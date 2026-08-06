@@ -1,74 +1,101 @@
 from __future__ import annotations
 
-from agent_py_agent.agent.backends.tool_schema import tool_spec_to_input_schema
-from agent_py_agent.agent.tooling.models import ToolSpec
+from types import SimpleNamespace
 
-# 防回归：ToolSpec.parameter_schema / required_parameters 的精确 schema 通道。
-# 背景：native tool_use 弱推导把每个参数都当 string，导致 web_fetch（urls=array/mode=enum/
-# headers=object/max_chars=integer）被模型传错 → TOOL_INVALID_ARGUMENTS（M3 真机 3 次）。
-# parameter_schema 声明精确类型后真机降到 0；未声明的工具回退弱推导（零破坏）。
+import pytest
 
-
-def _spec(parameters, parameter_schema=None, required=None, parameter_details=None):
-    return ToolSpec(
-        name="t", category="c", description="d",
-        use_cases=[], avoid_when=[], keywords=[],
-        parameters=parameters,
-        parameter_details=parameter_details or {},
-        parameter_schema=parameter_schema or {},
-        required_parameters=required or [],
-    )
+from agent_py_agent.agent.backends.tool_schema import tool_model_spec_to_input_schema
+from agent_py_agent.agent.tooling.models import (
+    EffectResolverPolicy,
+    ToolModelSpec,
+    ToolRuntime,
+    ToolRuntimePolicy,
+    ToolRuntimeSnapshot,
+)
 
 
-def test_declared_parameter_schema_overrides_weak_string():
-    spec = _spec(
-        {"urls": "URL 数组", "mode": "读取模式"},
-        parameter_schema={
-            "urls": {"type": "array", "items": {"type": "string"}},
-            "mode": {"type": "string", "enum": ["auto", "extract"]},
+def _model_spec() -> ToolModelSpec:
+    return ToolModelSpec(
+        name="typed_tool",
+        description="Exercise the exact canonical provider schema.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "urls": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "URL 数组",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["auto", "extract"],
+                    "description": "读取模式",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "最大条数",
+                },
+            },
+            "required": ["urls"],
+            "additionalProperties": False,
         },
     )
-    props = tool_spec_to_input_schema(spec)["properties"]
-    assert props["urls"]["type"] == "array"
-    assert props["urls"]["items"] == {"type": "string"}
-    assert props["mode"]["enum"] == ["auto", "extract"]
-    assert props["urls"]["description"] == "URL 数组"  # 中文描述自动补上
 
 
-def test_undeclared_params_fall_back_to_string():
-    spec = _spec({"a": "甲", "b": "乙"}, parameter_schema={"a": {"type": "integer"}})
-    props = tool_spec_to_input_schema(spec)["properties"]
-    assert props["a"] == {"type": "integer", "description": "甲"}
-    assert props["b"] == {"type": "string", "description": "乙"}
+def test_provider_receives_the_exact_canonical_schema() -> None:
+    spec = _model_spec()
+
+    schema = tool_model_spec_to_input_schema(spec)
+
+    assert schema == spec.input_schema
+    assert schema["properties"]["urls"]["items"] == {"type": "string"}
+    assert schema["properties"]["mode"]["enum"] == ["auto", "extract"]
+    assert schema["required"] == ["urls"]
 
 
-def test_required_parameters_mapped_and_filtered():
-    spec = _spec({"x": "必填", "y": "选填"}, required=["x", "ghost"])
-    schema = tool_spec_to_input_schema(spec)
-    assert schema["required"] == ["x"]  # 不存在的 ghost 被过滤
+def test_provider_schema_is_an_isolated_copy() -> None:
+    spec = _model_spec()
+    projected = tool_model_spec_to_input_schema(spec)
+
+    projected["properties"]["limit"]["minimum"] = 99
+
+    assert spec.input_schema["properties"]["limit"]["minimum"] == 1
 
 
-def test_no_schema_uses_closed_legacy_derivation():
-    spec = _spec({"path": "路径"})
-    schema = tool_spec_to_input_schema(spec)
-    assert schema == {
-        "type": "object",
-        "properties": {"path": {"type": "string", "description": "路径"}},
-        "additionalProperties": False,
-    }
-    assert "required" not in schema
+def test_model_spec_rejects_non_object_and_unsupported_schemas() -> None:
+    with pytest.raises(ValueError, match="top-level type"):
+        ToolModelSpec("bad", "bad schema", {"type": "string"})
+    with pytest.raises(ValueError, match="unsupported schema rules"):
+        ToolModelSpec(
+            "bad_keyword",
+            "bad schema",
+            {"type": "object", "properties": {}, "unevaluatedProperties": False},
+        )
 
 
-def test_explicit_schema_description_not_overwritten():
-    spec = _spec({"u": "默认描述"}, parameter_schema={"u": {"type": "string", "description": "自定义"}})
-    assert tool_spec_to_input_schema(spec)["properties"]["u"]["description"] == "自定义"
+def test_schema_hash_detects_post_snapshot_mutation() -> None:
+    spec = _model_spec()
+    spec.input_schema["properties"]["limit"]["minimum"] = 0
+
+    with pytest.raises(ValueError, match="mutated after snapshot"):
+        tool_model_spec_to_input_schema(spec)
 
 
-def test_parameter_details_are_the_native_schema_description():
-    spec = _spec(
-        {"patch": "简短目录说明"},
-        parameter_schema={"patch": {"type": "string"}},
-        parameter_details={"patch": "完整语法说明"},
+def test_runtime_snapshot_rechecks_schema_hash_before_lookup() -> None:
+    spec = _model_spec()
+    tool = SimpleNamespace(
+        model_spec=spec,
+        runtime_policy=ToolRuntimePolicy(EffectResolverPolicy("read_only")),
     )
+    snapshot = ToolRuntimeSnapshot(
+        run_id="run-1",
+        runtimes=(ToolRuntime(spec, tool.runtime_policy, tool),),
+        available_tool_names=frozenset({spec.name}),
+        unavailable_tools=(),
+        allowed_tools=None,
+    )
+    spec.input_schema["properties"]["limit"]["minimum"] = 0
 
-    assert tool_spec_to_input_schema(spec)["properties"]["patch"]["description"] == "完整语法说明"
+    with pytest.raises(ValueError, match="mutated after snapshot"):
+        snapshot.runtime(spec.name)

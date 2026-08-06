@@ -25,11 +25,26 @@ from agent_py_agent.agent.contracts.gates.command_policy import (
 )
 from agent_py_agent.agent.path_access_policy import PathAccessPolicy
 
+from .cancellation import (
+    CancellationToken,
+    cancellation_requested,
+    current_cancellation_token,
+    register_cancellation_callback,
+)
 from .models import (
     BaseTool,
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    OutputPolicy,
+    ResourceScopePolicy,
+    SandboxPolicy,
+    TimeoutPolicy,
     ToolAvailability,
-    ToolExecutionResult,
-    ToolSpec,
+    ToolHandlerOutcome,
+    ToolInputPolicy,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
     TrustedParameterBinding,
 )
 from .process_registry import process_registry, terminate_process_tree
@@ -96,7 +111,7 @@ def _validate_command(command: str) -> str:
     return text
 
 
-def _parsed_command_or_error(tool_name: str, raw_command: object) -> str | ToolExecutionResult:
+def _parsed_command_or_error(tool_name: str, raw_command: object) -> str | ToolHandlerOutcome:
     """校验 command,合法返回字符串,否则返回带精确 error_code 的失败结果。
 
     too-long 走 COMMAND_TOO_LONG(命令合法但太长→拆条/换 write_file),空/空白走
@@ -105,9 +120,9 @@ def _parsed_command_or_error(tool_name: str, raw_command: object) -> str | ToolE
     try:
         return _validate_command(str(raw_command or ""))
     except CommandTooLongError as exc:
-        return ToolExecutionResult(tool_name, False, str(exc), error_code="COMMAND_TOO_LONG")
+        return ToolHandlerOutcome(tool_name, False, str(exc), error_code="COMMAND_TOO_LONG")
     except ValueError as exc:
-        return ToolExecutionResult(tool_name, False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
+        return ToolHandlerOutcome(tool_name, False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
 
 
 def _pure_delay_seconds(command: str) -> int | None:
@@ -181,7 +196,7 @@ def _start_sleep_delay_seconds(tokens: list[str]) -> int | None:
     return None
 
 
-def _delay_command_result(seconds: int) -> ToolExecutionResult:
+def _delay_command_result(seconds: int) -> ToolHandlerOutcome:
     suggested_seconds = min(_WAIT_MAX_SECONDS, max(_WAIT_MIN_SECONDS, seconds))
     payload = {
         "ok": False,
@@ -194,7 +209,7 @@ def _delay_command_result(seconds: int) -> ToolExecutionResult:
             "reason": "wait before checking progress again",
         },
     }
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         "run_command",
         False,
         json.dumps(payload, ensure_ascii=False, indent=2),
@@ -292,12 +307,12 @@ def _working_dir_from_params(
     workspace_roots: list[Path] | None = None,
     path_access_policy: PathAccessPolicy | None = None,
     access_mode: str = _DEFAULT_ACCESS_MODE,
-) -> Path | ToolExecutionResult:
+) -> Path | ToolHandlerOutcome:
     working_dir = str(params.get("working_dir", "")).strip()
     target = Path(working_dir).expanduser() if working_dir else workspace_root
     if not target.is_dir():
         field = "working_dir" if working_dir else "workspace_root"
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             "run_command",
             False,
             f"COMMAND_ACCESS_DENIED: {field} does not exist or is not a directory: {target}",
@@ -313,7 +328,7 @@ def _working_dir_from_params(
     #   registry 临时注入。禁止 PathAccessPolicy 的全局公共区放行变成额外可写挂载。
     # 人类: 否则把 service-cwd 填进 working_dir，bwrap 会把它挂成可写目录。
     if path_access_policy is not None and path_access_policy.owner_scope_root is not None:
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             "run_command",
             False,
             "COMMAND_ACCESS_DENIED: 多用户 owner 只能在当前任务工作区或结构化授权目录执行命令。",
@@ -324,13 +339,13 @@ def _working_dir_from_params(
         decision = policy.check(target)
         if decision.allowed:
             return target.resolve()
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             "run_command",
             False,
             f"COMMAND_ACCESS_DENIED: {decision.message}",
             error_code=decision.code or "PATH_ACCESS_DENIED",
         )
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         "run_command",
         False,
         (
@@ -423,22 +438,30 @@ class _LogSizeWatchdog(threading.Thread):
         *,
         max_bytes: int = _MAX_BG_LOG_BYTES,
         interval: float = _BG_WATCHDOG_INTERVAL,
+        cancellation_token: CancellationToken | None = None,
     ) -> None:
         super().__init__(daemon=True)
         self._proc = proc
         self._log_path = log_path
         self._max = max_bytes
         self._interval = interval
+        self._cancellation_token = cancellation_token
 
     def run(self) -> None:
         while self._proc.poll() is None:
+            if self._cancellation_token and self._cancellation_token.cancelled:
+                _kill_process_group(self._proc)
+                return
             if self._over_limit():
                 _kill_process_group(self._proc)
                 logger.error(
                     f"后台命令日志超 {self._max} 字节上限,已杀进程组防写满磁盘: {self._log_path}"
                 )
                 return
-            time.sleep(self._interval)
+            if self._cancellation_token is not None:
+                self._cancellation_token.wait(self._interval)
+            else:
+                time.sleep(self._interval)
 
     def _over_limit(self) -> bool:
         try:
@@ -481,21 +504,24 @@ def _communicate_process(
     timeout: int,
 ) -> subprocess.CompletedProcess[str]:
     deadline = time.monotonic() + max(0.0, float(timeout))
-    while True:
-        if is_interrupted():
-            _kill_process_group(proc)
-            _drain_terminated_process(proc)
-            raise CommandInterruptedError(command)
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            _kill_process_group(proc)
-            _drain_terminated_process(proc)
-            raise subprocess.TimeoutExpired(command, timeout)
-        try:
-            out, err = proc.communicate(timeout=min(0.2, remaining))
-            return subprocess.CompletedProcess(command, proc.returncode, out, err)
-        except subprocess.TimeoutExpired:
-            continue
+    with register_cancellation_callback(lambda: _kill_process_group(proc)):
+        while True:
+            if is_interrupted() or cancellation_requested():
+                _kill_process_group(proc)
+                _drain_terminated_process(proc)
+                raise CommandInterruptedError(command)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _kill_process_group(proc)
+                _drain_terminated_process(proc)
+                raise subprocess.TimeoutExpired(command, timeout)
+            try:
+                out, err = proc.communicate(timeout=min(0.2, remaining))
+                if cancellation_requested():
+                    raise CommandInterruptedError(command)
+                return subprocess.CompletedProcess(command, proc.returncode, out, err)
+            except subprocess.TimeoutExpired:
+                continue
 
 
 # 函数用途: 判断 run_command 是否请求后台模式(布尔或 "true"/"1"/"yes" 字符串)。
@@ -643,72 +669,63 @@ def _record_background_job(jobs_dir: Path, pid: int, command: str, log_path: Pat
         pass
 
 
-def _build_shell_tool_spec(
+def _build_shell_tool_model_spec(
     access_mode: str, default_timeout: int, max_output_chars: int
-) -> ToolSpec:
-    return ToolSpec(
+) -> ToolModelSpec:
+    return ToolModelSpec(
         name="run_command",
-        category="shell",
-        effect="mutating",
-        promotes_task=True,
-        idempotency_scope="operation",
         description="Execute one shell command in the workspace.",
-        use_cases=[
-            "Run a project build script such as make or npm run.",
-            "Inspect processes, ports, network state, or other system information.",
-            "Execute a one-off script or command-line tool.",
-            "脚本里需要调用 LLM（翻译/摘要/分类等）时：子进程环境自带 AGENT_API_KEY、AGENT_API_BASE、AGENT_MODEL_NAME（与本代理同款 anthropic 兼容端点），直接用它们初始化客户端，不要猜测其他服务商端点。",
-        ],
-        avoid_when=[
-            "Use read_file / write_file when only file IO is needed.",
-            "Avoid for interactive terminal workflows.",
-            "Prefer write_file for file changes instead of shell redirection.",
-            "Do not use rm/rmdir/unlink. Delete one text file with apply_patch; route directory or bulk deletion through task_trash.",
-            "Do not keep files needed by a later tool call in /tmp: owner-scoped sandbox /tmp is a per-command tmpfs. Keep cross-command state in the selected workspace.",
-            "Use wait for pure delays such as sleep 120 while waiting for subagent progress.",
-            "盯守/轮询数据流→用 watch_stream,禁自写轮询脚本(无游标持久/覆盖账目,实测误报泛滥)。",
-        ],
-        keywords=["shell", "command", "terminal", "bash", "cmd", "script"],
-        parameters={
-            "command": "Shell command string to execute.",
-            "timeout": f"Timeout in seconds; default {default_timeout}.",
-            "working_dir": (
-                "Execution directory; defaults to the Registry's structured effective cwd, "
-                "shared with relative-path file tools."
+        input_schema={
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": _MAX_COMMAND_CHARS,
+                    "description": "Required shell command string, for example 'ls -la' or 'python build.py'.",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": f"Timeout in seconds; default {default_timeout}.",
+                },
+                "working_dir": {
+                    "type": "string",
+                    "description": "Execution directory; defaults to this run's trusted effective cwd and must obey workspace access policy.",
+                },
+                "run_in_background": {
+                    "type": "boolean",
+                    "description": "When true, start the command in the background and immediately return its session_id, pid, and output_file.",
+                },
+            },
+            "required": ["command"],
+            "additionalProperties": False,
+        },
+        hints=ToolModelHints(
+            category="shell",
+            use_cases=(
+                "Run a project build script such as make or npm run.",
+                "Inspect processes, ports, network state, or other system information.",
+                "Execute a one-off script or command-line tool.",
+                "脚本里需要调用 LLM（翻译/摘要/分类等）时：子进程环境自带 AGENT_API_KEY、AGENT_API_BASE、AGENT_MODEL_NAME（与本代理同款 anthropic 兼容端点），直接用它们初始化客户端，不要猜测其他服务商端点。",
             ),
-            "run_in_background": "可选。true 时命令在后台运行,立即返回 pid 与 output_file,不阻塞工具循环;适合耗时长的下载/构建/批处理。",
-        },
-        parameter_details={
-            "command": "Required. Full command string, for example 'ls -la' or 'python build.py'.",
-            "timeout": f"Optional. Defaults to {default_timeout} seconds.",
-            "working_dir": "Optional. In restricted/workspace-write mode it must stay inside workspace roots.",
-            "access_mode": f"Runtime policy is configured outside the tool as access_mode={access_mode}.",
-            "output": f"Stdout/stderr are bounded previews; each stream preview defaults to {max_output_chars} chars.",
-            "temporary_storage": (
-                "In an owner-scoped sandbox, /tmp is a per-command tmpfs. It is private "
-                "to one run_command invocation and is discarded when that invocation ends. "
-                "Persist files needed by later tool calls under the selected workspace instead."
+            avoid_when=(
+                "Use read_file / write_file when only file IO is needed.",
+                "Avoid for interactive terminal workflows.",
+                "Prefer write_file for file changes instead of shell redirection.",
+                "Do not use rm/rmdir/unlink. Delete one text file with apply_patch; route directory or bulk deletion through task_trash.",
+                "Do not keep files needed by a later tool call in /tmp: owner-scoped sandbox /tmp is a per-command tmpfs. Keep cross-command state in the selected workspace.",
+                "Use wait for pure delays such as sleep 120 while waiting for subagent progress.",
+                "盯守/轮询数据流→用 watch_stream,禁自写轮询脚本(无游标持久/覆盖账目,实测误报泛滥)。",
             ),
-            "run_in_background": "可选布尔,默认 false。后台模式不等待结束,立即返回 session_id+pid+output_file:用 process_status 查状态+输出、list_processes 看全部、kill_process 终止(杀整个进程组);也可 read_file 读 output_file 看完整日志。",
-        },
-        parameter_schema={
-            "timeout": {"type": "integer", "minimum": 0},
-            "run_in_background": {"type": "boolean"},
-        },
-        required_parameters=["command"],
-        safe_parameter_defaults={
-            "timeout": default_timeout,
-            "run_in_background": False,
-        },
-        trusted_parameter_bindings={
-            "working_dir": TrustedParameterBinding(source_refs=("registry.effective_cwd",)),
-        },
-        examples=[
-            '{"tool": "run_command", "command": "ls -la"}',
-            '{"tool": "run_command", "command": "python --version", "working_dir": "."}',
-            '{"tool": "run_command", "command": "make build", "timeout": 60}',
-            '{"tool": "run_command", "command": "python download_all.py", "run_in_background": true}',
-        ],
+            keywords=("shell", "command", "terminal", "bash", "cmd", "script"),
+            examples=(
+                '{"tool": "run_command", "command": "ls -la"}',
+                '{"tool": "run_command", "command": "python --version", "working_dir": "."}',
+                '{"tool": "run_command", "command": "make build", "timeout": 60}',
+                '{"tool": "run_command", "command": "python download_all.py", "run_in_background": true}',
+            ),
+        ),
     )
 
 
@@ -733,8 +750,38 @@ class ShellTool(BaseTool):
         self.protected_persona_root = str(options.protected_persona_root or "")
         self.default_timeout = options.default_timeout
         self.max_output_chars = max(0, int(options.max_output_chars))
-        self.spec = _build_shell_tool_spec(
+        self.model_spec = _build_shell_tool_model_spec(
             self.access_mode, self.default_timeout, self.max_output_chars
+        )
+        self.runtime_policy = ToolRuntimePolicy(
+            effect_resolver=EffectResolverPolicy(
+                default_effect="dangerous",
+                strategy="command",
+                command_parameter="command",
+            ),
+            sandbox_policy=SandboxPolicy("required"),
+            idempotency_policy=IdempotencyPolicy("operation"),
+            timeout_policy=TimeoutPolicy(self.default_timeout),
+            resource_scopes=ResourceScopePolicy(parameter_names=("working_dir",)),
+            output_policy=OutputPolicy(trust="external_data"),
+            input_policy=ToolInputPolicy(
+                internal_parameters=(
+                    "__sandbox_write_roots",
+                    "__sandbox_read_roots",
+                    "__access_mode",
+                ),
+                safe_parameter_defaults=(
+                    ("timeout", self.default_timeout),
+                    ("run_in_background", False),
+                ),
+                trusted_parameter_bindings=(
+                    (
+                        "working_dir",
+                        TrustedParameterBinding(source_refs=("registry.effective_cwd",)),
+                    ),
+                ),
+            ),
+            promotes_task=True,
         )
 
     # LLM: owner-scoped shell 没有 bwrap 时必须在本轮工具快照阶段消失；最终执行仍会
@@ -748,15 +795,15 @@ class ShellTool(BaseTool):
             error_code="SANDBOX_UNAVAILABLE",
         )
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         command_result = self._parse_command(params)
-        if isinstance(command_result, ToolExecutionResult):
+        if isinstance(command_result, ToolHandlerOutcome):
             return command_result
         command = command_result
         command_policy = evaluate_command_policy(command, allow_shell_operators=True)
         if not command_policy.allowed:
-            return ToolExecutionResult(
-                self.spec.name,
+            return ToolHandlerOutcome(
+                self.model_spec.name,
                 False,
                 (
                     "危险命令被系统拒绝: "
@@ -766,8 +813,8 @@ class ShellTool(BaseTool):
             )
         internal_status_ref = _internal_agent_status_command(command)
         if internal_status_ref is not None:
-            return ToolExecutionResult(
-                self.spec.name,
+            return ToolHandlerOutcome(
+                self.model_spec.name,
                 False,
                 json.dumps(internal_status_ref, ensure_ascii=False, indent=2),
                 error_code="WRONG_STATUS_SURFACE",
@@ -778,8 +825,8 @@ class ShellTool(BaseTool):
 
         timeout = _timeout_from_params(params, self.default_timeout)
         if timeout <= 0:
-            return ToolExecutionResult(
-                self.spec.name,
+            return ToolHandlerOutcome(
+                self.model_spec.name,
                 False,
                 "TOOL_DEADLINE_EXCEEDED: 外层任务剩余时间不足，系统没有启动新的 shell 命令。",
                 error_code="TOOL_TIMEOUT",
@@ -787,7 +834,7 @@ class ShellTool(BaseTool):
         sandbox_write_roots = _sandbox_write_roots(params)
         sandbox_read_roots = _sandbox_read_roots(params)
         target = self._execution_target(params, command)
-        if isinstance(target, ToolExecutionResult):
+        if isinstance(target, ToolHandlerOutcome):
             return target
         if _wants_background(params):
             return self._start_background_command(
@@ -808,7 +855,7 @@ class ShellTool(BaseTool):
         self,
         params: dict[str, Any],
         command: str,
-    ) -> Path | ToolExecutionResult:
+    ) -> Path | ToolHandlerOutcome:
         effective_access_mode = _effective_access_mode(
             self.access_mode, params.get("__access_mode")
         )
@@ -819,7 +866,7 @@ class ShellTool(BaseTool):
             path_access_policy=self.path_access_policy,
             access_mode=effective_access_mode,
         )
-        if isinstance(target, ToolExecutionResult):
+        if isinstance(target, ToolHandlerOutcome):
             return target
         return target
 
@@ -830,12 +877,12 @@ class ShellTool(BaseTool):
         timeout: int,
         sandbox_write_roots: tuple[Path, ...] | None,
         sandbox_read_roots: tuple[Path, ...] | None,
-    ) -> ToolExecutionResult:
+    ) -> ToolHandlerOutcome:
         try:
             artifact_snapshots = snapshot_ready_artifacts(self.workspace_root)
         except OSError as exc:
-            return ToolExecutionResult(
-                self.spec.name,
+            return ToolHandlerOutcome(
+                self.model_spec.name,
                 False,
                 f"ARTIFACT_BACKUP_FAILED: shell 执行前无法备份已登记产物: {exc}",
                 error_code="ARTIFACT_BACKUP_FAILED",
@@ -859,8 +906,8 @@ class ShellTool(BaseTool):
         protection_note = shell_artifact_protection_note(artifact_summary)
         if protection_note:
             output = f"{output}\n{protection_note}"
-        return ToolExecutionResult(
-            self.spec.name,
+        return ToolHandlerOutcome(
+            self.model_spec.name,
             ok,
             output,
             result_envelope={
@@ -943,15 +990,15 @@ class ShellTool(BaseTool):
         target: Path,
         sandbox_write_roots: tuple[Path, ...] | None,
         sandbox_read_roots: tuple[Path, ...] | None,
-    ) -> ToolExecutionResult:
+    ) -> ToolHandlerOutcome:
         try:
             jobs_dir = self.workspace_root / ".background_jobs"
             jobs_dir.mkdir(parents=True, exist_ok=True)
             log_path = jobs_dir / f"job-{time.time_ns()}.log"
             handle = log_path.open("wb")
         except OSError as exc:
-            return ToolExecutionResult(
-                self.spec.name,
+            return ToolHandlerOutcome(
+                self.model_spec.name,
                 False,
                 f"COMMAND_FAILED: 后台日志创建失败: {exc}",
                 error_code="COMMAND_FAILED",
@@ -968,23 +1015,22 @@ class ShellTool(BaseTool):
             )
         except SandboxUnavailable as exc:
             handle.close()
-            return ToolExecutionResult(
-                self.spec.name,
+            return ToolHandlerOutcome(
+                self.model_spec.name,
                 False,
                 f"SANDBOX_UNAVAILABLE: {exc}",
                 error_code="SANDBOX_UNAVAILABLE",
             )
         except OSError as exc:
             handle.close()
-            return ToolExecutionResult(
-                self.spec.name,
+            return ToolHandlerOutcome(
+                self.model_spec.name,
                 False,
                 f"COMMAND_FAILED: 后台启动失败: {exc}",
                 error_code="COMMAND_FAILED",
             )
         handle.close()  # 子进程已持有 fd 副本,父进程关闭自己的句柄避免泄漏
         _record_background_job(jobs_dir, process.pid, command, log_path)
-        _LogSizeWatchdog(process, log_path).start()  # 日志超上限即杀进程组,防写满磁盘
         # 登记进进程内注册表,模型可用 list_processes/process_status/kill_process
         # 按 session_id 查状态、收割、按进程组杀(避免只剩日志文件管不了进程)。
         record = process_registry.register(
@@ -994,6 +1040,11 @@ class ShellTool(BaseTool):
             process=process,
             cwd=str(target),
         )
+        _LogSizeWatchdog(
+            process,
+            log_path,
+            cancellation_token=current_cancellation_token(),
+        ).start()  # 日志超上限或所属 turn 取消时终止完整进程组
         payload = {
             "status": "started",
             "session_id": record.session_id,
@@ -1005,10 +1056,12 @@ class ShellTool(BaseTool):
                 "也可以用 read_file 直接读 output_file 看完整日志。"
             ),
         }
-        return ToolExecutionResult(self.spec.name, True, json.dumps(payload, ensure_ascii=False))
+        return ToolHandlerOutcome(
+            self.model_spec.name, True, json.dumps(payload, ensure_ascii=False)
+        )
 
-    def _parse_command(self, params: dict[str, Any]) -> str | ToolExecutionResult:
-        return _parsed_command_or_error(self.spec.name, params.get("command", ""))
+    def _parse_command(self, params: dict[str, Any]) -> str | ToolHandlerOutcome:
+        return _parsed_command_or_error(self.model_spec.name, params.get("command", ""))
 
     def _run_command(
         self,
@@ -1018,76 +1071,96 @@ class ShellTool(BaseTool):
         sandbox_write_roots: tuple[Path, ...] | None = None,
         sandbox_read_roots: tuple[Path, ...] | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        if self.path_access_policy.owner_scope_root or self.protected_persona_root:
-            return self._run_owner_scoped_command(
-                command,
-                target,
-                timeout,
-                sandbox_write_roots,
-                sandbox_read_roots,
-            )
-        if os.name == "nt":
-            return subprocess.run(
-                ["powershell.exe", "-NoProfile", "-Command", command],
-                cwd=str(target),
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                env=_subprocess_text_env(self.path_access_policy.owner_scope_root),
-                timeout=timeout,
-            )
-        # POSIX:独立会话启动(start_new_session)→ 超时时可杀整个进程组,消除孙进程(make/npm/编译器)孤儿。
-        # 原 subprocess.run(timeout=) 超时只 SIGKILL 直接 shell,孙进程成孤儿累积耗尽 PID/CPU(审计 #14)。
-        from .sandbox import strict_posix_shell_argv
+        return _run_shell_command(
+            self,
+            command,
+            target,
+            timeout,
+            sandbox_write_roots,
+            sandbox_read_roots,
+        )
 
+
+def _run_shell_command(
+    tool: ShellTool,
+    command: str,
+    target: Path,
+    timeout: int,
+    sandbox_write_roots: tuple[Path, ...] | None,
+    sandbox_read_roots: tuple[Path, ...] | None,
+) -> subprocess.CompletedProcess[str]:
+    if tool.path_access_policy.owner_scope_root or tool.protected_persona_root:
+        return _run_owner_scoped_shell_command(
+            tool,
+            command,
+            target,
+            timeout,
+            sandbox_write_roots,
+            sandbox_read_roots,
+        )
+    if os.name == "nt":
         proc = subprocess.Popen(
-            strict_posix_shell_argv(command),
-            shell=False,
+            ["powershell.exe", "-NoProfile", "-Command", command],
             cwd=str(target),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=_subprocess_text_env(self.path_access_policy.owner_scope_root),
+            env=_subprocess_text_env(tool.path_access_policy.owner_scope_root),
+            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        )
+        return _communicate_process(proc, command=command, timeout=timeout)
+    # POSIX 独立会话让超时和取消可以终止整个进程组，避免 make/npm 子进程变成孤儿。
+    from .sandbox import strict_posix_shell_argv
+
+    proc = subprocess.Popen(
+        strict_posix_shell_argv(command),
+        shell=False,
+        cwd=str(target),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=_subprocess_text_env(tool.path_access_policy.owner_scope_root),
+        start_new_session=True,
+    )
+    return _communicate_process(proc, command=command, timeout=timeout)
+
+
+# LLM: owner-scoped 前台命令只能吃 bwrap argv；加载失败归一成 SandboxUnavailable。
+# 函数用途: 在当前 owner/workspace 隔离环境中运行前台命令并等待完成。
+def _run_owner_scoped_shell_command(
+    tool: ShellTool,
+    command: str,
+    target: Path,
+    timeout: int,
+    sandbox_write_roots: tuple[Path, ...] | None,
+    sandbox_read_roots: tuple[Path, ...] | None,
+) -> subprocess.CompletedProcess[str]:
+    owner_home = tool.path_access_policy.owner_scope_root
+    exec_arg, use_shell = _sandbox_exec(
+        command,
+        target,
+        owner_home,
+        tool.protected_persona_root,
+        sandbox_write_roots,
+        sandbox_read_roots,
+    )
+    try:
+        proc = subprocess.Popen(
+            exec_arg,
+            shell=use_shell,
+            cwd=str(target),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=_subprocess_text_env(owner_home),
             start_new_session=True,
         )
-        return _communicate_process(proc, command=command, timeout=timeout)
-
-    # LLM: owner-scoped 前台命令的 Popen 只能吃 bwrap argv；二进制加载失败必须归一成
-    #   SandboxUnavailable，让工具层返回结构化安全错误而不是普通命令失败。
-    # 函数用途: 在当前 owner/workspace 隔离环境中运行一条前台命令并等待完成。
-    def _run_owner_scoped_command(
-        self,
-        command: str,
-        target: Path,
-        timeout: int,
-        sandbox_write_roots: tuple[Path, ...] | None,
-        sandbox_read_roots: tuple[Path, ...] | None,
-    ) -> subprocess.CompletedProcess[str]:
-        owner_home = self.path_access_policy.owner_scope_root
-        exec_arg, use_shell = _sandbox_exec(
-            command,
-            target,
-            owner_home,
-            self.protected_persona_root,
-            sandbox_write_roots,
-            sandbox_read_roots,
-        )
-        try:
-            proc = subprocess.Popen(
-                exec_arg,
-                shell=use_shell,
-                cwd=str(target),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                env=_subprocess_text_env(owner_home),
-                start_new_session=True,
-            )
-        except OSError as exc:
-            raise SandboxUnavailable(f"BWRAP_EXEC_FAILED:{exc}") from exc
-        return _communicate_process(proc, command=command, timeout=timeout)
+    except OSError as exc:
+        raise SandboxUnavailable(f"BWRAP_EXEC_FAILED:{exc}") from exc
+    return _communicate_process(proc, command=command, timeout=timeout)

@@ -14,6 +14,7 @@ from typing import Any
 
 from ...runtime_errors import runtime_error_report
 from ...subagents.models import TaskStatus, task_has_status
+from ...tooling.runtime_contracts import ToolCall, ToolResult
 from .context import current_subagent_run_id
 
 _LOGGER = logging.getLogger(__name__)
@@ -35,8 +36,8 @@ class RunnerToolStageTraceRequest:
     params: Any
     tool_rounds: int
     idx: int
-    payload: Any
-    result: Any = None
+    call: ToolCall
+    result: ToolResult | None = None
 
 
 @dataclass(frozen=True)
@@ -103,10 +104,10 @@ def trace_runner_tool_call_started(request: RunnerToolStageTraceRequest) -> None
             tool_rounds=request.tool_rounds,
             payload={
                 "idx": request.idx,
-                "tool": _tool_name(request.payload),
-                "payload_keys": _payload_keys(request.payload),
+                "tool": request.call.tool_name,
+                "payload_keys": sorted(request.call.arguments)[:32],
             },
-            detail_payload={"tool_payload": request.payload},
+            detail_payload={"tool_payload": request.call.to_dict()},
         )
     )
 
@@ -120,14 +121,16 @@ def trace_runner_tool_call_finished(request: RunnerToolStageTraceRequest) -> Non
             tool_rounds=request.tool_rounds,
             payload={
                 "idx": request.idx,
-                "tool": str(getattr(request.result, "tool", "") or _tool_name(request.payload)),
-                "ok": bool(getattr(request.result, "ok", False)),
-                "output_chars": len(str(getattr(request.result, "output", "") or "")),
-                "failure_stage": str(getattr(request.result, "failure_stage", "") or ""),
-                "handler_executed": bool(getattr(request.result, "handler_executed", False)),
-                "duration_ms": max(0, int(getattr(request.result, "duration_ms", 0) or 0)),
+                "tool": request.result.tool_name if request.result is not None else request.call.tool_name,
+                "ok": bool(request.result and request.result.ok),
+                "output_chars": len(request.result.output if request.result is not None else ""),
+                "failure_stage": request.result.failure_stage if request.result is not None else "",
+                "handler_executed": bool(request.result and request.result.handler_executed),
+                "duration_ms": request.result.duration_ms if request.result is not None else 0,
             },
-            detail_payload={"tool_output": str(getattr(request.result, "output", "") or "")},
+            detail_payload={
+                "tool_output": request.result.output if request.result is not None else ""
+            },
         )
     )
 
@@ -259,15 +262,3 @@ def _detail_trace_payload(manager: Any, task: Any, bundle: RunnerStageTraceBundl
         if detail_ref:
             payload[f"{label}_detail_ref"] = detail_ref
     return payload
-
-
-def _tool_name(payload: Any) -> str:
-    if not isinstance(payload, dict):
-        return "unknown"
-    return str(payload.get("tool") or "unknown")
-
-
-def _payload_keys(payload: Any) -> list[str]:
-    if not isinstance(payload, dict):
-        return []
-    return sorted(str(key) for key in payload.keys())[:32]

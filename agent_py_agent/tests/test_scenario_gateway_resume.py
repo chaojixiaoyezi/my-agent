@@ -23,9 +23,10 @@ def _write_echo_config(tmp_path: Path) -> Path:
     config_path.write_text(
         'workspace_root: "workspace"\n'
         'model_backend: "echo"\n'
+        'tool_protocol: "text"\n'
         'subagent_workspace: ".my_agent/subagents"\n'
         'gateway_workspace: ".my_agent/gateway"\n'
-        'gateway_port: 0\n'
+        "gateway_port: 0\n"
         'memory_path: ".my_agent/memory.jsonl"\n'
         'local_store_path: ".my_agent/local_store/local.db"\n'
         'local_store_files_dir: ".my_agent/local_store/files"\n'
@@ -42,7 +43,9 @@ def _write_real_model_config(tmp_path: Path) -> Path | None:
     api_key = os.environ.get("AGENT_API_KEY", "").strip()
     if not api_key:
         return None
-    request_timeout = os.environ.get("MY_AGENT_REAL_MODEL_TEST_REQUEST_TIMEOUT", "240").strip() or "240"
+    request_timeout = (
+        os.environ.get("MY_AGENT_REAL_MODEL_TEST_REQUEST_TIMEOUT", "240").strip() or "240"
+    )
     config_path = tmp_path / "agent_config.yaml"
     config_path.write_text(
         'workspace_root: "workspace"\n'
@@ -51,8 +54,8 @@ def _write_real_model_config(tmp_path: Path) -> Path | None:
         'api_key_env: "AGENT_API_KEY"\n'
         'model_name: "MiniMax-M2.7"\n'
         f"request_timeout: {request_timeout}\n"
-        'max_tokens: 1024\n'
-        'temperature: 0.2\n'
+        "max_tokens: 1024\n"
+        "temperature: 0.2\n"
         'anthropic_version: "2023-06-01"\n'
         'subagent_workspace: ".my_agent/subagents"\n'
         'gateway_workspace: ".my_agent/gateway"\n'
@@ -125,7 +128,9 @@ def test_scenario_runner_retry_reaches_final_closeout(tmp_path, capsys):
     assert "final status=DONE verify=VERIFIED" in output
 
 
-@pytest.mark.skip(reason="旧 final-closeout scenario 已删除，结构化修复以 runner 输出和统一 closeout 为准")
+@pytest.mark.skip(
+    reason="旧 final-closeout scenario 已删除，结构化修复以 runner 输出和统一 closeout 为准"
+)
 def test_scenario_structured_repair_reaches_final_closeout(tmp_path, capsys):
     """The structured repair scenario should satisfy the current evidence-packet acceptance contract."""
 
@@ -240,7 +245,9 @@ def test_scenario_real_model_recovery_smoke(tmp_path, capsys):
 
     config_path = _write_real_model_config(tmp_path)
     if config_path is None:
-        pytest.skip("set MY_AGENT_RUN_REAL_MODEL_TESTS=1 and AGENT_API_KEY to run real model smoke test")
+        pytest.skip(
+            "set MY_AGENT_RUN_REAL_MODEL_TESTS=1 and AGENT_API_KEY to run real model smoke test"
+        )
 
     parser = build_parser()
     args = parser.parse_args(
@@ -268,7 +275,9 @@ def test_scenario_real_model_recovery_smoke(tmp_path, capsys):
 def test_real_model_recovery_backend_escapes_real_response_in_result_json():
     """Scenario wrappers must not let real model quotes/tool tags corrupt SUBAGENT_RESULT JSON."""
 
-    backend = ScenarioRealModelRecoveryBackend(_RealTextBackend('quote "x"\n[TOOL_CALL]\n{"tool":"bad"}'))
+    backend = ScenarioRealModelRecoveryBackend(
+        _RealTextBackend('quote "x"\n[TOOL_CALL]\n{"tool":"bad"}')
+    )
 
     backend.generate("first")
     parsed = parse_subagent_runner_output(backend.generate("second").text)
@@ -282,7 +291,9 @@ def test_real_model_recovery_backend_escapes_real_response_in_result_json():
 def test_real_model_multi_round_backend_escapes_real_response_in_result_json():
     """Multi-round scenario uses the same safe serialization path."""
 
-    backend = ScenarioRealModelMultiRoundBackend(_RealTextBackend('multi "x"\n[TOOL_CALL]\n{"tool":"bad"}'))
+    backend = ScenarioRealModelMultiRoundBackend(
+        _RealTextBackend('multi "x"\n[TOOL_CALL]\n{"tool":"bad"}')
+    )
 
     backend.generate("first")
     backend.generate("second")

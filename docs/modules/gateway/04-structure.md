@@ -1,5 +1,14 @@
 # Gateway Structure
 
+## Memory Curator 后台接线
+
+- `cli/gateway_loops.py::_run_memory_curator_if_due` 使用当前 owner scheduler 已持有的 scoped agent，不能
+  重新创建 Agent、ToolRegistry、owner identity 或独立线程系统。
+- `gateway_parts/control_service.py` 把已认证 session close/reset 转成 typed lifecycle request；
+  `owner_wake_discovery.py` 负责重启后重新发现 durable pending work。二者都不直接生成 Daily/Candidate。
+- Curator 的 provider/model、strict schema、lease、cursor、批提交和运行审计由 Memory 模块拥有；Gateway
+  只提供生命周期触发和现有 owner maintenance 执行位置，因此聊天、飞书、本地入口不会形成不同记忆语义。
+
 Gateway 负责把外部请求落成可审计队列，并由 worker 调用 SimpleAgent。它不负责模型业务决策。
 
 2026-07-09 P0 维护仅清理 gateway 文件的 import/type lint，不新增入口或结构层。

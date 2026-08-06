@@ -7,7 +7,7 @@ from pathlib import Path
 from ...backends import ModelResponse
 from ...common.json_io import read_json_object_report
 from ...runtime_errors import runtime_error_report
-from ...tooling.models import ToolExecutionResult
+from ...tooling.runtime_contracts import ToolResult
 from .._runtime_params import ToolLoopExecuteParams
 from ..runner.context import current_subagent_run_id
 
@@ -17,7 +17,7 @@ class SubagentOutputWriteCheck:
     agent: object
     params: ToolLoopExecuteParams
     payload: object
-    result: ToolExecutionResult
+    result: ToolResult
 
 
 def subagent_output_json_response(
@@ -70,7 +70,7 @@ def _record_subagent_result_ir_if_native(agent, loop_params: object | None, text
     from ..native_tool_protocol import native_tool_use_active
     from ..tool_ir_history import native_tool_ir_history
 
-    if not native_tool_use_active(agent):
+    if not native_tool_use_active(loop_params):
         return
     from ...backends.tool_ir import AssistantTurn
 
@@ -80,7 +80,7 @@ def _record_subagent_result_ir_if_native(agent, loop_params: object | None, text
 def is_subagent_output_json_write(check: SubagentOutputWriteCheck) -> bool:
     if not (
         check.result.ok
-        and check.result.tool == "write_file"
+        and check.result.tool_name == "write_file"
         and isinstance(check.payload, dict)
     ):
         return False

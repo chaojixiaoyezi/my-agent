@@ -8,7 +8,6 @@
 - 040a3f6: gateway runtime recovery heartbeat
 - ae7de13: tool input boundary validation
 - ee2db4e: subagent write boundaries + locked jsonl appends
-- 8c0ac63: xmlish tool call tolerance
 """
 from __future__ import annotations
 
@@ -24,26 +23,6 @@ import pytest
 # ============================================================
 # Regression 1: max_tool_rounds from task_attributes (a413083)
 # ============================================================
-
-def test_regression_xml_tool_call_keeps_tool_name_exact():
-    """验证 XML-ish tool_call 不再自动映射 read/write 等旧别名"""
-    from agent_py_agent.agent.tooling.parser import _normalize_xmlish_tool_name
-
-    assert _normalize_xmlish_tool_name("read") == "read"
-    assert _normalize_xmlish_tool_name("write") == "write"
-    assert _normalize_xmlish_tool_name("search") == "search"
-    assert _normalize_xmlish_tool_name("list") == "list"
-    assert _normalize_xmlish_tool_name("read_file") == "read_file"
-
-def test_regression_xml_tool_call_keeps_parameter_name_exact():
-    """验证 XML-ish 参数名不再自动映射成 path"""
-    from agent_py_agent.agent.tooling.parser import _normalize_xmlish_parameter_name
-
-    assert _normalize_xmlish_parameter_name("file_path") == "file_path"
-    assert _normalize_xmlish_parameter_name("filepath") == "filepath"
-    assert _normalize_xmlish_parameter_name("filename") == "filename"
-    assert _normalize_xmlish_parameter_name("file") == "file"
-    assert _normalize_xmlish_parameter_name("path") == "path"
 
 def test_regression_qq_adapter_urllib_import():
     """验证 QQ adapter 的 urllib import 在文件顶部（可在任何函数外导入）"""

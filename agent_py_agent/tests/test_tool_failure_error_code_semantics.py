@@ -6,7 +6,7 @@ from __future__ import annotations
 模型往沟里带——典型坑:
   - 资源/状态问题(路径不存在/文件缺失)却用 TOOL_INVALID_ARGUMENTS(暗示"改参数格式")，
     模型会反复纠结参数而非改路径/先定位。
-  - 失败返回漏传 error_code → ToolExecutionResult.__post_init__ 兜底成 UNKNOWN_ERROR
+  - 失败返回漏传 error_code → ToolHandlerOutcome.__post_init__ 兜底成 UNKNOWN_ERROR
     (retryable=False, report_blocker)，模型被告知"未知失败、报阻塞、别重试"，
     而实际是改参数/换工具就能修的。
 
@@ -400,51 +400,4 @@ def test_send_guidance_unknown_scope_is_invalid_arguments(tmp_path: Path):
     r = SendGuidanceTool(_agent(tmp_path)).execute({"message": "hi", "target_scope": "bogus_scope"})
     assert r.ok is False
     assert r.error_code == "TOOL_INVALID_ARGUMENTS", r.error_code
-    assert r.error_code != "UNKNOWN_ERROR"
-
-
-# ---- registry execute_call：畸形 tool 名 / payload 结构错→TOOL_CALL_PAYLOAD_INVALID(非 UNKNOWN_ERROR) ----
-
-
-def _exec_registry(tmp_path: Path, payload):
-    from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
-
-    registry = ToolRegistry(
-        ToolRegistryParams(
-            workspace_root=tmp_path,
-            max_chars=6000,
-            max_entries=200,
-            max_matches=50,
-            web_max_chars=12000,
-            http_timeout=30,
-            catalog_limit=20,
-            retrieval_limit=3,
-            vector_search_enabled=False,
-            shell_tool_timeout=30,
-            shell_tool_output_max_chars=200,
-        )
-    )
-    return registry.execute_call(payload)
-
-
-def test_registry_empty_tool_name_is_payload_invalid(tmp_path: Path):
-    # native 下 _flatten_tool_use_block 可能产出空 tool 名(block.name 缺失) → normalize_tool_name
-    # 抛 ValueError。以前无码兜底 UNKNOWN_ERROR(告知放弃)；现在 TOOL_CALL_PAYLOAD_INVALID(重构调用)。
-    r = _exec_registry(tmp_path, {"tool": "", "x": 1})
-    assert r.ok is False
-    assert r.error_code == "TOOL_CALL_PAYLOAD_INVALID", r.error_code
-    assert r.error_code != "UNKNOWN_ERROR"
-
-
-def test_registry_control_char_tool_name_is_payload_invalid(tmp_path: Path):
-    r = _exec_registry(tmp_path, {"tool": "read\x00file"})
-    assert r.ok is False
-    assert r.error_code == "TOOL_CALL_PAYLOAD_INVALID", r.error_code
-
-
-def test_registry_non_object_payload_is_payload_invalid(tmp_path: Path):
-    # payload 不是 JSON 对象(裸列表)→结构错→TOOL_CALL_PAYLOAD_INVALID,不是 UNKNOWN_ERROR。
-    r = _exec_registry(tmp_path, ["not", "an", "object"])
-    assert r.ok is False
-    assert r.error_code == "TOOL_CALL_PAYLOAD_INVALID", r.error_code
     assert r.error_code != "UNKNOWN_ERROR"

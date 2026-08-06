@@ -115,7 +115,7 @@
   与持久 child lineage 投影，不从中文正文分类。实现对照 会话运行时 `3418498f0142` 的
   session/turn/task 边界，没有增加第二份会话或未完成清单。
 - 另一个真测缺口是模型只能看到危险命令被拒绝，却没有单文件安全删除的权威恢复路径。当前实现复用
-  既有 `apply_patch`：`*** Delete File` 同时进入 ToolSpec、主代理、child 和统一错误恢复提示；目录或
+  既有 `apply_patch`：`*** Delete File` 同时进入 `ToolModelSpec.input_schema`、主代理、child 和统一错误恢复提示；目录或
   批量内容仍走正式 `task_trash`。实现对照 会话运行时 同一 apply-patch 生命周期和 长期助手
   `0b32ff708808` 的 patch parser，只增加一条共享规则，没有新增 delete 工具、shell 旁路或自然语言硬判。
 - A/B 的 owner home、task/output、Persona、USER、Memory、Compact 与 thread 文件均是独立物理路径；
@@ -420,7 +420,7 @@
 
 ## 2026-07-25 模型可见工具结果的统一安全投影
 
-- 工具完整原始结果不是直接拼进模型上下文。正式执行仍只有 Registry 一条主链：`ToolSpec` 声明最低
+- 工具完整原始结果不是直接拼进模型上下文。正式执行仍只有 ToolExecutor/Registry handler seam 一条主链：`ToolRuntimePolicy.output_policy` 声明最低
   输出信任/脱敏策略，执行结果只能继续收紧；live context、compact、恢复、父子代理共享和 handoff
   共用同一模型投影，不各自维护名单或包装器。
 - 网页、浏览器、MCP、视觉、watch 和已归档工具正文按外部不可信数据进入模型。包装会中和伪造的边界
@@ -495,7 +495,7 @@
 | 能力 | 状态 | 当前事实与承诺边界 |
 | --- | --- | --- |
 | Python 包、`my-agent` CLI、默认 gateway/chat 主循环 | 稳定 | 唯一正式普通用户入口是无子命令 `my-agent`，自动确保 gateway 存活并 attach chat client。`run` 与 `chat --direct` 是脚本/调试面，不是另一套默认 runtime。显式 `my_agent_home` 是 profile 权威；只有留空时才回落到 `MY_AGENT_HOME`，配置注释与既有测试已统一。稳定范围不包含十万用户容量承诺。 |
-| 本地文件工具、结构化 Tool Gateway、错误分类 | 稳定 | 正式工具调用统一经过注册、授权、参数、路径、限流、effect 和权威 operation claim；不得通过直接新增旁路执行器绕开。参数层已收敛为一份完整 ToolSpec JSON Schema：provider、text/native、MCP、恢复门与最终执行共用；只做无歧义强类型纠正，随后在副作用前检查必填、类型、枚举、嵌套、额外字段、长度/范围、组合规则和本地引用。typed 外层协议与工具参数分离，Schema 声明的 `kind/run_id/status/metadata/artifact_refs` 不再被同名协议字段误删；provider call id 由可信外层传入，模型参数不能覆盖 operation identity。缺失参数只允许来自 ToolSpec 逐字段明示的安全默认值或 Registry typed 上下文绑定；显式模型字段永不覆盖，Schema `default` 注解本身没有执行权，其余必填字段继续失败。每个有效参数只记录不含原值的 `source/source_ref`，并以 value-free 白名单进入短/长工具输出的 canonical index；旧 artifact scope 与 process cwd 专项补参已删除。mutating/dangerous 工具在实现前以 `owner + run + operation_id` 原子占位，首份执行后完整保存结果；同一精确操作只重放，不会再次执行，参数变更冲突、并发副本等待、崩溃歧义转 unknown，store 不可用默认 fail-closed。audit ledger 不再充当执行权威，副作用工具没有通用盲重试；`send_message` 的旧进程内/磁盘回执已经删除。没有真实外置 artifact 的短输出不再向模型提供无效 `read_artifact` 提示。POSIX shell 使用 `pipefail`，管道末端成功不能掩盖前段失败；前台超时、用户中断、后台 kill 与日志上限共用完整后代进程树终止，覆盖 bwrap 内层新 session，随后只做有界 pipe drain。provider incomplete 不会把半截正文或工具参数当成功；仅在已有耐久工具结果时允许一次有界续接。控制流使用归一错误类别，同时保留提供方原始错误码和脱敏输入形状供审计；供应商额度耗尽有正式 `PROVIDER_QUOTA_EXHAUSTED` 合同并引导切换后端，不再退化为 `UNKNOWN_ERROR`。operation claim 已随提交 `9f03140e` 进入远程 `main`，精确 wheel（SHA-256 `f702784a…e448b`）已部署 1.10；完整 pytest、静态门禁、干净 wheel、8899 Qwen、MiniMax-M2.7、两个既有真实 Feishu owner 的并发写入/回读/真实消息投递与跨 owner 读取拒绝均通过。真实 owner 请求由可信 localhost Feishu scope 提交，消息由 Feishu API 返回 sent receipt；不能把服务器侧 scope 请求冒充成新的客户端入站。 |
+| 本地文件工具、结构化 Tool Gateway、错误分类 | 稳定 | 正式工具调用统一经过注册、授权、参数、路径、限流、effect 和权威 operation claim；不得通过直接新增旁路执行器绕开。参数层以 `ToolModelSpec.input_schema` 为唯一 JSON Schema，provider、显式 text/native adapter、MCP、恢复门与最终执行共用同一 `schema_hash`；安全默认值和可信上下文补参只来自 `ToolRuntimePolicy.input_policy`。typed canonical ToolCall 将外层身份与参数分离，模型参数不能覆盖 operation identity。mutating/dangerous 工具在实现前以 `owner + run + operation_id` 原子占位，同一精确操作只重放，参数冲突、并发副本和崩溃歧义转 unknown，store 不可用默认 fail-closed。统一切片已接入 run 固定协议/ToolChoice、ActionPolicy、ToolExecutor、required actions/CompletionGate、策略并发与取消，并于 2026-08-04 完成全量 pytest、静态/制品门和 MiniMax-M2.7 四条普通中文真实验收；脱敏证据在 `validation/real_runs/tool-runtime-20260805T141123Z/report.json`。这些是当前未提交 worktree 证据，不冒充已部署版本。既有 operation claim 已随提交 `9f03140e` 进入远程 `main`，精确 wheel（SHA-256 `f702784a…e448b`）已部署 1.10；既有 8899 Qwen、两个 Feishu owner 的并发写入/回读/消息投递与跨 owner 拒绝证据仍成立。 |
 | 发布干净度检查 | 稳定 | 工作树模式检查 tracked 和未忽略 untracked；制品模式直接检查 wheel/zip/tar 成员、运行目录、路径穿越和大小预算。distribution boundary 还逐项核对 wheel 中的 `agent_py_agent/` payload 必须存在于当前源码树，旧 `build/` 缓存不能把已删除模块重新带回发布物。 |
 | 单用户 owner home、文件记忆、SQLite/FTS | 稳定 | 适用于本地/单节点；不是 PostgreSQL、RLS 或在线迁移的替代证明。 |
 | 多用户 owner scope 与 Linux shell 隔离 | 部分可用 | owner-scoped 前后台 shell 必须经 bwrap；不可用时结构化 fail-closed，禁止宿主降级。root 部署的宿主 home 放宽仅限无 owner scope 的本地管理员。远程 owner 默认只能访问自己的 owner home 和管理员显式发布的 `~/.my-agent/shared/`；其他 user/group owner、根模板、旧顶层私有目录与未授权宿主路径在 full mode 下也拒绝。只有当前轮的结构化 capability/delivery contract 可精确加入额外 workspace root，且不能覆盖凭据文件或其他 owner 拒绝。子代理 shell/后台命令/PTY/LSP 使用 owner home 只读基座加精确 `allowed_write_roots` 可写叠层，并阻止 PTY/LSP 跨任务复用权限；该边界已随 SHA-256 `bd8f9eb2…06ca1` wheel 在 1.10 经第二 owner 的旧任务续作反证，A/B owner 私有产物、人格、`USER.md`、skills 和 memory 反向检索均未互读。进程工具在没有显式 `working_dir` 时使用结构化选中的 `task_root`，显式目录仍优先；不解析用户文字或 shell 命令。随 wheel 发布的 builtin tools/skills 是公共代码能力。Docker 真机已验，Kubernetes 目标集群仍需节点 profile 分发与验收。 |
@@ -518,7 +518,7 @@
 | 扩展插件加载 | 实验性 | 唯一加载链接受管理员显式配置的已安装模块或 `my_agent.plugins` entry point；不扫描用户可写目录，缺失/重复/注册失败会阻断启动。尚缺第三方生态兼容矩阵。 |
 | PTY 交互终端 | 部分可用 | POSIX 已有真实 PTY start/write/read/close、增量游标与有界缓冲，并复用 shell 路径、命令策略和 bwrap。当前 wheel 已在 1.9/1.10 由本地 Qwen 经 4000 真实完成 Python REPL 五/八轮操作并 close；Windows ConPTY 尚未实现。 |
 | LSP | 实验性 | 已有管理员配置、惰性 stdio server、initialize/request/didOpen/diagnostics/shutdown 全链；路径限于工作区，多用户 server 经 bwrap。当前工作树在 `lsp_servers` 为空时不再把 LSP Schema 发给模型，availability 检查本身不启动 language server；有配置后仍只在真实 action 时惰性启动。1.10 已用主流 `typescript-language-server 5.3.0 + TypeScript 5.9.3` 返回 TS2322/hover，并由本地 Qwen 两轮真实 LSP 工具账本复验；其他语言服务器兼容矩阵与长稳仍未验证。 |
-| OpenAI 原生工具调用 | 实验性 | OpenAI-compatible `tools/tool_calls/role=tool` 的非流式和 SSE 分片链已接入统一 ToolSpec/IR；坏参数进入截断恢复。本地 Qwen 已完成三轮真实文件工具调用，但尚未扩大 provider/model、streaming 和长稳矩阵。 |
+| OpenAI 原生工具调用 | 实验性 | OpenAI-compatible `tools/tool_calls/role=tool` 的非流式和 SSE 分片链已接入 canonical ToolCall/ToolResult；坏参数、截断和正文伪调用均在 handler 前结构化拒绝。本地 Qwen 已完成三轮真实文件工具调用，但尚未扩大 provider/model、streaming 和长稳矩阵。 |
 | Redis、OpenTelemetry、在线迁移 | 部分可用 | Redis Lua、OTLP exporter、迁移 1–10 和应用只读版本门已接主链；release channel、Gateway API canary、分析门、PG backup/隔离 restore 清单已存在。尚无目标集群 HA、collector 后端、真实流量灰度和灾备演练。 |
 | 十万用户以上容量与可靠性证明 | 仅设计 | 已有一次三路真实异构来源连续 24 小时保证 proof，但尚无正式容量模型、SLO、十万用户压测、故障演练和多周期运行证据；该 proof 不能外推为容量证明。 |
 

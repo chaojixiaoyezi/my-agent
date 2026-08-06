@@ -139,3 +139,36 @@ def test_build_memory_embedder_gating(tmp_path) -> None:
         AgentConfig(memory_semantic_recall=True, memory_embedding_model="text-embedding-3-small")
     )
     assert embedder is not None  # 开 + 配 model → 建出 embedder
+
+
+def test_search_scoped_no_embedder_returns_ranked_active_only(tmp_path) -> None:
+    """运行时召回主路径:无 embedder → HybridRetriever 降级纯 BM25;predicate allowlist 生效。"""
+    mem = JsonlMemory(tmp_path / "mem.jsonl")
+    mem.add("user", "萧炎在加玛帝国用焚决修炼斗气")
+    mem.add("user", "用户偏好喝美式咖啡")
+    mem.add("user", "石昊在荒域采集灵药")  # 不属于本 scope,被 predicate 滤掉
+
+    hits = mem.search_scoped(
+        "焚决 斗气",
+        top_k=5,
+        predicate=lambda r: "石昊" not in r.content,
+    )
+
+    assert hits and "焚决" in hits[0].content  # BM25 词面排序目标在前
+    assert not any("石昊" in r.content for r in hits)  # allowlist 外记录绝不复活
+
+
+def test_search_scoped_with_embedder_fuses_and_still_scopes(tmp_path) -> None:
+    """运行时召回主路径:有 embedder → 混合两路融合;scope 过滤仍先于检索。"""
+    mem = JsonlMemory(tmp_path / "mem.jsonl", embedder=LocalHashingEmbedder(dim=128))
+    mem.add("user", "项目总花费是五十万元")
+    mem.add("user", "今天天气不错")
+
+    hits = mem.search_scoped(
+        "项目花费 五十万",
+        top_k=5,
+        predicate=lambda r: "天气" not in r.content,
+    )
+
+    assert hits and any("五十万" in r.content for r in hits)
+    assert not any("天气" in r.content for r in hits)

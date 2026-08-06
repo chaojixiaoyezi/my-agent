@@ -11,7 +11,16 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-from ..tooling.models import BaseTool, ToolExecutionResult, ToolSpec
+from ..tooling.models import (
+    BaseTool,
+    ConcurrencyPolicy,
+    EffectResolverPolicy,
+    ResourceScopePolicy,
+    ToolHandlerOutcome,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+)
 from .router import CapabilityRouter
 from .skill_snapshot import SkillSnapshotError
 
@@ -20,50 +29,54 @@ if TYPE_CHECKING:
 
 
 # 函数用途: skill_search 的工具说明书(进工具目录,引导模型在需要领域方法时先搜)。
-def build_skill_search_spec() -> ToolSpec:
-    return ToolSpec(
+def build_skill_search_model_spec() -> ToolModelSpec:
+    return ToolModelSpec(
         name="skill_search",
-        category="capability",
-        effect="read_only",
         description=(
             "检索或读取当前轮可用技能。action=search 按需求返回摘要和稳定 skill_id；"
             "action=get 用 skill_id 读取同一不可变快照里的完整 SKILL.md。"
         ),
-        use_cases=[
-            "任务需要特定领域的方法论（如深度代码分析、文档翻译工具链）时先搜一下",
-            "不确定系统有没有现成做法时，用一句话描述需求来检索",
-        ],
-        avoid_when=["普通问答或已明确知道怎么做时不必检索"],
-        keywords=["技能", "skill", "方法", "工具链", "怎么做", "检索技能"],
-        parameters={
-            "action": "search 或 get；省略时默认 search。",
-            "query": "search 时必填。用一句话描述你要做的事或需要的方法。",
-            "skill_id": "get 时必填。逐字使用 search 返回的稳定 skill_id。",
-            "category": "可选。限定类目（见 Skill Categories 索引）。",
-            "limit": "可选。最多返回几条，默认 5。",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["search", "get"], "description": "search 或 get；省略时默认 search。"},
+                "query": {"type": "string", "description": "search 时用一句话描述需要的方法。"},
+                "skill_id": {"type": "string", "description": "get 时逐字使用 search 返回的稳定 skill_id。"},
+                "category": {"type": "string", "description": "可选，限定 Skill Categories 类目。"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "最多返回几条，默认 5。"},
+            },
+            "additionalProperties": False,
         },
-        parameter_schema={
-            "action": {"type": "string", "enum": ["search", "get"]},
-            "query": {"type": "string"},
-            "skill_id": {"type": "string"},
-            "category": {"type": "string"},
-            "limit": {"type": "integer", "minimum": 1},
-        },
-        examples=[
-            '{"tool":"skill_search","action":"search","query":"把一份英文资料翻译成中文文档"}',
-            '{"tool":"skill_search","action":"get","skill_id":"builtin:pdf-translate-toolchain"}',
-        ],
+        hints=ToolModelHints(
+            category="capability",
+            use_cases=(
+                "任务需要特定领域的方法论时先检索",
+                "不确定系统有没有现成做法时，用一句话描述需求来检索",
+            ),
+            avoid_when=("普通问答或已明确知道怎么做时不必检索",),
+            keywords=("技能", "skill", "方法", "工具链", "怎么做", "检索技能"),
+            examples=(
+                '{"tool":"skill_search","action":"search","query":"把一份英文资料翻译成中文文档"}',
+                '{"tool":"skill_search","action":"get","skill_id":"builtin:pdf-translate-toolchain"}',
+            ),
+        ),
     )
 
 
 class SkillSearchTool(BaseTool):
+    model_spec = build_skill_search_model_spec()
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy("read_only"),
+        concurrency_policy=ConcurrencyPolicy("parallel_safe"),
+        resource_scopes=ResourceScopePolicy(parameter_names=("skill_id", "query")),
+    )
+
     # 类用途: 把 CapabilityRouter 的 skill 检索暴露成模型可调用的只读工具。
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
-        self.spec = build_skill_search_spec()
 
     # 函数用途: 执行一次检索;命中给卡片+稳定 id,未命中给类目索引当线索。
-    def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         action = str(params.get("action") or ("get" if params.get("skill_id") else "search")).strip()
         if action == "get":
             return self._get(params)
@@ -71,7 +84,7 @@ class SkillSearchTool(BaseTool):
             return _invalid("action 只接受 search 或 get")
         return self._search(params)
 
-    def _search(self, params: dict[str, object]) -> ToolExecutionResult:
+    def _search(self, params: dict[str, object]) -> ToolHandlerOutcome:
         query = str(params.get("query") or "").strip()
         if not query:
             return _invalid("query 不能为空", hint="用一句话描述要做的事")
@@ -94,7 +107,7 @@ class SkillSearchTool(BaseTool):
                 "hint": "没有命中的技能;可以换关键词,或按下方类目浏览。",
                 "categories": router.render_category_index(),
             }
-            return ToolExecutionResult("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
+            return ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
         matches = [
             {
                 "name": hit.card.name,
@@ -111,9 +124,9 @@ class SkillSearchTool(BaseTool):
             "matches": matches,
             "hint": "选择合适项后，用 skill_search action=get 和原样 skill_id 读取完整方法。",
         }
-        return ToolExecutionResult("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
+        return ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
 
-    def _get(self, params: dict[str, object]) -> ToolExecutionResult:
+    def _get(self, params: dict[str, object]) -> ToolHandlerOutcome:
         skill_id = str(params.get("skill_id") or "").strip()
         if not skill_id:
             return _invalid("skill_id 不能为空", hint="先 search，再逐字使用返回的 skill_id")
@@ -129,7 +142,7 @@ class SkillSearchTool(BaseTool):
         try:
             body = snapshot.read_body(skill_id)
         except SkillSnapshotError as exc:
-            return ToolExecutionResult(
+            return ToolHandlerOutcome(
                 "skill_search",
                 False,
                 json.dumps({"error": str(exc), "skill_id": skill_id}, ensure_ascii=False),
@@ -143,7 +156,7 @@ class SkillSearchTool(BaseTool):
             "content_sha256": entry.content_sha256,
             "body": body,
         }
-        return ToolExecutionResult("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
+        return ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 # 函数用途: 只取 composition root 装配的唯一路由器；缺失时 fail closed。
@@ -161,8 +174,8 @@ def _snapshot_for(agent):
     return getattr(agent, "_current_skill_snapshot", None)
 
 
-def _invalid(error: str, *, hint: str = "") -> ToolExecutionResult:
-    return ToolExecutionResult(
+def _invalid(error: str, *, hint: str = "") -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(
         "skill_search",
         False,
         json.dumps({"error": error, "hint": hint}, ensure_ascii=False),
@@ -170,8 +183,8 @@ def _invalid(error: str, *, hint: str = "") -> ToolExecutionResult:
     )
 
 
-def _unavailable() -> ToolExecutionResult:
-    return ToolExecutionResult(
+def _unavailable() -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(
         "skill_search",
         False,
         json.dumps({"error": "Skill 服务未装配"}, ensure_ascii=False),
@@ -179,8 +192,8 @@ def _unavailable() -> ToolExecutionResult:
     )
 
 
-def _snapshot_unavailable(exc: SkillSnapshotError) -> ToolExecutionResult:
-    return ToolExecutionResult(
+def _snapshot_unavailable(exc: SkillSnapshotError) -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(
         "skill_search",
         False,
         json.dumps({"error": str(exc)}, ensure_ascii=False),
@@ -197,4 +210,4 @@ def _safe_limit(value: object) -> int:
     return max(1, min(limit, 20))
 
 
-__all__ = ["SkillSearchTool", "build_skill_search_spec"]
+__all__ = ["SkillSearchTool", "build_skill_search_model_spec"]

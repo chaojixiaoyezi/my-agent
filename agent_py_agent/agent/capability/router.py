@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 """统一能力路由模块。
@@ -13,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..common.value_parsing import dedupe_strings
-from ..tooling.models import ToolSpec
+from ..tooling.models import ToolModelSpec
 from .config import CapabilityConfig
 from .skill_snapshot import SkillSnapshot, SkillSnapshotEntry
 from .skills import SkillCard
@@ -117,8 +116,7 @@ class CapabilityCard:
             lines.append(f"  副作用：{', '.join(self.side_effects)}")
         if self.kind == "skill" and self.metadata.get("stable_id"):
             lines.append(
-                "  正文：调用 skill_search，"
-                f"action=get，skill_id={self.metadata['stable_id']}"
+                f"  正文：调用 skill_search，action=get，skill_id={self.metadata['stable_id']}"
             )
         text = "\n".join(lines)
         if max_chars and len(text) > max_chars:
@@ -147,7 +145,7 @@ class CapabilityRouter:
         config: CapabilityConfig | None = None,
         skill_snapshot: SkillSnapshot | None = None,
         skill_snapshot_provider: Callable[[], SkillSnapshot] | None = None,
-        tool_specs: list[ToolSpec] | None = None,
+        tool_specs: list[ToolModelSpec] | None = None,
         extra_cards: list[CapabilityCard] | None = None,
     ):
         self.config = config or CapabilityConfig()
@@ -155,7 +153,7 @@ class CapabilityRouter:
         self._skill_snapshot = skill_snapshot
         self._skill_snapshot_provider = skill_snapshot_provider
         for spec in tool_specs or []:
-            self.register(from_tool_spec(spec))
+            self.register(from_tool_model_spec(spec))
         for card in default_capability_cards():
             self.register(card)
         for card in extra_cards or []:
@@ -334,10 +332,10 @@ def from_skill_snapshot_entry(entry: SkillSnapshotEntry) -> CapabilityCard:
     return card
 
 
-def from_tool_spec(spec: ToolSpec) -> CapabilityCard:
-    """把现有 ToolSpec 映射成统一能力卡。"""
+def from_tool_model_spec(spec: ToolModelSpec) -> CapabilityCard:
+    """把当前模型工具契约映射成统一能力卡。"""
 
-    side_effects, risk_level = classify_tool_risk(spec)
+    side_effects, risk_level = classify_tool_model_risk(spec)
     return CapabilityCard(
         id=f"tool:{spec.name}",
         kind="tool",
@@ -351,7 +349,7 @@ def from_tool_spec(spec: ToolSpec) -> CapabilityCard:
         side_effects=side_effects,
         source="builtin_tool_registry",
         metadata={
-            "parameters": spec.parameters,
+            "parameters": spec.parameter_descriptions,
             "examples": spec.examples,
         },
     )
@@ -381,7 +379,7 @@ def _playwright_capability_card() -> CapabilityCard:
     )
 
 
-def classify_tool_risk(spec: ToolSpec) -> tuple[list[str], str]:
+def classify_tool_model_risk(spec: ToolModelSpec) -> tuple[list[str], str]:
     """给现有工具补一层基础风险分类。
 
     这不是最终安全策略，只是 Tool Card 的初始风险信号。
@@ -444,7 +442,9 @@ class _SkillMetadataBudget:
 
     def cost(self, text: str) -> int:
         if self.token_based:
-            return (len(text.encode("utf-8")) + _APPROX_BYTES_PER_TOKEN - 1) // _APPROX_BYTES_PER_TOKEN
+            return (
+                len(text.encode("utf-8")) + _APPROX_BYTES_PER_TOKEN - 1
+            ) // _APPROX_BYTES_PER_TOKEN
         return len(text)
 
 
@@ -523,20 +523,76 @@ def _render_skill_metadata_lines(
         _skill_line(card, description[:chars])
         for card, description, chars in zip(skills, descriptions, allocations)
     ]
-    shortened = any(chars < len(description) for chars, description in zip(allocations, descriptions))
+    shortened = any(
+        chars < len(description) for chars, description in zip(allocations, descriptions)
+    )
     return lines, 0, shortened
 
 
 # 英文停用词:score_card 是子串匹配,短停用词会命中长单词内部("is"∈"d_is_covery"、
 # "in"∈ 所有"-ing"词),污染英文/拉丁系检索(跨语言支持)。只滤纯拉丁停用词——中文走
 # n-gram、token 都是 CJK,不在表内,中文检索完全不受影响。
-_EN_STOPWORDS = frozenset({
-    "the", "is", "are", "was", "were", "a", "an", "of", "to", "in", "on", "at", "and",
-    "or", "this", "that", "these", "those", "it", "its", "for", "with", "my", "our",
-    "your", "their", "me", "you", "i", "we", "he", "she", "they", "help", "please",
-    "be", "do", "does", "did", "how", "what", "can", "could", "will", "would", "should",
-    "let", "lets", "im", "ive", "some", "as", "by", "from", "want", "need", "get",
-})
+_EN_STOPWORDS = frozenset(
+    {
+        "the",
+        "is",
+        "are",
+        "was",
+        "were",
+        "a",
+        "an",
+        "of",
+        "to",
+        "in",
+        "on",
+        "at",
+        "and",
+        "or",
+        "this",
+        "that",
+        "these",
+        "those",
+        "it",
+        "its",
+        "for",
+        "with",
+        "my",
+        "our",
+        "your",
+        "their",
+        "me",
+        "you",
+        "i",
+        "we",
+        "he",
+        "she",
+        "they",
+        "help",
+        "please",
+        "be",
+        "do",
+        "does",
+        "did",
+        "how",
+        "what",
+        "can",
+        "could",
+        "will",
+        "would",
+        "should",
+        "let",
+        "lets",
+        "im",
+        "ive",
+        "some",
+        "as",
+        "by",
+        "from",
+        "want",
+        "need",
+        "get",
+    }
+)
 
 
 def tokenize(text: str) -> list[str]:

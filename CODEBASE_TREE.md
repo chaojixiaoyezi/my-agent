@@ -10,6 +10,8 @@ agent_py_agent/
 |-- config/                             # 默认 YAML 配置
 |-- cli/                                # 命令行、chat/TUI、gateway 管理、诊断维护命令
 |   |-- chat.py                         # 本地 chat 入口
+|   |-- memory_admin_parser.py          # Memory v2 唯一管理员命令树与中文参数帮助
+|   |-- memory_admin_commands.py        # Candidate/Curator/Retention/Doctor/Migration 共用正式 Service 的 CLI 适配
 |   |-- chat_parts/                     # TUI、gateway client、stream/render worker
 |   |   `-- control_runtime.py          # CLI 对共享会话控制协议及窗口级精确中断的运行适配
 |   |-- home_runtime_commands.py        # owner home 状态、daily/task workspace/index 维护命令
@@ -31,7 +33,6 @@ agent_py_agent/
 |   |   |-- tool_loop/final_exit_contract.py # run 出口合同：未收口任务态必走 closeout+续航双闸
 |   |   |-- tool_loop/failure_only_exit.py # 当前 request 全工具终态阻断时丢弃无证据结论
 |   |   |-- current_turn_execution.py # 当前 request canonical 工具事实的有界 prompt-tail 投影
-|   |   |-- run_learning_review.py     # run 收尾自学习复盘钩子（教训进 drafts 待审，默认关闭）
 |   |   |-- tool_loop/exit_orphan_recovery.py # 出口孤儿回收：未收口退出前终止后台子代理进程并 requeue
 |   |   `-- runner/                     # 子代理 runner prompt/worker/session/timeout；context.py 也隔离共享 Agent 的 thread-local 运行态
 |   |-- subagents/
@@ -53,7 +54,7 @@ agent_py_agent/
 |   |   |   |-- hierarchy/              # 多层调度和恢复包
 |   |   |   |-- patch_apply/            # patch review/apply/report
 |   |   |   |-- capability_service.py   # 能力请求、grant、gap、路由
-|   |   |   `-- memory_gate/           # task-local 经验候选审核
+|   |   |   `-- memory_candidates.py   # 子代理 lessons/findings 只经父级写入 owner 唯一候选账本
 |   |   |-- patch/                     # patch review/apply 底层实现
 |   |   |-- execution/                 # 测试执行和记录
 |   |   `-- static_site/               # 静态站点检查
@@ -61,10 +62,26 @@ agent_py_agent/
 |   |   |-- owner_quota.py             # 结构化写入口的 owner 跨进程配额锁与整批最终字节准入
 |   |   |-- home_retention.py          # 结构化终态/时间清理、二次校验、trash tombstone 与 legal hold
 |   |   `-- owner_maintenance.py       # owner 维护间隔、状态记录与自动执行控制
-|   |-- memory_store/                  # owner JSONL 权威长期记忆、候选/操作审计与派生索引
-|   |   |-- jsonl.py                  # 稳定 ID CRUD/batch、去重/冲突、hard delete 与统一召回
-|   |   |-- operations.py             # ops.jsonl 模型候选和无正文操作审计
+|   |-- memory_store/                  # owner 长期事实、候选、每日经历、策展、晋升与维护的唯一主链
+|   |   |-- candidate_models.py       # Candidate v2 Schema、来源/scope/状态枚举与稳定 ID
+|   |   |-- candidates.py             # owner candidates.jsonl 唯一候选账本和唯一状态机
+|   |   |-- curator.py                # 后台策展统一 Service、reason、lease、增量 cursor 与有界重试
+|   |   |-- curator_backend.py        # 无工具辅助模型调用适配；只返回严格结构化结果
+|   |   |-- curator_commit.py         # Daily/Candidate/state/run audit 整批提交与崩溃恢复
+|   |   |-- curator_*.py              # Curator 输入、Schema、正式记忆快照、状态与运行审计辅助模块
+|   |   |-- daily.py                  # v2 DailyMemoryEvent 稳定序列、幂等合并与按天账本
+|   |   |-- jsonl.py                  # 正式 long_term 稳定 ID CRUD/batch、冲突、hard delete 与召回
+|   |   |-- lessons.py                # 正式 lesson/HOT 唯一正文、阈值验证与确定性 routing index
+|   |   |-- lifecycle.py              # close/reset/task-complete/pre-compact 等统一策展请求入口
+|   |   |-- migration.py              # Memory v1→v2 只读计划、完整备份、幂等迁移和失败回滚
+|   |   |-- operations.py             # ops.jsonl 无正文正式 Memory 操作审计
+|   |   |-- promotion.py              # Candidate 证据、冲突、Persona、lesson/HOT 的唯一晋升服务
+|   |   |-- recall.py                 # active long-term/正式 lesson/HOT 的 owner+scope 安全召回
+|   |   |-- retention.py              # 统一 Retention service facade
+|   |   |-- retention_*.py            # 策略/计划/重验证/可恢复删除和 hard-delete 辅助模块
 |   |   `-- security.py               # Memory/Persona 共用持久内容威胁扫描
+|   |-- memory_api.py                  # CLI/外层包使用的公开 Memory façade；只转发正式 Service/DTO，不建第二权威
+|   |-- memory_push.py                 # planner/runner 决策点只召回正式 Lesson/HOT，并复用唯一 memory-context 信封
 |   |-- memory_archive/                # compact、audit、tool output artifact、task workspace refs
 |   |-- local_storage/                 # SQLite/FTS/文件事实源；ledger_redaction.py 精确擦除已删事实但保留幂等身份
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
@@ -96,13 +113,18 @@ agent_py_agent/
 |   |-- continuous_monitor_entry.py    # 真实 wall-clock 异构来源 proof 长守入口
 |   |-- contracts/                     # 稳定协议、错误分类（taxonomy+provider 九类分类器）、验收合同
 |   |   `-- tool_input_schema.py       # 工具参数有限 JSON Schema 纠正/完整校验与脱敏问题路径
-|   |-- tooling/                       # 工具注册、执行、写入边界、结构化错误出口
+|   |-- tooling/                       # 唯一 ToolRuntime/ActionPolicy/ToolExecutor、写入边界与结果投影
+|   |   |-- models.py                 # ToolModelSpec、ToolRuntimePolicy、ToolRuntime/Snapshot 与 handler outcome
+|   |   |-- runtime_contracts.py      # 唯一 canonical ToolCall/ToolResult、ToolChoice、协议与 operation 合同
+|   |   |-- input_schema.py           # 唯一 input_schema 规范化、强类型纠正和完整执行前校验
+|   |   |-- action_policy.py          # 副作用前唯一 allow/ask/deny 聚合决策
+|   |   |-- executor.py               # approval、sandbox、handler、账本、核对、持久化与投影状态机
+|   |   |-- runtime_boundary.py       # task 相对路径归一与精确读边界检查
 |   |   |-- capabilities_tool.py      # 从真实工具目录与唯一 channel registry 投影模型能力
 |   |   |-- _persona_write_guard.py   # SOUL/USER/AGENTS 统一强制走 update_persona
 |   |   |-- process_registry.py       # 前后台命令完整后代树终止的唯一进程入口
 |   |   |-- shell.py                  # run_command、超时/中断与有界 pipe drain
 |   |   |-- tool_input_completion.py # 明示安全默认值、可信上下文补参与脱敏 source/source_ref
-|   |   |-- tool_spec_schema.py       # ToolSpec→provider/runtime 唯一 Schema 与协议同名字段分层
 |   |   `-- sandbox.py                # bwrap 唯一策略、自检、worker/K8s readiness 硬门
 |   |-- capability/                    # 单一 SkillsService、逐轮 snapshot、能力路由与 capability tools
 |   |   |-- skill_service.py           # bounded builtin/shared/owner/workspace discovery、policy 与缓存
@@ -112,10 +134,18 @@ agent_py_agent/
 |   |-- prompting_parts/               # prompt 构造
 |   |   `-- memory_context.py          # 非权威、可转义且可统一剥离的召回记忆信封
 |   |-- scale_downstream.py            # scale worker 复用普通 gateway 会话执行主链
-|   `-- backends/                      # 模型后端适配、原生工具历史、JSON/JSON Schema 结构化生成
+|   `-- backends/                      # 模型后端适配、run 固定协议/tool_choice、原生工具历史与结构化生成
+|       `-- tool_protocol_adapter.py   # native 事件或显式完整 text 帧到 canonical ToolCall 的唯一适配口
 |-- tests/                             # 单元、集成、真实链路回归
 |   |-- test_current_turn_execution.py # 当前轮成功/失败副作用事实投影回归
 |   |-- test_memory_hardening.py       # 来源证据、候选、并发去重、hard delete 与信封安全回归
+|   |-- test_memory_candidate_daily_v2.py # Candidate/Daily v2 身份、状态、顺序、并发与大输出边界
+|   |-- test_memory_curator_v2.py      # Curator 触发、模型配置、权限、失败恢复与整批提交
+|   |-- test_memory_promotion_v2.py    # 证据/冲突/Persona/lesson/HOT 晋升边界
+|   |-- test_memory_recall_v2.py       # 正式来源、scope、陈旧索引、owner 隔离与信封安全
+|   |-- test_memory_migration_v2.py    # v1→v2 dry-run、备份、回滚、幂等与坏数据关闭式失败
+|   |-- test_memory_retention_v2.py    # 保留期、legal hold、终态保护、重验证与 hard delete
+|   |-- test_memory_admin_cli_v2.py    # 统一 Memory 管理命令复用正式服务
 |   |-- test_tool_input_completion_provenance.py # 有限补参、来源账目、伪造拒绝和旧旁路删除回归
 |   |-- test_tool_input_schema.py      # 强类型纠正、嵌套/组合/边界规则与显式 Schema fail-closed
 |   |-- test_sandbox.py                # bwrap argv、自检协议、owner-scoped fail-closed
@@ -131,6 +161,9 @@ deploy/
 `-- k8s/                              # stable/canary、Gateway route、migration、monitor 与 DR 清单
 docs/
 |-- PRODUCT_FACTS.md                    # 当前能力状态唯一权威：稳定/部分可用/实验性/仅设计
+|-- design/FEATURE-20260804-tool-runtime-unification.md # 工具唯一主链的用户行为、需求与验收规格
+|-- design/tool-runtime-unification.md  # 工具参考证据、架构、迁移删除表与并行边界
+|-- tasks/completed/TASK-20260804-1913-tool-runtime-unification.md # 工具唯一主链实施与验收记录
 |-- design/AGENT_FOUNDATION_CAPABILITY_AUDIT_20260718.md # 自我描述、Shared、Memory、Persona、Compact、Skill、Workflow、配额、隐私和完成质量审计
 |-- design/P2_SCALE_ROLLOUT_DR_OWNER_STORE.md # 灰度/灾备/Owner store/24h proof 事实
 |-- architecture/BOUNDARY_RULES.md      # 分层和写入边界
@@ -144,13 +177,25 @@ docs/
 
 ```text
 ~/.my-agent/owners/<provider>/<kind-or-id>/
-|-- memory/long_term/memory.jsonl       # 主代理长期记忆
-|-- memory/daily/YYYY-MM-DD.jsonl       # 每日工作记忆
-|-- audit/YYYY-MM-DD.jsonl              # raw turn/tool/gateway 黑盒流水
-|-- blobs/tool_outputs/                 # 大工具输出正文
+|-- SOUL.md                             # AI 人格；用户明确确认后经 PersonaRepository 更新
+|-- USER.md                             # 当前用户明确表达的稳定画像与偏好
+|-- AGENTS.md                           # 长期合作方式；用户明确确认后更新
+|-- memory-hot.md                      # 每轮必读的少量高频短规则与精确 lesson 引用
+|-- memory.md                          # 短导航，不保存第二份事实或教训正文
+|-- memory/
+|   |-- long_term/memory.jsonl         # 当前 active 正式长期事实唯一权威
+|   |-- daily/YYYY-MM-DD.jsonl         # Curator 提炼的经历摘要和 refs，不是正式事实
+|   |-- candidates.jsonl               # owner 唯一候选账本与状态机
+|   |-- ops.jsonl                      # 无正文正式 Memory 操作审计
+|   |-- curator/state.json             # 所有触发共用的 lease、cursor 与失败状态
+|   |-- curator/runs/YYYY-MM-DD.jsonl  # 后台运行审计
+|   |-- lessons/*.md                   # 可复用正式教训唯一详细正文
+|   `-- routing/INDEX.md               # 由 lesson metadata 确定性重建的路由索引
+|-- audit/YYYY-MM-DD.jsonl              # raw turn/tool/gateway 黑盒索引；非完整对话权威
 |-- tasks/<date>/<task-slug>/           # 当前任务工作区
 |   |-- output/                         # 最终交付物
-|   `-- work/                           # 状态、日志、子代理账本、过程产物
+|   `-- work/                           # 状态、日志、子代理原始结果与过程产物
+|       `-- blobs/tool_outputs/         # 大工具输出完整正文；Memory 只保存 preview/hash/size/ref
 |-- agents/<run_id>/                    # 子代理 refs-only projection
 |-- workspace/runtime/workspaces/<scope>/# LocalStore、gateway、conversation 等 workspace 账本
 `-- global_index/                       # 可重建轻量索引

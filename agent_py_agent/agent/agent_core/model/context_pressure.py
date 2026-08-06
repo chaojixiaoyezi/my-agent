@@ -123,7 +123,7 @@ def preflight_context_pressure_response(request: object) -> ModelResponse | None
 # fixed schema disappear from the compact decision.
 # 函数用途: 统一统计文字 prompt、原生工具 schema、原生工具消息和待转发运行时引导。
 def model_visible_context_tokens(agent: object, params: object, prompt: str) -> int:
-    if not native_tool_use_active(agent):
+    if not native_tool_use_active(params):
         return estimate_tokens(str(prompt or ""))
 
     from ...backends.message_adapter import AnthropicMessageAdapter

@@ -5,7 +5,17 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from ..tooling.models import BaseTool, ToolExecutionResult, ToolSpec
+from ..tooling.models import (
+    BaseTool,
+    ConcurrencyPolicy,
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    ResourceScopePolicy,
+    ToolHandlerOutcome,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+)
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -25,8 +35,8 @@ def _goal_context(agent: SimpleAgent) -> tuple[str, str, str, dict[str, object] 
     )
 
 
-def _error(tool: str, message: str, code: str) -> ToolExecutionResult:
-    return ToolExecutionResult(
+def _error(tool: str, message: str, code: str) -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(
         tool,
         False,
         json.dumps({"ok": False, "error": message, "error_code": code}, ensure_ascii=False),
@@ -64,23 +74,26 @@ def _goal_response(goal: object | None, *, completion_report: bool = False) -> s
 
 
 class GetGoalTool(BaseTool):
+    model_spec = ToolModelSpec(
+        name="get_goal",
+        description="Get the current goal or named goals for this thread, including status, budgets, token and elapsed-time usage.",
+        input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        hints=ToolModelHints(
+            category="goal",
+            use_cases=("Read the current persisted thread goal",),
+            keywords=("goal", "status", "budget"),
+        ),
+    )
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy("read_only"),
+        concurrency_policy=ConcurrencyPolicy("parallel_safe"),
+        resource_scopes=ResourceScopePolicy(mode="declared", static_scopes=("current_thread_goal",)),
+    )
+
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
-        self.spec = ToolSpec(
-            name="get_goal",
-            category="goal",
-            description=(
-                "Get the current goal or the named goals for this thread, including status, "
-                "budgets, token and elapsed-time usage."
-            ),
-            use_cases=["Read the current persisted thread goal"],
-            avoid_when=[],
-            keywords=["goal", "status", "budget"],
-            parameters={},
-            effect="read_only",
-        )
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         del params
         thread_id, task_id, goal_id, _ = _goal_context(self.agent)
         if not thread_id:
@@ -97,51 +110,51 @@ class GetGoalTool(BaseTool):
                 for item in store.load_goals(thread_id)
                 if str(getattr(item, "status", "") or "") != "complete"
             ]
-            return ToolExecutionResult(
+            return ToolHandlerOutcome(
                 "get_goal",
                 True,
                 json.dumps({"goal": None, "goals": goals}, ensure_ascii=False, indent=2),
             )
-        return ToolExecutionResult("get_goal", True, _goal_response(goal))
+        return ToolHandlerOutcome("get_goal", True, _goal_response(goal))
 
 
 class CreateGoalTool(BaseTool):
+    model_spec = ToolModelSpec(
+        name="create_goal",
+        description=(
+            "Create a goal only when explicitly requested by the user or system/developer instructions; "
+            "do not infer goals from ordinary tasks. Set token_budget only when explicitly requested. "
+            "Fails if an unfinished unnamed goal exists; named goals may coexist."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "objective": {"type": "string", "description": "Concrete persisted objective."},
+                "token_budget": {"type": "integer", "minimum": 1, "description": "Explicitly requested positive token budget."},
+                "name": {"type": "string", "minLength": 1, "description": "Optional exact user-visible goal name."},
+                "duration_seconds": {"type": "integer", "minimum": 1, "description": "Optional duration explicitly requested by the user."},
+            },
+            "required": ["objective"],
+            "additionalProperties": False,
+        },
+        hints=ToolModelHints(
+            category="goal",
+            use_cases=("The user or system explicitly requests a persistent goal",),
+            avoid_when=("Ordinary tasks that did not explicitly request a goal",),
+            keywords=("goal", "persistent objective"),
+        ),
+    )
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy("mutating"),
+        idempotency_policy=IdempotencyPolicy("operation"),
+        resource_scopes=ResourceScopePolicy(mode="declared", static_scopes=("current_thread_goal",)),
+        promotes_task=True,
+    )
+
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
-        self.spec = ToolSpec(
-            name="create_goal",
-            category="goal",
-            description=(
-                "Create a goal only when explicitly requested by the user or system/developer "
-                "instructions; do not infer goals from ordinary tasks.\n"
-                "Set token_budget only when an explicit token budget is requested. Fails if an "
-                "unfinished unnamed goal exists; explicitly named goals may coexist."
-            ),
-            use_cases=["The user or system explicitly requests a persistent goal"],
-            avoid_when=["Ordinary tasks that did not explicitly request a goal"],
-            keywords=["goal", "persistent objective"],
-            parameters={
-                "objective": (
-                    "Required. The concrete objective to start pursuing. This starts a new active "
-                    "goal when no goal exists or replaces the current goal when it is complete."
-                ),
-                "token_budget": "Positive token budget for the new goal. Omit unless explicitly requested.",
-                "name": "Optional exact user-visible name for a goal that may coexist with other named goals.",
-                "duration_seconds": "Optional positive duration requested by the user.",
-            },
-            parameter_schema={
-                "objective": {"type": "string"},
-                "token_budget": {"type": "integer", "minimum": 1},
-                "name": {"type": "string", "minLength": 1},
-                "duration_seconds": {"type": "integer", "minimum": 1},
-            },
-            required_parameters=["objective"],
-            effect="mutating",
-            idempotency_scope="operation",
-            promotes_task=True,
-        )
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         objective = str(params.get("objective") or "").strip()
         thread_id, task_id, _goal_id, attrs = _goal_context(self.agent)
         if not thread_id or not task_id or attrs is None:
@@ -182,56 +195,52 @@ class CreateGoalTool(BaseTool):
             return _error("create_goal", str(exc), "GOAL_INVALID_REQUEST")
         attrs["thread_goal_id"] = goal.goal_id
         attrs["thread_goal_activation_pending"] = True
-        return ToolExecutionResult("create_goal", True, _goal_response(goal))
+        return ToolHandlerOutcome("create_goal", True, _goal_response(goal))
 
 
 class UpdateGoalTool(BaseTool):
+    model_spec = ToolModelSpec(
+        name="update_goal",
+        description=(
+            "Update the existing goal. Use this tool only to mark the goal achieved or genuinely blocked. "
+            "Set status to complete only when the objective has actually been achieved and no required work remains. "
+            "Set status to blocked only when the same blocking condition has repeated for at least three consecutive "
+            "goal turns, counting the original user-triggered turn and automatic continuations, and no meaningful "
+            "progress is possible without user input or an external-state change. If the user resumes a previously "
+            "blocked goal, start a fresh three-turn blocked audit. Do not use blocked merely because work is hard, "
+            "slow, uncertain, incomplete, or would benefit from clarification. Do not mark complete because budget "
+            "is low or work is stopping. Pause, resume and budget changes remain user/system controlled. When a "
+            "budgeted goal completes, report final token usage from the structured tool result."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["complete", "blocked"],
+                    "description": "Required terminal status under the goal lifecycle rules.",
+                }
+            },
+            "required": ["status"],
+            "additionalProperties": False,
+        },
+        hints=ToolModelHints(
+            category="goal",
+            use_cases=("Mark an existing goal complete or genuinely blocked",),
+            avoid_when=("The goal still has useful work available",),
+            keywords=("goal", "complete", "blocked"),
+        ),
+    )
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy("mutating"),
+        idempotency_policy=IdempotencyPolicy("operation"),
+        resource_scopes=ResourceScopePolicy(mode="declared", static_scopes=("current_thread_goal",)),
+    )
+
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
-        self.spec = ToolSpec(
-            name="update_goal",
-            category="goal",
-            description=(
-                "Update the existing goal.\n"
-                "Use this tool only to mark the goal achieved or genuinely blocked.\n"
-                "Set status to `complete` only when the objective has actually been achieved and "
-                "no required work remains.\n"
-                "Set status to `blocked` only when the same blocking condition has repeated for "
-                "at least three consecutive goal turns, counting the original/user-triggered turn "
-                "and any automatic continuations, and the agent cannot make meaningful progress "
-                "without user input or an external-state change.\n"
-                "If the user resumes a goal that was previously marked `blocked`, treat the resumed "
-                "run as a fresh blocked audit. If the same blocking condition then repeats for at "
-                "least three consecutive resumed goal turns, set status to `blocked` again.\n"
-                "Once the blocked threshold is satisfied, do not keep reporting that you are still "
-                "blocked while leaving the goal active; set status to `blocked`.\n"
-                "Do not use `blocked` merely because the work is hard, slow, uncertain, incomplete, "
-                "or would benefit from clarification.\n"
-                "Do not mark a goal complete merely because its budget is nearly exhausted or "
-                "because you are stopping work.\n"
-                "You cannot use this tool to pause, resume, budget-limit, or usage-limit a goal; "
-                "those status changes are controlled by the user or system.\n"
-                "When marking a budgeted goal achieved with status `complete`, report the final "
-                "token usage from the tool result to the user."
-            ),
-            use_cases=["Mark an existing goal complete or genuinely blocked"],
-            avoid_when=["The goal still has useful work available"],
-            keywords=["goal", "complete", "blocked"],
-            parameters={
-                "status": (
-                    "Required. Set to `complete` only when the objective is achieved and no "
-                    "required work remains. Set to `blocked` only after the same blocking "
-                    "condition has recurred for at least three consecutive goal turns and the "
-                    "agent is at an impasse."
-                )
-            },
-            parameter_schema={"status": {"type": "string", "enum": ["complete", "blocked"]}},
-            required_parameters=["status"],
-            effect="mutating",
-            idempotency_scope="operation",
-        )
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         status = str(params.get("status") or "").strip().lower()
         if status not in {"complete", "blocked"}:
             return _error(
@@ -278,7 +287,7 @@ class UpdateGoalTool(BaseTool):
             self.agent.local_store.task_registry.register_task(
                 goal.task_id, status=registry_status, goal=updated.objective
             )
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             "update_goal",
             True,
             _goal_response(updated, completion_report=status == "complete"),

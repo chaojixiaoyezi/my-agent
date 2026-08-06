@@ -27,7 +27,16 @@ from ...common.json_io import (
     read_jsonl_objects_report,
 )
 from ...conversation.authority import CONVERSATION_REQUEST_ID_ATTR
-from ...tooling.models import BaseTool, ToolExecutionResult, ToolSpec
+from ...tooling.models import (
+    BaseTool,
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    ResourceScopePolicy,
+    ToolHandlerOutcome,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+)
 from ..runner.context import current_subagent_attempt_id, current_subagent_run_id
 
 _TOOL_NAME = "record_finding"
@@ -42,22 +51,38 @@ _FINDING_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
 
 class RecordFindingTool(BaseTool):
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy("mutating"),
+        idempotency_policy=IdempotencyPolicy("operation"),
+        resource_scopes=ResourceScopePolicy(
+            parameter_names=("finding_id", "watch_id"),
+        ),
+    )
+
     def __init__(self, agent: object) -> None:
         self.agent = agent
-        self.spec = build_record_finding_spec()
+        self.model_spec = build_record_finding_model_spec()
 
-    def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         claim = str(params.get("claim") or "").strip()
         if not claim:
-            return ToolExecutionResult(_TOOL_NAME, False, "缺少 claim:一句话写清你确认了什么。")
+            return ToolHandlerOutcome(
+                _TOOL_NAME,
+                False,
+                "缺少 claim:一句话写清你确认了什么。",
+                error_code="TOOL_PARAMETER_REQUIRED",
+            )
         ledger_path, ledger_scope = _findings_ledger_path(self.agent)
         if not ledger_path:
-            return ToolExecutionResult(
-                _TOOL_NAME, False, "当前上下文没有可用的结论账本(没有运行中的任务工作区)。"
+            return ToolHandlerOutcome(
+                _TOOL_NAME,
+                False,
+                "当前上下文没有可用的结论账本(没有运行中的任务工作区)。",
+                error_code="TOOL_UNAVAILABLE",
             )
         audit_context, audit_error = _audit_finding_context(self.agent, params)
         if audit_error:
-            return ToolExecutionResult(
+            return ToolHandlerOutcome(
                 _TOOL_NAME,
                 False,
                 audit_error,
@@ -65,7 +90,7 @@ class RecordFindingTool(BaseTool):
             )
         requested_id = str(params.get("finding_id") or "").strip()
         if requested_id and not _FINDING_ID_PATTERN.fullmatch(requested_id):
-            return ToolExecutionResult(
+            return ToolHandlerOutcome(
                 _TOOL_NAME,
                 False,
                 "finding_id 格式无效。",
@@ -82,7 +107,12 @@ class RecordFindingTool(BaseTool):
             path.parent.mkdir(parents=True, exist_ok=True)
             recorded, revision = _append_finding_revision(path, record)
         except OSError as exc:
-            return ToolExecutionResult(_TOOL_NAME, False, f"结论账本写入失败: {exc}")
+            return ToolHandlerOutcome(
+                _TOOL_NAME,
+                False,
+                f"结论账本写入失败: {exc}",
+                error_code="TOOL_PERSISTENCE_FAILED",
+            )
         payload = {
             "ok": True,
             "recorded": recorded,
@@ -108,7 +138,9 @@ class RecordFindingTool(BaseTool):
                 self.agent,
                 current_subagent_run_id(self.agent),
             )
-        return ToolExecutionResult(_TOOL_NAME, True, json.dumps(payload, ensure_ascii=False, indent=2))
+        return ToolHandlerOutcome(
+            _TOOL_NAME, True, json.dumps(payload, ensure_ascii=False, indent=2)
+        )
 
 
 def _finding_record(
@@ -167,9 +199,7 @@ def _finding_record_for_context(
         record["report_status"] = "pending"
         urgency = str(params.get("urgency") or "normal").strip().lower()
         record["urgency"] = urgency if urgency in {"normal", "urgent"} else "normal"
-        record["requires_llm_report"] = bool(
-            params.get("requires_llm_report", False)
-        )
+        record["requires_llm_report"] = bool(params.get("requires_llm_report", False))
     return record
 
 
@@ -247,9 +277,7 @@ def append_inline_audit_finding(
         "stage": str(finding.get("stage") or "initial"),
         "needs_evidence": bool(finding.get("needs_evidence", False)),
         "urgency": str(finding.get("urgency") or "normal"),
-        "requires_llm_report": bool(
-            finding.get("requires_llm_report", False)
-        ),
+        "requires_llm_report": bool(finding.get("requires_llm_report", False)),
     }
     record = _finding_record_for_context(
         str(finding.get("claim") or ""),
@@ -303,22 +331,21 @@ def _append_finding_revision(
         if report.load_errors:
             raise OSError("findings.jsonl 存在损坏行，已按 fail-closed 拒绝追加")
         same_id = [
-            row
-            for row in report.records
-            if str(row.get("id") or "") == str(record.get("id") or "")
+            row for row in report.records if str(row.get("id") or "") == str(record.get("id") or "")
         ]
         if same_id and _same_finding_projection(same_id[-1], record):
             return False, int(same_id[-1].get("revision") or len(same_id))
-        revision = max(
-            [int(row.get("revision") or index + 1) for index, row in enumerate(same_id)],
-            default=0,
-        ) + 1
+        revision = (
+            max(
+                [int(row.get("revision") or index + 1) for index, row in enumerate(same_id)],
+                default=0,
+            )
+            + 1
+        )
         record["revision"] = revision
         record["updated_at"] = time.time()
         with path.open("a", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
-            )
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
     return True, revision
 
 
@@ -343,9 +370,7 @@ def _same_finding_projection(
         "source",
         "updated_at",
     }
-    return {
-        key: value for key, value in existing.items() if key not in ignored
-    } == {
+    return {key: value for key, value in existing.items() if key not in ignored} == {
         key: value for key, value in current.items() if key not in ignored
     }
 
@@ -366,10 +391,6 @@ def _audit_finding_context(
         caller_epoch = max(0, int(attrs.get(AUDIT_RUN_EPOCH_ATTR) or 0))
     except (TypeError, ValueError):
         caller_epoch = -1
-    from ...ingestion.harvester import (
-        inspect_audit_record,
-        parse_audit_source_ref,
-    )
     from ...ingestion.watch_state import load_state
 
     state = load_state(owner_home, watch_id)
@@ -381,64 +402,19 @@ def _audit_finding_context(
         or caller_epoch != max(0, int(state.audit_run_epoch or 0))
     ):
         return {}, "当前来源工作者的持久来源绑定不可用。"
-    refs_value = params.get("evidence_refs")
-    raw_refs = (
-        refs_value
-        if isinstance(refs_value, list)
-        else ([refs_value] if refs_value else [])
-    )
-    refs = list(
-        dict.fromkeys(
-            str(item).strip() for item in raw_refs if str(item or "").strip()
-        )
-    )[:_MAX_REFS]
+    refs = _audit_finding_refs(params)
     if not refs:
         return {}, "Audit finding 必须引用当前 watch 已判断的 source_ref。"
-    verdicts: list[dict[str, Any]] = []
-    evidence_records: list[dict[str, Any]] = []
-    for ref in refs:
-        parsed = parse_audit_source_ref(ref)
-        # Non-Audit refs are supplementary pointers only.  They never grant
-        # source authority, but the public ToolSpec explicitly allows paths,
-        # event ids and URLs, so rejecting them here made Schema and execution
-        # disagree.  An audit:// ref for a sibling watch remains a hard denial.
-        if parsed is None:
-            continue
-        if parsed[0] != watch_id:
-            return {}, "Audit finding 只能引用当前来源工作者自己的 source_ref。"
-        inspected = inspect_audit_record(state, parsed[1])
-        status = inspected.get("processing_status")
-        if not inspected.get("ok") or not (
-            isinstance(status, dict) and bool(status.get("acknowledged"))
-        ):
-            return {}, "Audit finding 的 source_ref 尚无已签收首次判断。"
-        verdict = inspected.get("verdict")
-        evidence_records.append(
-            _audit_evidence_record(inspected, source_ref=ref, ack_id=parsed[1])
-        )
-        if isinstance(verdict, dict):
-            verdicts.append(
-                {
-                    "source_ref": ref,
-                    "ack_id": parsed[1],
-                    "audit_run_epoch": max(
-                        0,
-                        int(verdict.get("audit_run_epoch") or 0),
-                    ),
-                    "ingest_run_epoch": max(
-                        0,
-                        int(verdict.get("ingest_run_epoch") or 0),
-                    ),
-                    "verdict": verdict.get("verdict"),
-                    "score": verdict.get("score"),
-                    "score_range": verdict.get("score_range"),
-                    "dimensions": verdict.get("dimensions"),
-                    "note": verdict.get("note"),
-                }
-            )
+    verdicts, evidence_records, evidence_error = _audit_finding_evidence(
+        state,
+        watch_id=watch_id,
+        refs=refs,
+    )
+    if evidence_error:
+        return {}, evidence_error
     if not verdicts:
         return {}, "Audit finding 必须引用当前 watch 已签收判断的 source_ref。"
-    primary = verdicts[0] if verdicts else {}
+    primary = verdicts[0]
     return {
         "audit_finding": True,
         "owner_id": state.owner_id,
@@ -463,6 +439,68 @@ def _audit_finding_context(
         "evidence_verdicts": verdicts,
         "evidence_records": evidence_records,
     }, ""
+
+
+def _audit_finding_refs(params: dict[str, object]) -> list[str]:
+    refs_value = params.get("evidence_refs")
+    raw_refs = refs_value if isinstance(refs_value, list) else ([refs_value] if refs_value else [])
+    return list(dict.fromkeys(str(item).strip() for item in raw_refs if str(item or "").strip()))[
+        :_MAX_REFS
+    ]
+
+
+def _audit_finding_evidence(
+    state: object,
+    *,
+    watch_id: str,
+    refs: list[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+    from ...ingestion.harvester import (
+        inspect_audit_record,
+        parse_audit_source_ref,
+    )
+
+    verdicts: list[dict[str, Any]] = []
+    evidence_records: list[dict[str, Any]] = []
+    for ref in refs:
+        parsed = parse_audit_source_ref(ref)
+        # Non-Audit refs are supplementary pointers only.  They never grant
+        # source authority, but the public ToolModelSpec explicitly allows paths,
+        # event ids and URLs, so rejecting them here made Schema and execution
+        # disagree.  An audit:// ref for a sibling watch remains a hard denial.
+        if parsed is None:
+            continue
+        if parsed[0] != watch_id:
+            return [], [], "Audit finding 只能引用当前来源工作者自己的 source_ref。"
+        inspected = inspect_audit_record(state, parsed[1])
+        status = inspected.get("processing_status")
+        if not inspected.get("ok") or not (
+            isinstance(status, dict) and bool(status.get("acknowledged"))
+        ):
+            return [], [], "Audit finding 的 source_ref 尚无已签收首次判断。"
+        verdict = inspected.get("verdict")
+        evidence_records.append(_audit_evidence_record(inspected, source_ref=ref, ack_id=parsed[1]))
+        if isinstance(verdict, dict):
+            verdicts.append(
+                {
+                    "source_ref": ref,
+                    "ack_id": parsed[1],
+                    "audit_run_epoch": max(
+                        0,
+                        int(verdict.get("audit_run_epoch") or 0),
+                    ),
+                    "ingest_run_epoch": max(
+                        0,
+                        int(verdict.get("ingest_run_epoch") or 0),
+                    ),
+                    "verdict": verdict.get("verdict"),
+                    "score": verdict.get("score"),
+                    "score_range": verdict.get("score_range"),
+                    "dimensions": verdict.get("dimensions"),
+                    "note": verdict.get("note"),
+                }
+            )
+    return verdicts, evidence_records, ""
 
 
 def _audit_evidence_record(
@@ -534,7 +572,9 @@ def _link_watch_feedback(agent: object, params: dict[str, object]) -> bool | Non
         stream_pos = int(str(raw_pos).strip())
     except (TypeError, ValueError):
         return False
-    owner_home = str(getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or "").strip()
+    owner_home = str(
+        getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or ""
+    ).strip()
     if not owner_home:
         return False
     from ...ingestion.watch_feedback import append_confirmation
@@ -566,68 +606,92 @@ def _run_ledger_path(agent: object, run_id: str) -> str:
     return str(getattr(task, "agent_run_findings_jsonl", "") or "").strip()
 
 
-def build_record_finding_spec() -> ToolSpec:
-    return ToolSpec(
+def build_record_finding_model_spec() -> ToolModelSpec:
+    return ToolModelSpec(
         name=_TOOL_NAME,
         # collaboration = 默认 deferred 目录(tool_catalog_deferred_categories):不进主代理
         # 全局 catalog 正文(渐进式披露,防目录膨胀挤压上下文);子代理 runner 经 allowed_tools
         # 显式授权 + 执行合同"确认即记账"引导,不依赖全局目录曝光。
-        category="collaboration",
-        effect="mutating",
         # 追加式结论账(每次生成新 id 追加一行)对重试天然安全;side-effect 工具不声明
         # 幂等策略会被 tool_manifest 门整体 DENY——真机实锤:盯守主代理逐条入账被
         # TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING 拦死,findings 恒空、只能改走 write_file。
-        idempotency_scope="operation",
         description=(
             "把一条【已确认的结论/发现/完成事实】立刻写进本 run 的结论账本(findings.jsonl,追加一行)。"
             "确认一条记一条:之后收尾再崩、任务被取消,账还在,整合轮照样能收走;"
             "最终报告只是账本的汇总视图。"
         ),
-        use_cases=[
-            "盯守任务确认一条真命中:立刻入账(claim=事件ID+结果端理由),供主代理核验整合后自然汇报",
-            "建站/编码任务完成一个模块并验证通过:入账一条完成事实(claim+产物路径)",
-            "长分析任务得出一个中间结论:先入账再继续,防后面上下文压缩后忘掉",
-        ],
-        avoid_when=[
-            "还没确认的猜测不要入账——拿不准的先验证",
-            "不要把整篇报告塞进 claim:一条结论一行账,报告仍写产物文件",
-        ],
         # 增补盯守特异词(盯守任务上推荐区能把本工具的详细说明浮现进 prompt);
         # 只放特异词,别放"上报/汇报"类通用词——通用词会让普通任务也拉进推荐区,prompt 白胖一截。
-        keywords=["结论", "发现", "命中", "记账", "finding", "record", "确认", "落账", "持久化", "盯守", "watch_stream"],
-        parameters={
-            "claim": "必填:一句话写清确认了什么(结论本身,含关键标识如事件ID/模块名)",
-            "evidence_refs": "可选:证据指针列表(文件路径/事件ID/URL)",
-            "kind": "可选:结论类型标签,如 hit/module_done/analysis,默认 finding",
-            "confidence": "可选:置信来源一句话(如'结果端字段 probe.verified=true')",
-            "finding_id": "可选:更新既有 finding 时原样传回稳定编号；首次 Audit finding"
-            " 不给时由 audit_id、kind 和 source_ref 稳定生成",
-            "stage": "Audit finding 可选:本次更新所处阶段；仅原样入账，不触发固定流程",
-            "needs_evidence": "Audit finding 可选:是否仍需补充证据；仅保存事实",
-            "urgency": "Audit finding 可选:normal 或 urgent；只控制统一事件唤醒优先级",
-            "requires_llm_report": "Audit finding 可选:是否要求协调轮生成面向用户的模型回复",
-            "watch_id": "可选(盯守候选专用):该候选来自哪路 watch,从 pull 载荷原样复制",
-            "stream_pos": "可选(盯守候选专用):候选行的 stream_pos 原样复制——系统据此把确认的结构特征回灌预筛,自动抬同类",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "claim": {
+                    "type": "string",
+                    "description": "必填：一句话写清已确认的结论，含事件 ID 或模块名等关键标识。",
+                },
+                "evidence_refs": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "证据指针列表，如文件路径、事件 ID 或 URL。",
+                },
+                "kind": {
+                    "type": "string",
+                    "description": "结论类型标签，如 hit、module_done、analysis；默认 finding。",
+                },
+                "confidence": {"type": "string", "description": "置信来源的一句话说明。"},
+                "finding_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": "更新既有 finding 时原样传回稳定编号；首次可省略。",
+                },
+                "stage": {"type": "string", "description": "Audit finding 当前阶段；只保存事实。"},
+                "needs_evidence": {"type": "boolean", "description": "是否仍需补充证据。"},
+                "urgency": {
+                    "type": "string",
+                    "enum": ["normal", "urgent"],
+                    "description": "统一事件唤醒优先级。",
+                },
+                "requires_llm_report": {
+                    "type": "boolean",
+                    "description": "是否要求协调轮生成面向用户的模型回复。",
+                },
+                "watch_id": {"type": "string", "description": "盯守候选所属 watch ID。"},
+                "stream_pos": {"type": "integer", "description": "候选行的 stream_pos。"},
+            },
+            "required": ["claim"],
+            "additionalProperties": False,
         },
-        parameter_schema={
-            "claim": {"type": "string"},
-            "evidence_refs": {"type": "array", "items": {"type": "string"}},
-            "kind": {"type": "string"},
-            "confidence": {"type": "string"},
-            "finding_id": {"type": "string", "minLength": 1, "maxLength": 128},
-            "stage": {"type": "string"},
-            "needs_evidence": {"type": "boolean"},
-            "urgency": {"type": "string", "enum": ["normal", "urgent"]},
-            "requires_llm_report": {"type": "boolean"},
-            "watch_id": {"type": "string"},
-            "stream_pos": {"type": "integer"},
-        },
-        required_parameters=["claim"],
+        hints=ToolModelHints(
+            category="collaboration",
+            use_cases=(
+                "盯守任务确认一条真命中后立刻入账，供主代理核验整合",
+                "建站或编码任务完成一个模块并验证通过后记录完成事实",
+                "长分析任务得出中间结论后先入账再继续",
+            ),
+            avoid_when=(
+                "还没确认的猜测不要入账，拿不准的先验证",
+                "不要把整篇报告塞进 claim，一条结论一行账",
+            ),
+            keywords=(
+                "结论",
+                "发现",
+                "命中",
+                "记账",
+                "finding",
+                "record",
+                "确认",
+                "落账",
+                "持久化",
+                "盯守",
+                "watch_stream",
+            ),
+        ),
     )
 
 
 __all__ = [
     "RecordFindingTool",
     "append_inline_audit_finding",
-    "build_record_finding_spec",
+    "build_record_finding_model_spec",
 ]

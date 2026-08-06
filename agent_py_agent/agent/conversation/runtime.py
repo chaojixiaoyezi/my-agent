@@ -635,36 +635,28 @@ def _material_tool_success_count(
     agent: object,
     calls: list[dict[str, object]],
 ) -> int:
-    """Count successful state-changing calls from ToolSpec facts, never prose."""
-    from ..contracts.tool_protocol_v2 import (
-        execution_payload_for_tool_protocol,
-        normalize_tool_call,
-    )
-    from ..tooling.models import ToolSpec, tool_effect_for_parameters
-    from ..tooling.tool_spec_schema import tool_spec_declared_input_fields
+    """Count successful state-changing calls from the run-time policy, never prose."""
+    from ..tooling.models import tool_effect_for_runtime_policy
 
     registry = getattr(agent, "tools", None)
-    tools = getattr(registry, "tools", registry if isinstance(registry, dict) else None)
-    if not isinstance(tools, dict):
+    if registry is None or not hasattr(registry, "runtime_snapshot"):
         return 0
+    snapshot = registry.runtime_snapshot()
     count = 0
     for record in calls:
         if record.get("ok") is not True:
             continue
         tool_name = str(record.get("tool") or "").strip()
-        tool = tools.get(tool_name)
-        spec = getattr(tool, "spec", None)
-        if not isinstance(spec, ToolSpec):
+        runtime = snapshot.runtime(tool_name)
+        if runtime is None:
             continue
         raw = record.get("parameters")
-        payload = dict(raw) if isinstance(raw, dict) else {"tool": tool_name}
-        payload.setdefault("tool", tool_name)
-        canonical = execution_payload_for_tool_protocol(
-            payload,
-            declared_input_fields=tool_spec_declared_input_fields(spec),
-        )
-        call = normalize_tool_call(canonical)
-        if tool_effect_for_parameters(spec, call.input) in {"mutating", "dangerous"}:
+        arguments = dict(raw) if isinstance(raw, dict) else {}
+        arguments.pop("tool", None)
+        if tool_effect_for_runtime_policy(runtime.runtime_policy, arguments) in {
+            "mutating",
+            "dangerous",
+        }:
             count += 1
     return count
 
@@ -724,9 +716,7 @@ class BackgroundMainAgentRuntime:
             request,
             supports_proactive=getattr(self.channels, "supports_proactive", None),
         )
-        route_supports_proactive = bool(
-            target and self.channels.supports_proactive(channel)
-        )
+        route_supports_proactive = bool(target and self.channels.supports_proactive(channel))
         route_supports_transcript = _route_supports_transcript(self.channels, channel)
         (
             response,
@@ -837,9 +827,7 @@ class BackgroundMainAgentRuntime:
             task_id=signal.root_task_id,
             idempotency_key=_background_delivery_idempotency_key(request),
         )
-        route_supports_proactive = bool(
-            target and self.channels.supports_proactive(channel)
-        )
+        route_supports_proactive = bool(target and self.channels.supports_proactive(channel))
         route_supports_transcript = _route_supports_transcript(self.channels, channel)
         content, delivery_status = self._record_response(
             request,
@@ -1010,7 +998,7 @@ class BackgroundMainAgentRuntime:
                         "evidence_refs": list(evidence_refs),
                         "created_at": time.time(),
                     },
-        )
+                )
         receipt = self.channels.deliver(delivery_context, envelope)
         delivery_status = str(getattr(receipt, "delivery_status", "") or "sent")
         # The delivery service owns final user-boundary redaction.  Persist the
@@ -1026,42 +1014,62 @@ class BackgroundMainAgentRuntime:
             )
             and delivery_status == "not_applicable"
         )
-        if delivery_status == "sent" or transcript_record:
-            # External transcript rows require a committed provider receipt.
-            # An internal/local route has no provider side effect, so its
-            # authoritative local conversation append is the commit itself.
-            # Failed external attempts never enter user context.
-            message_request = {
-                "thread_id": request.thread_id,
-                "role": "assistant",
-                "content": committed_content,
-                "channel": delivery_context.channel,
-                "metadata": message_metadata,
-            }
-            delivery_key = _background_delivery_idempotency_key(request)
-            if delivery_key:
-                message_entry = self.store.append_message_once(
-                    message_request,
-                    dedupe_key=f"owner_delivery:{delivery_key}",
-                )
-            else:
-                message_entry = self.store.append_message(message_request)
-            if delivery_status == "sent":
-                _record_delivered_audit_refs(self.agent, receipt)
-            elif transcript_record and _audit_finding_report_event(request):
-                # CLI/Gateway transcript routes have no provider receipt.  Their owner-visible
-                # transcript append is nevertheless the durable delivery
-                # commit, so use that stable message id as the receipt.  Mark
-                # only after append_message(_once) succeeds: a crash before the
-                # append must retry, while a crash after it must not requeue the
-                # same Audit source refs and spend another model turn.
-                _record_transcript_audit_refs(
-                    self.agent,
-                    evidence_refs,
-                    message_entry=message_entry,
-                    channel=delivery_context.channel,
-                )
+        _commit_background_response(
+            self,
+            request,
+            delivery_context,
+            receipt=receipt,
+            delivery_status=delivery_status,
+            committed_content=committed_content,
+            transcript_record=transcript_record,
+            evidence_refs=evidence_refs,
+            message_metadata=message_metadata,
+        )
         return committed_content, delivery_status
+
+
+def _commit_background_response(
+    runtime: BackgroundMainAgentRuntime,
+    request: BackgroundRunRequest,
+    delivery_context: DeliveryContext,
+    *,
+    receipt: object,
+    delivery_status: str,
+    committed_content: str,
+    transcript_record: bool,
+    evidence_refs: tuple[str, ...],
+    message_metadata: dict[str, object],
+) -> None:
+    """Persist only a provider-committed or authoritative local delivery."""
+
+    if delivery_status != "sent" and not transcript_record:
+        return
+    message_request = {
+        "thread_id": request.thread_id,
+        "role": "assistant",
+        "content": committed_content,
+        "channel": delivery_context.channel,
+        "metadata": message_metadata,
+    }
+    delivery_key = _background_delivery_idempotency_key(request)
+    if delivery_key:
+        message_entry = runtime.store.append_message_once(
+            message_request,
+            dedupe_key=f"owner_delivery:{delivery_key}",
+        )
+    else:
+        message_entry = runtime.store.append_message(message_request)
+    if delivery_status == "sent":
+        _record_delivered_audit_refs(runtime.agent, receipt)
+    elif _audit_finding_report_event(request):
+        # CLI/Gateway transcript routes have no provider receipt. Their local
+        # transcript append is the durable commit and therefore the receipt.
+        _record_transcript_audit_refs(
+            runtime.agent,
+            evidence_refs,
+            message_entry=message_entry,
+            channel=delivery_context.channel,
+        )
 
 
 def _background_evidence_refs(
@@ -1093,9 +1101,7 @@ def _audit_finding_payload_delivery_refs(
     if isinstance(typed, list):
         refs = tuple(
             dict.fromkeys(
-                str(item).strip()
-                for item in typed
-                if isinstance(item, str) and str(item).strip()
+                str(item).strip() for item in typed if isinstance(item, str) and str(item).strip()
             )
         )
         if refs:
@@ -2043,63 +2049,12 @@ def _background_task_attributes(
                 CONVERSATION_TASK_TURN_ACTIVE_ATTR: True,
             }
         )
-        link = _background_conversation_task_link(agent, str(thread_id or "").strip(), task_id)
-        if link is not None:
-            goal = str(getattr(link, "goal", "") or "").strip()
-            work_name = str(getattr(link, "work_name", "") or "").strip()
-            if work_name:
-                # A named durable work item keeps its user-chosen identity
-                # across every background wake.  The wake prompt (for example
-                # an Audit source action) is one execution detail and must not
-                # overwrite the shared task workspace title.
-                attributes["task_title"] = work_name
-            elif goal:
-                attributes["task_title"] = goal
-            task_path = str(getattr(link, "task_path", "") or "").strip()
-            if task_path:
-                root = Path(task_path).expanduser().resolve(strict=False)
-                if root.exists():
-                    attributes["run_workspace"] = {
-                        "task_root": str(root),
-                        "output_dir": str(root / "output"),
-                        "work_dir": str(root / "work"),
-                    }
-            for field, attr_name in (
-                ("work_kind", "conversation_work_kind"),
-                ("work_name", "conversation_work_name"),
-                ("duration_seconds", "conversation_work_duration_seconds"),
-                ("cancellation_scope", "conversation_cancellation_scope"),
-            ):
-                value = getattr(link, field, None)
-                if value not in {None, ""}:
-                    attributes[attr_name] = value
-            if str(getattr(link, "work_kind", "") or "") == "audit":
-                from ..common.audit_activation import (
-                    AUDIT_ATTR,
-                    AUDIT_DEADLINE_ATTR,
-                    AUDIT_OBJECTIVE_ATTR,
-                    AUDIT_RUN_EPOCH_ATTR,
-                    AUDIT_SOURCE_BINDINGS_ATTR,
-                    AUDIT_WINDOW_ATTR,
-                )
-
-                attributes[AUDIT_ATTR] = True
-                if goal:
-                    attributes[AUDIT_OBJECTIVE_ATTR] = goal
-                duration = getattr(link, "duration_seconds", None)
-                if duration is not None:
-                    attributes[AUDIT_WINDOW_ATTR] = int(duration)
-                expires_at = getattr(link, "expires_at", None)
-                if expires_at is not None and float(expires_at) > 0:
-                    attributes[AUDIT_DEADLINE_ATTR] = float(expires_at)
-                attributes[AUDIT_RUN_EPOCH_ATTR] = max(
-                    0,
-                    int(getattr(link, "run_epoch", 0) or 0),
-                )
-                bindings = getattr(link, "effective_source_bindings", ()) or ()
-                attributes[AUDIT_SOURCE_BINDINGS_ATTR] = [
-                    dict(item) for item in bindings if isinstance(item, dict)
-                ]
+        _apply_background_task_link_attributes(
+            attributes,
+            agent=agent,
+            thread_id=str(thread_id or "").strip(),
+            task_id=task_id,
+        )
         if str(request.reason or "").strip().lower() == "thread_goal_continue":
             goal_id = str(metadata.get("goal_id") or "").strip()
             if goal_id:
@@ -2116,6 +2071,78 @@ def _background_task_attributes(
         if isinstance(skill_refs, list) and skill_refs:
             attributes["skill_snapshot_refs"] = skill_refs
     return attributes or None
+
+
+def _apply_background_task_link_attributes(
+    attributes: dict[str, object],
+    *,
+    agent: object | None,
+    thread_id: str,
+    task_id: str,
+) -> None:
+    link = _background_conversation_task_link(agent, thread_id, task_id)
+    if link is None:
+        return
+    goal = str(getattr(link, "goal", "") or "").strip()
+    work_name = str(getattr(link, "work_name", "") or "").strip()
+    if work_name:
+        attributes["task_title"] = work_name
+    elif goal:
+        attributes["task_title"] = goal
+    task_path = str(getattr(link, "task_path", "") or "").strip()
+    if task_path:
+        root = Path(task_path).expanduser().resolve(strict=False)
+        if root.exists():
+            attributes["run_workspace"] = {
+                "task_root": str(root),
+                "output_dir": str(root / "output"),
+                "work_dir": str(root / "work"),
+            }
+    for field, attr_name in (
+        ("work_kind", "conversation_work_kind"),
+        ("work_name", "conversation_work_name"),
+        ("duration_seconds", "conversation_work_duration_seconds"),
+        ("cancellation_scope", "conversation_cancellation_scope"),
+    ):
+        value = getattr(link, field, None)
+        if value not in {None, ""}:
+            attributes[attr_name] = value
+    if str(getattr(link, "work_kind", "") or "") == "audit":
+        _apply_background_audit_link_attributes(attributes, link, goal=goal)
+
+
+def _apply_background_audit_link_attributes(
+    attributes: dict[str, object],
+    link: object,
+    *,
+    goal: str,
+) -> None:
+    from ..common.audit_activation import (
+        AUDIT_ATTR,
+        AUDIT_DEADLINE_ATTR,
+        AUDIT_OBJECTIVE_ATTR,
+        AUDIT_RUN_EPOCH_ATTR,
+        AUDIT_SOURCE_BINDINGS_ATTR,
+        AUDIT_WINDOW_ATTR,
+    )
+
+    attributes[AUDIT_ATTR] = True
+    if goal:
+        attributes[AUDIT_OBJECTIVE_ATTR] = goal
+    duration = getattr(link, "duration_seconds", None)
+    if duration is not None:
+        attributes[AUDIT_WINDOW_ATTR] = int(duration)
+    expires_at = getattr(link, "expires_at", None)
+    if expires_at is not None and float(expires_at) > 0:
+        attributes[AUDIT_DEADLINE_ATTR] = float(expires_at)
+    attributes[AUDIT_RUN_EPOCH_ATTR] = max(
+        0,
+        int(getattr(link, "run_epoch", 0) or 0),
+    )
+    bindings = getattr(link, "effective_source_bindings", ()) or ()
+    attributes[AUDIT_SOURCE_BINDINGS_ATTR] = [
+        dict(item) for item in bindings if isinstance(item, dict)
+    ]
 
 
 def _apply_internal_background_tool_budget(
@@ -3032,72 +3059,115 @@ def _consume_pending_wake_signals(
         limit=scheduler._config_limit("conversation_pending_wake_limit")
     )
     for signal in wake_signals:
-        scheduler_signal = _is_scheduler_wake_signal(signal)
-        if current < scheduler._wake_retry_after.get(signal.wake_signal_id, 0.0):
-            continue
-        if signal.wake_signal_id in handled or signal.wake_signal_id in attempted:
-            continue
-        if signal.thread_id in reported and not scheduler_signal:
-            # One model turn already owns this thread for the current tick.
-            # Same-mode Audit siblings were either included in that turn or
-            # remain durable for the next one.
-            continue
-        if _reported_audit_finding_wake(scheduler, signal):
-            # The provider receipt ledger is the delivery authority.  A crash
-            # can happen after the channel accepted a finding but before its
-            # wake file moved to handled; replaying that wake would duplicate
-            # a real owner notification.  Archive only the exact refs already
-            # proved sent, never infer delivery from prose or queue position.
-            scheduler._mark_signal(signal, current, handled)
-            continue
-        if _successful_completion_waiting_for_batch(scheduler, signal, current):
-            continue
-        # 子任务可能在父任务被 supersede/complete 后才迟到结束。普通生命周期信号不得再
-        # 唤醒旧任务；已经形成且尚无发送回执的 owner-facing 事件则仍是未结交付义务。
-        if (
-            not _wake_survives_inactive_root(signal)
-            and _wake_signal_root_is_inactive(scheduler.store, signal)
+        if _skip_pending_wake_signal(
+            scheduler,
+            signal,
+            current=current,
+            reported=reported,
+            handled=handled,
+            attempted=attempted,
         ):
-            scheduler._mark_signal(signal, current, handled)
             continue
-        wake_batch = _select_wake_batch(scheduler, signal, wake_signals)
-        execution_signal = _batched_wake_signal(wake_batch)
-        attempted.update(member.wake_signal_id for member in wake_batch)
-        report = _consume_with_supply_guard(
-            scheduler._supply_backoff,
-            execution_signal.thread_id,
+        _consume_wake_signal_batch(
+            scheduler,
+            signal,
+            wake_signals,
+            reports,
+            reported,
+            handled,
+            attempted,
             current,
-            partial(scheduler._run_wake_signal, execution_signal, now=current),
         )
-        if report is not None:
-            reports.append(report)
-            if not scheduler_signal:
-                reported.add(report.thread_id)
-                scheduler._mark_sibling_signals(wake_signals, signal, current, handled)
-                if len(wake_batch) > 1:
-                    for member in wake_batch:
-                        if member.wake_signal_id not in handled:
-                            scheduler._mark_signal(member, current, handled)
-                    if _typed_audit_finding_signal(signal):
-                        from .task_promotion import complete_named_audit_task_if_settled
-
-                        complete_named_audit_task_if_settled(
-                            scheduler.runtime.agent,
-                            str(signal.root_task_id or "").strip(),
-                        )
-        elif len(wake_batch) > 1:
-            # One batch is one delivery attempt.  If its provider call, claim,
-            # or channel delivery did not settle, every member stays durable
-            # and shares the retry boundary.  Otherwise a later sibling could
-            # immediately replay the same batch in this tick (or the next one)
-            # and duplicate a real owner-facing message.
-            retry_at = max(
-                current + 30.0,
-                scheduler._wake_retry_after.get(execution_signal.wake_signal_id, 0.0),
-            )
-            for member in wake_batch:
-                scheduler._wake_retry_after[member.wake_signal_id] = retry_at
     return reported
+
+
+def _skip_pending_wake_signal(
+    scheduler: BackgroundMainAgentScheduler,
+    signal: WakeSignal,
+    *,
+    current: float,
+    reported: set[str],
+    handled: set[str],
+    attempted: set[str],
+) -> bool:
+    if current < scheduler._wake_retry_after.get(signal.wake_signal_id, 0.0):
+        return True
+    if signal.wake_signal_id in handled or signal.wake_signal_id in attempted:
+        return True
+    if signal.thread_id in reported and not _is_scheduler_wake_signal(signal):
+        # One model turn already owns this thread for the current tick.
+        return True
+    if _reported_audit_finding_wake(scheduler, signal):
+        # Provider receipts are the delivery authority after a publish crash.
+        scheduler._mark_signal(signal, current, handled)
+        return True
+    if _successful_completion_waiting_for_batch(scheduler, signal, current):
+        return True
+    if not _wake_survives_inactive_root(signal) and _wake_signal_root_is_inactive(
+        scheduler.store, signal
+    ):
+        # Ordinary late child lifecycle signals cannot revive an inactive root.
+        scheduler._mark_signal(signal, current, handled)
+        return True
+    return False
+
+
+def _consume_wake_signal_batch(
+    scheduler: BackgroundMainAgentScheduler,
+    signal: WakeSignal,
+    wake_signals: list[WakeSignal],
+    reports: list[BackgroundMainAgentReport],
+    reported: set[str],
+    handled: set[str],
+    attempted: set[str],
+    current: float,
+) -> None:
+    wake_batch = _select_wake_batch(scheduler, signal, wake_signals)
+    execution_signal = _batched_wake_signal(wake_batch)
+    attempted.update(member.wake_signal_id for member in wake_batch)
+    report = _consume_with_supply_guard(
+        scheduler._supply_backoff,
+        execution_signal.thread_id,
+        current,
+        partial(scheduler._run_wake_signal, execution_signal, now=current),
+    )
+    if report is None:
+        _defer_failed_wake_batch(scheduler, wake_batch, execution_signal, current)
+        return
+    reports.append(report)
+    if _is_scheduler_wake_signal(signal):
+        return
+    reported.add(report.thread_id)
+    scheduler._mark_sibling_signals(wake_signals, signal, current, handled)
+    if len(wake_batch) <= 1:
+        return
+    for member in wake_batch:
+        if member.wake_signal_id not in handled:
+            scheduler._mark_signal(member, current, handled)
+    if _typed_audit_finding_signal(signal):
+        from .task_promotion import complete_named_audit_task_if_settled
+
+        complete_named_audit_task_if_settled(
+            scheduler.runtime.agent,
+            str(signal.root_task_id or "").strip(),
+        )
+
+
+def _defer_failed_wake_batch(
+    scheduler: BackgroundMainAgentScheduler,
+    wake_batch: tuple[WakeSignal, ...],
+    execution_signal: WakeSignal,
+    current: float,
+) -> None:
+    if len(wake_batch) <= 1:
+        return
+    # One batch is one delivery attempt, so every member shares its retry edge.
+    retry_at = max(
+        current + 30.0,
+        scheduler._wake_retry_after.get(execution_signal.wake_signal_id, 0.0),
+    )
+    for member in wake_batch:
+        scheduler._wake_retry_after[member.wake_signal_id] = retry_at
 
 
 def _typed_audit_finding_signal(signal: WakeSignal) -> bool:
@@ -3342,10 +3412,7 @@ def _batched_audit_finding_signal(signals: tuple[WakeSignal, ...]) -> WakeSignal
     )
     delivery_evidence_refs = tuple(
         dict.fromkeys(
-            ref
-            for signal in signals
-            for ref in _audit_finding_signal_delivery_refs(signal)
-            if ref
+            ref for signal in signals for ref in _audit_finding_signal_delivery_refs(signal) if ref
         )
     )
     finding_rows = [
@@ -3353,9 +3420,7 @@ def _batched_audit_finding_signal(signals: tuple[WakeSignal, ...]) -> WakeSignal
             "wake_signal_id": signal.wake_signal_id,
             "summary": signal.summary,
             "evidence_refs": list(signal.evidence_refs),
-            "delivery_evidence_refs": list(
-                _audit_finding_signal_delivery_refs(signal)
-            ),
+            "delivery_evidence_refs": list(_audit_finding_signal_delivery_refs(signal)),
             "source_agent_id": signal.source_agent_id,
             "metadata": dict(signal.metadata or {}),
             "created_at": signal.created_at,
@@ -3385,9 +3450,7 @@ def _batched_audit_finding_signal(signals: tuple[WakeSignal, ...]) -> WakeSignal
         parent_agent_id=primary.parent_agent_id,
         root_task_id=primary.root_task_id,
         summary=(
-            f"{len(signals)} 个同一 Audit 的待汇报发现。"
-            if len(signals) > 1
-            else primary.summary
+            f"{len(signals)} 个同一 Audit 的待汇报发现。" if len(signals) > 1 else primary.summary
         ),
         evidence_refs=evidence_refs,
         created_at=primary.created_at,

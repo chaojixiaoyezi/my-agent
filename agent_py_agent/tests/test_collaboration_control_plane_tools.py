@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 import logging
 
-from agent_py_agent.agent.action_protocol import RunScope, ToolCallEnvelope
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
 
 
 def test_collaboration_tools_are_registered_and_write_case_flow(tmp_path) -> None:
@@ -55,27 +55,20 @@ def _raise_collaboration_params() -> dict[str, object]:
 
 def test_raise_collaboration_uses_structured_root_task_scope(tmp_path) -> None:
     agent = _agent_with_task(tmp_path)
-    envelope = ToolCallEnvelope(
-        call_id="call-background-main",
-        source="background_main_agent",
-        tool_name="raise_collaboration",
-        input={
+    result = execute_registry_test_call(
+        agent.tools,
+        "raise_collaboration",
+        {
             "title": "后台主任务协作 case",
             "summary": "工具参数没有重复携带任务 ID。",
             "created_by": "main-agent",
         },
-        scope=RunScope(
-            request_id="request-background-main",
-            task_id="background-attempt-1",
-            run_id="background-run-1",
-            root_task_id="task-1",
-            root_run_id="background-run-1",
-            agent_kind="main",
-        ),
+        allowed_tools=["raise_collaboration"],
+        write_boundary={"task_id": "task-1"},
+        run_id="background-run-1",
+        call_id="call-background-main",
         idempotency_key="raise-collaboration-background-main",
     )
-
-    result = agent.tools.execute_call(envelope.to_dict(), allowed_tools=["raise_collaboration"])
     payload = json.loads(result.output)
 
     assert result.ok is True

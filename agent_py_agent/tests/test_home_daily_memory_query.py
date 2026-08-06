@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.memory_store.daily import DailyMemoryEvent, DailyMemoryStore
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.cli.parser import build_parser
 
@@ -42,21 +43,30 @@ def _run_cli_json(capsys, config_path: Path, *argv: str) -> tuple[int, dict]:
     return code, json.loads(captured.out)
 
 
-def _write_daily_record(home: Path, *, date_key: str = "2026-05-13") -> Path:
+def _write_daily_record(
+    home: Path,
+    *,
+    date_key: str = "2026-05-13",
+    summary: str = "用户喜欢表格和干净目录",
+) -> Path:
     path = home / "owners" / "local" / "main" / "memory" / "daily" / f"{date_key}.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "role": "user",
-        "content": "用户喜欢表格和干净目录",
-        "kind": "preference",
-        "tags": ["ui"],
-        "created_at": 1778640000.0,
-    }
-    path.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+    DailyMemoryStore(path.parent).append(
+        DailyMemoryEvent(
+            event_type="conversation",
+            summary=summary,
+            actor="user",
+            origin="user_explicit",
+            session_id="session-daily-query",
+            thread_id="thread-daily-query",
+            created_at=f"{date_key}T12:00:00+00:00",
+            extracted_at=f"{date_key}T12:01:00+00:00",
+            curator_run_id="curator-run-daily-query",
+        )
+    )
     return path
 
 
-def test_memory_search_reads_home_daily_when_repo_memory_missing(tmp_path: Path):
+def test_memory_search_does_not_treat_daily_as_formal_recall(tmp_path: Path):
     home = tmp_path / "home"
     repo = tmp_path / "repo"
     agent = SimpleAgent(AgentConfig(my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]), repo)
@@ -64,7 +74,7 @@ def test_memory_search_reads_home_daily_when_repo_memory_missing(tmp_path: Path)
 
     results = agent.recall("表格", top_k=3)
 
-    assert [record.content for record in results] == ["用户喜欢表格和干净目录"]
+    assert results == []
 
 
 def test_provider_memory_search_does_not_read_repo_memory_path(tmp_path: Path):
@@ -105,15 +115,15 @@ def test_memory_daily_list_cli_filters_home_daily_records(tmp_path: Path, capsys
         "表格",
         "--date",
         "2026-05-13",
-        "--role",
+        "--actor",
         "user",
-        "--kind",
-        "preference",
+        "--event-type",
+        "conversation",
     )
 
     assert code == 0
     assert payload["home"] == str(home.resolve())
-    assert payload["records"][0]["content"] == "用户喜欢表格和干净目录"
+    assert payload["records"][0]["summary"] == "用户喜欢表格和干净目录"
     assert payload["records"][0]["date"] == "2026-05-13"
 
 
@@ -121,17 +131,14 @@ def test_memory_daily_list_cli_reports_corrupt_daily_rows(tmp_path: Path, capsys
     home = tmp_path / "home"
     config_path = _write_config(tmp_path, home)
     path = home / "owners" / "local" / "main" / "memory" / "daily" / "2026-05-13.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        '{"role":"user","kind":"note","content":"good daily memory"}\n'
-        "{bad daily row}\n",
-        encoding="utf-8",
-    )
+    _write_daily_record(home, summary="good daily memory")
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write("{bad daily row}\n")
 
     code, payload = _run_cli_json(capsys, config_path, "memory-daily-list", "daily", "--date", "2026-05-13")
 
     assert code == 0
-    assert [record["content"] for record in payload["records"]] == ["good daily memory"]
+    assert [record["summary"] for record in payload["records"]] == ["good daily memory"]
     assert payload["load_errors"]
     assert payload["load_errors"][0]["context"] == "home_runtime_query.daily_memory"
     assert payload["load_errors"][0]["path"] == str(path)
@@ -146,10 +153,17 @@ def test_memory_daily_list_ignores_legacy_root_daily_memory(tmp_path: Path, caps
     legacy_daily.parent.mkdir(parents=True)
     legacy_daily.write_text('{"role":"user","kind":"note","content":"legacy root daily"}\n', encoding="utf-8")
 
-    code, payload = _run_cli_json(capsys, config_path, "memory-daily-list", "daily", "--date", "2026-05-13")
+    code, payload = _run_cli_json(
+        capsys,
+        config_path,
+        "memory-daily-list",
+        "legacy root",
+        "--date",
+        "2026-05-13",
+    )
 
     assert code == 0
-    assert [record["content"] for record in payload["records"]] == []
+    assert payload["records"] == []
 
 
 def test_memory_daily_list_uses_configured_provider_owner(tmp_path: Path, capsys):
@@ -157,12 +171,28 @@ def test_memory_daily_list_uses_configured_provider_owner(tmp_path: Path, capsys
     config_path = _write_provider_config(tmp_path, home)
     provider_daily = home / "owners" / "providers" / "feishu" / "users" / "ou_123" / "memory" / "daily" / "2026-05-13.jsonl"
     local_daily = home / "owners" / "local" / "main" / "memory" / "daily" / "2026-05-13.jsonl"
-    provider_daily.parent.mkdir(parents=True, exist_ok=True)
-    local_daily.parent.mkdir(parents=True, exist_ok=True)
-    provider_daily.write_text('{"role":"user","kind":"note","content":"provider only"}\n', encoding="utf-8")
-    local_daily.write_text('{"role":"user","kind":"note","content":"local only"}\n', encoding="utf-8")
+    DailyMemoryStore(provider_daily.parent).append(
+        DailyMemoryEvent(
+            event_type="summary",
+            summary="provider only",
+            actor="main_agent",
+            created_at="2026-05-13T12:00:00+00:00",
+            extracted_at="2026-05-13T12:01:00+00:00",
+            curator_run_id="curator-provider",
+        )
+    )
+    DailyMemoryStore(local_daily.parent).append(
+        DailyMemoryEvent(
+            event_type="summary",
+            summary="local only",
+            actor="main_agent",
+            created_at="2026-05-13T12:00:00+00:00",
+            extracted_at="2026-05-13T12:01:00+00:00",
+            curator_run_id="curator-local",
+        )
+    )
 
     code, payload = _run_cli_json(capsys, config_path, "memory-daily-list", "only", "--date", "2026-05-13")
 
     assert code == 0
-    assert [record["content"] for record in payload["records"]] == ["provider only"]
+    assert [record["summary"] for record in payload["records"]] == ["provider only"]

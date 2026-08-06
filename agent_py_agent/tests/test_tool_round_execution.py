@@ -6,6 +6,9 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
+from dataclasses import replace
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.subagent.progress_closeout import (
@@ -17,7 +20,144 @@ from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
     subagent_output_json_response,
 )
 from agent_py_agent.agent.backends import ModelResponse
-from agent_py_agent.agent.tooling import ToolExecutionResult
+from agent_py_agent.agent.tooling.action_policy import ActionDecision
+from agent_py_agent.agent.tooling.cancellation import CancellationToken
+from agent_py_agent.agent.tooling.executor import ToolExecution
+from agent_py_agent.agent.tooling.runtime_contracts import (
+    ProviderToolCapability,
+    ToolCall,
+    ToolFailureFacts,
+    ToolProtocolSnapshot,
+    ToolResult,
+    ToolSuccessFacts,
+)
+from agent_py_agent.tests._tool_runtime_harness import (
+    make_test_model_spec,
+    make_test_runtime_policy,
+    runtime_snapshot_for_model_specs,
+)
+
+_ROUND_RUN_ID = "round-execution-test-run"
+
+
+def _text_protocol_snapshot() -> ToolProtocolSnapshot:
+    return ToolProtocolSnapshot(
+        _ROUND_RUN_ID,
+        "text",
+        ProviderToolCapability(
+            provider="test",
+            endpoint="local://round-execution-test",
+            model="test-model",
+            stream=False,
+            native_supported=False,
+            evidence="canonical_test_fixture",
+        ),
+    )
+
+
+def _canonical_calls(payloads: list[dict[str, object]]) -> list[ToolCall]:
+    calls: list[ToolCall] = []
+    for index, raw in enumerate(payloads, start=1):
+        payload = dict(raw)
+        tool_name = str(payload.pop("tool"))
+        calls.append(
+            ToolCall(
+                call_id=f"round-test-call-{index}",
+                tool_name=tool_name,
+                arguments=payload,
+                source_protocol="text",
+                schema_hash="sha256:round-test-schema",
+                run_id=_ROUND_RUN_ID,
+                turn_id=f"{_ROUND_RUN_ID}:turn",
+                attempt_id=f"{_ROUND_RUN_ID}:attempt",
+            )
+        )
+    return calls
+
+
+def _payload(call: ToolCall) -> dict[str, object]:
+    return {"tool": call.tool_name, **call.arguments}
+
+
+def _round_request(**kwargs) -> ToolRoundExecutionRequest:
+    params = kwargs["params"]
+    if not hasattr(params, "tool_protocol_snapshot"):
+        params.tool_protocol_snapshot = _text_protocol_snapshot()
+    calls = _canonical_calls(kwargs["calls"])
+    snapshot = getattr(params, "tool_runtime_snapshot", None)
+    if snapshot is not None:
+        calls = [
+            replace(
+                call,
+                schema_hash=(
+                    runtime.model_spec.schema_hash
+                    if (runtime := snapshot.runtime(call.tool_name)) is not None
+                    else call.schema_hash
+                ),
+            )
+            for call in calls
+        ]
+    kwargs["calls"] = calls
+    return ToolRoundExecutionRequest(**kwargs)
+
+
+def _success(
+    request,
+    output: str,
+    *,
+    result_envelope: dict[str, object] | None = None,
+) -> ToolExecution:
+    result = ToolResult.succeeded(
+        request.call,
+        output,
+        facts=ToolSuccessFacts(
+            effect_outcome="confirmed",
+            metadata={"handler_details": dict(result_envelope or {})},
+        ),
+    )
+    return ToolExecution(
+        request.call,
+        ActionDecision("allow"),
+        result,
+        (
+            "received",
+            "normalized",
+            "validated",
+            "authorized",
+            "approved",
+            "running",
+            "succeeded",
+            "reconciled",
+            "persisted",
+            "projected",
+        ),
+    )
+
+
+def _failure(
+    request,
+    output: str,
+    *,
+    error_code: str,
+    effect_outcome: str = "not_started",
+    handler_executed: bool = False,
+) -> ToolExecution:
+    result = ToolResult.failed(
+        request.call,
+        output,
+        error_code=error_code,
+        failure_stage="handler" if handler_executed else "runtime_gate",
+        facts=ToolFailureFacts(
+            handler_executed=handler_executed,
+            effect_outcome=effect_outcome,
+        ),
+    )
+    return ToolExecution(
+        request.call,
+        ActionDecision("deny", (error_code,)),
+        result,
+        ("received", "normalized", "failed", "reconciled", "persisted", "projected"),
+    )
 
 
 def test_tool_round_defers_dependent_dispatch_after_schedule():
@@ -29,15 +169,15 @@ def test_tool_round_defers_dependent_dispatch_after_schedule():
     records: list[tuple[str, bool, str]] = []
 
     def execute_one(request):
-        tool_name = str(request.payload["tool"])
+        tool_name = request.call.tool_name
         executed.append(tool_name)
-        return ToolExecutionResult(tool_name, True, '{"created_run_ids":["real-child-id"]}')
+        return _success(request, '{"created_run_ids":["real-child-id"]}')
 
     def record_one(record):
         records.append((str(record.payload["tool"]), record.result.ok, record.result.output))
 
     completed = execute_tool_round(
-        ToolRoundExecutionRequest(
+        _round_request(
             agent=SimpleNamespace(),
             params=SimpleNamespace(tool_context=[]),
             tool_rounds=1,
@@ -66,15 +206,15 @@ def test_tool_round_executes_independent_same_round_create_calls_serially():
     records: list[tuple[str, bool, str]] = []
 
     def execute_one(request):
-        goal = str(request.payload["goal"])
+        goal = str(request.call.arguments["goal"])
         executed.append(goal)
-        return ToolExecutionResult("create_subagents", True, '{"created_run_ids":["child"]}')
+        return _success(request, '{"created_run_ids":["child"]}')
 
     def record_one(record):
         records.append((str(record.payload["goal"]), record.result.ok, record.result.error_code))
 
     execute_tool_round(
-        ToolRoundExecutionRequest(
+        _round_request(
             agent=SimpleNamespace(),
             params=SimpleNamespace(tool_context=[]),
             tool_rounds=1,
@@ -95,15 +235,14 @@ def test_tool_round_stops_at_typed_context_refresh_boundary():
         {"tool": "watch_stream", "action": "pull"},
     ]
     executed: list[str] = []
-    records: list[str] = []
+    records: list[tuple[str, str]] = []
     params = SimpleNamespace(tool_context=[], live_archive_state={})
 
     def execute_one(request):
-        action = str(request.payload["action"])
+        action = str(request.call.arguments["action"])
         executed.append(action)
-        return ToolExecutionResult(
-            "watch_stream",
-            True,
+        return _success(
+            request,
             '{"ok":true}',
             result_envelope={
                 "runtime_transition": {
@@ -115,10 +254,10 @@ def test_tool_round_stops_at_typed_context_refresh_boundary():
         )
 
     def record_one(record):
-        records.append(str(record.payload["action"]))
+        records.append((str(record.payload["action"]), str(record.result.error_code or "")))
 
     execute_tool_round(
-        ToolRoundExecutionRequest(
+        _round_request(
             agent=SimpleNamespace(),
             params=params,
             tool_rounds=3,
@@ -130,7 +269,10 @@ def test_tool_round_stops_at_typed_context_refresh_boundary():
     )
 
     assert executed == ["open"]
-    assert records == ["open"]
+    assert records == [
+        ("open", ""),
+        ("pull", "RUNTIME_TRANSITION_DEFERRED"),
+    ]
     assert params.live_archive_state["pending_runtime_transition"] == {
         "kind": "context_refresh",
         "reason": "durable_tool_scope_changed",
@@ -151,11 +293,10 @@ def test_tool_round_stops_after_durable_slice_commit():
     params = SimpleNamespace(tool_context=[], live_archive_state={})
 
     def execute_one(request):
-        action = str(request.payload["action"])
+        action = str(request.call.arguments["action"])
         executed.append(action)
-        return ToolExecutionResult(
-            "watch_stream",
-            True,
+        return _success(
+            request,
             '{"ok":true}',
             result_envelope={
                 "runtime_transition": {
@@ -167,7 +308,7 @@ def test_tool_round_stops_after_durable_slice_commit():
         )
 
     execute_tool_round(
-        ToolRoundExecutionRequest(
+        _round_request(
             agent=SimpleNamespace(),
             params=params,
             tool_rounds=4,
@@ -194,24 +335,17 @@ def test_tool_round_records_partial_write_outcomes_in_original_order():
     records: list[tuple[str, bool, str]] = []
 
     def execute_one(request):
-        message = str(request.payload["message"])
+        message = str(request.call.arguments["message"])
         executed.append(message)
         if message == "second":
-            return ToolExecutionResult(
-                "send_message",
-                False,
+            return _failure(
+                request,
                 "outcome unknown",
-                result_envelope={
-                    "tool_operation": {
-                        "operation_id": "tool_call:second",
-                        "status": "unknown",
-                        "action": "completion_persistence_failed",
-                    }
-                },
                 error_code="TOOL_OPERATION_OUTCOME_UNKNOWN",
                 effect_outcome="unknown",
+                handler_executed=True,
             )
-        return ToolExecutionResult("send_message", True, "sent")
+        return _success(request, "sent")
 
     def record_one(record):
         records.append(
@@ -223,7 +357,7 @@ def test_tool_round_records_partial_write_outcomes_in_original_order():
         )
 
     execute_tool_round(
-        ToolRoundExecutionRequest(
+        _round_request(
             agent=SimpleNamespace(),
             params=SimpleNamespace(tool_context=[]),
             tool_rounds=1,
@@ -247,18 +381,16 @@ def test_deferred_orchestration_has_specific_retryable_error_code():
         {"tool": "schedule_child_subagents", "children": [{"goal": "child"}]},
         {"tool": "inspect_agent_tree"},
     ]
-    records: list[ToolExecutionResult] = []
+    records: list[ToolResult] = []
 
     execute_tool_round(
-        ToolRoundExecutionRequest(
+        _round_request(
             agent=SimpleNamespace(),
             params=SimpleNamespace(tool_context=[]),
             tool_rounds=1,
             response=ModelResponse(text="", backend="test"),
             calls=calls,
-            execute_one=lambda request: ToolExecutionResult(
-                str(request.payload["tool"]), True, "ok"
-            ),
+            execute_one=lambda request: _success(request, "ok"),
             record_one=lambda record: records.append(record.result),
         )
     )
@@ -270,22 +402,22 @@ def test_deferred_orchestration_has_specific_retryable_error_code():
 def test_tool_round_can_defer_excess_model_tool_calls_to_next_round():
     calls = [{"tool": "read_file", "path": f"/tmp/source-{idx}.md"} for idx in range(5)]
     executed: list[str] = []
-    records: list[str] = []
+    records: list[tuple[str, str]] = []
     params = SimpleNamespace(
         task_attributes={"max_tool_calls_per_round": 2},
         tool_context=[],
     )
 
     def execute_one(request):
-        path = str(request.payload["path"])
+        path = str(request.call.arguments["path"])
         executed.append(path)
-        return ToolExecutionResult("read_file", True, f"read {path}")
+        return _success(request, f"read {path}")
 
     def record_one(record):
-        records.append(str(record.payload["path"]))
+        records.append((str(record.payload["path"]), str(record.result.error_code or "")))
 
     completed = execute_tool_round(
-        ToolRoundExecutionRequest(
+        _round_request(
             agent=SimpleNamespace(),
             params=params,
             tool_rounds=1,
@@ -298,7 +430,13 @@ def test_tool_round_can_defer_excess_model_tool_calls_to_next_round():
 
     assert completed is False
     assert executed == ["/tmp/source-0.md", "/tmp/source-1.md"]
-    assert records == executed
+    assert records == [
+        ("/tmp/source-0.md", ""),
+        ("/tmp/source-1.md", ""),
+        ("/tmp/source-2.md", "TOOL_CALL_LIMIT_DEFERRED"),
+        ("/tmp/source-3.md", "TOOL_CALL_LIMIT_DEFERRED"),
+        ("/tmp/source-4.md", "TOOL_CALL_LIMIT_DEFERRED"),
+    ]
     assert any(
         "[tool-system]" in str(item) and "本轮模型请求了 5 个工具调用" in str(item)
         for item in params.tool_context
@@ -318,15 +456,15 @@ def test_tool_round_does_not_limit_model_tool_calls_by_default():
     )
 
     def execute_one(request):
-        path = str(request.payload["path"])
+        path = str(request.call.arguments["path"])
         executed.append(path)
-        return ToolExecutionResult("read_file", True, f"read {path}")
+        return _success(request, f"read {path}")
 
     def record_one(record):
         record.params.tool_context.append(f"[tool-record]\n{record.result.output}")
 
     completed = execute_tool_round(
-        ToolRoundExecutionRequest(
+        _round_request(
             agent=SimpleNamespace(config=SimpleNamespace(max_tool_calls_per_round=None)),
             params=params,
             tool_rounds=1,
@@ -347,6 +485,200 @@ def test_tool_round_does_not_limit_model_tool_calls_by_default():
     assert not any("剩余" in str(item) and "没有执行" in str(item) for item in params.tool_context)
 
 
+def test_parallel_safe_readers_overlap_but_records_keep_provider_order():
+    spec = make_test_model_spec(
+        "read_probe",
+        input_schema={
+            "type": "object",
+            "properties": {"slot": {"type": "integer"}},
+            "required": ["slot"],
+            "additionalProperties": False,
+        },
+    )
+    snapshot = runtime_snapshot_for_model_specs(
+        (spec,),
+        run_id=_ROUND_RUN_ID,
+        policies={
+            spec.name: make_test_runtime_policy(
+                "read_only",
+                concurrency_mode="parallel_safe",
+                resource_parameters=("slot",),
+            )
+        },
+    )
+    rendezvous = threading.Barrier(2, timeout=2)
+    completion_order: list[int] = []
+    records: list[int] = []
+    lock = threading.Lock()
+
+    def execute_one(request):
+        slot = int(request.call.arguments["slot"])
+        rendezvous.wait()
+        if slot == 0:
+            time.sleep(0.03)
+        with lock:
+            completion_order.append(slot)
+        return _success(request, f"read {slot}")
+
+    execute_tool_round(
+        _round_request(
+            agent=SimpleNamespace(),
+            params=SimpleNamespace(
+                tool_context=[],
+                tool_runtime_snapshot=snapshot,
+                cancellation_token=CancellationToken(),
+            ),
+            tool_rounds=1,
+            response=ModelResponse(text="", backend="test"),
+            calls=[
+                {"tool": "read_probe", "slot": 0},
+                {"tool": "read_probe", "slot": 1},
+            ],
+            execute_one=execute_one,
+            record_one=lambda record: records.append(int(record.call.arguments["slot"])),
+        )
+    )
+
+    assert completion_order == [1, 0], "barrier proves the two read handlers overlapped"
+    assert records == [0, 1], "durable ToolResult order follows provider call order"
+
+
+def test_mutating_effect_is_a_barrier_even_if_manifest_marks_parallel_safe():
+    spec = make_test_model_spec(
+        "write_probe",
+        input_schema={
+            "type": "object",
+            "properties": {"slot": {"type": "integer"}},
+            "required": ["slot"],
+            "additionalProperties": False,
+        },
+    )
+    snapshot = runtime_snapshot_for_model_specs(
+        (spec,),
+        run_id=_ROUND_RUN_ID,
+        policies={
+            spec.name: make_test_runtime_policy(
+                "mutating",
+                concurrency_mode="parallel_safe",
+                approval_mode="never",
+                resource_parameters=("slot",),
+            )
+        },
+    )
+    lock = threading.Lock()
+    active = 0
+    maximum_active = 0
+
+    def execute_one(request):
+        nonlocal active, maximum_active
+        with lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        time.sleep(0.02)
+        with lock:
+            active -= 1
+        return _success(request, "written")
+
+    execute_tool_round(
+        _round_request(
+            agent=SimpleNamespace(),
+            params=SimpleNamespace(
+                tool_context=[],
+                tool_runtime_snapshot=snapshot,
+                cancellation_token=CancellationToken(),
+            ),
+            tool_rounds=1,
+            response=ModelResponse(text="", backend="test"),
+            calls=[
+                {"tool": "write_probe", "slot": 0},
+                {"tool": "write_probe", "slot": 1},
+            ],
+            execute_one=execute_one,
+            record_one=lambda _record: None,
+        )
+    )
+
+    assert maximum_active == 1
+
+
+def test_parallel_segment_cancellation_blocks_later_barrier_and_pairs_every_call():
+    reader = make_test_model_spec(
+        "read_probe",
+        input_schema={
+            "type": "object",
+            "properties": {"slot": {"type": "integer"}},
+            "required": ["slot"],
+            "additionalProperties": False,
+        },
+    )
+    writer = make_test_model_spec(
+        "write_probe",
+        input_schema={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    )
+    snapshot = runtime_snapshot_for_model_specs(
+        (reader, writer),
+        run_id=_ROUND_RUN_ID,
+        policies={
+            reader.name: make_test_runtime_policy(
+                "read_only",
+                concurrency_mode="parallel_safe",
+                resource_parameters=("slot",),
+            ),
+            writer.name: make_test_runtime_policy(
+                "mutating",
+                approval_mode="never",
+            ),
+        },
+    )
+    token = CancellationToken()
+    rendezvous = threading.Barrier(2, timeout=2)
+    executed: list[str] = []
+    records: list[tuple[str, str]] = []
+    lock = threading.Lock()
+
+    def execute_one(request):
+        with lock:
+            executed.append(request.call.tool_name)
+        if request.call.tool_name == "read_probe":
+            rendezvous.wait()
+            if request.call.arguments["slot"] == 0:
+                token.cancel("test cancellation")
+        return _success(request, "done")
+
+    execute_tool_round(
+        _round_request(
+            agent=SimpleNamespace(),
+            params=SimpleNamespace(
+                tool_context=[],
+                tool_runtime_snapshot=snapshot,
+                cancellation_token=token,
+            ),
+            tool_rounds=1,
+            response=ModelResponse(text="", backend="test"),
+            calls=[
+                {"tool": "read_probe", "slot": 0},
+                {"tool": "read_probe", "slot": 1},
+                {"tool": "write_probe"},
+            ],
+            execute_one=execute_one,
+            record_one=lambda record: records.append(
+                (record.call.tool_name, str(record.result.error_code or ""))
+            ),
+        )
+    )
+
+    assert executed == ["read_probe", "read_probe"]
+    assert records == [
+        ("read_probe", ""),
+        ("read_probe", ""),
+        ("write_probe", "CANCELLED"),
+    ]
+
+
 def test_tool_round_rebases_placeholder_paths_after_conversation_task_selection():
     old_root = "/owner/tasks/req-new"
     selected_root = "/owner/tasks/req-old"
@@ -362,11 +694,11 @@ def test_tool_round_rebases_placeholder_paths_after_conversation_task_selection(
     executed: list[dict[str, object]] = []
 
     def execute_one(request):
-        executed.append(dict(request.payload))
-        return ToolExecutionResult("create_subagents", True, "{}")
+        executed.append(_payload(request.call))
+        return _success(request, "{}")
 
     execute_tool_round(
-        ToolRoundExecutionRequest(
+        _round_request(
             agent=agent,
             params=params,
             tool_rounds=1,
@@ -406,9 +738,9 @@ def test_tool_round_stops_batch_when_new_tool_context_crosses_compact_budget():
     )
 
     def execute_one(request):
-        path = str(request.payload["path"])
+        path = str(request.call.arguments["path"])
         executed.append(path)
-        return ToolExecutionResult("read_file", True, "片段正文" * 40)
+        return _success(request, "片段正文" * 40)
 
     def record_one(record):
         records.append(
@@ -423,7 +755,7 @@ def test_tool_round_stops_batch_when_new_tool_context_crosses_compact_budget():
         )
 
     execute_tool_round(
-        ToolRoundExecutionRequest(
+        _round_request(
             agent=agent,
             params=params,
             tool_rounds=1,
@@ -459,8 +791,8 @@ def test_tool_round_records_deferred_content_tool_when_context_needs_compact():
     )
 
     def execute_one(request):
-        executed.append(str(request.payload["tool"]))
-        return ToolExecutionResult("read_file", True, "不应该执行")
+        executed.append(request.call.tool_name)
+        return _success(request, "不应该执行")
 
     def record_one(record):
         records.append(
@@ -473,7 +805,7 @@ def test_tool_round_records_deferred_content_tool_when_context_needs_compact():
         )
 
     execute_tool_round(
-        ToolRoundExecutionRequest(
+        _round_request(
             agent=agent,
             params=params,
             tool_rounds=2,
@@ -511,8 +843,8 @@ def test_tool_round_runs_first_reader_before_context_pressure_deferral():
     )
 
     def execute_one(request):
-        executed.append(str(request.payload["tool"]))
-        return ToolExecutionResult("read_file", True, "第一片段已读取")
+        executed.append(request.call.tool_name)
+        return _success(request, "第一片段已读取")
 
     def record_one(record):
         record.params.tool_context.append(
@@ -522,7 +854,7 @@ def test_tool_round_runs_first_reader_before_context_pressure_deferral():
         )
 
     execute_tool_round(
-        ToolRoundExecutionRequest(
+        _round_request(
             agent=agent,
             params=params,
             tool_rounds=2,
@@ -544,13 +876,13 @@ def test_tool_round_does_not_inject_checkpoint_work_after_chunked_read():
     agent = SimpleNamespace(config=SimpleNamespace(memory_compact_auto_trigger_percent=0))
 
     def execute_one(request):
-        return ToolExecutionResult(str(request.payload["tool"]), True, "第001章：南京，CP-001-037")
+        return _success(request, "第001章：南京，CP-001-037")
 
     def record_one(record):
         record.params.tool_context.append(f"[tool-record]\n{record.result.output}")
 
     execute_tool_round(
-        ToolRoundExecutionRequest(
+        _round_request(
             agent=agent,
             params=params,
             tool_rounds=1,
@@ -583,8 +915,8 @@ def test_tool_round_defers_more_reading_to_compact_when_previous_results_already
     )
 
     def execute_one(request):
-        executed.append(str(request.payload["tool"]))
-        return ToolExecutionResult("read_file", True, "不应该执行")
+        executed.append(request.call.tool_name)
+        return _success(request, "不应该执行")
 
     def record_one(record):
         records.append(
@@ -592,7 +924,7 @@ def test_tool_round_defers_more_reading_to_compact_when_previous_results_already
         )
 
     execute_tool_round(
-        ToolRoundExecutionRequest(
+        _round_request(
             agent=agent,
             params=params,
             tool_rounds=4,
@@ -622,15 +954,15 @@ def test_tool_round_allows_checkpoint_writes_at_compact_budget():
     )
 
     def execute_one(request):
-        tool_name = str(request.payload["tool"])
+        tool_name = request.call.tool_name
         executed.append(tool_name)
-        return ToolExecutionResult(tool_name, True, "written")
+        return _success(request, "written")
 
     def record_one(record):
         record.params.tool_context.append(record.result.output)
 
     execute_tool_round(
-        ToolRoundExecutionRequest(
+        _round_request(
             agent=agent,
             params=params,
             tool_rounds=2,
@@ -656,14 +988,14 @@ def test_tool_round_detects_bundled_filesystem_output_json(tmp_path):
     records: list[str] = []
 
     def execute_one(request):
-        assert request.payload == payload
-        return ToolExecutionResult("write_file", True, "ok")
+        assert _payload(request.call) == payload
+        return _success(request, "ok")
 
     def record_one(record):
-        records.append(record.result.tool)
+        records.append(record.result.tool_name)
 
     completed = execute_tool_round(
-        ToolRoundExecutionRequest(
+        _round_request(
             agent=agent,
             params=SimpleNamespace(tool_context=[]),
             tool_rounds=1,
@@ -692,11 +1024,11 @@ def test_tool_round_reports_subagent_output_json_scope_load_error(tmp_path):
     payload = {"tool": "write_file", "path": str(output_json), "content": "{}"}
     params = SimpleNamespace(tool_context=[])
 
-    def execute_one(_request):
-        return ToolExecutionResult("write_file", True, "ok")
+    def execute_one(request):
+        return _success(request, "ok")
 
     completed = execute_tool_round(
-        ToolRoundExecutionRequest(
+        _round_request(
             agent=agent,
             params=params,
             tool_rounds=1,

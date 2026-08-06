@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_py_agent.agent.tooling.models import ToolExecutionResult
+from agent_py_agent.agent.tooling.models import ToolHandlerOutcome
 from agent_py_agent.agent.tooling.shell import (
     ShellTool,
     ShellToolOptions,
@@ -57,10 +57,12 @@ def test_shell_tool_pwd(shell_tool: ShellTool) -> None:
 
 def test_shell_tool_with_working_dir(shell_tool: ShellTool, tmp_path: Path) -> None:
     """Test command respects working_dir parameter."""
-    result = shell_tool.execute({
-        "command": "pwd",
-        "working_dir": str(tmp_path),
-    })
+    result = shell_tool.execute(
+        {
+            "command": "pwd",
+            "working_dir": str(tmp_path),
+        }
+    )
     assert result.ok is True
     # pwd should return the working_dir we specified
     assert "return_code=0" in result.output
@@ -68,10 +70,12 @@ def test_shell_tool_with_working_dir(shell_tool: ShellTool, tmp_path: Path) -> N
 
 def test_shell_tool_timeout(shell_tool: ShellTool) -> None:
     """Test that long-running command is terminated on timeout."""
-    result = shell_tool.execute({
-        "command": _python_sleep_command(10),
-        "timeout": 1,
-    })
+    result = shell_tool.execute(
+        {
+            "command": _python_sleep_command(10),
+            "timeout": 1,
+        }
+    )
     assert result.ok is False
     assert result.error_code == "TOOL_TIMEOUT"
     assert "超时" in result.output or "timeout" in result.output.lower()
@@ -108,7 +112,16 @@ def test_shell_tool_sleep_then_echo_suggests_wait(shell_tool: ShellTool) -> None
 def test_shell_tool_routes_internal_agent_status_paths_to_agent_tree(tmp_path: Path) -> None:
     """Shell should not bypass the agent tree status surface."""
     workspace = tmp_path / "workspace"
-    state = workspace / "tasks" / "2026-06-06" / "demo" / "work" / "agents" / "subagent-123" / "state.json"
+    state = (
+        workspace
+        / "tasks"
+        / "2026-06-06"
+        / "demo"
+        / "work"
+        / "agents"
+        / "subagent-123"
+        / "state.json"
+    )
     state.parent.mkdir(parents=True)
     state.write_text('{"status":"RUNNING"}', encoding="utf-8")
     tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=5))
@@ -431,10 +444,10 @@ def test_shell_changing_generic_ready_artifact_keeps_ready_with_backup(tmp_path:
     assert "artifact_protection_invalid=0" in result.output
 
 
-def test_shell_tool_spec_has_run_command(shell_tool: ShellTool) -> None:
-    """Test that ShellTool spec has correct name."""
-    assert shell_tool.spec.name == "run_command"
-    assert shell_tool.spec.category == "shell"
-    assert "command" in shell_tool.spec.parameters
-    assert "timeout" in shell_tool.spec.parameters
-    assert "working_dir" in shell_tool.spec.parameters
+def test_shell_tool_model_spec_has_run_command(shell_tool: ShellTool) -> None:
+    """Test that ShellTool model spec has correct name."""
+    assert shell_tool.model_spec.name == "run_command"
+    assert shell_tool.model_spec.category == "shell"
+    assert "command" in shell_tool.model_spec.parameter_descriptions
+    assert "timeout" in shell_tool.model_spec.parameter_descriptions
+    assert "working_dir" in shell_tool.model_spec.parameter_descriptions

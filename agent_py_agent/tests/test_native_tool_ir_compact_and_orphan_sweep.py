@@ -47,7 +47,6 @@ from agent_py_agent.agent.backends.message_adapter import (
 from agent_py_agent.agent.backends.tool_ir import (
     AssistantTurn,
     CompactionSummary,
-    ToolCall,
     ToolResult,
     UserTurn,
 )
@@ -55,7 +54,11 @@ from agent_py_agent.agent.conversation.authority import (
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
 )
 from agent_py_agent.agent.memory_archive import estimate_tokens
-from agent_py_agent.agent.tooling import ToolExecutionResult
+from agent_py_agent.tests._tool_runtime_harness import (
+    canonical_history_call,
+    canonical_history_result,
+    make_test_protocol_snapshot,
+)
 
 # --- shared native fixtures (no archive/network side effects) -----------------
 
@@ -75,7 +78,7 @@ def _native_agent(root: Path, *, protocol: str = "native", backend: str = "anthr
     )
 
 
-def _params() -> ToolLoopExecuteParams:
+def _params(*, protocol: str = "native") -> ToolLoopExecuteParams:
     return ToolLoopExecuteParams(
         user_prompt="x",
         memories=[],
@@ -94,20 +97,33 @@ def _params() -> ToolLoopExecuteParams:
         one_shot_tool_calls=set(),
         executed_tools=[],
         archive_tool_calls=[],
+        tool_protocol_snapshot=make_test_protocol_snapshot(
+            run_id="run",
+            source_protocol=protocol,
+        ),
         save=False,
         delivery_contract={},
     )
 
 
 def _rec(agent, params, *, rnd, idx, cid, body):
+    call = canonical_history_call(
+        "read_file",
+        {"path": f"{cid}.md"},
+        call_id=cid,
+        source_protocol=params.tool_protocol_snapshot.source_protocol,
+        run_id=params.run_id,
+        turn_id=f"{params.run_id}:round-{rnd}",
+        attempt_id=params.request_id,
+    )
     _record_tool_call(
         agent,
         ToolCallRecordParams(
             params=params,
             tool_rounds=rnd,
             idx=idx,
-            payload={"tool": "read_file", "call_id": cid, "path": f"{cid}.md"},
-            result=ToolExecutionResult("read_file", True, body),
+            call=call,
+            result=canonical_history_result(call, body),
         ),
     )
 
@@ -130,19 +146,26 @@ def _provider_message_tokens(agent, params) -> int:
 
 def _record_large_write_calls(agent, params, *, start: int, stop: int, chars: int) -> None:
     for index in range(start, stop + 1):
+        call = canonical_history_call(
+            "write_file",
+            {
+                "path": f"checkpoint-{index}.txt",
+                "content": f"STATE-{index}-" + ("x" * chars),
+            },
+            call_id=f"write_{index}",
+            source_protocol=params.tool_protocol_snapshot.source_protocol,
+            run_id=params.run_id,
+            turn_id=f"{params.run_id}:round-{index}",
+            attempt_id=params.request_id,
+        )
         _record_tool_call(
             agent,
             ToolCallRecordParams(
                 params=params,
                 tool_rounds=index,
                 idx=1,
-                payload={
-                    "tool": "write_file",
-                    "call_id": f"write_{index}",
-                    "path": f"checkpoint-{index}.txt",
-                    "content": f"STATE-{index}-" + ("x" * chars),
-                },
-                result=ToolExecutionResult("write_file", True, "written"),
+                call=call,
+                result=canonical_history_result(call, "written"),
             ),
         )
 
@@ -247,7 +270,7 @@ def test_tool_window_never_discards_current_turn_user_input(tmp_path):
 def test_window_via_loop_helper_is_gated_native_only(tmp_path):
     # text protocol: the native IR window helper must be a no-op even with stray IR.
     text_agent = _native_agent(tmp_path, protocol="text")
-    text_params = _params()
+    text_params = _params(protocol="text")
     # seed stray IR by recording under a native agent, then feed the same list (mutated
     # in place; params is frozen so we extend rather than reassign).
     seed_agent = _native_agent(tmp_path)
@@ -494,7 +517,7 @@ def test_ptl_loop_helper_native_drops_ir_text_drops_text(tmp_path):
 
     # text protocol: IR stays empty, text track is what gets reclaimed.
     text_agent = _native_agent(tmp_path, protocol="text")
-    text_params = _params()
+    text_params = _params(protocol="text")
     for i in range(1, 4):
         _rec(text_agent, text_params, rnd=i, idx=1, cid=f"t_{i}", body="X" * 400)
     assert text_params.tool_ir_history == []  # text never builds IR
@@ -633,7 +656,19 @@ def test_outbound_boundary_stubs_orphan_tool_use(tmp_path):
     # mid-round truncation that Step3's pair-drop didn't cover).
     _rec(agent, params, rnd=1, idx=1, cid="kept", body="ok")
     params.tool_ir_history.append(
-        AssistantTurn(text="", tool_calls=[ToolCall(id="lonely", name="read_file", input={"path": "x"})])
+        AssistantTurn(
+            text="",
+            tool_calls=[
+                canonical_history_call(
+                    "read_file",
+                    {"path": "x"},
+                    call_id="lonely",
+                    run_id=params.run_id,
+                    turn_id="run:orphan",
+                    attempt_id=params.request_id,
+                )
+            ],
+        )
     )
 
     messages = _native_provider_messages(agent, params)
@@ -651,7 +686,15 @@ def test_outbound_boundary_strips_orphan_tool_result(tmp_path):
     params = _params()
     _rec(agent, params, rnd=1, idx=1, cid="kept", body="ok")
     # forge a ToolResult that references no ToolCall (e.g. a stale resume fragment).
-    params.tool_ir_history.append(ToolResult(tool_call_id="ghost", content="dangling", is_error=False))
+    ghost_call = canonical_history_call(
+        "read_file",
+        {"path": "ghost"},
+        call_id="ghost",
+        run_id=params.run_id,
+        turn_id="run:orphan",
+        attempt_id=params.request_id,
+    )
+    params.tool_ir_history.append(canonical_history_result(ghost_call, "dangling"))
 
     messages = _native_provider_messages(agent, params)
 
@@ -663,7 +706,16 @@ def test_outbound_boundary_strips_orphan_tool_result(tmp_path):
 def test_to_provider_messages_stays_pure_translation():
     # the translator itself must NOT sweep — isolated fragments map 1:1 (unit contract).
     history = [
-        AssistantTurn(text="", tool_calls=[ToolCall(id="solo", name="read_file", input={"path": "x"})]),
+        AssistantTurn(
+            text="",
+            tool_calls=[
+                canonical_history_call(
+                    "read_file",
+                    {"path": "x"},
+                    call_id="solo",
+                )
+            ],
+        ),
     ]
     messages = AnthropicMessageAdapter().to_provider_messages(history)
     # no synthesized stub here: pure translation leaves the lone tool_use as-is.

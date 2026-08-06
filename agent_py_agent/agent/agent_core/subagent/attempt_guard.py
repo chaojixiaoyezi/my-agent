@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 from ...runtime_errors import runtime_error_report
-from ...tooling.models import ToolExecutionResult
+from ...tooling.models import ToolHandlerOutcome
 from ..runner.context import current_subagent_attempt_id, current_subagent_run_id
 
 
-def stale_subagent_attempt_result(agent, payload: object) -> ToolExecutionResult | None:
+def stale_subagent_attempt_result(agent, payload: object) -> ToolHandlerOutcome | None:
     reason = _stale_attempt_reason(agent)
     if reason is None:
         return None
@@ -44,11 +44,11 @@ def _stale_attempt_reason(agent) -> str | None:
     return None
 
 
-def _blocked_result(payload: object, reason: str) -> ToolExecutionResult:
+def _blocked_result(payload: object, reason: str) -> ToolHandlerOutcome:
     tool_name = "unknown"
     if isinstance(payload, dict):
         tool_name = str(payload.get("tool") or "unknown").strip() or "unknown"
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         tool_name,
         False,
         (

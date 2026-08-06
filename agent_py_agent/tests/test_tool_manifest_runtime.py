@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
+from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
 
 
 def test_list_tools_returns_runtime_tool_manifest(tmp_path: Path) -> None:
@@ -21,18 +22,14 @@ def test_list_tools_returns_runtime_tool_manifest(tmp_path: Path) -> None:
         )
     )
 
-    result = registry.execute_call({"tool": "list_tools"})
+    result = execute_registry_test_call(registry, "list_tools", {})
 
     assert result.ok, result.output
-    payload = json.loads(result.output)
+    payload = json.loads(
+        result.metadata["handler_details"]["tool_output_policy"]["live_prompt_output"]
+    )
     names = {item["name"] for item in payload["tools"]}
-    assert "TOOL_UNAVAILABLE" in payload["tool_failure_taxonomy"]
     assert "run_command" in names
     assert "write_file" in names
     assert "apply_patch" in names
     assert "list_tools" in names
-    list_tools = next(item for item in payload["tools"] if item["name"] == "list_tools")
-    assert list_tools["visible_in_context"] is True
-    assert list_tools["executable_in_context"] is True
-    failure_contracts = {item["code"]: item for item in payload["failure_contracts"]}
-    assert failure_contracts["TOOL_TIMEOUT"]["recommended_action"] == "retry"

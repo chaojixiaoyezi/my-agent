@@ -17,13 +17,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..capability.persona_repository import PersonaRepository, PersonaRepositoryError
 from ..common import agent_time
-from ..memory_store import MemoryRecord
 from ..settings import AgentConfig
 from .memory_context import memory_context_text
+
+if TYPE_CHECKING:
+    # 循环导入根修: builder 被 prompting_parts/__init__ 顶层加载,而 memory_store/__init__
+    # → retention_apply → conversation 链又回 prompting_parts。MemoryRecord 只在类型注解用
+    # (__future__ annotations 延迟求值),运行时无需解析 → TYPE_CHECKING 下 import 打破回环。
+    from ..memory_store import MemoryRecord
 
 _BUILTIN_PROMPT_PREFIX = "builtin:"
 _LEGACY_DEFAULT_PROMPT = "prompts/default.md"
@@ -174,16 +179,8 @@ class PromptBuilder:
     def read_home_context(self, user_prompt: str) -> list[str]:
         if not self.home_paths or not bool(getattr(self.config, "home_context_enabled", True)):
             return []
-        chunks = _home_entry_context_chunks(self.home_paths, self.persona_repository)
-        chunks.extend(
-            _matching_lesson_chunks(
-                self.home_paths,
-                user_prompt,
-                _lesson_limit(self.config),
-                stale_days=float(getattr(self.config, "home_lesson_stale_caveat_days", _LESSON_STALE_DAYS) or 0),
-            )
-        )
-        return chunks
+        del user_prompt
+        return _persona_home_context_chunks(self.home_paths, self.persona_repository)
 
     def snapshot_workspace_context(self, *, facts_only: bool = False) -> str:
         """Freeze date/time and workspace facts for one model turn."""
@@ -447,7 +444,9 @@ def _is_isolated_scope(value: object) -> bool:
     return str(value or "").strip().lower() in {"isolated", "task_local", "control_plane"}
 
 
-def _home_entry_context_chunks(
+# LLM: PromptBuilder 的 Home 层只读取 Persona；Memory/HOT/lesson 必须由 runtime recall 进入唯一信封。
+# 函数用途: 返回当前 owner 的 SOUL、USER、AGENTS 分层上下文。
+def _persona_home_context_chunks(
     home_paths: Any,
     persona_repository: PersonaRepository | None = None,
 ) -> list[str]:
@@ -457,15 +456,7 @@ def _home_entry_context_chunks(
             repository = PersonaRepository.from_home_paths(home_paths)
         except PersonaRepositoryError:
             repository = None
-    chunks = _persona_context_chunks(repository)
-    entries = (
-        ("memory.md", _owner_paths(home_paths, "owner_memory_md")),
-        ("memory-hot.md", _owner_paths(home_paths, "owner_memory_hot_md")),
-    )
-    for label, paths in entries:
-        for path in paths:
-            chunks.extend(_home_entry_chunk(label, path))
-    return chunks
+    return _persona_context_chunks(repository)
 
 
 def _persona_context_chunks(repository: PersonaRepository | None) -> list[str]:
@@ -504,18 +495,6 @@ def _persona_context_chunks(repository: PersonaRepository | None) -> list[str]:
     return chunks
 
 
-def _home_entry_chunk(label: str, path: Path) -> list[str]:
-    content = _read_text_if_nonempty(path)
-    if not content:
-        return []
-    content = _strip_injection_comments(content)
-    if not content.strip():
-        return []
-    # owner 的真实宿主路径只用于结构化文件访问，不是模型需要告诉用户的知识。
-    # prompt 仅保留稳定逻辑标签，避免普通回复复述服务器目录布局。
-    return [f"# Home Entry: {label}\n{content}"]
-
-
 def _strip_injection_comments(text: str) -> str:
     """注入系统提示词前剥离 HTML 注释(对标 终端应用:<!-- --> 给人看、注入时隐藏、Read 时可见)。
     让人格/记忆模板里的引导注释零 token——模板可带丰富填写提示,却不占每轮上下文。"""
@@ -546,150 +525,3 @@ def _strip_empty_markdown_sections(text: str) -> str:
             kept.extend(lines[index:end])
         index = end
     return "\n".join(kept).strip("\n")
-
-
-def _owner_paths(home_paths: Any, owner_attr: str) -> tuple[Path, ...]:
-    owner_path = Path(getattr(home_paths, owner_attr, "") or "")
-    return (owner_path,) if owner_path else ()
-
-
-_LESSON_STALE_DAYS = 7.0
-
-
-def _lesson_age_caveat(path: Path, now: float, stale_days: float = _LESSON_STALE_DAYS) -> str:
-    """召回的 lesson 超过 stale_days 天未更新就加陈旧提示。
-
-    防止把陈旧记忆当现状——记忆反映写入时的事实，与当前代码/状态冲突时应以现状为准。
-    stale_days<=0 表示关闭提示（对应配置 home_lesson_stale_caveat_days=0）。
-    """
-    if stale_days <= 0:
-        return ""
-    try:
-        mtime = float(path.stat().st_mtime)
-    except OSError:
-        return ""
-    age_days = (now - mtime) / 86400.0
-    if age_days < stale_days:
-        return ""
-    return (
-        f"\n[memory-age-caveat] 这条记忆约 {int(age_days)} 天未更新，是当时的事实，"
-        "可能已过期；与当前代码/状态冲突时以现状为准。"
-    )
-
-
-def _matching_lesson_chunks(
-    home_paths: Any,
-    user_prompt: str,
-    limit: int,
-    *,
-    stale_days: float = _LESSON_STALE_DAYS,
-) -> list[str]:
-    if limit <= 0:
-        return []
-    import time
-
-    now = time.time()
-    prompt_text = str(user_prompt or "").casefold()
-    chunks: list[str] = []
-    for path in _matching_lesson_paths(home_paths, prompt_text):
-        if len(chunks) >= limit:
-            return chunks
-        content = _read_text_if_nonempty(path)
-        if content:
-            chunks.append(
-                f"# Home Lesson: memory/lessons/{path.name}\n"
-                f"{content}{_lesson_age_caveat(path, now, stale_days)}"
-            )
-    return chunks
-
-
-# LLM: lesson 召回的匹配权威(批 2 断链①修复,R10 实锤:旧算法要求英文文件名
-#   作为子串出现在用户 prompt 里——中文任务 prompt 永远零命中,种了 lessons
-#   从未被看到)。新算法:读 owner 路由索引(memory/routing/INDEX.md,播种时
-#   每个 lesson 段都带中文 trigger_keywords)——任一关键词命中 prompt 即召回该
-#   段 authority_path 指向的 lesson。"一个概念一个权威位置":索引就是召回路由,
-#   匹配函数终于读它。stem 匹配保留为并集兜底而非回退分支——索引是加速器
-#   不是封闭白名单,未登记进索引的手写 lesson 仍可按文件名命中(开放世界)。
-# 函数用途: 按用户这句话的内容,从经验笔记里挑出真正相关的几篇。
-def _matching_lesson_paths(home_paths: Any, prompt_text: str) -> list[Path]:
-    candidates: list[Path] = []
-    for lessons_dir in _owner_paths(home_paths, "owner_memory_lessons_dir"):
-        if lessons_dir.exists():
-            candidates += _routing_index_matches(lessons_dir, prompt_text)
-            candidates += _stem_matches(lessons_dir, prompt_text)
-    return [path for path in dict.fromkeys(candidates) if path.is_file()]
-
-
-# 函数用途: 中文模糊召回——needle(lesson 文件名/触发词)去分隔符拆 3-gram,与 prompt 有 >= min_grams 个
-#   公共 3-gram(≥4 字连续重叠)即算相关。补"完全子串匹配"对中文词序差异/部分提及召回不到的洞(R7 头号
-#   短板:检索偏窄)。用绝对公共 gram 数而非占比——长文件名只要其中一段关键词出现在 prompt 就召回,
-#   又因要 ≥4 字连续重叠而控噪不滥召。
-def _ngram_hit(needle: str, prompt_text: str, *, min_grams: int = 2) -> bool:
-    s = needle.casefold().replace("-", "").replace("_", "").replace(" ", "")
-    if len(s) < 3:
-        return s in prompt_text  # 短词回退完全子串
-    grams = [s[idx:idx + 3] for idx in range(len(s) - 2)]
-    hits = sum(1 for gram in grams if gram in prompt_text)
-    if hits >= min(min_grams, len(grams)):
-        return True
-    # Phase 2 增量补召(只增不减):3-gram 对中文词序差异/部分提及会漏,用检索子系统的 CJK-bigram
-    # 词元重叠兜底。加严控噪:needle 与 prompt 的 bigram 词元交集 >= 2 且 needle 本身 >= 2 个 bigram。
-    from agent_py_agent.agent.retrieval.lexical import tokenize
-
-    needle_grams = {t for t in tokenize(needle) if len(t) >= 2}
-    if len(needle_grams) >= 2:
-        prompt_grams = {t for t in tokenize(prompt_text) if len(t) >= 2}
-        if len(needle_grams & prompt_grams) >= 2:
-            return True
-    return False
-
-
-# 函数用途: stem 兜底——文件名直接出现 或 中文 3-gram 模糊命中 prompt 的 lesson。
-def _stem_matches(lessons_dir: Path, prompt_text: str) -> list[Path]:
-    return [
-        path
-        for path in sorted(lessons_dir.glob("*.md"))
-        if path.stem.casefold() in prompt_text or _ngram_hit(path.stem, prompt_text)
-    ]
-
-
-# 函数用途: 解析路由索引(lessons 上级 memory/routing/INDEX.md)的各段,
-#   trigger_keywords 任一命中 prompt 即返回该段 authority_path 对应的 lesson 文件。
-def _routing_index_matches(lessons_dir: Path, prompt_text: str) -> list[Path]:
-    index_path = lessons_dir.parent / "routing" / "INDEX.md"
-    text = _read_text_if_nonempty(index_path)
-    if not text:
-        return []
-    matches: list[Path] = []
-    for section in text.split("\n## ")[1:]:
-        keywords = _index_field(section, "trigger_keywords")
-        authority = _index_field(section, "authority_path")
-        if not keywords or not authority:
-            continue
-        terms = [term.strip().casefold() for term in keywords.split(",") if term.strip()]
-        if not any(term and (term in prompt_text or _ngram_hit(term, prompt_text)) for term in terms):
-            continue
-        candidate = (lessons_dir.parent.parent / authority).resolve(strict=False)
-        if candidate.suffix == ".md" and "lessons" in candidate.parts:
-            matches.append(candidate)
-    return matches
-
-
-# 函数用途: 从索引段里取一个"key: value"字段的值(没有返回空串)。
-def _index_field(section: str, key: str) -> str:
-    for line in section.splitlines():
-        if line.strip().startswith(f"{key}:"):
-            return line.split(":", 1)[1].strip()
-    return ""
-
-
-def _lesson_limit(config: AgentConfig) -> int:
-    return max(0, int(getattr(config, "home_lesson_auto_read_limit", 3) or 0))
-
-
-def _read_text_if_nonempty(path: Path) -> str:
-    try:
-        text = path.read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeDecodeError):
-        return ""
-    return text

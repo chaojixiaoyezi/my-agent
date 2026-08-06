@@ -115,7 +115,7 @@ def test_owner_retention_plan_and_apply_delete_only_expired_files(tmp_path: Path
     _set_mtime(fresh_raw, "2026-05-30T00:00:00+00:00")
 
     retention = json.loads(home.owner_retention_json.read_text(encoding="utf-8"))
-    retention["raw_days"] = 30
+    retention["audit_days"] = 30
     home.owner_retention_json.write_text(json.dumps(retention, ensure_ascii=False), encoding="utf-8")
 
     plan = plan_owner_retention(home, now=datetime(2026, 5, 31, tzinfo=timezone.utc))
@@ -149,11 +149,11 @@ def test_owner_retention_trashes_only_structured_terminal_task(tmp_path: Path) -
         "2025-01-01T00:00:00+00:00",
     )
     fresh_done = _task_workspace(home.owner_tasks_dir, "fresh", "DONE", "2026-05-30T00:00:00+00:00")
-    _set_retention(home.owner_retention_json, task_completed_days=30)
+    _set_retention(home.owner_retention_json, completed_task_days=30)
 
     applied = apply_owner_retention(home, now=datetime(2026, 5, 31, tzinfo=timezone.utc))
 
-    task_action = next(action for action in applied.actions if action.category == "task_completed")
+    task_action = next(action for action in applied.actions if action.category == "completed_task")
     assert task_action.status == "trashed"
     assert not old_done.exists()
     assert old_active.exists()
@@ -164,7 +164,7 @@ def test_owner_retention_trashes_only_structured_terminal_task(tmp_path: Path) -
     assert tombstone["source_path"] == str(old_done)
     assert tombstone["authority_status"] == "DONE"
 
-    _set_retention(home.owner_retention_json, task_completed_days=10_000, trash_days=30)
+    _set_retention(home.owner_retention_json, completed_task_days=10_000, trash_days=30)
     purged = apply_owner_retention(home, now=datetime(2026, 7, 1, tzinfo=timezone.utc))
 
     purge_action = next(action for action in purged.actions if action.operation == "delete_tree")
@@ -183,7 +183,7 @@ def test_owner_retention_preserves_held_task_and_all_cleanup_on_legal_hold(tmp_p
     _set_mtime(old_cache, "2025-01-01T00:00:00+00:00")
     _set_retention(
         home.owner_retention_json,
-        task_completed_days=30,
+        completed_task_days=30,
         legal_hold=True,
         legal_hold_task_ids=["held"],
     )

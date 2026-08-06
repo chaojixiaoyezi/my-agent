@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
-from agent_py_agent.agent.agent_core.tool_loop.recovery import tool_payload_with_run_scope
+from agent_py_agent.agent.agent_core.tool_loop.recovery import runtime_run_scope
 
 
 def _params(**overrides) -> ToolLoopExecuteParams:
@@ -36,18 +36,13 @@ def test_tool_call_scope_reports_subagent_task_load_error() -> None:
 
     agent = SimpleNamespace(subagents=SimpleNamespace(load=broken_load))
 
-    envelope = tool_payload_with_run_scope(
-        agent,
-        _params(context_scope="task_local"),
-        {"tool": "read_file", "path": "README.md"},
-        call_id="call-1",
-    )
+    scope = runtime_run_scope(agent, _params(context_scope="task_local"))
 
-    assert envelope.scope.run_id == "child-1"
-    assert envelope.scope.root_task_id == "task-1"
-    assert envelope.scope.agent_kind == "child_agent"
-    assert envelope.scope.task_load_error["context"] == "tool_call_scope.subagents.load"
-    assert "subagent ledger unreadable" in envelope.scope.task_load_error["message"]
+    assert scope.run_id == "child-1"
+    assert scope.root_task_id == "task-1"
+    assert scope.agent_kind == "child_agent"
+    assert scope.task_load_error["context"] == "tool_call_scope.subagents.load"
+    assert "subagent ledger unreadable" in scope.task_load_error["message"]
 
 
 def test_background_root_scope_does_not_query_subagent_ledger() -> None:
@@ -59,7 +54,7 @@ def test_background_root_scope_does_not_query_subagent_ledger() -> None:
 
     agent = SimpleNamespace(subagents=SimpleNamespace(load=unexpected_load))
 
-    envelope = tool_payload_with_run_scope(
+    scope = runtime_run_scope(
         agent,
         _params(
             source="background_main_agent",
@@ -67,23 +62,21 @@ def test_background_root_scope_does_not_query_subagent_ledger() -> None:
             task_id="request-1",
             task_attributes={"conversation_task_id": "request-1"},
         ),
-        {"tool": "read_file", "path": "README.md"},
-        call_id="call-root",
     )
 
     assert load_calls == []
-    assert envelope.scope.run_id == "bg-main-thread-1"
-    assert envelope.scope.task_id == "request-1"
-    assert envelope.scope.root_run_id == "bg-main-thread-1"
-    assert envelope.scope.root_task_id == "request-1"
-    assert envelope.scope.agent_kind == "root_agent"
-    assert envelope.scope.task_load_error == {}
+    assert scope.run_id == "bg-main-thread-1"
+    assert scope.task_id == "request-1"
+    assert scope.root_run_id == "bg-main-thread-1"
+    assert scope.root_task_id == "request-1"
+    assert scope.agent_kind == "root_agent"
+    assert scope.task_load_error == {}
 
 
 def test_background_root_scope_projects_trusted_delivery_evidence_refs() -> None:
     agent = SimpleNamespace(subagents=SimpleNamespace(load=lambda _run_id: None))
 
-    envelope = tool_payload_with_run_scope(
+    scope = runtime_run_scope(
         agent,
         _params(
             source="background_main_agent",
@@ -97,86 +90,31 @@ def test_background_root_scope_projects_trusted_delivery_evidence_refs() -> None
                 ],
             },
         ),
-        {
-            "tool": "send_message",
-            "message": "发现一项事件",
-            "evidence_refs": ["audit://watch-1/candidate/1:0"],
-        },
-        call_id="call-audit-report",
     )
 
-    assert envelope.scope.delivery_evidence_refs == (
+    assert scope.delivery_evidence_refs == (
         "audit://watch-1/candidate/1:0",
         "audit://watch-1/candidate/2:0",
     )
-    assert envelope.input["evidence_refs"] == [
-        "audit://watch-1/candidate/1:0"
-    ]
 
 
 def test_subagent_scope_uses_loaded_lineage() -> None:
     task = SimpleNamespace(parent_id="child-1", root_id="root-1", depth=2)
     agent = SimpleNamespace(subagents=SimpleNamespace(load=lambda run_id: task if run_id == "grandchild-1" else None))
 
-    envelope = tool_payload_with_run_scope(
+    scope = runtime_run_scope(
         agent,
         _params(
             context_scope="task_local",
             run_id="grandchild-1",
             task_id="root-1",
         ),
-        {"tool": "read_file", "path": "README.md"},
-        call_id="call-grandchild",
     )
 
-    assert envelope.scope.run_id == "grandchild-1"
-    assert envelope.scope.parent_run_id == "child-1"
-    assert envelope.scope.root_run_id == "root-1"
-    assert envelope.scope.root_task_id == "root-1"
-    assert envelope.scope.depth == 2
-    assert envelope.scope.agent_kind == "grandchild_agent"
-    assert envelope.scope.task_load_error == {}
-
-
-def test_native_provider_call_id_is_not_forwarded_as_tool_input() -> None:
-    agent = SimpleNamespace(subagents=SimpleNamespace(load=lambda _run_id: None))
-
-    envelope = tool_payload_with_run_scope(
-        agent,
-        _params(source="background_main_agent"),
-        {
-            "tool": "example_tool",
-            "call_id": "provider-call-9",
-            "status": "active",
-            "operation_id": "legitimate-tool-argument",
-        },
-        call_id="provider-call-9",
-    )
-
-    assert envelope.call_id == "provider-call-9"
-    assert envelope.operation_id == "tool_call:provider-call-9"
-    assert envelope.input == {
-        "status": "active",
-        "operation_id": "legitimate-tool-argument",
-    }
-
-
-def test_runtime_attempt_is_projected_into_tool_operation_identity() -> None:
-    agent = SimpleNamespace(subagents=SimpleNamespace(load=lambda _run_id: None))
-
-    envelope = tool_payload_with_run_scope(
-        agent,
-        _params(
-            source="background_main_agent",
-            run_id="bg-main-thread-1",
-            attempt_id="attempt-background-2",
-        ),
-        {"tool": "read_file", "path": "README.md"},
-        call_id="provider-call-1",
-    )
-
-    assert envelope.scope.run_id == "bg-main-thread-1"
-    assert envelope.scope.attempt_id == "attempt-background-2"
-    assert envelope.operation_id == (
-        "tool_call:attempt-background-2:provider-call-1"
-    )
+    assert scope.run_id == "grandchild-1"
+    assert scope.parent_run_id == "child-1"
+    assert scope.root_run_id == "root-1"
+    assert scope.root_task_id == "root-1"
+    assert scope.depth == 2
+    assert scope.agent_kind == "grandchild_agent"
+    assert scope.task_load_error == {}

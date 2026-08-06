@@ -19,6 +19,22 @@
 
 来自 STATUS.md，当前最急迫的任务已清空，下面保留中长期项。
 
+### Memory v2 单一主链收敛
+
+状态：代码迁移完成，最终全量与真实模型验证中
+
+解决问题：旧实现把候选正文、每日镜像、learning draft、task-local memory gate 与正式长期记忆分散在
+多套账本和状态机中，后台提炼也缺少统一触发、证据核验、失败恢复和真实 Gateway 验收，容易产生双写、
+旧事实复活、跨 scope 覆盖和模型绕过审核的问题。
+
+当前进展：已落地 owner 唯一 Candidate/Daily/Curator/Promotion/Lesson/HOT/Recall 主链、一次性 v1→v2
+Migration、Retention v2、统一管理员 CLI 与 Gateway owner-maintenance 接线；旧 learning/memory-gate/daily
+mirror 生产路径已删除。聚焦测试持续通过，正在补齐双层注释、联合/全量/静态门禁以及隔离真实
+Gateway、真实双模型、重启恢复和超长阅读最终验收，因此尚未标记完成。
+
+设计与证据：`docs/modules/memory/03-purpose.md`、`04-structure.md`、`05-memory-v2-layout.md`、
+`06-runtime-memory-requirements.md`。
+
 ### Agent 基础能力单一主链收敛
 
 状态：待验证
@@ -31,7 +47,7 @@ registry、能力自述、Skill 单一逐轮 snapshot、Memory 稳定 ID CRUD/ba
 版本/CAS/回滚、owner-scoped 持久 Scheduler，以及 Workflow 收敛为 Skill + 当前 task plan + 原生
 tools/subagents 均已完成聚焦验证；旧 workflow package/mode/config/CLI/extension/index 已删除。
 被动验证证据也已接入公共工具出口，能保留真实命令/exit/targeted/full 并在文件写后过期。
-工具参数也已收敛到单一 ToolSpec Schema：provider 展示、文本/native 入口、MCP、运行门和 handler
+工具参数也已收敛到单一 `ToolModelSpec.input_schema`：provider 展示、文本/native 入口、MCP、运行门和 handler
 前校验不再各保留 required/type 副本；保守强类型纠正、嵌套/枚举/范围/额外字段校验及协议同名参数
 碰撞已完成本地回归，并由本地 8899 与 MiniMax-M2.7 的隔离工具失败恢复链验证。当前后续切片又把
 缺失参数限制为逐字段明示的安全默认值或 Registry 可信上下文绑定，并为每个有效输入保留脱敏

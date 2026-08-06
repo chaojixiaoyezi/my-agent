@@ -5,7 +5,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from agent_py_agent.agent.action_protocol import RunScope, ToolCallEnvelope
 from agent_py_agent.agent.agent_core._finalization_service import _message_tool_deliveries
 from agent_py_agent.agent.agent_core.tool_call_archive_record import _compact_result_envelope
 from agent_py_agent.agent.artifacts.registry import ArtifactRegistration, register_artifact
@@ -19,6 +18,7 @@ from agent_py_agent.agent.delivery import (
 from agent_py_agent.agent.local_storage import LocalStore
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
+from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
 
 
 class _RecordingAdapter:
@@ -103,25 +103,35 @@ def test_send_message_uses_task_registry_and_native_attachment_api(tmp_path: Pat
     tool, adapter = _tool(owner_root)
     store = LocalStore(owner_root / "data" / "local.db", enable_fts=False)
     registry = _message_registry(tmp_path, store, tool)
-    params = ToolCallEnvelope(
-        call_id="call-1",
-        source="model_tool_call",
-        tool_name="send_message",
-        input={
+    call_arguments = {
             "message": "给你周报。",
             "attachments": [str(artifact)],
-        },
-        scope=RunScope(
-            request_id="gw-1",
-            task_id="run-1",
-            run_id="run-1",
-            owner_type="user",
-            owner_id="providers/feishu/users/ou_current_user",
-        ),
-    )
+    }
+    trusted_context = {
+        "run_scope": {
+            "request_id": "gw-1",
+            "task_id": "run-1",
+            "owner_type": "user",
+            "owner_id": "providers/feishu/users/ou_current_user",
+        }
+    }
 
-    first = registry.execute_call(params)
-    second = registry.execute_call(params)
+    first = execute_registry_test_call(
+        registry,
+        "send_message",
+        call_arguments,
+        run_id="run-1",
+        call_id="call-1",
+        trusted_run_context=trusted_context,
+    )
+    second = execute_registry_test_call(
+        registry,
+        "send_message",
+        call_arguments,
+        run_id="run-1",
+        call_id="call-1",
+        trusted_run_context=trusted_context,
+    )
 
     assert first.ok is True
     assert second.ok is True
@@ -135,7 +145,7 @@ def test_send_message_uses_task_registry_and_native_attachment_api(tmp_path: Pat
     assert str(owner_root) not in first.output
     assert "ou_current_user" not in first.output
     assert second.output == first.output
-    evidence = first.result_envelope["delivery_evidence"]
+    evidence = first.metadata["handler_details"]["delivery_evidence"]
     assert evidence == {
         "schema_version": "message_tool_delivery.v1",
         "delivery_status": "sent",
@@ -169,8 +179,11 @@ def test_send_message_uses_task_registry_and_native_attachment_api(tmp_path: Pat
         ]
     )
     assert _message_tool_deliveries(ctx) == [evidence]
-    assert second.result_envelope["delivery_evidence"]["deduplicated"] is True
-    assert second.result_envelope["tool_operation"]["replayed"] is True
+    assert (
+        second.metadata["handler_details"]["delivery_evidence"]["deduplicated"]
+        is True
+    )
+    assert second.operation is not None and second.operation.replayed is True
 
 
 def test_successful_send_records_exact_audit_source_refs(tmp_path: Path) -> None:
@@ -321,36 +334,36 @@ def test_background_send_canonicalizes_scoped_evidence_misplaced_as_attachments(
         "audit://watch-1/candidate/1:0",
         "audit://watch-1/candidate/2:0",
     )
-    envelope = ToolCallEnvelope(
-        call_id="call-audit-report",
-        source="model_tool_call",
-        tool_name="send_message",
-        input={
+    trusted_context = {
+        "run_scope": {
+            "request_id": "request-audit-report",
+            "task_id": "task-audit-report",
+            "owner_type": "user",
+            "owner_id": "providers/feishu/users/ou_current_user",
+            "delivery_evidence_refs": list(required),
+        }
+    }
+    result = execute_registry_test_call(
+        registry,
+        "send_message",
+        {
             "message": "这是当前事件的审计报告。",
             "attachments": list(required),
         },
-        scope=RunScope(
-            request_id="request-audit-report",
-            task_id="task-audit-report",
-            run_id="task-audit-report",
-            owner_type="user",
-            owner_id="providers/feishu/users/ou_current_user",
-            delivery_evidence_refs=required,
-        ),
+        run_id="task-audit-report",
+        call_id="call-audit-report",
+        trusted_run_context=trusted_context,
     )
-
-    result = registry.execute_call(envelope)
-    corrected = registry.execute_call(
-        ToolCallEnvelope(
-            call_id="call-audit-report-retry",
-            source="model_tool_call",
-            tool_name="send_message",
-            input={
-                "message": "这是当前事件的审计报告。",
-                "evidence_refs": list(required),
-            },
-            scope=envelope.scope,
-        )
+    corrected = execute_registry_test_call(
+        registry,
+        "send_message",
+        {
+            "message": "这是当前事件的审计报告。",
+            "evidence_refs": list(required),
+        },
+        run_id="task-audit-report",
+        call_id="call-audit-report-retry",
+        trusted_run_context=trusted_context,
     )
 
     assert result.ok is True
@@ -363,9 +376,9 @@ def test_background_send_canonicalizes_scoped_evidence_misplaced_as_attachments(
     payload = json.loads(result.output)
     assert payload["attachments"] == []
     assert payload["evidence_refs"] == list(required)
-    assert result.result_envelope["delivery_evidence"]["evidence_refs"] == list(
-        required
-    )
+    assert result.metadata["handler_details"]["delivery_evidence"][
+        "evidence_refs"
+    ] == list(required)
     assert corrected.handler_executed is False
 
 
@@ -376,34 +389,36 @@ def test_send_message_business_key_blocks_new_call_id_in_same_request(tmp_path: 
     store = LocalStore(owner_root / "data" / "local.db", enable_fts=False)
     registry = _message_registry(tmp_path, store, tool)
 
-    def envelope(request_id: str, run_id: str, call_id: str) -> ToolCallEnvelope:
-        return ToolCallEnvelope(
+    def send(request_id: str, run_id: str, call_id: str):
+        return execute_registry_test_call(
+            registry,
+            "send_message",
+            {"message": "同一条真实发送"},
+            run_id=run_id,
             call_id=call_id,
-            source="model_tool_call",
-            tool_name="send_message",
-            input={"message": "同一条真实发送"},
-            scope=RunScope(
-                request_id=request_id,
-                task_id=run_id,
-                run_id=run_id,
-                owner_type="user",
-                owner_id="providers/feishu/users/ou_current_user",
-            ),
+            trusted_run_context={
+                "run_scope": {
+                    "request_id": request_id,
+                    "task_id": run_id,
+                    "owner_type": "user",
+                    "owner_id": "providers/feishu/users/ou_current_user",
+                }
+            },
         )
 
-    first = registry.execute_call(envelope("gw-1", "run-1", "call-1"))
-    same_request_new_call = registry.execute_call(
-        envelope("gw-1", "run-1", "call-2")
-    )
-    new_request = registry.execute_call(envelope("gw-2", "run-2", "call-3"))
+    first = send("gw-1", "run-1", "call-1")
+    same_request_new_call = send("gw-1", "run-1", "call-2")
+    new_request = send("gw-2", "run-2", "call-3")
 
     assert first.ok and same_request_new_call.ok and new_request.ok
     assert adapter.messages == [
         ("ou_current_user", "同一条真实发送"),
         ("ou_current_user", "同一条真实发送"),
     ]
-    assert same_request_new_call.result_envelope["tool_operation"]["replayed"] is True
-    assert new_request.result_envelope["tool_operation"]["replayed"] is False
+    assert same_request_new_call.operation is not None
+    assert same_request_new_call.operation.replayed is True
+    assert new_request.operation is not None
+    assert new_request.operation.replayed is False
 
 
 def test_ambiguous_send_failure_is_not_executed_again(tmp_path: Path) -> None:
@@ -414,23 +429,25 @@ def test_ambiguous_send_failure_is_not_executed_again(tmp_path: Path) -> None:
     store = LocalStore(owner_root / "data" / "local.db", enable_fts=False)
     registry = _message_registry(tmp_path, store, tool)
 
-    def envelope(call_id: str) -> ToolCallEnvelope:
-        return ToolCallEnvelope(
+    def send(call_id: str):
+        return execute_registry_test_call(
+            registry,
+            "send_message",
+            {"message": "只应尝试一次"},
+            run_id="run-ambiguous",
             call_id=call_id,
-            source="model_tool_call",
-            tool_name="send_message",
-            input={"message": "只应尝试一次"},
-            scope=RunScope(
-                request_id="gw-ambiguous",
-                task_id="run-ambiguous",
-                run_id="run-ambiguous",
-                owner_type="user",
-                owner_id="providers/feishu/users/ou_current_user",
-            ),
+            trusted_run_context={
+                "run_scope": {
+                    "request_id": "gw-ambiguous",
+                    "task_id": "run-ambiguous",
+                    "owner_type": "user",
+                    "owner_id": "providers/feishu/users/ou_current_user",
+                }
+            },
         )
 
-    first = registry.execute_call(envelope("call-1"))
-    second = registry.execute_call(envelope("call-2"))
+    first = send("call-1")
+    second = send("call-2")
 
     assert first.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
     assert second.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
@@ -494,27 +511,29 @@ def test_provider_send_then_operation_store_crash_recovers_without_duplicate_mes
         tool,
     )
 
-    def envelope(run_id: str, call_id: str) -> ToolCallEnvelope:
-        return ToolCallEnvelope(
+    def send(run_id: str, call_id: str):
+        return execute_registry_test_call(
+            registry,
+            "send_message",
+            {"message": "同一条崩溃恢复通知"},
+            run_id=run_id,
             call_id=call_id,
-            source="model_tool_call",
-            tool_name="send_message",
-            input={"message": "同一条崩溃恢复通知"},
-            scope=RunScope(
-                request_id="gw-provider-crash",
-                task_id=run_id,
-                run_id=run_id,
-                owner_type="user",
-                owner_id="providers/feishu/users/ou_current_user",
-            ),
+            trusted_run_context={
+                "run_scope": {
+                    "request_id": "gw-provider-crash",
+                    "task_id": run_id,
+                    "owner_type": "user",
+                    "owner_id": "providers/feishu/users/ou_current_user",
+                }
+            },
         )
 
-    first = registry.execute_call(envelope("run-before-crash", "call-1"))
+    first = send("run-before-crash", "call-1")
     with patch(
         "agent_py_agent.agent.local_storage.tool_operations._operation_holder_is_live",
         return_value=False,
     ):
-        recovered = registry.execute_call(envelope("run-after-crash", "call-2"))
+        recovered = send("run-after-crash", "call-2")
 
     assert first.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
     assert recovered.ok is True

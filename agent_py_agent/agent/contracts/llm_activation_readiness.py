@@ -202,13 +202,16 @@ def build_small_llm_canary_gate(workspace: Path) -> dict[str, object]:
 def model_adapter_facts() -> dict[str, object]:
     return {
         "tool_calls": [
-            {"tool_name": "read_file", "tool_call_id": "provider-call-1"},
-            {"tool_name": "write_file", "generated_tool_call_id": "generated-call-2"},
+            {"tool_name": "read_file", "call_id": "provider-call-1"},
+            {"tool_name": "write_file", "call_id": "generated-call-2"},
         ],
         "stream": {"complete": True, "partial_json": False},
         "retry_limit": 2,
         "model_errors": [{"code": "rate_limit", "retryable": True}],
-        "model_switch": {"from_schema": "tool_protocol_v2", "to_schema": "tool_protocol_v2"},
+        "model_switch": {
+            "from_schema": "canonical_tool_runtime_v1",
+            "to_schema": "canonical_tool_runtime_v1",
+        },
     }
 
 

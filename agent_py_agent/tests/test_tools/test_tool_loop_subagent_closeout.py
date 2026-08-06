@@ -15,10 +15,16 @@ from agent_py_agent.agent.agent_core.tool_loop.round_subagent_output import (
 )
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.core import SimpleAgent
-from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.settings import AgentConfig as _AgentConfig
 from agent_py_agent.agent.subagents import EvidencePacket, VerificationEvidence
+from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
 
 from .backends import DispatchCompletionBackend, OutputJsonCompletionBackend
+
+
+def _text_agent_config(**kwargs) -> _AgentConfig:
+    kwargs.setdefault("tool_protocol", "text")
+    return _AgentConfig(**kwargs)
 
 
 class _DispatchThenQualityBackend:
@@ -47,7 +53,7 @@ class _DispatchThenQualityBackend:
 def test_subagent_runner_stops_after_output_json_write():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        cfg = AgentConfig(
+        cfg = _text_agent_config(
             enable_tools=True,
             memory_path="memory.jsonl",
             subagent_workspace="subs",
@@ -75,7 +81,7 @@ def test_subagent_runner_stops_after_output_json_write():
 def test_subagent_output_json_closeout_reports_dirty_output_json():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        cfg = AgentConfig(
+        cfg = _text_agent_config(
             enable_tools=True,
             memory_path="memory.jsonl",
             subagent_workspace="subs",
@@ -104,7 +110,7 @@ def test_subagent_output_json_closeout_reports_dirty_output_json():
 def test_completed_dispatch_returns_to_parent_synthesis_turn():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        cfg = AgentConfig(
+        cfg = _text_agent_config(
             enable_tools=True,
             memory_path="memory.jsonl",
             subagent_workspace="subs",
@@ -126,7 +132,7 @@ def test_completed_dispatch_returns_to_parent_synthesis_turn():
 def test_completed_dispatch_does_not_local_close_when_prompt_requires_more_work():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        cfg = AgentConfig(
+        cfg = _text_agent_config(
             enable_tools=True,
             memory_path="memory.jsonl",
             subagent_workspace="subs",
@@ -147,7 +153,7 @@ def test_completed_dispatch_does_not_local_close_when_prompt_requires_more_work(
 def test_generic_acceptance_result_wording_does_not_require_bug_finder_role():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        cfg = AgentConfig(
+        cfg = _text_agent_config(
             enable_tools=True,
             memory_path="memory.jsonl",
             subagent_workspace="subs",
@@ -170,18 +176,20 @@ def test_generic_acceptance_result_wording_does_not_require_bug_finder_role():
 def test_tool_allowlist_limits_prompt_and_execution():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        cfg = _text_agent_config(enable_tools=True, memory_path="memory.jsonl")
         agent = SimpleAgent(cfg, workspace)
         result = agent.run("读取 notes.txt", save=False, allowed_tools=["read_file"])
-        blocked = agent.tools.execute_call(
-            {"tool": "write_file", "path": "x.txt", "content": "x"},
+        blocked = execute_registry_test_call(
+            agent.tools,
+            "write_file",
+            {"path": "x.txt", "content": "x"},
             allowed_tools=["read_file"],
         )
 
         assert "read_file [filesystem" in result.prompt
         assert "write_file [filesystem" not in result.prompt
         assert not blocked.ok
-        assert "TOOL_NOT_ALLOWED" in blocked.output
+        assert blocked.error_code == "TOOL_NOT_IN_RUNTIME_SNAPSHOT"
 
 
 def _done_verified_task(agent, *, required_qa_roles: list[str] | None = None):

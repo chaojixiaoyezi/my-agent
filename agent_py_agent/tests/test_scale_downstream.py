@@ -115,7 +115,12 @@ def test_scale_turn_reuses_gateway_transcript_and_isolates_other_conversation(tm
     home_root = tmp_path / "home"
     workspace = tmp_path / "workspace"
     agent = SimpleAgent(
-        AgentConfig(model_backend="echo", my_agent_home=str(home_root), prompt_files=[]),
+        AgentConfig(
+            tool_protocol="text",
+            model_backend="echo",
+            my_agent_home=str(home_root),
+            prompt_files=[],
+        ),
         workspace,
     )
     pool = object.__new__(ScaleAgentPool)
@@ -177,7 +182,12 @@ def test_scale_group_members_share_group_conversation_without_becoming_owner(tmp
     home_root = tmp_path / "home"
     workspace = tmp_path / "workspace"
     agent = SimpleAgent(
-        AgentConfig(model_backend="echo", my_agent_home=str(home_root), prompt_files=[]),
+        AgentConfig(
+            tool_protocol="text",
+            model_backend="echo",
+            my_agent_home=str(home_root),
+            prompt_files=[],
+        ),
         workspace,
     )
     pool = object.__new__(ScaleAgentPool)
@@ -190,9 +200,7 @@ def test_scale_group_members_share_group_conversation_without_becoming_owner(tmp
     )
 
     pool._run_conversation_turn(agent, first, TraceContext("7" * 32, "8" * 16), paths)
-    result = pool._run_conversation_turn(
-        agent, second, TraceContext("9" * 32, "a" * 16), paths
-    )
+    result = pool._run_conversation_turn(agent, second, TraceContext("9" * 32, "a" * 16), paths)
 
     assert "群里约定代号是远山" in result.prompt
     assert len(list(agent.conversation_store.threads_dir.glob("*.json"))) == 1

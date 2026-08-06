@@ -190,8 +190,8 @@ def test_runtime_guard_readers_prefer_agent_policy_snapshot():
 
 def test_registry_runtime_gate_policy_uses_passed_runtime_policy():
     from agent_py_agent.agent.settings.runtime_guard_config import RuntimeGuardPolicy
+    from agent_py_agent.agent.tooling.action_policy import _tool_guardrail_config
     from agent_py_agent.agent.tooling.registry_rate_limit_policy import tool_rate_limit_policy
-    from agent_py_agent.agent.tooling.registry_runtime_gate_pipeline import _tool_guardrail_config
 
     policy = RuntimeGuardPolicy(
         values={

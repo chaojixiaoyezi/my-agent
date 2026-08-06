@@ -12,6 +12,7 @@ from agent_py_agent.agent.capability.persona_repository import (
 )
 from agent_py_agent.agent.capability.persona_tool import UpdatePersonaTool
 from agent_py_agent.agent.conversation.authority import CONVERSATION_AUDIT_PREPARE_ATTR
+from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
 
 
 def _agent_with_paths(tmp_path):
@@ -45,30 +46,49 @@ def test_update_persona_is_not_exposed_in_named_audit_prepare(tmp_path):
     assert "task-scoped" in availability.reason
 
 
-def test_update_persona_targets_soul_and_agents_need_confirm(tmp_path):
-    # SOUL/AGENTS 带 confirmed=true 才写(先问用户拿到同意后)
+def test_update_persona_targets_soul_and_agents_use_exact_approval_binding(tmp_path):
     agent, soul, _user, agents = _agent_with_paths(tmp_path)
-    assert (
-        UpdatePersonaTool(agent)
-        .execute({"target": "soul", "content": "语气偏活泼", "confirmed": True})
-        .ok
-    )
-    assert (
-        UpdatePersonaTool(agent)
-        .execute({"target": "agents", "content": "产物用 HTML", "confirmed": True})
-        .ok
-    )
+    for target, content in (("soul", "语气偏活泼"), ("agents", "产物用 HTML")):
+        tool = UpdatePersonaTool(agent)
+        arguments = {"target": target, "content": content}
+        first = execute_canonical_test_call(
+            tmp_path,
+            tools={"update_persona": tool},
+            tool_name="update_persona",
+            arguments=arguments,
+        )
+        assert first.result.status == "approval_required"
+        assert first.result.handler_executed is False
+        binding = {
+            **dict(first.decision.approval_request or {}),
+            "approval_id": f"approval-{target}",
+            "status": "APPROVED",
+        }
+        approved = execute_canonical_test_call(
+            tmp_path,
+            tools={"update_persona": tool},
+            tool_name="update_persona",
+            arguments=arguments,
+            write_boundary={"approved_actions": [binding]},
+        )
+        assert approved.result.ok is True
+        assert approved.result.handler_executed is True
     assert "语气偏活泼" in soul.read_text(encoding="utf-8")
     assert "产物用 HTML" in agents.read_text(encoding="utf-8")
 
 
-def test_update_persona_soul_agents_refused_without_confirm(tmp_path):
-    # 不带 confirmed:SOUL/AGENTS 拒写(护住长期人设不被随意自动改),文件不动
+def test_update_persona_soul_agents_cannot_use_model_confirmed_flag(tmp_path):
     agent, soul, _user, agents = _agent_with_paths(tmp_path)
     for target in ("soul", "agents"):
-        r = UpdatePersonaTool(agent).execute({"target": target, "content": "别乱写"})
-        assert r.ok is False
-        assert r.error_code == "APPROVAL_REQUIRED"
+        execution = execute_canonical_test_call(
+            tmp_path,
+            tools={"update_persona": UpdatePersonaTool(agent)},
+            tool_name="update_persona",
+            arguments={"target": target, "content": "别乱写", "confirmed": True},
+        )
+        assert execution.result.ok is False
+        assert execution.result.error_code == "TOOL_INVALID_ARGUMENTS"
+        assert execution.result.handler_executed is False
     assert "别乱写" not in soul.read_text(encoding="utf-8")
     assert "别乱写" not in agents.read_text(encoding="utf-8")
 
@@ -318,129 +338,3 @@ def test_update_persona_registered_in_agent_toolset(tmp_path):
     agent = SimpleAgent(default_agent_config(), tmp_path)
     names = [getattr(s, "name", "") for s in agent.tools.specs()]
     assert "update_persona" in names
-
-
-# --------------------------------------------------------------------------- 飞书卡片确认流
-
-
-def _feishu_agent(tmp_path, provider="feishu"):
-    """owner=飞书用户的 agent:home_paths 带 owner_provider/owner_id/root,config 带飞书凭据。"""
-    soul, user, agents = tmp_path / "SOUL.md", tmp_path / "USER.md", tmp_path / "AGENTS.md"
-    for p, head in (
-        (soul, "# SOUL\n"),
-        (user, "# USER\n\n## 画像\n- 称呼:\n"),
-        (agents, "# AGENTS\n"),
-    ):
-        p.write_text(head, encoding="utf-8")
-    home = SimpleNamespace(
-        owner_soul_md=soul,
-        owner_user_md=user,
-        owner_agents_md=agents,
-        owner_provider=provider,
-        owner_kind="user",
-        owner_id="ou_x",
-        root=tmp_path,
-    )
-    config = SimpleNamespace(feishu_app_id="app", feishu_app_secret="sec")
-    return SimpleNamespace(home_paths=home, config=config), soul, user, agents
-
-
-def test_feishu_soul_sends_card_and_stores_pending_not_writing(tmp_path, monkeypatch):
-    # 飞书改 SOUL:不直接写,存待确认记录 + 发卡片,工具立即返回(非阻塞)。无需 confirmed。
-    import json
-
-    from agent_py_agent.agent.adapter import feishu_card as card_mod
-    from agent_py_agent.agent.capability import persona_pending
-
-    agent, soul, _user, _agents = _feishu_agent(tmp_path)
-    sent: list = []
-    monkeypatch.setattr(
-        card_mod,
-        "send_interactive_card",
-        lambda aid, sec, oid, card: sent.append((aid, sec, oid, card)) or True,
-    )
-    # 即使模型自行塞 confirmed=true，飞书也必须等真人点卡片，不能直接写。
-    r = UpdatePersonaTool(agent).execute(
-        {"target": "soul", "content": "语气偏活泼", "confirmed": True}
-    )
-    assert r.ok
-    payload = json.loads(r.output)
-    assert payload["pending"] is True
-    assert "语气偏活泼" not in soul.read_text(encoding="utf-8")  # 没直接写,等确认
-    assert len(sent) == 1 and sent[0][0] == "app" and sent[0][2] == "ou_x"  # 卡片发到 owner open_id
-    files = list((tmp_path / "pending_persona").glob("*.json"))
-    assert len(files) == 1
-    rec = persona_pending.load(tmp_path, files[0].stem)
-    assert rec.target == "soul" and rec.content == "语气偏活泼" and rec.owner_provider == "feishu"
-
-
-def test_feishu_card_send_fail_cleans_pending_and_no_write(tmp_path, monkeypatch):
-    # 凭据缺失/发不出去 → fail-open:清掉悬挂记录 + 回落"就地不写 + 提示用户"(不崩)。
-    import json
-
-    from agent_py_agent.agent.adapter import feishu_card as card_mod
-
-    agent, soul, _user, _agents = _feishu_agent(tmp_path)
-    monkeypatch.setattr(card_mod, "send_interactive_card", lambda *a, **k: False)
-    r = UpdatePersonaTool(agent).execute({"target": "agents", "content": "产物用 HTML"})
-    assert r.ok  # fail-open,非错误态
-    payload = json.loads(r.output)
-    assert payload["pending"] is False and "没写" in payload["note"]
-    assert "产物用 HTML" not in soul.read_text(encoding="utf-8")
-    assert list((tmp_path / "pending_persona").glob("*.json")) == []  # 悬挂记录已清
-
-
-def test_feishu_user_target_still_direct_write(tmp_path, monkeypatch):
-    # target=user 完全不变:飞书下也直接写,不走卡片。
-    from agent_py_agent.agent.adapter import feishu_card as card_mod
-
-    agent, _soul, user, _agents = _feishu_agent(tmp_path)
-    called: list = []
-    monkeypatch.setattr(card_mod, "send_interactive_card", lambda *a, **k: called.append(1) or True)
-    agent._current_user_prompt = "以后请叫我小王"
-    r = UpdatePersonaTool(agent).execute(
-        {"target": "user", "content": "称呼:小王", "source_quote": "以后请叫我小王"}
-    )
-    assert r.ok and "称呼:小王" in user.read_text(encoding="utf-8")
-    assert called == []
-
-
-def test_feishu_soul_remove_waits_for_card_and_carries_structured_operation(tmp_path, monkeypatch):
-    import json
-
-    from agent_py_agent.agent.adapter import feishu_card as card_mod
-    from agent_py_agent.agent.capability import persona_pending
-
-    agent, soul, _user, _agents = _feishu_agent(tmp_path)
-    soul.write_text("# SOUL\n- 语气偏活泼\n", encoding="utf-8")
-    listed = UpdatePersonaTool(agent).execute({"action": "list", "target": "soul"})
-    entry_id = json.loads(listed.output)["entries"][0]["entry_id"]
-    sent: list = []
-    monkeypatch.setattr(
-        card_mod,
-        "send_interactive_card",
-        lambda aid, sec, oid, card: sent.append(card) or True,
-    )
-
-    result = UpdatePersonaTool(agent).execute(
-        {"action": "remove", "target": "soul", "entry_id": entry_id}
-    )
-
-    assert result.ok
-    assert "语气偏活泼" in soul.read_text(encoding="utf-8")
-    record_path = next((tmp_path / "pending_persona").glob("*.json"))
-    record = persona_pending.load(tmp_path, record_path.stem)
-    assert record is not None and record.action == "remove" and record.entry_id == entry_id
-    assert "确认删除" in sent[0]["header"]["title"]["content"]
-
-
-def test_non_feishu_soul_still_confirmed_gate(tmp_path):
-    # 非飞书通道(local):保持现有 confirmed 闸——无 confirmed 拒写,有 confirmed 直接写。
-    agent, soul, _user, _agents = _feishu_agent(tmp_path, provider="local")
-    refused = UpdatePersonaTool(agent).execute({"target": "soul", "content": "语气偏活泼"})
-    assert refused.ok is False and refused.error_code == "APPROVAL_REQUIRED"
-    assert "pending_persona" not in {p.name for p in tmp_path.iterdir()}  # 非飞书不建待确认存储
-    ok = UpdatePersonaTool(agent).execute(
-        {"target": "soul", "content": "语气偏活泼", "confirmed": True}
-    )
-    assert ok.ok and "语气偏活泼" in soul.read_text(encoding="utf-8")

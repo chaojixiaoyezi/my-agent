@@ -21,7 +21,6 @@ from .context_bundle import (
     latest_main_context_bundle_path,
 )
 from .home_backup import HomeBackupManifest, create_home_backup_manifest
-from .home_doctor import build_home_doctor_report
 from .home_index_rebuild import HomeIndexRebuildResult, rebuild_home_indexes
 from .home_indexes import (
     AgentIndexRef,
@@ -43,12 +42,6 @@ from .home_indexes import (
     register_task_ref,
 )
 from .home_layout import ensure_my_agent_home, home_paths, resolve_my_agent_home
-from .home_retention import (
-    OwnerRetentionPlan,
-    RetentionAction,
-    apply_owner_retention,
-    plan_owner_retention,
-)
 from .identity_store import (
     ProviderIdentityLookupReport,
     ProviderIdentityRecord,
@@ -59,11 +52,6 @@ from .identity_store import (
     lookup_provider_identity_report,
     resolve_owner_from_provider_identity,
     resolve_owner_from_provider_identity_report,
-)
-from .owner_maintenance import (
-    OwnerMaintenanceResult,
-    owner_maintenance_due,
-    run_owner_retention_if_due,
 )
 from .owner_policy import (
     EffectiveOwnerPolicy,
@@ -84,11 +72,6 @@ from .owner_resolver import (
     resolve_owner_home,
 )
 from .run_workspace import EnsureRunWorkspaceRequest, RunWorkspacePaths, ensure_run_workspace
-from .skill_candidates import (
-    SkillCandidate,
-    SkillCandidateAppendResult,
-    append_owner_skill_candidate,
-)
 from .temporary_grants import (
     CreateTemporaryGrant,
     OwnerTemporaryGrant,
@@ -126,10 +109,7 @@ __all__ = [
     "IndexRefsReport",
     "RunIndexRef",
     "RetentionAction",
-    "SkillCandidate",
-    "SkillCandidateAppendResult",
     "TaskIndexRef",
-    "append_owner_skill_candidate",
     "apply_owner_retention",
     "build_home_doctor_report",
     "build_main_context_bundle",

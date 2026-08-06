@@ -10,9 +10,9 @@ from .activity_timeout import ActivitySnapshot, ActivityTimeoutPolicy, decide_ac
 from .e2e_matrix_runner import E2ERunnerRequest, run_e2e_matrix
 from .error_taxonomy import classify_error
 from .main_agent_foundation_contract_cases import (
+    case_canonical_tool_contract,
     case_general_write_contract,
     case_model_call_ledger_timeout,
-    case_tool_protocol_v2_envelope,
 )
 from .main_agent_foundation_models import (
     MainAgentFoundationCaseResult,
@@ -37,7 +37,7 @@ def run_main_agent_foundation(request: MainAgentFoundationRequest) -> MainAgentF
         _case_web_artifact_validator(workspace),
         _case_activity_timeout_recovery(workspace),
         case_model_call_ledger_timeout(workspace),
-        case_tool_protocol_v2_envelope(workspace),
+        case_canonical_tool_contract(workspace),
         case_general_write_contract(workspace),
         _real_model_placeholder(
             "single_agent_real_tasks",

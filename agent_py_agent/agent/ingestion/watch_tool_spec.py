@@ -1,11 +1,21 @@
-"""watch_stream 的 ToolSpec(单独成文件:spec 文本长,和执行逻辑分开)。"""
+"""watch_stream 的模型契约与运行策略（长描述和执行逻辑分开）。"""
 
 from __future__ import annotations
 
 from copy import deepcopy
 
 from ..common.audit_activation import AUDIT_SOURCE_OPEN_FIELDS
-from ..tooling.models import ToolSpec, TrustedParameterBinding
+from ..tooling.models import (
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    OutputPolicy,
+    ResourceScopePolicy,
+    ToolInputPolicy,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+    TrustedParameterBinding,
+)
 
 _DESCRIPTION = (
     "数据源持续采集与可审计交付工具，支持 HTTP 游标流、本地文件/持续增长日志和"
@@ -557,21 +567,21 @@ def _surface_examples(surface: str, examples: list[str]) -> list[str]:
     ]
 
 
-def build_watch_stream_spec(*, surface: str = "ordinary") -> ToolSpec:
+def build_watch_stream_model_spec(*, surface: str = "ordinary") -> ToolModelSpec:
     actions = _SURFACE_ACTIONS.get(surface)
     if actions is None:
         raise ValueError(f"unknown watch_stream surface: {surface}")
     names = _surface_parameter_names(surface)
     parameters = _surface_parameters(surface, actions, names)
-    parameter_schema = {
+    property_schemas = {
         name: deepcopy(value) for name, value in _PARAMETER_SCHEMA.items() if name in names
     }
-    parameter_schema["action"] = {"type": "string", "enum": list(actions)}
-    return _watch_stream_tool_spec(
+    property_schemas["action"] = {"type": "string", "enum": list(actions)}
+    return _watch_stream_model_spec(
         surface,
         names,
         parameters,
-        parameter_schema,
+        property_schemas,
         _surface_description(surface, parameters),
     )
 
@@ -664,85 +674,91 @@ def _surface_description(surface: str, parameters: dict[str, str]) -> str:
     return description
 
 
-def _watch_stream_tool_spec(
+def _watch_stream_model_spec(
     surface: str,
     names: set[str],
     parameters: dict[str, str],
-    parameter_schema: dict[str, object],
+    property_schemas: dict[str, object],
     description: str,
-) -> ToolSpec:
-    return ToolSpec(
+) -> ToolModelSpec:
+    details = {
+        name: f"{parameters.get(name, '')} {value}".strip()
+        for name, value in _PARAMETER_DETAILS.items()
+        if name in names
+    }
+    properties: dict[str, object] = {}
+    for name, parameter_description in parameters.items():
+        shape = deepcopy(property_schemas.get(name) or {"type": "string"})
+        if isinstance(shape, dict):
+            shape["description"] = details.get(name, parameter_description)
+        properties[name] = shape
+    return ToolModelSpec(
         name="watch_stream",
-        category="web",
-        # 同一工具包含读写动作。顶层保守按 mutating 进入统一副作用/幂等入口；
-        # 只有明确的只读 action 才可在持有已校验参数的运行门中降级。
-        effect="mutating",
-        effect_by_parameter={
-            "action": {
-                "sample": "read_only",
-                "inspect": "read_only",
-                "status": "read_only",
-                "list": "read_only",
-                "open": "mutating",
-                "configure": "mutating",
-                "pull": "mutating",
-                "verdict": "mutating",
-                "close": "mutating",
-            }
-        },
-        idempotency_scope="operation",
-        output_trust="external_data",
         description=description,
-        use_cases=[
-            "持续采集 HTTP 游标流并保留断点、覆盖率和完整原文",
-            "定时读取快照接口(mode=poll)，把每次完整响应作为记录",
-            "读取一次性大文件或持续增长日志，并在重启后从记录边界续接",
-            "/audit 保证档中逐条交付、逐条签收并按 source_ref 复查",
-            "由 create_subagents 的 audit_source_id 建立的来源叶子只传 action=open；"
-            "运行时从该 Audit 的已发布绑定补入全部传输字段",
-        ],
-        avoid_when=[
-            "一次性读取普通网页/文档/API → 用 web_fetch",
-            "定向带参数查一次接口做交叉印证 → 用 web_fetch(本工具是持续盯守)",
-            "读普通小文件 → 用 read_file",
-        ],
-        keywords=[
-            "数据流",
-            "盯守",
-            "监控",
-            "游标",
-            "增量",
-            "高吞吐",
-            "stream",
-            "watch",
-            "pull",
-            "候选",
-            "初筛",
-            "背压",
-            "判据",
-            "spec",
-            "日志",
-            "大文件",
-            "tail",
-            "定时查",
-            "轮询",
-            "poll",
-            "快照",
-        ],
-        parameters=parameters,
-        parameter_schema=parameter_schema,
-        required_parameters=["action"],
-        local_file_url_parameters=("url",),
-        parameter_details={
-            name: f"{parameters.get(name, '')} {value}".strip()
-            for name, value in _PARAMETER_DETAILS.items()
-            if name in names
+        input_schema={
+            "type": "object",
+            "properties": properties,
+            "required": ["action"],
+            "additionalProperties": False,
         },
-        examples=_surface_examples(
-            surface,
-            _watch_stream_examples(),
+        hints=ToolModelHints(
+            category="web",
+            use_cases=(
+                "持续采集 HTTP 游标流并保留断点、覆盖率和完整原文",
+                "定时读取快照接口(mode=poll)，把每次完整响应作为记录",
+                "读取一次性大文件或持续增长日志，并在重启后从记录边界续接",
+                "/audit 保证档中逐条交付、逐条签收并按 source_ref 复查",
+                "由 create_subagents 的 audit_source_id 建立的来源叶子只传 action=open；运行时从该 Audit 的已发布绑定补入全部传输字段",
+            ),
+            avoid_when=(
+                "一次性读取普通网页/文档/API → 用 web_fetch",
+                "定向带参数查一次接口做交叉印证 → 用 web_fetch(本工具是持续盯守)",
+                "读普通小文件 → 用 read_file",
+            ),
+            keywords=("数据流", "盯守", "监控", "游标", "增量", "高吞吐", "stream", "watch", "pull", "候选", "初筛", "背压", "判据", "spec", "日志", "大文件", "tail", "定时查", "轮询", "poll", "快照"),
+            examples=tuple(_surface_examples(surface, _watch_stream_examples())),
         ),
-        trusted_parameter_bindings=_trusted_parameter_bindings(surface, names),
+    )
+
+
+def build_watch_stream_runtime_policy(*, surface: str = "ordinary") -> ToolRuntimePolicy:
+    actions = _SURFACE_ACTIONS.get(surface)
+    if actions is None:
+        raise ValueError(f"unknown watch_stream surface: {surface}")
+    names = _surface_parameter_names(surface)
+    trusted = _trusted_parameter_bindings(surface, names)
+    return ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy(
+            "mutating",
+            by_parameter=((
+                "action",
+                (
+                    ("sample", "read_only"),
+                    ("inspect", "read_only"),
+                    ("status", "read_only"),
+                    ("list", "read_only"),
+                    ("open", "mutating"),
+                    ("configure", "mutating"),
+                    ("pull", "mutating"),
+                    ("verdict", "mutating"),
+                    ("close", "mutating"),
+                ),
+            ),),
+        ),
+        idempotency_policy=IdempotencyPolicy("operation"),
+        resource_scopes=ResourceScopePolicy(
+            parameter_names=tuple(
+                name
+                for name in ("url", "watch_id", "source_ref", "source_id")
+                if name in names
+            ),
+        ),
+        output_policy=OutputPolicy(trust="external_data"),
+        input_policy=ToolInputPolicy(
+            internal_parameters=("__run_scope", "__tool_call_id"),
+            trusted_parameter_bindings=tuple(trusted.items()),
+            local_file_url_parameters=(("url",) if "url" in names else ()),
+        ),
     )
 
 
@@ -780,6 +796,7 @@ def _trusted_parameter_bindings(
                 name: TrustedParameterBinding(
                     source_refs=(f"run_scope.task_attributes.audit_source_open.{name}",),
                     when=(("action", "open"),),
+                    authority="host_authoritative",
                 )
                 for name in AUDIT_SOURCE_OPEN_FIELDS
                 if name in names
@@ -788,8 +805,9 @@ def _trusted_parameter_bindings(
     if "watch_id" in names:
         bindings["watch_id"] = TrustedParameterBinding(
             source_refs=("run_scope.task_attributes.audit_source_watch_id",),
+            authority="host_authoritative",
         )
     return bindings
 
 
-__all__ = ["build_watch_stream_spec"]
+__all__ = ["build_watch_stream_model_spec", "build_watch_stream_runtime_policy"]

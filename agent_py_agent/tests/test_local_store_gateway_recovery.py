@@ -75,6 +75,7 @@ def _track_heartbeat_during_run(agent, paths, request_path) -> list[float]:
 
 def _make_recovery_agent(root: Path) -> SimpleAgent:
     cfg = AgentConfig(
+        tool_protocol="text",
         model_backend="echo",
         gateway_workspace="gateway",
         local_store_path="local_store/local.db",
@@ -158,7 +159,9 @@ def test_gateway_startup_requeued_request_does_not_block_fresh_pending():
         assert old_payload["not_before_at"] > time.time()
         assert old_payload["priority"] == "recovery"
 
-        fresh_id, fresh_path, _ = submit_gateway_ask(paths, params=GatewayAskParams(prompt="新请求", save=False))
+        fresh_id, fresh_path, _ = submit_gateway_ask(
+            paths, params=GatewayAskParams(prompt="新请求", save=False)
+        )
         assert _iter_pending_request_paths(paths)[0].name == fresh_path.name
         assert _process_gateway_requests(agent, paths, worker_id="test-worker") == 1
 
@@ -188,7 +191,9 @@ def test_gateway_worker_prioritizes_fresh_pending_over_due_recovery_request():
                 "not_before_at": time.time() - 1,
             },
         )
-        _fresh_id, fresh_path, _ = submit_gateway_ask(paths, params=GatewayAskParams(prompt="新请求", save=False))
+        _fresh_id, fresh_path, _ = submit_gateway_ask(
+            paths, params=GatewayAskParams(prompt="新请求", save=False)
+        )
 
         ordered = _iter_pending_request_paths(paths)
 
@@ -200,6 +205,7 @@ def test_gateway_worker_refreshes_processing_lease_heartbeat_during_long_run():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
+            tool_protocol="text",
             model_backend="echo",
             gateway_workspace="gateway",
             gateway_heartbeat_interval=1,
@@ -212,7 +218,9 @@ def test_gateway_worker_refreshes_processing_lease_heartbeat_during_long_run():
         paths = gateway_paths(agent)
         for path in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
             path.mkdir(parents=True, exist_ok=True)
-        request_id, request_path, _ = submit_gateway_ask(paths, params=GatewayAskParams(prompt="长任务 lease heartbeat 测试", save=False))
+        request_id, request_path, _ = submit_gateway_ask(
+            paths, params=GatewayAskParams(prompt="长任务 lease heartbeat 测试", save=False)
+        )
         observed = _track_heartbeat_during_run(agent, paths, request_path)
 
         archived = read_json_file(paths.done / request_path.name)
@@ -225,10 +233,12 @@ def test_gateway_worker_refreshes_processing_lease_heartbeat_during_long_run():
         assert response["ok"] is True
         assert response["lease_heartbeat_at"] >= observed[1]
 
+
 def test_gateway_recovery_uses_lease_heartbeat_before_started_at():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
+            tool_protocol="text",
             model_backend="echo",
             gateway_workspace="gateway",
             local_store_path="local_store/local.db",
@@ -269,10 +279,12 @@ def test_gateway_recovery_uses_lease_heartbeat_before_started_at():
         assert request_path.exists()
         assert not (paths.inbox / request_path.name).exists()
 
+
 def test_gateway_recovery_archives_processing_duplicate_when_response_exists():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
+            tool_protocol="text",
             model_backend="echo",
             gateway_workspace="gateway",
             local_store_path="local_store/local.db",
@@ -315,10 +327,12 @@ def test_gateway_recovery_archives_processing_duplicate_when_response_exists():
         assert not (paths.inbox / request_path.name).exists()
         assert not (paths.failed / request_path.name).exists()
 
+
 def test_file_adapter_writes_gateway_response_to_outbox():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
+            tool_protocol="text",
             model_backend="echo",
             gateway_workspace="gateway",
             adapter_workspace="adapter",

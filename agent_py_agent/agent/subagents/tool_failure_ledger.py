@@ -1,5 +1,5 @@
 # LLM: 子代理工具失败的系统级账本(开发计划 A1,根治 R4b 模型归因幻觉)。数据源是
-#   工具循环的 archive_tool_calls(registry_invoke 产出的 ToolExecutionResult:
+#   工具循环的 archive_tool_calls(registry_invoke 产出的 ToolHandlerOutcome:
 #   ok/error_code 是系统事实,不是模型转述)。契约:账本只做观测与对账事实源,
 #   绝不做硬门、不拦任何主链路;tool_failures 为 None(超时/worker 异常,拿不到
 #   archive)时不覆盖已有账本,为 [](正常跑完零失败)时写空账本——"系统记录

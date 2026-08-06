@@ -596,23 +596,23 @@ do_write()
   names the rewrite and says explicit `mode="overwrite"` is required for a clean
   replacement. Do not make the model infer this from file contents.
 - Never commit an unclosed `write_file.content` as a partial artifact. Incomplete
-  JSON content in any directory, including current task output/work, and malformed
-  `WRITE_FILE_RAW` blocks must return structured parse errors with
-  `write_recovery`, then continue through bounded complete overwrite/append
-  chunks. A malformed or unclosed tool call is not an action boundary and must not
-  mutate the final artifact path.
-- Artifact registration must use the latest successful write record for each output
-  path. A write carrying `__partial_unclosed_write=true` is not a successful action
-  boundary and must not be registered as a ready attachment. The tool returns a
-  structured error so the model can perform a complete overwrite/append; this does
-  not create a separate task-completion checker.
+  JSON content in any directory, including current task output/work, is a host-owned
+  protocol violation with zero canonical calls, zero handler executions, and zero
+  operations. Never salvage a content prefix, invent a pseudo tool, or register a
+  partial artifact. The bounded repair turn must emit a new, complete overwrite or
+  append call before any file mutation is authorized.
+- Artifact registration must use the latest successful canonical ToolResult for each
+  output path. There is no partial-write success marker: an incomplete call has no
+  ToolCall/ToolResult pair and therefore cannot become a ready attachment.
 - Streaming tool-call boundaries are an observability and cleanup layer, not a
   one-tool execution limiter. If a model streams a complete `[TOOL_CALL]` and
   then continues with more machine blocks in the same assistant turn, the
   runtime must wait for the assistant turn to finish and execute the full parsed
-  batch. It may suppress post-tool prose from the live UI and trim non-machine
-  text before parsing, but it must not abort the provider request just because
-  the first complete tool block arrived.
+  batch only when the entire response is a sequence of complete standalone blocks.
+  Live UI filtering may suppress machine frames, but the protocol adapter must inspect
+  the whole final response; leading/trailing prose, Markdown, bad JSON or a missing
+  close marker invalidates the whole proposed batch. The runtime must not abort the
+  provider request just because the first complete block arrived.
 - Tool prompt budgets must be long-term config-backed. If a tool/catalog/search
   threshold affects runtime behavior, put it in `agent_config.yaml`,
   `AgentConfig`, the normalizer, and the frontend runtime config together; do

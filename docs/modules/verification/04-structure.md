@@ -14,7 +14,7 @@ Compact 不建立第二套验证链。live tool-context 与 archive 共用一个
 
 ## 数据流
 
-1. `tool_call_runtime.execute_traced_tool_call` 得到真实 `ToolExecutionResult`。
+1. `tool_call_runtime.execute_traced_tool_call` 得到真实 canonical `ToolResult`；handler 的 `ToolHandlerOutcome` 只在 Executor 内转换。
    在进入工具 registry 前，同一入口先处理 conversation task promotion 和精确 mutation workspace：
    主代理从 thread sticky cwd 自动绑定当前 execution，child rebase 只能改变当前 runner 的
    `run_workspace` 并留下 host marker；随后的动态 write boundary 只信该结构化 marker，不信模型正文。
@@ -42,16 +42,17 @@ Compact 不建立第二套验证链。live tool-context 与 archive 共用一个
    runtime_gate、execution、effect_reconciliation 或 persistence。
 2. `handler_executed` 只回答当前调用是否进入真实实现；`duration_ms` 是统一 Registry 计时结果。
    runtime guard、owner/path/effect/availability 拒绝必须在 handler 前标 false；实现返回的业务失败标 true。
-3. trace、audit、tool index、runtime ledger、compact/recovery 消费同一个
-   `ToolExecutionResult`，不得从错误字符串、provider 文本或 IM 消息重分类。
+3. trace、audit、tool index、runtime ledger、compact/recovery 消费同一个 canonical
+   `ToolResult` 投影；handler 内部 `ToolHandlerOutcome` 不得越过 Executor 成为历史权威，也不得从错误
+   字符串、provider 文本或 IM 消息重分类。
 4. 幂等重放的当前调用标 false，并保留首次执行的嵌套事实；timeout/effect unknown 进入
    effect reconciliation，不能因 `retryable=true` 盲目再次产生副作用。
 
 工具参数在进入上述工具出口前走同一结构：
 
-1. typed ToolCallEnvelope 先拆出外层身份/幂等元数据；扁平执行 payload 中的 Schema 声明字段全部保留为输入。
-2. `tool_spec_schema.py` 从完整 `input_schema` 或 builtin 旧声明编译唯一 runtime Schema。
-3. `tool_input_completion.py` 只对缺失字段应用 ToolSpec 明示安全默认值或 Registry 可信上下文绑定；
+1. provider adapter 先形成 canonical `ToolCall`，外层身份/幂等元数据与参数天然分层；Schema 声明字段全部保留为输入。
+2. `ToolModelSpec.input_schema` 是唯一 runtime/provider Schema；旧 compiler 和 builtin 多字段声明已删除。
+3. `tool_input_completion.py` 只对缺失字段应用 `ToolRuntimePolicy.input_policy` 明示安全默认值或 Registry 可信上下文绑定；
    显式字段永不覆盖，Schema `default` 注解本身没有执行权，并输出不含原值的 `source/source_ref`。
    该账目经显式白名单进入短/长工具输出索引，归档只负责审计，不能反向参与参数补全。
 4. `tool_input_schema.py` 只做无歧义类型纠正，并在路径、effect、审批和实现前返回结构化问题。
@@ -60,7 +61,7 @@ Compact 不建立第二套验证链。live tool-context 与 archive 共用一个
 
 副作用工具在参数、权限、路径、approval、availability 和 effect 门都通过后，再进入一条权威执行链：
 
-1. `action_protocol.ToolCallEnvelope` 使用 provider call id 或框架生成的精确 call id 形成
+1. canonical `ToolCall` 使用 provider call id 或隔离 text adapter 生成的精确 call id 形成
    `owner + run + operation_id`；参数相同不等于同一操作，模型参数不能改写该身份。
 2. `local_storage/tool_operations.py` 用 SQLite `BEGIN IMMEDIATE` 在实现前原子占位。正式 Registry 默认
    要求该 store；不可用时在 handler 前返回 `TOOL_OPERATION_STORE_UNAVAILABLE`，裸 Registry 也不能
@@ -69,7 +70,7 @@ Compact 不建立第二套验证链。live tool-context 与 archive 共用一个
    `idempotency_scope=business` 还要求工具从可信运行事实和规范参数生成稳定业务键，缺键在 handler
    前 fail-closed。业务键在 owner 内跨 run 去重，但不同 owner 永不共享。
 4. `tooling/tool_operation_coordinator.py` 对首份 claim 只调用一次 handler，并保存完整
-   `ToolExecutionResult`；同一精确操作重放保存结果，不再执行。不同参数复用身份会冲突，正在执行的
+   `ToolHandlerOutcome` 供 Executor 生成 canonical `ToolResult`；同一精确操作重放保存结果，不再执行。不同参数复用身份会冲突，正在执行的
    副本只返回 in-flight。handler 返回不是最终成功权威；只有 completion 原子保存成功才可继续返回
    `ok=true`，保存异常统一降级为 unknown，原 handler 报告只以脱敏旁证保留。
 5. 持有进程死亡、跨主机 lease 过期、终态内容不可读、mutating 工具返回 timeout，或实现明确报告
@@ -80,15 +81,16 @@ Compact 不建立第二套验证链。live tool-context 与 archive 共用一个
 6. 只有 read-only 工具可做一次通用瞬时重试；mutating/dangerous 工具即使提供方错误标为 retryable，
    也不在 Registry 内盲重试。`send_message`、文件写入、shell、子代理、定时等共用这条链，不各自保存
    第二份进程内/磁盘回执。
-7. 同一模型轮的多个调用由 tool loop 按原顺序逐项记录。通用底座不从自然语言猜调用依赖，不实现跨
-   外部系统 Saga，也不在一项失败后机械取消无 typed 依赖的后续调用。archive 与 control-plane event
+7. 同一模型轮按 runtime 的 `ConcurrencyPolicy + resource_scopes` 构造连续安全分段；只读且资源不冲突
+   才并行，写冲突、审批、危险和未知调用形成 barrier，最终结果仍按 provider 原顺序记录。通用底座不从
+   自然语言猜调用依赖，不实现跨外部系统 Saga。archive 与 control-plane event
    投影每项 operation/effect；compact 的语义摘要必须另保留中段非成功副作用事实，最终模型据真实
    部分结果说明完成、失败或未知。
 
 工具正文进入模型前还经过一条与执行权分开的投影链：
 
-1. `ToolSpec.output_trust/output_redaction` 声明工具的最低输出边界；handler 的单次结果只能收紧，
-   Registry 把有效策略写入同一个 `ToolExecutionResult`，不能绕过权限/effect/operation 主链。
+1. `ToolRuntimePolicy.output_policy` 声明工具的最低输出边界；handler 的单次结果只能收紧，
+   Executor 把有效策略写入同一个 canonical `ToolResult`，不能绕过权限/effect/operation 主链。
 2. `agent_core/tool_context/reducer.py` 是 live model context 的唯一正文出口。外部数据正文先统一脱敏，
    再放入不可信数据边界；status、error code、verification facts、hash、大小与 artifact ref 保持
    结构化，不能被正文里的伪标签覆盖。
@@ -113,7 +115,7 @@ Conversation thread 的 sticky workspace、task 索引、Compact 状态、通道
 - scope、exit 和 stale 只能由结构化事件决定。
 - targeted 永远不能在投影层变成 full。
 - 新增 archive envelope 字段必须逐字段压缩并说明消费者；不得把任意工具私有结果整包带入最终回复。
-- `input_sources` 只能引用 Registry typed context 或 ToolSpec 声明；归档回放不能把它变成新参数、
+- `input_sources` 只能引用 Registry typed context 或 `ToolRuntimePolicy.input_policy` 声明；归档回放不能把它变成新参数、
   owner 授权或工具执行依据。持久层只接受单行有界的 `path/source/source_ref`，不得保存来源项里的
   参数值或任意结果 envelope 私有字段。
 - `scoped_call_id` 只是审计身份，不代表正文已外置；没有 `artifact_ref/source_artifact_ref` 的短输出
@@ -130,7 +132,7 @@ Conversation thread 的 sticky workspace、task 索引、Compact 状态、通道
 - 子代理的父 task lineage 与 cwd 必须分开；验证/归档沿父 `conversation_task_id` 归账，实际文件边界沿
   当前 `run_workspace` 执行。任何 child cwd 改变都不得 reopen、supersede 或重新绑定父
   conversation task。
-- 失败工具必须携带注册错误码；不得依赖 `ToolExecutionResult` 的 `UNKNOWN_ERROR` 兜底表达已知参数、
+- 失败工具必须携带注册错误码；不得依赖 `ToolHandlerOutcome` 的 `UNKNOWN_ERROR` 兜底表达已知参数、
   scope 或资源错误。
 - 新增 Schema assertion 必须同时被 canonical compiler、provider projection 和 runtime validator 支持；
   否则在注册/启动边界 fail-closed，不能只让 provider 看见而执行端忽略。

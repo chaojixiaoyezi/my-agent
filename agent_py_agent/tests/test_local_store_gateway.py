@@ -36,6 +36,7 @@ def test_local_rebuild_indexes_memory_gateway_and_subagents():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
+            tool_protocol="text",
             model_backend="echo",
             my_agent_home=str(root / "home"),
             memory_path="memory.jsonl",
@@ -46,7 +47,7 @@ def test_local_rebuild_indexes_memory_gateway_and_subagents():
             local_store_events_path="local_store/events.jsonl",
         )
         agent = SimpleAgent(cfg, root)
-        agent.remember("重建测试记忆：local-rebuild 应该重新索引。", kind="note")
+        agent.remember("重建测试记忆：local-rebuild 应该重新索引。", kind="fact")
         task = agent.subagents.create_run(
             goal="local-rebuild 子代理索引测试",
             thought="生成一个可被重建扫描到的工单。",
@@ -64,13 +65,20 @@ def test_local_rebuild_indexes_memory_gateway_and_subagents():
         assert _process_gateway_requests(agent, gpaths) == 1
 
         agent.local_store.reset()
-        result = rebuild_local_store(agent, sources={"memory", "gateway", "subagent", "fts"}, reset=False)
+        result = rebuild_local_store(
+            agent, sources={"memory", "gateway", "subagent", "fts"}, reset=False
+        )
 
         counts = result["source_counts"]
         assert counts["memory"] == 1
         assert counts["gateway_request"] >= 1
         assert counts["subagent_run"] == 1
-        assert agent.local_store.search("local-rebuild 子代理", source_type="subagent_run")[0].source_id == task.id
+        assert (
+            agent.local_store.search("local-rebuild 子代理", source_type="subagent_run")[
+                0
+            ].source_id
+            == task.id
+        )
 
         doctor = build_local_doctor_report(agent)
         assert doctor["memory_count"] == 1
@@ -79,11 +87,15 @@ def test_local_rebuild_indexes_memory_gateway_and_subagents():
 
 # ── Shared gateway fixture helpers ─────────────────────────────────────────────
 
-def _setup_agent_with_gateway(cfg_overrides: dict | None = None) -> tuple[Path, SimpleAgent, AdapterPaths]:
+
+def _setup_agent_with_gateway(
+    cfg_overrides: dict | None = None,
+) -> tuple[Path, SimpleAgent, AdapterPaths]:
     """Create agent with gateway workspace and all directory paths created."""
     temp_dir = tempfile.TemporaryDirectory()
     root = Path(temp_dir.name)
     cfg = AgentConfig(
+        tool_protocol="text",
         model_backend="echo",
         gateway_workspace="gateway",
         local_store_path="local_store/local.db",
@@ -152,7 +164,9 @@ def _track_heartbeat_during_run(agent: SimpleAgent, paths, request_path: Path) -
             if updated > initial:
                 break
         observed.extend([initial, updated])
-        return AgentRunResult(prompt=f"prompt: {user_prompt}", response="ok", backend="test", used_memories=0)
+        return AgentRunResult(
+            prompt=f"prompt: {user_prompt}", response="ok", backend="test", used_memories=0
+        )
 
     agent.run = slow_run  # type: ignore[method-assign]
     try:
@@ -191,12 +205,16 @@ def test_gateway_processing_recovery_requeues_then_fails_after_attempt_limit():
 
     # First request: requeue (attempts=1, lease timed out)
     request_path = _write_processing_request(paths, "gwreq-timeout", attempts=1)
-    recovered = recover_gateway_processing_requests(paths, startup=False, max_attempts=2, timeout_seconds=1, agent=agent)
+    recovered = recover_gateway_processing_requests(
+        paths, startup=False, max_attempts=2, timeout_seconds=1, agent=agent
+    )
     _assert_requeued(paths, recovered, request_path)
 
     # Second request: fail (attempts=2, lease timed out, exhausted)
     second_path = _write_processing_request(paths, "gwreq-fail", attempts=2)
-    failed = recover_gateway_processing_requests(paths, startup=False, max_attempts=2, timeout_seconds=1, agent=agent)
+    failed = recover_gateway_processing_requests(
+        paths, startup=False, max_attempts=2, timeout_seconds=1, agent=agent
+    )
     _assert_failed(paths, failed, second_path, "gwreq-fail")
 
 
@@ -206,7 +224,9 @@ def test_gateway_processing_recovery_zero_attempt_limit_is_unlimited():
     )
 
     request_path = _write_processing_request(paths, "gwreq-unlimited", attempts=99)
-    recovered = recover_gateway_processing_requests(paths, startup=False, max_attempts=0, timeout_seconds=1, agent=agent)
+    recovered = recover_gateway_processing_requests(
+        paths, startup=False, max_attempts=0, timeout_seconds=1, agent=agent
+    )
 
     _assert_requeued(paths, recovered, request_path)
 
@@ -216,7 +236,9 @@ def test_gateway_worker_refreshes_processing_lease_heartbeat_during_long_run():
     root, agent, paths = _setup_agent_with_gateway(
         {"gateway_heartbeat_interval": 1, "gateway_processing_timeout_seconds": 1}
     )
-    request_id, request_path, _ = submit_gateway_ask(paths, params=GatewayAskParams(prompt="长任务 lease heartbeat 测试", save=False))
+    request_id, request_path, _ = submit_gateway_ask(
+        paths, params=GatewayAskParams(prompt="长任务 lease heartbeat 测试", save=False)
+    )
     observed = _track_heartbeat_during_run(agent, paths, request_path)
     _assert_heartbeat_refreshed(observed, paths, request_path, request_id)
 
@@ -225,6 +247,7 @@ def test_gateway_recovery_uses_lease_heartbeat_before_started_at():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
+            tool_protocol="text",
             model_backend="echo",
             gateway_workspace="gateway",
             local_store_path="local_store/local.db",
@@ -270,6 +293,7 @@ def test_gateway_recovery_archives_processing_duplicate_when_response_exists():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
+            tool_protocol="text",
             model_backend="echo",
             gateway_workspace="gateway",
             local_store_path="local_store/local.db",
@@ -317,6 +341,7 @@ def test_file_adapter_writes_gateway_response_to_outbox():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
+            tool_protocol="text",
             model_backend="echo",
             gateway_workspace="gateway",
             adapter_workspace="adapter",

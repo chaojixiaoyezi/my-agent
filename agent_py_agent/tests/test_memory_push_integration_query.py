@@ -1,182 +1,155 @@
-"""记忆推模式集成测试。
-
-测试记忆推模式在各个决策点的实际效果：
-1. dispatch 失败后的记忆注入
-2. planner 决策前的记忆注入（预留）
-3. 记忆格式化和注入
-4. 记忆查询相关性
-"""
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
-import pytest
+from agent_py_agent.agent.memory_push import (
+    _build_memory_query,
+    _structured_scope_attributes,
+    push_relevant_memories,
+)
+from agent_py_agent.tests._memory_push_v2_harness import formal_memory_agent, promote_lesson
 
 
-class TestMemoryQueryRelevance:
-    """测试记忆查询相关性。"""
+def test_query_contains_reason_failure_type_and_goal() -> None:
+    query = _build_memory_query(
+        "failure",
+        {"failure_type": "timeout", "goal": "数据库迁移失败"},
+    )
 
-    def test_push_relevant_memories_no_memory_attr(self, tmp_path: Path):
-        """agent 没有 memory 属性时返回空列表。"""
-        from agent_py_agent.agent.memory_push import push_relevant_memories
+    assert query.split()[:3] == ["failure", "timeout", "数据库迁移失败"]
 
-        agent = MagicMock()
-        del agent.memory  # 没有 memory 属性
 
-        result = push_relevant_memories(agent, "timeout", {}, limit=3)
-        assert result == []
+def test_query_does_not_embed_task_identity() -> None:
+    query = _build_memory_query(
+        "failure",
+        {"task_id": "secret-task-id", "goal": "验证失败"},
+    )
 
-    def test_push_relevant_memories_none_memory(self, tmp_path: Path):
-        """agent.memory 为 None 时返回空列表。"""
-        from agent_py_agent.agent.memory_push import push_relevant_memories
+    assert "secret-task-id" not in query
 
-        agent = MagicMock()
-        agent.memory = None
 
-        result = push_relevant_memories(agent, "timeout", {}, limit=3)
-        assert result == []
+def test_query_goal_is_bounded() -> None:
+    query = _build_memory_query("planning", {"goal": "A" * 1000})
 
-    def test_push_relevant_memories_with_context(self, tmp_path: Path):
-        """验证 context 参数被正确使用。"""
-        from agent_py_agent.agent.memory_push import push_relevant_memories
-        from agent_py_agent.agent.memory_store import MemoryRecord
+    assert len(query) < 150
 
-        agent = MagicMock()
-        agent.memory.search.return_value = [
-            MemoryRecord(
-                role="system",
-                content="超时处理技巧",
-                kind="lesson_general",
-                tags=["timeout"],
-                created_at=1234567890.0,
-            ),
-        ]
 
-        context = {
-            "task_id": "test_123",
-            "goal": "执行长时间任务",
-            "failure_type": "timeout",
+def test_structured_scope_copies_only_typed_fields() -> None:
+    attrs = _structured_scope_attributes(
+        {
+            "goal": "请在 company:acme 范围回答",
+            "company_id": "company:acme",
+            "task_attributes": {"project_id": "project:alpha", "unrelated": "kept"},
         }
-        result = push_relevant_memories(agent, "timeout", context, limit=3)
+    )
 
-        # 验证 search 被调用（参数不重要，重要的是调用了）
-        agent.memory.search.assert_called_once()
+    assert attrs["company_id"] == "company:acme"
+    assert attrs["project_id"] == "project:alpha"
+    assert "goal" not in attrs
 
-    def test_push_relevant_memories_timeout_trigger(self, tmp_path: Path):
-        """timeout 触发类型正确查询记忆。"""
-        from agent_py_agent.agent.memory_push import push_relevant_memories
-        from agent_py_agent.agent.memory_store import MemoryRecord
 
-        agent = MagicMock()
-        agent.memory.search.return_value = [
-            MemoryRecord(
-                role="system",
-                content="timeout lesson",
-                kind="lesson_general",
-                tags=["timeout"],
-                created_at=1234567890.0,
-            ),
-        ]
+def test_company_scope_requires_typed_company_id(tmp_path: Path) -> None:
+    agent = formal_memory_agent(tmp_path)
+    promote_lesson(
+        agent,
+        content="公司部署失败时核对环境变量。",
+        subject_key="company.deploy.failure",
+        scope_type="company",
+        scope_key="company:acme",
+    )
 
-        result = push_relevant_memories(agent, "timeout", {"failure_type": "timeout"}, limit=3)
+    absent = push_relevant_memories(
+        agent,
+        "failure",
+        {"goal": "company:acme 部署失败"},
+    )
+    present = push_relevant_memories(
+        agent,
+        "failure",
+        {"goal": "部署失败", "company_id": "company:acme"},
+    )
 
-        assert isinstance(result, list)
+    assert absent == []
+    assert len(present) == 1
 
-    def test_push_relevant_memories_failure_trigger(self, tmp_path: Path):
-        """failure 触发类型正确查询记忆。"""
-        from agent_py_agent.agent.memory_push import push_relevant_memories
-        from agent_py_agent.agent.memory_store import MemoryRecord
 
-        agent = MagicMock()
-        agent.memory.search.return_value = [
-            MemoryRecord(
-                role="system",
-                content="failure lesson",
-                kind="lesson_task",
-                tags=["failure"],
-                created_at=1234567890.0,
-            ),
-        ]
+def test_session_scope_requires_typed_session_id(tmp_path: Path) -> None:
+    agent = formal_memory_agent(tmp_path)
+    promote_lesson(
+        agent,
+        content="本会话失败时保留现场。",
+        subject_key="session.failure.preserve",
+        scope_type="session",
+        scope_key="session:s1",
+    )
 
-        result = push_relevant_memories(agent, "failure", {"failure_type": "parse_error"}, limit=3)
+    assert push_relevant_memories(agent, "failure", {"goal": "会话失败"}) == []
+    assert push_relevant_memories(
+        agent,
+        "failure",
+        {"goal": "会话失败", "session_id": "session:s1"},
+    )
 
-        assert isinstance(result, list)
 
-    def test_push_relevant_memories_planning_trigger(self, tmp_path: Path):
-        """planning 触发类型正确查询 context 类型记忆。"""
-        from agent_py_agent.agent.memory_push import push_relevant_memories
-        from agent_py_agent.agent.memory_store import MemoryRecord
+def test_project_task_id_accepts_exact_project_scope(tmp_path: Path) -> None:
+    agent = formal_memory_agent(tmp_path)
+    promote_lesson(
+        agent,
+        content="项目失败时读取迁移清单。",
+        subject_key="project.failure.migration",
+        scope_type="project",
+        scope_key="project:alpha",
+    )
 
-        agent = MagicMock()
-        agent.memory.search.return_value = [
-            MemoryRecord(
-                role="system",
-                content="planning context",
-                kind="context",
-                tags=["planning"],
-                created_at=1234567890.0,
-            ),
-        ]
+    assert push_relevant_memories(
+        agent,
+        "failure",
+        {"task_id": "alpha", "goal": "项目失败"},
+    )
 
-        result = push_relevant_memories(agent, "planning", {"goal": "设计架构"}, limit=3)
 
-        assert isinstance(result, list)
+def test_declared_memory_scope_is_accepted_as_typed_data(tmp_path: Path) -> None:
+    agent = formal_memory_agent(tmp_path)
+    promote_lesson(
+        agent,
+        content="临时演练失败时不执行外部写入。",
+        subject_key="temporary.drill.failure",
+        scope_type="temporary",
+        scope_key="temporary:drill-1",
+    )
 
-    def test_push_relevant_memories_general_trigger(self, tmp_path: Path):
-        """general 触发类型返回所有类型记忆。"""
-        from agent_py_agent.agent.memory_push import push_relevant_memories
-        from agent_py_agent.agent.memory_store import MemoryRecord
+    records = push_relevant_memories(
+        agent,
+        "failure",
+        {
+            "goal": "演练失败",
+            "memory_scope": {
+                "scope_type": "temporary",
+                "scope_key": "temporary:drill-1",
+            },
+        },
+    )
 
-        agent = MagicMock()
-        agent.memory.search.return_value = [
-            MemoryRecord(
-                role="system",
-                content="general lesson",
-                kind="lesson_general",
-                tags=["general"],
-                created_at=1234567890.0,
-            ),
-        ]
+    assert len(records) == 1
 
-        result = push_relevant_memories(agent, "general", {}, limit=3)
 
-        assert isinstance(result, list)
+def test_invalid_declared_scope_cannot_expand_to_global(tmp_path: Path) -> None:
+    agent = formal_memory_agent(tmp_path)
+    promote_lesson(
+        agent,
+        content="公司失败处理规则。",
+        subject_key="company.failure.rule",
+        scope_type="company",
+        scope_key="company:acme",
+    )
 
-    def test_push_relevant_memories_skip_short_content(self, tmp_path: Path):
-        """验证跳过内容太短的记录（< 10 字符）。"""
-        from agent_py_agent.agent.memory_push import push_relevant_memories
-        from agent_py_agent.agent.memory_store import MemoryRecord
+    records = push_relevant_memories(
+        agent,
+        "failure",
+        {
+            "goal": "公司失败",
+            "memory_scope": {"scope_type": "global", "scope_key": "company:acme"},
+        },
+    )
 
-        agent = MagicMock()
-        agent.memory.search.return_value = [
-            MemoryRecord(
-                role="system",
-                content="短",  # 太短，应该被跳过
-                kind="lesson_general",
-                tags=["test"],
-                created_at=1234567890.0,
-            ),
-        ]
-
-        result = push_relevant_memories(agent, "timeout", {}, limit=3)
-
-        # 短内容被跳过，结果应为空
-        assert len(result) == 0
-
-    def test_push_relevant_memories_goal_truncation(self, tmp_path: Path):
-        """验证超长 goal 被截断到 50 字符。"""
-        from agent_py_agent.agent.memory_push import push_relevant_memories
-        from agent_py_agent.agent.memory_store import MemoryRecord
-
-        agent = MagicMock()
-        agent.memory.search.return_value = []
-
-        long_goal = "A" * 100
-        context = {"task_id": "task_long", "goal": long_goal}
-        push_relevant_memories(agent, "timeout", context, limit=3)
-
-        # 验证 search 被调用，参数中 goal 长度不超过 50
-        call_args = agent.memory.search.call_args
-        query = call_args[0][0] if call_args[0] else call_args[1].get("query", "")
-        assert len(query) < 150  # goal 被截断，query 不会太长
+    assert records == []

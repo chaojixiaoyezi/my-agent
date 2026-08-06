@@ -99,7 +99,9 @@ def test_subagent_debug_trace_records_task_creation_when_enabled(tmp_path):
     """开启等级后，创建子代理会写 refs-only 调试事件到内部 runtime。"""
     manager = SubAgentManager(tmp_path, debug_trace_level=1)
 
-    task = manager.create_run(goal="write proof file", thought="observe", plan=["create"], role="worker", depth=2)
+    task = manager.create_run(
+        goal="write proof file", thought="observe", plan=["create"], role="worker", depth=2
+    )
 
     records = _trace_records(tmp_path)
     assert len(records) == 1
@@ -118,7 +120,9 @@ def test_subagent_debug_trace_records_task_creation_when_enabled(tmp_path):
     }
 
 
-def test_runner_stage_trace_reports_current_run_load_error(caplog: pytest.LogCaptureFixture) -> None:
+def test_runner_stage_trace_reports_current_run_load_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """runner 追踪读不到当前 run 时要有 warning，不能静默丢掉心跳线索。"""
 
     class BrokenSubagents:
@@ -126,7 +130,9 @@ def test_runner_stage_trace_reports_current_run_load_error(caplog: pytest.LogCap
             raise OSError("canonical state unavailable")
 
     agent = SimpleNamespace(_current_subagent_run_id="run-1", subagents=BrokenSubagents())
-    request = RunnerModelStageTraceRequest(agent=agent, params=SimpleNamespace(), tool_rounds=1, prompt="hello")
+    request = RunnerModelStageTraceRequest(
+        agent=agent, params=SimpleNamespace(), tool_rounds=1, prompt="hello"
+    )
 
     with caplog.at_level(logging.WARNING):
         trace_runner_model_request_started(request)
@@ -155,7 +161,10 @@ def test_subagent_debug_trace_records_runner_result_when_enabled(tmp_path):
     )
 
     records = _trace_records(tmp_path)
-    assert [record["event_type"] for record in records] == ["task_created", "runner_result_recorded"]
+    assert [record["event_type"] for record in records] == [
+        "task_created",
+        "runner_result_recorded",
+    ]
     runner_record = records[-1]
     assert runner_record["level"] == 2
     assert runner_record["run_id"] == task.id
@@ -233,7 +242,9 @@ def test_subagent_debug_trace_records_due_action_and_recovery_reports_at_level_t
     child_id = manager.hierarchy.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=root.id,
-            child_specs=[HierarchyChildSpec(goal="child waits", agent_name="child", role="coordinator")],
+            child_specs=[
+                HierarchyChildSpec(goal="child waits", agent_name="child", role="coordinator")
+            ],
             apply=True,
         )
     ).created_run_ids[0]
@@ -271,7 +282,9 @@ def test_subagent_debug_trace_records_dispatch_reports_at_level_three(tmp_path):
         ok=True,
         message="planned",
     )
-    manager.dispatch.write_dispatch_report(manager.dispatch.build_dispatch_report([record], dry_run=True))
+    manager.dispatch.write_dispatch_report(
+        manager.dispatch.build_dispatch_report([record], dry_run=True)
+    )
     watch = manager.dispatch.make_dispatch_watch_record(
         cycle=1,
         dry_run=True,
@@ -280,7 +293,9 @@ def test_subagent_debug_trace_records_dispatch_reports_at_level_three(tmp_path):
         dispatch_record_count=1,
         dispatch_summary={"run_subagent": 1},
     )
-    manager.dispatch.write_dispatch_watch_report(manager.dispatch.build_dispatch_watch_report([watch], dry_run=True))
+    manager.dispatch.write_dispatch_watch_report(
+        manager.dispatch.build_dispatch_watch_report([watch], dry_run=True)
+    )
 
     records = _trace_records(tmp_path)
     by_type = {record["event_type"]: record for record in records}
@@ -293,6 +308,7 @@ def test_subagent_debug_trace_records_dispatch_reports_at_level_three(tmp_path):
 def test_subagent_debug_trace_records_runner_model_and_tool_stages(tmp_path):
     """等级 3 记录模型请求/响应和工具调用阶段，便于定位长 runner 卡点。"""
     cfg = AgentConfig(
+        tool_protocol="text",
         enable_tools=True,
         model_backend="echo",
         subagent_workspace="subs",
@@ -317,10 +333,14 @@ def test_subagent_debug_trace_records_runner_model_and_tool_stages(tmp_path):
     assert event_types.count("runner_model_response_received") == 2
     assert "runner_tool_call_started" in event_types
     assert "runner_tool_call_finished" in event_types
-    tool_started = next(record for record in records if record["event_type"] == "runner_tool_call_started")
-    tool_finished = next(record for record in records if record["event_type"] == "runner_tool_call_finished")
+    tool_started = next(
+        record for record in records if record["event_type"] == "runner_tool_call_started"
+    )
+    tool_finished = next(
+        record for record in records if record["event_type"] == "runner_tool_call_finished"
+    )
     assert tool_started["tool"] == "list_files"
-    assert tool_started["payload_keys"] == ["path", "tool"]
+    assert tool_started["payload_keys"] == ["path"]
     assert "payload" not in tool_started
     assert tool_finished["ok"] is True
     assert tool_finished["output_chars"] > 0
@@ -399,6 +419,7 @@ def _trace_child_tool_started(manager: SubAgentManager, root_id: str, child_id: 
         RunnerToolStageTraceRequest,
         trace_runner_tool_call_started,
     )
+    from agent_py_agent.tests._tool_runtime_harness import canonical_history_call
 
     agent = SimpleNamespace(subagents=manager, _current_subagent_run_id=child_id)
     trace_runner_tool_call_started(
@@ -407,12 +428,14 @@ def _trace_child_tool_started(manager: SubAgentManager, root_id: str, child_id: 
             params=SimpleNamespace(source="test", request_id="", run_id=child_id, task_id=root_id),
             tool_rounds=1,
             idx=1,
-            payload={"tool": "write_file", "path": "x"},
+            call=canonical_history_call("write_file", {"path": "x"}, run_id=child_id),
         )
     )
 
 
-def _assert_ancestor_heartbeats_refreshed(manager: SubAgentManager, run_ids: list[str], old: float) -> None:
+def _assert_ancestor_heartbeats_refreshed(
+    manager: SubAgentManager, run_ids: list[str], old: float
+) -> None:
     for run_id in run_ids:
         assert manager.load(run_id).heartbeat_at > old
 
@@ -420,6 +443,7 @@ def _assert_ancestor_heartbeats_refreshed(manager: SubAgentManager, run_ids: lis
 def test_subagent_debug_trace_level_four_records_stage_previews(tmp_path):
     """等级 4 写 prompt/response/tool 的短预览，方便实时 tail 定位模型传参。"""
     cfg = AgentConfig(
+        tool_protocol="text",
         enable_tools=True,
         model_backend="echo",
         subagent_workspace="subs",
@@ -439,10 +463,18 @@ def test_subagent_debug_trace_level_four_records_stage_previews(tmp_path):
 
     assert result.ok
     records = _trace_records(tmp_path / "subs")
-    model_started = next(record for record in records if record["event_type"] == "runner_model_request_started")
-    model_received = next(record for record in records if record["event_type"] == "runner_model_response_received")
-    tool_started = next(record for record in records if record["event_type"] == "runner_tool_call_started")
-    tool_finished = next(record for record in records if record["event_type"] == "runner_tool_call_finished")
+    model_started = next(
+        record for record in records if record["event_type"] == "runner_model_request_started"
+    )
+    model_received = next(
+        record for record in records if record["event_type"] == "runner_model_response_received"
+    )
+    tool_started = next(
+        record for record in records if record["event_type"] == "runner_tool_call_started"
+    )
+    tool_finished = next(
+        record for record in records if record["event_type"] == "runner_tool_call_finished"
+    )
     assert "observe detailed runner previews" in model_started["task_goal_preview"]
     assert model_started["prompt_preview"]
     assert "TOOL_CALL" in model_received["response_preview"]
@@ -454,6 +486,7 @@ def test_subagent_debug_trace_level_four_records_stage_previews(tmp_path):
 def test_subagent_debug_trace_level_five_writes_detail_refs(tmp_path):
     """等级 5 把完整 prompt/response/tool payload/output 写到内部 detail 文件。"""
     cfg = AgentConfig(
+        tool_protocol="text",
         enable_tools=True,
         model_backend="echo",
         subagent_workspace="subs",
@@ -473,10 +506,18 @@ def test_subagent_debug_trace_level_five_writes_detail_refs(tmp_path):
 
     assert result.ok
     records = _trace_records(tmp_path / "subs")
-    model_started = next(record for record in records if record["event_type"] == "runner_model_request_started")
-    model_received = next(record for record in records if record["event_type"] == "runner_model_response_received")
-    tool_started = next(record for record in records if record["event_type"] == "runner_tool_call_started")
-    tool_finished = next(record for record in records if record["event_type"] == "runner_tool_call_finished")
+    model_started = next(
+        record for record in records if record["event_type"] == "runner_model_request_started"
+    )
+    model_received = next(
+        record for record in records if record["event_type"] == "runner_model_response_received"
+    )
+    tool_started = next(
+        record for record in records if record["event_type"] == "runner_tool_call_started"
+    )
+    tool_finished = next(
+        record for record in records if record["event_type"] == "runner_tool_call_finished"
+    )
     assert "observe full detail refs" in _read_debug_detail(model_started["prompt_detail_ref"])
     assert _read_debug_detail(model_received["response_detail_ref"])
     response_details = [
@@ -492,6 +533,7 @@ def test_subagent_debug_trace_level_five_writes_detail_refs(tmp_path):
 def test_subagent_debug_trace_records_runner_model_request_failure(tmp_path):
     """等级 3 记录模型请求异常，避免 trace 只停在 request_started。"""
     cfg = AgentConfig(
+        tool_protocol="text",
         enable_tools=True,
         model_backend="echo",
         subagent_workspace="subs",
@@ -513,13 +555,16 @@ def test_subagent_debug_trace_records_runner_model_request_failure(tmp_path):
     event_types = [record["event_type"] for record in records]
     assert "runner_model_request_started" in event_types
     assert "runner_model_request_failed" in event_types
-    failed = next(record for record in records if record["event_type"] == "runner_model_request_failed")
+    failed = next(
+        record for record in records if record["event_type"] == "runner_model_request_failed"
+    )
     assert failed["error_type"] == "RuntimeError"
     assert "trace backend failed" in failed["error_preview"]
 
 
 def test_subagent_run_failure_classifies_provider_timeout(tmp_path):
     cfg = AgentConfig(
+        tool_protocol="text",
         enable_tools=True,
         model_backend="echo",
         subagent_workspace="subs",
@@ -541,7 +586,8 @@ def test_subagent_run_failure_classifies_provider_timeout(tmp_path):
     assert recorded.failure_type == "provider_timeout"
     assert "模型接口请求超时" in result.message
     failed = next(
-        record for record in _trace_records(tmp_path / "subs")
+        record
+        for record in _trace_records(tmp_path / "subs")
         if record["event_type"] == "runner_model_request_failed"
     )
     assert failed["error_type"] == "ProviderTimeoutError"
@@ -550,8 +596,11 @@ def test_subagent_run_failure_classifies_provider_timeout(tmp_path):
 def test_subagent_run_failure_classifies_provider_transient(tmp_path, monkeypatch):
     from agent_py_agent.agent.agent_core import provider_transient_auto_resume
 
-    monkeypatch.setattr(provider_transient_auto_resume, "provider_transient_retry_delays", lambda _policy=None: ())
+    monkeypatch.setattr(
+        provider_transient_auto_resume, "provider_transient_retry_delays", lambda _policy=None: ()
+    )
     cfg = AgentConfig(
+        tool_protocol="text",
         enable_tools=True,
         model_backend="echo",
         subagent_workspace="subs",
@@ -573,7 +622,8 @@ def test_subagent_run_failure_classifies_provider_transient(tmp_path, monkeypatc
     assert recorded.failure_type == "transient_error"
     assert "模型接口临时断开" in result.message
     failed = next(
-        record for record in _trace_records(tmp_path / "subs")
+        record
+        for record in _trace_records(tmp_path / "subs")
         if record["event_type"] == "runner_model_request_failed"
     )
     assert failed["error_type"] == "ProviderTransientError"

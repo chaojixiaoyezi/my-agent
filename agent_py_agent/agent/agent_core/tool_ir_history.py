@@ -40,13 +40,8 @@ text 协议路径一字不动。
 from copy import deepcopy
 from typing import Any
 
-from ..backends.tool_ir import (
-    AssistantTurn,
-    CompactionSummary,
-    ToolCall,
-    ToolResult,
-    UserTurn,
-)
+from ..backends.tool_ir import AssistantTurn, CompactionSummary, UserTurn
+from ..tooling.runtime_contracts import ToolCall, ToolResult
 
 
 def native_tool_ir_history(params: object) -> list[Any]:
@@ -117,29 +112,17 @@ def record_tool_call_ir(
     params: object,
     *,
     tool_rounds: int,
-    payload: object,
-    call_id: str,
-    result_content: str,
-    is_error: bool,
+    call: ToolCall,
+    result: ToolResult,
 ) -> None:
-    """把一次工具调用的「调用 + 结果」追加进 IR 历史（native 专用）。
+    """Append one canonical call/result pair to native history."""
 
-    ``call_id`` 必须是真实 provider tool_use id（native 下由 ``payload["call_id"]``
-    或结果侧 ``ToolExecutionResult.call_id`` 提供），出站 tool_result 的 ``tool_use_id``
-    才能与 assistant 的 ``tool_use.id`` 配对。本轮的 AssistantTurn 通常已由
-    ``open_assistant_turn_ir`` 开好；若没开（防御）这里会以空文本补开。
-    """
+    if call.call_id != result.call_id or call.tool_name != result.tool_name:
+        raise ValueError("canonical tool call/result pair mismatch")
     history = native_tool_ir_history(params)
     turn = _ensure_assistant_turn(history, tool_rounds, "")
-    call = ToolCall.from_payload(payload, fallback_id=call_id)
     turn.tool_calls.append(call)
-    history.append(
-        ToolResult(
-            tool_call_id=call.id,
-            content=result_content,
-            is_error=is_error,
-        )
-    )
+    history.append(result)
 
 
 def drop_tool_call_pairs(params: object, call_ids: set[str]) -> int:
@@ -153,7 +136,7 @@ def drop_tool_call_pairs(params: object, call_ids: set[str]) -> int:
         return 0
     history = native_tool_ir_history(params)
     removed = sum(
-        1 for item in history if isinstance(item, ToolResult) and item.tool_call_id in call_ids
+        1 for item in history if isinstance(item, ToolResult) and item.call_id in call_ids
     )
     rebuilt = [_rewritten_history_item(item, call_ids) for item in history]
     history[:] = [
@@ -167,7 +150,7 @@ def drop_tool_call_pairs(params: object, call_ids: set[str]) -> int:
 def _rewritten_history_item(item: Any, call_ids: set[str]) -> Any:
     """摘除命中的 ToolResult（返回 None）；AssistantTurn 删掉命中的 ToolCall；其余原样。"""
     if isinstance(item, ToolResult):
-        return None if item.tool_call_id in call_ids else item
+        return None if item.call_id in call_ids else item
     if isinstance(item, AssistantTurn):
         return _assistant_turn_without(item, call_ids)
     return item
@@ -219,7 +202,7 @@ def _last_turn_marker(history: list[Any]) -> tuple[int, AssistantTurn] | None:
 # LLM: 删除任何 tool_use 都会破坏原厂 thinking 签名与块完整性，因此重写后的 turn 必须退回 text+剩余 canonical calls，不能保留旧 content_blocks。
 # 函数用途: 从一轮 assistant 历史中删除指定工具调用，并在发生结构变化时清掉失效的厂商原生块。
 def _assistant_turn_without(turn: AssistantTurn, call_ids: set[str]) -> AssistantTurn:
-    kept = [call for call in turn.tool_calls if call.id not in call_ids]
+    kept = [call for call in turn.tool_calls if call.call_id not in call_ids]
     if len(kept) == len(turn.tool_calls):
         return turn
     if isinstance(turn, _MarkedAssistantTurn):

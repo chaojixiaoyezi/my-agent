@@ -144,9 +144,3 @@ def _sync_runtime_refs(task: SubAgentTask, task_workspace_paths) -> None:
     task.daily_ledger_last_event_id = task_workspace_paths.daily_ledger.event_id
     task.task_artifact_manifest_jsonl = str(task_workspace_paths.artifact_manifest.task_manifest_jsonl)
     task.agent_run_artifact_manifest_jsonl = str(task_workspace_paths.artifact_manifest.agent_manifest_jsonl)
-    task.agent_run_memory_gate_dir = str(task_workspace_paths.memory_gate.gate_dir)
-    task.agent_run_memory_candidates_jsonl = str(task_workspace_paths.memory_gate.candidates_jsonl)
-    task.agent_run_memory_review_queue_jsonl = str(task_workspace_paths.memory_gate.review_queue_jsonl)
-    task.agent_run_memory_decisions_jsonl = str(task_workspace_paths.memory_gate.decisions_jsonl)
-    task.agent_run_memory_exports_jsonl = str(task_workspace_paths.memory_gate.exports_jsonl)
-    task.agent_run_skill_spark_gate_json = str(task_workspace_paths.memory_gate.skill_spark_gate_json)

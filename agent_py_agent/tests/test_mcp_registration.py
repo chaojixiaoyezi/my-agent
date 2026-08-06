@@ -30,6 +30,10 @@ from agent_py_agent.agent.tooling.mcp_registration import (
     register_mcp_servers,
     sanitize_name_component,
 )
+from agent_py_agent.tests._tool_runtime_harness import (
+    canonical_test_call,
+    execute_canonical_test_call,
+)
 from agent_py_agent.tests.test_mcp_client import _ECHO_SERVER
 
 pytestmark = pytest.mark.integration
@@ -86,7 +90,7 @@ def test_input_schema_conversion_handles_missing_or_empty_schema():
     assert mcp_schema_parameters({"type": "object"}) == {}
 
 
-def test_build_proxy_tool_spec_matches_native_tool_use_contract():
+def test_build_proxy_tool_contract_matches_native_tool_use_contract():
     info = MCPToolInfo(
         name="add",
         description="Add two integers",
@@ -97,21 +101,20 @@ def test_build_proxy_tool_spec_matches_native_tool_use_contract():
         },
     )
     proxy = build_proxy_tool(client=None, server_name="calc", info=info)  # type: ignore[arg-type]
-    spec = proxy.spec
+    spec = proxy.model_spec
+    policy = proxy.runtime_policy
     assert spec.name == "mcp__calc__add"
     assert spec.category == "mcp"
-    assert spec.effect == "dangerous"
-    assert spec.output_trust == "external_data"
-    assert spec.idempotency_scope == "operation"
-    assert spec.requires_approval is True
-    assert spec.required_parameters == []
-    assert spec.parameter_schema == {}
+    assert policy.effect_resolver.default_effect == "dangerous"
+    assert policy.output_policy.trust == "external_data"
+    assert policy.idempotency_policy.scope == "operation"
+    assert policy.approval_policy.mode == "dangerous"
     assert spec.input_schema["properties"]["a"] == {"type": "integer"}
 
     # 经 backend schema 转换后是合法的 Anthropic input_schema（对齐 native tool_use）
-    from agent_py_agent.agent.backends.tool_schema import tool_spec_to_input_schema
+    from agent_py_agent.agent.backends.tool_schema import tool_model_spec_to_input_schema
 
-    input_schema = tool_spec_to_input_schema(spec)
+    input_schema = tool_model_spec_to_input_schema(spec)
     assert input_schema["type"] == "object"
     assert input_schema["properties"]["a"]["type"] == "integer"
     assert sorted(input_schema["required"]) == ["a", "b"]
@@ -143,18 +146,13 @@ def test_mcp_full_schema_is_preserved_for_provider_and_runtime():
         info=MCPToolInfo(name="rank", description="rank", input_schema=schema),
     )
 
-    from agent_py_agent.agent.backends.tool_schema import tool_spec_to_input_schema
+    from agent_py_agent.agent.backends.tool_schema import tool_model_spec_to_input_schema
 
-    assert proxy.spec.input_schema == schema
-    assert tool_spec_to_input_schema(proxy.spec) == schema
+    assert proxy.model_spec.input_schema == schema
+    assert tool_model_spec_to_input_schema(proxy.model_spec) == schema
 
 
 def test_mcp_schema_gate_blocks_invalid_arguments_before_remote_call(tmp_path):
-    from agent_py_agent.agent.tooling.registry_execution import (
-        ExecuteRegistryCallParams,
-        execute_registry_call,
-    )
-
     client = _FakeClient(result={"content": "must not run", "isError": False})
     proxy = build_proxy_tool(
         client=client,  # type: ignore[arg-type]
@@ -175,26 +173,19 @@ def test_mcp_schema_gate_blocks_invalid_arguments_before_remote_call(tmp_path):
         effect="read_only",
     )
 
-    result = execute_registry_call(
-        ExecuteRegistryCallParams(
-            payload={"tool": proxy.spec.name, "a": 0, "b": 2},
-            tools={proxy.spec.name: proxy},
-            workspace_root=tmp_path,
-            workspace_roots=[tmp_path],
-        )
-    )
+    result = execute_canonical_test_call(
+        tmp_path,
+        tools={proxy.model_spec.name: proxy},
+        tool_name=proxy.model_spec.name,
+        arguments={"a": 0, "b": 2},
+    ).result
 
     assert result.ok is False
     assert result.error_code == "TOOL_INVALID_ARGUMENTS"
     assert client.calls == []
 
 
-def test_mcp_schema_gate_coerces_safe_types_and_strips_host_fields(tmp_path):
-    from agent_py_agent.agent.tooling.registry_execution import (
-        ExecuteRegistryCallParams,
-        execute_registry_call,
-    )
-
+def test_mcp_schema_gate_rejects_wrong_types_without_remote_call(tmp_path):
     client = _FakeClient(result={"content": "3", "isError": False})
     proxy = build_proxy_tool(
         client=client,  # type: ignore[arg-type]
@@ -215,18 +206,17 @@ def test_mcp_schema_gate_coerces_safe_types_and_strips_host_fields(tmp_path):
         effect="read_only",
     )
 
-    result = execute_registry_call(
-        ExecuteRegistryCallParams(
-            payload={"tool": proxy.spec.name, "a": "1", "b": "2"},
-            tools={proxy.spec.name: proxy},
-            workspace_root=tmp_path,
-            workspace_roots=[tmp_path],
-        )
-    )
+    result = execute_canonical_test_call(
+        tmp_path,
+        tools={proxy.model_spec.name: proxy},
+        tool_name=proxy.model_spec.name,
+        arguments={"a": "1", "b": "2"},
+    ).result
 
-    assert result.ok is True
-    assert client.calls == [("add", {"a": 1, "b": 2})]
-    assert len(result.result_envelope["input_coercions"]) == 2
+    assert result.ok is False
+    assert result.error_code == "TOOL_PARAMETER_TYPE_INVALID"
+    assert result.handler_executed is False
+    assert client.calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -379,7 +369,7 @@ class _MiniRegistry:
         self.tools: dict = {}
 
     def register(self, tool):
-        self.tools[tool.spec.name] = tool
+        self.tools[tool.model_spec.name] = tool
 
 
 def _echo_servers_config():
@@ -401,7 +391,10 @@ def test_register_mcp_servers_end_to_end_registers_and_calls():
         # 两个工具被注册，带 mcp__demo__ 前缀
         assert "mcp__demo__echo" in registry.tools
         assert "mcp__demo__add" in registry.tools
-        assert registry.tools["mcp__demo__echo"].spec.effect == "dangerous"
+        assert (
+            registry.tools["mcp__demo__echo"].runtime_policy.effect_resolver.default_effect
+            == "dangerous"
+        )
 
         # 模型侧调用走代理工具 → 转发给 server → 拿到结果
         echo_tool = registry.tools["mcp__demo__echo"]
@@ -463,32 +456,27 @@ def test_mcp_tool_effect_can_only_be_lowered_by_explicit_server_config():
     config["demo"]["tool_effects"] = {"echo": "read_only", "add": "mutating"}
     clients = register_mcp_servers(registry, config)
     try:
-        assert registry.tools["mcp__demo__echo"].spec.effect == "read_only"
-        assert registry.tools["mcp__demo__echo"].spec.idempotency_scope == ""
-        assert registry.tools["mcp__demo__add"].spec.effect == "mutating"
-        assert registry.tools["mcp__demo__add"].spec.idempotency_scope == "operation"
-        assert registry.tools["mcp__demo__add"].spec.requires_approval is False
+        echo_policy = registry.tools["mcp__demo__echo"].runtime_policy
+        add_policy = registry.tools["mcp__demo__add"].runtime_policy
+        assert echo_policy.effect_resolver.default_effect == "read_only"
+        assert echo_policy.idempotency_policy.scope == ""
+        assert add_policy.effect_resolver.default_effect == "mutating"
+        assert add_policy.idempotency_policy.scope == "operation"
+        assert add_policy.approval_policy.mode == "dangerous"
     finally:
         for client in clients:
             client.stop()
 
 
 def test_unknown_mcp_tool_is_blocked_by_runtime_effect_gate_before_call(tmp_path):
-    from agent_py_agent.agent.tooling.registry_execution import (
-        ExecuteRegistryCallParams,
-        execute_registry_call,
-    )
-
     client = _FakeClient(result={"content": "must not run", "isError": False})
     proxy = _proxy(client)
-    result = execute_registry_call(
-        ExecuteRegistryCallParams(
-            payload={"tool": proxy.spec.name, "text": "unsafe"},
-            tools={proxy.spec.name: proxy},
-            workspace_root=tmp_path,
-            workspace_roots=[tmp_path],
-        )
-    )
+    result = execute_canonical_test_call(
+        tmp_path,
+        tools={proxy.model_spec.name: proxy},
+        tool_name=proxy.model_spec.name,
+        arguments={"text": "unsafe"},
+    ).result
 
     assert result.ok is False
     assert result.error_code == "APPROVAL_REQUIRED"
@@ -524,14 +512,21 @@ def test_registry_run_boundary_reconnects_and_refreshes_dead_mcp_binding(tmp_pat
 
         registry.prepare_for_run()
 
-        snapshot = registry.runtime_snapshot()
+        snapshot = registry.runtime_snapshot(run_id="mcp-reconnect-run")
         assert "mcp__demo__echo" in snapshot.available_tool_names
-        result = registry.execute_call(
-            {"tool": "mcp__demo__echo", "text": "reconnected"},
-            runtime_snapshot=snapshot,
+        call = canonical_test_call(
+            snapshot,
+            "mcp__demo__echo",
+            {"text": "reconnected"},
         )
+        result = registry.execute_tool(
+            call,
+            write_boundary=None,
+            runtime_snapshot=snapshot,
+        ).result
         assert result.ok is True
-        assert json.loads(result.output)["result"] == "reconnected"
+        assert result.output_trust == "external_data"
+        assert '"result": "reconnected"' in result.output
     finally:
         registry.close_mcp_clients()
 

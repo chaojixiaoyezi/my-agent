@@ -8,7 +8,16 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..concurrency.interrupt import interrupt_by_name
-from ..tooling.models import BaseTool, ToolExecutionResult, ToolSpec
+from ..tooling.models import (
+    BaseTool,
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    ResourceScopePolicy,
+    ToolHandlerOutcome,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+)
 from .control_commands import conversation_request_interrupt_name
 from .models import THREAD_TASK_LINK_INACTIVE_STATUSES
 
@@ -25,46 +34,44 @@ class NamedWorkStopResult:
 class StopNamedWorkTool(BaseTool):
     """Let the main agent honor an ordinary-language request to stop one named item."""
 
-    def __init__(self, agent: object):
-        self.agent = agent
-        self.spec = ToolSpec(
-            name="stop_named_work",
+    model_spec = ToolModelSpec(
+        name="stop_named_work",
+        description=(
+            "Stop or cancel one exact user-named persistent Audit or Goal in the current conversation. "
+            "Use it when the user explicitly names the work to stop; it does not stop the foreground reply."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["audit", "goal"], "description": "Optional persistent work kind."},
+                "name": {"type": "string", "minLength": 1, "maxLength": 64, "description": "Exact user-visible work name."},
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+        hints=ToolModelHints(
             category="conversation",
-            description=(
-                "Stop or cancel one exact user-named persistent Audit or Goal in the current "
-                "conversation. 当用户用普通话明确要求停止、取消某个名称时直接调用本工具，"
-                "不要改查 task_progress 或 schedule。The kind may be omitted when the name "
-                "uniquely identifies one item; this does not stop the current foreground reply."
-            ),
-            use_cases=[
+            use_cases=(
                 "The user explicitly asks to stop or cancel an exact named Audit or Goal",
                 "用户说停止某个已命名的长期审计或目标",
-            ],
-            avoid_when=[
+            ),
+            avoid_when=(
                 "The user asks to stop only the current reply",
                 "The user did not identify an exact persistent work name",
-            ],
-            keywords=[
-                "stop named audit",
-                "stop named goal",
-                "cancel persistent work",
-                "停止命名审计",
-                "取消命名目标",
-            ],
-            parameters={
-                "kind": "Optional persistent work kind: audit or goal.",
-                "name": "Required exact user-visible work name.",
-            },
-            parameter_schema={
-                "kind": {"type": "string", "enum": ["audit", "goal"]},
-                "name": {"type": "string", "minLength": 1, "maxLength": 64},
-            },
-            required_parameters=["name"],
-            effect="mutating",
-            idempotency_scope="operation",
-        )
+            ),
+            keywords=("stop named audit", "stop named goal", "cancel persistent work", "停止命名审计", "取消命名目标"),
+        ),
+    )
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy("dangerous"),
+        idempotency_policy=IdempotencyPolicy("operation"),
+        resource_scopes=ResourceScopePolicy(parameter_names=("kind", "name")),
+    )
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def __init__(self, agent: object):
+        self.agent = agent
+
+    def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         run_params = getattr(self.agent, "_current_run_params", None)
         attrs = getattr(run_params, "task_attributes", None)
         thread_id = (
@@ -428,8 +435,8 @@ def _tool_result(
     kind: str,
     name: str,
     error_code: str = "",
-) -> ToolExecutionResult:
-    return ToolExecutionResult(
+) -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(
         "stop_named_work",
         ok,
         json.dumps(

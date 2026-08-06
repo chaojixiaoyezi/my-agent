@@ -132,3 +132,94 @@ def test_request_worker_initialization_error_is_terminalized(tmp_path, monkeypat
     assert archived["status"] == "failed"
     assert processing.exists() is False
     assert released == [("user-1", "conversation-1")]
+
+
+class _ImmediateFuture:
+    """Submit 即执行;done 恒 True(可被 _run_due_curators 清 in-flight)。"""
+
+    def __init__(self, fn, args) -> None:
+        self._value = None
+        self._error = None
+        try:
+            self._value = fn(*args)
+        except Exception as exc:  # noqa: BLE001 - 测试辅助
+            self._error = exc
+
+    def done(self) -> bool:
+        return True
+
+    def result(self):
+        if self._error is not None:
+            raise self._error
+        return self._value
+
+
+class _RunningFuture:
+    def done(self) -> bool:
+        return False  # 模拟 curator 提取仍在跑(LLM 调用中)
+
+
+def _curator_supervisor(*, base_calls, scoped_calls, running=()) -> object:
+    from agent_py_agent.cli import gateway_loops
+
+    base_agent = SimpleNamespace(
+        config=SimpleNamespace(owner_maintenance_scan_interval_seconds=60),
+        memory_curator=SimpleNamespace(run_if_due=lambda: base_calls.append(1)),
+        owner_id="local",
+    )
+    scoped_agent = SimpleNamespace(
+        memory_curator=SimpleNamespace(run_if_due=lambda: scoped_calls.append(1)),
+        owner_id="owner-a",
+    )
+    pool = SimpleNamespace(active_agents=lambda: [scoped_agent])
+
+    supervisor = object.__new__(gateway_loops._BackgroundMainSupervisor)
+    supervisor._base_agent = base_agent
+    supervisor._owner_pool = pool
+    supervisor._curator_inflight = {}
+    supervisor._next_curator_run_at = 0.0
+    supervisor._get_executor = lambda: SimpleNamespace(
+        submit=lambda fn, *args: _ImmediateFuture(fn, args)
+    )
+    supervisor._curator_inflight.update({id(agent): _RunningFuture() for agent in running})
+    return supervisor, base_agent, scoped_agent
+
+
+def test_background_main_supervisor_wakes_base_and_scoped_curators_with_throttle() -> None:
+    base_calls: list[int] = []
+    scoped_calls: list[int] = []
+    supervisor, _base, _scoped = _curator_supervisor(
+        base_calls=base_calls, scoped_calls=scoped_calls
+    )
+
+    supervisor._run_due_curators()
+    assert base_calls == [1] and scoped_calls == [1]  # base + 每个活跃 scoped owner 都被唤醒
+    assert supervisor._next_curator_run_at > 0.0  # 节流已生效
+
+    supervisor._run_due_curators()  # 节流窗口内再调 → 不重复唤醒
+    assert base_calls == [1] and scoped_calls == [1]
+
+
+def test_background_main_supervisor_curator_dedupes_and_isolates_failures(monkeypatch) -> None:
+    from agent_py_agent.cli import gateway_loops
+
+    base_calls: list[int] = []
+    scoped_calls: list[int] = []
+    supervisor, base_agent, scoped_agent = _curator_supervisor(
+        base_calls=base_calls, scoped_calls=scoped_calls
+    )
+
+    # base 的 curator 抛异常 → _safe_run_curator 兜住,scoped 照常唤醒(单 owner 失败隔离)
+    def _boom():
+        raise RuntimeError("curator backend down")
+
+    base_agent.memory_curator.run_if_due = _boom
+    supervisor._run_due_curators()
+    assert base_calls == [] and scoped_calls == [1]
+
+    # in-flight 去重:某 owner 上一轮还没跑完 → 本轮不重复提交;其余照常
+    supervisor._next_curator_run_at = 0.0  # 破节流
+    supervisor._curator_inflight[id(scoped_agent)] = _RunningFuture()
+    base_agent.memory_curator.run_if_due = lambda: base_calls.append(1)
+    supervisor._run_due_curators()
+    assert base_calls == [1] and scoped_calls == [1]  # base 被唤醒,scoped 仍在跑被跳过

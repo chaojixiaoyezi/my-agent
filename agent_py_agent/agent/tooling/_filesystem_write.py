@@ -1,5 +1,3 @@
-
-
 from __future__ import annotations
 
 import base64
@@ -39,7 +37,15 @@ from .content_transport_policy import (
     long_content_avoidance_rule,
     write_file_content_parameter_detail,
 )
-from .models import ToolExecutionResult, ToolSpec
+from .models import (
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    ResourceScopePolicy,
+    ToolHandlerOutcome,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+)
 
 _WRITE_FILE_USE_CASES = [
     "新建代码文件、配置文件、文档或二进制产物",
@@ -86,6 +92,12 @@ class WriteOutputRequest:
 
 
 class WriteFileTool(FileSystemTool):
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy("mutating"),
+        idempotency_policy=IdempotencyPolicy("operation"),
+        resource_scopes=ResourceScopePolicy(parameter_names=("path",)),
+        promotes_task=True,
+    )
 
     def __init__(
         self,
@@ -100,42 +112,72 @@ class WriteFileTool(FileSystemTool):
             options.access_options,
         )
         self.max_inline_content_chars = inline_write_content_limit(options.max_inline_content_chars)
-        self.runtime_fact_roots = [Path(root).expanduser().resolve(strict=False) for root in options.runtime_fact_roots]
-        self.spec = ToolSpec(
+        self.runtime_fact_roots = [
+            Path(root).expanduser().resolve(strict=False) for root in options.runtime_fact_roots
+        ]
+        self.model_spec = ToolModelSpec(
             name="write_file",
-            category="filesystem",
-            effect="mutating",
-            promotes_task=True,
-            idempotency_scope="operation",
             description="原子写入或覆盖完整文件；支持文本 content 或二进制 data_base64，缺失父目录会自动创建。",
-            use_cases=_WRITE_FILE_USE_CASES,
-            avoid_when=[
-                "只想局部改已有文件时优先用 apply_patch",
-                long_content_avoidance_rule(),
-            ],
-            keywords=["写文件", "生成代码", "创建文件", "覆盖", "save file", "write", "binary", "base64"],
-            parameters=_WRITE_FILE_PARAMETERS,
-            parameter_details={
-                "path": "相对工作区的目标文件路径；缺失父目录会自动创建。",
-                "content": write_file_content_parameter_detail(self.max_inline_content_chars),
-                "data_base64": "可选。用于 PDF、XLSX、图片、压缩包等二进制文件；传入后按原始字节写入。",
-                "mode": "可选，精确值 overwrite 或 append。省略时始终覆盖；只有显式 append 才会原子地保留已有内容并追加到文件末尾。不接受 completed/continue 等别名。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "相对工作区的目标文件路径；缺失父目录会自动创建。",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": write_file_content_parameter_detail(
+                            self.max_inline_content_chars
+                        ),
+                    },
+                    "data_base64": {
+                        "type": "string",
+                        "description": "可选。用于 PDF、XLSX、图片、压缩包等二进制文件；传入后按原始字节写入。",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["overwrite", "append"],
+                        "description": "可选，精确值 overwrite 或 append。省略时始终覆盖；只有显式 append 才会原子地保留已有内容并追加到文件末尾。不接受 completed/continue 等别名。",
+                    },
+                },
+                "required": ["path"],
+                "additionalProperties": False,
             },
-            parameter_schema={
-                "mode": {"type": "string", "enum": ["overwrite", "append"]},
-            },
-            required_parameters=["path"],
-            internal_parameters=["__partial_unclosed_write"],
-            examples=_WRITE_FILE_EXAMPLES,
+            hints=ToolModelHints(
+                category="filesystem",
+                use_cases=tuple(_WRITE_FILE_USE_CASES),
+                avoid_when=(
+                    "只想局部改已有文件时优先用 apply_patch",
+                    long_content_avoidance_rule(),
+                ),
+                keywords=(
+                    "写文件",
+                    "生成代码",
+                    "创建文件",
+                    "覆盖",
+                    "save file",
+                    "write",
+                    "binary",
+                    "base64",
+                ),
+                examples=tuple(_WRITE_FILE_EXAMPLES),
+            ),
         )
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         try:
             request = _write_request(self, params)
         except WriteScopeError as exc:
-            return ToolExecutionResult("write_file", False, str(exc), error_code="WRITE_FORBIDDEN")
+            return ToolHandlerOutcome(
+                "write_file",
+                False,
+                str(exc),
+                error_code="WRITE_FORBIDDEN",
+                effect_outcome="not_started",
+            )
         except ValueError as exc:
-            return ToolExecutionResult(
+            return ToolHandlerOutcome(
                 "write_file",
                 False,
                 str(exc),
@@ -144,15 +186,18 @@ class WriteFileTool(FileSystemTool):
                 recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
             )
         if request.content_policy and not request.content_policy.allowed:
-            return ToolExecutionResult(
-                "write_file", False, request.content_policy.message, error_code="ARTIFACT_VALIDATION_FAILED",
+            return ToolHandlerOutcome(
+                "write_file",
+                False,
+                request.content_policy.message,
+                error_code="ARTIFACT_VALIDATION_FAILED",
             )
         ledger_error = _system_ledger_write_error(request.target)
         if ledger_error:
             return _system_ledger_write_blocked_result(ledger_error)
         approval_error = _persona_approval_write_error(request.target, self.protected_persona_root)
         if approval_error:
-            return ToolExecutionResult(
+            return ToolHandlerOutcome(
                 "write_file",
                 False,
                 approval_error,
@@ -160,20 +205,26 @@ class WriteFileTool(FileSystemTool):
             )
         persona_error = _persona_injection_write_error(request.target, request.content)
         if persona_error:
-            return ToolExecutionResult("write_file", False, persona_error, error_code="PERSONA_INJECTION_BLOCKED")
+            return ToolHandlerOutcome(
+                "write_file", False, persona_error, error_code="PERSONA_INJECTION_BLOCKED"
+            )
         target = _prepare_write_target(self, request.target)
         write_error = _atomic_write_or_error(self, target, request)
         if write_error is not None:
             return write_error
         web_decision = check_web_project_post_write(target, self.workspace_root)
-        output = _write_output(WriteOutputRequest(
-            display_path=self.display_path(target),
-            target=target,
-            content=request.content,
-            content_policy=request.content_policy,
-            mode=request.mode,
-        ))
-        output, feedback = _attach_reference_write_feedback(self.workspace_root, target, output, self.runtime_fact_roots)
+        output = _write_output(
+            WriteOutputRequest(
+                display_path=self.display_path(target),
+                target=target,
+                content=request.content,
+                content_policy=request.content_policy,
+                mode=request.mode,
+            )
+        )
+        output, feedback = _attach_reference_write_feedback(
+            self.workspace_root, target, output, self.runtime_fact_roots
+        )
         result = _write_result("write_file", target, output, web_decision)
         result.result_envelope["bytes_written"] = len(request.data)
         if feedback:
@@ -185,8 +236,8 @@ def _atomic_write_or_error(
     tool: WriteFileTool,
     target: Path,
     request: WriteRequest,
-) -> ToolExecutionResult | None:
-    """执行原子写入；失败返回 ToolExecutionResult，成功返回 None。从 execute 抽出以控行数。"""
+) -> ToolHandlerOutcome | None:
+    """执行原子写入；失败返回 ToolHandlerOutcome，成功返回 None。从 execute 抽出以控行数。"""
     try:
         change = OwnerQuotaChange(
             target,
@@ -198,7 +249,7 @@ def _atomic_write_or_error(
     except (OwnerQuotaExceeded, OwnerQuotaUnavailable) as exc:
         return owner_quota_error_result("write_file", exc)
     except ValueError as exc:
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             "write_file",
             False,
             str(exc),
@@ -207,8 +258,11 @@ def _atomic_write_or_error(
             recommended_action=RecoveryAction.REWRITE_ARTIFACT_BYTES.value,
         )
     except OSError as exc:
-        return ToolExecutionResult(
-            "write_file", False, f"写入失败: {exc}", error_code="TOOL_EXECUTION_FAILED",
+        return ToolHandlerOutcome(
+            "write_file",
+            False,
+            f"写入失败: {exc}",
+            error_code="TOOL_EXECUTION_FAILED",
         )
     return None
 
@@ -231,7 +285,9 @@ def _write_request(tool: WriteFileTool, params: dict[str, Any]) -> WriteRequest:
     )
 
 
-def _preserve_existing_encoding(target: Path, content: str, mode: str, default_data: bytes) -> bytes:
+def _preserve_existing_encoding(
+    target: Path, content: str, mode: str, default_data: bytes
+) -> bytes:
     """写既有文本文件时按其原编码+原换行写回(审计 #23):非 UTF-8/CRLF 文件不被静默改坏。
 
     仅当覆盖/追加且目标已存在才探测;新文件/读不到时用默认 utf-8。Shift-JIS/GBK/Latin-1、带 BOM、
@@ -246,8 +302,8 @@ def _preserve_existing_encoding(target: Path, content: str, mode: str, default_d
     return encode_text(content, detect_encoding(raw), detect_line_ending(raw))
 
 
-def _system_ledger_write_blocked_result(message: str) -> ToolExecutionResult:
-    return ToolExecutionResult(
+def _system_ledger_write_blocked_result(message: str) -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(
         "write_file",
         False,
         message,
@@ -262,20 +318,20 @@ def _prepare_write_target(tool: WriteFileTool, target: Path) -> Path:
     return tool.resolve_write_path(target)
 
 
-def _write_result(tool: str, target: Path, output: str, web_decision: Any) -> ToolExecutionResult:
+def _write_result(tool: str, target: Path, output: str, web_decision: Any) -> ToolHandlerOutcome:
     envelope = _artifact_integrity_envelope(web_decision, target)
     web_note = web_project_post_write_note(web_decision)
     blocker_codes = list(getattr(web_decision, "blocker_codes", []) or [])
     rendered_output = f"{output}\n{web_note}" if web_note else output
     if blocker_codes:
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             tool,
             False,
             rendered_output,
             result_envelope=envelope,
             error_code="ACCEPTANCE_FAILED",
         )
-    return ToolExecutionResult(tool, True, rendered_output, result_envelope=envelope)
+    return ToolHandlerOutcome(tool, True, rendered_output, result_envelope=envelope)
 
 
 def _attach_reference_write_feedback(
@@ -284,7 +340,9 @@ def _attach_reference_write_feedback(
     output: str,
     runtime_fact_roots: list[Path] | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    feedback = reference_write_feedback(workspace_root=workspace_root, target=target, fact_roots=runtime_fact_roots)
+    feedback = reference_write_feedback(
+        workspace_root=workspace_root, target=target, fact_roots=runtime_fact_roots
+    )
     if not feedback:
         return output, {}
     return f"{output}\n{_feedback_message(feedback)}", feedback
@@ -298,7 +356,11 @@ def _feedback_message(feedback: dict[str, Any]) -> str:
     first = load_errors[0] if isinstance(load_errors[0], dict) else {}
     context = str(first.get("context") or "").strip()
     path = str(first.get("path") or "").strip()
-    detail = "；".join(part for part in (f"context={context}" if context else "", f"path={path}" if path else "") if part)
+    detail = "；".join(
+        part
+        for part in (f"context={context}" if context else "", f"path={path}" if path else "")
+        if part
+    )
     return f"{message}\n软提醒详情：{detail}" if detail else message
 
 
@@ -320,11 +382,12 @@ def _write_payload(params: dict[str, Any]) -> tuple[str | None, bytes]:
     if has_text == has_base64:
         raise ValueError(
             "write_file 的 content 和 data_base64 必须二选一，且只能提供其中一个。"
-            "写普通文本报告时用 content；超长文本可以用 "
-            "独立成行的 [WRITE_FILE_RAW path=\"...\"]...[/WRITE_FILE_RAW] 原文块（独立原文块，不要写进任何工具调用的参数里，也不要把 WRITE_FILE_RAW 当 JSON tool 名）。"
+            '写普通文本报告时用 content；超长文本用 mode="append" 分成多个规范 write_file 调用。'
         )
     if has_base64:
-        raw = _text_param(params.get("data_base64"), name="data_base64", max_chars=_MAX_WRITE_TEXT_CHARS)
+        raw = _text_param(
+            params.get("data_base64"), name="data_base64", max_chars=_MAX_WRITE_TEXT_CHARS
+        )
         try:
             return None, base64.b64decode(raw, validate=True)
         except Exception as exc:
@@ -352,7 +415,9 @@ def _write_mode(params: dict[str, Any]) -> str:
     if raw in {"overwrite", "append"}:
         return raw
     if raw == "write":
-        raise ValueError('write_file.mode 不接受 "write"。新建或覆盖文件时省略 mode，或显式使用 mode="overwrite"；追加时使用 mode="append"。')
+        raise ValueError(
+            'write_file.mode 不接受 "write"。新建或覆盖文件时省略 mode，或显式使用 mode="overwrite"；追加时使用 mode="append"。'
+        )
     raise ValueError("write_file.mode 必须精确为 overwrite 或 append。")
 
 
@@ -384,7 +449,11 @@ def _is_task_progress_ledger(parts: tuple[str, ...]) -> bool:
     for index, part in enumerate(parts):
         if part != "memory_archive":
             continue
-        if index + 1 < len(parts) and parts[index + 1] == "task_progress" and parts[-1] == "progress.json":
+        if (
+            index + 1 < len(parts)
+            and parts[index + 1] == "task_progress"
+            and parts[-1] == "progress.json"
+        ):
             return True
     return False
 
@@ -403,7 +472,9 @@ def _write_output(request: WriteOutputRequest) -> str:
 
 def _atomic_write_bytes(target: Path, data: bytes, *, mode: str = "overwrite") -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=_temp_suffix_for(target), dir=str(target.parent))
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{target.name}.", suffix=_temp_suffix_for(target), dir=str(target.parent)
+    )
     try:
         _write_temp_bytes(fd, target, data, mode=mode)
         _validate_final_artifact_candidate(Path(tmp_name), target)
@@ -456,9 +527,13 @@ _PREWRITE_VALIDATED_SUFFIXES = {
 def _validate_final_artifact_candidate(candidate: Path, target: Path) -> None:
     if target.suffix.lower() not in _PREWRITE_VALIDATED_SUFFIXES:
         return
-    report = validate_artifact(ArtifactAcceptanceRequest(path=candidate, workspace_root=target.parent))
+    report = validate_artifact(
+        ArtifactAcceptanceRequest(path=candidate, workspace_root=target.parent)
+    )
     if report.ok:
         return
     codes = ",".join(finding.code for finding in report.findings if finding.code)
     messages = "; ".join(finding.message for finding in report.findings if finding.message)
-    raise ValueError(f"{codes or 'ARTIFACT_INVALID'}: {messages or 'artifact candidate failed objective validation'}")
+    raise ValueError(
+        f"{codes or 'ARTIFACT_INVALID'}: {messages or 'artifact candidate failed objective validation'}"
+    )

@@ -8,6 +8,7 @@ from typing import Any
 
 from ..common.value_parsing import string_list, text_value
 from .contract_validation_recovery import recovery_for_findings
+from .required_actions import RequiredAction
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,8 @@ class EffectiveContractSnapshot:
     error_codes: tuple[str, ...]
     findings: tuple[dict[str, object], ...]
     recovery: dict[str, object] | None = None
+    required_actions: tuple[RequiredAction, ...] = ()
+    required_action_assessment: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -34,6 +37,8 @@ def build_effective_contract_snapshot(
     *,
     run_id: str,
     layers: tuple[dict[str, Any], ...],
+    required_actions: tuple[RequiredAction, ...] = (),
+    required_action_assessment: dict[str, Any] | None = None,
 ) -> EffectiveContractSnapshot:
     findings: list[dict[str, object]] = []
     effective: dict[str, Any] = {}
@@ -42,6 +47,8 @@ def build_effective_contract_snapshot(
         _merge_layer(effective, safety, layer)
     if safety:
         effective["dangerous_actions"] = safety
+    if required_actions:
+        effective["required_actions"] = [item.to_dict() for item in required_actions]
     contract_hash = _contract_hash(effective)
     return EffectiveContractSnapshot(
         ok=not findings,
@@ -52,6 +59,8 @@ def build_effective_contract_snapshot(
         error_codes=(),
         findings=tuple(findings),
         recovery=recovery_for_findings("effective_contract_snapshot", findings),
+        required_actions=required_actions,
+        required_action_assessment=dict(required_action_assessment or {}),
     )
 
 

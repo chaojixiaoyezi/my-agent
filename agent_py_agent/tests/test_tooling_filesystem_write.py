@@ -184,8 +184,9 @@ def test_write_file_content_detail_uses_transport_policy(tmp_path: Path) -> None
     workspace.mkdir()
     tool = WriteFileTool(workspace)
 
-    assert tool.spec.parameter_details["content"] == write_file_content_parameter_detail()
-    assert str(MAX_INLINE_WRITE_CONTENT_CHARS) in tool.spec.parameter_details["content"]
+    detail = tool.model_spec.input_schema["properties"]["content"]["description"]
+    assert detail == write_file_content_parameter_detail()
+    assert str(MAX_INLINE_WRITE_CONTENT_CHARS) in detail
 
 
 def test_write_file_accepts_long_inline_content_with_transport_hint(tmp_path: Path) -> None:
@@ -203,7 +204,8 @@ def test_write_file_accepts_long_inline_content_with_transport_hint(tmp_path: Pa
 
     assert result.ok
     assert "inline content 超过推荐值" in result.output
-    assert "WRITE_FILE_RAW" in result.output
+    assert 'mode="append"' in result.output
+    assert "WRITE_FILE_RAW" not in result.output
     assert target.read_text(encoding="utf-8") == "A" * (MAX_INLINE_WRITE_CONTENT_CHARS + 1)
 
 

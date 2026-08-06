@@ -11,6 +11,22 @@ from types import SimpleNamespace
 import pytest
 from agent.ingestion import watch_state as ws
 from agent.ingestion.watch_tool import WatchStreamTool
+from agent.tooling.runtime_contracts import ProviderToolCapability, ToolProtocolSnapshot
+
+
+def _text_protocol_snapshot(run_id: str) -> ToolProtocolSnapshot:
+    return ToolProtocolSnapshot(
+        run_id=run_id,
+        source_protocol="text",
+        capability=ProviderToolCapability(
+            provider="test",
+            endpoint="local://watch-test",
+            model="fake",
+            stream=False,
+            native_supported=False,
+            evidence="explicit_watch_test_fixture",
+        ),
+    )
 
 
 class _FakeSource:
@@ -60,7 +76,7 @@ def _payload(result) -> dict:
 def test_watch_stream_requires_explicit_action(owner_home) -> None:
     tool = _tool(owner_home, _FakeSource())
 
-    assert tool.spec.required_parameters == ["action"]
+    assert tool.model_spec.input_schema["required"] == ["action"]
     result = tool.execute({"watch_id": "ws-do-not-guess"})
 
     assert result.ok is False
@@ -142,6 +158,7 @@ def _named_audit_tool(
             task_attributes=attrs,
             run_id="source-open-transition",
             request_id=audit_id,
+            tool_protocol_snapshot=_text_protocol_snapshot("source-open-transition"),
         ),
     )
     task = SimpleNamespace(

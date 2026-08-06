@@ -18,7 +18,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from ..tooling.models import BaseTool, ToolAvailability, ToolExecutionResult, ToolSpec
+from ..tooling.models import (
+    BaseTool,
+    ToolAvailability,
+    ToolHandlerOutcome,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+)
 from ..tooling.web import (
     _default_network_resolver,
     _format_http_error,
@@ -67,7 +73,10 @@ from .watch_state import (
     source_id_for,
     watch_id_for,
 )
-from .watch_tool_spec import build_watch_stream_spec
+from .watch_tool_spec import (
+    build_watch_stream_model_spec,
+    build_watch_stream_runtime_policy,
+)
 
 _TOOL_NAME = "watch_stream"
 _HTTP_TIMEOUT_SECONDS = 15
@@ -154,29 +163,25 @@ class WatchStreamTool(BaseTool):
     #   游标+引擎状态跨轮持久(进程内注册表+owner 盘上快照),重启从游标续。
     def __init__(self, agent: object) -> None:
         self.agent = agent
-        self._specs: dict[str, ToolSpec] = {
-            surface: build_watch_stream_spec(surface=surface)
-            for surface in (
-                "ordinary",
-                "audit_prepare",
-                "audit_binding",
-                "audit_source",
-                "audit_coordinator",
-            )
+        surfaces = (
+            "ordinary",
+            "audit_prepare",
+            "audit_binding",
+            "audit_source",
+            "audit_coordinator",
+        )
+        self._model_specs: dict[str, ToolModelSpec] = {
+            surface: build_watch_stream_model_spec(surface=surface)
+            for surface in surfaces
+        }
+        self._runtime_policies: dict[str, ToolRuntimePolicy] = {
+            surface: build_watch_stream_runtime_policy(surface=surface)
+            for surface in surfaces
         }
         self.allowed_private_hosts: tuple[str, ...] = ()
         self.allow_private_resolution: bool | None = None
 
-    @property
-    def spec(self) -> ToolSpec:
-        """Expose only actions usable by the current typed runtime role.
-
-        This remains one tool and one execution path.  The per-run public
-        schema is a projection of existing structured Audit authority, like an
-        allowlist projection; it never inspects model prose or source content.
-        The execution checks below remain the final authority.
-        """
-
+    def _current_surface(self) -> str:
         from ..common.audit_activation import (
             attributes_request_audit,
             current_audit_attributes,
@@ -190,25 +195,37 @@ class WatchStreamTool(BaseTool):
 
         attrs = current_audit_attributes(self.agent)
         if structured_audit_source_worker_attributes(attrs):
-            return self._specs["audit_source"]
+            return "audit_source"
         if structured_audit_source_binding_attributes(attrs):
-            return self._specs["audit_binding"]
+            return "audit_binding"
         if attributes_request_audit(attrs):
-            return self._specs["audit_coordinator"]
+            return "audit_coordinator"
         if (
             isinstance(attrs, dict)
             and attrs.get(CONVERSATION_AUDIT_PREPARE_ATTR) is True
             and attrs.get(CONVERSATION_TRANSIENT_WORKSPACE_ATTR) is True
         ):
-            return self._specs["audit_prepare"]
-        return self._specs["ordinary"]
+            return "audit_prepare"
+        return "ordinary"
+
+    @property
+    def model_spec(self) -> ToolModelSpec:
+        """Expose only actions authorized by the current typed runtime role."""
+
+        return self._model_specs[self._current_surface()]
+
+    @property
+    def runtime_policy(self) -> ToolRuntimePolicy:
+        """Return the policy paired with the same typed surface as model_spec."""
+
+        return self._runtime_policies[self._current_surface()]
 
     def availability(self) -> ToolAvailability:
         """The role-specific schema narrows actions; the read surface stays usable."""
 
         return ToolAvailability.ready()
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         owner_home = self._owner_home()
         if owner_home is None:
             return _err("无 owner home 上下文,盯守状态存储不可用", "TOOL_UNAVAILABLE")
@@ -280,32 +297,32 @@ class WatchStreamTool(BaseTool):
             )
         return handler(owner_home, params)
 
-    def _open(self, owner_home: Path, params: dict[str, Any]) -> ToolExecutionResult:
+    def _open(self, owner_home: Path, params: dict[str, Any]) -> ToolHandlerOutcome:
         context = _resolve_open_watch_context(self, owner_home, params)
-        if isinstance(context, ToolExecutionResult):
+        if isinstance(context, ToolHandlerOutcome):
             return context
         committed = _commit_open_watch(self, context, params)
-        if isinstance(committed, ToolExecutionResult):
+        if isinstance(committed, ToolHandlerOutcome):
             return committed
         payload, runtime_transition = committed
         return _ok_payload(payload, runtime_transition=runtime_transition)
 
     def _resolve_open_source(
         self, params: dict[str, Any]
-    ) -> tuple[str, str, dict[str, Any], dict[str, str]] | ToolExecutionResult:
+    ) -> tuple[str, str, dict[str, Any], dict[str, str]] | ToolHandlerOutcome:
         return _resolve_open_source(self, params)
 
-    def _sample(self, owner_home: Path, params: dict[str, Any]) -> ToolExecutionResult:
+    def _sample(self, owner_home: Path, params: dict[str, Any]) -> ToolHandlerOutcome:
         """抓原始样本+字段分布，不动盯守游标/引擎。"""
         state = _state_for(self, owner_home, params)
-        if isinstance(state, ToolExecutionResult):
+        if isinstance(state, ToolHandlerOutcome):
             return state
         return sample_source(self._fetch_json, state, params)
 
-    def _configure(self, owner_home: Path, params: dict[str, Any]) -> ToolExecutionResult:
+    def _configure(self, owner_home: Path, params: dict[str, Any]) -> ToolHandlerOutcome:
         """普通 watch 可配置筛选；Audit 的业务要求只保存在命名任务目标中。"""
         state = _state_for(self, owner_home, params)
-        if isinstance(state, ToolExecutionResult):
+        if isinstance(state, ToolHandlerOutcome):
             return state
         if state.audit_guarantee:
             return _err(
@@ -315,12 +332,12 @@ class WatchStreamTool(BaseTool):
             )
         return configure_spec(state, params)
 
-    def _pull(self, owner_home: Path, params: dict[str, Any]) -> ToolExecutionResult:
+    def _pull(self, owner_home: Path, params: dict[str, Any]) -> ToolHandlerOutcome:
         state = _state_for(self, owner_home, params)
-        if isinstance(state, ToolExecutionResult):
+        if isinstance(state, ToolHandlerOutcome):
             return state
         candidate_limit = _pull_target_records(params)
-        if isinstance(candidate_limit, ToolExecutionResult):
+        if isinstance(candidate_limit, ToolHandlerOutcome):
             return candidate_limit
         source_authority: dict[str, object] | None = None
         if state.audit_guarantee:
@@ -349,7 +366,7 @@ class WatchStreamTool(BaseTool):
         with state.lock:
             return self._pull_locked(state, max_wait)
 
-    def _pull_locked(self, state: WatchState, max_wait: float) -> ToolExecutionResult:
+    def _pull_locked(self, state: WatchState, max_wait: float) -> ToolHandlerOutcome:
         deadline = time.time() + max_wait
         aggregate = {"seen": 0, "pages": 0, "waited_rounds": 0}
         while True:
@@ -408,11 +425,11 @@ class WatchStreamTool(BaseTool):
         audit_append(state, build_audit_record(drain, digest))
         return digest
 
-    def _verdict(self, owner_home: Path, params: dict[str, Any]) -> ToolExecutionResult:
+    def _verdict(self, owner_home: Path, params: dict[str, Any]) -> ToolHandlerOutcome:
         """/audit 保证档的逐条结论签收:判读工把手里批的逐条结论交回来销账(ack-on-judge)。
         非保证档调用如实拒绝(那条路是 ack-on-next-pull,没有欠账可销)。"""
         state = _state_for(self, owner_home, params)
-        if isinstance(state, ToolExecutionResult):
+        if isinstance(state, ToolHandlerOutcome):
             return state
         if not state.audit_guarantee:
             return _err(
@@ -420,7 +437,7 @@ class WatchStreamTool(BaseTool):
                 "TOOL_INVALID_ARGUMENTS",
             )
         request = _verdict_tool_request(params)
-        if isinstance(request, ToolExecutionResult):
+        if isinstance(request, ToolHandlerOutcome):
             return request
         # Initial settlement and later review are the same source-worker
         # authority surface.  A replaced/stale attempt may inspect history but
@@ -433,7 +450,7 @@ class WatchStreamTool(BaseTool):
             return authorization_error
         run_id = self._current_run_id()
         bound = _bound_runtime_verdicts(self, state, request, run_id)
-        if isinstance(bound, ToolExecutionResult):
+        if isinstance(bound, ToolHandlerOutcome):
             return bound
         verdicts, output_observation = bound
         from .harvester import submit_verdicts
@@ -455,15 +472,15 @@ class WatchStreamTool(BaseTool):
             run_id=run_id,
         )
 
-    def _status(self, owner_home: Path, params: dict[str, Any]) -> ToolExecutionResult:
+    def _status(self, owner_home: Path, params: dict[str, Any]) -> ToolHandlerOutcome:
         state = _state_for(self, owner_home, params)
-        if isinstance(state, ToolExecutionResult):
+        if isinstance(state, ToolHandlerOutcome):
             return state
         with state.lock:
             refresh_scalars_from_disk(state)
         return _ok_payload(_status_payload(state, agent=self.agent))
 
-    def _inspect(self, owner_home: Path, params: dict[str, Any]) -> ToolExecutionResult:
+    def _inspect(self, owner_home: Path, params: dict[str, Any]) -> ToolHandlerOutcome:
         """按 ack_id 只读找回 /audit 原始日志和逐条结论，不推进游标、不改变任务状态。"""
         inspect_params = dict(params)
         source_ref = str(inspect_params.get("source_ref") or "").strip()
@@ -492,7 +509,7 @@ class WatchStreamTool(BaseTool):
             inspect_params["watch_id"] = ref_watch_id
             inspect_params["ack_id"] = ref_ack_id
         state = _state_for(self, owner_home, inspect_params)
-        if isinstance(state, ToolExecutionResult):
+        if isinstance(state, ToolHandlerOutcome):
             return state
         if not state.audit_guarantee:
             return _err(
@@ -511,9 +528,9 @@ class WatchStreamTool(BaseTool):
             else _err(str(payload.get("error") or "审计记录不存在"), "TOOL_INVALID_ARGUMENTS")
         )
 
-    def _close(self, owner_home: Path, params: dict[str, Any]) -> ToolExecutionResult:
+    def _close(self, owner_home: Path, params: dict[str, Any]) -> ToolHandlerOutcome:
         state = _state_for(self, owner_home, params)
-        if isinstance(state, ToolExecutionResult):
+        if isinstance(state, ToolHandlerOutcome):
             return state
         if state.audit_guarantee:
             # A model-authored close must not terminate a named Audit or discard
@@ -531,7 +548,7 @@ class WatchStreamTool(BaseTool):
         close_watch_state(state, reason="watch_tool_close")
         return _ok_payload(_close_payload(state))
 
-    def _list(self, owner_home: Path, _params: dict[str, Any]) -> ToolExecutionResult:
+    def _list(self, owner_home: Path, _params: dict[str, Any]) -> ToolHandlerOutcome:
         rows = [
             _enriched_list_row(owner_home, row, agent=self.agent)
             for row in _visible_state_rows(self, owner_home)
@@ -591,7 +608,7 @@ class WatchStreamTool(BaseTool):
             format_http_error=_format_http_error,
             resolve_pin=lambda pin_url: self._resolve_pin_with(pin_url, hosts, allow_resolution),
         )
-        if isinstance(response, ToolExecutionResult):
+        if isinstance(response, ToolHandlerOutcome):
             return False, response.output, response.error_code
         try:
             return True, json.loads(response.body.decode("utf-8", "replace")), ""
@@ -635,12 +652,12 @@ def _resolve_open_watch_context(
     tool: WatchStreamTool,
     owner_home: Path,
     params: dict[str, Any],
-) -> _OpenWatchContext | ToolExecutionResult:
+) -> _OpenWatchContext | ToolHandlerOutcome:
     identity_error = _audit_prepare_open_identity_error(tool.agent, params)
     if identity_error is not None:
         return identity_error
     resolved = _resolve_open_source(tool, params)
-    if isinstance(resolved, ToolExecutionResult):
+    if isinstance(resolved, ToolHandlerOutcome):
         return resolved
     url, mode, request_facts, adapter_facts = resolved
     audit_id = _audit_root_task_id(tool.agent) if _audit_requested(tool) else ""
@@ -684,7 +701,7 @@ def _resolve_open_watch_context(
         adapter_facts=adapter_facts,
         prepare_id=prepare_id,
     )
-    if isinstance(loaded, ToolExecutionResult):
+    if isinstance(loaded, ToolHandlerOutcome):
         return loaded
     state, resumed = loaded
     prepare_error = _prepare_open_watch(
@@ -726,7 +743,7 @@ def _load_open_watch(
     request_facts: dict[str, Any],
     adapter_facts: dict[str, str],
     prepare_id: str,
-) -> tuple[WatchState, bool] | ToolExecutionResult:
+) -> tuple[WatchState, bool] | ToolHandlerOutcome:
     state = registry.get_or_load(owner_home, watch_id)
     resumed = state is not None
     if state is None:
@@ -772,7 +789,7 @@ def _prepare_open_watch(
     prepare_id: str,
     *,
     probe_audit_id: str,
-) -> ToolExecutionResult | None:
+) -> ToolHandlerOutcome | None:
     if not state.owner_id:
         state.owner_id = str(
             getattr(getattr(tool.agent, "home_paths", None), "owner_id", "") or ""
@@ -828,7 +845,7 @@ def _commit_open_watch(
     tool: WatchStreamTool,
     context: _OpenWatchContext,
     params: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, object] | None] | ToolExecutionResult:
+) -> tuple[dict[str, Any], dict[str, object] | None] | ToolHandlerOutcome:
     state = context.state
     with _audit_open_transition_guard(tool.agent, context.audit_root_task_id):
         if state.audit_guarantee or context.audit_root_task_id:
@@ -848,7 +865,7 @@ def _persist_open_watch(
     tool: WatchStreamTool,
     context: _OpenWatchContext,
     params: dict[str, Any],
-) -> ToolExecutionResult | None:
+) -> ToolHandlerOutcome | None:
     state = context.state
     with state.lock:
         refresh_scalars_from_disk(state)
@@ -939,7 +956,7 @@ def _open_watch_payload(
 
 def _resolve_open_source(
     tool: WatchStreamTool, params: dict[str, Any]
-) -> tuple[str, str, dict[str, Any], dict[str, str]] | ToolExecutionResult:
+) -> tuple[str, str, dict[str, Any], dict[str, str]] | ToolHandlerOutcome:
     """Resolve one source without assuming vendor, endpoint, or cursor names."""
     raw_value = params.get("url")
     if isinstance(raw_value, (list, tuple, dict, set)):
@@ -1132,7 +1149,7 @@ def _audit_prepare_request_id(agent: object) -> str:
 def _audit_prepare_open_identity_error(
     agent: object,
     params: dict[str, Any],
-) -> ToolExecutionResult | None:
+) -> ToolHandlerOutcome | None:
     if not _audit_prepare_root_task_id(agent):
         return None
     missing: list[str] = []
@@ -1168,7 +1185,7 @@ def _audit_open_transition_guard(agent: object, audit_id: str):
 def _audit_parent_open_error(
     agent: object,
     audit_id: str,
-) -> ToolExecutionResult | None:
+) -> ToolHandlerOutcome | None:
     selected = str(audit_id or "").strip()
     store = getattr(agent, "conversation_store", None)
     if store is None:
@@ -1212,11 +1229,11 @@ def _state_for(
     tool: WatchStreamTool,
     owner_home: Path,
     params: dict[str, Any],
-) -> WatchState | ToolExecutionResult:
+) -> WatchState | ToolHandlerOutcome:
     watch_id = str(params.get("watch_id") or "").strip()
     if not watch_id and params.get("url"):
         resolved = _resolve_open_source(tool, params)
-        if isinstance(resolved, ToolExecutionResult):
+        if isinstance(resolved, ToolHandlerOutcome):
             return resolved
         resolved_url, _mode, _request, _adapter = resolved
         audit_root_task_id = _audit_root_task_id(tool.agent) if _audit_requested(tool) else ""
@@ -1423,7 +1440,7 @@ def _source_worker_authority(
     state: WatchState,
     *,
     require_current_config: bool = False,
-) -> tuple[dict[str, object] | None, ToolExecutionResult | None]:
+) -> tuple[dict[str, object] | None, ToolHandlerOutcome | None]:
     from .source_worker import authorize_source_worker_action
 
     result = authorize_source_worker_action(
@@ -2055,7 +2072,7 @@ def _apply_open_overrides(
 def _apply_file_record_boundary(
     state: WatchState,
     params: dict[str, Any],
-) -> ToolExecutionResult | None:
+) -> ToolHandlerOutcome | None:
     from .sources import source_kind
 
     raw = params.get("record_boundary")
@@ -2170,7 +2187,7 @@ def _apply_audit_guarantee(
 def _apply_audit_context(
     tool: WatchStreamTool,
     state: WatchState,
-) -> ToolExecutionResult | None:
+) -> ToolHandlerOutcome | None:
     if not state.audit_guarantee:
         return None
     root_task_id = _audit_root_task_id(tool.agent)
@@ -2257,7 +2274,7 @@ def _pin_source_binding(
     params: dict[str, Any],
     *,
     resumed: bool,
-) -> ToolExecutionResult | None:
+) -> ToolHandlerOutcome | None:
     requested_source_id = str(params.get("source_id") or "").strip()
     if requested_source_id and not _SOURCE_ID_RE.fullmatch(requested_source_id):
         return _err(
@@ -2504,7 +2521,7 @@ class _VerdictToolRequest:
     delivery_ref: str
 
 
-def _verdict_tool_request(params: dict[str, Any]) -> _VerdictToolRequest | ToolExecutionResult:
+def _verdict_tool_request(params: dict[str, Any]) -> _VerdictToolRequest | ToolHandlerOutcome:
     raw_verdicts = params.get("verdicts")
     verdicts, parse_error = _parse_verdicts(raw_verdicts)
     if parse_error:
@@ -2535,7 +2552,7 @@ def _bound_runtime_verdicts(
     state: WatchState,
     request: _VerdictToolRequest,
     run_id: str,
-) -> tuple[list[dict[str, Any]], dict[str, int]] | ToolExecutionResult:
+) -> tuple[list[dict[str, Any]], dict[str, int]] | ToolHandlerOutcome:
     from .harvester import (
         bind_current_delivery_verdict_tokens,
         validate_verdict_evidence_refs,
@@ -2596,7 +2613,7 @@ def _render_verdict_tool_result(
     result: dict[str, Any],
     *,
     run_id: str,
-) -> ToolExecutionResult:
+) -> ToolHandlerOutcome:
     if not result.get("ok"):
         return _verdict_failure_result(result)
     from .source_worker import reconcile_audit_finding_outbox
@@ -2639,7 +2656,7 @@ def _verdict_runtime_transition(
     return _context_refresh_transition("durable_slice_committed")
 
 
-def _verdict_failure_result(result: dict[str, Any]) -> ToolExecutionResult:
+def _verdict_failure_result(result: dict[str, Any]) -> ToolHandlerOutcome:
     reported_code = str(result.get("error_code") or "")
     message = str(result.get("error") or "结论未入账")
     details = [str(item).strip() for item in result.get("errors") or [] if str(item).strip()]
@@ -2762,7 +2779,7 @@ def _pull_from_spool(
     *,
     candidate_limit: int | None = None,
     source_authority: dict[str, object] | None = None,
-) -> ToolExecutionResult | None:
+) -> ToolHandlerOutcome | None:
     """后台连续摄取模式的 pull:确保收割者在跑,长轮询消费 spool 候选批。
 
     与 inline 模式的关键差别:等待期间【不持 state.lock】(收割线程每拍要锁);
@@ -2853,7 +2870,7 @@ def _spool_pull_budget(request: _SpoolPullRequest) -> _SpoolPullBudget:
     )
 
 
-def _spool_authorization_error(error: dict[str, Any]) -> ToolExecutionResult:
+def _spool_authorization_error(error: dict[str, Any]) -> ToolHandlerOutcome:
     reported_code = str(error.get("error_code") or "AUDIT_SOURCE_AUTHORIZATION_FAILED")
     return _err(
         str(error.get("error") or "来源工作者写账授权已失效"),
@@ -2874,7 +2891,7 @@ def _render_claimed_spool_pull(
     *,
     remote: bool,
     harvester_ready: bool,
-) -> ToolExecutionResult:
+) -> ToolHandlerOutcome:
     from .harvester import harvester_block
 
     state = request.state
@@ -2939,7 +2956,7 @@ def _commit_audit_pull_context(
     budget: _SpoolPullBudget,
     records: list[dict],
     payload: dict[str, Any],
-) -> ToolExecutionResult | None:
+) -> ToolHandlerOutcome | None:
     from .harvester import update_audit_batch_context
 
     batch_context = payload.get("batch_context")
@@ -3221,7 +3238,7 @@ def _resolved_pull_wait(state: WatchState, params: dict[str, Any]) -> float:
 
 def _pull_target_records(
     params: dict[str, Any],
-) -> int | None | ToolExecutionResult:
+) -> int | None | ToolHandlerOutcome:
     """Validate the Agent's optional per-call complete-record target."""
     if "target_records" not in params:
         return None
@@ -3624,7 +3641,7 @@ def _enriched_list_row(
     return row
 
 
-def _source_error_result(state: WatchState) -> ToolExecutionResult:
+def _source_error_result(state: WatchState) -> ToolHandlerOutcome:
     body = {
         "ok": False,
         "watch_id": state.watch_id,
@@ -3635,7 +3652,7 @@ def _source_error_result(state: WatchState) -> ToolExecutionResult:
     control_code, reported_code = _source_tool_error_codes(
         state.last_error_code or "NETWORK_REQUEST_FAILED"
     )
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         _TOOL_NAME,
         False,
         json.dumps(body, ensure_ascii=False),
@@ -3657,7 +3674,7 @@ def _ok_payload(
     *,
     preserve_prompt_output: bool = False,
     runtime_transition: dict[str, object] | None = None,
-) -> ToolExecutionResult:
+) -> ToolHandlerOutcome:
     envelope = dict(payload)
     if preserve_prompt_output:
         # Audit batches are already bounded against the active model context and
@@ -3666,7 +3683,7 @@ def _ok_payload(
         envelope["tool_output_policy"] = {"preserve_prompt_output": True}
     if runtime_transition:
         envelope["runtime_transition"] = dict(runtime_transition)
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         _TOOL_NAME,
         True,
         json.dumps(payload, ensure_ascii=False),
@@ -3687,8 +3704,8 @@ def _err(
     code: str,
     *,
     reported_code: str = "",
-) -> ToolExecutionResult:
-    return ToolExecutionResult(
+) -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(
         _TOOL_NAME,
         False,
         json.dumps({"ok": False, "error": message}, ensure_ascii=False),

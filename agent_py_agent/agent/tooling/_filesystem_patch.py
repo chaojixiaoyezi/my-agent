@@ -15,7 +15,14 @@ from ._filesystem_read import (
 )
 from ._filesystem_write import _atomic_write_bytes
 from ._persona_write_guard import _persona_approval_write_error
-from .models import ToolExecutionResult, ToolSpec
+from .models import (
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    ToolHandlerOutcome,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+)
 
 
 class PatchTargetMissingError(ValueError):
@@ -27,46 +34,55 @@ class PatchTargetMissingError(ValueError):
     """
 
 
-def _build_apply_patch_spec() -> ToolSpec:
-    return ToolSpec(
+def _build_apply_patch_model_spec() -> ToolModelSpec:
+    return ToolModelSpec(
         name="apply_patch",
-        category="filesystem",
-        effect="mutating",
-        promotes_task=True,
-        idempotency_scope="operation",
         description="应用结构化文本补丁，适合局部修改、新增、删除或移动文本文件。",
-        use_cases=[
-            "局部修改已有代码、配置或文档",
-            "一次补丁里处理多个相关文件",
-            "安全删除单个文本文件，使用 *** Delete File 而不是 rm/rmdir/unlink",
-        ],
-        avoid_when=[
-            "要完整重写一个文件时用 write_file",
-            "要写 PDF、XLSX、图片等二进制文件时用 write_file 的 data_base64",
-        ],
-        keywords=["patch", "apply patch", "修改文件", "局部编辑", "新增文件", "删除文件"],
-        parameters={"patch": "以 *** Begin Patch 开始、*** End Patch 结束的补丁文本"},
-        parameter_details={
-            "patch": (
-                "严格使用 Codex apply_patch 语法：第一行必须是 *** Begin Patch；"
-                "每个变更段必须以 *** Add File: <path>、*** Update File: <path> "
-                "或 *** Delete File: <path> 开始；仅在 Update File 后可紧跟 "
-                "*** Move to: <path>；新增行用 +，删除行用 -，上下文行用空格；"
-                "前缀后直接接正文（例如 -old 与 +new，不要写成 - old）；"
-                "最后一行必须是 *** End Patch。不要使用 ---/+++ 统一 diff 格式。"
-            )
+        input_schema={
+            "type": "object",
+            "properties": {
+                "patch": {
+                    "type": "string",
+                    "description": (
+                        "严格使用 Codex apply_patch 语法：第一行必须是 *** Begin Patch；"
+                        "变更段使用 *** Add File、*** Update File 或 *** Delete File；"
+                        "仅 Update File 可紧跟 *** Move to；新增/删除/上下文行分别以 +、-、空格开头；"
+                        "最后一行必须是 *** End Patch。不要使用 ---/+++ 统一 diff。"
+                    ),
+                }
+            },
+            "required": ["patch"],
+            "additionalProperties": False,
         },
-        parameter_schema={"patch": {"type": "string"}},
-        required_parameters=["patch"],
-        examples=[
-            '{"tool": "apply_patch", "patch": "*** Begin Patch\\n*** Add File: notes.txt\\n+hello\\n*** End Patch\\n"}',
-            '{"tool": "apply_patch", "patch": "*** Begin Patch\\n*** Update File: notes.txt\\n-old\\n+new\\n*** End Patch\\n"}',
-            '{"tool": "apply_patch", "patch": "*** Begin Patch\\n*** Delete File: obsolete.txt\\n*** End Patch\\n"}',
-        ],
+        hints=ToolModelHints(
+            category="filesystem",
+            use_cases=(
+                "局部修改已有代码、配置或文档",
+                "一次补丁里处理多个相关文件",
+                "安全删除单个文本文件，使用 *** Delete File 而不是 rm/rmdir/unlink",
+            ),
+            avoid_when=(
+                "要完整重写一个文件时用 write_file",
+                "要写 PDF、XLSX、图片等二进制文件时用 write_file 的 data_base64",
+            ),
+            keywords=("patch", "apply patch", "修改文件", "局部编辑", "新增文件", "删除文件"),
+            examples=(
+                '{"tool": "apply_patch", "patch": "*** Begin Patch\\n*** Add File: notes.txt\\n+hello\\n*** End Patch\\n"}',
+                '{"tool": "apply_patch", "patch": "*** Begin Patch\\n*** Update File: notes.txt\\n-old\\n+new\\n*** End Patch\\n"}',
+                '{"tool": "apply_patch", "patch": "*** Begin Patch\\n*** Delete File: obsolete.txt\\n*** End Patch\\n"}',
+            ),
+        ),
     )
 
 
 class ApplyPatchTool(FileSystemTool):
+    model_spec = _build_apply_patch_model_spec()
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy("mutating"),
+        idempotency_policy=IdempotencyPolicy("operation"),
+        promotes_task=True,
+    )
+
     def __init__(
         self,
         workspace_root: Path,
@@ -78,14 +94,13 @@ class ApplyPatchTool(FileSystemTool):
             workspace_roots,
             access_options,
         )
-        self.spec = _build_apply_patch_spec()
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         try:
             patch = _text_param(params.get("patch"), name="patch", max_chars=_MAX_WRITE_TEXT_CHARS)
             changes = _parse_simple_patch(patch)
             if approval_error := _persona_patch_approval_error(changes, self):
-                return ToolExecutionResult(
+                return ToolHandlerOutcome(
                     "apply_patch",
                     False,
                     approval_error,
@@ -99,14 +114,14 @@ class ApplyPatchTool(FileSystemTool):
         except PatchTargetMissingError as exc:
             # 目标文件不存在(Update/Delete)→PATH_NOT_FOUND(改路径/先定位)，而非
             # TOOL_INVALID_ARGUMENTS——后者会让模型反复重写补丁文本而非确认路径。
-            return ToolExecutionResult("apply_patch", False, str(exc), error_code="PATH_NOT_FOUND")
+            return ToolHandlerOutcome("apply_patch", False, str(exc), error_code="PATH_NOT_FOUND")
         except WriteScopeError as exc:
-            return ToolExecutionResult("apply_patch", False, str(exc), error_code="WRITE_FORBIDDEN")
+            return ToolHandlerOutcome("apply_patch", False, str(exc), error_code="WRITE_FORBIDDEN")
         except ValueError as exc:
-            return ToolExecutionResult("apply_patch", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
+            return ToolHandlerOutcome("apply_patch", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
         except OSError as exc:
-            return ToolExecutionResult("apply_patch", False, f"补丁写入失败: {exc}", error_code="TOOL_EXECUTION_FAILED")
-        return ToolExecutionResult(
+            return ToolHandlerOutcome("apply_patch", False, f"补丁写入失败: {exc}", error_code="TOOL_EXECUTION_FAILED")
+        return ToolHandlerOutcome(
             "apply_patch",
             True,
             "已应用补丁: " + ", ".join(touched),

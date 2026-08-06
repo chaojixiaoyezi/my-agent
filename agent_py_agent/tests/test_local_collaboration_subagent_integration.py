@@ -32,7 +32,11 @@ class _CreateChildBackend:
                             "tool": "create_subagents",
                             "goal": "本地子代理观察一条线索，并在需要主代理处理时上报。",
                             "defer_start": True,
-                            "allowed_tools": ["raise_event", "submit_collaboration_result", "inspect_collaboration"],
+                            "allowed_tools": [
+                                "raise_event",
+                                "submit_collaboration_result",
+                                "inspect_collaboration",
+                            ],
                         },
                         ensure_ascii=False,
                     )
@@ -107,7 +111,9 @@ class _ChildOpensCollaborationCaseBackend:
             return _tool_call_response(self.name, _request_collaboration_call(case_id, run_id))
         case_id = _json_field_from_prompt(prompt, "case_id")
         request_id = _json_field_from_prompt(prompt, "request_id")
-        return _subagent_result_response(self.name, _raise_collaboration_result(case_id, request_id))
+        return _subagent_result_response(
+            self.name, _raise_collaboration_result(case_id, request_id)
+        )
 
 
 class _ChildSubmitsCollaborationEvidenceBackend:
@@ -122,9 +128,13 @@ class _ChildSubmitsCollaborationEvidenceBackend:
         self.calls += 1
         run_id = _run_id_from_prompt(prompt)
         if self.calls == 1:
-            return _tool_call_response(self.name, _submit_collaboration_result_call(self.case_id, self.request_id, run_id))
+            return _tool_call_response(
+                self.name, _submit_collaboration_result_call(self.case_id, self.request_id, run_id)
+            )
         if self.calls == 2:
-            return _tool_call_response(self.name, _update_request_call(self.case_id, self.request_id, run_id))
+            return _tool_call_response(
+                self.name, _update_request_call(self.case_id, self.request_id, run_id)
+            )
         return _subagent_result_response(self.name, _evidence_result())
 
 
@@ -145,7 +155,10 @@ class _BackgroundCollaborationWakeBackend:
             return ModelResponse(
                 text=(
                     "[TOOL_CALL]\n"
-                    + json.dumps({"tool": "inspect_collaboration", "case_id": self.case_id}, ensure_ascii=False)
+                    + json.dumps(
+                        {"tool": "inspect_collaboration", "case_id": self.case_id},
+                        ensure_ascii=False,
+                    )
                     + "\n[/TOOL_CALL]"
                 ),
                 backend=self.name,
@@ -157,7 +170,9 @@ class _BackgroundCollaborationWakeBackend:
                 backend=self.name,
             )
         assert '"does_not_dispatch": true' in prompt
-        return ModelResponse(text="后台主代理已读取协作 case 和代理树，准备继续调度。", backend=self.name)
+        return ModelResponse(
+            text="后台主代理已读取协作 case 和代理树，准备继续调度。", backend=self.name
+        )
 
 
 def _tool_call_response(backend: str, payload: dict[str, object]) -> ModelResponse:
@@ -174,12 +189,20 @@ def _create_collaboration_children_call() -> dict[str, object]:
             {
                 "goal": "观察一条线索，打开协作 case，并请求另一个代理补证据。",
                 "agent_name": "local-source-a",
-                "allowed_tools": ["raise_collaboration", "raise_collaboration", "inspect_collaboration"],
+                "allowed_tools": [
+                    "raise_collaboration",
+                    "raise_collaboration",
+                    "inspect_collaboration",
+                ],
             },
             {
                 "goal": "收到协作请求后提交 refs-first 证据，并更新请求状态。",
                 "agent_name": "local-source-b",
-                "allowed_tools": ["submit_collaboration_result", "update_collaboration", "inspect_collaboration"],
+                "allowed_tools": [
+                    "submit_collaboration_result",
+                    "update_collaboration",
+                    "inspect_collaboration",
+                ],
             },
         ],
     }
@@ -265,13 +288,18 @@ def _case_request_packet(case_id: str, request_id: str) -> dict[str, object]:
         "id": "local-source-a-case-request",
         "claim": "第一个子代理已打开协作 case 并发起请求。",
         "checked_scope": "collaboration case",
-        "evidence_refs": [f"collaboration://case/{case_id}", f"collaboration://request/{request_id}"],
+        "evidence_refs": [
+            f"collaboration://case/{case_id}",
+            f"collaboration://request/{request_id}",
+        ],
         "artifact_refs": [],
         "confidence": 0.8,
     }
 
 
-def _submit_collaboration_result_call(case_id: str, request_id: str, run_id: str) -> dict[str, object]:
+def _submit_collaboration_result_call(
+    case_id: str, request_id: str, run_id: str
+) -> dict[str, object]:
     return {
         "tool": "submit_collaboration_result",
         "case_id": case_id,
@@ -405,7 +433,9 @@ def test_real_local_child_runner_event_wakes_background_main_agent_after_restart
         store=restarted.conversation_store,
         channels=channels,
     )
-    scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': restarted.conversation_store})
+    scheduler = BackgroundMainAgentScheduler(
+        {"runtime": runtime, "store": restarted.conversation_store}
+    )
 
     reports = scheduler.tick(now=100.0)
 
@@ -419,7 +449,9 @@ def test_real_local_children_collaborate_and_wake_background_main_agent(tmp_path
     agent = _agent(tmp_path)
     _bind_thread(agent)
     opener, responder = _create_collaboration_children(agent)
-    open_report, evidence_report, case_id = _run_local_collaboration_children(agent, opener, responder)
+    open_report, evidence_report, case_id = _run_local_collaboration_children(
+        agent, opener, responder
+    )
 
     assert open_report.records[0].ok is True
     assert evidence_report.records[0].ok is True
@@ -445,7 +477,9 @@ def _create_collaboration_children(agent: SimpleAgent):
     agent.backend = _CreateCollaborationChildrenBackend()
     agent.run(
         "请派两个本地子代理协作，有证据后叫醒你看 case 和代理树。",
-        params=RunParams(task_id="root-task-1", allowed_tools=["create_subagents"], save=False, source="test"),
+        params=RunParams(
+            task_id="root-task-1", allowed_tools=["create_subagents"], save=False, source="test"
+        ),
     )
     return sorted(agent.subagents.list_runs(), key=lambda item: item.agent_name)
 
@@ -454,7 +488,9 @@ def _run_local_collaboration_children(agent: SimpleAgent, opener, responder):
     open_report = _dispatch_one_child(agent, opener.id, _ChildOpensCollaborationCaseBackend())
     case_id = agent.collaboration_store.list_cases()[0].case_id
     request_id = agent.collaboration_store.case_status(case_id)["requests"][0]["request_id"]
-    evidence_backend = _ChildSubmitsCollaborationEvidenceBackend(case_id=case_id, request_id=request_id)
+    evidence_backend = _ChildSubmitsCollaborationEvidenceBackend(
+        case_id=case_id, request_id=request_id
+    )
     evidence_report = _dispatch_one_child(agent, responder.id, evidence_backend)
     return open_report, evidence_report, case_id
 
@@ -464,8 +500,16 @@ def _run_background_collaboration_wake(tmp_path, case_id: str):
     background = _BackgroundCollaborationWakeBackend(case_id=case_id)
     restarted.backend = background
     channels = FakeDeliveryService()
-    runtime = BackgroundMainAgentRuntime(agent=restarted, store=restarted.conversation_store, channels=channels)
-    scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': restarted.conversation_store, 'collaboration_store': restarted.collaboration_store})
+    runtime = BackgroundMainAgentRuntime(
+        agent=restarted, store=restarted.conversation_store, channels=channels
+    )
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": runtime,
+            "store": restarted.conversation_store,
+            "collaboration_store": restarted.collaboration_store,
+        }
+    )
     return background, channels, scheduler.tick(now=200.0)
 
 
@@ -485,12 +529,29 @@ def _dispatch_one_child(agent: SimpleAgent, run_id: str, backend):
 
 
 def _agent(tmp_path) -> SimpleAgent:
-    return SimpleAgent(AgentConfig(enable_tools=True, memory_path="memory.jsonl"), tmp_path)
+    return SimpleAgent(
+        AgentConfig(tool_protocol="text", enable_tools=True, memory_path="memory.jsonl"), tmp_path
+    )
 
 
 def _bind_thread(agent: SimpleAgent):
-    thread = agent.conversation_store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
-    agent.conversation_store.bind_task({'thread_id': thread.thread_id, 'task_id': "root-task-1", 'goal': "本地多代理协作任务", 'now': 2.0})
+    thread = agent.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 1.0,
+        }
+    )
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "root-task-1",
+            "goal": "本地多代理协作任务",
+            "now": 2.0,
+        }
+    )
     return thread
 
 

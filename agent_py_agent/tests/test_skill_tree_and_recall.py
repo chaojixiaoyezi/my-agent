@@ -27,42 +27,37 @@ import pytest
 
 from agent_py_agent.agent.capability import CapabilityRouter
 from agent_py_agent.agent.capability.skill_search_tool import SkillSearchTool
-from agent_py_agent.agent.prompting_parts.builder import (
-    _matching_lesson_paths,
-    _skill_context_chunks,
-)
-from agent_py_agent.agent.user_space.home_memory_seeds import (
-    default_memory_lessons,
-    default_memory_route_index_md,
-)
+from agent_py_agent.agent.memory_push import push_relevant_memories
+from agent_py_agent.agent.prompting_parts.builder import _skill_context_chunks
+from agent_py_agent.tests._memory_push_v2_harness import formal_memory_agent, promote_lesson
 
 pytestmark = pytest.mark.integration
 
 
-def _seed_home(tmp_path: Path) -> SimpleNamespace:
-    lessons = tmp_path / "memory" / "lessons"
-    lessons.mkdir(parents=True)
-    routing = tmp_path / "memory" / "routing"
-    routing.mkdir(parents=True)
-    for name, content in default_memory_lessons().items():
-        (lessons / name).write_text(content, encoding="utf-8")
-    (routing / "INDEX.md").write_text(default_memory_route_index_md(), encoding="utf-8")
-    return SimpleNamespace(owner_memory_lessons_dir=lessons)
-
-
 def test_lesson_recall_via_routing_keywords(tmp_path: Path) -> None:
-    hp = _seed_home(tmp_path)
-    assert [p.name for p in _matching_lesson_paths(hp, "请检索 deepseek 的论文".casefold())] == ["research.md"]
-    assert [p.name for p in _matching_lesson_paths(hp, "报告写到哪个输出目录".casefold())] == ["workspace.md"]
-    assert _matching_lesson_paths(hp, "今天天气怎么样".casefold()) == []
+    agent = formal_memory_agent(tmp_path)
+    lesson = promote_lesson(
+        agent,
+        content="检索论文时先核验来源。",
+        subject_key="research.deepseek.source",
+    )
+
+    hits = push_relevant_memories(agent, "planning", {"goal": "检索 deepseek 论文"})
+
+    assert [record.entry_id for record in hits] == [lesson.lesson_id]
+    assert push_relevant_memories(agent, "planning", {"goal": "今天天气怎么样"}) == []
 
 
-def test_lesson_recall_falls_back_to_stem_without_index(tmp_path: Path) -> None:
-    lessons = tmp_path / "memory" / "lessons"
-    lessons.mkdir(parents=True)
-    (lessons / "compact.md").write_text("# C", encoding="utf-8")
-    hp = SimpleNamespace(owner_memory_lessons_dir=lessons)
-    assert [p.name for p in _matching_lesson_paths(hp, "debug compact flow")] == ["compact.md"]
+def test_lesson_recall_does_not_fallback_to_stem_without_index(tmp_path: Path) -> None:
+    agent = formal_memory_agent(tmp_path)
+    promote_lesson(
+        agent,
+        content="Compact 前保存恢复证据。",
+        subject_key="compact.recovery",
+    )
+    agent.home_paths.owner_memory_routing_index_md.unlink()
+
+    assert push_relevant_memories(agent, "planning", {"goal": "debug compact flow"}) == []
 
 
 def _make_skill(root: Path, rel: str, name: str, desc: str) -> None:

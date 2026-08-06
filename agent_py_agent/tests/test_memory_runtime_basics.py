@@ -18,29 +18,38 @@ from agent_py_agent.agent.memory_archive import (
     append_snapshot,
     has_resume_trigger,
 )
+from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
 from agent_py_agent.agent.settings import AgentConfig
 
 
-def _write_route(root: Path) -> None:
-    authority = root / "references" / "memory" / "routing.md"
-    authority.parent.mkdir(parents=True, exist_ok=True)
-    authority.write_text("长期规则正文：回答前必须读权威文件。", encoding="utf-8")
-    index = root / "memory" / "routing" / "INDEX.md"
-    index.parent.mkdir(parents=True, exist_ok=True)
-    index.write_text(
-        """# Memory Routes
-
-## memory.routing
-topic: 长期规则索引
-trigger_keywords: 长期规则, 规则索引
-related_terms: memory index
-when_to_read: 用户讨论长期规则或 memory index 时读取
-authority_path: references/memory/routing.md
-scope: global
-priority: 30
-""",
-        encoding="utf-8",
+def _promote_formal_route(agent: SimpleAgent) -> str:
+    candidate = None
+    for task_id in ("task-route-a", "task-route-b"):
+        candidate = agent.memory_candidates.observe(
+            CandidateObservation(
+                candidate_type="lesson",
+                content="长期规则正文：回答 memory routing 问题时先核对正式 lesson。",
+                subject_key="memory.routing",
+                scope=MemoryScope("global", "global"),
+                origin="subagent_lesson",
+                evidence_refs=({"ref_id": task_id, "kind": "task"},),
+                source_task_ids=(task_id,),
+                observation_id=f"route-observation:{task_id}",
+                promotion_target="lesson",
+            )
+        )
+    assert candidate is not None
+    agent.memory_promotion.review(
+        candidate.candidate_id,
+        approved=True,
+        reviewer="runtime-test",
     )
+    result = agent.memory_promotion.promote(
+        candidate.candidate_id,
+        reviewer="runtime-test",
+    )
+    assert result.promoted is True
+    return result.promotion_ref.split("#", 1)[0]
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -48,6 +57,7 @@ def _read_jsonl(path: Path) -> list[dict]:
 
 
 def _test_config(tmp_path: Path, **kwargs) -> AgentConfig:
+    kwargs.setdefault("tool_protocol", "text")
     return AgentConfig(my_agent_home=str(tmp_path / "home"), **kwargs)
 
 
@@ -101,24 +111,26 @@ class NeverCalledBackend:
         raise AssertionError("backend should not be called after preflight overflow")
 
 
-def test_run_injects_routed_memory_authority_context(tmp_path):
-    """LLM: Tests that agent.run() injects routed memory authority context when routing is enabled."""
-    _write_route(tmp_path)
+def test_run_injects_only_formal_routed_lesson_in_memory_envelope(tmp_path):
+    """LLM: Tests runtime injects only formal routed lesson through the one Memory envelope."""
     agent = SimpleAgent(
         AgentConfig(
             model_backend="echo",
+            tool_protocol="text",
             memory_rule_routing_enabled=True,
             memory_rule_routing_mode="soft",
             memory_rule_auto_read_limit=1,
         ),
         tmp_path,
     )
+    lesson_path = _promote_formal_route(agent)
 
     result = agent.run("请按长期规则处理 memory index", save=False)
 
     assert result.memory_route_matches == 1
-    assert result.memory_route_paths == ["references/memory/routing.md"]
-    assert "### Routed memory authority: references/memory/routing.md" in result.prompt
+    assert result.memory_route_paths == [lesson_path]
+    assert "### Routed memory authority:" not in result.prompt
+    assert result.prompt.count("<memory-context") == 1
     assert "长期规则正文" in result.prompt
     assert result.archive_events == 0
 
@@ -165,9 +177,13 @@ def test_saved_empty_model_response_is_archived_without_empty_long_term_memory(t
     )
 
     assert archived is not None
-    assert [record.content for record in agent.memory.all()] == [
-        "保留用户请求，但模型没有生成正文"
-    ]
+    assert agent.memory.all() == []
+    audit_files = sorted(Path(agent.home_paths.owner_audit_dir).glob("*.jsonl"))
+    assert audit_files
+    assert any(
+        record.get("content_preview") == "保留用户请求，但模型没有生成正文"
+        for record in _read_jsonl(audit_files[0])
+    )
 
 
 def test_provider_saved_run_writes_only_owner_task_workspace(tmp_path):
@@ -201,7 +217,7 @@ def test_provider_saved_run_writes_only_owner_task_workspace(tmp_path):
 
 def test_run_surfaces_compact_suggestion_without_persistence(tmp_path):
     """LLM: Tests save=False keeps compact read-only while saved runs auto-apply."""
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = SimpleAgent(AgentConfig(model_backend="echo", tool_protocol="text"), tmp_path)
     agent.backend.context_window_tokens = 20
 
     result = agent.run("请生成足够长的 compact 提示触发内容", save=False)
@@ -221,7 +237,7 @@ def test_run_surfaces_compact_suggestion_without_persistence(tmp_path):
 
 
 def test_run_context_overflow_uses_same_compact_cycle_even_below_threshold(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = SimpleAgent(AgentConfig(model_backend="echo", tool_protocol="text"), tmp_path)
     agent.backend = RuntimeOverflowBackend()
 
     result = agent.run("普通短任务，但后端报告上下文溢出", save=False)
@@ -237,7 +253,7 @@ def test_run_context_overflow_uses_same_compact_cycle_even_below_threshold(tmp_p
 
 
 def test_run_context_error_uses_same_compact_cycle(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = SimpleAgent(AgentConfig(model_backend="echo", tool_protocol="text"), tmp_path)
     backend = RaisingContextBackend()
     agent.backend = backend
 
@@ -250,7 +266,7 @@ def test_run_context_error_uses_same_compact_cycle(tmp_path):
 
 
 def test_run_preflights_prompt_over_context_before_provider_call(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = SimpleAgent(AgentConfig(model_backend="echo", tool_protocol="text"), tmp_path)
     backend = NeverCalledBackend()
     agent.backend = backend
 
@@ -263,7 +279,10 @@ def test_run_preflights_prompt_over_context_before_provider_call(tmp_path):
 
 
 def test_run_uses_provider_usage_for_active_compact_budget_not_cumulative(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", prompt_files=[]), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", prompt_files=[], tool_protocol="text"),
+        tmp_path,
+    )
     backend = SequenceUsageBackend(
         [
             {"input_tokens": 19_000, "output_tokens": 200},
@@ -312,7 +331,7 @@ def test_active_compact_budget_excludes_full_archive_tool_history(tmp_path):
 
 def test_run_no_save_blocks_persistent_auto_compact_apply(tmp_path):
     """LLM: Tests that save=False remains a hard persistence boundary for auto compact apply."""
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = SimpleAgent(AgentConfig(model_backend="echo", tool_protocol="text"), tmp_path)
     agent.backend.context_window_tokens = 20
 
     result = agent.run(
@@ -333,7 +352,7 @@ def test_run_no_save_blocks_persistent_auto_compact_apply(tmp_path):
 
 def test_run_no_save_does_not_write_raw_archive(tmp_path):
     """LLM: Tests that agent.run() with save=False does not write any raw archive files."""
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = SimpleAgent(AgentConfig(model_backend="echo", tool_protocol="text"), tmp_path)
 
     result = agent.run("不要归档这轮对话", save=False)
 
@@ -345,7 +364,7 @@ def test_run_no_save_does_not_write_raw_archive(tmp_path):
 
 def test_run_no_save_does_not_write_runtime_fact(tmp_path):
     """LLM: Tests that save=False does not write runtime fact sources."""
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = SimpleAgent(AgentConfig(model_backend="echo", tool_protocol="text"), tmp_path)
 
     result = agent.run(
         "子代理已完成，请写恢复锚点",

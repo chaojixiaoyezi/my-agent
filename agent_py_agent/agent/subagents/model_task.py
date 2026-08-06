@@ -319,12 +319,6 @@ class SubAgentTask:
     daily_ledger_last_event_id: str = ""
     task_artifact_manifest_jsonl: str = ""
     agent_run_artifact_manifest_jsonl: str = ""
-    agent_run_memory_gate_dir: str = ""
-    agent_run_memory_candidates_jsonl: str = ""
-    agent_run_memory_review_queue_jsonl: str = ""
-    agent_run_memory_decisions_jsonl: str = ""
-    agent_run_memory_exports_jsonl: str = ""
-    agent_run_skill_spark_gate_json: str = ""
     handoff_file: str = ""
     debrief_file: str = ""
     output_json: str = ""
@@ -357,21 +351,3 @@ class SubAgentTask:
     channel_checks: list[ChannelProbeCheck] = field(default_factory=list)
     channel_probe_file: str = ""
     attributes: dict[str, object] = field(default_factory=dict)
-
-
-@dataclass
-class LearningCandidate:
-    """Candidate lesson that may later be accepted into learning memory."""
-
-    id: str
-    lesson: str
-    normalized_key: str
-    status: str = "draft"
-    confidence: float = 0.5
-    occurrence_count: int = 1
-    evidence_count: int = 1
-    source_runs: list[str] = field(default_factory=list)
-    evidence: list[dict[str, object]] = field(default_factory=list)
-    variants: list[str] = field(default_factory=list)
-    created_at: float = 0.0
-    updated_at: float = 0.0

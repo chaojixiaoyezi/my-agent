@@ -1,8 +1,8 @@
-"""Typed action protocol — core refs, tool envelopes, subagent envelopes,
-dispatch envelope, and public API.
+"""Typed action protocol for shared refs, subagents, and compaction packets.
 
 Was split across action_protocol_core / action_protocol_tooling /
 action_protocol_subagents / action_protocol_subagent_dispatch — now merged.
+工具调用只使用 tooling.runtime_contracts 中的 ToolCall/ToolResult；
 自然语言回复不在这里获得执行权。
 """
 
@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .common.value_parsing import string_list
-from .contracts.idempotency import operation_idempotency_key
 
 ACTION_PROTOCOL_SCHEMA_VERSION = 1
 UTC = timezone.utc
@@ -192,138 +191,6 @@ class EvidenceRef:
             artifact_refs=string_list(payload.get("artifact_refs")),
             confidence=_float_or_zero(payload.get("confidence")),
         )
-
-
-# ===========================================================================
-# tool envelopes (was action_protocol_tooling.py)
-# ===========================================================================
-
-@dataclass(frozen=True)
-class ToolCallEnvelopePayloadRequest:
-    payload: dict[str, Any]
-    call_id: str
-    source: str
-    scope: RunScope | None = None
-    operation_id: str = ""
-    idempotency_key: str = ""
-
-
-@dataclass(frozen=True)
-class ToolCallEnvelope:
-    call_id: str
-    source: str
-    tool_name: str
-    input: dict[str, Any]
-    scope: RunScope = field(default_factory=RunScope)
-    operation_id: str = ""
-    idempotency_key: str = ""
-    schema_version: int = ACTION_PROTOCOL_SCHEMA_VERSION
-    kind: str = "tool_call"
-    created_at: str = field(default_factory=_now_iso)
-
-    def __post_init__(self) -> None:
-        if not self.operation_id:
-            identifier = self.call_id
-            if self.scope.attempt_id:
-                identifier = f"{self.scope.attempt_id}:{identifier}"
-            object.__setattr__(self, "operation_id", _default_operation_id(self.kind, identifier))
-        if not self.idempotency_key:
-            scope_id = (
-                self.scope.attempt_id
-                or self.scope.run_id
-                or self.scope.request_id
-                or self.scope.task_id
-                or self.scope.session_id
-                or "unscoped"
-            )
-            object.__setattr__(
-                self,
-                "idempotency_key",
-                operation_idempotency_key(scope_id, self.operation_id),
-            )
-
-    def to_dict(self) -> dict[str, Any]:
-        payload = asdict(self)
-        payload["scope"] = self.scope.to_dict()
-        return payload
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> ToolCallEnvelope:
-        return cls(
-            call_id=str(payload.get("call_id") or ""),
-            source=str(payload.get("source") or ""),
-            tool_name=str(payload.get("tool_name") or ""),
-            input=_dict_or_empty(payload.get("input")),
-            scope=RunScope.from_dict(payload.get("scope")),
-            operation_id=str(payload.get("operation_id") or ""),
-            idempotency_key=str(payload.get("idempotency_key") or ""),
-            schema_version=int(payload.get("schema_version") or ACTION_PROTOCOL_SCHEMA_VERSION),
-            kind=str(payload.get("kind") or "tool_call"),
-            created_at=str(payload.get("created_at") or _now_iso()),
-        )
-
-
-@dataclass(frozen=True)
-class ToolCallResultEnvelope:
-    call_id: str
-    tool: str
-    ok: bool
-    output_ref: str = ""
-    output: str = ""
-    error: str = ""
-    scope: RunScope = field(default_factory=RunScope)
-    operation_id: str = ""
-    source: str = ""
-    action_created_at: str = ""
-    schema_version: int = ACTION_PROTOCOL_SCHEMA_VERSION
-    kind: str = "tool_call_result"
-    created_at: str = field(default_factory=_now_iso)
-
-    def __post_init__(self) -> None:
-        if not self.operation_id:
-            object.__setattr__(self, "operation_id", _default_operation_id(self.kind, self.call_id))
-
-    def to_dict(self) -> dict[str, Any]:
-        payload = asdict(self)
-        payload["scope"] = self.scope.to_dict()
-        return payload
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> ToolCallResultEnvelope:
-        return cls(
-            call_id=str(payload.get("call_id") or ""),
-            tool=str(payload.get("tool") or ""),
-            ok=bool(payload.get("ok")),
-            output_ref=str(payload.get("output_ref") or ""),
-            output=str(payload.get("output") or ""),
-            error=str(payload.get("error") or ""),
-            scope=RunScope.from_dict(payload.get("scope")),
-            operation_id=str(payload.get("operation_id") or ""),
-            source=str(payload.get("source") or ""),
-            action_created_at=str(payload.get("action_created_at") or ""),
-            schema_version=int(payload.get("schema_version") or ACTION_PROTOCOL_SCHEMA_VERSION),
-            kind=str(payload.get("kind") or "tool_call_result"),
-            created_at=str(payload.get("created_at") or _now_iso()),
-        )
-
-
-def tool_call_envelope_from_payload(request: ToolCallEnvelopePayloadRequest) -> ToolCallEnvelope:
-    payload = request.payload
-    tool = str(payload.get("tool") or "").strip()
-    input_payload = {
-        key: value
-        for key, value in payload.items()
-        if key != "tool"
-    }
-    return ToolCallEnvelope(
-        call_id=request.call_id,
-        source=request.source,
-        tool_name=tool,
-        input=input_payload,
-        scope=request.scope or RunScope(),
-        operation_id=str(request.operation_id or ""),
-        idempotency_key=str(request.idempotency_key or ""),
-    )
 
 
 # ===========================================================================
@@ -728,18 +595,12 @@ class CompactContinuePacketEnvelope:
 def decode_action_envelope(
     payload: dict[str, Any],
 ) -> (
-    ToolCallEnvelope
-    | ToolCallResultEnvelope
-    | SubagentResultEnvelope
+    SubagentResultEnvelope
     | CompactContinuePacketEnvelope
     | SubagentScheduleEnvelope
     | SubagentDispatchEnvelope
 ):
     kind = str(payload.get("kind") or "")
-    if kind == "tool_call":
-        return ToolCallEnvelope.from_dict(payload)
-    if kind == "tool_call_result":
-        return ToolCallResultEnvelope.from_dict(payload)
     if kind == "subagent_result":
         return SubagentResultEnvelope.from_dict(payload)
     if kind == "compact_continue_packet":
@@ -761,12 +622,8 @@ __all__ = [
     "SubagentDispatchEnvelope",
     "SubagentResultEnvelope",
     "SubagentScheduleEnvelope",
-    "ToolCallEnvelope",
-    "ToolCallEnvelopePayloadRequest",
-    "ToolCallResultEnvelope",
     "decode_action_envelope",
     "path_refs_from_subagent_refs",
     "subagent_dispatch_envelope_from_payload",
     "subagent_schedule_envelope_from_payload",
-    "tool_call_envelope_from_payload",
 ]

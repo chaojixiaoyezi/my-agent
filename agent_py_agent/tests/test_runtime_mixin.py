@@ -161,16 +161,13 @@ class TestRuntimeMixinMemoryMethods:
     """测试 memory 相关方法。"""
 
     def test_remember(self) -> None:
-        """测试 remember 方法。"""
+        """旧 note 入口必须拒绝，不能恢复绕过统一候选链的兼容语义。"""
         from agent_py_agent.agent.agent_core.runtime_mixin import SimpleAgentRuntimeMixin
 
         mixin = SimpleAgentRuntimeMixin()
-        mock_memory = MagicMock()
-        mock_memory.add.return_value = None
-        mixin.memory = mock_memory
 
-        mixin.remember("测试记忆内容", kind="note")
-        mock_memory.add.assert_called_once_with("user", "测试记忆内容", kind="note")
+        with pytest.raises(ValueError, match="fact/event/project"):
+            mixin.remember("测试记忆内容", kind="note")
 
     def test_remember_default_kind(self) -> None:
         """测试 remember 默认 kind。"""
@@ -178,11 +175,34 @@ class TestRuntimeMixinMemoryMethods:
 
         mixin = SimpleAgentRuntimeMixin()
         mock_memory = MagicMock()
-        mock_memory.add.return_value = None
+        record = SimpleNamespace(entry_id="entry-1")
+        mock_memory.all.return_value = [record]
         mixin.memory = mock_memory
+        pending = SimpleNamespace(candidate_id="candidate-1", status="pending_review")
+        approved = SimpleNamespace(candidate_id="candidate-1", status="approved")
+        mixin.memory_candidates = MagicMock()
+        mixin.memory_candidates.observe.return_value = pending
+        mixin.memory_promotion = MagicMock()
+        mixin.memory_promotion.review.return_value = approved
+        mixin.memory_promotion.promote.return_value = SimpleNamespace(
+            promoted=True,
+            promotion_ref="memory:long_term#entry-1",
+            reason_code="",
+        )
 
-        mixin.remember("内容")
-        mock_memory.add.assert_called_once_with("user", "内容", kind="note")
+        result = mixin.remember("内容")
+
+        observation = mixin.memory_candidates.observe.call_args.args[0]
+        assert observation.candidate_type == "long_term_fact"
+        assert observation.promotion_target == "long_term"
+        mixin.memory_promotion.review.assert_called_once()
+        mixin.memory_promotion.promote.assert_called_once_with(
+            "candidate-1",
+            reviewer="local-user-explicit",
+            confirmed=True,
+        )
+        mock_memory.add.assert_not_called()
+        assert result is record
 
     def test_recall(self) -> None:
         """测试 recall 方法。"""

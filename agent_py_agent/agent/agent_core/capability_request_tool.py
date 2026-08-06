@@ -8,7 +8,17 @@ from typing import TYPE_CHECKING
 from ..common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
 from ..subagents.role_templates import is_self_authorized_root_task
 from ..subagents.services.lifecycle import RecordCapabilityRequestParams
-from ..tooling.models import BaseTool, ToolExecutionResult, ToolSpec
+from ..tooling.models import (
+    BaseTool,
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    ResourceScopePolicy,
+    ToolHandlerOutcome,
+    ToolInputPolicy,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+)
 from .orchestration.scope_resolution import (
     ScopeResolution,
     identity_scope_resolution,
@@ -32,13 +42,22 @@ class CapabilityRequestToolInput:
 
 class CapabilityRequestTool(BaseTool):
 
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy("mutating"),
+        idempotency_policy=IdempotencyPolicy("operation"),
+        resource_scopes=ResourceScopePolicy(mode="declared", static_scopes=("capability_requests",)),
+        input_policy=ToolInputPolicy(
+            internal_parameters=("run_id", "from_run_id", "agent_id"),
+        ),
+    )
+
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
-        self.spec = build_capability_request_spec()
+        self.model_spec = build_capability_request_model_spec()
 
-    def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         request = _capability_request_input(self.agent, params)
-        if isinstance(request, ToolExecutionResult):
+        if isinstance(request, ToolHandlerOutcome):
             return request
         try:
             record = self.agent.subagents.lifecycle.record_capability_request(request.run_id, request.params)
@@ -91,43 +110,38 @@ class CapabilityRequestTool(BaseTool):
         }
 
 
-def build_capability_request_spec() -> ToolSpec:
-    return ToolSpec(
+def build_capability_request_model_spec() -> ToolModelSpec:
+    return ToolModelSpec(
         name=_TOOL_NAME,
-        category="orchestration",
-        effect="mutating",
-        idempotency_scope="operation",
         description=(
             "为当前 subagent run 提交能力申请。常规能力（shell/读写自己任务沙箱）"
             "会被机制层立即自动授权并安排续跑；外部能力（网络/MCP/skill/越界路径/高风险）"
             "记录为待父级处理，本工具自身不执行任何工具。"
         ),
-        use_cases=[
-            "runner 需要当前工具目录之外的网络、MCP、skill 或新工具才能继续",
-            "runner 需要父级扩大运行权限或代为处理当前权限下做不了的动作",
-            "当前工具集无法产出真实证据，需要父级授权后重跑",
-        ],
-        avoid_when=[
-            "只是推荐父级运行测试命令，可以写 tests/next_actions，不需要申请能力",
-            "当前已有 run_command、write_file、apply_patch 等普通工具能完成任务",
-        ],
-        keywords=["capability", "request", "grant", "tool", "skill", "shell", "MCP", "能力申请", "授权"],
-        parameters=_capability_request_parameters(),
-        parameter_details=_capability_request_parameter_details(),
-        parameter_schema=_capability_request_parameter_schema(),
-        required_parameters=["problem"],
-        examples=[
-            (
+        input_schema=_capability_request_input_schema(),
+        hints=ToolModelHints(
+            category="orchestration",
+            use_cases=(
+                "runner 需要当前工具目录之外的网络、MCP、skill 或新工具才能继续",
+                "runner 需要父级扩大运行权限或代为处理当前权限下做不了的动作",
+                "当前工具集无法产出真实证据，需要父级授权后重跑",
+            ),
+            avoid_when=(
+                "只是推荐父级运行测试命令，可以写 tests/next_actions，不需要申请能力",
+                "当前已有 run_command、write_file、apply_patch 等普通工具能完成任务",
+            ),
+            keywords=("capability", "request", "grant", "tool", "skill", "shell", "MCP", "能力申请", "授权"),
+            examples=((
                 '{"tool":"capability_request","problem":"当前工具无法访问必要的内部系统查询结果",'
                 '"needed_capability":"internal_api_access","capability_type":"network",'
                 '"requested_tools":["internal_api_query"],"expected_output":"拿到查询结果或明确失败原因",'
                 '"risk_level":"low"}'
-            )
-        ],
+            ),),
+        ),
     )
 
 
-def _capability_request_input(agent: object, params: dict[str, object]) -> CapabilityRequestToolInput | ToolExecutionResult:
+def _capability_request_input(agent: object, params: dict[str, object]) -> CapabilityRequestToolInput | ToolHandlerOutcome:
     normalized = _capability_params(params)
     resolution = identity_scope_resolution(
         agent,
@@ -231,50 +245,45 @@ def _object_dict(value: object) -> dict[str, object]:
     return {}
 
 
-def _capability_request_parameters() -> dict[str, str]:
+def _capability_request_input_schema() -> dict[str, object]:
+    string_list_schema = {"type": "array", "items": {"type": "string"}}
+    properties: dict[str, object] = {
+        "problem": {"type": "string", "description": "写清楚为什么现有工具不能继续；不要只写需要工具。"},
+        "needed_capability": {"type": "string", "description": "具体能力名，如 network_api、browser_login、skill:xxx 或 internal_tool。"},
+        "capability_type": {
+            "type": "string",
+            "enum": ["shell", "tool", "skill", "mcp", "network", "generic"],
+            "description": "能力分类，用于父级路由。",
+        },
+        "requested_tools": {**string_list_schema, "description": "真正需要父级授权的工具名。"},
+        "requested_skills": {**string_list_schema, "description": "任务确实需要的 skill 名。"},
+        "requested_mcp_tools": {**string_list_schema, "description": "需要父级接入的 MCP 工具名。"},
+        "requested_commands": {**string_list_schema, "description": "需要授权的命令或命令前缀。"},
+        "cwd_scope": {**string_list_schema, "description": "命令工作目录范围。"},
+        "path_scope": {**string_list_schema, "description": "需要读写的路径范围。"},
+        "network_scope": {**string_list_schema, "description": "需要访问的网络主机或域范围。"},
+        "expected_output": {"type": "string", "description": "父级处理后应返回的结果、证据、审批或失败原因。"},
+        "tried": {**string_list_schema, "description": "已经尝试过的安全方案。"},
+        "evidence": {**string_list_schema, "description": "证明能力缺口的证据引用。"},
+        "constraints": {"type": "object", "additionalProperties": {"type": "string"}, "description": "授权需要遵守的约束。"},
+        "output_budget": {"type": "object", "description": "输出预算的结构化要求。"},
+        "risk_level": {"type": "string", "enum": ["low", "medium", "high"], "description": "风险等级；删除、网络写入或越界访问至少 medium。"},
+        "alternatives_attempted": {**string_list_schema, "description": "已经尝试的替代路径。"},
+        "escalation_target": {"type": "string", "description": "升级目标，默认 parent。"},
+    }
     return {
-        "problem": "必填；当前被什么能力缺口阻塞",
-        "needed_capability": "能力名，例如 network_api、browser_login、skill:xxx、internal_tool",
-        "capability_type": "shell/tool/skill/mcp/network/generic",
-        "requested_tools": "希望父级授权的工具名列表",
-        "requested_skills": "希望父级授权或加载的 skill 名列表",
-        "requested_mcp_tools": "希望父级授权的 MCP 工具名列表",
-        "expected_output": "拿到能力后预计能产出的结果或证据",
-        "risk_level": "low/medium/high；高风险必须说明原因和替代方案",
+        "type": "object",
+        "properties": properties,
+        "required": ["problem"],
+        "additionalProperties": False,
     }
 
 
-def _capability_request_parameter_details() -> dict[str, str]:
-    return {
-        "problem": "写清楚为什么现有工具不能继续；不要只写“需要工具”。",
-        "needed_capability": "父级用它做路由检索；能具体就具体。",
-        "capability_type": "shell 表示命令执行；tool 表示内置工具；skill 表示知识/流程；mcp/network 分别表示 MCP 或网络能力。",
-        "requested_tools": "只列真正需要的工具；能用已有 run_command/write_file/apply_patch 完成时不要申请。",
-        "requested_skills": "只列任务确实需要的 skill；不要把普通任务包装成能力申请。",
-        "requested_mcp_tools": "只列需要父级接入的外部工具；不知道名称时在 problem 里说明需要什么能力即可。",
-        "expected_output": "说明父级处理后应该返回什么，例如文件路径、查询结果、审批结果或失败原因。",
-        "risk_level": "涉及删除、网络写入、大量输出或跨目录访问时至少 medium。",
-    }
+def _capability_ok(payload: dict[str, object]) -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(_TOOL_NAME, True, json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
 
-def _capability_request_parameter_schema() -> dict[str, object]:
-    return {
-        "problem": {"type": "string"},
-        "needed_capability": {"type": "string"},
-        "capability_type": {"type": "string"},
-        "requested_tools": {"type": "array", "items": {"type": "string"}},
-        "requested_skills": {"type": "array", "items": {"type": "string"}},
-        "requested_mcp_tools": {"type": "array", "items": {"type": "string"}},
-        "expected_output": {"type": "string"},
-        "risk_level": {"type": "string", "enum": ["low", "medium", "high"]},
-    }
-
-
-def _capability_ok(payload: dict[str, object]) -> ToolExecutionResult:
-    return ToolExecutionResult(_TOOL_NAME, True, json.dumps(payload, ensure_ascii=False, sort_keys=True))
-
-
-def _capability_error(message: str, *, error_code: str) -> ToolExecutionResult:
+def _capability_error(message: str, *, error_code: str) -> ToolHandlerOutcome:
     # A missing classification falls back to UNKNOWN_ERROR and tells the model to
     # give up.  Capability failures are all typed parameter, scope, or lookup facts.
-    return ToolExecutionResult(_TOOL_NAME, False, message, error_code=error_code)
+    return ToolHandlerOutcome(_TOOL_NAME, False, message, error_code=error_code)

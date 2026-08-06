@@ -10,12 +10,15 @@ from agent_py_agent.agent.contracts.tool_input_schema import (
     normalize_tool_input,
     validate_tool_input,
 )
-from agent_py_agent.agent.tooling.models import ToolSpec
-from agent_py_agent.agent.tooling.tool_spec_schema import (
-    normalize_tool_payload_for_spec,
-    tool_spec_input_schema,
-    tool_spec_runtime_input_schema,
+from agent_py_agent.agent.tooling.input_schema import canonicalize_tool_input_schema
+from agent_py_agent.agent.tooling.models import (
+    BaseTool,
+    ToolHandlerOutcome,
+    ToolInputPolicy,
+    ToolModelSpec,
+    ToolRuntime,
 )
+from agent_py_agent.tests._tool_runtime_harness import make_test_runtime_policy
 
 
 def test_normalizer_recurses_and_only_applies_unambiguous_conversions() -> None:
@@ -116,23 +119,19 @@ def test_normalizer_uses_container_limit_for_long_json_collections() -> None:
 
 def test_create_subagents_long_native_items_string_uses_canonical_schema_path() -> None:
     from agent_py_agent.agent.agent_core.orchestration.tool_specs import (
-        build_create_subagents_spec,
+        build_create_subagents_model_spec,
     )
 
     items = [{"goal": f"独立检查第 {index} 路数据：" + ("保留完整证据。" * 100)} for index in range(5)]
     items_text = json.dumps(items, ensure_ascii=False)
 
     assert len(items_text) > 1_024
-    normalized = normalize_tool_payload_for_spec(
-        {
-            "tool": "create_subagents",
-            "goal": "并行检查五路数据",
-            "items": items_text,
-        },
-        build_create_subagents_spec(),
+    normalized = normalize_tool_input(
+        {"goal": "并行检查五路数据", "items": items_text},
+        build_create_subagents_model_spec().input_schema,
     )
 
-    assert normalized.payload["items"] == items
+    assert normalized.value["items"] == items
     assert [item.to_dict() for item in normalized.coercions] == [
         {"path": "$.items", "source_type": "string", "target_type": "array"}
     ]
@@ -210,83 +209,81 @@ def test_validator_distinguishes_missing_and_type_errors() -> None:
     assert wrong.primary_error_code == "TOOL_PARAMETER_TYPE_INVALID"
 
 
-def test_tool_spec_public_and_runtime_schema_share_one_source() -> None:
-    spec = ToolSpec(
+def test_model_schema_and_host_internal_parameters_remain_separate() -> None:
+    spec = ToolModelSpec(
         name="demo",
-        category="test",
         description="demo",
-        use_cases=[],
-        avoid_when=[],
-        keywords=[],
-        parameters={"value": "值"},
-        parameter_schema={"value": {"type": "integer", "minimum": 1}},
-        required_parameters=["value"],
-        internal_parameters=["__scope"],
+        input_schema={
+            "type": "object",
+            "properties": {"value": {"type": "integer", "minimum": 1}},
+            "required": ["value"],
+            "additionalProperties": False,
+        },
+    )
+    policy = make_test_runtime_policy("read_only")
+    policy = type(policy)(
+        effect_resolver=policy.effect_resolver,
+        approval_policy=policy.approval_policy,
+        sandbox_policy=policy.sandbox_policy,
+        idempotency_policy=policy.idempotency_policy,
+        timeout_policy=policy.timeout_policy,
+        concurrency_policy=policy.concurrency_policy,
+        resource_scopes=policy.resource_scopes,
+        output_policy=policy.output_policy,
+        availability_policy=policy.availability_policy,
+        input_policy=ToolInputPolicy(internal_parameters=("__scope",)),
+        promotes_task=policy.promotes_task,
     )
 
-    public = tool_spec_input_schema(spec)
-    runtime = tool_spec_runtime_input_schema(spec)
+    class _Tool(BaseTool):
+        model_spec = spec
+        runtime_policy = policy
 
-    assert public["properties"]["value"]["minimum"] == 1
-    assert public["additionalProperties"] is False
-    assert "__scope" not in public["properties"]
-    assert runtime["properties"]["__scope"] == {}
+        def execute(self, params):
+            return ToolHandlerOutcome("demo", True, str(params))
+
+    runtime = ToolRuntime(spec, policy, _Tool())
+
+    assert runtime.model_spec.input_schema["properties"]["value"]["minimum"] == 1
+    assert runtime.model_spec.input_schema["additionalProperties"] is False
+    assert "__scope" not in runtime.model_spec.input_schema["properties"]
+    assert runtime.runtime_policy.input_policy.internal_parameters == ("__scope",)
 
 
 def test_explicit_schema_rejects_unimplemented_assertions_and_external_refs() -> None:
-    base = {
-        "name": "demo",
-        "category": "test",
-        "description": "demo",
-        "use_cases": [],
-        "avoid_when": [],
-        "keywords": [],
-        "parameters": {},
-    }
-    unsupported = ToolSpec(
-        **base,
-        input_schema={"type": "object", "properties": {}, "uniqueItems": True},
-    )
-    external_ref = ToolSpec(
-        **base,
-        input_schema={"type": "object", "$ref": "https://example.com/schema.json"},
-    )
-    missing_ref = ToolSpec(
-        **base,
-        input_schema={
-            "type": "object",
-            "properties": {"value": {"$ref": "#/$defs/missing"}},
-        },
-    )
-    cyclic_ref = ToolSpec(
-        **base,
-        input_schema={
-            "type": "object",
-            "$defs": {
-                "left": {"$ref": "#/$defs/right"},
-                "right": {"$ref": "#/$defs/left"},
-            },
-            "properties": {"value": {"$ref": "#/$defs/left"}},
-        },
-    )
-    invalid_pattern = ToolSpec(
-        **base,
-        input_schema={
-            "type": "object",
-            "properties": {"value": {"type": "string", "pattern": "("}},
-        },
-    )
-
-    with pytest.raises(ValueError, match="未支持"):
-        tool_spec_input_schema(unsupported)
-    with pytest.raises(ValueError, match="本地引用"):
-        tool_spec_input_schema(external_ref)
-    with pytest.raises(ValueError, match="不存在"):
-        tool_spec_input_schema(missing_ref)
-    with pytest.raises(ValueError, match="循环别名"):
-        tool_spec_input_schema(cyclic_ref)
-    with pytest.raises(ValueError, match="有效正则"):
-        tool_spec_input_schema(invalid_pattern)
+    with pytest.raises(ValueError, match="unsupported schema rules"):
+        canonicalize_tool_input_schema(
+            {"type": "object", "properties": {}, "uniqueItems": True}
+        )
+    with pytest.raises(ValueError, match="local schema reference"):
+        canonicalize_tool_input_schema(
+            {"type": "object", "$ref": "https://example.com/schema.json"}
+        )
+    with pytest.raises(ValueError, match="missing or non-schema"):
+        canonicalize_tool_input_schema(
+            {
+                "type": "object",
+                "properties": {"value": {"$ref": "#/$defs/missing"}},
+            }
+        )
+    with pytest.raises(ValueError, match="alias cycle"):
+        canonicalize_tool_input_schema(
+            {
+                "type": "object",
+                "$defs": {
+                    "left": {"$ref": "#/$defs/right"},
+                    "right": {"$ref": "#/$defs/left"},
+                },
+                "properties": {"value": {"$ref": "#/$defs/left"}},
+            }
+        )
+    with pytest.raises(ValueError, match="valid regular expression"):
+        canonicalize_tool_input_schema(
+            {
+                "type": "object",
+                "properties": {"value": {"type": "string", "pattern": "("}},
+            }
+        )
 
 
 def test_local_reference_alias_chain_is_fully_resolved() -> None:
@@ -300,18 +297,7 @@ def test_local_reference_alias_chain_is_fully_resolved() -> None:
         "required": ["count"],
         "additionalProperties": False,
     }
-    spec = ToolSpec(
-        name="demo",
-        category="test",
-        description="demo",
-        use_cases=[],
-        avoid_when=[],
-        keywords=[],
-        parameters={},
-        input_schema=schema,
-    )
-
-    canonical = tool_spec_input_schema(spec)
+    canonical = ToolModelSpec("demo", "demo", schema).input_schema
     normalized = normalize_tool_input({"count": "2"}, canonical)
 
     assert normalized.value == {"count": 2}

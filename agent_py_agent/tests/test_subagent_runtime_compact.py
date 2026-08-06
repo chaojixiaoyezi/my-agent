@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +14,7 @@ from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.subagents.context_bundle_refs import runtime_task_attributes
+from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
 
 
 class _TwoOverflowChildBackend:
@@ -39,8 +41,14 @@ class _TwoOverflowChildBackend:
             return ModelResponse(
                 text=(
                     "[TOOL_CALL]\n"
-                    f'{{"tool":"write_file","path":"{self.output_path}",'
-                    '"content":"child progress"}}\n'
+                    + json.dumps(
+                        {
+                            "tool": "write_file",
+                            "path": str(self.output_path),
+                            "content": "child progress",
+                        }
+                    )
+                    + "\n"
                     "[/TOOL_CALL]"
                 ),
                 backend=self.name,
@@ -58,6 +66,7 @@ def test_subagent_reuses_generic_compact_in_own_home_without_owner_memory_pollut
 ) -> None:
     agent = SimpleAgent(
         AgentConfig(
+            tool_protocol="text",
             model_backend="echo",
             enable_tools=True,
             my_agent_home=str(tmp_path / "home"),
@@ -93,13 +102,7 @@ def test_subagent_reuses_generic_compact_in_own_home_without_owner_memory_pollut
         source="subagent_run_model_turn",
     )
 
-    apply_dir = (
-        run_home
-        / "memory_archive"
-        / "runs"
-        / task.id
-        / "compact_applies"
-    )
+    apply_dir = run_home / "memory_archive" / "runs" / task.id / "compact_applies"
     metadata = [
         path
         for path in apply_dir.glob("apply-*.json")
@@ -132,6 +135,7 @@ def test_task_local_preflight_uses_the_configured_exact_compact_threshold(
     run_home.mkdir(parents=True)
     agent = SimpleNamespace(
         config=AgentConfig(
+            tool_protocol="text",
             auto_save_memory=True,
             memory_compact_auto_trigger_percent=90,
             model_context_window_tokens=1_000,
@@ -142,6 +146,7 @@ def test_task_local_preflight_uses_the_configured_exact_compact_threshold(
         context_scope="task_local",
         task_attributes={"agent_run_workspace_dir": str(run_home)},
         live_archive_state={},
+        tool_protocol_snapshot=make_test_protocol_snapshot(),
     )
     request = SimpleNamespace(agent=agent, params=params, prompt="child prompt", tool_rounds=0)
 

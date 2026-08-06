@@ -383,8 +383,8 @@ def test_memory_doctor_reports_home_runtime_status(tmp_path: Path, capsys):
     assert payload["home"]["owner"]["tasks"]["exists"] is True
     assert payload["home"]["directories"]["workspace_tasks"]["exists"] is False
     assert payload["routing"]["index"]["path"] == str(home.resolve() / "owners" / "local" / "main" / "memory" / "routing" / "INDEX.md")
-    # owner 路由索引现在播种默认路由表（原来播在被忽略的根索引，等于死配置）
-    assert payload["routing"]["route_count"] > 0
+    # 新 owner 尚无正式晋升 lesson，因此索引存在但不能伪造默认正式路由。
+    assert payload["routing"]["route_count"] == 0
     assert payload["ok"] is True
 
 

@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import json
@@ -16,9 +15,13 @@ from agent_py_agent.agent.memory_archive.runtime_fact_source import (
 from agent_py_agent.cli.parser import build_parser
 
 
-def test_real_run_runtime_fact_source_keeps_prompt_sections_as_goal_only(tmp_path: Path, capsys) -> None:
+def test_real_run_runtime_fact_source_keeps_prompt_sections_as_goal_only(
+    tmp_path: Path, capsys
+) -> None:
     config_path = _write_config(tmp_path)
-    run_args = build_parser().parse_args(["--config", str(config_path), "run", _explicit_prompt(), "--save"])
+    run_args = build_parser().parse_args(
+        ["--config", str(config_path), "run", _explicit_prompt(), "--save"]
+    )
 
     assert run_args.func(run_args) == 0
     capsys.readouterr()
@@ -32,7 +35,9 @@ def test_real_run_runtime_fact_source_keeps_prompt_sections_as_goal_only(tmp_pat
     assert payload["latest_tests"] == []
 
 
-def test_runtime_fact_source_does_not_parse_prompt_sections_as_machine_facts(tmp_path: Path) -> None:
+def test_runtime_fact_source_does_not_parse_prompt_sections_as_machine_facts(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "workspace"
 
     write_runtime_fact_source(
@@ -56,7 +61,9 @@ def test_runtime_fact_source_does_not_parse_prompt_sections_as_machine_facts(tmp
     )
 
     payload = json.loads(
-        (root / "memory_archive" / "runtime_facts" / "req-section-stop" / "task.json").read_text(encoding="utf-8")
+        (root / "memory_archive" / "runtime_facts" / "req-section-stop" / "task.json").read_text(
+            encoding="utf-8"
+        )
     )
     assert payload["acceptance"] == []
     assert payload["constraints"] == []
@@ -64,7 +71,9 @@ def test_runtime_fact_source_does_not_parse_prompt_sections_as_machine_facts(tmp
     assert "only approved constraint" in payload["goal"]
 
 
-def test_runtime_fact_source_does_not_promote_succeeded_status_alias_to_final(tmp_path: Path) -> None:
+def test_runtime_fact_source_does_not_promote_succeeded_status_alias_to_final(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "workspace"
 
     write_runtime_fact_source(
@@ -77,7 +86,9 @@ def test_runtime_fact_source_does_not_promote_succeeded_status_alias_to_final(tm
     )
 
     payload = json.loads(
-        (root / "memory_archive" / "runtime_facts" / "req-status-alias" / "task.json").read_text(encoding="utf-8")
+        (root / "memory_archive" / "runtime_facts" / "req-status-alias" / "task.json").read_text(
+            encoding="utf-8"
+        )
     )
     assert payload["runtime_progress"]["phase"] == "running"
 
@@ -95,7 +106,9 @@ def test_runtime_fact_source_does_not_promote_lowercase_done_to_final(tmp_path: 
     )
 
     payload = json.loads(
-        (root / "memory_archive" / "runtime_facts" / "req-lowercase-done" / "task.json").read_text(encoding="utf-8")
+        (root / "memory_archive" / "runtime_facts" / "req-lowercase-done" / "task.json").read_text(
+            encoding="utf-8"
+        )
     )
     assert payload["runtime_progress"]["phase"] == "running"
 
@@ -113,12 +126,16 @@ def test_runtime_fact_source_records_channel_error_as_terminal_phase(tmp_path: P
     )
 
     payload = json.loads(
-        (root / "memory_archive" / "runtime_facts" / "req-channel-error" / "task.json").read_text(encoding="utf-8")
+        (root / "memory_archive" / "runtime_facts" / "req-channel-error" / "task.json").read_text(
+            encoding="utf-8"
+        )
     )
     assert payload["runtime_progress"]["phase"] == "channel_error"
 
 
-def test_runtime_fact_source_does_not_parse_compact_auto_continuation_markdown(tmp_path: Path) -> None:
+def test_runtime_fact_source_does_not_parse_compact_auto_continuation_markdown(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "workspace"
 
     write_runtime_fact_source(
@@ -147,9 +164,9 @@ def test_runtime_fact_source_does_not_parse_compact_auto_continuation_markdown(t
     )
 
     payload = json.loads(
-        (root / "memory_archive" / "runtime_facts" / "req-compact-continuation" / "task.json").read_text(
-            encoding="utf-8"
-        )
+        (
+            root / "memory_archive" / "runtime_facts" / "req-compact-continuation" / "task.json"
+        ).read_text(encoding="utf-8")
     )
     assert payload["acceptance"] == []
     assert payload["constraints"] == []
@@ -177,7 +194,9 @@ def test_runtime_fact_source_keeps_test_commands_from_tool_records(tmp_path: Pat
     )
 
     payload = json.loads(
-        (root / "memory_archive" / "runtime_facts" / "req-tool-test" / "task.json").read_text(encoding="utf-8")
+        (root / "memory_archive" / "runtime_facts" / "req-tool-test" / "task.json").read_text(
+            encoding="utf-8"
+        )
     )
     assert len(payload["latest_tests"]) == 1
     assert "pytest" in payload["latest_tests"][0]
@@ -201,7 +220,11 @@ def test_compact_work_state_does_not_import_workspace_root_checklist(tmp_path: P
     result = apply_memory_compact(
         root,
         MemoryCompactApplyOptions(
-            MemoryCompactPlanOptions(request_id="req-root-checklist", run_id="req-root-checklist", task_id="req-root-checklist")
+            MemoryCompactPlanOptions(
+                request_id="req-root-checklist",
+                run_id="req-root-checklist",
+                task_id="req-root-checklist",
+            )
         ),
     )
 
@@ -254,6 +277,7 @@ def _write_config(tmp_path: Path) -> Path:
         'workspace_root: "workspace"\n'
         f'my_agent_home: "{(tmp_path / "home").as_posix()}"\n'
         'model_backend: "echo"\n'
+        'tool_protocol: "text"\n'
         'subagent_workspace: "subagents"\n'
         'local_store_path: "local_store/local.db"\n'
         'local_store_files_dir: "local_store/files"\n'

@@ -8,7 +8,18 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from .models import BaseTool, ToolExecutionResult, ToolSpec
+from .models import (
+    BaseTool,
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    OutputPolicy,
+    ResourceScopePolicy,
+    TimeoutPolicy,
+    ToolHandlerOutcome,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+)
 from .web_fetch_runtime import (
     FetchFormatRequest,
     FetchRawRequest,
@@ -68,9 +79,29 @@ class WebFetchTool(BaseTool):
         self.allowed_private_hosts = tuple(deps.allowed_private_hosts)
         self.allow_private_resolution = deps.allow_private_resolution
         self._cache: dict[tuple[str, str], CachedFetch] = {}
-        self.spec = _web_fetch_spec()
+        self.model_spec = _web_fetch_model_spec()
+        self.runtime_policy = ToolRuntimePolicy(
+            effect_resolver=EffectResolverPolicy(
+                "read_only",
+                by_parameter=((
+                    "method",
+                    (
+                        ("GET", "read_only"),
+                        ("HEAD", "read_only"),
+                        ("POST", "dangerous"),
+                        ("PUT", "dangerous"),
+                        ("DELETE", "dangerous"),
+                        ("PATCH", "dangerous"),
+                    ),
+                ),),
+            ),
+            idempotency_policy=IdempotencyPolicy("operation"),
+            timeout_policy=TimeoutPolicy(self.timeout),
+            resource_scopes=ResourceScopePolicy(parameter_names=("url", "urls")),
+            output_policy=OutputPolicy(trust="external_data"),
+        )
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         try:
             max_chars = self.response_preview_chars(params, self.max_chars)
             mode = str(params.get("mode", params.get("format", "auto")) or "auto").strip().lower()
@@ -78,17 +109,17 @@ class WebFetchTool(BaseTool):
                 return self._execute_extract(params, max_chars)
             request = self._request_parts(params, mode, max_chars)
         except ValueError as exc:
-            return ToolExecutionResult("web_fetch", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
+            return ToolHandlerOutcome("web_fetch", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
         # 网络安全门已下沉到 _resolve_pin(逐跳:初始 URL + 每个重定向都校验+pin)。不再单独 pre-check——
         # 否则一次 execute 内 pre-check 与 resolve_pin 二次解析,对 DNS 翻转的判定会不一致。
         return self._execute_single_request(request, max_chars)
 
-    def _execute_single_request(self, request: _WebFetchRequest, max_chars: int) -> ToolExecutionResult:
+    def _execute_single_request(self, request: _WebFetchRequest, max_chars: int) -> ToolHandlerOutcome:
         cache_key = request.method == "GET" and not request.headers and request.body_text is None
         cached = self._cache_get(request.url, request.fmt) if cache_key else None
         cache_hit = cached is not None
         response = cached or self._fetch_raw_request(request)
-        if isinstance(response, ToolExecutionResult):
+        if isinstance(response, ToolHandlerOutcome):
             return response
         if cache_key and not cache_hit:
             self._cache_put(request.url, request.fmt, response)
@@ -129,7 +160,7 @@ class WebFetchTool(BaseTool):
             return PinResult(None, err)
         return PinResult(resolved[0] if resolved else None, None)
 
-    def _fetch_raw_request(self, request: _WebFetchRequest) -> RawResponseParts | ToolExecutionResult:
+    def _fetch_raw_request(self, request: _WebFetchRequest) -> RawResponseParts | ToolHandlerOutcome:
         return fetch_raw_response(
             FetchRawRequest(
                 tool="web_fetch",
@@ -160,7 +191,7 @@ class WebFetchTool(BaseTool):
             max_chars=max_chars,
         )
 
-    def _execute_extract(self, params: dict[str, Any], max_chars: int) -> ToolExecutionResult:
+    def _execute_extract(self, params: dict[str, Any], max_chars: int) -> ToolHandlerOutcome:
         urls = normalize_url_list(params.get("urls", params.get("url")), self.normalize_url)
         pages: list[dict[str, Any]] = []
         failures: list[dict[str, str | None]] = []
@@ -187,12 +218,12 @@ class WebFetchTool(BaseTool):
                 format_http_error=self.format_http_error,
                 resolve_pin=self._resolve_pin,
             )
-            if isinstance(response, ToolExecutionResult):
+            if isinstance(response, ToolHandlerOutcome):
                 failures.append({"url": url, "error_code": response.error_code, "error": response.output})
                 continue
             pages.append(page_payload_from_response(self.artifact_root, url, response, max_chars))
         payload = {"pages": pages, "failures": failures, "mode": "extract"}
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             "web_fetch",
             bool(pages),
             json.dumps(payload, ensure_ascii=False, sort_keys=True),
@@ -223,52 +254,50 @@ class _WebFetchRequest:
     max_chars: int
 
 
-def _web_fetch_spec() -> ToolSpec:
-    return ToolSpec(
+def _web_fetch_model_spec() -> ToolModelSpec:
+    return ToolModelSpec(
         name="web_fetch",
-        category="web",
-        effect="read_only",
-        output_trust="external_data",
         description="读取 URL、批量抽取网页，或带 method/header/body 调一个 HTTP/API；大内容保存为 artifact。",
-        use_cases=[
-            "已经知道 URL，需要读取网页、在线文档、PDF 或文本内容",
-            "搜索后读取候选来源正文，保留可恢复的 artifact 引用",
-            "需要 GET/POST/PUT/DELETE 等 HTTP/API 请求，但不想切换到另一个网络工具",
-        ],
-        avoid_when=["不知道 URL 时先用 web_search"],
-        keywords=["网页", "打开URL", "fetch", "web_fetch", "markdown", "正文", "在线文档", "PDF", "API", "HTTP", "POST", "GET"],
-        parameters={
-            "url": "完整 URL；批量读取时也可用 urls",
-            "urls": "可选，URL 数组；存在时按批量 extract 返回 pages/failures",
-            "mode": "auto/markdown/text/html/json/raw/extract，默认 auto；extract 用于批量来源抽取",
-            "method": "HTTP 方法，默认 GET",
-            "headers": "可选请求头，JSON 对象或 JSON 字符串",
-            "body": "可选请求体，适合 API 调用",
-            "max_chars": "可选，本次返回预览字符数",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "完整 http 或 https 地址；传 urls 时可省略。"},
+                "urls": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "URL 数组；用于一次读取多个来源并保存每页 artifact。",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["auto", "markdown", "text", "html", "json", "raw", "extract"],
+                    "description": "默认 auto；extract 用于批量来源抽取。",
+                },
+                "method": {
+                    "type": "string",
+                    "enum": ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"],
+                    "description": "HTTP 方法，默认 GET；非读取方法属于危险外部副作用并进入审批门。",
+                },
+                "headers": {"type": "object", "description": "可选请求头 JSON 对象。"},
+                "body": {"type": "string", "description": "可选，请求体按 UTF-8 文本发送。"},
+                "max_chars": {"type": "integer", "minimum": 1, "description": "只限制模型预览，不影响 artifact 保存。"},
+            },
+            "additionalProperties": False,
         },
-        parameter_details={
-            "url": "完整 http 或 https 地址；传 urls 时可省略。",
-            "urls": "字符串或数组；用于一次读取多个来源并保存每页 artifact。",
-            "mode": "auto 默认 HTML 转 Markdown、文本原样返回、二进制保存 artifact；extract 会返回 pages/failures。",
-            "method": "可选，支持 GET/POST/PUT/DELETE 等；默认 GET。",
-            "headers": "可传 JSON 对象或 JSON 字符串。",
-            "body": "可选，请求体会按 utf-8 文本发送。",
-            "max_chars": "只限制返回给模型的预览，不影响 artifact 保存。",
-        },
-        parameter_schema={
-            "url": {"type": "string"},
-            "urls": {"type": "array", "items": {"type": "string"}},
-            "mode": {"type": "string", "enum": ["auto", "markdown", "text", "html", "json", "raw", "extract"]},
-            "method": {"type": "string", "enum": ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"]},
-            "headers": {"type": "object"},
-            "body": {"type": "string"},
-            "max_chars": {"type": "integer"},
-        },
-        examples=[
-            '{"tool": "web_fetch", "url": "https://example.com/docs", "mode": "markdown"}',
-            '{"tool": "web_fetch", "urls": ["https://example.com/a", "https://example.com/b"], "mode": "extract"}',
-            '{"tool": "web_fetch", "url": "https://example.com/api", "method": "POST", "headers": {"Content-Type": "application/json"}, "body": "{\\"name\\": \\"demo\\"}", "mode": "json"}',
-        ],
+        hints=ToolModelHints(
+            category="web",
+            use_cases=(
+                "已经知道 URL，需要读取网页、在线文档、PDF 或文本内容",
+                "搜索后读取候选来源正文，保留可恢复的 artifact 引用",
+                "需要 GET/POST/PUT/DELETE 等 HTTP/API 请求",
+            ),
+            avoid_when=("不知道 URL 时先用 web_search",),
+            keywords=("网页", "打开URL", "fetch", "web_fetch", "markdown", "正文", "在线文档", "PDF", "API", "HTTP", "POST", "GET"),
+            examples=(
+                '{"tool": "web_fetch", "url": "https://example.com/docs", "mode": "markdown"}',
+                '{"tool": "web_fetch", "urls": ["https://example.com/a", "https://example.com/b"], "mode": "extract"}',
+                '{"tool": "web_fetch", "url": "https://example.com/api", "method": "POST", "headers": {"Content-Type": "application/json"}, "body": "{\\"name\\": \\"demo\\"}", "mode": "json"}',
+            ),
+        ),
     )
 
 

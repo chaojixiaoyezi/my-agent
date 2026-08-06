@@ -25,8 +25,19 @@ from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.backends.errors import ProviderResponseError
 from agent_py_agent.agent.core import SimpleAgent
-from agent_py_agent.agent.settings import AgentConfig
-from agent_py_agent.agent.tooling import ToolExecutionResult
+from agent_py_agent.agent.settings import AgentConfig as _AgentConfig
+from agent_py_agent.agent.tooling import ToolHandlerOutcome
+from agent_py_agent.agent.tooling.action_policy import ActionDecision
+from agent_py_agent.agent.tooling.executor import ToolExecution
+from agent_py_agent.agent.tooling.runtime_contracts import (
+    ProviderToolCapability,
+    ToolCall,
+    ToolFailureFacts,
+    ToolProtocolSnapshot,
+    ToolResult,
+    ToolSuccessFacts,
+)
+from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
 
 from .backends import (
     BudgetedRepeatedReadBackend,
@@ -43,6 +54,13 @@ from .backends import (
     ToolCallingBackend,
     UnclosedWriteFileBackend,
 )
+
+
+def _text_agent_config(**kwargs) -> _AgentConfig:
+    """Make the legacy fake text backends explicit instead of relying on fallback."""
+
+    kwargs.setdefault("tool_protocol", "text")
+    return _AgentConfig(**kwargs)
 
 
 def _assert_verified_response(
@@ -67,30 +85,110 @@ class _OneShotHarnessAgent:
         self.tools = tools
 
 
+def _canonical_test_call(
+    tool_name: str,
+    arguments: dict[str, object],
+    *,
+    call_id: str = "test-call-1",
+    run_id: str = "run-progress",
+) -> ToolCall:
+    return ToolCall(
+        call_id=call_id,
+        tool_name=tool_name,
+        arguments=arguments,
+        source_protocol="text",
+        schema_hash="sha256:test-schema",
+        run_id=run_id,
+        turn_id=f"{run_id}:turn-1",
+        attempt_id=f"{run_id}:attempt-1",
+    )
+
+
+def _successful_test_execution(call: ToolCall, output: str) -> ToolExecution:
+    return ToolExecution(
+        call=call,
+        decision=ActionDecision("allow"),
+        result=ToolResult.succeeded(
+            call,
+            output,
+            facts=ToolSuccessFacts(effect_outcome="confirmed"),
+        ),
+        states=(
+            "received",
+            "normalized",
+            "validated",
+            "authorized",
+            "approved",
+            "running",
+            "succeeded",
+            "reconciled",
+            "persisted",
+            "projected",
+        ),
+    )
+
+
+def _failed_test_execution(call: ToolCall, outcome: ToolHandlerOutcome) -> ToolExecution:
+    error_code = outcome.error_code or "TOOL_GUARDRAIL_DENIED"
+    return ToolExecution(
+        call=call,
+        decision=ActionDecision(
+            "deny",
+            (error_code,),
+            {"failure_stage": outcome.failure_stage or "runtime_gate"},
+        ),
+        result=ToolResult.failed(
+            call,
+            outcome.output,
+            error_code=error_code,
+            failure_stage=outcome.failure_stage or "runtime_gate",
+            facts=ToolFailureFacts(handler_executed=False),
+        ),
+        states=("received", "normalized", "failed", "persisted", "projected"),
+    )
+
+
+def _text_protocol_snapshot(run_id: str) -> ToolProtocolSnapshot:
+    return ToolProtocolSnapshot(
+        run_id,
+        "text",
+        ProviderToolCapability(
+            provider="test",
+            endpoint="local://test",
+            model="test-model",
+            stream=False,
+            native_supported=False,
+            evidence="test_fixture",
+        ),
+    )
+
+
+def _native_protocol_snapshot(run_id: str) -> ToolProtocolSnapshot:
+    return ToolProtocolSnapshot(
+        run_id,
+        "native",
+        ProviderToolCapability(
+            provider="test",
+            endpoint="local://test",
+            model="test-model",
+            stream=False,
+            native_supported=True,
+            evidence="test_fixture",
+        ),
+    )
+
+
 class _BlockedScheduleTools:
     def __init__(self):
         self.calls = 0
 
-    def execute_call(
-        self,
-        payload,
-        *,
-        allowed_tools=None,
-        write_boundary=None,
-        runtime_snapshot=None,
-        trusted_run_context=None,
-    ):
-        _ = (
-            payload,
-            allowed_tools,
-            write_boundary,
-            runtime_snapshot,
-            trusted_run_context,
-        )
+    def execute_tool(self, call: ToolCall, **kwargs):
+        gate = kwargs["pre_handler_gate"](call)
+        if gate is not None:
+            return _failed_test_execution(call, gate)
         self.calls += 1
-        return ToolExecutionResult(
-            "schedule_child_subagents",
-            True,
+        return _successful_test_execution(
+            call,
             '{"blocked": true, "reason": "duplicate_leaf_target:app.js", "created_run_ids": []}',
         )
 
@@ -99,24 +197,12 @@ class _SuccessfulCreateTools:
     def __init__(self):
         self.calls = 0
 
-    def execute_call(
-        self,
-        payload,
-        *,
-        allowed_tools=None,
-        write_boundary=None,
-        runtime_snapshot=None,
-        trusted_run_context=None,
-    ):
-        _ = (
-            payload,
-            allowed_tools,
-            write_boundary,
-            runtime_snapshot,
-            trusted_run_context,
-        )
+    def execute_tool(self, call: ToolCall, **kwargs):
+        gate = kwargs["pre_handler_gate"](call)
+        if gate is not None:
+            return _failed_test_execution(call, gate)
         self.calls += 1
-        return ToolExecutionResult("create_subagents", True, '{"created": 1}')
+        return _successful_test_execution(call, '{"created": 1}')
 
 
 class _UnlimitedRoundsBackend:
@@ -193,7 +279,6 @@ class _RepeatedMissingReadBackend:
                 backend=self.name,
             )
         assert "TOOL_GUARDRAIL_REPEAT_FAILURE_BLOCKED" in prompt
-        assert "这一次相同工具调用未执行" in prompt
         return ModelResponse(text="已看到提示，改用其他路径继续推进。", backend=self.name)
 
 
@@ -210,7 +295,9 @@ class _EmptyAfterToolBackend:
                 text='[TOOL_CALL]\n{"tool":"read_file","path":"notes.txt"}\n[/TOOL_CALL]',
                 backend=self.name,
             )
-        raise ProviderResponseError("Anthropic-compatible 流式响应没有文本内容", error_code="MODEL_EMPTY_RESPONSE")
+        raise ProviderResponseError(
+            "Anthropic-compatible 流式响应没有文本内容", error_code="MODEL_EMPTY_RESPONSE"
+        )
 
 
 class _EmptyThenFinalAfterToolBackend:
@@ -227,7 +314,9 @@ class _EmptyThenFinalAfterToolBackend:
                 backend=self.name,
             )
         if self.calls == 2:
-            raise ProviderResponseError("Anthropic-compatible 流式响应没有文本内容", error_code="MODEL_EMPTY_RESPONSE")
+            raise ProviderResponseError(
+                "Anthropic-compatible 流式响应没有文本内容", error_code="MODEL_EMPTY_RESPONSE"
+            )
         assert "上一轮模型接口返回了空文本" in prompt
         assert "hello empty repair" in prompt
         return ModelResponse(text="已根据工具结果继续完成。", backend=self.name)
@@ -258,7 +347,9 @@ class _SeparatedEmptyResponsesBackend:
                 backend=self.name,
             )
         if self.calls == 4:
-            raise ProviderResponseError("second isolated empty response", error_code="MODEL_EMPTY_RESPONSE")
+            raise ProviderResponseError(
+                "second isolated empty response", error_code="MODEL_EMPTY_RESPONSE"
+            )
         assert "上一轮模型接口返回了空文本" in prompt
         return ModelResponse(text="两次独立空响应后仍完成。", backend=self.name)
 
@@ -366,7 +457,11 @@ def test_tool_loop_and_prompt_transcript():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         (workspace / "notes.txt").write_text("hello tool world", encoding="utf-8")
-        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        cfg = _text_agent_config(
+            enable_tools=True,
+            tool_protocol="text",
+            memory_path="memory.jsonl",
+        )
         agent = SimpleAgent(cfg, workspace)
         agent.backend = ToolCallingBackend()
         result = agent.run("读取 notes.txt 并总结", save=False)
@@ -377,7 +472,7 @@ def test_tool_loop_and_prompt_transcript():
 
 def test_tool_loop_reuses_one_workspace_context_snapshot_across_model_rounds(tmp_path):
     (tmp_path / "notes.txt").write_text("hello tool world", encoding="utf-8")
-    agent = SimpleAgent(AgentConfig(enable_tools=True, memory_path="memory.jsonl"), tmp_path)
+    agent = SimpleAgent(_text_agent_config(enable_tools=True, memory_path="memory.jsonl"), tmp_path)
     backend = ToolCallingBackend()
     prompts: list[str] = []
     generate = backend.generate
@@ -409,7 +504,7 @@ def test_tool_loop_projects_live_promoted_workspace_from_same_write_boundary(tmp
     output_dir.mkdir(parents=True)
     work_dir.mkdir()
     agent = SimpleAgent(
-        AgentConfig(enable_tools=True, memory_path="memory.jsonl"),
+        _text_agent_config(enable_tools=True, memory_path="memory.jsonl"),
         service_cwd,
     )
     params = ToolLoopExecuteParams(
@@ -465,7 +560,7 @@ def test_audit_source_worker_uses_facts_only_workspace_snapshot(tmp_path):
     )
 
     agent = SimpleAgent(
-        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        _text_agent_config(enable_tools=False, memory_path="memory.jsonl"),
         tmp_path,
     )
     backend = MagicMock()
@@ -500,9 +595,7 @@ def test_audit_source_worker_uses_facts_only_workspace_snapshot(tmp_path):
     )
 
     assert result.response
-    agent.prompts.snapshot_workspace_context.assert_called_once_with(
-        facts_only=True
-    )
+    agent.prompts.snapshot_workspace_context.assert_called_once_with(facts_only=True)
 
 
 def test_tool_round_streams_tool_progress_chunks():
@@ -527,6 +620,7 @@ def test_tool_round_streams_tool_progress_chunks():
         one_shot_tool_calls=set(),
         executed_tools=[],
         archive_tool_calls=[],
+        tool_protocol_snapshot=_text_protocol_snapshot("run-progress"),
     )
 
     execute_tool_round(
@@ -538,8 +632,8 @@ def test_tool_round_streams_tool_progress_chunks():
                 text='[TOOL_CALL]\n{"tool":"run_command","command":"echo hello"}\n[/TOOL_CALL]',
                 backend="test",
             ),
-            [{"tool": "run_command", "command": "echo hello"}],
-            lambda _request: ToolExecutionResult("run_command", True, "hello\n"),
+            [_canonical_test_call("run_command", {"command": "echo hello"})],
+            lambda request: _successful_test_execution(request.call, "hello\n"),
             records.append,
         )
     )
@@ -552,10 +646,11 @@ def test_tool_round_streams_tool_progress_chunks():
 
 def test_plain_parallel_project_prompt_recommends_tool_search(tmp_path):
     """大白话里的并行任务先命中按需搜索，不在首轮直接暴露编排工具。"""
-    agent = SimpleAgent(AgentConfig(enable_tools=True, memory_path="memory.jsonl"), tmp_path)
+    agent = SimpleAgent(_text_agent_config(enable_tools=True, memory_path="memory.jsonl"), tmp_path)
 
-    _catalog, recommendations = agent.tools.render_catalog_section(), agent.tools.render_recommended_tools_section(
-        "请让子代理分别去看不同项目，最后你汇总。"
+    _catalog, recommendations = (
+        agent.tools.render_catalog_section(),
+        agent.tools.render_recommended_tools_section("请让子代理分别去看不同项目，最后你汇总。"),
     )
 
     assert "tool_search" in recommendations
@@ -569,43 +664,58 @@ def test_runtime_tool_sections_use_user_prompt_for_orchestration_recommendations
         _resolve_tool_sections,
     )
 
-    agent = SimpleAgent(AgentConfig(enable_tools=True, memory_path="memory.jsonl"), tmp_path)
+    agent = SimpleAgent(_text_agent_config(enable_tools=True, memory_path="memory.jsonl"), tmp_path)
 
-    _catalog, recommendations = _resolve_tool_sections(ToolSectionsRequest(
-        agent=agent,
-        user_prompt="请让子代理分别去看不同项目，最后你汇总。",
-        allowed_tools=None,
-        runtime_snapshot=agent.tools.runtime_snapshot(),
-    ))
+    _catalog, recommendations = _resolve_tool_sections(
+        ToolSectionsRequest(
+            agent=agent,
+            user_prompt="请让子代理分别去看不同项目，最后你汇总。",
+            allowed_tools=None,
+            runtime_snapshot=agent.tools.runtime_snapshot(),
+            protocol_snapshot=_text_protocol_snapshot("tool-sections"),
+        )
+    )
 
     assert "tool_search" in recommendations
     assert "create_subagents" not in recommendations
 
 
 def test_runtime_tool_sections_only_collapse_catalog_when_native_is_effective(tmp_path):
-    from types import SimpleNamespace
-
     from agent_py_agent.agent.agent_core.runtime.loop_support import (
         ToolSectionsRequest,
         _resolve_tool_sections,
     )
 
     agent = SimpleAgent(
-        AgentConfig(enable_tools=True, tool_protocol="native", memory_path="memory.jsonl"),
+        _text_agent_config(enable_tools=True, tool_protocol="native", memory_path="memory.jsonl"),
         tmp_path,
     )
     snapshot = agent.tools.runtime_snapshot()
 
     # Echo cannot consume provider-native schemas, so configured "native" must
-    # retain the complete text catalog.
+    # retain the complete text catalog once the run-start probe selected text.
     text_catalog, _ = _resolve_tool_sections(
-        ToolSectionsRequest(agent, "继续编码", None, snapshot)
+        ToolSectionsRequest(
+            agent,
+            "继续编码",
+            None,
+            snapshot,
+            _text_protocol_snapshot("tool-sections-text"),
+        )
     )
     assert "read_file" in text_catalog
 
-    agent.backend = SimpleNamespace(name="anthropic_compatible")
+    # A separate run-start snapshot with observed native capability collapses
+    # the prose catalog. Changing backend identity mid-run is deliberately not
+    # part of the contract anymore.
     native_catalog, _ = _resolve_tool_sections(
-        ToolSectionsRequest(agent, "继续编码", None, snapshot)
+        ToolSectionsRequest(
+            agent,
+            "继续编码",
+            None,
+            snapshot,
+            _native_protocol_snapshot("tool-sections-native"),
+        )
     )
     assert "结构化 Schema 为准" in native_catalog
     assert len(native_catalog) < len(text_catalog) // 2
@@ -615,7 +725,7 @@ def test_tool_loop_reports_empty_final_model_response_after_retry():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         (workspace / "notes.txt").write_text("hello empty model response", encoding="utf-8")
-        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        cfg = _text_agent_config(enable_tools=True, memory_path="memory.jsonl")
         agent = SimpleAgent(cfg, workspace)
         agent.backend = _EmptyAfterToolBackend()
 
@@ -628,7 +738,7 @@ def test_tool_loop_retries_once_when_final_model_response_is_empty_after_tool():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         (workspace / "notes.txt").write_text("hello empty repair", encoding="utf-8")
-        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        cfg = _text_agent_config(enable_tools=True, memory_path="memory.jsonl")
         agent = SimpleAgent(cfg, workspace)
         agent.backend = _EmptyThenFinalAfterToolBackend()
 
@@ -643,7 +753,7 @@ def test_tool_loop_resets_empty_response_retry_after_successful_model_turn():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         (workspace / "notes.txt").write_text("hello separated empty repairs", encoding="utf-8")
-        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        cfg = _text_agent_config(enable_tools=True, memory_path="memory.jsonl")
         agent = SimpleAgent(cfg, workspace)
         agent.backend = _SeparatedEmptyResponsesBackend()
 
@@ -667,7 +777,7 @@ def test_tool_loop_continues_once_after_incomplete_response_with_durable_tool_re
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         (workspace / "notes.txt").write_text("hello incomplete repair", encoding="utf-8")
-        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        cfg = _text_agent_config(enable_tools=True, memory_path="memory.jsonl")
         agent = SimpleAgent(cfg, workspace)
         agent.backend = _IncompleteThenFinalAfterToolBackend()
 
@@ -680,7 +790,7 @@ def test_tool_loop_continues_once_after_incomplete_response_with_durable_tool_re
 
 def test_tool_loop_does_not_replay_incomplete_ordinary_chat_response():
     with tempfile.TemporaryDirectory() as td:
-        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        cfg = _text_agent_config(enable_tools=True, memory_path="memory.jsonl")
         agent = SimpleAgent(cfg, Path(td))
         agent.backend = _IncompleteWithoutToolBackend()
 
@@ -695,7 +805,7 @@ def test_tool_loop_continues_only_once_for_repeated_incomplete_response():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         (workspace / "notes.txt").write_text("hello bounded incomplete repair", encoding="utf-8")
-        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        cfg = _text_agent_config(enable_tools=True, memory_path="memory.jsonl")
         agent = SimpleAgent(cfg, workspace)
         agent.backend = _RepeatedIncompleteAfterToolBackend()
 
@@ -710,7 +820,7 @@ def test_max_tool_rounds_zero_allows_multiple_tool_rounds():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         (workspace / "notes.txt").write_text("hello unlimited", encoding="utf-8")
-        cfg = AgentConfig(
+        cfg = _text_agent_config(
             enable_tools=True,
             memory_path="memory.jsonl",
             max_tool_rounds=0,
@@ -727,10 +837,14 @@ def test_max_tool_rounds_zero_allows_multiple_tool_rounds():
         assert "已达到最大工具轮数限制" not in result.prompt
 
 
-def test_tool_loop_executes_complete_unclosed_write_file_tool_call():
+def test_tool_loop_rejects_unclosed_write_then_executes_complete_repair():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        cfg = _text_agent_config(
+            enable_tools=True,
+            tool_protocol="text",
+            memory_path="memory.jsonl",
+        )
         agent = SimpleAgent(cfg, workspace)
         agent.backend = UnclosedWriteFileBackend(workspace)
 
@@ -742,7 +856,7 @@ def test_tool_loop_executes_complete_unclosed_write_file_tool_call():
             {("write_file", "succeeded"): 1},
         )
         assert result.tool_rounds == 1
-        assert agent.backend.calls == 2
+        assert agent.backend.calls == 3
         assert (workspace / "index.html").read_text(encoding="utf-8") == (
             "<!doctype html><html><head><title>OK</title></head><body><main>ok</main></body></html>"
         )
@@ -752,7 +866,7 @@ def test_tool_loop_enforces_per_agent_tool_budget_for_run_id():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         (workspace / "notes.txt").write_text("budget note", encoding="utf-8")
-        cfg = AgentConfig(
+        cfg = _text_agent_config(
             enable_tools=True,
             memory_path="memory.jsonl",
             max_tool_rounds=4,
@@ -762,7 +876,9 @@ def test_tool_loop_enforces_per_agent_tool_budget_for_run_id():
         agent = SimpleAgent(cfg, workspace)
         agent.backend = BudgetedRepeatedReadBackend()
 
-        result = agent.run("重复读文件后自检", save=False, allowed_tools=["read_file"], run_id="run-budget")
+        result = agent.run(
+            "重复读文件后自检", save=False, allowed_tools=["read_file"], run_id="run-budget"
+        )
 
         assert result.response == "预算触发后已自检收口。"
         assert result.tool_rounds == 2
@@ -773,7 +889,7 @@ def test_tool_loop_enforces_per_agent_tool_budget_for_run_id():
 def test_tool_loop_blocks_repeated_identical_tool_failures_before_reexecuting():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl", max_tool_rounds=6)
+        cfg = _text_agent_config(enable_tools=True, memory_path="memory.jsonl", max_tool_rounds=6)
         agent = SimpleAgent(cfg, workspace)
         agent.backend = _RepeatedMissingReadBackend()
 
@@ -789,13 +905,20 @@ def test_tool_loop_blocks_repeated_identical_tool_failures_before_reexecuting():
         assert result.tool_rounds == 4
         assert agent.backend.calls == 5
         assert result.executed_tools == []
+        blocked = [
+            record
+            for record in result.archive_tool_calls
+            if record.get("error_code") == "TOOL_GUARDRAIL_REPEAT_FAILURE_BLOCKED"
+        ]
+        assert blocked
+        assert blocked[-1]["handler_executed"] is False
 
 
 def test_tool_loop_bounds_long_runner_tool_context_without_fake_archive_hints():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         (workspace / "data").mkdir()
-        cfg = AgentConfig(
+        cfg = _text_agent_config(
             enable_tools=True,
             memory_path="memory.jsonl",
             max_tool_rounds=0,
@@ -806,7 +929,9 @@ def test_tool_loop_bounds_long_runner_tool_context_without_fake_archive_hints():
         backend = _LongAppendPromptWindowBackend()
         agent.backend = backend
 
-        result = agent.run("持续写入 data/weekly_data.json 后收口", save=False, allowed_tools=["write_file"])
+        result = agent.run(
+            "持续写入 data/weekly_data.json 后收口", save=False, allowed_tools=["write_file"]
+        )
 
         _assert_verified_response(
             result,
@@ -817,14 +942,16 @@ def test_tool_loop_bounds_long_runner_tool_context_without_fake_archive_hints():
         assert backend.max_prompt_chars < 100_000
         assert "read_artifact_hint" not in result.prompt
         assert "tool-output-archive-anchor" not in result.prompt
-        assert (workspace / "data" / "weekly_data.json").read_text(encoding="utf-8").count("row-") == 45
+        assert (workspace / "data" / "weekly_data.json").read_text(encoding="utf-8").count(
+            "row-"
+        ) == 45
 
 
 def test_tool_loop_ignores_model_written_protected_tool_markers_after_real_call():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         (workspace / "notes.txt").write_text("hello protected marker", encoding="utf-8")
-        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        cfg = _text_agent_config(enable_tools=True, memory_path="memory.jsonl")
         agent = SimpleAgent(cfg, workspace)
         agent.backend = FakeProtectedMarkerWithToolBackend()
 
@@ -832,9 +959,9 @@ def test_tool_loop_ignores_model_written_protected_tool_markers_after_real_call(
 
         assert result.response == "真实工具回执已使用，伪造记录已忽略。"
         assert result.tool_rounds == 1
+        assert agent.backend.calls == 3
         assert result.executed_tools == ["read_file"]
         assert "fake-child-1" not in result.prompt
-        assert "机器块" in result.prompt
 
 
 def test_tool_loop_executes_all_streaming_tool_calls_and_ignores_spoofed_records():
@@ -842,7 +969,7 @@ def test_tool_loop_executes_all_streaming_tool_calls_and_ignores_spoofed_records
         workspace = Path(td)
         (workspace / "notes.txt").write_text("first note", encoding="utf-8")
         (workspace / "second.txt").write_text("second note", encoding="utf-8")
-        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        cfg = _text_agent_config(enable_tools=True, memory_path="memory.jsonl")
         agent = SimpleAgent(cfg, workspace)
         backend = ToolBoundarySpoofStreamingBackend()
         agent.backend = backend
@@ -857,6 +984,7 @@ def test_tool_loop_executes_all_streaming_tool_calls_and_ignores_spoofed_records
 
         assert result.response == "两个真实工具结果都使用，伪造记录已忽略。"
         assert result.tool_rounds == 1
+        assert backend.calls == 3
         assert result.executed_tools == ["read_file", "read_file"]
         assert "first note" in result.prompt
         assert "second note" in result.prompt
@@ -869,7 +997,7 @@ def test_tool_loop_does_not_cut_delayed_second_streaming_tool_call():
         workspace = Path(td)
         (workspace / "first.txt").write_text("first body", encoding="utf-8")
         (workspace / "second.txt").write_text("second body", encoding="utf-8")
-        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        cfg = _text_agent_config(enable_tools=True, memory_path="memory.jsonl")
         agent = SimpleAgent(cfg, workspace)
         agent.backend = DelayedSecondToolStreamingBackend()
 
@@ -889,7 +1017,7 @@ def test_tool_loop_does_not_cut_delayed_second_streaming_tool_call():
 def test_tool_loop_repairs_spoof_only_protected_tool_marker_once():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        cfg = _text_agent_config(enable_tools=True, memory_path="memory.jsonl")
         agent = SimpleAgent(cfg, workspace)
         agent.backend = FakeProtectedMarkerWithoutToolBackend()
 
@@ -904,7 +1032,7 @@ def test_tool_loop_repairs_spoof_only_protected_tool_marker_once():
 def test_tool_loop_blocks_repeated_spoof_only_protected_tool_markers():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        cfg = _text_agent_config(enable_tools=True, memory_path="memory.jsonl")
         agent = SimpleAgent(cfg, workspace)
         agent.backend = RepeatedFakeProtectedMarkerBackend()
 
@@ -924,7 +1052,7 @@ def test_agent_can_delegate_to_subagents_from_tool_call():
     """
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        cfg = AgentConfig(
+        cfg = _text_agent_config(
             enable_tools=True,
             memory_path="memory.jsonl",
             subagent_workspace="subs",
@@ -935,10 +1063,23 @@ def test_agent_can_delegate_to_subagents_from_tool_call():
 
         result = agent.run("请创建两个子代理做隔离 coding 场景测试", save=False)
         tasks = agent.subagents.list_runs()
-        tree = agent.tools.execute_call({"tool": "inspect_agent_tree"})
-        dry_dispatch = agent.tools.execute_call({"tool": "dispatch_subagents", "dry_run": True, "max_runners": 1})
-        rejected_internal_switch = agent.tools.execute_call(
-            {"tool": "dispatch_subagents", "start_runners": True, "dry_run": True}
+        tree = execute_registry_test_call(
+            agent.tools,
+            "inspect_agent_tree",
+            {},
+            call_id="inspect-created-subagents",
+        )
+        dry_dispatch = execute_registry_test_call(
+            agent.tools,
+            "dispatch_subagents",
+            {"dry_run": True, "max_runners": 1},
+            call_id="dry-dispatch-created-subagents",
+        )
+        rejected_internal_switch = execute_registry_test_call(
+            agent.tools,
+            "dispatch_subagents",
+            {"start_runners": True, "dry_run": True},
+            call_id="reject-internal-dispatch-switch",
         )
 
         # 普通任务保留模型自然回复；程序核验单独证明实际发生的派工副作用。
@@ -955,7 +1096,8 @@ def test_agent_can_delegate_to_subagents_from_tool_call():
         assert any(task.id in tree.output for task in tasks)
         assert dry_dispatch.ok
         assert not rejected_internal_switch.ok
-        assert "只接受 dry_run" in rejected_internal_switch.output
+        assert rejected_internal_switch.error_code == "TOOL_INTERNAL_PARAMETER_FORBIDDEN"
+        assert rejected_internal_switch.handler_executed is False
         assert '"dry_run": true' in dry_dispatch.output
 
 
@@ -963,7 +1105,7 @@ def test_gateway_wait_receipt_is_model_written_from_structured_facts():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         agent = SimpleAgent(
-            AgentConfig(
+            _text_agent_config(
                 enable_tools=True,
                 memory_path="memory.jsonl",
                 subagent_workspace="subs",
@@ -978,7 +1120,10 @@ def test_gateway_wait_receipt_is_model_written_from_structured_facts():
         _assert_verified_response(
             result,
             "我先把两部分拆开整理，汇总好后一起给你。",
-            {("create_subagents", "succeeded"): 1},
+            {
+                ("create_subagents", "succeeded"): 1,
+                ("wait", "succeeded"): 1,
+            },
         )
         assert result.runtime_status == "ok"
         assert result.runtime_reason == "wait"
@@ -993,7 +1138,7 @@ def test_create_subagents_accepts_explicit_external_write_target_without_startin
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         external_dir = workspace.parent / "external-target"
-        cfg = AgentConfig(
+        cfg = _text_agent_config(
             enable_tools=True,
             memory_path="memory.jsonl",
             subagent_workspace="subs",
@@ -1001,19 +1146,24 @@ def test_create_subagents_accepts_explicit_external_write_target_without_startin
         )
         agent = SimpleAgent(cfg, workspace)
 
-        result = agent.tools.execute_call(
+        result = execute_registry_test_call(
+            agent.tools,
+            "create_subagents",
             {
-                "tool": "create_subagents",
                 "goal": "创建一个 txt 文件",
                 "allowed_tools": ["read_file", "write_file"],
-                "extra_write_roots": [str(external_dir)],
+                "output_files": [str(external_dir / "result.txt")],
                 "defer_start": True,
-            }
+            },
+            call_id="create-external-output-subagent",
         )
 
         assert result.ok
         assert "工作区外" not in result.output
         assert len(agent.subagents.list_runs()) == 1
+        assert agent.subagents.list_runs()[0].attributes["output_files"] == [
+            str(external_dir / "result.txt")
+        ]
 
 
 def test_repeated_orchestration_tool_call_is_not_executed_twice():
@@ -1024,7 +1174,7 @@ def test_repeated_orchestration_tool_call_is_not_executed_twice():
     """
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        cfg = AgentConfig(
+        cfg = _text_agent_config(
             enable_tools=True,
             memory_path="memory.jsonl",
             subagent_workspace="subs",
@@ -1062,24 +1212,36 @@ def test_non_mutating_schedule_result_does_not_consume_one_shot_key():
         allowed_tools=None,
         write_boundary=None,
         task_attributes=None,
-        request_id="",
-        run_id="",
-        task_id="",
+        request_id="request-one-shot-blocked",
+        run_id="run-one-shot-blocked",
+        task_id="task-one-shot-blocked",
         one_shot_tool_calls=set(),
         executed_tools=[],
         archive_tool_calls=[],
     )
     agent = _OneShotHarnessAgent(_BlockedScheduleTools())
     service = ToolLoopService(agent)
-    payload = {"tool": "schedule_child_subagents", "dry_run": False, "children": [{"goal": "cart"}]}
+    arguments = {"dry_run": False, "children": [{"goal": "cart"}]}
+    first_call = _canonical_test_call(
+        "schedule_child_subagents",
+        arguments,
+        call_id="blocked-schedule-1",
+        run_id="run-one-shot-blocked",
+    )
+    second_call = _canonical_test_call(
+        "schedule_child_subagents",
+        arguments,
+        call_id="blocked-schedule-2",
+        run_id="run-one-shot-blocked",
+    )
 
-    first = service._execute_one_tool_call(ToolCallExecuteParams(params, 1, 1, payload))
-    second = service._execute_one_tool_call(ToolCallExecuteParams(params, 2, 1, payload))
+    first = service._execute_one_tool_call(ToolCallExecuteParams(params, 1, 1, first_call))
+    second = service._execute_one_tool_call(ToolCallExecuteParams(params, 2, 1, second_call))
 
-    assert first.ok is True
-    assert second.ok is True
+    assert first.result.ok is True
+    assert second.result.ok is True
     assert agent.tools.calls == 2
-    assert "阻止重复执行" not in second.output
+    assert "阻止重复执行" not in second.result.output
 
 
 def test_batch_create_blocks_overlapping_single_child_calls_in_same_turn():
@@ -1095,9 +1257,9 @@ def test_batch_create_blocks_overlapping_single_child_calls_in_same_turn():
         allowed_tools=None,
         write_boundary=None,
         task_attributes=None,
-        request_id="",
-        run_id="",
-        task_id="",
+        request_id="request-one-shot-batch",
+        run_id="run-one-shot-batch",
+        task_id="task-one-shot-batch",
         one_shot_tool_calls=set(),
         executed_tools=[],
         archive_tool_calls=[],
@@ -1107,30 +1269,53 @@ def test_batch_create_blocks_overlapping_single_child_calls_in_same_turn():
     service = ToolLoopService(agent)
     goals = ["研究营养均衡", "研究采购预算", "研究食材复用"]
     batch = {
-        "tool": "create_subagents",
         "goal": "并行研究营养计划",
         "items": [{"goal": goal, "role": "worker"} for goal in goals],
     }
 
-    first = service._execute_one_tool_call(ToolCallExecuteParams(params, 1, 1, batch))
+    first = service._execute_one_tool_call(
+        ToolCallExecuteParams(
+            params,
+            1,
+            1,
+            _canonical_test_call(
+                "create_subagents",
+                batch,
+                call_id="batch-create-1",
+                run_id="run-one-shot-batch",
+            ),
+        )
+    )
     repeated = [
         service._execute_one_tool_call(
             ToolCallExecuteParams(
                 params,
                 1,
                 index,
-                {"tool": "create_subagents", "goal": goal, "role": "worker"},
+                _canonical_test_call(
+                    "create_subagents",
+                    {"goal": goal, "role": "worker"},
+                    call_id=f"single-create-{index}",
+                    run_id="run-one-shot-batch",
+                ),
             )
         )
         for index, goal in enumerate(goals, start=2)
     ]
 
-    assert first.ok is True
+    assert first.result.ok is True
     assert tools.calls == 1
-    assert all(result.ok is False and "阻止重复执行" in result.output for result in repeated)
+    assert all(
+        result.result.ok is False and "阻止重复执行" in result.result.output for result in repeated
+    )
 
 
-def test_tool_loop_drains_pending_deferred_tool_calls_before_model_turn():
+def test_tool_loop_drains_pending_deferred_tool_calls_before_model_turn(tmp_path):
+    run_id = "run-deferred-drain"
+    agent = SimpleAgent(
+        _text_agent_config(enable_tools=True, memory_path="memory.jsonl"),
+        tmp_path,
+    )
     params = ToolLoopExecuteParams(
         user_prompt="",
         memories=[],
@@ -1143,21 +1328,22 @@ def test_tool_loop_drains_pending_deferred_tool_calls_before_model_turn():
         allowed_tools=None,
         write_boundary=None,
         task_attributes=None,
-        request_id="",
-        run_id="",
-        task_id="",
+        request_id="request-deferred-drain",
+        run_id=run_id,
+        task_id="task-deferred-drain",
         one_shot_tool_calls=set(),
         executed_tools=[],
         archive_tool_calls=[],
+        tool_runtime_snapshot=agent.tools.runtime_snapshot(run_id=run_id),
+        tool_protocol_snapshot=_text_protocol_snapshot(run_id),
         live_archive_state={
             "pending_deferred_tool_calls": [
                 {"tool": "read_file", "path": "notes.txt", "offset": 100, "max_chars": 50}
             ]
         },
     )
-    agent = object()
     service = ToolLoopService(agent)
-    drained: list[list[dict[str, object]]] = []
+    drained: list[list[ToolCall]] = []
     model_calls: list[int] = []
 
     def fake_run_tool_round(request):
@@ -1174,7 +1360,12 @@ def test_tool_loop_drains_pending_deferred_tool_calls_before_model_turn():
 
     final_prompt, response, tool_rounds = service.execute(params)
 
-    assert drained == [[{"tool": "read_file", "path": "notes.txt", "offset": 100, "max_chars": 50}]]
+    assert [[call.tool_name for call in calls] for calls in drained] == [["read_file"]]
+    assert drained[0][0].arguments == {
+        "path": "notes.txt",
+        "offset": 100,
+        "max_chars": 50,
+    }
     assert model_calls == [1]
     assert final_prompt == "prompt"
     assert response.text == "done"
@@ -1186,7 +1377,7 @@ def test_repeated_dispatch_is_allowed_for_parent_progress_loops():
     """LLM: dispatch_subagents may need repeated identical calls when rate limits leave pending children."""
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        cfg = AgentConfig(
+        cfg = _text_agent_config(
             enable_tools=True,
             memory_path="memory.jsonl",
             subagent_workspace="subs",
@@ -1215,7 +1406,7 @@ def test_max_tool_rounds_generates_model_authored_interim_response():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         (workspace / "notes.txt").write_text("hello", encoding="utf-8")
-        cfg = AgentConfig(
+        cfg = _text_agent_config(
             enable_tools=True,
             memory_path="memory.jsonl",
             max_tool_rounds=1,
@@ -1236,7 +1427,7 @@ def test_max_tool_rounds_generates_model_authored_interim_response():
 def test_max_tool_rounds_hard_stops_when_model_still_requests_tools():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl", max_tool_rounds=1)
+        cfg = _text_agent_config(enable_tools=True, memory_path="memory.jsonl", max_tool_rounds=1)
         agent = SimpleAgent(cfg, workspace)
         agent.backend = StubbornToolAfterLimitBackend()
 
@@ -1257,7 +1448,7 @@ def test_tool_round_limit_does_not_schedule_ordinary_checklist_continuation(tmp_
 
     (tmp_path / "notes.txt").write_text("hello", encoding="utf-8")
     agent = SimpleAgent(
-        AgentConfig(
+        _text_agent_config(
             enable_tools=True,
             memory_path="memory.jsonl",
             max_tool_rounds=1,
@@ -1314,9 +1505,10 @@ def test_explicit_goal_cannot_close_with_open_progress(tmp_path):
 
     (tmp_path / "notes.txt").write_text("hello tool world", encoding="utf-8")
     agent = SimpleAgent(
-        AgentConfig(enable_tools=True, memory_path="memory.jsonl"),
+        _text_agent_config(enable_tools=True, memory_path="memory.jsonl"),
         tmp_path,
     )
+
     class OpenProgressBackend:
         name = "open_progress"
 
@@ -1400,7 +1592,7 @@ def test_ordinary_task_open_progress_is_history_not_turn_lifecycle(tmp_path):
     from agent_py_agent.agent.task_progress import write_task_progress
 
     agent = SimpleAgent(
-        AgentConfig(enable_tools=True, memory_path="memory.jsonl"),
+        _text_agent_config(enable_tools=True, memory_path="memory.jsonl"),
         tmp_path,
     )
 

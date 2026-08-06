@@ -378,15 +378,21 @@ def test_blocked_base_tick_does_not_starve_scoped_owner_tick() -> None:
 
     supervisor = object.__new__(_BackgroundMainSupervisor)
     supervisor._base_agent = SimpleNamespace(
-        config=SimpleNamespace(background_owner_workers=1),
+        config=SimpleNamespace(
+            background_owner_workers=1,
+            owner_maintenance_scan_interval_seconds=60,
+        ),
     )
     supervisor._base_scheduler = BlockingBaseScheduler()
     supervisor._owner_schedulers = {1: OwnerScheduler()}
     supervisor._executor = None
     supervisor._inflight = {}
+    supervisor._next_curator_run_at = 0.0
+    supervisor._curator_inflight = {}
     supervisor._maybe_seed_wake_pending_owners = lambda: None
     supervisor._sync_owner_schedulers = lambda: None
     supervisor._recover_active_watch_harvesters = lambda: None
+    supervisor._run_due_curators = lambda: None  # curator 调度独立单测覆盖,这里只测 tick 编排
 
     try:
         assert supervisor.tick() is False

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from agent_py_agent.agent.action_protocol import RunScope, ToolCallEnvelope
 from agent_py_agent.agent.agent_core.tool_call_archive_record import (
     _compact_result_envelope,
 )
@@ -13,84 +13,115 @@ from agent_py_agent.agent.common.audit_activation import (
     AUDIT_SOURCE_OPEN_ATTR,
     AUDIT_SOURCE_WATCH_ID_ATTR,
 )
-from agent_py_agent.agent.ingestion.watch_tool_spec import build_watch_stream_spec
+from agent_py_agent.agent.contracts.tool_input_schema import normalize_tool_input
+from agent_py_agent.agent.ingestion.watch_tool_spec import (
+    build_watch_stream_model_spec,
+    build_watch_stream_runtime_policy,
+)
 from agent_py_agent.agent.tooling.artifact import ReadArtifactTool
 from agent_py_agent.agent.tooling.models import (
     BaseTool,
-    ToolExecutionResult,
-    ToolSpec,
+    ToolAvailability,
+    ToolHandlerOutcome,
+    ToolInputPolicy,
+    ToolModelSpec,
+    ToolRuntime,
+    ToolRuntimePolicy,
     TrustedParameterBinding,
 )
 from agent_py_agent.agent.tooling.pty_sessions import TerminalSessionTool
-from agent_py_agent.agent.tooling.registry_execution import (
-    ExecuteRegistryCallParams,
-    execute_registry_call,
-)
 from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
-from agent_py_agent.agent.tooling.tool_input_completion import ToolInputCompletionContext
-from agent_py_agent.agent.tooling.tool_spec_schema import (
-    normalize_tool_payload_for_spec,
-    tool_spec_input_schema,
+from agent_py_agent.agent.tooling.tool_input_completion import (
+    ToolInputCompletionContext,
+    complete_tool_arguments,
+)
+from agent_py_agent.tests._tool_runtime_harness import (
+    canonical_history_call,
+    canonical_history_result,
+    execute_canonical_test_call,
+    make_test_model_spec,
+    make_test_runtime_policy,
 )
 
 
 class _CaptureTool(BaseTool):
-    def __init__(self, spec: ToolSpec) -> None:
-        self.spec = spec
+    def __init__(self, model_spec: ToolModelSpec, runtime_policy: ToolRuntimePolicy) -> None:
+        self.model_spec = model_spec
+        self.runtime_policy = runtime_policy
         self.last_params: dict[str, object] = {}
 
-    def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         self.last_params = dict(params)
-        return ToolExecutionResult(
-            self.spec.name,
+        return ToolHandlerOutcome(
+            self.model_spec.name,
             True,
             json.dumps(params, ensure_ascii=False, sort_keys=True),
         )
 
 
-def _spec(**overrides: object) -> ToolSpec:
-    values: dict[str, object] = {
-        "name": "capture",
-        "category": "test",
-        "effect": "read_only",
-        "description": "capture",
-        "use_cases": [],
-        "avoid_when": [],
-        "keywords": [],
-        "parameters": {
-            "action": "action",
-            "query": "query",
-            "limit": "limit",
-            "working_dir": "working dir",
+def _contract(
+    *,
+    input_schema: dict[str, object] | None = None,
+    safe_defaults: dict[str, object] | None = None,
+    trusted_bindings: dict[str, TrustedParameterBinding] | None = None,
+) -> tuple[ToolModelSpec, ToolRuntimePolicy]:
+    schema = input_schema or {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "description": "action"},
+            "query": {"type": "string", "description": "query"},
+            "limit": {"type": "integer", "minimum": 1, "description": "limit"},
+            "working_dir": {"type": "string", "description": "working dir"},
         },
-        "parameter_schema": {
-            "action": {"type": "string"},
-            "query": {"type": "string"},
-            "limit": {"type": "integer", "minimum": 1},
-            "working_dir": {"type": "string"},
-        },
-        "required_parameters": ["query"],
+        "required": ["query"],
+        "additionalProperties": False,
     }
-    values.update(overrides)
-    return ToolSpec(**values)
+    model_spec = make_test_model_spec(
+        "capture",
+        description="capture",
+        input_schema=schema,
+    )
+    runtime_policy = replace(
+        make_test_runtime_policy("read_only"),
+        input_policy=ToolInputPolicy(
+            safe_parameter_defaults=tuple((safe_defaults or {}).items()),
+            trusted_parameter_bindings=tuple((trusted_bindings or {}).items()),
+        ),
+    )
+    return model_spec, runtime_policy
 
 
-def test_safe_default_is_schema_visible_and_applied_before_validation() -> None:
-    spec = _spec(safe_parameter_defaults={"limit": 25})
-    schema = tool_spec_input_schema(spec)
+def _complete(
+    arguments: dict[str, object],
+    model_spec: ToolModelSpec,
+    runtime_policy: ToolRuntimePolicy,
+    context: ToolInputCompletionContext,
+):
+    tool = _CaptureTool(model_spec, runtime_policy)
+    completed = complete_tool_arguments(
+        arguments,
+        ToolRuntime(model_spec, runtime_policy, tool),
+        context,
+    )
+    normalized = normalize_tool_input(completed.value, model_spec.input_schema)
+    return normalized.value, completed.sources
 
-    normalized = normalize_tool_payload_for_spec(
-        {"tool": "capture", "query": "demo"},
-        spec,
-        completion_context=ToolInputCompletionContext(
+
+def test_safe_default_is_applied_from_runtime_policy_before_validation() -> None:
+    model_spec, runtime_policy = _contract(safe_defaults={"limit": 25})
+
+    value, sources = _complete(
+        {"query": "demo"},
+        model_spec,
+        runtime_policy,
+        ToolInputCompletionContext(
             call_id="call-1",
             call_source="native",
         ),
     )
 
-    assert schema["properties"]["limit"]["default"] == 25
-    assert normalized.payload["limit"] == 25
-    assert [item.to_dict() for item in normalized.input_sources] == [
+    assert value["limit"] == 25
+    assert [item.to_dict() for item in sources] == [
         {
             "path": "$.query",
             "source": "model_proposed",
@@ -99,28 +130,28 @@ def test_safe_default_is_schema_visible_and_applied_before_validation() -> None:
         {
             "path": "$.limit",
             "source": "safe_default",
-            "source_ref": "tool_spec:capture#/safe_parameter_defaults/limit",
+            "source_ref": "tool_runtime:capture#/input_policy/safe_parameter_defaults/limit",
         },
     ]
 
 
 def test_explicit_value_is_never_overwritten_by_default_or_trusted_context() -> None:
-    spec = _spec(
-        safe_parameter_defaults={"limit": 25},
-        trusted_parameter_bindings={
+    model_spec, runtime_policy = _contract(
+        safe_defaults={"limit": 25},
+        trusted_bindings={
             "working_dir": TrustedParameterBinding(source_refs=("write_boundary.task_root",))
         },
     )
 
-    normalized = normalize_tool_payload_for_spec(
+    value, input_sources = _complete(
         {
-            "tool": "capture",
             "query": "demo",
             "limit": 3,
             "working_dir": "",
         },
-        spec,
-        completion_context=ToolInputCompletionContext(
+        model_spec,
+        runtime_policy,
+        ToolInputCompletionContext(
             call_id="call-2",
             trusted_context={
                 "write_boundary": {"task_root": "/trusted/task"},
@@ -128,16 +159,122 @@ def test_explicit_value_is_never_overwritten_by_default_or_trusted_context() -> 
         ),
     )
 
-    assert normalized.payload["limit"] == 3
-    assert normalized.payload["working_dir"] == ""
-    sources = {item.path: item.source for item in normalized.input_sources}
+    assert value["limit"] == 3
+    assert value["working_dir"] == ""
+    sources = {item.path: item.source for item in input_sources}
     assert sources["$.limit"] == "model_proposed"
     assert sources["$.working_dir"] == "model_proposed"
 
 
+def test_host_authoritative_binding_replaces_model_value_before_handler(
+    tmp_path: Path,
+) -> None:
+    model_spec, runtime_policy = _contract(
+        trusted_bindings={
+            "working_dir": TrustedParameterBinding(
+                source_refs=("registry.effective_cwd",),
+                authority="host_authoritative",
+            )
+        },
+    )
+    tool = _CaptureTool(model_spec, runtime_policy)
+
+    execution = execute_canonical_test_call(
+        tmp_path,
+        tools={"capture": tool},
+        tool_name="capture",
+        arguments={"query": "demo", "working_dir": "/model/guess"},
+        trusted_run_context={},
+    )
+
+    assert execution.result.ok is True
+    assert tool.last_params["working_dir"] == str(tmp_path)
+    sources = {
+        item["path"]: item for item in execution.result.metadata["input_sources"]
+    }
+    assert sources["$.working_dir"] == {
+        "path": "$.working_dir",
+        "source": "trusted_context",
+        "source_ref": "registry.effective_cwd",
+    }
+
+
+def test_must_match_binding_rejects_conflict_before_handler(tmp_path: Path) -> None:
+    model_spec, runtime_policy = _contract(
+        trusted_bindings={
+            "working_dir": TrustedParameterBinding(
+                source_refs=("registry.effective_cwd",),
+                authority="must_match",
+            )
+        },
+    )
+    tool = _CaptureTool(model_spec, runtime_policy)
+
+    execution = execute_canonical_test_call(
+        tmp_path,
+        tools={"capture": tool},
+        tool_name="capture",
+        arguments={"query": "demo", "working_dir": "/other"},
+    )
+
+    assert execution.result.ok is False
+    assert execution.result.error_code == "TOOL_TRUSTED_PARAMETER_CONFLICT"
+    assert execution.result.handler_executed is False
+    assert execution.result.failure_stage == "validation"
+    assert tool.last_params == {}
+
+
+def test_internal_trusted_binding_is_injected_but_cannot_be_model_supplied(
+    tmp_path: Path,
+) -> None:
+    model_spec = make_test_model_spec(
+        "capture",
+        input_schema={
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    )
+    runtime_policy = replace(
+        make_test_runtime_policy("read_only"),
+        input_policy=ToolInputPolicy(
+            internal_parameters=("run_id",),
+            trusted_parameter_bindings=((
+                "run_id",
+                TrustedParameterBinding(
+                    source_refs=("run_scope.run_id",),
+                    authority="host_authoritative",
+                ),
+            ),),
+        ),
+    )
+    tool = _CaptureTool(model_spec, runtime_policy)
+
+    injected = execute_canonical_test_call(
+        tmp_path,
+        tools={"capture": tool},
+        tool_name="capture",
+        arguments={"query": "demo"},
+        run_id="trusted-run",
+    )
+    spoofed = execute_canonical_test_call(
+        tmp_path,
+        tools={"capture": tool},
+        tool_name="capture",
+        arguments={"query": "demo", "run_id": "spoofed"},
+        run_id="trusted-run",
+    )
+
+    assert injected.result.ok is True
+    assert tool.last_params["run_id"] == "trusted-run"
+    assert spoofed.result.error_code == "TOOL_INTERNAL_PARAMETER_FORBIDDEN"
+    assert spoofed.result.handler_executed is False
+
+
 def test_trusted_context_binding_uses_first_present_ref_and_exact_condition() -> None:
-    spec = _spec(
-        trusted_parameter_bindings={
+    model_spec, runtime_policy = _contract(
+        trusted_bindings={
             "working_dir": TrustedParameterBinding(
                 source_refs=(
                     "write_boundary.task_root",
@@ -154,24 +291,26 @@ def test_trusted_context_binding_uses_first_present_ref_and_exact_condition() ->
         }
     )
 
-    started = normalize_tool_payload_for_spec(
-        {"tool": "capture", "query": "demo", "action": "start"},
-        spec,
-        completion_context=context,
+    started, started_sources = _complete(
+        {"query": "demo", "action": "start"},
+        model_spec,
+        runtime_policy,
+        context,
     )
-    read = normalize_tool_payload_for_spec(
-        {"tool": "capture", "query": "demo", "action": "read"},
-        spec,
-        completion_context=context,
+    read, _read_sources = _complete(
+        {"query": "demo", "action": "read"},
+        model_spec,
+        runtime_policy,
+        context,
     )
 
-    assert started.payload["working_dir"] == "/workspace"
-    assert started.input_sources[-1].to_dict() == {
+    assert started["working_dir"] == "/workspace"
+    assert started_sources[-1].to_dict() == {
         "path": "$.working_dir",
         "source": "trusted_context",
         "source_ref": "registry.workspace_root",
     }
-    assert "working_dir" not in read.payload
+    assert "working_dir" not in read
 
 
 def test_audit_source_open_uses_host_selected_transport_without_model_rewrite(
@@ -192,30 +331,22 @@ def test_audit_source_open_uses_host_selected_transport_without_model_rewrite(
         "record_list_field": "items",
         "cursor_field": "next_position",
     }
-    tool = _CaptureTool(build_watch_stream_spec(surface="audit_binding"))
-
-    result = execute_registry_call(
-        ExecuteRegistryCallParams(
-            payload=ToolCallEnvelope(
-                call_id="call-audit-source-open",
-                source="native",
-                tool_name="watch_stream",
-                input={"action": "open"},
-                scope=RunScope(
-                    request_id="audit-a",
-                    task_id="audit-a",
-                    run_id="source-worker-a",
-                ),
-            ),
-            tools={"watch_stream": tool},
-            workspace_root=tmp_path,
-            workspace_roots=[tmp_path],
-            operation_store_required=False,
-            trusted_run_context={
-                "task_attributes": {AUDIT_SOURCE_OPEN_ATTR: binding}
-            },
-        )
+    tool = _CaptureTool(
+        build_watch_stream_model_spec(surface="audit_binding"),
+        build_watch_stream_runtime_policy(surface="audit_binding"),
     )
+
+    result = execute_canonical_test_call(
+        tmp_path,
+        tools={"watch_stream": tool},
+        tool_name="watch_stream",
+        arguments={"action": "open"},
+        operation_store_required=False,
+        trusted_run_context={
+            "task_attributes": {AUDIT_SOURCE_OPEN_ATTR: binding}
+        },
+        call_id="call-audit-source-open",
+    ).result
 
     assert result.ok is True
     assert {
@@ -224,7 +355,7 @@ def test_audit_source_open_uses_host_selected_transport_without_model_rewrite(
     } == {"action": "open", **binding}
     sources = {
         item["path"]: item
-        for item in result.result_envelope["input_sources"]
+        for item in result.metadata["input_sources"]
     }
     assert sources["$.action"]["source"] == "model_proposed"
     for name in binding:
@@ -238,30 +369,22 @@ def test_audit_source_open_uses_host_selected_transport_without_model_rewrite(
 def test_audit_source_worker_uses_host_bound_watch_id_when_model_omits_it(
     tmp_path: Path,
 ) -> None:
-    tool = _CaptureTool(build_watch_stream_spec(surface="audit_source"))
-
-    result = execute_registry_call(
-        ExecuteRegistryCallParams(
-            payload=ToolCallEnvelope(
-                call_id="call-audit-source-status",
-                source="native",
-                tool_name="watch_stream",
-                input={"action": "status"},
-                scope=RunScope(
-                    request_id="audit-a",
-                    task_id="audit-a",
-                    run_id="source-worker-a",
-                ),
-            ),
-            tools={"watch_stream": tool},
-            workspace_root=tmp_path,
-            workspace_roots=[tmp_path],
-            operation_store_required=False,
-            trusted_run_context={
-                "task_attributes": {AUDIT_SOURCE_WATCH_ID_ATTR: "ws-0123456789"}
-            },
-        )
+    tool = _CaptureTool(
+        build_watch_stream_model_spec(surface="audit_source"),
+        build_watch_stream_runtime_policy(surface="audit_source"),
     )
+
+    result = execute_canonical_test_call(
+        tmp_path,
+        tools={"watch_stream": tool},
+        tool_name="watch_stream",
+        arguments={"action": "status"},
+        operation_store_required=False,
+        trusted_run_context={
+            "task_attributes": {AUDIT_SOURCE_WATCH_ID_ATTR: "ws-0123456789"}
+        },
+        call_id="call-audit-source-status",
+    ).result
 
     assert result.ok is True
     assert {
@@ -273,7 +396,7 @@ def test_audit_source_worker_uses_host_bound_watch_id_when_model_omits_it(
     }
     sources = {
         item["path"]: item
-        for item in result.result_envelope["input_sources"]
+        for item in result.metadata["input_sources"]
     }
     assert sources["$.watch_id"] == {
         "path": "$.watch_id",
@@ -289,50 +412,54 @@ def test_audit_source_worker_uses_host_bound_watch_id_when_model_omits_it(
 def test_non_source_watch_surfaces_do_not_inherit_source_worker_bindings(
     surface: str,
 ) -> None:
-    spec = build_watch_stream_spec(surface=surface)
+    policy = build_watch_stream_runtime_policy(surface=surface)
 
-    assert spec.trusted_parameter_bindings == {}
+    assert policy.input_policy.trusted_parameter_bindings == ()
 
 
 def test_audit_source_binding_surface_has_only_its_required_host_facts() -> None:
-    first_open = build_watch_stream_spec(surface="audit_binding")
-    continuing = build_watch_stream_spec(surface="audit_source")
+    first_open = build_watch_stream_runtime_policy(surface="audit_binding")
+    continuing = build_watch_stream_runtime_policy(surface="audit_source")
 
-    assert "watch_id" in first_open.trusted_parameter_bindings
-    assert "url" in first_open.trusted_parameter_bindings
-    assert set(continuing.trusted_parameter_bindings) == {"watch_id"}
+    first_bindings = dict(first_open.input_policy.trusted_parameter_bindings)
+    continuing_bindings = dict(continuing.input_policy.trusted_parameter_bindings)
+    assert "watch_id" in first_bindings
+    assert "url" in first_bindings
+    assert set(continuing_bindings) == {"watch_id"}
 
 
 @pytest.mark.parametrize(
-    ("overrides", "error"),
+    ("safe_defaults", "trusted_bindings", "error"),
     [
-        ({"safe_parameter_defaults": {"missing": 1}}, "未声明参数"),
-        ({"safe_parameter_defaults": {"limit": "25"}}, "不符合参数 Schema"),
+        ({"missing": 1}, {}, "undeclared parameter"),
+        ({"limit": "25"}, {}, "violates schema"),
         (
-            {
-                "trusted_parameter_bindings": {
-                    "working_dir": TrustedParameterBinding(source_refs=("model.input.cwd",))
-                }
-            },
-            "不允许的 trusted source_ref",
+            {},
+            {"working_dir": TrustedParameterBinding(source_refs=("model.input.cwd",))},
+            "invalid trusted source_ref",
         ),
         (
-            {
-                "safe_parameter_defaults": {"working_dir": "."},
-                "trusted_parameter_bindings": {
-                    "working_dir": TrustedParameterBinding(source_refs=("registry.workspace_root",))
-                },
-            },
-            "不能同时声明",
+            {"working_dir": "."},
+            {"working_dir": TrustedParameterBinding(source_refs=("registry.workspace_root",))},
+            "both default and trusted binding",
         ),
     ],
 )
 def test_invalid_completion_contract_fails_closed(
-    overrides: dict[str, object],
+    safe_defaults: dict[str, object],
+    trusted_bindings: dict[str, TrustedParameterBinding],
     error: str,
 ) -> None:
     with pytest.raises(ValueError, match=error):
-        tool_spec_input_schema(_spec(**overrides))
+        model_spec, runtime_policy = _contract(
+            safe_defaults=safe_defaults,
+            trusted_bindings=trusted_bindings,
+        )
+        ToolRuntime(
+            model_spec,
+            runtime_policy,
+            _CaptureTool(model_spec, runtime_policy),
+        )
 
 
 def test_registry_uses_workspace_as_effective_cwd_without_task_write_scope(
@@ -340,36 +467,26 @@ def test_registry_uses_workspace_as_effective_cwd_without_task_write_scope(
 ) -> None:
     task_root = tmp_path / "task"
     task_root.mkdir()
-    spec = _spec(
-        trusted_parameter_bindings={
+    model_spec, runtime_policy = _contract(
+        trusted_bindings={
             "working_dir": TrustedParameterBinding(source_refs=("registry.effective_cwd",))
         },
     )
-    tool = _CaptureTool(spec)
+    tool = _CaptureTool(model_spec, runtime_policy)
 
-    result = execute_registry_call(
-        ExecuteRegistryCallParams(
-            payload=ToolCallEnvelope(
-                call_id="call-registry",
-                source="native",
-                tool_name="capture",
-                input={"query": "demo"},
-                scope=RunScope(
-                    request_id="req-1",
-                    task_id="task-1",
-                    run_id="run-1",
-                ),
-            ),
-            tools={"capture": tool},
-            workspace_root=tmp_path,
-            workspace_roots=[tmp_path, task_root],
-            write_boundary={"task_root": str(task_root)},
-        )
-    )
+    result = execute_canonical_test_call(
+        tmp_path,
+        tools={"capture": tool},
+        tool_name="capture",
+        arguments={"query": "demo"},
+        workspace_roots=(tmp_path, task_root),
+        write_boundary={"task_root": str(task_root)},
+        call_id="call-registry",
+    ).result
 
     assert result.ok is True
     assert tool.last_params["working_dir"] == str(tmp_path)
-    assert result.result_envelope["input_sources"] == [
+    assert result.metadata["input_sources"] == [
         {
             "path": "$.query",
             "source": "model_proposed",
@@ -389,39 +506,29 @@ def test_registry_uses_task_root_as_effective_cwd_for_task_scoped_writes(
     task_root = tmp_path / "task"
     task_output = task_root / "output"
     task_output.mkdir(parents=True)
-    spec = _spec(
-        trusted_parameter_bindings={
+    model_spec, runtime_policy = _contract(
+        trusted_bindings={
             "working_dir": TrustedParameterBinding(source_refs=("registry.effective_cwd",))
         },
     )
-    tool = _CaptureTool(spec)
+    tool = _CaptureTool(model_spec, runtime_policy)
 
-    result = execute_registry_call(
-        ExecuteRegistryCallParams(
-            payload=ToolCallEnvelope(
-                call_id="call-task-registry",
-                source="native",
-                tool_name="capture",
-                input={"query": "demo"},
-                scope=RunScope(
-                    request_id="req-2",
-                    task_id="task-2",
-                    run_id="run-2",
-                ),
-            ),
-            tools={"capture": tool},
-            workspace_root=tmp_path,
-            workspace_roots=[tmp_path, task_root],
-            write_boundary={
-                "task_root": str(task_root),
-                "allowed_write_roots": [str(task_output)],
-            },
-        )
-    )
+    result = execute_canonical_test_call(
+        tmp_path,
+        tools={"capture": tool},
+        tool_name="capture",
+        arguments={"query": "demo"},
+        workspace_roots=(tmp_path, task_root),
+        write_boundary={
+            "task_root": str(task_root),
+            "allowed_write_roots": [str(task_output)],
+        },
+        call_id="call-task-registry",
+    ).result
 
     assert result.ok is True
     assert tool.last_params["working_dir"] == str(task_root)
-    assert result.result_envelope["input_sources"][-1] == {
+    assert result.metadata["input_sources"][-1] == {
         "path": "$.working_dir",
         "source": "trusted_context",
         "source_ref": "registry.effective_cwd",
@@ -431,16 +538,15 @@ def test_registry_uses_task_root_as_effective_cwd_for_task_scoped_writes(
 def test_missing_unsafe_required_parameter_still_fails_schema_gate(
     tmp_path: Path,
 ) -> None:
-    tool = _CaptureTool(_spec())
+    model_spec, runtime_policy = _contract()
+    tool = _CaptureTool(model_spec, runtime_policy)
 
-    result = execute_registry_call(
-        ExecuteRegistryCallParams(
-            payload={"tool": "capture"},
-            tools={"capture": tool},
-            workspace_root=tmp_path,
-            workspace_roots=[tmp_path],
-        )
-    )
+    result = execute_canonical_test_call(
+        tmp_path,
+        tools={"capture": tool},
+        tool_name="capture",
+        arguments={},
+    ).result
 
     assert result.ok is False
     assert result.error_code == "TOOL_PARAMETER_REQUIRED"
@@ -450,10 +556,7 @@ def test_missing_unsafe_required_parameter_still_fails_schema_gate(
 def test_schema_default_annotation_alone_never_authorizes_completion(
     tmp_path: Path,
 ) -> None:
-    spec = _spec(
-        parameters={},
-        parameter_schema={},
-        required_parameters=[],
+    model_spec, runtime_policy = _contract(
         input_schema={
             "type": "object",
             "properties": {
@@ -464,16 +567,14 @@ def test_schema_default_annotation_alone_never_authorizes_completion(
             "additionalProperties": False,
         },
     )
-    tool = _CaptureTool(spec)
+    tool = _CaptureTool(model_spec, runtime_policy)
 
-    result = execute_registry_call(
-        ExecuteRegistryCallParams(
-            payload={"tool": "capture", "query": "demo"},
-            tools={"capture": tool},
-            workspace_root=tmp_path,
-            workspace_roots=[tmp_path],
-        )
-    )
+    result = execute_canonical_test_call(
+        tmp_path,
+        tools={"capture": tool},
+        tool_name="capture",
+        arguments={"query": "demo"},
+    ).result
 
     assert result.ok is False
     assert result.error_code == "TOOL_PARAMETER_REQUIRED"
@@ -481,26 +582,24 @@ def test_schema_default_annotation_alone_never_authorizes_completion(
 
 
 def test_model_cannot_spoof_parameter_source_metadata(tmp_path: Path) -> None:
-    tool = _CaptureTool(_spec())
+    model_spec, runtime_policy = _contract()
+    tool = _CaptureTool(model_spec, runtime_policy)
 
-    result = execute_registry_call(
-        ExecuteRegistryCallParams(
-            payload={
-                "tool": "capture",
-                "query": "demo",
-                "input_sources": [
-                    {
-                        "path": "$.query",
-                        "source": "trusted_context",
-                        "source_ref": "registry.workspace_root",
-                    }
-                ],
-            },
-            tools={"capture": tool},
-            workspace_root=tmp_path,
-            workspace_roots=[tmp_path],
-        )
-    )
+    result = execute_canonical_test_call(
+        tmp_path,
+        tools={"capture": tool},
+        tool_name="capture",
+        arguments={
+            "query": "demo",
+            "input_sources": [
+                {
+                    "path": "$.query",
+                    "source": "trusted_context",
+                    "source_ref": "registry.workspace_root",
+                }
+            ],
+        },
+    ).result
 
     assert result.ok is False
     assert result.error_code == "TOOL_INVALID_ARGUMENTS"
@@ -508,11 +607,15 @@ def test_model_cannot_spoof_parameter_source_metadata(tmp_path: Path) -> None:
 
 
 def test_archive_compaction_preserves_value_free_input_audit() -> None:
-    result = ToolExecutionResult(
+    call = canonical_history_call(
         "capture",
-        True,
+        {},
+        source_protocol="text",
+    )
+    result = canonical_history_result(
+        call,
         "ok",
-        result_envelope={
+        handler_details={
             "input_sources": [
                 {
                     "path": "$.working_dir",
@@ -567,34 +670,45 @@ def test_builtin_process_and_artifact_specs_use_the_shared_completion_path(
         },
     )
 
-    shell_call = normalize_tool_payload_for_spec(
-        {"tool": "run_command", "command": "pwd"},
-        shell.spec,
-        completion_context=context,
+    def complete(tool: BaseTool, arguments: dict[str, object]):
+        return complete_tool_arguments(
+            arguments,
+            ToolRuntime(
+                model_spec=tool.model_spec,
+                runtime_policy=tool.runtime_policy,
+                handler=tool,
+                availability=ToolAvailability.ready(),
+            ),
+            context,
+        )
+
+    shell_call = complete(shell, {"command": "pwd"})
+    terminal_start = complete(
+        terminal,
+        {"action": "start", "command": "python -q"},
     )
-    terminal_start = normalize_tool_payload_for_spec(
-        {"tool": "terminal_session", "action": "start", "command": "python -q"},
-        terminal.spec,
-        completion_context=context,
+    terminal_read = complete(
+        terminal,
+        {"action": "read", "session_id": "pty-1"},
     )
-    terminal_read = normalize_tool_payload_for_spec(
-        {"tool": "terminal_session", "action": "read", "session_id": "pty-1"},
-        terminal.spec,
-        completion_context=context,
-    )
-    artifact_call = normalize_tool_payload_for_spec(
-        {"tool": "read_artifact", "artifact_ref": "run-builtins:1-1"},
-        artifact.spec,
-        completion_context=context,
+    artifact_call = complete_tool_arguments(
+        {"artifact_ref": "run-builtins:1-1"},
+        ToolRuntime(
+            model_spec=artifact.model_spec,
+            runtime_policy=artifact.runtime_policy,
+            handler=artifact,
+            availability=ToolAvailability.ready(),
+        ),
+        context,
     )
 
-    assert shell_call.payload["timeout"] == 47
-    assert shell_call.payload["run_in_background"] is False
-    assert shell_call.payload["working_dir"] == str(tmp_path / "task")
-    assert terminal_start.payload["working_dir"] == str(tmp_path / "task")
-    assert "working_dir" not in terminal_read.payload
+    assert shell_call.value["timeout"] == 47
+    assert shell_call.value["run_in_background"] is False
+    assert shell_call.value["working_dir"] == str(tmp_path / "task")
+    assert terminal_start.value["working_dir"] == str(tmp_path / "task")
+    assert "working_dir" not in terminal_read.value
     assert {
-        key: artifact_call.payload[key]
+        key: artifact_call.value[key]
         for key in (
             "offset",
             "max_chars",

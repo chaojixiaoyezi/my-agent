@@ -1,5 +1,15 @@
 # Subagent Progress
 
+## 2026-08-04 子代理经验统一进入 owner Memory Candidate
+
+- 删除 `SubAgentLearningService`、task-local `memory_gate` 及各自审核/导出状态机；子代理 workspace 只保留
+  原始 result、finding、lesson、evidence 和 artifact refs，不再拥有第二套正式候选事实源。
+- `SubAgentManager` 由 owner composition root 注入唯一 `CandidateService`，runner 结果通过
+  `SubAgentMemoryCandidateService` 将 lesson/finding 批量写入 `memory/candidates.jsonl`。该适配器不审核、
+  不晋升，也不能直接写 long-term、Persona、正式 lesson 或 HOT。
+- observation id 使用结构化 run/finding/content 身份保持重放幂等；`subagent_finding` 与
+  `subagent_lesson` 默认待审，不能因 child 自报 confidence 或较新时间获得事实权威。
+
 ## 2026-07-30 子代理启动上下文只要求执行必需事实
 
 - 子代理的 `acceptance_checks` 是可选的质量说明，不是每个任务都具备的执行前提。旧门把它与
@@ -203,7 +213,7 @@
 - **来源比例观测**(R8b 隐蔽编造实锤:静态列表复用 24 周+公式造数,验收照过):
   `delivery_closeout/source_volume.py`——closeout 报告新增
   `source_volume_observation`(网络成功调用数/交付文件数与字节/声明 min_count
-  总数并排),挂双路径。检索侧按 `ToolSpec.category=="web"` 结构化判定零白名单;
+  总数并排),挂双路径。检索侧按 `ToolModelSpec.hints.category=="web"` 结构化判定零白名单;
   **设计裁决:纯观测零 finding**——"数据类 vs 分析类产物"是机器判不了的内容
   语义,任何阈值必误伤零网络的本地分析任务;比例判断留给把关者。钉子 4 条。
 - **启动孤儿检测**(异常崩溃兜底,孤儿回收第二期):`startup_recovery.
@@ -264,8 +274,9 @@ docs/audits/R7-three-tasks-20260611.md 与 REFACTORING_BACKLOG 同日条目：
   `append_tool_failure_channel_hint`：
   - 触发（全结构化）：同一工具的 archive ok=false 累计 ≥
     `tool_failure_channel_hint_threshold`（主配置三同步，默认 2，0=关闭）。
-    按 tool name 通用计数，零工具类型枚举；`__parse_error__` 不计；只认系统事实
+    按 tool name 通用计数，零工具类型枚举；当时的 `__parse_error__` 不计；只认系统事实
     （与 A1 失败账本同源），绝不解析模型文本。
+    当前实现已删除该伪工具；协议错误直接作为 host-owned violation，仍不会计成 handler 失败。
   - 动作：tool_context 注入一条枚举引导——下"数据不存在/不可行/找不到"绝对结论
     之前，先枚举已试渠道（含失败证据）与已知未试渠道（其他工具/数据源/查询字段），
     换渠道再验证；确认不可行则把枚举写进结构化不可行报告
@@ -392,7 +403,7 @@ docs/audits/R7-three-tasks-20260611.md 与 REFACTORING_BACKLOG 同日条目：
 
 - **A1 系统级工具失败账本**（根治 R4b 模型归因幻觉）：新增
   `subagents/tool_failure_ledger.py`——子代理一轮 `agent.run` 的
-  `archive_tool_calls`（registry 层 ToolExecutionResult 的 ok/error_code，系统事实）
+  `archive_tool_calls`（canonical ToolResult 的 ok/error_code 投影，系统事实）
   提取 ok=False 摘要（tool/call_id/error_code/target），经
   `RecordRunnerResultParams.tool_failures` 写进
   `task.attributes["tool_failure_ledger"]`。语义：`[]`=系统确认零失败（强事实，
@@ -518,7 +529,7 @@ docs/audits/R7-three-tasks-20260611.md 与 REFACTORING_BACKLOG 同日条目：
   `parameter_name` 占位字段，模型会照抄成错误工具参数。当前工具协议示例改为真实
   `read_file` 顶层参数；registry 统一拒绝未知顶层参数并返回 `TOOL_INVALID_ARGUMENTS`，
   不再让 `list_files` 这类有默认值的工具静默把错参当成功。内部字段通过
-  `ToolSpec.internal_parameters` 隐藏声明，不展示给模型。
+  `ToolRuntimePolicy.input_policy.internal_parameters` 隐藏声明，不展示给模型。
 - persistence 保存链路继续收直：`identity`、`security`、`status_report`、`failure_handoff`、
   `inheritance`、`output_load_errors`、`recovery_outputs` 等只服务持久化保存的私有 helper
   已折回 `persistence/service.py`；`thought.md` 渲染折回 projection 写入点。

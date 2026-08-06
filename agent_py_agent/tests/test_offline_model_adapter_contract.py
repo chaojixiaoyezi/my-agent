@@ -1,17 +1,16 @@
 from __future__ import annotations
 
 
-def test_model_adapter_normalizes_current_tool_call_envelope() -> None:
-    from agent_py_agent.agent.contracts.tool_protocol_v2 import (
-        normalize_tool_call,
-        validate_tool_call,
+def test_model_adapter_accepts_canonical_call_id() -> None:
+    from agent_py_agent.agent.contracts.offline_model_adapter_contract import (
+        validate_model_adapter_facts,
     )
 
-    envelope = normalize_tool_call({"tool_name": "read_file", "input": {"path": "input.txt"}})
+    result = validate_model_adapter_facts(
+        {"tool_calls": [{"call_id": "call-1", "tool_name": "read_file"}]}
+    )
 
-    assert envelope.operation_id
-    assert envelope.idempotency_key
-    assert validate_tool_call(envelope) == []
+    assert result.ok is True
 
 
 def test_model_adapter_requires_tool_call_id_or_generated_id() -> None:

@@ -332,7 +332,14 @@ def test_structurally_completed_conversation_task_never_auto_continues() -> None
 
 
 def test_finalization_skips_compact_cycle_after_structured_turn_completion(tmp_path) -> None:
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
+            tool_protocol="text",
+        ),
+        tmp_path,
+    )
     ctx = replace(
         _finalize_context_for_continuation(tool_rounds=0, executed_tools=[]),
         task_attributes={
@@ -502,7 +509,14 @@ def test_compact_deferred_record_is_not_counted_as_progress() -> None:
 
 def test_run_auto_compact_apply_continues_once_after_continue_packet(tmp_path):
     """LLM: Tests saved auto compact apply performs one guarded continuation turn."""
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
+            tool_protocol="text",
+        ),
+        tmp_path,
+    )
     agent.backend.context_window_tokens = 20
 
     result = agent.run(
@@ -527,7 +541,10 @@ def test_run_auto_compact_apply_continues_once_after_continue_packet(tmp_path):
 
 def test_run_auto_compact_apply_continues_with_home_entries_and_packet(tmp_path):
     home = tmp_path / "home"
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(home)), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(home), tool_protocol="text"),
+        tmp_path,
+    )
     backend = ContextOverflowThenCaptureBackend()
     agent.backend = backend
     agent.home_paths.agents_md.write_text("执行制度：每轮先读 AGENTS。\n", encoding="utf-8")
@@ -552,7 +569,8 @@ def test_run_auto_compact_apply_continues_with_home_entries_and_packet(tmp_path)
     assert "# Home Entry: LONG-TERM WORKING AGREEMENT" in second_prompt
     assert "# Home Entry: ASSISTANT PERSONA" in second_prompt
     assert "# Home Entry: CURRENT USER OR GROUP PROFILE" in second_prompt
-    assert "# Home Entry: memory.md" in second_prompt
+    assert "# Home Entry: memory.md" not in second_prompt
+    assert "关键记忆：不要重做已完成步骤。" not in second_prompt
     assert second_prompt.index("# Home Entry: LONG-TERM WORKING AGREEMENT") < second_prompt.index(
         "# Compact Auto Continuation"
     )
@@ -562,7 +580,10 @@ def test_run_auto_compact_apply_continues_with_home_entries_and_packet(tmp_path)
 
 def test_run_auto_compact_continuation_reuses_original_task_workspace(tmp_path):
     home = tmp_path / "home"
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(home)), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(home), tool_protocol="text"),
+        tmp_path,
+    )
     backend = ContextOverflowThenCaptureBackend()
     agent.backend = backend
 
@@ -581,7 +602,14 @@ def test_run_auto_compact_continuation_reuses_original_task_workspace(tmp_path):
 
 
 def test_run_auto_compact_apply_returns_after_no_tool_continuation(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
+            tool_protocol="text",
+        ),
+        tmp_path,
+    )
     backend = ContextOverflowThenCaptureBackend()
     agent.backend = backend
 
@@ -647,6 +675,7 @@ def test_run_auto_compact_apply_can_repeat_when_continuation_makes_tool_progress
             model_backend="echo",
             enable_tools=True,
             my_agent_home=str(tmp_path / "home"),
+            tool_protocol="text",
             tool_context_ptl_retry_max=0,
         ),
         tmp_path,
@@ -1428,7 +1457,14 @@ def test_default_run_recovery_next_actions_are_action_first() -> None:
 
 
 def test_run_auto_compact_apply_continues_with_optional_work_notes_missing(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
+            tool_protocol="text",
+        ),
+        tmp_path,
+    )
     backend = ContextOverflowThenCaptureBackend()
     agent.backend = backend
 
@@ -1477,10 +1513,22 @@ def test_run_auto_compact_normal_final_returns_without_auto_continuation(tmp_pat
 def _seed_for_carried(
     carried: list[dict[str, object]],
     active_turn_user_inputs: list[dict[str, object]] | None = None,
+    *,
+    source_protocol: str = "text",
 ):
     from agent_py_agent.agent.agent_core.runtime.loop_models import (
         RuntimeLoopParams,
         RuntimeToolLoopSeed,
+    )
+    from agent_py_agent.tests._tool_runtime_harness import (
+        make_test_protocol_snapshot,
+        runtime_snapshot_for_model_specs,
+    )
+
+    runtime_snapshot = runtime_snapshot_for_model_specs((), run_id="test-run")
+    protocol_snapshot = make_test_protocol_snapshot(
+        run_id="test-run",
+        source_protocol=source_protocol,
     )
 
     loop_params = RuntimeLoopParams(
@@ -1498,6 +1546,8 @@ def _seed_for_carried(
         memories=[],
         tool_catalog_section="",
         tool_recommendations_section="",
+        tool_runtime_snapshot=runtime_snapshot,
+        tool_protocol_snapshot=protocol_snapshot,
     )
 
 
@@ -1520,8 +1570,8 @@ def test_compact_continuation_rebuilds_runtime_state_from_carried_records():
             "output_preview": "def a(): ...",
             "scoped_call_id": "run-1:1-2",
         },
-        # 失败/解析错误记录：不计入 executed_tools、不进 one_shot，但仍占一轮预算。
-        {"tool": "__parse_error__", "ok": False, "parameters": {"tool": "__parse_error__"}},
+        # 真实工具失败记录：不计入 executed_tools、不进 one_shot，但仍占一轮预算。
+        {"tool": "read_file", "ok": False, "parameters": {"tool": "read_file"}},
     ]
 
     loop_params = _tool_loop_execute_params(SimpleNamespace(), _seed_for_carried(carried))
@@ -1589,20 +1639,21 @@ def test_compact_continuation_rebuilt_one_shot_blocks_duplicate_subagent_creatio
     live_key = _one_shot_tool_call_key(create_payload)
     assert live_key in loop_params.one_shot_tool_calls
 
-    from agent_py_agent.agent.agent_core.runner.stage_trace import RunnerToolStageTraceRequest
     from agent_py_agent.agent.agent_core.tool_call_runtime import (
         ToolCallRuntimeRequest,
         guarded_tool_call_result,
     )
     from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallExecuteParams
+    from agent_py_agent.tests._tool_runtime_harness import canonical_history_call
 
     agent = SimpleNamespace(_current_subagent_run_id="")
-    exec_params = ToolCallExecuteParams(loop_params, 4, 1, dict(create_payload))
-    trace_request = RunnerToolStageTraceRequest(
-        agent=agent, params=loop_params, tool_rounds=4, idx=1, payload=dict(create_payload)
+    call = canonical_history_call(
+        "create_subagents",
+        {key: value for key, value in create_payload.items() if key != "tool"},
     )
+    exec_params = ToolCallExecuteParams(loop_params, 4, 1, call)
     guarded = guarded_tool_call_result(
-        ToolCallRuntimeRequest(agent, exec_params, dict(create_payload), trace_request)
+        ToolCallRuntimeRequest(agent, exec_params, call)
     )
 
     assert guarded is not None
@@ -1665,13 +1716,16 @@ def test_compact_continuation_carries_active_turn_user_input_as_real_native_turn
             tool_protocol="native",
             enable_tools=True,
             model_name="MiniMax-M2.7",
-            tool_protocol_text_models=[],
         ),
         backend=SimpleNamespace(name="anthropic_compatible"),
     )
     loop_params = _tool_loop_execute_params(
         agent,
-        _seed_for_carried([], continued.carried_active_turn_user_inputs),
+        _seed_for_carried(
+            [],
+            continued.carried_active_turn_user_inputs,
+            source_protocol="native",
+        ),
     )
 
     assert continued.carried_active_turn_user_inputs == [packet]

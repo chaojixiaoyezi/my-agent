@@ -598,12 +598,12 @@ class TestBuildPromptFilesParam:
         assert "HOT SECRET" not in result
         assert "（无相关记忆）" in result
 
-    def test_home_context_injects_memory_hot_entry(self, tmp_path):
-        """普通主代理上下文每轮读取 memory-hot.md，保证高频教训不用扫长记忆。"""
+    def test_home_context_does_not_directly_inject_memory_hot_entry(self, tmp_path):
+        """HOT 只能由 runtime recall 进入唯一 memory-context，不能由 Builder 再读一次。"""
         home = tmp_path / "home"
         home.mkdir()
         hot = home / "memory-hot.md"
-        hot.write_text("不要把测试失败改成硬门。", encoding="utf-8")
+        hot.write_text("RAW HOT SECRET", encoding="utf-8")
         home_paths = SimpleNamespace(
             owner_agents_md=home / "AGENTS.md",
             owner_soul_md=home / "SOUL.md",
@@ -614,17 +614,26 @@ class TestBuildPromptFilesParam:
         )
         builder = PromptBuilder(AgentConfig(system_prompt="System"), tmp_path, home_paths=home_paths)
 
-        result = builder.build("普通开发任务", [])
+        formal_hot = MemoryRecord(
+            role="system",
+            content="正式 HOT 规则：失败后先核对真实证据。",
+            kind="hot",
+            entry_id="hot-formal-1",
+            attributes={"origin": "reviewed"},
+        )
+        result = builder.build("普通开发任务", [formal_hot])
 
-        assert "# Home Entry: memory-hot.md" in result
-        assert "不要把测试失败改成硬门。" in result
+        assert "# Home Entry: memory-hot.md" not in result
+        assert "RAW HOT SECRET" not in result
+        assert result.count("<memory-context>") == 1
+        assert "正式 HOT 规则：失败后先核对真实证据。" in result
         assert str(home) not in result
 
-    def test_matching_home_lesson_uses_logical_source_not_host_path(self, tmp_path):
+    def test_formal_lesson_uses_memory_envelope_not_direct_home_read(self, tmp_path):
         home = tmp_path / "private-owner-home"
         lessons = home / "memory" / "lessons"
         lessons.mkdir(parents=True)
-        (lessons / "quality.md").write_text("失败后先核对真实证据。", encoding="utf-8")
+        (lessons / "quality.md").write_text("RAW LESSON SECRET", encoding="utf-8")
         home_paths = SimpleNamespace(
             owner_memory_lessons_dir=lessons,
             owner_memory_routing_index_md=home / "memory" / "routing" / "INDEX.md",
@@ -635,10 +644,19 @@ class TestBuildPromptFilesParam:
             home_paths=home_paths,
         )
 
-        result = builder.build("quality", [])
+        formal_lesson = MemoryRecord(
+            role="system",
+            content="正式 lesson：失败后先核对真实证据。",
+            kind="lesson",
+            entry_id="lesson-formal-1",
+            attributes={"origin": "reviewed"},
+        )
+        result = builder.build("quality", [formal_lesson])
 
-        assert "# Home Lesson: memory/lessons/quality.md" in result
-        assert "失败后先核对真实证据。" in result
+        assert "# Home Lesson: memory/lessons/quality.md" not in result
+        assert "RAW LESSON SECRET" not in result
+        assert result.count("<memory-context>") == 1
+        assert "正式 lesson：失败后先核对真实证据。" in result
         assert str(home) not in result
 
     def test_control_plane_context_suppresses_owner_memory_and_home_files(self, tmp_path):

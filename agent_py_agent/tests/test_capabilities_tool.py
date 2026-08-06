@@ -24,9 +24,12 @@ from agent_py_agent.agent.tooling.capabilities_tool import (
     build_capability_inventory,
 )
 from agent_py_agent.agent.tooling.models import (
+    EffectResolverPolicy,
     ToolInvocationContext,
+    ToolModelSpec,
+    ToolRuntime,
+    ToolRuntimePolicy,
     ToolRuntimeSnapshot,
-    ToolSpec,
 )
 
 
@@ -279,16 +282,24 @@ def test_scoped_capability_inventory_uses_same_availability_and_permission_snaps
             gateway_per_user_owner_scoping=True,
         ),
     )
+    model_spec = ToolModelSpec(
+        name="list_capabilities",
+        description="能力清单",
+        input_schema={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    )
     snapshot = ToolRuntimeSnapshot(
-        specs=(
-            ToolSpec(
-                name="list_capabilities",
-                category="meta",
-                description="能力清单",
-                use_cases=[],
-                avoid_when=[],
-                keywords=[],
-                parameters={},
+        run_id="test-run",
+        runtimes=(
+            ToolRuntime(
+                model_spec=model_spec,
+                runtime_policy=ToolRuntimePolicy(
+                    effect_resolver=EffectResolverPolicy(),
+                ),
+                handler=tool,
             ),
         ),
         available_tool_names=frozenset({"list_capabilities"}),

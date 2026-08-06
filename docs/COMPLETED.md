@@ -4,6 +4,14 @@
 
 最近收口重点：
 
+- 工具运行时已收敛为唯一链：`required_actions -> ToolRuntimeSnapshot -> ToolChoice ->
+  provider adapter -> canonical ToolCall -> ActionPolicy -> ToolExecutor -> operation/reconcile -> canonical
+  ToolResult -> settlement -> CompletionGate`。旧重复 Schema/审批/effect/执行入口、native 正文提升、
+  protocol-v2、parser/JSON repair 和陈旧测试已删除。focused/full/static/package 门已通过；
+  MiniMax-M2.7 四条原始普通中文真实验收证据在
+  `validation/real_runs/tool-runtime-20260805T141123Z/report.json`。macOS 无 owner-scoped `bwrap` 的执行请求
+  按合同阻断，没有降级到宿主执行。详细任务见
+  `docs/tasks/completed/TASK-20260804-1913-tool-runtime-unification.md`。
 - `/audit` 高频判读没有新增专用 Agent/Memory/Compact 路线，而是在现有 durable spool 主链加入
   时间、条数和按模型上下文计算的数据量三条件合批；自动判完即逐条签收，低风险原文不再进入长命
   子代理重复判。正常记录不截断，单条自身超窗才产生显式头尾模型视图，完整原文与逐条结论可由
@@ -34,7 +42,7 @@
   没有 长期助手 外部异步 provider 的 pending queue，因此不复制 `pre-compact flush` 或第二个
   memory provider。只被自身测试调用、可绕过统一 Memory/配额/来源合同直接改 HOT/lesson 的
   `home_memory_notes` 旧写入口与测试已删除；`memory-hot.md` 只保留为用户/管理员现有提示文件。
-- 工具结果不再由 live、compact、恢复和子代理共享链各自处理。`ToolSpec` 的最低输出信任与脱敏策略在
+- 工具结果不再由 live、compact、恢复和子代理共享链各自处理。`ToolRuntimePolicy.output_policy` 的最低输出信任与脱敏策略在
   Registry 执行结果上形成唯一投影，handler 只可收紧；外部网页/浏览器/MCP/视觉/watch 和
   `work/blobs/tool_outputs/` 归档正文统一按不可信数据进入模型，完整正文仍留 owner-scoped artifact，
   prompt 只保留脱敏有界 preview 和恢复引用。JSON/纯文本归档再经 `read_artifact/read_file/search_text`
@@ -46,12 +54,12 @@
   和 compact。显式绝对路径的旧 escape-relocate 兼容链及专属死代码已删除，目标只能按原路径明确成功
   或被统一写边界拒绝。本地 Qwen 基础 CLI、MiniMax 长链/极端 CLI、完整本地门禁和 1.10 双 owner
   Feishu scope/真实出站均通过；新的桌面客户端入站因 macOS 锁屏未冒充完成，精确边界见产品事实页。
-- 工具漏参不再由各 handler 或主循环分散补救：`ToolSpec` 逐字段声明安全默认值或 Registry 可信上下文
+- 工具漏参不再由各 handler 或主循环分散补救：`ToolRuntimePolicy.input_policy` 逐字段声明安全默认值或 Registry 可信上下文
   binding，统一入口在 Schema/effect/path/审批前补入并写脱敏 `source/source_ref`。Schema `default`
   注解本身不获得执行权，显式模型字段不被覆盖，其余必填参数仍精确失败。`run_command`、PTY start 和
   `read_artifact` 已迁移，旧 cwd 末端补参和 artifact scope 特判删除；发布与真机证据以产品事实页为准。
 - 工具参数合同已从“模型 Schema、拍平 required/type、MCP 投影、handler 各管一段”收敛为一条主链：
-  `ToolSpec` 完整 Schema 同时驱动 provider 与副作用前运行门；只做无歧义强类型纠正，完整检查嵌套、
+  `ToolModelSpec.input_schema` 同时驱动 provider 与副作用前运行门；只做无歧义强类型纠正，完整检查嵌套、
   枚举、范围和额外字段，并返回不含原值的 JSON 路径问题。外层信封与工具参数已明确分层，修复了
   `kind/run_id/status/metadata/artifact_refs` 既是正式参数却被旧协议名单跳过或误判的缺陷。MCP 不再
   压平 Schema，畸形/未支持断言在注册时 fail-closed；旧 unknown-field、MCP protocol-field 过滤和拍平

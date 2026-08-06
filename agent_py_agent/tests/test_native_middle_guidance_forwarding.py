@@ -26,7 +26,12 @@ from agent_py_agent.agent.agent_core.tool_model_generation import (
     _forwarded_guidance_seen,
     _native_provider_messages,
 )
-from agent_py_agent.agent.backends.tool_ir import AssistantTurn, ToolCall, ToolResult
+from agent_py_agent.agent.backends.tool_ir import AssistantTurn
+from agent_py_agent.tests._tool_runtime_harness import (
+    canonical_history_call,
+    canonical_history_result,
+    make_test_protocol_snapshot,
+)
 
 
 def _native_agent():
@@ -38,8 +43,13 @@ def _native_agent():
 
 
 def _one_call_ir():
-    turn = AssistantTurn(text="", tool_calls=[ToolCall(id="t1", name="write_file", input={"path": "a.py"})])
-    result = ToolResult(tool_call_id="t1", content="[tool=write_file; status=ok]", is_error=False)
+    call = canonical_history_call(
+        "write_file",
+        {"path": "a.py"},
+        call_id="t1",
+    )
+    turn = AssistantTurn(text="", tool_calls=[call])
+    result = canonical_history_result(call, "[tool=write_file; status=ok]")
     return [turn, result]
 
 
@@ -107,6 +117,9 @@ def test_append_with_seen_forwards_middle_guidance_once():
 def test_native_messages_forward_middle_guidance_then_dedupe_across_calls():
     agent = _native_agent()
     params = SimpleNamespace(
+        tool_protocol_snapshot=make_test_protocol_snapshot(
+            run_id="run-1", source_protocol="native"
+        ),
         tool_ir_history=_one_call_ir(),
         live_archive_state={},  # persists the seen set across calls, like the real params
         tool_context=[
@@ -132,6 +145,9 @@ def test_native_messages_forward_new_guidance_but_not_old():
     agent = _native_agent()
     state: dict = {}
     params = SimpleNamespace(
+        tool_protocol_snapshot=make_test_protocol_snapshot(
+            run_id="run-1", source_protocol="native"
+        ),
         tool_ir_history=_one_call_ir(),
         live_archive_state=state,
         tool_context=[
@@ -156,6 +172,9 @@ def test_text_protocol_unaffected():
         tools=SimpleNamespace(),
     )
     params = SimpleNamespace(
+        tool_protocol_snapshot=make_test_protocol_snapshot(
+            run_id="run-1", source_protocol="text"
+        ),
         tool_ir_history=_one_call_ir(),
         live_archive_state={},
         tool_context=["[tool-loop-guardrail-hint]\nx", "[tool-record round=1 index=1]\nok"],

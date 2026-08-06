@@ -11,12 +11,21 @@ from ..task_progress import (
     read_task_progress,
     write_task_progress,
 )
-from ..tooling.models import BaseTool, ToolExecutionResult
+from ..tooling.models import (
+    BaseTool,
+    ConcurrencyPolicy,
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    ResourceScopePolicy,
+    ToolHandlerOutcome,
+    ToolInputPolicy,
+    ToolRuntimePolicy,
+)
 from .orchestration.dispatch_progress_seed import (
     reconcile_completed_child_covers,
     reconcile_completed_child_items,
 )
-from .orchestration.tool_specs import build_task_progress_spec
+from .orchestration.tool_specs import build_task_progress_model_spec
 from .runner.context import current_subagent_run_id
 from .runtime.owner_roots import runtime_owner_root
 from .runtime.task_identity import progress_ledger_id
@@ -26,11 +35,22 @@ if TYPE_CHECKING:
 
 
 class TaskProgressTool(BaseTool):
+    model_spec = build_task_progress_model_spec()
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy(
+            "read_only",
+            by_parameter=(("action", (("", "read_only"), ("read", "read_only"), ("update", "mutating"))),),
+        ),
+        idempotency_policy=IdempotencyPolicy("operation"),
+        concurrency_policy=ConcurrencyPolicy("serial"),
+        resource_scopes=ResourceScopePolicy(parameter_names=("run_id",)),
+        input_policy=ToolInputPolicy(internal_parameters=("__run_scope",)),
+    )
+
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
-        self.spec = build_task_progress_spec()
 
-    def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         action = _normalized_action(params.get("action"))
         if action_error := _invalid_action_result(action):
             return action_error
@@ -53,7 +73,7 @@ class TaskProgressTool(BaseTool):
             _reconcile_completed_child_covers_before_read(self.agent, root, run_id)
             reconcile_completed_child_items(self.agent, root, run_id)
             payload = read_task_progress(root, run_id)
-        return ToolExecutionResult("task_progress", True, json.dumps(payload, ensure_ascii=False, indent=2))
+        return ToolHandlerOutcome("task_progress", True, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def _reconcile_completed_child_covers_before_read(
@@ -69,7 +89,7 @@ def _reconcile_completed_child_covers_before_read(
     reconcile_completed_child_covers(agent, root, run_id)
 
 
-def _invalid_status_result(params: dict[str, object]) -> ToolExecutionResult | None:
+def _invalid_status_result(params: dict[str, object]) -> ToolHandlerOutcome | None:
     invalid = invalid_item_statuses(params)
     invalid_coverage = invalid_coverage_statuses(params)
     if not invalid and not invalid_coverage:
@@ -82,11 +102,12 @@ def _invalid_status_result(params: dict[str, object]) -> ToolExecutionResult | N
         "allowed_statuses": ["pending", "in_progress", "done", "skipped", "blocked"],
         "how_to_fix": "Move labels such as completed/read/ok into notes or summary, and use status=done when the item/check is complete.",
     }
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         "task_progress",
         False,
         json.dumps(payload, ensure_ascii=False, indent=2),
         error_code="TOOL_INVALID_ARGUMENTS",
+        effect_outcome="not_started",
     )
 
 
@@ -95,7 +116,7 @@ def _normalized_action(value: object) -> str:
     return action if action in {"read", "update"} else action or "read"
 
 
-def _invalid_action_result(action: str) -> ToolExecutionResult | None:
+def _invalid_action_result(action: str) -> ToolHandlerOutcome | None:
     if action in {"read", "update"}:
         return None
     payload = {
@@ -104,11 +125,12 @@ def _invalid_action_result(action: str) -> ToolExecutionResult | None:
         "invalid_action": action,
         "allowed_actions": ["read", "update"],
     }
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         "task_progress",
         False,
         json.dumps(payload, ensure_ascii=False, indent=2),
         error_code="TOOL_INVALID_ARGUMENTS",
+        effect_outcome="not_started",
     )
 
 
@@ -118,7 +140,7 @@ def _invalid_action_result(action: str) -> ToolExecutionResult | None:
 def _invalid_action_fields_result(
     action: str,
     params: dict[str, object],
-) -> ToolExecutionResult | None:
+) -> ToolHandlerOutcome | None:
     action_fields = {
         "read": frozenset({"action", "run_id"}),
         "update": frozenset({"action", "summary", "next_action", "items", "coverage"}),
@@ -148,11 +170,12 @@ def _invalid_action_fields_result(
         "allowed_fields": sorted(action_fields[action] - {"action"}),
         "how_to_fix": "Use action=read to inspect progress or action=update to record progress.",
     }
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         "task_progress",
         False,
         json.dumps(payload, ensure_ascii=False, indent=2),
         error_code="TOOL_INVALID_ARGUMENTS",
+        effect_outcome="not_started",
     )
 
 def _target_run_id(agent: object, params: dict[str, object], *, allow_explicit: bool) -> str:

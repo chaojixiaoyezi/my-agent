@@ -12,14 +12,25 @@ from ..common.value_parsing import (
     non_negative_int,
     string_list,
 )
-from ..tooling.models import ToolExecutionResult
+from ..tooling.models import (
+    BaseTool,
+    ConcurrencyPolicy,
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    ResourceScopePolicy,
+    ToolHandlerOutcome,
+    ToolInputPolicy,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+)
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
-def ok(tool: str, payload: dict[str, Any]) -> ToolExecutionResult:
-    return ToolExecutionResult(tool, True, json.dumps({"ok": True, **payload}, ensure_ascii=False, indent=2))
+def ok(tool: str, payload: dict[str, Any]) -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(tool, True, json.dumps({"ok": True, **payload}, ensure_ascii=False, indent=2))
 
 
 _COLLABORATION_CONTROL_ERROR_CODES = {
@@ -32,12 +43,12 @@ _COLLABORATION_CONTROL_ERROR_CODES = {
 }
 
 
-def error(tool: str, code: str, message: str, details: dict[str, Any] | None = None) -> ToolExecutionResult:
+def error(tool: str, code: str, message: str, details: dict[str, Any] | None = None) -> ToolHandlerOutcome:
     payload = {"ok": False, "error": code, "message": message}
     if details:
         payload.update(details)
     reported_code = str(code or "COLLABORATION_ERROR").strip().upper()
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         tool,
         False,
         json.dumps(payload, ensure_ascii=False, indent=2),
@@ -69,8 +80,7 @@ def default_deadline_seconds(agent: SimpleAgent) -> float:
 def limit_param(value: object, *, default: int) -> int:
     return non_negative_int(value, default=default)
 
-# Collaboration tool specs
-from ..tooling.models import ToolSpec
+# Collaboration tool model definitions
 
 _CASE_PARAMETERS = {
     "thread_id": "会话线程 ID；不知道时可传 task_id 让系统反查",
@@ -266,77 +276,81 @@ _UPDATE_REQUEST_PARAMETER_SCHEMA = {
 }
 
 
-def build_raise_collaboration_spec() -> ToolSpec:
-    return ToolSpec(
+def _collaboration_input_schema(
+    descriptions: dict[str, str],
+    shapes: dict[str, dict[str, object]],
+) -> dict[str, object]:
+    properties: dict[str, dict[str, object]] = {}
+    for name, description in descriptions.items():
+        shape = dict(shapes.get(name) or {"type": "string"})
+        shape["description"] = description
+        properties[name] = shape
+    return {"type": "object", "properties": properties, "additionalProperties": False}
+
+
+def build_raise_collaboration_model_spec() -> ToolModelSpec:
+    descriptions = {**_CASE_PARAMETERS, **_REQUEST_PARAMETERS, **_RAISE_EVENT_PARAMETERS}
+    shapes = {**_CASE_PARAMETER_SCHEMA, **_REQUEST_PARAMETER_SCHEMA, **_RAISE_EVENT_PARAMETER_SCHEMA}
+    return ToolModelSpec(
         name="raise_collaboration",
-        category="collaboration",
-        effect="mutating",
-        idempotency_scope="operation",
         description=(
             "发起通用协作：没有 case_id 时打开新 case；有 question/target/capability 时同时发请求；"
             "已有 case_id 时在该 case 里继续发请求。"
         ),
-        use_cases=[],
-        avoid_when=[],
-        keywords=["协作", "case", "补证据", "联合判断", "collaboration", "coordination"],
-        parameters={**_CASE_PARAMETERS, **_REQUEST_PARAMETERS, **_RAISE_EVENT_PARAMETERS},
-        parameter_schema={**_CASE_PARAMETER_SCHEMA, **_REQUEST_PARAMETER_SCHEMA, **_RAISE_EVENT_PARAMETER_SCHEMA},
-        examples=[],
+        input_schema=_collaboration_input_schema(descriptions, shapes),
+        hints=ToolModelHints(
+            category="collaboration",
+            keywords=("协作", "case", "补证据", "联合判断", "collaboration", "coordination"),
+        ),
     )
 
 
-def build_inspect_collaboration_spec() -> ToolSpec:
-    return ToolSpec(
+def build_inspect_collaboration_model_spec() -> ToolModelSpec:
+    descriptions = {"case_id": "可选协作 case ID；有则查看 case 状态", **_LIST_REQUESTS_PARAMETERS}
+    shapes = {"case_id": {"type": "string"}, **_LIST_REQUESTS_PARAMETER_SCHEMA}
+    return ToolModelSpec(
         name="inspect_collaboration",
-        category="collaboration",
-        effect="read_only",
         description="只读查看协作：传 case_id 看 case；不传 case_id 时列出当前或指定代理的待处理协作请求。",
-        use_cases=[],
-        avoid_when=["不要用它查看普通 agent/subagent run 的执行状态；run 状态请用 inspect_agent_tree。"],
-        keywords=["协作状态", "协作待办", "pending collaboration", "case status", "request discovery"],
-        parameters={"case_id": "可选协作 case ID；有则查看 case 状态", **_LIST_REQUESTS_PARAMETERS},
-        parameter_schema={"case_id": {"type": "string"}, **_LIST_REQUESTS_PARAMETER_SCHEMA},
-        examples=[],
+        input_schema=_collaboration_input_schema(descriptions, shapes),
+        hints=ToolModelHints(
+            category="collaboration",
+            avoid_when=("不要用它查看普通 agent/subagent run 的执行状态；run 状态请用 inspect_agent_tree。",),
+            keywords=("协作状态", "协作待办", "pending collaboration", "case status", "request discovery"),
+        ),
     )
 
 
-def build_submit_collaboration_result_spec() -> ToolSpec:
-    return ToolSpec(
+def build_submit_collaboration_result_model_spec() -> ToolModelSpec:
+    return ToolModelSpec(
         name="submit_collaboration_result",
-        category="collaboration",
-        effect="mutating",
-        idempotency_scope="operation",
         description="向 case 提交协作结果；只交 refs、查询范围、命中/未命中摘要和限制，不把大正文塞进协作账本。",
-        use_cases=[],
-        avoid_when=[],
-        keywords=["证据", "evidence", "refs", "协作响应", "result"],
-        parameters=_EVIDENCE_PARAMETERS,
-        parameter_schema=_EVIDENCE_PARAMETER_SCHEMA,
-        examples=[],
+        input_schema=_collaboration_input_schema(_EVIDENCE_PARAMETERS, _EVIDENCE_PARAMETER_SCHEMA),
+        hints=ToolModelHints(
+            category="collaboration",
+            keywords=("证据", "evidence", "refs", "协作响应", "result"),
+        ),
     )
 
 
-def build_update_collaboration_spec() -> ToolSpec:
-    return ToolSpec(
+def build_update_collaboration_model_spec() -> ToolModelSpec:
+    descriptions = {**_UPDATE_STATUS_PARAMETERS, **_UPDATE_REQUEST_PARAMETERS}
+    shapes = {**_UPDATE_STATUS_PARAMETER_SCHEMA, **_UPDATE_REQUEST_PARAMETER_SCHEMA}
+    return ToolModelSpec(
         name="update_collaboration",
-        category="collaboration",
-        effect="mutating",
-        idempotency_scope="operation",
         description="更新协作 case 或 request；有 request_id 时更新请求，无 request_id 时更新 case；带 target_agent_ids 可改派请求。",
-        use_cases=[],
-        avoid_when=[],
-        keywords=["case update", "request update", "reroute", "换路", "关闭协作", "状态推进"],
-        parameters={**_UPDATE_STATUS_PARAMETERS, **_UPDATE_REQUEST_PARAMETERS},
-        parameter_schema={**_UPDATE_STATUS_PARAMETER_SCHEMA, **_UPDATE_REQUEST_PARAMETER_SCHEMA},
-        examples=[],
+        input_schema=_collaboration_input_schema(descriptions, shapes),
+        hints=ToolModelHints(
+            category="collaboration",
+            keywords=("case update", "request update", "reroute", "换路", "关闭协作", "状态推进"),
+        ),
     )
 
 
 __all__ = [
-    "build_inspect_collaboration_spec",
-    "build_raise_collaboration_spec",
-    "build_submit_collaboration_result_spec",
-    "build_update_collaboration_spec",
+    "build_inspect_collaboration_model_spec",
+    "build_raise_collaboration_model_spec",
+    "build_submit_collaboration_result_model_spec",
+    "build_update_collaboration_model_spec",
 ]
 
 # Collaboration target resolution
@@ -611,7 +625,7 @@ from typing import TYPE_CHECKING
 from ..agent_core.runner.context import current_subagent_run_id
 from ..agent_core.runtime.task_identity import run_scope_task_id
 from ..runtime_errors import runtime_error_report
-from ..tooling.models import ToolExecutionResult
+from ..tooling.models import ToolHandlerOutcome
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -619,14 +633,14 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 
-def resolve_thread(agent: SimpleAgent, params: dict[str, object], *, tool_name: str = "raise_collaboration") -> tuple[str, str] | ToolExecutionResult:
+def resolve_thread(agent: SimpleAgent, params: dict[str, object], *, tool_name: str = "raise_collaboration") -> tuple[str, str] | ToolHandlerOutcome:
     thread_id = str(params.get("thread_id") or "").strip()
     task_id = str(params.get("task_id") or "").strip()
     if thread_id:
         return _explicit_thread(agent, thread_id, task_id, tool_name=tool_name)
     if task_id:
         resolved = thread_from_task(agent, task_id, materialize=True, tool_name=tool_name)
-        if isinstance(resolved, ToolExecutionResult):
+        if isinstance(resolved, ToolHandlerOutcome):
             return _current_runner_or_error(agent, resolved)
         if resolved:
             return resolved
@@ -635,7 +649,7 @@ def resolve_thread(agent: SimpleAgent, params: dict[str, object], *, tool_name: 
     scoped_task_id = run_scope_task_id(params.get("__run_scope"))
     if scoped_task_id:
         resolved = thread_from_task(agent, scoped_task_id, materialize=True, tool_name=tool_name)
-        if isinstance(resolved, ToolExecutionResult):
+        if isinstance(resolved, ToolHandlerOutcome):
             return resolved
         if resolved:
             return resolved
@@ -648,7 +662,7 @@ def thread_from_task(
     *,
     materialize: bool = False,
     tool_name: str = "raise_collaboration",
-) -> tuple[str, str] | ToolExecutionResult | None:
+) -> tuple[str, str] | ToolHandlerOutcome | None:
     if not task_id:
         return None
     try:
@@ -663,26 +677,26 @@ def thread_from_task(
     if thread is not None:
         return thread.thread_id, task_id
     linked = _thread_from_subagent_task(agent, task_id, tool_name=tool_name)
-    if isinstance(linked, ToolExecutionResult):
+    if isinstance(linked, ToolHandlerOutcome):
         return linked
     if linked:
         return linked, task_id
     return _materialize_internal_thread_for_task(agent, task_id, tool_name=tool_name) if materialize else None
 
 
-def thread_from_current_runner(agent: SimpleAgent) -> tuple[str, str] | ToolExecutionResult | None:
+def thread_from_current_runner(agent: SimpleAgent) -> tuple[str, str] | ToolHandlerOutcome | None:
     run_id = current_subagent_run_id(agent)
     return thread_from_task(agent, run_id, materialize=True, tool_name="raise_collaboration") if run_id else None
 
 
-def _explicit_thread(agent: SimpleAgent, thread_id: str, task_id: str, *, tool_name: str) -> tuple[str, str] | ToolExecutionResult:
+def _explicit_thread(agent: SimpleAgent, thread_id: str, task_id: str, *, tool_name: str) -> tuple[str, str] | ToolHandlerOutcome:
     thread = _load_conversation_thread(
         agent,
         thread_id,
         context="raise_collaboration.load_thread",
         tool_name=tool_name,
     )
-    if isinstance(thread, ToolExecutionResult):
+    if isinstance(thread, ToolHandlerOutcome):
         return thread
     if thread is not None:
         return thread_id, task_id
@@ -694,9 +708,9 @@ def _materialize_internal_thread_for_task(
     task_id: str,
     *,
     tool_name: str,
-) -> tuple[str, str] | ToolExecutionResult | None:
+) -> tuple[str, str] | ToolHandlerOutcome | None:
     task = _load_subagent_task(agent, task_id, tool_name=tool_name)
-    if isinstance(task, ToolExecutionResult):
+    if isinstance(task, ToolHandlerOutcome):
         return task
     current = getattr(agent, "_current_run_params", None)
     if task is None and str(getattr(current, "task_id", "") or "").strip() != task_id:
@@ -732,9 +746,9 @@ def _materialize_internal_thread_for_task(
     return thread.thread_id, task_id
 
 
-def _thread_from_subagent_task(agent: SimpleAgent, task_id: str, *, tool_name: str) -> str | ToolExecutionResult:
+def _thread_from_subagent_task(agent: SimpleAgent, task_id: str, *, tool_name: str) -> str | ToolHandlerOutcome:
     task = _load_subagent_task(agent, task_id, tool_name=tool_name)
-    if isinstance(task, ToolExecutionResult):
+    if isinstance(task, ToolHandlerOutcome):
         return task
     attrs = getattr(task, "attributes", {}) if task is not None else {}
     thread_id = str(attrs.get("conversation_thread_id") or "").strip() if isinstance(attrs, dict) else ""
@@ -746,7 +760,7 @@ def _thread_from_subagent_task(agent: SimpleAgent, task_id: str, *, tool_name: s
         context="raise_collaboration.load_linked_thread",
         tool_name=tool_name,
     )
-    if isinstance(thread, ToolExecutionResult):
+    if isinstance(thread, ToolHandlerOutcome):
         return thread
     return thread_id if thread is not None else ""
 
@@ -823,25 +837,23 @@ def _report_load_error(report: dict[str, object], context: str) -> dict[str, obj
     return {"load_error": payload}
 
 
-def _current_runner_or_error(agent: SimpleAgent, original_error: ToolExecutionResult) -> tuple[str, str] | ToolExecutionResult:
+def _current_runner_or_error(agent: SimpleAgent, original_error: ToolHandlerOutcome) -> tuple[str, str] | ToolHandlerOutcome:
     current = thread_from_current_runner(agent)
     return current if current else original_error
 
 # Collaboration evidence tools
-from typing import TYPE_CHECKING
-
-from ..tooling.models import BaseTool, ToolExecutionResult
-
-if TYPE_CHECKING:
-    from ..core import SimpleAgent
-
-
 class SubmitCollaborationResultTool(BaseTool):
+    model_spec = build_submit_collaboration_result_model_spec()
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy("mutating"),
+        idempotency_policy=IdempotencyPolicy("operation"),
+        resource_scopes=ResourceScopePolicy(parameter_names=("case_id", "request_id")),
+    )
+
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
-        self.spec = build_submit_collaboration_result_spec()
 
-    def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         case_id = str(params.get("case_id") or "").strip()
         if not case_id:
             return error("submit_collaboration_result", "case_id_required", "case_id is required")
@@ -879,13 +891,8 @@ def _evidence_payload(case_id: str, evidence_id: str, params: dict[str, object])
 
 # Collaboration case tools
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 from ..runtime_errors import runtime_error_report
-from ..tooling.models import BaseTool, ToolExecutionResult
-
-if TYPE_CHECKING:
-    from ..core import SimpleAgent
 
 
 @dataclass(frozen=True)
@@ -911,11 +918,18 @@ class _EventPayloadRefs:
 
 
 class RaiseCollaborationTool(BaseTool):
+    model_spec = build_raise_collaboration_model_spec()
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy("mutating"),
+        idempotency_policy=IdempotencyPolicy("operation"),
+        resource_scopes=ResourceScopePolicy(parameter_names=("case_id", "thread_id", "task_id")),
+        input_policy=ToolInputPolicy(internal_parameters=("__run_scope",)),
+    )
+
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
-        self.spec = build_raise_collaboration_spec()
 
-    def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         actor_id = actor_agent_id(self.agent, params)
         case_id = str(params.get("case_id") or "").strip()
         if case_id:
@@ -924,7 +938,7 @@ class RaiseCollaborationTool(BaseTool):
             task_id = ""
         else:
             resolved = resolve_thread(self.agent, params)
-            if isinstance(resolved, ToolExecutionResult):
+            if isinstance(resolved, ToolHandlerOutcome):
                 return resolved
             thread_id, task_id = resolved
             case = self._open_event_case(_EventCaseInput(thread_id, task_id, actor_id, params))
@@ -952,11 +966,17 @@ class RaiseCollaborationTool(BaseTool):
 
 
 class UpdateCollaborationTool(BaseTool):
+    model_spec = build_update_collaboration_model_spec()
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy("mutating"),
+        idempotency_policy=IdempotencyPolicy("operation"),
+        resource_scopes=ResourceScopePolicy(parameter_names=("case_id", "request_id")),
+    )
+
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
-        self.spec = build_update_collaboration_spec()
 
-    def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         if str(params.get("request_id") or "").strip():
             return update_request(self.agent, "update_collaboration", params, targets=string_values(params.get("target_agent_ids")))
         case_id = str(params.get("case_id") or "").strip()
@@ -995,11 +1015,17 @@ class UpdateCollaborationTool(BaseTool):
 
 
 class InspectCollaborationTool(BaseTool):
+    model_spec = build_inspect_collaboration_model_spec()
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy("read_only"),
+        concurrency_policy=ConcurrencyPolicy("parallel_safe"),
+        resource_scopes=ResourceScopePolicy(parameter_names=("case_id", "agent_id")),
+    )
+
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
-        self.spec = build_inspect_collaboration_spec()
 
-    def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         case_id = str(params.get("case_id") or "").strip()
         if not case_id:
             return list_pending_requests(self.agent, params)
@@ -1014,7 +1040,7 @@ class InspectCollaborationTool(BaseTool):
             )
 
 
-def list_pending_requests(agent: SimpleAgent, params: dict[str, object]) -> ToolExecutionResult:
+def list_pending_requests(agent: SimpleAgent, params: dict[str, object]) -> ToolHandlerOutcome:
     identity, identity_error = request_identity_report(agent, params)
     if identity_error:
         return error(
@@ -1054,13 +1080,13 @@ def list_pending_requests(agent: SimpleAgent, params: dict[str, object]) -> Tool
     return ok("inspect_collaboration", payload)
 
 
-def update_request(agent: SimpleAgent, tool: str, params: dict[str, object], *, targets: list[str]) -> ToolExecutionResult:
+def update_request(agent: SimpleAgent, tool: str, params: dict[str, object], *, targets: list[str]) -> ToolHandlerOutcome:
     return _update_request_tool(agent, tool, params, targets=targets)
 
 
-def _update_request_tool(agent: SimpleAgent, tool: str, params: dict[str, object], *, targets: list[str]) -> ToolExecutionResult:
+def _update_request_tool(agent: SimpleAgent, tool: str, params: dict[str, object], *, targets: list[str]) -> ToolHandlerOutcome:
     ids = _case_and_request_ids(params)
-    if isinstance(ids, ToolExecutionResult):
+    if isinstance(ids, ToolHandlerOutcome):
         return ids
     case_id, request_id = ids
     try:
@@ -1082,7 +1108,7 @@ def _update_request_tool(agent: SimpleAgent, tool: str, params: dict[str, object
     return ok(tool, payload)
 
 
-def _case_and_request_ids(params: dict[str, object]) -> tuple[str, str] | ToolExecutionResult:
+def _case_and_request_ids(params: dict[str, object]) -> tuple[str, str] | ToolHandlerOutcome:
     case_id = str(params.get("case_id") or "").strip()
     request_id = str(params.get("request_id") or "").strip()
     if not case_id:

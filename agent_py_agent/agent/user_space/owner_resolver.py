@@ -59,15 +59,16 @@ class OwnerHomeResult:
     skill_policy_json: Path
     tool_policy_json: Path
     daily_memory_dir: Path
-    hooks_memory_dir: Path
     lessons_memory_dir: Path
     routing_memory_dir: Path
     routing_index_md: Path
-    indexes_dir: Path
-    memory_store_jsonl: Path
+    memory_candidates_jsonl: Path
     memory_ops_jsonl: Path
     long_term_dir: Path
-    runtime_refs_dir: Path
+    long_term_jsonl: Path
+    curator_dir: Path
+    curator_state_json: Path
+    curator_runs_dir: Path
     tasks_dir: Path
     runs_dir: Path
     agents_dir: Path
@@ -140,15 +141,16 @@ def home_paths_with_owner(paths: MyAgentHomePaths, owner: OwnerHomeResult) -> My
         owner_skill_policy_json=owner.skill_policy_json,
         owner_tool_policy_json=owner.tool_policy_json,
         owner_memory_daily_dir=owner.daily_memory_dir,
-        owner_memory_hooks_dir=owner.hooks_memory_dir,
         owner_memory_lessons_dir=owner.lessons_memory_dir,
         owner_memory_routing_dir=owner.routing_memory_dir,
         owner_memory_routing_index_md=owner.routing_index_md,
-        owner_memory_indexes_dir=owner.indexes_dir,
-        owner_memory_store_jsonl=owner.memory_store_jsonl,
+        owner_memory_candidates_jsonl=owner.memory_candidates_jsonl,
         owner_memory_ops_jsonl=owner.memory_ops_jsonl,
         owner_memory_long_term_dir=owner.long_term_dir,
-        owner_memory_runtime_refs_dir=owner.runtime_refs_dir,
+        owner_memory_long_term_jsonl=owner.long_term_jsonl,
+        owner_memory_curator_dir=owner.curator_dir,
+        owner_memory_curator_state_json=owner.curator_state_json,
+        owner_memory_curator_runs_dir=owner.curator_runs_dir,
         owner_tasks_dir=owner.tasks_dir,
         owner_runs_dir=owner.runs_dir,
         owner_agents_dir=owner.agents_dir,
@@ -197,15 +199,16 @@ def _owner_home_result(root: Path, identity: OwnerIdentity, home_dir: Path) -> O
         skill_policy_json=home_dir / "skill_policy.json",
         tool_policy_json=home_dir / "tool_policy.json",
         daily_memory_dir=memory / "daily",
-        hooks_memory_dir=memory / "hooks",
         lessons_memory_dir=memory / "lessons",
         routing_memory_dir=memory / "routing",
         routing_index_md=memory / "routing" / "INDEX.md",
-        indexes_dir=memory / "indexes",
-        memory_store_jsonl=memory / "store.jsonl",
+        memory_candidates_jsonl=memory / "candidates.jsonl",
         memory_ops_jsonl=memory / "ops.jsonl",
         long_term_dir=memory / "long_term",
-        runtime_refs_dir=memory / "runtime_refs",
+        long_term_jsonl=memory / "long_term" / "memory.jsonl",
+        curator_dir=memory / "curator",
+        curator_state_json=memory / "curator" / "state.json",
+        curator_runs_dir=memory / "curator" / "runs",
         tasks_dir=home_dir / "tasks",
         runs_dir=home_dir / "runs",
         agents_dir=home_dir / "agents",
@@ -231,12 +234,10 @@ def _owner_directories(result: OwnerHomeResult) -> tuple[Path, ...]:
     return (
         result.home_dir,
         result.daily_memory_dir,
-        result.hooks_memory_dir,
         result.lessons_memory_dir,
         result.routing_memory_dir,
-        result.indexes_dir,
         result.long_term_dir,
-        result.runtime_refs_dir,
+        result.curator_runs_dir,
         result.tasks_dir,
         result.runs_dir,
         result.agents_dir,
@@ -266,8 +267,9 @@ def _owner_seed_files(result: OwnerHomeResult) -> tuple[tuple[Path, str], ...]:
         (result.memory_md, "# Memory\n\n"),
         (result.memory_hot_md, "# Memory HOT\n\n"),
         (result.routing_index_md, "# Owner Memory Routing Index\n\n"),
-        (result.memory_store_jsonl, ""),
+        (result.memory_candidates_jsonl, ""),
         (result.memory_ops_jsonl, ""),
+        (result.long_term_jsonl, ""),
     )
 
 

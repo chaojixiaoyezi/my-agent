@@ -22,13 +22,6 @@ def _current_owner_persona_paths(agent: object) -> tuple[Path, ...]:
     return tuple(paths)
 
 
-def _tool_workspace_root(agent: object, tool_name: str) -> Path | None:
-    tools = getattr(getattr(agent, "tools", None), "tools", None)
-    tool = tools.get(tool_name) if isinstance(tools, dict) else None
-    raw = getattr(tool, "workspace_root", None)
-    return Path(raw).expanduser().resolve(strict=False) if raw else None
-
-
 def _resolved_tool_path(raw_path: str, workspace_root: Path | None) -> Path:
     candidate = Path(raw_path).expanduser()
     if not candidate.is_absolute() and workspace_root is not None:
@@ -55,12 +48,12 @@ def _patch_target_paths(patch: str, workspace_root: Path | None) -> tuple[Path, 
 
 
 def _payload_mentions_persona_path(
-    agent: object,
     payload: dict[str, Any],
     protected: tuple[Path, ...],
+    *,
+    workspace_root: Path | None,
 ) -> bool:
     tool_name = str(payload.get("tool") or "").strip()
-    workspace_root = _tool_workspace_root(agent, tool_name)
     if tool_name in {"write_file", "edit_file"}:
         raw_path = str(payload.get("path") or "").strip()
         if not raw_path:
@@ -81,13 +74,22 @@ def _payload_mentions_persona_path(
     return False
 
 
-def _persona_runtime_redirect_error(agent: object, payload: dict[str, Any]) -> str:
+def _persona_runtime_redirect_error(
+    agent: object,
+    payload: dict[str, Any],
+    *,
+    workspace_root: Path | None = None,
+) -> str:
     """晋升任务前识别当前 owner 人格写入，让专用工具错误不被工作区选择闸覆盖。"""
     tool_name = str(payload.get("tool") or "").strip()
     if tool_name not in _PERSONA_MUTATING_TOOLS:
         return ""
     protected = _current_owner_persona_paths(agent)
-    if not protected or not _payload_mentions_persona_path(agent, payload, protected):
+    if not protected or not _payload_mentions_persona_path(
+        payload,
+        protected,
+        workspace_root=workspace_root,
+    ):
         return ""
     return (
         "SOUL.md、USER.md、AGENTS.md 不能通过基础文件、补丁或 shell 工具修改；"

@@ -1,7 +1,4 @@
-"""LLM: Tool gateway contract tests for exact tool protocol and bounded shell output.
-
-函数/模块用途: 验证工具网关拒绝旧工具写法，并阻止大 shell 输出直接撑爆上下文。
-"""
+"""Canonical Tool Gateway execution, path, and bounded-output contracts."""
 
 from __future__ import annotations
 
@@ -10,6 +7,8 @@ import sys
 from pathlib import Path
 
 from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
+from agent_py_agent.agent.tooling.runtime_contracts import ToolResult
+from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
 
 
 def _registry(
@@ -35,25 +34,47 @@ def _registry(
     )
 
 
+def _execute(
+    registry: ToolRegistry,
+    tool_name: str,
+    arguments: dict[str, object],
+    *,
+    allowed_tools: list[str] | None = None,
+    write_boundary: dict[str, object] | None = None,
+) -> ToolResult:
+    return execute_registry_test_call(
+        registry,
+        tool_name,
+        arguments,
+        allowed_tools=allowed_tools,
+        write_boundary=write_boundary,
+    )
+
+
 def test_tool_gateway_rejects_shell_alias(tmp_path: Path):
-    result = _registry(tmp_path).execute_call(
+    result = _execute(
+        _registry(tmp_path),
+        "shell",
         {
-            "tool": "shell",
             "cmd": f'{sys.executable} -c "print(123)"',
             "cwd": str(tmp_path),
-        }
+        },
     )
 
     assert result.ok is False
-    assert result.tool == "shell"
-    assert "TOOL_NOT_REGISTERED" in result.output
+    assert result.tool_name == "shell"
+    assert result.error_code == "TOOL_NOT_IN_RUNTIME_SNAPSHOT"
 
 
 def test_tool_gateway_hides_controlled_exec_from_default_catalog(tmp_path: Path):
     registry = _registry(tmp_path)
 
     names = {spec.name for spec in registry.specs(include_orchestration=True)}
-    manifest = json.loads(registry.execute_call({"tool": "list_tools"}).output)
+    list_result = _execute(registry, "list_tools", {})
+    live_manifest = list_result.metadata["handler_details"]["tool_output_policy"][
+        "live_prompt_output"
+    ]
+    manifest = json.loads(live_manifest)
     manifest_names = {item["name"] for item in manifest["tools"]}
     retired_names = {
         "append_file",
@@ -94,9 +115,10 @@ def _controlled_exec_boundary(root: Path) -> dict[str, object]:
 
 
 def test_tool_gateway_rejects_hidden_controlled_exec_when_not_explicitly_allowed(tmp_path: Path):
-    result = _registry(tmp_path).execute_call(
+    result = _execute(
+        _registry(tmp_path),
+        "controlled_exec",
         {
-            "tool": "controlled_exec",
             "command": "pwd",
             "cwd": str(tmp_path),
             "apply": False,
@@ -105,14 +127,15 @@ def test_tool_gateway_rejects_hidden_controlled_exec_when_not_explicitly_allowed
     )
 
     assert result.ok is False
-    assert result.tool == "controlled_exec"
-    assert "内部显式授权" in result.output
+    assert result.tool_name == "controlled_exec"
+    assert result.error_code == "TOOL_NOT_IN_RUNTIME_SNAPSHOT"
 
 
 def test_tool_gateway_executes_controlled_exec_only_when_explicitly_allowed(tmp_path: Path):
-    result = _registry(tmp_path).execute_call(
+    result = _execute(
+        _registry(tmp_path),
+        "controlled_exec",
         {
-            "tool": "controlled_exec",
             "command": "pwd",
             "cwd": str(tmp_path),
             "apply": False,
@@ -127,36 +150,41 @@ def test_tool_gateway_executes_controlled_exec_only_when_explicitly_allowed(tmp_
 
 
 def test_run_command_output_is_bounded_by_gateway_budget(tmp_path: Path):
-    result = _registry(tmp_path, shell_output_max_chars=40).execute_call(
+    for index in range(12):
+        (tmp_path / f"very-long-output-name-{index:02d}.txt").write_text(
+            "fixture",
+            encoding="utf-8",
+        )
+    result = _execute(
+        _registry(tmp_path, shell_output_max_chars=40),
+        "run_command",
         {
-            "tool": "run_command",
-            "command": f'{sys.executable} -c "print(\\"A\\" * 200)"',
-        }
+            "command": "find . -maxdepth 1 -print",
+        },
     )
 
     assert result.ok
     assert "stdout_truncated=True" in result.output
-    assert "stdout_chars=201" in result.output
-    assert "A" * 80 not in result.output
+    assert "stdout_chars=" in result.output
+    assert "very-long-output-name-11.txt" not in result.output
 
 
 def test_relative_file_and_shell_tools_share_workspace_cwd(tmp_path: Path):
     registry = _registry(tmp_path)
-    written = registry.execute_call(
+    written = _execute(
+        registry,
+        "write_file",
         {
-            "tool": "write_file",
             "path": "cwd-contract/value.txt",
             "content": "same-cwd",
-        }
+        },
     )
-    read_from_shell = registry.execute_call(
+    read_from_shell = _execute(
+        registry,
+        "run_command",
         {
-            "tool": "run_command",
-            "command": (
-                f"{sys.executable} -c "
-                "'from pathlib import Path; print(Path(\"cwd-contract/value.txt\").read_text())'"
-            ),
-        }
+            "command": "cat cwd-contract/value.txt",
+        },
     )
 
     assert written.ok is True
@@ -177,21 +205,20 @@ def test_task_scoped_file_alias_and_shell_share_task_cwd(tmp_path: Path):
         "task_work_dir": str(task_root / "work"),
         "allowed_write_roots": [str(task_output)],
     }
-    written = registry.execute_call(
+    written = _execute(
+        registry,
+        "write_file",
         {
-            "tool": "write_file",
             "path": "output/project/value.txt",
             "content": "task-cwd",
         },
         write_boundary=boundary,
     )
-    read_from_shell = registry.execute_call(
+    read_from_shell = _execute(
+        registry,
+        "run_command",
         {
-            "tool": "run_command",
-            "command": (
-                f"{sys.executable} -c "
-                "'from pathlib import Path; print(Path(\"output/project/value.txt\").read_text())'"
-            ),
+            "command": "cat output/project/value.txt",
         },
         write_boundary=boundary,
     )
@@ -208,9 +235,10 @@ def test_run_command_shell_access_override_uses_normal_path_policy(tmp_path: Pat
     external.mkdir()
     registry = _registry(workspace, access_mode="full-access")
 
-    result = registry.execute_call(
+    result = _execute(
+        registry,
+        "run_command",
         {
-            "tool": "run_command",
             "command": "pwd",
             "working_dir": str(external),
         },
@@ -219,167 +247,6 @@ def test_run_command_shell_access_override_uses_normal_path_policy(tmp_path: Pat
 
     assert result.ok is True
     assert "return_code=0" in result.output
-
-
-def test_tool_gateway_preserves_unknown_read_artifact_parameters_unmodified(tmp_path: Path):
-    registry = _registry(tmp_path)
-
-    payload = registry.parse_tool_calls(
-        '[TOOL_CALL]\n{"tool":"read_artifact","ref":"run-1:2-1","limit":123}\n[/TOOL_CALL]'
-    )[0]
-
-    assert payload == {"tool": "read_artifact", "ref": "run-1:2-1", "limit": 123}
-
-
-def test_tool_gateway_reports_malformed_write_file_raw_marker(tmp_path: Path):
-    registry = _registry(tmp_path)
-
-    calls = registry.parse_tool_calls(
-        "准备写文件\n"
-        "[FILE_WRITE_SESSION_APPEND]\n"
-        '{"tool":"write_file","action":"begin","target_path":"out/index.html"}\n'
-        "[/TOOL_CALL]"
-    )
-
-    assert calls == []
-
-
-def test_tool_gateway_reports_single_error_for_closed_raw_block_missing_attrs(tmp_path: Path):
-    registry = _registry(tmp_path)
-
-    calls = registry.parse_tool_calls("[WRITE_FILE_RAW]\nhello\n[/WRITE_FILE_RAW]")
-
-    assert len(calls) == 1
-    assert calls[0]["tool"] == "__parse_error__"
-    assert calls[0]["error"] == "WRITE_FILE_RAW 缺少结构化属性: path"
-
-
-def test_tool_gateway_reports_raw_block_append_recovery_for_unclosed_marker(tmp_path: Path):
-    registry = _registry(tmp_path)
-
-    calls = registry.parse_tool_calls('[WRITE_FILE_RAW path="out/report.md"]\n# Report\n')
-
-    assert len(calls) == 1
-    assert calls[0]["tool"] == "__parse_error__"
-    assert calls[0]["error_code"] == "WRITE_FILE_RAW_MALFORMED"
-    assert calls[0]["path"] == "out/report.md"
-    assert calls[0]["previous_write_committed"] is False
-    assert calls[0]["write_recovery"]["first_tool_call"]["mode"] == "overwrite"
-    assert calls[0]["write_recovery"]["next_tool_call"]["mode"] == "append"
-    result = registry.execute_call(calls[0])
-    assert result.ok is False
-    assert result.error_code == "WRITE_FILE_RAW_MALFORMED"
-
-
-def test_tool_gateway_reports_unclosed_write_file_json_as_recoverable_parse_error(tmp_path: Path):
-    registry = _registry(tmp_path)
-
-    calls = registry.parse_tool_calls(
-        '[TOOL_CALL]\n{"tool":"write_file","path":"out/report.md","content":"# Report\\n'
-    )
-
-    assert len(calls) == 1
-    assert calls[0]["tool"] == "__parse_error__"
-    assert calls[0]["error_code"] == "TOOL_CALL_UNCLOSED"
-    assert calls[0]["path"] == "out/report.md"
-    assert calls[0]["previous_write_committed"] is False
-    assert calls[0]["write_recovery"]["strategy"] == "restart_same_file_with_append_chunks"
-    result = registry.execute_call(calls[0])
-    assert result.ok is False
-    assert not (tmp_path / "out/report.md").exists()
-    assert 'mode="append"' in result.output
-
-
-def test_tool_gateway_does_not_commit_unclosed_write_file_json_inside_task_output(tmp_path: Path):
-    workspace = tmp_path / "workspace"
-    task_output = tmp_path / "home" / "tasks" / "today" / "task" / "output"
-    workspace.mkdir()
-    registry = _registry(workspace)
-    boundary = {
-        "task_output_dir": str(task_output),
-        "task_work_dir": str(task_output.parent / "work"),
-    }
-
-    calls = registry.parse_tool_calls(
-        '[TOOL_CALL]\n{"tool":"write_file","path":"output/report.md","content":"# Report\\n'
-    )
-    result = registry.execute_call(calls[0], write_boundary=boundary)
-
-    assert calls[0]["tool"] == "__parse_error__"
-    assert calls[0]["previous_write_committed"] is False
-    assert result.ok is False
-    assert not (task_output / "report.md").exists()
-    assert 'mode="append"' in result.output
-
-
-def test_tool_gateway_reports_unclosed_write_file_json_append_mode_as_parse_error(tmp_path: Path):
-    workspace = tmp_path / "workspace"
-    task_output = tmp_path / "home" / "tasks" / "today" / "task" / "output"
-    workspace.mkdir()
-    task_output.mkdir(parents=True)
-    (task_output / "report.md").write_text("# Report\n", encoding="utf-8")
-    registry = _registry(workspace)
-    boundary = {
-        "task_output_dir": str(task_output),
-        "task_work_dir": str(task_output.parent / "work"),
-    }
-
-    calls = registry.parse_tool_calls(
-        "[TOOL_CALL]\n"
-        '{"tool":"write_file","path":"output/report.md","mode":"append","content":"## Next\\n'
-    )
-
-    assert len(calls) == 1
-    assert calls[0]["tool"] == "__parse_error__"
-    assert calls[0]["error_code"] == "TOOL_CALL_UNCLOSED"
-    assert calls[0]["previous_write_committed"] is False
-    result = registry.execute_call(calls[0], write_boundary=boundary)
-    assert result.ok is False
-    assert (task_output / "report.md").read_text(encoding="utf-8") == "# Report\n"
-    assert 'mode="append"' in result.output
-
-
-def test_tool_gateway_parses_write_file_raw_content_block(tmp_path: Path):
-    registry = _registry(tmp_path)
-    html = (
-        "<!doctype html>\n"
-        "<html>\n"
-        '<head><meta charset="utf-8"><title>ARCA</title></head>\n'
-        "<body><h1>ARCA</h1></body>\n"
-        "</html>"
-    )
-
-    calls = registry.parse_tool_calls(
-        f'[WRITE_FILE_RAW path="out/index.html"]\n{html}\n[/WRITE_FILE_RAW]'
-    )
-
-    assert calls == [
-        {
-            "tool": "write_file",
-            "path": "out/index.html",
-            "content": html,
-        }
-    ]
-    result = registry.execute_call(calls[0])
-    assert result.ok is True
-    assert (tmp_path / "out" / "index.html").read_text(encoding="utf-8") == html
-
-
-def test_tool_gateway_parses_write_file_raw_append_mode(tmp_path: Path):
-    registry = _registry(tmp_path)
-
-    calls = registry.parse_tool_calls(
-        '[WRITE_FILE_RAW path="out/report.md" mode="append"]\n## Section\n[/WRITE_FILE_RAW]'
-    )
-
-    assert calls == [
-        {
-            "tool": "write_file",
-            "path": "out/report.md",
-            "mode": "append",
-            "content": "## Section",
-        }
-    ]
 
 
 def test_tool_gateway_executes_write_file_overwrite_and_append_modes(tmp_path: Path):
@@ -393,18 +260,20 @@ def test_tool_gateway_executes_write_file_overwrite_and_append_modes(tmp_path: P
     }
     target = output_root / "report.md"
 
-    first = registry.execute_call(
+    first = _execute(
+        registry,
+        "write_file",
         {
-            "tool": "write_file",
             "path": str(target),
             "mode": "overwrite",
             "content": "# Report\n",
         },
         write_boundary=boundary,
     )
-    second = registry.execute_call(
+    second = _execute(
+        registry,
+        "write_file",
         {
-            "tool": "write_file",
             "path": str(target),
             "mode": "append",
             "content": "\nbody\n",
@@ -427,12 +296,16 @@ def test_tool_gateway_overwrites_existing_task_output_when_mode_is_omitted(tmp_p
         "task_work_dir": str(task_output.parent / "work"),
     }
 
-    first = registry.execute_call(
-        {"tool": "write_file", "path": "output/report.md", "content": "# Report\n"},
+    first = _execute(
+        registry,
+        "write_file",
+        {"path": "output/report.md", "content": "# Report\n"},
         write_boundary=boundary,
     )
-    second = registry.execute_call(
-        {"tool": "write_file", "path": "output/report.md", "content": "## Section\n"},
+    second = _execute(
+        registry,
+        "write_file",
+        {"path": "output/report.md", "content": "## Section\n"},
         write_boundary=boundary,
     )
 
@@ -449,12 +322,16 @@ def test_tool_gateway_overwrites_existing_task_work_when_mode_is_omitted(tmp_pat
     registry = _registry(workspace)
     boundary = {"task_output_dir": str(task_output), "task_work_dir": str(task_work)}
 
-    first = registry.execute_call(
-        {"tool": "write_file", "path": "work/facts.md", "content": "# Facts\n"},
+    first = _execute(
+        registry,
+        "write_file",
+        {"path": "work/facts.md", "content": "# Facts\n"},
         write_boundary=boundary,
     )
-    second = registry.execute_call(
-        {"tool": "write_file", "path": "work/facts.md", "content": "- detail\n"},
+    second = _execute(
+        registry,
+        "write_file",
+        {"path": "work/facts.md", "content": "- detail\n"},
         write_boundary=boundary,
     )
 
@@ -478,8 +355,10 @@ def test_tool_gateway_overwrites_execution_output_json_when_mode_is_omitted(tmp_
         "output_json": str(output_json),
     }
 
-    result = registry.execute_call(
-        {"tool": "write_file", "path": str(output_json), "content": '{"status":"DONE"}'},
+    result = _execute(
+        registry,
+        "write_file",
+        {"path": str(output_json), "content": '{"status":"DONE"}'},
         write_boundary=boundary,
     )
 
@@ -497,13 +376,16 @@ def test_tool_gateway_explicit_overwrite_still_replaces_task_output(tmp_path: Pa
         "task_work_dir": str(task_output.parent / "work"),
     }
 
-    registry.execute_call(
-        {"tool": "write_file", "path": "output/report.md", "content": "# Report\n"},
+    _execute(
+        registry,
+        "write_file",
+        {"path": "output/report.md", "content": "# Report\n"},
         write_boundary=boundary,
     )
-    result = registry.execute_call(
+    result = _execute(
+        registry,
+        "write_file",
         {
-            "tool": "write_file",
             "path": "output/report.md",
             "mode": "overwrite",
             "content": "# Replacement\n",
@@ -522,7 +404,11 @@ def test_tool_gateway_omitted_mode_still_overwrites_non_task_output_file(tmp_pat
     target = workspace / "notes.md"
     target.write_text("old\n", encoding="utf-8")
 
-    result = registry.execute_call({"tool": "write_file", "path": "notes.md", "content": "new\n"})
+    result = _execute(
+        registry,
+        "write_file",
+        {"path": "notes.md", "content": "new\n"},
+    )
 
     assert result.ok is True
     assert target.read_text(encoding="utf-8") == "new\n"
@@ -536,16 +422,20 @@ def test_tool_gateway_maps_task_output_alias_from_write_boundary(tmp_path: Path)
     registry = _registry(workspace)
     boundary = {"task_output_dir": str(task_output), "task_work_dir": str(task_work)}
 
-    result = registry.execute_call(
-        {"tool": "write_file", "path": "output/report.md", "content": "hello"},
+    result = _execute(
+        registry,
+        "write_file",
+        {"path": "output/report.md", "content": "hello"},
         write_boundary=boundary,
     )
 
     assert result.ok is True
     assert (task_output / "report.md").read_text(encoding="utf-8") == "hello"
     assert not (workspace / "output" / "report.md").exists()
-    readback = registry.execute_call(
-        {"tool": "read_file", "path": "output/report.md"},
+    readback = _execute(
+        registry,
+        "read_file",
+        {"path": "output/report.md"},
         write_boundary=boundary,
     )
     assert readback.ok is True
@@ -569,16 +459,18 @@ def test_tool_gateway_maps_owner_workspace_alias_without_granting_write(
         "allowed_write_roots": [str(task_root / "output"), str(task_root / "work")],
     }
 
-    readback = registry.execute_call(
+    readback = _execute(
+        registry,
+        "read_file",
         {
-            "tool": "read_file",
             "path": "workspace/input/reference_repos/project-a/README.md",
         },
         write_boundary=boundary,
     )
-    write = registry.execute_call(
+    write = _execute(
+        registry,
+        "write_file",
         {
-            "tool": "write_file",
             "path": "workspace/input/reference_repos/project-a/changed.txt",
             "content": "must not write",
         },
@@ -590,36 +482,3 @@ def test_tool_gateway_maps_owner_workspace_alias_without_granting_write(
     assert write.ok is False
     assert write.error_code == "WRITE_FORBIDDEN"
     assert not (source.parent / "changed.txt").exists()
-
-
-def test_tool_gateway_parses_raw_block_with_literal_tool_markers(tmp_path: Path):
-    registry = _registry(tmp_path)
-    content = (
-        "# 报告\n\n"
-        "正文会直接提到 `[TOOL_CALL]` 和 `[/TOOL_CALL]`，这些只是文档内容。\n"
-        "[TOOL_CALL]\n"
-        '{"tool":"read_file","path":"README.md"}\n'
-        "[/TOOL_CALL]\n"
-    )
-
-    calls = registry.parse_tool_calls(
-        f'[WRITE_FILE_RAW path="out/report.md"]\n{content}[/WRITE_FILE_RAW]'
-    )
-
-    assert calls == [
-        {
-            "tool": "write_file",
-            "path": "out/report.md",
-            "content": content.rstrip("\n"),
-        }
-    ]
-
-
-def test_tool_gateway_ignores_inline_raw_marker_example(tmp_path: Path):
-    registry = _registry(tmp_path)
-
-    calls = registry.parse_tool_calls(
-        '普通说明：`[WRITE_FILE_RAW path="..."]...[/WRITE_FILE_RAW]` 只是文档示例。'
-    )
-
-    assert calls == []

@@ -14,7 +14,17 @@ from ..conversation.authority import (
     current_conversation_task_attributes,
 )
 from ..memory_store.security import scan_memory_content
-from ..tooling.models import BaseTool, ToolAvailability, ToolExecutionResult, ToolSpec
+from ..tooling.models import (
+    BaseTool,
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    ResourceScopePolicy,
+    ToolAvailability,
+    ToolHandlerOutcome,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+)
 from ..user_space.owner_quota import OwnerQuotaExceeded, OwnerQuotaUnavailable
 from .persona_repository import (
     PersonaBatchMutationRequest,
@@ -36,15 +46,13 @@ _PERSONA_DESCRIPTION = (
     "**target=user(用户画像/称呼/长期偏好)可直接写**;"
     "同一条用户消息里有多个 USER 事实时，必须把全部变更放进一次 operations 批量调用；"
     "整批全部校验后只写一次，任一项失败则全部不写。"
-    "**target=soul(你自己的性格语气)/ agents(长期工作约定)是长期人设,不能随意自动改(会越堆越乱)——"
-    "只能走本工具的用户确认链：飞书会发确认卡片且点击前绝不写；其他通道须先取得用户明确同意，"
-    "再带 confirmed=true 调用。禁止改用 write/edit/patch/shell 绕过。**"
+    "**target=soul(你自己的性格语气)/ agents(长期工作约定)是长期人设，任何变更都必须通过"
+    "统一危险动作审批门。禁止改用 write/edit/patch/shell 绕过。**"
 )
 _PERSONA_USE_CASES = (
     "用户说怎么称呼他 / 自我介绍身份角色 / 表达长期偏好 → target=user(直接写)",
-    "飞书用户明确要求长期调整性格/语气/风格 → target=soul(直接调用后由确认卡片裁决)",
-    "飞书用户明确要求长期工作约定/产物习惯 → target=agents(直接调用后由确认卡片裁决)",
-    "其他通道调整 soul/agents → 先问用户，同意后 confirmed=true",
+    "用户明确要求长期调整性格/语气/风格 → target=soul，由统一审批门裁决",
+    "用户明确要求长期工作约定/产物习惯 → target=agents，由统一审批门裁决",
 )
 _PERSONA_AVOID_WHEN = (
     "用基础文件或 shell 工具改 soul/agents → 必须改用 update_persona 的确认链",
@@ -72,7 +80,6 @@ _PERSONA_PARAMETERS = {
     "source_quote": (
         "可选审计说明。可记录促成本次 USER 画像变更的用户原话；只进入版本记录，不参与授权或文本匹配。"
     ),
-    "confirmed": "非飞书改 soul/agents 时，在用户已明确同意后填 true；飞书会忽略此值并始终等待卡片点击；改 user 不需要。",
     "expected_sha256": "可选。list 返回的文件哈希；并发修改后不匹配则拒绝覆盖。",
     "rollback_version": "rollback 必填。history 返回的精确版本号。",
     "operations": (
@@ -86,7 +93,6 @@ _PERSONA_PARAMETER_SCHEMA = {
     "content": {"type": "string"},
     "entry_id": {"type": "string"},
     "source_quote": {"type": "string"},
-    "confirmed": {"type": "boolean"},
     "expected_sha256": {"type": "string"},
     "rollback_version": {"type": "integer", "minimum": 1},
     "operations": {
@@ -110,7 +116,7 @@ _PERSONA_EXAMPLES = (
     '{"tool":"update_persona","action":"batch","target":"user","operations":[{"action":"add","content":"称呼:松果"},{"action":"add","content":"回答偏好:简洁"}]}',
     '{"tool":"update_persona","action":"list","target":"user"}',
     '{"tool":"update_persona","action":"remove","target":"user","entry_id":"persona-..."}',
-    '{"tool":"update_persona","target":"soul","content":"语气偏活泼","confirmed":true}',
+    '{"tool":"update_persona","target":"soul","content":"语气偏活泼"}',
 )
 
 
@@ -125,7 +131,6 @@ class _PersonaToolRequest:
     source_quote: str
     expected_sha256: str
     rollback_version: int | None
-    confirmed: bool
     operations: tuple[_PersonaToolOperation, ...] = ()
 
 
@@ -139,28 +144,57 @@ class _PersonaToolOperation:
     source_quote: str
 
 
-def build_update_persona_spec() -> ToolSpec:
-    return ToolSpec(
+def build_update_persona_model_spec() -> ToolModelSpec:
+    properties = copy.deepcopy(_PERSONA_PARAMETER_SCHEMA)
+    for name, description in _PERSONA_PARAMETERS.items():
+        properties[name]["description"] = description
+    operations = properties["operations"]["items"]
+    operations["additionalProperties"] = False
+    return ToolModelSpec(
         name="update_persona",
-        category="capability",
-        effect="mutating",
-        idempotency_scope="operation",
         description=_PERSONA_DESCRIPTION,
-        use_cases=list(_PERSONA_USE_CASES),
-        avoid_when=list(_PERSONA_AVOID_WHEN),
-        keywords=list(_PERSONA_KEYWORDS),
-        parameters=dict(_PERSONA_PARAMETERS),
-        parameter_schema=copy.deepcopy(_PERSONA_PARAMETER_SCHEMA),
-        required_parameters=["target"],
-        examples=list(_PERSONA_EXAMPLES),
+        input_schema={
+            "type": "object",
+            "properties": properties,
+            "required": ["target"],
+            "additionalProperties": False,
+        },
+        hints=ToolModelHints(
+            category="capability",
+            use_cases=_PERSONA_USE_CASES,
+            avoid_when=_PERSONA_AVOID_WHEN,
+            keywords=_PERSONA_KEYWORDS,
+            examples=_PERSONA_EXAMPLES,
+        ),
     )
 
 
 class UpdatePersonaTool(BaseTool):
+    model_spec = build_update_persona_model_spec()
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy(
+            "dangerous",
+            by_parameter=((
+                "action",
+                (
+                    ("list", "read_only"),
+                    ("history", "read_only"),
+                    ("status", "read_only"),
+                    ("add", "dangerous"),
+                    ("replace", "dangerous"),
+                    ("remove", "dangerous"),
+                    ("batch", "dangerous"),
+                    ("rollback", "dangerous"),
+                ),
+            ),),
+        ),
+        idempotency_policy=IdempotencyPolicy("operation"),
+        resource_scopes=ResourceScopePolicy(parameter_names=("target", "entry_id")),
+    )
+
     # 类用途: 把"更新用户人设/画像/工作约定"暴露成模型工具,落到 owner 的 SOUL/USER/AGENTS.md(每轮注入)。
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
-        self.spec = build_update_persona_spec()
 
     def availability(self) -> ToolAvailability:
         attributes = current_conversation_task_attributes(self.agent)
@@ -170,9 +204,9 @@ class UpdatePersonaTool(BaseTool):
             )
         return ToolAvailability.ready()
 
-    def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         request = _parse_persona_tool_request(params)
-        if isinstance(request, ToolExecutionResult):
+        if isinstance(request, ToolHandlerOutcome):
             return request
         try:
             repository = self._repository()
@@ -198,26 +232,6 @@ class UpdatePersonaTool(BaseTool):
                 )
                 if shape_error is not None:
                     return shape_error
-        # SOUL/AGENTS 是长期人设/工作约定(每轮注入、管所有行为),不能随意自动改(会越堆越乱)。
-        if request.target in ("soul", "agents"):
-            # 飞书通道:不再靠 confirmed 拒写,而是发一张交互卡片让用户按钮确认(非阻塞,工具立即返回)。
-            if self._owner_provider() == "feishu":
-                return self._feishu_confirm_flow(
-                    request.target,
-                    request.action,
-                    request.content,
-                    request.entry_id,
-                    expected_sha256=request.expected_sha256
-                    or repository.current_sha256(request.target),
-                    rollback_version=request.rollback_version,
-                )
-            # 非飞书:保持现有 confirmed 闸行为不变(必须先问用户、拿到同意带 confirmed=true 才写)。
-            if not request.confirmed:
-                return _err(
-                    f"{request.target.upper()}.md 是长期人设/工作约定,不能自动改(会越改越乱)。"
-                    "请先在回复里明确问用户'要不要把这条写进长期设定',用户明确同意后,再带 confirmed=true 调用。",
-                    "APPROVAL_REQUIRED",
-                )
         contents = [operation.content for operation in request.operations] or [request.content]
         for content in contents:
             if not content:
@@ -237,95 +251,11 @@ class UpdatePersonaTool(BaseTool):
             return repository
         return PersonaRepository.from_home_paths(getattr(self.agent, "home_paths", None))
 
-    def _owner_provider(self) -> str:
-        """当前 agent 的 owner 通道(飞书=feishu),取自 home_paths(scoped owner 身份)。"""
-        return (
-            str(getattr(getattr(self.agent, "home_paths", None), "owner_provider", "") or "")
-            .strip()
-            .lower()
-        )
-
-    def _feishu_confirm_flow(
-        self,
-        target: str,
-        action: str,
-        content: str,
-        entry_id: str,
-        *,
-        expected_sha256: str,
-        rollback_version: int | None,
-    ) -> ToolExecutionResult:
-        """飞书改 SOUL/AGENTS:存一条待确认记录 + 发交互卡片,用户点『确认写入』才落写(回调侧完成)。
-        非阻塞——本工具立即返回。凭据缺失/卡片发不出 → 清掉悬挂记录、回落"就地不写 + 提示用户"。"""
-        scan = (
-            scan_memory_content(content) if content else None
-        )  # 卡片确认后照写,内容先过注入/外泄扫描
-        if scan is not None and not scan.safe:
-            return _err(
-                scan.reason(), "PERSONA_INJECTION_BLOCKED", hint="人格文件每轮注入,改成纯描述再写"
-            )
-        home = getattr(self.agent, "home_paths", None)
-        root = getattr(home, "root", None)
-        open_id = str(getattr(home, "owner_id", "") or "")
-        if not root or not open_id:
-            return _err("无法定位待确认存储或飞书身份", "TOOL_UNAVAILABLE")
-        from ..adapter.feishu_card import build_persona_confirm_card, send_interactive_card
-        from . import persona_pending
-
-        owner = ("feishu", str(getattr(home, "owner_kind", "user") or "user"), open_id)
-        token = persona_pending.add(
-            root,
-            owner,
-            target,
-            content,
-            action=action,
-            entry_id=entry_id,
-            expected_sha256=expected_sha256,
-            rollback_version=rollback_version,
-        )
-        app_id, app_secret = self._feishu_creds()
-        sent = send_interactive_card(
-            app_id,
-            app_secret,
-            open_id,
-            build_persona_confirm_card(token, target, content, action=action),
-        )
-        if not sent:
-            persona_pending.pop(root, token)  # 发不出去 → 清掉悬挂记录(用户永远收不到按钮)
-            payload = {
-                "ok": True,
-                "target": target,
-                "pending": False,
-                "note": "现在没法给你发确认卡片(飞书没连上或缺凭据),这条长期设定我先没写。稍后可以再让我改。",
-            }
-            return ToolExecutionResult(
-                "update_persona", True, json.dumps(payload, ensure_ascii=False)
-            )
-        label = "SOUL(长期人设)" if target == "soul" else "AGENTS(工作约定)"
-        payload = {
-            "ok": True,
-            "target": target,
-            "pending": True,
-            "note": f"已给你发了确认卡片，确认后才会对{label}执行 {action}；取消则不改。",
-        }
-        return ToolExecutionResult("update_persona", True, json.dumps(payload, ensure_ascii=False))
-
-    def _feishu_creds(self) -> tuple[str, str]:
-        """从 config 取飞书凭据并过 SecretRef 解析(值可为 env:/file: 间接引用)。取不到 → 空串,
-        由 send_interactive_card fail-open 处理(回落不写)。"""
-        from ..settings.secret_ref import resolve_secret_ref
-
-        cfg = getattr(self.agent, "config", None)
-        app_id = resolve_secret_ref(str(getattr(cfg, "feishu_app_id", "") or ""))
-        app_secret = resolve_secret_ref(str(getattr(cfg, "feishu_app_secret", "") or ""))
-        return app_id, app_secret
-
-
 # LLM: Parse and validate the action schema before repository or consent side effects.
 # 函数用途: 把 update_persona 参数整理成一个结构化请求，统一返回可读的参数错误。
 def _parse_persona_tool_request(
     params: dict[str, object],
-) -> _PersonaToolRequest | ToolExecutionResult:
+) -> _PersonaToolRequest | ToolHandlerOutcome:
     action = str(params.get("action") or "add").strip().lower()
     target = str(params.get("target") or "").strip().lower()
     content = str(params.get("content") or "").strip()
@@ -340,7 +270,7 @@ def _parse_persona_tool_request(
             "TOOL_INVALID_ARGUMENTS",
         )
     operations = _parse_persona_operations(target, params, raw_operations)
-    if isinstance(operations, ToolExecutionResult):
+    if isinstance(operations, ToolHandlerOutcome):
         return operations
     if operations:
         return _PersonaToolRequest(
@@ -351,7 +281,6 @@ def _parse_persona_tool_request(
             source_quote="",
             expected_sha256=expected_sha256,
             rollback_version=None,
-            confirmed=True,
             operations=operations,
         )
     if action == "batch":
@@ -361,7 +290,7 @@ def _parse_persona_tool_request(
     if action in {"replace", "remove"} and not entry_id:
         return _err("replace/remove 必须提供 list 返回的 entry_id", "TOOL_INVALID_ARGUMENTS")
     rollback_version = _parse_rollback_version(action, params.get("rollback_version"))
-    if isinstance(rollback_version, ToolExecutionResult):
+    if isinstance(rollback_version, ToolHandlerOutcome):
         return rollback_version
     return _PersonaToolRequest(
         action=action,
@@ -371,7 +300,6 @@ def _parse_persona_tool_request(
         source_quote=source_quote,
         expected_sha256=expected_sha256,
         rollback_version=rollback_version,
-        confirmed=bool(params.get("confirmed")),
     )
 
 
@@ -379,7 +307,7 @@ def _parse_persona_operations(
     target: str,
     params: dict[str, object],
     raw_operations: object,
-) -> tuple[_PersonaToolOperation, ...] | ToolExecutionResult:
+) -> tuple[_PersonaToolOperation, ...] | ToolHandlerOutcome:
     if raw_operations is None:
         return ()
     if target != "user":
@@ -432,7 +360,7 @@ def _parse_persona_operations(
 def _parse_rollback_version(
     action: str,
     value: object,
-) -> int | None | ToolExecutionResult:
+) -> int | None | ToolHandlerOutcome:
     if action == "rollback" and value in (None, ""):
         return _err("rollback 必须提供 history 返回的 rollback_version", "TOOL_INVALID_ARGUMENTS")
     if value in (None, ""):
@@ -451,7 +379,7 @@ def _parse_rollback_version(
 def _persona_read_result(
     repository: PersonaRepository,
     request: _PersonaToolRequest,
-) -> ToolExecutionResult | None:
+) -> ToolHandlerOutcome | None:
     try:
         if request.action == "list":
             payload = repository.list_entries(request.target)
@@ -474,7 +402,7 @@ def _persona_read_result(
             return None
     except (OSError, PersonaRepositoryError) as exc:
         return _err(f"读取人格状态失败: {exc}", "TOOL_EXECUTION_FAILED")
-    return ToolExecutionResult("update_persona", True, json.dumps(payload, ensure_ascii=False))
+    return ToolHandlerOutcome("update_persona", True, json.dumps(payload, ensure_ascii=False))
 
 
 # LLM: All mutation failures map to the registered tool error taxonomy in one place.
@@ -483,7 +411,7 @@ def _execute_persona_mutation(
     agent: object,
     repository: PersonaRepository,
     request: _PersonaToolRequest,
-) -> ToolExecutionResult:
+) -> ToolHandlerOutcome:
     try:
         source = _persona_source(agent)
         if request.operations:
@@ -514,7 +442,7 @@ def _execute_persona_mutation(
                     content=request.content,
                     entry_id=request.entry_id,
                     source_quote=request.source_quote,
-                    confirmed=request.confirmed or request.target == "user",
+                    confirmed=True,
                     expected_sha256=request.expected_sha256,
                     rollback_version=request.rollback_version,
                     source=source,
@@ -543,10 +471,10 @@ def _execute_persona_mutation(
     except (OSError, PersonaRepositoryError, ValueError) as exc:
         return _err(f"写入失败: {exc}", "TOOL_EXECUTION_FAILED")
     payload["hint"] = "人格文件已按结构化 entry_id 更新，下一轮起长期生效。"
-    return ToolExecutionResult("update_persona", True, json.dumps(payload, ensure_ascii=False))
+    return ToolHandlerOutcome("update_persona", True, json.dumps(payload, ensure_ascii=False))
 
 
-def _user_persona_shape_error(*, action: str, content: str) -> ToolExecutionResult | None:
+def _user_persona_shape_error(*, action: str, content: str) -> ToolHandlerOutcome | None:
     """USER 画像保留结构化单事实边界，不从自然语言推断授权。"""
     if action in {"add", "replace"} and len(content.splitlines()) != 1:
         return _err(
@@ -563,16 +491,16 @@ def _persona_source(agent: object) -> str:
     return f"agent_tool:{request_id}" if request_id else "agent_tool"
 
 
-def _err(msg: str, code: str, hint: str = "") -> ToolExecutionResult:
+def _err(msg: str, code: str, hint: str = "") -> ToolHandlerOutcome:
     body = {"error": msg}
     if hint:
         body["hint"] = hint
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         "update_persona", False, json.dumps(body, ensure_ascii=False), error_code=code
     )
 
 
 __all__ = [
     "UpdatePersonaTool",
-    "build_update_persona_spec",
+    "build_update_persona_model_spec",
 ]

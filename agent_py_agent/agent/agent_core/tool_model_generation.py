@@ -14,6 +14,7 @@ from ..concurrency.interrupt import (
     register_interrupt_callback,
     set_interrupt,
 )
+from ..tooling.runtime_contracts import ToolChoice
 from ._runtime_params import ToolLoopExecuteParams
 from .model.call_runtime import (
     effective_model_request_timeout_seconds as _effective_model_request_timeout_seconds,
@@ -43,14 +44,12 @@ from .tool_stream import (
     LongToolContentStreamAbort,
     MalformedToolProtocolStreamAbort,
     ToolBoundaryChunkFilter,
-    cut_response_after_first_complete_tool_call,
     long_write_abort_response,
     long_write_response_abort,
     malformed_tool_protocol_abort_response,
 )
 
 _TOOL_STREAM_POLL_SECONDS = 0.05
-_TOOL_STREAM_COMPLETE_DRAIN_SECONDS = 1.2
 _MODEL_INTERRUPT_DRAIN_SECONDS = 1.0
 
 
@@ -86,6 +85,7 @@ class _ModelGenerationState:
     on_chunk: object
     # 原生 tool_use 协议下传给 backend.generate 的 tools schema；text 协议为 None。
     tools: list[dict] | None = None
+    tool_choice: ToolChoice | None = None
     # native 下由 IR 历史翻出的厂商原生 messages；text 协议为 None（走单条 user prompt）。
     messages: list[dict] | None = None
 
@@ -178,6 +178,7 @@ def _trace_model_start(request: ModelGenerateParams) -> None:
 
 
 def _start_model_generation(request: ModelGenerateParams) -> _ModelGenerationState:
+    _begin_model_turn_identity(request.params, request.tool_rounds)
     chunk_filter = _build_tool_boundary_chunk_filter(request)
     ledger, call_id, first_token_estimate = start_model_call_record(request)
     on_chunk = observed_chunk_filter(
@@ -186,32 +187,45 @@ def _start_model_generation(request: ModelGenerateParams) -> _ModelGenerationSta
         chunk_filter=chunk_filter,
         first_token_estimate=first_token_estimate,
     )
+    tools = resolve_native_tools(request.agent, request.params)
+    tool_choice = _model_turn_tool_choice(request.params, tools)
+    _remember_model_turn_tool_choice(request.params, tool_choice)
     return _ModelGenerationState(
         chunk_filter=chunk_filter,
         ledger=ledger,
         call_id=call_id,
         first_token_timeout_seconds=first_token_estimate.timeout_seconds,
         on_chunk=on_chunk,
-        tools=resolve_native_tools(request.agent, request.params),
+        tools=tools,
+        tool_choice=tool_choice,
         messages=_native_provider_messages(request.agent, request.params),
     )
 
 
-def _native_provider_messages(agent: object, params: object) -> list[dict] | None:
-    """native 下把 IR 历史翻成厂商原生 messages；text 协议或空历史时返回 None。
+def _begin_model_turn_identity(params: object, tool_rounds: int) -> str:
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return ""
+    sequence = max(0, int(state.get("_model_turn_sequence") or 0)) + 1
+    state["_model_turn_sequence"] = sequence
+    turn_id = f"{getattr(params, 'run_id', '')}:model:{sequence}:after-tools:{tool_rounds}"
+    state["_current_model_turn_id"] = turn_id
+    return turn_id
 
-    返回 None 时 backend 走单条 user=prompt 的旧路径（文本协议零改动）。native 的
-    第一轮还没有任何工具往返时 IR 历史为空，也返回 None——此时整段 prompt 仍作为
-    单条 user 消息发出，与现状一致；有往返后才切到结构化 messages。
+
+def _native_provider_messages(agent: object, params: object) -> list[dict] | None:
+    """native 下把 IR 历史和宿主运行时指引翻成厂商原生 messages。
+
+    text 协议始终返回 ``None``。native 第一轮或协议修复轮可能没有 IR 工具
+    历史，但只要 ``tool_context`` 有尚未转发的宿主指引，仍必须返回结构化
+    user 消息。backend 会先放入原始 prompt，再追加这些指引。
     """
-    if not native_tool_use_active(agent):
+    if not native_tool_use_active(params):
         return None
     history = getattr(params, "tool_ir_history", None)
-    if not history:
-        return None
     from ..backends.message_adapter import AnthropicMessageAdapter, strip_orphaned_tool_blocks
 
-    messages = AnthropicMessageAdapter().to_provider_messages(history)
+    messages = AnthropicMessageAdapter().to_provider_messages(history) if history else []
     # Step 4 最后防线：发请求前再扫一遍孤儿（Step3 的整对回收漏了截断/异常中断/subagent
     # 提前结束/resume 等边界时，IR 仍可能残留「有 tool_use 无配对 tool_result」或反之）。
     # Anthropic 对孤儿一律 HTTP 400，这道 sweep 给孤儿 tool_use 补 stub、剔除孤儿
@@ -232,6 +246,47 @@ def _native_provider_messages(agent: object, params: object) -> list[dict] | Non
     return messages or None
 
 
+def _model_turn_tool_choice(
+    params: object,
+    tools: list[dict] | None,
+) -> ToolChoice:
+    """Read the host-owned choice fixed for this turn; provider prose cannot alter it."""
+
+    from ..contracts.required_actions import tool_choice_for_required_actions
+
+    snapshot = getattr(params, "effective_contract_snapshot", None)
+    if snapshot is not None:
+        visible_tools = tools
+        if visible_tools is None:
+            runtime_snapshot = getattr(params, "tool_runtime_snapshot", None)
+            visible_tools = [
+                {"name": name}
+                for name in sorted(getattr(runtime_snapshot, "available_tool_names", ()) or ())
+            ]
+        return tool_choice_for_required_actions(snapshot, visible_tools)
+    state = getattr(params, "live_archive_state", None)
+    candidate = state.get("tool_choice") if isinstance(state, dict) else None
+    if isinstance(candidate, ToolChoice):
+        return candidate
+    return ToolChoice.auto("ordinary_tool_turn")
+
+
+def _remember_model_turn_tool_choice(params: object, choice: ToolChoice) -> None:
+    state = getattr(params, "live_archive_state", None)
+    if isinstance(state, dict):
+        state["_current_model_turn_tool_choice"] = choice
+        trace = state.setdefault("tool_choice_trace", [])
+        if isinstance(trace, list):
+            trace.append(
+                {
+                    "turn_id": str(state.get("_current_model_turn_id") or ""),
+                    "mode": choice.mode,
+                    "tool_name": choice.tool_name,
+                    "reason": choice.reason,
+                }
+            )
+
+
 def _forwarded_guidance_seen(params: object) -> set:
     """返回跨轮持有的「已转发运行时指引」去重集合，挂在 ``live_archive_state`` 上。
 
@@ -250,13 +305,12 @@ def _forwarded_guidance_seen(params: object) -> set:
     return seen
 
 
-# LLM: 该收尾只完成 chunk/filter、模型账本、边界裁剪和 trace，不再维护已删除的 digest 状态机。
+# LLM: 该收尾只完成 chunk/filter、模型账本和 trace；不得裁掉正文后把内嵌文本提升为工具调用。
 # 函数用途: 统一收尾一次模型调用，并把最终可用响应交回工具循环。
 def _finish_model_generation(request: ModelGenerateParams, state: _ModelGenerationState, response):
     state.chunk_filter.finish()
     response = _recover_unclosed_long_write_response(request, response)
     record_model_call_finished(state.ledger, state.call_id, response)
-    response = _apply_tool_boundary_cut(request, response)
     trace_runner_model_response_received(
         RunnerModelStageTraceRequest(
             agent=request.agent,
@@ -319,17 +373,6 @@ def _trace_model_failure(request: ModelGenerateParams, exc: BaseException) -> No
     )
 
 
-def _apply_tool_boundary_cut(request: ModelGenerateParams, response):
-    response, cut = cut_response_after_first_complete_tool_call(response)
-    if cut:
-        request.params.tool_context.append(
-            "[tool-system]\n"
-            "模型回复里同时包含工具调用和普通正文；系统已只保留完整工具/写入机器块，"
-            "普通正文和伪造的内部记录不会作为工具结果、事实或下一轮上下文。"
-        )
-    return response
-
-
 # LLM: The caller owns the typed task identity while the provider runs in a guard thread; relay interruption to that child before returning.
 # 函数用途: 用超时保护线程调模型，并把外层任务的停止信号转发给真正读模型响应的线程。
 def _generate_with_wall_timeout(
@@ -370,7 +413,6 @@ def _wait_for_generation_result(
 ):
     started = time.monotonic()
     transport_owns_timeout = _transport_owns_stream_idle_timeout(request.agent)
-    tool_block_completed_at: float | None = None
     while True:
         if is_interrupted():
             _interrupt_generation_worker(worker)
@@ -379,27 +421,14 @@ def _wait_for_generation_result(
         remaining = timeout - (time.monotonic() - started)
         if remaining <= 0 and not transport_owns_timeout:
             raise ProviderTimeoutError(f"模型接口请求超时: request_timeout={timeout:g}s")
-        result, tool_block_completed_at = _poll_generation_result(
+        result = _poll_generation_result(
             results,
-            state,
-            tool_block_completed_at,
             _TOOL_STREAM_POLL_SECONDS if transport_owns_timeout else remaining,
         )
         if result is not None:
             if result.exc is not None:
                 raise result.exc
             return result.response
-        if _complete_tool_block_wait_elapsed(tool_block_completed_at):
-            # The first complete tool block is already a terminal boundary for
-            # this provider turn.  Returning without cancelling the guarded
-            # transport leaves the model generating an ignored tail while the
-            # tool loop starts its next request, consuming a second inference
-            # slot and potentially the full output budget.  Cancel and drain
-            # the exact worker before advancing, using the same typed transport
-            # close path as an explicit turn interrupt.
-            _interrupt_generation_worker(worker)
-            worker.join(timeout=_MODEL_INTERRUPT_DRAIN_SECONDS)
-            return _complete_stream_tool_response(request, state)
 
 
 def _transport_owns_stream_idle_timeout(agent: object) -> bool:
@@ -419,38 +448,12 @@ def _interrupt_generation_worker(worker: Thread) -> None:
 
 def _poll_generation_result(
     results: Queue[_BackendGenerateResult],
-    state: _ModelGenerationState,
-    tool_block_completed_at: float | None,
     remaining: float,
-) -> tuple[_BackendGenerateResult | None, float | None]:
+) -> _BackendGenerateResult | None:
     try:
-        return results.get(
-            timeout=min(_TOOL_STREAM_POLL_SECONDS, remaining)
-        ), tool_block_completed_at
+        return results.get(timeout=min(_TOOL_STREAM_POLL_SECONDS, remaining))
     except Empty:
-        return None, _tool_block_completed_at(state, tool_block_completed_at)
-
-
-def _tool_block_completed_at(state: _ModelGenerationState, current: float | None) -> float | None:
-    if current is not None:
-        return current
-    if state.chunk_filter.cut_detected and state.chunk_filter.complete_tool_text():
-        return time.monotonic()
-    return None
-
-
-def _complete_tool_block_wait_elapsed(completed_at: float | None) -> bool:
-    if completed_at is None:
-        return False
-    return time.monotonic() - completed_at >= _TOOL_STREAM_COMPLETE_DRAIN_SECONDS
-
-
-def _complete_stream_tool_response(
-    request: ModelGenerateParams, state: _ModelGenerationState
-) -> ModelResponse:
-    text = state.chunk_filter.complete_tool_text()
-    backend = str(getattr(request.agent.backend, "name", "") or "")
-    return ModelResponse(text=text, backend=backend)
+        return None
 
 
 def _generate_backend_response(
@@ -511,6 +514,7 @@ def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
     kwargs: dict[str, object] = {"on_chunk": state.on_chunk}
     if state.tools is not None:
         kwargs["tools"] = state.tools
+        kwargs["tool_choice"] = state.tool_choice or ToolChoice.auto()
     if state.messages is not None:
         kwargs["messages"] = state.messages
     return backend.generate(prompt, **kwargs)

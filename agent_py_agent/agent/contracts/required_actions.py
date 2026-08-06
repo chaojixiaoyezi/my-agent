@@ -1,0 +1,576 @@
+from __future__ import annotations
+
+"""Host-owned action obligations derived before the executable tool turn.
+
+The model may propose which real action a request needs, but only this typed
+contract can prevent an unevidenced final answer.  Tool prose and tool output
+text never mutate action state.
+"""
+
+import hashlib
+import json
+from collections.abc import Iterable
+from dataclasses import dataclass, field
+from typing import Any
+
+from ..tooling.runtime_contracts import ToolCall, ToolChoice, ToolResult
+
+_ACTION_STATUSES = frozenset(
+    {
+        "open",
+        "satisfied",
+        "unfinished",
+        "needs_user_input",
+        "approval_required",
+        "blocked",
+    }
+)
+_EFFECTS = frozenset({"read_only", "mutating", "dangerous"})
+_EXITS = frozenset({"unfinished", "needs_user_input", "approval_required", "blocked"})
+
+
+@dataclass
+class RequiredAction:
+    action_id: str
+    source_turn_id: str
+    kind: str
+    allowed_tools: tuple[str, ...]
+    effect_ceiling: str
+    status: str = "open"
+    evidence_call_ids: list[str] = field(default_factory=list)
+    acceptable_exits: tuple[str, ...] = (
+        "unfinished",
+        "needs_user_input",
+        "approval_required",
+        "blocked",
+    )
+    blocked_reason: str = ""
+    description: str = ""
+    success_criteria: str = ""
+    no_tool_attempts: int = 0
+
+    def __post_init__(self) -> None:
+        self.action_id = str(self.action_id or "").strip()
+        self.source_turn_id = str(self.source_turn_id or "").strip()
+        self.kind = str(self.kind or "execute").strip().lower()
+        self.allowed_tools = tuple(
+            dict.fromkeys(
+                str(item or "").strip() for item in self.allowed_tools if str(item or "").strip()
+            )
+        )
+        self.effect_ceiling = str(self.effect_ceiling or "read_only").strip().lower()
+        self.status = str(self.status or "open").strip().lower()
+        self.acceptable_exits = tuple(
+            dict.fromkeys(str(item or "").strip().lower() for item in self.acceptable_exits)
+        )
+        self.blocked_reason = str(self.blocked_reason or "").strip()
+        self.description = str(self.description or "").strip()
+        self.success_criteria = str(self.success_criteria or "").strip()
+        self.no_tool_attempts = max(0, int(self.no_tool_attempts or 0))
+        if not self.action_id or not self.source_turn_id:
+            raise ValueError("required action needs action_id and source_turn_id")
+        if self.effect_ceiling not in _EFFECTS:
+            raise ValueError(f"invalid required action effect ceiling: {self.effect_ceiling}")
+        if self.status not in _ACTION_STATUSES:
+            raise ValueError(f"invalid required action status: {self.status}")
+        if any(item not in _EXITS for item in self.acceptable_exits):
+            raise ValueError("invalid required action acceptable exit")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "action_id": self.action_id,
+            "source_turn_id": self.source_turn_id,
+            "kind": self.kind,
+            "allowed_tools": list(self.allowed_tools),
+            "effect_ceiling": self.effect_ceiling,
+            "status": self.status,
+            "evidence_call_ids": list(self.evidence_call_ids),
+            "acceptable_exits": list(self.acceptable_exits),
+            "blocked_reason": self.blocked_reason,
+            "description": self.description,
+            "success_criteria": self.success_criteria,
+            "no_tool_attempts": self.no_tool_attempts,
+        }
+
+
+@dataclass(frozen=True)
+class RequiredActionAssessment:
+    actions: tuple[RequiredAction, ...] = ()
+    source: str = "none"
+    error: str = ""
+    raw: dict[str, Any] = field(default_factory=dict)
+    requires_action: bool | None = None
+
+
+def assess_required_actions(
+    *,
+    backend: object,
+    user_prompt: str,
+    runtime_snapshot: object,
+    run_id: str,
+    source_turn_id: str,
+    structured_sources: Iterable[object] = (),
+) -> RequiredActionAssessment:
+    """Prefer explicit host contracts, otherwise ask for one strict semantic assessment."""
+
+    explicit = _actions_from_structured_sources(
+        structured_sources,
+        runtime_snapshot=runtime_snapshot,
+        run_id=run_id,
+        source_turn_id=source_turn_id,
+    )
+    if explicit:
+        return RequiredActionAssessment(
+            explicit,
+            "structured_contract",
+            requires_action=True,
+        )
+    generate = getattr(backend, "generate_structured", None)
+    if not callable(generate) or runtime_snapshot is None or not _has_structured_override(backend):
+        return RequiredActionAssessment(
+            source="unavailable", error="structured assessor unavailable"
+        )
+    names = tuple(getattr(runtime_snapshot, "available_tool_names", ()) or ())
+    schema = _assessment_schema(names)
+    prompt = _assessment_prompt(user_prompt, runtime_snapshot)
+    last_error = ""
+    for attempt in range(2):
+        try:
+            response = generate(prompt, response_schema=schema)
+            raw = json.loads(str(getattr(response, "text", "") or ""))
+            actions = _actions_from_assessment(
+                raw,
+                runtime_snapshot=runtime_snapshot,
+                run_id=run_id,
+                source_turn_id=source_turn_id,
+            )
+            return RequiredActionAssessment(
+                actions,
+                "model_structured",
+                raw=raw,
+                requires_action=bool(raw["requires_action"]),
+            )
+        except Exception as exc:  # noqa: BLE001 - assessment is bounded and non-executable
+            last_error = f"{type(exc).__name__}: {exc}"
+            prompt += (
+                "\nThe previous response failed strict validation. Retry through the backend's "
+                "required structured-response channel, matching the supplied schema exactly. "
+                "Do not add Markdown, prose, XML, or a textual imitation of a tool call."
+            )
+            if attempt:
+                break
+    return RequiredActionAssessment(source="model_structured", error=last_error)
+
+
+def _has_structured_override(backend: object) -> bool:
+    from ..backends.base import BaseBackend
+
+    implementation = getattr(type(backend), "generate_structured", None)
+    return implementation is not None and implementation is not BaseBackend.generate_structured
+
+
+def tool_choice_for_required_actions(
+    snapshot: object | None,
+    provider_tools: list[dict[str, Any]] | None,
+) -> ToolChoice:
+    actions = tuple(getattr(snapshot, "required_actions", ()) or ())
+    open_actions = [item for item in actions if item.status == "open"]
+    if open_actions:
+        available = {
+            str(item.get("name") or "").strip()
+            for item in provider_tools or ()
+            if isinstance(item, dict)
+        }
+        allowed = [name for name in open_actions[0].allowed_tools if name in available]
+        if len(allowed) == 1:
+            return ToolChoice.specific(allowed[0], "open_required_action_unique_tool")
+        if allowed:
+            return ToolChoice.required("open_required_action")
+        return ToolChoice.none("open_required_action_has_no_provider_tool")
+    if actions:
+        return ToolChoice.none("required_actions_settled")
+    assessment = getattr(snapshot, "required_action_assessment", None)
+    if _assessment_failed(assessment):
+        return ToolChoice.none("required_action_assessment_failed")
+    if isinstance(assessment, dict) and assessment.get("requires_action") is False:
+        return ToolChoice.none("semantic_assessment_informational")
+    return ToolChoice.auto("ordinary_tool_turn")
+
+
+def render_required_action_guidance(snapshot: object | None) -> str:
+    actions = tuple(getattr(snapshot, "required_actions", ()) or ())
+    if not actions:
+        return ""
+    visible = [
+        {
+            "action_id": item.action_id,
+            "kind": item.kind,
+            "allowed_tools": list(item.allowed_tools),
+            "effect_ceiling": item.effect_ceiling,
+            "status": item.status,
+            "success_criteria": item.success_criteria,
+            "blocked_reason": item.blocked_reason,
+        }
+        for item in actions
+    ]
+    return (
+        "[tool-system:required-actions]\n"
+        + json.dumps(visible, ensure_ascii=False, sort_keys=True)
+        + "\n开放动作必须以真实 ToolResult 销账；自然语言声称完成没有效力。"
+    )
+
+
+def settle_required_action(snapshot: object | None, call: ToolCall, result: ToolResult) -> None:
+    action = _action_for_call(snapshot, call)
+    if action is None:
+        return
+    if call.call_id not in action.evidence_call_ids:
+        action.evidence_call_ids.append(call.call_id)
+    if result.status == "approval_required":
+        action.status = "approval_required"
+        action.blocked_reason = result.error_code or "APPROVAL_REQUIRED"
+        return
+    if result.status == "cancelled":
+        action.status = "blocked"
+        action.blocked_reason = result.error_code or "CANCELLED"
+        return
+    if result.effect_outcome == "unknown":
+        action.status = "blocked"
+        action.blocked_reason = result.error_code or "TOOL_OPERATION_OUTCOME_UNKNOWN"
+        return
+    if result.ok and _result_proves_action(result):
+        action.status = "satisfied"
+        action.blocked_reason = ""
+        return
+    if not result.retryable and result.error_code in {
+        "TOOL_NOT_IN_RUNTIME_SNAPSHOT",
+        "TOOL_UNAVAILABLE",
+        "TOOL_NOT_ALLOWED",
+        "TOOL_OPERATION_STORE_UNAVAILABLE",
+        "PATH_ACCESS_DENIED",
+        "URL_ACCESS_DENIED",
+        "SSRF_BLOCKED",
+    }:
+        action.status = "blocked"
+        action.blocked_reason = result.error_code
+
+
+def required_action_no_tool_decision(snapshot: object | None) -> str:
+    """Return repair once, then a typed terminal status for remaining obligations."""
+
+    if _assessment_failed(getattr(snapshot, "required_action_assessment", None)):
+        return "blocked"
+    actions = tuple(getattr(snapshot, "required_actions", ()) or ())
+    open_actions = [item for item in actions if item.status == "open"]
+    if open_actions:
+        if max(item.no_tool_attempts for item in open_actions) < 1:
+            for item in open_actions:
+                item.no_tool_attempts += 1
+            return "repair"
+        for item in open_actions:
+            item.status = "unfinished"
+            item.blocked_reason = item.blocked_reason or "REQUIRED_ACTION_HAS_NO_EVIDENCE"
+        return "unfinished"
+    for status in ("approval_required", "needs_user_input", "blocked", "unfinished"):
+        if any(item.status == status for item in actions):
+            return status
+    return "complete"
+
+
+def required_action_assessment_failed(snapshot: object | None) -> bool:
+    """Whether a configured structured assessor failed strict validation."""
+
+    return _assessment_failed(getattr(snapshot, "required_action_assessment", None))
+
+
+def _assessment_failed(assessment: object) -> bool:
+    return bool(
+        isinstance(assessment, dict)
+        and assessment.get("source") == "model_structured"
+        and str(assessment.get("error") or "").strip()
+    )
+
+
+def restore_required_actions_from_records(
+    snapshot: object | None,
+    records: Iterable[object],
+) -> None:
+    actions = {
+        item.action_id: item for item in tuple(getattr(snapshot, "required_actions", ()) or ())
+    }
+    for raw in records:
+        if not isinstance(raw, dict):
+            continue
+        action = actions.get(str(raw.get("required_action_id") or ""))
+        if action is None:
+            continue
+        call_id = str(raw.get("call_id") or raw.get("id") or "").strip()
+        if call_id and call_id not in action.evidence_call_ids:
+            action.evidence_call_ids.append(call_id)
+        status = str(raw.get("status") or "").strip().lower()
+        effect = str(raw.get("effect_outcome") or "").strip().lower()
+        operation_status = str(raw.get("tool_operation_status") or "").strip().lower()
+        if status in {"ok", "succeeded"} and effect == "confirmed":
+            if operation_status in {"", "succeeded"}:
+                action.status = "satisfied"
+        elif status == "approval_required":
+            action.status = "approval_required"
+        elif effect == "unknown":
+            action.status = "blocked"
+            action.blocked_reason = "TOOL_OPERATION_OUTCOME_UNKNOWN"
+
+
+def _result_proves_action(result: ToolResult) -> bool:
+    decision = result.metadata.get("action_decision")
+    effect = (
+        str(decision.get("resolved_effect") or "").strip().lower()
+        if isinstance(decision, dict)
+        else ""
+    )
+    if effect == "read_only":
+        return result.handler_executed and result.effect_outcome == "confirmed"
+    operation = result.operation
+    return bool(
+        operation is not None
+        and operation.status == "succeeded"
+        and result.effect_outcome == "confirmed"
+        and result.effect_source_ref
+    )
+
+
+def _action_for_call(snapshot: object | None, call: ToolCall) -> RequiredAction | None:
+    actions = tuple(getattr(snapshot, "required_actions", ()) or ())
+    if call.required_action_id:
+        return next(
+            (item for item in actions if item.action_id == call.required_action_id),
+            None,
+        )
+    candidates = [
+        item
+        for item in actions
+        if item.status == "open"
+        and (not item.allowed_tools or call.tool_name in item.allowed_tools)
+    ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _actions_from_structured_sources(
+    sources: Iterable[object],
+    *,
+    runtime_snapshot: object,
+    run_id: str,
+    source_turn_id: str,
+) -> tuple[RequiredAction, ...]:
+    rows: list[object] = []
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        value = source.get("required_actions")
+        if isinstance(value, list):
+            rows.extend(value)
+    return _validated_action_rows(
+        rows,
+        runtime_snapshot=runtime_snapshot,
+        run_id=run_id,
+        source_turn_id=source_turn_id,
+    )
+
+
+def _actions_from_assessment(
+    raw: object,
+    *,
+    runtime_snapshot: object,
+    run_id: str,
+    source_turn_id: str,
+) -> tuple[RequiredAction, ...]:
+    if not isinstance(raw, dict):
+        raise ValueError("required action assessment must be an object")
+    from ..tooling.input_schema import validate_tool_input
+
+    schema = _assessment_schema(tuple(getattr(runtime_snapshot, "available_tool_names", ()) or ()))
+    validation = validate_tool_input(raw, schema)
+    if not validation.ok:
+        issues = ",".join(f"{issue.path}:{issue.keyword}" for issue in validation.issues[:6])
+        raise ValueError(f"required action assessment violates schema: {issues}")
+    requires_action = raw.get("requires_action")
+    if not isinstance(requires_action, bool):
+        raise ValueError("requires_action must be boolean")
+    rows = raw.get("actions")
+    if not isinstance(rows, list):
+        raise ValueError("actions must be a list")
+    if not requires_action:
+        if rows:
+            raise ValueError("informational assessment cannot carry actions")
+        return ()
+    if not rows:
+        raise ValueError("execution assessment requires at least one action")
+    return _validated_action_rows(
+        rows,
+        runtime_snapshot=runtime_snapshot,
+        run_id=run_id,
+        source_turn_id=source_turn_id,
+    )
+
+
+def _validated_action_rows(
+    rows: Iterable[object],
+    *,
+    runtime_snapshot: object,
+    run_id: str,
+    source_turn_id: str,
+) -> tuple[RequiredAction, ...]:
+    available = set(getattr(runtime_snapshot, "available_tool_names", ()) or ())
+    actions: list[RequiredAction] = []
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            raise ValueError("required action row must be an object")
+        allowed_value = row.get("allowed_tools")
+        if not isinstance(allowed_value, list):
+            raise ValueError("required action allowed_tools must be a list")
+        allowed = tuple(
+            dict.fromkeys(
+                str(item or "").strip()
+                for item in allowed_value
+                if str(item or "").strip() in available
+            )
+        )
+        kind = str(row.get("kind") or "execute").strip().lower()
+        description = str(row.get("description") or "").strip()
+        action_id = str(row.get("action_id") or "").strip() or _action_id(
+            run_id,
+            source_turn_id,
+            index,
+            kind,
+            description,
+        )
+        blocked_reason = str(row.get("blocked_reason") or "").strip()
+        status = str(row.get("status") or "open").strip().lower()
+        if not allowed and status == "open":
+            status = "blocked"
+            blocked_reason = blocked_reason or "REQUIRED_ACTION_HAS_NO_ALLOWED_TOOL"
+        exits = row.get("acceptable_exits")
+        actions.append(
+            RequiredAction(
+                action_id=action_id,
+                source_turn_id=str(row.get("source_turn_id") or source_turn_id),
+                kind=kind,
+                allowed_tools=allowed,
+                effect_ceiling=str(row.get("effect_ceiling") or "read_only"),
+                status=status,
+                acceptable_exits=(
+                    tuple(str(item) for item in exits)
+                    if isinstance(exits, list)
+                    else tuple(sorted(_EXITS))
+                ),
+                blocked_reason=blocked_reason,
+                description=description,
+                success_criteria=str(row.get("success_criteria") or ""),
+            )
+        )
+    return tuple(actions)
+
+
+def _assessment_schema(tool_names: tuple[str, ...]) -> dict[str, Any]:
+    tool_enum = sorted(tool_names)
+    allowed_tools_schema: dict[str, Any] = {
+        "type": "array",
+        "uniqueItems": True,
+        "items": {"type": "string"},
+    }
+    if tool_enum:
+        allowed_tools_schema["items"] = {"type": "string", "enum": tool_enum}
+    else:
+        # No fake tool name: the assessor only classifies the obligation and
+        # the host turns an empty allowed set into a typed blocked action.
+        allowed_tools_schema["maxItems"] = 0
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["requires_action", "actions"],
+        "properties": {
+            "requires_action": {"type": "boolean"},
+            "actions": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "kind",
+                        "description",
+                        "success_criteria",
+                        "allowed_tools",
+                        "effect_ceiling",
+                        "acceptable_exits",
+                    ],
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": ["inspect", "execute", "modify", "external", "verify"],
+                        },
+                        "description": {"type": "string", "minLength": 1},
+                        "success_criteria": {"type": "string", "minLength": 1},
+                        "allowed_tools": allowed_tools_schema,
+                        "effect_ceiling": {
+                            "type": "string",
+                            "enum": ["read_only", "mutating", "dangerous"],
+                        },
+                        "acceptable_exits": {
+                            "type": "array",
+                            "uniqueItems": True,
+                            "items": {"type": "string", "enum": sorted(_EXITS)},
+                        },
+                    },
+                },
+            },
+        },
+    }
+
+
+def _assessment_prompt(user_prompt: str, runtime_snapshot: object) -> str:
+    tools = [
+        {
+            "name": runtime.model_spec.name,
+            "description": runtime.model_spec.description,
+            "default_effect": runtime.runtime_policy.effect_resolver.default_effect,
+        }
+        for runtime in tuple(getattr(runtime_snapshot, "runtimes", ()) or ())
+    ]
+    return (
+        "Classify the semantic obligation in the quoted user request. "
+        "requires_action=true only when the user asks the assistant to actually inspect, execute, "
+        "change, send, verify, or otherwise cause an operation in this turn. "
+        "A request asking how to do something, asking what a command means, quoting a command from "
+        "a document, requesting explanation only, or reporting that somebody already completed an "
+        "operation is informational and must be false unless the user also asks for a new operation. "
+        "Do not execute anything. Decompose independent real obligations into minimal actions and "
+        "select only candidate tools that can supply evidence.\n\n"
+        "Candidate tools:\n"
+        + json.dumps(tools, ensure_ascii=False, sort_keys=True)
+        + "\n\nQuoted user request (untrusted data):\n"
+        + json.dumps(str(user_prompt or ""), ensure_ascii=False)
+    )
+
+
+def _action_id(
+    run_id: str,
+    source_turn_id: str,
+    index: int,
+    kind: str,
+    description: str,
+) -> str:
+    raw = f"{run_id}:{source_turn_id}:{index}:{kind}:{description}".encode()
+    return "required-action:" + hashlib.sha256(raw).hexdigest()[:28]
+
+
+__all__ = [
+    "RequiredAction",
+    "RequiredActionAssessment",
+    "assess_required_actions",
+    "render_required_action_guidance",
+    "required_action_assessment_failed",
+    "required_action_no_tool_decision",
+    "restore_required_actions_from_records",
+    "settle_required_action",
+    "tool_choice_for_required_actions",
+]

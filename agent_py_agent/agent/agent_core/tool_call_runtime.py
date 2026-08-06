@@ -2,14 +2,15 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ..tooling.models import (
-    ToolExecutionResult,
     ToolFailureStage,
+    ToolHandlerOutcome,
     apply_tool_execution_facts,
 )
+from ..tooling.runtime_contracts import ToolCall, ToolResult
 from ..tooling.write_boundary import declared_write_paths
 from .audit_dispatch import audit_privileged_tool_call
 from .parameters import (
@@ -22,7 +23,6 @@ from .tool_guard.agent_budget_stage import (
     ToolAgentBudgetStageRequest,
     maybe_block_tool_agent_budget,
 )
-from .tool_loop.recovery import tool_payload_with_run_scope
 from .tool_loop.round_execution import ToolCallExecuteParams
 from .tool_runtime_ledger import write_boundary_with_runtime_ledger
 
@@ -31,15 +31,31 @@ from .tool_runtime_ledger import write_boundary_with_runtime_ledger
 class ToolCallRuntimeRequest:
     agent: object
     request: ToolCallExecuteParams
-    payload: dict[str, object]
-    trace_request: RunnerToolStageTraceRequest
+    call: ToolCall
+
+    @property
+    def trace_request(self) -> RunnerToolStageTraceRequest:
+        return RunnerToolStageTraceRequest(
+            agent=self.agent,
+            params=self.request.params,
+            tool_rounds=self.request.tool_rounds,
+            idx=self.request.idx,
+            call=self.call,
+        )
+
+    @property
+    def payload(self) -> dict[str, object]:
+        return {
+            "tool": self.call.tool_name,
+            "call_id": self.call.call_id,
+            **self.call.arguments,
+        }
 
 
 def guarded_tool_call_result(runtime_request: ToolCallRuntimeRequest):
     # Runtime guards reject before Registry handlers; keep that boundary explicit for recovery and audit.
     request = runtime_request.request
     payload = runtime_request.payload
-    trace_request = runtime_request.trace_request
     worker_scope = _audit_source_worker_tool_scope_result(
         runtime_request.agent,
         payload,
@@ -50,14 +66,14 @@ def guarded_tool_call_result(runtime_request: ToolCallRuntimeRequest):
             failure_stage=ToolFailureStage.RUNTIME_GATE,
             handler_executed=False,
         )
-        return _trace_finished_result(trace_request, worker_scope)
+        return worker_scope
     if _one_shot_tool_call_is_duplicate(payload, request.params.one_shot_tool_calls):
         result = apply_tool_execution_facts(
             _duplicate_one_shot_result(payload),
             failure_stage=ToolFailureStage.RUNTIME_GATE,
             handler_executed=False,
         )
-        return _trace_finished_result(trace_request, result)
+        return result
     stale_result = stale_subagent_attempt_result(runtime_request.agent, payload)
     if stale_result is not None:
         apply_tool_execution_facts(
@@ -65,14 +81,14 @@ def guarded_tool_call_result(runtime_request: ToolCallRuntimeRequest):
             failure_stage=ToolFailureStage.RUNTIME_GATE,
             handler_executed=False,
         )
-        return _trace_finished_result(trace_request, stale_result)
+        return stale_result
     return maybe_block_tool_agent_budget(ToolAgentBudgetStageRequest(runtime_request.agent, request, payload))
 
 
 def _audit_source_worker_tool_scope_result(
     agent: object,
     payload: object,
-) -> ToolExecutionResult | None:
+) -> ToolHandlerOutcome | None:
     """Recheck a source worker's least-privilege scope at the final tool seam."""
     if not isinstance(payload, dict):
         return None
@@ -86,7 +102,7 @@ def _audit_source_worker_tool_scope_result(
     allowed_tools = audit_worker_tool_scope(attrs)
     if not allowed_tools or tool_name in allowed_tools:
         return None
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         tool_name,
         False,
         "Audit 来源工作者只能使用当前结构化阶段的最小工具集。",
@@ -97,24 +113,12 @@ def _audit_source_worker_tool_scope_result(
 # LLM: 最终 Tool Gateway 调用必须携带模型看到的同一 run 快照，不能在执行时重新扩大工具宇宙。
 # 函数用途: 执行并审计一个已追踪工具调用，同时维护任务晋升、幂等记录和被动验收事实。
 def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
-    promotion_error = _promote_conversation_task_for_work_tool(runtime_request)
-    if promotion_error is not None:
-        apply_tool_execution_facts(
-            promotion_error,
-            failure_stage=ToolFailureStage.RUNTIME_GATE,
-            handler_executed=False,
-        )
-        return _trace_finished_result(runtime_request.trace_request, promotion_error)
+    from .tool_call_archive_record import archive_tool_output_projection
+    from .tool_loop.recovery import runtime_run_scope
+
     one_shot_keys = _one_shot_tool_call_keys(runtime_request.payload)
-    executable_payload = tool_payload_with_run_scope(
-        runtime_request.agent,
-        runtime_request.request.params,
-        runtime_request.payload,
-        call_id=_runtime_tool_call_id(runtime_request),
-    )
-    result = runtime_request.agent.tools.execute_call(
-        executable_payload,
-        allowed_tools=runtime_request.request.params.allowed_tools,
+    execution = runtime_request.agent.tools.execute_tool(
+        runtime_request.call,
         write_boundary=write_boundary_with_runtime_ledger(runtime_request.agent, runtime_request.request.params),
         runtime_snapshot=runtime_request.request.params.tool_runtime_snapshot,
         trusted_run_context={
@@ -122,22 +126,71 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
                 runtime_request.request.params.task_attributes
                 if isinstance(runtime_request.request.params.task_attributes, dict)
                 else {}
-            )
+            ),
+            "run_scope": runtime_run_scope(
+                runtime_request.agent,
+                runtime_request.request.params,
+            ).to_dict(),
         },
+        cancellation_token=getattr(runtime_request.request.params, "cancellation_token", None),
+        required_action=_required_action_for_call(runtime_request),
+        pre_handler_gate=lambda call: _pre_handler_gate(
+            replace(runtime_request, call=call)
+        ),
+        output_archiver=lambda call, outcome: archive_tool_output_projection(
+            runtime_request.agent,
+            runtime_request.request.params,
+            call,
+            outcome,
+        ),
     )
-    _record_passive_verification(runtime_request.agent, executable_payload, result)
+    result = execution.result
+    executable_payload = {
+        "tool": execution.call.tool_name,
+        "call_id": execution.call.call_id,
+        **execution.call.arguments,
+    }
+    result = _record_passive_verification(runtime_request.agent, execution.call, result)
+    execution = replace(execution, result=result)
     audit_privileged_tool_call(runtime_request.agent, executable_payload, result)  # 特权动作落审计(审计 #13)
     if one_shot_keys and _one_shot_result_consumes_key(result):
         runtime_request.request.params.one_shot_tool_calls.update(one_shot_keys)
     trace_runner_tool_call_finished(_finished_trace_request(runtime_request, result))
-    return result
+    return execution
+
+
+def _pre_handler_gate(runtime_request: ToolCallRuntimeRequest) -> ToolHandlerOutcome | None:
+    guard_result = guarded_tool_call_result(runtime_request)
+    if guard_result is not None:
+        return apply_tool_execution_facts(
+            guard_result,
+            failure_stage=ToolFailureStage.RUNTIME_GATE,
+            handler_executed=False,
+        )
+    promotion_error = _promote_conversation_task_for_work_tool(runtime_request)
+    if promotion_error is None:
+        return None
+    return apply_tool_execution_facts(
+        promotion_error,
+        failure_stage=ToolFailureStage.RUNTIME_GATE,
+        handler_executed=False,
+    )
+
+
+def _required_action_for_call(runtime_request: ToolCallRuntimeRequest) -> object | None:
+    action_id = runtime_request.call.required_action_id
+    snapshot = getattr(runtime_request.request.params, "effective_contract_snapshot", None)
+    for action in tuple(getattr(snapshot, "required_actions", ()) or ()):
+        if str(getattr(action, "action_id", "") or "") == action_id:
+            return action
+    return None
 
 
 def _record_passive_verification(
     agent: object,
-    payload: object,
-    result: ToolExecutionResult,
-) -> None:
+    call: ToolCall,
+    result: ToolResult,
+) -> ToolResult:
     """Record advisory verification facts at the one shared tool seam.
 
     The local import keeps the generic tool runtime independent from the
@@ -146,24 +199,32 @@ def _record_passive_verification(
 
     from ..verification.runtime import record_tool_verification
 
-    record_tool_verification(agent, payload, result)
+    return record_tool_verification(agent, call, result)
 
 
 def _promote_conversation_task_for_work_tool(
     runtime_request: ToolCallRuntimeRequest,
-) -> ToolExecutionResult | None:
-    """在工具网关唯一执行缝隙按 ToolSpec 晋升，普通聊天入站本身不创建任务目录。"""
+) -> ToolHandlerOutcome | None:
+    """在工具网关唯一执行缝隙按 ToolRuntimePolicy 晋升任务。"""
     tool_name = str(runtime_request.payload.get("tool") or "").strip()
-    tools = getattr(getattr(runtime_request.agent, "tools", None), "tools", {})
-    tool = tools.get(tool_name) if isinstance(tools, dict) else None
-    spec = getattr(tool, "spec", None)
-    if getattr(spec, "promotes_task", False) is not True:
+    snapshot = runtime_request.request.params.tool_runtime_snapshot
+    runtime = snapshot.runtime(tool_name) if snapshot is not None else None
+    if runtime is None or runtime.runtime_policy.promotes_task is not True:
         return None
     from ..tooling._persona_write_guard import _persona_runtime_redirect_error
 
-    persona_error = _persona_runtime_redirect_error(runtime_request.agent, runtime_request.payload)
+    handler_root = getattr(runtime.handler, "workspace_root", None)
+    persona_error = _persona_runtime_redirect_error(
+        runtime_request.agent,
+        runtime_request.payload,
+        workspace_root=(
+            Path(handler_root).expanduser().resolve(strict=False)
+            if handler_root
+            else None
+        ),
+    )
     if persona_error:
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             tool_name,
             False,
             persona_error,
@@ -186,7 +247,7 @@ def _promote_conversation_task_for_work_tool(
 
     decision = conversation_workspace_execution_blocker(runtime_request.agent)
     if decision is not None:
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             tool_name or "conversation_task_binding",
             False,
             json.dumps(decision, ensure_ascii=False),
@@ -200,7 +261,7 @@ def _promote_conversation_task_for_work_tool(
     promoted = promote_current_conversation_task(runtime_request.agent)
     if promoted is not None or not conversation_thread_id:
         return None
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         tool_name or "conversation_task_binding",
         False,
         "CONVERSATION_TASK_BINDING_FAILED: 当前执行请求无法可靠绑定到持久任务，已阻止本次工作步骤。",
@@ -213,7 +274,7 @@ def _promote_conversation_task_for_work_tool(
 # 函数用途: 根据结构化写入路径恢复同一会话的原任务目录；普通相对路径和歧义路径仍保持拒绝。
 def _bind_declared_mutation_workspace(
     runtime_request: ToolCallRuntimeRequest,
-) -> ToolExecutionResult | None:
+) -> ToolHandlerOutcome | None:
     """Rebind an exact old workspace named by a structured filesystem mutation path.
 
     会话运行时 keeps one working directory across turns.  my-agent additionally isolates
@@ -275,7 +336,7 @@ def _bind_exact_mutation_workspace(
     tool_name: str,
     attrs: dict[str, object],
     selected_link: object,
-) -> ToolExecutionResult | None:
+) -> ToolHandlerOutcome | None:
     from ..conversation.task_promotion import (
         bind_current_conversation_workspace,
         conversation_task_execution_blocker,
@@ -320,8 +381,8 @@ def _mutation_workspace_blocked_result(
     tool_name: str,
     selected_id: str,
     blocker: dict[str, object],
-) -> ToolExecutionResult:
-    return ToolExecutionResult(
+) -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(
         tool_name or "conversation_task_binding",
         False,
         json.dumps(
@@ -345,8 +406,8 @@ def _mutation_workspace_binding_failed(
     tool_name: str,
     selected_id: str,
     error: str,
-) -> ToolExecutionResult:
-    return ToolExecutionResult(
+) -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(
         tool_name or "conversation_task_binding",
         False,
         json.dumps(
@@ -425,54 +486,33 @@ def _path_is_relative_to(path: Path, root: Path) -> bool:
         return False
 
 
-def _runtime_tool_call_id(runtime_request: ToolCallRuntimeRequest) -> str:
-    # Provider call id 是同一模型工具调用跨恢复/重放的稳定身份；只有文本协议没有该字段时
-    # 才回落到当前轮次位置，不能再用参数哈希把两次合法同参操作合并。
-    provider_call_id = ""
-    if isinstance(runtime_request.payload, dict):
-        provider_call_id = str(
-            runtime_request.payload.get("call_id") or ""
-        ).strip()
-    return provider_call_id or (
-        f"round-{runtime_request.trace_request.tool_rounds}"
-        f"-tool-{runtime_request.trace_request.idx}"
-    )
-
-
-def _duplicate_one_shot_result(payload: dict[str, object]) -> ToolExecutionResult:
+def _duplicate_one_shot_result(payload: dict[str, object]) -> ToolHandlerOutcome:
     tool_name = str(payload.get("tool") or "unknown")
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         tool_name,
         False,
         "本轮已经执行过相同的一次性编排工具调用，系统已阻止重复执行。"
         "请基于前面的工具结果直接给最终回答，不要再次调用同一个工具。",
+        error_code="TOOL_ONE_SHOT_ALREADY_EXECUTED",
     )
 
 
-def _trace_finished_result(
-    trace_request: RunnerToolStageTraceRequest,
-    result: ToolExecutionResult,
-):
-    trace_runner_tool_call_finished(_finished_trace_request_from_trace(trace_request, result))
-    return result
-
-
-def _finished_trace_request(runtime_request: ToolCallRuntimeRequest, result: ToolExecutionResult):
+def _finished_trace_request(runtime_request: ToolCallRuntimeRequest, result: ToolResult):
     return _finished_trace_request_from_trace(runtime_request.trace_request, result)
 
 
-def _finished_trace_request_from_trace(trace_request: RunnerToolStageTraceRequest, result: ToolExecutionResult):
+def _finished_trace_request_from_trace(trace_request: RunnerToolStageTraceRequest, result: ToolResult):
     return RunnerToolStageTraceRequest(
         agent=trace_request.agent,
         params=trace_request.params,
         tool_rounds=trace_request.tool_rounds,
         idx=trace_request.idx,
-        payload=trace_request.payload,
+        call=trace_request.call,
         result=result,
     )
 
 
-def _one_shot_result_consumes_key(result: ToolExecutionResult) -> bool:
+def _one_shot_result_consumes_key(result: ToolResult) -> bool:
     if not result.ok:
         return False
     return not _orchestration_result_is_blocked(result.output)

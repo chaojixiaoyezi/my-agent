@@ -33,7 +33,6 @@ from ..daily_ledger import (
     DailyLedgerWorkspaceRefs,
     append_subagent_task_event,
 )
-from ..memory_gate import MemoryGateResult, memory_gate_paths, sync_agent_run_memory_gate
 from ..shared_workspace import (
     SharedWorkspaceResult,
     SyncSharedWorkspaceRequest,
@@ -76,14 +75,12 @@ class TaskWorkspacePaths:
     agent_adapter_dir: Path
     agent_run: AgentRunWorkspacePaths
     artifact_manifest: ArtifactManifestResult
-    memory_gate: MemoryGateResult
     daily_ledger: DailyLedgerAppendResult
 
 
 @dataclass(frozen=True)
 class _TaskWorkspaceRuntimeRefs:
     artifact_manifest: ArtifactManifestResult | None = None
-    memory_gate: MemoryGateResult | None = None
     daily_ledger: DailyLedgerAppendResult | None = None
 
 
@@ -255,15 +252,9 @@ def _sync_runtime_refs(inputs: _RuntimeSyncInputs) -> _TaskWorkspaceRuntimeRefs:
             now=inputs.now,
         )
     )
-    memory_gate = sync_agent_run_memory_gate(
-        inputs.task,
-        agent_run_workspace_root=inputs.paths.agent_adapter_dir,
-        now=inputs.now,
-    )
-    daily_ledger = _append_daily_ledger(inputs, artifact_manifest, memory_gate)
+    daily_ledger = _append_daily_ledger(inputs, artifact_manifest)
     return _TaskWorkspaceRuntimeRefs(
         artifact_manifest=artifact_manifest,
-        memory_gate=memory_gate,
         daily_ledger=daily_ledger,
     )
 
@@ -271,7 +262,6 @@ def _sync_runtime_refs(inputs: _RuntimeSyncInputs) -> _TaskWorkspaceRuntimeRefs:
 def _append_daily_ledger(
     inputs: _RuntimeSyncInputs,
     artifact_manifest: ArtifactManifestResult,
-    memory_gate: MemoryGateResult,
 ) -> DailyLedgerAppendResult:
     return append_subagent_task_event(
         AppendSubagentTaskEventRequest(
@@ -282,8 +272,6 @@ def _append_daily_ledger(
                 inputs.paths.agent_adapter_dir,
                 artifact_manifest.task_manifest_jsonl,
                 artifact_manifest.agent_manifest_jsonl,
-                memory_gate.candidates_jsonl,
-                memory_gate.skill_spark_gate_json,
             ),
             now=inputs.now,
         ),
@@ -323,7 +311,6 @@ def _paths_for(
         agent_run=agent_run_workspace_paths(agent_adapter_dir),
         artifact_manifest=runtime_refs.artifact_manifest
         or _default_artifact_manifest(artifacts_dir, agent_adapter_dir),
-        memory_gate=runtime_refs.memory_gate or memory_gate_paths(agent_adapter_dir),
         daily_ledger=runtime_refs.daily_ledger or _default_daily_ledger(root),
     )
 

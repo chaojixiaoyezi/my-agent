@@ -32,6 +32,7 @@ from agent_py_agent.agent.user_space.network_grants import (
     normalized_grant_host,
     revoke_network_host_grant,
 )
+from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
 
 _LAN_HOST = "192.168.77.10"
 _LAN_URL = f"http://{_LAN_HOST}:8901/pull?since=0&limit=5"
@@ -80,20 +81,42 @@ def test_grant_store_expiry_and_malformed(tmp_path):
     assert active_private_hosts(tmp_path) == (_LAN_HOST,)
 
 
-# ---- 工具层:属主确认闸(update_persona 先例)+ 永久拦截段拒绝 ----
+# ---- 工具层:危险 grant 必须经过统一 ActionPolicy 精确审批绑定 ----
 
-def test_authorize_tool_requires_confirmed(tmp_path):
-    result = AuthorizeNetworkHostTool(_agent(tmp_path)).execute(
-        {"action": "grant", "hosts": [_LAN_HOST], "reason": "用户点名"}
+def test_authorize_tool_requires_canonical_approval_binding(tmp_path):
+    tool = AuthorizeNetworkHostTool(_agent(tmp_path))
+    arguments = {"action": "grant", "hosts": [_LAN_HOST], "reason": "用户点名"}
+    first = execute_canonical_test_call(
+        tmp_path,
+        tools={"authorize_network_host": tool},
+        tool_name="authorize_network_host",
+        arguments=arguments,
     )
-    assert result.ok is False
-    assert result.error_code == "APPROVAL_REQUIRED"
+    assert first.result.status == "approval_required"
+    assert first.result.error_code == "APPROVAL_REQUIRED"
+    assert first.result.handler_executed is False
     assert active_private_hosts(tmp_path) == ()
+
+    binding = {
+        **dict(first.decision.approval_request or {}),
+        "approval_id": "approval-network-1",
+        "status": "APPROVED",
+    }
+    approved = execute_canonical_test_call(
+        tmp_path,
+        tools={"authorize_network_host": tool},
+        tool_name="authorize_network_host",
+        arguments=arguments,
+        write_boundary={"approved_actions": [binding]},
+    )
+    assert approved.result.ok is True
+    assert approved.result.handler_executed is True
+    assert active_private_hosts(tmp_path) == (_LAN_HOST,)
 
 
 def test_authorize_tool_grant_revoke_list(tmp_path):
     tool = AuthorizeNetworkHostTool(_agent(tmp_path))
-    result = tool.execute({"action": "grant", "hosts": [_LAN_URL, "10.1.2.3:9000"], "reason": "用户点名监控 5 路数据源", "confirmed": True})
+    result = tool.execute({"action": "grant", "hosts": [_LAN_URL, "10.1.2.3:9000"], "reason": "用户点名监控 5 路数据源"})
     assert result.ok
     assert active_private_hosts(tmp_path) == ("10.1.2.3", _LAN_HOST)
     # 审计字段落盘
@@ -108,7 +131,7 @@ def test_authorize_tool_grant_revoke_list(tmp_path):
 def test_authorize_tool_rejects_always_blocked(tmp_path):
     tool = AuthorizeNetworkHostTool(_agent(tmp_path))
     for host in ("metadata.google.internal", "169.254.169.254"):
-        result = tool.execute({"action": "grant", "hosts": [host], "reason": "x", "confirmed": True})
+        result = tool.execute({"action": "grant", "hosts": [host], "reason": "x"})
         assert result.ok is False, host
         assert result.error_code == "NETWORK_ALWAYS_BLOCKED_HOST"
     assert active_private_hosts(tmp_path) == ()
@@ -117,8 +140,8 @@ def test_authorize_tool_rejects_always_blocked(tmp_path):
 
 def test_authorize_tool_requires_reason_and_hosts(tmp_path):
     tool = AuthorizeNetworkHostTool(_agent(tmp_path))
-    assert tool.execute({"action": "grant", "hosts": [_LAN_HOST], "confirmed": True}).error_code == "TOOL_INVALID_ARGUMENTS"
-    assert tool.execute({"action": "grant", "reason": "x", "confirmed": True}).error_code == "TOOL_INVALID_ARGUMENTS"
+    assert tool.execute({"action": "grant", "hosts": [_LAN_HOST]}).error_code == "TOOL_INVALID_ARGUMENTS"
+    assert tool.execute({"action": "grant", "reason": "x"}).error_code == "TOOL_INVALID_ARGUMENTS"
 
 
 # ---- boundary 接线:授权在 run 中途落盘,下一次工具调用就能看到(新鲜读,不走 init 缓存) ----
@@ -193,10 +216,6 @@ def test_end_to_end_authorize_then_fetch_private_host(tmp_path):
     from http.server import BaseHTTPRequestHandler, HTTPServer
     from pathlib import Path as _Path
 
-    from agent_py_agent.agent.tooling.registry_invoke import (
-        RegistryToolInvokeRequest,
-        invoke_registry_tool,
-    )
     from agent_py_agent.agent.tooling.web import WebFetchTool
 
     class _Handler(BaseHTTPRequestHandler):
@@ -222,17 +241,20 @@ def test_end_to_end_authorize_then_fetch_private_host(tmp_path):
         def invoke():
             params = SimpleNamespace(write_boundary=None, run_id="", task_attributes=None, delivery_contract=None)
             boundary = write_boundary_with_runtime_ledger(agent, params)
-            return invoke_registry_tool(RegistryToolInvokeRequest(
-                tool_name="web_fetch", payload={"tool": "web_fetch", "url": url, "mode": "json"},
-                tools=tools, workspace_root=_Path.cwd(), workspace_roots=None,
-                allowed_tools=["web_fetch"], write_boundary=boundary,
-            ))
+            return execute_canonical_test_call(
+                _Path.cwd(),
+                tools=tools,
+                tool_name="web_fetch",
+                arguments={"url": url, "mode": "json"},
+                allowed_tools=["web_fetch"],
+                write_boundary=boundary,
+            ).result
 
         blocked = invoke()
         assert blocked.ok is False and blocked.error_code == "NETWORK_PRIVATE_HOST_BLOCKED"
-        assert "authorize_network_host" in blocked.output
+        assert "authorize_network_host" in blocked.recovery_hint
         grant = AuthorizeNetworkHostTool(agent).execute(
-            {"action": "grant", "hosts": [f"127.0.0.1:{port}"], "reason": "e2e", "confirmed": True}
+            {"action": "grant", "hosts": [f"127.0.0.1:{port}"], "reason": "e2e"}
         )
         assert grant.ok
         fetched = invoke()  # 授权在 run 中途生效:同一条调用链立即放行并真取到数据

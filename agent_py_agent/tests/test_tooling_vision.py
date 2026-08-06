@@ -8,7 +8,7 @@
 5. 未配视觉模型 → TOOL_UNAVAILABLE（带配置指引），不崩、不影响其它工具。
 6. 图片不存在 → PATH_NOT_FOUND；格式不支持 → TOOL_INVALID_ARGUMENTS；超大 → ARTIFACT_TOO_LARGE。
 7. anthropic image block 构造正确：{"type":"image","source":{"type":"base64","media_type":..,"data":..}}。
-8. 精确 parameter_schema + required_parameters；analyze_image 注册进 registry 且在模型可见目录。
+8. 唯一完整 input_schema；analyze_image 注册进 registry 且在模型可见目录。
 9. 视觉模型调用失败（HTTP 错/空响应/坏 JSON）→ MODEL_UPSTREAM_FAILED，不崩。
 
 标杆：长期助手 tools/vision_tools.py（async + auxiliary 视觉路由）；这里适配 my-agent 同步工具，
@@ -32,6 +32,7 @@ from agent_py_agent.agent.tooling.vision_tools import (
     _vision_request_payload,
     vision_config_from_agent_config,
 )
+from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
 
 pytestmark = pytest.mark.integration
 
@@ -306,15 +307,14 @@ def test_no_question_uses_default_prompt(tmp_path: Path) -> None:
 
 
 def test_precise_schema_and_required() -> None:
-    spec = AnalyzeImageTool(VisionModelConfig()).spec
+    tool = AnalyzeImageTool(VisionModelConfig())
+    spec = tool.model_spec
     assert spec.name == "analyze_image"
     assert spec.category == "vision"
-    assert spec.effect == "read_only"
-    assert spec.parameter_schema == {
-        "image": {"type": "string"},
-        "question": {"type": "string"},
-    }
-    assert spec.required_parameters == ["image"]
+    assert tool.runtime_policy.effect_resolver.default_effect == "read_only"
+    assert spec.input_schema["properties"]["image"]["type"] == "string"
+    assert spec.input_schema["properties"]["question"]["type"] == "string"
+    assert spec.input_schema["required"] == ["image"]
 
 
 def test_registered_in_registry(tmp_path: Path) -> None:
@@ -356,8 +356,12 @@ def test_registered_even_without_vision_config(tmp_path: Path) -> None:
     registry = ToolRegistry(params)
     assert "analyze_image" in registry.tools
     assert "analyze_image" not in {spec.name for spec in registry.specs()}
-    result = registry.execute_call({"tool": "analyze_image", "image": "/x.png"})
-    assert result.error_code == "TOOL_UNAVAILABLE"
+    result = execute_registry_test_call(
+        registry,
+        "analyze_image",
+        {"image": "/x.png"},
+    )
+    assert result.error_code == "TOOL_NOT_IN_RUNTIME_SNAPSHOT"
 
 
 # --- 9. 视觉模型调用失败 → MODEL_UPSTREAM_FAILED ---------------------------
@@ -459,7 +463,7 @@ def test_vision_config_empty_not_configured() -> None:
 import email.message  # noqa: E402
 import urllib.request  # noqa: E402
 
-from agent_py_agent.agent.tooling.models import ToolExecutionResult  # noqa: E402
+from agent_py_agent.agent.tooling.models import ToolHandlerOutcome  # noqa: E402
 from agent_py_agent.agent.tooling.vision_tools import (  # noqa: E402
     _RedirectBlocked,
     _SSRFGuardingRedirectHandler,
@@ -521,7 +525,7 @@ def test_download_builds_ssrf_guarding_opener() -> None:
 def test_download_surfaces_redirect_ssrf_rejection() -> None:
     """重定向被网关拦时,_download 把网关的具体拒绝码原样透出(不吞成泛化错误)。"""
     tool = AnalyzeImageTool(_configured(), resolver=_resolver_to("93.184.216.34"))
-    blocked = ToolExecutionResult("analyze_image", False, "blocked", error_code="NETWORK_PRIVATE_IP_BLOCKED")
+    blocked = ToolHandlerOutcome("analyze_image", False, "blocked", error_code="NETWORK_PRIVATE_IP_BLOCKED")
 
     def spy_build_opener(*handlers):
         opener = MagicMock()

@@ -13,14 +13,22 @@ from ....action_protocol import subagent_dispatch_envelope_from_payload
 from ....common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
 from ....model_visible_refs import current_model_ref
 from ....runtime_errors import runtime_error_report
-from ....tooling.models import BaseTool, ToolExecutionResult
+from ....tooling.models import (
+    BaseTool,
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    ResourceScopePolicy,
+    ToolHandlerOutcome,
+    ToolInputPolicy,
+    ToolRuntimePolicy,
+)
 from ...parameters import _bool_param, _non_negative_int
 from ..run_scope import (
     remember_dispatched_orchestration_run_ids,
     remember_orchestration_run_ids,
 )
 from ..scope_resolution import dispatch_scope_resolution, scope_resolution_payload
-from ..tool_specs import build_dispatch_subagents_spec
+from ..tool_specs import build_dispatch_subagents_model_spec
 from .no_progress import dispatch_no_progress_payload
 from .params import DispatchExecutionPlan, DispatchParams
 from .payload import (
@@ -80,17 +88,28 @@ def _agent_workspace_root(agent: object) -> str:
 
 
 class DispatchSubagentsTool(BaseTool):
+    model_spec = build_dispatch_subagents_model_spec()
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy(
+            "mutating",
+            by_parameter=(("dry_run", (("true", "read_only"), ("false", "mutating"))),),
+        ),
+        idempotency_policy=IdempotencyPolicy("operation"),
+        resource_scopes=ResourceScopePolicy(parameter_names=("run_ids",)),
+        input_policy=ToolInputPolicy(
+            internal_parameters=("apply", "start_runners", "execute_runners", "no_probe"),
+        ),
+    )
 
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
-        self.spec = build_dispatch_subagents_spec()
 
-    def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         unsupported_error = _unsupported_execution_param_error(params)
         if unsupported_error:
             # 模型传了不支持的执行开关(apply/start_runners/execute_runners) → 改参数可修，
             # 给精确码而非无码兜底成 UNKNOWN_ERROR(否则模型以为该放弃而非移除多余参数重发)。
-            return ToolExecutionResult(
+            return ToolHandlerOutcome(
                 "dispatch_subagents", False, unsupported_error, error_code="TOOL_INVALID_ARGUMENTS"
             )
         request = self._request(params)
@@ -116,7 +135,7 @@ class DispatchSubagentsTool(BaseTool):
             payload["guidance_persist_errors"] = guidance_errors
         if load_error := getattr(self.agent, "_capability_config_load_error", None):
             payload["capability_config_load_error"] = load_error
-        return ToolExecutionResult("dispatch_subagents", True, json.dumps(payload, ensure_ascii=False, indent=2))
+        return ToolHandlerOutcome("dispatch_subagents", True, json.dumps(payload, ensure_ascii=False, indent=2))
 
     def _router(self) -> tuple[CapabilityConfig, CapabilityRouter]:
         cfg = _dispatch_capability_config(self.agent)

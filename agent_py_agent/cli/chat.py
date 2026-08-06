@@ -12,6 +12,7 @@ from ..agent.gateway_parts import (
     render_gateway_status,
     wait_for_gateway_running,
 )
+from ..agent.memory_api import request_memory_curator_for_session_best_effort
 from ..agent.session import SessionManager, generate_session_id
 
 # Public symbols used by chat CLI tests and helpers.
@@ -116,6 +117,8 @@ def _ensure_chat_memory_limit(args, agent) -> None:
         args.memory_limit = int(getattr(agent.config, "cli_chat_memory_limit", 5) or 0)
 
 
+# LLM: Local and Gateway chat share conversation/archive semantics; normal session exit only submits one best-effort Curator close reason.
+# 函数用途: 启动交互聊天并在正常关闭后登记统一后台会话提炼请求。
 def cmd_chat(args) -> int:
     agent = make_agent(args)
     _ensure_chat_memory_limit(args, agent)
@@ -137,7 +140,7 @@ def cmd_chat(args) -> int:
     prompt_files: list[str] = args.prompt_file or []
 
     if _has_prompt_toolkit() and not bool(getattr(args, "plain", False)):
-        return run_tui(params=TuiRunParams(
+        result = run_tui(params=TuiRunParams(
             agent=agent, args=args, use_gateway=use_gateway, paths=paths,
             runtime_inject=runtime_inject, prompt_files=prompt_files,
             conversation_history=state["conversation_history"],
@@ -154,16 +157,19 @@ def cmd_chat(args) -> int:
             session_manager=session_manager,
             current_session_id=current_session_id,
         ))
-    return run_plain(RunPlainConfig(
-        agent=agent, args=args, use_gateway=use_gateway, paths=paths,
-        runtime_inject=runtime_inject, prompt_files=prompt_files,
-        conversation_history=state["conversation_history"],
-        history_lock=state["history_lock"],
-        jobs=state["jobs"], state_lock=state["state_lock"],
-        build_history_context=build_history_context,
-        session_manager=session_manager,
-        current_session_id=current_session_id,
-    ))
+    else:
+        result = run_plain(RunPlainConfig(
+            agent=agent, args=args, use_gateway=use_gateway, paths=paths,
+            runtime_inject=runtime_inject, prompt_files=prompt_files,
+            conversation_history=state["conversation_history"],
+            history_lock=state["history_lock"],
+            jobs=state["jobs"], state_lock=state["state_lock"],
+            build_history_context=build_history_context,
+            session_manager=session_manager,
+            current_session_id=current_session_id,
+        ))
+    request_memory_curator_for_session_best_effort(agent, event="close")
+    return result
 
 
 render_gateway_status = render_gateway_status

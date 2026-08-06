@@ -14,7 +14,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
-from .models import ToolExecutionResult
+from .cancellation import (
+    ToolCancelled,
+    cancellation_requested,
+    register_cancellation_callback,
+)
+from .models import ToolHandlerOutcome
 from .web_html_preview import is_html_response, visible_html_text
 from .web_markdown import html_to_markdown
 
@@ -68,7 +73,7 @@ class PinResult:
     """resolve_pin 的结果:ip=网关校验并固定的连接 IP;error=网关拒绝(初始或某重定向目标不安全)。"""
 
     ip: str | None
-    error: ToolExecutionResult | None
+    error: ToolHandlerOutcome | None
 
 
 @dataclass(frozen=True)
@@ -90,7 +95,7 @@ class _HopReq:
 @dataclass(frozen=True)
 class _HopOutcome:
     redirect_to: str
-    result: RawResponseParts | ToolExecutionResult | None
+    result: RawResponseParts | ToolHandlerOutcome | None
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
@@ -144,14 +149,21 @@ def _redirect_target(resp: Any, url: str) -> str:
     return urljoin(url, location) if location else ""
 
 
-def _network_failure(tool: str, exc: BaseException) -> ToolExecutionResult:
+def _network_failure(tool: str, exc: BaseException) -> ToolHandlerOutcome:
+    if isinstance(exc, ToolCancelled) or cancellation_requested():
+        return ToolHandlerOutcome(
+            tool,
+            False,
+            "CANCELLED: HTTP 请求已取消。",
+            error_code="CANCELLED",
+        )
     if isinstance(exc, TimeoutError):
         # 网络失败带可重试错误码;无码会 fallback UNKNOWN_ERROR 误导模型"放弃报阻塞"(实测暴露)。
-        return ToolExecutionResult(tool, False, f"请求超时: {exc.__class__.__name__}", error_code="TOOL_TIMEOUT")
-    return ToolExecutionResult(tool, False, f"请求失败: {exc.__class__.__name__}", error_code="NETWORK_REQUEST_FAILED")
+        return ToolHandlerOutcome(tool, False, f"请求超时: {exc.__class__.__name__}", error_code="TOOL_TIMEOUT")
+    return ToolHandlerOutcome(tool, False, f"请求失败: {exc.__class__.__name__}", error_code="NETWORK_REQUEST_FAILED")
 
 
-def fetch_raw_response(request: FetchRawRequest, *, format_http_error, resolve_pin) -> RawResponseParts | ToolExecutionResult:
+def fetch_raw_response(request: FetchRawRequest, *, format_http_error, resolve_pin) -> RawResponseParts | ToolHandlerOutcome:
     """逐跳:每个 URL(含每个重定向目标)先过 resolve_pin(网关校验+取固定 IP),再 pin 到该 IP 连接。
 
     杜绝 SSRF 两条绕过:(1) DNS rebinding/TOCTOU——不让连接层重解析,连的就是网关校验过的 IP;
@@ -159,57 +171,74 @@ def fetch_raw_response(request: FetchRawRequest, *, format_http_error, resolve_p
     """
     url, body = request.url, request.data
     for _hop in range(_MAX_REDIRECTS + 1):
+        if cancellation_requested():
+            return _network_failure(request.tool, ToolCancelled("cancelled"))
         pin = resolve_pin(url)
         if pin.error is not None:
             return pin.error  # 初始或某重定向目标没过网关
         if not pin.ip:
-            return ToolExecutionResult(request.tool, False, "主机解析失败", error_code="NETWORK_REQUEST_FAILED")
+            return ToolHandlerOutcome(request.tool, False, "主机解析失败", error_code="NETWORK_REQUEST_FAILED")
         outcome = _do_hop(_HopReq(_target_for(url, pin.ip), request, url, body), format_http_error)
         if outcome.redirect_to:
             url, body = outcome.redirect_to, None
             continue
         return outcome.result
-    return ToolExecutionResult(request.tool, False, "重定向次数过多", error_code="TOO_MANY_REDIRECTS")
+    return ToolHandlerOutcome(request.tool, False, "重定向次数过多", error_code="TOO_MANY_REDIRECTS")
 
 
 def _do_hop(hop: _HopReq, format_http_error) -> _HopOutcome:
+    conn: http.client.HTTPConnection | None = None
     try:
         conn, resp = _send_pinned(hop)
-    except (TimeoutError, OSError, ssl.SSLError) as exc:
-        return _HopOutcome("", _network_failure(hop.request.tool, exc))
-    try:
-        location = _redirect_target(resp, hop.url)
-        if location:
-            resp.read()  # 排空再换下一跳
-            return _HopOutcome(location, None)
-        return _HopOutcome("", _finalize_hop(hop, resp, format_http_error))
-    except (TimeoutError, OSError, ssl.SSLError) as exc:
-        # 连接成功后读取 response body 仍可能超时/断流；它和 connect/request 阶段
-        # 使用同一结构化网络错误，不能逃到 harvester 外层打印整段 traceback。
+        with register_cancellation_callback(conn.close):
+            if cancellation_requested():
+                raise ToolCancelled("cancelled")
+            location = _redirect_target(resp, hop.url)
+            if location:
+                resp.read()  # 排空再换下一跳
+                return _HopOutcome(location, None)
+            return _HopOutcome("", _finalize_hop(hop, resp, format_http_error))
+    except (ToolCancelled, TimeoutError, OSError, ssl.SSLError) as exc:
+        # 连接或读取被取消/超时/断流时使用同一结构化网络结果。
         return _HopOutcome("", _network_failure(hop.request.tool, exc))
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
-def _send_pinned(hop: _HopReq) -> tuple[Any, Any]:
+def _send_pinned(hop: _HopReq) -> tuple[http.client.HTTPConnection, Any]:
+    """Open one pinned hop while making a blocked request cancellable."""
+
     conn = _open_pinned(hop.target, hop.request.timeout)
-    headers = dict(hop.request.headers)
-    headers.setdefault("Host", hop.target.host)
-    conn.request(hop.request.method, _request_path(hop.url), body=hop.body, headers=headers)
-    return conn, conn.getresponse()
+    try:
+        with register_cancellation_callback(conn.close):
+            if cancellation_requested():
+                raise ToolCancelled("cancelled")
+            headers = dict(hop.request.headers)
+            headers.setdefault("Host", hop.target.host)
+            conn.request(
+                hop.request.method,
+                _request_path(hop.url),
+                body=hop.body,
+                headers=headers,
+            )
+            return conn, conn.getresponse()
+    except BaseException:
+        conn.close()
+        raise
 
 
-def _finalize_hop(hop: _HopReq, resp: Any, format_http_error) -> RawResponseParts | ToolExecutionResult:
+def _finalize_hop(hop: _HopReq, resp: Any, format_http_error) -> RawResponseParts | ToolHandlerOutcome:
     body = resp.read(hop.request.max_bytes + 1)
     if len(body) > hop.request.max_bytes:
-        return ToolExecutionResult(hop.request.tool, False, f"响应体过大，最多 {hop.request.max_bytes} 字节", error_code="ARTIFACT_TOO_LARGE")
+        return ToolHandlerOutcome(hop.request.tool, False, f"响应体过大，最多 {hop.request.max_bytes} 字节", error_code="ARTIFACT_TOO_LARGE")
     if resp.status >= 400:
         err = urllib.error.HTTPError(hop.url, resp.status, resp.reason or "", resp.headers, io.BytesIO(body))
         return format_http_error(hop.request.tool, err, _MIN_RESPONSE_PREVIEW_CHARS)
     return RawResponseParts(resp.status, resp.headers, body, hop.url)
 
 
-def format_fetch_result(request: FetchFormatRequest) -> ToolExecutionResult:
+def format_fetch_result(request: FetchFormatRequest) -> ToolHandlerOutcome:
     content_type = content_type_from_headers(request.response.headers)
     if not is_textual_response(request.response.headers):
         artifact = save_web_artifact(
@@ -218,7 +247,7 @@ def format_fetch_result(request: FetchFormatRequest) -> ToolExecutionResult:
             body=request.response.body,
             content_type=content_type,
         )
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             request.tool,
             True,
             f"status={request.response.status}\ncontent_type={content_type}\nbytes={len(request.response.body)}\nartifact_ref={artifact['path']}",
@@ -237,7 +266,7 @@ def format_fetch_result(request: FetchFormatRequest) -> ToolExecutionResult:
     )
     if truncated:
         output += "\n... 已截断"
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         request.tool,
         True,
         output,

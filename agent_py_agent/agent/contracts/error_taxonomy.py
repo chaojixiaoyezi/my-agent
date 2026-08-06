@@ -485,6 +485,16 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "让运行时补入传输参数，不要重写 URL、请求体、游标、来源编号或文档引用。"
         ),
     ),
+    "AUDIT_SOURCE_REBIND_REQUIRED": ErrorContract(
+        code="AUDIT_SOURCE_REBIND_REQUIRED",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint=(
+            "已运行来源的地址、推进方式或文件记录边界发生改变；不能让旧 source_id "
+            "静默继承旧游标。由 Audit 协调者保留旧来源记录，并用新 source_id 重新发布来源。"
+        ),
+    ),
     "AUDIT_DELIVERY_REF_INVALID": ErrorContract(
         code="AUDIT_DELIVERY_REF_INVALID",
         category="validation",
@@ -619,6 +629,131 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
         recovery_hint="工具参数不合法；按工具 schema 修参数后可重试。",
     ),
+    "TOOL_INTERNAL_PARAMETER_FORBIDDEN": ErrorContract(
+        code="TOOL_INTERNAL_PARAMETER_FORBIDDEN",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="调用包含仅供宿主注入的内部参数；删除该字段，按模型可见 schema 重新调用。",
+    ),
+    "TOOL_TRUSTED_PARAMETER_CONFLICT": ErrorContract(
+        code="TOOL_TRUSTED_PARAMETER_CONFLICT",
+        category="permission",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint=(
+            "模型参数与本 run 的可信宿主绑定冲突；删除冲突字段，"
+            "让宿主注入当前 owner、任务或来源范围后重新调用。"
+        ),
+    ),
+    "TOOL_SCHEMA_HASH_MISMATCH": ErrorContract(
+        code="TOOL_SCHEMA_HASH_MISMATCH",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_CALL.value,
+        recovery_hint="调用使用的 schema 与本 run 固定快照不一致；按当前快照重新生成完整调用。",
+    ),
+    "TOOL_RUN_SNAPSHOT_MISMATCH": ErrorContract(
+        code="TOOL_RUN_SNAPSHOT_MISMATCH",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_CALL_IDENTITY.value,
+        recovery_hint="调用不属于当前 run 的工具快照；不得跨 run 重放，需在当前 run 重新生成调用。",
+    ),
+    "TOOL_NOT_IN_RUNTIME_SNAPSHOT": ErrorContract(
+        code="TOOL_NOT_IN_RUNTIME_SNAPSHOT",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.CHOOSE_REGISTERED_TOOL.value,
+        recovery_hint="工具不在本 run 固定运行时快照中；只能选择当前快照已暴露的工具。",
+    ),
+    "TOOL_NOT_MODEL_VISIBLE": ErrorContract(
+        code="TOOL_NOT_MODEL_VISIBLE",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="该工具是宿主内部能力，模型无权直接调用；改用模型可见工具或宿主工作流。",
+    ),
+    "TOOL_PROTOCOL_RUN_MISMATCH": ErrorContract(
+        code="TOOL_PROTOCOL_RUN_MISMATCH",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_CALL_IDENTITY.value,
+        recovery_hint="协议快照与运行时快照不属于同一 run；停止执行并重建当前 run 快照。",
+    ),
+    "TOOL_PROTOCOL_CAPABILITY_UNAVAILABLE": ErrorContract(
+        code="TOOL_PROTOCOL_CAPABILITY_UNAVAILABLE",
+        category="tool",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint=(
+            "当前 provider/endpoint/model/stream 组合未证明支持配置的原生工具协议；"
+            "显式改用已验证的 native 部署，或把该部署配置为 text 协议后新建 run。"
+        ),
+    ),
+    "PROTOCOL_VIOLATION": ErrorContract(
+        code="PROTOCOL_VIOLATION",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_CALL.value,
+        recovery_hint="响应违反本 run 固定工具协议；按已选协议重新生成完整结构化调用，正文不能取得执行权威。",
+    ),
+    "TOOL_CHOICE_VIOLATION": ErrorContract(
+        code="TOOL_CHOICE_VIOLATION",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_CALL.value,
+        recovery_hint="模型调用与宿主固定的 tool_choice 不一致；遵守 none/required/specific 约束重新生成。",
+    ),
+    "REQUIRED_ACTION_TOOL_NOT_ALLOWED": ErrorContract(
+        code="REQUIRED_ACTION_TOOL_NOT_ALLOWED",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="该工具不能为当前 required action 提供证据；改用 allowed_tools 中的工具或结构化报告阻塞。",
+    ),
+    "REQUIRED_ACTION_EFFECT_CEILING_EXCEEDED": ErrorContract(
+        code="REQUIRED_ACTION_EFFECT_CEILING_EXCEEDED",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint="动作副作用超过 required action 允许上限；不得升级执行，需改用更安全方案或请求用户确认。",
+    ),
+    "COMMAND_CLASSIFICATION_UNKNOWN": ErrorContract(
+        code="COMMAND_CLASSIFICATION_UNKNOWN",
+        category="approval",
+        retryable=True,
+        recommended_action=RecoveryAction.REQUEST_APPROVAL.value,
+        recovery_hint="命令无法可靠分类；先请求精确审批，或改成可证明只读的结构化操作。",
+    ),
+    "COMMAND_DANGEROUS_DENIED": ErrorContract(
+        code="COMMAND_DANGEROUS_DENIED",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="命令被确定为危险且策略禁止执行；停止该命令，改用安全、范围受限的方案。",
+    ),
+    "PATH_URL_COMMAND_DENIED": ErrorContract(
+        code="PATH_URL_COMMAND_DENIED",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="路径、URL 或命令联合安全门拒绝了调用；按结构化 findings 修正目标或更换方案。",
+    ),
+    "TOOL_GUARDRAIL_DENIED": ErrorContract(
+        code="TOOL_GUARDRAIL_DENIED",
+        category="tool",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="重复失败或无进展调用已被阻止；必须更换参数、工具或数据来源，不能原样重试。",
+    ),
+    "TOOL_RATE_LIMIT_DENIED": ErrorContract(
+        code="TOOL_RATE_LIMIT_DENIED",
+        category="resource",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
+        recovery_hint="工具调用超过当前速率或预算；等待结构化退避时间后再试，不能用别名绕过。",
+    ),
     "SCHEDULER_INVALID_SCHEDULE": ErrorContract(
         code="SCHEDULER_INVALID_SCHEDULE",
         category="tool",
@@ -743,14 +878,7 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         category="tool",
         retryable=True,
         recommended_action=RecoveryAction.REPAIR_TOOL_CALL.value,
-        recovery_hint="流式工具调用里的 inline content 过长并被提前截断；改用 WRITE_FILE_RAW、data_base64、apply_patch 或更小 content 块。",
-    ),
-    "WRITE_FILE_RAW_MALFORMED": ErrorContract(
-        code="WRITE_FILE_RAW_MALFORMED",
-        category="tool",
-        retryable=True,
-        recommended_action=RecoveryAction.REPAIR_TOOL_CALL.value,
-        recovery_hint="WRITE_FILE_RAW 原文块缺少完整 header 或结束标记；重新输出完整 raw block，或改用 write_file append 小块续写。",
+        recovery_hint="流式工具调用里的 inline content 过长并被提前截断；改用 write_file append 小块、data_base64 或 apply_patch。",
     ),
     "OFFSET_OUT_OF_RANGE": ErrorContract(
         code="OFFSET_OUT_OF_RANGE",
@@ -944,7 +1072,7 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REQUEST_CAPABILITY.value,
         recovery_hint=(
             "目标是内网/私网地址,默认出站防护拦截(授权缺口,不是网络故障)。若这正是用户任务指定的目标:"
-            "主代理→用 authorize_network_host(confirmed=true)授权后重试;子代理→用 capability_request"
+            "主代理→调用 authorize_network_host，并通过统一危险动作审批门后重试；子代理→用 capability_request"
             "(capability_type=network, network_scope=[该主机])申请,等父代理授权期间继续其他工作,"
             "不要因此放弃任务。与任务无关的内网地址才换公网来源。"
         ),
@@ -1044,6 +1172,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=True,
         recommended_action=RecoveryAction.RETRY.value,
         recovery_hint="模型上游失败；可重试，连续失败时切换模型或暂停等待。",
+    ),
+    "MODEL_SCHEMA_INVALID": ErrorContract(
+        code="MODEL_SCHEMA_INVALID",
+        category="model",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY.value,
+        recovery_hint="模型没有按强制结构化 schema 返回唯一结果；可以重试一次，连续失败时切换模型或后端。",
     ),
     "ARTIFACT_MISSING": ErrorContract(
         code="ARTIFACT_MISSING",
@@ -1249,6 +1384,20 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=True,
         recommended_action=RecoveryAction.RECOVER_FROM_CHECKPOINT.value,
         recovery_hint="当前上下文需要先 compact/resume；这个工具调用已经登记为未执行，恢复后再从同一目标继续。",
+    ),
+    "RUNTIME_TRANSITION_DEFERRED": ErrorContract(
+        code="RUNTIME_TRANSITION_DEFERRED",
+        category="runtime",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_CALL.value,
+        recovery_hint="前一个工具改变了耐久运行上下文；从新快照重新生成并发起这个尚未执行的调用。",
+    ),
+    "TOOL_CALL_LIMIT_DEFERRED": ErrorContract(
+        code="TOOL_CALL_LIMIT_DEFERRED",
+        category="runtime",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_CALL.value,
+        recovery_hint="本轮调用超过宿主上限；下一模型轮按最新结构化事实重新发起尚未执行的调用。",
     ),
     "ORCHESTRATION_CALL_DEFERRED": ErrorContract(
         code="ORCHESTRATION_CALL_DEFERRED",
@@ -1523,6 +1672,27 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.RECOVER_FROM_CHECKPOINT.value,
         recovery_hint="工具输出超过上下文来自结构化记录；使用 artifact/chunk/cursor 继续读取，不要整块塞回模型。",
     ),
+    "TOOL_OUTPUT_ARCHIVE_FAILED": ErrorContract(
+        code="TOOL_OUTPUT_ARCHIVE_FAILED",
+        category="persistence",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="工具已经运行但输出归档失败；保留 operation 状态并报告阻塞，不要盲目重放可能产生副作用的调用。",
+    ),
+    "TOOL_PERSISTENCE_FAILED": ErrorContract(
+        code="TOOL_PERSISTENCE_FAILED",
+        category="persistence",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="工具业务动作已进入持久化阶段但未能证明完整落盘；保留 operation 状态并核对后再决定，不要盲目重放。",
+    ),
+    "TOOL_ONE_SHOT_ALREADY_EXECUTED": ErrorContract(
+        code="TOOL_ONE_SHOT_ALREADY_EXECUTED",
+        category="tool",
+        retryable=False,
+        recommended_action=RecoveryAction.CONTINUE.value,
+        recovery_hint="同一轮的一次性工具已经执行；读取前一个配对 ToolResult 继续，不要重复调用。",
+    ),
     "VERIFICATION_FAILED": ErrorContract(
         code="VERIFICATION_FAILED",
         category="acceptance",
@@ -1645,13 +1815,6 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REPAIR_TOOL_CALL.value,
         recovery_hint="工具调用 payload 结构不合法（缺 tool 名或字段类型错）；按工具 schema 重新构造一个完整调用。",
     ),
-    "WRITE_FILE_RAW_INVALID": ErrorContract(
-        code="WRITE_FILE_RAW_INVALID",
-        category="tool",
-        retryable=True,
-        recommended_action=RecoveryAction.REPAIR_TOOL_CALL.value,
-        recovery_hint="WRITE_FILE_RAW 原文块格式无效；重新输出带完整 header 与结束标记的 raw block，或改用 write_file 小块续写。",
-    ),
     "TOOL_EXECUTION_FAILED": ErrorContract(
         code="TOOL_EXECUTION_FAILED",
         category="tool",
@@ -1665,6 +1828,46 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=True,
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
         recovery_hint="数据源的记录数组或游标结构无法唯一确定；核对接口结构并显式提供记录字段、游标字段和游标语义后重试。",
+    ),
+    "SOURCE_ADAPTER_INVALID": ErrorContract(
+        code="SOURCE_ADAPTER_INVALID",
+        category="source",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint=(
+            "动态来源缺少已验证的请求、适配器或 Audit 归属，或适配器结构不合法；"
+            "回到来源准备阶段修正并重新发布结构化来源配置，不能由工作者猜测协议。"
+        ),
+    ),
+    "SOURCE_RECORD_KEYS_REQUIRED": ErrorContract(
+        code="SOURCE_RECORD_KEYS_REQUIRED",
+        category="source",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint=(
+            "来源适配器必须为每条完整记录提供一一对应、非空且唯一的来源位置键；"
+            "修正适配器的 record_keys 映射后再重试。"
+        ),
+    ),
+    "SOURCE_RECORD_KEY_MISMATCH": ErrorContract(
+        code="SOURCE_RECORD_KEY_MISMATCH",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint=(
+            "当前采集批次的记录与持久来源位置键不能一一对应；保持游标不提交，"
+            "修复来源适配器或重新绑定来源后再继续，不能按数组下标猜键。"
+        ),
+    ),
+    "SOURCE_RECORD_INDEX_UNAVAILABLE": ErrorContract(
+        code="SOURCE_RECORD_INDEX_UNAVAILABLE",
+        category="state",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
+        recovery_hint=(
+            "来源记录去重索引暂时不可用；保持当前游标和批次不提交，恢复索引后安全重试，"
+            "不得绕过去重账继续消费。"
+        ),
     ),
     "SOURCE_REQUEST_INVALID": ErrorContract(
         code="SOURCE_REQUEST_INVALID",
@@ -1828,7 +2031,7 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recovery_hint="请求的状态迁移不满足状态机条件；按 required_condition 修复后重新迁移。",
     ),
     # —— 运行时门(tool_manifest / tool_effect / tool_mode)拦截码 ——
-    # 这些是工具被调用「之前」、在 execute_registry_call 的 gate pipeline 里产出的拦截码，
+    # 这些是工具被调用「之前」、在统一 ActionPolicy/ToolExecutor 门中产出的拦截码，
     # 此前**全部未注册** → error_contract 回落成 UNKNOWN_ERROR(retryable=False/report_blocker)。
     # 实锤(日志运营 2 小时):log_alert_poll 声明 mutating 却漏 idempotency_scope,被
     # tool_manifest 门 0.00s 判 TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING,兜底成 UNKNOWN_ERROR,

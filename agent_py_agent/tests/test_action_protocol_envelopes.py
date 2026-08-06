@@ -1,166 +1,18 @@
 from agent_py_agent.agent.action_protocol import (
-    ACTION_PROTOCOL_SCHEMA_VERSION,
     ArtifactRef,
     EvidenceRef,
     PathRef,
     RunScope,
     SubagentResultEnvelope,
     SubagentScheduleEnvelope,
-    ToolCallEnvelope,
-    ToolCallEnvelopePayloadRequest,
-    ToolCallResultEnvelope,
     decode_action_envelope,
     path_refs_from_subagent_refs,
     subagent_schedule_envelope_from_payload,
-    tool_call_envelope_from_payload,
 )
 
 
-def test_tool_call_envelope_round_trips_with_explicit_scope_fields():
-    scope = RunScope(
-        request_id="req-1",
-        session_id="sess-1",
-        task_id="task-1",
-        run_id="run-1",
-        owner_type="subagent_run",
-        owner_id="run-1",
-        delivery_evidence_refs=(
-            "audit://watch-1/candidate/1:0",
-            "audit://watch-1/candidate/2:0",
-        ),
-    )
-    envelope = ToolCallEnvelope(
-        call_id="call-1",
-        source="text_protocol",
-        tool_name="read_file",
-        input={"path": "README.md"},
-        scope=scope,
-        idempotency_key="idem-1",
-    )
-
-    payload = envelope.to_dict()
-    decoded = decode_action_envelope(payload)
-
-    assert payload["schema_version"] == ACTION_PROTOCOL_SCHEMA_VERSION
-    assert payload["kind"] == "tool_call"
-    assert payload["operation_id"] == "tool_call:call-1"
-    assert "reserved" not in payload
-    assert "reserved" not in payload["scope"]
-    assert payload["idempotency_key"] == "idem-1"
-    assert isinstance(decoded, ToolCallEnvelope)
-    assert decoded.call_id == "call-1"
-    assert decoded.operation_id == "tool_call:call-1"
-    assert decoded.scope.owner_type == "subagent_run"
-    assert decoded.scope.delivery_evidence_refs == (
-        "audit://watch-1/candidate/1:0",
-        "audit://watch-1/candidate/2:0",
-    )
-    assert decoded.input == {"path": "README.md"}
-
-
-def test_tool_call_operation_identity_is_namespaced_by_runtime_attempt():
-    envelope = ToolCallEnvelope(
-        call_id="provider-call-1",
-        source="model_tool_call",
-        tool_name="read_file",
-        input={"path": "README.md"},
-        scope=RunScope(
-            request_id="request-1",
-            attempt_id="attempt-1",
-            task_id="task-1",
-            run_id="run-1",
-        ),
-    )
-
-    decoded = decode_action_envelope(envelope.to_dict())
-    next_attempt = ToolCallEnvelope(
-        call_id="provider-call-1",
-        source="model_tool_call",
-        tool_name="read_file",
-        input={"path": "README.md"},
-        scope=RunScope(
-            request_id="request-1",
-            attempt_id="attempt-2",
-            task_id="task-1",
-            run_id="run-1",
-        ),
-    )
-
-    assert envelope.operation_id == "tool_call:attempt-1:provider-call-1"
-    assert envelope.idempotency_key.startswith("idem:operation:")
-    assert envelope.idempotency_key != next_attempt.idempotency_key
-    assert isinstance(decoded, ToolCallEnvelope)
-    assert decoded.scope.attempt_id == "attempt-1"
-    assert decoded.operation_id == envelope.operation_id
-
-
-def test_tool_call_envelope_from_payload_separates_tool_name_from_args():
-    envelope = tool_call_envelope_from_payload(
-        ToolCallEnvelopePayloadRequest(
-            payload={"tool": "write_file", "path": "out.txt", "content": "hello"},
-            call_id="call-write",
-            source="text_protocol",
-        )
-    )
-
-    assert envelope.tool_name == "write_file"
-    assert envelope.input == {"path": "out.txt", "content": "hello"}
-    assert envelope.call_id == "call-write"
-    assert envelope.operation_id == "tool_call:call-write"
-    assert envelope.source == "text_protocol"
-
-
-def test_tool_call_envelope_preserves_status_when_it_is_a_tool_argument():
-    envelope = tool_call_envelope_from_payload(
-        ToolCallEnvelopePayloadRequest(
-            payload={
-                "tool": "cancel_subagents",
-                "root_id": "root-1",
-                "status": ["RUNNING"],
-            },
-            call_id="call-cancel",
-            source="text_protocol",
-        )
-    )
-
-    assert envelope.input == {
-        "root_id": "root-1",
-        "status": ["RUNNING"],
-    }
-
-
-def test_flat_tool_arguments_cannot_override_typed_operation_identity():
-    envelope = tool_call_envelope_from_payload(
-        ToolCallEnvelopePayloadRequest(
-            payload={
-                "tool": "mcp__demo__echo",
-                "operation_id": "tool-argument-operation",
-                "idempotency_key": "tool-argument-key",
-            },
-            call_id="provider-call-7",
-            source="model_tool_call",
-            operation_id="trusted-operation-7",
-            idempotency_key="trusted-key-7",
-        )
-    )
-
-    assert envelope.operation_id == "trusted-operation-7"
-    assert envelope.idempotency_key == "trusted-key-7"
-    assert envelope.input == {
-        "operation_id": "tool-argument-operation",
-        "idempotency_key": "tool-argument-key",
-    }
-
-
-def test_tool_call_result_and_subagent_result_envelopes_are_decodeable():
+def test_subagent_result_envelope_is_decodeable():
     scope = RunScope(task_id="task-1", run_id="run-1")
-    result = ToolCallResultEnvelope(
-        call_id="call-1",
-        tool="read_file",
-        ok=True,
-        output_ref="memory_archive/artifacts/tool-call-1.txt",
-        scope=scope,
-    )
     subagent = SubagentResultEnvelope(
         result_id="result-1",
         run_id="run-1",
@@ -179,12 +31,8 @@ def test_tool_call_result_and_subagent_result_envelopes_are_decodeable():
         scope=scope,
     )
 
-    decoded_result = decode_action_envelope(result.to_dict())
     decoded_subagent = decode_action_envelope(subagent.to_dict())
 
-    assert isinstance(decoded_result, ToolCallResultEnvelope)
-    assert decoded_result.operation_id == "tool_call_result:call-1"
-    assert decoded_result.output_ref == "memory_archive/artifacts/tool-call-1.txt"
     assert isinstance(decoded_subagent, SubagentResultEnvelope)
     assert decoded_subagent.operation_id == "subagent_result:result-1"
     assert decoded_subagent.actual_tools == ["read_file"]

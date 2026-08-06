@@ -1,46 +1,82 @@
-"""召回 lesson 的陈旧标注钉子测试。"""
+"""正式 Lesson 陈旧提示只读持久 metadata.updated_at，不依赖文件 mtime。"""
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
-from agent_py_agent.agent.prompting_parts.builder import _lesson_age_caveat
-
-
-def test_fresh_lesson_has_no_caveat(tmp_path: Path) -> None:
-    path = tmp_path / "lesson.md"
-    path.write_text("内容", encoding="utf-8")
-    os.utime(path, (1000.0, 1000.0))
-    # now 仅比 mtime 晚 1 天 < 7 天阈值
-    assert _lesson_age_caveat(path, now=1000.0 + 86400.0) == ""
+from agent_py_agent.agent.memory_store.lessons import LESSON_SCHEMA_VERSION, LessonRecord
+from agent_py_agent.agent.memory_store.recall import MemoryRecallScope, routed_lesson_records
 
 
-def test_stale_lesson_gets_caveat(tmp_path: Path) -> None:
-    path = tmp_path / "lesson.md"
-    path.write_text("内容", encoding="utf-8")
-    os.utime(path, (1000.0, 1000.0))
-    caveat = _lesson_age_caveat(path, now=1000.0 + 10 * 86400.0)
-    assert "memory-age-caveat" in caveat
-    assert "10 天" in caveat
+class _Repository:
+    def __init__(self, record: LessonRecord) -> None:
+        self.record = record
+
+    def list(self):
+        return [self.record]
 
 
-def test_missing_file_no_crash(tmp_path: Path) -> None:
-    assert _lesson_age_caveat(tmp_path / "nope.md", now=1_000_000.0) == ""
+def _lesson(updated_at: str) -> LessonRecord:
+    return LessonRecord(
+        schema_version=LESSON_SCHEMA_VERSION,
+        lesson_id="lesson-1",
+        candidate_id="candidate-1",
+        subject_key="lesson.age",
+        scope={"scope_type": "global", "scope_key": "global"},
+        content="历史教训正文。",
+        occurrence_count=2,
+        evidence_groups=("task:a", "task:b"),
+        source_task_ids=("a", "b"),
+        source_run_ids=(),
+        created_at=updated_at,
+        updated_at=updated_at,
+        path="memory/lessons/age.md",
+    )
 
 
-def test_custom_stale_threshold(tmp_path: Path) -> None:
-    path = tmp_path / "lesson.md"
-    path.write_text("内容", encoding="utf-8")
-    os.utime(path, (1000.0, 1000.0))
-    # 3 天龄，阈值 2 天 → 标注；阈值 5 天 → 不标注
-    assert _lesson_age_caveat(path, now=1000.0 + 3 * 86400.0, stale_days=2.0) != ""
-    assert _lesson_age_caveat(path, now=1000.0 + 3 * 86400.0, stale_days=5.0) == ""
+def _recall(record: LessonRecord, *, now: datetime, stale_days: float = 7.0):
+    return routed_lesson_records(
+        _Repository(record),
+        read_paths=[record.path],
+        scope=MemoryRecallScope.from_runtime(),
+        stale_days=stale_days,
+        now=now,
+    )[0].content
 
 
-def test_zero_threshold_disables_caveat(tmp_path: Path) -> None:
-    # 配置 home_lesson_stale_caveat_days=0 表示关闭提示，再老也不标注
-    path = tmp_path / "lesson.md"
-    path.write_text("内容", encoding="utf-8")
-    os.utime(path, (1000.0, 1000.0))
-    assert _lesson_age_caveat(path, now=1000.0 + 100 * 86400.0, stale_days=0.0) == ""
+def test_fresh_lesson_has_no_caveat() -> None:
+    now = datetime.now(timezone.utc)
+
+    assert "memory-age-caveat" not in _recall(_lesson((now - timedelta(days=1)).isoformat()), now=now)
+
+
+def test_stale_lesson_gets_caveat() -> None:
+    now = datetime.now(timezone.utc)
+    content = _recall(_lesson((now - timedelta(days=10)).isoformat()), now=now)
+
+    assert "memory-age-caveat" in content
+    assert "10 天" in content
+
+
+def test_invalid_metadata_time_gets_fail_closed_caveat() -> None:
+    content = _recall(_lesson("not-an-iso-time"), now=datetime.now(timezone.utc))
+
+    assert "更新时间不可验证" in content
+
+
+def test_custom_stale_threshold() -> None:
+    now = datetime.now(timezone.utc)
+    lesson = _lesson((now - timedelta(days=3)).isoformat())
+
+    assert "memory-age-caveat" in _recall(lesson, now=now, stale_days=2.0)
+    assert "memory-age-caveat" not in _recall(lesson, now=now, stale_days=5.0)
+
+
+def test_zero_threshold_disables_caveat() -> None:
+    now = datetime.now(timezone.utc)
+
+    assert "memory-age-caveat" not in _recall(
+        _lesson((now - timedelta(days=100)).isoformat()),
+        now=now,
+        stale_days=0.0,
+    )

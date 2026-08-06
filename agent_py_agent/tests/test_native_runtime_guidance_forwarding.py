@@ -18,7 +18,12 @@ from agent_py_agent.agent.agent_core.tool_ir_guidance import (
     trailing_runtime_guidance,
 )
 from agent_py_agent.agent.agent_core.tool_model_generation import _native_provider_messages
-from agent_py_agent.agent.backends.tool_ir import AssistantTurn, ToolCall, ToolResult
+from agent_py_agent.agent.backends.tool_ir import AssistantTurn
+from agent_py_agent.tests._tool_runtime_harness import (
+    canonical_history_call,
+    canonical_history_result,
+    make_test_protocol_snapshot,
+)
 
 
 def _native_agent(root: Path, *, protocol: str = "native", backend: str = "anthropic_compatible"):
@@ -61,7 +66,9 @@ def test_trailing_guidance_skips_subagent_result_and_assistant_round_markers():
         "[SUBAGENT_RESULT]\n{...}\n[/SUBAGENT_RESULT]",
         "[tool-loop-guardrail-hint]\n护栏提示应当转发",
     ]
-    assert trailing_runtime_guidance(tool_context) == ["[tool-loop-guardrail-hint]\n护栏提示应当转发"]
+    assert trailing_runtime_guidance(tool_context) == [
+        "[tool-loop-guardrail-hint]\n护栏提示应当转发"
+    ]
 
 
 def test_trailing_guidance_handles_non_list_and_empty():
@@ -75,8 +82,14 @@ def test_trailing_guidance_handles_non_list_and_empty():
 
 def test_append_adds_single_trailing_user_text_message():
     messages = [
-        {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "write_file", "input": {}}]},
-        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]},
+        {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "t1", "name": "write_file", "input": {}}],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}],
+        },
     ]
     tool_context = [
         "[tool-record round=1 index=1]\n{...}\n[tool-output-record round=1 index=1]\nok",
@@ -92,25 +105,42 @@ def test_append_adds_single_trailing_user_text_message():
     assert len(messages) == 2
 
 
-def test_append_noop_when_no_guidance_or_no_messages():
-    messages = [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}]
-    only_tool_records = ["[tool-record round=1 index=1]\n{...}\n[tool-output-record round=1 index=1]\nok"]
+def test_append_noop_without_guidance_and_forwards_guidance_without_ir_messages():
+    messages = [
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}
+    ]
+    only_tool_records = [
+        "[tool-record round=1 index=1]\n{...}\n[tool-output-record round=1 index=1]\nok"
+    ]
     assert append_runtime_guidance_user_message(messages, only_tool_records) == messages
-    assert append_runtime_guidance_user_message([], ["[runtime-policy-guidance]\nx"]) == []
+    assert append_runtime_guidance_user_message([], ["[runtime-policy-guidance]\nx"]) == [
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "[runtime-policy-guidance]\nx"}],
+        }
+    ]
 
 
 # --- integration: _native_provider_messages forwards guidance ----------------
 
 
 def _ir_history_with_one_call():
-    turn = AssistantTurn(text="", tool_calls=[ToolCall(id="toolu_w", name="write_file", input={"path": "lru.py"})])
-    result = ToolResult(tool_call_id="toolu_w", content="[tool=write_file; status=ok]", is_error=False)
+    call = canonical_history_call(
+        "write_file",
+        {"path": "lru.py"},
+        call_id="toolu_w",
+    )
+    turn = AssistantTurn(text="", tool_calls=[call])
+    result = canonical_history_result(call, "[tool=write_file; status=ok]")
     return [turn, result]
 
 
 def test_native_provider_messages_appends_runtime_guidance(tmp_path):
     agent = _native_agent(tmp_path)
     params = SimpleNamespace(
+        tool_protocol_snapshot=make_test_protocol_snapshot(
+            run_id="run-1", source_protocol="native"
+        ),
         tool_ir_history=_ir_history_with_one_call(),
         tool_context=[
             "[tool-record round=1 index=1]\n{...}\n[tool-output-record round=1 index=1]\nok",
@@ -129,18 +159,51 @@ def test_native_provider_messages_appends_runtime_guidance(tmp_path):
 def test_native_provider_messages_no_guidance_keeps_pairs_only(tmp_path):
     agent = _native_agent(tmp_path)
     params = SimpleNamespace(
+        tool_protocol_snapshot=make_test_protocol_snapshot(
+            run_id="run-1", source_protocol="native"
+        ),
         tool_ir_history=_ir_history_with_one_call(),
         # only a tool-record at the tail → nothing to forward
-        tool_context=["[tool-record round=1 index=1]\n{...}\n[tool-output-record round=1 index=1]\nok"],
+        tool_context=[
+            "[tool-record round=1 index=1]\n{...}\n[tool-output-record round=1 index=1]\nok"
+        ],
     )
     messages = _native_provider_messages(agent, params)
     assert [m["role"] for m in messages] == ["assistant", "user"]
+
+
+def test_native_provider_messages_forwards_first_turn_guidance_without_ir(tmp_path):
+    agent = _native_agent(tmp_path)
+    params = SimpleNamespace(
+        tool_protocol_snapshot=make_test_protocol_snapshot(
+            run_id="run-first", source_protocol="native"
+        ),
+        tool_ir_history=[],
+        live_archive_state={},
+        tool_context=["[tool-protocol-violation]\n上一轮正文不是可执行调用，请按结构化协议重试。"],
+    )
+
+    first = _native_provider_messages(agent, params)
+    assert first == [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "[tool-protocol-violation]\n上一轮正文不是可执行调用，请按结构化协议重试。",
+                }
+            ],
+        }
+    ]
+    # The exact guidance is sent only once across model retries.
+    assert _native_provider_messages(agent, params) is None
 
 
 def test_text_protocol_unaffected_by_guidance_forwarding(tmp_path):
     # text protocol → _native_provider_messages returns None, no structured messages at all.
     agent = _native_agent(tmp_path, protocol="text")
     params = SimpleNamespace(
+        tool_protocol_snapshot=make_test_protocol_snapshot(run_id="run-1", source_protocol="text"),
         tool_ir_history=_ir_history_with_one_call(),
         tool_context=["[runtime-policy-guidance]\nx"],
     )

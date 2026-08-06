@@ -208,35 +208,31 @@ def test_tool_execution_gate_finding_codes_are_registered():
     被 tool_manifest 门拦成 TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING→UNKNOWN_ERROR 即此)。
     这条钉子把"门产出的 finding code 必须注册"也守住,补上扫描盲区。
 
-    扫描范围跟随 registry_runtime_gate_pipeline 的强制门及其直接子门，包括 tool_call、manifest、
-    path/command/owner scope、guardrail、rate limit、effect、approval binding 和管线自身。
+    扫描范围跟随唯一 ActionPolicy 和 Provider adapter 的强制门及其直接子门，包括
+    Schema、path/command/owner scope、guardrail、rate limit、effect 和 approval binding。
     不能再用只列 manifest/effect 两个文件的窄名单，否则真实门已正确拒绝，错误原因仍会在
-    ToolExecutionResult 中静默降级成 UNKNOWN_ERROR。
+    ToolHandlerOutcome 中静默降级成 UNKNOWN_ERROR。
     """
     from agent_py_agent.agent.contracts.error_taxonomy import error_contract
-    from agent_py_agent.agent.contracts.gates.adapters import _tool_protocol_finding
-
     gate_files = [
-        AGENT_ROOT / "contracts" / "gates" / "gate_pipeline.py",
-        AGENT_ROOT / "contracts" / "gates" / "adapters.py",
-        AGENT_ROOT / "contracts" / "gates" / "tool_manifest.py",
-        AGENT_ROOT / "contracts" / "gates" / "path_url_command.py",
+        AGENT_ROOT / "tooling" / "action_policy.py",
+            AGENT_ROOT / "contracts" / "gates" / "gate_pipeline.py",
+            AGENT_ROOT / "contracts" / "gates" / "adapters.py",
+            AGENT_ROOT / "contracts" / "gates" / "path_url_command.py",
         AGENT_ROOT / "contracts" / "gates" / "command_policy.py",
         AGENT_ROOT / "path_access_policy.py",
         AGENT_ROOT / "contracts" / "gates" / "tool_guardrail.py",
         AGENT_ROOT / "contracts" / "gates" / "tool_rate_limit.py",
-        AGENT_ROOT / "contracts" / "gates" / "tool_effects.py",
-        AGENT_ROOT / "contracts" / "gates" / "tool_approval_binding.py",
+            AGENT_ROOT / "contracts" / "gates" / "tool_approval_binding.py",
     ]
     used: set[str] = set()
     for path in gate_files:
         used.update(_literal_gate_codes(path))
 
-    protocol_source = (AGENT_ROOT / "contracts" / "tool_protocol_v2.py").read_text(encoding="utf-8")
-    protocol_findings = re.findall(r'''findings\.append\(["']([a-z_]+)["']\)''', protocol_source)
-    used.update(_tool_protocol_finding(code).code for code in protocol_findings)
-    used.add(_tool_protocol_finding("artifact_refs[0].artifact_id_required").code)
-    used.add(_tool_protocol_finding("artifact_refs[0].path_required").code)
+    adapter_source = (
+        AGENT_ROOT / "backends" / "tool_protocol_adapter.py"
+    ).read_text(encoding="utf-8")
+    used.update(re.findall(r'''["']([A-Z][A-Z0-9_]+)["']''', adapter_source))
 
     missing = sorted(
         code for code in used if code != "UNKNOWN_ERROR" and error_contract(code).code != code
@@ -303,58 +299,76 @@ def _uppercase_code_literals(node: ast.AST | None) -> set[str]:
 
 
 def test_all_tool_effects_are_valid():
-    """所有工具 spec 的 effect 必须是合法值(read_only/mutating/dangerous)。
+    """Literal EffectResolverPolicy defaults must use the canonical vocabulary."""
 
-    无效 effect(如曾经的 effect="write")会被 tool_manifest gate 判 TOOL_MANIFEST_EFFECT_INVALID
-    → DENY，工具【从未能执行】(remember 曾因此对强模型完全不可用,直到 effect
-    改 mutating + idempotency_scope="operation" 才修通)。现有工具单测直接调 execute 绕过了 gate，
-    抓不到这类 spec 错误——这条钉子用静态扫描守住"effect 写对值"。
-    """
-    from agent_py_agent.agent.contracts.gates.tool_manifest import VALID_TOOL_EFFECTS
-
-    pattern = re.compile(r"""effect\s*=\s*["']([a-z_]+)["']""")
+    valid_effects = {"read_only", "mutating", "dangerous"}
     invalid: dict[str, list[str]] = {}
     for path in _production_files():
-        for match in pattern.finditer(path.read_text(encoding="utf-8")):
-            value = match.group(1)
-            if value not in VALID_TOOL_EFFECTS:
-                invalid.setdefault(value, []).append(path.name)
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or _call_name(node) != "EffectResolverPolicy":
+                continue
+            keywords = {item.arg: item.value for item in node.keywords if item.arg}
+            candidate = node.args[0] if node.args else keywords.get("default_effect")
+            value = _literal_string(candidate)
+            if value and value not in valid_effects:
+                invalid.setdefault(value, []).append(f"{path.name}:{node.lineno}")
     assert not invalid, (
-        f"这些 effect 值不合法(只允许 {sorted(VALID_TOOL_EFFECTS)}),"
-        f"会被 tool_manifest gate 拦死导致工具不可用: {invalid}"
+        f"这些 effect 值不合法(只允许 {sorted(valid_effects)}): {invalid}"
     )
 
 
-def test_all_literal_side_effect_tool_specs_declare_idempotency_scope():
-    """静态守住所有内置 ToolSpec：有副作用就必须进入统一操作账本。"""
-    from agent_py_agent.agent.contracts.gates.tool_manifest import (
-        SIDE_EFFECT_TOOL_EFFECTS,
-        VALID_IDEMPOTENCY_SCOPES,
-    )
+def test_all_literal_side_effect_runtime_policies_declare_idempotency_scope():
+    """Static guard: every literal side-effect policy enters the operation ledger."""
+
+    side_effects = {"mutating", "dangerous"}
+    valid_scopes = {"operation", "business"}
 
     missing: list[str] = []
     invalid: list[str] = []
     for path in _production_files():
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Call) or _call_name(node) != "ToolSpec":
+            if not isinstance(node, ast.Call) or _call_name(node) != "ToolRuntimePolicy":
                 continue
             keywords = {
                 item.arg: item.value
                 for item in node.keywords
                 if item.arg is not None
             }
-            effect = _literal_string(keywords.get("effect"))
-            if effect not in SIDE_EFFECT_TOOL_EFFECTS:
+            resolver = keywords.get("effect_resolver")
+            if not isinstance(resolver, ast.Call) or _call_name(resolver) != "EffectResolverPolicy":
                 continue
-            scope = _literal_string(keywords.get("idempotency_scope"))
+            resolver_keywords = {
+                item.arg: item.value for item in resolver.keywords if item.arg
+            }
+            effect_node = (
+                resolver.args[0]
+                if resolver.args
+                else resolver_keywords.get("default_effect")
+            )
+            effect = _literal_string(effect_node)
+            if effect not in side_effects:
+                continue
+            idempotency = keywords.get("idempotency_policy")
+            scope = ""
+            if isinstance(idempotency, ast.Call) and _call_name(idempotency) == "IdempotencyPolicy":
+                idempotency_keywords = {
+                    item.arg: item.value for item in idempotency.keywords if item.arg
+                }
+                scope_node = (
+                    idempotency.args[0]
+                    if idempotency.args
+                    else idempotency_keywords.get("scope")
+                )
+                scope = _literal_string(scope_node)
             location = f"{path.name}:{node.lineno}"
             if not scope:
                 missing.append(location)
-            elif scope not in VALID_IDEMPOTENCY_SCOPES:
+            elif scope not in valid_scopes:
                 invalid.append(f"{location}={scope}")
-    assert not missing, f"副作用 ToolSpec 未声明 idempotency_scope: {missing}"
-    assert not invalid, f"副作用 ToolSpec 的 idempotency_scope 非法: {invalid}"
+    assert not missing, f"副作用 ToolRuntimePolicy 未声明 idempotency scope: {missing}"
+    assert not invalid, f"副作用 ToolRuntimePolicy 的 idempotency scope 非法: {invalid}"
 
 
 def _literal_string(node: ast.AST | None) -> str:

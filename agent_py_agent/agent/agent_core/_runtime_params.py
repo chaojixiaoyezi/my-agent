@@ -1,16 +1,15 @@
-
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
 
 from ..action_protocol import RunScope
+from ..concurrency.interrupt import is_interrupted
+from ..tooling.cancellation import CancellationToken
 
 
 @dataclass(frozen=True)
 class FinalizeContext:
-
     user_prompt: str
     final_prompt: str
     final_response: Any
@@ -41,11 +40,11 @@ class FinalizeContext:
     # 子代理 task_local 回合的 compact 阈值覆盖依赖这个字段；来源是 run params 的 context_scope。
     context_scope: str = "default"
     active_turn_user_inputs: list[dict[str, object]] = field(default_factory=list)
+    tool_runtime_evidence: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class ToolLoopExecuteParams:
-
     user_prompt: str
     memories: list
     runtime_injections: list
@@ -68,6 +67,14 @@ class ToolLoopExecuteParams:
     attempt_id: str = ""
     # 会话运行时 run snapshot: catalog, search, native Schema and execution share one tool universe.
     tool_runtime_snapshot: Any = None
+    # The provider capability and native/text decision are fixed once per run.
+    tool_protocol_snapshot: Any = None
+    # The existing EffectiveContractSnapshot remains the sole task obligation authority.
+    effective_contract_snapshot: Any = None
+    # One host-owned token follows this run through shell/MCP/HTTP/long-poll boundaries.
+    cancellation_token: CancellationToken = field(
+        default_factory=lambda: CancellationToken(_external_check=is_interrupted)
+    )
     tool_rounds: int = 0
     save: bool | None = None
     live_archive_state: dict[str, object] = field(default_factory=dict)
@@ -101,7 +108,6 @@ class ToolLoopExecuteParams:
 
 @dataclass(frozen=True)
 class CompressionContext:
-
     user_prompt: str
     memories: list
     runtime_injections: list
@@ -115,7 +121,6 @@ class CompressionContext:
 
 @dataclass(frozen=True)
 class ArchiveRunParams:
-
     do_save: bool
     user_prompt: str
     final_response: Any
@@ -130,7 +135,6 @@ class ArchiveRunParams:
 
 @dataclass(frozen=True)
 class EstimateTokenParams:
-
     user_prompt: str
     runtime_injections: list
     memories: list

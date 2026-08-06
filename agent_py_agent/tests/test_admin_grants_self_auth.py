@@ -1,6 +1,6 @@
 """F11④ 自授权漏洞验收:owner-scoped agent 无法自写一张 bypass 授权。
 
-端到端走 ToolRegistry.execute_call:owner-scoped(降权)场景下用 write_file 写
+端到端走 canonical Tool Gateway:owner-scoped(降权)场景下用 write_file 写
 `<my_agent_home>/admin_grants/grant_x.json`(想给自己发 owner.full_access)必须明确拒绝。
 显式绝对路径不能静默改写到其他位置后谎报成功。
 """
@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
+from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
 
 
 def _registry(workspace: Path, owner_scope_root: str) -> ToolRegistry:
@@ -51,17 +52,19 @@ def test_self_authorize_is_rejected_without_path_relocation(tmp_path, monkeypatc
     home, owner_home, workspace, admin_grant_path = _setup(tmp_path, monkeypatch)
     task_output = owner_home / "tasks" / "t1" / "output"
     registry = _registry(workspace, str(owner_home))
-    result = registry.execute_call(
-        {"tool": "write_file", "path": str(admin_grant_path), "content": _EVIL},
+    result = execute_registry_test_call(
+        registry,
+        "write_file",
+        {"path": str(admin_grant_path), "content": _EVIL},
         write_boundary={"task_output_dir": str(task_output)},
     )
     assert not admin_grant_path.exists()
     assert not list(task_output.rglob("grant_evil.json"))
     assert result.ok is False
     assert result.error_code == "PATH_ADMIN_GRANTS_BLOCKED"
-    assert result.failure_stage == "runtime_gate"
+    assert result.failure_stage == "authorization"
     assert result.handler_executed is False
-    finding = result.result_envelope["runtime_gate"]["findings"][0]
+    finding = result.metadata["action_decision"]["evidence"]["gate"]["findings"][0]
     assert finding["evidence"]["resolved_path"] == str(admin_grant_path.resolve())
 
 
@@ -69,8 +72,10 @@ def test_self_authorize_blocked_without_task_ctx(tmp_path, monkeypatch) -> None:
     """无任务上下文(①归一不触发):write_file 写 admin_grants → 被 owner 墙硬拦,没写成。"""
     home, owner_home, workspace, admin_grant_path = _setup(tmp_path, monkeypatch)
     registry = _registry(workspace, str(owner_home))
-    result = registry.execute_call(
-        {"tool": "write_file", "path": str(admin_grant_path), "content": _EVIL},
+    result = execute_registry_test_call(
+        registry,
+        "write_file",
+        {"path": str(admin_grant_path), "content": _EVIL},
         write_boundary=None,
     )
     assert not admin_grant_path.exists()

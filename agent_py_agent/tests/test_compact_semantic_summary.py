@@ -20,7 +20,7 @@ from agent_py_agent.agent.agent_core.runtime.loop_models import (
 )
 from agent_py_agent.agent.agent_core.runtime.loop_support import _tool_loop_execute_params
 from agent_py_agent.agent.backends.base import ModelResponse
-from agent_py_agent.agent.backends.tool_ir import AssistantTurn, ToolCall, ToolResult
+from agent_py_agent.agent.backends.tool_ir import AssistantTurn
 from agent_py_agent.agent.memory_archive.compact_semantic_summary import (
     LiveToolHistorySummaryRequest,
     SemanticSummaryConfig,
@@ -28,6 +28,10 @@ from agent_py_agent.agent.memory_archive.compact_semantic_summary import (
     semantic_summary_config,
     summarize_carried_tool_context,
     summarize_live_tool_history,
+)
+from agent_py_agent.tests._tool_runtime_harness import (
+    canonical_history_call,
+    canonical_history_result,
 )
 
 _SUMMARY_MARK = "[compact-semantic-summary]"
@@ -253,20 +257,19 @@ def test_summary_timeout_falls_back_to_mechanical_path() -> None:
 
 def test_live_tool_history_summary_reuses_native_messages_and_preserves_refs() -> None:
     backend = _LiveSummaryBackend()
+    call = canonical_history_call(
+        "read_file",
+        {"path": "/srv/project/checkpoint.json"},
+        call_id="toolu_exact_123",
+    )
     history = [
         AssistantTurn(
             text="继续",
-            tool_calls=[
-                ToolCall(
-                    id="toolu_exact_123",
-                    name="read_file",
-                    input={"path": "/srv/project/checkpoint.json"},
-                )
-            ],
+            tool_calls=[call],
         ),
-        ToolResult(
-            tool_call_id="toolu_exact_123",
-            content='{"request_id":"req_exact_123","status":"running"}',
+        canonical_history_result(
+            call,
+            '{"request_id":"req_exact_123","status":"running"}',
         ),
     ]
 

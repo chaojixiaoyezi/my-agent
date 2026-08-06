@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 """Forward non-tool runtime guidance into native tool-use messages.
@@ -75,9 +74,11 @@ def append_runtime_guidance_user_message(
 ) -> list[dict[str, Any]]:
     """把待转发的运行时指引接成一条收尾 ``user`` 文本消息追加到 ``messages``（native 专用）。
 
-    要求 ``messages`` 末尾已是一条 ``user`` tool_result 消息（IR 正常出站形态）——指引
+    有 IR 工具历史时，``messages`` 末尾通常是一条 ``user`` tool_result 消息；指引
     单独成一条新的 user 文本消息，紧跟其后，不与 tool_result 同条（保持 tool_result
-    块纯净，规避 Anthropic 对 user content 混排的边界）。无指引或 messages 为空时原样返回。
+    块纯净，规避 Anthropic 对 user content 混排的边界）。第一轮或协议修复轮可能还没有
+    IR 历史；此时也必须返回单条 user 指引，否则 native prompt 旁路会让模型
+    永远收不到纠偏。只有无指引时原样返回。
 
     切片口径取决于是否传入 ``seen``：
     - 传入 ``seen``（跨轮去重集合）：走 :func:`unforwarded_runtime_guidance`，转发全表里
@@ -91,7 +92,7 @@ def append_runtime_guidance_user_message(
         if seen is not None
         else trailing_runtime_guidance(tool_context)
     )
-    if not guidance or not messages:
+    if not guidance:
         return messages
     text = "\n\n".join(guidance)
     if not text.strip():

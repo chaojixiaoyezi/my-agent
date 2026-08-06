@@ -72,7 +72,7 @@ def test_dispatch_routes_new_capability_request_then_reruns_worker(monkeypatch):
         root = Path(td)
         backend = CapabilityThenAcceptedBackend()
         monkeypatch.setattr("agent_py_agent.agent.core.get_backend", lambda _name, _config: backend)
-        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        cfg = AgentConfig(tool_protocol="text", model_backend="echo", subagent_workspace="subs")
         agent = SimpleAgent(cfg, root)
         task = agent.subagents.create_run(
             goal="需要受控 shell 能力，授权后再继续执行并报告 refs。",
@@ -95,7 +95,9 @@ def test_dispatch_routes_new_capability_request_then_reruns_worker(monkeypatch):
 
         assert backend.calls == 2
         assert [item.step for item in report.records].count("runner") == 2
-        assert any(item.step == "capability_route" and item.action == "granted" for item in report.records)
+        assert any(
+            item.step == "capability_route" and item.action == "granted" for item in report.records
+        )
         assert loaded.capability_requests[0].status == "GRANTED"
         assert loaded.capability_requests[0].requested_commands == ["pwd", "rm"]
         assert loaded.capability_grants[0].command_allowlist == ["pwd"]
@@ -109,7 +111,7 @@ def test_capability_grant_reopens_exact_blocked_conversation_child(monkeypatch):
         root = Path(td)
         backend = CapabilityThenAcceptedBackend()
         monkeypatch.setattr("agent_py_agent.agent.core.get_backend", lambda _name, _config: backend)
-        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        cfg = AgentConfig(tool_protocol="text", model_backend="echo", subagent_workspace="subs")
         agent = SimpleAgent(cfg, root)
         task = agent.subagents.create_run(
             goal="需要受控 shell 能力，授权后继续同一个子任务。",
@@ -157,9 +159,7 @@ def test_capability_grant_reopens_exact_blocked_conversation_child(monkeypatch):
 
         assert backend.calls == 2
         assert [item.step for item in report.records].count("runner") == 2
-        assert not any(
-            item.action == "conversation_lifecycle_blocked" for item in report.records
-        )
+        assert not any(item.action == "conversation_lifecycle_blocked" for item in report.records)
         assert loaded.status == "DONE"
         child_links = {
             link.task_id: link for link in agent.conversation_store.task_links(thread.thread_id)
@@ -172,7 +172,7 @@ def test_capability_grant_does_not_resurrect_stopped_conversation_child():
 
     with tempfile.TemporaryDirectory() as td:
         agent = SimpleAgent(
-            AgentConfig(model_backend="echo", subagent_workspace="subs"),
+            AgentConfig(tool_protocol="text", model_backend="echo", subagent_workspace="subs"),
             Path(td),
         )
         task = agent.subagents.create_run(goal="等待能力后继续", allowed_tools=["read_file"])
@@ -216,7 +216,7 @@ def test_dispatch_reruns_incomplete_output_after_write_grant(monkeypatch):
         root = Path(td)
         backend = IncompleteOutputThenAcceptedBackend()
         monkeypatch.setattr("agent_py_agent.agent.core.get_backend", lambda _name, _config: backend)
-        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        cfg = AgentConfig(tool_protocol="text", model_backend="echo", subagent_workspace="subs")
         agent = SimpleAgent(cfg, root)
         task = agent.subagents.create_run(
             goal="写一个完整的单文件 HTML。",
@@ -240,7 +240,9 @@ def test_dispatch_reruns_incomplete_output_after_write_grant(monkeypatch):
 
         assert backend.calls == 2
         assert [item.step for item in report.records].count("runner") == 2
-        assert any(item.step == "capability_route" and item.action == "granted" for item in report.records)
+        assert any(
+            item.step == "capability_route" and item.action == "granted" for item in report.records
+        )
         assert "授权后续跑" in backend.prompts[1]
         assert "不要从头重做任务" in backend.prompts[1]
         assert loaded.capability_requests[0].status == "GRANTED"

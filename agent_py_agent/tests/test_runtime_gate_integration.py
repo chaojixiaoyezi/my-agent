@@ -1,58 +1,51 @@
 from __future__ import annotations
 
 import json
+import time
+from dataclasses import replace
 
-from agent_py_agent.agent.contracts.gates.tool_effects import args_hash_for_call
-from agent_py_agent.agent.tooling.models import BaseTool, ToolExecutionResult, ToolSpec
-from agent_py_agent.agent.tooling.registry_execution import (
-    ExecuteRegistryCallParams,
-    execute_registry_call,
+import pytest
+
+from agent_py_agent.agent.tooling.models import (
+    BaseTool,
+    ToolHandlerOutcome,
+    ToolInputPolicy,
+    ToolModelSpec,
+)
+from agent_py_agent.agent.tooling.runtime_contracts import tool_arguments_hash
+from agent_py_agent.tests._tool_runtime_harness import (
+    execute_canonical_test_call,
+    make_test_model_spec,
+    make_test_runtime_policy,
 )
 
 
 class EchoTool(BaseTool):
-    spec = ToolSpec(
-        name="echo",
+    model_spec = make_test_model_spec(
+        "echo",
         category="utility",
-        effect="read_only",
         description="Return params for tests.",
-        use_cases=[],
-        avoid_when=[],
-        keywords=[],
-        parameters={},
-        input_schema={"type": "object", "additionalProperties": True},
+        input_schema={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": True,
+        },
     )
+    runtime_policy = make_test_runtime_policy("read_only")
 
     def execute(self, params):
-        return ToolExecutionResult("echo", True, json.dumps(params, sort_keys=True))
+        return ToolHandlerOutcome("echo", True, json.dumps(params, sort_keys=True))
 
 
-class MissingManifestTool(BaseTool):
-    spec = ToolSpec(
-        name="missing_manifest",
-        category="utility",
-        description="Intentionally incomplete manifest for tests.",
-        use_cases=[],
-        avoid_when=[],
-        keywords=[],
-        parameters={},
-        input_schema={"type": "object", "additionalProperties": True},
-    )
-
-    def execute(self, params):
-        return ToolExecutionResult("missing_manifest", True, "should not execute")
+class DangerousEchoTool(EchoTool):
+    runtime_policy = make_test_runtime_policy("dangerous")
 
 
 class ProtocolNameCollisionTool(BaseTool):
-    spec = ToolSpec(
-        name="protocol_name_collision",
+    model_spec = make_test_model_spec(
+        "protocol_name_collision",
         category="utility",
-        effect="read_only",
         description="Validate arguments whose names also occur in outer protocols.",
-        use_cases=[],
-        avoid_when=[],
-        keywords=[],
-        parameters={"kind": "kind", "run_id": "run id"},
         input_schema={
             "type": "object",
             "properties": {
@@ -63,9 +56,10 @@ class ProtocolNameCollisionTool(BaseTool):
             "additionalProperties": False,
         },
     )
+    runtime_policy = make_test_runtime_policy("read_only")
 
     def execute(self, params):
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             "protocol_name_collision",
             True,
             json.dumps(params, sort_keys=True),
@@ -73,26 +67,24 @@ class ProtocolNameCollisionTool(BaseTool):
 
 
 class LocalFileUrlTool(BaseTool):
-    spec = ToolSpec(
-        name="local_file_url",
+    model_spec = make_test_model_spec(
+        "local_file_url",
         category="utility",
-        effect="read_only",
         description="Read one explicitly declared local file URL for tests.",
-        use_cases=[],
-        avoid_when=[],
-        keywords=[],
-        parameters={"url": "local file URL"},
         input_schema={
             "type": "object",
             "properties": {"url": {"type": "string"}},
             "required": ["url"],
             "additionalProperties": False,
         },
-        local_file_url_parameters=("url",),
+    )
+    runtime_policy = replace(
+        make_test_runtime_policy("read_only"),
+        input_policy=ToolInputPolicy(local_file_url_parameters=("url",)),
     )
 
     def execute(self, params):
-        return ToolExecutionResult("local_file_url", True, json.dumps(params, sort_keys=True))
+        return ToolHandlerOutcome("local_file_url", True, json.dumps(params, sort_keys=True))
 
 
 def _execute(
@@ -105,35 +97,36 @@ def _execute(
     owner_scope_root="",
 ):
     selected = tool or EchoTool()
-    return execute_registry_call(
-        ExecuteRegistryCallParams(
-            payload=payload,
-            tools={selected.spec.name: selected},
-            workspace_root=tmp_path,
-            workspace_roots=[tmp_path],
-            write_boundary=write_boundary,
-            path_dangerous_roots=dangerous_roots or [],
-            owner_scope_root=owner_scope_root,
-        )
-    )
+    arguments = dict(payload)
+    tool_name = str(arguments.pop("tool"))
+    return execute_canonical_test_call(
+        tmp_path,
+        tools={selected.model_spec.name: selected},
+        tool_name=tool_name,
+        arguments=arguments,
+        write_boundary=write_boundary,
+        path_dangerous_roots=tuple(dangerous_roots or ()),
+        owner_scope_root=owner_scope_root,
+    ).result
 
 
 def test_registry_execution_returns_runtime_gate_denial_for_unknown_tool(tmp_path):
     result = _execute(tmp_path, {"tool": "magic_tool", "value": 1})
 
     assert result.ok is False
-    assert result.result_envelope["runtime_gate"]["status"] == "DENY"
-    assert result.result_envelope["runtime_gate"]["findings"][0]["code"] == "TOOL_NOT_REGISTERED"
+    assert result.error_code == "TOOL_NOT_IN_RUNTIME_SNAPSHOT"
+    assert result.handler_executed is False
 
 
 def test_registry_execution_records_runtime_gate_allow_for_executed_tool(tmp_path):
     result = _execute(tmp_path, {"tool": "echo", "value": 1})
 
     assert result.ok is True
-    gate = result.result_envelope["runtime_gate"]
-    assert gate["status"] == "ALLOW"
+    gate = result.metadata["action_decision"]
+    assert gate["status"] == "allow"
     assert gate["evidence"]["tool_name"] == "echo"
-    assert "tool_rate_limit" in gate["evidence"]["executed_gates"]
+    assert gate["evidence"]["schema_hash"].startswith("sha256:")
+    assert result.handler_executed is True
 
 
 def test_registry_validates_protocol_named_tool_arguments_and_strips_outer_metadata(tmp_path):
@@ -142,16 +135,24 @@ def test_registry_validates_protocol_named_tool_arguments_and_strips_outer_metad
         {
             "tool": "protocol_name_collision",
             "kind": "fact",
-            "run_id": "7",
-            "idempotency_key": "outer-only",
+            "run_id": 7,
         },
         tool=ProtocolNameCollisionTool(),
     )
 
     assert result.ok is True
     assert json.loads(result.output) == {"kind": "fact", "run_id": 7}
-    assert result.result_envelope["input_coercions"] == [
-        {"path": "$.run_id", "source_type": "string", "target_type": "integer"}
+    assert result.metadata["input_sources"] == [
+        {
+            "path": "$.kind",
+            "source": "model_proposed",
+            "source_ref": "tool_call:test-call#/input/kind",
+        },
+        {
+            "path": "$.run_id",
+            "source": "model_proposed",
+            "source_ref": "tool_call:test-call#/input/run_id",
+        },
     ]
 
 
@@ -168,7 +169,7 @@ def test_registry_rejects_invalid_protocol_named_tool_argument_before_execute(tm
 
     assert result.ok is False
     assert result.error_code == "TOOL_INVALID_ARGUMENTS"
-    assert result.result_envelope["runtime_gate"]["findings"][0]["evidence"]["issues"] == [
+    assert result.metadata["action_decision"]["evidence"]["issues"] == [
         {
             "keyword": "enum",
             "path": "$.kind",
@@ -180,35 +181,34 @@ def test_registry_rejects_invalid_protocol_named_tool_argument_before_execute(tm
 
 def test_registry_execution_blocks_when_runtime_rate_limit_is_exhausted(tmp_path):
     payload = {"tool": "echo", "value": 1}
+    now = time.time()
     result = _execute(
         tmp_path,
         payload,
         write_boundary={
-            "now": 10.0,
             "tool_rate_limit_policy": {"max_calls": 1, "window_seconds": 60},
             "tool_rate_limit_records": [
                 {
                     "tool_name": "echo",
-                    "args_hash": args_hash_for_call({"value": 1}),
-                    "attempt_timestamps": [9.0],
+                    "args_hash": tool_arguments_hash({"value": 1}),
+                    "attempt_timestamps": [now - 1],
                 }
             ],
         },
     )
 
     assert result.ok is False
-    assert result.result_envelope["runtime_gate"]["gate"] == "tool_rate_limit"
+    assert result.error_code == "TOOL_RATE_LIMIT_EXCEEDED"
+    assert result.metadata["action_decision"]["evidence"]["gate"]["gate"] == "tool_rate_limit"
 
 
 def test_registry_execution_blocks_tool_with_incomplete_manifest(tmp_path):
-    result = _execute(
-        tmp_path,
-        {"tool": "missing_manifest", "value": 1},
-        tool=MissingManifestTool(),
-    )
-
-    assert result.ok is False
-    assert result.result_envelope["runtime_gate"]["gate"] == "tool_manifest"
+    with pytest.raises(ValueError, match="description is required"):
+        ToolModelSpec(
+            name="missing_manifest",
+            description="",
+            input_schema={"type": "object"},
+        )
 
 
 def test_registry_execution_blocks_path_gate_before_tool_execute(tmp_path):
@@ -220,18 +220,18 @@ def test_registry_execution_blocks_path_gate_before_tool_execute(tmp_path):
     outside.write_text("secret", encoding="utf-8")
     (workspace / "link").symlink_to(outside)
 
-    result = execute_registry_call(
-        ExecuteRegistryCallParams(
-            payload={"tool": "echo", "path": "link"},
-            tools={"echo": EchoTool()},
-            workspace_root=workspace,
-            workspace_roots=[workspace],
-            path_dangerous_roots=[str(danger)],
-        )
-    )
+    result = execute_canonical_test_call(
+        workspace,
+        tools={"echo": EchoTool()},
+        tool_name="echo",
+        arguments={"path": "link"},
+        workspace_roots=(workspace,),
+        path_dangerous_roots=(str(danger),),
+    ).result
 
     assert result.ok is False
-    assert result.result_envelope["runtime_gate"]["gate"] == "path_url_command"
+    assert result.handler_executed is False
+    assert result.metadata["action_decision"]["evidence"]["gate"]["gate"] == "path_url_command"
 
 
 def test_registry_execution_blocks_cross_owner_path_before_tool_execute(tmp_path):
@@ -250,9 +250,8 @@ def test_registry_execution_blocks_cross_owner_path_before_tool_execute(tmp_path
 
     assert result.ok is False
     assert result.error_code == "PATH_CROSS_OWNER_BLOCKED"
-    assert result.result_envelope["runtime_gate"]["gate"] == "path_url_command"
-    assert result.result_envelope["tool_execution"]["failure_stage"] == "runtime_gate"
-    assert result.result_envelope["tool_execution"]["handler_executed"] is False
+    assert result.metadata["action_decision"]["evidence"]["gate"]["gate"] == "path_url_command"
+    assert result.handler_executed is False
 
 
 def test_registry_execution_applies_manifest_file_url_policy_without_bypass(tmp_path):
@@ -281,7 +280,7 @@ def test_registry_execution_applies_manifest_file_url_policy_without_bypass(tmp_
     assert allowed.ok is True
     assert cross_owner.ok is False
     assert cross_owner.error_code == "PATH_CROSS_OWNER_BLOCKED"
-    assert cross_owner.result_envelope["tool_execution"]["handler_executed"] is False
+    assert cross_owner.handler_executed is False
 
 
 def test_registry_execution_allows_trusted_workspace_outside_owner_home(tmp_path):
@@ -299,20 +298,16 @@ def test_registry_execution_allows_trusted_workspace_outside_owner_home(tmp_path
     )
 
     assert result.ok is True
-    assert result.result_envelope["tool_execution"]["handler_executed"] is True
+    assert result.handler_executed is True
 
 
 def test_registry_execution_blocks_dangerous_real_tool_without_approval(tmp_path):
     result = _execute(
         tmp_path,
-        {
-            "tool": "echo",
-            "value": 1,
-            "mode": "real",
-            "idempotency_key": "idem-echo-dangerous",
-        },
-        write_boundary={"tool_effects": {"echo": "dangerous"}},
+        {"tool": "echo", "value": 1},
+        tool=DangerousEchoTool(),
     )
 
     assert result.ok is False
-    assert result.result_envelope["runtime_gate"]["status"] == "NEED_APPROVAL"
+    assert result.status == "approval_required"
+    assert result.metadata["action_decision"]["status"] == "ask"

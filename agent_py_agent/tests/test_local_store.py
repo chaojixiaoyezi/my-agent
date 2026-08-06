@@ -68,7 +68,9 @@ def test_locked_jsonl_append_preserves_complete_lines_under_threads():
             for index in range(per_thread):
                 append_jsonl(path, {"worker": worker, "index": index})
 
-        threads = [threading.Thread(target=writer, args=(worker,)) for worker in range(total_threads)]
+        threads = [
+            threading.Thread(target=writer, args=(worker,)) for worker in range(total_threads)
+        ]
         for thread in threads:
             thread.start()
         for thread in threads:
@@ -78,7 +80,9 @@ def test_locked_jsonl_append_preserves_complete_lines_under_threads():
         records = [json.loads(line) for line in lines]
 
         assert len(records) == total_threads * per_thread
-        assert len({(item["worker"], item["index"]) for item in records}) == total_threads * per_thread
+        assert (
+            len({(item["worker"], item["index"]) for item in records}) == total_threads * per_thread
+        )
 
 
 def test_local_store_like_search_when_fts_disabled():
@@ -176,6 +180,7 @@ def test_subagent_flow_indexes_logs_to_local_store():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
+            tool_protocol="text",
             model_backend="echo",
             memory_path="memory.jsonl",
             subagent_workspace="subs",
@@ -207,6 +212,7 @@ def test_gateway_request_indexes_logs_to_local_store():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
+            tool_protocol="text",
             model_backend="echo",
             memory_path="memory.jsonl",
             gateway_workspace="gateway",
@@ -238,6 +244,7 @@ def test_gateway_request_writes_runtime_fact_when_saved():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
+            tool_protocol="text",
             model_backend="echo",
             gateway_workspace="gateway",
             local_store_path="local_store/local.db",
@@ -258,7 +265,13 @@ def test_gateway_request_writes_runtime_fact_when_saved():
         response = _handle_gateway_request(agent, request_path)
 
         assert response["ok"] is True
-        fact_path = agent.home_paths.owner_home_dir / "memory_archive" / "runtime_facts" / request_id / "task.json"
+        fact_path = (
+            agent.home_paths.owner_home_dir
+            / "memory_archive"
+            / "runtime_facts"
+            / request_id
+            / "task.json"
+        )
         assert fact_path.exists()
         payload = json.loads(fact_path.read_text(encoding="utf-8"))
         assert payload["request_id"] == request_id
@@ -269,6 +282,7 @@ def test_gateway_request_can_override_resume_context():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
+            tool_protocol="text",
             model_backend="echo",
             gateway_workspace="gateway",
             local_store_path="local_store/local.db",
@@ -301,6 +315,7 @@ def test_local_rebuild_indexes_memory_gateway_and_subagents():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
+            tool_protocol="text",
             model_backend="echo",
             my_agent_home=str(root / "home"),
             memory_path="memory.jsonl",
@@ -311,7 +326,7 @@ def test_local_rebuild_indexes_memory_gateway_and_subagents():
             local_store_events_path="local_store/events.jsonl",
         )
         agent = SimpleAgent(cfg, root)
-        agent.remember("重建测试记忆：local-rebuild 应该重新索引。", kind="note")
+        agent.remember("重建测试记忆：local-rebuild 应该重新索引。", kind="fact")
         task = agent.subagents.create_run(
             goal="local-rebuild 子代理索引测试",
             thought="生成一个可被重建扫描到的工单。",
@@ -329,13 +344,20 @@ def test_local_rebuild_indexes_memory_gateway_and_subagents():
         assert _process_gateway_requests(agent, gpaths) == 1
 
         agent.local_store.reset()
-        result = rebuild_local_store(agent, sources={"memory", "gateway", "subagent", "fts"}, reset=False)
+        result = rebuild_local_store(
+            agent, sources={"memory", "gateway", "subagent", "fts"}, reset=False
+        )
 
         counts = result["source_counts"]
         assert counts["memory"] == 1
         assert counts["gateway_request"] >= 1
         assert counts["subagent_run"] == 1
-        assert agent.local_store.search("local-rebuild 子代理", source_type="subagent_run")[0].source_id == task.id
+        assert (
+            agent.local_store.search("local-rebuild 子代理", source_type="subagent_run")[
+                0
+            ].source_id
+            == task.id
+        )
 
         doctor = build_local_doctor_report(agent)
         assert doctor["memory_count"] == 1

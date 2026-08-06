@@ -12,29 +12,38 @@ from agent_py_agent.agent.memory_archive import (
     append_raw_event,
     append_snapshot,
 )
+from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
 from agent_py_agent.agent.settings import AgentConfig
 
 
-def _write_route(root: Path) -> None:
-    authority = root / "references" / "memory" / "routing.md"
-    authority.parent.mkdir(parents=True, exist_ok=True)
-    authority.write_text("长期规则正文：回答前必须读权威文件。", encoding="utf-8")
-    index = root / "memory" / "routing" / "INDEX.md"
-    index.parent.mkdir(parents=True, exist_ok=True)
-    index.write_text(
-        """# Memory Routes
-
-## memory.routing
-topic: 长期规则索引
-trigger_keywords: 长期规则, 规则索引
-related_terms: memory index
-when_to_read: 用户讨论长期规则或 memory index 时读取
-authority_path: references/memory/routing.md
-scope: global
-priority: 30
-""",
-        encoding="utf-8",
+def _promote_formal_route(agent: SimpleAgent) -> str:
+    candidate = None
+    for task_id in ("task-route-a", "task-route-b"):
+        candidate = agent.memory_candidates.observe(
+            CandidateObservation(
+                candidate_type="lesson",
+                content="长期规则正文：回答 memory routing 问题时先核对正式 lesson。",
+                subject_key="memory.routing",
+                scope=MemoryScope("global", "global"),
+                origin="subagent_lesson",
+                evidence_refs=({"ref_id": task_id, "kind": "task"},),
+                source_task_ids=(task_id,),
+                observation_id=f"route-observation:{task_id}",
+                promotion_target="lesson",
+            )
+        )
+    assert candidate is not None
+    agent.memory_promotion.review(
+        candidate.candidate_id,
+        approved=True,
+        reviewer="runtime-test",
     )
+    result = agent.memory_promotion.promote(
+        candidate.candidate_id,
+        reviewer="runtime-test",
+    )
+    assert result.promoted is True
+    return result.promotion_ref.split("#", 1)[0]
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -42,6 +51,7 @@ def _read_jsonl(path: Path) -> list[dict]:
 
 
 def _test_config(tmp_path: Path, **kwargs) -> AgentConfig:
+    kwargs.setdefault("tool_protocol", "text")
     return AgentConfig(my_agent_home=str(tmp_path / "home"), **kwargs)
 
 
@@ -208,23 +218,25 @@ def _write_cross_day_gateway_archive(agent: SimpleAgent, request_id: str = "gwre
     return response_path
 
 
-def test_run_injects_routed_memory_authority_context(tmp_path):
-    _write_route(tmp_path)
+def test_run_injects_only_formal_routed_lesson_in_memory_envelope(tmp_path):
     agent = SimpleAgent(
         AgentConfig(
             model_backend="echo",
+            tool_protocol="text",
             memory_rule_routing_enabled=True,
             memory_rule_routing_mode="soft",
             memory_rule_auto_read_limit=1,
         ),
         tmp_path,
     )
+    lesson_path = _promote_formal_route(agent)
 
     result = agent.run("请按长期规则处理 memory index", save=False)
 
     assert result.memory_route_matches == 1
-    assert result.memory_route_paths == ["references/memory/routing.md"]
-    assert "### Routed memory authority: references/memory/routing.md" in result.prompt
+    assert result.memory_route_paths == [lesson_path]
+    assert "### Routed memory authority:" not in result.prompt
+    assert result.prompt.count("<memory-context") == 1
     assert "长期规则正文" in result.prompt
     assert result.archive_events == 0
 
@@ -252,7 +264,7 @@ def test_run_writes_raw_archive_when_saved(tmp_path):
 
 
 def test_run_no_save_does_not_write_raw_archive(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = SimpleAgent(AgentConfig(model_backend="echo", tool_protocol="text"), tmp_path)
 
     result = agent.run("不要归档这轮对话", save=False)
 
@@ -263,7 +275,7 @@ def test_run_no_save_does_not_write_raw_archive(tmp_path):
 
 
 def test_run_no_save_does_not_write_runtime_fact(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = SimpleAgent(AgentConfig(model_backend="echo", tool_protocol="text"), tmp_path)
 
     result = agent.run(
         "子代理已完成，请写恢复锚点",

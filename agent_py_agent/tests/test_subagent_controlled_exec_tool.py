@@ -5,6 +5,30 @@ import json
 from test_tools.backends import make_tool_registry
 
 from agent_py_agent.agent.tooling.registry import ToolRegistry
+from agent_py_agent.tests._tool_runtime_harness import (
+    execute_approved_registry_test_call,
+    execute_registry_test_call,
+)
+
+
+def _execute(registry, arguments, *, boundary):
+    return execute_registry_test_call(
+        registry,
+        "controlled_exec",
+        arguments,
+        allowed_tools=["controlled_exec"],
+        write_boundary=boundary,
+    )
+
+
+def _execute_approved(registry, arguments, *, boundary):
+    return execute_approved_registry_test_call(
+        registry,
+        "controlled_exec",
+        arguments,
+        allowed_tools=["controlled_exec"],
+        write_boundary=boundary,
+    )
 
 
 def test_controlled_exec_tool_plans_from_write_boundary_grant(tmp_path) -> None:
@@ -13,15 +37,14 @@ def test_controlled_exec_tool_plans_from_write_boundary_grant(tmp_path) -> None:
     registry = make_tool_registry(workspace)
     boundary = _controlled_exec_boundary(workspace)
 
-    result = registry.execute_call(
+    result = _execute(
+        registry,
         {
-            "tool": "controlled_exec",
             "grant_id": "grant-shell-1",
             "command": "pwd",
             "cwd": str(workspace),
         },
-        allowed_tools=["controlled_exec"],
-        write_boundary=boundary,
+        boundary=boundary,
     )
 
     payload = json.loads(result.output)
@@ -37,20 +60,19 @@ def test_controlled_exec_tool_rejects_self_authored_scope(tmp_path) -> None:
     workspace.mkdir()
     registry = make_tool_registry(workspace)
 
-    result = registry.execute_call(
+    result = _execute(
+        registry,
         {
-            "tool": "controlled_exec",
             "command": "pwd",
             "cwd": str(workspace),
             "command_allowlist": ["pwd"],
             "path_scope": [str(workspace)],
         },
-        allowed_tools=["controlled_exec"],
-        write_boundary={"task_dir": str(workspace / "task")},
+        boundary={"task_dir": str(workspace / "task")},
     )
 
     assert not result.ok
-    assert "controlled_exec requires parent grant" in result.output
+    assert result.error_code == "TOOL_INTERNAL_PARAMETER_FORBIDDEN"
 
 
 def test_controlled_exec_tool_accepts_duplicate_equivalent_grants_without_grant_id(tmp_path) -> None:
@@ -63,14 +85,13 @@ def test_controlled_exec_tool_accepts_duplicate_equivalent_grants_without_grant_
     boundary["controlled_exec_grants"].append(duplicate)
     registry = make_tool_registry(workspace)
 
-    result = registry.execute_call(
+    result = _execute(
+        registry,
         {
-            "tool": "controlled_exec",
             "command": "pwd",
             "cwd": str(workspace),
         },
-        allowed_tools=["controlled_exec"],
-        write_boundary=boundary,
+        boundary=boundary,
     )
 
     payload = json.loads(result.output)
@@ -86,16 +107,15 @@ def test_controlled_exec_tool_apply_runs_with_bounded_audit_refs(tmp_path) -> No
     boundary["controlled_exec_artifact_dir"] = str(workspace / "task" / "artifacts" / "controlled_exec")
     registry = make_tool_registry(workspace)
 
-    result = registry.execute_call(
+    result = _execute_approved(
+        registry,
         {
-            "tool": "controlled_exec",
             "grant_id": "grant-shell-1",
             "command": "pwd",
             "cwd": str(workspace),
             "apply": True,
         },
-        allowed_tools=["controlled_exec"],
-        write_boundary=boundary,
+        boundary=boundary,
     )
 
     payload = json.loads(result.output)
@@ -115,15 +135,14 @@ def test_controlled_exec_tool_apply_keeps_large_stdout_externalized(tmp_path) ->
     boundary["controlled_exec_grants"][0]["output_budget"] = {"stdout_bytes": 8, "stderr_bytes": 8}
     registry = make_tool_registry(workspace)
 
-    result = registry.execute_call(
+    result = _execute_approved(
+        registry,
         {
-            "tool": "controlled_exec",
             "command": ["python3", "-c", "print('x' * 2000)"],
             "cwd": str(workspace),
             "apply": True,
         },
-        allowed_tools=["controlled_exec"],
-        write_boundary=boundary,
+        boundary=boundary,
     )
 
     payload = json.loads(result.output)
@@ -147,15 +166,14 @@ def test_controlled_exec_tool_apply_routes_delete_to_task_trash(tmp_path) -> Non
     boundary["controlled_exec_grants"][0]["path_scope"] = [str(task_dir)]
     registry = make_tool_registry(workspace)
 
-    result = registry.execute_call(
+    result = _execute_approved(
+        registry,
         {
-            "tool": "controlled_exec",
             "command": "rm stale.txt",
             "cwd": str(task_dir),
             "apply": True,
         },
-        allowed_tools=["controlled_exec"],
-        write_boundary=boundary,
+        boundary=boundary,
     )
 
     payload = json.loads(result.output)
@@ -169,7 +187,7 @@ def test_controlled_exec_tool_apply_routes_delete_to_task_trash(tmp_path) -> Non
     assert payload["trash"]["manifest_ref"].endswith("trash/manifest.jsonl")
 
 
-def test_controlled_exec_tool_apply_full_routes_delete_without_rm_shell_grant(tmp_path) -> None:
+def test_controlled_exec_tool_blocks_delete_without_rm_shell_grant(tmp_path) -> None:
     workspace = tmp_path / "workspace"
     task_dir = workspace / "task"
     task_dir.mkdir(parents=True)
@@ -181,25 +199,22 @@ def test_controlled_exec_tool_apply_full_routes_delete_without_rm_shell_grant(tm
     boundary["controlled_exec_grants"][0]["path_scope"] = [str(task_dir)]
     registry = make_tool_registry(workspace)
 
-    result = registry.execute_call(
+    result = _execute(
+        registry,
         {
-            "tool": "controlled_exec",
             "command": "rm stale.txt",
             "cwd": str(task_dir),
             "apply": True,
         },
-        allowed_tools=["controlled_exec"],
-        write_boundary=boundary,
+        boundary=boundary,
     )
 
-    payload = json.loads(result.output)
-    assert result.ok
-    assert payload["mode"] == "task_trash"
-    assert payload["trash"]["moved"] is True
-    assert not stale.exists()
+    assert result.ok is False
+    assert result.error_code == "COMMAND_DESTRUCTIVE_DELETE_BLOCKED"
+    assert stale.exists()
 
 
-def test_controlled_exec_tool_routes_relative_delete_from_command_cwd(tmp_path) -> None:
+def test_controlled_exec_tool_blocks_relative_delete_without_rm_grant(tmp_path) -> None:
     workspace = tmp_path / "workspace"
     task_dir = workspace / "task"
     deliverables = workspace / "deliverables"
@@ -213,27 +228,22 @@ def test_controlled_exec_tool_routes_relative_delete_from_command_cwd(tmp_path) 
     boundary["controlled_exec_grants"][0]["path_scope"] = [str(deliverables)]
     registry = make_tool_registry(workspace)
 
-    result = registry.execute_call(
+    result = _execute(
+        registry,
         {
-            "tool": "controlled_exec",
             "command": "rm sentinel.txt",
             "cwd": str(deliverables),
             "apply": True,
         },
-        allowed_tools=["controlled_exec"],
-        write_boundary=boundary,
+        boundary=boundary,
     )
 
-    payload = json.loads(result.output)
-    assert result.ok
-    assert payload["mode"] == "task_trash"
-    assert payload["trash"]["moved"] is True
-    assert payload["trash"]["source"] == str(sentinel)
-    assert not sentinel.exists()
-    assert payload["trash"]["destination"].startswith(str(task_dir / "trash"))
+    assert result.ok is False
+    assert result.error_code == "COMMAND_DESTRUCTIVE_DELETE_BLOCKED"
+    assert sentinel.exists()
 
 
-def test_controlled_exec_tool_dry_run_delete_is_valid_trash_plan(tmp_path) -> None:
+def test_controlled_exec_tool_dry_run_delete_still_requires_rm_grant(tmp_path) -> None:
     workspace = tmp_path / "workspace"
     task_dir = workspace / "task"
     task_dir.mkdir(parents=True)
@@ -243,21 +253,17 @@ def test_controlled_exec_tool_dry_run_delete_is_valid_trash_plan(tmp_path) -> No
     boundary["controlled_exec_grants"][0]["path_scope"] = [str(task_dir)]
     registry = make_tool_registry(workspace)
 
-    result = registry.execute_call(
+    result = _execute(
+        registry,
         {
-            "tool": "controlled_exec",
             "command": "rm stale.txt",
             "cwd": str(task_dir),
         },
-        allowed_tools=["controlled_exec"],
-        write_boundary=boundary,
+        boundary=boundary,
     )
 
-    payload = json.loads(result.output)
-    assert result.ok
-    assert payload["allowed"] is False
-    assert payload["action"] == "use_task_trash"
-    assert payload["trash_hint"]["replacement"] == "move_to_task_trash"
+    assert result.ok is False
+    assert result.error_code == "COMMAND_DESTRUCTIVE_DELETE_BLOCKED"
 
 
 def test_controlled_exec_tool_is_registered_in_catalog(tmp_path) -> None:

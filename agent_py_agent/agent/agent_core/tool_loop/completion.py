@@ -60,6 +60,28 @@ def completion_response_after_tool_round(
             request.agent, request.response
         ):
             return progress_response
+    # 工具执行后必须基于真实结果生成最终自然语言回复(真机 bug:普通 gateway 请求工具执行后,
+    # completion 返回 None → 主代理 response 是工具结果而非总结 → USER_REPLY_UNAVAILABLE)。
+    # 本轮执行过工具(executed_tools 比 before 多)、未达工具轮上限、且无 pending 自然回复 →
+    # queue_natural_user_reply 要求模型再生成一次基于工具结果的总结。round_limit 场景由现有
+    # interim 机制处理,不在此重复 queue。纯结构化判据,不解析正文。
+    executed = list(getattr(request.params, "executed_tools", None) or [])
+    # 只在"本轮执行了工具 且 模型回复不是自然语言(空/只内部信号) 且 未达工具轮上限"时 queue——
+    # 否则工具执行后模型已产出总结/继续指令,无需再生成(避免多一轮调用破坏既有测试语义)。
+    response_text = str(getattr(request.response, "text", "") or "").strip()
+    if (
+        len(executed) > int(getattr(request, "before_executed_count", 0) or 0)
+        and not response_text
+        and not _round_limit_reached(request)
+    ):
+        from .natural_user_reply import pending_natural_user_reply, queue_natural_user_reply
+
+        if pending_natural_user_reply(request.params) is None:
+            queue_natural_user_reply(
+                request.params,
+                kind="tool_result",
+                facts=_tool_result_reply_facts(request),
+            )
     return None
 
 
@@ -82,17 +104,10 @@ def _context_refresh_transition_response(
         return None
     payload = {
         "status": "PENDING",
-        "summary": (
-            "工具已提交耐久状态更新；当前工作片已结束，"
-            "下一工作片从最新规范状态继续。"
-        ),
+        "summary": ("工具已提交耐久状态更新；当前工作片已结束，下一工作片从最新规范状态继续。"),
     }
     return ModelResponse(
-        text=(
-            "[SUBAGENT_RESULT]\n"
-            f"{json.dumps(payload, ensure_ascii=False)}\n"
-            "[/SUBAGENT_RESULT]"
-        ),
+        text=(f"[SUBAGENT_RESULT]\n{json.dumps(payload, ensure_ascii=False)}\n[/SUBAGENT_RESULT]"),
         backend=request.response.backend,
     )
 
@@ -112,6 +127,33 @@ def _round_can_finish_via_soft_wait(request: ToolRoundCompletionRequest) -> bool
 
 def _soft_wait_can_finish_turn(request: ToolRoundCompletionRequest) -> bool:
     return is_wake_capable_source(request.params)
+
+
+def _round_limit_reached(request: ToolRoundCompletionRequest) -> bool:
+    """本轮是否已达工具轮上限(round_limit 场景由现有 interim 机制处理,不重复 queue)。"""
+    raw = getattr(getattr(request.agent, "config", None), "max_tool_rounds", None)
+    limit = 0
+    if raw is None:
+        try:
+            from .._tool_loop_service import _effective_max_tool_rounds
+
+            limit = _effective_max_tool_rounds(request.agent, request.params)
+        except Exception:
+            limit = 0
+    else:
+        limit = int(raw or 0)
+    return limit > 0 and int(getattr(request, "tool_rounds", 0) or 0) >= limit
+
+
+def _tool_result_reply_facts(request: ToolRoundCompletionRequest) -> dict[str, object]:
+    """工具执行后的自然回复事实(结构化,供模型生成总结回复时引用)。"""
+    facts = _interim_reply_facts(
+        request.agent,
+        request.params,
+        tool_rounds=request.tool_rounds,
+    )
+    facts["tool_result_pending"] = True
+    return facts
 
 
 def _queue_soft_wait_user_reply(request: ToolRoundCompletionRequest) -> None:
@@ -224,9 +266,8 @@ def queue_interim_reply_for_tool_round_limit(
     *,
     tool_rounds: int,
 ) -> bool:
-    if (
-        str(getattr(params, "context_scope", "") or "") == "task_local"
-        or not isinstance(getattr(params, "live_archive_state", None), dict)
+    if str(getattr(params, "context_scope", "") or "") == "task_local" or not isinstance(
+        getattr(params, "live_archive_state", None), dict
     ):
         return False
     facts = _interim_reply_facts(
@@ -302,8 +343,7 @@ def queue_reply_for_audit_prepare(
     if (
         attrs.get(CONVERSATION_AUDIT_PREPARE_ATTR) is not True
         or attrs.get(CONVERSATION_TRANSIENT_WORKSPACE_ATTR) is not True
-        or str(attrs.get(CONVERSATION_WORK_KIND_ATTR) or "").strip().lower()
-        != "audit"
+        or str(attrs.get(CONVERSATION_WORK_KIND_ATTR) or "").strip().lower() != "audit"
     ):
         return False
     thread_id = str(attrs.get("conversation_thread_id") or "").strip()
@@ -312,23 +352,7 @@ def queue_reply_for_audit_prepare(
     store = getattr(agent, "conversation_store", None)
     if not thread_id or not task_id or not work_name or store is None:
         return False
-    try:
-        links, errors = store.task_links_report(thread_id)
-    except Exception:
-        return False
-    if errors:
-        return False
-    link = next(
-        (
-            item
-            for item in links
-            if str(getattr(item, "task_id", "") or "").strip() == task_id
-            and str(getattr(item, "work_kind", "") or "").strip().lower()
-            == "audit"
-            and str(getattr(item, "work_name", "") or "").strip() == work_name
-        ),
-        None,
-    )
+    link = _matching_audit_prepare_link(store, thread_id, task_id, work_name)
     if link is None:
         return False
     prepare_request_id = str(attrs.get(CONVERSATION_TURN_REQUEST_ID_ATTR) or "").strip()
@@ -346,60 +370,14 @@ def queue_reply_for_audit_prepare(
         response.runtime_reason = "AUDIT_PREPARE_RESULT"
         response.runtime_source = "conversation_task"
         return False
-    source_bindings = tuple(getattr(link, "effective_source_bindings", ()) or ())
     publish_facts = _current_audit_publish_facts(params, prepare_request_id)
-    named_work: dict[str, object] = {
-        "work_kind": "audit",
-        "work_name": work_name,
-        "status": str(getattr(link, "status", "") or "preparing"),
-        "update_applied": published,
-        "effective_revision": max(
-            0,
-            int(getattr(link, "effective_revision", 0) or 0),
-        ),
-        "effective_source_count": len(source_bindings),
-        "effective_source_ids": [
-            str(item.get("source_id") or "")
-            for item in source_bindings
-            if isinstance(item, dict)
-            and str(item.get("source_id") or "").strip()
-        ],
-    }
-    if pending:
-        named_work.update(
-            {
-                "pending_requirement_preserved": True,
-                "source_binding_change_applied": False,
-                "applied_source_probe_count": 0,
-                "applied_source_ids": [],
-                "publication_validation_status": "pending",
-                "source_access_verified": False,
-            }
-        )
-    else:
-        applied_source_probe_count = max(
-            0,
-            int(publish_facts.get("applied_source_probe_count") or 0),
-        )
-        named_work.update(
-            {
-                "source_binding_change_applied": bool(
-                    publish_facts.get("source_binding_change_applied") is True
-                ),
-                "applied_source_probe_count": applied_source_probe_count,
-                "applied_source_ids": list(
-                    publish_facts.get("applied_source_ids") or []
-                ),
-                "publication_validation_status": str(
-                    publish_facts.get("validation_status") or "not_required"
-                ),
-                # A source can only enter the durable binding set through a
-                # successful current-Audit watch probe.  Expose that terminal
-                # fact directly so the model-written presentation does not
-                # infer availability from stale failed attempts.
-                "source_access_verified": bool(applied_source_probe_count > 0),
-            }
-        )
+    named_work = _audit_prepare_named_work(
+        link,
+        work_name=work_name,
+        pending=pending,
+        published=published,
+        publish_facts=publish_facts,
+    )
     facts = _interim_reply_facts(agent, params, tool_rounds=tool_rounds)
     # ``operation_verification`` is an audit trail of every mutating attempt,
     # not the authoritative outcome of this named Audit revision.  A model may
@@ -431,6 +409,89 @@ def queue_reply_for_audit_prepare(
         draft="",
     )
     return True
+
+
+def _matching_audit_prepare_link(
+    store: object,
+    thread_id: str,
+    task_id: str,
+    work_name: str,
+) -> object | None:
+    try:
+        links, errors = store.task_links_report(thread_id)
+    except Exception:
+        return None
+    if errors:
+        return None
+    return next(
+        (
+            item
+            for item in links
+            if str(getattr(item, "task_id", "") or "").strip() == task_id
+            and str(getattr(item, "work_kind", "") or "").strip().lower() == "audit"
+            and str(getattr(item, "work_name", "") or "").strip() == work_name
+        ),
+        None,
+    )
+
+
+def _audit_prepare_named_work(
+    link: object,
+    *,
+    work_name: str,
+    pending: bool,
+    published: bool,
+    publish_facts: dict[str, object],
+) -> dict[str, object]:
+    source_bindings = tuple(getattr(link, "effective_source_bindings", ()) or ())
+    named_work: dict[str, object] = {
+        "work_kind": "audit",
+        "work_name": work_name,
+        "status": str(getattr(link, "status", "") or "preparing"),
+        "update_applied": published,
+        "effective_revision": max(
+            0,
+            int(getattr(link, "effective_revision", 0) or 0),
+        ),
+        "effective_source_count": len(source_bindings),
+        "effective_source_ids": [
+            str(item.get("source_id") or "")
+            for item in source_bindings
+            if isinstance(item, dict) and str(item.get("source_id") or "").strip()
+        ],
+    }
+    if pending:
+        named_work.update(
+            {
+                "pending_requirement_preserved": True,
+                "source_binding_change_applied": False,
+                "applied_source_probe_count": 0,
+                "applied_source_ids": [],
+                "publication_validation_status": "pending",
+                "source_access_verified": False,
+            }
+        )
+        return named_work
+    applied_source_probe_count = max(
+        0,
+        int(publish_facts.get("applied_source_probe_count") or 0),
+    )
+    named_work.update(
+        {
+            "source_binding_change_applied": bool(
+                publish_facts.get("source_binding_change_applied") is True
+            ),
+            "applied_source_probe_count": applied_source_probe_count,
+            "applied_source_ids": list(publish_facts.get("applied_source_ids") or []),
+            "publication_validation_status": str(
+                publish_facts.get("validation_status") or "not_required"
+            ),
+            # A source can only enter the durable binding set through a
+            # successful current-Audit watch probe.
+            "source_access_verified": bool(applied_source_probe_count > 0),
+        }
+    )
+    return named_work
 
 
 def _current_audit_publish_facts(
@@ -498,8 +559,7 @@ def _active_named_audit_facts(
                         "state_available": False,
                         "continues_without_more_user_input": True,
                     }
-                    if str(attrs.get(CONVERSATION_WORK_KIND_ATTR) or "").lower()
-                    == "audit"
+                    if str(attrs.get(CONVERSATION_WORK_KIND_ATTR) or "").lower() == "audit"
                     else {}
                 )
         else:
@@ -521,8 +581,7 @@ def _active_named_audit_facts(
             for item in links
             if str(getattr(item, "task_id", "") or "").strip() == task_id
             and str(getattr(item, "status", "") or "").strip().lower() == "active"
-            and str(getattr(item, "work_kind", "") or "").strip().lower()
-            == "audit"
+            and str(getattr(item, "work_kind", "") or "").strip().lower() == "audit"
         ),
         None,
     )
@@ -556,9 +615,7 @@ def _active_named_audit_facts(
         "activation": activation,
         "sources": audit_task_source_facts(agent, task_id, now=now),
         "summary": audit_task_summary_facts(agent, task_id, now=now),
-        "continues_without_more_user_input": bool(
-            expires_at > now or sources_incomplete
-        ),
+        "continues_without_more_user_input": bool(expires_at > now or sources_incomplete),
     }
 
 
@@ -590,9 +647,7 @@ def _interim_reply_facts(
     )
     operation_count = max(0, int(verification.get("operation_count") or 0))
     verification_counts = verification.get("counts")
-    verification_counts = (
-        verification_counts if isinstance(verification_counts, dict) else {}
-    )
+    verification_counts = verification_counts if isinstance(verification_counts, dict) else {}
     succeeded_operation_count = max(
         0,
         int(verification_counts.get("succeeded") or 0),

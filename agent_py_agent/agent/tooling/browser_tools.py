@@ -30,7 +30,18 @@ from .browser_session import (
     BrowserUnavailableError,
     browser_session_manager,
 )
-from .models import BaseTool, ToolAvailability, ToolExecutionResult, ToolSpec
+from .models import (
+    BaseTool,
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    OutputPolicy,
+    ResourceScopePolicy,
+    ToolAvailability,
+    ToolHandlerOutcome,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+)
 from .web import _default_network_resolver, _network_safety_error, _normalize_url
 
 # 模型不传 session_id 时用的默认会话名(单会话场景够用;多任务并发可显式分会话)。
@@ -52,14 +63,14 @@ def _is_timeout_error(exc: Exception) -> bool:
     return "timeout" in str(exc).lower()
 
 
-def _unavailable_result(tool_name: str, exc: BrowserUnavailableError) -> ToolExecutionResult:
+def _unavailable_result(tool_name: str, exc: BrowserUnavailableError) -> ToolHandlerOutcome:
     """浏览器不可用(没装 playwright / Chromium 二进制缺失)→ TOOL_UNAVAILABLE,带指引。"""
     payload = {
         "ok": False,
         "error": "browser_unavailable",
         "message": exc.hint,
     }
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         tool_name,
         False,
         json.dumps(payload, ensure_ascii=False),
@@ -67,7 +78,7 @@ def _unavailable_result(tool_name: str, exc: BrowserUnavailableError) -> ToolExe
     )
 
 
-def _action_error_result(tool_name: str, exc: Exception, *, default_msg: str) -> ToolExecutionResult:
+def _action_error_result(tool_name: str, exc: Exception, *, default_msg: str) -> ToolHandlerOutcome:
     """把一次浏览器动作的异常转成结构化 error_code(不崩)。
 
     超时 → TOOL_TIMEOUT(retryable);其余 playwright 动作失败(元素找不到/导航被拒/页面崩)
@@ -80,12 +91,12 @@ def _action_error_result(tool_name: str, exc: Exception, *, default_msg: str) ->
         code = "NETWORK_REQUEST_FAILED"
         message = f"{default_msg}:{exc}"
     payload = {"ok": False, "error": code.lower(), "message": message}
-    return ToolExecutionResult(tool_name, False, json.dumps(payload, ensure_ascii=False), error_code=code)
+    return ToolHandlerOutcome(tool_name, False, json.dumps(payload, ensure_ascii=False), error_code=code)
 
 
-def _invalid_args_result(tool_name: str, message: str) -> ToolExecutionResult:
+def _invalid_args_result(tool_name: str, message: str) -> ToolHandlerOutcome:
     payload = {"ok": False, "error": "invalid_arguments", "message": message}
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         tool_name,
         False,
         json.dumps(payload, ensure_ascii=False),
@@ -93,9 +104,9 @@ def _invalid_args_result(tool_name: str, message: str) -> ToolExecutionResult:
     )
 
 
-def _ok_result(tool_name: str, payload: dict[str, Any]) -> ToolExecutionResult:
+def _ok_result(tool_name: str, payload: dict[str, Any]) -> ToolHandlerOutcome:
     body = {"ok": True, **payload}
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         tool_name,
         True,
         json.dumps(body, ensure_ascii=False),
@@ -108,63 +119,72 @@ def _ok_result(tool_name: str, payload: dict[str, Any]) -> ToolExecutionResult:
 class BrowserTool(BaseTool):
     """单入口浏览器自动化:action ∈ navigate/snapshot/click/type/close,共享一个会话管理器。"""
 
-    spec = ToolSpec(
+    model_spec = ToolModelSpec(
         name="browser",
-        category="web",
-        effect="mutating",
-        output_trust="external_data",
-        promotes_task=True,
-        # 浏览器交互有状态有副作用 → 整组声明幂等策略(框架自动派生 key,模型无需手填);
-        # 否则 side-effecting 动作会被 tool_manifest 门 0.00s 拦成幂等策略缺失。
-        idempotency_scope="operation",
         description=(
             "headless 浏览器自动化(处理 web_fetch 抓不到的 JS 渲染/SPA/需点击填表的动态页)。"
             "用 action 选动作:navigate=打开 URL 并返回 a11y 快照;snapshot=重取当前页快照;"
             "click=点击 ref 指向的元素;type=往 ref 输入框填 text;close=关闭会话。"
         ),
-        use_cases=[
-            "动态站/SPA:navigate 打开 → snapshot 看结构和 ref → click/type 交互",
-            "登录/搜索/多步表单:navigate → type 填表 → click 提交",
-            "web_fetch 抓回是 JS 空壳/前端渲染站时,改用 browser 渲染后再看内容",
-        ],
-        avoid_when=[
-            "目标是静态页/纯 API/可直接下载的文档 → 用更轻量的 web_fetch",
-            "只是批量抽取多个已知 URL 的正文 → 用 web_fetch 的 extract 模式",
-        ],
-        keywords=[
-            "浏览器", "browser", "navigate", "snapshot", "click", "type", "close",
-            "打开网页", "渲染", "SPA", "动态页面", "JS", "点击", "填表", "表单",
-            "accessibility", "a11y", "快照", "ref", "selector", "headless", "登录",
-        ],
-        parameters={
-            "action": "必填:navigate/snapshot/click/type/close。",
-            "url": "action=navigate 必填:要打开的完整 http/https URL。",
-            "ref": "action=click/type 必填:快照里的 ref(如 e5)或 CSS selector。",
-            "text": "action=type 必填:要填入的文字。",
-            "session_id": "可选:会话名,隔离 cookie/storage,不传用 default。",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": list(_BROWSER_ACTIONS),
+                    "description": "必填。navigate=打开 URL 并取快照；snapshot=重取快照；click=点 ref；type=往 ref 填 text；close=关会话。",
+                },
+                "url": {
+                    "type": "string",
+                    "description": "仅 action=navigate。完整 http/https 地址；导航前走 SSRF 检查。",
+                },
+                "ref": {
+                    "type": "string",
+                    "description": "action=click/type。快照给出的 ref 或 CSS selector。",
+                },
+                "text": {"type": "string", "description": "仅 action=type。要填入的字符串。"},
+                "session_id": {
+                    "type": "string",
+                    "description": "可选。同名会话复用浏览器上下文；不传使用 default。",
+                },
+            },
+            "required": ["action"],
+            "additionalProperties": False,
         },
-        parameter_details={
-            "action": "navigate=打开 URL 并取快照;snapshot=重取快照;click=点 ref;type=往 ref 填 text;close=关会话。",
-            "url": "仅 action=navigate:完整 http/https 地址。导航前走 SSRF 检查,默认拒私网/内网/云 metadata。",
-            "ref": "action=click/type:优先用快照给的 ref(如 e5),也可传 CSS selector;ref 过期(页面已变)会提示重拍快照。",
-            "text": "仅 action=type:要填入的字符串;会先清空目标输入框再输入。",
-            "session_id": "可选字符串:同名会话复用同一浏览器上下文(登录态/cookie);并发不同任务可分不同会话。",
-        },
-        parameter_schema={
-            "action": {"type": "string", "enum": list(_BROWSER_ACTIONS)},
-            "url": {"type": "string"},
-            "ref": {"type": "string"},
-            "text": {"type": "string"},
-            "session_id": {"type": "string"},
-        },
-        required_parameters=["action"],
-        examples=[
-            '{"tool": "browser", "action": "navigate", "url": "https://example.com"}',
-            '{"tool": "browser", "action": "snapshot"}',
-            '{"tool": "browser", "action": "click", "ref": "e5"}',
-            '{"tool": "browser", "action": "type", "ref": "e3", "text": "hello@example.com"}',
-            '{"tool": "browser", "action": "close", "session_id": "task-7"}',
-        ],
+        hints=ToolModelHints(
+            category="web",
+            use_cases=(
+                "动态站/SPA:navigate 打开 → snapshot 看结构和 ref → click/type 交互",
+                "登录/搜索/多步表单:navigate → type 填表 → click 提交",
+                "web_fetch 抓回是 JS 空壳/前端渲染站时,改用 browser 渲染后再看内容",
+            ),
+            avoid_when=(
+                "目标是静态页/纯 API/可直接下载的文档 → 用更轻量的 web_fetch",
+                "只是批量抽取多个已知 URL 的正文 → 用 web_fetch 的 extract 模式",
+            ),
+            keywords=(
+                "浏览器", "browser", "navigate", "snapshot", "click", "type", "close",
+                "打开网页", "渲染", "SPA", "动态页面", "JS", "点击", "填表", "表单",
+                "accessibility", "a11y", "快照", "ref", "selector", "headless", "登录",
+            ),
+            examples=(
+                '{"tool": "browser", "action": "navigate", "url": "https://example.com"}',
+                '{"tool": "browser", "action": "snapshot"}',
+                '{"tool": "browser", "action": "click", "ref": "e5"}',
+                '{"tool": "browser", "action": "type", "ref": "e3", "text": "hello@example.com"}',
+                '{"tool": "browser", "action": "close", "session_id": "task-7"}',
+            ),
+        ),
+    )
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy(
+            "mutating",
+            by_parameter=(("action", (("snapshot", "read_only"),)),),
+        ),
+        idempotency_policy=IdempotencyPolicy("operation"),
+        resource_scopes=ResourceScopePolicy(parameter_names=("session_id", "url")),
+        output_policy=OutputPolicy(trust="external_data"),
+        promotes_task=True,
     )
 
     def __init__(self, manager: BrowserSessionManager | None = None):
@@ -180,7 +200,7 @@ class BrowserTool(BaseTool):
             else ToolAvailability.ready()
         )
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         action = str(params.get("action") or "").strip().lower()
         handler = {
             "navigate": self._navigate,
@@ -191,83 +211,83 @@ class BrowserTool(BaseTool):
         }.get(action)
         if handler is None:
             return _invalid_args_result(
-                self.spec.name,
+                self.model_spec.name,
                 f"action 必须是 {list(_BROWSER_ACTIONS)} 之一;收到 {action!r}。",
             )
         return handler(params)
 
-    def _navigate(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def _navigate(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         try:
             url = _normalize_url(params.get("url"))
         except ValueError as exc:
-            return _invalid_args_result(self.spec.name, str(exc))
+            return _invalid_args_result(self.model_spec.name, str(exc))
         # SSRF:复用 web_fetch 同一把锁,默认拒私网/loopback/云 metadata。
-        network_error = _network_safety_error(self.spec.name, url, _default_network_resolver)
+        network_error = _network_safety_error(self.model_spec.name, url, _default_network_resolver)
         if network_error is not None:
             return network_error
         session_id = _coerce_session_id(params)
         try:
             result = self.manager.navigate(session_id, url)
         except BrowserUnavailableError as exc:
-            return _unavailable_result(self.spec.name, exc)
+            return _unavailable_result(self.model_spec.name, exc)
         except Exception as exc:  # 导航失败/超时/页面崩 → 结构化错误,不崩
-            return _action_error_result(self.spec.name, exc, default_msg=f"打开 {url} 失败")
-        return _ok_result(self.spec.name, {"session_id": session_id, **result})
+            return _action_error_result(self.model_spec.name, exc, default_msg=f"打开 {url} 失败")
+        return _ok_result(self.model_spec.name, {"session_id": session_id, **result})
 
-    def _snapshot(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def _snapshot(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         session_id = _coerce_session_id(params)
         try:
             result = self.manager.snapshot(session_id)
         except BrowserUnavailableError as exc:
-            return _unavailable_result(self.spec.name, exc)
+            return _unavailable_result(self.model_spec.name, exc)
         except ValueError as exc:  # 未导航/会话不存在
-            return _invalid_args_result(self.spec.name, str(exc))
+            return _invalid_args_result(self.model_spec.name, str(exc))
         except Exception as exc:
-            return _action_error_result(self.spec.name, exc, default_msg="获取页面快照失败")
-        return _ok_result(self.spec.name, {"session_id": session_id, **result})
+            return _action_error_result(self.model_spec.name, exc, default_msg="获取页面快照失败")
+        return _ok_result(self.model_spec.name, {"session_id": session_id, **result})
 
-    def _click(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def _click(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         ref = str(params.get("ref") or "").strip()
         if not ref:
-            return _invalid_args_result(self.spec.name, "action=click 需要 ref(快照里的 ref 或 CSS selector)。")
+            return _invalid_args_result(self.model_spec.name, "action=click 需要 ref(快照里的 ref 或 CSS selector)。")
         session_id = _coerce_session_id(params)
         try:
             result = self.manager.click(session_id, ref)
         except BrowserUnavailableError as exc:
-            return _unavailable_result(self.spec.name, exc)
+            return _unavailable_result(self.model_spec.name, exc)
         except ValueError as exc:  # 未导航 / ref 过期
-            return _invalid_args_result(self.spec.name, str(exc))
+            return _invalid_args_result(self.model_spec.name, str(exc))
         except Exception as exc:
-            return _action_error_result(self.spec.name, exc, default_msg=f"点击 {ref} 失败")
-        return _ok_result(self.spec.name, {"session_id": session_id, **result})
+            return _action_error_result(self.model_spec.name, exc, default_msg=f"点击 {ref} 失败")
+        return _ok_result(self.model_spec.name, {"session_id": session_id, **result})
 
-    def _type(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def _type(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         ref = str(params.get("ref") or "").strip()
         if not ref:
-            return _invalid_args_result(self.spec.name, "action=type 需要 ref(快照里的 ref 或 CSS selector)。")
+            return _invalid_args_result(self.model_spec.name, "action=type 需要 ref(快照里的 ref 或 CSS selector)。")
         if params.get("text") is None:
-            return _invalid_args_result(self.spec.name, "action=type 需要 text(要填入的文字)。")
+            return _invalid_args_result(self.model_spec.name, "action=type 需要 text(要填入的文字)。")
         text = str(params.get("text"))
         session_id = _coerce_session_id(params)
         try:
             result = self.manager.type_text(session_id, ref, text)
         except BrowserUnavailableError as exc:
-            return _unavailable_result(self.spec.name, exc)
+            return _unavailable_result(self.model_spec.name, exc)
         except ValueError as exc:
-            return _invalid_args_result(self.spec.name, str(exc))
+            return _invalid_args_result(self.model_spec.name, str(exc))
         except Exception as exc:
-            return _action_error_result(self.spec.name, exc, default_msg=f"往 {ref} 填文字失败")
-        return _ok_result(self.spec.name, {"session_id": session_id, **result})
+            return _action_error_result(self.model_spec.name, exc, default_msg=f"往 {ref} 填文字失败")
+        return _ok_result(self.model_spec.name, {"session_id": session_id, **result})
 
-    def _close(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def _close(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         session_id = _coerce_session_id(params)
         try:
             result = self.manager.close(session_id)
         except BrowserUnavailableError as exc:
-            return _unavailable_result(self.spec.name, exc)
+            return _unavailable_result(self.model_spec.name, exc)
         except Exception as exc:
-            return _action_error_result(self.spec.name, exc, default_msg="关闭浏览器会话失败")
-        return _ok_result(self.spec.name, result)
+            return _action_error_result(self.model_spec.name, exc, default_msg="关闭浏览器会话失败")
+        return _ok_result(self.model_spec.name, result)
 
 
 def browser_tools() -> list[BaseTool]:

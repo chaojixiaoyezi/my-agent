@@ -1,7 +1,21 @@
 from __future__ import annotations
 
+from agent_py_agent.agent.contracts.tool_manifest_contract import tool_manifest_payload
+from agent_py_agent.agent.tooling.models import (
+    ApprovalPolicy,
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    OutputPolicy,
+    TimeoutPolicy,
+    ToolRuntimePolicy,
+)
+from agent_py_agent.tests._tool_runtime_harness import (
+    make_test_model_spec,
+    runtime_snapshot_for_model_specs,
+)
 
-def test_tool_manifest_payload_includes_failure_contracts():
+
+def test_tool_manifest_payload_includes_failure_contracts() -> None:
     payload = _tool_manifest_payload()
 
     assert payload["visible_tools"] == ["read_file", "write_file"]
@@ -15,58 +29,86 @@ def test_tool_manifest_payload_includes_failure_contracts():
     assert payload["tools"][0]["visible_in_context"] is True
 
 
-def test_tool_manifest_payload_includes_side_effect_policy_fields():
+def test_tool_manifest_projects_runtime_policy_without_duplicate_approval_flag() -> None:
     payload = _tool_manifest_payload()
     write_manifest = payload["tools"][1]
+    policy = write_manifest["runtime_policy"]
 
-    assert write_manifest["effect"] == "mutating"
-    assert write_manifest["default_mode"] == "real"
-    assert write_manifest["idempotency_scope"] == "operation"
-    assert write_manifest["requires_approval"] is False
-    assert write_manifest["timeout_seconds"] == 20
-    assert write_manifest["output_refs"] == ["file"]
+    assert policy["effect_resolver"]["default_effect"] == "mutating"
+    assert policy["approval_policy"] == {"mode": "dangerous"}
+    assert policy["idempotency_policy"] == {"scope": "operation"}
+    assert policy["timeout_policy"] == {"seconds": 20}
+    assert policy["output_policy"]["refs"] == ["file"]
+    assert "requires_approval" not in write_manifest
+    assert write_manifest["schema_hash"].startswith("sha256:")
+    assert set(write_manifest["input_schema"]["required"]) == {"content", "path"}
 
 
-def test_tool_manifest_payload_uses_owner_scoped_permission_mode_for_non_root_owner():
-    from agent_py_agent.agent.contracts.tool_manifest_contract import tool_manifest_payload
+def test_tool_manifest_requires_runtime_snapshot() -> None:
+    try:
+        tool_manifest_payload([{"name": "read_file"}])
+    except TypeError as exc:
+        assert "ToolRuntimeSnapshot" in str(exc)
+    else:  # pragma: no cover - explicit authority assertion
+        raise AssertionError("dict/spec manifests must not be accepted")
 
-    payload = tool_manifest_payload(
-        [{"name": "read_file", "category": "filesystem", "parameters": {}}],
-        owner_type="subagent",
+
+def test_tool_manifest_payload_uses_owner_scoped_permission_mode_for_non_root_owner() -> None:
+    read_spec = make_test_model_spec("read_file")
+    snapshot = runtime_snapshot_for_model_specs(
+        (read_spec,),
+        owner_type="task_local",
     )
+
+    payload = tool_manifest_payload(snapshot)
 
     assert payload["permission_mode"] == "owner_scoped"
     assert payload["tools"][0]["permission_mode"] == "owner_scoped"
 
 
 def _tool_manifest_payload() -> dict[str, object]:
-    from agent_py_agent.agent.contracts.tool_manifest_contract import tool_manifest_payload
-
-    return tool_manifest_payload(
-        [
-            {
-                "name": "read_file",
-                "category": "filesystem",
-                "description": "Read a file",
-                "effect": "read_only",
-                "parameters": {"path": "file path"},
-                "parameter_details": {"path": "绝对路径"},
-                "examples": ['{"tool":"read_file"}'],
+    read_spec = make_test_model_spec(
+        "read_file",
+        description="Read a file",
+        category="filesystem",
+        input_schema={
+            "type": "object",
+            "properties": {"path": {"type": "string", "description": "绝对路径"}},
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+        examples=('{"tool":"read_file"}',),
+    )
+    write_spec = make_test_model_spec(
+        "write_file",
+        description="Write a file",
+        category="filesystem",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "绝对路径"},
+                "content": {"type": "string", "description": "内容"},
             },
-            {
-                "name": "write_file",
-                "category": "filesystem",
-                "description": "Write a file",
-                "effect": "mutating",
-                "default_mode": "real",
-                "idempotency_scope": "operation",
-                "requires_approval": False,
-                "timeout_seconds": 20,
-                "output_refs": ["file"],
-                "parameters": {"path": "file path", "content": "text"},
-                "parameter_details": {"path": "绝对路径", "content": "内容"},
-                "examples": ['{"tool":"write_file"}'],
-            },
-        ],
+            "required": ["path", "content"],
+            "additionalProperties": False,
+        },
+        examples=('{"tool":"write_file"}',),
+    )
+    policies = {
+        "read_file": ToolRuntimePolicy(
+            effect_resolver=EffectResolverPolicy("read_only"),
+        ),
+        "write_file": ToolRuntimePolicy(
+            effect_resolver=EffectResolverPolicy("mutating"),
+            approval_policy=ApprovalPolicy("dangerous"),
+            idempotency_policy=IdempotencyPolicy("operation"),
+            timeout_policy=TimeoutPolicy(20),
+            output_policy=OutputPolicy(refs=("file",)),
+        ),
+    }
+    snapshot = runtime_snapshot_for_model_specs(
+        (read_spec, write_spec),
+        policies=policies,
         allowed_tools=["read_file", "write_file"],
     )
+    return tool_manifest_payload(snapshot)

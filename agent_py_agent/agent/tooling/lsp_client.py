@@ -14,7 +14,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .models import BaseTool, ToolAvailability, ToolExecutionResult, ToolSpec
+from .cancellation import ToolCancelled, cancellation_requested
+from .models import (
+    BaseTool,
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    OutputPolicy,
+    ResourceScopePolicy,
+    SandboxPolicy,
+    TimeoutPolicy,
+    ToolAvailability,
+    ToolHandlerOutcome,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+)
 from .sandbox import SandboxUnavailable
 from .shell import (
     _sandbox_exec,
@@ -173,12 +187,32 @@ class LspClient:
             response_queue: queue.Queue = queue.Queue(maxsize=1)
             self._pending[request_id] = response_queue
         self._send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
-        try:
-            response = response_queue.get(timeout=max(0.1, self.timeout))
-        except queue.Empty as exc:
-            with self._lock:
-                self._pending.pop(request_id, None)
-            raise LspProtocolError(f"LSP request timed out method={method!r}") from exc
+        deadline = time.monotonic() + max(0.1, self.timeout)
+        while True:
+            if cancellation_requested():
+                with self._lock:
+                    self._pending.pop(request_id, None)
+                try:
+                    self._send(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "$/cancelRequest",
+                            "params": {"id": request_id},
+                        }
+                    )
+                except LspProtocolError:
+                    pass
+                raise ToolCancelled(f"LSP request cancelled method={method!r}")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                with self._lock:
+                    self._pending.pop(request_id, None)
+                raise LspProtocolError(f"LSP request timed out method={method!r}")
+            try:
+                response = response_queue.get(timeout=min(0.1, remaining))
+                break
+            except queue.Empty:
+                continue
         if isinstance(response, Exception):
             raise response
         if response.get("error") is not None:
@@ -381,45 +415,44 @@ class LspTool(BaseTool):
         server_schema: dict[str, Any] = {"type": "string"}
         if configured_servers:
             server_schema["enum"] = configured_servers
-        self.spec = ToolSpec(
+        self.model_spec = ToolModelSpec(
             name="lsp",
-            category="code",
-            effect="mutating",
-            output_redaction="source_code",
-            promotes_task=True,
-            idempotency_scope="operation",
             description="通过管理员配置的真实 Language Server 执行 JSON-RPC 请求、打开文档和读取诊断。",
-            use_cases=[
-                "像代码编辑器一样检查类型错误和代码诊断",
-                "查定义、引用、hover、符号或类型信息",
-                "打开源码后读取 language server 诊断",
-            ],
-            avoid_when=["只需文本搜索时使用 search_text", "未配置对应 language server 时"],
-            keywords=[
-                "lsp", "language server", "definition", "references", "hover", "diagnostics",
-                "代码诊断", "代码编辑器", "类型检查", "类型错误", "编辑器诊断", "ts", "typescript",
-            ],
-            parameters={
-                "action": "status/request/open_document/diagnostics/close",
-                "server": "lsp_servers 中的管理员配置名",
-                "method": "request 的 LSP 方法",
-                "params": "request 的 JSON object 参数",
-                "path": "open_document 的工作区文件路径",
-                "language_id": "open_document 的 LSP languageId",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["status", "request", "open_document", "diagnostics", "close"], "description": "要执行的 LSP 动作。"},
+                    "server": {**server_schema, "description": "lsp_servers 中的管理员配置名；只有一个配置时可省略。"},
+                    "method": {"type": "string", "description": "request 动作的 LSP 方法。"},
+                    "params": {"type": "object", "description": "request 动作的 JSON object 参数。"},
+                    "path": {"type": "string", "description": "open_document 动作的工作区文件路径。"},
+                    "language_id": {"type": "string", "description": "open_document 动作的 LSP languageId。"},
+                },
+                "required": ["action"],
+                "additionalProperties": False,
             },
-            parameter_schema={
-                "action": {"type": "string", "enum": ["status", "request", "open_document", "diagnostics", "close"]},
-                "server": server_schema,
-                "method": {"type": "string"},
-                "params": {"type": "object"},
-                "path": {"type": "string"},
-                "language_id": {"type": "string"},
-            },
-            required_parameters=["action"],
-            examples=[
-                '{"tool":"lsp","action":"status"}',
-                '{"tool":"lsp","action":"request","server":"python","method":"textDocument/hover","params":{"textDocument":{"uri":"file:///workspace/app.py"},"position":{"line":0,"character":1}}}',
-            ],
+            hints=ToolModelHints(
+                category="code",
+                use_cases=("像代码编辑器一样检查类型错误和代码诊断", "查定义、引用、hover、符号或类型信息", "打开源码后读取 language server 诊断"),
+                avoid_when=("只需文本搜索时使用 search_text", "未配置对应 language server 时"),
+                keywords=("lsp", "language server", "definition", "references", "hover", "diagnostics", "代码诊断", "代码编辑器", "类型检查", "类型错误", "编辑器诊断", "ts", "typescript"),
+                examples=(
+                    '{"tool":"lsp","action":"status"}',
+                    '{"tool":"lsp","action":"request","server":"python","method":"textDocument/hover","params":{"textDocument":{"uri":"file:///workspace/app.py"},"position":{"line":0,"character":1}}}',
+                ),
+            ),
+        )
+        self.runtime_policy = ToolRuntimePolicy(
+            effect_resolver=EffectResolverPolicy(
+                "dangerous",
+                by_parameter=(("action", (("status", "read_only"), ("diagnostics", "read_only"), ("open_document", "mutating"), ("close", "mutating"))),),
+            ),
+            sandbox_policy=SandboxPolicy("required"),
+            idempotency_policy=IdempotencyPolicy("operation"),
+            timeout_policy=TimeoutPolicy(30),
+            resource_scopes=ResourceScopePolicy(parameter_names=("server", "path")),
+            output_policy=OutputPolicy(redaction="source_code"),
+            promotes_task=True,
         )
 
     # LLM: 配置检查不启动 server、不探测文件系统命令，避免仅渲染 Schema 就产生进程副作用。
@@ -429,7 +462,7 @@ class LspTool(BaseTool):
             return ToolAvailability.ready()
         return ToolAvailability.unavailable("管理员尚未配置任何 lsp_servers")
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         try:
             return self._execute_action(params)
         except SandboxUnavailable as exc:
@@ -437,7 +470,7 @@ class LspTool(BaseTool):
         except (LspProtocolError, OSError, ValueError) as exc:
             return self._error("TOOL_UNAVAILABLE", str(exc))
 
-    def _execute_action(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def _execute_action(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         action = str(params.get("action") or "").strip().lower()
         if action == "status":
             return self._ok(self.manager.status())
@@ -468,14 +501,14 @@ class LspTool(BaseTool):
         configured = sorted(self.manager.configs)
         return configured[0] if len(configured) == 1 else ""
 
-    def _request(self, client: LspClient, server: str, params: dict[str, Any]) -> ToolExecutionResult:
+    def _request(self, client: LspClient, server: str, params: dict[str, Any]) -> ToolHandlerOutcome:
         method = str(params.get("method") or "").strip()
         request_params = params.get("params")
         if not method or not isinstance(request_params, dict):
             return self._error("TOOL_INVALID_ARGUMENTS", "request 需要 method 和 object params")
         return self._ok({"server": server, "method": method, "result": client.request(method, request_params)})
 
-    def _diagnostics(self, client: LspClient, server: str) -> ToolExecutionResult:
+    def _diagnostics(self, client: LspClient, server: str) -> ToolHandlerOutcome:
         return self._ok(
             {
                 "server": server,
@@ -483,13 +516,13 @@ class LspTool(BaseTool):
             }
         )
 
-    def _close_client(self, client: LspClient, server: str) -> ToolExecutionResult:
+    def _close_client(self, client: LspClient, server: str) -> ToolHandlerOutcome:
         client.close()
         return self._ok({"server": server, "status": "closed"})
 
-    def _open_document(self, client: LspClient, server: str, params: dict[str, Any]) -> ToolExecutionResult:
+    def _open_document(self, client: LspClient, server: str, params: dict[str, Any]) -> ToolHandlerOutcome:
         path = self._workspace_file(str(params.get("path") or ""))
-        if isinstance(path, ToolExecutionResult):
+        if isinstance(path, ToolHandlerOutcome):
             return path
         content = path.read_bytes()
         if len(content) > _MAX_DOCUMENT_BYTES:
@@ -507,7 +540,7 @@ class LspTool(BaseTool):
         )
         return self._ok({"server": server, "path": str(path), "status": "opened"})
 
-    def _workspace_file(self, raw: str) -> Path | ToolExecutionResult:
+    def _workspace_file(self, raw: str) -> Path | ToolHandlerOutcome:
         if not raw.strip():
             return self._error("TOOL_INVALID_ARGUMENTS", "open_document 需要 path")
         candidate = Path(raw).expanduser()
@@ -520,11 +553,11 @@ class LspTool(BaseTool):
             return self._error("PATH_NOT_FOUND", f"LSP document not found: {candidate}")
         return candidate
 
-    def _ok(self, payload: dict[str, Any]) -> ToolExecutionResult:
-        return ToolExecutionResult(self.spec.name, True, json.dumps(payload, ensure_ascii=False))
+    def _ok(self, payload: dict[str, Any]) -> ToolHandlerOutcome:
+        return ToolHandlerOutcome(self.model_spec.name, True, json.dumps(payload, ensure_ascii=False))
 
-    def _error(self, code: str, message: str) -> ToolExecutionResult:
-        return ToolExecutionResult(self.spec.name, False, message, error_code=code)
+    def _error(self, code: str, message: str) -> ToolHandlerOutcome:
+        return ToolHandlerOutcome(self.model_spec.name, False, message, error_code=code)
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:

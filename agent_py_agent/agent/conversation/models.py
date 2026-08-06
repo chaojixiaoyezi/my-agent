@@ -424,7 +424,7 @@ class BackgroundMainAgentReport:
     # 本轮工具调用的结构化统计(§6-B4 无进展退避的判据来源:零成功调用=无进展轮)。
     tool_call_count: int = 0
     tool_success_count: int = 0
-    # 只统计 ToolSpec 明示为 mutating/dangerous 的成功调用；只读成功不能
+    # 只统计 ToolRuntimePolicy 明示为 mutating/dangerous 的成功调用；只读成功不能
     # 伪装成任务推进并持续清空后台退避。
     material_progress_count: int = 0
     # 后台主代理可以内部推进但不必把每个子任务的碎片回复写进普通聊天。

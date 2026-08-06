@@ -6,14 +6,14 @@ from __future__ import annotations
 职责（对接 ``mcp_client.MCPStdioClient`` 与 ``registry.ToolRegistry``）：
 1. 读 config 的 ``mcp_servers`` 段，逐个连接 server（起子进程 + 握手 + tools/list）。
 2. 把每个发现的 MCP 工具包成一个 ``BaseTool``，名字加 ``mcp__<server>__<tool>`` 前缀防冲突，
-   并把 MCP ``inputSchema`` 原样保存为 ToolSpec 的完整权威 Schema。
+   并把 MCP ``inputSchema`` 规范化为唯一 ``ToolModelSpec.input_schema``。
 3. 模型调用该工具时，handler 把 arguments 转发给 server 的 ``tools/call``，结果转成
-   ``ToolExecutionResult``。
+   ``ToolHandlerOutcome``。
 
 严格约束落地：
 - 惰性/可选：``mcp_servers`` 为空（默认）时 ``register_mcp_servers`` 直接返回，不起任何子进程。
 - 不破坏现有工具：只新增 ``mcp__*`` 前缀工具；某 server 连不上只记日志跳过，不影响其他工具。
-- server 异常不崩主流程：连接异常被捕获转日志；调用异常转结构化 ``ToolExecutionResult`` 错误。
+- server 异常不崩主流程：连接异常被捕获转日志；调用异常转结构化 ``ToolHandlerOutcome`` 错误。
 - 凭证脱敏：复用 ``mcp_client.sanitize_credentials`` / ``redact_env_for_log``。
 
 effect 边界：MCP 工具属于外部执行边界，未声明 effect 时一律按 ``dangerous`` 进入统一
@@ -28,6 +28,7 @@ import re
 from typing import Any
 
 from ..common.log_redaction import redact_sensitive_value
+from .input_schema import canonicalize_tool_input_schema
 from .mcp_client import (
     MCPError,
     MCPServerConfig,
@@ -36,8 +37,19 @@ from .mcp_client import (
     redact_env_for_log,
     sanitize_credentials,
 )
-from .models import BaseTool, ToolAvailability, ToolExecutionResult, ToolSpec
-from .tool_spec_schema import tool_spec_input_schema
+from .models import (
+    BaseTool,
+    ConcurrencyPolicy,
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    OutputPolicy,
+    ResourceScopePolicy,
+    ToolAvailability,
+    ToolHandlerOutcome,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,15 +100,22 @@ class MCPProxyTool(BaseTool):
     """一个把调用转发给某 MCP server ``tools/call`` 的代理工具。
 
     ``execute`` 把模型传来的 dict 参数（去掉内部 ``tool`` 字段）转发给 server，
-    再把结果归一化成 ``ToolExecutionResult``。server 自报的工具错（isError=true）
+    再把结果归一化成 ``ToolHandlerOutcome``。server 自报的工具错（isError=true）
     映射成 ``error_code=TOOL_EXECUTION_FAILED``（可重试语义）；客户端层异常按其
     ``MCPError.code`` 映射成 my-agent 错误码。
     """
 
-    def __init__(self, client: MCPStdioClient, remote_tool: str, spec: ToolSpec):
+    def __init__(
+        self,
+        client: MCPStdioClient,
+        remote_tool: str,
+        model_spec: ToolModelSpec,
+        runtime_policy: ToolRuntimePolicy,
+    ):
         self.client = client
         self.remote_tool = remote_tool
-        self.spec = spec
+        self.model_spec = model_spec
+        self.runtime_policy = runtime_policy
 
     # LLM: 只读取既有 stdio 进程状态，不自动重启或重新发现工具，防止列表查询产生子进程副作用。
     # 函数用途: MCP server 掉线后立即从后续请求快照中隐藏对应 proxy。
@@ -105,7 +124,7 @@ class MCPProxyTool(BaseTool):
             return ToolAvailability.ready()
         return ToolAvailability.unavailable("MCP stdio server 当前未运行")
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         arguments = {
             key: value
             for key, value in (params or {}).items()
@@ -116,7 +135,7 @@ class MCPProxyTool(BaseTool):
         except MCPError as exc:
             return self._error_result(str(exc), _ERROR_CODE_MAP.get(exc.code, "TOOL_EXECUTION_FAILED"))
         except Exception as exc:  # 兜底：任何意外异常都转结构化错误，绝不向上崩主循环。
-            logger.exception("MCP 工具 %s 调用出现未预期异常", self.spec.name)
+            logger.exception("MCP 工具 %s 调用出现未预期异常", self.model_spec.name)
             return self._error_result(
                 sanitize_credentials(f"MCP 工具调用异常：{type(exc).__name__}: {exc}"),
                 "TOOL_EXECUTION_FAILED",
@@ -133,15 +152,15 @@ class MCPProxyTool(BaseTool):
             payload["structuredContent"] = redact_sensitive_value(
                 result["structuredContent"]
             )
-        return ToolExecutionResult(
-            self.spec.name,
+        return ToolHandlerOutcome(
+            self.model_spec.name,
             True,
             json.dumps(payload, ensure_ascii=False),
         )
 
-    def _error_result(self, message: str, error_code: str) -> ToolExecutionResult:
-        return ToolExecutionResult(
-            self.spec.name,
+    def _error_result(self, message: str, error_code: str) -> ToolHandlerOutcome:
+        return ToolHandlerOutcome(
+            self.model_spec.name,
             False,
             json.dumps({"error": message}, ensure_ascii=False),
             error_code=error_code,
@@ -151,6 +170,7 @@ class MCPProxyTool(BaseTool):
 # MCPError.code → my-agent 错误码。让模型拿到正确的可重试/恢复语义：
 # 超时/断连可重试；配置/协议错不应原样空转重试。
 _ERROR_CODE_MAP = {
+    "MCP_CANCELLED": "CANCELLED",
     "MCP_TIMEOUT": "TOOL_TIMEOUT",
     "MCP_CONNECTION_CLOSED": "TOOL_EXECUTION_FAILED",
     "MCP_PROTOCOL_ERROR": "TOOL_EXECUTION_FAILED",
@@ -172,39 +192,38 @@ def build_proxy_tool(
     函数用途: 从一个已发现 MCP 工具构造受统一 Schema/effect 门控制的本地代理。
     """
     raw_schema = info.input_schema if isinstance(info.input_schema, dict) else {}
-    provisional = ToolSpec(
-        name="schema_probe",
-        category="mcp",
-        description="",
-        use_cases=[],
-        avoid_when=[],
-        keywords=[],
-        parameters={},
-        input_schema=raw_schema,
-    )
-    canonical_schema = tool_spec_input_schema(provisional)
-    parameters = mcp_schema_parameters(canonical_schema)
+    canonical_schema = canonicalize_tool_input_schema(raw_schema)
     upstream_description = info.description or f"工具 {info.name}"
     description = (
         f"管理员配置的外部 MCP 服务 '{server_name}' 提供的 '{info.name}' 能力。"
         f"{upstream_description}"
     )
-    spec = ToolSpec(
+    model_spec = ToolModelSpec(
         name=mcp_tool_name(server_name, info.name),
-        category="mcp",
         description=sanitize_credentials(description),
-        use_cases=_mcp_use_cases(server_name, info.name, effect),
-        avoid_when=["该外部能力与当前任务无关时不要调用"],
-        keywords=_mcp_keywords(server_name, info.name, effect),
-        parameters=parameters,
         input_schema=canonical_schema,
-        effect=effect,
-        output_trust="external_data",
-        default_mode="read_only" if effect == "read_only" else "real",
-        idempotency_scope="operation" if effect in {"mutating", "dangerous"} else "",
-        requires_approval=effect == "dangerous",
+        hints=ToolModelHints(
+            category="mcp",
+            use_cases=tuple(_mcp_use_cases(server_name, info.name, effect)),
+            avoid_when=("该外部能力与当前任务无关时不要调用",),
+            keywords=tuple(_mcp_keywords(server_name, info.name, effect)),
+        ),
     )
-    return MCPProxyTool(client, info.name, spec)
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy(effect),
+        idempotency_policy=IdempotencyPolicy(
+            "operation" if effect in {"mutating", "dangerous"} else ""
+        ),
+        concurrency_policy=ConcurrencyPolicy(
+            "parallel_safe" if effect == "read_only" else "serial"
+        ),
+        resource_scopes=ResourceScopePolicy(
+            mode="declared",
+            static_scopes=(f"mcp:{server_name}:{info.name}",),
+        ),
+        output_policy=OutputPolicy(trust="external_data"),
+    )
+    return MCPProxyTool(client, info.name, model_spec, runtime_policy)
 
 
 def _mcp_use_cases(server_name: str, tool_name: str, effect: str) -> list[str]:
@@ -311,15 +330,15 @@ def refresh_registered_mcp_client(
                 exc,
             )
             continue
-        if proxy.spec.name in replacement:
+        if proxy.model_spec.name in replacement:
             logger.warning(
                 "MCP 工具名冲突，跳过 server '%s' 的 '%s'（已存在 %s）",
                 client.config.name,
                 info.name,
-                proxy.spec.name,
+                proxy.model_spec.name,
             )
             continue
-        replacement[proxy.spec.name] = proxy
+        replacement[proxy.model_spec.name] = proxy
         registered += 1
     registry.tools = replacement
     return registered
@@ -350,11 +369,11 @@ def _register_discovered_tools(
                 exc,
             )
             continue
-        if proxy.spec.name in existing:
+        if proxy.model_spec.name in existing:
             # 极端情况下两个 server 清洗后撞名：保留先到者，跳过后者并告警。
             logger.warning(
                 "MCP 工具名冲突，跳过 server '%s' 的 '%s'（已存在 %s）",
-                config.name, info.name, proxy.spec.name,
+                config.name, info.name, proxy.model_spec.name,
             )
             continue
         registry.register(proxy)

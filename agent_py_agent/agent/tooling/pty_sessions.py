@@ -13,7 +13,20 @@ from pathlib import Path
 from typing import Any
 
 from ..contracts.gates.command_policy import evaluate_command_policy
-from .models import BaseTool, ToolExecutionResult, ToolSpec, TrustedParameterBinding
+from .models import (
+    BaseTool,
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    OutputPolicy,
+    ResourceScopePolicy,
+    SandboxPolicy,
+    ToolHandlerOutcome,
+    ToolInputPolicy,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+    TrustedParameterBinding,
+)
 from .sandbox import SandboxUnavailable
 from .shell import (
     ShellTool,
@@ -242,57 +255,60 @@ pty_session_registry = PtySessionRegistry()
 class TerminalSessionTool(BaseTool):
     """Start and interact with a real pseudoterminal session."""
 
-    def __init__(self, shell_tool: ShellTool):
-        self.shell_tool = shell_tool
-        self.spec = ToolSpec(
-            name="terminal_session",
+    model_spec = ToolModelSpec(
+        name="terminal_session",
+        description="启动并操作真实 PTY 交互终端会话，支持 start/write/read/close。",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["start", "write", "read", "close"], "description": "要执行的终端会话动作。"},
+                "session_id": {"type": "string", "description": "write/read/close 所需 PTY session id。"},
+                "command": {"type": "string", "description": "start 所需命令。"},
+                "working_dir": {"type": "string", "description": "start 的工作目录；省略时使用本轮可信有效目录。"},
+                "data": {"type": "string", "description": "write 写入的文本。"},
+                "append_newline": {"type": "boolean", "description": "write 后是否追加换行。"},
+                "cursor": {"type": "integer", "minimum": 0, "description": "read 的增量游标。"},
+                "max_bytes": {"type": "integer", "minimum": 1, "maximum": _MAX_BUFFER_BYTES, "description": "read 最多返回的字节数。"},
+            },
+            "required": ["action"],
+            "additionalProperties": False,
+        },
+        hints=ToolModelHints(
             category="shell",
-            effect="mutating",
-            promotes_task=True,
-            idempotency_scope="operation",
-            description="启动并操作真实 PTY 交互终端会话，支持 start/write/read/close。",
-            use_cases=[
-                "CLI 必须检测 TTY、显示交互提示或接收 stdin 时",
-                "需要向长驻 REPL、调试器或交互安装器持续写入输入并读取输出时",
-            ],
-            avoid_when=[
-                "一次性非交互命令继续使用 run_command",
-                "纯后台批处理使用 run_command(run_in_background=true)",
-            ],
-            keywords=["pty", "terminal", "interactive", "stdin", "repl", "交互终端"],
-            parameters={
-                "action": "start/write/read/close",
-                "session_id": "write/read/close 所需 PTY session id",
-                "command": "start 所需命令",
-                "working_dir": "start 的工作目录",
-                "data": "write 写入的文本",
-                "append_newline": "write 后追加换行",
-                "cursor": "read 的增量游标",
-                "max_bytes": "read 最大字节数",
-            },
-            parameter_schema={
-                "action": {"type": "string", "enum": ["start", "write", "read", "close"]},
-                "session_id": {"type": "string"},
-                "command": {"type": "string"},
-                "working_dir": {"type": "string"},
-                "data": {"type": "string"},
-                "append_newline": {"type": "boolean"},
-                "cursor": {"type": "integer", "minimum": 0},
-                "max_bytes": {"type": "integer", "minimum": 1, "maximum": _MAX_BUFFER_BYTES},
-            },
-            required_parameters=["action"],
-            trusted_parameter_bindings={
-                "working_dir": TrustedParameterBinding(
-                    source_refs=("registry.effective_cwd",),
-                    when=(("action", "start"),),
-                ),
-            },
-            examples=[
+            use_cases=("CLI 必须检测 TTY、显示交互提示或接收 stdin 时", "需要向长驻 REPL、调试器或交互安装器持续写入输入并读取输出时"),
+            avoid_when=("一次性非交互命令继续使用 run_command", "纯后台批处理使用 run_command(run_in_background=true)"),
+            keywords=("pty", "terminal", "interactive", "stdin", "repl", "交互终端"),
+            examples=(
                 '{"tool":"terminal_session","action":"start","command":"python -q"}',
                 '{"tool":"terminal_session","action":"write","session_id":"pty-1-...","data":"print(42)","append_newline":true}',
                 '{"tool":"terminal_session","action":"read","session_id":"pty-1-...","cursor":0}',
-            ],
-        )
+            ),
+        ),
+    )
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy(
+            "dangerous",
+            by_parameter=(("action", (("read", "read_only"),)),),
+        ),
+        sandbox_policy=SandboxPolicy("required"),
+        idempotency_policy=IdempotencyPolicy("operation"),
+        resource_scopes=ResourceScopePolicy(parameter_names=("session_id", "working_dir")),
+        output_policy=OutputPolicy(trust="external_data"),
+        input_policy=ToolInputPolicy(
+            internal_parameters=("__sandbox_write_roots", "__sandbox_read_roots", "__access_mode"),
+            trusted_parameter_bindings=((
+                "working_dir",
+                TrustedParameterBinding(
+                    source_refs=("registry.effective_cwd",),
+                    when=(("action", "start"),),
+                ),
+            ),),
+        ),
+        promotes_task=True,
+    )
+
+    def __init__(self, shell_tool: ShellTool):
+        self.shell_tool = shell_tool
 
     @property
     def workspace_roots(self) -> list[Path]:
@@ -309,7 +325,7 @@ class TerminalSessionTool(BaseTool):
             _sandbox_read_roots(params),
         )
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         action = str(params.get("action") or "").strip().lower()
         if action == "start":
             return self._start(params)
@@ -321,9 +337,9 @@ class TerminalSessionTool(BaseTool):
             return self._close(params)
         return self._error("TOOL_INVALID_ARGUMENTS", "action 必须是 start/write/read/close")
 
-    def _start(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def _start(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         command_result = self.shell_tool._parse_command(params)
-        if isinstance(command_result, ToolExecutionResult):
+        if isinstance(command_result, ToolHandlerOutcome):
             return self._error(command_result.error_code, command_result.output)
         command = command_result
         command_policy = evaluate_command_policy(command, allow_shell_operators=True)
@@ -335,7 +351,7 @@ class TerminalSessionTool(BaseTool):
         write_roots = _sandbox_write_roots(params)
         read_roots = _sandbox_read_roots(params)
         target = self.shell_tool._execution_target(params, command)
-        if isinstance(target, ToolExecutionResult):
+        if isinstance(target, ToolHandlerOutcome):
             return self._error(target.error_code, target.output)
         try:
             session = pty_session_registry.start(
@@ -358,7 +374,7 @@ class TerminalSessionTool(BaseTool):
             }
         )
 
-    def _write(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def _write(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         session_id = str(params.get("session_id") or "").strip()
         data = str(params.get("data") or "")
         if bool(params.get("append_newline")):
@@ -378,7 +394,7 @@ class TerminalSessionTool(BaseTool):
             return self._error("COMMAND_FAILED", f"PTY session 已结束: {session_id}")
         return self._ok({"status": "written", "session_id": session_id, "bytes": len(encoded)})
 
-    def _read(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def _read(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         session_id = str(params.get("session_id") or "").strip()
         session = pty_session_registry.get(session_id, self._access_scope(params))
         if session is None:
@@ -402,7 +418,7 @@ class TerminalSessionTool(BaseTool):
             }
         )
 
-    def _close(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def _close(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         session_id = str(params.get("session_id") or "").strip()
         session = pty_session_registry.close(session_id, self._access_scope(params))
         if session is None:
@@ -415,11 +431,11 @@ class TerminalSessionTool(BaseTool):
             }
         )
 
-    def _ok(self, payload: dict[str, Any]) -> ToolExecutionResult:
-        return ToolExecutionResult(self.spec.name, True, json.dumps(payload, ensure_ascii=False))
+    def _ok(self, payload: dict[str, Any]) -> ToolHandlerOutcome:
+        return ToolHandlerOutcome(self.model_spec.name, True, json.dumps(payload, ensure_ascii=False))
 
-    def _error(self, code: str, message: str) -> ToolExecutionResult:
-        return ToolExecutionResult(self.spec.name, False, message, error_code=code)
+    def _error(self, code: str, message: str) -> ToolHandlerOutcome:
+        return ToolHandlerOutcome(self.model_spec.name, False, message, error_code=code)
 
 
 __all__ = ["PtySessionRegistry", "TerminalSessionTool", "pty_session_registry"]

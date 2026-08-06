@@ -20,7 +20,7 @@ from .filesystem_artifact_guard import (
     tool_output_artifact_typo_hint,
 )
 from .filesystem_path_recovery import MissingPathRequest, missing_path_result
-from .models import ToolExecutionResult
+from .models import ToolHandlerOutcome
 
 
 @dataclass(frozen=True)
@@ -67,12 +67,12 @@ class TruncatedReadFooterRequest:
     next_offset: int | None = None
 
 
-def execute_read_file(tool, params: dict[str, Any], max_chars: int) -> ToolExecutionResult:
+def execute_read_file(tool, params: dict[str, Any], max_chars: int) -> ToolHandlerOutcome:
     try:
         raw_path = _required_path(params.get("path"))
         target = tool.resolve_path(raw_path)
     except ValueError as exc:
-        return ToolExecutionResult("read_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
+        return ToolHandlerOutcome("read_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
     return _execute_read_file_request(ReadFileRequest(
         tool=tool,
         params=params,
@@ -82,12 +82,12 @@ def execute_read_file(tool, params: dict[str, Any], max_chars: int) -> ToolExecu
     ))
 
 
-def _execute_read_file_request(request: ReadFileRequest) -> ToolExecutionResult:
+def _execute_read_file_request(request: ReadFileRequest) -> ToolHandlerOutcome:
     target = request.target
     if not target.exists():
         typo_hint = _missing_tool_artifact_typo_hint(request.tool, request.raw_path)
         if typo_hint:
-            return ToolExecutionResult("read_file", False, typo_hint, error_code="PATH_NOT_FOUND")
+            return ToolHandlerOutcome("read_file", False, typo_hint, error_code="PATH_NOT_FOUND")
         return missing_path_result(MissingPathRequest(
             tool_name="read_file",
             raw_path=request.raw_path,
@@ -101,7 +101,7 @@ def _execute_read_file_request(request: ReadFileRequest) -> ToolExecutionResult:
         return _not_file_result(request.tool, target)
     internal_ref = _internal_agent_status_ref(target)
     if internal_ref:
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             "read_file",
             False,
             json.dumps(internal_ref, ensure_ascii=False, indent=2),
@@ -120,7 +120,7 @@ def _execute_read_file_request(request: ReadFileRequest) -> ToolExecutionResult:
     return _ordinary_file_result(request)
 
 
-def _ordinary_file_result(request: ReadFileRequest) -> ToolExecutionResult:
+def _ordinary_file_result(request: ReadFileRequest) -> ToolHandlerOutcome:
     target = request.target
     if _has_char_window_params(request.params):
         return _char_window_file_result(CharWindowFileRequest(
@@ -134,11 +134,11 @@ def _ordinary_file_result(request: ReadFileRequest) -> ToolExecutionResult:
         # 不再因非 UTF-8 硬失败;真二进制/测不出仍抛 UnicodeDecodeError 维持"无法读取"语义。
         content, _encoding = decode_bytes(target.read_bytes())
     except UnicodeDecodeError:
-        return ToolExecutionResult("read_file", False, "文件不是有效文本（编码探测失败），无法读取。", error_code="TOOL_EXECUTION_FAILED")
+        return ToolHandlerOutcome("read_file", False, "文件不是有效文本（编码探测失败），无法读取。", error_code="TOOL_EXECUTION_FAILED")
     return _numbered_text_result(content, request.params, request.max_chars)
 
 
-def _not_file_result(tool, target: Path) -> ToolExecutionResult:
+def _not_file_result(tool, target: Path) -> ToolHandlerOutcome:
     if target.is_dir():
         display_path = tool.display_path(target)
         payload = {
@@ -148,16 +148,16 @@ def _not_file_result(tool, target: Path) -> ToolExecutionResult:
             "message": "目标是目录，不是文件；请先用 list_files 查看目录，再读取具体文件。",
             "suggested_tool_call": {"tool": "list_files", "path": display_path, "max_depth": 1},
         }
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             "read_file",
             False,
             json.dumps(payload, ensure_ascii=False, indent=2),
             error_code="PATH_IS_DIRECTORY",
         )
-    return ToolExecutionResult("read_file", False, f"目标不是文件: {tool.display_path(target)}", error_code="PATH_INVALID")
+    return ToolHandlerOutcome("read_file", False, f"目标不是文件: {tool.display_path(target)}", error_code="PATH_INVALID")
 
 
-def _numbered_text_result(content: str, params: dict[str, Any], max_chars: int) -> ToolExecutionResult:
+def _numbered_text_result(content: str, params: dict[str, Any], max_chars: int) -> ToolHandlerOutcome:
     if _has_char_window_params(params):
         return _char_window_result(content, params, max_chars)
     lines = content.splitlines()
@@ -177,12 +177,12 @@ def _numbered_text_result(content: str, params: dict[str, Any], max_chars: int) 
         )
         line_max_chars = _line_max_chars(params, max_chars)
     except ValueError as exc:
-        return ToolExecutionResult("read_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
+        return ToolHandlerOutcome("read_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
     error = _line_range_error(lines, start_line, end_line, raw_end_line)
     if error:
-        return ToolExecutionResult("read_file", False, error, error_code="TOOL_INVALID_ARGUMENTS")
+        return ToolHandlerOutcome("read_file", False, error, error_code="TOOL_INVALID_ARGUMENTS")
     if not lines:
-        return ToolExecutionResult("read_file", True, "(空文件)")
+        return ToolHandlerOutcome("read_file", True, "(空文件)")
     result, read_window = _render_numbered_read_lines(NumberedReadLinesRequest(
         lines=lines,
         start_line=start_line,
@@ -191,7 +191,7 @@ def _numbered_text_result(content: str, params: dict[str, Any], max_chars: int) 
         continuation_max_chars=max_chars,
     ))
     envelope = {"read_window": read_window} if read_window else {}
-    return ToolExecutionResult("read_file", True, result or "(空文件)", result_envelope=envelope)
+    return ToolHandlerOutcome("read_file", True, result or "(空文件)", result_envelope=envelope)
 
 
 def _has_char_window_params(params: dict[str, Any]) -> bool:
@@ -216,7 +216,7 @@ def _line_max_chars(params: dict[str, Any], default_max_chars: int) -> int:
     return min(requested, default_max_chars)
 
 
-def _char_window_result(content: str, params: dict[str, Any], default_max_chars: int) -> ToolExecutionResult:
+def _char_window_result(content: str, params: dict[str, Any], default_max_chars: int) -> ToolHandlerOutcome:
     try:
         offset = _int_param(
             params.get("offset")
@@ -233,7 +233,7 @@ def _char_window_result(content: str, params: dict[str, Any], default_max_chars:
             min_value=1,
         )
     except ValueError as exc:
-        return ToolExecutionResult("read_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
+        return ToolHandlerOutcome("read_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
     if offset >= len(content):
         return _offset_out_of_range_result(offset, len(content))
     window = content[offset : offset + min(limit, default_max_chars)]
@@ -249,13 +249,13 @@ def _char_window_result(content: str, params: dict[str, Any], default_max_chars:
             f" next_call=read_file(offset={next_offset}, max_chars={continuation_max_chars})。"
             " 最终报告前先把关键事实和 source offset 写入 task_progress 或 work 表。"
         )
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             "read_file",
             True,
             f"{header}\n{window}\n{footer}",
             result_envelope={"read_window": _char_read_window(offset, len(window), len(content))},
         )
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         "read_file",
         True,
         f"{header}\n{window}",
@@ -263,7 +263,7 @@ def _char_window_result(content: str, params: dict[str, Any], default_max_chars:
     )
 
 
-def _char_window_file_result(request: CharWindowFileRequest) -> ToolExecutionResult:
+def _char_window_file_result(request: CharWindowFileRequest) -> ToolHandlerOutcome:
     try:
         offset, limit = _char_window_values(request.params, request.default_max_chars)
         total_chars = _cached_total_chars(request.tool, request.target)
@@ -275,11 +275,11 @@ def _char_window_file_result(request: CharWindowFileRequest) -> ToolExecutionRes
             limit=min(limit, request.default_max_chars),
         )
     except ValueError as exc:
-        return ToolExecutionResult("read_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
+        return ToolHandlerOutcome("read_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
     except UnicodeDecodeError:
-        return ToolExecutionResult("read_file", False, "文件不是有效 UTF-8 文本，无法读取。", error_code="TOOL_EXECUTION_FAILED")
+        return ToolHandlerOutcome("read_file", False, "文件不是有效 UTF-8 文本，无法读取。", error_code="TOOL_EXECUTION_FAILED")
     except OSError as exc:
-        return ToolExecutionResult("read_file", False, f"读取文件失败: {exc}", error_code="TOOL_EXECUTION_FAILED")
+        return ToolHandlerOutcome("read_file", False, f"读取文件失败: {exc}", error_code="TOOL_EXECUTION_FAILED")
     return _char_window_view_result(CharWindowView(
         offset=offset,
         window=window,
@@ -307,7 +307,7 @@ def _char_window_values(params: dict[str, Any], default_max_chars: int) -> tuple
     return offset, limit
 
 
-def _char_window_view_result(view: CharWindowView) -> ToolExecutionResult:
+def _char_window_view_result(view: CharWindowView) -> ToolHandlerOutcome:
     next_offset = view.offset + len(view.window)
     header = f"[char-window offset={view.offset} chars={len(view.window)} total_chars={view.total_chars}]"
     if next_offset < view.total_chars:
@@ -320,13 +320,13 @@ def _char_window_view_result(view: CharWindowView) -> ToolExecutionResult:
             f" next_call=read_file(offset={next_offset}, max_chars={continuation_max_chars})。"
             " 最终报告前先把关键事实和 source offset 写入 task_progress 或 work 表。"
         )
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             "read_file",
             True,
             f"{header}\n{view.window}\n{footer}",
             result_envelope={"read_window": _char_read_window(view.offset, len(view.window), view.total_chars)},
         )
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         "read_file",
         True,
         f"{header}\n{view.window}",
@@ -334,8 +334,8 @@ def _char_window_view_result(view: CharWindowView) -> ToolExecutionResult:
     )
 
 
-def _offset_out_of_range_result(offset: int, total_chars: int) -> ToolExecutionResult:
-    return ToolExecutionResult(
+def _offset_out_of_range_result(offset: int, total_chars: int) -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(
         "read_file",
         False,
         f"offset 超出文件末尾：offset={offset}, total_chars={total_chars}。请改用更小的 offset。",

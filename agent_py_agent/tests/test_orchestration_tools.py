@@ -2,6 +2,7 @@
 
 测试编排工具注册、权限控制、执行边界等功能。
 """
+
 from __future__ import annotations
 
 import json
@@ -12,39 +13,40 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent_py_agent.agent.capability import CapabilityRouter
+from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
 
 
-def test_create_subagents_tool_spec_uses_template_index_not_full_prompt():
-    from agent_py_agent.agent.agent_core.orchestration.tool_specs import build_create_subagents_spec
-    from agent_py_agent.agent.backends.tool_schema import tool_spec_to_input_schema
+def test_create_subagents_model_spec_uses_template_index_not_full_prompt():
+    from agent_py_agent.agent.agent_core.orchestration.tool_specs import (
+        build_create_subagents_model_spec,
+    )
 
-    spec = build_create_subagents_spec()
-    role_detail = spec.parameter_details["role"]
+    spec = build_create_subagents_model_spec()
+    role_detail = spec.input_schema["properties"]["role"]["description"]
 
     assert "模板位置" not in role_detail
     assert "worker" in role_detail
     assert "你是执行子代理" not in role_detail
-    assert "count" not in spec.parameters
-    assert "count" not in tool_spec_to_input_schema(spec)["properties"]
-    assert spec.required_parameters == ["goal"]
-    assert tool_spec_to_input_schema(spec)["required"] == ["goal"]
+    assert "count" not in spec.parameter_descriptions
+    assert "count" not in spec.input_schema["properties"]
+    assert spec.input_schema["required"] == ["goal"]
     assert all('"goal"' in example for example in spec.examples)
 
 
 def test_inspect_agent_tree_model_schema_excludes_owner_wide_history():
     from agent_py_agent.agent.agent_core.orchestration.tool_specs import (
-        build_inspect_agent_tree_spec,
+        build_inspect_agent_tree_model_spec,
     )
-    from agent_py_agent.agent.backends.tool_schema import tool_spec_to_input_schema
 
-    schema = tool_spec_to_input_schema(build_inspect_agent_tree_spec())
+    model_spec = build_inspect_agent_tree_model_spec()
+    schema = model_spec.input_schema
 
     assert schema["properties"]["scope"]["enum"] == [
         "root_tree",
         "own_subtree",
         "subtree",
     ]
-    assert "all" not in build_inspect_agent_tree_spec().parameters["scope"]
+    assert "all" not in model_spec.parameter_descriptions["scope"]
 
 
 def test_create_subagents_inherits_current_task_workspace(tmp_path):
@@ -52,8 +54,15 @@ def test_create_subagents_inherits_current_task_workspace(tmp_path):
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
 
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), subagent_workspace="subs"), tmp_path)
-    task_root = tmp_path / "home" / "owners" / "local" / "main" / "tasks" / "2026-06-01" / "big-task"
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo", my_agent_home=str(tmp_path / "home"), subagent_workspace="subs"
+        ),
+        tmp_path,
+    )
+    task_root = (
+        tmp_path / "home" / "owners" / "local" / "main" / "tasks" / "2026-06-01" / "big-task"
+    )
     agent._current_run_task_workspace = str(task_root)
 
     params = create_run_params(agent, {"role": "worker"}, "阅读项目 A 并写报告", ["read_file"])
@@ -92,7 +101,9 @@ class TestTaskProgressTool:
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+        agent = SimpleAgent(
+            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+        )
         agent._main_agent_run_id = "run-main"
         tool = TaskProgressTool(agent)
 
@@ -102,7 +113,12 @@ class TestTaskProgressTool:
                 "summary": "已读完项目 A，准备读项目 B。",
                 "next_action": "继续阅读项目 B 的核心模块。",
                 "items": [
-                    {"id": "project-a", "title": "阅读项目 A", "status": "done", "evidence": ["A/README.md"]},
+                    {
+                        "id": "project-a",
+                        "title": "阅读项目 A",
+                        "status": "done",
+                        "evidence": ["A/README.md"],
+                    },
                     {"id": "project-b", "title": "阅读项目 B", "status": "in_progress"},
                 ],
             }
@@ -119,13 +135,16 @@ class TestTaskProgressTool:
         assert payload["counts"]["in_progress"] == 1
         assert payload["items"][0]["evidence"] == ["A/README.md"]
 
+
 def test_task_identity_keeps_main_resume_and_child_ledgers_separate():
     from agent_py_agent.agent.agent_core.runtime.task_identity import (
         durable_task_id,
         progress_ledger_id,
     )
 
-    agent = SimpleNamespace(_main_agent_run_id="main-fallback", _current_request_id="request-fallback")
+    agent = SimpleNamespace(
+        _main_agent_run_id="main-fallback", _current_request_id="request-fallback"
+    )
     resumed = SimpleNamespace(
         run_id="request-after-resume",
         task_id="request-after-resume",
@@ -155,86 +174,117 @@ class TestTaskProgressRegistryTool:
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+        agent = SimpleAgent(
+            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+        )
         agent._main_agent_run_id = "run-main"
 
-        result = agent.tools.execute_call(
+        result = execute_registry_test_call(
+            agent.tools,
+            "task_progress",
             {
-                "tool": "task_progress",
                 "action": "update",
                 "summary": "已完成第一块。",
                 "items": [{"id": "block-1", "title": "第一块", "status": "done"}],
-            }
+            },
+            run_id="run-main",
+            call_id="task-progress-valid",
         )
 
         assert result.ok is True
         owner_home = Path(agent.home_paths.owner_home_dir)
-        assert (owner_home / "memory_archive" / "task_progress" / "run-main" / "progress.json").exists()
+        assert (
+            owner_home / "memory_archive" / "task_progress" / "run-main" / "progress.json"
+        ).exists()
 
     def test_registry_rejects_tool_name_wrapped_payload(self, tmp_path):
         """同名 wrapper 不是当前工具协议，不能被静默忽略或拆包执行。"""
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+        agent = SimpleAgent(
+            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+        )
         agent._main_agent_run_id = "run-main"
 
-        result = agent.tools.execute_call(
+        result = execute_registry_test_call(
+            agent.tools,
+            "task_progress",
             {
-                "tool": "task_progress",
                 "task_progress": {
                     "action": "update",
                     "summary": "已读目录。",
                     "items": [{"id": "list", "status": "done"}],
                 },
-            }
+            },
+            run_id="run-main",
+            call_id="task-progress-wrapper-invalid",
         )
 
         assert result.ok is False
-        payload = json.loads(result.output)
-        assert payload["invalid_field"] == "task_progress"
-        assert "top-level current fields" in payload["error"]
+        assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+        assert result.failure_stage == "validation"
+        assert result.handler_executed is False
+        assert result.metadata["action_decision"]["evidence"]["issues"] == [
+            {
+                "path": "$.task_progress",
+                "keyword": "additionalProperties",
+                "expected": False,
+                "actual_type": "object",
+            }
+        ]
 
     def test_registry_scope_drives_task_progress_run_id(self, tmp_path):
         """真实工具循环注入的 run_scope 应决定进度账本归属，不能落到 main。"""
-        from agent_py_agent.agent.action_protocol import RunScope, ToolCallEnvelope
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
-        envelope = ToolCallEnvelope(
-            call_id="call-1",
-            source="test",
-            tool_name="task_progress",
-            input={
+        agent = SimpleAgent(
+            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+        )
+        result = execute_registry_test_call(
+            agent.tools,
+            "task_progress",
+            {
                 "action": "update",
                 "summary": "读完第一批项目。",
                 "items": [{"id": "batch-1", "title": "第一批", "status": "done"}],
             },
-            scope=RunScope(run_id="run-scoped", task_id="task-scoped", request_id="request-scoped"),
+            run_id="run-scoped",
+            call_id="call-1",
+            write_boundary={"task_id": "task-scoped"},
         )
-
-        result = agent.tools.execute_call(envelope.to_dict())
 
         assert result.ok is True
         owner_home = Path(agent.home_paths.owner_home_dir)
-        assert (owner_home / "memory_archive" / "task_progress" / "run-scoped" / "progress.json").exists()
-        assert not (owner_home / "memory_archive" / "task_progress" / "main" / "progress.json").exists()
+        assert (
+            owner_home / "memory_archive" / "task_progress" / "run-scoped" / "progress.json"
+        ).exists()
+        assert not (
+            owner_home / "memory_archive" / "task_progress" / "main" / "progress.json"
+        ).exists()
 
     def test_task_progress_soft_feedback_names_missing_evidence_items(self, tmp_path):
         """模型一写完成/结果但没证据时，工具应立即给可操作软提醒，不等最终验收。"""
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+        agent = SimpleAgent(
+            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+        )
         agent._main_agent_run_id = "run-main"
 
-        result = agent.tools.execute_call(
+        result = execute_registry_test_call(
+            agent.tools,
+            "task_progress",
             {
-                "tool": "task_progress",
                 "action": "update",
-                "items": [{"id": "project-a", "title": "项目 A", "status": "done", "notes": "完成"}],
-            }
+                "items": [
+                    {"id": "project-a", "title": "项目 A", "status": "done", "notes": "完成"}
+                ],
+            },
+            run_id="run-main",
+            call_id="task-progress-soft-feedback",
         )
         payload = json.loads(result.output)
 
@@ -242,6 +292,7 @@ class TestTaskProgressRegistryTool:
         assert payload["soft_feedback"]["blocking"] is False
         assert payload["soft_feedback"]["missing_evidence_item_ids"] == ["project-a"]
         assert "补证据" in payload["soft_feedback"]["message"]
+
 
 class TestInspectAgentTreeTool:
     """测试只读代理树查看工具。"""
@@ -491,7 +542,9 @@ class TestInspectAgentTreeTool:
         mock_agent.subagents = manager
         mock_agent._main_agent_run_id = "main"
 
-        payload = json.loads(InspectAgentTreeTool(mock_agent).execute({"scope": "root_tree"}).output)
+        payload = json.loads(
+            InspectAgentTreeTool(mock_agent).execute({"scope": "root_tree"}).output
+        )
 
         assert payload["coordination_advice"]["suggested_tool_call"]["tool"] == "wait"
         assert payload["policy"]["suggested_tool_call"]["tool"] == "wait"
@@ -505,9 +558,9 @@ class TestInspectAgentTreeTool:
 
         assert "wait" in agent.tools.tools
         result = json.loads(
-            agent.tools.tools["wait"].execute(
-                {"seconds": 5, "task_id": "root-task-1", "reason": "等子代理完成"}
-            ).output
+            agent.tools.tools["wait"]
+            .execute({"seconds": 5, "task_id": "root-task-1", "reason": "等子代理完成"})
+            .output
         )
         assert result["ok"] is True
         assert result["scheduled"] is True
@@ -523,12 +576,16 @@ class TestInspectAgentTreeTool:
         from agent_py_agent.agent.settings import AgentConfig
 
         agent = SimpleAgent(
-            AgentConfig(model_backend="echo", subagent_workspace="subs", subagent_watch_interval_seconds=240),
+            AgentConfig(
+                model_backend="echo", subagent_workspace="subs", subagent_watch_interval_seconds=240
+            ),
             tmp_path,
         )
 
         defaulted = json.loads(agent.tools.tools["wait"].execute({"task_id": "task-a"}).output)
-        capped = json.loads(agent.tools.tools["wait"].execute({"task_id": "task-b", "seconds": 99999}).output)
+        capped = json.loads(
+            agent.tools.tools["wait"].execute({"task_id": "task-b", "seconds": 99999}).output
+        )
 
         assert defaulted["interval_seconds"] == 240
         assert capped["interval_seconds"] == 7200
@@ -538,12 +595,16 @@ class TestInspectAgentTreeTool:
         from agent_py_agent.agent.settings import AgentConfig
 
         agent = SimpleAgent(
-            AgentConfig(model_backend="echo", subagent_workspace="subs", subagent_watch_interval_seconds=180),
+            AgentConfig(
+                model_backend="echo", subagent_workspace="subs", subagent_watch_interval_seconds=180
+            ),
             tmp_path,
         )
 
         payload = json.loads(
-            agent.tools.tools["wait"].execute({"task_id": "task-alias", "interval_seconds": 600}).output
+            agent.tools.tools["wait"]
+            .execute({"task_id": "task-alias", "interval_seconds": 600})
+            .output
         )
 
         assert payload["ok"] is True
@@ -588,7 +649,7 @@ class TestInspectAgentTreeTool:
         assert policy.route_channel == "internal"
         assert policy.route_target == ""
 
-        spec = agent.tools.tools["wait"].spec
+        spec = agent.tools.tools["wait"].model_spec
         assert "用户的未来提醒使用 schedule" in spec.description
         assert "提醒" not in spec.keywords
 
@@ -619,8 +680,22 @@ class TestRaiseEventTool:
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), subagent_workspace="subs"), tmp_path)
-        thread = agent.conversation_store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1"})
+        agent = SimpleAgent(
+            AgentConfig(
+                model_backend="echo",
+                my_agent_home=str(tmp_path / "home"),
+                subagent_workspace="subs",
+            ),
+            tmp_path,
+        )
+        thread = agent.conversation_store.get_or_create_thread(
+            {
+                "canonical_user_id": "user-1",
+                "channel": "internal",
+                "channel_conversation_id": "thread-1",
+                "channel_user_id": "user-1",
+            }
+        )
         root = agent.subagents.create_run(goal="root", thought="", plan=["root"])
         child = agent.subagents.create_run(
             goal="child",
@@ -666,7 +741,14 @@ class TestDispatchSubagentsTool:
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), subagent_workspace="subs"), tmp_path)
+        agent = SimpleAgent(
+            AgentConfig(
+                model_backend="echo",
+                my_agent_home=str(tmp_path / "home"),
+                subagent_workspace="subs",
+            ),
+            tmp_path,
+        )
         task = agent.subagents.create_run(goal="child", thought="", plan=["do"], role="worker")
         report = SimpleNamespace(dry_run=False, summary={"ok": True}, records=[])
         agent.dispatch_subagents = MagicMock(return_value=report)
@@ -692,7 +774,14 @@ class TestDispatchSubagentsTool:
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), subagent_workspace="subs"), tmp_path)
+        agent = SimpleAgent(
+            AgentConfig(
+                model_backend="echo",
+                my_agent_home=str(tmp_path / "home"),
+                subagent_workspace="subs",
+            ),
+            tmp_path,
+        )
         report = SimpleNamespace(
             dry_run=False,
             summary={"total": 1, "ok": 1, "dry_run": 1, "applied": 0},
@@ -715,7 +804,14 @@ class TestDispatchSubagentsTool:
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), subagent_workspace="subs"), tmp_path)
+        agent = SimpleAgent(
+            AgentConfig(
+                model_backend="echo",
+                my_agent_home=str(tmp_path / "home"),
+                subagent_workspace="subs",
+            ),
+            tmp_path,
+        )
         record = SimpleNamespace(
             step="runner",
             action="execute",
@@ -728,11 +824,13 @@ class TestDispatchSubagentsTool:
             after_status="PENDING",
             evidence_paths=[],
         )
-        agent.dispatch_subagents = MagicMock(return_value=SimpleNamespace(
-            dry_run=False,
-            summary={"total": 1},
-            records=[record],
-        ))
+        agent.dispatch_subagents = MagicMock(
+            return_value=SimpleNamespace(
+                dry_run=False,
+                summary={"total": 1},
+                records=[record],
+            )
+        )
 
         payload = json.loads(DispatchSubagentsTool(agent).execute({"dry_run": False}).output)
 
@@ -767,10 +865,22 @@ class TestScheduleChildSubagentsTool:
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), subagent_workspace="subs"), tmp_path)
+        agent = SimpleAgent(
+            AgentConfig(
+                model_backend="echo",
+                my_agent_home=str(tmp_path / "home"),
+                subagent_workspace="subs",
+            ),
+            tmp_path,
+        )
         root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])
         child = agent.subagents.create_run(
-            goal="child", thought="child", plan=["child"], parent_id=root.id, root_id=root.id, depth=1,
+            goal="child",
+            thought="child",
+            plan=["child"],
+            parent_id=root.id,
+            root_id=root.id,
+            depth=1,
         )
         agent._current_subagent_run_id = child.id
         tool = ScheduleChildSubagentsTool(agent)
@@ -797,12 +907,21 @@ class TestScheduleChildSubagentsTool:
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), subagent_workspace="subs"), tmp_path)
+        agent = SimpleAgent(
+            AgentConfig(
+                model_backend="echo",
+                my_agent_home=str(tmp_path / "home"),
+                subagent_workspace="subs",
+            ),
+            tmp_path,
+        )
         root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])
         agent._current_subagent_run_id = root.id
         tool = ScheduleChildSubagentsTool(agent)
 
-        result = tool.execute({"children": [{"goal": "leaf", "role": "worker", "agent_name": "leaf"}]})
+        result = tool.execute(
+            {"children": [{"goal": "leaf", "role": "worker", "agent_name": "leaf"}]}
+        )
         payload = json.loads(result.output)
 
         assert result.ok
@@ -818,16 +937,31 @@ class TestScheduleChildSubagentsTool:
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), subagent_workspace="subs"), tmp_path)
+        agent = SimpleAgent(
+            AgentConfig(
+                model_backend="echo",
+                my_agent_home=str(tmp_path / "home"),
+                subagent_workspace="subs",
+            ),
+            tmp_path,
+        )
         root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])
         agent._current_subagent_run_id = root.id
         tool = ScheduleChildSubagentsTool(agent)
 
-        result = tool.execute({
-            "tool": "schedule_child_subagents",
-            "dry_run": False,
-            "children": [{"goal": "grandchild coordinator", "role": "coordinator", "agent_name": "页面组"}],
-        })
+        result = tool.execute(
+            {
+                "tool": "schedule_child_subagents",
+                "dry_run": False,
+                "children": [
+                    {
+                        "goal": "grandchild coordinator",
+                        "role": "coordinator",
+                        "agent_name": "页面组",
+                    }
+                ],
+            }
+        )
         payload = json.loads(result.output)
         child = agent.subagents.load(payload["created_run_ids"][0])
 

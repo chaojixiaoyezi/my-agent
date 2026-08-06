@@ -34,6 +34,10 @@ from agent_py_agent.agent.user_space.context_bundle_artifacts import (
 )
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 from agent_py_agent.cli.parser import build_parser
+from agent_py_agent.tests._tool_runtime_harness import (
+    make_test_model_spec,
+    runtime_snapshot_for_model_specs,
+)
 
 
 def test_main_context_bundle_contains_contract_surfaces_and_self_check(tmp_path: Path) -> None:
@@ -58,15 +62,20 @@ def test_main_context_bundle_contains_contract_surfaces_and_self_check(tmp_path:
     assert payload["tool_manifest"]["visible_tools"] == ["read_file", "write_file"]
     assert payload["tool_manifest"]["executable_tools"] == ["read_file", "write_file"]
     assert "WRITE_FORBIDDEN" in payload["tool_manifest"]["failure_taxonomy"]
-    failure_contracts = {item["code"]: item for item in payload["tool_manifest"]["failure_contracts"]}
+    failure_contracts = {
+        item["code"]: item for item in payload["tool_manifest"]["failure_contracts"]
+    }
     assert failure_contracts["WRITE_FORBIDDEN"]["recommended_action"] == "request_permission"
-    assert payload["tool_manifest"]["tool_specs"][0]["visible_in_context"] is True
+    assert payload["tool_manifest"]["tool_runtimes"][0]["visible_in_context"] is True
     assert payload["artifact_refs"]["items"][0]["ref"].endswith("outputs/index.html")
     assert payload["acceptance_contract"]["items"] == ["有登录", "有购买"]
     assert payload["acceptance_contract"]["constraints"] == ["单文件 HTML"]
     assert payload["acceptance_contract"]["latest_tests"] == ["人工检查按钮不失效"]
     assert payload["self_check"]["ok"] is True
-    assert payload["prompt_budget"]["prompt_section_chars"] <= payload["prompt_budget"]["max_prompt_section_chars"]
+    assert (
+        payload["prompt_budget"]["prompt_section_chars"]
+        <= payload["prompt_budget"]["max_prompt_section_chars"]
+    )
     assert "request_id:" not in result.prompt_section
     assert "run_id:" not in result.prompt_section
     assert "task_id:" not in result.prompt_section
@@ -103,7 +112,9 @@ def test_main_context_bundle_keeps_conversation_task_id_out_of_model_prompt(
 
 def test_runtime_context_bundle_surfaces_tool_spec_load_error(tmp_path: Path) -> None:
     class BrokenTools:
-        def specs(self, **_kwargs):
+        owner_type = "main_agent"
+
+        def runtime_snapshot(self, **_kwargs):
             raise ValueError("tool registry broken")
 
     agent = SimpleNamespace(
@@ -129,7 +140,7 @@ def test_runtime_context_bundle_surfaces_tool_spec_load_error(tmp_path: Path) ->
     )
 
     errors = result.bundle["tool_manifest"]["tool_load_errors"]
-    assert errors[0]["context"] == "main_context_bundle.tool_specs"
+    assert errors[0]["context"] == "main_context_bundle.tool_runtime_snapshot"
     assert errors[0]["category"] == "data_parse"
     assert "读取失败" in errors[0]["model_message"]
 
@@ -146,7 +157,10 @@ def test_runtime_context_bundle_uses_owner_effective_workspace(tmp_path: Path) -
         workspace_roots=[service_root],
         home_paths=None,
         config=SimpleNamespace(auto_save_memory=False),
-        tools=SimpleNamespace(specs=lambda **_kwargs: []),
+        tools=SimpleNamespace(
+            owner_type="main_agent",
+            runtime_snapshot=lambda **_kwargs: runtime_snapshot_for_model_specs(()),
+        ),
     )
 
     result = build_runtime_main_context_bundle(
@@ -212,8 +226,7 @@ def _build_contract_bundle_result(tmp_path: Path):
         task_id="task-main-contract",
         workspace_roots=(str(root), str(tmp_path / "shared")),
         write_boundary=_contract_write_boundary(root),
-        allowed_tools=("read_file", "write_file"),
-        tool_specs=_contract_tool_specs(),
+        tool_runtime_snapshot=_contract_tool_runtime_snapshot(),
         artifact_refs=(str(root / "outputs" / "index.html"),),
         task_attributes=_contract_task_attributes(),
         save=True,
@@ -229,10 +242,36 @@ def _contract_write_boundary(root: Path) -> dict[str, list[str]]:
     }
 
 
-def _contract_tool_specs() -> tuple[dict[str, object], ...]:
-    return (
-        {"name": "read_file", "category": "filesystem", "parameters": {"path": "文件路径"}},
-        {"name": "write_file", "category": "filesystem", "parameters": {"path": "文件路径", "content": "内容"}},
+def _contract_tool_runtime_snapshot():
+    specs = (
+        make_test_model_spec(
+            "read_file",
+            category="filesystem",
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "文件路径"}},
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        ),
+        make_test_model_spec(
+            "write_file",
+            category="filesystem",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "文件路径"},
+                    "content": {"type": "string", "description": "内容"},
+                },
+                "required": ["path", "content"],
+                "additionalProperties": False,
+            },
+        ),
+    )
+    return runtime_snapshot_for_model_specs(
+        specs,
+        run_id="run-main-contract",
+        allowed_tools=["read_file", "write_file"],
     )
 
 
@@ -279,7 +318,9 @@ def test_compact_apply_skips_auto_context_bundle_when_scope_mismatches(tmp_path:
     assert result["restore_refs"]["source_refs"]["context_bundles"] == []
 
 
-def test_compact_apply_explicit_context_bundle_ref_records_mismatch_but_keeps_ref(tmp_path: Path) -> None:
+def test_compact_apply_explicit_context_bundle_ref_records_mismatch_but_keeps_ref(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "workspace"
     home_paths = ensure_my_agent_home(tmp_path / "home")
     _write_compact_scope(root)
@@ -311,7 +352,10 @@ def test_compact_apply_explicit_context_bundle_ref_records_mismatch_but_keeps_re
 
     assert result["main_context_bundle_match"]["status"] == "explicit_scope_mismatch"
     assert result["refs"]["main_context_bundle"] == explicit_bundle.json_path
-    assert result["restore_refs"]["source_refs"]["context_bundles"][0]["path"] == explicit_bundle.json_path
+    assert (
+        result["restore_refs"]["source_refs"]["context_bundles"][0]["path"]
+        == explicit_bundle.json_path
+    )
 
 
 def test_context_bundle_latest_cli_reports_observability_payload(tmp_path: Path, capsys) -> None:
@@ -322,23 +366,28 @@ def test_context_bundle_latest_cli_reports_observability_payload(tmp_path: Path,
         f'workspace_root: "{workspace}"\n'
         f'my_agent_home: "{home}"\n'
         'model_backend: "echo"\n'
+        'tool_protocol: "text"\n'
         'memory_path: "data/memory.jsonl"\n'
         'local_store_path: "data/local_store/local.db"\n'
         'local_store_files_dir: "data/local_store/files"\n'
         'local_store_events_path: "data/local_store/events.jsonl"\n',
         encoding="utf-8",
     )
-    run_args = build_parser().parse_args([
-        "--config",
-        str(config_path),
-        "run",
-        "context bundle CLI 观测测试",
-        "--save",
-    ])
+    run_args = build_parser().parse_args(
+        [
+            "--config",
+            str(config_path),
+            "run",
+            "context bundle CLI 观测测试",
+            "--save",
+        ]
+    )
     assert run_args.func(run_args) == 0
     capsys.readouterr()
 
-    latest_args = build_parser().parse_args(["--config", str(config_path), "context-bundle", "latest", "--json"])
+    latest_args = build_parser().parse_args(
+        ["--config", str(config_path), "context-bundle", "latest", "--json"]
+    )
     assert latest_args.func(latest_args) == 0
     payload = json.loads(capsys.readouterr().out)
 
@@ -361,7 +410,9 @@ def test_context_bundle_latest_payload_reports_bad_json(tmp_path: Path) -> None:
     assert payload["load_error"]["context"] == "cli.context_bundle.latest.read"
 
 
-def test_main_context_bundle_artifacts_can_be_updated_from_tool_output_index(tmp_path: Path) -> None:
+def test_main_context_bundle_artifacts_can_be_updated_from_tool_output_index(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "workspace"
     home_paths = ensure_my_agent_home(tmp_path / "home")
     bundle = build_main_context_bundle(

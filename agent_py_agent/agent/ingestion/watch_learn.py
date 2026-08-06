@@ -12,7 +12,7 @@ import json
 import time
 from typing import Any
 
-from ..tooling.models import ToolExecutionResult
+from ..tooling.models import ToolHandlerOutcome
 from .puller import DrainBudget, drain_source
 from .source_http import public_source_envelope
 from .source_spec import SourceSpec, canon_value, parse_source_spec
@@ -49,7 +49,7 @@ AUDIT_SAMPLE_GUIDANCE = (
 )
 
 
-def sample_source(fetch_json, state: WatchState, params: dict[str, Any]) -> ToolExecutionResult:
+def sample_source(fetch_json, state: WatchState, params: dict[str, Any]) -> ToolHandlerOutcome:
     """抓一批原始样本(从源滚动缓冲最旧处顺读,不动盯守游标),给模型学判据。
     每字段取值分布同时缓存进 watch 状态(configure 校验 target 频次的样本证据)。
     file 源=读文件头 N 行;poll 源=原样查一次接口包成单条样本;cursor 源=翻页顺读。"""
@@ -132,7 +132,7 @@ def _sample_events(fetch_json, state: WatchState, count: int) -> tuple[list[dict
 _JUDGMENT_NOTE_CAP = 2000
 
 
-def configure_spec(state: WatchState, params: dict[str, Any]) -> ToolExecutionResult:
+def configure_spec(state: WatchState, params: dict[str, Any]) -> ToolHandlerOutcome:
     """校验并灌入模型学出的判据 spec:引擎立即按 spec 盯,spec 随 watch 持久化。
     judgment_note(可选)= 轻量记忆:用户教的"这个来源/这类事怎么看"原文(样品说明/
     判据描述),随 watch 持久化,重启或消费者切换后都在载荷里原样带回——教一次别重教。
@@ -341,12 +341,12 @@ def _sample_count(params: dict[str, Any]) -> int:
     return max(_SAMPLE_MIN, min(_SAMPLE_MAX, parsed))
 
 
-def _ok(payload: dict[str, Any]) -> ToolExecutionResult:
-    return ToolExecutionResult(_TOOL_NAME, True, json.dumps(payload, ensure_ascii=False), result_envelope=payload)
+def _ok(payload: dict[str, Any]) -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(_TOOL_NAME, True, json.dumps(payload, ensure_ascii=False), result_envelope=payload)
 
 
-def _err(message: str, code: str) -> ToolExecutionResult:
-    return ToolExecutionResult(
+def _err(message: str, code: str) -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(
         _TOOL_NAME, False, json.dumps({"ok": False, "error": message}, ensure_ascii=False), error_code=code
     )
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 
 """composition root for SimpleAgent runtime, tools, memory, gateway, and subagents."""
 
@@ -74,7 +75,7 @@ from .agent_core.runner.prompts import (
 from .agent_core.runtime.owner_roots import runtime_owner_root
 from .agent_core.runtime.record_finding_tool import RecordFindingTool
 from .backends import get_backend
-from .capability import CapabilityRouter, from_tool_spec
+from .capability import CapabilityRouter, from_tool_model_spec
 from .capability.channel_message_tool import SendMessageTool
 from .capability.memory_tool import RememberTool
 from .capability.network_authorization_tool import AuthorizeNetworkHostTool
@@ -108,14 +109,37 @@ from .extensions import load_extension_registry
 from .gateway_parts.channel_health import adapter_runtime_health
 from .ingestion.watch_tool import WatchStreamTool
 from .local_storage import LocalStore
+from .memory_archive.control_plane import (
+    MemoryControlPlaneQueryOptions,
+    query_memory_control_plane,
+)
 from .memory_store import JsonlMemory
+from .memory_store.candidates import CandidateService
+from .memory_store.curator import (
+    MemoryCuratorDependencies,
+    MemoryCuratorIdentity,
+    MemoryCuratorService,
+)
+from .memory_store.curator_formal import FormalMemorySource
+from .memory_store.curator_inputs import CuratorToolReferenceSource
+from .memory_store.curator_models import MemoryCuratorConfig
+from .memory_store.curator_run_log import CuratorRunLog
+from .memory_store.curator_state import MemoryCuratorStateStore
+from .memory_store.daily import DailyMemoryStore
+from .memory_store.lessons import HotRuleRepository, LessonRepository
+from .memory_store.promotion import (
+    ConversationMessageEvidenceVerifier,
+    LocalStoreToolEvidenceVerifier,
+    MemoryPromotionDependencies,
+    MemoryPromotionPolicy,
+    MemoryPromotionService,
+)
 from .prompting_parts import PromptBuilder
 from .scheduler import SchedulerDueIndex, SchedulerRepository, SchedulerService, ScheduleTool
 from .settings import AgentConfig
 from .settings.runtime_guard_config import runtime_guard_policy
 from .subagents.manager import SubAgentManager
 from .tooling.registry import ToolRegistry, ToolRegistryParams
-from .tooling.registry_payload_normalize import tool_payload_limits_from_config
 from .tooling.vision_tools import vision_config_from_agent_config
 from .user_space.home_indexes import register_owner_ref
 from .user_space.home_layout import ensure_my_agent_home, home_paths
@@ -156,6 +180,143 @@ def _export_model_endpoint_env(config) -> None:
         os.environ.setdefault("AGENT_API_BASE", api_base)
     if model_name:
         os.environ.setdefault("AGENT_MODEL_NAME", model_name)
+
+
+# LLM: Curator provider/model selection reuses the canonical backend factory and config credentials;
+# it must not create a second agent loop or tool registry.
+# 函数用途: 为无工具后台策展构造独立非流式模型适配器，并返回解析后的 provider/model 标识。
+def _build_memory_curator_backend(
+    config: AgentConfig,
+    curator_config: MemoryCuratorConfig,
+) -> tuple[object, str, str]:
+    provider = (
+        str(config.model_backend)
+        if curator_config.provider in {"", "auto"}
+        else curator_config.provider
+    )
+    model = curator_config.model or str(config.model_name)
+    scoped_config = replace(
+        config,
+        model_backend=provider,
+        model_name=model,
+        stream_enabled=False,
+    )
+    return get_backend(provider, scoped_config), provider, model
+
+
+# LLM: The composition root is the only adapter allowed to join Memory Store with the existing
+# archive control plane; Curator receives bounded metadata and never imports the archive layer.
+# 函数用途: 按精确 run_id 查询当前 owner 的工具产物索引，并保持内部层依赖单向。
+def _query_curator_tool_references(
+    owner_root: Path,
+    run_id: str,
+    limit: int,
+) -> dict[str, object]:
+    return query_memory_control_plane(
+        owner_root,
+        MemoryControlPlaneQueryOptions(run_id=run_id, limit=limit),
+    )
+
+
+# LLM: Formal Memory, Candidate and Persona authorities are constructed once from canonical owner paths before prompts/tools.
+# 函数用途: 为 composition root 接通 LocalStore 派生索引、唯一候选账本、长期记忆和 Persona 仓库。
+def _wire_memory_authorities(
+    agent: object,
+    config: AgentConfig,
+    paths: dict[str, object],
+) -> None:
+    agent.local_store = LocalStore(
+        paths["local_store_path"],
+        files_dir=paths["local_store_files_dir"],
+        events_path=paths["local_store_events_path"],
+        enable_fts=config.local_store_fts_enabled,
+    )
+    agent.memory_candidates = CandidateService(
+        agent.home_paths.owner_memory_candidates_jsonl,
+        quota_enforcer=agent.owner_quota,
+    )
+    agent.memory = JsonlMemory(
+        paths["memory_path"],
+        local_store=agent.local_store,
+        ops_path=getattr(agent.home_paths, "owner_memory_ops_jsonl", None),
+        candidate_service=agent.memory_candidates,
+        embedder=_build_memory_embedder(config),
+        quota_enforcer=agent.owner_quota,
+    )
+    agent.persona_repository = PersonaRepository.from_home_paths(
+        agent.home_paths,
+        quota_enforcer=agent.owner_quota,
+    )
+
+
+# LLM: Composition is kept outside SimpleAgent.__init__; every repository is the existing owner
+# authority and the Curator dependency bundle contains no model-facing tools.
+# 函数用途: 为一个已建立 ConversationStore/Memory/Persona 的 agent 接通统一后台策展链。
+def _wire_memory_curator(agent: object, config: AgentConfig) -> None:
+    agent.memory_lessons = LessonRepository(
+        agent.home_paths.owner_memory_lessons_dir,
+        agent.home_paths.owner_memory_routing_index_md,
+    )
+    agent.memory_hot = HotRuleRepository(agent.home_paths.owner_memory_hot_md)
+    agent.memory_promotion = MemoryPromotionService(
+        dependencies=MemoryPromotionDependencies(
+            candidates=agent.memory_candidates,
+            long_term=agent.memory,
+            persona=agent.persona_repository,
+            lessons=agent.memory_lessons,
+            hot=agent.memory_hot,
+            message_verifier=ConversationMessageEvidenceVerifier(agent.conversation_store),
+            tool_verifier=LocalStoreToolEvidenceVerifier(
+                agent.local_store,
+                owner_id=str(agent.home_paths.owner_id or "local/main"),
+            ),
+        ),
+        policy=MemoryPromotionPolicy(
+            lesson_min_occurrences=config.memory_lesson_min_occurrences,
+            hot_min_occurrences=config.memory_hot_min_occurrences,
+        ),
+    )
+    curator_config = MemoryCuratorConfig.from_agent_config(config)
+    backend, provider, model = _build_memory_curator_backend(config, curator_config)
+    daily_store = DailyMemoryStore(
+        agent.home_paths.owner_memory_daily_dir,
+        quota_enforcer=agent.owner_quota,
+    )
+    state_store = MemoryCuratorStateStore(
+        agent.home_paths.owner_memory_curator_state_json
+    )
+    run_log = CuratorRunLog(agent.home_paths.owner_memory_curator_runs_dir)
+    agent.memory_curator = MemoryCuratorService(
+        config=curator_config,
+        dependencies=MemoryCuratorDependencies(
+            backend=backend,
+            conversation_store=agent.conversation_store,
+            audit_dir=agent.home_paths.owner_audit_dir,
+            state_store=state_store,
+            daily_store=daily_store,
+            candidate_service=agent.memory_candidates,
+            run_log=run_log,
+            identity=MemoryCuratorIdentity(
+                provider=provider,
+                model=model,
+                owner_id=str(agent.home_paths.owner_id or "local/main"),
+                timezone_name=str(getattr(config, "timezone", "") or ""),
+            ),
+            formal_memory_source=FormalMemorySource(
+                agent.memory,
+                agent.memory_lessons,
+                agent.memory_hot,
+            ),
+            tool_reference_source=CuratorToolReferenceSource(
+                agent.home_paths.owner_home_dir,
+                query=_query_curator_tool_references,
+            ),
+            promotion_callback=lambda candidate_id: agent.memory_promotion.promote(
+                candidate_id,
+                automatic=True,
+            ),
+        ),
+    )
 
 
 class SimpleAgent(
@@ -217,24 +378,7 @@ class SimpleAgent(
         )
         paths = self.runtime_path_resolution.paths
         apply_runtime_paths_to_config(config, self.runtime_path_resolution)
-        self.local_store = LocalStore(
-            paths["local_store_path"],
-            files_dir=paths["local_store_files_dir"],
-            events_path=paths["local_store_events_path"],
-            enable_fts=config.local_store_fts_enabled,
-        )
-        self.memory = JsonlMemory(
-            paths["memory_path"],
-            local_store=self.local_store,
-            daily_mirror_dir=_daily_memory_dir(config, self.home_paths),
-            ops_path=getattr(self.home_paths, "owner_memory_ops_jsonl", None),
-            embedder=_build_memory_embedder(config),  # 记忆语义召回(检索拓宽 #1);默认关返 None
-            quota_enforcer=self.owner_quota,
-        )
-        self.persona_repository = PersonaRepository.from_home_paths(
-            self.home_paths,
-            quota_enforcer=self.owner_quota,
-        )
+        _wire_memory_authorities(self, config, paths)
         self.prompts = PromptBuilder(
             config,
             self.root,
@@ -254,6 +398,7 @@ class SimpleAgent(
         self.prompts.capability_router = self.capability_router
         self.backend = get_backend(config.model_backend, config)
         self.conversation_store = ConversationStore(paths["conversation_workspace"])
+        _wire_memory_curator(self, config)
         self.collaboration_store = CollaborationStore(paths["collaboration_workspace"])
         self.scheduler_repository = SchedulerRepository(
             self.home_paths.owner_scheduler_dir,
@@ -290,7 +435,7 @@ class SimpleAgent(
         self.extensions.activate_agent(self)
         _register_orchestration_tools(self)
         for spec in self.tools.specs():
-            self.capability_router.register(from_tool_spec(spec))
+            self.capability_router.register(from_tool_model_spec(spec))
 
     def current_skill_snapshot(self):
         """Return the immutable Skill catalog bound to this worker turn."""
@@ -526,13 +671,6 @@ def _register_owner_ref_if_possible(paths, owner) -> None:
         return
 
 
-def _daily_memory_dir(config: AgentConfig, paths):
-    if not bool(getattr(config, "daily_memory_mirror_enabled", True)):
-        return None
-    owner_daily = getattr(paths, "owner_memory_daily_dir", None)
-    return (owner_daily,) if owner_daily else None
-
-
 def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
     # 远程 scoped owner 的子代理与主代理同规:工作区=owner home(见 _remote_owner_workspace_override)。
     scoped_workspace = _remote_owner_workspace_override(agent, agent.config)
@@ -545,7 +683,7 @@ def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
         workspace_root=workspace_root,
         workspace_roots=workspace_roots,
         role_template_dirs=agent.config.subagent_role_template_dirs,
-        enable_self_learning=agent.config.enable_self_learning,
+        candidate_service=agent.memory_candidates,
         debug_trace_level=agent.config.subagent_debug_trace_level,
         takeover_chain_max_depth=agent.config.subagent_takeover_chain_max_depth,
         owner_id=str(getattr(agent.home_paths, "owner_id", "") or ""),
@@ -670,7 +808,6 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             artifact_read_budget_window_seconds=config.tool_artifact_read_budget_window_seconds,
             artifact_read_budget_max_chars=config.tool_artifact_read_budget_max_chars,
             artifact_default_read_chars=config.memory_artifact_default_read_chars,
-            payload_limits=tool_payload_limits_from_config(config),
             disabled_tools=list(getattr(agent.owner_policy, "disabled_tools", ())),
             artifact_root=runtime_owner_root(agent),
             runtime_guard_policy=getattr(agent, "runtime_guard_policy", None),

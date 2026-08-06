@@ -353,20 +353,23 @@ class TestRegistryConcurrency:
 class TestToolSpecs:
     def test_specs_have_precise_schema(self):
         """三个工具的 schema 对齐原生 tool_use 规范:必填参数声明 + 精确类型。"""
-        list_spec = ListProcessesTool().spec
-        status_spec = ProcessStatusTool().spec
-        kill_spec = KillProcessTool().spec
+        list_tool = ListProcessesTool()
+        status_tool = ProcessStatusTool()
+        kill_tool = KillProcessTool()
+        list_spec = list_tool.model_spec
+        status_spec = status_tool.model_spec
+        kill_spec = kill_tool.model_spec
 
         assert list_spec.name == "list_processes"
-        assert list_spec.required_parameters == []
+        assert list_spec.input_schema.get("required", []) == []
 
-        assert status_spec.required_parameters == ["session_id"]
-        assert status_spec.parameter_schema["session_id"] == {"type": "string"}
-        assert status_spec.effect == "read_only"
+        assert status_spec.input_schema["required"] == ["session_id"]
+        assert status_spec.input_schema["properties"]["session_id"]["type"] == "string"
+        assert status_tool.runtime_policy.effect_resolver.default_effect == "read_only"
 
-        assert kill_spec.required_parameters == ["session_id"]
-        assert kill_spec.parameter_schema["session_id"] == {"type": "string"}
-        assert kill_spec.effect == "mutating"
+        assert kill_spec.input_schema["required"] == ["session_id"]
+        assert kill_spec.input_schema["properties"]["session_id"]["type"] == "string"
+        assert kill_tool.runtime_policy.effect_resolver.default_effect == "mutating"
 
     def test_tools_registered_in_catalog(self, tmp_path: Path):
         """三个工具真的注册进了 ToolRegistry,模型可见。"""

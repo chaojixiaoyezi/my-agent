@@ -9,7 +9,17 @@ from ...common.value_parsing import dedupe_strings, string_list
 from ...conversation.models import normalize_guidance_target_type
 from ...runtime_errors import runtime_error_report
 from ...subagents.kernel import SubagentKernelQuery
-from ...tooling.models import BaseTool, ToolExecutionResult, ToolSpec
+from ...tooling.models import (
+    BaseTool,
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    ResourceScopePolicy,
+    ToolHandlerOutcome,
+    ToolInputPolicy,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+)
 from ..runner.context import current_subagent_run_id
 
 if TYPE_CHECKING:
@@ -30,13 +40,22 @@ class GuidanceToolRequest:
 
 
 class SendGuidanceTool(BaseTool):
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy("mutating"),
+        idempotency_policy=IdempotencyPolicy("operation"),
+        resource_scopes=ResourceScopePolicy(
+            parameter_names=("target_id", "run_ids", "root_id"),
+        ),
+        input_policy=ToolInputPolicy(internal_parameters=("sender", "metadata")),
+    )
+
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
-        self.spec = build_send_guidance_spec()
+        self.model_spec = build_send_guidance_model_spec()
 
-    def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         requests = _guidance_requests(self.agent, params)
-        if isinstance(requests, ToolExecutionResult):
+        if isinstance(requests, ToolHandlerOutcome):
             return requests
         entries = [
             self.agent.conversation_store.append_guidance(
@@ -61,60 +80,70 @@ class SendGuidanceTool(BaseTool):
             "delivery": entry.delivery,
             "message": "已写入软提示；目标代理下一轮会读取，不会被强制停止或硬阻断。",
         }
-        return ToolExecutionResult(_TOOL_NAME, True, json.dumps(payload, ensure_ascii=False, indent=2))
+        return ToolHandlerOutcome(_TOOL_NAME, True, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
-def build_send_guidance_spec() -> ToolSpec:
-    return ToolSpec(
+def build_send_guidance_model_spec() -> ToolModelSpec:
+    return ToolModelSpec(
         name=_TOOL_NAME,
-        category="orchestration",
-        effect="mutating",
-        idempotency_scope="operation",
         description="给正在运行的主代理、子代理、孙代理、会话或任务追加一条软提示；只影响下一轮判断，不推进、不验收、不硬卡。",
-        use_cases=[
-            "用户在任务运行中补一句要求、纠偏或提醒",
-            "父代理想提醒某个下级换来源、补证据、先写草稿或尽快汇报",
-            "需要给一个 thread/task/case 留下一条后续醒来可见的提示",
-        ],
-        avoid_when=["需要真正推进、重跑或恢复子代理时继续用 dispatch_subagents；第一次派工继续用 create_subagents"],
-        keywords=["补充提示", "引导", "纠偏", "催一下", "steer", "guidance", "message"],
-        parameters={
-            "target": "目标对象，必须写 {type,id}；type 只接受 agent_run/thread/task/case",
-            "target_type": "不使用 target 时可直接写 target_type，只接受 agent_run/thread/task/case",
-            "target_id": "不使用 target 时可直接写 target_id",
-            "run_ids": "多个 agent_run 目标；适合给一批已知子代理同一句补充提示",
-            "target_scope": "批量目标；children 表示 root_id 的直接孩子，descendants 表示 root_id 的整棵下级",
-            "root_id": "target_scope 的根 run_id",
-            "message": "要给目标下一轮看的补充提示，必须是具体可执行的人话",
-            "priority": "软优先级文本，默认 normal",
-            "delivery": "投递方式提示，默认 next_turn",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "target": {
+                    "type": "object",
+                    "properties": {
+                        "type": {"type": "string", "enum": ["agent_run", "thread", "task", "case"]},
+                        "id": {"type": "string"},
+                    },
+                    "required": ["type", "id"],
+                    "additionalProperties": False,
+                    "description": "单个目标对象。",
+                },
+                "target_type": {
+                    "type": "string",
+                    "enum": ["agent_run", "thread", "task", "case"],
+                    "description": "不使用 target 时指定目标类型。",
+                },
+                "target_id": {"type": "string", "description": "不使用 target 时指定目标 ID。"},
+                "run_ids": {"type": "array", "items": {"type": "string"}, "description": "多个 agent_run 目标。"},
+                "target_scope": {
+                    "type": "string",
+                    "enum": ["children", "descendants"],
+                    "description": "按 root_id 选择直接孩子或整棵下级。",
+                },
+                "root_id": {"type": "string", "description": "target_scope 的根 run_id。"},
+                "message": {"type": "string", "description": "目标下一轮要看的具体可执行提示。"},
+                "priority": {"type": "string", "description": "软优先级，默认 normal。"},
+                "delivery": {"type": "string", "description": "投递方式提示，默认 next_turn。"},
+            },
+            "required": ["message"],
+            "additionalProperties": False,
         },
-        parameter_schema={
-            "target": {"type": "object"},
-            "target_type": {"type": "string", "enum": ["agent_run", "thread", "task", "case"]},
-            "target_id": {"type": "string"},
-            "run_ids": {"type": "array", "items": {"type": "string"}},
-            "target_scope": {"type": "string", "enum": ["children", "descendants"]},
-            "root_id": {"type": "string"},
-            "message": {"type": "string"},
-            "priority": {"type": "string"},
-            "delivery": {"type": "string"},
-        },
-        required_parameters=["message"],
-        examples=[
-            '{"tool":"send_guidance","target":{"type":"agent_run","id":"child-1"},"message":"换一个数据来源核对，不要重复查同一个页面。"}',
-            '{"tool":"send_guidance","target_scope":"children","root_id":"parent-1","message":"按用户补充要求补证据，完成后继续原任务。"}',
-            '{"tool":"send_guidance","target":{"type":"thread","id":"thread-1"},"message":"用户补充：最终报告里要把未命中的来源也写清楚。"}',
-        ],
+        hints=ToolModelHints(
+            category="orchestration",
+            use_cases=(
+                "用户在任务运行中补一句要求、纠偏或提醒",
+                "父代理想提醒某个下级换来源、补证据、先写草稿或尽快汇报",
+                "需要给一个 thread/task/case 留下一条后续醒来可见的提示",
+            ),
+            avoid_when=("需要真正推进、重跑或恢复子代理时继续用 dispatch_subagents；第一次派工继续用 create_subagents",),
+            keywords=("补充提示", "引导", "纠偏", "催一下", "steer", "guidance", "message"),
+            examples=(
+                '{"tool":"send_guidance","target":{"type":"agent_run","id":"child-1"},"message":"换一个数据来源核对，不要重复查同一个页面。"}',
+                '{"tool":"send_guidance","target_scope":"children","root_id":"parent-1","message":"按用户补充要求补证据，完成后继续原任务。"}',
+                '{"tool":"send_guidance","target":{"type":"thread","id":"thread-1"},"message":"用户补充：最终报告里要把未命中的来源也写清楚。"}',
+            ),
+        ),
     )
 
 
-def _guidance_requests(agent: object, params: dict[str, object]) -> list[GuidanceToolRequest] | ToolExecutionResult:
+def _guidance_requests(agent: object, params: dict[str, object]) -> list[GuidanceToolRequest] | ToolHandlerOutcome:
     message = str(params.get("message") or "").strip()
     if not message:
         return _guidance_error("缺少 message；send_guidance 只记录具体补充提示。", error_code="TOOL_PARAMETER_REQUIRED")
     run_ids = _target_run_ids(agent, params)
-    if isinstance(run_ids, ToolExecutionResult):
+    if isinstance(run_ids, ToolHandlerOutcome):
         return run_ids
     if run_ids:
         sender = str(params.get("sender") or current_subagent_run_id(agent) or "main_agent").strip()
@@ -132,12 +161,12 @@ def _guidance_requests(agent: object, params: dict[str, object]) -> list[Guidanc
             for run_id in run_ids
         ]
     request = _guidance_request(agent, params)
-    if isinstance(request, ToolExecutionResult):
+    if isinstance(request, ToolHandlerOutcome):
         return request
     return [request]
 
 
-def _guidance_request(agent: object, params: dict[str, object]) -> GuidanceToolRequest | ToolExecutionResult:
+def _guidance_request(agent: object, params: dict[str, object]) -> GuidanceToolRequest | ToolHandlerOutcome:
     target_type, target_id = _target_from_params(params)
     message = str(params.get("message") or "").strip()
     if not target_type or not target_id:
@@ -157,7 +186,7 @@ def _guidance_request(agent: object, params: dict[str, object]) -> GuidanceToolR
     )
 
 
-def _target_run_ids(agent: object, params: dict[str, object]) -> list[str] | ToolExecutionResult:
+def _target_run_ids(agent: object, params: dict[str, object]) -> list[str] | ToolHandlerOutcome:
     explicit = string_list(params.get("run_ids"))
     if explicit:
         return dedupe_strings(explicit)
@@ -165,7 +194,7 @@ def _target_run_ids(agent: object, params: dict[str, object]) -> list[str] | Too
     if not scope:
         return []
     resolved = _target_scope_rows(agent, params, scope)
-    if isinstance(resolved, ToolExecutionResult):
+    if isinstance(resolved, ToolHandlerOutcome):
         return resolved
     rows, anchor = resolved
     if scope == "children":
@@ -175,7 +204,7 @@ def _target_run_ids(agent: object, params: dict[str, object]) -> list[str] | Too
     return _guidance_error("未知 target_scope；请使用 children 或 descendants，或直接传 run_ids。")
 
 
-def _target_scope_rows(agent: object, params: dict[str, object], scope: str) -> tuple[list[object], str] | ToolExecutionResult:
+def _target_scope_rows(agent: object, params: dict[str, object], scope: str) -> tuple[list[object], str] | ToolHandlerOutcome:
     manager = getattr(agent, "subagents", None)
     if manager is None or not callable(getattr(type(manager), "kernel_snapshot", None)):
         return _guidance_error("target_scope 需要可读取的子代理树；请先用显式 run_ids，或刷新代理树后再发。")
@@ -197,7 +226,7 @@ def _target_scope_rows(agent: object, params: dict[str, object], scope: str) -> 
         }
         # kernel_snapshot 运行时异常 → 可恢复执行失败(可重试/改用显式 run_ids)，
         # 不是参数不合法；无码会兜底成 UNKNOWN_ERROR(retryable=False)误导模型放弃。
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             _TOOL_NAME, False, json.dumps(payload, ensure_ascii=False, indent=2), error_code="TOOL_EXECUTION_FAILED"
         )
     return rows, anchor
@@ -240,8 +269,8 @@ def _target_from_params(params: dict[str, object]) -> tuple[str, str]:
     )
 
 
-def _guidance_error(message: str, *, error_code: str = "TOOL_INVALID_ARGUMENTS") -> ToolExecutionResult:
+def _guidance_error(message: str, *, error_code: str = "TOOL_INVALID_ARGUMENTS") -> ToolHandlerOutcome:
     # 带准确分类码：缺必填参数(message/target)给 TOOL_PARAMETER_REQUIRED，取值非法给
     # TOOL_INVALID_ARGUMENTS；无码会兜底成 UNKNOWN_ERROR(retryable=False)误导模型放弃。
     payload = {"ok": False, "error": "invalid_guidance_request", "message": message}
-    return ToolExecutionResult(_TOOL_NAME, False, json.dumps(payload, ensure_ascii=False, indent=2), error_code=error_code)
+    return ToolHandlerOutcome(_TOOL_NAME, False, json.dumps(payload, ensure_ascii=False, indent=2), error_code=error_code)

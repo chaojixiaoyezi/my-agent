@@ -6,12 +6,11 @@ from ..settings.runtime_guard_config import (
     runtime_guard_float_tuple,
     runtime_guard_int,
 )
-from .registry_gate_policy import boundary_mapping
 
 
 def tool_rate_limit_policy(boundary: dict[str, object] | None, policy: object = None) -> ToolRateLimitPolicy:
     default = default_tool_rate_limit_policy(policy)
-    value = boundary_mapping(boundary, "tool_rate_limit_policy")
+    value = _boundary_mapping(boundary, "tool_rate_limit_policy")
     if not value:
         return default
     return ToolRateLimitPolicy(
@@ -39,6 +38,16 @@ def default_tool_rate_limit_policy(policy: object = None) -> ToolRateLimitPolicy
         ),
         max_records=runtime_guard_int("tool_rate_max_records", 256, policy=policy),
     )
+
+
+def _boundary_mapping(
+    boundary: dict[str, object] | None,
+    key: str,
+) -> dict[str, object] | None:
+    if not isinstance(boundary, dict):
+        return None
+    value = boundary.get(key)
+    return value if isinstance(value, dict) else None
 
 
 def _int_value(value: object, default: int) -> int:

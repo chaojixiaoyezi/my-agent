@@ -182,16 +182,20 @@ def test_registered_products_scoped_to_own_run(tmp_path, monkeypatch):
     assert sorted(p["name"] for p in products) == ["legacy.md", "mine.md"]
 
 
-def test_record_finding_spec_passes_tool_manifest_gate():
-    """真机实锤:side-effect 工具缺 idempotency_scope 声明会被 tool_manifest 门整体
-    DENY——盯守主代理逐条入账被拦死,findings 恒空。spec 必须长期过门。"""
+def test_record_finding_declares_complete_canonical_runtime():
+    """逐条入账必须由同一 canonical runtime 声明副作用与幂等范围。"""
     from agent_py_agent.agent.agent_core.runtime.record_finding_tool import (
-        build_record_finding_spec,
+        RecordFindingTool,
     )
-    from agent_py_agent.agent.contracts.gates.tool_manifest import (
-        evaluate_tool_manifest_gate,
-        tool_manifest_from_spec,
+    from agent_py_agent.agent.tooling.models import ToolRuntime
+
+    tool = RecordFindingTool(SimpleNamespace())
+    runtime = ToolRuntime(
+        model_spec=tool.model_spec,
+        runtime_policy=tool.runtime_policy,
+        handler=tool,
     )
 
-    decision = evaluate_tool_manifest_gate(tool_manifest_from_spec(build_record_finding_spec()))
-    assert decision.allowed, decision.findings
+    assert runtime.runtime_policy.effect_resolver.default_effect == "mutating"
+    assert runtime.runtime_policy.idempotency_policy.scope == "operation"
+    assert runtime.model_spec.input_schema["required"]

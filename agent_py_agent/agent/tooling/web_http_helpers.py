@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from .models import ToolExecutionResult
+from .models import ToolHandlerOutcome
 
 MAX_BODY_CHARS = 1_000_000
 _MAX_HEADER_JSON_CHARS = 65536
@@ -70,7 +70,7 @@ def normalize_headers(headers: Any) -> dict[str, str]:
     raise ValueError("headers 必须为空、对象或 JSON 字符串")
 
 
-def attach_http_advisory(result: ToolExecutionResult, request: HttpRequestParts) -> None:
+def attach_http_advisory(result: ToolHandlerOutcome, request: HttpRequestParts) -> None:
     effect = "mutating" if request.method in _MUTATING_METHODS else "read_only"
     advisories = ["idempotency_key"] if effect == "mutating" and not _has_idempotency_key(request.headers) else []
     result.result_envelope.update({

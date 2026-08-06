@@ -138,7 +138,14 @@ def _add_gateway_ask_result_subcommands(gateway_sub):
     gateway_ask.add_argument("prompt", help="用户任务 / prompt")
     gateway_ask.add_argument("--inject", action="append", help="动态注入 prompt，可多次传入")
     gateway_ask.add_argument("--prompt-file", action="append", help="额外动态 prompt 文件，可多次传入")
-    gateway_ask.add_argument("--no-save", action="store_true", help="不保存本次对话到记忆")
+    gateway_ask.add_argument(
+        "--no-save",
+        action="store_true",
+        help=(
+            "关闭本次运行归档与持久化 Compact；ConversationStore/审计仍按 Gateway 合同记录，"
+            "且不会直接写正式长期记忆"
+        ),
+    )
     gateway_ask.add_argument("--show-prompt", action="store_true", help="响应返回时打印最终 prompt")
     gateway_ask.add_argument("--timeout", type=float, help="等待 gateway 响应的秒数，默认使用配置")
     gateway_ask.add_argument("--no-wait", action="store_true", help="只投递请求并立即返回 request_id，适合长任务")

@@ -56,6 +56,12 @@ from agent_py_agent.agent.conversation.authority import (
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.runtime_errors import DataCorruptionError
 from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.tests._tool_runtime_harness import (
+    canonical_history_call,
+    canonical_history_result,
+    make_test_protocol_snapshot,
+    runtime_snapshot_for_model_specs,
+)
 
 
 def _tool_loop_params(**overrides) -> ToolLoopExecuteParams:
@@ -77,9 +83,30 @@ def _tool_loop_params(**overrides) -> ToolLoopExecuteParams:
         one_shot_tool_calls=set(),
         executed_tools=[],
         archive_tool_calls=[],
+        tool_protocol_snapshot=make_test_protocol_snapshot(
+            run_id="main-run-1",
+            source_protocol="text",
+        ),
     )
     for key, value in overrides.items():
         params = replace(params, **{key: value})
+    if "run_id" in overrides and "tool_protocol_snapshot" not in overrides:
+        params = replace(
+            params,
+            tool_protocol_snapshot=make_test_protocol_snapshot(
+                run_id=params.run_id,
+                source_protocol="text",
+            ),
+        )
+    if "tool_runtime_snapshot" not in overrides:
+        params = replace(
+            params,
+            tool_runtime_snapshot=runtime_snapshot_for_model_specs(
+                (),
+                run_id=params.run_id,
+                allowed_tools=params.allowed_tools,
+            ),
+        )
     return params
 
 
@@ -137,6 +164,7 @@ def test_two_real_agent_runs_do_not_cross_prompt_task_or_workspace(tmp_path, mon
 
     agent = SimpleAgent(
         AgentConfig(
+            tool_protocol="text",
             model_backend="echo",
             my_agent_home=str(tmp_path / ".my-agent"),
             memory_path="memory.jsonl",
@@ -258,8 +286,12 @@ def test_send_guidance_tool_writes_run_guidance(tmp_path) -> None:
 def test_send_guidance_tool_can_target_direct_child_scope(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     root = agent.subagents.create_run(goal="root", thought="", plan=["root"])
-    child_a = agent.subagents.create_run(goal="a", thought="", plan=["a"], parent_id=root.id, root_id=root.id, depth=1)
-    child_b = agent.subagents.create_run(goal="b", thought="", plan=["b"], parent_id=root.id, root_id=root.id, depth=1)
+    child_a = agent.subagents.create_run(
+        goal="a", thought="", plan=["a"], parent_id=root.id, root_id=root.id, depth=1
+    )
+    child_b = agent.subagents.create_run(
+        goal="b", thought="", plan=["b"], parent_id=root.id, root_id=root.id, depth=1
+    )
     grandchild = agent.subagents.create_run(
         goal="grandchild",
         thought="",
@@ -287,7 +319,9 @@ def test_send_guidance_tool_can_target_direct_child_scope(tmp_path) -> None:
     assert agent.conversation_store.pending_guidance("agent_run", grandchild.id) == []
 
 
-def test_send_guidance_scope_resolution_failure_does_not_target_parent(tmp_path, monkeypatch) -> None:
+def test_send_guidance_scope_resolution_failure_does_not_target_parent(
+    tmp_path, monkeypatch
+) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     root = agent.subagents.create_run(goal="root", thought="", plan=["root"])
 
@@ -412,8 +446,12 @@ def test_active_turn_injects_matching_subagent_events_in_fifo_and_acks_after_mod
             "now": 1.0,
         }
     )
-    store.bind_task({"thread_id": thread.thread_id, "task_id": "task-1", "goal": "build", "now": 2.0})
-    store.bind_task({"thread_id": thread.thread_id, "task_id": "task-2", "goal": "other", "now": 3.0})
+    store.bind_task(
+        {"thread_id": thread.thread_id, "task_id": "task-1", "goal": "build", "now": 2.0}
+    )
+    store.bind_task(
+        {"thread_id": thread.thread_id, "task_id": "task-2", "goal": "other", "now": 3.0}
+    )
     first = store.raise_wake_signal(
         {
             "thread_id": thread.thread_id,
@@ -482,7 +520,9 @@ def test_active_background_wake_is_left_for_scheduler_ack(tmp_path) -> None:
             "now": 1.0,
         }
     )
-    store.bind_task({"thread_id": thread.thread_id, "task_id": "task-1", "goal": "build", "now": 2.0})
+    store.bind_task(
+        {"thread_id": thread.thread_id, "task_id": "task-1", "goal": "build", "now": 2.0}
+    )
     signal = store.raise_wake_signal(
         {
             "thread_id": thread.thread_id,
@@ -727,7 +767,9 @@ def test_tool_loop_guidance_can_override_earlier_contract_context(tmp_path) -> N
     assert "ACTIVE_TURN_USER_INPUT" in prompt
     assert "guidance_id=" not in prompt
     assert "用户补充：25次压缩已经够了" in prompt
-    assert prompt.rfind("用户补充：25次压缩已经够了") > prompt.find("[tool-system delivery-contract]")
+    assert prompt.rfind("用户补充：25次压缩已经够了") > prompt.find(
+        "[tool-system delivery-contract]"
+    )
     assert agent.conversation_store.pending_guidance("agent_run", "main-run-1")
     assert acknowledge_injected_turn_input(agent, params, now=11.0) == 1
     assert agent.conversation_store.pending_guidance("agent_run", "main-run-1") == []
@@ -735,7 +777,7 @@ def test_tool_loop_guidance_can_override_earlier_contract_context(tmp_path) -> N
 
 def test_task_steer_stays_as_latest_native_user_turn_across_later_model_rounds(tmp_path) -> None:
     from agent_py_agent.agent.agent_core.tool_model_generation import _native_provider_messages
-    from agent_py_agent.agent.backends.tool_ir import AssistantTurn, ToolCall, ToolResult
+    from agent_py_agent.agent.backends.tool_ir import AssistantTurn
 
     agent = SimpleAgent(
         AgentConfig(
@@ -753,11 +795,25 @@ def test_task_steer_stays_as_latest_native_user_turn_across_later_model_rounds(t
             "now": 10.0,
         }
     )
-    params = _tool_loop_params(task_id="task-1")
+    params = _tool_loop_params(
+        task_id="task-1",
+        tool_protocol_snapshot=make_test_protocol_snapshot(
+            run_id="main-run-1",
+            source_protocol="native",
+        ),
+    )
+    first_call = canonical_history_call(
+        "read_file",
+        {},
+        call_id="t1",
+        run_id=params.run_id,
+        turn_id="main-run-1:round-1",
+        attempt_id=params.request_id,
+    )
     params.tool_ir_history.extend(
         [
-            AssistantTurn(tool_calls=[ToolCall(id="t1", name="read_file", input={})]),
-            ToolResult(tool_call_id="t1", content="old result"),
+            AssistantTurn(tool_calls=[first_call]),
+            canonical_history_result(first_call, "old result"),
         ]
     )
 
@@ -769,10 +825,18 @@ def test_task_steer_stays_as_latest_native_user_turn_across_later_model_rounds(t
         "content": [{"type": "text", "text": "只接受标准 wheel 的项目外安装结果。"}],
     }
 
+    second_call = canonical_history_call(
+        "run_command",
+        {},
+        call_id="t2",
+        run_id=params.run_id,
+        turn_id="main-run-1:round-2",
+        attempt_id=params.request_id,
+    )
     params.tool_ir_history.extend(
         [
-            AssistantTurn(tool_calls=[ToolCall(id="t2", name="run_command", input={})]),
-            ToolResult(tool_call_id="t2", content="later result"),
+            AssistantTurn(tool_calls=[second_call]),
+            canonical_history_result(second_call, "later result"),
         ]
     )
     later = _native_provider_messages(agent, params)
@@ -1763,6 +1827,7 @@ def test_published_audit_sources_release_root_before_any_tool_round(
 
     agent = SimpleAgent(
         AgentConfig(
+            tool_protocol="text",
             model_backend="echo",
             my_agent_home=str(tmp_path / ".my-agent"),
             memory_path="memory.jsonl",

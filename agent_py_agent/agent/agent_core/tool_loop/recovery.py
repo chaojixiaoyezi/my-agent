@@ -4,11 +4,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
-from ...action_protocol import (
-    RunScope,
-    ToolCallEnvelopePayloadRequest,
-    tool_call_envelope_from_payload,
-)
+from ...action_protocol import RunScope
 from ...backends import ModelResponse
 from ...common.value_parsing import text_value
 from ...runtime_errors import runtime_error_report
@@ -22,8 +18,28 @@ from ..runtime.task_identity import durable_task_id
 from .round_execution import ToolCallRecordParams
 
 
-def without_tool_call_after_limit(agent, response: ModelResponse) -> ModelResponse:
-    if not agent.tools.parse_tool_calls(response.text):
+def without_tool_call_after_limit(
+    params: ToolLoopExecuteParams,
+    response: ModelResponse,
+) -> ModelResponse:
+    from ...backends.tool_protocol_adapter import (
+        ProviderToolCallRequest,
+        canonical_tool_calls_from_response,
+    )
+
+    adapted = canonical_tool_calls_from_response(
+        ProviderToolCallRequest(
+            response=response,
+            protocol=params.tool_protocol_snapshot,
+            runtime_snapshot=params.tool_runtime_snapshot,
+            turn_id=f"{params.run_id}:tool-limit-summary",
+            attempt_id=str(params.attempt_id or params.request_id or params.run_id or "attempt"),
+            required_actions=tuple(
+                getattr(params.effective_contract_snapshot, "required_actions", ()) or ()
+            ),
+        )
+    )
+    if not adapted.calls and not adapted.violations:
         return response
     return replace(
         response,
@@ -98,32 +114,6 @@ def runtime_run_scope(agent, params: ToolLoopExecuteParams) -> RunScope:
     )
 
 
-def tool_payload_with_run_scope(
-    agent,
-    params: ToolLoopExecuteParams,
-    payload: object,
-    *,
-    call_id: str,
-    source: str = "model_tool_call",
-) -> object:
-    if not isinstance(payload, dict):
-        return payload
-    tool_payload = dict(payload)
-    if str(tool_payload.get("call_id") or "") == str(call_id or ""):
-        # Native providers flatten their outer call id beside tool arguments.
-        # The trusted argument above owns operation identity; handlers must not
-        # receive that outer protocol field as a tool parameter.
-        tool_payload.pop("call_id", None)
-    return tool_call_envelope_from_payload(
-        ToolCallEnvelopePayloadRequest(
-            payload=tool_payload,
-            call_id=call_id,
-            source=source,
-            scope=runtime_run_scope(agent, params),
-        )
-    )
-
-
 def _load_runtime_task(agent, run_id: str) -> Any:
     if not run_id:
         return None, None
@@ -166,7 +156,7 @@ def append_long_content_recovery_context(record: ToolCallRecordParams) -> None:
     context = long_content_recovery_context(
         LongContentRecoveryRequest(
             payload=record.payload,
-            result_tool=record.result.tool,
+            result_tool=record.result.tool_name,
             result_ok=record.result.ok,
             result_error_code=record.result.error_code,
             output=record.result.output,

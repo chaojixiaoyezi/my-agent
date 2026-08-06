@@ -25,6 +25,7 @@ from agent_py_agent.agent.agent_core.runtime.loop_models import RuntimeContextRe
 from agent_py_agent.agent.agent_core.runtime.loop_support import RunParams, _prepare_runtime_context
 from agent_py_agent.agent.agent_core.task_progress_tool import TaskProgressTool
 from agent_py_agent.agent.agent_core.tool_call_runtime import (
+    ToolCallRuntimeRequest,
     _promote_conversation_task_for_work_tool,
 )
 from agent_py_agent.agent.common.audit_activation import AUDIT_ATTR, AUDIT_DEADLINE_ATTR
@@ -77,10 +78,32 @@ from agent_py_agent.agent.gateway_parts.request_execution import (
 from agent_py_agent.agent.gateway_parts.request_worker import GatewayAskParams, submit_gateway_ask
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.user_space.home_indexes import latest_task_refs
+from agent_py_agent.tests._tool_runtime_harness import canonical_test_call
+
+
+def _promote_work_tool(
+    agent: SimpleAgent,
+    params: RunParams,
+    payload: dict[str, object],
+):
+    snapshot = agent.tools.runtime_snapshot(run_id=params.run_id)
+    params.tool_runtime_snapshot = snapshot
+    arguments = dict(payload)
+    tool_name = str(arguments.pop("tool"))
+    call = canonical_test_call(snapshot, tool_name, arguments)
+    return _promote_conversation_task_for_work_tool(
+        ToolCallRuntimeRequest(
+            agent=agent,
+            request=SimpleNamespace(params=params),
+            call=call,
+        )
+    )
 
 
 def test_gateway_chat_request_payload_carries_session_conversation(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
     paths = gateway_paths(agent)
 
     _request_id, request_path, _response_path = submit_gateway_ask(
@@ -100,7 +123,9 @@ def test_gateway_chat_request_payload_carries_session_conversation(tmp_path):
 
 
 def test_gateway_cli_request_payload_carries_default_local_conversation(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
     paths = gateway_paths(agent)
 
     _request_id, request_path, _response_path = submit_gateway_ask(
@@ -124,9 +149,7 @@ def test_named_audit_projects_durable_task_deadline_into_current_run(tmp_path):
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
         tmp_path,
     )
-    command = parse_conversation_control(
-        "/audit 10m audit-smoke 逐条检查五路日志"
-    )
+    command = parse_conversation_control("/audit 10m audit-smoke 逐条检查五路日志")
     assert command is not None and command.valid
     request = {
         "conversation": {
@@ -168,7 +191,9 @@ def test_named_audit_projects_durable_task_deadline_into_current_run(tmp_path):
 
 
 def test_gateway_chat_reuses_thread_but_does_not_auto_bind_task(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
     request = {
         "conversation": {
             "channel": "chat",
@@ -366,7 +391,12 @@ def test_audit_prepare_projection_does_not_use_global_compact_or_sibling_artifac
 
 def test_gateway_run_persists_user_and_assistant_for_next_turn(tmp_path):
     agent = SimpleAgent(
-        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[]),
+        AgentConfig(
+            tool_protocol="text",
+            model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
+            prompt_files=[],
+        ),
         tmp_path,
     )
     conversation = {
@@ -823,11 +853,14 @@ def test_gateway_same_turn_pressure_without_new_structured_progress_stops(tmp_pa
     assert calls == 2
 
 
-def test_gateway_foreground_turn_holds_shared_conversation_execution_lane(
-    tmp_path, monkeypatch
-):
+def test_gateway_foreground_turn_holds_shared_conversation_execution_lane(tmp_path, monkeypatch):
     agent = SimpleAgent(
-        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[]),
+        AgentConfig(
+            tool_protocol="text",
+            model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
+            prompt_files=[],
+        ),
         tmp_path,
     )
     conversation = {
@@ -880,7 +913,12 @@ def test_gateway_foreground_turn_holds_shared_conversation_execution_lane(
 
 def test_gateway_foreground_turn_waits_for_existing_conversation_lane(tmp_path, monkeypatch):
     agent = SimpleAgent(
-        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[]),
+        AgentConfig(
+            tool_protocol="text",
+            model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
+            prompt_files=[],
+        ),
         tmp_path,
     )
     conversation = {
@@ -959,7 +997,12 @@ def test_gateway_foreground_turn_waits_for_existing_conversation_lane(tmp_path, 
 
 def test_two_gateway_foreground_turns_share_one_lane_and_fresh_history(tmp_path, monkeypatch):
     agent = SimpleAgent(
-        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[]),
+        AgentConfig(
+            tool_protocol="text",
+            model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
+            prompt_files=[],
+        ),
         tmp_path,
     )
     conversation = {
@@ -1103,8 +1146,7 @@ def test_gateway_ordinary_history_excludes_detached_audit_deliveries(tmp_path):
     followup = _conversation_context(agent, request, "gw-follow", "继续聊天")
     history_text = "\n".join(content for _role, content in followup.history)
     stored_text = "\n".join(
-        row.content
-        for row in agent.conversation_store.recent_messages(context.thread_id, limit=0)
+        row.content for row in agent.conversation_store.recent_messages(context.thread_id, limit=0)
     )
 
     assert "旧 Audit 的新受益人事件正文" not in history_text
@@ -1204,7 +1246,9 @@ def test_gateway_public_path_sanitizer_preserves_completion_facts() -> None:
 
 
 def test_plain_reply_preserves_relative_paths_without_mangling_slashes() -> None:
-    raw = "产物在 tasks/demo/output/report.md，依赖位于 libs/agents/core.py；另见 ./notes/today.md。"
+    raw = (
+        "产物在 tasks/demo/output/report.md，依赖位于 libs/agents/core.py；另见 ./notes/today.md。"
+    )
 
     projection = project_user_reply(raw)
 
@@ -1287,7 +1331,9 @@ def test_delivery_projection_strips_legacy_findings_ledger_block() -> None:
 
 
 def test_gateway_chat_history_isolated_by_real_conversation_id(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
     request = {
         "conversation": {
             "channel": "chat",
@@ -1314,7 +1360,12 @@ def test_gateway_chat_history_isolated_by_real_conversation_id(tmp_path):
 
 def test_gateway_conversation_turns_do_not_leak_into_owner_global_memory(tmp_path):
     agent = SimpleAgent(
-        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[]),
+        AgentConfig(
+            tool_protocol="text",
+            model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
+            prompt_files=[],
+        ),
         tmp_path,
     )
     first_conversation = {
@@ -1390,7 +1441,12 @@ def test_gateway_fails_closed_before_model_when_user_turn_cannot_persist(tmp_pat
 
 def test_gateway_ordinary_chat_accepts_legacy_cleared_goal_tombstone(tmp_path) -> None:
     agent = SimpleAgent(
-        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[]),
+        AgentConfig(
+            tool_protocol="text",
+            model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
+            prompt_files=[],
+        ),
         tmp_path,
     )
     conversation = {
@@ -1433,9 +1489,7 @@ def test_gateway_ordinary_chat_accepts_legacy_cleared_goal_tombstone(tmp_path) -
     ]
 
 
-def test_gateway_does_not_report_success_for_empty_unavailable_model_reply(
-    tmp_path, monkeypatch
-):
+def test_gateway_does_not_report_success_for_empty_unavailable_model_reply(tmp_path, monkeypatch):
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[]),
         tmp_path,
@@ -1476,7 +1530,9 @@ def test_gateway_does_not_report_success_for_empty_unavailable_model_reply(
     )
     rows = agent.conversation_store.recent_messages(thread.thread_id, limit=10)
     assert [(row.role, row.content) for row in rows] == [("user", "继续原任务")]
-    assert not (agent.conversation_store.root / "message_repairs" / "gw-empty-assistant.json").exists()
+    assert not (
+        agent.conversation_store.root / "message_repairs" / "gw-empty-assistant.json"
+    ).exists()
 
 
 def test_gateway_does_not_report_done_for_any_empty_model_reply(tmp_path, monkeypatch):
@@ -1599,13 +1655,28 @@ def test_gateway_returns_answer_and_repairs_assistant_transcript_on_next_turn(
     assert not repair_path.exists()
 
 
-def test_gateway_authoritative_transcript_filters_legacy_dialogue_but_keeps_preferences(tmp_path):
+def test_gateway_authoritative_transcript_filters_legacy_dialogue_but_keeps_formal_fact(tmp_path):
     agent = SimpleAgent(
-        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[]),
+        AgentConfig(
+            tool_protocol="text",
+            model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
+            prompt_files=[],
+        ),
         tmp_path,
     )
     agent.memory.add("user", "串线令牌海棠", kind="dialogue")
-    agent.memory.add("user", "偏好令牌青黛", kind="preference")
+    agent.memory.add(
+        "user",
+        "正式事实令牌青黛",
+        kind="fact",
+        attributes={
+            "origin": "reviewed",
+            "subject_key": "test.gateway.formal-fact",
+            "scope_type": "personal",
+            "scope_key": "personal",
+        },
+    )
 
     prepared = _prepare_runtime_context(
         agent,
@@ -1617,13 +1688,14 @@ def test_gateway_authoritative_transcript_filters_legacy_dialogue_but_keeps_pref
         ),
     )
 
-    assert [row.kind for row in prepared.memories] == ["preference"]
-    assert prepared.memories[0].content == "偏好令牌青黛"
+    assert [row.kind for row in prepared.memories] == ["fact"]
+    assert prepared.memories[0].content == "正式事实令牌青黛"
 
 
-def test_authoritative_transcript_overfetches_past_legacy_dialogue_for_preferences(tmp_path):
+def test_authoritative_transcript_overfetches_past_legacy_dialogue_for_formal_fact(tmp_path):
     agent = SimpleAgent(
         AgentConfig(
+            tool_protocol="text",
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
             prompt_files=[],
@@ -1633,7 +1705,17 @@ def test_authoritative_transcript_overfetches_past_legacy_dialogue_for_preferenc
     )
     for index in range(5):
         agent.memory.add("user", f"海棠旧对话 {index}", kind="dialogue")
-    agent.memory.add("user", "海棠偏好：回答简短", kind="preference")
+    agent.memory.add(
+        "user",
+        "海棠正式事实：项目代号青黛",
+        kind="fact",
+        attributes={
+            "origin": "reviewed",
+            "subject_key": "test.gateway.project-code",
+            "scope_type": "personal",
+            "scope_key": "personal",
+        },
+    )
 
     prepared = _prepare_runtime_context(
         agent,
@@ -1645,12 +1727,14 @@ def test_authoritative_transcript_overfetches_past_legacy_dialogue_for_preferenc
         ),
     )
 
-    assert [row.kind for row in prepared.memories] == ["preference"]
-    assert prepared.memories[0].content == "海棠偏好：回答简短"
+    assert [row.kind for row in prepared.memories] == ["fact"]
+    assert prepared.memories[0].content == "海棠正式事实：项目代号青黛"
 
 
 def test_gateway_thread_does_not_expose_internal_run_candidates_to_model(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
     request = {
         "conversation": {
             "channel": "chat",
@@ -1675,7 +1759,9 @@ def test_gateway_thread_does_not_expose_internal_run_candidates_to_model(tmp_pat
 
 
 def test_current_turn_automatically_binds_sticky_workspace_without_overwriting_goal(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
     request = {
         "conversation": {
             "channel": "feishu",
@@ -1710,9 +1796,7 @@ def test_current_turn_automatically_binds_sticky_workspace_without_overwriting_g
     agent._current_run_params = params
     try:
         selected = promote_current_conversation_task(agent)
-        TaskProgressTool(agent).execute(
-            {"action": "update", "summary": "继续整理中"}
-        )
+        TaskProgressTool(agent).execute({"action": "update", "summary": "继续整理中"})
         reused = promote_current_conversation_task(agent, goal="不应覆盖旧目标")
     finally:
         delattr(agent, "_current_run_params")
@@ -1720,14 +1804,18 @@ def test_current_turn_automatically_binds_sticky_workspace_without_overwriting_g
     assert selected is not None
     assert params.task_attributes["conversation_task_id"] == "task-old"
     assert params.task_attributes["run_workspace"]["task_root"] == str(workspace)
-    progress = json.loads(TaskProgressTool(agent).execute({"action": "read", "run_id": "task-old"}).output)
+    progress = json.loads(
+        TaskProgressTool(agent).execute({"action": "read", "run_id": "task-old"}).output
+    )
     assert progress["summary"] == "继续整理中"
     assert reused.goal == "整理季度报告"
     assert reused.task_path == str(workspace)
 
 
 def test_live_background_claim_alone_blocks_second_task_executor(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
     request = {
         "conversation": {
             "channel": "feishu",
@@ -1766,9 +1854,7 @@ def test_live_background_claim_alone_blocks_second_task_executor(tmp_path):
     )
     agent._current_run_params = params
     try:
-        selected = _promote_conversation_task_for_work_tool(
-            SimpleNamespace(agent=agent, payload={"tool": "write_file"})
-        )
+        selected = _promote_work_tool(agent, params, {"tool": "write_file"})
     finally:
         delattr(agent, "_current_run_params")
 
@@ -1777,7 +1863,9 @@ def test_live_background_claim_alone_blocks_second_task_executor(tmp_path):
 
 
 def test_unreadable_background_execution_state_fails_closed(tmp_path, monkeypatch):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
     request = {
         "conversation": {
             "channel": "feishu",
@@ -1811,9 +1899,7 @@ def test_unreadable_background_execution_state_fails_closed(tmp_path, monkeypatc
     )
     agent._current_run_params = params
     try:
-        selected = _promote_conversation_task_for_work_tool(
-            SimpleNamespace(agent=agent, payload={"tool": "write_file"})
-        )
+        selected = _promote_work_tool(agent, params, {"tool": "write_file"})
     finally:
         delattr(agent, "_current_run_params")
 
@@ -1822,7 +1908,9 @@ def test_unreadable_background_execution_state_fails_closed(tmp_path, monkeypatc
 
 
 def test_background_promotion_reuses_link_workspace_without_synthetic_wake_directory(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
     request = {
         "conversation": {
             "channel": "feishu",
@@ -1870,7 +1958,9 @@ def test_background_promotion_reuses_link_workspace_without_synthetic_wake_direc
 
 
 def test_current_conversation_workspace_is_inherited_by_new_subagents(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
     request = {
         "conversation": {
             "channel": "feishu",
@@ -1908,12 +1998,17 @@ def test_current_conversation_workspace_is_inherited_by_new_subagents(tmp_path):
     assert child_attrs["conversation_thread_id"] == conversation.thread_id
     assert child_attrs["conversation_task_id"] == "task-old"
     workspace = Path(params.task_attributes["run_workspace"]["task_root"])
-    assert json.loads((workspace / "work" / "state.json").read_text(encoding="utf-8"))["task_id"] == "task-old"
+    assert (
+        json.loads((workspace / "work" / "state.json").read_text(encoding="utf-8"))["task_id"]
+        == "task-old"
+    )
     assert 'task_id: "task-old"' in (workspace / "work" / "task.yaml").read_text(encoding="utf-8")
 
 
 def test_completed_run_stays_internal_and_does_not_become_a_model_task_menu(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
     request = {
         "conversation": {
             "channel": "feishu",
@@ -2154,7 +2249,9 @@ def test_named_audit_waits_for_owner_event_receipt_before_structural_close(
 
 
 def test_cancel_wins_completion_status_race(tmp_path, monkeypatch):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
     request = {
         "conversation": {
             "channel": "feishu",
@@ -2198,7 +2295,9 @@ def test_cancel_wins_completion_status_race(tmp_path, monkeypatch):
 
 
 def test_pending_task_guidance_keeps_current_task_open(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
     request = {
         "conversation": {
             "channel": "feishu",
@@ -2236,7 +2335,9 @@ def test_pending_task_guidance_keeps_current_task_open(tmp_path):
 
 
 def test_active_thread_goal_is_not_closed_by_one_delivery_complete_turn(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
     request = {
         "conversation": {
             "channel": "feishu",
@@ -2395,7 +2496,9 @@ def test_detached_named_work_never_occupies_the_foreground_sticky_workspace(
 
 
 def test_internal_child_links_never_appear_in_model_conversation_context(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
     request = {
         "conversation": {
             "channel": "feishu",
@@ -2428,7 +2531,9 @@ def test_next_turn_reuses_terminal_workspace_with_fresh_execution_automatically(
     tmp_path,
     prior_status,
 ):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
     request = {
         "conversation": {
             "channel": "feishu",
@@ -2488,7 +2593,9 @@ def test_next_turn_reuses_terminal_workspace_with_fresh_execution_automatically(
 
 
 def test_terminal_workspace_successor_fails_closed_without_current_prompt(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
     request = {
         "conversation": {
             "channel": "feishu",
@@ -2541,7 +2648,9 @@ def test_terminal_workspace_successor_fails_closed_without_current_prompt(tmp_pa
 
 
 def test_progress_update_binds_current_turn_without_old_task_ceremony(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
     request = {
         "conversation": {
             "channel": "feishu",
@@ -2570,12 +2679,8 @@ def test_progress_update_binds_current_turn_without_old_task_ceremony(tmp_path):
     agent._current_run_params = params
     try:
         updated = TaskProgressTool(agent).execute({"action": "update", "summary": "开工"})
-        old_select = TaskProgressTool(agent).execute(
-            {"action": "select", "task_id": "task-old"}
-        )
-        old_start = TaskProgressTool(agent).execute(
-            {"action": "start", "new_task": True}
-        )
+        old_select = TaskProgressTool(agent).execute({"action": "select", "task_id": "task-old"})
+        old_start = TaskProgressTool(agent).execute({"action": "start", "new_task": True})
     finally:
         delattr(agent, "_current_run_params")
 
@@ -2586,7 +2691,9 @@ def test_progress_update_binds_current_turn_without_old_task_ceremony(tmp_path):
 
 
 def test_first_progress_update_automatically_binds_current_turn(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
     request = {
         "conversation": {
             "channel": "feishu",
@@ -2605,9 +2712,7 @@ def test_first_progress_update_automatically_binds_current_turn(tmp_path):
     )
     agent._current_run_params = params
     try:
-        started = TaskProgressTool(agent).execute(
-            {"action": "update", "summary": "开始第一个项目"}
-        )
+        started = TaskProgressTool(agent).execute({"action": "update", "summary": "开始第一个项目"})
     finally:
         delattr(agent, "_current_run_params")
 
@@ -2666,20 +2771,23 @@ def test_gateway_inherits_terminal_workspace_and_starts_fresh_execution_at_first
     assert CONVERSATION_TASK_TURN_ACTIVE_ATTR not in attrs
     assert before.status == prior_status
     assert complete_current_conversation_task(agent, attrs, source="gateway") is False
-    assert write_run_task_workspace_if_needed(
-        agent,
-        ArchiveRunParams(
-            do_save=True,
-            user_prompt="纯聊天",
-            final_response=None,
-            archive_tool_calls=[],
-            run_request_id="gw-followup",
-            run_id="gw-followup",
-            task_id="gw-followup",
-            source="gateway",
-            task_attributes=attrs,
-        ),
-    ) == ""
+    assert (
+        write_run_task_workspace_if_needed(
+            agent,
+            ArchiveRunParams(
+                do_save=True,
+                user_prompt="纯聊天",
+                final_response=None,
+                archive_tool_calls=[],
+                run_request_id="gw-followup",
+                run_id="gw-followup",
+                task_id="gw-followup",
+                source="gateway",
+                task_attributes=attrs,
+            ),
+        )
+        == ""
+    )
     params = RunParams(
         request_id="gw-followup",
         run_id="gw-followup",
@@ -2689,19 +2797,14 @@ def test_gateway_inherits_terminal_workspace_and_starts_fresh_execution_at_first
     )
     agent._current_run_params = params
     try:
-        promoted = _promote_conversation_task_for_work_tool(
-            SimpleNamespace(agent=agent, payload={"tool": work_tool})
-        )
+        promoted = _promote_work_tool(agent, params, {"tool": work_tool})
     finally:
         delattr(agent, "_current_run_params")
 
     assert promoted is None
     assert attrs[CONVERSATION_TASK_TURN_ACTIVE_ATTR] is True
     assert attrs["conversation_task_id"] == "gw-followup"
-    links = {
-        link.task_id: link
-        for link in agent.conversation_store.task_links(first.thread_id)
-    }
+    links = {link.task_id: link for link in agent.conversation_store.task_links(first.thread_id)}
     thread = agent.conversation_store.load_thread(first.thread_id)
     assert links["task-original"].status == prior_status
     assert links["gw-followup"].status == "active"
@@ -2711,7 +2814,9 @@ def test_gateway_inherits_terminal_workspace_and_starts_fresh_execution_at_first
     identity = json.loads((workspace / "work" / "run_workspace.json").read_text(encoding="utf-8"))
     assert state["task_id"] == "gw-followup" and state["status"] == "RUNNING"
     assert identity["task_id"] == "gw-followup" and identity["run_id"] == "gw-followup"
-    assert 'task_id: "gw-followup"' in (workspace / "work" / "task.yaml").read_text(encoding="utf-8")
+    assert 'task_id: "gw-followup"' in (workspace / "work" / "task.yaml").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_new_ordinary_turn_reuses_sticky_workspace_without_switch_command(tmp_path):
@@ -2743,9 +2848,7 @@ def test_new_ordinary_turn_reuses_sticky_workspace_without_switch_command(tmp_pa
     agent.conversation_store.select_workspace_task(
         {"thread_id": first.thread_id, "task_id": "task-old"}
     )
-    agent.conversation_store.update_task_status(
-        {"task_id": "task-old", "status": "completed"}
-    )
+    agent.conversation_store.update_task_status({"task_id": "task-old", "status": "completed"})
     followup = _conversation_context(agent, request, "gw-new", "普通用户说的一句话")
     attrs = _gateway_task_attributes(followup)
     params = RunParams(
@@ -2766,8 +2869,7 @@ def test_new_ordinary_turn_reuses_sticky_workspace_without_switch_command(tmp_pa
 
     thread = agent.conversation_store.load_thread(first.thread_id)
     links = {
-        link.task_id: link.status
-        for link in agent.conversation_store.task_links(first.thread_id)
+        link.task_id: link.status for link in agent.conversation_store.task_links(first.thread_id)
     }
     assert started.ok is True
     assert thread is not None and thread.workspace_task_id == "gw-new"
@@ -2779,7 +2881,9 @@ def test_new_ordinary_turn_reuses_sticky_workspace_without_switch_command(tmp_pa
 
 
 def test_interrupted_workspace_is_reused_at_first_work_tool_without_selection(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
     request = {
         "conversation": {
             "channel": "feishu",
@@ -2823,9 +2927,7 @@ def test_interrupted_workspace_is_reused_at_first_work_tool_without_selection(tm
     )
     agent._current_run_params = params
     try:
-        allowed = _promote_conversation_task_for_work_tool(
-            SimpleNamespace(agent=agent, payload={"tool": "write_file"})
-        )
+        allowed = _promote_work_tool(agent, params, {"tool": "write_file"})
     finally:
         delattr(agent, "_current_run_params")
 
@@ -2836,7 +2938,9 @@ def test_interrupted_workspace_is_reused_at_first_work_tool_without_selection(tm
 
 
 def test_exact_mutation_path_reselects_completed_conversation_workspace(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
     request = {
         "conversation": {
             "channel": "feishu",
@@ -2893,16 +2997,15 @@ def test_exact_mutation_path_reselects_completed_conversation_workspace(tmp_path
     agent._current_run_params = params
     agent._current_run_task_workspace = str(placeholder)
     try:
-        result = _promote_conversation_task_for_work_tool(
-            SimpleNamespace(
-                agent=agent,
-                payload={
-                    "tool": "edit_file",
-                    "path": str(target),
-                    "old_string": "value = 1",
-                    "new_string": "value = 2",
-                },
-            )
+        result = _promote_work_tool(
+            agent,
+            params,
+            {
+                "tool": "edit_file",
+                "path": str(target),
+                "old_string": "value = 1",
+                "new_string": "value = 2",
+            },
         )
     finally:
         delattr(agent, "_current_run_params")
@@ -2986,16 +3089,15 @@ def test_owner_relative_task_mutation_reselects_exact_conversation_workspace(tmp
     agent._current_run_params = params
     agent._current_run_task_workspace = str(placeholder)
     try:
-        result = _promote_conversation_task_for_work_tool(
-            SimpleNamespace(
-                agent=agent,
-                payload={
-                    "tool": "edit_file",
-                    "path": str(target.relative_to(owner_home)),
-                    "old_string": "value = 1",
-                    "new_string": "value = 2",
-                },
-            )
+        result = _promote_work_tool(
+            agent,
+            params,
+            {
+                "tool": "edit_file",
+                "path": str(target.relative_to(owner_home)),
+                "old_string": "value = 1",
+                "new_string": "value = 2",
+            },
         )
     finally:
         delattr(agent, "_current_run_params")
@@ -3017,7 +3119,9 @@ def test_owner_relative_task_mutation_reselects_exact_conversation_workspace(tmp
 
 
 def test_exact_mutation_path_rebases_child_without_superseding_parent_task(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
     request = {
         "conversation": {
             "channel": "feishu",
@@ -3080,16 +3184,15 @@ def test_exact_mutation_path_rebases_child_without_superseding_parent_task(tmp_p
         task_attributes=attrs,
     )
     try:
-        result = _promote_conversation_task_for_work_tool(
-            SimpleNamespace(
-                agent=agent,
-                payload={
-                    "tool": "edit_file",
-                    "path": str(target),
-                    "old_string": "value = 1",
-                    "new_string": "value = 2",
-                },
-            )
+        result = _promote_work_tool(
+            agent,
+            params,
+            {
+                "tool": "edit_file",
+                "path": str(target),
+                "old_string": "value = 1",
+                "new_string": "value = 2",
+            },
         )
     finally:
         restore_current_subagent_context(agent, previous)
@@ -3111,7 +3214,9 @@ def test_exact_mutation_path_rebases_child_without_superseding_parent_task(tmp_p
 
 
 def test_subagent_completion_cannot_close_parent_conversation_task(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
     request = {
         "conversation": {
             "channel": "feishu",
@@ -3149,7 +3254,9 @@ def test_subagent_completion_cannot_close_parent_conversation_task(tmp_path):
 
 
 def test_subagent_completion_can_close_its_exact_own_conversation_link(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
     request = {
         "conversation": {
             "channel": "feishu",
@@ -3184,7 +3291,9 @@ def test_subagent_completion_can_close_its_exact_own_conversation_link(tmp_path)
 
 
 def test_structured_task_tool_promotes_natural_language_chat_internally(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
     request = {
         "conversation": {
             "channel": "feishu",
@@ -3219,8 +3328,12 @@ def test_structured_task_tool_promotes_natural_language_chat_internally(tmp_path
 
 
 def test_gateway_followup_archive_reuses_active_task_workspace(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
-    workspace = tmp_path / "home" / "owners" / "local" / "main" / "tasks" / "2026-06-03" / "analysis"
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
+    workspace = (
+        tmp_path / "home" / "owners" / "local" / "main" / "tasks" / "2026-06-03" / "analysis"
+    )
     (workspace / "output").mkdir(parents=True)
     (workspace / "work").mkdir()
 
@@ -3253,7 +3366,9 @@ def test_gateway_followup_archive_reuses_active_task_workspace(tmp_path):
 
 
 def test_background_child_archive_cannot_overwrite_parent_goal_workspace_or_index_title(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
     conversation = _conversation_context(
         agent,
         {
@@ -3314,7 +3429,9 @@ def test_background_child_archive_cannot_overwrite_parent_goal_workspace_or_inde
 
 
 def test_gateway_followup_subagent_lineage_uses_active_task_root(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
 
     params = RunParams(
         request_id="gw-second",
@@ -3339,7 +3456,9 @@ def test_gateway_followup_subagent_lineage_uses_active_task_root(tmp_path):
 
 
 def test_gateway_subagent_records_originating_conversation_request(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
     agent._current_run_params = RunParams(request_id="gw-current")
     try:
         create_params = create_run_params(
@@ -3355,4 +3474,6 @@ def test_gateway_subagent_records_originating_conversation_request(tmp_path):
 
 
 def _conversation_context(agent: SimpleAgent, request: dict, request_id: str, prompt: str):
-    return _gateway_conversation_context(_GatewayConversationLoadRequest(agent, request, request_id, prompt))
+    return _gateway_conversation_context(
+        _GatewayConversationLoadRequest(agent, request, request_id, prompt)
+    )

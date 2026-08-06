@@ -41,7 +41,6 @@ from agent_py_agent.agent.subagents.models import (
     ChannelProbeReport,
     ChannelProbeResult,
     ContextManifest,
-    LearningCandidate,
     QualityContract,
     SubAgentCard,
     SubAgentExecutionContext,

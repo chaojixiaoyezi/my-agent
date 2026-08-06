@@ -1,82 +1,86 @@
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
+
+import pytest
+
 from agent_py_agent.agent.backends.tool_ir import AssistantTurn, ToolCall, ToolResult, UserTurn
+from agent_py_agent.tests._tool_runtime_harness import (
+    canonical_history_call,
+    canonical_history_result,
+)
 
 
-def test_toolcall_input_is_structured_dict_not_json_string():
-    call = ToolCall(id="toolu_1", name="read_file", input={"path": "README.md"})
+def test_toolcall_arguments_are_structured_and_canonical() -> None:
+    call = canonical_history_call(
+        "read_file",
+        {"path": "README.md"},
+        call_id="toolu_1",
+    )
 
-    assert call.input == {"path": "README.md"}
-    assert isinstance(call.input, dict)
-
-
-def test_toolcall_is_frozen():
-    call = ToolCall(id="x", name="read_file", input={})
-    try:
-        call.name = "write_file"  # type: ignore[misc]
-    except Exception as exc:  # FrozenInstanceError is a dataclasses subclass
-        assert "frozen" in str(type(exc)).lower() or "cannot assign" in str(exc).lower()
-    else:  # pragma: no cover - frozen dataclass must reject mutation
-        raise AssertionError("ToolCall should be immutable")
+    assert call.arguments == {"path": "README.md"}
+    assert isinstance(call.arguments, dict)
+    assert call.tool_name == "read_file"
+    assert call.call_id == "toolu_1"
 
 
-def test_toolresult_defaults_is_error_false():
-    result = ToolResult(tool_call_id="toolu_1", content="ok")
+def test_toolcall_is_frozen() -> None:
+    call = canonical_history_call("read_file", {}, call_id="x")
+
+    with pytest.raises(FrozenInstanceError):
+        call.tool_name = "write_file"  # type: ignore[misc]
+
+
+def test_toolresult_success_is_not_error() -> None:
+    call = canonical_history_call("read_file", {}, call_id="toolu_1")
+    result = canonical_history_result(call, "ok")
 
     assert result.is_error is False
+    assert result.status == "succeeded"
+    assert result.call_id == call.call_id
 
 
-def test_user_turn_preserves_current_turn_input_text():
+def test_user_turn_preserves_current_turn_input_text() -> None:
     turn = UserTurn("把标准安装验收补上。")
 
     assert turn.text == "把标准安装验收补上。"
 
 
-def test_assistant_turn_holds_text_and_calls_together():
+def test_assistant_turn_holds_text_and_calls_together() -> None:
     turn = AssistantTurn(
         text="let me read it",
-        tool_calls=[ToolCall(id="toolu_1", name="read_file", input={"path": "a"})],
+        tool_calls=[
+            canonical_history_call("read_file", {"path": "a"}, call_id="toolu_1")
+        ],
     )
 
     assert turn.text == "let me read it"
-    assert turn.tool_calls[0].name == "read_file"
+    assert turn.tool_calls[0].tool_name == "read_file"
 
 
-def test_assistant_turn_defaults_are_empty():
+def test_assistant_turn_defaults_are_empty() -> None:
     turn = AssistantTurn()
 
     assert turn.text == ""
     assert turn.tool_calls == []
 
 
-# --- from_payload: the Step 2 bridge from the existing call dict --------------
+def test_backend_ir_exports_the_single_runtime_contract_types() -> None:
+    from agent_py_agent.agent.tooling.runtime_contracts import (
+        ToolCall as RuntimeToolCall,
+    )
+    from agent_py_agent.agent.tooling.runtime_contracts import (
+        ToolResult as RuntimeToolResult,
+    )
+
+    assert ToolCall is RuntimeToolCall
+    assert ToolResult is RuntimeToolResult
 
 
-def test_from_payload_strips_control_keys_into_structured_input():
-    payload = {"tool": "read_file", "call_id": "toolu_7", "path": "README.md", "limit": 50}
-
-    call = ToolCall.from_payload(payload)
-
-    assert call.id == "toolu_7"
-    assert call.name == "read_file"
-    # control keys (tool/call_id) must NOT leak into input
-    assert call.input == {"path": "README.md", "limit": 50}
-
-
-def test_from_payload_uses_fallback_id_when_payload_has_none():
-    payload = {"tool": "write_file", "path": "out.md", "content": "x"}
-
-    call = ToolCall.from_payload(payload, fallback_id="toolu_result_id")
-
-    assert call.id == "toolu_result_id"
-    assert call.name == "write_file"
-    assert call.input == {"path": "out.md", "content": "x"}
-
-
-def test_from_payload_handles_tool_name_alias_and_non_dict():
-    aliased = ToolCall.from_payload({"tool_name": "search_text", "query": "foo"})
-    assert aliased.name == "search_text"
-    assert aliased.input == {"query": "foo"}
-
-    degenerate = ToolCall.from_payload("not-a-dict")
-    assert degenerate == ToolCall(id="", name="", input={})
+def test_raw_payload_cannot_construct_a_canonical_tool_call() -> None:
+    with pytest.raises(TypeError):
+        ToolCall(  # type: ignore[call-arg]
+            tool="read_file",
+            call_id="toolu_7",
+            path="README.md",
+        )

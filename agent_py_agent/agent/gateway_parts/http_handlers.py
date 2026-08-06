@@ -25,6 +25,7 @@ from ..runtime_errors import runtime_error_report
 from .control_service import (
     GatewayControlScope,
     execute_gateway_conversation_control,
+    request_gateway_memory_curator_lifecycle,
     steer_active_conversation_if_running,
 )
 from .io import gateway_request_counts
@@ -359,6 +360,15 @@ def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
     body = dict(body)
     body.pop("system_task", None)
     kind = body.get("kind", "ask")
+    if kind == "session_lifecycle":
+        _handle_session_lifecycle_signal(
+            handler,
+            server,
+            body,
+            user_id=_request_channel(handler)[0],
+            channel=_request_channel(handler)[1],
+        )
+        return
     if kind != "ask":
         handler._send_json(400, {"error": f"unsupported kind: {kind}"})
         return
@@ -433,6 +443,48 @@ def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
 
     gateway_request_enqueued()  # §6-A 进队计数:/ask 直写 inbox 不经 write_gateway_request,单独补点
     handler._send_json(202, {"request_id": request_id, "status": "queued"})
+
+
+# LLM: Lifecycle 请求只接受 close/reset 枚举且不进入模型队列；owner 仍由已认证 scope 解析。
+# 函数用途: 接收渠道会话关闭/重置信号并登记统一 Curator durable reason。
+def _handle_session_lifecycle_signal(
+    handler,
+    server,
+    body: dict,
+    *,
+    user_id: str,
+    channel: str,
+) -> None:
+    if server is None or getattr(server, "agent", None) is None:
+        handler._send_json(500, {"error": "server memory curator is not initialized"})
+        return
+    event = str(body.get("event") or "").strip().lower()
+    if event not in {"close", "reset"}:
+        handler._send_json(400, {"error": "session lifecycle event must be close or reset"})
+        return
+    try:
+        result = request_gateway_memory_curator_lifecycle(
+            server.agent,
+            scope=_gateway_control_scope(
+                handler,
+                body,
+                user_id=user_id,
+                channel=channel,
+            ),
+            event=event,
+        )
+    except Exception as exc:  # noqa: BLE001 - request failure must not enqueue a fake lifecycle event.
+        handler._send_json(
+            503,
+            {
+                "error": "memory curator lifecycle request failed",
+                "error_code": type(exc).__name__,
+            },
+        )
+        return
+    payload = result.to_dict()
+    payload.update({"status": "accepted", "disposition": "memory_curator_request"})
+    handler._send_json(202, payload)
 
 
 # LLM: The busy-turn decision is based only on authenticated scope plus durable runtime state;

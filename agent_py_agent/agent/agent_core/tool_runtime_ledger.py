@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import sqlite3
@@ -7,13 +6,12 @@ from pathlib import Path
 from typing import Any
 
 from ..common.value_parsing import text_value as _text
-from ..contracts.gates.tool_effects import args_hash_for_call
 from ..contracts.protocol_status import TOOL_STATUS_DONE, TOOL_STATUS_FAILED
-from ..contracts.tool_protocol_v2 import normalize_tool_call
 from ..conversation.authority import CONVERSATION_TRANSIENT_WORKSPACE_ATTR
 from ..local_storage import RuntimeGateLedgerRecord
 from ..local_storage.control_plane_models import AgentEventInput
 from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
+from ..tooling.runtime_contracts import tool_arguments_hash
 from ..user_space.network_grants import active_private_hosts
 from .tool_guard.call_guardrail import tool_guardrail_policy, tool_guardrail_records
 
@@ -56,7 +54,8 @@ def _record_tool_agent_event(store: object, archive_record: dict[str, object]) -
     event = AgentEventInput(
         root_task_id=root_task_id,
         run_id=run_id,
-        parent_run_id=_text(scope.get("parent_run_id")) or _text(archive_record.get("parent_run_id")),
+        parent_run_id=_text(scope.get("parent_run_id"))
+        or _text(archive_record.get("parent_run_id")),
         event_type="tool_call_finished",
         payload=_tool_event_payload(archive_record, scope),
     )
@@ -95,9 +94,7 @@ def _tool_event_payload(
         if value:
             payload[key] = value
     if "tool_operation_replayed" in archive_record:
-        payload["tool_operation_replayed"] = (
-            archive_record.get("tool_operation_replayed") is True
-        )
+        payload["tool_operation_replayed"] = archive_record.get("tool_operation_replayed") is True
     refs = archive_record.get("tool_result_refs")
     if isinstance(refs, list):
         payload["tool_result_refs"] = [item for item in refs if isinstance(item, dict)]
@@ -134,7 +131,9 @@ def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[st
         return merged or boundary
     rate_rows = _runtime_tool_rate_limit_rows(store, run_id)
     if rate_rows:
-        merged["tool_rate_limit_records"] = _merged_rate_limit_rows(merged.get("tool_rate_limit_records"), rate_rows)
+        merged["tool_rate_limit_records"] = _merged_rate_limit_rows(
+            merged.get("tool_rate_limit_records"), rate_rows
+        )
     return merged or boundary
 
 
@@ -155,9 +154,7 @@ def _attach_transient_named_work_write_scope(
     attrs = getattr(params, "task_attributes", None)
     if not isinstance(attrs, dict) or attrs.get(CONVERSATION_TRANSIENT_WORKSPACE_ATTR) is not True:
         return
-    owner_home_text = _text(
-        getattr(getattr(agent, "home_paths", None), "owner_home_dir", "")
-    )
+    owner_home_text = _text(getattr(getattr(agent, "home_paths", None), "owner_home_dir", ""))
     task_root = _resolved_path(boundary.get("task_root"))
     work_dir = _resolved_path(boundary.get("task_work_dir"))
     output_dir = _resolved_path(boundary.get("task_output_dir"))
@@ -360,10 +357,15 @@ def _attach_owner_network_grants(boundary: dict[str, object], agent: object) -> 
     if not hosts:
         return
     existing = _string_list(boundary.get("allowed_private_hosts"))
-    boundary["allowed_private_hosts"] = [*existing, *(host for host in hosts if host not in existing)]
+    boundary["allowed_private_hosts"] = [
+        *existing,
+        *(host for host in hosts if host not in existing),
+    ]
 
 
-def _attach_active_child_output_locks(boundary: dict[str, object], agent: object, params: object) -> None:
+def _attach_active_child_output_locks(
+    boundary: dict[str, object], agent: object, params: object
+) -> None:
     locks = _active_child_output_refs(agent, params)
     if not locks:
         return
@@ -380,14 +382,20 @@ def _active_child_output_refs(agent: object, params: object) -> list[str]:
     except (OSError, RuntimeError, ValueError):
         return []
     current_ids = _current_task_ids(params)
+    current_lineage = _current_lineage_ids(tasks, current_ids)
     refs: list[str] = []
     for task in tasks:
-        _append_active_child_output_refs(refs, task, current_ids)
+        _append_active_child_output_refs(refs, task, current_ids, current_lineage)
     return refs
 
 
-def _append_active_child_output_refs(refs: list[str], task: object, current_ids: set[str]) -> None:
-    if not _is_active_child_for_current_run(task, current_ids):
+def _append_active_child_output_refs(
+    refs: list[str],
+    task: object,
+    current_ids: set[str],
+    current_lineage: set[str],
+) -> None:
+    if not _is_active_child_for_current_run(task, current_ids, current_lineage):
         return
     for ref in _declared_output_refs(task):
         if ref not in refs:
@@ -405,7 +413,11 @@ def _current_task_ids(params: object) -> set[str]:
     return {value for value in values if value}
 
 
-def _is_active_child_for_current_run(task: object, current_ids: set[str]) -> bool:
+def _is_active_child_for_current_run(
+    task: object,
+    current_ids: set[str],
+    current_lineage: set[str],
+) -> bool:
     if not current_ids:
         return False
     # 正主不锁自己:子代理跑轮的 current_ids 含它自己的 run_id,而它声明的 output_files
@@ -413,11 +425,30 @@ def _is_active_child_for_current_run(task: object, current_ids: set[str]) -> boo
     # (真机实锤:子代理被"output/inventory.py 在 locked_files 中"拦死,capability 已
     # GRANTED 也无济于事,3/4 子代理被迫由主代理接管代写)。锁的正当用途是拦
     # 【别人】(兄弟/主代理中途)乱写在建产物,单向外溢保护,不拦正主。
-    if _text(getattr(task, "id", "")) in current_ids:
+    if _text(getattr(task, "id", "")) in current_lineage:
         return False
     if task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES):
         return False
-    return _text(getattr(task, "parent_id", "")) in current_ids or _text(getattr(task, "root_id", "")) in current_ids
+    return (
+        _text(getattr(task, "parent_id", "")) in current_ids
+        or _text(getattr(task, "root_id", "")) in current_ids
+    )
+
+
+def _current_lineage_ids(tasks: list[object], current_ids: set[str]) -> set[str]:
+    """Return current subagent plus ancestors so delegated outputs stay writable."""
+
+    by_id = {task_id: task for task in tasks if (task_id := _text(getattr(task, "id", "")))}
+    lineage = set(current_ids)
+    pending = [task_id for task_id in current_ids if task_id in by_id]
+    while pending:
+        task = by_id[pending.pop()]
+        parent_id = _text(getattr(task, "parent_id", ""))
+        if parent_id and parent_id not in lineage:
+            lineage.add(parent_id)
+            if parent_id in by_id:
+                pending.append(parent_id)
+    return lineage
 
 
 def _declared_output_refs(task: object) -> list[str]:
@@ -451,7 +482,9 @@ def _run_workspace(params: object) -> dict[str, object]:
     return {}
 
 
-def runtime_gate_ledger_record_from_archive(archive_record: dict[str, object]) -> RuntimeGateLedgerRecord | None:
+def runtime_gate_ledger_record_from_archive(
+    archive_record: dict[str, object],
+) -> RuntimeGateLedgerRecord | None:
     runtime_gate = archive_record.get("runtime_gate")
     if not isinstance(runtime_gate, dict):
         return None
@@ -475,21 +508,13 @@ def runtime_gate_ledger_record_from_archive(archive_record: dict[str, object]) -
 
 
 def _operation_id(record: Mapping[str, object]) -> str:
-    direct = _text(record.get("operation_id"))
-    if direct:
-        return direct
-    protocol = _dict_value(record.get("tool_protocol_v2"))
-    return _text(protocol.get("operation_id"))
+    return _text(record.get("operation_id"))
 
 
 def _idempotency_key(record: Mapping[str, object], runtime_gate: Mapping[str, object]) -> str:
     direct = _text(record.get("idempotency_key"))
     if direct:
         return direct
-    protocol = _dict_value(record.get("tool_protocol_v2"))
-    protocol_key = _text(protocol.get("idempotency_key"))
-    if protocol_key:
-        return protocol_key
     evidence = _dict_value(runtime_gate.get("evidence"))
     return _text(evidence.get("idempotency_key"))
 
@@ -503,11 +528,14 @@ def _approval_id(record: Mapping[str, object], runtime_gate: Mapping[str, object
 
 
 def _args_hash(record: Mapping[str, object]) -> str:
+    direct = _text(record.get("args_hash"))
+    if direct:
+        return direct
     parameters = _dict_value(record.get("parameters"))
     if not parameters:
         return ""
-    call = normalize_tool_call(parameters)
-    return args_hash_for_call(call.input)
+    arguments = {key: value for key, value in parameters.items() if key not in {"tool", "call_id"}}
+    return tool_arguments_hash(arguments)
 
 
 def _result_ref(record: Mapping[str, object]) -> str:
@@ -558,7 +586,9 @@ def _new_rate_limit_row(identity: tuple[str, str]) -> dict[str, object]:
 
 
 def _apply_rate_limit_record(row: dict[str, object], record: object) -> None:
-    timestamp = float(getattr(record, "created_at", 0.0) or getattr(record, "updated_at", 0.0) or 0.0)
+    timestamp = float(
+        getattr(record, "created_at", 0.0) or getattr(record, "updated_at", 0.0) or 0.0
+    )
     if timestamp > 0:
         row["attempt_timestamps"].append(timestamp)
     status = _text(getattr(record, "status", ""))
@@ -571,7 +601,9 @@ def _apply_rate_limit_record(row: dict[str, object], record: object) -> None:
         row["last_success_at"] = timestamp
 
 
-def _merged_rate_limit_rows(existing: object, persisted: tuple[dict[str, object], ...]) -> tuple[dict[str, object], ...]:
+def _merged_rate_limit_rows(
+    existing: object, persisted: tuple[dict[str, object], ...]
+) -> tuple[dict[str, object], ...]:
     rows: list[dict[str, object]] = []
     seen: set[tuple[str, str]] = set()
     for item in [*(existing if isinstance(existing, (list, tuple)) else ()), *persisted]:
@@ -599,6 +631,7 @@ def _merged_tool_guardrail_rows(
 
 def _dict_value(value: object) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
+
 
 __all__ = [
     "persist_tool_runtime_ledger",

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
+
 
 def test_owner_policy_reads_seed_files_and_usage(tmp_path: Path) -> None:
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
@@ -19,7 +21,7 @@ def test_owner_policy_reads_seed_files_and_usage(tmp_path: Path) -> None:
 
     assert bundle.permissions["filesystem"]["access_mode"] == "workspace-write"
     assert bundle.quota["max_subagents"] == 50
-    assert bundle.retention["raw_days"] == 90
+    assert bundle.retention["audit_days"] == 180
     assert usage.total_bytes >= 5
     assert str(home.owner_workspace_dir) in usage.by_root
 
@@ -103,9 +105,9 @@ def test_tool_registry_respects_owner_disabled_tools(tmp_path: Path) -> None:
     agent = SimpleAgent(AgentConfig(my_agent_home=str(home), prompt_files=[]), tmp_path / "repo")
 
     assert "list_files" not in {spec.name for spec in agent.tools.specs(include_orchestration=True)}
-    result = agent.tools.execute_call({"tool": "list_files", "path": "."})
+    result = execute_registry_test_call(agent.tools, "list_files", {"path": "."})
     assert not result.ok
-    assert "owner 策略禁用" in result.output
+    assert result.error_code == "TOOL_NOT_IN_RUNTIME_SNAPSHOT"
 
 
 def test_subagent_inherits_owner_policy_snapshot_and_projection(tmp_path: Path) -> None:

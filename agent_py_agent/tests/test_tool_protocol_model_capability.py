@@ -1,62 +1,102 @@
-"""审计 #8(部分,high/任务)真测:工具协议按模型能力运行时降级。
-
-原状:tool_protocol 全局静态,自选非 native 模型(如某些 anthropic 兼容端点的 Text-01)上 native
-静默失效(0 工具调用 + 幻觉完成),无运行时降级。在单一开关点 native_tool_use_active 加按模型能力
-判定:命中 tool_protocol_text_models 子串的模型强制回退 text。空配置=默认行为不变。治 MEMORY 记的
-"自选模型须按模型配协议"(reasoning→native / 非 reasoning→text)。
-"""
+"""Run-start tool protocol selection uses observed capability and one frozen snapshot."""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 
-from agent_py_agent.agent.agent_core.native_tool_protocol import native_tool_use_active
+import pytest
+
+from agent_py_agent.agent.agent_core.native_tool_protocol import (
+    ToolProtocolSelectionError,
+    native_tool_use_active,
+    select_tool_protocol,
+)
+from agent_py_agent.agent.tooling.runtime_contracts import ProviderToolCapability
 
 
-def _agent(*, protocol="native", enable=True, backend="anthropic_compatible", model="claude-opus-4-8", text_models=None):
-    config = SimpleNamespace(
-        tool_protocol=protocol,
-        enable_tools=enable,
-        model_name=model,
-        tool_protocol_text_models=text_models or [],
+class _Backend:
+    name = "test-provider"
+    model_name = "test-model"
+    stream_enabled = False
+
+    def __init__(self, *, native_supported: bool) -> None:
+        self.native_supported = native_supported
+        self.probes = 0
+
+    def _tool_endpoint(self) -> str:
+        return "local://tool-capability-test"
+
+    def probe_tool_capability(self) -> ProviderToolCapability:
+        self.probes += 1
+        return ProviderToolCapability(
+            provider=self.name,
+            endpoint=self._tool_endpoint(),
+            model=self.model_name,
+            stream=self.stream_enabled,
+            native_supported=self.native_supported,
+            evidence="explicit_test_probe",
+        )
+
+
+def _agent(
+    *,
+    native_supported: bool,
+    protocol: str = "native",
+    enable_tools: bool = True,
+) -> SimpleNamespace:
+    backend = _Backend(native_supported=native_supported)
+    return SimpleNamespace(
+        config=SimpleNamespace(
+            tool_protocol=protocol,
+            enable_tools=enable_tools,
+        ),
+        backend=backend,
     )
-    return SimpleNamespace(config=config, backend=SimpleNamespace(name=backend))
 
 
-def test_native_active_by_default_for_capable_model() -> None:
-    assert native_tool_use_active(_agent()) is True  # 默认(空降级表)行为完全不变
+def test_native_protocol_requires_positive_provider_capability_probe() -> None:
+    agent = _agent(native_supported=True)
+
+    snapshot = select_tool_protocol(agent, run_id="run-native")
+
+    assert snapshot.source_protocol == "native"
+    assert snapshot.capability.evidence == "explicit_test_probe"
+    assert agent.backend.probes == 1
+    assert native_tool_use_active(SimpleNamespace(tool_protocol_snapshot=snapshot)) is True
 
 
-def test_downgrade_for_configured_non_native_model() -> None:
-    agent = _agent(model="abab-text-01", text_models=["text-01"])
-    assert native_tool_use_active(agent) is False  # 命中 → 强制回退 text(防 native 静默失效)
+def test_failed_native_capability_probe_does_not_silently_select_text() -> None:
+    agent = _agent(native_supported=False)
+
+    with pytest.raises(
+        ToolProtocolSelectionError,
+        match="explicitly select tool_protocol=text",
+    ):
+        select_tool_protocol(agent, run_id="run-text")
+
+    assert agent.backend.probes == 1
 
 
-def test_pattern_is_case_insensitive_substring() -> None:
-    agent = _agent(model="MiniMax-Text-01-Pro", text_models=["minimax"])
-    assert native_tool_use_active(agent) is False
+def test_explicit_text_protocol_does_not_probe_native_transport() -> None:
+    agent = _agent(native_supported=True, protocol="text")
+
+    snapshot = select_tool_protocol(agent, run_id="run-explicit-text")
+
+    assert snapshot.source_protocol == "text"
+    assert snapshot.capability.evidence == "explicit_text_protocol_configuration"
+    assert agent.backend.probes == 0
 
 
-def test_non_matching_model_stays_native() -> None:
-    agent = _agent(model="claude-sonnet-4-6", text_models=["text-01", "minimax"])
-    assert native_tool_use_active(agent) is True  # 不命中 → 保持 native
+def test_tools_disabled_selects_non_native_snapshot_without_probe() -> None:
+    agent = _agent(native_supported=True, enable_tools=False)
+
+    snapshot = select_tool_protocol(agent, run_id="run-tools-disabled")
+
+    assert snapshot.source_protocol == "text"
+    assert snapshot.capability.evidence == "tools_disabled_for_run"
+    assert agent.backend.probes == 0
 
 
-def test_empty_model_name_keeps_native() -> None:
-    assert native_tool_use_active(_agent(model="")) is True  # 判断不了就不降级(不误伤)
-
-
-def test_text_protocol_unchanged() -> None:
-    assert native_tool_use_active(_agent(protocol="text")) is False  # 现有判定不受影响
-
-
-def test_non_native_backend_unchanged() -> None:
-    assert native_tool_use_active(_agent(backend="echo")) is False
-
-
-def test_openai_compatible_backend_is_native_capable() -> None:
-    assert native_tool_use_active(_agent(backend="openai_compatible", model="gpt-4.1")) is True
-
-
-def test_tools_disabled_unchanged() -> None:
-    assert native_tool_use_active(_agent(enable=False)) is False
+def test_native_tool_use_requires_run_fixed_protocol_snapshot() -> None:
+    with pytest.raises(RuntimeError, match="tool protocol snapshot is missing"):
+        native_tool_use_active(SimpleNamespace())

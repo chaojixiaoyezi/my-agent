@@ -74,10 +74,21 @@ class TestEmptyInputCases:
     def test_very_long_goal_truncation(self, tmp_path: Path):
         """超长目标被正确处理。"""
         from agent_py_agent.agent.memory_push import format_memories_for_injection
+        from agent_py_agent.agent.memory_store import MemoryRecord
 
         long_goal = "A" * 10000  # 非常长的目标
-        result = format_memories_for_injection([long_goal])
-        # 应该能处理而不崩溃
+        result = format_memories_for_injection(
+            [
+                MemoryRecord(
+                    role="system",
+                    content=long_goal,
+                    kind="lesson",
+                    entry_id="lesson-long",
+                    attributes={"origin": "reviewed"},
+                )
+            ]
+        )
+        assert result.count("<memory-context>") <= 1
 
     def test_unicode_goal_handling(self, tmp_path: Path):
         """Unicode 目标字符串的处理。"""

@@ -20,7 +20,17 @@ from ._filesystem_helpers import (
 )
 from .filesystem_artifact_guard import tool_output_artifact_typo_hint
 from .filesystem_read_file import execute_read_file
-from .models import BaseTool, ToolExecutionResult, ToolSpec
+from .models import (
+    BaseTool,
+    ConcurrencyPolicy,
+    EffectResolverPolicy,
+    OutputPolicy,
+    ResourceScopePolicy,
+    ToolHandlerOutcome,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+)
 
 _COMMON_FILE_DISCOVERY_IGNORES = frozenset(
     {
@@ -76,10 +86,10 @@ class PathAccessError(ValueError):
     """A resolved path was rejected by PathAccessPolicy."""
 
 
-def owner_quota_error_result(tool_name: str, exc: BaseException) -> ToolExecutionResult:
+def owner_quota_error_result(tool_name: str, exc: BaseException) -> ToolHandlerOutcome:
     if isinstance(exc, OwnerQuotaExceeded):
         projection = exc.projection
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             tool_name,
             False,
             str(exc),
@@ -92,7 +102,7 @@ def owner_quota_error_result(tool_name: str, exc: BaseException) -> ToolExecutio
                 }
             },
         )
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         tool_name,
         False,
         "当前无法可靠读取 owner 配额或磁盘使用量；系统已拒绝本次写入。",
@@ -252,6 +262,53 @@ def filesystem_access_options(
 
 class ReadFileTool(FileSystemTool):
 
+    model_spec = ToolModelSpec(
+        name="read_file",
+        description="读取文本文件内容；普通文件、大工具输出路径和历史产物路径都优先用这个入口。可直接读任意绝对路径，包括 workspace 外、用户在任务里指定的输入目录/文件，无需 shell 或额外授权——不要为读取输入文件提 capability_request。",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": _READ_FILE_PARAMETER_DETAILS["path"]},
+                "start_line": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": _READ_FILE_PARAMETER_DETAILS["start_line"],
+                },
+                "end_line": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": _READ_FILE_PARAMETER_DETAILS["end_line"],
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": _READ_FILE_PARAMETER_DETAILS["offset"],
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": _READ_FILE_PARAMETER_DETAILS["max_chars"],
+                },
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+        hints=ToolModelHints(
+            category="filesystem",
+            use_cases=tuple(_READ_FILE_USE_CASES),
+            avoid_when=("只想知道关键字在哪些文件出现过时，先用 search_text 更省",),
+            keywords=("读文件", "查看文件", "代码", "配置", "文档", "cat", "open file"),
+            examples=tuple(_READ_FILE_EXAMPLES),
+        ),
+    )
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy("read_only"),
+        concurrency_policy=ConcurrencyPolicy("parallel_safe"),
+        resource_scopes=ResourceScopePolicy(parameter_names=("path",)),
+        output_policy=OutputPolicy(redaction="source_code"),
+        promotes_task=True,
+    )
+
     def __init__(
         self,
         workspace_root: Path,
@@ -265,29 +322,5 @@ class ReadFileTool(FileSystemTool):
             access_options,
         )
         self.max_chars = max_chars
-        self.spec = ToolSpec(
-            name="read_file",
-            category="filesystem",
-            effect="read_only",
-            output_redaction="source_code",
-            description="读取文本文件内容；普通文件、大工具输出路径和历史产物路径都优先用这个入口。可直接读任意绝对路径，包括 workspace 外、用户在任务里指定的输入目录/文件，无需 shell 或额外授权——不要为读取输入文件提 capability_request。",
-            use_cases=_READ_FILE_USE_CASES,
-            avoid_when=[
-                "只想知道关键字在哪些文件出现过时，先用 search_text 更省",
-            ],
-            keywords=["读文件", "查看文件", "代码", "配置", "文档", "cat", "open file"],
-            parameters=_READ_FILE_PARAMETERS,
-            parameter_details=_READ_FILE_PARAMETER_DETAILS,
-            parameter_schema={
-                "start_line": {"type": "integer", "minimum": 1},
-                "end_line": {"type": "integer", "minimum": 1},
-                "offset": {"type": "integer", "minimum": 0},
-                "max_chars": {"type": "integer", "minimum": 1},
-            },
-            required_parameters=["path"],
-            examples=_READ_FILE_EXAMPLES,
-            promotes_task=True,
-        )
-
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         return execute_read_file(self, params, self.max_chars)

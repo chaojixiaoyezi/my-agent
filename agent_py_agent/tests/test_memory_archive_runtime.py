@@ -29,7 +29,9 @@ from agent_py_agent.agent.settings.config import AgentConfig
 
 
 def _read_jsonl(path: Path) -> list[dict]:
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return [
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
+    ]
 
 
 def test_archive_run_turn_writes_user_and_assistant_events():
@@ -224,7 +226,9 @@ def test_archive_live_tool_round_writes_before_turn_finalization():
 
 
 def test_live_archive_respects_archive_level_zero(tmp_path: Path) -> None:
-    config = AgentConfig()
+    config = AgentConfig(
+        tool_protocol="text",
+    )
     config.memory_archive_level = 0
     config.memory_archive_preview_level_0_chars = 1000
     config.memory_archive_preview_level_3_chars = 20
@@ -252,7 +256,9 @@ def test_live_archive_respects_archive_level_zero(tmp_path: Path) -> None:
 
 
 def test_live_archive_records_assistant_archive_errors(tmp_path: Path, monkeypatch) -> None:
-    config = AgentConfig()
+    config = AgentConfig(
+        tool_protocol="text",
+    )
     agent = SimpleNamespace(root=tmp_path, config=config, session_id="session-live")
     params = SimpleNamespace(
         request_id="req-live",
@@ -281,7 +287,9 @@ def test_live_archive_records_assistant_archive_errors(tmp_path: Path, monkeypat
 
 
 def test_runtime_fact_progress_records_write_errors(tmp_path: Path, monkeypatch) -> None:
-    config = AgentConfig()
+    config = AgentConfig(
+        tool_protocol="text",
+    )
     agent = SimpleNamespace(root=tmp_path, config=config, session_id="session-live")
     params = SimpleNamespace(
         request_id="req-live",
@@ -339,7 +347,9 @@ def test_archive_run_turn_skips_tool_records_already_written_live():
 
 
 def test_runtime_fact_progress_updates_without_raw_checkpoint(tmp_path: Path) -> None:
-    config = AgentConfig()
+    config = AgentConfig(
+        tool_protocol="text",
+    )
     agent = SimpleNamespace(root=tmp_path, config=config, session_id="session-live")
     params = SimpleNamespace(
         request_id="req-live",
@@ -364,12 +374,16 @@ def test_runtime_fact_progress_updates_without_raw_checkpoint(tmp_path: Path) ->
     payload = json.loads(fact_path.read_text(encoding="utf-8"))
     assert payload["runtime_progress"]["tool_rounds"] == 7
     assert payload["runtime_progress"]["executed_tools"] == ["web_search"]
-    assert any(ref.endswith("outputs/report.md") for ref in payload["runtime_progress"]["artifact_refs"])
+    assert any(
+        ref.endswith("outputs/report.md") for ref in payload["runtime_progress"]["artifact_refs"]
+    )
     assert not (tmp_path / "audit").exists()
 
 
 def test_live_archive_and_runtime_fact_use_owner_home(tmp_path: Path) -> None:
-    config = AgentConfig()
+    config = AgentConfig(
+        tool_protocol="text",
+    )
     owner_home = tmp_path / "home" / "owners" / "providers" / "feishu" / "users" / "ou_123"
     agent = SimpleNamespace(
         root=tmp_path / "workspace",
@@ -389,17 +403,23 @@ def test_live_archive_and_runtime_fact_use_owner_home(tmp_path: Path) -> None:
         save=True,
     )
 
-    archive_assistant_tool_round_if_enabled(agent, params, tool_round=1, response_text="准备读取资料。", tool_calls=[])
+    archive_assistant_tool_round_if_enabled(
+        agent, params, tool_round=1, response_text="准备读取资料。", tool_calls=[]
+    )
     update_runtime_fact_progress_if_enabled(agent, params, tool_round=1)
 
     assert list((owner_home / "audit").glob("*.jsonl"))
     assert (owner_home / "memory_archive" / "runtime_facts" / "req-owner" / "task.json").exists()
     assert not (agent.root / "audit").exists()
-    assert not (agent.root / "memory_archive" / "runtime_facts" / "req-owner" / "task.json").exists()
+    assert not (
+        agent.root / "memory_archive" / "runtime_facts" / "req-owner" / "task.json"
+    ).exists()
 
 
 def test_runtime_fact_progress_preserves_root_user_prompt(tmp_path: Path) -> None:
-    config = AgentConfig()
+    config = AgentConfig(
+        tool_protocol="text",
+    )
     agent = SimpleNamespace(root=tmp_path, config=config, session_id="session-live")
     params = SimpleNamespace(
         request_id="req-live-root",
@@ -408,7 +428,7 @@ def test_runtime_fact_progress_preserves_root_user_prompt(tmp_path: Path) -> Non
         user_prompt="继续执行 Compact Auto Continuation 包里的 Next Step。",
         root_user_prompt="请整理 all-agent 下面的项目并写中文报告。",
         executed_tools=["read_file"],
-        tool_context=["[TOOL_CALL]\n{\"tool\":\"read_file\"}\n[/TOOL_CALL]\ntools: read_file"],
+        tool_context=['[TOOL_CALL]\n{"tool":"read_file"}\n[/TOOL_CALL]\ntools: read_file'],
         archive_tool_calls=[],
         live_archive_state={},
     )
@@ -421,7 +441,9 @@ def test_runtime_fact_progress_preserves_root_user_prompt(tmp_path: Path) -> Non
 
 
 def test_runtime_fact_terminal_preserves_live_progress(tmp_path: Path) -> None:
-    config = AgentConfig()
+    config = AgentConfig(
+        tool_protocol="text",
+    )
     agent = SimpleNamespace(root=tmp_path, config=config, session_id="session-live")
     params = SimpleNamespace(
         request_id="req-terminal",
@@ -454,7 +476,9 @@ def test_runtime_fact_terminal_preserves_live_progress(tmp_path: Path) -> None:
 
 
 def test_runtime_fact_terminal_records_user_interrupt_as_cancelled(tmp_path: Path) -> None:
-    config = AgentConfig()
+    config = AgentConfig(
+        tool_protocol="text",
+    )
     agent = SimpleNamespace(root=tmp_path, config=config, session_id="session-live")
     params = SimpleNamespace(
         request_id="req-cancelled",
@@ -485,7 +509,7 @@ class _FailingRuntimeFactBackend:
 
 
 def test_agent_run_closes_runtime_fact_when_model_raises(tmp_path: Path) -> None:
-    config = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+    config = AgentConfig(tool_protocol="text", enable_tools=True, memory_path="memory.jsonl")
     agent = SimpleAgent(config, tmp_path)
     agent.backend = _FailingRuntimeFactBackend()
 

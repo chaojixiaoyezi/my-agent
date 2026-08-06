@@ -4,12 +4,15 @@ from __future__ import annotations
 """Execution helpers for controlled subagent shell gateway."""
 
 import json
+import os
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from ..tooling.cancellation import cancellation_requested
+from ..tooling.process_registry import terminate_process_tree
 from .shell_gateway import (
     ShellGatewayDecision,
     ShellGatewayRequest,
@@ -24,6 +27,7 @@ class ShellGatewayExecutionResult:
     executed: bool = False
     exit_code: int | None = None
     timed_out: bool = False
+    cancelled: bool = False
     duration_seconds: float = 0.0
     stdout_preview: str = ""
     stderr_preview: str = ""
@@ -44,6 +48,7 @@ class _ExecutionCapture:
     stdout_total: int = 0
     stderr_total: int = 0
     timed_out: bool = False
+    cancelled: bool = False
 
 
 def execute_shell_command(request: ShellGatewayRequest) -> ShellGatewayExecutionResult:
@@ -79,20 +84,47 @@ def _run_subprocess_with_budget(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=False,
+        start_new_session=os.name != "nt",
+        creationflags=(
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            if os.name == "nt"
+            else 0
+        ),
     )
     with ThreadPoolExecutor(max_workers=2) as pool:
         stdout_future = pool.submit(_read_limited, process.stdout, stdout_limit)
         stderr_future = pool.submit(_read_limited, process.stderr, stderr_limit)
         timed_out = False
-        try:
-            exit_code = process.wait(timeout=timeout_seconds)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            process.kill()
-            exit_code = process.wait()
+        cancelled = False
+        deadline = time.monotonic() + max(0, timeout_seconds)
+        while True:
+            if cancellation_requested():
+                cancelled = True
+                terminate_process_tree(process.pid, process)
+                exit_code = process.wait()
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                terminate_process_tree(process.pid, process)
+                exit_code = process.wait()
+                break
+            try:
+                exit_code = process.wait(timeout=min(0.2, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                continue
         stdout, stdout_total = stdout_future.result()
         stderr, stderr_total = stderr_future.result()
-    return _ExecutionCapture(exit_code, stdout, stderr, stdout_total, stderr_total, timed_out)
+    return _ExecutionCapture(
+        exit_code,
+        stdout,
+        stderr,
+        stdout_total,
+        stderr_total,
+        timed_out,
+        cancelled,
+    )
 
 
 def _read_limited(stream, limit: int) -> tuple[bytes, int]:
@@ -126,6 +158,7 @@ def _execution_result_from_capture(
     result.executed = True
     result.exit_code = capture.exit_code
     result.timed_out = capture.timed_out
+    result.cancelled = capture.cancelled
     result.duration_seconds = round(time.monotonic() - start, 4)
     result.stdout_preview = _decode_preview(capture.stdout)
     result.stderr_preview = _decode_preview(capture.stderr)

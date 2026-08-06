@@ -24,6 +24,7 @@ import logging
 import time
 from bisect import bisect_right
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -202,7 +203,61 @@ def _owner_has_wake_pending_facts(owner_home: Path) -> bool:
         _has_unfinished_subagent_run(owner_home)
         or _has_incomplete_watch_lane(owner_home)
         or _has_due_scheduler_fact(owner_home)
+        or _has_pending_memory_curator_work(owner_home)
     )
+
+
+# LLM: Curator pending reason、崩溃遗留 lease 和未处理输入都是 owner 唤醒事实；进程内 registry 不是权威。
+# 函数用途: 让 scoped owner 在 Gateway 重启或 LRU 逐出后重新进入既有后台 lane。
+def _has_pending_memory_curator_work(owner_home: Path) -> bool:
+    state_path = owner_home / "memory" / "curator" / "state.json"
+    if not state_path.exists():
+        return _curator_input_newer_than(owner_home, 0.0)
+    try:
+        from .memory_store.curator_models import MemoryCuratorState
+
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return True
+        state = MemoryCuratorState.from_dict(payload)
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return True
+    if state.pending_reasons or state.active_lease:
+        return True
+    last_success = _curator_success_timestamp(state.last_success_at)
+    if last_success <= 0:
+        return _curator_input_newer_than(owner_home, 0.0)
+    if state.last_daily_finalize_date != datetime.now(timezone.utc).date().isoformat():
+        return True
+    return _curator_input_newer_than(owner_home, last_success)
+
+
+# LLM: mtime 只用于发现“需要 tick”的 owner；真正 cursor/due 判定仍由 CuratorService 的结构化 state 完成。
+# 函数用途: 检查 ConversationStore 消息或 owner audit 是否晚于最近成功策展。
+def _curator_input_newer_than(owner_home: Path, timestamp: float) -> bool:
+    candidates = [
+        *(path for root in _store_roots(owner_home) for path in (root / "messages").glob("*.jsonl")),
+        *(owner_home / "audit").glob("*.jsonl"),
+    ]
+    for path in candidates:
+        try:
+            if path.is_file() and path.stat().st_size > 0 and path.stat().st_mtime > timestamp:
+                return True
+        except OSError:
+            return True
+    return False
+
+
+# LLM: 坏 last_success_at 不能让 owner 永久沉睡；返回零使 discovery 保守唤醒后由严格 state parser 报错。
+# 函数用途: 将 Curator UTC ISO 时间转换成发现层比较时间。
+def _curator_success_timestamp(value: str) -> float:
+    try:
+        parsed = datetime.fromisoformat(str(value or ""))
+    except ValueError:
+        return 0.0
+    if parsed.tzinfo is None:
+        return 0.0
+    return parsed.astimezone(timezone.utc).timestamp()
 
 
 def _has_due_scheduler_fact(owner_home: Path) -> bool:

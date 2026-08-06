@@ -38,12 +38,22 @@ from ._filesystem_search_models import (
     search_request_from_params,
     slice_hits,
 )
+from .cancellation import raise_if_cancelled
 from .filesystem_artifact_guard import (
     is_tool_output_artifact_path,
     mark_tool_output_artifact_result,
 )
 from .filesystem_path_recovery import MissingPathRequest, missing_path_result
-from .models import ToolExecutionResult, ToolSpec
+from .models import (
+    ConcurrencyPolicy,
+    EffectResolverPolicy,
+    OutputPolicy,
+    ResourceScopePolicy,
+    ToolHandlerOutcome,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+)
 
 _SEARCH_TEXT_USE_CASES = [
     "想找某个函数、类、配置项出现在哪些文件里",
@@ -121,33 +131,55 @@ class AppendItemHitsRequest:
     hit_budget: int
 
 
-def build_search_text_spec() -> ToolSpec:
-    return ToolSpec(
+def build_search_text_model_spec() -> ToolModelSpec:
+    properties: dict[str, dict[str, Any]] = {
+        name: {"type": "string", "description": _SEARCH_TEXT_PARAMETER_DETAILS[name]}
+        for name in _SEARCH_TEXT_PARAMETERS
+    }
+    properties.update(
+        {
+            "limit": {"type": "integer", "minimum": 1, "description": _SEARCH_TEXT_PARAMETER_DETAILS["limit"]},
+            "offset": {"type": "integer", "minimum": 0, "description": _SEARCH_TEXT_PARAMETER_DETAILS["offset"]},
+            "context": {"type": "integer", "minimum": 0, "description": _SEARCH_TEXT_PARAMETER_DETAILS["context"]},
+            "literal": {"type": "boolean", "description": _SEARCH_TEXT_PARAMETER_DETAILS["literal"]},
+            "ignore_case": {"type": "boolean", "description": _SEARCH_TEXT_PARAMETER_DETAILS["ignore_case"]},
+            "include_ignored": {"type": "boolean", "description": _SEARCH_TEXT_PARAMETER_DETAILS["include_ignored"]},
+            "output_mode": {
+                "type": "string",
+                "enum": ["content", "files_with_matches", "count", "line_numbers"],
+                "description": _SEARCH_TEXT_PARAMETER_DETAILS["output_mode"],
+            },
+        }
+    )
+    return ToolModelSpec(
         name="search_text",
-        category="filesystem",
-        effect="read_only",
-        output_redaction="source_code",
         description="在工作区里搜索纯文本，适合找函数名、配置项、章节标记、日志锚点和大文件里的候选范围。",
-        use_cases=_SEARCH_TEXT_USE_CASES,
-        avoid_when=_SEARCH_TEXT_AVOID_WHEN,
-        keywords=["搜索", "查找", "关键字", "grep", "rg", "全文检索", "文本匹配"],
-        parameters=_SEARCH_TEXT_PARAMETERS,
-        parameter_details=_SEARCH_TEXT_PARAMETER_DETAILS,
-        parameter_schema={
-            "limit": {"type": "integer", "minimum": 1},
-            "offset": {"type": "integer", "minimum": 0},
-            "context": {"type": "integer", "minimum": 0},
-            "literal": {"type": "boolean"},
-            "ignore_case": {"type": "boolean"},
-            "include_ignored": {"type": "boolean"},
+        input_schema={
+            "type": "object",
+            "properties": properties,
+            "required": ["query"],
+            "additionalProperties": False,
         },
-        required_parameters=["query"],
-        examples=_SEARCH_TEXT_EXAMPLES,
-        promotes_task=True,
+        hints=ToolModelHints(
+            category="filesystem",
+            use_cases=tuple(_SEARCH_TEXT_USE_CASES),
+            avoid_when=tuple(_SEARCH_TEXT_AVOID_WHEN),
+            keywords=("搜索", "查找", "关键字", "grep", "rg", "全文检索", "文本匹配"),
+            examples=tuple(_SEARCH_TEXT_EXAMPLES),
+        ),
     )
 
 
 class SearchTextTool(FileSystemTool):
+
+    model_spec = build_search_text_model_spec()
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy("read_only"),
+        concurrency_policy=ConcurrencyPolicy("parallel_safe"),
+        resource_scopes=ResourceScopePolicy(parameter_names=("path",)),
+        output_policy=OutputPolicy(redaction="source_code"),
+        promotes_task=True,
+    )
 
     def __init__(
         self,
@@ -162,16 +194,15 @@ class SearchTextTool(FileSystemTool):
             access_options,
         )
         self.max_matches = max_matches
-        self.spec = build_search_text_spec()
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         try:
             request = search_request_from_params(params, self.max_matches)
             target = self.resolve_path(request.raw_path)
         except ValueError as exc:
             # 参数/路径解析失败→TOOL_INVALID_ARGUMENTS(改参可修)；漏码会兜底 UNKNOWN_ERROR
             # (retryable=False)误导模型放弃。not-found 走下面 missing_path_result(PATH_NOT_FOUND)。
-            return ToolExecutionResult("search_text", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
+            return ToolHandlerOutcome("search_text", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
         if not target.exists():
             return missing_path_result(MissingPathRequest(
                 tool_name="search_text",
@@ -184,18 +215,18 @@ class SearchTextTool(FileSystemTool):
             ))
         return self._search_target(target, request)
 
-    def _search_target(self, target: Path, request: SearchRequest) -> ToolExecutionResult:
+    def _search_target(self, target: Path, request: SearchRequest) -> ToolHandlerOutcome:
         try:
             matcher = SearchMatcher.from_request(request)
         except ValueError as exc:
             # 无效正则/匹配参数→TOOL_INVALID_ARGUMENTS(改 pattern 可修)；漏码兜底 UNKNOWN_ERROR
             # (retryable=False)会让模型放弃整个搜索而非修正 query/pattern。
-            return ToolExecutionResult("search_text", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
+            return ToolHandlerOutcome("search_text", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
         if request.output_mode == "count":
             counts = _collect_counts_with_rg(self, target, request)
             if counts is None:
                 counts = self._collect_counts(target, request, matcher)
-            result = ToolExecutionResult(
+            result = ToolHandlerOutcome(
                 "search_text",
                 True,
                 render_match_counts(counts, request),
@@ -207,7 +238,7 @@ class SearchTextTool(FileSystemTool):
             hits = self._collect_hits(target, request, matcher)
         if request.output_mode == "files_with_matches":
             total_items = len(dict.fromkeys(hit.rel for hit in hits))
-            result = ToolExecutionResult(
+            result = ToolHandlerOutcome(
                 "search_text",
                 True,
                 render_files_with_matches(hits, request),
@@ -219,7 +250,7 @@ class SearchTextTool(FileSystemTool):
                 (hit.rel for hit in hits),
             )
         if request.output_mode == "line_numbers":
-            result = ToolExecutionResult(
+            result = ToolHandlerOutcome(
                 "search_text",
                 True,
                 render_line_numbers(hits, request),
@@ -230,7 +261,7 @@ class SearchTextTool(FileSystemTool):
                 target,
                 (hit.rel for hit in hits),
             )
-        result = ToolExecutionResult(
+        result = ToolHandlerOutcome(
             "search_text",
             True,
             self._render_content_hits(hits, request),
@@ -247,6 +278,7 @@ class SearchTextTool(FileSystemTool):
             return [target]
         candidates: list[Path] = []
         for root, dirnames, filenames in os.walk(target):
+            raise_if_cancelled()
             dirnames.sort()
             filenames.sort()
             self._filter_search_dirs(dirnames, request)
@@ -266,6 +298,7 @@ class SearchTextTool(FileSystemTool):
         seen_files: set[str] = set()
         hit_budget = request.offset + request.limit + 1
         for item in self._iter_search_candidates(target, request):
+            raise_if_cancelled()
             if not self._should_search_item(item, request):
                 continue
             if self._append_item_hits(AppendItemHitsRequest(
@@ -295,6 +328,7 @@ class SearchTextTool(FileSystemTool):
     def _collect_counts(self, target: Path, request: SearchRequest, matcher: SearchMatcher) -> dict[str, int]:
         counts: dict[str, int] = {}
         for item in self._iter_search_candidates(target, request):
+            raise_if_cancelled()
             if not self._should_search_item(item, request):
                 continue
             for hit in self._iter_search_item_hits(item, request, matcher, include_context=False):
@@ -368,10 +402,10 @@ class SearchTextTool(FileSystemTool):
 
 
 def _search_result_with_source_projection(
-    result: ToolExecutionResult,
+    result: ToolHandlerOutcome,
     target: Path,
     matched_paths: Iterable[str],
-) -> ToolExecutionResult:
+) -> ToolHandlerOutcome:
     if is_tool_output_artifact_path(target) or any(
         is_tool_output_artifact_path(Path(path))
         for path in matched_paths
@@ -412,6 +446,7 @@ def _iter_matching_lines(request: MatchingLineRequest):
 
 def _non_null_hits(hits):
     for hit in hits:
+        raise_if_cancelled()
         if hit is not None:
             yield hit
 
@@ -502,6 +537,7 @@ def _read_rg_hits(
     if stdout is None:
         raise RuntimeError("rg stdout missing")
     for raw_line in stdout:
+        raise_if_cancelled()
         try:
             hit = _hit_from_rg_line(tool, raw_line, request)
         except MalformedRgOutput:
@@ -549,6 +585,7 @@ def _read_rg_counts(
     if stdout is None:
         raise RuntimeError("rg stdout missing")
     for raw_line in stdout:
+        raise_if_cancelled()
         try:
             hit = _hit_from_rg_line(tool, raw_line, request, include_context=False)
         except MalformedRgOutput:

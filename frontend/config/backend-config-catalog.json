@@ -4,7 +4,7 @@
     {
       "id": "agent_config",
       "path": "agent_py_agent/config/agent_config.yaml",
-      "fieldCount": 294
+      "fieldCount": 301
     },
     {
       "id": "capability_config",
@@ -165,7 +165,7 @@
           {
             "key": "home_context_enabled",
             "label": "home_context_enabled（home context enabled）",
-            "description": "家目录运行时开关： - SimpleAgent 启动时固定创建 ~/.my-agent owner home 基础目录和 SOUL/USER/AGENTS/memory 入口文件。 - home_context_enabled: 每轮 prompt 允许读取轻量 home 上下文，例如 memory.md 和匹配 lesson。 - home_lesson_auto_read_limit: 每轮最多自动读取多少个匹配 lesson 文件；0 表示不自动读 lesson。 - home_lesson_stale_caveat_days: 召回的 lesson 超过多少天未更新就附加\"记忆可能过期\"提示；0 表示不加提示。 防止把陈旧记忆当现状：记忆反映写入时的事实，与当前代码/状态冲突时以现状为准。 - daily_memory_mirror_enabled: 写长期记忆时，同时按天追加一份到 owner memory/daily/YYYY-MM-DD.jsonl。 - run_task_workspace_enabled: 保存 run 在第一轮模型调用前自动创建 tasks/date/task_slug/output 和 work 等目录，并把路径作为软运行状态提示给模型。",
+            "description": "家目录运行时开关： - SimpleAgent 启动时固定创建 ~/.my-agent owner home 基础目录和 SOUL/USER/AGENTS/memory 入口文件。 - home_context_enabled: 每轮 prompt 允许读取轻量 home 上下文，例如 memory.md 和匹配 lesson。 - home_lesson_auto_read_limit: 每轮最多自动读取多少个匹配 lesson 文件；0 表示不自动读 lesson。 - home_lesson_stale_caveat_days: 召回的 lesson 超过多少天未更新就附加\"记忆可能过期\"提示；0 表示不加提示。 防止把陈旧记忆当现状：记忆反映写入时的事实，与当前代码/状态冲突时以现状为准。 - run_task_workspace_enabled: 保存 run 在第一轮模型调用前自动创建 tasks/date/task_slug/output 和 work 等目录，并把路径作为软运行状态提示给模型。",
             "type": "boolean",
             "defaultValue": true,
             "currentValue": true,
@@ -218,23 +218,6 @@
             "max": 3650
           },
           {
-            "key": "daily_memory_mirror_enabled",
-            "label": "daily_memory_mirror_enabled（daily memory mirror enabled）",
-            "description": "agent_config.yaml 中的 daily_memory_mirror_enabled 配置项。",
-            "type": "boolean",
-            "defaultValue": true,
-            "currentValue": true,
-            "category": "basic",
-            "categoryLabel": "基础信息",
-            "advanced": false,
-            "restartRequired": false,
-            "riskLevel": "low",
-            "riskWarning": "",
-            "requiresUnlock": false,
-            "source": "agent_config.yaml",
-            "order": 12
-          },
-          {
             "key": "run_task_workspace_enabled",
             "label": "run_task_workspace_enabled（run task workspace enabled）",
             "description": "agent_config.yaml 中的 run_task_workspace_enabled 配置项。",
@@ -249,7 +232,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 13
+            "order": 12
           },
           {
             "key": "workspace_task_path_template",
@@ -266,7 +249,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 14
+            "order": 13
           },
           {
             "key": "workspace_task_llm_title_enabled",
@@ -283,7 +266,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 15
+            "order": 14
           },
           {
             "key": "workspace_task_llm_title_input_chars",
@@ -300,7 +283,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 16,
+            "order": 15,
             "min": 0,
             "max": 2000000
           },
@@ -319,7 +302,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 62
+            "order": 74
           },
           {
             "key": "external_knowledge_directory_roots",
@@ -336,7 +319,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 63
+            "order": 75
           },
           {
             "key": "external_knowledge_api_sources",
@@ -353,7 +336,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 64
+            "order": 76
           },
           {
             "key": "external_knowledge_database_sources",
@@ -370,24 +353,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 65
-          },
-          {
-            "key": "enable_self_learning",
-            "label": "enable_self_learning（enable self learning）",
-            "description": "是否启用自学习功能 - false: 默认关闭，只按已有 prompt、记忆、工具和 skill 工作，不自动沉淀新经验 - true: 允许后续自学习模块在任务结束后生成“学习候选” - 注意：开启后也不应该直接改正式 skill；应先生成草稿，再由用户确认",
-            "type": "boolean",
-            "defaultValue": false,
-            "currentValue": false,
-            "category": "basic",
-            "categoryLabel": "基础信息",
-            "advanced": false,
-            "restartRequired": false,
-            "riskLevel": "low",
-            "riskWarning": "",
-            "requiresUnlock": false,
-            "source": "agent_config.yaml",
-            "order": 66
+            "order": 77
           },
           {
             "key": "prompt_files",
@@ -408,7 +374,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 67
+            "order": 78
           },
           {
             "key": "max_subagents",
@@ -425,7 +391,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 70,
+            "order": 81,
             "min": 0,
             "max": 1000000
           },
@@ -444,7 +410,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 94
+            "order": 105
           },
           {
             "key": "result_check_timeout_seconds",
@@ -461,7 +427,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 95,
+            "order": 106,
             "min": 0,
             "max": 3600
           },
@@ -480,7 +446,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 96,
+            "order": 107,
             "min": 0,
             "max": 1000000
           },
@@ -499,7 +465,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 97,
+            "order": 108,
             "min": 0,
             "max": 2000000
           },
@@ -518,7 +484,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 98,
+            "order": 109,
             "min": 0,
             "max": 1000000
           },
@@ -537,7 +503,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 99,
+            "order": 110,
             "min": 0,
             "max": 1000000
           },
@@ -556,7 +522,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 100,
+            "order": 111,
             "min": 0,
             "max": 1000000
           },
@@ -575,7 +541,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 101,
+            "order": 112,
             "min": 0,
             "max": 3600
           },
@@ -594,7 +560,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 102,
+            "order": 113,
             "min": 0,
             "max": 5000000
           },
@@ -613,7 +579,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 103,
+            "order": 114,
             "min": 0,
             "max": 1000000
           },
@@ -632,7 +598,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 129
+            "order": 140
           },
           {
             "key": "owner_agent_pool_max_agents",
@@ -649,7 +615,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 130,
+            "order": 141,
             "min": 0,
             "max": 1000000
           },
@@ -668,7 +634,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 131,
+            "order": 142,
             "min": 0,
             "max": 3600
           },
@@ -687,7 +653,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 132,
+            "order": 143,
             "min": 0,
             "max": 3600
           },
@@ -706,7 +672,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 153
+            "order": 164
           },
           {
             "key": "week_start",
@@ -723,7 +689,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 154
+            "order": 165
           },
           {
             "key": "conversation_workspace",
@@ -740,7 +706,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 156
+            "order": 167
           },
           {
             "key": "conversation_thread_list_limit",
@@ -757,7 +723,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 157,
+            "order": 168,
             "min": 0,
             "max": 1000000
           },
@@ -776,7 +742,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 158,
+            "order": 169,
             "min": 0,
             "max": 1000000
           },
@@ -795,7 +761,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 159,
+            "order": 170,
             "min": 0,
             "max": 1000000
           },
@@ -814,7 +780,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 160,
+            "order": 171,
             "min": 0,
             "max": 1000000
           },
@@ -833,7 +799,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 161,
+            "order": 172,
             "min": 0,
             "max": 1000000
           },
@@ -852,7 +818,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 162,
+            "order": 173,
             "min": 0,
             "max": 2000000
           },
@@ -871,7 +837,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 163,
+            "order": 174,
             "min": 0,
             "max": 1000000
           },
@@ -890,7 +856,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 164,
+            "order": 175,
             "min": 0,
             "max": 1000000
           },
@@ -909,7 +875,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 165,
+            "order": 176,
             "min": 0,
             "max": 1000000
           },
@@ -928,7 +894,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 166,
+            "order": 177,
             "min": 0,
             "max": 200000
           },
@@ -947,7 +913,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 167,
+            "order": 178,
             "min": 0,
             "max": 3600
           },
@@ -966,7 +932,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 168,
+            "order": 179,
             "min": 0,
             "max": 3600
           },
@@ -985,7 +951,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 169,
+            "order": 180,
             "min": 0,
             "max": 3600
           },
@@ -1004,7 +970,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 171
+            "order": 182
           },
           {
             "key": "collaboration_workspace",
@@ -1021,7 +987,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 172
+            "order": 183
           },
           {
             "key": "collaboration_auto_dispatch_max_runners",
@@ -1038,7 +1004,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 173,
+            "order": 184,
             "min": 0,
             "max": 1000000
           },
@@ -1057,7 +1023,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 174,
+            "order": 185,
             "min": 0,
             "max": 3600
           },
@@ -1076,7 +1042,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 176,
+            "order": 187,
             "min": 0,
             "max": 3600
           },
@@ -1095,7 +1061,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 192,
+            "order": 203,
             "choices": [
               "debug",
               "info",
@@ -1119,7 +1085,7 @@
             "riskWarning": "会改变运行边界或加载来源，建议只在明确知道影响时修改。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 193
+            "order": 204
           },
           {
             "key": "extension_plugins",
@@ -1136,7 +1102,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 194
+            "order": 205
           },
           {
             "key": "model_context_window_tokens",
@@ -1153,7 +1119,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 201,
+            "order": 212,
             "min": 0,
             "max": 200000
           },
@@ -1172,7 +1138,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 207,
+            "order": 218,
             "min": 0,
             "max": 1000000
           },
@@ -1191,7 +1157,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 210,
+            "order": 221,
             "min": 0,
             "max": 3600
           },
@@ -1210,7 +1176,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 212
+            "order": 223
           },
           {
             "key": "path_access_mode",
@@ -1227,7 +1193,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 231
+            "order": 238
           },
           {
             "key": "path_dangerous_roots",
@@ -1276,7 +1242,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 232
+            "order": 239
           },
           {
             "key": "access_mode",
@@ -1293,7 +1259,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 233
+            "order": 240
           },
           {
             "key": "mcp_servers",
@@ -1310,7 +1276,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 253
+            "order": 260
           },
           {
             "key": "lsp_servers",
@@ -1327,7 +1293,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 254
+            "order": 261
           },
           {
             "key": "vision_api_base",
@@ -1344,7 +1310,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 255
+            "order": 262
           },
           {
             "key": "vision_api_key",
@@ -1361,7 +1327,7 @@
             "riskWarning": "密钥或凭证字段，保存前确认不要写入真实公开仓库。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 256
+            "order": 263
           },
           {
             "key": "vision_model_name",
@@ -1378,7 +1344,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 257
+            "order": 264
           },
           {
             "key": "vision_anthropic_version",
@@ -1395,7 +1361,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 258
+            "order": 265
           },
           {
             "key": "vision_request_timeout",
@@ -1412,7 +1378,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 259,
+            "order": 266,
             "min": 0,
             "max": 3600
           },
@@ -1431,7 +1397,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 260,
+            "order": 267,
             "min": 0,
             "max": 200000
           },
@@ -1450,7 +1416,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 263,
+            "order": 270,
             "min": 0,
             "max": 1000000
           },
@@ -1469,7 +1435,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 264,
+            "order": 271,
             "min": 0,
             "max": 2000000
           },
@@ -1488,7 +1454,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 265,
+            "order": 272,
             "min": 0,
             "max": 2000000
           }
@@ -1515,7 +1481,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 17,
+            "order": 16,
             "choices": [
               "echo",
               "openai_compatible",
@@ -1537,7 +1503,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 116
+            "order": 127
           },
           {
             "key": "auto_bench_model_on_first_use",
@@ -1554,7 +1520,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 117
+            "order": 128
           },
           {
             "key": "api_base",
@@ -1571,7 +1537,7 @@
             "riskWarning": "会改变运行边界或加载来源，建议只在明确知道影响时修改。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 195
+            "order": 206
           },
           {
             "key": "api_key",
@@ -1588,7 +1554,7 @@
             "riskWarning": "密钥或凭证字段，保存前确认不要写入真实公开仓库。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 196
+            "order": 207
           },
           {
             "key": "api_key_env",
@@ -1605,7 +1571,7 @@
             "riskWarning": "密钥或凭证字段，保存前确认不要写入真实公开仓库。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 197
+            "order": 208
           },
           {
             "key": "model_name",
@@ -1622,7 +1588,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 198
+            "order": 209
           },
           {
             "key": "request_timeout",
@@ -1639,7 +1605,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 199,
+            "order": 210,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -1659,7 +1625,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 200,
+            "order": 211,
             "unit": "tokens",
             "min": 0,
             "max": 200000
@@ -1679,7 +1645,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 202,
+            "order": 213,
             "min": 0,
             "max": 2
           },
@@ -1698,7 +1664,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 203
+            "order": 214
           }
         ]
       },
@@ -1723,7 +1689,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 204
+            "order": 215
           },
           {
             "key": "stream_enabled",
@@ -1740,7 +1706,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 205
+            "order": 216
           },
           {
             "key": "max_tool_rounds",
@@ -1757,7 +1723,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 206,
+            "order": 217,
             "min": 0,
             "max": 1000000
           },
@@ -1776,7 +1742,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 208,
+            "order": 219,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -1796,7 +1762,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 209,
+            "order": 220,
             "min": 0,
             "max": 1000000
           },
@@ -1815,7 +1781,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 213
+            "order": 224
           },
           {
             "key": "tool_artifact_read_budget_window_seconds",
@@ -1832,7 +1798,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 214,
+            "order": 225,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -1852,7 +1818,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 215,
+            "order": 226,
             "min": 0,
             "max": 2000000
           },
@@ -1871,7 +1837,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 216,
+            "order": 227,
             "min": 0,
             "max": 2000000
           },
@@ -1890,7 +1856,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 217,
+            "order": 228,
             "min": 0,
             "max": 2000000
           },
@@ -1909,7 +1875,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 218
+            "order": 229
           },
           {
             "key": "tool_context_microcompact_min_chars",
@@ -1926,7 +1892,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 219,
+            "order": 230,
             "min": 0,
             "max": 2000000
           },
@@ -1945,83 +1911,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 220
-          },
-          {
-            "key": "tool_payload_max_fields",
-            "label": "tool_payload_max_fields（tool payload max fields）",
-            "description": "agent_config.yaml 中的 tool_payload_max_fields 配置项。",
-            "type": "number",
-            "defaultValue": 64,
-            "currentValue": 64,
-            "category": "tools",
-            "categoryLabel": "工具配置",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "low",
-            "riskWarning": "",
-            "requiresUnlock": false,
-            "source": "agent_config.yaml",
-            "order": 221,
-            "min": 0,
-            "max": 1000000
-          },
-          {
-            "key": "tool_payload_max_field_name_chars",
-            "label": "tool_payload_max_field_name_chars（tool payload max field name chars）",
-            "description": "agent_config.yaml 中的 tool_payload_max_field_name_chars 配置项。",
-            "type": "number",
-            "defaultValue": 128,
-            "currentValue": 128,
-            "category": "tools",
-            "categoryLabel": "工具配置",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "low",
-            "riskWarning": "",
-            "requiresUnlock": false,
-            "source": "agent_config.yaml",
-            "order": 222,
-            "min": 0,
-            "max": 2000000
-          },
-          {
-            "key": "tool_payload_max_name_chars",
-            "label": "tool_payload_max_name_chars（tool payload max name chars）",
-            "description": "agent_config.yaml 中的 tool_payload_max_name_chars 配置项。",
-            "type": "number",
-            "defaultValue": 128,
-            "currentValue": 128,
-            "category": "tools",
-            "categoryLabel": "工具配置",
-            "advanced": true,
-            "restartRequired": false,
-            "riskLevel": "low",
-            "riskWarning": "",
-            "requiresUnlock": false,
-            "source": "agent_config.yaml",
-            "order": 223,
-            "min": 0,
-            "max": 2000000
-          },
-          {
-            "key": "tool_payload_parse_error_raw_chars",
-            "label": "tool_payload_parse_error_raw_chars（tool payload parse error raw chars）",
-            "description": "agent_config.yaml 中的 tool_payload_parse_error_raw_chars 配置项。",
-            "type": "number",
-            "defaultValue": 1000,
-            "currentValue": 1000,
-            "category": "tools",
-            "categoryLabel": "工具配置",
-            "advanced": false,
-            "restartRequired": false,
-            "riskLevel": "low",
-            "riskWarning": "",
-            "requiresUnlock": false,
-            "source": "agent_config.yaml",
-            "order": 224,
-            "min": 0,
-            "max": 2000000
+            "order": 231
           },
           {
             "key": "tool_read_max_chars",
@@ -2038,7 +1928,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 225,
+            "order": 232,
             "min": 0,
             "max": 2000000
           },
@@ -2057,7 +1947,7 @@
             "riskWarning": "放宽工具边界会影响模型调用成本和执行风险。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 226,
+            "order": 233,
             "min": 0,
             "max": 2000000
           },
@@ -2076,7 +1966,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 227,
+            "order": 234,
             "min": 0,
             "max": 1000000
           },
@@ -2095,7 +1985,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 228,
+            "order": 235,
             "min": 0,
             "max": 1000000
           },
@@ -2114,7 +2004,7 @@
             "riskWarning": "放宽工具边界会影响模型调用成本和执行风险。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 229,
+            "order": 236,
             "min": 0,
             "max": 2000000
           },
@@ -2133,7 +2023,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 230,
+            "order": 237,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -2153,7 +2043,7 @@
             "riskWarning": "放宽工具边界会影响模型调用成本和执行风险。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 234,
+            "order": 241,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -2173,7 +2063,7 @@
             "riskWarning": "放宽工具边界会影响模型调用成本和执行风险。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 235,
+            "order": 242,
             "min": 0,
             "max": 2000000
           },
@@ -2192,7 +2082,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 236,
+            "order": 243,
             "min": 0,
             "max": 1000000
           },
@@ -2211,7 +2101,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 237,
+            "order": 244,
             "choices": [
               "compact",
               "full",
@@ -2234,7 +2124,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 238
+            "order": 245
           },
           {
             "key": "tool_catalog_categories",
@@ -2251,7 +2141,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 239
+            "order": 246
           },
           {
             "key": "tool_catalog_deferred_categories",
@@ -2276,7 +2166,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 240
+            "order": 247
           },
           {
             "key": "tool_catalog_include_examples",
@@ -2293,7 +2183,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 241
+            "order": 248
           },
           {
             "key": "tool_catalog_entry_max_chars",
@@ -2310,7 +2200,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 242,
+            "order": 249,
             "min": 0,
             "max": 2000000
           },
@@ -2329,7 +2219,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 243
+            "order": 250
           },
           {
             "key": "tool_detail_max_chars",
@@ -2346,7 +2236,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 244,
+            "order": 251,
             "min": 0,
             "max": 2000000
           },
@@ -2365,7 +2255,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 245,
+            "order": 252,
             "min": 0,
             "max": 1000000
           },
@@ -2384,7 +2274,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 246
+            "order": 253
           },
           {
             "key": "tool_embedding_model",
@@ -2401,7 +2291,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 247
+            "order": 254
           },
           {
             "key": "tool_embedding_api_base",
@@ -2418,7 +2308,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 248
+            "order": 255
           },
           {
             "key": "tool_embedding_api_key",
@@ -2435,7 +2325,7 @@
             "riskWarning": "密钥或凭证字段，保存前确认不要写入真实公开仓库。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 249
+            "order": 256
           },
           {
             "key": "tool_embedding_api_key_env",
@@ -2452,12 +2342,12 @@
             "riskWarning": "密钥或凭证字段，保存前确认不要写入真实公开仓库。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 250
+            "order": 257
           },
           {
             "key": "tool_protocol",
             "label": "tool_protocol（tool protocol）",
-            "description": "工具调用协议：native=在 anthropic_compatible 端点用模型原生 tool_use（默认，已全场景真机验证： 单代理/子代理协作 × 强中弱模型 M3/M2.7/mimo 真实任务全过，治本解决弱模型草草完成/幻觉的协议层根因）。 text=旧 [TOOL_CALL] 文本协议（保底回退，出问题可改回 text）。 native 支持 model_backend=anthropic_compatible / openai_compatible，其余后端自动回退 text。",
+            "description": "工具调用协议在一次 run 开始前固定。native 会先探测当前 provider + endpoint + model + stream 是否支持原生 tool_use；text 只用于明确配置的 非原生端点或协议调试。一个 run 内不会切换协议，native 失败也不会由 text 中途接管。",
             "type": "string",
             "defaultValue": "native",
             "currentValue": "native",
@@ -2469,12 +2359,12 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 251
+            "order": 258
           },
           {
             "key": "tool_protocol_text_models",
             "label": "tool_protocol_text_models（tool protocol text models）",
-            "description": "按模型能力降级（审计 #8）：列出\"不支持 native tool_use\"的模型名子串，命中即对该模型强制回退 text 协议，防自选非 reasoning 模型上 native 静默失效（0 工具调用 + 幻觉完成）。空=不降级（默认行为不变）。 例：tool_protocol_text_models: [\"text-01\", \"minimax\"]",
+            "description": "运维人员已实际确认“不支持 native tool_use”的模型名子串。命中后只在 run 开始时选择 隔离 text adapter，不是运行中 fallback。默认空；当全部生产端点均支持 native 后， 应保持为空并删除仍依赖 text 的部署配置。例：tool_protocol_text_models: [\"text-only-model\"]",
             "type": "string_list",
             "defaultValue": [],
             "currentValue": [],
@@ -2486,7 +2376,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 252
+            "order": 259
           }
         ]
       },
@@ -2511,7 +2401,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 18
+            "order": 17
           },
           {
             "key": "local_store_path",
@@ -2528,7 +2418,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 19
+            "order": 18
           },
           {
             "key": "local_store_files_dir",
@@ -2545,7 +2435,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 20
+            "order": 19
           },
           {
             "key": "local_store_events_path",
@@ -2562,7 +2452,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 21
+            "order": 20
           },
           {
             "key": "local_store_fts_enabled",
@@ -2579,7 +2469,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 22
+            "order": 21
           },
           {
             "key": "memory_top_k",
@@ -2596,12 +2486,12 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 23
+            "order": 22
           },
           {
-            "key": "auto_save_memory",
-            "label": "auto_save_memory（auto save memory）",
-            "description": "是否自动把用户输入和模型回复写入记忆",
+            "key": "memory_curator_enabled",
+            "label": "memory_curator_enabled（memory curator enabled）",
+            "description": "- batch_message_limit: 单批最多读取多少条 ConversationStore 消息。 - max_input_chars: 单批模型输入字符上限；长工具输出只传预览和引用。 - timeout_seconds: 单次后台模型调用超时秒数。 - max_retries: Schema、超时或模型错误后的有界重试次数；失败不推进游标。 - daily_finalize_hour: owner 当地时间每天收尾小时，取值 0-23。 - auto_promotion_policy: 自动晋升机器策略版本；conservative_v1 只允许精确证据、无冲突的新长期事实。 - lesson_min_occurrences: 普通教训晋升所需最少独立观察次数，默认 2。 - hot_min_occurrences: 已接受教训晋升 HOT 所需最少独立观察次数，默认 3。",
             "type": "boolean",
             "defaultValue": true,
             "currentValue": true,
@@ -2613,7 +2503,238 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
+            "order": 23
+          },
+          {
+            "key": "memory_curator_provider",
+            "label": "memory_curator_provider（memory curator provider）",
+            "description": "agent_config.yaml 中的 memory_curator_provider 配置项。",
+            "type": "string",
+            "defaultValue": "auto",
+            "currentValue": "auto",
+            "category": "memory",
+            "categoryLabel": "记忆配置",
+            "advanced": false,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
             "order": 24
+          },
+          {
+            "key": "memory_curator_model",
+            "label": "memory_curator_model（memory curator model）",
+            "description": "agent_config.yaml 中的 memory_curator_model 配置项。",
+            "type": "string",
+            "defaultValue": "",
+            "currentValue": "",
+            "category": "memory",
+            "categoryLabel": "记忆配置",
+            "advanced": false,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 25
+          },
+          {
+            "key": "memory_curator_interval_seconds",
+            "label": "memory_curator_interval_seconds（memory curator interval seconds）",
+            "description": "agent_config.yaml 中的 memory_curator_interval_seconds 配置项。",
+            "type": "number",
+            "defaultValue": 10800,
+            "currentValue": 10800,
+            "category": "memory",
+            "categoryLabel": "记忆配置",
+            "advanced": false,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 26,
+            "min": 0,
+            "max": 10800
+          },
+          {
+            "key": "memory_curator_turn_threshold",
+            "label": "memory_curator_turn_threshold（memory curator turn threshold）",
+            "description": "agent_config.yaml 中的 memory_curator_turn_threshold 配置项。",
+            "type": "number",
+            "defaultValue": 10,
+            "currentValue": 10,
+            "category": "memory",
+            "categoryLabel": "记忆配置",
+            "advanced": false,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 27
+          },
+          {
+            "key": "memory_curator_batch_message_limit",
+            "label": "memory_curator_batch_message_limit（memory curator batch message limit）",
+            "description": "agent_config.yaml 中的 memory_curator_batch_message_limit 配置项。",
+            "type": "number",
+            "defaultValue": 80,
+            "currentValue": 80,
+            "category": "memory",
+            "categoryLabel": "记忆配置",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 28,
+            "min": 0,
+            "max": 1000000
+          },
+          {
+            "key": "memory_curator_max_input_chars",
+            "label": "memory_curator_max_input_chars（memory curator max input chars）",
+            "description": "agent_config.yaml 中的 memory_curator_max_input_chars 配置项。",
+            "type": "number",
+            "defaultValue": 40000,
+            "currentValue": 40000,
+            "category": "memory",
+            "categoryLabel": "记忆配置",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 29,
+            "min": 0,
+            "max": 2000000
+          },
+          {
+            "key": "memory_curator_timeout_seconds",
+            "label": "memory_curator_timeout_seconds（memory curator timeout seconds）",
+            "description": "agent_config.yaml 中的 memory_curator_timeout_seconds 配置项。",
+            "type": "number",
+            "defaultValue": 90,
+            "currentValue": 90,
+            "category": "memory",
+            "categoryLabel": "记忆配置",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 30,
+            "min": 0,
+            "max": 3600
+          },
+          {
+            "key": "memory_curator_max_retries",
+            "label": "memory_curator_max_retries（memory curator max retries）",
+            "description": "agent_config.yaml 中的 memory_curator_max_retries 配置项。",
+            "type": "number",
+            "defaultValue": 1,
+            "currentValue": 1,
+            "category": "memory",
+            "categoryLabel": "记忆配置",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 31,
+            "min": 0,
+            "max": 1000000
+          },
+          {
+            "key": "memory_curator_daily_finalize_hour",
+            "label": "memory_curator_daily_finalize_hour（memory curator daily finalize hour）",
+            "description": "agent_config.yaml 中的 memory_curator_daily_finalize_hour 配置项。",
+            "type": "number",
+            "defaultValue": 23,
+            "currentValue": 23,
+            "category": "memory",
+            "categoryLabel": "记忆配置",
+            "advanced": false,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 32
+          },
+          {
+            "key": "memory_curator_auto_promotion_policy",
+            "label": "memory_curator_auto_promotion_policy（memory curator auto promotion policy）",
+            "description": "agent_config.yaml 中的 memory_curator_auto_promotion_policy 配置项。",
+            "type": "string",
+            "defaultValue": "conservative_v1",
+            "currentValue": "conservative_v1",
+            "category": "memory",
+            "categoryLabel": "记忆配置",
+            "advanced": false,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 33
+          },
+          {
+            "key": "memory_lesson_min_occurrences",
+            "label": "memory_lesson_min_occurrences（memory lesson min occurrences）",
+            "description": "agent_config.yaml 中的 memory_lesson_min_occurrences 配置项。",
+            "type": "number",
+            "defaultValue": 2,
+            "currentValue": 2,
+            "category": "memory",
+            "categoryLabel": "记忆配置",
+            "advanced": false,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 34
+          },
+          {
+            "key": "memory_hot_min_occurrences",
+            "label": "memory_hot_min_occurrences（memory hot min occurrences）",
+            "description": "agent_config.yaml 中的 memory_hot_min_occurrences 配置项。",
+            "type": "number",
+            "defaultValue": 3,
+            "currentValue": 3,
+            "category": "memory",
+            "categoryLabel": "记忆配置",
+            "advanced": false,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 35
+          },
+          {
+            "key": "auto_save_memory",
+            "label": "auto_save_memory（auto save memory）",
+            "description": "是否自动持久化运行归档、恢复事实和 task workspace。 该字段不把普通 user/assistant 正文写入正式 long_term；完整对话由 ConversationStore 掌权， Daily/Candidate 只由统一 Memory Curator 生成。",
+            "type": "boolean",
+            "defaultValue": true,
+            "currentValue": true,
+            "category": "memory",
+            "categoryLabel": "记忆配置",
+            "advanced": false,
+            "restartRequired": false,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 36
           },
           {
             "key": "memory_semantic_recall",
@@ -2630,7 +2751,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 25
+            "order": 37
           },
           {
             "key": "memory_embedding_model",
@@ -2647,7 +2768,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 26
+            "order": 38
           },
           {
             "key": "memory_embedding_api_base",
@@ -2664,7 +2785,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 27
+            "order": 39
           },
           {
             "key": "memory_embedding_api_key",
@@ -2681,7 +2802,7 @@
             "riskWarning": "密钥或凭证字段，保存前确认不要写入真实公开仓库。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 28
+            "order": 40
           },
           {
             "key": "memory_embedding_api_key_env",
@@ -2698,7 +2819,7 @@
             "riskWarning": "密钥或凭证字段，保存前确认不要写入真实公开仓库。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 29
+            "order": 41
           },
           {
             "key": "memory_archive_level",
@@ -2715,7 +2836,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 30
+            "order": 42
           },
           {
             "key": "memory_hook_enabled",
@@ -2732,7 +2853,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 31
+            "order": 43
           },
           {
             "key": "memory_hook_archive_level",
@@ -2749,7 +2870,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 32
+            "order": 44
           },
           {
             "key": "memory_hook_retention_days",
@@ -2766,7 +2887,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 33,
+            "order": 45,
             "unit": "天",
             "min": 0,
             "max": 3650
@@ -2786,7 +2907,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 34
+            "order": 46
           },
           {
             "key": "memory_rule_routing_mode",
@@ -2803,7 +2924,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 35,
+            "order": 47,
             "choices": [
               "off",
               "soft",
@@ -2825,7 +2946,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 36,
+            "order": 48,
             "min": 0,
             "max": 1000000
           },
@@ -2844,7 +2965,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 37
+            "order": 49
           },
           {
             "key": "memory_resume_auto_context_enabled",
@@ -2861,7 +2982,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 38
+            "order": 50
           },
           {
             "key": "memory_resume_auto_context_mode",
@@ -2878,7 +2999,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 39,
+            "order": 51,
             "choices": [
               "off",
               "trigger",
@@ -2900,7 +3021,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 40,
+            "order": 52,
             "min": 0,
             "max": 1000000
           },
@@ -2919,7 +3040,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 41
+            "order": 53
           },
           {
             "key": "memory_compact_auto_continue_max_depth",
@@ -2936,7 +3057,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 42,
+            "order": 54,
             "min": 0,
             "max": 1000000
           },
@@ -2955,7 +3076,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 43
+            "order": 55
           },
           {
             "key": "memory_compact_semantic_summary_protect_head",
@@ -2972,7 +3093,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 44
+            "order": 56
           },
           {
             "key": "memory_compact_semantic_summary_protect_tail",
@@ -2989,7 +3110,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 45
+            "order": 57
           },
           {
             "key": "memory_compact_semantic_summary_min_middle",
@@ -3006,7 +3127,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 46
+            "order": 58
           },
           {
             "key": "memory_compact_semantic_summary_timeout_seconds",
@@ -3023,7 +3144,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 47,
+            "order": 59,
             "min": 0,
             "max": 3600
           },
@@ -3042,7 +3163,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 48,
+            "order": 60,
             "min": 0,
             "max": 2000000
           },
@@ -3061,7 +3182,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 49,
+            "order": 61,
             "min": 0,
             "max": 2000000
           },
@@ -3080,7 +3201,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 50,
+            "order": 62,
             "min": 0,
             "max": 2000000
           },
@@ -3099,7 +3220,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 51,
+            "order": 63,
             "min": 0,
             "max": 2000000
           },
@@ -3118,7 +3239,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 52,
+            "order": 64,
             "min": 0,
             "max": 2000000
           },
@@ -3137,7 +3258,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 53,
+            "order": 65,
             "min": 0,
             "max": 2000000
           },
@@ -3156,7 +3277,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 54,
+            "order": 66,
             "min": 0,
             "max": 2000000
           },
@@ -3175,7 +3296,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 55,
+            "order": 67,
             "min": 0,
             "max": 1000000
           },
@@ -3194,7 +3315,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 56,
+            "order": 68,
             "min": 0,
             "max": 1000000
           },
@@ -3213,7 +3334,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 57
+            "order": 69
           },
           {
             "key": "memory_query_content_preview_chars",
@@ -3230,7 +3351,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 58,
+            "order": 70,
             "min": 0,
             "max": 2000000
           },
@@ -3249,7 +3370,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 59,
+            "order": 71,
             "min": 0,
             "max": 1000000
           },
@@ -3268,7 +3389,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 60,
+            "order": 72,
             "min": 0,
             "max": 1000000
           },
@@ -3287,7 +3408,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 61,
+            "order": 73,
             "min": 0,
             "max": 1000000
           }
@@ -3314,7 +3435,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 68
+            "order": 79
           },
           {
             "key": "subagent_mode",
@@ -3331,7 +3452,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 69
+            "order": 80
           },
           {
             "key": "task_max_subagents",
@@ -3348,7 +3469,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 71,
+            "order": 82,
             "min": 0,
             "max": 1000000
           },
@@ -3367,7 +3488,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 72,
+            "order": 83,
             "min": 0,
             "max": 1000000
           },
@@ -3386,7 +3507,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 73
+            "order": 84
           },
           {
             "key": "subagent_board_limit",
@@ -3403,7 +3524,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 74,
+            "order": 85,
             "min": 0,
             "max": 1000000
           },
@@ -3422,7 +3543,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 75
+            "order": 86
           },
           {
             "key": "subagent_role_template_dirs",
@@ -3439,7 +3560,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 76
+            "order": 87
           },
           {
             "key": "subagent_spawn_default_count",
@@ -3456,7 +3577,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 77,
+            "order": 88,
             "min": 0,
             "max": 1000000
           },
@@ -3475,7 +3596,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 78,
+            "order": 89,
             "min": 0,
             "max": 1000000
           },
@@ -3494,7 +3615,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 79,
+            "order": 90,
             "min": 0,
             "max": 1000000
           },
@@ -3513,7 +3634,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 80,
+            "order": 91,
             "min": 0,
             "max": 1000000
           },
@@ -3532,7 +3653,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 81,
+            "order": 92,
             "min": 0,
             "max": 1000000
           },
@@ -3551,7 +3672,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 82,
+            "order": 93,
             "min": 0,
             "max": 1000000
           },
@@ -3570,7 +3691,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 83,
+            "order": 94,
             "min": 0,
             "max": 1000000
           },
@@ -3589,7 +3710,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 84,
+            "order": 95,
             "min": 0,
             "max": 1000000
           },
@@ -3608,7 +3729,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 85,
+            "order": 96,
             "min": 0,
             "max": 2000000
           },
@@ -3627,7 +3748,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 86,
+            "order": 97,
             "min": 0,
             "max": 2000000
           },
@@ -3646,7 +3767,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 87
+            "order": 98
           },
           {
             "key": "subagent_memory_retention_policy",
@@ -3663,7 +3784,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 88
+            "order": 99
           },
           {
             "key": "subagent_memory_delete_after_days",
@@ -3680,7 +3801,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 89,
+            "order": 100,
             "min": 0,
             "max": 3650
           },
@@ -3699,7 +3820,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 90
+            "order": 101
           },
           {
             "key": "max_auto_split_depth",
@@ -3716,7 +3837,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 114,
+            "order": 125,
             "min": 0,
             "max": 1000000
           },
@@ -3735,7 +3856,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 115,
+            "order": 126,
             "min": 0,
             "max": 1000000
           },
@@ -3754,7 +3875,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。",
             "requiresUnlock": true,
             "source": "agent_config.yaml",
-            "order": 170,
+            "order": 181,
             "min": 0,
             "max": 3600
           }
@@ -3781,7 +3902,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 104,
+            "order": 115,
             "choices": [
               "auto",
               "off",
@@ -3804,7 +3925,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 105,
+            "order": 116,
             "choices": [
               "auto",
               "manual",
@@ -3826,7 +3947,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 106,
+            "order": 117,
             "choices": [
               "auto"
             ]
@@ -3846,7 +3967,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 107,
+            "order": 118,
             "choices": [
               "auto"
             ]
@@ -3866,7 +3987,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 108,
+            "order": 119,
             "choices": [
               "off",
               "auto"
@@ -3889,7 +4010,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 109,
+            "order": 120,
             "min": 0,
             "max": 3600
           },
@@ -3908,7 +4029,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 110
+            "order": 121
           },
           {
             "key": "dynamic_timeout_safety_margin",
@@ -3925,7 +4046,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 111,
+            "order": 122,
             "unit": "倍",
             "min": 0,
             "max": 3600
@@ -3945,7 +4066,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 112,
+            "order": 123,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -3965,7 +4086,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 113,
+            "order": 124,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -3985,7 +4106,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 118
+            "order": 129
           },
           {
             "key": "gateway_heartbeat_interval",
@@ -4002,7 +4123,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 119,
+            "order": 130,
             "unit": "秒"
           },
           {
@@ -4020,7 +4141,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 120,
+            "order": 131,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -4040,7 +4161,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 121,
+            "order": 132,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -4060,7 +4181,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 122,
+            "order": 133,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -4080,7 +4201,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 123
+            "order": 134
           },
           {
             "key": "gateway_user_inflight_limit",
@@ -4097,7 +4218,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 124,
+            "order": 135,
             "min": 0,
             "max": 1000000
           },
@@ -4116,7 +4237,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 125,
+            "order": 136,
             "min": 0,
             "max": 1000000
           },
@@ -4135,7 +4256,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 126
+            "order": 137
           },
           {
             "key": "gateway_processing_timeout_seconds",
@@ -4152,7 +4273,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 127,
+            "order": 138,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -4172,7 +4293,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 128,
+            "order": 139,
             "min": 0,
             "max": 1000000
           },
@@ -4191,7 +4312,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 133,
+            "order": 144,
             "min": 0,
             "max": 3600
           },
@@ -4210,7 +4331,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 134,
+            "order": 145,
             "min": 0,
             "max": 3600
           },
@@ -4229,7 +4350,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 135,
+            "order": 146,
             "min": 0,
             "max": 3600
           },
@@ -4248,7 +4369,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 136,
+            "order": 147,
             "min": 0,
             "max": 3600
           },
@@ -4267,7 +4388,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 137,
+            "order": 148,
             "min": 0,
             "max": 65535
           },
@@ -4286,7 +4407,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 138
+            "order": 149
           },
           {
             "key": "gateway_bind_host",
@@ -4303,7 +4424,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 139
+            "order": 150
           },
           {
             "key": "gateway_auth_token",
@@ -4320,7 +4441,7 @@
             "riskWarning": "密钥或凭证字段，保存前确认不要写入真实公开仓库。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 140
+            "order": 151
           },
           {
             "key": "daemon_planner",
@@ -4337,7 +4458,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 179
+            "order": 190
           },
           {
             "key": "daemon_mutate_state",
@@ -4354,7 +4475,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 180
+            "order": 191
           },
           {
             "key": "daemon_start_runners",
@@ -4371,7 +4492,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 181
+            "order": 192
           },
           {
             "key": "daemon_interval",
@@ -4388,7 +4509,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 182
+            "order": 193
           },
           {
             "key": "daemon_max_runners",
@@ -4405,7 +4526,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 183,
+            "order": 194,
             "choices": [
               "auto"
             ],
@@ -4427,7 +4548,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 184,
+            "order": 195,
             "min": 0,
             "max": 1000000
           },
@@ -4446,7 +4567,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 185,
+            "order": 196,
             "min": 0,
             "max": 1000000
           },
@@ -4465,7 +4586,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 186,
+            "order": 197,
             "min": 0,
             "max": 1000000
           },
@@ -4484,7 +4605,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 187
+            "order": 198
           },
           {
             "key": "daemon_reviewer",
@@ -4501,7 +4622,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 188,
+            "order": 199,
             "choices": [
               "parent-daemon"
             ]
@@ -4521,7 +4642,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 189
+            "order": 200
           },
           {
             "key": "lease_heartbeat_interval_seconds",
@@ -4538,7 +4659,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 190,
+            "order": 201,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -4558,7 +4679,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 191,
+            "order": 202,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -4578,7 +4699,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 211,
+            "order": 222,
             "min": 0,
             "max": 3600
           },
@@ -4597,7 +4718,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 284,
+            "order": 291,
             "min": 0,
             "max": 1000000
           },
@@ -4616,7 +4737,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 285
+            "order": 292
           },
           {
             "key": "dispatch_idle_interval",
@@ -4633,7 +4754,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 286
+            "order": 293
           },
           {
             "key": "dispatch_default_max_runners",
@@ -4650,7 +4771,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 287,
+            "order": 294,
             "min": 0,
             "max": 1000000
           },
@@ -4669,7 +4790,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 288,
+            "order": 295,
             "min": 0,
             "max": 1000000
           },
@@ -4688,7 +4809,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 289
+            "order": 296
           },
           {
             "key": "dispatch_pending_runner_scan_limit",
@@ -4705,7 +4826,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 290,
+            "order": 297,
             "min": 0,
             "max": 1000000
           }
@@ -4732,7 +4853,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 141
+            "order": 152
           },
           {
             "key": "feishu_app_id",
@@ -4749,7 +4870,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 142
+            "order": 153
           },
           {
             "key": "feishu_app_secret",
@@ -4766,7 +4887,7 @@
             "riskWarning": "密钥或凭证字段，保存前确认不要写入真实公开仓库。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 143
+            "order": 154
           },
           {
             "key": "feishu_verification_token",
@@ -4783,7 +4904,7 @@
             "riskWarning": "密钥或凭证字段，保存前确认不要写入真实公开仓库。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 144
+            "order": 155
           },
           {
             "key": "feishu_encrypt_key",
@@ -4800,7 +4921,7 @@
             "riskWarning": "密钥或凭证字段，保存前确认不要写入真实公开仓库。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 145
+            "order": 156
           },
           {
             "key": "feishu_callback_port",
@@ -4817,7 +4938,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 146,
+            "order": 157,
             "min": 0,
             "max": 65535
           },
@@ -4836,7 +4957,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 147
+            "order": 158
           },
           {
             "key": "feishu_ws_proxy",
@@ -4853,7 +4974,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 148
+            "order": 159
           },
           {
             "key": "feishu_session_lock_enabled",
@@ -4870,7 +4991,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 149
+            "order": 160
           },
           {
             "key": "feishu_personal_idle_lock_seconds",
@@ -4887,7 +5008,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 150,
+            "order": 161,
             "min": 0,
             "max": 10800
           },
@@ -4906,7 +5027,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 151
+            "order": 162
           },
           {
             "key": "qq_app_secret",
@@ -4923,7 +5044,7 @@
             "riskWarning": "密钥或凭证字段，保存前确认不要写入真实公开仓库。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 152
+            "order": 163
           },
           {
             "key": "session_workspace",
@@ -4940,7 +5061,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 155
+            "order": 166
           }
         ]
       },
@@ -4965,7 +5086,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 91
+            "order": 102
           },
           {
             "key": "auth_enabled",
@@ -4982,7 +5103,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 92
+            "order": 103
           },
           {
             "key": "admin_user_id",
@@ -4999,7 +5120,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 93
+            "order": 104
           },
           {
             "key": "concurrency_lock_enabled",
@@ -5016,7 +5137,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 175
+            "order": 186
           },
           {
             "key": "audit_enabled",
@@ -5033,7 +5154,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 177
+            "order": 188
           },
           {
             "key": "audit_log_path",
@@ -5050,7 +5171,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 178
+            "order": 189
           },
           {
             "key": "watchdog_enabled",
@@ -5067,7 +5188,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 291
+            "order": 298
           },
           {
             "key": "watchdog_interval",
@@ -5084,7 +5205,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 292
+            "order": 299
           },
           {
             "key": "watchdog_max_restarts",
@@ -5101,7 +5222,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 293,
+            "order": 300,
             "min": 0,
             "max": 1000000
           },
@@ -5120,7 +5241,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 294
+            "order": 301
           }
         ]
       },
@@ -5145,7 +5266,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 261,
+            "order": 268,
             "min": 0,
             "max": 1000000
           },
@@ -5164,7 +5285,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 262,
+            "order": 269,
             "min": 0,
             "max": 2000000
           },
@@ -5183,7 +5304,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 266,
+            "order": 273,
             "min": 0,
             "max": 2000000
           },
@@ -5202,7 +5323,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 267
+            "order": 274
           },
           {
             "key": "chat_collapse_preview_chars",
@@ -5219,7 +5340,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 268,
+            "order": 275,
             "min": 0,
             "max": 2000000
           },
@@ -5238,7 +5359,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 269,
+            "order": 276,
             "min": 0,
             "max": 2000000
           },
@@ -5257,7 +5378,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 270
+            "order": 277
           },
           {
             "key": "cli_status_limit",
@@ -5274,7 +5395,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 271,
+            "order": 278,
             "min": 0,
             "max": 1000000
           },
@@ -5293,7 +5414,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 272,
+            "order": 279,
             "min": 0,
             "max": 1000000
           },
@@ -5312,7 +5433,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 273,
+            "order": 280,
             "min": 0,
             "max": 1000000
           },
@@ -5331,7 +5452,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 274,
+            "order": 281,
             "min": 0,
             "max": 1000000
           },
@@ -5350,7 +5471,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 275,
+            "order": 282,
             "min": 0,
             "max": 1000000
           },
@@ -5369,7 +5490,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 276,
+            "order": 283,
             "min": 0,
             "max": 1000000
           },
@@ -5388,7 +5509,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 277,
+            "order": 284,
             "min": 0,
             "max": 1000000
           },
@@ -5407,7 +5528,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 278,
+            "order": 285,
             "min": 0,
             "max": 1000000
           },
@@ -5426,7 +5547,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 279,
+            "order": 286,
             "min": 0,
             "max": 2000000
           },
@@ -5445,7 +5566,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 280,
+            "order": 287,
             "min": 0,
             "max": 1000000
           },
@@ -5464,7 +5585,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 281,
+            "order": 288,
             "min": 0,
             "max": 1000000
           },
@@ -5483,7 +5604,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 282,
+            "order": 289,
             "min": 0,
             "max": 1000000
           },
@@ -5502,7 +5623,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 283,
+            "order": 290,
             "unit": "天",
             "min": 0,
             "max": 3650

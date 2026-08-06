@@ -18,7 +18,18 @@ from ..subagents.models import CapabilityGrant
 from ..subagents.shell_gateway import decision_to_dict
 from ..subagents.shell_gateway_execution import execute_shell_command
 from ..subagents.task_trash import TaskTrashMoveRequest, move_to_task_trash
-from .models import BaseTool, ToolExecutionResult, ToolSpec
+from .models import (
+    BaseTool,
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    ResourceScopePolicy,
+    SandboxPolicy,
+    ToolHandlerOutcome,
+    ToolInputPolicy,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+)
 
 
 @dataclass(frozen=True)
@@ -29,64 +40,77 @@ class ControlledExecToolRequest:
 
 
 class ControlledExecTool(BaseTool):
-    spec = ToolSpec(
+    model_spec = ToolModelSpec(
         name="controlled_exec",
-        category="shell",
-        effect="mutating",
-        promotes_task=True,
-        idempotency_scope="operation",
-        requires_approval=False,
         description="Plan or run a parent-granted shell command inside scoped task roots.",
-        use_cases=[
-            "Run a command only after the parent granted command/path/network scope.",
-            "Inspect task-local files or tooling output without using unbounded shell access.",
-        ],
-        avoid_when=[
-            "Do not use for ordinary file reads/writes when read_file/write_file can do it.",
-            "Do not pass command_allowlist/path_scope in params; grants must come from parent context.",
-        ],
-        keywords=["controlled", "exec", "shell", "subagent", "grant", "command"],
-        parameters={
-            "command": "Command string or argv list to check.",
-            "cwd": "Optional working directory, must stay inside the granted path scope.",
-            "grant_id": "Optional parent grant id when multiple controlled exec grants exist.",
-            "apply": "Optional boolean; false means dry-run planning only.",
-        },
-        parameter_details={
-            "command": "Required. Example: 'pwd' or ['python3', '--version'].",
-            "cwd": "Optional. Defaults to workspace root; parent path_scope still applies.",
-            "grant_id": "Optional if there is exactly one controlled_exec grant in context.",
-            "apply": "Optional. False returns dry-run plan; true runs only after grant checks pass.",
-            "delete": "rm/rmdir/unlink intentionally stay out of shell allowlists; with apply=true they route to task_trash and return trash_manifest_ref.",
-        },
-        parameter_schema={
-            "command": {
-                "anyOf": [
-                    {"type": "string"},
-                    {"type": "array", "items": {"type": "string"}, "minItems": 1},
-                ]
+        input_schema={
+            "type": "object",
+            "properties": {
+                "command": {
+                    "description": "必填。要检查或执行的命令字符串或 argv 字符串数组。",
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                    ],
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "可选工作目录，必须位于父级授权 path_scope 内。",
+                },
+                "grant_id": {
+                    "type": "string",
+                    "description": "存在多个 controlled_exec grant 时指定父级 grant_id。",
+                },
+                "apply": {
+                    "type": "boolean",
+                    "description": "可选。false 只返回计划；true 在全部授权门通过后执行。",
+                },
             },
-            "apply": {"type": "boolean"},
+            "required": ["command"],
+            "additionalProperties": False,
         },
-        required_parameters=["command"],
-        internal_parameters=["command_allowlist", "path_scope"],
-        examples=[
-            '{"tool":"controlled_exec","apply":true,"command":"pwd","cwd":"."}',
-            '{"tool":"controlled_exec","apply":true,"grant_id":"grant-shell-1","command":["python3","-c","print(\'x\' * 2000)"]}',
-        ],
+        hints=ToolModelHints(
+            category="shell",
+            use_cases=(
+                "Run a command only after the parent granted command/path/network scope.",
+                "Inspect task-local files or tooling output without using unbounded shell access.",
+            ),
+            avoid_when=(
+                "Do not use for ordinary file reads/writes when read_file/write_file can do it.",
+                "Do not pass command_allowlist/path_scope in params; grants must come from parent context.",
+            ),
+            keywords=("controlled", "exec", "shell", "subagent", "grant", "command"),
+            examples=(
+                '{"tool":"controlled_exec","apply":true,"command":"pwd","cwd":"."}',
+                '{"tool":"controlled_exec","apply":true,"grant_id":"grant-shell-1","command":["python3","-c","print(\'x\' * 2000)"]}',
+            ),
+        ),
+    )
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy(
+            "mutating",
+            by_parameter=(("apply", (("false", "read_only"), ("true", "dangerous"))),),
+        ),
+        sandbox_policy=SandboxPolicy("required"),
+        idempotency_policy=IdempotencyPolicy("operation"),
+        resource_scopes=ResourceScopePolicy(parameter_names=("cwd",)),
+        input_policy=ToolInputPolicy(
+            internal_parameters=("command_allowlist", "path_scope"),
+        ),
+        promotes_task=True,
     )
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
-        return ToolExecutionResult(self.spec.name, False, "controlled_exec requires registry write_boundary", error_code="TOOL_EXECUTION_FAILED")
+    def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
+        return ToolHandlerOutcome(self.model_spec.name, False, "controlled_exec requires registry write_boundary", error_code="TOOL_EXECUTION_FAILED")
 
 
-def execute_controlled_exec_tool(request: ControlledExecToolRequest) -> ToolExecutionResult:
+def execute_controlled_exec_tool(request: ControlledExecToolRequest) -> ToolHandlerOutcome:
     grant_ref, grant_error = _select_controlled_exec_grant(request.params, request.write_boundary)
     if grant_error:
-        return ToolExecutionResult("controlled_exec", False, grant_error, error_code="WRITE_FORBIDDEN")
+        return ToolHandlerOutcome("controlled_exec", False, grant_error, error_code="WRITE_FORBIDDEN")
     command = request.params.get("command")
     if command is None:
-        return ToolExecutionResult("controlled_exec", False, "controlled_exec requires command", error_code="TOOL_INVALID_ARGUMENTS")
+        return ToolHandlerOutcome("controlled_exec", False, "controlled_exec requires command", error_code="TOOL_INVALID_ARGUMENTS")
     grant = _grant_from_ref(grant_ref)
     exec_request = ControlledExecRequest(
         command=command,
@@ -108,16 +132,23 @@ def execute_controlled_exec_tool(request: ControlledExecToolRequest) -> ToolExec
                 actor_run_id=grant.grant_to_run_id,
             )
         )
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             "controlled_exec",
             trash_result.moved,
             _trash_payload(trash_result, grant.id, plan.reason),
         )
     if exec_request.apply and plan.allowed and plan.action == "execute_shell":
         execution = execute_shell_command(shell_request_from_controlled_exec(exec_request))
+        if execution.cancelled:
+            return ToolHandlerOutcome(
+                "controlled_exec",
+                False,
+                _execution_payload(execution, grant.id),
+                error_code="CANCELLED",
+            )
         ok = bool(execution.executed and execution.exit_code == 0 and not execution.timed_out)
-        return ToolExecutionResult("controlled_exec", ok, _execution_payload(execution, grant.id))
-    return ToolExecutionResult("controlled_exec", _plan_result_ok(plan), _plan_payload(plan, grant.id))
+        return ToolHandlerOutcome("controlled_exec", ok, _execution_payload(execution, grant.id))
+    return ToolHandlerOutcome("controlled_exec", _plan_result_ok(plan), _plan_payload(plan, grant.id))
 
 
 def _select_controlled_exec_grant(

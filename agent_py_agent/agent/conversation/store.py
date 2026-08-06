@@ -691,6 +691,40 @@ def _message_entries(
     return entries, errors
 
 
+# LLM: Exact Memory evidence lookup must stop at the matching row while preserving JSONL corruption errors.
+# 函数用途: 流式扫描单个 transcript 文件并返回目标消息，避免加载完整会话或在公开方法中堆叠嵌套分支。
+def _message_entry_by_id_in_path(
+    path: Path,
+    target: str,
+) -> tuple[MessageLogEntry | None, list[dict[str, Any]]]:
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            row, error = _json_row(
+                line,
+                context="conversation.messages.by_id",
+                path=path,
+                line_number=line_number,
+            )
+            if error is not None:
+                return None, [error]
+            if row is None or str(row.get("message_id") or "") != target:
+                continue
+            try:
+                return MessageLogEntry.from_dict(row), []
+            except Exception as exc:
+                return None, [
+                    _jsonl_error(
+                        exc,
+                        "conversation.messages.by_id",
+                        path=path,
+                        line_number=line_number,
+                    )
+                ]
+    return None, []
+
+
 class ConversationMessageStore(ConversationThreadStore):
     # LLM: Transcript append is append-only; its activity projection must merge into the latest
     # thread after the ledger write rather than writing the earlier loaded thread snapshot.
@@ -779,6 +813,71 @@ class ConversationMessageStore(ConversationThreadStore):
         entries, parse_errors = _message_entries(report.rows)
         selected = entries if limit <= 0 else entries[-limit:]
         return selected, [*report.load_errors, *parse_errors]
+
+    # LLM: Memory Curator 只能从精确 message_id 后顺序读取有界批次；不得每次全量重放 transcript。
+    # 函数用途: 从 append-only ConversationStore 游标后流式读取至多 limit 条消息和结构化错误。
+    def messages_after_report(
+        self,
+        thread_id: str,
+        *,
+        after_message_id: str = "",
+        limit: int = 100,
+    ) -> tuple[list[MessageLogEntry], list[dict[str, Any]]]:
+        bounded_limit = max(1, min(1_000, int(limit or 100)))
+        path = self._message_path(thread_id)
+        if not path.exists():
+            return [], []
+        try:
+            offset = (
+                self.message_byte_offset_after(thread_id, after_message_id)
+                if str(after_message_id or "").strip()
+                else 0
+            )
+            rows: list[dict[str, Any]] = []
+            errors: list[dict[str, Any]] = []
+            with path.open("rb") as handle:
+                handle.seek(offset)
+                while len(rows) < bounded_limit and (line := handle.readline()):
+                    if not line.strip():
+                        continue
+                    try:
+                        text = line.decode("utf-8")
+                    except UnicodeDecodeError as exc:
+                        errors.append(
+                            _jsonl_error(exc, "conversation.messages.after", path=path)
+                        )
+                        break
+                    row, error = _json_row(
+                        text,
+                        context="conversation.messages.after",
+                        path=path,
+                        line_number=0,
+                    )
+                    if error is not None:
+                        errors.append(error)
+                        break
+                    if row is not None:
+                        rows.append(row)
+            entries, parse_errors = _message_entries(rows)
+            return entries, [*errors, *parse_errors]
+        except Exception as exc:
+            return [], [_jsonl_error(exc, "conversation.messages.after", path=path)]
+
+    # LLM: Persona/Memory evidence verification must resolve one exact message_id without loading a whole transcript.
+    # 函数用途: 流式查找一条 ConversationStore 消息并返回结构化读取错误。
+    def message_by_id_report(
+        self,
+        thread_id: str,
+        message_id: str,
+    ) -> tuple[MessageLogEntry | None, list[dict[str, Any]]]:
+        path = self._message_path(thread_id)
+        target = str(message_id or "").strip()
+        if not path.exists() or not target:
+            return None, []
+        try:
+            return _message_entry_by_id_in_path(path, target)
+        except Exception as exc:
+            return None, [_jsonl_error(exc, "conversation.messages.by_id", path=path)]
 
     def messages_after_compact_report(
         self,

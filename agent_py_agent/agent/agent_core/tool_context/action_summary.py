@@ -28,7 +28,7 @@ def actionable_tool_result_summary(result: object, archive_record: dict[str, obj
     if not action_fields and not _has_error_fact(result, payload):
         return ""
     lines = [
-        f"[tool={getattr(result, 'tool', '')}; status={'ok' if getattr(result, 'ok', False) else 'error'}]",
+        f"[tool={getattr(result, 'tool_name', '')}; status={'ok' if getattr(result, 'ok', False) else 'error'}]",
         "actionable_tool_result:",
         "- policy: full tool output is archived; live prompt keeps structured recovery facts.",
     ]

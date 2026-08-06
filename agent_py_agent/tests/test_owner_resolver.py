@@ -43,31 +43,44 @@ def test_ensure_owner_home_creates_owner_seed_files(tmp_path: Path):
 
 
 def test_prompt_home_context_reads_owner_entry_files(tmp_path: Path):
-    from agent_py_agent.agent.prompting_parts.builder import _home_entry_context_chunks
+    from agent_py_agent.agent.prompting_parts.builder import _persona_home_context_chunks
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 
     paths = ensure_my_agent_home(tmp_path)
     paths.agents_md.write_text("current agents\n", encoding="utf-8")
     paths.owner_agents_md.write_text("owner agents\n", encoding="utf-8")
+    paths.owner_soul_md.write_text("owner soul\n", encoding="utf-8")
+    paths.owner_user_md.write_text("owner user\n", encoding="utf-8")
+    paths.owner_memory_md.write_text("raw memory must not enter prompt\n", encoding="utf-8")
+    paths.owner_memory_hot_md.write_text("raw hot must not enter prompt\n", encoding="utf-8")
+    (paths.owner_memory_lessons_dir / "raw.md").write_text(
+        "raw lesson must not enter prompt\n",
+        encoding="utf-8",
+    )
 
-    rendered = "\n".join(_home_entry_context_chunks(paths))
+    rendered = "\n".join(_persona_home_context_chunks(paths))
 
     assert "owner agents" in rendered
+    assert "owner soul" in rendered
+    assert "owner user" in rendered
     assert "current agents" not in rendered
+    assert "raw memory must not enter prompt" not in rendered
+    assert "raw hot must not enter prompt" not in rendered
+    assert "raw lesson must not enter prompt" not in rendered
 
 
-def test_simple_agent_daily_memory_mirror_uses_owner_home(tmp_path: Path):
+def test_simple_agent_long_term_write_does_not_create_daily_mirror(tmp_path: Path):
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings.config import AgentConfig
 
     home = tmp_path / "home"
     agent = SimpleAgent(AgentConfig(my_agent_home=str(home), prompt_files=[]), tmp_path / "workspace")
 
-    agent.memory.add("user", "记录 owner daily", kind="note")
+    agent.memory.add("user", "只写正式长期记忆", kind="note")
 
     owner_daily = list((home / "owners" / "local" / "main" / "memory" / "daily").glob("*.jsonl"))
     previous_daily = list((home / "memory" / "daily").glob("*.jsonl"))
-    assert owner_daily
+    assert owner_daily == []
     assert previous_daily == []
 
 
@@ -87,7 +100,7 @@ def test_simple_agent_uses_configured_provider_owner_home(tmp_path: Path):
         tmp_path / "workspace",
     )
 
-    agent.memory.add("user", "记录飞书用户 daily", kind="note")
+    agent.memory.add("user", "记录飞书用户长期事实", kind="note")
 
     provider_daily = list((home / "owners" / "providers" / "feishu" / "users" / "ou_123" / "memory" / "daily").glob("*.jsonl"))
     local_daily = list((home / "owners" / "local" / "main" / "memory" / "daily").glob("*.jsonl"))
@@ -101,7 +114,7 @@ def test_simple_agent_uses_configured_provider_owner_home(tmp_path: Path):
     assert agent.conversation_store.root.name == "conversations"
     assert agent.collaboration_store.root.is_relative_to(runtime_root)
     assert agent.collaboration_store.root.name == "collaboration"
-    assert provider_daily
+    assert not provider_daily
     assert not local_daily
 
 

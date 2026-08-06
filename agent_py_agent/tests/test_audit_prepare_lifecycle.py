@@ -8,7 +8,6 @@ from agent.agent_core.orchestration.create_policy import (
     prepare_audit_child_creation_scope,
 )
 from agent.agent_core.run_task_workspace_writer import _sync_conversation_task_workspace
-from agent.backends.tool_schema import tool_spec_to_input_schema
 from agent.common.audit_activation import (
     AUDIT_ATTR,
     AUDIT_OBJECTIVE_ATTR,
@@ -69,7 +68,7 @@ def _agent(tmp_path: Path) -> SimpleAgent:
 def test_publish_audit_update_spec_compiles_for_native_tool_protocol(
     tmp_path: Path,
 ) -> None:
-    schema = tool_spec_to_input_schema(PublishAuditUpdateTool(_agent(tmp_path)).spec)
+    schema = PublishAuditUpdateTool(_agent(tmp_path)).model_spec.input_schema
     removal = schema["properties"]["remove_source_ids"]
 
     assert removal["type"] == "array"
@@ -428,8 +427,9 @@ def test_same_audit_accumulates_unpublished_prepare_turns_in_order(
     assert link.pending_prompt.index("第一条来源规则") < link.pending_prompt.index("第二条探针结果")
 
     tool = PublishAuditUpdateTool(agent)
-    assert "Durable cross-source operational notes only" in tool.spec.parameters["effective_prompt"]
-    assert "Notes, scripts, tests, skills and documents" in tool.spec.description
+    effective_prompt = tool.model_spec.input_schema["properties"]["effective_prompt"]
+    assert "Durable cross-source operational notes only" in effective_prompt["description"]
+    assert "Notes, scripts, tests, skills and documents" in tool.model_spec.description
     attrs = _register(
         agent,
         tmp_path,

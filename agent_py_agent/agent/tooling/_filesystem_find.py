@@ -20,54 +20,80 @@ from ._filesystem_read import (
     FileSystemAccessOptions,
     FileSystemTool,
 )
+from .cancellation import raise_if_cancelled
 from .filesystem_path_recovery import MissingPathRequest, missing_path_result
-from .models import ToolExecutionResult, ToolSpec
+from .models import (
+    ConcurrencyPolicy,
+    EffectResolverPolicy,
+    ResourceScopePolicy,
+    ToolHandlerOutcome,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+)
 
 
-def _build_find_files_spec() -> ToolSpec:
-    return ToolSpec(
+def _build_find_files_model_spec() -> ToolModelSpec:
+    return ToolModelSpec(
         name="find_files",
-        category="filesystem",
-        effect="read_only",
         description="按 glob 查找文件路径，适合不知道文件具体位置但知道文件名模式时使用。",
-        use_cases=[
-            "找所有 Python、Markdown、配置或测试文件",
-            "按文件名模式定位候选文件，再用 read_file 阅读",
-        ],
-        avoid_when=[
-            "只是想看某个目录下一层有什么时，用目录查看工具",
-            "想搜索文件正文内容时，用正文搜索工具",
-        ],
-        keywords=["find", "glob", "文件查找", "按模式找文件", "找文件", "文件名"],
-        parameters={
-            "pattern": "glob 模式，例如 *.py、**/*.md、src/**/*.ts",
-            "path": "从哪个目录开始找，默认工作区根目录",
-            "limit": "本次最多返回多少个文件，默认使用工具配置上限",
-            "offset": "跳过前多少个结果，用于分页，默认 0",
-            "include_ignored": "是否包含常见噪声目录，如 .git/node_modules，默认 false",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "必填；glob 模式，例如 *.py、**/*.md、src/**/*.ts。匹配路径或文件名，不会打开正文。",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "可选；从哪个目录开始找，默认工作区根目录。缩小范围会更快。",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "分页大小；结果很多时先看一小页，再用 next_offset 继续。",
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "上一页返回 next_offset 后，下一次传入这里继续看。",
+                },
+                "include_ignored": {
+                    "type": "boolean",
+                    "description": "是否包含 .git、node_modules 和常见缓存目录；默认 false。",
+                },
+            },
+            "required": ["pattern"],
+            "additionalProperties": False,
         },
-        parameter_details={
-            "pattern": "必填；匹配工作区相对路径或文件名。不是正文搜索，不会打开文件内容。",
-            "path": "可选；把范围缩小到某个目录会更快。",
-            "limit": "分页大小；结果很多时先看一小页，再用 next_offset 继续。",
-            "offset": "上一页返回 next_offset 后，下一次传入这里继续看。",
-            "include_ignored": "宽泛查找默认跳过 .git、node_modules 和常见缓存目录。未传该参数且显式 glob 在可见文件中零命中时，会自动检查忽略目录；传 false 可强制排除，传 true 可始终包含。",
-        },
-        parameter_schema={
-            "limit": {"type": "integer", "minimum": 1},
-            "offset": {"type": "integer", "minimum": 0},
-            "include_ignored": {"type": "boolean"},
-        },
-        required_parameters=["pattern"],
-        examples=[
-            '{"tool": "find_files", "pattern": "**/*.py"}',
-            '{"tool": "find_files", "pattern": "*.md", "path": "docs", "limit": 50}',
-        ],
-        promotes_task=True,
+        hints=ToolModelHints(
+            category="filesystem",
+            use_cases=(
+                "找所有 Python、Markdown、配置或测试文件",
+                "按文件名模式定位候选文件，再用 read_file 阅读",
+            ),
+            avoid_when=(
+                "只是想看某个目录下一层有什么时，用目录查看工具",
+                "想搜索文件正文内容时，用正文搜索工具",
+            ),
+            keywords=("find", "glob", "文件查找", "按模式找文件", "找文件", "文件名"),
+            examples=(
+                '{"tool": "find_files", "pattern": "**/*.py"}',
+                '{"tool": "find_files", "pattern": "*.md", "path": "docs", "limit": 50}',
+            ),
+        ),
     )
 
 
 class FindFilesTool(FileSystemTool):
+
+    model_spec = _build_find_files_model_spec()
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy("read_only"),
+        concurrency_policy=ConcurrencyPolicy("parallel_safe"),
+        resource_scopes=ResourceScopePolicy(parameter_names=("path",)),
+        promotes_task=True,
+    )
 
     def __init__(
         self,
@@ -82,16 +108,15 @@ class FindFilesTool(FileSystemTool):
             access_options,
         )
         self.max_matches = max_matches
-        self.spec = _build_find_files_spec()
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         try:
             request = _find_files_request_from_params(params, self.max_matches)
             target = self.resolve_path(request.raw_path)
         except ValueError as exc:
             # 参数/路径解析失败→TOOL_INVALID_ARGUMENTS(改参可修)；漏码会兜底 UNKNOWN_ERROR
             # (retryable=False)误导模型放弃而非按 schema 改参重试。
-            return ToolExecutionResult("find_files", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
+            return ToolHandlerOutcome("find_files", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
         if not target.exists():
             # 目标路径不存在是状态问题，应带 PATH_NOT_FOUND + candidate_paths(与 list/search 一致)，
             # 而非无码兜底 UNKNOWN_ERROR——后者让模型放弃，前者引导改用候选路径或先 list_files 定位。
@@ -108,9 +133,9 @@ class FindFilesTool(FileSystemTool):
             return self._find_in_single_file(target, request)
         return self._find_in_directory(target, request)
 
-    def _find_in_single_file(self, target: Path, request: _FindFilesRequest) -> ToolExecutionResult:
+    def _find_in_single_file(self, target: Path, request: _FindFilesRequest) -> ToolHandlerOutcome:
         if _matches_find_pattern(self.display_path(target), target.name, request.pattern):
-            return ToolExecutionResult(
+            return ToolHandlerOutcome(
                 "find_files",
                 True,
                 self.display_path(target),
@@ -126,7 +151,7 @@ class FindFilesTool(FileSystemTool):
                     )
                 },
             )
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             "find_files",
             True,
             "没有找到匹配文件",
@@ -143,7 +168,7 @@ class FindFilesTool(FileSystemTool):
             },
         )
 
-    def _find_in_directory(self, target: Path, request: _FindFilesRequest) -> ToolExecutionResult:
+    def _find_in_directory(self, target: Path, request: _FindFilesRequest) -> ToolHandlerOutcome:
         results, seen, limit_reached = _find_directory_matches(self, target, request)
         included_ignored_fallback = False
         if (
@@ -215,7 +240,7 @@ def _find_directory_matches(
     return results, seen, limit_reached
 
 
-def _find_directory_result(result: _FindDirectoryResultRequest) -> ToolExecutionResult:
+def _find_directory_result(result: _FindDirectoryResultRequest) -> ToolHandlerOutcome:
     if not result.results:
         return _find_directory_empty_result(result.tool, result.target, result.request)
     if result.limit_reached:
@@ -225,7 +250,7 @@ def _find_directory_result(result: _FindDirectoryResultRequest) -> ToolExecution
     output = "\n".join(result.results)
     if result.included_ignored_fallback:
         output = f"{_ignored_discovery_fallback_notice()}\n{output}"
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         "find_files",
         True,
         output,
@@ -244,8 +269,8 @@ def _find_directory_result(result: _FindDirectoryResultRequest) -> ToolExecution
     )
 
 
-def _find_directory_empty_result(tool: FindFilesTool, target: Path, request: _FindFilesRequest) -> ToolExecutionResult:
-    return ToolExecutionResult(
+def _find_directory_empty_result(tool: FindFilesTool, target: Path, request: _FindFilesRequest) -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(
         "find_files",
         True,
         "没有找到匹配文件",
@@ -295,6 +320,7 @@ def _find_files_request_from_params(params: dict[str, Any], max_matches: int) ->
 def _iter_find_candidates(target: Path, *, include_ignored: bool) -> list[Path]:
     candidates: list[Path] = []
     for root, dirnames, filenames in os.walk(target):
+        raise_if_cancelled()
         if not include_ignored:
             dirnames[:] = [dirname for dirname in dirnames if dirname not in _COMMON_FILE_DISCOVERY_IGNORES]
         root_path = Path(root)

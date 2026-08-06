@@ -6,6 +6,7 @@ from agent_py_agent.agent.capability.persona_repository import PersonaMutationRe
 from agent_py_agent.agent.owner_scoped_pool import OwnerScopedAgentPool
 from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
+from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
 
 
 def _write_skill(root: Path, name: str, description: str) -> Path:
@@ -23,7 +24,9 @@ def test_group_runtime_never_loads_member_private_state_and_shared_stays_read_on
 ) -> None:
     home = tmp_path / "home"
     pool = OwnerScopedAgentPool(
-        AgentConfig(model_backend="echo", my_agent_home=str(home), prompt_files=[]),
+        AgentConfig(
+            tool_protocol="text", model_backend="echo", my_agent_home=str(home), prompt_files=[]
+        ),
         tmp_path / "service-checkout",
     )
     user_a = pool.get(OwnerIdentity.provider_user("feishu", "user-a"))
@@ -64,17 +67,28 @@ def test_group_runtime_never_loads_member_private_state_and_shared_stays_read_on
     assert "alpha-only" not in prompt
     assert "beta-only" not in prompt
 
-    cross_read = group.tools.execute_call(
-        {"tool": "read_file", "path": str(user_a.home_paths.owner_user_md)}
+    cross_read = execute_registry_test_call(
+        group.tools,
+        "read_file",
+        {"path": str(user_a.home_paths.owner_user_md)},
+        call_id="group-cross-owner-read",
     )
-    shared_read = group.tools.execute_call({"tool": "read_file", "path": str(shared_skill)})
-    shared_write = group.tools.execute_call(
-        {"tool": "write_file", "path": str(shared_skill), "content": "tampered"}
+    shared_read = execute_registry_test_call(
+        group.tools,
+        "read_file",
+        {"path": str(shared_skill)},
+        call_id="group-shared-read",
+    )
+    shared_write = execute_registry_test_call(
+        group.tools,
+        "write_file",
+        {"path": str(shared_skill), "content": "tampered"},
+        call_id="group-shared-write",
     )
 
     assert not cross_read.ok
     assert cross_read.error_code == "PATH_CROSS_OWNER_BLOCKED"
-    assert cross_read.failure_stage == "runtime_gate"
+    assert cross_read.failure_stage == "authorization"
     assert cross_read.handler_executed is False
     assert shared_read.ok
     assert not shared_write.ok

@@ -21,7 +21,7 @@ from ..contracts.gates.network_safety import (
     NetworkSafetyFacts,
     evaluate_network_safety_gate,
 )
-from .models import ToolExecutionResult
+from .models import ToolHandlerOutcome
 from .web_fetch_tools import WebFetchTool as _WebFetchTool
 from .web_fetch_tools import WebRuntimeDeps
 from .web_http_helpers import scalar_text
@@ -59,7 +59,7 @@ def _network_safety_error(
     resolver: NetworkResolver,
     allowed_private_hosts: Iterable[str] = (),
     allow_private_resolution: bool | None = None,
-) -> ToolExecutionResult | None:
+) -> ToolHandlerOutcome | None:
     decision = evaluate_network_safety_gate(
         NetworkSafetyFacts(
             url=url,
@@ -71,7 +71,7 @@ def _network_safety_error(
     if decision.allowed:
         return None
     code = decision.finding_codes[0] if decision.finding_codes else "NETWORK_SAFETY_DENIED"
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         tool,
         False,
         f"网络安全检查失败: {code}{_private_host_recovery_note(code, url)}",
@@ -102,7 +102,7 @@ def _effective_allow_private_resolution(value: bool | None) -> bool:
     return raw.strip().lower() in {"1", "true"}
 
 
-def _format_http_error(tool: str, exc: urllib.error.HTTPError, max_chars: int) -> ToolExecutionResult:
+def _format_http_error(tool: str, exc: urllib.error.HTTPError, max_chars: int) -> ToolHandlerOutcome:
     detail = exc.read(max_chars + 1).decode("utf-8", "replace")
     result = (
         f"HTTP {exc.code}\n"
@@ -124,7 +124,7 @@ def _format_http_error(tool: str, exc: urllib.error.HTTPError, max_chars: int) -
         code = "PERMISSION_BLOCKED"
     else:
         code = "TOOL_INVALID_ARGUMENTS"
-    return ToolExecutionResult(tool, False, result, error_code=code)
+    return ToolHandlerOutcome(tool, False, result, error_code=code)
 
 
 def _response_preview_chars(params: dict[str, Any], configured_max: int) -> int:

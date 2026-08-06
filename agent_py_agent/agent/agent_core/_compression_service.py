@@ -24,10 +24,13 @@ class CompressionService:
     def __init__(self, agent):
         self._agent = agent
 
+    # LLM: Threshold crossing first records one pre_compact Curator reason, then Compact proceeds independently.
+    # 函数用途: 判断是否需要压缩，保存恢复快照并返回压缩后的当前上下文记忆。
     def check_and_apply(self, ctx: CompressionContext):
         if self._full_prompt_estimate(ctx) <= int(getattr(self._agent.config, "max_tokens", 1024)):
             return ctx.memories, "", "", False
 
+        self._request_curator_pre_compact()
         try:
             hook_result = write_compression_snapshot(
                 self._agent.root,
@@ -44,6 +47,19 @@ class CompressionService:
             keep_recent=max(self._agent.config.memory_top_k, 2),
         )
         return compressed_memories, hook_result.snapshot_id, hook_result.snapshot_file_path, True
+
+    # LLM: pre-compact is only a durable high-priority request; compaction must never wait for
+    # or depend on Curator model success.
+    # 函数用途: 向统一 MemoryCuratorService 登记压缩前提炼原因，失败时继续正常压缩。
+    def _request_curator_pre_compact(self) -> None:
+        curator = getattr(self._agent, "memory_curator", None)
+        request = getattr(curator, "request", None)
+        if not callable(request):
+            return
+        try:
+            request("pre_compact")
+        except Exception:
+            return
 
     def _full_prompt_estimate(self, ctx: CompressionContext) -> int:
         return estimate_tokens(

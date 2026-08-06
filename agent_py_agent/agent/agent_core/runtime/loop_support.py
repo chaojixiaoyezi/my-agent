@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import json
@@ -10,10 +9,19 @@ from ...conversation.active_turn_input import (
 )
 from ...conversation.authority import (
     CONVERSATION_BACKGROUND_EVENT_REASON_ATTR,
-    conversation_transcript_is_authoritative,
 )
-from ...memory_archive import build_auto_resume_context, has_resume_trigger
-from ...memory_routing import RouteContextOptions, build_routed_memory_context
+from ...memory_archive import build_auto_resume_context
+from ...memory_routing import (
+    RouteContextOptions,
+    RoutedMemoryContext,
+    build_routed_memory_context,
+)
+from ...memory_store import (
+    MemoryRecallScope,
+    hot_memory_records,
+    long_term_record_matches_scope,
+    routed_lesson_records,
+)
 from ...runtime_errors import runtime_error_report
 from ...tooling.output_projection import project_tool_output_body
 from ...user_space.context_bundle import MainContextBundleRequest, build_main_context_bundle
@@ -42,6 +50,7 @@ class ToolSectionsRequest:
     user_prompt: str
     allowed_tools: list[str] | None
     runtime_snapshot: object
+    protocol_snapshot: object
 
 
 # LLM: 只保留有真实运行消费者的字段；工具能力由 allowed_tools 与 runtime snapshot 共同决定。
@@ -108,6 +117,8 @@ def _runtime_loop_params(
         save=params.save,
         carried_archive_tool_calls=params.carried_archive_tool_calls,
         carried_active_turn_user_inputs=params.carried_active_turn_user_inputs,
+        tool_runtime_snapshot=prepared.tool_runtime_snapshot,
+        tool_protocol_snapshot=prepared.tool_protocol_snapshot,
     )
 
 
@@ -135,6 +146,7 @@ def _finalize_params(
         main_context_bundle_path=prepared.main_context_bundle_path,
         main_context_bundle_markdown_path=prepared.main_context_bundle_markdown_path,
         active_turn_user_inputs=loop_result.active_turn_user_inputs,
+        tool_runtime_evidence=loop_result.tool_runtime_evidence,
     )
 
 
@@ -143,14 +155,12 @@ def _finalize_params(
 def _resolve_tool_sections(request: ToolSectionsRequest):
     if not request.agent.config.enable_tools:
         return "", ""
-    from ..native_tool_protocol import native_tool_use_active
-
     # The effective protocol is a runtime capability decision, not merely the
     # configured preference. A model that has downgraded to text must retain
     # the full text catalog; a native-capable model receives canonical schemas
     # through the provider's tools field and must not get the same schemas
     # duplicated in prompt prose.
-    tool_protocol = "native" if native_tool_use_active(request.agent) else "text"
+    tool_protocol = str(getattr(request.protocol_snapshot, "source_protocol", "text") or "text")
     tool_catalog = request.agent.tools.render_catalog_section(
         allowed_tools=request.allowed_tools,
         tool_protocol=tool_protocol,
@@ -165,22 +175,66 @@ def _resolve_tool_sections(request: ToolSectionsRequest):
     return tool_catalog, tool_recommendations
 
 
+# LLM: Runtime recall uses only active long-term plus formal lesson/HOT under structured scope, then one memory-context envelope.
+# 函数用途: 为一轮主代理请求准备 owner 隔离的 Memory、路由收据、恢复上下文与运行注入。
 def _prepare_runtime_context(agent, request: RuntimeContextRequest):
+    tool_runtime_snapshot, tool_protocol_snapshot = _tool_snapshots_for_run(
+        agent,
+        request,
+    )
     task_local = _is_task_local_context(request.context_scope)
     memory_top_k = max(1, int(agent.config.memory_top_k or 1))
-    # 过滤 dialogue 必须发生在最终 top_k 之前。旧版本把前 5 条历史对话先取出再
-    # 过滤，会让排在第 6 条的 USER preference/lesson 永远进不了上下文。
-    needs_dialogue_filter = conversation_transcript_is_authoritative(
-        request.task_attributes
-    ) or not _dialogue_memory_allowed(request)
-    search_top_k = max(memory_top_k * 4, memory_top_k + 20) if needs_dialogue_filter else memory_top_k
-    raw_memories = [] if task_local else agent.memory.search(request.user_prompt, search_top_k)
-    memories = _memories_for_request(raw_memories, request, task_local=task_local)[:memory_top_k]
     routed_context = _routed_memory_context_for_request(agent, request, task_local=task_local)
-    resume_context_result, resume_context_section = _resume_context_for_request(
-        agent, request, task_local=task_local,
+    recall_scope = MemoryRecallScope.from_runtime(
+        task_id=request.task_id,
+        task_attributes=request.task_attributes,
     )
-    base_runtime_injections = _base_runtime_injections(request, resume_context_section, routed_context)
+    # 真机缺口(2026-08-06):普通对话(无 task)的召回只含 global/personal,project 记忆(如
+    # 用户喂入的小说知识库,scope=project:novel:xxx)不被召回 → 问小说"信息不足"。这里把
+    # 记忆库中实际存在的 project scope 追加进召回范围(用户明确要求记住的项目知识可召回),
+    # 有 task 时仍按 task 精确。纯结构化:只扫描 long_term 的 attributes.scope_type/key。
+    # gateway 的 request_id 会被当 task_id,故不能以 task_id 判"普通对话"。始终追加记忆库中
+    # 实际存在的 project scope(用户明确要求记住的项目知识可召回),与 task 的 project:task 并存。
+    try:
+        project_pairs: list[tuple[str, str]] = []
+        for record in agent.memory.all():
+            attrs = record.attributes if isinstance(record.attributes, dict) else {}
+            st = str(attrs.get("scope_type") or "").strip().lower()
+            sk = str(attrs.get("scope_key") or "").strip()
+            if st == "project" and sk:
+                project_pairs.append(("project", sk))
+        if project_pairs:
+            recall_scope = MemoryRecallScope(tuple(dict.fromkeys([*recall_scope.keys, *project_pairs])))
+    except Exception:
+        pass
+
+    long_term_memories = (
+        []
+        if task_local
+        else agent.memory.search_scoped(
+            request.user_prompt,
+            memory_top_k,
+            lambda record: long_term_record_matches_scope(record, recall_scope),
+        )
+    )
+
+    memories = _formal_memories_for_request(
+        agent,
+        request,
+        routed_context,
+        recall_scope=recall_scope,
+        long_term_memories=long_term_memories,
+        task_local=task_local,
+    )
+
+    resume_context_result, resume_context_section = _resume_context_for_request(
+        agent,
+        request,
+        task_local=task_local,
+    )
+    base_runtime_injections = _base_runtime_injections(
+        request, resume_context_section, routed_context
+    )
     main_context_bundle = build_runtime_main_context_bundle(
         agent,
         request,
@@ -189,9 +243,12 @@ def _prepare_runtime_context(agent, request: RuntimeContextRequest):
         routed_context=routed_context,
         resume_context_injected=bool(resume_context_result.injected),
         task_local=task_local,
+        tool_runtime_snapshot=tool_runtime_snapshot,
     )
     runtime_injections = _runtime_injections_with_bundle(
-        base_runtime_injections, len(request.inject or []), main_context_bundle,
+        base_runtime_injections,
+        len(request.inject or []),
+        main_context_bundle,
     )
     return PreparedRuntimeContext(
         memories=memories,
@@ -200,8 +257,41 @@ def _prepare_runtime_context(agent, request: RuntimeContextRequest):
         resume_context_result=resume_context_result,
         resume_context_section=resume_context_section,
         main_context_bundle_path=main_context_bundle.json_path if main_context_bundle else "",
-        main_context_bundle_markdown_path=main_context_bundle.markdown_path if main_context_bundle else "",
+        main_context_bundle_markdown_path=main_context_bundle.markdown_path
+        if main_context_bundle
+        else "",
+        tool_runtime_snapshot=tool_runtime_snapshot,
+        tool_protocol_snapshot=tool_protocol_snapshot,
     )
+
+
+def _tool_snapshots_for_run(
+    agent: object,
+    request: RuntimeContextRequest,
+) -> tuple[object, object]:
+    """Freeze protocol and tools once, before any catalog/context projection."""
+
+    from ...tooling.models import ToolRuntimeSnapshot
+    from ..native_tool_protocol import select_tool_protocol
+
+    protocol_snapshot = select_tool_protocol(agent, run_id=request.run_id)
+    if agent.config.enable_tools:
+        runtime_snapshot = agent.tools.runtime_snapshot(
+            allowed_tools=request.allowed_tools,
+            run_id=request.run_id,
+        )
+    else:
+        runtime_snapshot = ToolRuntimeSnapshot(
+            run_id=request.run_id,
+            runtimes=(),
+            available_tool_names=frozenset(),
+            unavailable_tools=(),
+            allowed_tools=(
+                frozenset(request.allowed_tools) if request.allowed_tools is not None else None
+            ),
+            owner_type=str(getattr(agent.tools, "owner_type", "main_agent") or "main_agent"),
+        )
+    return runtime_snapshot, protocol_snapshot
 
 
 def build_runtime_main_context_bundle(
@@ -213,6 +303,7 @@ def build_runtime_main_context_bundle(
     routed_context,
     resume_context_injected: bool,
     task_local: bool,
+    tool_runtime_snapshot: object = None,
 ):
     if task_local:
         return None
@@ -224,7 +315,11 @@ def build_runtime_main_context_bundle(
     )
     auto_save = bool(getattr(agent.config, "auto_save_memory", True))
     do_save = auto_save if request.save is None else bool(request.save)
-    tool_specs, tool_spec_errors = _tool_specs_for_context(agent, request)
+    runtime_snapshot, tool_runtime_errors = _tool_runtime_for_context_bundle(
+        agent,
+        request,
+        tool_runtime_snapshot,
+    )
     return build_main_context_bundle(
         MainContextBundleRequest(
             root=workspace_root,
@@ -238,36 +333,70 @@ def build_runtime_main_context_bundle(
             save=do_save,
             memory_count=len(memories),
             runtime_injection_count=len(runtime_injections),
-            routed_required_read_paths=tuple(getattr(routed_context, "required_read_paths", ()) or ()),
+            routed_required_read_paths=tuple(
+                getattr(routed_context, "required_read_paths", ()) or ()
+            ),
             routed_candidate_paths=tuple(getattr(routed_context, "candidate_paths", ()) or ()),
             resume_context_injected=resume_context_injected,
             task_attributes=request.task_attributes,
             workspace_roots=tuple(str(item) for item in workspace_roots or ()),
             write_boundary=request.write_boundary,
-            allowed_tools=tuple(request.allowed_tools or ()),
-            tool_specs=tuple(tool_specs),
-            tool_spec_errors=tuple(tool_spec_errors),
+            tool_runtime_snapshot=runtime_snapshot,
+            tool_runtime_errors=tuple(tool_runtime_errors),
         )
     )
 
 
-def _tool_specs_for_context(agent, request: RuntimeContextRequest) -> tuple[list[object], list[dict[str, object]]]:
+def _tool_runtime_for_context_bundle(
+    agent: object,
+    request: RuntimeContextRequest,
+    snapshot: object,
+) -> tuple[object, list[dict[str, object]]]:
+    from ...tooling.models import ToolRuntimeSnapshot
+
+    if isinstance(snapshot, ToolRuntimeSnapshot):
+        return snapshot, []
     try:
-        return agent.tools.specs(
+        return agent.tools.runtime_snapshot(
             allowed_tools=request.allowed_tools,
-            include_orchestration=True,
+            run_id=request.run_id,
         ), []
     except Exception as exc:
-        return [], [runtime_error_report(exc, context="main_context_bundle.tool_specs")]
+        empty = ToolRuntimeSnapshot(
+            run_id=request.run_id,
+            runtimes=(),
+            available_tool_names=frozenset(),
+            unavailable_tools=(),
+            allowed_tools=(
+                frozenset(request.allowed_tools) if request.allowed_tools is not None else None
+            ),
+            owner_type=str(getattr(agent.tools, "owner_type", "main_agent") or "main_agent"),
+        )
+        return empty, [
+            runtime_error_report(exc, context="main_context_bundle.tool_runtime_snapshot")
+        ]
 
 
+# LLM: Routing reads only the owner formal index; missing/invalid authority disables this projection with a typed finding.
+# 函数用途: 为当前请求构造 lesson 路由收据，且 Memory 故障不使正常用户任务崩溃。
 def _routed_memory_context_for_request(agent, request: RuntimeContextRequest, *, task_local: bool):
     route_mode = str(getattr(agent.config, "memory_rule_routing_mode", "soft") or "soft")
     route_enabled = (
-        not task_local and bool(getattr(agent.config, "memory_rule_routing_enabled", True)) and route_mode != "off"
+        not task_local
+        and bool(getattr(agent.config, "memory_rule_routing_enabled", True))
+        and route_mode != "off"
     )
     route_auto_read_limit = int(getattr(agent.config, "memory_rule_auto_read_limit", 3))
-    route_root, route_index = runtime_route_root_and_index(agent)
+    if not route_enabled:
+        return RoutedMemoryContext(enabled=False, index_path="")
+    try:
+        route_root, route_index = runtime_route_root_and_index(agent)
+    except (OSError, RuntimeError, ValueError) as exc:
+        return RoutedMemoryContext(
+            enabled=False,
+            index_path="",
+            findings=[f"MEMORY_ROUTING_AUTHORITY_UNAVAILABLE:{type(exc).__name__}"],
+        )
     return build_routed_memory_context(
         route_root,
         request.user_prompt,
@@ -281,6 +410,63 @@ def _routed_memory_context_for_request(agent, request: RuntimeContextRequest, *,
     )
 
 
+# LLM: Runtime Prompt 只能收到一个 MemoryRecord 列表；routing 原始 Markdown 和 HOT 不得另建注入格式。
+# 函数用途: 合并适用的 HOT、已成功路由 lesson 和 active long-term，并清空旧 routing 文本注入。
+def _formal_memories_for_request(
+    agent,
+    request: RuntimeContextRequest,
+    routed_context,
+    *,
+    recall_scope: MemoryRecallScope,
+    long_term_memories: list,
+    task_local: bool,
+) -> list:
+    if task_local:
+        routed_context.injected_sections = []
+        return []
+    read_paths = [
+        str(receipt.get("path") or "")
+        for receipt in list(getattr(routed_context, "receipts", ()) or ())
+        if isinstance(receipt, dict) and receipt.get("status") == "read"
+    ]
+    try:
+        hot = hot_memory_records(
+            agent.memory_hot,
+            agent.memory_lessons,
+            scope=recall_scope,
+        )
+        lessons = routed_lesson_records(
+            agent.memory_lessons,
+            read_paths=read_paths,
+            scope=recall_scope,
+            stale_days=float(getattr(agent.config, "home_lesson_stale_caveat_days", 7.0) or 0.0),
+        )
+    except (OSError, UnicodeError, ValueError, KeyError) as exc:
+        # Corrupt formal files fail closed for this turn. Doctor/migration exposes the
+        # durable repair path; normal user work must not receive partial legacy prose.
+        finding = f"formal memory recall unavailable: {type(exc).__name__}"
+        if finding not in routed_context.findings:
+            routed_context.findings.append(finding)
+        hot, lessons = [], []
+    routed_context.injected_sections = []
+    return _dedupe_formal_memories([*hot, *lessons, *long_term_memories])
+
+
+# LLM: 三个正式来源按稳定 entry_id 精确去重，不做文本相似合并或时间覆盖。
+# 函数用途: 保留 HOT、lesson、long-term 的权威优先顺序并去掉重复 ID。
+def _dedupe_formal_memories(records: list) -> list:
+    result: list = []
+    seen: set[str] = set()
+    for record in records:
+        entry_id = str(getattr(record, "entry_id", "") or "")
+        marker = entry_id or f"{getattr(record, 'kind', '')}:{getattr(record, 'content', '')}"
+        if marker in seen:
+            continue
+        seen.add(marker)
+        result.append(record)
+    return result
+
+
 def _resume_context_for_request(agent, request: RuntimeContextRequest, *, task_local: bool):
     result = build_auto_resume_context(
         agent,
@@ -291,7 +477,9 @@ def _resume_context_for_request(agent, request: RuntimeContextRequest, *, task_l
     return result, section
 
 
-def _base_runtime_injections(request: RuntimeContextRequest, resume_context_section: str, routed_context):
+def _base_runtime_injections(
+    request: RuntimeContextRequest, resume_context_section: str, routed_context
+):
     return [
         *(request.inject or []),
         *([resume_context_section] if resume_context_section else []),
@@ -316,17 +504,29 @@ def _runtime_injections_with_bundle(
 def _execute_runtime_loop(agent, params: RuntimeLoopParams):
     write_runtime_fact_start_if_enabled(agent, params)
     audit_source_provision = _provision_audit_sources_before_model(agent, params)
-    tool_runtime_snapshot = (
-        agent.tools.runtime_snapshot(allowed_tools=params.allowed_tools)
-        if agent.config.enable_tools
-        else None
+    from ...tooling.models import ToolRuntimeSnapshot
+    from ...tooling.runtime_contracts import ToolProtocolSnapshot
+
+    tool_runtime_snapshot = params.tool_runtime_snapshot
+    tool_protocol_snapshot = params.tool_protocol_snapshot
+    if not isinstance(tool_runtime_snapshot, ToolRuntimeSnapshot):
+        raise RuntimeError("tool runtime snapshot is missing from this run")
+    if not isinstance(tool_protocol_snapshot, ToolProtocolSnapshot):
+        raise RuntimeError("tool protocol snapshot is missing from this run")
+    effective_contract_snapshot = _required_action_contract_snapshot(
+        agent,
+        params,
+        tool_runtime_snapshot,
     )
-    tool_catalog_section, tool_recommendations_section = _resolve_tool_sections(ToolSectionsRequest(
-        agent=agent,
-        user_prompt=params.user_prompt,
-        allowed_tools=params.allowed_tools,
-        runtime_snapshot=tool_runtime_snapshot,
-    ))
+    tool_catalog_section, tool_recommendations_section = _resolve_tool_sections(
+        ToolSectionsRequest(
+            agent=agent,
+            user_prompt=params.user_prompt,
+            allowed_tools=params.allowed_tools,
+            runtime_snapshot=tool_runtime_snapshot,
+            protocol_snapshot=tool_protocol_snapshot,
+        )
+    )
     compression = _execute_runtime_compression(agent, params)
     loop_params = _tool_loop_execute_params(
         agent,
@@ -336,8 +536,15 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
             tool_catalog_section=tool_catalog_section,
             tool_recommendations_section=tool_recommendations_section,
             tool_runtime_snapshot=tool_runtime_snapshot,
-        )
+            tool_protocol_snapshot=tool_protocol_snapshot,
+            effective_contract_snapshot=effective_contract_snapshot,
+        ),
     )
+    from ...contracts.required_actions import render_required_action_guidance
+
+    required_guidance = render_required_action_guidance(effective_contract_snapshot)
+    if required_guidance:
+        loop_params.tool_context.append(required_guidance)
     _queue_audit_source_provision_reply(loop_params, audit_source_provision)
     # 每个 run 都有自己的工具循环状态；同一 owner 的并发聊天/后台轮
     # 不能共享一个 ToolLoopService 实例。
@@ -352,7 +559,71 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
         executed_tools=loop_params.executed_tools,
         archive_tool_calls=loop_params.archive_tool_calls,
         active_turn_user_inputs=list(loop_params.active_turn_user_inputs),
+        tool_runtime_evidence=_tool_runtime_evidence(
+            tool_runtime_snapshot,
+            tool_protocol_snapshot,
+            effective_contract_snapshot,
+            loop_params.live_archive_state,
+            final_response,
+        ),
     )
+
+
+def _tool_runtime_evidence(
+    runtime_snapshot: object,
+    protocol_snapshot: object,
+    contract_snapshot: object,
+    live_state: dict[str, object],
+    final_response: object,
+) -> dict[str, object]:
+    capability = getattr(protocol_snapshot, "capability", None)
+    actions = tuple(getattr(contract_snapshot, "required_actions", ()) or ())
+    assessment = getattr(contract_snapshot, "required_action_assessment", None)
+    assessment = assessment if isinstance(assessment, dict) else {}
+    action_rows = [item.to_dict() for item in actions if callable(getattr(item, "to_dict", None))]
+    final_status = str(getattr(final_response, "runtime_status", "") or "ok")
+    open_count = sum(row.get("status") == "open" for row in action_rows)
+    return {
+        "runtime_snapshot": {
+            "run_id": str(getattr(runtime_snapshot, "run_id", "") or ""),
+            "snapshot_hash": str(getattr(runtime_snapshot, "snapshot_hash", "") or ""),
+            "available_tool_count": len(
+                tuple(getattr(runtime_snapshot, "available_tool_names", ()) or ())
+            ),
+        },
+        "protocol": {
+            "source_protocol": str(getattr(protocol_snapshot, "source_protocol", "") or ""),
+            "provider": str(getattr(capability, "provider", "") or ""),
+            "endpoint": str(getattr(capability, "endpoint", "") or ""),
+            "model": str(getattr(capability, "model", "") or ""),
+            "stream": bool(getattr(capability, "stream", False)),
+            "native_supported": bool(getattr(capability, "native_supported", False)),
+            "capability_evidence": str(getattr(capability, "evidence", "") or ""),
+        },
+        "required_action_assessment": {
+            "source": str(assessment.get("source") or ""),
+            "error": str(assessment.get("error") or ""),
+            "requires_action": assessment.get("requires_action"),
+        },
+        "required_actions": action_rows,
+        "tool_choices": [
+            dict(item)
+            for item in list(live_state.get("tool_choice_trace") or [])
+            if isinstance(item, dict)
+        ],
+        "protocol_violations": [
+            dict(item)
+            for item in list(live_state.get("protocol_violation_trace") or [])
+            if isinstance(item, dict)
+        ],
+        "completion_gate": {
+            "status": final_status,
+            "reason": str(getattr(final_response, "runtime_reason", "") or ""),
+            "source": str(getattr(final_response, "runtime_source", "") or ""),
+            "open_required_action_count": open_count,
+            "completed": open_count == 0 and final_status == "ok",
+        },
+    }
 
 
 def _provision_audit_sources_before_model(
@@ -443,34 +714,13 @@ def _execute_runtime_compression(agent, params: RuntimeLoopParams) -> Compressio
         source=params.source,
     )
     memories, snapshot_id, snapshot_path, applied = compression_svc.check_and_apply(compression_ctx)
-    return CompressionLoopResult(memories=memories, snapshot_id=snapshot_id, snapshot_path=snapshot_path, applied=applied)
+    return CompressionLoopResult(
+        memories=memories, snapshot_id=snapshot_id, snapshot_path=snapshot_path, applied=applied
+    )
 
 
 def _is_task_local_context(value: object) -> bool:
     return str(value or "").strip().lower() in {"task_local", "control_plane"}
-
-
-def _memories_for_request(memories: list, request: RuntimeContextRequest, *, task_local: bool) -> list:
-    if task_local:
-        return []
-    if conversation_transcript_is_authoritative(request.task_attributes):
-        return [memory for memory in memories if not _is_dialogue_memory(memory)]
-    if _dialogue_memory_allowed(request):
-        return memories
-    return [memory for memory in memories if not _is_dialogue_memory(memory)]
-
-
-def _dialogue_memory_allowed(request: RuntimeContextRequest) -> bool:
-    source = str(request.source or "").strip()
-    if source != "cli_run":
-        return True
-    if request.resume_context is True:
-        return True
-    return has_resume_trigger(request.user_prompt)
-
-
-def _is_dialogue_memory(memory: object) -> bool:
-    return str(getattr(memory, "kind", "") or "").strip().lower() == "dialogue"
 
 
 def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecuteParams:
@@ -492,9 +742,7 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         f"[ACTIVE_TURN_USER_INPUT]\n{text}" for text in active_turn_user_input_texts_carried
     )
     tool_ir_history: list[object] = []
-    from ..native_tool_protocol import native_tool_use_active
-
-    if native_tool_use_active(agent):
+    if getattr(seed.tool_protocol_snapshot, "source_protocol", "") == "native":
         from ...backends.tool_ir import UserTurn
 
         tool_ir_history.extend(UserTurn(text) for text in active_turn_user_input_texts_carried)
@@ -502,6 +750,12 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
     one_shot_tool_calls: set[str] = reconstructed.one_shot_tool_calls
     executed_tools: list[str] = reconstructed.executed_tools
     live_archive_state = _live_archive_state_from_carried_archive_tool_calls(archive_tool_calls)
+    required_tool_names = {
+        name
+        for action in tuple(getattr(seed.effective_contract_snapshot, "required_actions", ()) or ())
+        if str(getattr(action, "status", "") or "") == "open"
+        for name in tuple(getattr(action, "allowed_tools", ()) or ())
+    }
     return ToolLoopExecuteParams(
         user_prompt=params.user_prompt,
         root_user_prompt=params.root_user_prompt or params.user_prompt,
@@ -528,15 +782,55 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         archive_tool_calls=archive_tool_calls,
         attempt_id=params.attempt_id,
         tool_runtime_snapshot=seed.tool_runtime_snapshot,
+        tool_protocol_snapshot=seed.tool_protocol_snapshot,
+        effective_contract_snapshot=seed.effective_contract_snapshot,
         tool_rounds=tool_rounds,
         save=params.save,
         live_archive_state=live_archive_state,
         tool_ir_history=tool_ir_history,
         active_turn_user_inputs=active_turn_user_inputs,
         context_scope=params.context_scope,
-        loaded_tool_names=reconstructed.loaded_tool_names,
+        loaded_tool_names={*reconstructed.loaded_tool_names, *required_tool_names},
         workspace_context_snapshot=_workspace_context_snapshot(agent, params),
     )
+
+
+def _required_action_contract_snapshot(
+    agent: object,
+    params: RuntimeLoopParams,
+    tool_runtime_snapshot: object,
+):
+    from ...contracts.effective_contract_snapshot import build_effective_contract_snapshot
+    from ...contracts.required_actions import (
+        assess_required_actions,
+        restore_required_actions_from_records,
+    )
+
+    assessment = assess_required_actions(
+        backend=getattr(agent, "backend", None),
+        user_prompt=params.root_user_prompt or params.user_prompt,
+        runtime_snapshot=tool_runtime_snapshot,
+        run_id=params.run_id,
+        source_turn_id=params.request_id or params.attempt_id or params.run_id,
+        structured_sources=(params.task_attributes, params.delivery_contract),
+    )
+    metadata = {
+        "source": assessment.source,
+        "error": assessment.error,
+        "raw": assessment.raw,
+        "requires_action": assessment.requires_action,
+    }
+    snapshot = build_effective_contract_snapshot(
+        run_id=params.run_id,
+        layers=(),
+        required_actions=assessment.actions,
+        required_action_assessment=metadata,
+    )
+    restore_required_actions_from_records(
+        snapshot,
+        params.carried_archive_tool_calls or (),
+    )
+    return snapshot
 
 
 def _workspace_context_snapshot(agent, params: RuntimeLoopParams) -> str:
@@ -588,14 +882,16 @@ def _reconstructed_runtime_state(
     valid_records = [record for record in records if isinstance(record, dict)]
     mechanical_entries = [_reconstructed_tool_context_entry(record) for record in valid_records]
     return _ReconstructedRuntimeState(
-        tool_context=_tool_context_with_optional_semantic_summary(valid_records, mechanical_entries, agent),
+        tool_context=_tool_context_with_optional_semantic_summary(
+            valid_records, mechanical_entries, agent
+        ),
         tool_rounds=len(valid_records),
         one_shot_tool_calls={
-            key
-            for record in valid_records
-            for key in _carried_one_shot_keys(record)
+            key for record in valid_records for key in _carried_one_shot_keys(record)
         },
-        executed_tools=[name for record in valid_records if (name := _carried_executed_tool_name(record))],
+        executed_tools=[
+            name for record in valid_records if (name := _carried_executed_tool_name(record))
+        ],
         loaded_tool_names=_pending_carried_loaded_tool_names(valid_records),
     )
 
@@ -682,7 +978,7 @@ def _carried_executed_tool_name(record: dict[str, object]) -> str:
     if not bool(record.get("ok")):
         return ""
     tool_name = str(record.get("tool") or "").strip()
-    return tool_name if tool_name and tool_name not in {"__parse_error__", "unknown"} else ""
+    return tool_name
 
 
 def _carried_one_shot_keys(record: dict[str, object]) -> set[str]:
@@ -712,9 +1008,7 @@ def _reconstructed_tool_context_entry(record: dict[str, object]) -> str:
         if key not in {"tool", "call_id"} and str(value).strip()
     )
     model_summary = str(record.get("model_summary") or "").strip()
-    result_lines = [model_summary] if model_summary else [
-        f"[tool={tool_name}; status={status}]"
-    ]
+    result_lines = [model_summary] if model_summary else [f"[tool={tool_name}; status={status}]"]
     preview = str(record.get("output_preview") or "").strip()
     if preview and not model_summary:
         projected_preview = project_tool_output_body(
@@ -742,12 +1036,8 @@ def _reconstructed_tool_context_entry(record: dict[str, object]) -> str:
         value = str(record.get(key) or "").strip()
         if value:
             result_lines.append(f"- {key}: {value}")
-    result_lines.append(
-        f"- handler_executed: {record.get('handler_executed') is True}"
-    )
-    result_lines.append(
-        f"- duration_ms: {_nonnegative_tool_duration(record.get('duration_ms'))}"
-    )
+    result_lines.append(f"- handler_executed: {record.get('handler_executed') is True}")
+    result_lines.append(f"- duration_ms: {_nonnegative_tool_duration(record.get('duration_ms'))}")
     if "tool_operation_replayed" in record:
         result_lines.append(
             f"- tool_operation_replayed: {record.get('tool_operation_replayed') is True}"
@@ -769,7 +1059,9 @@ def _nonnegative_tool_duration(value: object) -> int:
         return 0
 
 
-def _live_archive_state_from_carried_archive_tool_calls(records: list[dict[str, object]]) -> dict[str, object]:
+def _live_archive_state_from_carried_archive_tool_calls(
+    records: list[dict[str, object]],
+) -> dict[str, object]:
     pending = _pending_deferred_tool_calls(records)
     if not pending:
         return {}

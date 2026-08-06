@@ -169,12 +169,12 @@ class TestRememberParser:
     def test_remember_default_kind(self, parser_with_basic: argparse.ArgumentParser) -> None:
         """测试 remember 的默认 kind 值。"""
         args = parser_with_basic.parse_args(["remember", "内容"])
-        assert args.kind == "note"
+        assert args.kind == "fact"
 
     def test_remember_custom_kind(self, parser_with_basic: argparse.ArgumentParser) -> None:
         """测试 remember 的自定义 kind 值。"""
-        args = parser_with_basic.parse_args(["remember", "内容", "--kind", "fact"])
-        assert args.kind == "fact"
+        args = parser_with_basic.parse_args(["remember", "内容", "--kind", "project"])
+        assert args.kind == "project"
 
 
 class TestMemorySubcommands:

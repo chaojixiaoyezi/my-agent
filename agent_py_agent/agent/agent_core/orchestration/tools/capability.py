@@ -19,8 +19,15 @@ from ....runtime_errors import runtime_error_report
 from ....subagents.model_capabilities import capability_request_requires_parent_resolution
 from ....subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
 from ....subagents.services.lifecycle import RecordCapabilityGrantParams
-from ....tooling.models import BaseTool, ToolExecutionResult
-from ..tool_specs import build_resolve_capability_requests_spec
+from ....tooling.models import (
+    BaseTool,
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    ResourceScopePolicy,
+    ToolHandlerOutcome,
+    ToolRuntimePolicy,
+)
+from ..tool_specs import build_resolve_capability_requests_model_spec
 
 if TYPE_CHECKING:
     from ....core import SimpleAgent
@@ -39,7 +46,7 @@ class _ResolveContext:
     reason: str
 
 
-def _resolve_param_error(run_id: str, decision: str, reason: str) -> ToolExecutionResult | None:
+def _resolve_param_error(run_id: str, decision: str, reason: str) -> ToolHandlerOutcome | None:
     # 精准报缺哪个参数(修 T5-deliver 阶段3:旧版把 run_id/decision/reason 笼统列一起,
     # M2.7 只缺 reason 却误判成别的参数、试 18 轮没搞清)。reason 仍必填,此处给示例引导。
     if not run_id:
@@ -60,15 +67,24 @@ def _resolve_param_error(run_id: str, decision: str, reason: str) -> ToolExecuti
 
 class ResolveCapabilityRequestsTool(BaseTool):
     # 类用途: 主代理模型处理子代理能力申请的唯一显式入口；grant/deny 都唤醒子代理。
+    model_spec = build_resolve_capability_requests_model_spec()
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy(
+            "mutating",
+            by_parameter=(("decision", (("grant", "dangerous"), ("deny", "mutating"))),),
+        ),
+        idempotency_policy=IdempotencyPolicy("operation"),
+        resource_scopes=ResourceScopePolicy(parameter_names=("run_id", "request_id", "write_roots")),
+    )
+
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
-        self.spec = build_resolve_capability_requests_spec()
 
     # LLM: 工具响应必须是结构化 JSON（resolved/errors），失败也要给出机器可读原因；
     #   不要把自然语言判断混进裁决路径。持久化顺序契约：先 save 请求状态，再逐条落
     #   grant（record_capability_grant 内部重新加载，顺序反了旧副本会覆盖 grants）。
     # 函数用途: 解析参数、裁决每条未决请求、落盘并发 wake。
-    def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         run_id = str(params.get("run_id") or "").strip()
         decision = str(params.get("decision") or "").strip().lower()
         reason = str(params.get("reason") or "").strip()
@@ -103,7 +119,7 @@ class ResolveCapabilityRequestsTool(BaseTool):
             "resolved": resolved,
             "errors": errors,
         }
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             "resolve_capability_requests",
             bool(resolved) and not errors,
             json.dumps(payload, ensure_ascii=False, indent=2),
@@ -274,7 +290,7 @@ def _safe_grant_roots(agent: Any, task: Any) -> list[Path]:
 #   触发工具熔断 → 熔断兜底文案又像权限墙 → 模型判定"解阻工具坏了"放弃整条编队。
 #   这里必须给足客观事实(子代理状态+申请账目)和下一步指引,让模型转去重派/给提示/了结。
 # 函数用途: 无未决申请时的结构化成功响应(状态实情 + 可执行下一步,终结重试螺旋)。
-def _no_pending_result(task: Any, run_id: str, decision: str) -> ToolExecutionResult:
+def _no_pending_result(task: Any, run_id: str, decision: str) -> ToolHandlerOutcome:
     counts: dict[str, int] = {}
     for request in getattr(task, "capability_requests", None) or []:
         status = str(getattr(request, "status", "") or "UNKNOWN").upper()
@@ -293,7 +309,7 @@ def _no_pending_result(task: Any, run_id: str, decision: str) -> ToolExecutionRe
             "救不回来就 cancel_subagents 了结,别晾着拖收尾。"
         ),
     }
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         "resolve_capability_requests", True, json.dumps(payload, ensure_ascii=False, indent=2)
     )
 
@@ -456,8 +472,8 @@ def _is_relative_to(path: Path, root: Path) -> bool:
 
 
 # 函数用途: 统一的参数错误响应（带准确分类码，避免无码兜底成 UNKNOWN_ERROR 误导模型放弃）。
-def _error_result(message: str, *, error_code: str = "TOOL_INVALID_ARGUMENTS") -> ToolExecutionResult:
-    return ToolExecutionResult("resolve_capability_requests", False, message, error_code=error_code)
+def _error_result(message: str, *, error_code: str = "TOOL_INVALID_ARGUMENTS") -> ToolHandlerOutcome:
+    return ToolHandlerOutcome("resolve_capability_requests", False, message, error_code=error_code)
 
 
 __all__ = ["ResolveCapabilityRequestsTool"]

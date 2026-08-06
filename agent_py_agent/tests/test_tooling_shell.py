@@ -1,13 +1,21 @@
 """Shell 命令执行工具测试 - 命令执行、超时控制、输出捕获。"""
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import sys
+import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+
+from agent_py_agent.agent.tooling.cancellation import (
+    CancellationToken,
+    bind_cancellation_token,
+)
 
 
 def _python_sleep_command(seconds: int) -> str:
@@ -27,11 +35,14 @@ class TestShellToolBasics:
         workspace = tmp_path / "workspace"
         workspace.mkdir()
 
-        spec = ShellTool(workspace).spec
+        model_spec = ShellTool(workspace).model_spec
 
-        assert "per-command tmpfs" in spec.parameter_details["temporary_storage"]
-        assert "selected workspace" in spec.parameter_details["temporary_storage"]
-        assert any("/tmp" in item and "per-command tmpfs" in item for item in spec.avoid_when)
+        assert any(
+            "/tmp" in item
+            and "per-command tmpfs" in item
+            and "selected workspace" in item
+            for item in model_spec.hints.avoid_when
+        )
 
     def test_run_simple_command(self, tmp_path: Path):
         """执行简单命令。"""
@@ -46,6 +57,61 @@ class TestShellToolBasics:
         assert result.ok is True
         assert "return_code=0" in result.output
         assert "hello" in result.output
+
+    def test_running_process_obeys_bound_cancellation_token(self, tmp_path: Path):
+        from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=30))
+        token = CancellationToken()
+        observed = {}
+
+        def run() -> None:
+            with bind_cancellation_token(token):
+                observed["result"] = tool.execute(
+                    {"command": _python_sleep_command(20)}
+                )
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        time.sleep(0.3)
+        token.cancel("test stop")
+        thread.join(5)
+
+        assert not thread.is_alive()
+        assert observed["result"].error_code == "CANCELLED"
+
+    def test_background_process_is_terminated_when_owning_token_is_cancelled(
+        self,
+        tmp_path: Path,
+    ):
+        from agent_py_agent.agent.tooling.process_registry import process_registry
+        from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=30))
+        token = CancellationToken()
+        with bind_cancellation_token(token):
+            result = tool.execute(
+                {
+                    "command": _python_sleep_command(20),
+                    "run_in_background": True,
+                }
+            )
+        assert result.ok is True
+        session_id = json.loads(result.output)["session_id"]
+
+        token.cancel("test stop")
+        deadline = time.monotonic() + 4
+        status = process_registry.status(session_id)
+        while status and status["status"] == "running" and time.monotonic() < deadline:
+            time.sleep(0.05)
+            status = process_registry.status(session_id)
+
+        assert status is not None
+        assert status["status"] == "exited"
 
     def test_run_command_with_cwd(self, tmp_path: Path):
         """指定工作目录执行命令。"""

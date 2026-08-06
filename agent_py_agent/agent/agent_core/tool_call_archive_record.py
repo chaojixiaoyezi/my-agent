@@ -6,7 +6,10 @@ from pathlib import Path
 from ..artifacts.registry import ArtifactRegistration, register_artifact
 from ..memory_archive import ExternalizeToolOutputRequest, externalize_tool_output_record
 from ..settings.defaults import default_config_int
-from .native_tool_protocol import native_tool_use_active
+from ..tooling.executor import ToolOutputProjection
+from ..tooling.models import ToolHandlerOutcome, output_policy_for_outcome
+from ..tooling.output_projection import project_tool_output_body
+from ..tooling.runtime_contracts import ToolCall, ToolContentBlock, ToolResultRef
 from .run_task_workspace_writer import current_run_task_work_dir, current_run_task_workspace_root
 from .runtime.owner_roots import runtime_owner_root
 from .tool_loop.recovery import runtime_run_id, runtime_run_scope
@@ -16,33 +19,152 @@ from .tool_output_failsafe import write_tool_output_fail_safe_checkpoint
 _MODEL_SUMMARY_MAX_CHARS = 12_000
 
 
-def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dict[str, object]:
-    call_id = _tool_call_archive_call_id(agent, record)
+def archive_tool_output_projection(
+    agent: object,
+    params: object,
+    call: ToolCall,
+    outcome: ToolHandlerOutcome,
+) -> ToolOutputProjection:
+    """Archive the raw handler body before any model-facing projection is applied."""
+
+    runtime_snapshot = getattr(params, "tool_runtime_snapshot", None)
+    runtime = runtime_snapshot.runtime(call.tool_name) if runtime_snapshot is not None else None
+    output_policy = (
+        output_policy_for_outcome(runtime.runtime_policy, outcome)
+        if runtime is not None
+        else None
+    )
+    trust = output_policy.trust if output_policy is not None else "runtime"
+    redaction = output_policy.redaction if output_policy is not None else "default"
+    envelope = dict(outcome.result_envelope or {})
+    envelope["tool_output_policy"] = {
+        "trust": trust,
+        "redaction": redaction,
+    }
     request = ExternalizeToolOutputRequest(
-        root=_tool_output_archive_root(agent, record.params),
-        tool=record.result.tool,
-        call_id=call_id,
-        output=record.result.output,
-        ok=record.result.ok,
-        error_code=str(getattr(record.result, "error_code", "") or ""),
-        reported_error_code=str(getattr(record.result, "reported_error_code", "") or ""),
-        request_id=record.params.request_id,
-        run_id=runtime_run_id(agent, record.params),
-        task_id=record.params.task_id,
+        root=_tool_output_archive_root(agent, params),
+        tool=call.tool_name,
+        call_id=call.call_id,
+        output=outcome.output,
+        ok=outcome.ok,
+        error_code=str(outcome.error_code or ""),
+        reported_error_code=str(outcome.reported_error_code or ""),
+        request_id=str(getattr(params, "request_id", "") or ""),
+        run_id=call.run_id,
+        task_id=str(getattr(params, "task_id", "") or ""),
         min_chars=_config_int(agent, "tool_output_externalize_min_chars"),
         preview_chars=_config_int(agent, "tool_output_preview_chars"),
-        parameters=record.payload,
-        result_envelope=getattr(record.result, "result_envelope", None),
+        parameters=dict(call.arguments),
+        result_envelope=envelope,
     )
     output_record = externalize_tool_output_record(request)
     output_record.update(write_tool_output_fail_safe_checkpoint(request))
-    output_record["parameters"] = record.payload
+    preview = project_tool_output_body(
+        tool=call.tool_name,
+        output=output_record.get("output_preview", ""),
+        trust=trust,
+        redaction=redaction,
+    )
+    refs = _projection_refs(output_record, outcome)
+    blocks: list[ToolContentBlock] = []
+    if preview:
+        blocks.append(ToolContentBlock("text", text=preview))
+    blocks.extend(ToolContentBlock("ref", ref=ref.ref) for ref in refs)
+    return ToolOutputProjection(
+        content_blocks=tuple(blocks),
+        refs=refs,
+        metadata={
+            "archive_output_record": output_record,
+            "raw_output_chars": len(str(outcome.output or "")),
+            "raw_output_bytes": int(output_record.get("output_size_bytes") or 0),
+            "raw_output_sha256": str(output_record.get("output_hash") or ""),
+            "projection_truncated": output_record.get("output_externalized") is True,
+        },
+    )
+
+
+def _projection_refs(
+    output_record: dict[str, object],
+    outcome: ToolHandlerOutcome,
+) -> tuple[ToolResultRef, ...]:
+    refs: list[ToolResultRef] = []
+    seen: set[str] = set()
+
+    def append(kind: object, value: object, *, summary: object = "") -> None:
+        ref = str(value or "").strip()
+        if not ref or ref in seen:
+            return
+        seen.add(ref)
+        refs.append(
+            ToolResultRef(
+                kind=str(kind or "artifact"),
+                ref=ref,
+                sha256=str(output_record.get("output_hash") or ""),
+                size_bytes=int(output_record.get("output_size_bytes") or 0),
+                summary=str(summary or "").strip(),
+            )
+        )
+
+    append(
+        "tool_output",
+        output_record.get("output_path")
+        or output_record.get("artifact_ref")
+        or output_record.get("source_artifact_ref"),
+        summary="complete raw tool output",
+    )
+    envelope = outcome.result_envelope if isinstance(outcome.result_envelope, dict) else {}
+    for key in ("tool_result_refs", "artifact_refs", "output_refs"):
+        values = envelope.get(key)
+        for item in values if isinstance(values, list) else ():
+            if not isinstance(item, dict):
+                continue
+            append(
+                item.get("kind") or "artifact",
+                item.get("ref") or item.get("path") or item.get("uri"),
+                summary=item.get("summary"),
+            )
+    return tuple(refs)
+
+
+def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dict[str, object]:
+    call_id = record.call.call_id
+    cached = record.result.metadata.get("archive_output_record")
+    if isinstance(cached, dict):
+        output_record = dict(cached)
+    else:
+        request = ExternalizeToolOutputRequest(
+            root=_tool_output_archive_root(agent, record.params),
+            tool=record.result.tool_name,
+            call_id=call_id,
+            output=record.result.output,
+            ok=record.result.ok,
+            error_code=record.result.error_code,
+            reported_error_code=record.result.reported_error_code,
+            request_id=record.params.request_id,
+            run_id=runtime_run_id(agent, record.params),
+            task_id=record.params.task_id,
+            min_chars=_config_int(agent, "tool_output_externalize_min_chars"),
+            preview_chars=_config_int(agent, "tool_output_preview_chars"),
+            parameters=dict(record.call.arguments),
+            result_envelope=_result_details(record.result),
+        )
+        output_record = externalize_tool_output_record(request)
+        output_record.update(write_tool_output_fail_safe_checkpoint(request))
+    output_record["parameters"] = dict(record.call.arguments)
     # The round/index pair is runtime authority for ephemeral tool discovery:
     # a tool loaded by tool_search is pending only until the next model turn.
     # Persist it on the carried record so a compact continuation can distinguish
     # an unconsumed search from a search consumed by later rounds.
     output_record["tool_round"] = max(0, int(record.tool_rounds or 0))
     output_record["tool_index"] = max(0, int(record.idx or 0))
+    output_record["source_protocol"] = record.call.source_protocol
+    output_record["schema_hash"] = record.call.schema_hash
+    output_record["turn_id"] = record.call.turn_id
+    output_record["attempt_id"] = record.call.attempt_id
+    output_record["required_action_id"] = record.call.required_action_id
+    output_record["operation_id"] = record.call.operation_id
+    output_record["idempotency_key"] = record.call.idempotency_key
+    output_record["execution_states"] = list(record.execution_states)
     _attach_run_scope(output_record, agent, record)
     _attach_gate_and_refs(output_record, record.result)
     _attach_model_summary(output_record, record.result)
@@ -58,15 +180,14 @@ def _attach_model_summary(output_record: dict[str, object], result: object) -> N
         tool_output_projection_policy,
     )
 
-    trust, redaction = tool_output_projection_policy(
-        getattr(result, "result_envelope", None)
-    )
+    details = _result_details(result)
+    trust, redaction = tool_output_projection_policy(details)
     if trust == "external_data":
         return
     from .orchestration.context.live_summary import orchestration_live_summary
     from .tool_context.action_summary import actionable_tool_result_summary
 
-    policy = getattr(result, "result_envelope", {}).get("tool_output_policy")
+    policy = details.get("tool_output_policy")
     live_prompt_output = (
         str(policy.get("live_prompt_output") or "").strip()
         if isinstance(policy, dict)
@@ -89,37 +210,6 @@ def _bounded_model_summary(value: str) -> str:
     head = int(budget * 0.6)
     tail = budget - head
     return f"{value[:head]}{marker}{value[-tail:]}"
-
-
-def _tool_call_archive_call_id(agent: object, record: ToolCallRecordParams) -> str:
-    """选用这次工具记录的 call_id。
-
-    text 协议：沿用合成 ``round-idx``（既有外置/锚点/账本口径不变）。
-    native 协议：优先用模型返回的真实 provider tool_use id（``payload["call_id"]``，
-    由 ``_flatten_tool_use_block`` 注入），使出站 tool_result 的 ``tool_use_id`` 能与
-    assistant ``tool_use.id`` 配对；同时把它回写到 ``result.call_id``，让 IR 历史
-    （``record_tool_call_ir``）拿到同一个真实 id。真实 id 缺失时回退合成 id，永不空。
-    """
-    synthetic = f"{record.tool_rounds}-{record.idx}"
-    if not native_tool_use_active(agent):
-        return synthetic
-    provider_id = ""
-    if isinstance(record.payload, dict):
-        provider_id = str(record.payload.get("call_id") or "")
-    if not provider_id:
-        provider_id = str(getattr(record.result, "call_id", "") or "")
-    call_id = provider_id or synthetic
-    _stamp_result_call_id(record.result, call_id)
-    return call_id
-
-
-def _stamp_result_call_id(result: object, call_id: str) -> None:
-    if not call_id or str(getattr(result, "call_id", "") or "") == call_id:
-        return
-    try:
-        result.call_id = call_id  # type: ignore[attr-defined]
-    except (AttributeError, TypeError):
-        return
 
 
 def _config_int(agent: object, key: str) -> int:
@@ -169,7 +259,7 @@ def _register_tool_result_artifacts(
     for ref in refs:
         if not isinstance(ref, dict):
             continue
-        path = _existing_file_ref(ref.get("path"))
+        path = _existing_file_ref(ref.get("ref") or ref.get("path"))
         if path is None:
             continue
         registered = register_artifact(
@@ -181,7 +271,7 @@ def _register_tool_result_artifacts(
                 agent_id=str(scope.get("owner_id") or scope.get("run_id") or record.params.run_id or ""),
                 kind=str(ref.get("kind") or ""),
                 source="tool_result",
-                created_by_tool=str(record.result.tool or ""),
+                created_by_tool=record.result.tool_name,
                 metadata={"call_id": str(output_record.get("call_id") or "")},
             )
         )
@@ -219,19 +309,24 @@ def _attach_run_scope(output_record: dict[str, object], agent: object, record: T
     _copy_text_fact(output_record, "agent_kind", scope.get("agent_kind"))
 
 
+def _result_details(result: object) -> dict[str, object]:
+    """Read handler details from canonical ToolResult metadata."""
+
+    metadata = getattr(result, "metadata", None)
+    if isinstance(metadata, dict):
+        details = metadata.get("handler_details")
+        if isinstance(details, dict):
+            return dict(details)
+    return {}
+
+
 def _scope_from_result(result: object) -> dict[str, object]:
-    envelope = getattr(result, "result_envelope", None)
-    if not isinstance(envelope, dict):
-        return {}
-    scope = envelope.get("scope")
+    scope = _result_details(result).get("scope")
     return dict(scope) if isinstance(scope, dict) else {}
 
 
 def _runtime_gate_from_result(result: object) -> dict[str, object]:
-    envelope = getattr(result, "result_envelope", None)
-    if not isinstance(envelope, dict):
-        return {}
-    gate = envelope.get("runtime_gate")
+    gate = _result_details(result).get("runtime_gate")
     return dict(gate) if isinstance(gate, dict) else {}
 
 
@@ -259,16 +354,26 @@ def _tool_execution_facts_from_result(result: object) -> dict[str, object]:
 # LLM: archive 顶层的操作事实来自 typed result/envelope；不得从 output 正文解析状态。
 # 函数用途: 提取 compact、重启续跑和审计都需要的操作终态与副作用引用。
 def _operation_facts_from_result(result: object) -> dict[str, object]:
-    envelope = getattr(result, "result_envelope", None)
+    details = _result_details(result)
     facts: dict[str, object] = {}
     _copy_text_fact(facts, "effect_outcome", getattr(result, "effect_outcome", ""))
     _copy_text_fact(facts, "effect_source_ref", getattr(result, "effect_source_ref", ""))
-    if not isinstance(envelope, dict):
-        return facts
-    _copy_text_fact(facts, "operation_id", envelope.get("operation_id"))
-    operation = envelope.get("tool_operation")
+    operation_value = getattr(result, "operation", None)
+    if operation_value is not None and hasattr(operation_value, "to_dict"):
+        operation = operation_value.to_dict()
+        _copy_text_fact(facts, "operation_id", operation.get("operation_id"))
+        _copy_text_fact(facts, "result_ref", operation.get("result_ref"))
+        _copy_text_fact(facts, "idempotency_key", operation.get("idempotency_key"))
+        _copy_text_fact(facts, "tool_operation_status", operation.get("status"))
+        facts["tool_operation_replayed"] = operation.get("replayed") is True
+        facts["tool_operation_attempt_count"] = max(
+            0, _int_value(operation.get("attempt_count"))
+        )
+    _copy_text_fact(facts, "operation_id", details.get("operation_id"))
+    operation = details.get("tool_operation")
     if isinstance(operation, dict):
         _copy_text_fact(facts, "operation_id", operation.get("operation_id"))
+        _copy_text_fact(facts, "result_ref", operation.get("result_ref"))
         _copy_text_fact(facts, "tool_operation_status", operation.get("status"))
         _copy_text_fact(facts, "tool_operation_action", operation.get("action"))
         _copy_text_fact(
@@ -283,15 +388,6 @@ def _operation_facts_from_result(result: object) -> dict[str, object]:
         )
         if "replayed" in operation:
             facts["tool_operation_replayed"] = operation.get("replayed") is True
-    protocol = envelope.get("tool_protocol_v2")
-    if isinstance(protocol, dict):
-        output_record_protocol = {
-            "operation_id": protocol.get("operation_id"),
-            "idempotency_key": protocol.get("idempotency_key"),
-        }
-        _copy_text_fact(facts, "operation_id", output_record_protocol["operation_id"])
-        _copy_text_fact(facts, "idempotency_key", output_record_protocol["idempotency_key"])
-        facts["tool_protocol_v2"] = output_record_protocol
     return facts
 
 
@@ -309,12 +405,15 @@ def _int_value(value: object) -> int:
 
 
 def _tool_result_refs_from_result(result: object) -> list[dict[str, object]]:
-    envelope = getattr(result, "result_envelope", None)
-    if not isinstance(envelope, dict):
-        return []
-    refs: list[dict[str, object]] = []
-    _append_refs(refs, envelope)
-    output = envelope.get("output")
+    typed_refs = getattr(result, "refs", ()) or ()
+    refs = [
+        item.to_dict()
+        for item in typed_refs
+        if hasattr(item, "to_dict")
+    ]
+    details = _result_details(result)
+    _append_refs(refs, details)
+    output = details.get("output")
     if isinstance(output, dict):
         _append_refs(refs, output)
     return refs
@@ -323,8 +422,8 @@ def _tool_result_refs_from_result(result: object) -> list[dict[str, object]]:
 # LLM: 归档白名单可保留参数来源/类型/摘要，但绝不能复制原参数值或任意私有 result envelope。
 # 函数用途: 压缩工具结果中恢复与收口所需的安全结构化事实，忽略未明确登记的实现私有字段。
 def _compact_result_envelope(result: object) -> dict[str, object]:
-    envelope = getattr(result, "result_envelope", None)
-    if not isinstance(envelope, dict):
+    envelope = _result_details(result)
+    if not envelope:
         return {}
     keys = (
         "artifact_ref",

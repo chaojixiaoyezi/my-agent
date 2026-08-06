@@ -1,12 +1,9 @@
-
-
 from __future__ import annotations
 
 import time as time_module
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..conversation.authority import conversation_transcript_is_authoritative
 from ..conversation.task_state import conversation_task_completed
 from ..memory_archive import (
     archive_run_turn,
@@ -46,10 +43,11 @@ class BuildAgentRunResultParams:
 
 
 class FinalizationService:
-
     def __init__(self, agent):
         self._agent = agent
 
+    # LLM: Finalization archives run facts and only requests Curator after a typed task terminal state; it never writes dialogue to long-term.
+    # 函数用途: 收口一轮模型运行、写恢复事实并在任务完成时登记后台记忆提炼。
     def finalize(self, ctx: FinalizeContext):
         assert ctx.final_response is not None
         _mark_open_goal_progress_unfinished(self._agent, ctx)
@@ -92,9 +90,13 @@ class FinalizationService:
 
         schedule_goal_activated_in_turn(self._agent, ctx.task_attributes)
         finish_goal_turn_accounting(self._agent, ctx.task_attributes)
+        if conversation_task_completed(ctx.task_attributes):
+            _request_memory_curator(self._agent, "task_complete")
         return result
 
-    def _write_runtime_fact_source_if_needed(self, ctx: FinalizeContext, run_request_id: str) -> str:
+    def _write_runtime_fact_source_if_needed(
+        self, ctx: FinalizeContext, run_request_id: str
+    ) -> str:
         if not ctx.do_save:
             return ""
         written = ""
@@ -132,7 +134,9 @@ class FinalizationService:
             )
         return written
 
-    def _update_main_context_bundle_artifacts(self, ctx: FinalizeContext, run_request_id: str) -> None:
+    def _update_main_context_bundle_artifacts(
+        self, ctx: FinalizeContext, run_request_id: str
+    ) -> None:
         if not ctx.do_save or not ctx.main_context_bundle_path:
             return
         update_main_context_bundle_artifacts(
@@ -145,20 +149,12 @@ class FinalizationService:
             )
         )
 
+    # LLM: Run archive/task workspace preserve experience refs only; ordinary user/assistant bodies never enter formal long-term here.
+    # 函数用途: 按保存开关写任务工作区和运行经历档案，不做长期事实晋升。
     def _archive_run_if_needed(self, params: ArchiveRunParams):
         if not params.do_save:
             return None
         write_run_task_workspace_if_needed(self._agent, params)
-        if (
-            str(params.context_scope or "").strip().lower() != "task_local"
-            and not conversation_transcript_is_authoritative(params.task_attributes)
-        ):
-            if str(params.user_prompt or "").strip():
-                self._agent.memory.add("user", params.user_prompt)
-            if str(params.final_response.text or "").strip():
-                self._agent.memory.add(
-                    "agent", params.final_response.text, tags=[params.final_response.backend]
-                )
         result = None
         for root in runtime_archive_roots(
             self._agent,
@@ -169,7 +165,9 @@ class FinalizationService:
                 ArchiveRunTurnParams(
                     root=root,
                     ctx=ArchiveTurnContext(
-                        session_id=getattr(self._agent, "session_id", self._agent.config.agent_name),
+                        session_id=getattr(
+                            self._agent, "session_id", self._agent.config.agent_name
+                        ),
                         request_id=params.run_request_id,
                         run_id=params.run_id,
                         task_id=params.task_id,
@@ -180,7 +178,9 @@ class FinalizationService:
                         source=params.source,
                         archive_level=int(getattr(self._agent.config, "memory_archive_level", 3)),
                         preview_limits=_memory_archive_preview_limits(self._agent.config),
-                        summary_chars=int(getattr(self._agent.config, "memory_archive_summary_chars", 96) or 96),
+                        summary_chars=int(
+                            getattr(self._agent.config, "memory_archive_summary_chars", 96) or 96
+                        ),
                     ),
                 ),
             )
@@ -196,7 +196,9 @@ class FinalizationService:
                 input_tokens = (
                     estimate_tokens(params.user_prompt)
                     + estimate_tokens(params.runtime_injections)
-                    + estimate_tokens([getattr(memory, "content", "") for memory in params.memories])
+                    + estimate_tokens(
+                        [getattr(memory, "content", "") for memory in params.memories]
+                    )
                 )
         output_tokens = output_token_usage(params.final_response)
         if output_tokens is None:
@@ -255,7 +257,9 @@ class FinalizationService:
                 *routed_context.candidate_paths,
             ],
             archive_events=params.archive_result.event_count if params.archive_result else 0,
-            archive_token_estimate=params.archive_result.token_estimate if params.archive_result else 0,
+            archive_token_estimate=params.archive_result.token_estimate
+            if params.archive_result
+            else 0,
             prompt_token_estimate=estimate_tokens(ctx.final_prompt),
             runtime_injection_token_estimate=estimate_tokens(ctx.runtime_injections)
             if ctx.runtime_injections
@@ -267,19 +271,11 @@ class FinalizationService:
             compression_applied=ctx.compression_applied,
             turn_token_estimate=params.token_ledger["turn"],
             cumulative_token_estimate=params.token_ledger["cumulative"],
-            logical_model_turn_count=int(
-                model_calls.get("logical_model_turn_count") or 0
-            ),
-            physical_model_attempt_count=int(
-                model_calls.get("physical_model_attempt_count") or 0
-            ),
+            logical_model_turn_count=int(model_calls.get("logical_model_turn_count") or 0),
+            physical_model_attempt_count=int(model_calls.get("physical_model_attempt_count") or 0),
             model_retry_count=int(model_calls.get("model_retry_count") or 0),
-            provider_http_attempt_count=int(
-                model_calls.get("provider_http_attempt_count") or 0
-            ),
-            provider_http_retry_count=int(
-                model_calls.get("provider_http_retry_count") or 0
-            ),
+            provider_http_attempt_count=int(model_calls.get("provider_http_attempt_count") or 0),
+            provider_http_retry_count=int(model_calls.get("provider_http_retry_count") or 0),
             model_call_status_counts={
                 str(key): int(value or 0)
                 for key, value in dict(
@@ -297,9 +293,26 @@ class FinalizationService:
             delivery_artifacts=_structured_delivery_artifacts(ctx),
             message_tool_deliveries=_message_tool_deliveries(ctx),
             operation_verification=operation_verification,
+            tool_runtime_evidence=dict(ctx.tool_runtime_evidence or {}),
             active_turn_user_inputs=list(ctx.active_turn_user_inputs or []),
-            **compact_auto_cycle_fields(self._agent, ctx, params.token_ledger, request_id=params.run_request_id),
+            **compact_auto_cycle_fields(
+                self._agent, ctx, params.token_ledger, request_id=params.run_request_id
+            ),
         )
+
+
+# LLM: finalization only submits a typed reason to the one Curator state; it never runs a
+# background model inline or writes daily/candidate/long-term data itself.
+# 函数用途: 在任务真正终态后 best-effort 登记异步记忆提炼请求，失败不影响用户回复。
+def _request_memory_curator(agent: object, reason: str) -> None:
+    curator = getattr(agent, "memory_curator", None)
+    request = getattr(curator, "request", None)
+    if not callable(request):
+        return
+    try:
+        request(reason)
+    except Exception:
+        return
 
 
 def _current_model_call_summary(
@@ -496,6 +509,7 @@ def _memory_archive_preview_limits(config) -> dict[int, int]:
         3: int(getattr(config, "memory_archive_preview_level_3_chars", 160) or 0),
     }
 
+
 # LLM: Completion authority is the runtime turn outcome, never a phrase in model text.
 # 函数用途: 判断本轮是否为可关闭普通会话任务的正常最终响应；等待、后台交接和失败状态保持任务活跃。
 def _conversation_turn_is_terminal(ctx: FinalizeContext) -> bool:
@@ -555,8 +569,7 @@ def _mark_open_goal_progress_unfinished(agent: object, ctx: FinalizeContext) -> 
         not ctx.do_save
         or conversation_task_completed(ctx.task_attributes)
         or not str(attrs.get("thread_goal_id") or "").strip()
-        or str(getattr(ctx.final_response, "runtime_status", "ok") or "ok").strip().lower()
-        != "ok"
+        or str(getattr(ctx.final_response, "runtime_status", "ok") or "ok").strip().lower() != "ok"
     ):
         return
     from .runtime.task_identity import durable_task_id

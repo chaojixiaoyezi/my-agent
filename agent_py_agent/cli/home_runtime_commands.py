@@ -5,6 +5,7 @@ import argparse
 import json
 from typing import Any
 
+from ..agent.memory_api import DAILY_ACTORS, DAILY_EVENT_TYPES
 from ..agent.user_space.home_index_rebuild import rebuild_home_indexes
 from ..agent.user_space.home_retention import apply_owner_retention, plan_owner_retention
 from ..agent.user_space.home_runtime_query import (
@@ -17,6 +18,9 @@ from ..agent.user_space.home_runtime_query import (
 from .common import make_agent
 
 
+# LLM: Home runtime commands expose only canonical owner paths; Daily filters follow v2 actor/
+# event_type fields and never revive the legacy role/kind mirror schema.
+# 函数用途: 注册 owner home 状态、保留期、索引、Daily v2 与任务工作区管理员命令。
 def add_home_runtime_subcommands(sub: argparse._SubParsersAction) -> None:
     home_status = sub.add_parser("home-status", help="查看 my-agent 家目录入口文件和关键目录")
     home_status.add_argument("--json", action="store_true", help="输出机器可读 JSON")
@@ -32,11 +36,21 @@ def add_home_runtime_subcommands(sub: argparse._SubParsersAction) -> None:
     home_index_rebuild.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     home_index_rebuild.set_defaults(func=cmd_home_index_rebuild)
 
-    memory_daily_list = sub.add_parser("memory-daily-list", help="列出 home/memory/daily 按天记忆")
+    memory_daily_list = sub.add_parser("memory-daily-list", help="列出 owner 的 Daily v2 经历摘要")
     memory_daily_list.add_argument("query", nargs="?", default="", help="搜索关键词；为空时列出匹配日期的记录")
     memory_daily_list.add_argument("--date", help="只查看某一天，格式 YYYY-MM-DD")
-    memory_daily_list.add_argument("--role", default="", help="按 role 过滤，如 user/assistant/tool")
-    memory_daily_list.add_argument("--kind", default="", help="按 kind 过滤，如 dialogue/preference/note")
+    memory_daily_list.add_argument(
+        "--actor",
+        choices=sorted(DAILY_ACTORS),
+        default="",
+        help="按经历主体过滤：user/main_agent/subagent/tool/system",
+    )
+    memory_daily_list.add_argument(
+        "--event-type",
+        choices=sorted(DAILY_EVENT_TYPES),
+        default="",
+        help="按经历类型过滤：conversation/decision/task_progress/tool_result/lesson/todo/summary/warning/error",
+    )
     memory_daily_list.add_argument("--limit", type=int, default=None, help="最多显示多少条记录；默认读配置")
     memory_daily_list.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     memory_daily_list.set_defaults(func=cmd_memory_daily_list)
@@ -49,13 +63,15 @@ def add_home_runtime_subcommands(sub: argparse._SubParsersAction) -> None:
     task_workspace_list.set_defaults(func=cmd_task_workspace_list)
 
 
+# LLM: Daily CLI 是只读经历检查器，不得把旧 role/kind 镜像解释成正式记忆或召回来源。
+# 函数用途: 查询当前 owner 的 Daily v2 账本并呈现摘要、顺序和引用字段。
 def cmd_memory_daily_list(args) -> int:
     agent = make_agent(args)
     request = DailyMemoryQuery(
         query=getattr(args, "query", "") or "",
         date_key=getattr(args, "date", None),
-        role=getattr(args, "role", "") or "",
-        kind=getattr(args, "kind", "") or "",
+        actor=getattr(args, "actor", "") or "",
+        event_type=getattr(args, "event_type", "") or "",
         limit=_limit_from_args(agent, args),
     )
     report = read_daily_memory_records_report(agent.home_paths, request)
@@ -64,8 +80,8 @@ def cmd_memory_daily_list(args) -> int:
         "home": str(agent.home_paths.root),
         "query": request.query,
         "date": request.date_key or "",
-        "role": request.role,
-        "kind": request.kind,
+        "actor": request.actor,
+        "event_type": request.event_type,
         "limit": request.limit,
         "records": report.records,
         "load_errors": report.load_errors,
@@ -129,6 +145,9 @@ def _limit_from_args(agent, args) -> int:
     return int(getattr(agent.config, "cli_task_list_limit", 50) or 0)
 
 
+# LLM: Human output renders only bounded Daily v2 summaries and ordering IDs, never referenced
+# message/tool/artifact bodies.
+# 函数用途: 输出 Daily v2 查询结果或稳定 JSON。
 def _print_memory_daily_list(payload: dict[str, Any], *, json_output: bool) -> None:
     if json_output:
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
@@ -139,7 +158,11 @@ def _print_memory_daily_list(payload: dict[str, Any], *, json_output: bool) -> N
     if payload.get("load_errors"):
         print(f"load_errors={len(payload['load_errors'])}")
     for record in payload["records"]:
-        print(f"- {record.get('date', '-')}: {record.get('role', '-')} {record.get('kind', '-')} :: {record.get('content', '')}")
+        print(
+            f"- {record.get('date', '-')} #{record.get('sequence', '-')}: "
+            f"{record.get('actor', '-')} {record.get('event_type', '-')} :: "
+            f"{record.get('summary', '')}"
+        )
 
 
 def _print_task_workspace_list(payload: dict[str, Any], *, json_output: bool) -> None:

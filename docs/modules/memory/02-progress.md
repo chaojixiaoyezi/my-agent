@@ -1,5 +1,47 @@
 # Memory Progress
 
+## 2026-08-04 Memory v2 单一候选、后台策展与维护闭环（开发中）
+
+- owner 级正式结构已收敛为 `long_term`、`daily`、`candidates`、`ops`、`curator`、`lessons`、
+  `routing`、HOT 与导航各一份权威；Candidate/Daily/Curator 均使用版本化严格 Schema。
+- 新增真正接入 Gateway owner maintenance 的 `MemoryCuratorService`：轮次、时间、pre-compact、
+  session close/reset、task complete、daily finalize 和 admin 只提交不同 reason，共用同一 state、
+  lease、增量 cursor、后台模型和整批提交/恢复链。后台模型不获得工具循环或文件/Persona 写权限。
+- Candidate → Promotion 已统一证据核验、scope/subject 冲突、精确 replace/remove/merge、Persona 边界、
+  lesson/HOT 阈值和正式落点。`model_inferred` 不会成为正式事实；Tools 成功只由正式 operation store
+  适配器核验，不复制 Tools Agent 状态机。
+- 一次性 Migration v2 支持只读 plan、完整备份 manifest、幂等 apply、坏数据 fail closed 和中途回滚；
+  覆盖旧 ops 候选、learning drafts、task-local memory_gate、daily mirror、dialogue、kind=lesson、
+  重复导航/HOT/lesson 与 retention v1。迁移成功后不保留生产双读/双写/fallback。
+- Retention v2 覆盖 ConversationStore、audit、Daily、tool artifacts、rejected Candidate、Curator runs、
+  Compact 和 completed task；legal hold、非终态恢复数据、损坏状态与执行前变化均优先阻断删除。
+- 管理 CLI 收敛为 `my-agent memory candidates|curator|retention|doctor|migrate`；旧 `learn` 和
+  `subagents-memory-gate` 生产入口已删除。普通 dialogue 不再自动写 long-term，`ops` 不再保存正文，
+  daily 不再镜像正式 Memory 操作。
+- 已完成迁移 17 项、retention 7 项、Memory tool/repository/hardening 26 项、Candidate/Curator/Promotion
+  扩展测试以及 Goal 指定 Memory 聚焦组验证；当前 14 文件 Memory 聚焦组 168 项全绿。13 文件联合组的
+  独立运行是 250/251，通过的部分已覆盖 Memory 主链；唯一失败是 Tools 状态机把共享只读目录写入拒绝投影成
+  `TOOL_OPERATION_OUTCOME_UNKNOWN`，而用例期望 `WRITE_FORBIDDEN`，不属于 Memory 合同。
+- 最新完整回归共 8,744 项：8,553 通过、160 失败、31 跳过、0 error，pytest 记录 485.147 秒；其中
+  107 项在模型调用前统一失败于 Tools 的 `ToolProtocolSelectionError`（默认 `native`，但 Echo/测试后端
+  没有 run-start native capability probe），包括若干文件名含 memory 的运行集成测试。剩余失败集中在
+  Tools 错误码/operation 投影、Subagent runner 与 Audit/Verification 并行链；14 个 Memory 核心聚焦文件
+  在该 JUnit 中仍是零失败。先前 26 个要求旧 dialogue 自动写 long-term、旧 `note/preference` kind、
+  Daily mirror 或 Builder 直读 memory/HOT/lesson 的陈旧失败已逐项修复，不能把这 160 项回退解释成
+  恢复旧 Memory 语义的理由。完整发布门禁仍未通过。
+- 上述完整回归之后，Memory 自己使用 Echo/脚本后端的测试已显式选择 `text` 协议，不再假装完成
+  run-start native capability probe；相关 4 文件 82/82 通过，随后 Goal 指定联合组确认 250/251。
+  当前 Memory 范围 Ruff 与 `compileall`、`git diff --check` 通过；全仓 Ruff 的 16 项、doc-sync 的
+  Verification 文档、strict code-size 的 12 项以及 clean-package 的并行运行产物仍由对应模块收口。
+- 真实隔离 Gateway 已用 MiniMax-M2.7 与 DeepSeek `deepseek-v4-pro` 验证相同严格输出合同、轮次/时间/
+  pre-compact/close/reset/task complete/daily/admin 触发、过期 lease 重启恢复和同名 reason generation 并发接续。
+- 真实大 `read_file` 输出（32,330 bytes）只在 tool-output artifact 保存正文；Daily 只落路径、内容 SHA-256
+  和大小，正式 long-term、USER、SOUL、AGENTS、lesson/HOT 均未变化。
+- 真实故障已分别留下 `CURATOR_SCHEMA_INVALID`、`CURATOR_MODEL_FAILED`、`CURATOR_MODEL_TIMEOUT` 和
+  `CURATOR_COMMIT_FAILED`。超时与撤销 Daily 目录写权限的提交故障都未推进游标、未增加 Daily/Candidate；
+  恢复配置/权限后，同一 Gateway maintenance 安全重试成功且 occurrence 未虚增。
+- 最终全量、静态发布门禁与八部长文本最后验收仍按 Goal 继续执行，因此本条状态保持“开发中”，不提前宣称完成。
+
 ## 2026-08-03 Audit 来源工作者的任务状态与工具归档隔离
 
 - 同一父任务下多个来源工作者会并发更新 `work/state.json`。现在读、单调合并和原子替换共用同一
@@ -101,17 +143,17 @@
 ## 2026-07-25 长期记忆来源、召回与删除边界收敛
 
 - `memory/long_term/memory.jsonl` 继续是每个 owner 唯一可召回长期记忆事实源；没有新增 provider、
-  IM 专用记忆或第二套 compact。既有 `memory/ops.jsonl` 只保存无正文操作审计和模型推测候选，
-  候选不进入 search/prompt。
+  IM 专用记忆或第二套 compact。当时 v1 的 `memory/ops.jsonl` 还混放模型推测候选；该历史路径已在
+  2026-08-04 迁入 `memory/candidates.jsonl` 并从生产链删除，当前 `ops` 只保存无正文操作审计。
 - `remember` 的 add/replace 新增结构化 `origin/evidence_refs/subject_key`：用户明确事实可写入；
   `tool_verified` 只能引用本轮成功工具归档中的结构化 ref；`model_inferred` 只落候选账本。
   来源与工具成功不从自然语言正文猜测。
 - 完全相同的规范化记忆写入幂等；同一 `subject_key` 的不同事实返回冲突和现有稳定 ID，要求
   list 后 replace，不做语义自动合并或静默覆盖。replace 保留旧结构化属性并合并新来源字段。
-- remove 改为 hard delete：权威 JSONL 中该 ID 的历史正文、daily mirror、LocalStore/FTS 内容文件、
-  向量项、ops 中同正文候选以及结构化 remember 工具账本中的正文都会清除，只保留无正文
+- remove 改为 hard delete：当时 v1 会清理权威 JSONL 中该 ID 的历史正文、daily mirror、LocalStore/FTS 内容文件、
+  向量项、ops 中同正文候选以及结构化 remember 工具账本中的正文，只保留无正文
   tombstone/hash/调用终态审计；精确重试同一 remove 仍幂等。raw conversation 与 gateway audit
-  属于独立留存事实，不随长期记忆删除而改写。
+  属于独立留存事实，不随长期记忆删除而改写。2026-08-04 的 v2 已删除 daily mirror 与 ops 候选正文。
 - JSONL、daily 与 LocalStore 的关键词召回已统一到同一文本规范化函数；召回先取有界候选池，
   再按文本相关度、结构化来源、更新时间确定性排序，并按 subject 去重。配置 embedding 时仍以
   原 RRF 结果顺序为相关性主线，不新增模型 reranker。
@@ -136,7 +178,7 @@
 ## 2026-07-25 工具结果投影贯穿 compact 与恢复
 
 - tool-output archive 继续保存当前 owner/task 的完整原文、hash、大小和稳定引用，但 preview 在落入
-  record/index 前已按 ToolSpec 结果策略脱敏；索引只额外保存有界的 `tool_output_trust` 与
+  record/index 前已按 `ToolRuntimePolicy.output_policy` 脱敏；索引只额外保存有界的 `tool_output_trust` 与
   `tool_output_redaction`，不保存任意 envelope。
 - compact semantic summary、机械恢复、runtime event 和 handoff 使用这两个 typed 字段重建同一模型
   投影。外部网页/MCP/浏览器结果即使通过纯文本 artifact、`read_file` 或 `search_text` 再进入历史，
@@ -181,12 +223,13 @@
 
 - 长期 Memory 继续只使用当前 owner 的 `memory/long_term/memory.jsonl`，没有建立第二份数据库或 IM 专用记忆。
 - `remember` 单工具新增 add/list/replace/remove/batch；操作带稳定 ID、版本、来源、kind 与可选过期时间。
-- JSONL 写入在同一文件锁内重读、验证并原子提交；batch 任一项失败整批回滚，daily mirror 保留同一操作事件。
+- JSONL 写入在同一文件锁内重读、验证并原子提交；batch 任一项失败整批回滚。当时 v1 的 daily mirror
+  已在 2026-08-04 被迁移并删除，当前正式操作只写无正文 `ops.jsonl` 审计。
 - SQLite/FTS 与可选向量索引只是派生层；检索返回前对照 JSONL 当前 active state，删除或旧版本不会从陈旧索引复活。
 - 新增 `PersonaRepository` 统一 SOUL/USER/AGENTS 的加载与更新：2 MiB UTF-8 文件上限、symlink/owner 边界、逐行威胁扫描、prompt budget、版本/CAS/回滚和结构化诊断。
 - USER 仍只允许基于当前用户原话自主维护；SOUL/AGENTS 仍需确认。飞书确认保存点击前 SHA，确认期间发生并发修改会拒绝覆盖。
 - Memory/Persona runtime snapshot 已进入 `list_capabilities`，只暴露健康、计数、版本和错误码，不暴露正文或私有路径。
-- Memory 的权威 JSONL 与全部 daily mirror、Persona 的正文/backup/version ledger 均作为一次 owner quota
+- Memory 的权威 JSONL 与当时 v1 的 daily mirror、Persona 的正文/backup/version ledger 均作为一次 owner quota
   batch 准入；quota lock 在各自 repository/file lock 外层，拒绝时不会留下半批文件。
 - Memory/Persona、能力自述和 prompt 聚焦回归与完整本地 CI 通过；提交、1.10 部署与真实多用户验证仍待最终阶段。
 
@@ -232,22 +275,25 @@
 
 - `compact_semantic_summary.py` 仅做 Ruff 要求的 `Callable` 导入归属清理；compact、摘要、线程和持久化语义没有变化。
 
-## 2026-06-11 记忆推模式扩展到 planner 决策点 + 注入幂等 + 中文短 goal 检索修复（开发计划 B1/B2）
+## 2026-06-11 记忆推模式扩展到 planner 决策点（历史 v1，已由 Memory v2 收敛）
 
-- **B1 planner 注入**：父代理 planner 出决策前自动注入 planning 类教训——
+- 当时的 **B1 planner 注入**：父代理 planner 出决策前自动注入 planning 类教训——
   `planner_service.append_planner_memory_hint`（查询上下文取 due_issues/active_tasks
   首条 goal），接线在 `_execute_planner_llm` 的 prompt 构造后。软注入：无 memory/
   检索异常一律原样返回，绝不阻断 planner。注入点覆盖从"仅 runner 失败点
   （runner/gate）"扩展到 planner 决策点；dispatch 本身无独立 LLM 决策面
   （planner 即其决策面），机器路径不注入。
-- **B1 生产端缺陷修复**：`memory_push._build_memory_query` 曾写成 `len(goal)>50`
+- 当时的 **B1 检索缺陷修复**：`memory_push._build_memory_query` 曾写成 `len(goal)>50`
   才把 goal 加入查询——中文短 goal（常态）被整个丢弃，查询只剩英文 trigger 词，
   中文教训永远搜不到，推模式形同虚设（失败点注入同样受害）。现在 goal 非空即入
   查询、超 50 字才截断。
-- **B2 注入幂等**：planner 注入与 runner 失败注入（`_append_memory_hint`）都做
+- 当时的 **B2 注入幂等**：planner 注入与 runner 失败注入（`_append_memory_hint`）都做
   "同一 hint 已存在则不堆叠"——失败重试循环不再把同批教训反复追加进派工指令。
-- 钉子：`test_memory_push_decision_points.py`（9 条：注入命中/软容错/异常容错/
-  goal 提取/双路径幂等）。
+- Memory v2 已保留关键决策点主动召回与幂等能力，但删除旧 long-term
+  `kind=lesson_general/lesson_task`、`MemoryType/MemoryEntry/MemoryWriteContext` 和直接写入函数。
+  当前 `memory_push` 只读正式 Lesson/HOT、按 typed scope 过滤，并与普通运行共用唯一
+  `<memory-context>`；失败自省只提交待审 Candidate。对应钉子已更新为正式 authority、
+  scope、只读性、错误关闭和单信封测试。
 
 ## 2026-06-11 compact 连续失败熔断（防 thrash）
 

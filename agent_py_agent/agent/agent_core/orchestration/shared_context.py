@@ -4,10 +4,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from ...tooling.output_projection import (
-    project_tool_output_body,
-    tool_output_projection_policy,
-)
+from ...tooling.output_projection import project_tool_output_body
+from ...tooling.runtime_contracts import ToolCall, ToolResult
 from ..runner.ref_fields import _file_refs_from_value, _normalize_file_ref
 
 _DEFAULT_LIMIT = 3
@@ -32,12 +30,13 @@ class _SharedPackBounds:
 
 @dataclass(frozen=True)
 class _SharedToolValues:
-    tool: object
+    tool_name: object
     ok: object
     output: object
     payload: object
     ref: object
-    result_envelope: object
+    output_trust: object
+    output_redaction: object
     bounds: _SharedPackBounds
 
 
@@ -120,13 +119,17 @@ def refresh_parent_shared_context_cache(agent: object, records: Iterable[object]
 
 def refresh_parent_shared_context_from_tool_record(agent: object, record: object) -> list[dict[str, object]]:
     result = getattr(record, "result", None)
+    call = getattr(record, "call", None)
+    if not isinstance(result, ToolResult) or not isinstance(call, ToolCall):
+        return []
     pack = _shared_pack_from_tool_values(_SharedToolValues(
-        tool=getattr(result, "tool", ""),
-        ok=getattr(result, "ok", False),
-        output=getattr(result, "output", ""),
-        payload=getattr(record, "payload", None),
-        ref=getattr(result, "call_id", "") or f"{getattr(record, 'tool_rounds', '')}-{getattr(record, 'idx', '')}",
-        result_envelope=getattr(result, "result_envelope", None),
+        tool_name=result.tool_name,
+        ok=result.ok,
+        output=result.output,
+        payload=call.arguments,
+        ref=result.call_id,
+        output_trust=result.output_trust,
+        output_redaction=result.output_redaction,
         bounds=_SharedPackBounds(_DEFAULT_MAX_PREVIEW_CHARS, _DEFAULT_MAX_OUTPUT_BYTES),
     ))
     if not pack:
@@ -209,7 +212,7 @@ def _shared_pack_from_record(
 def _shared_pack_from_tool_values(values: _SharedToolValues) -> dict[str, object]:
     if not values.ok:
         return {}
-    source_tool = str(values.tool or "").strip()
+    source_tool = str(values.tool_name or "").strip()
     if source_tool not in _SHARED_CONTEXT_SOURCE_TOOLS:
         return {}
     if len(str(values.output or "").encode("utf-8")) > max(0, int(values.bounds.max_output_bytes)):
@@ -220,7 +223,8 @@ def _shared_pack_from_tool_values(values: _SharedToolValues) -> dict[str, object
     )
     if not summary:
         return {}
-    trust, redaction = tool_output_projection_policy(values.result_envelope)
+    trust = str(values.output_trust or "runtime").strip().lower()
+    redaction = str(values.output_redaction or "default").strip().lower()
     summary = project_tool_output_body(
         tool=source_tool,
         output=summary,

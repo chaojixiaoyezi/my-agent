@@ -111,33 +111,47 @@ def test_fake_tool_runner_wraps_invalid_tool_result_as_structured_error(tmp_path
     assert runner.trace[-1]["result"]["error_code"] == "TOOL_RESULT_INVALID"
 
 
-def test_fake_tool_runner_applies_structured_tool_policy_before_execution(tmp_path: Path):
-    from agent_py_agent.agent.contracts.tool_call_policy import ToolCallPolicy
-    from agent_py_agent.tests.support.fake_tools import FakeToolRunner
-
-    runner = FakeToolRunner(
-        tmp_path,
-        policy=ToolCallPolicy(
-            available_tools=("read_file", "write_file"),
-            allowed_tools=("read_file",),
-            input_schemas={
-                "read_file": {
-                    "type": "object",
-                    "properties": {"path": {"type": "string"}},
-                    "required": ["path"],
-                    "additionalProperties": False,
-                }
-            },
-        ),
+def test_canonical_action_policy_blocks_invalid_or_unavailable_fake_calls(tmp_path: Path):
+    from agent_py_agent.agent.tooling.action_policy import ActionPolicy, ActionPolicyRequest
+    from agent_py_agent.tests._tool_runtime_harness import (
+        canonical_test_call,
+        make_test_model_spec,
+        make_test_runtime_policy,
+        runtime_snapshot_for_tools,
     )
 
-    missing_param = runner.execute("read_file", {})
-    not_allowed = runner.execute("write_file", {"path": "out.md", "content": "demo"})
+    class _ReadTool:
+        model_spec = make_test_model_spec(
+            "read_file",
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        )
+        runtime_policy = make_test_runtime_policy()
 
-    assert missing_param["ok"] is False
-    assert missing_param["error_code"] == "TOOL_PARAMETER_REQUIRED"
-    assert not_allowed["ok"] is False
-    assert not_allowed["error_code"] == "TOOL_NOT_ALLOWED"
+    snapshot = runtime_snapshot_for_tools({"read_file": _ReadTool()})
+    missing = ActionPolicy().decide(
+        ActionPolicyRequest(
+            canonical_test_call(snapshot, "read_file", {}),
+            snapshot,
+            tmp_path,
+        )
+    )
+    unavailable = ActionPolicy().decide(
+        ActionPolicyRequest(
+            canonical_test_call(snapshot, "write_file", {"path": "out.md"}),
+            snapshot,
+            tmp_path,
+        )
+    )
+
+    assert missing.status == "deny"
+    assert missing.reason_codes == ("TOOL_PARAMETER_REQUIRED",)
+    assert unavailable.status == "deny"
+    assert unavailable.reason_codes == ("TOOL_NOT_IN_RUNTIME_SNAPSHOT",)
     assert not (tmp_path / "out.md").exists()
 
 

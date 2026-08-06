@@ -40,8 +40,6 @@ class DailyLedgerWorkspaceRefs:
     agent_run_workspace_root: Path
     task_artifact_manifest_jsonl: Path | None = None
     agent_artifact_manifest_jsonl: Path | None = None
-    agent_memory_gate_candidates_jsonl: Path | None = None
-    agent_skill_spark_gate_json: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -140,8 +138,6 @@ def _refs(task: Any, workspace_refs: DailyLedgerWorkspaceRefs) -> dict[str, str]
         "agent_run_timeline": str(agent_run_workspace_root / "timeline.jsonl"),
         "task_artifact_manifest": _path_text(workspace_refs.task_artifact_manifest_jsonl),
         "agent_artifact_manifest": _path_text(workspace_refs.agent_artifact_manifest_jsonl),
-        "agent_memory_gate_candidates": _path_text(workspace_refs.agent_memory_gate_candidates_jsonl),
-        "agent_skill_spark_gate": _path_text(workspace_refs.agent_skill_spark_gate_json),
         "task_checkpoint": str(getattr(task, "checkpoint_json", "")),
         "task_status_report": str(getattr(task, "status_report_json", "")),
     }

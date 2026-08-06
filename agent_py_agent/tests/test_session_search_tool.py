@@ -15,7 +15,7 @@ import pytest
 
 from agent_py_agent.agent.capability.session_search_tool import (
     SessionSearchTool,
-    build_session_search_spec,
+    build_session_search_model_spec,
 )
 from agent_py_agent.agent.local_storage.store import LocalStore
 
@@ -43,16 +43,16 @@ def _payload(result) -> dict:
 
 
 class TestSpec:
-    def test_spec_has_precise_parameter_schema(self):
-        spec = build_session_search_spec()
+    def test_spec_has_precise_input_schema(self):
+        spec = build_session_search_model_spec()
         assert spec.name == "session_search"
-        assert spec.effect == "read_only"
         # 精确类型(对齐原生 tool_use):整型参数带 integer + 上下界。
-        assert spec.parameter_schema["query"]["type"] == "string"
-        assert spec.parameter_schema["window"]["type"] == "integer"
-        assert spec.parameter_schema["limit"]["type"] == "integer"
-        assert spec.parameter_schema["around_id"]["type"] == "string"
-        assert spec.required_parameters == []
+        properties = spec.input_schema["properties"]
+        assert properties["query"]["type"] == "string"
+        assert properties["window"]["type"] == "integer"
+        assert properties["limit"]["type"] == "integer"
+        assert properties["around_id"]["type"] == "string"
+        assert spec.input_schema.get("required", []) == []
 
 
 class TestDiscoveryMode:

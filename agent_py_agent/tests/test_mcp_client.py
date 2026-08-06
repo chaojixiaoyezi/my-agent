@@ -16,9 +16,15 @@ tools/list/tools/call 的 JSON-RPC over stdio），不依赖任何外部 MCP ser
 import json
 import sys
 import textwrap
+import threading
+import time
 
 import pytest
 
+from agent_py_agent.agent.tooling.cancellation import (
+    CancellationToken,
+    bind_cancellation_token,
+)
 from agent_py_agent.agent.tooling.mcp_client import (
     MCPError,
     MCPServerConfig,
@@ -161,6 +167,33 @@ def _config(script: str, name: str = "echo", **overrides) -> MCPServerConfig:
     }
     kwargs.update(overrides)
     return MCPServerConfig(**kwargs)
+
+
+def test_hanging_call_obeys_bound_cancellation_token():
+    client = MCPStdioClient(_config(_HANG_ON_CALL_SERVER, timeout=20.0))
+    token = CancellationToken()
+    observed: list[MCPError] = []
+    try:
+        client.start()
+
+        def invoke() -> None:
+            try:
+                with bind_cancellation_token(token):
+                    client.call_tool("slow", {})
+            except MCPError as exc:
+                observed.append(exc)
+
+        thread = threading.Thread(target=invoke)
+        thread.start()
+        time.sleep(0.2)
+        token.cancel("test stop")
+        thread.join(3)
+
+        assert not thread.is_alive()
+        assert len(observed) == 1
+        assert observed[0].code == "MCP_CANCELLED"
+    finally:
+        client.stop()
 
 
 # ---------------------------------------------------------------------------

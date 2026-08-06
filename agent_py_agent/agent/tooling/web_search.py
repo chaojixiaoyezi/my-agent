@@ -12,7 +12,23 @@ from html import unescape
 from html.parser import HTMLParser
 from typing import Any
 
-from .models import BaseTool, ToolExecutionResult, ToolSpec
+from .cancellation import (
+    ToolCancelled,
+    cancellation_requested,
+    register_cancellation_callback,
+)
+from .models import (
+    BaseTool,
+    ConcurrencyPolicy,
+    EffectResolverPolicy,
+    OutputPolicy,
+    ResourceScopePolicy,
+    TimeoutPolicy,
+    ToolHandlerOutcome,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+)
 from .web import _has_control_chars, _normalize_url
 from .web_http_helpers import scalar_text
 
@@ -71,8 +87,7 @@ class DuckDuckGoHtmlProvider(WebSearchProvider):
             method="GET",
             headers={"User-Agent": "MyAgent-WebSearch/1.0"},
         )
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-            body = resp.read().decode("utf-8", "replace")
+        body = _read_search_response(req, self.timeout)
 
         parser = _DuckDuckGoHtmlResultParser()
         parser.feed(body)
@@ -112,8 +127,7 @@ class BingHtmlProvider(WebSearchProvider):
                 "Accept-Language": "en-US,en;q=0.9",
             },
         )
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-            body = resp.read().decode("utf-8", "replace")
+        body = _read_search_response(req, self.timeout)
         return _parse_bing_results(body, limit)
 
 
@@ -308,57 +322,90 @@ class WebSearchTool(BaseTool):
             BingHtmlProvider(timeout=timeout),
             DuckDuckGoHtmlProvider(timeout=timeout),
         ]
-        self.spec = ToolSpec(
+        self.model_spec = ToolModelSpec(
             name="web_search",
-            category="web",
-            effect="read_only",
-            output_trust="external_data",
             description="按关键词搜索公开网页，返回结构化候选来源 URL、标题和摘要。",
-            use_cases=[
-                "不知道具体 URL 时，先搜索公开来源候选，再用 web_fetch 读取",
-                "研究论文、项目资料、文档和新闻入口时获取可核验链接",
-            ],
-            avoid_when=[
-                "已经有确定 URL 或 API 地址时，直接用 web_fetch",
-            ],
-            keywords=["搜索", "网页搜索", "查找来源", "search", "web_search", "公开来源", "候选链接"],
-            parameters={"query": "搜索关键词", "limit": "可选，最多返回多少条候选结果", "allowed_domains": "可选，只保留这些域名及其子域名的结果", "blocked_domains": "可选，排除这些域名及其子域名的结果"},
-            parameter_details={
-                "query": "必填，普通搜索关键词；工具只把它作为搜索引擎查询，不从自然语言推断任务事实。",
-                "limit": f"可选，1 到 {self.max_results}；超过配置会自动收敛。",
-                "allowed_domains": "可选字符串数组，例如 [\"github.com\"]；和 blocked_domains 不能同时使用。",
-                "blocked_domains": "可选字符串数组，例如 [\"example.com\"]；和 allowed_domains 不能同时使用。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "必填，普通搜索关键词；只作为搜索引擎查询，不从自然语言推断任务事实。",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": self.max_results,
+                        "description": f"最多返回多少条候选结果，范围 1-{self.max_results}。",
+                    },
+                    "allowed_domains": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "只保留这些域名及其子域名；不能和 blocked_domains 同时使用。",
+                    },
+                    "blocked_domains": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "排除这些域名及其子域名；不能和 allowed_domains 同时使用。",
+                    },
+                },
+                "required": ["query"],
+                "additionalProperties": False,
             },
-            parameter_schema={
-                "query": {"type": "string"},
-                "limit": {"type": "integer", "minimum": 1},
-                "allowed_domains": {"type": "array", "items": {"type": "string"}},
-                "blocked_domains": {"type": "array", "items": {"type": "string"}},
-            },
-            required_parameters=["query"],
-            examples=['{"tool": "web_search", "query": "open model reasoning paper arxiv", "limit": 5}', '{"tool": "web_search", "query": "project weekly ranking 20260105", "allowed_domains": ["example.com"]}'],
+            hints=ToolModelHints(
+                category="web",
+                use_cases=(
+                    "不知道具体 URL 时，先搜索公开来源候选，再用 web_fetch 读取",
+                    "研究论文、项目资料、文档和新闻入口时获取可核验链接",
+                ),
+                avoid_when=("已经有确定 URL 或 API 地址时，直接用 web_fetch",),
+                keywords=("搜索", "网页搜索", "查找来源", "search", "web_search", "公开来源", "候选链接"),
+                examples=(
+                    '{"tool": "web_search", "query": "open model reasoning paper arxiv", "limit": 5}',
+                    '{"tool": "web_search", "query": "project weekly ranking 20260105", "allowed_domains": ["example.com"]}',
+                ),
+            ),
+        )
+        self.runtime_policy = ToolRuntimePolicy(
+            effect_resolver=EffectResolverPolicy("read_only"),
+            timeout_policy=TimeoutPolicy(self.timeout),
+            concurrency_policy=ConcurrencyPolicy("parallel_safe"),
+            resource_scopes=ResourceScopePolicy(parameter_names=("query",)),
+            output_policy=OutputPolicy(trust="external_data"),
         )
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         try:
             request = _search_request_from_params(params, self.max_results)
         except ValueError as exc:
-            return ToolExecutionResult("web_search", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
+            return ToolHandlerOutcome("web_search", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
 
-        provider_result = _search_with_providers(self.providers, request.query, request.limit)
+        try:
+            provider_result = _search_with_providers(
+                self.providers,
+                request.query,
+                request.limit,
+            )
+        except ToolCancelled:
+            return ToolHandlerOutcome(
+                "web_search",
+                False,
+                "CANCELLED: 网页搜索已取消。",
+                error_code="CANCELLED",
+            )
         if not provider_result.rows:
             payload = {"query": request.query, "provider_failures": provider_result.failures}
             if provider_result.failures:
                 # 所有 provider 都抛异常(网络/HTTP/反爬挑战)→ 工具暂时不可用,可重试或改用 web_fetch
-                return ToolExecutionResult("web_search", False, json.dumps(payload, ensure_ascii=False), error_code="TOOL_UNAVAILABLE")
+                return ToolHandlerOutcome("web_search", False, json.dumps(payload, ensure_ascii=False), error_code="TOOL_UNAVAILABLE")
             # provider 正常响应但查询无匹配→不是工具故障,是"搜索无结果";ok=True 避免被当成工具坏了而放弃
             payload["results"] = []
             payload["note"] = "搜索无匹配结果(也可能是来源限流返回空)。换更具体/不同关键词重试,或改用 web_fetch 直接抓已知 URL。"
-            return ToolExecutionResult("web_search", True, json.dumps(payload, ensure_ascii=False, sort_keys=True))
+            return ToolHandlerOutcome("web_search", True, json.dumps(payload, ensure_ascii=False, sort_keys=True))
         results = _normalized_provider_results(provider_result)
         results = _filter_search_results(results, allowed_domains=request.allowed_domains, blocked_domains=request.blocked_domains)
         payload = _search_payload(provider_result, request, _dedupe_search_results(results, request.limit))
-        return ToolExecutionResult("web_search", True, json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return ToolHandlerOutcome("web_search", True, json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
 
 def _search_request_from_params(params: dict[str, Any], max_results: int) -> _SearchRequest:
@@ -377,8 +424,12 @@ def _search_request_from_params(params: dict[str, Any], max_results: int) -> _Se
 def _search_with_providers(providers: list[WebSearchProvider], query: str, limit: int) -> _ProviderSearchResult:
     failures: list[dict[str, str]] = []
     for provider in providers:
+        if cancellation_requested():
+            raise ToolCancelled("cancelled")
         try:
             rows = provider.search(query, limit)
+        except ToolCancelled:
+            raise
         except urllib.error.HTTPError as exc:
             failures.append({"provider": provider.name, "error": f"HTTP {exc.code}"})
             continue
@@ -388,6 +439,22 @@ def _search_with_providers(providers: list[WebSearchProvider], query: str, limit
         if rows:
             return _ProviderSearchResult(provider.name, rows, failures)
     return _ProviderSearchResult("", [], failures)
+
+
+def _read_search_response(request: urllib.request.Request, timeout: int) -> str:
+    if cancellation_requested():
+        raise ToolCancelled("cancelled")
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        with register_cancellation_callback(response.close):
+            try:
+                body = response.read()
+            except (OSError, ValueError) as exc:
+                if cancellation_requested():
+                    raise ToolCancelled("cancelled") from exc
+                raise
+    if cancellation_requested():
+        raise ToolCancelled("cancelled")
+    return body.decode("utf-8", "replace")
 
 
 def _normalized_provider_results(provider_result: _ProviderSearchResult) -> list[_SearchResult]:

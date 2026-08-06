@@ -43,7 +43,6 @@ _LIVE_SCENARIO_NAMES = {
 _CORE_PREFIXES = (
     "gates",
     "state_machine",
-    "tool_protocol",
 )
 _CORE_NAMES = {
     "acceptance_contract",
@@ -59,7 +58,7 @@ _CORE_NAMES = {
     "runtime_cards",
     "runtime_config_contract",
     "task_tree_ledger_contract",
-    "tool_call_policy",
+    "required_actions",
     "tool_manifest_contract",
 }
 

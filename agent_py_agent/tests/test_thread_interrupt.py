@@ -30,8 +30,11 @@ from agent_py_agent.agent.concurrency.interrupt import (
     wait_interruptibly,
 )
 from agent_py_agent.agent.conversation.runtime import BackgroundMainAgentScheduler
-from agent_py_agent.agent.tooling import ToolExecutionResult
 from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
+from agent_py_agent.tests._tool_runtime_harness import (
+    canonical_history_call,
+    make_test_protocol_snapshot,
+)
 
 
 def test_interrupt_is_thread_scoped():
@@ -241,21 +244,37 @@ def test_tool_round_stops_at_interrupt_safe_point():
     records: list[tuple[str, str, str]] = []
 
     def execute_one(request):
-        executed.append(str(request.payload["tool"]))
-        return ToolExecutionResult("read_file", True, "ok")
+        executed.append(request.call.tool_name)
+        raise AssertionError("中断安全点之后不得进入执行器")
 
     def record_one(record):
-        records.append((str(record.payload["tool"]), record.result.output, record.result.error_code or ""))
+        records.append((record.call.tool_name, record.result.output, record.result.error_code or ""))
 
     set_interrupt(True)
     try:
         execute_tool_round(
             ToolRoundExecutionRequest(
                 agent=SimpleNamespace(),
-                params=SimpleNamespace(tool_context=[]),
+                params=SimpleNamespace(
+                    tool_context=[],
+                    tool_protocol_snapshot=make_test_protocol_snapshot(),
+                ),
                 tool_rounds=1,
                 response=ModelResponse(text="round", backend="test"),
-                calls=[{"tool": "read_file", "path": "/tmp/a.md"}, {"tool": "read_file", "path": "/tmp/b.md"}],
+                calls=[
+                    canonical_history_call(
+                        "read_file",
+                        {"path": "/tmp/a.md"},
+                        call_id="interrupt-a",
+                        source_protocol="text",
+                    ),
+                    canonical_history_call(
+                        "read_file",
+                        {"path": "/tmp/b.md"},
+                        call_id="interrupt-b",
+                        source_protocol="text",
+                    ),
+                ],
                 execute_one=execute_one,
                 record_one=record_one,
             )
@@ -263,8 +282,11 @@ def test_tool_round_stops_at_interrupt_safe_point():
     finally:
         set_interrupt(False)
     assert executed == [], "中断旗下不再开新工具"
-    assert records and records[0][2] == "CANCELLED", "复用 taxonomy 权威码,字段链(hint/动作)不丢"
-    assert "已被取消" in records[0][1]
+    assert [item[0] for item in records] == ["read_file", "read_file"]
+    assert all(item[2] == "CANCELLED" for item in records), (
+        "每个已接纳但未启动的调用都必须有配对的取消结果"
+    )
+    assert all("已被取消" in item[1] for item in records)
 
 
 def test_cancel_signals_dispatch_thread_by_run_id():

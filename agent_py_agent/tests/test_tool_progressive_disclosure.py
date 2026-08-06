@@ -104,7 +104,11 @@ def test_tool_search_exact_load_is_bounded_and_does_not_reveal_unavailable_names
     assert result.result_envelope["tool_search"]["loaded_tool_names"] == [
         "create_subagents"
     ]
-    assert payload["tools"][0]["parameters"]
+    loaded_tool = payload["tools"][0]
+    assert loaded_tool["input_schema"]["properties"]
+    assert loaded_tool["schema_hash"].startswith("sha256:")
+    assert "parameters" not in loaded_tool
+    assert "required_parameters" not in loaded_tool
 
 
 def test_loaded_tool_schema_is_consumed_after_one_successful_model_call() -> None:

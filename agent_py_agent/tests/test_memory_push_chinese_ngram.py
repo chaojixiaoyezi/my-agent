@@ -9,16 +9,14 @@ goal 里的中文串切成 2-4 gram(复用 memory_routing.matcher._chinese_ngram
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
-import pytest
+from pathlib import Path
 
 from agent_py_agent.agent.memory_push import (
     _build_memory_query,
     _goal_chinese_ngrams,
     push_relevant_memories,
 )
-from agent_py_agent.agent.memory_store import MemoryRecord
+from agent_py_agent.tests._memory_push_v2_harness import formal_memory_agent, promote_lesson
 
 
 class TestGoalChineseNgrams:
@@ -79,24 +77,14 @@ class TestBuildMemoryQuery:
 
 
 class TestPushRelevantMemoriesWithChineseGoal:
-    def test_chinese_goal_search_invoked_with_ngrams(self):
-        captured = {}
-
-        def fake_search(q, top_k=5):
-            captured["query"] = q
-            return [
-                MemoryRecord(
-                    role="system",
-                    content="推送模式已落地的经验教训内容",
-                    kind="lesson_general",
-                    tags=["failure"],
-                    created_at=1.0,
-                )
-            ]
-
-        agent = SimpleNamespace(memory=SimpleNamespace(search=fake_search))
+    def test_chinese_partial_goal_routes_formal_lesson(self, tmp_path: Path):
+        agent = formal_memory_agent(tmp_path)
+        lesson = promote_lesson(
+            agent,
+            content="记忆推送模式落地时必须只读正式教训。",
+            subject_key="记忆.推送.模式",
+        )
         out = push_relevant_memories(
             agent, "failure", {"goal": "记忆推送模式落地", "failure_type": "x"}, limit=3
         )
-        assert "推送" in captured["query"].split()
-        assert isinstance(out, list)
+        assert [record.entry_id for record in out] == [lesson.lesson_id]

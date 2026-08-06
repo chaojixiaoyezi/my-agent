@@ -394,11 +394,16 @@ def _provider_is_interrupted() -> bool:
 
 def _urllib_request(request: GatewayRequest) -> urllib.request.Request:
     """Build the urllib request without exposing shell/string transport paths."""
+    headers = dict(request.headers or {})
+    # Cloudflare 1010 拦截根因(真机实测):urllib 默认无 User-Agent 时,工具运行时.ai 等
+    # Cloudflare 端点对无 UA 的脚本请求返回 403 error code:1010;带浏览器 UA 则 200。
+    # 统一补 UA,兼容所有 Cloudflare 防护的 Anthropic 兼容端点。
+    headers.setdefault("User-Agent", "my-agent/1.0 (anthropic-compatible client)")
     return urllib.request.Request(
         request.url,
         data=json.dumps(request.payload).encode("utf-8"),
         method="POST",
-        headers=request.headers,
+        headers=headers,
     )
 
 

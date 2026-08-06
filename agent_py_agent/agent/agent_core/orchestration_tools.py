@@ -20,7 +20,15 @@ from ..subagents.services.hierarchy.scheduled_role import (
     agent_name_has_trailing_identifier,
     is_placeholder_agent_name,
 )
-from ..tooling.models import BaseTool, ToolExecutionResult
+from ..tooling.models import (
+    BaseTool,
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    ResourceScopePolicy,
+    ToolHandlerOutcome,
+    ToolInputPolicy,
+    ToolRuntimePolicy,
+)
 from .hierarchy_tools import ScheduleChildSubagentsTool as ScheduleChildSubagentsTool
 from .orchestration.create_constraints import (
     CreateTaskResolution,
@@ -62,7 +70,7 @@ from .orchestration.tool_grants import (
     READ_ONLY_SUBAGENT_TOOLS,
     subagent_allowed_tools,
 )
-from .orchestration.tool_specs import build_create_subagents_spec
+from .orchestration.tool_specs import build_create_subagents_model_spec
 from .orchestration.tools.cancel import (
     CancelSubagentsTool as CancelSubagentsTool,
 )
@@ -139,38 +147,63 @@ def _role_suffix(role: str) -> str:
 
 
 class CreateSubagentsTool(BaseTool):
+    model_spec = build_create_subagents_model_spec()
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy("mutating"),
+        idempotency_policy=IdempotencyPolicy("operation"),
+        resource_scopes=ResourceScopePolicy(
+            parameter_names=("output_files", "input_refs", "replacement_for_run_ids"),
+        ),
+        input_policy=ToolInputPolicy(
+            internal_parameters=("dry_run", "extra_write_roots"),
+        ),
+        promotes_task=True,
+    )
 
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
-        self.spec = build_create_subagents_spec()
 
-    def execute(self, params: dict[str, object]) -> ToolExecutionResult:
-        try:
-            return _execute_create_subagents(self.agent, params)
-        except Exception as exc:
-            # create_subagents 在真实 dispatch 路径上会偶发崩溃(真机 B1/R3:合法 goal+output_files
-            # 调用也抛异常,堆栈没落到任何日志,模型只看到无信息、retryable=False 的 UNKNOWN_ERROR 兜底码
-            # 就放弃、退回主代理独自写)。这里兜住异常:① 记完整 traceback 便于定位;② 把异常类型+摘要
-            # 写进报错消息(工具账本里就能看到崩在哪);③ 用 retryable 的 TOOL_INVALID_ARGUMENTS 让模型
-            # 换简单写法重试,而不是吞成 UNKNOWN_ERROR 直接弃疗。
-            import logging
-            import traceback as _tb
-            logging.getLogger(__name__).error("create_subagents crashed: %s\n%s", exc, _tb.format_exc())
-            return ToolExecutionResult(
-                "create_subagents",
-                False,
-                f"create_subagents 执行时内部出错({type(exc).__name__}: {exc})。多半是某个参数触发的内部问题——"
-                "换最简单的写法重试:只传一个 goal、先别带 output_files/acceptance_checks 等附加字段。别因此就改回自己写。",
-                error_code="TOOL_INVALID_ARGUMENTS",
-            )
+    def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
+        return execute_create_subagents_service(self.agent, params)
 
-def _execute_create_subagents(agent: SimpleAgent, params: dict[str, object]) -> ToolExecutionResult:
+
+def execute_create_subagents_service(
+    agent: SimpleAgent,
+    params: dict[str, object],
+) -> ToolHandlerOutcome:
+    """Create audit/runtime children without pretending an internal service call is a model tool call."""
+
+    try:
+        return _execute_create_subagents(agent, params)
+    except Exception as exc:
+        # create_subagents 在真实 dispatch 路径上会偶发崩溃(真机 B1/R3:合法 goal+output_files
+        # 调用也抛异常,堆栈没落到任何日志,模型只看到无信息、retryable=False 的 UNKNOWN_ERROR 兜底码
+        # 就放弃、退回主代理独自写)。这里兜住异常:① 记完整 traceback 便于定位;② 把异常类型+摘要
+        # 写进报错消息(工具账本里就能看到崩在哪);③ 用 retryable 的 TOOL_INVALID_ARGUMENTS 让模型
+        # 换简单写法重试,而不是吞成 UNKNOWN_ERROR 直接弃疗。
+        import logging
+        import traceback as _tb
+
+        logging.getLogger(__name__).error(
+            "create_subagents crashed: %s\n%s",
+            exc,
+            _tb.format_exc(),
+        )
+        return ToolHandlerOutcome(
+            "create_subagents",
+            False,
+            f"create_subagents 执行时内部出错({type(exc).__name__}: {exc})。多半是某个参数触发的内部问题——"
+            "换最简单的写法重试:只传一个 goal、先别带 output_files/acceptance_checks 等附加字段。别因此就改回自己写。",
+            error_code="TOOL_INVALID_ARGUMENTS",
+        )
+
+def _execute_create_subagents(agent: SimpleAgent, params: dict[str, object]) -> ToolHandlerOutcome:
     if not agent.config.enable_subagents:
-        return ToolExecutionResult("create_subagents", False, "配置已禁用 subagent。", error_code="TOOL_UNAVAILABLE")
+        return ToolHandlerOutcome("create_subagents", False, "配置已禁用 subagent。", error_code="TOOL_UNAVAILABLE")
     if not str(params.get("goal") or "").strip():
         # goal 是整批派工的结构化意图，items 模式也不能省。这样 schema 入口与直接
         # execute 入口使用同一硬约束，不靠模型正文猜本批任务是什么。
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             "create_subagents",
             False,
             "create_subagents 缺少始终必填的 goal。这里的 goal 是内部整批派工说明，"
@@ -181,7 +214,7 @@ def _execute_create_subagents(agent: SimpleAgent, params: dict[str, object]) -> 
             error_code="TOOL_INVALID_ARGUMENTS",
         )
     if "count" in params:
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             "create_subagents",
             False,
             "create_subagents 不接受 count 克隆同一任务。只派一个时直接传 goal；"
@@ -197,14 +230,14 @@ def _execute_create_subagents(agent: SimpleAgent, params: dict[str, object]) -> 
         goal=str(params.get("goal") or ""),
     )
     if relation_error:
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             "create_subagents",
             False,
             relation_error,
             error_code="TOOL_INVALID_ARGUMENTS",
         )
     prepared = _prepare_single_mode(agent, related_params)
-    if isinstance(prepared, ToolExecutionResult):
+    if isinstance(prepared, ToolHandlerOutcome):
         return prepared
     allowed_tools, run_params = prepared
     task_params = [run_params]
@@ -220,10 +253,10 @@ def _execute_create_subagents(agent: SimpleAgent, params: dict[str, object]) -> 
     )
 
 
-def _items_result(agent: SimpleAgent, params: dict[str, object]) -> ToolExecutionResult | None:
+def _items_result(agent: SimpleAgent, params: dict[str, object]) -> ToolHandlerOutcome | None:
     items = create_items_from_params(params)
     if isinstance(items, str):
-        return ToolExecutionResult("create_subagents", False, items, error_code="TOOL_INVALID_ARGUMENTS")
+        return ToolHandlerOutcome("create_subagents", False, items, error_code="TOOL_INVALID_ARGUMENTS")
     if items:
         return _execute_items(agent, items, params)
     return None
@@ -232,11 +265,11 @@ def _items_result(agent: SimpleAgent, params: dict[str, object]) -> ToolExecutio
 def _prepare_single_mode(
     agent: SimpleAgent,
     params: dict[str, object],
-) -> tuple[list[str] | None, CreateRunParams] | ToolExecutionResult:
+) -> tuple[list[str] | None, CreateRunParams] | ToolHandlerOutcome:
     params = append_parent_shared_context(agent, params)
     params, skill_error = _params_with_skill_snapshot_refs(agent, params)
     if skill_error:
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             "create_subagents",
             False,
             skill_error,
@@ -244,7 +277,7 @@ def _prepare_single_mode(
         )
     params, audit_scope_error = prepare_audit_child_creation_scope(agent, params)
     if audit_scope_error:
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             "create_subagents",
             False,
             audit_scope_error,
@@ -252,7 +285,7 @@ def _prepare_single_mode(
         )
     goal = str(params.get("goal") or "").strip()
     capacity = _checked_creation_capacity(agent)
-    if isinstance(capacity, ToolExecutionResult):
+    if isinstance(capacity, ToolHandlerOutcome):
         return capacity
     slots, limits = capacity
     if slots < 1:
@@ -260,7 +293,7 @@ def _prepare_single_mode(
     allowed_tools = subagent_allowed_tools(params)
     validation = _validate_single_goal(ValidateSingleGoalRequest(agent, params, goal, allowed_tools))
     if validation:
-        return ToolExecutionResult("create_subagents", False, validation, error_code="TOOL_INVALID_ARGUMENTS")
+        return ToolHandlerOutcome("create_subagents", False, validation, error_code="TOOL_INVALID_ARGUMENTS")
     return allowed_tools, create_run_params(agent, params, goal, allowed_tools)
 
 
@@ -269,7 +302,7 @@ def _created_tasks_result(
     resolutions: list[CreateTaskResolution],
     allowed_tools: list[str] | str | None,
     request_params: dict[str, object],
-) -> ToolExecutionResult:
+) -> ToolHandlerOutcome:
     tasks = [item.task for item in resolutions]
     attach_sibling_roster(agent.subagents, tasks)
     replacement_records = record_create_replacements(agent, tasks)
@@ -305,16 +338,16 @@ def _execute_items(
     agent: SimpleAgent,
     items: list[CreateSubagentItem],
     request_params: dict[str, object],
-) -> ToolExecutionResult:
+) -> ToolHandlerOutcome:
     capacity = _checked_creation_capacity(agent)
-    if isinstance(capacity, ToolExecutionResult):
+    if isinstance(capacity, ToolHandlerOutcome):
         return capacity
     slots, limits = capacity
     if len(items) > slots:
         return _subagent_quota_result(len(items), slots, limits)
     related_items, relation_error = _items_with_finding_relations(agent, items)
     if relation_error:
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             "create_subagents",
             False,
             relation_error,
@@ -323,7 +356,7 @@ def _execute_items(
     capped = _items_with_parent_context(agent, related_items)
     capped, skill_error = _items_with_skill_snapshot_refs(agent, capped)
     if skill_error:
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             "create_subagents",
             False,
             skill_error,
@@ -331,7 +364,7 @@ def _execute_items(
         )
     capped, audit_scope_error = _items_with_audit_child_scopes(agent, capped)
     if audit_scope_error:
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             "create_subagents",
             False,
             audit_scope_error,
@@ -343,7 +376,7 @@ def _execute_items(
     allowed_tool_values = [subagent_allowed_tools(item.params) for item in capped]
     validation = _validate_items(agent, capped, allowed_tool_values)
     if validation:
-        return ToolExecutionResult("create_subagents", False, validation, error_code="TOOL_INVALID_ARGUMENTS")
+        return ToolHandlerOutcome("create_subagents", False, validation, error_code="TOOL_INVALID_ARGUMENTS")
     task_params = _indexed_item_run_params(agent, capped)
     if conflict := _output_scope_conflict_result(agent, task_params):
         return conflict
@@ -359,7 +392,7 @@ def _execute_items(
     ))
 
 
-def _created_items_result(request: CreatedItemsResultRequest) -> ToolExecutionResult:
+def _created_items_result(request: CreatedItemsResultRequest) -> ToolHandlerOutcome:
     tasks = [item.task for item in request.resolutions]
     attach_sibling_roster(request.agent.subagents, tasks, save=False)
     for task in tasks:
@@ -397,11 +430,11 @@ def _created_items_result(request: CreatedItemsResultRequest) -> ToolExecutionRe
     return _create_subagents_success(payload)
 
 
-def _create_subagents_success(payload: dict[str, object]) -> ToolExecutionResult:
+def _create_subagents_success(payload: dict[str, object]) -> ToolHandlerOutcome:
     """Preserve a compact scheduling receipt after full output archival."""
     lifecycle = payload.get("schedule_lifecycle")
     envelope = {"schedule_lifecycle": dict(lifecycle)} if isinstance(lifecycle, dict) else {}
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         "create_subagents",
         True,
         json.dumps(payload, ensure_ascii=False, indent=2),
@@ -558,7 +591,7 @@ def _resolve_task_params(agent: SimpleAgent, task_params: list[CreateRunParams])
 def _output_scope_conflict_result(
     agent: SimpleAgent,
     task_params: list[CreateRunParams],
-) -> ToolExecutionResult | None:
+) -> ToolHandlerOutcome | None:
     conflicts = creation_output_scope_conflicts(agent.subagents, task_params)
     if not conflicts:
         return None
@@ -582,7 +615,7 @@ def _output_scope_conflict_result(
             ),
         },
     }
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         "create_subagents",
         False,
         json.dumps(payload, ensure_ascii=False, indent=2),
@@ -593,7 +626,7 @@ def _output_scope_conflict_result(
 def _active_lineage_creation_result(
     agent: SimpleAgent,
     task_params: list[CreateRunParams],
-) -> ToolExecutionResult | None:
+) -> ToolHandlerOutcome | None:
     current = getattr(agent, "_current_run_params", None)
     if str(getattr(current, "source", "") or "").strip() != "background_main_agent":
         return None
@@ -623,7 +656,7 @@ def _active_lineage_creation_result(
             ),
         },
     }
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         "create_subagents",
         False,
         json.dumps(payload, ensure_ascii=False, indent=2),
@@ -658,11 +691,11 @@ class _SubagentCapacityStateError(RuntimeError):
 # 函数用途: 统一读取子代理容量，账本异常时整批拒绝而不假定占用量为零。
 def _checked_creation_capacity(
     agent: object,
-) -> tuple[int, dict[str, int]] | ToolExecutionResult:
+) -> tuple[int, dict[str, int]] | ToolHandlerOutcome:
     try:
         return _available_creation_slots(agent)
     except _SubagentCapacityStateError:
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             "create_subagents",
             False,
             "当前无法读取权威子代理容量状态；本批没有创建任何子代理。",
@@ -769,7 +802,7 @@ def _subagent_quota_result(
     requested: int,
     available: int,
     limits: dict[str, int],
-) -> ToolExecutionResult:
+) -> ToolHandlerOutcome:
     payload = {
         "ok": False,
         "error_code": "SUBAGENT_CAPACITY_EXCEEDED",
@@ -779,7 +812,7 @@ def _subagent_quota_result(
         "limits": limits,
         "how_to_fix": "减少 items 数量后重试；已有子代理结束后容量会自动释放。",
     }
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         "create_subagents",
         False,
         json.dumps(payload, ensure_ascii=False, indent=2),

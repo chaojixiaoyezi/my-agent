@@ -188,36 +188,18 @@ class TestMemoryPushExceptions:
         result = push_relevant_memories(agent, "timeout", {}, limit=3)
         assert result == []
 
-    def test_memory_corrupted_entry(self, tmp_path: Path):
-        """记忆条目损坏时的降级处理。"""
-        from agent_py_agent.agent.memory_push import MemoryEntry, MemoryType
+    def test_legacy_memory_entry_schema_is_removed(self, tmp_path: Path):
+        """旧 MemoryEntry/MemoryType 不能继续形成第二套 lesson Schema。"""
+        import agent_py_agent.agent.memory_push as memory_push
 
-        # 损坏的数据（缺少必需字段）
-        corrupted_data = {
-            "type": "invalid_type",
-            # 缺少其他必需字段
-        }
+        assert not hasattr(memory_push, "MemoryEntry")
+        assert not hasattr(memory_push, "MemoryType")
 
-        # from_dict 应该能处理损坏数据，返回默认值
-        entry = MemoryEntry.from_dict(corrupted_data)
-        assert entry.type == MemoryType.LESSON_GENERAL  # 默认值
+    def test_direct_lesson_writer_is_removed(self, tmp_path: Path):
+        """失败/规划召回模块不得再暴露绕过 CandidateService 的写入口。"""
+        import agent_py_agent.agent.memory_push as memory_push
 
-    def test_write_memory_without_memory(self, tmp_path: Path):
-        """写入记忆时 memory 为 None 的处理。"""
-        from agent_py_agent.agent.memory_push import write_memory_with_type
-
-        mock_memory = MagicMock()
-        mock_memory.add.side_effect = AttributeError("memory is None")
-
-        # 应该不抛出异常
-        try:
-            write_memory_with_type(
-                mock_memory,
-                content="test",
-                mem_type=MemoryType.LESSON_GENERAL,
-            )
-        except Exception:
-            pass  # 可能抛出异常，但不应该导致进程崩溃
+        assert not hasattr(memory_push, "write_memory_with_type")
 
 
 class TestFailureIntrospectorRulePath:

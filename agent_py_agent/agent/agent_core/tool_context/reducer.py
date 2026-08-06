@@ -3,7 +3,7 @@ from __future__ import annotations
 
 """Live prompt reducer for tool execution results.
 
-This is the model-facing choke point: output bodies use the ToolSpec-derived
+This is the model-facing choke point: output bodies use the ToolRuntimePolicy-derived
 projection while status, verification facts, hashes and archive refs remain
 structured framework facts outside an untrusted external-data body.
 """
@@ -11,28 +11,32 @@ structured framework facts outside an untrusted external-data body.
 import json
 from dataclasses import replace
 
-from ...tooling.models import ToolExecutionResult
 from ...tooling.output_projection import (
-    model_tool_output_body,
+    project_tool_output_body,
     redact_tool_output_text,
-    tool_output_projection_policy,
 )
+from ...tooling.runtime_contracts import ToolContentBlock, ToolResult
 from ..orchestration.context.live_summary import orchestration_live_summary
 from .action_summary import actionable_tool_result_summary
 
 
-def render_tool_result_for_live_prompt(result: ToolExecutionResult, archive_record: dict[str, object]) -> str:
+def render_tool_result_for_live_prompt(result: ToolResult, archive_record: dict[str, object]) -> str:
     live_output = _live_prompt_output(result)
     if live_output is not None:
         rendered = _inline_result_with_archive_anchor(
-            replace(result, output=_project_output_body(result, live_output)),
+            replace(
+                result,
+                content_blocks=(
+                    ToolContentBlock("text", text=_project_output_body(result, live_output)),
+                ),
+            ),
             archive_record,
         )
     elif _preserve_prompt_output(result) or not archive_record.get(
         "output_externalized"
     ):
         rendered = _inline_result_with_archive_anchor(
-            replace(result, output=_project_output_body(result, result.output)),
+            result,
             archive_record,
         )
     else:
@@ -47,7 +51,7 @@ def render_tool_result_for_live_prompt(result: ToolExecutionResult, archive_reco
 # LLM: Externalized results prefer structured orchestration/action summaries before the generic anchor.
 # 函数用途: 为外置大输出选择最有用的摘要，并保留能重新读取完整内容的稳定引用。
 def _externalized_result_summary(
-    result: ToolExecutionResult,
+    result: ToolResult,
     archive_record: dict[str, object],
 ) -> str:
     stored_summary = str(archive_record.get("model_summary") or "").strip()
@@ -86,11 +90,12 @@ def _externalized_result_summary(
     return "\n".join(lines)
 
 
-def _with_verification_facts(rendered: str, result: ToolExecutionResult) -> str:
+def _with_verification_facts(rendered: str, result: ToolResult) -> str:
+    details = _handler_details(result)
     facts = {
-        key: result.result_envelope[key]
+        key: details[key]
         for key in ("verification_evidence", "verification_state")
-        if key in result.result_envelope
+        if key in details
     }
     if not facts:
         return rendered
@@ -102,36 +107,42 @@ def _with_verification_facts(rendered: str, result: ToolExecutionResult) -> str:
     )
 
 
-def _live_prompt_output(result: ToolExecutionResult) -> str | None:
-    policy = result.result_envelope.get("tool_output_policy")
+def _live_prompt_output(result: ToolResult) -> str | None:
+    policy = _handler_details(result).get("tool_output_policy")
     if not isinstance(policy, dict) or "live_prompt_output" not in policy:
         return None
     value = policy.get("live_prompt_output")
     return str(value) if value is not None else ""
 
 
-def _preserve_prompt_output(result: ToolExecutionResult) -> bool:
-    policy = result.result_envelope.get("tool_output_policy")
+def _preserve_prompt_output(result: ToolResult) -> bool:
+    policy = _handler_details(result).get("tool_output_policy")
     return isinstance(policy, dict) and bool(policy.get("preserve_prompt_output"))
 
 
-def _project_output_body(result: ToolExecutionResult, output: str) -> str:
-    return model_tool_output_body(
-        tool=result.tool,
+def _handler_details(result: ToolResult) -> dict[str, object]:
+    details = result.metadata.get("handler_details")
+    return dict(details) if isinstance(details, dict) else {}
+
+
+def _project_output_body(result: ToolResult, output: str) -> str:
+    return project_tool_output_body(
+        tool=result.tool_name,
         output=output,
-        result_envelope=result.result_envelope,
+        trust=result.output_trust,
+        redaction=result.output_redaction,
     )
 
 
-def _output_trust(result: ToolExecutionResult) -> str:
-    return tool_output_projection_policy(result.result_envelope)[0]
+def _output_trust(result: ToolResult) -> str:
+    return result.output_trust
 
 
-def _output_redaction(result: ToolExecutionResult) -> str:
-    return tool_output_projection_policy(result.result_envelope)[1]
+def _output_redaction(result: ToolResult) -> str:
+    return result.output_redaction
 
 
-def _inline_result_with_archive_anchor(result: ToolExecutionResult, archive_record: dict[str, object]) -> str:
+def _inline_result_with_archive_anchor(result: ToolResult, archive_record: dict[str, object]) -> str:
     rendered = result.render_for_prompt()
     artifact_ref = str(archive_record.get("artifact_ref") or archive_record.get("source_artifact_ref") or "").strip()
     scoped_call_id = str(archive_record.get("scoped_call_id") or "").strip()

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 对标 长期助手 tools/vision_tools.py 的两条路径,适配 my-agent:
   - 长期助手 走 async httpx + 中心化 auxiliary 视觉路由(OpenRouter/Nous/Anthropic...);
-    my-agent 工具是同步(execute(params)->ToolExecutionResult),所以这里用 urllib 同步实现,
+    my-agent 工具是同步(execute(params)->ToolHandlerOutcome),所以这里用 urllib 同步实现,
     和 web_fetch_runtime/gateway_helpers 同一套 HTTP 风格。
   - 长期助手 判 supports_vision 决定"直接附图给主模型"还是"走辅助视觉模型";my-agent 主模型
     (minimax)不一定支持视觉,所以**主路径是辅助视觉模型**:config 配一个独立的 anthropic_compatible
@@ -40,7 +40,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .models import BaseTool, ToolAvailability, ToolExecutionResult, ToolSpec
+from .cancellation import cancellation_requested, register_cancellation_callback
+from .models import (
+    BaseTool,
+    ConcurrencyPolicy,
+    EffectResolverPolicy,
+    OutputPolicy,
+    ResourceScopePolicy,
+    TimeoutPolicy,
+    ToolAvailability,
+    ToolHandlerOutcome,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+)
 from .web import _default_network_resolver, _network_safety_error, _normalize_url
 
 # 下载/编码上限:防超大图或解压炸弹把内存撑爆(对标 长期助手 的 _VISION_MAX_DOWNLOAD_BYTES,
@@ -149,7 +162,7 @@ class _LoadedImage:
 class _RedirectBlocked(Exception):
     """重定向目标未过 SSRF 网关时抛出,携带网关原始拒绝结果供 _download 透出具体 error_code。"""
 
-    def __init__(self, blocked: ToolExecutionResult) -> None:
+    def __init__(self, blocked: ToolHandlerOutcome) -> None:
         super().__init__("redirect blocked by SSRF gate")
         self.blocked = blocked
 
@@ -173,10 +186,10 @@ class _SSRFGuardingRedirectHandler(urllib.request.HTTPRedirectHandler):
             raise _RedirectBlocked(blocked)
         return super().redirect_request(*args)
 
-    def _gate_target(self, newurl: str) -> ToolExecutionResult | None:
+    def _gate_target(self, newurl: str) -> ToolHandlerOutcome | None:
         """对重定向目标过网关:非 http(s) 直接拒;否则复用 _network_safety_error 逐跳校验。"""
         if not str(newurl).lower().startswith(("http://", "https://")):
-            return ToolExecutionResult(
+            return ToolHandlerOutcome(
                 self._tool_name, False, "重定向到非 http(s) 目标被拒", error_code="NETWORK_REQUEST_FAILED"
             )
         return _network_safety_error(self._tool_name, newurl, self._resolver)
@@ -190,7 +203,14 @@ class AnalyzeImageTool(BaseTool):
     def __init__(self, vision_config: VisionModelConfig, *, resolver: Any = None):
         self.vision_config = vision_config
         self._resolver = resolver or _default_network_resolver
-        self.spec = _analyze_image_spec()
+        self.model_spec = _analyze_image_model_spec()
+        self.runtime_policy = ToolRuntimePolicy(
+            effect_resolver=EffectResolverPolicy("read_only"),
+            timeout_policy=TimeoutPolicy(self.vision_config.timeout),
+            concurrency_policy=ConcurrencyPolicy("parallel_safe"),
+            resource_scopes=ResourceScopePolicy(parameter_names=("image",)),
+            output_policy=OutputPolicy(trust="external_data"),
+        )
 
     # LLM: 只检查静态连接配置，不探测网络或发送图片；真实调用前统一入口还会再次检查。
     # 函数用途: 未配置辅助视觉模型时让 analyze_image 从本轮工具面消失。
@@ -201,7 +221,7 @@ class AnalyzeImageTool(BaseTool):
             "辅助视觉模型尚未配置 vision_api_base 与 vision_model_name"
         )
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         if not self.vision_config.configured:
             return self._unavailable()
         source = str(params.get("image", "") or "").strip()
@@ -210,13 +230,13 @@ class AnalyzeImageTool(BaseTool):
         question = str(params.get("question", "") or "").strip()
 
         loaded = self._load_image(source)
-        if isinstance(loaded, ToolExecutionResult):
+        if isinstance(loaded, ToolHandlerOutcome):
             return loaded
         return self._analyze(loaded, question)
 
     # ---- 图片获取 + base64 + media type --------------------------------
 
-    def _load_image(self, source: str) -> _LoadedImage | ToolExecutionResult:
+    def _load_image(self, source: str) -> _LoadedImage | ToolHandlerOutcome:
         """解析图片源:http/https → 走 SSRF gate 下载;否则当本地文件读取。返回字节+media type。
 
         显式挡住其它 URL scheme(file://、ftp://、data: 等):它们既不是公网图片,也不应被
@@ -232,11 +252,11 @@ class AnalyzeImageTool(BaseTool):
             )
         return self._load_local(source)
 
-    def _load_local(self, source: str) -> _LoadedImage | ToolExecutionResult:
+    def _load_local(self, source: str) -> _LoadedImage | ToolHandlerOutcome:
         path = Path(source).expanduser()
         if not path.is_file():
-            return ToolExecutionResult(
-                self.spec.name,
+            return ToolHandlerOutcome(
+                self.model_spec.name,
                 False,
                 f"本地图片不存在或不是文件: {source}",
                 error_code="PATH_NOT_FOUND",
@@ -244,54 +264,59 @@ class AnalyzeImageTool(BaseTool):
         try:
             data = path.read_bytes()
         except OSError as exc:
-            return ToolExecutionResult(
-                self.spec.name,
+            return ToolHandlerOutcome(
+                self.model_spec.name,
                 False,
                 f"读取本地图片失败: {type(exc).__name__}",
                 error_code="ARTIFACT_UNREADABLE",
             )
         return self._finalize_image(data)
 
-    def _load_remote(self, source: str) -> _LoadedImage | ToolExecutionResult:
+    def _load_remote(self, source: str) -> _LoadedImage | ToolHandlerOutcome:
         try:
             url = _normalize_url(source)
         except ValueError as exc:
             return self._invalid(str(exc))
         # SSRF:复用 web_fetch/browser 同一把锁,默认拒私网/loopback/云 metadata。
-        network_error = _network_safety_error(self.spec.name, url, self._resolver)
+        network_error = _network_safety_error(self.model_spec.name, url, self._resolver)
         if network_error is not None:
             return network_error
         body = self._download(url)
-        if isinstance(body, ToolExecutionResult):
+        if isinstance(body, ToolHandlerOutcome):
             return body
         return self._finalize_image(body)
 
-    def _download(self, url: str) -> bytes | ToolExecutionResult:
+    def _download(self, url: str) -> bytes | ToolHandlerOutcome:
+        if cancellation_requested():
+            return self._cancelled()
         req = urllib.request.Request(url, headers={"User-Agent": "MyAgent-Vision/1.0", "Accept": "image/*,*/*;q=0.8"})
         # 带 SSRF 守卫的 opener:每个重定向目标都重新过网关,堵"首跳公网→跳转内网/云 metadata"的绕过
-        opener = urllib.request.build_opener(_SSRFGuardingRedirectHandler(self.spec.name, self._resolver))
+        opener = urllib.request.build_opener(_SSRFGuardingRedirectHandler(self.model_spec.name, self._resolver))
         try:
             with opener.open(req, timeout=self.vision_config.timeout) as resp:
-                body = resp.read(_MAX_IMAGE_BYTES + 1)
+                with register_cancellation_callback(resp.close):
+                    body = resp.read(_MAX_IMAGE_BYTES + 1)
         except _RedirectBlocked as exc:
             return exc.blocked  # 透出 SSRF 网关对该重定向目标的具体拒绝码
         except urllib.error.HTTPError as exc:
-            return ToolExecutionResult(
-                self.spec.name, False, f"下载图片失败: HTTP {exc.code}", error_code="NETWORK_REQUEST_FAILED"
+            return ToolHandlerOutcome(
+                self.model_spec.name, False, f"下载图片失败: HTTP {exc.code}", error_code="NETWORK_REQUEST_FAILED"
             )
         except TimeoutError as exc:
-            return ToolExecutionResult(
-                self.spec.name, False, f"下载图片超时: {type(exc).__name__}", error_code="TOOL_TIMEOUT"
+            return ToolHandlerOutcome(
+                self.model_spec.name, False, f"下载图片超时: {type(exc).__name__}", error_code="TOOL_TIMEOUT"
             )
         except (urllib.error.URLError, OSError) as exc:
-            return ToolExecutionResult(
-                self.spec.name, False, f"下载图片失败: {type(exc).__name__}", error_code="NETWORK_REQUEST_FAILED"
+            if cancellation_requested():
+                return self._cancelled()
+            return ToolHandlerOutcome(
+                self.model_spec.name, False, f"下载图片失败: {type(exc).__name__}", error_code="NETWORK_REQUEST_FAILED"
             )
         if len(body) > _MAX_IMAGE_BYTES:
             return self._too_large()
         return body
 
-    def _finalize_image(self, data: bytes) -> _LoadedImage | ToolExecutionResult:
+    def _finalize_image(self, data: bytes) -> _LoadedImage | ToolHandlerOutcome:
         if len(data) > _MAX_IMAGE_BYTES:
             return self._too_large()
         media_type = _detect_media_type(data)
@@ -303,12 +328,12 @@ class AnalyzeImageTool(BaseTool):
 
     # ---- 视觉模型调用(anthropic image block) --------------------------
 
-    def _analyze(self, image: _LoadedImage, question: str) -> ToolExecutionResult:
+    def _analyze(self, image: _LoadedImage, question: str) -> ToolHandlerOutcome:
         encoded = base64.b64encode(image.data).decode("ascii")
         prompt = question or "请详细描述这张图片的内容。"
         payload = _vision_request_payload(self.vision_config, image.media_type, encoded, prompt)
         analysis = self._call_vision_model(payload)
-        if isinstance(analysis, ToolExecutionResult):
+        if isinstance(analysis, ToolHandlerOutcome):
             return analysis
         result = {
             "ok": True,
@@ -317,14 +342,16 @@ class AnalyzeImageTool(BaseTool):
             "question": question,
             "analysis": analysis,
         }
-        return ToolExecutionResult(
-            self.spec.name,
+        return ToolHandlerOutcome(
+            self.model_spec.name,
             True,
             json.dumps(result, ensure_ascii=False),
             result_envelope=result,
         )
 
-    def _call_vision_model(self, payload: dict[str, Any]) -> str | ToolExecutionResult:
+    def _call_vision_model(self, payload: dict[str, Any]) -> str | ToolHandlerOutcome:
+        if cancellation_requested():
+            return self._cancelled()
         url = self.vision_config.api_base.rstrip("/") + "/v1/messages"
         headers = {
             "Content-Type": "application/json",
@@ -336,18 +363,29 @@ class AnalyzeImageTool(BaseTool):
         )
         try:
             with urllib.request.urlopen(req, timeout=self.vision_config.timeout) as resp:
-                raw = resp.read()
+                with register_cancellation_callback(resp.close):
+                    raw = resp.read()
         except urllib.error.HTTPError as exc:
             return self._model_error(f"视觉模型返回 HTTP {exc.code}")
         except TimeoutError:
-            return ToolExecutionResult(
-                self.spec.name, False, "视觉模型请求超时", error_code="TOOL_TIMEOUT"
+            return ToolHandlerOutcome(
+                self.model_spec.name, False, "视觉模型请求超时", error_code="TOOL_TIMEOUT"
             )
         except (urllib.error.URLError, OSError) as exc:
+            if cancellation_requested():
+                return self._cancelled()
             return self._model_error(f"无法连接视觉模型: {type(exc).__name__}")
         return self._parse_vision_response(raw)
 
-    def _parse_vision_response(self, raw: bytes) -> str | ToolExecutionResult:
+    def _cancelled(self) -> ToolHandlerOutcome:
+        return ToolHandlerOutcome(
+            self.model_spec.name,
+            False,
+            "CANCELLED: 图片分析已取消。",
+            error_code="CANCELLED",
+        )
+
+    def _parse_vision_response(self, raw: bytes) -> str | ToolHandlerOutcome:
         try:
             obj = json.loads(raw.decode("utf-8", "replace"))
         except (json.JSONDecodeError, ValueError):
@@ -359,7 +397,7 @@ class AnalyzeImageTool(BaseTool):
 
     # ---- 结构化错误工厂 ------------------------------------------------
 
-    def _unavailable(self) -> ToolExecutionResult:
+    def _unavailable(self) -> ToolHandlerOutcome:
         payload = {
             "ok": False,
             "error": "vision_model_not_configured",
@@ -369,30 +407,30 @@ class AnalyzeImageTool(BaseTool):
                 "anthropic_compatible 的视觉模型端点。"
             ),
         }
-        return ToolExecutionResult(
-            self.spec.name, False, json.dumps(payload, ensure_ascii=False), error_code="TOOL_UNAVAILABLE"
+        return ToolHandlerOutcome(
+            self.model_spec.name, False, json.dumps(payload, ensure_ascii=False), error_code="TOOL_UNAVAILABLE"
         )
 
-    def _invalid(self, message: str) -> ToolExecutionResult:
+    def _invalid(self, message: str) -> ToolHandlerOutcome:
         payload = {"ok": False, "error": "invalid_arguments", "message": message}
-        return ToolExecutionResult(
-            self.spec.name, False, json.dumps(payload, ensure_ascii=False), error_code="TOOL_INVALID_ARGUMENTS"
+        return ToolHandlerOutcome(
+            self.model_spec.name, False, json.dumps(payload, ensure_ascii=False), error_code="TOOL_INVALID_ARGUMENTS"
         )
 
-    def _too_large(self) -> ToolExecutionResult:
+    def _too_large(self) -> ToolHandlerOutcome:
         payload = {
             "ok": False,
             "error": "image_too_large",
             "message": f"图片超过大小上限({_MAX_IMAGE_BYTES // (1024 * 1024)} MB);请压缩后重试。",
         }
-        return ToolExecutionResult(
-            self.spec.name, False, json.dumps(payload, ensure_ascii=False), error_code="ARTIFACT_TOO_LARGE"
+        return ToolHandlerOutcome(
+            self.model_spec.name, False, json.dumps(payload, ensure_ascii=False), error_code="ARTIFACT_TOO_LARGE"
         )
 
-    def _model_error(self, message: str) -> ToolExecutionResult:
+    def _model_error(self, message: str) -> ToolHandlerOutcome:
         payload = {"ok": False, "error": "vision_model_failed", "message": message}
-        return ToolExecutionResult(
-            self.spec.name, False, json.dumps(payload, ensure_ascii=False), error_code="MODEL_UPSTREAM_FAILED"
+        return ToolHandlerOutcome(
+            self.model_spec.name, False, json.dumps(payload, ensure_ascii=False), error_code="MODEL_UPSTREAM_FAILED"
         )
 
 
@@ -434,49 +472,39 @@ def _anthropic_text(obj: dict[str, Any]) -> str:
     return ""
 
 
-def _analyze_image_spec() -> ToolSpec:
-    return ToolSpec(
+def _analyze_image_model_spec() -> ToolModelSpec:
+    return ToolModelSpec(
         name="analyze_image",
-        category="vision",
-        effect="read_only",
-        output_trust="external_data",
         description=(
             "看图:分析一张图片的内容。输入本地图片路径或 http/https 图片 URL,加可选问题,"
             "返回图片内容的描述/分析。用于需要理解图片(截图、照片、图表、UI)时。"
         ),
-        use_cases=[
-            "用户给了一张图片(本地路径或 URL),需要知道图里有什么、读图中文字、看懂图表/界面",
-            "网页/工具输出里出现图片 URL,需要理解其内容再决定下一步",
-            "对一张图片提具体问题(这是什么牌子/有几个人/报错信息是什么)",
-        ],
-        avoid_when=[
-            "目标是纯文本文件时用 read_file,不要当图片分析",
-            "要抓网页正文/下载文件时用 web_fetch",
-        ],
-        keywords=[
-            "看图", "图片", "图像", "视觉", "vision", "image", "看懂", "识图", "截图",
-            "图表", "照片", "OCR", "图里", "analyze_image", "多模态",
-        ],
-        parameters={
-            "image": "图片来源:本地文件路径,或 http/https 图片 URL。",
-            "question": "可选。对图片的具体问题或分析要求;不传则返回整体内容描述。",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "image": {
+                    "type": "string",
+                    "description": "本地绝对/相对路径或 http/https URL；URL 会经过 SSRF 安全检查，仅支持 PNG/JPEG/WebP/GIF。",
+                },
+                "question": {"type": "string", "description": "可选。对图片的具体问题或分析要求；不传则返回整体描述。"},
+            },
+            "required": ["image"],
+            "additionalProperties": False,
         },
-        parameter_details={
-            "image": (
-                "本地绝对/相对路径,或 http/https URL。URL 取图前会走 SSRF 安全检查,默认拒绝"
-                "私网/内网/云 metadata 地址。仅支持 PNG/JPEG/WebP/GIF(按文件内容判定)。"
+        hints=ToolModelHints(
+            category="vision",
+            use_cases=(
+                "用户给了一张图片(本地路径或 URL),需要知道图里有什么、读图中文字、看懂图表/界面",
+                "网页/工具输出里出现图片 URL,需要理解其内容再决定下一步",
+                "对一张图片提具体问题(这是什么牌子/有几个人/报错信息是什么)",
             ),
-            "question": "可选字符串。比如'图里有几个人''读出图中的报错文字''这是什么图表'。",
-        },
-        parameter_schema={
-            "image": {"type": "string"},
-            "question": {"type": "string"},
-        },
-        required_parameters=["image"],
-        examples=[
-            '{"tool": "analyze_image", "image": "/path/to/screenshot.png", "question": "图里的报错信息是什么?"}',
-            '{"tool": "analyze_image", "image": "https://example.com/chart.png"}',
-        ],
+            avoid_when=("目标是纯文本文件时用 read_file,不要当图片分析", "要抓网页正文/下载文件时用 web_fetch"),
+            keywords=("看图", "图片", "图像", "视觉", "vision", "image", "看懂", "识图", "截图", "图表", "照片", "OCR", "图里", "analyze_image", "多模态"),
+            examples=(
+                '{"tool": "analyze_image", "image": "/path/to/screenshot.png", "question": "图里的报错信息是什么?"}',
+                '{"tool": "analyze_image", "image": "https://example.com/chart.png"}',
+            ),
+        ),
     )
 
 

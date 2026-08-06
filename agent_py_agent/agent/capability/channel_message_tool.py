@@ -19,10 +19,16 @@ from ..delivery import (
 )
 from ..tooling.models import (
     BaseTool,
-    ToolExecutionResult,
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    ResourceScopePolicy,
+    ToolHandlerOutcome,
+    ToolInputPolicy,
+    ToolModelHints,
+    ToolModelSpec,
     ToolOperationReconciliation,
     ToolOperationReconciliationContext,
-    ToolSpec,
+    ToolRuntimePolicy,
     TrustedParameterBinding,
 )
 
@@ -35,55 +41,51 @@ _MAX_EVIDENCE_REFS = 64
 
 # LLM: send_message 是通道无关的模型入口，目标固定为当前 owner；不要新增 feishu_send 等重叠工具。
 # 函数用途: 返回发送文字或 owner 已登记附件的工具说明书。
-def build_send_message_spec() -> ToolSpec:
-    return ToolSpec(
+def build_send_message_model_spec() -> ToolModelSpec:
+    return ToolModelSpec(
         name="send_message",
-        category="messaging",
-        effect="mutating",
-        idempotency_scope="business",
         description=(
             "把文字或已经生成的文件原生发送到当前用户连接的聊天通道。"
             "用户说‘发我/传给我/作为附件发送’时，在文件生成后调用；不需要用户提供飞书 ID。"
             "attachments 每项使用 Recent Artifact Refs 里的完整 path 原值。"
         ),
-        use_cases=[
-            "用户要求把刚生成的文件作为附件发回当前飞书会话",
-            "用户追问‘把上一个文件发我’，直接复用 Recent Artifact Refs，不要重新生成或复制",
-            "需要主动给当前 owner 发送一条短消息",
-        ],
-        avoid_when=[
-            "只需要在当前轮正常回复文字时，直接给最终回复，不要额外发送一遍",
-            "文件尚未生成或尚未登记时，先完成文件产物",
-            "不能用它给其他用户或任意群发送消息；目标由当前 owner 身份固定决定",
-        ],
-        keywords=[
-            "发我", "发送", "飞书", "附件", "传给我", "把文件给我", "send", "message", "attachment",
-        ],
-        parameters={
-            "message": "可选。随附件一起发送的简短说明；只发附件时可留空。",
-            "attachments": "可选。Recent Artifact Refs 中 path 组成的数组，最多 10 项。",
-            "evidence_refs": "可选。正文实际依据的结构化证据引用；只搬运引用，不从正文猜测。",
-        },
-        parameter_schema={
-            "message": {"type": "string"},
-            "attachments": {"type": "array", "items": {"type": "string"}, "maxItems": _MAX_ATTACHMENTS},
-            "evidence_refs": {
-                "type": "array",
-                "items": {"type": "string"},
-                "maxItems": _MAX_EVIDENCE_REFS,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "description": "随附件发送的简短说明；只发附件时可留空。"},
+                "attachments": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": _MAX_ATTACHMENTS,
+                    "description": "Recent Artifact Refs 中 path 组成的数组。",
+                },
+                "evidence_refs": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": _MAX_EVIDENCE_REFS,
+                    "description": "正文实际依据的结构化证据引用；不从正文猜测。",
+                },
             },
+            "additionalProperties": False,
         },
-        required_parameters=[],
-        internal_parameters=["__run_scope", "__tool_call_id"],
-        trusted_parameter_bindings={
-            "evidence_refs": TrustedParameterBinding(
-                source_refs=("run_scope.delivery_evidence_refs",),
+        hints=ToolModelHints(
+            category="messaging",
+            use_cases=(
+                "用户要求把刚生成的文件作为附件发回当前会话",
+                "用户追问把上一个文件发我时复用 Recent Artifact Refs",
+                "需要主动给当前 owner 发送一条短消息",
             ),
-        },
-        examples=[
-            '{"tool":"send_message","message":"文件写好了。","attachments":["<Recent Artifact Refs path>"]}',
-            '{"tool":"send_message","attachments":["<已登记产物的完整 path>"]}',
-        ],
+            avoid_when=(
+                "当前轮正常回复文字时直接最终回复，不额外发送",
+                "文件尚未生成或登记时先完成产物",
+                "不能给其他用户或任意群发送消息",
+            ),
+            keywords=("发我", "发送", "飞书", "附件", "传给我", "把文件给我", "send", "message", "attachment"),
+            examples=(
+                '{"tool":"send_message","message":"文件写好了。","attachments":["<Recent Artifact Refs path>"]}',
+                '{"tool":"send_message","attachments":["<已登记产物的完整 path>"]}',
+            ),
+        ),
     )
 
 
@@ -94,7 +96,25 @@ class SendMessageTool(BaseTool):
     # 函数用途: 创建当前 agent 的原生消息发送工具。
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
-        self.spec = build_send_message_spec()
+        self.model_spec = build_send_message_model_spec()
+        self.runtime_policy = ToolRuntimePolicy(
+            effect_resolver=EffectResolverPolicy("mutating"),
+            idempotency_policy=IdempotencyPolicy("business"),
+            resource_scopes=ResourceScopePolicy(
+                mode="declared",
+                static_scopes=("current_owner_channel",),
+            ),
+            input_policy=ToolInputPolicy(
+                internal_parameters=("__run_scope", "__tool_call_id"),
+                trusted_parameter_bindings=((
+                    "evidence_refs",
+                    TrustedParameterBinding(
+                        source_refs=("run_scope.delivery_evidence_refs",),
+                        authority="host_authoritative",
+                    ),
+                ),),
+            ),
+        )
         self._delivery: DeliveryService = agent.delivery_service
 
     # LLM: 同一 owner 请求里的同一外发内容是一个业务动作；call_id 不得进入键，否则超时后换调用 ID 可绕过去重。
@@ -166,13 +186,13 @@ class SendMessageTool(BaseTool):
 
     # LLM: 外部副作用前必须先完成 owner target、registry、真实路径和 hash 四层校验。
     # 函数用途: 执行一次发给当前用户的文字/附件发送，并返回不含服务器路径的回执。
-    def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         message = str(params.get("message") or "").strip()
         attachment_refs = _attachment_refs(params.get("attachments"))
-        if isinstance(attachment_refs, ToolExecutionResult):
+        if isinstance(attachment_refs, ToolHandlerOutcome):
             return attachment_refs
         evidence_refs = _evidence_refs(params.get("evidence_refs"))
-        if isinstance(evidence_refs, ToolExecutionResult):
+        if isinstance(evidence_refs, ToolHandlerOutcome):
             return evidence_refs
         scope = params.get("__run_scope") if isinstance(params.get("__run_scope"), dict) else {}
         attachment_refs, evidence_refs = _canonical_scoped_delivery_refs(
@@ -190,7 +210,7 @@ class SendMessageTool(BaseTool):
         if not capabilities.proactive or not target or owner_root is None:
             return _error("当前 owner 没有可用的外部消息通道", "CHANNEL_ADAPTER_UNAVAILABLE")
         attachments = _resolve_attachments(owner_root, attachment_refs)
-        if isinstance(attachments, ToolExecutionResult):
+        if isinstance(attachments, ToolHandlerOutcome):
             return attachments
         envelope = ReplyEnvelope(
             content=message,
@@ -257,7 +277,7 @@ class SendMessageTool(BaseTool):
 
 # LLM: attachments 是开放世界的 artifact 引用数组；这里只限制资源数量和元素标量类型。
 # 函数用途: 清洗并去重模型传入的附件引用。
-def _attachment_refs(value: object) -> list[str] | ToolExecutionResult:
+def _attachment_refs(value: object) -> list[str] | ToolHandlerOutcome:
     if value in (None, ""):
         return []
     if not isinstance(value, list):
@@ -277,7 +297,7 @@ def _attachment_refs(value: object) -> list[str] | ToolExecutionResult:
 def _scoped_delivery_evidence_error(
     scope: dict[str, object],
     evidence_refs: list[str],
-) -> ToolExecutionResult | None:
+) -> ToolHandlerOutcome | None:
     required = _required_delivery_evidence_refs(scope)
     if not required:
         return None
@@ -333,7 +353,7 @@ def _string_refs(value: object) -> list[str]:
     )
 
 
-def _evidence_refs(value: object) -> list[str] | ToolExecutionResult:
+def _evidence_refs(value: object) -> list[str] | ToolHandlerOutcome:
     if value in (None, ""):
         return []
     if not isinstance(value, (list, tuple)):
@@ -375,11 +395,11 @@ def _owner_delivery_identity(agent: object) -> tuple[str, str, Path | None]:
 def _resolve_attachments(
     owner_root: Path,
     refs: list[str],
-) -> tuple[ChannelAttachment, ...] | ToolExecutionResult:
+) -> tuple[ChannelAttachment, ...] | ToolHandlerOutcome:
     attachments: list[ChannelAttachment] = []
     for ref in refs:
         record = _resolve_registered_artifact(owner_root, ref)
-        if isinstance(record, ToolExecutionResult):
+        if isinstance(record, ToolHandlerOutcome):
             return record
         if record is None:
             return _error(f"没有找到已登记产物：{Path(ref).name or ref}", "ARTIFACT_NOT_REGISTERED")
@@ -413,7 +433,7 @@ def _resolve_attachments(
 def _resolve_registered_artifact(
     owner_root: Path,
     ref: str,
-) -> ArtifactRegistryRecord | ToolExecutionResult | None:
+) -> ArtifactRegistryRecord | ToolHandlerOutcome | None:
     roots = _artifact_registry_roots(owner_root, ref)
     for root in roots:
         report = resolve_artifact_record_report(root, ref, path=ref)
@@ -510,9 +530,9 @@ def _success_result(
     payload: dict[str, Any],
     *,
     evidence_refs: list[str],
-) -> ToolExecutionResult:
+) -> ToolHandlerOutcome:
     output = dict(payload)
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         "send_message",
         True,
         json.dumps(output, ensure_ascii=False),
@@ -527,7 +547,7 @@ def _success_result(
                 "evidence_refs": list(evidence_refs),
                 "deduplicated": False,
                 # 路径只在内部结构化运行事实中保留，供同一 owner transcript 复用附件；
-                # ToolExecutionResult.output 仍只暴露不含路径的 _success_payload。
+                # ToolHandlerOutcome.output 仍只暴露不含路径的 _success_payload。
                 "attachments": [
                     {
                         "artifact_id": item.artifact_id,
@@ -563,8 +583,8 @@ def _error(
     *,
     effect_outcome: str = "not_started",
     effect_source_ref: str = "send_message_preflight",
-) -> ToolExecutionResult:
-    return ToolExecutionResult(
+) -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(
         "send_message",
         False,
         json.dumps({"ok": False, "error": message}, ensure_ascii=False),
@@ -574,4 +594,4 @@ def _error(
     )
 
 
-__all__ = ["SendMessageTool", "build_send_message_spec"]
+__all__ = ["SendMessageTool", "build_send_message_model_spec"]

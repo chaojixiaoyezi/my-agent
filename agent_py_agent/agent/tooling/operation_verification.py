@@ -244,11 +244,12 @@ def incomplete_final_mutation_facts(
     }
 
 
-# LLM: 当前轮调用投影只读取 archive typed fields 与注册 ToolSpec，不检查 output 或最终回复文本。
+# LLM: 当前轮调用投影只读取 archive typed fields 与运行快照，不检查 output 或最终回复文本。
 # 函数用途: 规范一条工具记录，供 prompt 事实和最终操作核验共用。
 def _execution_call(agent: object, record: dict[str, object]) -> dict[str, object]:
     tool = str(record.get("tool") or "").strip() or "unknown"
-    effect = _tool_effect(agent, tool)
+    parameters = record.get("parameters")
+    effect = _tool_effect(agent, tool, parameters if isinstance(parameters, dict) else {})
     item: dict[str, object] = {
         "call_id": str(record.get("call_id") or record.get("id") or "").strip(),
         "tool": tool,
@@ -282,15 +283,26 @@ def _execution_call(agent: object, record: dict[str, object]) -> dict[str, objec
     return item
 
 
-def _tool_effect(agent: object, tool_name: str) -> str:
+def _tool_effect(
+    agent: object,
+    tool_name: str,
+    parameters: dict[str, object],
+) -> str:
     registry = getattr(agent, "tools", None)
-    tools = getattr(registry, "tools", None)
-    tool = tools.get(tool_name) if isinstance(tools, dict) else None
-    effect = str(getattr(getattr(tool, "spec", None), "effect", "") or "").strip().lower()
-    return effect or "unknown"
+    if registry is None or not hasattr(registry, "runtime_snapshot"):
+        return "unknown"
+    try:
+        from .models import tool_effect_for_runtime_policy
+
+        runtime = registry.runtime_snapshot().runtime(tool_name)
+        if runtime is None:
+            return "unknown"
+        return tool_effect_for_runtime_policy(runtime.runtime_policy, parameters)
+    except (AttributeError, TypeError, ValueError):
+        return "unknown"
 
 
-# LLM: 动作名只接受当前 ToolSpec Schema 明示的 action enum，不能把任意模型参数显示成可信动作。
+# LLM: 动作名只接受当前 ToolModelSpec Schema 明示的 action enum，不能把任意模型参数显示成可信动作。
 # 函数用途: 从已校验工具参数中提取一个安全、精确的业务动作标签。
 def _declared_business_action(
     agent: object,
@@ -304,15 +316,13 @@ def _declared_business_action(
     if not isinstance(value, str):
         return ""
     registry = getattr(agent, "tools", None)
-    tools = getattr(registry, "tools", None)
-    tool = tools.get(tool_name) if isinstance(tools, dict) else None
-    spec = getattr(tool, "spec", None)
-    if spec is None:
+    if registry is None or not hasattr(registry, "runtime_snapshot"):
         return ""
     try:
-        from .tool_spec_schema import tool_spec_runtime_input_schema
-
-        schema = tool_spec_runtime_input_schema(spec)
+        runtime = registry.runtime_snapshot().runtime(tool_name)
+        if runtime is None:
+            return ""
+        schema = runtime.model_spec.input_schema
     except (AttributeError, TypeError, ValueError):
         return ""
     properties = schema.get("properties")

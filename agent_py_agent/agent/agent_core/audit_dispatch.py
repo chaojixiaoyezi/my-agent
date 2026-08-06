@@ -45,7 +45,7 @@ def _write_tool_audit(config: object, tool: str, payload: dict, result: object) 
     from ..audit.records import AuditStatus, LogParams
 
     ok = bool(getattr(result, "ok", False))
-    from ..tooling.registry_envelopes import tool_input_facts
+    from ..tooling.input_facts import tool_input_facts
 
     params = payload.get("params")
     safe_input = params if isinstance(params, dict) else {

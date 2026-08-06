@@ -54,6 +54,7 @@ from agent.conversation.control_commands import (
 from agent.ingestion import watch_state as ws
 from agent.ingestion import watch_tool as wt
 from agent.ingestion.watch_tool import WatchStreamTool
+from agent.tooling.runtime_contracts import ProviderToolCapability, ToolProtocolSnapshot
 
 _BASE_URL = "http://127.0.0.1:9/pull"
 _URL = f"{_BASE_URL}?position=<next>&count=<limit>"
@@ -73,12 +74,30 @@ def _fetch_ok(request) -> tuple[bool, object, str]:
     return True, {"items": [], "next_cursor": cursor}, ""
 
 
+def _text_protocol_snapshot() -> ToolProtocolSnapshot:
+    return ToolProtocolSnapshot(
+        run_id="audit-activation-test",
+        source_protocol="text",
+        capability=ProviderToolCapability(
+            provider="test",
+            endpoint="local://audit-activation-test",
+            model="fake",
+            stream=False,
+            native_supported=False,
+            evidence="explicit_test_protocol_fixture",
+        ),
+    )
+
+
 def _tool(owner_home, *, run_params=None, user_prompt="", subagent_run_id=""):
-    task_attributes = getattr(run_params, "task_attributes", None)
+    effective_run_params = run_params or SimpleNamespace()
+    if not hasattr(effective_run_params, "tool_protocol_snapshot"):
+        effective_run_params.tool_protocol_snapshot = _text_protocol_snapshot()
+    task_attributes = getattr(effective_run_params, "task_attributes", None)
     agent = SimpleNamespace(
         home_paths=SimpleNamespace(owner_home_dir=str(owner_home), owner_id="u-test"),
         _current_user_prompt=user_prompt,
-        _current_run_params=run_params,
+        _current_run_params=effective_run_params,
         _current_subagent_run_id=subagent_run_id,
         _current_task_attributes=task_attributes if subagent_run_id else None,
         subagents=(
@@ -190,7 +209,11 @@ def test_activate_in_subagent_with_empty_goal(owner_home, monkeypatch):
     agent = SimpleNamespace(
         home_paths=SimpleNamespace(owner_home_dir=str(owner_home), owner_id="u-test"),
         _current_user_prompt="",  # 唤醒轮无用户原文
-        _current_run_params=SimpleNamespace(task_attributes=None, root_user_prompt=""),
+        _current_run_params=SimpleNamespace(
+            task_attributes=None,
+            root_user_prompt="",
+            tool_protocol_snapshot=_text_protocol_snapshot(),
+        ),
         subagents=None,
     )
     tool = WatchStreamTool(agent)
@@ -520,12 +543,14 @@ def test_published_audit_coordinator_advertises_only_read_surface(owner_home):
     availability = tool.availability()
 
     assert availability.available is True
-    assert tool.spec.parameter_schema["action"]["enum"] == [
+    model_spec = tool.model_spec
+    properties = model_spec.input_schema["properties"]
+    assert properties["action"]["enum"] == [
         "inspect",
         "status",
         "list",
     ]
-    assert set(tool.spec.parameters) == {
+    assert set(properties) == {
         "action",
         "watch_id",
         "ack_id",
@@ -539,7 +564,8 @@ def test_watch_stream_surface_follows_typed_worker_phase(owner_home):
         run_params=SimpleNamespace(task_attributes=_audit_source_attrs()),
         subagent_run_id="source-pending",
     )
-    assert pending.spec.parameter_schema["action"]["enum"] == [
+    pending_properties = pending.model_spec.input_schema["properties"]
+    assert pending_properties["action"]["enum"] == [
         "open",
         "pull",
         "verdict",
@@ -547,7 +573,7 @@ def test_watch_stream_surface_follows_typed_worker_phase(owner_home):
         "status",
         "list",
     ]
-    assert "close" not in pending.spec.parameters
+    assert "close" not in pending_properties
 
     audit_id = "audit-root-1"
     watch_id = "ws-0123456789"
@@ -565,19 +591,21 @@ def test_watch_stream_surface_follows_typed_worker_phase(owner_home):
         run_params=SimpleNamespace(task_attributes=bound_attrs),
         subagent_run_id="source-bound",
     )
-    assert bound.spec.parameter_schema["action"]["enum"] == [
+    bound_properties = bound.model_spec.input_schema["properties"]
+    assert bound_properties["action"]["enum"] == [
         "pull",
         "verdict",
         "inspect",
         "status",
         "list",
     ]
-    assert "url" not in bound.spec.parameters
-    assert "open" not in bound.spec.parameter_schema["action"]["enum"]
+    assert "url" not in bound_properties
+    assert "open" not in bound_properties["action"]["enum"]
 
     ordinary = _tool(owner_home)
-    assert "open" in ordinary.spec.parameter_schema["action"]["enum"]
-    assert "close" in ordinary.spec.parameter_schema["action"]["enum"]
+    ordinary_actions = ordinary.model_spec.input_schema["properties"]["action"]["enum"]
+    assert "open" in ordinary_actions
+    assert "close" in ordinary_actions
 
 
 def test_audit_prepare_watch_surface_exposes_only_transport_probe_actions(owner_home):
@@ -592,7 +620,8 @@ def test_audit_prepare_watch_surface_exposes_only_transport_probe_actions(owner_
         ),
     )
 
-    assert prepare.spec.parameter_schema["action"]["enum"] == [
+    properties = prepare.model_spec.input_schema["properties"]
+    assert properties["action"]["enum"] == [
         "open",
         "pull",
         "inspect",
@@ -600,15 +629,15 @@ def test_audit_prepare_watch_surface_exposes_only_transport_probe_actions(owner_
         "close",
         "list",
     ]
-    assert "sample_count" not in prepare.spec.parameters
-    assert "spec" not in prepare.spec.parameters
-    assert "judgment_note" not in prepare.spec.parameters
-    assert "source_profile_ref" in prepare.spec.parameters
-    assert "document_refs" in prepare.spec.parameters
-    assert "open 可选" in prepare.spec.parameters["source_profile_ref"]
-    assert "不要为了满足底座格式专门制造" in prepare.spec.parameters["source_profile_ref"]
-    assert "cursor_binding 不是顶层参数" in prepare.spec.parameters["url"]
-    assert "sample(" not in prepare.spec.parameters["action"]
+    assert "sample_count" not in properties
+    assert "spec" not in properties
+    assert "judgment_note" not in properties
+    assert "source_profile_ref" in properties
+    assert "document_refs" in properties
+    assert "open 可选" in properties["source_profile_ref"]["description"]
+    assert "不要为了满足底座格式专门制造" in properties["source_profile_ref"]["description"]
+    assert "cursor_binding 不是顶层参数" in properties["url"]["description"]
+    assert "sample(" not in properties["action"]["description"]
 
 
 def test_single_audit_source_resolves_omitted_watch_id_but_multiple_fail_closed(

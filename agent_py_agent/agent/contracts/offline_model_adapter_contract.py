@@ -24,7 +24,7 @@ def validate_model_adapter_facts(facts: dict[str, Any]) -> OfflineContractValida
 
 def _validate_tool_call_ids(facts: dict[str, Any], findings: list[dict[str, object]]) -> None:
     for call in dict_items(facts.get("tool_calls")):
-        if not text(call.get("tool_call_id")) and not text(call.get("generated_tool_call_id")):
+        if not text(call.get("call_id")):
             findings.append(finding("TOOL_CALL_ID_MISSING", {"tool": text(call.get("tool_name"))}))
             return
 

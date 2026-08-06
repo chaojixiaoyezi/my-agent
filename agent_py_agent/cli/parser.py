@@ -17,7 +17,6 @@ from .commands import (
     add_bench_model_command,
     add_collaboration_subcommands,
     add_guidance_subcommand,
-    add_learning_subcommand,
     add_operations_subcommands,
     add_task_subcommands,
 )
@@ -65,7 +64,6 @@ def build_parser(extension_registry: ExtensionRegistry | None = None) -> argpars
     add_contracts_subcommand(subparsers)
     add_memory_subcommands(subparsers)
     add_local_store_subcommands(subparsers)
-    add_learning_subcommand(subparsers)
     add_guidance_subcommand(subparsers)
     add_subagents_subcommands(subparsers)
     add_daemon_subcommand(subparsers)

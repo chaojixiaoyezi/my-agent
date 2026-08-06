@@ -22,11 +22,27 @@ from ._filesystem_read import (
     FileSystemAccessOptions,
     FileSystemTool,
 )
+from .cancellation import raise_if_cancelled
 from .filesystem_path_recovery import MissingPathRequest, missing_path_result
-from .models import ToolExecutionResult, ToolSpec
+from .models import (
+    ConcurrencyPolicy,
+    EffectResolverPolicy,
+    ResourceScopePolicy,
+    ToolHandlerOutcome,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+)
 
 
 class ListFilesTool(FileSystemTool):
+
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy("read_only"),
+        concurrency_policy=ConcurrencyPolicy("parallel_safe"),
+        resource_scopes=ResourceScopePolicy(parameter_names=("path",)),
+        promotes_task=True,
+    )
 
     def __init__(
         self,
@@ -41,17 +57,17 @@ class ListFilesTool(FileSystemTool):
             access_options,
         )
         self.max_entries = max_entries
-        self.spec = build_list_files_spec()
+        self.model_spec = build_list_files_model_spec()
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         try:
             request = _list_files_request_from_params(params, self.max_entries)
             target = self.resolve_path(request.raw_path)
         except ValueError as exc:
             # 参数/路径解析失败是"改参数可修"，必须带 TOOL_INVALID_ARGUMENTS；
-            # 漏传 error_code 会被 ToolExecutionResult 兜底成 UNKNOWN_ERROR(retryable=False)，
+            # 漏传 error_code 会被 ToolHandlerOutcome 兜底成 UNKNOWN_ERROR(retryable=False)，
             # 误导模型"放弃报阻塞"而非按 schema 改参后重试。
-            return ToolExecutionResult("list_files", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
+            return ToolHandlerOutcome("list_files", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
         if not target.exists():
             return missing_path_result(MissingPathRequest(
                 tool_name="list_files",
@@ -64,17 +80,17 @@ class ListFilesTool(FileSystemTool):
             ))
         internal_ref = _internal_agent_status_ref(target, include_agent_directory=True)
         if internal_ref:
-            return ToolExecutionResult(
+            return ToolHandlerOutcome(
                 "list_files",
                 False,
                 json.dumps(internal_ref, ensure_ascii=False, indent=2),
                 error_code="WRONG_STATUS_SURFACE",
             )
         if target.is_file():
-            return ToolExecutionResult("list_files", True, self.display_path(target))
+            return ToolHandlerOutcome("list_files", True, self.display_path(target))
         return self._list_target(target, request)
 
-    def _list_target(self, target: Path, request: _ListFilesRequest) -> ToolExecutionResult:
+    def _list_target(self, target: Path, request: _ListFilesRequest) -> ToolHandlerOutcome:
         collected = _collect_list_entries(self, target, request)
         included_ignored_fallback = False
         if (
@@ -90,7 +106,7 @@ class ListFilesTool(FileSystemTool):
         entries = list(collected.entries)
         if included_ignored_fallback:
             entries.insert(0, _ignored_discovery_fallback_notice())
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             "list_files",
             True,
             "\n".join(entries) or "目录为空",
@@ -229,6 +245,7 @@ def _collect_list_entries(
 
 
 def _iter_list_candidates(target: Path, *, recursive: bool, include_ignored: bool) -> list[Path]:
+    raise_if_cancelled()
     if not recursive:
         return sorted(
             [item for item in target.iterdir() if include_ignored or item.name not in _COMMON_FILE_DISCOVERY_IGNORES],
@@ -236,6 +253,7 @@ def _iter_list_candidates(target: Path, *, recursive: bool, include_ignored: boo
         )
     candidates: list[Path] = []
     for root, dirnames, filenames in os.walk(target):
+        raise_if_cancelled()
         if not include_ignored:
             dirnames[:] = [dirname for dirname in dirnames if dirname not in _COMMON_FILE_DISCOVERY_IGNORES]
         root_path = Path(root)
@@ -263,46 +281,39 @@ def _offset_page_window(request: _OffsetPageWindowRequest) -> dict[str, int | bo
     }
 
 
-def build_list_files_spec() -> ToolSpec:
-    return ToolSpec(
+def build_list_files_model_spec() -> ToolModelSpec:
+    details = _list_files_parameter_details()
+    return ToolModelSpec(
         name="list_files",
-        category="filesystem",
-        effect="read_only",
         description="列出目录中的文件和子目录，适合先摸清项目结构。可直接列任意绝对路径，包括 workspace 外、用户在任务里指定的输入目录，无需 shell 或额外授权——不要为查看输入目录提 capability_request。",
-        use_cases=[
-            "刚接手一个项目，先看看目录树大概长什么样",
-            "不知道文件放在哪，先按目录层级摸排",
-        ],
-        avoid_when=[
-            "已经知道目标文件路径时，别用它兜圈子，直接 read_file 更快",
-        ],
-        keywords=["目录", "文件树", "结构", "项目结构", "列文件", "list", "tree"],
-        parameters={
-            "path": "要查看的目录，默认是工作区根目录",
-            "recursive": "是否递归展开子目录，默认 false",
-            "limit": "本次最多返回多少条，默认使用工具配置上限",
-            "offset": "从第几条开始返回，用于分页，默认 0",
-            "max_depth": "递归时最多展开几层，默认不额外限制",
-            "file_glob": "按 glob 过滤文件/目录名，例如 *.py",
-            "include_dirs": "是否包含目录，默认 true",
-            "include_files": "是否包含文件，默认 true",
-            "include_ignored": "是否包含常见噪声目录。宽泛列表默认 false；显式 file_glob 零命中时会自动检查忽略目录，显式 false 可禁用该回退",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": details["path"]},
+                "recursive": {"type": "boolean", "description": details["recursive"]},
+                "limit": {"type": "integer", "minimum": 1, "description": details["limit"]},
+                "offset": {"type": "integer", "minimum": 0, "description": details["offset"]},
+                "max_depth": {"type": "integer", "minimum": 0, "description": details["max_depth"]},
+                "file_glob": {"type": "string", "description": details["file_glob"]},
+                "include_dirs": {"type": "boolean", "description": details["include_dirs"]},
+                "include_files": {"type": "boolean", "description": details["include_files"]},
+                "include_ignored": {"type": "boolean", "description": details["include_ignored"]},
+            },
+            "additionalProperties": False,
         },
-        parameter_details=_list_files_parameter_details(),
-        parameter_schema={
-            "recursive": {"type": "boolean"},
-            "limit": {"type": "integer", "minimum": 1},
-            "offset": {"type": "integer", "minimum": 0},
-            "max_depth": {"type": "integer", "minimum": 0},
-            "include_dirs": {"type": "boolean"},
-            "include_files": {"type": "boolean"},
-            "include_ignored": {"type": "boolean"},
-        },
-        examples=[
-            '{"tool": "list_files", "path": "."}',
-            '{"tool": "list_files", "path": "agent_py_agent/agent", "recursive": true, "limit": 50, "offset": 0}',
-        ],
-        promotes_task=True,
+        hints=ToolModelHints(
+            category="filesystem",
+            use_cases=(
+                "刚接手一个项目，先看看目录树大概长什么样",
+                "不知道文件放在哪，先按目录层级摸排",
+            ),
+            avoid_when=("已经知道目标文件路径时，别用它兜圈子，直接 read_file 更快",),
+            keywords=("目录", "文件树", "结构", "项目结构", "列文件", "list", "tree"),
+            examples=(
+                '{"tool": "list_files", "path": "."}',
+                '{"tool": "list_files", "path": "agent_py_agent/agent", "recursive": true, "limit": 50, "offset": 0}',
+            ),
+        ),
     )
 
 

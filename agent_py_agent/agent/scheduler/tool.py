@@ -6,7 +6,17 @@ import json
 import time
 from typing import TYPE_CHECKING
 
-from ..tooling.models import BaseTool, ToolExecutionResult, ToolSpec
+from ..tooling.models import (
+    BaseTool,
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    ResourceScopePolicy,
+    ToolHandlerOutcome,
+    ToolInputPolicy,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+)
 from ..user_space.owner_quota import OwnerQuotaExceeded, OwnerQuotaUnavailable
 from .repository import (
     SchedulerConflictError,
@@ -22,53 +32,17 @@ if TYPE_CHECKING:
 _MUTATING_EXISTING_ACTIONS = frozenset({"update", "pause", "resume", "delete"})
 
 
-def build_schedule_tool_spec() -> ToolSpec:
-    return ToolSpec(
+def build_schedule_tool_model_spec() -> ToolModelSpec:
+    return ToolModelSpec(
         name="schedule",
-        category="orchestration",
-        effect="mutating",
-        # 定时任务创建/修改与其他副作用工具共用 operation claim，不再由各工具自建幂等分支。
-        idempotency_scope="operation",
         description=(
             "管理当前用户自己的持久定时任务或提醒。任务到点后会回到创建它的同一会话继续执行，"
             "网关重启后仍会恢复；支持一次、固定间隔和五段 cron。"
         ),
-        use_cases=[
-            "用户要求稍后提醒、每天/每周定时执行一件事",
-            "查看、修改、暂停、恢复或删除自己的定时任务",
-            "立即试跑一个已有定时任务，或查看历史结果",
-        ],
-        avoid_when=[
-            "只是当前长任务内部等待子代理或命令完成时，继续使用 wait",
-            "用户没有要求跨当前执行轮持续存在的定时时，不要创建计划",
-            "不能指定其他用户、群或任意会话；归属和会话由当前可信运行上下文固定",
-        ],
-        keywords=["提醒", "定时", "schedule", "cron", "每天", "每周", "稍后", "周期任务"],
-        parameters={
-            "action": "create/list/get/update/pause/resume/delete/run_now/history/status。",
-            "job_id": "除 create/list/status 外，使用 list/get 返回的精确 job_id。",
-            "expected_version": "update/pause/resume/delete 必填，使用 get/list 返回的 version。",
-            "name": "create 必填；简短说明这个定时任务。update 可选。",
-            "prompt": "create 必填；到点后要在同一会话继续执行的完整用户要求。update 可选。",
-            "schedule_kind": "create 必填；at/every/cron。update 修改时间时填写。",
-            "at": (
-                "at 的未来绝对时间，模型调用时只填写 ISO-8601 字符串；"
-                "它不是相对秒数。无时区时按 timezone/config 解释。"
-            ),
-            "after_seconds": (
-                "at 的可选相对时长（秒）；例如 90 秒后执行就填 90。"
-                "运行时会立即固化成绝对时间，不能与 at 同时填写。"
-            ),
-            "every_seconds": "every 的间隔秒数，最少 60。",
-            "anchor_at": "every 可选锚点时间。",
-            "cron": "cron 的五段表达式（分 时 日 月 周）。",
-            "timezone": "可选 IANA 时区，例如 Asia/Shanghai；默认使用 agent 配置。",
-            "misfire_grace_seconds": "可选。重启等原因错过后允许补执行的秒数。",
-            "skill_ids": "可选。将当前可用 Skill 的稳定 ID/名称及内容版本固定到这个计划。",
-            "limit": "list/history 的返回条数。",
-        },
-        parameter_schema={
-            "action": {
+        input_schema={
+            "type": "object",
+            "properties": {
+                "action": {
                 "type": "string",
                 "enum": [
                     "create",
@@ -82,20 +56,21 @@ def build_schedule_tool_spec() -> ToolSpec:
                     "history",
                     "status",
                 ],
-            },
-            "job_id": {"type": "string"},
-            "expected_version": {"type": "integer", "minimum": 1},
-            "name": {"type": "string"},
-            "prompt": {"type": "string"},
-            "schedule_kind": {"type": "string", "enum": ["at", "every", "cron"]},
-            "at": {
+                    "description": "create/list/get/update/pause/resume/delete/run_now/history/status。",
+                },
+                "job_id": {"type": "string", "description": "除 create/list/status 外，使用 list/get 返回的精确 job_id。"},
+                "expected_version": {"type": "integer", "minimum": 1, "description": "更新现有任务时使用 get/list 返回的 version。"},
+                "name": {"type": "string", "description": "create 必填的简短名称；update 可选。"},
+                "prompt": {"type": "string", "description": "到点后在同一会话继续执行的完整用户要求。"},
+                "schedule_kind": {"type": "string", "enum": ["at", "every", "cron"], "description": "计划类型。"},
+                "at": {
                 "type": "string",
                 "description": (
                     "Future absolute ISO-8601 time for schedule_kind=at; "
                     "never pass a duration or relative seconds."
                 ),
-            },
-            "after_seconds": {
+                },
+                "after_seconds": {
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 31622400,
@@ -103,32 +78,70 @@ def build_schedule_tool_spec() -> ToolSpec:
                     "Relative seconds from now for schedule_kind=at; "
                     "the runtime persists the resolved absolute instant."
                 ),
+                },
+                "every_seconds": {"type": "integer", "minimum": 60, "description": "every 的间隔秒数。"},
+                "anchor_at": {"description": "every 的可选锚点时间。"},
+                "cron": {"type": "string", "description": "五段 cron 表达式（分 时 日 月 周）。"},
+                "timezone": {"type": "string", "description": "IANA 时区，如 Asia/Shanghai。"},
+                "misfire_grace_seconds": {"type": "integer", "minimum": 0, "maximum": 604800, "description": "错过后允许补执行的秒数。"},
+                "skill_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 32, "description": "固定到计划的当前可用 Skill 稳定 ID。"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "list/history 的返回条数。"},
             },
-            "every_seconds": {"type": "integer", "minimum": 60},
-            "anchor_at": {},
-            "cron": {"type": "string"},
-            "timezone": {"type": "string"},
-            "misfire_grace_seconds": {"type": "integer", "minimum": 0, "maximum": 604800},
-            "skill_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 32},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+            "required": ["action"],
+            "additionalProperties": False,
         },
-        required_parameters=["action"],
-        internal_parameters=["__tool_call_id", "__run_scope"],
-        examples=[
-            '{"tool":"schedule","action":"create","name":"稍后提醒","prompt":"提醒用户检查备份","schedule_kind":"at","after_seconds":90}',
-            '{"tool":"schedule","action":"create","name":"周报提醒","prompt":"整理本周项目进展并发给我","schedule_kind":"cron","cron":"0 18 * * 5","timezone":"Asia/Shanghai"}',
-            '{"tool":"schedule","action":"list"}',
-            '{"tool":"schedule","action":"pause","job_id":"job_...","expected_version":2}',
-        ],
+        hints=ToolModelHints(
+            category="orchestration",
+            use_cases=(
+                "用户要求稍后提醒或每天每周定时执行",
+                "查看、修改、暂停、恢复或删除自己的定时任务",
+                "立即试跑已有定时任务或查看历史结果",
+            ),
+            avoid_when=(
+                "当前长任务内部等待使用 wait",
+                "用户没有要求跨当前执行轮持续存在时不要创建计划",
+                "不能指定其他用户、群或任意会话",
+            ),
+            keywords=("提醒", "定时", "schedule", "cron", "每天", "每周", "稍后", "周期任务"),
+            examples=(
+                '{"tool":"schedule","action":"create","name":"稍后提醒","prompt":"提醒用户检查备份","schedule_kind":"at","after_seconds":90}',
+                '{"tool":"schedule","action":"create","name":"周报提醒","prompt":"整理本周项目进展并发给我","schedule_kind":"cron","cron":"0 18 * * 5","timezone":"Asia/Shanghai"}',
+                '{"tool":"schedule","action":"list"}',
+                '{"tool":"schedule","action":"pause","job_id":"job_...","expected_version":2}',
+            ),
+        ),
     )
 
 
 class ScheduleTool(BaseTool):
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
-        self.spec = build_schedule_tool_spec()
+        self.model_spec = build_schedule_tool_model_spec()
+        self.runtime_policy = ToolRuntimePolicy(
+            effect_resolver=EffectResolverPolicy(
+                "mutating",
+                by_parameter=((
+                    "action",
+                    (
+                        ("list", "read_only"),
+                        ("get", "read_only"),
+                        ("history", "read_only"),
+                        ("status", "read_only"),
+                        ("create", "mutating"),
+                        ("update", "mutating"),
+                        ("pause", "mutating"),
+                        ("resume", "mutating"),
+                        ("delete", "dangerous"),
+                        ("run_now", "dangerous"),
+                    ),
+                ),),
+            ),
+            idempotency_policy=IdempotencyPolicy("operation"),
+            resource_scopes=ResourceScopePolicy(parameter_names=("job_id",)),
+            input_policy=ToolInputPolicy(internal_parameters=("__tool_call_id", "__run_scope")),
+        )
 
-    def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         action = str(params.get("action") or "").strip().lower()
         if action not in {
             "create",
@@ -161,7 +174,7 @@ class ScheduleTool(BaseTool):
         except (OSError, SchedulerRepositoryError, ValueError) as exc:
             return _error(str(exc), "SCHEDULER_UNAVAILABLE")
 
-    def _execute(self, repository, action: str, params: dict[str, object]) -> ToolExecutionResult:
+    def _execute(self, repository, action: str, params: dict[str, object]) -> ToolHandlerOutcome:
         if action == "status":
             return _success(action, {"scheduler": repository.runtime_snapshot()})
         if action == "list":
@@ -196,7 +209,7 @@ class ScheduleTool(BaseTool):
         if action == "create":
             return self._create(repository, params)
         expected_version = _expected_version(params, required=action in _MUTATING_EXISTING_ACTIONS)
-        if isinstance(expected_version, ToolExecutionResult):
+        if isinstance(expected_version, ToolHandlerOutcome):
             return expected_version
         if action == "pause":
             job = repository.pause_job(job_id, expected_version=expected_version)
@@ -206,7 +219,7 @@ class ScheduleTool(BaseTool):
             job = repository.delete_job(job_id, expected_version=expected_version)
         else:
             patch = self._update_patch(params)
-            if isinstance(patch, ToolExecutionResult):
+            if isinstance(patch, ToolHandlerOutcome):
                 return patch
             if not patch:
                 return _error("update 至少需要一个可修改字段", "TOOL_INVALID_ARGUMENTS")
@@ -217,7 +230,7 @@ class ScheduleTool(BaseTool):
             )
         return _success(action, {"job": _job_projection(job, include_prompt=True)})
 
-    def _create(self, repository, params: dict[str, object]) -> ToolExecutionResult:
+    def _create(self, repository, params: dict[str, object]) -> ToolHandlerOutcome:
         name = str(params.get("name") or "").strip()
         prompt = str(params.get("prompt") or "").strip()
         if not name or not prompt or not str(params.get("schedule_kind") or "").strip():
@@ -229,7 +242,7 @@ class ScheduleTool(BaseTool):
                 "SCHEDULER_THREAD_REQUIRED",
             )
         skill_refs = _skill_refs(self.agent, params.get("skill_ids"))
-        if isinstance(skill_refs, ToolExecutionResult):
+        if isinstance(skill_refs, ToolHandlerOutcome):
             return skill_refs
         current = time.time()
         schedule = _schedule_from_params(self.agent, params, now=current)
@@ -251,14 +264,14 @@ class ScheduleTool(BaseTool):
             {"job": _job_projection(job, include_prompt=True), "deduplicated": deduped},
         )
 
-    def _update_patch(self, params: dict[str, object]) -> dict[str, object] | ToolExecutionResult:
+    def _update_patch(self, params: dict[str, object]) -> dict[str, object] | ToolHandlerOutcome:
         patch: dict[str, object] = {}
         for key in ("name", "prompt", "misfire_grace_seconds"):
             if key in params:
                 patch[key] = params[key]
         if "skill_ids" in params:
             refs = _skill_refs(self.agent, params.get("skill_ids"))
-            if isinstance(refs, ToolExecutionResult):
+            if isinstance(refs, ToolHandlerOutcome):
                 return refs
             patch["skill_refs"] = refs
         schedule_keys = {
@@ -333,7 +346,7 @@ def _conversation_scope(agent: object) -> tuple[str, str]:
     ), task_id
 
 
-def _skill_refs(agent: object, raw: object) -> list[dict[str, str]] | ToolExecutionResult:
+def _skill_refs(agent: object, raw: object) -> list[dict[str, str]] | ToolHandlerOutcome:
     if raw in (None, ""):
         return []
     if not isinstance(raw, list):
@@ -370,7 +383,7 @@ def _expected_version(
     params: dict[str, object],
     *,
     required: bool,
-) -> int | None | ToolExecutionResult:
+) -> int | None | ToolHandlerOutcome:
     value = params.get("expected_version")
     if value in (None, ""):
         return (
@@ -450,16 +463,16 @@ def _run_projection(run: dict[str, object]) -> dict[str, object]:
     }
 
 
-def _success(action: str, payload: dict[str, object]) -> ToolExecutionResult:
-    return ToolExecutionResult(
+def _success(action: str, payload: dict[str, object]) -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(
         "schedule",
         True,
         json.dumps({"ok": True, "action": action, **payload}, ensure_ascii=False),
     )
 
 
-def _error(message: str, code: str) -> ToolExecutionResult:
-    return ToolExecutionResult(
+def _error(message: str, code: str) -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(
         "schedule",
         False,
         json.dumps({"ok": False, "error": message}, ensure_ascii=False),
@@ -467,4 +480,4 @@ def _error(message: str, code: str) -> ToolExecutionResult:
     )
 
 
-__all__ = ["ScheduleTool", "build_schedule_tool_spec"]
+__all__ = ["ScheduleTool", "build_schedule_tool_model_spec"]

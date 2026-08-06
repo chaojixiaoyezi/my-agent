@@ -78,15 +78,23 @@ def _run_scope(request: Any) -> dict[str, Any]:
 
 
 def _tool_manifest(request: Any) -> dict[str, Any]:
-    payload = tool_manifest_payload(
-        list(_sequence(getattr(request, "tool_specs", ()))),
-        allowed_tools=_context_texts(getattr(request, "allowed_tools", ())),
-        owner_type=_owner_type(request),
-    )
-    payload["tool_specs"] = payload["tools"]
+    from ..tooling.models import ToolRuntimeSnapshot
+
+    snapshot = getattr(request, "tool_runtime_snapshot", None)
+    if not isinstance(snapshot, ToolRuntimeSnapshot):
+        snapshot = ToolRuntimeSnapshot(
+            run_id=_text(getattr(request, "run_id", "")),
+            runtimes=(),
+            available_tool_names=frozenset(),
+            unavailable_tools=(),
+            allowed_tools=None,
+            owner_type=_owner_type(request),
+        )
+    payload = tool_manifest_payload(snapshot)
+    payload["tool_runtimes"] = payload["tools"]
     payload["tool_load_errors"] = [
         dict(item)
-        for item in _sequence(getattr(request, "tool_spec_errors", ()))
+        for item in _sequence(getattr(request, "tool_runtime_errors", ()))
         if isinstance(item, dict)
     ]
     return payload

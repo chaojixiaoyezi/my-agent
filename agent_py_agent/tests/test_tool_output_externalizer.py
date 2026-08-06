@@ -18,12 +18,6 @@ from agent_py_agent.agent.agent_core.tool_context.call_reducer import (
     render_assistant_tool_round_context,
     render_tool_payload_for_live_prompt,
 )
-from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
-    ToolLoopRepairCounters,
-    ToolLoopResponseDecisionRequest,
-    tool_loop_response_decision,
-)
-from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.memory_archive.artifact.reader import (
     ReadToolOutputArtifactRequest,
     read_tool_output_artifact,
@@ -39,12 +33,74 @@ from agent_py_agent.agent.memory_archive.tool_output_externalizer import (
     externalize_tool_output_record,
 )
 from agent_py_agent.agent.settings.config import AgentConfig
-from agent_py_agent.agent.tooling.content_transport_policy import (
-    MAX_INLINE_WRITE_CONTENT_CHARS,
-    RECOVERY_WRITE_CHUNK_CHARS,
-    STREAMING_INLINE_WRITE_ABORT_CHARS,
+from agent_py_agent.agent.tooling.runtime_contracts import (
+    ToolFailureFacts,
+    ToolResult,
+    ToolSuccessFacts,
 )
-from agent_py_agent.agent.tooling.models import ToolExecutionResult
+from agent_py_agent.tests._tool_runtime_harness import (
+    canonical_history_call,
+    make_test_model_spec,
+    make_test_protocol_snapshot,
+    runtime_snapshot_for_model_specs,
+)
+
+
+def _canonical_record(
+    params: ToolLoopExecuteParams,
+    *,
+    tool_rounds: int,
+    idx: int,
+    tool_name: str,
+    arguments: dict[str, object],
+    output: str,
+    ok: bool = True,
+    error_code: str = "TOOL_EXECUTION_FAILED",
+    handler_details: dict[str, object] | None = None,
+    handler_executed: bool = True,
+) -> ToolCallRecordParams:
+    """Build an archive record from the sole canonical call/result contracts."""
+
+    run_id = params.run_id or params.request_id or "archive-test-run"
+    attempt_id = params.request_id or "archive-test-attempt"
+    call = canonical_history_call(
+        tool_name,
+        arguments,
+        call_id=f"{tool_rounds}-{idx}",
+        source_protocol="text",
+        run_id=run_id,
+        turn_id=f"{run_id}:round-{tool_rounds}",
+        attempt_id=attempt_id,
+    )
+    metadata = {"handler_details": dict(handler_details or {})}
+    result = (
+        ToolResult.succeeded(
+            call,
+            output,
+            facts=ToolSuccessFacts(
+                metadata=metadata,
+                handler_executed=handler_executed,
+            ),
+        )
+        if ok
+        else ToolResult.failed(
+            call,
+            output,
+            error_code=error_code,
+            failure_stage="execution" if handler_executed else "protocol",
+            facts=ToolFailureFacts(
+                handler_executed=handler_executed,
+                metadata=metadata,
+            ),
+        )
+    )
+    return ToolCallRecordParams(
+        params=params,
+        tool_rounds=tool_rounds,
+        idx=idx,
+        call=call,
+        result=result,
+    )
 
 
 def test_tool_loop_externalizes_large_tool_output_for_archive(tmp_path: Path) -> None:
@@ -53,12 +109,13 @@ def test_tool_loop_externalizes_large_tool_output_for_archive(tmp_path: Path) ->
     large_output = "line\n" + ("x" * 25_000)
 
     service._record_tool_call(
-        ToolCallRecordParams(
-            params=params,
+        _canonical_record(
+            params,
             tool_rounds=1,
             idx=1,
-            payload={"tool": "shell", "command": "cat large.log"},
-            result=ToolExecutionResult("shell", True, large_output),
+            tool_name="shell",
+            arguments={"command": "cat large.log"},
+            output=large_output,
         )
     )
     record = params.archive_tool_calls[0]
@@ -136,12 +193,13 @@ def test_compact_carried_agent_tree_keeps_structured_child_recovery_facts(
     )
 
     service._record_tool_call(
-        ToolCallRecordParams(
-            params=params,
+        _canonical_record(
+            params,
             tool_rounds=3,
             idx=1,
-            payload={"tool": "inspect_agent_tree", "scope": "own_subtree"},
-            result=ToolExecutionResult("inspect_agent_tree", True, output),
+            tool_name="inspect_agent_tree",
+            arguments={"scope": "own_subtree"},
+            output=output,
         )
     )
 
@@ -214,7 +272,11 @@ def test_tool_call_index_preserves_short_failed_tool_status(tmp_path: Path) -> N
         )
     )
     index_path = tmp_path / "blobs" / "tool_outputs" / "index.jsonl"
-    index = [json.loads(line) for line in index_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    index = [
+        json.loads(line)
+        for line in index_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
 
     assert record["output_externalized"] is False
     assert "artifact_ref" not in record
@@ -390,8 +452,7 @@ def test_tool_output_index_persists_value_free_input_sources(tmp_path: Path) -> 
         },
     ]
     envelope_sources = [
-        {**item, "value": "must-not-be-persisted", "private": "drop-me"}
-        for item in expected
+        {**item, "value": "must-not-be-persisted", "private": "drop-me"} for item in expected
     ]
 
     short_record = externalize_tool_output_record(
@@ -450,12 +511,13 @@ def test_tool_loop_keeps_moderate_tool_output_inline_for_model_context(tmp_path:
     output = "\n".join(f"章节 {idx:03d}: CP-{idx:03d}-{idx:03d}" for idx in range(1, 81))
 
     service._record_tool_call(
-        ToolCallRecordParams(
-            params=params,
+        _canonical_record(
+            params,
             tool_rounds=1,
             idx=1,
-            payload={"tool": "run_command", "command": "extract chapters"},
-            result=ToolExecutionResult("run_command", True, output),
+            tool_name="run_command",
+            arguments={"command": "extract chapters"},
+            output=output,
         )
     )
 
@@ -471,12 +533,13 @@ def test_tool_loop_records_live_raw_archive_for_each_tool_result(tmp_path: Path)
     params = _tool_loop_params(request_id="req-live", run_id="run-live", task_id="task-live")
 
     service._record_tool_call(
-        ToolCallRecordParams(
-            params=params,
+        _canonical_record(
+            params,
             tool_rounds=3,
             idx=2,
-            payload={"tool": "read_file", "path": "notes.txt"},
-            result=ToolExecutionResult("read_file", True, "文件内容"),
+            tool_name="read_file",
+            arguments={"path": "notes.txt"},
+            output="文件内容",
         )
     )
 
@@ -497,12 +560,13 @@ def test_tool_loop_externalizer_falls_back_to_current_subagent_run_id(tmp_path: 
     large_output = "line\n" + ("x" * 25_000)
 
     service._record_tool_call(
-        ToolCallRecordParams(
-            params=params,
+        _canonical_record(
+            params,
             tool_rounds=7,
             idx=1,
-            payload={"tool": "inspect_agent_tree"},
-            result=ToolExecutionResult("inspect_agent_tree", True, large_output),
+            tool_name="inspect_agent_tree",
+            arguments={},
+            output=large_output,
         )
     )
     record = params.archive_tool_calls[0]
@@ -513,7 +577,9 @@ def test_tool_loop_externalizer_falls_back_to_current_subagent_run_id(tmp_path: 
     assert artifact["run_id"] == "runner-42"
 
 
-def test_externalizer_preserves_internal_tool_outputs_without_path_sanitizer(tmp_path: Path) -> None:
+def test_externalizer_preserves_internal_tool_outputs_without_path_sanitizer(
+    tmp_path: Path,
+) -> None:
     path = "/repo/current/tasks/run_1/work/agents/run_1/final_report.md"
     output = json.dumps({"workspace_refs": {"final_report": path}}, ensure_ascii=False)
 
@@ -604,7 +670,10 @@ def test_externalizer_archives_read_file_when_utf8_bytes_cross_threshold(tmp_pat
     )
 
     artifact_path = Path(str(record["source_artifact_ref"]))
-    index = [json.loads(line) for line in (artifact_path.parent / "index.jsonl").read_text(encoding="utf-8").splitlines()]
+    index = [
+        json.loads(line)
+        for line in (artifact_path.parent / "index.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
 
     assert len(output) < 100_000
     assert len(output.encode("utf-8")) >= 100_000
@@ -622,12 +691,13 @@ def test_tool_loop_read_file_archive_does_not_hide_live_result(tmp_path: Path) -
     output = "CPX-001-ABCDEF1234\n" + ("x" * 25_000)
 
     service._record_tool_call(
-        ToolCallRecordParams(
-            params=params,
+        _canonical_record(
+            params,
             tool_rounds=2,
             idx=1,
-            payload={"tool": "read_file", "path": "fragment-001.txt"},
-            result=ToolExecutionResult("read_file", True, output),
+            tool_name="read_file",
+            arguments={"path": "fragment-001.txt"},
+            output=output,
         )
     )
 
@@ -737,12 +807,14 @@ def test_tool_call_record_summarizes_large_payload_for_live_prompt(tmp_path: Pat
     huge_html = "<html>" + ("x" * 9000) + "</html>"
 
     service._record_tool_call(
-        ToolCallRecordParams(
-            params=params,
+        _canonical_record(
+            params,
             tool_rounds=1,
             idx=1,
-            payload={"tool": "write_file", "path": "shop/flow-a.html", "content": huge_html},
-            result=ToolExecutionResult("write_file", False, "路径不在 allowed_write_roots 内"),
+            tool_name="write_file",
+            arguments={"path": "shop/flow-a.html", "content": huge_html},
+            output="路径不在 allowed_write_roots 内",
+            ok=False,
         )
     )
 
@@ -758,17 +830,14 @@ def test_tool_call_archive_keeps_runtime_gate_for_replay(tmp_path: Path) -> None
     params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
 
     service._record_tool_call(
-        ToolCallRecordParams(
-            params=params,
+        _canonical_record(
+            params,
             tool_rounds=1,
             idx=1,
-            payload={"tool": "read_file", "path": "README.md"},
-            result=ToolExecutionResult(
-                "read_file",
-                True,
-                "ok",
-                result_envelope={"runtime_gate": {"status": "ALLOW", "allowed": True}},
-            ),
+            tool_name="read_file",
+            arguments={"path": "README.md"},
+            output="ok",
+            handler_details={"runtime_gate": {"status": "ALLOW", "allowed": True}},
         )
     )
 
@@ -776,322 +845,6 @@ def test_tool_call_archive_keeps_runtime_gate_for_replay(tmp_path: Path) -> None
     assert record["runtime_gate"]["status"] == "ALLOW"
     assert record["runtime_gate"]["allowed"] is True
 
-
-def test_tool_loop_enters_long_content_recovery_after_truncated_write_parse_error(
-    tmp_path: Path,
-) -> None:
-    service = ToolLoopService(SimpleNamespace(root=tmp_path))
-    params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
-    payload = {
-        "tool": "__parse_error__",
-        "error_code": "TOOL_INLINE_CONTENT_STREAM_ABORTED",
-        "error": "工具调用缺少结束标记 [/TOOL_CALL]",
-        "source_tool": "write_file",
-        "path": "site/app.js",
-        "content_field_present": True,
-    }
-    output = (
-        "工具调用缺少结束标记 [/TOOL_CALL]。如果上一轮是 write_file/apply_patch 且 "
-        "content 太长，不要重复输出完整 content；必须先用 write_file 写短骨架，再用 "
-        f"apply_patch 分块追加内容；content 降到不超过 {RECOVERY_WRITE_CHUNK_CHARS} 字符。"
-    )
-
-    service._record_tool_call(
-        ToolCallRecordParams(
-            params=params,
-            tool_rounds=2,
-            idx=1,
-            payload=payload,
-            result=ToolExecutionResult(
-                "__parse_error__",
-                False,
-                output,
-                error_code="TOOL_INLINE_CONTENT_STREAM_ABORTED",
-            ),
-        )
-    )
-
-    live_context = "\n".join(params.tool_context)
-    assert "long_content_recovery_mode" in live_context
-    assert "WRITE_FILE_RAW" in live_context
-    assert 'mode="overwrite"' in live_context
-    assert 'mode="append"' in live_context
-    assert f"不超过 {RECOVERY_WRITE_CHUNK_CHARS} 字符" in live_context
-    assert "site/app.js" in live_context
-
-
-def test_tool_loop_enters_long_content_recovery_after_unclosed_write_file_parse_error(
-    tmp_path: Path,
-) -> None:
-    service = ToolLoopService(SimpleNamespace(root=tmp_path))
-    params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
-    payload = {
-        "tool": "__parse_error__",
-        "error_code": "TOOL_CALL_UNCLOSED",
-        "error": "工具调用缺少结束标记 [/TOOL_CALL]",
-        "source_tool": "write_file",
-        "path": "reports/final.md",
-        "content_field_present": True,
-        "previous_write_committed": False,
-        "write_recovery": {
-            "strategy": "restart_same_file_with_append_chunks",
-            "first_tool_call": {"tool": "write_file", "path": "reports/final.md", "mode": "overwrite"},
-            "next_tool_call": {"tool": "write_file", "path": "reports/final.md", "mode": "append"},
-        },
-    }
-
-    service._record_tool_call(
-        ToolCallRecordParams(
-            params=params,
-            tool_rounds=2,
-            idx=1,
-            payload=payload,
-            result=ToolExecutionResult(
-                "__parse_error__",
-                False,
-                "工具调用缺少结束标记 [/TOOL_CALL]",
-                error_code="TOOL_CALL_UNCLOSED",
-            ),
-        )
-    )
-
-    live_context = "\n".join(params.tool_context)
-    assert "long_content_recovery_mode" in live_context
-    assert "reports/final.md" in live_context
-    assert 'mode="overwrite"' in live_context
-    assert 'mode="append"' in live_context
-
-
-def test_tool_loop_allows_complete_write_payload_above_recovery_chunk_recommendation(
-    tmp_path: Path,
-) -> None:
-    params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
-    params.archive_tool_calls.append(
-        {
-            "tool": "__parse_error__",
-            "error_code": "TOOL_CALL_UNCLOSED",
-            "parameters": {
-                "tool": "__parse_error__",
-                "error_code": "TOOL_CALL_UNCLOSED",
-                "source_tool": "write_file",
-                "path": "reports/final.md",
-                "content_field_present": True,
-                "write_recovery": {"strategy": "restart_same_file_with_append_chunks"},
-            },
-        }
-    )
-
-    class _Tools:
-        def parse_tool_calls(self, _text: str):
-            return [
-                {
-                    "tool": "write_file",
-                    "path": "reports/final.md",
-                    "mode": "append",
-                    "content": "A" * (RECOVERY_WRITE_CHUNK_CHARS + 1),
-                }
-            ]
-
-    agent = SimpleNamespace(
-        root=tmp_path,
-        config=SimpleNamespace(enable_tools=True),
-        tools=_Tools(),
-    )
-
-    decision = tool_loop_response_decision(
-        ToolLoopResponseDecisionRequest(
-            agent=agent,
-            params=params,
-            response=ModelResponse(text="tool call", backend="test"),
-            counters=ToolLoopRepairCounters(),
-        )
-    )
-
-    assert decision.action == "run_tools"
-    assert decision.calls
-    assert decision.calls[0]["tool"] == "write_file"
-    assert "blocked_large_write" not in "\n".join(params.tool_context)
-
-
-def test_tool_loop_blocks_write_payload_above_recovery_inline_hard_limit(
-    tmp_path: Path,
-) -> None:
-    params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
-    params.archive_tool_calls.append(
-        {
-            "tool": "__parse_error__",
-            "error_code": "TOOL_CALL_UNCLOSED",
-            "parameters": {
-                "tool": "__parse_error__",
-                "error_code": "TOOL_CALL_UNCLOSED",
-                "source_tool": "write_file",
-                "path": "reports/final.md",
-                "content_field_present": True,
-                "write_recovery": {"strategy": "restart_same_file_with_append_chunks"},
-            },
-        }
-    )
-
-    class _Tools:
-        def parse_tool_calls(self, _text: str):
-            return [
-                {
-                    "tool": "write_file",
-                    "path": "reports/final.md",
-                    "mode": "append",
-                    "content": "A" * (STREAMING_INLINE_WRITE_ABORT_CHARS + 1),
-                }
-            ]
-
-    agent = SimpleNamespace(
-        root=tmp_path,
-        config=SimpleNamespace(enable_tools=True),
-        tools=_Tools(),
-    )
-
-    decision = tool_loop_response_decision(
-        ToolLoopResponseDecisionRequest(
-            agent=agent,
-            params=params,
-            response=ModelResponse(text="tool call", backend="test"),
-            counters=ToolLoopRepairCounters(),
-        )
-    )
-
-    assert decision.action == "continue"
-    assert decision.calls == []
-    assert "long_content_recovery_mode: blocked_large_write" in params.tool_context[-1]
-    assert f"max_chunk_chars: {RECOVERY_WRITE_CHUNK_CHARS}" in params.tool_context[-1]
-    assert f"max_inline_chars: {STREAMING_INLINE_WRITE_ABORT_CHARS}" in params.tool_context[-1]
-
-
-def test_tool_loop_enters_long_content_recovery_from_structured_raw_write_recovery(
-    tmp_path: Path,
-) -> None:
-    service = ToolLoopService(SimpleNamespace(root=tmp_path))
-    params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
-    payload = {
-        "tool": "__parse_error__",
-        "error_code": "WRITE_FILE_RAW_MALFORMED",
-        "error": "WRITE_FILE_RAW 原文块格式错误，缺少结束标记 [/WRITE_FILE_RAW]",
-        "source_tool": "WRITE_FILE_RAW",
-        "path": "reports/final.md",
-        "previous_write_committed": False,
-        "write_recovery": {
-            "strategy": "restart_same_file_with_append_chunks",
-            "path": "reports/final.md",
-            "first_tool_call": {"tool": "write_file", "path": "reports/final.md", "mode": "overwrite"},
-            "next_tool_call": {"tool": "write_file", "path": "reports/final.md", "mode": "append"},
-        },
-    }
-
-    service._record_tool_call(
-        ToolCallRecordParams(
-            params=params,
-            tool_rounds=2,
-            idx=1,
-            payload=payload,
-            result=ToolExecutionResult(
-                "__parse_error__",
-                False,
-                "WRITE_FILE_RAW 原文块格式错误",
-                error_code="WRITE_FILE_RAW_MALFORMED",
-            ),
-        )
-    )
-
-    live_context = "\n".join(params.tool_context)
-    assert "long_content_recovery_mode" in live_context
-    assert "reports/final.md" in live_context
-    assert 'mode="overwrite"' in live_context
-    assert 'mode="append"' in live_context
-
-
-def test_tool_loop_does_not_enter_long_content_recovery_from_raw_parse_error_text(
-    tmp_path: Path,
-) -> None:
-    service = ToolLoopService(SimpleNamespace(root=tmp_path))
-    params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
-    payload = {
-        "tool": "__parse_error__",
-        "error_code": "TOOL_INLINE_CONTENT_STREAM_ABORTED",
-        "error": "工具调用缺少结束标记 [/TOOL_CALL]",
-        "raw": '{"tool":"write_file","path":"site/app.js","content":"const data = ',
-    }
-
-    service._record_tool_call(
-        ToolCallRecordParams(
-            params=params,
-            tool_rounds=2,
-            idx=1,
-            payload=payload,
-            result=ToolExecutionResult(
-                "__parse_error__",
-                False,
-                "工具调用缺少结束标记 [/TOOL_CALL]",
-                error_code="TOOL_INLINE_CONTENT_STREAM_ABORTED",
-            ),
-        )
-    )
-
-    live_context = "\n".join(params.tool_context)
-    assert "long_content_recovery_mode" not in live_context
-
-
-def test_tool_loop_enters_structured_json_recovery_after_truncated_parse_error(
-    tmp_path: Path,
-) -> None:
-    service = ToolLoopService(SimpleNamespace(root=tmp_path))
-    params = _tool_loop_params(request_id="req-json", run_id="run-json", task_id="task-json")
-    payload = {
-        "tool": "__parse_error__",
-        "error_code": "TOOL_CALL_UNCLOSED",
-        "error": "工具调用缺少结束标记 [/TOOL_CALL]",
-        "raw": '{"tool":"write_file","path":"outputs/report/source_data.json","sheets":[{"rows":[',
-    }
-    output = "工具调用缺少结束标记 [/TOOL_CALL]。write_structured_json 参数太长。"
-
-    service._record_tool_call(
-        ToolCallRecordParams(
-            params=params,
-            tool_rounds=2,
-            idx=1,
-            payload=payload,
-            result=ToolExecutionResult("__parse_error__", False, output),
-        )
-    )
-
-    live_context = "\n".join(params.tool_context)
-    assert "structured_json_recovery_mode" not in live_context
-    assert "write_file" in live_context
-    assert "write_structured_json 参数太长" in live_context
-    assert "outputs/report/source_data.json" in live_context
-
-
-def test_tool_loop_does_not_enter_long_content_recovery_from_inline_write_message_only(
-    tmp_path: Path,
-) -> None:
-    service = ToolLoopService(SimpleNamespace(root=tmp_path))
-    params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
-    rejected_chars = MAX_INLINE_WRITE_CONTENT_CHARS + 500
-    output = (
-        f"write_file.content inline content 超过推荐值：{rejected_chars} 字符，"
-        f"推荐最多 {MAX_INLINE_WRITE_CONTENT_CHARS} 字符。 path=site/app.css\n"
-        "请先用 write_file 写短骨架，再用 apply_patch 分块追加。"
-    )
-
-    service._record_tool_call(
-        ToolCallRecordParams(
-            params=params,
-            tool_rounds=3,
-            idx=1,
-            payload={"tool": "write_file", "path": "site/app.css", "content": "A" * rejected_chars},
-            result=ToolExecutionResult("write_file", False, output),
-        )
-    )
-
-    live_context = "\n".join(params.tool_context)
-    assert "long_content_recovery_mode" not in live_context
 
 
 def test_render_tool_payload_keeps_small_payload_readable() -> None:
@@ -1103,18 +856,21 @@ def test_render_tool_payload_keeps_small_payload_readable() -> None:
     assert "{'tool'" not in rendered
 
 
-def test_tool_loop_writes_fail_safe_checkpoint_before_externalizing_large_output(tmp_path: Path) -> None:
+def test_tool_loop_writes_fail_safe_checkpoint_before_externalizing_large_output(
+    tmp_path: Path,
+) -> None:
     service = ToolLoopService(SimpleNamespace(root=tmp_path))
     params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
     large_output = "danger\n" + ("x" * 25_000)
 
     service._record_tool_call(
-        ToolCallRecordParams(
-            params=params,
+        _canonical_record(
+            params,
             tool_rounds=1,
             idx=1,
-            payload={"tool": "blackbox_tool"},
-            result=ToolExecutionResult("blackbox_tool", True, large_output),
+            tool_name="blackbox_tool",
+            arguments={},
+            output=large_output,
         )
     )
 
@@ -1131,7 +887,9 @@ def test_tool_loop_writes_fail_safe_checkpoint_before_externalizing_large_output
     assert snapshots[-1]["turn_range"]["source"] == "tool_output_externalizer"
     assert snapshots[-1]["tool_calls"][0]["tool"] == "blackbox_tool"
     assert snapshots[-1]["tool_calls"][0]["output_hash"] == record["output_hash"]
-    assert snapshots[-1]["next_actions"] == ["先读取工具输出 artifact 摘要和 fail-safe checkpoint，再决定是否把内容切片读回 prompt。"]
+    assert snapshots[-1]["next_actions"] == [
+        "先读取工具输出 artifact 摘要和 fail-safe checkpoint，再决定是否把内容切片读回 prompt。"
+    ]
 
 
 def test_archive_tool_event_keeps_externalized_output_path(tmp_path: Path) -> None:
@@ -1150,16 +908,18 @@ def test_archive_tool_event_keeps_externalized_output_path(tmp_path: Path) -> No
                 request_id="req-tool",
                 run_id="run-tool",
                 task_id="task-tool",
-                tool_calls=[{
-                    "tool": "read_file",
-                    "id": "1-1",
-                    "ok": True,
-                    "output_preview": "preview",
-                    "output_hash": "hash",
-                    "output_path": str(output_path),
-                    "output_externalized": True,
-                    "parameters": {"path": "large.log"},
-                }],
+                tool_calls=[
+                    {
+                        "tool": "read_file",
+                        "id": "1-1",
+                        "ok": True,
+                        "output_preview": "preview",
+                        "output_hash": "hash",
+                        "output_path": str(output_path),
+                        "output_externalized": True,
+                        "parameters": {"path": "large.log"},
+                    }
+                ],
             ),
         )
     )
@@ -1178,6 +938,20 @@ def _assert_schema_v2(record: dict[str, object], name: str) -> None:
 
 
 def _tool_loop_params(*, request_id: str, run_id: str, task_id: str) -> ToolLoopExecuteParams:
+    snapshot_run_id = run_id or request_id or "archive-test-run"
+    write_file_spec = make_test_model_spec(
+        "write_file",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "mode": {"type": "string"},
+                "content": {"type": "string"},
+            },
+            "required": ["path", "content"],
+            "additionalProperties": False,
+        },
+    )
     return ToolLoopExecuteParams(
         user_prompt="",
         memories=[],
@@ -1196,4 +970,12 @@ def _tool_loop_params(*, request_id: str, run_id: str, task_id: str) -> ToolLoop
         one_shot_tool_calls=set(),
         executed_tools=[],
         archive_tool_calls=[],
+        tool_protocol_snapshot=make_test_protocol_snapshot(
+            run_id=snapshot_run_id,
+            source_protocol="text",
+        ),
+        tool_runtime_snapshot=runtime_snapshot_for_model_specs(
+            (write_file_spec,),
+            run_id=snapshot_run_id,
+        ),
     )

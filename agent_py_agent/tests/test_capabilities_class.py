@@ -10,9 +10,9 @@ from agent_py_agent.agent.capability.router import (
     CapabilityCard,
     CapabilityRouter,
     CapabilitySearchHit,
-    classify_tool_risk,
+    classify_tool_model_risk,
     from_skill_card,
-    from_tool_spec,
+    from_tool_model_spec,
     score_card,
     tokenize,
 )
@@ -302,7 +302,7 @@ def test_capability_router_render_candidates_empty():
     assert "没有明显匹配" in rendered
 
 
-# ── from_skill_card 和 from_tool_spec 测试 ────────────────────────────────
+# ── from_skill_card 和 from_tool_model_spec 测试 ─────────────────────────
 
 def test_from_skill_card():
     """测试从 SkillCard 转换。"""
@@ -324,59 +324,77 @@ def test_from_skill_card():
     assert card.description == "测试技能描述"
 
 
-def test_from_tool_spec():
-    """测试从 ToolSpec 转换。"""
-    from agent_py_agent.agent.tooling.models import ToolSpec
+def test_from_tool_model_spec():
+    """测试从 ToolModelSpec 转换。"""
+    from agent_py_agent.tests._tool_runtime_harness import make_test_model_spec
 
-    spec = ToolSpec(
-        name="test-tool",
+    spec = make_test_model_spec(
+        "test-tool",
         category="utility",
         description="测试工具描述",
-        use_cases=["测试场景"],
-        avoid_when=["避免场景"],
-        keywords=["测试"],
-        parameters={"param1": "参数1说明"},
+        use_cases=("测试场景",),
+        avoid_when=("避免场景",),
+        keywords=("测试",),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "param1": {"type": "string", "description": "参数1说明"},
+            },
+            "additionalProperties": False,
+        },
     )
 
-    card = from_tool_spec(spec)
+    card = from_tool_model_spec(spec)
 
     assert card.kind == "tool"
     assert card.name == "test-tool"
 
 
-# ── classify_tool_risk 测试 ──────────────────────────────────────────────
+# ── classify_tool_model_risk 测试 ────────────────────────────────────────
 
-def test_classify_tool_risk_low():
+def test_classify_tool_model_risk_low():
     """测试低风险工具分类。"""
-    from agent_py_agent.agent.tooling.models import ToolSpec
+    from agent_py_agent.tests._tool_runtime_harness import make_test_model_spec
 
-    spec = ToolSpec(
-        name="read_file",
+    spec = make_test_model_spec(
+        "read_file",
         category="filesystem",
         description="读取文件",
-        use_cases=["查看文件内容"],
-        avoid_when=[],
-        keywords=["读取", "文件"],
-        parameters={"path": "文件路径"},
+        use_cases=("查看文件内容",),
+        keywords=("读取", "文件"),
+        input_schema={
+            "type": "object",
+            "properties": {"path": {"type": "string", "description": "文件路径"}},
+            "required": ["path"],
+            "additionalProperties": False,
+        },
     )
-    sides, risk = classify_tool_risk(spec)
+    sides, risk = classify_tool_model_risk(spec)
     assert risk in ("low", "medium", "high")
 
 
-def test_classify_tool_risk_with_side_effects():
+def test_classify_tool_model_risk_with_side_effects():
     """测试有副作用的工具分类。"""
-    from agent_py_agent.agent.tooling.models import ToolSpec
+    from agent_py_agent.tests._tool_runtime_harness import make_test_model_spec
 
-    spec = ToolSpec(
-        name="write_file",
+    spec = make_test_model_spec(
+        "write_file",
         category="filesystem",
         description="写入文件",
-        use_cases=["创建或覆盖文件"],
-        avoid_when=["不确定内容时"],
-        keywords=["写入", "文件"],
-        parameters={"path": "文件路径", "content": "内容"},
+        use_cases=("创建或覆盖文件",),
+        avoid_when=("不确定内容时",),
+        keywords=("写入", "文件"),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "文件路径"},
+                "content": {"type": "string", "description": "内容"},
+            },
+            "required": ["path", "content"],
+            "additionalProperties": False,
+        },
     )
-    sides, risk = classify_tool_risk(spec)
+    sides, risk = classify_tool_model_risk(spec)
     assert risk in ("low", "medium", "high")
 
 

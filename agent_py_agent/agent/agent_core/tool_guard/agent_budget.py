@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass
 
 from ...settings.runtime_guard_config import runtime_guard_int
-from ...tooling.models import ToolExecutionResult
+from ...tooling.models import ToolHandlerOutcome
 
 
 @dataclass(frozen=True)
@@ -16,7 +16,7 @@ class ToolAgentBudgetRequest:
     now: float | None = None
 
 
-def check_tool_agent_budget(request: ToolAgentBudgetRequest) -> ToolExecutionResult | None:
+def check_tool_agent_budget(request: ToolAgentBudgetRequest) -> ToolHandlerOutcome | None:
     config = getattr(request.agent, "config", None)
     policy = getattr(request.agent, "runtime_guard_policy", None)
     run_id = str(request.run_id or "").strip()
@@ -65,8 +65,8 @@ def _budget_int(config: object, key: str, *, policy: object = None) -> int:
         return 0
 
 
-def _budget_result(tool_name: str, run_id: str, max_calls: int, window_seconds: int) -> ToolExecutionResult:
-    return ToolExecutionResult(
+def _budget_result(tool_name: str, run_id: str, max_calls: int, window_seconds: int) -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(
         str(tool_name or "unknown"),
         False,
         (
@@ -75,4 +75,5 @@ def _budget_result(tool_name: str, run_id: str, max_calls: int, window_seconds: 
             "如果足够完成当前交付，请立刻用已有工具结果写入交付物并给出最终回复；"
             "只有确实缺少关键事实时，才简短说明具体缺口和需要继续调度、接管或提高预算的原因。"
         ),
+        error_code="TOOL_RATE_LIMIT_EXCEEDED",
     )

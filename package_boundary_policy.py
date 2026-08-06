@@ -22,7 +22,6 @@ DEV_ONLY_CONTRACT_MODULES = frozenset(
         "dry_run_mainline_contract",
         "e2e_matrix",
         "e2e_matrix_runner",
-        "effective_contract_snapshot",
         "failure_sample_capture",
         "failure_sample_library_contract",
         "live_llm_fake_tool_contract",

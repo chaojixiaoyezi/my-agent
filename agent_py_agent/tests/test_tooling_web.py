@@ -2,10 +2,16 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+from agent_py_agent.agent.tooling.cancellation import (
+    CancellationToken,
+    bind_cancellation_token,
+)
 
 
 def _private_resolver(_host: str) -> tuple[str, ...]:
@@ -84,6 +90,51 @@ class TestWebSearchTool:
         assert payload["results"][0]["url"] == "https://arxiv.org/abs/2501.12948"
         assert payload["results"][0]["title"].startswith("DeepSeek-R1")
         assert payload["results"][0]["source"] == "duckduckgo_html"
+
+    @patch("urllib.request.urlopen")
+    def test_web_search_closes_blocking_response_on_cancellation(
+        self,
+        mock_urlopen,
+    ):
+        from agent_py_agent.agent.tooling.web_search import WebSearchTool
+
+        reading = threading.Event()
+        closed = threading.Event()
+
+        class BlockingResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+                return False
+
+            def read(self):
+                reading.set()
+                assert closed.wait(3)
+                return b""
+
+            def close(self):
+                closed.set()
+
+        mock_urlopen.return_value = BlockingResponse()
+        token = CancellationToken()
+        observed = {}
+
+        def run() -> None:
+            with bind_cancellation_token(token):
+                observed["result"] = WebSearchTool(timeout=20).execute(
+                    {"query": "blocking query"}
+                )
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        assert reading.wait(2)
+        token.cancel("test stop")
+        thread.join(3)
+
+        assert not thread.is_alive()
+        assert observed["result"].error_code == "CANCELLED"
 
     def test_web_search_rejects_empty_query(self, tmp_path: Path):
         """空查询不能发起网络请求。"""
@@ -187,8 +238,16 @@ class TestWebSearchTool:
         )
 
         specs_by_name = {spec.name: spec for spec in registry.specs(include_orchestration=True)}
-        assert specs_by_name["web_search"].effect == "read_only"
-        assert specs_by_name["web_fetch"].effect == "read_only"
+        runtimes_by_name = {
+            runtime.model_spec.name: runtime
+            for runtime in registry.runtime_snapshot().runtimes
+        }
+        assert runtimes_by_name["web_search"].runtime_policy.effect_resolver.default_effect == "read_only"
+        fetch_effects = dict(
+            runtimes_by_name["web_fetch"].runtime_policy.effect_resolver.by_parameter
+        )
+        assert dict(fetch_effects["method"])["GET"] == "read_only"
+        assert dict(fetch_effects["method"])["POST"] == "dangerous"
         assert "web_extract" not in specs_by_name
         assert "http_request" not in specs_by_name
         hits = registry.find_relevant_specs("需要搜索公开来源和候选链接")

@@ -125,7 +125,7 @@
 
 ## 2026-07-25 工具结果投影与归档再进入回归
 
-- `ToolSpec -> ToolExecutionResult.tool_output_policy -> tool-context reducer` 是模型可见工具结果的唯一
+- 当前等价主链为 `ToolRuntimePolicy.output_policy -> canonical ToolResult -> tool-context reducer`；这是模型可见工具结果的唯一
   合同。测试覆盖 spec 基线、handler 只可收紧、runtime/source-code 与 external/default 合并、
   外部边界标签中和、结构化/文本凭据脱敏，以及错误/状态/archive ref 仍留在可信结构层。
 - 同一投影已覆盖 live prompt、外置 preview、compact semantic input、机械恢复、父子代理 shared
@@ -168,7 +168,7 @@
 
 ## 2026-07-23 工具参数合同收敛
 
-- `ToolSpec.input_schema` 是外部/MCP 完整 Schema 的权威；builtin 旧字段只在一个 compiler 中转换，
+- 当前 `ToolModelSpec.input_schema` 是外部/MCP 完整 Schema 的唯一权威；旧 builtin 字段和 compiler 已删除，
   provider definition、文本/native 入口、参数 gate 和最终 handler 前执行消费同一结构。
 - 参数入口先做有限、无歧义的类型纠正，再完整检查必填、类型、枚举、嵌套、额外字段、长度/数值边界、
   组合规则和本地引用。结构问题发生在路径/effect/审批/真实工具实现前，错误证据不保存原值。

@@ -1,10 +1,11 @@
-
 from __future__ import annotations
 
 """Defines stable tool metadata, retrieval hits, and base execution contracts."""
 
+import hashlib
 import json
 import re
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -38,85 +39,120 @@ _TOOL_FAILURE_STAGE_VALUES = frozenset(item.value for item in ToolFailureStage)
 class TrustedParameterBinding:
     source_refs: tuple[str, ...]
     when: tuple[tuple[str, Any], ...] = ()
-
-
-@dataclass
-class ToolSpec:
-    """LLM: 工具元数据的唯一声明对象；参数结构由 tooling.tool_spec_schema 统一编译。
-
-    类用途: 保存工具目录、输入结构、副作用和执行属性，供模型展示与运行时硬门共同读取。
-    """
-    name: str
-    category: str
-    description: str
-    use_cases: list[str]
-    avoid_when: list[str]
-    keywords: list[str]
-    parameters: dict[str, str]
-    parameter_details: dict[str, str] = field(default_factory=dict)
-    # 可选精确 JSON Schema 片段：{参数名: {"type": "array", "items": {...}, "enum": [...]}}。
-    # 声明了的参数走精确类型（消除 native tool_use 弱推导致的 TOOL_INVALID_ARGUMENTS），
-    # 未声明的回退到全 string 弱推导；required_parameters 列出必填参数名。
-    parameter_schema: dict[str, Any] = field(default_factory=dict)
-    required_parameters: list[str] = field(default_factory=list)
-    internal_parameters: list[str] = field(default_factory=list)
-    # 外部工具可直接保存完整 JSON Schema；非空时它是参数结构的权威源，旧三件套只用于目录展示。
-    input_schema: dict[str, Any] | None = None
-    # 只有工具作者逐字段声明的无歧义默认值才可在统一入口补入；JSON Schema 的 default 注解不自动执行。
-    safe_parameter_defaults: dict[str, Any] = field(default_factory=dict)
-    # 缺失参数只能从 Registry 构造的可信运行事实补入；模型输入不能提供或改写这些 source_ref。
-    trusted_parameter_bindings: dict[str, TrustedParameterBinding] = field(default_factory=dict)
-    # 只有工具清单逐字段声明后，通用运行门才把该参数中的 file:// 视为本地路径并继续走
-    # PathAccessPolicy；未声明工具仍按网络文件 URL 拒绝，不能借此绕过 owner/危险目录边界。
-    local_file_url_parameters: tuple[str, ...] = ()
-    examples: list[str] = field(default_factory=list)
-    effect: str = ""
-    # Mixed-action tools keep one public name but may have structurally
-    # different effects.  Exact parameter values select a narrower effect;
-    # the top-level effect remains the conservative fallback.
-    effect_by_parameter: dict[str, dict[str, str]] = field(default_factory=dict)
-    default_mode: str = ""
-    # 副作用工具必须显式选 operation 或 business；只读工具留空。
-    # 通用运行时绝不能把“参数相同”猜成“同一业务动作”。
-    idempotency_scope: str = ""
-    requires_approval: bool = False
-    # 结构化任务晋升标志：调用真正的工作工具（包括读取任务材料）时，
-    # 才把普通聊天提升为 TaskRun；无工具的聊天不会因此重开任务。
-    promotes_task: bool = False
-    timeout_seconds: int = 0
-    output_refs: list[str] = field(default_factory=list)
-    # 工具正文进入模型前的信任边界。runtime=框架生成的运行事实；
-    # external_data=网页/MCP/外部流等只能作为数据，不能取得指令权。
-    output_trust: str = "runtime"
-    # default=完整凭证字段脱敏；source_code=保留源码中的占位赋值结构，
-    # 但仍移除真实 token、Authorization、私钥和连接串密码。
-    output_redaction: str = "default"
+    authority: str = "fill_missing"
 
     def __post_init__(self) -> None:
-        _validate_tool_effects(self)
-        self.output_trust = str(self.output_trust or "").strip().lower()
-        if self.output_trust not in {"runtime", "external_data"}:
-            raise ValueError(f"invalid tool output trust: {self.output_trust}")
-        self.output_redaction = str(self.output_redaction or "").strip().lower()
-        if self.output_redaction not in {"default", "source_code"}:
-            raise ValueError(
-                f"invalid tool output redaction mode: {self.output_redaction}"
-            )
+        source_refs = tuple(str(item or "").strip() for item in self.source_refs)
+        if not source_refs or any(not item for item in source_refs):
+            raise ValueError("trusted parameter binding requires non-empty source_refs")
+        if len(set(source_refs)) != len(source_refs):
+            raise ValueError("trusted parameter binding source_refs must be unique")
+        conditions = tuple((str(name or "").strip(), value) for name, value in self.when)
+        if any(not name for name, _value in conditions):
+            raise ValueError("trusted parameter binding condition name is required")
+        if len({name for name, _value in conditions}) != len(conditions):
+            raise ValueError("trusted parameter binding condition names must be unique")
+        authority = str(self.authority or "fill_missing").strip().lower()
+        if authority not in {"fill_missing", "must_match", "host_authoritative"}:
+            raise ValueError(f"invalid trusted parameter authority: {authority}")
+        object.__setattr__(self, "source_refs", source_refs)
+        object.__setattr__(self, "when", conditions)
+        object.__setattr__(self, "authority", authority)
+
+
+@dataclass(frozen=True)
+class ToolModelHints:
+    """Soft catalog and retrieval hints; never an authorization input."""
+
+    category: str = "general"
+    use_cases: tuple[str, ...] = ()
+    avoid_when: tuple[str, ...] = ()
+    keywords: tuple[str, ...] = ()
+    examples: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ToolModelSpec:
+    """The single model-visible definition of one tool."""
+
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+    schema_hash: str = ""
+    hints: ToolModelHints = field(default_factory=ToolModelHints)
+
+    def __post_init__(self) -> None:
+        name = str(self.name or "").strip()
+        description = str(self.description or "").strip()
+        if not name:
+            raise ValueError("tool model spec name is required")
+        if not description:
+            raise ValueError(f"tool model spec description is required: {name}")
+        if not isinstance(self.input_schema, dict):
+            raise ValueError(f"tool input_schema must be an object: {name}")
+        from .input_schema import canonicalize_tool_input_schema
+
+        schema = canonicalize_tool_input_schema(self.input_schema)
+        digest = tool_schema_hash(schema)
+        supplied = str(self.schema_hash or "").strip()
+        if supplied and supplied != digest:
+            raise ValueError(f"tool schema_hash mismatch: {name}")
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "description", description)
+        object.__setattr__(self, "input_schema", schema)
+        object.__setattr__(self, "schema_hash", digest)
+
+    def assert_schema_hash(self) -> None:
+        if tool_schema_hash(self.input_schema) != self.schema_hash:
+            raise ValueError(f"tool input_schema mutated after snapshot: {self.name}")
+
+    @property
+    def category(self) -> str:
+        return self.hints.category
+
+    @property
+    def use_cases(self) -> list[str]:
+        return list(self.hints.use_cases)
+
+    @property
+    def avoid_when(self) -> list[str]:
+        return list(self.hints.avoid_when)
+
+    @property
+    def keywords(self) -> list[str]:
+        return list(self.hints.keywords)
+
+    @property
+    def examples(self) -> list[str]:
+        return list(self.hints.examples)
+
+    @property
+    def parameter_descriptions(self) -> dict[str, str]:
+        """Derived catalog labels; ``input_schema`` remains the only declaration."""
+
+        properties = self.input_schema.get("properties")
+        if not isinstance(properties, dict):
+            return {}
+        return {
+            str(name): str(value.get("description") or "")
+            for name, value in properties.items()
+            if isinstance(value, dict)
+        }
+
     def render_catalog_entry(
         self,
         *,
         include_examples: bool = True,
         max_chars: int = 0,
     ) -> str:
-
-        params = "、".join(self.parameters.keys()) or "无"
-        example = f"\n  示例：{self.examples[0]}" if include_examples and self.examples else ""
-        traits = _tool_traits(self)
-        trait_text = f"；{traits}" if traits else ""
+        params = "、".join(self.parameter_descriptions) or "无"
+        example = (
+            f"\n  示例：{self.hints.examples[0]}"
+            if include_examples and self.hints.examples
+            else ""
+        )
         rendered = (
-            f"- {self.name} [{self.category}{trait_text}]：{self.description}\n"
-            f"  关键参数：{params}"
-            f"{example}"
+            f"- {self.name} [{self.category}]：{self.description}\n  关键参数：{params}{example}"
         )
         return _truncate_rendered_tool_entry(
             rendered,
@@ -125,17 +161,14 @@ class ToolSpec:
         )
 
     def render_recommended_entry(self, *, max_chars: int = 0) -> str:
-
-        params = "\n".join(
-            f"  - {name}: {self.parameters.get(name, '')}" for name in self.parameters
-        ) or "  - 无"
-        traits = _tool_traits(self)
-        trait_line = f"\n  属性：{traits}" if traits else ""
-        rendered = (
-            f"- {self.name} [{self.category}]：{self.description}"
-            f"{trait_line}\n"
-            f"  参数：\n{params}"
+        params = (
+            "\n".join(
+                f"  - {name}: {description}"
+                for name, description in self.parameter_descriptions.items()
+            )
+            or "  - 无"
         )
+        rendered = f"- {self.name} [{self.category}]：{self.description}\n  参数：\n{params}"
         return _truncate_rendered_tool_entry(
             rendered,
             max_chars=max_chars,
@@ -143,20 +176,22 @@ class ToolSpec:
         )
 
     def render_detail_entry(self, *, max_chars: int = 0) -> str:
-
-        params = "\n".join(
-            f"  - {name}: {self.parameter_details.get(name, desc)}"
-            for name, desc in self.parameters.items()
-        ) or "  - 无"
-        examples = "\n".join(f"  - {item}" for item in self.examples) or "  - 无"
-        use_cases = "\n".join(f"  - {item}" for item in self.use_cases) or "  - 无"
-        avoid_when = "\n".join(f"  - {item}" for item in self.avoid_when) or "  - 无"
+        params = (
+            "\n".join(
+                f"  - {name}: {description}"
+                for name, description in self.parameter_descriptions.items()
+            )
+            or "  - 无"
+        )
+        examples = "\n".join(f"  - {item}" for item in self.hints.examples) or "  - 无"
+        use_cases = "\n".join(f"  - {item}" for item in self.hints.use_cases) or "  - 无"
+        avoid_when = "\n".join(f"  - {item}" for item in self.hints.avoid_when) or "  - 无"
         rendered = (
             f"## {self.name}\n"
             f"类别：{self.category}\n"
             f"一句话说明：{self.description}\n"
             f"适合在这些时候用：\n{use_cases}\n"
-            f"关键 \n{params}\n"
+            f"关键参数：\n{params}\n"
             f"示例：\n{examples}\n"
             f"这些场景别优先选它：\n{avoid_when}"
         )
@@ -167,47 +202,256 @@ class ToolSpec:
         )
 
 
-def tool_effect_for_parameters(spec: ToolSpec, parameters: object) -> str:
-    """Resolve a ToolSpec effect from exact structured parameters only."""
-    values = parameters if isinstance(parameters, dict) else {}
+def tool_schema_hash(schema: dict[str, Any]) -> str:
+    payload = json.dumps(
+        schema,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class EffectResolverPolicy:
+    default_effect: str = "read_only"
+    by_parameter: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = ()
+    strategy: str = "declared"
+    command_parameter: str = ""
+
+    def __post_init__(self) -> None:
+        effect = str(self.default_effect or "").strip().lower()
+        strategy = str(self.strategy or "declared").strip().lower()
+        if effect not in {"read_only", "mutating", "dangerous"}:
+            raise ValueError(f"invalid default tool effect: {effect}")
+        if strategy not in {"declared", "command"}:
+            raise ValueError(f"invalid tool effect strategy: {strategy}")
+        command_parameter = str(self.command_parameter or "").strip()
+        if strategy == "command" and not command_parameter:
+            raise ValueError("command effect strategy requires command_parameter")
+        if strategy == "declared" and command_parameter:
+            raise ValueError("declared effect strategy cannot carry command_parameter")
+        if strategy == "command" and self.by_parameter:
+            raise ValueError("command effect strategy cannot carry by_parameter mappings")
+        normalized_mappings: list[tuple[str, tuple[tuple[str, str], ...]]] = []
+        seen_fields: set[str] = set()
+        for raw_field_name, variants in self.by_parameter:
+            field_name = str(raw_field_name or "").strip()
+            if not field_name:
+                raise ValueError("effect parameter name is required")
+            if field_name in seen_fields:
+                raise ValueError(f"duplicate effect parameter mapping: {field_name}")
+            seen_fields.add(field_name)
+            normalized_variants: list[tuple[str, str]] = []
+            seen_values: set[str] = set()
+            for raw_value, raw_resolved in variants:
+                value = str(raw_value)
+                resolved = str(raw_resolved or "").strip().lower()
+                if value in seen_values:
+                    raise ValueError(f"duplicate effect parameter value: {field_name}={value}")
+                seen_values.add(value)
+                if resolved not in {
+                    "read_only",
+                    "mutating",
+                    "dangerous",
+                }:
+                    raise ValueError(f"invalid parameter-resolved effect: {resolved}")
+                normalized_variants.append((value, resolved))
+            if not normalized_variants:
+                raise ValueError(f"effect parameter mapping is empty: {field_name}")
+            normalized_mappings.append((field_name, tuple(normalized_variants)))
+        object.__setattr__(self, "default_effect", effect)
+        object.__setattr__(self, "strategy", strategy)
+        object.__setattr__(self, "command_parameter", command_parameter)
+        object.__setattr__(self, "by_parameter", tuple(normalized_mappings))
+
+
+@dataclass(frozen=True)
+class ApprovalPolicy:
+    mode: str = "dangerous"
+
+    def __post_init__(self) -> None:
+        mode = str(self.mode or "").strip().lower()
+        if mode not in {"never", "dangerous", "mutating", "always"}:
+            raise ValueError(f"invalid tool approval mode: {mode}")
+        object.__setattr__(self, "mode", mode)
+
+
+@dataclass(frozen=True)
+class SandboxPolicy:
+    mode: str = "inherit"
+
+    def __post_init__(self) -> None:
+        mode = str(self.mode or "").strip().lower()
+        if mode not in {"inherit", "required", "none"}:
+            raise ValueError(f"invalid tool sandbox mode: {mode}")
+        object.__setattr__(self, "mode", mode)
+
+
+@dataclass(frozen=True)
+class IdempotencyPolicy:
+    scope: str = ""
+
+    def __post_init__(self) -> None:
+        scope = str(self.scope or "").strip().lower()
+        if scope not in {"", "operation", "business"}:
+            raise ValueError(f"invalid tool idempotency scope: {scope}")
+        object.__setattr__(self, "scope", scope)
+
+
+@dataclass(frozen=True)
+class TimeoutPolicy:
+    seconds: int = 0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "seconds", max(0, int(self.seconds or 0)))
+
+
+@dataclass(frozen=True)
+class ConcurrencyPolicy:
+    mode: str = "serial"
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"serial", "parallel_safe", "barrier"}:
+            raise ValueError(f"invalid tool concurrency mode: {self.mode}")
+
+
+@dataclass(frozen=True)
+class ResourceScopePolicy:
+    mode: str = "from_arguments"
+    parameter_names: tuple[str, ...] = ()
+    static_scopes: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        mode = str(self.mode or "").strip().lower()
+        if mode not in {"none", "from_arguments", "declared"}:
+            raise ValueError(f"invalid resource scope mode: {mode}")
+        parameter_names = tuple(
+            str(item).strip() for item in self.parameter_names if str(item).strip()
+        )
+        static_scopes = tuple(str(item).strip() for item in self.static_scopes if str(item).strip())
+        if len(set(parameter_names)) != len(parameter_names):
+            raise ValueError("resource scope parameter names must be unique")
+        if len(set(static_scopes)) != len(static_scopes):
+            raise ValueError("declared resource scopes must be unique")
+        if mode == "none" and (parameter_names or static_scopes):
+            raise ValueError("resource scope mode none cannot carry scopes")
+        if mode == "from_arguments" and static_scopes:
+            raise ValueError("from_arguments resource scopes cannot carry static_scopes")
+        if mode == "declared" and parameter_names:
+            raise ValueError("declared resource scopes cannot carry parameter_names")
+        if mode == "declared" and not static_scopes:
+            raise ValueError("declared resource scope mode requires static_scopes")
+        object.__setattr__(self, "mode", mode)
+        object.__setattr__(self, "parameter_names", parameter_names)
+        object.__setattr__(self, "static_scopes", static_scopes)
+
+
+@dataclass(frozen=True)
+class OutputPolicy:
+    refs: tuple[str, ...] = ()
+    trust: str = "runtime"
+    redaction: str = "default"
+
+    def __post_init__(self) -> None:
+        trust = str(self.trust or "").strip().lower()
+        redaction = str(self.redaction or "").strip().lower()
+        if trust not in {"runtime", "external_data"}:
+            raise ValueError(f"invalid tool output trust: {trust}")
+        if redaction not in {"default", "source_code"}:
+            raise ValueError(f"invalid tool output redaction: {redaction}")
+        object.__setattr__(self, "trust", trust)
+        object.__setattr__(self, "redaction", redaction)
+
+
+@dataclass(frozen=True)
+class AvailabilityPolicy:
+    mode: str = "handler_probe"
+
+    def __post_init__(self) -> None:
+        mode = str(self.mode or "").strip().lower()
+        if mode not in {"handler_probe", "always"}:
+            raise ValueError(f"invalid availability mode: {mode}")
+        object.__setattr__(self, "mode", mode)
+
+
+@dataclass(frozen=True)
+class ToolInputPolicy:
+    internal_parameters: tuple[str, ...] = ()
+    safe_parameter_defaults: tuple[tuple[str, Any], ...] = ()
+    trusted_parameter_bindings: tuple[tuple[str, TrustedParameterBinding], ...] = ()
+    local_file_url_parameters: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ToolRuntimePolicy:
+    effect_resolver: EffectResolverPolicy
+    approval_policy: ApprovalPolicy = field(default_factory=ApprovalPolicy)
+    sandbox_policy: SandboxPolicy = field(default_factory=SandboxPolicy)
+    idempotency_policy: IdempotencyPolicy = field(default_factory=IdempotencyPolicy)
+    timeout_policy: TimeoutPolicy = field(default_factory=TimeoutPolicy)
+    concurrency_policy: ConcurrencyPolicy = field(default_factory=ConcurrencyPolicy)
+    resource_scopes: ResourceScopePolicy = field(default_factory=ResourceScopePolicy)
+    output_policy: OutputPolicy = field(default_factory=OutputPolicy)
+    availability_policy: AvailabilityPolicy = field(default_factory=AvailabilityPolicy)
+    input_policy: ToolInputPolicy = field(default_factory=ToolInputPolicy)
+    promotes_task: bool = False
+
+
+def tool_effect_for_runtime_policy(
+    policy: ToolRuntimePolicy,
+    arguments: object,
+) -> str:
+    """Resolve an effect from exact structured arguments and manifest policy."""
+
+    values = arguments if isinstance(arguments, dict) else {}
+    resolver = policy.effect_resolver
+    if resolver.strategy == "command":
+        from ..contracts.gates.command_policy import analyze_command
+
+        return analyze_command(values.get(resolver.command_parameter)).resolved_effect
     matched: list[str] = []
-    for field_name, variants in spec.effect_by_parameter.items():
-        if not isinstance(variants, dict):
+    for field_name, variants in resolver.by_parameter:
+        if field_name not in values:
             continue
-        value = str(values.get(field_name) or "").strip()
-        effect = str(variants.get(value) or "").strip().lower()
-        if effect:
-            matched.append(effect)
+        raw_value = values.get(field_name)
+        if isinstance(raw_value, bool):
+            value = "true" if raw_value else "false"
+        else:
+            value = str(raw_value or "").strip()
+        mapping = {str(key): str(effect).strip().lower() for key, effect in variants}
+        if value in mapping:
+            matched.append(mapping[value])
     if not matched:
-        return str(spec.effect or "").strip().lower()
+        return resolver.default_effect
     rank = {"read_only": 0, "mutating": 1, "dangerous": 2}
     return max(matched, key=rank.__getitem__)
 
 
-def _validate_tool_effects(spec: ToolSpec) -> None:
-    allowed = {"", "read_only", "mutating", "dangerous"}
-    base = str(spec.effect or "").strip().lower()
-    if base not in allowed:
-        raise ValueError(f"invalid tool effect: {spec.effect}")
-    for field_name, variants in spec.effect_by_parameter.items():
-        if not str(field_name).strip() or not isinstance(variants, dict):
-            raise ValueError("effect_by_parameter 必须是参数名到取值映射的对象")
-        invalid = sorted(
-            {
-                str(effect or "").strip().lower()
-                for effect in variants.values()
-                if str(effect or "").strip().lower() not in allowed - {""}
-            }
-        )
-        if invalid:
-            raise ValueError(
-                "effect_by_parameter 包含未知 effect: " + ", ".join(invalid)
-            )
+def resource_scopes_for_runtime_policy(
+    policy: ToolRuntimePolicy,
+    arguments: object,
+    *,
+    additional_scopes: tuple[str, ...] = (),
+) -> tuple[str, ...]:
+    """Project stable resource identities from the canonical runtime policy."""
+
+    values = arguments if isinstance(arguments, dict) else {}
+    scope_policy = policy.resource_scopes
+    scopes = list(scope_policy.static_scopes)
+    if scope_policy.mode == "from_arguments":
+        for name in scope_policy.parameter_names:
+            value = values.get(name)
+            for item in value if isinstance(value, list) else [value]:
+                text = str(item or "").strip()
+                if text:
+                    scopes.append(f"{name}:{text}")
+    scopes.extend(str(item).strip() for item in additional_scopes if str(item).strip())
+    return tuple(dict.fromkeys(scopes))
 
 
 @dataclass
-class ToolExecutionResult:
-
+class ToolHandlerOutcome:
     tool: str
     ok: bool
     output: str
@@ -238,13 +482,9 @@ class ToolExecutionResult:
         self.duration_ms = _nonnegative_duration_ms(self.duration_ms)
         self.effect_outcome = str(self.effect_outcome or "").strip().lower()
         if self.effect_outcome not in {"", "not_started", "unknown"}:
-            raise ValueError(
-                f"invalid tool effect outcome: {self.effect_outcome}"
-            )
+            raise ValueError(f"invalid tool effect outcome: {self.effect_outcome}")
         if self.ok and self.effect_outcome:
-            raise ValueError(
-                "successful tool result cannot report an incomplete effect outcome"
-            )
+            raise ValueError("successful tool result cannot report an incomplete effect outcome")
         self.effect_source_ref = str(self.effect_source_ref or "").strip()
         if self.ok:
             if self.failure_stage:
@@ -256,7 +496,10 @@ class ToolExecutionResult:
             self.recommended_action = ""
             self.recovery_hint = ""
             return
-        reported_code = self.reported_error_code or self.error_code or _error_code_from_output(self.output)
+        # ``output`` is untrusted business/provider data.  It may contain JSON
+        # that looks like host lifecycle metadata, but only explicit fields on
+        # this handler-internal outcome may influence canonical control flow.
+        reported_code = self.reported_error_code or self.error_code
         control_code = self.error_code or reported_code
         self.reported_error_code = str(reported_code or "UNKNOWN_ERROR").strip().upper()
         contract = error_contract(control_code) if control_code else error_contract("UNKNOWN_ERROR")
@@ -325,13 +568,38 @@ class ToolExecutionResult:
         return f"[tool-execution; {'; '.join(fields)}]"
 
 
+def output_policy_for_outcome(
+    policy: ToolRuntimePolicy,
+    outcome: ToolHandlerOutcome,
+) -> OutputPolicy:
+    """Resolve the strictest host policy and handler-observed data boundary."""
+
+    configured = policy.output_policy
+    details = outcome.result_envelope if isinstance(outcome.result_envelope, dict) else {}
+    observed = details.get("tool_output_policy")
+    observed = observed if isinstance(observed, dict) else {}
+    observed_trust = str(observed.get("trust") or "").strip().lower()
+    observed_redaction = str(observed.get("redaction") or "").strip().lower()
+    trust = configured.trust
+    redaction = configured.redaction
+    if observed_trust == "external_data":
+        trust = "external_data"
+    if observed_redaction == "default" or trust == "external_data":
+        redaction = "default"
+    return OutputPolicy(
+        refs=configured.refs,
+        trust=trust,
+        redaction=redaction,
+    )
+
+
 def apply_tool_execution_facts(
-    result: ToolExecutionResult,
+    result: ToolHandlerOutcome,
     *,
     failure_stage: ToolFailureStage | str | None = None,
     handler_executed: bool | None = None,
     duration_ms: int | float | None = None,
-) -> ToolExecutionResult:
+) -> ToolHandlerOutcome:
     """Attach host-owned lifecycle facts at one explicit runtime boundary."""
 
     if handler_executed is not None:
@@ -387,7 +655,7 @@ class ToolOperationReconciliationContext:
 class ToolOperationReconciliation:
     outcome: str = "unknown"
     source_ref: str = ""
-    result: ToolExecutionResult | None = None
+    result: ToolHandlerOutcome | None = None
     reason: str = ""
 
 
@@ -417,15 +685,264 @@ class ToolAvailability:
         return cls(available=False, error_code=error_code, reason=str(reason or "").strip())
 
 
+@dataclass(frozen=True)
+class ToolExposure:
+    model_visible: bool = True
+    owner_types: tuple[str, ...] = ("main_agent", "task_local")
+
+
+@dataclass(frozen=True)
+class ToolRuntime:
+    """One immutable binding of model definition, policy and business handler."""
+
+    model_spec: ToolModelSpec
+    runtime_policy: ToolRuntimePolicy
+    handler: Any = field(compare=False, repr=False)
+    availability: ToolAvailability = field(default_factory=ToolAvailability.ready)
+    exposure: ToolExposure = field(default_factory=ToolExposure)
+
+    def __post_init__(self) -> None:
+        self.model_spec.assert_schema_hash()
+        _validate_runtime_policy(self.model_spec, self.runtime_policy)
+        handler_name = str(
+            getattr(getattr(self.handler, "model_spec", None), "name", "") or ""
+        ).strip()
+        if handler_name and handler_name != self.model_spec.name:
+            raise ValueError(
+                f"tool handler/model name mismatch: {handler_name} != {self.model_spec.name}"
+            )
+
+
+def _validate_runtime_policy(
+    model_spec: ToolModelSpec,
+    runtime_policy: ToolRuntimePolicy,
+) -> None:
+    """Fail snapshot construction when policy fields contradict the sole schema."""
+
+    properties = model_spec.input_schema.get("properties")
+    if not isinstance(properties, dict):
+        raise ValueError(f"tool input schema properties must be an object: {model_spec.name}")
+    public_names = {str(name) for name in properties}
+    policy = runtime_policy.input_policy
+    internal_names = {str(name) for name in policy.internal_parameters}
+    if len(internal_names) != len(policy.internal_parameters) or "" in internal_names:
+        raise ValueError(f"duplicate or empty internal parameter: {model_spec.name}")
+    overlap = sorted(public_names & internal_names)
+    if overlap:
+        raise ValueError(
+            f"internal parameters must not be model-visible: {model_spec.name}: {overlap}"
+        )
+    defaults = dict(policy.safe_parameter_defaults)
+    bindings = dict(policy.trusted_parameter_bindings)
+    if len(defaults) != len(policy.safe_parameter_defaults):
+        raise ValueError(f"duplicate safe parameter default: {model_spec.name}")
+    if len(bindings) != len(policy.trusted_parameter_bindings):
+        raise ValueError(f"duplicate trusted parameter binding: {model_spec.name}")
+    duplicate_completion = sorted(set(defaults) & set(bindings))
+    if duplicate_completion:
+        raise ValueError(
+            f"parameter cannot have both default and trusted binding: {model_spec.name}: {duplicate_completion}"
+        )
+    for name, value in defaults.items():
+        _require_public_input_parameter(model_spec, public_names, name, "safe default")
+        _validate_runtime_default(model_spec, str(name), value)
+    for name, binding in bindings.items():
+        _require_runtime_input_parameter(
+            model_spec,
+            public_names,
+            internal_names,
+            name,
+            "trusted binding",
+        )
+        if not isinstance(binding, TrustedParameterBinding) or not binding.source_refs:
+            raise ValueError(f"invalid trusted parameter binding: {model_spec.name}.{name}")
+        for source_ref in binding.source_refs:
+            _validate_trusted_source_ref(model_spec.name, source_ref)
+        for condition_name, _expected in binding.when:
+            _require_public_input_parameter(
+                model_spec,
+                public_names,
+                condition_name,
+                f"trusted binding condition for {name}",
+            )
+    for name in policy.local_file_url_parameters:
+        _require_public_input_parameter(
+            model_spec,
+            public_names,
+            name,
+            "local file URL parameter",
+        )
+    resolver = runtime_policy.effect_resolver
+    for field_name, _variants in resolver.by_parameter:
+        _require_public_input_parameter(
+            model_spec,
+            public_names,
+            field_name,
+            "effect resolver",
+        )
+    if resolver.command_parameter:
+        _require_public_input_parameter(
+            model_spec,
+            public_names,
+            resolver.command_parameter,
+            "command effect resolver",
+        )
+    for name in runtime_policy.resource_scopes.parameter_names:
+        _require_runtime_input_parameter(
+            model_spec,
+            public_names,
+            internal_names,
+            name,
+            "resource scope",
+        )
+
+
+def _require_runtime_input_parameter(
+    model_spec: ToolModelSpec,
+    public_names: set[str],
+    internal_names: set[str],
+    name: object,
+    contract: str,
+) -> None:
+    field_name = str(name or "").strip()
+    if not field_name or field_name not in public_names | internal_names:
+        raise ValueError(
+            f"{contract} references undeclared parameter: "
+            f"{model_spec.name}.{field_name or '<empty>'}"
+        )
+
+
+def _require_public_input_parameter(
+    model_spec: ToolModelSpec,
+    public_names: set[str],
+    name: object,
+    contract: str,
+) -> None:
+    field_name = str(name or "").strip()
+    if not field_name or field_name not in public_names:
+        raise ValueError(
+            f"{contract} references undeclared parameter: {model_spec.name}.{field_name or '<empty>'}"
+        )
+
+
+def _validate_runtime_default(
+    model_spec: ToolModelSpec,
+    name: str,
+    value: Any,
+) -> None:
+    from .input_schema import validate_tool_input
+
+    schema = model_spec.input_schema
+    probe: dict[str, Any] = {
+        "type": "object",
+        "properties": deepcopy(schema.get("properties") or {}),
+        "required": [name],
+        "additionalProperties": False,
+    }
+    for definitions_key in ("$defs", "definitions"):
+        definitions = schema.get(definitions_key)
+        if isinstance(definitions, dict):
+            probe[definitions_key] = deepcopy(definitions)
+    validation = validate_tool_input({name: value}, probe)
+    if not validation.ok:
+        issues = ",".join(f"{issue.path}:{issue.keyword}" for issue in validation.issues[:4])
+        raise ValueError(f"safe default violates schema: {model_spec.name}.{name}: {issues}")
+
+
+def _validate_trusted_source_ref(tool_name: str, source_ref: object) -> None:
+    text = str(source_ref or "").strip()
+    parts = text.split(".")
+    if (
+        len(parts) < 2
+        or parts[0] not in {"registry", "run_scope", "write_boundary"}
+        or any(not part or not part.replace("_", "").isalnum() for part in parts)
+    ):
+        raise ValueError(f"invalid trusted source_ref: {tool_name}: {text or '<empty>'}")
+
+
 # LLM: 该快照是一次 Agent run 的工具事实面；Schema、目录、搜索与最终调用只能在它上面继续做减法。
 # 类用途: 固定一次请求开始时已授权且已就绪的工具集合，并保留授权范围内不可用工具的结构化原因。
 @dataclass(frozen=True)
 class ToolRuntimeSnapshot:
-    specs: tuple[ToolSpec, ...]
+    run_id: str
+    runtimes: tuple[ToolRuntime, ...]
     available_tool_names: frozenset[str]
     unavailable_tools: tuple[tuple[str, str, str], ...]
     allowed_tools: frozenset[str] | None
     owner_type: str = "main_agent"
+    snapshot_hash: str = ""
+
+    def __post_init__(self) -> None:
+        names = [runtime.model_spec.name for runtime in self.runtimes]
+        if len(names) != len(set(names)):
+            raise ValueError("tool runtime snapshot contains duplicate names")
+        expected_available = frozenset(names)
+        if self.available_tool_names != expected_available:
+            raise ValueError("tool runtime snapshot available names do not match runtimes")
+        unavailable_names = [str(item[0] or "").strip() for item in self.unavailable_tools]
+        if len(unavailable_names) != len(set(unavailable_names)):
+            raise ValueError("tool runtime snapshot contains duplicate unavailable names")
+        if expected_available.intersection(unavailable_names):
+            raise ValueError("tool runtime cannot be both available and unavailable")
+        for runtime in self.runtimes:
+            runtime.model_spec.assert_schema_hash()
+        digest = _tool_runtime_snapshot_hash(self.run_id, self.runtimes, self.owner_type)
+        supplied = str(self.snapshot_hash or "").strip()
+        if supplied and supplied != digest:
+            raise ValueError("tool runtime snapshot hash mismatch")
+        object.__setattr__(self, "snapshot_hash", digest)
+
+    @property
+    def specs(self) -> tuple[ToolModelSpec, ...]:
+        """Derived model specs; the runtime bindings remain the authority."""
+
+        for runtime in self.runtimes:
+            runtime.model_spec.assert_schema_hash()
+        return tuple(runtime.model_spec for runtime in self.runtimes)
+
+    def runtime(self, name: str) -> ToolRuntime | None:
+        runtime = next(
+            (
+                runtime
+                for runtime in self.runtimes
+                if runtime.model_spec.name == str(name or "").strip()
+            ),
+            None,
+        )
+        if runtime is not None:
+            runtime.model_spec.assert_schema_hash()
+        return runtime
+
+
+def _tool_runtime_snapshot_hash(
+    run_id: str,
+    runtimes: tuple[ToolRuntime, ...],
+    owner_type: str,
+) -> str:
+    payload = {
+        "run_id": str(run_id or ""),
+        "owner_type": str(owner_type or ""),
+        "tools": [
+            {
+                "name": runtime.model_spec.name,
+                "schema_hash": runtime.model_spec.schema_hash,
+                "available": runtime.availability.available,
+                "model_visible": runtime.exposure.model_visible,
+            }
+            for runtime in runtimes
+        ],
+    }
+    return (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+    )
 
 
 # LLM: 工具实现拿到的是不可变调用上下文；目录工具不能再从进程全局注册表猜测本轮权限。
@@ -433,50 +950,27 @@ class ToolRuntimeSnapshot:
 @dataclass(frozen=True)
 class ToolInvocationContext:
     runtime_snapshot: ToolRuntimeSnapshot
-
-
-def _error_code_from_output(output: str) -> str:
-    """工具失败时若没显式传 error_code，从其 JSON output 里兜底提取一个。
-
-    许多工具把含 error_code 的错误 payload json.dumps 进 output 字符串，却忘了
-    同时传 error_code= 给构造函数，导致 __post_init__ 兜底成 UNKNOWN_ERROR
-    （retryable=False）误导模型放弃。这里通用地把它捞回来——error_contract 对
-    返回值做大小写归一化，所以 reader 的小写语义码（如 artifact_not_registered）
-    也能命中其已注册的大写契约。提取不到合法 dict.error_code 时返回 ""，保持原有
-    UNKNOWN_ERROR 兜底，未注册的码也会被 error_contract 自然回落到 UNKNOWN_ERROR。
-    """
-    if not output:
-        return ""
-    try:
-        payload = json.loads(output)
-    except (json.JSONDecodeError, TypeError, ValueError):
-        return ""
-    if isinstance(payload, dict):
-        return str(payload.get("error_code") or "").strip()
-    return ""
+    cancellation_token: object | None = None
 
 
 @dataclass
 class ToolSearchHit:
-
     name: str
     score: float
     reasons: list[str]
 
 
 class BaseToolSearchProvider:
-
     name = "base"
 
-    def search(self, query: str, specs: list[ToolSpec], limit: int) -> list[ToolSearchHit]:
+    def search(self, query: str, specs: list[ToolModelSpec], limit: int) -> list[ToolSearchHit]:
         raise NotImplementedError
 
 
 class KeywordToolSearchProvider(BaseToolSearchProvider):
-
     name = "keyword"
 
-    def search(self, query: str, specs: list[ToolSpec], limit: int) -> list[ToolSearchHit]:
+    def search(self, query: str, specs: list[ToolModelSpec], limit: int) -> list[ToolSearchHit]:
         tokens = _tokenize(query)
         hits: list[ToolSearchHit] = []
         for spec in specs:
@@ -488,7 +982,6 @@ class KeywordToolSearchProvider(BaseToolSearchProvider):
 
 
 class VectorToolSearchProvider(BaseToolSearchProvider):
-
     name = "vector"
 
     def __init__(
@@ -505,7 +998,7 @@ class VectorToolSearchProvider(BaseToolSearchProvider):
         self._document_vectors: list[list[float]] = []
         self.last_error = ""
 
-    def search(self, query: str, specs: list[ToolSpec], limit: int) -> list[ToolSearchHit]:
+    def search(self, query: str, specs: list[ToolModelSpec], limit: int) -> list[ToolSearchHit]:
         if not self.enabled or self.embedder is None or not query.strip() or not specs:
             return []
         documents = tuple(_tool_semantic_document(spec) for spec in specs)
@@ -522,7 +1015,7 @@ class VectorToolSearchProvider(BaseToolSearchProvider):
     def _semantic_search(
         self,
         query: str,
-        specs: list[ToolSpec],
+        specs: list[ToolModelSpec],
         documents: tuple[str, ...],
     ) -> list[ToolSearchHit]:
         self._ensure_document_vectors(documents)
@@ -558,11 +1051,10 @@ class VectorToolSearchProvider(BaseToolSearchProvider):
 
 
 class HybridToolRetriever:
-
     def __init__(self, providers: list[BaseToolSearchProvider]):
         self.providers = providers
 
-    def search(self, query: str, specs: list[ToolSpec], limit: int) -> list[ToolSearchHit]:
+    def search(self, query: str, specs: list[ToolModelSpec], limit: int) -> list[ToolSearchHit]:
         merged: dict[str, ToolSearchHit] = {}
         for provider in self.providers:
             for hit in provider.search(query, specs, limit):
@@ -578,24 +1070,24 @@ class HybridToolRetriever:
         return {"mode": "hybrid", "providers": providers}
 
 
-# LLM: 所有工具继续只实现 execute；availability/execute_scoped 是统一窄腰，默认实现保持旧工具零改动。
+# LLM: 普通 handler 实现 execute；Registry 只调用 execute_scoped，默认委托是基类适配而非第二条执行链。
 # 类用途: 定义工具执行、无副作用就绪检查和请求上下文调用三个稳定底层合同。
 class BaseTool:
-
-    spec: ToolSpec
+    model_spec: ToolModelSpec
+    runtime_policy: ToolRuntimePolicy
 
     # LLM: 默认就绪避免为几十个纯本地工具写空检查；可选后端工具按结构化配置覆盖。
     # 函数用途: 返回不触发网络、进程或业务写入的当前就绪状态。
     def availability(self) -> ToolAvailability:
         return ToolAvailability.ready()
 
-    # LLM: 只有需要请求范围的工具覆盖本方法；其余工具仍走既有 execute，避免双执行链。
+    # LLM: 只有需要请求快照的工具覆盖本方法；其余 handler 由这个唯一受权入口委托 execute。
     # 函数用途: 在统一调用入口传递请求快照，同时向后兼容现有工具实现。
     def execute_scoped(
         self,
         params: dict[str, Any],
         context: ToolInvocationContext,
-    ) -> ToolExecutionResult:
+    ) -> ToolHandlerOutcome:
         _ = context
         return self.execute(params)
 
@@ -615,30 +1107,14 @@ class BaseTool:
         _ = (params, context)
         return ToolOperationReconciliation()
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         raise NotImplementedError
-
-
-def _tool_traits(spec: ToolSpec) -> str:
-    parts: list[str] = []
-    if spec.effect:
-        parts.append(f"effect={spec.effect}")
-    if spec.default_mode:
-        parts.append(f"default={spec.default_mode}")
-    if spec.idempotency_scope:
-        parts.append(f"idempotency={spec.idempotency_scope}")
-    if spec.requires_approval:
-        parts.append("approval")
-    if spec.timeout_seconds:
-        parts.append(f"timeout={spec.timeout_seconds}s")
-    return "；".join(parts)
 
 
 def _truncate_rendered_tool_entry(text: str, *, max_chars: int, label: str) -> str:
     if max_chars <= 0 or len(text) <= max_chars:
         return text
     return text[:max_chars].rstrip() + f"\n  ... 已按 {label} 截断"
-
 
 
 def _tokenize(text: str) -> list[str]:
@@ -659,7 +1135,7 @@ def _tokenize(text: str) -> list[str]:
     return unique
 
 
-def _score_keyword_spec(spec: ToolSpec, tokens: list[str]) -> tuple[float, list[str]]:
+def _score_keyword_spec(spec: ToolModelSpec, tokens: list[str]) -> tuple[float, list[str]]:
     haystacks = _keyword_haystacks(spec)
     score = 0.0
     reasons: list[str] = []
@@ -695,7 +1171,7 @@ def _append_unique_reasons(target: list[str], reasons: list[str]) -> None:
     del target[4:]
 
 
-def _keyword_haystacks(spec: ToolSpec) -> dict[str, str]:
+def _keyword_haystacks(spec: ToolModelSpec) -> dict[str, str]:
     return {
         "name": spec.name.lower(),
         "description": spec.description.lower(),
@@ -705,7 +1181,7 @@ def _keyword_haystacks(spec: ToolSpec) -> dict[str, str]:
     }
 
 
-def _tool_semantic_document(spec: ToolSpec) -> str:
+def _tool_semantic_document(spec: ToolModelSpec) -> str:
     return "\n".join(
         (
             f"name: {spec.name}",
@@ -719,7 +1195,7 @@ def _tool_semantic_document(spec: ToolSpec) -> str:
 
 
 def _semantic_tool_hits(
-    specs: list[ToolSpec],
+    specs: list[ToolModelSpec],
     query_vector: list[float],
     document_vectors: list[list[float]],
     *,

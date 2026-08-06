@@ -563,9 +563,7 @@ def _register_named_system_task(
     if work_kind not in {"audit"} or not work_name:
         return
     if attributes.get(CONVERSATION_AUDIT_PREPARE_ATTR) is not True:
-        raise SystemCommandRoutingError(
-            "Audit 启动必须在控制入口处理，不能进入模型执行队列"
-        )
+        raise SystemCommandRoutingError("Audit 启动必须在控制入口处理，不能进入模型执行队列")
     store = getattr(context.agent, "conversation_store", None)
     if store is None or not conversation.thread_id:
         raise ConversationPersistenceError("命名任务当前无法登记，请稍后重试")
@@ -1023,8 +1021,7 @@ def _is_scoped_audit_prepare(work_scope: object) -> bool:
     scope = work_scope if isinstance(work_scope, dict) else {}
     return (
         scope.get(CONVERSATION_AUDIT_PREPARE_ATTR) is True
-        and str(scope.get(CONVERSATION_WORK_KIND_ATTR) or "").strip().lower()
-        == "audit"
+        and str(scope.get(CONVERSATION_WORK_KIND_ATTR) or "").strip().lower() == "audit"
         and bool(str(scope.get(CONVERSATION_WORK_NAME_ATTR) or "").strip())
     )
 
@@ -1647,39 +1644,11 @@ def _conversation_prompt_section(
                 conversation.compact_summary,
             ]
         )
-    if conversation.compact_operation_evidence and not scoped_audit_prepare:
-        prompt_evidence = _prompt_operation_evidence(conversation.compact_operation_evidence)
-        lines.extend(
-            [
-                "## Program-Verified Operations From Compacted History",
-                "- 下面 JSON 是完整程序账本的有界投影，不是模型摘要或聊天自述。",
-                "- 凡涉及是否真正保存、修改、发送、创建或删除，若与上方摘要冲突，必须以此 JSON 为准。",
-                (
-                    f"- full_operation_evidence_ref: {conversation.compact_operation_evidence_ref}"
-                    if conversation.compact_operation_evidence_ref
-                    else "- full_operation_evidence_ref: unavailable"
-                ),
-                json.dumps(
-                    prompt_evidence,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
-            ]
-        )
-    if conversation.recent_operation_evidence and not scoped_audit_prepare:
-        lines.extend(
-            [
-                "## Program-Verified Operations From Recent Raw History",
-                "- 下面 JSON 是尚未压缩的近期 assistant metadata 的有界投影，与上面的 compact 证据同为程序事实。",
-                json.dumps(
-                    _prompt_operation_evidence(conversation.recent_operation_evidence),
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
-            ]
-        )
+    _append_conversation_operation_evidence(
+        lines,
+        conversation,
+        scoped_audit_prepare=scoped_audit_prepare,
+    )
     if conversation.history:
         lines.extend(
             [
@@ -1720,6 +1689,49 @@ def _conversation_prompt_section(
     if conversation.load_errors:
         lines.append(f"- conversation_context_load_errors: {len(conversation.load_errors)}")
     return "\n".join(lines)
+
+
+def _append_conversation_operation_evidence(
+    lines: list[str],
+    conversation: _GatewayConversationContext,
+    *,
+    scoped_audit_prepare: bool,
+) -> None:
+    if scoped_audit_prepare:
+        return
+    if conversation.compact_operation_evidence:
+        prompt_evidence = _prompt_operation_evidence(conversation.compact_operation_evidence)
+        lines.extend(
+            [
+                "## Program-Verified Operations From Compacted History",
+                "- 下面 JSON 是完整程序账本的有界投影，不是模型摘要或聊天自述。",
+                "- 凡涉及是否真正保存、修改、发送、创建或删除，若与上方摘要冲突，必须以此 JSON 为准。",
+                (
+                    f"- full_operation_evidence_ref: {conversation.compact_operation_evidence_ref}"
+                    if conversation.compact_operation_evidence_ref
+                    else "- full_operation_evidence_ref: unavailable"
+                ),
+                json.dumps(
+                    prompt_evidence,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            ]
+        )
+    if conversation.recent_operation_evidence:
+        lines.extend(
+            [
+                "## Program-Verified Operations From Recent Raw History",
+                "- 下面 JSON 是尚未压缩的近期 assistant metadata 的有界投影，与上面的 compact 证据同为程序事实。",
+                json.dumps(
+                    _prompt_operation_evidence(conversation.recent_operation_evidence),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            ]
+        )
 
 
 # LLM: Aggregate counts remain complete while only the newest detailed events stay hot. Full

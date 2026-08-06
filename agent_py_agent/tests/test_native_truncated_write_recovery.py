@@ -41,6 +41,11 @@ from agent_py_agent.agent.tooling.content_recovery_mode import (
     LongContentRecoveryRequest,
     long_content_recovery_context,
 )
+from agent_py_agent.tests._tool_runtime_harness import (
+    make_test_model_spec,
+    make_test_protocol_snapshot,
+    runtime_snapshot_for_model_specs,
+)
 
 # --------------------------------------------------------------------------- #
 # SSE 夹具:长 content 的 write_file tool_use 被 max_tokens 截断(半截 input_json)。
@@ -166,35 +171,33 @@ def test_stream_completion_truncated_property():
 
 
 def _decision_agent(root: Path, guardrail_records: tuple = ()) -> SimpleNamespace:
-    write_spec = SimpleNamespace(required_parameters=["path", "content"])
-    registry = SimpleNamespace(tools={"write_file": SimpleNamespace(spec=write_spec)}, workspace_root=root)
-
-    class _Tools:
-        workspace_root = root
-
-        def __init__(self) -> None:
-            self.parsed_texts: list[str] = []
-
-        def parse_tool_calls(self, text: str):
-            self.parsed_texts.append(text)
-            return []
-
     config = SimpleNamespace(
-        enable_tools=True, tool_protocol="native", model_name="MiniMax-M2.7", tool_protocol_text_models=[]
+        enable_tools=True,
+        tool_protocol="native",
+        model_name="MiniMax-M2.7",
     )
     agent = SimpleNamespace(
         backend=SimpleNamespace(name="anthropic_compatible"),
         config=config,
         root=root,
-        tools=_Tools(),
     )
     agent._tool_call_guardrail_records = guardrail_records
-    # 给 spec 查询用的真实 registry(_tool_has_required_parameters 走 agent.tools.tools)。
-    agent.tools.tools = registry.tools  # type: ignore[attr-defined]
     return agent
 
 
 def _params() -> ToolLoopExecuteParams:
+    write_spec = make_test_model_spec(
+        "write_file",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "content": {"type": "string"},
+            },
+            "required": ["path", "content"],
+            "additionalProperties": False,
+        },
+    )
     return ToolLoopExecuteParams(
         user_prompt="写长报告",
         memories=[],
@@ -214,6 +217,14 @@ def _params() -> ToolLoopExecuteParams:
         executed_tools=[],
         archive_tool_calls=[],
         delivery_contract={},
+        tool_runtime_snapshot=runtime_snapshot_for_model_specs(
+            (write_spec,),
+            run_id="run-1",
+        ),
+        tool_protocol_snapshot=make_test_protocol_snapshot(
+            run_id="run-1",
+            source_protocol="native",
+        ),
     )
 
 
@@ -250,8 +261,7 @@ def test_truncated_empty_write_activates_recovery_continue(tmp_path: Path):
     assert decision.action == "continue", "首次截断空参 write → 激活恢复并 continue(不死循环)"
     joined = "\n".join(params.tool_context)
     assert "截断" in joined and "分" in joined, "恢复指令必须提示分块写"
-    # 没退回文本解析(native 路径)。
-    assert agent.tools.parsed_texts == []
+    assert decision.calls == []
 
 
 def test_truncated_empty_write_breaks_after_limit(tmp_path: Path):
@@ -293,7 +303,8 @@ def test_complete_write_with_truncated_flag_not_hijacked(tmp_path: Path):
     )
     decision = _decide(agent, response, params)
     assert decision.action == "run_tools"
-    assert decision.calls[0]["path"] == "a.md"
+    assert decision.calls[0].arguments["path"] == "a.md"
+    assert decision.calls[0].source_protocol == "native"
 
 
 # --------------------------------------------------------------------------- #

@@ -14,14 +14,22 @@ from ..subagents.services.hierarchy.scheduler import (
     HierarchyScheduleRequest,
     HierarchyScheduleResult,
 )
-from ..tooling.models import BaseTool, ToolExecutionResult
+from ..tooling.models import (
+    BaseTool,
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    ResourceScopePolicy,
+    ToolHandlerOutcome,
+    ToolInputPolicy,
+    ToolRuntimePolicy,
+)
 from .orchestration.create_context import create_context_manifest, create_context_packs
 from .orchestration.dispatch.state_contract import dispatch_state_contract_payload
 from .orchestration.lifecycle import (
     CreatedSubagentLifecycleRequest,
     publish_created_subagents,
 )
-from .orchestration.tool_specs import build_schedule_child_subagents_spec
+from .orchestration.tool_specs import build_schedule_child_subagents_model_spec
 from .orchestration.write_guard import ExternalWriteTargetRequest, external_write_target_error
 from .parameters import _bool_param, _non_negative_int
 from .runner.context import current_subagent_run_id
@@ -48,18 +56,27 @@ class ScheduleLifecyclePayload:
 
 
 class ScheduleChildSubagentsTool(BaseTool):
+    model_spec = build_schedule_child_subagents_model_spec()
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy(
+            "mutating",
+            by_parameter=(("dry_run", (("true", "read_only"), ("false", "mutating"))),),
+        ),
+        idempotency_policy=IdempotencyPolicy("operation"),
+        resource_scopes=ResourceScopePolicy(parameter_names=("children",)),
+        input_policy=ToolInputPolicy(internal_parameters=("apply", "extra_write_roots")),
+    )
 
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
-        self.spec = build_schedule_child_subagents_spec()
 
-    def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         params = _schedule_tool_params(params)
         parent_run_id = current_subagent_run_id(self.agent)
         if not parent_run_id:
             return _schedule_error("缺少当前 subagent runner 上下文；顶层派工请使用 create_subagents。")
         child_specs = _hierarchy_child_specs(params)
-        if isinstance(child_specs, ToolExecutionResult):
+        if isinstance(child_specs, ToolHandlerOutcome):
             return child_specs
         bulk_error = _bulk_schedule_error(child_specs)
         if bulk_error:
@@ -76,7 +93,7 @@ class ScheduleChildSubagentsTool(BaseTool):
         except (IndexError, TypeError, ValueError) as exc:
             return _schedule_error(_schedule_validation_error_message(exc))
         lifecycle = _schedule_lifecycle(self.agent, result, params)
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             "schedule_child_subagents",
             True,
             _schedule_payload_json(
@@ -91,8 +108,8 @@ class ScheduleChildSubagentsTool(BaseTool):
         )
 
 
-def _schedule_error(message: str, code: str = "TOOL_INVALID_ARGUMENTS") -> ToolExecutionResult:
-    return ToolExecutionResult("schedule_child_subagents", False, message, error_code=code)
+def _schedule_error(message: str, code: str = "TOOL_INVALID_ARGUMENTS") -> ToolHandlerOutcome:
+    return ToolHandlerOutcome("schedule_child_subagents", False, message, error_code=code)
 
 
 def _schedule_validation_error_message(exc: Exception) -> str:
@@ -217,7 +234,7 @@ def _schedule_item_payload(item) -> dict[str, object]:
     }
 
 
-def _hierarchy_child_specs(params: dict[str, object]) -> list[HierarchyChildSpec] | ToolExecutionResult:
+def _hierarchy_child_specs(params: dict[str, object]) -> list[HierarchyChildSpec] | ToolHandlerOutcome:
     if "child_specs" in params:
         return _schedule_error("schedule_child_subagents 只接受 children；请移除 child_specs。")
     raw_children = params.get("children")
@@ -229,7 +246,7 @@ def _hierarchy_child_specs(params: dict[str, object]) -> list[HierarchyChildSpec
     specs: list[HierarchyChildSpec] = []
     for raw in children:
         spec = _hierarchy_child_spec(raw)
-        if isinstance(spec, ToolExecutionResult):
+        if isinstance(spec, ToolHandlerOutcome):
             return spec
         specs.append(spec)
     return specs
@@ -246,7 +263,7 @@ def _bulk_schedule_error(child_specs: list[HierarchyChildSpec]) -> str:
     )
 
 
-def _hierarchy_child_spec(raw: object) -> HierarchyChildSpec | ToolExecutionResult:
+def _hierarchy_child_spec(raw: object) -> HierarchyChildSpec | ToolHandlerOutcome:
     if not isinstance(raw, dict):
         return _schedule_error("children 每一项必须是对象。")
     goal = str(raw.get("goal") or "").strip()

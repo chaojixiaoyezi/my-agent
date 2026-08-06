@@ -1,8 +1,11 @@
 from pathlib import Path
 from types import SimpleNamespace
 
-from agent_py_agent.agent.action_protocol import RunScope, ToolCallEnvelope
-from agent_py_agent.agent.tooling.models import ToolExecutionResult
+from agent_py_agent.agent.tooling.runtime_contracts import (
+    ToolCall,
+    ToolResult,
+    ToolSuccessFacts,
+)
 from agent_py_agent.agent.verification.repository import (
     VerificationContext,
     VerificationEvidenceRepository,
@@ -39,34 +42,41 @@ def _agent(tmp_path: Path, *, owner: str = "owner-a") -> tuple[SimpleNamespace, 
     return agent, project, owner_home
 
 
-def _envelope(tool: str, payload: dict[str, object]) -> ToolCallEnvelope:
-    return ToolCallEnvelope(
+def _call(tool: str, arguments: dict[str, object]) -> ToolCall:
+    return ToolCall(
         call_id="call-1",
-        source="model_tool_call",
         tool_name=tool,
-        input=payload,
-        scope=RunScope(task_id="child-task", root_task_id="root-task", run_id="child-run"),
+        arguments=arguments,
+        source_protocol="native",
+        schema_hash="sha256:" + "0" * 64,
+        run_id="child-run",
+        turn_id="turn-1",
+        attempt_id="attempt-1",
+    )
+
+
+def _success(call: ToolCall, output: str, handler_metadata: dict[str, object]) -> ToolResult:
+    return ToolResult.succeeded(
+        call,
+        output,
+        facts=ToolSuccessFacts(metadata={"handler_details": handler_metadata}),
     )
 
 
 def test_runtime_records_child_test_under_structured_root_task(tmp_path: Path):
     agent, project, owner_home = _agent(tmp_path)
-    result = ToolExecutionResult(
-        "run_command",
-        True,
+    call = _call("run_command", {"command": "pytest -q", "working_dir": str(project)})
+    result = _success(
+        call,
         "24 passed",
-        result_envelope={
+        {
             "process": {"status": "exited", "return_code": 0, "command_succeeded": True},
         },
     )
 
-    record_tool_verification(
-        agent,
-        _envelope("run_command", {"command": "pytest -q", "working_dir": str(project)}),
-        result,
-    )
+    result = record_tool_verification(agent, call, result)
 
-    fact = result.result_envelope["verification_evidence"]
+    fact = result.metadata["verification_evidence"]
     repository = VerificationEvidenceRepository(owner_home)
     context = VerificationContext("providers/feishu/users/owner-a", "thread-1", "root-task")
     assert (fact["status"], fact["scope"]) == ("passed", "full")
@@ -75,61 +85,51 @@ def test_runtime_records_child_test_under_structured_root_task(tmp_path: Path):
 
 def test_successful_file_write_makes_same_root_task_evidence_stale(tmp_path: Path):
     agent, project, owner_home = _agent(tmp_path)
-    test_result = ToolExecutionResult(
-        "run_command",
-        True,
+    test_call = _call("run_command", {"command": "pytest", "working_dir": str(project)})
+    test_result = _success(
+        test_call,
         "24 passed",
-        result_envelope={"process": {"status": "exited", "return_code": 0}},
+        {"process": {"status": "exited", "return_code": 0}},
     )
-    record_tool_verification(
-        agent,
-        _envelope("run_command", {"command": "pytest", "working_dir": str(project)}),
-        test_result,
-    )
+    test_result = record_tool_verification(agent, test_call, test_result)
     changed = project / "app.py"
     changed.write_text("print('changed')\n", encoding="utf-8")
-    write_result = ToolExecutionResult(
-        "edit_file",
-        True,
+    write_call = _call("edit_file", {"path": str(changed)})
+    write_result = _success(
+        write_call,
         "edited",
-        result_envelope={"path": str(changed), "target_path": str(changed)},
+        {"path": str(changed), "target_path": str(changed)},
     )
 
-    record_tool_verification(
-        agent,
-        _envelope("edit_file", {"path": str(changed)}),
-        write_result,
-    )
+    write_result = record_tool_verification(agent, write_call, write_result)
 
     repository = VerificationEvidenceRepository(owner_home)
     context = VerificationContext("providers/feishu/users/owner-a", "thread-1", "root-task")
-    assert write_result.result_envelope["verification_state"][0]["status"] == "stale"
+    assert write_result.metadata["verification_state"][0]["status"] == "stale"
     assert repository.status(context, root=project)["status"] == "stale"
 
 
 def test_failed_write_and_arbitrary_command_do_not_change_evidence(tmp_path: Path):
     agent, project, owner_home = _agent(tmp_path)
-    arbitrary = ToolExecutionResult(
-        "run_command",
-        True,
+    arbitrary_call = _call("run_command", {"command": "echo hello", "working_dir": str(project)})
+    arbitrary = _success(
+        arbitrary_call,
         "hello",
-        result_envelope={"process": {"status": "exited", "return_code": 0}},
+        {"process": {"status": "exited", "return_code": 0}},
     )
-    failed_write = ToolExecutionResult("edit_file", False, "missing", error_code="PATH_NOT_FOUND")
+    failed_call = _call("edit_file", {"path": str(project / "missing.py")})
+    failed_write = ToolResult.failed(
+        failed_call,
+        "missing",
+        error_code="PATH_NOT_FOUND",
+        failure_stage="execution",
+    )
 
-    record_tool_verification(
-        agent,
-        _envelope("run_command", {"command": "echo hello", "working_dir": str(project)}),
-        arbitrary,
-    )
-    record_tool_verification(
-        agent,
-        _envelope("edit_file", {"path": str(project / "missing.py")}),
-        failed_write,
-    )
+    arbitrary = record_tool_verification(agent, arbitrary_call, arbitrary)
+    failed_write = record_tool_verification(agent, failed_call, failed_write)
 
     repository = VerificationEvidenceRepository(owner_home)
     context = VerificationContext("providers/feishu/users/owner-a", "thread-1", "root-task")
-    assert "verification_evidence" not in arbitrary.result_envelope
-    assert "verification_state" not in failed_write.result_envelope
+    assert "verification_evidence" not in arbitrary.metadata
+    assert "verification_state" not in failed_write.metadata
     assert repository.status(context, root=project)["status"] == "unverified"

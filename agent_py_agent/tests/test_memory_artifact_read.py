@@ -17,6 +17,45 @@ from agent_py_agent.agent.memory_archive.tool_output_externalizer import (
 )
 from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
 from agent_py_agent.cli.parser import build_parser
+from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
+
+
+def _execute_tool(
+    registry: ToolRegistry,
+    tool_name: str,
+    arguments: dict[str, object],
+    *,
+    allowed_tools: list[str] | None = None,
+    write_boundary: dict[str, object] | None = None,
+):
+    proposed = dict(arguments)
+    run_id = str(proposed.pop("run_id", "run-artifact"))
+    task_id = str(proposed.pop("task_id", ""))
+    request_id = str(proposed.pop("request_id", ""))
+    run_scope = {"run_id": run_id}
+    if task_id:
+        run_scope["task_id"] = task_id
+    if request_id:
+        run_scope["request_id"] = request_id
+    return execute_registry_test_call(
+        registry,
+        tool_name,
+        proposed,
+        allowed_tools=allowed_tools,
+        write_boundary=write_boundary,
+        run_id=run_id,
+        trusted_run_context={"run_scope": run_scope},
+    )
+
+
+def _result_json(result) -> dict[str, object]:
+    text = result.output
+    start = text.find("{")
+    end = text.rfind("\n</untrusted_tool_result>")
+    payload = text[start:end] if start >= 0 and end > start else text
+    parsed = json.loads(payload)
+    assert isinstance(parsed, dict)
+    return parsed
 
 
 def test_memory_artifact_read_cli_reads_registered_tool_output_artifact(tmp_path: Path, capsys) -> None:
@@ -81,13 +120,12 @@ def test_read_artifact_tool_reads_explicit_slice_from_registered_artifact(tmp_pa
         )
     )
 
-    result = registry.execute_call({
-        "tool": "read_artifact",
-        "artifact_ref": str(artifact_path),
-        "offset": 2,
-        "max_chars": 5,
-    })
-    payload = json.loads(result.output)
+    result = _execute_tool(
+        registry,
+        "read_artifact",
+        {"artifact_ref": str(artifact_path), "offset": 2, "max_chars": 5},
+    )
+    payload = _result_json(result)
 
     assert result.ok is True
     assert payload["ok"] is True
@@ -108,9 +146,10 @@ def test_read_artifact_keeps_recovered_body_inside_data_boundary(tmp_path: Path)
     artifact_path = _write_externalized_tool_output(tmp_path, content=content)
     registry = _registry(tmp_path)
 
-    result = registry.execute_call(
+    result = _execute_tool(
+        registry,
+        "read_artifact",
         {
-            "tool": "read_artifact",
             "artifact_ref": str(artifact_path),
             "max_chars": 0,
         }
@@ -118,8 +157,9 @@ def test_read_artifact_keeps_recovered_body_inside_data_boundary(tmp_path: Path)
     rendered = render_tool_result_for_live_prompt(result, {})
 
     assert result.ok is True
-    assert fake_key in result.output
-    assert result.result_envelope["tool_output_policy"]["trust"] == "external_data"
+    assert fake_key not in result.output
+    assert "api_key=<redacted>" in result.output
+    assert result.output_trust == "external_data"
     assert '<untrusted_tool_result source="read_artifact">' in rendered
     assert "untrusted-tool-result" in rendered
     assert fake_key not in rendered
@@ -142,15 +182,14 @@ def test_read_artifact_tool_requires_artifact_ref_parameter(tmp_path: Path) -> N
         )
     )
 
-    result = registry.execute_call({
-        "tool": "read_artifact",
-        "path": str(artifact_path),
-        "offset": 2,
-        "max_chars": 5,
-    })
+    result = _execute_tool(
+        registry,
+        "read_artifact",
+        {"path": str(artifact_path), "offset": 2, "max_chars": 5},
+    )
 
     assert result.ok is False
-    assert "artifact_ref" in result.output
+    assert result.error_code == "TOOL_PARAMETER_REQUIRED"
 
 
 def test_read_artifact_supports_head_tail_and_search_modes(tmp_path: Path) -> None:
@@ -193,24 +232,21 @@ def test_read_artifact_tool_enforces_per_run_artifact_read_budget(tmp_path: Path
         )
     )
 
-    first = registry.execute_call({
-        "tool": "read_artifact",
-        "artifact_ref": str(artifact_path),
-        "run_id": "reader-a",
-        "max_chars": 8,
-    })
-    second = registry.execute_call({
-        "tool": "read_artifact",
-        "artifact_ref": str(artifact_path),
-        "run_id": "reader-a",
-        "max_chars": 8,
-    })
-    sibling = registry.execute_call({
-        "tool": "read_artifact",
-        "artifact_ref": str(artifact_path),
-        "run_id": "reader-b",
-        "max_chars": 8,
-    })
+    first = _execute_tool(
+        registry,
+        "read_artifact",
+        {"artifact_ref": str(artifact_path), "run_id": "reader-a", "max_chars": 8},
+    )
+    second = _execute_tool(
+        registry,
+        "read_artifact",
+        {"artifact_ref": str(artifact_path), "run_id": "reader-a", "max_chars": 8},
+    )
+    sibling = _execute_tool(
+        registry,
+        "read_artifact",
+        {"artifact_ref": str(artifact_path), "run_id": "reader-b", "max_chars": 8},
+    )
 
     assert first.ok is True
     assert second.ok is False
@@ -237,12 +273,11 @@ def test_read_artifact_budget_blocks_unbounded_large_read_from_index(tmp_path: P
         )
     )
 
-    result = registry.execute_call({
-        "tool": "read_artifact",
-        "artifact_ref": str(artifact_path),
-        "run_id": "reader-a",
-        "max_chars": 0,
-    })
+    result = _execute_tool(
+        registry,
+        "read_artifact",
+        {"artifact_ref": str(artifact_path), "run_id": "reader-a", "max_chars": 0},
+    )
 
     assert result.ok is False
     assert "artifact 读取预算" in result.output
@@ -265,13 +300,16 @@ def test_read_artifact_tool_repairs_wrong_prefix_with_unique_artifact_name(tmp_p
         )
     )
 
-    result = registry.execute_call({
-        "tool": "read_artifact",
-        "artifact_ref": f"/wrong/workspace/blobs/tool_outputs/{artifact_path.name}",
-        "offset": 0,
-        "max_chars": 6,
-    })
-    payload = json.loads(result.output)
+    result = _execute_tool(
+        registry,
+        "read_artifact",
+        {
+            "artifact_ref": f"/wrong/workspace/blobs/tool_outputs/{artifact_path.name}",
+            "offset": 0,
+            "max_chars": 6,
+        },
+    )
+    payload = _result_json(result)
 
     assert result.ok is True
     assert payload["ok"] is True
@@ -294,14 +332,12 @@ def test_read_artifact_short_call_id_prefers_matching_run_scope(tmp_path: Path) 
     )
     registry = _registry(tmp_path)
 
-    result = registry.execute_call({
-        "tool": "read_artifact",
-        "artifact_ref": "17-1",
-        "run_id": "old-run",
-        "offset": 0,
-        "max_chars": 0,
-    })
-    payload = json.loads(result.output)
+    result = _execute_tool(
+        registry,
+        "read_artifact",
+        {"artifact_ref": "17-1", "run_id": "old-run", "offset": 0, "max_chars": 0},
+    )
+    payload = _result_json(result)
 
     assert result.ok is True
     assert payload["ok"] is True
@@ -309,7 +345,9 @@ def test_read_artifact_short_call_id_prefers_matching_run_scope(tmp_path: Path) 
     assert payload["run_id"] == "old-run"
 
 
-def test_read_artifact_short_call_id_without_scope_prefers_latest(tmp_path: Path) -> None:
+def test_read_artifact_short_call_id_without_matching_run_scope_is_rejected(
+    tmp_path: Path,
+) -> None:
     _write_externalized_tool_output(
         tmp_path,
         content="older-output",
@@ -324,17 +362,16 @@ def test_read_artifact_short_call_id_without_scope_prefers_latest(tmp_path: Path
     )
     registry = _registry(tmp_path)
 
-    result = registry.execute_call({
-        "tool": "read_artifact",
-        "artifact_ref": "17-1",
-        "offset": 0,
-        "max_chars": 0,
-    })
-    payload = json.loads(result.output)
+    result = _execute_tool(
+        registry,
+        "read_artifact",
+        {"artifact_ref": "17-1", "offset": 0, "max_chars": 0},
+    )
+    payload = _result_json(result)
 
-    assert result.ok is True
-    assert payload["content"] == "latest-output"
-    assert payload["run_id"] == "latest-run"
+    assert result.ok is False
+    assert result.error_code == "ARTIFACT_NOT_REGISTERED"
+    assert payload["reads_artifact_body"] is False
 
 
 def test_read_artifact_preserves_internal_tool_archives_without_path_sanitizer(tmp_path: Path) -> None:
@@ -348,8 +385,12 @@ def test_read_artifact_preserves_internal_tool_archives_without_path_sanitizer(t
     artifact_path.write_text(json.dumps(artifact_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     registry = _registry(tmp_path)
 
-    result = registry.execute_call({"tool": "read_artifact", "artifact_ref": str(artifact_path), "max_chars": 0})
-    payload = json.loads(result.output)
+    result = _execute_tool(
+        registry,
+        "read_artifact",
+        {"artifact_ref": str(artifact_path), "max_chars": 0},
+    )
+    payload = _result_json(result)
 
     assert result.ok is True
     assert payload["content"] == raw_content
@@ -361,8 +402,12 @@ def test_read_artifact_preserves_ordinary_tool_archive_content(tmp_path: Path) -
     artifact_path = _write_externalized_tool_output(tmp_path, content=text)
     registry = _registry(tmp_path)
 
-    result = registry.execute_call({"tool": "read_artifact", "artifact_ref": str(artifact_path), "max_chars": 0})
-    payload = json.loads(result.output)
+    result = _execute_tool(
+        registry,
+        "read_artifact",
+        {"artifact_ref": str(artifact_path), "max_chars": 0},
+    )
+    payload = _result_json(result)
 
     assert result.ok is True
     assert payload["content"] == text
@@ -393,14 +438,14 @@ def test_read_file_reads_tool_output_artifact_content(tmp_path: Path) -> None:
         )
     )
 
-    result = registry.execute_call({"tool": "read_file", "path": str(artifact_path)})
+    result = _execute_tool(registry, "read_file", {"path": str(artifact_path)})
 
     assert result.ok is True
     assert "1: large-output" in result.output
     assert "... 已截断" in result.output
     assert '"kind": "tool_output"' not in result.output
-    assert result.result_envelope["tool_output_policy"]["trust"] == "external_data"
-    assert result.result_envelope["tool_output_policy"]["redaction"] == "default"
+    assert result.output_trust == "external_data"
+    assert result.output_redaction == "default"
 
     rendered = render_tool_result_for_live_prompt(
         result,
@@ -418,8 +463,10 @@ def test_read_file_artifact_wrapper_does_not_require_read_artifact_permission(tm
     artifact_path = _write_externalized_tool_output(tmp_path, content="alpha\nbeta\n" * 20)
     registry = _registry(tmp_path)
 
-    result = registry.execute_call(
-        {"tool": "read_file", "path": str(artifact_path), "start_line": 2, "end_line": 3},
+    result = _execute_tool(
+        registry,
+        "read_file",
+        {"path": str(artifact_path), "start_line": 2, "end_line": 3},
         allowed_tools=["read_file"],
     )
 
@@ -442,11 +489,11 @@ def test_read_file_plain_large_result_archive_keeps_external_projection(
     )
     registry = _registry(tmp_path)
 
-    result = registry.execute_call({"tool": "read_file", "path": str(artifact_path)})
+    result = _execute_tool(registry, "read_file", {"path": str(artifact_path)})
 
     assert result.ok is True
-    assert result.result_envelope["tool_output_policy"]["trust"] == "external_data"
-    assert result.result_envelope["tool_output_policy"]["redaction"] == "default"
+    assert result.output_trust == "external_data"
+    assert result.output_redaction == "default"
     rendered = render_tool_result_for_live_prompt(
         result,
         {"output_externalized": False},
@@ -462,11 +509,11 @@ def test_read_file_ordinary_source_keeps_source_code_projection(tmp_path: Path) 
     source.write_text('api_key = os.getenv("API_KEY")\nVALUE = 7\n', encoding="utf-8")
     registry = _registry(tmp_path)
 
-    result = registry.execute_call({"tool": "read_file", "path": str(source)})
+    result = _execute_tool(registry, "read_file", {"path": str(source)})
 
     assert result.ok is True
-    assert result.result_envelope["tool_output_policy"]["trust"] == "runtime"
-    assert result.result_envelope["tool_output_policy"]["redaction"] == "source_code"
+    assert result.output_trust == "runtime"
+    assert result.output_redaction == "source_code"
     rendered = render_tool_result_for_live_prompt(
         result,
         {"output_externalized": False},
@@ -492,7 +539,7 @@ def test_read_file_typo_to_tool_output_artifact_keeps_read_file_recovery(tmp_pat
     )
     wrong_prefix = f"/wrong/{tmp_path.name}/blobs/tool_outputs/{artifact_path.name}"
 
-    result = registry.execute_call({"tool": "read_file", "path": wrong_prefix})
+    result = _execute_tool(registry, "read_file", {"path": wrong_prefix})
 
     assert result.ok is False
     assert "suspected_path_typo=true" in result.output
@@ -662,9 +709,10 @@ def test_registry_reads_current_subagent_artifact_from_typed_run_root(
     )
     registry = _registry(owner_root)
 
-    result = registry.execute_call(
+    result = _execute_tool(
+        registry,
+        "read_artifact",
         {
-            "tool": "read_artifact",
             "artifact_ref": "stable-subagent:pull-1",
             "run_id": "stable-subagent",
             "max_chars": 0,
@@ -677,7 +725,7 @@ def test_registry_reads_current_subagent_artifact_from_typed_run_root(
             "task_id": "audit-a",
         },
     )
-    payload = json.loads(result.output)
+    payload = _result_json(result)
 
     assert result.ok is True
     assert payload["content"] == "CURRENT-RUN-ARCHIVE"

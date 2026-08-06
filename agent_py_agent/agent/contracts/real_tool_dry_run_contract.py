@@ -12,10 +12,9 @@ from .offline_contract_report import (
 )
 
 TRUSTED_TOOL_EXECUTOR_REFS = {
-    "ToolRegistry.execute_call",
-    "registry.execute_call",
-    "tool_executor.execute",
-    "tool_registry.execute_call",
+    "ToolExecutor.execute",
+    "ToolRegistry.execute_tool",
+    "tool_registry.execute_tool",
 }
 VALID_EFFECTS = {"read_only", "mutating", "dangerous"}
 SIDE_EFFECT_EFFECTS = {"mutating", "dangerous"}

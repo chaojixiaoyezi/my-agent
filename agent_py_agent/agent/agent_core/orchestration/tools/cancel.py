@@ -14,9 +14,16 @@ from ....subagents.model_capabilities import capability_request_requires_parent_
 from ....subagents.models import FailureType, normalize_task_status, task_status_in
 from ....subagents.process_control import terminate_pid_with_escalation
 from ....subagents.runner_session_liveness import has_fresh_runner_session, runner_session_of
-from ....tooling.models import BaseTool, ToolExecutionResult
+from ....tooling.models import (
+    BaseTool,
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    ResourceScopePolicy,
+    ToolHandlerOutcome,
+    ToolRuntimePolicy,
+)
 from ...agent_tree.status import agent_tree_status_payload
-from ..tool_specs import build_cancel_subagents_spec
+from ..tool_specs import build_cancel_subagents_model_spec
 
 if TYPE_CHECKING:
     from ....core import SimpleAgent
@@ -81,18 +88,27 @@ class _StatusFilterResult:
 
 
 class CancelSubagentsTool(BaseTool):
+    model_spec = build_cancel_subagents_model_spec()
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy(
+            "dangerous",
+            by_parameter=(("dry_run", (("true", "read_only"), ("false", "dangerous"))),),
+        ),
+        idempotency_policy=IdempotencyPolicy("operation"),
+        resource_scopes=ResourceScopePolicy(parameter_names=("run_id", "run_ids", "root_id")),
+    )
+
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
-        self.spec = build_cancel_subagents_spec()
 
-    def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         return execute_cancel_subagents(self.agent, params)
 
 
 def execute_cancel_subagents(
     agent: SimpleAgent,
     params: dict[str, object],
-) -> ToolExecutionResult:
+) -> ToolHandlerOutcome:
     """Run canonical cancellation; model calls add Tool Gateway authority around it."""
     run_ids_result = _resolve_run_ids(agent, params)
     if not run_ids_result.ok:
@@ -181,7 +197,7 @@ def _execute_cancel_targets(
     params: dict[str, object],
     run_ids: list[str],
     targets: list[dict[str, object]],
-) -> ToolExecutionResult:
+) -> ToolHandlerOutcome:
     cancelled: list[dict[str, object]] = []
     failed: list[dict[str, object]] = []
     for item in targets:
@@ -230,7 +246,7 @@ def _execute_cancel_targets(
 def _cancel_payload_result(
     agent: SimpleAgent,
     request: _CancelPayloadRequest,
-) -> ToolExecutionResult:
+) -> ToolHandlerOutcome:
     payload = {
         "ok": request.ok,
         "dry_run": request.dry_run,
@@ -244,10 +260,15 @@ def _cancel_payload_result(
             )
         ),
     }
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         "cancel_subagents",
         request.ok,
         json.dumps(payload, ensure_ascii=False, indent=2),
+        effect_outcome=(
+            "not_started"
+            if not request.ok and not request.cancelled
+            else ""
+        ),
     )
 
 
@@ -299,8 +320,14 @@ def _explicit_run_ids(params: dict[str, object]) -> list[str]:
     return [item for item in ids if item]
 
 
-def _cancel_failure(output: str, error_code: str) -> ToolExecutionResult:
-    return ToolExecutionResult("cancel_subagents", False, output, error_code=error_code)
+def _cancel_failure(output: str, error_code: str) -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(
+        "cancel_subagents",
+        False,
+        output,
+        error_code=error_code,
+        effect_outcome="not_started",
+    )
 
 
 def _cancel_error_code(error_payload: dict[str, object]) -> str:

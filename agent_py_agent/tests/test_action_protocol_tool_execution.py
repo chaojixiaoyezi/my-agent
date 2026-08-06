@@ -1,69 +1,42 @@
-from agent_py_agent.agent.action_protocol import RunScope, ToolCallEnvelope
+from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
 from agent_py_agent.tests.test_tools.backends import make_tool_registry
 
 
-def test_tool_registry_executes_typed_tool_call_envelope(tmp_path):
-    (tmp_path / "notes.txt").write_text("hello typed protocol", encoding="utf-8")
+def test_registry_executes_only_canonical_tool_call_path(tmp_path):
+    (tmp_path / "notes.txt").write_text("hello canonical protocol", encoding="utf-8")
     registry = make_tool_registry(tmp_path)
-    envelope = ToolCallEnvelope(
+
+    result = execute_registry_test_call(
+        registry,
+        "read_file",
+        {"path": "notes.txt"},
+        run_id="run-1",
         call_id="call-read-1",
-        source="text_protocol",
-        tool_name="read_file",
-        input={"path": "notes.txt"},
-        scope=RunScope(task_id="task-1", run_id="run-1"),
     )
 
-    result = registry.execute_call(envelope)
-
     assert result.ok is True
-    assert result.tool == "read_file"
+    assert result.tool_name == "read_file"
     assert result.call_id == "call-read-1"
-    assert result.result_envelope["kind"] == "tool_call_result"
-    assert result.result_envelope["call_id"] == "call-read-1"
-    assert result.result_envelope["tool"] == "read_file"
-    assert result.result_envelope["scope"]["run_id"] == "run-1"
-    assert result.result_envelope["tool_protocol_v2"]["schema_version"] == "tool_protocol.v2"
-    assert result.result_envelope["tool_protocol_v2"]["operation_id"] == result.result_envelope["operation_id"]
-    assert result.result_envelope["input_facts"]["field_names"] == ["path"]
-    assert result.result_envelope["input_facts"]["field_types"] == {"path": "str"}
-    assert len(result.result_envelope["input_facts"]["sha256"]) == 64
+    assert len(result.metadata["raw_output_sha256"]) == 64
+    assert result.metadata["action_decision"]["status"] == "allow"
 
 
-def test_tool_registry_result_envelope_preserves_call_operation_id(tmp_path):
-    (tmp_path / "notes.txt").write_text("hello typed protocol", encoding="utf-8")
-    registry = make_tool_registry(tmp_path)
-    envelope = ToolCallEnvelope(
-        call_id="call-read-2",
-        source="text_protocol",
-        tool_name="read_file",
-        input={"path": "notes.txt"},
-        operation_id="op:read_file:stable-123",
-        scope=RunScope(task_id="task-1", run_id="run-1"),
+def test_canonical_result_preserves_handler_structured_metadata(tmp_path):
+    (tmp_path / "notes.txt").write_text(
+        "hello canonical protocol\nsecond line",
+        encoding="utf-8",
     )
-
-    result = registry.execute_call(envelope)
-
-    assert result.ok is True
-    assert result.result_envelope["operation_id"] == "op:read_file:stable-123"
-
-
-def test_tool_registry_result_envelope_preserves_tool_structured_fields(tmp_path):
-    (tmp_path / "notes.txt").write_text("hello typed protocol\nsecond line", encoding="utf-8")
     registry = make_tool_registry(tmp_path)
-    envelope = ToolCallEnvelope(
-        call_id="call-read-structured",
-        source="text_protocol",
-        tool_name="read_file",
-        input={"path": "notes.txt"},
+
+    result = execute_registry_test_call(
+        registry,
+        "read_file",
+        {"path": "notes.txt"},
         operation_id="op:read_file:structured",
-        scope=RunScope(task_id="task-1", run_id="run-1"),
     )
 
-    result = registry.execute_call(envelope)
-
     assert result.ok is True
-    assert result.result_envelope["operation_id"] == "op:read_file:structured"
-    assert result.result_envelope["read_window"] == {
+    assert result.metadata["handler_details"]["read_window"] == {
         "kind": "line_window",
         "start_line": 1,
         "end_line": 2,
@@ -73,40 +46,20 @@ def test_tool_registry_result_envelope_preserves_tool_structured_fields(tmp_path
     }
 
 
-def test_tool_registry_rejects_non_tool_call_envelope_kind(tmp_path):
+def test_canonical_result_exposes_typed_error_contract(tmp_path):
     registry = make_tool_registry(tmp_path)
-    envelope = {
-        "kind": "subagent_result",
-        "schema_version": 1,
-        "result_id": "result-1",
-        "run_id": "run-1",
-        "status": "DONE",
-    }
 
-    result = registry.execute_call(envelope)
-
-    assert result.ok is False
-    assert result.tool == "unknown"
-    assert "tool_call envelope" in result.output
-
-
-def test_tool_registry_error_envelope_includes_error_contract(tmp_path):
-    registry = make_tool_registry(tmp_path)
-    envelope = ToolCallEnvelope(
+    result = execute_registry_test_call(
+        registry,
+        "read_file",
+        {"path": "missing.txt"},
         call_id="call-missing-1",
-        source="text_protocol",
-        tool_name="read_file",
-        input={"path": "missing.txt"},
-        scope=RunScope(task_id="task-1", run_id="run-1"),
     )
-
-    result = registry.execute_call(envelope)
 
     assert result.ok is False
     assert result.error_code == "PATH_NOT_FOUND"
-    assert result.result_envelope["error_code"] == "PATH_NOT_FOUND"
-    assert result.result_envelope["error_category"] == "path"
-    assert result.result_envelope["recommended_action"] == "retry"
-    assert "不存在" in result.result_envelope["recovery_hint"]
-    assert result.result_envelope["tool_protocol_v2"]["error_type"] == "PATH_NOT_FOUND"
-    assert result.result_envelope["tool_protocol_v2"]["retry_hint"] == "retry"
+    assert result.error_category == "path"
+    assert result.recommended_action == "retry"
+    assert "不存在" in result.recovery_hint
+    assert result.handler_executed is True
+    assert result.failure_stage == "execution"

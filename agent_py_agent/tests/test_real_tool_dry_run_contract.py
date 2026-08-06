@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agent_py_agent.agent.tooling.models import ToolExecutionResult
 from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
+from agent_py_agent.agent.tooling.runtime_contracts import ToolResult
+from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
 
 
 def _registry(root: Path) -> ToolRegistry:
@@ -33,12 +34,16 @@ def test_real_tool_dry_run_accepts_actual_read_only_and_dry_run_wrapper_results(
 
     (tmp_path / "input.txt").write_text("hello from real read_file wrapper\n", encoding="utf-8")
     registry = _registry(tmp_path)
-    read_result = registry.execute_call(
-        {"tool": "read_file", "path": "input.txt"},
+    read_result = execute_registry_test_call(
+        registry,
+        "read_file",
+        {"path": "input.txt"},
         allowed_tools=["read_file"],
     )
-    dry_run_result = registry.execute_call(
-        {"tool": "controlled_exec", "command": "pwd", "apply": False, "cwd": "."},
+    dry_run_result = execute_registry_test_call(
+        registry,
+        "controlled_exec",
+        {"command": "pwd", "apply": False, "cwd": "."},
         allowed_tools=["controlled_exec"],
         write_boundary={
             "controlled_exec_grants": [
@@ -68,15 +73,15 @@ def _controlled_exec_grant(root: Path) -> dict[str, object]:
     }
 
 
-def _read_probe(read_result: ToolExecutionResult) -> dict[str, object]:
+def _read_probe(read_result: ToolResult) -> dict[str, object]:
     return {
         "probe_id": "read-file-success",
         "operation_id": "op-read-file-success",
-        "tool": read_result.tool,
+        "tool": read_result.tool_name,
         "effect": "read_only",
         "mode": "read_only",
         "outcome": "success",
-        "tool_executor_ref": "tool_registry.execute_call",
+        "tool_executor_ref": "tool_registry.execute_tool",
         "result_schema_ref": "schema://tools/read_file/result",
         "executed_actions": [],
         "result": {
@@ -86,15 +91,15 @@ def _read_probe(read_result: ToolExecutionResult) -> dict[str, object]:
     }
 
 
-def _controlled_exec_probe(dry_run_result: ToolExecutionResult) -> dict[str, object]:
+def _controlled_exec_probe(dry_run_result: ToolResult) -> dict[str, object]:
     return {
         "probe_id": "controlled-exec-dry-run",
         "operation_id": "op-controlled-exec-dry-run",
-        "tool": dry_run_result.tool,
+        "tool": dry_run_result.tool_name,
         "effect": "dangerous",
         "mode": "dry_run",
         "outcome": "dry_run_success",
-        "tool_executor_ref": "tool_registry.execute_call",
+        "tool_executor_ref": "tool_registry.execute_tool",
         "result_schema_ref": "schema://tools/controlled_exec/result",
         "idempotency_key": "idem-controlled-exec-pwd",
         "args_hash": "sha256:controlled-exec-pwd",
@@ -132,7 +137,7 @@ def test_real_tool_dry_run_rejects_unwrapped_or_real_side_effect_results() -> No
                 "effect": "dangerous",
                 "mode": "dry_run",
                 "outcome": "dry_run_success",
-                "tool_executor_ref": "tool_registry.execute_call",
+                "tool_executor_ref": "legacy_registry_adapter",
                 "result_schema_ref": "schema://tools/controlled_exec/result",
                 "idempotency_key": "",
                 "args_hash": "",

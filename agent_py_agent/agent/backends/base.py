@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 """模型后端适配层。
@@ -11,11 +10,14 @@ from __future__ import annotations
 """
 
 import json
+import secrets
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from ..settings.defaults import DEFAULT_MODEL_MAX_TOKENS
+from ..tooling.runtime_contracts import ProviderToolCapability, ToolChoice
 from .errors import ProviderResponseError
 from .gateway_helpers import GatewayRequest, post_json, post_stream, post_stream_iter
 from .model_metadata import ProviderMetadataOptions, discover_provider_model_metadata
@@ -90,6 +92,10 @@ class ModelResponse:
     truncated: bool = False
     # 上游返回的原始 stop_reason(观测/审计用;自动续写后为最后一段的 stop_reason)。
     stop_reason: str = ""
+    # 传输/流边界在形成完整响应前发现的结构化工具协议错误。这里只能由宿主适配层写入；
+    # 模型正文不能设置该字段，也不能借此制造可执行 ToolCall。
+    tool_protocol_violations: list[dict[str, str]] = field(default_factory=list)
+
 
 @dataclass(frozen=True)
 class BackendOptions:
@@ -111,6 +117,7 @@ class _OpenAIGenerateRequest:
     prompt: str
     on_chunk: Callable[[str], None] | None = None
     tools: list[dict[str, Any]] | None = None
+    tool_choice: ToolChoice | None = None
     messages: list[dict[str, Any]] | None = None
     response_schema: dict[str, Any] | None = None
     json_object: bool = False
@@ -126,18 +133,32 @@ class BaseBackend:
         """Return provider-advertised context capacity, or zero when unavailable."""
         return 0
 
+    def probe_tool_capability(self) -> ProviderToolCapability:
+        """Return an explicit unsupported fact for backends without native tools."""
+
+        return ProviderToolCapability(
+            provider=str(self.name or "base"),
+            endpoint=f"local://{self.name or 'base'}",
+            model=str(getattr(self, "model_name", "") or ""),
+            stream=bool(getattr(self, "stream_enabled", False)),
+            native_supported=False,
+            evidence="backend_declares_no_native_tool_transport",
+            observed_at=_utc_now_iso(),
+        )
+
     def generate(
         self,
         prompt: str,
         on_chunk: Callable[[str], None] | None = None,
         tools: list[dict[str, Any]] | None = None,
+        tool_choice: ToolChoice | None = None,
         messages: list[dict[str, Any]] | None = None,
     ) -> ModelResponse:
         """Generate one assistant response for the supplied prompt.
 
-        ``tools`` carries an Anthropic-style tools schema for native tool_use
-        (tool_protocol=native). Backends that do not support it ignore it and
-        keep the text protocol; bypass callers omit it for unchanged behavior.
+        ``tools`` carries the run-fixed provider schema for native tool use.
+        A backend without the selected native capability must fail closed;
+        protocol selection happens before the run and never falls back here.
 
         ``messages`` carries a provider-native structured conversation (native
         tool_use IR translated to Anthropic ``messages``). When supplied it
@@ -186,9 +207,10 @@ class EchoBackend(BaseBackend):
         prompt: str,
         on_chunk: Callable[[str], None] | None = None,
         tools: list[dict[str, Any]] | None = None,
+        tool_choice: ToolChoice | None = None,
         messages: list[dict[str, Any]] | None = None,
     ) -> ModelResponse:
-        del tools, messages  # echo backend never speaks native tool_use
+        del tools, tool_choice, messages  # echo backend never speaks native tool_use
         lines = [line.strip() for line in prompt.splitlines() if line.strip()]
         if "# User Task" in prompt:
             task = prompt.split("# User Task", 1)[-1]
@@ -228,6 +250,7 @@ class HttpBackend(BaseBackend):
         # 兼容既有只读调用方；context-window resolver 会识别 configured_ 字段，绝不把本属性
         # 当成 provider 事实。新代码应读取 configured_context_window_tokens。
         self.context_window_tokens = self.configured_context_window_tokens
+        self._provider_tool_capability_cache: ProviderToolCapability | None = None
         self._provider_context_window_cache: int | None = None
         self.model_metadata: dict[str, Any] = {}
         self.temperature = float(options.temperature)
@@ -236,6 +259,72 @@ class HttpBackend(BaseBackend):
         # timeout.  The tool-loop guard therefore must not also reinterpret it
         # as a total wall-clock limit while valid events keep arriving.
         self.stream_timeout_is_idle = self.stream_enabled
+
+    def probe_tool_capability(self) -> ProviderToolCapability:
+        """Run one harmless structured-call probe and cache the observed result."""
+
+        cached = self._provider_tool_capability_cache
+        if cached is not None:
+            return cached
+        nonce = secrets.token_hex(8)
+        probe_tool = {
+            "name": "my_agent_capability_probe",
+            "description": "Internal protocol capability probe with no host-side effect.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "nonce": {
+                        "type": "string",
+                        "description": "Copy the nonce from the user request exactly.",
+                    }
+                },
+                "required": ["nonce"],
+                "additionalProperties": False,
+            },
+        }
+        evidence = ""
+        supported = False
+        try:
+            response = self.generate(
+                (
+                    "Call my_agent_capability_probe exactly once with nonce "
+                    f"{nonce}. Do not answer in prose."
+                ),
+                tools=[probe_tool],
+                tool_choice=ToolChoice.specific("my_agent_capability_probe"),
+            )
+            blocks = list(getattr(response, "tool_use_blocks", None) or ())
+            supported = any(
+                isinstance(block, dict)
+                and str(block.get("id") or "").strip()
+                and str(block.get("name") or "") == "my_agent_capability_probe"
+                and isinstance(block.get("input"), dict)
+                and str(block["input"].get("nonce") or "") == nonce
+                for block in blocks
+            )
+            evidence = (
+                "live_probe_returned_structured_tool_call"
+                if supported
+                else "live_probe_returned_no_valid_structured_tool_call"
+            )
+        except Exception as exc:
+            code = str(getattr(exc, "error_code", "") or "").strip().upper()
+            suffix = f":{code}" if code else ""
+            evidence = f"live_probe_failed:{type(exc).__name__}{suffix}"
+        capability = ProviderToolCapability(
+            provider=str(self.name or type(self).__name__),
+            endpoint=self._tool_endpoint(),
+            model=self.model_name,
+            stream=self.stream_enabled,
+            native_supported=supported,
+            evidence=evidence,
+            observed_at=_utc_now_iso(),
+        )
+        self._provider_tool_capability_cache = capability
+        return capability
+
+    def _tool_endpoint(self) -> str:
+        return self.api_base
 
     def request_json(
         self, path: str, payload: dict[str, Any], headers: dict[str, str]
@@ -253,13 +342,13 @@ class HttpBackend(BaseBackend):
         """Send a streaming request and collect all data lines."""
         return post_stream(self._gateway_request(path, payload, headers))
 
-    def request_stream_iter(
-        self, path: str, payload: dict[str, Any], headers: dict[str, str]
-    ):
+    def request_stream_iter(self, path: str, payload: dict[str, Any], headers: dict[str, str]):
         """Send a streaming request and yield data lines as they arrive."""
         yield from post_stream_iter(self._gateway_request(path, payload, headers))
 
-    def _gateway_request(self, path: str, payload: dict[str, Any], headers: dict[str, str]) -> GatewayRequest:
+    def _gateway_request(
+        self, path: str, payload: dict[str, Any], headers: dict[str, str]
+    ) -> GatewayRequest:
         """Build the immutable gateway request envelope used by all HTTP calls."""
         return GatewayRequest(
             api_base=self.api_base,
@@ -296,11 +385,15 @@ class OpenAICompatibleBackend(HttpBackend):
 
     name = "openai_compatible"
 
+    def _tool_endpoint(self) -> str:
+        return self.api_base + "/chat/completions"
+
     def generate(
         self,
         prompt: str,
         on_chunk: Callable[[str], None] | None = None,
         tools: list[dict[str, Any]] | None = None,
+        tool_choice: ToolChoice | None = None,
         messages: list[dict[str, Any]] | None = None,
     ) -> ModelResponse:
         """Call the OpenAI-compatible chat completion endpoint."""
@@ -309,6 +402,7 @@ class OpenAICompatibleBackend(HttpBackend):
                 prompt=prompt,
                 on_chunk=on_chunk,
                 tools=tools,
+                tool_choice=tool_choice,
                 messages=messages,
             )
         )
@@ -361,8 +455,14 @@ class OpenAICompatibleBackend(HttpBackend):
             )
         else:
             payload["messages"] = [{"role": "user", "content": request.prompt}]
-        if request.tools:
-            payload["tools"] = _openai_tools_from_native(request.tools)
+        tools = _tools_for_choice(request.tools, request.tool_choice)
+        if tools:
+            from .tool_protocol_adapter import openai_tool_choice
+
+            payload["tools"] = _openai_tools_from_native(tools)
+            payload["tool_choice"] = openai_tool_choice(request.tool_choice or ToolChoice.auto())
+        elif request.tool_choice is not None and request.tool_choice.mode == "none":
+            payload["tool_choice"] = "none"
         if request.response_schema is not None:
             payload["response_format"] = {
                 "type": "json_schema",
@@ -381,7 +481,11 @@ class OpenAICompatibleBackend(HttpBackend):
         if self.stream_enabled:
             return self._generate_stream(payload, headers, on_chunk=request.on_chunk)
         obj = self.request_json("/chat/completions", payload, headers)
-        return _openai_non_stream_response(obj, backend_name=self.name, tools_requested=bool(request.tools))
+        return _openai_non_stream_response(
+            obj,
+            backend_name=self.name,
+            tools_requested=bool(tools),
+        )
 
     def _generate_stream(
         self,
@@ -430,7 +534,9 @@ def _openai_non_stream_response(
         text = str(message.get("content") or "")
         blocks, malformed = _openai_tool_use_blocks(message)
     except Exception as exc:
-        raise ProviderResponseError(f"无法解析 OpenAI-compatible 响应: {_response_preview(obj)}") from exc
+        raise ProviderResponseError(
+            f"无法解析 OpenAI-compatible 响应: {_response_preview(obj)}"
+        ) from exc
     finish_reason = str(choice.get("finish_reason") or "")
     _raise_for_incomplete_response(
         finish_reason,
@@ -493,7 +599,9 @@ def _openai_message_from_native(message: dict[str, Any]) -> list[dict[str, Any]]
     content = message.get("content")
     if isinstance(content, str):
         return [{"role": role, "content": content}]
-    blocks = [block for block in content if isinstance(block, dict)] if isinstance(content, list) else []
+    blocks = (
+        [block for block in content if isinstance(block, dict)] if isinstance(content, list) else []
+    )
     if role == "assistant":
         return _openai_assistant_messages(blocks)
     if role == "user":
@@ -565,7 +673,9 @@ def _openai_tool_use_blocks(message: dict[str, Any]) -> tuple[list[dict[str, Any
         function = raw.get("function") if isinstance(raw.get("function"), dict) else {}
         arguments = function.get("arguments")
         try:
-            tool_input = arguments if isinstance(arguments, dict) else json.loads(str(arguments or "{}"))
+            tool_input = (
+                arguments if isinstance(arguments, dict) else json.loads(str(arguments or "{}"))
+            )
         except (json.JSONDecodeError, TypeError, ValueError):
             tool_input = {}
             malformed = True
@@ -587,6 +697,9 @@ class AnthropicCompatibleBackend(HttpBackend):
 
     name = "anthropic_compatible"
 
+    def _tool_endpoint(self) -> str:
+        return self.api_base + "/v1/messages"
+
     def __init__(
         self,
         options: BackendOptions,
@@ -600,6 +713,7 @@ class AnthropicCompatibleBackend(HttpBackend):
         prompt: str,
         on_chunk: Callable[[str], None] | None = None,
         tools: list[dict[str, Any]] | None = None,
+        tool_choice: ToolChoice | None = None,
         messages: list[dict[str, Any]] | None = None,
     ) -> ModelResponse:
         """Call the Anthropic-compatible messages endpoint.
@@ -613,7 +727,62 @@ class AnthropicCompatibleBackend(HttpBackend):
             prompt,
             on_chunk=on_chunk,
             tools=tools,
+            tool_choice=tool_choice,
             messages=messages,
+        )
+
+    def generate_structured(
+        self,
+        prompt: str,
+        *,
+        response_schema: dict[str, Any],
+        messages: list[dict[str, Any]] | None = None,
+    ) -> ModelResponse:
+        """Force one non-executable tool block as the provider-native JSON envelope."""
+
+        tool_name = "my_agent_structured_output"
+        structured_prompt = (
+            "MANDATORY OUTPUT CONTRACT: Call the provided my_agent_structured_output tool "
+            "exactly once. Do not answer with prose, Markdown, XML, or a textual tool-call "
+            "imitation.\n\n" + prompt
+        )
+        schema_tool = {
+            "name": tool_name,
+            "description": (
+                "Required non-executable response envelope. Call exactly once; never answer in prose."
+            ),
+            "input_schema": response_schema,
+        }
+        for attempt in range(2):
+            request_prompt = structured_prompt
+            if attempt:
+                request_prompt += (
+                    "\n\nThe previous provider response ignored the mandatory structured channel. "
+                    "Retry by calling my_agent_structured_output exactly once and emit no text."
+                )
+            response = self._generate_request(
+                request_prompt,
+                tools=[schema_tool],
+                tool_choice=ToolChoice.specific(tool_name),
+                messages=messages,
+                stream_response=False,
+                temperature=0.0,
+            )
+            blocks = [
+                block
+                for block in response.tool_use_blocks
+                if isinstance(block, dict) and str(block.get("name") or "") == tool_name
+            ]
+            if len(blocks) == 1 and isinstance(blocks[0].get("input"), dict):
+                return ModelResponse(
+                    text=json.dumps(blocks[0]["input"], ensure_ascii=False),
+                    backend=response.backend,
+                    usage=dict(response.usage),
+                    stop_reason=response.stop_reason,
+                )
+        raise ProviderResponseError(
+            "Anthropic-compatible structured response did not return one valid schema block",
+            error_code="MODEL_SCHEMA_INVALID",
         )
 
     # LLM: Auxiliary JSON calls share the normal Anthropic transport but may lower only this request's output cap.
@@ -639,8 +808,11 @@ class AnthropicCompatibleBackend(HttpBackend):
         *,
         on_chunk: Callable[[str], None] | None = None,
         tools: list[dict[str, Any]] | None = None,
+        tool_choice: ToolChoice | None = None,
         messages: list[dict[str, Any]] | None = None,
         max_output_tokens: int | None = None,
+        stream_response: bool | None = None,
+        temperature: float | None = None,
     ) -> ModelResponse:
         payload: dict[str, Any] = {
             "model": self.model_name,
@@ -648,7 +820,7 @@ class AnthropicCompatibleBackend(HttpBackend):
                 self.max_tokens,
                 max_output_tokens,
             ),
-            "temperature": self.temperature,
+            "temperature": self.temperature if temperature is None else float(temperature),
         }
         if messages:
             if prompt:
@@ -657,20 +829,30 @@ class AnthropicCompatibleBackend(HttpBackend):
                 payload["messages"] = messages
         else:
             payload["messages"] = [{"role": "user", "content": prompt}]
-        if tools:
-            payload["tools"] = tools
+        selected_tools = _tools_for_choice(tools, tool_choice)
+        if selected_tools:
+            from .tool_protocol_adapter import anthropic_tool_choice
+
+            payload["tools"] = selected_tools
+            payload["tool_choice"] = anthropic_tool_choice(tool_choice or ToolChoice.auto())
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
+            # 兼容只认 x-api-key 的 Anthropic 兼容端点(如 工具运行时.ai/zen:Authorization: Bearer
+            # 返回 403 Missing API key,x-api-key 才通过)。两头发,主流端点都接受。
+            "x-api-key": self.api_key,
             "anthropic-version": self.anthropic_version,
         }
-        if self.stream_enabled:
+        use_stream = self.stream_enabled if stream_response is None else stream_response
+        if use_stream:
             return self._generate_stream(payload, headers, on_chunk=on_chunk)
         return self._generate_non_stream(payload, headers)
 
     # LLM: 非流式 Anthropic 响应必须同时保留可见正文、规范化工具调用和可安全回放的完整 assistant 块；三者不能互相替代。
     # 函数用途: 请求一次非流式 Anthropic-compatible 响应，并整理成运行时统一结果。
-    def _generate_non_stream(self, payload: dict[str, Any], headers: dict[str, str]) -> ModelResponse:
+    def _generate_non_stream(
+        self, payload: dict[str, Any], headers: dict[str, str]
+    ) -> ModelResponse:
         obj: dict[str, Any] = {}
         text = ""
         blocks: list[dict[str, Any]] = []
@@ -682,7 +864,9 @@ class AnthropicCompatibleBackend(HttpBackend):
                 blocks = _anthropic_tool_use_blocks(obj)
                 assistant_blocks = _anthropic_assistant_content_blocks(obj)
             except Exception as exc:
-                raise ProviderResponseError(f"无法解析 Anthropic-compatible 响应: {_response_preview(obj)}") from exc
+                raise ProviderResponseError(
+                    f"无法解析 Anthropic-compatible 响应: {_response_preview(obj)}"
+                ) from exc
             _raise_for_incomplete_response(
                 obj.get("stop_reason"),
                 backend=self.name,
@@ -752,6 +936,28 @@ class AnthropicCompatibleBackend(HttpBackend):
         return collect_anthropic_stream_with_completion(
             lines("/v1/messages", payload, headers), on_chunk=on_chunk
         )
+
+
+def _tools_for_choice(
+    tools: list[dict[str, Any]] | None,
+    choice: ToolChoice | None,
+) -> list[dict[str, Any]]:
+    selected = list(tools or ())
+    if choice is None or choice.mode == "auto":
+        return selected
+    if choice.mode == "none":
+        return []
+    if not selected:
+        raise ValueError(f"tool_choice={choice.mode} requires a non-empty tools surface")
+    names = {str(tool.get("name") or "").strip() for tool in selected if isinstance(tool, dict)}
+    if choice.mode == "specific" and choice.tool_name not in names:
+        raise ValueError(f"specific tool_choice is outside provider surface: {choice.tool_name}")
+    return selected
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
 
 def _anthropic_text_from_response(obj: dict[str, Any]) -> str:
     parts = obj.get("content", [])
@@ -868,6 +1074,5 @@ def get_backend(name: str, config: Any | None = None) -> BaseBackend:
         )
 
     raise ValueError(
-        "未知模型后端: %s。当前内置 echo / openai_compatible / anthropic_compatible。"
-        % name
+        "未知模型后端: %s。当前内置 echo / openai_compatible / anthropic_compatible。" % name
     )

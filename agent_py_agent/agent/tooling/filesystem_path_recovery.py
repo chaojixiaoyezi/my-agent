@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .models import ToolExecutionResult
+from .models import ToolHandlerOutcome
 
 _DISCOVERY_IGNORES = frozenset({
     ".git",
@@ -65,7 +65,7 @@ class MissingPathRecovery:
         }
 
 
-def missing_path_result(request: MissingPathRequest) -> ToolExecutionResult:
+def missing_path_result(request: MissingPathRequest) -> ToolHandlerOutcome:
     candidates = suggest_missing_path_candidates(
         raw_path=request.raw_path,
         target=request.target,
@@ -79,7 +79,7 @@ def missing_path_result(request: MissingPathRequest) -> ToolExecutionResult:
         candidate_paths=tuple(str(candidate) for candidate in candidates),
         expected_kind=request.expected_kind,
     )
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         request.tool_name,
         False,
         _render_missing_path(recovery, retry_tool=request.retry_tool or request.tool_name),

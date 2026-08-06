@@ -3,16 +3,13 @@ from __future__ import annotations
 import socket
 import threading
 import time
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from agent_py_agent.agent.action_protocol import RunScope, ToolCallEnvelope
-from agent_py_agent.agent.agent_core.tool_call_runtime import (
-    _runtime_tool_call_id,
-)
-from agent_py_agent.agent.contracts.gates.tool_effects import args_hash_for_call
+from agent_py_agent.agent.contracts.idempotency import operation_idempotency_key
 from agent_py_agent.agent.local_storage import (
     LocalStore,
     ToolOperationClaimRequest,
@@ -23,23 +20,48 @@ from agent_py_agent.agent.local_storage import (
 )
 from agent_py_agent.agent.tooling.models import (
     BaseTool,
-    ToolExecutionResult,
     ToolFailureStage,
+    ToolHandlerOutcome,
     ToolOperationReconciliation,
-    ToolSpec,
 )
 from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
-from agent_py_agent.agent.tooling.registry_resilience import (
-    ResilientToolInvokeRequest,
-    resilient_tool_invoke,
+from agent_py_agent.agent.tooling.runtime_contracts import ToolResult, tool_arguments_hash
+from agent_py_agent.tests._tool_runtime_harness import (
+    canonical_test_call,
+    execute_canonical_test_call,
+    make_test_model_spec,
+    make_test_runtime_policy,
 )
+
+
+@dataclass(frozen=True)
+class _CallSpec:
+    tool_name: str
+    arguments: dict[str, object]
+    run_id: str
+    call_id: str
+    attempt_id: str = ""
+
+    @property
+    def operation_id(self) -> str:
+        identifier = (
+            f"{self.attempt_id}:{self.call_id}" if self.attempt_id else self.call_id
+        )
+        return f"tool_call:{identifier}"
+
+    @property
+    def idempotency_key(self) -> str:
+        return operation_idempotency_key(
+            self.attempt_id or self.run_id,
+            self.operation_id,
+        )
 
 
 class _CountingTool(BaseTool):
     def __init__(
         self,
         *,
-        result: ToolExecutionResult | None = None,
+        result: ToolHandlerOutcome | None = None,
         started: threading.Event | None = None,
         release: threading.Event | None = None,
     ):
@@ -47,19 +69,17 @@ class _CountingTool(BaseTool):
         self.result = result
         self.started = started
         self.release = release
-        self.spec = ToolSpec(
-            name="counting_write",
-            category="test",
+        self.model_spec = make_test_model_spec(
+            "counting_write",
             description="count one side effect",
-            use_cases=[],
-            avoid_when=[],
-            keywords=[],
-            parameters={"value": "integer"},
-            parameter_schema={"value": {"type": "integer"}},
-            required_parameters=["value"],
-            effect="mutating",
-            idempotency_scope="operation",
+            input_schema={
+                "type": "object",
+                "properties": {"value": {"type": "integer"}},
+                "required": ["value"],
+                "additionalProperties": False,
+            },
         )
+        self.runtime_policy = make_test_runtime_policy("mutating")
 
     def execute(self, params):
         self.calls += 1
@@ -67,7 +87,7 @@ class _CountingTool(BaseTool):
             self.started.set()
         if self.release is not None:
             assert self.release.wait(timeout=5)
-        return self.result or ToolExecutionResult(
+        return self.result or ToolHandlerOutcome(
             "counting_write",
             True,
             f"completed:{params['value']}",
@@ -78,14 +98,20 @@ class _CountingTool(BaseTool):
 class _BusinessReconcilingTool(_CountingTool):
     def __init__(self, reconciliation: ToolOperationReconciliation):
         super().__init__(
-            result=ToolExecutionResult(
+            result=ToolHandlerOutcome(
                 "counting_write",
                 False,
                 "provider timed out",
                 error_code="TOOL_TIMEOUT",
             )
         )
-        self.spec.idempotency_scope = "business"
+        self.runtime_policy = replace(
+            self.runtime_policy,
+            idempotency_policy=replace(
+                self.runtime_policy.idempotency_policy,
+                scope="business",
+            ),
+        )
         self.reconciliation = reconciliation
 
     def business_idempotency_key(self, params):
@@ -99,7 +125,7 @@ class _BusinessReconcilingTool(_CountingTool):
         self.calls += 1
         if self.calls == 1:
             return self.result
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             "counting_write",
             True,
             f"completed:{params['value']}",
@@ -109,7 +135,13 @@ class _BusinessReconcilingTool(_CountingTool):
 class _BusinessCountingTool(_CountingTool):
     def __init__(self) -> None:
         super().__init__()
-        self.spec.idempotency_scope = "business"
+        self.runtime_policy = replace(
+            self.runtime_policy,
+            idempotency_policy=replace(
+                self.runtime_policy.idempotency_policy,
+                scope="business",
+            ),
+        )
 
     def business_idempotency_key(self, params):
         return f"business-count:{params['value']}"
@@ -118,32 +150,30 @@ class _BusinessCountingTool(_CountingTool):
 class _MixedActionTool(BaseTool):
     def __init__(self) -> None:
         self.calls = 0
-        self.spec = ToolSpec(
-            name="mixed_action",
-            category="test",
+        self.model_spec = make_test_model_spec(
+            "mixed_action",
             description="one tool with read and write actions",
-            use_cases=[],
-            avoid_when=[],
-            keywords=[],
-            parameters={"action": "string", "value": "integer"},
-            parameter_schema={
-                "action": {"type": "string", "enum": ["inspect", "update"]},
-                "value": {"type": "integer"},
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["inspect", "update"]},
+                    "value": {"type": "integer"},
+                },
+                "required": ["action", "value"],
+                "additionalProperties": False,
             },
-            required_parameters=["action", "value"],
-            effect="mutating",
-            effect_by_parameter={
-                "action": {
-                    "inspect": "read_only",
-                    "update": "mutating",
-                }
-            },
-            idempotency_scope="operation",
+        )
+        self.runtime_policy = make_test_runtime_policy(
+            "mutating",
+            effect_by_parameter=((
+                "action",
+                (("inspect", "read_only"), ("update", "mutating")),
+            ),),
         )
 
     def execute(self, params):
         self.calls += 1
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             "mixed_action",
             True,
             f"{params['action']}:{params['value']}",
@@ -154,18 +184,30 @@ def test_exact_operation_replays_saved_result_without_second_effect(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
     tool = _CountingTool()
     registry = _registry(tmp_path, store, tool)
-    envelope = _envelope("run-1", "call-1", 7)
+    call = _call("run-1", "call-1", 7)
 
-    first = registry.execute_call(envelope)
+    first = _execute(registry, call)
     reopened = LocalStore(tmp_path / "local.db", enable_fts=False)
     replay_tool = _CountingTool()
-    replay = _registry(tmp_path, reopened, replay_tool).execute_call(envelope)
+    replay_registry = _registry(tmp_path, reopened, replay_tool)
+    replay = _execute(replay_registry, call)
 
     assert first.ok is True
     assert replay.ok is True
     assert replay.output == first.output
-    assert replay.result_envelope["domain"] == {"value": 7}
-    assert replay.result_envelope["tool_operation"]["replayed"] is True
+    assert replay.metadata["handler_details"]["domain"] == {"value": 7}
+    assert replay.operation is not None and replay.operation.replayed is True
+    assert first.operation is not None
+    assert first.operation.result_ref == "tool-operation://run-1/tool_call:call-1"
+    assert replay.operation.result_ref == first.operation.result_ref
+    stored = store.get_tool_operation(
+        owner_id="owner-a",
+        run_id="run-1",
+        operation_id="tool_call:call-1",
+    )
+    assert stored is not None
+    assert stored.result_ref == first.operation.result_ref
+    assert stored.result["result_ref"] == first.operation.result_ref
     assert first.handler_executed is True
     assert replay.handler_executed is False
     assert tool.calls == 1
@@ -177,8 +219,8 @@ def test_same_operation_with_changed_input_is_rejected(tmp_path):
     tool = _CountingTool()
     registry = _registry(tmp_path, store, tool)
 
-    first = registry.execute_call(_envelope("run-1", "call-1", 1))
-    changed = registry.execute_call(_envelope("run-1", "call-1", 2))
+    first = _execute(registry, _call("run-1", "call-1", 1))
+    changed = _execute(registry, _call("run-1", "call-1", 2))
 
     assert first.ok is True
     assert changed.ok is False
@@ -191,9 +233,9 @@ def test_equal_arguments_in_new_operations_are_both_legal(tmp_path):
     tool = _CountingTool()
     registry = _registry(tmp_path, store, tool)
 
-    first = registry.execute_call(_envelope("run-1", "call-1", 1))
-    second = registry.execute_call(_envelope("run-1", "call-2", 1))
-    other_run = registry.execute_call(_envelope("run-2", "call-1", 1))
+    first = _execute(registry, _call("run-1", "call-1", 1))
+    second = _execute(registry, _call("run-1", "call-2", 1))
+    other_run = _execute(registry, _call("run-2", "call-1", 1))
 
     assert first.ok and second.ok and other_run.ok
     assert tool.calls == 3
@@ -204,18 +246,18 @@ def test_provider_call_id_can_repeat_in_separate_runtime_attempts(tmp_path):
     tool = _CountingTool()
     registry = _registry(tmp_path, store, tool)
 
-    first_envelope = _envelope(
+    first_call = _call(
         "run-1", "provider-call-1", 1, attempt_id="attempt-1"
     )
-    second_envelope = _envelope(
+    second_call = _call(
         "run-1", "provider-call-1", 2, attempt_id="attempt-2"
     )
-    first = registry.execute_call(first_envelope)
-    second = registry.execute_call(second_envelope)
+    first = _execute(registry, first_call)
+    second = _execute(registry, second_call)
 
     assert first.ok and second.ok
-    assert first_envelope.operation_id == "tool_call:attempt-1:provider-call-1"
-    assert second_envelope.operation_id == "tool_call:attempt-2:provider-call-1"
+    assert first_call.operation_id == "tool_call:attempt-1:provider-call-1"
+    assert second_call.operation_id == "tool_call:attempt-2:provider-call-1"
     assert tool.calls == 2
     records = store.list_tool_operations(owner_id="owner-a", run_id="run-1")
     assert {record.operation_id for record in records} == {
@@ -229,11 +271,13 @@ def test_same_provider_call_id_still_conflicts_inside_one_runtime_attempt(tmp_pa
     tool = _CountingTool()
     registry = _registry(tmp_path, store, tool)
 
-    first = registry.execute_call(
-        _envelope("run-1", "provider-call-1", 1, attempt_id="attempt-1")
+    first = _execute(
+        registry,
+        _call("run-1", "provider-call-1", 1, attempt_id="attempt-1"),
     )
-    changed = registry.execute_call(
-        _envelope("run-1", "provider-call-1", 2, attempt_id="attempt-1")
+    changed = _execute(
+        registry,
+        _call("run-1", "provider-call-1", 2, attempt_id="attempt-1"),
     )
 
     assert first.ok is True
@@ -246,11 +290,13 @@ def test_read_only_variant_of_mixed_action_tool_bypasses_effect_ledger(tmp_path)
     tool = _MixedActionTool()
     registry = _registry(tmp_path, store, tool)
 
-    first = registry.execute_call(
-        _mixed_envelope("run-1", "provider-call-1", "inspect", 1)
+    first = _execute(
+        registry,
+        _mixed_call("run-1", "provider-call-1", "inspect", 1),
     )
-    second = registry.execute_call(
-        _mixed_envelope("run-1", "provider-call-1", "inspect", 2)
+    second = _execute(
+        registry,
+        _mixed_call("run-1", "provider-call-1", "inspect", 2),
     )
 
     assert first.ok and second.ok
@@ -258,19 +304,21 @@ def test_read_only_variant_of_mixed_action_tool_bypasses_effect_ledger(tmp_path)
     assert store.list_tool_operations(owner_id="owner-a", run_id="run-1") == []
 
 
-def test_explicit_boundary_cannot_lower_or_bypass_dangerous_effect(tmp_path):
+def test_explicit_boundary_cannot_lower_runtime_declared_effect(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
     tool = _MixedActionTool()
     registry = _registry(tmp_path, store, tool)
 
-    result = registry.execute_call(
-        _mixed_envelope("run-1", "provider-call-1", "inspect", 1),
-        write_boundary={"tool_effects": {"mixed_action": "dangerous"}},
+    result = _execute(
+        registry,
+        _mixed_call("run-1", "provider-call-1", "update", 1),
+        write_boundary={"tool_effects": {"mixed_action": "read_only"}},
     )
 
-    assert result.ok is False
-    assert result.result_envelope["runtime_gate"]["status"] == "NEED_APPROVAL"
-    assert tool.calls == 0
+    assert result.ok is True
+    assert result.metadata["action_decision"]["resolved_effect"] == "mutating"
+    assert result.operation is not None
+    assert tool.calls == 1
 
 
 def test_concurrent_same_operation_never_enters_handler_twice(tmp_path):
@@ -279,15 +327,15 @@ def test_concurrent_same_operation_never_enters_handler_twice(tmp_path):
     release = threading.Event()
     tool = _CountingTool(started=started, release=release)
     registry = _registry(tmp_path, store, tool)
-    envelope = _envelope("run-1", "call-1", 1)
-    results: list[ToolExecutionResult] = []
+    call = _call("run-1", "call-1", 1)
+    results: list[ToolHandlerOutcome] = []
 
     first = threading.Thread(
-        target=lambda: results.append(registry.execute_call(envelope))
+        target=lambda: results.append(_execute(registry, call))
     )
     first.start()
     assert started.wait(timeout=5)
-    second = registry.execute_call(envelope)
+    second = _execute(registry, call)
     release.set()
     first.join(timeout=5)
 
@@ -300,16 +348,16 @@ def test_concurrent_same_operation_never_enters_handler_twice(tmp_path):
 
 def test_dead_holder_becomes_unknown_and_is_not_reexecuted(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
-    envelope = _envelope("run-1", "call-1", 1)
+    call = _call("run-1", "call-1", 1)
     store.claim_tool_operation(
         ToolOperationClaimRequest(
             owner_id="owner-a",
             run_id="run-1",
             task_id="run-1",
-            operation_id=envelope.operation_id,
+            operation_id=call.operation_id,
             tool="counting_write",
-            args_hash=args_hash_for_call({"value": 1}),
-            idempotency_key=envelope.idempotency_key,
+            args_hash=tool_arguments_hash({"value": 1}),
+            idempotency_key=call.idempotency_key,
             idempotency_scope="operation",
             idempotency_namespace="counting_write",
             holder=ToolOperationHolder(
@@ -323,7 +371,8 @@ def test_dead_holder_becomes_unknown_and_is_not_reexecuted(tmp_path):
     )
     tool = _CountingTool()
 
-    result = _registry(tmp_path, store, tool).execute_call(envelope)
+    registry = _registry(tmp_path, store, tool)
+    result = _execute(registry, call)
 
     assert result.ok is False
     assert result.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
@@ -331,7 +380,7 @@ def test_dead_holder_becomes_unknown_and_is_not_reexecuted(tmp_path):
     record = store.get_tool_operation(
         owner_id="owner-a",
         run_id="run-1",
-        operation_id=envelope.operation_id,
+        operation_id=call.operation_id,
     )
     assert record is not None and record.status == "unknown"
 
@@ -355,18 +404,19 @@ def test_expired_lease_becomes_unknown_even_if_holder_process_is_live(tmp_path):
 
 def test_failed_result_is_replayed_exactly(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
-    failure = ToolExecutionResult(
+    failure = ToolHandlerOutcome(
         "counting_write",
         False,
         "provider unavailable",
         error_code="TOOL_RATE_LIMIT_EXCEEDED",
+        effect_outcome="not_started",
     )
     tool = _CountingTool(result=failure)
     registry = _registry(tmp_path, store, tool)
-    envelope = _envelope("run-1", "call-1", 1)
+    call = _call("run-1", "call-1", 1)
 
-    first = registry.execute_call(envelope)
-    replay = registry.execute_call(envelope)
+    first = _execute(registry, call)
+    replay = _execute(registry, call)
 
     assert first.ok is False and replay.ok is False
     assert replay.error_code == first.error_code
@@ -377,18 +427,44 @@ def test_failed_result_is_replayed_exactly(tmp_path):
     assert first.handler_executed is True
     assert replay.failure_stage == ToolFailureStage.EFFECT_RECONCILIATION.value
     assert replay.handler_executed is False
-    assert replay.result_envelope["tool_operation"]["original_tool_execution"][
+    assert replay.metadata["handler_details"]["tool_operation"]["original_tool_execution"][
         "failure_stage"
     ] == ToolFailureStage.EXECUTION.value
-    assert replay.result_envelope["tool_operation"]["original_tool_execution"][
+    assert replay.metadata["handler_details"]["tool_operation"]["original_tool_execution"][
         "handler_executed"
     ] is True
     assert tool.calls == 1
 
 
+def test_started_generic_side_effect_failure_is_unknown_without_not_started_proof(
+    tmp_path,
+):
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    failure = ToolHandlerOutcome(
+        "counting_write",
+        False,
+        "provider failed after accepting the request",
+        error_code="TOOL_ERROR",
+    )
+    tool = _CountingTool(result=failure)
+    registry = _registry(tmp_path, store, tool)
+    call = _call("run-1", "call-generic-failure", 1)
+
+    first = _execute(registry, call)
+    replay = _execute(registry, call)
+
+    assert first.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
+    assert first.reported_error_code == "TOOL_ERROR"
+    assert first.effect_outcome == "unknown"
+    assert first.handler_executed is True
+    assert replay.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
+    assert replay.handler_executed is False
+    assert tool.calls == 1
+
+
 def test_side_effect_timeout_is_persisted_unknown_and_not_retried(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
-    timeout = ToolExecutionResult(
+    timeout = ToolHandlerOutcome(
         "counting_write",
         False,
         "provider timed out",
@@ -396,16 +472,16 @@ def test_side_effect_timeout_is_persisted_unknown_and_not_retried(tmp_path):
     )
     tool = _CountingTool(result=timeout)
     registry = _registry(tmp_path, store, tool)
-    envelope = _envelope("run-1", "call-1", 1)
+    call = _call("run-1", "call-1", 1)
 
-    first = registry.execute_call(envelope)
-    second = registry.execute_call(envelope)
+    first = _execute(registry, call)
+    second = _execute(registry, call)
 
     assert first.ok is False and second.ok is False
     assert first.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
     assert first.reported_error_code == "TOOL_TIMEOUT"
     assert first.retryable is False
-    assert first.result_envelope["tool_operation"]["status"] == "unknown"
+    assert first.operation is not None and first.operation.status == "unknown"
     assert first.failure_stage == ToolFailureStage.EFFECT_RECONCILIATION.value
     assert first.handler_executed is True
     assert second.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
@@ -415,7 +491,7 @@ def test_side_effect_timeout_is_persisted_unknown_and_not_retried(tmp_path):
     record = store.get_tool_operation(
         owner_id="owner-a",
         run_id="run-1",
-        operation_id=envelope.operation_id,
+        operation_id=call.operation_id,
     )
     assert record is not None
     assert record.status == "unknown"
@@ -423,9 +499,34 @@ def test_side_effect_timeout_is_persisted_unknown_and_not_retried(tmp_path):
     assert record.unknown_reason == "effect_outcome_unknown:TOOL_TIMEOUT"
 
 
+def test_started_side_effect_cancellation_is_unknown_and_not_retried(tmp_path):
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    cancelled = ToolHandlerOutcome(
+        "counting_write",
+        False,
+        "request cancelled after dispatch",
+        error_code="CANCELLED",
+    )
+    tool = _CountingTool(result=cancelled)
+    registry = _registry(tmp_path, store, tool)
+    call = _call("run-1", "call-cancelled", 7)
+
+    first = _execute(registry, call)
+    replay = _execute(registry, call)
+
+    assert first.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
+    assert first.reported_error_code == "CANCELLED"
+    assert first.effect_outcome == "unknown"
+    assert first.handler_executed is True
+    assert first.operation is not None and first.operation.status == "unknown"
+    assert replay.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
+    assert replay.handler_executed is False
+    assert tool.calls == 1
+
+
 def test_equivalent_unknown_operation_with_new_call_id_is_not_retried(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
-    timeout = ToolExecutionResult(
+    timeout = ToolHandlerOutcome(
         "counting_write",
         False,
         "provider timed out",
@@ -434,13 +535,13 @@ def test_equivalent_unknown_operation_with_new_call_id_is_not_retried(tmp_path):
     tool = _CountingTool(result=timeout)
     registry = _registry(tmp_path, store, tool)
 
-    first = registry.execute_call(_envelope("run-1", "call-1", 1))
-    second = registry.execute_call(_envelope("run-1", "call-2", 1))
+    first = _execute(registry, _call("run-1", "call-1", 1))
+    second = _execute(registry, _call("run-1", "call-2", 1))
 
     assert first.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
     assert second.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
     assert second.handler_executed is False
-    assert second.result_envelope["tool_operation"]["diagnostic"].startswith(
+    assert second.metadata["handler_details"]["tool_operation"]["diagnostic"].startswith(
         "equivalent_unknown_operation:tool_call:call-1"
     )
     assert tool.calls == 1
@@ -450,7 +551,7 @@ def test_equivalent_unknown_operation_with_new_call_id_is_not_retried(tmp_path):
 
 def test_timeout_with_proof_not_started_remains_a_normal_failure(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
-    timeout = ToolExecutionResult(
+    timeout = ToolHandlerOutcome(
         "counting_write",
         False,
         "queue wait timed out before dispatch",
@@ -460,16 +561,16 @@ def test_timeout_with_proof_not_started_remains_a_normal_failure(tmp_path):
     )
     tool = _CountingTool(result=timeout)
     registry = _registry(tmp_path, store, tool)
-    envelope = _envelope("run-1", "call-1", 1)
+    call = _call("run-1", "call-1", 1)
 
-    result = registry.execute_call(envelope)
+    result = _execute(registry, call)
 
     assert result.error_code == "TOOL_TIMEOUT"
-    assert result.result_envelope["tool_operation"]["status"] == "failed"
+    assert result.operation is not None and result.operation.status == "failed"
     record = store.get_tool_operation(
         owner_id="owner-a",
         run_id="run-1",
-        operation_id=envelope.operation_id,
+        operation_id=call.operation_id,
     )
     assert record is not None and record.status == "failed"
 
@@ -484,16 +585,18 @@ def test_reconciliation_not_started_reopens_same_business_operation(tmp_path):
     )
     registry = _registry(tmp_path, store, tool)
 
-    first = registry.execute_call(_envelope("run-1", "call-1", 7))
-    second = registry.execute_call(_envelope("run-2", "call-2", 7))
+    first = _execute(registry, _call("run-1", "call-1", 7))
+    second = _execute(registry, _call("run-2", "call-2", 7))
 
     assert first.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
     assert second.ok is True
     assert tool.calls == 2
-    assert second.result_envelope["tool_operation"]["action"] == (
+    assert second.metadata["handler_details"]["tool_operation"]["action"] == (
         "executed_after_reconciliation"
     )
-    assert second.result_envelope["tool_operation"]["reconciliation_source_ref"] == (
+    assert second.metadata["handler_details"]["tool_operation"][
+        "reconciliation_source_ref"
+    ] == (
         "provider_lookup:req-7:not_found"
     )
     record = store.get_tool_operation(
@@ -512,12 +615,12 @@ def test_reconciliation_not_started_reopens_same_business_operation(tmp_path):
         == "provider_lookup:req-7:not_found"
     )
 
-    replay = registry.execute_call(_envelope("run-3", "call-3", 7))
+    replay = _execute(registry, _call("run-3", "call-3", 7))
 
     assert replay.ok is True
     assert tool.calls == 2
-    assert replay.result_envelope["tool_operation"]["action"] == "replay"
-    assert replay.result_envelope["tool_operation"][
+    assert replay.metadata["handler_details"]["tool_operation"]["action"] == "replay"
+    assert replay.metadata["handler_details"]["tool_operation"][
         "reconciliation_source_ref"
     ] == "provider_lookup:req-7:not_found"
 
@@ -532,13 +635,13 @@ def test_reconciliation_safe_to_retry_reopens_same_business_operation(tmp_path):
     )
     registry = _registry(tmp_path, store, tool)
 
-    first = registry.execute_call(_envelope("run-1", "call-1", 17))
-    second = registry.execute_call(_envelope("run-2", "call-2", 17))
+    first = _execute(registry, _call("run-1", "call-1", 17))
+    second = _execute(registry, _call("run-2", "call-2", 17))
 
     assert first.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
     assert second.ok is True
     assert tool.calls == 2
-    assert second.result_envelope["tool_operation"]["action"] == (
+    assert second.metadata["handler_details"]["tool_operation"]["action"] == (
         "executed_after_reconciliation"
     )
     record = store.get_tool_operation(
@@ -553,7 +656,7 @@ def test_reconciliation_safe_to_retry_reopens_same_business_operation(tmp_path):
 
 def test_reconciliation_success_settles_without_second_effect(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
-    reconciled = ToolExecutionResult(
+    reconciled = ToolHandlerOutcome(
         "counting_write",
         True,
         "provider confirms committed",
@@ -567,13 +670,13 @@ def test_reconciliation_success_settles_without_second_effect(tmp_path):
     )
     registry = _registry(tmp_path, store, tool)
 
-    first = registry.execute_call(_envelope("run-1", "call-1", 8))
-    second = registry.execute_call(_envelope("run-2", "call-2", 8))
+    first = _execute(registry, _call("run-1", "call-1", 8))
+    second = _execute(registry, _call("run-2", "call-2", 8))
 
     assert first.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
     assert second.ok is True
     assert second.output == "provider confirms committed"
-    assert second.result_envelope["tool_operation"]["action"] == "reconciled"
+    assert second.metadata["handler_details"]["tool_operation"]["action"] == "reconciled"
     assert tool.calls == 1
     record = store.get_tool_operation(
         owner_id="owner-a",
@@ -592,7 +695,7 @@ def test_reconciliation_success_settles_without_second_effect(tmp_path):
 
 def test_reconciliation_failure_settles_without_second_effect(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
-    reconciled = ToolExecutionResult(
+    reconciled = ToolHandlerOutcome(
         "counting_write",
         False,
         "provider confirms rejection",
@@ -609,12 +712,12 @@ def test_reconciliation_failure_settles_without_second_effect(tmp_path):
     )
     registry = _registry(tmp_path, store, tool)
 
-    first = registry.execute_call(_envelope("run-1", "call-1", 8))
-    second = registry.execute_call(_envelope("run-2", "call-2", 8))
+    first = _execute(registry, _call("run-1", "call-1", 8))
+    second = _execute(registry, _call("run-2", "call-2", 8))
 
     assert first.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
     assert second.error_code == "TOOL_INVALID_ARGUMENTS"
-    assert second.result_envelope["tool_operation"]["action"] == "reconciled"
+    assert second.metadata["handler_details"]["tool_operation"]["action"] == "reconciled"
     assert tool.calls == 1
     record = store.get_tool_operation(
         owner_id="owner-a",
@@ -631,11 +734,11 @@ def test_reconciliation_without_source_ref_stays_unknown(tmp_path):
     )
     registry = _registry(tmp_path, store, tool)
 
-    registry.execute_call(_envelope("run-1", "call-1", 9))
-    second = registry.execute_call(_envelope("run-2", "call-2", 9))
+    _execute(registry, _call("run-1", "call-1", 9))
+    second = _execute(registry, _call("run-2", "call-2", 9))
 
     assert second.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
-    assert second.result_envelope["tool_operation"]["diagnostic"] == (
+    assert second.metadata["handler_details"]["tool_operation"]["diagnostic"] == (
         "reconciliation_source_ref_missing"
     )
     assert tool.calls == 1
@@ -652,7 +755,7 @@ def test_concurrent_reconciliation_reopens_unknown_operation_only_once(tmp_path)
                 return self.result
             retry_started.set()
             assert retry_release.wait(timeout=5)
-            return ToolExecutionResult(
+            return ToolHandlerOutcome(
                 "counting_write",
                 True,
                 f"completed:{params['value']}",
@@ -666,17 +769,17 @@ def test_concurrent_reconciliation_reopens_unknown_operation_only_once(tmp_path)
         )
     )
     registry = _registry(tmp_path, store, tool)
-    first = registry.execute_call(_envelope("run-1", "call-1", 10))
-    results: list[ToolExecutionResult] = []
+    first = _execute(registry, _call("run-1", "call-1", 10))
+    results: list[ToolHandlerOutcome] = []
     retry = threading.Thread(
         target=lambda: results.append(
-            registry.execute_call(_envelope("run-2", "call-2", 10))
+            _execute(registry, _call("run-2", "call-2", 10))
         )
     )
     retry.start()
     assert retry_started.wait(timeout=5)
 
-    competing = registry.execute_call(_envelope("run-3", "call-3", 10))
+    competing = _execute(registry, _call("run-3", "call-3", 10))
     retry_release.set()
     retry.join(timeout=5)
 
@@ -690,11 +793,16 @@ def test_concurrent_reconciliation_reopens_unknown_operation_only_once(tmp_path)
 def test_business_scope_without_stable_key_fails_before_handler(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
     tool = _CountingTool()
-    tool.spec.idempotency_scope = "business"
-
-    result = _registry(tmp_path, store, tool).execute_call(
-        _envelope("run-1", "call-1", 1)
+    tool.runtime_policy = replace(
+        tool.runtime_policy,
+        idempotency_policy=replace(
+            tool.runtime_policy.idempotency_policy,
+            scope="business",
+        ),
     )
+
+    registry = _registry(tmp_path, store, tool)
+    result = _execute(registry, _call("run-1", "call-1", 1))
 
     assert result.error_code == "TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING"
     assert tool.calls == 0
@@ -712,11 +820,11 @@ def test_claim_store_failure_is_fail_closed_before_handler(tmp_path):
     tool = _CountingTool()
     registry = _registry(tmp_path, _UnavailableStore(), tool)
 
-    result = registry.execute_call(_envelope("run-1", "call-1", 1))
+    result = _execute(registry, _call("run-1", "call-1", 1))
 
     assert result.ok is False
     assert result.error_code == "TOOL_OPERATION_STORE_UNAVAILABLE"
-    assert result.result_envelope["tool_operation"]["status"] == "not_started"
+    assert result.operation is not None and result.operation.status == "not_started"
     assert tool.calls == 0
 
 
@@ -737,7 +845,7 @@ def test_missing_store_is_fail_closed_by_default(tmp_path):
     )
     registry.register(tool)
 
-    result = registry.execute_call(_envelope("run-1", "call-1", 1))
+    result = _execute(registry, _call("run-1", "call-1", 1))
 
     assert result.ok is False
     assert result.error_code == "TOOL_OPERATION_STORE_UNAVAILABLE"
@@ -760,15 +868,15 @@ def test_completion_store_failure_does_not_invite_duplicate_retry(tmp_path):
         _FinishUnavailableStore(),
         tool,
     )
-    result = registry.execute_call(_envelope("run-1", "call-1", 1))
-    replay_attempt = registry.execute_call(_envelope("run-1", "call-1", 1))
+    result = _execute(registry, _call("run-1", "call-1", 1))
+    replay_attempt = _execute(registry, _call("run-1", "call-1", 1))
 
     assert result.ok is False
     assert result.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
     assert result.effect_outcome == "unknown"
-    assert result.result_envelope["reported_tool_result"]["ok"] is True
-    assert result.result_envelope["tool_operation"]["status"] == "unknown"
-    assert result.result_envelope["tool_operation"]["action"] == (
+    assert result.metadata["handler_details"]["reported_tool_result"]["ok"] is True
+    assert result.operation is not None and result.operation.status == "unknown"
+    assert result.metadata["handler_details"]["tool_operation"]["action"] == (
         "completion_persistence_failed"
     )
     assert replay_attempt.ok is False
@@ -928,7 +1036,7 @@ def test_business_key_reuse_with_changed_input_is_a_conflict(tmp_path):
                 **first_request.__dict__,
                 "run_id": "run-2",
                 "operation_id": "tool_call:call-2",
-                "args_hash": args_hash_for_call({"value": 2}),
+                "args_hash": tool_arguments_hash({"value": 2}),
                 "holder": new_tool_operation_holder(),
                 "now": 300.0,
                 "lease_expires_at": 400.0,
@@ -978,8 +1086,8 @@ def test_unreadable_terminal_result_never_reexecutes_handler(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
     tool = _CountingTool()
     registry = _registry(tmp_path, store, tool)
-    envelope = _envelope("run-1", "call-1", 1)
-    assert registry.execute_call(envelope).ok is True
+    call = _call("run-1", "call-1", 1)
+    assert _execute(registry, call).ok is True
     with store._connection() as conn:
         conn.execute(
             """
@@ -987,17 +1095,17 @@ def test_unreadable_terminal_result_never_reexecutes_handler(tmp_path):
             SET result_json = ?
             WHERE owner_id = ? AND run_id = ? AND operation_id = ?
             """,
-            ("{}", "owner-a", "run-1", envelope.operation_id),
+            ("{}", "owner-a", "run-1", call.operation_id),
         )
         conn.commit()
 
-    replay = registry.execute_call(envelope)
+    replay = _execute(registry, call)
 
     assert replay.ok is False
     assert replay.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
-    assert replay.result_envelope["tool_operation"]["status"] == "unknown"
-    assert replay.result_envelope["tool_operation"]["action"] == "reconcile"
-    assert replay.result_envelope["tool_operation"]["replayed"] is False
+    assert replay.operation is not None and replay.operation.status == "unknown"
+    assert replay.metadata["handler_details"]["tool_operation"]["action"] == "reconcile"
+    assert replay.operation.replayed is False
     assert tool.calls == 1
 
 
@@ -1005,20 +1113,22 @@ def test_operation_identity_is_owner_scoped(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
     tool_a = _CountingTool()
     tool_b = _CountingTool()
-    envelope = _envelope("run-1", "call-1", 1)
+    call = _call("run-1", "call-1", 1)
 
-    result_a = _registry(
+    registry_a = _registry(
         tmp_path,
         store,
         tool_a,
         owner_id="owner-a",
-    ).execute_call(envelope)
-    result_b = _registry(
+    )
+    registry_b = _registry(
         tmp_path,
         store,
         tool_b,
         owner_id="owner-b",
-    ).execute_call(envelope)
+    )
+    result_a = _execute(registry_a, call)
+    result_b = _execute(registry_b, call)
 
     assert result_a.ok and result_b.ok
     assert tool_a.calls == 1 and tool_b.calls == 1
@@ -1029,18 +1139,20 @@ def test_business_identity_is_owner_scoped(tmp_path):
     tool_a = _BusinessCountingTool()
     tool_b = _BusinessCountingTool()
 
-    result_a = _registry(
+    registry_a = _registry(
         tmp_path,
         store,
         tool_a,
         owner_id="owner-a",
-    ).execute_call(_envelope("run-1", "call-1", 1))
-    result_b = _registry(
+    )
+    registry_b = _registry(
         tmp_path,
         store,
         tool_b,
         owner_id="owner-b",
-    ).execute_call(_envelope("run-2", "call-2", 1))
+    )
+    result_a = _execute(registry_a, _call("run-1", "call-1", 1))
+    result_b = _execute(registry_b, _call("run-2", "call-2", 1))
 
     assert result_a.ok and result_b.ok
     assert tool_a.calls == 1 and tool_b.calls == 1
@@ -1048,7 +1160,7 @@ def test_business_identity_is_owner_scoped(tmp_path):
 
 def test_success_cannot_claim_incomplete_effect_outcome():
     with pytest.raises(ValueError, match="successful tool result"):
-        ToolExecutionResult(
+        ToolHandlerOutcome(
             "counting_write",
             True,
             "contradictory",
@@ -1056,62 +1168,44 @@ def test_success_cannot_claim_incomplete_effect_outcome():
         )
 
 
-def test_native_provider_call_id_is_used_as_operation_identity():
-    runtime_request = SimpleNamespace(
-        payload={"tool": "counting_write", "call_id": "provider-call-42"},
-        trace_request=SimpleNamespace(tool_rounds=9, idx=3),
-    )
-    text_request = SimpleNamespace(
-        payload={"tool": "counting_write"},
-        trace_request=SimpleNamespace(tool_rounds=9, idx=3),
-    )
-
-    assert _runtime_tool_call_id(runtime_request) == "provider-call-42"
-    assert _runtime_tool_call_id(text_request) == "round-9-tool-3"
-
-
 def test_resilience_retries_read_only_but_never_side_effect(tmp_path):
-    read_calls = 0
-    write_calls = 0
+    class _RetryTool(BaseTool):
+        def __init__(self, name: str, effect: str) -> None:
+            self.calls = 0
+            self.effect = effect
+            self.model_spec = make_test_model_spec(name, description=name)
+            self.runtime_policy = make_test_runtime_policy(effect)
 
-    def read_invoke():
-        nonlocal read_calls
-        read_calls += 1
-        if read_calls == 1:
-            return ToolExecutionResult(
-                "read",
+        def execute(self, params):
+            self.calls += 1
+            if self.effect == "read_only" and self.calls > 1:
+                return ToolHandlerOutcome(self.model_spec.name, True, "ok")
+            return ToolHandlerOutcome(
+                self.model_spec.name,
                 False,
                 "try again",
                 error_code="TOOL_RATE_LIMIT_EXCEEDED",
             )
-        return ToolExecutionResult("read", True, "ok")
 
-    def write_invoke():
-        nonlocal write_calls
-        write_calls += 1
-        return ToolExecutionResult(
-            "write",
-            False,
-            "try again",
-            error_code="TOOL_RATE_LIMIT_EXCEEDED",
-        )
+    read_tool = _RetryTool("read", "read_only")
+    write_tool = _RetryTool("write", "mutating")
+    read = execute_canonical_test_call(
+        tmp_path,
+        tools={"read": read_tool},
+        tool_name="read",
+        arguments={},
+    ).result
+    write = execute_canonical_test_call(
+        tmp_path,
+        tools={"write": write_tool},
+        tool_name="write",
+        arguments={},
+        operation_store_required=False,
+    ).result
 
-    read = resilient_tool_invoke(
-        ResilientToolInvokeRequest(
-            invoke=read_invoke,
-            spec=_spec("read", "read_only"),
-        )
-    )
-    write = resilient_tool_invoke(
-        ResilientToolInvokeRequest(
-            invoke=write_invoke,
-            spec=_spec("write", "mutating"),
-        )
-    )
-
-    assert read.ok is True and read_calls == 2
-    assert write.ok is False and write_calls == 1
-    assert write.result_envelope["tool_resilience"]["retry_attempts"] == 0
+    assert read.ok is True and read_tool.calls == 2
+    assert read.metadata["handler_details"]["tool_resilience"]["retry_attempts"] == 1
+    assert write.ok is False and write_tool.calls == 1
 
 
 def _registry(
@@ -1141,48 +1235,65 @@ def _registry(
     return registry
 
 
-def _envelope(
+def _call(
     run_id: str,
     call_id: str,
     value: int,
     *,
     attempt_id: str = "",
-) -> ToolCallEnvelope:
-    return ToolCallEnvelope(
-        call_id=call_id,
-        source="model_tool_call",
+) -> _CallSpec:
+    return _CallSpec(
         tool_name="counting_write",
-        input={"value": value},
-        scope=RunScope(
-            request_id=f"request-{run_id}",
-            attempt_id=attempt_id,
-            task_id=run_id,
-            run_id=run_id,
-            owner_type="user",
-            owner_id="owner-a",
-        ),
+        arguments={"value": value},
+        run_id=run_id,
+        call_id=call_id,
+        attempt_id=attempt_id,
     )
 
 
-def _mixed_envelope(
+def _mixed_call(
     run_id: str,
     call_id: str,
     action: str,
     value: int,
-) -> ToolCallEnvelope:
-    return ToolCallEnvelope(
-        call_id=call_id,
-        source="model_tool_call",
+) -> _CallSpec:
+    return _CallSpec(
         tool_name="mixed_action",
-        input={"action": action, "value": value},
-        scope=RunScope(
-            request_id=f"request-{run_id}",
-            task_id=run_id,
-            run_id=run_id,
-            owner_type="user",
-            owner_id="owner-a",
-        ),
+        arguments={"action": action, "value": value},
+        run_id=run_id,
+        call_id=call_id,
     )
+
+
+def _execute(
+    registry: ToolRegistry,
+    spec: _CallSpec,
+    *,
+    write_boundary: dict[str, object] | None = None,
+) -> ToolResult:
+    snapshot = registry.runtime_snapshot(run_id=spec.run_id)
+    call = canonical_test_call(
+        snapshot,
+        spec.tool_name,
+        spec.arguments,
+        call_id=spec.call_id,
+        attempt_id=spec.attempt_id or f"attempt:{spec.run_id}",
+        operation_id=spec.operation_id,
+        idempotency_key=spec.idempotency_key,
+    )
+    return registry.execute_tool(
+        call,
+        write_boundary=write_boundary,
+        runtime_snapshot=snapshot,
+        trusted_run_context={
+            "run_scope": {
+                "request_id": f"request-{spec.run_id}",
+                "task_id": spec.run_id,
+                "owner_type": "user",
+                "owner_id": "owner-a",
+            }
+        },
+    ).result
 
 
 def _claim_request(
@@ -1199,25 +1310,11 @@ def _claim_request(
         task_id="run-1",
         operation_id="tool_call:call-1",
         tool="counting_write",
-        args_hash=args_hash_for_call({"value": 1}),
+        args_hash=tool_arguments_hash({"value": 1}),
         idempotency_key=idempotency_key,
         idempotency_scope=idempotency_scope,
         idempotency_namespace="counting_write",
         holder=holder,
         lease_expires_at=lease_expires_at,
         now=now,
-    )
-
-
-def _spec(name: str, effect: str) -> ToolSpec:
-    return ToolSpec(
-        name=name,
-        category="test",
-        description=name,
-        use_cases=[],
-        avoid_when=[],
-        keywords=[],
-        parameters={},
-        effect=effect,
-        idempotency_scope="operation" if effect != "read_only" else "",
     )

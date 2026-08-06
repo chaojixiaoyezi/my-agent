@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..common.log_redaction import redact_sensitive_text
+from .cancellation import cancellation_requested, register_cancellation_callback
 
 logger = logging.getLogger(__name__)
 
@@ -309,6 +310,7 @@ class MCPStdioClient:
         self._next_id = 1
         self._reader: threading.Thread | None = None
         self._responses: dict[int, dict[str, Any]] = {}
+        self._abandoned_response_ids: set[int] = set()
         self._responses_cv = threading.Condition()
         self._reader_done = threading.Event()
         self._stderr_tail = _StderrTail(config.name)  # 子进程 stderr 末尾若干行，用于诊断
@@ -542,26 +544,37 @@ class MCPStdioClient:
     def _await_response(self, req_id: int, method: str, timeout: float) -> Any:
         """轮询等待指定 id 的响应；超时 / 进程提前死 都转成 MCPError。"""
         deadline = time.monotonic() + max(0.1, timeout)
-        with self._responses_cv:
-            while True:
-                if req_id in self._responses:
-                    payload = self._responses.pop(req_id)
-                    return _unwrap_jsonrpc(self.config.name, payload, method)
-                if self._reader_done.is_set() and req_id not in self._responses:
-                    # 读线程已结束（子进程退出 / stdout EOF）但没拿到本请求的响应。
-                    raise MCPError(
-                        f"MCP server '{self.config.name}' 在响应 {method} 前断开连接"
-                        f"{self._stderr_hint()}",
-                        code="MCP_CONNECTION_CLOSED",
-                    )
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise MCPError(
-                        f"MCP server '{self.config.name}' 调用 {method} 超时"
-                        f"（{timeout:.0f}s）",
-                        code="MCP_TIMEOUT",
-                    )
-                self._responses_cv.wait(timeout=min(remaining, 0.5))
+        def wake_waiter() -> None:
+            with self._responses_cv:
+                self._responses_cv.notify_all()
+
+        with register_cancellation_callback(wake_waiter):
+            with self._responses_cv:
+                while True:
+                    if cancellation_requested():
+                        self._abandoned_response_ids.add(req_id)
+                        raise MCPError(
+                            f"MCP server '{self.config.name}' 调用 {method} 已取消",
+                            code="MCP_CANCELLED",
+                        )
+                    if req_id in self._responses:
+                        payload = self._responses.pop(req_id)
+                        return _unwrap_jsonrpc(self.config.name, payload, method)
+                    if self._reader_done.is_set() and req_id not in self._responses:
+                        # 读线程已结束（子进程退出 / stdout EOF）但没拿到本请求的响应。
+                        raise MCPError(
+                            f"MCP server '{self.config.name}' 在响应 {method} 前断开连接"
+                            f"{self._stderr_hint()}",
+                            code="MCP_CONNECTION_CLOSED",
+                        )
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise MCPError(
+                            f"MCP server '{self.config.name}' 调用 {method} 超时"
+                            f"（{timeout:.0f}s）",
+                            code="MCP_TIMEOUT",
+                        )
+                    self._responses_cv.wait(timeout=min(remaining, 0.5))
 
     # -- 后台读 / stderr -----------------------------------------------------
 
@@ -626,6 +639,9 @@ class MCPStdioClient:
         except (TypeError, ValueError):
             return
         with self._responses_cv:
+            if key in self._abandoned_response_ids:
+                self._abandoned_response_ids.discard(key)
+                return
             self._responses[key] = message
             self._responses_cv.notify_all()
 

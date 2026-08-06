@@ -423,8 +423,7 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
         "- 如果用户要求按钮、链接或图片不能失效，不要用 href=\"#\"、空锚点或不存在的 #id 假装可点击；"
         "页面内跳转必须指向真实存在的元素 id，按钮必须有真实交互或真实本地目标。",
         "- 生成普通报告或中等长度文本时，优先用 write_file 的 content 字段完整写入。"
-        "生成长 CSS/JS/HTML、大段代码或长报告时，可以用 "
-        "独立成行的 [WRITE_FILE_RAW path=\"...\"]...[/WRITE_FILE_RAW] 原文块（独立原文块，不要写进任何工具调用的参数里，也不要把 WRITE_FILE_RAW 写进 JSON 的 tool 字段）。"
+        "生成长 CSS/JS/HTML、大段代码或长报告时，第一块用 mode=\"overwrite\"，后续使用 mode=\"append\" 分段写入。"
         f"{filesystem_text_mutation_rule()}。PDF、XLSX、图片等二进制产物可用授权命令/脚本生成，"
         "再用 write_file.data_base64 写入。",
         "- write_file 会自动创建父目录；不要因为目标目录尚未创建就标记 BLOCKED。"

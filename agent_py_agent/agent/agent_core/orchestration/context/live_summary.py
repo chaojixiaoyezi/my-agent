@@ -52,7 +52,7 @@ _TOP_LEVEL_ACTION_KEYS = (
 
 
 def orchestration_live_summary(result, archive_record: dict[str, object]) -> str:
-    tool = str(getattr(result, "tool", "") or "")
+    tool = str(getattr(result, "tool_name", "") or "")
     payload = _json_object(str(getattr(result, "output", "") or ""))
     if tool in _ORCHESTRATION_TOOLS and payload is not None:
         return orchestration_payload_summary(tool, payload, archive_record)

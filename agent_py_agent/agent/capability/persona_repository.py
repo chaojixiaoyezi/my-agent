@@ -16,7 +16,6 @@ from ..common.json_io import (
     write_text_file_atomic,
     write_text_file_atomic_unlocked,
 )
-from ..memory_store.security import scan_memory_content
 from ..user_space.owner_quota import (
     OwnerQuotaAdmission,
     OwnerQuotaChange,
@@ -583,6 +582,8 @@ def _prepare_persona_rollback(
     if request.rollback_version is None:
         raise ValueError("rollback_version is required")
     next_text = repository._content_for_version(request.target, request.rollback_version)
+    from ..memory_store.security import scan_memory_content
+
     if not scan_memory_content(next_text).safe:
         raise PersonaSecurityError("rollback snapshot failed persona threat scan")
     return next_text, "", ""
@@ -735,6 +736,7 @@ def _persona_entries_for_output(
     entries: list[dict[str, str | bool]] = []
     for entry in _persona_entries_from_text(text, target):
         content = entry["content"]
+        from ..memory_store.security import scan_memory_content
         if scan_memory_content(content).safe:
             entries.append(entry)
             continue
@@ -760,6 +762,7 @@ def _apply_operation_to_text(
         content = str(content or "").strip()
         if not content:
             raise ValueError("persona content is required")
+        from ..memory_store.security import scan_memory_content
         scan = scan_memory_content(content)
         if not scan.safe:
             raise PersonaSecurityError(scan.reason())
@@ -839,6 +842,7 @@ def _sanitize_persona_text(content: str) -> tuple[str, int]:
             stripped[2:].strip()
         ):
             continue
+        from ..memory_store.security import scan_memory_content
         scan = scan_memory_content(line)
         if scan.safe:
             lines.append(line)

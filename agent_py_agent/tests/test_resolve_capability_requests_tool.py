@@ -15,6 +15,7 @@ from pathlib import Path
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.subagents.services.lifecycle import RecordCapabilityRequestParams
+from agent_py_agent.tests._tool_runtime_harness import execute_approved_registry_test_call
 
 
 def _agent_and_blocked_task(td: str):
@@ -138,8 +139,10 @@ def test_cancelled_child_closes_leftover_open_request():
         task = agent.subagents.load(task.id)
         task.status = "BLOCKED"
         agent.subagents.save(task)
-        result = agent.tools.execute_call(
-            {"tool": "cancel_subagents", "run_ids": [task.id], "reason": "救不回来,了结"}
+        result = execute_approved_registry_test_call(
+            agent.tools,
+            "cancel_subagents",
+            {"run_ids": [task.id], "reason": "救不回来,了结"},
         )
         assert result.ok
         reloaded = agent.subagents.load(task.id)

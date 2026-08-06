@@ -37,16 +37,17 @@ class NaturalFurnitureRootBackend(BaseBackend):
                 backend=self.name,
             )
         assert "dispatch_subagents" in prompt
-        return ModelResponse(text="小傻妞团队已交付高端现代家具品牌首页，产物和验收线索都已写入。", backend=self.name)
+        return ModelResponse(
+            text="小傻妞团队已交付高端现代家具品牌首页，产物和验收线索都已写入。", backend=self.name
+        )
 
     def _create_payload(self) -> dict[str, object]:
         return {
             "tool": "create_subagents",
-            "dry_run": False,
             "role": "coordinator",
             "agent_name": "小傻妞-家具总控",
             "tool_preset": "coding",
-            "extra_write_roots": [str(self.site_dir)],
+            "output_files": [str(self.site_dir / "index.html")],
             "goal": (
                 f"请统筹完成高端现代家具品牌首页，最终只需要在 {self.site_dir / 'index.html'} "
                 "交付单文件 HTML。不要写注释，不要使用失效图片，不要有失灵按钮。"
@@ -86,13 +87,19 @@ class NaturalFurnitureRunnerBackend(BaseBackend):
             return ModelResponse(text=_tool_call(self._schedule_leaf_payload()), backend=self.name)
         if self.coordinator_calls == 2:
             return ModelResponse(text=_tool_call(_child_dispatch_payload()), backend=self.name)
-        return ModelResponse(text=_subagent_result("小傻妞已让小小傻妞完成 index.html，并完成本地验收。"), backend=self.name)
+        return ModelResponse(
+            text=_subagent_result("小傻妞已让小小傻妞完成 index.html，并完成本地验收。"),
+            backend=self.name,
+        )
 
     def _leaf_response(self) -> ModelResponse:
         self.leaf_calls += 1
         if self.leaf_calls == 1:
             return ModelResponse(text=_tool_call(self._write_html_payload()), backend=self.name)
-        return ModelResponse(text=_subagent_result(f"小小傻妞已写入 {self.site_dir / 'index.html'}。"), backend=self.name)
+        return ModelResponse(
+            text=_subagent_result(f"小小傻妞已写入 {self.site_dir / 'index.html'}。"),
+            backend=self.name,
+        )
 
     def _schedule_leaf_payload(self) -> dict[str, object]:
         return {
@@ -155,7 +162,14 @@ def _subagent_result(summary: str) -> str:
                 ],
                 "capability_requests": [],
                 "artifacts": [{"path": "index.html", "kind": "html", "summary": "家具首页"}],
-                "tests": [{"name": "static-site-smoke", "command": "static_site_check", "ok": True, "summary": "通过"}],
+                "tests": [
+                    {
+                        "name": "static-site-smoke",
+                        "command": "static_site_check",
+                        "ok": True,
+                        "summary": "通过",
+                    }
+                ],
                 "patches": [],
                 "lessons": [],
                 "next_actions": [],
@@ -172,7 +186,11 @@ def _agent_name_from_prompt(prompt: str) -> str:
     for line in prompt.splitlines():
         if line.startswith("- agent:"):
             return line.partition(":")[2].strip()
-    scoped_prompt = prompt[prompt.find("## Execution Context JSON") :] if "## Execution Context JSON" in prompt else prompt
+    scoped_prompt = (
+        prompt[prompt.find("## Execution Context JSON") :]
+        if "## Execution Context JSON" in prompt
+        else prompt
+    )
     match = re.search(r'"agent_name":\s*"([^"]+)"', scoped_prompt)
     if match:
         return match.group(1)
@@ -219,6 +237,7 @@ def test_natural_language_root_drives_child_and_grandchild_e2e(tmp_path: Path) -
     site_dir = tmp_path / "site"
     site_dir.mkdir()
     config = AgentConfig(
+        tool_protocol="text",
         enable_tools=True,
         model_backend="echo",
         max_tool_rounds=8,

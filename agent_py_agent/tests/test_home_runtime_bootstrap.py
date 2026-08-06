@@ -5,6 +5,7 @@ from datetime import date
 from pathlib import Path
 
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.memory_store import MemoryRecord
 from agent_py_agent.agent.settings import AgentConfig
 
 
@@ -12,7 +13,9 @@ def test_simple_agent_initializes_my_agent_home(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
 
-    agent = SimpleAgent(AgentConfig(my_agent_home=str(home), prompt_files=[]), repo)
+    agent = SimpleAgent(
+        AgentConfig(tool_protocol="text", my_agent_home=str(home), prompt_files=[]), repo
+    )
 
     assert agent.home_paths.root == home.resolve()
     assert agent.home_paths.config_dir.is_dir()
@@ -27,7 +30,9 @@ def test_simple_agent_rewrites_runtime_config_paths_to_owner_home(tmp_path: Path
     repo = tmp_path / "repo"
     home = tmp_path / "home"
 
-    agent = SimpleAgent(AgentConfig(my_agent_home=str(home), prompt_files=[]), repo)
+    agent = SimpleAgent(
+        AgentConfig(tool_protocol="text", my_agent_home=str(home), prompt_files=[]), repo
+    )
 
     owner_home = home / "owners" / "local" / "main"
     assert agent.config.memory_path == str(owner_home / "memory" / "long_term" / "memory.jsonl")
@@ -35,8 +40,12 @@ def test_simple_agent_rewrites_runtime_config_paths_to_owner_home(tmp_path: Path
     assert "/data/" not in agent.config.subagent_workspace
     assert "/data/" not in agent.config.gateway_workspace
     assert "/data/" not in agent.config.local_store_path
-    assert str(owner_home / "workspace" / "runtime" / "workspaces") in agent.config.subagent_workspace
-    assert str(owner_home / "workspace" / "runtime" / "workspaces") in agent.config.gateway_workspace
+    assert (
+        str(owner_home / "workspace" / "runtime" / "workspaces") in agent.config.subagent_workspace
+    )
+    assert (
+        str(owner_home / "workspace" / "runtime" / "workspaces") in agent.config.gateway_workspace
+    )
     assert str(owner_home / "workspace" / "runtime" / "workspaces") in agent.config.local_store_path
     assert not (repo / "data").exists()
 
@@ -44,12 +53,16 @@ def test_simple_agent_rewrites_runtime_config_paths_to_owner_home(tmp_path: Path
 def test_saved_run_creates_home_task_workspace(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
-    cfg = AgentConfig(my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[])
+    cfg = AgentConfig(
+        tool_protocol="text", my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
+    )
     agent = SimpleAgent(cfg, repo)
 
     agent.run("做一个示例网站", request_id="req-1", run_id="run-1", task_id="示例网站 E2E")
 
-    task_root = home / "owners" / "local" / "main" / "tasks" / date.today().isoformat() / "示例网站-e2e"
+    task_root = (
+        home / "owners" / "local" / "main" / "tasks" / date.today().isoformat() / "示例网站-e2e"
+    )
     assert (task_root / "output").is_dir()
     assert (task_root / "work").is_dir()
     assert (task_root / "work" / "runtime").is_dir()
@@ -73,7 +86,9 @@ def test_saved_run_creates_home_task_workspace(tmp_path: Path):
 def test_saved_run_uses_prompt_slug_when_only_machine_ids_are_available(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
-    cfg = AgentConfig(my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[])
+    cfg = AgentConfig(
+        tool_protocol="text", my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
+    )
     agent = SimpleAgent(cfg, repo)
 
     agent.run("分析多个项目源码并写一份中文报告", request_id="gw-123", run_id="run-456")
@@ -83,7 +98,9 @@ def test_saved_run_uses_prompt_slug_when_only_machine_ids_are_available(tmp_path
     assert len(task_dirs) == 1
     assert task_dirs[0].name not in {"gw-123", "run-456"}
     assert not task_dirs[0].name.startswith(("gw-", "run-", "req-"))
-    workspace = json.loads((task_dirs[0] / "work" / "run_workspace.json").read_text(encoding="utf-8"))
+    workspace = json.loads(
+        (task_dirs[0] / "work" / "run_workspace.json").read_text(encoding="utf-8")
+    )
     assert workspace["request_id"] == "gw-123"
     assert workspace["run_id"] == "run-456"
 
@@ -95,7 +112,9 @@ def test_same_prompt_new_run_reuses_task_workspace_with_timeline(tmp_path: Path)
     原 progress/产物/expected_outputs 声明全部失效)。"""
     repo = tmp_path / "repo"
     home = tmp_path / "home"
-    cfg = AgentConfig(my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[])
+    cfg = AgentConfig(
+        tool_protocol="text", my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
+    )
     agent = SimpleAgent(cfg, repo)
 
     prompt = "分析 all-agent 项目并写中文报告"
@@ -106,7 +125,9 @@ def test_same_prompt_new_run_reuses_task_workspace_with_timeline(tmp_path: Path)
     task_dirs = sorted(item for item in date_root.iterdir() if item.is_dir())
     assert len(task_dirs) == 1, "同 prompt 接力必须复用同一任务目录"
     assert task_dirs[0].name == "分析-all-agent-项目并写中文报告"
-    workspace = json.loads((task_dirs[0] / "work" / "run_workspace.json").read_text(encoding="utf-8"))
+    workspace = json.loads(
+        (task_dirs[0] / "work" / "run_workspace.json").read_text(encoding="utf-8")
+    )
     state = json.loads((task_dirs[0] / "work" / "state.json").read_text(encoding="utf-8"))
     manifest = json.loads(
         (task_dirs[0] / "work" / "refs" / "artifacts" / "manifest.json").read_text(encoding="utf-8")
@@ -124,8 +145,7 @@ def test_same_prompt_new_run_reuses_task_workspace_with_timeline(tmp_path: Path)
     assert workspace["prompt_fingerprint"]
     assert len(timeline) == 4, "timeline 为每一次 run 记录开始与结构化终态"
     assert [
-        (event["event_type"], event["run_id"], event.get("status", ""))
-        for event in timeline
+        (event["event_type"], event["run_id"], event.get("status", "")) for event in timeline
     ] == [
         ("run_workspace_saved", "run-one", ""),
         ("run_workspace_finished", "run-one", "DONE"),
@@ -137,20 +157,14 @@ def test_same_prompt_new_run_reuses_task_workspace_with_timeline(tmp_path: Path)
 def test_same_task_resume_refreshes_run_identity_without_losing_workspace_facts(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
-    cfg = AgentConfig(my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[])
+    cfg = AgentConfig(
+        tool_protocol="text", my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
+    )
     agent = SimpleAgent(cfg, repo)
 
     prompt = "持续维护同一个项目"
     agent.run(prompt, request_id="req-one", run_id="run-one", task_id="goal-one")
-    task_root = (
-        home
-        / "owners"
-        / "local"
-        / "main"
-        / "tasks"
-        / date.today().isoformat()
-        / "goal-one"
-    )
+    task_root = home / "owners" / "local" / "main" / "tasks" / date.today().isoformat() / "goal-one"
     state_path = task_root / "work" / "state.json"
     manifest_path = task_root / "work" / "refs" / "artifacts" / "manifest.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -195,7 +209,9 @@ def test_workspace_identity_does_not_reuse_old_state_json(tmp_path: Path):
         'task_id: "分析-all-agent-项目并写中文报告"\nrequest_id: "req-one"\nrun_id: "run-one"\n',
         encoding="utf-8",
     )
-    cfg = AgentConfig(my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[])
+    cfg = AgentConfig(
+        tool_protocol="text", my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
+    )
     agent = SimpleAgent(cfg, repo)
 
     agent.run("分析 all-agent 项目并写中文报告", request_id="req-one", run_id="run-one")
@@ -208,7 +224,9 @@ def test_workspace_identity_does_not_reuse_old_state_json(tmp_path: Path):
 def test_long_project_prompt_gets_short_relevant_task_workspace_name(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
-    cfg = AgentConfig(my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[])
+    cfg = AgentConfig(
+        tool_protocol="text", my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
+    )
     agent = SimpleAgent(cfg, repo)
 
     prompt = (
@@ -217,7 +235,15 @@ def test_long_project_prompt_gets_short_relevant_task_workspace_name(tmp_path: P
     )
     agent.run(prompt, request_id="req-all-agent", run_id="run-all-agent")
 
-    task_root = home / "owners" / "local" / "main" / "tasks" / date.today().isoformat() / "all-agent-架构分析"
+    task_root = (
+        home
+        / "owners"
+        / "local"
+        / "main"
+        / "tasks"
+        / date.today().isoformat()
+        / "all-agent-架构分析"
+    )
     assert (task_root / "output").is_dir()
     workspace = json.loads((task_root / "work" / "run_workspace.json").read_text(encoding="utf-8"))
     task_yaml = (task_root / "work" / "task.yaml").read_text(encoding="utf-8")
@@ -232,6 +258,7 @@ def test_two_provider_owners_write_separate_task_workspaces(tmp_path: Path):
     home = tmp_path / "home"
     feishu = SimpleAgent(
         AgentConfig(
+            tool_protocol="text",
             my_agent_home=str(home),
             my_agent_owner_provider="feishu",
             my_agent_owner_kind="user",
@@ -243,6 +270,7 @@ def test_two_provider_owners_write_separate_task_workspaces(tmp_path: Path):
     )
     wechat = SimpleAgent(
         AgentConfig(
+            tool_protocol="text",
             my_agent_home=str(home),
             my_agent_owner_provider="wechat",
             my_agent_owner_kind="user",
@@ -267,13 +295,19 @@ def test_two_provider_owners_write_separate_task_workspaces(tmp_path: Path):
 def test_saved_run_writes_main_context_bundle_v1(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
-    cfg = AgentConfig(my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[])
+    cfg = AgentConfig(
+        tool_protocol="text", my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
+    )
     agent = SimpleAgent(cfg, repo)
 
-    result = agent.run("做一个示例网站", request_id="req-ctx", run_id="run-ctx", task_id="主代理任务")
+    result = agent.run(
+        "做一个示例网站", request_id="req-ctx", run_id="run-ctx", task_id="主代理任务"
+    )
 
     assert "# Main Agent Context Bundle v1" in result.prompt
-    task_root = home / "owners" / "local" / "main" / "tasks" / date.today().isoformat() / "主代理任务"
+    task_root = (
+        home / "owners" / "local" / "main" / "tasks" / date.today().isoformat() / "主代理任务"
+    )
     assert "# Current Task Workspace" in result.prompt
     assert f"- output_dir: {task_root / 'output'}" in result.prompt
     assert f"- work_dir: {task_root / 'work'}" in result.prompt
@@ -290,8 +324,12 @@ def test_saved_run_writes_main_context_bundle_v1(tmp_path: Path):
     assert payload["scope"]["task_id"] == "主代理任务"
     assert payload["workspace_refs"]["primary_workspace_root"] == str(repo.resolve())
     assert payload["workspace_refs"]["my_agent_home"] == str(home.resolve())
-    assert payload["workspace_refs"]["owner_home"] == str((home / "owners" / "local" / "main").resolve())
-    assert payload["workspace_refs"]["owner_tasks_root"] == str((home / "owners" / "local" / "main" / "tasks").resolve())
+    assert payload["workspace_refs"]["owner_home"] == str(
+        (home / "owners" / "local" / "main").resolve()
+    )
+    assert payload["workspace_refs"]["owner_tasks_root"] == str(
+        (home / "owners" / "local" / "main" / "tasks").resolve()
+    )
     assert "workspace_tasks_root" not in payload["workspace_refs"]
     assert payload["owner_model"]["task_workspace_refs"]["owner_tasks_root"] == str(
         (home / "owners" / "local" / "main" / "tasks").resolve()
@@ -307,10 +345,14 @@ def test_saved_run_writes_main_context_bundle_v1(tmp_path: Path):
 def test_no_save_run_keeps_main_context_bundle_ephemeral(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
-    cfg = AgentConfig(my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[])
+    cfg = AgentConfig(
+        tool_protocol="text", my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
+    )
     agent = SimpleAgent(cfg, repo)
 
-    result = agent.run("临时诊断", save=False, request_id="req-nosave", run_id="run-nosave", task_id="诊断")
+    result = agent.run(
+        "临时诊断", save=False, request_id="req-nosave", run_id="run-nosave", task_id="诊断"
+    )
 
     assert "# Main Agent Context Bundle v1" in result.prompt
     assert result.main_context_bundle_path == ""
@@ -323,7 +365,9 @@ def test_task_local_run_does_not_inject_main_context_bundle(tmp_path: Path):
     home = tmp_path / "home"
     run_home = tmp_path / "task" / "work" / "agents" / "run-local"
     run_home.mkdir(parents=True)
-    cfg = AgentConfig(my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[])
+    cfg = AgentConfig(
+        tool_protocol="text", my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
+    )
     agent = SimpleAgent(cfg, repo)
 
     result = agent.run(
@@ -343,7 +387,9 @@ def test_task_local_run_does_not_inject_main_context_bundle(tmp_path: Path):
 def test_no_save_run_does_not_create_task_workspace_or_daily_memory(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
-    cfg = AgentConfig(my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[])
+    cfg = AgentConfig(
+        tool_protocol="text", my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
+    )
     agent = SimpleAgent(cfg, repo)
 
     agent.run("临时诊断", save=False, request_id="req-nosave", run_id="run-nosave", task_id="诊断")
@@ -355,10 +401,12 @@ def test_no_save_run_does_not_create_task_workspace_or_daily_memory(tmp_path: Pa
     assert not daily_path.exists()
 
 
-def test_memory_add_writes_owner_memory_and_ignores_legacy_memory_path(tmp_path: Path):
+def test_remember_promotes_owner_fact_without_daily_or_ops_body_mirror(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
-    cfg = AgentConfig(my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[])
+    cfg = AgentConfig(
+        tool_protocol="text", my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
+    )
     agent = SimpleAgent(cfg, repo)
     legacy_path = repo / "memory.jsonl"
     legacy_path.parent.mkdir(parents=True, exist_ok=True)
@@ -377,45 +425,70 @@ def test_memory_add_writes_owner_memory_and_ignores_legacy_memory_path(tmp_path:
         encoding="utf-8",
     )
 
-    agent.remember("用户喜欢表格", kind="preference")
+    agent.remember("项目青黛的交付格式是表格", kind="fact")
 
     owner_memory = home / "owners" / "local" / "main" / "memory" / "long_term" / "memory.jsonl"
-    owner_records = owner_memory.read_text(encoding="utf-8").splitlines()
-    daily_path = home / "owners" / "local" / "main" / "memory" / "daily" / f"{date.today().isoformat()}.jsonl"
-    daily_records = daily_path.read_text(encoding="utf-8").splitlines()
-    payload = json.loads(daily_records[-1])
+    owner_records = [
+        json.loads(line) for line in owner_memory.read_text(encoding="utf-8").splitlines()
+    ]
+    daily_path = (
+        home
+        / "owners"
+        / "local"
+        / "main"
+        / "memory"
+        / "daily"
+        / f"{date.today().isoformat()}.jsonl"
+    )
+    ops_path = home / "owners" / "local" / "main" / "memory" / "ops.jsonl"
+    ops_records = [json.loads(line) for line in ops_path.read_text(encoding="utf-8").splitlines()]
 
-    assert "用户喜欢表格" in owner_records[-1]
-    assert payload["kind"] == "preference"
-    assert payload["role"] == "user"
-    assert payload["content"] == "用户喜欢表格"
+    assert owner_records[-1]["content"] == "项目青黛的交付格式是表格"
+    assert owner_records[-1]["kind"] == "fact"
+    assert not daily_path.exists()
+    assert ops_records
+    assert all("content" not in row for row in ops_records)
     assert agent.memory.search("旧记忆", top_k=1) == []
 
 
-def test_prompt_builder_reads_key_memory_and_matching_lessons(tmp_path: Path):
-    # 批2 新语义:lesson 召回=路由索引关键词(主路)∪ 文件名 stem(兜底)。
-    # "派工"命中播种索引的 lessons.subagents 段(索引路),"subagent"命中
-    # 手写文件 stem(兜底路),两路并集都进 prompt;无关 lesson 不进。
+def test_prompt_builder_uses_only_recalled_memory_envelope(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
-    cfg = AgentConfig(my_agent_home=str(home), prompt_files=[], home_lesson_auto_read_limit=2)
+    cfg = AgentConfig(
+        tool_protocol="text",
+        my_agent_home=str(home),
+        prompt_files=[],
+        home_lesson_auto_read_limit=2,
+    )
     agent = SimpleAgent(cfg, repo)
     agent.home_paths.owner_memory_md.write_text("记住：产物目录必须干净。\n", encoding="utf-8")
-    (agent.home_paths.owner_memory_lessons_dir / "subagent.md").write_text("子代理教训：路径必须由上层传递。\n", encoding="utf-8")
-    (agent.home_paths.owner_memory_lessons_dir / "video.md").write_text("视频教训：不用读。\n", encoding="utf-8")
+    (agent.home_paths.owner_memory_lessons_dir / "subagent.md").write_text(
+        "子代理教训：路径必须由上层传递。\n", encoding="utf-8"
+    )
+    (agent.home_paths.owner_memory_lessons_dir / "video.md").write_text(
+        "视频教训：不用读。\n", encoding="utf-8"
+    )
 
-    prompt = agent.prompts.build("测试 subagent 派工")
+    recalled = MemoryRecord(
+        role="user",
+        content="正式长期事实：青黛项目产物目录必须干净。",
+        kind="fact",
+        entry_id="mem-formal-1",
+        attributes={"origin": "reviewed", "scope_type": "personal", "scope_key": "personal"},
+    )
+    prompt = agent.prompts.build("测试 subagent 派工", [recalled])
 
-    assert "记住：产物目录必须干净。" in prompt
-    assert "lessons/subagents.md" in prompt, "索引路:'派工'应召回播种的子代理协作权威 lesson"
-    assert "子代理教训：路径必须由上层传递。" in prompt, "兜底路:未登记索引的手写 lesson 仍按 stem 召回"
+    assert prompt.count("<memory-context>") == 1
+    assert "正式长期事实：青黛项目产物目录必须干净。" in prompt
+    assert "记住：产物目录必须干净。" not in prompt
+    assert "子代理教训：路径必须由上层传递。" not in prompt
     assert "视频教训：不用读。" not in prompt
 
 
 def test_prompt_builder_reads_home_entry_files_every_round(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
-    cfg = AgentConfig(my_agent_home=str(home), prompt_files=[])
+    cfg = AgentConfig(tool_protocol="text", my_agent_home=str(home), prompt_files=[])
     agent = SimpleAgent(cfg, repo)
     agent.home_paths.owner_soul_md.write_text("人格规则：先证据后判断。\n", encoding="utf-8")
     agent.home_paths.owner_user_md.write_text("用户偏好：短汇报但要有验证。\n", encoding="utf-8")
@@ -430,23 +503,20 @@ def test_prompt_builder_reads_home_entry_files_every_round(tmp_path: Path):
     assert "用户偏好：短汇报但要有验证。" in prompt
     assert "# Home Entry: LONG-TERM WORKING AGREEMENT" in prompt
     assert "执行制度：每轮读关键文件。" in prompt
-    assert "# Home Entry: memory.md" in prompt
-    assert "关键记忆：产物目录要干净。" in prompt
+    assert "# Home Entry: memory.md" not in prompt
+    assert "关键记忆：产物目录要干净。" not in prompt
     assert prompt.index("# Home Entry: LONG-TERM WORKING AGREEMENT") < prompt.index(
         "# Home Entry: ASSISTANT PERSONA"
     )
     assert prompt.index("# Home Entry: ASSISTANT PERSONA") < prompt.index(
         "# Home Entry: CURRENT USER OR GROUP PROFILE"
     )
-    assert prompt.index("# Home Entry: CURRENT USER OR GROUP PROFILE") < prompt.index(
-        "# Home Entry: memory.md"
-    )
 
 
 def test_prompt_builder_ignores_legacy_root_home_files(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
-    cfg = AgentConfig(my_agent_home=str(home), prompt_files=[])
+    cfg = AgentConfig(tool_protocol="text", my_agent_home=str(home), prompt_files=[])
     agent = SimpleAgent(cfg, repo)
     agent.home_paths.owner_memory_md.write_text("owner 当前记忆。\n", encoding="utf-8")
     agent.home_paths.memory_md.write_text("旧根污染记忆。\n", encoding="utf-8")
@@ -454,6 +524,6 @@ def test_prompt_builder_ignores_legacy_root_home_files(tmp_path: Path):
 
     prompt = agent.prompts.build("继续测试")
 
-    assert "owner 当前记忆。" in prompt
+    assert "owner 当前记忆。" not in prompt
     assert "旧根污染记忆。" not in prompt
     assert "旧根 HOT 污染。" not in prompt

@@ -27,6 +27,8 @@
 
 | 文档 | 模块 | 状态 | 说明 |
 | --- | --- | --- | --- |
+| [FEATURE-20260804-tool-runtime-unification.md](FEATURE-20260804-tool-runtime-unification.md) | 工具运行时统一功能规格 | 完成 | 用户可见行为、需求、状态机、测试与验收权威 |
+| [tool-runtime-unification.md](tool-runtime-unification.md) | ToolRuntime / ToolCall / ToolResult / ActionPolicy / ToolExecutor | 完成 | 参考证据、完整架构、迁移删除表、并行边界和完成证据 |
 | [subagent-quality-contract.md](subagent-quality-contract.md) | subagent 派工与验收 | 设计中 | 质量契约、受控施工队、context pack、producer/critic/reviewer、用户少说模式 |
 | [main-agent-contract-testing.md](main-agent-contract-testing.md) | 主代理合同驱动测试 | 进行中 | 真实环境降级为最终收口，主开发切到合同单测、fake tool、fake LLM 和 replay |
 | [P1_MAINLINE_CONVERGENCE.md](P1_MAINLINE_CONVERGENCE.md) | P1 主链收敛 | 本地验收通过 | import/wheel 边界、唯一入口与插件链、语义检索、PTY、LSP、OpenAI native tools |

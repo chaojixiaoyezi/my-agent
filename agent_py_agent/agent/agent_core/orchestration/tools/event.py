@@ -7,8 +7,15 @@ from typing import TYPE_CHECKING
 
 from ....conversation.models import new_id
 from ....runtime_errors import runtime_error_report
-from ....tooling.models import BaseTool, ToolExecutionResult
-from ..tool_specs import build_raise_event_spec
+from ....tooling.models import (
+    BaseTool,
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    ResourceScopePolicy,
+    ToolHandlerOutcome,
+    ToolRuntimePolicy,
+)
+from ..tool_specs import build_raise_event_model_spec
 
 if TYPE_CHECKING:
     from ....core import SimpleAgent
@@ -24,13 +31,19 @@ class _EventResultRefs:
 
 
 class RaiseEventTool(BaseTool):
+    model_spec = build_raise_event_model_spec()
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy("mutating"),
+        idempotency_policy=IdempotencyPolicy("operation"),
+        resource_scopes=ResourceScopePolicy(parameter_names=("thread_id", "task_id", "dedupe_key")),
+    )
+
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
-        self.spec = build_raise_event_spec()
 
-    def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         resolved = _resolve_event_thread(self.agent, params, tool_name="raise_event")
-        if isinstance(resolved, ToolExecutionResult):
+        if isinstance(resolved, ToolHandlerOutcome):
             return resolved
         thread_id, task_id = resolved
         lineage_task_id = str(params.get("source_agent_id") or task_id).strip()
@@ -163,12 +176,12 @@ def _resolve_event_thread(
     params: dict[str, object],
     *,
     tool_name: str,
-) -> tuple[str, str] | ToolExecutionResult:
+) -> tuple[str, str] | ToolHandlerOutcome:
     thread_id = str(params.get("thread_id") or "").strip()
     task_id = str(params.get("task_id") or params.get("root_task_id") or "").strip()
     if thread_id:
         thread = _load_event_thread(agent, thread_id, context="raise_event.load_thread", tool_name=tool_name)
-        if isinstance(thread, ToolExecutionResult):
+        if isinstance(thread, ToolHandlerOutcome):
             return thread
         if thread is None:
             return _event_error(tool_name, "unknown_thread", f"unknown conversation thread: {thread_id}")
@@ -186,7 +199,7 @@ def _resolve_event_thread(
         if thread is not None:
             return thread.thread_id, task_id
         linked = _thread_from_subagent_task(agent, task_id, tool_name=tool_name)
-        if isinstance(linked, ToolExecutionResult):
+        if isinstance(linked, ToolHandlerOutcome):
             return linked
         if linked:
             return linked, task_id
@@ -197,7 +210,7 @@ def _resolve_event_thread(
     )
 
 
-def _thread_from_subagent_task(agent: SimpleAgent, task_id: str, *, tool_name: str) -> str | ToolExecutionResult:
+def _thread_from_subagent_task(agent: SimpleAgent, task_id: str, *, tool_name: str) -> str | ToolHandlerOutcome:
     try:
         task = agent.subagents.load(task_id)
     except Exception as exc:
@@ -213,7 +226,7 @@ def _thread_from_subagent_task(agent: SimpleAgent, task_id: str, *, tool_name: s
     thread_id = str(attrs.get("conversation_thread_id") or "").strip()
     if thread_id:
         thread = _load_event_thread(agent, thread_id, context="raise_event.load_linked_thread", tool_name=tool_name)
-        if isinstance(thread, ToolExecutionResult):
+        if isinstance(thread, ToolHandlerOutcome):
             return thread
         if thread is not None:
             return thread_id
@@ -295,12 +308,12 @@ def _event_error(
     message: str,
     *,
     load_error: dict[str, object] | None = None,
-) -> ToolExecutionResult:
+) -> ToolHandlerOutcome:
     payload = {"ok": False, "error": code, "message": message}
     if load_error:
         payload["load_error"] = load_error
     error_code = _EVENT_ERROR_CODE_BY_INTERNAL.get(code, "TOOL_INVALID_ARGUMENTS")
-    return ToolExecutionResult(tool, False, json.dumps(payload, ensure_ascii=False, indent=2), error_code=error_code)
+    return ToolHandlerOutcome(tool, False, json.dumps(payload, ensure_ascii=False, indent=2), error_code=error_code)
 
 
 def _load_error(exc: BaseException, context: str) -> dict[str, object]:
@@ -314,7 +327,7 @@ def _report_load_error(report: dict[str, object], context: str) -> dict[str, obj
     return payload
 
 
-def _event_tool_result(tool: str, refs: _EventResultRefs) -> ToolExecutionResult:
+def _event_tool_result(tool: str, refs: _EventResultRefs) -> ToolHandlerOutcome:
     payload = {
         "ok": True,
         "thread_id": refs.thread_id,
@@ -324,7 +337,7 @@ def _event_tool_result(tool: str, refs: _EventResultRefs) -> ToolExecutionResult
     }
     if refs.wake_signal_error:
         payload["wake_signal_error"] = refs.wake_signal_error
-    return ToolExecutionResult(tool, True, json.dumps(payload, ensure_ascii=False, indent=2))
+    return ToolHandlerOutcome(tool, True, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def _string_values(value: object) -> list[str]:

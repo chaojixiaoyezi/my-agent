@@ -75,7 +75,6 @@ class _HomeProviderConfigFields:
     home_context_enabled: bool = True
     home_lesson_auto_read_limit: int = 3
     home_lesson_stale_caveat_days: int = 7
-    daily_memory_mirror_enabled: bool = True
     run_task_workspace_enabled: bool = True
     external_knowledge_index_file_name: str = "MY_AGENT_INDEX.md"
     external_knowledge_directory_roots: list[str] = field(default_factory=list)
@@ -115,10 +114,6 @@ class _ToolConfigFields:
     tool_context_microcompact_keep_recent: int = 8
     tool_context_microcompact_min_chars: int = 1500
     tool_context_ptl_retry_max: int = 3
-    tool_payload_max_fields: int = 64
-    tool_payload_max_field_name_chars: int = 128
-    tool_payload_max_name_chars: int = 128
-    tool_payload_parse_error_raw_chars: int = 1000
     tool_read_max_chars: int = 50_000
     tool_write_inline_max_chars: int = DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
     tool_list_max_entries: int = 200
@@ -153,14 +148,10 @@ class _ToolConfigFields:
     tool_embedding_api_base: str = ""
     tool_embedding_api_key: str = ""
     tool_embedding_api_key_env: str = ""
-    # 工具调用协议：native=在 anthropic_compatible 端点用原生 tool_use(传 tools schema、收结构化块，默认，治本根因)；
-    # text=回退到现有 [TOOL_CALL] 文本协议。native 支持 anthropic_compatible 和 openai_compatible；其他后端回退 text。
-    # 切默认 native 依据:Step0-5 迁移完成 + R1-T(56min值守)/R2-T(编码14测试)真机验证 + 集成测试全过;text 保留为回退安全网。
+    # 工具调用协议在 run 开始前固定：native 先探测当前 provider+endpoint+model+stream
+    # 是否支持原生 tool_use；明确选择 text 时只启用隔离的 [TOOL_CALL] 适配器。
+    # 一个 run 内禁止 native/text 切换，native 失败也不会由 text 中途接管。
     tool_protocol: str = "native"
-    # 按模型能力降级(审计 #8):列出"不支持 native tool_use"的模型名子串,命中即对该模型强制回退 text
-    # 协议——防自选非 reasoning 模型(如某些 anthropic 兼容端点的 Text-01)上 native 静默失效(0 工具+幻觉)。
-    # 空=不降级(默认行为不变)。匹配:大小写无关子串命中 model_name。
-    tool_protocol_text_models: list[str] = field(default_factory=list)
     # MCP 客户端(短板6)：声明要连接的外部 MCP server，把社区现成工具(GitHub/DB/Slack 等)
     # 动态注册成 mcp__<server>__<tool> 前缀的工具。结构：
     #   {server_name: {command: str, args: [..], env: {..}, timeout: int, connect_timeout: int,
@@ -211,6 +202,8 @@ class _RuntimeBudgetConfigFields:
     background_main_agent_allowed_tools: list[str] = field(default_factory=list)
 
 
+# LLM: AgentConfig is the public configuration authority; Memory Curator defaults must mirror YAML and MemorySettings.
+# 类用途: 汇总主模型、工具、Gateway、Memory 和子代理运行时配置。
 @dataclass
 class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetConfigFields):
 
@@ -257,6 +250,20 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_resume_auto_context_mode: str = "trigger"
     memory_resume_auto_context_limit: int = 5
     memory_compact_auto_trigger_percent: int = 90
+    # 后台 Memory Curator 只读有界经历并输出严格 daily/candidate JSON；它没有工具循环和写人格权限。
+    memory_curator_enabled: bool = True
+    memory_curator_provider: str = "auto"
+    memory_curator_model: str = ""
+    memory_curator_interval_seconds: int = 10_800
+    memory_curator_turn_threshold: int = 10
+    memory_curator_batch_message_limit: int = 80
+    memory_curator_max_input_chars: int = 40_000
+    memory_curator_timeout_seconds: int = 90
+    memory_curator_max_retries: int = 1
+    memory_curator_daily_finalize_hour: int = 23
+    memory_curator_auto_promotion_policy: str = "conservative_v1"
+    memory_lesson_min_occurrences: int = 2
+    memory_hot_min_occurrences: int = 3
     # 单次 run 内 compact→自动续跑的绝对深度硬顶（与 no-tool 软顶并存）。达到即强制 return，
     # 防止持续高于阈值且每轮都调工具的任务无限 compact/续跑（H2）。0 表示沿用内置默认。
     memory_compact_auto_continue_max_depth: int = 50
@@ -287,7 +294,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     local_store_files_dir: str = ""
     local_store_events_path: str = ""
     local_store_fts_enabled: bool = True
-    enable_self_learning: bool = False
     prompt_files: list[str] = field(default_factory=lambda: ["builtin:prompts/default.md"])
     enable_subagents: bool = True
     subagent_mode: str = "trusted_local_hardening"

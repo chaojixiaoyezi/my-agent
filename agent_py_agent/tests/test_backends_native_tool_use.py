@@ -52,7 +52,12 @@ def test_non_stream_extracts_tool_use_blocks():
         return {
             "content": [
                 {"type": "text", "text": "let me read it"},
-                {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {"path": "README.md"}},
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "read_file",
+                    "input": {"path": "README.md"},
+                },
             ],
             "usage": {"input_tokens": 5, "output_tokens": 9},
         }
@@ -66,6 +71,102 @@ def test_non_stream_extracts_tool_use_blocks():
     ]
     # tools must be forwarded into the payload
     assert captured["payload"]["tools"] == _TOOLS
+
+
+def test_anthropic_structured_generation_uses_forced_schema_tool_and_non_stream_transport():
+    backend = AnthropicCompatibleBackend(_options(stream_enabled=True))
+    captured: dict[str, object] = {}
+
+    def fake_request_json(path, payload, headers):
+        captured["payload"] = payload
+        return {
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_structured",
+                    "name": "my_agent_structured_output",
+                    "input": {"requires_action": False, "actions": []},
+                }
+            ],
+            "stop_reason": "tool_use",
+        }
+
+    backend.request_json = fake_request_json
+    backend.request_stream = lambda *args, **kwargs: pytest.fail(
+        "structured output must use the deterministic non-stream transport"
+    )
+    schema = {
+        "type": "object",
+        "properties": {
+            "requires_action": {"type": "boolean"},
+            "actions": {"type": "array"},
+        },
+        "required": ["requires_action", "actions"],
+        "additionalProperties": False,
+    }
+    response = backend.generate_structured("classify", response_schema=schema)
+
+    payload = captured["payload"]
+    assert payload["tool_choice"] == {
+        "type": "tool",
+        "name": "my_agent_structured_output",
+    }
+    assert payload["tools"][0]["input_schema"] == schema
+    assert payload["temperature"] == 0.0
+    assert payload["messages"][0]["content"].startswith(
+        "MANDATORY OUTPUT CONTRACT: Call the provided my_agent_structured_output tool exactly once."
+    )
+    assert json.loads(response.text) == {"requires_action": False, "actions": []}
+
+
+def test_anthropic_structured_generation_retries_forced_channel_without_parsing_prose():
+    backend = AnthropicCompatibleBackend(_options(stream_enabled=True))
+    responses = iter(
+        [
+            {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": '{"requires_action": false, "actions": []}',
+                    }
+                ],
+                "stop_reason": "end_turn",
+            },
+            {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_structured_retry",
+                        "name": "my_agent_structured_output",
+                        "input": {"requires_action": False, "actions": []},
+                    }
+                ],
+                "stop_reason": "tool_use",
+            },
+        ]
+    )
+    prompts: list[str] = []
+
+    def fake_request_json(path, payload, headers):
+        prompts.append(payload["messages"][0]["content"])
+        return next(responses)
+
+    backend.request_json = fake_request_json
+    response = backend.generate_structured(
+        "classify",
+        response_schema={
+            "type": "object",
+            "properties": {
+                "requires_action": {"type": "boolean"},
+                "actions": {"type": "array"},
+            },
+            "required": ["requires_action", "actions"],
+        },
+    )
+
+    assert json.loads(response.text) == {"requires_action": False, "actions": []}
+    assert len(prompts) == 2
+    assert "ignored the mandatory structured channel" in prompts[1]
 
 
 def test_non_stream_preserves_ordered_thinking_text_and_tool_blocks_for_replay():
@@ -164,20 +265,57 @@ def test_non_stream_malformed_input_falls_back_to_empty_dict():
 
 def _tool_use_sse_lines() -> list[str]:
     return [
-        json.dumps({"type": "message_start", "message": {"usage": {"input_tokens": 7, "output_tokens": 0}}}),
-        json.dumps({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
-        json.dumps({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "ok "}}),
+        json.dumps(
+            {"type": "message_start", "message": {"usage": {"input_tokens": 7, "output_tokens": 0}}}
+        ),
+        json.dumps(
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""},
+            }
+        ),
+        json.dumps(
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "ok "},
+            }
+        ),
         json.dumps({"type": "content_block_stop", "index": 0}),
         json.dumps(
             {
                 "type": "content_block_start",
                 "index": 1,
-                "content_block": {"type": "tool_use", "id": "toolu_9", "name": "read_file", "input": {}},
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "toolu_9",
+                    "name": "read_file",
+                    "input": {},
+                },
             }
         ),
-        json.dumps({"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": '{"path":'}}),
-        json.dumps({"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": ' "READ'}}),
-        json.dumps({"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": 'ME.md"}'}}),
+        json.dumps(
+            {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": '{"path":'},
+            }
+        ),
+        json.dumps(
+            {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": ' "READ'},
+            }
+        ),
+        json.dumps(
+            {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": 'ME.md"}'},
+            }
+        ),
         json.dumps({"type": "content_block_stop", "index": 1}),
         json.dumps({"type": "message_delta", "usage": {"output_tokens": 4}}),
         json.dumps({"type": "message_stop"}),
@@ -285,9 +423,7 @@ def test_stream_completion_preserves_thinking_text_tool_order_without_exposing_t
 
     assert text == "开始"
     assert chunks == ["开始"]
-    assert blocks == [
-        {"id": "toolu_stream", "name": "read_file", "input": {"path": "README.md"}}
-    ]
+    assert blocks == [{"id": "toolu_stream", "name": "read_file", "input": {"path": "README.md"}}]
     assert list(completion.assistant_content_blocks) == [
         {"type": "thinking", "thinking": "先读", "signature": "sig-stream"},
         {"type": "text", "text": "开始"},
@@ -350,7 +486,13 @@ def test_stream_tool_use_only_with_empty_text_does_not_raise():
                 "content_block": {"type": "tool_use", "id": "t0", "name": "read_file", "input": {}},
             }
         ),
-        json.dumps({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": '{"path":"x"}'}}),
+        json.dumps(
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": '{"path":"x"}'},
+            }
+        ),
         json.dumps({"type": "content_block_stop", "index": 0}),
         json.dumps({"type": "message_stop"}),
     ]

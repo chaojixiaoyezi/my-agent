@@ -4,8 +4,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ..tooling.models import ToolExecutionResult
 from ..tooling.registry import ToolRegistry, ToolRegistryParams
+from ..tooling.runtime_contracts import ToolResult
 
 
 def small_real_registry(root: Path) -> ToolRegistry:
@@ -28,28 +28,28 @@ def small_real_registry(root: Path) -> ToolRegistry:
     )
 
 
-def read_file_probe(result: ToolExecutionResult) -> dict[str, object]:
+def read_file_probe(result: ToolResult) -> dict[str, object]:
     return {
         "probe_id": "read-file-success",
         "operation_id": "op-read-file-success",
-        "tool": result.tool,
+        "tool": result.tool_name,
         "effect": "read_only",
         "mode": "read_only",
-        "tool_executor_ref": "tool_registry.execute_call",
+        "tool_executor_ref": "tool_registry.execute_tool",
         "result_schema_ref": "schema://tools/read_file/result",
         "executed_actions": [],
         "result": {"ok": result.ok, "payload": {"output": result.output}},
     }
 
 
-def controlled_exec_probe(result: ToolExecutionResult) -> dict[str, object]:
+def controlled_exec_probe(result: ToolResult) -> dict[str, object]:
     return {
         "probe_id": "controlled-exec-dry-run",
         "operation_id": "op-controlled-exec-dry-run",
-        "tool": result.tool,
+        "tool": result.tool_name,
         "effect": "dangerous",
         "mode": "dry_run",
-        "tool_executor_ref": "tool_registry.execute_call",
+        "tool_executor_ref": "tool_registry.execute_tool",
         "result_schema_ref": "schema://tools/controlled_exec/result",
         "idempotency_key": "idem-controlled-exec-pwd",
         "args_hash": "sha256:controlled-exec-pwd",

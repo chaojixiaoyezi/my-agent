@@ -1,82 +1,128 @@
-
 from __future__ import annotations
 
-"""原生 tool_use 协议(tool_protocol=native)的启用判定与 tools schema 解析。
-
-单一开关点：只有 config.tool_protocol=native 且当前 backend 支持原生工具协议
-（Anthropic/OpenAI compatible）时才走原生协议，其余情况一律回退现有文本协议。prompt 侧和
-生成侧(给 backend.generate 传 tools schema)都用这里的同一个判定，避免两侧漂移。
-"""
+"""Run-fixed tool protocol capability, selection and provider schema surface."""
 
 from typing import Any
 
+from ..tooling.runtime_contracts import (
+    ProviderToolCapability,
+    ToolProtocolSnapshot,
+)
+
 _NATIVE_PROTOCOL = "native"
-_NATIVE_BACKENDS = frozenset({"anthropic_compatible", "openai_compatible"})
+_TEXT_PROTOCOL = "text"
 
 
-def native_tool_use_active(agent: object) -> bool:
-    """Return True when this agent should use native Anthropic tool_use."""
+class ToolProtocolSelectionError(RuntimeError):
+    """The configured run protocol has no explicitly authorized transport."""
+
+    error_code = "TOOL_PROTOCOL_CAPABILITY_UNAVAILABLE"
+
+
+def select_tool_protocol(agent: object, *, run_id: str) -> ToolProtocolSnapshot:
+    """Probe once before the run and select exactly one protocol."""
+
     config = getattr(agent, "config", None)
-    protocol = str(getattr(config, "tool_protocol", "text") or "text").strip().lower()
-    if protocol != _NATIVE_PROTOCOL:
-        return False
-    if not bool(getattr(config, "enable_tools", False)):
-        return False
+    requested = native_tool_protocol_value(getattr(config, "tool_protocol", "native"))
     backend = getattr(agent, "backend", None)
-    if str(getattr(backend, "name", "") or "") not in _NATIVE_BACKENDS:
-        return False
-    return _model_supports_native(config)  # 按模型能力降级(审计 #8):非 native 模型强制回退 text
+    if not bool(getattr(config, "enable_tools", False)):
+        capability = _declared_capability(
+            backend,
+            native_supported=False,
+            evidence="tools_disabled_for_run",
+        )
+        return ToolProtocolSnapshot(run_id, _TEXT_PROTOCOL, capability)
+    if requested == _TEXT_PROTOCOL:
+        capability = _declared_capability(
+            backend,
+            native_supported=False,
+            evidence="explicit_text_protocol_configuration",
+        )
+        return ToolProtocolSnapshot(run_id, _TEXT_PROTOCOL, capability)
+
+    probe = getattr(backend, "probe_tool_capability", None)
+    capability = probe() if callable(probe) else _declared_capability(
+        backend,
+        native_supported=False,
+        evidence="backend_has_no_capability_probe",
+    )
+    if not isinstance(capability, ProviderToolCapability):
+        raise TypeError("backend probe_tool_capability must return ProviderToolCapability")
+    if capability.native_supported:
+        return ToolProtocolSnapshot(run_id, _NATIVE_PROTOCOL, capability)
+    # 安全边界:probe 未证明 native 支持时,必须显式选 text(不静默降级)——防止 model 声称支持
+    # native 但实际 probe 失败时,静默切 text 掩盖协议缺陷。换模型时若该模型确实不支持 native,
+    # 部署方显式配置 tool_protocol=text(有测试/文档/边界),与目标书"native/text 不混用"一致。
+    raise ToolProtocolSelectionError(
+        "tool_protocol=native was configured, but the run-start provider probe "
+        "did not prove native tool support; explicitly select tool_protocol=text"
+    )
 
 
-def _model_supports_native(config: object) -> bool:
-    """当前模型是否走 native:命中 tool_protocol_text_models 任一子串则强制回退 text(防非 native 模型静默失效)。"""
-    model = str(getattr(config, "model_name", "") or "").strip().lower()
-    if not model:
-        return True
-    for pattern in getattr(config, "tool_protocol_text_models", None) or []:
-        token = str(pattern).strip().lower()
-        if token and token in model:
-            return False
-    return True
+def native_tool_use_active(params: object) -> bool:
+    """Read the immutable run snapshot; never infer capability mid-run."""
+
+    snapshot = getattr(params, "tool_protocol_snapshot", None)
+    if not isinstance(snapshot, ToolProtocolSnapshot):
+        raise RuntimeError("tool protocol snapshot is missing from this run")
+    return snapshot.source_protocol == _NATIVE_PROTOCOL
 
 
 def native_tool_protocol_value(tool_protocol: object) -> str:
-    """Normalize a raw tool_protocol value to 'native' or 'text'."""
-    return _NATIVE_PROTOCOL if str(tool_protocol or "").strip().lower() == _NATIVE_PROTOCOL else "text"
+    value = str(tool_protocol or "").strip().lower()
+    if not value:
+        return _NATIVE_PROTOCOL
+    if value not in {_NATIVE_PROTOCOL, _TEXT_PROTOCOL}:
+        raise ValueError(f"invalid tool protocol: {value}")
+    return value
 
 
-# LLM: native Schema 必须使用 ToolLoopExecuteParams 中固定的 run 快照，并仅叠加真实 tool_search 已加载名称。
-# 函数用途: 为当前模型回合生成已授权且已就绪的 Anthropic/OpenAI 原生工具定义。
 def resolve_native_tools(agent: object, params: object) -> list[dict[str, Any]] | None:
-    """Build the canonical native tools schema for this turn, or None for text protocol.
+    """Render schemas from the immutable runtime snapshot for a native turn."""
 
-    Respects the same run snapshot used by the prompt catalog and final
-    execution so the model is only offered authorized, ready tools.
-    """
-    if not native_tool_use_active(agent):
+    if not native_tool_use_active(params):
         return None
-    from ..backends.tool_schema import tool_specs_to_anthropic_tools
+    from ..backends.tool_schema import tool_model_specs_to_anthropic_tools
 
     registry = getattr(agent, "tools", None)
-    if registry is None or not hasattr(registry, "specs"):
+    snapshot = getattr(params, "tool_runtime_snapshot", None)
+    if registry is None or snapshot is None:
         return None
-    if hasattr(registry, "model_visible_specs"):
-        specs = registry.model_visible_specs(
-            allowed_tools=getattr(params, "allowed_tools", None),
-            loaded_tool_names=getattr(params, "loaded_tool_names", None),
-            runtime_snapshot=getattr(params, "tool_runtime_snapshot", None),
-        )
-    else:
-        specs = registry.specs(
-            allowed_tools=getattr(params, "allowed_tools", None),
-            include_orchestration=True,
-        )
-    tools = tool_specs_to_anthropic_tools(specs)
+    specs = registry.model_visible_specs(
+        allowed_tools=getattr(params, "allowed_tools", None),
+        loaded_tool_names=getattr(params, "loaded_tool_names", None),
+        runtime_snapshot=snapshot,
+    )
+    tools = tool_model_specs_to_anthropic_tools(specs)
     return tools or None
 
 
+def _declared_capability(
+    backend: object,
+    *,
+    native_supported: bool,
+    evidence: str,
+) -> ProviderToolCapability:
+    endpoint_resolver = getattr(backend, "_tool_endpoint", None)
+    endpoint = (
+        str(endpoint_resolver() or "").strip()
+        if callable(endpoint_resolver)
+        else f"local://{getattr(backend, 'name', 'unknown')}"
+    )
+    return ProviderToolCapability(
+        provider=str(getattr(backend, "name", "unknown") or "unknown"),
+        endpoint=endpoint,
+        model=str(getattr(backend, "model_name", "") or ""),
+        stream=bool(getattr(backend, "stream_enabled", False)),
+        native_supported=native_supported,
+        evidence=evidence,
+    )
+
+
 __all__ = [
+    "ToolProtocolSelectionError",
     "native_tool_protocol_value",
     "native_tool_use_active",
     "resolve_native_tools",
+    "select_tool_protocol",
 ]

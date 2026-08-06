@@ -4,13 +4,76 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.tool_guard.call_guardrail import (
-    record_tool_guard_observation,
+    record_tool_guard_observation as _record_tool_guard_observation,
+)
+from agent_py_agent.agent.agent_core.tool_guard.call_guardrail import (
     tool_guardrail_policy,
     tool_guardrail_records,
 )
 from agent_py_agent.agent.agent_core.tool_runtime_ledger import write_boundary_with_runtime_ledger
-from agent_py_agent.agent.tooling import BaseTool, ToolExecutionResult, ToolSpec
-from agent_py_agent.agent.tooling.registry_runtime_gate_pipeline import tool_call_gate_decision
+from agent_py_agent.agent.tooling import BaseTool, ToolHandlerOutcome
+from agent_py_agent.agent.tooling.action_policy import ActionPolicy, ActionPolicyRequest
+from agent_py_agent.agent.tooling.runtime_contracts import (
+    ToolCall,
+    ToolFailureFacts,
+    ToolResult,
+)
+from agent_py_agent.tests._tool_runtime_harness import (
+    canonical_test_call,
+    make_test_model_spec,
+    make_test_runtime_policy,
+    runtime_snapshot_for_tools,
+)
+
+
+def _snapshot(agent: object, params: object):
+    snapshot = getattr(params, "tool_runtime_snapshot", None)
+    if snapshot is None:
+        snapshot = runtime_snapshot_for_tools(agent.tools, run_id="run-1")
+        params.tool_runtime_snapshot = snapshot
+    return snapshot
+
+
+def _canonical_call(agent: object, params: object, payload: dict[str, object]) -> ToolCall:
+    arguments = dict(payload)
+    tool_name = str(arguments.pop("tool"))
+    arguments.pop("call_id", None)
+    return canonical_test_call(_snapshot(agent, params), tool_name, arguments)
+
+
+def record_tool_guard_observation(
+    agent: object,
+    params: object,
+    payload: dict[str, object],
+    outcome: ToolHandlerOutcome,
+) -> str:
+    call = _canonical_call(agent, params, payload)
+    result = (
+        ToolResult.succeeded(call, outcome.output)
+        if outcome.ok
+        else ToolResult.failed(
+            call,
+            outcome.output,
+            error_code=outcome.error_code,
+            failure_stage="execution",
+            facts=ToolFailureFacts(handler_executed=True),
+        )
+    )
+    return _record_tool_guard_observation(agent, params, call, result)
+
+
+def _decision(agent: object, params: object, payload: dict[str, object]):
+    call = _canonical_call(agent, params, payload)
+    root = Path("/tmp/my-agent-workspace")
+    return ActionPolicy().decide(
+        ActionPolicyRequest(
+            call=call,
+            runtime_snapshot=_snapshot(agent, params),
+            workspace_root=root,
+            workspace_roots=(root,),
+            write_boundary=write_boundary_with_runtime_ledger(agent, params),
+        )
+    )
 
 
 def test_runtime_routes_repeated_read_only_successes_through_gate_pipeline() -> None:
@@ -19,12 +82,14 @@ def test_runtime_routes_repeated_read_only_successes_through_gate_pipeline() -> 
     payload = {"tool": "list_tools"}
 
     for _ in range(3):
-        record_tool_guard_observation(agent, params, payload, ToolExecutionResult("list_tools", True, "same"))
+        record_tool_guard_observation(
+            agent, params, payload, ToolHandlerOutcome("list_tools", True, "same")
+        )
 
-    decision = tool_call_gate_decision(payload, _call(agent, params))
+    decision = _decision(agent, params, payload)
 
     assert decision.allowed is False
-    assert "TOOL_GUARDRAIL_NO_PROGRESS_BLOCKED" in decision.finding_codes
+    assert "TOOL_GUARDRAIL_NO_PROGRESS_BLOCKED" in decision.reason_codes
 
 
 def test_runtime_no_progress_threshold_zero_is_unlimited() -> None:
@@ -33,9 +98,11 @@ def test_runtime_no_progress_threshold_zero_is_unlimited() -> None:
     payload = {"tool": "list_tools"}
 
     for _ in range(4):
-        record_tool_guard_observation(agent, params, payload, ToolExecutionResult("list_tools", True, "same"))
+        record_tool_guard_observation(
+            agent, params, payload, ToolHandlerOutcome("list_tools", True, "same")
+        )
 
-    decision = tool_call_gate_decision(payload, _call(agent, params))
+    decision = _decision(agent, params, payload)
 
     assert decision.allowed is True
 
@@ -47,14 +114,18 @@ def test_runtime_repeated_read_guard_resets_after_local_progress() -> None:
     write_payload = {"tool": "write_file", "path": "outputs/source_index.json", "content": "{}"}
 
     for _ in range(3):
-        record_tool_guard_observation(agent, params, read_payload, ToolExecutionResult("list_tools", True, "same"))
-    blocked = tool_call_gate_decision(read_payload, _call(agent, params))
+        record_tool_guard_observation(
+            agent, params, read_payload, ToolHandlerOutcome("list_tools", True, "same")
+        )
+    blocked = _decision(agent, params, read_payload)
     assert blocked.allowed is False
-    assert "TOOL_GUARDRAIL_NO_PROGRESS_BLOCKED" in blocked.finding_codes
+    assert "TOOL_GUARDRAIL_NO_PROGRESS_BLOCKED" in blocked.reason_codes
 
-    record_tool_guard_observation(agent, params, write_payload, ToolExecutionResult("write_file", True, "{}"))
+    record_tool_guard_observation(
+        agent, params, write_payload, ToolHandlerOutcome("write_file", True, "{}")
+    )
 
-    assert tool_call_gate_decision(read_payload, _call(agent, params)).allowed is True
+    assert _decision(agent, params, read_payload).allowed is True
 
 
 def test_runtime_same_args_same_failure_warns_then_pipeline_blocks_next_call_only() -> None:
@@ -68,7 +139,7 @@ def test_runtime_same_args_same_failure_warns_then_pipeline_blocks_next_call_onl
             agent,
             params,
             payload,
-            ToolExecutionResult("web_search", False, "timeout", error_code="TOOL_TIMEOUT"),
+            ToolHandlerOutcome("web_search", False, "timeout", error_code="TOOL_TIMEOUT"),
         )
         if warning:
             warnings.append(warning)
@@ -77,11 +148,10 @@ def test_runtime_same_args_same_failure_warns_then_pipeline_blocks_next_call_onl
     assert "3 times" in warnings[0] or "3 次" in warnings[0]
     assert "6 times" in warnings[1] or "6 次" in warnings[1]
 
-    decision = tool_call_gate_decision(payload, _call(agent, params))
+    decision = _decision(agent, params, payload)
 
     assert decision.allowed is False
-    assert "TOOL_GUARDRAIL_REPEAT_FAILURE_BLOCKED" in decision.finding_codes
-    assert "change" in decision.recommended_action
+    assert "TOOL_GUARDRAIL_REPEAT_FAILURE_BLOCKED" in decision.reason_codes
 
 
 def test_runtime_repeat_fail_threshold_zero_is_unlimited_with_fixed_hints() -> None:
@@ -95,7 +165,7 @@ def test_runtime_repeat_fail_threshold_zero_is_unlimited_with_fixed_hints() -> N
             agent,
             params,
             payload,
-            ToolExecutionResult("web_search", False, "timeout", error_code="TOOL_TIMEOUT"),
+            ToolHandlerOutcome("web_search", False, "timeout", error_code="TOOL_TIMEOUT"),
         )
         if warning:
             warnings.append(warning)
@@ -103,7 +173,7 @@ def test_runtime_repeat_fail_threshold_zero_is_unlimited_with_fixed_hints() -> N
     assert len(warnings) == 2
     assert "50 times" in warnings[0] or "50 次" in warnings[0]
     assert "100 times" in warnings[1] or "100 次" in warnings[1]
-    assert tool_call_gate_decision(payload, _call(agent, params)).allowed is True
+    assert _decision(agent, params, payload).allowed is True
 
 
 def test_runtime_same_args_different_failure_class_does_not_compound() -> None:
@@ -116,17 +186,17 @@ def test_runtime_same_args_different_failure_class_does_not_compound() -> None:
             agent,
             params,
             payload,
-            ToolExecutionResult("web_search", False, "timeout", error_code="TOOL_TIMEOUT"),
+            ToolHandlerOutcome("web_search", False, "timeout", error_code="TOOL_TIMEOUT"),
         )
     for _ in range(3):
         record_tool_guard_observation(
             agent,
             params,
             payload,
-            ToolExecutionResult("web_search", False, "permission", error_code="WRITE_FORBIDDEN"),
+            ToolHandlerOutcome("web_search", False, "permission", error_code="WRITE_FORBIDDEN"),
         )
 
-    assert tool_call_gate_decision(payload, _call(agent, params)).allowed is True
+    assert _decision(agent, params, payload).allowed is True
 
 
 def test_runtime_same_args_read_with_changing_results_is_progress() -> None:
@@ -139,10 +209,12 @@ def test_runtime_same_args_read_with_changing_results_is_progress() -> None:
             agent,
             params,
             payload,
-            ToolExecutionResult("read_artifact", True, f'{{"cursor_after": "{index}", "rows": [{index}]}}'),
+            ToolHandlerOutcome(
+                "read_artifact", True, f'{{"cursor_after": "{index}", "rows": [{index}]}}'
+            ),
         )
 
-    assert tool_call_gate_decision(payload, _call(agent, params)).allowed is True
+    assert _decision(agent, params, payload).allowed is True
 
 
 def test_runtime_boundary_carries_guardrail_records_and_policy() -> None:
@@ -154,7 +226,7 @@ def test_runtime_boundary_carries_guardrail_records_and_policy() -> None:
         agent,
         params,
         payload,
-        ToolExecutionResult("web_search", False, "timeout", error_code="TOOL_TIMEOUT"),
+        ToolHandlerOutcome("web_search", False, "timeout", error_code="TOOL_TIMEOUT"),
     )
 
     boundary = write_boundary_with_runtime_ledger(agent, params)
@@ -174,14 +246,14 @@ def test_runtime_guardrail_ignores_provider_call_id_for_same_tool_input() -> Non
             agent,
             params,
             payload,
-            ToolExecutionResult("list_tools", True, "same"),
+            ToolHandlerOutcome("list_tools", True, "same"),
         )
 
     next_payload = {"tool": "list_tools", "call_id": "provider-call-next"}
-    decision = tool_call_gate_decision(next_payload, _call(agent, params))
+    decision = _decision(agent, params, next_payload)
 
     assert decision.allowed is False
-    assert "TOOL_GUARDRAIL_NO_PROGRESS_BLOCKED" in decision.finding_codes
+    assert "TOOL_GUARDRAIL_NO_PROGRESS_BLOCKED" in decision.reason_codes
 
 
 def test_runtime_task_progress_read_is_guarded_but_update_remains_mutating() -> None:
@@ -194,10 +266,10 @@ def test_runtime_task_progress_read_is_guarded_but_update_remains_mutating() -> 
             agent,
             params,
             read_payload,
-            ToolExecutionResult("task_progress", True, '{"summary":"same"}'),
+            ToolHandlerOutcome("task_progress", True, '{"summary":"same"}'),
         )
 
-    assert tool_call_gate_decision(read_payload, _call(agent, params)).allowed is False
+    assert _decision(agent, params, read_payload).allowed is False
 
     update_payload = {
         "tool": "task_progress",
@@ -208,10 +280,10 @@ def test_runtime_task_progress_read_is_guarded_but_update_remains_mutating() -> 
         agent,
         params,
         update_payload,
-        ToolExecutionResult("task_progress", True, '{"summary":"new checkpoint"}'),
+        ToolHandlerOutcome("task_progress", True, '{"summary":"new checkpoint"}'),
     )
 
-    assert tool_call_gate_decision(read_payload, _call(agent, params)).allowed is True
+    assert _decision(agent, params, read_payload).allowed is True
 
 
 def _params(*, task_attributes: dict[str, object] | None = None):
@@ -224,27 +296,17 @@ def _params(*, task_attributes: dict[str, object] | None = None):
     )
 
 
-def _call(agent: object, params: object):
-    return SimpleNamespace(
-        tools=agent.tools,
-        workspace_root=Path("/tmp/my-agent-workspace"),
-        workspace_roots=[Path("/tmp/my-agent-workspace")],
-        path_access_mode="normal",
-        path_dangerous_roots=(),
-        allowed_tools=None,
-        write_boundary=write_boundary_with_runtime_ledger(agent, params),
-    )
-
-
 def _agent():
-    task_progress = _tool("task_progress", "mutating")
-    task_progress.spec.effect_by_parameter = {
-        "action": {
-            "": "read_only",
-            "read": "read_only",
-            "update": "mutating",
-        }
-    }
+    task_progress = _tool(
+        "task_progress",
+        "mutating",
+        effect_by_parameter=(
+            (
+                "action",
+                (("", "read_only"), ("read", "read_only"), ("update", "mutating")),
+            ),
+        ),
+    )
     return SimpleNamespace(
         local_store=None,
         tools={
@@ -257,24 +319,49 @@ def _agent():
     )
 
 
-def _tool(name: str, effect: str) -> BaseTool:
-    return _FakeTool(name, effect)
+def _tool(
+    name: str,
+    effect: str,
+    *,
+    effect_by_parameter: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (),
+) -> BaseTool:
+    return _FakeTool(name, effect, effect_by_parameter=effect_by_parameter)
 
 
 class _FakeTool(BaseTool):
-    def __init__(self, name: str, effect: str):
-        self.spec = ToolSpec(
-            name=name,
-            category="test",
+    def __init__(
+        self,
+        name: str,
+        effect: str,
+        *,
+        effect_by_parameter: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (),
+    ):
+        properties = {
+            "list_tools": {},
+            "web_search": {"query": {"type": "string"}},
+            "read_artifact": {"artifact_ref": {"type": "string"}},
+            "write_file": {
+                "path": {"type": "string"},
+                "content": {"type": "string"},
+            },
+            "task_progress": {
+                "action": {"type": "string"},
+                "summary": {"type": "string"},
+            },
+        }[name]
+        self.model_spec = make_test_model_spec(
+            name,
             description="test tool",
-            use_cases=[],
-            avoid_when=[],
-            keywords=[],
-            parameters={},
-            input_schema={"type": "object", "additionalProperties": True},
-            effect=effect,
-            idempotency_scope="operation" if effect != "read_only" else "",
+            input_schema={
+                "type": "object",
+                "properties": properties,
+                "additionalProperties": False,
+            },
+        )
+        self.runtime_policy = make_test_runtime_policy(
+            effect,
+            effect_by_parameter=effect_by_parameter,
         )
 
     def execute(self, params: dict):
-        return ToolExecutionResult(self.spec.name, True, "{}")
+        return ToolHandlerOutcome(self.model_spec.name, True, "{}")

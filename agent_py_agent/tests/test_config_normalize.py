@@ -293,14 +293,12 @@ class TestNormalizeSubagentAgentConfig:
             {
                 "home_context_enabled": "false",
                 "home_lesson_auto_read_limit": "4",
-                "daily_memory_mirror_enabled": "true",
                 "run_task_workspace_enabled": "false",
             }
         )
         assert warnings == []
         assert normalized["home_context_enabled"] is False
         assert normalized["home_lesson_auto_read_limit"] == 4
-        assert normalized["daily_memory_mirror_enabled"] is True
         assert normalized["run_task_workspace_enabled"] is False
 
     def test_path_access_mode_only_accepts_current_values(self):

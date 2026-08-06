@@ -10,7 +10,7 @@
 #   session 血缘/连续 message-id,故 scroll 用 updated_at 时间序当滚动轴、不做
 #   血缘去重/rebind;模式名(discover/scroll/browse)与返回字段(snippet/window/
 #   messages_before/after/count)对齐 长期助手 语义。契约:只读零副作用;空库/无命中
-#   返回结构化提示不报错;给精确 parameter_schema(对齐原生 tool_use 改造规范)。
+#   返回结构化提示不报错；给精确 input_schema（对齐原生 tool_use 改造规范）。
 # 模块用途: 让模型能检索/翻看本地历史记录(普通聊天、记忆、任务产物、归档),回答"我们之前
 #   对 X 怎么处理的/在哪聊过 Y",而不用把全部历史塞进 prompt。
 from __future__ import annotations
@@ -18,7 +18,16 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from ..tooling.models import BaseTool, ToolExecutionResult, ToolSpec
+from ..tooling.models import (
+    BaseTool,
+    ConcurrencyPolicy,
+    EffectResolverPolicy,
+    ResourceScopePolicy,
+    ToolHandlerOutcome,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+)
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -34,61 +43,58 @@ _MAX_WINDOW = 20
 
 
 # 函数用途: session_search 的工具说明书(进工具目录,引导模型先查历史再上网/翻盘)。
-def build_session_search_spec() -> ToolSpec:
-    return ToolSpec(
+def build_session_search_model_spec() -> ToolModelSpec:
+    return ToolModelSpec(
         name="session_search",
-        category="capability",
-        effect="read_only",
         description=(
             "检索/翻看当前用户自己的本地历史记录(普通聊天、记忆、任务产物、归档),零成本纯读。"
             "三种形态由参数推断:"
             "①传 query=全文检索(FTS5,支持中文子串);②传 around_id=以某条记录为锚翻看前后上下文;"
             "③都不传=按时间倒序列出最近记录。回答'我们之前对X怎么处理/在哪记过Y'优先用它,先于上网/翻文件。"
         ),
-        use_cases=[
-            "用户问'之前是怎么解决…的''上次…聊到哪了',先检索历史记录而不是凭空答",
-            "拿到一条命中记录后想看它前后的上下文(同期还记了什么),用 around_id 翻看",
-            "用户问'最近都在做什么'但没给具体话题,不传参浏览最近记录",
-        ],
-        avoid_when=[
-            "问的是当前世界状态(最新代码/线上数据)——那用对应工具,历史记录只是当时说了什么",
-            "已经知道确切答案、无需翻历史时",
-        ],
-        keywords=[
-            "历史", "检索", "回顾", "之前", "上次", "记录", "session",
-            "history", "search", "recall", "翻看", "找一下", "查一下",
-        ],
-        parameters={
-            "query": "可选。全文检索词(discovery 形态)。中文/英文/短语都行,留空则浏览最近记录。",
-            "around_id": "可选。记录 id(scroll 形态)。以它为锚返回前后窗口;优先级高于 query。",
-            "window": "可选。scroll 形态锚两侧各取几条,默认 5,上限 20。",
-            "limit": "可选。discovery/browse 返回几条,默认 5/10,上限 20。",
-            "source_type": "可选。限定来源类型(如 memory),只在该类记录里检索/浏览。",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "全文检索词；留空则浏览最近记录。"},
+                "around_id": {"type": "string", "description": "记录 ID；以它为锚返回前后窗口，优先于 query。"},
+                "window": {"type": "integer", "minimum": 1, "maximum": _MAX_WINDOW, "description": "锚点两侧各取几条，默认 5。"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": _MAX_LIMIT, "description": "检索或浏览返回条数。"},
+                "source_type": {"type": "string", "description": "限定来源类型，如 memory。"},
+            },
+            "additionalProperties": False,
         },
-        parameter_schema={
-            "query": {"type": "string"},
-            "around_id": {"type": "string"},
-            "window": {"type": "integer", "minimum": 1, "maximum": _MAX_WINDOW},
-            "limit": {"type": "integer", "minimum": 1, "maximum": _MAX_LIMIT},
-            "source_type": {"type": "string"},
-        },
-        required_parameters=[],
-        examples=[
-            '{"tool":"session_search","query":"记忆推送模式怎么落地的"}',
-            '{"tool":"session_search","around_id":"rec-abc123","window":8}',
-            '{"tool":"session_search"}',
-        ],
+        hints=ToolModelHints(
+            category="capability",
+            use_cases=(
+                "用户问之前怎么解决或上次聊到哪时先检索历史",
+                "拿到一条命中后用 around_id 翻看前后上下文",
+                "用户问最近在做什么时浏览最近记录",
+            ),
+            avoid_when=("当前世界状态要使用对应实时工具", "已经知道确切答案时无需翻历史"),
+            keywords=("历史", "检索", "回顾", "之前", "上次", "记录", "session", "history", "search", "recall", "翻看", "找一下", "查一下"),
+            examples=(
+                '{"tool":"session_search","query":"记忆推送模式怎么落地的"}',
+                '{"tool":"session_search","around_id":"rec-abc123","window":8}',
+                '{"tool":"session_search"}',
+            ),
+        ),
     )
 
 
 class SessionSearchTool(BaseTool):
+    model_spec = build_session_search_model_spec()
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy("read_only"),
+        concurrency_policy=ConcurrencyPolicy("parallel_safe"),
+        resource_scopes=ResourceScopePolicy(parameter_names=("around_id", "query")),
+    )
+
     # 类用途: 把 LocalStore 的历史检索/翻看暴露成模型可调用的只读工具(三模式)。
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
-        self.spec = build_session_search_spec()
 
     # 函数用途: 校验 store 后把三模式分派交给 _dispatch;store 不可用/检索异常都给结构化码。
-    def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         store = _store_for(self.agent)
         if store is None:
             return _error("本地历史存储不可用", "当前运行环境未配置 local_store", "TOOL_UNAVAILABLE")
@@ -96,7 +102,7 @@ class SessionSearchTool(BaseTool):
             payload = _dispatch(store, params)
         except Exception as exc:  # noqa: BLE001 — 检索失败要给明确可重试码,不逃逸成 UNKNOWN_ERROR
             return _error(f"历史检索失败: {exc}", "可原样重试一次", "TOOL_EXECUTION_FAILED")
-        return ToolExecutionResult("session_search", True, json.dumps(payload, ensure_ascii=False))
+        return ToolHandlerOutcome("session_search", True, json.dumps(payload, ensure_ascii=False))
 
 
 # 函数用途: 按参数推断并执行三模式(scroll 优先 > discovery > browse)。
@@ -115,8 +121,8 @@ def _dispatch(store: LocalStore, params: dict[str, object]) -> dict[str, Any]:
 
 
 # 函数用途: 统一构造 session_search 的失败返回(带明确 error_code)。
-def _error(message: str, hint: str, code: str) -> ToolExecutionResult:
-    return ToolExecutionResult(
+def _error(message: str, hint: str, code: str) -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(
         "session_search",
         False,
         json.dumps({"error": message, "hint": hint}, ensure_ascii=False),
@@ -277,4 +283,4 @@ def _safe_int(value: object, default: int, ceiling: int) -> int:
     return max(1, min(parsed, ceiling))
 
 
-__all__ = ["SessionSearchTool", "build_session_search_spec"]
+__all__ = ["SessionSearchTool", "build_session_search_model_spec"]

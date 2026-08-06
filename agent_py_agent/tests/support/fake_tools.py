@@ -2,10 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agent_py_agent.agent.contracts.tool_call_policy import (
-    ToolCallPolicy,
-    validate_tool_call_policy,
-)
 from agent_py_agent.tests.support.xlsx_fixtures import write_xlsx_fixture
 
 
@@ -15,34 +11,15 @@ class FakeToolRunner:
         run_dir: Path,
         *,
         fixtures: dict[str, object] | None = None,
-        policy: ToolCallPolicy | None = None,
     ):
         self.run_dir = run_dir
         self.fixtures = fixtures or {}
-        self.policy = policy
         self.trace: list[dict[str, object]] = []
 
     def execute(self, tool: str, params: dict[str, object]) -> dict[str, object]:
-        policy_error = self._policy_error(tool, params)
-        if policy_error is not None:
-            result = policy_error
-        else:
-            result = self._execute_allowed(tool, params)
+        result = self._execute_allowed(tool, params)
         self.trace.append({"tool": tool, "params": dict(params), "result": dict(result)})
         return result
-
-    def _policy_error(self, tool: str, params: dict[str, object]) -> dict[str, object] | None:
-        if self.policy is None:
-            return None
-        decision = validate_tool_call_policy({"tool_name": tool, "input": params}, self.policy)
-        if decision.ok:
-            return None
-        return {
-            "tool": tool,
-            "ok": False,
-            "error_code": decision.error_code,
-            "findings": list(decision.findings),
-        }
 
     def _execute_allowed(self, tool: str, params: dict[str, object]) -> dict[str, object]:
         fixture_result = self._fixture_result(tool, params)

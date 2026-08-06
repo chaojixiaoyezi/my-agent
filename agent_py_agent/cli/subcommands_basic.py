@@ -26,6 +26,7 @@ from .local_commands import (
     cmd_timeline,
 )
 from .local_repair_commands import cmd_local_doctor, cmd_local_rebuild
+from .memory_admin_parser import add_memory_admin_subcommands
 from .memory_archive_commands import (
     cmd_memory_archive_list,
     cmd_memory_archive_search,
@@ -80,8 +81,18 @@ def _add_status_timeline_run_commands(sub: argparse._SubParsersAction) -> None:
     run.add_argument("prompt", help="用户任务 / prompt")
     run.add_argument("--inject", action="append", help="动态注入 prompt，可多次传入")
     run.add_argument("--prompt-file", action="append", help="额外动态 prompt 文件，可多次传入")
-    run.add_argument("--save", action="store_true", default=None, help="保存本次对话到记忆")
-    run.add_argument("--no-save", action="store_false", dest="save", help="不保存本次对话到记忆")
+    run.add_argument(
+        "--save",
+        action="store_true",
+        default=None,
+        help="保存本次运行归档与恢复事实；不会把普通对话直接写入正式长期记忆",
+    )
+    run.add_argument(
+        "--no-save",
+        action="store_false",
+        dest="save",
+        help="不保存本次运行归档；ConversationStore/Gateway 审计仍按各自入口语义处理",
+    )
     run.add_argument("--show-prompt", action="store_true", help="打印最终拼装后的 prompt")
     run.add_argument("--delivery-contract-file", default="", help="结构化交付合同 JSON 文件")
     add_resume_context_switches(run)
@@ -89,9 +100,14 @@ def _add_status_timeline_run_commands(sub: argparse._SubParsersAction) -> None:
 
 
 def _add_memory_chat_commands(sub: argparse._SubParsersAction) -> None:
-    remember = sub.add_parser("remember", help="手动写入一条记忆")
-    remember.add_argument("content", help="记忆内容")
-    remember.add_argument("--kind", default="note", help="记忆类型，如 note/preference/fact")
+    remember = sub.add_parser("remember", help="显式确认并经统一候选/晋升链保存具体长期知识")
+    remember.add_argument("content", help="要长期保存的具体事实、事件或项目知识")
+    remember.add_argument(
+        "--kind",
+        choices=["fact", "event", "project"],
+        default="fact",
+        help="正式知识类型：fact=事实，event=事件，project=项目知识；人格偏好使用 update_persona",
+    )
     remember.set_defaults(func=cmd_remember)
 
     memory_list = sub.add_parser("memory-list", help="列出最近记忆")
@@ -107,7 +123,14 @@ def _add_memory_chat_commands(sub: argparse._SubParsersAction) -> None:
     chat.add_argument("--inject", action="append", help="启动时注入 prompt，可多次传入")
     chat.add_argument("--prompt-file", action="append", help="启动时加载额外 prompt 文件，可多次传入")
     chat.add_argument("--memory-limit", type=int, default=None, help="交互中 /memory 默认显示条数；默认读配置")
-    chat.add_argument("--no-save", action="store_true", help="交互对话不自动保存到记忆")
+    chat.add_argument(
+        "--no-save",
+        action="store_true",
+        help=(
+            "关闭本次运行归档与持久化 Compact；Gateway 模式仍记录 ConversationStore/审计，"
+            "且不会直接写正式长期记忆"
+        ),
+    )
     transport = chat.add_mutually_exclusive_group()
     transport.add_argument("--gateway", action="store_true", dest="gateway", help="使用正式后台 gateway（默认）")
     transport.add_argument("--direct", action="store_false", dest="gateway", help="开发调试：在当前前台进程直接调用模型")
@@ -228,6 +251,7 @@ def _add_memory_compact_args(parser) -> None:
 
 
 def add_memory_subcommands(sub: argparse._SubParsersAction) -> None:
+    add_memory_admin_subcommands(sub)
     add_home_runtime_subcommands(sub)
     memory_route = sub.add_parser("memory-route", help="按长期规则索引预览 memory 路由命中")
     memory_route.add_argument("query", nargs="?", default="", help="要路由的查询或用户任务")

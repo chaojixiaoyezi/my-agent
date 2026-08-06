@@ -13,6 +13,7 @@ from pathlib import Path
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
 
 
 class _LargeReadSaveBackend:
@@ -36,6 +37,7 @@ def test_saved_run_generates_request_id_before_externalized_tool_outputs(tmp_pat
     (tmp_path / "big.txt").write_text("TRACE-RUN-ID\n" + ("x" * 3000), encoding="utf-8")
     agent = SimpleAgent(
         AgentConfig(
+            tool_protocol="text",
             enable_tools=True,
             memory_path="memory.jsonl",
             my_agent_home=str(tmp_path / "home"),
@@ -52,20 +54,32 @@ def test_saved_run_generates_request_id_before_externalized_tool_outputs(tmp_pat
     index_path = task_work / "blobs" / "tool_outputs" / "index.jsonl"
     index_rows = [json.loads(line) for line in index_path.read_text(encoding="utf-8").splitlines()]
     request_id = index_rows[-1]["request_id"]
-    fact_path = agent.home_paths.owner_home_dir / "memory_archive" / "runtime_facts" / request_id / "task.json"
+    fact_path = (
+        agent.home_paths.owner_home_dir
+        / "memory_archive"
+        / "runtime_facts"
+        / request_id
+        / "task.json"
+    )
 
     assert request_id.startswith("run-")
     assert index_rows[-1]["tool"] == "read_file"
     assert fact_path.exists()
     assert index_path.exists()
     assert not (agent.home_paths.owner_home_dir / "blobs" / "tool_outputs" / "index.jsonl").exists()
-    artifact_read = agent.tools.execute_call(
+    artifact_read = execute_registry_test_call(
+        agent.tools,
+        "read_artifact",
         {
-            "tool": "read_artifact",
             "artifact_ref": index_rows[-1]["scoped_call_id"],
-            "request_id": request_id,
-            "run_id": request_id,
             "max_chars": 80,
+        },
+        run_id=request_id,
+        trusted_run_context={
+            "run_scope": {
+                "request_id": request_id,
+                "task_id": str(index_rows[-1].get("task_id") or ""),
+            }
         },
         write_boundary={"task_work_dir": str(task_work)},
     )

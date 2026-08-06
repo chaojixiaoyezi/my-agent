@@ -238,10 +238,9 @@ def test_audit_clear_racing_investigation_create_cancels_new_run(
 
 def test_create_subagents_schema_exposes_related_finding_id():
     from agent_py_agent.agent.agent_core.orchestration.tool_specs import (
-        build_create_subagents_spec,
+        build_create_subagents_model_spec,
     )
-    from agent_py_agent.agent.backends.tool_schema import tool_spec_to_input_schema
 
-    schema = tool_spec_to_input_schema(build_create_subagents_spec())
+    schema = build_create_subagents_model_spec().input_schema
 
     assert schema["properties"]["related_finding_id"]["type"] == "string"

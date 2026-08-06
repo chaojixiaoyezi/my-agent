@@ -21,9 +21,14 @@ from ..memory_archive.artifact.reader import (
 )
 from ..tooling.models import (
     BaseTool,
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    ResourceScopePolicy,
     ToolAvailability,
-    ToolExecutionResult,
-    ToolSpec,
+    ToolHandlerOutcome,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
 )
 from .audit_requirements import (
     canonical_audit_validated_notes,
@@ -86,18 +91,26 @@ class _AuditPublishResult:
 class PublishAuditUpdateTool(BaseTool):
     """The only program-authoritative transition from prepared text to effective config."""
 
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy("mutating"),
+        idempotency_policy=IdempotencyPolicy("operation"),
+        resource_scopes=ResourceScopePolicy(
+            parameter_names=("source_probe_refs", "remove_source_ids"),
+        ),
+        promotes_task=True,
+    )
+
     def __init__(self, agent: object):
         self.agent = agent
-        self.spec = ToolSpec(
+        self.model_spec = ToolModelSpec(
             name="publish_audit_update",
-            category="conversation",
             description=(
                 "Publish validated operational notes for the exact Audit scoped to this prepare turn. "
                 "This tool is unavailable in ordinary chat and never selects an Audit by prose. "
                 "A successful probe, watch open, or file write does not update the named Audit; "
                 "only a successful call to this tool does. Publishing changes the effective "
                 "configuration but the host preserves the current prepare message verbatim as "
-                "the authoritative user requirement; derived notes cannot replace it. Publishing "
+                "the authoritative user requirement; derived notes cannot replace it. "
                 "Prefer one final call after all requested checks pass. If an earlier successful call "
                 "in this exact still-running prepare turn happened before a later probe completed, "
                 "the same turn may call again to atomically amend its own publication. A different "
@@ -113,96 +126,65 @@ class PublishAuditUpdateTool(BaseTool):
                 "It does not start monitoring; start remains an explicit "
                 "/audit <duration> <name> command."
             ),
-            use_cases=[
-                "The user explicitly asks to apply the prepared Audit change",
-                "A requested probe or validation has completed and the user asked to publish the result",
-            ],
-            avoid_when=[
-                "The user is asking a question, comparing options, or only testing a proposal",
-                "The current turn is not an /audit <name> prepare turn",
-            ],
-            keywords=["publish audit update", "apply audit preparation", "生效审计配置"],
-            parameters={
-                "effective_prompt": (
-                    "Durable cross-source operational notes only. Put source-specific stable "
-                    "field meaning and judgment requirements in that source's profile. Do not "
-                    "copy transient probe observations or duplicate every source profile here. "
-                    "Do not silently rewrite identifiers or business conditions from the user; "
-                    "the host separately preserves the current prepare message verbatim and "
-                    "gives it precedence."
-                ),
-                "validation_status": "not_required, passed, or failed.",
-                "validation_refs": (
-                    "Required when validation_status=passed. Use an exact existing file path "
-                    "returned by write_file under this Audit's work/output directory, or an "
-                    "exact registered externalized tool artifact_ref/scoped_call_id from this "
-                    "Audit. Never invent or edit a call id."
-                ),
-                "source_probe_refs": (
-                    "Optional successful watch_id values returned by final watch_stream(open) "
-                    "probes in this exact named Audit. The host atomically materializes and "
-                    "applies their persisted transport facts by stable source_id according to "
-                    "source_update_mode. Omit this parameter or pass an empty list when only "
-                    "changing judgment instructions. Never invent or edit a watch_id."
-                ),
-                "source_update_mode": (
-                    "Optional structured source-set mutation: upsert (default) adds or replaces "
-                    "the selected source_ids and keeps all unmentioned sources; replace makes "
-                    "source_probe_refs the complete effective source set. A replace that omits "
-                    "existing sources must also list every omitted id in remove_source_ids; "
-                    "otherwise it fails without changing the Audit. This field expresses collection "
-                    "membership only; it never classifies source content or user prose."
-                ),
-                "remove_source_ids": (
-                    "Exact existing source_id values intentionally removed by source_update_mode=replace. "
-                    "The list must exactly match the persisted sources omitted from source_probe_refs. "
-                    "Omit it for ordinary additions and corrections so unmentioned sources stay active."
-                ),
-            },
-            parameter_schema={
-                "effective_prompt": {"type": "string", "minLength": 1},
-                "validation_status": {
-                    "type": "string",
-                    "enum": ["not_required", "passed", "failed"],
-                },
-                "validation_refs": {
-                    "type": "array",
-                    "items": {"type": "string", "minLength": 1},
-                    "maxItems": 32,
-                },
-                "source_probe_refs": {
-                    "type": "array",
-                    "maxItems": _MAX_SOURCE_PROBE_REFS,
-                    "items": {
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "effective_prompt": {
                         "type": "string",
-                        "pattern": r"^ws-[0-9a-f]{10}$",
+                        "minLength": 1,
+                        "description": (
+                            "Durable cross-source operational notes only. Keep source-specific stable field meaning "
+                            "in that source profile; do not copy transient probe observations or rewrite the user's identifiers."
+                        ),
+                    },
+                    "validation_status": {
+                        "type": "string",
+                        "enum": ["not_required", "passed", "failed"],
+                        "description": "Validation outcome for this exact prepare revision.",
+                    },
+                    "validation_refs": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1},
+                        "maxItems": 32,
+                        "description": "Exact existing Audit workspace paths or registered externalized artifact refs; required when passed.",
+                    },
+                    "source_probe_refs": {
+                        "type": "array",
+                        "maxItems": _MAX_SOURCE_PROBE_REFS,
+                        "items": {"type": "string", "pattern": r"^ws-[0-9a-f]{10}$"},
+                        "description": "Successful watch_id values from final watch_stream(open) probes in this prepare turn.",
+                    },
+                    "source_update_mode": {
+                        "type": "string",
+                        "enum": ["upsert", "replace"],
+                        "description": "upsert keeps unmentioned sources; replace declares the complete effective source set.",
+                    },
+                    "remove_source_ids": {
+                        "type": "array",
+                        "maxItems": _MAX_SOURCE_PROBE_REFS,
+                        "items": {"type": "string", "pattern": r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+                        "description": "Exact persisted source IDs intentionally omitted by replace.",
                     },
                 },
-                "source_update_mode": {
-                    "type": "string",
-                    "enum": ["upsert", "replace"],
-                },
-                "remove_source_ids": {
-                    "type": "array",
-                    "maxItems": _MAX_SOURCE_PROBE_REFS,
-                    "items": {
-                        "type": "string",
-                        "pattern": r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
-                    },
-                },
+                "required": ["effective_prompt", "validation_status"],
+                "additionalProperties": False,
             },
-            required_parameters=["effective_prompt", "validation_status"],
-            examples=[
-                '{"tool":"publish_audit_update","effective_prompt":"完整生效要求",'
-                '"validation_status":"not_required"}',
-                '{"tool":"publish_audit_update","effective_prompt":"经过探针验证的完整要求",'
-                '"validation_status":"passed","validation_refs":'
-                '["output/source-a-profile.json"],"source_probe_refs":'
-                '["ws-ab12cd34ef"]}',
-            ],
-            effect="mutating",
-            idempotency_scope="operation",
-            promotes_task=True,
+            hints=ToolModelHints(
+                category="conversation",
+                use_cases=(
+                    "The user explicitly asks to apply the prepared Audit change",
+                    "A requested probe or validation completed and the user asked to publish",
+                ),
+                avoid_when=(
+                    "The user is asking a question, comparing options, or only testing a proposal",
+                    "The current turn is not an /audit <name> prepare turn",
+                ),
+                keywords=("publish audit update", "apply audit preparation", "生效审计配置"),
+                examples=(
+                    '{"tool":"publish_audit_update","effective_prompt":"完整生效要求","validation_status":"not_required"}',
+                    '{"tool":"publish_audit_update","effective_prompt":"经过探针验证的完整要求","validation_status":"passed","validation_refs":["output/source-a-profile.json"],"source_probe_refs":["ws-ab12cd34ef"]}',
+                ),
+            ),
         )
 
     def availability(self) -> ToolAvailability:
@@ -241,7 +223,7 @@ class PublishAuditUpdateTool(BaseTool):
             )
         return ToolAvailability.ready()
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         request, error = _audit_publish_request(self.agent, params)
         if error is not None or request is None:
             return _result(error or _AuditPublishResult(False))
@@ -900,7 +882,7 @@ def _validated_tool_artifact_ref(root: Path, artifact_ref: str) -> str:
     return str(path)
 
 
-def _result(result: _AuditPublishResult) -> ToolExecutionResult:
+def _result(result: _AuditPublishResult) -> ToolHandlerOutcome:
     payload = {
         "ok": result.ok,
         "applied": result.applied,
@@ -935,7 +917,7 @@ def _result(result: _AuditPublishResult) -> ToolExecutionResult:
         "error_code": result.error_code,
         "error_detail": str(result.error_detail or "")[:800],
     }
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         "publish_audit_update",
         result.ok,
         json.dumps(payload, ensure_ascii=False),

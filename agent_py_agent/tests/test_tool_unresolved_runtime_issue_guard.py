@@ -3,6 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+from agent_py_agent.agent.tooling.runtime_contracts import ToolFailureFacts, ToolResult
+from agent_py_agent.tests._tool_runtime_harness import (
+    canonical_history_call,
+    canonical_history_result,
+    make_test_protocol_snapshot,
+    runtime_snapshot_for_model_specs,
+)
+
 
 def test_no_tool_final_redirects_unresolved_artifact_integrity_issue(tmp_path: Path):
     from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
@@ -112,7 +120,9 @@ def test_unresolved_runtime_issue_repair_context_redirects_once_then_allows_repo
     assert decision.action == "break"
     assert decision.response.text == "已经完成了。"
     assert decision.counters.unresolved_runtime_issue_redirects == 3
-    assert not any("repair_revalidate_or_report_real_blocker" in item for item in params.tool_context)
+    assert not any(
+        "repair_revalidate_or_report_real_blocker" in item for item in params.tool_context
+    )
 
 
 def test_no_tool_final_allows_after_artifact_integrity_issue_is_cleared(tmp_path: Path):
@@ -178,14 +188,23 @@ def test_read_result_with_path_does_not_clear_artifact_integrity_issue(tmp_path:
 def test_archive_record_keeps_artifact_integrity_failure_envelope(tmp_path: Path):
     from agent_py_agent.agent.agent_core.tool_call_archive_record import archive_tool_call_record
     from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallRecordParams
-    from agent_py_agent.agent.tooling import ToolExecutionResult
 
     params = _params()
-    result = ToolExecutionResult(
+    call = canonical_history_call(
         "write_file",
-        False,
+        {"path": "app.js"},
+        call_id="1-1",
+        source_protocol="text",
+        run_id=params.run_id,
+        turn_id="run-1:round-1",
+        attempt_id=params.request_id,
+    )
+    result = canonical_history_result(
+        call,
         "site integrity failed",
-        result_envelope={
+        ok=False,
+        error_code="ACCEPTANCE_FAILED",
+        handler_details={
             "artifact_integrity": {
                 "kind": "web_project",
                 "path": "app.js",
@@ -194,7 +213,6 @@ def test_archive_record_keeps_artifact_integrity_failure_envelope(tmp_path: Path
                 "issues": [{"code": "STATIC_SITE_MISSING_DOM_ID_HITS", "severity": "blocker"}],
             }
         },
-        error_code="ACCEPTANCE_FAILED",
     )
 
     record = archive_tool_call_record(
@@ -203,7 +221,7 @@ def test_archive_record_keeps_artifact_integrity_failure_envelope(tmp_path: Path
             params=params,
             tool_rounds=1,
             idx=1,
-            payload={"tool": "write_file", "path": "app.js"},
+            call=call,
             result=result,
         ),
     )
@@ -219,34 +237,47 @@ def test_archive_record_keeps_artifact_integrity_failure_envelope(tmp_path: Path
 def test_archive_record_keeps_safe_unknown_operation_facts(tmp_path: Path):
     from agent_py_agent.agent.agent_core.tool_call_archive_record import archive_tool_call_record
     from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallRecordParams
-    from agent_py_agent.agent.tooling import ToolExecutionResult
 
     params = _params()
-    result = ToolExecutionResult(
+    call = canonical_history_call(
         "send_message",
-        False,
-        "operation outcome unknown",
-        result_envelope={
-            "tool_operation": {
-                "schema_version": "tool_operation.v1",
-                "operation_id": "tool_call:call-9",
-                "status": "unknown",
-                "action": "completion_persistence_failed",
-                "replayed": False,
-                "idempotency_scope": "business",
-                "diagnostic": "must-not-enter-compact-envelope",
-            },
-            "reported_tool_result": {
-                "ok": True,
-                "error_code": "",
-                "effect_outcome": "",
-                "effect_source_ref": "provider://message/9",
-                "output": "must-not-enter-compact-envelope",
-            },
+        {"message": "hello"},
+        call_id="1-1",
+        source_protocol="text",
+        run_id=params.run_id,
+        turn_id="run-1:round-1",
+        attempt_id=params.request_id,
+    )
+    handler_details = {
+        "tool_operation": {
+            "schema_version": "tool_operation.v1",
+            "operation_id": "tool_call:call-9",
+            "status": "unknown",
+            "action": "completion_persistence_failed",
+            "replayed": False,
+            "idempotency_scope": "business",
+            "diagnostic": "must-not-enter-compact-envelope",
         },
+        "reported_tool_result": {
+            "ok": True,
+            "error_code": "",
+            "effect_outcome": "",
+            "effect_source_ref": "provider://message/9",
+            "output": "must-not-enter-compact-envelope",
+        },
+    }
+    result = ToolResult.failed(
+        call,
+        "operation outcome unknown",
         error_code="TOOL_OPERATION_OUTCOME_UNKNOWN",
-        effect_outcome="unknown",
-        effect_source_ref="provider://message/9",
+        failure_stage="persistence",
+        facts=ToolFailureFacts(
+            handler_executed=True,
+            effect_outcome="unknown",
+            effect_source_ref="provider://message/9",
+            status="unknown",
+            metadata={"handler_details": handler_details},
+        ),
     )
 
     record = archive_tool_call_record(
@@ -255,7 +286,7 @@ def test_archive_record_keeps_safe_unknown_operation_facts(tmp_path: Path):
             params=params,
             tool_rounds=1,
             idx=1,
-            payload={"tool": "send_message", "message": "hello"},
+            call=call,
             result=result,
         ),
     )
@@ -275,9 +306,6 @@ def test_archive_record_keeps_safe_unknown_operation_facts(tmp_path: Path):
 def _agent(root: Path):
     class _Tools:
         workspace_root = root
-
-        def parse_tool_calls(self, text: str):
-            return []
 
     return SimpleNamespace(
         backend=SimpleNamespace(name="fake"),
@@ -308,6 +336,11 @@ def _params(*, archive_tool_calls: list[dict[str, object]] | None = None):
         one_shot_tool_calls=set(),
         executed_tools=[],
         archive_tool_calls=list(archive_tool_calls or []),
+        tool_protocol_snapshot=make_test_protocol_snapshot(
+            run_id="run-1",
+            source_protocol="text",
+        ),
+        tool_runtime_snapshot=runtime_snapshot_for_model_specs((), run_id="run-1"),
     )
 
 

@@ -9,10 +9,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
-from ..contracts.tool_input_schema import validate_tool_input
-from .models import ToolSpec, TrustedParameterBinding
-
-_TRUSTED_CONTEXT_ROOTS = frozenset({"registry", "run_scope", "write_boundary"})
+from .models import ToolRuntime, TrustedParameterBinding
 
 
 # LLM: 来源记录只允许暴露字段路径、来源类别和结构化引用，绝不能复制命令、密钥或参数正文。
@@ -46,15 +43,19 @@ class ToolInputCompletionContext:
 class ToolInputCompletion:
     value: dict[str, Any]
     sources: tuple[ToolInputSource, ...] = ()
+    error_code: str = ""
+    conflict_fields: tuple[str, ...] = ()
 
 
-# LLM: 该函数只补“缺失”的顶层字段；显式空值、错误值和未知字段仍交给同一 Schema 门处理。
-# 函数用途: 依次应用工具作者声明的安全默认值与可信上下文绑定，并记录每个已有/补入字段的来源。
-def complete_tool_input(
+def complete_tool_arguments(
     arguments: dict[str, Any],
-    spec: ToolSpec,
+    runtime: ToolRuntime,
     context: ToolInputCompletionContext | None = None,
+    *,
+    include_trusted_bindings: bool = True,
 ) -> ToolInputCompletion:
+    """Complete canonical arguments from ToolRuntimePolicy, never from prose."""
+
     completion_context = context or ToolInputCompletionContext()
     completed = deepcopy(arguments)
     sources = [
@@ -65,9 +66,8 @@ def complete_tool_input(
         )
         for name in completed
     ]
-    for name, value in (
-        getattr(spec, "safe_parameter_defaults", None) or {}
-    ).items():
+    policy = runtime.runtime_policy.input_policy
+    for name, value in policy.safe_parameter_defaults:
         if name in completed:
             continue
         completed[name] = deepcopy(value)
@@ -75,140 +75,62 @@ def complete_tool_input(
             ToolInputSource(
                 path=_field_path(name),
                 source="safe_default",
-                source_ref=f"tool_spec:{spec.name}#/safe_parameter_defaults/{_pointer_part(name)}",
+                source_ref=(
+                    f"tool_runtime:{runtime.model_spec.name}"
+                    f"#/input_policy/safe_parameter_defaults/{_pointer_part(name)}"
+                ),
             )
         )
+    if not include_trusted_bindings:
+        return ToolInputCompletion(completed, tuple(sources))
     trusted_context = (
         completion_context.trusted_context
         if isinstance(completion_context.trusted_context, dict)
         else {}
     )
-    for name, binding in (
-        getattr(spec, "trusted_parameter_bindings", None) or {}
-    ).items():
-        if name in completed or not _binding_matches(binding, completed):
+    conflicts: list[str] = []
+    for name, binding in policy.trusted_parameter_bindings:
+        if not _binding_matches(binding, completed):
             continue
         resolved = _first_trusted_value(binding.source_refs, trusted_context)
         if resolved is None:
             continue
         source_ref, value = resolved
+        if name in completed:
+            if binding.authority == "fill_missing":
+                continue
+            if binding.authority == "must_match" and completed[name] != value:
+                conflicts.append(str(name))
+                sources.append(
+                    ToolInputSource(
+                        path=_field_path(name),
+                        source="trusted_context_conflict",
+                        source_ref=source_ref,
+                    )
+                )
+                continue
+            if binding.authority == "must_match":
+                sources = [item for item in sources if item.path != _field_path(name)]
         completed[name] = deepcopy(value)
+        if binding.authority == "host_authoritative":
+            sources = [item for item in sources if item.path != _field_path(name)]
         sources.append(
             ToolInputSource(
                 path=_field_path(name),
-                source="trusted_context",
+                source=(
+                    "trusted_context_verified"
+                    if binding.authority == "must_match"
+                    else "trusted_context"
+                ),
                 source_ref=source_ref,
             )
         )
-    return ToolInputCompletion(completed, tuple(sources))
-
-
-# LLM: 工具补全声明与参数 Schema 必须在展示和执行前共同验证；错误声明不能降级继续运行。
-# 函数用途: 校验补全目标、可信引用、条件字段和默认值类型，并把安全默认值投影为 Schema 注解。
-def schema_with_tool_input_completion(
-    spec: ToolSpec,
-    schema: dict[str, Any],
-) -> dict[str, Any]:
-    result = deepcopy(schema)
-    properties = result.get("properties")
-    if not isinstance(properties, dict):
-        properties = {}
-        result["properties"] = properties
-    defaults = getattr(spec, "safe_parameter_defaults", None) or {}
-    bindings = getattr(spec, "trusted_parameter_bindings", None) or {}
-    if not isinstance(defaults, dict):
-        raise ValueError("safe_parameter_defaults 必须是对象")
-    if not isinstance(bindings, dict):
-        raise ValueError("trusted_parameter_bindings 必须是对象")
-    overlap = sorted(set(defaults) & set(bindings), key=str)
-    if overlap:
-        raise ValueError(
-            "同一参数不能同时声明安全默认值和可信上下文绑定: "
-            + ", ".join(str(item) for item in overlap)
-        )
-    for name, value in defaults.items():
-        field_name = _require_declared_parameter(
-            name,
-            properties,
-            contract="safe_parameter_defaults",
-        )
-        _validate_safe_default(field_name, value, result)
-        declared_default = properties[field_name].get("default")
-        if "default" in properties[field_name] and declared_default != value:
-            raise ValueError(
-                f"{field_name} 的 Schema default 与 safe_parameter_defaults 冲突"
-            )
-        properties[field_name]["default"] = deepcopy(value)
-    for name, binding in bindings.items():
-        field_name = _require_declared_parameter(
-            name,
-            properties,
-            contract="trusted_parameter_bindings",
-        )
-        if not isinstance(binding, TrustedParameterBinding):
-            raise ValueError(f"{field_name} 的 trusted parameter binding 类型无效")
-        if not binding.source_refs:
-            raise ValueError(
-                f"{field_name} 的 trusted parameter binding 缺少 source_refs"
-            )
-        for source_ref in binding.source_refs:
-            _validate_source_ref(source_ref)
-        for condition_name, _ in binding.when:
-            _require_declared_parameter(
-                condition_name,
-                properties,
-                contract=f"{field_name}.when",
-            )
-    return result
-
-
-def _validate_safe_default(
-    name: str,
-    value: Any,
-    schema: dict[str, Any],
-) -> None:
-    probe_schema: dict[str, Any] = {
-        "type": "object",
-        "properties": deepcopy(schema.get("properties") or {}),
-        "required": [name],
-        "additionalProperties": False,
-    }
-    for definitions_key in ("$defs", "definitions"):
-        definitions = schema.get(definitions_key)
-        if isinstance(definitions, dict):
-            probe_schema[definitions_key] = deepcopy(definitions)
-    validation = validate_tool_input({name: value}, probe_schema)
-    if validation.ok:
-        return
-    keywords = ",".join(
-        f"{issue.path}:{issue.keyword}" for issue in validation.issues[:4]
+    return ToolInputCompletion(
+        completed,
+        tuple(sources),
+        "TOOL_TRUSTED_PARAMETER_CONFLICT" if conflicts else "",
+        tuple(conflicts),
     )
-    raise ValueError(f"{name} 的安全默认值不符合参数 Schema: {keywords}")
-
-
-def _require_declared_parameter(
-    name: object,
-    properties: dict[str, Any],
-    *,
-    contract: str,
-) -> str:
-    text = str(name or "").strip()
-    if not text or text not in properties:
-        raise ValueError(f"{contract} 引用了未声明参数: {text or '<empty>'}")
-    if not isinstance(properties[text], dict):
-        raise ValueError(f"{contract} 的参数 Schema 无效: {text}")
-    return text
-
-
-def _validate_source_ref(source_ref: object) -> None:
-    text = str(source_ref or "").strip()
-    parts = text.split(".")
-    if (
-        len(parts) < 2
-        or parts[0] not in _TRUSTED_CONTEXT_ROOTS
-        or any(not part or not part.replace("_", "").isalnum() for part in parts)
-    ):
-        raise ValueError(f"不允许的 trusted source_ref: {text or '<empty>'}")
 
 
 def _binding_matches(
@@ -277,6 +199,5 @@ __all__ = [
     "ToolInputCompletion",
     "ToolInputCompletionContext",
     "ToolInputSource",
-    "complete_tool_input",
-    "schema_with_tool_input_completion",
+    "complete_tool_arguments",
 ]

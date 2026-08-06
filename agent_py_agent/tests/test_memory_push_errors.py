@@ -1,48 +1,68 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+
+from agent_py_agent.agent.memory_push import push_relevant_memories_report
+from agent_py_agent.tests._memory_push_v2_harness import formal_memory_agent, promote_lesson
 
 
-def test_push_relevant_memories_report_keeps_search_failure_visible() -> None:
-    from agent_py_agent.agent.memory_push import push_relevant_memories_report
-
-    agent = SimpleNamespace(memory=MagicMock())
-    agent.memory.search.side_effect = RuntimeError("memory search crashed")
-
-    memories, load_errors = push_relevant_memories_report(
-        agent,
+def test_missing_owner_route_authority_has_visible_error() -> None:
+    memories, errors = push_relevant_memories_report(
+        SimpleNamespace(),
         "timeout",
         {"task_id": "task-1", "goal": "long task", "failure_type": "timeout"},
-        limit=3,
     )
 
     assert memories == []
-    assert load_errors
-    assert load_errors[0]["context"] == "memory_push.search"
-    assert "memory search crashed" in load_errors[0]["message"]
+    assert errors
+    assert errors[0]["context"] == "memory_push.formal_recall"
+    assert "authority" in errors[0]["message"]
 
 
-def test_push_relevant_memories_report_preserves_memory_index_errors() -> None:
-    from agent_py_agent.agent.memory_push import push_relevant_memories_report
-
-    record = SimpleNamespace(
-        content="This is a useful timeout lesson with enough detail",
-        kind="lesson_general",
-        tags=["timeout"],
-        created_at=1.0,
+def test_route_findings_are_preserved_as_structured_diagnostics(tmp_path: Path) -> None:
+    agent = formal_memory_agent(tmp_path)
+    promote_lesson(agent)
+    agent.home_paths.owner_memory_routing_index_md.write_text(
+        "## bad\nauthority_path: ../../escape.md\n",
+        encoding="utf-8",
     )
-    index_error = {"context": "memory_store.local_store.search", "message": "index failed"}
-    memory = MagicMock()
-    memory.search_report.return_value = ([record], [index_error])
-    agent = SimpleNamespace(memory=memory)
 
-    memories, load_errors = push_relevant_memories_report(
+    memories, errors = push_relevant_memories_report(
         agent,
-        "timeout",
-        {"task_id": "task-1", "goal": "long task", "failure_type": "timeout"},
-        limit=3,
+        "failure",
+        {"goal": "bad"},
     )
 
-    assert memories == ["[lesson_general] This is a useful timeout lesson with enough detail"]
-    assert load_errors == [index_error]
+    assert memories == []
+    assert errors
+    assert all(error["code"] == "MEMORY_ROUTING_FINDING" for error in errors)
+
+
+def test_corrupt_formal_hot_is_not_partially_recalled(tmp_path: Path) -> None:
+    agent = formal_memory_agent(tmp_path)
+    promote_lesson(agent)
+    agent.memory_hot.path.write_text("# unmarked legacy HOT\n- unsafe\n", encoding="utf-8")
+
+    memories, errors = push_relevant_memories_report(
+        agent,
+        "failure",
+        {"goal": "失败验证"},
+    )
+
+    assert [record.kind for record in memories] == ["lesson"]
+    assert "unsafe" not in memories[0].content
+    assert errors == []
+
+
+def test_invalid_limit_fails_soft() -> None:
+    memories, errors = push_relevant_memories_report(
+        SimpleNamespace(),
+        "failure",
+        {"goal": "x"},
+        limit="invalid",  # type: ignore[arg-type]
+    )
+
+    assert memories == []
+    assert errors
+    assert errors[0]["context"] == "memory_push.formal_recall"

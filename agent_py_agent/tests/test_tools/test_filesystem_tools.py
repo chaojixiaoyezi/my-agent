@@ -19,9 +19,14 @@ from agent_py_agent.agent.tooling._filesystem_patch import ApplyPatchTool
 from agent_py_agent.agent.tooling._filesystem_read import ReadFileTool
 from agent_py_agent.agent.tooling._filesystem_search import SearchTextTool
 from agent_py_agent.agent.tooling._filesystem_write import WriteFileTool
+from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
 from agent_py_agent.tests.support.xlsx_fixtures import write_xlsx_fixture
 
 from .backends import make_tool_registry
+
+
+def _execute(registry, tool_name, arguments, **kwargs):
+    return execute_registry_test_call(registry, tool_name, arguments, **kwargs)
 
 
 def _write_boundary_test_registry(workspace: Path) -> tuple:
@@ -38,8 +43,10 @@ def _write_boundary_test_registry(workspace: Path) -> tuple:
 
 
 def _assert_allowed_write(registry, task_dir, boundary) -> None:
-    result = registry.execute_call(
-        {"tool": "write_file", "path": "subs/run-1/output.md", "content": "ok"},
+    result = _execute(
+        registry,
+        "write_file",
+        {"path": "subs/run-1/output.md", "content": "ok"},
         allowed_tools=["write_file"],
         write_boundary=boundary,
     )
@@ -48,8 +55,10 @@ def _assert_allowed_write(registry, task_dir, boundary) -> None:
 
 
 def _assert_blocked_outside_allowed_roots(registry, workspace, boundary) -> None:
-    result = registry.execute_call(
-        {"tool": "write_file", "path": "README.md", "content": "bad"},
+    result = _execute(
+        registry,
+        "write_file",
+        {"path": "README.md", "content": "bad"},
         allowed_tools=["write_file"],
         write_boundary=boundary,
     )
@@ -59,8 +68,10 @@ def _assert_blocked_outside_allowed_roots(registry, workspace, boundary) -> None
 
 
 def _assert_blocked_forbidden_root(registry, task_dir, boundary) -> None:
-    result = registry.execute_call(
-        {"tool": "write_file", "path": "subs/run-1/private/secret.md", "content": "bad"},
+    result = _execute(
+        registry,
+        "write_file",
+        {"path": "subs/run-1/private/secret.md", "content": "bad"},
         allowed_tools=["write_file"],
         write_boundary=boundary,
     )
@@ -69,16 +80,20 @@ def _assert_blocked_forbidden_root(registry, task_dir, boundary) -> None:
 
 
 def _assert_blocked_locked_file(registry, task_dir, boundary) -> None:
-    locked = registry.execute_call(
-        {"tool": "write_file", "path": "subs/run-1/LOCKED.md", "content": "bad"},
+    locked = _execute(
+        registry,
+        "write_file",
+        {"path": "subs/run-1/LOCKED.md", "content": "bad"},
         allowed_tools=["write_file"],
         write_boundary=boundary,
     )
     assert not locked.ok
     assert locked.error_code == "WRITE_FORBIDDEN"
     assert "locked_files" in locked.output
-    locked_child = registry.execute_call(
-        {"tool": "write_file", "path": "subs/run-1/LOCKED.md/child.txt", "content": "bad"},
+    locked_child = _execute(
+        registry,
+        "write_file",
+        {"path": "subs/run-1/LOCKED.md/child.txt", "content": "bad"},
         allowed_tools=["write_file"],
         write_boundary=boundary,
     )
@@ -89,14 +104,16 @@ def _assert_blocked_locked_file(registry, task_dir, boundary) -> None:
 
 
 def _assert_blocked_non_string_path(registry, boundary) -> None:
-    result = registry.execute_call(
-        {"tool": "write_file", "path": {"unexpected": "object"}, "content": "bad"},
+    result = _execute(
+        registry,
+        "write_file",
+        {"path": {"unexpected": "object"}, "content": "bad"},
         allowed_tools=["write_file"],
         write_boundary=boundary,
     )
     assert not result.ok
     assert result.error_code == "TOOL_PARAMETER_TYPE_INVALID"
-    assert '"path":"$.path"' in result.output
+    assert result.metadata["action_decision"]["evidence"]["issues"][0]["path"] == "$.path"
 
 
 def test_write_boundary_enforces_declared_allowed_roots_for_write_tools():
@@ -123,9 +140,10 @@ def test_write_boundary_allows_explicit_product_root_outside_primary_workspace()
         product_root = Path(product_td) / "deliverables"
         registry = make_tool_registry(workspace)
 
-        result = registry.execute_call(
+        result = _execute(
+            registry,
+            "write_file",
             {
-                "tool": "write_file",
                 "path": str(product_root / "index.html"),
                 "content": "<!doctype html><html><body>ok</body></html>",
             },
@@ -155,8 +173,10 @@ def test_write_boundary_extends_read_tools_to_explicit_product_root():
             "product_write_policy": "direct",
         }
 
-        result = registry.execute_call(
-            {"tool": "read_file", "path": str(product_root / "index.html")},
+        result = _execute(
+            registry,
+            "read_file",
+            {"path": str(product_root / "index.html")},
             allowed_tools=["read_file"],
             write_boundary=boundary,
         )
@@ -183,8 +203,10 @@ def test_write_boundary_blocks_symlink_escape_outside_declared_allowed_roots():
         except OSError:
             return
 
-        result = registry.execute_call(
-            {"tool": "write_file", "path": "subs/run-1/outside-link/escape.txt", "content": "bad"},
+        result = _execute(
+            registry,
+            "write_file",
+            {"path": "subs/run-1/outside-link/escape.txt", "content": "bad"},
             allowed_tools=["write_file"],
             write_boundary={"allowed_write_roots": [str(task_dir)]},
         )
@@ -396,8 +418,10 @@ def test_read_file_reports_active_child_declared_output_not_ready(tmp_path: Path
     output.parent.mkdir(parents=True)
     registry = make_tool_registry(workspace)
 
-    result = registry.execute_call(
-        {"tool": "read_file", "path": str(output)},
+    result = _execute(
+        registry,
+        "read_file",
+        {"path": str(output)},
         allowed_tools=["read_file"],
         write_boundary={"locked_files": [str(output)]},
     )
@@ -1100,8 +1124,10 @@ def test_find_files_returns_structured_page_window_when_more_matches_remain(tmp_
 def test_find_files_is_registered_in_base_registry(tmp_path: Path):
     registry = make_tool_registry(tmp_path)
 
-    result = registry.execute_call(
-        {"tool": "find_files", "pattern": "*.py", "path": "."},
+    result = _execute(
+        registry,
+        "find_files",
+        {"pattern": "*.py", "path": "."},
         allowed_tools=["find_files"],
     )
 

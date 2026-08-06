@@ -27,9 +27,8 @@ from .services.dispatch import SubAgentDispatchService, SubAgentParentPlannerSer
 from .services.hierarchy.service import SubAgentHierarchyService
 from .services.indexing import SubAgentIndexingService
 from .services.indexing.records import LocalRecordParams
-from .services.learning import SubAgentLearningService
 from .services.lifecycle import SubAgentLifecycleService
-from .services.memory_gate import SubAgentMemoryGateService
+from .services.memory_candidates import SubAgentMemoryCandidateService
 from .services.persistence import SubAgentPersistenceService
 from .services.runner_context_service import SubAgentRunnerContextService
 from .services.runner_result_service import SubAgentRunnerResultService
@@ -50,7 +49,9 @@ class SubAgentManagerInitParams:
     workspace_root: str | Path | None = None
     workspace_roots: list[str | Path] | None = None
     role_template_dirs: list[str | Path] | None = None
-    enable_self_learning: bool = False
+    # LLM: The owner CandidateService is injected by the composition root; a child manager cannot create another ledger.
+    # 字段用途: 让子代理结果只投递到当前 owner 的统一 Memory 候选账本。
+    candidate_service: object | None = None
     debug_trace_level: int = 0
     takeover_chain_max_depth: int = 0
     owner_id: str = ""
@@ -71,7 +72,7 @@ class SubAgentManager(SubagentKernelMixin):
         workspace_root=None,
         workspace_roots=None,
         role_template_dirs=None,
-        enable_self_learning=False,
+        candidate_service=None,
         debug_trace_level=0,
         takeover_chain_max_depth=0,
         owner_id="",
@@ -259,7 +260,7 @@ def _init_params_from_kwargs(values: dict[str, object]) -> SubAgentManagerInitPa
         workspace_root=values.get("workspace_root"),
         workspace_roots=values.get("workspace_roots"),
         role_template_dirs=values.get("role_template_dirs"),
-        enable_self_learning=bool(values.get("enable_self_learning")),
+        candidate_service=values.get("candidate_service"),
         debug_trace_level=int(values.get("debug_trace_level") or 0),
         takeover_chain_max_depth=int(values.get("takeover_chain_max_depth") or 0),
         owner_id=str(values.get("owner_id") or ""),
@@ -296,6 +297,8 @@ def _create_run_params_from_kwargs(values: dict[str, object]) -> CreateRunParams
     )
 
 
+# LLM: Learning and memory_gate services were removed; this adapter is the only subagent-to-Memory write seam.
+# 函数用途: 装配子代理服务，并把 lesson/finding 统一接到 owner CandidateService。
 def _attach_services(manager: SubAgentManager) -> None:
     manager.lifecycle = SubAgentLifecycleService(manager)
     manager.persistence = SubAgentPersistenceService(manager)
@@ -308,8 +311,7 @@ def _attach_services(manager: SubAgentManager) -> None:
     manager.dispatch = SubAgentDispatchService(manager)
     manager.hierarchy = SubAgentHierarchyService(manager)
     manager.indexing = SubAgentIndexingService(manager)
-    manager.learning = SubAgentLearningService(manager)
-    manager.memory_gate = SubAgentMemoryGateService(manager)
+    manager.memory_candidates = SubAgentMemoryCandidateService(manager)
     manager.patch = SubAgentPatchService(manager)
     manager.parent_planner = SubAgentParentPlannerService(manager)
     manager.runner_context = SubAgentRunnerContextService(manager)
@@ -330,7 +332,7 @@ def _init_manager_state(manager: SubAgentManager, workspace: str | Path, params:
     )
     manager.workspace_roots = _normalized_workspace_roots(manager.workspace_root, params.workspace_roots)
     manager.role_template_dirs = _normalized_template_dirs(manager.workspace_root, params.role_template_dirs)
-    manager.enable_self_learning = bool(params.enable_self_learning)
+    manager.candidate_service = params.candidate_service
     manager.debug_trace_level = _normalize_debug_trace_level(params.debug_trace_level)
     manager.takeover_chain_max_depth = max(0, int(params.takeover_chain_max_depth or 0))
     _apply_owner_scope(manager, params)

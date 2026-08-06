@@ -27,7 +27,7 @@ from .orchestration.shared_context import (
 )
 from .provider_transient_auto_resume import run_with_provider_transient_auto_resume
 from .runner.context import current_task_attributes
-from .runner.stage_trace import RunnerToolStageTraceRequest, trace_runner_tool_call_started
+from .runner.stage_trace import trace_runner_tool_call_started
 from .runtime.goal_accounting import account_goal_model_response, begin_goal_model_turn
 from .runtime.guidance import (
     acknowledge_injected_turn_input,
@@ -43,7 +43,6 @@ from .tool_call_archive_record import archive_tool_call_record
 from .tool_call_runtime import (
     ToolCallRuntimeRequest,
     execute_traced_tool_call,
-    guarded_tool_call_result,
 )
 from .tool_context.call_reducer import render_tool_payload_for_live_prompt
 from .tool_context.reducer import render_tool_result_for_live_prompt
@@ -251,7 +250,7 @@ def _render_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
                 else ""
             ),
             # native 下工具往返由原生 messages 携带，prompt 旁路 tool_context 文本折入。
-            native_tool_use=native_tool_use_active(agent),
+            native_tool_use=native_tool_use_active(params),
         ),
     )
 
@@ -308,7 +307,7 @@ def _fit_native_ir_to_shared_budget(
     ``compact_semantic_summary``：不新增会话或第二阈值，只在同一 IR 内同时修正完整
     token 计量和被回收旧段的语义续接。
     """
-    if not native_tool_use_active(agent):
+    if not native_tool_use_active(params):
         return 0
     from .model.context_pressure import model_visible_context_tokens
     from .runtime.context_compactor import runtime_compact_policy
@@ -567,7 +566,7 @@ def _is_provider_context_overflow(response) -> bool:
 def _ptl_reclaim_oldest(agent, params: ToolLoopExecuteParams) -> bool:
     from .tool_context.ptl_retry import _PTL_DROP_FRACTION, reclaim_oldest_tool_results_for_ptl
 
-    if native_tool_use_active(agent):
+    if native_tool_use_active(params):
         return reclaim_oldest_native_ir_pairs(params, fraction=_PTL_DROP_FRACTION) > 0
     return reclaim_oldest_tool_results_for_ptl(params.tool_context) > 0
 
@@ -583,19 +582,9 @@ def execute_one_tool_call(agent, request: ToolCallExecuteParams):
 
 
 def _execute_scoped_tool_call(agent, request: ToolCallExecuteParams):
-    payload = request.payload
-    trace_request = RunnerToolStageTraceRequest(
-        agent=agent,
-        params=request.params,
-        tool_rounds=request.tool_rounds,
-        idx=request.idx,
-        payload=payload,
-    )
-    trace_runner_tool_call_started(trace_request)
-    runtime_request = ToolCallRuntimeRequest(agent, request, payload, trace_request)
-    guard_result = guarded_tool_call_result(runtime_request)
-    if guard_result is not None:
-        return guard_result
+    call = request.call
+    runtime_request = ToolCallRuntimeRequest(agent, request, call)
+    trace_runner_tool_call_started(runtime_request.trace_request)
     return execute_traced_tool_call(runtime_request)
 
 
@@ -875,12 +864,19 @@ def _model_turn_or_retry(
 
 
 def _response_action(agent, loop_params: ToolLoopExecuteParams, response, repair_counters: ToolLoopRepairCounters):
+    state = loop_params.live_archive_state
+    turn_id = (
+        str(state.get("_current_model_turn_id") or "")
+        if isinstance(state, dict)
+        else ""
+    )
     decision = tool_loop_response_decision(
         ToolLoopResponseDecisionRequest(
             agent,
             loop_params,
             response,
             repair_counters,
+            turn_id,
         )
     )
     return decision.counters, decision
@@ -968,7 +964,7 @@ def _final_response_after_tool_limit(agent, params: ToolLoopExecuteParams, tool_
             tool_rounds=tool_rounds,
         )
     )
-    final_response = without_tool_call_after_limit(agent, final_response)
+    final_response = without_tool_call_after_limit(params, final_response)
     final_response = replace(
         final_response,
         runtime_status="unfinished",
@@ -979,9 +975,22 @@ def _final_response_after_tool_limit(agent, params: ToolLoopExecuteParams, tool_
 
 
 def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
-    guardrail_hint = record_tool_guard_observation(agent, record.params, record.payload, record.result)
-    if record.result.ok and record.result.tool not in {"__parse_error__", "unknown"}:
-        record.params.executed_tools.append(record.result.tool)
+    from ..contracts.required_actions import settle_required_action
+
+    payload = record.payload
+    settle_required_action(
+        record.params.effective_contract_snapshot,
+        record.call,
+        record.result,
+    )
+    guardrail_hint = record_tool_guard_observation(
+        agent,
+        record.params,
+        record.call,
+        record.result,
+    )
+    if record.result.ok:
+        record.params.executed_tools.append(record.result.tool_name)
     archive_record = archive_tool_call_record(agent, record)
     _load_discovered_tools(record.params, archive_record)
     archive_tool_call_if_enabled(
@@ -999,13 +1008,13 @@ def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
     result_rendered = render_tool_result_for_live_prompt(record.result, archive_record)
     record.params.tool_context.append(
         f"[tool-record round={record.tool_rounds} index={record.idx}]\n"
-        f"{render_tool_payload_for_live_prompt(record.payload)}\n"
+        f"{render_tool_payload_for_live_prompt(payload)}\n"
         f"[tool-output-record round={record.tool_rounds} index={record.idx}]\n"
         f"{result_rendered}"
     )
     # 灰度双轨：native 下同时把这次「调用+结果」记进结构化 IR 历史（与上面的文本
     # tool_context 共存），供出站翻成原生 messages；text 协议下完全不走这里。
-    _record_tool_call_ir_if_native(agent, record, archive_record, result_rendered)
+    _record_tool_call_ir_if_native(record)
     if guardrail_hint:
         record.params.tool_context.append(f"[tool-loop-guardrail-hint]\n{guardrail_hint}")
     append_long_content_recovery_context(record)
@@ -1030,38 +1039,16 @@ def _load_discovered_tools(params: ToolLoopExecuteParams, archive_record: dict[s
 
 
 def _record_tool_call_ir_if_native(
-    agent,
     record: ToolCallRecordParams,
-    archive_record: dict[str, object],
-    result_rendered: str,
 ) -> None:
-    """native 下把这次工具调用的「调用+结果」记进结构化 IR 历史（text 协议跳过）。
-
-    真实 provider tool_use id 取自 ``result.call_id``（archive 已用真实入站 id 覆盖
-    合成 id）→ 兜底 ``payload["call_id"]``，保证出站 tool_result 的 tool_use_id 与
-    assistant tool_use.id 配对。结果 content 复用与文本链路同源的 ``result_rendered``，
-    两轨「给模型看到的结果」口径一致。
-
-    Step 5 韧性补缺：文本兜底（漏成正文的 [TOOL_CALL]）若在执行前就被某道 guard 短路
-    （agent budget / 一次性去重 / stale subagent），结果是 guard 直接产的，``call_id``
-    为空、payload 也无 call_id。此时回填一个与 ``execute_traced_tool_call`` 同约定的
-    确定性合成 id ``round-{N}-tool-{idx}``，绝不让空 id 的 tool_use/tool_result 进 IR
-    （空 id 对会被出站孤儿净化拆成悬空 tool_use → Anthropic 400）。
-    """
-    if not native_tool_use_active(agent):
+    """Append the exact canonical pair; IDs are never synthesized at record time."""
+    if not native_tool_use_active(record.params):
         return
-    call_id = str(getattr(record.result, "call_id", "") or "")
-    if not call_id and isinstance(record.payload, dict):
-        call_id = str(record.payload.get("call_id") or "")
-    if not call_id:
-        call_id = f"round-{record.tool_rounds}-tool-{record.idx}"
     record_tool_call_ir(
         record.params,
         tool_rounds=record.tool_rounds,
-        payload=record.payload,
-        call_id=call_id,
-        result_content=result_rendered,
-        is_error=not record.result.ok,
+        call=record.call,
+        result=record.result,
     )
 
 
@@ -1088,14 +1075,39 @@ def _executed_subagent_orchestration(params: ToolLoopExecuteParams) -> bool:
     return any(str(item or "") in _ORCHESTRATION_TOOLS for item in params.executed_tools or [])
 
 
-def _pop_pending_deferred_tool_calls(params: ToolLoopExecuteParams) -> list[dict[str, object]]:
+def _pop_pending_deferred_tool_calls(params: ToolLoopExecuteParams) -> list:
+    from ..tooling.runtime_contracts import canonical_tool_call_from_persisted_payload
+
     state = getattr(params, "live_archive_state", None)
     if not isinstance(state, dict):
         return []
     value = state.pop("pending_deferred_tool_calls", [])
     if not isinstance(value, list):
         return []
-    return [dict(item) for item in value if isinstance(item, dict) and str(item.get("tool") or "").strip()]
+    calls = []
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, dict) or not str(item.get("tool") or "").strip():
+            continue
+        try:
+            calls.append(
+                canonical_tool_call_from_persisted_payload(
+                    item,
+                    runtime_snapshot=params.tool_runtime_snapshot,
+                    protocol_snapshot=params.tool_protocol_snapshot,
+                    run_id=params.run_id,
+                    turn_id=f"{params.run_id}:deferred-resume",
+                    attempt_id=str(
+                        params.attempt_id or params.request_id or params.run_id or "attempt"
+                    ),
+                    fallback_call_id=f"deferred-{index}",
+                )
+            )
+        except ValueError as exc:
+            params.tool_context.append(
+                "[tool-system:deferred-call-rejected]\n"
+                f"{type(exc).__name__}: {exc}"
+            )
+    return calls
 
 
 def _deferred_drain_prompt(agent: object, params: ToolLoopExecuteParams) -> str:

@@ -27,6 +27,10 @@ from ..conversation.models import (
     THREAD_TASK_LINK_INACTIVE_STATUSES,
     thread_task_run_started_at,
 )
+from ..memory_store.lifecycle import (
+    MemoryCuratorLifecycleRequest,
+    request_memory_curator_for_session,
+)
 from .audit_control_service import AuditControlRequest, execute_audit_control_operation
 from .goal_control_service import GoalControlRequest, execute_goal_control_operation
 from .io import read_json_file_report, update_json_file_atomic
@@ -111,6 +115,18 @@ def execute_gateway_conversation_control(
     if command.kind == "steer":
         return _steer_active_request(agent, active, command, scope)
     return _stop_active_request(agent, active, scope)
+
+
+# LLM: Gateway 只解析已认证的 typed session event 并解析 owner；真正 durable reason 仍由 Memory Service 持有。
+# 函数用途: 把会话 close/reset 信号提交给正确 owner 的唯一 MemoryCuratorService。
+def request_gateway_memory_curator_lifecycle(
+    base_agent: object,
+    *,
+    scope: GatewayControlScope,
+    event: str,
+) -> MemoryCuratorLifecycleRequest:
+    owner_agent = _request_agent(base_agent, _scope_request_payload(scope))
+    return request_memory_curator_for_session(owner_agent, event=event)
 
 
 def _execute_audit_control(
@@ -1606,5 +1622,6 @@ def _request_prompt(payload: dict[str, object]) -> str:
 __all__ = [
     "GatewayControlScope",
     "execute_gateway_conversation_control",
+    "request_gateway_memory_curator_lifecycle",
     "steer_active_conversation_if_running",
 ]

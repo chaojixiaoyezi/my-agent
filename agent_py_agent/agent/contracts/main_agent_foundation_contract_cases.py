@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import hashlib
@@ -15,15 +14,18 @@ from ..contracts.model_call_ledger import (
     ModelCallStartedParams,
     ModelCallTimeoutParams,
 )
+from ..local_storage import LocalStore
 from ..tooling._filesystem_patch import ApplyPatchTool
 from ..tooling._filesystem_write import WriteFileTool
-from .main_agent_foundation_models import MainAgentFoundationCaseResult
-from .tool_protocol_v2 import (
-    normalize_tool_call,
-    normalize_tool_result,
-    validate_tool_call,
-    validate_tool_result,
+from ..tooling.executor import ToolExecutor, ToolExecutorRequest
+from ..tooling.models import ToolRuntime, ToolRuntimeSnapshot, tool_schema_hash
+from ..tooling.runtime_contracts import (
+    ToolCall,
+    ToolFailureFacts,
+    ToolResult,
+    ToolResultRef,
 )
+from .main_agent_foundation_models import MainAgentFoundationCaseResult
 
 
 def case_model_call_ledger_timeout(workspace: Path) -> MainAgentFoundationCaseResult:
@@ -57,43 +59,56 @@ def case_model_call_ledger_timeout(workspace: Path) -> MainAgentFoundationCaseRe
     )
 
 
-def case_tool_protocol_v2_envelope(workspace: Path) -> MainAgentFoundationCaseResult:
-    call = normalize_tool_call(
-        {
-            "tool_name": "read_file",
-            "input": {"path": "missing.txt"},
-            "artifact_refs": [{"artifact_id": "input-ref", "path": "missing.txt"}],
-        }
+def case_canonical_tool_contract(workspace: Path) -> MainAgentFoundationCaseResult:
+    schema = {
+        "type": "object",
+        "properties": {"path": {"type": "string"}},
+        "required": ["path"],
+        "additionalProperties": False,
+    }
+    call = ToolCall(
+        call_id="foundation-read-missing",
+        tool_name="read_file",
+        arguments={"path": "missing.txt"},
+        source_protocol="native",
+        schema_hash=tool_schema_hash(schema),
+        run_id="foundation-run",
+        turn_id="foundation-turn",
+        attempt_id="foundation-attempt",
     )
-    result = normalize_tool_result(
-        {
-            "tool_name": "read_file",
-            "ok": False,
-            "operation_ref": call.operation_ref().to_dict(),
-            "error": {"error_type": "PATH_INVALID", "message": "missing.txt"},
-            "artifact_refs": [{"artifact_id": "error-log", "path": "logs/error.json"}],
-        }
+    result = ToolResult.failed(
+        call,
+        "missing.txt",
+        error_code="PATH_INVALID",
+        failure_stage="execution",
+        facts=ToolFailureFacts(
+            handler_executed=True,
+            refs=(ToolResultRef(kind="artifact", ref="logs/error.json"),),
+        ),
     )
-    findings = validate_tool_call(call) + validate_tool_result(result)
-    evidence = workspace / "tool_protocol_v2_envelope" / "envelope.json"
+    evidence = workspace / "canonical_tool_contract" / "contract.json"
     evidence.parent.mkdir(parents=True, exist_ok=True)
     evidence.write_text(
         json.dumps(
-            {"call": call.to_dict(), "result": result.to_dict(), "findings": findings},
+            {"call": call.to_dict(), "result": result.to_dict()},
             ensure_ascii=False,
             indent=2,
             sort_keys=True,
         ),
         encoding="utf-8",
     )
-    issues = list(findings)
-    if result.error is None or result.error.error_type != "PATH_INVALID":
-        issues.append("tool result error taxonomy missing")
+    issues: list[str] = []
+    if result.error_code != "PATH_INVALID":
+        issues.append("canonical tool result error taxonomy missing")
+    if result.call_id != call.call_id or result.tool_name != call.tool_name:
+        issues.append("canonical call/result pairing mismatch")
+    if not result.refs or result.refs[0].ref != "logs/error.json":
+        issues.append("canonical tool result ref missing")
     return MainAgentFoundationCaseResult(
-        case_id="tool_protocol_v2_envelope",
-        title="工具协议 v2 envelope 测试",
+        case_id="canonical_tool_contract",
+        title="Canonical ToolCall/ToolResult 合同测试",
         status="FAILED" if issues else "PASSED",
-        summary="工具调用/结果包含 operation、幂等键、错误分类和 artifact refs，不读自然语言输出当事实。",
+        summary="工具调用/结果包含稳定身份、幂等键、错误分类和 refs，不读自然语言输出当事实。",
         evidence_refs=[str(evidence)],
         issues=issues,
     )
@@ -103,9 +118,39 @@ def case_general_write_contract(workspace: Path) -> MainAgentFoundationCaseResul
     case_dir = workspace / "general_write_contract"
     write_tool = WriteFileTool(case_dir)
     patch_tool = ApplyPatchTool(case_dir)
-    text_result = write_tool.execute({"path": "out/report.txt", "content": "hello world\n"})
-    binary_result = write_tool.execute({"path": "out/blob.bin", "data_base64": "AAEC"})
-    patch_result = patch_tool.execute(
+    tools = (write_tool, patch_tool)
+    snapshot = ToolRuntimeSnapshot(
+        run_id="foundation-write-run",
+        runtimes=tuple(
+            ToolRuntime(tool.model_spec, tool.runtime_policy, tool)
+            for tool in tools
+        ),
+        available_tool_names=frozenset(tool.model_spec.name for tool in tools),
+        unavailable_tools=(),
+        allowed_tools=None,
+    )
+    operation_store = LocalStore(case_dir / "operations.db", enable_fts=False)
+    text_result = _execute_foundation_tool(
+        case_dir,
+        snapshot,
+        operation_store,
+        "write_file",
+        {"path": "out/report.txt", "content": "hello world\n"},
+        index=1,
+    )
+    binary_result = _execute_foundation_tool(
+        case_dir,
+        snapshot,
+        operation_store,
+        "write_file",
+        {"path": "out/blob.bin", "data_base64": "AAEC"},
+        index=2,
+    )
+    patch_result = _execute_foundation_tool(
+        case_dir,
+        snapshot,
+        operation_store,
+        "apply_patch",
         {
             "patch": (
                 "*** Begin Patch\n"
@@ -113,8 +158,9 @@ def case_general_write_contract(workspace: Path) -> MainAgentFoundationCaseResul
                 "-hello world\n"
                 "+hello patched world\n"
                 "*** End Patch\n"
-            )
-        }
+            ),
+        },
+        index=3,
     )
     evidence = _write_general_write_evidence(case_dir, text_result, binary_result, patch_result)
     issues = _general_write_issues(case_dir, text_result, binary_result, patch_result)
@@ -126,6 +172,41 @@ def case_general_write_contract(workspace: Path) -> MainAgentFoundationCaseResul
         evidence_refs=[str(evidence)],
         issues=issues,
     )
+
+
+def _execute_foundation_tool(
+    case_dir: Path,
+    snapshot: ToolRuntimeSnapshot,
+    operation_store: LocalStore,
+    tool_name: str,
+    arguments: dict[str, object],
+    *,
+    index: int,
+) -> ToolResult:
+    runtime = snapshot.runtime(tool_name)
+    if runtime is None:
+        raise RuntimeError(f"foundation runtime missing tool: {tool_name}")
+    call = ToolCall(
+        call_id=f"foundation-write-{index}",
+        tool_name=tool_name,
+        arguments=arguments,
+        source_protocol="native",
+        schema_hash=runtime.model_spec.schema_hash,
+        run_id=snapshot.run_id,
+        turn_id="foundation-write-turn",
+        attempt_id="foundation-write-attempt",
+    )
+    return ToolExecutor().execute(
+        ToolExecutorRequest(
+            call=call,
+            runtime_snapshot=snapshot,
+            workspace_root=case_dir,
+            workspace_roots=(case_dir,),
+            operation_store=operation_store,
+            operation_store_required=True,
+            operation_owner_id="foundation-contract",
+        )
+    ).result
 
 
 def _started_params() -> ModelCallStartedParams:
@@ -155,7 +236,9 @@ def _ledger_issues(ledger: ModelCallLedger) -> list[str]:
     return ["model call ledger did not record timeout"]
 
 
-def _write_general_write_evidence(case_dir: Path, text_result: object, binary_result: object, patch_result: object) -> Path:
+def _write_general_write_evidence(
+    case_dir: Path, text_result: object, binary_result: object, patch_result: object
+) -> Path:
     evidence = case_dir / "evidence.json"
     text_target = case_dir / "out" / "report.txt"
     binary_target = case_dir / "out" / "blob.bin"
@@ -165,8 +248,12 @@ def _write_general_write_evidence(case_dir: Path, text_result: object, binary_re
         "patch_ok": bool(getattr(patch_result, "ok", False)),
         "text_target_ref": str(text_target),
         "binary_target_ref": str(binary_target),
-        "text_sha256": hashlib.sha256(text_target.read_bytes()).hexdigest() if text_target.exists() else "",
-        "binary_sha256": hashlib.sha256(binary_target.read_bytes()).hexdigest() if binary_target.exists() else "",
+        "text_sha256": hashlib.sha256(text_target.read_bytes()).hexdigest()
+        if text_target.exists()
+        else "",
+        "binary_sha256": hashlib.sha256(binary_target.read_bytes()).hexdigest()
+        if binary_target.exists()
+        else "",
     }
     evidence.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8"
@@ -174,13 +261,20 @@ def _write_general_write_evidence(case_dir: Path, text_result: object, binary_re
     return evidence
 
 
-def _general_write_issues(case_dir: Path, text_result: object, binary_result: object, patch_result: object) -> list[str]:
+def _general_write_issues(
+    case_dir: Path, text_result: object, binary_result: object, patch_result: object
+) -> list[str]:
     issues: list[str] = []
-    if not all(bool(getattr(item, "ok", False)) for item in (text_result, binary_result, patch_result)):
+    if not all(
+        bool(getattr(item, "ok", False)) for item in (text_result, binary_result, patch_result)
+    ):
         issues.append("generic write action failed")
     text_target = case_dir / "out" / "report.txt"
     binary_target = case_dir / "out" / "blob.bin"
-    if not text_target.exists() or text_target.read_text(encoding="utf-8") != "hello patched world\n":
+    if (
+        not text_target.exists()
+        or text_target.read_text(encoding="utf-8") != "hello patched world\n"
+    ):
         issues.append("text target content mismatch")
     if not binary_target.exists() or binary_target.read_bytes() != b"\x00\x01\x02":
         issues.append("binary target content mismatch")
@@ -190,5 +284,5 @@ def _general_write_issues(case_dir: Path, text_result: object, binary_result: ob
 __all__ = [
     "case_general_write_contract",
     "case_model_call_ledger_timeout",
-    "case_tool_protocol_v2_envelope",
+    "case_canonical_tool_contract",
 ]

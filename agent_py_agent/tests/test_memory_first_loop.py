@@ -29,7 +29,9 @@ from agent_py_agent.cli.parser import build_parser
 
 
 def _read_jsonl(path: Path) -> list[dict]:
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return [
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
+    ]
 
 
 def _write_config(tmp_path: Path, extra: str = "") -> Path:
@@ -38,6 +40,7 @@ def _write_config(tmp_path: Path, extra: str = "") -> Path:
         'workspace_root: "workspace"\n'
         f'my_agent_home: "{(tmp_path / "home").as_posix()}"\n'
         'model_backend: "echo"\n'
+        'tool_protocol: "text"\n'
         'subagent_workspace: "subagents"\n'
         'local_store_path: "local_store/local.db"\n'
         'local_store_files_dir: "local_store/files"\n'
@@ -111,7 +114,16 @@ def test_memory_archive_list_can_filter_by_archive_level(tmp_path, capsys):
 
     parser = build_parser()
     args = parser.parse_args(
-        ["--config", str(config_path), "memory-archive-list", "--layer", "raw", "--level", "3", "--json"]
+        [
+            "--config",
+            str(config_path),
+            "memory-archive-list",
+            "--layer",
+            "raw",
+            "--level",
+            "3",
+            "--json",
+        ]
     )
     code = args.func(args)
     payload = json.loads(capsys.readouterr().out)
@@ -133,6 +145,7 @@ def test_compression_hook_failure_blocks_run_and_audits_event(tmp_path, monkeypa
     monkeypatch.setattr(compression_service, "write_compression_snapshot", boom)
     agent = SimpleAgent(
         AgentConfig(
+            tool_protocol="text",
             model_backend="echo",
             max_tokens=1,
             local_store_path="local_store/local.db",
@@ -156,6 +169,8 @@ def test_runtime_compression_receives_routed_and_resume_context(monkeypatch):
         required_read_paths=["memory/routing/rules/compact.md"],
         candidate_paths=["memory/routing/rules/subagent.md"],
         matches=[],
+        receipts=[],
+        findings=[],
     )
     resume_context = SimpleNamespace(
         context_block="恢复线索：继续 compact split 前先读 checkpoint。",
@@ -164,8 +179,17 @@ def test_runtime_compression_receives_routed_and_resume_context(monkeypatch):
     captured: dict[str, object] = {}
     agent = _runtime_context_capture_agent(captured)
 
-    monkeypatch.setattr(runtime_loop_support, "build_routed_memory_context", lambda *args, **kwargs: routed_context)
-    monkeypatch.setattr(runtime_loop_support, "build_auto_resume_context", lambda *args, **kwargs: resume_context)
+    monkeypatch.setattr(
+        runtime_loop_support, "build_routed_memory_context", lambda *args, **kwargs: routed_context
+    )
+    monkeypatch.setattr(
+        runtime_loop_support,
+        "runtime_route_root_and_index",
+        lambda *args, **kwargs: (Path("."), "memory/routing/INDEX.md"),
+    )
+    monkeypatch.setattr(
+        runtime_loop_support, "build_auto_resume_context", lambda *args, **kwargs: resume_context
+    )
 
     prepared = runtime_loop_support._prepare_runtime_context(
         agent,
@@ -182,13 +206,18 @@ def test_runtime_compression_receives_routed_and_resume_context(monkeypatch):
     assert ctx.routed_context is routed_context
     assert ctx.resume_context_section.startswith("### Auto Recovery Context")
     assert "恢复线索" in ctx.resume_context_section
-    assert "### Routed Memory" in ctx.runtime_injections[-1]
+    assert any("恢复线索" in item for item in ctx.runtime_injections)
+    assert all("### Routed Memory" not in item for item in ctx.runtime_injections)
 
 
 def _runtime_context_capture_agent(captured: dict[str, object]):
     class Memory:
-        def search(self, user_prompt: str, top_k: int):
-            return [SimpleNamespace(role="user", content=user_prompt)]
+        def search_scoped(self, user_prompt: str, top_k: int, predicate):
+            return []
+
+    class EmptyFormalRepository:
+        def list(self):
+            return []
 
     class Compression:
         def check_and_apply(self, ctx):
@@ -198,12 +227,17 @@ def _runtime_context_capture_agent(captured: dict[str, object]):
     class Agent:
         root = Path(".")
         memory = Memory()
+        memory_hot = EmptyFormalRepository()
+        memory_lessons = EmptyFormalRepository()
         config = SimpleNamespace(
+            enable_tools=False,
+            tool_protocol="text",
             memory_top_k=1,
             memory_rule_routing_enabled=True,
             memory_rule_routing_mode="soft",
             memory_rule_auto_read_limit=2,
         )
+        tools = SimpleNamespace(owner_type="main_agent")
 
         def _get_services(self):
             return SimpleNamespace(compression=Compression())

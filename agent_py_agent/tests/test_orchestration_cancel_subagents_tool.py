@@ -2,6 +2,24 @@ from __future__ import annotations
 
 import json
 import time
+from itertools import count
+
+from agent_py_agent.tests._tool_runtime_harness import execute_approved_registry_test_call
+
+_TOOL_CALL_IDS = count(1)
+
+
+def _execute_cancel_subagents(agent: object, arguments: dict[str, object]):
+    """Exercise cancellation through the canonical ToolCall-only boundary."""
+
+    sequence = next(_TOOL_CALL_IDS)
+    return execute_approved_registry_test_call(
+        agent.tools,
+        "cancel_subagents",
+        arguments,
+        run_id=f"cancel-tool-run-{sequence}",
+        call_id=f"cancel-tool-call-{sequence}",
+    )
 
 
 def test_cancel_subagents_tool_abandons_active_attempt_and_audits(tmp_path):
@@ -17,9 +35,9 @@ def test_cancel_subagents_tool_abandons_active_attempt_and_audits(tmp_path):
     task.runner_active_attempt_id = "attempt-live"
     agent.subagents.save(task)
 
-    result = agent.tools.execute_call(
+    result = _execute_cancel_subagents(
+        agent,
         {
-            "tool": "cancel_subagents",
             "run_ids": [task.id],
             "reason": "测试取消",
         }
@@ -56,9 +74,9 @@ def test_cancel_subagents_tool_requires_same_run_retry_before_cancellation(tmp_p
     task.runner_attempts = 1
     agent.subagents.save(task)
 
-    result = agent.tools.execute_call(
+    result = _execute_cancel_subagents(
+        agent,
         {
-            "tool": "cancel_subagents",
             "run_id": task.id,
             "reason": "模型认为永久阻塞",
         }
@@ -102,9 +120,9 @@ def test_cancel_subagents_tool_allows_cancellation_after_same_run_retry_exhauste
     task.runner_attempts = 2
     agent.subagents.save(task)
 
-    result = agent.tools.execute_call(
+    result = _execute_cancel_subagents(
+        agent,
         {
-            "tool": "cancel_subagents",
             "run_id": task.id,
             "reason": "重试预算已耗尽",
         }
@@ -157,9 +175,9 @@ def test_cancel_subagents_tool_cannot_cancel_system_managed_audit_source_worker(
     }
     agent.subagents.save(task)
 
-    result = agent.tools.execute_call(
+    result = _execute_cancel_subagents(
+        agent,
         {
-            "tool": "cancel_subagents",
             "run_id": task.id,
             "reason": "模型认为它卡住了",
         }
@@ -214,9 +232,9 @@ def test_cancel_subagents_retry_protection_is_atomic_for_mixed_targets(tmp_path)
     agent.subagents.save(running)
     agent.subagents.save(retryable)
 
-    result = agent.tools.execute_call(
+    result = _execute_cancel_subagents(
+        agent,
         {
-            "tool": "cancel_subagents",
             "run_ids": [running.id, retryable.id],
             "reason": "整批清理",
         }
@@ -235,9 +253,9 @@ def test_cancel_subagents_tool_filters_by_root_and_status(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
     parent, child, done_child = _create_cancel_tree(agent)
 
-    result = agent.tools.execute_call(
+    result = _execute_cancel_subagents(
+        agent,
         {
-            "tool": "cancel_subagents",
             "root_id": parent.id,
             "status": ["RUNNING", "PLANNING"],
             "reason": "清理子树",
@@ -282,8 +300,9 @@ def test_cancel_subagents_retires_existing_conversation_task_link(tmp_path):
         }
     )
 
-    result = agent.tools.execute_call(
-        {"tool": "cancel_subagents", "run_id": task.id, "reason": "停止会话绑定任务"}
+    result = _execute_cancel_subagents(
+        agent,
+        {"run_id": task.id, "reason": "停止会话绑定任务"},
     )
     payload = json.loads(result.output)
     link = store.task_links(thread.thread_id)[0]
@@ -303,9 +322,9 @@ def test_cancel_subagents_tool_rejects_old_status_filter_alias(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
     parent, child, _done_child = _create_cancel_tree(agent)
 
-    result = agent.tools.execute_call(
+    result = _execute_cancel_subagents(
+        agent,
         {
-            "tool": "cancel_subagents",
             "root_id": parent.id,
             "status": ["completed"],
             "reason": "旧别名不能驱动取消筛选",
@@ -331,9 +350,9 @@ def test_cancel_subagents_tool_reports_list_runs_failure_for_tree_filters(tmp_pa
 
     monkeypatch.setattr(agent.subagents, "list_runs", broken_list_runs)
 
-    result = agent.tools.execute_call(
+    result = _execute_cancel_subagents(
+        agent,
         {
-            "tool": "cancel_subagents",
             "root_id": "run-missing",
             "reason": "清理子树",
         }
@@ -362,9 +381,9 @@ def test_cancel_subagents_tool_reports_corrupt_locator_without_private_recovery(
     task_json.write_text(task_json.read_text(encoding="utf-8") + "}", encoding="utf-8")
     run_json.write_text(run_json.read_text(encoding="utf-8") + "}", encoding="utf-8")
 
-    result = agent.tools.execute_call(
+    result = _execute_cancel_subagents(
+        agent,
         {
-            "tool": "cancel_subagents",
             "run_id": task.id,
             "reason": "取消腐坏账本",
         }
@@ -397,7 +416,7 @@ def test_cancel_subagents_never_signals_gateway_pid_for_in_process_runner(tmp_pa
     signalled: list[int] = []
     monkeypatch.setattr(cancel, "terminate_pid_with_escalation", lambda pid: signalled.append(pid) or {})
 
-    result = agent.tools.execute_call({"tool": "cancel_subagents", "run_id": task.id, "reason": "停止进程内任务"})
+    result = _execute_cancel_subagents(agent, {"run_id": task.id, "reason": "停止进程内任务"})
     payload = json.loads(result.output)
 
     assert result.ok is True
@@ -430,7 +449,7 @@ def test_cancel_subagents_signals_fresh_subprocess_runner_pid(tmp_path, monkeypa
 
     monkeypatch.setattr(cancel, "terminate_pid_with_escalation", _terminate)
 
-    result = agent.tools.execute_call({"tool": "cancel_subagents", "run_id": task.id, "reason": "停止独立进程"})
+    result = _execute_cancel_subagents(agent, {"run_id": task.id, "reason": "停止独立进程"})
     payload = json.loads(result.output)
 
     assert result.ok is True
@@ -480,9 +499,9 @@ def test_cancel_subagents_fences_one_task_without_killing_shared_subprocess_host
 
     monkeypatch.setattr(cancel, "terminate_pid_with_escalation", _terminate)
 
-    first = agent.tools.execute_call(
+    first = _execute_cancel_subagents(
+        agent,
         {
-            "tool": "cancel_subagents",
             "run_id": tasks[0].id,
             "reason": "只停止第一个任务",
         }
@@ -500,9 +519,9 @@ def test_cancel_subagents_fences_one_task_without_killing_shared_subprocess_host
     assert agent.subagents.load(tasks[0].id).status == "CANCELLED"
     assert agent.subagents.load(tasks[1].id).status == "RUNNING"
 
-    second = agent.tools.execute_call(
+    second = _execute_cancel_subagents(
+        agent,
         {
-            "tool": "cancel_subagents",
             "run_id": tasks[1].id,
             "reason": "再停止最后一个任务",
         }
@@ -561,9 +580,9 @@ def test_cancel_subagents_does_not_interrupt_shared_in_process_dispatch(
         lambda name: interrupted.append(name) or True,
     )
 
-    first = agent.tools.execute_call(
+    first = _execute_cancel_subagents(
+        agent,
         {
-            "tool": "cancel_subagents",
             "run_id": tasks[0].id,
             "reason": "只停止第一个线程任务",
         }
@@ -578,9 +597,9 @@ def test_cancel_subagents_does_not_interrupt_shared_in_process_dispatch(
     )
     assert agent.subagents.load(tasks[1].id).status == "RUNNING"
 
-    second = agent.tools.execute_call(
+    second = _execute_cancel_subagents(
+        agent,
         {
-            "tool": "cancel_subagents",
             "run_id": tasks[1].id,
             "reason": "停止最后一个线程任务",
         }
@@ -608,7 +627,7 @@ def test_cancel_subagents_missing_runner_topology_fails_closed(tmp_path, monkeyp
     signalled: list[int] = []
     monkeypatch.setattr(cancel, "terminate_pid_with_escalation", lambda pid: signalled.append(pid) or {})
 
-    result = agent.tools.execute_call({"tool": "cancel_subagents", "run_id": task.id, "reason": "停止旧版会话"})
+    result = _execute_cancel_subagents(agent, {"run_id": task.id, "reason": "停止旧版会话"})
     payload = json.loads(result.output)
 
     assert result.ok is True
@@ -632,7 +651,7 @@ def test_cancel_subagents_missing_runner_session_ignores_legacy_pid(tmp_path, mo
     signalled: list[int] = []
     monkeypatch.setattr(cancel, "terminate_pid_with_escalation", lambda pid: signalled.append(pid) or {})
 
-    result = agent.tools.execute_call({"tool": "cancel_subagents", "run_id": task.id, "reason": "停止旧记录"})
+    result = _execute_cancel_subagents(agent, {"run_id": task.id, "reason": "停止旧记录"})
     payload = json.loads(result.output)
 
     assert result.ok is True
@@ -658,7 +677,7 @@ def test_cancel_subagents_stale_subprocess_session_never_signals_reused_pid(tmp_
     signalled: list[int] = []
     monkeypatch.setattr(cancel, "terminate_pid_with_escalation", lambda pid: signalled.append(pid) or {})
 
-    result = agent.tools.execute_call({"tool": "cancel_subagents", "run_id": task.id, "reason": "停止过期记录"})
+    result = _execute_cancel_subagents(agent, {"run_id": task.id, "reason": "停止过期记录"})
     payload = json.loads(result.output)
 
     assert result.ok is True

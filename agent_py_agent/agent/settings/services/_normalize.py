@@ -214,7 +214,7 @@ _HOME_RUNTIME_INT_FIELDS = (
     ("workspace_task_llm_title_input_chars", 200, 20_000),
 )
 _HOME_RUNTIME_BOOL_FIELDS = (
-    "home_context_enabled", "daily_memory_mirror_enabled", "run_task_workspace_enabled",
+    "home_context_enabled", "run_task_workspace_enabled",
     "workspace_task_llm_title_enabled",
 )
 def _normalize_home_strings(out: dict[str, object], defaults: object) -> list[str]:
@@ -321,7 +321,7 @@ class UserFieldsService:
 
 _RUNTIME_BOOL_FIELDS = (
     "auto_detect_work_on_startup", "auto_save_memory", "local_store_fts_enabled",
-    "enable_self_learning", "enable_subagents",
+    "enable_subagents",
     "concurrency_lock_enabled", "audit_enabled", "watchdog_enabled",
 )
 

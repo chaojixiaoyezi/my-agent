@@ -1,29 +1,34 @@
 from __future__ import annotations
 
+import pytest
+
 from agent_py_agent.agent.backends.tool_schema import (
-    tool_spec_to_anthropic_tool,
-    tool_spec_to_input_schema,
-    tool_specs_to_anthropic_tools,
+    tool_model_spec_to_anthropic_tool,
+    tool_model_spec_to_input_schema,
+    tool_model_specs_to_anthropic_tools,
 )
-from agent_py_agent.agent.tooling.models import ToolSpec
+from agent_py_agent.agent.tooling.models import ToolModelSpec
 
 
-def _spec(name: str, parameters: dict[str, str], description: str = "") -> ToolSpec:
-    return ToolSpec(
+def _spec(name: str, parameters: dict[str, str], description: str = "") -> ToolModelSpec:
+    return ToolModelSpec(
         name=name,
-        category="test",
         description=description or f"{name} 工具",
-        use_cases=[],
-        avoid_when=[],
-        keywords=[],
-        parameters=parameters,
+        input_schema={
+            "type": "object",
+            "properties": {
+                key: {"type": "string", "description": str(value or "")}
+                for key, value in parameters.items()
+            },
+            "additionalProperties": False,
+        },
     )
 
 
 def test_input_schema_has_object_root_and_string_props():
     spec = _spec("read_file", {"path": "要读取的文件路径", "limit": "可选，最多读取行数"})
 
-    schema = tool_spec_to_input_schema(spec)
+    schema = tool_model_spec_to_input_schema(spec)
 
     assert schema["type"] == "object"
     assert schema["properties"]["path"] == {"type": "string", "description": "要读取的文件路径"}
@@ -33,7 +38,7 @@ def test_input_schema_has_object_root_and_string_props():
 
 
 def test_input_schema_empty_parameters_yields_empty_properties():
-    schema = tool_spec_to_input_schema(_spec("noop", {}))
+    schema = tool_model_spec_to_input_schema(_spec("noop", {}))
 
     assert schema == {
         "type": "object",
@@ -45,7 +50,7 @@ def test_input_schema_empty_parameters_yields_empty_properties():
 def test_input_schema_coerces_non_string_description_to_string():
     spec = _spec("weird", {"flag": None})  # type: ignore[arg-type]
 
-    schema = tool_spec_to_input_schema(spec)
+    schema = tool_model_spec_to_input_schema(spec)
 
     assert schema["properties"]["flag"] == {"type": "string", "description": ""}
 
@@ -57,7 +62,7 @@ def test_anthropic_tool_carries_name_description_and_schema():
         description="读取 URL 或调用 HTTP",
     )
 
-    tool = tool_spec_to_anthropic_tool(spec)
+    tool = tool_model_spec_to_anthropic_tool(spec)
 
     assert tool["name"] == "web_fetch"
     assert tool["description"] == "读取 URL 或调用 HTTP"
@@ -72,7 +77,7 @@ def test_tools_array_for_real_filesystem_tools_is_well_formed():
         _spec("web_fetch", {"url": "完整 URL", "urls": "URL 数组", "mode": "抽取模式"}),
     ]
 
-    tools = tool_specs_to_anthropic_tools(specs)
+    tools = tool_model_specs_to_anthropic_tools(specs)
 
     assert [t["name"] for t in tools] == ["read_file", "write_file", "web_fetch"]
     for tool in tools:
@@ -84,13 +89,11 @@ def test_tools_array_for_real_filesystem_tools_is_well_formed():
         )
 
 
-def test_tools_array_drops_duplicate_names_keeping_first():
+def test_tools_array_rejects_duplicate_names():
     specs = [
         _spec("read_file", {"path": "first"}),
         _spec("read_file", {"path": "second"}),
     ]
 
-    tools = tool_specs_to_anthropic_tools(specs)
-
-    assert len(tools) == 1
-    assert tools[0]["input_schema"]["properties"]["path"]["description"] == "first"
+    with pytest.raises(ValueError, match="duplicate tool"):
+        tool_model_specs_to_anthropic_tools(specs)

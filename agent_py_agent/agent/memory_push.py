@@ -1,421 +1,257 @@
-
-"""记忆推送模块。
-
-在关键决策点自动查询并注入相关记忆，实现"推模式"记忆系统。
-"""
 from __future__ import annotations
 
-import json
-import time
-from dataclasses import dataclass
-from enum import Enum
-from pathlib import Path
-from typing import TYPE_CHECKING, Any
+"""在规划和失败决策点主动召回正式 Lesson/HOT。"""
 
-from .memory_store.security import scan_memory_content
+# LLM: 本模块只消费 LessonRepository/HotRuleRepository，并复用唯一 memory-context 投影；
+# 禁止从 long-term 的 legacy kind=lesson_* 召回或向任意正式 Memory 落盘。
+# 模块用途: 让 planner/runner 在关键决策点主动获得相关正式教训，同时不建立第二套记忆权威。
+
+import re
+from collections.abc import Mapping
+
+from .common.value_parsing import dedupe_strings
+from .memory_routing import RouteContextOptions, build_routed_memory_context
+from .memory_routing.matcher import _chinese_ngrams
+from .memory_store import (
+    MemoryRecallScope,
+    MemoryRecord,
+    hot_memory_records,
+    routed_lesson_records,
+)
+from .prompting_parts.memory_context import memory_context_text
 from .runtime_errors import runtime_error_report
+from .user_space.home_layout import runtime_route_root_and_index
 
-if TYPE_CHECKING:
-    from .local_storage import LocalStore
-    from .memory_store import JsonlMemory
-
-
-class MemoryType(str, Enum):
-    """记忆类型枚举。
-
-    - LESSON_GENERAL: 通用教训，永不过期
-    - LESSON_TASK: 任务教训，有场景限制
-    - LESSON_TEMP: 临时经验，单次有效
-    - CONTEXT: 上下文记忆
-    - FACT: 事实"""
-
-    LESSON_GENERAL = "lesson_general"
-    LESSON_TASK = "lesson_task"
-    LESSON_TEMP = "lesson_temp"
-    CONTEXT = "context"
-    FACT = "fact"
-
-    @classmethod
-    def from_string(cls, value: str) -> MemoryType:
-        """从字符串创建 MemoryType；空值或未知值归入通用 lesson。"""
-        if not value:
-            return cls.LESSON_GENERAL
-        normalized = value.lower().strip()
-        for member in cls:
-            if member.value == normalized:
-                return member
-        return cls.LESSON_GENERAL
+_GOAL_MAX_CHARS = 80
+_GOAL_NGRAM_MAX = 24
+_STRUCTURED_SCOPE_FIELDS = (
+    "company_id",
+    "project_id",
+    "task_class",
+    "session_id",
+    "temporary_scope_key",
+    "memory_scope",
+    "memory_scopes",
+)
 
 
-class TriggerType(str, Enum):
-    """触发类型枚举。"""
-
-    TIMEOUT = "timeout"
-    FAILURE = "failure"
-    PLANNING = "planning"
-    GENERAL = "general"
-
-
-@dataclass
-class MemoryEntry:
-    """记忆条目结构。"""
-
-    type: MemoryType = MemoryType.LESSON_GENERAL
-    trigger_type: str = ""
-    tags: list[str] | None = None
-    content: str = ""
-    lesson: str = ""
-    action: str = ""
-    result: str = ""
-    trigger_conditions: dict | None = None
-    created_at: float = 0.0
-
-    def to_dict(self) -> dict:
-        return {
-            "type": self.type.value if isinstance(self.type, MemoryType) else self.type,
-            "trigger_type": self.trigger_type,
-            "tags": self.tags or [],
-            "content": self.content,
-            "lesson": self.lesson,
-            "action": self.action,
-            "result": self.result,
-            "trigger_conditions": self.trigger_conditions or {},
-            "created_at": self.created_at,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> MemoryEntry:
-        type_val = data.get("type", "lesson_general")
-        if isinstance(type_val, str):
-            mem_type = MemoryType.from_string(type_val)
-        else:
-            mem_type = type_val
-
-        return cls(
-            type=mem_type,
-            trigger_type=data.get("trigger_type", ""),
-            tags=data.get("tags"),
-            content=data.get("content", ""),
-            lesson=data.get("lesson", ""),
-            action=data.get("action", ""),
-            result=data.get("result", ""),
-            trigger_conditions=data.get("trigger_conditions"),
-            created_at=data.get("created_at", 0.0),
-        )
-
-    def to_memory_record_content(self) -> str:
-        """转换为简短的记忆文本，供注入到上下文使用。"""
-        if self.lesson:
-            return f"[{self.type.value}] {self.lesson}"
-        return f"[{self.type.value}] {self.content[:100]}"
-
-
+# LLM: 返回值只能含 active 正式 Lesson/HOT 的 MemoryRecord 投影；候选、Daily、Ops 和 legacy long-term lesson 不可进入。
+# 函数用途: 查询关键决策点相关的正式教训，忽略可恢复的路由错误。
 def push_relevant_memories(
-    agent,
+    agent: object,
     trigger_type: str,
-    context: dict,
+    context: Mapping[str, object],
     limit: int = 3,
-) -> list[str]:
-    """查询并返回与当前上下文相关的记忆文本."""
-    memories, _load_errors = push_relevant_memories_report(agent, trigger_type, context, limit=limit)
+) -> list[MemoryRecord]:
+    memories, _load_errors = push_relevant_memories_report(
+        agent,
+        trigger_type,
+        context,
+        limit=limit,
+    )
     return memories
 
 
+# LLM: 路由或正式文件损坏时 fail closed 并返回结构化错误；决策主链不能因 Memory 故障崩溃。
+# 函数用途: 查询正式教训并同时返回诊断信息。
 def push_relevant_memories_report(
-    agent,
+    agent: object,
     trigger_type: str,
-    context: dict,
+    context: Mapping[str, object],
     limit: int = 3,
-) -> tuple[list[str], list[dict]]:
-    """查询相关记忆，并保留可恢复的记忆检索错误。"""
-    if not hasattr(agent, "memory") or agent.memory is None:
-        return [], []
-    memories_text: list[str] = []
-    load_errors: list[dict] = []
+) -> tuple[list[MemoryRecord], list[dict[str, object]]]:
     try:
+        bounded_limit = max(0, int(limit or 0))
+        if bounded_limit <= 0:
+            return [], []
         query = _build_memory_query(trigger_type, context)
-        records, search_errors = _search_memory_records_report(agent.memory, query, top_k=limit * 2)
-        load_errors.extend(search_errors)
-        # P5-2:结构化触发条件匹配提权——声明了 trigger_conditions 且与当前上下文
-        # 事实匹配的记忆排到最前(软提权,不过滤未声明条件的记忆)。
-        records = _prioritize_by_trigger_conditions(records, trigger_type, context)
-        memories_text = _collect_memory_texts(records, trigger_type, limit)
-    except Exception as exc:
-        load_errors.append(runtime_error_report(exc, context="memory_push.search"))
-    return memories_text[:limit], load_errors
+        routed = _route_formal_lessons(agent, query, bounded_limit)
+        scope = MemoryRecallScope.from_runtime(
+            task_id=str(context.get("task_id") or ""),
+            task_attributes=_structured_scope_attributes(context),
+        )
+        memories = _formal_decision_memories(agent, routed, scope, bounded_limit)
+        errors = [_routing_finding(item) for item in routed.findings if str(item).strip()]
+        return memories, errors
+    except (OSError, RuntimeError, TypeError, ValueError, KeyError, UnicodeError) as exc:
+        return [], [runtime_error_report(exc, context="memory_push.formal_recall")]
 
 
-# LLM: P5-2 结构化触发条件匹配(唯一消费方,守"绝不解析自然语言"铁律)。
-#   conditions 是开放 dict,逐键对照 context 的结构化事实:
-#   ①键值为 list → context 同键值命中任一即满足;②键名带 min_ 前缀 → context
-#   对应数值 ≥ 阈值;③其余 → 字符串相等。全部声明键满足才算 matched。
-#   trigger_type 键名特殊:对照本次推送的 trigger_type。匹配只做排序提权,
-#   绝不淘汰未声明条件的记忆(软语义,零硬门)。
-# 函数用途: 让"写明了适用场景"的教训在场景真出现时排到最前面。
-def trigger_conditions_match(conditions: object, trigger_type: str, context: dict) -> bool:
-    if not isinstance(conditions, dict) or not conditions:
-        return False
-    facts = {**(context or {}), "trigger_type": trigger_type}
-    return all(_condition_satisfied(str(key), expected, facts) for key, expected in conditions.items())
-
-
-# 函数用途: 单个触发条件键的判定(min_ 前缀=数值阈值,列表=任一命中,标量=相等)。
-def _condition_satisfied(key: str, expected: object, facts: dict) -> bool:
-    if key.startswith("min_"):
-        try:
-            return float(facts.get(key.removeprefix("min_")) or 0) >= float(expected)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            return False
-    actual = str(facts.get(key) or "")
-    if isinstance(expected, list):
-        return actual in {str(item) for item in expected}
-    return actual == str(expected)
-
-
-# 函数用途: 把条件匹配的记忆排到前面(稳定排序,其余相对顺序不变)。
-def _prioritize_by_trigger_conditions(records: list, trigger_type: str, context: dict) -> list:
-    matched: list = []
-    rest: list = []
-    for record in records:
-        conditions = _record_trigger_conditions(record)
-        (matched if trigger_conditions_match(conditions, trigger_type, context) else rest).append(record)
-    return [*matched, *rest]
-
-
-# 函数用途: 从记忆记录的结构化扩展位读出触发条件(没有就空)。
-def _record_trigger_conditions(record) -> dict:
-    attributes = getattr(record, "attributes", None)
-    if not isinstance(attributes, dict):
-        return {}
-    conditions = attributes.get("trigger_conditions")
-    return conditions if isinstance(conditions, dict) else {}
-
-
-def _search_memory_records_report(memory, query: str, *, top_k: int) -> tuple[list, list[dict]]:
-    search_report = getattr(memory, "search_report", None)
-    if callable(search_report):
-        result = search_report(query, top_k=top_k)
-        if isinstance(result, tuple) and len(result) == 2:
-            records, load_errors = result
-            return list(records or []), list(load_errors or [])
-    records = memory.search(query, top_k=top_k)
-    return list(records or []), []
-
-
-def _collect_memory_texts(records, trigger_type: str, limit: int) -> list[str]:
-    values: list[str] = []
-    for record in records:
-        text = _memory_text_from_record(record, trigger_type)
-        if not text:
-            continue
-        values.append(text)
-        if len(values) >= limit:
-            break
-    return values
-
-
-def _memory_text_from_record(record, trigger_type: str) -> str:
-    if not record.content or len(record.content) < 10:
-        return ""
-    if not scan_memory_content(str(record.content)).safe:
-        return ""
-    kind = str(getattr(record, "kind", "") or "").strip().lower()
-    try:
-        memory_type = MemoryType(kind)
-    except ValueError:
-        # dialogue / preference / note 等不是“教训推送”记录。未知类型不能按
-        # LESSON_GENERAL 兜底，否则历史普通聊天会在 planner/failure 旁路重新注入。
-        return ""
-    entry = MemoryEntry(
-        type=memory_type,
-        trigger_type=trigger_type,
-        tags=record.tags or [],
-        content=record.content,
-        created_at=record.created_at,
+# LLM: Timeout/Failure 只是检索 reason，不创建独立存储或状态机。
+# 函数用途: 召回一次超时决策可用的正式教训。
+def push_timeout_memories(
+    agent: object,
+    task_id: str,
+    goal: str,
+    timeout_count: int = 0,
+) -> list[MemoryRecord]:
+    return push_relevant_memories(
+        agent,
+        "timeout",
+        {
+            "task_id": task_id,
+            "goal": goal,
+            "failure_type": "timeout",
+            "timeout_count": max(0, int(timeout_count or 0)),
+        },
+        limit=3,
     )
-    return _extract_memory_text(entry, trigger_type)
 
 
-# LLM: 检索词构造的唯一权威。历史缺陷(B1 修复):曾写成 len(goal)>50 才把 goal
-#   加进查询——中文短 goal(常态)被整个丢弃,查询只剩英文 trigger 词,中文教训
-#   永远搜不到,推模式形同虚设。现在 goal 非空即入查询。
-# 第二层缺陷(本次修):底层检索按空格分词(_search_jsonl 走 query.split(),FTS5 走
-#   词/子串),中文 goal 是一整段无空格汉字 → 整段当一个词,只有完全包含才命中,
-#   部分重合的相关记忆全漏。修法:把 goal 里的中文串切成 2-4 gram(复用
-#   memory_routing.matcher._chinese_ngrams,与 skill/路由检索同一套切词)并空格拼进
-#   查询 → JSONL 端每个 gram 独立打分、FTS5 端每个 gram 独立 OR 命中,中文召回打通。
-#   截断从 50 放宽到 80(留住更多语义),n-gram 单独限量防查询爆炸。
-# 函数用途: 把触发类型和任务上下文拼成记忆检索词(含中文 n-gram 展开)。
-_GOAL_MAX_CHARS = 80
-_GOAL_NGRAM_MAX = 24
+# LLM: failure_type 只参与相关度查询，不能从自然语言推断 scope 或事实权威。
+# 函数用途: 召回一次失败决策可用的正式教训。
+def push_failure_memories(
+    agent: object,
+    task_id: str,
+    goal: str,
+    failure_type: str,
+) -> list[MemoryRecord]:
+    return push_relevant_memories(
+        agent,
+        "failure",
+        {
+            "task_id": task_id,
+            "goal": goal,
+            "failure_type": failure_type,
+        },
+        limit=3,
+    )
 
 
-def _build_memory_query(trigger_type: str, context: dict) -> str:
-    query_parts = [trigger_type]
-    if context.get("task_id"):
-        query_parts.append(context["task_id"])
-    if context.get("failure_type"):
-        query_parts.append(context["failure_type"])
-    goal = str(context.get("goal", "") or "").strip()
+# LLM: planner 只获得正式教训投影，不获得候选审核字段或 routing 原文块。
+# 函数用途: 召回规划决策可用的正式教训。
+def push_planning_memories(
+    agent: object,
+    task_id: str,
+    goal: str,
+) -> list[MemoryRecord]:
+    return push_relevant_memories(
+        agent,
+        "planning",
+        {"task_id": task_id, "goal": goal},
+        limit=3,
+    )
+
+
+# LLM: 关键决策点与普通运行必须共用同一个安全投影函数，禁止恢复 [相关记忆提示] 等第二信封。
+# 函数用途: 把正式教训记录渲染成唯一的非权威 memory-context 信封。
+def format_memories_for_injection(memories: list[MemoryRecord]) -> str:
+    return memory_context_text(memories) if memories else ""
+
+
+# LLM: 路由根和索引只能来自当前 owner home；工作区 legacy INDEX 不得作为 fallback。
+# 函数用途: 根据触发词和任务目标读取正式 lesson 路由小票。
+def _route_formal_lessons(agent: object, query: str, limit: int):
+    root, index_path = runtime_route_root_and_index(agent)
+    config = getattr(agent, "config", None)
+    auto_read_limit = min(
+        limit,
+        max(0, int(getattr(config, "memory_rule_auto_read_limit", limit) or 0)),
+    )
+    return build_routed_memory_context(
+        root,
+        query,
+        options=RouteContextOptions(
+            enabled=bool(getattr(config, "memory_rule_routing_enabled", True)),
+            index_path=index_path,
+            mode=str(getattr(config, "memory_rule_routing_mode", "soft") or "soft"),
+            auto_read_limit=auto_read_limit,
+            limit=max(limit, auto_read_limit),
+        ),
+    )
+
+
+# LLM: HOT 与已成功路由的 Lesson 是这里仅有的两个来源；二者都继承正式 lesson 的 typed scope。
+# 函数用途: 合并、按 entry_id 去重并限制关键决策点的正式教训数量。
+def _formal_decision_memories(
+    agent: object,
+    routed: object,
+    scope: MemoryRecallScope,
+    limit: int,
+) -> list[MemoryRecord]:
+    lessons_repository = getattr(agent, "memory_lessons", None)
+    hot_repository = getattr(agent, "memory_hot", None)
+    if lessons_repository is None or hot_repository is None:
+        raise RuntimeError("formal lesson repositories are unavailable")
+    read_paths = [
+        str(receipt.get("path") or "")
+        for receipt in list(getattr(routed, "receipts", ()) or ())
+        if isinstance(receipt, dict) and receipt.get("status") == "read"
+    ]
+    records = [
+        *hot_memory_records(hot_repository, lessons_repository, scope=scope),
+        *routed_lesson_records(
+            lessons_repository,
+            read_paths=read_paths,
+            scope=scope,
+            stale_days=float(
+                getattr(getattr(agent, "config", None), "home_lesson_stale_caveat_days", 7.0)
+                or 0.0
+            ),
+        ),
+    ]
+    result: list[MemoryRecord] = []
+    seen: set[str] = set()
+    for record in records:
+        marker = str(record.entry_id or "")
+        if not marker or marker in seen:
+            continue
+        seen.add(marker)
+        result.append(record)
+        if len(result) >= limit:
+            break
+    return result
+
+
+# LLM: Scope 只从调用方 typed fields 复制；goal/failure 文本不参与 scope 推断。
+# 函数用途: 构造 MemoryRecallScope 允许消费的结构化任务属性。
+def _structured_scope_attributes(context: Mapping[str, object]) -> dict[str, object]:
+    nested = context.get("task_attributes")
+    result = dict(nested) if isinstance(nested, Mapping) else {}
+    for field in _STRUCTURED_SCOPE_FIELDS:
+        if field in context:
+            result[field] = context[field]
+    return result
+
+
+# LLM: 查询词只影响相关度，不产生 subject_key、scope 或晋升动作。
+# 函数用途: 把触发类型、结构化失败类别和短任务目标拼成 lesson 路由查询。
+def _build_memory_query(trigger_type: str, context: Mapping[str, object]) -> str:
+    parts = [str(trigger_type or "").strip()]
+    failure_type = str(context.get("failure_type") or "").strip()
+    if failure_type:
+        parts.append(failure_type)
+    goal = str(context.get("goal") or "").strip()[:_GOAL_MAX_CHARS]
     if goal:
-        clipped = goal[:_GOAL_MAX_CHARS]
-        query_parts.append(clipped)
-        query_parts.extend(_goal_chinese_ngrams(clipped))
-    return " ".join(query_parts)
+        parts.append(goal)
+        parts.extend(_goal_chinese_ngrams(goal))
+    return " ".join(part for part in parts if part)
 
 
+# LLM: 中文 n-gram 只改善路由召回，不以文本相似度合并候选或覆盖事实。
+# 函数用途: 对中文连续串生成有界去重的路由查询片段。
 def _goal_chinese_ngrams(goal: str) -> list[str]:
-    """对 goal 里的中文连续串做 n-gram 展开(复用路由器同款切词,不另写一套)。"""
-    import re
-
-    from .common.value_parsing import dedupe_strings
-    from .memory_routing.matcher import _chinese_ngrams
-
     grams: list[str] = []
     for run in re.findall(r"[一-鿿]+", goal):
         grams.extend(_chinese_ngrams(run))
     return dedupe_strings(grams)[:_GOAL_NGRAM_MAX]
 
 
-def _extract_memory_text(entry: MemoryEntry, trigger_type: str) -> str:
-    """Extract and filter memory text based on trigger type."""
-    desired: set[MemoryType] = {
-        "timeout": {MemoryType.LESSON_GENERAL, MemoryType.LESSON_TASK},
-        "failure": {MemoryType.LESSON_GENERAL, MemoryType.LESSON_TASK},
-        "planning": {MemoryType.CONTEXT, MemoryType.LESSON_GENERAL},
-    }.get(trigger_type, set())
-    if not desired or entry.type not in desired:
-        return ""
-    text = entry.to_memory_record_content()
-    if text and len(text) <= 200:
-        return text
-    return ""
-
-
-def push_timeout_memories(agent, task_id: str, goal: str, timeout_count: int = 0) -> list[str]:
-    """推送超时相关记忆。"""
-    context = {
-        "task_id": task_id,
-        "goal": goal,
-        "failure_type": "timeout",
+# LLM: finding 只用于诊断，不进入 Prompt，也不能取得 Memory 内容权威。
+# 函数用途: 将 routing finding 转成稳定结构化错误记录。
+def _routing_finding(value: object) -> dict[str, object]:
+    return {
+        "code": "MEMORY_ROUTING_FINDING",
+        "context": "memory_push.formal_recall",
+        "message": str(value),
     }
-    return push_relevant_memories(agent, TriggerType.TIMEOUT.value, context, limit=3)
-
-
-def push_failure_memories(agent, task_id: str, goal: str, failure_type: str) -> list[str]:
-    """推送失败相关记忆。"""
-    context = {
-        "task_id": task_id,
-        "goal": goal,
-        "failure_type": failure_type,
-    }
-    return push_relevant_memories(agent, TriggerType.FAILURE.value, context, limit=3)
-
-
-def push_planning_memories(agent, task_id: str, goal: str) -> list[str]:
-    """推送计划相关记忆。"""
-    context = {
-        "task_id": task_id,
-        "goal": goal,
-    }
-    return push_relevant_memories(agent, TriggerType.PLANNING.value, context, limit=3)
-
-
-@dataclass
-class MemoryWriteContext:
-    """Context for writing a typed memory entry."""
-
-    content: str
-    mem_type: MemoryType
-    trigger_type: str = ""
-    tags: list[str] | None = None
-    lesson: str = ""
-    action: str = ""
-    result: str = ""
-    trigger_conditions: dict | None = None
-    role: str = "system"
-
-
-def write_memory_with_type(
-    memory: JsonlMemory,
-    ctx: MemoryWriteContext,
-) -> None:
-    """写入带类型标签的记忆。
-
-    Args:
-        memory: JsonlMemory 实例
-        ctx: MemoryWriteContext 包含 content、mem_type 等字段"""
-    # 构建扩展记忆内容（包含结构化字段）
-    extended_content = ctx.content
-    if ctx.lesson or ctx.action:
-        parts = [ctx.content]
-        if ctx.lesson:
-            parts.append(f"Lesson: {ctx.lesson}")
-        if ctx.action:
-            parts.append(f"Action: {ctx.action}")
-        if ctx.result:
-            parts.append(f"Result: {ctx.result}")
-        extended_content = " | ".join(parts)
-
-    # 构建标签
-    all_tags = ctx.tags or []
-    if ctx.trigger_type:
-        all_tags.append(ctx.trigger_type)
-    if ctx.mem_type.value:
-        all_tags.append(ctx.mem_type.value)
-
-    # 写入记忆(P5-2:trigger_conditions 作为结构化扩展字段随主事实持久化,
-    # 决策端 trigger_conditions_match 按字段匹配提权,绝不解析正文)
-    if ctx.trigger_conditions:
-        from .memory_store.jsonl import MemoryRecord
-
-        return memory.add_record(
-            MemoryRecord(
-                role=ctx.role,
-                content=extended_content,
-                kind=ctx.mem_type.value,
-                tags=all_tags,
-                attributes={"trigger_conditions": dict(ctx.trigger_conditions)},
-            )
-        )
-    return memory.add(
-        role=ctx.role,
-        content=extended_content,
-        kind=ctx.mem_type.value,
-        tags=all_tags,
-    )
-
-
-def format_memories_for_injection(memories: list[str]) -> str:
-    """格式化记忆列表，准备注入到上下文。
-
-    Args:
-        memories: 记忆文本列表
-
-    Returns:
-        格式化的字符串，每条记忆用换行分隔"""
-    if not memories:
-        return ""
-
-    lines = ["[相关记忆提示]"]
-    for i, mem in enumerate(memories, 1):
-        # 截取到 200 字
-        if len(mem) > 200:
-            mem = mem[:200] + "..."
-        lines.append(f"{i}. {mem}")
-
-    return "\n".join(lines)
 
 
 __all__ = [
-    "MemoryType",
-    "TriggerType",
-    "MemoryEntry",
+    "format_memories_for_injection",
+    "push_failure_memories",
+    "push_planning_memories",
     "push_relevant_memories",
     "push_relevant_memories_report",
     "push_timeout_memories",
-    "push_failure_memories",
-    "push_planning_memories",
-    "write_memory_with_type",
-    "format_memories_for_injection",
 ]

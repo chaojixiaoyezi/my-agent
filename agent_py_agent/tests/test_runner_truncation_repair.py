@@ -54,10 +54,17 @@ class _ScriptedBackend(BaseBackend):
 
 def _run_with(scripts: list[str]):
     with tempfile.TemporaryDirectory() as td:
-        agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), Path(td))
+        agent = SimpleAgent(
+            AgentConfig(tool_protocol="text", model_backend="echo", subagent_workspace="subs"),
+            Path(td),
+        )
         agent.backend = _ScriptedBackend(scripts)
         task = agent.subagents.create_run(
-            goal="截断修复链验证", thought="t", plan=["p"], allowed_tools=[], acceptance_checks=["c"]
+            goal="截断修复链验证",
+            thought="t",
+            plan=["p"],
+            allowed_tools=[],
+            acceptance_checks=["c"],
         )
         result = agent.run_subagent(task.id, dry_run=False, probe=False)
         loaded = agent.subagents.load(task.id)

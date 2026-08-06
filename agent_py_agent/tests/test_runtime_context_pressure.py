@@ -21,6 +21,7 @@ from agent_py_agent.agent.conversation.authority import (
 )
 from agent_py_agent.agent.conversation.channels import project_user_reply
 from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
 
 
 class _AgentStub:
@@ -91,6 +92,7 @@ def test_authoritative_conversation_windows_without_requesting_second_compact() 
 def test_preflight_context_pressure_uses_tool_context_window_signal() -> None:
     params = SimpleNamespace(
         context_scope="default",
+        tool_protocol_snapshot=make_test_protocol_snapshot(source_protocol="text"),
         live_archive_state={
             "tool_context_window_overflow": {
                 "omitted_count": 12,
@@ -120,6 +122,7 @@ def test_preflight_uses_configured_threshold_without_a_second_ceiling(monkeypatc
     )
     params = SimpleNamespace(
         context_scope="default",
+        tool_protocol_snapshot=make_test_protocol_snapshot(source_protocol="text"),
         live_archive_state={},
     )
     request = SimpleNamespace(agent=agent, params=params, prompt="系统上下文", tool_rounds=3)
@@ -155,6 +158,7 @@ def test_preflight_native_counts_tool_schemas_before_first_tool_call(monkeypatch
     )
     params = SimpleNamespace(
         context_scope="conversation",
+        tool_protocol_snapshot=make_test_protocol_snapshot(source_protocol="native"),
         live_archive_state={},
         tool_context=[],
         tool_ir_history=[],
@@ -198,7 +202,12 @@ def test_inline_tool_result_budget_reuses_current_compact_headroom(monkeypatch) 
         ),
         backend=SimpleNamespace(context_window_tokens=100_000, name="fake"),
     )
-    params = SimpleNamespace(context_scope="default", tool_context=[], tool_ir_history=[])
+    params = SimpleNamespace(
+        context_scope="default",
+        tool_context=[],
+        tool_ir_history=[],
+        tool_protocol_snapshot=make_test_protocol_snapshot(source_protocol="text"),
+    )
     agent._current_run_params = params
     agent._current_user_prompt = "当前会话"
 

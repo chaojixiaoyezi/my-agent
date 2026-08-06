@@ -125,7 +125,7 @@ def inject_pending_guidance(agent: object, params: object, *, now: float | None 
             tool_context.append(f"[ACTIVE_TURN_USER_INPUT]\n{user_input}")
         from ..native_tool_protocol import native_tool_use_active
 
-        if native_tool_use_active(agent):
+        if native_tool_use_active(params):
             from ..tool_ir_history import record_user_turn_ir
 
             record_user_turn_ir(params, user_input)

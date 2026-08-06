@@ -131,7 +131,7 @@ class SubAgentRunnerResultService:
         result: SubAgentRunnerResult,
         params: _PostResultSideEffectParams,
     ) -> int:
-        """Handle save, debrief, learning side effects. Returns learning candidate count."""
+        """Handle save, debrief, unified Memory candidate and indexing side effects."""
         output_payload = params.output_payload
         parsed = params.parsed
         if parsed.found and parsed.ok:
@@ -144,16 +144,20 @@ class SubAgentRunnerResultService:
         self.manager.save(task)
         if parsed.found and parsed.ok:
             _runner_append_debrief(task, parsed)
-        learning_candidates = []
-        if not params.dry_run and parsed.found and parsed.ok and params.lessons:
-            learning_candidates = self.manager.learning.record_learning_candidates(task, params.lessons)
+        memory_candidates = []
+        if not params.dry_run and parsed.found and parsed.ok:
+            memory_candidates = self.manager.memory_candidates.record_result_candidates(
+                task,
+                lessons=params.lessons,
+                findings=list(getattr(task, "findings", []) or []),
+            )
         self.manager.actions._append_task_work_log(
             task,
             f"subagent_runner: dry_run={params.dry_run} ok={result.ok} status={task.status} "
-            f"message={result.message} learning_candidates={len(learning_candidates)}",
+            f"message={result.message} memory_candidates={len(memory_candidates)}",
         )
         self.manager.indexing.index_runner_result(result, output_payload)
-        return len(learning_candidates)
+        return len(memory_candidates)
 
     def record_runner_result(
         self,

@@ -6,7 +6,7 @@ web_search 系统失败 2 次后模型断言"数据根本不存在"并口头放�
    (含工具名/失败计数/tried+untried 枚举指引);纯软提示,零拦截零硬门。
 2. 不同工具各自计数:都没到阈值不触发;各自到阈值各自提示。
 3. 幂等:同工具继续失败不重复注入。
-4. 阈值 0 = 关闭;成功调用与 __parse_error__ 不计数。
+4. 阈值 0 = 关闭；成功调用与缺少工具名的损坏记录不计数。
 """
 
 from __future__ import annotations
@@ -85,14 +85,14 @@ def test_threshold_zero_disables_hint(tmp_path: Path) -> None:
     assert request.params.tool_context == []
 
 
-def test_success_and_parse_errors_do_not_count(tmp_path: Path) -> None:
+def test_success_and_malformed_records_do_not_count(tmp_path: Path) -> None:
     request = _request(
         tmp_path,
         [
             _ok("web_search", "1-1"),
             _ok("web_search", "2-1"),
-            {"tool": "__parse_error__", "call_id": "3-1", "ok": False},
-            {"tool": "__parse_error__", "call_id": "4-1", "ok": False},
+            {"tool": "", "call_id": "3-1", "ok": False},
+            {"call_id": "4-1", "ok": False},
         ],
     )
     append_tool_failure_channel_hint(request)

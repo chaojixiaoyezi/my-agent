@@ -1,38 +1,50 @@
-"""P2 检索召回:lessons 中文 n-gram 模糊召回单测(补 R7 头号短板"检索偏窄")。"""
+"""正式 Lesson 只通过 routing metadata 召回，不再扫描文件名做模糊 fallback。"""
 
-from agent.prompting_parts.builder import _ngram_hit, _stem_matches
-
-
-def test_ngram_hit_chinese_fuzzy_recall():
-    assert _ngram_hit("日志运营值守", "帮我盯日志运营") is True
-    assert _ngram_hit("安全告警研判", "帮忙研判安全告警") is True
+from agent_py_agent.agent.memory_routing.matcher import _chinese_ngrams, match_routes
+from agent_py_agent.agent.memory_routing.models import MemoryRoute
 
 
-def test_ngram_hit_controls_noise():
-    assert _ngram_hit("日志运营值守", "写个待办工具") is False
-    assert _ngram_hit("数据库优化", "帮我查天气") is False
+def _route(*keywords: str) -> MemoryRoute:
+    return MemoryRoute(
+        route_id="lesson.lesson-1",
+        topic="日志运营值守",
+        trigger_keywords=list(keywords),
+        authority_path="memory/lessons/log-ops.md",
+        inject_mode="on_hit",
+    )
 
 
-def test_ngram_hit_short_word_fallback_to_substring():
-    assert _ngram_hit("ab", "xabz") is True  # 短词(<3字)回退完全子串
-    assert _ngram_hit("ab", "xyz") is False
+def test_chinese_keyword_routes_formal_lesson() -> None:
+    hits = match_routes("帮我盯日志运营", [_route("日志", "运营", "值守")])
+
+    assert [item.route.route_id for item in hits] == ["lesson.lesson-1"]
 
 
-def test_ngram_hit_bigram_recall_for_word_order_diff():
-    # Phase 2 增量:3-gram 对中文词序差异会漏,接检索子系统的 CJK-bigram 词元重叠补召(只增召回)
-    assert _ngram_hit("压缩续航", "这个续航压缩方案不错") is True  # 词序反,3-gram 漏、bigram 补召
-    assert _ngram_hit("压缩续航", "今天天气很好") is False          # 真无关仍不滥召(阈值控噪)
+def test_unrelated_query_does_not_route_lesson() -> None:
+    assert match_routes("写个待办工具", [_route("日志", "运营", "值守")]) == []
 
 
-def test_stem_matches_ngram_recall(tmp_path):
-    (tmp_path / "日志运营值守.md").write_text("lesson", encoding="utf-8")
-    (tmp_path / "无关主题abc.md").write_text("lesson", encoding="utf-8")
-    hits = [p.stem for p in _stem_matches(tmp_path, "帮我做日志运营".casefold())]
-    assert "日志运营值守" in hits  # 中文模糊召回
-    assert "无关主题abc" not in hits  # 不滥召
+def test_short_keyword_uses_explicit_substring_not_filename_guess() -> None:
+    assert match_routes("xabz", [_route("ab")])
+    assert match_routes("xyz", [_route("ab")]) == []
 
 
-def test_stem_matches_exact_substring_still_works(tmp_path):
-    (tmp_path / "todo-cli.md").write_text("lesson", encoding="utf-8")
-    hits = [p.stem for p in _stem_matches(tmp_path, "帮我用 todo-cli 工具".casefold())]
-    assert "todo-cli" in hits  # 完全子串仍命中(回归保护)
+def test_chinese_ngrams_are_deterministic() -> None:
+    grams = _chinese_ngrams("压缩续航")
+
+    assert "压缩" in grams
+    assert "续航" in grams
+    assert grams == _chinese_ngrams("压缩续航")
+
+
+def test_word_order_difference_requires_declared_keywords() -> None:
+    route = _route("压缩", "续航")
+
+    assert match_routes("这个续航压缩方案不错", [route])
+    assert match_routes("今天天气很好", [route]) == []
+
+
+def test_route_returns_authority_path_not_scanned_stem() -> None:
+    hit = match_routes("使用 todo-cli 工具", [_route("todo-cli")])[0]
+
+    assert hit.route.authority_file() == "memory/lessons/log-ops.md"

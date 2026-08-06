@@ -76,6 +76,7 @@ def test_dispatch_parallel_runner_pool_respects_start_rate(monkeypatch):
         backend = CountingAcceptedBackend()
         monkeypatch.setattr("agent_py_agent.agent.core.get_backend", lambda _name, _config: backend)
         cfg = AgentConfig(
+            tool_protocol="text",
             model_backend="worker-pool-test",
             subagent_workspace="subs",
             runner_concurrency="3",
@@ -83,7 +84,9 @@ def test_dispatch_parallel_runner_pool_respects_start_rate(monkeypatch):
         )
         agent = SimpleAgent(cfg, root)
         tasks = [
-            agent.subagents.create_run(goal=f"并发任务 {index}", thought="等待 worker pool。", plan=["执行", "验收"])
+            agent.subagents.create_run(
+                goal=f"并发任务 {index}", thought="等待 worker pool。", plan=["执行", "验收"]
+            )
             for index in range(3)
         ]
 
@@ -108,20 +111,29 @@ def test_dispatch_parallel_runner_pool_respects_start_rate(monkeypatch):
         assert len(planning) == 1
 
 
-def test_dispatch_parallel_runner_pool_does_not_broadcast_specific_instruction(monkeypatch, tmp_path):
+def test_dispatch_parallel_runner_pool_does_not_broadcast_specific_instruction(
+    monkeypatch, tmp_path
+):
     captured: list[tuple[str, str]] = []
     cfg = AgentConfig(
+        tool_protocol="text",
         model_backend="worker-pool-test",
         subagent_workspace="subs",
         runner_concurrency="2",
         runner_start_rate="2",
         runner_timeout_seconds="3.0",
     )
-    monkeypatch.setattr("agent_py_agent.agent.core.get_backend", lambda _name, _config: CountingAcceptedBackend())
+    monkeypatch.setattr(
+        "agent_py_agent.agent.core.get_backend", lambda _name, _config: CountingAcceptedBackend()
+    )
     agent = SimpleAgent(cfg, tmp_path)
     tasks = [
-        agent.subagents.create_run(goal="auth coordinator task", thought="等待 worker。", plan=["执行"]),
-        agent.subagents.create_run(goal="catalog coordinator task", thought="等待 worker。", plan=["执行"]),
+        agent.subagents.create_run(
+            goal="auth coordinator task", thought="等待 worker。", plan=["执行"]
+        ),
+        agent.subagents.create_run(
+            goal="catalog coordinator task", thought="等待 worker。", plan=["执行"]
+        ),
     ]
 
     def fake_worker(params):
@@ -137,7 +149,9 @@ def test_dispatch_parallel_runner_pool_does_not_broadcast_specific_instruction(m
             )
         )
 
-    monkeypatch.setattr("agent_py_agent.agent.agent_core.runner.dispatch._run_subagent_worker", fake_worker)
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.runner.dispatch._run_subagent_worker", fake_worker
+    )
 
     router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
     report = agent.dispatch_subagents(
@@ -160,15 +174,20 @@ def test_dispatch_parallel_runner_pool_does_not_broadcast_specific_instruction(m
 def test_dispatch_single_runner_keeps_specific_instruction(monkeypatch, tmp_path):
     captured: list[str] = []
     cfg = AgentConfig(
+        tool_protocol="text",
         model_backend="worker-pool-test",
         subagent_workspace="subs",
         runner_concurrency="2",
         runner_start_rate="2",
         runner_timeout_seconds="3.0",
     )
-    monkeypatch.setattr("agent_py_agent.agent.core.get_backend", lambda _name, _config: CountingAcceptedBackend())
+    monkeypatch.setattr(
+        "agent_py_agent.agent.core.get_backend", lambda _name, _config: CountingAcceptedBackend()
+    )
     agent = SimpleAgent(cfg, tmp_path)
-    task = agent.subagents.create_run(goal="auth coordinator task", thought="等待 worker。", plan=["执行"])
+    task = agent.subagents.create_run(
+        goal="auth coordinator task", thought="等待 worker。", plan=["执行"]
+    )
 
     def fake_worker(params):
         captured.append(params.instruction)
@@ -183,7 +202,9 @@ def test_dispatch_single_runner_keeps_specific_instruction(monkeypatch, tmp_path
             )
         )
 
-    monkeypatch.setattr("agent_py_agent.agent.agent_core.runner.dispatch._run_subagent_worker", fake_worker)
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.runner.dispatch._run_subagent_worker", fake_worker
+    )
 
     router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
     agent.dispatch_subagents(
@@ -208,6 +229,7 @@ def test_dispatch_worker_reuses_parent_runtime_context_config(monkeypatch, tmp_p
 
     captured: list[tuple[int, int, str]] = []
     cfg = AgentConfig(
+        tool_protocol="text",
         model_backend="worker-pool-test",
         subagent_workspace="subs",
         runner_concurrency="1",
@@ -216,9 +238,13 @@ def test_dispatch_worker_reuses_parent_runtime_context_config(monkeypatch, tmp_p
         model_context_window_tokens=200_000,
         memory_compact_auto_trigger_percent=70,
     )
-    monkeypatch.setattr("agent_py_agent.agent.core.get_backend", lambda _name, _config: CountingAcceptedBackend())
+    monkeypatch.setattr(
+        "agent_py_agent.agent.core.get_backend", lambda _name, _config: CountingAcceptedBackend()
+    )
     agent = SimpleAgent(cfg, tmp_path)
-    task = agent.subagents.create_run(goal="读取大项目并写报告", thought="等待 worker。", plan=["执行"])
+    task = agent.subagents.create_run(
+        goal="读取大项目并写报告", thought="等待 worker。", plan=["执行"]
+    )
 
     def fake_worker(params):
         captured.append(
@@ -239,7 +265,9 @@ def test_dispatch_worker_reuses_parent_runtime_context_config(monkeypatch, tmp_p
             )
         )
 
-    monkeypatch.setattr("agent_py_agent.agent.agent_core.runner.dispatch._run_subagent_worker", fake_worker)
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.runner.dispatch._run_subagent_worker", fake_worker
+    )
 
     router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
     agent.dispatch_subagents(
@@ -259,11 +287,18 @@ def test_dispatch_worker_reuses_parent_runtime_context_config(monkeypatch, tmp_p
 
 def _parent_child_pair(agent):
     parent = agent.subagents.create_run(
-        goal="cart coordinator", thought="create cart worker", plan=["dispatch child"], role="coordinator",
+        goal="cart coordinator",
+        thought="create cart worker",
+        plan=["dispatch child"],
+        role="coordinator",
     )
     child = agent.subagents.create_run(
-        goal="cart worker", thought="write cart", plan=["work"],
-        parent_id=parent.id, root_id=parent.id, depth=1,
+        goal="cart worker",
+        thought="write cart",
+        plan=["work"],
+        parent_id=parent.id,
+        root_id=parent.id,
+        depth=1,
     )
     return parent, child
 
@@ -282,18 +317,23 @@ def _capture_runner_ids(monkeypatch, agent, captured: list[str]) -> None:
             )
         )
 
-    monkeypatch.setattr("agent_py_agent.agent.agent_core.runner.dispatch._run_subagent_worker", fake_worker)
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.runner.dispatch._run_subagent_worker", fake_worker
+    )
 
 
 def test_dispatch_blocks_invalid_scoped_run_id_with_valid_child_hint(monkeypatch, tmp_path):
     captured: list[str] = []
     cfg = AgentConfig(
+        tool_protocol="text",
         model_backend="worker-pool-test",
         subagent_workspace="subs",
         runner_concurrency="1",
         runner_start_rate="1",
     )
-    monkeypatch.setattr("agent_py_agent.agent.core.get_backend", lambda _name, _config: CountingAcceptedBackend())
+    monkeypatch.setattr(
+        "agent_py_agent.agent.core.get_backend", lambda _name, _config: CountingAcceptedBackend()
+    )
     agent = SimpleAgent(cfg, tmp_path)
     parent, child = _parent_child_pair(agent)
     wrong_id = f"subagent-0000000000-{child.id.rsplit('-', 1)[-1]}"
@@ -314,7 +354,8 @@ def test_dispatch_blocks_invalid_scoped_run_id_with_valid_child_hint(monkeypatch
     )
 
     selection_records = [
-        record for record in report.records
+        record
+        for record in report.records
         if record.step == "runner_selection" and record.action == "invalid_run_ids"
     ]
 
@@ -331,6 +372,7 @@ def test_dispatch_parallel_runner_pool_timeout_does_not_block_other_workers(monk
     backend = OneSlowOneFastBackend()
     monkeypatch.setattr("agent_py_agent.agent.core.get_backend", lambda _name, _config: backend)
     cfg = AgentConfig(
+        tool_protocol="text",
         model_backend="worker-pool-test",
         subagent_workspace="subs",
         runner_concurrency="2",
@@ -339,7 +381,9 @@ def test_dispatch_parallel_runner_pool_timeout_does_not_block_other_workers(monk
     )
     agent = SimpleAgent(cfg, root)
     tasks = [
-        agent.subagents.create_run(goal=f"超时隔离任务 {index}", thought="等待 worker pool。", plan=["执行", "验收"])
+        agent.subagents.create_run(
+            goal=f"超时隔离任务 {index}", thought="等待 worker pool。", plan=["执行", "验收"]
+        )
         for index in range(2)
     ]
 

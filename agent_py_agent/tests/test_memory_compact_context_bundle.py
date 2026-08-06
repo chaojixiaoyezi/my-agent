@@ -82,6 +82,7 @@ def _write_home_config(tmp_path: Path) -> Path:
         'workspace_root: "workspace"\n'
         f'my_agent_home: "{home}"\n'
         'model_backend: "echo"\n'
+        'tool_protocol: "text"\n'
         'subagent_workspace: "subagents"\n'
         'local_store_path: "local_store/local.db"\n'
         'local_store_files_dir: "local_store/files"\n'
@@ -110,16 +111,23 @@ def test_memory_compact_apply_and_resume_use_main_context_bundle(tmp_path: Path)
     apply_result = apply_memory_compact(
         root,
         MemoryCompactApplyOptions(
-            plan_options=MemoryCompactPlanOptions(session_id="session-compact", request_id="request-compact"),
+            plan_options=MemoryCompactPlanOptions(
+                session_id="session-compact", request_id="request-compact"
+            ),
             main_context_bundle_ref=bundle.json_path,
         ),
     )
-    resume = build_memory_compact_resume(root, MemoryCompactResumeOptions(apply_ref=apply_result["apply_id"]))
+    resume = build_memory_compact_resume(
+        root, MemoryCompactResumeOptions(apply_ref=apply_result["apply_id"])
+    )
 
     assert apply_result["refs"]["main_context_bundle"] == bundle.json_path
     assert apply_result["main_context_bundle"]["loaded"] is True
     assert apply_result["main_context_bundle"]["scope"]["request_id"] == "request-compact"
-    assert apply_result["restore_refs"]["source_refs"]["context_bundles"][0]["path"] == bundle.json_path
+    assert (
+        apply_result["restore_refs"]["source_refs"]["context_bundles"][0]["path"]
+        == bundle.json_path
+    )
     assert resume["main_context_bundle"]["ref"] == bundle.json_path
     assert resume["main_context_bundle"]["scope"]["task_id"] == "家具网站"
     assert bundle.json_path in resume["recommended_read_paths"]
@@ -136,7 +144,9 @@ def test_memory_compact_apply_reports_corrupt_main_context_bundle_ref(tmp_path: 
     apply_result = apply_memory_compact(
         root,
         MemoryCompactApplyOptions(
-            plan_options=MemoryCompactPlanOptions(session_id="session-compact", request_id="request-compact"),
+            plan_options=MemoryCompactPlanOptions(
+                session_id="session-compact", request_id="request-compact"
+            ),
             main_context_bundle_ref=str(bundle_path),
             main_context_bundle_ref_explicit=True,
         ),
@@ -153,22 +163,26 @@ def test_memory_compact_apply_reports_corrupt_main_context_bundle_ref(tmp_path: 
 
 def test_memory_compact_cli_apply_uses_latest_main_context_bundle(tmp_path: Path, capsys) -> None:
     config_path = _write_home_config(tmp_path)
-    run_args = build_parser().parse_args([
-        "--config",
-        str(config_path),
-        "run",
-        "主代理 compact context bundle CLI 测试。\n验收条件:\n- context bundle 自动进入 compact apply",
-        "--save",
-    ])
+    run_args = build_parser().parse_args(
+        [
+            "--config",
+            str(config_path),
+            "run",
+            "主代理 compact context bundle CLI 测试。\n验收条件:\n- context bundle 自动进入 compact apply",
+            "--save",
+        ]
+    )
     assert run_args.func(run_args) == 0
     capsys.readouterr()
-    compact_args = build_parser().parse_args([
-        "--config",
-        str(config_path),
-        "memory-compact",
-        "--apply",
-        "--json",
-    ])
+    compact_args = build_parser().parse_args(
+        [
+            "--config",
+            str(config_path),
+            "memory-compact",
+            "--apply",
+            "--json",
+        ]
+    )
 
     code = compact_args.func(compact_args)
     captured = capsys.readouterr()

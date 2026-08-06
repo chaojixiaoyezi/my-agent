@@ -57,6 +57,10 @@ from agent.ingestion.watch_state import new_state as _runtime_new_state
 from agent.ingestion.watch_state import persist_state
 from agent.ingestion.watch_tool import WatchStreamTool
 from agent.settings import AgentConfig
+from agent.tooling.runtime_contracts import (
+    ProviderToolCapability,
+    ToolProtocolSnapshot,
+)
 
 
 def new_state(*args, **kwargs):
@@ -127,7 +131,21 @@ def _tool(
     agent = SimpleNamespace(
         home_paths=SimpleNamespace(owner_home_dir=str(owner_home), owner_id="u-test"),
         _current_user_prompt=user_prompt,
-        _current_run_params=SimpleNamespace(task_attributes=task_attributes),
+        _current_run_params=SimpleNamespace(
+            task_attributes=task_attributes,
+            tool_protocol_snapshot=ToolProtocolSnapshot(
+                run_id="watch-test-run",
+                source_protocol="text",
+                capability=ProviderToolCapability(
+                    provider="test",
+                    endpoint="local://watch-test",
+                    model="watch-test",
+                    stream=False,
+                    native_supported=False,
+                    evidence="explicit-watch-test-contract",
+                ),
+            ),
+        ),
         config=AgentConfig(enable_subagents=False),
         subagents=None,
     )
@@ -548,10 +566,12 @@ def test_verdict_output_observation_preserves_escaped_provider_shape() -> None:
 
 def test_audit_source_tool_schema_defers_cross_field_rules_to_row_handler() -> None:
     from agent.contracts.tool_input_schema import validate_tool_input
-    from agent.ingestion.watch_tool_spec import _watch_stream_examples, build_watch_stream_spec
-    from agent.tooling.tool_spec_schema import tool_spec_input_schema
+    from agent.ingestion.watch_tool_spec import (
+        _watch_stream_examples,
+        build_watch_stream_model_spec,
+    )
 
-    schema = tool_spec_input_schema(build_watch_stream_spec(surface="audit_source"))
+    schema = build_watch_stream_model_spec(surface="audit_source").input_schema
     base = {
         "action": "verdict",
         "watch_id": "ws-0123456789",

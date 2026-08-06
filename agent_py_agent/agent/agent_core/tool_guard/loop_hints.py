@@ -115,7 +115,7 @@ def _failure_counts_by_tool(params: object) -> dict[str, int]:
         if not isinstance(record, dict) or record.get("ok", True):
             continue
         tool = str(record.get("tool") or "").strip()
-        if tool and tool != "__parse_error__":
+        if tool:
             counts[tool] = counts.get(tool, 0) + 1
     return counts
 

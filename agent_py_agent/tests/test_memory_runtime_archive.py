@@ -67,6 +67,7 @@ def _write_cross_day_handoff_archive(root: Path, run_id: str) -> None:
 
 # ── Gateway archive helpers ────────────────────────────────────────────────────
 
+
 def _write_gateway_response_file(response_path: Path, request_id: str) -> None:
     """Write the gateway response JSON file."""
     response_path.parent.mkdir(parents=True, exist_ok=True)
@@ -105,7 +106,9 @@ def _write_gateway_request_file(request_path: Path, request_id: str) -> None:
     )
 
 
-def _log_gateway_request_to_local_store(agent: SimpleAgent, request_id: str, request_path: Path, response_path: Path) -> None:
+def _log_gateway_request_to_local_store(
+    agent: SimpleAgent, request_id: str, request_path: Path, response_path: Path
+) -> None:
     """Log gateway request to LocalStore."""
     agent.local_store.log_record(
         source_type="gateway_request",
@@ -123,7 +126,9 @@ def _log_gateway_request_to_local_store(agent: SimpleAgent, request_id: str, req
     )
 
 
-def _append_gateway_archive_events(root: Path, request_id: str, request_path: Path, response_path: Path) -> None:
+def _append_gateway_archive_events(
+    root: Path, request_id: str, request_path: Path, response_path: Path
+) -> None:
     """Append raw event and snapshot for gateway cross-day archive."""
     append_raw_event(
         root,
@@ -167,7 +172,9 @@ def _append_gateway_archive_events(root: Path, request_id: str, request_path: Pa
     )
 
 
-def _write_cross_day_gateway_archive(agent: SimpleAgent, request_id: str = "gwreq-runtime-cross-day") -> Path:
+def _write_cross_day_gateway_archive(
+    agent: SimpleAgent, request_id: str = "gwreq-runtime-cross-day"
+) -> Path:
     workspace_root = agent.root
     archive_root = agent.home_paths.owner_home_dir
     response_path = workspace_root / "gateway" / "responses" / f"{request_id}.json"
@@ -183,6 +190,7 @@ def test_auto_resume_context_recovers_cross_day_handoff_task(tmp_path):
     """LLM: Tests that auto resume context recovers cross-day handoff tasks with task fact sources."""
     agent = SimpleAgent(
         AgentConfig(
+            tool_protocol="text",
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
             memory_resume_auto_context_enabled=True,
@@ -221,6 +229,7 @@ def test_auto_resume_context_recovers_cross_day_gateway_request(tmp_path):
     """LLM: Tests that auto resume context recovers cross-day gateway requests with gateway fact sources."""
     agent = SimpleAgent(
         AgentConfig(
+            tool_protocol="text",
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
             memory_resume_auto_context_enabled=True,

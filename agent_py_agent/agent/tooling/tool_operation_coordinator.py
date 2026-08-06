@@ -27,8 +27,8 @@ from ..local_storage import (
     new_tool_operation_holder,
 )
 from .models import (
-    ToolExecutionResult,
     ToolFailureStage,
+    ToolHandlerOutcome,
     ToolOperationReconciliation,
     apply_tool_execution_facts,
 )
@@ -52,7 +52,7 @@ class ToolOperationExecutionRequest:
     idempotency_scope: str
     idempotency_namespace: str
     timeout_seconds: int
-    invoke: Callable[[], ToolExecutionResult]
+    invoke: Callable[[], ToolHandlerOutcome]
     reconcile: Callable[[ToolOperationRecord], ToolOperationReconciliation] | None = None
 
 
@@ -65,7 +65,7 @@ class _ToolOperationClaimAttempt:
 
 def execute_tool_operation(
     request: ToolOperationExecutionRequest,
-) -> ToolExecutionResult:
+) -> ToolHandlerOutcome:
     """Claim, execute once, persist, and replay an exact side-effect result."""
 
     if not _operation_store_available(request.store):
@@ -89,10 +89,10 @@ def execute_tool_operation(
             )
         return request.invoke()
     attempt = _claim_operation(request)
-    if isinstance(attempt, ToolExecutionResult):
+    if isinstance(attempt, ToolHandlerOutcome):
         return attempt
     resolved = _resolve_claim(request, attempt)
-    if isinstance(resolved, ToolExecutionResult):
+    if isinstance(resolved, ToolHandlerOutcome):
         return resolved
     return _execute_claimed_operation(request, resolved)
 
@@ -107,7 +107,7 @@ def _operation_store_available(store: object | None) -> bool:
 
 def _claim_operation(
     request: ToolOperationExecutionRequest,
-) -> _ToolOperationClaimAttempt | ToolExecutionResult:
+) -> _ToolOperationClaimAttempt | ToolHandlerOutcome:
     holder = new_tool_operation_holder()
     lease_seconds = max(
         _MINIMUM_LEASE_SECONDS,
@@ -158,7 +158,7 @@ def _claim_operation(
 def _resolve_claim(
     request: ToolOperationExecutionRequest,
     attempt: _ToolOperationClaimAttempt,
-) -> ToolOperationClaim | ToolExecutionResult:
+) -> ToolOperationClaim | ToolHandlerOutcome:
     claim = attempt.claim
     if claim.action == "replay":
         result = _result_from_record(claim.record)
@@ -219,7 +219,7 @@ def _resolve_claim(
 def _reconcile_unknown_operation(
     request: ToolOperationExecutionRequest,
     attempt: _ToolOperationClaimAttempt,
-) -> ToolOperationClaim | ToolExecutionResult:
+) -> ToolOperationClaim | ToolHandlerOutcome:
     claim = attempt.claim
     if request.reconcile is None:
         return _unknown_claim_result(request, claim, diagnostic=claim.reason or "no_reconciler")
@@ -320,7 +320,7 @@ def _reopen_unknown_operation(
     *,
     source_ref: str,
     reconciliation_outcome: str,
-) -> ToolOperationClaim | ToolExecutionResult:
+) -> ToolOperationClaim | ToolHandlerOutcome:
     record = attempt.claim.record
     reopen = getattr(request.store, "reopen_tool_operation_after_reconciliation", None)
     if not callable(reopen):
@@ -361,9 +361,9 @@ def _reopened_operation_result(
     *,
     source_ref: str,
     reconciliation_outcome: str,
-) -> ToolExecutionResult:
+) -> ToolHandlerOutcome:
     retry_safe = reconciliation_outcome == "safe_to_retry"
-    result = ToolExecutionResult(
+    result = ToolHandlerOutcome(
         request.tool_name,
         False,
         json.dumps(
@@ -403,7 +403,7 @@ def _unknown_claim_result(
     *,
     diagnostic: str,
     source_ref: str = "",
-) -> ToolExecutionResult:
+) -> ToolHandlerOutcome:
     prior = _result_from_record(claim.record)
     reported = (
         prior.reported_error_code
@@ -465,7 +465,7 @@ def _claim_block_contract(action: str) -> tuple[str, str, str]:
 def _execute_claimed_operation(
     request: ToolOperationExecutionRequest,
     claim: ToolOperationClaim,
-) -> ToolExecutionResult:
+) -> ToolHandlerOutcome:
     result = request.invoke()
     operation_status = _operation_status_for_result(result)
     unknown_reason = ""
@@ -524,11 +524,11 @@ def _execute_claimed_operation(
 # 函数用途: 把已调用工具的结果转换为不可自动重试的 unknown，并保留最小安全报告字段。
 def _completion_persistence_unknown_result(
     request: ToolOperationExecutionRequest,
-    reported: ToolExecutionResult,
-) -> ToolExecutionResult:
+    reported: ToolHandlerOutcome,
+) -> ToolHandlerOutcome:
     envelope = dict(reported.result_envelope or {})
     envelope["reported_tool_result"] = _reported_tool_result_facts(reported)
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         tool=request.tool_name,
         ok=False,
         output=json.dumps(
@@ -555,23 +555,24 @@ def _completion_persistence_unknown_result(
     )
 
 
-def _operation_status_for_result(result: ToolExecutionResult) -> str:
+def _operation_status_for_result(result: ToolHandlerOutcome) -> str:
     if result.ok:
         return TOOL_OPERATION_SUCCEEDED
     if result.effect_outcome == "not_started":
         return TOOL_OPERATION_FAILED
-    if (
-        result.effect_outcome == "unknown"
-        or result.error_code in {"TOOL_TIMEOUT", "TOOL_OPERATION_OUTCOME_UNKNOWN"}
-    ):
+    # Once a mutating/dangerous handler was entered, a generic failure cannot
+    # prove that no side effect happened.  Only an explicit structured
+    # ``not_started`` fact may make the operation terminal-failed; error text
+    # and taxonomy labels never grant replay authority.
+    if result.effect_outcome == "unknown" or result.handler_executed:
         return TOOL_OPERATION_UNKNOWN
     return TOOL_OPERATION_FAILED
 
 
 def _unknown_outcome_result(
     request: ToolOperationExecutionRequest,
-    reported: ToolExecutionResult,
-) -> ToolExecutionResult:
+    reported: ToolHandlerOutcome,
+) -> ToolHandlerOutcome:
     reported_code = (
         reported.reported_error_code
         or reported.error_code
@@ -579,7 +580,7 @@ def _unknown_outcome_result(
     )
     envelope = dict(reported.result_envelope or {})
     envelope["reported_tool_result"] = _reported_tool_result_facts(reported)
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         tool=request.tool_name,
         ok=False,
         output=json.dumps(
@@ -606,7 +607,7 @@ def _unknown_outcome_result(
 # LLM: reported_tool_result 只保存类型化旁证，不复制可能含密钥或大正文的工具 output。
 # 函数用途: 为 timeout 与账本终态写入失败生成同一份安全、可归档的原始结果摘要。
 def _reported_tool_result_facts(
-    reported: ToolExecutionResult,
+    reported: ToolHandlerOutcome,
 ) -> dict[str, object]:
     return {
         "ok": reported.ok,
@@ -620,7 +621,7 @@ def _reported_tool_result_facts(
     }
 
 
-def _tool_execution_facts(result: ToolExecutionResult) -> dict[str, object]:
+def _tool_execution_facts(result: ToolHandlerOutcome) -> dict[str, object]:
     facts: dict[str, object] = {
         "handler_executed": result.handler_executed,
         "duration_ms": result.duration_ms,
@@ -630,9 +631,10 @@ def _tool_execution_facts(result: ToolExecutionResult) -> dict[str, object]:
     return facts
 
 
-def _result_payload(result: ToolExecutionResult) -> dict[str, Any]:
+def _result_payload(result: ToolHandlerOutcome) -> dict[str, Any]:
     return {
         "schema_version": _RESULT_SCHEMA,
+        "result_ref": _operation_result_ref(result),
         "tool": result.tool,
         "ok": result.ok,
         "output": result.output,
@@ -652,7 +654,16 @@ def _result_payload(result: ToolExecutionResult) -> dict[str, Any]:
     }
 
 
-def _result_from_record(record: ToolOperationRecord) -> ToolExecutionResult:
+def _operation_result_ref(result: ToolHandlerOutcome) -> str:
+    operation = result.result_envelope.get("tool_operation")
+    return (
+        str(operation.get("result_ref") or "").strip()
+        if isinstance(operation, dict)
+        else ""
+    )
+
+
+def _result_from_record(record: ToolOperationRecord) -> ToolHandlerOutcome:
     payload = record.result if isinstance(record.result, dict) else {}
     if payload.get("schema_version") != _RESULT_SCHEMA:
         return _operation_error(
@@ -661,7 +672,7 @@ def _result_from_record(record: ToolOperationRecord) -> ToolExecutionResult:
             "已有副作用操作缺少可重放的完整结果，系统不会重复执行。",
         )
     try:
-        result = ToolExecutionResult(
+        result = ToolHandlerOutcome(
             tool=str(payload.get("tool") or record.tool),
             ok=payload.get("ok") is True,
             output=str(payload.get("output") or ""),
@@ -705,8 +716,8 @@ def _operation_error(
     message: str,
     *,
     reported_error_code: str = "",
-) -> ToolExecutionResult:
-    return ToolExecutionResult(
+) -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(
         tool_name,
         False,
         json.dumps(
@@ -719,7 +730,7 @@ def _operation_error(
 
 
 def _attach_operation_facts(
-    result: ToolExecutionResult,
+    result: ToolHandlerOutcome,
     request: ToolOperationExecutionRequest,
     *,
     status: str,
@@ -731,6 +742,9 @@ def _attach_operation_facts(
     facts: dict[str, object] = {
         "schema_version": "tool_operation.v1",
         "operation_id": request.operation_id,
+        "result_ref": (
+            f"tool-operation://{request.run_id}/{request.operation_id}"
+        ),
         "status": status,
         "action": action,
         "replayed": replayed,

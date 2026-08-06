@@ -14,15 +14,14 @@ from copy import deepcopy
 from typing import Any
 
 from ..common.audit_activation import AUDIT_SOURCE_OPEN_FIELDS
-from ..contracts.tool_input_schema import normalize_tool_input, validate_tool_input
-from ..tooling.tool_spec_schema import tool_spec_input_schema
+from ..tooling.input_schema import normalize_tool_input, validate_tool_input
 from .source_adapter import normalize_source_adapter
 from .source_http import (
     normalize_source_http_request,
     normalize_top_level_response_field,
     public_source_http_request,
 )
-from .watch_tool_spec import build_watch_stream_spec
+from .watch_tool_spec import build_watch_stream_model_spec
 
 _AUDIT_SOURCE_OPEN_FIELD_SET = frozenset(AUDIT_SOURCE_OPEN_FIELDS)
 _MAX_AUDIT_SOURCES = 256
@@ -32,7 +31,7 @@ _SOURCE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 def audit_source_binding_schema() -> dict[str, Any]:
     """Return the canonical persisted watch-open transport schema."""
 
-    watch_schema = tool_spec_input_schema(build_watch_stream_spec())
+    watch_schema = build_watch_stream_model_spec().input_schema
     properties = watch_schema.get("properties")
     properties = properties if isinstance(properties, dict) else {}
     return {

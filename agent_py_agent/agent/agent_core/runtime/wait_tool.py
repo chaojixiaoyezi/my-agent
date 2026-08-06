@@ -2,7 +2,16 @@ from __future__ import annotations
 
 import json
 
-from ...tooling.models import BaseTool, ToolExecutionResult, ToolSpec
+from ...tooling.models import (
+    BaseTool,
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    ResourceScopePolicy,
+    ToolHandlerOutcome,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+)
 from ..runner.context import current_subagent_run_id
 from .task_identity import durable_task_id
 
@@ -12,18 +21,27 @@ _MAX_SECONDS = 7200
 
 
 class WaitTool(BaseTool):
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy("mutating"),
+        idempotency_policy=IdempotencyPolicy("operation"),
+        resource_scopes=ResourceScopePolicy(
+            parameter_names=("run_id", "task_id", "thread_id"),
+        ),
+        promotes_task=True,
+    )
+
     def __init__(self, agent: object) -> None:
         self.agent = agent
-        self.spec = build_wait_spec()
+        self.model_spec = build_wait_model_spec()
 
-    def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         if _truthy(params.get("cancel")):
             # cancel 不走 _target:那条路会在没绑线程时顺手新建内部线程,取消场景不该有副作用。
             return _cancel_result(self.agent, params)
         _promote_wait_conversation(self.agent, params)
         interval = _seconds(params.get("seconds"), self.agent)
         target = _target(self.agent, params)
-        if isinstance(target, ToolExecutionResult):
+        if isinstance(target, ToolHandlerOutcome):
             return target
         thread_id, task_id = target
         actionable = _actionable_audit_input(self.agent, task_id)
@@ -86,7 +104,7 @@ class WaitTool(BaseTool):
                 "不要原地循环轮询。"
             ),
         }
-        return ToolExecutionResult(_TOOL_NAME, True, json.dumps(payload, ensure_ascii=False, indent=2))
+        return ToolHandlerOutcome(_TOOL_NAME, True, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def _promote_wait_conversation(agent: object, params: dict[str, object]) -> None:
@@ -110,44 +128,43 @@ _WAIT_AVOID_WHEN = [
 ]
 
 
-def build_wait_spec() -> ToolSpec:
-    return ToolSpec(
+def build_wait_model_spec() -> ToolModelSpec:
+    return ToolModelSpec(
         name=_TOOL_NAME,
-        category="orchestration",
-        effect="read_only",
-        promotes_task=True,
         description=(
             "登记一个只在当前任务内部生效、到点自动唤醒 agent 的非阻塞等待(按间隔循环触发)："
             "等子代理进度、盯持续增长的"
             "文件/数据源、周期性自查、长任务阶段性推进都用它。登记后结束本回合，到点系统会自动"
             "唤醒你继续当前任务；永不原地睡等。它不创建用户提醒或出站消息；用户的未来提醒使用 schedule。"
         ),
-        use_cases=_WAIT_USE_CASES,
-        avoid_when=_WAIT_AVOID_WHEN,
-        keywords=["等待", "watch", "yield", "wait", "冷却", "不要轮询", "监控", "盯", "持续", "巡检", "子代理进度"],
-        parameters={
-            "seconds": f"多少秒后内部唤醒 agent 查看；不填使用配置 subagent_watch_interval_seconds，最低 {_MIN_SECONDS}，最高 {_MAX_SECONDS}",
-            "run_id": "可选，想查看的代理 run；默认当前 task/run",
-            "task_id": "可选，绑定到哪个任务；默认当前运行任务",
-            "thread_id": "可选，绑定到哪个会话线程；默认按 task_id 查找或自动创建内部线程",
-            "scope": "可选，查看范围提示，默认 own_task_tree",
-            "reason": "可选但强烈建议填：为什么等待/下次醒来该干什么——唤醒时会原样带给你",
-            "cancel": "可选，true 时停掉当前任务/会话已登记的循环提醒（任务结束或不再需要盯守时用）",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "seconds": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": f"多少秒后内部唤醒；不填用配置，最低 {_MIN_SECONDS}，最高 {_MAX_SECONDS}。",
+                },
+                "run_id": {"type": "string", "description": "要查看的代理 run；默认当前 task/run。"},
+                "task_id": {"type": "string", "description": "绑定任务；默认当前运行任务。"},
+                "thread_id": {"type": "string", "description": "绑定会话线程；默认按 task_id 查找或创建内部线程。"},
+                "scope": {"type": "string", "description": "查看范围提示，默认 own_task_tree。"},
+                "reason": {"type": "string", "description": "等待原因与下次醒来要做的事。"},
+                "cancel": {"type": "boolean", "description": "true 时取消当前任务或会话已登记的循环唤醒。"},
+            },
+            "additionalProperties": False,
         },
-        parameter_schema={
-            "seconds": {"type": "integer", "minimum": 0},
-            "run_id": {"type": "string"},
-            "task_id": {"type": "string"},
-            "thread_id": {"type": "string"},
-            "scope": {"type": "string"},
-            "reason": {"type": "string"},
-            "cancel": {"type": "boolean"},
-        },
-        examples=[
-            '{"tool":"wait","seconds":120,"reason":"刚启动子代理，稍后看一次进度"}',
-            '{"tool":"wait","seconds":120,"reason":"盯守日志文件增量，醒来后从上次行号继续读新行，有目标事件才上报"}',
-            '{"tool":"wait","cancel":true,"reason":"盯守任务已结束，停止循环提醒"}',
-        ],
+        hints=ToolModelHints(
+            category="orchestration",
+            use_cases=tuple(_WAIT_USE_CASES),
+            avoid_when=tuple(_WAIT_AVOID_WHEN),
+            keywords=("等待", "watch", "yield", "wait", "冷却", "不要轮询", "监控", "盯", "持续", "巡检", "子代理进度"),
+            examples=(
+                '{"tool":"wait","seconds":120,"reason":"刚启动子代理，稍后看一次进度"}',
+                '{"tool":"wait","seconds":120,"reason":"盯守日志文件增量，醒来后从上次行号继续读新行，有目标事件才上报"}',
+                '{"tool":"wait","cancel":true,"reason":"盯守任务已结束，停止循环提醒"}',
+            ),
+        ),
     )
 
 
@@ -180,7 +197,7 @@ def _register_dispatch_supervision(
     if interval <= 0:
         return None
     target = _target(agent, {})
-    if isinstance(target, ToolExecutionResult):
+    if isinstance(target, ToolHandlerOutcome):
         return None
     thread_id, task_id = target
     store = agent.conversation_store
@@ -286,7 +303,7 @@ def _truthy(value: object) -> bool:
 # 函数用途: 停掉当前任务/会话上已登记的循环提醒（模型显式收手的开关；任务结构化结束时
 #   系统也会自动退休，这里是“任务仍在但确定不用再盯”的手动出口）。按 task_id 或
 #   显式 thread_id 匹配,禁用所有命中的 enabled policy。
-def _cancel_result(agent: object, params: dict[str, object]) -> ToolExecutionResult:
+def _cancel_result(agent: object, params: dict[str, object]) -> ToolHandlerOutcome:
     store = getattr(agent, "conversation_store", None)
     if store is None or not callable(getattr(store, "list_progress_policies", None)):
         return _error(
@@ -309,7 +326,7 @@ def _cancel_result(agent: object, params: dict[str, object]) -> ToolExecutionRes
         "cancelled_count": len(cancelled),
         "guidance": "循环提醒已停止；若任务已有结果，请核对事实后直接给出最终回复。",
     }
-    return ToolExecutionResult(_TOOL_NAME, True, json.dumps(payload, ensure_ascii=False, indent=2))
+    return ToolHandlerOutcome(_TOOL_NAME, True, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def _seconds(value: object, agent: object) -> int:
@@ -343,7 +360,7 @@ def _interval_int(value: object) -> int | None:
     return None
 
 
-def _target(agent: object, params: dict[str, object]) -> tuple[str, str] | ToolExecutionResult:
+def _target(agent: object, params: dict[str, object]) -> tuple[str, str] | ToolHandlerOutcome:
     store = getattr(agent, "conversation_store", None)
     if store is None or not callable(getattr(store, "set_progress_policy", None)):
         return _error(
@@ -474,14 +491,14 @@ def _error(
     *,
     error_code: str | None = None,
     facts: dict[str, object] | None = None,
-) -> ToolExecutionResult:
+) -> ToolHandlerOutcome:
     # code 是给人/日志看的语义标签(写进 payload.error)；error_code 必须是 taxonomy 已注册码，
-    # 否则 ToolExecutionResult 会把未注册的小写 code 兜底成 UNKNOWN_ERROR(retryable=False)，
+    # 否则 ToolHandlerOutcome 会把未注册的小写 code 兜底成 UNKNOWN_ERROR(retryable=False)，
     # 误导模型"放弃报阻塞"，而 store 缺失/缺 task_id 其实是可换工具/补参数修复的。
     payload = {"ok": False, "error": code, "message": message}
     if facts:
         payload["facts"] = facts
-    return ToolExecutionResult(
+    return ToolHandlerOutcome(
         _TOOL_NAME,
         False,
         json.dumps(payload, ensure_ascii=False, indent=2),
@@ -489,4 +506,4 @@ def _error(
     )
 
 
-__all__ = ["WaitTool", "build_wait_spec", "register_dispatch_supervision_policy"]
+__all__ = ["WaitTool", "build_wait_model_spec", "register_dispatch_supervision_policy"]

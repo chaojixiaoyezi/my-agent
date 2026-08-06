@@ -192,7 +192,7 @@ def _provision_published_audit_source(
     agent: object,
     binding: dict[str, object],
 ) -> dict[str, object]:
-    from ..agent_core.orchestration_tools import CreateSubagentsTool
+    from ..agent_core.orchestration_tools import execute_create_subagents_service
 
     source_id = str(binding.get("source_id") or "").strip()
     refs = [
@@ -203,7 +203,8 @@ def _provision_published_audit_source(
         ]
         if str(ref or "").strip()
     ]
-    result = CreateSubagentsTool(agent).execute(
+    result = execute_create_subagents_service(
+        agent,
         {
             "goal": (
                 "持续处理当前命名 Audit 已发布的这一条来源。"
@@ -216,7 +217,7 @@ def _provision_published_audit_source(
             "audit_source_id": source_id,
             "context_manifest": {"required_read_paths": refs},
             "long_running": True,
-        }
+        },
     )
     payload = _tool_payload(result)
     created_ids = _payload_run_ids(payload, "created_run_ids")
@@ -274,9 +275,7 @@ def authorize_source_worker_action(
     watch_id = str(attrs.get(AUDIT_SOURCE_WATCH_ID_ATTR) or "").strip()
     worker_key = str(attrs.get(AUDIT_SOURCE_WORKER_KEY_ATTR) or "").strip()
     owner_home = str(attrs.get(AUDIT_SOURCE_OWNER_HOME_ATTR) or "").strip()
-    runtime_config_version = str(
-        attrs.get(AUDIT_SOURCE_CONFIG_VERSION_ATTR) or ""
-    ).strip()
+    runtime_config_version = str(attrs.get(AUDIT_SOURCE_CONFIG_VERSION_ATTR) or "").strip()
     run_epoch = _normalized_run_epoch(attrs.get(AUDIT_RUN_EPOCH_ATTR))
     if (
         state.closed
@@ -401,9 +400,7 @@ def _validate_fenced_authority(
         )
     expected = {
         "audit_id": str(authority.get("audit_id") or ""),
-        "audit_run_epoch": _normalized_run_epoch(
-            authority.get("audit_run_epoch")
-        ),
+        "audit_run_epoch": _normalized_run_epoch(authority.get("audit_run_epoch")),
         "source_id": str(authority.get("source_id") or ""),
         "watch_id": str(authority.get("watch_id") or ""),
         "worker_key": str(authority.get("worker_key") or ""),
@@ -413,9 +410,7 @@ def _validate_fenced_authority(
     }
     observed = {
         "audit_id": str(lease.get("audit_id") or ""),
-        "audit_run_epoch": _normalized_run_epoch(
-            lease.get("audit_run_epoch")
-        ),
+        "audit_run_epoch": _normalized_run_epoch(lease.get("audit_run_epoch")),
         "source_id": str(lease.get("source_id") or ""),
         "watch_id": str(lease.get("watch_id") or ""),
         "worker_key": str(lease.get("worker_key") or ""),
@@ -425,15 +420,10 @@ def _validate_fenced_authority(
     }
     if (
         expected["audit_id"] != str(state.audit_root_task_id or "")
-        or expected["audit_run_epoch"]
-        != _normalized_run_epoch(state.audit_run_epoch)
+        or expected["audit_run_epoch"] != _normalized_run_epoch(state.audit_run_epoch)
         or expected["source_id"] != state.source_id
         or expected["watch_id"] != state.watch_id
-        or not all(
-            value
-            for key, value in expected.items()
-            if key != "audit_run_epoch"
-        )
+        or not all(value for key, value in expected.items() if key != "audit_run_epoch")
         or expected != observed
     ):
         return _denied(
@@ -764,9 +754,9 @@ def _create_audit_source_worker(
 ) -> dict[str, object]:
     params = _source_worker_create_params(agent, state, worker_key)
     try:
-        from ..agent_core.orchestration_tools import CreateSubagentsTool
+        from ..agent_core.orchestration_tools import execute_create_subagents_service
 
-        result = CreateSubagentsTool(agent).execute(params)
+        result = execute_create_subagents_service(agent, params)
     except Exception as exc:
         return {
             "ok": False,
@@ -929,6 +919,36 @@ def _sync_source_worker_runtime_context(
     attrs = getattr(task, "attributes", None)
     if not isinstance(attrs, dict):
         return state_changed
+    updates, manifest_changed, projected_goal, goal_changed = _source_worker_task_context_changes(
+        task,
+        attrs,
+        state,
+        objective=objective,
+        run_prompt=run_prompt,
+    )
+    if not updates and not manifest_changed and not goal_changed:
+        return state_changed
+    if updates:
+        task.attributes = {**attrs, **updates}
+    if goal_changed:
+        task.goal = projected_goal
+    task.updated_at = time.time()
+    manager = getattr(agent, "subagents", None)
+    saver = getattr(manager, "save", None)
+    if not callable(saver):
+        return state_changed
+    saver(task)
+    return True
+
+
+def _source_worker_task_context_changes(
+    task: object,
+    attrs: dict[str, object],
+    state: WatchState,
+    *,
+    objective: str,
+    run_prompt: str,
+) -> tuple[dict[str, object], bool, str, bool]:
     updates: dict[str, object] = {}
     if objective and str(attrs.get(AUDIT_OBJECTIVE_ATTR) or "").strip() != objective:
         updates[AUDIT_OBJECTIVE_ATTR] = objective
@@ -953,34 +973,17 @@ def _sync_source_worker_runtime_context(
             manifest_changed = True
     projected_goal = _source_worker_goal(state)
     goal_changed = bool(projected_goal and str(getattr(task, "goal", "") or "") != projected_goal)
-    active_attempt_id = str(
-        getattr(task, "runner_active_attempt_id", "") or ""
-    ).strip()
+    active_attempt_id = str(getattr(task, "runner_active_attempt_id", "") or "").strip()
     if (
         active_attempt_id
         and str(getattr(task, "status", "") or "").upper() == TaskStatus.RUNNING.value
         and (updates or manifest_changed or goal_changed)
         and attrs.get(AUDIT_SOURCE_CONTEXT_REFRESH_ATTEMPT_ATTR) != active_attempt_id
     ):
-        # The running model turn keeps its immutable prompt/tool snapshot.  Mark
-        # that exact attempt so the existing runner-result transition discards
-        # its stale closeout and requeues the same logical worker with the
-        # newly persisted task context.  A claimed batch may still be signed;
-        # config-version fencing prevents this attempt claiming another one.
+        # The active turn keeps its immutable snapshot. Mark the exact attempt
+        # so its stale closeout is discarded and the durable worker is requeued.
         updates[AUDIT_SOURCE_CONTEXT_REFRESH_ATTEMPT_ATTR] = active_attempt_id
-    if not updates and not manifest_changed and not goal_changed:
-        return state_changed
-    if updates:
-        task.attributes = {**attrs, **updates}
-    if goal_changed:
-        task.goal = projected_goal
-    task.updated_at = time.time()
-    manager = getattr(agent, "subagents", None)
-    saver = getattr(manager, "save", None)
-    if not callable(saver):
-        return state_changed
-    saver(task)
-    return True
+    return updates, manifest_changed, projected_goal, goal_changed
 
 
 def _apply_source_runtime_projection(
@@ -1041,10 +1044,8 @@ def _apply_source_runtime_projection(
         changed = any(
             (
                 state.source_envelope != source_envelope,
-                state.source_profile_ref
-                != str(projection.get("source_profile_ref") or ""),
-                list(state.document_refs)
-                != list(projection.get("document_refs") or []),
+                state.source_profile_ref != str(projection.get("source_profile_ref") or ""),
+                list(state.document_refs) != list(projection.get("document_refs") or []),
                 state.source_config_version != desired_version,
                 objective and state.audit_objective != objective,
                 run_prompt and state.audit_run_prompt != run_prompt,
@@ -1206,9 +1207,7 @@ def retire_published_audit_sources(
     owner_home = _agent_owner_home(agent)
     selected_audit = str(audit_id or "").strip()
     selected_sources = {
-        str(item or "").strip()
-        for item in (source_ids or ())
-        if str(item or "").strip()
+        str(item or "").strip() for item in (source_ids or ()) if str(item or "").strip()
     }
     if owner_home is None or not selected_audit or not selected_sources:
         return 0
@@ -1225,10 +1224,7 @@ def retire_published_audit_sources(
         state = registry.get_or_load(owner_home, str(row.get("watch_id") or ""))
         if state is None or state.closed:
             continue
-        if (
-            state.audit_root_task_id != selected_audit
-            or state.source_id not in selected_sources
-        ):
+        if state.audit_root_task_id != selected_audit or state.source_id not in selected_sources:
             continue
         close_watch_state(state, reason="audit_source_membership_removed")
         _cancel_closed_source_worker(
@@ -1824,9 +1820,7 @@ def audit_task_has_unreported_findings(agent: object, audit_id: str) -> bool:
             return True
         owner_home = Path(str(attrs.get(AUDIT_SOURCE_OWNER_HOME_ATTR) or ""))
         for row in rows:
-            if row.get("audit_finding") is not True or not bool(
-                row.get("requires_llm_report")
-            ):
+            if row.get("audit_finding") is not True or not bool(row.get("requires_llm_report")):
                 continue
             if _audit_finding_task_mismatch(task, row):
                 return True
@@ -1987,8 +1981,7 @@ def _finding_delivery_refs(row: dict[str, Any]) -> list[str]:
             source_ref
             for source_ref in _finding_source_refs(row)
             if (
-                (parsed := parse_audit_source_ref(source_ref)) is not None
-                and parsed[0] == watch_id
+                (parsed := parse_audit_source_ref(source_ref)) is not None and parsed[0] == watch_id
             )
         )
     )
@@ -2008,8 +2001,7 @@ def _pending_finding_delivery_keys(
         metadata = metadata if isinstance(metadata, dict) else {}
         if (
             str(getattr(signal, "root_task_id", "") or "").strip() != audit_id
-            or str(getattr(signal, "reason", "") or "").strip().lower()
-            != "audit_finding"
+            or str(getattr(signal, "reason", "") or "").strip().lower() != "audit_finding"
             or str(metadata.get("schema_version") or "") != "audit-finding-event.v1"
         ):
             continue
@@ -2042,9 +2034,7 @@ def _requeue_unreported_finding_deliveries(
     from .harvester import audit_source_refs_reported
 
     for row in rows:
-        if row.get("audit_finding") is not True or not bool(
-            row.get("requires_llm_report")
-        ):
+        if row.get("audit_finding") is not True or not bool(row.get("requires_llm_report")):
             continue
         mismatch = _audit_finding_task_mismatch(task, row)
         if mismatch:
@@ -2357,6 +2347,46 @@ def _publish_audit_finding_event(
         thread_id = str(getattr(thread, "thread_id", "") or "").strip()
     if not thread_id:
         return _outbox_pending("conversation_thread_unavailable")
+    envelope, envelope_error = _audit_finding_event_envelope(
+        task,
+        row,
+        thread_id=thread_id,
+        audit_id=audit_id,
+    )
+    if envelope_error:
+        return _outbox_pending(envelope_error)
+    observation_payload = envelope["observation_payload"]
+    wake_payload = envelope.get("wake_payload")
+    assert isinstance(observation_payload, dict)
+    try:
+        if isinstance(wake_payload, dict):
+            observation, signal = store.append_observation_with_wake(
+                observation_payload,
+                wake_payload,
+            )
+        else:
+            observation = store.append_observation(observation_payload)
+            signal = None
+    except Exception as exc:
+        return _outbox_pending(f"event_publish_failed:{type(exc).__name__}")
+    return {
+        "ok": True,
+        "state": "published",
+        "finding_id": str(envelope.get("finding_id") or ""),
+        "revision": max(1, int(envelope.get("revision") or 1)),
+        "observation_id": str(getattr(observation, "observation_id", "") or ""),
+        "wake_signal_id": str(getattr(signal, "wake_signal_id", "") or ""),
+        "report_requested": bool(envelope.get("requires_report")),
+    }
+
+
+def _audit_finding_event_envelope(
+    task: object,
+    row: dict[str, Any],
+    *,
+    thread_id: str,
+    audit_id: str,
+) -> tuple[dict[str, object], str]:
     finding_id = str(row.get("id") or "").strip()
     revision = max(1, int(row.get("revision") or 1))
     urgency = str(row.get("urgency") or "normal").strip().lower()
@@ -2367,14 +2397,61 @@ def _publish_audit_finding_event(
         for item in (row.get("source_refs") or row.get("evidence_refs") or [])
         if str(item or "").strip()
     ]
-    delivery_evidence_refs = _finding_delivery_refs(row)
-    if bool(row.get("requires_llm_report")) and not delivery_evidence_refs:
-        return _outbox_pending("finding_delivery_identity_unavailable")
-    metadata = {
+    delivery_refs = _finding_delivery_refs(row)
+    requires_report = bool(row.get("requires_llm_report"))
+    if requires_report and not delivery_refs:
+        return {}, "finding_delivery_identity_unavailable"
+    metadata = _audit_finding_event_metadata(
+        row,
+        audit_id=audit_id,
+        finding_id=finding_id,
+        revision=revision,
+        delivery_refs=delivery_refs,
+    )
+    common = {
+        "thread_id": thread_id,
+        "summary": str(row.get("claim") or ""),
+        "urgency": urgency,
+        "source_agent_id": str(getattr(task, "id", "") or ""),
+        "parent_agent_id": audit_id,
+        "root_task_id": audit_id,
+        "evidence_refs": evidence_refs,
+        "metadata": metadata,
+    }
+    observation_payload = {
+        **common,
+        "event_type": "audit_finding",
+        # Only a typed report request may wake the owner-facing model.
+        "requires_main_agent": requires_report,
+        "requires_llm_report": requires_report,
+    }
+    wake_payload = None
+    if requires_report:
+        wake_payload = {
+            **common,
+            "reason": "audit_finding",
+            "dedupe_key": f"audit-finding:{audit_id}:{finding_id}:{revision}",
+        }
+    return {
+        "finding_id": finding_id,
+        "revision": revision,
+        "requires_report": requires_report,
+        "observation_payload": observation_payload,
+        "wake_payload": wake_payload,
+    }, ""
+
+
+def _audit_finding_event_metadata(
+    row: dict[str, Any],
+    *,
+    audit_id: str,
+    finding_id: str,
+    revision: int,
+    delivery_refs: list[str],
+) -> dict[str, object]:
+    return {
         "schema_version": "audit-finding-event.v1",
-        # A finding wake is an incremental report request.  It is not a
-        # completed-window or whole-Audit summary, even when several wakes are
-        # coalesced into one owner-facing turn.
+        # Finding wakes report increments, never whole-Audit completion.
         "report_scope": "incremental",
         "owner_id": str(row.get("owner_id") or ""),
         "audit_id": audit_id,
@@ -2390,59 +2467,10 @@ def _publish_audit_finding_event(
         "verdict": row.get("verdict"),
         "score": row.get("score"),
         "requires_llm_report": bool(row.get("requires_llm_report")),
-        "delivery_evidence_refs": delivery_evidence_refs,
+        "delivery_evidence_refs": delivery_refs,
         "evidence_records": [
-            dict(item)
-            for item in (row.get("evidence_records") or [])
-            if isinstance(item, dict)
+            dict(item) for item in (row.get("evidence_records") or []) if isinstance(item, dict)
         ],
-    }
-    requires_report = bool(row.get("requires_llm_report"))
-    observation_payload = {
-        "thread_id": thread_id,
-        "event_type": "audit_finding",
-        "summary": str(row.get("claim") or ""),
-        "urgency": urgency,
-        "source_agent_id": str(getattr(task, "id", "") or ""),
-        "parent_agent_id": audit_id,
-        "root_task_id": audit_id,
-        "evidence_refs": evidence_refs,
-        # Findings that are retained only for audit/review stay in the event
-        # ledger.  Only a typed report request may wake the owner-facing model.
-        "requires_main_agent": requires_report,
-        "requires_llm_report": requires_report,
-        "metadata": metadata,
-    }
-    try:
-        if requires_report:
-            observation, signal = store.append_observation_with_wake(
-                observation_payload,
-                {
-                    "thread_id": thread_id,
-                    "urgency": urgency,
-                    "reason": "audit_finding",
-                    "source_agent_id": str(getattr(task, "id", "") or ""),
-                    "parent_agent_id": audit_id,
-                    "root_task_id": audit_id,
-                    "summary": str(row.get("claim") or ""),
-                    "evidence_refs": evidence_refs,
-                    "dedupe_key": (f"audit-finding:{audit_id}:{finding_id}:{revision}"),
-                    "metadata": metadata,
-                },
-            )
-        else:
-            observation = store.append_observation(observation_payload)
-            signal = None
-    except Exception as exc:
-        return _outbox_pending(f"event_publish_failed:{type(exc).__name__}")
-    return {
-        "ok": True,
-        "state": "published",
-        "finding_id": finding_id,
-        "revision": revision,
-        "observation_id": str(getattr(observation, "observation_id", "") or ""),
-        "wake_signal_id": str(getattr(signal, "wake_signal_id", "") or ""),
-        "report_requested": requires_report,
     }
 
 
@@ -2736,9 +2764,7 @@ def _acquire_or_renew_lease(
             payload = {
                 "schema_version": _LEASE_SCHEMA,
                 "audit_id": state.audit_root_task_id,
-                "audit_run_epoch": _normalized_run_epoch(
-                    state.audit_run_epoch
-                ),
+                "audit_run_epoch": _normalized_run_epoch(state.audit_run_epoch),
                 "source_id": state.source_id,
                 "watch_id": state.watch_id,
                 "worker_key": worker_key,
@@ -3072,8 +3098,7 @@ def _source_worker_goal(state: WatchState) -> str:
         "在采集窗口关闭且待判积压清零前保持可续跑。"
         + (
             "\n当前 Audit 已发布的生效要求（业务判断权威；只处理其中与本来源相关的记录，"
-            "不得据此消费兄弟来源）："
-            + audit_requirement
+            "不得据此消费兄弟来源）：" + audit_requirement
             if audit_requirement
             else ""
         )
@@ -3180,9 +3205,7 @@ def _matching_worker_tasks(
     except Exception:
         return []
     matching = []
-    selected_epoch = (
-        None if run_epoch is None else _normalized_run_epoch(run_epoch)
-    )
+    selected_epoch = None if run_epoch is None else _normalized_run_epoch(run_epoch)
     for task in tasks:
         attrs = getattr(task, "attributes", {}) or {}
         if (
@@ -3191,8 +3214,7 @@ def _matching_worker_tasks(
             and str(attrs.get(AUDIT_SOURCE_WORKER_KEY_ATTR) or "") == worker_key
             and (
                 selected_epoch is None
-                or _normalized_run_epoch(attrs.get(AUDIT_RUN_EPOCH_ATTR))
-                == selected_epoch
+                or _normalized_run_epoch(attrs.get(AUDIT_RUN_EPOCH_ATTR)) == selected_epoch
             )
         ):
             matching.append(task)

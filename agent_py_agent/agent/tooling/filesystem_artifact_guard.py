@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .models import ToolExecutionResult
+from .models import ToolHandlerOutcome
 
 _BLOB_TOOL_OUTPUT_ARTIFACT_PARTS = ("blobs", "tool_outputs")
 
@@ -72,7 +72,7 @@ def _tool_output_content_from_json(target: Path) -> str:
     return content if isinstance(content, str) else ""
 
 
-def mark_tool_output_artifact_result(result: ToolExecutionResult) -> ToolExecutionResult:
+def mark_tool_output_artifact_result(result: ToolHandlerOutcome) -> ToolHandlerOutcome:
     """Tighten one filesystem result that exposes archived tool output."""
 
     policy = result.result_envelope.setdefault("tool_output_policy", {})

@@ -31,57 +31,69 @@ from ._persona_write_guard import (
     _persona_injection_write_error,
 )
 from .filesystem_path_recovery import MissingPathRequest, missing_path_result
-from .models import ToolExecutionResult, ToolSpec
+from .models import (
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    ResourceScopePolicy,
+    ToolHandlerOutcome,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+)
 
 
-def _build_edit_file_spec() -> ToolSpec:
-    return ToolSpec(
+def _build_edit_file_model_spec() -> ToolModelSpec:
+    return ToolModelSpec(
         name="edit_file",
-        category="filesystem",
-        effect="mutating",
-        promotes_task=True,
-        idempotency_scope="operation",
         description="把已有文本文件里的 old_string 精确替换成 new_string（带空白容错匹配）。改几行时首选，比 write_file 省、比 apply_patch 简单。",
-        use_cases=[
-            "修改已有代码/配置/文档里的一处或几处文本",
-            "把 new_string 设为空串即可删除 old_string 这段",
-        ],
-        avoid_when=[
-            "新建文件用 write_file",
-            "整文件重写用 write_file",
-            "一次要改很多文件用 apply_patch",
-        ],
-        keywords=["编辑", "替换", "改文件", "edit", "str_replace", "局部修改"],
-        parameters={
-            "path": "要编辑的文件路径",
-            "old_string": "文件中要被替换的原文（需足够唯一以精确定位）",
-            "new_string": "替换成的新文本（空串=删除 old_string）",
-            "replace_all": "可选，true 时替换所有匹配处（默认只换唯一一处）",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "要编辑的文件路径。"},
+                "old_string": {
+                    "type": "string",
+                    "description": (
+                        "必须能在文件中唯一定位；若多处相同，请多带上下文或设 replace_all=true。"
+                        "缩进或空白略有出入时会按文件中的真实文本容错匹配。"
+                    ),
+                },
+                "new_string": {
+                    "type": "string",
+                    "description": "替换后的文本；允许空串以删除 old_string，并保持原有缩进风格。",
+                },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "true 时替换所有匹配处；默认只允许唯一匹配。",
+                },
+            },
+            "required": ["path", "old_string", "new_string"],
+            "additionalProperties": False,
         },
-        parameter_details={
-            "old_string": (
-                "必须能在文件中唯一定位；若只给一行而文件多处相同会报错，"
-                "这时多带几行上下文，或设 replace_all=true。"
-                "缩进/行首尾空白和文件略有出入也能容错命中（按真实文本替换）。"
+        hints=ToolModelHints(
+            category="filesystem",
+            use_cases=(
+                "修改已有代码/配置/文档里的一处或几处文本",
+                "把 new_string 设为空串即可删除 old_string 这段",
             ),
-            "new_string": "允许空串（删除）；保持与 old_string 一致的缩进风格。",
-            "replace_all": "布尔，默认 false。",
-        },
-        parameter_schema={
-            "path": {"type": "string"},
-            "old_string": {"type": "string"},
-            "new_string": {"type": "string"},
-            "replace_all": {"type": "boolean"},
-        },
-        required_parameters=["path", "old_string", "new_string"],
-        examples=[
-            '{"tool": "edit_file", "path": "app.py", "old_string": "timeout = 30", "new_string": "timeout = 60"}',
-            '{"tool": "edit_file", "path": "config.yaml", "old_string": "debug: true", "new_string": "debug: false", "replace_all": true}',
-        ],
+            avoid_when=("新建文件用 write_file", "整文件重写用 write_file", "一次要改很多文件用 apply_patch"),
+            keywords=("编辑", "替换", "改文件", "edit", "str_replace", "局部修改"),
+            examples=(
+                '{"tool": "edit_file", "path": "app.py", "old_string": "timeout = 30", "new_string": "timeout = 60"}',
+                '{"tool": "edit_file", "path": "config.yaml", "old_string": "debug: true", "new_string": "debug: false", "replace_all": true}',
+            ),
+        ),
     )
 
 
 class EditFileTool(FileSystemTool):
+    model_spec = _build_edit_file_model_spec()
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy("mutating"),
+        idempotency_policy=IdempotencyPolicy("operation"),
+        resource_scopes=ResourceScopePolicy(parameter_names=("path",)),
+        promotes_task=True,
+    )
+
     def __init__(
         self,
         workspace_root: Path,
@@ -89,9 +101,8 @@ class EditFileTool(FileSystemTool):
         access_options: FileSystemAccessOptions | None = None,
     ):
         super().__init__(workspace_root, workspace_roots, access_options)
-        self.spec = _build_edit_file_spec()
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         try:
             target = self.resolve_write_path(
                 _text_param(params.get("path"), name="path", max_chars=4096, strip=True)
@@ -102,9 +113,9 @@ class EditFileTool(FileSystemTool):
             if old == new:
                 raise ValueError("old_string 与 new_string 相同，无需编辑")
         except WriteScopeError as exc:
-            return ToolExecutionResult("edit_file", False, str(exc), error_code="WRITE_FORBIDDEN")
+            return ToolHandlerOutcome("edit_file", False, str(exc), error_code="WRITE_FORBIDDEN")
         except ValueError as exc:
-            return ToolExecutionResult("edit_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
+            return ToolHandlerOutcome("edit_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
         # 文件不存在是路径/状态问题，不是"改 old_string/new_string 格式"能修的：
         # 旧实现把它和参数错混在一个 except 里报 TOOL_INVALID_ARGUMENTS，会让模型
         # 反复纠结 old_string 是否匹配，而真正该做的是先创建文件(write_file)或改对路径。
@@ -123,15 +134,15 @@ class EditFileTool(FileSystemTool):
             content = target.read_text(encoding="utf-8")
             updated, strategy, count = _replace_in_content(content, old, new, replace_all=replace_all)
         except ValueError as exc:
-            return ToolExecutionResult("edit_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
+            return ToolHandlerOutcome("edit_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
         approval_error = _persona_approval_write_error(target, self.protected_persona_root)
         if approval_error:
-            return ToolExecutionResult(
+            return ToolHandlerOutcome(
                 "edit_file", False, approval_error, error_code="PERSONA_WRITE_REQUIRES_TOOL"
             )
         persona_error = _persona_injection_write_error(target, updated)  # 改 owner SOUL/USER/AGENTS 也过注入扫描
         if persona_error:
-            return ToolExecutionResult("edit_file", False, persona_error, error_code="PERSONA_INJECTION_BLOCKED")
+            return ToolHandlerOutcome("edit_file", False, persona_error, error_code="PERSONA_INJECTION_BLOCKED")
         try:
             updated_bytes = updated.encode("utf-8")
             with self.quota_changes([OwnerQuotaChange(target, len(updated_bytes))]):
@@ -139,9 +150,9 @@ class EditFileTool(FileSystemTool):
         except (OwnerQuotaExceeded, OwnerQuotaUnavailable) as exc:
             return owner_quota_error_result("edit_file", exc)
         except (OSError, UnicodeError) as exc:
-            return ToolExecutionResult("edit_file", False, f"写入失败: {exc}", error_code="TOOL_EXECUTION_FAILED")
+            return ToolHandlerOutcome("edit_file", False, f"写入失败: {exc}", error_code="TOOL_EXECUTION_FAILED")
         note = "" if strategy == "exact" else f"（{strategy} 容错匹配）"
-        return ToolExecutionResult(
+        return ToolHandlerOutcome(
             "edit_file",
             True,
             f"已编辑 {self.display_path(target)}：替换 {count} 处{note}",

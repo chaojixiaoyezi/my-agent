@@ -158,8 +158,25 @@ def test_tool_archive_registers_write_file_artifact(tmp_path: Path):
     from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallRecordParams
     from agent_py_agent.agent.artifacts.registry import latest_artifact_records
     from agent_py_agent.agent.tooling._filesystem_write import WriteFileTool
+    from agent_py_agent.tests._tool_runtime_harness import (
+        canonical_history_call,
+        canonical_history_result,
+    )
 
-    result = WriteFileTool(tmp_path).execute({"path": "outputs/report.md", "content": "hello"})
+    outcome = WriteFileTool(tmp_path).execute(
+        {"path": "outputs/report.md", "content": "hello"}
+    )
+    call = canonical_history_call(
+        "write_file",
+        {"path": "outputs/report.md"},
+        call_id="write-report",
+        run_id="run-1",
+    )
+    result = canonical_history_result(
+        call,
+        outcome.output,
+        handler_details=outcome.result_envelope,
+    )
     params = _empty_tool_loop_params()
     archive_tool_call_record(
         SimpleNamespace(root=tmp_path, config=SimpleNamespace()),
@@ -167,7 +184,7 @@ def test_tool_archive_registers_write_file_artifact(tmp_path: Path):
             params=params,
             tool_rounds=1,
             idx=1,
-            payload={"tool": "write_file", "path": "outputs/report.md"},
+            call=call,
             result=result,
         ),
     )

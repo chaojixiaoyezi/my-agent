@@ -42,12 +42,10 @@ my_agent_owner_id: "main"
 # - home_lesson_auto_read_limit: 每轮最多自动读取多少个匹配 lesson 文件；0 表示不自动读 lesson。
 # - home_lesson_stale_caveat_days: 召回的 lesson 超过多少天未更新就附加"记忆可能过期"提示；0 表示不加提示。
 #   防止把陈旧记忆当现状：记忆反映写入时的事实，与当前代码/状态冲突时以现状为准。
-# - daily_memory_mirror_enabled: 写长期记忆时，同时按天追加一份到 owner memory/daily/YYYY-MM-DD.jsonl。
 # - run_task_workspace_enabled: 保存 run 在第一轮模型调用前自动创建 tasks/date/task_slug/output 和 work 等目录，并把路径作为软运行状态提示给模型。
 home_context_enabled: true
 home_lesson_auto_read_limit: 3
 home_lesson_stale_caveat_days: 7
-daily_memory_mirror_enabled: true
 run_task_workspace_enabled: true
 
 # 任务工作区路径模板：
@@ -86,7 +84,37 @@ local_store_fts_enabled: true
 # 每轮请求最多带多少条相关记忆进入 prompt
 memory_top_k: 5
 
-# 是否自动把用户输入和模型回复写入记忆
+# 后台 Memory Curator（统一每日经历提炼服务）：
+# - enabled: 是否启用后台策展；关闭时保留现有游标和候选，不调用辅助模型。
+# - provider: auto 表示继承主后端；指定 provider 时由统一后端工厂创建，不改变输出 Schema。
+# - model: 留空继承主模型；填写时只影响后台提炼模型，不改变主会话模型。
+# - interval_seconds: 有新经历且距离上次成功达到多少秒时触发，默认 3 小时。
+# - turn_threshold: 游标后累计多少个新用户轮次触发，默认 10 轮。
+# - batch_message_limit: 单批最多读取多少条 ConversationStore 消息。
+# - max_input_chars: 单批模型输入字符上限；长工具输出只传预览和引用。
+# - timeout_seconds: 单次后台模型调用超时秒数。
+# - max_retries: Schema、超时或模型错误后的有界重试次数；失败不推进游标。
+# - daily_finalize_hour: owner 当地时间每天收尾小时，取值 0-23。
+# - auto_promotion_policy: 自动晋升机器策略版本；conservative_v1 只允许精确证据、无冲突的新长期事实。
+# - lesson_min_occurrences: 普通教训晋升所需最少独立观察次数，默认 2。
+# - hot_min_occurrences: 已接受教训晋升 HOT 所需最少独立观察次数，默认 3。
+memory_curator_enabled: true
+memory_curator_provider: "auto"
+memory_curator_model: ""
+memory_curator_interval_seconds: 10800
+memory_curator_turn_threshold: 10
+memory_curator_batch_message_limit: 80
+memory_curator_max_input_chars: 40000
+memory_curator_timeout_seconds: 90
+memory_curator_max_retries: 1
+memory_curator_daily_finalize_hour: 23
+memory_curator_auto_promotion_policy: "conservative_v1"
+memory_lesson_min_occurrences: 2
+memory_hot_min_occurrences: 3
+
+# 是否自动持久化运行归档、恢复事实和 task workspace。
+# 该字段不把普通 user/assistant 正文写入正式 long_term；完整对话由 ConversationStore 掌权，
+# Daily/Candidate 只由统一 Memory Curator 生成。
 auto_save_memory: true
 # 记忆语义召回（检索拓宽 #1，默认 false=现状纯关键词）：开后记忆召回在关键词外加一路语义向量召回、
 # RRF 融合，治"换词就召不回"。向量只存各 owner 自己 home 本地文件（零依赖、不碰共享向量库、按用户隔离）。
@@ -173,12 +201,6 @@ external_knowledge_index_file_name: "MY_AGENT_INDEX.md"
 external_knowledge_directory_roots: []
 external_knowledge_api_sources: []
 external_knowledge_database_sources: []
-
-# 是否启用自学习功能
-# - false: 默认关闭，只按已有 prompt、记忆、工具和 skill 工作，不自动沉淀新经验
-# - true: 允许后续自学习模块在任务结束后生成“学习候选”
-# - 注意：开启后也不应该直接改正式 skill；应先生成草稿，再由用户确认
-enable_self_learning: false
 
 # 额外动态 prompt 文件
 prompt_files:
@@ -632,11 +654,6 @@ tool_context_microcompact_min_chars: 1500
 # - tool_context_ptl_retry_max: 单轮最多重试几次；0 表示关闭，直接走 compact。
 tool_context_ptl_retry_max: 3
 
-tool_payload_max_fields: 64
-tool_payload_max_field_name_chars: 128
-tool_payload_max_name_chars: 128
-tool_payload_parse_error_raw_chars: 1000
-
 # read_file 工具最多返回多少字符，避免单次结果太长
 tool_read_max_chars: 50000
 
@@ -753,15 +770,10 @@ tool_embedding_api_base: ""
 tool_embedding_api_key: ""
 tool_embedding_api_key_env: ""
 
-# 工具调用协议：native=在 anthropic_compatible 端点用模型原生 tool_use（默认，已全场景真机验证：
-# 单代理/子代理协作 × 强中弱模型 M3/M2.7/mimo 真实任务全过，治本解决弱模型草草完成/幻觉的协议层根因）。
-# text=旧 [TOOL_CALL] 文本协议（保底回退，出问题可改回 text）。
-# native 支持 model_backend=anthropic_compatible / openai_compatible，其余后端自动回退 text。
+# 工具调用协议在一次 run 开始前固定。native 会先探测当前
+# provider + endpoint + model + stream 是否支持原生 tool_use；text 只用于明确配置的
+# 非原生端点或协议调试。一个 run 内不会切换协议，native 失败也不会由 text 中途接管。
 tool_protocol: "native"
-# 按模型能力降级（审计 #8）：列出"不支持 native tool_use"的模型名子串，命中即对该模型强制回退 text
-# 协议，防自选非 reasoning 模型上 native 静默失效（0 工具调用 + 幻觉完成）。空=不降级（默认行为不变）。
-# 例：tool_protocol_text_models: ["text-01", "minimax"]
-tool_protocol_text_models: []
 
 # MCP 客户端（短板6）：连接外部 MCP server（Model Context Protocol，JSON-RPC over stdio），
 # 把社区现成工具（GitHub/数据库/Slack 等）动态注册成 mcp__<server>__<tool> 前缀的工具，

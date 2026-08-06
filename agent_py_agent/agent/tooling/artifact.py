@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +14,19 @@ from ..memory_archive.artifact.reader import (
     read_tool_output_artifact,
 )
 from ..settings.defaults import default_config_int
-from .models import BaseTool, ToolExecutionResult, ToolSpec, TrustedParameterBinding
+from .models import (
+    BaseTool,
+    ConcurrencyPolicy,
+    EffectResolverPolicy,
+    OutputPolicy,
+    ResourceScopePolicy,
+    ToolHandlerOutcome,
+    ToolInputPolicy,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
+    TrustedParameterBinding,
+)
 
 
 @dataclass(frozen=True)
@@ -41,7 +53,12 @@ class ArtifactReadBudget:
         events = self._fresh_events(run_id, now)
         used = sum(chars for _, chars in events)
         if used + requested > self.max_chars:
-            return _budget_error(run_id, self.max_chars, self.window_seconds, f"已用 {used} 字符，本次请求 {requested} 字符")
+            return _budget_error(
+                run_id,
+                self.max_chars,
+                self.window_seconds,
+                f"已用 {used} 字符，本次请求 {requested} 字符",
+            )
         return ""
 
     def commit(self, run_id: str, chars: int, *, now: float | None = None) -> None:
@@ -64,57 +81,51 @@ class ArtifactReadBudget:
 
 
 class ReadArtifactTool(BaseTool):
-    spec = ToolSpec(
+    model_spec = ToolModelSpec(
         name="read_artifact",
-        category="memory",
-        effect="read_only",
         description="显式读取已外置 tool-output artifact 的正文切片；不能读取任意文件路径。",
-        use_cases=[
-            "memory-resume 只给出 artifact path/hash/size 后，需要显式查看正文片段",
-            "接管或救援时核对大工具输出的具体内容",
-        ],
-        avoid_when=[
-            "只是要看普通工作区文件时使用 read_file",
-            "artifact ref 没有来自 tool output index、manifest 或恢复包",
-        ],
-        keywords=["artifact", "tool_output", "externalized", "read_artifact", "checkpoint"],
-        parameters={
-            "artifact_ref": "artifact path、sha256、scoped_call_id 或 call_id；必须能在当前 task work 的 tool_outputs/index.jsonl 中命中",
-            "offset": "从正文第几个字符开始读取，默认 0",
-            "max_chars": "最多读取多少字符；0 表示读取全部，默认读取 agent_config.yaml 的 memory_artifact_default_read_chars",
-            "mode": "读取模式：slice/head/tail/search；默认 slice",
-            "query": "mode=search 时要搜索的关键词",
-            "run_id": "可选；读取短 call_id 时用于限制当前 runner 作用域，通常由系统自动注入",
-            "task_id": "可选；读取短 call_id 时用于限制当前任务作用域，通常由系统自动注入",
-            "request_id": "可选；读取短 call_id 时用于限制当前请求作用域，通常由系统自动注入",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "artifact_ref": {
+                    "type": "string",
+                    "description": "artifact path、sha256、scoped_call_id 或 call_id；必须在当前 task work 的 tool_outputs/index.jsonl 中命中。",
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "从正文第几个字符开始读取，默认 0。",
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "最多读取多少字符；0 表示读取全部。",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["slice", "head", "tail", "search"],
+                    "description": "读取模式，默认 slice。",
+                },
+                "query": {"type": "string", "description": "mode=search 时要搜索的关键词。"},
+            },
+            "required": ["artifact_ref"],
+            "additionalProperties": False,
         },
-        parameter_schema={
-            "artifact_ref": {"type": "string"},
-            "offset": {"type": "integer", "minimum": 0},
-            "max_chars": {"type": "integer", "minimum": 0},
-            "mode": {"type": "string", "enum": ["slice", "head", "tail", "search"]},
-            "query": {"type": "string"},
-            "run_id": {"type": "string"},
-            "task_id": {"type": "string"},
-            "request_id": {"type": "string"},
-        },
-        required_parameters=["artifact_ref"],
-        # Artifact body is evidence recovered from an earlier tool, file, web
-        # source, or MCP server. Reading it must never upgrade that body into
-        # runtime instructions merely because the reader itself is builtin.
-        output_trust="external_data",
-        safe_parameter_defaults={
-            "offset": 0,
-            "mode": "slice",
-        },
-        trusted_parameter_bindings={
-            "run_id": TrustedParameterBinding(source_refs=("run_scope.run_id",)),
-            "task_id": TrustedParameterBinding(source_refs=("run_scope.task_id",)),
-            "request_id": TrustedParameterBinding(source_refs=("run_scope.request_id",)),
-        },
-        examples=[
-            '{"tool": "read_artifact", "artifact_ref": "run-123:2-1", "offset": 0, "max_chars": 4000}',
-        ],
+        hints=ToolModelHints(
+            category="memory",
+            use_cases=(
+                "memory-resume 只给出 artifact path/hash/size 后，需要显式查看正文片段",
+                "接管或救援时核对大工具输出的具体内容",
+            ),
+            avoid_when=(
+                "只是要看普通工作区文件时使用 read_file",
+                "artifact ref 没有来自 tool output index、manifest 或恢复包",
+            ),
+            keywords=("artifact", "tool_output", "externalized", "read_artifact", "checkpoint"),
+            examples=(
+                '{"tool": "read_artifact", "artifact_ref": "run-123:2-1", "offset": 0, "max_chars": 4000}',
+            ),
+        ),
     )
 
     def __init__(
@@ -126,24 +137,65 @@ class ReadArtifactTool(BaseTool):
         default_read_chars: int | None = None,
     ):
         self.root = Path(root)
-        self.default_read_chars = _config_int("memory_artifact_default_read_chars", default_read_chars)
-        self.spec = replace(
-            type(self).spec,
-            safe_parameter_defaults={
-                **type(self).spec.safe_parameter_defaults,
-                "max_chars": self.default_read_chars,
-            },
+        self.default_read_chars = _config_int(
+            "memory_artifact_default_read_chars", default_read_chars
+        )
+        self.runtime_policy = ToolRuntimePolicy(
+            effect_resolver=EffectResolverPolicy("read_only"),
+            concurrency_policy=ConcurrencyPolicy("parallel_safe"),
+            resource_scopes=ResourceScopePolicy(parameter_names=("artifact_ref",)),
+            output_policy=OutputPolicy(trust="external_data"),
+            input_policy=ToolInputPolicy(
+                internal_parameters=(
+                    "__artifact_read_scope_mode",
+                    "run_id",
+                    "task_id",
+                    "request_id",
+                ),
+                safe_parameter_defaults=(
+                    ("offset", 0),
+                    ("mode", "slice"),
+                    ("max_chars", self.default_read_chars),
+                ),
+                trusted_parameter_bindings=(
+                    (
+                        "run_id",
+                        TrustedParameterBinding(
+                            source_refs=("run_scope.run_id",),
+                            authority="host_authoritative",
+                        ),
+                    ),
+                    (
+                        "task_id",
+                        TrustedParameterBinding(
+                            source_refs=("run_scope.task_id",),
+                            authority="host_authoritative",
+                        ),
+                    ),
+                    (
+                        "request_id",
+                        TrustedParameterBinding(
+                            source_refs=("run_scope.request_id",),
+                            authority="host_authoritative",
+                        ),
+                    ),
+                ),
+            ),
         )
         self.read_budget = ArtifactReadBudget(
             window_seconds=_config_int(
                 "tool_artifact_read_budget_window_seconds",
                 artifact_read_budget_window_seconds,
             ),
-            max_chars=_config_int("tool_artifact_read_budget_max_chars", artifact_read_budget_max_chars),
+            max_chars=_config_int(
+                "tool_artifact_read_budget_max_chars", artifact_read_budget_max_chars
+            ),
         )
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
-        request = _read_request_from_params(self.root, params, default_read_chars=self.default_read_chars)
+    def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
+        request = _read_request_from_params(
+            self.root, params, default_read_chars=self.default_read_chars
+        )
         budget_error = self.read_budget.preflight(
             ArtifactReadBudgetRequest(
                 run_id=request.run_id,
@@ -151,11 +203,21 @@ class ReadArtifactTool(BaseTool):
             )
         )
         if budget_error:
-            return ToolExecutionResult(self.spec.name, False, budget_error, error_code="QUOTA_EXCEEDED")
+            return ToolHandlerOutcome(
+                self.model_spec.name, False, budget_error, error_code="QUOTA_EXCEEDED"
+            )
         payload = read_tool_output_artifact(request)
-        if payload.get("ok"):
+        ok = payload.get("ok") is True
+        if ok:
             self.read_budget.commit(request.run_id, int(payload.get("content_chars") or 0))
-        return ToolExecutionResult(self.spec.name, bool(payload.get("ok")), json.dumps(payload, ensure_ascii=False))
+        return ToolHandlerOutcome(
+            self.model_spec.name,
+            ok,
+            json.dumps(payload, ensure_ascii=False),
+            error_code=(
+                "" if ok else str(payload.get("error_code") or "TOOL_EXECUTION_FAILED").upper()
+            ),
+        )
 
 
 def _read_request_from_params(
@@ -180,9 +242,7 @@ def _read_request_from_params(
 
 def _artifact_read_root(root: Path, params: dict[str, Any]) -> Path:
     artifact_root = str(
-        params.get("__artifact_read_root")
-        or params.get("__task_work_dir")
-        or ""
+        params.get("__artifact_read_root") or params.get("__task_work_dir") or ""
     ).strip()
     if not artifact_root:
         return root

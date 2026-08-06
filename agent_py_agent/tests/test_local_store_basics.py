@@ -79,7 +79,9 @@ def test_locked_jsonl_append_preserves_complete_lines_under_threads():
             for index in range(per_thread):
                 append_jsonl(path, {"worker": worker, "index": index})
 
-        threads = [threading.Thread(target=writer, args=(worker,)) for worker in range(total_threads)]
+        threads = [
+            threading.Thread(target=writer, args=(worker,)) for worker in range(total_threads)
+        ]
         for thread in threads:
             thread.start()
         for thread in threads:
@@ -89,7 +91,9 @@ def test_locked_jsonl_append_preserves_complete_lines_under_threads():
         records = [json.loads(line) for line in lines]
 
         assert len(records) == total_threads * per_thread
-        assert len({(item["worker"], item["index"]) for item in records}) == total_threads * per_thread
+        assert (
+            len({(item["worker"], item["index"]) for item in records}) == total_threads * per_thread
+        )
 
 
 def test_local_store_like_search_when_fts_disabled():
@@ -204,6 +208,7 @@ def test_subagent_flow_indexes_logs_to_local_store():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
+            tool_protocol="text",
             model_backend="echo",
             memory_path="memory.jsonl",
             subagent_workspace="subs",
@@ -241,6 +246,7 @@ def test_gateway_request_indexes_logs_to_local_store():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
+            tool_protocol="text",
             model_backend="echo",
             memory_path="memory.jsonl",
             gateway_workspace="gateway",
@@ -278,6 +284,7 @@ def test_gateway_request_writes_runtime_fact_when_saved():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
+            tool_protocol="text",
             model_backend="echo",
             gateway_workspace="gateway",
             local_store_path="local_store/local.db",
@@ -298,7 +305,13 @@ def test_gateway_request_writes_runtime_fact_when_saved():
         response = _handle_gateway_request(agent, request_path)
 
         assert response["ok"] is True
-        fact_path = agent.home_paths.owner_home_dir / "memory_archive" / "runtime_facts" / request_id / "task.json"
+        fact_path = (
+            agent.home_paths.owner_home_dir
+            / "memory_archive"
+            / "runtime_facts"
+            / request_id
+            / "task.json"
+        )
         assert fact_path.exists()
         payload = json.loads(fact_path.read_text(encoding="utf-8"))
         assert payload["request_id"] == request_id
@@ -316,6 +329,7 @@ def test_gateway_request_can_override_resume_context():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
+            tool_protocol="text",
             model_backend="echo",
             gateway_workspace="gateway",
             local_store_path="local_store/local.db",

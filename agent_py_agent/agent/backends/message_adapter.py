@@ -3,11 +3,9 @@ from __future__ import annotations
 
 """IR ↔ 厂商原生 messages 的出/入站翻译适配器。
 
-``MessageAdapter`` 是 provider 无关的抽象：
-- 出站 ``to_provider_messages``：把 IR 历史（``AssistantTurn``、``ToolResult``、
-  current-turn ``UserTurn`` 与同历史的 ``CompactionSummary``）翻译成某厂商
-  ``messages`` 数组；
-- 入站 ``tool_calls_from_response``：把一次模型响应里的工具调用抽成 ``ToolCall`` IR。
+``MessageAdapter`` 只负责出站历史翻译。入站响应必须经过
+``backends.tool_protocol_adapter``，在那里绑定 run/turn/attempt、Schema hash 和
+幂等身份；历史适配器没有这些权威事实，不能自行制造 ``ToolCall``。
 
 ``AnthropicMessageAdapter`` 是 my-agent 唯一需要的实现（只走 anthropic_compatible）。
 入站复用 stage1 已经落地的解析：``base.py`` 的 ``_anthropic_tool_use_blocks`` /
@@ -42,11 +40,6 @@ class MessageAdapter(ABC):
     def to_provider_messages(self, history: Iterable[HistoryItem]) -> list[dict[str, Any]]:
         """出站：IR 历史 → 厂商原生 ``messages`` 序列。"""
 
-    @abstractmethod
-    def tool_calls_from_response(self, response: object) -> list[ToolCall]:
-        """入站：一次模型响应 → 本轮的 ``ToolCall`` 列表。"""
-
-
 class AnthropicMessageAdapter(MessageAdapter):
     """Anthropic ``/v1/messages`` 形态的 IR 适配器。
 
@@ -78,11 +71,6 @@ class AnthropicMessageAdapter(MessageAdapter):
         # 发请求前的最后防线，见 strip_orphaned_tool_blocks，由出站边界
         # _native_provider_messages 调用）。保持本方法纯翻译，便于按片段单测。
         return messages
-
-    def tool_calls_from_response(self, response: object) -> list[ToolCall]:
-        blocks = getattr(response, "tool_use_blocks", None) or []
-        return [_tool_call_from_block(block) for block in blocks if isinstance(block, dict)]
-
 
 def _as_tool_results(item: HistoryItem) -> list[ToolResult] | None:
     """把历史项规整成 ToolResult 列表；非结果项返回 None。"""
@@ -146,7 +134,7 @@ def _replay_assistant_content_blocks(turn: AssistantTurn) -> list[dict[str, Any]
     raw_blocks = turn.content_blocks
     if not raw_blocks:
         return []
-    calls_by_id = {call.id: call for call in turn.tool_calls if call.id}
+    calls_by_id = {call.call_id: call for call in turn.tool_calls if call.call_id}
     used_call_ids: set[str] = set()
     replayed: list[dict[str, Any]] = []
     for raw in raw_blocks:
@@ -177,7 +165,9 @@ def _replay_assistant_content_blocks(turn: AssistantTurn) -> list[dict[str, Any]
         replayed.append(_tool_use_block(call))
         used_call_ids.add(call_id)
     replayed.extend(
-        _tool_use_block(call) for call in turn.tool_calls if call.id not in used_call_ids
+        _tool_use_block(call)
+        for call in turn.tool_calls
+        if call.call_id not in used_call_ids
     )
     return replayed
 
@@ -185,9 +175,9 @@ def _replay_assistant_content_blocks(turn: AssistantTurn) -> list[dict[str, Any]
 def _tool_use_block(call: ToolCall) -> dict[str, Any]:
     return {
         "type": "tool_use",
-        "id": call.id,
-        "name": call.name,
-        "input": dict(call.input) if isinstance(call.input, dict) else {},
+        "id": call.call_id,
+        "name": call.tool_name,
+        "input": dict(call.arguments),
     }
 
 
@@ -196,19 +186,10 @@ def _tool_result_block(result: ToolResult) -> dict[str, Any]:
     # 显式的 ``is_error: false``（与省略等价），不改变模型侧语义。
     return {
         "type": "tool_result",
-        "tool_use_id": result.tool_call_id,
-        "content": result.content,
+        "tool_use_id": result.call_id,
+        "content": result.render_for_prompt(),
         "is_error": bool(result.is_error),
     }
-
-
-def _tool_call_from_block(block: dict[str, Any]) -> ToolCall:
-    tool_input = block.get("input")
-    return ToolCall(
-        id=str(block.get("id", "") or ""),
-        name=str(block.get("name", "") or ""),
-        input=tool_input if isinstance(tool_input, dict) else {},
-    )
 
 
 # tool_use 缺配对结果时补的合成占位（参照标杆 长期助手 _strip_orphaned_tool_blocks /

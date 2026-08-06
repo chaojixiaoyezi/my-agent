@@ -10,6 +10,7 @@ import pytest
 
 from agent_py_agent.agent.capability.memory_tool import RememberTool
 from agent_py_agent.agent.conversation.user_visible_text import sanitize_user_visible_text
+from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.local_storage import (
     TOOL_OPERATION_SUCCEEDED,
     LocalStore,
@@ -19,9 +20,11 @@ from agent_py_agent.agent.local_storage import (
     new_tool_operation_holder,
 )
 from agent_py_agent.agent.memory_store import JsonlMemory, MemoryRecord, MemorySubjectConflict
-from agent_py_agent.agent.memory_store.operations import record_memory_candidate
+from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
+from agent_py_agent.agent.memory_store.candidates import CandidateService
 from agent_py_agent.agent.prompting_parts.memory_context import memory_context_text
 from agent_py_agent.agent.retrieval.embedding import LocalHashingEmbedder
+from agent_py_agent.agent.settings.config import AgentConfig
 
 
 def test_exact_normalized_memory_add_is_idempotent(tmp_path: Path) -> None:
@@ -70,23 +73,26 @@ def test_subject_conflict_requires_stable_id_replace(tmp_path: Path) -> None:
     assert [record.content for record in memory.all()] == ["默认语言是 Python"]
 
 
-def test_hard_delete_scrubs_authority_mirrors_ops_and_indexes(tmp_path: Path) -> None:
+def test_hard_delete_scrubs_authority_candidates_ops_and_indexes(tmp_path: Path) -> None:
     secret = "需要彻底删除的私人计划 7391"
     local_store = LocalStore(tmp_path / "local" / "store.sqlite3")
+    candidates = CandidateService(tmp_path / "memory" / "candidates.jsonl")
     memory = JsonlMemory(
         tmp_path / "memory" / "long_term" / "memory.jsonl",
         local_store=local_store,
-        daily_mirror_dir=tmp_path / "memory" / "daily",
         ops_path=tmp_path / "memory" / "ops.jsonl",
+        candidate_service=candidates,
         embedder=LocalHashingEmbedder(dim=64),
     )
-    record_memory_candidate(
-        memory.ops_path,
-        role="user",
-        kind="fact",
-        content=secret,
-        tags=[],
-        source="test",
+    candidate = candidates.observe(
+        CandidateObservation(
+            candidate_type="long_term_fact",
+            content=secret,
+            subject_key="personal:private-plan",
+            scope=MemoryScope("personal", "personal"),
+            origin="model_inferred",
+            observation_id="test-hard-delete",
+        )
     )
     added = memory.add(
         "user",
@@ -152,11 +158,12 @@ def test_hard_delete_scrubs_authority_mirrors_ops_and_indexes(tmp_path: Path) ->
     assert not indexed_path.exists() or indexed_path.read_text(encoding="utf-8") == ""
     for path in (
         memory.path,
-        *memory._daily_mirror_files(),
+        candidates.path,
         memory.ops_path,
         tmp_path / "memory" / "long_term" / "memory_vectors.json",
     ):
         assert secret not in Path(path).read_text(encoding="utf-8")
+    assert candidates.get(candidate.candidate_id).content == ""
     gate_record = local_store.get_runtime_gate_ledger("run-memory", "op-memory")
     operation_record = local_store.get_tool_operation(
         owner_id="owner-memory",
@@ -207,11 +214,20 @@ def test_hard_delete_keeps_authority_when_ledger_redaction_fails(
 
 
 def test_model_inference_is_candidate_not_active_memory(tmp_path: Path) -> None:
+    candidates = CandidateService(tmp_path / "candidates.jsonl")
     memory = JsonlMemory(
         tmp_path / "memory.jsonl",
         ops_path=tmp_path / "ops.jsonl",
+        candidate_service=candidates,
     )
-    tool = RememberTool(SimpleNamespace(memory=memory, _current_run_params=None))
+    tool = RememberTool(
+        SimpleNamespace(
+            memory=memory,
+            memory_candidates=candidates,
+            memory_promotion=object(),
+            _current_run_params=None,
+        )
+    )
 
     result = tool.execute(
         {
@@ -219,6 +235,7 @@ def test_model_inference_is_candidate_not_active_memory(tmp_path: Path) -> None:
             "kind": "fact",
             "origin": "model_inferred",
             "subject_key": "preference:theme",
+            "scope": {"scope_type": "personal", "scope_key": "personal"},
         }
     )
 
@@ -232,52 +249,89 @@ def test_model_inference_is_candidate_not_active_memory(tmp_path: Path) -> None:
             "kind": "fact",
             "origin": "model_inferred",
             "subject_key": "preference:theme",
+            "scope": {"scope_type": "personal", "scope_key": "personal"},
         }
     )
-    ops_text = memory.ops_path.read_text(encoding="utf-8")
     assert repeated.ok is True
-    assert ops_text.count("用户可能更喜欢深色主题") == 1
-    assert "candidate_reobserved" in ops_text
+    records = candidates.list()
+    assert len(records) == 1
+    assert records[0].content == "用户可能更喜欢深色主题"
+    assert records[0].occurrence_count == 1
+    assert not memory.ops_path.exists()
 
 
 def test_tool_verified_memory_accepts_only_successful_archive_refs(tmp_path: Path) -> None:
-    memory = JsonlMemory(tmp_path / "memory.jsonl", ops_path=tmp_path / "ops.jsonl")
+    agent = SimpleAgent(
+        AgentConfig(my_agent_home=str(tmp_path / "home"), prompt_files=[]),
+        tmp_path / "workspace",
+    )
+    owner_id = str(agent.home_paths.owner_id)
+    holder = new_tool_operation_holder()
+    claim = agent.local_store.claim_tool_operation(
+        ToolOperationClaimRequest(
+            owner_id=owner_id,
+            run_id="run-1",
+            task_id="task-1",
+            operation_id="op-ok",
+            tool="read_file",
+            args_hash="sha256:tool-evidence",
+            idempotency_key="idem-tool-evidence",
+            idempotency_scope="operation",
+            idempotency_namespace="read_file:test",
+            holder=holder,
+            lease_expires_at=time.time() + 60,
+        )
+    )
+    agent.local_store.finish_tool_operation(
+        ToolOperationCompletionRequest(
+            owner_id=owner_id,
+            run_id="run-1",
+            operation_id="op-ok",
+            holder_id=holder.holder_id,
+            generation=claim.record.generation,
+            status=TOOL_OPERATION_SUCCEEDED,
+            result={"ok": True, "call_id": "call-ok", "effect_outcome": ""},
+        )
+    )
     tool_loop = SimpleNamespace(
         archive_tool_calls=[
             {
                 "ok": True,
                 "call_id": "call-ok",
-                "scoped_call_id": "req-1:call-ok",
+                "operation_id": "op-ok",
+                "run_id": "run-1",
+                "tool": "read_file",
                 "artifact_ref": "artifact://ok",
             },
             {"ok": False, "call_id": "call-bad", "artifact_ref": "artifact://bad"},
         ],
     )
-    tool = RememberTool(
-        SimpleNamespace(
-            memory=memory,
-            _current_run_params=SimpleNamespace(
-                request_id="req-1",
-                archive_tool_calls=[
-                    {"ok": True, "call_id": "forged-run-param-ref"},
-                ],
-            ),
-            _current_tool_loop_params=tool_loop,
-        )
+    agent._current_run_params = SimpleNamespace(
+        request_id="req-1",
+        run_id="run-1",
+        task_id="task-1",
+        task_attributes={},
+        archive_tool_calls=[{"ok": True, "call_id": "forged-run-param-ref"}],
     )
+    agent._current_tool_loop_params = tool_loop
+    tool = RememberTool(agent)
 
     rejected = tool.execute(
         {
             "content": "失败结果不可信",
             "origin": "tool_verified",
             "evidence_refs": ["artifact://bad"],
+            "subject_key": "tool.failed",
+            "scope": {"scope_type": "project", "scope_key": "project:test"},
         }
     )
     accepted = tool.execute(
         {
             "content": "成功工具确认了事实",
             "origin": "tool_verified",
-            "evidence_refs": ["call-ok", "req-1:call-ok", "artifact://ok"],
+            "evidence_refs": ["call-ok", "artifact://ok"],
+            "subject_key": "tool.success",
+            "scope": {"scope_type": "project", "scope_key": "project:test"},
         }
     )
     forged = tool.execute(
@@ -285,13 +339,15 @@ def test_tool_verified_memory_accepts_only_successful_archive_refs(tmp_path: Pat
             "content": "RunParams 不是工具账本",
             "origin": "tool_verified",
             "evidence_refs": ["forged-run-param-ref"],
+            "subject_key": "tool.forged",
+            "scope": {"scope_type": "project", "scope_key": "project:test"},
         }
     )
 
-    assert rejected.error_code == "MEMORY_EVIDENCE_NOT_VERIFIED"
-    assert forged.error_code == "MEMORY_EVIDENCE_NOT_VERIFIED"
+    assert json.loads(rejected.output)["results"][0]["status"] == "blocked_missing_evidence"
+    assert json.loads(forged.output)["results"][0]["status"] == "blocked_missing_evidence"
     assert accepted.ok is True
-    assert [record.content for record in memory.all()] == ["成功工具确认了事实"]
+    assert [record.content for record in agent.memory.all()] == ["成功工具确认了事实"]
 
 
 def test_memory_context_is_fenced_escaped_and_scanned() -> None:

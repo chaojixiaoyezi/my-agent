@@ -7,7 +7,7 @@ from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.prompting_parts import PromptBuilder, ToolSections
 from agent_py_agent.agent.settings import AgentConfig
-from agent_py_agent.agent.tooling import BaseTool, ToolExecutionResult, ToolSpec
+from agent_py_agent.agent.tooling import BaseTool, ToolHandlerOutcome
 from agent_py_agent.agent.tooling.operation_verification import (
     build_operation_verification,
     incomplete_final_mutation_facts,
@@ -15,27 +15,53 @@ from agent_py_agent.agent.tooling.operation_verification import (
     redact_executed_operation_labels,
     render_current_turn_execution_facts,
 )
+from agent_py_agent.tests._tool_runtime_harness import (
+    make_test_model_spec,
+    make_test_runtime_policy,
+    runtime_snapshot_for_tools,
+)
+
+
+class _ProjectionTool(BaseTool):
+    def __init__(self, *, name: str, mutating: bool) -> None:
+        properties = {}
+        required = []
+        effect_by_parameter = ()
+        if name == "remember":
+            properties = {
+                "action": {
+                    "type": "string",
+                    "enum": ["add", "list", "replace", "remove"],
+                }
+            }
+            required = ["action"]
+            effect_by_parameter = (("action", (("list", "read_only"),)),)
+        self.model_spec = make_test_model_spec(
+            name,
+            input_schema={
+                "type": "object",
+                "properties": properties,
+                "required": required,
+                "additionalProperties": False,
+            },
+        )
+        self.runtime_policy = make_test_runtime_policy(
+            "mutating" if mutating else "read_only",
+            effect_by_parameter=effect_by_parameter,
+        )
+
+    def execute(self, params):
+        return ToolHandlerOutcome(self.model_spec.name, True, str(params))
 
 
 def _agent() -> SimpleNamespace:
+    tools = {
+        "remember": _ProjectionTool(name="remember", mutating=True),
+        "read_file": _ProjectionTool(name="read_file", mutating=False),
+    }
+    snapshot = runtime_snapshot_for_tools(tools)
     return SimpleNamespace(
-        tools=SimpleNamespace(
-            tools={
-                "remember": SimpleNamespace(
-                    spec=SimpleNamespace(
-                        effect="mutating",
-                        parameters={"action": "memory action"},
-                        parameter_schema={
-                            "action": {
-                                "type": "string",
-                                "enum": ["add", "list", "replace", "remove"],
-                            }
-                        },
-                    )
-                ),
-                "read_file": SimpleNamespace(spec=SimpleNamespace(effect="read_only")),
-            }
-        )
+        tools=SimpleNamespace(runtime_snapshot=lambda: snapshot),
     )
 
 
@@ -213,12 +239,12 @@ def test_final_operation_verification_stays_structured_and_hides_protocol_labels
         verification,
     )
 
-    assert verification["status"] == "partial"
-    assert verification["counts"]["succeeded"] == 1
+    assert verification["status"] == "failed"
+    assert verification["counts"]["succeeded"] == 0
     assert verification["counts"]["not_started"] == 1
-    assert "remember/list" not in rendered
+    assert "remember/list" in rendered
     assert "remember/remove" not in rendered
-    assert rendered == "相关操作 已完成，相关操作 没有执行。"
+    assert rendered == "remember/list 已完成，相关操作 没有执行。"
 
 
 def test_final_operation_verification_deduplicates_replayed_operation() -> None:
@@ -368,26 +394,20 @@ def test_only_an_unsuccessful_terminal_mutation_requires_reply_rewrite() -> None
 
 
 class _AlwaysFailMutationTool(BaseTool):
-    spec = ToolSpec(
-        name="always_fail_mutation",
-        category="test",
+    model_spec = make_test_model_spec(
+        "always_fail_mutation",
         description="Fail one mutation for response-integrity testing.",
-        use_cases=[],
-        avoid_when=[],
-        keywords=[],
-        parameters={},
-        input_schema={"type": "object", "additionalProperties": False},
-        effect="mutating",
-        idempotency_scope="operation",
     )
+    runtime_policy = make_test_runtime_policy("mutating")
 
     def execute(self, params):
         assert params == {}
-        return ToolExecutionResult(
-            self.spec.name,
+        return ToolHandlerOutcome(
+            self.model_spec.name,
             False,
             '{"ok":false}',
             error_code="TOOL_INVALID_ARGUMENTS",
+            effect_outcome="not_started",
         )
 
 
@@ -493,8 +513,8 @@ def test_agent_run_keeps_operation_proof_out_of_model_authored_prose(
     assert backend.calls == 2
     assert result.response == "我已经删除了记忆。"
     assert "操作核验" not in result.response
-    assert result.operation_verification["status"] == "succeeded"
-    assert result.operation_verification["operations"][0]["action"] == "list"
+    assert result.operation_verification["status"] == "none"
+    assert result.operation_verification["operations"] == []
 
 
 def test_execution_facts_are_after_active_user_task(tmp_path) -> None:

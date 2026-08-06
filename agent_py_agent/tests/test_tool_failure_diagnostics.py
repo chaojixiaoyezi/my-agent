@@ -1,30 +1,42 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from agent_py_agent.agent.action_protocol import RunScope, ToolCallEnvelope
 from agent_py_agent.agent.agent_core.tool_call_archive_record import (
     _attach_gate_and_refs,
 )
 from agent_py_agent.agent.agent_core.tool_runtime_ledger import (
     _tool_event_payload,
 )
+from agent_py_agent.agent.backends.tool_protocol_adapter import (
+    ProviderToolCallRequest,
+    canonical_tool_calls_from_response,
+)
 from agent_py_agent.agent.tooling.models import (
     BaseTool,
     ToolAvailability,
-    ToolExecutionResult,
     ToolFailureStage,
-    ToolSpec,
+    ToolHandlerOutcome,
 )
-from agent_py_agent.agent.tooling.registry_execution import (
-    ExecuteRegistryCallParams,
-    execute_registry_call,
+from agent_py_agent.agent.tooling.runtime_contracts import (
+    ProviderToolCapability,
+    ToolFailureFacts,
+    ToolProtocolSnapshot,
+    ToolResult,
 )
 from agent_py_agent.agent.tooling.tool_operation_coordinator import (
     ToolOperationExecutionRequest,
     execute_tool_operation,
+)
+from agent_py_agent.tests._tool_runtime_harness import (
+    canonical_history_call,
+    execute_canonical_test_call,
+    make_test_model_spec,
+    make_test_runtime_policy,
+    runtime_snapshot_for_tools,
 )
 
 
@@ -32,7 +44,7 @@ class _DiagnosticTool(BaseTool):
     def __init__(
         self,
         *,
-        result: ToolExecutionResult | None = None,
+        result: ToolHandlerOutcome | None = None,
         available: bool = True,
         raises: bool = False,
     ) -> None:
@@ -40,30 +52,29 @@ class _DiagnosticTool(BaseTool):
         self.available = available
         self.raises = raises
         self.calls = 0
-        self.spec = ToolSpec(
-            name="diagnostic",
-            category="test",
+        self.model_spec = make_test_model_spec(
+            "diagnostic",
             description="diagnostic test tool",
-            use_cases=[],
-            avoid_when=[],
-            keywords=[],
-            parameters={"value": "integer"},
-            parameter_schema={"value": {"type": "integer"}},
-            required_parameters=["value"],
-            effect="read_only",
+            input_schema={
+                "type": "object",
+                "properties": {"value": {"type": "integer"}},
+                "required": ["value"],
+                "additionalProperties": False,
+            },
         )
+        self.runtime_policy = make_test_runtime_policy("read_only")
 
     def availability(self) -> ToolAvailability:
         if self.available:
             return ToolAvailability.ready()
         return ToolAvailability.unavailable("dependency is not configured")
 
-    def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         self.calls += 1
         if self.raises:
             raise RuntimeError("handler exploded")
-        return self.result or ToolExecutionResult(
-            self.spec.name,
+        return self.result or ToolHandlerOutcome(
+            self.model_spec.name,
             True,
             f"value={params['value']}",
         )
@@ -72,35 +83,62 @@ class _DiagnosticTool(BaseTool):
 def _call(
     root: Path,
     tool: _DiagnosticTool,
-    payload: object,
+    arguments: dict[str, object],
     *,
     allowed_tools: list[str] | None = None,
-) -> ToolExecutionResult:
-    return execute_registry_call(
-        ExecuteRegistryCallParams(
-            payload=payload,
-            tools={tool.spec.name: tool},
-            workspace_root=root,
-            workspace_roots=[root],
-            allowed_tools=allowed_tools,
-        )
-    )
+):
+    return execute_canonical_test_call(
+        root,
+        tools={tool.model_spec.name: tool},
+        tool_name=tool.model_spec.name,
+        arguments=arguments,
+        allowed_tools=allowed_tools,
+    ).result
 
 
 def test_protocol_authorization_validation_and_runtime_gate_are_distinct(
     tmp_path: Path,
 ) -> None:
     protocol_tool = _DiagnosticTool()
-    protocol = _call(tmp_path, protocol_tool, "not-an-object")
-    assert protocol.failure_stage == ToolFailureStage.PROTOCOL.value
-    assert protocol.handler_executed is False
+    snapshot = runtime_snapshot_for_tools({protocol_tool.model_spec.name: protocol_tool})
+    protocol = canonical_tool_calls_from_response(
+        ProviderToolCallRequest(
+            response=SimpleNamespace(
+                text="",
+                tool_use_blocks=[
+                    {
+                        "id": "protocol-call",
+                        "name": "diagnostic",
+                        "input": "not-an-object",
+                    }
+                ],
+            ),
+            protocol=ToolProtocolSnapshot(
+                run_id=snapshot.run_id,
+                source_protocol="native",
+                capability=ProviderToolCapability(
+                    provider="test",
+                    endpoint="local://test",
+                    model="test-model",
+                    stream=False,
+                    native_supported=True,
+                    evidence="test-contract",
+                ),
+            ),
+            runtime_snapshot=snapshot,
+            turn_id="test-turn",
+            attempt_id="test-attempt",
+        )
+    )
+    assert protocol.calls == ()
+    assert protocol.violations[0].code == "TOOL_INVALID_ARGUMENTS"
     assert protocol_tool.calls == 0
 
     auth_tool = _DiagnosticTool()
     authorization = _call(
         tmp_path,
         auth_tool,
-        {"tool": "diagnostic", "value": 1},
+        {"value": 1},
         allowed_tools=["list_tools"],
     )
     assert authorization.failure_stage == ToolFailureStage.AUTHORIZATION.value
@@ -111,7 +149,7 @@ def test_protocol_authorization_validation_and_runtime_gate_are_distinct(
     validation = _call(
         tmp_path,
         validation_tool,
-        {"tool": "diagnostic"},
+        {},
     )
     assert validation.failure_stage == ToolFailureStage.VALIDATION.value
     assert validation.handler_executed is False
@@ -121,7 +159,7 @@ def test_protocol_authorization_validation_and_runtime_gate_are_distinct(
     unavailable = _call(
         tmp_path,
         unavailable_tool,
-        {"tool": "diagnostic", "value": 1},
+        {"value": 1},
     )
     assert unavailable.failure_stage == ToolFailureStage.RUNTIME_GATE.value
     assert unavailable.handler_executed is False
@@ -133,7 +171,7 @@ def test_handler_failures_are_distinguished_from_pre_handler_blocks(
     tmp_path: Path,
     raises: bool,
 ) -> None:
-    explicit_failure = ToolExecutionResult(
+    explicit_failure = ToolHandlerOutcome(
         "diagnostic",
         False,
         "dependency failed",
@@ -147,28 +185,14 @@ def test_handler_failures_are_distinguished_from_pre_handler_blocks(
     result = _call(
         tmp_path,
         tool,
-        ToolCallEnvelope(
-            call_id="call-diagnostic",
-            source="model_tool_call",
-            tool_name="diagnostic",
-            input={"value": 1},
-            scope=RunScope(run_id="run-1", task_id="task-1"),
-        ),
+        {"value": 1},
     )
 
     assert result.ok is False
     assert result.failure_stage == ToolFailureStage.EXECUTION.value
     assert result.handler_executed is True
     assert result.duration_ms >= 0
-    assert result.result_envelope["tool_execution"] == {
-        "handler_executed": True,
-        "duration_ms": result.duration_ms,
-        "failure_stage": "execution",
-    }
-    assert (
-        result.result_envelope["tool_protocol_v2"]["metadata"]["tool_execution"]
-        == result.result_envelope["tool_execution"]
-    )
+    assert result.status == "failed"
 
 
 def test_success_records_handler_and_duration_without_failure_stage(
@@ -179,26 +203,23 @@ def test_success_records_handler_and_duration_without_failure_stage(
     result = _call(
         tmp_path,
         tool,
-        {"tool": "diagnostic", "value": 7},
+        {"value": 7},
     )
 
     assert result.ok is True
     assert result.handler_executed is True
     assert result.failure_stage == ""
     assert result.duration_ms >= 0
-    assert result.result_envelope["tool_execution"] == {
-        "handler_executed": True,
-        "duration_ms": result.duration_ms,
-    }
+    assert result.status == "succeeded"
 
 
 def test_side_effect_store_failure_is_persistence_before_handler() -> None:
     invoked = False
 
-    def invoke() -> ToolExecutionResult:
+    def invoke() -> ToolHandlerOutcome:
         nonlocal invoked
         invoked = True
-        return ToolExecutionResult("write", True, "should not run")
+        return ToolHandlerOutcome("write", True, "should not run")
 
     result = execute_tool_operation(
         ToolOperationExecutionRequest(
@@ -225,21 +246,13 @@ def test_side_effect_store_failure_is_persistence_before_handler() -> None:
 
 
 def test_archive_and_runtime_event_keep_the_same_execution_facts() -> None:
-    result = ToolExecutionResult(
-        "diagnostic",
-        False,
+    call = canonical_history_call("diagnostic", {}, call_id="call-1")
+    result = ToolResult.failed(
+        call,
         "failed",
         error_code="TOOL_ERROR",
-        handler_executed=True,
         failure_stage=ToolFailureStage.EXECUTION.value,
-        duration_ms=17,
-        result_envelope={
-            "tool_execution": {
-                "handler_executed": True,
-                "failure_stage": "execution",
-                "duration_ms": 17,
-            }
-        },
+        facts=ToolFailureFacts(handler_executed=True, duration_ms=17),
     )
     archive: dict[str, object] = {
         "tool": "diagnostic",
@@ -254,11 +267,7 @@ def test_archive_and_runtime_event_keep_the_same_execution_facts() -> None:
     assert archive["failure_stage"] == "execution"
     assert archive["handler_executed"] is True
     assert archive["duration_ms"] == 17
-    assert archive["tool_result_envelope"]["tool_execution"] == {
-        "handler_executed": True,
-        "failure_stage": "execution",
-        "duration_ms": 17,
-    }
+    assert "tool_result_envelope" not in archive
     assert event["failure_stage"] == "execution"
     assert event["handler_executed"] is True
     assert event["duration_ms"] == 17
@@ -266,9 +275,9 @@ def test_archive_and_runtime_event_keep_the_same_execution_facts() -> None:
 
 def test_invalid_or_success_failure_stage_is_rejected() -> None:
     with pytest.raises(ValueError, match="invalid tool failure stage"):
-        ToolExecutionResult("diagnostic", False, "bad", failure_stage="guessed")
+        ToolHandlerOutcome("diagnostic", False, "bad", failure_stage="guessed")
     with pytest.raises(ValueError, match="successful tool result"):
-        ToolExecutionResult(
+        ToolHandlerOutcome(
             "diagnostic",
             True,
             "ok",

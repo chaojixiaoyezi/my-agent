@@ -1,8 +1,8 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
-import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -13,14 +13,10 @@ from ...tooling.content_transport_policy import (
 from .write_abort import (
     LongToolContentStreamAbort,
     long_write_stream_abort,
-    recovered_write_abort_payload,
 )
 
 _TOOL_START_MARKERS = ("[TOOL_CALL]",)
 _TOOL_END_MARKERS = ("[/TOOL_CALL]",)
-_RAW_MACHINE_BLOCK_PATTERNS = (
-    re.compile(r"\[WRITE_FILE_RAW[^\]]*\].*?\[/WRITE_FILE_RAW\]", re.DOTALL),
-)
 _MAX_UNCLOSED_TOOL_START_MARKERS = 1
 
 
@@ -42,58 +38,6 @@ def first_complete_tool_call_cut_index(text: str) -> int | None:
         return None
     end, end_marker = end_info
     return end + len(end_marker)
-
-
-def cut_response_after_first_complete_tool_call(response: ModelResponse) -> tuple[ModelResponse, bool]:
-    machine_text = complete_machine_block_text(response.text)
-    if not machine_text:
-        return response, False
-    if machine_text == response.text.strip():
-        return response, False
-    return ModelResponse(text=machine_text, backend=response.backend), True
-
-
-def complete_machine_block_text(text: str) -> str:
-    ranges = _complete_machine_block_ranges(text)
-    if not ranges:
-        return ""
-    return "\n".join(text[start:end].strip() for start, end in ranges)
-
-
-def _complete_machine_block_ranges(text: str) -> list[tuple[int, int]]:
-    ranges: list[tuple[int, int]] = _complete_tool_call_block_ranges(text)
-    for pattern in _RAW_MACHINE_BLOCK_PATTERNS:
-        ranges.extend((match.start(), match.end()) for match in pattern.finditer(text))
-    ranges.sort(key=lambda item: item[0])
-    return _non_overlapping_ranges(ranges)
-
-
-def _complete_tool_call_block_ranges(text: str) -> list[tuple[int, int]]:
-    ranges: list[tuple[int, int]] = []
-    cursor = 0
-    while True:
-        start_info = _first_marker(text, _TOOL_START_MARKERS, cursor)
-        if start_info is None:
-            return ranges
-        start, start_marker = start_info
-        body_start = start + len(start_marker)
-        end_info = _first_tool_end_marker(text, body_start)
-        if end_info is None:
-            return ranges
-        end, end_marker = end_info
-        cursor = end + len(end_marker)
-        ranges.append((start, cursor))
-
-
-def _non_overlapping_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
-    kept: list[tuple[int, int]] = []
-    last_end = -1
-    for start, end in ranges:
-        if start < last_end:
-            continue
-        kept.append((start, end))
-        last_end = end
-    return kept
 
 
 @dataclass
@@ -289,27 +233,43 @@ def _one_protocol_marker_count(text: str, marker: str, cursor: int) -> int:
 def malformed_tool_protocol_abort_response(
     exc: MalformedToolProtocolStreamAbort, *, backend: str
 ) -> ModelResponse:
-    payload = {
-        "tool": "__parse_error__",
-        "error_code": "TOOL_CALL_UNCLOSED",
-        "error": (
-            f"模型连续输出 {exc.marker_count} 个未闭合 {exc.start_marker} 工具协议标记；"
-            "工具调用缺少结束标记"
-        ),
-        "raw": json.dumps(
-            {
-                "start_marker": exc.start_marker,
-                "marker_count": exc.marker_count,
-                "limit": exc.limit,
-            },
-            ensure_ascii=False,
-        ),
-    }
-    return ModelResponse(
-        text="[TOOL_CALL]\n"
-        f"{json.dumps(payload, ensure_ascii=False)}\n"
-        "[/TOOL_CALL]",
+    return _protocol_violation_response(
         backend=backend,
+        code="TOOL_CALL_UNCLOSED",
+        detail=(
+            f"模型连续输出 {exc.marker_count} 个未闭合 {exc.start_marker} 工具协议标记；"
+            "没有形成可执行调用，请重新发出一个完整且独立的工具块"
+        ),
+        evidence={
+            "start_marker": exc.start_marker,
+            "marker_count": exc.marker_count,
+            "limit": exc.limit,
+        },
+    )
+
+
+def _protocol_violation_response(
+    *,
+    backend: str,
+    code: str,
+    detail: str,
+    evidence: dict[str, object],
+) -> ModelResponse:
+    return ModelResponse(
+        text="",
+        backend=backend,
+        tool_protocol_violations=[
+            {
+                "code": code,
+                "detail": detail,
+                "evidence_preview": json.dumps(
+                    evidence,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            }
+        ],
     )
 
 
@@ -323,30 +283,19 @@ def long_write_response_abort(text: str, *, max_inline_content_chars: int) -> Lo
 
 
 def long_write_abort_response(exc: LongToolContentStreamAbort, *, backend: str) -> ModelResponse:
-    recovered = recovered_write_abort_payload(exc)
-    if recovered is not None:
-        return ModelResponse(
-            text="[TOOL_CALL]\n"
-            f"{json.dumps(recovered, ensure_ascii=False)}\n"
-            "[/TOOL_CALL]",
-            backend=backend,
-        )
-    raw = json.dumps(
-        {"tool": exc.tool, "path": exc.path, "content": "...streaming content omitted..."},
-        ensure_ascii=False,
-    )
-    payload = {
-        "tool": "__parse_error__",
-        "error_code": "TOOL_INLINE_CONTENT_STREAM_ABORTED",
-        "error": (
-            f"{exc.tool}.content inline content streaming exceeded {exc.limit} chars; "
-            "工具调用缺少结束标记"
-        ),
-        "raw": raw,
-    }
-    return ModelResponse(
-        text="[TOOL_CALL]\n"
-        f"{json.dumps(payload, ensure_ascii=False)}\n"
-        "[/TOOL_CALL]",
+    return _protocol_violation_response(
         backend=backend,
+        code="TOOL_INLINE_CONTENT_STREAM_ABORTED",
+        detail=(
+            f"{exc.tool}.content inline content streaming exceeded {exc.limit} chars; "
+            "没有执行任何写入。请把内容分成更小的完整 write_file 调用，"
+            "第一块用 overwrite，后续块用 append"
+        ),
+        evidence={
+            "source_tool": exc.tool,
+            "path_sha256": hashlib.sha256(exc.path.encode("utf-8")).hexdigest(),
+            "streaming_content_chars": exc.chars,
+            "streaming_content_limit": exc.limit,
+            "previous_write_committed": False,
+        },
     )

@@ -44,10 +44,16 @@ def test_background_run_params_carry_structured_conversation_task_identity() -> 
 
 
 def test_claimed_background_turn_can_use_its_own_task_workspace(tmp_path) -> None:
+    from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
     from agent_py_agent.agent.agent_core.tool_call_runtime import (
+        ToolCallRuntimeRequest,
         _promote_conversation_task_for_work_tool,
     )
+    from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
+        ToolCallExecuteParams,
+    )
     from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run_params
+    from agent_py_agent.tests._tool_runtime_harness import canonical_test_call
 
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
@@ -92,10 +98,33 @@ def test_claimed_background_turn_can_use_its_own_task_workspace(tmp_path) -> Non
         ),
         agent,
     )
+    snapshot = agent.tools.runtime_snapshot(run_id=params.run_id)
+    loop_params = ToolLoopExecuteParams(
+        user_prompt="继续既有任务",
+        memories=[],
+        runtime_injections=[],
+        prompt_files=[],
+        tool_catalog_section="",
+        tool_recommendations_section="",
+        tool_context=[],
+        effective_on_chunk=None,
+        allowed_tools=params.allowed_tools,
+        write_boundary=params.write_boundary,
+        task_attributes=params.task_attributes,
+        request_id=params.request_id,
+        run_id=params.run_id,
+        task_id=params.task_id,
+        one_shot_tool_calls=set(),
+        executed_tools=[],
+        archive_tool_calls=[],
+        tool_runtime_snapshot=snapshot,
+    )
     agent._current_run_params = params
+    call = canonical_test_call(snapshot, "write_file", {})
+    execute_request = ToolCallExecuteParams(loop_params, 1, 1, call)
     try:
         result = _promote_conversation_task_for_work_tool(
-            SimpleNamespace(agent=agent, payload={"tool": "write_file"})
+            ToolCallRuntimeRequest(agent, execute_request, call)
         )
     finally:
         delattr(agent, "_current_run_params")
@@ -146,9 +175,7 @@ def test_taskless_internal_background_wait_does_not_create_task_or_thread(tmp_pa
     # active.  It must not be promoted into a durable task identity.
     agent._main_agent_run_id = params.run_id
     try:
-        result = agent.tools.tools["wait"].execute(
-            {"seconds": 60, "reason": "check again later"}
-        )
+        result = agent.tools.tools["wait"].execute({"seconds": 60, "reason": "check again later"})
     finally:
         delattr(agent, "_current_run_params")
         delattr(agent, "_main_agent_run_id")
@@ -229,42 +256,50 @@ def test_internal_background_run_fallback_allows_a_complete_work_slice() -> None
 
 def test_background_material_progress_uses_structured_tool_effect_variants() -> None:
     from agent_py_agent.agent.conversation.runtime import _material_tool_success_count
-    from agent_py_agent.agent.tooling import ToolSpec
+    from agent_py_agent.agent.tooling import BaseTool, ToolHandlerOutcome
+    from agent_py_agent.tests._tool_runtime_harness import (
+        make_test_model_spec,
+        make_test_runtime_policy,
+        runtime_snapshot_for_tools,
+    )
 
-    task_progress_spec = ToolSpec(
-        name="task_progress",
-        category="test",
-        description="test",
-        use_cases=[],
-        avoid_when=[],
-        keywords=[],
-        parameters={"action": "action"},
-        parameter_schema={"action": {"type": "string"}},
-        effect="mutating",
-        effect_by_parameter={
-            "action": {
-                "": "read_only",
-                "read": "read_only",
-                "update": "mutating",
-            }
-        },
-    )
-    read_spec = ToolSpec(
-        name="read_file",
-        category="test",
-        description="test",
-        use_cases=[],
-        avoid_when=[],
-        keywords=[],
-        parameters={"path": "path"},
-        effect="read_only",
-    )
-    agent = SimpleNamespace(
-        tools={
-            "task_progress": SimpleNamespace(spec=task_progress_spec),
-            "read_file": SimpleNamespace(spec=read_spec),
-        }
-    )
+    class _Tool(BaseTool):
+        def __init__(self, name, effect, effect_by_parameter=()):
+            self.model_spec = make_test_model_spec(
+                name,
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string"},
+                        "path": {"type": "string"},
+                        "summary": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+            )
+            self.runtime_policy = make_test_runtime_policy(
+                effect,
+                effect_by_parameter=effect_by_parameter,
+            )
+
+        def execute(self, params):
+            return ToolHandlerOutcome(self.model_spec.name, True, str(params))
+
+    tools = {
+        "task_progress": _Tool(
+            "task_progress",
+            "mutating",
+            (
+                (
+                    "action",
+                    (("", "read_only"), ("read", "read_only"), ("update", "mutating")),
+                ),
+            ),
+        ),
+        "read_file": _Tool("read_file", "read_only"),
+    }
+    snapshot = runtime_snapshot_for_tools(tools)
+    agent = SimpleNamespace(tools=SimpleNamespace(runtime_snapshot=lambda: snapshot))
     readonly_calls = [
         {
             "tool": "task_progress",
@@ -1012,7 +1047,7 @@ class _PlainLanguageCollaborationBackend:
             assert "ready_to_report" in prompt
             return ModelResponse(
                 text=(
-                    '[TOOL_CALL]\n'
+                    "[TOOL_CALL]\n"
                     f'{{"tool":"update_collaboration","case_id":"{self.case_id}",'
                     '"status":"needs_replan","summary":"已看到阻塞请求，下一步需要换来源或补派代理。"}'
                     "\n[/TOOL_CALL]"
@@ -1020,7 +1055,9 @@ class _PlainLanguageCollaborationBackend:
                 backend=self.name,
             )
         assert "needs_replan" in prompt
-        return ModelResponse(text="我已经看到阻塞点，会换来源或补派代理继续推进。", backend=self.name)
+        return ModelResponse(
+            text="我已经看到阻塞点，会换来源或补派代理继续推进。", backend=self.name
+        )
 
 
 class _SlowBackend:
@@ -1117,7 +1154,7 @@ class _InternalStatusBackend:
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         return ModelResponse(
             text=(
-                '[RUN_TOOL_EVIDENCE_BLOCKED]\n'
+                "[RUN_TOOL_EVIDENCE_BLOCKED]\n"
                 '{"reason":"scheduled_progress_report","private":"must-not-enter-chat"}'
             ),
             backend=self.name,
@@ -1127,7 +1164,15 @@ class _InternalStatusBackend:
 def test_background_runtime_reports_corrupt_thread_before_running_model(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 10.0})
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
     store._thread_path(thread.thread_id).write_text("{bad-json", encoding="utf-8")
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
 
@@ -1147,19 +1192,46 @@ def test_due_progress_policy_wakes_background_main_agent_and_sends_message(tmp_p
     store = ConversationStore(tmp_path / "conversations")
     channels = FakeDeliveryService()
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
-    scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
 
-    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'title': "长期后台任务", 'now': 10.0})
-    store.append_message({
-        'thread_id': thread.thread_id,
-        'role': "user",
-        'content': "每小时帮我看一次进展，有问题就调度。",
-        'channel': "internal",
-        'metadata': {"gateway_request_id": "task-1"},
-        'now': 11.0,
-    })
-    store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "观察子代理任务树", 'now': 12.0})
-    store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 60, 'route_channel': "internal", 'route_target': "thread-1", 'now': 13.0})
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "title": "长期后台任务",
+            "now": 10.0,
+        }
+    )
+    store.append_message(
+        {
+            "thread_id": thread.thread_id,
+            "role": "user",
+            "content": "每小时帮我看一次进展，有问题就调度。",
+            "channel": "internal",
+            "metadata": {"gateway_request_id": "task-1"},
+            "now": 11.0,
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "goal": "观察子代理任务树",
+            "now": 12.0,
+        }
+    )
+    store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "interval_seconds": 60,
+            "route_channel": "internal",
+            "route_target": "thread-1",
+            "now": 13.0,
+        }
+    )
 
     reports = scheduler.tick(now=73.0)
 
@@ -1225,7 +1297,10 @@ def test_thread_goal_turn_with_no_tool_calls_stops_auto_continuation(tmp_path) -
 
 
 def test_thread_goal_with_tool_progress_schedules_exactly_one_next_turn(tmp_path) -> None:
-    agent = SimpleAgent(AgentConfig(enable_tools=True, memory_path="memory.jsonl"), tmp_path)
+    agent = SimpleAgent(
+        AgentConfig(tool_protocol="text", enable_tools=True, memory_path="memory.jsonl"),
+        tmp_path,
+    )
     agent.backend = _GoalToolProgressBackend()
     store = agent.conversation_store
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
@@ -1238,9 +1313,7 @@ def test_thread_goal_with_tool_progress_schedules_exactly_one_next_turn(tmp_path
             "channel_user_id": "user-1",
         }
     )
-    goal = store.create_goal(
-        {"thread_id": thread.thread_id, "objective": "持续检查目录并推进"}
-    )
+    goal = store.create_goal({"thread_id": thread.thread_id, "objective": "持续检查目录并推进"})
     store.bind_task(
         {
             "thread_id": thread.thread_id,
@@ -1272,7 +1345,12 @@ def test_thread_goal_waits_for_child_events_without_polling_or_chat_noise(tmp_pa
     from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run_params
 
     agent = SimpleAgent(
-        AgentConfig(enable_tools=True, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0),
+        AgentConfig(
+            tool_protocol="text",
+            enable_tools=True,
+            memory_path="memory.jsonl",
+            orphan_supervision_interval_seconds=0,
+        ),
         tmp_path,
     )
     backend = _GoalToolProgressBackend()
@@ -1363,7 +1441,12 @@ def test_thread_goal_waits_for_child_events_without_polling_or_chat_noise(tmp_pa
 
 def test_terminal_goal_children_trigger_one_integrating_closeout(tmp_path) -> None:
     agent = SimpleAgent(
-        AgentConfig(enable_tools=True, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0),
+        AgentConfig(
+            tool_protocol="text",
+            enable_tools=True,
+            memory_path="memory.jsonl",
+            orphan_supervision_interval_seconds=0,
+        ),
         tmp_path,
     )
     backend = _GoalCompletingBackend()
@@ -1421,10 +1504,7 @@ def test_terminal_goal_children_trigger_one_integrating_closeout(tmp_path) -> No
         "已经完成整合和验证。"
     ]
     final_row = store.recent_messages(thread.thread_id, limit=1)[0]
-    assert (
-        final_row.metadata["operation_verification"]["groups"][0]["label"]
-        == "update_goal"
-    )
+    assert final_row.metadata["operation_verification"]["groups"][0]["label"] == "update_goal"
 
     stale = store.raise_wake_signal(
         {
@@ -1539,67 +1619,83 @@ def test_task_continuation_uses_the_same_thread_history_and_compact(tmp_path) ->
     store = agent.conversation_store
     channels = FakeDeliveryService()
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
-    scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
-    thread = store.get_or_create_thread({
-        'canonical_user_id': "user-1",
-        'channel': "feishu",
-        'channel_conversation_id': "chat-1",
-        'channel_user_id': "user-1",
-        'now': 10.0,
-    })
-    store.append_message({
-        'thread_id': thread.thread_id,
-        'role': "user",
-        'content': "请完成任务甲的七天晚餐方案。",
-        'channel': "feishu",
-        'metadata': {"gateway_request_id": "task-1"},
-        'now': 11.0,
-    })
-    store.bind_task({
-        'thread_id': thread.thread_id,
-        'task_id': "task-1",
-        'goal': "完成任务甲的七天晚餐方案",
-        'now': 12.0,
-    })
-    store.bind_task({
-        'thread_id': thread.thread_id,
-        'task_id': "task-2",
-        'goal': "任务乙私有目标-不应出现在任务甲",
-        'now': 13.0,
-    })
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "feishu",
+            "channel_conversation_id": "chat-1",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    store.append_message(
+        {
+            "thread_id": thread.thread_id,
+            "role": "user",
+            "content": "请完成任务甲的七天晚餐方案。",
+            "channel": "feishu",
+            "metadata": {"gateway_request_id": "task-1"},
+            "now": 11.0,
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "goal": "完成任务甲的七天晚餐方案",
+            "now": 12.0,
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-2",
+            "goal": "任务乙私有目标-不应出现在任务甲",
+            "now": 13.0,
+        }
+    )
     store.update_summary(thread.thread_id, "普通聊天压缩摘要-青柚47", now=14.0)
-    store.append_message({
-        'thread_id': thread.thread_id,
-        'role': "user",
-        'content': "普通聊天核对词青柚47，不要把它写进任务。",
-        'channel': "feishu",
-        'metadata': {"gateway_request_id": "chat-request-2"},
-        'now': 15.0,
-    })
-    store.append_message({
-        'thread_id': thread.thread_id,
-        'role': "user",
-        'content': "预算控制在三百元内。",
-        'channel': "feishu",
-        'metadata': {"kind": "active_turn_user_input"},
-        'now': 16.0,
-    })
-    store.append_message({
-        'thread_id': thread.thread_id,
-        'role': "user",
-        'content': "第二步只实现营养评分、时间衰减和对应测试。",
-        'channel': "feishu",
-        'metadata': {"gateway_request_id": "chat-request-3"},
-        'now': 16.75,
-    })
-    store.set_progress_policy({
-        'thread_id': thread.thread_id,
-        'task_id': "task-1",
-        'interval_seconds': 60,
-        'route_channel': "feishu",
-        'route_target': "chat-1",
-        'now': 17.0,
-    })
+    store.append_message(
+        {
+            "thread_id": thread.thread_id,
+            "role": "user",
+            "content": "普通聊天核对词青柚47，不要把它写进任务。",
+            "channel": "feishu",
+            "metadata": {"gateway_request_id": "chat-request-2"},
+            "now": 15.0,
+        }
+    )
+    store.append_message(
+        {
+            "thread_id": thread.thread_id,
+            "role": "user",
+            "content": "预算控制在三百元内。",
+            "channel": "feishu",
+            "metadata": {"kind": "active_turn_user_input"},
+            "now": 16.0,
+        }
+    )
+    store.append_message(
+        {
+            "thread_id": thread.thread_id,
+            "role": "user",
+            "content": "第二步只实现营养评分、时间衰减和对应测试。",
+            "channel": "feishu",
+            "metadata": {"gateway_request_id": "chat-request-3"},
+            "now": 16.75,
+        }
+    )
+    store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "interval_seconds": 60,
+            "route_channel": "feishu",
+            "route_target": "chat-1",
+            "now": 17.0,
+        }
+    )
 
     reports = scheduler.tick(now=77.0)
     prompt = backend.prompts[0]
@@ -1751,7 +1847,9 @@ def test_detached_named_task_excludes_future_ordinary_turns_from_background_cont
     assert guidance_row.metadata["task_id"] == "audit-1"
 
 
-def test_automatic_supervision_skips_unchanged_llm_turn_and_runs_on_material_delta(tmp_path) -> None:
+def test_automatic_supervision_skips_unchanged_llm_turn_and_runs_on_material_delta(
+    tmp_path,
+) -> None:
     from agent_py_agent.agent.conversation.progress_fingerprint import subagent_material_signature
 
     agent = SimpleAgent(
@@ -1906,7 +2004,9 @@ def test_partial_successful_subagent_wake_stays_out_of_ordinary_chat_until_batch
     tmp_path,
 ) -> None:
     agent = SimpleAgent(
-        AgentConfig(enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0),
+        AgentConfig(
+            enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0
+        ),
         tmp_path,
     )
     agent.backend = _CapturingBackend()
@@ -2245,9 +2345,7 @@ def test_audit_finding_message_tool_delivery_is_mirrored_once_with_evidence(
     assert sent.wake_handled is True
     messages = store.recent_messages(thread.thread_id)
     assert [row.content for row in messages] == ["发现一项明确事件，证据已保留。"]
-    assert messages[0].metadata["evidence_refs"] == [
-        "audit://watch-1/candidate/1:0"
-    ]
+    assert messages[0].metadata["evidence_refs"] == ["audit://watch-1/candidate/1:0"]
     # send_message already performed the external side effect. The runtime only
     # mirrors its typed receipt and must not call the channel a second time.
     assert channels.adapter("feishu").sent_messages == []
@@ -2507,9 +2605,7 @@ def test_failed_audit_finding_delivery_does_not_consume_wake(
     monkeypatch.setattr(scheduler, "_run_claimed", pending_report)
 
     assert scheduler._run_wake_signal(signal, now=20.0) is None
-    assert [item.wake_signal_id for item in store.pending_wake_signals()] == [
-        signal.wake_signal_id
-    ]
+    assert [item.wake_signal_id for item in store.pending_wake_signals()] == [signal.wake_signal_id]
     assert scheduler.tick(now=21.0) == []
     assert len(attempts) == 1
     assert scheduler.tick(now=50.0) == []
@@ -2563,16 +2659,12 @@ def test_completed_audit_keeps_unreceipted_typed_finding_until_delivery(
                 "watch_id": "watch-1",
                 "finding_id": "finding-97",
                 "requires_llm_report": True,
-                "delivery_evidence_refs": [
-                    "audit://watch-1/candidate/97:0"
-                ],
+                "delivery_evidence_refs": ["audit://watch-1/candidate/97:0"],
             },
             "now": 10.0,
         }
     )
-    store.update_task_status(
-        {"task_id": "audit-1", "status": "completed", "now": 20.0}
-    )
+    store.update_task_status({"task_id": "audit-1", "status": "completed", "now": 20.0})
     scheduler = BackgroundMainAgentScheduler(
         {
             "runtime": BackgroundMainAgentRuntime(
@@ -2647,12 +2739,8 @@ def test_completed_root_retires_ordinary_late_child_wake(tmp_path, monkeypatch) 
             "channel_user_id": "owner-a",
         }
     )
-    store.bind_task(
-        {"thread_id": thread.thread_id, "task_id": "task-1", "goal": "旧任务"}
-    )
-    store.update_task_status(
-        {"task_id": "task-1", "status": "completed", "now": 20.0}
-    )
+    store.bind_task({"thread_id": thread.thread_id, "task_id": "task-1", "goal": "旧任务"})
+    store.update_task_status({"task_id": "task-1", "status": "completed", "now": 20.0})
     signal = store.raise_wake_signal(
         {
             "thread_id": thread.thread_id,
@@ -2768,14 +2856,15 @@ def test_linked_observation_does_not_fork_while_delivery_wake_is_pending(
     assert attempts == ["audit_capacity_alert"]
     assert store.pending_wake_signal(signal.wake_signal_id) is not None
     assert [
-        item.observation_id
-        for item in store.unhandled_observations_requiring_main(limit=10)
+        item.observation_id for item in store.unhandled_observations_requiring_main(limit=10)
     ] == [observation.observation_id]
 
 
 def test_completion_observation_fallback_uses_same_partial_delivery_policy(tmp_path) -> None:
     agent = SimpleAgent(
-        AgentConfig(enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0),
+        AgentConfig(
+            enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0
+        ),
         tmp_path,
     )
     agent.backend = _CapturingBackend()
@@ -2831,7 +2920,9 @@ def test_completion_observation_fallback_uses_same_partial_delivery_policy(tmp_p
 
 def test_internal_wait_continuation_stays_out_of_chat_while_child_runs(tmp_path) -> None:
     agent = SimpleAgent(
-        AgentConfig(enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0),
+        AgentConfig(
+            enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0
+        ),
         tmp_path,
     )
     agent.backend = _CapturingBackend()
@@ -2876,7 +2967,9 @@ def test_internal_wait_continuation_stays_out_of_chat_while_child_runs(tmp_path)
 
 def test_internal_wait_completion_delivers_model_authored_final_reply(tmp_path) -> None:
     agent = SimpleAgent(
-        AgentConfig(enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0),
+        AgentConfig(
+            enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0
+        ),
         tmp_path,
     )
     backend = _CapturingBackend()
@@ -2921,9 +3014,13 @@ def test_internal_wait_completion_delivers_model_authored_final_reply(tmp_path) 
     assert [row.content for row in store.recent_messages(thread.thread_id)] == [report.response]
 
 
-def test_scheduled_turn_accepts_mid_turn_child_event_without_starting_second_main_run(tmp_path) -> None:
+def test_scheduled_turn_accepts_mid_turn_child_event_without_starting_second_main_run(
+    tmp_path,
+) -> None:
     agent = SimpleAgent(
-        AgentConfig(enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0),
+        AgentConfig(
+            enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0
+        ),
         tmp_path,
     )
     store = agent.conversation_store
@@ -2981,7 +3078,9 @@ def test_scheduled_turn_accepts_mid_turn_child_event_without_starting_second_mai
 
 def test_mid_turn_child_event_stays_retryable_when_provider_fails_after_injection(tmp_path) -> None:
     agent = SimpleAgent(
-        AgentConfig(enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0),
+        AgentConfig(
+            enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0
+        ),
         tmp_path,
     )
     store = agent.conversation_store
@@ -3041,7 +3140,9 @@ def test_mid_turn_child_event_stays_retryable_when_provider_fails_after_injectio
 
 def test_internal_continuation_delivers_natural_runtime_completion(tmp_path) -> None:
     agent = SimpleAgent(
-        AgentConfig(enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0),
+        AgentConfig(
+            enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0
+        ),
         tmp_path,
     )
     agent.backend = _NaturalCompletionBackend()
@@ -3088,7 +3189,9 @@ def test_internal_continuation_delivers_natural_runtime_completion(tmp_path) -> 
 
 def test_done_child_wake_delivers_natural_final_response(tmp_path) -> None:
     agent = SimpleAgent(
-        AgentConfig(enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0),
+        AgentConfig(
+            enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0
+        ),
         tmp_path,
     )
     agent.backend = _CapturingBackend()
@@ -3242,9 +3345,7 @@ def test_two_audit_findings_on_one_thread_share_one_receipted_model_turn(
                         "finding_id": f"af-{index}",
                         "revision": 1,
                         "requires_llm_report": True,
-                        "delivery_evidence_refs": [
-                            f"audit://watch-1/candidate/1:{index}"
-                        ],
+                        "delivery_evidence_refs": [f"audit://watch-1/candidate/1:{index}"],
                     },
                 }
             )
@@ -3416,9 +3517,7 @@ def test_failed_audit_finding_batch_stays_pending_and_shares_retry_boundary(
                     "watch_id": "watch-1",
                     "finding_id": f"af-{index}",
                     "requires_llm_report": True,
-                    "delivery_evidence_refs": [
-                        f"audit://watch-1/candidate/1:{index}"
-                    ],
+                    "delivery_evidence_refs": [f"audit://watch-1/candidate/1:{index}"],
                 },
             }
         )
@@ -3466,8 +3565,7 @@ def test_failed_audit_finding_batch_stays_pending_and_shares_retry_boundary(
         signal.wake_signal_id for signal in signals
     ]
     assert all(
-        scheduler._wake_retry_after[signal.wake_signal_id] == current + 30.0
-        for signal in signals
+        scheduler._wake_retry_after[signal.wake_signal_id] == current + 30.0 for signal in signals
     )
 
     assert scheduler.tick(now=current + 1.0) == []
@@ -3521,9 +3619,7 @@ def test_audit_finding_batch_honors_existing_wake_projection_limit(
                     "watch_id": "watch-1",
                     "finding_id": f"af-{index}",
                     "requires_llm_report": True,
-                    "delivery_evidence_refs": [
-                        f"audit://watch-1/candidate/1:{index}"
-                    ],
+                    "delivery_evidence_refs": [f"audit://watch-1/candidate/1:{index}"],
                 },
             }
         )
@@ -3676,8 +3772,7 @@ def test_audit_source_worker_lifecycle_is_supervised_without_owner_model_turn(
         lambda reason, _signal: swept.append(reason),
     )
     monkeypatch.setattr(
-        "agent_py_agent.agent.conversation.task_promotion."
-        "complete_named_audit_task_if_settled",
+        "agent_py_agent.agent.conversation.task_promotion.complete_named_audit_task_if_settled",
         lambda _agent, task_id: completed.append(task_id) or True,
     )
 
@@ -3845,9 +3940,11 @@ def test_legacy_pending_audit_source_wake_uses_durable_task_identity() -> None:
     )
     agent = SimpleNamespace(
         subagents=SimpleNamespace(
-            load=lambda task_id: task
-            if task_id == "source-legacy-pending"
-            else (_ for _ in ()).throw(KeyError(task_id))
+            load=lambda task_id: (
+                task
+                if task_id == "source-legacy-pending"
+                else (_ for _ in ()).throw(KeyError(task_id))
+            )
         )
     )
     signal = SimpleNamespace(
@@ -4247,15 +4344,12 @@ def test_capacity_wake_retry_reuses_frozen_reply_without_second_model_turn(
     assert len(backend.prompts) == 1
     cached = store.pending_wake_signal(signal.wake_signal_id)
     assert cached is not None
-    assert cached.metadata["owner_delivery"]["schema_version"] == (
-        "wake-owner-delivery.v1"
-    )
+    assert cached.metadata["owner_delivery"]["schema_version"] == ("wake-owner-delivery.v1")
     assert scheduler.tick(now=51.0) == []
     assert len(backend.prompts) == 1
     assert store.pending_wake_signal(signal.wake_signal_id) is not None
     assert [
-        item.observation_id
-        for item in store.unhandled_observations_requiring_main(limit=10)
+        item.observation_id for item in store.unhandled_observations_requiring_main(limit=10)
     ] == [observation.observation_id]
     assert store.recent_messages(thread.thread_id) == []
 
@@ -4369,10 +4463,27 @@ def test_scheduler_records_bad_progress_policy_without_blocking_due_policy(tmp_p
     store = ConversationStore(tmp_path / "conversations")
     channels = FakeDeliveryService()
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
-    scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
 
-    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 10.0})
-    store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 60, 'route_channel': "internal", 'route_target': "thread-1", 'now': 13.0})
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "interval_seconds": 60,
+            "route_channel": "internal",
+            "route_target": "thread-1",
+            "now": 13.0,
+        }
+    )
     bad_path = store.policies_dir / "broken.json"
     bad_path.write_text("[]", encoding="utf-8")
 
@@ -4380,7 +4491,10 @@ def test_scheduler_records_bad_progress_policy_without_blocking_due_policy(tmp_p
 
     assert len(reports) == 1
     assert scheduler.last_progress_policy_load_errors
-    assert scheduler.last_progress_policy_load_errors[0]["context"] == "conversation.progress_policy.read"
+    assert (
+        scheduler.last_progress_policy_load_errors[0]["context"]
+        == "conversation.progress_policy.read"
+    )
     assert scheduler.last_progress_policy_load_errors[0]["policy_id"] == "broken"
     assert channels.adapter("internal").sent_messages
 
@@ -4391,10 +4505,34 @@ def test_scheduler_retires_stale_missed_progress_policy_without_model_call(tmp_p
     agent.backend = backend
     store = ConversationStore(tmp_path / "conversations")
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
-    scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
-    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 10.0})
-    store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "陈年提醒退休不复活", 'now': 11.0})
-    policy = store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 60, 'route_channel': "internal", 'route_target': "thread-1", 'now': 12.0})
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "goal": "陈年提醒退休不复活",
+            "now": 11.0,
+        }
+    )
+    policy = store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "interval_seconds": 60,
+            "route_channel": "internal",
+            "route_target": "thread-1",
+            "now": 12.0,
+        }
+    )
 
     reports = scheduler.tick(now=12.0 + 7200 + 61)
 
@@ -4503,12 +4641,37 @@ def test_scheduler_renews_stale_policy_while_coverage_open(tmp_path) -> None:
     agent.backend = backend
     store = ConversationStore(tmp_path / "conversations")
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
-    scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
-    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 10.0})
-    store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "活任务的续推提醒", 'now': 11.0})
-    policy = store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 60, 'route_channel': "internal", 'route_target': "thread-1", 'now': 12.0})
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "goal": "活任务的续推提醒",
+            "now": 11.0,
+        }
+    )
+    policy = store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "interval_seconds": 60,
+            "route_channel": "internal",
+            "route_target": "thread-1",
+            "now": 12.0,
+        }
+    )
     write_task_progress(
-        runtime_owner_root(agent), "task-1",
+        runtime_owner_root(agent),
+        "task-1",
         {"coverage": {"targets": [{"id": "req-01", "title": "模块1", "status": "pending"}]}},
     )
     stale_now = 12.0 + 7200 + 61
@@ -4532,11 +4695,35 @@ def test_scheduler_retires_terminal_task_progress_policy_without_model_call(
     agent.backend = backend
     store = ConversationStore(tmp_path / "conversations")
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
-    scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
-    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 10.0})
-    store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "终态任务退休watch", 'now': 11.0})
-    policy = store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 60, 'route_channel': "internal", 'route_target': "thread-1", 'now': 12.0})
-    store.update_task_status({'task_id': "task-1", 'status': terminal_status, 'now': 70.0})
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "goal": "终态任务退休watch",
+            "now": 11.0,
+        }
+    )
+    policy = store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "interval_seconds": 60,
+            "route_channel": "internal",
+            "route_target": "thread-1",
+            "now": 12.0,
+        }
+    )
+    store.update_task_status({"task_id": "task-1", "status": terminal_status, "now": 70.0})
 
     reports = scheduler.tick(now=100.0)
 
@@ -4560,18 +4747,34 @@ def test_terminal_child_watch_policy_is_not_revived_by_owner_backlog(tmp_path) -
     from agent_py_agent.agent.ingestion.watch_state import new_state, persist_state, state_dir
 
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread({
-        'canonical_user_id': "user-1", 'channel': "internal",
-        'channel_conversation_id': "conv:run-w", 'channel_user_id': "user-1", 'now': 10.0,
-    })
-    store.bind_task({'thread_id': thread.thread_id, 'task_id': "run-w", 'goal': "盯守", 'now': 11.0})
-    policy = store.set_progress_policy({
-        'thread_id': thread.thread_id, 'task_id': "run-w", 'interval_seconds': 60,
-        'route_channel': "internal", 'route_target': "",
-        'metadata': {"kind": "subagent_progress_watch", "tool": "wait", "watch_run_id": "run-w"},
-        'now': 12.0,
-    })
-    store.update_task_status({'task_id': "run-w", 'status': "DONE", 'now': 70.0})
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "conv:run-w",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    store.bind_task(
+        {"thread_id": thread.thread_id, "task_id": "run-w", "goal": "盯守", "now": 11.0}
+    )
+    policy = store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "run-w",
+            "interval_seconds": 60,
+            "route_channel": "internal",
+            "route_target": "",
+            "metadata": {
+                "kind": "subagent_progress_watch",
+                "tool": "wait",
+                "watch_run_id": "run-w",
+            },
+            "now": 12.0,
+        }
+    )
+    store.update_task_status({"task_id": "run-w", "status": "DONE", "now": 70.0})
     owner_home = tmp_path / "owner"
     lane = new_state(owner_home, "http://127.0.0.1:9/pull", {"watch_window_seconds": 600})
     lane.opened_at = time.time() - 900.0  # 窗口已走完
@@ -4586,7 +4789,14 @@ def test_terminal_child_watch_policy_is_not_revived_by_owner_backlog(tmp_path) -
     # Clearing the backlog does not change the terminal-link decision.
     sidecar = state_dir(owner_home) / f"{lane.watch_id}.read.json"
     sidecar.write_text(
-        json.dumps({"read_seq": 9, "candidates_consumed": 7, "candidates_acked": 7, "updated_at": time.time()}),
+        json.dumps(
+            {
+                "read_seq": 9,
+                "candidates_consumed": 7,
+                "candidates_acked": 7,
+                "updated_at": time.time(),
+            }
+        ),
         encoding="utf-8",
     )
     runnable2, suppressed2 = _runnable_due_policies(store, [policy], now=time.time(), agent=agent)
@@ -4608,9 +4818,7 @@ def test_scheduler_retires_legacy_child_bound_watch_backstop(tmp_path) -> None:
         store=store,
         channels=FakeDeliveryService(),
     )
-    scheduler = BackgroundMainAgentScheduler(
-        {"runtime": runtime, "store": store}
-    )
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
     thread = store.get_or_create_thread(
         {
             "canonical_user_id": "user-1",
@@ -4767,9 +4975,7 @@ def test_scheduler_retires_running_durable_audit_root_wait_without_model_turn(
             "duration_seconds": 600,
             "expires_at": 611.0,
             "cancellation_scope": "detached",
-            "effective_source_bindings": [
-                {"source_id": "source-1", "profile_ref": "profile-1"}
-            ],
+            "effective_source_bindings": [{"source_id": "source-1", "profile_ref": "profile-1"}],
             "run_epoch": 1,
             "now": 11.0,
         }
@@ -4811,14 +5017,25 @@ def test_due_policy_backs_off_on_no_progress_rounds_and_recovers(tmp_path) -> No
     from agent_py_agent.agent.conversation.models import BackgroundMainAgentReport
 
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread({
-        'canonical_user_id': "user-1", 'channel': "internal",
-        'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 0.0,
-    })
-    policy = store.set_progress_policy({
-        'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 60,
-        'route_channel': "internal", 'route_target': "thread-1", 'now': 0.0,
-    })
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 0.0,
+        }
+    )
+    policy = store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "interval_seconds": 60,
+            "route_channel": "internal",
+            "route_target": "thread-1",
+            "now": 0.0,
+        }
+    )
 
     class _FakeRuntime:
         agent = None
@@ -4842,7 +5059,7 @@ def test_due_policy_backs_off_on_no_progress_rounds_and_recovers(tmp_path) -> No
             )
 
     runtime = _FakeRuntime()
-    scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
 
     # 第 1 轮无进展:streak=1 → 间隔 60 → 120
     scheduler.tick(now=61.0)
@@ -4884,17 +5101,52 @@ def test_scheduler_runs_one_duplicate_progress_policy_per_target(tmp_path) -> No
     agent.backend = backend
     store = ConversationStore(tmp_path / "conversations")
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
-    scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
-    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 10.0})
-    store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "重复提醒只跑一次", 'now': 11.0})
-    store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 60, 'route_channel': "internal", 'route_target': "thread-1", 'now': 12.0})
-    store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 60, 'route_channel': "internal", 'route_target': "thread-1", 'now': 13.0})
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "goal": "重复提醒只跑一次",
+            "now": 11.0,
+        }
+    )
+    store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "interval_seconds": 60,
+            "route_channel": "internal",
+            "route_target": "thread-1",
+            "now": 12.0,
+        }
+    )
+    store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "interval_seconds": 60,
+            "route_channel": "internal",
+            "route_target": "thread-1",
+            "now": 13.0,
+        }
+    )
 
     reports = scheduler.tick(now=73.0)
 
     assert len(reports) == 1
     assert len(backend.prompts) == 1
-    assert [item["reason"] for item in scheduler.last_progress_policy_suppressed] == ["duplicate_policy"]
+    assert [item["reason"] for item in scheduler.last_progress_policy_suppressed] == [
+        "duplicate_policy"
+    ]
 
 
 def test_urgent_wake_uses_full_background_tool_profile(tmp_path) -> None:
@@ -4903,20 +5155,31 @@ def test_urgent_wake_uses_full_background_tool_profile(tmp_path) -> None:
     agent.backend = backend
     store = ConversationStore(tmp_path / "conversations")
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
-    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'title': "紧急事件", 'now': 10.0})
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "title": "紧急事件",
+            "now": 10.0,
+        }
+    )
 
-    runtime.run_once({
-        "thread_id": thread.thread_id,
-        "task_id": "task-1",
-        "reason": "urgent_wake_signal",
-        "wake_signal": {
-            "wake_signal_id": "wake-1",
+    runtime.run_once(
+        {
             "thread_id": thread.thread_id,
-            "urgency": "urgent",
-            "summary": "需要主代理马上处理。",
-        },
-        "now": 20.0,
-    })
+            "task_id": "task-1",
+            "reason": "urgent_wake_signal",
+            "wake_signal": {
+                "wake_signal_id": "wake-1",
+                "thread_id": thread.thread_id,
+                "urgency": "urgent",
+                "summary": "需要主代理马上处理。",
+            },
+            "now": 20.0,
+        }
+    )
     prompt = backend.prompts[0]
 
     assert "create_subagents" in prompt
@@ -4938,10 +5201,30 @@ def test_background_runtime_uses_configured_allowed_tools(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
     channels = FakeDeliveryService()
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
-    scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
-    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'title': "长期后台任务", 'now': 10.0})
-    store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "只读看树并提醒", 'now': 12.0})
-    store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 60, 'route_channel': "internal", 'route_target': "thread-1", 'now': 13.0})
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "title": "长期后台任务",
+            "now": 10.0,
+        }
+    )
+    store.bind_task(
+        {"thread_id": thread.thread_id, "task_id": "task-1", "goal": "只读看树并提醒", "now": 12.0}
+    )
+    store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "interval_seconds": 60,
+            "route_channel": "internal",
+            "route_target": "thread-1",
+            "now": 13.0,
+        }
+    )
 
     scheduler.tick(now=73.0)
     prompt = backend.prompts[0]
@@ -4957,20 +5240,33 @@ def test_background_runtime_applies_owner_disabled_tools(tmp_path) -> None:
         AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
         tmp_path,
     )
-    agent.owner_policy = type("OwnerPolicy", (), {"disabled_tools": ("create_subagents", "raise_collaboration")})()
+    agent.owner_policy = type(
+        "OwnerPolicy", (), {"disabled_tools": ("create_subagents", "raise_collaboration")}
+    )()
     backend = _CapturingBackend()
     agent.backend = backend
     store = ConversationStore(tmp_path / "conversations")
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
-    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'title': "紧急事件", 'now': 10.0})
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "title": "紧急事件",
+            "now": 10.0,
+        }
+    )
 
-    runtime.run_once({
-        "thread_id": thread.thread_id,
-        "task_id": "task-1",
-        "reason": "urgent_wake_signal",
-        "wake_signal": {"urgency": "urgent", "summary": "需要处理。"},
-        "now": 20.0,
-    })
+    runtime.run_once(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "reason": "urgent_wake_signal",
+            "wake_signal": {"urgency": "urgent", "summary": "需要处理。"},
+            "now": 20.0,
+        }
+    )
     prompt = backend.prompts[0]
 
     assert "create_subagents: 创建" not in prompt
@@ -4984,19 +5280,30 @@ def test_background_runtime_applies_wake_policy_snapshot(tmp_path) -> None:
     agent.backend = backend
     store = ConversationStore(tmp_path / "conversations")
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
-    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'title': "策略快照", 'now': 10.0})
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "title": "策略快照",
+            "now": 10.0,
+        }
+    )
 
-    runtime.run_once({
-        "thread_id": thread.thread_id,
-        "task_id": "task-1",
-        "reason": "urgent_wake_signal",
-        "wake_signal": {
-            "urgency": "urgent",
-            "summary": "只允许观察。",
-            "policy_snapshot": {"allowed_tools": ["inspect_agent_tree"]},
-        },
-        "now": 20.0,
-    })
+    runtime.run_once(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "reason": "urgent_wake_signal",
+            "wake_signal": {
+                "urgency": "urgent",
+                "summary": "只允许观察。",
+                "policy_snapshot": {"allowed_tools": ["inspect_agent_tree"]},
+            },
+            "now": 20.0,
+        }
+    )
     prompt = backend.prompts[0]
 
     assert "inspect_agent_tree" in prompt
@@ -5010,19 +5317,39 @@ def test_background_context_budget_truncates_large_messages(tmp_path) -> None:
     agent.backend = backend
     store = ConversationStore(tmp_path / "conversations")
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
-    scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
-    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'title': "长上下文后台任务", 'now': 10.0})
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "title": "长上下文后台任务",
+            "now": 10.0,
+        }
+    )
     long_message = "A" * 12000
-    store.append_message({
-        'thread_id': thread.thread_id,
-        'role': "user",
-        'content': long_message,
-        'channel': "internal",
-        'metadata': {"gateway_request_id": "task-1"},
-        'now': 11.0,
-    })
-    store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "检查长上下文裁剪", 'now': 12.0})
-    store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 60, 'now': 13.0})
+    store.append_message(
+        {
+            "thread_id": thread.thread_id,
+            "role": "user",
+            "content": long_message,
+            "channel": "internal",
+            "metadata": {"gateway_request_id": "task-1"},
+            "now": 11.0,
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "goal": "检查长上下文裁剪",
+            "now": 12.0,
+        }
+    )
+    store.set_progress_policy(
+        {"thread_id": thread.thread_id, "task_id": "task-1", "interval_seconds": 60, "now": 13.0}
+    )
 
     reports = scheduler.tick(now=73.0)
     prompt = backend.prompts[0]
@@ -5034,19 +5361,42 @@ def test_background_context_budget_truncates_large_messages(tmp_path) -> None:
 
 def test_scheduler_recovers_due_policy_after_process_restart(tmp_path) -> None:
     first_store = ConversationStore(tmp_path / "conversations")
-    thread = first_store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "feishu", 'channel_conversation_id': "chat-1", 'channel_user_id': "open-id-1", 'now': 100.0})
-    first_store.append_message({
-        'thread_id': thread.thread_id,
-        'role': "user",
-        'content': "一小时后继续检查。",
-        'channel': "feishu",
-        'metadata': {"gateway_request_id": "task-1"},
-        'now': 101.0,
-    })
-    first_store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "重启后继续", 'now': 102.0})
-    first_store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 3600, 'route_channel': "feishu", 'route_target': "chat-1", 'now': 103.0})
+    thread = first_store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "feishu",
+            "channel_conversation_id": "chat-1",
+            "channel_user_id": "open-id-1",
+            "now": 100.0,
+        }
+    )
+    first_store.append_message(
+        {
+            "thread_id": thread.thread_id,
+            "role": "user",
+            "content": "一小时后继续检查。",
+            "channel": "feishu",
+            "metadata": {"gateway_request_id": "task-1"},
+            "now": 101.0,
+        }
+    )
+    first_store.bind_task(
+        {"thread_id": thread.thread_id, "task_id": "task-1", "goal": "重启后继续", "now": 102.0}
+    )
+    first_store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "interval_seconds": 3600,
+            "route_channel": "feishu",
+            "route_target": "chat-1",
+            "now": 103.0,
+        }
+    )
 
-    restarted_agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    restarted_agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path
+    )
     backend = _CapturingBackend()
     restarted_agent.backend = backend
     restarted_store = ConversationStore(tmp_path / "conversations")
@@ -5056,7 +5406,7 @@ def test_scheduler_recovers_due_policy_after_process_restart(tmp_path) -> None:
         store=restarted_store,
         channels=channels,
     )
-    scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': restarted_store})
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": restarted_store})
 
     reports = scheduler.tick(now=3703.0)
 
@@ -5071,11 +5421,30 @@ def test_scheduler_skips_thread_with_active_background_claim(tmp_path) -> None:
     agent.backend = backend
     store = ConversationStore(tmp_path / "conversations")
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
-    scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
-    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
-    store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "避免重复唤醒", 'now': 2.0})
-    store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 60, 'now': 3.0})
-    claim = store.claim_background_run({'thread_id': thread.thread_id, 'reason': "already_running", 'lease_seconds': 300, 'now': 63.0})
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 1.0,
+        }
+    )
+    store.bind_task(
+        {"thread_id": thread.thread_id, "task_id": "task-1", "goal": "避免重复唤醒", "now": 2.0}
+    )
+    store.set_progress_policy(
+        {"thread_id": thread.thread_id, "task_id": "task-1", "interval_seconds": 60, "now": 3.0}
+    )
+    claim = store.claim_background_run(
+        {
+            "thread_id": thread.thread_id,
+            "reason": "already_running",
+            "lease_seconds": 300,
+            "now": 63.0,
+        }
+    )
 
     reports = scheduler.tick(now=64.0)
 
@@ -5089,10 +5458,29 @@ def test_scheduler_renews_background_claim_while_runtime_is_still_running(tmp_pa
     agent.backend = _SlowBackend(sleep_seconds=1.2)
     store = ConversationStore(tmp_path / "conversations")
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
-    scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store, 'claim_ttl_seconds': 1, 'claim_heartbeat_interval_seconds': 0.2})
-    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
-    store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "长后台运行要续租", 'now': 2.0})
-    store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 1, 'now': 3.0})
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": runtime,
+            "store": store,
+            "claim_ttl_seconds": 1,
+            "claim_heartbeat_interval_seconds": 0.2,
+        }
+    )
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 1.0,
+        }
+    )
+    store.bind_task(
+        {"thread_id": thread.thread_id, "task_id": "task-1", "goal": "长后台运行要续租", "now": 2.0}
+    )
+    store.set_progress_policy(
+        {"thread_id": thread.thread_id, "task_id": "task-1", "interval_seconds": 1, "now": 3.0}
+    )
 
     reports = scheduler.tick(now=4.0)
 
@@ -5108,7 +5496,9 @@ def test_scheduler_default_heartbeat_interval_stays_below_small_ttl(tmp_path) ->
     store = ConversationStore(tmp_path / "conversations")
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
 
-    scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store, 'claim_ttl_seconds': 9})
+    scheduler = BackgroundMainAgentScheduler(
+        {"runtime": runtime, "store": store, "claim_ttl_seconds": 9}
+    )
 
     assert scheduler.claim_heartbeat_interval_seconds == 3.0
 
@@ -5184,7 +5574,10 @@ def test_detached_task_claim_does_not_occupy_foreground_thread_lane(tmp_path) ->
         )
         is None
     )
-    assert store.load_background_run_claim(thread.thread_id)["claim_id"] == foreground_claim["claim_id"]
+    assert (
+        store.load_background_run_claim(thread.thread_id)["claim_id"]
+        == foreground_claim["claim_id"]
+    )
     assert (
         store.load_background_run_claim(
             thread.thread_id,
@@ -5250,9 +5643,12 @@ def test_background_claim_legacy_owner_waits_for_ttl_instead_of_guessing(tmp_pat
     payload.pop("owner_process", None)
     claim_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    assert store.claim_background_run(
-        {"thread_id": thread.thread_id, "reason": "recovery", "lease_seconds": 90, "now": 3.0}
-    ) is None
+    assert (
+        store.claim_background_run(
+            {"thread_id": thread.thread_id, "reason": "recovery", "lease_seconds": 90, "now": 3.0}
+        )
+        is None
+    )
 
 
 def test_background_claim_different_process_domain_waits_for_ttl(tmp_path) -> None:
@@ -5275,9 +5671,12 @@ def test_background_claim_different_process_domain_waits_for_ttl(tmp_path) -> No
     payload["owner_process"] = {"host_id": "another-process-domain", "pid": 999_999_999}
     claim_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    assert store.claim_background_run(
-        {"thread_id": thread.thread_id, "reason": "recovery", "lease_seconds": 90, "now": 3.0}
-    ) is None
+    assert (
+        store.claim_background_run(
+            {"thread_id": thread.thread_id, "reason": "recovery", "lease_seconds": 90, "now": 3.0}
+        )
+        is None
+    )
 
 
 def test_scheduler_marks_background_claim_failed_when_runtime_raises(tmp_path) -> None:
@@ -5287,17 +5686,38 @@ def test_scheduler_marks_background_claim_failed_when_runtime_raises(tmp_path) -
     agent._last_progress_summary = "正在核对来源"
     store = ConversationStore(tmp_path / "conversations")
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
-    scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store, 'claim_ttl_seconds': 30})
-    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
-    store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "失败时留下可接手事实", 'now': 2.0})
-    store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 1, 'now': 3.0})
+    scheduler = BackgroundMainAgentScheduler(
+        {"runtime": runtime, "store": store, "claim_ttl_seconds": 30}
+    )
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 1.0,
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "goal": "失败时留下可接手事实",
+            "now": 2.0,
+        }
+    )
+    store.set_progress_policy(
+        {"thread_id": thread.thread_id, "task_id": "task-1", "interval_seconds": 1, "now": 3.0}
+    )
 
     try:
         scheduler.tick(now=4.0)
     except RuntimeError:
         pass
 
-    claim = json.loads((store.background_claims_dir / f"{thread.thread_id}.json").read_text(encoding="utf-8"))
+    claim = json.loads(
+        (store.background_claims_dir / f"{thread.thread_id}.json").read_text(encoding="utf-8")
+    )
     assert claim["status"] == "failed"
     assert claim["task_id"] == "task-1"
     assert claim["last_error"]["type"] == "RuntimeError"
@@ -5316,41 +5736,72 @@ def test_background_prompt_includes_recovery_snapshot_for_previous_failed_claim(
     agent.backend = backend
     store = ConversationStore(tmp_path / "conversations")
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
-    scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store})
-    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
-    store.bind_task({'thread_id': thread.thread_id, 'task_id': "task-1", 'goal': "接手时先对账", 'now': 2.0})
-    failed = store.claim_background_run({'thread_id': thread.thread_id, 'reason': "previous_run", 'lease_seconds': 10, 'now': 3.0})
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 1.0,
+        }
+    )
+    store.bind_task(
+        {"thread_id": thread.thread_id, "task_id": "task-1", "goal": "接手时先对账", "now": 2.0}
+    )
+    failed = store.claim_background_run(
+        {"thread_id": thread.thread_id, "reason": "previous_run", "lease_seconds": 10, "now": 3.0}
+    )
     assert failed is not None
-    store.finish_background_run({
-        'thread_id': thread.thread_id,
-        'claim_id': failed["claim_id"],
-        'status': "failed",
-        'task_id': "task-1",
-        'error': {"type": "RuntimeError", "message": "previous run crashed"},
-        'now': 4.0,
-    })
-    store.set_progress_policy({'thread_id': thread.thread_id, 'task_id': "task-1", 'interval_seconds': 1, 'now': 5.0})
+    store.finish_background_run(
+        {
+            "thread_id": thread.thread_id,
+            "claim_id": failed["claim_id"],
+            "status": "failed",
+            "task_id": "task-1",
+            "error": {"type": "RuntimeError", "message": "previous run crashed"},
+            "now": 4.0,
+        }
+    )
+    store.set_progress_policy(
+        {"thread_id": thread.thread_id, "task_id": "task-1", "interval_seconds": 1, "now": 5.0}
+    )
 
     scheduler.tick(now=7.0)
     prompt = backend.prompts[0]
 
     assert "Recovery Snapshot" in prompt
     assert '"previous_claim_status": "failed"' in prompt
-    assert '"takeover_advice": "接手前先核对 claim、任务树和产物登记；不要把模型文本里的完成声明当成事实。"' in prompt
+    assert (
+        '"takeover_advice": "接手前先核对 claim、任务树和产物登记；不要把模型文本里的完成声明当成事实。"'
+        in prompt
+    )
 
 
 def test_background_claim_unknown_finish_status_is_explicit_protocol_error(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
-    claim = store.claim_background_run({'thread_id': thread.thread_id, 'reason': "unknown_status", 'lease_seconds': 10, 'now': 2.0})
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 1.0,
+        }
+    )
+    claim = store.claim_background_run(
+        {"thread_id": thread.thread_id, "reason": "unknown_status", "lease_seconds": 10, "now": 2.0}
+    )
     assert claim is not None
 
-    finished = store.finish_background_run({
-        'thread_id': thread.thread_id,
-        'claim_id': claim["claim_id"],
-        'status': "succeeded",
-        'now': 3.0,
-    })
+    finished = store.finish_background_run(
+        {
+            "thread_id": thread.thread_id,
+            "claim_id": claim["claim_id"],
+            "status": "succeeded",
+            "now": 3.0,
+        }
+    )
 
     assert finished is not None
     assert finished["status"] == "invalid_status"
@@ -5360,16 +5811,28 @@ def test_background_claim_unknown_finish_status_is_explicit_protocol_error(tmp_p
 
 def test_cancelled_background_claim_is_not_recovery_takeover_candidate(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
-    claim = store.claim_background_run({'thread_id': thread.thread_id, 'reason': "user_work", 'lease_seconds': 10, 'now': 2.0})
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 1.0,
+        }
+    )
+    claim = store.claim_background_run(
+        {"thread_id": thread.thread_id, "reason": "user_work", "lease_seconds": 10, "now": 2.0}
+    )
     assert claim is not None
 
-    finished = store.finish_background_run({
-        'thread_id': thread.thread_id,
-        'claim_id': claim["claim_id"],
-        'status': "cancelled",
-        'now': 3.0,
-    })
+    finished = store.finish_background_run(
+        {
+            "thread_id": thread.thread_id,
+            "claim_id": claim["claim_id"],
+            "status": "cancelled",
+            "now": 3.0,
+        }
+    )
 
     assert finished is not None
     assert finished["takeover"] == {"allowed": False, "reason": "user_interrupted"}
@@ -5377,14 +5840,32 @@ def test_cancelled_background_claim_is_not_recovery_takeover_candidate(tmp_path)
 
 # ── 后台 claim 心跳:线程缺失不得裸崩 daemon 线程(修多 owner ticking 下 KeyError 崩心跳) ──
 
+
 def test_renew_background_run_claim_present_thread_still_renews(tmp_path) -> None:
     """行为保持:线程在时续租照常成功、写入新的 heartbeat_at/expires_at。"""
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread({'canonical_user_id': "u1", 'channel': "internal", 'channel_conversation_id': "c1", 'channel_user_id': "u1", 'now': 1.0})
-    claim = store.claim_background_run({'thread_id': thread.thread_id, 'reason': "wake_signal", 'lease_seconds': 30, 'now': 2.0})
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "u1",
+            "channel": "internal",
+            "channel_conversation_id": "c1",
+            "channel_user_id": "u1",
+            "now": 1.0,
+        }
+    )
+    claim = store.claim_background_run(
+        {"thread_id": thread.thread_id, "reason": "wake_signal", "lease_seconds": 30, "now": 2.0}
+    )
     assert claim is not None
 
-    renewed = store.renew_background_run_claim({'thread_id': thread.thread_id, 'claim_id': claim["claim_id"], 'lease_seconds': 30, 'now': 5.0})
+    renewed = store.renew_background_run_claim(
+        {
+            "thread_id": thread.thread_id,
+            "claim_id": claim["claim_id"],
+            "lease_seconds": 30,
+            "now": 5.0,
+        }
+    )
 
     assert renewed is not None
     assert renewed["heartbeat_at"] == 5.0
@@ -5394,13 +5875,30 @@ def test_renew_background_run_claim_present_thread_still_renews(tmp_path) -> Non
 def test_renew_background_run_claim_missing_thread_returns_none_not_keyerror(tmp_path) -> None:
     """根因修:线程文件在长跑中消失(边缘/竞态)时,续租返回 None 让心跳优雅停机,绝不抛 KeyError。"""
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread({'canonical_user_id': "u1", 'channel': "internal", 'channel_conversation_id': "c1", 'channel_user_id': "u1", 'now': 1.0})
-    claim = store.claim_background_run({'thread_id': thread.thread_id, 'reason': "wake_signal", 'lease_seconds': 30, 'now': 2.0})
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "u1",
+            "channel": "internal",
+            "channel_conversation_id": "c1",
+            "channel_user_id": "u1",
+            "now": 1.0,
+        }
+    )
+    claim = store.claim_background_run(
+        {"thread_id": thread.thread_id, "reason": "wake_signal", "lease_seconds": 30, "now": 2.0}
+    )
     assert claim is not None
     # 模拟真机现象:claim 成功后线程文件不再可读(store 根竞态/外部清理/长跑中消失)。
     (store.threads_dir / f"{thread.thread_id}.json").unlink()
 
-    renewed = store.renew_background_run_claim({'thread_id': thread.thread_id, 'claim_id': claim["claim_id"], 'lease_seconds': 30, 'now': 5.0})
+    renewed = store.renew_background_run_claim(
+        {
+            "thread_id": thread.thread_id,
+            "claim_id": claim["claim_id"],
+            "lease_seconds": 30,
+            "now": 5.0,
+        }
+    )
 
     assert renewed is None  # 修前:此处抛 KeyError('unknown conversation thread') 崩心跳线程
 
@@ -5408,12 +5906,29 @@ def test_renew_background_run_claim_missing_thread_returns_none_not_keyerror(tmp
 def test_finish_background_run_missing_thread_finalizes_claim_without_crash(tmp_path) -> None:
     """收尾在 _run_with_heartbeat 的 finally 跑:线程缺失也要能释放已存在的 claim 租约,绝不二次抛 KeyError。"""
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.get_or_create_thread({'canonical_user_id': "u1", 'channel': "internal", 'channel_conversation_id': "c1", 'channel_user_id': "u1", 'now': 1.0})
-    claim = store.claim_background_run({'thread_id': thread.thread_id, 'reason': "wake_signal", 'lease_seconds': 30, 'now': 2.0})
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "u1",
+            "channel": "internal",
+            "channel_conversation_id": "c1",
+            "channel_user_id": "u1",
+            "now": 1.0,
+        }
+    )
+    claim = store.claim_background_run(
+        {"thread_id": thread.thread_id, "reason": "wake_signal", "lease_seconds": 30, "now": 2.0}
+    )
     assert claim is not None
     (store.threads_dir / f"{thread.thread_id}.json").unlink()
 
-    finished = store.finish_background_run({'thread_id': thread.thread_id, 'claim_id': claim["claim_id"], 'status': "finished", 'now': 5.0})
+    finished = store.finish_background_run(
+        {
+            "thread_id": thread.thread_id,
+            "claim_id": claim["claim_id"],
+            "status": "finished",
+            "now": 5.0,
+        }
+    )
 
     assert finished is not None
     assert finished["status"] == "finished"
@@ -5421,7 +5936,12 @@ def test_finish_background_run_missing_thread_finalizes_claim_without_crash(tmp_
 
 def test_finish_background_run_no_claim_file_returns_none_without_crash(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    assert store.finish_background_run({'thread_id': "thread-never", 'claim_id': "x", 'status': "finished", 'now': 1.0}) is None
+    assert (
+        store.finish_background_run(
+            {"thread_id": "thread-never", "claim_id": "x", "status": "finished", "now": 1.0}
+        )
+        is None
+    )
 
 
 def test_background_claim_heartbeat_stops_gracefully_when_renew_raises() -> None:
@@ -5434,7 +5954,15 @@ def test_background_claim_heartbeat_stops_gracefully_when_renew_raises() -> None
         def renew_background_run_claim(self, request: dict):
             raise KeyError("unknown conversation thread: thread-boom")
 
-    heartbeat = ConversationRunClaimHeartbeat({'store': _RaisingStore(), 'thread_id': "thread-boom", 'claim_id': "c1", 'lease_seconds': 1, 'interval_seconds': 0.05})
+    heartbeat = ConversationRunClaimHeartbeat(
+        {
+            "store": _RaisingStore(),
+            "thread_id": "thread-boom",
+            "claim_id": "c1",
+            "lease_seconds": 1,
+            "interval_seconds": 0.05,
+        }
+    )
     uncaught: list[type] = []
     previous_hook = _threading.excepthook
     _threading.excepthook = lambda args: uncaught.append(args.exc_type)

@@ -11,11 +11,18 @@ from ....subagents.models import (
     TaskStatus,
     task_status_in,
 )
-from ....tooling.models import BaseTool, ToolExecutionResult
+from ....tooling.models import (
+    BaseTool,
+    ConcurrencyPolicy,
+    EffectResolverPolicy,
+    ResourceScopePolicy,
+    ToolHandlerOutcome,
+    ToolRuntimePolicy,
+)
 from ...agent_tree.status import agent_tree_status_payload
 from ..context.live_summary import orchestration_payload_summary
 from ..tool_specs import (
-    build_inspect_agent_tree_spec,
+    build_inspect_agent_tree_model_spec,
 )
 
 if TYPE_CHECKING:
@@ -23,11 +30,17 @@ if TYPE_CHECKING:
 
 
 class InspectAgentTreeTool(BaseTool):
+    model_spec = build_inspect_agent_tree_model_spec()
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy("read_only"),
+        concurrency_policy=ConcurrencyPolicy("parallel_safe"),
+        resource_scopes=ResourceScopePolicy(parameter_names=("root_id", "run_id")),
+    )
+
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
-        self.spec = build_inspect_agent_tree_spec()
 
-    def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         cached = _cached_cooldown_payload_before_render(self.agent, params)
         if cached is not None:
             return _inspect_result(cached)
@@ -39,8 +52,8 @@ class InspectAgentTreeTool(BaseTool):
         return _inspect_result(payload)
 
 
-def _inspect_result(payload: dict[str, object]) -> ToolExecutionResult:
-    return ToolExecutionResult(
+def _inspect_result(payload: dict[str, object]) -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(
         "inspect_agent_tree",
         True,
         json.dumps(payload, ensure_ascii=False, indent=2),

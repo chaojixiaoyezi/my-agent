@@ -4,7 +4,6 @@ from pathlib import Path
 
 from agent_py_agent.agent.contracts.gates.adapters import (
     evaluate_state_transition_gate,
-    evaluate_tool_call_gate,
 )
 from agent_py_agent.agent.contracts.gates.artifact_gate import (
     evaluate_artifact_report_gate,
@@ -129,34 +128,6 @@ def test_gate_decision_recovery_envelope_marks_approval_as_user_input():
     assert recovery["requires_user"] is True
     assert recovery["next_status"] == "WAITING_APPROVAL"
     assert recovery["actions"][0]["recommended_action"] == "request_user_input"
-
-
-def test_tool_call_gate_accepts_runtime_tool_payload_after_structured_normalization():
-    decision = evaluate_tool_call_gate(
-        {"tool": "read_file", "path": "README.md"},
-        available_tools={"read_file"},
-        allowed_tools=["read_file"],
-    )
-
-    assert decision.allowed is True
-    assert decision.status == "ALLOW"
-    assert decision.evidence["tool_name"] == "read_file"
-    assert decision.evidence["operation_id"]
-    assert decision.evidence["idempotency_key"]
-
-
-def test_tool_call_gate_rejects_unknown_or_unauthorized_tools_before_execution():
-    unknown = evaluate_tool_call_gate({"tool": "magic_tool"}, available_tools={"read_file"})
-    unauthorized = evaluate_tool_call_gate(
-        {"tool": "write_file", "path": "out.md", "content": "x"},
-        available_tools={"write_file"},
-        allowed_tools=["read_file"],
-    )
-
-    assert unknown.allowed is False
-    assert unknown.finding_codes == ("TOOL_NOT_REGISTERED",)
-    assert unauthorized.allowed is False
-    assert unauthorized.finding_codes == ("TOOL_NOT_ALLOWED",)
 
 
 def test_run_contract_gate_requires_scope_and_records_effective_contract_hash():

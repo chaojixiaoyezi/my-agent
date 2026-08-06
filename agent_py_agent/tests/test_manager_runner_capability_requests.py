@@ -42,7 +42,7 @@ def capability_manager():
             self._work_logs = []
             self.actions = SimpleNamespace(_append_task_work_log=self._append_task_work_log)
             self.indexing = SimpleNamespace(index_runner_result=self._index_runner_result)
-            self.learning = SimpleNamespace(record_learning_candidates=self.record_learning_candidates)
+            self.memory_candidates = SimpleNamespace(record_result_candidates=self.record_result_candidates)
             self.runner_result = SubAgentRunnerResultService(self)
 
         def record_runner_result(self, params: RecordRunnerResultParams):
@@ -63,7 +63,7 @@ def capability_manager():
         def _index_runner_result(self, result, payload):
             pass
 
-        def record_learning_candidates(self, task, lessons):
+        def record_result_candidates(self, task, *, lessons, findings):
             return []
 
     return TestManager()

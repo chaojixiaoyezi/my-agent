@@ -6,6 +6,17 @@
 `task_node_closeout` 副本。canonical task/result 是唯一结果事实源；父代理通过结构化 status、blockers、
 findings、artifact refs 和 result payload 阅读子代理工作，再由模型向用户汇总。
 
+## Memory Candidate 接口
+
+- `SubAgentManagerInitParams.candidate_service` 只接收当前 owner 已创建的 CandidateService，不在
+  `subagents/` 内创建候选仓库。
+- `services/runner_result_service.py` 在 canonical result 已成功解析和保存后调用
+  `services/memory_candidates.py`；一次批次把去重后的 lesson 与结构化 finding 转成统一
+  `CandidateObservation`。
+- task/run/artifact/evidence 只以 typed refs 传递；子代理自然语言摘要不决定 scope、审核状态或晋升。
+- dry-run、坏 result 和未找到正式 CandidateService 时不写候选；正式结果事实仍由 canonical task/result
+  持有，Candidate 只是待审核的跨任务复用提议。
+
 ## 2026-07-30 启动上下文必需字段
 
 - `goal`、`output_contract`、`permissions`、`constraints` 和 `workspace_refs` 是子代理启动所需的

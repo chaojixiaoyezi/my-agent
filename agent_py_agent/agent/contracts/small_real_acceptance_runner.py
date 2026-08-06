@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from ..common.json_io import write_json_file
+from ..tooling.runtime_contracts import ToolCall, ToolResult
 from .failure_sample_capture import failure_samples_from_case_results
 from .real_tool_dry_run_contract import validate_real_tool_dry_run_probes
 from .small_real_acceptance_gate import validate_small_real_acceptance_gate
@@ -118,8 +119,10 @@ def _run_real_read_file(context: _SmallRunContext) -> SmallRealCaseResult:
     case_dir = _case_dir(context.workspace, "real_read_file")
     input_path = case_dir / "input.txt"
     input_path.write_text("hello from real read_file wrapper\n", encoding="utf-8")
-    result = context.registry.execute_call(
-        {"tool": "read_file", "path": _rel(input_path, context.workspace)},
+    result = _execute_probe_tool(
+        context,
+        "read_file",
+        {"path": _rel(input_path, context.workspace)},
         allowed_tools=["read_file"],
     )
     probe = read_file_probe(result)
@@ -128,13 +131,48 @@ def _run_real_read_file(context: _SmallRunContext) -> SmallRealCaseResult:
 
 def _run_controlled_exec_dry_run(context: _SmallRunContext) -> SmallRealCaseResult:
     case_dir = _case_dir(context.workspace, "controlled_exec_dry_run")
-    result = context.registry.execute_call(
-        {"tool": "controlled_exec", "command": "pwd", "apply": False, "cwd": _rel(case_dir, context.workspace)},
+    result = _execute_probe_tool(
+        context,
+        "controlled_exec",
+        {"command": "pwd", "apply": False, "cwd": _rel(case_dir, context.workspace)},
         allowed_tools=["controlled_exec"],
         write_boundary={"controlled_exec_grants": [controlled_exec_grant(case_dir)]},
     )
     probe = controlled_exec_probe(result)
     return _tool_probe_case(context, "controlled_exec_dry_run", case_dir, probe)
+
+
+def _execute_probe_tool(
+    context: _SmallRunContext,
+    tool_name: str,
+    arguments: dict[str, object],
+    *,
+    allowed_tools: list[str],
+    write_boundary: dict[str, object] | None = None,
+) -> ToolResult:
+    run_id = f"small-real:{tool_name}"
+    snapshot = context.registry.runtime_snapshot(
+        allowed_tools=allowed_tools,
+        run_id=run_id,
+    )
+    runtime = snapshot.runtime(tool_name)
+    if runtime is None:
+        raise RuntimeError(f"small real probe tool unavailable: {tool_name}")
+    call = ToolCall(
+        call_id=f"probe:{tool_name}",
+        tool_name=tool_name,
+        arguments=arguments,
+        source_protocol="native",
+        schema_hash=runtime.model_spec.schema_hash,
+        run_id=run_id,
+        turn_id=f"{run_id}:turn",
+        attempt_id=f"{run_id}:attempt",
+    )
+    return context.registry.execute_tool(
+        call,
+        write_boundary=write_boundary,
+        runtime_snapshot=snapshot,
+    ).result
 
 
 def _tool_probe_case(

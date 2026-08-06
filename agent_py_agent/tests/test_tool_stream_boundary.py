@@ -9,12 +9,9 @@ from agent_py_agent.agent.agent_core.tool_stream import (
     LongToolContentStreamAbort,
     MalformedToolProtocolStreamAbort,
     ToolBoundaryChunkFilter,
-    complete_machine_block_text,
-    cut_response_after_first_complete_tool_call,
     long_write_abort_response,
     malformed_tool_protocol_abort_response,
 )
-from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.tooling.content_transport_policy import (
     MAX_INLINE_WRITE_CONTENT_CHARS,
     STREAMING_INLINE_WRITE_ABORT_CHARS,
@@ -56,7 +53,7 @@ def test_tool_boundary_aborts_write_file_at_expanded_streaming_threshold() -> No
         raise AssertionError("expected streaming threshold abort")
 
 
-def test_long_write_abort_response_returns_parse_error_not_hidden_writer() -> None:
+def test_long_write_abort_response_returns_host_violation_not_fake_tool() -> None:
     response = long_write_abort_response(
         LongToolContentStreamAbort(
             LongToolContentAbortPayload(
@@ -64,50 +61,21 @@ def test_long_write_abort_response_returns_parse_error_not_hidden_writer() -> No
                 path="outputs/site/index.html",
                 chars=5000,
                 limit=4000,
-                content_prefix="<!doctype html>\n<html>",
             )
         ),
         backend="test-backend",
     )
 
-    payload = json.loads(response.text.split("\n", 2)[1])
-    assert payload["tool"] == "__parse_error__"
-    assert payload["source_tool"] == "write_file"
-    assert payload["path"] == "outputs/site/index.html"
-    assert payload["content_field_present"] is True
-    assert payload["streaming_content_chars"] == 5000
-    assert payload["streaming_content_limit"] == 4000
-    assert payload["previous_write_committed"] is False
-    assert payload["write_recovery"]["strategy"] == "restart_same_file_with_append_chunks"
-    assert payload["write_recovery"]["first_tool_call"]["mode"] == "overwrite"
-    assert payload["write_recovery"]["next_tool_call"]["mode"] == "append"
-    assert "raw" not in payload
-
-
-def test_tool_boundary_preserves_later_raw_write_block_when_trimming_prose() -> None:
-    response = ModelResponse(
-        text=(
-            "先建目录\n"
-            "[TOOL_CALL]\n"
-            '{"tool":"run_command","command":"mkdir -p out"}\n'
-            "[/TOOL_CALL]\n"
-            "然后写完整文件\n"
-            '[WRITE_FILE_RAW path="out/index.html"]\n'
-            "<!doctype html>\n"
-            "<html></html>\n"
-            "[/WRITE_FILE_RAW]\n"
-            "这些普通解释不应进入控制流"
-        ),
-        backend="test-backend",
-    )
-
-    cut, changed = cut_response_after_first_complete_tool_call(response)
-
-    assert changed is True
-    assert "先建目录" not in cut.text
-    assert "然后写完整文件" not in cut.text
-    assert "[TOOL_CALL]" in cut.text
-    assert "[WRITE_FILE_RAW" in cut.text
+    assert response.text == ""
+    violation = response.tool_protocol_violations[0]
+    evidence = json.loads(violation["evidence_preview"])
+    assert violation["code"] == "TOOL_INLINE_CONTENT_STREAM_ABORTED"
+    assert evidence["source_tool"] == "write_file"
+    assert evidence["streaming_content_chars"] == 5000
+    assert evidence["streaming_content_limit"] == 4000
+    assert evidence["previous_write_committed"] is False
+    assert "outputs/site/index.html" not in str(response.tool_protocol_violations)
+    assert len(evidence["path_sha256"]) == 64
 
 
 def test_tool_boundary_stops_stream_inspection_after_complete_tool_call() -> None:
@@ -140,7 +108,10 @@ def test_tool_boundary_ignores_inline_closing_marker_inside_json_string() -> Non
     }
     text = "[TOOL_CALL]\n" + json.dumps(payload, ensure_ascii=False) + "\n[/TOOL_CALL]"
 
-    assert complete_machine_block_text(text) == text
+    boundary = ToolBoundaryChunkFilter(None)
+    boundary(text)
+
+    assert boundary.complete_tool_text() == text
 
 
 def test_tool_boundary_ignores_near_tool_protocol_lines_without_exact_marker() -> None:
@@ -151,19 +122,19 @@ def test_tool_boundary_ignores_near_tool_protocol_lines_without_exact_marker() -
     assert boundary.complete_tool_text() == ""
 
 
-def test_tool_boundary_collects_complete_machine_blocks_without_abort() -> None:
+def test_tool_boundary_detects_first_complete_block_without_rewriting_response() -> None:
     boundary = ToolBoundaryChunkFilter(None)
-    boundary(
+    text = (
         '[TOOL_CALL]\n{"tool":"read_file","path":"a.md"}\n[/TOOL_CALL]\n'
         '[TOOL_CALL]\n{"tool":"read_file","path":"b.md"}\n[/TOOL_CALL]\n'
         "这段普通解释不应进入工具执行"
     )
+    boundary(text)
 
-    machine_text = complete_machine_block_text(boundary._text)
-
-    assert '"path":"a.md"' in machine_text
-    assert '"path":"b.md"' in machine_text
-    assert "普通解释" not in machine_text
+    assert boundary._text == text
+    assert boundary.complete_tool_text() == (
+        '[TOOL_CALL]\n{"tool":"read_file","path":"a.md"}\n[/TOOL_CALL]'
+    )
 
 
 def test_tool_boundary_aborts_repeated_unclosed_tool_markers() -> None:
@@ -192,7 +163,7 @@ def test_tool_boundary_aborts_second_unclosed_tool_start_marker() -> None:
         raise AssertionError("expected second unclosed tool marker abort")
 
 
-def test_malformed_tool_protocol_abort_response_uses_parse_error_tool() -> None:
+def test_malformed_tool_protocol_abort_response_uses_host_violation() -> None:
     response = malformed_tool_protocol_abort_response(
         MalformedToolProtocolStreamAbort(
             start_marker="[TOOL_CALL]",
@@ -202,6 +173,8 @@ def test_malformed_tool_protocol_abort_response_uses_parse_error_tool() -> None:
         backend="test-backend",
     )
 
-    payload = json.loads(response.text.split("\n", 2)[1])
-    assert payload["tool"] == "__parse_error__"
-    assert "TOOL_CALL" in payload["error"]
+    assert response.text == ""
+    violation = response.tool_protocol_violations[0]
+    evidence = json.loads(violation["evidence_preview"])
+    assert violation["code"] == "TOOL_CALL_UNCLOSED"
+    assert evidence == {"limit": 8, "marker_count": 9, "start_marker": "[TOOL_CALL]"}

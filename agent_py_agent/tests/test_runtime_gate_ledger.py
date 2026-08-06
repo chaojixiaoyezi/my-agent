@@ -3,21 +3,34 @@ from __future__ import annotations
 import sqlite3
 from types import SimpleNamespace
 
-from agent_py_agent.agent.action_protocol import RunScope, ToolCallEnvelope
+from agent_py_agent.agent.action_protocol import RunScope
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core._tool_loop_service import ToolLoopService
-from agent_py_agent.agent.agent_core.runner.stage_trace import RunnerToolStageTraceRequest
 from agent_py_agent.agent.agent_core.tool_call_runtime import (
     ToolCallRuntimeRequest,
     execute_traced_tool_call,
 )
-from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallRecordParams
+from agent_py_agent.agent.agent_core.tool_loop.recovery import runtime_run_scope
+from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
+    ToolCallExecuteParams,
+    ToolCallRecordParams,
+)
 from agent_py_agent.agent.agent_core.tool_runtime_ledger import (
     persist_tool_runtime_ledger,
     write_boundary_with_runtime_ledger,
 )
 from agent_py_agent.agent.local_storage import LocalStore, RuntimeGateLedgerRecord
-from agent_py_agent.agent.tooling.models import ToolExecutionResult
+from agent_py_agent.agent.tooling.action_policy import ActionDecision
+from agent_py_agent.agent.tooling.executor import ToolExecution
+from agent_py_agent.agent.tooling.models import ToolHandlerOutcome
+from agent_py_agent.agent.tooling.runtime_contracts import (
+    ProviderToolCapability,
+    ToolCall,
+    ToolOperation,
+    ToolProtocolSnapshot,
+    ToolResult,
+    ToolSuccessFacts,
+)
 
 
 def test_local_store_persists_runtime_gate_records_for_replay(tmp_path):
@@ -106,13 +119,14 @@ def test_tool_loop_record_persists_runtime_gate_ledger(tmp_path):
     agent = SimpleNamespace(root=tmp_path, local_store=store)
     params = _loop_params(write_boundary={})
 
+    call = _runtime_gate_call()
     ToolLoopService(agent)._record_tool_call(
         ToolCallRecordParams(
             params=params,
             tool_rounds=1,
             idx=1,
-            payload={"tool": "write_file", "path": "out/report.md"},
-            result=_runtime_gate_result(),
+            call=call,
+            result=_runtime_gate_result(call),
         )
     )
 
@@ -120,10 +134,10 @@ def test_tool_loop_record_persists_runtime_gate_ledger(tmp_path):
     assert len(records) == 1
     assert records[0].operation_id == "op-1"
     assert records[0].runtime_gate["allowed"] is True
-    assert records[0].parameters == {"tool": "write_file", "path": "out/report.md"}
+    assert records[0].parameters == {"path": "out/report.md"}
 
 
-def test_execute_traced_tool_call_passes_explicit_run_scope_envelope(tmp_path):
+def test_execute_traced_tool_call_passes_canonical_call_and_trusted_scope(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
     tools = _CapturingTools()
     agent = SimpleNamespace(tools=tools, local_store=store)
@@ -139,25 +153,23 @@ def test_execute_traced_tool_call_passes_explicit_run_scope_envelope(tmp_path):
         },
         write_boundary={},
     )
+    call = _runtime_gate_call(run_id="run-child")
     request = ToolCallRuntimeRequest(
         agent=agent,
-        request=SimpleNamespace(params=params),
-        payload={"tool": "write_file", "path": "out/report.md"},
-        trace_request=RunnerToolStageTraceRequest(agent=agent, params=params, tool_rounds=1, idx=1, payload={}),
+        request=ToolCallExecuteParams(params, 1, 1, call),
+        call=call,
     )
 
     execute_traced_tool_call(request)
 
-    assert isinstance(tools.captured_payload, ToolCallEnvelope)
-    assert tools.captured_payload.scope.run_id == "run-child"
-    assert tools.captured_payload.scope.parent_run_id == "run-parent"
-    assert tools.captured_payload.scope.root_run_id == "run-root"
-    assert tools.captured_payload.scope.root_task_id == "task-root"
-    assert tools.captured_payload.scope.depth == 1
-    assert tools.captured_payload.scope.agent_kind == "child_agent"
-    assert tools.captured_trusted_run_context == {
-        "task_attributes": params.task_attributes
-    }
+    assert isinstance(tools.captured_call, ToolCall)
+    assert tools.captured_call.run_id == "run-child"
+    assert tools.captured_call.arguments == {"path": "out/report.md"}
+    assert tools.captured_trusted_run_context["task_attributes"] == params.task_attributes
+    assert (
+        tools.captured_trusted_run_context["run_scope"]
+        == runtime_run_scope(agent, params).to_dict()
+    )
 
 
 def test_tool_loop_record_appends_agent_event_with_explicit_scope(tmp_path):
@@ -176,13 +188,14 @@ def test_tool_loop_record_appends_agent_event_with_explicit_scope(tmp_path):
         write_boundary={},
     )
 
+    call = _runtime_gate_call(run_id="run-child")
     ToolLoopService(agent)._record_tool_call(
         ToolCallRecordParams(
             params=params,
             tool_rounds=1,
             idx=1,
-            payload={"tool": "write_file", "path": "out/report.md"},
-            result=_runtime_gate_result(),
+            call=call,
+            result=_runtime_gate_result(call),
         )
     )
 
@@ -198,8 +211,8 @@ def test_tool_loop_record_appends_agent_event_with_explicit_scope(tmp_path):
     assert event.payload["scope"]["root_run_id"] == "run-root"
     assert event.payload["operation_id"] == "op-1"
     assert event.payload["tool_operation_status"] == "succeeded"
-    assert event.payload["tool_operation_action"] == "executed"
     assert event.payload["tool_operation_replayed"] is False
+    assert event.payload["effect_outcome"] == "confirmed"
 
 
 def test_runtime_ledger_locked_control_plane_does_not_crash_tool_loop():
@@ -216,8 +229,8 @@ def test_runtime_ledger_locked_control_plane_does_not_crash_tool_loop():
             "tool": "write_file",
             "ok": True,
             "result_ref": "artifact://run-1/op-1",
+            "operation_id": "op-1",
             "runtime_gate": {"gate": "tool_execution", "allowed": True},
-            "tool_protocol_v2": {"operation_id": "op-1"},
         },
     )
 
@@ -250,8 +263,8 @@ def test_runtime_ledger_disk_io_error_does_not_crash_tool_loop():
             "tool": "write_file",
             "ok": True,
             "result_ref": "artifact://run-1/op-1",
+            "operation_id": "op-1",
             "runtime_gate": {"gate": "tool_execution", "allowed": True},
-            "tool_protocol_v2": {"operation_id": "op-1"},
         },
     )
 
@@ -277,11 +290,11 @@ def test_execute_traced_tool_call_does_not_inject_audit_as_authority(tmp_path):
     tools = _CapturingTools()
     agent = SimpleNamespace(tools=tools, local_store=store)
     params = _loop_params(run_id="run-1", task_id="task-1", write_boundary={})
+    call = _runtime_gate_call()
     request = ToolCallRuntimeRequest(
         agent=agent,
-        request=SimpleNamespace(params=params),
-        payload={"tool": "write_file", "path": "out/report.md"},
-        trace_request=RunnerToolStageTraceRequest(agent=agent, params=params, tool_rounds=1, idx=1, payload={}),
+        request=ToolCallExecuteParams(params, 1, 1, call),
+        call=call,
     )
 
     execute_traced_tool_call(request)
@@ -306,7 +319,9 @@ def test_write_boundary_injects_tool_rate_limit_records(tmp_path):
     )
     agent = SimpleNamespace(local_store=store)
 
-    boundary = write_boundary_with_runtime_ledger(agent, _loop_params(run_id="run-1", write_boundary={}))
+    boundary = write_boundary_with_runtime_ledger(
+        agent, _loop_params(run_id="run-1", write_boundary={})
+    )
 
     assert boundary["tool_rate_limit_records"] == (
         {
@@ -701,7 +716,9 @@ def test_write_boundary_locks_active_child_declared_outputs() -> None:
     )
     agent = SimpleNamespace(local_store=None, subagents=SimpleNamespace(list_runs=lambda: [child]))
 
-    boundary = write_boundary_with_runtime_ledger(agent, _loop_params(run_id="run-1", write_boundary={}))
+    boundary = write_boundary_with_runtime_ledger(
+        agent, _loop_params(run_id="run-1", write_boundary={})
+    )
 
     assert boundary["locked_files"] == ["output/child-report.md"]
 
@@ -715,7 +732,9 @@ def test_write_boundary_does_not_lock_finished_child_declared_outputs() -> None:
     )
     agent = SimpleNamespace(local_store=None, subagents=SimpleNamespace(list_runs=lambda: [child]))
 
-    boundary = write_boundary_with_runtime_ledger(agent, _loop_params(run_id="run-1", write_boundary={}))
+    boundary = write_boundary_with_runtime_ledger(
+        agent, _loop_params(run_id="run-1", write_boundary={})
+    )
 
     assert "locked_files" not in boundary
 
@@ -737,7 +756,9 @@ def test_write_boundary_never_locks_run_out_of_its_own_declared_outputs() -> Non
         status="RUNNING",
         attributes={"output_files": ["output/kitchen.py"]},
     )
-    agent = SimpleNamespace(local_store=None, subagents=SimpleNamespace(list_runs=lambda: [me, sibling]))
+    agent = SimpleNamespace(
+        local_store=None, subagents=SimpleNamespace(list_runs=lambda: [me, sibling])
+    )
 
     # 子代理 runner 轮:run_id=自己,task_id=根任务 → 自己的申报不锁,兄弟的仍锁
     boundary = write_boundary_with_runtime_ledger(
@@ -765,6 +786,43 @@ def test_write_boundary_master_still_locked_from_active_child_outputs() -> None:
     assert boundary["locked_files"] == ["output/inventory.py"]
 
 
+def test_write_boundary_descendant_does_not_lock_ancestor_delegated_output() -> None:
+    """A leaf may write a parent-delegated output while sibling outputs stay locked."""
+
+    parent = SimpleNamespace(
+        id="coordinator-1",
+        parent_id="req-root",
+        root_id="req-root",
+        status="RUNNING",
+        attributes={"output_files": ["output/site.html"]},
+    )
+    leaf = SimpleNamespace(
+        id="leaf-1",
+        parent_id="coordinator-1",
+        root_id="req-root",
+        status="RUNNING",
+        attributes={},
+    )
+    sibling = SimpleNamespace(
+        id="sibling-1",
+        parent_id="req-root",
+        root_id="req-root",
+        status="RUNNING",
+        attributes={"output_files": ["output/sibling.html"]},
+    )
+    agent = SimpleNamespace(
+        local_store=None,
+        subagents=SimpleNamespace(list_runs=lambda: [parent, leaf, sibling]),
+    )
+
+    boundary = write_boundary_with_runtime_ledger(
+        agent,
+        _loop_params(run_id="leaf-1", task_id="req-root", write_boundary={}),
+    )
+
+    assert boundary["locked_files"] == ["output/sibling.html"]
+
+
 def test_tool_rate_limit_records_reset_failures_on_done_status(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
     for status, timestamp in (("failed", 10.0), ("done", 20.0)):
@@ -783,7 +841,9 @@ def test_tool_rate_limit_records_reset_failures_on_done_status(tmp_path):
         )
     agent = SimpleNamespace(local_store=store)
 
-    boundary = write_boundary_with_runtime_ledger(agent, _loop_params(run_id="run-1", write_boundary={}))
+    boundary = write_boundary_with_runtime_ledger(
+        agent, _loop_params(run_id="run-1", write_boundary={})
+    )
 
     assert boundary["tool_rate_limit_records"][0]["consecutive_failures"] == 0
     assert boundary["tool_rate_limit_records"][0]["last_success_at"] == 20.0
@@ -793,23 +853,37 @@ def test_tool_rate_limit_records_reset_failures_on_done_status(tmp_path):
 class _CapturingTools:
     def __init__(self):
         self.captured_write_boundary = None
-        self.captured_payload = None
+        self.captured_call = None
         self.captured_trusted_run_context = None
 
-    def execute_call(
+    def execute_tool(
         self,
-        payload,
+        call,
         *,
-        allowed_tools,
         write_boundary,
         runtime_snapshot,
         trusted_run_context=None,
+        cancellation_token=None,
+        required_action=None,
+        pre_handler_gate=None,
+        output_archiver=None,
     ):
-        _ = (allowed_tools, runtime_snapshot)
-        self.captured_payload = payload
+        _ = (
+            runtime_snapshot,
+            cancellation_token,
+            required_action,
+            pre_handler_gate,
+            output_archiver,
+        )
+        self.captured_call = call
         self.captured_write_boundary = write_boundary
         self.captured_trusted_run_context = trusted_run_context
-        return ToolExecutionResult("write_file", True, "ok")
+        return ToolExecution(
+            call,
+            ActionDecision("allow"),
+            ToolResult.succeeded(call, "ok"),
+            ("received", "running", "succeeded", "persisted", "projected"),
+        )
 
 
 class _LockedStore:
@@ -853,32 +927,60 @@ def _loop_params(
         one_shot_tool_calls=set(),
         executed_tools=[],
         archive_tool_calls=[],
+        tool_protocol_snapshot=ToolProtocolSnapshot(
+            run_id,
+            "text",
+            ProviderToolCapability(
+                provider="test",
+                endpoint="local://test",
+                model="fake",
+                stream=False,
+                native_supported=False,
+                evidence="runtime_gate_ledger_fixture",
+            ),
+        ),
     )
 
 
-def _runtime_gate_result() -> ToolExecutionResult:
-    return ToolExecutionResult(
-        "write_file",
-        True,
+def _runtime_gate_call(*, run_id: str = "run-1") -> ToolCall:
+    return ToolCall(
+        call_id="call-1",
+        tool_name="write_file",
+        arguments={"path": "out/report.md"},
+        source_protocol="native",
+        schema_hash="sha256:" + "0" * 64,
+        run_id=run_id,
+        turn_id="turn-1",
+        attempt_id="attempt-1",
+        operation_id="op-1",
+        idempotency_key="idem-1",
+    )
+
+
+def _runtime_gate_result(call: ToolCall) -> ToolResult:
+    return ToolResult.succeeded(
+        call,
         "ok",
-        result_envelope={
-            "operation_id": "op-1",
-            "runtime_gate": {
-                "gate": "tool_execution",
-                "allowed": True,
-                "evidence": {"idempotency_key": "idem-1"},
+        facts=ToolSuccessFacts(
+            operation=ToolOperation(
+                operation_id="op-1",
+                idempotency_key="idem-1",
+                args_hash=call.args_hash,
+                status="succeeded",
+                handler_executed=True,
+                effect_outcome="confirmed",
+                effect_source_ref="tool-operation://run-1/op-1",
+            ),
+            effect_outcome="confirmed",
+            effect_source_ref="tool-operation://run-1/op-1",
+            metadata={
+                "handler_details": {
+                    "runtime_gate": {
+                        "gate": "tool_execution",
+                        "allowed": True,
+                        "evidence": {"idempotency_key": "idem-1"},
+                    },
+                }
             },
-            "tool_protocol_v2": {
-                "operation_id": "op-1",
-                "idempotency_key": "idem-1",
-            },
-            "tool_operation": {
-                "schema_version": "tool_operation.v1",
-                "operation_id": "op-1",
-                "status": "succeeded",
-                "action": "executed",
-                "replayed": False,
-                "idempotency_scope": "operation",
-            },
-        },
+        ),
     )

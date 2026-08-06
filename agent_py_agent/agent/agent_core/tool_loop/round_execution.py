@@ -3,18 +3,18 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
 from typing import ClassVar, Literal
 
 from ...backends import ModelResponse
-from ...concurrency.interrupt import is_interrupted
+from ...concurrency.interrupt import is_interrupted, register_interrupt_callback
 from ...conversation.authority import conversation_transcript_is_authoritative
 from ...memory_archive import estimate_tokens
-from ...tooling.models import (
-    ToolExecutionResult,
-    ToolFailureStage,
-    apply_tool_execution_facts,
-)
+from ...tooling.action_policy import ActionDecision
+from ...tooling.concurrency import concurrency_conflicts, describe_tool_concurrency
+from ...tooling.executor import ToolExecution
+from ...tooling.runtime_contracts import ToolCall, ToolFailureFacts, ToolResult
 from .._runtime_params import ToolLoopExecuteParams
 from ..model.context_pressure import should_compact_before_more_tool_output
 from ..runtime.context_compactor import runtime_compact_policy
@@ -63,8 +63,15 @@ class ToolCallRecordParams:
     params: ToolLoopExecuteParams
     tool_rounds: int
     idx: int
-    payload: object
-    result: ToolExecutionResult
+    call: ToolCall
+    result: ToolResult
+    execution_states: tuple[str, ...] = ()
+
+    @property
+    def payload(self) -> dict[str, object]:
+        """Read-only projection for adjacent reporters; execution authority is ``call``."""
+
+        return _tool_call_payload(self.call)
 
 
 @dataclass(frozen=True)
@@ -74,7 +81,7 @@ class ToolCallExecuteParams:
     params: ToolLoopExecuteParams
     tool_rounds: int
     idx: int
-    payload: object
+    call: ToolCall
 
 
 @dataclass(frozen=True)
@@ -85,8 +92,8 @@ class ToolRoundExecutionRequest:
     params: ToolLoopExecuteParams
     tool_rounds: int
     response: ModelResponse
-    calls: list[dict[str, object]]
-    execute_one: Callable[[ToolCallExecuteParams], ToolExecutionResult]
+    calls: list[ToolCall]
+    execute_one: Callable[[ToolCallExecuteParams], ToolExecution]
     record_one: Callable[[ToolCallRecordParams], None]
     current_prompt: str = ""
 
@@ -95,105 +102,430 @@ class ToolRoundExecutionRequest:
 class ToolProgressEvent:
     request: ToolRoundExecutionRequest
     idx: int
-    payload: object
+    call: ToolCall
     phase: Literal["deferred", "started", "finished", "interrupted"]
     status: str
     started_at: float | None = None
-    result: ToolExecutionResult | None = None
+    result: ToolResult | None = None
 
 
-# LLM: 本入口顺序执行当前模型轮的 typed 工具调用；compact、安全中断、编排去重和记录顺序均是调用契约，变更要同步工具轮测试。
-# 函数用途: 执行一轮模型请求的工具列表，逐项记录开始、结果、中断或因 compact 延后的真实状态。
+@dataclass
+class _ToolRoundProgress:
+    subagent_output_written: bool = False
+    stateful_orchestration_seen: bool = False
+    handled_count: int = 0
+    deferred_reason: str = ""
+
+
+# LLM: 本入口按 ToolRuntimePolicy 划分只读并发段和顺序屏障；无论实际完成顺序如何，记录顺序始终与 provider 调用顺序一致。
+# 函数用途: 执行一轮 canonical 工具调用，并为执行、拒绝、延后与取消都写入配对 ToolResult。
 def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
     before_context_count = len(getattr(request.params, "tool_context", []) or [])
     _append_assistant_tool_round_context(request)
-    calls = _calls_for_this_execution_round(request)
-    subagent_output_written = False
-    stateful_orchestration_seen = False
-    handled_count = 0
-    for idx, payload in enumerate(calls, start=1):
-        payload = _bound_conversation_workspace_payload(request.agent, payload)
-        tool_name = _tool_name(payload)
-        # 协作中断安全点(批3):本线程被取消就不再开新工具,已完成的照常留痕。
-        if is_interrupted():
-            _record_interrupted_call(request, idx, payload)
-            handled_count = idx
+    calls = [
+        _bound_conversation_workspace_call(request.agent, call)
+        for call in _calls_for_this_execution_round(request)
+    ]
+    progress = _ToolRoundProgress()
+    position = 0
+    while position < len(calls):
+        if _defer_unstarted_calls_if_needed(request, calls, position, progress):
             break
-        if _should_defer_for_compact(request, tool_name):
-            _emit_tool_progress(ToolProgressEvent(request, idx, payload, "deferred", "延后"))
-            result = _compact_deferred_result(tool_name)
-            request.record_one(
-                ToolCallRecordParams(request.params, request.tool_rounds, idx, payload, result)
-            )
-            _append_compact_deferred_notice(request, tool_name, idx)
-            handled_count = idx
-            break
-        started_at = time.monotonic()
-        _emit_tool_progress(ToolProgressEvent(request, idx, payload, "started", "开始"))
-        if _should_defer_orchestration(stateful_orchestration_seen, tool_name):
-            result = _deferred_orchestration_result(tool_name)
-        else:
-            result = request.execute_one(
-                ToolCallExecuteParams(request.params, request.tool_rounds, idx, payload)
-            )
-        if result.duration_ms <= 0:
-            apply_tool_execution_facts(
-                result,
-                duration_ms=(time.monotonic() - started_at) * 1000,
-            )
-        _emit_tool_progress(
-            ToolProgressEvent(
+        parallel_end = _parallel_segment_end(request, calls, position)
+        if parallel_end - position >= 2:
+            position = _execute_parallel_step(
                 request,
-                idx,
-                payload,
-                "finished",
-                _finished_status(result),
-                started_at,
-                result,
+                calls,
+                position,
+                parallel_end,
+                before_context_count,
+                progress,
             )
+            if progress.deferred_reason:
+                break
+            continue
+        _execute_serial_step(
+            request,
+            calls,
+            position,
+            before_context_count,
+            progress,
         )
-        request.record_one(
-            ToolCallRecordParams(request.params, request.tool_rounds, idx, payload, result)
-        )
-        handled_count = idx
-        subagent_output_written = subagent_output_written or is_subagent_output_json_write(
-            SubagentOutputWriteCheck(request.agent, request.params, payload, result)
-        )
-        stateful_orchestration_seen = (
-            stateful_orchestration_seen or tool_name in _STATEFUL_ORCHESTRATION_TOOLS
-        )
-        if transition := _runtime_transition_after_tool(result):
-            state = getattr(request.params, "live_archive_state", None)
-            if isinstance(state, dict):
-                state["pending_runtime_transition"] = {
-                    **transition,
-                    "tool": tool_name,
-                    "tool_round": request.tool_rounds,
-                    "tool_index": idx,
-                }
-            # The successful handler changed the durable authority used to
-            # build model context.  Do not execute calls selected from the old
-            # snapshot and do not ask the model to reason over that stale
-            # snapshot again; completion.py ends this bounded slice and the
-            # normal continuation reloads canonical state.
+        if progress.deferred_reason:
             break
-        if _round_context_over_compact_budget(request, before_context_count):
-            _record_remaining_content_calls_as_deferred(request, calls, start_idx=idx + 1)
-            break
-    _append_deferred_tool_call_notice(request, handled_count=handled_count)
+        position += 1
+    _record_round_limit_deferred_calls(request, processed_count=len(calls))
+    if len(calls) < len(request.calls) and not progress.deferred_reason:
+        progress.deferred_reason = "达到宿主设置的单轮工具调用上限"
+    _append_deferred_tool_call_notice(
+        request,
+        handled_count=progress.handled_count,
+        reason=progress.deferred_reason,
+    )
     _enforce_turn_context_budget(request.params, before_context_count)
-    return subagent_output_written
+    return progress.subagent_output_written
+
+
+def _defer_unstarted_calls_if_needed(
+    request: ToolRoundExecutionRequest,
+    calls: list[ToolCall],
+    position: int,
+    progress: _ToolRoundProgress,
+) -> bool:
+    idx = position + 1
+    call = calls[position]
+    # 取消是顺序屏障：当前及后续未启动调用都得到 cancelled 结果，不能留下孤儿 ToolCall。
+    if _round_cancelled(request):
+        _record_unstarted_calls(
+            request,
+            calls,
+            start_idx=idx,
+            result_factory=_interrupted_result,
+            phase="interrupted",
+            status="中断",
+        )
+        progress.deferred_reason = "任务已被取消"
+        return True
+    if not _should_defer_for_compact(request, call.tool_name):
+        return False
+    _record_unstarted_calls(
+        request,
+        calls,
+        start_idx=idx,
+        result_factory=_compact_deferred_result,
+        phase="deferred",
+        status="延后",
+    )
+    _append_compact_deferred_notice(request, call.tool_name, idx)
+    progress.deferred_reason = "上下文需要先 compact/resume"
+    return True
+
+
+def _execute_parallel_step(
+    request: ToolRoundExecutionRequest,
+    calls: list[ToolCall],
+    position: int,
+    parallel_end: int,
+    before_context_count: int,
+    progress: _ToolRoundProgress,
+) -> int:
+    outcomes = _execute_parallel_segment(
+        request,
+        calls[position:parallel_end],
+        start_idx=position + 1,
+    )
+    transition_index = 0
+    for outcome_idx, outcome_call, started_at, execution in outcomes:
+        wrote_output, transition = _record_execution(
+            request,
+            outcome_idx,
+            started_at,
+            execution,
+        )
+        progress.subagent_output_written |= wrote_output
+        if transition and not transition_index:
+            _remember_runtime_transition(
+                request,
+                transition,
+                tool_name=outcome_call.tool_name,
+                idx=outcome_idx,
+            )
+            transition_index = outcome_idx
+    progress.handled_count = parallel_end
+    if transition_index:
+        _record_runtime_transition_deferred_calls(
+            request,
+            calls,
+            start_idx=parallel_end + 1,
+        )
+        progress.deferred_reason = "前一个工具改变了耐久运行上下文"
+    elif _round_cancelled(request):
+        _record_unstarted_calls(
+            request,
+            calls,
+            start_idx=parallel_end + 1,
+            result_factory=_interrupted_result,
+            phase="interrupted",
+            status="中断",
+        )
+        progress.deferred_reason = "任务已被取消"
+    elif _round_context_over_compact_budget(request, before_context_count):
+        _record_remaining_content_calls_as_deferred(
+            request,
+            calls,
+            start_idx=parallel_end + 1,
+        )
+        progress.deferred_reason = "上下文需要先 compact/resume"
+    return parallel_end
+
+
+def _execute_serial_step(
+    request: ToolRoundExecutionRequest,
+    calls: list[ToolCall],
+    position: int,
+    before_context_count: int,
+    progress: _ToolRoundProgress,
+) -> None:
+    idx = position + 1
+    call = calls[position]
+    started_at = time.monotonic()
+    _emit_tool_progress(ToolProgressEvent(request, idx, call, "started", "开始"))
+    if _should_defer_orchestration(progress.stateful_orchestration_seen, call.tool_name):
+        execution = _synthetic_execution(
+            call,
+            _deferred_orchestration_result(call),
+            "ORCHESTRATION_CALL_DEFERRED",
+        )
+    else:
+        execution = request.execute_one(
+            ToolCallExecuteParams(request.params, request.tool_rounds, idx, call)
+        )
+    wrote_output, transition = _record_execution(request, idx, started_at, execution)
+    progress.handled_count = idx
+    progress.subagent_output_written |= wrote_output
+    progress.stateful_orchestration_seen |= call.tool_name in _STATEFUL_ORCHESTRATION_TOOLS
+    if transition:
+        _remember_runtime_transition(
+            request,
+            transition,
+            tool_name=call.tool_name,
+            idx=idx,
+        )
+        _record_runtime_transition_deferred_calls(request, calls, start_idx=idx + 1)
+        progress.deferred_reason = "前一个工具改变了耐久运行上下文"
+    elif _round_context_over_compact_budget(request, before_context_count):
+        _record_remaining_content_calls_as_deferred(request, calls, start_idx=idx + 1)
+        progress.deferred_reason = "上下文需要先 compact/resume"
+
+
+@dataclass(frozen=True)
+class _ParallelThreadContext:
+    transient_values: tuple[tuple[str, object], ...]
+    subagent_run_id: str
+    subagent_attempt_id: str
+    task_attributes: dict[str, object] | None
+
+
+def _parallel_segment_end(
+    request: ToolRoundExecutionRequest,
+    calls: list[ToolCall],
+    start: int,
+) -> int:
+    descriptors = []
+    position = start
+    while position < len(calls) and position - start < _MAX_PARALLEL_TOOL_CALLS:
+        call = calls[position]
+        if _should_defer_for_compact(request, call.tool_name):
+            break
+        descriptor = describe_tool_concurrency(
+            getattr(request.params, "tool_runtime_snapshot", None),
+            call,
+        )
+        if not descriptor.parallel_eligible:
+            break
+        if any(concurrency_conflicts(descriptor, prior) for prior in descriptors):
+            break
+        descriptors.append(descriptor)
+        position += 1
+    return position
+
+
+def _execute_parallel_segment(
+    request: ToolRoundExecutionRequest,
+    calls: list[ToolCall],
+    *,
+    start_idx: int,
+) -> list[tuple[int, ToolCall, float, ToolExecution]]:
+    context = _capture_parallel_thread_context(request.agent)
+    scheduled: list[tuple[int, ToolCall, float]] = []
+    for offset, call in enumerate(calls):
+        idx = start_idx + offset
+        started_at = time.monotonic()
+        _emit_tool_progress(ToolProgressEvent(request, idx, call, "started", "开始"))
+        scheduled.append((idx, call, started_at))
+    token = getattr(request.params, "cancellation_token", None)
+    cancel = getattr(token, "cancel", None)
+    callback = (lambda: cancel("interrupted")) if callable(cancel) else (lambda: None)
+    workers = min(8, len(scheduled))
+    with register_interrupt_callback(callback):
+        with ThreadPoolExecutor(
+            max_workers=workers,
+            thread_name_prefix="my-agent-tool",
+        ) as pool:
+            futures = [
+                pool.submit(
+                    _execute_parallel_call,
+                    request,
+                    idx,
+                    call,
+                    context,
+                )
+                for idx, call, _started_at in scheduled
+            ]
+            executions = [future.result() for future in futures]
+    return [
+        (idx, execution.call, started_at, execution)
+        for (idx, _call, started_at), execution in zip(
+            scheduled,
+            executions,
+            strict=True,
+        )
+    ]
+
+
+def _execute_parallel_call(
+    request: ToolRoundExecutionRequest,
+    idx: int,
+    call: ToolCall,
+    context: _ParallelThreadContext,
+) -> ToolExecution:
+    restore_values = _install_parallel_thread_context(request.agent, context)
+    previous_runner: dict[str, object] | None = None
+    if context.subagent_run_id:
+        from ..runner.context import set_current_subagent_context
+
+        previous_runner = set_current_subagent_context(
+            request.agent,
+            run_id=context.subagent_run_id,
+            attempt_id=context.subagent_attempt_id,
+            task_attributes=context.task_attributes,
+        )
+    try:
+        return request.execute_one(
+            ToolCallExecuteParams(request.params, request.tool_rounds, idx, call)
+        )
+    finally:
+        if previous_runner is not None:
+            from ..runner.context import restore_current_subagent_context
+
+            restore_current_subagent_context(request.agent, previous_runner)
+        _restore_parallel_thread_context(request.agent, restore_values)
+
+
+def _capture_parallel_thread_context(agent: object) -> _ParallelThreadContext:
+    from ..runner.context import (
+        ThreadLocalAgentAttribute,
+        current_subagent_attempt_id,
+        current_subagent_run_id,
+        current_task_attributes,
+    )
+
+    values: list[tuple[str, object]] = []
+    for name in (
+        "_current_user_prompt",
+        "_current_run_params",
+        "_current_run_task_workspace",
+        "_current_skill_snapshot",
+    ):
+        descriptor = getattr(type(agent), name, None)
+        if isinstance(descriptor, ThreadLocalAgentAttribute) and hasattr(agent, name):
+            values.append((name, getattr(agent, name)))
+    attrs = current_task_attributes(agent)
+    return _ParallelThreadContext(
+        tuple(values),
+        current_subagent_run_id(agent),
+        current_subagent_attempt_id(agent),
+        dict(attrs) if isinstance(attrs, dict) else None,
+    )
+
+
+def _install_parallel_thread_context(
+    agent: object,
+    context: _ParallelThreadContext,
+) -> tuple[tuple[str, bool, object], ...]:
+    previous: list[tuple[str, bool, object]] = []
+    for name, value in context.transient_values:
+        existed = hasattr(agent, name)
+        previous.append((name, existed, getattr(agent, name, None)))
+        setattr(agent, name, value)
+    return tuple(previous)
+
+
+def _restore_parallel_thread_context(
+    agent: object,
+    previous: tuple[tuple[str, bool, object], ...],
+) -> None:
+    for name, existed, value in reversed(previous):
+        if existed:
+            setattr(agent, name, value)
+        elif hasattr(agent, name):
+            delattr(agent, name)
+
+
+def _record_execution(
+    request: ToolRoundExecutionRequest,
+    idx: int,
+    started_at: float,
+    execution: ToolExecution,
+) -> tuple[bool, dict[str, str] | None]:
+    call = execution.call
+    result = execution.result
+    if result.duration_ms <= 0:
+        result = result.with_execution_facts(
+            duration_ms=(time.monotonic() - started_at) * 1000,
+        )
+        execution = replace(execution, result=result)
+    _emit_tool_progress(
+        ToolProgressEvent(
+            request,
+            idx,
+            call,
+            "finished",
+            _finished_status(result),
+            started_at,
+            result,
+        )
+    )
+    request.record_one(
+        ToolCallRecordParams(
+            request.params,
+            request.tool_rounds,
+            idx,
+            call,
+            result,
+            execution.states,
+        )
+    )
+    wrote_output = is_subagent_output_json_write(
+        SubagentOutputWriteCheck(
+            request.agent,
+            request.params,
+            _tool_call_payload(call),
+            result,
+        )
+    )
+    return wrote_output, _runtime_transition_after_tool(result)
+
+
+def _remember_runtime_transition(
+    request: ToolRoundExecutionRequest,
+    transition: dict[str, str],
+    *,
+    tool_name: str,
+    idx: int,
+) -> None:
+    state = getattr(request.params, "live_archive_state", None)
+    if isinstance(state, dict):
+        state["pending_runtime_transition"] = {
+            **transition,
+            "tool": tool_name,
+            "tool_round": request.tool_rounds,
+            "tool_index": idx,
+        }
+
+
+def _round_cancelled(request: ToolRoundExecutionRequest) -> bool:
+    token = getattr(request.params, "cancellation_token", None)
+    return is_interrupted() or bool(token and getattr(token, "cancelled", False))
 
 
 def _runtime_transition_after_tool(
-    result: ToolExecutionResult,
+    result: ToolResult,
 ) -> dict[str, str] | None:
     if not result.ok:
         return None
-    envelope = result.result_envelope
-    if not isinstance(envelope, dict):
-        return None
-    transition = envelope.get("runtime_transition")
+    details = result.metadata.get("handler_details")
+    transition = details.get("runtime_transition") if isinstance(details, dict) else None
     if not isinstance(transition, dict):
         return None
     kind = str(transition.get("kind") or "").strip()
@@ -204,34 +536,65 @@ def _runtime_transition_after_tool(
     return {"kind": kind, "reason": reason, "resume": resume}
 
 
-def _bound_conversation_workspace_payload(agent: object, payload: object) -> object:
+def _bound_conversation_workspace_call(agent: object, call: ToolCall) -> ToolCall:
     """统一改写绑定前 prompt 遗留的占位目录，避免账本续上而产物另起目录。"""
     from ...conversation.task_promotion import rebase_bound_conversation_workspace_params
 
-    return rebase_bound_conversation_workspace_params(agent, payload)
+    projected = {"tool": call.tool_name, **call.arguments}
+    rebased = rebase_bound_conversation_workspace_params(agent, projected)
+    if not isinstance(rebased, dict):
+        return call
+    arguments = {
+        key: value for key, value in rebased.items() if key not in {"tool", "tool_name", "call_id"}
+    }
+    return replace(call, arguments=arguments)
 
 
-# 函数用途: 中断时给本工具留一条结构化"已中断"记录(进度+留痕一并处理)。
-def _record_interrupted_call(request: ToolRoundExecutionRequest, idx: int, payload: object) -> None:
-    _emit_tool_progress(ToolProgressEvent(request, idx, payload, "interrupted", "中断"))
-    result = _interrupted_result(_tool_name(payload))
-    request.record_one(
-        ToolCallRecordParams(request.params, request.tool_rounds, idx, payload, result)
-    )
+def _record_unstarted_calls(
+    request: ToolRoundExecutionRequest,
+    calls: list[ToolCall],
+    *,
+    start_idx: int,
+    result_factory: Callable[[ToolCall], ToolResult],
+    phase: Literal["deferred", "interrupted"],
+    status: str,
+) -> None:
+    """Pair every admitted but unstarted call with one host-owned terminal result."""
+
+    if start_idx <= 0:
+        return
+    for idx, call in enumerate(calls[start_idx - 1 :], start=start_idx):
+        result = result_factory(call)
+        _emit_tool_progress(ToolProgressEvent(request, idx, call, phase, status, result=result))
+        request.record_one(
+            ToolCallRecordParams(
+                request.params,
+                request.tool_rounds,
+                idx,
+                call,
+                result,
+                (
+                    "received",
+                    "cancelled" if result.status == "cancelled" else "failed",
+                    "persisted",
+                    "projected",
+                ),
+            )
+        )
 
 
 # 函数用途: 中断时给本工具一条结构化"已中断"结果(模型可读懂并收尾)。
-def _interrupted_result(tool_name: str) -> ToolExecutionResult:
+def _interrupted_result(call: ToolCall) -> ToolResult:
     payload = json.dumps(
         {"error": "任务已被取消,本工具未执行。", "hint": "停止派发新动作,保存已有进展后收尾。"},
         ensure_ascii=False,
     )
-    return ToolExecutionResult(
-        tool_name,
-        False,
+    return ToolResult.failed(
+        call,
         payload,
         error_code="CANCELLED",
-        failure_stage=ToolFailureStage.RUNTIME_GATE.value,
+        failure_stage="runtime_gate",
+        facts=ToolFailureFacts(status="cancelled"),
     )
 
 
@@ -241,6 +604,7 @@ def _interrupted_result(tool_name: str) -> ToolExecutionResult:
 #   截口落在换行处,并注明恢复路径(重新调用工具/读档案)。纯框架层,模型无感。
 _TURN_TOOL_CONTEXT_BUDGET_CHARS = 200_000
 _TURN_BUDGET_KEEP_CHARS = 20_000
+_MAX_PARALLEL_TOOL_CALLS = 8
 
 
 # 函数用途: 本轮工具输出总量超预算时,把最大的几段裁到安全大小(裁口带提示)。
@@ -287,7 +651,10 @@ def _should_defer_for_compact(request: ToolRoundExecutionRequest, tool_name: str
 
 def _append_assistant_tool_round_context(request: ToolRoundExecutionRequest) -> None:
     rendered = render_assistant_tool_round_context(
-        AssistantToolRoundContextRequest(request.response.text, request.calls)
+        AssistantToolRoundContextRequest(
+            request.response.text,
+            [_tool_call_payload(call) for call in request.calls],
+        )
     )
     request.params.tool_context.append(f"[assistant-tool-round-{request.tool_rounds}]\n{rendered}")
     # 灰度双轨：native 下先为本轮开一条 AssistantTurn 并落定其可见文本（取该轮真实
@@ -298,7 +665,7 @@ def _append_assistant_tool_round_context(request: ToolRoundExecutionRequest) -> 
         request.params,
         tool_round=request.tool_rounds,
         response_text=request.response.text,
-        tool_calls=request.calls,
+        tool_calls=[_tool_call_payload(call) for call in request.calls],
     )
 
 
@@ -308,7 +675,7 @@ def _open_assistant_turn_ir_if_native(request: ToolRoundExecutionRequest) -> Non
     from ..native_tool_protocol import native_tool_use_active
     from ..tool_ir_history import open_assistant_turn_ir
 
-    if not native_tool_use_active(request.agent):
+    if not native_tool_use_active(request.params):
         return
     open_assistant_turn_ir(
         request.params,
@@ -335,41 +702,96 @@ def _append_compact_deferred_notice(
     )
 
 
-def _compact_deferred_result(tool_name: str) -> ToolExecutionResult:
-    return ToolExecutionResult(
-        tool_name or "unknown",
-        False,
+def _compact_deferred_result(call: ToolCall) -> ToolResult:
+    return ToolResult.failed(
+        call,
         "CONTEXT_COMPACT_DEFERRED: 当前上下文需要先 compact/resume；本次工具调用未执行，恢复后从同一目标继续。",
         error_code="CONTEXT_COMPACT_DEFERRED",
-        failure_stage=ToolFailureStage.RUNTIME_GATE.value,
+        failure_stage="runtime_gate",
     )
 
 
 def _record_remaining_content_calls_as_deferred(
     request: ToolRoundExecutionRequest,
-    calls: list[dict[str, object]],
+    calls: list[ToolCall],
     *,
     start_idx: int,
 ) -> None:
-    deferred = 0
-    for idx, payload in enumerate(calls[start_idx - 1 :], start=start_idx):
-        tool_name = _tool_name(payload)
-        if tool_name not in _CONTENT_OUTPUT_TOOLS:
-            continue
-        result = _compact_deferred_result(tool_name)
-        request.record_one(
-            ToolCallRecordParams(request.params, request.tool_rounds, idx, payload, result)
-        )
-        deferred += 1
+    deferred = max(0, len(calls) - start_idx + 1)
+    _record_unstarted_calls(
+        request,
+        calls,
+        start_idx=start_idx,
+        result_factory=_compact_deferred_result,
+        phase="deferred",
+        status="延后",
+    )
     if deferred:
         request.params.tool_context.append(
             "[tool-system]\n"
-            f"本轮剩余 {deferred} 个内容读取/检索工具已登记为 CONTEXT_COMPACT_DEFERRED；"
+            f"本轮剩余 {deferred} 个工具已登记为 CONTEXT_COMPACT_DEFERRED；"
             "compact/resume 后系统会按这些结构化记录继续，不需要凭记忆重造调用。"
         )
 
 
-def _calls_for_this_execution_round(request: ToolRoundExecutionRequest) -> list[dict[str, object]]:
+def _record_runtime_transition_deferred_calls(
+    request: ToolRoundExecutionRequest,
+    calls: list[ToolCall],
+    *,
+    start_idx: int,
+) -> None:
+    _record_unstarted_calls(
+        request,
+        calls,
+        start_idx=start_idx,
+        result_factory=_runtime_transition_deferred_result,
+        phase="deferred",
+        status="等待上下文刷新",
+    )
+
+
+def _runtime_transition_deferred_result(call: ToolCall) -> ToolResult:
+    return ToolResult.failed(
+        call,
+        "RUNTIME_TRANSITION_DEFERRED: 前一调用改变了耐久运行上下文；本调用未执行，必须从新快照重新发起。",
+        error_code="RUNTIME_TRANSITION_DEFERRED",
+        failure_stage="runtime_gate",
+    )
+
+
+def _record_round_limit_deferred_calls(
+    request: ToolRoundExecutionRequest,
+    *,
+    processed_count: int,
+) -> None:
+    if processed_count >= len(request.calls):
+        return
+    # Keep provider order intact. The helper uses ``start_idx`` as both the
+    # one-based record index and slice point, so passing an already-sliced tail
+    # would slice twice and silently leave calls without terminal results.
+    calls = [_bound_conversation_workspace_call(request.agent, call) for call in request.calls]
+    _record_unstarted_calls(
+        request,
+        calls,
+        start_idx=processed_count + 1,
+        result_factory=_tool_call_limit_deferred_result,
+        phase="deferred",
+        status="超过本轮上限",
+    )
+
+
+def _tool_call_limit_deferred_result(call: ToolCall) -> ToolResult:
+    return ToolResult.failed(
+        call,
+        "TOOL_CALL_LIMIT_DEFERRED: 本轮调用数量超过宿主上限；本调用没有执行，请在下一模型轮按最新事实重新发起。",
+        error_code="TOOL_CALL_LIMIT_DEFERRED",
+        failure_stage="runtime_gate",
+    )
+
+
+def _calls_for_this_execution_round(
+    request: ToolRoundExecutionRequest,
+) -> list[ToolCall]:
     limit = _max_tool_calls_per_round(request)
     if limit <= 0 or len(request.calls) <= limit:
         return request.calls
@@ -412,6 +834,7 @@ def _append_deferred_tool_call_notice(
     request: ToolRoundExecutionRequest,
     *,
     handled_count: int,
+    reason: str,
 ) -> None:
     total = len(request.calls)
     if handled_count >= total:
@@ -419,9 +842,9 @@ def _append_deferred_tool_call_notice(
     deferred_count = total - handled_count
     request.params.tool_context.append(
         "[tool-system]\n"
-        f"本轮模型请求了 {total} 个工具调用；为了避免单轮工具结果把上下文撑爆，"
+        f"本轮模型请求了 {total} 个工具调用；由于{reason or '运行时边界要求分轮处理'}，"
         f"只处理到前 {handled_count} 个，剩余 {deferred_count} 个没有执行。\n"
-        "如果某个工具被记录为 CONTEXT_COMPACT_DEFERRED，它只是可审计回执，不代表工具已经执行。\n"
+        "这些工具已有结构化的未执行回执；回执只用于审计和恢复，不代表工具已经执行。\n"
         "下一轮请继续处理未完成的读取、写入或检查；不要把未执行的工具调用当作已经完成。"
     )
 
@@ -463,18 +886,12 @@ def _persistent_compact_enabled(agent: object, params: object) -> bool:
     return bool(getattr(getattr(agent, "config", None), "auto_save_memory", True))
 
 
-def _tool_name(payload: object) -> str:
-    if not isinstance(payload, dict):
-        return ""
-    return str(payload.get("tool") or "").strip()
-
-
 def _emit_tool_progress(event: ToolProgressEvent) -> None:
     on_chunk = getattr(event.request.params, "effective_on_chunk", None)
     if not callable(on_chunk):
         return
-    tool_name = _tool_name(event.payload) or "unknown"
-    detail = _payload_progress_detail(event.payload)
+    tool_name = event.call.tool_name or "unknown"
+    detail = _payload_progress_detail(event.call)
     elapsed = ""
     if event.started_at is not None:
         elapsed = f" {max(0.0, time.monotonic() - event.started_at):.2f}s"
@@ -551,13 +968,12 @@ def _public_progress_text(
     return f"{text[:keep_head]}\n…（内容过长，已省略）…\n{text[-keep_tail:]}"
 
 
-def _finished_status(result: ToolExecutionResult) -> str:
+def _finished_status(result: ToolResult) -> str:
     return "完成" if result.ok else f"失败({result.error_code or 'ERROR'})"
 
 
-def _payload_progress_detail(payload: object) -> str:
-    if not isinstance(payload, dict):
-        return ""
+def _payload_progress_detail(call: ToolCall) -> str:
+    payload = call.arguments
     for key in ("path", "artifact_ref", "root_id", "run_id", "status", "scope"):
         value = str(payload.get(key) or "").strip()
         if value:
@@ -571,6 +987,14 @@ def _payload_progress_detail(payload: object) -> str:
     return ""
 
 
+def _tool_call_payload(call: ToolCall) -> dict[str, object]:
+    return {
+        "tool": call.tool_name,
+        "call_id": call.call_id,
+        **call.arguments,
+    }
+
+
 def _shorten(value: str, limit: int = 100) -> str:
     text = " ".join(value.split())
     if len(text) <= limit:
@@ -578,15 +1002,27 @@ def _shorten(value: str, limit: int = 100) -> str:
     return f"{text[: limit - 3]}..."
 
 
-def _deferred_orchestration_result(tool_name: str) -> ToolExecutionResult:
-    return ToolExecutionResult(
-        tool_name or "unknown",
-        False,
+def _deferred_orchestration_result(call: ToolCall) -> ToolResult:
+    return ToolResult.failed(
+        call,
         "同一轮已经执行过会创建或改变子代理树的工具调用，"
         "后续编排工具已延后。请先读取上一条工具的真实输出，"
         "下一轮再使用返回的 created_run_ids/actionable_run_ids 调用 dispatch_subagents。",
         error_code="ORCHESTRATION_CALL_DEFERRED",
-        failure_stage=ToolFailureStage.RUNTIME_GATE.value,
+        failure_stage="runtime_gate",
+    )
+
+
+def _synthetic_execution(
+    call: ToolCall,
+    result: ToolResult,
+    reason_code: str,
+) -> ToolExecution:
+    return ToolExecution(
+        call=call,
+        decision=ActionDecision("deny", (reason_code,), {"failure_stage": "runtime_gate"}),
+        result=result,
+        states=("received", "normalized", "failed", "persisted", "projected"),
     )
 
 

@@ -13,9 +13,26 @@ from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.tooling.models import (
     BaseTool,
     ToolAvailability,
-    ToolExecutionResult,
-    ToolSpec,
+    ToolHandlerOutcome,
 )
+from agent_py_agent.tests._tool_runtime_harness import (
+    canonical_test_call,
+    make_test_model_spec,
+    make_test_runtime_policy,
+)
+
+
+def _execute(agent, tool_name, arguments, *, allowed_tools=None, snapshot=None):
+    runtime_snapshot = snapshot or agent.tools.runtime_snapshot(
+        allowed_tools=allowed_tools,
+        run_id="scope-test-run",
+    )
+    call = canonical_test_call(runtime_snapshot, tool_name, arguments)
+    return agent.tools.execute_tool(
+        call,
+        write_boundary=None,
+        runtime_snapshot=runtime_snapshot,
+    ).result
 
 
 def _agent(tmp_path) -> SimpleAgent:
@@ -33,13 +50,18 @@ def test_restricted_list_tools_only_reports_current_runtime_scope(tmp_path) -> N
     """LLM: list_tools is a scoped discovery surface, not a process-wide registry dump."""
     agent = _agent(tmp_path)
 
-    result = agent.tools.execute_call(
-        {"tool": "list_tools"},
+    result = _execute(
+        agent,
+        "list_tools",
+        {},
         allowed_tools=["list_tools", "read_file"],
     )
 
     assert result.ok, result.output
-    names = {item["name"] for item in json.loads(result.output)["tools"]}
+    payload = json.loads(
+        result.metadata["handler_details"]["tool_output_policy"]["live_prompt_output"]
+    )
+    names = {item["name"] for item in payload["tools"]}
     assert names == {"list_tools", "read_file"}
 
 
@@ -47,9 +69,10 @@ def test_restricted_tool_search_cannot_load_ungranted_deferred_tools(tmp_path) -
     """LLM: search narrows an existing grant and never creates a new tool grant."""
     agent = _agent(tmp_path)
 
-    result = agent.tools.execute_call(
+    result = _execute(
+        agent,
+        "tool_search",
         {
-            "tool": "tool_search",
             "query": "create_subagents 创建并管理子代理",
             "load_names": ["create_subagents"],
         },
@@ -57,7 +80,7 @@ def test_restricted_tool_search_cannot_load_ungranted_deferred_tools(tmp_path) -
     )
 
     assert result.ok, result.output
-    assert result.result_envelope["tool_search"]["loaded_tool_names"] == []
+    assert result.metadata["handler_details"]["tool_search"]["loaded_tool_names"] == []
     payload = json.loads(result.output)
     assert payload["loaded_for_next_model_call"] == []
     assert payload["not_loaded"] == ["create_subagents"]
@@ -66,16 +89,13 @@ def test_restricted_tool_search_cannot_load_ungranted_deferred_tools(tmp_path) -
 class _SwitchTool(BaseTool):
     """LLM: controllable readiness proves snapshot and live recheck semantics without external services."""
 
-    spec = ToolSpec(
-        name="switch_tool",
+    model_spec = make_test_model_spec(
+        "switch_tool",
         category="system",
-        effect="read_only",
         description="test-only readiness switch",
-        use_cases=[],
-        avoid_when=[],
-        keywords=["switch"],
-        parameters={},
+        keywords=("switch",),
     )
+    runtime_policy = make_test_runtime_policy("read_only")
 
     def __init__(self, *, ready: bool) -> None:
         self.ready = ready
@@ -88,10 +108,10 @@ class _SwitchTool(BaseTool):
             else ToolAvailability.unavailable("switch is off")
         )
 
-    def execute(self, params) -> ToolExecutionResult:
+    def execute(self, params) -> ToolHandlerOutcome:
         _ = params
         self.executions += 1
-        return ToolExecutionResult(self.spec.name, True, "executed")
+        return ToolHandlerOutcome(self.model_spec.name, True, "executed")
 
 
 def test_unconfigured_optional_tools_are_absent_and_report_unavailable(tmp_path) -> None:
@@ -106,18 +126,21 @@ def test_unconfigured_optional_tools_are_absent_and_report_unavailable(tmp_path)
     assert "lsp" not in names
     assert agent.tools._lsp_manager.clients == {}
 
-    result = agent.tools.execute_call(
-        {"tool": "analyze_image", "image": "missing.png"}
+    result = _execute(
+        agent,
+        "analyze_image",
+        {"image": "missing.png"},
     )
     assert not result.ok
-    assert result.error_code == "TOOL_UNAVAILABLE"
-    assert "vision" in result.output
+    assert result.error_code == "TOOL_NOT_IN_RUNTIME_SNAPSHOT"
 
-    unauthorized = agent.tools.execute_call(
-        {"tool": "analyze_image", "image": "missing.png"},
+    unauthorized = _execute(
+        agent,
+        "analyze_image",
+        {"image": "missing.png"},
         allowed_tools=["list_tools"],
     )
-    assert unauthorized.error_code == "TOOL_NOT_ALLOWED"
+    assert unauthorized.error_code == "TOOL_NOT_IN_RUNTIME_SNAPSHOT"
     assert "vision_api_base" not in unauthorized.output
 
 
@@ -126,61 +149,74 @@ def test_run_snapshot_does_not_expand_when_tool_becomes_ready_later(tmp_path) ->
     agent = _agent(tmp_path)
     tool = _SwitchTool(ready=False)
     agent.tools.register(tool)
-    snapshot = agent.tools.runtime_snapshot(allowed_tools=["switch_tool"])
+    snapshot = agent.tools.runtime_snapshot(
+        allowed_tools=["switch_tool"],
+        run_id="switch-readiness-run",
+    )
     tool.ready = True
     assert agent.tools.specs(runtime_snapshot=snapshot) == []
 
-    result = agent.tools.execute_call(
-        {"tool": "switch_tool"},
+    result = _execute(
+        agent,
+        "switch_tool",
+        {},
         allowed_tools=["switch_tool"],
-        runtime_snapshot=snapshot,
+        snapshot=snapshot,
     )
 
     assert not result.ok
-    assert result.error_code == "TOOL_UNAVAILABLE"
+    assert result.error_code == "TOOL_NOT_IN_RUNTIME_SNAPSHOT"
     assert tool.executions == 0
 
 
 def test_run_snapshot_does_not_expand_when_tool_is_registered_later(tmp_path) -> None:
     """LLM: dynamic registration only affects a later run, never the current frozen tool universe."""
     agent = _agent(tmp_path)
-    snapshot = agent.tools.runtime_snapshot(allowed_tools=["switch_tool"])
+    snapshot = agent.tools.runtime_snapshot(
+        allowed_tools=["switch_tool"],
+        run_id="switch-registration-run",
+    )
     tool = _SwitchTool(ready=True)
     agent.tools.register(tool)
 
-    result = agent.tools.execute_call(
-        {"tool": "switch_tool"},
+    result = _execute(
+        agent,
+        "switch_tool",
+        {},
         allowed_tools=["switch_tool"],
-        runtime_snapshot=snapshot,
+        snapshot=snapshot,
     )
 
     assert not result.ok
-    assert result.error_code == "TOOL_UNAVAILABLE"
-    assert "当前 run" in result.output
+    assert result.error_code == "TOOL_NOT_IN_RUNTIME_SNAPSHOT"
     assert tool.executions == 0
 
 
-def test_execution_rechecks_tool_that_drops_after_snapshot(tmp_path) -> None:
-    """LLM: a tool that disappears after model exposure fails before its implementation runs."""
+def test_execution_uses_same_frozen_availability_snapshot_seen_by_model(tmp_path) -> None:
+    """A mid-run probe change cannot rewrite the already exposed run snapshot."""
     agent = _agent(tmp_path)
     tool = _SwitchTool(ready=True)
     agent.tools.register(tool)
-    snapshot = agent.tools.runtime_snapshot(allowed_tools=["switch_tool"])
+    snapshot = agent.tools.runtime_snapshot(
+        allowed_tools=["switch_tool"],
+        run_id="switch-frozen-run",
+    )
     tool.ready = False
     assert {
         spec.name
         for spec in agent.tools.model_visible_specs(runtime_snapshot=snapshot)
     } == {"switch_tool"}
 
-    result = agent.tools.execute_call(
-        {"tool": "switch_tool"},
+    result = _execute(
+        agent,
+        "switch_tool",
+        {},
         allowed_tools=["switch_tool"],
-        runtime_snapshot=snapshot,
+        snapshot=snapshot,
     )
 
-    assert not result.ok
-    assert result.error_code == "TOOL_UNAVAILABLE"
-    assert tool.executions == 0
+    assert result.ok
+    assert tool.executions == 1
 
 
 def test_list_tools_uses_resolved_remote_owner_type(tmp_path) -> None:
@@ -197,10 +233,15 @@ def test_list_tools_uses_resolved_remote_owner_type(tmp_path) -> None:
         str(tmp_path / "repo"),
     )
 
-    result = agent.tools.execute_call(
-        {"tool": "list_tools"},
+    result = _execute(
+        agent,
+        "list_tools",
+        {},
         allowed_tools=["list_tools"],
     )
 
     assert result.ok, result.output
-    assert json.loads(result.output)["permission_mode"] == "owner_scoped"
+    payload = json.loads(
+        result.metadata["handler_details"]["tool_output_policy"]["live_prompt_output"]
+    )
+    assert payload["permission_mode"] == "owner_scoped"

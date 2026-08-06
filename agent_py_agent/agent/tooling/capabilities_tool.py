@@ -16,10 +16,14 @@ from typing import Any
 from ..delivery import ChannelAdapterRegistry, DeliveryContext
 from .models import (
     BaseTool,
-    ToolExecutionResult,
+    ConcurrencyPolicy,
+    EffectResolverPolicy,
+    ToolHandlerOutcome,
     ToolInvocationContext,
+    ToolModelHints,
+    ToolModelSpec,
+    ToolRuntimePolicy,
     ToolRuntimeSnapshot,
-    ToolSpec,
 )
 
 
@@ -631,37 +635,28 @@ def _public_channel_connection(*, configured: object, health_state: str) -> str:
 # LLM: 该只读工具只投影真实 registry/config 状态，不执行安装、探活或通道发送；变更时保持无副作用。
 # 类用途: 给模型一个统一入口查看自己当前能做什么，以及哪些能力只是安装了但尚未配置。
 class ListCapabilitiesTool(BaseTool):
-    spec = ToolSpec(
+    model_spec = ToolModelSpec(
         name="list_capabilities",
-        category="meta",
         description=(
             "列出 my-agent 当前已安装、已配置和模型可调用的产品能力，并明确未配置/未实现项。"
             "遇到接通道、记忆、人格、调度或多用户需求时先查它，不能把支持列表虚报成已连接。"
         ),
-        use_cases=[
-            "要接入飞书/QQ或其他通道前，先区分 adapter 是否安装、配置和可投递",
-            "要做定时任务/多用户隔离前,先查有没有内置能力",
-            "不确定自己能做什么、有什么内置命令时",
-        ],
-        avoid_when=["只是要低层文件/命令/网络工具时,用 list_tools 即可"],
-        keywords=[
-            "capabilities",
-            "能力",
-            "内置",
-            "adapter",
-            "通道",
-            "channel",
-            "gateway",
-            "网关",
-            "list_capabilities",
-            "造轮子",
-        ],
-        parameters={},
-        parameter_schema={},
-        examples=['{"tool": "list_capabilities"}'],
-        effect="read_only",
-        default_mode="real",
-        requires_approval=False,
+        input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        hints=ToolModelHints(
+            category="meta",
+            use_cases=(
+                "要接入飞书/QQ或其他通道前，先区分 adapter 是否安装、配置和可投递",
+                "要做定时任务/多用户隔离前,先查有没有内置能力",
+                "不确定自己能做什么、有什么内置命令时",
+            ),
+            avoid_when=("只是要低层文件/命令/网络工具时,用 list_tools 即可",),
+            keywords=("capabilities", "能力", "内置", "adapter", "通道", "channel", "gateway", "网关", "list_capabilities", "造轮子"),
+            examples=('{"tool": "list_capabilities"}',),
+        ),
+    )
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy("read_only"),
+        concurrency_policy=ConcurrencyPolicy("parallel_safe"),
     )
 
     # LLM: config 与 tool_names_provider 均由 registry bootstrap 注入；不要在这里再创建第二份 registry。
@@ -678,19 +673,19 @@ class ListCapabilitiesTool(BaseTool):
     def _execute_snapshot(
         self,
         runtime_snapshot: ToolRuntimeSnapshot | None,
-    ) -> ToolExecutionResult:
+    ) -> ToolHandlerOutcome:
         payload = build_capability_inventory(
             self.sources,
             runtime_snapshot=runtime_snapshot,
         )
-        return ToolExecutionResult(
-            self.spec.name,
+        return ToolHandlerOutcome(
+            self.model_spec.name,
             True,
             json.dumps(_capability_model_view(payload), ensure_ascii=False, indent=2),
             result_envelope=payload,
         )
 
-    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+    def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         _ = params
         provider = self.sources.runtime_snapshot_provider
         snapshot = provider() if provider else None
@@ -700,7 +695,7 @@ class ListCapabilitiesTool(BaseTool):
         self,
         params: dict[str, Any],
         context: ToolInvocationContext,
-    ) -> ToolExecutionResult:
+    ) -> ToolHandlerOutcome:
         _ = params
         return self._execute_snapshot(context.runtime_snapshot)
 

@@ -1,3 +1,7 @@
+"""Canonical v2 owner path, directory, and seed projections."""
+
+# LLM: This file is the canonical v2 path/seed projection; removed hooks/store/runtime_refs paths must not reappear.
+# 模块用途: 生成 owner v2 目录、文件路径和首次初始化种子清单。
 
 from __future__ import annotations
 
@@ -52,18 +56,18 @@ def _shared_directories(paths: Any) -> tuple[Path, ...]:
     )
 
 
+# LLM: The directory list contains only canonical v2 authorities and required runtime roots, including Curator runs.
+# 函数用途: 返回初始化时必须创建的 owner 目录集合。
 def _owner_directories(paths: Any) -> tuple[Path, ...]:
     return (
         paths.local_owners_dir,
         paths.owner_home_dir,
         paths.owner_sessions_dir,
         paths.owner_memory_daily_dir,
-        paths.owner_memory_hooks_dir,
         paths.owner_memory_lessons_dir,
         paths.owner_memory_routing_dir,
-        paths.owner_memory_indexes_dir,
         paths.owner_memory_long_term_dir,
-        paths.owner_memory_runtime_refs_dir,
+        paths.owner_memory_curator_runs_dir,
         paths.owner_tasks_dir,
         paths.owner_runs_dir,
         paths.owner_agents_dir,
@@ -122,6 +126,8 @@ def _owner_persona_seed(template_path: Path, default: str, owner_kind: object, i
     return persona_templates_for_owner("group")[index]
 
 
+# LLM: Seeds create empty Candidate/ops/long-term files; no legacy store, lesson body, or memory mirror is generated.
+# 函数用途: 返回新 owner 首次写入的文本文件与安全初始内容。
 def v2_seed_files(paths: Any) -> tuple[tuple[Path, str], ...]:
     # owner 的人格/记忆从根级"种子模板"复制(管理员可在根级 SOUL.md/USER.md 等预设默认,
     # 新 owner 初始化时继承一份、之后各自改自己的;根级模板为空则用下方兜底文案)。
@@ -141,8 +147,9 @@ def v2_seed_files(paths: Any) -> tuple[tuple[Path, str], ...]:
         (paths.owner_memory_md, _seed_from_template(paths.memory_md, "# Memory\n\n")),
         (paths.owner_memory_hot_md, _seed_from_template(paths.memory_hot_md, "# Memory HOT\n\nOwner-specific HOT memory can override or refine root HOT memory.\n")),
         (paths.owner_memory_routing_index_md, "# Owner Memory Routing Index\n\n"),
-        (paths.owner_memory_store_jsonl, ""),
+        (paths.owner_memory_candidates_jsonl, ""),
         (paths.owner_memory_ops_jsonl, ""),
+        (paths.owner_memory_long_term_jsonl, ""),
         (paths.shared_indexes_skills_jsonl, ""),
         (paths.shared_indexes_role_templates_jsonl, ""),
         (paths.linked_identities_jsonl, ""),
@@ -206,19 +213,22 @@ def _owner_path_fields(home: Path) -> dict[str, Path]:
     }
 
 
+# LLM: This mapping is the sole owner Memory layout contract consumed by HomePaths and composition root wiring.
+# 函数用途: 返回 Candidate、Daily、long-term、lesson、routing 与 Curator 的规范路径字段。
 def _owner_memory_path_fields(owner_memory_dir: Path) -> dict[str, Path]:
     return {
         "owner_memory_dir": owner_memory_dir,
         "owner_memory_daily_dir": owner_memory_dir / "daily",
-        "owner_memory_hooks_dir": owner_memory_dir / "hooks",
         "owner_memory_lessons_dir": owner_memory_dir / "lessons",
         "owner_memory_routing_dir": owner_memory_dir / "routing",
         "owner_memory_routing_index_md": owner_memory_dir / "routing" / "INDEX.md",
-        "owner_memory_indexes_dir": owner_memory_dir / "indexes",
-        "owner_memory_store_jsonl": owner_memory_dir / "store.jsonl",
+        "owner_memory_candidates_jsonl": owner_memory_dir / "candidates.jsonl",
         "owner_memory_ops_jsonl": owner_memory_dir / "ops.jsonl",
         "owner_memory_long_term_dir": owner_memory_dir / "long_term",
-        "owner_memory_runtime_refs_dir": owner_memory_dir / "runtime_refs",
+        "owner_memory_long_term_jsonl": owner_memory_dir / "long_term" / "memory.jsonl",
+        "owner_memory_curator_dir": owner_memory_dir / "curator",
+        "owner_memory_curator_state_json": owner_memory_dir / "curator" / "state.json",
+        "owner_memory_curator_runs_dir": owner_memory_dir / "curator" / "runs",
     }
 
 

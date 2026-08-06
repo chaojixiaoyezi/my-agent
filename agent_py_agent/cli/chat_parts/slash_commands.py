@@ -101,7 +101,7 @@ def _handle_remember_command(
     del include_plain_help
     if not user.startswith("/remember "):
         return None
-    rec = ctx.agent.remember(user[len("/remember "):], kind="note")
+    rec = ctx.agent.remember(user[len("/remember "):], kind="fact")
     ctx.print_line(f"Remembered: {rec.content}")
     return True
 

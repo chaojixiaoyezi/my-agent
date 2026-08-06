@@ -10,7 +10,7 @@ from .repository import (
 )
 from .schedule import ScheduleValidationError, build_schedule, compute_next_run
 from .service import SchedulerRunClaim, SchedulerService, is_scheduler_wake
-from .tool import ScheduleTool, build_schedule_tool_spec
+from .tool import ScheduleTool, build_schedule_tool_model_spec
 
 __all__ = [
     "ScheduleTool",
@@ -25,7 +25,7 @@ __all__ = [
     "SchedulerService",
     "SchedulerStateError",
     "build_schedule",
-    "build_schedule_tool_spec",
+    "build_schedule_tool_model_spec",
     "compute_next_run",
     "DueOwner",
     "SchedulerDueIndex",

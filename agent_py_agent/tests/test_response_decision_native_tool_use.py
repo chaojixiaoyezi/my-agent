@@ -10,30 +10,48 @@ from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
     tool_loop_response_decision,
 )
 from agent_py_agent.agent.backends import ModelResponse
+from agent_py_agent.tests._tool_runtime_harness import (
+    make_test_model_spec,
+    make_test_protocol_snapshot,
+    runtime_snapshot_for_model_specs,
+)
 
 
 def _agent(root: Path, *, enable_tools: bool = True):
-    class _Tools:
-        workspace_root = root
-
-        def __init__(self) -> None:
-            self.parsed_texts: list[str] = []
-
-        def parse_tool_calls(self, text: str):
-            self.parsed_texts.append(text)
-            if "[TOOL_CALL]" in text:
-                return [{"tool": "read_file", "path": "from_text.md"}]
-            return []
-
     return SimpleNamespace(
         backend=SimpleNamespace(name="fake"),
         config=SimpleNamespace(enable_tools=enable_tools),
         root=root,
-        tools=_Tools(),
     )
 
 
-def _params() -> ToolLoopExecuteParams:
+def _runtime_snapshot():
+    return runtime_snapshot_for_model_specs(
+        (
+            make_test_model_spec(
+                "read_file",
+                input_schema={
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                    "additionalProperties": False,
+                },
+            ),
+            make_test_model_spec(
+                "search_text",
+                input_schema={
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+            ),
+        ),
+        run_id="run-1",
+    )
+
+
+def _params(source_protocol: str = "native") -> ToolLoopExecuteParams:
     return ToolLoopExecuteParams(
         user_prompt="test",
         memories=[],
@@ -53,22 +71,26 @@ def _params() -> ToolLoopExecuteParams:
         executed_tools=[],
         archive_tool_calls=[],
         delivery_contract={},
+        tool_runtime_snapshot=_runtime_snapshot(),
+        tool_protocol_snapshot=make_test_protocol_snapshot(
+            run_id="run-1",
+            source_protocol=source_protocol,
+        ),
     )
 
 
-def _decide(agent, response: ModelResponse):
+def _decide(agent, response: ModelResponse, *, source_protocol: str = "native"):
     return tool_loop_response_decision(
         ToolLoopResponseDecisionRequest(
             agent=agent,
-            params=_params(),
+            params=_params(source_protocol),
             response=response,
             counters=ToolLoopRepairCounters(),
         )
     )
 
 
-def test_tool_use_blocks_flatten_to_run_tools_without_text_parse(tmp_path: Path):
-    agent = _agent(tmp_path)
+def test_native_tool_use_blocks_become_canonical_calls_without_text_parse(tmp_path: Path):
     response = ModelResponse(
         text="",
         backend="fake",
@@ -77,16 +99,18 @@ def test_tool_use_blocks_flatten_to_run_tools_without_text_parse(tmp_path: Path)
         ],
     )
 
-    decision = _decide(agent, response)
+    decision = _decide(_agent(tmp_path), response)
 
     assert decision.action == "run_tools"
-    assert decision.calls == [{"path": "README.md", "tool": "read_file", "call_id": "toolu_1"}]
-    # native path must NOT fall back to text parsing
-    assert agent.tools.parsed_texts == []
+    assert len(decision.calls) == 1
+    call = decision.calls[0]
+    assert call.call_id == "toolu_1"
+    assert call.tool_name == "read_file"
+    assert call.arguments == {"path": "README.md"}
+    assert call.source_protocol == "native"
 
 
-def test_multiple_tool_use_blocks_all_flatten(tmp_path: Path):
-    agent = _agent(tmp_path)
+def test_multiple_native_tool_use_blocks_keep_order(tmp_path: Path):
     response = ModelResponse(
         text="",
         backend="fake",
@@ -96,37 +120,51 @@ def test_multiple_tool_use_blocks_all_flatten(tmp_path: Path):
         ],
     )
 
-    decision = _decide(agent, response)
+    decision = _decide(_agent(tmp_path), response)
 
     assert decision.action == "run_tools"
-    assert [c["tool"] for c in decision.calls] == ["read_file", "search_text"]
-    assert decision.calls[1] == {"query": "foo", "tool": "search_text", "call_id": "b"}
+    assert [call.tool_name for call in decision.calls] == ["read_file", "search_text"]
+    assert decision.calls[1].arguments == {"query": "foo"}
 
 
-def test_no_tool_use_blocks_falls_back_to_text_protocol(tmp_path: Path):
-    agent = _agent(tmp_path)
-    response = ModelResponse(text='[TOOL_CALL]\n{"tool":"read_file"}\n[/TOOL_CALL]', backend="fake")
+def test_native_run_never_falls_back_to_text_tool_blocks(tmp_path: Path):
+    response = ModelResponse(
+        text='[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]',
+        backend="fake",
+    )
 
-    decision = _decide(agent, response)
+    decision = _decide(_agent(tmp_path), response, source_protocol="native")
+
+    assert decision.action == "continue"
+    assert decision.calls == []
+    assert decision.counters.protocol_repairs == 1
+
+
+def test_explicit_text_run_accepts_one_complete_standalone_block(tmp_path: Path):
+    response = ModelResponse(
+        text='[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]',
+        backend="fake",
+    )
+
+    decision = _decide(_agent(tmp_path), response, source_protocol="text")
 
     assert decision.action == "run_tools"
-    assert decision.calls == [{"tool": "read_file", "path": "from_text.md"}]
-    # fall-back path DID parse the text
-    assert agent.tools.parsed_texts == [response.text]
+    assert len(decision.calls) == 1
+    assert decision.calls[0].tool_name == "read_file"
+    assert decision.calls[0].arguments == {"path": "README.md"}
+    assert decision.calls[0].source_protocol == "text"
 
 
 def test_no_blocks_and_plain_text_breaks(tmp_path: Path):
-    agent = _agent(tmp_path)
     response = ModelResponse(text="任务完成。", backend="fake")
 
-    decision = _decide(agent, response)
+    decision = _decide(_agent(tmp_path), response)
 
     assert decision.action == "break"
     assert decision.response.text == "任务完成。"
 
 
-def test_tool_use_input_tool_key_does_not_override_name(tmp_path: Path):
-    agent = _agent(tmp_path)
+def test_tool_use_input_tool_key_does_not_override_provider_name(tmp_path: Path):
     response = ModelResponse(
         text="",
         backend="fake",
@@ -135,21 +173,20 @@ def test_tool_use_input_tool_key_does_not_override_name(tmp_path: Path):
         ],
     )
 
-    decision = _decide(agent, response)
+    decision = _decide(_agent(tmp_path), response)
 
-    assert decision.calls[0]["tool"] == "read_file"
-    assert decision.calls[0]["path"] == "p"
+    assert decision.calls[0].tool_name == "read_file"
+    assert decision.calls[0].arguments == {"tool": "evil", "path": "p"}
 
 
 def test_disabled_tools_short_circuits_before_native_blocks(tmp_path: Path):
-    agent = _agent(tmp_path, enable_tools=False)
     response = ModelResponse(
         text="done",
         backend="fake",
         tool_use_blocks=[{"id": "1", "name": "read_file", "input": {"path": "x"}}],
     )
 
-    decision = _decide(agent, response)
+    decision = _decide(_agent(tmp_path, enable_tools=False), response)
 
     assert decision.action == "break"
     assert decision.calls == []

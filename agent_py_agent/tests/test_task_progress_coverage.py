@@ -3,8 +3,30 @@
 from __future__ import annotations
 
 import json
+from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
+
+from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
+
+_TOOL_CALL_IDS = count(1)
+
+
+def _execute_task_progress(agent: object, arguments: dict[str, object]):
+    """Send task_progress through the canonical ToolCall-only test boundary."""
+
+    run_id = str(getattr(agent, "_main_agent_run_id", "") or "test-run")
+    return execute_registry_test_call(
+        agent.tools,
+        "task_progress",
+        arguments,
+        run_id=run_id,
+        call_id=f"task-progress-{next(_TOOL_CALL_IDS)}",
+    )
+
+
+def _validation_issues(result: object) -> list[dict[str, object]]:
+    return result.metadata["action_decision"]["evidence"]["issues"]
 
 
 class TestTaskProgressCoverageTool:
@@ -574,9 +596,9 @@ class TestTaskProgressContinuationAndAliases:
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
 
-        result = agent.tools.execute_call(
+        result = _execute_task_progress(
+            agent,
             {
-                "tool": "task_progress",
                 "action": "update",
                 "summary": "开始覆盖五个项目。",
                 "coverage": {
@@ -611,9 +633,9 @@ class TestTaskProgressContinuationAndAliases:
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
 
-        result = agent.tools.execute_call(
+        result = _execute_task_progress(
+            agent,
             {
-                "tool": "task_progress",
                 "action": "update",
                 "coverage": {
                     "targets": [
@@ -643,16 +665,16 @@ def test_task_progress_rejects_old_action_aliases(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
     agent._main_agent_run_id = "run-main"
 
-    result = agent.tools.execute_call(
+    result = _execute_task_progress(
+        agent,
         {
-            "tool": "task_progress",
             "action": "create",
             "summary": "开始覆盖五个项目。",
         }
     )
     assert result.ok is False
     assert result.error_code == "TOOL_INVALID_ARGUMENTS"
-    issue = result.result_envelope["runtime_gate"]["findings"][0]["evidence"]["issues"][0]
+    issue = _validation_issues(result)[0]
     assert issue["keyword"] == "enum"
     assert issue["path"] == "$.action"
     assert issue["expected"] == ["read", "update"]
@@ -669,9 +691,9 @@ class TestTaskProgressCoverageRejectedAliases:
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
 
-        result = agent.tools.execute_call(
+        result = _execute_task_progress(
+            agent,
             {
-                "tool": "task_progress",
                 "action": "update",
                 "summary": "开始分析五个项目。",
                 "coverage_targets": [
@@ -682,7 +704,7 @@ class TestTaskProgressCoverageRejectedAliases:
         )
         assert result.ok is False
         assert result.error_code == "TOOL_INVALID_ARGUMENTS"
-        assert "$.coverage_targets" in result.output
+        assert _validation_issues(result)[0]["path"] == "$.coverage_targets"
 
     def test_task_progress_rejects_fields_needed_and_chinese_target_text(self, tmp_path):
         """fields_needed 和中文冒号覆盖项不再生成 checks，也不再作为顶层旧字段通过。"""
@@ -692,9 +714,9 @@ class TestTaskProgressCoverageRejectedAliases:
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
 
-        result = agent.tools.execute_call(
+        result = _execute_task_progress(
+            agent,
             {
-                "tool": "task_progress",
                 "action": "update",
                 "summary": "开始覆盖多个对象。",
                 "items": [
@@ -711,7 +733,7 @@ class TestTaskProgressCoverageRejectedAliases:
         )
         assert result.ok is False
         assert result.error_code == "TOOL_INVALID_ARGUMENTS"
-        assert "$.coverage_targets" in result.output
+        assert _validation_issues(result)[0]["path"] == "$.coverage_targets"
 
     def test_task_progress_notes_do_not_create_implicit_coverage_checks(self, tmp_path):
         """notes 是事实或备注；不要靠冒号文本猜 coverage checks。"""
@@ -721,9 +743,9 @@ class TestTaskProgressCoverageRejectedAliases:
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
 
-        result = agent.tools.execute_call(
+        result = _execute_task_progress(
+            agent,
             {
-                "tool": "task_progress",
                 "action": "update",
                 "items": [
                     {
@@ -750,9 +772,9 @@ class TestTaskProgressCoverageRejectedAliases:
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
 
-        result = agent.tools.execute_call(
+        result = _execute_task_progress(
+            agent,
             {
-                "tool": "task_progress",
                 "action": "update",
                 "items": [{"id": "agentscope-main", "status": "in_progress", "note": "旧字段"}],
             }
@@ -770,9 +792,9 @@ class TestTaskProgressCoverageRejectedAliases:
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
 
-        result = agent.tools.execute_call(
+        result = _execute_task_progress(
+            agent,
             {
-                "tool": "task_progress",
                 "action": "update",
                 "coverage": "0/2 项目已分析",
                 "coverage_targets": [
@@ -783,8 +805,10 @@ class TestTaskProgressCoverageRejectedAliases:
         )
         assert result.ok is False
         assert result.error_code == "TOOL_PARAMETER_TYPE_INVALID"
-        assert "$.coverage" in result.output
-        assert "$.coverage_targets" in result.output
+        assert [issue["path"] for issue in _validation_issues(result)] == [
+            "$.coverage",
+            "$.coverage_targets",
+        ]
 
 
 class TestTaskProgressQualityHints:
@@ -830,9 +854,9 @@ class TestTaskProgressQualityHints:
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
 
-        result = agent.tools.execute_call(
+        result = _execute_task_progress(
+            agent,
             {
-                "tool": "task_progress",
                 "action": "update",
                 "items": [{"id": "a", "title": "对象 A", "status": "done"}],
             }
@@ -852,9 +876,9 @@ class TestTaskProgressQualityHints:
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
 
-        result = agent.tools.execute_call(
+        result = _execute_task_progress(
+            agent,
             {
-                "tool": "task_progress",
                 "action": "update",
                 "items": [
                     {"id": "a", "title": "对象 A", "status": "已完成"},
@@ -878,9 +902,9 @@ class TestTaskProgressQualityHints:
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
         agent._main_agent_run_id = "run-main"
 
-        result = agent.tools.execute_call(
+        result = _execute_task_progress(
+            agent,
             {
-                "tool": "task_progress",
                 "action": "update",
                 "coverage": {
                     "targets": [
@@ -962,9 +986,9 @@ class TestTaskProgressQualityHints:
             ]
         )
 
-        result = agent.tools.execute_call(
+        result = _execute_task_progress(
+            agent,
             {
-                "tool": "task_progress",
                 "action": "update",
                 "items": [
                     {
@@ -998,9 +1022,9 @@ class TestTaskProgressQualityHints:
             ]
         )
 
-        result = agent.tools.execute_call(
+        result = _execute_task_progress(
+            agent,
             {
-                "tool": "task_progress",
                 "action": "update",
                 "items": [
                     {

@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -80,6 +79,8 @@ class RuntimeLoopParams:
     save: bool | None = None
     carried_archive_tool_calls: list[dict[str, object]] | None = None
     carried_active_turn_user_inputs: list[dict[str, object]] | None = None
+    tool_runtime_snapshot: object = None
+    tool_protocol_snapshot: object = None
 
 
 @dataclass
@@ -101,6 +102,7 @@ class FinalizeParams:
     main_context_bundle_path: str = ""
     main_context_bundle_markdown_path: str = ""
     active_turn_user_inputs: list[dict[str, object]] | None = None
+    tool_runtime_evidence: dict[str, object] | None = None
 
 
 @dataclass
@@ -112,6 +114,8 @@ class PreparedRuntimeContext:
     resume_context_section: str
     main_context_bundle_path: str = ""
     main_context_bundle_markdown_path: str = ""
+    tool_runtime_snapshot: object = None
+    tool_protocol_snapshot: object = None
 
 
 @dataclass
@@ -125,6 +129,7 @@ class RuntimeLoopResult:
     executed_tools: list[str]
     archive_tool_calls: list[dict[str, object]]
     active_turn_user_inputs: list[dict[str, object]]
+    tool_runtime_evidence: dict[str, object]
 
 
 @dataclass
@@ -142,3 +147,5 @@ class RuntimeToolLoopSeed:
     tool_catalog_section: str
     tool_recommendations_section: str
     tool_runtime_snapshot: object = None
+    tool_protocol_snapshot: object = None
+    effective_contract_snapshot: object = None

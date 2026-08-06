@@ -159,8 +159,9 @@ Ctrl+C
 | --- | --- | --- | --- |
 | `status` | 查看 gateway、LocalStore、subagent 和最近事件总览 | 否 | 否 |
 | `timeline` | 查看本地事实源最近事件 | 否 | 否 |
-| `run` | 运行一次智能体对话 | 默认写记忆和轻量 recovery hook，可用 `--no-save` 关闭普通会话保存 | 是，除非配置 echo 后端 |
-| `remember` | 手动写入一条记忆 | 是 | 否 |
+| `run` | 运行一次智能体对话 | 默认写运行归档与恢复事实；不自动写正式长期记忆，可用 `--no-save` 关闭本次运行归档 | 是，除非配置 echo 后端 |
+| `remember` | 通过统一 Candidate/Promotion 主链保存用户明确确认的具体事实、事件或项目知识 | 是 | 否 |
+| `memory` | 统一管理 Candidate、后台 Curator、Retention、Doctor 与 Migration | 取决于子命令；list/status/plan 默认只读 | Curator run 可能调用后台模型 |
 | `memory-list` | 列出最近记忆 | 否 | 否 |
 | `memory-search` | 搜索记忆 | 否 | 否 |
 | `home-status` | 查看 `~/.my-agent` 入口文件、关键目录和轻量计数 | 否 | 否 |
@@ -187,8 +188,7 @@ Ctrl+C
 | `local-doctor` | 诊断 LocalStore、gateway 队列和 subagent 文件事实源 | 可选 `--repair` | 否 |
 | `local-rebuild` | 从 memory/gateway/subagent 文件事实源重建 LocalStore | 是 | 否 |
 | `logs` | log analysis 状态、文件导入和安全查询入口 | status/query 只读；ingest 写 log analysis 数据目录 | 否 |
-| `chat` | 启动交互循环 | 默认写记忆，可用 `--no-save` 关闭 | 是；加 `--gateway` 时由后台 gateway 调用 |
-| `learn` | 查看和确认自动生成的 learning draft 候选 | 读取或更新 `data/learning_drafts/*.json` | 否 |
+| `chat` | 启动交互循环 | Gateway 模式写 ConversationStore/audit；默认另写运行归档，`--no-save` 只关闭运行归档；不自动写正式长期记忆 | 是；加 `--gateway` 时由后台 gateway 调用 |
 | `spawn-subagents` | 拆分并创建 subagent 工单 | 是 | 否 |
 | `subagents` | 查看 subagent 看板 | 否 | 否 |
 | `subagents-due-check` | 巡检 subagent 风险 | 写全局 due-check 报告 | 否 |
@@ -206,7 +206,6 @@ Ctrl+C
 | `subagents-acceptance-plan` | 查看、审计或显式应用单个 subagent 的父级验收决策 | `--write` 写 dry-run 决策；`--apply` 只允许 `inspect_only` 进入普通验收 apply；`--next-action` 给上级动作建议；`--auto-policy` 写策略 dry-run 审计；`--execute-auto-tests` 只在 `--auto-execution` 下手动确认跑 tests | 否 |
 | `subagents-tests` | 查看或显式重跑单个 subagent 的真实测试执行记录 | `--re-run` 时写 `test_execution.json/md` | 否 |
 | `subagents-patches` | 审核或 apply runner 输出的 patch 记录 | 默认 review dry-run；`--review-apply` 只写审核状态；`--apply` 真正落文件 | 否 |
-| `subagents-memory-gate` | 查看或写回子代理 memory/skill 候选 review decision | 传 `--candidate-id` 时写 `memory_gate/decisions.jsonl` 和 gate 状态 | 否 |
 | `subagents-dispatch` | 执行父代理调度 | dry-run 写报告；`--apply` 写回；`--execute-acceptance-tests` 只跑父级验收 tests | 只有 `--apply --start-runners` 会调用模型；`--execute-acceptance-tests` 会执行本地验收 tests |
 | `background-main-agent` | 本地长期主代理线程、定时汇报和后台唤醒命令 | message/bind-task/observe 会写长期会话账本；tick/service 会唤醒后台主代理 | tick/service 可能调用模型 |
 | `collaboration` | 查看和推进通用多代理协作 case/request/evidence 状态 | update-status/update-request 会写协作账本 | 否 |
@@ -277,7 +276,7 @@ my-agent timeline --event-type gateway_request_completed --details
 my-agent run "总结这个项目" --no-save
 ```
 
-默认保存时，`run` 会同时写入普通 JSONL memory、raw archive 和一条轻量 `memory/hooks/YYYY-MM-DD.jsonl` recovery snapshot。`--no-save` 会关闭普通单轮会话保存；任务类 runner 仍会通过自己的事实源写 run_id 级恢复锚点。
+默认保存时，`run` 会写运行经历归档、轻量 `memory/hooks/YYYY-MM-DD.jsonl` recovery snapshot 和运行恢复事实；有结构化任务时还会写 task workspace。它不会把普通 user/assistant 正文写进正式长期记忆。`--no-save` 关闭这些本次运行归档及持久化 Compact；它不删除或绕过由 Gateway 入口独立维护的 ConversationStore 与 audit。
 
 如果配置打开 `memory_resume_auto_context_enabled: true`，`run/chat/gateway` 会在“继续、刚刚、恢复、run_id/request_id”等恢复场景里尝试读取归档和任务事实源，并把一段短小 `Recovery Brief` 注入本轮 prompt。默认关闭，避免普通请求被恢复检索拖慢。
 
@@ -288,8 +287,8 @@ my-agent run "总结这个项目" --no-save
 | `prompt` | 必填，用户任务或问题。 |
 | `--inject <text>` | 动态注入 prompt，可多次传入。 |
 | `--prompt-file <path>` | 加载额外动态 prompt 文件，可多次传入。 |
-| `--save` | 保存本次对话到记忆。 |
-| `--no-save` | 不保存本次对话到记忆。 |
+| `--save` | 保存本次运行归档与恢复事实；不会把普通对话直接写入正式长期记忆。 |
+| `--no-save` | 不保存本次运行归档；Gateway 的 ConversationStore 与 audit 仍按入口合同记录。 |
 | `--show-prompt` | 打印最终拼装后的 prompt。 |
 | `--delivery-contract-file <path>` | 读取结构化交付合同 JSON，供主代理按机器字段验收产物，不把合同塞进用户 prompt。 |
 | `--resume-context` | 本次请求临时启用恢复上下文注入，不用改配置文件。 |
@@ -298,31 +297,65 @@ my-agent run "总结这个项目" --no-save
 ## `remember`
 
 ```powershell
-my-agent remember "我喜欢清晰的表格" --kind preference
+my-agent remember "项目 moneywise 使用 Python 3.14" --kind project
 ```
 
 | 参数 | 说明 |
 | --- | --- |
-| `content` | 必填，记忆内容。 |
-| `--kind <kind>` | 记忆类型，默认 `note`，常用值如 `note`、`preference`、`fact`。 |
+| `content` | 必填，要长期保存的具体事实、事件或项目知识。 |
+| `--kind <kind>` | 正式知识类型：`fact`=事实（默认）、`event`=事件、`project`=项目知识；用户画像或偏好走 `update_persona`，lesson 走统一 Candidate/Promotion 链。 |
 
-## `learn`
+## `memory`
 
 ```powershell
-my-agent learn list
-my-agent learn accept <candidate_id>
-my-agent learn reject <candidate_id>
-my-agent learn stats --json
+my-agent memory candidates list --status pending_review
+my-agent memory candidates review <candidate_id> --decision approve --reviewer admin
+my-agent memory candidates promote <candidate_id> --reviewer admin
+my-agent memory curator status --json
+my-agent memory curator run --json
+my-agent memory retention plan --json
+my-agent memory retention apply --json
+my-agent memory doctor --json
+my-agent memory migrate --json
+my-agent memory migrate --apply --json
 ```
 
-当 `agent_config.yaml` 里打开 `enable_self_learning: true` 后，runner 结构化输出中的 `lessons` 会自动沉淀为 `data/learning_drafts/*.json` 候选草稿。`learn` 命令只管理这些候选，不会自动改正式 skill。
+这是 Memory v2 唯一管理员命令树。旧 `learn` 与 `subagents-memory-gate` 已删除；旧
+`data/learning_drafts` 和 task-local `memory_gate` 只由一次性 `memory migrate` 读取，不再作为生产状态机。
 
-| 子命令 | 说明 |
+### `memory candidates`
+
+| 子命令或参数 | 中文说明 |
 | --- | --- |
-| `learn list` | 列出当前 learning draft，显示状态、置信度、出现次数和证据数。 |
-| `learn accept <candidate_id>` | 把一个候选标记为 `accepted`，表示这条 lesson 值得后续人工提升。 |
-| `learn reject <candidate_id>` | 把一个候选标记为 `rejected`。 |
-| `learn stats` | 输出 draft/accepted/rejected 汇总；可加 `--json`。 |
+| `list` | 从当前 owner 的唯一 `memory/candidates.jsonl` 列出候选；`--status` 可重复传入，`--limit 0` 表示不限。 |
+| `review <candidate_id>` | 按精确 ID 审核；`--decision` 可选 `approve`（批准）、`reject`（拒绝）、`reopen`（阻塞态退回待审）、`expire`（过期）、`supersede`（被替代）。 |
+| `--proposed-action` | 修正正式动作：`add` 新增、`replace` 替换、`remove` 删除、`merge` 合并、`none` 不处理。 |
+| `--target-entry-id` | replace/remove/merge 或 HOT 的精确正式目标 ID，不能按正文模糊选择。 |
+| `--promotion-target` | 正式落点：`long_term` 长期事实、`user` 用户画像、`lesson` 教训、`hot` 高频规则、`soul` AI 人格、`agents` 合作约定、`none` 不晋升。 |
+| `promote <candidate_id>` | 经唯一 PromotionService 核验证据、scope 与冲突后晋升；批准状态不等于已落盘。 |
+| `--automatic` | 使用 `conservative_v1` 自动策略，不会放宽证据、冲突或 Persona 确认边界。 |
+| `--confirmed` | 表示当前受保护 Persona 操作已确认；候选本身仍必须有用户明确来源。 |
+
+候选状态：`observed`=已观察，`pending_review`=待审核，`approved`=已批准，`promoted`=已晋升，
+`rejected`=已拒绝，`superseded`=已被替代，`expired`=已过期，
+`blocked_missing_evidence`=缺少证据，`blocked_conflict`=存在冲突。
+
+### `memory curator`
+
+- `status`：查看当前 provider/model、增量游标、pending reason、active lease、累计数量和最近错误码。
+- `run`：先持久化 `admin` reason，再由同一 CuratorService 立即尝试一个有界批次。
+- `--force`：即使配置关闭也执行一次；仍遵守严格 Schema、证据、lease 和无工具权限边界。
+
+### `memory retention`
+
+- `plan`：严格只读，不创建 trash 或审计，也不修改任何文件。
+- `apply`：锁内重新计划并逐项重验证后执行；legal hold、非终态任务、损坏状态或 fingerprint 变化会关闭式阻断删除。
+
+### `memory doctor` 与 `memory migrate`
+
+- `doctor`：只读汇总 Candidate、Curator、routing、migration 和 retention 健康；`--index` 可指定 routing index。
+- `migrate`：默认 dry-run；`--apply` 才会先生成完整备份/manifest，再迁移并写 schema marker；失败会回滚。
+- 所有子命令可加 `--json` 输出稳定机器字段；普通输出提供中文标题，字段完整解释见 `docs/modules/memory/05-memory-v2-layout.md`。
 
 ## `memory-list`
 
@@ -404,17 +437,17 @@ my-agent home-index-rebuild --apply --json
 
 ```powershell
 my-agent memory-daily-list "表格" --date 2026-05-13
-my-agent memory-daily-list --date 2026-05-13 --role user --kind preference --json
+my-agent memory-daily-list --date 2026-05-13 --actor user --event-type conversation --json
 ```
 
-直接查看 home daily memory：也就是 `~/.my-agent/memory/daily/YYYY-MM-DD.jsonl` 里的按天记忆流水。这个命令适合调试“今天到底存了什么记忆”，不会读取旧 `memory_path`，也不会调用模型。
+直接查看当前 owner 的 `memory/daily/YYYY-MM-DD.jsonl` Daily v2 经历摘要。该命令只读严格 v2 记录，旧 `role/kind/content` Daily 镜像必须先经 `memory migrate`，不会被兼容双读；Daily 也不会因此成为正式长期记忆或 Prompt 召回来源。
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `query` | 空 | 可选搜索关键词；为空时列出匹配日期、角色和类型的记录。 |
 | `--date <YYYY-MM-DD>` | - | 只查看某一天的 daily memory 文件。 |
-| `--role <role>` | 空 | 按 role 精确过滤，例如 `user`、`assistant`、`tool`。 |
-| `--kind <kind>` | 空 | 按 kind 精确过滤，例如 `dialogue`、`preference`、`note`。 |
+| `--actor <actor>` | 空 | 按经历主体精确过滤：`user` 用户、`main_agent` 主代理、`subagent` 子代理、`tool` 工具、`system` 系统。 |
+| `--event-type <type>` | 空 | 按经历类型精确过滤：`conversation` 对话、`decision` 决定、`task_progress` 任务进展、`tool_result` 工具结果、`lesson` 教训、`todo` 待办、`summary` 摘要、`warning` 警告、`error` 错误。 |
 | `--limit <n>` | `50` | 最多显示多少条记录；未传时读 `cli_task_list_limit`。 |
 | `--json` | `false` | 输出机器可读 JSON。 |
 
@@ -834,7 +867,7 @@ my-agent chat --gateway
 | `--inject <text>` | - | 启动时注入 prompt，可多次传入。 |
 | `--prompt-file <path>` | - | 启动时加载额外 prompt 文件，可多次传入。 |
 | `--memory-limit <n>` | `5` | 交互中 `/memory` 默认显示条数。 |
-| `--no-save` | `false` | 交互对话不自动保存到记忆。 |
+| `--no-save` | `false` | 只关闭本次运行归档与持久化 Compact；Gateway 模式的 ConversationStore/audit 仍照常记录，不会直接写正式长期记忆。 |
 | `--gateway` | `false` | 普通聊天消息投递给后台 gateway；如果 gateway 没启动，会提示先执行 `my-agent gateway start`。 |
 | `--gateway-timeout <seconds>` | `gateway_request_timeout` | gateway 模式连续无请求租约或流式活动后停止等待的秒数；仍在工作的长任务会继续等待。 |
 | `--resume-context` | 配置值 | 本次 chat 会话临时启用恢复上下文注入。 |
@@ -1172,36 +1205,6 @@ my-agent subagents-patches --apply --run-id <run_id> --reviewer parent
 | `--reviewer <name>` | `parent` | 审核者标识。 |
 | `--note <text>` | - | 写入 patch 审核记录的备注。 |
 
-## `subagents-memory-gate`
-
-```powershell
-my-agent subagents-memory-gate <run_id>
-my-agent subagents-memory-gate <run_id> --candidate-id <candidate_id> --decision approve_memory --reviewer parent
-my-agent subagents-memory-gate <run_id> --export-memory --candidate-id <candidate_id>
-my-agent subagents-memory-gate <run_id> --export-skill --candidate-id <candidate_id>
-my-agent subagents-memory-gate <run_id> --retention-dry-run
-my-agent subagents-memory-gate <run_id> --retention-apply
-my-agent subagents-memory-gate <run_id> --verify
-```
-
-这个命令默认只处理 `tasks/<root_id>/agents/<run_id>/memory_gate/` 里的候选 review 状态。显式传 `--export-memory` 才会把 `approve_memory` 候选写入主代理长期 memory JSONL；显式传 `--export-skill` 才会把 `approve_skill` 候选写成本地 skill draft。`--retention-apply` 只压缩 active review queue，不删除候选、decision 或 export 审计日志。
-
-| 参数 | 默认值 | 说明 |
-| --- | --- | --- |
-| `run_id` | - | 子代理运行 ID。 |
-| `--retention-dry-run` | `false` | 只生成 retention 清理计划和 `retention_report.json`。 |
-| `--retention-apply` | `false` | 应用 retention：从 active review queue 移除 closed 候选，但保留审计日志。 |
-| `--export-memory` | `false` | 把已 `approve_memory` 的候选显式导出到主 memory JSONL。 |
-| `--export-skill` | `false` | 把已 `approve_skill` 的候选显式导出为 skill draft，不安装正式 skill。 |
-| `--verify` | `false` | 写 `verifier_report.json`，检查 gate/export 没有自动提升或边界破坏。 |
-| `--candidate-id <id>` | - | 要写回 review decision 的候选 ID；不传时只列出候选。 |
-| `--decision <value>` | `needs_evidence` | 可选 `approve_memory`、`approve_skill`、`reject`、`needs_evidence`。 |
-| `--reviewer <name>` | `parent` | review 者标识。 |
-| `--note <text>` | - | 写入 `decisions.jsonl` 的备注。 |
-| `--memory-path <path>` | 当前 agent memory | `--export-memory` 的目标 JSONL。 |
-| `--skill-output-dir <path>` | run-local `memory_gate/skill_drafts` | `--export-skill` 的草稿输出目录。 |
-| `--limit <n>` | `20` | 列表模式最多显示多少条候选。 |
-
 ## `subagents-dispatch`
 
 ```powershell
@@ -1516,7 +1519,7 @@ my-agent gateway result gwreq-1777442684-0b7ac8cb
 | `run` | `--workspace-root <path>` | 内部字段：`start` 把父进程当前工作区传给后台 gateway，普通用户不需要手填。 |
 | `ask` | `--inject <text>` | 给本次 gateway 请求动态注入 prompt，可多次传入。 |
 | `ask` | `--prompt-file <path>` | 给本次请求追加 prompt 文件，可多次传入。 |
-| `ask` | `--no-save` | 不把本次 gateway 对话保存进记忆。 |
+| `ask` | `--no-save` | 只关闭本次运行归档与持久化 Compact；ConversationStore/audit 仍按 Gateway 合同记录，不会直接写正式长期记忆。 |
 | `ask` | `--show-prompt` | 响应返回时打印最终 prompt。 |
 | `ask` | `--timeout <seconds>` | 等待后台响应的秒数，默认使用 `gateway_request_timeout`。 |
 | `ask` | `--no-wait` | 只投递请求并立即返回 request id。 |

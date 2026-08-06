@@ -68,6 +68,7 @@ from agent_py_agent.agent.ingestion.watch_state import (
 )
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.subagents.models import TaskStatus
+from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
 
 
 def _request(request_id: str, *, user: str = "u-1", conversation_id: str = "c-1") -> dict:
@@ -393,6 +394,10 @@ def test_btw_becomes_one_thread_user_message_after_model_accepts_it(tmp_path) ->
         scope,
     )
     params = RunParams(request_id="req-1", run_id="req-1", task_id="req-1")
+    params.tool_protocol_snapshot = make_test_protocol_snapshot(
+        run_id="req-1",
+        source_protocol="text",
+    )
     params.live_archive_state = {}
     params.tool_context = []
     params.runtime_injections = []

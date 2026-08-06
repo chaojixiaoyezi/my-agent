@@ -26,18 +26,18 @@ class TestOrchestrationToolsSpec:
         mock_agent.config.max_subagents = 10
 
         tool = CreateSubagentsTool(mock_agent)
-        spec = tool.spec
+        spec = tool.model_spec
 
         assert spec.name == "create_subagents"
         assert spec.category == "orchestration"
-        assert "role" in spec.parameters
-        assert "bug_finder" in spec.parameter_details["role"]
-        assert "writer" in spec.parameter_details["role"]
-        assert "资料线索" in spec.parameter_details["items"]
-        assert "root" not in spec.parameter_details["items"]
-        assert "context_manifest" not in spec.parameters
-        assert "context_packs" not in spec.parameters
-        assert "output_refs" not in spec.parameters
+        assert "role" in spec.parameter_descriptions
+        assert "bug_finder" in spec.parameter_descriptions["role"]
+        assert "writer" in spec.parameter_descriptions["role"]
+        assert "资料线索" in spec.parameter_descriptions["items"]
+        assert "root" not in spec.parameter_descriptions["items"]
+        assert "context_manifest" not in spec.parameter_descriptions
+        assert "context_packs" not in spec.parameter_descriptions
+        assert "output_refs" not in spec.parameter_descriptions
 
     def test_dispatch_subagents_spec_defined(self):
         """DispatchSubagentsTool 工具规格已定义。"""
@@ -49,7 +49,7 @@ class TestOrchestrationToolsSpec:
         mock_agent.tools.specs.return_value = []
 
         tool = DispatchSubagentsTool(mock_agent)
-        spec = tool.spec
+        spec = tool.model_spec
 
         assert spec.name == "dispatch_subagents"
         assert spec.category == "orchestration"
@@ -64,11 +64,11 @@ class TestOrchestrationToolsSpec:
         mock_agent.tools.specs.return_value = []
 
         tool = DispatchSubagentsTool(mock_agent)
-        spec = tool.spec
+        spec = tool.model_spec
 
-        assert "take_over_by" not in spec.parameters
-        assert "locked_files" not in spec.parameters
-        assert "workflow_mode" not in spec.parameters
+        assert "take_over_by" not in spec.parameter_descriptions
+        assert "locked_files" not in spec.parameter_descriptions
+        assert "workflow_mode" not in spec.parameter_descriptions
         assert not any("take_over_by" in example for example in spec.examples)
         assert not any("workflow_mode" in example for example in spec.examples)
 
@@ -80,12 +80,12 @@ class TestOrchestrationToolsSpec:
 
         mock_agent.capability_router = CapabilityRouter()
         tool = ScheduleChildSubagentsTool(mock_agent)
-        spec = tool.spec
+        spec = tool.model_spec
 
         assert spec.name == "schedule_child_subagents"
         assert spec.category == "orchestration"
         assert "当前子代理" in spec.description
-        assert "tester" in spec.parameter_details["children"]
+        assert "tester" in spec.parameter_descriptions["children"]
         assert "runner" not in spec.description
 
     def test_orchestration_specs_do_not_expose_role_template_paths(self):
@@ -102,8 +102,8 @@ class TestOrchestrationToolsSpec:
         store = load_role_template_store()
 
         for tool_cls in (CreateSubagentsTool, ScheduleChildSubagentsTool):
-            spec = tool_cls(mock_agent).spec
-            blob = str(spec.parameters) + str(spec.parameter_details) + str(spec.examples)
+            spec = tool_cls(mock_agent).model_spec
+            blob = str(spec.parameter_descriptions) + str(spec.examples)
             assert "模板位置" not in blob
             for template in store.all():
                 assert template.source_path not in blob

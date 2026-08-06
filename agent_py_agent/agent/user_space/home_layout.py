@@ -1,3 +1,7 @@
+"""Canonical my-agent Home layout and safe owner initialization."""
+
+# LLM: This module defines canonical owner-home paths; legacy Memory directories must not return as runtime fallbacks.
+# 模块用途: 解析、创建和播种每个 owner 的规范 Home、Memory、Persona 与运行目录。
 
 from __future__ import annotations
 
@@ -11,7 +15,6 @@ from pathlib import Path
 from .home_layout_v2 import v2_home_directories, v2_home_path_fields, v2_seed_files, v2_seed_jsons
 from .home_memory_seeds import (
     default_memory_hot_md,
-    default_memory_lessons,
     default_memory_md,
     default_memory_route_index_md,
 )
@@ -20,6 +23,8 @@ from .persona_templates import AGENTS_TEMPLATE, SOUL_TEMPLATE, USER_TEMPLATE
 DEFAULT_ROUTE_INDEX = Path("memory") / "routing" / "INDEX.md"
 
 
+# LLM: Every durable owner authority gets one explicit path field; callers must not reconstruct alternate locations from prose.
+# 类用途: 保存 my-agent 根目录和当前 owner 的全部规范文件/目录路径。
 @dataclass(frozen=True)
 class MyAgentHomePaths:
     root: Path
@@ -73,15 +78,16 @@ class MyAgentHomePaths:
     owner_sessions_dir: Path
     owner_memory_dir: Path
     owner_memory_daily_dir: Path
-    owner_memory_hooks_dir: Path
     owner_memory_lessons_dir: Path
     owner_memory_routing_dir: Path
     owner_memory_routing_index_md: Path
-    owner_memory_indexes_dir: Path
-    owner_memory_store_jsonl: Path
+    owner_memory_candidates_jsonl: Path
     owner_memory_ops_jsonl: Path
     owner_memory_long_term_dir: Path
-    owner_memory_runtime_refs_dir: Path
+    owner_memory_long_term_jsonl: Path
+    owner_memory_curator_dir: Path
+    owner_memory_curator_state_json: Path
+    owner_memory_curator_runs_dir: Path
     owner_tasks_dir: Path
     owner_runs_dir: Path
     owner_agents_dir: Path
@@ -171,6 +177,8 @@ def _root_home_path_fields(home: Path) -> dict[str, Path]:
     }
 
 
+# LLM: Initialization creates empty v2 authorities and never seeds unreviewed lessons/HOT or migrates legacy user data.
+# 函数用途: 创建缺失的 Home 目录与安全空种子，并返回规范路径集合。
 def ensure_my_agent_home(root: str | Path | None = None) -> MyAgentHomePaths:
     paths = home_paths(root)
     paths.root.mkdir(parents=True, exist_ok=True)
@@ -183,8 +191,6 @@ def ensure_my_agent_home(root: str | Path | None = None) -> MyAgentHomePaths:
     _write_seed_file(paths.memory_md, default_memory_md())
     _write_seed_file(paths.memory_hot_md, default_memory_hot_md())
     _write_seed_file(paths.owner_memory_routing_index_md, default_memory_route_index_md())
-    for lesson_name, lesson_content in default_memory_lessons().items():
-        _write_seed_file(paths.owner_memory_lessons_dir / lesson_name, lesson_content)
     for path, content in v2_seed_files(paths):
         _write_seed_file(path, content)
     for path, payload in v2_seed_jsons(paths):
@@ -355,8 +361,19 @@ def resolve_route_index_target(root: Path, raw_index: str | None, *, home_paths:
     return RouteIndexTarget(path=workspace_index, authority_root=root)
 
 
+# LLM: Runtime lesson routing must use the current owner's deterministic formal index; a
+# workspace memory/routing file is legacy data for explicit migration, never a fallback authority.
+# 函数用途: 返回 owner home 与其唯一 memory/routing/INDEX.md 相对路径。
 def runtime_route_root_and_index(agent) -> tuple[Path, str]:
-    target = resolve_route_index_target(agent.root, None, home_paths=getattr(agent, "home_paths", None))
-    if target.authority_root == agent.root:
-        return target.authority_root, DEFAULT_ROUTE_INDEX.as_posix()
-    return target.authority_root, DEFAULT_ROUTE_INDEX.as_posix()
+    home = getattr(agent, "home_paths", None)
+    owner_root = getattr(home, "owner_home_dir", None)
+    owner_index = getattr(home, "owner_memory_routing_index_md", None)
+    if owner_root is None or owner_index is None:
+        raise RuntimeError("owner memory routing authority is unavailable")
+    root = Path(owner_root).resolve()
+    index = Path(owner_index).resolve()
+    try:
+        relative_index = index.relative_to(root).as_posix()
+    except ValueError as exc:
+        raise RuntimeError("owner memory routing index escapes owner home") from exc
+    return root, relative_index

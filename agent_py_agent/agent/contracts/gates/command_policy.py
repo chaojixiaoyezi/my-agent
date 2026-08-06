@@ -30,6 +30,66 @@ _PROTECTED_DELETE_PREFIXES = (
 _SHELL_EXECUTABLES = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
 _DOWNLOAD_EXECUTABLES = frozenset({"curl", "wget"})
 _FORK_BOMB_RE = re.compile(r":\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;?\s*:")
+_READ_ONLY_EXECUTABLES = frozenset(
+    {
+        "basename",
+        "cat",
+        "cmp",
+        "cut",
+        "diff",
+        "dirname",
+        "du",
+        "env",
+        "file",
+        "find",
+        "git",
+        "grep",
+        "head",
+        "id",
+        "jq",
+        "ls",
+        "md5",
+        "md5sum",
+        "pwd",
+        "pytest",
+        "rg",
+        "sed",
+        "sha1sum",
+        "sha256sum",
+        "sort",
+        "stat",
+        "tail",
+        "test",
+        "true",
+        "uname",
+        "uniq",
+        "wc",
+        "which",
+        "whoami",
+    }
+)
+_KNOWN_MUTATING_EXECUTABLES = frozenset(
+    {
+        "chmod",
+        "chown",
+        "cp",
+        "install",
+        "ln",
+        "mkdir",
+        "mv",
+        "patch",
+        "python",
+        "python3",
+        "ruby",
+        "tee",
+        "touch",
+    }
+)
+_EXTERNAL_SEND_EXECUTABLES = frozenset(
+    {"curl", "ftp", "git", "nc", "netcat", "rsync", "scp", "sftp", "ssh", "wget"}
+)
+_REDIRECTION_OPERATORS = frozenset({">", ">>", "<>", "2>", "2>>", "&>", "&>>"})
+_SEQUENCE_OPERATORS = frozenset({";", "&&", "||", "|", "&"})
 
 
 @dataclass(frozen=True)
@@ -55,6 +115,32 @@ class CommandPolicyDecision:
         return tuple(finding.code for finding in self.findings)
 
 
+@dataclass(frozen=True)
+class CommandSegment:
+    executable: str
+    argv: tuple[str, ...]
+    operator_before: str = ""
+
+
+@dataclass(frozen=True)
+class CommandAnalysis:
+    """Deterministic command classification used by ActionPolicy."""
+
+    classification: str
+    argv: tuple[str, ...] = ()
+    segments: tuple[CommandSegment, ...] = ()
+    reason_codes: tuple[str, ...] = ()
+    paths: tuple[str, ...] = ()
+
+    @property
+    def resolved_effect(self) -> str:
+        if self.classification == "read_only":
+            return "read_only"
+        if self.classification == "dangerous":
+            return "dangerous"
+        return "mutating"
+
+
 def evaluate_command_policy(
     command: object,
     *,
@@ -69,6 +155,143 @@ def evaluate_command_policy(
         findings.extend(_shell_operator_findings(parsed.argv, _raw_command_text(command)))
     findings.extend(_dangerous_executable_findings(parsed.argv, covered_positions, frozenset(allowed_commands)))
     return CommandPolicyDecision(parsed.argv, _unique_findings(findings))
+
+
+def analyze_command(command: object) -> CommandAnalysis:
+    """Parse commands, operators and redirections; unknowns never become read-only."""
+
+    parsed = _parse_command_value(command)
+    if parsed.findings:
+        return CommandAnalysis(
+            "unknown",
+            reason_codes=tuple(item.code for item in parsed.findings),
+        )
+    policy = evaluate_command_policy(command, allow_shell_operators=True)
+    if policy.findings:
+        return CommandAnalysis(
+            "dangerous",
+            argv=parsed.argv,
+            segments=_command_segments(parsed.argv),
+            reason_codes=policy.finding_codes,
+            paths=_command_path_candidates(parsed.argv),
+        )
+    segments = _command_segments(parsed.argv)
+    if not segments:
+        return CommandAnalysis("unknown", argv=parsed.argv, reason_codes=("COMMAND_EMPTY",))
+    redirections = tuple(token for token in parsed.argv if token in _REDIRECTION_OPERATORS)
+    if redirections:
+        return CommandAnalysis(
+            "mutating",
+            argv=parsed.argv,
+            segments=segments,
+            reason_codes=("COMMAND_REDIRECTION_MUTATING",),
+            paths=_command_path_candidates(parsed.argv),
+        )
+    classifications = tuple(_segment_classification(segment) for segment in segments)
+    if "dangerous" in classifications:
+        classification = "dangerous"
+    elif "unknown" in classifications:
+        classification = "unknown"
+    elif "mutating" in classifications:
+        classification = "mutating"
+    else:
+        classification = "read_only"
+    reasons = tuple(
+        f"COMMAND_SEGMENT_{item.upper()}" for item in dict.fromkeys(classifications)
+    )
+    return CommandAnalysis(
+        classification,
+        argv=parsed.argv,
+        segments=segments,
+        reason_codes=reasons,
+        paths=_command_path_candidates(parsed.argv),
+    )
+
+
+def _command_segments(argv: tuple[str, ...]) -> tuple[CommandSegment, ...]:
+    positions = command_positions(argv)
+    segments: list[CommandSegment] = []
+    for index, position in enumerate(positions):
+        end = positions[index + 1] if index + 1 < len(positions) else len(argv)
+        start = _unwrap_command_position(argv, position)
+        operator = argv[position - 1] if position > 0 and is_shell_operator_token(argv[position - 1]) else ""
+        segment_argv = tuple(
+            token for token in argv[start:end] if token not in _SEQUENCE_OPERATORS
+        )
+        if not segment_argv:
+            continue
+        segments.append(
+            CommandSegment(command_name(segment_argv[0]), segment_argv, operator)
+        )
+    return tuple(segments)
+
+
+def _segment_classification(segment: CommandSegment) -> str:
+    executable = segment.executable
+    args = segment.argv[1:]
+    if executable in _CATASTROPHIC_EXECUTABLES or _is_dangerous_executable(executable):
+        return "dangerous"
+    if executable in _MANAGED_DELETE_EXECUTABLES:
+        return "dangerous"
+    if executable in _EXTERNAL_SEND_EXECUTABLES:
+        if executable == "git" and _git_subcommand(args) in {
+            "branch",
+            "diff",
+            "log",
+            "rev-parse",
+            "show",
+            "status",
+        }:
+            return "read_only"
+        return "dangerous"
+    if executable == "git":
+        return (
+            "read_only"
+            if _git_subcommand(args)
+            in {"branch", "diff", "log", "rev-parse", "show", "status"}
+            else "mutating"
+        )
+    if executable == "sed" and any(arg in {"-i", "--in-place"} or arg.startswith("-i") for arg in args):
+        return "mutating"
+    if executable in {"python", "python3"} and _python_read_only_module(args):
+        return "read_only"
+    if executable in _READ_ONLY_EXECUTABLES:
+        return "read_only"
+    if executable in _KNOWN_MUTATING_EXECUTABLES:
+        return "mutating"
+    return "unknown"
+
+
+def _python_read_only_module(args: tuple[str, ...]) -> bool:
+    """Recognize only explicitly enumerated inspection modules.
+
+    Arbitrary Python remains mutating/unknown because source text and scripts
+    can perform any effect.  ``python -m pytest`` is a bounded exception used
+    for test execution; OS sandboxing still controls its filesystem/network.
+    """
+
+    try:
+        marker = args.index("-m")
+    except ValueError:
+        return False
+    return marker + 1 < len(args) and args[marker + 1].lower() == "pytest"
+
+
+def _git_subcommand(args: tuple[str, ...]) -> str:
+    for item in args:
+        if not item.startswith("-"):
+            return item.lower()
+    return ""
+
+
+def _command_path_candidates(argv: tuple[str, ...]) -> tuple[str, ...]:
+    paths: list[str] = []
+    for token in argv:
+        if token in _SEQUENCE_OPERATORS or token in _REDIRECTION_OPERATORS:
+            continue
+        if token.startswith(("/", "./", "../", "~/")) and token not in paths:
+            paths.append(token)
+    return tuple(paths)
 
 
 def _parse_command_value(command: object) -> CommandPolicyDecision:
@@ -279,8 +502,11 @@ def _unique_findings(findings: list[CommandPolicyFinding]) -> tuple[CommandPolic
 
 
 __all__ = [
+    "CommandAnalysis",
     "CommandPolicyDecision",
     "CommandPolicyFinding",
+    "CommandSegment",
+    "analyze_command",
     "command_name",
     "evaluate_command_policy",
 ]

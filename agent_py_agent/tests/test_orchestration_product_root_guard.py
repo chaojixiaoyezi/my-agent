@@ -6,7 +6,9 @@
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from agent_py_agent.agent.agent_core.orchestration.tool_specs import build_create_subagents_spec
+from agent_py_agent.agent.agent_core.orchestration.tool_specs import (
+    build_create_subagents_model_spec,
+)
 from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
 
@@ -24,25 +26,28 @@ def test_explicit_coordinator_product_delivery_uses_output_files_without_extra_w
     mock_agent.subagents.create_run.return_value = mock_task
 
     tool = CreateSubagentsTool(mock_agent)
-    result = tool.execute({
-        "goal": "交付示例网站。",
-        "output_files": ["build/index.html", "build/style.css", "build/app.js"],
-        "role": "coordinator",
-    })
+    result = tool.execute(
+        {
+            "goal": "交付示例网站。",
+            "output_files": ["build/index.html", "build/style.css", "build/app.js"],
+            "role": "coordinator",
+        }
+    )
 
     assert result.ok is True
     params = mock_agent.subagents.create_run.call_args.kwargs["params"]
     assert params.extra_write_roots == [str(Path("/tmp/project/build").resolve(strict=False))]
 
 
-def test_create_subagents_spec_does_not_require_write_root_parameters():
-    spec = build_create_subagents_spec()
-    rendered = "\n".join([
-        spec.description,
-        str(spec.parameters),
-        str(spec.parameter_details),
-        str(spec.examples),
-    ])
+def test_create_subagents_model_spec_does_not_require_write_root_parameters():
+    spec = build_create_subagents_model_spec()
+    rendered = "\n".join(
+        [
+            spec.description,
+            str(spec.parameter_descriptions),
+            str(spec.examples),
+        ]
+    )
 
     assert "allowed_write_roots" not in rendered
     assert "extra_write_roots" not in rendered

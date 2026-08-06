@@ -4,11 +4,63 @@ from agent_py_agent.agent.agent_core.orchestration.shared_context import (
     shared_context_packs_from_archive,
 )
 from agent_py_agent.agent.agent_core.tool_context.reducer import render_tool_result_for_live_prompt
-from agent_py_agent.agent.tooling import ToolExecutionResult
+from agent_py_agent.agent.tooling.output_projection import project_tool_output_body
+from agent_py_agent.agent.tooling.runtime_contracts import (
+    ToolFailureFacts,
+    ToolResult,
+    ToolSuccessFacts,
+)
+from agent_py_agent.tests._tool_runtime_harness import canonical_history_call
+
+
+def _result(
+    tool_name: str,
+    ok: bool,
+    output: str,
+    *,
+    result_envelope: dict[str, object] | None = None,
+    error_code: str = "TOOL_EXECUTION_FAILED",
+) -> ToolResult:
+    """Build the canonical post-executor result consumed by the live reducer."""
+
+    details = dict(result_envelope or {})
+    policy = details.get("tool_output_policy")
+    policy = policy if isinstance(policy, dict) else {}
+    trust = str(policy.get("trust") or "runtime")
+    redaction = str(policy.get("redaction") or "default")
+    projected_output = project_tool_output_body(
+        tool=tool_name,
+        output=output,
+        trust=trust,
+        redaction=redaction,
+    )
+    call = canonical_history_call(tool_name, {}, call_id=f"{tool_name}-call")
+    if ok:
+        return ToolResult.succeeded(
+            call,
+            projected_output,
+            facts=ToolSuccessFacts(
+                output_trust=trust,
+                output_redaction=redaction,
+                metadata={"handler_details": details},
+            ),
+        )
+    return ToolResult.failed(
+        call,
+        projected_output,
+        error_code=error_code,
+        failure_stage="execution",
+        facts=ToolFailureFacts(
+            handler_executed=True,
+            output_trust=trust,
+            output_redaction=redaction,
+            metadata={"handler_details": details},
+        ),
+    )
 
 
 def test_runtime_verification_facts_reach_model_context_without_changing_tool_output():
-    result = ToolExecutionResult(
+    result = _result(
         "run_command",
         True,
         "24 passed",
@@ -31,7 +83,7 @@ def test_runtime_verification_facts_reach_model_context_without_changing_tool_ou
 
 
 def test_inline_result_without_artifact_does_not_offer_unreadable_archive_hint():
-    result = ToolExecutionResult(
+    result = _result(
         "run_command",
         False,
         "SANDBOX_UNAVAILABLE",
@@ -53,7 +105,7 @@ def test_inline_result_without_artifact_does_not_offer_unreadable_archive_hint()
 
 
 def test_preserved_result_keeps_full_body_even_when_archive_is_externalized():
-    result = ToolExecutionResult(
+    result = _result(
         "watch_stream",
         True,
         '{"candidates":[{"seq":1},{"seq":2}]}',
@@ -80,7 +132,7 @@ def test_preserved_result_keeps_full_body_even_when_archive_is_externalized():
 
 
 def test_external_tool_output_is_redacted_wrapped_and_cannot_close_boundary():
-    result = ToolExecutionResult(
+    result = _result(
         "web_fetch",
         True,
         (
@@ -101,23 +153,20 @@ def test_external_tool_output_is_redacted_wrapped_and_cannot_close_boundary():
         {"output_externalized": False},
     )
 
-    assert rendered.startswith("[tool=web_fetch; status=ok]\n<untrusted_tool_result")
+    assert rendered.startswith("[tool-result; tool=web_fetch; status=succeeded;")
     assert rendered.count("<untrusted_tool_result") == 1
     assert rendered.count("</untrusted_tool_result>") == 1
     assert "</untrusted-tool-result>" in rendered
     assert "opaque-secret-value" not in rendered
     assert "api_key=<redacted>" in rendered
-    assert result.output.endswith("api_key=opaque-secret-value")
+    assert "opaque-secret-value" not in result.output
 
 
 def test_source_code_projection_preserves_placeholders_and_redacts_real_key():
-    result = ToolExecutionResult(
+    result = _result(
         "read_file",
         True,
-        (
-            'MAX_TOKENS=8000\napi_key = os.getenv("API_KEY")\n'
-            'fixture = "sk-abcdefghij123456"\n'
-        ),
+        ('MAX_TOKENS=8000\napi_key = os.getenv("API_KEY")\nfixture = "sk-abcdefghij123456"\n'),
         result_envelope={
             "tool_output_policy": {
                 "trust": "runtime",
@@ -137,16 +186,10 @@ def test_source_code_projection_preserves_placeholders_and_redacts_real_key():
 
 
 def test_json_tool_output_redacts_sensitive_fields_inside_nested_text():
-    result = ToolExecutionResult(
+    result = _result(
         "read_artifact",
         True,
-        json.dumps(
-            {
-                "content": json.dumps(
-                    {"api_key": "opaque-nested-secret", "count": 2}
-                )
-            }
-        ),
+        json.dumps({"content": json.dumps({"api_key": "opaque-nested-secret", "count": 2})}),
         result_envelope={
             "tool_output_policy": {
                 "trust": "runtime",
@@ -166,7 +209,7 @@ def test_json_tool_output_redacts_sensitive_fields_inside_nested_text():
 
 
 def test_external_live_prompt_override_uses_same_projection_boundary():
-    result = ToolExecutionResult(
+    result = _result(
         "web_search",
         True,
         "raw provider body",
@@ -191,7 +234,7 @@ def test_external_live_prompt_override_uses_same_projection_boundary():
 
 
 def test_externalized_external_preview_is_wrapped_but_archive_anchor_remains_outside():
-    result = ToolExecutionResult(
+    result = _result(
         "mcp__demo__read",
         True,
         "x" * 20_000,
@@ -249,7 +292,7 @@ def test_parent_shared_context_reuses_external_output_projection():
 def test_dispatch_externalized_result_keeps_checkpoint_next_action_without_read_hint():
     output = _dispatch_externalized_output()
     rendered = render_tool_result_for_live_prompt(
-        ToolExecutionResult("dispatch_subagents", True, output),
+        _result("dispatch_subagents", True, output),
         _dispatch_externalized_archive_record(output),
     )
 
@@ -291,7 +334,11 @@ def _direct_children_recovery_payload() -> dict:
                 "runner_instruction": "从 checkpoint.json 继续当前步骤",
             }
         ],
-        "suggested_tool_call": {"tool": "dispatch_subagents", "run_ids": ["child-1"], "dry_run": False},
+        "suggested_tool_call": {
+            "tool": "dispatch_subagents",
+            "run_ids": ["child-1"],
+            "dry_run": False,
+        },
     }
 
 
@@ -335,7 +382,7 @@ def test_read_artifact_dispatch_content_is_summarized_for_live_prompt():
         }
     )
     rendered = render_tool_result_for_live_prompt(
-        ToolExecutionResult("read_artifact", True, output),
+        _result("read_artifact", True, output),
         {
             "output_externalized": True,
             "artifact_ref": "/tmp/tool_outputs/read_artifact-2.json",
@@ -372,7 +419,7 @@ def test_inspect_agent_tree_externalized_result_keeps_deliverable_refs():
     )
 
     rendered = render_tool_result_for_live_prompt(
-        ToolExecutionResult("inspect_agent_tree", True, output),
+        _result("inspect_agent_tree", True, output),
         _dispatch_externalized_archive_record(output),
     )
 
@@ -408,7 +455,7 @@ def test_inspect_agent_tree_externalized_result_keeps_deliverable_artifact_ids()
     )
 
     rendered = render_tool_result_for_live_prompt(
-        ToolExecutionResult("inspect_agent_tree", True, output),
+        _result("inspect_agent_tree", True, output),
         _dispatch_externalized_archive_record(output),
     )
 
@@ -436,7 +483,7 @@ def test_dispatch_externalized_result_keeps_top_level_completion_gate():
     )
 
     rendered = render_tool_result_for_live_prompt(
-        ToolExecutionResult("dispatch_subagents", True, output),
+        _result("dispatch_subagents", True, output),
         _dispatch_externalized_archive_record(output),
     )
 
@@ -464,7 +511,7 @@ def test_orchestration_externalized_result_keeps_current_turn_run_state():
     )
 
     rendered = render_tool_result_for_live_prompt(
-        ToolExecutionResult("create_subagents", True, output),
+        _result("create_subagents", True, output),
         _dispatch_externalized_archive_record(output),
     )
 
@@ -498,7 +545,7 @@ def test_dispatch_externalized_result_keeps_final_closeout_repair_advice():
     )
 
     rendered = render_tool_result_for_live_prompt(
-        ToolExecutionResult("dispatch_subagents", True, output),
+        _result("dispatch_subagents", True, output),
         _dispatch_externalized_archive_record(output),
     )
 
@@ -527,7 +574,7 @@ def test_dispatch_externalized_result_keeps_top_level_parent_repair_tool_call():
     )
 
     rendered = render_tool_result_for_live_prompt(
-        ToolExecutionResult("dispatch_subagents", True, output),
+        _result("dispatch_subagents", True, output),
         _dispatch_externalized_archive_record(output),
     )
 
@@ -546,7 +593,9 @@ def test_dispatch_externalized_result_keeps_result_refs_by_run():
                     "status": "DONE",
                     "verification_status": "VERIFIED",
                     "summary": "市场环境报告完成",
-                    "primary_artifact_refs": ["/tmp/subagents/market/market_env_comprehensive_report.md"],
+                    "primary_artifact_refs": [
+                        "/tmp/subagents/market/market_env_comprehensive_report.md"
+                    ],
                     "output_json": "/tmp/subagents/market/output.json",
                 },
                 {
@@ -554,22 +603,29 @@ def test_dispatch_externalized_result_keeps_result_refs_by_run():
                     "status": "DONE",
                     "verification_status": "VERIFIED",
                     "summary": "竞争格局报告完成",
-                    "primary_artifact_refs": ["/tmp/subagents/competitor/competitive_landscape_report.md"],
-                    "primary_artifact_summaries": [{
-                        "path": "/tmp/subagents/competitor/competitive_landscape_report.md",
-                        "kind": "report",
-                        "summary": "竞品矩阵和差异化机会",
-                    }],
+                    "primary_artifact_refs": [
+                        "/tmp/subagents/competitor/competitive_landscape_report.md"
+                    ],
+                    "primary_artifact_summaries": [
+                        {
+                            "path": "/tmp/subagents/competitor/competitive_landscape_report.md",
+                            "kind": "report",
+                            "summary": "竞品矩阵和差异化机会",
+                        }
+                    ],
                     "output_json": "/tmp/subagents/competitor/output.json",
                 },
             ],
-            "deliverable_artifact_refs": ["/tmp/too-many/market.md", *[f"/tmp/too-many/ref-{i}.md" for i in range(60)]],
+            "deliverable_artifact_refs": [
+                "/tmp/too-many/market.md",
+                *[f"/tmp/too-many/ref-{i}.md" for i in range(60)],
+            ],
             "records": [{"message": "z" * 2000}],
         }
     )
 
     rendered = render_tool_result_for_live_prompt(
-        ToolExecutionResult("dispatch_subagents", True, output),
+        _result("dispatch_subagents", True, output),
         _dispatch_externalized_archive_record(output),
     )
 
@@ -604,7 +660,7 @@ def test_dispatch_externalized_result_keeps_result_ref_artifact_ids():
     )
 
     rendered = render_tool_result_for_live_prompt(
-        ToolExecutionResult("dispatch_subagents", True, output),
+        _result("dispatch_subagents", True, output),
         _dispatch_externalized_archive_record(output),
     )
 
@@ -626,7 +682,7 @@ def test_read_artifact_summary_hides_nested_wrapper_artifact_path():
         }
     )
     rendered = render_tool_result_for_live_prompt(
-        ToolExecutionResult("read_artifact", True, output),
+        _result("read_artifact", True, output),
         {
             "output_externalized": True,
             "artifact_ref": "/tmp/tool_outputs/read_artifact-2.json",

@@ -1,7 +1,13 @@
 
 from __future__ import annotations
 
+"""Owner 权限、配额、Memory retention、Skill 与工具策略默认值。"""
 
+# LLM: seed payload 是新 owner 的机器配置起点；字段变更必须同步 migration、CLI 中文说明和策略测试。
+# 模块用途: 生成首次初始化时写入 owner home 的结构化策略 JSON。
+
+# LLM: 权限 seed 只定义通用边界，不从提示词或用户正文推导例外。
+# 函数用途: 返回新 owner 的默认文件、网络、shell 和子代理权限。
 def default_permissions_payload() -> dict[str, object]:
     return {
         "schema_version": "permissions.v1",
@@ -12,6 +18,8 @@ def default_permissions_payload() -> dict[str, object]:
     }
 
 
+# LLM: quota 数字是 owner 资源上界；运行时仍由统一 quota enforcer 执行。
+# 函数用途: 返回新 owner 的默认并发、深度和磁盘配额。
 def default_quota_payload() -> dict[str, object]:
     return {
         "schema_version": "quota.v1",
@@ -22,15 +30,22 @@ def default_quota_payload() -> dict[str, object]:
     }
 
 
+# LLM: retention v2 key 是唯一运行合同；旧 raw_days/task_completed_days 只能经显式 Memory migration 转换。
+# 函数用途: 返回完整会话、审计、Daily、工具输出、候选、Curator、Compact 和任务默认保留期。
 def default_retention_payload() -> dict[str, object]:
     return {
-        "schema_version": "retention.v1",
-        "raw_days": 90,
+        "schema_version": "my-agent.memory-retention.v2",
+        "conversation_days": 365,
+        "audit_days": 180,
         "daily_days": 365,
-        "hooks_days": 180,
+        "tool_output_days_after_terminal": 30,
+        "rejected_candidate_days": 30,
+        "curator_run_days": 90,
         "compact_days": 365,
-        "task_completed_days": 365,
+        "completed_task_days": 365,
         "subagent_scratch_days": 30,
+        "cache_days": 30,
+        "tmp_days": 7,
         "trash_days": 30,
         "legal_hold": False,
         "legal_hold_task_ids": [],
@@ -39,6 +54,8 @@ def default_retention_payload() -> dict[str, object]:
     }
 
 
+# LLM: Skill source allowlist 只约束来源，不在 seed 中复制 Skill 内容。
+# 函数用途: 返回新 owner 可见 Skill 来源的默认策略。
 def default_skill_policy_payload() -> dict[str, object]:
     return {
         "schema_version": "skill-policy.v1",
@@ -48,6 +65,8 @@ def default_skill_policy_payload() -> dict[str, object]:
     }
 
 
+# LLM: 工具禁用列表是结构化机器事实；空列表表示继承其他安全边界而非全权限。
+# 函数用途: 返回新 owner 的默认工具策略。
 def default_tool_policy_payload() -> dict[str, object]:
     return {
         "schema_version": "tool-policy.v1",

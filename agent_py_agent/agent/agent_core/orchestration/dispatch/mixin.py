@@ -138,40 +138,33 @@ class _DispatchFailureMixin:
             self._record_introspection_lesson(task, introspection)
         self._apply_introspection_split(task, introspection)
 
-    # LLM: P5-2 教训生产端(自省→带结构化触发条件的教训记忆)。自省真调了参数时,
-    #   把"什么场景下该这样调"写成 LESSON_TASK:trigger_conditions 全部是结构化
-    #   事实(failure_type / min_attempts),推送端 trigger_conditions_match 在同型
-    #   失败再现时把这条教训提权注入。失败静默(教训写不进不能打断自省主链)。
-    # 函数用途: 这次失败学到的调参经验,记下来让下次同样的失败自动想起。
+    # LLM: 失败自省只提交 model_inferred lesson Candidate；统一审核/Promotion 之前不得成为可召回正文。
+    # 函数用途: 把结构化失败与调参建议投递到 owner 唯一候选账本，供后续人工审核和重复验证。
     def _record_introspection_lesson(self, task, introspection) -> None:
-        memory = getattr(self, "memory", None)
-        if memory is None:
+        candidate_adapter = getattr(
+            getattr(self, "subagents", None),
+            "memory_candidates",
+            None,
+        )
+        record = getattr(candidate_adapter, "record_introspection_lesson", None)
+        if not callable(record):
             return
-        from ....memory_push import MemoryType, MemoryWriteContext, write_memory_with_type
-
         failure_type = str(getattr(task, "failure_type", "") or "")
-        params_text = json.dumps(introspection.suggested_params, ensure_ascii=False, sort_keys=True)
         try:
-            write_memory_with_type(
-                memory,
-                MemoryWriteContext(
-                    content=f"failure introspection adjusted params for {failure_type or 'failure'}",
-                    mem_type=MemoryType.LESSON_TASK,
-                    trigger_type="failure",
-                    tags=["introspection", failure_type] if failure_type else ["introspection"],
-                    lesson=f"同型失败({failure_type})自省后调参 {params_text} 曾被采用;再次出现时优先考虑同类调整。",
-                    action=params_text,
-                    trigger_conditions={
-                        "trigger_type": ["failure", "timeout"],
-                        "failure_type": failure_type,
-                        "min_attempts": max(1, int(getattr(task, "runner_attempts", 0) or 0)),
-                    },
-                ),
+            record(
+                task,
+                suggested_params=dict(introspection.suggested_params or {}),
+                failure_type=failure_type,
+                attempts=max(0, int(getattr(task, "runner_attempts", 0) or 0)),
+                confidence=float(getattr(introspection, "confidence", 0.0) or 0.0),
             )
         except Exception:
             import logging
 
-            logging.getLogger(__name__).warning("introspection lesson write failed", exc_info=True)
+            logging.getLogger(__name__).warning(
+                "introspection lesson candidate write failed",
+                exc_info=True,
+            )
 
     # LLM: 消费 key 必须与生产端对齐：new_timeout_seconds（runner 超时，读取方
     #   get_task_timeout）、max_tool_rounds（工具轮上限，读取方 _effective_max_tool_rounds；

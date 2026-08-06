@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 """implements the SimpleAgent prompt/model/tool loop plus memory methods.
@@ -7,6 +6,7 @@ from __future__ import annotations
 它不处理子代理调度细节，那些已经拆到别的 mixin。
 """
 
+import hashlib
 import json
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -41,7 +41,6 @@ from .runtime.run_params import (
 
 @dataclass
 class _RuntimeServices:
-
     compression: CompressionService
     finalization: FinalizationService
 
@@ -120,7 +119,6 @@ def _turn_skill_snapshot(agent):
 
 
 class SimpleAgentRuntimeMixin:
-
     _services: _RuntimeServices | None = None
 
     def _get_services(self) -> _RuntimeServices:
@@ -132,7 +130,9 @@ class SimpleAgentRuntimeMixin:
         return self._services
 
     def _compress_memories(self, memories: list[object], *, keep_recent: int) -> list[object]:
-        return self._get_services().compression._compress_memories(memories, keep_recent=keep_recent)
+        return self._get_services().compression._compress_memories(
+            memories, keep_recent=keep_recent
+        )
 
     def _build_compression_snapshot_content(
         self,
@@ -166,14 +166,21 @@ class SimpleAgentRuntimeMixin:
         user_prompt: str,
         *,
         params: RunParams = None,
-        inject: list[str] | None = None, prompt_files: list[str] | None = None, save: bool | None = None,
+        inject: list[str] | None = None,
+        prompt_files: list[str] | None = None,
+        save: bool | None = None,
         allowed_tools: list[str] | None = None,
-        write_boundary: dict[str, object] | None = None, request_id: str | None = None,
-        run_id: str | None = None, task_id: str | None = None, task_attributes: dict | None = None,
+        write_boundary: dict[str, object] | None = None,
+        request_id: str | None = None,
+        run_id: str | None = None,
+        task_id: str | None = None,
+        task_attributes: dict | None = None,
         delivery_contract: dict | None = None,
-        system_prompt_override: str | None = None, source: str | None = None,
+        system_prompt_override: str | None = None,
+        source: str | None = None,
         resume_context: bool | None = None,
-        recovery_task_refs: list[str] | None = None, recovery_content_paths: list[str] | None = None,
+        recovery_task_refs: list[str] | None = None,
+        recovery_content_paths: list[str] | None = None,
         recovery_next_actions: list[str] | None = None,
         on_chunk: object = None,
         context_scope: str | None = None,
@@ -235,10 +242,61 @@ class SimpleAgentRuntimeMixin:
             delivery_contract=rp.delivery_contract,
             context_scope=str(getattr(rp, "context_scope", "default") or "default"),
             active_turn_user_inputs=list(params.active_turn_user_inputs or []),
+            tool_runtime_evidence=dict(params.tool_runtime_evidence or {}),
         )
 
-    def remember(self, content: str, *, kind: str = "note"):
-        return self.memory.add("user", content, kind=kind)
+    # LLM: Programmatic/admin remember must traverse the same Candidate and Promotion services as
+    # the model tool; direct JsonlMemory.add here would restore a hidden long-term write bypass.
+    # 函数用途: 将本地用户明确确认的具体事实、事件或项目知识审核并晋升，返回正式记录。
+    def remember(self, content: str, *, kind: str = "fact"):
+        from ..memory_store.candidate_models import CandidateObservation, MemoryScope
+
+        normalized_kind = str(kind or "fact").strip().lower()
+        type_map = {
+            "fact": "long_term_fact",
+            "event": "event",
+            "project": "project",
+        }
+        if normalized_kind not in type_map:
+            raise ValueError(
+                "remember kind 只允许 fact/event/project；人格偏好请使用 update_persona"
+            )
+        text = str(content or "").strip()
+        if not text:
+            raise ValueError("remember content 不能为空")
+        digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:20]
+        candidate = self.memory_candidates.observe(
+            CandidateObservation(
+                candidate_type=type_map[normalized_kind],
+                content=text,
+                subject_key=f"manual.{normalized_kind}.{digest}",
+                scope=MemoryScope("personal", "personal", "本地用户明确保存", ""),
+                origin="reviewed",
+                confidence=1.0,
+                proposed_action="add",
+                promotion_target="long_term",
+                observation_id=f"manual-remember:{digest}",
+            )
+        )
+        if candidate.status == "pending_review":
+            candidate = self.memory_promotion.review(
+                candidate.candidate_id,
+                approved=True,
+                reviewer="local-user-explicit",
+                note="本地 remember 命令显式确认。",
+            )
+        result = self.memory_promotion.promote(
+            candidate.candidate_id,
+            reviewer="local-user-explicit",
+            confirmed=True,
+        )
+        if not result.promoted:
+            raise RuntimeError(f"remember promotion failed: {result.reason_code}")
+        entry_id = result.promotion_ref.rsplit("#", 1)[-1]
+        for record in self.memory.all():
+            if record.entry_id == entry_id:
+                return record
+        raise RuntimeError("remember promotion succeeded without a formal memory record")
 
     def recall(self, query: str, top_k: int | None = None):
         return self.memory.search(query, top_k or self.config.memory_top_k)
@@ -262,7 +320,9 @@ def _run_with_params(agent, user_prompt: str, params: RunParams):
             return result
         next_params = _compact_auto_continue_params(current_params, decision.injection, result)
         continued = _run_once_with_params(agent, decision.user_prompt, next_params)
-        result = mark_compact_auto_continued(continued, result, depth=next_params.compact_auto_continue_depth)
+        result = mark_compact_auto_continued(
+            continued, result, depth=next_params.compact_auto_continue_depth
+        )
         current_params = next_params
 
 
@@ -363,11 +423,13 @@ def _archive_record_is_tool_progress(record: dict[str, object]) -> bool:
     error_code = str(record.get("error_code") or "").strip().upper()
     if error_code == "CONTEXT_COMPACT_DEFERRED":
         return False
-    return bool(tool_name and tool_name not in {"__parse_error__", "unknown"})
+    return bool(tool_name)
 
 
 def _result_has_no_tool_progress(result) -> bool:
-    return int(getattr(result, "tool_rounds", 0) or 0) <= 0 and not list(getattr(result, "executed_tools", None) or [])
+    return int(getattr(result, "tool_rounds", 0) or 0) <= 0 and not list(
+        getattr(result, "executed_tools", None) or []
+    )
 
 
 def _non_compact_auto_injections(injections: list[str] | None) -> list[str]:

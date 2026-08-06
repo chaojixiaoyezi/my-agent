@@ -25,7 +25,11 @@ from agent_py_agent.agent.backends.base import AnthropicCompatibleBackend, Backe
 from agent_py_agent.agent.backends.tool_ir import AssistantTurn, ToolResult
 from agent_py_agent.agent.prompting_parts.builder import PromptBuilder, ToolSections
 from agent_py_agent.agent.settings import AgentConfig
-from agent_py_agent.agent.tooling import ToolExecutionResult
+from agent_py_agent.tests._tool_runtime_harness import (
+    canonical_history_call,
+    canonical_history_result,
+    make_test_protocol_snapshot,
+)
 
 # --- minimal native agent + params (no archive/network side effects) ---------
 
@@ -46,7 +50,7 @@ def _native_agent(root: Path, *, protocol: str = "native", backend: str = "anthr
     )
 
 
-def _params() -> ToolLoopExecuteParams:
+def _params(*, protocol: str = "native") -> ToolLoopExecuteParams:
     return ToolLoopExecuteParams(
         user_prompt="分析两个文件并汇总",
         memories=[],
@@ -67,28 +71,50 @@ def _params() -> ToolLoopExecuteParams:
         archive_tool_calls=[],
         save=False,
         delivery_contract={},
+        tool_protocol_snapshot=make_test_protocol_snapshot(
+            run_id="run-1", source_protocol=protocol
+        ),
     )
 
 
-def _record(agent, params, *, tool_rounds, idx, payload, result):
+def _record(
+    agent,
+    params,
+    *,
+    tool_rounds: int,
+    idx: int,
+    tool_name: str,
+    call_id: str,
+    arguments: dict[str, object],
+    output: str,
+    error_code: str = "",
+):
+    call = canonical_history_call(
+        tool_name,
+        arguments,
+        call_id=call_id,
+        source_protocol=params.tool_protocol_snapshot.source_protocol,
+        run_id=params.run_id,
+        turn_id=f"{params.run_id}:round-{tool_rounds}",
+        attempt_id=params.request_id,
+    )
+    result = canonical_history_result(
+        call,
+        output,
+        ok=not error_code,
+        error_code=error_code or "TOOL_EXECUTION_FAILED",
+    )
     _record_tool_call(
         agent,
         ToolCallRecordParams(
             params=params,
             tool_rounds=tool_rounds,
             idx=idx,
-            payload=payload,
+            call=call,
             result=result,
         ),
     )
-
-
-def _ok(tool: str, output: str) -> ToolExecutionResult:
-    return ToolExecutionResult(tool, True, output)
-
-
-def _err(tool: str, output: str, code: str) -> ToolExecutionResult:
-    return ToolExecutionResult(tool, False, output, error_code=code)
+    return call, result
 
 
 # --- 1+2+3: multi-round IR through the real _record_tool_call path ------------
@@ -101,19 +127,19 @@ def test_multi_round_native_history_produces_paired_merged_messages(tmp_path):
     # round 1: two read_file calls with real provider tool_use ids (toolu_*)
     _record(
         agent, params, tool_rounds=1, idx=1,
-        payload={"tool": "read_file", "call_id": "toolu_aaa", "path": "a.md"},
-        result=_ok("read_file", "BODY-A"),
+        tool_name="read_file", call_id="toolu_aaa", arguments={"path": "a.md"},
+        output="BODY-A",
     )
     _record(
         agent, params, tool_rounds=1, idx=2,
-        payload={"tool": "read_file", "call_id": "toolu_bbb", "path": "b.md"},
-        result=_ok("read_file", "BODY-B"),
+        tool_name="read_file", call_id="toolu_bbb", arguments={"path": "b.md"},
+        output="BODY-B",
     )
     # round 2: one write_file call
     _record(
         agent, params, tool_rounds=2, idx=1,
-        payload={"tool": "write_file", "call_id": "toolu_ccc", "path": "out.md"},
-        result=_ok("write_file", "WROTE"),
+        tool_name="write_file", call_id="toolu_ccc", arguments={"path": "out.md"},
+        output="WROTE",
     )
 
     messages = _native_provider_messages(agent, params)
@@ -128,7 +154,9 @@ def test_multi_round_native_history_produces_paired_merged_messages(tmp_path):
     assert messages[0]["content"][0]["input"] == {"path": "a.md"}
     # round 1 results merged into ONE user message, tool_use_id pairs the call id
     assert [b["tool_use_id"] for b in messages[1]["content"]] == ["toolu_aaa", "toolu_bbb"]
-    assert messages[1]["content"][0]["content"].startswith("[tool=read_file; status=ok]")
+    assert messages[1]["content"][0]["content"].startswith(
+        "[tool-result; tool=read_file; status=succeeded;"
+    )
     assert messages[1]["content"][0]["is_error"] is False
     # round 2 is a separate assistant/user pair — does NOT cross-merge with round 1
     assert messages[2]["content"][0]["id"] == "toolu_ccc"
@@ -140,8 +168,8 @@ def test_error_result_marks_is_error_true_in_messages(tmp_path):
     params = _params()
     _record(
         agent, params, tool_rounds=1, idx=1,
-        payload={"tool": "web_fetch", "call_id": "toolu_e", "url": "http://x"},
-        result=_err("web_fetch", '{"error_code":"WEB_FETCH_FAILED"}', "WEB_FETCH_FAILED"),
+        tool_name="web_fetch", call_id="toolu_e", arguments={"url": "http://x"},
+        output='{"error_code":"WEB_FETCH_FAILED"}', error_code="WEB_FETCH_FAILED",
     )
 
     messages = _native_provider_messages(agent, params)
@@ -176,12 +204,10 @@ def test_native_history_replays_provider_thinking_blocks_on_next_tool_round(tmp_
         params,
         tool_rounds=1,
         idx=1,
-        payload={
-            "tool": "read_file",
-            "call_id": "toolu_1",
-            "path": "README.md",
-        },
-        result=_ok("read_file", "BODY"),
+        tool_name="read_file",
+        call_id="toolu_1",
+        arguments={"path": "README.md"},
+        output="BODY",
     )
 
     messages = _native_provider_messages(agent, params)
@@ -200,8 +226,8 @@ def test_native_record_coexists_with_text_tool_context(tmp_path):
     params = _params()
     _record(
         agent, params, tool_rounds=1, idx=1,
-        payload={"tool": "read_file", "call_id": "toolu_z", "path": "z.md"},
-        result=_ok("read_file", "ZBODY"),
+        tool_name="read_file", call_id="toolu_z", arguments={"path": "z.md"},
+        output="ZBODY",
     )
 
     assert params.tool_ir_history, "native must populate IR history"
@@ -214,14 +240,13 @@ def test_native_record_coexists_with_text_tool_context(tmp_path):
 def test_archive_stamps_real_provider_id_onto_result_call_id(tmp_path):
     agent = _native_agent(tmp_path)
     params = _params()
-    result = _ok("read_file", "B")
-    assert result.call_id == ""  # starts synthetic-free
-    _record(
+    call, result = _record(
         agent, params, tool_rounds=3, idx=2,
-        payload={"tool": "read_file", "call_id": "toolu_real", "path": "p"},
-        result=result,
+        tool_name="read_file", call_id="toolu_real", arguments={"path": "p"},
+        output="B",
     )
-    # archive_tool_call_record must overwrite synthetic "3-2" with the real id.
+    # Provider identity is already canonical before recording and remains unchanged.
+    assert call.call_id == "toolu_real"
     assert result.call_id == "toolu_real"
     # and the archive record carries the same real id.
     assert params.archive_tool_calls[-1]["call_id"] == "toolu_real"
@@ -230,17 +255,15 @@ def test_archive_stamps_real_provider_id_onto_result_call_id(tmp_path):
 # --- text protocol stays synthetic (gray-line: text path untouched) -----------
 
 
-def test_text_protocol_keeps_synthetic_call_id_and_no_ir(tmp_path):
+def test_text_protocol_keeps_canonical_call_id_and_no_native_ir(tmp_path):
     agent = _native_agent(tmp_path, protocol="text")
-    params = _params()
-    result = _ok("read_file", "B")
+    params = _params(protocol="text")
     _record(
         agent, params, tool_rounds=3, idx=2,
-        payload={"tool": "read_file", "call_id": "toolu_should_be_ignored", "path": "p"},
-        result=result,
+        tool_name="read_file", call_id="text-call-1", arguments={"path": "p"},
+        output="B",
     )
-    # text protocol: synthetic round-idx id, IR history stays empty.
-    assert params.archive_tool_calls[-1]["call_id"] == "3-2"
+    assert params.archive_tool_calls[-1]["call_id"] == "text-call-1"
     assert params.tool_ir_history == []
     assert _native_provider_messages(agent, params) is None
 
@@ -250,12 +273,12 @@ def test_openai_backend_uses_the_same_native_ir_history(tmp_path):
     params = _params()
     _record(
         agent, params, tool_rounds=1, idx=1,
-        payload={"tool": "read_file", "call_id": "toolu_x", "path": "p"},
-        result=_ok("read_file", "B"),
+        tool_name="read_file", call_id="toolu_x", arguments={"path": "p"},
+        output="B",
     )
     assert len(params.tool_ir_history) == 2
-    assert params.tool_ir_history[0].tool_calls[0].name == "read_file"
-    assert params.tool_ir_history[1].tool_call_id == "toolu_x"
+    assert params.tool_ir_history[0].tool_calls[0].tool_name == "read_file"
+    assert params.tool_ir_history[1].call_id == "toolu_x"
     assert params.archive_tool_calls[-1]["call_id"] == "toolu_x"
 
 
@@ -365,8 +388,8 @@ def test_subagent_closeout_appends_to_ir_history_when_native(tmp_path):
     # simulate the write_file that wrote output.json already being in IR
     _record(
         agent, params, tool_rounds=1, idx=1,
-        payload={"tool": "write_file", "call_id": "toolu_w", "path": "output.json"},
-        result=_ok("write_file", "WROTE"),
+        tool_name="write_file", call_id="toolu_w", arguments={"path": "output.json"},
+        output="WROTE",
     )
 
     _record_subagent_result_ir_if_native(agent, params, "[SUBAGENT_RESULT]\n{...}\n[/SUBAGENT_RESULT]")
@@ -375,7 +398,10 @@ def test_subagent_closeout_appends_to_ir_history_when_native(tmp_path):
     assert isinstance(params.tool_ir_history[-1], AssistantTurn)
     assert params.tool_ir_history[-1].text.startswith("[SUBAGENT_RESULT]")
     # write_file call+result pair is still present and paired.
-    assert any(isinstance(item, ToolResult) and item.tool_call_id == "toolu_w" for item in params.tool_ir_history)
+    assert any(
+        isinstance(item, ToolResult) and item.call_id == "toolu_w"
+        for item in params.tool_ir_history
+    )
 
 
 def test_subagent_closeout_noop_for_text_protocol(tmp_path):
@@ -384,7 +410,7 @@ def test_subagent_closeout_noop_for_text_protocol(tmp_path):
     )
 
     agent = _native_agent(tmp_path, protocol="text")
-    params = _params()
+    params = _params(protocol="text")
     _record_subagent_result_ir_if_native(agent, params, "[SUBAGENT_RESULT]\n{}")
     assert params.tool_ir_history == []
 
@@ -399,13 +425,13 @@ def test_drop_tool_call_pairs_removes_both_sides_no_orphans(tmp_path):
     params = _params()
     _record(
         agent, params, tool_rounds=1, idx=1,
-        payload={"tool": "read_file", "call_id": "toolu_old", "path": "old"},
-        result=_ok("read_file", "OLD"),
+        tool_name="read_file", call_id="toolu_old", arguments={"path": "old"},
+        output="OLD",
     )
     _record(
         agent, params, tool_rounds=2, idx=1,
-        payload={"tool": "read_file", "call_id": "toolu_new", "path": "new"},
-        result=_ok("read_file", "NEW"),
+        tool_name="read_file", call_id="toolu_new", arguments={"path": "new"},
+        output="NEW",
     )
 
     removed = drop_tool_call_pairs(params, {"toolu_old"})
@@ -451,8 +477,8 @@ def test_drop_tool_call_pair_discards_invalidated_thinking_signature(tmp_path):
         params,
         tool_rounds=1,
         idx=1,
-        payload={"tool": "read_file", "call_id": "toolu_old", "path": "old"},
-        result=_ok("read_file", "OLD"),
+        tool_name="read_file", call_id="toolu_old", arguments={"path": "old"},
+        output="OLD",
     )
 
     drop_tool_call_pairs(params, {"toolu_old"})

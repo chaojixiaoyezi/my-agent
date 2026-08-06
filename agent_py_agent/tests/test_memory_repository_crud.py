@@ -9,7 +9,9 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.capability.memory_tool import RememberTool
+from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.memory_store.jsonl import JsonlMemory
+from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.user_space.owner_quota import OwnerQuotaEnforcer, OwnerQuotaExceeded
 
 
@@ -111,12 +113,11 @@ def test_memory_runtime_snapshot_reports_health_without_content_or_path(tmp_path
     assert "private-owner" not in str(snapshot)
 
 
-def test_memory_authority_and_daily_mirror_share_owner_quota_admission(tmp_path: Path) -> None:
+def test_memory_authority_uses_owner_quota_admission(tmp_path: Path) -> None:
     owner = tmp_path / "owner"
     path = owner / "memory" / "long_term" / "memory.jsonl"
     memory = JsonlMemory(
         path,
-        daily_mirror_dir=owner / "memory" / "daily",
         quota_enforcer=OwnerQuotaEnforcer(owner, max_bytes=1),
     )
 
@@ -124,41 +125,96 @@ def test_memory_authority_and_daily_mirror_share_owner_quota_admission(tmp_path:
         memory.add("user", "this mutation cannot fit", kind="fact")
 
     assert not path.exists()
-    assert list((owner / "memory" / "daily").glob("*.jsonl")) == []
 
 
 def test_remember_tool_crud_uses_stable_ids(tmp_path: Path) -> None:
-    memory = JsonlMemory(tmp_path / "memory.jsonl")
-    tool = RememberTool(SimpleNamespace(memory=memory, _current_run_params=None))
-    added = tool.execute(
-        {"content": "项目代号青竹", "kind": "project", "origin": "user_explicit"}
+    agent = SimpleAgent(
+        AgentConfig(my_agent_home=str(tmp_path / "home"), prompt_files=[]),
+        tmp_path / "workspace",
     )
-    entry = json.loads(added.output)["entries"][0]
+    thread = agent.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "chat-1",
+            "channel_user_id": "user-1",
+        }
+    )
+
+    def bind_user_message(request_id: str, content: str) -> None:
+        agent.conversation_store.append_message(
+            {
+                "thread_id": thread.thread_id,
+                "role": "user",
+                "content": content,
+                "metadata": {"gateway_request_id": request_id},
+            }
+        )
+        agent._current_run_params = SimpleNamespace(
+            request_id=request_id,
+            run_id=f"run-{request_id}",
+            task_id="task-memory-crud",
+            task_attributes={"conversation_thread_id": thread.thread_id},
+        )
+
+    tool = RememberTool(agent)
+    bind_user_message("add", "请记住项目代号青竹")
+    added = tool.execute(
+        {
+            "content": "项目代号青竹",
+            "kind": "project",
+            "origin": "user_explicit",
+            "subject_key": "project.bamboo.identity",
+            "scope": {"scope_type": "project", "scope_key": "project:bamboo"},
+        }
+    )
+    assert json.loads(added.output)["active_memory_changed"] is True
+    entry = agent.memory.all()[0]
 
     listed = tool.execute({"action": "list"})
-    assert json.loads(listed.output)["entries"][0]["entry_id"] == entry["entry_id"]
+    assert json.loads(listed.output)["entries"][0]["entry_id"] == entry.entry_id
+    bind_user_message("replace", "把项目青竹记忆更新为账单输出 JSON")
     replaced = tool.execute(
         {
             "action": "replace",
-            "entry_id": entry["entry_id"],
-            "expected_version": entry["version"],
+            "entry_id": entry.entry_id,
             "content": "项目代号青竹，账单输出 JSON",
             "kind": "project",
             "origin": "user_explicit",
         }
     )
-    replacement = json.loads(replaced.output)["entries"][0]
-    assert replacement["version"] == 2
+    replacement_result = json.loads(replaced.output)["results"][0]
+    assert replacement_result["reason_code"] == "REVIEW_REQUIRED"
+    assert agent.memory.all()[0].version == 1
+    agent.memory_promotion.review(
+        replacement_result["candidate_id"],
+        approved=True,
+        reviewer="test-admin",
+    )
+    assert agent.memory_promotion.promote(
+        replacement_result["candidate_id"], reviewer="test-admin"
+    ).promoted
+    assert agent.memory.all()[0].version == 2
 
+    bind_user_message("remove", "删除项目青竹这条长期记忆")
     removed = tool.execute(
         {
             "action": "remove",
-            "entry_id": entry["entry_id"],
-            "expected_version": replacement["version"],
+            "entry_id": entry.entry_id,
+            "origin": "user_explicit",
         }
     )
     assert removed.ok
-    assert memory.all() == []
+    removal_result = json.loads(removed.output)["results"][0]
+    agent.memory_promotion.review(
+        removal_result["candidate_id"],
+        approved=True,
+        reviewer="test-admin",
+    )
+    assert agent.memory_promotion.promote(
+        removal_result["candidate_id"], reviewer="test-admin"
+    ).promoted
+    assert agent.memory.all() == []
 
 
 def test_separate_owner_and_group_memory_paths_are_blacklisted_by_construction(tmp_path: Path) -> None:

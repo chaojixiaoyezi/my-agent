@@ -46,8 +46,9 @@ def test_runner_prompt_tells_leaf_to_chunk_long_file_writes():
     prompt = _build_subagent_runner_prompt(context)
 
     assert "长 CSS/JS/HTML" in prompt
-    assert "WRITE_FILE_RAW" in prompt
-    assert "不要把 WRITE_FILE_RAW" in prompt
+    assert 'mode="overwrite"' in prompt
+    assert 'mode="append"' in prompt
+    assert "WRITE_FILE_RAW" not in prompt
     assert "apply_patch" in prompt
     assert "data_base64" in prompt
 

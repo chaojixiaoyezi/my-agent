@@ -14,7 +14,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_py_agent.agent.agent_core import tool_model_generation as tool_model_generation_module
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core.tool_model_generation import (
     ModelGenerateParams,
@@ -24,6 +23,7 @@ from agent_py_agent.agent.agent_core.tool_model_generation import (
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.backends.errors import ProviderContextWindowError, ProviderTimeoutError
 from agent_py_agent.agent.tooling.content_transport_policy import RECOVERY_WRITE_CHUNK_CHARS
+from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
 
 
 class _BlockingBackend:
@@ -124,55 +124,23 @@ class _StreamingRepeatedToolBackend:
         return ModelResponse(text=text, backend=self.name)
 
 
-class _StreamingCompleteThenStallBackend:
-    name = "streaming-complete-then-stall-test-backend"
-
-    def __init__(self) -> None:
-        self.chunks_emitted = 0
-        self.closed = threading.Event()
-        self.finished = threading.Event()
-
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
-        from agent_py_agent.agent.concurrency.interrupt import (
-            is_interrupted,
-            register_interrupt_callback,
-        )
-
-        tool_text = '[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]'
-        try:
-            with register_interrupt_callback(self.closed.set):
-                self.chunks_emitted += 1
-                if on_chunk is not None:
-                    on_chunk(tool_text)
-                self.closed.wait(timeout=5)
-                if is_interrupted():
-                    raise InterruptedError("stream tail closed after complete tool call")
-            return ModelResponse(text=f"{tool_text}\nlate prose", backend=self.name)
-        finally:
-            self.finished.set()
-
-
-class _StreamingLongFileWriteSessionBackend:
-    name = "streaming-long-file-write-session-test-backend"
+class _StreamingToolThenProseBackend:
+    name = "streaming-tool-then-prose-test-backend"
 
     def __init__(self) -> None:
         self.chunks_emitted = 0
 
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        del prompt
         parts = [
-            "[TOOL_CALL]\n"
-            '{"tool":"write_file","action":"append",'
-            '"session_id":"homepage-v1","chunk_index":2,"content":"',
-            "hello\\n",
-            "world" * 30_000,
+            '[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]',
+            "\nlate prose",
         ]
-        text = ""
         for part in parts:
             self.chunks_emitted += 1
-            text += part
             if on_chunk is not None:
                 on_chunk(part)
-        return ModelResponse(text=text, backend=self.name)
+        return ModelResponse(text="".join(parts), backend=self.name)
 
 
 class _StreamingTokenBackend:
@@ -289,6 +257,7 @@ def _tool_loop_params() -> ToolLoopExecuteParams:
         one_shot_tool_calls=set(),
         executed_tools=[],
         archive_tool_calls=[],
+        tool_protocol_snapshot=make_test_protocol_snapshot(source_protocol="text"),
     )
 
 
@@ -396,12 +365,14 @@ def test_model_generate_aborts_streaming_write_file_content_over_inline_limit():
 
     assert 1 < backend.chunks_emitted < 5
     assert response.backend == backend.name
-    assert '"tool": "__parse_error__"' in response.text
-    assert "inline content streaming exceeded" in response.text
-    assert "site/index.html" in response.text
+    assert response.text == ""
+    violation = response.tool_protocol_violations[0]
+    assert violation["code"] == "TOOL_INLINE_CONTENT_STREAM_ABORTED"
+    assert "inline content streaming exceeded" in violation["detail"]
+    assert "site/index.html" not in str(response.tool_protocol_violations)
 
 
-def test_model_generate_does_not_use_recovery_chunk_as_stream_abort_limit():
+def test_model_generate_allows_unclosed_write_below_configured_stream_limit():
     backend = _StreamingRecoveryLongWriteBackend()
     agent = SimpleNamespace(
         backend=backend,
@@ -409,20 +380,6 @@ def test_model_generate_does_not_use_recovery_chunk_as_stream_abort_limit():
         _current_subagent_run_id="",
     )
     params = _tool_loop_params()
-    params.archive_tool_calls.append(
-        {
-            "tool": "__parse_error__",
-            "error_code": "TOOL_CALL_UNCLOSED",
-            "parameters": {
-                "tool": "__parse_error__",
-                "error_code": "TOOL_CALL_UNCLOSED",
-                "source_tool": "write_file",
-                "path": "reports/final.md",
-                "content_field_present": True,
-                "write_recovery": {"strategy": "restart_same_file_with_append_chunks"},
-            },
-        }
-    )
 
     response = generate_model_response(
         ModelGenerateParams(
@@ -434,12 +391,12 @@ def test_model_generate_does_not_use_recovery_chunk_as_stream_abort_limit():
     )
 
     assert backend.chunks_emitted == 3
-    assert '"tool": "__parse_error__"' not in response.text
+    assert response.tool_protocol_violations == []
     assert "reports/final.md" in response.text
     assert len(response.text) > RECOVERY_WRITE_CHUNK_CHARS
 
 
-def test_model_generate_uses_configured_stream_limit_during_long_write_recovery():
+def test_model_generate_uses_configured_stream_limit_for_unclosed_write():
     backend = _StreamingRecoveryLongWriteBackend()
     agent = SimpleNamespace(
         backend=backend,
@@ -447,20 +404,6 @@ def test_model_generate_uses_configured_stream_limit_during_long_write_recovery(
         _current_subagent_run_id="",
     )
     params = _tool_loop_params()
-    params.archive_tool_calls.append(
-        {
-            "tool": "__parse_error__",
-            "error_code": "TOOL_CALL_UNCLOSED",
-            "parameters": {
-                "tool": "__parse_error__",
-                "error_code": "TOOL_CALL_UNCLOSED",
-                "source_tool": "write_file",
-                "path": "reports/final.md",
-                "content_field_present": True,
-                "write_recovery": {"strategy": "restart_same_file_with_append_chunks"},
-            },
-        }
-    )
 
     response = generate_model_response(
         ModelGenerateParams(
@@ -471,12 +414,12 @@ def test_model_generate_uses_configured_stream_limit_during_long_write_recovery(
         )
     )
 
-    payload = json.loads(response.text.split("\n", 2)[1])
+    violation = response.tool_protocol_violations[0]
+    evidence = json.loads(violation["evidence_preview"])
     assert 1 < backend.chunks_emitted < 4
-    assert payload["tool"] == "__parse_error__"
-    assert payload["error_code"] == "TOOL_INLINE_CONTENT_STREAM_ABORTED"
-    assert payload["path"] == "reports/final.md"
-    assert payload["streaming_content_limit"] == 4_000
+    assert violation["code"] == "TOOL_INLINE_CONTENT_STREAM_ABORTED"
+    assert evidence["streaming_content_limit"] == 4_000
+    assert "reports/final.md" not in str(response.tool_protocol_violations)
 
 
 def test_model_generate_does_not_compact_from_plain_exception_text():
@@ -519,30 +462,7 @@ def test_model_generate_compacts_from_typed_provider_context_window_error():
     assert response.runtime_source == "provider_error"
 
 
-def test_model_generate_salvages_streaming_write_file_append_prefix():
-    backend = _StreamingLongFileWriteSessionBackend()
-    agent = SimpleNamespace(
-        backend=backend,
-        config=SimpleNamespace(request_timeout=10, tool_write_inline_max_chars=120),
-        _current_subagent_run_id="",
-    )
-
-    response = generate_model_response(
-        ModelGenerateParams(
-            agent=agent,
-            params=_tool_loop_params(),
-            prompt="build furniture homepage",
-            tool_rounds=1,
-        )
-    )
-
-    assert 1 < backend.chunks_emitted < 4
-    assert '"tool": "__parse_error__"' in response.text
-    assert "homepage-v1" in response.text
-    assert "inline content streaming exceeded" in response.text
-
-
-def test_model_generate_recovers_unclosed_long_write_after_full_response():
+def test_model_generate_rejects_unclosed_long_write_after_full_response():
     backend = _NonStreamingUnclosedLongWriteBackend()
     agent = SimpleNamespace(
         backend=backend,
@@ -559,14 +479,13 @@ def test_model_generate_recovers_unclosed_long_write_after_full_response():
         )
     )
 
-    payload = json.loads(response.text.split("\n", 2)[1])
-    assert payload["tool"] == "__parse_error__"
-    assert payload["error_code"] == "TOOL_INLINE_CONTENT_STREAM_ABORTED"
-    assert payload["source_tool"] == "write_file"
-    assert payload["path"] == "outputs/report.md"
-    assert payload["previous_write_committed"] is False
-    assert payload["write_recovery"]["first_tool_call"]["mode"] == "overwrite"
-    assert payload["write_recovery"]["next_tool_call"]["mode"] == "append"
+    assert response.text == ""
+    violation = response.tool_protocol_violations[0]
+    evidence = json.loads(violation["evidence_preview"])
+    assert violation["code"] == "TOOL_INLINE_CONTENT_STREAM_ABORTED"
+    assert evidence["source_tool"] == "write_file"
+    assert evidence["previous_write_committed"] is False
+    assert "outputs/report.md" not in str(response.tool_protocol_violations)
 
 
 def test_model_generate_keeps_all_complete_streaming_tool_blocks():
@@ -593,17 +512,14 @@ def test_model_generate_keeps_all_complete_streaming_tool_blocks():
     )
 
 
-def test_model_generate_returns_complete_tool_block_before_stream_finishes(monkeypatch):
-    monkeypatch.setattr(tool_model_generation_module, "_TOOL_STREAM_COMPLETE_DRAIN_SECONDS", 0.01)
-    monkeypatch.setattr(tool_model_generation_module, "_TOOL_STREAM_POLL_SECONDS", 0.005)
-    backend = _StreamingCompleteThenStallBackend()
+def test_model_generate_does_not_strip_prose_to_promote_text_tool_block():
+    backend = _StreamingToolThenProseBackend()
     agent = SimpleNamespace(
         backend=backend,
         config=SimpleNamespace(request_timeout=10, tool_write_inline_max_chars=12_000),
         _current_subagent_run_id="",
     )
 
-    started = time.monotonic()
     response = generate_model_response(
         ModelGenerateParams(
             agent=agent,
@@ -613,11 +529,8 @@ def test_model_generate_returns_complete_tool_block_before_stream_finishes(monke
         )
     )
 
-    assert time.monotonic() - started < 0.1
-    assert backend.chunks_emitted == 1
-    assert backend.closed.wait(timeout=0.5)
-    assert backend.finished.wait(timeout=0.5)
-    assert response.text == '[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]'
+    assert backend.chunks_emitted == 2
+    assert response.text.endswith("\nlate prose")
 
 
 def test_model_generate_records_model_call_ledger_for_streaming_response():
@@ -671,7 +584,7 @@ def test_model_generate_keeps_literal_protocol_markers_inside_write_content():
     )
 
     assert backend.chunks_emitted >= 2
-    assert '"tool": "__parse_error__"' not in response.text
+    assert response.tool_protocol_violations == []
     assert "`[TOOL_CALL]`" in response.text
     assert "`[/TOOL_CALL]`" in response.text
 

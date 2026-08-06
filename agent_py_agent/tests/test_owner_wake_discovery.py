@@ -187,6 +187,69 @@ def test_due_or_queued_scheduler_fact_restores_owner_after_restart(tmp_path) -> 
     assert found == {"u-due", "u-queued"}
 
 
+def test_pending_or_leased_memory_curator_restores_scoped_owner_after_restart(
+    tmp_path,
+) -> None:
+    owners = tmp_path / "owners"
+    pending = _owner_home(owners, "feishu", "users", "u-curator-pending")
+    leased = _owner_home(owners, "feishu", "users", "u-curator-lease")
+    for owner_home, pending_reasons, active_lease in (
+        (pending, ["session_close"], {}),
+        (
+            leased,
+            [],
+            {
+                "lease_id": "lease-1",
+                "run_id": "run-1",
+                "reason": "interval",
+                "acquired_at": "2026-08-04T00:00:00+00:00",
+                "expires_at": "2026-08-04T00:10:00+00:00",
+            },
+        ),
+    ):
+        state_path = owner_home / "memory" / "curator" / "state.json"
+        state_path.parent.mkdir(parents=True)
+        state_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "my-agent.memory-curator-state.v1",
+                    "last_processed_message_id": "",
+                    "last_processed_audit_event_id": "",
+                    "per_thread_cursors": {},
+                    "last_run_at": "",
+                    "last_success_at": "",
+                    "last_failure_at": "",
+                    "last_failure_code": "",
+                    "active_lease": active_lease,
+                    "processed_count": 0,
+                    "candidate_count": 0,
+                    "daily_event_count": 0,
+                    "config_revision": "",
+                    "pending_reasons": pending_reasons,
+                    "pending_requested_at": "2026-08-04T00:00:00+00:00",
+                    "last_daily_finalize_date": "",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    found = {owner.owner_id for owner in discover_wake_pending_owners(owners)}
+
+    assert found == {"u-curator-pending", "u-curator-lease"}
+
+
+def test_unprocessed_conversation_input_restores_owner_without_curator_state(tmp_path) -> None:
+    owners = tmp_path / "owners"
+    store = _store_root(owners, "feishu", "users", "u-curator-input", "runtime")
+    messages = store / "messages"
+    messages.mkdir(parents=True)
+    (messages / "thread-1.jsonl").write_text('{"message_id":"msg-1"}\n', encoding="utf-8")
+
+    found = discover_wake_pending_owners(owners)
+
+    assert [owner.owner_id for owner in found] == ["u-curator-input"]
+
+
 def test_corrupt_policy_json_treated_as_no_fact(tmp_path) -> None:
     owners = tmp_path / "owners"
     store = _store_root(owners, "feishu", "users", "u-bad", "runtime")

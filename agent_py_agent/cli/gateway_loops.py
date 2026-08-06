@@ -13,6 +13,7 @@ import os
 import sys
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 from ..agent.concurrency import DurableDaemonThreadPoolExecutor
@@ -317,6 +318,79 @@ def _background_owner_workers(agent: object) -> int:
     return parsed if parsed > 0 else _BACKGROUND_OWNER_WORKERS
 
 
+def _scan_curator_pending_owners(owners_dir: object) -> list[object]:
+    """模块级辅助:扫描磁盘上有待处理记忆策展工作或待晋升候选的 owner(扁平,避免类方法深嵌套)。
+
+    LLM: 只读 owner home 的 curator state/candidates.jsonl 判 pending(纯结构化);失败静默跳过。
+    """
+    try:
+        from ..agent.owner_wake_discovery import _has_pending_memory_curator_work
+        from ..agent.user_space.owner_resolver import OwnerIdentity
+
+        if not owners_dir:
+            return []
+        providers_root = Path(str(owners_dir)) / "providers"
+        if not providers_root.is_dir():
+            return []
+        owners: list[object] = []
+        for provider_dir in providers_root.iterdir():
+            if not provider_dir.is_dir():
+                continue
+            owners.extend(
+                _scan_provider_users(provider_dir, _has_pending_memory_curator_work, OwnerIdentity)
+            )
+        return owners
+    except Exception:
+        return []
+
+
+def _scan_provider_users(provider_dir: Path, pending_fn: object, owner_identity: object) -> list[object]:
+    """扫描单个 provider 下的用户目录,返回有 pending 记忆工作/待晋升候选的 owner 身份(扁平)。"""
+    users_root = provider_dir / "users"
+    if not users_root.is_dir():
+        return []
+    found: list[object] = []
+    for user_dir in users_root.iterdir():
+        if not user_dir.is_dir():
+            continue
+        try:
+            if pending_fn(user_dir) or _has_pending_review_candidates(user_dir):
+                found.append(owner_identity.provider_user(provider_dir.name, user_dir.name))
+        except Exception:
+            continue
+    return found
+
+
+def _has_pending_review_candidates(owner_home: Path) -> bool:
+    """owner 是否有已落库、待晋升的候选(纯结构化:读 candidates.jsonl 的 status/字段,不解析正文)。
+
+    LLM: 用于 gateway 晋升兜底的调度判据——候选落库后若 curator 不再 run(pending 清空),
+    pending_review 的 user_explicit 候选不会晋升;这里保证这类 owner 仍被调度,让 run_if_due
+    的晋升兜底能触发。失败静默返回 False,绝不外抛。
+    """
+    try:
+        import json as _json
+
+        path = owner_home / "memory" / "candidates.jsonl"
+        if not path.exists():
+            return False
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = _json.loads(line)
+            except ValueError:
+                continue
+            if str(row.get("status") or "").strip().lower() != "pending_review":
+                continue
+            origin = str(row.get("origin") or "").strip().lower()
+            if origin in {"user_explicit", "tool_verified"}:
+                return True
+        return False
+    except Exception:
+        return False
+
+
 class _BackgroundMainSupervisor:
     """后台主代理值守:tick base owner + 每个活跃 scoped owner,各自消费自己 store 的唤醒并投真渠道。
 
@@ -360,12 +434,16 @@ class _BackgroundMainSupervisor:
         # authority merely because an old state file remains on disk.
         self._watch_recovery_interval = 15.0
         self._next_watch_recovery_at = 0.0
+        # 后台记忆策展唤醒:节流扫描 + 独立 in-flight 去重(见 _run_due_curators)。
+        self._next_curator_run_at = 0.0
+        self._curator_inflight: dict[object, object] = {}
 
     def tick(self) -> bool:
         self._maybe_seed_wake_pending_owners()
         reports = self._collect_finished_ticks()
         self._sync_owner_schedulers()
         self._recover_active_watch_harvesters()
+        self._run_due_curators()
         self._submit_base_tick()
         self._submit_owner_ticks()
         if not reports:
@@ -466,6 +544,10 @@ class _BackgroundMainSupervisor:
 
     def _sync_owner_schedulers(self) -> None:
         snapshot = self._registry.snapshot()
+        # 框架层兜底:除 registry snapshot 外,直接扫描磁盘上有【待处理记忆策展工作】或【待晋升
+        # 候选】的 owner,纳入调度。保证任何有记忆待提炼/晋升的 owner 都会被后台 curator 处理,
+        # 不依赖 registry 完整性。纯结构化判据,不猜正文。
+        snapshot = list(snapshot) + self._disk_curator_pending_owners()
         if not snapshot and not self._owner_schedulers:
             return  # 无活跃 scoped owner(单 owner / 未开 scoping)→ 完全不碰 owner 池,零额外开销
         pool = self._ensure_owner_pool()
@@ -483,6 +565,15 @@ class _BackgroundMainSupervisor:
         for key, scoped_agent in active.items():
             if key not in self._owner_schedulers:
                 self._owner_schedulers[key] = _build_background_scheduler(scoped_agent, self._channels)
+
+    def _disk_curator_pending_owners(self) -> list[object]:
+        """扫描磁盘上有待处理记忆策展工作或待晋升候选的 owner,构造其身份(框架兜底)。
+
+        LLM: 只读 owner home 的 curator state/candidates.jsonl 判 pending(纯结构化),不解析正文;
+        失败静默跳过单个 owner,绝不外抛。返回可与 snapshot 合并的 OwnerIdentity 列表。
+        """
+        owners_dir = getattr(getattr(self._base_agent, "home_paths", None), "owners_dir", None)
+        return _scan_curator_pending_owners(owners_dir)
 
     def _recover_active_watch_harvesters(self, *, now: float | None = None) -> int:
         """Reacquire active named-Audit collectors for active owner lanes.
@@ -530,6 +621,47 @@ class _BackgroundMainSupervisor:
                     exc,
                 )
         return ensured
+
+    def _run_due_curators(self) -> None:
+        """后台记忆策展唤醒:对 base + 每个活跃 scoped owner 周期调 run_if_due(节流60s)。
+
+        只负责「按时唤醒」:到期判断/租约/失败退避/journal 回滚全在 run_if_due 内部,
+        调度器不做重复判断(curator.py:164 run_if_due 自带 pending/turn/interval/daily 触发)。
+        提取批次的 LLM 调用可能耗时几十秒,必须丢线程池并独立 in-flight 去重——否则按
+        _submit_owner_ticks 的教训(真机:单 owner 长 turn 占死单后台线程,饿死其他 owner)
+        会把全部 owner 的整合 tick 饿死。单 owner 异常只记录不中断其他 owner(健壮性)。
+        """
+        now = time.monotonic()
+        if now < self._next_curator_run_at:
+            return
+        self._next_curator_run_at = now + _positive_int_config(
+            self._base_agent, "owner_maintenance_scan_interval_seconds", default=60
+        )
+        for key in list(self._curator_inflight):
+            future = self._curator_inflight[key]
+            if getattr(future, "done", lambda: True)():
+                self._curator_inflight.pop(key, None)
+        agents = [self._base_agent]
+        pool = getattr(self, "_owner_pool", None)
+        if pool is not None:
+            try:
+                agents.extend(pool.active_agents())
+            except Exception as exc:
+                _print_gateway_loop_error("gateway_memory_curator.owner_pool", "memory-curator", exc)
+        for agent in agents:
+            key = id(agent)
+            if key in self._curator_inflight:
+                continue  # 该 owner 上一轮 curator 还在跑(LLM 提取中)→ 不重复提交
+            self._curator_inflight[key] = self._get_executor().submit(
+                self._safe_run_curator, agent, str(getattr(agent, "owner_id", "local"))
+            )
+
+    def _safe_run_curator(self, agent: object, label: str) -> object:
+        try:
+            return agent.memory_curator.run_if_due()
+        except Exception as exc:
+            _print_gateway_loop_error("gateway_memory_curator.iteration", label, exc)
+            return None
 
     def _ensure_owner_pool(self) -> object | None:
         if self._owner_pool is not None:
@@ -921,7 +1053,8 @@ def _wake_rescan_interval_seconds(agent: SimpleAgent) -> float:
 def _positive_int_config(agent: SimpleAgent, key: str, *, default: int) -> int:
     try:
         parsed = int(getattr(agent.config, key))
-    except (TypeError, ValueError):
+    except (AttributeError, TypeError, ValueError):
+        # 缺字段/非数字(测试桩 SimpleNamespace 等)一律回退默认,不崩——后台循环永不停机
         return default
     return parsed if parsed > 0 else default
 

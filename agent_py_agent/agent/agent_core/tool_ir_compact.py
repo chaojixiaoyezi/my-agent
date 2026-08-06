@@ -39,7 +39,8 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-from ..backends.tool_ir import AssistantTurn, ToolResult
+from ..backends.tool_ir import AssistantTurn
+from ..tooling.runtime_contracts import ToolResult
 from .tool_ir_history import drop_tool_call_pairs, native_tool_ir_history
 
 # 与 _tool_loop_service._record_tool_call 写入的文本条目头一致：
@@ -129,9 +130,9 @@ def _marked_turn_ids_in(item: Any, wanted: set[tuple[int, int]]) -> set[str]:
     if not isinstance(item, AssistantTurn) or round_no is None:
         return set()
     return {
-        call.id
+        call.call_id
         for position, call in enumerate(item.tool_calls, start=1)
-        if (int(round_no), position) in wanted and call.id
+        if (int(round_no), position) in wanted and call.call_id
     }
 
 
@@ -141,9 +142,9 @@ def _ordered_tool_call_ids(history: list[Any]) -> list[str]:
     以 ``ToolResult`` 出现顺序为准——它紧随其发起调用，等价于工具往返的时间序。
     """
     return [
-        item.tool_call_id
+        item.call_id
         for item in history
-        if isinstance(item, ToolResult) and item.tool_call_id
+        if isinstance(item, ToolResult) and item.call_id
     ]
 
 

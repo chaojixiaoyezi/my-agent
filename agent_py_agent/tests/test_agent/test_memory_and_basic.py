@@ -12,20 +12,25 @@ from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
 
 
-def test_memory_and_run():
-    """LLM: Verifies that SimpleAgent stores memory after a run and can recall it."""
+def test_run_does_not_auto_save_formal_memory():
+    """LLM: Verifies that an ordinary turn cannot bypass Candidate/Promotion into long-term."""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         (root / "prompts").mkdir()
         (root / "prompts/default.md").write_text("动态规则", encoding="utf-8")
-        cfg = AgentConfig(memory_path="memory.jsonl", prompt_files=["prompts/default.md"])
+        cfg = AgentConfig(
+            memory_path="memory.jsonl",
+            prompt_files=["prompts/default.md"],
+            tool_protocol="text",
+        )
         agent = SimpleAgent(cfg, root)
         result = agent.run("记住我喜欢表格", inject=["回答要短"])
         assert "echo 后端" in result.response
         assert agent.memory.path.exists()
         assert agent.memory.path == agent.home_paths.owner_memory_long_term_dir / "memory.jsonl"
         assert not (root / "memory.jsonl").exists()
-        assert len(agent.recall("表格")) >= 1
+        assert agent.memory.all() == []
+        assert agent.recall("表格") == []
 
 
 def test_subagents():

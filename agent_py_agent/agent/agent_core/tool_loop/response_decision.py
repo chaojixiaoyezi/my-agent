@@ -1,25 +1,27 @@
-
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import ClassVar
 
 from ...backends import ModelResponse
+from ...backends.tool_protocol_adapter import (
+    ProviderToolCallRequest,
+    ProviderToolCallResult,
+    ToolProtocolViolation,
+    canonical_tool_calls_from_response,
+)
 from ...tooling.content_recovery_mode import (
     LongContentRecoveryRequest,
-    long_content_recovery_block_context,
     long_content_recovery_context,
-    long_content_recovery_payload_too_large,
-    long_content_recovery_state_from_records,
 )
+from ...tooling.runtime_contracts import ToolCall, ToolChoice
 from .._runtime_params import ToolLoopExecuteParams
 from ..tool_guard.call_guardrail import tool_guardrail_records
 from ..tool_guard.unresolved_runtime_issue import (
     has_unresolved_runtime_issues,
     unresolved_runtime_issue_context,
 )
-from .text_tool_call_promotion import promote_text_tool_calls_if_native
 
 _PROTECTED_TOOL_MARKERS = (
     "[tool-record",
@@ -34,6 +36,7 @@ class ToolLoopRepairCounters:
 
     protected_marker_repairs: int = 0
     unresolved_runtime_issue_redirects: int = 0
+    protocol_repairs: int = 0
 
 
 # LLM: repair counters 只记录真实协议修复次数，不再承载任何工作风格或检查点提醒状态。
@@ -42,6 +45,7 @@ def _inc_protected_marker(counters: ToolLoopRepairCounters) -> ToolLoopRepairCou
     return ToolLoopRepairCounters(
         protected_marker_repairs=counters.protected_marker_repairs + 1,
         unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
+        protocol_repairs=counters.protocol_repairs,
     )
 
 
@@ -51,6 +55,15 @@ def _inc_unresolved_runtime_issue(counters: ToolLoopRepairCounters) -> ToolLoopR
     return ToolLoopRepairCounters(
         protected_marker_repairs=counters.protected_marker_repairs,
         unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects + 1,
+        protocol_repairs=counters.protocol_repairs,
+    )
+
+
+def _inc_protocol(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
+    return ToolLoopRepairCounters(
+        protected_marker_repairs=counters.protected_marker_repairs,
+        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
+        protocol_repairs=counters.protocol_repairs + 1,
     )
 
 
@@ -62,6 +75,7 @@ class ToolLoopResponseDecisionRequest:
     params: ToolLoopExecuteParams
     response: object
     counters: ToolLoopRepairCounters
+    turn_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -70,7 +84,7 @@ class ToolLoopResponseDecision:
 
     action: str
     response: object
-    calls: list[dict[str, object]]
+    calls: list[ToolCall]
     counters: ToolLoopRepairCounters
 
 
@@ -80,7 +94,7 @@ class UnresolvedRuntimeIssueDecision:
 
     action: str
     response: object
-    calls: list[dict[str, object]]
+    calls: list[ToolCall]
     counters: ToolLoopRepairCounters
 
 
@@ -109,16 +123,18 @@ def tool_loop_response_decision(
     has_protected_marker = contains_protected_tool_marker(request.response.text)
     if has_protected_marker:
         request.params.tool_context.append(
-            protected_tool_marker_repair_context(native=_native_tool_use_active(request.agent))
+            protected_tool_marker_repair_context(native=_native_tool_use_active(request.params))
         )
 
     if not request.agent.config.enable_tools:
         final = _disabled_tools_response(request.response, has_protected_marker)
         return ToolLoopResponseDecision("break", final, [], request.counters)
 
-    calls = _tool_calls_from_response(request)
-    if calls:
-        return _tool_calls_decision(request, calls)
+    adapted = _tool_calls_from_response(request)
+    if adapted.violations:
+        return _protocol_violation_decision(request, adapted.violations)
+    if adapted.calls:
+        return _tool_calls_decision(request, list(adapted.calls))
 
     return _no_tool_calls_decision(
         _NoToolCallsRequest(
@@ -133,43 +149,85 @@ def tool_loop_response_decision(
 
 def _tool_calls_from_response(
     request: ToolLoopResponseDecisionRequest,
-) -> list[dict[str, object]]:
-    """Resolve this turn's tool calls, preferring native tool_use blocks.
+) -> ProviderToolCallResult:
+    """Adapt only the protocol fixed before this run; prose never gains authority."""
 
-    tool_protocol=native: the backend already emitted structured
-    ``tool_use_blocks`` ({id,name,input}); flatten each to the existing
-    ``{"tool": name, **input}`` dict so all downstream gates/execution stay
-    unchanged. Otherwise fall back to parsing the [TOOL_CALL] text protocol.
+    params = request.params
+    run_id = str(params.run_id or "").strip()
+    turn_id = str(request.turn_id or "").strip() or f"{run_id}:model-turn"
+    return canonical_tool_calls_from_response(
+        ProviderToolCallRequest(
+            response=request.response,
+            protocol=params.tool_protocol_snapshot,
+            runtime_snapshot=params.tool_runtime_snapshot,
+            turn_id=turn_id,
+            attempt_id=str(params.attempt_id or params.request_id or run_id or "attempt"),
+            required_actions=tuple(
+                getattr(
+                    getattr(params, "effective_contract_snapshot", None), "required_actions", ()
+                )
+                or ()
+            ),
+            tool_choice=_current_model_turn_tool_choice(params),
+        )
+    )
 
-    Step 5 修复网：native 下若本轮**没有**结构化 block 但模型把调用漏成了正文
-    ``[TOOL_CALL]`` 文本，文本解析结果要过一道严格门控的提升闸（见
-    ``promote_text_tool_calls_if_native``）才放行——只在全部调用都精确命中已注册工具时
-    才当真实调用，避免把模型正文里的散文/拼错块误当工具调用。text 协议不进这道闸。
-    """
-    blocks = getattr(request.response, "tool_use_blocks", None)
-    if blocks:
-        return [_flatten_tool_use_block(block) for block in blocks]
-    parsed = request.agent.tools.parse_tool_calls(request.response.text)
-    if not _native_tool_use_active(request.agent):
-        return parsed
-    return promote_text_tool_calls_if_native(request.agent, request.response, parsed)
+
+def _current_model_turn_tool_choice(params: object) -> ToolChoice | None:
+    state = getattr(params, "live_archive_state", None)
+    candidate = state.get("_current_model_turn_tool_choice") if isinstance(state, dict) else None
+    return candidate if isinstance(candidate, ToolChoice) else None
 
 
-def _native_tool_use_active(agent: object) -> bool:
+def _native_tool_use_active(params: object) -> bool:
     from ..native_tool_protocol import native_tool_use_active
 
-    return native_tool_use_active(agent)
+    return native_tool_use_active(params)
 
 
-def _flatten_tool_use_block(block: dict[str, object]) -> dict[str, object]:
-    tool_input = block.get("input")
-    flattened: dict[str, object] = dict(tool_input) if isinstance(tool_input, dict) else {}
-    # tool name must win even if the model put a stray "tool" key in input.
-    flattened["tool"] = str(block.get("name", "") or "")
-    call_id = str(block.get("id", "") or "")
-    if call_id:
-        flattened.setdefault("call_id", call_id)
-    return flattened
+def _protocol_violation_decision(
+    request: ToolLoopResponseDecisionRequest,
+    violations: tuple[ToolProtocolViolation, ...],
+) -> ToolLoopResponseDecision:
+    payload = [item.to_dict() for item in violations]
+    state = getattr(request.params, "live_archive_state", None)
+    if isinstance(state, dict):
+        trace = state.setdefault("protocol_violation_trace", [])
+        if isinstance(trace, list):
+            trace.append(
+                {
+                    "turn_id": str(request.turn_id or ""),
+                    "violations": payload,
+                }
+            )
+    request.params.tool_context.append(
+        "[tool-protocol-violation]\n"
+        + json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        + "\n上一轮没有形成可执行工具调用。若仍需操作，请使用本 run 已选定的结构化协议重新发起；"
+        "不要把工具调用写进正文、代码块或解释文字。"
+    )
+    if request.counters.protocol_repairs < 1:
+        return ToolLoopResponseDecision(
+            "continue",
+            None,
+            [],
+            _inc_protocol(request.counters),
+        )
+    return ToolLoopResponseDecision(
+        "break",
+        ModelResponse(
+            text=(
+                "本轮工具协议连续不符合运行约定，系统没有执行任何正文或伪工具块。"
+                "请重新发起请求，或改用当前模型真实支持的工具协议。"
+            ),
+            backend=str(getattr(request.response, "backend", "") or ""),
+            runtime_status="blocked",
+            runtime_reason="PROTOCOL_VIOLATION",
+            runtime_source="tool_protocol_adapter",
+        ),
+        [],
+        request.counters,
+    )
 
 
 def contains_protected_tool_marker(text: str) -> bool:
@@ -239,16 +297,13 @@ def _disabled_tools_response(response, has_protected_marker: bool):
 # 函数用途: 决定本轮真实工具调用是执行、纠偏后重试，还是因客观错误停止。
 def _tool_calls_decision(
     request: ToolLoopResponseDecisionRequest,
-    calls: list[dict[str, object]],
+    calls: list[ToolCall],
 ) -> ToolLoopResponseDecision:
     native_truncated_write = _native_truncated_write_decision(request, calls)
     if native_truncated_write is not None:
         return native_truncated_write
-    long_content_recovery = _long_content_recovery_tool_call_decision(request, calls)
-    if long_content_recovery is not None:
-        return long_content_recovery
     clean_response = sanitize_protected_tool_marker_response(
-        request.response, native=_native_tool_use_active(request.agent)
+        request.response, native=_native_tool_use_active(request.params)
     )
     return ToolLoopResponseDecision("run_tools", clean_response, calls, request.counters)
 
@@ -262,7 +317,7 @@ _TRUNCATED_WRITE_FAILURE_CLASS = "code:TOOL_PARAMETER_REQUIRED"
 
 def _native_truncated_write_decision(
     request: ToolLoopResponseDecisionRequest,
-    calls: list[dict[str, object]],
+    calls: list[ToolCall],
 ) -> ToolLoopResponseDecision | None:
     """P0-2:native 写长文档被截断成空参时，激活长内容恢复（分块写），连续 N 次即硬 break。
 
@@ -270,7 +325,7 @@ def _native_truncated_write_decision(
     时介入。正常多轮写大文档（未截断、参数完整）一律不进此分支，零误伤；text 协议另有
     write_abort 路径，也不进。
     """
-    if not _native_tool_use_active(request.agent):
+    if not _native_tool_use_active(request.params):
         return None
     if not bool(getattr(request.response, "truncated", False)):
         return None
@@ -280,7 +335,9 @@ def _native_truncated_write_decision(
     if prior_failures + 1 >= _NATIVE_TRUNCATED_WRITE_LOOP_LIMIT:
         return ToolLoopResponseDecision(
             "break",
-            _native_truncated_write_loop_break_response(request.response.backend, prior_failures + 1),
+            _native_truncated_write_loop_break_response(
+                request.response.backend, prior_failures + 1
+            ),
             [],
             request.counters,
         )
@@ -288,12 +345,15 @@ def _native_truncated_write_decision(
     return ToolLoopResponseDecision("continue", None, [], request.counters)
 
 
-def _has_truncated_empty_write(calls: list[dict[str, object]]) -> bool:
+def _has_truncated_empty_write(calls: list[ToolCall]) -> bool:
     for call in calls:
         if _call_tool(call) != "write_file":
             continue
-        has_path = bool(str(call.get("path") or "").strip())
-        has_content = call.get("content") is not None or call.get("data_base64") is not None
+        has_path = bool(str(call.arguments.get("path") or "").strip())
+        has_content = (
+            call.arguments.get("content") is not None
+            or call.arguments.get("data_base64") is not None
+        )
         if not has_path or not has_content:
             return True
     return False
@@ -318,9 +378,9 @@ def _consecutive_truncated_write_failures(agent: object) -> int:
     return count
 
 
-def _native_truncated_write_recovery_context(calls: list[dict[str, object]]) -> str:
+def _native_truncated_write_recovery_context(calls: list[ToolCall]) -> str:
     payload = next(
-        (call for call in calls if _call_tool(call) == "write_file"),
+        (_tool_call_payload(call) for call in calls if _call_tool(call) == "write_file"),
         {"tool": "write_file"},
     )
     base = long_content_recovery_context(
@@ -337,7 +397,7 @@ def _native_truncated_write_recovery_context(calls: list[dict[str, object]]) -> 
         "[tool-system]\n"
         "上一轮 write_file 的参数 JSON 在流式生成时被截断（疑似 max_tokens/长度上限），"
         "导致工具收到空参数而无法执行。请把正文拆成更小的块分多次写入，"
-        "第一块用 mode=\"overwrite\" 重写目标文件，后续块用 mode=\"append\"。"
+        '第一块用 mode="overwrite" 重写目标文件，后续块用 mode="append"。'
     )
     return f"{header}\n{base}" if base else header
 
@@ -357,33 +417,12 @@ def _native_truncated_write_loop_break_response(backend: str, attempts: int) -> 
     )
 
 
-def _long_content_recovery_tool_call_decision(
-    request: ToolLoopResponseDecisionRequest,
-    calls: list[dict[str, object]],
-) -> ToolLoopResponseDecision | None:
-    state = long_content_recovery_state_from_records(request.params.archive_tool_calls)
-    if not state.active:
-        return None
-    max_inline_chars = _agent_tool_write_inline_max_chars(request.agent)
-    for call in calls:
-        if long_content_recovery_payload_too_large(call, state, max_inline_chars=max_inline_chars):
-            request.params.tool_context.append(
-                long_content_recovery_block_context(call, state, max_inline_chars=max_inline_chars)
-            )
-            return ToolLoopResponseDecision("continue", None, [], request.counters)
-    return None
+def _call_tool(call: ToolCall) -> str:
+    return call.tool_name
 
 
-def _agent_tool_write_inline_max_chars(agent: object) -> int | None:
-    value = getattr(getattr(agent, "config", None), "tool_write_inline_max_chars", None)
-    try:
-        return int(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
-
-
-def _call_tool(call: dict[str, object]) -> str:
-    return str(call.get("tool") or call.get("tool_name") or "").strip()
+def _tool_call_payload(call: ToolCall) -> dict[str, object]:
+    return {"tool": call.tool_name, "call_id": call.call_id, **call.arguments}
 
 
 # LLM: 无工具调用时只处理 typed runtime error 和受保护标记；普通模型回复直接结束本轮。
@@ -391,6 +430,9 @@ def _call_tool(call: dict[str, object]) -> str:
 def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDecision:
     if _is_runtime_status_response(request.response):
         return ToolLoopResponseDecision("break", request.response, [], request.counters)
+    required_decision = _required_action_no_tool_call_decision(request)
+    if required_decision is not None:
+        return required_decision
     unresolved_issue_decision = unresolved_runtime_issue_no_tool_call_decision(
         _unresolved_runtime_issue_request(request)
     )
@@ -399,9 +441,61 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
     if not request.has_protected_marker:
         return ToolLoopResponseDecision("break", request.response, [], request.counters)
     if request.counters.protected_marker_repairs < 1:
-        return ToolLoopResponseDecision("continue", None, [], _inc_protected_marker(request.counters))
+        return ToolLoopResponseDecision(
+            "continue", None, [], _inc_protected_marker(request.counters)
+        )
     final = protected_tool_marker_block_response(request.response.backend)
     return ToolLoopResponseDecision("break", final, [], request.counters)
+
+
+def _required_action_no_tool_call_decision(
+    request: _NoToolCallsRequest,
+) -> ToolLoopResponseDecision | None:
+    from ...contracts.required_actions import (
+        render_required_action_guidance,
+        required_action_assessment_failed,
+        required_action_no_tool_decision,
+    )
+
+    snapshot = getattr(request.params, "effective_contract_snapshot", None)
+    if not tuple(
+        getattr(snapshot, "required_actions", ()) or ()
+    ) and not required_action_assessment_failed(snapshot):
+        return None
+    outcome = required_action_no_tool_decision(snapshot)
+    if outcome == "complete":
+        return None
+    if outcome == "repair":
+        guidance = render_required_action_guidance(snapshot)
+        request.params.tool_context.append(
+            guidance + "\n上一轮没有产生任何 canonical ToolCall，因此没有动作证据。"
+            "请发起所需的真实工具调用；若权限、审批、能力或用户输入不足，"
+            "请保持结构化阻塞，不要用自然语言宣称完成。"
+        )
+        return ToolLoopResponseDecision("continue", None, [], request.counters)
+    actions = tuple(getattr(snapshot, "required_actions", ()) or ())
+    if not actions and required_action_assessment_failed(snapshot):
+        reason = "REQUIRED_ACTION_ASSESSMENT_FAILED"
+    else:
+        reason = next(
+            (
+                str(item.blocked_reason or "").strip()
+                for item in actions
+                if item.status == outcome and str(item.blocked_reason or "").strip()
+            ),
+            f"REQUIRED_ACTION_{outcome.upper()}",
+        )
+    return ToolLoopResponseDecision(
+        "break",
+        replace(
+            request.response,
+            runtime_status=outcome,
+            runtime_reason=reason,
+            runtime_source="required_action_completion_gate",
+        ),
+        [],
+        request.counters,
+    )
 
 
 def _is_runtime_status_response(response: object) -> bool:
@@ -436,11 +530,17 @@ def unresolved_runtime_issue_no_tool_call_decision(
     return UnresolvedRuntimeIssueDecision("break", request.response, [], request.counters)
 
 
-def _unresolved_runtime_issue_decision(decision: UnresolvedRuntimeIssueDecision) -> ToolLoopResponseDecision:
-    return ToolLoopResponseDecision(decision.action, decision.response, decision.calls, decision.counters)
+def _unresolved_runtime_issue_decision(
+    decision: UnresolvedRuntimeIssueDecision,
+) -> ToolLoopResponseDecision:
+    return ToolLoopResponseDecision(
+        decision.action, decision.response, decision.calls, decision.counters
+    )
 
 
 def _unresolved_runtime_issue_request(
     request: _NoToolCallsRequest,
 ) -> UnresolvedRuntimeIssueDecisionRequest:
-    return UnresolvedRuntimeIssueDecisionRequest(request.agent, request.params, request.response, request.counters)
+    return UnresolvedRuntimeIssueDecisionRequest(
+        request.agent, request.params, request.response, request.counters
+    )

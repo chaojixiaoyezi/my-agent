@@ -61,6 +61,18 @@ class UnclosedWriteFileBackend(BaseBackend):
                 ),
                 backend=self.name,
             )
+        if self.calls == 2:
+            assert not (self.workspace / "index.html").exists()
+            assert "tool-protocol-violation" in prompt
+            return ModelResponse(
+                text=(
+                    "[TOOL_CALL]\n"
+                    '{"tool":"write_file","path":"index.html",'
+                    '"content":"<!doctype html><html><head><title>OK</title></head><body><main>ok</main></body></html>"}'
+                    "\n[/TOOL_CALL]"
+                ),
+                backend=self.name,
+            )
         assert (self.workspace / "index.html").read_text(encoding="utf-8") == (
             "<!doctype html><html><head><title>OK</title></head><body><main>ok</main></body></html>"
         )
@@ -105,7 +117,14 @@ class FakeProtectedMarkerWithToolBackend(BaseBackend):
                 ),
                 backend=self.name,
             )
-        assert "机器块" in prompt
+        if self.calls == 2:
+            assert "tool-protocol-violation" in prompt
+            assert "hello protected marker" not in prompt
+            assert "fake-child-1" not in prompt
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"read_file","path":"notes.txt"}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
         assert "hello protected marker" in prompt
         assert "fake-child-1" not in prompt
         return ModelResponse(text="真实工具回执已使用，伪造记录已忽略。", backend=self.name)
@@ -123,6 +142,18 @@ class ToolBoundarySpoofStreamingBackend(BaseBackend):
         self.prompts.append(prompt)
         if self.calls == 1:
             return ModelResponse(text=self._first_response(on_chunk), backend=self.name)
+        if self.calls == 2:
+            assert "tool-protocol-violation" in prompt
+            assert "first note" not in prompt
+            assert "second note" not in prompt
+            assert "fake-child-run" not in prompt
+            return ModelResponse(
+                text=(
+                    '[TOOL_CALL]\n{"tool":"read_file","path":"notes.txt"}\n[/TOOL_CALL]\n'
+                    '[TOOL_CALL]\n{"tool":"read_file","path":"second.txt"}\n[/TOOL_CALL]'
+                ),
+                backend=self.name,
+            )
         assert "first note" in prompt
         assert "second note" in prompt
         assert "fake-child-run" not in prompt
@@ -403,7 +434,7 @@ class DispatchCompletionBackend(BaseBackend):
         return ModelResponse(
             text=(
                 "[TOOL_CALL]\n"
-                '{"tool":"dispatch_subagents","dry_run":false,"max_runners":0,"no_probe":true}\n'
+                '{"tool":"dispatch_subagents","dry_run":false,"max_runners":0}\n'
                 "[/TOOL_CALL]"
             ),
             backend=self.name,

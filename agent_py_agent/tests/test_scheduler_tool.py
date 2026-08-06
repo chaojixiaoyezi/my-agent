@@ -8,7 +8,7 @@ from agent_py_agent.agent.scheduler.repository import SchedulerRepository
 from agent_py_agent.agent.scheduler.tool import (
     ScheduleTool,
     _schedule_from_params,
-    build_schedule_tool_spec,
+    build_schedule_tool_model_spec,
 )
 
 
@@ -102,12 +102,12 @@ def test_schedule_tool_crud_uses_current_thread_and_hides_owner_paths(tmp_path) 
 
 
 def test_schedule_tool_schema_requires_absolute_iso_string_for_one_shot() -> None:
-    spec = build_schedule_tool_spec()
-    schema = spec.parameter_schema["at"]
+    spec = build_schedule_tool_model_spec()
+    schema = spec.input_schema["properties"]["at"]
     assert schema["type"] == "string"
     assert "absolute ISO-8601" in schema["description"]
     assert "relative seconds" in schema["description"]
-    relative = spec.parameter_schema["after_seconds"]
+    relative = spec.input_schema["properties"]["after_seconds"]
     assert relative["type"] == "integer"
     assert relative["minimum"] == 1
     assert "resolved absolute instant" in relative["description"]

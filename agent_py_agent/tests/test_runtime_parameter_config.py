@@ -21,10 +21,6 @@ def test_runtime_parameter_knobs_are_normalized_from_agent_config() -> None:
             "background_pending_wake_prompt_limit": "5",
             "tool_output_externalize_min_chars": "44",
             "tool_output_preview_chars": "12",
-            "tool_payload_max_fields": "8",
-            "tool_payload_max_field_name_chars": "30",
-            "tool_payload_max_name_chars": "31",
-            "tool_payload_parse_error_raw_chars": "32",
             "contract_status_max_scan_files": "9",
             "contract_status_max_report_bytes": "999",
             "contract_status_recent_findings_limit": "3",
@@ -45,7 +41,6 @@ def test_runtime_parameter_knobs_are_normalized_from_agent_config() -> None:
     assert normalized["background_context_max_total_tokens"] == 8000
     assert normalized["conversation_pending_wake_limit"] == 7
     assert normalized["tool_output_externalize_min_chars"] == 44
-    assert normalized["tool_payload_max_fields"] == 8
     assert normalized["contract_status_max_scan_files"] == 9
     assert normalized["skill_guard_max_files"] == 4
     assert normalized["small_real_acceptance_max_runtime_seconds"] == 60

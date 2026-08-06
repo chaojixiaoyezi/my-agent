@@ -1,5 +1,15 @@
 # Gateway Progress
 
+## 2026-08-04 Memory Curator 复用 owner 后台 lane
+
+- Gateway 没有新增 Memory daemon。每个已解析 owner 的既有 background-main supervisor 在 scheduler
+  tick 前调用同一 `MemoryCuratorService.run_if_due()`；Curator 异常只记录稳定失败，不终止普通请求或调度。
+- turn threshold、interval、pre-compact、session close/reset、task complete、daily finalize 和 admin
+  都只向同一 durable `memory/curator/state.json` 提交 reason；同一 owner 的 lease 与 cursor 由 Memory
+  服务裁决，Gateway 不维护第二份策展状态。
+- owner wake discovery 只根据 pending reason、lease、Daily 日期和输入 mtime 判断“需要唤醒”；真正的
+  cursor/due/schema 校验仍回到 Curator，坏状态会保守唤醒并 fail closed，不能让 owner 永久漏处理。
+
 ## 2026-08-01 命名 Audit 准备工作区与控制面第一阶段
 
 - CLI、Gateway 与 IM 共用一个 typed parser 和控制入口，正式语法收敛为 `/audit help`、
@@ -107,7 +117,7 @@
   transcript/summary，同时只把当前 task 及持久 child lineage 的 task link 和 observation 带进后台轮。
   所有选择依据都是 typed id/status/path，不检查用户正文。
 - 单文本删除继续复用唯一 `apply_patch` 主链：共享 `filesystem_text_mutation_rule` 同时供应主代理、
-  child、长内容恢复提示和危险命令错误合同；ToolSpec 明确 `*** Delete File`。目录和批量删除仍进入
+  child、长内容恢复提示和危险命令错误合同；`ToolModelSpec.input_schema` 明确 `*** Delete File`。目录和批量删除仍进入
   `task_trash`，没有第二个 delete tool、shell fallback 或 IM 专项分支。
 - B 的最后纠错 request 连续消费 4 条真实飞书 `/btw`，没有创建第二个 request。`d94213c0` 与
   `b24f815f` 的聚焦回归 182 项通过，干净 wheel 已精确部署 1.10。
@@ -385,7 +395,7 @@
 - 协议 envelope、运行门、handler、effect coordinator、审计、tool index、runtime ledger、
   compact/recovery 共用同一事实。幂等重放不会谎称本次再次执行；超时或效果未知不会自动重试。长输出
   归档只保留白名单诊断字段，不能把工具私有字段带回模型。
-- native Schema 继续由同一个 `ToolSpec` 编译；`apply_patch` 模型说明精确采用 会话运行时 patch grammar，
+- native Schema 继续来自同一个 `ToolModelSpec.input_schema`；`apply_patch` 模型说明精确采用 会话运行时 patch grammar，
   没有第二套兼容解析器。1.10 本地 Qwen 能在读取失败后自纠正，但补丁调用用了 7 次；MiniMax-M2.7
   第一次即成功，说明执行协议明确但本地模型效率仍弱。
 - 真实 MiniMax CLI 长链为 16 轮、21 条工具记录，覆盖安全成功、缺文件、危险根路径、bwrap、非零退出、
@@ -411,7 +421,7 @@
 
 - 参考 会话运行时 history/tool result 的集中记录、有界输出和替换旧正文，以及 长期助手
   `tool_result_storage.py`、`tool_dispatch_helpers.py::_maybe_wrap_untrusted`、`redact.py` 后，没有增加
-  provider、IM 或 MCP 专用旁路。Registry 在真实执行完成后附加 ToolSpec 最低投影，模型工具循环、
+  provider、IM 或 MCP 专用旁路。Executor 在真实执行完成后附加 runtime output policy 最低投影，模型工具循环、
   compact、恢复和父子共享上下文统一消费。
 - 外部数据包装与凭据脱敏发生在模型出口，完整 owner-scoped 原文仍供审计/分页读取。纯文本大输出归档
   再由 `search_text/read_file` 读取时也保留 external/default 策略，修复了候选飞书真测发现的来源传播
@@ -474,7 +484,7 @@
   `会话运行时-rs/core/src/tools/router.rs` 的统一 typed arguments 入口，以及 长期助手
   `model_tools.py::coerce_tool_args` 的 Schema 引导转换。没有移植 长期助手 的标量包数组，也没有从
   用户自然语言、上一工具正文或字段名相似度推断参数。
-- `ToolSpec.safe_parameter_defaults` 只承载工具作者逐字段确认的无歧义默认值；
+- `ToolRuntimePolicy.input_policy.safe_parameter_defaults` 只承载工具作者逐字段确认的无歧义默认值；
   `trusted_parameter_bindings` 只可引用 Registry 构造的 `run_scope/write_boundary/registry` 路径并按
   精确字段值限定动作变体。Schema `default` 仍是注解，未同时列入安全默认值就没有执行权。
 - 统一 normalize seam 先分离外层 envelope，再补缺失参数、做 Schema 强类型纠正和完整参数门，然后
@@ -484,7 +494,7 @@
 - 已迁移 `run_command`、PTY start、`read_artifact`，删除主循环中只服务 artifact 的 scope 补参和
   执行器末端 process cwd 补参。聚焦 Schema、Registry、MCP、native、shell/PTY、artifact 回归已通过。
 - 完整 pytest 跑到 100% 后只暴露两个 native 协议测试替身没有新可选属性；Schema 编译器改为与既有
-  ToolSpec-like discovery object 一致的只读 `getattr`，失败项及 native/provider 邻接回归随后全绿。
+  model-spec-like discovery object 一致的只读 `getattr`，失败项及 native/provider 邻接回归随后全绿。
   本地 8899 Qwen 的省略参数 Shell 调用留下三项正确来源，并因 macOS 无 bwrap 在实现前拒绝、零文件
   副作用；后续只读轮实际调用 `list_files/read_file`。同轮发现短输出只有 scoped call id、没有 artifact
   时仍给出读取提示会诱发无效工具调用；该旧分支已删除，实际 artifact 读取入口保持不变。
@@ -508,7 +518,7 @@
 - 代码参考固定在 会话运行时 `808d3c27` 的 `会话运行时-rs/core/src/tools/router.rs` typed
   `serde_json::from_value` 入口和各 handler 的 `JsonSchema`，以及 长期助手 `91546b83` 的
   `model_tools.py::coerce_tool_args`、registry schema 和 MCP schema 处理。my-agent 没有复制第二套
-  provider 专用校验器，而是把既有 ToolSpec Schema 作为 provider 展示、text/native 解析、恢复、
+  provider 专用校验器，而是把既有 `ToolModelSpec.input_schema` 作为 provider 展示、text/native 解析、恢复、
   MCP 注册和最终执行的唯一参数事实源。
 - 强类型纠正只处理无歧义的整数/数字、boolean、null 和合法 JSON array/object 字符串；随后在
   effect、审批、路径和 handler 前统一检查 required、类型、enum/const、嵌套对象、
@@ -1762,7 +1772,7 @@
 - provider 原生 call id 进入可信 `ToolCallEnvelope`；没有 provider id 的文本调用才使用轮次位置。
   `status/operation_id/idempotency_key` 等同名工具参数不再被协议黑名单误删，模型 payload 也不能覆盖
   外层 operation identity。
-- 所有 mutating/dangerous `ToolSpec` 已声明 `idempotency_scope="operation"`；静态测试会阻止新增副作用
+- 所有 mutating/dangerous `ToolRuntimePolicy` 已声明 `idempotency_policy.scope="operation"`；静态测试会阻止新增副作用
   工具漏接账本。`send_message` 原进程缓存和磁盘 receipt 已删除，取消控制逻辑也从 Tool wrapper 提成
   共用领域函数，避免内部控制面看起来像直接绕过 Tool Gateway。
 - 当前已通过原子 claim、并发同操作、进程失活、远端 lease、终态损坏、结果重放、身份冲突、owner

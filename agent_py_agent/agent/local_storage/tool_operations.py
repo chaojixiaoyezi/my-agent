@@ -80,6 +80,7 @@ class ToolOperationRecord:
     generation: int
     lease_expires_at: float
     result: dict[str, Any] = field(default_factory=dict)
+    result_ref: str = ""
     error_code: str = ""
     unknown_reason: str = ""
     created_at: float = 0.0
@@ -642,6 +643,7 @@ def _select_operation(
 
 
 def _record_from_row(row: Any) -> ToolOperationRecord:
+    result = _json_loads(row["result_json"])
     return ToolOperationRecord(
         owner_id=str(row["owner_id"]),
         run_id=str(row["run_id"]),
@@ -661,12 +663,30 @@ def _record_from_row(row: Any) -> ToolOperationRecord:
         ),
         generation=int(row["generation"] or 0),
         lease_expires_at=float(row["lease_expires_at"] or 0),
-        result=_json_loads(row["result_json"]),
+        result=result,
+        result_ref=_result_ref(result),
         error_code=str(row["error_code"] or ""),
         unknown_reason=str(row["unknown_reason"] or ""),
         created_at=float(row["created_at"] or 0),
         updated_at=float(row["updated_at"] or 0),
         completed_at=float(row["completed_at"] or 0),
+    )
+
+
+def _result_ref(result: dict[str, Any]) -> str:
+    direct = str(result.get("result_ref") or "").strip()
+    if direct:
+        return direct
+    envelope = result.get("result_envelope")
+    operation = (
+        envelope.get("tool_operation")
+        if isinstance(envelope, dict)
+        else None
+    )
+    return (
+        str(operation.get("result_ref") or "").strip()
+        if isinstance(operation, dict)
+        else ""
     )
 
 

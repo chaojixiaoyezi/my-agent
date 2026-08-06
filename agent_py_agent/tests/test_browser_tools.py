@@ -304,20 +304,21 @@ class TestSessionLifecycleRobustness:
 
 class TestToolSpecs:
     def test_single_browser_tool_with_action_enum(self):
-        spec = BrowserTool().spec
+        tool = BrowserTool()
+        spec = tool.model_spec
         assert spec.name == "browser"
         assert spec.category == "web"
         # 条件必填(url/ref/text 按 action)在运行时校验,工具级只必填 action
-        assert spec.required_parameters == ["action"]
-        assert spec.parameter_schema["action"]["enum"] == [
+        assert spec.input_schema["required"] == ["action"]
+        assert spec.input_schema["properties"]["action"]["enum"] == [
             "navigate", "snapshot", "click", "type", "close",
         ]
         # 整组取最严:浏览器交互有状态有副作用 → mutating + 幂等(自动派生 key)
-        assert spec.effect == "mutating"
-        assert spec.idempotency_scope == "operation"
+        assert tool.runtime_policy.effect_resolver.default_effect == "mutating"
+        assert tool.runtime_policy.idempotency_policy.scope == "operation"
 
     def test_all_tools_factory(self):
-        names = {t.spec.name for t in browser_tools()}
+        names = {t.model_spec.name for t in browser_tools()}
         assert names == {"browser"}  # 5 个动作合成 1 个入口
 
     def test_registered_in_registry(self, tmp_path):

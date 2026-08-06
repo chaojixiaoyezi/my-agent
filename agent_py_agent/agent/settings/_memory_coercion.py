@@ -1,5 +1,7 @@
 """Coercion helpers for memory-related config fields."""
 
+# LLM: Every Memory config field must normalize through this typed table; invalid values warn and use one declared default.
+# 模块用途: 校验 Memory/Curator 配置类型、枚举与范围，并生成不含秘密的结构化警告。
 
 from __future__ import annotations
 
@@ -14,6 +16,8 @@ _MISSING = object()
 _INT_PATTERN = re.compile(r"-?[0-9]+")
 
 
+# LLM: Field specs are the sole coercion rules; max_chars bounds provider/model identifiers without parsing semantics.
+# 类用途: 描述一个 Memory 配置字段的类型、范围、枚举或长度限制。
 @dataclass(frozen=True)
 class _FieldSpec:
     field_name: str
@@ -21,6 +25,7 @@ class _FieldSpec:
     min_value: int | None = None
     max_value: int | None = None
     choices: set[str] | None = None
+    max_chars: int | None = None
 
 
 @dataclass(frozen=True)
@@ -62,9 +67,32 @@ _FIELDS = (
     _FieldSpec("memory_resume_auto_context_mode", "choice", choices={"off", "trigger", "always"}),
     _FieldSpec("memory_resume_auto_context_limit", "int", 1, 50),
     _FieldSpec("memory_compact_auto_trigger_percent", "compact_trigger_percent"),
+    _FieldSpec("memory_curator_enabled", "bool"),
+    _FieldSpec(
+        "memory_curator_provider",
+        "choice",
+        choices={"auto", "echo", "openai_compatible", "anthropic_compatible"},
+    ),
+    _FieldSpec("memory_curator_model", "string", max_chars=200),
+    _FieldSpec("memory_curator_interval_seconds", "int", 60, 604_800),
+    _FieldSpec("memory_curator_turn_threshold", "int", 1, 1_000),
+    _FieldSpec("memory_curator_batch_message_limit", "int", 1, 500),
+    _FieldSpec("memory_curator_max_input_chars", "int", 2_000, 500_000),
+    _FieldSpec("memory_curator_timeout_seconds", "int", 5, 900),
+    _FieldSpec("memory_curator_max_retries", "int", 0, 5),
+    _FieldSpec("memory_curator_daily_finalize_hour", "int", 0, 23),
+    _FieldSpec(
+        "memory_curator_auto_promotion_policy",
+        "choice",
+        choices={"conservative_v1", "manual_only"},
+    ),
+    _FieldSpec("memory_lesson_min_occurrences", "int", 2, 100),
+    _FieldSpec("memory_hot_min_occurrences", "int", 3, 100),
 )
 
 
+# LLM: All MemorySettings fields must be produced in _FIELDS order so warning order and defaults stay deterministic.
+# 函数用途: 从配置源构造完整、已验证的 Memory 设置字典。
 def _build_memory_settings_dict(
     source: Mapping[str, Any] | object,
     defaults: MemorySettings,
@@ -77,6 +105,8 @@ def _build_memory_settings_dict(
     return result
 
 
+# LLM: Dispatch is based only on typed FieldSpec.kind; unknown prose or runtime values cannot select another parser.
+# 函数用途: 按字段规格校验并规范化一个 Memory 配置值。
 def _coerce_field(
     spec: _FieldSpec,
     source: Mapping[str, Any] | object,
@@ -90,6 +120,14 @@ def _coerce_field(
         return _coerce_bool(spec.field_name, raw_value, default=default, warnings=warnings)
     if spec.kind == "choice":
         return _coerce_choice(_ChoiceCoercion(spec.field_name, raw_value, default, spec.choices or set(), warnings))
+    if spec.kind == "string":
+        return _coerce_string(
+            spec.field_name,
+            raw_value,
+            default=default,
+            max_chars=spec.max_chars or 200,
+            warnings=warnings,
+        )
     if spec.kind == "compact_trigger_percent":
         return _coerce_compact_trigger_percent(spec.field_name, raw_value, default=default, warnings=warnings)
     return _coerce_int(
@@ -102,6 +140,30 @@ def _coerce_field(
         ),
         warnings=warnings,
     )
+
+
+# LLM: Model/provider strings must be short single-line values; booleans/numbers cannot be coerced into identifiers.
+# 函数用途: 校验后台模型等短字符串配置，非法值回退默认并记录警告。
+def _coerce_string(
+    field_name: str,
+    raw_value: Any,
+    *,
+    default: str,
+    max_chars: int,
+    warnings: list[MemoryConfigWarning],
+) -> str:
+    """Parse a short single-line string without treating booleans/numbers as model names."""
+    if raw_value is _MISSING:
+        return default
+    if isinstance(raw_value, str):
+        normalized = raw_value.strip()
+        if len(normalized) <= max_chars and "\n" not in normalized and "\r" not in normalized:
+            return normalized
+    _warn(
+        warnings,
+        _WarningDraft(field_name, raw_value, default, "expected a short single-line string"),
+    )
+    return default
 
 
 def _coerce_compact_trigger_percent(
