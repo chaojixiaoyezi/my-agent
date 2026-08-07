@@ -8,6 +8,7 @@ status should use the cumulative field when showing current context pressure.
 
 import json
 import logging
+import os
 import threading
 import time
 from contextlib import nullcontext
@@ -1518,10 +1519,23 @@ def _gateway_workspace_task(
         if len(unique_paths) == 1:
             selected = next(iter(unique_paths.values()))
         elif len(unique_paths) > 1:
-            # 多个候选工作区时同会话普通消息默认延续最近创建的可复用任务,
-            # 不因多候选而开新任务目录(开新任务会让用户消息截断成目录名,
-            # 模型在新目录找不到旧产物,真机 2026-08-08 scrapy 复刻停摆三连)。
-            selected = next(reversed(list(unique_paths.values())))
+            # 多个候选工作区时同会话普通消息默认延续有真实产物的任务:
+            # 仅 output 目录非空才是工作证据,空壳目录是用户消息被截断成
+            # 任务名的产物(真机 2026-08-08 scrapy 复刻停摆三连)。全部
+            # 有产物/全部为空时回退最近绑定的候选。开新任务目录会让模型
+            # 在新目录找不到旧产物,因此绝不因多候选而开新任务。
+            candidates = list(unique_paths.values())
+            populated = [
+                link
+                for link in candidates
+                if _gateway_workspace_has_artifacts(
+                    _existing_gateway_workspace_path(getattr(link, "task_path", ""))
+                )
+            ]
+            if len(populated) == 1:
+                selected = populated[0]
+            else:
+                selected = candidates[-1]
     if selected is None:
         return None
     task_path = _existing_gateway_workspace_path(getattr(selected, "task_path", ""))
@@ -1567,6 +1581,25 @@ def _existing_gateway_workspace_path(value: object) -> str:
     except OSError:
         return ""
     return str(path) if path.is_dir() else ""
+
+
+# LLM: An output subdirectory with at least one file is the only structured evidence that a
+# task actually produced artifacts; empty shells are created when a user message truncates
+# into a task name (2026-08-08 scrapy replica stall x3).
+# 函数用途: 判断任务工作区是否有真实产物,供多候选工作区选择时区分实工作区与空壳。
+def _gateway_workspace_has_artifacts(path: str) -> bool:
+    if not path:
+        return False
+    output_dir = os.path.join(path, "output")
+    if not os.path.isdir(output_dir):
+        return False
+    try:
+        return any(
+            os.path.isfile(os.path.join(output_dir, name))
+            for name in os.listdir(output_dir)
+        )
+    except OSError:
+        return False
 
 
 # LLM: 对话正文和产物引用都来自同一 thread，但保持两种 typed 结果，禁止把 path 混进历史正文。

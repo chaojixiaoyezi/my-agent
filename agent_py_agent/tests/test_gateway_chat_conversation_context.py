@@ -2926,6 +2926,50 @@ def test_sticky_workspace_superseded_falls_back_to_reusable_task(tmp_path):
     assert attrs["run_workspace"]["task_root"] == str(workspace)
 
 
+def test_multi_candidate_workspace_prefers_populated_output_over_latest_empty(tmp_path):
+    # 多候选工作区(同会话多个可复用任务目录)时,普通消息延续有真实产物的任务,
+    # 不选最近创建的 output 空壳目录(空壳=用户消息被截断成任务名,真机
+    # 2026-08-08 scrapy 复刻停摆三连)。
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_multi_candidate",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    first = _conversation_context(agent, request, "gw-first", "把 scrapy 用 Go 重写")
+    populated = Path(agent.home_paths.owner_home_dir) / "tasks" / "scrapy-go"
+    (populated / "output").mkdir(parents=True)
+    (populated / "work").mkdir()
+    (populated / "output" / "main.go").write_text("package main", encoding="utf-8")
+    shell = Path(agent.home_paths.owner_home_dir) / "tasks" / "output-空壳目录"
+    (shell / "output").mkdir(parents=True)
+    (shell / "work").mkdir()
+    # 绑定顺序:先有产物的任务,后空壳任务(空壳为最近创建)
+    for task_id, path in (("task-populated", populated), ("task-shell", shell)):
+        agent.conversation_store.bind_task(
+            {
+                "thread_id": first.thread_id,
+                "task_id": task_id,
+                "goal": "scrapy 复刻",
+                "status": "active",
+                "task_path": str(path),
+            }
+        )
+
+    followup = _conversation_context(agent, request, "gw-new", "继续写解析器")
+    attrs = _gateway_task_attributes(followup)
+
+    assert attrs is not None
+    assert attrs["conversation_task_id"] == "task-populated"
+    assert attrs["run_workspace"]["task_root"] == str(populated)
+
+
 def test_interrupted_workspace_is_reused_at_first_work_tool_without_selection(tmp_path):
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
