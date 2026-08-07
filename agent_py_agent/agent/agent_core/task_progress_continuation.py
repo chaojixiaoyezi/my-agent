@@ -79,7 +79,7 @@ def task_progress_continuation_decision(
         return TaskProgressContinuationDecision(False, "conversation_scoped")
     if str(getattr(result, "runtime_status", "ok") or "ok").strip().lower() != "ok":
         return TaskProgressContinuationDecision(False, "not_ok")
-    task_id = _durable_task_id(params)
+    task_id = _ledger_key(agent, params)
     if not task_id:
         return TaskProgressContinuationDecision(False, "no_task_id")
     from ..conversation.runtime import ledger_open_progress_item_count
@@ -173,7 +173,19 @@ def mark_task_progress_limit_reached(result: Any) -> Any:
     return result
 
 
-def _durable_task_id(params: object) -> str:
+def _ledger_key(agent: object, params: object) -> str:
+    """账本 key 必须与 task_progress 工具的读写 key 完全一致。
+
+    会话任务(带 conversation_task_id)用 progress_ledger_id:gateway 每轮请求派生
+    新任务身份(req_2→req_3→req_0),按 conversation_task_id 读=读错位账本=0 pending
+    =不续跑(真机实证 2026-08-07);progress_ledger_id 按 task_path 指纹寻址,跨请求
+    稳定。非会话场景保持 durable_task_id 原语义(任务身份),零变化。
+    """
+    attrs = getattr(params, "task_attributes", None)
+    if isinstance(attrs, dict) and str(attrs.get("conversation_task_id") or "").strip():
+        from .runtime.task_identity import progress_ledger_id
+
+        return str(progress_ledger_id(agent, params) or "").strip()
     from .runtime.task_identity import durable_task_id
 
     return str(durable_task_id(params) or "").strip()

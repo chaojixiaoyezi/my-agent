@@ -42,7 +42,7 @@ def select_tool_protocol(agent: object, *, run_id: str) -> ToolProtocolSnapshot:
     if _model_declared_text_protocol(config, backend):
         # 模型名单显式声明(配置 tool_protocol_text_models):该模型不参与 native probe,
         # 直接走 text。非 reasoning 模型配 native 会静默失效(0 工具调用+幻觉,真机实证
-        # 2026-08-07 deepseek-v4-flash),名单是部署方显式配对,不是猜测。
+        # 2026-08-07),名单是部署方显式配对,不是猜测。
         capability = _declared_capability(
             backend,
             native_supported=False,
