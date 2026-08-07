@@ -362,6 +362,19 @@ class TestRunIntegration:
         assert result.task_progress_auto_continue_depth == 3
         assert result.runtime_status == "unfinished"
         assert result.runtime_reason == "TASK_PROGRESS_LIMIT_REACHED"
+        # standalone 任务 workspace 收口 BLOCKED,绝不 DONE 撒谎(假 DONE 根修的
+        # 收尾断言;conversation 任务由 conversation 侧投影 RUNNING,语义如实)。
+        state = (
+            agent.home_paths.owner_home_dir
+            / "tasks"
+            / "2026-08-07"
+            / "用-go-复刻-celery"
+            / "work"
+            / "state.json"
+        )
+        if state.is_file():
+            payload = json.loads(state.read_text(encoding="utf-8"))
+            assert payload["status"] == "BLOCKED"
         continuation_injections = [
             p for p in backend.prompts if "# Task Progress Continuation" in p
         ]
