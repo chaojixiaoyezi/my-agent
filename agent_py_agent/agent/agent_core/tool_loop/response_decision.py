@@ -29,6 +29,16 @@ _PROTECTED_TOOL_MARKERS = (
     "[/tool-call]",
 )
 
+# 长期助手 式空响应 nudge 的有界次数:执行过工具后模型空正文无工具调用时,
+# 塞一条提示要求继续;超限后诚实失败(USER_REPLY_UNAVAILABLE),不让坏输出无限烧 token。
+_MAX_EMPTY_TEXT_REPAIRS = 2
+_EMPTY_TEXT_NUDGE = (
+    "[tool-system]\n"
+    "上一轮你执行了工具调用，但回复正文为空。请基于上方真实工具结果继续推进："
+    "任务未完成就调用下一步工具，任务已完成才给最终回答。不要重复读取同一批材料，"
+    "也不要只复述计划。"
+)
+
 
 @dataclass(frozen=True)
 class ToolLoopRepairCounters:
@@ -37,6 +47,7 @@ class ToolLoopRepairCounters:
     protected_marker_repairs: int = 0
     unresolved_runtime_issue_redirects: int = 0
     protocol_repairs: int = 0
+    empty_text_repairs: int = 0
 
 
 # LLM: repair counters 只记录真实协议修复次数，不再承载任何工作风格或检查点提醒状态。
@@ -46,6 +57,7 @@ def _inc_protected_marker(counters: ToolLoopRepairCounters) -> ToolLoopRepairCou
         protected_marker_repairs=counters.protected_marker_repairs + 1,
         unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
         protocol_repairs=counters.protocol_repairs,
+        empty_text_repairs=counters.empty_text_repairs,
     )
 
 
@@ -56,6 +68,7 @@ def _inc_unresolved_runtime_issue(counters: ToolLoopRepairCounters) -> ToolLoopR
         protected_marker_repairs=counters.protected_marker_repairs,
         unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects + 1,
         protocol_repairs=counters.protocol_repairs,
+        empty_text_repairs=counters.empty_text_repairs,
     )
 
 
@@ -64,6 +77,19 @@ def _inc_protocol(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
         protected_marker_repairs=counters.protected_marker_repairs,
         unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
         protocol_repairs=counters.protocol_repairs + 1,
+        empty_text_repairs=counters.empty_text_repairs,
+    )
+
+
+# LLM: 空正文 nudge 有界(默认 2 次):工具执行后模型必须产出终态正文或继续调工具,
+# 静默空收口只会让用户收不到回复。计数与协议修复相互独立。
+# 函数用途: 增加一次"执行过工具但空正文"的修复计数。
+def _inc_empty_text(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
+    return ToolLoopRepairCounters(
+        protected_marker_repairs=counters.protected_marker_repairs,
+        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
+        protocol_repairs=counters.protocol_repairs,
+        empty_text_repairs=counters.empty_text_repairs + 1,
     )
 
 
@@ -440,6 +466,19 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
     if unresolved_issue_decision is not None:
         return _unresolved_runtime_issue_decision(unresolved_issue_decision)
     if not request.has_protected_marker:
+        # 长期助手 式空响应 nudge(参考 长期助手 conversation_loop 6511-6547:
+        # "You just executed tool calls but returned an empty response... continue")。
+        # 执行过工具后模型空正文无工具调用 = 静默收口:直接 break 会让用户收不到
+        # 任何回复(USER_REPLY_UNAVAILABLE)。有界重试(默认 2 次)后仍空 → 诚实失败。
+        if (
+            not str(getattr(request.response, "text", "") or "").strip()
+            and list(getattr(request.params, "executed_tools", None) or [])
+            and request.counters.empty_text_repairs < _MAX_EMPTY_TEXT_REPAIRS
+        ):
+            request.params.tool_context.append(_EMPTY_TEXT_NUDGE)
+            return ToolLoopResponseDecision(
+                "continue", None, [], _inc_empty_text(request.counters)
+            )
         return ToolLoopResponseDecision("break", request.response, [], request.counters)
     if request.counters.protected_marker_repairs < 1:
         return ToolLoopResponseDecision(

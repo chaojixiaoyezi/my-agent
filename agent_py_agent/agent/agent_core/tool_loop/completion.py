@@ -60,28 +60,13 @@ def completion_response_after_tool_round(
             request.agent, request.response
         ):
             return progress_response
-    # 工具执行后必须基于真实结果生成最终自然语言回复(真机 bug:普通 gateway 请求工具执行后,
-    # completion 返回 None → 主代理 response 是工具结果而非总结 → USER_REPLY_UNAVAILABLE)。
-    # 本轮执行过工具(executed_tools 比 before 多)、未达工具轮上限、且无 pending 自然回复 →
-    # queue_natural_user_reply 要求模型再生成一次基于工具结果的总结。round_limit 场景由现有
-    # interim 机制处理,不在此重复 queue。纯结构化判据,不解析正文。
-    executed = list(getattr(request.params, "executed_tools", None) or [])
-    # 只在"本轮执行了工具 且 模型回复不是自然语言(空/只内部信号) 且 未达工具轮上限"时 queue——
-    # 否则工具执行后模型已产出总结/继续指令,无需再生成(避免多一轮调用破坏既有测试语义)。
-    response_text = str(getattr(request.response, "text", "") or "").strip()
-    if (
-        len(executed) > int(getattr(request, "before_executed_count", 0) or 0)
-        and not response_text
-        and not _round_limit_reached(request)
-    ):
-        from .natural_user_reply import pending_natural_user_reply, queue_natural_user_reply
-
-        if pending_natural_user_reply(request.params) is None:
-            queue_natural_user_reply(
-                request.params,
-                kind="tool_result",
-                facts=_tool_result_reply_facts(request),
-            )
+    # 工具轮后模型正文为空 ≠ 收口信号:长期助手/会话运行时/终端应用/通道运行时 四家参考产品
+    # 都是"工具→结果→继续采样"直到模型主动输出无工具调用的终态正文(参考调研 2026-08-07)。
+    # 真机铁证(2026-08-07, scrapy/celery 复刻):DeepSeek 经 工具运行时 网关工具轮后空正文
+    # 是在准备下一步工具调用,旧逻辑在此强制 queue 表达轮收口 → 每请求只调 1-2 个工具,
+    # 长任务推进极慢。现在返回 None,主循环带着工具结果继续;模型"空正文无工具"的静默收口
+    # 由 response_decision 的 长期助手 式 bounded nudge 兜底(参考 长期助手 "empty response"
+    # 塞用户消息要求继续),真正无产出时走诚实 USER_REPLY_UNAVAILABLE。
     return None
 
 
@@ -127,33 +112,6 @@ def _round_can_finish_via_soft_wait(request: ToolRoundCompletionRequest) -> bool
 
 def _soft_wait_can_finish_turn(request: ToolRoundCompletionRequest) -> bool:
     return is_wake_capable_source(request.params)
-
-
-def _round_limit_reached(request: ToolRoundCompletionRequest) -> bool:
-    """本轮是否已达工具轮上限(round_limit 场景由现有 interim 机制处理,不重复 queue)。"""
-    raw = getattr(getattr(request.agent, "config", None), "max_tool_rounds", None)
-    limit = 0
-    if raw is None:
-        try:
-            from .._tool_loop_service import _effective_max_tool_rounds
-
-            limit = _effective_max_tool_rounds(request.agent, request.params)
-        except Exception:
-            limit = 0
-    else:
-        limit = int(raw or 0)
-    return limit > 0 and int(getattr(request, "tool_rounds", 0) or 0) >= limit
-
-
-def _tool_result_reply_facts(request: ToolRoundCompletionRequest) -> dict[str, object]:
-    """工具执行后的自然回复事实(结构化,供模型生成总结回复时引用)。"""
-    facts = _interim_reply_facts(
-        request.agent,
-        request.params,
-        tool_rounds=request.tool_rounds,
-    )
-    facts["tool_result_pending"] = True
-    return facts
 
 
 def _queue_soft_wait_user_reply(request: ToolRoundCompletionRequest) -> None:
