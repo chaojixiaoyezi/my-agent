@@ -63,9 +63,12 @@ def test_process_and_file_isolation(tmp_path) -> None:
     else:
         assert argv[argv.index("--dir") + 1] == "/proc"
     assert "--die-with-parent" in argv
-    # owner home 读写 bind
-    i = argv.index("--bind")
-    assert argv[i + 1] == str(home) and argv[i + 2] == str(home)
+    # owner home 读写 bind（第一个 --bind 是 .sandbox-tmp 持久临时目录）
+    binds = {
+        (argv[i + 1], argv[i + 2]) for i, flag in enumerate(argv) if flag == "--bind"
+    }
+    assert (str(home), str(home)) in binds
+    assert (str(home / ".sandbox-tmp"), "/tmp") in binds
 
 
 def test_persona_files_are_readonly_inside_owner_shell(tmp_path) -> None:

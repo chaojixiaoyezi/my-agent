@@ -170,8 +170,15 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
         # 嵌套容器内核拒 mount("proc") 时回退空 /proc 目录(旧行为,进程隔离仍在)。
         *_proc_mount_args(),
         "--dev", "/dev",
-        "--tmpfs", "/tmp",     # 临时,rm -rf /tmp 无害
     ]
+    # 持久 /tmp：owner-scoped 沙箱把临时目录 bind 到任务工作区的隐藏目录，
+    # 模型下载的源码/依赖跨命令、跨请求保留。tmpfs 时 pip download 成功但
+    # 下一请求源码消失，模型不知道丢了还谎称源码已备好（真机铁证 2026-08-08
+    # celery/scrapy→Go 复刻）。rm -rf /tmp 只清任务区 .sandbox-tmp，
+    # 沙箱隔离与写边界不变。
+    tmp_root = spec.workspace / ".sandbox-tmp"
+    tmp_root.mkdir(parents=True, exist_ok=True)
+    argv += ["--bind", str(tmp_root), "/tmp"]
     for ro in _SYSTEM_RO_ROOTS:
         if Path(ro).exists():
             argv += ["--ro-bind", ro, ro]

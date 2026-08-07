@@ -714,7 +714,7 @@ def _build_shell_tool_model_spec(
                 "Avoid for interactive terminal workflows.",
                 "Prefer write_file for file changes instead of shell redirection.",
                 "Do not use rm/rmdir/unlink. Delete one text file with apply_patch; route directory or bulk deletion through task_trash.",
-                "Do not keep files needed by a later tool call in /tmp: owner-scoped sandbox /tmp is a per-command tmpfs. Keep cross-command state in the selected workspace.",
+                "Files written under /tmp inside the owner-scoped sandbox are kept in the task workspace .sandbox-tmp directory and survive across tool calls and requests; still keep final deliverables in the selected workspace, not in /tmp.",
                 "Use wait for pure delays such as sleep 120 while waiting for subagent progress.",
                 "盯守/轮询数据流→用 watch_stream,禁自写轮询脚本(无游标持久/覆盖账目,实测误报泛滥)。",
             ),
