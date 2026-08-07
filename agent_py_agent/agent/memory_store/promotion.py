@@ -6,6 +6,7 @@ from __future__ import annotations
 # 模块用途: 核验消息/工具证据，执行保守自动策略，并在正式落点成功后标 promoted。
 
 import hashlib
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Protocol
@@ -17,6 +18,21 @@ from .jsonl import JsonlMemory, MemoryRecord
 from .lessons import HotRuleRepository, LessonRepository
 
 _LONG_TERM_TARGET_TYPES = frozenset({"long_term_fact", "event", "project"})
+
+# 写路径查重:表述变体(LCS 覆盖率)与长度差双闸,只合并"逐字近重复"的同一断言,
+# 绝不把不同事实(加信息/换词义)并掉——漏并多存一条,误并丢信息,后者更糟。
+_MERGE_CONTENT_SIMILARITY = 0.90
+_MERGE_MAX_LENGTH_RATIO = 0.20
+
+# 英文关键词抽取:只收 ASCII 词面(结构化),不做词义判断;用于 BM25 臂跨语言命中。
+_EN_KEYWORD_MIN_LEN = 3
+_EN_KEYWORD_MAX = 12
+_EN_KEYWORD_STOPWORDS = frozenset(
+    {
+        "the", "and", "for", "with", "from", "that", "this", "have", "has",
+        "was", "were", "will", "would", "should", "could", "about", "into",
+    }
+)
 
 
 # LLM: 工具证据结果由 Tool Agent 权威接口提供；Memory 不读取模型文字或自建工具成功状态机。
@@ -88,22 +104,22 @@ class MemoryPromotionPolicy:
     hot_min_occurrences: int = 3
 
 
-# LLM: This adapter reads the Tool Agent's authoritative operation ledger; it does not infer success from archive prose.
+# LLM: This adapter reads the Tool Agent's authoritative runtime gate ledger; it does not infer success from archive prose.
 # 类用途: 按 owner/run/operation 精确核验工具成功终态，并返回可保存的最小规范引用。
 class LocalStoreToolEvidenceVerifier:
-    # LLM: owner_id 是不可变核验边界，operation store 仍由 Tools Agent 持有和定义。
-    # 函数用途: 初始化 Tools operation ledger 的只读 Memory 适配器。
-    def __init__(self, operation_store: object, *, owner_id: str) -> None:
-        self.operation_store = operation_store
+    # LLM: owner_id 是不可变核验边界，runtime gate ledger 由执行层每轮工具执行后机器写入。
+    # 函数用途: 初始化 runtime gate ledger 的只读 Memory 适配器。
+    def __init__(self, ledger_store: object, *, owner_id: str) -> None:
+        self.ledger_store = ledger_store
         self.owner_id = str(owner_id or "").strip()
 
-    # LLM: Claimed status/effect fields in the candidate are advisory; the operation store is authoritative.
-    # 函数用途: 查一条工具操作账本，只有 succeeded、ok 且副作用结果确定时才通过。
+    # LLM: Claimed status/effect fields in the candidate are advisory; the runtime gate ledger is authoritative.
+    # 函数用途: 查一条工具执行观测记录，只有执行层判定 succeeded 时才通过。
     def verify(self, ref: dict[str, object]) -> VerifiedToolEvidence | None:
         owner_id = str(ref.get("owner_id") or "").strip()
         run_id = str(ref.get("run_id") or "").strip()
         operation_id = str(ref.get("operation_id") or "").strip()
-        reader = getattr(self.operation_store, "get_tool_operation", None)
+        reader = getattr(self.ledger_store, "get_runtime_gate_ledger", None)
         if (
             not callable(reader)
             or not self.owner_id
@@ -113,22 +129,13 @@ class LocalStoreToolEvidenceVerifier:
         ):
             return None
         try:
-            record = reader(
-                owner_id=self.owner_id,
-                run_id=run_id,
-                operation_id=operation_id,
-            )
+            record = reader(run_id=run_id, operation_id=operation_id)
         except Exception:
             return None
         if record is None:
             return None
-        result = record.result if isinstance(record.result, dict) else {}
-        effect_outcome = str(result.get("effect_outcome") or "").strip().lower()
-        successful = (
-            str(record.status or "").strip().lower() == "succeeded"
-            and result.get("ok") is True
-            and effect_outcome not in {"unknown", "not_started"}
-        )
+        successful = str(record.status or "").strip().lower() == "succeeded"
+        effect_outcome = "confirmed" if successful else "unknown"
         canonical = {
             "owner_id": self.owner_id,
             "run_id": str(record.run_id),
@@ -136,10 +143,10 @@ class LocalStoreToolEvidenceVerifier:
             "tool": str(record.tool),
             "status": str(record.status),
         }
-        call_id = str(result.get("call_id") or "").strip()
+        call_id = str(ref.get("call_id") or "").strip()
         if call_id:
             canonical["call_id"] = call_id
-        effect_source_ref = str(result.get("effect_source_ref") or "").strip()
+        effect_source_ref = str(ref.get("effect_source_ref") or "").strip()
         if effect_source_ref:
             canonical["effect_source_ref"] = effect_source_ref
         return VerifiedToolEvidence(
@@ -349,6 +356,13 @@ class MemoryPromotionService:
                     "PROMOTION_THRESHOLD_NOT_MET",
                 )
             raise
+        # 总量闸:long_term 写成功后顺带治理(超上限按访问信号浓缩,user_explicit 不淘汰)。
+        # 放在 promote 成功路径,任何写入口(remember/curator)都自动触发,无需单独 cron。
+        try:
+            if str(candidate.promotion_target or "").strip().lower() in {"", "none", "long_term"}:
+                self.long_term.condense()
+        except Exception:
+            pass  # 治理失败不影响本次晋升本身
         promoted = self.candidates.mark_promoted(
             candidate.candidate_id,
             reviewer=reviewer,
@@ -477,6 +491,26 @@ class MemoryPromotionService:
                     "SUBJECT_SCOPE_CONFLICT_REQUIRES_REPLACE",
                     tuple(item.entry_id for item in existing),
                 )
+            # 写路径查重:同 scope 内"逐字近重复"的旧断言合入旧条目,不新增(治重复记录膨胀)。
+            # 与 subject 冲突不同——跨 subject 的表述变体不是矛盾,而是同一事实的重复记录。
+            near = _near_duplicate_in_scope(self.long_term.all(), candidate)
+            if near is not None:
+                record = self.long_term.apply_batch(
+                    [
+                        {
+                            "action": "replace",
+                            "entry_id": near.entry_id,
+                            "content": candidate.content,
+                            "kind": _long_term_kind(candidate.candidate_type),
+                            "tags": _merged_tags(near, candidate),
+                            "attributes": _long_term_attributes(candidate),
+                            "source": f"candidate:{candidate.candidate_id}",
+                            "expires_at": _expiry_epoch(candidate.valid_until),
+                            "expected_version": near.version,
+                        }
+                    ]
+                )[0]
+                return "memory/long_term/memory.jsonl#" + record.entry_id
             entry_id = "memory-" + hashlib.sha256(
                 candidate.candidate_id.encode("utf-8")
             ).hexdigest()[:24]
@@ -652,6 +686,93 @@ def _absolute_authority_block(candidate: MemoryCandidate) -> str:
     return ""
 
 
+# LLM: 查重是字符级确定性算法(LCS 覆盖率+长度差),不解析词义,不依赖 embedding 端点。
+# 函数用途: 归一化正文后计算两段文字的 LCS 覆盖率。
+def _text_similarity(a: str, b: str) -> float:
+    ta = "".join(str(a or "").lower().split())
+    tb = "".join(str(b or "").lower().split())
+    if not ta or not tb:
+        return 0.0
+    if ta == tb:
+        return 1.0
+    if abs(len(ta) - len(tb)) / max(len(ta), len(tb)) > _MERGE_MAX_LENGTH_RATIO:
+        return 0.0
+    lcs = _lcs_length(ta, tb)
+    return 2.0 * lcs / (len(ta) + len(tb))
+
+
+def _lcs_length(a: str, b: str) -> int:
+    if not a or not b:
+        return 0
+    if len(a) > len(b):
+        a, b = b, a
+    prev = [0] * (len(b) + 1)
+    for row in range(len(a)):
+        cur = [0] * (len(b) + 1)
+        ach = a[row]
+        for col in range(len(b)):
+            if ach == b[col]:
+                cur[col + 1] = prev[col] + 1
+            else:
+                cur[col + 1] = prev[col + 1] if prev[col + 1] >= cur[col] else cur[col]
+        prev = cur
+    return prev[-1]
+
+
+# LLM: 查重范围限定同 scope;跨 scope 近重复是不同语境的记忆,不得合并。
+# 函数用途: 在同 scope active 记录里找与候选内容"逐字近重复"的条目。
+def _near_duplicate_in_scope(
+    records: list[MemoryRecord],
+    candidate: MemoryCandidate,
+) -> MemoryRecord | None:
+    scope = MemoryScope.from_value(candidate.scope)
+    best: MemoryRecord | None = None
+    best_score = 0.0
+    for record in records:
+        attributes = record.attributes if isinstance(record.attributes, dict) else {}
+        if str(attributes.get("scope_type") or "legacy") != scope.scope_type:
+            continue
+        if str(attributes.get("scope_key") or "legacy") != scope.scope_key:
+            continue
+        score = _text_similarity(candidate.content, record.content)
+        if score > best_score:
+            best, best_score = record, score
+    if best is None or best_score < _MERGE_CONTENT_SIMILARITY:
+        return None
+    return best
+
+
+# LLM: 合并时保留旧条目身份(subject_key/entry_id 不动),正文用新表述,证据与标签追加去重。
+# 函数用途: 把候选证据并入被查重命中的旧条目 tags。
+def _merged_tags(prior: MemoryRecord, candidate: MemoryCandidate) -> list[str]:
+    merged = [str(tag) for tag in (prior.tags or [])]
+    for tag in (candidate.candidate_type, candidate.origin):
+        if tag and tag not in merged:
+            merged.append(tag)
+    return merged[:12]
+
+
+# LLM: 英文关键词只做词面抽取(ASCII 词/小写/停用词过滤),不做词义或翻译判断。
+# 函数用途: 从正文抽取英文关键词,供 BM25 臂跨语言命中中文记忆。
+def _english_keywords(text: str) -> list[str]:
+    words = re.findall(r"[A-Za-z][A-Za-z0-9_-]+", str(text or ""))
+    kept: list[str] = []
+    for word in words:
+        low = word.lower()
+        if len(low) < _EN_KEYWORD_MIN_LEN or low in _EN_KEYWORD_STOPWORDS:
+            continue
+        if low not in kept:
+            kept.append(low)
+    return kept[:_EN_KEYWORD_MAX]
+
+
+# LLM: 中文关键词来自稳定 subject_key 的机械拆段(与 lessons routing 同法),不读正文。
+# 函数用途: 从 subject_key 生成中文关键词段。
+def _cn_keywords(subject_key: str) -> list[str]:
+    parts = [part for part in re.split(r"[^一-鿿A-Za-z0-9]+", str(subject_key or "")) if len(part) >= 2]
+    return list(dict.fromkeys(parts))[:12]
+
+
 # LLM: conflict 比较明确读取 subject_key + scope_type + scope_key；适用条件文字不参与身份猜测。
 # 函数用途: 查找同主题同范围的 active 长期记忆。
 def _same_subject_scope(
@@ -686,6 +807,8 @@ def _long_term_attributes(candidate: MemoryCandidate) -> dict[str, object]:
         "excludes_when": scope.excludes_when,
         "valid_from": candidate.valid_from,
         "valid_until": candidate.valid_until,
+        "keywords_en": _english_keywords(candidate.content),
+        "keywords_cn": _cn_keywords(candidate.subject_key),
         "evidence_refs": normalize_reference_list(
             [
                 *candidate.source_message_refs,

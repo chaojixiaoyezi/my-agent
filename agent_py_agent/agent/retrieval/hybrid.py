@@ -22,12 +22,22 @@ class HybridRetriever:
     - ``embedder=None`` → 纯 BM25 词面召回。
     - 提供 embedder → BM25 + 向量 cosine 两路,RRF 融合(语义 + 词面互补)。
       embedder 端点抖动(``EmbeddingError``)自动降级到纯 BM25,检索绝不崩。
+    - ``vector_min_score``:向量臂最低 cosine。低于门槛的弱相关候选不进语义臂
+      (注入侧"阈值化":只带真相关,不靠弱相关凑数);BM25 词面臂不受影响(词面
+      重合本身就是相关信号)。None/0 表示不过滤。
     """
 
     def __init__(self, embedder: EmbeddingProvider | None = None) -> None:
         self._embedder = embedder
 
-    def rank(self, query: str, docs: list[tuple[str, str]], *, top_k: int = 10) -> list[tuple[str, float]]:
+    def rank(
+        self,
+        query: str,
+        docs: list[tuple[str, str]],
+        *,
+        top_k: int = 10,
+        vector_min_score: float = 0.0,
+    ) -> list[tuple[str, float]]:
         if not docs:
             return []
         ids = [d[0] for d in docs]
@@ -35,7 +45,7 @@ class HybridRetriever:
 
         bm25_order = [ids[i] for i in bm25_rank(query, texts)]
 
-        vec_order = self._vector_order(query, ids, texts)
+        vec_order = self._vector_order(query, ids, texts, min_score=vector_min_score)
         if vec_order is None:
             # 无 embedder 或端点失败 → 纯 BM25(给个递减分,保持可比)
             return [(id, 1.0 / (i + 1)) for i, id in enumerate(bm25_order)][:top_k]
@@ -43,7 +53,14 @@ class HybridRetriever:
         fused = reciprocal_rank_fusion([bm25_order, vec_order])
         return fused[:top_k]
 
-    def _vector_order(self, query: str, ids: list[str], texts: list[str]) -> list[str] | None:
+    def _vector_order(
+        self,
+        query: str,
+        ids: list[str],
+        texts: list[str],
+        *,
+        min_score: float,
+    ) -> list[str] | None:
         if self._embedder is None:
             return None
         try:
@@ -54,4 +71,8 @@ class HybridRetriever:
         # 去"通用方向偏置"(某些文档和所有查询都高相似→干扰召回),提升语义召回区分度;通道运行时 也没做这步
         query_vec, doc_vecs = mean_center(query_vec, doc_vecs)
         sims = [(ids[i], cosine(query_vec, doc_vecs[i])) for i in range(min(len(ids), len(doc_vecs)))]
-        return [id for id, score in sorted(sims, key=lambda kv: (-kv[1], kv[0])) if score > 0.0]
+        return [
+            id
+            for id, score in sorted(sims, key=lambda kv: (-kv[1], kv[0]))
+            if score > 0.0 and (min_score <= 0.0 or score >= min_score)
+        ]

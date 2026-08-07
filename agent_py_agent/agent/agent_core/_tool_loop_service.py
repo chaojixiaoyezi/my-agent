@@ -94,6 +94,10 @@ from .tool_runtime_ledger import persist_tool_runtime_ledger, write_boundary_wit
 
 _LOGGER = logging.getLogger(__name__)
 
+# 模型失败后机械重试无上限时的轮数防线。
+# 显式配置 max_tool_rounds 或任务属性可覆盖; 显式 0 保留"不限制"逃生。
+_DEFAULT_MAX_TOOL_ROUNDS = 60
+
 _ORCHESTRATION_TOOLS = {
     "create_subagents",
     "dispatch_subagents",
@@ -128,10 +132,20 @@ def _effective_max_tool_rounds(agent, params: ToolLoopExecuteParams) -> int:
     attrs_to_check = params.task_attributes or current_task_attributes(agent)
     if attrs_to_check and "max_tool_rounds" in attrs_to_check:
         effective = attrs_to_check["max_tool_rounds"]
+    # LLM: 模型失败后机械重试无上限会把任务拖死(实测"读不存在文件"38+ 轮不收敛)；
+    # 参考 长期助手 max_iterations 默认 15 的同一防线, 这里给宽默认 60——复杂多步任务
+    # 足够, 死循环 60 轮后走 _final_response_after_tool_limit 诚实交接(未完成+进度持久,
+    # 下个 run 续跑), 不会无限烧时间/成本。只有"显式 0"才保留不限制逃生；空值/缺省
+    # 一律落到默认防线(与 runtime_guard_config.yaml 的 max_tool_rounds 默认值保持一致)。
+    if effective is None:
+        return _DEFAULT_MAX_TOOL_ROUNDS
     try:
-        return max(0, int(effective))
+        effective = int(effective)
     except (TypeError, ValueError):
+        return _DEFAULT_MAX_TOOL_ROUNDS
+    if effective <= 0:
         return 0
+    return effective
 
 
 def _should_retry_empty_model_response(

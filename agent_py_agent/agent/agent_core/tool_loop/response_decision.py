@@ -206,7 +206,8 @@ def _protocol_violation_decision(
         + "\n上一轮没有形成可执行工具调用。若仍需操作，请使用本 run 已选定的结构化协议重新发起；"
         "不要把工具调用写进正文、代码块或解释文字。"
     )
-    if request.counters.protocol_repairs < 1:
+    max_repairs = max(1, int(getattr(request.params, "max_protocol_repairs", 2) or 2))
+    if request.counters.protocol_repairs < max_repairs:
         return ToolLoopResponseDecision(
             "continue",
             None,

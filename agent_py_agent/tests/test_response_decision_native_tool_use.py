@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -190,3 +191,72 @@ def test_disabled_tools_short_circuits_before_native_blocks(tmp_path: Path):
 
     assert decision.action == "break"
     assert decision.calls == []
+
+
+def test_protocol_violation_gets_two_repairs_before_break(tmp_path: Path):
+    """默认 max_protocol_repairs=2：前两次违规继续修复，第三次才 break。"""
+    agent = _agent(tmp_path)
+    response = ModelResponse(
+        text='[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]',
+        backend="fake",
+    )
+
+    first = _decide(agent, response)
+    assert first.action == "continue"
+    assert first.calls == []
+    assert first.counters.protocol_repairs == 1
+
+    second = tool_loop_response_decision(
+        ToolLoopResponseDecisionRequest(
+            agent=agent,
+            params=_params(),
+            response=response,
+            counters=first.counters,
+        )
+    )
+    assert second.action == "continue"
+    assert second.counters.protocol_repairs == 2
+
+    third = tool_loop_response_decision(
+        ToolLoopResponseDecisionRequest(
+            agent=agent,
+            params=_params(),
+            response=response,
+            counters=second.counters,
+        )
+    )
+    assert third.action == "break"
+    assert third.response.runtime_reason == "PROTOCOL_VIOLATION"
+    assert third.counters.protocol_repairs == 2
+
+
+def test_protocol_violation_break_after_single_repair_when_configured(tmp_path: Path):
+    """max_protocol_repairs=1 时保持旧行为：第一次违规修复，第二次 break。"""
+    agent = _agent(tmp_path)
+    response = ModelResponse(
+        text='[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]',
+        backend="fake",
+    )
+    params = dataclasses.replace(_params(), max_protocol_repairs=1)
+
+    first = tool_loop_response_decision(
+        ToolLoopResponseDecisionRequest(
+            agent=agent,
+            params=params,
+            response=response,
+            counters=ToolLoopRepairCounters(),
+        )
+    )
+    assert first.action == "continue"
+    assert first.counters.protocol_repairs == 1
+
+    second = tool_loop_response_decision(
+        ToolLoopResponseDecisionRequest(
+            agent=agent,
+            params=params,
+            response=response,
+            counters=first.counters,
+        )
+    )
+    assert second.action == "break"
+    assert second.response.runtime_reason == "PROTOCOL_VIOLATION"

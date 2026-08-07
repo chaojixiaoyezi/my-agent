@@ -514,7 +514,13 @@ def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
     kwargs: dict[str, object] = {"on_chunk": state.on_chunk}
     if state.tools is not None:
         kwargs["tools"] = state.tools
-        kwargs["tool_choice"] = state.tool_choice or ToolChoice.auto()
+        tool_choice = state.tool_choice or ToolChoice.auto()
+        kwargs["tool_choice"] = tool_choice
+        if tool_choice.mode != "auto":
+            # LLM: 强制 tool_choice(specific/required/none)必须同时关思考——部分兼容端点
+            # (如 工具运行时 zen)在思考模式下拒绝强制工具选择,回哑 400;不识别该字段的
+            # 端点(如 MiniMax)静默忽略。与 generate_structured 的 thinking_disabled 同一形态。
+            kwargs["thinking_disabled"] = True
     if state.messages is not None:
         kwargs["messages"] = state.messages
     return backend.generate(prompt, **kwargs)

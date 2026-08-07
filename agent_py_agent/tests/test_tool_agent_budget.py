@@ -23,14 +23,16 @@ def _agent(max_calls: int = 2, window_seconds: int = 600):
     )
 
 
-def test_tool_agent_budget_ignores_calls_without_run_id():
+def test_tool_agent_budget_counts_calls_without_run_id():
+    # 用户规格（2026-08-07）：额度按代理实例分桶，与 run_id 无关；
+    # 无 run_id 的调用（如主代理普通聊天）同样计入该代理的窗口额度。
     agent = _agent(max_calls=1)
 
     first = check_tool_agent_budget(ToolAgentBudgetRequest(agent, "", "read_file", now=10.0))
     second = check_tool_agent_budget(ToolAgentBudgetRequest(agent, "", "read_file", now=11.0))
 
     assert first is None
-    assert second is None
+    assert second is not None
 
 
 def test_tool_agent_budget_uses_shared_runtime_config_defaults():
@@ -70,15 +72,26 @@ def test_tool_agent_budget_blocks_after_per_agent_window_limit():
     assert "自检" in blocked.output
 
 
-def test_tool_agent_budget_is_scoped_per_run_id():
+def test_tool_agent_budget_is_scoped_per_agent_not_run_id():
+    # 用户规格：同一代理实例的多个 run 共享该代理的窗口额度（不按 run_id 分桶）
     agent = _agent(max_calls=1)
 
     assert check_tool_agent_budget(ToolAgentBudgetRequest(agent, "run-a", "read_file", now=10.0)) is None
-    assert check_tool_agent_budget(ToolAgentBudgetRequest(agent, "run-b", "read_file", now=11.0)) is None
-    blocked = check_tool_agent_budget(ToolAgentBudgetRequest(agent, "run-a", "read_file", now=12.0))
+    blocked = check_tool_agent_budget(ToolAgentBudgetRequest(agent, "run-b", "read_file", now=11.0))
 
     assert blocked is not None
-    assert "run-a" in blocked.output
+    assert "单个代理工具预算已达到" in blocked.output
+
+
+def test_tool_agent_budget_agents_do_not_share_quota():
+    # 用户规格：主代理与子代理各独立额度，用户间不共用（不同 agent 实例互不影响）
+    main = _agent(max_calls=1)
+    subagent = _agent(max_calls=1)
+
+    assert check_tool_agent_budget(ToolAgentBudgetRequest(main, "run-a", "read_file", now=10.0)) is None
+    assert check_tool_agent_budget(ToolAgentBudgetRequest(main, "run-b", "read_file", now=11.0)) is not None
+    # 子代理是独立实例：不受主代理已用额度影响
+    assert check_tool_agent_budget(ToolAgentBudgetRequest(subagent, "run-c", "read_file", now=11.0)) is None
 
 
 def test_tool_agent_budget_prunes_calls_outside_window():

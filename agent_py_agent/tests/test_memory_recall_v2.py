@@ -335,3 +335,58 @@ def test_formal_projection_helpers_never_accept_orphan_hot_and_keep_scope() -> N
     )
     assert [item.entry_id for item in combined] == ["hot-1", "lesson-1"]
     assert orphan == []
+
+
+def test_budgeted_memories_prioritize_hot_then_lesson_then_long_term() -> None:
+    """总预算池:超限时按优先级让位——HOT 全保,lessons 次之,long_term 先砍。"""
+    from agent_py_agent.agent.agent_core.runtime.loop_support import (
+        _FORMAL_MEMORY_BUDGET_CHARS,
+        _budgeted_formal_memories,
+    )
+
+    hot = _record("hot-1", "高频规则。" * 100)
+    hot.kind = "hot"  # 500 字符
+    lessons = [
+        _record(f"lesson-{index}", "经验教训。" * 200)  # 每条 800 字符
+        for index in range(6)
+    ]
+    for item in lessons:
+        item.kind = "lesson"
+    long_term = [
+        _record(f"fact-{index}", "长期事实。" * 300)  # 每条 1200 字符
+        for index in range(8)
+    ]
+
+    kept = _budgeted_formal_memories([*long_term, *lessons, hot])
+    by_kind = {
+        kind: [item for item in kept if item.kind == kind]
+        for kind in ("hot", "lesson", "fact")
+    }
+    # HOT 全保。
+    assert [item.entry_id for item in by_kind["hot"]] == ["hot-1"]
+    # 总量不超预算。
+    total = sum(len(item.content or "") for item in kept)
+    assert total <= _FORMAL_MEMORY_BUDGET_CHARS
+    # 优先级让位:long_term 被砍得最多,lessons 次之(预算内尽量多保)。
+    assert len(by_kind["fact"]) < len(long_term)
+    assert len(by_kind["lesson"]) >= len(by_kind["fact"])
+
+
+def test_budgeted_memories_keep_everything_within_budget() -> None:
+    from agent_py_agent.agent.agent_core.runtime.loop_support import (
+        _budgeted_formal_memories,
+    )
+
+    records = [
+        _record("hot-1", "短规则。"),
+        _record("lesson-1", "短经验。"),
+        _record("fact-1", "短事实。"),
+    ]
+    records[0].kind = "hot"
+    records[1].kind = "lesson"
+    assert [item.entry_id for item in _budgeted_formal_memories(records)] == [
+        "hot-1",
+        "lesson-1",
+        "fact-1",
+    ]
+    assert _budgeted_formal_memories([]) == []

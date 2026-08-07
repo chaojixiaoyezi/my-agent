@@ -671,7 +671,42 @@ def _decision_message(decision: ActionDecision) -> str:
         decision.reason_codes or ("RUNTIME_GATE_DENIED",)
     )
     boundary_error = str(decision.evidence.get("boundary_error") or "").strip()
-    return f"{message}. {boundary_error}" if boundary_error else message
+    if boundary_error:
+        message += f". {boundary_error}"
+    rendered_issues = _render_validation_issues(decision.evidence.get("issues"))
+    if rendered_issues:
+        message += " 参数问题: " + rendered_issues
+    return message
+
+
+def _render_validation_issues(raw: object) -> str:
+    """把 schema 校验的字段级诊断渲染成模型可读文本(recovery_hint 承诺的 名:期望类型)。
+
+    实机教训(test2-req-7 urllib3 复刻):validation 拒绝只回错误码不带字段详情,
+    MiniMax-M2.7 盲猜重试 send_message 57 轮全失败、任务零推进。这里只渲染结构化的
+    path/keyword/expected/actual_type,绝不回显参数值(防凭据进模型/审计)。
+    """
+    if not isinstance(raw, list):
+        return ""
+    parts: list[str] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip()
+        keyword = str(item.get("keyword") or "").strip()
+        expected = item.get("expected")
+        actual = item.get("actual_type")
+        if keyword == "required":
+            parts.append(f"{path}: 必填缺失")
+        elif keyword == "additionalProperties":
+            parts.append(f"{path}: 未声明字段(该工具不接受额外参数)")
+        elif keyword == "type":
+            parts.append(f"{path}: 期望 {expected}, 实际 {actual or '?'}")
+        else:
+            parts.append(f"{path}: {keyword} 校验失败")
+        if len(parts) >= 4:
+            break
+    return "; ".join(parts)
 
 
 def _task_id(request: ToolExecutorRequest) -> str:

@@ -590,10 +590,15 @@ enable_tools: true
 stream_enabled: true
 
 # 工具轮数和单代理工具预算：
-# - 空值表示不额外限制。
+# - 空值=用代码默认 60 轮;
+#   到顶走诚实交接(未完成+进度持久,下个 run 续跑),不会无限烧时间/成本。
+# - 显式 0 才表示不限制(逃生)。
 # - 需要单任务临时覆盖时，由任务属性显式传入。
 max_tool_rounds:
 max_tool_calls_per_round:
+# 协议违规的修复机会次数（默认 2 = 3 次尝试后才 break）。模型输出格式偶发抖动
+# （工具调用混进正文/代码块）时，多给两次机会能显著提高长任务成活率。
+max_protocol_repairs: 2
 tool_agent_budget_window_seconds:
 tool_agent_budget_max_calls:
 

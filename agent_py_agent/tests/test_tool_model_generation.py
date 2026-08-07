@@ -646,3 +646,51 @@ def test_model_generate_applies_dynamic_timeout_to_backend_request():
     assert response.text == "ok"
     assert backend.seen_timeout > 40
     assert backend.request_timeout == 1
+
+
+class _KwargRecordingBackend:
+    name = "kwarg-recording-backend"
+
+    def __init__(self) -> None:
+        self.seen: list[dict] = []
+
+    def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
+        self.seen.append({"prompt": prompt, **kwargs})
+        return ModelResponse(text="ok", backend=self.name)
+
+
+def _do_generate_with_tool_choice(backend, tool_choice):
+    from agent_py_agent.agent.agent_core.tool_model_generation import _do_backend_generate
+
+    state = SimpleNamespace(
+        tools=[{"name": "remember", "description": "remember a fact"}],
+        tool_choice=tool_choice,
+        messages=[{"role": "user", "content": "hi"}],
+        on_chunk=None,
+    )
+    return _do_backend_generate(backend, "prompt", state)
+
+
+def test_forced_tool_choice_turn_disables_thinking_for_provider_compat():
+    """LLM: 强制 tool_choice(specific/required/none)必须同时关思考——部分兼容端点(如
+    工具运行时 zen)在思考模式下拒绝强制工具选择,回哑 400;与 generate_structured 同形态。"""
+    from agent_py_agent.agent.tooling.runtime_contracts import ToolChoice
+
+    for choice in (
+        ToolChoice.specific("remember", "open_required_action_unique_tool"),
+        ToolChoice.required("open_required_action"),
+        ToolChoice.none("open_required_action_has_no_provider_tool"),
+    ):
+        backend = _KwargRecordingBackend()
+        _do_generate_with_tool_choice(backend, choice)
+        assert backend.seen[-1]["thinking_disabled"] is True
+        assert backend.seen[-1]["tool_choice"] is choice
+
+
+def test_auto_tool_choice_turn_keeps_original_request_shape():
+    """auto 轮保持原请求形态,不传 thinking_disabled(对不识别该字段的端点零影响)。"""
+    from agent_py_agent.agent.tooling.runtime_contracts import ToolChoice
+
+    backend = _KwargRecordingBackend()
+    _do_generate_with_tool_choice(backend, ToolChoice.auto("ordinary_tool_turn"))
+    assert "thinking_disabled" not in backend.seen[-1]

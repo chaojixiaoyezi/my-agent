@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from agent_py_agent.agent.contracts.gates.command_policy import evaluate_command_policy
+from agent_py_agent.agent.contracts.gates.command_policy import (
+    analyze_command,
+    evaluate_command_policy,
+)
 
 
 @pytest.mark.parametrize(
@@ -107,3 +110,41 @@ def test_command_policy_reports_unclosed_quote_as_repairable_parse_failure() -> 
     assert decision.allowed is False
     assert decision.finding_codes == ("COMMAND_PARSE_FAILED",)
     assert decision.findings[0].evidence["error"] == "No closing quotation"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pwd && ls -la 2>&1",
+        "ls -la 2>&1 | head -20",
+        "grep foo bar 1>&2",
+        "cat file 2>&-",
+    ],
+)
+def test_analyze_command_fd_copy_redirects_stay_read_only(command: str) -> None:
+    # 实机实证(click 复刻): shlex punctuation_chars 把 "2>&1" 拆成 2/>&/1,
+    # "1" 被当成 unknown 命令段把整条只读命令抬成 mutating,撞 required action
+    # 的 read_only ceiling 后任务卡死。fd 复制重定向不落盘,不应改变效果级别。
+    analysis = analyze_command(command)
+
+    assert analysis.resolved_effect != "mutating"
+    assert not any(
+        segment.executable in {"1", "2"} for segment in analysis.segments
+    ), "重定向 fd 数字不得成为命令段"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pwd > /dev/null",
+        "echo hello 2>err.log",
+        "ls -la >> out.txt",
+        "go build ./... > build.log",
+        "cd work && go build ./... 2>&1",
+    ],
+)
+def test_analyze_command_disk_redirects_stay_mutating(command: str) -> None:
+    # 落盘重定向(>/>>/2>)写文件,必须保持 mutating;fd 复制修复不得放宽这里。
+    analysis = analyze_command(command)
+
+    assert analysis.resolved_effect == "mutating"

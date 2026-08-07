@@ -294,7 +294,6 @@ def _cmd_gateway_run_threads(request: GatewayThreadsRequest):
         args=(context, stop_event),
         daemon=True,
     )
-    heartbeat_thread.start()
     request_thread = threading.Thread(
         target=_gateway_request_loop,
         args=(context, paths, stop_event),
@@ -317,6 +316,10 @@ def _cmd_gateway_run_threads(request: GatewayThreadsRequest):
             agent=agent,
         )
         http_server = start_http_server(http_port, paths, params=http_params)
+    # 就绪信号只能在这里之后发：heartbeat 一旦写了 "running"，父进程 start
+    # 就认定网关就绪。若在 HTTP bind 之前启动 heartbeat 线程，绑定失败崩溃时
+    # start 会对一个已死的网关谎报成功（旧时序：heartbeat 先写 running，再 bind）。
+    heartbeat_thread.start()
     write_json_file(paths.state, _build_run_state(request, pid))
     log_gateway_event(agent, "gateway_run_running", _build_run_payload(request, pid))
     print(
@@ -340,6 +343,9 @@ def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest) -> dict[str, obj
         "background": request.background_thread,
     }
     for thread in threads.values():
+        if thread.ident is None:
+            # 未启动的线程（HTTP bind 失败时 heartbeat 线程还没 start）不能 join
+            continue
         thread.join(timeout=2)
     alive_threads = [name for name, thread in threads.items() if thread.is_alive()]
     drain_complete = not alive_threads

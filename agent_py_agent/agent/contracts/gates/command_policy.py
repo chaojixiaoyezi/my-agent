@@ -90,6 +90,36 @@ _EXTERNAL_SEND_EXECUTABLES = frozenset(
 )
 _REDIRECTION_OPERATORS = frozenset({">", ">>", "<>", "2>", "2>>", "&>", "&>>"})
 _SEQUENCE_OPERATORS = frozenset({";", "&&", "||", "|", "&"})
+# fd 复制重定向(2>&1 / >&1 / 1>&2 / 2>&-):只改变 fd 指向,不落盘,不算副作用。
+# shlex punctuation_chars=True 会把 "2>&1" 拆成 ["2", ">&", "1"],重定向目标 "1"
+# 被误当成新命令段(unknown -> mutating),只读命令(ls -la 2>&1)被抬级成 mutating,
+# 撞上 required action 的 read_only ceiling 后任务整体卡死(真机实证)。
+_FD_COPY_REDIRECT_RE = re.compile(r"^(?:[0-9]+)?(?:>&|<&)-?[0-9]*$")
+
+
+def _merge_fd_copy_redirects(argv: tuple[str, ...]) -> tuple[str, ...]:
+    """把 shlex 拆散的 fd 复制重定向合并回单 token(2 >& 1 -> "2>&1")。"""
+    merged: list[str] = []
+    index = 0
+    length = len(argv)
+    while index < length:
+        token = argv[index]
+        if (
+            token in {"0", "1", "2"}
+            and index + 2 < length
+            and argv[index + 1] in {">&", "<&"}
+            and _FD_COPY_REDIRECT_RE.match(argv[index + 1] + argv[index + 2])
+        ):
+            merged.append(token + argv[index + 1] + argv[index + 2])
+            index += 3
+            continue
+        if token in {">&", "<&"} and index + 1 < length:
+            merged.append(token + argv[index + 1])
+            index += 2
+            continue
+        merged.append(token)
+        index += 1
+    return tuple(merged)
 
 
 @dataclass(frozen=True)
@@ -306,7 +336,7 @@ def _parse_command_value(command: object) -> CommandPolicyDecision:
         lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
         lexer.whitespace_split = True
         lexer.commenters = ""
-        argv = tuple(lexer)
+        argv = _merge_fd_copy_redirects(tuple(lexer))
     except ValueError as exc:
         return CommandPolicyDecision(
             findings=(CommandPolicyFinding("COMMAND_PARSE_FAILED", {"error": str(exc)}),)
@@ -321,7 +351,8 @@ def _parse_argv_value(value: list[object]) -> CommandPolicyDecision:
         if not text or "\x00" in text:
             return CommandPolicyDecision(findings=(CommandPolicyFinding("COMMAND_ARGV_INVALID"),))
         argv.append(text)
-    return CommandPolicyDecision(tuple(argv), () if argv else (CommandPolicyFinding("COMMAND_EMPTY"),))
+    merged = _merge_fd_copy_redirects(tuple(argv))
+    return CommandPolicyDecision(merged, () if merged else (CommandPolicyFinding("COMMAND_EMPTY"),))
 
 
 def _dangerous_pattern_findings(argv: tuple[str, ...]) -> tuple[list[CommandPolicyFinding], set[int]]:
@@ -535,6 +566,9 @@ def command_positions(argv: tuple[str, ...]) -> list[int]:
     positions: list[int] = []
     expect_command = True
     for index, token in enumerate(argv):
+        if _FD_COPY_REDIRECT_RE.match(token):
+            # fd 复制重定向(2>&1 等)不是命令段,也不打断命令序列。
+            continue
         if is_shell_operator_token(token):
             expect_command = True
             continue

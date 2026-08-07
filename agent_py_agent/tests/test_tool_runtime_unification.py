@@ -233,14 +233,15 @@ def test_required_enum_and_extra_fields_are_rejected_before_handler(
         assert tool.executions == 0
 
 
-def test_unknown_command_requires_review_before_handler(tmp_path: Path) -> None:
+def test_unknown_command_passes_without_approval(tmp_path: Path) -> None:
+    # 2026-08-07 用户设计：unknown 命令不做人工审批（无审批通道，ask 只会卡死任务），
+    # 决策层放行，额度制在 runtime guard 层按代理实例滚动管理。
     tool = _CountingTool(command=True)
     execution = _execute(tmp_path, tool, _call(tool, {"command": "mystery_cli --do-it"}))
 
-    assert execution.decision.status == "ask"
-    assert execution.result.status == "approval_required"
-    assert execution.result.handler_executed is False
-    assert tool.executions == 0
+    assert execution.decision.status == "allow"
+    assert execution.result.handler_executed is True
+    assert tool.executions == 1
 
 
 def test_dangerous_command_needs_exact_approval_binding(tmp_path: Path) -> None:
@@ -426,7 +427,7 @@ def test_semantic_assessment_distinguishes_execution_from_explanation() -> None:
                         "description": "run the requested test suite",
                         "success_criteria": "a real test process returns a result",
                         "allowed_tools": ["command_tool"],
-                        "effect_ceiling": "read_only",
+                        "effect_ceiling": "mutating",
                         "acceptable_exits": ["unfinished", "blocked"],
                     }
                 ],
@@ -462,7 +463,7 @@ def test_semantic_assessment_is_locally_validated_not_provider_trusted() -> None
                         "description": "pretend to act",
                         "success_criteria": "pretend result",
                         "allowed_tools": ["command_tool"],
-                        "effect_ceiling": "read_only",
+                        "effect_ceiling": "mutating",
                         "acceptable_exits": ["blocked"],
                         "provider_only_authority": True,
                     }
@@ -513,7 +514,7 @@ def test_semantic_assessment_without_available_tools_creates_typed_block() -> No
                         "description": "run the requested tests",
                         "success_criteria": "a real process returns a result",
                         "allowed_tools": [],
-                        "effect_ceiling": "read_only",
+                        "effect_ceiling": "mutating",
                         "acceptable_exits": ["blocked"],
                     }
                 ],

@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .jsonl import MemoryRecord
-from .lessons import HotRuleRepository, LessonRecord, LessonRepository
+from .lessons import HotRuleRepository, LessonRecord, LessonRepository, hot_records_within_budget
 
 
 # LLM: 活跃范围只来自 host 的 typed IDs，不解析用户自然语言或 applies_when 文本。
@@ -97,7 +97,8 @@ def hot_memory_records(
 ) -> list[MemoryRecord]:
     lesson_by_id = {lesson.lesson_id: lesson for lesson in lessons.list()}
     records: list[MemoryRecord] = []
-    for rule in hot.list():
+    # 注入预算硬顶：全量注入但只带最近活跃的规则（活跃度排序，超出截断是正常行为）。
+    for rule in hot_records_within_budget(hot.list()):
         lesson = lesson_by_id.get(rule.lesson_id)
         if lesson is None or not _lesson_scope_allowed(lesson, scope):
             continue

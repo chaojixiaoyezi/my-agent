@@ -7,10 +7,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from ..common.json_io import locked_json_path, write_text_file_atomic_unlocked
 from .candidate_models import MemoryCandidate, utc_now_iso
@@ -22,6 +25,9 @@ _LESSON_META_PREFIX = "<!-- my-agent-lesson-meta:"
 _HOT_META_PREFIX = "<!-- my-agent-hot-meta:"
 _META_SUFFIX = " -->"
 _MAX_HOT_RULE_CHARS = 300
+# 注入预算：HOT 全量注入的硬顶（字符≈token，中文 1:1）。超出的按活跃度截断，
+# 冷条目在写入时降级回 lessons（lesson 正文保留，路由仍可命中，零信息丢失）。
+HOT_MAX_INJECT_CHARS = 5000
 
 
 # LLM: LessonRecord 元数据与同文件正文一起提交；routing 只是可重建导航投影。
@@ -204,12 +210,25 @@ class HotRuleRepository:
                     raise RuntimeError("HOT id collision")
                 return prior
             write_text_file_atomic_unlocked(self.path, _render_hot([*existing, record]))
+            demoted = _demote_hot_excess_unlocked(self.path)
+        if demoted:
+            logger.warning(
+                "HOT budget exceeded: demoted %d cold rule(s) back to lessons: %s",
+                len(demoted),
+                ", ".join(item.hot_id for item in demoted),
+            )
         return record
 
     # LLM: 只解析程序 marker；自由文本 HOT 被视为 legacy，迁移前不能静默混入正式规则。
     # 函数用途: 列出正式 HOT 规则。
     def list(self) -> list[HotRuleRecord]:
         return _read_hot_records(self.path)
+
+    # LLM: 降级是数据治理而非删除——lesson 正文与路由索引不变，失去的只是"每轮全量注入"资格。
+    # 函数用途: 返回被降级的冷 HOT 记录（超预算时按活跃度从低到高移除）。
+    def demote_cold_rules(self) -> list[HotRuleRecord]:
+        with locked_json_path(self.path):
+            return _demote_hot_excess_unlocked(self.path)
 
 
 # LLM: lesson 候选必须是 approved 且落点为 lesson，拒绝将长期事实换个文件名写入。
@@ -408,6 +427,51 @@ def _read_hot_records(path: Path) -> list[HotRuleRecord]:
 # 函数用途: 清洗一个短展示值。
 def _one_line(value: object, limit: int) -> str:
     return " ".join(str(value or "").split())[:limit]
+
+
+# LLM: 活跃度排序只用结构化信号（promoted_at/occurrence_count），不解析 rule 正文。
+# 函数用途: 活跃度键——新提升 + 高出现次数 = 更活跃。
+def _hot_activity_key(record: HotRuleRecord) -> tuple[str, int]:
+    return (record.promoted_at or "", record.occurrence_count)
+
+
+# LLM: 截断是注入侧安全网；排序与写侧降级对称（保留活跃、淘汰冷旧）。
+# 函数用途: 按活跃度从高到低截断 HOT 到预算内（字符），返回保留的记录。
+def hot_records_within_budget(
+    records: list[HotRuleRecord],
+    *,
+    max_chars: int = HOT_MAX_INJECT_CHARS,
+) -> list[HotRuleRecord]:
+    ordered = sorted(records, key=_hot_activity_key, reverse=True)
+    kept: list[HotRuleRecord] = []
+    total = 0
+    for record in ordered:
+        cost = len(record.rule or "")
+        if kept and total + cost > max_chars:
+            break
+        kept.append(record)
+        total += cost
+    return kept
+
+
+# LLM: 只降级冷记录；同一批都超预算时逐条让位直到回到预算内，绝不整批清空。
+# 函数用途: 写入后检查 HOT 总字符，超预算则按活跃度从低到高移除并重写文件；返回被降级记录。
+def _demote_hot_excess_unlocked(path: Path) -> list[HotRuleRecord]:
+    existing = _read_hot_records(path)
+    total = sum(len(record.rule or "") for record in existing)
+    if total <= HOT_MAX_INJECT_CHARS:
+        return []
+    cold_first = sorted(existing, key=_hot_activity_key)
+    demoted: list[HotRuleRecord] = []
+    for record in cold_first:
+        if total <= HOT_MAX_INJECT_CHARS:
+            break
+        total -= len(record.rule or "")
+        demoted.append(record)
+    if demoted:
+        kept = [record for record in existing if record not in demoted]
+        write_text_file_atomic_unlocked(path, _render_hot(kept))
+    return demoted
 
 
 __all__ = [

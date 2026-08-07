@@ -30,6 +30,52 @@ _VENDOR_BWRAP = Path(__file__).resolve().parents[2] / "vendor" / "bin" / "bwrap.
 
 # 命令运行需要的系统只读根(库/工具/证书目录)。只 bind 存在的。
 _SYSTEM_RO_ROOTS = ("/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc/alternatives")
+
+# /proc 挂载方式探测结果缓存: "proc"=真实 procfs 可用, "dir"=必须空目录, None=未探测。
+_PROC_MOUNT_KIND: str | None = None
+
+
+def _proc_mount_args() -> list[str]:
+    """决定沙箱 /proc 挂载方式。
+
+    真机(或有 mount 权限的容器)挂真实 procfs:`/proc/self/exe` 等自省路径对
+    go/python 等发行版(trimmed)二进制成立——它们靠 /proc/self/exe 推导自身根目录
+    (实测 testbox: bwrap 空 /proc 里 `go version` 报 "binary is trimmed and GOROOT
+    is not set", --proc 挂真实 procfs 后正常)。挂载后立即 --remount-ro 锁只读
+    (Docker 同款):/proc 只供读取,防改 /proc/sys 内核全局参数;进程隔离不变
+    (bwrap 挂的是新 pid namespace 里的 procfs, 宿主进程列表照样不可见)。
+    嵌套容器(Docker Desktop/K8s hardened runtime)内核常拒 mount("proc"), 回退旧行为
+    `--dir /proc`(空目录, 进程隔离仍在)。
+    """
+    global _PROC_MOUNT_KIND
+    if _PROC_MOUNT_KIND is None:
+        bwrap = find_bwrap()
+        _PROC_MOUNT_KIND = "dir"
+        if bwrap:
+            # 探测挂载与真实沙箱一致(_SYSTEM_RO_ROOTS):动态链接二进制(env/sh)的
+            # interpreter /lib64/ld-linux-x86-64.so.2 独立于 /usr,不挂就 execvp 失败,
+            # 会误判成"内核拒 mount(proc)"(实测 RHEL 系 testbox)。
+            probe_args = [bwrap, "--unshare-pid", "--proc", "/proc"]
+            for ro in _SYSTEM_RO_ROOTS:
+                if Path(ro).exists():
+                    probe_args += ["--ro-bind", ro, ro]
+            probe_args += ["--chdir", "/", "--", "/usr/bin/env", "true"]
+            try:
+                probe = subprocess.run(
+                    probe_args,
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                probe = None
+            if probe is not None and probe.returncode == 0:
+                _PROC_MOUNT_KIND = "proc"
+    if _PROC_MOUNT_KIND == "proc":
+        # 挂完立即锁只读(Docker 同款):/proc 只供读取(/proc/self/exe 自省等),
+        # 防沙箱内进程改 /proc/sys 等内核全局参数;只读不影响 go/python 自省。
+        return ["--proc", "/proc", "--remount-ro", "/proc"]
+    return ["--dir", "/proc"]
 # 放行外网必须的:DNS 解析 + TLS 证书(https API),否则沙箱内连不上/证书校验失败。
 _NETWORK_RO_FILES = (
     "/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf",
@@ -120,9 +166,9 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
         "--unshare-ipc",
         "--share-net" if spec.network_access else "--unshare-net",
         "--new-session",
-        # 嵌套容器内挂新 procfs 在 Docker Desktop/K8s hardened runtime 常被内核拒绝。
-        # 保留 PID namespace，但给命令空 /proc：看不到其他进程且不需要 mount proc 权限。
-        "--dir", "/proc",
+        # 优先挂真实 procfs(go/python 等靠 /proc/self/exe 推导根目录的 trimmed 二进制必需);
+        # 嵌套容器内核拒 mount("proc") 时回退空 /proc 目录(旧行为,进程隔离仍在)。
+        *_proc_mount_args(),
         "--dev", "/dev",
         "--tmpfs", "/tmp",     # 临时,rm -rf /tmp 无害
     ]

@@ -104,6 +104,8 @@ class ToolLoopExecuteParams:
     # 会话运行时 turn snapshot: volatile wall-clock fields must not rewrite the
     # first provider message on every tool round and invalidate prompt caching.
     workspace_context_snapshot: str = ""
+    # 协议违规修复机会次数：模型输出格式偶发抖动时先给几次结构化重试再 break。
+    max_protocol_repairs: int = 2
 
 
 @dataclass(frozen=True)

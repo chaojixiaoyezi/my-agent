@@ -815,3 +815,79 @@ def test_routing_index_rebuild_is_byte_deterministic(tmp_path: Path) -> None:
 
     assert second == first
     assert b"my-agent-lesson-meta" not in second
+
+
+def test_near_duplicate_merge_updates_existing_entry_not_add(tmp_path: Path):
+    """写路径查重:跨 subject 的逐字近重复合入旧条目,不新增(治重复记录膨胀)。"""
+    service, conversations, thread = _runtime(tmp_path)
+    first = _explicit(
+        service, conversations, thread,
+        content="祥子买了两次车。",
+        subject_key="xiangzi.car",
+    )
+    assert service.promote(first.candidate_id, automatic=True).promoted
+    assert len(service.long_term.all()) == 1
+    first_ref = service.long_term.all()[0].entry_id
+
+    second = _explicit(
+        service, conversations, thread,
+        content="祥子买了两次车",
+        subject_key="xiangzi.car-count",  # 不同 subject,模拟模型换主题记同一事实
+    )
+    result = service.promote(second.candidate_id, automatic=True)
+    assert result.promoted
+    records = service.long_term.all()
+    assert len(records) == 1, "近重复必须合并,不新增"
+    assert records[0].entry_id == first_ref, "合并保留原条目身份"
+    assert records[0].content == "祥子买了两次车"
+    assert first_ref in result.promotion_ref
+
+
+def test_distinct_facts_never_merged_by_content_similarity(tmp_path: Path):
+    """写路径查重:不同事实(措辞变体/信息增量)不得误并。"""
+    service, conversations, thread = _runtime(tmp_path)
+    for content, subject in (
+        ("祥子买过两次车", "xiangzi.car.used"),     # 过/了 措辞变体,信息等价但非逐字
+        ("祥子买了两辆车", "xiangzi.car.two"),      # 两辆/两次 不同事实
+        ("祥子买了车", "xiangzi.car.basic"),        # 信息增量
+        ("今天天气很好", "weather.today"),           # 完全不同
+    ):
+        candidate = _explicit(
+            service, conversations, thread,
+            content=content, subject_key=subject,
+        )
+        assert service.promote(candidate.candidate_id, automatic=True).promoted
+    assert len(service.long_term.all()) == 4
+
+
+def test_keywords_en_written_into_long_term_attributes(tmp_path: Path):
+    """写路径中英关键词:正文里的英文词面写进 keywords_en,供 BM25 跨语言命中。"""
+    service, conversations, thread = _runtime(tmp_path)
+    candidate = _explicit(
+        service, conversations, thread,
+        content="祥子(Xiangzi)在北京买了两次车,花费 96 元。",
+        subject_key="xiangzi.beijing.car",
+    )
+    assert service.promote(candidate.candidate_id, automatic=True).promoted
+    record = service.long_term.all()[0]
+    assert "xiangzi" in record.attributes["keywords_en"]
+    assert "beijing" not in record.attributes["keywords_en"]  # 中文词不进英文关键词
+
+
+def test_search_scoped_english_keyword_hits_chinese_memory(tmp_path: Path):
+    """检索消费点:英文查询词命中含 keywords_en 的中文记忆(BM25 词面臂)。"""
+    service, conversations, thread = _runtime(tmp_path)
+    candidate = _explicit(
+        service, conversations, thread,
+        content="祥子(Xiangzi)在北京买了两次车。",
+        subject_key="xiangzi.beijing.car",
+    )
+    assert service.promote(candidate.candidate_id, automatic=True).promoted
+
+    hits = service.long_term.search_scoped(
+        "xiangzi",
+        top_k=5,
+        predicate=lambda record: True,
+    )
+    assert hits, "英文关键词必须让 BM25 命中中文记忆"
+    assert "祥子" in hits[0].content

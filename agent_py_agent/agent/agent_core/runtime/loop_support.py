@@ -449,7 +449,34 @@ def _formal_memories_for_request(
             routed_context.findings.append(finding)
         hot, lessons = [], []
     routed_context.injected_sections = []
-    return _dedupe_formal_memories([*hot, *lessons, *long_term_memories])
+    return _budgeted_formal_memories(_dedupe_formal_memories([*hot, *lessons, *long_term_memories]))
+
+
+# 记忆注入总预算池(字符≈token,中文 1:1)。上下文有界第一原则:宁可丢不撑爆。
+# 各来源已自带上限(HOT 5000 硬顶/long_term top_k 检索/lessons 路由命中),这里是最后保险丝:
+# 优先级让位——HOT 全保(最后砍),lessons 次之,long_term 先砍;组内超预算截断尾部。
+_FORMAL_MEMORY_BUDGET_CHARS = 10000
+
+
+def _budgeted_formal_memories(records: list) -> list:
+    hot = [record for record in records if str(getattr(record, "kind", "") or "") == "hot"]
+    lessons = [
+        record for record in records if str(getattr(record, "kind", "") or "") == "lesson"
+    ]
+    rest = [
+        record for record in records
+        if str(getattr(record, "kind", "") or "") not in {"hot", "lesson"}
+    ]
+    kept = list(hot)
+    total = sum(len(str(getattr(record, "content", "") or "")) for record in kept)
+    for group in (lessons, rest):
+        for record in group:
+            cost = len(str(getattr(record, "content", "") or ""))
+            if kept and total + cost > _FORMAL_MEMORY_BUDGET_CHARS:
+                break
+            kept.append(record)
+            total += cost
+    return kept
 
 
 # LLM: 三个正式来源按稳定 entry_id 精确去重，不做文本相似合并或时间覆盖。
@@ -792,6 +819,7 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         context_scope=params.context_scope,
         loaded_tool_names={*reconstructed.loaded_tool_names, *required_tool_names},
         workspace_context_snapshot=_workspace_context_snapshot(agent, params),
+        max_protocol_repairs=max(1, int(getattr(getattr(agent, "config", None), "max_protocol_repairs", 2) or 2)),
     )
 
 

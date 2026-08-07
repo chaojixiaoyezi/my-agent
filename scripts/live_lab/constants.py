@@ -31,6 +31,13 @@ SUITES = {
         "main_large_log_audit",
     ],
     "real": ["health", "gateway_ask", "long_subagent"],
+    "limit-cli": [
+        "health",
+        "main_dense_rounds",
+        "main_failure_storm",
+        "main_interrupt_honesty",
+        "main_adversarial_mix",
+    ],
     "all": [
         "health",
         "bad_weather",
@@ -47,4 +54,8 @@ REAL_CASES = {
     "main_compact_resume_roundtrip",
     "main_compact_stress_long_read",
     "main_large_log_audit",
+    "main_dense_rounds",
+    "main_failure_storm",
+    "main_interrupt_honesty",
+    "main_adversarial_mix",
 }

@@ -197,8 +197,11 @@ def test_failure_introspection_params_actually_take_effect(tmp_path: Path) -> No
     next_round_config = AgentConfig(runner_timeout_seconds="auto")
     assert get_task_timeout(reloaded, 0.0, next_round_config) == pytest.approx(180.0)
 
-    # max_tool_rounds 分支：同一个真实应用入口 + 落盘 + 下一轮真实读取方
-    assert _effective_max_tool_rounds(agent, _tool_loop_params(dict(reloaded.attributes), task.id)) == 0
+    # max_tool_rounds 分支：同一个真实应用入口 + 落盘 + 下一轮真实读取方。
+    # 未自省时落到默认防线 60(空/缺省不再等于"不限制", 防模型机械重试拖死任务)。
+    from agent_py_agent.agent.agent_core._tool_loop_service import _DEFAULT_MAX_TOOL_ROUNDS
+
+    assert _effective_max_tool_rounds(agent, _tool_loop_params(dict(reloaded.attributes), task.id)) == _DEFAULT_MAX_TOOL_ROUNDS
     agent._apply_introspection_params(reloaded, {"max_tool_rounds": 7})
     agent.subagents.save(reloaded)
     after_rounds = agent.subagents.load(task.id)

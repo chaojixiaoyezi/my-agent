@@ -172,6 +172,63 @@ class TestPostJson:
         with pytest.raises(RuntimeError, match="HTTP 401"):
             post_json(_request(api_key="bad-key"))
 
+    @patch("agent_py_agent.agent.backends.gateway_helpers._provider_retry_wait")
+    @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
+    def test_silent_400_retries_before_success(self, mock_urlopen, mock_sleep):
+        """聚合网关的哑 400(响应体只有请求回显)是瞬时错误,应重试而不是永久放弃。"""
+        from io import BytesIO
+
+        silent = urllib.error.HTTPError(
+            "https://api.example.com", 400, "Bad Request",
+            {"Content-Type": "application/json"},
+            BytesIO(b'{"model":"deepseek-v4-flash"}'),
+        )
+        second = MagicMock()
+        second.read.return_value = json.dumps({"content": "after retry"}).encode()
+        second.__enter__ = MagicMock(return_value=second)
+        second.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.side_effect = [silent, second]
+
+        from agent_py_agent.agent.backends.gateway_helpers import post_json
+        assert post_json(_request()) == {"content": "after retry"}
+        assert mock_urlopen.call_count == 2
+
+    @patch("agent_py_agent.agent.backends.gateway_helpers._provider_retry_wait")
+    @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
+    def test_silent_400_exhaustion_is_transient_error(self, mock_urlopen, mock_sleep):
+        """哑 400 重试耗尽后归类可恢复瞬时错误,不能当程序 bug 一票否决任务。"""
+        from io import BytesIO
+
+        silent = urllib.error.HTTPError(
+            "https://api.example.com", 400, "Bad Request",
+            {"Content-Type": "application/json"},
+            BytesIO(b'{"model":"deepseek-v4-flash"}'),
+        )
+        mock_urlopen.side_effect = [silent, silent, silent, silent]
+
+        from agent_py_agent.agent.backends.errors import ProviderTransientError
+        from agent_py_agent.agent.backends.gateway_helpers import post_json
+        with pytest.raises(ProviderTransientError):
+            post_json(_request())
+        assert mock_urlopen.call_count == 4  # 首轮 + 3 次重试后抛
+
+    @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
+    def test_explicit_400_stays_permanent(self, mock_urlopen):
+        """带 error/message 说明的 400 是真正的请求错误,保持永久失败不重试。"""
+        from io import BytesIO
+
+        explicit = urllib.error.HTTPError(
+            "https://api.example.com", 400, "Bad Request",
+            {"Content-Type": "application/json"},
+            BytesIO(b'{"error":{"message":"model not found"}}'),
+        )
+        mock_urlopen.side_effect = explicit
+
+        from agent_py_agent.agent.backends.gateway_helpers import post_json
+        with pytest.raises(RuntimeError, match="HTTP 400"):
+            post_json(_request())
+        assert mock_urlopen.call_count == 1
+
     @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
     def test_http_context_window_error_is_typed_provider_error(self, mock_urlopen):
         """验证上下文窗口错误在 provider HTTP 边界结构化，核心层不用猜异常文本。"""

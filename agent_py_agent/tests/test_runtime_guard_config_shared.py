@@ -109,16 +109,29 @@ def test_runner_retry_limit_only_uses_off_or_zero_to_disable():
         assert _runner_max_attempts(old_alias) == default_limit
 
 
-def test_agent_config_blank_tool_rounds_disables_hidden_runtime_default():
+def test_agent_config_blank_tool_rounds_falls_back_to_default_guard():
+    """LLM: 空配置不再等于"不限制"——模型失败后机械重试无上限会把任务拖死(实测
+    "读不存在文件"38+ 轮不收敛), 空值落到默认防线 60。
+    只有显式 0 才保留不限制逃生。"""
     from types import SimpleNamespace
 
-    from agent_py_agent.agent.agent_core._tool_loop_service import _effective_max_tool_rounds
+    from agent_py_agent.agent.agent_core._tool_loop_service import (
+        _DEFAULT_MAX_TOOL_ROUNDS,
+        _effective_max_tool_rounds,
+    )
     from agent_py_agent.agent.settings import AgentConfig
 
     agent = SimpleNamespace(config=AgentConfig(enable_tools=True, memory_path="memory.jsonl"))
     params = SimpleNamespace(task_attributes={})
 
-    assert _effective_max_tool_rounds(agent, params) == 0
+    assert _DEFAULT_MAX_TOOL_ROUNDS == 60
+    assert _effective_max_tool_rounds(agent, params) == _DEFAULT_MAX_TOOL_ROUNDS
+
+    # 显式 0 保留不限制逃生；任务属性可覆盖。
+    agent_explicit_zero = SimpleNamespace(config=AgentConfig(enable_tools=True, memory_path="memory.jsonl", max_tool_rounds=0))
+    assert _effective_max_tool_rounds(agent_explicit_zero, params) == 0
+    params_override = SimpleNamespace(task_attributes={"max_tool_rounds": 17})
+    assert _effective_max_tool_rounds(agent, params_override) == 17
 
 
 def test_runtime_guard_readers_follow_the_same_patched_yaml(tmp_path, monkeypatch):

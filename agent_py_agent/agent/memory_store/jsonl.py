@@ -108,6 +108,9 @@ class MemoryRecord:
     source: str = ""
     updated_at: float = 0.0
     expires_at: float = 0.0
+    # 访问信号:search_scoped/search 命中时由 touch 事件写入;总量闸浓缩按它淘汰冷条目。
+    # 旧 JSONL 行无此字段,读取时按 0 兼容(浓缩时退化为按 updated_at)。
+    last_accessed_at: float = 0.0
 
     # LLM: 序列化只补缺失 created_at，不写文件或更新任何派生索引。
     # 函数用途: 把当前长期记忆事件转换为单行 JSON 文本。
@@ -189,6 +192,8 @@ class _JsonlMemoryIdentityMixin:
         self._embedder = embedder  # 配了 → 记忆召回加一路语义向量(检索拓宽 #1);None → 纯关键词
         self._vector_store_cache = None
         self.quota_enforcer = quota_enforcer
+        # 访问信号缓冲:命中先累积内存,随下一次写原子落盘,避免每次召回都写一次文件。
+        self._pending_access: dict[str, float] = {}
 
     # LLM: add 仍走 add_record/apply_batch 唯一权威提交链；attributes 只承载结构化来源等元数据。
     # 函数用途: 便捷新增一条长期记忆，并返回实际写入或已存在的稳定记录。
@@ -369,11 +374,14 @@ class _JsonlMemoryMutationMixin:
                 retained_events = [
                     record for record in current_events if record.entry_id not in final_removed_ids
                 ]
-                next_events = [*retained_events, *persisted]
+                # 访问信号:本次写事务顺带落盘累积的 touch 事件(原子,不额外开锁)。
+                touch_events = _touch_events(self._pending_access)
+                next_events = [*retained_events, *persisted, *touch_events]
                 next_text = "".join(
                     json.dumps(_record_payload(record), ensure_ascii=False) + "\n"
                     for record in next_events
                 )
+                self._pending_access.clear()
                 _check_memory_quota(admission, self, persisted, next_text)
                 self._redact_local_tool_ledgers(removed_contents)
                 write_text_file_atomic_unlocked(self.path, next_text)
@@ -563,6 +571,87 @@ class _JsonlMemoryRecallMixin(JsonlMemoryIndexMixin):
 
         return self._read_memory_file(self.path)
 
+    # LLM: 访问信号只在召回命中时产生;不命中不 touch,命中才证明"这条被用过"。
+    # 函数用途: 记录一次对某条记忆的访问(内存累积,随下次写原子落盘)。
+    def _note_access(self, entry_id: str) -> None:
+        if not entry_id:
+            return
+        self._pending_access[entry_id] = time.time()
+
+    # LLM: 落盘仍是写路径职责(锁内原子);公开入口供无写场景时手动冲刷。
+    # 函数用途: 手动把累积的访问信号作为 touch 事件写入文件。
+    def flush_access_events(self) -> int:
+        if not self._pending_access:
+            return 0
+        with locked_json_path(self.path):
+            if not self._pending_access:
+                return 0
+            pending = dict(self._pending_access)
+            current_events = self._read_memory_events(self.path)
+            next_text = "".join(
+                json.dumps(_record_payload(record), ensure_ascii=False) + "\n"
+                for record in [*current_events, *_touch_events(pending)]
+            )
+            self._pending_access.clear()
+            write_text_file_atomic_unlocked(self.path, next_text)
+        return len(pending)
+
+    # LLM: 总量闸只淘汰"非用户明确要求"的冷条目;user_explicit 永不因用量淘汰(用户显式记忆
+    # 是硬事实),且单次最多移除 25%——冷启动后仍有渐进收缩空间,不一次性清空。
+    # 函数用途: 超总量上限时,把最久未被访问的非 user_explicit 条目移入 archive 并移除。
+    def condense(
+        self,
+        *,
+        max_records: int = 2000,
+        target_records: int = 1200,
+        max_ratio: float = 0.25,
+    ) -> list[MemoryRecord]:
+        active = self.all()
+        if len(active) <= max_records:
+            return []
+        removable = [
+            record
+            for record in active
+            if str((record.attributes or {}).get("origin") or "") != "user_explicit"
+        ]
+        if not removable:
+            return []
+        excess = len(active) - target_records
+        cap = max(1, int(len(active) * max_ratio))
+        to_remove = sorted(
+            removable,
+            key=lambda item: (
+                float(item.last_accessed_at or 0.0)
+                or float(item.updated_at or 0.0)
+                or float(item.created_at or 0.0),
+                item.entry_id,
+            ),
+        )[: min(excess, cap)]
+        if not to_remove:
+            return []
+        # 先入 archive 账本,再在主文件移除——archive 多写一次无害,主文件移除失败可下次重试。
+        archive_path = self.path.with_name(self.path.name + ".archive.jsonl")
+        with locked_json_path(archive_path):
+            archived_text = "".join(
+                json.dumps(_record_payload(record), ensure_ascii=False) + "\n"
+                for record in to_remove
+            )
+            if archive_path.exists():
+                archived_text = archive_path.read_text(encoding="utf-8") + archived_text
+            write_text_file_atomic_unlocked(archive_path, archived_text)
+        self.apply_batch(
+            [
+                {
+                    "action": "remove",
+                    "entry_id": record.entry_id,
+                    "source": "condense:quota",
+                    "expected_version": record.version,
+                }
+                for record in to_remove
+            ]
+        )
+        return to_remove
+
     # LLM: 过期 active 记录仍可能含需迁移/清除的正文；此入口只供 retention、migration 和 doctor，召回不得使用。
     # 函数用途: 返回包括已过期但尚未删除的全部 active 长期记忆。
     def all_including_expired(self) -> list[MemoryRecord]:
@@ -642,9 +731,13 @@ class _JsonlMemoryRecallMixin(JsonlMemoryIndexMixin):
         candidate_limit = max(top_k * 4, top_k + 8)
         records, _load_errors = self.search_report(query, top_k=candidate_limit)
         if self._embedder is None:
-            return _rerank_memory_records(records, query, top_k)
-        fused = self._fuse_semantic(query, records, candidate_limit)
-        return _select_diverse_memory_records(fused, top_k)
+            selected = _rerank_memory_records(records, query, top_k)
+        else:
+            fused = self._fuse_semantic(query, records, candidate_limit)
+            selected = _select_diverse_memory_records(fused, top_k)
+        for record in selected:
+            self._note_access(record.entry_id)
+        return selected
 
     # LLM: Runtime recall 先以 active JSONL 建 allowlist，再读取派生索引；陈旧 FTS/vector 命中不能复活删除版本。
     # 函数用途: 在当前正式记录和显式 scope predicate 内做确定性召回。
@@ -664,16 +757,33 @@ class _JsonlMemoryRecallMixin(JsonlMemoryIndexMixin):
         if active:
             from ..retrieval.hybrid import HybridRetriever
 
+            # BM25 臂拼入写路径生成的关键词(keywords_en),让英文查询词面命中中文记忆;
+            # embedding 臂本就跨语言(mean centering 实证),两臂互补。
+            def _index_text(record: MemoryRecord) -> str:
+                attrs = record.attributes if isinstance(record.attributes, dict) else {}
+                keywords = attrs.get("keywords_en") or []
+                if isinstance(keywords, list):
+                    suffix = " ".join(str(item) for item in keywords)
+                else:
+                    suffix = str(keywords)
+                return record.content + (" " + suffix if suffix else "")
+
             ranked = HybridRetriever(self._embedder).rank(
                 query,
-                [(record.entry_id, record.content) for record in active],
+                [(record.entry_id, _index_text(record)) for record in active],
                 top_k=candidate_limit,
+                # 注入侧阈值化:向量臂只留 cosine≥0.30 的真相关,弱相关不凑数带进 prompt。
+                # 词面臂(BM25)不受限——词面重合本身是相关信号;无 embedder 自动降级纯 BM25。
+                vector_min_score=0.30,
             )
             by_id = {record.entry_id: record for record in active}
             keyword = [by_id[entry_id] for entry_id, _score in ranked if entry_id in by_id]
         else:
             keyword = []
-        return _rerank_memory_records(keyword, query, top_k)
+        selected = _rerank_memory_records(keyword, query, top_k)
+        for record in selected:
+            self._note_access(record.entry_id)
+        return selected
 
     # LLM: RRF 只融合两个可重建候选列表，返回前仍使用稳定 entry ID 对齐。
     # 函数用途: 合并关键词与语义召回顺序。
@@ -783,7 +893,7 @@ def _record_payload(record: MemoryRecord) -> dict:
     for key in ("entry_id", "source"):
         if not payload.get(key):
             payload.pop(key, None)
-    for key in ("updated_at", "expires_at"):
+    for key in ("updated_at", "expires_at", "last_accessed_at"):
         if not float(payload.get(key) or 0.0):
             payload.pop(key, None)
     return payload
@@ -845,6 +955,24 @@ def _with_legacy_identity(record: MemoryRecord) -> MemoryRecord:
     return record
 
 
+# LLM: touch 是访问信号事件,不携带正文/不改版本;last_accessed_at 是唯一有效载荷。
+# 函数用途: 把累积访问缓冲转成 touch 事件列表。
+def _touch_events(pending: dict[str, float]) -> list[MemoryRecord]:
+    return [
+        MemoryRecord(
+            role="system",
+            content="",
+            kind="touch",
+            action="touch",
+            entry_id=entry_id,
+            created_at=timestamp,
+            updated_at=timestamp,
+            last_accessed_at=timestamp,
+        )
+        for entry_id, timestamp in sorted(pending.items())
+    ]
+
+
 # LLM: 新增记录只补唯一 ID、时间、版本与 tags，证据/scope 仍必须由上游结构化提供。
 # 函数用途: 规范化一条准备新增的长期记忆事件。
 def _normalized_new_record(record: MemoryRecord) -> MemoryRecord:
@@ -874,6 +1002,15 @@ def _materialize_memory_events(
         action = str(record.action or "add").strip().lower()
         if action == "remove":
             active.pop(record.entry_id, None)
+            continue
+        if action == "touch":
+            # 访问信号:只更新 last_accessed_at,不改内容、不 bump version。
+            prior = active.get(record.entry_id)
+            if prior is not None:
+                prior.last_accessed_at = max(
+                    float(record.last_accessed_at or 0.0),
+                    float(prior.last_accessed_at or 0.0),
+                )
             continue
         if action not in {"add", "replace"}:
             continue

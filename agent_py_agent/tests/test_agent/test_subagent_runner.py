@@ -370,6 +370,9 @@ def test_subagent_runner_does_not_override_coordinator_tool_limit_status():
             model_backend="echo",
             subagent_workspace="subs",
             max_tool_rounds=1,
+            # 本场景测 coordinator 工具限制不被覆盖；显式固定协议修复次数，
+            # 避免默认宽容度（2 次修复）改变模型调用轮数。
+            max_protocol_repairs=1,
         )
         agent = SimpleAgent(cfg, root)
         agent.backend = CoordinatorToolLimitBlockedBackend()

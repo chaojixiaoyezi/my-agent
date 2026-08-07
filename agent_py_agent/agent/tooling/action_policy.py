@@ -131,7 +131,13 @@ class ActionPolicy:
         if boundary_decision is not None:
             return boundary_decision
 
-        command_decision = _command_classification_decision(call, runtime, command, effect)
+        command_decision = _command_classification_decision(
+            call,
+            runtime,
+            command,
+            effect,
+            allowed_commands=_unknown_command_allowlist(request.runtime_guard_policy),
+        )
         if command_decision is not None:
             return command_decision
 
@@ -234,6 +240,8 @@ def _command_classification_decision(
     runtime: ToolRuntime,
     command: CommandAnalysis | None,
     effect: str,
+    *,
+    allowed_commands: frozenset[str] = frozenset(),
 ) -> ActionDecision | None:
     if command is None:
         return None
@@ -244,13 +252,15 @@ def _command_classification_decision(
         "reason_codes": list(command.reason_codes),
     }
     if command.classification == "unknown":
-        return _ask(
-            call,
-            "COMMAND_CLASSIFICATION_UNKNOWN",
-            effect=effect,
-            evidence=evidence,
-            approval_kind="command_review",
-        )
+        executables = tuple(segment.executable for segment in command.segments)
+        if executables and allowed_commands and all(item in allowed_commands for item in executables):
+            # 部署者显式白名单：命令全部段落在 unknown_command_allowlist 中，视为
+            # 已声明的受信命令（按 mutating 语义继续走沙箱/边界/灾难保护）。
+            return None
+        # unknown 命令不进入人工审批（approval_request 无消费端，ask 只会卡死任务），
+        # 额度制在更前置的 runtime guard 层（agent_budget_stage，有 agent 身份）按
+        # 代理实例分桶管理；这里放行，沙箱/边界/灾难命令保护仍然兜底。
+        return None
     if command.classification == "dangerous" and runtime.runtime_policy.approval_policy.mode == "never":
         return _deny("COMMAND_DANGEROUS_DENIED", effect=effect, evidence=evidence)
     return None
@@ -263,6 +273,13 @@ def _required_action_decision(
 ) -> ActionDecision | None:
     action = request.required_action
     if action is None:
+        return None
+    # 只有 open(待销账)的 required action 才施加工具级执行约束。已 blocked/settled 的
+    # 动作(如评估器未给出任何可用证据工具而自动封死)约束已失效,继续拦截只会把
+    # "继续干活"类任务卡死:模型误以为要用户确认,而 approval 无消费端(真机实证:
+    # click 复刻任务 pwd/ls 只读命令因 2>&1 解析成 mutating 后撞 read_only ceiling,
+    # 模型放弃 run_command 改用 read_file,任务停滞)。
+    if str(getattr(action, "status", "") or "").strip().lower() != "open":
         return None
     allowed_tools = tuple(getattr(action, "allowed_tools", ()) or ())
     if allowed_tools and runtime.model_spec.name not in allowed_tools:
@@ -534,6 +551,24 @@ def _controlled_exec_allowed_commands(boundary: dict[str, object]) -> tuple[str,
             if text:
                 allowed.append(text)
     return tuple(dict.fromkeys(allowed))
+
+
+def _unknown_command_allowlist(policy: object | None) -> frozenset[str]:
+    """Deployment-declared trusted executables for the unknown-command gate.
+
+    Read live from runtime_guard_config.yaml (key: unknown_command_allowlist).
+    Empty by default: unknown commands fall through to the per-agent rolling
+    window budget in agent_budget_stage instead of a hard deny, so ordinary
+    users need no configuration at all.
+    """
+    values = getattr(policy, "values", None)
+    if not isinstance(values, dict):
+        return frozenset()
+    raw = values.get("unknown_command_allowlist")
+    items = raw if isinstance(raw, (list, tuple)) else ()
+    return frozenset(
+        str(item).strip() for item in items if str(item).strip()
+    )
 
 
 def _string_values(value: object) -> tuple[str, ...]:

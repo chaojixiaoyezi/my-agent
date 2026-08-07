@@ -341,7 +341,7 @@ def test_tool_round_records_partial_write_outcomes_in_original_order():
             return _failure(
                 request,
                 "outcome unknown",
-                error_code="TOOL_OPERATION_OUTCOME_UNKNOWN",
+                error_code="CHANNEL_SEND_FAILED",
                 effect_outcome="unknown",
                 handler_executed=True,
             )
@@ -371,7 +371,7 @@ def test_tool_round_records_partial_write_outcomes_in_original_order():
     assert executed == ["first", "second", "third"]
     assert records == [
         ("first", True, ""),
-        ("second", False, "TOOL_OPERATION_OUTCOME_UNKNOWN"),
+        ("second", False, "CHANNEL_SEND_FAILED"),
         ("third", True, ""),
     ]
 

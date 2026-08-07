@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,12 +11,8 @@ from agent_py_agent.agent.capability.memory_tool import RememberTool
 from agent_py_agent.agent.conversation.user_visible_text import sanitize_user_visible_text
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.local_storage import (
-    TOOL_OPERATION_SUCCEEDED,
     LocalStore,
     RuntimeGateLedgerRecord,
-    ToolOperationClaimRequest,
-    ToolOperationCompletionRequest,
-    new_tool_operation_holder,
 )
 from agent_py_agent.agent.memory_store import JsonlMemory, MemoryRecord, MemorySubjectConflict
 from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
@@ -117,39 +112,6 @@ def test_hard_delete_scrubs_authority_candidates_ops_and_indexes(tmp_path: Path)
             status="done",
         )
     )
-    holder = new_tool_operation_holder()
-    claim = local_store.claim_tool_operation(
-        ToolOperationClaimRequest(
-            owner_id="owner-memory",
-            run_id="run-memory",
-            task_id="task-memory",
-            operation_id="op-memory",
-            tool="remember",
-            args_hash="sha256:keep-operation-hash",
-            idempotency_key="idem-memory",
-            idempotency_scope="operation",
-            idempotency_namespace="remember:owner-memory",
-            holder=holder,
-            lease_expires_at=time.time() + 60,
-        )
-    )
-    local_store.finish_tool_operation(
-        ToolOperationCompletionRequest(
-            owner_id="owner-memory",
-            run_id="run-memory",
-            operation_id="op-memory",
-            holder_id=holder.holder_id,
-            generation=claim.record.generation,
-            status=TOOL_OPERATION_SUCCEEDED,
-            result={
-                "output": json.dumps(
-                    {"content": secret, "unrelated": "另一条内容必须保留"},
-                    ensure_ascii=False,
-                )
-            },
-        )
-    )
-
     removed = memory.remove(added.entry_id, expected_version=1)
 
     assert removed.content == ""
@@ -165,20 +127,10 @@ def test_hard_delete_scrubs_authority_candidates_ops_and_indexes(tmp_path: Path)
         assert secret not in Path(path).read_text(encoding="utf-8")
     assert candidates.get(candidate.candidate_id).content == ""
     gate_record = local_store.get_runtime_gate_ledger("run-memory", "op-memory")
-    operation_record = local_store.get_tool_operation(
-        owner_id="owner-memory",
-        run_id="run-memory",
-        operation_id="op-memory",
-    )
     assert gate_record is not None
     assert gate_record.parameters["content"] == "[deleted-content]"
     assert gate_record.runtime_gate["normalized"]["content"] == "[deleted-content]"
     assert gate_record.args_hash == "sha256:keep-runtime-hash"
-    assert operation_record is not None
-    assert operation_record.status == TOOL_OPERATION_SUCCEEDED
-    assert operation_record.args_hash == "sha256:keep-operation-hash"
-    assert secret not in json.dumps(operation_record.result, ensure_ascii=False)
-    assert "另一条内容必须保留" in json.dumps(operation_record.result, ensure_ascii=False)
     for sqlite_path in (
         local_store.db_path,
         Path(str(local_store.db_path) + "-wal"),
@@ -266,31 +218,15 @@ def test_tool_verified_memory_accepts_only_successful_archive_refs(tmp_path: Pat
         tmp_path / "workspace",
     )
     owner_id = str(agent.home_paths.owner_id)
-    holder = new_tool_operation_holder()
-    claim = agent.local_store.claim_tool_operation(
-        ToolOperationClaimRequest(
-            owner_id=owner_id,
+    agent.local_store.record_runtime_gate_ledger(
+        RuntimeGateLedgerRecord(
             run_id="run-1",
             task_id="task-1",
             operation_id="op-ok",
             tool="read_file",
             args_hash="sha256:tool-evidence",
             idempotency_key="idem-tool-evidence",
-            idempotency_scope="operation",
-            idempotency_namespace="read_file:test",
-            holder=holder,
-            lease_expires_at=time.time() + 60,
-        )
-    )
-    agent.local_store.finish_tool_operation(
-        ToolOperationCompletionRequest(
-            owner_id=owner_id,
-            run_id="run-1",
-            operation_id="op-ok",
-            holder_id=holder.holder_id,
-            generation=claim.record.generation,
-            status=TOOL_OPERATION_SUCCEEDED,
-            result={"ok": True, "call_id": "call-ok", "effect_outcome": ""},
+            status="succeeded",
         )
     )
     tool_loop = SimpleNamespace(

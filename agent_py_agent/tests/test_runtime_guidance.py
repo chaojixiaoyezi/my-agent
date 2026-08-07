@@ -1576,7 +1576,7 @@ def test_published_audit_prepare_uses_durable_outcome_not_repaired_attempts(
                 "status": "ok",
                 "handler_executed": True,
                 "tool_operation_status": "succeeded",
-                "effect_outcome": "succeeded",
+                "effect_outcome": "confirmed",
                 "parameters": {"action": "open"},
             },
             {
@@ -1586,7 +1586,7 @@ def test_published_audit_prepare_uses_durable_outcome_not_repaired_attempts(
                 "status": "ok",
                 "handler_executed": True,
                 "tool_operation_status": "succeeded",
-                "effect_outcome": "succeeded",
+                "effect_outcome": "confirmed",
                 "request_id": request_id,
                 "parameters": {
                     "validation_status": "passed",
@@ -1662,7 +1662,7 @@ def test_published_prepare_turn_is_not_replaced_by_active_audit_lifecycle(
                 "status": "ok",
                 "handler_executed": True,
                 "tool_operation_status": "succeeded",
-                "effect_outcome": "succeeded",
+                "effect_outcome": "confirmed",
             }
         ],
         live_archive_state={},
@@ -1716,7 +1716,7 @@ def test_active_named_work_reply_carries_current_turn_operation_facts(tmp_path) 
                 "status": "ok",
                 "handler_executed": True,
                 "tool_operation_status": "succeeded",
-                "effect_outcome": "succeeded",
+                "effect_outcome": "confirmed",
             }
         ],
         live_archive_state={},

@@ -20,6 +20,12 @@ from .main_agent_complex_case import (
     case_main_large_log_audit,
     case_main_tool_failure_recovery,
 )
+from .main_agent_limit_cases import (
+    case_main_adversarial_mix,
+    case_main_dense_rounds,
+    case_main_failure_storm,
+    case_main_interrupt_honesty,
+)
 
 # 2026-05-18: main-complex/main-artifact cases stay imported here only for suite dispatch; task logic lives in split main-agent case modules.
 
@@ -39,6 +45,10 @@ def run_case(lab, case_name: str) -> None:
         "main_compact_stress_long_read": case_main_compact_stress_long_read,
         "main_tool_failure_recovery": case_main_tool_failure_recovery,
         "main_large_log_audit": case_main_large_log_audit,
+        "main_dense_rounds": case_main_dense_rounds,
+        "main_failure_storm": case_main_failure_storm,
+        "main_interrupt_honesty": case_main_interrupt_honesty,
+        "main_adversarial_mix": case_main_adversarial_mix,
     }
     handlers[case_name](lab)
 

@@ -89,6 +89,9 @@ class _ToolConfigFields:
     enable_tools: bool = True
     max_tool_rounds: int | None = None
     max_tool_calls_per_round: int | None = None
+    # 模型输出格式偶发抖动（把工具调用写进正文/代码块/XML 标签）时，
+    # 协议违规先给几次结构化修复机会再 break；1=只修一次就断（旧行为）。
+    max_protocol_repairs: int = 2
     # 后台调度器的周期性孤儿 supervision(reconcile 兜底,零 LLM 成本):每隔此秒数巡查一次
     # "盯守死岗补建接管 + durable 复活 PENDING/PLANNING 停滞孤儿"。事件唤醒覆盖不了
     # 静默死亡(SIGKILL/断电不发 wake),靠这里捡回;0=关闭。

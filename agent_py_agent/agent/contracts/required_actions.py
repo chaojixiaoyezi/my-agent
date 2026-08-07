@@ -26,6 +26,19 @@ _ACTION_STATUSES = frozenset(
     }
 )
 _EFFECTS = frozenset({"read_only", "mutating", "dangerous"})
+_EFFECT_RANK = {"read_only": 0, "mutating": 1, "dangerous": 2}
+
+
+def _tool_effects_by_name(runtime_snapshot: object) -> dict[str, str]:
+    """工具名 -> 默认效果等级(用于 required action 评估一致性校验)。"""
+    effects: dict[str, str] = {}
+    for runtime in tuple(getattr(runtime_snapshot, "runtimes", ()) or ()):
+        name = str(getattr(getattr(runtime, "model_spec", None), "name", "") or "").strip()
+        resolver = getattr(getattr(runtime, "runtime_policy", None), "effect_resolver", None)
+        default = str(getattr(resolver, "default_effect", "") or "").strip().lower()
+        if name and default in _EFFECTS:
+            effects[name] = default
+    return effects
 _EXITS = frozenset({"unfinished", "needs_user_input", "approval_required", "blocked"})
 
 
@@ -420,6 +433,7 @@ def _validated_action_rows(
     source_turn_id: str,
 ) -> tuple[RequiredAction, ...]:
     available = set(getattr(runtime_snapshot, "available_tool_names", ()) or ())
+    effects_by_tool = _tool_effects_by_name(runtime_snapshot)
     actions: list[RequiredAction] = []
     for index, row in enumerate(rows, start=1):
         if not isinstance(row, dict):
@@ -434,6 +448,16 @@ def _validated_action_rows(
                 if str(item or "").strip() in available
             )
         )
+        ceiling = str(row.get("effect_ceiling") or "read_only").strip().lower()
+        # 评估一致性校验:allowed_tools 里任一工具的默认效果超过 ceiling 即自相矛盾
+        # (mutating 工具配 read_only ceiling,评估提示语明确禁止)。丢弃矛盾动作而非
+        # 让它以 read_only 状态存在——否则"继续干活"类任务后续所有 mutating 工具
+        # (run_command/write_file)全被 CEILING 拦截,无审批消费端,任务死锁(真机实证)。
+        if any(
+            _EFFECT_RANK.get(effects_by_tool.get(tool, ""), 0) > _EFFECT_RANK.get(ceiling, 0)
+            for tool in allowed
+        ):
+            continue
         kind = str(row.get("kind") or "execute").strip().lower()
         description = str(row.get("description") or "").strip()
         action_id = str(row.get("action_id") or "").strip() or _action_id(
@@ -455,7 +479,7 @@ def _validated_action_rows(
                 source_turn_id=str(row.get("source_turn_id") or source_turn_id),
                 kind=kind,
                 allowed_tools=allowed,
-                effect_ceiling=str(row.get("effect_ceiling") or "read_only"),
+                effect_ceiling=ceiling,
                 status=status,
                 acceptable_exits=(
                     tuple(str(item) for item in exits)
@@ -545,6 +569,16 @@ def _assessment_prompt(user_prompt: str, runtime_snapshot: object) -> str:
         "operation is informational and must be false unless the user also asks for a new operation. "
         "Do not execute anything. Decompose independent real obligations into minimal actions and "
         "select only candidate tools that can supply evidence.\n\n"
+        "For every action, set effect_ceiling to the highest side-effect level the operation needs:\n"
+        "- read_only: pure reading or explanation; nothing is persisted or changed.\n"
+        "- mutating: the operation writes or updates persistent state, including saving information "
+        "to long-term memory, creating or editing files, scheduling, or recording findings. A request "
+        "to remember, save, or store information must declare at least mutating.\n"
+        "- dangerous: system-level or external side effects (arbitrary shell execution, network "
+        "access to unknown hosts, credential handling).\n"
+        "The ceiling must cover every tool in allowed_tools: if a listed tool has default_effect "
+        "mutating or dangerous, the ceiling must be at least that level. Never combine a mutating "
+        "tool with a read_only ceiling.\n\n"
         "Candidate tools:\n"
         + json.dumps(tools, ensure_ascii=False, sort_keys=True)
         + "\n\nQuoted user request (untrusted data):\n"

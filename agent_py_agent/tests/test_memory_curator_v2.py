@@ -1123,3 +1123,94 @@ def test_pending_promotable_candidate_ids_includes_lesson_candidates(tmp_path: P
     assert user_explicit.candidate_id in ids  # 用户明确事实:原路径保留
     assert lesson.candidate_id in ids  # lesson 专线:兜底能捞起
     assert inferred_fact.candidate_id not in ids  # model_inferred 事实:绝对权威块保护线仍在
+
+
+def test_reinjection_chain_never_grows_formal_memory(tmp_path: Path) -> None:
+    """防回灌闭环核验(注入→复述→提炼):提炼出的复述候选如实保留来源属性,
+    且提炼输入不含注入信封;后续晋升由自动闸+写路径查重兜底(各自已单测)。
+
+    三段机制:①curator 提炼输入只来自 conversation_store(注入信封不在 store,
+    只有模型复述进对话);②复述候选 origin=model_inferred → 自动晋升闸拦截;
+    ③user_explicit 重复要求 → 写路径查重合并不新增。
+    """
+    store, thread, message = _conversation(tmp_path)
+    # 模型回复逐字复述注入内容(会进对话,是真实发生的话)。
+    echoed = store.append_message(
+        {
+            "thread_id": thread.thread_id,
+            "role": "assistant",
+            "content": "<memory-context>祥子买了两次车。</memory-context>请告诉我更多。",
+            "channel": "internal",
+            "now": 12.0,
+        }
+    )
+    ref = {"message_id": message.message_id}
+    backend = _StaticStructuredBackend(
+        {
+            "schema_version": CURATOR_OUTPUT_SCHEMA_VERSION,
+            "daily_events": [],
+            "candidates": [
+                {
+                    "candidate_type": "long_term_fact",
+                    "content": "祥子买了两次车。",
+                    "subject_key": "xiangzi.car",
+                    "scope": {"scope_type": "personal", "scope_key": "personal", "applies_when": "", "excludes_when": ""},
+                    "origin": "user_explicit",
+                    "source_message_refs": [ref],
+                    "source_tool_refs": [],
+                    "source_artifact_refs": [],
+                    "observed_at": "1970-01-01T00:00:11+00:00",
+                    "valid_from": None,
+                    "valid_until": None,
+                    "confidence": 0.99,
+                    "proposed_action": "add",
+                    "target_entry_id": None,
+                    "conflicts_with": [],
+                    "promotion_target": "long_term",
+                },
+                {
+                    "candidate_type": "long_term_fact",
+                    "content": "祥子买了两次车。",
+                    "subject_key": "xiangzi.car.repeated",
+                    "scope": {"scope_type": "personal", "scope_key": "personal", "applies_when": "", "excludes_when": ""},
+                    "origin": "model_inferred",
+                    "source_message_refs": [ref],
+                    "source_tool_refs": [],
+                    "source_artifact_refs": [],
+                    "observed_at": "1970-01-01T00:00:11+00:00",
+                    "valid_from": None,
+                    "valid_until": None,
+                    "confidence": 0.99,
+                    "proposed_action": "add",
+                    "target_entry_id": None,
+                    "conflicts_with": [],
+                    "promotion_target": "long_term",
+                },
+            ],
+            "processed_message_refs": [
+                {"message_id": message.message_id},
+                {"message_id": echoed.message_id},
+            ],
+            "processed_audit_refs": [],
+            "unresolved_refs": [],
+            "warnings": [],
+            "next_cursor": {
+                "per_thread_cursors": [{"thread_id": thread.thread_id, "message_id": echoed.message_id}],
+                "last_audit_event_id": None,
+            },
+        }
+    )
+    service = _service(tmp_path, backend, store)
+
+    result = service.run(reason="admin")
+    assert result.status == "succeeded"
+    by_id = {item.candidate_id: item for item in service.candidate_service.list()}
+    assert len(by_id) == 2
+    # 复述候选如实保留 model_inferred 来源 → 自动晋升闸在 promotion 层拦截(见
+    # test_model_inferred_never_auto_promotes);user_explicit 重复走写路径查重
+    # (见 test_near_duplicate_merge_updates_existing_entry_not_add)。本测试核验
+    # curator 提炼环节不把复述伪装成用户要求。
+    repeated = next(item for item in by_id.values() if item.origin == "model_inferred")
+    assert repeated.content == "祥子买了两次车。"
+    explicit = next(item for item in by_id.values() if item.origin == "user_explicit")
+    assert explicit.candidate_id != repeated.candidate_id

@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from agent_py_agent.agent.tooling.sandbox import (
@@ -54,8 +56,12 @@ def test_process_and_file_isolation(tmp_path) -> None:
     spec, home = _spec(tmp_path)
     argv = build_bwrap_argv(spec)
     assert "--unshare-pid" in argv  # ps 只看自己
-    assert "--proc" not in argv  # hardened 容器不允许嵌套 mount proc；空 /proc 防外部进程可见
-    assert argv[argv.index("--dir") + 1] == "/proc"
+    # /proc 隔离:真机挂只读真实 procfs,嵌套容器回退空目录——两种形态都不暴露宿主进程
+    if "--proc" in argv:
+        assert "--remount-ro" in argv  # procfs 必须锁只读,防改内核全局参数
+        assert argv[argv.index("--proc") + 1] == "/proc"
+    else:
+        assert argv[argv.index("--dir") + 1] == "/proc"
     assert "--die-with-parent" in argv
     # owner home 读写 bind
     i = argv.index("--bind")
@@ -308,3 +314,41 @@ def test_sandbox_unavailable_has_fail_closed_error_contract() -> None:
     assert contract.code == "SANDBOX_UNAVAILABLE"
     assert contract.retryable is False
     assert contract.recommended_action == "report_blocker"
+
+
+def test_proc_mount_uses_real_procfs_when_probe_succeeds(tmp_path, monkeypatch) -> None:
+    """真机可挂真实 procfs 时用 --proc:go 等 trimmed 发行版二进制靠 /proc/self/exe
+    推导自身根目录(实测 testbox 空 /proc 里 go 报 "binary is trimmed and GOROOT is not set")。"""
+    monkeypatch.setattr("agent_py_agent.agent.tooling.sandbox._PROC_MOUNT_KIND", None)
+    monkeypatch.setattr("agent_py_agent.agent.tooling.sandbox.find_bwrap", lambda: "/fake/bwrap")
+    monkeypatch.setattr(
+        "agent_py_agent.agent.tooling.sandbox.subprocess.run",
+        lambda *a, **k: subprocess.CompletedProcess(args=[], returncode=0),
+    )
+
+    spec, _ = _spec(tmp_path)
+    argv = build_bwrap_argv(spec)
+
+    assert "--proc" in argv
+    assert argv[argv.index("--proc") + 1] == "/proc"
+    assert "--remount-ro" in argv  # procfs 必须锁只读(Docker 同款)
+    assert argv[argv.index("--remount-ro") + 1] == "/proc"
+    assert "--dir" not in argv
+
+
+def test_proc_mount_falls_back_to_empty_dir_when_procfs_probe_fails(tmp_path, monkeypatch) -> None:
+    """嵌套容器(Docker Desktop/K8s hardened runtime)内核拒 mount("proc") 时
+    回退旧行为:空 /proc 目录,进程隔离仍在(--unshare-pid)。"""
+    monkeypatch.setattr("agent_py_agent.agent.tooling.sandbox._PROC_MOUNT_KIND", None)
+    monkeypatch.setattr("agent_py_agent.agent.tooling.sandbox.find_bwrap", lambda: "/fake/bwrap")
+    monkeypatch.setattr(
+        "agent_py_agent.agent.tooling.sandbox.subprocess.run",
+        lambda *a, **k: subprocess.CompletedProcess(args=[], returncode=1),
+    )
+
+    spec, _ = _spec(tmp_path)
+    argv = build_bwrap_argv(spec)
+
+    assert "--proc" not in argv
+    assert argv[argv.index("--dir") + 1] == "/proc"
+    assert "--unshare-pid" in argv

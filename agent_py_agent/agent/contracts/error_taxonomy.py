@@ -721,10 +721,10 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
     ),
     "COMMAND_CLASSIFICATION_UNKNOWN": ErrorContract(
         code="COMMAND_CLASSIFICATION_UNKNOWN",
-        category="approval",
-        retryable=True,
-        recommended_action=RecoveryAction.REQUEST_APPROVAL.value,
-        recovery_hint="命令无法可靠分类；先请求精确审批，或改成可证明只读的结构化操作。",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="命令不在内置分类表也不在部署 unknown_command_allowlist 白名单中，已拒绝；改用白名单内命令或可证明只读的结构化操作。",
     ),
     "COMMAND_DANGEROUS_DENIED": ErrorContract(
         code="COMMAND_DANGEROUS_DENIED",
