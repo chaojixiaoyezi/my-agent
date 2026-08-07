@@ -14,7 +14,9 @@ task_progress 账本不参与生命周期判定。
 账本有未 closed 项 → 请求内自动续跑(注入账本结构化事实 + nudge,模型继续推进
 未完成工作),直到账本 closed 或达上限(默认 3 轮,可配)停止。达上限后账本仍
 open → 如实收口 unfinished(TASK_PROGRESS_LIMIT_REACHED)→ workspace 标
-BLOCKED 等用户,绝不标 DONE 撒谎。
+BLOCKED 等用户,绝不标 DONE 撒谎。thread_goal_id(/goal)任务走既有对话机制
+不在此通道;conversation_thread_id/conversation_task_id 不排除(gateway 每个
+请求都带,详见 decision 注释,2026-08-07 真机铁证)。
 
 结构化信号铁律:判定只看 task_progress 账本的状态字段(items/coverage.counts),
 不匹配任何模型自然语言文案。
@@ -63,19 +65,18 @@ def task_progress_continuation_decision(
     """判定本轮结束后是否按 task_progress 账本自动续跑。
 
     全部输入都是结构化信号:
-      - 作用域:有 conversation thread/task/thread_goal_id 的任务走既有对话通道,
-        不在请求内续跑(它们有自己的 wake/continuation 机制)。
+      - 作用域:thread_goal_id(/goal)任务走既有对话机制,不在请求内续跑。
+        conversation_thread_id/conversation_task_id **不能**排除——gateway 每个
+        /ask 请求都带这对属性(2026-08-07 真机铁证),而 conversation 侧的账本
+        续跑唤醒(_schedule_typed_unfinished_continuation)只认 thread_goal_id,
+        无 goal 的 conversation 任务若被排除就进无人区,假 DONE 依旧。
       - 本轮 outcome:只有正常结束(ok)才可能续跑;等待、失败、已收口不续跑。
       - 账本:ledger_open_progress_item_count > 0 才算未完成(空账本/全 done 不续跑)。
       - 轮数:depth 达到上限即停止,防止模型永远不 closed 账本的死循环。
     """
     attrs = getattr(params, "task_attributes", None)
-    if isinstance(attrs, dict):
-        if any(
-            str(attrs.get(key) or "").strip()
-            for key in ("conversation_thread_id", "conversation_task_id", "thread_goal_id")
-        ):
-            return TaskProgressContinuationDecision(False, "conversation_scoped")
+    if isinstance(attrs, dict) and str(attrs.get("thread_goal_id") or "").strip():
+        return TaskProgressContinuationDecision(False, "conversation_scoped")
     if str(getattr(result, "runtime_status", "ok") or "ok").strip().lower() != "ok":
         return TaskProgressContinuationDecision(False, "not_ok")
     task_id = _durable_task_id(params)

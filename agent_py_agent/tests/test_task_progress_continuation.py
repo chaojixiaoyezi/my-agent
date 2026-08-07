@@ -136,21 +136,47 @@ class TestContinuationDecision:
         assert not decision.should_continue
         assert decision.reason == "ledger_closed"
 
-    def test_conversation_scoped_stops(self, tmp_path):
+    def test_conversation_attrs_with_open_ledger_continues(self, tmp_path):
+        # gateway 每个 /ask 请求都带 conversation_thread_id/conversation_task_id
+        # (2026-08-07 真机铁证),它们不能排除账本驱动续跑——否则所有 gateway 任务
+        # 都进 conversation 侧无人区(该侧续跑只认 thread_goal_id),假 DONE 依旧。
         agent = SimpleAgent(
             AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), tool_protocol="text"),
             tmp_path,
         )
         _write_ledger(agent, _ledger_payload())
+        # conversation_task_id 与 params.task_id 一致(真机:两者都是 req_xxx),
+        # 账本按该 id 读写。
         params = _params(
             {
                 "conversation_thread_id": "thread-1",
-                "conversation_task_id": "task-1",
+                "conversation_task_id": "task-progress-1",
+            }
+        )
+        decision = task_progress_continuation_decision(agent, params, _ok_result())
+        assert decision.should_continue
+        assert decision.reason == "ledger_open"
+
+    def test_conversation_attrs_with_closed_ledger_stops(self, tmp_path):
+        agent = SimpleAgent(
+            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), tool_protocol="text"),
+            tmp_path,
+        )
+        _write_ledger(
+            agent,
+            _ledger_payload(
+                items=[{"id": "main", "status": "done", "title": "全部完成"}],
+            ),
+        )
+        params = _params(
+            {
+                "conversation_thread_id": "thread-1",
+                "conversation_task_id": "task-progress-1",
             }
         )
         decision = task_progress_continuation_decision(agent, params, _ok_result())
         assert not decision.should_continue
-        assert decision.reason == "conversation_scoped"
+        assert decision.reason == "ledger_closed"
 
     def test_thread_goal_scoped_stops(self, tmp_path):
         agent = SimpleAgent(
