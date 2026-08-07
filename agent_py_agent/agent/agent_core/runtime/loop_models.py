@@ -29,6 +29,8 @@ class RunParams:
     on_chunk: object = None
     compact_auto_continue_depth: int = 0
     compact_auto_no_tool_continue_depth: int = 0
+    # task_progress 账本驱动自动续跑轮数(2026-08-07 scrapy/celery 假 DONE 根修)。
+    task_progress_continue_depth: int = 0
     context_scope: str = "default"
     root_user_prompt: str = ""
     carried_archive_tool_calls: list[dict[str, object]] | None = None

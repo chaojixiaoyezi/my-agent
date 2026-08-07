@@ -161,6 +161,9 @@ memory_compact_auto_trigger_percent: 90
 # 单次 run 内 compact→自动续跑的绝对深度硬顶（与「连续无工具进展」软顶并存）。达到即强制
 # return 当前结果，防止持续高于阈值且每轮都调工具的任务无限 compact/续跑（H2）。
 memory_compact_auto_continue_max_depth: 50
+# 普通 standalone 任务 task_progress 账本驱动自动续跑上限（2026-08-07 假 DONE 根修）：
+# 0=内置默认(3)；显式 >0 覆盖。task_attributes["task_progress_continue_limit"] 优先于此。
+task_progress_auto_continue_limit: 0
 # compact 续跑时对卸掉的“中段历史”做一次 LLM 语义摘要：
 # - 续跑靠 carried archive 记录逐条重建工具历史；默认会对中段记录调一次摘要模型，用一条语义摘要
 #   折叠中段、原样保留首尾，把机械截断换成“这段做了什么/学到什么”的叙述，长任务续跑少丢上下文。
