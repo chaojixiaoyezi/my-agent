@@ -520,6 +520,7 @@ def _conversation_turn_is_terminal(ctx: FinalizeContext) -> bool:
     return reason not in {
         "background_dispatch",
         "wait",
+        "repeated_tool_failure",
     }
 
 

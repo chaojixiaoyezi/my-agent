@@ -183,6 +183,53 @@ def record_tool_guardrail_result(
     return tuple(new_records)
 
 
+def failure_class_of_result(result: object) -> str:
+    """Stable failure class of one tool result (code > category > output hash).
+
+    The same class re-occurring across different argument hashes is the
+    structural signature of a model repeating the same mistake (real-machine
+    evidence: urllib3 replica, 60+ consecutive send_message failures with
+    TOOL_PARAMETER_TYPE_INVALID — args changed every attempt, so the
+    (tool, args_hash) identity never accumulated).
+    """
+    code = str(getattr(result, "error_code", "") or "").strip()
+    if code:
+        return f"code:{code}"
+    category = str(getattr(result, "error_category", "") or "").strip()
+    if category:
+        return f"category:{category}"
+    return f"output:{result_hash_for_guardrail(getattr(result, 'output', None))}"
+
+
+def consecutive_same_failure_count(
+    records: tuple[dict[str, object], ...],
+    tool_name: str,
+    failure_class: str,
+) -> int:
+    """Consecutive same-tool same-class failures, ignoring other tools' events.
+
+    Same tool + same class accumulates; same tool + a different class or a
+    success clears the current run, so only the trailing same-class segment
+    counts. Events of other tools do not participate (a model alternating
+    between a broken call and a working one must still be caught, which the
+    strict per-record reset of _count_repeat_failures misses). Guardrail's own
+    block records (TOOL_GUARDRAIL_*_BLOCKED) are not model behavior: they
+    neither accumulate nor clear the segment.
+    """
+    count = 0
+    for record in records:
+        if str(record.get("tool_name") or "") != tool_name:
+            continue
+        current_class = str(record.get("failure_class") or "")
+        if current_class.startswith("code:TOOL_GUARDRAIL"):
+            continue
+        if record.get("failed") is not True:
+            count = 0
+            continue
+        count = count + 1 if current_class == failure_class else 0
+    return count
+
+
 def args_hash_for_guardrail(tool_name: str, args: object) -> str:
     try:
         canonical = json.dumps(args, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)

@@ -4,6 +4,7 @@ from ...contracts.gates.tool_guardrail import (
     ToolGuardrailConfig,
     ToolGuardrailFacts,
     evaluate_tool_guardrail_gate,
+    failure_class_of_result,
     record_tool_guardrail_result,
     result_hash_for_guardrail,
 )
@@ -125,13 +126,7 @@ def _set_tool_guardrail_records(
 
 
 def _failure_class(result: ToolResult) -> str:
-    code = str(result.error_code or "").strip()
-    if code:
-        return f"code:{code}"
-    category = str(result.error_category or "").strip()
-    if category:
-        return f"category:{category}"
-    return f"output:{result_hash_for_guardrail(result.output)}"
+    return failure_class_of_result(result)
 
 
 __all__ = [

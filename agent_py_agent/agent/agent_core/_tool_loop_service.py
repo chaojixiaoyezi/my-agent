@@ -47,7 +47,17 @@ from .tool_call_runtime import (
 from .tool_context.call_reducer import render_tool_payload_for_live_prompt
 from .tool_context.reducer import render_tool_result_for_live_prompt
 from .tool_context.window import record_native_ir_window, window_tool_context_params
-from .tool_guard.call_guardrail import record_tool_guard_observation
+from .tool_guard.call_guardrail import (
+    record_tool_guard_observation,
+    tool_guardrail_records,
+)
+from .tool_guard.call_guardrail_config import (
+    repeat_fail_threshold as configured_repeat_fail_threshold,
+)
+from ..contracts.gates.tool_guardrail import (
+    consecutive_same_failure_count,
+    failure_class_of_result,
+)
 from .tool_guard.loop_hints import (
     append_tool_failure_channel_hint,
     append_tool_guardrail_action_block_hint,
@@ -776,6 +786,11 @@ class ToolLoopService:
     def _final_response_after_tool_limit(self, params: ToolLoopExecuteParams, tool_rounds: int):
         return _final_response_after_tool_limit(self._agent, params, tool_rounds)
 
+    def _final_response_after_repeated_failure(
+        self, params: ToolLoopExecuteParams, tool_rounds: int
+    ):
+        return _final_response_after_repeated_failure(self._agent, params, tool_rounds)
+
     def _execute_one_tool_call(self, request: ToolCallExecuteParams):
         return execute_one_tool_call(self._agent, request)
 
@@ -930,6 +945,15 @@ def _tool_step_or_limit(service: ToolLoopService, request: _ToolStepRequest):
             request.current_prompt,
         ),
     )
+    # 同类失败强制收口优先于本轮自然结束：即使模型又产出了"继续推进"式
+    # 回复，也要按未完成交接收口，避免把原地打转标成完成(真机实证:
+    # urllib3 复刻 60+ 次同类 send_message 失败后仍可能产出完成态)。
+    if request.params.repeated_failure_halt is not None:
+        final_prompt, final_response = service._final_response_after_repeated_failure(
+            request.params,
+            next_round,
+        )
+        return final_prompt, final_response, next_round
     return request.current_prompt, final_response, next_round
 
 
@@ -988,6 +1012,67 @@ def _final_response_after_tool_limit(agent, params: ToolLoopExecuteParams, tool_
     return final_prompt, final_response
 
 
+def _repeated_failure_halt_threshold(params: ToolLoopExecuteParams) -> int:
+    # guardrail 的 3N 次 DENY 先行；其后再犯同类错误 1 次即强制收口。
+    # N=1(测试)时 DENY 在第 3 次失败,阈值 4 保证不抢 DENY 语义。
+    threshold = configured_repeat_fail_threshold(params)
+    return max(3, 3 * threshold + 1)
+
+
+def _mark_repeated_failure_halt(agent, record: ToolCallRecordParams) -> None:
+    if record.params.repeated_failure_halt is not None or record.result.ok:
+        return
+    failure_class = failure_class_of_result(record.result)
+    # guardrail 自身拦截(TOOL_GUARDRAIL_*_BLOCKED)不是模型错误:不计入连续段,
+    # 也不触发 halt(拦截后模型换策略是正常路径)。
+    if failure_class.startswith("code:TOOL_GUARDRAIL"):
+        return
+    count = consecutive_same_failure_count(
+        tool_guardrail_records(agent),
+        record.call.tool_name,
+        failure_class,
+    )
+    if count < _repeated_failure_halt_threshold(record.params):
+        return
+    object.__setattr__(
+        record.params,
+        "repeated_failure_halt",
+        (record.call.tool_name, failure_class, count),
+    )
+    record.params.tool_context.append(
+        "[tool-system]\n"
+        f"工具 {record.call.tool_name} 已连续 {count} 次以同一失败类型({failure_class})失败，"
+        "判定为原地打转。停止继续调用该工具或同类操作，彻底更换策略；"
+        "本轮将按未完成状态强制收口。"
+    )
+
+
+# LLM: 同类失败强制收口时由模型基于真实工具记录给出诚实总结；与工具轮数
+# 耗尽同一套路——只总结、不再调用工具。
+def _final_response_after_repeated_failure(
+    agent, params: ToolLoopExecuteParams, tool_rounds: int
+):
+    final_prompt = build_tool_loop_prompt(agent, params)
+    final_response = generate_model_response(
+        ModelGenerateParams(
+            agent=agent,
+            params=params,
+            prompt=final_prompt,
+            tool_rounds=tool_rounds,
+        )
+    )
+    final_response = without_tool_call_after_limit(
+        params, final_response, reason="repeated_failure"
+    )
+    final_response = replace(
+        final_response,
+        runtime_status="unfinished",
+        runtime_reason="REPEATED_TOOL_FAILURE",
+        runtime_source="tool_loop",
+    )
+    return final_prompt, final_response
+
+
 def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
     from ..contracts.required_actions import settle_required_action
 
@@ -1003,6 +1088,7 @@ def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
         record.call,
         record.result,
     )
+    _mark_repeated_failure_halt(agent, record)
     if record.result.ok:
         record.params.executed_tools.append(record.result.tool_name)
     archive_record = archive_tool_call_record(agent, record)

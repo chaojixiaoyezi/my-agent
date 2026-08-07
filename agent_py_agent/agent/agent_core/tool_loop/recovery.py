@@ -21,6 +21,7 @@ from .round_execution import ToolCallRecordParams
 def without_tool_call_after_limit(
     params: ToolLoopExecuteParams,
     response: ModelResponse,
+    reason: str = "",
 ) -> ModelResponse:
     from ...backends.tool_protocol_adapter import (
         ProviderToolCallRequest,
@@ -41,6 +42,15 @@ def without_tool_call_after_limit(
     )
     if not adapted.calls and not adapted.violations:
         return response
+    if reason == "repeated_failure":
+        return replace(
+            response,
+            text=(
+                "同类工具失败已连续达到阈值，系统强制停止新的工具调用。"
+                "模型在收口阶段仍输出工具调用请求，后续工具请求不会被执行；"
+                "请彻底更换策略，不要原样重试，基于已有工具结果说明已做与未做的工作。"
+            ),
+        )
     return replace(
         response,
         text=(

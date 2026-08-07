@@ -106,6 +106,9 @@ class ToolLoopExecuteParams:
     workspace_context_snapshot: str = ""
     # 协议违规修复机会次数：模型输出格式偶发抖动时先给几次结构化重试再 break。
     max_protocol_repairs: int = 2
+    # 同一工具同类失败(同 failure_class,参数可不同)连续达阈值的强制收口标记
+    # (tool_name, failure_class, count)。模型需彻底换策略,不得原样重试。
+    repeated_failure_halt: tuple[str, str, int] | None = None
 
 
 @dataclass(frozen=True)
