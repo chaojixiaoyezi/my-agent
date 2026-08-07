@@ -104,6 +104,24 @@ def test_command_policy_allows_plain_read_only_command() -> None:
     assert decision.allowed is True
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git clone --depth=1 https://github.com/celery/celery.git celery_src",
+        "cd /tmp && git clone https://example.test/repo.git",
+        "git fetch origin main",
+        "git pull --rebase origin main",
+    ],
+)
+def test_command_policy_git_receive_subcommands_are_mutating_not_dangerous(command: str) -> None:
+    # 真机铁证(2026-08-08): git clone 归 dangerous 后,复刻任务下载源码撞
+    # APPROVAL_REQUIRED(审批无消费端)卡死。clone/fetch/pull 是网络接收+
+    # 沙箱内本地写,与 mkdir/cp 同级;git push 仍 dangerous(外发)。
+    analysis = analyze_command(command)
+
+    assert analysis.resolved_effect == "mutating"
+
+
 def test_command_policy_reports_unclosed_quote_as_repairable_parse_failure() -> None:
     decision = evaluate_command_policy("python -c 'print(1)")
 

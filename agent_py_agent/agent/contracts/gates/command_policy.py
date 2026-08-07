@@ -264,15 +264,15 @@ def _segment_classification(segment: CommandSegment) -> str:
     if executable in _MANAGED_DELETE_EXECUTABLES:
         return "dangerous"
     if executable in _EXTERNAL_SEND_EXECUTABLES:
-        if executable == "git" and _git_subcommand(args) in {
-            "branch",
-            "diff",
-            "log",
-            "rev-parse",
-            "show",
-            "status",
-        }:
-            return "read_only"
+        if executable == "git":
+            sub = _git_subcommand(args)
+            if sub in {"branch", "diff", "log", "rev-parse", "show", "status"}:
+                return "read_only"
+            if sub in {"clone", "fetch", "pull"}:
+                # 网络接收 + 沙箱内本地写，不是外发：与 mkdir/cp 同级 mutating。
+                # 归 dangerous 会让下载源码在 approval 无消费端的通道里卡死
+                # （真机铁证 2026-08-08：celery 复刻 git clone → APPROVAL_REQUIRED）。
+                return "mutating"
         return "dangerous"
     if executable == "git":
         return (
