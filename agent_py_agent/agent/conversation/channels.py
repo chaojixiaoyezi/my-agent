@@ -95,9 +95,12 @@ def _plain_user_reply_projection(text: str) -> UserReplyProjection:
         return UserReplyProjection(content="")
     sanitization = sanitize_user_visible_text(text)
     if sanitization.removed_protocol:
+        # 剥离协议后仍有正文 → 可交付给用户(与 natural_user_reply 的
+        # 接受语义一致,否则 M2.7 表达轮回执带 [TOOL_CALL] 块会整条
+        # USER_REPLY_UNAVAILABLE,用户收不到任何回复);剥离后为空才是纯内部信号。
         return UserReplyProjection(
             content=sanitization.content,
-            internal_signal=True,
+            internal_signal=not sanitization.content,
             projection_status=(
                 "internal_protocol_removed" if sanitization.content else "tool_envelope_removed"
             ),

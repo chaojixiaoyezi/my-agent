@@ -1283,7 +1283,7 @@ def test_delivery_projection_removes_fenced_tool_call_but_keeps_public_text() ->
     projection = project_user_reply(raw)
 
     assert projection.content == "明白，任务已接。\n\n我会读完源码后汇总。"
-    assert projection.internal_signal is True
+    assert projection.internal_signal is False
     assert projection.projection_status == "internal_protocol_removed"
     assert "task_progress" not in projection.content
 
@@ -1299,7 +1299,7 @@ def test_delivery_projection_removes_minimax_named_xml_tool_envelopes() -> None:
     projection = project_user_reply(raw)
 
     assert projection.content == "我先把几块工作分别推进。\n有可靠结果后我再一起说明。"
-    assert projection.internal_signal is True
+    assert projection.internal_signal is False
     assert projection.projection_status == "internal_protocol_removed"
     assert "task_progress" not in projection.content
     assert "spawn_subagent" not in projection.content
@@ -1311,7 +1311,7 @@ def test_delivery_projection_drops_truncated_named_xml_tool_tail() -> None:
     projection = project_user_reply(raw)
 
     assert projection.content == "我先开始核对。"
-    assert projection.internal_signal is True
+    assert projection.internal_signal is False
     assert projection.projection_status == "internal_protocol_removed"
 
 
@@ -1325,7 +1325,7 @@ def test_delivery_projection_strips_legacy_findings_ledger_block() -> None:
     projection = project_user_reply(raw)
 
     assert projection.content == "项目已经完成，全部测试通过。"
-    assert projection.internal_signal is True
+    assert projection.internal_signal is False
     assert projection.projection_status == "internal_protocol_removed"
     assert "rf-private" not in projection.content
 
