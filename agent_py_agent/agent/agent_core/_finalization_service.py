@@ -521,6 +521,7 @@ def _conversation_turn_is_terminal(ctx: FinalizeContext) -> bool:
         "background_dispatch",
         "wait",
         "repeated_tool_failure",
+        "repeated_tool_failure_exhausted",
     }
 
 
@@ -539,7 +540,9 @@ def _schedule_typed_unfinished_continuation(agent: object, ctx: FinalizeContext)
     if not str(attrs.get("thread_goal_id") or "").strip():
         return
     reason = str(getattr(ctx.final_response, "runtime_reason", "") or "").strip().upper()
-    if reason not in {"TASK_PROGRESS_OPEN", "TOOL_ROUND_LIMIT_REACHED"}:
+    # REPEATED_TOOL_FAILURE:软收口,任务未完成,自动续跑让模型换策略继续;
+    # EXHAUSTED 变体(收益递减/硬门)不在此列,等用户介入。
+    if reason not in {"TASK_PROGRESS_OPEN", "TOOL_ROUND_LIMIT_REACHED", "REPEATED_TOOL_FAILURE"}:
         return
     from ..conversation.runtime import ensure_goal_progress_continuation
     from .runtime.task_identity import durable_task_id

@@ -48,11 +48,18 @@ from .tool_context.call_reducer import render_tool_payload_for_live_prompt
 from .tool_context.reducer import render_tool_result_for_live_prompt
 from .tool_context.window import record_native_ir_window, window_tool_context_params
 from .tool_guard.call_guardrail import (
+    clear_consecutive_failure_segment,
     record_tool_guard_observation,
     tool_guardrail_records,
 )
 from .tool_guard.call_guardrail_config import (
-    repeat_fail_threshold as configured_repeat_fail_threshold,
+    hard_failure_halt_enabled as configured_hard_failure_halt_enabled,
+)
+from .tool_guard.call_guardrail_config import (
+    hard_failure_halt_threshold as configured_hard_failure_halt_threshold,
+)
+from .tool_guard.call_guardrail_config import (
+    repeated_failure_halt_threshold as configured_repeated_failure_halt_threshold,
 )
 from ..contracts.gates.tool_guardrail import (
     consecutive_same_failure_count,
@@ -1013,10 +1020,9 @@ def _final_response_after_tool_limit(agent, params: ToolLoopExecuteParams, tool_
 
 
 def _repeated_failure_halt_threshold(params: ToolLoopExecuteParams) -> int:
-    # guardrail 的 3N 次 DENY 先行；其后再犯同类错误 1 次即强制收口。
-    # N=1(测试)时 DENY 在第 3 次失败,阈值 4 保证不抢 DENY 语义。
-    threshold = configured_repeat_fail_threshold(params)
-    return max(3, 3 * threshold + 1)
+    # L2 阶梯:同工具同类失败连续达阈值即收口并自动续跑(不再跟随 guardrail
+    # 3N DENY;默认 8,可经 task_attributes/runtime_guard_policy 覆盖)。
+    return configured_repeated_failure_halt_threshold(params)
 
 
 def _mark_repeated_failure_halt(agent, record: ToolCallRecordParams) -> None:
@@ -1032,23 +1038,125 @@ def _mark_repeated_failure_halt(agent, record: ToolCallRecordParams) -> None:
         record.call.tool_name,
         failure_class,
     )
+    _soft_hint_after_failures(agent, record, count, failure_class)
     if count < _repeated_failure_halt_threshold(record.params):
         return
+    exhausted = _repeated_failure_exhausted(agent, record, count)
     object.__setattr__(
         record.params,
         "repeated_failure_halt",
         (record.call.tool_name, failure_class, count),
     )
+    object.__setattr__(record.params, "repeated_failure_halt_exhausted", exhausted)
+    if exhausted:
+        record.params.tool_context.append(
+            "[tool-system]\n"
+            f"工具 {record.call.tool_name} 已连续 {count} 次以同一失败类型({failure_class})失败，"
+            f"且已连续 {_repeated_failure_streak(agent)} 轮未取得任何成功工具结果"
+            f"{'(达到硬门阈值)' if _hard_halt_hit(agent, record, count) else ''}。"
+            "判定为无法自行脱困。本轮按未完成状态收口；请基于已有工具结果如实说明"
+            "已做与未做的工作，等待用户提供新思路后继续。"
+        )
+        return
+    # 软收口:本轮停止该工具,任务保持未完成并自动续跑;清掉该失败段,
+    # 下轮换策略后重新尝试同一工具时从 0 重新累计,不会一碰就再收口。
+    clear_consecutive_failure_segment(agent, record.call.tool_name, failure_class)
     record.params.tool_context.append(
         "[tool-system]\n"
         f"工具 {record.call.tool_name} 已连续 {count} 次以同一失败类型({failure_class})失败，"
-        "判定为原地打转。停止继续调用该工具或同类操作，彻底更换策略；"
-        "本轮将按未完成状态强制收口。"
+        "本轮停止调用该工具。任务未完成：请彻底更换策略，从另一个角度继续推进任务；"
+        "不要总结或宣告完成。"
     )
 
 
-# LLM: 同类失败强制收口时由模型基于真实工具记录给出诚实总结；与工具轮数
-# 耗尽同一套路——只总结、不再调用工具。
+# LLM: 四级阶梯的 L3 收益递减判定:连续多轮收口且每轮都没有任何成功工具结果
+# → 判定模型自愈不了,本轮起不再自动续跑,等用户介入换思路。
+def _repeated_failure_exhausted(
+    agent, record: ToolCallRecordParams, count: int
+) -> bool:
+    if _hard_halt_hit(agent, record, count):
+        return True
+    streak = _repeated_failure_streak(agent)
+    progressed = len(record.params.executed_tools) > 0
+    next_streak = 1 if progressed else streak + 1
+    _set_repeated_failure_streak(agent, next_streak)
+    return next_streak >= _REPEATED_FAILURE_EXHAUST_STREAK
+
+
+def _hard_halt_hit(agent, record: ToolCallRecordParams, count: int) -> bool:
+    # L4 真硬门:默认关闭;开启后同类失败达硬阈值即强制收口等用户。
+    if not configured_hard_failure_halt_enabled(record.params):
+        return False
+    return count >= configured_hard_failure_halt_threshold(record.params)
+
+
+# L3:连续软收口轮数上限,超过即判定自愈不了。
+_REPEATED_FAILURE_EXHAUST_STREAK = 3
+_STREAK_ATTR = "_repeated_failure_halt_streak"
+
+
+def _repeated_failure_streak(agent) -> int:
+    value = getattr(agent, _STREAK_ATTR, 0)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _set_repeated_failure_streak(agent, value: int) -> None:
+    object.__setattr__(agent, _STREAK_ATTR, value)
+
+
+# L1 软提示:同工具同类失败第 2 次即注入按失败类别的恢复指引(只提示一次,
+# 不拦调用)。指引按结构化 error_code 前缀分类,不依赖自然语言匹配。
+_RECOVERY_HINT_BY_CODE_PREFIX: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        ("code:TOOL_PARAMETER", "code:TOOL_ARGUMENT", "category:parameter"),
+        "工具参数类型或格式不正确。检查参数名称、类型与必填项，参考工具说明重新构造参数；不要原样重试。",
+    ),
+    (
+        ("code:TOOL_PERMISSION", "code:TOOL_AUTHORIZATION", "category:permission"),
+        "缺少执行权限或授权。换一个不需要该权限的途径完成任务，或向用户说明需要授权。",
+    ),
+    (
+        ("code:TOOL_EXECUTION_TIMEOUT", "code:TOOL_TIMEOUT", "category:timeout"),
+        "执行超时。把操作拆成更小步骤，或换一种实现方式（如直接读写文件代替长时间命令）。",
+    ),
+    (
+        ("code:TOOL_NOT_FOUND", "code:UNKNOWN_TOOL", "code:TOOL_UNKNOWN"),
+        "调用了不存在的工具。改用已注册工具，不要继续尝试该工具名。",
+    ),
+)
+
+
+def _soft_hint_after_failures(
+    agent,
+    record: ToolCallRecordParams,
+    count: int,
+    failure_class: str,
+) -> None:
+    if count != 2:
+        return
+    hint = _recovery_hint_for_failure_class(failure_class)
+    if not hint:
+        return
+    record.params.tool_context.append(
+        "[tool-system]\n"
+        f"工具 {record.call.tool_name} 已连续 {count} 次失败（{failure_class}）。{hint}"
+    )
+
+
+def _recovery_hint_for_failure_class(failure_class: str) -> str:
+    for prefixes, hint in _RECOVERY_HINT_BY_CODE_PREFIX:
+        if failure_class.startswith(prefixes):
+            return hint
+    return (
+        "该工具连续失败。停止原样重试，换一种做法：换工具、拆步骤、或换实现路径。"
+    )
+
+
+# LLM: 软收口(可自愈)时由模型基于真实工具记录给出 nudge 交接——保持未完成,
+# 换策略继续;硬收口(自愈不了/硬门)时给出诚实总结等用户。
 def _final_response_after_repeated_failure(
     agent, params: ToolLoopExecuteParams, tool_rounds: int
 ):
@@ -1061,16 +1169,25 @@ def _final_response_after_repeated_failure(
             tool_rounds=tool_rounds,
         )
     )
+    exhausted = _is_exhausted_halt(params)
     final_response = without_tool_call_after_limit(
-        params, final_response, reason="repeated_failure"
+        params,
+        final_response,
+        reason="repeated_failure" if not exhausted else "repeated_failure_exhausted",
     )
     final_response = replace(
         final_response,
         runtime_status="unfinished",
-        runtime_reason="REPEATED_TOOL_FAILURE",
+        runtime_reason=(
+            "REPEATED_TOOL_FAILURE_EXHAUSTED" if exhausted else "REPEATED_TOOL_FAILURE"
+        ),
         runtime_source="tool_loop",
     )
     return final_prompt, final_response
+
+
+def _is_exhausted_halt(params: ToolLoopExecuteParams) -> bool:
+    return bool(getattr(params, "repeated_failure_halt_exhausted", False))
 
 
 def _record_tool_call(agent, record: ToolCallRecordParams) -> None:

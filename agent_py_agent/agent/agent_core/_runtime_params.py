@@ -106,9 +106,13 @@ class ToolLoopExecuteParams:
     workspace_context_snapshot: str = ""
     # 协议违规修复机会次数：模型输出格式偶发抖动时先给几次结构化重试再 break。
     max_protocol_repairs: int = 2
-    # 同一工具同类失败(同 failure_class,参数可不同)连续达阈值的强制收口标记
-    # (tool_name, failure_class, count)。模型需彻底换策略,不得原样重试。
+    # 同一工具同类失败(同 failure_class,参数可不同)连续达阈值的收口标记
+    # (tool_name, failure_class, count)。软收口后任务保持未完成并自动续跑,
+    # 模型需彻底换策略继续推进;exhausted 为 True 时是收益递减/硬门真收口,
+    # 等待用户介入。
     repeated_failure_halt: tuple[str, str, int] | None = None
+    # 真收口标记:True 时本轮不再自动续跑,等用户提供新思路。
+    repeated_failure_halt_exhausted: bool = False
 
 
 @dataclass(frozen=True)

@@ -63,6 +63,37 @@ def record_tool_guard_observation(
     return decision.model_message if decision.allowed and decision.findings else ""
 
 
+def clear_consecutive_failure_segment(
+    agent: object,
+    tool_name: str,
+    failure_class: str,
+) -> None:
+    """清掉某工具某失败类的尾部连续段,使计数从 0 重新累计。
+
+    收口后调用:模型换策略重新尝试同一工具时,不应因为历史段未清而
+    一碰就再次收口。边界规则与 consecutive_same_failure_count 一致
+    (同工具成功/不同失败类/guardrail 自身记录都不在段内)。
+    """
+    records = list(tool_guardrail_records(agent))
+    if not records:
+        return
+    drop_indices: set[int] = set()
+    for i in range(len(records) - 1, -1, -1):
+        record = records[i]
+        if str(record.get("tool_name") or "") != tool_name:
+            continue
+        current_class = str(record.get("failure_class") or "")
+        if current_class.startswith("code:TOOL_GUARDRAIL"):
+            continue
+        if record.get("failed") is not True or current_class != failure_class:
+            break
+        drop_indices.add(i)
+    if not drop_indices:
+        return
+    remaining = [r for i, r in enumerate(records) if i not in drop_indices]
+    _set_tool_guardrail_records(agent, tuple(remaining))
+
+
 def _facts_from_result(
     runtime_params: object,
     call: ToolCall,
