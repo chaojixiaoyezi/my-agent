@@ -43,12 +43,14 @@ def _agent(
     native_supported: bool,
     protocol: str = "native",
     enable_tools: bool = True,
+    text_models: list[str] | None = None,
 ) -> SimpleNamespace:
     backend = _Backend(native_supported=native_supported)
     return SimpleNamespace(
         config=SimpleNamespace(
             tool_protocol=protocol,
             enable_tools=enable_tools,
+            tool_protocol_text_models=list(text_models or []),
         ),
         backend=backend,
     )
@@ -100,3 +102,45 @@ def test_tools_disabled_selects_non_native_snapshot_without_probe() -> None:
 def test_native_tool_use_requires_run_fixed_protocol_snapshot() -> None:
     with pytest.raises(RuntimeError, match="tool protocol snapshot is missing"):
         native_tool_use_active(SimpleNamespace())
+
+
+def test_model_in_text_models_skips_probe_and_selects_text() -> None:
+    # deepseek-v4-flash 真机实证(2026-08-07):flash 类非 reasoning 模型配 native 静默失效
+    # (0 工具调用+幻觉,只见只读查询从不写文件),名单内模型必须显式走 text。
+    agent = _agent(native_supported=True, text_models=["deepseek-v4-flash"])
+    agent.backend.model_name = "deepseek-v4-flash"
+
+    snapshot = select_tool_protocol(agent, run_id="run-text-model")
+
+    assert snapshot.source_protocol == "text"
+    assert snapshot.capability.evidence == "model_declared_text_protocol_configuration"
+    assert agent.backend.probes == 0
+    assert native_tool_use_active(SimpleNamespace(tool_protocol_snapshot=snapshot)) is False
+
+
+def test_model_not_in_text_models_probes_native_as_usual() -> None:
+    agent = _agent(native_supported=True, text_models=["other-model"])
+
+    snapshot = select_tool_protocol(agent, run_id="run-native-other")
+
+    assert snapshot.source_protocol == "native"
+    assert agent.backend.probes == 1
+
+
+def test_empty_text_models_leaves_native_probe_untouched() -> None:
+    agent = _agent(native_supported=True, text_models=[])
+
+    snapshot = select_tool_protocol(agent, run_id="run-native-empty-list")
+
+    assert snapshot.source_protocol == "native"
+    assert agent.backend.probes == 1
+
+
+def test_text_models_ignored_when_protocol_explicitly_text() -> None:
+    # 显式 text 已走最短路径;名单不改变行为,仅确保不 probe。
+    agent = _agent(native_supported=True, protocol="text", text_models=["deepseek-v4-flash"])
+
+    snapshot = select_tool_protocol(agent, run_id="run-text-explicit")
+
+    assert snapshot.source_protocol == "text"
+    assert agent.backend.probes == 0

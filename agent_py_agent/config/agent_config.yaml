@@ -782,6 +782,11 @@ tool_embedding_api_key_env: ""
 # provider + endpoint + model + stream 是否支持原生 tool_use；text 只用于明确配置的
 # 非原生端点或协议调试。一个 run 内不会切换协议，native 失败也不会由 text 中途接管。
 tool_protocol: "native"
+# 显式声明必须走 text 协议（跳过 native probe）的模型名单，如 flash 类非 reasoning
+# 模型配 native 会静默失效（0 工具调用+幻觉，真机实证 2026-08-07 deepseek-v4-flash）。
+# 例：tool_protocol_text_models: ["text-01", "minimax"]
+# 空列表 = 全部模型照常 native probe；名单内模型由部署方显式配对 text。
+tool_protocol_text_models: []
 
 # MCP 客户端（短板6）：连接外部 MCP server（Model Context Protocol，JSON-RPC over stdio），
 # 把社区现成工具（GitHub/数据库/Slack 等）动态注册成 mcp__<server>__<tool> 前缀的工具，

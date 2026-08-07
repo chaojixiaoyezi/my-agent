@@ -39,6 +39,16 @@ def select_tool_protocol(agent: object, *, run_id: str) -> ToolProtocolSnapshot:
             evidence="explicit_text_protocol_configuration",
         )
         return ToolProtocolSnapshot(run_id, _TEXT_PROTOCOL, capability)
+    if _model_declared_text_protocol(config, backend):
+        # 模型名单显式声明(配置 tool_protocol_text_models):该模型不参与 native probe,
+        # 直接走 text。非 reasoning 模型配 native 会静默失效(0 工具调用+幻觉,真机实证
+        # 2026-08-07 deepseek-v4-flash),名单是部署方显式配对,不是猜测。
+        capability = _declared_capability(
+            backend,
+            native_supported=False,
+            evidence="model_declared_text_protocol_configuration",
+        )
+        return ToolProtocolSnapshot(run_id, _TEXT_PROTOCOL, capability)
 
     probe = getattr(backend, "probe_tool_capability", None)
     capability = probe() if callable(probe) else _declared_capability(
@@ -95,6 +105,17 @@ def resolve_native_tools(agent: object, params: object) -> list[dict[str, Any]] 
     )
     tools = tool_model_specs_to_anthropic_tools(specs)
     return tools or None
+
+
+def _model_declared_text_protocol(config: object, backend: object) -> bool:
+    """True when the backend's model name is in the explicit text-protocol list."""
+    configured = getattr(config, "tool_protocol_text_models", None)
+    if not isinstance(configured, list) or not configured:
+        return False
+    model = str(getattr(backend, "model_name", "") or "").strip()
+    if not model:
+        return False
+    return model in {str(item or "").strip() for item in configured if str(item or "").strip()}
 
 
 def _declared_capability(
