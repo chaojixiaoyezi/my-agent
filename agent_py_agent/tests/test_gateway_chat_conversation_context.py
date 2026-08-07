@@ -2880,6 +2880,52 @@ def test_new_ordinary_turn_reuses_sticky_workspace_without_switch_command(tmp_pa
     assert links["gw-new"] == "active"
 
 
+def test_sticky_workspace_superseded_falls_back_to_reusable_task(tmp_path):
+    # sticky 指向 superseded 任务时,普通轮次回退复用最近的可复用任务目录,
+    # 不因 sticky 失效而开新任务目录(真机 2026-08-08:用户连续消息被截断成
+    # 新任务名,模型在新目录找不到旧产物,复刻任务停摆)。
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_sticky_superseded",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    first = _conversation_context(agent, request, "gw-first", "把 scrapy 用 Go 重写")
+    workspace = Path(agent.home_paths.owner_home_dir) / "tasks" / "scrapy-go"
+    (workspace / "output").mkdir(parents=True)
+    (workspace / "work").mkdir()
+    for task_id in ("task-prev", "task-old"):
+        agent.conversation_store.bind_task(
+            {
+                "thread_id": first.thread_id,
+                "task_id": task_id,
+                "goal": "scrapy 复刻",
+                "status": "active" if task_id == "task-old" else "completed",
+                "task_path": str(workspace),
+            }
+        )
+    # sticky 指向 task-old,然后它被标记 superseded(sticky 仍指向它)
+    agent.conversation_store.select_workspace_task(
+        {"thread_id": first.thread_id, "task_id": "task-old"}
+    )
+    agent.conversation_store.update_task_status(
+        {"task_id": "task-old", "status": "superseded"}
+    )
+
+    followup = _conversation_context(agent, request, "gw-new", "继续写解析器")
+    attrs = _gateway_task_attributes(followup)
+
+    assert attrs is not None
+    assert attrs["conversation_task_id"] == "task-prev"
+    assert attrs["run_workspace"]["task_root"] == str(workspace)
+
+
 def test_interrupted_workspace_is_reused_at_first_work_tool_without_selection(tmp_path):
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path

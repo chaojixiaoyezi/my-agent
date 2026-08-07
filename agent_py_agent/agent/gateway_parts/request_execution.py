@@ -1490,29 +1490,33 @@ def _gateway_workspace_task(
                     "gateway.conversation.workspace_task",
                 )
             )
-            return None
-        if selected not in selectable:
-            return None
-    else:
-        goal_task_id = str((thread_goal or {}).get("task_id") or "").strip()
-        if goal_task_id:
-            selected = next(
-                (
-                    link
-                    for link in selectable
-                    if str(getattr(link, "task_id", "") or "") == goal_task_id
-                ),
-                None,
-            )
-            strict_selection = selected is not None
-        if selected is None:
-            with_paths = [
+        elif selected not in selectable:
+            # sticky 指向的任务已不可复用(如 superseded/取消)时回退常规选择,
+            # 不能因此让本轮开新任务目录——真机(2026-08-08):用户连续消息被
+            # 截断成新任务名,模型在新目录找不到旧产物,复刻任务停摆。
+            selected = None
+            strict_selection = False
+    goal_task_id = str((thread_goal or {}).get("task_id") or "").strip()
+    if goal_task_id:
+        selected = next(
+            (
                 link
                 for link in selectable
-                if _existing_gateway_workspace_path(getattr(link, "task_path", ""))
-            ]
-            if len(with_paths) == 1:
-                selected = with_paths[0]
+                if str(getattr(link, "task_id", "") or "") == goal_task_id
+            ),
+            None,
+        )
+        strict_selection = strict_selection or selected is not None
+    if selected is None:
+        # 同路径的多条历史链接算一个工作区;去重后唯一才可隐式继承,
+        # 否则同一目录反复续跑会被 len>1 误判为"多个候选"而开新任务。
+        unique_paths = {
+            path: link
+            for link in selectable
+            if (path := _existing_gateway_workspace_path(getattr(link, "task_path", "")))
+        }
+        if len(unique_paths) == 1:
+            selected = next(iter(unique_paths.values()))
     if selected is None:
         return None
     task_path = _existing_gateway_workspace_path(getattr(selected, "task_path", ""))
