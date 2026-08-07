@@ -1517,6 +1517,11 @@ def _gateway_workspace_task(
         }
         if len(unique_paths) == 1:
             selected = next(iter(unique_paths.values()))
+        elif len(unique_paths) > 1:
+            # 多个候选工作区时同会话普通消息默认延续最近创建的可复用任务,
+            # 不因多候选而开新任务目录(开新任务会让用户消息截断成目录名,
+            # 模型在新目录找不到旧产物,真机 2026-08-08 scrapy 复刻停摆三连)。
+            selected = next(reversed(list(unique_paths.values())))
     if selected is None:
         return None
     task_path = _existing_gateway_workspace_path(getattr(selected, "task_path", ""))
