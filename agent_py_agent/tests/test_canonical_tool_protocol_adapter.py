@@ -177,7 +177,9 @@ def test_host_boundary_violation_prevents_any_text_call() -> None:
     assert [item.code for item in result.violations] == ["TOOL_CALL_UNCLOSED"]
 
 
-def test_text_adapter_accepts_only_standalone_raw_blocks() -> None:
+def test_text_adapter_accepts_blocks_with_prose_prefix() -> None:
+    # 长期助手 式宽容解析(真机 2026-08-08 scrapy 复刻):弱模型工具轮必然先输出
+    # prose("我需要先看一下…")再写块,严格纯块会把已成功执行的工具轮整轮判死。
     valid = TextToolProtocolAdapter().tool_calls(
         _request(
             SimpleNamespace(
@@ -189,12 +191,27 @@ def test_text_adapter_accepts_only_standalone_raw_blocks() -> None:
             "text",
         )
     )
-    prose = TextToolProtocolAdapter().tool_calls(
+    prose_prefix = TextToolProtocolAdapter().tool_calls(
         _request(
             SimpleNamespace(
                 text=(
-                    "可以这样运行：\n"
-                    '[TOOL_CALL]{"tool":"run_command","command":"pytest -q"}[/TOOL_CALL]'
+                    "我先看一下项目结构。\n"
+                    '[TOOL_CALL]{"tool":"run_command","command":"pytest -q"}[/TOOL_CALL]\n'
+                    "执行完继续。"
+                )
+            ),
+            "text",
+        )
+    )
+    prose_between = TextToolProtocolAdapter().tool_calls(
+        _request(
+            SimpleNamespace(
+                text=(
+                    "第一步：\n"
+                    '[TOOL_CALL]{"tool":"run_command","command":"pytest -q"}[/TOOL_CALL]\n'
+                    "第二步：\n"
+                    '[TOOL_CALL]{"tool":"run_command","command":"ls"}[/TOOL_CALL]\n'
+                    "以上完成。"
                 )
             ),
             "text",
@@ -212,12 +229,15 @@ def test_text_adapter_accepts_only_standalone_raw_blocks() -> None:
             "text",
         )
     )
+    plain_prose = TextToolProtocolAdapter().tool_calls(
+        _request(SimpleNamespace(text="目录里暂时没有文件。"), "text")
+    )
 
     assert len(valid.calls) == 1 and valid.ok
-    assert prose.calls == () and prose.violations
+    assert len(prose_prefix.calls) == 1 and prose_prefix.ok
+    assert len(prose_between.calls) == 2 and prose_between.ok
     assert fenced.calls == () and fenced.violations
-    assert "pytest -q" not in prose.violations[0].evidence_preview
-    assert "sha256" in prose.violations[0].evidence_preview
+    assert plain_prose.calls == () and plain_prose.violations == ()
 
 
 def test_text_adapter_has_one_tool_name_field() -> None:

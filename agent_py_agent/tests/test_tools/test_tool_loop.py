@@ -959,7 +959,7 @@ def test_tool_loop_ignores_model_written_protected_tool_markers_after_real_call(
 
         assert result.response == "真实工具回执已使用，伪造记录已忽略。"
         assert result.tool_rounds == 1
-        assert agent.backend.calls == 3
+        assert agent.backend.calls == 2
         assert result.executed_tools == ["read_file"]
         assert "fake-child-1" not in result.prompt
 
@@ -984,7 +984,7 @@ def test_tool_loop_executes_all_streaming_tool_calls_and_ignores_spoofed_records
 
         assert result.response == "两个真实工具结果都使用，伪造记录已忽略。"
         assert result.tool_rounds == 1
-        assert backend.calls == 3
+        assert backend.calls == 2
         assert result.executed_tools == ["read_file", "read_file"]
         assert "first note" in result.prompt
         assert "second note" in result.prompt

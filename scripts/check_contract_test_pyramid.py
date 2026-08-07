@@ -33,7 +33,10 @@ REFERENCE_PROJECTS = {
 }
 
 PRODUCTION_TASK_SPECIFIC_NEEDLES = (
-    "deepseek",
+    # 注意:本名单只放【测试任务特有的内容】(任务名/任务主题),不放通用术语。
+    # deepseek 曾入名单(2026-05 防测试任务把模型名写进生产代码),其污染源已删;
+    # 但 "DeepSeek" 是通用模型名,生产代码注释/名单里引用模型名是正当工程记录,
+    # 子串匹配会反复误报(2026-08-08 completion.py 真机观察注释中招),故移除。
     "论文翻译",
     "github升星",
     "github star",

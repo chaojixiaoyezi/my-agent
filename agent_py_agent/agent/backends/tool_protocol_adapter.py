@@ -343,22 +343,34 @@ def _native_prose_violation(text: str) -> ToolProtocolViolation | None:
 
 
 def _parse_standalone_text_blocks(text: str) -> tuple[list[dict[str, Any]], str]:
+    # 长期助手 式宽容解析(真机 2026-08-08 scrapy 复刻):弱模型(falsh 类)在工具轮
+    # 几乎必然先输出 prose("我需要先看一下…")再写 [TOOL_CALL] 块,严格"纯块"
+    # 会把已成功执行的工具轮整轮判 violation 杀死。语义:有合法块就提取执行,
+    # 块与块之间的 prose 忽略;完全没有块标记=普通文本回复(非违规);有标记但
+    # 没有形成合法块(未闭合/JSON 损坏/围栏包裹)才是协议违规。
     if _TEXT_OPEN not in text and _TEXT_CLOSE not in text:
         return [], ""
     payloads: list[dict[str, Any]] = []
     cursor = 0
     length = len(text)
-    while cursor < length:
-        while cursor < length and text[cursor].isspace():
-            cursor += 1
-        if cursor >= length:
+    while True:
+        open_at = text.find(_TEXT_OPEN, cursor)
+        if open_at < 0:
             break
-        if not text.startswith(_TEXT_OPEN, cursor):
-            return [], "text tool response contains prose or a fenced/code representation"
-        body_start = cursor + len(_TEXT_OPEN)
+        body_start = open_at + len(_TEXT_OPEN)
         close = text.find(_TEXT_CLOSE, body_start)
         if close < 0:
             return [], "text tool block is not closed"
+        # 块被 markdown 围栏包裹(仅空白相隔)=模型在展示示例而非发起调用,仍判
+        # 违规;普通 prose 前缀(「我先看一下…」)宽容提取,这是弱模型真实输出形态。
+        before = open_at
+        while before > 0 and text[before - 1].isspace():
+            before -= 1
+        after = close + len(_TEXT_CLOSE)
+        while after < length and text[after].isspace():
+            after += 1
+        if text[max(0, before - 3) : before] == "```" or text[after : after + 3] == "```":
+            return [], "text tool block must not be wrapped in Markdown fences"
         raw = text[body_start:close].strip()
         if not raw or "```" in raw or "`" in raw:
             return [], "text tool block must contain raw JSON, not Markdown"
@@ -373,7 +385,9 @@ def _parse_standalone_text_blocks(text: str) -> tuple[list[dict[str, Any]], str]
             return [], "text tool block is missing tool name"
         payloads.append(dict(payload))
         cursor = close + len(_TEXT_CLOSE)
-    return payloads, "" if payloads else ""
+    if not payloads:
+        return [], "text tool response has tool markers but no valid standalone block"
+    return payloads, ""
 
 
 def _required_action_id(tool_name: str, actions: tuple[object, ...]) -> str:

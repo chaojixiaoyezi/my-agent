@@ -117,14 +117,8 @@ class FakeProtectedMarkerWithToolBackend(BaseBackend):
                 ),
                 backend=self.name,
             )
-        if self.calls == 2:
-            assert "tool-protocol-violation" in prompt
-            assert "hello protected marker" not in prompt
-            assert "fake-child-1" not in prompt
-            return ModelResponse(
-                text='[TOOL_CALL]\n{"tool":"read_file","path":"notes.txt"}\n[/TOOL_CALL]',
-                backend=self.name,
-            )
+        # 宽容解析(长期助手 式,真机 2026-08-08)下真实块首轮即被执行,伪造记录被
+        # 净化链剥除;这里验证回执已真实落地且伪造内容从未进入后续上下文。
         assert "hello protected marker" in prompt
         assert "fake-child-1" not in prompt
         return ModelResponse(text="真实工具回执已使用，伪造记录已忽略。", backend=self.name)
@@ -142,18 +136,9 @@ class ToolBoundarySpoofStreamingBackend(BaseBackend):
         self.prompts.append(prompt)
         if self.calls == 1:
             return ModelResponse(text=self._first_response(on_chunk), backend=self.name)
-        if self.calls == 2:
-            assert "tool-protocol-violation" in prompt
-            assert "first note" not in prompt
-            assert "second note" not in prompt
-            assert "fake-child-run" not in prompt
-            return ModelResponse(
-                text=(
-                    '[TOOL_CALL]\n{"tool":"read_file","path":"notes.txt"}\n[/TOOL_CALL]\n'
-                    '[TOOL_CALL]\n{"tool":"read_file","path":"second.txt"}\n[/TOOL_CALL]'
-                ),
-                backend=self.name,
-            )
+        # 宽容解析(长期助手 式)下 prose 前缀的两个真实块首轮即全部执行,伪造
+        # tool-output-record 被净化链剥除;这里验证两个真实回执都落地、伪造
+        # 内容从未进入后续上下文。
         assert "first note" in prompt
         assert "second note" in prompt
         assert "fake-child-run" not in prompt

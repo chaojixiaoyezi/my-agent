@@ -79,6 +79,21 @@ def task_progress_continuation_decision(
         return TaskProgressContinuationDecision(False, "conversation_scoped")
     if str(getattr(result, "runtime_status", "ok") or "ok").strip().lower() != "ok":
         return TaskProgressContinuationDecision(False, "not_ok")
+    # 表达轮收尾(wait/subagents_active 等)是挂起语义:turn 结束、run 终止,
+    # 后续推进由 wait 定时器/唤醒链在新的 run 里继续,不能在请求内续跑。
+    # runtime_source=model_user_reply 只有 finish_natural_user_reply 表达轮会
+    # 设置,普通中间汇报(reason=tool_result)不受影响。若在此续跑,PLANNING
+    # 子代理会再触发 subagents_active 表达轮,与续跑无限交替(2026-08-07
+    # 测试铁证:wait 收尾薄视图轮 verdict=finish 后仍出现第 4/6/8 轮)。
+    if str(getattr(result, "runtime_source", "") or "") == "model_user_reply":
+        return TaskProgressContinuationDecision(False, "reply_round_closed")
+    # 后台主代理唤醒轮(非阻塞甩手掌柜叫回,source=background_main_agent)是
+    # 「读状态、给回执」语义:任务推进由协作 case/wait 定时器/新的 wake 信号
+    # 驱动,唤醒轮不得替 root task 续跑。若在此续跑,唤醒执行会与续跑互相
+    # 触发,一次 tick 跑两轮完整循环(2026-08-07 测试铁证:协作唤醒 6 次模型
+    # 调用 vs 预期 3)。gateway/chat 前台轮不受影响。
+    if str(getattr(params, "source", "") or "") == "background_main_agent":
+        return TaskProgressContinuationDecision(False, "background_wake_round")
     task_id = _ledger_key(agent, params)
     if not task_id:
         return TaskProgressContinuationDecision(False, "no_task_id")

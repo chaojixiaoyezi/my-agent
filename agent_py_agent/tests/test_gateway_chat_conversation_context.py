@@ -1797,6 +1797,11 @@ def test_current_turn_automatically_binds_sticky_workspace_without_overwriting_g
     try:
         selected = promote_current_conversation_task(agent)
         TaskProgressTool(agent).execute({"action": "update", "summary": "继续整理中"})
+        # read 必须与 update 走同一账本解析(progress_ledger_id 按 task_path 指纹
+        # 寻址,真机实证 2026-08-07 celery 复刻):显式字面 run_id 是跨任务逃生口,
+        # 按字面 task-old 读指纹账本=读错位=空。故不传 run_id 且在 run 参数存活
+        # 期内执行,验证 sticky 绑定后账本写读延续。
+        progress = json.loads(TaskProgressTool(agent).execute({"action": "read"}).output)
         reused = promote_current_conversation_task(agent, goal="不应覆盖旧目标")
     finally:
         delattr(agent, "_current_run_params")
@@ -1804,9 +1809,6 @@ def test_current_turn_automatically_binds_sticky_workspace_without_overwriting_g
     assert selected is not None
     assert params.task_attributes["conversation_task_id"] == "task-old"
     assert params.task_attributes["run_workspace"]["task_root"] == str(workspace)
-    progress = json.loads(
-        TaskProgressTool(agent).execute({"action": "read", "run_id": "task-old"}).output
-    )
     assert progress["summary"] == "继续整理中"
     assert reused.goal == "整理季度报告"
     assert reused.task_path == str(workspace)
