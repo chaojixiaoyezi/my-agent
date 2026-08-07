@@ -4,7 +4,10 @@ import json
 from dataclasses import replace
 
 from ...backends import ModelResponse
-from ...conversation.user_visible_text import contains_internal_protocol
+from ...conversation.user_visible_text import (
+    contains_internal_protocol,
+    sanitize_user_visible_text,
+)
 from .._runtime_params import ToolLoopExecuteParams
 
 _STATE_KEY = "_pending_natural_user_reply"
@@ -129,7 +132,13 @@ def natural_user_reply_rejection_reason(
     text = str(getattr(response, "text", "") or "").strip()
     if not text:
         return "empty_text"
-    if contains_internal_protocol(text):
+    # internal_protocol 只拒绝「剥离协议信封后没有任何可交付正文」的回复。
+    # 真机铁证(2026-08-07, M2.7 表达轮):模型把工具调用降级成正文
+    # [TOOL_CALL]...[/TOOL_CALL] 块,剥离后仍剩自然正文(「让我先看下…」);
+    # 整条拒绝会让表达轮 25-40% 失败。剥离后非空 → 接受,交付时交付剥离
+    # 后正文(与 structured_tool_call 的 salvage 先例同一语义)。
+    sanitized = sanitize_user_visible_text(text)
+    if sanitized.removed_protocol and not sanitized.content:
         return "internal_protocol"
     return ""
 
@@ -170,19 +179,15 @@ def finish_natural_user_reply(
         # providers nevertheless attach a structured tool_use block to an
         # otherwise valid natural-language reply.  The first occurrence is
         # still retried above; after the bounded retry, discard that
-        # unauthorized machine block and preserve only text which passes the
-        # same internal-protocol boundary as every other user reply.  This is
-        # a structural decision (no tools were authorized), not a guess based
-        # on the wording of the reply.
-        text = str(response.text or "").strip()
-        if (
-            rejection_reason == "structured_tool_call"
-            and text
-            and not contains_internal_protocol(text)
-        ):
+        # unauthorized machine block and preserve only the sanitized prose
+        # (protocol envelopes stripped, same boundary as every user reply).
+        # This is a structural decision (no tools were authorized), not a
+        # guess based on the wording of the reply.
+        sanitized = sanitize_user_visible_text(response.text)
+        if rejection_reason == "structured_tool_call" and sanitized.content:
             return replace(
                 response,
-                text=text,
+                text=sanitized.content,
                 runtime_status=runtime_status,
                 runtime_reason=runtime_reason,
                 runtime_source=(
@@ -204,7 +209,7 @@ def finish_natural_user_reply(
         )
     return replace(
         response,
-        text=str(response.text or "").strip(),
+        text=sanitize_user_visible_text(response.text).content,
         runtime_status=runtime_status,
         runtime_reason=runtime_reason,
         runtime_source=runtime_source,
