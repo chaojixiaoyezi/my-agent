@@ -412,29 +412,39 @@ def _has_unfinished_subagent_run(owner_home: Path) -> bool:
     return False
 
 
-def _has_unfinished_task_ledger(owner_home: Path) -> bool:
-    """owner 名下普通任务账本是否有未完成的(tasks/<date>/<name>/work/state.json 的 status)。
+def unfinished_task_ids(owner_home: Path) -> list[str]:
+    """owner 名下未完成任务账本的 task_id 列表(tasks/<date>/<name>/work/state.json 的 status)。
 
-    子代理投影在 ``agents/``,solo 任务账本在 ``tasks/`` 按日分目录。主代理要靠 tick 驱动
-    续跑;gateway 重启/逐出后发现层不认 RUNNING 账本 → owner 永不进池 → 任务停摆
-    (真机:celery 复刻 RUNNING 6h 无人驱动,主代理会话停在闸门拦截处)。与
-    _has_unfinished_subagent_run 同构:非终态即还需被驱动;坏文件跳过;倒序扫新日期
-    优先(活跃任务总在最近日期目录),命中即停。"""
+    子代理投影在 ``agents/``,solo 任务账本在 ``tasks/`` 按日分目录。发现层用它判硬事实,
+    后台 tick 用它把 RUNNING 任务落成续跑 wake——两处同一把尺。与 _has_unfinished_subagent_run
+    同构:非终态即还需被驱动;坏文件跳过;倒序扫新日期优先(活跃任务总在最近日期目录)。"""
     tasks_root = owner_home / "tasks"
     if not tasks_root.is_dir():
-        return False
+        return []
     try:
         task_files = sorted(tasks_root.glob("*/*/work/state.json"), reverse=True)
     except OSError:
-        return False
+        return []
+    unfinished: list[str] = []
     for path in task_files:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, ValueError):
             continue
         if isinstance(payload, dict) and str(payload.get("status") or "").strip().upper() in _UNFINISHED_RUN_STATUSES:
-            return True
-    return False
+            task_id = str(payload.get("task_id") or "").strip()
+            if task_id:
+                unfinished.append(task_id)
+    return unfinished
+
+
+def _has_unfinished_task_ledger(owner_home: Path) -> bool:
+    """owner 名下普通任务账本是否有未完成的(见 unfinished_task_ids)。
+
+    主代理要靠 tick 驱动续跑;gateway 重启/逐出后发现层不认 RUNNING 账本 → owner
+    永不进池 → 任务停摆(真机:celery 复刻 RUNNING 6h 无人驱动,主代理会话停在闸门
+    拦截处)。"""
+    return bool(unfinished_task_ids(owner_home))
 
 
 def _has_incomplete_watch_lane(owner_home: Path) -> bool:

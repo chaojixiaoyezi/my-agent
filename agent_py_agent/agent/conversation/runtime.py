@@ -3646,6 +3646,7 @@ class _BackgroundSchedulerTickMixin:
         self._process_collaboration_cases(now=current)
         _maybe_supervise_orphans(self, current)
         self._enqueue_scheduler_runs(now=current)
+        self._enqueue_unfinished_task_resume_wakes(now=current)
         reports: list[BackgroundMainAgentReport] = []
         reported = _consume_pending_wake_signals(self, reports, current)
         _consume_observation_batches(self, reports, reported, current)
@@ -3660,6 +3661,51 @@ class _BackgroundSchedulerTickMixin:
         CollaborationCoordinator(
             store=self.collaboration_store, conversation_store=self.store
         ).tick(now=now)
+
+    def _enqueue_unfinished_task_resume_wakes(self, *, now: float) -> None:
+        """任务账本 RUNNING → 落一条 dedupe wake,让主代理续跑(claim/执行链全复用)。
+
+        真机:celery 复刻 RUNNING 6h 无人驱动——发现层已把 RUNNING 任务判为硬事实进池,
+        但 tick 只消费 wake/policy,没有消费者会把账本变成待驱动信号,主代理永远不被
+        拉起。这里把每个未完成任务的 task_id 反查会话线程(store 的 tasks/<id>.json
+        链接),按 dedupe_key 落 wake:同一任务同一轮不重复写(已有 pending wake 命中
+        返回),消费后下一轮再写 → 每 tick 一轮续跑直到任务终态。"""
+        try:
+            home = getattr(getattr(self, "runtime", None), "agent", None)
+            owner_home = getattr(getattr(home, "home_paths", None), "owner_home_dir", None)
+            if not owner_home:
+                return
+            from ..owner_wake_discovery import unfinished_task_ids
+
+            for task_id in unfinished_task_ids(Path(owner_home)):
+                try:
+                    thread = self.store.thread_for_task(task_id)
+                    if thread is None:
+                        continue  # 会话链接未建(任务没挂到线程)→ 下轮再试
+                    links, _link_errors = self.store.task_links_report(thread.thread_id)
+                    if _link_errors:
+                        continue
+                    if any(
+                        str(link.work_kind or "").strip().lower() in {"audit", "goal"}
+                        for link in links
+                        if str(link.task_id or "").strip() == task_id
+                    ):
+                        continue  # audit/goal 有自己的唤醒通道,续跑 wake 会双重拉起主代理
+                    self.store.raise_wake_signal(
+                        {
+                            "thread_id": thread.thread_id,
+                            "urgency": "normal",
+                            "reason": "task_ledger_resume",
+                            "root_task_id": task_id,
+                            "source_agent_id": "task-ledger-resume",
+                            "summary": task_id,
+                            "dedupe_key": f"task-resume:{task_id}",
+                        }
+                    )
+                except Exception:
+                    _HEARTBEAT_LOGGER.warning("task resume wake enqueue failed", exc_info=True)
+        except Exception:
+            _HEARTBEAT_LOGGER.warning("task resume wake scan failed", exc_info=True)
 
     def _enqueue_scheduler_runs(self, *, now: float) -> None:
         if self.scheduler_service is None:
