@@ -340,6 +340,60 @@ def test_owner_with_only_terminal_runs_not_discovered(tmp_path) -> None:
     assert discover_wake_pending_owners(owners) == []
 
 
+def _write_task(owner_home: Path, day: str, name: str, status: str) -> None:
+    work_dir = owner_home / "tasks" / day / name / "work"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    (work_dir / "state.json").write_text(
+        json.dumps({"task_id": name, "status": status}),
+        encoding="utf-8",
+    )
+
+
+def test_owner_with_running_solo_task_is_discovered(tmp_path) -> None:
+    """H 批:普通任务账本 RUNNING(非子代理投影)也是待驱动硬事实——否则重启/逐出后
+    owner 永不进池,任务停摆(真机 celery 复刻 RUNNING 6h 无人驱动)。"""
+    owners = tmp_path / "owners"
+    home = _owner_home(owners, "unknown", "users", "u-celery")
+    _write_task(home, "2026-08-08", "继续把-celery-用-go-语言复刻完", "RUNNING")
+
+    page = discover_wake_pending_owner_page(owners, limit=16)
+
+    assert [o.owner_id for o in page.owners] == ["u-celery"]
+    assert [o.owner_id for o in page.hard_owners] == ["u-celery"]
+    assert page.soft_owners == ()
+
+
+def test_owner_with_only_terminal_tasks_not_discovered(tmp_path) -> None:
+    owners = tmp_path / "owners"
+    home = _owner_home(owners, "unknown", "users", "u-tdone")
+    for status in ["DONE", "CANCELLED", "FAILED", "ABANDONED", "PAUSED"]:
+        _write_task(home, "2026-08-08", f"task-{status}", status)
+
+    assert discover_wake_pending_owners(owners) == []
+
+
+def test_task_ledger_bad_json_skipped(tmp_path) -> None:
+    owners = tmp_path / "owners"
+    home = _owner_home(owners, "unknown", "users", "u-bad")
+    bad = home / "tasks" / "2026-08-08" / "broken" / "work"
+    bad.mkdir(parents=True, exist_ok=True)
+    (bad / "state.json").write_text("{not json", encoding="utf-8")
+
+    assert discover_wake_pending_owners(owners) == []
+
+
+def test_task_ledger_planning_pending_blocked_all_count(tmp_path) -> None:
+    owners = tmp_path / "owners"
+    home = _owner_home(owners, "unknown", "users", "u-multi")
+    for status in ["PLANNING", "PENDING", "BLOCKED"]:
+        _write_task(home, "2026-08-08", f"task-{status}", status)
+    _write_task(home, "2026-08-07", "old-day", "RUNNING")  # 跨天也认
+
+    found = discover_wake_pending_owners(owners)
+
+    assert [(o.provider, o.owner_id) for o in found] == [("unknown", "u-multi")]
+
+
 def test_owner_with_incomplete_watch_lane_is_discovered(tmp_path) -> None:
     import time
 
