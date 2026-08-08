@@ -372,8 +372,13 @@ def _parse_standalone_text_blocks(text: str) -> tuple[list[dict[str, Any]], str]
         if text[max(0, before - 3) : before] == "```" or text[after : after + 3] == "```":
             return [], "text tool block must not be wrapped in Markdown fences"
         raw = text[body_start:close].strip()
-        if not raw or "```" in raw or "`" in raw:
+        if not raw:
             return [], "text tool block must contain raw JSON, not Markdown"
+        # 不再做字符串级反引号检查:JSON 字符串值里反引号合法(Go raw string/
+        # 正则/模板高频,如 write_file 写 Go 代码),字符串级误杀会砍掉合法调用
+        # (真机铁证 2026-08-08 celery 复刻:补 broker.go 被"raw JSON, not
+        # Markdown"连拦 3 轮 break)。真正的围栏包裹已由上方 before/after 检查
+        # 捕获,块内 ```json 围栏由 json.loads 失败兜底。
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError:

@@ -240,6 +240,28 @@ def test_text_adapter_accepts_blocks_with_prose_prefix() -> None:
     assert plain_prose.calls == () and plain_prose.violations == ()
 
 
+def test_text_adapter_accepts_backticks_inside_json_values() -> None:
+    # JSON 字符串值里反引号合法(写 Go 代码时 raw string/正则高频);字符串级
+    # 反引号检查误杀合法调用(真机铁证 2026-08-08 celery 复刻:补 broker.go
+    # 被连拦 3 轮 break)。只保留结构级检查(围栏包裹/json 解析)。
+    result = TextToolProtocolAdapter().tool_calls(
+        _request(
+            SimpleNamespace(
+                text=(
+                    '[TOOL_CALL]\n{"tool": "run_command", '
+                    '"command": "go build ./... `task:*`"}'
+                    "\n[/TOOL_CALL]"
+                )
+            ),
+            "text",
+        )
+    )
+
+    assert len(result.calls) == 1 and result.ok, result
+    assert result.calls[0].tool_name == "run_command"
+    assert result.violations == ()
+
+
 def test_text_adapter_has_one_tool_name_field() -> None:
     result = TextToolProtocolAdapter().tool_calls(
         _request(
