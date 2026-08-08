@@ -291,8 +291,8 @@ def test_curator_daily_quota_blocks_routine_but_not_urgent(tmp_path) -> None:
     assert base_calls == [1] and scoped_calls == [1, 1]  # base 被挡;紧急 scoped 照跑
 
 
-def test_curator_quota_spend_persists_to_disk(tmp_path) -> None:
-    """配额记账落盘:重启后按文件恢复计数(防超跑)。"""
+def test_curator_quota_available_checks_but_does_not_record(tmp_path) -> None:
+    """配额检查不记账:available 只看剩余额度,实际消耗由 record_consumed 单独记账。"""
     base_calls: list[int] = []
     scoped_calls: list[int] = []
     supervisor, _base, _scoped = _quota_supervisor(
@@ -300,7 +300,23 @@ def test_curator_quota_spend_persists_to_disk(tmp_path) -> None:
     )
     supervisor._curator_quota_path = tmp_path / "quota.json"
 
-    assert supervisor._curator_quota_spend() is True
+    assert supervisor._curator_quota_available() is True
+    assert not (tmp_path / "quota.json").exists()  # 检查不写盘、不扣次数
+
+    supervisor._curator_quota_count = 5000  # 满额
+    assert supervisor._curator_quota_available() is False
+
+
+def test_curator_quota_record_consumed_persists_to_disk(tmp_path) -> None:
+    """实际消耗记账落盘:重启后按文件恢复计数(防超跑)。"""
+    base_calls: list[int] = []
+    scoped_calls: list[int] = []
+    supervisor, _base, _scoped = _quota_supervisor(
+        tmp_path, base_calls=base_calls, scoped_calls=scoped_calls
+    )
+    supervisor._curator_quota_path = tmp_path / "quota.json"
+
+    supervisor._curator_quota_record_consumed()
     payload = json.loads((tmp_path / "quota.json").read_text(encoding="utf-8"))
     assert payload["count"] == 1
     assert payload["date"]  # 当天日期
@@ -315,6 +331,36 @@ def test_curator_quota_spend_persists_to_disk(tmp_path) -> None:
     fresh._load_curator_quota()
     assert fresh._curator_quota_count == 1
     assert fresh._curator_quota_date == payload["date"]
+
+
+def test_curator_quota_counts_only_real_runs(tmp_path) -> None:
+    """配额按实际消耗扣:run_if_due 返回 succeeded/failed(真跑了事务)才记账;
+    not_due/busy/disabled(没碰 LLM)不算消耗(旧语义把每次提交检查都扣,真机
+    当日配额被推到 3651)。"""
+    from agent_py_agent.cli import gateway_loops
+
+    statuses = ["succeeded", "failed", "not_due", "busy", "disabled"]
+    counts: dict[str, int] = {}
+    for status in statuses:
+        result = SimpleNamespace(status=status)
+        base_agent = SimpleNamespace(
+            config=SimpleNamespace(owner_maintenance_scan_interval_seconds=60),
+            memory_curator=SimpleNamespace(run_if_due=lambda: result),
+            owner_id="local",
+        )
+        supervisor = object.__new__(gateway_loops._BackgroundMainSupervisor)
+        supervisor._base_agent = base_agent
+        supervisor._curator_quota_count = 0
+        supervisor._curator_quota_date = ""
+        supervisor._curator_quota_path = None
+        supervisor._safe_run_curator(base_agent, "test")
+        counts[status] = supervisor._curator_quota_count
+
+    assert counts["succeeded"] == 1
+    assert counts["failed"] == 1
+    assert counts["not_due"] == 0
+    assert counts["busy"] == 0
+    assert counts["disabled"] == 0
 
 
 def test_background_main_supervisor_writes_heartbeat(tmp_path) -> None:

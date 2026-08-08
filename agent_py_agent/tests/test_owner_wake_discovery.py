@@ -340,21 +340,48 @@ def test_owner_with_only_terminal_runs_not_discovered(tmp_path) -> None:
     assert discover_wake_pending_owners(owners) == []
 
 
-def _write_task(owner_home: Path, day: str, name: str, status: str) -> None:
+def _write_task(
+    owner_home: Path, day: str, name: str, status: str, task_id: str | None = None
+) -> None:
+    """写账本投影(tasks/<date>/<name>/work/state.json)。task_id 默认=目录名,
+    真实世界账本 task_id 与 link 一致(bind 同源),需要匹配 link 时显式传。"""
     work_dir = owner_home / "tasks" / day / name / "work"
     work_dir.mkdir(parents=True, exist_ok=True)
     (work_dir / "state.json").write_text(
-        json.dumps({"task_id": name, "status": status}),
+        json.dumps({"task_id": task_id or name, "status": status}),
+        encoding="utf-8",
+    )
+
+
+def _write_link(
+    owner_home: Path, task_id: str, status: str, workspace: str = "ws-1"
+) -> None:
+    """写 conversation task link(生命周期权威):workspace 下 conversations/tasks/<id>.json。"""
+    link_dir = (
+        owner_home
+        / "workspace"
+        / "runtime"
+        / "workspaces"
+        / workspace
+        / "conversations"
+        / "tasks"
+    )
+    link_dir.mkdir(parents=True, exist_ok=True)
+    (link_dir / f"{task_id}.json").write_text(
+        json.dumps({"task_id": task_id, "status": status}),
         encoding="utf-8",
     )
 
 
 def test_owner_with_running_solo_task_is_discovered(tmp_path) -> None:
-    """H 批:普通任务账本 RUNNING(非子代理投影)也是待驱动硬事实——否则重启/逐出后
+    """H 批:任务 link active(非子代理投影)也是待驱动硬事实——否则重启/逐出后
     owner 永不进池,任务停摆(真机 celery 复刻 RUNNING 6h 无人驱动)。"""
     owners = tmp_path / "owners"
     home = _owner_home(owners, "unknown", "users", "u-celery")
-    _write_task(home, "2026-08-08", "继续把-celery-用-go-语言复刻完", "RUNNING")
+    _write_link(home, "req-celery-1", "active")
+    _write_task(
+        home, "2026-08-08", "继续把-celery-用-go-语言复刻完", "RUNNING", task_id="req-celery-1"
+    )
 
     page = discover_wake_pending_owner_page(owners, limit=16)
 
@@ -366,32 +393,79 @@ def test_owner_with_running_solo_task_is_discovered(tmp_path) -> None:
 def test_owner_with_only_terminal_tasks_not_discovered(tmp_path) -> None:
     owners = tmp_path / "owners"
     home = _owner_home(owners, "unknown", "users", "u-tdone")
-    for status in ["DONE", "CANCELLED", "FAILED", "ABANDONED", "PAUSED"]:
-        _write_task(home, "2026-08-08", f"task-{status}", status)
+    for status in ["completed", "done", "cancelled", "failed", "abandoned", "taken_over"]:
+        _write_link(home, f"req-{status}", status)
+        _write_task(home, "2026-08-08", f"task-{status}", "RUNNING")  # 账本投影残留 RUNNING
 
     assert discover_wake_pending_owners(owners) == []
+
+
+def test_ledger_running_but_link_done_not_discovered(tmp_path) -> None:
+    """#54 生命周期权威=link:账本 RUNNING 只是投影残留(子代理 DONE 后账本不投影终态,
+    真机 7 月旧任务 932h 无终态),link 已终态就不再需要驱动。"""
+    owners = tmp_path / "owners"
+    home = _owner_home(owners, "unknown", "users", "u-stale")
+    _write_link(home, "subagent-1780468980-688e0b85", "done")
+    _write_task(home, "2026-07-03", "派出的子代理有新进展把你唤醒了", "RUNNING")
+
+    assert discover_wake_pending_owners(owners) == []
+
+
+def test_shadow_task_without_link_not_discovered(tmp_path) -> None:
+    """#56 任务分身:task-path: 指纹账本没有 conversation task link(续跑按 task_path
+    寻址写账本,却从不 bind link)——link 缺失 = 生命周期未在册,不算未完成,owner 不再
+    永久硬活;真实任务(link+账本齐)照常驱动。"""
+    owners = tmp_path / "owners"
+    home = _owner_home(owners, "unknown", "users", "u-shadow")
+    _write_link(home, "req-real-1", "active")
+    _write_task(
+        home, "2026-08-08", "真实任务", "RUNNING", task_id="req-real-1"
+    )
+    _write_task(home, "2026-08-08", "this-is-a-continuation-turn-for", "RUNNING")
+
+    found = discover_wake_pending_owners(owners)
+
+    assert [(o.provider, o.owner_id) for o in found] == [("unknown", "u-shadow")]
 
 
 def test_task_ledger_bad_json_skipped(tmp_path) -> None:
     owners = tmp_path / "owners"
     home = _owner_home(owners, "unknown", "users", "u-bad")
-    bad = home / "tasks" / "2026-08-08" / "broken" / "work"
-    bad.mkdir(parents=True, exist_ok=True)
-    (bad / "state.json").write_text("{not json", encoding="utf-8")
-
-    assert discover_wake_pending_owners(owners) == []
-
-
-def test_task_ledger_planning_pending_blocked_all_count(tmp_path) -> None:
-    owners = tmp_path / "owners"
-    home = _owner_home(owners, "unknown", "users", "u-multi")
-    for status in ["PLANNING", "PENDING", "BLOCKED"]:
-        _write_task(home, "2026-08-08", f"task-{status}", status)
-    _write_task(home, "2026-08-07", "old-day", "RUNNING")  # 跨天也认
+    _write_link(home, "req-ok", "active")
+    _write_task(home, "2026-08-08", "ok-task", "RUNNING", task_id="req-ok")
+    link_dir = (
+        home
+        / "workspace"
+        / "runtime"
+        / "workspaces"
+        / "ws-1"
+        / "conversations"
+        / "tasks"
+    )
+    (link_dir / "req-broken.json").write_text("{not json", encoding="utf-8")
 
     found = discover_wake_pending_owners(owners)
 
-    assert [(o.provider, o.owner_id) for o in found] == [("unknown", "u-multi")]
+    assert [(o.provider, o.owner_id) for o in found] == [("unknown", "u-bad")]
+
+
+def test_unfinished_task_ids_cross_workspace_and_dedupe(tmp_path) -> None:
+    from agent_py_agent.agent.owner_wake_discovery import unfinished_task_ids
+
+    owners = tmp_path / "owners"
+    home = _owner_home(owners, "unknown", "users", "u-multi")
+    _write_link(home, "req-a", "active", workspace="ws-1")
+    _write_link(home, "req-b", "active", workspace="ws-2")
+    _write_link(home, "req-a", "active", workspace="ws-2")  # 跨 workspace 重复 task_id
+    _write_link(home, "req-c", "done", workspace="ws-1")
+    _write_link(home, "req-d", "cancelled", workspace="ws-2")
+    _write_task(home, "2026-08-08", "a-task", "RUNNING", task_id="req-a")
+    _write_task(home, "2026-08-08", "b-task", "RUNNING", task_id="req-b")
+    _write_task(home, "2026-08-08", "c-task", "RUNNING", task_id="req-c")  # 账本在跑但 link 终态
+
+    found = unfinished_task_ids(home)
+
+    assert sorted(found) == ["req-a", "req-b"]
 
 
 def test_owner_with_incomplete_watch_lane_is_discovered(tmp_path) -> None:

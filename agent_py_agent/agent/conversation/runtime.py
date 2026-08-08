@@ -2917,6 +2917,11 @@ from .models import BackgroundMainAgentReport, ObservationEvent, ProgressPolicy,
 # 后台 claim 心跳是 daemon 线程，其异常必须结构化落日志而非裸崩 stderr 杀线程。
 _HEARTBEAT_LOGGER = logging.getLogger("agent.conversation.background_claim_heartbeat")
 
+# 任务续跑 wake 冷却(秒):距上次落 wake 不足此值时不再重复催促——子代理正在跑/
+# 主代理 turn 还在推进的窗口内,重复拉起只有模型调用成本没有新信息(真机 celery
+# 46 分钟 18 次 task_ledger_resume)。死停最长 cooldown 内被发现(H 批前是 6h)。
+_TASK_RESUME_COOLDOWN_SECONDS = 900
+
 _TASK_LINK_TERMINAL_STATUSES = frozenset(
     {
         "ABANDONED",
@@ -3663,13 +3668,18 @@ class _BackgroundSchedulerTickMixin:
         ).tick(now=now)
 
     def _enqueue_unfinished_task_resume_wakes(self, *, now: float) -> None:
-        """任务账本 RUNNING → 落一条 dedupe wake,让主代理续跑(claim/执行链全复用)。
+        """未完成任务(link 权威)→ 落一条 dedupe wake,让主代理续跑(claim/执行链全复用)。
 
         真机:celery 复刻 RUNNING 6h 无人驱动——发现层已把 RUNNING 任务判为硬事实进池,
         但 tick 只消费 wake/policy,没有消费者会把账本变成待驱动信号,主代理永远不被
-        拉起。这里把每个未完成任务的 task_id 反查会话线程(store 的 tasks/<id>.json
-        链接),按 dedupe_key 落 wake:同一任务同一轮不重复写(已有 pending wake 命中
-        返回),消费后下一轮再写 → 每 tick 一轮续跑直到任务终态。"""
+        拉起。这里把每个未完成任务 id 反查会话线程(store 的 tasks/<id>.json 链接),
+        按 dedupe_key 落 wake:同一任务同一轮不重复写(已有 pending wake 命中返回),
+        消费后隔 cooldown 再写 → 按节奏续跑直到任务终态。
+
+        cooldown:子代理正在跑/主代理刚被拉起干活的窗口内不重复催促(真机 celery
+        46 分钟 18 次 task_ledger_resume,大多落在主代理 turn 还在推进的空档,只有
+        模型调用成本没有新信息)。距上次落 wake 不足 cooldown 的跳过,死停最长
+        cooldown 内被发现(对比 H 批前 6h 无人驱动)。"""
         try:
             home = getattr(getattr(self, "runtime", None), "agent", None)
             owner_home = getattr(getattr(home, "home_paths", None), "owner_home_dir", None)
@@ -3677,8 +3687,15 @@ class _BackgroundSchedulerTickMixin:
                 return
             from ..owner_wake_discovery import unfinished_task_ids
 
+            last_raised = getattr(self, "_task_resume_last_raised", None)
+            if last_raised is None:
+                last_raised = {}
+                self._task_resume_last_raised = last_raised
             for task_id in unfinished_task_ids(Path(owner_home)):
                 try:
+                    raised_at = last_raised.get(task_id)
+                    if raised_at is not None and now - raised_at < _TASK_RESUME_COOLDOWN_SECONDS:
+                        continue  # 冷却期:不重复催促(子代理在跑/刚催过都算在窗口内)
                     thread = self.store.thread_for_task(task_id)
                     if thread is None:
                         continue  # 会话链接未建(任务没挂到线程)→ 下轮再试
@@ -3702,6 +3719,7 @@ class _BackgroundSchedulerTickMixin:
                             "dedupe_key": f"task-resume:{task_id}",
                         }
                     )
+                    last_raised[task_id] = now
                 except Exception:
                     _HEARTBEAT_LOGGER.warning("task resume wake enqueue failed", exc_info=True)
         except Exception:

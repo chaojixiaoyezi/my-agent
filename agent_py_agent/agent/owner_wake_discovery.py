@@ -28,6 +28,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .conversation.models import THREAD_TASK_LINK_ACTIVE_STATUS
+
 _LOGGER = logging.getLogger(__name__)
 
 # owner home 内会话存储根(conversations 目录)的已知形态。网关按 workspace root 跑时
@@ -413,11 +415,39 @@ def _has_unfinished_subagent_run(owner_home: Path) -> bool:
 
 
 def unfinished_task_ids(owner_home: Path) -> list[str]:
-    """owner 名下未完成任务账本的 task_id 列表(tasks/<date>/<name>/work/state.json 的 status)。
+    """owner 名下未完成任务 id 列表——link active(生命周期权威)且账本非终态(交叉验证)。
 
-    子代理投影在 ``agents/``,solo 任务账本在 ``tasks/`` 按日分目录。发现层用它判硬事实,
-    后台 tick 用它把 RUNNING 任务落成续跑 wake——两处同一把尺。与 _has_unfinished_subagent_run
-    同构:非终态即还需被驱动;坏文件跳过;倒序扫新日期优先(活跃任务总在最近日期目录)。"""
+    link(workspace 下 ``conversations/tasks/<task_id>.json``)由 bind_task 同步写,
+    status=active 是生命周期在册;但 link 单独不够:线程 goal/协作/audit 任务 bind 后
+    link 也是 active,它们各有自己的驱动通道(thread_goal_continue/协作事件/audit 通道),
+    不该落 task_ledger_resume(测试实锤 9 例回归)。账本(tasks/<date>/<name>/work/
+    state.json)由任务运行时写,只有真正开始跑的任务才有——两者取交集就是「在册且
+    在跑,需要兜底驱动」的任务。
+
+    反向排除:子代理 DONE 后账本残留 RUNNING(真机:7 月旧任务 932h 无终态)但 link
+    已终态;影子账本(task-path: 指纹寻址,无 link)。发现层用它判硬事实,后台 tick
+    用它把任务落成续跑 wake——两处同一把尺。坏文件跳过。"""
+    links_root = owner_home / "workspace" / "runtime" / "workspaces"
+    active_ids: list[str] = []
+    if links_root.is_dir():
+        try:
+            link_files = sorted(links_root.glob("*/conversations/tasks/*.json"), reverse=True)
+        except OSError:
+            link_files = []
+        for path in link_files:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, ValueError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if str(payload.get("status") or "").strip().lower() != THREAD_TASK_LINK_ACTIVE_STATUS:
+                continue
+            task_id = str(payload.get("task_id") or "").strip()
+            if task_id and task_id not in active_ids:
+                active_ids.append(task_id)
+    if not active_ids:
+        return []
     tasks_root = owner_home / "tasks"
     if not tasks_root.is_dir():
         return []
@@ -425,7 +455,7 @@ def unfinished_task_ids(owner_home: Path) -> list[str]:
         task_files = sorted(tasks_root.glob("*/*/work/state.json"), reverse=True)
     except OSError:
         return []
-    unfinished: list[str] = []
+    ledger_ids: set[str] = set()
     for path in task_files:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -434,8 +464,8 @@ def unfinished_task_ids(owner_home: Path) -> list[str]:
         if isinstance(payload, dict) and str(payload.get("status") or "").strip().upper() in _UNFINISHED_RUN_STATUSES:
             task_id = str(payload.get("task_id") or "").strip()
             if task_id:
-                unfinished.append(task_id)
-    return unfinished
+                ledger_ids.add(task_id)
+    return [task_id for task_id in active_ids if task_id in ledger_ids]
 
 
 def _has_unfinished_task_ledger(owner_home: Path) -> bool:

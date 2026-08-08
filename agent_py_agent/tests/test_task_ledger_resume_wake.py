@@ -37,10 +37,14 @@ def _write_task(owner_home: Path, day: str, name: str, task_id: str, status: str
 
 
 def _call_enqueue(agent: SimpleAgent, *, now: float = 100.0) -> None:
-    fake = SimpleNamespace(
-        runtime=SimpleNamespace(agent=agent),
-        store=agent.conversation_store,
-    )
+    # 冷却状态挂在 tick 对象上;同 agent 复用同一 fake,模拟真实 tick 实例跨轮保留。
+    fake = getattr(agent, "_task_resume_fake", None)
+    if fake is None:
+        fake = SimpleNamespace(
+            runtime=SimpleNamespace(agent=agent),
+            store=agent.conversation_store,
+        )
+        agent._task_resume_fake = fake
     _BackgroundSchedulerTickMixin._enqueue_unfinished_task_resume_wakes(fake, now=now)
 
 
@@ -92,20 +96,25 @@ def test_pending_wake_not_duplicated_same_round(tmp_path) -> None:
     assert len(pending) == 1
 
 
-def test_consumed_wake_is_recreated_next_tick(tmp_path) -> None:
-    """消费后账本仍 RUNNING → 下轮 tick 再落一条(续跑节奏,直到终态)。"""
+def test_consumed_wake_is_recreated_after_cooldown(tmp_path) -> None:
+    """消费后任务仍 RUNNING → 冷却期内不重复催促(子代理在跑/主代理 turn 推进的窗口,
+    重复拉起只有模型调用成本),过冷却期再落一条续跑直到终态。"""
     agent = _agent(tmp_path)
     thread = _new_thread(agent)
     task_id = "req_333"
     _bind(agent, thread.thread_id, task_id)
     _write_task(Path(agent.home_paths.owner_home_dir), "2026-08-08", "celery", task_id, "RUNNING")
 
-    _call_enqueue(agent)
+    _call_enqueue(agent, now=100.0)
     signal = agent.conversation_store.pending_wake_signals()[0]
     agent.conversation_store.mark_wake_signal_handled(signal.wake_signal_id, now=110.0)
     assert not agent.conversation_store.pending_wake_signals()
 
-    _call_enqueue(agent, now=120.0)
+    _call_enqueue(agent, now=120.0)  # 冷却期(900s)内:不重生成
+
+    assert agent.conversation_store.pending_wake_signals() == []
+
+    _call_enqueue(agent, now=1000.0)  # 过冷却期:再落一条
 
     pending = agent.conversation_store.pending_wake_signals()
     assert len(pending) == 1
@@ -113,13 +122,18 @@ def test_consumed_wake_is_recreated_next_tick(tmp_path) -> None:
 
 
 def test_terminal_tasks_do_not_write_wake(tmp_path) -> None:
+    """终态以 link 为准(生命周期权威):bind 后 update_task_status 置终态 → 不再落 wake。
+    账本投影怎么写都不影响(旧版 DONE 后账本残留 RUNNING 的场景见发现层测试)。"""
     agent = _agent(tmp_path)
     thread = _new_thread(agent)
     home = Path(agent.home_paths.owner_home_dir)
-    for status in ("DONE", "FAILED", "ABANDONED", "CANCELLED", "PAUSED"):
+    for status in ("done", "failed", "abandoned", "cancelled"):
         task_id = f"req-done-{status}"
         _bind(agent, thread.thread_id, task_id)
-        _write_task(home, "2026-08-08", f"task-{status}", task_id, status)
+        agent.conversation_store.update_task_status(
+            {"task_id": task_id, "status": status, "now": 25.0}
+        )
+        _write_task(home, "2026-08-08", f"task-{status}", task_id, "RUNNING")  # 账本残留 RUNNING
 
     _call_enqueue(agent)
 

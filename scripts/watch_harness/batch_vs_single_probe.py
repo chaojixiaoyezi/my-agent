@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -20,7 +21,6 @@ from test_env_loader import ensure_model_key
   AGENT_API_KEY=... python3 scripts/watch_harness/batch_vs_single_probe.py --events 30
 """
 
-from __future__ import annotations
 
 import argparse
 import json

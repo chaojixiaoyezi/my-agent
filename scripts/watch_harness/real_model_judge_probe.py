@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -16,7 +17,6 @@ response.message 语义、真事稀)。两臂喂给同一个真模型、同一�
   AGENT_API_KEY=... python3 scripts/watch_harness/real_model_judge_probe.py --backlog 480
 """
 
-from __future__ import annotations
 
 import argparse
 import json

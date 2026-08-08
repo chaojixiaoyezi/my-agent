@@ -313,6 +313,9 @@ _HEARTBEAT_INTERVAL_SECONDS = 60
 # 策展每日全局配额(默认 5000 次/天,config curator_daily_quota 覆盖):LLM 提取烧钱,
 # 归档类晚一天无害,超限顺延;紧急车道(pending reason)不受此限。
 _CURATOR_DAILY_QUOTA = 5000
+# 算实际消耗的 run 结果状态:只有真正执行了一次 curator 事务才记账;not_due(interval
+# 未到/无新消息)、busy(他人持 lease)、disabled 都没碰 LLM,不算消耗。
+_CURATOR_CONSUMED_STATUSES = frozenset({"succeeded", "failed"})
 
 
 def _background_owner_workers(agent: object) -> int:
@@ -636,7 +639,7 @@ class _BackgroundMainSupervisor:
             key = id(agent)
             if key in self._curator_inflight:
                 continue  # 该 owner 上一轮 curator 还在跑(LLM 提取中)→ 不重复提交
-            if not self._curator_has_pending_reason(agent) and not self._curator_quota_spend():
+            if not self._curator_has_pending_reason(agent) and not self._curator_quota_available():
                 continue  # 常规车道已到当日全局限额 → 顺延明天(紧急车道不受配额约束)
             self._curator_inflight[key] = self._get_executor().submit(
                 self._safe_run_curator, agent, str(getattr(agent, "owner_id", "local"))
@@ -645,8 +648,8 @@ class _BackgroundMainSupervisor:
     def _curator_daily_quota(self) -> int:
         return _positive_int_config(self._base_agent, "curator_daily_quota", default=_CURATOR_DAILY_QUOTA)
 
-    def _curator_quota_spend(self) -> bool:
-        """常规策展提交即记账(approve 式防超跑);按日滚动,落盘重启不丢。返回是否还有配额。"""
+    def _curator_quota_available(self) -> bool:
+        """常规车道当日剩余配额检查(不记账)。提交前调用:还有额度才发起 curator run。"""
         quota = self._curator_daily_quota()
         if quota <= 0:
             return True  # 配额关闭 = 不限额
@@ -654,8 +657,21 @@ class _BackgroundMainSupervisor:
         if self._curator_quota_date != today:
             self._curator_quota_date = today
             self._curator_quota_count = 0
-        if self._curator_quota_count >= quota:
-            return False
+        return self._curator_quota_count < quota
+
+    def _curator_quota_record_consumed(self) -> None:
+        """实际执行后记账:只有真正跑了一次 curator 事务(提取/晋升/提交)才扣配额。
+
+        提交前扣的旧语义把「每次 tick 的提交检查」都算消耗——run_if_due 大多返回
+        not_due(interval 未到/无新消息),没烧 LLM 也照样扣(真机:当日配额被推到
+        3651)。按 run 结果记账后,配额 ≈ 实际 LLM 消耗。按日滚动,落盘重启不丢。"""
+        quota = self._curator_daily_quota()
+        if quota <= 0:
+            return
+        today = datetime.now(timezone.utc).date().isoformat()
+        if self._curator_quota_date != today:
+            self._curator_quota_date = today
+            self._curator_quota_count = 0
         self._curator_quota_count += 1
         if self._curator_quota_path is not None:
             try:
@@ -666,7 +682,6 @@ class _BackgroundMainSupervisor:
                 )
             except OSError:
                 pass  # 配额账本写失败不阻塞策展(内存计数仍在)
-        return True
 
     def _curator_has_pending_reason(self, agent: object) -> bool:
         """紧急车道判定:该 agent 的 curator state 是否有 pending reason/active lease(纯读 state.json)。"""
@@ -684,10 +699,14 @@ class _BackgroundMainSupervisor:
 
     def _safe_run_curator(self, agent: object, label: str) -> object:
         try:
-            return agent.memory_curator.run_if_due()
+            result = agent.memory_curator.run_if_due()
         except Exception as exc:
             _print_gateway_loop_error("gateway_memory_curator.iteration", label, exc)
             return None
+        status = str(getattr(result, "status", "") or "").strip().lower()
+        if status in _CURATOR_CONSUMED_STATUSES:
+            self._curator_quota_record_consumed()
+        return result
 
     def _ensure_owner_pool(self) -> object | None:
         if self._owner_pool is not None:
