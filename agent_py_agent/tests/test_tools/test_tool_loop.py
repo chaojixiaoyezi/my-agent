@@ -1445,11 +1445,11 @@ def test_max_tool_rounds_hard_stops_when_model_still_requests_tools():
 def test_tool_round_limit_schedules_ordinary_task_resume(tmp_path):
     """LLM: 普通任务(无 /goal)轮限收口后创建带预算的自动续跑 policy。
 
-    2026-08-07 真机铁证:user-b celery 复刻 60 轮 TOOL_ROUND_LIMIT_REACHED 收口,
-    收口提示词承诺「运行时会保留同一任务并按持久进度继续」,但普通任务无
-    thread_goal_id 时 _schedule_typed_unfinished_continuation 直接 return,承诺未
-    兑现。修复后:前台普通任务(gateway/chat/cli_run)创建 kind=ordinary_task_resume
-    的 policy,调度器 tick 到点拉起续跑 run;预算 resume_used < resume_limit 才续。
+    2026-08-08 真机查证:gateway worker 的 run source 是硬编码 "gateway"(request_execution
+    _gateway_run_params),原白名单本就匹配——收口后 policy 确实创建。真 bug 在调度器
+    (policy 创建后无人消费),此处测试只固定创建侧语义:前台普通任务(gateway/chat/
+    cli_run/cli_*/http:*/空)创建 kind=ordinary_task_resume 的 policy,预算
+    resume_used < resume_limit 才续;后台唤醒轮不占预算。
     """
     (tmp_path / "notes.txt").write_text("hello", encoding="utf-8")
     agent = SimpleAgent(
@@ -1486,7 +1486,7 @@ def test_tool_round_limit_schedules_ordinary_task_resume(tmp_path):
             "conversation_thread_id": thread.thread_id,
             "conversation_task_id": "task-limit",
         },
-        source="gateway",
+        source="cli_gateway",  # 前台形态之一(前缀匹配),固定创建路径语义
     )
 
     assert result.runtime_status == "unfinished"
@@ -1660,6 +1660,56 @@ def test_ordinary_task_resume_budget_exhausted_disables_policy(tmp_path):
     assert len(policies) == 1
     assert not policies[0].enabled
     assert agent.conversation_store.list_progress_policies(enabled_only=True) == []
+
+
+def test_background_main_agent_no_ordinary_resume_policy(tmp_path):
+    """LLM: 后台唤醒轮收口不占普通任务续跑预算。
+
+    唤醒轮是「读状态、给回执」语义,推进由 wait 定时器/wake 信号驱动——同 source
+    排除先例(task_progress_continuation_decision)。若误建 policy,调度器每 interval
+    都会拉起一个空转唤醒 run,白烧预算。前台 cli_gateway 走创建路径(上个测试),
+    这里验证排除分支:同样收口,policy 必须为零。
+    """
+    (tmp_path / "notes.txt").write_text("hello", encoding="utf-8")
+    agent = SimpleAgent(
+        _text_agent_config(
+            enable_tools=True,
+            memory_path="memory.jsonl",
+            max_tool_rounds=1,
+        ),
+        tmp_path,
+    )
+    agent.backend = MaxToolRoundBackend()
+    thread = agent.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "chat-limit-bg",
+            "channel_user_id": "user-1",
+        }
+    )
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-limit",
+            "goal": "读取并整理文件",
+            "status": "active",
+        }
+    )
+
+    result = agent.run(
+        "读取 notes 并完成验证",
+        save=True,
+        task_id="task-limit",
+        task_attributes={
+            "conversation_thread_id": thread.thread_id,
+            "conversation_task_id": "task-limit",
+        },
+        source="background_main_agent",
+    )
+
+    assert result.runtime_status == "unfinished"
+    assert agent.conversation_store.list_progress_policies(enabled_only=False) == []
 
 
 def test_explicit_goal_cannot_close_with_open_progress(tmp_path):

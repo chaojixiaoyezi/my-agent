@@ -549,10 +549,17 @@ def _schedule_typed_unfinished_continuation(agent: object, ctx: FinalizeContext)
     from .runtime.task_identity import durable_task_id
 
     thread_id = str(attrs.get("conversation_thread_id") or "")
-    # Foreground task turns should hand off immediately to the existing
-    # background continuation lane. Background/subagent turns retain the
-    # policy's bounded cadence and cannot recursively expedite themselves.
-    foreground = str(ctx.source or "").strip().lower() in {"gateway", "chat", "cli_run"}
+    # 前台会话任务立即 expedite 续跑:gateway worker 硬编码 source="gateway",
+    # 直跑传 chat/cli_run,HTTP 适配器传 http:<channel>,cli_* 是预留前缀;
+    # 排除法比旧白名单 {gateway,chat,cli_run} 更健壮(任何前台形态都不漏)。
+    # 后台唤醒轮/子代理收口按 policy interval 自然触发,不抢占资源。
+    source = str(ctx.source or "").strip().lower()
+    foreground = (
+        source.startswith("cli_")
+        or source.startswith("http:")
+        or source in {"gateway", "chat", "cli_run"}
+        or not source
+    )
     if str(attrs.get("thread_goal_id") or "").strip():
         ensure_goal_progress_continuation(
             agent,
@@ -561,10 +568,11 @@ def _schedule_typed_unfinished_continuation(agent: object, ctx: FinalizeContext)
             due_now=foreground,
         )
         return
-    # 普通任务(无 /goal):轮限/失败软收口也在预算内自动续跑——轮限收口提示词承诺
-    # 「运行时会保留同一任务并按持久进度继续」,这里兑现该承诺。仅前台任务创建:
-    # 子代理/后台唤醒轮的推进由父代理唤醒链与 wait 定时器负责,不在此占续跑预算。
-    if not foreground:
+    # 普通任务(无 /goal):轮限/失败软收口也在预算内自动续跑——收口提示词承诺
+    # 「运行时会保留同一任务并按持久进度继续」,这里兑现该承诺。后台唤醒轮除外:
+    # 唤醒轮是「读状态、给回执」语义,推进由 wait 定时器/wake 信号驱动,不占续跑预算
+    # (与 task_progress_continuation_decision 同一排除先例)。
+    if source == "background_main_agent":
         return
     from .runtime.task_identity import progress_ledger_id
 
@@ -572,7 +580,7 @@ def _schedule_typed_unfinished_continuation(agent: object, ctx: FinalizeContext)
         agent,
         task_id=str(progress_ledger_id(agent, ctx) or attrs.get("root_task_id") or ""),
         thread_id=thread_id,
-        due_now=True,
+        due_now=foreground,
     )
 
 

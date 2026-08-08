@@ -111,9 +111,12 @@ from .tool_runtime_ledger import persist_tool_runtime_ledger, write_boundary_wit
 
 _LOGGER = logging.getLogger(__name__)
 
-# 模型失败后机械重试无上限时的轮数防线。
-# 显式配置 max_tool_rounds 或任务属性可覆盖; 显式 0 保留"不限制"逃生。
-_DEFAULT_MAX_TOOL_ROUNDS = 60
+# 轮数防线默认关闭(0=不限制):参考 终端应用/会话运行时 均不截停主循环,长任务
+# (如整仓换语言复刻)一条指令要连续干几百次工具,60 轮截停只会打断推进。
+# 防失控改由专项防线承担:repeated_failure_halt(同工具同类失败连续达阈值收口)、
+# unknown_command_budget(200 次/10 分钟)、compact 防抖。显式配置 max_tool_rounds
+# 或任务属性仍可覆盖(正数=限制,0=不限制),需要单任务收紧时由任务属性显式传入。
+_DEFAULT_MAX_TOOL_ROUNDS = 0
 
 _ORCHESTRATION_TOOLS = {
     "create_subagents",
@@ -149,11 +152,11 @@ def _effective_max_tool_rounds(agent, params: ToolLoopExecuteParams) -> int:
     attrs_to_check = params.task_attributes or current_task_attributes(agent)
     if attrs_to_check and "max_tool_rounds" in attrs_to_check:
         effective = attrs_to_check["max_tool_rounds"]
-    # LLM: 模型失败后机械重试无上限会把任务拖死(实测"读不存在文件"38+ 轮不收敛)；
-    # 参考 长期助手 max_iterations 默认 15 的同一防线, 这里给宽默认 60——复杂多步任务
-    # 足够, 死循环 60 轮后走 _final_response_after_tool_limit 诚实交接(未完成+进度持久,
-    # 下个 run 续跑), 不会无限烧时间/成本。只有"显式 0"才保留不限制逃生；空值/缺省
-    # 一律落到默认防线(与 runtime_guard_config.yaml 的 max_tool_rounds 默认值保持一致)。
+    # LLM: 轮数防线默认关闭(0=不限制)——终端应用/会话运行时 均不截停主循环,5 万行
+    # 项目复刻需要几百轮连续工具调用,60 轮截停只会打断推进。防失控改由专项防线
+    # 承担:repeated_failure_halt(同类失败连续 8 次收口)、unknown_command_budget
+    # (200 次/10 分钟滚动窗口)、compact 防抖——比"总轮数天花板"更精准地只拦
+    # 机械重试。显式正数仍可限制,显式 0 同默认不限制,任务属性可单任务覆盖。
     if effective is None:
         return _DEFAULT_MAX_TOOL_ROUNDS
     try:
