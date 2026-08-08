@@ -981,3 +981,56 @@ def test_get_or_create_thread_does_not_duplicate_when_latest_index_is_corrupt(tm
     threads, errors = store.list_threads_report()
     assert len(threads) == 1
     assert errors == []
+
+
+def test_mark_progress_failed_records_backoff_and_retires(tmp_path) -> None:
+    """失败续跑记账(问题6):写失败账+退避顺延;连续失败达阈值退休;未知 policy 安全。"""
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-fail-store",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    policy = store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "interval_seconds": 60,
+            "route_channel": "internal",
+            "route_target": thread.thread_id,
+            "now": 20.0,
+        }
+    )
+
+    # 未知 policy:安全返回 None,不抛。
+    assert store.mark_progress_failed("policy-nope", now=21.0, backoff_seconds=300, failure_count=1) is None
+
+    # 第 1 次失败:记账 + 退避顺延,enabled 保持。
+    failed = store.mark_progress_failed(
+        policy.policy_id, now=30.0, backoff_seconds=300.0, failure_count=1
+    )
+    assert failed is not None and failed.enabled is True
+    assert failed.metadata["failure_count"] == 1
+    assert failed.metadata["last_failure_at"] == 30.0
+    assert failed.metadata["last_backoff_seconds"] == 300.0
+    assert failed.next_due_at == 30.0 + 300.0
+
+    # 阈值内再失败:账累加,仍 enabled。
+    failed2 = store.mark_progress_failed(
+        policy.policy_id, now=40.0, backoff_seconds=600.0, failure_count=2
+    )
+    assert failed2.enabled is True
+    assert failed2.metadata["failure_count"] == 2
+
+    # 达退休阈值:enabled=False,离开 due 扫描,账目保留供复盘。
+    retired = store.mark_progress_failed(
+        policy.policy_id, now=50.0, backoff_seconds=1200.0, failure_count=3
+    )
+    assert retired.enabled is False
+    assert retired.metadata["failure_count"] == 3
+    assert retired.metadata["retired_at"] == 50.0
+    assert policy.policy_id not in {p.policy_id for p in store.due_progress_policies(now=100.0)}

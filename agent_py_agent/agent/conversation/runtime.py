@@ -2933,6 +2933,12 @@ _TASK_LINK_TERMINAL_STATUSES = frozenset(
 )
 _MIN_PROGRESS_POLICY_CATCHUP_SECONDS = 7200
 _MAX_PROGRESS_POLICY_CATCHUP_INTERVALS = 4
+
+# 失败续跑记账(问题6):失败 run 后 policy 退避 5min×2^(n-1)、上限 1h;抖动按
+# policy_id 确定性派生(纯函数,可测,不引入 random);连续 3 次失败退休(等用户)。
+_POLICY_FAILURE_BASE_BACKOFF_SECONDS = 300
+_POLICY_FAILURE_MAX_BACKOFF_SECONDS = 3600
+_POLICY_FAILURE_RETIRE_AFTER = 3
 from .store import ConversationStore
 
 if TYPE_CHECKING:
@@ -4369,13 +4375,17 @@ class _BackgroundSchedulerExecutionMixin:
             latest_signature = (
                 _automatic_supervision_signature(self.runtime.agent, policy) or signature
             )
+            metadata_updates = {}
+            if latest_signature:
+                metadata_updates["material_signature"] = latest_signature
+            # 问题6:成功 run 清零失败账(failure_count=0),退避/退休账目复原——
+            # 一旦恢复,policy 回正常 interval,绝不带着旧失败历史继续减速。
+            metadata_updates["failure_count"] = 0
             self.store.mark_progress_reported(
                 policy.policy_id,
                 now=now,
                 no_progress_streak=_next_no_progress_streak(policy, report),
-                metadata_updates=(
-                    {"material_signature": latest_signature} if latest_signature else None
-                ),
+                metadata_updates=metadata_updates,
             )
         return report
 
@@ -4466,6 +4476,62 @@ class _BackgroundSchedulerExecutionMixin:
                     "now": now(),
                 }
             )
+            if status == "failed" and error is not None and not is_provider_transient_error(error):
+                # 问题6:失败 run 的异常在 _consume_with_supply_guard 被吸收 → policy
+                # next_due_at 不动 → 下个 tick 又 due = 失败无限重试。这里把失败事实
+                # 落账(退避顺延/连续失败退休);非 policy 来源的失败不动账,行为不变。
+                # 供应类错误(429/限流/超载)不记失败账:它们走 _ProviderSupplyBackoff
+                # 专属退避,计 failure_count 会连 3 次 429 就把 policy 退休(错杀);
+                # 恢复后照常排期。判据只认 typed provider error,不匹配错误文本。
+                self._record_policy_failure(kwargs)
+
+    def _record_policy_failure(self, kwargs: dict) -> None:
+        """失败续跑记账:policy 退避 + 连续失败退休(见 _policy_failure_backoff)。
+
+        只认结构化信号:kwargs 的 wake_signal 里 policy_id(policy 触发 run 时由
+        _progress_policy_wake_payload 注入)。无 policy_id/policy 已不存在 → 跳过。
+        退休(连续 3 次失败)后 policy 离开 due 扫描,任务保持失败态等用户,绝不
+        无限重试;账目保留在 metadata,成功路径 mark_progress_reported 清零复原。
+        """
+        try:
+            wake = kwargs.get("wake_signal")
+            policy_id = ""
+            if isinstance(wake, dict):
+                policy_id = str(wake.get("policy_id") or "")
+            elif wake is not None:
+                policy_id = str(getattr(wake, "policy_id", "") or "")
+            if not policy_id:
+                return
+            policy = self.store.get_progress_policy(policy_id)
+            if policy is None:
+                return
+            metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
+            failures = max(0, int(metadata.get("failure_count") or 0)) + 1
+            backoff = _policy_failure_backoff(failures, policy_id)
+            # 失败时刻与 run 的调度时刻对齐(kwargs["now"],与 claim/finish 同一时钟);
+            # 缺失时回落真实时钟。测试用注入时钟可精确断言,生产行为不变。
+            try:
+                recorded_at = float(kwargs.get("now") or 0.0) or now()
+            except (TypeError, ValueError):
+                recorded_at = now()
+            self.store.mark_progress_failed(
+                policy_id,
+                now=recorded_at,
+                backoff_seconds=backoff,
+                failure_count=failures,
+                retire_after=_POLICY_FAILURE_RETIRE_AFTER,
+            )
+            if failures >= _POLICY_FAILURE_RETIRE_AFTER:
+                _HEARTBEAT_LOGGER.warning(
+                    "progress policy retired after %s failures: policy_id=%s backoff=%s",
+                    failures,
+                    policy_id,
+                    backoff,
+                )
+        except Exception:
+            # 记账失败绝不能让主流程连带崩:失败本身已由 finish_background_run 记录,
+            # 这里只是补 policy 退避账,最坏情况退回旧行为(下次仍 due)。
+            _HEARTBEAT_LOGGER.warning("record policy failure failed", exc_info=True)
 
     def _start_heartbeat(
         self,
@@ -4614,6 +4680,24 @@ def _progress_policy_wake_payload(policy: ProgressPolicy) -> dict[str, object]:
 
 def _progress_policy_run_reason(policy: ProgressPolicy) -> str:
     return "scheduled_progress_report"
+
+
+def _policy_failure_backoff(failures: int, policy_id: str) -> float:
+    """失败退避 5min×2^(n-1) 上限 1h,抖动 0.90~1.10 按 policy_id 确定性派生。
+
+    纯函数(无 random):同一 policy 每次失败算出同一退避,跨进程/重启可复现,测试
+    可精确断言区间;抖动只做跨 policy 错峰(防多个失败 policy 同秒齐醒),不改变
+    退避的量级结构。
+    """
+    import hashlib
+
+    base = min(
+        _POLICY_FAILURE_BASE_BACKOFF_SECONDS * (2 ** max(0, int(failures) - 1)),
+        _POLICY_FAILURE_MAX_BACKOFF_SECONDS,
+    )
+    digest = hashlib.md5(str(policy_id).encode("utf-8")).hexdigest()
+    ratio = 0.9 + (int(digest[:4], 16) % 2000) / 10000.0
+    return round(base * ratio, 3)
 
 
 # LLM: A plain task checklist is memory, not a lifecycle.  Only an exact active /goal may

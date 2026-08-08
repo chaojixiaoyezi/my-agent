@@ -5975,3 +5975,257 @@ def test_background_claim_heartbeat_stops_gracefully_when_renew_raises() -> None
 
     assert not heartbeat.is_alive()  # 线程已优雅退出
     assert uncaught == []  # 没有未捕获异常杀线程(修前:KeyError 裸崩 "Exception in thread")
+
+
+def test_policy_failure_backoff_is_deterministic_exponential_and_bounded() -> None:
+    """失败退避纯函数:5min×2^(n-1) 上限 1h,抖动 0.90~1.10 按 policy_id 确定性派生。
+
+    同一 policy 每次失败同值(可复现、可精确断言);不同 policy 抖动错峰(防齐醒)。
+    """
+    from agent_py_agent.agent.conversation.runtime import _policy_failure_backoff
+
+    def base_seconds(n: int) -> float:
+        return min(300 * (2 ** (n - 1)), 3600)
+
+    def ratio(failures: int, policy_id: str) -> float:
+        return _policy_failure_backoff(failures, policy_id) / base_seconds(failures)
+
+    assert _policy_failure_backoff(1, "p-a") == _policy_failure_backoff(1, "p-a")
+    for n in (1, 2, 3, 4, 5, 8, 9, 20):
+        assert base_seconds(n) <= 3600  # 封顶 1h,永不超
+        for pid in ("p-a", "p-b", "p-c"):
+            assert 0.9 <= ratio(n, pid) <= 1.1  # 抖动区间
+    assert base_seconds(1) == 300
+    assert base_seconds(2) == 600
+    assert base_seconds(4) == 2400
+    assert base_seconds(5) == 3600
+    assert base_seconds(20) == 3600
+
+
+def test_failed_policy_run_records_backoff_and_retires_after_three(tmp_path) -> None:
+    """问题6:失败 run 后 policy 记账(退避顺延),连续 3 次失败退休,绝不无限重试。
+
+    修前:失败异常被 _consume_with_supply_guard 吸收 → policy.next_due_at 不动 →
+    下个 tick 又 due = 无限重试。修后:失败落账 failure_count/last_failure_at,
+    next_due_at 退避顺延;第 3 次失败 → enabled=False 退休,离开 due 扫描等用户。
+    """
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundMainAgentRuntime,
+        BackgroundMainAgentScheduler,
+        _policy_failure_backoff,
+    )
+
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            enable_tools=False,
+            my_agent_home=str(tmp_path / "home"),
+        ),
+        tmp_path,
+    )
+    agent.backend = _FailingBackend()
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-fail-policy",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    task_root = tmp_path / "home" / "tasks" / "task-fail-policy"
+    (task_root / "output").mkdir(parents=True)
+    (task_root / "work").mkdir()
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-fail-policy",
+            "goal": "失败续跑记账",
+            "status": "active",
+            "task_path": str(task_root),
+        }
+    )
+    policy = store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-fail-policy",
+            "interval_seconds": 30,
+            "route_channel": "internal",
+            "route_target": thread.thread_id,
+            "now": 20.0,
+        }
+    )
+    runtime = BackgroundMainAgentRuntime(
+        agent=agent,
+        store=store,
+        channels=FakeDeliveryService(),
+    )
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+
+    # 第 1、2 次失败:记账 + 退避顺延,policy 仍 enabled。
+    for attempt, tick in ((1, 30.0), (2, 40.0)):
+        with pytest.raises(RuntimeError, match="backend boom"):
+            scheduler._run_due_policy(policy, now=tick)
+        after = store.get_progress_policy(policy.policy_id)
+        assert after is not None and after.enabled is True
+        assert after.metadata["failure_count"] == attempt
+        assert after.metadata["last_failure_at"] == tick
+        expected_backoff = _policy_failure_backoff(attempt, policy.policy_id)
+        assert after.metadata["last_backoff_seconds"] == expected_backoff
+        assert after.next_due_at == tick + expected_backoff
+        assert after.next_due_at > tick + 30  # 比原 interval 退避更长(1 次=5min 基数)
+
+    # 第 3 次失败:退休(enabled=False),离开 due 扫描,账目保留供复盘。
+    with pytest.raises(RuntimeError, match="backend boom"):
+        scheduler._run_due_policy(policy, now=50.0)
+    retired = store.get_progress_policy(policy.policy_id)
+    assert retired is not None
+    assert retired.enabled is False
+    assert retired.metadata["failure_count"] == 3
+    assert retired.metadata["retired_at"] == 50.0
+    assert retired.policy_id not in {
+        p.policy_id for p in store.due_progress_policies(now=60.0)
+    }
+
+
+def test_successful_policy_run_resets_failure_accounting(tmp_path) -> None:
+    """问题6成功半边:policy run 成功 → failure_count 清零,退避账复原。
+
+    先造 1 次失败账,再换能成功的 backend 跑一轮 → metadata.failure_count==0,
+    排期回到正常 interval(不再带旧失败历史减速)。
+    """
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundMainAgentRuntime,
+        BackgroundMainAgentScheduler,
+    )
+
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", enable_tools=False, my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-reset-policy",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    task_root = tmp_path / "home" / "tasks" / "task-reset-policy"
+    (task_root / "output").mkdir(parents=True)
+    (task_root / "work").mkdir()
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-reset-policy",
+            "goal": "成功清零失败账",
+            "status": "active",
+            "task_path": str(task_root),
+        }
+    )
+    policy = store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-reset-policy",
+            "interval_seconds": 30,
+            "route_channel": "internal",
+            "route_target": thread.thread_id,
+            "now": 20.0,
+        }
+    )
+    runtime = BackgroundMainAgentRuntime(
+        agent=agent,
+        store=store,
+        channels=FakeDeliveryService(),
+    )
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+
+    agent.backend = _FailingBackend()
+    with pytest.raises(RuntimeError, match="backend boom"):
+        scheduler._run_due_policy(policy, now=30.0)
+    assert store.get_progress_policy(policy.policy_id).metadata["failure_count"] == 1
+
+    agent.backend = _CapturingBackend()
+    report = scheduler._run_due_policy(policy, now=40.0)
+    assert report is not None  # run 成功
+    after = store.get_progress_policy(policy.policy_id)
+    assert after.metadata["failure_count"] == 0  # 失败账清零复原
+    assert after.enabled is True
+    # 排期只受既有「无进展退避」(echo backend 无工具调用 → streak=1 → interval×2)
+    # 影响,失败账已归零不带退避;两种账独立:streak 管无进展,失败账管连续失败。
+    assert after.metadata["no_progress_streak"] == 1
+    assert after.next_due_at == 40.0 + 30 * 2
+
+
+def test_supply_failure_does_not_record_policy_failure_accounting(tmp_path, monkeypatch) -> None:
+    """429/限流等供应类错误不记 policy 失败账(走 supply backoff 专属退避)。
+
+    C 批失败记账若把 429 也计 failure_count,连续 3 次 429 就把 policy 退休
+    (错杀:额度恢复后应照常排期)。判据只认 typed provider error。
+    """
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundMainAgentRuntime,
+        BackgroundMainAgentScheduler,
+    )
+
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", enable_tools=False, my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-supply-fail",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    task_root = tmp_path / "home" / "tasks" / "task-supply-fail"
+    (task_root / "output").mkdir(parents=True)
+    (task_root / "work").mkdir()
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-supply-fail",
+            "goal": "429 不算任务失败",
+            "status": "active",
+            "task_path": str(task_root),
+        }
+    )
+    policy = store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-supply-fail",
+            "interval_seconds": 30,
+            "route_channel": "internal",
+            "route_target": thread.thread_id,
+            "now": 20.0,
+        }
+    )
+    runtime = BackgroundMainAgentRuntime(
+        agent=agent,
+        store=store,
+        channels=FakeDeliveryService(),
+    )
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+
+    # 直接让 run_once 抛 429(绕过 run_once 内部 provider auto_resume 重试环,
+    # 测试目标=finally 的供应错误排除分支,与重试环无关)。
+    def quota_boom(_request):
+        raise ProviderUsageLimitError("HTTP 429: 已达到 Token Plan 用量上限")
+
+    monkeypatch.setattr(runtime, "run_once", quota_boom)
+    with pytest.raises(ProviderUsageLimitError):
+        scheduler._run_due_policy(policy, now=30.0)
+
+    after = store.get_progress_policy(policy.policy_id)
+    assert after is not None
+    assert after.enabled is True  # 不退休
+    assert after.metadata.get("failure_count") in (None, 0)  # 不记失败账
+    assert after.metadata == {}  # 连失败账字段都没写:供应错误完全不碰 policy
+    assert after.next_due_at == 50.0  # 初始排期(20+30)原样,无失败退避

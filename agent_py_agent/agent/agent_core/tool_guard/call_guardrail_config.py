@@ -6,7 +6,10 @@ from ...settings.runtime_guard_config import runtime_guard_bool, runtime_guard_i
 DEFAULT_REPEAT_FAIL_THRESHOLD = 10
 DEFAULT_READONLY_NO_PROGRESS_THRESHOLD = 3
 # L2 阶梯:同工具同类失败连续达该值即收口并自动续跑(不再跟随 guardrail 3N DENY)。
-DEFAULT_REPEATED_FAILURE_HALT_THRESHOLD = 8
+# 8→15(2026-08-08,问题4「取消 60 轮限制没修真实失败」):真机长任务里 8 次同类
+# 失败往往是"换策略前的挣扎"(如复刻任务依赖未就绪连续构建失败),8 次收口会
+# 打断可救任务;放宽到 15 次仍能在确凿机械重试时收口,配合 L3 收益递减兜底。
+DEFAULT_REPEATED_FAILURE_HALT_THRESHOLD = 15
 # L4 阶梯:真硬门默认关;开启后同类失败达该值强制收口等用户介入。
 DEFAULT_HARD_FAILURE_HALT_THRESHOLD = 15
 

@@ -2960,6 +2960,14 @@ def _read_progress_policy_report(path: Path) -> tuple[ProgressPolicy | None, dic
 # 又不至于把守望任务拖到没响应;有进展即归零复原,永不 disable。
 _NO_PROGRESS_MAX_BACKOFF_MULTIPLIER = 8
 
+# 失败续跑记账(问题6「失败自动续跑记账不正确」)机制层根因:失败 run 的异常在
+# _consume_with_supply_guard 被吸收后 policy.next_due_at 不动 → 下个 tick 又 due →
+# 失败无限重试。修复=失败事实落账:next_due_at 推到 now+backoff(指数退避,抖动由
+# 调度层按 policy_id 确定性派生),连续失败达 retire_after 次 → enabled=False 退休
+# (等用户,绝不停机式无限重试)。成功路径由调度层 mark_progress_reported(failure_count=0)
+# 清零复原,退休 policy 被 disable 后不再出现在 due 扫描,账目保留在 metadata 供复盘。
+_POLICY_FAILURE_RETIRE_AFTER = 3
+
 
 class ConversationProgressStore(ConversationWakeStore):
     def set_progress_policy(self, request: dict) -> ProgressPolicy:
@@ -3063,6 +3071,43 @@ class ConversationProgressStore(ConversationWakeStore):
         updated = replace(
             policy,
             next_due_at=current + max(0, policy.interval_seconds),
+            metadata=metadata,
+        )
+        write_json_file_atomic(self._policy_path(policy_id), updated.to_dict())
+        return updated
+
+    def mark_progress_failed(
+        self,
+        policy_id: str,
+        *,
+        now: float | None = None,
+        backoff_seconds: float,
+        failure_count: int,
+        retire_after: int = _POLICY_FAILURE_RETIRE_AFTER,
+    ) -> ProgressPolicy | None:
+        """失败续跑记账:写 failure_count/last_failure_at 并退避顺延,超阈值退休。
+
+        backoff_seconds 由调度层按 5min×2^(n-1) 上限 1h 计算(含按 policy_id 确定性
+        派生的抖动);本方法只落账,不自己算退避——退避公式是调度策略,存层只持久化。
+        连续失败达 retire_after → enabled=False 退休(不再进 due 扫描),失败账目保留
+        在 metadata(供复盘)。成功路径 mark_progress_reported 清零复原。
+        """
+        policy = self.get_progress_policy(policy_id)
+        if policy is None:
+            return None
+        current = now if now is not None else time.time()
+        metadata = dict(policy.metadata or {})
+        metadata["failure_count"] = max(0, int(failure_count))
+        metadata["last_failure_at"] = current
+        metadata["last_backoff_seconds"] = float(backoff_seconds)
+        retired = int(failure_count) >= max(1, int(retire_after))
+        if retired:
+            metadata["retired_at"] = current
+        updated = replace(
+            policy,
+            enabled=not retired,
+            last_report_at=current,
+            next_due_at=current + float(backoff_seconds),
             metadata=metadata,
         )
         write_json_file_atomic(self._policy_path(policy_id), updated.to_dict())

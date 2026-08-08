@@ -115,10 +115,12 @@ tool_agent_budget_max_calls: 200
 # max_tool_rounds:
 #   一次主代理/runner 工具循环最多允许多少个工具轮。
 #   这里的“工具轮”是模型一次回复里请求的一批工具，不是单个工具调用。
-#   0 表示不限制。默认 60: 模型失败后机械重试
-#   无上限会把任务拖死(实测“读不存在文件”38+ 轮不收敛), 60 轮足够复杂任务走完,
-#   到顶走诚实交接(未完成+进度持久, 下个 run 续跑)而不是无限烧时间/成本。
-max_tool_rounds: 60
+#   0 表示不限制(逃生)。默认 5000 = 极高级别保护: 正常深度任务几百轮远够,
+#   5000 等效不限制,但真失控死循环(失败类/工具不断变化,到不了
+#   repeated_failure_halt 的同类 15 次)有硬顶,不会无限烧时间/成本。
+#   防失控另有专项防线: repeated_failure_halt(同类失败连续 15 次收口)、
+#   unknown_command_budget(200 次/10 分钟)、compact 防抖。
+max_tool_rounds: 5000
 
 # background_max_tool_rounds / background_max_tool_calls_per_round:
 #   内部后台唤醒只是同一任务的一次有界续跑切片，不应在一次 claim 内无限读取。

@@ -111,12 +111,12 @@ from .tool_runtime_ledger import persist_tool_runtime_ledger, write_boundary_wit
 
 _LOGGER = logging.getLogger(__name__)
 
-# 轮数防线默认关闭(0=不限制):参考 终端应用/会话运行时 均不截停主循环,长任务
-# (如整仓换语言复刻)一条指令要连续干几百次工具,60 轮截停只会打断推进。
-# 防失控改由专项防线承担:repeated_failure_halt(同工具同类失败连续达阈值收口)、
-# unknown_command_budget(200 次/10 分钟)、compact 防抖。显式配置 max_tool_rounds
-# 或任务属性仍可覆盖(正数=限制,0=不限制),需要单任务收紧时由任务属性显式传入。
-_DEFAULT_MAX_TOOL_ROUNDS = 0
+# 极高级别轮数保护(默认 5000):正常深度任务(整仓换语言复刻)几百轮远够,
+# 5000 等效"不限制",但真失控死循环(失败类/工具不断变化,永远到不了
+# repeated_failure_halt 的同类 15 次)有硬顶,不会无限烧时间/成本——这是
+# 取消 60 轮截停(2026-08-07)后的补位兜底:轮数不再拦可救任务,失控仍有终点。
+# 显式配置 max_tool_rounds 或任务属性仍可覆盖(正数=限制,0=不限制)。
+_DEFAULT_MAX_TOOL_ROUNDS = 5000
 
 _ORCHESTRATION_TOOLS = {
     "create_subagents",
@@ -152,11 +152,10 @@ def _effective_max_tool_rounds(agent, params: ToolLoopExecuteParams) -> int:
     attrs_to_check = params.task_attributes or current_task_attributes(agent)
     if attrs_to_check and "max_tool_rounds" in attrs_to_check:
         effective = attrs_to_check["max_tool_rounds"]
-    # LLM: 轮数防线默认关闭(0=不限制)——终端应用/会话运行时 均不截停主循环,5 万行
-    # 项目复刻需要几百轮连续工具调用,60 轮截停只会打断推进。防失控改由专项防线
-    # 承担:repeated_failure_halt(同类失败连续 8 次收口)、unknown_command_budget
-    # (200 次/10 分钟滚动窗口)、compact 防抖——比"总轮数天花板"更精准地只拦
-    # 机械重试。显式正数仍可限制,显式 0 同默认不限制,任务属性可单任务覆盖。
+    # LLM: 极高级别轮数保护(默认 5000)——正常深度任务几百轮远够,5000 只拦
+    # 真失控死循环;防失控另有专项防线:repeated_failure_halt(同类失败连续 15
+    # 次收口)、unknown_command_budget(200 次/10 分钟滚动窗口)、compact 防抖。
+    # 显式正数仍可限制,显式 0 不限制,任务属性可单任务覆盖。
     if effective is None:
         return _DEFAULT_MAX_TOOL_ROUNDS
     try:

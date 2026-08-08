@@ -109,12 +109,14 @@ def test_runner_retry_limit_only_uses_off_or_zero_to_disable():
         assert _runner_max_attempts(old_alias) == default_limit
 
 
-def test_agent_config_blank_tool_rounds_defaults_to_no_round_limit():
-    """LLM: 默认不再截停工具轮数(0=不限制)——终端应用/会话运行时 均不截停主循环,
-    深度任务(如 5 万行项目复刻)需要几百轮工具调用,60 轮上限是人为天花板。
-    防失控改由专项防线承担:repeated_failure_halt(同类失败连续 8 次收口)、
-    unknown_command_budget(200 次/10 分钟)、compact 防抖。显式正数仍可限制,
-    显式 0 同默认不限制;任务属性可覆盖。"""
+def test_agent_config_blank_tool_rounds_defaults_to_extreme_guard():
+    """LLM: 默认极高级别轮数保护(5000)——正常深度任务(如 5 万行项目复刻)几百轮
+    远够,5000 等效不截停主循环,但真失控死循环(失败类/工具不断变化,到不了
+    repeated_failure_halt 同类 15 次)有硬顶,不会无限烧时间/成本(问题4
+    「取消 60 轮限制没修真实失败」的补位兜底)。防失控另有专项防线:
+    repeated_failure_halt(同类失败连续 15 次收口)、unknown_command_budget
+    (200 次/10 分钟)、compact 防抖。显式正数仍可限制,显式 0 才是不限制;
+    任务属性可覆盖。"""
     from types import SimpleNamespace
 
     from agent_py_agent.agent.agent_core._tool_loop_service import (
@@ -126,8 +128,13 @@ def test_agent_config_blank_tool_rounds_defaults_to_no_round_limit():
     agent = SimpleNamespace(config=AgentConfig(enable_tools=True, memory_path="memory.jsonl"))
     params = SimpleNamespace(task_attributes={})
 
-    assert _DEFAULT_MAX_TOOL_ROUNDS == 0
+    assert _DEFAULT_MAX_TOOL_ROUNDS == 5000
     assert _effective_max_tool_rounds(agent, params) == _DEFAULT_MAX_TOOL_ROUNDS
+    # 显式 0 保留「不限制」逃生。
+    agent_explicit_0 = SimpleNamespace(
+        config=AgentConfig(enable_tools=True, memory_path="memory.jsonl", max_tool_rounds=0)
+    )
+    assert _effective_max_tool_rounds(agent_explicit_0, params) == 0
 
     # 显式正数仍可限制;任务属性可覆盖。
     agent_explicit_10 = SimpleNamespace(config=AgentConfig(enable_tools=True, memory_path="memory.jsonl", max_tool_rounds=10))
