@@ -76,13 +76,23 @@ def promote_current_conversation_task(
             _set_current_task_workspace(agent, attrs, workspace)
         selected = _materialize_promoted_workspace(agent, current, existing, task_goal=goal) or existing
         return _activate_current_conversation_task(store, current, attrs, selected)
-    if explicit_task_id and not child_run_id:
-        reusable = _reusable_conversation_workspace_link(store, thread_id, explicit_task_id)
-        if str(getattr(reusable, "status", "") or "").strip().lower() in {
-            "completed",
-            "interrupted",
-        }:
-            return bind_current_conversation_workspace(agent, explicit_task_id)
+    if not child_run_id:
+        # 每轮 /ask 派生新请求 id(req_2→req_3→…),精确 id 无 active link 时
+        # 回落线程持久化的 workspace_task_id(上一轮晋升时 select_workspace_task
+        # 写入的 sticky cwd):续接同一任务身份与同一目录,避免「影子任务」
+        # (问题5: 新请求另建 task link+新目录,原任务永久无终态、两任务分裂)。
+        candidate = _sticky_workspace_task_id(store, thread_id) or explicit_task_id
+        if candidate:
+            reusable = _reusable_conversation_workspace_link(store, thread_id, candidate)
+            if reusable is not None and not _detached_named_work_link(reusable):
+                bound = bind_current_conversation_workspace(agent, candidate)
+                if bound is not None:
+                    return bound
+                # 续接失败(如旧任务仍被 policy/claim 驱动执行中):不另建影子任务,
+                # 本轮工作步骤由 workspace execution blocker 拦截,等旧执行收束。
+                return None
+        # detached 任务(后台巡检等)只提供 sticky 目录,不续接:新请求是独立的
+        # 前台任务,按原路径新建 link(不占用 detached 任务的工作区)。
     task_goal = str(
         goal
         or getattr(current, "root_user_prompt", "")
@@ -136,6 +146,14 @@ def _materialize_promoted_workspace(
     task_goal: str,
 ):
     """把已晋升会话任务绑定到真实 workspace；失败时保留任务链接但不伪造路径。"""
+    attrs = getattr(current, "task_attributes", None)
+    inherited = _selected_task_workspace(getattr(link, "task_path", ""))
+    if inherited is not None and isinstance(attrs, dict):
+        # 链接已持有既有目录(续接/新执行代数继承原目录):先填进本轮工作区,
+        # 下面的 materialize 命中 existing 分支只刷新身份文件(state.json/
+        # task.yaml),绝不另建新目录——否则「同 cwd 新执行代数」承诺被打破,
+        # 每轮续跑散落新目录(问题5 影子任务的目录分裂源)。
+        _set_current_task_workspace(agent, attrs, inherited)
     try:
         from ..agent_core.run_task_workspace_writer import materialize_promoted_task_workspace
 
@@ -187,6 +205,25 @@ def _active_conversation_link(store: object, thread_id: str, task_id: str):
     )
 
 
+def _detached_named_work_link(link: object) -> bool:
+    """detached 命名工作(audit/后台巡检)只贡献 sticky 目录,不参与前台续接。"""
+    return str(getattr(link, "cancellation_scope", "") or "").strip().lower() == "detached"
+
+
+def _sticky_workspace_task_id(store: object, thread_id: str) -> str:
+    """读取线程持久化的 sticky cwd(上一轮晋升时 select_workspace_task 写入)。"""
+    loader = getattr(store, "load_thread", None)
+    if not callable(loader):
+        return ""
+    try:
+        thread = loader(thread_id)
+    except Exception:
+        return ""
+    if thread is None:
+        return ""
+    return str(getattr(thread, "workspace_task_id", "") or "").strip()
+
+
 # LLM: Binding uses an exact structured task id and never matches prose.  A terminal ordinary
 # task yields a fresh execution successor over the same cwd; only a paused structured /goal resumes
 # in place because the goal record itself owns that durable task id.
@@ -205,7 +242,12 @@ def bind_current_conversation_workspace(agent: object, task_id: str):
         return None
     if conversation_task_execution_blocker(agent, selected_id) is not None:
         return None
-    prior_current_id = str(attrs.get("conversation_task_id") or "").strip()
+    # 先前的 current 是线程持久化的 sticky cwd,不是本轮 gateway 派生的占位 id:
+    # 占位 id 从未 activate 过,把它当 prior 会在 supersede 时误杀同 id 的
+    # 新执行代数(问题5 影子任务:successor 刚建就被标 superseded)。
+    prior_current_id = _sticky_workspace_task_id(store, thread_id) or str(
+        attrs.get("conversation_task_id") or ""
+    ).strip()
     link = _activate_reusable_workspace_link(agent, store, link)
     if link is None or not _supersede_prior_current(store, thread_id, prior_current_id, selected_id):
         return None

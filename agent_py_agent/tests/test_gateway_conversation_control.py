@@ -2987,3 +2987,181 @@ def test_http_ask_steers_active_turn_without_creating_a_second_request(tmp_path)
     pending = agent.conversation_store.pending_guidance("request", "req-1")
     assert [item.message for item in pending] == ["先简单回答我这句，原任务继续"]
     assert pending[0].metadata["channel_message_id"] == "om-live-chat"
+
+
+def test_promote_resumes_exact_active_sticky_task_without_shadow_link(tmp_path) -> None:
+    """问题5 影子任务:每轮 /ask 派生新请求 id,精确 id 无 active link 时,
+    回落线程持久化 workspace_task_id 续接原任务身份+原目录,不另建新 link。"""
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    task_dir = tmp_path / "tasks" / "req-first"
+    task_dir.mkdir(parents=True, exist_ok=True)
+    thread, _link = _bind_durable_task(agent, "req-first", task_path=str(task_dir))
+    agent.conversation_store.select_workspace_task(
+        {"thread_id": thread.thread_id, "task_id": "req-first"}
+    )
+    attrs = {
+        "conversation_thread_id": thread.thread_id,
+        "conversation_task_id": "req-second",
+    }
+    agent._current_run_params = RunParams(
+        request_id="req-second",
+        run_id="req-second",
+        task_id="req-second",
+        source="gateway",
+        root_user_prompt="继续完成复刻任务",
+        task_attributes=attrs,
+    )
+    try:
+        from agent_py_agent.agent.conversation.task_promotion import (
+            promote_current_conversation_task,
+        )
+
+        promoted = promote_current_conversation_task(agent)
+    finally:
+        del agent._current_run_params
+
+    assert promoted is not None
+    assert promoted.task_id == "req-first"  # 续接原任务身份,不派生新 id
+    assert attrs["conversation_task_id"] == "req-first"
+    assert promoted.task_path == str(task_dir)  # 同目录
+    links = agent.conversation_store.task_links(thread.thread_id)
+    assert [item.task_id for item in links] == ["req-first"]  # 无影子新 link
+    assert str(links[0].status).strip().lower() == "active"
+
+
+def test_promote_continues_completed_sticky_task_in_same_directory(tmp_path) -> None:
+    """终态任务续做=同一目录新执行代数:原任务保持终态,新代数继承原目录,
+    materialize 只刷新身份文件,绝不另建新目录(目录分裂源)。"""
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    task_dir = tmp_path / "tasks" / "req-first"
+    task_dir.mkdir(parents=True, exist_ok=True)
+    thread, _link = _bind_durable_task(agent, "req-first", task_path=str(task_dir))
+    agent.conversation_store.update_task_status(
+        {"task_id": "req-first", "status": "completed", "expected_status": "active"}
+    )
+    agent.conversation_store.select_workspace_task(
+        {"thread_id": thread.thread_id, "task_id": "req-first"}
+    )
+    attrs = {
+        "conversation_thread_id": thread.thread_id,
+        "conversation_task_id": "req-second",
+    }
+    agent._current_run_params = RunParams(
+        request_id="req-second",
+        run_id="req-second",
+        task_id="req-second",
+        source="gateway",
+        root_user_prompt="继续把复刻任务做完",
+        task_attributes=attrs,
+    )
+    try:
+        from agent_py_agent.agent.conversation.task_promotion import (
+            promote_current_conversation_task,
+        )
+
+        promoted = promote_current_conversation_task(agent)
+    finally:
+        del agent._current_run_params
+
+    assert promoted is not None
+    assert promoted.task_id == "req-second"  # 新执行代数
+    assert promoted.task_path == str(task_dir)  # 同目录,不另建
+    links = agent.conversation_store.task_links(thread.thread_id)
+    by_id = {item.task_id: item for item in links}
+    assert str(by_id["req-first"].status).strip().lower() == "completed"  # 原任务保持终态
+    assert str(by_id["req-second"].status).strip().lower() == "active"
+    assert not list((tmp_path / "tasks").glob("req-*continue*"))  # 无新目录
+
+
+def test_promote_without_sticky_link_still_binds_fresh_task(tmp_path) -> None:
+    """无 sticky 目录(全新会话首轮):保持原行为,新建任务 link。"""
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    thread = agent.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "u-1",
+            "channel": "feishu",
+            "channel_conversation_id": "c-1",
+            "channel_user_id": "u-1",
+            "now": time.time() - 40,
+        }
+    )
+    attrs = {
+        "conversation_thread_id": thread.thread_id,
+        "conversation_task_id": "req-new",
+    }
+    agent._current_run_params = RunParams(
+        request_id="req-new",
+        run_id="req-new",
+        task_id="req-new",
+        source="gateway",
+        root_user_prompt="整理今天的资料",
+        task_attributes=attrs,
+    )
+    try:
+        from agent_py_agent.agent.conversation.task_promotion import (
+            promote_current_conversation_task,
+        )
+
+        promoted = promote_current_conversation_task(agent)
+    finally:
+        del agent._current_run_params
+
+    assert promoted is not None
+    assert promoted.task_id == "req-new"
+    assert attrs["conversation_task_id"] == "req-new"
+
+
+def test_promote_blocked_by_running_policy_does_not_create_shadow_link(tmp_path) -> None:
+    """旧任务仍被 progress policy 驱动执行中:promote 不建影子 link,
+    由 workspace execution blocker 拦截本轮工作步骤。"""
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    task_dir = tmp_path / "tasks" / "req-first"
+    task_dir.mkdir(parents=True, exist_ok=True)
+    thread, _link = _bind_durable_task(agent, "req-first", task_path=str(task_dir))
+    agent.conversation_store.select_workspace_task(
+        {"thread_id": thread.thread_id, "task_id": "req-first"}
+    )
+    agent.conversation_store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "req-first",
+            "interval_seconds": 60,
+            "now": time.time() - 30,
+        }
+    )
+    attrs = {
+        "conversation_thread_id": thread.thread_id,
+        "conversation_task_id": "req-second",
+    }
+    agent._current_run_params = RunParams(
+        request_id="req-second",
+        run_id="req-second",
+        task_id="req-second",
+        source="gateway",
+        root_user_prompt="继续完成复刻任务",
+        task_attributes=attrs,
+    )
+    try:
+        from agent_py_agent.agent.conversation.task_promotion import (
+            promote_current_conversation_task,
+        )
+
+        promoted = promote_current_conversation_task(agent)
+    finally:
+        del agent._current_run_params
+
+    assert promoted is None
+    links = agent.conversation_store.task_links(thread.thread_id)
+    assert [item.task_id for item in links] == ["req-first"]  # 无影子 link
