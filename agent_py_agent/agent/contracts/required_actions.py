@@ -204,9 +204,17 @@ def tool_choice_for_required_actions(
         return ToolChoice.none("required_actions_settled")
     assessment = getattr(snapshot, "required_action_assessment", None)
     if _assessment_failed(assessment):
-        return ToolChoice.none("required_action_assessment_failed")
+        # 评估模型失败不应一票否决禁掉整轮工具：评估只是预判，主循环模型拥有完整上下文，
+        # 让它自主决定是否调用(长期助手/会话运行时 均无预评估硬禁)。评估失败硬禁曾导致
+        # 真实请求整 run 无工具可用(2026-08-08 真机铁证)。
+        return ToolChoice.auto("required_action_assessment_failed")
     if isinstance(assessment, dict) and assessment.get("requires_action") is False:
-        return ToolChoice.none("semantic_assessment_informational")
+        # informational 评估(纯询问/闲聊/催办)不硬禁工具:催办、追问进度是真实用户最常
+        # 说的消息,评估模型判 False 时整 run 禁工具 → 模型按系统提示发起调用 →
+        # TOOL_CHOICE_VIOLATION → 修复轮(教 JSON 格式)方向全错 → 3 轮 break 卡死
+        # (2026-08-08 真机铁证:scrapy 复刻连续 3 请求 blocked)。工具是否调用由主循环
+        # 模型自主决定,评估只影响 guidance 注入。
+        return ToolChoice.auto("semantic_assessment_informational")
     return ToolChoice.auto("ordinary_tool_turn")
 
 

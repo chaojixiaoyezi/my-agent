@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, replace
 from typing import ClassVar
+
+_LOGGER = logging.getLogger(__name__)
 
 from ...backends import ModelResponse
 from ...backends.tool_protocol_adapter import (
@@ -215,6 +218,13 @@ def _protocol_violation_decision(
     request: ToolLoopResponseDecisionRequest,
     violations: tuple[ToolProtocolViolation, ...],
 ) -> ToolLoopResponseDecision:
+    model_output = str(getattr(request.response, "text", "") or "")
+    _LOGGER.warning(
+        "protocol violation: turn=%s violations=%s model_output_head=%r",
+        str(request.turn_id or ""),
+        [item.to_dict() for item in violations],
+        model_output[:400],
+    )
     payload = [item.to_dict() for item in violations]
     state = getattr(request.params, "live_archive_state", None)
     if isinstance(state, dict):

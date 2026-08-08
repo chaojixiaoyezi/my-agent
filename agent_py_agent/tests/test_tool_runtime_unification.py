@@ -492,7 +492,7 @@ def test_semantic_assessment_is_locally_validated_not_provider_trusted() -> None
     assert tool_choice_for_required_actions(
         contract,
         [{"name": "command_tool"}],
-    ) == ToolChoice.none("required_action_assessment_failed")
+    ) == ToolChoice.auto("required_action_assessment_failed")
     assert required_action_no_tool_decision(contract) == "blocked"
 
 
@@ -559,7 +559,9 @@ def test_soc_completed_action_report_disables_tools_for_native_and_text() -> Non
 
     assert assessment.requires_action is False
     assert assessment.actions == ()
-    assert choice == ToolChoice.none("semantic_assessment_informational")
+    # informational 评估不硬禁工具:催办/追问进度判 False 时禁工具会卡死真实任务
+    # (2026-08-08 真机铁证),工具调用由主循环模型自主决定。
+    assert choice == ToolChoice.auto("semantic_assessment_informational")
 
     native = canonical_tool_calls_from_response(
         ProviderToolCallRequest(
@@ -617,10 +619,12 @@ def test_soc_completed_action_report_disables_tools_for_native_and_text() -> Non
         )
     )
 
-    assert native.calls == ()
-    assert text.calls == ()
-    assert [item.code for item in native.violations] == ["TOOL_CHOICE_VIOLATION"]
-    assert [item.code for item in text.violations] == ["TOOL_CHOICE_VIOLATION"]
+    # informational 评估不再硬禁工具(auto):催办/追问进度判 False 时禁工具会卡死真实
+    # 任务(2026-08-08 真机铁证),调用是否放行交给主循环模型自主决定。
+    assert [item.tool_name for item in native.calls] == ["command_tool"]
+    assert [item.tool_name for item in text.calls] == ["command_tool"]
+    assert native.violations == ()
+    assert text.violations == ()
     assert tool.executions == 0
 
 
