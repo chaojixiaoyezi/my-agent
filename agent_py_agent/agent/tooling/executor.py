@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
+
+_LOGGER = logging.getLogger(__name__)
 
 from ..local_storage import ToolOperationRecord
 from .action_policy import ActionDecision, ActionPolicy, ActionPolicyRequest
@@ -105,6 +108,15 @@ class ToolExecutor:
         call, sources, normalization_error = _normalized_call(request, runtime)
         states.append("normalized")
         if normalization_error:
+            _LOGGER.warning(
+                "tool validation failed: tool=%s run=%s turn=%s error=%s "
+                "arguments_head=%r",
+                str(request.call.tool_name or ""),
+                str(getattr(request.call, "run_id", "") or ""),
+                str(getattr(request.call, "turn_id", "") or ""),
+                normalization_error,
+                json.dumps(request.call.arguments, ensure_ascii=False)[:500],
+            )
             decision = ActionDecision(
                 "deny",
                 (normalization_error,),
