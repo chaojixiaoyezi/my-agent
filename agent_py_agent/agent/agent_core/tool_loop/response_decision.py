@@ -229,7 +229,12 @@ def _protocol_violation_decision(
     request.params.tool_context.append(
         "[tool-protocol-violation]\n"
         + json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        + "\n上一轮没有形成可执行工具调用。若仍需操作，请使用本 run 已选定的结构化协议重新发起；"
+        + "\n上一轮没有形成可执行工具调用（工具协议格式无效）。若仍需操作，请按以下唯一格式"
+        "重新发起——[TOOL_CALL] 包裹的单个 JSON 对象，参数直接平铺：\n"
+        '[TOOL_CALL]\n{"tool": "read_file", "path": "README.md"}\n[/TOOL_CALL]\n'
+        "写文件类似：{\"tool\": \"write_file\", \"path\": \"output/main.go\", "
+        "\"content\": \"package main...\"}。必须使用 Tool Catalog 里该工具自己的参数名；"
+        "不要用 args/arguments/param_name 包裹参数，不要写 => 或 <invoke> 风格，"
         "不要把工具调用写进正文、代码块或解释文字。"
     )
     max_repairs = max(1, int(getattr(request.params, "max_protocol_repairs", 2) or 2))

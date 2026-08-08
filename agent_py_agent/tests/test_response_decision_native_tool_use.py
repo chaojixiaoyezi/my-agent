@@ -230,6 +230,39 @@ def test_protocol_violation_gets_two_repairs_before_break(tmp_path: Path):
     assert third.counters.protocol_repairs == 2
 
 
+def test_protocol_violation_feedback_includes_flat_json_example(tmp_path: Path):
+    """修复轮反馈必须带 [TOOL_CALL] 平铺 JSON 正例。
+
+    真机实证(2026-08-08, deepseek-v4-flash 经 OpenCode Go 网关):长代码任务里模型
+    忽略系统提示中段的格式说明,输出 Perl 风格(tool => 'write_file'/args => {)或
+    XML 风格(<invoke name=...>)漂移;修复轮反馈带 JSON 正例时模型 100% 纠正。
+    正例必须参数平铺(与 _tool_call_protocol 及工具 schema 一致),不得用
+    args/arguments 包裹——解析器把整块 JSON 直接当 arguments 执行。
+    """
+    agent = _agent(tmp_path)
+    response = ModelResponse(
+        text="[TOOL_CALL]\ntool => 'write_file', args => { path => 'output/main.go' }\n[/TOOL_CALL]",
+        backend="fake",
+    )
+    params = _params(source_protocol="text")
+
+    decision = tool_loop_response_decision(
+        ToolLoopResponseDecisionRequest(
+            agent=agent,
+            params=params,
+            response=response,
+            counters=ToolLoopRepairCounters(),
+        )
+    )
+    assert decision.action == "continue"
+    feedback = "\n".join(params.tool_context)
+    assert "tool-protocol-violation" in feedback
+    assert '[TOOL_CALL]\n{"tool": "read_file", "path": "README.md"}\n[/TOOL_CALL]' in feedback
+    assert '{"tool": "write_file", "path": "output/main.go"' in feedback
+    assert "不要用 args/arguments/param_name 包裹参数" in feedback
+    assert "=>" in feedback and "<invoke" in feedback  # 点名禁用风格,模型才知道错在哪
+
+
 def test_protocol_violation_break_after_single_repair_when_configured(tmp_path: Path):
     """max_protocol_repairs=1 时保持旧行为：第一次违规修复，第二次 break。"""
     agent = _agent(tmp_path)
