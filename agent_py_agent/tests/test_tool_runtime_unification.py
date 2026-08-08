@@ -706,7 +706,7 @@ def test_run_evidence_projects_exact_snapshots_choices_and_completion() -> None:
     assert "not projected" not in json.dumps(evidence)
 
 
-def test_required_action_forces_specific_tool_then_none_after_evidence(tmp_path: Path) -> None:
+def test_required_action_lets_model_choose_then_none_after_evidence(tmp_path: Path) -> None:
     tool = _CountingTool(command=True)
     action = RequiredAction(
         action_id="required-1",
@@ -721,7 +721,9 @@ def test_required_action_forces_specific_tool_then_none_after_evidence(tmp_path:
         required_actions=(action,),
     )
     provider_tools = [{"name": "command_tool"}]
-    assert tool_choice_for_required_actions(contract, provider_tools).mode == "specific"
+    # open action 不再强制 specific 工具:执行层 _required_action_decision 已硬约束
+    # 工具名单与 effect 上限(真机铁证 2026-08-08: 强制唯一工具卡死"先读后改"链)。
+    assert tool_choice_for_required_actions(contract, provider_tools).mode == "auto"
 
     call = replace(
         _call(tool, {"command": "pytest -q"}),

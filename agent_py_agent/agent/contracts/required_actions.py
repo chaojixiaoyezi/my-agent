@@ -189,17 +189,13 @@ def tool_choice_for_required_actions(
     actions = tuple(getattr(snapshot, "required_actions", ()) or ())
     open_actions = [item for item in actions if item.status == "open"]
     if open_actions:
-        available = {
-            str(item.get("name") or "").strip()
-            for item in provider_tools or ()
-            if isinstance(item, dict)
-        }
-        allowed = [name for name in open_actions[0].allowed_tools if name in available]
-        if len(allowed) == 1:
-            return ToolChoice.specific(allowed[0], "open_required_action_unique_tool")
-        if allowed:
-            return ToolChoice.required("open_required_action")
-        return ToolChoice.none("open_required_action_has_no_provider_tool")
+        # open action 不强制工具选择:强制 specific/required 会在"先读后改"等前置
+        # 依赖链上死锁(真机铁证 2026-08-08:修 main.go 的 action allowed_tools=
+        # [edit_file],模型 read_file 被 TOOL_CHOICE_VIOLATION 连拦 3 轮 break)。
+        # 工具权限与 effect 上限由执行层 _required_action_decision 硬约束
+        # (REQUIRED_ACTION_TOOL_NOT_ALLOWED / REQUIRED_ACTION_EFFECT_CEILING_EXCEEDED),
+        # tool_choice 只决定"是否调用",由主循环模型自主(对齐 长期助手/会话运行时)。
+        return ToolChoice.auto("open_required_action")
     if actions:
         return ToolChoice.none("required_actions_settled")
     assessment = getattr(snapshot, "required_action_assessment", None)

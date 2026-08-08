@@ -71,13 +71,67 @@ def _decide(
     *,
     required_action: RequiredAction | None,
     default_effect: str = "dangerous",
+    tool_name: str = "run_command",
+    arguments: dict[str, object] | None = None,
 ) -> object:
     root = Path("/tmp/my-agent-workspace")
     snapshot = _snapshot(default_effect)
     call = canonical_test_call(
         snapshot,
-        "run_command",
-        {"command": "go build ./..."},
+        tool_name,
+        arguments if arguments is not None else {"command": "go build ./..."},
+    )
+    return ActionPolicy().decide(
+        ActionPolicyRequest(
+            call=call,
+            runtime_snapshot=snapshot,
+            workspace_root=root,
+            workspace_roots=(root,),
+            write_boundary=None,
+            runtime_guard_policy=None,
+            required_action=required_action,
+        )
+    )
+
+
+def _ReadTool():
+    from agent_py_agent.agent.tooling import BaseTool as _BT
+
+    class _FakeReadTool(_BT):
+        model_spec = make_test_model_spec(
+            "read_file",
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        )
+        runtime_policy = make_test_runtime_policy(
+            "read_only",
+            strategy="declared",
+        )
+
+        def execute(self, params):
+            raise AssertionError("decide 阶段不应执行 handler")
+
+    return _FakeReadTool()
+
+
+def _decide_read(*, required_action: RequiredAction | None) -> object:
+    from agent_py_agent.agent.tooling.action_policy import (
+        ActionPolicy,
+        ActionPolicyRequest,
+    )
+
+    root = Path("/tmp/my-agent-workspace")
+    snapshot = runtime_snapshot_for_tools(
+        {"read_file": _ReadTool()}, run_id=_RUN
+    )
+    call = canonical_test_call(
+        snapshot,
+        "read_file",
+        {"path": "main.go"},
     )
     return ActionPolicy().decide(
         ActionPolicyRequest(
@@ -138,13 +192,32 @@ def test_open_mutating_ceiling_allows_mutating_call() -> None:
 
 
 def test_open_action_tool_not_allowed_still_denies() -> None:
-    # 工具名单外拦截语义不受状态闸影响。
+    # 工具名单外拦截语义不受状态闸影响(mutating 调用仍受名单约束)。
     action = _action(status="open", ceiling="mutating")
     action.allowed_tools = ("other_tool",)
     decision = _decide(required_action=action)
 
     assert decision.status != "allow"
     assert "REQUIRED_ACTION_TOOL_NOT_ALLOWED" in decision.reason_codes
+
+
+def test_open_action_read_call_not_blocked_by_tool_allowlist() -> None:
+    # "先读后改"前置链:action allowed_tools 只列写工具(edit_file/run_command)时,
+    # 只读调用(read_file)必须放行,否则模型无法先读文件再编辑,任务卡死
+    # (真机铁证 2026-08-08: 修 main.go 的 action allowed_tools=[edit_file],
+    # 模型 read_file 被连拦 3 轮 break)。只读零副作用,effect_ceiling 已覆盖其上限。
+    action = RequiredAction(
+        action_id="act-1",
+        source_turn_id="turn-1",
+        kind="execute",
+        allowed_tools=("edit_file",),
+        effect_ceiling="mutating",
+        status="open",
+    )
+    decision = _decide_read(required_action=action)
+
+    assert decision.status == "allow", decision
+    assert "REQUIRED_ACTION_TOOL_NOT_ALLOWED" not in (decision.reason_codes or ())
 
 
 # ---------- _validated_action_rows：评估一致性校验 ----------

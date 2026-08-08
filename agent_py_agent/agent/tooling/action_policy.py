@@ -282,8 +282,14 @@ def _required_action_decision(
     if str(getattr(action, "status", "") or "").strip().lower() != "open":
         return None
     allowed_tools = tuple(getattr(action, "allowed_tools", ()) or ())
-    if allowed_tools and runtime.model_spec.name not in allowed_tools:
-        return _deny("REQUIRED_ACTION_TOOL_NOT_ALLOWED", effect=effect)
+    # 只读调用不受 action 工具名单约束:读文件/查目录是任务推进的正常前置,评估模型
+    # 生成的 allowed_tools 常只列写/执行工具,漏只读工具会把"先读后改"卡死(真机铁证
+    # 2026-08-08: 修 main.go 的 action allowed_tools=[edit_file],模型 read_file 被
+    # REQUIRED_ACTION_TOOL_NOT_ALLOWED/TOOL_CHOICE_VIOLATION 连拦 3 轮 break)。
+    # 只读调用零副作用,effect_ceiling 已覆盖其效果上限,名单约束只施加于 mutating 以上。
+    if not (_EFFECT_RANK.get(effect, 0) <= _EFFECT_RANK["read_only"]):
+        if allowed_tools and runtime.model_spec.name not in allowed_tools:
+            return _deny("REQUIRED_ACTION_TOOL_NOT_ALLOWED", effect=effect)
     ceiling = str(getattr(action, "effect_ceiling", "") or "").strip().lower()
     if ceiling in _EFFECT_RANK and _EFFECT_RANK[effect] > _EFFECT_RANK[ceiling]:
         return _deny("REQUIRED_ACTION_EFFECT_CEILING_EXCEEDED", effect=effect)
