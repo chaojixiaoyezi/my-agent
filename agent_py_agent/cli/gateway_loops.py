@@ -13,6 +13,7 @@ import os
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -307,6 +308,11 @@ def _build_background_scheduler(agent: SimpleAgent, channels: DeliveryService) -
 #   可由 config background_owner_workers 覆盖(千并发调参入口),此常量是无配置时的兜底。
 _BACKGROUND_OWNER_WORKERS = 8
 _BASE_SCHEDULER_KEY = "base"
+# 调度器存活心跳节流(秒):>5 分钟没更新即疑死,配合 systemd 快速定位。
+_HEARTBEAT_INTERVAL_SECONDS = 60
+# 策展每日全局配额(默认 5000 次/天,config curator_daily_quota 覆盖):LLM 提取烧钱,
+# 归档类晚一天无害,超限顺延;紧急车道(pending reason)不受此限。
+_CURATOR_DAILY_QUOTA = 5000
 
 
 def _background_owner_workers(agent: object) -> int:
@@ -318,77 +324,6 @@ def _background_owner_workers(agent: object) -> int:
     return parsed if parsed > 0 else _BACKGROUND_OWNER_WORKERS
 
 
-def _scan_curator_pending_owners(owners_dir: object) -> list[object]:
-    """模块级辅助:扫描磁盘上有待处理记忆策展工作或待晋升候选的 owner(扁平,避免类方法深嵌套)。
-
-    LLM: 只读 owner home 的 curator state/candidates.jsonl 判 pending(纯结构化);失败静默跳过。
-    """
-    try:
-        from ..agent.owner_wake_discovery import _has_pending_memory_curator_work
-        from ..agent.user_space.owner_resolver import OwnerIdentity
-
-        if not owners_dir:
-            return []
-        providers_root = Path(str(owners_dir)) / "providers"
-        if not providers_root.is_dir():
-            return []
-        owners: list[object] = []
-        for provider_dir in providers_root.iterdir():
-            if not provider_dir.is_dir():
-                continue
-            owners.extend(
-                _scan_provider_users(provider_dir, _has_pending_memory_curator_work, OwnerIdentity)
-            )
-        return owners
-    except Exception:
-        return []
-
-
-def _scan_provider_users(provider_dir: Path, pending_fn: object, owner_identity: object) -> list[object]:
-    """扫描单个 provider 下的用户目录,返回有 pending 记忆工作/待晋升候选的 owner 身份(扁平)。"""
-    users_root = provider_dir / "users"
-    if not users_root.is_dir():
-        return []
-    found: list[object] = []
-    for user_dir in users_root.iterdir():
-        if not user_dir.is_dir():
-            continue
-        try:
-            if pending_fn(user_dir) or _has_pending_review_candidates(user_dir):
-                found.append(owner_identity.provider_user(provider_dir.name, user_dir.name))
-        except Exception:
-            continue
-    return found
-
-
-def _has_pending_review_candidates(owner_home: Path) -> bool:
-    """owner 是否有已落库、待晋升的候选(纯结构化:读 candidates.jsonl 的 status/字段,不解析正文)。
-
-    LLM: 用于 gateway 晋升兜底的调度判据——候选落库后若 curator 不再 run(pending 清空),
-    pending_review 的 user_explicit 候选不会晋升;这里保证这类 owner 仍被调度,让 run_if_due
-    的晋升兜底能触发。失败静默返回 False,绝不外抛。
-    """
-    try:
-        import json as _json
-
-        path = owner_home / "memory" / "candidates.jsonl"
-        if not path.exists():
-            return False
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                row = _json.loads(line)
-            except ValueError:
-                continue
-            if str(row.get("status") or "").strip().lower() != "pending_review":
-                continue
-            origin = str(row.get("origin") or "").strip().lower()
-            if origin in {"user_explicit", "tool_verified"}:
-                return True
-        return False
-    except Exception:
-        return False
 
 
 class _BackgroundMainSupervisor:
@@ -437,8 +372,56 @@ class _BackgroundMainSupervisor:
         # 后台记忆策展唤醒:节流扫描 + 独立 in-flight 去重(见 _run_due_curators)。
         self._next_curator_run_at = 0.0
         self._curator_inflight: dict[object, object] = {}
+        # 策展每日全局配额(见 _run_due_curators):记账落盘到 global_index_dir,重启不丢。
+        self._curator_quota_path: Path | None = None
+        self._curator_quota_count = 0
+        self._curator_quota_date = ""
+        # 调度器存活心跳(见 _maybe_write_heartbeat):出事 5 分钟内定位调度循环是否还活着。
+        self._heartbeat_path: Path | None = None
+        self._next_heartbeat_at = 0.0
+        index_dir = getattr(getattr(self._base_agent, "home_paths", None), "global_index_dir", None)
+        if index_dir is not None:
+            self._curator_quota_path = Path(str(index_dir)) / "curator_daily_quota.json"
+            self._heartbeat_path = Path(str(index_dir)) / "background_supervisor_heartbeat.json"
+            self._load_curator_quota()
+
+    def _load_curator_quota(self) -> None:
+        """启动时恢复当日配额计数(重启不丢);只认当天日期,跨天自然重置。"""
+        if self._curator_quota_path is None or not self._curator_quota_path.is_file():
+            return
+        try:
+            payload = json.loads(self._curator_quota_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            return
+        today = datetime.now(timezone.utc).date().isoformat()
+        if not isinstance(payload, dict) or str(payload.get("date") or "") != today:
+            return
+        try:
+            count = max(0, int(payload.get("count") or 0))
+        except (TypeError, ValueError):
+            return
+        self._curator_quota_count = count
+        self._curator_quota_date = today
+
+    def _maybe_write_heartbeat(self) -> None:
+        """调度器存活心跳:节流写 ts+pid 到 global_index_dir,诊断「调度循环死了没有」。"""
+        now = time.time()
+        if now < self._next_heartbeat_at:
+            return
+        self._next_heartbeat_at = now + _HEARTBEAT_INTERVAL_SECONDS
+        if self._heartbeat_path is None:
+            return
+        try:
+            self._heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+            self._heartbeat_path.write_text(
+                json.dumps({"ts": int(now), "pid": os.getpid()}, sort_keys=True),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
 
     def tick(self) -> bool:
+        self._maybe_write_heartbeat()
         self._maybe_seed_wake_pending_owners()
         reports = self._collect_finished_ticks()
         self._sync_owner_schedulers()
@@ -543,11 +526,10 @@ class _BackgroundMainSupervisor:
             print(f"[gateway-background-main] wake-pending owners seeded from disk: {page.seeded}", flush=True)
 
     def _sync_owner_schedulers(self) -> None:
+        # 登记本唯一入口:registry snapshot(controller claim_due_owners / wake seed 分页种回)。
+        # 曾经的磁盘全量策展扫(186+ owner 全进池)已被登记本替代——全量扫把 64 容量 LRU 池
+        # 用假活灌满、真活 owner 被逐出饿死(探针实锤:user-b 的 ordinary_task_resume 永不拉起)。
         snapshot = self._registry.snapshot()
-        # 框架层兜底:除 registry snapshot 外,直接扫描磁盘上有【待处理记忆策展工作】或【待晋升
-        # 候选】的 owner,纳入调度。保证任何有记忆待提炼/晋升的 owner 都会被后台 curator 处理,
-        # 不依赖 registry 完整性。纯结构化判据,不猜正文。
-        snapshot = list(snapshot) + self._disk_curator_pending_owners()
         if not snapshot and not self._owner_schedulers:
             return  # 无活跃 scoped owner(单 owner / 未开 scoping)→ 完全不碰 owner 池,零额外开销
         pool = self._ensure_owner_pool()
@@ -565,15 +547,6 @@ class _BackgroundMainSupervisor:
         for key, scoped_agent in active.items():
             if key not in self._owner_schedulers:
                 self._owner_schedulers[key] = _build_background_scheduler(scoped_agent, self._channels)
-
-    def _disk_curator_pending_owners(self) -> list[object]:
-        """扫描磁盘上有待处理记忆策展工作或待晋升候选的 owner,构造其身份(框架兜底)。
-
-        LLM: 只读 owner home 的 curator state/candidates.jsonl 判 pending(纯结构化),不解析正文;
-        失败静默跳过单个 owner,绝不外抛。返回可与 snapshot 合并的 OwnerIdentity 列表。
-        """
-        owners_dir = getattr(getattr(self._base_agent, "home_paths", None), "owners_dir", None)
-        return _scan_curator_pending_owners(owners_dir)
 
     def _recover_active_watch_harvesters(self, *, now: float | None = None) -> int:
         """Reacquire active named-Audit collectors for active owner lanes.
@@ -630,6 +603,10 @@ class _BackgroundMainSupervisor:
         提取批次的 LLM 调用可能耗时几十秒,必须丢线程池并独立 in-flight 去重——否则按
         _submit_owner_ticks 的教训(真机:单 owner 长 turn 占死单后台线程,饿死其他 owner)
         会把全部 owner 的整合 tick 饿死。单 owner 异常只记录不中断其他 owner(健壮性)。
+
+        每日全局配额(LLM 提取烧钱,防失控):紧急车道(pending reason/active lease,事故必办)
+        不受配额约束;常规车道(interval/daily/turn 轮询,归档类晚一天无害)占用配额,
+        当日满了就顺延明天——配额账本落盘,重启不丢。
         """
         now = time.monotonic()
         if now < self._next_curator_run_at:
@@ -652,9 +629,51 @@ class _BackgroundMainSupervisor:
             key = id(agent)
             if key in self._curator_inflight:
                 continue  # 该 owner 上一轮 curator 还在跑(LLM 提取中)→ 不重复提交
+            if not self._curator_has_pending_reason(agent) and not self._curator_quota_spend():
+                continue  # 常规车道已到当日全局限额 → 顺延明天(紧急车道不受配额约束)
             self._curator_inflight[key] = self._get_executor().submit(
                 self._safe_run_curator, agent, str(getattr(agent, "owner_id", "local"))
             )
+
+    def _curator_daily_quota(self) -> int:
+        return _positive_int_config(self._base_agent, "curator_daily_quota", default=_CURATOR_DAILY_QUOTA)
+
+    def _curator_quota_spend(self) -> bool:
+        """常规策展提交即记账(approve 式防超跑);按日滚动,落盘重启不丢。返回是否还有配额。"""
+        quota = self._curator_daily_quota()
+        if quota <= 0:
+            return True  # 配额关闭 = 不限额
+        today = datetime.now(timezone.utc).date().isoformat()
+        if self._curator_quota_date != today:
+            self._curator_quota_date = today
+            self._curator_quota_count = 0
+        if self._curator_quota_count >= quota:
+            return False
+        self._curator_quota_count += 1
+        if self._curator_quota_path is not None:
+            try:
+                self._curator_quota_path.parent.mkdir(parents=True, exist_ok=True)
+                self._curator_quota_path.write_text(
+                    json.dumps({"date": today, "count": self._curator_quota_count}, sort_keys=True),
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass  # 配额账本写失败不阻塞策展(内存计数仍在)
+        return True
+
+    def _curator_has_pending_reason(self, agent: object) -> bool:
+        """紧急车道判定:该 agent 的 curator state 是否有 pending reason/active lease(纯读 state.json)。"""
+        owner_home = getattr(getattr(agent, "home_paths", None), "owner_home_dir", "")
+        if not owner_home:
+            return False
+        state_path = Path(str(owner_home)) / "memory" / "curator" / "state.json"
+        try:
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            return False
+        if not isinstance(payload, dict):
+            return False
+        return bool(payload.get("pending_reasons") or payload.get("active_lease"))
 
     def _safe_run_curator(self, agent: object, label: str) -> object:
         try:

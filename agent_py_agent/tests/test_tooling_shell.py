@@ -480,3 +480,25 @@ class TestShellToolEdgeCases:
 
         assert result.ok is True
         assert str(external) in result.output
+
+
+def test_failure_effect_outcome_three_state_classification():
+    """失败副作用三态分类(长期助手 式,判定层只认结构化信号):
+
+    只读命令失败 → not_started(明确失败,重做安全,不再说成「结果不确定」);
+    写命令失败 → 不声明(沿通用合同保守 unknown 防重做);超时 → unknown(可能部分生效);
+    成功/未启动失败 → 无声明(handler_executed=False 已由上层判 not_started)。
+    """
+    from agent_py_agent.agent.tooling.shell import ShellTool
+
+    classify = ShellTool._failure_effect_outcome
+    # 只读命令(grep)完整退出失败 → not_started
+    assert classify("grep foo bar.txt", False, "COMMAND_FAILED") == "not_started"
+    # 写命令(重定向)失败 → 不声明 → 保守 unknown
+    assert classify("echo x > f.txt", False, "COMMAND_FAILED") == ""
+    # 超时 → unknown(进程可能部分生效)
+    assert classify("sleep 100", False, "TOOL_TIMEOUT") == "unknown"
+    # 成功 → 无声明
+    assert classify("grep foo bar.txt", True, "") == ""
+    # 未启动的前置失败(策略拒绝)→ 无声明(handler_executed=False 已足够)
+    assert classify("rm -rf /", False, "COMMAND_POLICY_BLOCKED") == ""

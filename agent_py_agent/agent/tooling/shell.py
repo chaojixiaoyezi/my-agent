@@ -21,6 +21,7 @@ from agent_py_agent.agent.artifacts.shell_protection import (
 from agent_py_agent.agent.common.json_io import append_jsonl_capped
 from agent_py_agent.agent.concurrency.interrupt import is_interrupted
 from agent_py_agent.agent.contracts.gates.command_policy import (
+    analyze_command,
     evaluate_command_policy,
 )
 from agent_py_agent.agent.path_access_policy import PathAccessPolicy
@@ -915,7 +916,29 @@ class ShellTool(BaseTool):
                 "process": process_facts,
             },
             error_code="" if ok else error_code,
+            effect_outcome=self._failure_effect_outcome(command, ok, error_code),
         )
+
+    @staticmethod
+    def _failure_effect_outcome(command: str, ok: bool, error_code: str) -> str:
+        """失败时声明副作用状态(长期助手 三态,判定层只认结构化信号):
+
+        - 命令完整退出且是只读命令(analyze_command resolved_effect=read_only,如 grep/
+          ls/diff)→ not_started:失败是明确的,重做安全,不再说成「结果不确定」。
+        - 超时 → unknown:进程可能部分生效,防重做(保持)。
+        - 写命令失败 → 不声明:沿通用错误合同保守判 unknown(防重复副作用)。
+        """
+        if ok or not error_code:
+            return ""
+        if error_code == "TOOL_TIMEOUT":
+            return "unknown"
+        if error_code != "COMMAND_FAILED":
+            return ""
+        try:
+            analysis = analyze_command(command)
+        except Exception:  # noqa: BLE001 - 判定失败时保守不声明,沿通用合同
+            return ""
+        return "not_started" if analysis.resolved_effect == "read_only" else ""
 
     def _run_process_text(
         self,

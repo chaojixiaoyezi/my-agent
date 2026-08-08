@@ -178,6 +178,9 @@ def _curator_supervisor(*, base_calls, scoped_calls, running=()) -> object:
     supervisor._owner_pool = pool
     supervisor._curator_inflight = {}
     supervisor._next_curator_run_at = 0.0
+    supervisor._curator_quota_count = 0
+    supervisor._curator_quota_date = ""
+    supervisor._curator_quota_path = None
     supervisor._get_executor = lambda: SimpleNamespace(
         submit=lambda fn, *args: _ImmediateFuture(fn, args)
     )
@@ -223,3 +226,114 @@ def test_background_main_supervisor_curator_dedupes_and_isolates_failures(monkey
     base_agent.memory_curator.run_if_due = lambda: base_calls.append(1)
     supervisor._run_due_curators()
     assert base_calls == [1] and scoped_calls == [1]  # base 被唤醒,scoped 仍在跑被跳过
+
+
+def _quota_supervisor(tmp_path, *, base_calls, scoped_calls):
+    """构造配额可注入的 supervisor:base 常规车道、scoped 紧急车道(pending reason)。"""
+    from agent_py_agent.cli import gateway_loops
+
+    base_agent = SimpleNamespace(
+        config=SimpleNamespace(owner_maintenance_scan_interval_seconds=60),
+        memory_curator=SimpleNamespace(run_if_due=lambda: base_calls.append(1)),
+        owner_id="local",
+        home_paths=SimpleNamespace(owner_home_dir=""),
+    )
+    scoped_home = tmp_path / "scoped-home"
+    scoped_home.mkdir(parents=True)
+    (scoped_home / "memory" / "curator").mkdir(parents=True)
+    (scoped_home / "memory" / "curator" / "state.json").write_text(
+        json.dumps({"pending_reasons": ["session_close"]}),
+        encoding="utf-8",
+    )
+    scoped_agent = SimpleNamespace(
+        memory_curator=SimpleNamespace(run_if_due=lambda: scoped_calls.append(1)),
+        owner_id="owner-a",
+        home_paths=SimpleNamespace(owner_home_dir=str(scoped_home)),
+    )
+    pool = SimpleNamespace(active_agents=lambda: [scoped_agent])
+
+    supervisor = object.__new__(gateway_loops._BackgroundMainSupervisor)
+    supervisor._base_agent = base_agent
+    supervisor._owner_pool = pool
+    supervisor._curator_inflight = {}
+    supervisor._next_curator_run_at = 0.0
+    supervisor._curator_quota_count = 0
+    supervisor._curator_quota_date = ""
+    supervisor._curator_quota_path = None
+    supervisor._get_executor = lambda: SimpleNamespace(
+        submit=lambda fn, *args: _ImmediateFuture(fn, args)
+    )
+    return supervisor, base_agent, scoped_agent
+
+
+def test_curator_daily_quota_blocks_routine_but_not_urgent(tmp_path) -> None:
+    """每日全局配额:常规车道(无 pending reason)满额即跳过;紧急车道(pending reason)不受限。"""
+    base_calls: list[int] = []
+    scoped_calls: list[int] = []
+    supervisor, _base, scoped_agent = _quota_supervisor(
+        tmp_path, base_calls=base_calls, scoped_calls=scoped_calls
+    )
+    # 预置配额满(默认 5000)但日期是昨天 → 本轮 spend 跨天重置,全部放行
+    supervisor._curator_quota_date = "2000-01-01"
+    supervisor._curator_quota_count = 5000
+
+    supervisor._run_due_curators()
+    assert base_calls == [1] and scoped_calls == [1]  # 跨天重置后两个车道都跑
+
+    # 配额当天已满:常规 base 被挡;紧急 scoped(pending_reasons)照跑
+    from datetime import datetime, timezone
+
+    supervisor._next_curator_run_at = 0.0  # 破节流
+    supervisor._curator_inflight.clear()
+    supervisor._curator_quota_date = datetime.now(timezone.utc).date().isoformat()
+    supervisor._curator_quota_count = 5000
+    supervisor._run_due_curators()
+    assert base_calls == [1] and scoped_calls == [1, 1]  # base 被挡;紧急 scoped 照跑
+
+
+def test_curator_quota_spend_persists_to_disk(tmp_path) -> None:
+    """配额记账落盘:重启后按文件恢复计数(防超跑)。"""
+    base_calls: list[int] = []
+    scoped_calls: list[int] = []
+    supervisor, _base, _scoped = _quota_supervisor(
+        tmp_path, base_calls=base_calls, scoped_calls=scoped_calls
+    )
+    supervisor._curator_quota_path = tmp_path / "quota.json"
+
+    assert supervisor._curator_quota_spend() is True
+    payload = json.loads((tmp_path / "quota.json").read_text(encoding="utf-8"))
+    assert payload["count"] == 1
+    assert payload["date"]  # 当天日期
+
+    # 新实例按文件恢复计数
+    from agent_py_agent.cli import gateway_loops
+
+    fresh = object.__new__(gateway_loops._BackgroundMainSupervisor)
+    fresh._curator_quota_path = tmp_path / "quota.json"
+    fresh._curator_quota_count = 0
+    fresh._curator_quota_date = ""
+    fresh._load_curator_quota()
+    assert fresh._curator_quota_count == 1
+    assert fresh._curator_quota_date == payload["date"]
+
+
+def test_background_main_supervisor_writes_heartbeat(tmp_path) -> None:
+    """调度器存活心跳:节流写 ts+pid,诊断「调度循环死了没有」;60s 内不重复写。"""
+    base_calls: list[int] = []
+    scoped_calls: list[int] = []
+    supervisor, _base, _scoped = _curator_supervisor(
+        base_calls=base_calls, scoped_calls=scoped_calls
+    )
+    heartbeat = tmp_path / "heartbeat.json"
+    supervisor._heartbeat_path = heartbeat
+    supervisor._next_heartbeat_at = 0.0
+
+    supervisor._maybe_write_heartbeat()
+    assert heartbeat.is_file()
+    payload = json.loads(heartbeat.read_text(encoding="utf-8"))
+    assert payload["pid"] == __import__("os").getpid()
+    assert int(payload["ts"]) > 0
+    first_mtime = heartbeat.stat().st_mtime
+
+    supervisor._maybe_write_heartbeat()  # 节流窗口内 → 不重写
+    assert heartbeat.stat().st_mtime == first_mtime

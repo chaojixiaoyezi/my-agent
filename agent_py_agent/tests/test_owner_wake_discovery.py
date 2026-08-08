@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from agent_py_agent.agent.owner_scoped_pool import ActiveOwnerRegistry
@@ -382,3 +384,160 @@ def test_closed_or_drained_watch_lane_not_discovered(tmp_path) -> None:
     )  # close 只停采集；已落盘记录全部有 verdict 后才真正安静
 
     assert discover_wake_pending_owners(owners) == []
+
+
+def _write_curator_state(
+    owner_home: Path,
+    *,
+    pending_reasons: list[str] | None = None,
+    active_lease: dict | None = None,
+    last_success_at: str = "",
+    last_daily_finalize_date: str = "",
+    raw: str | None = None,
+) -> None:
+    state_path = owner_home / "memory" / "curator" / "state.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    if raw is not None:
+        state_path.write_text(raw, encoding="utf-8")
+        return
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "my-agent.memory-curator-state.v1",
+                "last_processed_message_id": "",
+                "last_processed_audit_event_id": "",
+                "per_thread_cursors": {},
+                "last_run_at": "",
+                "last_success_at": last_success_at,
+                "last_failure_at": "",
+                "last_failure_code": "",
+                "active_lease": active_lease or {},
+                "processed_count": 0,
+                "candidate_count": 0,
+                "daily_event_count": 0,
+                "config_revision": "",
+                "pending_reasons": pending_reasons or [],
+                "pending_requested_at": "",
+                "last_daily_finalize_date": last_daily_finalize_date,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+class _FrozenUTC:
+    """固定 UTC 时刻的 datetime 替身:测 daily「白天不挂 / 23 点后挂」不依赖真实跑测时刻。"""
+
+    fromisoformat = staticmethod(datetime.fromisoformat)  # 发现层解析 state 时间戳也用 datetime
+
+    def __init__(self, iso_ts: str) -> None:
+        self._dt = datetime.fromisoformat(iso_ts)
+
+    def now(self, tz=None) -> datetime:  # noqa: ARG002 - 测试替身,忽略时区参数
+        return self._dt
+
+
+def test_curator_daily_finalize_missing_does_not_hang_before_hour(monkeypatch, tmp_path) -> None:
+    """旧实现「last_daily_finalize_date != 今天 → 每天必挂」;真到期语义:白天不该挂。"""
+    from agent_py_agent.agent import owner_wake_discovery
+
+    owners = tmp_path / "owners"
+    home = owners / "providers" / "feishu" / "users" / "u-daily"
+    _write_curator_state(
+        home,
+        last_daily_finalize_date=(datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat(),
+    )
+    monkeypatch.setattr(owner_wake_discovery, "datetime", _FrozenUTC("2026-08-08T14:00:00+00:00"))
+
+    assert discover_wake_pending_owners(owners) == []
+
+
+def test_curator_daily_finalize_due_after_hour(monkeypatch, tmp_path) -> None:
+    from agent_py_agent.agent import owner_wake_discovery
+
+    owners = tmp_path / "owners"
+    home = owners / "providers" / "feishu" / "users" / "u-daily"
+    _write_curator_state(
+        home,
+        last_daily_finalize_date=(datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat(),
+    )
+    monkeypatch.setattr(owner_wake_discovery, "datetime", _FrozenUTC("2026-08-08T23:30:00+00:00"))
+
+    found = discover_wake_pending_owners(owners)
+    assert [o.owner_id for o in found] == ["u-daily"]
+
+
+def test_corrupt_curator_state_not_discovered(tmp_path) -> None:
+    """坏 state 不能证明有活:发现层不据此占工位(CuratorService 运行时才报结构化错误)。"""
+    owners = tmp_path / "owners"
+    home = owners / "providers" / "feishu" / "users" / "u-bad-state"
+    _write_curator_state(home, raw="{not-json")
+
+    assert discover_wake_pending_owners(owners) == []
+
+
+def test_curator_pending_review_candidate_discovered(monkeypatch, tmp_path) -> None:
+    """candidates.jsonl 有 user_explicit/tool_verified 待晋升候选 → 策展活,与晋升兜底同源。"""
+    from agent_py_agent.agent import owner_wake_discovery
+
+    monkeypatch.setattr(owner_wake_discovery, "datetime", _FrozenUTC("2026-08-08T14:00:00+00:00"))
+    owners = tmp_path / "owners"
+    home = owners / "providers" / "feishu" / "users" / "u-cand"
+    _write_curator_state(home, last_success_at=datetime.now(timezone.utc).isoformat())
+    (home / "memory" / "candidates.jsonl").write_text(
+        json.dumps(
+            {"candidate_id": "c-1", "status": "pending_review", "origin": "user_explicit"}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    found = discover_wake_pending_owners(owners)
+    assert [o.owner_id for o in found] == ["u-cand"]
+
+
+def test_candidate_review_status_ignored(monkeypatch, tmp_path) -> None:
+    """非 pending_review(如 user_rejected)不算策展活;model_inferred 来源不算(发现层只认结构化)。"""
+    from agent_py_agent.agent import owner_wake_discovery
+
+    monkeypatch.setattr(owner_wake_discovery, "datetime", _FrozenUTC("2026-08-08T14:00:00+00:00"))
+    owners = tmp_path / "owners"
+    home = owners / "providers" / "feishu" / "users" / "u-cand-skip"
+    _write_curator_state(home, last_success_at=datetime.now(timezone.utc).isoformat())
+    (home / "memory" / "candidates.jsonl").write_text(
+        json.dumps({"candidate_id": "c-1", "status": "user_rejected", "origin": "user_explicit"})
+        + "\n"
+        + json.dumps({"candidate_id": "c-2", "status": "pending_review", "origin": "model_inferred"})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert discover_wake_pending_owners(owners) == []
+
+
+def test_policy_enabled_but_not_due_not_discovered(tmp_path) -> None:
+    """只看 enabled 不看 next_due_at 的旧实现会把未到期 policy 当有活;真到期:未来不挂。"""
+    owners = tmp_path / "owners"
+    store = _store_root(owners, "feishu", "users", "u-future", "runtime")
+    policies = store / "progress_policies"
+    policies.mkdir(parents=True, exist_ok=True)
+    (policies / "policy-x.json").write_text(
+        json.dumps({"enabled": True, "next_due_at": time.time() + 3600}),
+        encoding="utf-8",
+    )
+
+    assert discover_wake_pending_owners(owners) == []
+
+
+def test_policy_due_discovered(tmp_path) -> None:
+    owners = tmp_path / "owners"
+    store = _store_root(owners, "feishu", "users", "u-due", "runtime")
+    policies = store / "progress_policies"
+    policies.mkdir(parents=True, exist_ok=True)
+    (policies / "policy-x.json").write_text(
+        json.dumps({"enabled": True, "next_due_at": time.time() - 1}),
+        encoding="utf-8",
+    )
+
+    found = discover_wake_pending_owners(owners)
+    assert [o.owner_id for o in found] == ["u-due"]

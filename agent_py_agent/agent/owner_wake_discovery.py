@@ -38,6 +38,10 @@ _STORE_ROOT_PATTERNS = (
     "conversations",
     "data/conversations",
 )
+# 策展发现常量:与 config.CuratorConfig(interval_seconds=10_800)/daily_finalize_hour=23 对齐,
+# 发现层不引配置避免循环依赖,只保证「到期」语义一致(真到期,非每天必挂/对话即挂)。
+_CURATOR_INTERVAL_SECONDS = 10_800
+_DAILY_FINALIZE_HOUR = 23
 _PROVIDER_BUCKET_KINDS = {"users": "user", "groups": "group"}
 OwnerWakeCursor = tuple[str, str, str]
 
@@ -207,29 +211,69 @@ def _owner_has_wake_pending_facts(owner_home: Path) -> bool:
     )
 
 
-# LLM: Curator pending reason、崩溃遗留 lease 和未处理输入都是 owner 唤醒事实；进程内 registry 不是权威。
+# LLM: 发现层只认结构化信号,与 CuratorService.run_if_due 同源;「无法证明没活=有活」已删——
+# 真机 184 个 feishu 测试号被 state 缺失/每天必挂/对话即挂三条过宽判定天天挂起,
+# 占满 64 容量运行池,真活的 user-a/user-b 被 LRU 逐出饿死(探针实锤)。
 # 函数用途: 让 scoped owner 在 Gateway 重启或 LRU 逐出后重新进入既有后台 lane。
 def _has_pending_memory_curator_work(owner_home: Path) -> bool:
     state_path = owner_home / "memory" / "curator" / "state.json"
-    if not state_path.exists():
-        return _curator_input_newer_than(owner_home, 0.0)
     try:
         from .memory_store.curator_models import MemoryCuratorState
 
         payload = json.loads(state_path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
-            return True
+            return False
         state = MemoryCuratorState.from_dict(payload)
+    except FileNotFoundError:
+        # 从未初始化:有新输入就该初始化(一次性低频,不构成占位源)
+        return _curator_input_newer_than(owner_home, 0.0)
     except (OSError, UnicodeError, ValueError, TypeError):
-        return True
+        # 坏 state 不能证明有活;CuratorService 运行时会以结构化错误暴露,发现层不据此占工位
+        return False
     if state.pending_reasons or state.active_lease:
         return True
+    if _has_pending_promotable_candidates(owner_home):
+        return True
+    # 日终归档从「每天必挂」改为「真到期」:当天没归档且已过归档时刻(23 点)才挂。
+    # 注意放 last_success 判定之前——无成功记录的 owner 也要能触发日终归档。
+    if state.last_daily_finalize_date != datetime.now(timezone.utc).date().isoformat():
+        if datetime.now(timezone.utc).hour >= _DAILY_FINALIZE_HOUR:
+            return True
     last_success = _curator_success_timestamp(state.last_success_at)
     if last_success <= 0:
         return _curator_input_newer_than(owner_home, 0.0)
-    if state.last_daily_finalize_date != datetime.now(timezone.utc).date().isoformat():
-        return True
-    return _curator_input_newer_than(owner_home, last_success)
+    # interval 兜底:距上次成功 >= interval 且期间有新输入才挂(对话即挂收敛为真到期)
+    if time.time() - last_success >= _CURATOR_INTERVAL_SECONDS:
+        return _curator_input_newer_than(owner_home, last_success)
+    return False
+
+
+# LLM: 候选文件是当前态唯一事实源(candidates.jsonl),发现层只读 status/origin 字段不解析正文。
+# 函数用途: 是否有用户确认待晋升(pending_review 且 user_explicit/tool_verified)的候选——
+# 有即策展活,与 run_if_due 晋升兜底同源(gateway_loops._has_pending_review_candidates 迁移)。
+def _has_pending_promotable_candidates(owner_home: Path) -> bool:
+    path = owner_home / "memory" / "candidates.jsonl"
+    if not path.is_file():
+        return False
+    try:
+        with path.open(encoding="utf-8") as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except (ValueError, UnicodeError):
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                if str(record.get("status") or "").strip().lower() != "pending_review":
+                    continue
+                origin = str(record.get("origin") or "").strip().lower()
+                if origin in {"user_explicit", "tool_verified"}:
+                    return True
+    except OSError:
+        return False
+    return False
 
 
 # LLM: mtime 只用于发现“需要 tick”的 owner；真正 cursor/due 判定仍由 CuratorService 的结构化 state 完成。
@@ -353,18 +397,32 @@ def _has_pending_wake_signal(store_root: Path) -> bool:
 
 
 def _has_enabled_progress_policy(store_root: Path) -> bool:
+    """只认「已启用且已到期」的 policy(看 next_due_at,与 runtime._runnable_due_policies 同尺)。
+
+    LLM: 旧实现只查 enabled 字段,退休/未到期 policy 的 owner 也会被当有活挂起,
+    与真到期语义相悖;到期判定移到 _policy_due,发现层只做轻量筛选。"""
+    now = time.time()
     for path in (store_root / "progress_policies").glob("*.json"):
-        if _policy_enabled(path):
+        if _policy_due(path, now):
             return True
     return False
 
 
-def _policy_enabled(path: Path) -> bool:
+def _policy_due(path: Path, now: float) -> bool:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError):
         return False
-    return isinstance(payload, dict) and bool(payload.get("enabled", True))
+    if not isinstance(payload, dict) or not bool(payload.get("enabled", True)):
+        return False
+    next_due = payload.get("next_due_at")
+    if next_due is None:
+        # 无到期时间的旧格式:视为到期交 runtime 裁决,不静默丢弃
+        return True
+    try:
+        return float(next_due) <= now
+    except (TypeError, ValueError):
+        return True
 
 
 def _identity(provider: str, owner_kind: str, owner_id: str) -> Any:

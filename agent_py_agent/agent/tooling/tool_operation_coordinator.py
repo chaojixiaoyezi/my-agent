@@ -410,13 +410,21 @@ def _unknown_claim_result(
         if prior.error_code != "TOOL_OPERATION_OUTCOME_UNKNOWN"
         else claim.record.error_code
     )
+    # 本次未执行(claim 拦截,handler 没被调用)是明确事实——不能算「本次结果未知」。
+    # effect_outcome=not_started 让 executor 的最终归档(status=failed)与模型看到的
+    # 语义一致:「上次执行可能已生效,本次没跑且不重做」;错误码保持 OUTCOME_UNKNOWN
+    # 防重做契约不变。prior_effect_outcome 是上次结果的旁证,不篡改历史记录。
     result = _operation_error(
         request.tool_name,
         "TOOL_OPERATION_OUTCOME_UNKNOWN",
-        "此前执行可能已经产生副作用，但目标系统尚未给出可证明的终态；系统不会自动重做。",
+        "此前执行可能已经产生副作用，但目标系统尚未给出可证明的终态；本次调用未执行，系统不会自动重做，请人工核验目标系统状态。",
         reported_error_code=reported,
     )
+    result.effect_outcome = "not_started"
     result.result_envelope["reported_tool_result"] = _reported_tool_result_facts(prior)
+    result.result_envelope["prior_effect_outcome"] = (
+        prior.effect_outcome or claim.record.status
+    )
     _attach_operation_facts(
         result,
         request,

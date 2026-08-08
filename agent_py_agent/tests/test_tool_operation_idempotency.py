@@ -459,6 +459,7 @@ def test_started_generic_side_effect_failure_is_unknown_without_not_started_proo
     assert first.handler_executed is True
     assert replay.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
     assert replay.handler_executed is False
+    assert replay.effect_outcome == "not_started"  # 拦截=本次未执行,不能算「本次结果未知」
     assert tool.calls == 1
 
 
@@ -487,6 +488,7 @@ def test_side_effect_timeout_is_persisted_unknown_and_not_retried(tmp_path):
     assert second.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
     assert second.failure_stage == ToolFailureStage.EFFECT_RECONCILIATION.value
     assert second.handler_executed is False
+    assert second.effect_outcome == "not_started"  # 超时后的再次调用=拦截未执行
     assert tool.calls == 1
     record = store.get_tool_operation(
         owner_id="owner-a",
@@ -521,6 +523,7 @@ def test_started_side_effect_cancellation_is_unknown_and_not_retried(tmp_path):
     assert first.operation is not None and first.operation.status == "unknown"
     assert replay.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
     assert replay.handler_executed is False
+    assert replay.effect_outcome == "not_started"  # 取消后的重放=拦截未执行
     assert tool.calls == 1
 
 

@@ -389,6 +389,8 @@ def test_blocked_base_tick_does_not_starve_scoped_owner_tick() -> None:
     supervisor._inflight = {}
     supervisor._next_curator_run_at = 0.0
     supervisor._curator_inflight = {}
+    supervisor._heartbeat_path = None
+    supervisor._next_heartbeat_at = 0.0
     supervisor._maybe_seed_wake_pending_owners = lambda: None
     supervisor._sync_owner_schedulers = lambda: None
     supervisor._recover_active_watch_harvesters = lambda: None
