@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_env_loader import ensure_model_key
 """批判读 vs 逐条判读 精度对照探针(判读全真调 MiniMax-M2.7)。
 
 回答一个命门:延迟/过载自测台里修复臂那 ~37% 的绝对精度、几十条误报,到底是
@@ -65,7 +69,7 @@ def _call(candidates: list[dict], note: str) -> list[str]:
     }
     req = urllib.request.Request(
         _API_BASE, data=json.dumps(body).encode(),
-        headers={"x-api-key": os.environ["AGENT_API_KEY"], "anthropic-version": "2023-06-01",
+        headers={"x-api-key": ensure_model_key(), "anthropic-version": "2023-06-01",
                  "content-type": "application/json"},
     )
     for attempt in range(3):
@@ -118,7 +122,7 @@ def main() -> None:
     p.add_argument("--decoys-per-hit", type=int, default=6)
     p.add_argument("--seed", type=int, default=20260707)
     args = p.parse_args()
-    if not os.environ.get("AGENT_API_KEY"):
+    if not ensure_model_key():
         print("需要 AGENT_API_KEY(禁模拟判读)", flush=True)
         sys.exit(2)
 

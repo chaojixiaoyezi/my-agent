@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_env_loader import ensure_model_key
 """洞2 报准·真 LLM 判读探针:引擎已把候选 surface 到模型眼前后,模型读正文语义判真假的准头。
 
 确定性引擎 harness 证明了"引擎 surface 满召回";这一层用【真模型】(MiniMax-M2.7,与产品同源)
@@ -110,7 +114,7 @@ def _call_model(system: str, user: str, max_tokens: int = 8000) -> str:
     }).encode("utf-8")
     req = urllib.request.Request(_API_BASE, data=body, method="POST", headers={
         "content-type": "application/json",
-        "x-api-key": os.environ["AGENT_API_KEY"],
+        "x-api-key": ensure_model_key(),
         "anthropic-version": "2023-06-01",
     })
     with urllib.request.urlopen(req, timeout=180) as resp:

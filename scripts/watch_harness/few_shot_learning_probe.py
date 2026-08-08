@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_env_loader import ensure_model_key
 """判读误报根因探针:裸判 vs 喂样品学习 vs 产品级判读纪律(判读全真调 MiniMax-M2.7)。
 
 前一个探针(batch_vs_single)证了:批判读 11% / 逐条判 13%,精度都低——【不是批判读 artifact】。
@@ -72,7 +76,7 @@ def _call(system: str, user: str, note: str) -> list[str]:
             "messages": [{"role": "user", "content": user}]}
     req = urllib.request.Request(
         _API_BASE, data=json.dumps(body).encode(),
-        headers={"x-api-key": os.environ["AGENT_API_KEY"], "anthropic-version": "2023-06-01",
+        headers={"x-api-key": ensure_model_key(), "anthropic-version": "2023-06-01",
                  "content-type": "application/json"})
     for attempt in range(3):
         try:
@@ -128,7 +132,7 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=20260707)
     p.add_argument("--repeat", type=int, default=2, help="每臂重复几次取平均(压模型随机)")
     args = p.parse_args()
-    if not os.environ.get("AGENT_API_KEY"):
+    if not ensure_model_key():
         print("需要 AGENT_API_KEY(禁模拟判读)", flush=True)
         sys.exit(2)
 

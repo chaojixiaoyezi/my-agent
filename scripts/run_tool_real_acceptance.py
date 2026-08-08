@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_env_loader import ensure_model_key
 
 from __future__ import annotations
 
@@ -299,7 +303,7 @@ def _git_head() -> str:
 
 def main() -> int:
     args = _parse_args()
-    if not str(__import__("os").environ.get("AGENT_API_KEY") or "").strip():
+    if not ensure_model_key():
         print("AGENT_API_KEY is required; no fake fallback is allowed.", file=sys.stderr)
         return 2
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
