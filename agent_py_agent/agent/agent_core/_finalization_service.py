@@ -526,7 +526,7 @@ def _conversation_turn_is_terminal(ctx: FinalizeContext) -> bool:
 
 
 def _schedule_typed_unfinished_continuation(agent: object, ctx: FinalizeContext) -> None:
-    """Resume only explicit persistent work after a structured turn boundary."""
+    """Resume explicit persistent work after a structured turn boundary."""
     if not ctx.do_save:
         return
     attrs = ctx.task_attributes if isinstance(ctx.task_attributes, dict) else {}
@@ -537,24 +537,42 @@ def _schedule_typed_unfinished_continuation(agent: object, ctx: FinalizeContext)
     # healthy and duplicate that runtime.
     if str(attrs.get("conversation_work_kind") or "").strip().lower() == "audit":
         return
-    if not str(attrs.get("thread_goal_id") or "").strip():
-        return
     reason = str(getattr(ctx.final_response, "runtime_reason", "") or "").strip().upper()
     # REPEATED_TOOL_FAILURE:软收口,任务未完成,自动续跑让模型换策略继续;
     # EXHAUSTED 变体(收益递减/硬门)不在此列,等用户介入。
     if reason not in {"TASK_PROGRESS_OPEN", "TOOL_ROUND_LIMIT_REACHED", "REPEATED_TOOL_FAILURE"}:
         return
-    from ..conversation.runtime import ensure_goal_progress_continuation
+    from ..conversation.runtime import (
+        ensure_goal_progress_continuation,
+        ensure_ordinary_task_resume,
+    )
     from .runtime.task_identity import durable_task_id
 
-    ensure_goal_progress_continuation(
+    thread_id = str(attrs.get("conversation_thread_id") or "")
+    # Foreground task turns should hand off immediately to the existing
+    # background continuation lane. Background/subagent turns retain the
+    # policy's bounded cadence and cannot recursively expedite themselves.
+    foreground = str(ctx.source or "").strip().lower() in {"gateway", "chat", "cli_run"}
+    if str(attrs.get("thread_goal_id") or "").strip():
+        ensure_goal_progress_continuation(
+            agent,
+            task_id=str(durable_task_id(ctx) or attrs.get("root_task_id") or ""),
+            thread_id=thread_id,
+            due_now=foreground,
+        )
+        return
+    # 普通任务(无 /goal):轮限/失败软收口也在预算内自动续跑——轮限收口提示词承诺
+    # 「运行时会保留同一任务并按持久进度继续」,这里兑现该承诺。仅前台任务创建:
+    # 子代理/后台唤醒轮的推进由父代理唤醒链与 wait 定时器负责,不在此占续跑预算。
+    if not foreground:
+        return
+    from .runtime.task_identity import progress_ledger_id
+
+    ensure_ordinary_task_resume(
         agent,
-        task_id=str(durable_task_id(ctx) or attrs.get("root_task_id") or ""),
-        thread_id=str(attrs.get("conversation_thread_id") or ""),
-        # Foreground task turns should hand off immediately to the existing
-        # background continuation lane. Background/subagent turns retain the
-        # policy's bounded cadence and cannot recursively expedite themselves.
-        due_now=str(ctx.source or "").strip().lower() in {"gateway", "chat", "cli_run"},
+        task_id=str(progress_ledger_id(agent, ctx) or attrs.get("root_task_id") or ""),
+        thread_id=thread_id,
+        due_now=True,
     )
 
 

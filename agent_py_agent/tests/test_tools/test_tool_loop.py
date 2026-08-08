@@ -1442,10 +1442,15 @@ def test_max_tool_rounds_hard_stops_when_model_still_requests_tools():
         assert agent.backend.calls == 4
 
 
-def test_tool_round_limit_does_not_schedule_ordinary_checklist_continuation(tmp_path):
-    from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_owner_root
-    from agent_py_agent.agent.task_progress import write_task_progress
+def test_tool_round_limit_schedules_ordinary_task_resume(tmp_path):
+    """LLM: 普通任务(无 /goal)轮限收口后创建带预算的自动续跑 policy。
 
+    2026-08-07 真机铁证:user-b celery 复刻 60 轮 TOOL_ROUND_LIMIT_REACHED 收口,
+    收口提示词承诺「运行时会保留同一任务并按持久进度继续」,但普通任务无
+    thread_goal_id 时 _schedule_typed_unfinished_continuation 直接 return,承诺未
+    兑现。修复后:前台普通任务(gateway/chat/cli_run)创建 kind=ordinary_task_resume
+    的 policy,调度器 tick 到点拉起续跑 run;预算 resume_used < resume_limit 才续。
+    """
     (tmp_path / "notes.txt").write_text("hello", encoding="utf-8")
     agent = SimpleAgent(
         _text_agent_config(
@@ -1472,10 +1477,171 @@ def test_tool_round_limit_does_not_schedule_ordinary_checklist_continuation(tmp_
             "status": "active",
         }
     )
-    write_task_progress(
-        runtime_owner_root(agent),
-        "task-limit",
-        {"items": [{"id": "verify", "status": "pending", "title": "完成验证"}]},
+
+    result = agent.run(
+        "读取 notes 并完成验证",
+        save=True,
+        task_id="task-limit",
+        task_attributes={
+            "conversation_thread_id": thread.thread_id,
+            "conversation_task_id": "task-limit",
+        },
+        source="gateway",
+    )
+
+    assert result.runtime_status == "unfinished"
+    assert result.runtime_reason == "TOOL_ROUND_LIMIT_REACHED"
+    link = next(
+        item
+        for item in agent.conversation_store.task_links(thread.thread_id)
+        if item.task_id == "task-limit"
+    )
+    assert link.status == "active"
+    policies = agent.conversation_store.list_progress_policies(enabled_only=True)
+    assert len(policies) == 1
+    assert policies[0].task_id == "task-limit" or policies[0].task_id.startswith("task-path:")
+    assert policies[0].metadata["kind"] == "ordinary_task_resume"
+    assert policies[0].metadata["tool"] == "task_round_resume"
+    assert policies[0].metadata["resume_used"] == 1
+    assert policies[0].metadata["resume_limit"] == 3
+    # due_now expedite: next_due_at 提前到当前,调度器下一 tick 即拉起续跑。
+    assert policies[0].next_due_at <= policies[0].metadata["expedited_at"]
+
+
+def test_ordinary_task_resume_available_signal(tmp_path):
+    """LLM: 轮限收口提示词按续跑预算切换——还有预算说「会自动继续」,耗尽说「请回复『继续』」。
+
+    全部用结构化信号(policy metadata 的 resume_used/resume_limit)判定,禁自然语言。
+    """
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core._tool_loop_service import (
+        _ordinary_task_resume_available,
+    )
+
+    (tmp_path / "notes.txt").write_text("hello", encoding="utf-8")
+    agent = SimpleAgent(
+        _text_agent_config(enable_tools=True, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    thread = agent.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "chat-resume-signal",
+            "channel_user_id": "user-1",
+        }
+    )
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-resume-signal",
+            "goal": "读取并整理文件",
+            "status": "active",
+        }
+    )
+
+    def params(**overrides) -> ToolLoopExecuteParams:
+        base = {
+            "task_attributes": {
+                "conversation_thread_id": thread.thread_id,
+                "conversation_task_id": "task-resume-signal",
+            },
+            "context_scope": "default",
+            "source": "gateway",
+            "run_id": "run-resume-signal",
+            "task_id": "task-resume-signal",
+        }
+        base.update(overrides)
+        return SimpleNamespace(**base)
+
+    # 无 policy(本次收口将创建第一次)= 有预算。
+    assert _ordinary_task_resume_available(agent, params()) is True
+    # /goal 任务无预算概念,永远乐观(用户显式目标即无限续跑授权)。
+    assert (
+        _ordinary_task_resume_available(
+            agent, params(task_attributes={**params().task_attributes, "thread_goal_id": "goal-1"})
+        )
+        is True
+    )
+
+    # 生产语义:同一任务同一时刻只有一个 ordinary_task_resume policy(创建后每次
+    # 收口 expedite 复用),预算随 metadata 递增——这里用 mark_progress_reported
+    # 更新同一 policy 模拟真实状态。
+    policy = agent.conversation_store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-resume-signal",
+            "interval_seconds": 180,
+            "route_channel": "internal",
+            "route_target": "",
+            "metadata": {
+                "kind": "ordinary_task_resume",
+                "tool": "task_round_resume",
+                "resume_used": 1,
+                "resume_limit": 3,
+            },
+        }
+    )
+    assert _ordinary_task_resume_available(agent, params()) is True
+    agent.conversation_store.mark_progress_reported(
+        policy.policy_id, metadata_updates={"resume_used": 2}
+    )
+    assert _ordinary_task_resume_available(agent, params()) is True
+    agent.conversation_store.mark_progress_reported(
+        policy.policy_id, metadata_updates={"resume_used": 3}
+    )
+    assert _ordinary_task_resume_available(agent, params()) is False
+    # 无 conversation_store 的宿主侧调用 → None(沿用乐观文案)。
+    assert _ordinary_task_resume_available(object(), params()) is None
+
+
+def test_ordinary_task_resume_budget_exhausted_disables_policy(tmp_path):
+    """LLM: 普通任务续跑预算耗尽后 policy 退休,调度器不再拉起,等用户显式「继续」。
+
+    resume_used >= resume_limit 时 _schedule_typed_unfinished_continuation 必须
+    disable policy(否则 scheduler 每 interval 照拉,预算失去意义)。
+    """
+    (tmp_path / "notes.txt").write_text("hello", encoding="utf-8")
+    agent = SimpleAgent(
+        _text_agent_config(
+            enable_tools=True,
+            memory_path="memory.jsonl",
+            max_tool_rounds=1,
+        ),
+        tmp_path,
+    )
+    agent.backend = MaxToolRoundBackend()
+    thread = agent.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "chat-limit-budget",
+            "channel_user_id": "user-1",
+        }
+    )
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-limit",
+            "goal": "读取并整理文件",
+            "status": "active",
+        }
+    )
+    agent.conversation_store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-limit",
+            "interval_seconds": 180,
+            "route_channel": "internal",
+            "route_target": "",
+            "metadata": {
+                "kind": "ordinary_task_resume",
+                "tool": "task_round_resume",
+                "resume_used": 3,
+                "resume_limit": 3,
+            },
+        }
     )
 
     result = agent.run(
@@ -1490,12 +1656,9 @@ def test_tool_round_limit_does_not_schedule_ordinary_checklist_continuation(tmp_
     )
 
     assert result.runtime_status == "unfinished"
-    link = next(
-        item
-        for item in agent.conversation_store.task_links(thread.thread_id)
-        if item.task_id == "task-limit"
-    )
-    assert link.status == "active"
+    policies = agent.conversation_store.list_progress_policies(enabled_only=False)
+    assert len(policies) == 1
+    assert not policies[0].enabled
     assert agent.conversation_store.list_progress_policies(enabled_only=True) == []
 
 

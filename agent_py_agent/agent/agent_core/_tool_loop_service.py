@@ -990,14 +990,26 @@ def _tool_round_limit_reached(agent, params: ToolLoopExecuteParams, tool_rounds:
 
 
 # LLM: 工具轮数耗尽时由模型基于真实工具记录给出诚实总结；不再交给独立验收器重写正文。
-# 函数用途: 轮数到顶时让模型只做总结不再用工具。
+# 函数用途: 轮数到顶时让模型只做总结不再用工具；续跑文案按预算如实切换——
+# 还有自动续跑预算说「系统会自动继续」，预算耗尽说「请回复『继续』」（真机铁证
+# 2026-08-07 celery 复刻:提示词承诺自动续跑但普通任务不续，模型如实转述了没兑现的承诺）。
 def _final_response_after_tool_limit(agent, params: ToolLoopExecuteParams, tool_rounds: int):
-    params.tool_context.append(
-        "[tool-system]\n"
-        "本轮已达到最大工具轮数限制，停止继续调用工具。这是一次未完成的阶段交接，不是任务完成。"
-        "请只根据真实工具记录说明已经完成的工作、仍未完成的工作和当前限制；"
-        "不要把尚未执行的动作写成正在执行或已经完成。运行时会保留同一任务并按持久进度继续。"
-    )
+    if _ordinary_task_resume_available(agent, params) is False:
+        params.tool_context.append(
+            "[tool-system]\n"
+            "本轮已达到最大工具轮数限制，停止继续调用工具。这是一次未完成的阶段交接，不是任务完成。"
+            "请只根据真实工具记录说明已经完成的工作、仍未完成的工作和当前限制；"
+            "不要把尚未执行的动作写成正在执行或已经完成。"
+            "本任务已自动推进多次仍未完成，本次交接后暂停自动推进；"
+            "请如实告诉用户：回复『继续』可让我接着做。"
+        )
+    else:
+        params.tool_context.append(
+            "[tool-system]\n"
+            "本轮已达到最大工具轮数限制，停止继续调用工具。这是一次未完成的阶段交接，不是任务完成。"
+            "请只根据真实工具记录说明已经完成的工作、仍未完成的工作和当前限制；"
+            "不要把尚未执行的动作写成正在执行或已经完成。运行时会保留同一任务并按持久进度继续。"
+        )
     if _executed_subagent_orchestration(params):
         params.tool_context.append("[tool-system]\n子代理调度状态请通过 dispatch_subagents/tree 状态结果继续查看；系统不再替主代理生成最终结论。")
     final_prompt = build_tool_loop_prompt(agent, params)
@@ -1023,6 +1035,50 @@ def _repeated_failure_halt_threshold(params: ToolLoopExecuteParams) -> int:
     # L2 阶梯:同工具同类失败连续达阈值即收口并自动续跑(不再跟随 guardrail
     # 3N DENY;默认 8,可经 task_attributes/runtime_guard_policy 覆盖)。
     return configured_repeated_failure_halt_threshold(params)
+
+
+def _ordinary_task_resume_available(agent, params: ToolLoopExecuteParams) -> bool | None:
+    """轮限收口提示词按续跑预算切换:还有预算说「会自动继续」,耗尽说「请回复『继续』」。
+
+    三值语义:True=本次收口后还有自动续跑预算;False=预算耗尽,本次收口后不再
+    自动续跑;None=查不到(沿用乐观文案,与 /goal 无限续跑语义一致)。判定完全用
+    结构化信号(policy metadata 的 resume_used/resume_limit),不做自然语言判断。
+    """
+    try:
+        attrs = getattr(params, "task_attributes", None)
+        if isinstance(attrs, dict) and str(attrs.get("thread_goal_id") or "").strip():
+            # /goal 任务无预算概念:用户显式目标即无限续跑授权。
+            return True
+        store = getattr(agent, "conversation_store", None)
+        if store is None or not callable(getattr(store, "list_progress_policies", None)):
+            return None
+        from .runtime.task_identity import progress_ledger_id
+
+        task_id = str(progress_ledger_id(agent, params) or "").strip()
+        if not task_id:
+            return None
+        matching = [
+            policy
+            for policy in store.list_progress_policies(enabled_only=True)
+            if policy.task_id == task_id
+            and str((policy.metadata or {}).get("kind") or "") == "ordinary_task_resume"
+        ]
+        if not matching:
+            # 还没有 policy = 本次收口将创建第一次续跑 = 有预算。
+            return True
+        try:
+            used = int((matching[0].metadata or {}).get("resume_used") or 0)
+        except (TypeError, ValueError):
+            used = 0
+        try:
+            resume_limit = int((matching[0].metadata or {}).get("resume_limit") or 0)
+        except (TypeError, ValueError):
+            resume_limit = 0
+        if resume_limit <= 0:
+            return True
+        return used < resume_limit
+    except Exception:
+        return None
 
 
 def _mark_repeated_failure_halt(agent, record: ToolCallRecordParams) -> None:

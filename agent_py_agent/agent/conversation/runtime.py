@@ -4723,6 +4723,124 @@ def ensure_goal_progress_continuation(
     return True
 
 
+# LLM: A plain task (no /goal) can also leave open work at a tool-round limit or a
+# soft repeated-failure closeout.  The closeout prompt promises "the runtime keeps
+# the same task and continues on persistent progress"; this function makes that
+# promise real for ordinary tasks by renting the same progress-policy lane, bounded
+# by a resume budget so a stuck task cannot auto-burn forever.  Goal tasks stay on
+# their own unbounded lane (an explicit /goal is the user's standing authorization).
+# 函数用途: 普通任务(无 /goal)轮限/失败软收口后调度自动续跑,预算耗尽后退休 policy
+# 并如实停等用户回复「继续」。
+def ensure_ordinary_task_resume(
+    agent: object | None,
+    *,
+    task_id: str,
+    thread_id: str = "",
+    store: ConversationStore | None = None,
+    now: float | None = None,
+    due_now: bool = False,
+    limit: int | None = None,
+) -> bool:
+    """Schedule bounded automatic resumption for an ordinary unfinished task.
+
+    Unlike :func:`ensure_goal_progress_continuation` this lane does not require
+    a goal record nor a non-empty progress ledger: the conversation history is
+    enough to resume.  The budget (``resume_used`` vs ``resume_limit``) caps
+    automatic resumptions; once exhausted the policy is disabled and the
+    closeout prompt tells the user to say 继续 explicitly.
+    """
+    task_id = str(task_id or "").strip()
+    if agent is None or not task_id:
+        return False
+    selected_store = store or getattr(agent, "conversation_store", None)
+    if selected_store is None:
+        return False
+    thread_id = str(thread_id or "").strip() or _thread_id_for_task(selected_store, task_id)
+    if not thread_id:
+        return False
+    current = now if now is not None else time.time()
+    resume_limit = _ordinary_task_resume_limit(agent, limit)
+    matching = [
+        policy
+        for policy in selected_store.list_progress_policies(enabled_only=True)
+        if policy.task_id == task_id
+        and str((policy.metadata or {}).get("kind") or "") == "ordinary_task_resume"
+    ]
+    used = 0
+    if matching:
+        try:
+            used = int((matching[0].metadata or {}).get("resume_used") or 0)
+        except (TypeError, ValueError):
+            used = 0
+        if used >= resume_limit:
+            # 预算耗尽:退休 policy,调度器不再每间隔拉起;由用户显式「继续」驱动。
+            selected_store.disable_progress_policy(matching[0].policy_id, now=current)
+            return False
+    if matching:
+        # 先顺延再 expedite 到 now:mark_progress_reported 记账 resume_used+1,
+        # expedite 单调提前,最终 due=now 立即拉起。
+        selected_store.mark_progress_reported(
+            matching[0].policy_id,
+            now=current,
+            metadata_updates={"resume_used": used + 1},
+        )
+        selected_store.expedite_progress_policy(
+            matching[0].policy_id,
+            due_at=current,
+            reason="ordinary_task_round_resume",
+            now=current,
+        )
+        return True
+    interval = int(
+        getattr(
+            getattr(agent, "config", None),
+            "dispatch_supervision_reminder_seconds",
+            0,
+        )
+        or 0
+    )
+    policy = selected_store.set_progress_policy(
+        {
+            "thread_id": thread_id,
+            "task_id": task_id,
+            "interval_seconds": max(60, interval) if interval > 0 else 180,
+            "route_channel": "internal",
+            "route_target": "",
+            "now": current,
+            "metadata": {
+                "kind": "ordinary_task_resume",
+                "tool": "task_round_resume",
+                "resume_used": 1,
+                "resume_limit": resume_limit,
+                "reason": "普通任务轮限/失败软收口自动续跑",
+            },
+        }
+    )
+    if due_now:
+        selected_store.expedite_progress_policy(
+            policy.policy_id,
+            due_at=current,
+            reason="ordinary_task_round_resume",
+            now=current,
+        )
+    return True
+
+
+def _ordinary_task_resume_limit(agent: object | None, explicit: int | None = None) -> int:
+    if explicit is not None:
+        try:
+            return max(1, int(explicit))
+        except (TypeError, ValueError):
+            pass
+    try:
+        configured = int(
+            getattr(getattr(agent, "config", None), "ordinary_task_resume_limit", 0) or 0
+        )
+    except (TypeError, ValueError):
+        configured = 0
+    return configured if configured > 0 else 3
+
+
 def _thread_id_for_task(store: ConversationStore, task_id: str) -> str:
     try:
         thread = store.thread_for_task(task_id)
