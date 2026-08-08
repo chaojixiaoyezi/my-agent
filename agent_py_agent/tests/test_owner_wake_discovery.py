@@ -392,6 +392,8 @@ def _write_curator_state(
     pending_reasons: list[str] | None = None,
     active_lease: dict | None = None,
     last_success_at: str = "",
+    last_failure_at: str = "",
+    last_failure_code: str = "",
     last_daily_finalize_date: str = "",
     raw: str | None = None,
 ) -> None:
@@ -409,8 +411,8 @@ def _write_curator_state(
                 "per_thread_cursors": {},
                 "last_run_at": "",
                 "last_success_at": last_success_at,
-                "last_failure_at": "",
-                "last_failure_code": "",
+                "last_failure_at": last_failure_at,
+                "last_failure_code": last_failure_code,
                 "active_lease": active_lease or {},
                 "processed_count": 0,
                 "candidate_count": 0,
@@ -541,3 +543,116 @@ def test_policy_due_discovered(tmp_path) -> None:
 
     found = discover_wake_pending_owners(owners)
     assert [o.owner_id for o in found] == ["u-due"]
+
+
+# ---------------------------------------------------------------------------
+# F 批:父任务聚合收口 —— 准入机制(发现层退避 + 硬/软事实分层 + seed 硬先软后)。
+# 真机实锤:215 个 feishu 测试号的 curator 软活(pending_reasons)每轮分页被种回登记表,
+# 占满 64 容量池,真活 user-a 的 wake 硬事实按字母序最后被 LRU 逐出 → 唤醒永不消费 → 父任务不收口。
+# ---------------------------------------------------------------------------
+
+
+def test_curator_pending_within_failure_backoff_not_discovered(tmp_path) -> None:
+    """失败退避窗口(300s)内,pending 的 curator 软活不判活——不再每轮分页占工位。"""
+    owners = tmp_path / "owners"
+    _write_curator_state(
+        _owner_home(owners, "feishu", "users", "u-backoff"),
+        pending_reasons=["turn_threshold"],
+        last_failure_at=(datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat(),
+        last_failure_code="CURATOR_MODEL_TIMEOUT",
+    )
+
+    assert discover_wake_pending_owners(owners) == []
+
+
+def test_curator_pending_after_backoff_elapsed_discovered_as_soft(tmp_path) -> None:
+    """退避窗口(300s)过后,pending 的 curator 软活恢复判活,但归为 soft(可被硬 owner 逐出)。"""
+    owners = tmp_path / "owners"
+    _write_curator_state(
+        _owner_home(owners, "feishu", "users", "u-backoff"),
+        pending_reasons=["turn_threshold"],
+        last_failure_at=(datetime.now(timezone.utc) - timedelta(seconds=400)).isoformat(),
+        last_failure_code="CURATOR_MODEL_TIMEOUT",
+    )
+
+    page = discover_wake_pending_owner_page(owners, limit=16)
+    assert [o.owner_id for o in page.owners] == ["u-backoff"]
+    assert [o.owner_id for o in page.soft_owners] == ["u-backoff"]
+    assert page.hard_owners == ()
+
+
+def test_curator_pending_without_failure_is_soft(tmp_path) -> None:
+    """无失败记录的 pending curator 活 → soft(可被硬 owner 逐出),不再与硬事实平权。"""
+    owners = tmp_path / "owners"
+    _write_curator_state(_owner_home(owners, "feishu", "users", "u-soft"), pending_reasons=["turn_threshold"])
+
+    page = discover_wake_pending_owner_page(owners, limit=16)
+    assert [o.owner_id for o in page.owners] == ["u-soft"]
+    assert [o.owner_id for o in page.soft_owners] == ["u-soft"]
+    assert page.hard_owners == ()
+
+
+def test_hard_fact_ignores_curator_failure_backoff(tmp_path) -> None:
+    """curator 刚失败不掩盖硬事实:同一 owner 有待消费 wake 信号仍判 hard,必进池。"""
+    owners = tmp_path / "owners"
+    home = _owner_home(owners, "feishu", "users", "u-mixed")
+    _write_curator_state(
+        home,
+        pending_reasons=["turn_threshold"],
+        last_failure_at=(datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat(),
+        last_failure_code="CURATOR_MODEL_TIMEOUT",
+    )
+    _write_wake_signal(_store_root(owners, "feishu", "users", "u-mixed", "runtime"), "urgent", "ws-1")
+
+    page = discover_wake_pending_owner_page(owners, limit=16)
+    assert [o.owner_id for o in page.owners] == ["u-mixed"]
+    assert [o.owner_id for o in page.hard_owners] == ["u-mixed"]
+    assert page.soft_owners == ()
+
+
+def test_seed_registry_hard_owners_evict_soft_when_full(tmp_path) -> None:
+    """登记表满时,分页种入硬 owner 必成功、软 owner 被拒——软活可以等,硬活不能饿死。"""
+    from agent_py_agent.agent.owner_wake_discovery import (
+        discover_wake_pending_owner_page,
+    )
+
+    owners = tmp_path / "owners"
+    # 软(curator pending)owner 字母序在前,硬(policy 到期)owner 在后 → 同一页内先扫到软。
+    _write_curator_state(_owner_home(owners, "feishu", "users", "u-a-soft1"), pending_reasons=["turn_threshold"])
+    _write_curator_state(_owner_home(owners, "feishu", "users", "u-a-soft2"), pending_reasons=["turn_threshold"])
+    for name in ("u-z-hard1", "u-z-hard2"):
+        _write_policy(_store_root(owners, "feishu", "users", name, "runtime"), "p", enabled=True)
+    registry = ActiveOwnerRegistry(max_owners=2)
+
+    page = discover_wake_pending_owner_page(owners, limit=16)
+    # owners = hard + soft(硬先软后);软 owner 虽字母序在前,分页内仍排在硬 owner 之后
+    assert [o.owner_id for o in page.owners] == ["u-z-hard1", "u-z-hard2", "u-a-soft1", "u-a-soft2"]
+    assert [o.owner_id for o in page.hard_owners] == ["u-z-hard1", "u-z-hard2"]
+    assert [o.owner_id for o in page.soft_owners] == ["u-a-soft1", "u-a-soft2"]
+    seeded = 0
+    for owner in page.hard_owners:
+        if registry.record(owner, hard=True):
+            seeded += 1
+    for owner in page.soft_owners:
+        if registry.record(owner, hard=False):
+            seeded += 1
+
+    assert seeded == 2  # 只有硬 owner 种入,软 owner 全被拒
+    ids = {o.owner_id for o in registry.snapshot()}
+    assert ids == {"u-z-hard1", "u-z-hard2"}
+
+
+def test_seed_registry_preserves_hard_owners_when_soft_evicted(tmp_path) -> None:
+    """已入表软 owner 被新硬 owner 逐出(而非反过来);用 seed_registry_page_from_disk 全流程。"""
+    owners = tmp_path / "owners"
+    _write_curator_state(_owner_home(owners, "feishu", "users", "u-a-soft1"), pending_reasons=["turn_threshold"])
+    _write_curator_state(_owner_home(owners, "feishu", "users", "u-a-soft2"), pending_reasons=["turn_threshold"])
+    _write_policy(_store_root(owners, "feishu", "users", "u-z-hard1", "runtime"), "p", enabled=True)
+    _write_policy(_store_root(owners, "feishu", "users", "u-z-hard2", "runtime"), "p", enabled=True)
+    registry = ActiveOwnerRegistry(max_owners=2)
+
+    seed_registry_page_from_disk(registry, owners, limit=16)
+
+    assert {o.owner_id for o in registry.snapshot()} == {"u-z-hard1", "u-z-hard2"}
+    assert registry.hard_snapshot() != []
+    assert registry.soft_snapshot() == []

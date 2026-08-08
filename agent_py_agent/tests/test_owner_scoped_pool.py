@@ -145,6 +145,118 @@ def test_shared_active_owner_registry_uses_agent_pool_limit() -> None:
     assert registry._max_owners == 128
 
 
+# ---------- 硬/软分层准入(F 批:215 个 curator 软活测试号灌满池,真活 wake 硬 owner 被逐出饿死) ----------
+
+
+def test_registry_soft_rejected_when_full_of_hard(tmp_path) -> None:
+    registry = ActiveOwnerRegistry(max_owners=2)
+    registry.record(OwnerIdentity.provider_user("feishu", "h1"))
+    registry.record(OwnerIdentity.provider_user("feishu", "h2"))
+
+    accepted = registry.record(OwnerIdentity.provider_user("feishu", "s1"), hard=False)
+
+    assert accepted is False  # 软活等下一轮,绝不挤硬
+    assert {o.owner_id for o in registry.snapshot()} == {"h1", "h2"}
+
+
+def test_registry_hard_evicts_soft_not_hard(tmp_path) -> None:
+    registry = ActiveOwnerRegistry(max_owners=2)
+    registry.record(OwnerIdentity.provider_user("feishu", "s1"), hard=False)
+    registry.record(OwnerIdentity.provider_user("feishu", "h1"))
+    registry.record(OwnerIdentity.provider_user("feishu", "h2"))  # 满:应逐软 s1 而非硬 h1
+
+    ids = {o.owner_id for o in registry.snapshot()}
+    assert ids == {"h1", "h2"}
+
+
+def test_registry_soft_upgrades_to_hard(tmp_path) -> None:
+    registry = ActiveOwnerRegistry(max_owners=2)
+    owner = OwnerIdentity.provider_user("feishu", "s1")
+    registry.record(owner, hard=False)
+
+    registry.record(owner, hard=True)  # 软 owner 出现硬事实(如新入站请求)→ 升级
+
+    assert {o.owner_id for o in registry.hard_snapshot()} == {"s1"}
+    assert registry.soft_snapshot() == []
+
+
+def test_registry_soft_hit_does_not_downgrade_hard(tmp_path) -> None:
+    registry = ActiveOwnerRegistry(max_owners=2)
+    owner = OwnerIdentity.provider_user("feishu", "h1")
+    registry.record(owner)
+
+    registry.record(owner, hard=False)  # 已有硬事实 → 软登记不降级
+
+    assert {o.owner_id for o in registry.hard_snapshot()} == {"h1"}
+    assert registry.soft_snapshot() == []
+
+
+def test_registry_snapshots_hard_before_soft(tmp_path) -> None:
+    registry = ActiveOwnerRegistry(max_owners=8)
+    registry.record(OwnerIdentity.provider_user("feishu", "s1"), hard=False)
+    registry.record(OwnerIdentity.provider_user("feishu", "h1"))
+    registry.record(OwnerIdentity.provider_user("feishu", "s2"), hard=False)
+    registry.record(OwnerIdentity.provider_user("feishu", "h2"))
+
+    ids = [o.owner_id for o in registry.snapshot()]
+    assert ids == ["h1", "h2", "s1", "s2"]  # 硬先软后(后台循环硬 owner 先建 scheduler)
+
+
+def test_pool_hard_get_evicts_soft_not_hard(tmp_path) -> None:
+    pool, builds = _counting_pool(tmp_path, max_agents=2)
+    pool.get(OwnerIdentity.provider_user("feishu", "s1"), hard=False)
+    pool.get(OwnerIdentity.provider_user("feishu", "h1"), hard=True)
+    pool.get(OwnerIdentity.provider_user("feishu", "h2"), hard=True)  # 满:逐软 s1
+
+    ids = {a.owner_id for a in pool.active_agents()}
+    assert ids == {"h1", "h2"}
+    assert len(builds) == 3
+
+
+def test_pool_soft_get_rejected_when_full_of_hard(tmp_path) -> None:
+    pool, builds = _counting_pool(tmp_path, max_agents=2)
+    pool.get(OwnerIdentity.provider_user("feishu", "h1"))
+    pool.get(OwnerIdentity.provider_user("feishu", "h2"))
+
+    result = pool.get(OwnerIdentity.provider_user("feishu", "s1"), hard=False)
+
+    assert result is None  # 软活等下一轮,不挤硬
+    assert pool.active_count() == 2
+    assert len(builds) == 2
+
+
+def test_pool_soft_evicts_soft_among_soft(tmp_path) -> None:
+    pool, builds = _counting_pool(tmp_path, max_agents=2)
+    pool.get(OwnerIdentity.provider_user("feishu", "s1"), hard=False)
+    pool.get(OwnerIdentity.provider_user("feishu", "s2"), hard=False)
+    pool.get(OwnerIdentity.provider_user("feishu", "s3"), hard=False)  # 软表满:软内互挤最久(s1)
+
+    ids = {a.owner_id for a in pool.active_agents()}
+    assert ids == {"s2", "s3"}
+
+
+def test_pool_soft_hit_upgrades_to_hard_same_instance(tmp_path) -> None:
+    pool, builds = _counting_pool(tmp_path, max_agents=2)
+    owner = OwnerIdentity.provider_user("feishu", "s1")
+    soft = pool.get(owner, hard=False)
+
+    hard = pool.get(owner, hard=True)  # 升级:同一 agent 实例,不重建
+
+    assert hard is soft
+    assert len(builds) == 1
+    assert {a.owner_id for a in pool.active_agents()} == {"s1"}
+
+
+def test_pool_active_agents_lists_hard_before_soft(tmp_path) -> None:
+    pool, _ = _counting_pool(tmp_path, max_agents=8)
+    pool.get(OwnerIdentity.provider_user("feishu", "s1"), hard=False)
+    pool.get(OwnerIdentity.provider_user("feishu", "h1"))
+    pool.get(OwnerIdentity.provider_user("feishu", "s2"), hard=False)
+    pool.get(OwnerIdentity.provider_user("feishu", "h2"))
+
+    assert [a.owner_id for a in pool.active_agents()] == ["h1", "h2", "s1", "s2"]
+
+
 # ---------- config owner 覆盖 ----------
 
 def test_config_with_owner_overrides_owner_keeps_rest(tmp_path) -> None:

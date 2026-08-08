@@ -535,9 +535,16 @@ class _BackgroundMainSupervisor:
         pool = self._ensure_owner_pool()
         if pool is None:
             return
-        for owner in snapshot:
+        # 硬事实 owner(待消费 wake/到期 policy/未完成子代理/盯守路/调度活)必进池,软(curator)靠后:
+        # 池满时软 owner 的 get 返回 None,跳过建 scheduler——软活可以等,硬活不能饿死。
+        for owner in self._registry.hard_snapshot():
             try:
-                pool.get(owner)  # get-or-build 该 owner 的作用域 agent(池内缓存 + LRU)
+                pool.get(owner, hard=True)
+            except Exception as exc:
+                _print_gateway_loop_error("gateway_background_main.owner_build", str(getattr(owner, "owner_id", "")), exc)
+        for owner in self._registry.soft_snapshot():
+            try:
+                pool.get(owner, hard=False)
             except Exception as exc:
                 _print_gateway_loop_error("gateway_background_main.owner_build", str(getattr(owner, "owner_id", "")), exc)
         active = {id(agent): agent for agent in pool.active_agents()}

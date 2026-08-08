@@ -42,6 +42,10 @@ _STORE_ROOT_PATTERNS = (
 # 发现层不引配置避免循环依赖,只保证「到期」语义一致(真到期,非每天必挂/对话即挂)。
 _CURATOR_INTERVAL_SECONDS = 10_800
 _DAILY_FINALIZE_HOUR = 23
+# 策展失败退避窗口:与 curator._run_pending_when_due 的 retry_after 上限(300s)对齐——
+# 失败后的 pending owner 在窗口内不被发现层判活,避免 215 个失败 curator owner 每轮
+# 分页种回登记表占工位(真机:占满 64 容量池,真活 user-a 被逐出饿死)。
+_CURATOR_FAILURE_BACKOFF_SECONDS = 300
 _PROVIDER_BUCKET_KINDS = {"users": "user", "groups": "group"}
 OwnerWakeCursor = tuple[str, str, str]
 
@@ -64,6 +68,10 @@ class OwnerWakeDiscoveryPage:
     owners: tuple[Any, ...]
     next_cursor: OwnerWakeCursor | None
     scanned: int
+    # 硬/软事实 owner 分开返回(seed 路硬先软后种入,软事实在池满时可以被等);
+    # owners = hard + soft,保持旧「全部待唤醒 owner」语义。
+    hard_owners: tuple[Any, ...] = ()
+    soft_owners: tuple[Any, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -95,12 +103,16 @@ def discover_wake_pending_owner_page(
         limit=limit,
         after_cursor=after_cursor,
     )
-    found = tuple(
-        target.identity
-        for target in page.targets
-        if _owner_has_wake_pending_facts(target.home_dir)
+    kinds = [(_owner_fact_kind(target.home_dir), target.identity) for target in page.targets]
+    hard = tuple(identity for kind, identity in kinds if kind == "hard")
+    soft = tuple(identity for kind, identity in kinds if kind == "soft")
+    return OwnerWakeDiscoveryPage(
+        (*hard, *soft),
+        page.next_cursor,
+        page.scanned,
+        hard_owners=hard,
+        soft_owners=soft,
     )
-    return OwnerWakeDiscoveryPage(found, page.next_cursor, page.scanned)
 
 
 def discover_owner_home_page(
@@ -182,22 +194,41 @@ def seed_registry_page_from_disk(
     limit: int = 64,
     after_cursor: OwnerWakeCursor | None = None,
 ) -> OwnerWakeSeedPage:
-    """Seed one bounded page and return its continuation cursor."""
+    """Seed one bounded page and return its continuation cursor.
+
+    硬事实 owner 先种(registry 满时优先逐软、软 owner 被拒时硬仍然入表),
+    软事实(curator)后种——软活可以等,硬活不能饿死。"""
     try:
         page = discover_wake_pending_owner_page(
             owners_dir,
             limit=limit,
             after_cursor=after_cursor,
         )
-        for owner in page.owners:
-            registry.record(owner)
-        return OwnerWakeSeedPage(len(page.owners), page.next_cursor, page.scanned)
+        seeded = 0
+        for owner in page.hard_owners:
+            if registry.record(owner, hard=True):
+                seeded += 1
+        for owner in page.soft_owners:
+            if registry.record(owner, hard=False):
+                seeded += 1
+        return OwnerWakeSeedPage(seeded, page.next_cursor, page.scanned)
     except Exception:
         _LOGGER.warning("owner wake discovery failed (owners_dir=%s)", owners_dir, exc_info=True)
         return OwnerWakeSeedPage(0, after_cursor, 0)
 
 
-def _owner_has_wake_pending_facts(owner_home: Path) -> bool:
+# 事实类别:hard = 必须被驱动(等不起),soft = 可以等(池满时被逐出/拒绝)。
+# 真机实锤分层必要性:215 个 feishu 测试号的 curator 软活把 64 容量登记表/池灌满,
+# 真活 user-a 的 wake 硬事实按字母序最后被 LRU 逐出 → 唤醒永不消费 → 父任务永不收口。
+def _owner_fact_kind(owner_home: Path) -> str:
+    if _owner_has_hard_facts(owner_home):
+        return "hard"
+    if _owner_has_soft_facts(owner_home):
+        return "soft"
+    return "none"
+
+
+def _owner_has_hard_facts(owner_home: Path) -> bool:
     if any(
         _has_pending_wake_signal(store_root) or _has_enabled_progress_policy(store_root)
         for store_root in _store_roots(owner_home)
@@ -207,8 +238,11 @@ def _owner_has_wake_pending_facts(owner_home: Path) -> bool:
         _has_unfinished_subagent_run(owner_home)
         or _has_incomplete_watch_lane(owner_home)
         or _has_due_scheduler_fact(owner_home)
-        or _has_pending_memory_curator_work(owner_home)
     )
+
+
+def _owner_has_soft_facts(owner_home: Path) -> bool:
+    return _has_pending_memory_curator_work(owner_home)
 
 
 # LLM: 发现层只认结构化信号,与 CuratorService.run_if_due 同源;「无法证明没活=有活」已删——
@@ -229,6 +263,11 @@ def _has_pending_memory_curator_work(owner_home: Path) -> bool:
         return _curator_input_newer_than(owner_home, 0.0)
     except (OSError, UnicodeError, ValueError, TypeError):
         # 坏 state 不能证明有活;CuratorService 运行时会以结构化错误暴露,发现层不据此占工位
+        return False
+    # 失败退避:刚失败的 pending owner 不判活(curator 层 _run_pending_when_due 同窗口 300s)。
+    # 否则失败后的 curator 软活每轮分页都被种回登记表占工位,硬事实 owner 反而被挤(真机实锤)。
+    last_failure = _curator_success_timestamp(state.last_failure_at)
+    if last_failure > 0 and time.time() - last_failure < _CURATOR_FAILURE_BACKOFF_SECONDS:
         return False
     if state.pending_reasons or state.active_lease:
         return True
