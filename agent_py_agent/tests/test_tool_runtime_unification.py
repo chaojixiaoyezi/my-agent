@@ -706,7 +706,7 @@ def test_run_evidence_projects_exact_snapshots_choices_and_completion() -> None:
     assert "not projected" not in json.dumps(evidence)
 
 
-def test_required_action_lets_model_choose_then_none_after_evidence(tmp_path: Path) -> None:
+def test_required_action_lets_model_choose_and_keeps_choosing_after_evidence(tmp_path: Path) -> None:
     tool = _CountingTool(command=True)
     action = RequiredAction(
         action_id="required-1",
@@ -743,7 +743,10 @@ def test_required_action_lets_model_choose_then_none_after_evidence(tmp_path: Pa
 
     assert action.status == "satisfied"
     assert action.evidence_call_ids == ["call-1"]
-    assert tool_choice_for_required_actions(contract, provider_tools).mode == "none"
+    # settled 后仍由模型自主:销账后常需继续验证(编译/测试),强制 none 切断
+    # "修完-验证"链 → TOOL_CHOICE_VIOLATION break(真机铁证 2026-08-08: 模型
+    # 5 轮修完 main.go 后想 go build 被连拦 3 轮)。settled=无待办约束。
+    assert tool_choice_for_required_actions(contract, provider_tools).mode == "auto"
 
 
 def test_required_action_without_call_repairs_once_then_is_unfinished() -> None:

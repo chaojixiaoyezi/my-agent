@@ -197,7 +197,12 @@ def tool_choice_for_required_actions(
         # tool_choice 只决定"是否调用",由主循环模型自主(对齐 长期助手/会话运行时)。
         return ToolChoice.auto("open_required_action")
     if actions:
-        return ToolChoice.none("required_actions_settled")
+        # 动作全 settled 也不强制禁工具:模型写完文件后常需继续验证(编译/跑测试),
+        # 强制 none 把"修完-验证"链切断 → TOOL_CHOICE_VIOLATION break(真机铁证
+        # 2026-08-08: 模型 5 轮修完 main.go 后想 go build,被"the host disabled tools
+        # for this informational model turn" 连拦 3 轮 break)。settled=无待办约束,
+        # 工具选择权归主循环模型(对齐 长期助手/会话运行时,评估从不硬禁)。
+        return ToolChoice.auto("required_actions_settled")
     assessment = getattr(snapshot, "required_action_assessment", None)
     if _assessment_failed(assessment):
         # 评估模型失败不应一票否决禁掉整轮工具：评估只是预判，主循环模型拥有完整上下文，
