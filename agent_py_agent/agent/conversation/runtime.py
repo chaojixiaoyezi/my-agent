@@ -2936,6 +2936,14 @@ _TASK_LINK_TERMINAL_STATUSES = frozenset(
         "TIMEOUT",
     }
 )
+
+# policy 退休用终态(⊇ 上面那套):BLOCKED 的子代理不会再自动推进,watch 它只会
+# 每 interval 空转一次唤醒(真机 2026-08-09:BLOCKED fixer 的 300s policy 等到
+# 2h stale 窗口才退休)。不能并入 _TASK_LINK_TERMINAL_STATUSES:那里还被 wake
+# 信号过期判定复用,BLOCKED 子代理的 lifecycle 事件必须唤醒父代理去处理,
+# 误判终态会把「子代理卡住」的信号当 stale 丢弃。BLOCKED 只在这里(=有 policy
+# 挂它)当终态:父代理靠 BLOCKED 事件链唤醒,不靠 watch policy。
+_POLICY_RETIRE_TERMINAL_STATUSES = frozenset(_TASK_LINK_TERMINAL_STATUSES | {"BLOCKED"})
 _MIN_PROGRESS_POLICY_CATCHUP_SECONDS = 7200
 _MAX_PROGRESS_POLICY_CATCHUP_INTERVALS = 4
 
@@ -4436,7 +4444,7 @@ class _BackgroundSchedulerExecutionMixin:
                     ),
                     store=self.store,
                 )
-                if status.upper() in _TASK_LINK_TERMINAL_STATUSES:
+                if status.upper() in _POLICY_RETIRE_TERMINAL_STATUSES:
                     try:
                         self.store.disable_progress_policy(policy.policy_id)
                     except Exception:
@@ -5178,7 +5186,7 @@ def _policy_task_link_is_terminal(store, policy: ProgressPolicy) -> bool:
     for link in links:
         if (
             link.task_id == policy.task_id
-            and str(link.status or "").upper() in _TASK_LINK_TERMINAL_STATUSES
+            and str(link.status or "").upper() in _POLICY_RETIRE_TERMINAL_STATUSES
         ):
             return True
     return False

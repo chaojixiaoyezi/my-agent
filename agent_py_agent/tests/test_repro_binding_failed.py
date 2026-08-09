@@ -234,16 +234,13 @@ def _retire_with_child(agent, store, thread_id, child_id, *, task_id):
         FakeDeliveryService,
     )
 
-    def _watch_policy_ids(enabled_only):
-        return {
-            str(p.policy_id): str((p.metadata or {}).get("watch_run_id") or "")
-            for p in store.list_progress_policies_report(enabled_only=enabled_only)[0]
-        }
-
-    before = _watch_policy_ids(True)
-    stale_ids = [pid for pid, watched in before.items() if watched == child_id]
-    assert stale_ids, "watch 子代理的 policy 应存在且 enabled"
-    # 用与既有后台调度测试相同的容器驱动一次 tick：目标终态 → 该 policy 被禁用
+    enabled, _ = store.list_progress_policies_report(enabled_only=True)
+    stale_policies = [p for p in enabled if str((p.metadata or {}).get("watch_run_id") or "") == child_id]
+    assert stale_policies, "watch 子代理的 policy 应存在且 enabled"
+    # tick 落在「已 due 但未 stale」窗口(next_due+100s,catchup 是 2h):
+    # 只验证「watch 目标终态 → 退休」路径,不靠 stale 假绿。
+    due_at = max(float(p.next_due_at or 0) for p in stale_policies)
+    stale_ids = {str(p.policy_id) for p in stale_policies}
     scheduler = BackgroundMainAgentScheduler(
         {
             "runtime": BackgroundMainAgentRuntime(
@@ -253,11 +250,10 @@ def _retire_with_child(agent, store, thread_id, child_id, *, task_id):
             "claim_ttl_seconds": 30,
         }
     )
-    scheduler.tick(now=__import__("time").time() + 9999)
-    after = _watch_policy_ids(True)
-    assert not any(pid in after for pid in stale_ids), (
-        "watch 目标已终态的陈旧 policy 应被禁用"
-    )
+    scheduler.tick(now=due_at + 100)
+    after_enabled, _ = store.list_progress_policies_report(enabled_only=True)
+    after = {str(p.policy_id) for p in after_enabled}
+    assert not (stale_ids & after), "watch 目标已终态的陈旧 policy 应被禁用"
 
 
 def test_stale_watch_policy_retired_when_watch_target_terminal(tmp_path):
