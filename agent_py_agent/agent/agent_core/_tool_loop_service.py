@@ -188,10 +188,13 @@ def _should_retry_incomplete_model_response(
     # completed work.  Keep the retry bounded and only enable it after durable
     # tool results exist; a truncated ordinary chat answer remains terminal,
     # matching 会话运行时's response.incomplete handling.
+    # 真机 2026-08-09:deepseek-v4-flash 在 工具运行时.ai 端输出上限低,子代理写大文件/
+    # 收尾提交轮一次截断重试后仍截断,直接 BLOCKED 导致任务永远走不完。截断恢复
+    # 每次注入「继续输出」上下文(不重来),放宽到 3 次让低上限模型有足够机会完成。
     return (
         is_incomplete_provider_response_error(exc)
         and bool(params.executed_tools)
-        and provider_response_repairs < 1
+        and provider_response_repairs < 3
     )
 
 

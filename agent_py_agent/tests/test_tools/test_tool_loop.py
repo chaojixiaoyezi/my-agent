@@ -801,7 +801,7 @@ def test_tool_loop_does_not_replay_incomplete_ordinary_chat_response():
         assert agent.backend.calls == 1
 
 
-def test_tool_loop_continues_only_once_for_repeated_incomplete_response():
+def test_tool_loop_continues_bounded_times_for_repeated_incomplete_response():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         (workspace / "notes.txt").write_text("hello bounded incomplete repair", encoding="utf-8")
@@ -813,7 +813,10 @@ def test_tool_loop_continues_only_once_for_repeated_incomplete_response():
             agent.run("读取 notes 后继续完成", save=False, allowed_tools=["read_file"])
 
         assert exc_info.value.error_code == "MODEL_INCOMPLETE_RESPONSE"
-        assert agent.backend.calls == 3
+        # 截断恢复上限 3 次(每次注入「继续输出」上下文不重来):第 1 轮工具成功,
+        # calls 2-4 三次重试仍截断,calls 5 达到上限直接失败(真机 deepseek 低输出
+        # 上限下 1 次重试不够,放宽后任务不再一轮截断就 BLOCKED)。
+        assert agent.backend.calls == 5
 
 
 def test_max_tool_rounds_zero_allows_multiple_tool_rounds():
