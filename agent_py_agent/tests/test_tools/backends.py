@@ -53,11 +53,14 @@ class UnclosedWriteFileBackend(BaseBackend):
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
+            # 参数截断(JSON 不完整):半参数绝不执行,必须 violation 拒绝。
+            # (完整 JSON 缺 [/TOOL_CALL] 已被 60289e44 宽容——见
+            # test_canonical_tool_protocol_adapter 的接受用例。)
             return ModelResponse(
                 text=(
                     "[TOOL_CALL]\n"
                     '{"tool":"write_file","path":"index.html",'
-                    '"content":"<!doctype html><html><head><title>OK</title></head><body><main>ok</main></body></html>"}'
+                    '"content":"<!doctype html><html><head><ti'
                 ),
                 backend=self.name,
             )

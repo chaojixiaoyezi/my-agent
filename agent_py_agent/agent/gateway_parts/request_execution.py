@@ -1142,12 +1142,18 @@ def _gateway_task_attributes(conversation: _GatewayConversationContext) -> dict 
         attrs[CONVERSATION_WORKSPACE_EXECUTION_STATE_AVAILABLE_ATTR] = (
             task.execution_state_available
         )
-        attrs["conversation_task_id"] = task.task_id
-        attrs["run_workspace"] = {
-            "task_root": task.task_path,
-            "output_dir": str(Path(task.task_path) / "output"),
-            "work_dir": str(Path(task.task_path) / "work"),
-        }
+        # 终态任务(completed 等)只保留状态提示,不预填本轮任务身份与工作目录:
+        # 问题1 真机(2026-08-09)celery 完成后 click/jinja2/requests 等新任务
+        # 消息全被吸进 celery 旧目录——sticky 无条件预填身份,新任务继承旧身份
+        # 与旧目录。仅 live 任务(active/interrupted=暂停待恢复)可被新消息承接,
+        # 与 promote 回落链同一把尺;completed 等终态不预填,新任务走独立目录。
+        if str(task.status or "").strip().lower() in {"active", "interrupted"}:
+            attrs["conversation_task_id"] = task.task_id
+            attrs["run_workspace"] = {
+                "task_root": task.task_path,
+                "output_dir": str(Path(task.task_path) / "output"),
+                "work_dir": str(Path(task.task_path) / "work"),
+            }
     return attrs or None
 
 
@@ -1464,7 +1470,10 @@ def _gateway_workspace_task(
     if errors:
         load_errors.extend(error for error in errors if isinstance(error, dict))
         return None
-    from ..conversation.task_promotion import is_reusable_conversation_workspace
+    from ..conversation.task_promotion import (
+        is_live_conversation_workspace,
+        is_reusable_conversation_workspace,
+    )
 
     # A detached named task owns its own execution lane and workspace.  It may
     # remain active while the parent conversation starts unrelated work, so it
@@ -1511,10 +1520,13 @@ def _gateway_workspace_task(
     if selected is None:
         # 同路径的多条历史链接算一个工作区;去重后唯一才可隐式继承,
         # 否则同一目录反复续跑会被 len>1 误判为"多个候选"而开新任务。
+        # 仅 live(active/interrupted)任务可隐式继承:completed 等终态任务
+        # 是新消息应另开新目录的对象(问题1),不作为「最近工作区」回退选中。
         unique_paths = {
             path: link
             for link in selectable
-            if (path := _existing_gateway_workspace_path(getattr(link, "task_path", "")))
+            if is_live_conversation_workspace(link)
+            and (path := _existing_gateway_workspace_path(getattr(link, "task_path", "")))
         }
         if len(unique_paths) == 1:
             selected = next(iter(unique_paths.values()))

@@ -84,12 +84,25 @@ def promote_current_conversation_task(
         candidate = _sticky_workspace_task_id(store, thread_id) or explicit_task_id
         if candidate:
             reusable = _reusable_conversation_workspace_link(store, thread_id, candidate)
-            if reusable is not None and not _detached_named_work_link(reusable):
+            # 仅 live(active/interrupted)任务承接新消息身份与目录;completed 等
+            # 终态任务不再吸附(问题1:新任务消息吸进旧任务目录,新 req id 配旧
+            # task_path)。终态 sticky 走下方新建分支,新任务独立目录。
+            if reusable is not None and is_live_conversation_workspace(reusable) and not _detached_named_work_link(reusable):
                 bound = bind_current_conversation_workspace(agent, candidate)
                 if bound is not None:
                     return bound
                 # 续接失败(如旧任务仍被 policy/claim 驱动执行中):不另建影子任务,
                 # 本轮工作步骤由 workspace execution blocker 拦截,等旧执行收束。
+                return None
+            # 终态 sticky(completed 等)且本轮连目标文本都没有:不凭空新建任务
+            # (fails closed,与终态续接空目标失败同语义);有目标文本才走下方
+            # 新建分支,新任务独立目录。
+            if not str(
+                goal
+                or getattr(current, "root_user_prompt", "")
+                or getattr(current, "prompt", "")
+                or ""
+            ).strip():
                 return None
         # detached 任务(后台巡检等)只提供 sticky 目录,不续接:新请求是独立的
         # 前台任务,按原路径新建 link(不占用 detached 任务的工作区)。
@@ -591,6 +604,18 @@ def is_reusable_conversation_workspace(link: object) -> bool:
     return status in {"active", "completed", "interrupted"} and not task_id.startswith(
         ("subagent-", "bg-main-")
     )
+
+
+def is_live_conversation_workspace(link: object) -> bool:
+    """会话任务仍可被新用户消息继承身份/目录：仅 active 或 interrupted(暂停待恢复)。
+
+    completed 等终态任务不再吸附新消息(问题1 真机 2026-08-09:celery 完成后
+    click/jinja2/requests 等新任务消息全被吸进 celery 旧目录——新 req id 配旧
+    task_path);终态任务只保留状态提示,新一轮工作走独立目录。interrupted 是
+    「暂停可恢复」:用户手动继续时仍续接原目录(3081 测试锁定),故归入 live。
+    """
+    status = str(getattr(link, "status", "") or "").strip().lower()
+    return status in {"active", "interrupted"} and is_reusable_conversation_workspace(link)
 
 
 def conversation_task_execution_blocker(agent: object, task_id: str) -> dict[str, object] | None:

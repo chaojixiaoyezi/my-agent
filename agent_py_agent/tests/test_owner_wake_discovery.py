@@ -571,13 +571,16 @@ def test_curator_daily_finalize_missing_does_not_hang_before_hour(monkeypatch, t
     """旧实现「last_daily_finalize_date != 今天 → 每天必挂」;真到期语义:白天不该挂。"""
     from agent_py_agent.agent import owner_wake_discovery
 
+    # 冻结时刻必须与 state 的「昨天」同源(真实今天派生):写死日期会让
+    # 昨天==冻结日,判定因「日期相同」而非「白天」而不挂,测试静默失效。
+    today = datetime.now(timezone.utc).date().isoformat()
     owners = tmp_path / "owners"
     home = owners / "providers" / "feishu" / "users" / "u-daily"
     _write_curator_state(
         home,
         last_daily_finalize_date=(datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat(),
     )
-    monkeypatch.setattr(owner_wake_discovery, "datetime", _FrozenUTC("2026-08-08T14:00:00+00:00"))
+    monkeypatch.setattr(owner_wake_discovery, "datetime", _FrozenUTC(f"{today}T14:00:00+00:00"))
 
     assert discover_wake_pending_owners(owners) == []
 
@@ -585,13 +588,14 @@ def test_curator_daily_finalize_missing_does_not_hang_before_hour(monkeypatch, t
 def test_curator_daily_finalize_due_after_hour(monkeypatch, tmp_path) -> None:
     from agent_py_agent.agent import owner_wake_discovery
 
+    today = datetime.now(timezone.utc).date().isoformat()
     owners = tmp_path / "owners"
     home = owners / "providers" / "feishu" / "users" / "u-daily"
     _write_curator_state(
         home,
         last_daily_finalize_date=(datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat(),
     )
-    monkeypatch.setattr(owner_wake_discovery, "datetime", _FrozenUTC("2026-08-08T23:30:00+00:00"))
+    monkeypatch.setattr(owner_wake_discovery, "datetime", _FrozenUTC(f"{today}T23:30:00+00:00"))
 
     found = discover_wake_pending_owners(owners)
     assert [o.owner_id for o in found] == ["u-daily"]

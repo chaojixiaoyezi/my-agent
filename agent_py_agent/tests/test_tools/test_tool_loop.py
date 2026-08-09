@@ -5,6 +5,7 @@
 子代理 output.json 收口、工具授权过滤和安全能力授权。
 """
 
+import hashlib
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -1623,18 +1624,24 @@ def test_ordinary_task_resume_budget_exhausted_disables_policy(tmp_path):
             "channel_user_id": "user-1",
         }
     )
+    # 预置 policy 的归属 key 必须与调度侧同一把:普通任务续跑 policy 按
+    # progress_ledger_id(task-path:<目录指纹>)登记,收口按同一 key 匹配——
+    # durable task_id 形态的 policy 在产品中不存在(真机 2026-08-09 实证)。
+    task_path = str(tmp_path / "task-limit-workspace")
     agent.conversation_store.bind_task(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-limit",
             "goal": "读取并整理文件",
             "status": "active",
+            "task_path": task_path,
         }
     )
+    ledger_key = f"task-path:{hashlib.sha256(task_path.encode('utf-8')).hexdigest()[:16]}"
     agent.conversation_store.set_progress_policy(
         {
             "thread_id": thread.thread_id,
-            "task_id": "task-limit",
+            "task_id": ledger_key,
             "interval_seconds": 180,
             "route_channel": "internal",
             "route_target": "",
@@ -1752,12 +1759,17 @@ def test_explicit_goal_cannot_close_with_open_progress(tmp_path):
             "channel_user_id": "user-1",
         }
     )
+    # link 已绑定任务目录(模拟 promote 后的真实状态):收口读侧 progress_ledger_id
+    # = task-path:<sha256(task_path)>,账本必须立在同一个 key 上(task_progress_tool
+    # 产品写侧在 run 内 materialize 之后始终按此 key 记账)。
+    task_path = str(tmp_path / "goal-workspace")
     agent.conversation_store.bind_task(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-open-progress",
             "goal": "读取后继续完成验证",
             "status": "active",
+            "task_path": task_path,
         }
     )
     goal = agent.conversation_store.create_goal(
@@ -1767,9 +1779,10 @@ def test_explicit_goal_cannot_close_with_open_progress(tmp_path):
             "objective": "读取后继续完成验证",
         }
     )
+    ledger_key = f"task-path:{hashlib.sha256(task_path.encode('utf-8')).hexdigest()[:16]}"
     write_task_progress(
         runtime_owner_root(agent),
-        "task-open-progress",
+        ledger_key,
         {"items": [{"id": "verify", "status": "pending", "title": "完成验证"}]},
     )
 

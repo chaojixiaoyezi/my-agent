@@ -1293,12 +1293,14 @@ def test_curator_dropped_daily_and_candidate_warn_but_advance_cursor(tmp_path: P
     assert "candidate" in " ".join(result.warnings)
 
 
-def test_curator_coverage_mismatch_still_fails_batch(tmp_path: Path) -> None:
-    """覆盖声明仍严格:processed refs 与输入快照不符时整批失败、游标不推进
-    (宽容只作用于 daily/candidate 证据引用,不作用于游标推进依据)。"""
+def test_curator_unprocessed_claims_do_not_fail_batch(tmp_path: Path) -> None:
+    """漏声明/出界声明不再整批失败:游标按连续 processed 前缀推进,未声明输入停在
+    游标前、下轮重放(数据零丢失);daily/candidate 真实证据照常入库。精确相等校验
+    曾把「漏声明+出界声明」打成整批失败(真机 2026-08-09 deepseek-v4-flash 39 连败
+    0 产出),游标机制本就独立承担防漏。"""
     store, thread, message = _conversation(tmp_path)
     output = _valid_output(thread.thread_id, message.message_id, message.content)
-    # 覆盖声明缺失当前 message(假装只处理了不存在的消息)
+    # 模型漏声明真实消息、只声明了 batch 外不存在的消息
     output["processed_message_refs"] = [
         {"message_id": "msg-someone-elses"}
     ]
@@ -1306,7 +1308,8 @@ def test_curator_coverage_mismatch_still_fails_batch(tmp_path: Path) -> None:
 
     result = service.run(reason="admin")
 
-    assert result.status == "failed"
-    assert result.failure_code == "CURATOR_EVIDENCE_INVALID"
+    assert result.status == "succeeded"
+    # 真实消息未声明 → 游标不推进,下轮 batch 重放
     assert service.state_store.load().per_thread_cursors == {}
-    assert service.candidate_service.list() == []
+    # 真实证据引用(daily/candidate 引用本批真实 message)照常入库
+    assert len(service.candidate_service.list()) == 1

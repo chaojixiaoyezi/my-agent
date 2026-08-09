@@ -2689,9 +2689,18 @@ def test_next_turn_reuses_terminal_workspace_with_fresh_execution_automatically(
     assert selected is not None
     successor_id = params.task_attributes["conversation_task_id"]
     assert successor_id != "task-completed"
-    assert params.task_attributes["conversation_continued_from_task_id"] == "task-completed"
-    assert params.task_attributes["run_workspace"]["task_root"] == str(workspace)
-    assert agent._current_run_task_workspace == str(workspace)
+    if prior_status == "interrupted":
+        # interrupted=暂停可恢复:手动继续仍续接原目录(暂停恢复语义保留)
+        assert params.task_attributes["conversation_continued_from_task_id"] == "task-completed"
+        assert params.task_attributes["run_workspace"]["task_root"] == str(workspace)
+        assert agent._current_run_task_workspace == str(workspace)
+    else:
+        # completed=任务已完成:新消息是独立新任务,不再吸附旧身份与旧目录
+        # (问题1 真机 2026-08-09:celery 完成后 click/jinja2/requests 等新任务
+        # 消息全被吸进 celery 旧目录),新任务走独立目录、无续接标记。
+        assert "conversation_continued_from_task_id" not in params.task_attributes
+        assert params.task_attributes["run_workspace"]["task_root"] != str(workspace)
+        assert agent._current_run_task_workspace != str(workspace)
     links = {
         link.task_id: (link.status, link.goal)
         for link in agent.conversation_store.task_links(conversation.thread_id)
@@ -2872,10 +2881,19 @@ def test_gateway_inherits_terminal_workspace_and_starts_fresh_execution_at_first
     before = agent.conversation_store.task_links(first.thread_id)[0]
 
     assert attrs is not None
-    assert attrs["conversation_task_id"] == "task-original"
-    assert attrs[CONVERSATION_WORKSPACE_TASK_ID_ATTR] == "task-original"
-    assert attrs[CONVERSATION_WORKSPACE_TASK_STATUS_ATTR] == prior_status
-    assert attrs["run_workspace"]["task_root"] == str(workspace.resolve())
+    if prior_status == "completed":
+        # completed 是终态任务:不再作为隐式工作区返回,无状态提示、不预填
+        # 身份与目录(问题1:新任务消息不再被吸进旧任务目录),新一轮工作走
+        # 独立目录。
+        assert CONVERSATION_WORKSPACE_TASK_ID_ATTR not in attrs
+        assert "conversation_task_id" not in attrs
+        assert "run_workspace" not in attrs
+    else:
+        # interrupted=暂停待恢复:预填身份供 promote 回落续接原目录
+        assert attrs[CONVERSATION_WORKSPACE_TASK_ID_ATTR] == "task-original"
+        assert attrs[CONVERSATION_WORKSPACE_TASK_STATUS_ATTR] == prior_status
+        assert attrs["conversation_task_id"] == "task-original"
+        assert attrs["run_workspace"]["task_root"] == str(workspace.resolve())
     assert CONVERSATION_TASK_TURN_ACTIVE_ATTR not in attrs
     assert before.status == prior_status
     assert complete_current_conversation_task(agent, attrs, source="gateway") is False
@@ -2916,13 +2934,22 @@ def test_gateway_inherits_terminal_workspace_and_starts_fresh_execution_at_first
     thread = agent.conversation_store.load_thread(first.thread_id)
     assert links["task-original"].status == prior_status
     assert links["gw-followup"].status == "active"
-    assert links["gw-followup"].task_path == str(workspace.resolve())
+    if prior_status == "interrupted":
+        # 暂停恢复:新执行代数继续用原目录
+        new_workspace = workspace
+    else:
+        # completed 新任务:独立目录,不再占用旧任务目录(问题1)
+        new_workspace = Path(links["gw-followup"].task_path)
+        assert new_workspace != workspace
+    assert links["gw-followup"].task_path == str(new_workspace.resolve())
     assert thread is not None and thread.workspace_task_id == "gw-followup"
-    state = json.loads((workspace / "work" / "state.json").read_text(encoding="utf-8"))
-    identity = json.loads((workspace / "work" / "run_workspace.json").read_text(encoding="utf-8"))
+    state = json.loads((new_workspace / "work" / "state.json").read_text(encoding="utf-8"))
+    identity = json.loads(
+        (new_workspace / "work" / "run_workspace.json").read_text(encoding="utf-8")
+    )
     assert state["task_id"] == "gw-followup" and state["status"] == "RUNNING"
     assert identity["task_id"] == "gw-followup" and identity["run_id"] == "gw-followup"
-    assert 'task_id: "gw-followup"' in (workspace / "work" / "task.yaml").read_text(
+    assert 'task_id: "gw-followup"' in (new_workspace / "work" / "task.yaml").read_text(
         encoding="utf-8"
     )
 
@@ -2983,7 +3010,9 @@ def test_new_ordinary_turn_reuses_sticky_workspace_without_switch_command(tmp_pa
     assert thread is not None and thread.workspace_task_id == "gw-new"
     assert attrs["conversation_task_id"] == "gw-new"
     assert attrs[CONVERSATION_TASK_TURN_ACTIVE_ATTR] is True
-    assert attrs["run_workspace"]["task_root"] == str(old_workspace)
+    # completed 任务不吸附新消息:新任务走独立目录(问题1 真机 2026-08-09:
+    # celery 完成后 click/jinja2 等新任务全被吸进 celery 旧目录)。
+    assert attrs["run_workspace"]["task_root"] != str(old_workspace)
     assert links["task-old"] == "completed"
     assert links["gw-new"] == "active"
 
@@ -3029,9 +3058,12 @@ def test_sticky_workspace_superseded_falls_back_to_reusable_task(tmp_path):
     followup = _conversation_context(agent, request, "gw-new", "继续写解析器")
     attrs = _gateway_task_attributes(followup)
 
+    # 全终态(superseded + completed)不再隐式继承任何旧任务身份/目录:
+    # 新消息是独立新任务(问题1),后续 promote 走新目录;不再回退复用终态任务。
     assert attrs is not None
-    assert attrs["conversation_task_id"] == "task-prev"
-    assert attrs["run_workspace"]["task_root"] == str(workspace)
+    assert CONVERSATION_WORKSPACE_TASK_ID_ATTR not in attrs
+    assert "conversation_task_id" not in attrs
+    assert "run_workspace" not in attrs
 
 
 def test_multi_candidate_workspace_prefers_populated_output_over_latest_empty(tmp_path):

@@ -1598,7 +1598,7 @@ def _wake_signal_is_stale(
         )
     if not task_id:
         return False
-    if reason in _SCHEDULED_WAKE_REASONS:
+    if reason in _SCHEDULED_WAKE_REASONS or reason == "task_ledger_resume":
         return _signal_task_link_is_terminal(agent, store, signal, reason)
     if reason not in SUBAGENT_LIFECYCLE_WAKE_REASONS:
         return False
@@ -4845,6 +4845,25 @@ def _ensure_goal_progress_wake_chain(
         _HEARTBEAT_LOGGER.warning("goal-progress wake chain ensure failed", exc_info=True)
 
 
+def _goal_ledger_task_id(store: ConversationStore, task_id: str) -> str:
+    """账本 key 与 task_progress_tool 写侧同一把。
+
+    task_id 是唤醒目标/goal 记录/policy 归属 key(durable);账本读写按
+    progress_ledger_id 寻址——会话任务绑定任务目录后 = task-path:<目录指纹>。
+    这里只做读侧映射,不让调用方各自传两个 key。
+    """
+    try:
+        link = store.load_task_link(task_id)
+    except Exception:
+        return task_id
+    task_path = str(getattr(link, "task_path", "") or "").strip()
+    if not task_path:
+        return task_id
+    import hashlib
+
+    return f"task-path:{hashlib.sha256(task_path.encode('utf-8')).hexdigest()[:16]}"
+
+
 def ensure_goal_progress_continuation(
     agent: object | None,
     *,
@@ -4863,7 +4882,11 @@ def ensure_goal_progress_continuation(
     if agent is None or not task_id:
         return False
     selected_store = store or getattr(agent, "conversation_store", None)
-    if selected_store is None or ledger_open_progress_item_count(agent, task_id) <= 0:
+    if (
+        selected_store is None
+        or ledger_open_progress_item_count(agent, _goal_ledger_task_id(selected_store, task_id))
+        <= 0
+    ):
         return False
     thread_id = str(thread_id or "").strip() or _thread_id_for_task(selected_store, task_id)
     if not thread_id:

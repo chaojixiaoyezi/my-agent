@@ -3032,9 +3032,12 @@ def test_promote_resumes_exact_active_sticky_task_without_shadow_link(tmp_path) 
     assert str(links[0].status).strip().lower() == "active"
 
 
-def test_promote_continues_completed_sticky_task_in_same_directory(tmp_path) -> None:
-    """终态任务续做=同一目录新执行代数:原任务保持终态,新代数继承原目录,
-    materialize 只刷新身份文件,绝不另建新目录(目录分裂源)。"""
+def test_promote_completed_sticky_task_starts_fresh_workspace(tmp_path) -> None:
+    """终态(completed)sticky 任务不再吸附新消息:新消息开新任务、新目录(问题1
+    真机 2026-08-09:celery 完成后 click/jinja2/requests 等新任务消息全被吸进
+    celery 旧目录——新 req id 配旧 task_path)。原任务保持终态;「同一任务续做
+    同目录」由工具路径保留:模型显式写入旧任务目录时 bind_current_conversation_
+    workspace 走 _continue_terminal_link_as_new_execution(同 cwd 新执行代数)。"""
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
         tmp_path,
@@ -3071,12 +3074,11 @@ def test_promote_continues_completed_sticky_task_in_same_directory(tmp_path) -> 
 
     assert promoted is not None
     assert promoted.task_id == "req-second"  # 新执行代数
-    assert promoted.task_path == str(task_dir)  # 同目录,不另建
+    assert promoted.task_path != str(task_dir)  # 新任务新目录,不再吸附旧目录
     links = agent.conversation_store.task_links(thread.thread_id)
     by_id = {item.task_id: item for item in links}
     assert str(by_id["req-first"].status).strip().lower() == "completed"  # 原任务保持终态
     assert str(by_id["req-second"].status).strip().lower() == "active"
-    assert not list((tmp_path / "tasks").glob("req-*continue*"))  # 无新目录
 
 
 def test_promote_without_sticky_link_still_binds_fresh_task(tmp_path) -> None:

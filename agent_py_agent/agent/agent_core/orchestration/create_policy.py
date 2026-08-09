@@ -327,7 +327,16 @@ def _current_run_id(agent) -> str:
     current = getattr(agent, "_current_run_params", None)
     if current is None:
         return ""
-    return str(getattr(current, "run_id", "") or getattr(current, "task_id", "") or "").strip()
+    # request_id 兜底:gateway 普通轮无 run_id/task_id(身份在 promote 时才绑定),
+    # 缺此兜底子代理 parent_id 为空,子代理成为自己的 root,主任务与子代理
+    # 的 task_id 对不上(lineage 断裂,问题2)。request_id 是请求实例 id,语义
+    # 与 run_id 同级,仅作兜底不抢 run_id/task_id 的优先级。
+    return str(
+        getattr(current, "run_id", "")
+        or getattr(current, "task_id", "")
+        or getattr(current, "request_id", "")
+        or ""
+    ).strip()
 
 
 def _current_conversation_task_id(agent) -> str:

@@ -65,11 +65,12 @@ def validate_extraction(
         item.operation_id: item for item in batch.audit_events if item.operation_id
     }
     artifacts_by_ref = _artifacts_by_ref(batch)
-    # 覆盖声明保持严格:processed|unresolved 必须精确等于输入快照,否则游标不能推进。
-    # 证据引用则逐条取舍(见下)——出界/无证据的 daily/candidate 只丢自己,不连坐整批。
-    # 真机 2026-08-09:deepseek-v4-flash 在 candidate 证据里编造 batch 外 message_id
-    # (32位hex),一个幻觉引用让整批 CURATOR_EVIDENCE_INVALID、游标不推进,300s 退避
-    # + 2min tick 下每 6 分钟重试同一批,39 连败。宽容证据引用让真实提炼照常入库。
+    # 游标只按连续 processed 前缀推进(next_cursors):漏声明的输入自然停在游标前、
+    # 下轮重放,数据零丢失;出界/多报引用不参与任何推进计算。因此不再要求模型逐条
+    # 精确枚举输入(与证据引用同一宽容原则)。真机 2026-08-09:deepseek-v4-flash 在
+    # 空消息流上把 audit 内容误当消息声明 processed_message_refs 且漏 2 条 audit,
+    # 精确相等校验把整批打成 CURATOR_EVIDENCE_INVALID,300s 退避下 39 连败:纯消耗、
+    # 0 提炼、游标永不推进。宽容覆盖声明让真实提炼照常入库。
     _validate_processed_refs(extraction, messages, audits_by_event)
     dropped: list[str] = []
     daily: list[object] = []
@@ -374,9 +375,10 @@ def _require_curator_origin(origin: object) -> None:
         raise CuratorEvidenceError("host_owned_origin")
 
 
-# LLM: Every input is exactly processed or unresolved; omissions and unknown IDs block cursor
-# advancement instead of being guessed complete.
-# 函数用途: 核对模型处理声明覆盖精确输入快照。
+# LLM: Every input must not be claimed both processed and unresolved; cursor advancement is
+# guaranteed only by the continuous processed prefix, so omitted claims just stop the cursor
+# before them (safe replay) and out-of-scope claims never participate in advancement.
+# 函数用途: 核对模型处理声明无矛盾,游标防漏由连续前缀机制单独承担。
 def _validate_processed_refs(
     extraction: CuratorExtraction,
     messages: dict[str, CuratorMessageInput],
@@ -389,10 +391,6 @@ def _validate_processed_refs(
     unresolved_audits = _ref_ids(extraction.unresolved_refs, "event_id")
     if processed_messages & unresolved_messages or processed_audits & unresolved_audits:
         raise CuratorEvidenceError("processed_and_unresolved_overlap")
-    if processed_messages | unresolved_messages != set(messages):
-        raise CuratorEvidenceError("message_coverage_mismatch")
-    if processed_audits | unresolved_audits != set(audits):
-        raise CuratorEvidenceError("audit_coverage_mismatch")
 
 
 # LLM: The strict schema keeps provider compatibility by declaring both nullable stream IDs;

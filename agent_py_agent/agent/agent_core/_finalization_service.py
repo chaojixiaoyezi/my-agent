@@ -602,9 +602,12 @@ def _mark_open_goal_progress_unfinished(agent: object, ctx: FinalizeContext) -> 
         or str(getattr(ctx.final_response, "runtime_status", "ok") or "ok").strip().lower() != "ok"
     ):
         return
-    from .runtime.task_identity import durable_task_id
+    from .runtime.task_identity import progress_ledger_id
 
-    task_id = str(durable_task_id(ctx) or attrs.get("root_task_id") or "").strip()
+    # 读侧必须与写侧同一把 key:task_progress_tool 用 progress_ledger_id 记账
+    # (会话任务=task-path:<目录指纹>),收口用 durable_task_id(原始 id)读=读错位
+    # =恒 0=有 open item 也误收口(问题4:任务没做完 link 就转终态)。
+    task_id = str(progress_ledger_id(agent, ctx) or attrs.get("root_task_id") or "").strip()
     if not task_id:
         return
     from ..conversation.runtime import ledger_open_progress_item_count
