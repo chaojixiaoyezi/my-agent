@@ -681,6 +681,22 @@ def _append_thread_policy_execution_state(
     for item in policies:
         if str(getattr(item, "thread_id", "") or "") != thread_id:
             continue
+        metadata = getattr(item, "metadata", None)
+        metadata = metadata if isinstance(metadata, dict) else {}
+        if str(metadata.get("kind") or "") == "subagent_progress_watch":
+            # wait 登记的是「等某 run 的进度」:被 watch 的 run 才是执行中的对象,
+            # task_id 只是调度归属(通常=父任务自身),不能作为 running 源——
+            # 否则父任务唤醒轮续接会被自己的 wait policy 判成 running,被
+            # workspace blocker 拦成 CONVERSATION_TASK_BINDING_FAILED 死锁
+            # (真机 2026-08-09 requests 复刻:claim 驱动轮 sticky 回落 bind 被拦,
+            # 父代理全部工具禁足,连 cancel policy 都救不了自己)。
+            # self-watch(watch_run_id 空或=task_id)不证明任何 run 在执行。
+            watched = str(metadata.get("watch_run_id") or "").strip()
+            task_id_field = str(getattr(item, "task_id", "") or "").strip()
+            if not watched or watched == task_id_field:
+                continue
+            _append_execution_source(sources_by_task_id, watched, "progress_policy")
+            continue
         _append_execution_source(
             sources_by_task_id,
             str(getattr(item, "task_id", "") or ""),

@@ -76,7 +76,11 @@ class WaitTool(BaseTool):
                     "tool": _TOOL_NAME,
                     "scope": str(params.get("scope") or "own_task_tree"),
                     "reason": str(params.get("reason") or "").strip(),
-                    "watch_run_id": str(params.get("run_id") or task_id),
+                    # 只 watch 显式点名的 run;无 run_id 的 wait 是「interval 唤醒自己」,
+                    # watch_run_id 绝不能 fallback 成 task_id(self-watch):否则父任务
+                    # 会被自己的 policy 判 running,唤醒轮续接被 workspace blocker 拦成
+                    # CONVERSATION_TASK_BINDING_FAILED 死锁(真机 2026-08-09)。
+                    "watch_run_id": str(params.get("run_id") or "").strip(),
                 },
             }
         )

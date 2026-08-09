@@ -1916,8 +1916,14 @@ def test_wait_policy_alone_does_not_block_orchestration_tools(tmp_path):
         delattr(agent, "_current_run_params")
 
 
-def test_wait_policy_alone_still_blocks_workspace_write(tmp_path):
-    """wait 期间防双写保护必须保留:写类工具仍被同目录执行锁拦。"""
+def test_wait_policy_alone_does_not_block_workspace_write(tmp_path):
+    """wait 期间写类工具放行:policy 只证明「登记了唤醒」,不证明任何 run 在执行。
+
+    2026-08-09 真机死锁实锤:把 enabled wait policy 当 running 源,会把父任务
+    唤醒轮续接(claim 驱动轮 conversation_task_id 与 link 不一致时走 sticky 回落
+    bind)拦成 CONVERSATION_TASK_BINDING_FAILED,父代理连 cancel policy 都救不了
+    自己。running 的权威证据是 claim;policy 的 watch 目标(子代理)才算 running。
+    """
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
     )
@@ -1959,8 +1965,7 @@ def test_wait_policy_alone_still_blocks_workspace_write(tmp_path):
     try:
         for tool in ("write_file", "edit_file", "apply_patch"):
             selected = _promote_work_tool(agent, params, {"tool": tool})
-            assert selected is not None, f"{tool} 在 wait 期间应被拦"
-            assert selected.error_code == "CONVERSATION_TASK_ALREADY_RUNNING"
+            assert selected is None, f"{tool} 不应被 self-wait policy 拦截: {selected}"
     finally:
         delattr(agent, "_current_run_params")
 
