@@ -123,7 +123,15 @@ class SubAgentRunnerResultService:
         now: float,
     ) -> tuple[dict, BuildAndPersistContext]:
         """Apply status to task and build output payload."""
-        return apply_status_and_build_payload(params, extracted, now)
+        return apply_status_and_build_payload(
+            params,
+            extracted,
+            now,
+            # 验收机器执行的沙箱门与工具循环同一把:ShellTool 的 owner_scope_root。
+            # effective_permissions.owner_home 是快照默认值(无沙箱环境也非空),
+            # 以它做门会把合法普通执行误判成必须 bwrap → 假 SANDBOX_UNAVAILABLE。
+            owner_home=self.manager.owner_scope_root,
+        )
 
     def _post_result_side_effects(
         self,

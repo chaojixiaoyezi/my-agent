@@ -40,6 +40,8 @@ def capability_manager():
         def __init__(self):
             self._tasks = {}
             self._work_logs = []
+            # 与生产 SubAgentManager 对齐:验收机器执行的沙箱门(空 = 普通执行)。
+            self.owner_scope_root = ""
             self.actions = SimpleNamespace(_append_task_work_log=self._append_task_work_log)
             self.indexing = SimpleNamespace(index_runner_result=self._index_runner_result)
             self.memory_candidates = SimpleNamespace(record_result_candidates=self.record_result_candidates)

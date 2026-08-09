@@ -38,6 +38,12 @@ class TestExecutor:
         "python3",
         "py",
         "pytest",
+        # 机器验收(问题3):子代理交付的验收命令常以 shell 内建 test 和 Go 工具链
+        # 开头(test -f / go build / go test)。既有的 python 前缀本就允许任意代码
+        # 执行,test/go 不改变风险面;缺失则 `test -f` 这类最朴素的验收命令整批
+        # 被拒,机器绑定形同虚设。
+        "test",
+        "go",
     })
     BLOCKED_CHARS: ClassVar[frozenset[str]] = frozenset({"|", "&", ";", ">", "<", "`", "$"})
     DEFAULT_TIMEOUT_SECONDS: ClassVar[float] = 120.0
@@ -49,11 +55,27 @@ class TestExecutor:
         *,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         allowed_prefixes: set[str] | frozenset[str] | None = None,
+        argv_prefix: tuple[str, ...] = (),
+        env: dict[str, str] | None = None,
+        boundary_root: str | Path | None = None,
+        unrestricted_paths: bool = False,
     ) -> None:
         self.workspace_root = Path(workspace_root).resolve()
+        # 路径边界:默认收窄到 workspace_root(既有语义);机器验收(问题3)在
+        # owner-scoped 沙箱里跑时,bwrap 的可写宇宙是整个 owner home(写根 None =
+        # `--bind owner_home owner_home` rw),模型声明的绝对 working_dir 和注册表
+        # 背书的产物路径都在 home 内、任务 workspace 外——边界必须放开到 owner home,
+        # 否则这些合法路径被误拒。unrestricted_paths 只给无沙箱可信环境用
+        # (owner_home 空 = 单租户,与 run_command 普通执行同可信级,本身无路径限制)。
+        self.boundary_root = Path(boundary_root).resolve() if boundary_root else self.workspace_root
+        self.unrestricted_paths = bool(unrestricted_paths)
         self.timeout_seconds = min(max(float(timeout_seconds), 0.1), self.MAX_TIMEOUT_SECONDS)
         prefixes = allowed_prefixes if allowed_prefixes is not None else self.ALLOWED_PREFIXES
         self.allowed_prefixes = frozenset(str(item).lower() for item in prefixes)
+        # 机器验收沙箱(问题3):owner-scoped 任务的验收命令必须包 bwrap,argv_prefix
+        # 就是 bwrap argv;env 只覆盖显式字段(HOME 等),不引入宿主环境其余变量。
+        self.argv_prefix = tuple(argv_prefix)
+        self.env = dict(env) if env else None
 
     def execute(self, test: dict[str, Any]) -> TestExecutionRecord:
         """Execute a validation item and return its evidence record."""
@@ -85,7 +107,7 @@ class TestExecutor:
         if cwd_error:
             return _command_rejected_record(test, command, cwd_error)
         argv = _split_command(command)
-        run_argv = _execution_argv(argv)
+        run_argv = [*self.argv_prefix, *_execution_argv(argv)]
         start = time.monotonic()
         try:
             completed = subprocess.run(
@@ -95,6 +117,7 @@ class TestExecutor:
                 text=True,
                 timeout=self.timeout_seconds,
                 check=False,
+                env=self.env,
             )
         except subprocess.TimeoutExpired as exc:
             return _with_working_dir(
@@ -182,10 +205,11 @@ class TestExecutor:
         if not raw:
             return self.workspace_root, "缺少 file_path"
         path = (self.workspace_root / raw).resolve()
-        try:
-            path.relative_to(self.workspace_root)
-        except ValueError:
-            return path, "file_path 超出 workspace 边界"
+        if not self.unrestricted_paths:
+            try:
+                path.relative_to(self.boundary_root)
+            except ValueError:
+                return path, "file_path 超出可执行边界"
         return path, ""
 
     def _resolve_command_working_dir(self, test: dict[str, Any]) -> tuple[Path, str]:
@@ -194,10 +218,11 @@ class TestExecutor:
             return self.workspace_root, ""
         candidate = Path(raw).expanduser()
         path = candidate.resolve() if candidate.is_absolute() else (self.workspace_root / candidate).resolve()
-        try:
-            path.relative_to(self.workspace_root)
-        except ValueError:
-            return path, "working_dir 超出 workspace 边界"
+        if not self.unrestricted_paths:
+            try:
+                path.relative_to(self.boundary_root)
+            except ValueError:
+                return path, "working_dir 超出可执行边界"
         if not path.exists() or not path.is_dir():
             return path, "working_dir 不存在或不是目录"
         return path, ""

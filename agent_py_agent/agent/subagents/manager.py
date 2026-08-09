@@ -56,6 +56,10 @@ class SubAgentManagerInitParams:
     takeover_chain_max_depth: int = 0
     owner_id: str = ""
     owner_home_dir: str = ""
+    # 与工具循环同一把沙箱门:ShellTool.path_access_policy.owner_scope_root。
+    # 验收机器执行(DONE 绑定)以它为准——effective_permissions.owner_home 是快照
+    # 默认值,在无沙箱环境(如 SimpleAgent)也非空,会把验收误判成必须 bwrap。
+    owner_scope_root: str = ""
     owner_policy_snapshot: dict[str, object] | None = None
 
 class SubAgentManager(SubagentKernelMixin):
@@ -77,6 +81,7 @@ class SubAgentManager(SubagentKernelMixin):
         takeover_chain_max_depth=0,
         owner_id="",
         owner_home_dir="",
+        owner_scope_root="",
         owner_policy_snapshot=None,
     ):
         params = params or _init_params_from_kwargs(locals())
@@ -265,6 +270,7 @@ def _init_params_from_kwargs(values: dict[str, object]) -> SubAgentManagerInitPa
         takeover_chain_max_depth=int(values.get("takeover_chain_max_depth") or 0),
         owner_id=str(values.get("owner_id") or ""),
         owner_home_dir=str(values.get("owner_home_dir") or ""),
+        owner_scope_root=str(values.get("owner_scope_root") or ""),
         owner_policy_snapshot=values.get("owner_policy_snapshot"),
     )
 
@@ -371,4 +377,5 @@ def _normalize_debug_trace_level(value: object) -> int:
 def _apply_owner_scope(manager: SubAgentManager, params: SubAgentManagerInitParams) -> None:
     manager.owner_id = str(params.owner_id or "")
     manager.owner_home_dir = str(params.owner_home_dir or "")
+    manager.owner_scope_root = str(params.owner_scope_root or "")
     manager.owner_policy_snapshot = dict(params.owner_policy_snapshot or {})

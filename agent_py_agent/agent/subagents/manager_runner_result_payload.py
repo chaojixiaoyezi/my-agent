@@ -5,7 +5,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .models import SUBAGENT_FAILURE_STATUSES, SubAgentParsedOutput, SubAgentTask, task_status_in
+from .models import (
+    SUBAGENT_FAILURE_STATUSES,
+    SubAgentParsedOutput,
+    SubAgentTask,
+    TaskStatus,
+    VerificationStatus,
+    task_has_status,
+    task_status_in,
+)
 from .result_contexts import OutputPayloadContext
 from .result_processors import _build_output_payload
 from .runner_result_state import RunnerResultFieldParams, apply_runner_result_fields
@@ -280,6 +288,8 @@ def apply_status_and_build_payload(
     params: RecordRunnerResultParams,
     extracted: _ApplyStatusParams,
     now: float,
+    *,
+    owner_home: str = "",
 ) -> tuple[dict, BuildAndPersistContext]:
     """Apply status to task and build output payload."""
     result_meta = _runner_make_result_meta(params.ok, params.message, params.response, params.dry_run)
@@ -302,9 +312,15 @@ def apply_status_and_build_payload(
     apply_runner_result_fields(
         RunnerResultFieldParams(extracted.task, result_meta, status_context, extracted.parsed, now)
     )
+    _machine_verify_done_acceptance(extracted.task, extracted.tests, owner_home=owner_home)
     final_ok = result_meta["ok"]
     final_message = result_meta["message"]
     blockers = _runner_compute_blockers(final_ok, extracted.task.status, extracted.parsed, final_message)
+    # 机器验收失败事实要随本轮 output_payload 出站,父代理/返工门立刻可见,
+    # 而不是只活在持久化后的 task.blockers 里。
+    for blocker in getattr(extracted.task, "blockers", []) or []:
+        if blocker not in blockers:
+            blockers.append(blocker)
     runner_meta = _runner_make_runner_meta(
         _RunnerMetaParams(params.dry_run, final_ok, final_message, params.backend, params.tool_rounds, now)
     )
@@ -313,3 +329,60 @@ def apply_status_and_build_payload(
     return output_payload, _make_build_context(
         _build_context_params(_ContextBuildRequest(params, extracted, output_payload, build_state))
     )
+
+
+def _machine_verify_done_acceptance(task: SubAgentTask, tests: list, *, owner_home: str = "") -> None:
+    """DONE 任务的验收证据绑定机器执行(问题3)。
+
+    模型自述的 DONE/VERIFIED 不再自动成立:对 tests[] 逐条真实执行,全部通过才
+    保持 VERIFIED,任何失败/不可验都降回 UNVERIFIED 并打真实失败事实——由现有
+    ISSUE_UNVERIFIED_DONE → BLOCKED 返工门(policies.py)要求模型重做补齐证据。
+    来源 worker(ledger 权威)由 verify_done_acceptance 内部跳过。
+
+    owner_home 来自 manager.owner_scope_root = 工具循环 ShellTool 的
+    path_access_policy.owner_scope_root(同一把沙箱门):非空 = 本轮命令真的被
+    bwrap 隔离,验收同样必须 bwrap;空 = 本轮普通执行,验收普通执行。绝不能读
+    task.effective_permissions.owner_home(快照默认值在无沙箱环境也非空,会把
+    合法普通执行误判成必须 bwrap → 假 SANDBOX_UNAVAILABLE,子代理永远收不了口)。
+    """
+    if not task_has_status(task, TaskStatus.DONE):
+        return
+    from .services.acceptance_verification import (
+        AcceptanceVerificationResult,
+        verify_done_acceptance,
+    )
+    from ..tooling.sandbox import SandboxUnavailable
+
+    try:
+        result = verify_done_acceptance(task, tests, owner_home=owner_home)
+    except SandboxUnavailable:
+        result = AcceptanceVerificationResult(
+            checked=False,
+            passed=False,
+            reason="SANDBOX_UNAVAILABLE",
+        )
+    if result.checked and result.passed:
+        task.verification_status = VerificationStatus.VERIFIED.value
+        return
+    task.verification_status = VerificationStatus.UNVERIFIED.value
+    if not result.checked:
+        _append_acceptance_blocker(
+            task,
+            f"机器验收不可用: {result.reason}(DONE 未绑定机器执行,须补齐可执行的 tests)",
+        )
+        return
+    for failure in result.failures:
+        _append_acceptance_blocker(
+            task,
+            f"机器验收未通过: {failure['name']} - {failure['message'][:160]}",
+        )
+    if not result.failures:
+        _append_acceptance_blocker(task, "机器验收未通过: 存在未通过的验收测试")
+
+
+def _append_acceptance_blocker(task: SubAgentTask, blocker: str) -> None:
+    blockers = getattr(task, "blockers", None)
+    if blockers is None:
+        return
+    if blocker not in blockers:
+        blockers.append(blocker)

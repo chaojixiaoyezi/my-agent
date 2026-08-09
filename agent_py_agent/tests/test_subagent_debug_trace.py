@@ -16,6 +16,7 @@ from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.manager_runner_result_payload import RecordRunnerResultParams
+from agent_py_agent.agent.subagents.model_runtime import SubAgentParsedOutput
 from agent_py_agent.agent.subagents.services.hierarchy.recovery import HierarchyRecoveryRequest
 from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
     HierarchyChildSpec,
@@ -157,6 +158,15 @@ def test_subagent_debug_trace_records_runner_result_when_enabled(tmp_path):
             verification_status="VERIFIED",
             backend="echo",
             tool_rounds=1,
+            # 机器验收(问题3):DONE 必须带真实可执行且通过的 tests 才能保持
+            # VERIFIED——模型自述的 VERIFIED 不再自动成立。
+            structured_output=SubAgentParsedOutput(
+                found=True,
+                ok=True,
+                status="DONE",
+                summary="done",
+                tests=[{"name": "python ok", "command": "python -c 'print(1)'"}],
+            ),
         )
     )
 

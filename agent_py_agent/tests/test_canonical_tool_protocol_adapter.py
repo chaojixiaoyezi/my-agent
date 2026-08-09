@@ -240,10 +240,9 @@ def test_text_adapter_accepts_blocks_with_prose_prefix() -> None:
     assert plain_prose.calls == () and plain_prose.violations == ()
 
 
-def test_text_adapter_accepts_trailing_unclosed_complete_block() -> None:
-    # 真机 2026-08-09:deepseek-v4-flash text 协议高频形态 = [TOOL_CALL] + 完整
-    # JSON 后不带 [/TOOL_CALL] 就结束响应(块尾即响应尾,wait/inspect_agent_tree
-    # 调用坐实)。JSON 完整即块合法,闭合标记只是定位边界。
+def test_text_adapter_rejects_unclosed_complete_block() -> None:
+    # 安全红线(2026-08-09 用户复核):缺 [/TOOL_CALL] 即未形成可执行调用——即使
+    # JSON 完整,漏闭合标记的命令/写文件也不得执行(撤销 60289e44 的宽容)。
     cases = [
         '[TOOL_CALL]\n{"tool":"run_command","command":"pytest -q"}',
         "我先看一下。\n[TOOL_CALL]\n{" + '"tool":"run_command","command":"ls"}',
@@ -254,17 +253,28 @@ def test_text_adapter_accepts_trailing_unclosed_complete_block() -> None:
         result = TextToolProtocolAdapter().tool_calls(
             _request(SimpleNamespace(text=text), "text")
         )
-        assert result.ok, f"末尾未闭合完整块应宽容提取: {text!r} -> {result.violations}"
-    assert len(
-        TextToolProtocolAdapter()
-        .tool_calls(_request(SimpleNamespace(text=cases[0]), "text"))
-        .calls
-    ) == 1
-    assert len(
-        TextToolProtocolAdapter()
-        .tool_calls(_request(SimpleNamespace(text=cases[2]), "text"))
-        .calls
-    ) == 2
+        assert not result.ok, f"未闭合完整块必须拒绝: {text!r} -> {result.calls}"
+        assert any("not closed" in v.detail for v in result.violations), text
+    # 全坏块:整轮拒绝,一个调用都不执行
+    assert TextToolProtocolAdapter().tool_calls(
+        _request(SimpleNamespace(text=cases[0]), "text")
+    ).calls == ()
+    # 好块 + 未闭合坏块:好块执行(不连坐),坏块留痕违规(不执行)
+    mixed = TextToolProtocolAdapter().tool_calls(
+        _request(
+            SimpleNamespace(
+                text=(
+                    '[TOOL_CALL]\n{"tool":"run_command","command":"pytest -q"}'
+                    "\n[/TOOL_CALL]\n"
+                    '[TOOL_CALL]\n{"tool":"run_command","command":"ls"}'
+                )
+            ),
+            "text",
+        )
+    )
+    assert len(mixed.calls) == 1, mixed
+    assert mixed.calls[0].arguments == {"command": "pytest -q"}, mixed
+    assert any("not closed" in v.detail for v in mixed.violations), mixed
 
 
 def test_text_adapter_still_rejects_truncated_unclosed_block() -> None:

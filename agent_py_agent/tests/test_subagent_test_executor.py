@@ -79,7 +79,7 @@ def test_test_executor_blocks_working_dir_escape(tmp_path):
 
     assert record.executed is False
     assert record.passed is False
-    assert "working_dir 超出 workspace 边界" in record.error
+    assert "working_dir 超出可执行边界" in record.error
 
 
 def test_test_executor_blocks_high_risk_shell_characters(tmp_path):

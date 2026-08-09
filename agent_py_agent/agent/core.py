@@ -706,6 +706,9 @@ def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
         takeover_chain_max_depth=agent.config.subagent_takeover_chain_max_depth,
         owner_id=str(getattr(agent.home_paths, "owner_id", "") or ""),
         owner_home_dir=str(getattr(agent.home_paths, "owner_home_dir", "") or ""),
+        owner_scope_root=str(
+            getattr(getattr(agent, "path_access_policy", None), "owner_scope_root", "") or ""
+        ),
         owner_policy_snapshot=agent.owner_policy.to_dict(),
     )
     manager.home_paths = agent.home_paths

@@ -254,18 +254,21 @@ class TextToolProtocolAdapter:
 
     def tool_calls(self, request: ProviderToolCallRequest) -> ProviderToolCallResult:
         text = str(getattr(request.response, "text", "") or "")
-        payloads, error = _parse_standalone_text_blocks(text)
-        if error:
-            return ProviderToolCallResult(
-                violations=(
-                    ToolProtocolViolation(
-                        "PROTOCOL_VIOLATION",
-                        error,
-                        "text",
-                        _protocol_evidence(text),
-                    ),
-                )
+        control_violation = _text_control_block_violation(text)
+        if control_violation is not None:
+            return ProviderToolCallResult(violations=(control_violation,))
+        payloads, errors = _parse_standalone_text_blocks(text)
+        violations = tuple(
+            ToolProtocolViolation(
+                "PROTOCOL_VIOLATION",
+                error,
+                "text",
+                _protocol_evidence(text),
             )
+            for error in errors
+        )
+        if not payloads:
+            return ProviderToolCallResult(violations=violations)
         calls: list[ToolCall] = []
         for index, payload in enumerate(payloads, start=1):
             tool_name = str(payload.pop("tool", "") or "").strip()
@@ -298,7 +301,8 @@ class TextToolProtocolAdapter:
                     ),
                 )
             )
-        return ProviderToolCallResult(tuple(calls))
+        # 好块照常执行,坏块违规并存返回(调用方负责"执行好块+坏块留痕反馈")。
+        return ProviderToolCallResult(tuple(calls), violations)
 
 
 def anthropic_tool_choice(choice: ToolChoice) -> dict[str, str]:
@@ -342,15 +346,41 @@ def _native_prose_violation(text: str) -> ToolProtocolViolation | None:
     )
 
 
-def _parse_standalone_text_blocks(text: str) -> tuple[list[dict[str, Any]], str]:
+def _text_control_block_violation(text: str) -> ToolProtocolViolation | None:
+    # 治撒谎红线(2026-08-09 复核):模型在【同一个响应里】既交结果块又夹带工具
+    # 调用 = 伪造控制结果(宣称完成还想继续干活),整轮拒绝并留痕。纯结果块
+    # (无论前后有无 prose)是 text 协议的正常收口格式,绝不能误杀——误杀会让
+    # 合法 closeout 在工具循环里被无限打回(真机/测试 2026-08-09 实证)。
+    lowered = text.lower()
+    if "[subagent_result]" not in lowered or "[/subagent_result]" not in lowered:
+        return None
+    has_tool_call = _TEXT_OPEN in text or _TEXT_CLOSE in text
+    if not has_tool_call:
+        return None
+    return ToolProtocolViolation(
+        "PROTOCOL_VIOLATION",
+        "text response mixes a SUBAGENT_RESULT block with tool call blocks",
+        "text",
+        _protocol_evidence(text),
+    )
+
+
+def _parse_standalone_text_blocks(text: str) -> tuple[list[dict[str, Any]], list[str]]:
     # 长期助手 式宽容解析(真机 2026-08-08 scrapy 复刻):弱模型(falsh 类)在工具轮
     # 几乎必然先输出 prose("我需要先看一下…")再写 [TOOL_CALL] 块,严格"纯块"
     # 会把已成功执行的工具轮整轮判 violation 杀死。语义:有合法块就提取执行,
-    # 块与块之间的 prose 忽略;完全没有块标记=普通文本回复(非违规);有标记但
-    # 没有形成合法块(未闭合/JSON 损坏/围栏包裹)才是协议违规。
+    # 块与块之间的 prose 忽略;完全没有块标记=普通文本回复(非违规)。
+    #
+    # 安全红线(2026-08-09 用户复核):坏块永不执行——未闭合([/TOOL_CALL] 缺失)
+    # 与截断/JSON 损坏同罪,块边界标记是执行契约的一部分,漏闭合即未形成可执行
+    # 调用,撤销 60289e44 的"完整 JSON 宽容"(模型漏写闭合标记时命令/写文件不得
+    # 执行)。坏块记错误原因但不连坐同响应里的好块:好块照常提取执行,坏块违规
+    # 留痕反馈(真机 2026-08-09 17:27/17:46 形态 = 好块+伪 tool-result+截断块
+    # 混排,原来整轮拒绝让任务原地重试)。
     if _TEXT_OPEN not in text and _TEXT_CLOSE not in text:
-        return [], ""
+        return [], []
     payloads: list[dict[str, Any]] = []
+    errors: list[str] = []
     cursor = 0
     length = len(text)
     while True:
@@ -360,27 +390,10 @@ def _parse_standalone_text_blocks(text: str) -> tuple[list[dict[str, Any]], str]
         body_start = open_at + len(_TEXT_OPEN)
         close = text.find(_TEXT_CLOSE, body_start)
         if close < 0:
-            # 末尾未闭合宽容(真机 2026-08-09 深测):deepseek-v4-flash text 协议
-            # 高频形态 = [TOOL_CALL] + 完整 JSON 后不带 [/TOOL_CALL] 就结束响应
-            # (块尾即响应尾,82~900 字符的 wait/inspect 调用坐实,8 次 violation
-            # 中至少 4 次属此形态)。块的合法性由「JSON 完整可解析」决定而非闭合
-            # 标记——JSON 不完整(参数写到一半的真截断:apply_patch 的 patch 断在
-            # 中途、raise_event 的字段断在字符串中)照样 json.loads 失败,维持
-            # violation,半参数绝不执行。块后仍有 prose 时 loads 同样失败。
-            tail = text[body_start:].strip()
-            if not tail:
-                return [], "text tool block is not closed"
-            try:
-                payload = json.loads(tail)
-            except json.JSONDecodeError:
-                return [], "text tool block is not closed"
-            if not isinstance(payload, dict):
-                return [], "text tool block payload must be an object"
-            tool_name = str(payload.get("tool") or "").strip()
-            if not tool_name:
-                return [], "text tool block is missing tool name"
-            payloads.append(dict(payload))
-            return payloads, ""
+            # 未闭合 = 坏块,绝不执行;继续扫描后续块(坏块不连坐好块)。
+            errors.append("text tool block is not closed")
+            cursor = open_at + len(_TEXT_OPEN)
+            continue
         # 块被 markdown 围栏包裹(仅空白相隔)=模型在展示示例而非发起调用,仍判
         # 违规;普通 prose 前缀(「我先看一下…」)宽容提取,这是弱模型真实输出形态。
         before = open_at
@@ -390,10 +403,14 @@ def _parse_standalone_text_blocks(text: str) -> tuple[list[dict[str, Any]], str]
         while after < length and text[after].isspace():
             after += 1
         if text[max(0, before - 3) : before] == "```" or text[after : after + 3] == "```":
-            return [], "text tool block must not be wrapped in Markdown fences"
+            errors.append("text tool block must not be wrapped in Markdown fences")
+            cursor = close + len(_TEXT_CLOSE)
+            continue
         raw = text[body_start:close].strip()
         if not raw:
-            return [], "text tool block must contain raw JSON, not Markdown"
+            errors.append("text tool block must contain raw JSON, not Markdown")
+            cursor = close + len(_TEXT_CLOSE)
+            continue
         # 不再做字符串级反引号检查:JSON 字符串值里反引号合法(Go raw string/
         # 正则/模板高频,如 write_file 写 Go 代码),字符串级误杀会砍掉合法调用
         # (真机铁证 2026-08-08 celery 复刻:补 broker.go 被"raw JSON, not
@@ -402,17 +419,21 @@ def _parse_standalone_text_blocks(text: str) -> tuple[list[dict[str, Any]], str]
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError:
-            return [], "text tool block does not contain one valid JSON object"
+            errors.append("text tool block does not contain one valid JSON object")
+            cursor = close + len(_TEXT_CLOSE)
+            continue
         if not isinstance(payload, dict):
-            return [], "text tool block payload must be an object"
+            errors.append("text tool block payload must be an object")
+            cursor = close + len(_TEXT_CLOSE)
+            continue
         tool_name = str(payload.get("tool") or "").strip()
         if not tool_name:
-            return [], "text tool block is missing tool name"
+            errors.append("text tool block is missing tool name")
+            cursor = close + len(_TEXT_CLOSE)
+            continue
         payloads.append(dict(payload))
         cursor = close + len(_TEXT_CLOSE)
-    if not payloads:
-        return [], "text tool response has tool markers but no valid standalone block"
-    return payloads, ""
+    return payloads, errors
 
 
 def _required_action_id(tool_name: str, actions: tuple[object, ...]) -> str:

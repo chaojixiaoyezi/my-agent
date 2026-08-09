@@ -81,7 +81,7 @@ class ScenarioParentSubagentRecoveryBackend:
                 '  "capability_requests": [],\n'
                 '  "artifacts": [],\n'
                 '  "tests": [\n'
-                '    {"name": "read_file README.md", "command": "read_file README.md", "ok": true, "summary": "runner 工具回合成功"}\n'
+                '    {"name": "README.md on disk", "command": "test -f ' + self.read_path + '", "ok": true, "summary": "runner 工具回合读到的文件真实在盘上"}\n'
                 "  ],\n"
                 '  "patches": [],\n'
                 '  "lessons": ["跨天恢复必须回到 task fact sources，而不是只相信 archive 摘要"],\n'

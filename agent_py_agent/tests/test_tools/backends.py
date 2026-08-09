@@ -53,14 +53,14 @@ class UnclosedWriteFileBackend(BaseBackend):
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
-            # 参数截断(JSON 不完整):半参数绝不执行,必须 violation 拒绝。
-            # (完整 JSON 缺 [/TOOL_CALL] 已被 60289e44 宽容——见
-            # test_canonical_tool_protocol_adapter 的接受用例。)
+            # 缺闭合标记 = 未形成可执行调用(安全红线 2026-08-09 用户复核):即使
+            # JSON 完整,漏写 [/TOOL_CALL] 也必须拒绝执行——块边界是执行契约
+            # 的一部分,与截断同罪。(60289e44 曾宽容"完整 JSON 缺闭合",已撤销。)
             return ModelResponse(
                 text=(
                     "[TOOL_CALL]\n"
                     '{"tool":"write_file","path":"index.html",'
-                    '"content":"<!doctype html><html><head><ti'
+                    '"content":"<!doctype html><html><head><title>OK</title></head><body><main>ok</main></body></html>"}'
                 ),
                 backend=self.name,
             )
@@ -378,7 +378,25 @@ class OutputJsonCompletionBackend(BaseBackend):
 
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
-        if self.calls > 1:
+        if self.calls == 1:
+            # 先真实落地产物:机器验收(问题3)只认"命令真的 exit 0",产物文件必须
+            # 先写进 output_dir,`test -f proof.txt` 才有东西可验。
+            return ModelResponse(
+                text=(
+                    "[TOOL_CALL]\n"
+                    + json.dumps(
+                        {
+                            "tool": "write_file",
+                            "path": str(self.output_path.parent / "proof.txt"),
+                            "content": "done",
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n[/TOOL_CALL]"
+                ),
+                backend=self.name,
+            )
+        if self.calls > 2:
             raise AssertionError("subagent runner should stop after writing output.json")
         payload = {
             "status": "DONE",

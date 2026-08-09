@@ -130,10 +130,15 @@ def _packet(packet_id: str, claim: str, checked_scope: str) -> str:
 
 
 def _file_check_test(name: str, summary: str) -> str:
+    # 机器验收(问题3):tests[] 会被真实执行,file_path 必须在验收工作区(=
+    # 子代理 runner cwd,agent_run_workspace_dir)里真实存在。state.json 是任务
+    # 账本文件,create_run/save 必然落在这个工作区——检查它才是机器可绑定的事实
+    # (旧的 README.md 只活在 fixture 根、task.yaml 只活在 work/ 上一级,验收工作区
+    # 里根本没有,必假失败)。
     return json.dumps({
         "name": name,
         "validation_method": "file_check",
-        "file_path": "README.md",
+        "file_path": "state.json",
         "ok": True,
         "summary": summary,
     }, ensure_ascii=False)

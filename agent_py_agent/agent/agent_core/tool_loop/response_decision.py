@@ -30,6 +30,7 @@ _PROTECTED_TOOL_MARKERS = (
     "[tool-record",
     "[tool-output-record",
     "[/tool-call]",
+    "[tool-result;",
 )
 
 # 长期助手 式空响应 nudge 的有界次数:执行过工具后模型空正文无工具调用时,
@@ -160,6 +161,12 @@ def tool_loop_response_decision(
         return ToolLoopResponseDecision("break", final, [], request.counters)
 
     adapted = _tool_calls_from_response(request)
+    if adapted.calls and adapted.violations:
+        # 部分坏块(真机 2026-08-09 17:27/17:46 形态:好块 + 伪 tool-result + 截断块
+        # 混排):坏块已由解析层剔除永不执行(安全红线),好块照常执行——坏块只留痕
+        # 反馈不整轮连坐,避免任务原地重试烧 token。
+        _append_partial_violation_context(request, adapted.violations)
+        return _tool_calls_decision(request, list(adapted.calls))
     if adapted.violations:
         return _protocol_violation_decision(request, adapted.violations)
     if adapted.calls:
@@ -212,6 +219,30 @@ def _native_tool_use_active(params: object) -> bool:
     from ..native_tool_protocol import native_tool_use_active
 
     return native_tool_use_active(params)
+
+
+def _append_partial_violation_context(
+    request: ToolLoopResponseDecisionRequest,
+    violations: tuple[ToolProtocolViolation, ...],
+) -> None:
+    """坏块留痕但不断轮:记录违规 trace,给模型轻量反馈(已执行的真实回执保留)。"""
+    payload = [item.to_dict() for item in violations]
+    state = getattr(request.params, "live_archive_state", None)
+    if isinstance(state, dict):
+        trace = state.setdefault("protocol_violation_trace", [])
+        if isinstance(trace, list):
+            trace.append(
+                {
+                    "turn_id": str(request.turn_id or ""),
+                    "violations": payload,
+                }
+            )
+    request.params.tool_context.append(
+        "[tool-protocol-violation]\n"
+        + json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        + "\n其中部分工具块无效已忽略且未执行;本轮回执里出现的工具结果均为真实执行。"
+        "请继续使用 [TOOL_CALL] 包裹单个 JSON 对象并闭合 [/TOOL_CALL]。"
+    )
 
 
 def _protocol_violation_decision(

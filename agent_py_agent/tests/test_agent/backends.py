@@ -211,7 +211,7 @@ def _controlled_exec_done_result() -> str:
         '  "evidence_packets": [{"id": "evpkt-controlled-exec", "claim": "受控 shell 已完成", "checked_scope": "controlled_exec dispatch", "evidence_refs": ["stdout_ref=stdout.log", "audit_ref=audit.jsonl", "trash_manifest_ref=trash_manifest.jsonl"], "artifact_refs": ["output.json"], "confidence": 0.9}],\n'
         '  "capability_requests": [],\n'
         '  "artifacts": [],\n'
-        '  "tests": [{"name": "controlled-exec-smoke", "ok": true, "summary": "refs present"}],\n'
+        '  "tests": [{"name": "controlled-exec-smoke", "command": "python -c \\"print(\'ok\')\\"", "ok": true, "summary": "refs present"}],\n'
         '  "patches": [],\n'
         '  "lessons": [],\n'
         '  "next_actions": [],\n'
@@ -453,7 +453,7 @@ class RepairingSubagentBackend(BaseBackend):
                 '  "capability_requests": [],\n'
                 '  "artifacts": [],\n'
                 '  "tests": [\n'
-                '    {"name": "repair-format", "command": "", "ok": true, "summary": "结构化格式已恢复"}\n'
+                '    {"name": "repair-format", "command": "python -c \\"print(\'ok\')\\"", "ok": true, "summary": "结构化格式已恢复"}\n'
                 "  ],\n"
                 '  "patches": [],\n'
                 '  "lessons": [],\n'
