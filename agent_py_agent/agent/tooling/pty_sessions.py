@@ -305,6 +305,7 @@ class TerminalSessionTool(BaseTool):
             ),),
         ),
         promotes_task=True,
+        mutates_workspace=True,
     )
 
     def __init__(self, shell_tool: ShellTool):

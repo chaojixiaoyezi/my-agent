@@ -240,6 +240,59 @@ def test_text_adapter_accepts_blocks_with_prose_prefix() -> None:
     assert plain_prose.calls == () and plain_prose.violations == ()
 
 
+def test_text_adapter_accepts_trailing_unclosed_complete_block() -> None:
+    # 真机 2026-08-09:deepseek-v4-flash text 协议高频形态 = [TOOL_CALL] + 完整
+    # JSON 后不带 [/TOOL_CALL] 就结束响应(块尾即响应尾,wait/inspect_agent_tree
+    # 调用坐实)。JSON 完整即块合法,闭合标记只是定位边界。
+    cases = [
+        '[TOOL_CALL]\n{"tool":"run_command","command":"pytest -q"}',
+        "我先看一下。\n[TOOL_CALL]\n{" + '"tool":"run_command","command":"ls"}',
+        '[TOOL_CALL]\n{"tool":"run_command","command":"pytest -q"}[/TOOL_CALL]\n'
+        '[TOOL_CALL]\n{"tool":"run_command","command":"ls"}',
+    ]
+    for text in cases:
+        result = TextToolProtocolAdapter().tool_calls(
+            _request(SimpleNamespace(text=text), "text")
+        )
+        assert result.ok, f"末尾未闭合完整块应宽容提取: {text!r} -> {result.violations}"
+    assert len(
+        TextToolProtocolAdapter()
+        .tool_calls(_request(SimpleNamespace(text=cases[0]), "text"))
+        .calls
+    ) == 1
+    assert len(
+        TextToolProtocolAdapter()
+        .tool_calls(_request(SimpleNamespace(text=cases[2]), "text"))
+        .calls
+    ) == 2
+
+
+def test_text_adapter_still_rejects_truncated_unclosed_block() -> None:
+    # 真截断(参数写到一半)必须维持 violation:apply_patch 的 patch 断在字符串
+    # 中途、raise_event 的字段断在引号内——JSON 不完整,半参数绝不执行。
+    truncated = TextToolProtocolAdapter().tool_calls(
+        _request(
+            SimpleNamespace(
+                text='[TOOL_CALL]\n{"tool": "run_command", "command": "pytest --'
+            ),
+            "text",
+        )
+    )
+    assert truncated.calls == ()
+    assert truncated.violations
+    assert "not closed" in truncated.violations[0].detail
+    # 块后仍有 prose(非「块尾即响应尾」)同样维持 violation
+    prose_after = TextToolProtocolAdapter().tool_calls(
+        _request(
+            SimpleNamespace(
+                text='[TOOL_CALL]\n{"tool":"run_command","command":"pytest"} 接下来继续看。'
+            ),
+            "text",
+        )
+    )
+    assert prose_after.calls == ()
+
+
 def test_text_adapter_accepts_backticks_inside_json_values() -> None:
     # JSON 字符串值里反引号合法(写 Go 代码时 raw string/正则高频);字符串级
     # 反引号检查误杀合法调用(真机铁证 2026-08-08 celery 复刻:补 broker.go

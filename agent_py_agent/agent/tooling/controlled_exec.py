@@ -98,6 +98,7 @@ class ControlledExecTool(BaseTool):
             internal_parameters=("command_allowlist", "path_scope"),
         ),
         promotes_task=True,
+        mutates_workspace=True,
     )
 
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:

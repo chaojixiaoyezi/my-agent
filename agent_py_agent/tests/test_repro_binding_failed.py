@@ -263,6 +263,68 @@ def test_stale_watch_policy_retired_when_watch_target_terminal(tmp_path):
     _retire_with_child(agent, agent.conversation_store, thread_id, child_id, task_id=task_id)
 
 
+def test_executor_running_blocks_writing_tools_only(tmp_path):
+    """问题6契约:执行锁豁免从 ToolRuntimePolicy.mutates_workspace 声明推导,
+    不再手写工具名名单。executor running 时:写 workspace 工具被拦,读/编排
+    工具(wait/cancel 等)必须始终可用——2026-08-09 真机死锁里连 cancel 都
+    救不了自己,根源就是豁免名单与模型行为脱节。"""
+    agent, thread_id, task_id = _agent_with_self_watch(tmp_path)
+    # blocker 只拦「当前 conversation_task_id 自身 running」:用第三者任务 watch
+    # 当前任务,让 task_id 在 execution_state 里 running(而非 child running)。
+    agent.conversation_store.set_progress_policy(
+        {
+            "thread_id": thread_id,
+            "task_id": "other-task-9",
+            "interval_seconds": 300,
+            "metadata": {
+                "kind": "subagent_progress_watch",
+                "tool": "wait",
+                "scope": "own_task_tree",
+                "reason": "",
+                "watch_run_id": task_id,
+            },
+        }
+    )
+    params = _params(thread_id, task_id, task_id)
+    agent._current_run_params = params
+    snapshot = agent.tools.runtime_snapshot(run_id=params.run_id)
+    params.tool_runtime_snapshot = snapshot
+
+    # run_command 在无 bwrap 测试环境被 availability 隐藏,不在快照中;契约
+    # 测试验证声明驱动机制本身,写类集合取快照内必在的文件系统写工具。
+    writing = {"write_file", "edit_file", "apply_patch"}
+    exempt = {"wait", "read_file", "list_files", "cancel_subagents", "inspect_agent_tree"}
+    # 先写工具后豁免工具:豁免工具 promote 成功后同轮 TURN_ACTIVE 置位,后续
+    # 写工具放行——「首轮绑定后同轮放行」是既有语义,与声明无关,避免串扰。
+    for tool_name in sorted(writing) + sorted(exempt):
+        runtime = snapshot.runtime(tool_name)
+        assert runtime is not None, f"{tool_name} 应在 run snapshot 中"
+        call = canonical_test_call(snapshot, tool_name, {})
+        outcome = _promote_conversation_task_for_work_tool(
+            ToolCallRuntimeRequest(
+                agent=agent,
+                request=SimpleNamespace(params=params),
+                call=call,
+            )
+        )
+        if tool_name in writing:
+            assert outcome is not None, (
+                f"{tool_name} 声明写 workspace,executor running 时必须被拦"
+            )
+            assert getattr(outcome, "error_code", "") in {
+                "CONVERSATION_TASK_ALREADY_RUNNING",
+                "CONVERSATION_TASK_BINDING_FAILED",
+            }, (
+                f"{tool_name} 应报绑定门错误,"
+                f"实际={getattr(outcome, 'error_code', outcome)}"
+            )
+        else:
+            assert outcome is None, (
+                f"{tool_name} 不写 workspace,executor running 时必须豁免,"
+                f"实际={getattr(outcome, 'error_code', outcome)}"
+            )
+
+
 def test_stale_self_task_watch_retired_when_target_terminal(tmp_path):
     """真机实况补测：陈旧 policy 的 task_id 直接就是被 watch 的子代理 ID
     （watch 目标=task_id 自身）时,目标终态同样必须退休——修复 3 的

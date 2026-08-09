@@ -360,7 +360,27 @@ def _parse_standalone_text_blocks(text: str) -> tuple[list[dict[str, Any]], str]
         body_start = open_at + len(_TEXT_OPEN)
         close = text.find(_TEXT_CLOSE, body_start)
         if close < 0:
-            return [], "text tool block is not closed"
+            # 末尾未闭合宽容(真机 2026-08-09 深测):deepseek-v4-flash text 协议
+            # 高频形态 = [TOOL_CALL] + 完整 JSON 后不带 [/TOOL_CALL] 就结束响应
+            # (块尾即响应尾,82~900 字符的 wait/inspect 调用坐实,8 次 violation
+            # 中至少 4 次属此形态)。块的合法性由「JSON 完整可解析」决定而非闭合
+            # 标记——JSON 不完整(参数写到一半的真截断:apply_patch 的 patch 断在
+            # 中途、raise_event 的字段断在字符串中)照样 json.loads 失败,维持
+            # violation,半参数绝不执行。块后仍有 prose 时 loads 同样失败。
+            tail = text[body_start:].strip()
+            if not tail:
+                return [], "text tool block is not closed"
+            try:
+                payload = json.loads(tail)
+            except json.JSONDecodeError:
+                return [], "text tool block is not closed"
+            if not isinstance(payload, dict):
+                return [], "text tool block payload must be an object"
+            tool_name = str(payload.get("tool") or "").strip()
+            if not tool_name:
+                return [], "text tool block is missing tool name"
+            payloads.append(dict(payload))
+            return payloads, ""
         # 块被 markdown 围栏包裹(仅空白相隔)=模型在展示示例而非发起调用,仍判
         # 违规;普通 prose 前缀(「我先看一下…」)宽容提取,这是弱模型真实输出形态。
         before = open_at

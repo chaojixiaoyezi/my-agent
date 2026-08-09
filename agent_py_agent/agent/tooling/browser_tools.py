@@ -185,6 +185,7 @@ class BrowserTool(BaseTool):
         resource_scopes=ResourceScopePolicy(parameter_names=("session_id", "url")),
         output_policy=OutputPolicy(trust="external_data"),
         promotes_task=True,
+        mutates_workspace=True,
     )
 
     def __init__(self, manager: BrowserSessionManager | None = None):

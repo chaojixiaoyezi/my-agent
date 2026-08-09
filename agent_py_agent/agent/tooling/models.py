@@ -396,6 +396,10 @@ class ToolRuntimePolicy:
     availability_policy: AvailabilityPolicy = field(default_factory=AvailabilityPolicy)
     input_policy: ToolInputPolicy = field(default_factory=ToolInputPolicy)
     promotes_task: bool = False
+    # 执行锁声明(问题6):此工具是否写当前 conversation workspace 目录。与 effect
+    # 正交——wait/派工/审计发布是 mutating(改内部状态)但不写 workspace 文件,
+    # 声明 False 即豁免执行锁,不再维护手写工具名名单(新写工具在注册处声明)。
+    mutates_workspace: bool = False
 
 
 def tool_effect_for_runtime_policy(

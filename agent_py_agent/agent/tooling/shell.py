@@ -783,6 +783,7 @@ class ShellTool(BaseTool):
                 ),
             ),
             promotes_task=True,
+            mutates_workspace=True,
         )
 
     # LLM: owner-scoped shell 没有 bwrap 时必须在本轮工具快照阶段消失；最终执行仍会

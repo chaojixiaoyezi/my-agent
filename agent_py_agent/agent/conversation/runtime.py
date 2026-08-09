@@ -2947,6 +2947,9 @@ _POLICY_RETIRE_TERMINAL_STATUSES = frozenset(_TASK_LINK_TERMINAL_STATUSES | {"BL
 _MIN_PROGRESS_POLICY_CATCHUP_SECONDS = 7200
 _MAX_PROGRESS_POLICY_CATCHUP_INTERVALS = 4
 
+# 陈旧账本 gc 节奏:tick ~2 分钟一次,这里最多 6 小时跑一趟归档(问题8)。
+_LEDGER_GC_INTERVAL_SECONDS = 6 * 3600
+
 # 失败续跑记账(问题6):失败 run 后 policy 退避 5min×2^(n-1)、上限 1h;抖动按
 # policy_id 确定性派生(纯函数,可测,不引入 random);连续 3 次失败退休(等用户)。
 _POLICY_FAILURE_BASE_BACKOFF_SECONDS = 300
@@ -3656,6 +3659,7 @@ class _BackgroundSchedulerTickMixin:
 
     def tick(self, *, now: float | None = None) -> list[BackgroundMainAgentReport]:
         current = now if now is not None else __import__("time").time()
+        self._maybe_gc_ledger(now=current)
         self._process_collaboration_cases(now=current)
         _maybe_supervise_orphans(self, current)
         self._enqueue_scheduler_runs(now=current)
@@ -3665,6 +3669,24 @@ class _BackgroundSchedulerTickMixin:
         _consume_observation_batches(self, reports, reported, current)
         _consume_due_policies(self, reports, reported, current)
         return reports
+
+    def _maybe_gc_ledger(self, *, now: float) -> None:
+        """低频归档陈旧账本(disabled policy / finished claim),治目录无限累积。
+        tick 每 ~2 分钟一次,这里最多 6 小时跑一趟;归档是移动非删除,可回滚。"""
+        last = getattr(self, "_ledger_last_gc_at", 0.0)
+        if now - last < _LEDGER_GC_INTERVAL_SECONDS:
+            return
+        self._ledger_last_gc_at = now
+        try:
+            summary = self.store.gc_stale_ledger_records(now=now)
+        except Exception:  # noqa: BLE001 - 归档是增强,失败绝不影响 tick 主流程
+            return
+        if summary.get("archived_policies") or summary.get("archived_claims"):
+            logging.getLogger("agent.conversation.runtime").info(
+                "ledger gc archived policies=%s claims=%s",
+                summary.get("archived_policies"),
+                summary.get("archived_claims"),
+            )
 
     def _process_collaboration_cases(self, *, now: float) -> None:
         if self.collaboration_store is None:

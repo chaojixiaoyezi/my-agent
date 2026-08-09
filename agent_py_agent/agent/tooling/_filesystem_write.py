@@ -97,6 +97,7 @@ class WriteFileTool(FileSystemTool):
         idempotency_policy=IdempotencyPolicy("operation"),
         resource_scopes=ResourceScopePolicy(parameter_names=("path",)),
         promotes_task=True,
+        mutates_workspace=True,
     )
 
     def __init__(

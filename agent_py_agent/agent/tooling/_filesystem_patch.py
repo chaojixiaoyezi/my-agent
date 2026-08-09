@@ -81,6 +81,7 @@ class ApplyPatchTool(FileSystemTool):
         effect_resolver=EffectResolverPolicy("mutating"),
         idempotency_policy=IdempotencyPolicy("operation"),
         promotes_task=True,
+        mutates_workspace=True,
     )
 
     def __init__(

@@ -2968,6 +2968,30 @@ _NO_PROGRESS_MAX_BACKOFF_MULTIPLIER = 8
 # 清零复原,退休 policy 被 disable 后不再出现在 due 扫描,账目保留在 metadata 供复盘。
 _POLICY_FAILURE_RETIRE_AFTER = 3
 
+# 陈旧账本保留期(问题8):disabled policy / finished claim 超 7 天归档。
+# 够复盘诊断,又不让 ledger 无限累积(真机 2026-08-09 一个线程堆出 182 个
+# disabled policy 文件)。归档是移动不是删除,随时可回滚。
+_LEDGER_GC_RETENTION_SECONDS = 7 * 24 * 3600
+_LEDGER_ARCHIVE_DIR = ".ledger_archive"
+
+
+def _archive_ledger_file(src: Path, archive_dir: Path) -> bool:
+    """把单个账本文件(及其 .lock)移入归档目录;文件已被并发清走则视为成功(幂等)。"""
+    try:
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        src.rename(archive_dir / src.name)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    lock = Path(f"{src}.lock")
+    try:
+        if lock.exists():
+            lock.rename(archive_dir / lock.name)
+    except OSError:
+        pass
+    return True
+
 
 class ConversationProgressStore(ConversationWakeStore):
     def set_progress_policy(self, request: dict) -> ProgressPolicy:
@@ -3010,6 +3034,44 @@ class ConversationProgressStore(ConversationWakeStore):
         policies = [policy for policy in policies if policy.enabled] if enabled_only else policies
         policies.sort(key=lambda item: item.next_due_at)
         return policies, load_errors
+
+    # 陈旧账本归档(问题8):disabled policy 超保留期移到 .ledger_archive/ 子目录。
+    # 用文件系统移动而非删除——零破坏、可回滚;归档目录与扫描目录同级,glob("*.json")
+    # 不递归,归档项自动从 list/due 扫描消失。判龄用 max(last_report_at, next_due_at):
+    # disable 时写 last_report_at=当前时间,旧数据可能没有,回落 next_due_at 从严不误删。
+    def gc_stale_ledger_records(
+        self,
+        *,
+        now: float | None = None,
+        retention_seconds: float = _LEDGER_GC_RETENTION_SECONDS,
+    ) -> dict[str, int]:
+        current = now if now is not None else time.time()
+        archived_policies = 0
+        policies, _ = self.list_progress_policies_report()
+        for policy in policies:
+            if policy.enabled:
+                continue
+            age = current - max(policy.last_report_at, policy.next_due_at)
+            if age <= retention_seconds:
+                continue
+            if _archive_ledger_file(
+                self._policy_path(policy.policy_id),
+                self.policies_dir.parent / _LEDGER_ARCHIVE_DIR / "policies",
+            ):
+                archived_policies += 1
+        archived_claims = 0
+        for path in sorted(self.background_claims_dir.glob("*.json")):
+            claim, error = _read_claim_report(path)
+            if error is not None or not claim:
+                continue
+            if str(claim.get("status") or "") not in _FINISH_STATUSES:
+                continue
+            finished_at = float(claim.get("finished_at") or 0.0)
+            if finished_at <= 0 or current - finished_at <= retention_seconds:
+                continue
+            if _archive_ledger_file(path, self.background_claims_dir.parent / _LEDGER_ARCHIVE_DIR / "claims"):
+                archived_claims += 1
+        return {"archived_policies": archived_policies, "archived_claims": archived_claims}
 
     def due_progress_policies(self, *, now: float | None = None) -> list[ProgressPolicy]:
         policies, _ = self.due_progress_policies_report(now=now)

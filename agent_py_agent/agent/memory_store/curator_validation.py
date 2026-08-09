@@ -65,32 +65,63 @@ def validate_extraction(
         item.operation_id: item for item in batch.audit_events if item.operation_id
     }
     artifacts_by_ref = _artifacts_by_ref(batch)
+    # 覆盖声明保持严格:processed|unresolved 必须精确等于输入快照,否则游标不能推进。
+    # 证据引用则逐条取舍(见下)——出界/无证据的 daily/candidate 只丢自己,不连坐整批。
+    # 真机 2026-08-09:deepseek-v4-flash 在 candidate 证据里编造 batch 外 message_id
+    # (32位hex),一个幻觉引用让整批 CURATOR_EVIDENCE_INVALID、游标不推进,300s 退避
+    # + 2min tick 下每 6 分钟重试同一批,39 连败。宽容证据引用让真实提炼照常入库。
     _validate_processed_refs(extraction, messages, audits_by_event)
-    daily = [
-        _validated_daily(
-            draft,
-            messages=messages,
-            audits_by_event=audits_by_event,
-            audits_by_call=audits_by_call,
-            audits_by_operation=audits_by_operation,
-            artifacts_by_ref=artifacts_by_ref,
-            owner_id=owner_id,
+    dropped: list[str] = []
+    daily: list[object] = []
+    for draft in extraction.daily_events:
+        try:
+            daily.append(
+                _validated_daily(
+                    draft,
+                    messages=messages,
+                    audits_by_event=audits_by_event,
+                    audits_by_call=audits_by_call,
+                    audits_by_operation=audits_by_operation,
+                    artifacts_by_ref=artifacts_by_ref,
+                    owner_id=owner_id,
+                )
+            )
+        except CuratorEvidenceError as exc:
+            # 安全边界不宽容:模型越权声明 reviewed/subagent 等宿主来源仍是整批失败
+            # (schema 层已拦截,这里纵深防御),其余证据瑕疵只丢该条。
+            if exc.detail_code == "host_owned_origin":
+                raise
+            dropped.append(f"daily:{exc.detail_code}")
+    candidates: list[object] = []
+    for observation in extraction.candidates:
+        try:
+            candidates.append(
+                _validated_candidate(
+                    observation,
+                    messages=messages,
+                    audits_by_event=audits_by_event,
+                    audits_by_call=audits_by_call,
+                    audits_by_operation=audits_by_operation,
+                    artifacts_by_ref=artifacts_by_ref,
+                    owner_id=owner_id,
+                )
+            )
+        except CuratorEvidenceError as exc:
+            if exc.detail_code == "host_owned_origin":
+                raise
+            dropped.append(f"candidate:{exc.detail_code}")
+    warnings = extraction.warnings
+    if dropped:
+        warnings = (
+            *warnings,
+            f"dropped_evidence:{';'.join(sorted(set(dropped)))}",
         )
-        for draft in extraction.daily_events
-    ]
-    candidates = [
-        _validated_candidate(
-            observation,
-            messages=messages,
-            audits_by_event=audits_by_event,
-            audits_by_call=audits_by_call,
-            audits_by_operation=audits_by_operation,
-            artifacts_by_ref=artifacts_by_ref,
-            owner_id=owner_id,
-        )
-        for observation in extraction.candidates
-    ]
-    return replace(extraction, daily_events=tuple(daily), candidates=tuple(candidates))
+    return replace(
+        extraction,
+        daily_events=tuple(daily),
+        candidates=tuple(candidates),
+        warnings=warnings,
+    )
 
 
 # LLM: Daily user/tool origins must carry the same canonical evidence standard as candidates;
@@ -279,6 +310,7 @@ def _earliest_reference_time(refs: list[dict[str, object]]) -> str:
 # LLM: Artifact evidence is replaced with the exact audit identity and hash; a model cannot
 # invent a path/ref or attach raw output fields.
 # 函数用途: 将模型 artifact 引用绑定到本批 audit 中的正式 artifact_ref。
+# 宽容语义:出界引用剔除(不 raise),与 message/tool 引用一致——单条引用幻觉不连坐整批。
 def _canonical_artifact_refs(
     refs: object,
     by_ref: dict[str, CuratorAuditInput],
@@ -288,7 +320,7 @@ def _canonical_artifact_refs(
         artifact_ref = str(ref.get("artifact_ref") or "").strip()
         source = by_ref.get(artifact_ref)
         if source is None:
-            raise CuratorEvidenceError("artifact_outside_owner_batch")
+            continue  # 引用不在本批 owner 审计 → 剔除(不阻断)
         canonical.append(
             {
                 "artifact_ref": source.artifact_ref,
@@ -377,6 +409,10 @@ def _validate_unresolved_ref_shape(refs: object) -> None:
 # LLM: The provider selects message_id only; the host supplies one exact continuous quote and
 # full-content hash from ConversationStore, eliminating provider-authored evidence text.
 # 函数用途: 将模型 message refs 替换成带宿主 quote/hash 的 canonical owner refs。
+# 宽容语义:出界/线程不匹配的引用剔除(不 raise),与 _daily_tool_refs_tolerant 对齐——
+# 单条证据引用幻觉不连坐整批(真机 2026-08-09:deepseek-v4-flash 在 candidate 里编造
+# batch 外 message_id,整批曾因此作废 39 连败)。剔除后若无任何证据,由调用方按
+# daily_without_evidence/candidate_without_evidence 丢弃该条。
 def _canonical_message_refs(
     refs: object,
     messages: dict[str, CuratorMessageInput],
@@ -386,7 +422,7 @@ def _canonical_message_refs(
         message_id = str(ref.get("message_id") or "")
         source = messages.get(message_id)
         if source is None or str(ref.get("thread_id") or source.thread_id) != source.thread_id:
-            raise CuratorEvidenceError("message_outside_owner_batch")
+            continue  # 引用不在本批 owner 消息 → 剔除(不阻断)
         quote = source.full_content[:300]
         canonical.append({**source.ref(), "quote": quote})
     return canonical
@@ -395,6 +431,9 @@ def _canonical_message_refs(
 # LLM: Tool evidence status comes only from owner audit; a model-supplied success string cannot
 # override failed, timeout, cancelled, or unknown-effect records.
 # 函数用途: 将 tool refs 绑定到当前 owner audit 事件。
+# 宽容语义:出界引用剔除(不 raise),与 _daily_tool_refs_tolerant 对齐;非成功终态在
+# require_success 下同样剔除。剔除后若无任何证据,调用方按 candidate_without_evidence
+# 丢弃该条——单条引用幻觉不连坐整批(真机 2026-08-09 根因)。
 def _canonical_tool_refs(
     refs: object,
     by_event: dict[str, CuratorAuditInput],
@@ -408,9 +447,9 @@ def _canonical_tool_refs(
     for ref in normalize_reference_list(refs):
         source = _tool_source(ref, by_event, by_call, by_operation)
         if source is None:
-            raise CuratorEvidenceError("tool_outside_owner_batch")
+            continue  # 引用不在本批 owner 审计 → 剔除(不阻断)
         if require_success and source.status.strip().lower() not in _SUCCESS_TOOL_STATUSES:
-            raise CuratorEvidenceError("tool_not_successful_terminal")
+            continue  # 非成功终态工具 → 剔除(不阻断)
         resolved = source.ref()
         if owner_id:
             resolved["owner_id"] = owner_id

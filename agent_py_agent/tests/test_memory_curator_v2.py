@@ -1214,3 +1214,99 @@ def test_reinjection_chain_never_grows_formal_memory(tmp_path: Path) -> None:
     assert repeated.content == "祥子买了两次车。"
     explicit = next(item for item in by_id.values() if item.origin == "user_explicit")
     assert explicit.candidate_id != repeated.candidate_id
+
+
+def test_curator_drops_only_evidence_invalid_daily_and_candidate(tmp_path: Path) -> None:
+    """问题7真机根因回归(2026-08-09):deepseek-v4-flash 在 candidate 证据里编造
+    batch 外 message_id(32位hex)。修复前一个幻觉引用让整批 CURATOR_EVIDENCE_INVALID、
+    游标不推进、每6分钟重试同一批39连败;修复后出界引用被剔除,该条丢弃,
+    其余 daily/candidate 与游标照常入库——覆盖声明仍严格。"""
+    store, thread, message = _conversation(tmp_path)
+    output = _valid_output(thread.thread_id, message.message_id, message.content)
+    # 真机形态:candidate[0] 的 source_message_refs 里混入编造的 batch 外 ID
+    output["candidates"][0]["source_message_refs"] = [
+        {"message_id": "msg-5510de6a5edd21c53dad6066799b07e7"},  # 模型编造(32位hex)
+    ]
+    # 第二个 candidate 正常
+    output["candidates"].append(
+        {
+            "candidate_type": "long_term_fact",
+            "content": "个人电脑使用 macOS。",
+            "subject_key": "device.personal.os",
+            "scope": {
+                "scope_type": "personal",
+                "scope_key": "personal",
+                "applies_when": "个人电脑",
+                "excludes_when": "公司服务器",
+            },
+            "origin": "user_explicit",
+            "source_message_refs": [{"message_id": message.message_id}],
+            "source_tool_refs": [],
+            "source_artifact_refs": [],
+            "observed_at": "1970-01-01T00:00:11+00:00",
+            "valid_from": None,
+            "valid_until": None,
+            "confidence": 0.99,
+            "proposed_action": "add",
+            "target_entry_id": None,
+            "conflicts_with": [],
+            "promotion_target": "long_term",
+        }
+    )
+    service = _service(tmp_path, _StaticStructuredBackend(output), store)
+
+    result = service.run(reason="admin")
+
+    # 整批成功、游标推进、只丢证据无效的那条 candidate
+    assert result.status == "succeeded"
+    assert service.state_store.load().per_thread_cursors == {
+        thread.thread_id: message.message_id
+    }
+    candidates = service.candidate_service.list()
+    assert len(candidates) == 1
+    assert candidates[0].evidence_refs[0]["message_id"] == message.message_id
+    assert any("dropped_evidence:candidate" in w for w in result.warnings), result.warnings
+
+
+def test_curator_dropped_daily_and_candidate_warn_but_advance_cursor(tmp_path: Path) -> None:
+    """宽容边界:全部引用都出界的 daily/candidate 丢弃,但覆盖声明正确时整批仍推进。"""
+    store, thread, message = _conversation(tmp_path)
+    output = _valid_output(thread.thread_id, message.message_id, message.content)
+    # 两条都只引用 batch 外 ID → 双双丢弃
+    output["daily_events"][0]["message_refs"] = [
+        {"message_id": "msg-fabricated-daily-001"}
+    ]
+    output["candidates"][0]["source_message_refs"] = [
+        {"message_id": "msg-fabricated-candidate-001"}
+    ]
+    service = _service(tmp_path, _StaticStructuredBackend(output), store)
+
+    result = service.run(reason="admin")
+
+    assert result.status == "succeeded"
+    assert service.state_store.load().per_thread_cursors == {
+        thread.thread_id: message.message_id
+    }
+    assert service.candidate_service.list() == []
+    assert any("dropped_evidence:" in w for w in result.warnings), result.warnings
+    assert "daily" in " ".join(result.warnings)
+    assert "candidate" in " ".join(result.warnings)
+
+
+def test_curator_coverage_mismatch_still_fails_batch(tmp_path: Path) -> None:
+    """覆盖声明仍严格:processed refs 与输入快照不符时整批失败、游标不推进
+    (宽容只作用于 daily/candidate 证据引用,不作用于游标推进依据)。"""
+    store, thread, message = _conversation(tmp_path)
+    output = _valid_output(thread.thread_id, message.message_id, message.content)
+    # 覆盖声明缺失当前 message(假装只处理了不存在的消息)
+    output["processed_message_refs"] = [
+        {"message_id": "msg-someone-elses"}
+    ]
+    service = _service(tmp_path, _StaticStructuredBackend(output), store)
+
+    result = service.run(reason="admin")
+
+    assert result.status == "failed"
+    assert result.failure_code == "CURATOR_EVIDENCE_INVALID"
+    assert service.state_store.load().per_thread_cursors == {}
+    assert service.candidate_service.list() == []
