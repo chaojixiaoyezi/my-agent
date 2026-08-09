@@ -27,6 +27,29 @@ from .tool_loop.round_execution import ToolCallExecuteParams
 from .tool_runtime_ledger import write_boundary_with_runtime_ledger
 
 
+# 读/查询类与编排/管理类工具不做 workspace 双写,不触发同目录执行锁:锁只防
+# "两个执行者写同一 workspace"。wait 定时器(progress_policy)被当作 running
+# 信号时,管理类工具若也被拦,父代理连 cancel/wait/create_subagents 都做不了,
+# 任务死锁(真机 2026-08-09:父代理 wait 后 read_file/create_subagents 全被
+# CONVERSATION_TASK_ALREADY_RUNNING 拦,子代理全死,循环唤醒只空转烧钱)。
+# 读类放行同理:读不与写并发冲突,恢复任务必须先能看状态。
+_CONVERSATION_EXECUTION_EXEMPT_TOOLS = frozenset(
+    {
+        # 读/查询:不改 workspace,双写锁不适用
+        "read_file", "read_artifact", "search_text", "list_files", "find_files",
+        "list_processes", "list_tools", "tool_search", "session_search",
+        "get_goal", "inspect_agent_tree", "inspect_collaboration",
+        # 编排/管理:不写当前 workspace 文件,任务恢复/派工/取消必须始终可用
+        "create_subagents", "cancel_subagents", "dispatch_subagents",
+        "schedule_child_subagents", "send_guidance", "wait", "capability_request",
+        "resolve_capability_requests", "update_goal", "publish_audit_update",
+        "stop_named_work", "raise_event", "task_progress",
+        "raise_collaboration", "submit_collaboration_result",
+        "update_collaboration",
+    }
+)
+
+
 @dataclass(frozen=True)
 class ToolCallRuntimeRequest:
     agent: object
@@ -245,7 +268,11 @@ def _promote_conversation_task_for_work_tool(
         promote_current_conversation_task,
     )
 
-    decision = conversation_workspace_execution_blocker(runtime_request.agent)
+    decision = (
+        None
+        if tool_name in _CONVERSATION_EXECUTION_EXEMPT_TOOLS
+        else conversation_workspace_execution_blocker(runtime_request.agent)
+    )
     if decision is not None:
         return ToolHandlerOutcome(
             tool_name or "conversation_task_binding",

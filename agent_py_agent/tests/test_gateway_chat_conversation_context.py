@@ -1864,6 +1864,107 @@ def test_live_background_claim_alone_blocks_second_task_executor(tmp_path):
     assert selected.error_code == "CONVERSATION_TASK_ALREADY_RUNNING"
 
 
+def test_wait_policy_alone_does_not_block_orchestration_tools(tmp_path):
+    """wait 定时器 policy 不等于 live executor:管理/编排工具必须始终可用。
+
+    真机 2026-08-09:父代理 wait 登记 policy 后,create_subagents/read_file 全被
+    CONVERSATION_TASK_ALREADY_RUNNING 拦,子代理全死也无法重派,任务死锁。
+    """
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_wait_policy",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    first = _conversation_context(agent, request, "gw-wait-policy", "开始长任务")
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": first.thread_id,
+            "task_id": "task-waiting",
+            "goal": "持续完成长任务",
+            "status": "active",
+        }
+    )
+    agent.conversation_store.set_progress_policy(
+        {
+            "thread_id": first.thread_id,
+            "task_id": "task-waiting",
+            "interval_seconds": 120,
+            "metadata": {"kind": "subagent_progress_watch", "tool": "wait"},
+        }
+    )
+    params = RunParams(
+        request_id="gw-followup",
+        run_id="gw-followup",
+        task_id="gw-followup",
+        task_attributes={
+            "conversation_thread_id": first.thread_id,
+            "conversation_task_id": "task-waiting",
+        },
+    )
+    agent._current_run_params = params
+    try:
+        for tool in ("create_subagents", "cancel_subagents", "wait", "send_guidance", "read_file"):
+            selected = _promote_work_tool(agent, params, {"tool": tool})
+            assert selected is None, f"{tool} 不应被 wait policy 拦截: {selected}"
+    finally:
+        delattr(agent, "_current_run_params")
+
+
+def test_wait_policy_alone_still_blocks_workspace_write(tmp_path):
+    """wait 期间防双写保护必须保留:写类工具仍被同目录执行锁拦。"""
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
+    )
+    request = {
+        "conversation": {
+            "channel": "feishu",
+            "channel_conversation_id": "oc_wait_policy_write",
+            "channel_user_id": "ou_user1",
+            "canonical_user_id": "ou_user1",
+        }
+    }
+    first = _conversation_context(agent, request, "gw-wait-policy-write", "开始长任务")
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": first.thread_id,
+            "task_id": "task-waiting-write",
+            "goal": "持续完成长任务",
+            "status": "active",
+        }
+    )
+    agent.conversation_store.set_progress_policy(
+        {
+            "thread_id": first.thread_id,
+            "task_id": "task-waiting-write",
+            "interval_seconds": 120,
+            "metadata": {"kind": "subagent_progress_watch", "tool": "wait"},
+        }
+    )
+    params = RunParams(
+        request_id="gw-followup",
+        run_id="gw-followup",
+        task_id="gw-followup",
+        task_attributes={
+            "conversation_thread_id": first.thread_id,
+            "conversation_task_id": "task-waiting-write",
+        },
+    )
+    agent._current_run_params = params
+    try:
+        for tool in ("write_file", "edit_file", "apply_patch"):
+            selected = _promote_work_tool(agent, params, {"tool": tool})
+            assert selected is not None, f"{tool} 在 wait 期间应被拦"
+            assert selected.error_code == "CONVERSATION_TASK_ALREADY_RUNNING"
+    finally:
+        delattr(agent, "_current_run_params")
+
+
 def test_unreadable_background_execution_state_fails_closed(tmp_path, monkeypatch):
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
