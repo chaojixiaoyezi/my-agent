@@ -202,11 +202,7 @@ def test_wait_without_run_id_leaves_watch_run_id_empty(tmp_path):
     assert metadata.get("kind") == "subagent_progress_watch"
 
 
-def test_stale_watch_policy_retired_when_watch_target_terminal(tmp_path):
-    """修复验证：watch 目标已终态（BLOCKED/completed）的陈旧 policy 消费即禁用。"""
-    agent, thread_id, task_id = _agent_with_self_watch(tmp_path)
-    store = agent.conversation_store
-    child_id = "subagent-1786245734-a462d5b5"
+def _retire_with_child(agent, store, thread_id, child_id, *, task_id):
     store.set_progress_policy(
         {
             "thread_id": thread_id,
@@ -245,9 +241,7 @@ def test_stale_watch_policy_retired_when_watch_target_terminal(tmp_path):
         }
 
     before = _watch_policy_ids(True)
-    stale_ids = [
-        pid for pid, watched in before.items() if watched == child_id
-    ]
+    stale_ids = [pid for pid, watched in before.items() if watched == child_id]
     assert stale_ids, "watch 子代理的 policy 应存在且 enabled"
     # 用与既有后台调度测试相同的容器驱动一次 tick：目标终态 → 该 policy 被禁用
     scheduler = BackgroundMainAgentScheduler(
@@ -264,3 +258,19 @@ def test_stale_watch_policy_retired_when_watch_target_terminal(tmp_path):
     assert not any(pid in after for pid in stale_ids), (
         "watch 目标已终态的陈旧 policy 应被禁用"
     )
+
+
+def test_stale_watch_policy_retired_when_watch_target_terminal(tmp_path):
+    """修复验证：watch 目标已终态（BLOCKED/completed）的陈旧 policy 消费即禁用。"""
+    agent, thread_id, task_id = _agent_with_self_watch(tmp_path)
+    child_id = "subagent-1786245734-a462d5b5"
+    _retire_with_child(agent, agent.conversation_store, thread_id, child_id, task_id=task_id)
+
+
+def test_stale_self_task_watch_retired_when_target_terminal(tmp_path):
+    """真机实况补测：陈旧 policy 的 task_id 直接就是被 watch 的子代理 ID
+    （watch 目标=task_id 自身）时,目标终态同样必须退休——修复 3 的
+    watched != task_id_field 条件把这类政策永远排除,300s 一轮空转。"""
+    agent, thread_id, task_id = _agent_with_self_watch(tmp_path)
+    child_id = "subagent-1786211892-55685e17"
+    _retire_with_child(agent, agent.conversation_store, thread_id, child_id, task_id=child_id)

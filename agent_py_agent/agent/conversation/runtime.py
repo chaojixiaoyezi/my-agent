@@ -4418,13 +4418,15 @@ class _BackgroundSchedulerExecutionMixin:
         metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
         if str(metadata.get("kind") or "") == "subagent_progress_watch":
             watched = str(metadata.get("watch_run_id") or "").strip()
-            task_id_field = str(policy.task_id or "").strip()
-            if watched and watched != task_id_field:
+            if watched:
                 # 陈旧 wait policy 退休:watch 目标已终态(subagent BLOCKED/完成等)
                 # 的 policy 不再调度——它只证明「盯过」,不证明任何 run 在执行,
                 # 留着只会每 interval 空转一次唤醒(真机 2026-08-09:已 BLOCKED 的
-                # fixer 仍有 enabled watch policy,300s 一轮空转)。终态判定复用
-                # 后台准入的同一把尺,不引自然语言。
+                # fixer 仍有 enabled watch policy,300s 一轮空转;且这类 policy 的
+                # task_id 直接就是被 watch 的子代理 ID,watch 目标≠「调度归属
+                # 之外的对象」——判定只看 watch 目标终态,不看它是否等于 task_id)。
+                # self-watch(watch_run_id 空)是 interval 唤醒自己,不在此列。
+                # 终态判定复用后台准入的同一把尺,不引自然语言。
                 status = _background_task_link_status(
                     self.runtime.agent,
                     BackgroundRunRequest(
