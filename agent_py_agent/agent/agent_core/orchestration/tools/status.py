@@ -5,6 +5,11 @@ import json
 import time
 from typing import TYPE_CHECKING
 
+from ....subagents.authorization_gate import (
+    OperationRequest,
+    authorize_operation,
+    authorize_tree_scope,
+)
 from ....subagents.models import (
     SUBAGENT_FAILED_RESULT_STATUSES,
     SUBAGENT_RESOLVED_TERMINAL_STATUSES,
@@ -20,6 +25,7 @@ from ....tooling.models import (
     ToolRuntimePolicy,
 )
 from ...agent_tree.status import agent_tree_status_payload
+from ..create_policy import _current_run_id
 from ..context.live_summary import orchestration_payload_summary
 from ..tool_specs import (
     build_inspect_agent_tree_model_spec,
@@ -44,12 +50,58 @@ class InspectAgentTreeTool(BaseTool):
         cached = _cached_cooldown_payload_before_render(self.agent, params)
         if cached is not None:
             return _inspect_result(cached)
+        denied = _authorize_inspect_scope(self.agent, params)
+        if denied is not None:
+            return denied
         payload = agent_tree_status_payload(self.agent, params)
         cooldown = _cooldown_payload_for_current(self.agent, params, payload)
         if cooldown is not None:
             return _inspect_result(cooldown)
         _remember_payload(self.agent, params, payload)
         return _inspect_result(payload)
+
+
+def _authorize_inspect_scope(
+    agent: SimpleAgent,
+    params: dict[str, object],
+) -> ToolHandlerOutcome | None:
+    """3.txt B.4：inspect 走统一授权查询门（跨树越权拒绝）。
+
+    无 run_id/root_id（主代理看全树/当前 scope）→ 不拦（系统语义）；
+    有目标 → run_id 单点门 / root_id 树级门。
+    """
+    target_run = str(params.get("run_id") or "").strip()
+    target_root = str(params.get("root_id") or "").strip()
+    if not target_run and not target_root:
+        return None
+    owner = str(getattr(getattr(agent, "home_paths", None), "owner_id", "") or "")
+    requester_run = _current_run_id(agent)
+    try:
+        if target_run:
+            authorize_operation(
+                agent.subagents,
+                OperationRequest(
+                    operation="inspect",
+                    run_id=target_run,
+                    requester_owner=owner,
+                    requester_run_id=requester_run,
+                ),
+            )
+        else:
+            authorize_tree_scope(
+                agent.subagents,
+                OperationRequest(
+                    operation="inspect",
+                    run_id=target_root,
+                    requester_owner=owner,
+                    requester_run_id=requester_run,
+                ),
+                target_root,
+            )
+    except (PermissionError, OSError) as exc:
+        return _inspect_result({"schema_version": "agent_tree_status.v1", "effect": "read_only",
+                                "error": f"inspect 被授权门拒绝: {exc}"})
+    return None
 
 
 def _inspect_result(payload: dict[str, object]) -> ToolHandlerOutcome:

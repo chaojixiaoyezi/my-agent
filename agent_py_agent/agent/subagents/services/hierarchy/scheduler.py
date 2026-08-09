@@ -187,7 +187,11 @@ def _create_child_params(request: HierarchyCreateChildRequest) -> CreateRunParam
                 role=request.role,
             )
         ),
-        owner=agent_name,
+        # owner 是任务归属的 owner 域 ID（base.py 默认取 manager.owner_id），
+        # 不是 agent_name；5 月起的错填被统一授权查询门（B.4 owner 一致性）首次
+        # 真实拦截——agent_name 进 owner 会让授权门把本 owner 域的任务当越权
+        # 拒绝派工，且污染 local_store 归属、权限快照与 runtime 身份。
+        owner=parent.owner,
         supervisor=parent.id,
         final_owner=parent.final_owner or parent.owner,
         acceptance_checks=_scheduled_child_checks(

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from ....common.json_io import locked_json_path, read_json_object_report, write_json_file_atomic
+from ....common.opaque_id import validate_opaque_id
 from ....common.value_parsing import sequence_strings
 from ....runtime_errors import runtime_error_report
 from ...models import (
@@ -46,6 +47,7 @@ from ..agent_run_state import (
     build_agent_run_state,
     build_agent_state_locator,
     build_owner_agent_projection,
+    canonical_state_path_from_payload,
     read_agent_state_payload,
     write_agent_run_state,
 )
@@ -101,6 +103,11 @@ class SubAgentPersistenceService:
     def load(self, run_id: str) -> SubAgentTask:
         """Load one subagent task from disk."""
 
+        # 3.txt B.2/B.3：run_id 是 opaque identifier，拼进路径前必须先过拒绝式
+        # 校验（拦 ../、绝对路径、控制字符等注入），再由框架按已验证 ID 计算
+        # 路径。load 是 cancel/dispatch/inspect/resume/takeover 等入口的共同
+        # 读路径，此门挡住全部 ID 路径注入。
+        run_id = validate_opaque_id(run_id, kind="run_id")
         path = self.workspace / run_id / "task.json"
         if not path.exists():
             raise FileNotFoundError(f"子代理记录不存在: {run_id}")
@@ -225,6 +232,7 @@ class SubAgentPersistenceService:
     ) -> None:
         """Persist runner liveness without rebuilding task projections."""
 
+        run_id = validate_opaque_id(run_id, kind="run_id")
         locator_path = self.workspace / run_id / "task.json"
         if not locator_path.exists():
             raise FileNotFoundError(f"子代理记录不存在: {run_id}")
@@ -247,21 +255,22 @@ class SubAgentPersistenceService:
 def _canonical_state_guard_path(workspace: Path, task: SubAgentTask) -> Path:
     # Lock metadata belongs to the system locator plane, not the model-visible
     # task workspace where artifact scans or the runner could mistake it for work.
+    # task.id 是 run_id，拼进路径前必须过拒绝式校验（fail-closed：数据损坏
+    # 时拒绝写盘而不是把锁文件写到任意目录）。
     run_id = str(getattr(task, "id", "") or "").strip()
     if run_id:
+        run_id = validate_opaque_id(run_id, kind="run_id")
         return workspace / run_id / ".canonical_state.guard"
     task_dir = str(getattr(task, "task_dir", "") or "").strip()
     return workspace / (Path(task_dir).name if task_dir else "unknown-run") / ".canonical_state.guard"
 
 
 def _canonical_state_ref_from_payload(payload: dict[str, Any]) -> str:
-    attrs = payload.get("attributes")
-    if isinstance(attrs, dict):
-        ref = str(attrs.get("canonical_state_ref") or "").strip()
-        if ref:
-            return ref
-    workspace = str(payload.get("agent_run_workspace_dir") or "").strip()
-    return str(Path(workspace) / "canonical_state.json") if workspace else ""
+    # 3.txt B.6：canonical_ref 由框架重算（agent_run_workspace_dir + 域内检查，
+    # 锚 = 同 payload 的 task_workspace_dir），不信任 payload 自报的
+    # canonical_state_ref 字符串。
+    canonical = canonical_state_path_from_payload(payload)
+    return str(canonical) if canonical else ""
 
 
 def _merge_runner_session_payload(
@@ -327,7 +336,7 @@ def _prepare_and_write_state(
     state = build_agent_run_state(task)
     write_agent_run_state(state)
     locator_payload = build_agent_state_locator(task, state)
-    locator_dir = service.workspace / task.id
+    locator_dir = service.workspace / validate_opaque_id(task.id, kind="run_id")
     locator_dir.mkdir(parents=True, exist_ok=True)
     write_json_file_atomic(locator_dir / "task.json", locator_payload)
     write_json_file_atomic(locator_dir / "run.json", locator_payload)
@@ -344,8 +353,10 @@ def _set_canonical_state_ref(task: SubAgentTask) -> None:
         )
 
 
-def _read_state_payload(path: Path) -> dict[str, Any]:
-    return read_agent_state_payload(path)
+def _read_state_payload(path: Path, workspace: Path | None = None) -> dict[str, Any]:
+    # workspace 提供时 canonical ref 跳转强制域内（本 service 读写路径）；缺省
+    # 宽松模式留给只读投影调用方。
+    return read_agent_state_payload(path, workspace=workspace)
 
 
 def build_status_report(task: SubAgentTask) -> StatusReport:

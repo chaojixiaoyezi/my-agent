@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from ....common.audit_activation import structured_audit_source_worker_attributes
 from ....concurrency.interrupt import interrupt_by_name
 from ....runtime_errors import runtime_error_report
+from ....subagents.authorization_gate import OperationRequest, authorize_operation
 from ....subagents.model_capabilities import capability_request_requires_parent_resolution
 from ....subagents.models import FailureType, normalize_task_status, task_status_in
 from ....subagents.process_control import terminate_pid_with_escalation
@@ -23,6 +24,7 @@ from ....tooling.models import (
     ToolRuntimePolicy,
 )
 from ...agent_tree.status import agent_tree_status_payload
+from ..create_policy import _current_run_id
 from ..tool_specs import build_cancel_subagents_model_spec
 
 if TYPE_CHECKING:
@@ -408,9 +410,23 @@ def _filter_existing_targets(agent: SimpleAgent, run_ids: list[str], status_filt
 
 def _load_cancel_target(agent: SimpleAgent, run_id: str) -> dict[str, object]:
     try:
-        return {"run_id": run_id, "task": agent.subagents.load(run_id)}
+        # 3.txt B.4：cancel 走统一授权查询门（owner 一致性 + 子树可见性）。
+        task = authorize_operation(
+            agent.subagents,
+            OperationRequest(
+                operation="cancel",
+                run_id=run_id,
+                requester_owner=_requester_owner(agent),
+                requester_run_id=_current_run_id(agent),
+            ),
+        )
+        return {"run_id": run_id, "task": task}
     except Exception as exc:
         return {"run_id": run_id, "task": None, "error": runtime_error_report(exc, context="cancel_subagents.load")}
+
+
+def _requester_owner(agent: SimpleAgent) -> str:
+    return str(getattr(getattr(agent, "home_paths", None), "owner_id", "") or "")
 
 
 def _retry_required_targets(

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ....runtime_errors import runtime_error_report
+from ...authorization_gate import OperationRequest, authorize_operation
 from ...models import SUBAGENT_HANDLED_TERMINAL_STATUSES, FailureType, SubAgentTask, task_status_in
 from .refs import (
     default_takeover_plan,
@@ -64,7 +65,16 @@ class SubAgentTakeoverRunService:
         self.manager = manager
 
     def create(self, request: TakeoverRunRequest) -> TakeoverRunResult:
-        source = self.manager.load(request.source_run_id)
+        # 3.txt B.4：takeover 走统一授权查询门（owner 一致性；系统驱动无
+        # requester run_id——恢复编排是 owner 域内的机制路径）。
+        source = authorize_operation(
+            self.manager,
+            OperationRequest(
+                operation="takeover",
+                run_id=request.source_run_id,
+                requester_owner=str(getattr(self.manager, "owner_id", "") or ""),
+            ),
+        )
         existing, lookup_error = _existing_takeover(self.manager, source)
         if lookup_error:
             return _lookup_failed_result(source, lookup_error)

@@ -155,7 +155,8 @@ def test_subagent_takeover_records_locked_files():
             goal="修复登录按钮",
             thought="子代理先尝试修复，必要时由父代理接管。",
             plan=["定位", "修改", "验收"],
-            owner="child-worker",
+            # owner 继承 manager.owner_id（B.4 授权门 owner 一致性：跨 owner 域
+            # 接管是越权，拒绝场景见 test_authorization_gate.py 的 owner 不匹配用例）。
             final_owner="child-worker",
         )
 

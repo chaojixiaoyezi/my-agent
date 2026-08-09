@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ...common.opaque_id import OpaqueIdError
 from ...user_space.home_runtime_query import home_task_workspace_payload
 from .archive_helpers import (
     _append_run_id,
@@ -413,6 +414,11 @@ def _task_payload(agent, run_id: str) -> dict[str, Any]:
     try:
         task = agent.subagents.load(run_id)
     except (FileNotFoundError, json.JSONDecodeError, TypeError):
+        return _missing_or_home_task_payload(agent, run_id)
+    except OpaqueIdError:
+        # 3.txt B.2：非 opaque run_id（中文任务名、旧格式带空格 ID）不是
+        # 框架 run 记录，而是用户可读任务引用——本查询的 home task workspace
+        # 通道正是按 task_name/task_id 字段匹配，直接转入，不当作子代理 run。
         return _missing_or_home_task_payload(agent, run_id)
     paths = _task_read_paths(task)
     return {

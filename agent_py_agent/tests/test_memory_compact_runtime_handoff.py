@@ -191,7 +191,12 @@ def test_memory_compact_current_task_locator_overrides_archive_wrapper_and_old_a
                 "schema_version": "subagent-state-locator.v1",
                 "kind": "subagent_state_locator",
                 "run_id": "run-compact",
+                # B.6：canonical 由框架重算，锚 = 同 payload 的
+                # agent_run_workspace_dir（框架物化字段），不信任自报
+                # canonical_state_ref；fixture 按真实 locator 形态补锚字段。
                 "canonical_state_ref": str(canonical),
+                "task_workspace_dir": str(root),
+                "agent_run_workspace_dir": str(root),
             },
             ensure_ascii=False,
         ),

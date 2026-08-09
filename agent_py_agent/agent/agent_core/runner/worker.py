@@ -11,6 +11,7 @@ from pathlib import Path
 
 from ...settings import AgentConfig
 from ...settings.services.runtime_config_task import apply_task_runtime_config_overlay
+from ...subagents.authorization_gate import OperationRequest, authorize_operation
 from ...subagents.manager_runner_result_payload import RecordRunnerResultParams
 from ...subagents.models import FailureType, SubAgentRunnerResult
 from ..subagent.params import SubagentRunParams
@@ -102,7 +103,17 @@ def _continue_source_worker_after_session(worker, run_id: str, result) -> None:
 def _build_worker_agent(simple_agent_cls, params: RunSubagentWorkerParams):
     worker = simple_agent_cls(params.config, params.root)
     _attach_worker_runtime(worker, params)
-    task = worker.subagents.load(params.run_id)
+    # 3.txt B.4：dispatch/resume 执行阶段过统一授权查询门。系统驱动（调度器）
+    # 无 requester run_id——只做 owner 一致性 + ID 形态 + 存在性；owner 不
+    # 匹配 = 数据异常（任务归属另一 owner 域），fail-closed 拒绝派工。
+    task = authorize_operation(
+        worker.subagents,
+        OperationRequest(
+            operation="dispatch",
+            run_id=params.run_id,
+            requester_owner=str(getattr(worker.subagents, "owner_id", "") or ""),
+        ),
+    )
     effective_config = apply_task_runtime_config_overlay(
         params.config,
         task,

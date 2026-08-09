@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ....runtime_errors import runtime_error_report
+from ....subagents.authorization_gate import OperationRequest, authorize_operation
 from ....subagents.model_capabilities import capability_request_requires_parent_resolution
 from ....subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
 from ....subagents.services.lifecycle import RecordCapabilityGrantParams
@@ -27,6 +28,7 @@ from ....tooling.models import (
     ToolHandlerOutcome,
     ToolRuntimePolicy,
 )
+from ..create_policy import _current_run_id
 from ..tool_specs import build_resolve_capability_requests_model_spec
 
 if TYPE_CHECKING:
@@ -92,9 +94,22 @@ class ResolveCapabilityRequestsTool(BaseTool):
         if invalid is not None:
             return invalid
         try:
-            task = self.agent.subagents.load(run_id)
+            # 3.txt B.4：resolve capability 走统一授权查询门（owner + 子树）。
+            task = authorize_operation(
+                self.agent.subagents,
+                OperationRequest(
+                    operation="resolve_capability",
+                    run_id=run_id,
+                    requester_owner=str(
+                        getattr(getattr(self.agent, "home_paths", None), "owner_id", "") or ""
+                    ),
+                    requester_run_id=_current_run_id(self.agent),
+                ),
+            )
         except FileNotFoundError:
             return _error_result(f"run_id 不存在：{run_id}。{_known_children_hint(self.agent)}")
+        except PermissionError as exc:
+            return _error_result(f"无权操作 {run_id}：{exc}")
         request_id = str(params.get("request_id") or "").strip()
         pending = _pending_requests(task, request_id)
         if not pending:

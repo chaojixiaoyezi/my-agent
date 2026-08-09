@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..authorization_gate import OperationRequest, authorize_operation
 from ..effective_permissions import effective_permission_snapshot
 from ..models import SubAgentTask
 from .inheritance_manifest import build_inheritance_manifest
@@ -476,7 +477,15 @@ class SubAgentBaseService:
         from ..models import TakeoverRecord
         from ..utils import _merge_list
 
-        task = self.manager.load(run_id)
+        # 3.txt B.4：takeover 落账同样过统一授权查询门（owner 一致性）。
+        task = authorize_operation(
+            self.manager,
+            OperationRequest(
+                operation="takeover",
+                run_id=run_id,
+                requester_owner=str(getattr(self.manager, "owner_id", "") or ""),
+            ),
+        )
         record = TakeoverRecord(
             id=self.manager._new_id("takeover"),
             run_id=run_id,

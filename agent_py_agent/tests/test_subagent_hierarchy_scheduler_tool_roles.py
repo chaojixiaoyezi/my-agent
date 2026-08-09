@@ -74,13 +74,15 @@ def test_hierarchy_schedule_preserves_explicit_display_names(tmp_path):
     great_grandchild = manager.load(great_result.created_run_ids[0])
 
     assert child.agent_name == "catalog-lead"
-    assert child.owner == "catalog-lead"
+    # owner 是任务归属的 owner 域（B.4 授权门 owner 一致性），随层级继承，
+    # 不是 agent_name（5 月起错填 agent_name 已被授权门真实拦截）。
+    assert child.owner == root.owner
     assert child_result.items[0].agent_name == "catalog-lead"
     assert grandchild.agent_name == "小傻妞-product-worker"
-    assert grandchild.owner == "小傻妞-product-worker"
+    assert grandchild.owner == root.owner
     assert grand_result.items[0].agent_name == "小傻妞-product-worker"
     assert great_grandchild.agent_name == "sku-leaf"
-    assert great_grandchild.owner == "sku-leaf"
+    assert great_grandchild.owner == root.owner
     assert great_result.items[0].agent_name == "sku-leaf"
 
 

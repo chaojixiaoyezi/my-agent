@@ -123,13 +123,54 @@ def task_workspace_path(workspace: str | Path, task_id: str) -> Path:
 
 
 def resolve_task_workspace_root(workspace: str | Path, task: Any, task_id: str) -> Path:
+    # attributes 里的 task_root 是自报路径（audit 体系有意把任务工作区放到
+    # manager workspace 外），只在与框架已写字段 task_workspace_dir 同域、或
+    # 位于 workspace 之内时才信任——单独篡改逃逸到任意目录（如 /etc）会被
+    # 忽略回退框架计算。完整伪造（同时改所有字段）超出文件级防线，归 R1
+    # WorkspaceBinding。
     task_root = _task_root_from_attrs(getattr(task, "attributes", {}) or {})
-    if task_root:
+    if task_root and _task_root_trusted(task_root, task, workspace):
         return Path(task_root)
     existing = str(getattr(task, "task_workspace_dir", "") or "").strip()
     if existing and Path(existing).name == _task_segment(task_id):
         return Path(existing)
     return Path(workspace) / "tasks" / _task_segment(task_id)
+
+
+def _task_root_trusted(task_root: str, task: Any, workspace: str | Path) -> bool:
+    try:
+        root = Path(task_root).expanduser()
+    except TypeError:
+        return False
+    if not root.is_absolute() or ".." in root.parts or len(root.parts) <= 1:
+        return False
+    existing = str(getattr(task, "task_workspace_dir", "") or "").strip()
+    if not existing:
+        # 首次保存 task_workspace_dir 尚未写回：只要求路径形态安全。此时
+        # attributes 是框架自己（source_worker 等）刚写入的。
+        return True
+    try:
+        existing_root = Path(existing).expanduser()
+    except TypeError:
+        return False
+    if not existing_root.is_absolute() or ".." in existing_root.parts:
+        return False
+    if _same_or_under(root, existing_root) or _same_or_under(existing_root, root):
+        return True
+    # existing 是框架默认物化点（workspace/tasks/<segment>，create_run 预填、
+    # 尚未按 attributes 声明物化）→ task_root 仍是权威声明；existing 是别处
+    # 物化而 task_root 不同域 → 不一致（单独篡改 attributes 逃逸）→ 拒绝。
+    segment = _task_segment(str(getattr(task, "root_id", "") or getattr(task, "id", "") or ""))
+    default_root = Path(workspace).expanduser() / "tasks" / segment
+    return _same_or_under(existing_root, default_root) and _same_or_under(default_root, existing_root)
+
+
+def _same_or_under(child: Path, anchor: Path) -> bool:
+    try:
+        child.resolve(strict=False).relative_to(anchor.resolve(strict=False))
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def _task_root_from_attrs(attrs: Any) -> str:
