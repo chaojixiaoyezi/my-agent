@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..common.opaque_id import OpaqueIdError, validate_opaque_id
 from ..runtime_errors import runtime_error_report
 
 if TYPE_CHECKING:
@@ -35,7 +36,11 @@ class CrossChannelSession:
         self._session_root.mkdir(parents=True, exist_ok=True)
 
     def _get_channels_path(self, session_id: str) -> Path:
-        """获取通道配置文件路径。"""
+        """获取通道配置文件路径（B.2：ID 拼路径前必须过拒绝式校验，G1 补齐）。"""
+        try:
+            validate_opaque_id(session_id, kind="session_id")
+        except OpaqueIdError as exc:
+            raise ValueError(f"非法 session_id: {exc}") from exc
         return self._session_root / session_id / "channels.json"
 
     def _load_channels(self, session_id: str) -> dict | None:

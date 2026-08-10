@@ -267,3 +267,34 @@ class TestListSessionsByChannel:
         result = manager.list_sessions_by_channel("user_123", "feishu")
 
         assert len(result) == 2
+
+class TestCrossChannelPathEscapes:
+    """G1：session_id 拼路径前必须过拒绝式校验（B.2），与 SessionManager 同款。"""
+
+    def _manager(self, tmp_path):
+        from agent_py_agent.agent.session.cross_channel import CrossChannelSession
+
+        mock_config = MagicMock()
+        mock_config.session_workspace = str(tmp_path)
+        return CrossChannelSession(mock_config)
+
+    @pytest.mark.parametrize(
+        "malicious",
+        [
+            "../../etc/passwd",
+            "/etc/passwd",
+            "..",
+            ".",
+            "sess_1\\evil",
+            "sess_1 evil",
+            "sess_" + "A" * 200,
+        ],
+    )
+    def test_malicious_session_id_rejected_before_path_join(self, tmp_path, malicious):
+        from agent_py_agent.agent.session.cross_channel import CrossChannelSession
+
+        manager = self._manager(tmp_path)
+        with pytest.raises(ValueError):
+            manager._get_channels_path(malicious)
+        # 拒绝发生在路径拼接之前：会话根目录下不得出现任何越界痕迹。
+        assert list(tmp_path.iterdir()) == []
