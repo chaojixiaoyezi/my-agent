@@ -278,12 +278,17 @@ _BASE_RUNTIME_SQL = (
     # attempt；记录 code digest/argv/env/artifact digests/stdout/stderr。
     # status：VERIFIED/FAILED/UNAVAILABLE/BLOCKED（sandbox 不可用 fail
     # closed，不降级为 advisory）。
+    # G2 补尾：assertion_key 为断言稳定标识（validator_ref::artifact_kind，
+    # 编译时生成），行级绑定具体断言——同契约同 ref 不同 kind 的多断言
+    # 可区分（3.txt「不能只记 validator_ref」）；空 = 升级前的旧行（按
+    # ref 兜底匹配，见 closeout 判定）。
     """
     CREATE TABLE IF NOT EXISTS validator_operations (
         operation_id TEXT PRIMARY KEY,
         attempt_id TEXT NOT NULL,
         agent_run_id TEXT NOT NULL,
         contract_id TEXT NOT NULL DEFAULT '',
+        assertion_key TEXT NOT NULL DEFAULT '',
         validator_ref TEXT NOT NULL,
         validator_kind TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'PENDING',
@@ -383,6 +388,12 @@ _RUNTIME_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
         "artifact_record_id",
         "artifact_records",
         "ALTER TABLE artifact_records RENAME COLUMN artifact_id TO artifact_record_id",
+    ),
+    # G2 补尾：validator operation 绑定断言标识（旧库补列，新库 CREATE 已带）。
+    (
+        "assertion_key",
+        "validator_operations",
+        "ALTER TABLE validator_operations ADD COLUMN assertion_key TEXT NOT NULL DEFAULT ''",
     ),
 )
 

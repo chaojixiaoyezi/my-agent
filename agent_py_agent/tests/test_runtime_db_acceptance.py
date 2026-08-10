@@ -206,6 +206,80 @@ def test_compile_required_upgrade(repo, chain):
     assert contract.compiled["required_artifact_kinds"] == ["html"]
 
 
+def test_compile_assertion_key_binds_ref_and_kind(repo, chain):
+    """G2 补尾：断言稳定标识 = validator_ref::artifact_kind（kind 缺省 '*'）。
+
+    同契约同 ref 不同 kind 是两条不同断言（key 可区分）；kind 缺省与
+    snapshot「kind 缺省 → 全部文件」语义一致用 '*'。key 进契约 digest：
+    改 kind 即换 key，digest 变化（旧 closeout 判定无法区分的情况消失）。
+    """
+    contract = _compile(
+        repo,
+        chain,
+        {
+            "assertions": [
+                {"validator": "artifact_acceptance", "artifact_kind": "html"},
+                {"validator": "artifact_acceptance", "artifact_kind": "md"},
+                {"validator": "static_site_check"},
+            ]
+        },
+    )
+    keys = [a["assertion_key"] for a in contract.compiled["assertions"]]
+    assert keys == [
+        "artifact_acceptance::html",
+        "artifact_acceptance::md",
+        "static_site_check::*",
+    ]
+    assert len(set(keys)) == len(keys)
+
+
+def test_compile_duplicate_assertion_key_rejected(repo, chain):
+    """G2 补尾：同 ref 同 kind 重复断言 → 编译拒绝。
+
+    closeout 按 key 判定，重复 key 会让「哪条算验证过」不可裁决，编译期
+    直接拒绝（3.txt「不能只记 validator_ref」的另一半：key 必须唯一）。
+    """
+    with pytest.raises(ContractCompileError, match="重复断言标识"):
+        _compile(
+            repo,
+            chain,
+            {
+                "assertions": [
+                    {"validator": "artifact_acceptance", "artifact_kind": "html"},
+                    {"validator": "artifact_acceptance", "artifact_kind": "html"},
+                ]
+            },
+        )
+    # 不同 kind 的多断言合法保留（key 可区分）。
+    contract = _compile(
+        repo,
+        chain,
+        {
+            "assertions": [
+                {"validator": "artifact_acceptance", "artifact_kind": "html"},
+                {"validator": "artifact_acceptance", "artifact_kind": "md"},
+            ]
+        },
+    )
+    assert len(contract.compiled["assertions"]) == 2
+
+
+def test_compile_digest_distinguishes_kind_variants(repo, chain):
+    """G2 补尾：同 ref 不同 kind 的契约 digest 不同 —— key 参与 canonical
+    digest（旧 ref 集合无法区分的两契约现在可区分）。"""
+    a = _compile(
+        repo,
+        chain,
+        {"assertions": [{"validator": "artifact_acceptance", "artifact_kind": "html"}]},
+    )
+    b = _compile(
+        repo,
+        chain,
+        {"assertions": [{"validator": "artifact_acceptance", "artifact_kind": "md"}]},
+    )
+    assert a.digest != b.digest
+
+
 def test_compile_canonical_digest(repo, chain):
     """契约冻结产物带 canonical digest：同 propose 幂等，不同 propose 不同。"""
     a = _compile(
@@ -354,6 +428,71 @@ def test_runner_blocks_when_materialize_detects_tamper(repo, chain, tmp_path):
     )
     assert [r["status"] for r in results] == ["BLOCKED"]
     assert not any(r["status"] == "VERIFIED" for r in results)
+
+
+def test_runner_blocked_ledger_binds_assertion_key(repo, chain, tmp_path):
+    """G2 补尾：materialize 失败落账的 BLOCKED operation 必须绑定断言 key。
+
+    同 ref 不同 kind 的两条断言同时被挡时，账上能区分是哪条被 BLOCKED
+    （3.txt「不能只记 validator_ref」的直接落点：行级记录可定位断言）。
+    """
+    shared = _publish_artifact(repo, chain, tmp_path, "report.html", GOOD_HTML)
+    snap = _validated_snapshot(repo, chain, shared)
+    records = repo.artifact_records_for_attempt(chain["attempt_id"])
+    Path(records[0]["content_path"]).write_text("<div>evil</div>", encoding="utf-8")
+    contract = _compile(
+        repo,
+        chain,
+        {
+            "assertions": [
+                {"validator": "artifact_acceptance", "artifact_kind": "html"},
+                {"validator": "artifact_acceptance", "artifact_kind": "md"},
+            ]
+        },
+    )
+    _freeze(repo, chain, contract)
+    entries = {e.name: e for e in [resolve_validator("artifact_acceptance")]}
+    results = run_contract_validation(
+        repo=repo,
+        attempt_id=chain["attempt_id"],
+        agent_run_id=chain["agent_run_id"],
+        contract=contract.compiled,
+        snapshot=snap,
+        owner_home=tmp_path,
+        entries=entries,
+        contract_id=contract.contract_id,
+    )
+    assert [r["status"] for r in results] == ["BLOCKED", "BLOCKED"]
+    keys = sorted(
+        repo.validator_operation(r["operation_id"])["assertion_key"] for r in results
+    )
+    assert keys == ["artifact_acceptance::html", "artifact_acceptance::md"]
+
+
+def test_runner_verified_ledger_binds_assertion_key(repo, chain, tmp_path):
+    """G2 补尾：VERIFIED operation 行绑定断言 key（A.8 审计可定位具体断言）。"""
+    shared = _publish_artifact(repo, chain, tmp_path, "report.html", GOOD_HTML)
+    contract = _compile(
+        repo, chain, {"assertions": [{"validator": "artifact_acceptance", "artifact_kind": "html"}]}
+    )
+    _freeze(repo, chain, contract)
+    snap = _validated_snapshot(repo, chain, shared)
+    entries = {e.name: e for e in [resolve_validator("artifact_acceptance")]}
+    results = run_contract_validation(
+        repo=repo,
+        attempt_id=chain["attempt_id"],
+        agent_run_id=chain["agent_run_id"],
+        contract=contract.compiled,
+        snapshot=snap,
+        owner_home=tmp_path,
+        entries=entries,
+        contract_id=contract.contract_id,
+    )
+    assert results[0]["status"] == "VERIFIED"
+    assert (
+        repo.validator_operation(results[0]["operation_id"])["assertion_key"]
+        == "artifact_acceptance::html"
+    )
 
 
 def test_runner_verifies_materialized_copy_when_live_tampered(repo, chain, tmp_path):

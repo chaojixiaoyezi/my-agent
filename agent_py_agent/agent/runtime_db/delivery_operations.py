@@ -498,8 +498,11 @@ class RuntimeDeliveryMixin:
             # 对照对象是契约冻结时要求的 required assertion 集合（compiled
             # 的 assertions 恒为 I.5 升格后的 required 集合，非空），而不是
             # validator_operations 里已跑过的行 —— 只跑了子集不能通过。
+            # G2 补尾：判定单位从 validator_ref 升级为 assertion_key——
+            # 同一契约下同 ref 不同 artifact_kind 是两条不同断言，必须
+            # 分别 VERIFIED 才算过（只验证其中一条 ≠ 全部通过）。
             contract_id = str(run["current_contract_id"] or "")
-            required_refs: set[str] = set()
+            required_keys: set[str] = set()
             if contract_id:
                 c_row = conn.execute(
                     "SELECT compiled_json FROM acceptance_contracts "
@@ -508,27 +511,46 @@ class RuntimeDeliveryMixin:
                 ).fetchone()
                 if c_row is not None:
                     compiled = json.loads(c_row["compiled_json"] or "{}")
-                    required_refs = {
-                        str(a.get("validator_ref") or "")
-                        for a in compiled.get("assertions", [])
-                        if a.get("required") and a.get("validator_ref")
-                    }
+                    for a in compiled.get("assertions", []):
+                        if not a.get("required"):
+                            continue
+                        ref = str(a.get("validator_ref") or "")
+                        if not ref:
+                            continue
+                        # 新契约带 assertion_key；旧契约（升级前冻结）现场按
+                        # 编译规则回退生成（确定性 key，与 compiler 一致）。
+                        required_keys.add(
+                            str(a.get("assertion_key") or "")
+                            or f"{ref}::{str(a.get('artifact_kind') or '').strip() or '*'}"
+                        )
             # 无契约/契约无 required 断言 → 不可交付（fail-closed）。
-            if not required_refs:
+            if not required_keys:
                 raise RuntimeConflictError(
                     f"{NOT_VERIFIED}: task_run {task_run_id} 无 required "
                     f"acceptance（contract={contract_id or '无契约'}），不可成功交付"
                 )
             rows = conn.execute(
-                "SELECT validator_ref, status FROM validator_operations "
+                "SELECT assertion_key, validator_ref, status FROM validator_operations "
                 "WHERE contract_id = ?",
                 (contract_id,),
             ).fetchall()
-            verified_refs = {
-                str(row["validator_ref"]) for row in rows if row["status"] == "VERIFIED"
+            # verified 单位：行级 key；升级前的旧行（key 空）按
+            # ref::* 通配认（kind 未知 → 匹配该 ref 的任意断言，兼容窗口）。
+            verified_keys = {
+                str(row["assertion_key"] or "")
+                or f"{str(row['validator_ref'])}::*"
+                for row in rows
+                if row["status"] == "VERIFIED"
             }
-            if not required_refs <= verified_refs:
-                missing = sorted(required_refs - verified_refs)
+            verified_ref_wild = {
+                k.rsplit("::", 1)[0] for k in verified_keys if k.endswith("::*")
+            }
+
+            def _verified(key: str) -> bool:
+                return key in verified_keys or key.rsplit("::", 1)[0] in verified_ref_wild
+
+            missing = sorted(k for k in required_keys if not _verified(k))
+            if missing:
                 raise RuntimeConflictError(
                     f"{NOT_VERIFIED}: task_run {task_run_id} 的 required acceptance "
                     f"未全部 VERIFIED（contract={contract_id}，缺失: {missing}），不可成功交付"

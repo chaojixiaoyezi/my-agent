@@ -111,6 +111,9 @@ def _blocked_for_materialize_failure(
             attempt_id=attempt_id,
             agent_run_id=agent_run_id,
             contract_id=contract_id,
+            # G2 补尾：绑定具体断言标识（materialize 失败也要能定位哪条
+            # 断言被挡；同 ref 不同 kind 的多断言靠 key 区分）。
+            assertion_key=str(assertion.get("assertion_key") or ""),
             validator_ref=ref,
             validator_kind=str(entry.kind),
             code_digest=str(entry.code_digest),
@@ -160,6 +163,7 @@ def _run_assertions_against(
             attempt_id=attempt_id,
             agent_run_id=agent_run_id,
             contract_id=contract_id,
+            assertion_key=str(assertion.get("assertion_key") or ""),
             validator_ref=ref,
             validator_kind=str(entry.kind),
             code_digest=str(entry.code_digest),

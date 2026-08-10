@@ -109,6 +109,7 @@ class RuntimeAcceptanceMixin:
         attempt_id: str,
         agent_run_id: str,
         contract_id: str = "",
+        assertion_key: str = "",
         validator_ref: str = "",
         validator_kind: str = "",
         code_digest: str = "",
@@ -116,7 +117,13 @@ class RuntimeAcceptanceMixin:
         env: dict[str, str] | None = None,
         artifact_digests: list[str] | None = None,
     ) -> str:
-        """登记一次 validator 执行（A.8：追到具体 attempt_id）。"""
+        """登记一次 validator 执行（A.8：追到具体 attempt_id + 断言）。
+
+        assertion_key（G2 补尾）：编译时生成的断言稳定标识
+        （validator_ref::artifact_kind）。同一契约下同 ref 不同 kind 是
+        两条不同断言，行级必须绑定具体断言才能区分哪条被验证/被 BLOCKED；
+        空 = 升级前旧行/未绑定调用（closeout 按 ref 兜底匹配）。
+        """
         operation_id = new_id("validator_operation_id")
         now = time.time()
         with self._runtime_connection() as conn:
@@ -124,16 +131,17 @@ class RuntimeAcceptanceMixin:
                 """
                 INSERT INTO validator_operations(
                     operation_id, attempt_id, agent_run_id, contract_id,
-                    validator_ref, validator_kind, status, code_digest,
-                    argv_json, env_json, artifact_digests_json,
+                    assertion_key, validator_ref, validator_kind, status,
+                    code_digest, argv_json, env_json, artifact_digests_json,
                     started_at, created_at, updated_at)
-                VALUES(?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     operation_id,
                     attempt_id,
                     agent_run_id,
                     contract_id,
+                    str(assertion_key or ""),
                     validator_ref,
                     validator_kind,
                     code_digest,
@@ -239,6 +247,7 @@ class RuntimeAcceptanceMixin:
             "attempt_id": row["attempt_id"],
             "agent_run_id": row["agent_run_id"],
             "contract_id": row["contract_id"],
+            "assertion_key": str(row["assertion_key"] or ""),
             "validator_ref": row["validator_ref"],
             "validator_kind": row["validator_kind"],
             "status": row["status"],

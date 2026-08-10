@@ -77,6 +77,11 @@ def _compile_assertion(
     proposed_required = bool(item.get("required", True))
     required = proposed_required or entry.required_by_default
     assertion = {
+        # G2 补尾（3.txt「不能只记 validator_ref」）：断言稳定标识 = 验证器
+        # 名 + 匹配 kind 的组合。同一契约下同 ref 不同 kind 是两条不同断言，
+        # 行级记录必须能区分是哪条被验证/被 BLOCKED；kind 缺省用 '*'（与
+        # snapshot 匹配「kind 缺省 → 全部文件」语义一致）。
+        "assertion_key": f"{entry.name}::{artifact_kind or '*'}",
         "artifact_kind": artifact_kind,
         "validator_ref": entry.name,
         "validator_kind": entry.kind,
@@ -142,6 +147,14 @@ def compile_acceptance_contract(
             required.append(req)
         if adv is not None:
             advisory.append(adv)
+
+    # G2 补尾：assertion_key 全契约唯一（含 advisory）——同验证器同 kind 的
+    # 重复断言是语义歧义（closeout 按 key 判定，重复会让「哪条算验证过」
+    # 不可裁决），编译即拒绝；不同 kind 的多断言合法保留（key 可区分）。
+    keys = [str(a["assertion_key"]) for a in [*required, *advisory]]
+    dup = next((k for k in sorted(keys) if keys.count(k) > 1), None)
+    if dup is not None:
+        raise ContractCompileError(f"assertions 含重复断言标识 {dup!r}（同验证器同 kind 只能一条）")
 
     compiled: dict[str, Any] = {
         "assertions": required,

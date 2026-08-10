@@ -354,6 +354,106 @@ def test_closeout_extra_runs_do_not_substitute_required(repo, chain):
         repo.closeout_task_run(task_run_id=chain["task_run_id"], final_message={"text": "x"})
 
 
+def test_closeout_key_based_requires_each_kind_verified(repo, chain):
+    """G2 补尾：同 ref 不同 kind 是两条独立断言 —— 只 VERIFIED 一条 → 拒绝。
+
+    判别性测试：旧实现按 ref 集合判定会把 `artifact_acceptance::html` 与
+    `artifact_acceptance::md` 当成同一条，只验证 html 就错误放行；升级为
+    assertion_key 判定后必须逐 kind 验证，两条都 VERIFIED 才允许收口。
+    """
+    contract = compile_acceptance_contract(
+        task_run_id=chain["task_run_id"],
+        attempt_id=chain["attempt_id"],
+        proposed={
+            "assertions": [
+                {"validator": "artifact_acceptance", "artifact_kind": "html"},
+                {"validator": "artifact_acceptance", "artifact_kind": "md"},
+            ]
+        },
+    )
+    repo.freeze_contract(
+        contract_id=contract.contract_id,
+        task_run_id=chain["task_run_id"],
+        attempt_id=chain["attempt_id"],
+        compiled=contract.compiled,
+        digest=contract.digest,
+        inert_legacy=contract.inert_legacy,
+    )
+    html_op = repo.create_validator_operation(
+        attempt_id=chain["attempt_id"],
+        agent_run_id=chain["agent_run_id"],
+        contract_id=contract.contract_id,
+        assertion_key="artifact_acceptance::html",
+        validator_ref="artifact_acceptance",
+        validator_kind="pure",
+        code_digest="d",
+        artifact_digests=[],
+    )
+    repo.settle_validator_operation(html_op, status="VERIFIED", stdout_text="ok", exit_code=0)
+    with pytest.raises(RuntimeConflictError, match=NOT_VERIFIED):
+        repo.closeout_task_run(task_run_id=chain["task_run_id"], final_message={"text": "x"})
+    # md 那条补 VERIFIED 后收口通过 —— 同 ref 双 kind 全验证才算过。
+    md_op = repo.create_validator_operation(
+        attempt_id=chain["attempt_id"],
+        agent_run_id=chain["agent_run_id"],
+        contract_id=contract.contract_id,
+        assertion_key="artifact_acceptance::md",
+        validator_ref="artifact_acceptance",
+        validator_kind="pure",
+        code_digest="d",
+        artifact_digests=[],
+    )
+    repo.settle_validator_operation(md_op, status="VERIFIED", stdout_text="ok", exit_code=0)
+    r = repo.closeout_task_run(task_run_id=chain["task_run_id"], final_message={"text": "x"})
+    assert r["acceptance_ok"] is True
+
+
+def test_closeout_pre_upgrade_contract_and_rows_compat(repo, chain):
+    """G2 补尾兼容窗口：升级前冻结的旧契约（compiled 无 assertion_key）+
+    旧操作行（assertion_key=''）→ closeout 照常通过。
+
+    旧契约 required 侧现场回退生成 key（ref::kind，kind 缺省 '*'）；
+    旧行 verified 侧按 ref::* 通配认（kind 未知 → 匹配该 ref 任意断言）。
+    升级不得让存量进行中的任务收不了口。
+    """
+    contract = compile_acceptance_contract(
+        task_run_id=chain["task_run_id"],
+        attempt_id=chain["attempt_id"],
+        proposed={
+            "assertions": [{"validator": "artifact_acceptance", "artifact_kind": "html"}]
+        },
+    )
+    # 模拟旧契约：冻结前把 assertion_key 从 compiled 里剥掉。
+    compiled_legacy = {
+        k: v for k, v in contract.compiled.items()
+    }
+    compiled_legacy["assertions"] = [
+        {k: v for k, v in a.items() if k != "assertion_key"}
+        for a in compiled_legacy["assertions"]
+    ]
+    repo.freeze_contract(
+        contract_id=contract.contract_id,
+        task_run_id=chain["task_run_id"],
+        attempt_id=chain["attempt_id"],
+        compiled=compiled_legacy,
+        digest=contract.digest,
+        inert_legacy=contract.inert_legacy,
+    )
+    # 旧行：不传 assertion_key（升级前 runner 行为）→ VERIFIED。
+    op = repo.create_validator_operation(
+        attempt_id=chain["attempt_id"],
+        agent_run_id=chain["agent_run_id"],
+        contract_id=contract.contract_id,
+        validator_ref="artifact_acceptance",
+        validator_kind="pure",
+        code_digest="d",
+        artifact_digests=[],
+    )
+    repo.settle_validator_operation(op, status="VERIFIED", stdout_text="ok", exit_code=0)
+    r = repo.closeout_task_run(task_run_id=chain["task_run_id"], final_message={"text": "x"})
+    assert r["acceptance_ok"] is True
+
+
 def test_closeout_outbox_owner_is_real_task_owner(repo, chain):
     """K.4：outbox owner_id 取 tasks 表真实 owner，不是 task_run_id。"""
     _freeze_and_verify(repo, chain)
