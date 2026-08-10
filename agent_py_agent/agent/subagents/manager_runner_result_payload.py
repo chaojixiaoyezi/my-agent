@@ -332,18 +332,22 @@ def apply_status_and_build_payload(
 
 
 def _machine_verify_done_acceptance(task: SubAgentTask, tests: list, *, owner_home: str = "") -> None:
-    """DONE 任务的验收证据绑定机器执行(问题3)。
+    """DONE 任务的验收证据绑定机器验证(问题3)。
 
-    模型自述的 DONE/VERIFIED 不再自动成立:对 tests[] 逐条真实执行,全部通过才
-    保持 VERIFIED,任何失败/不可验都降回 UNVERIFIED 并打真实失败事实——由现有
-    ISSUE_UNVERIFIED_DONE → BLOCKED 返工门(policies.py)要求模型重做补齐证据。
-    来源 worker(ledger 权威)由 verify_done_acceptance 内部跳过。
+    模型自述的 DONE/VERIFIED 不再自动成立:对 tests[] 中可机验条目逐条做进程内
+    安全验证(file_check/content_check/static_site_check/artifact_integrity),
+    全部通过才保持 VERIFIED,任何失败/不可验都降回 UNVERIFIED 并打真实失败
+    事实——由现有 ISSUE_UNVERIFIED_DONE → BLOCKED 返工门(policies.py)要求模型
+    重做补齐证据。审计 R0:command/working_dir 不再被机器执行,只作 inert
+    evidence;未带可机验方式的 tests 一律按不可验处理。来源 worker(ledger
+    权威)由 verify_done_acceptance 内部跳过。
 
     owner_home 来自 manager.owner_scope_root = 工具循环 ShellTool 的
-    path_access_policy.owner_scope_root(同一把沙箱门):非空 = 本轮命令真的被
-    bwrap 隔离,验收同样必须 bwrap;空 = 本轮普通执行,验收普通执行。绝不能读
-    task.effective_permissions.owner_home(快照默认值在无沙箱环境也非空,会把
-    合法普通执行误判成必须 bwrap → 假 SANDBOX_UNAVAILABLE,子代理永远收不了口)。
+    path_access_policy.owner_scope_root(同一把沙箱门):非空时 file_check 的
+    路径边界放开到 owner home(注册表背书的产物路径可能在工作区外);空 =
+    无路径限制。绝不能读 task.effective_permissions.owner_home(快照默认值在
+    无沙箱环境也非空,会把合法普通执行误判成必须 bwrap → 假失败,子代理永远
+    收不了口)。
     """
     if not task_has_status(task, TaskStatus.DONE):
         return

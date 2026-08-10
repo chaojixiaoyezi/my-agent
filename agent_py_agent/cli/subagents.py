@@ -184,10 +184,10 @@ def _add_agents_action_subcommands(sub):
 
 
 def _add_agents_tests_subcommand(sub):
-    tests = sub.add_parser("subagents-tests", help="查看或显式重跑 subagent 真实测试执行记录")
+    tests = sub.add_parser("subagents-tests", help="查看或显式重跑 subagent 验收检查记录")
     tests.add_argument("run_id", help="子代理运行 ID")
-    tests.add_argument("--re-run", action="store_true", help="显式重新执行 output.json 里的 tests 并写入报告")
-    tests.add_argument("--timeout", type=float, default=120.0, help="re-run 时单条测试超时秒数")
+    tests.add_argument("--re-run", action="store_true", help="显式重新检查 output.json 里的 tests 并写入报告")
+    tests.add_argument("--timeout", type=float, default=120.0, help="兼容参数:验收已不执行命令,超时仅作报告元数据记录")
     tests.set_defaults(func=cmd_subagents_tests)
 
 

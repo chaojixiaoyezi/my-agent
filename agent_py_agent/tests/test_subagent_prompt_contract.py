@@ -25,10 +25,10 @@ def test_runner_prompt_tells_leaf_to_defer_command_execution_to_parent():
     assert "没有 shell/command/terminal 工具" in prompt
     assert "不要因为不能自己运行 pytest 就提交 capability_request" in prompt
     assert "最终收口认可" in prompt
-    assert "不要写 cd ... &&" in prompt
-    assert '"working_dir"' in prompt
+    # 审计 R0:提示词不再指导写命令,明确 command/working_dir 不会被机器执行。
+    assert "command/working_dir 不会被机器执行" in prompt
+    assert "validation_method" in prompt
     assert "逐条对照验收条件" in prompt
-    assert "从 working_dir 运行能导入被测模块" in prompt
 
 
 def test_runner_prompt_tells_leaf_to_chunk_long_file_writes():

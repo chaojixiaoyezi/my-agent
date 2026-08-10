@@ -7,6 +7,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from ...backends import ModelResponse
+from ...backends.text_protocol_parser import (
+    _TEXT_OPEN,
+    _inline_json_tool_end_marker_valid,
+)
 from ...tooling.content_transport_policy import (
     MAX_INLINE_WRITE_CONTENT_CHARS,
 )
@@ -44,14 +48,24 @@ def first_complete_tool_call_cut_index(text: str) -> int | None:
 class ToolBoundaryChunkFilter:
     on_chunk: Callable[[str], None] | None
     max_inline_content_chars: int = MAX_INLINE_WRITE_CONTENT_CHARS
+    bypass: bool = False  # native 直通：不解析 text 协议标记，全量转发
     _text: str = ""
     _forwarded: int = 0
     _closed: bool = False
     cut_detected: bool = field(default=False, init=False)
     cut_index: int | None = field(default=None, init=False)
+    _first_open_index: int | None = field(default=None, init=False)
 
     def __call__(self, chunk: str) -> None:
         self._text += str(chunk or "")
+        if self.bypass:
+            if self.on_chunk is not None:
+                self._forward_to(len(self._text))
+            return
+        # 先转发本帧已确认安全的可见部分再检查中止：abort 抛出时 UI 已推进到
+        # 第一个块 open 之前，可见文本与 chunk 切分方式无关（J-4）。
+        if self.on_chunk is not None:
+            self._forward_visible()
         protocol_abort = malformed_tool_protocol_stream_abort(self._text)
         if protocol_abort is not None:
             raise protocol_abort
@@ -65,28 +79,44 @@ class ToolBoundaryChunkFilter:
         if abort is not None:
             raise abort
         cut_index = first_complete_tool_call_cut_index(self._text)
-        if cut_index is None:
-            if self.on_chunk is not None:
-                self._forward_to(len(self._text))
+        if cut_index is not None:
+            if not self.cut_detected:
+                self.cut_detected = True
+                self.cut_index = cut_index
+            # J-4：块体原文不进 UI；第一个完整块完成后停止转发后续内容。
+            self._closed = True
             return
-        if not self.cut_detected:
-            self.cut_detected = True
-            self.cut_index = cut_index
-        if self.on_chunk is not None and not self._closed:
-            self._forward_to(cut_index)
-        self._closed = True
 
     def finish(self) -> None:
-        if self.on_chunk is None or self._closed:
+        if self.bypass or self.on_chunk is None or self._closed:
             return
         if self.cut_detected:
             return
-        self._forward_to(len(self._text))
+        self._forward_visible()
 
     def complete_tool_text(self) -> str:
         if self.cut_index is None:
             return ""
-        return self._text[: self.cut_index].strip()
+        start = self._first_open_index
+        if start is None:
+            start = self._text.find(_TEXT_OPEN)
+            if start < 0:
+                return ""
+        return self._text[start : self.cut_index].strip()
+
+    def _forward_visible(self) -> None:
+        # J-4：UI 只转发第一个工具块 open 之前的 prose；尾部不完整 marker 前缀
+        # hold-back（等后续 chunk 确认，保证可见文本与切分无关）。
+        self._forward_to(self._visible_end())
+
+    def _visible_end(self) -> int:
+        if self._first_open_index is not None:
+            return self._first_open_index
+        pos = self._text.find(_TEXT_OPEN)
+        if pos >= 0:
+            self._first_open_index = pos
+            return pos
+        return len(self._text) - _trailing_open_marker_prefix_len(self._text)
 
     def _forward_to(self, end: int) -> None:
         if end <= self._forwarded:
@@ -95,6 +125,26 @@ class ToolBoundaryChunkFilter:
         self._forwarded = end
         if safe:
             self.on_chunk(safe)
+
+
+def _trailing_open_marker_prefix_len(text: str) -> int:
+    """尾部是 [TOOL_CALL] 的不完整前缀（chunk 切在 marker 中间）→ 先不转发。"""
+    return _trailing_marker_prefix_len(text, _TOOL_START_MARKERS)
+
+
+def _trailing_marker_prefix_len(text: str, markers: tuple[str, ...]) -> int:
+    """尾部是任一 marker 的不完整前缀（chunk 切在 marker 中间）→ 返回前缀长度。
+
+    abort 判定用它作"等后续 chunk 确认"守卫：不完整的 [/TOOL_ 前缀可能是
+    已有块的闭合信号，不能在中途提前 abort——保证 abort 判定与 chunk 切分
+    方式无关（#89 等价性不变量）。
+    """
+    best = 0
+    for marker in markers:
+        for length in range(len(marker) - 1, 0, -1):
+            if length > best and text.endswith(marker[:length]):
+                best = length
+    return best
 
 
 def _first_marker(text: str, markers: tuple[str, ...], cursor: int) -> tuple[int, str] | None:
@@ -148,17 +198,6 @@ def _first_protocol_end_marker_pos(text: str, marker: str, body_start: int) -> i
         cursor = pos + len(marker)
 
 
-def _inline_json_tool_end_marker_valid(text: str, body_start: int, marker_pos: int) -> bool:
-    raw = text[body_start:marker_pos].strip().strip("`")
-    if not raw:
-        return False
-    try:
-        parsed, end = json.JSONDecoder().raw_decode(raw)
-    except json.JSONDecodeError:
-        return False
-    return isinstance(parsed, dict) and not raw[end:].strip()
-
-
 def _last_protocol_marker_pos(text: str, marker: str) -> int:
     cursor = len(text)
     while True:
@@ -186,6 +225,11 @@ def _open_tool_start(text: str) -> tuple[int, str] | None:
 
 
 def malformed_tool_protocol_stream_abort(text: str) -> MalformedToolProtocolStreamAbort | None:
+    # 尾部是未完成 marker 前缀（chunk 切在 marker 中间）→ 先等后续 chunk 确认，
+    # 不提前 abort：`[/TOOL_CAL` 可能是已存在块的闭合信号，此刻数未闭合 open
+    # 会把可闭合的块误数成未闭合（逐字符切分 false abort 根因）。
+    if _trailing_marker_prefix_len(text, _TOOL_START_MARKERS + _TOOL_END_MARKERS):
+        return None
     start_info = _open_tool_start(text)
     if start_info is None:
         return None
@@ -211,9 +255,37 @@ def malformed_tool_protocol_stream_abort(text: str) -> MalformedToolProtocolStre
 
 
 def _open_tool_start_count(text: str) -> int:
-    last_end = _last_marker(text, _TOOL_END_MARKERS)
+    last_end = _last_tool_end_marker(text)
     cursor = 0 if last_end is None else last_end[0] + len(last_end[1])
     return _protocol_marker_count(text, _TOOL_START_MARKERS, cursor)
+
+
+def _last_tool_end_marker(text: str) -> tuple[int, str] | None:
+    """最后一个已"有效闭合"的 [/TOOL_CALL]（line-start 或 raw_decode 验证的
+    inline close）。未闭合 open 计数必须从它之后数——旧实现只认 line-start
+    close，同行 close 的块被误数成未闭合（逐字符切分 false abort 根因）。
+    """
+    hits = [
+        (pos, marker)
+        for marker in _TOOL_END_MARKERS
+        for pos in [_last_protocol_end_marker_pos(text, marker)]
+        if pos != -1
+    ]
+    return max(hits, key=lambda item: item[0]) if hits else None
+
+
+def _last_protocol_end_marker_pos(text: str, marker: str) -> int:
+    cursor = len(text)
+    while True:
+        pos = text.rfind(marker, 0, cursor)
+        if pos == -1:
+            return -1
+        if _marker_starts_protocol_line(text, pos):
+            return pos
+        open_at = text.rfind(_TEXT_OPEN, 0, pos)
+        if open_at != -1 and _inline_json_tool_end_marker_valid(text, open_at + len(_TEXT_OPEN), pos):
+            return pos
+        cursor = pos
 
 
 def _protocol_marker_count(text: str, markers: tuple[str, ...], cursor: int) -> int:

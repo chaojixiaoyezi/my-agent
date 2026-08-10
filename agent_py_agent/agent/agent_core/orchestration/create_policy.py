@@ -331,12 +331,15 @@ def _current_run_id(agent) -> str:
     # 缺此兜底子代理 parent_id 为空,子代理成为自己的 root,主任务与子代理
     # 的 task_id 对不上(lineage 断裂,问题2)。request_id 是请求实例 id,语义
     # 与 run_id 同级,仅作兜底不抢 run_id/task_id 的优先级。
-    return str(
+    value = (
         getattr(current, "run_id", "")
         or getattr(current, "task_id", "")
         or getattr(current, "request_id", "")
-        or ""
-    ).strip()
+    )
+    # 结构化守卫：契约是"返回 str 或空"。字段可能不是 str（如测试用 MagicMock
+    # 时 getattr 自动返回 Mock 对象），绝不能把 str() 化后的 Mock 描述当 ID
+    # 拼进路径（R0 #90 opaque_id 拒绝式校验会因此把合法创建误判为注入）。
+    return str(value).strip() if isinstance(value, str) else ""
 
 
 def _current_conversation_task_id(agent) -> str:

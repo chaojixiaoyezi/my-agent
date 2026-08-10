@@ -1,14 +1,13 @@
 
 from __future__ import annotations
 
-"""Small helpers used by the closeout test executor."""
+"""Small helpers used by the closeout test executor.
 
-import os
-import shlex
-import shutil
-import subprocess
-import sys
-import time
+审计 R0:command 执行路径已删除,所有 command 专用 helper(_split_command /
+_execution_argv / _command_name / _command_*_record / _with_working_dir)一并
+移除;仅保留进程内文件检查(file_check / content_check)所需的 helper。
+"""
+
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,36 +23,6 @@ class ContentMatchRecordRequest:
     pattern: str
     exact: bool = False
     expect_absent: bool = False
-
-
-def _split_command(command: str) -> list[str]:
-    """Split a command string using the current platform's shell quoting rules."""
-
-    argv = shlex.split(command, posix=os.name != "nt")
-    if os.name == "nt":
-        return [_strip_wrapping_quotes(item) for item in argv]
-    return argv
-
-
-def _execution_argv(argv: list[str]) -> list[str]:
-    if argv and _command_name(argv[0]) == "python" and shutil.which(argv[0]) is None:
-        return [sys.executable, *argv[1:]]
-    return argv
-
-
-def _strip_wrapping_quotes(value: str) -> str:
-    """Remove one matching pair of wrapping quotes from an argv item."""
-
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-        return value[1:-1]
-    return value
-
-
-def _command_name(value: str) -> str:
-    """Return a normalized executable name for allowlist checks."""
-
-    name = Path(value.strip('"')).name.lower()
-    return name[:-4] if name.endswith(".exe") else name
 
 
 def _test_name(test: dict[str, Any], default: str = "") -> str:
@@ -126,93 +95,6 @@ def _file_record(
         validation_method=method,
         validation_result=result,
     )
-
-
-def _command_rejected_record(
-    test: dict[str, Any],
-    command: str,
-    error: str,
-) -> TestExecutionRecord:
-    """Return a failed command validation record."""
-
-    return TestExecutionRecord(
-        test_name=_test_name(test, default=command),
-        command=command,
-        validation_method="command",
-        error=error,
-        validation_result={"ok": False, "reason": "command_rejected"},
-    )
-
-
-def _command_timeout_record(
-    test: dict[str, Any],
-    command: str,
-    exc: subprocess.TimeoutExpired,
-    timing: tuple[float, float],
-) -> TestExecutionRecord:
-    """Return a failed command timeout record."""
-
-    timeout_seconds, start = timing
-    return TestExecutionRecord(
-        test_name=_test_name(test, default=command),
-        command=command,
-        executed=False,
-        stdout=exc.stdout or "",
-        stderr=exc.stderr or "",
-        duration_seconds=time.monotonic() - start,
-        executed_at=_utc_now_iso(),
-        error=f"命令超时 ({timeout_seconds:g}s)",
-        validation_method="command",
-        validation_result={"ok": False, "reason": "timeout"},
-    )
-
-
-def _command_error_record(
-    test: dict[str, Any],
-    command: str,
-    exc: Exception,
-    start: float,
-) -> TestExecutionRecord:
-    """Return a failed command execution-error record."""
-
-    return TestExecutionRecord(
-        test_name=_test_name(test, default=command),
-        command=command,
-        executed=False,
-        duration_seconds=time.monotonic() - start,
-        executed_at=_utc_now_iso(),
-        error=str(exc),
-        validation_method="command",
-        validation_result={"ok": False, "reason": "execution_error"},
-    )
-
-
-def _command_completed_record(
-    test: dict[str, Any],
-    command: str,
-    completed: subprocess.CompletedProcess,
-    start: float,
-) -> TestExecutionRecord:
-    """Return a completed command validation record."""
-
-    return TestExecutionRecord(
-        test_name=_test_name(test, default=command),
-        command=command,
-        executed=True,
-        exit_code=completed.returncode,
-        stdout=completed.stdout,
-        stderr=completed.stderr,
-        duration_seconds=time.monotonic() - start,
-        executed_at=_utc_now_iso(),
-        validation_method="command",
-        validation_result={"ok": completed.returncode == 0, "exit_code": completed.returncode},
-    )
-
-
-def _with_working_dir(record: TestExecutionRecord, working_dir: Path) -> TestExecutionRecord:
-    record.metadata["working_dir"] = str(working_dir)
-    record.validation_result.setdefault("working_dir", str(working_dir))
-    return record
 
 
 def _utc_now_iso() -> str:

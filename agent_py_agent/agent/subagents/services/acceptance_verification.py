@@ -2,17 +2,18 @@
 
 子代理收口时可以口头声明 DONE/VERIFIED、failing_tests=[],但机器状态与证据
 没有绑定:真实 build/test 日志可能仍然失败(问题3 实锤)。本模块在 runner 收口
-路径上对 DONE 任务的 tests[] 逐条真实执行:
+路径上对 DONE 任务的 tests[] 逐条执行进程内安全验证:
 
-- 全部可机验条目真实通过(exit 0 / 文件存在 / 内容命中)→ VERIFIED 成立;
-- 任何一条失败 → 在 test dict 上打真实失败事实(exit code + stderr 尾部),任务
+- 全部可机验条目真实通过(文件存在 / 内容命中 / 产物完整性)→ VERIFIED 成立;
+- 任何一条失败 → 在 test dict 上打真实失败事实(exit code + 错误信息),任务
   保持 UNVERIFIED,由现有 ISSUE_UNVERIFIED_DONE → BLOCKED 返工门要求重做;
-- 模型自述的 ok/status 一律以机器执行结果为准(机器裁决覆盖模型自述);
+- 模型自述的 ok/status 一律以机器验证结果为准(机器裁决覆盖模型自述);
 - 无任何可机验条目时也保持 UNVERIFIED(不可绑定即不可信),返工门要求补齐。
 
-沙箱语义与 run_command 同一把门:owner_home 非空必须 bwrap 隔离(写根 None =
-普通 owner shell 语义,home 可写,go cache 才能落盘),bwrap 缺失 fail-closed;
-owner_home 为空 = 单租户/显式全权,普通执行。
+审计 R0:模型验收 command/cwd/working_dir 执行路径已删除。command 只作为
+inert evidence 记录(任何读取不触发 subprocess,永不参与 VERIFIED 判定);
+可机验方式仅剩 file_check / content_check / static_site_check /
+artifact_integrity——全部为进程内文件检查,不执行外部程序。
 
 来源 worker(ledger)路径跳过:持久账本才是权威,模型收口不适用机器验收。
 """
@@ -25,26 +26,14 @@ from pathlib import Path
 from ..execution.executor import TestExecutor
 from ..models import TaskStatus, task_has_status
 
-# 机器可执行的验收方式集合:有 command 的 command 测试 + 文件/内容/站点/完整性
-# 检查。其余(模型自述类,如"人工核对过")不可绑定机器,不参与裁决。
+# 机器可验证的验收方式集合(全部为进程内文件检查,无外部程序执行)。其余
+# (模型自述类,如"人工核对过"或 command)不可绑定机器,不参与裁决。
 _CHECKABLE_METHODS = frozenset({
-    "command",
     "file_check",
     "content_check",
     "static_site_check",
     "artifact_integrity",
 })
-
-_ACCEPTANCE_PREFIXES = frozenset({
-    "python",
-    "python3",
-    "py",
-    "pytest",
-    "test",
-    "go",
-})
-
-_ACCEPTANCE_TIMEOUT_SECONDS = 120.0
 
 _STDERR_TAIL_CHARS = 400
 _MESSAGE_MAX_CHARS = 600
@@ -99,10 +88,7 @@ def verify_done_acceptance(
 
     failures: list[dict[str, str]] = []
     for test in [*checkable, *synthesized]:
-        # 模型声明的 working_dir 决定 bwrap 的 --chdir(与 run_command 同一语义:
-        # bwrap spec.workspace = 命令真实 cwd),相对路径以任务工作区为基准解析。
-        command_cwd = _command_cwd(test, workspace)
-        runner = _runner_for(workspace, owner_home, executor, command_cwd=command_cwd)
+        runner = _runner_for(workspace, owner_home, executor)
         _run_one(runner, test, failures)
     return AcceptanceVerificationResult(
         checked=True,
@@ -116,8 +102,8 @@ def _is_checkable(test: dict[str, object]) -> bool:
     if not isinstance(test, dict):
         return False
     method = str(test.get("validation_method") or "command").strip().lower() or "command"
-    if str(test.get("command") or "").strip():
-        return True
+    # command 不作为可机验方式:模型提交的 command 只保留为 inert evidence,
+    # 即使带了 command 字段也不触发任何机器执行。
     return method in _CHECKABLE_METHODS
 
 
@@ -157,51 +143,26 @@ def _workspace_for(task) -> Path | None:
     return None
 
 
-def _command_cwd(test: dict[str, object], workspace: Path) -> Path | None:
-    """解析测试声明的命令 cwd(与 TestExecutor 同一解析规则),用于 bwrap --chdir 对齐。
-
-    返回 None = 未声明(执行器会用 workspace);解析失败/不存在等由执行器裁决。
-    """
-    raw = str(test.get("working_dir") or test.get("cwd") or "").strip()
-    if not raw:
-        return None
-    candidate = Path(raw).expanduser()
-    return candidate.resolve() if candidate.is_absolute() else (workspace / candidate).resolve()
-
-
 def _runner_for(
     workspace: Path,
     owner_home: str,
     executor: TestExecutor | None = None,
-    command_cwd: Path | None = None,
 ) -> TestExecutor:
-    """按沙箱门构建验收执行器(owner_home 非空才包 bwrap,与 run_command 同一把门)。"""
+    """构建验收执行器(仅进程内文件检查,无外部程序执行)。"""
     if executor is not None:
         return executor
-    argv_prefix: tuple[str, ...] = ()
-    env: dict[str, str] | None = None
-    boundary_root: Path | None = None
-    unrestricted = False
     if owner_home:
-        # bwrap spec 的 workspace 必须 = 命令真实 cwd:run_command 里 --chdir
-        # 就是 target,Popen cwd 与沙箱内 cwd 由此对齐;验收复现同一语义,否则
-        # 模型声明的 working_dir(如父任务 output/)在沙箱里被 --chdir 覆盖,
-        # `go build ./...` 跑错目录假失败。
-        argv_prefix, env = _sandbox_execution_prefix(owner_home, command_cwd or workspace)
-        # 路径边界 = 沙箱可写宇宙(owner home,写根 None 整 home rw),不是窄
-        # workspace:注册表背书的绝对产物路径与父任务 output/ 都在 home 内、
-        # workspace 外,必须可验。
+        # 注册表背书的绝对产物路径与父任务 output/ 可能在任务 workspace 外、
+        # owner home 内(file_check 需要可验),路径边界放开到 owner home。
         boundary_root = Path(owner_home)
+        unrestricted = False
     else:
-        # 无沙箱 = 与 run_command 普通执行同可信级(单租户/开发机,本身无路径
-        # 限制):绝对路径照实解析,不做边界裁剪。
+        # 无 owner scope = 与 run_command 普通执行同可信级(单租户/开发机,本身
+        # 无路径限制):绝对路径照实解析,不做边界裁剪。
+        boundary_root = None
         unrestricted = True
     return TestExecutor(
         workspace,
-        allowed_prefixes=_ACCEPTANCE_PREFIXES,
-        timeout_seconds=_ACCEPTANCE_TIMEOUT_SECONDS,
-        argv_prefix=argv_prefix,
-        env=env,
         boundary_root=boundary_root,
         unrestricted_paths=unrestricted,
     )
@@ -222,43 +183,6 @@ def _ledger_authoritative(task) -> bool:
     from ...common.audit_activation import structured_audit_source_worker_attributes
 
     return structured_audit_source_worker_attributes(attrs)
-
-
-def _sandbox_execution_prefix(owner_home: str, workspace: Path) -> tuple[tuple[str, ...], dict[str, str]]:
-    """owner-scoped 验收执行包 bwrap(与 run_command 同一把隔离门)。
-
-    write_roots=None = 普通 owner shell 语义:owner home 可写(go cache/python
-    __pycache__ 需要);env 用 run_command 同一套 scrub 环境,保证沙箱内外命令
-    可解析路径一致,验收复现模型任务期的真实体验。
-    """
-    from ...tooling.sandbox import (
-        SandboxSpec,
-        SandboxUnavailable,
-        build_bwrap_argv,
-        find_bwrap,
-    )
-    from ...tooling.shell import _subprocess_text_env
-
-    bwrap = find_bwrap()
-    if not bwrap:
-        raise SandboxUnavailable(
-            "BWRAP_NOT_FOUND: owner-scoped 验收命令要求 bwrap 隔离"
-        )
-    argv = [
-        *build_bwrap_argv(
-            SandboxSpec(
-                owner_home=Path(owner_home),
-                workspace=workspace,
-                write_roots=None,
-                bwrap_path=bwrap,
-                network_access=True,
-            )
-        ),
-        "--",
-    ]
-    env = _subprocess_text_env(owner_home)
-    env["HOME"] = str(owner_home)
-    return tuple(argv), env
 
 
 def _stamp_machine_fact(test: dict[str, object], record, ok: bool) -> None:

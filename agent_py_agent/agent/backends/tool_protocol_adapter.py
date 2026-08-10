@@ -17,9 +17,17 @@ from ..tooling.runtime_contracts import (
     ToolChoice,
     ToolProtocolSnapshot,
 )
+from .text_protocol_parser import (
+    MAX_BLOCK_CHARS,
+    MAX_RESPONSE_CHARS,
+    MAX_TEXT_CALLS,
+    MAX_UNCLOSED_OPEN_MARKERS,
+    TextBlockScan,
+    _TEXT_CLOSE,
+    _TEXT_OPEN,
+    scan_text_blocks,
+)
 
-_TEXT_OPEN = "[TOOL_CALL]"
-_TEXT_CLOSE = "[/TOOL_CALL]"
 _NATIVE_PSEUDO_TOOL_MARKERS = (
     "[tool_call]",
     "[/tool_call]",
@@ -257,16 +265,33 @@ class TextToolProtocolAdapter:
         control_violation = _text_control_block_violation(text)
         if control_violation is not None:
             return ProviderToolCallResult(violations=(control_violation,))
-        payloads, errors = _parse_standalone_text_blocks(text)
-        violations = tuple(
-            ToolProtocolViolation(
-                "PROTOCOL_VIOLATION",
-                error,
-                "text",
-                _protocol_evidence(text),
+        # J-6：响应总量 terminal 上限——超限直接整轮拒绝，不解析任何块。
+        if len(text) > MAX_RESPONSE_CHARS:
+            return ProviderToolCallResult(
+                violations=(
+                    ToolProtocolViolation(
+                        "PROTOCOL_VIOLATION",
+                        f"text response exceeds {MAX_RESPONSE_CHARS} chars",
+                        "text",
+                        _protocol_evidence(text),
+                    ),
+                )
             )
-            for error in errors
-        )
+        scan = scan_text_blocks(text)
+        errors = _scan_errors(scan)
+        # J-6：未闭合 open 数 > 1 → 整轮拒绝，与流式 MalformedToolProtocolStreamAbort
+        # 对齐——同一响应里即使有合法好块也不执行（块序混乱即协议损坏）。
+        if scan.unclosed_count > MAX_UNCLOSED_OPEN_MARKERS:
+            return ProviderToolCallResult(violations=_scan_violations(errors, text))
+        payloads = scan.payloads
+        if len(payloads) > MAX_TEXT_CALLS:
+            # J-6：块数上限——超出的块违规不执行，之前的好块照常执行。
+            payloads = payloads[:MAX_TEXT_CALLS]
+            errors = [
+                *errors,
+                f"text response exceeds {MAX_TEXT_CALLS} tool calls; extra calls were not executed",
+            ]
+        violations = _scan_violations(errors, text)
         if not payloads:
             return ProviderToolCallResult(violations=violations)
         calls: list[ToolCall] = []
@@ -365,75 +390,27 @@ def _text_control_block_violation(text: str) -> ToolProtocolViolation | None:
     )
 
 
-def _parse_standalone_text_blocks(text: str) -> tuple[list[dict[str, Any]], list[str]]:
-    # 长期助手 式宽容解析(真机 2026-08-08 scrapy 复刻):弱模型(falsh 类)在工具轮
-    # 几乎必然先输出 prose("我需要先看一下…")再写 [TOOL_CALL] 块,严格"纯块"
-    # 会把已成功执行的工具轮整轮判 violation 杀死。语义:有合法块就提取执行,
-    # 块与块之间的 prose 忽略;完全没有块标记=普通文本回复(非违规)。
-    #
-    # 安全红线(2026-08-09 用户复核):坏块永不执行——未闭合([/TOOL_CALL] 缺失)
-    # 与截断/JSON 损坏同罪,块边界标记是执行契约的一部分,漏闭合即未形成可执行
-    # 调用,撤销 60289e44 的"完整 JSON 宽容"(模型漏写闭合标记时命令/写文件不得
-    # 执行)。坏块记错误原因但不连坐同响应里的好块:好块照常提取执行,坏块违规
-    # 留痕反馈(真机 2026-08-09 17:27/17:46 形态 = 好块+伪 tool-result+截断块
-    # 混排,原来整轮拒绝让任务原地重试)。
-    if _TEXT_OPEN not in text and _TEXT_CLOSE not in text:
-        return [], []
-    payloads: list[dict[str, Any]] = []
-    errors: list[str] = []
-    cursor = 0
-    length = len(text)
-    while True:
-        open_at = text.find(_TEXT_OPEN, cursor)
-        if open_at < 0:
-            break
-        body_start = open_at + len(_TEXT_OPEN)
-        close = text.find(_TEXT_CLOSE, body_start)
-        if close < 0:
-            # 未闭合 = 坏块,绝不执行;继续扫描后续块(坏块不连坐好块)。
-            errors.append("text tool block is not closed")
-            cursor = open_at + len(_TEXT_OPEN)
-            continue
-        # 块被 markdown 围栏包裹(仅空白相隔)=模型在展示示例而非发起调用,仍判
-        # 违规;普通 prose 前缀(「我先看一下…」)宽容提取,这是弱模型真实输出形态。
-        before = open_at
-        while before > 0 and text[before - 1].isspace():
-            before -= 1
-        after = close + len(_TEXT_CLOSE)
-        while after < length and text[after].isspace():
-            after += 1
-        if text[max(0, before - 3) : before] == "```" or text[after : after + 3] == "```":
-            errors.append("text tool block must not be wrapped in Markdown fences")
-            cursor = close + len(_TEXT_CLOSE)
-            continue
-        raw = text[body_start:close].strip()
-        if not raw:
-            errors.append("text tool block must contain raw JSON, not Markdown")
-            cursor = close + len(_TEXT_CLOSE)
-            continue
-        # 不再做字符串级反引号检查:JSON 字符串值里反引号合法(Go raw string/
-        # 正则/模板高频,如 write_file 写 Go 代码),字符串级误杀会砍掉合法调用
-        # (真机铁证 2026-08-08 celery 复刻:补 broker.go 被"raw JSON, not
-        # Markdown"连拦 3 轮 break)。真正的围栏包裹已由上方 before/after 检查
-        # 捕获,块内 ```json 围栏由 json.loads 失败兜底。
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
-            errors.append("text tool block does not contain one valid JSON object")
-            cursor = close + len(_TEXT_CLOSE)
-            continue
-        if not isinstance(payload, dict):
-            errors.append("text tool block payload must be an object")
-            cursor = close + len(_TEXT_CLOSE)
-            continue
-        tool_name = str(payload.get("tool") or "").strip()
-        if not tool_name:
-            errors.append("text tool block is missing tool name")
-            cursor = close + len(_TEXT_CLOSE)
-            continue
-        payloads.append(dict(payload))
-        cursor = close + len(_TEXT_CLOSE)
-    return payloads, errors
+def _scan_errors(scan: TextBlockScan) -> list[str]:
+    # 统一 parser 的违规清单：坏块原因 + J-6 未闭合块体超长（仅未闭合块）。
+    errors = list(scan.errors)
+    for block in scan.blocks:
+        if block.close_index is None and block.body_chars > MAX_BLOCK_CHARS:
+            errors.append(
+                f"text tool block is not closed and exceeds {MAX_BLOCK_CHARS} chars"
+            )
+    return errors
+
+
+def _scan_violations(errors: list[str], text: str) -> tuple[ToolProtocolViolation, ...]:
+    return tuple(
+        ToolProtocolViolation(
+            "PROTOCOL_VIOLATION",
+            error,
+            "text",
+            _protocol_evidence(text),
+        )
+        for error in errors
+    )
 
 
 def _required_action_id(tool_name: str, actions: tuple[object, ...]) -> str:

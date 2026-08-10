@@ -1,12 +1,13 @@
-"""测试子代理真实验收执行器。"""
+"""测试子代理真实验收执行器(审计 R0:command 只保留 inert evidence)。"""
 
 from pathlib import Path
 
 from agent_py_agent.agent.subagents.models import TestExecutor
 
 
-def test_test_executor_runs_allowed_command_and_records_exit_code(tmp_path):
-    executor = TestExecutor(tmp_path, timeout_seconds=10)
+def test_test_executor_never_executes_command(tmp_path):
+    """审计 R0:模型验收 command 永不执行——executed=False、ok=False、原文留档。"""
+    executor = TestExecutor(tmp_path)
 
     record = executor.execute({
         "name": "python smoke",
@@ -14,23 +15,22 @@ def test_test_executor_runs_allowed_command_and_records_exit_code(tmp_path):
         "command": "python -c \"print('ok')\"",
     })
 
-    assert record.executed is True
-    assert record.exit_code == 0
-    assert record.passed is True
+    assert record.executed is False
+    assert record.passed is False
+    assert record.exit_code != 0
     assert record.validation_method == "command"
-    assert record.validation_result["ok"] is True
-    assert "ok" in record.stdout
-    assert record.duration_seconds >= 0
+    assert record.validation_result["ok"] is False
+    assert record.validation_result["reason"] == "command_execution_disabled"
+    # command 原文保留为 inert evidence,供审计回溯。
+    assert record.validation_result["command"] == "python -c \"print('ok')\""
+    assert record.command == "python -c \"print('ok')\""
     assert record.executed_at
 
 
-def test_test_executor_treats_pytest_validation_method_as_command(tmp_path):
-    """runner may label pytest commands as validation_method=pytest."""
+def test_test_executor_treats_pytest_validation_method_as_inert_command(tmp_path):
+    """pytest/unittest 标签的验收命令同样进 inert,不触发任何执行。"""
     (tmp_path / "test_solution.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
-    # Starting a nested pytest process takes about 6s on an idle macOS host and
-    # can exceed 10s while the full suite is active; keep this integration check
-    # bounded without making host load the behavior under test.
-    executor = TestExecutor(tmp_path, timeout_seconds=30)
+    executor = TestExecutor(tmp_path)
 
     record = executor.execute({
         "name": "pytest alias",
@@ -38,22 +38,16 @@ def test_test_executor_treats_pytest_validation_method_as_command(tmp_path):
         "command": "python3 -m pytest test_solution.py -q",
     })
 
-    assert record.executed is True
-    assert record.passed is True
+    assert record.executed is False
+    assert record.passed is False
     assert record.validation_method == "command"
+    assert record.validation_result["reason"] == "command_execution_disabled"
 
 
-def test_test_executor_runs_command_in_explicit_working_dir(tmp_path):
+def test_test_executor_records_working_dir_as_inert_evidence(tmp_path):
     package_dir = tmp_path / "package"
     package_dir.mkdir()
-    (package_dir / "test_smoke.py").write_text(
-        "import unittest\n\n"
-        "class TestSmoke(unittest.TestCase):\n"
-        "    def test_ok(self):\n"
-        "        self.assertTrue(True)\n",
-        encoding="utf-8",
-    )
-    executor = TestExecutor(tmp_path, timeout_seconds=10)
+    executor = TestExecutor(tmp_path)
 
     record = executor.execute({
         "name": "relative unittest",
@@ -62,12 +56,14 @@ def test_test_executor_runs_command_in_explicit_working_dir(tmp_path):
         "working_dir": "package",
     })
 
-    assert record.passed is True
-    assert record.validation_result["working_dir"] == str(package_dir.resolve())
-    assert record.metadata["working_dir"] == str(package_dir.resolve())
+    # command 不执行,working_dir 只作证据原样记录,不做路径解析/边界检查。
+    assert record.executed is False
+    assert record.passed is False
+    assert record.validation_result["working_dir"] == "package"
 
 
-def test_test_executor_blocks_working_dir_escape(tmp_path):
+def test_test_executor_does_not_resolve_working_dir_escape(tmp_path):
+    """command 不执行后,working_dir 不再参与任何路径解析,越界值也仅留档。"""
     executor = TestExecutor(tmp_path)
 
     record = executor.execute({
@@ -79,10 +75,12 @@ def test_test_executor_blocks_working_dir_escape(tmp_path):
 
     assert record.executed is False
     assert record.passed is False
-    assert "working_dir 超出可执行边界" in record.error
+    assert record.validation_result["working_dir"] == "../outside"
+    assert "超出可执行边界" not in record.error
 
 
-def test_test_executor_blocks_high_risk_shell_characters(tmp_path):
+def test_test_executor_records_high_risk_command_as_inert(tmp_path):
+    """高风险 shell 字符不再需要拦截——命令整体不执行,原文留档。"""
     executor = TestExecutor(tmp_path)
 
     record = executor.execute({
@@ -94,7 +92,8 @@ def test_test_executor_blocks_high_risk_shell_characters(tmp_path):
     assert record.executed is False
     assert record.passed is False
     assert record.validation_method == "command"
-    assert "高风险 shell 字符" in record.error
+    assert "高风险" not in record.error
+    assert record.validation_result["command"] == "python -c \"print('ok')\"; echo unsafe"
 
 
 def test_test_executor_file_check_records_existing_file_metadata(tmp_path):

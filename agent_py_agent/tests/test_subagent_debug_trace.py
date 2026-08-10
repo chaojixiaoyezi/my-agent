@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -147,6 +148,9 @@ def test_subagent_debug_trace_records_runner_result_when_enabled(tmp_path):
     """开启等级后，runner 结果会写入 refs-only 调试事件，便于真实 E2E 排障。"""
     manager = SubAgentManager(tmp_path, debug_trace_level=2)
     task = manager.create_run(goal="write proof file", thought="observe", plan=["create"])
+    proof = Path(task.agent_run_workspace_dir) / "proof.txt"
+    proof.parent.mkdir(parents=True, exist_ok=True)
+    proof.write_text("ok", encoding="utf-8")
 
     manager.runner_result.record_runner_result(
         RecordRunnerResultParams(
@@ -158,14 +162,14 @@ def test_subagent_debug_trace_records_runner_result_when_enabled(tmp_path):
             verification_status="VERIFIED",
             backend="echo",
             tool_rounds=1,
-            # 机器验收(问题3):DONE 必须带真实可执行且通过的 tests 才能保持
+            # 机器验收(问题3):DONE 必须带真实可机验且通过的 tests 才能保持
             # VERIFIED——模型自述的 VERIFIED 不再自动成立。
             structured_output=SubAgentParsedOutput(
                 found=True,
                 ok=True,
                 status="DONE",
                 summary="done",
-                tests=[{"name": "python ok", "command": "python -c 'print(1)'"}],
+                tests=[{"name": "file ok", "validation_method": "file_check", "file_path": "proof.txt"}],
             ),
         )
     )

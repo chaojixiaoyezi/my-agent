@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..common.opaque_id import validate_opaque_id
 from .models import SubAgentTask, TakeoverRecord, WorkOrderValidation
 from .policies import _default_forbidden_write_roots
 from .utils import _apply_missing_paths, _write_if_missing, _write_json_if_missing
@@ -18,6 +19,9 @@ def build_work_order_paths(
     task_dir: str | Path | None = None,
     extra_write_roots: list[str] | None = None,
 ) -> dict[str, object]:
+    # 3.txt B.2/B.3：run_id 拼进路径前先过拒绝式校验；task_dir 未显式给出时
+    # 由框架按已验证 ID 计算（这些路径会进 allowed_write_roots，注入 = 写逃逸）。
+    run_id = validate_opaque_id(run_id, kind="run_id")
     task_dir = Path(task_dir) if task_dir else manager.workspace / run_id
     paths = _work_order_base_paths(task_dir)
     paths.update(_work_order_report_paths(task_dir))

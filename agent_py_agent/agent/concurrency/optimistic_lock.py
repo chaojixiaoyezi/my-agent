@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..common.json_io import locked_json_path, write_json_file_atomic_unlocked
+from ..common.opaque_id import validate_opaque_id
 from .exceptions import ConcurrencyConflictError
 
 if TYPE_CHECKING:
@@ -20,11 +21,14 @@ class OptimisticLock:
         self._workspace = Path(config.subagent_workspace)
 
     def _get_lock_path(self, task_id: str) -> Path:
-        # 锁文件和任务文件在同一目录
+        # 锁文件和任务文件在同一目录。task_id 是 opaque identifier（R0 #90）：
+        # 拼进路径前拒绝式校验，防 ../ 等注入在任意目录创建/锁定文件。
+        task_id = validate_opaque_id(task_id, kind="task_id")
         task_dir = self._workspace / task_id
         return task_dir / "task.json.lock"
 
     def _ensure_task_dir(self, task_id: str) -> Path:
+        task_id = validate_opaque_id(task_id, kind="task_id")
         task_dir = self._workspace / task_id
         task_dir.mkdir(parents=True, exist_ok=True)
         return task_dir

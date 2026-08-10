@@ -379,8 +379,8 @@ class OutputJsonCompletionBackend(BaseBackend):
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
-            # 先真实落地产物:机器验收(问题3)只认"命令真的 exit 0",产物文件必须
-            # 先写进 output_dir,`test -f proof.txt` 才有东西可验。
+            # 先真实落地产物:机器验收(问题3)只认"文件真的在盘上",产物文件必须
+            # 先写进 task 目录,file_check proof.txt 才有东西可验。
             return ModelResponse(
                 text=(
                     "[TOOL_CALL]\n"
@@ -402,7 +402,13 @@ class OutputJsonCompletionBackend(BaseBackend):
             "status": "DONE",
             "summary": "output.json completion smoke",
             "artifacts": [{"path": "proof.txt", "kind": "file", "ok": True}],
-            "tests": [{"name": "proof exists", "command": "test -f proof.txt"}],
+            "tests": [
+                {
+                    "name": "proof exists",
+                    "validation_method": "file_check",
+                    "file_path": "proof.txt",
+                }
+            ],
         }
         return ModelResponse(
             text=(

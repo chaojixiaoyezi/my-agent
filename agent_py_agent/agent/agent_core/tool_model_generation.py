@@ -323,6 +323,10 @@ def _finish_model_generation(request: ModelGenerateParams, state: _ModelGenerati
 
 
 def _recover_unclosed_long_write_response(request: ModelGenerateParams, response):
+    if native_tool_use_active(request.params):
+        # native 直通：正文不裁决 text 协议标记（写内容走 tool_use blocks；
+        # 正文提及 [TOOL_CALL] 由最终裁决 _native_prose_violation 处理）。
+        return response
     text = str(getattr(response, "text", "") or "")
     abort = long_write_response_abort(
         text,
@@ -337,9 +341,13 @@ def _recover_unclosed_long_write_response(request: ModelGenerateParams, response
 
 
 def _build_tool_boundary_chunk_filter(request: ModelGenerateParams) -> ToolBoundaryChunkFilter:
+    # native 直通：text parser 不解析 native 正文（裁决归 _native_prose_violation，
+    # 仅完整伪调用成对才拦），防止正文【提及】marker 被流式中途误杀
+    # （真机 2026-08-06 MiniMax 形态）。
     return ToolBoundaryChunkFilter(
         _model_chunk_callback(request.params.effective_on_chunk),
         max_inline_content_chars=_tool_write_inline_max_chars(request),
+        bypass=native_tool_use_active(request.params),
     )
 
 

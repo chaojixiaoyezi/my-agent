@@ -85,7 +85,9 @@ def test_tool_boundary_stops_stream_inspection_after_complete_tool_call() -> Non
     boundary('[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]')
     boundary("\nTOOL_PROTOCOL_LINE\n" * 20)
 
-    assert "".join(forwarded) == '[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]'
+    # J-4：块体原文不进 UI——第一个完整块 open 前无 prose，UI 看到空；
+    # 完整块之后的任何内容（伪协议行）同样不再进入。
+    assert "".join(forwarded) == ""
 
 
 def test_tool_boundary_accepts_inline_closing_marker_after_complete_json() -> None:
@@ -97,7 +99,65 @@ def test_tool_boundary_accepts_inline_closing_marker_after_complete_json() -> No
     boundary("\n普通解释不应继续进入机器块")
 
     assert boundary.complete_tool_text() == text
-    assert "".join(forwarded) == text
+    # J-4：块体不进 UI（open 前无 prose）
+    assert "".join(forwarded) == ""
+
+
+def test_tool_boundary_forwards_only_prose_before_first_complete_block() -> None:
+    forwarded: list[str] = []
+    boundary = ToolBoundaryChunkFilter(forwarded.append)
+
+    boundary("先看一下项目结构。\n")
+    boundary('[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]')
+    boundary("\n块后的解释不进 UI")
+
+    assert "".join(forwarded) == "先看一下项目结构。\n"
+    assert boundary.complete_tool_text() == (
+        '[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]'
+    )
+
+
+def test_tool_boundary_holds_back_incomplete_marker_prefix_across_chunks() -> None:
+    # chunk 切分停在 marker 中间时，半截 marker 不得提前进 UI：可见文本只由
+    # 完整文本决定，与切分方式无关（J-4）。
+    text = (
+        "先看一下。\n"
+        '[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]\n收尾。'
+    )
+    one_shot: list[str] = []
+    split: list[str] = []
+
+    a = ToolBoundaryChunkFilter(one_shot.append)
+    a(text)
+    a.finish()
+
+    b = ToolBoundaryChunkFilter(split.append)
+    for chunk in (
+        "先看一下。\n[TOOL_",
+        "CALL]\n{",
+        '"tool":"read_file","path":"README.md"}',
+        "\n[/TOOL_CALL]\n收尾。",
+    ):
+        b(chunk)
+    b.finish()
+
+    assert "".join(one_shot) == "先看一下。\n"
+    assert "".join(split) == "".join(one_shot)
+    assert "TOOL_CALL" not in "".join(split)
+    assert "[/TOOL" not in "".join(split)
+
+
+def test_tool_boundary_bypass_forwards_all_text_for_native() -> None:
+    # native 直通：正文提及 marker 全量转发、绝不误杀（裁决归 _native_prose_violation）。
+    forwarded: list[str] = []
+    boundary = ToolBoundaryChunkFilter(forwarded.append, bypass=True)
+
+    boundary("正文提到 [TOOL_CALL] 不应误杀\n")
+    boundary("继续输出。")
+    boundary.finish()
+
+    assert "".join(forwarded) == "正文提到 [TOOL_CALL] 不应误杀\n继续输出。"
+    assert boundary.complete_tool_text() == ""
 
 
 def test_tool_boundary_ignores_inline_closing_marker_inside_json_string() -> None:

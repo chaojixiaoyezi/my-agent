@@ -1,88 +1,57 @@
 
 from __future__ import annotations
 
-"""Bounded executor for real closeout validation items."""
+"""Safe closeout validation executor: file/content/artifact checks only.
+
+模型验收命令(command/cwd/working_dir)执行路径已删除(审计 R0):模型提交的
+command 只保留为 inert evidence——记录原文供审计,任何读取都不触发 subprocess,
+也永不参与 VERIFIED 判定。可机验方式仅剩 file_check / content_check /
+static_site_check / artifact_integrity(全部为进程内文件检查,不执行外部程序)。
+"""
 
 import importlib
-import subprocess
-import time
 from pathlib import Path
 from typing import Any, ClassVar
 
 from ..static_site import run_static_site_check
 from .executor_helpers import (
     ContentMatchRecordRequest,
-    _command_completed_record,
-    _command_error_record,
-    _command_name,
-    _command_rejected_record,
-    _command_timeout_record,
     _content_match_record,
-    _execution_argv,
     _file_record,
     _file_result,
-    _split_command,
     _test_name,
     _utc_now_iso,
-    _with_working_dir,
 )
 from .records import TestExecutionRecord
 
+_COMMAND_DISABLED_REASON = "command_execution_disabled"
+
 
 class TestExecutor:
-    """Execute one real validation item for closeout."""
+    """Execute one real validation item for closeout (no command execution)."""
 
     __test__: ClassVar[bool] = False
-    ALLOWED_PREFIXES: ClassVar[frozenset[str]] = frozenset({
-        "python",
-        "python3",
-        "py",
-        "pytest",
-        # 机器验收(问题3):子代理交付的验收命令常以 shell 内建 test 和 Go 工具链
-        # 开头(test -f / go build / go test)。既有的 python 前缀本就允许任意代码
-        # 执行,test/go 不改变风险面;缺失则 `test -f` 这类最朴素的验收命令整批
-        # 被拒,机器绑定形同虚设。
-        "test",
-        "go",
-    })
-    BLOCKED_CHARS: ClassVar[frozenset[str]] = frozenset({"|", "&", ";", ">", "<", "`", "$"})
-    DEFAULT_TIMEOUT_SECONDS: ClassVar[float] = 120.0
-    MAX_TIMEOUT_SECONDS: ClassVar[float] = 300.0
 
     def __init__(
         self,
         workspace_root: str | Path,
         *,
-        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
-        allowed_prefixes: set[str] | frozenset[str] | None = None,
-        argv_prefix: tuple[str, ...] = (),
-        env: dict[str, str] | None = None,
         boundary_root: str | Path | None = None,
         unrestricted_paths: bool = False,
     ) -> None:
         self.workspace_root = Path(workspace_root).resolve()
-        # 路径边界:默认收窄到 workspace_root(既有语义);机器验收(问题3)在
-        # owner-scoped 沙箱里跑时,bwrap 的可写宇宙是整个 owner home(写根 None =
-        # `--bind owner_home owner_home` rw),模型声明的绝对 working_dir 和注册表
-        # 背书的产物路径都在 home 内、任务 workspace 外——边界必须放开到 owner home,
-        # 否则这些合法路径被误拒。unrestricted_paths 只给无沙箱可信环境用
-        # (owner_home 空 = 单租户,与 run_command 普通执行同可信级,本身无路径限制)。
+        # 路径边界:默认收窄到 workspace_root;注册表背书的绝对产物路径可能在
+        # 任务 workspace 外(owner home 内),owner-scoped 时边界放开到 owner home。
+        # unrestricted_paths 只给单租户/无 owner scope 环境用(本身无路径限制)。
         self.boundary_root = Path(boundary_root).resolve() if boundary_root else self.workspace_root
         self.unrestricted_paths = bool(unrestricted_paths)
-        self.timeout_seconds = min(max(float(timeout_seconds), 0.1), self.MAX_TIMEOUT_SECONDS)
-        prefixes = allowed_prefixes if allowed_prefixes is not None else self.ALLOWED_PREFIXES
-        self.allowed_prefixes = frozenset(str(item).lower() for item in prefixes)
-        # 机器验收沙箱(问题3):owner-scoped 任务的验收命令必须包 bwrap,argv_prefix
-        # 就是 bwrap argv;env 只覆盖显式字段(HOME 等),不引入宿主环境其余变量。
-        self.argv_prefix = tuple(argv_prefix)
-        self.env = dict(env) if env else None
 
     def execute(self, test: dict[str, Any]) -> TestExecutionRecord:
         """Execute a validation item and return its evidence record."""
 
         method = _validation_method(test)
         if method == "command":
-            return self._execute_command(test)
+            return self._inert_command(test)
         if method == "file_check":
             return self._check_file(test)
         if method == "content_check":
@@ -98,51 +67,29 @@ class TestExecutor:
             validation_result={"ok": False, "reason": "unknown_validation_method"},
         )
 
-    def _execute_command(self, test: dict[str, Any]) -> TestExecutionRecord:
-        command = str(test.get("command") or "").strip()
-        error = self._validate_command(command)
-        if error:
-            return _command_rejected_record(test, command, error)
-        cwd, cwd_error = self._resolve_command_working_dir(test)
-        if cwd_error:
-            return _command_rejected_record(test, command, cwd_error)
-        argv = _split_command(command)
-        run_argv = [*self.argv_prefix, *_execution_argv(argv)]
-        start = time.monotonic()
-        try:
-            completed = subprocess.run(
-                run_argv,
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout_seconds,
-                check=False,
-                env=self.env,
-            )
-        except subprocess.TimeoutExpired as exc:
-            return _with_working_dir(
-                _command_timeout_record(test, command, exc, (self.timeout_seconds, start)),
-                cwd,
-            )
-        except Exception as exc:  # pragma: no cover - platform-specific subprocess failures.
-            return _with_working_dir(_command_error_record(test, command, exc, start), cwd)
-        return _with_working_dir(_command_completed_record(test, command, completed, start), cwd)
+    def _inert_command(self, test: dict[str, Any]) -> TestExecutionRecord:
+        """Record a model-supplied command as inert evidence only; never execute.
 
-    def _validate_command(self, command: str) -> str:
-        if not command:
-            return "空测试命令"
-        if any(char in command for char in self.BLOCKED_CHARS):
-            return "测试命令包含高风险 shell 字符"
-        try:
-            argv = _split_command(command)
-        except ValueError as exc:
-            return f"测试命令解析失败: {exc}"
-        if not argv:
-            return "空测试命令"
-        executable = _command_name(argv[0])
-        if executable not in self.allowed_prefixes:
-            return f"测试命令不在 allowlist 内: {executable}"
-        return ""
+        审计 R0:模型验收 command/cwd/working_dir 执行路径已删除。此处保留
+        command 原文供审计,executed=False 且 ok=False——command 永不参与
+        VERIFIED 判定,也绝不会触碰 subprocess。
+        """
+        command = str(test.get("command") or "").strip()
+        working_dir = str(test.get("working_dir") or test.get("cwd") or "").strip()
+        return TestExecutionRecord(
+            test_name=_test_name(test, default=command),
+            command=command,
+            executed=False,
+            executed_at=_utc_now_iso(),
+            error="模型验收命令已禁用:command 只保留为 inert evidence,不会被机器执行",
+            validation_method="command",
+            validation_result={
+                "ok": False,
+                "reason": _COMMAND_DISABLED_REASON,
+                "command": command,
+                "working_dir": working_dir,
+            },
+        )
 
     def _check_file(self, test: dict[str, Any], *, method: str = "file_check") -> TestExecutionRecord:
         path, error = self._resolve_test_path(test.get("file_path"))
@@ -211,22 +158,6 @@ class TestExecutor:
             except ValueError:
                 return path, "file_path 超出可执行边界"
         return path, ""
-
-    def _resolve_command_working_dir(self, test: dict[str, Any]) -> tuple[Path, str]:
-        raw = str(test.get("working_dir") or test.get("cwd") or "").strip()
-        if not raw:
-            return self.workspace_root, ""
-        candidate = Path(raw).expanduser()
-        path = candidate.resolve() if candidate.is_absolute() else (self.workspace_root / candidate).resolve()
-        if not self.unrestricted_paths:
-            try:
-                path.relative_to(self.boundary_root)
-            except ValueError:
-                return path, "working_dir 超出可执行边界"
-        if not path.exists() or not path.is_dir():
-            return path, "working_dir 不存在或不是目录"
-        return path, ""
-
 
 def _validation_method(test: dict[str, Any]) -> str:
     method = str(test.get("validation_method") or "command").strip().lower() or "command"

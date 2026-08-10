@@ -57,7 +57,7 @@ def _write_subagents_tests_report(agent, task, options: SubagentsTestsOptions):
     tests = prepare_test_items(
         TestItemPreparationRequest(tests=tests, output=output, workspace_root=workspace_root)
     )
-    executor = TestExecutor(workspace_root, timeout_seconds=options.timeout)
+    executor = TestExecutor(workspace_root)
     records = [executor.execute(test) for test in tests]
     return write_test_execution_report(
         task.reports_dir,

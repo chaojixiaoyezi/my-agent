@@ -71,7 +71,7 @@ def test_subagent_runner_stops_after_output_json_write():
         result = agent.run_subagent(task.id, dry_run=False, probe=False)
 
         # 机器验收(问题3):第1轮先真实写 proof.txt,第2轮写 output.json;收口时
-        # `test -f proof.txt` 真的 exit 0,VERIFIED 由机器执行背书。
+        # file_check proof.txt 真的命中,VERIFIED 由机器验证背书。
         assert agent.backend.calls == 2
         assert result.status == "DONE"
         assert result.verification_status == "VERIFIED"

@@ -27,7 +27,7 @@ SUBAGENT_RESULT_TEMPLATE = (
     '  "used_tools": [],\n'
     '  "used_skills": [],\n'
     '  "evidence": [\n'
-    '    {"kind": "command", "summary": "验证摘要", "command": "", "path": "", "url": "", "ok": true}\n'
+    '    {"kind": "artifact", "summary": "验证摘要", "path": "产物路径或报告路径", "url": "", "ok": true}\n'
     "  ],\n"
     '  "evidence_packets": [\n'
     '    {"id": "evpkt-run-id-short", "claim": "可验收声明", "checked_scope": "检查范围", "evidence_refs": ["runner_result.json"], "artifact_refs": ["产物路径或output.json"], "confidence": 0.9}\n'
@@ -42,7 +42,7 @@ SUBAGENT_RESULT_TEMPLATE = (
     '    {"path": "产物路径", "kind": "file|report|log", "summary": "产物说明"}\n'
     "  ],\n"
     '  "tests": [\n'
-    '    {"name": "测试名称", "validation_method": "command", "command": "python3 -m pytest -q", "working_dir": "运行目录", "ok": true, "summary": "测试结果摘要"}\n'
+    '    {"name": "测试名称", "validation_method": "file_check", "file_path": "待检查文件路径", "ok": true, "summary": "测试结果摘要"}\n'
     "  ],\n"
     '  "patches": [\n'
     '    {"path": "改动文件", "status": "applied|planned|blocked", "summary": "改了什么或准备改什么"}\n'
@@ -87,9 +87,11 @@ _REQUIRED_OUTPUT_GUIDE = (
     "- 给出可验收证据；成功时 evidence_packets 必须有 artifact_refs 或 evidence_refs，不能只写普通 evidence。\n"
     "- 如果你认为某个失败、损坏或超时的 child run 已由另一个已完成 run 覆盖，必须写 coverage_records；"
     "只在 summary 里说“已覆盖”不会被最终收口认可。\n"
-    "- tests 数组里每条测试的 command 会在收口时被机器真实执行：全部命令 exit 0 才会记为 VERIFIED，"
-    "任何一条失败或缺失都会把任务打回返工。写 tests 时必须保证 command 可独立执行（如 test -f 路径、go test ./...、python -c \"断言\")，"
-    "工作目录用 working_dir 指明；不要只写一句“已人工验收”当测试。\n"
+    "- tests 数组里的可机验条目（validation_method=\"file_check\"/\"content_check\"/"
+    "\"static_site_check\"/\"artifact_integrity\"）会在收口时由机器在进程内真实检查："
+    "文件存在、内容命中、产物完整才记为 VERIFIED，任何一条失败或缺失都会把任务打回返工。"
+    "command/working_dir 不会被机器执行，只作审计留档，不能当验收证据；"
+    "不要只写一句“已人工验收”当测试。\n"
     "- 只填你这次真用到的字段，用不到的留空数组 [] 或省略；不要为了填满模板而编造内容，长报告写文件后引用路径。\n"
     "- 最后必须输出一个机器可解析结果块（裸 JSON，不要 ```json 或 Markdown 围栏），**绝对不能交空块**。\n"
     "  最小必填：大多数任务只要 status、summary、artifacts（你真写出来的产物文件路径）这三项就够。完成时照这个最小示例填即可：\n\n"
@@ -419,10 +421,11 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
         "- 只把真正阻止你产出文件、报告或证据的缺口写成 capability_request。",
         "- 如果你没有 shell/command/terminal 工具，不要因为不能自己运行 pytest 就提交 capability_request。",
         "- 没有命令执行工具时，应写出产物和测试建议；不要假装你已经执行过命令。",
-        "- tests 里的命令必须安全、具体、可复制：不要写 cd ... &&，把目录写在 \"working_dir\" 字段里。",
-        "- 验证文件内容时优先写 validation_method=\"content_check\"、file_path、content_pattern 或 content_equals、match_mode=\"exact\"，不要写 cat 文件命令。",
+        "- 收口时机器只执行进程内安全验证（file_check/content_check/static_site_check/artifact_integrity）；"
+        "写 tests 用 validation_method 指明方式并给出 file_path，不要依赖 command/working_dir——它们不会被机器执行。",
+        "- 验证文件存在用 validation_method=\"file_check\" + file_path；验证文件内容用 "
+        "validation_method=\"content_check\"、file_path、content_pattern 或 content_equals、match_mode=\"exact\"。",
         "- 写代码和测试后，必须逐条对照验收条件做静态自检，确保实现、测试、README 三者互相一致。",
-        "- 写 Python 测试时必须保证从 working_dir 运行能导入被测模块；优先把测试文件和模块放同一目录，或显式处理 import path。",
         "- 如果用户要求按钮、链接或图片不能失效，不要用 href=\"#\"、空锚点或不存在的 #id 假装可点击；"
         "页面内跳转必须指向真实存在的元素 id，按钮必须有真实交互或真实本地目标。",
         "- 生成普通报告或中等长度文本时，优先用 write_file 的 content 字段完整写入。"

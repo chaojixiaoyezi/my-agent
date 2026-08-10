@@ -1,4 +1,9 @@
-"""测试子代理验收测试项目录推断。"""
+"""测试子代理验收测试项目录推断。
+
+审计 R0:command/cwd/working_dir 的 loader 路径已删除——不再合成 pytest 项、
+不再归一化 cd 前缀、不再推断 working_dir、不再把 cat 命令转成 content_check。
+模型声明的 command 只保留为 inert evidence 原样不动。
+"""
 
 from agent_py_agent.agent.subagents.execution.test_items import (
     TestItemPreparationRequest,
@@ -6,7 +11,8 @@ from agent_py_agent.agent.subagents.execution.test_items import (
 )
 
 
-def test_prepare_test_items_infers_single_artifact_working_dir(tmp_path):
+def test_prepare_test_items_does_not_infer_working_dir_for_command_items(tmp_path):
+    """command 项原样保留,不再推断 working_dir。"""
     target_dir = tmp_path / "strings"
     target_dir.mkdir()
     artifact = target_dir / "test_string_tools.py"
@@ -24,10 +30,12 @@ def test_prepare_test_items_infers_single_artifact_working_dir(tmp_path):
         )
     )
 
-    assert prepared[0]["working_dir"] == "strings"
+    assert "working_dir" not in prepared[0]
+    assert prepared[0]["command"] == "python -m unittest discover -s . -p 'test_*.py'"
 
 
 def test_prepare_test_items_keeps_explicit_working_dir(tmp_path):
+    """显式 working_dir 原样保留(仅作 inert evidence,不参与任何路径处理)。"""
     target_dir = tmp_path / "strings"
     target_dir.mkdir()
     artifact = target_dir / "test_string_tools.py"
@@ -49,7 +57,8 @@ def test_prepare_test_items_keeps_explicit_working_dir(tmp_path):
     assert prepared[0]["working_dir"] == "."
 
 
-def test_prepare_test_items_ignores_out_of_workspace_artifacts(tmp_path):
+def test_prepare_test_items_does_not_touch_out_of_workspace_command(tmp_path):
+    """工作区外产物不影响 command 项(不推断、不拒绝)。"""
     outside = tmp_path.parent / "test_outside.py"
 
     prepared = prepare_test_items(
@@ -67,7 +76,8 @@ def test_prepare_test_items_ignores_out_of_workspace_artifacts(tmp_path):
     assert "working_dir" not in prepared[0]
 
 
-def test_prepare_test_items_keeps_workspace_cwd_when_command_names_relative_artifact(tmp_path):
+def test_prepare_test_items_keeps_relative_artifact_command_untouched(tmp_path):
+    """command 里出现相对产物路径也不再触发 cwd 推断,原样保留。"""
     target_dir = tmp_path / "grandchild_sorting_edge"
     target_dir.mkdir()
     artifact = target_dir / "test_sorting_edges.py"
@@ -85,32 +95,12 @@ def test_prepare_test_items_keeps_workspace_cwd_when_command_names_relative_arti
         )
     )
 
-    assert prepared[0]["working_dir"] == "."
+    assert "working_dir" not in prepared[0]
+    assert prepared[0]["command"] == "python -m pytest grandchild_sorting_edge/test_sorting_edges.py -v"
 
 
-def test_prepare_test_items_recovers_nested_relative_artifact_command_cwd(tmp_path):
-    target_dir = tmp_path / "run-1" / "grandchild_sorting_edge"
-    target_dir.mkdir(parents=True)
-    artifact = target_dir / "test_sorting_edges.py"
-    artifact.write_text("pass\n", encoding="utf-8")
-
-    prepared = prepare_test_items(
-        TestItemPreparationRequest(
-            tests=[{
-                "name": "test_sorting_edges.py",
-                "validation_method": "command",
-                "command": "python -m pytest grandchild_sorting_edge/test_sorting_edges.py -v",
-            }],
-            output={"artifacts": [{"path": "grandchild_sorting_edge/test_sorting_edges.py"}]},
-            workspace_root=tmp_path,
-        )
-    )
-
-    assert prepared[0]["working_dir"] == "run-1"
-
-
-def test_prepare_test_items_converts_safe_cd_chain_into_working_dir(tmp_path):
-    """LLM: Verifies model-style cd && pytest commands become bounded cwd plus plain command."""
+def test_prepare_test_items_keeps_cd_chain_command_untouched(tmp_path):
+    """cd && 链不再剥离为 working_dir——command 原样保留为 inert evidence。"""
     target_dir = tmp_path / "deliverables" / "leaf"
     target_dir.mkdir(parents=True)
     artifact = target_dir / "test_solution.py"
@@ -128,36 +118,12 @@ def test_prepare_test_items_converts_safe_cd_chain_into_working_dir(tmp_path):
         )
     )
 
-    assert prepared[0]["command"] == "python3 -m pytest test_solution.py -v"
-    assert prepared[0]["working_dir"] == "deliverables/leaf"
+    assert prepared[0]["command"] == f"cd {target_dir} && python3 -m pytest test_solution.py -v"
+    assert "working_dir" not in prepared[0]
 
 
-def test_prepare_test_items_strips_safe_cd_chain_even_with_working_dir(tmp_path):
-    """LLM: Verifies explicit working_dir does not leave a redundant shell cd chain in command."""
-    target_dir = tmp_path / "deliverables" / "leaf"
-    target_dir.mkdir(parents=True)
-    artifact = target_dir / "test_solution.py"
-    artifact.write_text("pass\n", encoding="utf-8")
-
-    prepared = prepare_test_items(
-        TestItemPreparationRequest(
-            tests=[{
-                "name": "pytest test_solution.py",
-                "validation_method": "command",
-                "command": f"cd {target_dir} && python3 -m pytest test_solution.py -v",
-                "working_dir": str(target_dir),
-            }],
-            output={"artifacts": [{"path": str(artifact)}]},
-            workspace_root=tmp_path,
-        )
-    )
-
-    assert prepared[0]["command"] == "python3 -m pytest test_solution.py -v"
-    assert prepared[0]["working_dir"] == str(target_dir)
-
-
-def test_prepare_test_items_infers_pytest_when_runner_only_reports_test_artifact(tmp_path):
-    """LLM: Verifies missing tests can still execute workspace-local test_*.py artifacts."""
+def test_prepare_test_items_does_not_synthesize_pytest_items(tmp_path):
+    """没有 tests 时不再从 test_*.py 产物合成 pytest command 项。"""
     target_dir = tmp_path / "deliverables" / "leaf"
     target_dir.mkdir(parents=True)
     artifact = target_dir / "test_solution.py"
@@ -171,12 +137,7 @@ def test_prepare_test_items_infers_pytest_when_runner_only_reports_test_artifact
         )
     )
 
-    assert prepared == [{
-        "name": "artifact pytest test_solution.py",
-        "validation_method": "command",
-        "command": "python3 -m pytest test_solution.py -q",
-        "working_dir": "deliverables/leaf",
-    }]
+    assert prepared == []
 
 
 def test_prepare_test_items_infers_static_site_check_for_html_artifacts(tmp_path):
@@ -416,8 +377,8 @@ def test_prepare_test_items_does_not_convert_static_site_command_alias(tmp_path)
     ]
 
 
-def test_prepare_test_items_normalizes_pytest_method_with_command(tmp_path):
-    """LLM: Verifies runner `validation_method=pytest` remains executable by TestExecutor."""
+def test_prepare_test_items_keeps_pytest_method_untouched(tmp_path):
+    """pytest/unittest 标签不再归一化为 command——原样保留为 inert evidence。"""
     target_dir = tmp_path / "deliverables" / "leaf"
     target_dir.mkdir(parents=True)
     artifact = target_dir / "test_solution.py"
@@ -435,12 +396,12 @@ def test_prepare_test_items_normalizes_pytest_method_with_command(tmp_path):
         )
     )
 
-    assert prepared[0]["validation_method"] == "command"
-    assert prepared[0]["working_dir"] == "deliverables/leaf"
+    assert prepared[0]["validation_method"] == "pytest"
+    assert "working_dir" not in prepared[0]
 
 
-def test_prepare_test_items_converts_cat_content_assertion_to_content_check(tmp_path):
-    """LLM: Verifies model-style cat checks need structured expected content."""
+def test_prepare_test_items_keeps_cat_command_as_inert(tmp_path):
+    """cat 命令不再转成 content_check——command 原样保留为 inert evidence。"""
     target_dir = tmp_path / "deliverables" / "leaf"
     target_dir.mkdir(parents=True)
     artifact = target_dir / "proof.txt"
@@ -461,14 +422,14 @@ def test_prepare_test_items_converts_cat_content_assertion_to_content_check(tmp_
         )
     )
 
-    assert prepared[0]["validation_method"] == "content_check"
-    assert prepared[0]["file_path"] == "deliverables/leaf/proof.txt"
-    assert prepared[0]["content_equals"] == "context-lineage-ok"
-    assert prepared[0]["match_mode"] == "exact"
+    assert prepared[0]["validation_method"] == "command"
+    assert prepared[0]["command"] == f"cat {artifact}"
+    assert "file_path" not in prepared[0]
+    assert "content_equals" not in prepared[0]
 
 
 def test_prepare_test_items_does_not_parse_summary_for_cat_content(tmp_path):
-    """LLM: Human summaries must not become exact machine acceptance facts."""
+    """Human summaries must not become exact machine acceptance facts."""
     target_dir = tmp_path / "deliverables" / "leaf"
     target_dir.mkdir(parents=True)
     artifact = target_dir / "proof.txt"
