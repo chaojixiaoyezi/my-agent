@@ -6,6 +6,8 @@
 2. 流式与全文对"未闭合 open 数 > 1 → 整轮拒绝"对齐（好块也不执行）。
 3. UI（filter 转发）永不出现块体原文与半截 marker（J-4）。
 4. J-6 常量接线：未闭合块体上限 / 响应总量 / 块数上限。
+5. F10（J.5）：terminal 违规整轮零执行；非 terminal 坏块按安全前缀——
+   只执行第一个坏块之前的完整好块，坏块及其后的块（无论好坏）不执行。
 """
 
 from __future__ import annotations
@@ -203,8 +205,9 @@ def test_adapter_more_than_one_unclosed_rejects_good_blocks_too() -> None:
     assert sum("not closed" in v.detail for v in result.violations) == 2
 
 
-def test_adapter_one_unclosed_still_executes_good_blocks() -> None:
-    # 未闭合 ≤ 1：好块照常执行，坏块违规留痕（不连坐）。
+def test_adapter_one_unclosed_safe_prefix_executes_prior_good_blocks() -> None:
+    # F10（J.5 安全前缀）：未闭合 ≤ 1 不整轮拒；坏块（此处为末尾未闭合块）及其后
+    # 不执行，只执行第一个坏块之前的完整好块。
     text = (
         '[TOOL_CALL]{"tool":"run_command","command":"pytest -q"}[/TOOL_CALL]'
         '[TOOL_CALL]{"tool":"run_command","command":"ls"}'
@@ -214,6 +217,28 @@ def test_adapter_one_unclosed_still_executes_good_blocks() -> None:
     assert len(result.calls) == 1
     assert result.calls[0].arguments == {"command": "pytest -q"}
     assert any("not closed" in v.detail for v in result.violations)
+
+
+def test_adapter_broken_block_stops_later_blocks() -> None:
+    # F10（J.5 安全前缀）：第一个坏块（Markdown fence 包裹）后的完好块也不执行——
+    # 坏块位置之后的文本可能被坏块吞掉/溢出，块序损坏即协议不可信。只执行
+    # 第一个坏块之前的完整好块，并留痕说明后续块未执行。
+    text = (
+        '[TOOL_CALL]{"tool":"run_command","command":"pytest -q"}[/TOOL_CALL]\n'
+        "```\n"
+        '[TOOL_CALL]{"tool":"run_command","command":"ls"}[/TOOL_CALL]\n'
+        "```\n"
+        '[TOOL_CALL]{"tool":"run_command","command":"pwd"}[/TOOL_CALL]'
+    )
+    result = TextToolProtocolAdapter().tool_calls(_request(SimpleNamespace(text=text)))
+
+    assert [call.arguments for call in result.calls] == [{"command": "pytest -q"}]
+    details = [v.detail for v in result.violations]
+    assert any("Markdown fences" in detail for detail in details)
+    assert any(
+        "broken tool block at position 2" in detail and "not executed" in detail
+        for detail in details
+    ), details
 
 
 def test_adapter_enforces_text_call_limit() -> None:

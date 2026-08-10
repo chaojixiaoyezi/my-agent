@@ -259,7 +259,7 @@ def test_text_adapter_rejects_unclosed_complete_block() -> None:
     assert TextToolProtocolAdapter().tool_calls(
         _request(SimpleNamespace(text=cases[0]), "text")
     ).calls == ()
-    # 好块 + 未闭合坏块:好块执行(不连坐),坏块留痕违规(不执行)
+    # 好块 + 未闭合坏块:F10(J.5 安全前缀)只执行坏块之前的完整好块,坏块留痕违规
     mixed = TextToolProtocolAdapter().tool_calls(
         _request(
             SimpleNamespace(

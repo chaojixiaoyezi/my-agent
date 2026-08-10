@@ -1,6 +1,23 @@
 
 from __future__ import annotations
 
+"""流式 UI 转发过滤器（与统一 parser 的分层职责，F10 复核 2026-08-09）。
+
+J.3 的「stream 与 final 共用一个解析器」在此按职责分层落地：
+- 裁决层（tool_protocol_adapter.TextToolProtocolAdapter）永远对完整响应重扫
+  scan_text_blocks 做最终裁决（calls/violations），filter 不参与执行决策；
+- 本 filter 只承担流式 UI 转发与流式中止（abort/cut/visible text），close
+  判定复用统一 parser 的 _inline_json_tool_end_marker_valid（同一实现）。
+
+open 判定差异是有意设计：filter 用 line-start 规则（块 open 前仅空白）——
+模型正文里展示示例的 [TOOL_CALL] 文本（prose 同行）不触发流式 abort 与
+cut（防示例误杀）；裁决层用 plain find（更严），终局兜底。方向恒安全：
+filter 不 abort 的最坏情况是裁决层晚拒（不执行），filter 永不误杀可执行
+响应；abort 的未闭合计数（line-start 子集）≤ 裁决的 unclosed_count，故
+「流式 abort ⟹ 裁决整轮拒」恒成立。chunk 切分等价性（J.7）由尾部不完整
+marker 前缀 hold-back + 裁决全文重扫保证。
+"""
+
 import hashlib
 import json
 from collections.abc import Callable

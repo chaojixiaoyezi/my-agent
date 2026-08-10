@@ -283,9 +283,13 @@ class TextToolProtocolAdapter:
         # 对齐——同一响应里即使有合法好块也不执行（块序混乱即协议损坏）。
         if scan.unclosed_count > MAX_UNCLOSED_OPEN_MARKERS:
             return ProviderToolCallResult(violations=_scan_violations(errors, text))
-        payloads = scan.payloads
+        # F10（J.5）：安全前缀——第一个坏块及其后的块（无论好坏）整体不执行，
+        # 只执行第一个坏块之前的完整好块（坏块位置之后的文本可能被坏块吞掉/
+        # 溢出，块序损坏即协议不可信）。terminal 违规（超长响应/控制块混排/
+        # 未闭合>1）已在上面整轮零执行。
+        payloads, errors = _safe_prefix_payloads(scan, errors)
         if len(payloads) > MAX_TEXT_CALLS:
-            # J-6：块数上限——超出的块违规不执行，之前的好块照常执行。
+            # J-6：块数上限——超出的块违规不执行，之前的块照常执行（前缀语义）。
             payloads = payloads[:MAX_TEXT_CALLS]
             errors = [
                 *errors,
@@ -326,7 +330,8 @@ class TextToolProtocolAdapter:
                     ),
                 )
             )
-        # 好块照常执行,坏块违规并存返回(调用方负责"执行好块+坏块留痕反馈")。
+        # F10（J.5）：返回的 calls 恒为安全前缀——第一个坏块前的完整好块，
+        # 坏块及之后的块已在上游截断，违规并存返回留痕（调用方执行前缀+反馈）。
         return ProviderToolCallResult(tuple(calls), violations)
 
 
@@ -387,6 +392,44 @@ def _text_control_block_violation(text: str) -> ToolProtocolViolation | None:
         "text response mixes a SUBAGENT_RESULT block with tool call blocks",
         "text",
         _protocol_evidence(text),
+    )
+
+
+def _safe_prefix_payloads(
+    scan: TextBlockScan,
+    errors: list[str],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """F10（J.5 安全前缀）：截断为第一个坏块之前的完整好块。
+
+    坏块 = 未闭合（close_index None）或解析失败（error 非 None）。坏块及其
+    后所有块（无论好坏）不执行——坏块位置之后的文本可能被坏块吞掉/溢出，
+    块序损坏即协议不可信；只执行第一个坏块之前的完整好块。全好块时原样
+    返回。截断本身作为一条违规留痕，让模型知道后续块未执行。
+    """
+    first_bad = next(
+        (block for block in scan.blocks if block.close_index is None or block.error is not None),
+        None,
+    )
+    if first_bad is None:
+        return list(scan.payloads), errors
+    position = next(
+        (index for index, block in enumerate(scan.blocks, start=1) if block is first_bad),
+        1,
+    )
+    trailing = sum(1 for block in scan.blocks if block.open_index >= first_bad.open_index)
+    if trailing > 1:
+        errors = [
+            *errors,
+            f"text response has a broken tool block at position {position}; "
+            "the broken block and all blocks after it were not executed",
+        ]
+    return (
+        [
+            block.payload
+            for block in scan.blocks
+            if block.open_index < first_bad.open_index and block.payload is not None
+        ],
+        errors,
     )
 
 

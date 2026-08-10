@@ -10,10 +10,13 @@ from __future__ import annotations
 解析出的块、违规、未闭合计数完全一致（等价性天然成立——裁决永远对完整
 文本重扫，filter 只管 UI 转发什么）。
 
-安全红线（2026-08-09 用户复核）：
+安全红线（2026-08-09 用户复核；F10 2026-08-09 收紧为安全前缀）：
 坏块永不执行——未闭合（[/TOOL_CALL] 缺失）与截断/JSON 损坏同罪，块边界
-标记是执行契约的一部分，漏闭合即未形成可执行调用。坏块记错误原因但不
-连坐同响应里的好块：好块照常提取执行，坏块违规留痕反馈。
+标记是执行契约的一部分，漏闭合即未形成可执行调用。F10（J.5）起执行策略
+是安全前缀：第一个坏块及其后的块（无论好坏）整体不执行，只执行第一个坏
+块之前的完整好块——坏块位置之后的文本可能被坏块吞掉/溢出，块序损坏即
+协议不可信。scan 本身仍提取全部块（候选与坏块原因），截断是裁决层
+（tool_protocol_adapter）的策略。
 """
 
 import json
@@ -61,7 +64,8 @@ def scan_text_blocks(text: str) -> TextBlockScan:
       = 普通文本回复（非违规）。
     - 字符串感知 close：[/TOOL_CALL] 只有当其前的块体 raw_decode 成完整 JSON
       对象（无残留）才算闭合；JSON 字符串里未闭合的 marker 文本被跳过。
-    - 坏块记 error 不连坐好块；未闭合块继续扫描后续块并计入 unclosed_count。
+    - 坏块记 error 不阻塞扫描（继续找后续块，候选完整）；执行截断（安全前缀）
+      由裁决层 tool_protocol_adapter 决定，scan 本身不裁。
     """
     if _TEXT_OPEN not in text and _TEXT_CLOSE not in text:
         return TextBlockScan((), 0)
@@ -76,7 +80,8 @@ def scan_text_blocks(text: str) -> TextBlockScan:
         body_start = open_at + len(_TEXT_OPEN)
         close = _find_text_close(text, body_start)
         if close is None:
-            # 未闭合 = 坏块，绝不执行；继续扫描后续块（坏块不连坐好块）。
+            # 未闭合 = 坏块，绝不执行；继续扫描后续块（坏块不阻塞扫描，
+            # 安全前缀截断在裁决层 tool_protocol_adapter）。
             unclosed += 1
             blocks.append(
                 ScannedTextBlock(
