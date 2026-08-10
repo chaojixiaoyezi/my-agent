@@ -1,0 +1,673 @@
+"""Owner runtime.db 权威实体仓储（3.txt A/C/D/F 节落地面）。
+
+职责：
+- 主链（A.4）：Task → TaskRun → AgentRun 树 → AgentAttempt 的创建与读取。
+- 不可变委托（A.7）：child 必须先建自己的 AgentAttempt 才能被 delegate。
+- current attempt pointer（F.2/F.3）：create_attempt 以 CAS 递增 generation
+  并替换 agent_runs.current_attempt_id；旧 attempt 行是不可变历史（F.7）。
+- WorkspaceBinding / root claims（D 节）：绑定承载可读写根集合与 epoch，
+  同一物理写根在库内唯一声明（D.5）。
+- runtime_events（A.3）：append-only 权威事件流，每事件追到 attempt（A.8）。
+
+所有 ID 由 B.1 统一生成器（common.id_generator.new_id）铸造，本模块不手拼。
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import time
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any
+
+from ..common.id_generator import new_id
+from .schema import RuntimeSchemaMixin, runtime_db_path
+
+#: D.6/D.9：binding 生命周期状态。v1 不扩容（D.8），迁移时旧 ACTIVE → SUPERSEDED。
+BINDING_ACTIVE = "ACTIVE"
+BINDING_SUPERSEDED = "SUPERSEDED"
+
+#: D.7：可写根集合 digest 不同但包含/交叉 → 拒绝（BINDING_ROOT_OVERLAP）。
+BINDING_ROOT_OVERLAP = "BINDING_ROOT_OVERLAP"
+
+#: D.5：同一物理写根已被其他 binding 声明 → 冲突。
+ROOT_CLAIM_CONFLICT = "ROOT_CLAIM_CONFLICT"
+
+
+class RuntimeConflictError(RuntimeError):
+    """权威库内状态冲突（CAS 失败/根重叠/根被占）。"""
+
+
+class RuntimeRepository(RuntimeSchemaMixin):
+    """单 owner 权威库入口。每个 owner 一个实例（A.1）。"""
+
+    def __init__(self, db_path: str | Path):
+        self.db_path = Path(db_path)
+        self._init_runtime_schema()
+
+    # ------------------------------------------------------------------ 事务
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        """多实体权威写入的原子事务（A.9：ConversationTaskLink 需同事务）。"""
+        conn = self._runtime_connect()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    # -------------------------------------------- A.4/A.5/A.6/A.9 主链写入
+    def record_run_creation(
+        self,
+        *,
+        owner_id: str,
+        goal: str = "",
+        conversation_task_id: str = "",
+        thread_id: str = "",
+        run_id: str = "",
+        role: str = "",
+        parent_run_id: str = "",
+    ) -> dict[str, str]:
+        """create_run 权威主链写入（单事务）。
+
+        一个 TaskRun（=一次执行）→ 一个 root AgentRun（A.5）→ 第一个
+        AgentAttempt（A.6：执行任何工具前必须有 attempt）→ current pointer
+        （F.3 初值 generation 1）。conversation_task_id 与 thread_id 在
+        同一事务进入 tasks 行（A.9：ConversationTaskLink 不再是独立权威）。
+        child run 经 parent 的 AgentRun 建 immutable Delegation（A.7）；
+        parent 无权威记录（R1 前存量）时跳过委托，不阻断新链。
+        """
+        with self.transaction() as conn:
+            now = time.time()
+            # Task：conversation_task_id 复用既有任务身份；无则铸造框架 task_id。
+            task_id = str(conversation_task_id or "").strip() or new_id("task_id")
+            existing = conn.execute(
+                "SELECT task_id, owner_id FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            if existing is None:
+                try:
+                    conn.execute(
+                        """
+                        INSERT INTO tasks(task_id, owner_id, thread_id, conversation_task_id,
+                                          title, goal, status, created_at, updated_at)
+                        VALUES(?, ?, ?, ?, '', ?, 'active', ?, ?)
+                        """,
+                        (task_id, owner_id, thread_id, conversation_task_id, goal, now, now),
+                    )
+                except sqlite3.IntegrityError:
+                    # 并发同 conversation 建任务：另一事务已插入，取既有行。
+                    pass
+            # TaskRun：每次 create_run 一次执行。
+            task_run_id = new_id("task_run_id")
+            conn.execute(
+                """
+                INSERT INTO task_runs(task_run_id, task_id, status, created_at, updated_at, metadata_json)
+                VALUES(?, ?, 'created', ?, ?, '{}')
+                """,
+                (task_run_id, task_id, now, now),
+            )
+            # root AgentRun（parent 为空 = 合法根身份 A.7）。
+            agent_run_id = new_id("agent_run_id")
+            parent_agent_run_id = ""
+            delegation_id = ""
+            if str(parent_run_id or "").strip():
+                parent_row = conn.execute(
+                    "SELECT agent_run_id FROM agent_runs WHERE run_id = ?",
+                    (parent_run_id,),
+                ).fetchone()
+                if parent_row is not None:
+                    parent_agent_run_id = str(parent_row["agent_run_id"])
+            conn.execute(
+                """
+                INSERT INTO agent_runs(agent_run_id, task_run_id, parent_agent_run_id,
+                                       delegation_id, run_id, role, status,
+                                       current_attempt_id, current_attempt_generation,
+                                       workspace_epoch, created_at, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?, 'created', '', 0, 1, ?, ?)
+                """,
+                (agent_run_id, task_run_id, parent_agent_run_id, delegation_id,
+                 run_id, role, now, now),
+            )
+            # 第一个 AgentAttempt（A.6），CAS 语义与 create_attempt 同源。
+            attempt_id = new_id("attempt_id")
+            conn.execute(
+                """
+                INSERT INTO agent_attempts(attempt_id, agent_run_id, attempt_generation,
+                                           status, started_at)
+                VALUES(?, ?, 1, 'running', ?)
+                """,
+                (attempt_id, agent_run_id, now),
+            )
+            conn.execute(
+                """
+                UPDATE agent_runs
+                SET current_attempt_id = ?, current_attempt_generation = 1, updated_at = ?
+                WHERE agent_run_id = ? AND current_attempt_generation = 0
+                """,
+                (attempt_id, now, agent_run_id),
+            )
+            # child：immutable 委托（A.7）。
+            if parent_agent_run_id:
+                delegation_id = new_id("delegation_id")
+                conn.execute(
+                    """
+                    INSERT INTO delegations(delegation_id, parent_agent_run_id, child_agent_run_id,
+                                            child_attempt_id, granted_scope_json, created_at)
+                    VALUES(?, ?, ?, ?, '{}', ?)
+                    """,
+                    (delegation_id, parent_agent_run_id, agent_run_id, attempt_id, now),
+                )
+                conn.execute(
+                    "UPDATE agent_runs SET delegation_id = ? WHERE agent_run_id = ?",
+                    (delegation_id, agent_run_id),
+                )
+            # A.8：事件追到 attempt。
+            for event_type in ("task.created", "agent_run.created"):
+                conn.execute(
+                    """
+                    INSERT INTO runtime_events(event_id, event_type, attempt_id, agent_run_id,
+                                              task_run_id, payload_json, created_at)
+                    VALUES(?, ?, ?, ?, ?, '{}', ?)
+                    """,
+                    (uuid.uuid4().hex, event_type, attempt_id, agent_run_id, task_run_id, now),
+                )
+        return {
+            "task_id": task_id,
+            "task_run_id": task_run_id,
+            "agent_run_id": agent_run_id,
+            "attempt_id": attempt_id,
+            "delegation_id": delegation_id,
+        }
+
+    # ------------------------------------------------------------------ Task
+    def create_task(
+        self,
+        *,
+        owner_id: str,
+        task_id: str = "",
+        thread_id: str = "",
+        conversation_task_id: str = "",
+        title: str = "",
+        goal: str = "",
+    ) -> sqlite3.Row:
+        """创建 Task。task_id 缺省由框架铸造（B.1 task_id）。"""
+        task_id = task_id or new_id("task_id")
+        now = time.time()
+        with self._runtime_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO tasks(task_id, owner_id, thread_id, conversation_task_id,
+                                  title, goal, status, created_at, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?, 'active', ?, ?)
+                """,
+                (task_id, owner_id, thread_id, conversation_task_id, title, goal, now, now),
+            )
+            conn.commit()
+        row = self.get_task(task_id)
+        assert row is not None
+        return row
+
+    def get_task(self, task_id: str) -> sqlite3.Row | None:
+        with self._runtime_connection() as conn:
+            return conn.execute(
+                "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+
+    # -------------------------------------------------------------- TaskRun
+    def create_task_run(
+        self,
+        *,
+        task_id: str,
+        status: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> sqlite3.Row:
+        task_run_id = new_id("task_run_id")
+        now = time.time()
+        with self._runtime_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO task_runs(task_run_id, task_id, status, created_at, updated_at, metadata_json)
+                VALUES(?, ?, ?, ?, ?, ?)
+                """,
+                (task_run_id, task_id, status, now, now, json.dumps(metadata or {}, ensure_ascii=False)),
+            )
+            conn.commit()
+        row = self.get_task_run(task_run_id)
+        assert row is not None
+        return row
+
+    def get_task_run(self, task_run_id: str) -> sqlite3.Row | None:
+        with self._runtime_connection() as conn:
+            return conn.execute(
+                "SELECT * FROM task_runs WHERE task_run_id = ?", (task_run_id,)
+            ).fetchone()
+
+    def task_runs_for_task(self, task_id: str) -> list[sqlite3.Row]:
+        with self._runtime_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM task_runs WHERE task_id = ? ORDER BY created_at",
+                (task_id,),
+            ).fetchall()
+        return list(rows)
+
+    # ------------------------------------------------------------ AgentRun
+    def create_agent_run(
+        self,
+        *,
+        task_run_id: str,
+        parent_agent_run_id: str = "",
+        role: str = "",
+        run_id: str = "",
+    ) -> sqlite3.Row:
+        """创建 AgentRun。parent 为空 = root 身份（A.5/A.7，合法）。
+
+        root/child 的 current attempt pointer 在 create_attempt 时 CAS 生效。
+        """
+        agent_run_id = new_id("agent_run_id")
+        now = time.time()
+        with self._runtime_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO agent_runs(agent_run_id, task_run_id, parent_agent_run_id,
+                                       delegation_id, run_id, role, status,
+                                       current_attempt_id, current_attempt_generation,
+                                       workspace_epoch, created_at, updated_at)
+                VALUES(?, ?, ?, '', ?, ?, '', '', 0, 1, ?, ?)
+                """,
+                (agent_run_id, task_run_id, parent_agent_run_id, run_id, role, now, now),
+            )
+            conn.commit()
+        row = self.get_agent_run(agent_run_id)
+        assert row is not None
+        return row
+
+    def get_agent_run(self, agent_run_id: str) -> sqlite3.Row | None:
+        with self._runtime_connection() as conn:
+            return conn.execute(
+                "SELECT * FROM agent_runs WHERE agent_run_id = ?", (agent_run_id,)
+            ).fetchone()
+
+    def agent_run_for_run_id(self, run_id: str) -> sqlite3.Row | None:
+        """按既有 subagent run_id 找权威 AgentRun（新旧对账键，B.6 重算链路）。"""
+        with self._runtime_connection() as conn:
+            return conn.execute(
+                "SELECT * FROM agent_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+
+    def agent_runs_for_task_run(self, task_run_id: str) -> list[sqlite3.Row]:
+        with self._runtime_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM agent_runs WHERE task_run_id = ? ORDER BY created_at",
+                (task_run_id,),
+            ).fetchall()
+        return list(rows)
+
+    # ---------------------------------------------------------- AgentAttempt
+    def create_attempt(self, agent_run_id: str) -> sqlite3.Row:
+        """CAS 创建新 attempt 并替换 current pointer（F.2/F.3）。
+
+        读当前 generation → 新 generation = +1 → UPDATE agent_runs 时以
+        current_attempt_generation 为 CAS 条件；0 行命中 = 并发冲突，fail-closed。
+        旧 attempt 行不可变（F.7）。
+        """
+        now = time.time()
+        with self._runtime_connection() as conn:
+            run = conn.execute(
+                "SELECT current_attempt_generation FROM agent_runs WHERE agent_run_id = ?",
+                (agent_run_id,),
+            ).fetchone()
+            if run is None:
+                raise KeyError(f"agent_run 不存在: {agent_run_id}")
+            generation = int(run["current_attempt_generation"]) + 1
+            attempt_id = new_id("attempt_id")
+            conn.execute(
+                """
+                INSERT INTO agent_attempts(attempt_id, agent_run_id, attempt_generation,
+                                           status, started_at)
+                VALUES(?, ?, ?, 'running', ?)
+                """,
+                (attempt_id, agent_run_id, generation, now),
+            )
+            updated = conn.execute(
+                """
+                UPDATE agent_runs
+                SET current_attempt_id = ?, current_attempt_generation = ?, updated_at = ?
+                WHERE agent_run_id = ? AND current_attempt_generation = ?
+                """,
+                (attempt_id, generation, now, agent_run_id, generation - 1),
+            ).rowcount
+            if updated != 1:
+                raise RuntimeConflictError(
+                    f"attempt CAS 失败: {agent_run_id} generation {generation - 1}->{generation}"
+                )
+            conn.commit()
+        row = self.get_attempt(attempt_id)
+        assert row is not None
+        return row
+
+    def get_attempt(self, attempt_id: str) -> sqlite3.Row | None:
+        with self._runtime_connection() as conn:
+            return conn.execute(
+                "SELECT * FROM agent_attempts WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+
+    def current_attempt(self, agent_run_id: str) -> sqlite3.Row | None:
+        """agent_runs.current_attempt_id 指向的 attempt 行（F.6 验证用）。"""
+        with self._runtime_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT a.* FROM agent_attempts a
+                JOIN agent_runs r ON r.current_attempt_id = a.attempt_id
+                WHERE r.agent_run_id = ?
+                """,
+                (agent_run_id,),
+            ).fetchone()
+        return row
+
+    def attempts_for_run(self, agent_run_id: str) -> list[sqlite3.Row]:
+        with self._runtime_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM agent_attempts WHERE agent_run_id = ? ORDER BY attempt_generation",
+                (agent_run_id,),
+            ).fetchall()
+        return list(rows)
+
+    # ----------------------------------------------------------- Delegation
+    def create_delegation(
+        self,
+        *,
+        parent_agent_run_id: str,
+        child_agent_run_id: str,
+        child_attempt_id: str,
+        granted_scope: dict[str, Any] | None = None,
+    ) -> sqlite3.Row:
+        """创建 immutable parent→child 委托（A.7）。
+
+        强制 child 已建自己的 attempt（A.6：child 必须先创建 AgentAttempt
+        才能被委托/执行工具）；child_attempt_id 必须是 child 的 current attempt。
+        """
+        with self._runtime_connection() as conn:
+            child = conn.execute(
+                "SELECT current_attempt_id, current_attempt_generation FROM agent_runs WHERE agent_run_id = ?",
+                (child_agent_run_id,),
+            ).fetchone()
+            if child is None or str(child["current_attempt_id"] or "") != str(child_attempt_id):
+                raise RuntimeConflictError(
+                    f"委托失败: child {child_agent_run_id} 当前 attempt {child_attempt_id!r} "
+                    f"不是其 current pointer"
+                )
+            delegation_id = new_id("delegation_id")
+            conn.execute(
+                """
+                INSERT INTO delegations(delegation_id, parent_agent_run_id, child_agent_run_id,
+                                        child_attempt_id, granted_scope_json, created_at)
+                VALUES(?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    delegation_id,
+                    parent_agent_run_id,
+                    child_agent_run_id,
+                    child_attempt_id,
+                    json.dumps(granted_scope or {}, ensure_ascii=False),
+                    time.time(),
+                ),
+            )
+            conn.execute(
+                "UPDATE agent_runs SET delegation_id = ?, updated_at = ? WHERE agent_run_id = ?",
+                (delegation_id, time.time(), child_agent_run_id),
+            )
+            conn.commit()
+        row = self.get_delegation(delegation_id)
+        assert row is not None
+        return row
+
+    def get_delegation(self, delegation_id: str) -> sqlite3.Row | None:
+        with self._runtime_connection() as conn:
+            return conn.execute(
+                "SELECT * FROM delegations WHERE delegation_id = ?", (delegation_id,)
+            ).fetchone()
+
+    def delegation_for_child(self, child_agent_run_id: str) -> sqlite3.Row | None:
+        with self._runtime_connection() as conn:
+            return conn.execute(
+                "SELECT * FROM delegations WHERE child_agent_run_id = ?",
+                (child_agent_run_id,),
+            ).fetchone()
+
+    # ------------------------------------------------------ WorkspaceBinding
+    def create_binding(
+        self,
+        *,
+        agent_run_id: str,
+        attempt_id: str,
+        owner_id: str,
+        root_path: str,
+        readable_roots: list[str] | None = None,
+        writable_roots: list[str] | None = None,
+        extra_write_roots: list[str] | None = None,
+        roots_digest: str = "",
+        workspace_epoch: int = 1,
+    ) -> sqlite3.Row:
+        binding_id = _binding_id()
+        now = time.time()
+        with self._runtime_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO workspace_bindings(binding_id, owner_id, agent_run_id, attempt_id,
+                                               workspace_epoch, root_path,
+                                               readable_roots_json, writable_roots_json,
+                                               extra_write_roots_json, roots_digest, status,
+                                               created_at, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)
+                """,
+                (
+                    binding_id,
+                    owner_id,
+                    agent_run_id,
+                    attempt_id,
+                    int(workspace_epoch),
+                    root_path,
+                    json.dumps(readable_roots or [], ensure_ascii=False),
+                    json.dumps(writable_roots or [], ensure_ascii=False),
+                    json.dumps(extra_write_roots or [], ensure_ascii=False),
+                    roots_digest,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+        row = self.get_binding(binding_id)
+        assert row is not None
+        return row
+
+    def get_binding(self, binding_id: str) -> sqlite3.Row | None:
+        with self._runtime_connection() as conn:
+            return conn.execute(
+                "SELECT * FROM workspace_bindings WHERE binding_id = ?", (binding_id,)
+            ).fetchone()
+
+    def binding_for_run(self, agent_run_id: str) -> sqlite3.Row | None:
+        """agent_run 当前 ACTIVE binding（B.5 授权查询用）。"""
+        with self._runtime_connection() as conn:
+            return conn.execute(
+                """
+                SELECT * FROM workspace_bindings
+                WHERE agent_run_id = ? AND status = 'ACTIVE'
+                ORDER BY workspace_epoch DESC
+                LIMIT 1
+                """,
+                (agent_run_id,),
+            ).fetchone()
+
+    def latest_binding_for_run(self, agent_run_id: str) -> sqlite3.Row | None:
+        """agent_run 最近一次 binding（不分状态）。
+
+        授权门用它区分「从未建 binding（放行）」与「binding 已 SUPERSEDED
+        （D.9 迁移后旧 run fail-closed）」。
+        """
+        with self._runtime_connection() as conn:
+            return conn.execute(
+                """
+                SELECT * FROM workspace_bindings
+                WHERE agent_run_id = ?
+                ORDER BY workspace_epoch DESC
+                LIMIT 1
+                """,
+                (agent_run_id,),
+            ).fetchone()
+
+    def supersede_binding(
+        self,
+        *,
+        binding_id: str,
+        expected_epoch: int,
+    ) -> int:
+        """D.9：CAS 标记旧 binding SUPERSEDED 并递增 epoch，返回新 epoch。
+
+        F.1：workspace_epoch 只在 binding 迁移/撤销/接管时变化。迁移流程
+        （锁 claims→证明无 active 操作→CAS epoch→标 SUPERSEDED→转移 claims→
+        新 binding）由 R2 AttemptExecutionSandbox 编排，本方法只做原子表动作。
+        """
+        new_epoch = int(expected_epoch) + 1
+        now = time.time()
+        with self._runtime_connection() as conn:
+            updated = conn.execute(
+                """
+                UPDATE workspace_bindings
+                SET status = 'SUPERSEDED', workspace_epoch = ?, updated_at = ?
+                WHERE binding_id = ? AND status = 'ACTIVE' AND workspace_epoch = ?
+                """,
+                (new_epoch, now, binding_id, int(expected_epoch)),
+            ).rowcount
+            if updated != 1:
+                raise RuntimeConflictError(
+                    f"binding 迁移 CAS 失败: {binding_id} epoch {expected_epoch}"
+                )
+            conn.commit()
+        return new_epoch
+
+    # ------------------------------------------------------------ RootClaims
+    def claim_root(
+        self,
+        *,
+        binding_id: str,
+        agent_run_id: str,
+        attempt_id: str,
+        root_path: str,
+    ) -> sqlite3.Row:
+        """声明物理写根（D.5：同库内唯一）。UNIQUE(root_path) 冲突 → 拒绝。
+
+        迁移时旧 claims 必须先被原子转移（D.9），否则新声明必然冲突。
+        """
+        claim_id = uuid.uuid4().hex
+        try:
+            with self._runtime_connection() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO root_claims(claim_id, binding_id, agent_run_id, attempt_id,
+                                            root_path, created_at)
+                    VALUES(?, ?, ?, ?, ?, ?)
+                    """,
+                    (claim_id, binding_id, agent_run_id, attempt_id, root_path, time.time()),
+                )
+                conn.commit()
+        except sqlite3.IntegrityError as exc:
+            raise RuntimeConflictError(
+                f"{ROOT_CLAIM_CONFLICT}: 物理写根已被声明: {root_path}"
+            ) from exc
+        row = self.get_claim(claim_id)
+        assert row is not None
+        return row
+
+    def get_claim(self, claim_id: str) -> sqlite3.Row | None:
+        with self._runtime_connection() as conn:
+            return conn.execute(
+                "SELECT * FROM root_claims WHERE claim_id = ?", (claim_id,)
+            ).fetchone()
+
+    def claim_for_root(self, root_path: str) -> sqlite3.Row | None:
+        with self._runtime_connection() as conn:
+            return conn.execute(
+                "SELECT * FROM root_claims WHERE root_path = ?", (root_path,)
+            ).fetchone()
+
+    def claims_for_binding(self, binding_id: str) -> list[sqlite3.Row]:
+        with self._runtime_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM root_claims WHERE binding_id = ?", (binding_id,)
+            ).fetchall()
+        return list(rows)
+
+    # -------------------------------------------------------- RuntimeEvents
+    def append_event(
+        self,
+        *,
+        event_type: str,
+        attempt_id: str,
+        agent_run_id: str,
+        task_run_id: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> sqlite3.Row:
+        """append-only 权威事件（A.3/A.8：每事件追到具体 attempt）。"""
+        event_id = uuid.uuid4().hex
+        with self._runtime_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO runtime_events(event_id, event_type, attempt_id, agent_run_id,
+                                          task_run_id, payload_json, created_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    event_type,
+                    attempt_id,
+                    agent_run_id,
+                    task_run_id,
+                    json.dumps(payload or {}, ensure_ascii=False),
+                    time.time(),
+                ),
+            )
+            conn.commit()
+        return conn_row_to_event(self._fetch_event(event_id))
+
+    def _fetch_event(self, event_id: str) -> sqlite3.Row | None:
+        with self._runtime_connection() as conn:
+            return conn.execute(
+                "SELECT * FROM runtime_events WHERE event_id = ?", (event_id,)
+            ).fetchone()
+
+    def events_for_attempt(self, attempt_id: str, *, limit: int = 500) -> list[dict[str, Any]]:
+        with self._runtime_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM runtime_events WHERE attempt_id = ?
+                ORDER BY seq ASC LIMIT ?
+                """,
+                (attempt_id, int(limit)),
+            ).fetchall()
+        return [conn_row_to_event(row) for row in rows]
+
+
+def conn_row_to_event(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "seq": row["seq"],
+        "event_id": row["event_id"],
+        "event_type": row["event_type"],
+        "attempt_id": row["attempt_id"],
+        "agent_run_id": row["agent_run_id"],
+        "task_run_id": row["task_run_id"],
+        "payload": json.loads(row["payload_json"] or "{}"),
+        "created_at": row["created_at"],
+    }
+
+
+def _binding_id() -> str:
+    # binding 不在 B.1 七类内（B.1 只列 run/task/taskrun/agentrun/attempt/session/
+    # delegation），用无前缀 uuid 防与框架 ID 混淆。
+    return uuid.uuid4().hex

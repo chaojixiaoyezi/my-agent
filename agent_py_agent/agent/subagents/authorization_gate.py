@@ -5,9 +5,11 @@ cancel、dispatch、inspect、resume、takeover、resolve capability 六个操�
 owner 一致性 → parent/delegation 可见性。每次操作过同一序列，杜绝
 "有的入口校验、有的入口裸奔"的缺口。
 
-R0 验证现有结构化信号；WorkspaceBinding / TaskRun / AgentAttempt 的 DB 权威
-校验由 R1 runtime.db 在同一门签名上接入（B.5 后半），本模块只做文件层防线。
-完整伪造（同时篡改 task.json 所有字段）超出文件级防线，归 R1 binding。
+R1 起：目标 run 在 owner runtime.db 有权威记录时，额外强制
+WorkspaceBinding / TaskRun / parent+delegation / current AgentAttempt /
+DB owner 五重校验（B.5）；无权威库或无权威记录（R1 前存量 run）保持
+文件层防线（R0 现状）。完整伪造（同时篡改 task.json 与 runtime.db）超出
+单层防线，归 R2 binding 与 OS 沙箱。
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..common.opaque_id import OpaqueIdError, validate_opaque_id
+from ..runtime_db.repository import BINDING_ACTIVE
 from .models import SubAgentTask
 
 OPERATIONS = frozenset(
@@ -72,6 +75,7 @@ def authorize_operation(
         target = manager.load(run_id)
     _authorize_owner(target, request)
     _authorize_visibility(manager, target, request)
+    _authorize_runtime_authority(manager, target, request)
     return target
 
 
@@ -108,6 +112,7 @@ def authorize_tree_scope(
             f"{operation}: 目标树根 {root_id!r} 不在请求方子树内"
         )
     _authorize_owner(requester, request)
+    _authorize_runtime_authority(manager, requester, request)
 
 
 def _authorize_owner(task: SubAgentTask, request: OperationRequest) -> None:
@@ -142,6 +147,66 @@ def _authorize_visibility(manager: Any, task: SubAgentTask, request: OperationRe
     raise AuthorizationError(
         f"{request.operation}: 目标不在请求方子树内（parent 链断/超 {PARENT_CHAIN_LIMIT} 层/成环）"
     )
+
+
+def _authorize_runtime_authority(
+    manager: Any,
+    task: SubAgentTask,
+    request: OperationRequest,
+) -> None:
+    """B.5：runtime.db 权威五重校验（TaskRun/Binding/parent+delegation/attempt/owner）。
+
+    无权威库（无 owner home）或目标为 R1 前存量 run（无权威记录）→ 跳过，
+    维持文件层防线；有权威记录则任一环缺失/失配 → fail-closed 拒绝。
+    注意：task.json 与 DB 不一致时以 DB 为准（B.6：不信任文件自报值）。
+    """
+    repo = getattr(manager, "runtime_db", None)
+    if repo is None:
+        return
+    run_id = str(getattr(task, "id", "") or "").strip()
+    if not run_id:
+        return
+    agent_run = repo.agent_run_for_run_id(run_id)
+    if agent_run is None:
+        return  # R1 前存量 run：无权威记录，文件层防线兜底
+    agent_run_id = str(agent_run["agent_run_id"] or "").strip()
+    # 1. TaskRun 权威存在。
+    task_run = repo.get_task_run(str(agent_run["task_run_id"] or "").strip())
+    if task_run is None:
+        raise AuthorizationError(
+            f"{request.operation}: 权威 TaskRun 缺失: {run_id}"
+        )
+    # 2. owner 与 DB 权威一致（task.json 可被篡改，tasks.owner_id 才是权威）。
+    db_task = repo.get_task(str(task_run["task_id"] or "").strip())
+    requester_owner = str(request.requester_owner or "").strip()
+    if db_task is not None:
+        db_owner = str(db_task["owner_id"] or "").strip()
+        if requester_owner and db_owner and requester_owner != db_owner:
+            raise AuthorizationError(
+                f"{request.operation}: DB 权威 owner={db_owner!r} 与请求方 "
+                f"owner={requester_owner!r} 不一致"
+            )
+    # 3. 当前 AgentAttempt 必须存在（A.6/F.6：执行任何工具前必须有 attempt）。
+    if repo.current_attempt(agent_run_id) is None:
+        raise AuthorizationError(
+            f"{request.operation}: 权威 current attempt 缺失: {run_id}"
+        )
+    # 4. parent/delegation：有 parent 的 child 必须有 immutable delegation 指向
+    #    同 parent（A.7），缺失/失配即拒绝。
+    parent_id = str(agent_run["parent_agent_run_id"] or "").strip()
+    if parent_id:
+        delegation = repo.delegation_for_child(agent_run_id)
+        if delegation is None or str(delegation["parent_agent_run_id"] or "").strip() != parent_id:
+            raise AuthorizationError(
+                f"{request.operation}: 权威 delegation 缺失/失配: {run_id}"
+            )
+    # 5. WorkspaceBinding：建过 binding 的 run 必须仍是 ACTIVE（D.9 迁移后
+    #    旧 run fail-closed）；从未建 binding（未执行）→ 放行。
+    latest = repo.latest_binding_for_run(agent_run_id)
+    if latest is not None and str(latest["status"] or "") != BINDING_ACTIVE:
+        raise AuthorizationError(
+            f"{request.operation}: WorkspaceBinding 非 ACTIVE: {run_id}"
+        )
 
 
 def _load_ancestor(manager: Any, run_id: str) -> SubAgentTask | None:

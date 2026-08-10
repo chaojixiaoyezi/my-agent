@@ -88,8 +88,11 @@ _TASK_REGISTRY_SQL = (
 )
 
 _CONTROL_PLANE_SQL = (
+    # R1：旧 agent_runs 投影改名 legacy_agent_runs（3.txt R1 迁移顺序：新旧不得
+    # 同名双权威——权威 agent_runs 现属 owner runtime.db）。新库直接建新名，
+    # 旧库经 _migrate_legacy_agent_runs_rename 数据保留改名。
     """
-    CREATE TABLE IF NOT EXISTS agent_runs (
+    CREATE TABLE IF NOT EXISTS legacy_agent_runs (
         run_id TEXT PRIMARY KEY,
         root_task_id TEXT NOT NULL,
         parent_run_id TEXT NOT NULL DEFAULT '',
@@ -110,10 +113,10 @@ _CONTROL_PLANE_SQL = (
         metadata_json TEXT NOT NULL DEFAULT '{}'
     )
     """,
-    "CREATE INDEX IF NOT EXISTS idx_agent_runs_root ON agent_runs(root_task_id)",
-    "CREATE INDEX IF NOT EXISTS idx_agent_runs_parent ON agent_runs(parent_run_id)",
-    "CREATE INDEX IF NOT EXISTS idx_agent_runs_status ON agent_runs(status)",
-    "CREATE INDEX IF NOT EXISTS idx_agent_runs_updated ON agent_runs(updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_runs_root ON legacy_agent_runs(root_task_id)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_runs_parent ON legacy_agent_runs(parent_run_id)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_runs_status ON legacy_agent_runs(status)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_runs_updated ON legacy_agent_runs(updated_at)",
     """
     CREATE TABLE IF NOT EXISTS agent_events (
         event_id TEXT PRIMARY KEY,
@@ -219,6 +222,7 @@ class LocalStoreSchemaMixin:
         self._fts_needs_rebuild = False
         with self._connection() as conn:
             self._execute_schema(conn, _BASE_SCHEMA_SQL)
+            self._migrate_legacy_agent_runs_rename(conn)
             self._execute_schema(conn, _TASK_REGISTRY_SQL)
             self._execute_schema(conn, _CONTROL_PLANE_SQL)
             self._execute_schema(conn, _RUNTIME_GATE_LEDGER_SQL)
@@ -237,6 +241,22 @@ class LocalStoreSchemaMixin:
                 # 回填失败不能让 store 起不来:LIKE 兜底仍可用,下次 rebuild_fts 再补。
                 pass
         self._fts_needs_rebuild = False
+
+    def _migrate_legacy_agent_runs_rename(self, conn: sqlite3.Connection) -> None:
+        """数据保留迁移：旧投影表 agent_runs → legacy_agent_runs。
+
+        权威 agent_runs 现属 owner runtime.db，投影库不得再用同名表（R1 新旧
+        不得同名双权威）。已有库执行一次 ALTER TABLE RENAME（索引随表保留），
+        新库无旧表则跳过，随后 _CONTROL_PLANE_SQL 的 IF NOT EXISTS 建新名。
+        """
+        has_old = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_runs'"
+        ).fetchone()
+        has_new = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_agent_runs'"
+        ).fetchone()
+        if has_old and not has_new:
+            conn.execute("ALTER TABLE agent_runs RENAME TO legacy_agent_runs")
 
     def _execute_schema(self, conn: sqlite3.Connection, statements: tuple[str, ...]) -> None:
         for statement in statements:

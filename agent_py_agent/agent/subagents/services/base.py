@@ -8,11 +8,13 @@ SubAgentManager 通过当前服务组合调用这里。
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ...common.id_generator import new_id as _framework_new_id
 from ..authorization_gate import OperationRequest, authorize_operation
 from ..effective_permissions import effective_permission_snapshot
 from ..models import SubAgentTask
@@ -392,12 +394,44 @@ class SubAgentBaseService:
         )
         prepared = self._prepare_run(params)
         task = self._build_task(params, prepared)
+        self._write_authority_records(task, params)
         self._finalize_task(task, params.parent_id)
         return task
 
+    def _write_authority_records(self, task: SubAgentTask, params: CreateRunParams) -> None:
+        """R1：create_run 权威主链写入（A.4/A.5/A.6/A.7/A.9）。
+
+        单事务落 Task→TaskRun→root AgentRun→第一个 AgentAttempt→(child)
+        Delegation→runtime_events；conversation_task_id/thread_id 同事务进
+        tasks 行，ConversationTaskLink 不再独立权威。owner_home_dir 为空
+        （无 home 上下文）时无权威库，只走投影（向后兼容）。
+        """
+        repo = getattr(self.manager, "runtime_db", None)
+        if repo is None:
+            return
+        attrs = params.attributes if isinstance(params.attributes, dict) else {}
+        owner_id = str(task.owner or params.owner or "").strip()
+        if not owner_id:
+            owner_id = str(getattr(self.manager, "owner_id", "") or "").strip()
+        try:
+            repo.record_run_creation(
+                owner_id=owner_id,
+                goal=str(task.goal or "").strip(),
+                conversation_task_id=str(attrs.get("conversation_task_id") or "").strip(),
+                thread_id=str(attrs.get("conversation_thread_id") or "").strip(),
+                run_id=str(task.id or "").strip(),
+                role=str(task.role or "").strip(),
+                parent_run_id=str(params.parent_id or "").strip(),
+            )
+        except (OSError, KeyError) as exc:
+            # 权威库故障不阻断任务创建（投影仍可服务）；下次 create_run 重试。
+            logging.getLogger(__name__).warning(
+                "runtime.db 权威写入失败(run=%s): %s", task.id, exc, exc_info=True
+            )
+
     def _prepare_run(self, params: CreateRunParams) -> dict[str, object]:
         """Prepare run paths and the caller-provided acceptance contract."""
-        run_id = self.manager._new_id("subagent")
+        run_id = _framework_new_id("run_id")
         paths = self.manager._build_work_order_paths(run_id, extra_write_roots=params.extra_write_roots)
         return {
             "run_id": run_id,

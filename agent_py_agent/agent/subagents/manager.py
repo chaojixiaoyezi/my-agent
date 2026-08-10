@@ -342,6 +342,25 @@ def _init_manager_state(manager: SubAgentManager, workspace: str | Path, params:
     manager.debug_trace_level = _normalize_debug_trace_level(params.debug_trace_level)
     manager.takeover_chain_max_depth = max(0, int(params.takeover_chain_max_depth or 0))
     _apply_owner_scope(manager, params)
+    _attach_runtime_db(manager)
+
+
+def _attach_runtime_db(manager: SubAgentManager) -> None:
+    """R1：owner 权威 runtime.db（A.1 每 owner 一个）。
+
+    owner_home_dir 为空（无 home 上下文/纯测试）→ 不建权威库，create_run
+    只写投影（向后兼容）；有 home 上下文 → owner_home_dir/runtime.db 权威。
+    """
+    from ..runtime_db.repository import RuntimeRepository
+    from ..runtime_db.schema import runtime_db_path
+
+    manager.runtime_db = None
+    home = str(getattr(manager, "owner_home_dir", "") or "").strip()
+    if home:
+        try:
+            manager.runtime_db = RuntimeRepository(runtime_db_path(home))
+        except OSError:
+            manager.runtime_db = None
 
 
 def _normalized_workspace_roots(primary: Path, roots: list[str | Path] | None) -> list[Path]:

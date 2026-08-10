@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 
+from ...common.id_generator import new_id as _framework_new_id
 from ..models import (
     SUBAGENT_RECOVERY_CLOSED_STATUSES,
     SubAgentTask,
@@ -11,7 +12,6 @@ from ..models import (
     task_status_in,
 )
 from ..recovery_eligibility import user_stopped_run_is_resumable
-from ..utils import _new_id
 from .recovery.strategy import (
     SubagentRecoveryStrategyRequest,
     build_subagent_recovery_strategy,
@@ -28,7 +28,7 @@ def prepare_runner_attempt(manager: object, run_id: str, *, retry_reason: str = 
     strategy = build_subagent_recovery_strategy(
         SubagentRecoveryStrategyRequest(task=task)
     )
-    attempt_id = _new_id("attempt")
+    attempt_id = _framework_new_id("attempt_id")
     now = time.time()
     task.status = "RUNNING"
     task.verification_status = "UNVERIFIED"

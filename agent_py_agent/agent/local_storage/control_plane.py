@@ -54,7 +54,7 @@ class LocalStoreControlPlaneMixin:
 
     def get_agent_run(self, run_id: str) -> AgentRunRecord | None:
         with self._connection() as conn:
-            row = conn.execute("SELECT * FROM agent_runs WHERE run_id = ?", (run_id,)).fetchone()
+            row = conn.execute("SELECT * FROM legacy_agent_runs WHERE run_id = ?", (run_id,)).fetchone()
         return agent_run_from_row(row) if row else None
 
     def record_agent_event(self, event: AgentEventInput) -> AgentEventRecord:
@@ -163,7 +163,7 @@ class LocalStoreControlPlaneMixin:
         with self._connection() as conn:
             rows = conn.execute(
                 """
-                SELECT * FROM agent_runs
+                SELECT * FROM legacy_agent_runs
                 WHERE root_task_id = ?
                 ORDER BY depth ASC, created_at ASC, run_id ASC
                 """,

@@ -14,7 +14,7 @@ from typing import Any
 from .control_plane_models import AgentEventRecord, AgentRunRecord, TaskRollupRecord
 
 AGENT_RUN_UPSERT_SQL = """
-INSERT INTO agent_runs (
+INSERT INTO legacy_agent_runs (
     run_id, root_task_id, parent_run_id, depth, role, agent_name,
     status, progress, current_step, latest_summary, workspace_path,
     checkpoint_ref, latest_compact_ref, compact_count, heartbeat_at,
