@@ -7,9 +7,14 @@
 - readiness 失败（E.6）：任何可能写文件的 shell/build/test/child 进程
   handler=0，抛 SandboxUnavailableError（SANDBOX_UNAVAILABLE）；绝不退回
   "只设 cwd" 的宿主 shell（E.7）。
-- owner_scope_root 为空、单租户或 admin 不取消 sandbox（E.8）。
+- owner_scope_root 为空、单租户或 admin 不取消 sandbox（E.8）：单租户/全权
+  形态走 full_access 档（文件语义不变：bwrap 整根 bind / Seatbelt 不 deny），
+  网关统一 + 进程隔离仍生效；readiness 失败同样 fail-closed，不退回宿主。
 
-R2 建立机制与平台测试；接入工具执行链路归 R4 cutover。
+R2 建立机制与平台测试；G6（2026-08-10）接入生产工具执行主链：ShellTool
+前台/后台、PTY 会话的 spawn 统一经本网关（tooling/shell._sandbox_exec），
+AttemptSandboxSpec 由执行时真实上下文构造（attempt_view=任务工作目录、
+staging_root=同任务目录、shared_workspace=owner home）。
 """
 
 from __future__ import annotations
@@ -35,8 +40,12 @@ from ..tooling.sandbox import (
 )
 
 
-class SandboxUnavailableError(RuntimeError):
-    """SANDBOX_UNAVAILABLE：节点缺隔离能力时 handler=0 的载体。"""
+class SandboxUnavailableError(SandboxUnavailable):
+    """SANDBOX_UNAVAILABLE：节点缺隔离能力时 handler=0 的载体。
+
+    继承 tooling.sandbox.SandboxUnavailable（G6）：生产 spawn 的既有
+    except SandboxUnavailable 捕获链无需改动即对本网关的 fail-closed 生效。
+    """
 
 
 @dataclass(frozen=True)
@@ -50,6 +59,11 @@ class AttemptSandboxSpec:
     network_access: bool = True
     bwrap_path: str | None = None
     macos_sandbox_exec: str | None = None
+    # G6：生产 spawn 接线字段（tooling/shell._sandbox_exec 透传）。
+    full_access: bool = False  # 单租户/显式全权：文件语义不变，网关统一+进程隔离
+    protected_persona_root: Path | None = None  # SOUL/USER/AGENTS.md 强制只读
+    extra_write_roots: tuple[Path, ...] = ()  # __sandbox_write_roots 结构化授权根
+    public_read_roots: tuple[Path, ...] = ()  # __sandbox_read_roots 只读根
 
 
 class AttemptExecutionSandbox:
@@ -59,12 +73,28 @@ class AttemptExecutionSandbox:
         sandbox = AttemptExecutionSandbox(spec)
         sandbox.require_ready()          # fail-closed：不可用抛异常
         result = sandbox.run([...argv...], timeout=120)
+
+    G6：生产 spawn 每调用构造一个实例（spec 随任务目录变化）。readiness
+    探测只依赖平台与二进制路径（自检用临时目录，与 spec 路径无关），故按
+    (platform, bwrap_path, macos_sandbox_exec) 进程级缓存——高频工具轮不会
+    每次重复 subprocess 试跑。
     """
+
+    _READINESS_CACHE: dict[tuple, SandboxReadiness] = {}
 
     def __init__(self, spec: AttemptSandboxSpec):
         self.spec = spec
         self._ready: SandboxReadiness | None = None
         self._platform = platform.system()
+
+    @classmethod
+    def _cached_readiness(cls, key: tuple) -> SandboxReadiness | None:
+        return cls._READINESS_CACHE.get(key)
+
+    @classmethod
+    def _cache_readiness(cls, key: tuple, report: SandboxReadiness) -> SandboxReadiness:
+        cls._READINESS_CACHE[key] = report
+        return report
 
     # ---------------------------------------------------------------- 探测
     def probe(self, *, binary_only: bool = False) -> SandboxReadiness:
@@ -147,9 +177,15 @@ class AttemptExecutionSandbox:
 
     def require_ready(self) -> SandboxReadiness:
         """E.6：readiness 失败 → 抛 SANDBOX_UNAVAILABLE（handler=0 由调用方
-        以异常拒绝执行实现）。"""
+        以异常拒绝执行实现）。探测结果按平台二进制缓存，避免高频 spawn 重复
+        试跑；缓存只存 ready 事实（含失败），spec 路径不影响结论。"""
         if self._ready is None:
-            self._ready = self.probe()
+            key = (self._platform, self.spec.bwrap_path, self.spec.macos_sandbox_exec)
+            cached = self._cached_readiness(key)
+            if cached is not None:
+                self._ready = cached
+            else:
+                self._ready = self._cache_readiness(key, self.probe())
         if not self._ready.ready:
             raise SandboxUnavailableError(
                 f"SANDBOX_UNAVAILABLE: {self._ready.code}: {self._ready.detail}"
@@ -173,8 +209,15 @@ class AttemptExecutionSandbox:
         spec = SandboxSpec(
             owner_home=self.spec.owner_home,
             workspace=self.spec.attempt_view,
-            write_roots=(self.spec.attempt_view, self.spec.staging_root),
+            public_ro_roots=self.spec.public_read_roots,
+            write_roots=(
+                self.spec.attempt_view,
+                self.spec.staging_root,
+                *self.spec.extra_write_roots,
+            ),
             bwrap_path=self.spec.bwrap_path,
+            protected_persona_root=self.spec.protected_persona_root,
+            full_access=self.spec.full_access,
             network_access=self.spec.network_access,
         )
         return [*build_bwrap_argv(spec), "--", *command_argv]
@@ -189,6 +232,8 @@ class AttemptExecutionSandbox:
             attempt_view=self.spec.attempt_view,
             staging=self.spec.staging_root,
             shared=self.spec.shared_workspace,
+            protected_persona_root=self.spec.protected_persona_root,
+            full_access=self.spec.full_access,
         )
         return [sandbox_exec, "-p", profile, "--", *command_argv]
 
@@ -251,10 +296,23 @@ class AttemptExecutionSandbox:
         attempt_view: Path,
         staging: Path,
         shared: Path,
+        protected_persona_root: Path | None = None,
+        full_access: bool = False,
     ) -> str:
         """Seatbelt 策略：默认放行（mach/网络/进程语义同 bwrap：隔离文件为主）
-        → 禁所有文件写 → 只对 attempt view + staging（+ /dev 设备）重新开写。
-        共享 workspace 保持只读（file-read* 默认放行，file-write* 拒绝）。"""
+        → 禁所有文件写 → 只对 attempt view + staging + extra 授权根
+        （+ /dev 设备）重新开写。共享 workspace 保持只读（file-read* 默认
+        放行，file-write* 拒绝）。
+
+        full_access（单租户/显式全权，G6）：不加 file-write deny，文件语义
+        与宿主一致，网关统一 + readiness 检查仍生效；persona 文件若在可写
+        区内仍以更精确的 literal deny 强制只读。"""
+        if full_access:
+            lines = ["(version 1)", "(allow default)"]
+            persona_denies = _persona_file_literal_denies(protected_persona_root)
+            if persona_denies:
+                lines.extend(persona_denies)
+            return "\n".join(lines)
         write_roots = [str(attempt_view.resolve()), str(staging.resolve())]
         lines = [
             "(version 1)",
@@ -264,12 +322,36 @@ class AttemptExecutionSandbox:
             + "".join(f' (subpath {json.dumps(root)})' for root in write_roots)
             + ")",
         ]
+        persona_denies = _persona_file_literal_denies(protected_persona_root)
+        if persona_denies:
+            # literal 比 subpath 精确，Seatbelt 同精确度取首条 → deny 优先于
+            # 更宽的写根 allow；persona 文件在可写区内也保持只读。
+            lines.extend(persona_denies)
         return "\n".join(lines)
 
     @staticmethod
     def sandbox_readiness_dict() -> dict[str, Any]:
         """跨平台 readiness 汇总（诊断/CLI 用）。"""
         return {"platform": platform.system()}
+
+
+def _persona_file_literal_denies(protected_persona_root: Path | None) -> list[str]:
+    """persona 文件（SOUL/USER/AGENTS.md）的 Seatbelt literal deny 规则。
+
+    与 bwrap 侧 `_append_persona_readonly_mounts` 同语义：这些文件是用户
+    长期人格，shell 不得改写。只对实际存在的文件生成规则（探针临时目录里
+    不存在 → 不生成，probe 语义与真实一致）。
+    """
+    if protected_persona_root is None:
+        return []
+    denies: list[str] = []
+    for name in ("SOUL.md", "USER.md", "AGENTS.md"):
+        candidate = Path(protected_persona_root) / name
+        if candidate.is_file():
+            denies.append(
+                f"(deny file-write* (literal {json.dumps(str(candidate.resolve()))}))"
+            )
+    return denies
 
 
 __all__ = [

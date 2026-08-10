@@ -49,7 +49,7 @@ from .models import (
     TrustedParameterBinding,
 )
 from .process_registry import process_registry, terminate_process_tree
-from .sandbox import SandboxUnavailable, find_bwrap
+from .sandbox import SandboxUnavailable
 
 _MAX_COMMAND_CHARS = 2000
 _DEFAULT_MAX_OUTPUT_CHARS = 12_000
@@ -566,9 +566,12 @@ def _sandbox_roots(
     return tuple(roots)
 
 
-# LLM: 这是 owner-scoped shell 的不可绕过隔离门；owner_home 非空时只能返回
-#   bwrap argv(shell=False)或抛 SandboxUnavailable，禁止恢复宿主 shell fallback。
-# 函数用途: 为多用户命令选择隔离执行参数；单用户无 owner scope 时保留原有 shell。
+# LLM: 这是所有生产 shell spawn 的唯一隔离门（G6）：owner-scoped 与单租户
+#   都经 AttemptExecutionSandbox 网关（Linux bwrap / macOS Seatbelt），只能
+#   返回沙箱 argv(shell=False)或抛 SandboxUnavailable，禁止恢复宿主 shell
+#   fallback（3.txt E.6/E.7）。单租户走 full_access 档：文件语义不变，网关
+#   统一 + 进程隔离 + readiness 检查仍生效（E.8 不取消 sandbox）。
+# 函数用途: 为命令选择跨平台 attempt 沙箱执行参数；返回 (argv, shell=False)。
 def _sandbox_exec(
     command: str,
     target: Path,
@@ -577,33 +580,58 @@ def _sandbox_exec(
     write_roots: tuple[Path, ...] | None = None,
     read_roots: tuple[Path, ...] | None = None,
 ) -> tuple[Any, bool]:
-    """多用户隔离 1 层:owner-scoped(owner_home 非空)且 bwrap 可用时,把命令包进 bwrap——根视图只有
-    自己 owner home + 系统只读,隔离文件/进程,但【放行外网】;返回 (bwrap_argv, shell=False)。
-    bwrap 不可用则 fail-closed；owner_home 空(显式全权/单租户)才直接使用原 shell。"""
-    if not owner_home and not protected_persona_root:
-        return command, True
-    from .sandbox import SandboxSpec, find_bwrap, wrap_shell_command
+    """把命令包进 attempt 沙箱（G6 接线）。
 
-    bwrap = find_bwrap()
-    if not bwrap:
-        raise SandboxUnavailable("BWRAP_NOT_FOUND:owner-scoped 命令要求 bwrap 隔离")
-    argv = wrap_shell_command(
-        command,
-        SandboxSpec(
-            owner_home=Path(owner_home or protected_persona_root),
-            workspace=target,
-            public_ro_roots=read_roots or (),
-            write_roots=write_roots,
-            bwrap_path=bwrap,
-            protected_persona_root=Path(protected_persona_root) if protected_persona_root else None,
-            full_access=not bool(owner_home),
+    owner-scoped（owner_home 非空）：attempt_view=任务工作目录（本 attempt
+    可写工作区）、staging_root=同任务目录（publish 棒接入前 staging 语义由
+    任务目录承担）、shared_workspace=owner home（只读底图）。
+    单租户（owner_home 空）：full_access 档（bwrap 整根 bind / Seatbelt 不
+    deny file-write），文件权限语义与宿主一致，隔离=网关统一+进程隔离。
+    protected_persona_root 非空（哪怕 owner_home 空）→ 非 full_access：
+    persona 文件强制只读。
+    """
+    from ..attempt.sandbox import AttemptExecutionSandbox, AttemptSandboxSpec
+    from .sandbox import strict_posix_shell_argv
+
+    owner_text = str(owner_home or "").strip()
+    persona_text = str(protected_persona_root or "").strip()
+    full_access = not owner_text and not persona_text
+    if owner_text:
+        owner = Path(owner_text).expanduser().resolve(strict=False)
+        shared = owner
+        base = owner
+    elif persona_text:
+        # persona 只读要求=有隔离要求：以任务目录为底图，persona 根只读。
+        owner = Path(persona_text).expanduser().resolve(strict=False)
+        shared = owner
+        base = Path(persona_text).expanduser().resolve(strict=False)
+    else:
+        shared = Path(target).expanduser().resolve(strict=False)
+        base = shared
+    spec = AttemptSandboxSpec(
+        attempt_view=Path(target).expanduser().resolve(strict=False),
+        staging_root=Path(target).expanduser().resolve(strict=False),
+        shared_workspace=shared,
+        owner_home=base,
+        protected_persona_root=(
+            Path(persona_text).expanduser().resolve(strict=False)
+            if persona_text
+            else None
         ),
+        extra_write_roots=tuple(Path(r).expanduser().resolve(strict=False) for r in (write_roots or ())),
+        public_read_roots=tuple(Path(r).expanduser().resolve(strict=False) for r in (read_roots or ())),
+        full_access=full_access,
     )
+    sandbox = AttemptExecutionSandbox(spec)
+    # Attempt 网关的 SandboxUnavailableError 继承 SandboxUnavailable，
+    # 生产既有 except SandboxUnavailable → SANDBOX_UNAVAILABLE 捕获链直接生效。
+    argv = sandbox.build_argv(strict_posix_shell_argv(command))
     return argv, False
 
 
-# LLM: 后台 shell 与前台共用 _sandbox_exec 硬门；Windows owner-scoped 也必须拒绝，
-#   不能因为平台分支绕开 sandbox。Popen 失败由上层转成结构化工具错误。
+# LLM: 后台 shell 与前台共用 _sandbox_exec 硬门（G6：POSIX 单租户也经 attempt
+#   沙箱，full_access 档）；Windows owner-scoped 也必须拒绝，不能因为平台分支
+#   绕开 sandbox。Popen 失败由上层转成结构化工具错误。
 # 函数用途: 独立会话启动后台进程,stdout/stderr 合并写入给定日志句柄。
 def _spawn_background_process(
     command: str,
@@ -614,7 +642,7 @@ def _spawn_background_process(
     write_roots: tuple[Path, ...] | None = None,
     read_roots: tuple[Path, ...] | None = None,
 ) -> subprocess.Popen:
-    if owner_home or protected_persona_root:
+    if owner_home or protected_persona_root or os.name == "posix":
         exec_arg, use_shell = _sandbox_exec(
             command,
             target,
@@ -786,14 +814,40 @@ class ShellTool(BaseTool):
             mutates_workspace=True,
         )
 
-    # LLM: owner-scoped shell 没有 bwrap 时必须在本轮工具快照阶段消失；最终执行仍会
-    # 二次复检并 fail-closed，不能把 availability 当作权限或安全替代品。
+    # LLM: attempt 沙箱不可用时必须在本轮工具快照阶段消失；最终执行仍会二次
+    # 复检并 fail-closed，不能把 availability 当作权限或安全替代品。
     # 函数用途: 防止模型看到当前节点必然无法启动的 run_command，再反复尝试同一失败。
+    # G6：跨平台探测（Linux bwrap / macOS Seatbelt binary-only；单租户 POSIX 也
+    # 要求沙箱 E.8）；Windows 单租户保留宿主 powershell，owner-scoped 由执行期 fail-closed。
     def availability(self) -> ToolAvailability:
-        if not self.path_access_policy.owner_scope_root or find_bwrap():
+        if os.name == "nt":
+            if not self.path_access_policy.owner_scope_root:
+                return ToolAvailability.ready()
+            return ToolAvailability.unavailable(
+                "owner-scoped run_command 要求当前执行节点提供 attempt 沙箱（Windows 不支持）",
+                error_code="SANDBOX_UNAVAILABLE",
+            )
+        from ..attempt.sandbox import AttemptExecutionSandbox, AttemptSandboxSpec
+
+        target = self.workspace_root
+        owner_text = str(self.path_access_policy.owner_scope_root or "").strip()
+        spec = AttemptSandboxSpec(
+            attempt_view=target,
+            staging_root=target,
+            shared_workspace=Path(owner_text or target),
+            owner_home=Path(owner_text or target),
+            protected_persona_root=(
+                Path(self.protected_persona_root).expanduser().resolve(strict=False)
+                if self.protected_persona_root
+                else None
+            ),
+            full_access=not bool(owner_text),
+        )
+        report = AttemptExecutionSandbox(spec).probe(binary_only=True)
+        if report.ready:
             return ToolAvailability.ready()
         return ToolAvailability.unavailable(
-            "owner-scoped run_command 要求当前执行节点提供 bwrap",
+            f"run_command 要求当前执行节点提供 attempt 沙箱（{report.detail}）",
             error_code="SANDBOX_UNAVAILABLE",
         )
 
@@ -1113,8 +1167,15 @@ def _run_shell_command(
     sandbox_write_roots: tuple[Path, ...] | None,
     sandbox_read_roots: tuple[Path, ...] | None,
 ) -> subprocess.CompletedProcess[str]:
-    if tool.path_access_policy.owner_scope_root or tool.protected_persona_root:
-        return _run_owner_scoped_shell_command(
+    # G6：POSIX（macOS/Linux）一律经 attempt 沙箱路径（单租户=full_access 档）；
+    # Windows 单租户保留宿主 powershell（Attempt 网关不支持该平台，owner-scoped
+    # 的 Windows 由沙箱路径 fail-closed）。
+    if (
+        tool.path_access_policy.owner_scope_root
+        or tool.protected_persona_root
+        or os.name == "posix"
+    ):
+        return _run_attempt_sandboxed_shell_command(
             tool,
             command,
             target,
@@ -1135,27 +1196,15 @@ def _run_shell_command(
             creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
         )
         return _communicate_process(proc, command=command, timeout=timeout)
-    # POSIX 独立会话让超时和取消可以终止整个进程组，避免 make/npm 子进程变成孤儿。
-    from .sandbox import strict_posix_shell_argv
-
-    proc = subprocess.Popen(
-        strict_posix_shell_argv(command),
-        shell=False,
-        cwd=str(target),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=_subprocess_text_env(tool.path_access_policy.owner_scope_root),
-        start_new_session=True,
+    raise SandboxUnavailable(
+        "SANDBOX_UNAVAILABLE: 当前平台无 attempt 沙箱实现（POSIX 之外仅支持 Windows 单租户宿主路径）"
     )
-    return _communicate_process(proc, command=command, timeout=timeout)
 
 
-# LLM: owner-scoped 前台命令只能吃 bwrap argv；加载失败归一成 SandboxUnavailable。
-# 函数用途: 在当前 owner/workspace 隔离环境中运行前台命令并等待完成。
-def _run_owner_scoped_shell_command(
+# LLM: 前台命令只能吃 attempt 沙箱 argv（G6：owner-scoped 与 POSIX 单租户统一）；
+#   加载失败归一成 SandboxUnavailable（fail-closed，绝不回退宿主 shell）。
+# 函数用途: 在 attempt 沙箱内运行前台命令并等待完成。
+def _run_attempt_sandboxed_shell_command(
     tool: ShellTool,
     command: str,
     target: Path,

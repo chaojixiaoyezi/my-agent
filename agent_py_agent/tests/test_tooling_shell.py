@@ -400,7 +400,8 @@ class TestShellToolEdgeCases:
 
     @patch("subprocess.Popen")
     def test_os_error_handled(self, mock_popen, tmp_path: Path):
-        """OSError 错误处理(Popen 启动失败抛 OSError,上层转 COMMAND_FAILED)。"""
+        """沙箱 spawn 启动失败抛 OSError → fail-closed（G6：不退回宿主 shell，
+        归一成 SANDBOX_UNAVAILABLE: BWRAP_EXEC_FAILED，handler=0）。"""
         from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
 
         workspace = tmp_path / "workspace"
@@ -412,7 +413,8 @@ class TestShellToolEdgeCases:
         result = tool.execute({"command": "nonexistent_command"})
 
         assert result.ok is False
-        assert "命令执行失败" in result.output
+        assert "SANDBOX_UNAVAILABLE" in result.output
+        assert "BWRAP_EXEC_FAILED" in result.output
 
     def test_workspace_write_allows_external_working_dir_when_not_dangerous(self, tmp_path: Path):
         """默认 workspace-write 允许切到普通外部目录。"""

@@ -260,7 +260,12 @@ def test_read_root_is_mounted_before_nested_write_carveout(tmp_path) -> None:
 
 
 def test_owner_scoped_shell_fails_closed_without_bwrap(tmp_path, monkeypatch) -> None:
-    """owner-scoped 命令缺 sandbox 时必须拒绝，不能返回 shell=True 宿主执行。"""
+    """owner-scoped 命令缺平台沙箱时必须拒绝，不能返回 shell=True 宿主执行。
+
+    G6：macOS 用 Seatbelt（sandbox-exec）兜底，故强制 Linux+bwrap 缺失分支验证
+    fail-closed；macOS 真实 Seatbelt 拦截在 test_attempt_sandbox.py 真机覆盖。
+    """
+    monkeypatch.setattr("agent_py_agent.agent.attempt.sandbox.platform.system", lambda: "Linux")
     monkeypatch.setattr("agent_py_agent.agent.tooling.sandbox.find_bwrap", lambda: None)
     with pytest.raises(SandboxUnavailable, match="BWRAP_NOT_FOUND"):
         _sandbox_exec("echo forbidden", tmp_path, tmp_path / "owner")
@@ -269,7 +274,8 @@ def test_owner_scoped_shell_fails_closed_without_bwrap(tmp_path, monkeypatch) ->
 def test_owner_scoped_shell_is_hidden_when_bwrap_is_unavailable(tmp_path, monkeypatch) -> None:
     from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
 
-    monkeypatch.setattr("agent_py_agent.agent.tooling.shell.find_bwrap", lambda: None)
+    monkeypatch.setattr("agent_py_agent.agent.attempt.sandbox.platform.system", lambda: "Linux")
+    monkeypatch.setattr("agent_py_agent.agent.tooling.sandbox.find_bwrap", lambda: None)
     tool = ShellTool(
         tmp_path,
         options=ShellToolOptions(owner_scope_root=str(tmp_path)),
@@ -279,15 +285,44 @@ def test_owner_scoped_shell_is_hidden_when_bwrap_is_unavailable(tmp_path, monkey
 
     assert availability.available is False
     assert availability.error_code == "SANDBOX_UNAVAILABLE"
-    assert "bwrap" in availability.reason
+    assert "attempt 沙箱" in availability.reason
 
 
-def test_unscoped_shell_stays_available_without_bwrap(tmp_path, monkeypatch) -> None:
+def test_unscoped_shell_availability_tracks_attempt_sandbox(tmp_path, monkeypatch) -> None:
+    """单租户也经 attempt 沙箱（E.8）：平台沙箱可用→ready；不可用→unavailable。"""
+    from agent_py_agent.agent.attempt.sandbox import SandboxReadiness
     from agent_py_agent.agent.tooling.shell import ShellTool
 
-    monkeypatch.setattr("agent_py_agent.agent.tooling.shell.find_bwrap", lambda: None)
-
+    ready = SandboxReadiness(True, "SANDBOX_READY", "ok")
+    monkeypatch.setattr(
+        "agent_py_agent.agent.attempt.sandbox.AttemptExecutionSandbox.probe",
+        lambda self, binary_only=False: ready,
+    )
     assert ShellTool(tmp_path).availability().available is True
+
+    monkeypatch.setattr(
+        "agent_py_agent.agent.attempt.sandbox.AttemptExecutionSandbox.probe",
+        lambda self, binary_only=False: SandboxReadiness(
+            False, "BWRAP_NOT_FOUND", "当前执行环境不支持沙箱"
+        ),
+    )
+    availability = ShellTool(tmp_path).availability()
+    assert availability.available is False
+    assert availability.error_code == "SANDBOX_UNAVAILABLE"
+
+
+def test_windows_unscoped_shell_stays_available_without_sandbox(tmp_path, monkeypatch) -> None:
+    """Windows 单租户保留宿主 powershell（Attempt 网关不支持该平台）。"""
+    from agent_py_agent.agent.tooling import shell as shell_module
+    from agent_py_agent.agent.tooling.shell import ShellTool
+
+    monkeypatch.setattr(shell_module, "os", _FakeOs("nt"))
+    assert ShellTool(tmp_path).availability().available is True
+
+
+class _FakeOs:
+    def __init__(self, name: str) -> None:
+        self.name = name
 
 
 def test_probe_binary_only_returns_structured_readiness(monkeypatch) -> None:
