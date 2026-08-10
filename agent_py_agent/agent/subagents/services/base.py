@@ -15,7 +15,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ...common.id_generator import new_id as _framework_new_id
-from ..authorization_gate import OperationRequest, authorize_operation
+from ..authorization_gate import (
+    AuthorizationError,
+    OperationRequest,
+    authorize_operation,
+)
 from ..effective_permissions import effective_permission_snapshot
 from ..models import SubAgentTask
 from .inheritance_manifest import build_inheritance_manifest
@@ -405,10 +409,19 @@ class SubAgentBaseService:
         Delegation→runtime_events；conversation_task_id/thread_id 同事务进
         tasks 行，ConversationTaskLink 不再独立权威。owner_home_dir 为空
         （无 home 上下文）时无权威库，只走投影（向后兼容）。
+
+        F8（fail-closed）：有 home 上下文时权威写入不允许静默失败——缺记录
+        的 run 会被授权门按"权威记录缺失"拒绝（B.6），成为不可管理的幻影；
+        故 attach 降级（repo None）或写入失败一律抛错，任务创建不落地。
         """
         repo = getattr(self.manager, "runtime_db", None)
         if repo is None:
-            return
+            if str(getattr(self.manager, "owner_home_dir", "") or "").strip():
+                raise AuthorizationError(
+                    f"create_run: 权威库不可用（owner_home_dir 存在但 runtime.db "
+                    f"未挂载，run={task.id} 拒绝创建）"
+                )
+            return  # 无 home 上下文（纯文件层模式）→ 只走投影（兼容）
         attrs = params.attributes if isinstance(params.attributes, dict) else {}
         owner_id = str(task.owner or params.owner or "").strip()
         if not owner_id:
@@ -424,10 +437,11 @@ class SubAgentBaseService:
                 parent_run_id=str(params.parent_id or "").strip(),
             )
         except (OSError, KeyError) as exc:
-            # 权威库故障不阻断任务创建（投影仍可服务）；下次 create_run 重试。
+            # 权威写入失败不再吞掉：有 home 时记录缺失 = 门后拒绝（fail-closed）。
             logging.getLogger(__name__).warning(
                 "runtime.db 权威写入失败(run=%s): %s", task.id, exc, exc_info=True
             )
+            raise
 
     def _prepare_run(self, params: CreateRunParams) -> dict[str, object]:
         """Prepare run paths and the caller-provided acceptance contract."""

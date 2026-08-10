@@ -5,11 +5,13 @@ cancel、dispatch、inspect、resume、takeover、resolve capability 六个操�
 owner 一致性 → parent/delegation 可见性。每次操作过同一序列，杜绝
 "有的入口校验、有的入口裸奔"的缺口。
 
-R1 起：目标 run 在 owner runtime.db 有权威记录时，额外强制
-WorkspaceBinding / TaskRun / parent+delegation / current AgentAttempt /
-DB owner 五重校验（B.5）；无权威库或无权威记录（R1 前存量 run）保持
-文件层防线（R0 现状）。完整伪造（同时篡改 task.json 与 runtime.db）超出
-单层防线，归 R2 binding 与 OS 沙箱。
+R1 起：目标 run 必须经 owner runtime.db 的 WorkspaceBinding / TaskRun /
+parent+delegation / current AgentAttempt / DB owner 五重校验（B.5）。
+F8（fail-closed）：manager 有 owner_home_dir 时权威库必须可用且目标必须有
+权威记录——缺任一 → 拒绝（B.6：DB 权威，记录缺失 = 旁路/幻影，不信任
+文件层自报）。仅无 home 上下文（纯文件层模式）维持 R0 文件层防线。
+完整伪造（同时篡改 task.json 与 runtime.db）超出单层防线，归 R2 binding
+与 OS 沙箱。
 """
 
 from __future__ import annotations
@@ -156,19 +158,27 @@ def _authorize_runtime_authority(
 ) -> None:
     """B.5：runtime.db 权威五重校验（TaskRun/Binding/parent+delegation/attempt/owner）。
 
-    无权威库（无 owner home）或目标为 R1 前存量 run（无权威记录）→ 跳过，
-    维持文件层防线；有权威记录则任一环缺失/失配 → fail-closed 拒绝。
-    注意：task.json 与 DB 不一致时以 DB 为准（B.6：不信任文件自报值）。
+    F8 起 fail-closed：manager 有 owner_home_dir 时权威库必须可用（attach
+    失败 = 静默降级，不再跳过）且目标 run 必须有权威记录（R1 起 create_run
+    恒写记录，缺失 = 旁路/幻影 → B.6 以 DB 为准拒绝）；任一环缺失/失配 →
+    拒绝。仅无 home 上下文（纯文件层模式）跳过，维持 R0 文件层防线。
     """
     repo = getattr(manager, "runtime_db", None)
     if repo is None:
-        return
+        if str(getattr(manager, "owner_home_dir", "") or "").strip():
+            raise AuthorizationError(
+                f"{request.operation}: 权威库不可用（owner_home_dir 存在但 "
+                "runtime.db 未挂载，拒绝在无权威校验下执行）"
+            )
+        return  # 无 home 上下文（纯文件层模式）→ 维持 R0 文件层防线
     run_id = str(getattr(task, "id", "") or "").strip()
     if not run_id:
         return
     agent_run = repo.agent_run_for_run_id(run_id)
     if agent_run is None:
-        return  # R1 前存量 run：无权威记录，文件层防线兜底
+        raise AuthorizationError(
+            f"{request.operation}: 权威记录缺失: {run_id}"
+        )
     agent_run_id = str(agent_run["agent_run_id"] or "").strip()
     # 1. TaskRun 权威存在。
     task_run = repo.get_task_run(str(agent_run["task_run_id"] or "").strip())

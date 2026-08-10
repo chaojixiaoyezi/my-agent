@@ -84,53 +84,69 @@ class RuntimeRepository(
     ) -> dict[str, str]:
         """create_run 权威主链写入（单事务）。
 
-        一个 TaskRun（=一次执行）→ 一个 root AgentRun（A.5）→ 第一个
-        AgentAttempt（A.6：执行任何工具前必须有 attempt）→ current pointer
-        （F.3 初值 generation 1）。conversation_task_id 与 thread_id 在
-        同一事务进入 tasks 行（A.9：ConversationTaskLink 不再是独立权威）。
-        child run 经 parent 的 AgentRun 建 immutable Delegation（A.7）；
-        parent 无权威记录（R1 前存量）时跳过委托，不阻断新链。
+        一个 TaskRun（=一次执行）→ 一棵 root/child AgentRun 树（A.4/A.5：
+        一次 TaskRun 下一棵根树；每个 TaskRun 创建一个 root AgentRun）→
+        每个 AgentRun 第一个 AgentAttempt（A.6：执行任何工具前必须有
+        attempt）→ current pointer（F.3 初值 generation 1）。
+        conversation_task_id 与 thread_id 在同一事务进入 tasks 行（A.9：
+        ConversationTaskLink 不再是独立权威）。
+
+        F9（A.4 树建模）：child（parent 有权威记录）并入 parent 的 TaskRun，
+        不新建 TaskRun/Task——树的 AgentRun 同属一个 TaskRun，链是
+        Task→TaskRun→AgentRun tree→AgentAttempt；child 经 immutable
+        Delegation 连接 parent AgentRun（A.7）。parent 无权威记录
+        （R1 前存量/旁路）时 child 自成新树根（parent/delegation 为空 =
+        合法根身份 A.7），不阻断新链。
         """
         with self.transaction() as conn:
             now = time.time()
-            # Task：conversation_task_id 复用既有任务身份；无则铸造框架 task_id。
-            task_id = str(conversation_task_id or "").strip() or new_id("task_id")
-            existing = conn.execute(
-                "SELECT task_id, owner_id FROM tasks WHERE task_id = ?", (task_id,)
-            ).fetchone()
-            if existing is None:
-                try:
-                    conn.execute(
-                        """
-                        INSERT INTO tasks(task_id, owner_id, thread_id, conversation_task_id,
-                                          title, goal, status, created_at, updated_at)
-                        VALUES(?, ?, ?, ?, '', ?, 'active', ?, ?)
-                        """,
-                        (task_id, owner_id, thread_id, conversation_task_id, goal, now, now),
-                    )
-                except sqlite3.IntegrityError:
-                    # 并发同 conversation 建任务：另一事务已插入，取既有行。
-                    pass
-            # TaskRun：每次 create_run 一次执行。
-            task_run_id = new_id("task_run_id")
-            conn.execute(
-                """
-                INSERT INTO task_runs(task_run_id, task_id, status, created_at, updated_at, metadata_json)
-                VALUES(?, ?, 'created', ?, ?, '{}')
-                """,
-                (task_run_id, task_id, now, now),
-            )
-            # root AgentRun（parent 为空 = 合法根身份 A.7）。
-            agent_run_id = new_id("agent_run_id")
+            task_run_id = ""
             parent_agent_run_id = ""
-            delegation_id = ""
+            task_id = ""
             if str(parent_run_id or "").strip():
+                # child：并入 parent 的 TaskRun（同树），共享 parent 的 Task 身份。
                 parent_row = conn.execute(
-                    "SELECT agent_run_id FROM agent_runs WHERE run_id = ?",
+                    "SELECT ar.agent_run_id, ar.task_run_id, tr.task_id "
+                    "FROM agent_runs ar "
+                    "JOIN task_runs tr ON tr.task_run_id = ar.task_run_id "
+                    "WHERE ar.run_id = ?",
                     (parent_run_id,),
                 ).fetchone()
                 if parent_row is not None:
                     parent_agent_run_id = str(parent_row["agent_run_id"])
+                    task_run_id = str(parent_row["task_run_id"])
+                    task_id = str(parent_row["task_id"] or "")
+            if not task_run_id:
+                # root（无 parent 或 parent 无权威记录）：新 TaskRun + Task 行。
+                # Task：conversation_task_id 复用既有任务身份；无则铸造框架 task_id。
+                task_id = str(conversation_task_id or "").strip() or new_id("task_id")
+                existing = conn.execute(
+                    "SELECT task_id, owner_id FROM tasks WHERE task_id = ?", (task_id,)
+                ).fetchone()
+                if existing is None:
+                    try:
+                        conn.execute(
+                            """
+                            INSERT INTO tasks(task_id, owner_id, thread_id, conversation_task_id,
+                                              title, goal, status, created_at, updated_at)
+                            VALUES(?, ?, ?, ?, '', ?, 'active', ?, ?)
+                            """,
+                            (task_id, owner_id, thread_id, conversation_task_id, goal, now, now),
+                        )
+                    except sqlite3.IntegrityError:
+                        # 并发同 conversation 建任务：另一事务已插入，取既有行。
+                        pass
+                task_run_id = new_id("task_run_id")
+                conn.execute(
+                    """
+                    INSERT INTO task_runs(task_run_id, task_id, status, created_at, updated_at, metadata_json)
+                    VALUES(?, ?, 'created', ?, ?, '{}')
+                    """,
+                    (task_run_id, task_id, now, now),
+                )
+            # root AgentRun（parent 为空 = 合法根身份 A.7）。
+            agent_run_id = new_id("agent_run_id")
+            delegation_id = ""
             conn.execute(
                 """
                 INSERT INTO agent_runs(agent_run_id, task_run_id, parent_agent_run_id,

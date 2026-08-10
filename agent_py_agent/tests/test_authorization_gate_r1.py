@@ -1,9 +1,9 @@
-"""B.5 授权门 DB 权威升级测试（R1-4）。
+"""B.5 授权门 DB 权威升级测试（R1-4 + F8 fail-closed）。
 
-带 owner_home_dir 的 manager 下，目标 run 有 runtime.db 权威记录时，
-门必须同时验证 owner/TaskRun/parent+delegation/current attempt/
-WorkspaceBinding（B.5），任一环缺失或失配 → fail-closed。
-无权威库 / 存量 run → 维持文件层防线（R0）。
+带 owner_home_dir 的 manager 下，门必须同时验证 owner/TaskRun/
+parent+delegation/current attempt/WorkspaceBinding（B.5），任一环缺失
+或失配 → fail-closed。F8 起：有 home 时权威库不可用或目标无权威记录
+同样 fail-closed（B.6 以 DB 为权威）；仅无 home 上下文维持文件层防线。
 """
 
 from __future__ import annotations
@@ -135,16 +135,23 @@ def test_never_bound_run_allowed(ctx):
     assert task.id == ctx.root.id
 
 
-def test_legacy_run_without_authority_skips_db_check(tmp_path):
-    # R1 前存量 run：无权威记录 → 文件层防线，不误杀。
+def test_run_without_authority_record_fails_closed(tmp_path):
+    """F8：home 在但目标无权威记录（旁路/幻影/未迁移存量）→ B.6 以 DB 为准拒绝。"""
     workspace = tmp_path / "workspace"
-    legacy = SubAgentManager(workspace, owner_id=OWNER)  # 无 home
+    legacy = SubAgentManager(workspace, owner_id=OWNER)  # 无 home → 只写文件层
     run = legacy.create_run(goal="存量", root_id="run-main", parent_id="run-main")
     modern = SubAgentManager(
         workspace, owner_id=OWNER, owner_home_dir=str(tmp_path / "home")
     )
-    task = authorize_operation(modern, _req("inspect", run.id))
-    assert task.id == run.id
+    with pytest.raises(AuthorizationError, match="权威记录缺失"):
+        authorize_operation(modern, _req("inspect", run.id))
+
+
+def test_missing_repo_with_home_fails_closed(ctx):
+    """F8：attach 静默降级（home 在但 runtime_db=None）→ 门拒绝，不跳过 B.5。"""
+    ctx.manager.runtime_db = None
+    with pytest.raises(AuthorizationError, match="权威库不可用"):
+        authorize_operation(ctx.manager, _req("cancel", ctx.root.id))
 
 
 def test_tree_scope_validates_requester_authority(ctx):

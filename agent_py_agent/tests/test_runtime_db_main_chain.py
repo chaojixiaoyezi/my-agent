@@ -90,6 +90,13 @@ def test_child_run_delegation_chain(manager, repo):
     assert child_agent["delegation_id"] == delegation["delegation_id"]
     # child 也有自己的第一个 attempt（A.6）。
     assert repo.get_attempt(child_agent["current_attempt_id"]) is not None
+    # F9（A.4）：child 并入 parent 的 TaskRun——一次 TaskRun 下一棵 root/child
+    # 树，不跨 TaskRun 引用；child 共享 parent 的 Task 身份（无孤儿 Task 行）。
+    assert child_agent["task_run_id"] == parent_agent["task_run_id"]
+    assert len(repo.agent_runs_for_task_run(parent_agent["task_run_id"])) == 2
+    child_task_run = repo.get_task_run(child_agent["task_run_id"])
+    parent_task_run = repo.get_task_run(parent_agent["task_run_id"])
+    assert child_task_run["task_id"] == parent_task_run["task_id"]
 
 
 def test_legacy_parent_skips_delegation_without_blocking(tmp_path):
@@ -121,11 +128,26 @@ def test_no_owner_home_dir_no_authority_db(tmp_path):
     assert not (tmp_path / "runtime.db").exists()
 
 
-def test_authority_failure_does_not_block_run(manager, repo, monkeypatch):
+def test_authority_write_failure_fails_closed(manager, monkeypatch):
+    """F8：有 home 时权威写入失败不再静默降级——缺记录的 run 会被授权门
+    按"权威记录缺失"拒绝（B.6），成为不可管理的幻影，故 create 抛错。"""
     def boom(**kwargs):
         raise OSError("disk full")
 
-    monkeypatch.setattr(repo, "record_run_creation", boom)
-    task = manager.create_run(goal="照常建", root_id="run-main", parent_id="run-main")
-    assert task.id.startswith("subagent-")
-    assert task.status == "PENDING" or task.id
+    monkeypatch.setattr(manager.runtime_db, "record_run_creation", boom)
+    with pytest.raises(OSError, match="disk full"):
+        manager.create_run(goal="照常建", root_id="run-main", parent_id="run-main")
+
+
+def test_missing_repo_with_home_fails_closed(tmp_path):
+    """F8：attach 静默降级（home 在但 runtime_db=None）→ create 拒绝，不产生幻影 run。"""
+    manager = SubAgentManager(
+        tmp_path / "workspace",
+        owner_id=OWNER,
+        owner_home_dir=str(tmp_path / "home"),
+    )
+    manager.runtime_db = None  # 模拟 _attach_runtime_db 的 OSError 静默降级
+    with pytest.raises(PermissionError, match="权威库不可用"):
+        manager.create_run(goal="无权威", root_id="run-main", parent_id="run-main")
+    # 文件层也没有残留任务（_finalize_task 未执行）。
+    assert not (tmp_path / "workspace").exists() or not list((tmp_path / "workspace").rglob("task.json"))
