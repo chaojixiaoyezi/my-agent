@@ -147,6 +147,95 @@ _BASE_RUNTIME_SQL = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_runtime_events_attempt ON runtime_events(attempt_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_runtime_events_type ON runtime_events(event_type, created_at)",
+    # ---------------------------------------------------------------- R2（G/H 节）
+    # ToolOperation 状态机（G.1）：CLAIMED→EXECUTING(CAS handler_started_at)→
+    # SUCCEEDED/FAILED/CANCELLED；EXECUTING 后无法证明零副作用一律 UNKNOWN（G.4）。
+    """
+    CREATE TABLE IF NOT EXISTS tool_operations (
+        operation_id TEXT PRIMARY KEY,
+        agent_run_id TEXT NOT NULL,
+        attempt_id TEXT NOT NULL,
+        attempt_generation INTEGER NOT NULL,
+        tool_operation_generation INTEGER NOT NULL,
+        operation_type TEXT NOT NULL,
+        canonical_scope TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'CLAIMED',
+        handler_started_at REAL NOT NULL DEFAULT 0,
+        settled_at REAL NOT NULL DEFAULT 0,
+        outcome_json TEXT NOT NULL DEFAULT '{}',
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_tool_operations_attempt ON tool_operations(attempt_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tool_operations_run ON tool_operations(agent_run_id)",
+    # 资源锁（G.6）：holder instance + PID/start token + attempt generation +
+    # workspace_epoch + lease。UNIQUE(canonical_scope) = 同一资源至多一个持有者。
+    """
+    CREATE TABLE IF NOT EXISTS resource_locks (
+        lock_id TEXT PRIMARY KEY,
+        canonical_scope TEXT NOT NULL UNIQUE,
+        holder_instance TEXT NOT NULL,
+        pid INTEGER NOT NULL DEFAULT 0,
+        start_token TEXT NOT NULL DEFAULT '',
+        attempt_id TEXT NOT NULL,
+        attempt_generation INTEGER NOT NULL,
+        workspace_epoch INTEGER NOT NULL,
+        tool_operation_generation INTEGER NOT NULL DEFAULT 0,
+        lease_expires_at REAL NOT NULL,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_resource_locks_lease ON resource_locks(lease_expires_at)",
+    # 资源 mutation 账（G.12）：canonical scope + version + MUTATING/STABLE/DIRTY。
+    # unknown/unscoped 写置 DIRTY → reconcile 前阻止发布/验收/交付（G.14）。
+    """
+    CREATE TABLE IF NOT EXISTS resource_mutations (
+        mutation_id TEXT PRIMARY KEY,
+        canonical_scope TEXT NOT NULL UNIQUE,
+        version INTEGER NOT NULL DEFAULT 0,
+        state TEXT NOT NULL DEFAULT 'STABLE',
+        dirty_reason TEXT NOT NULL DEFAULT '',
+        attempt_id TEXT NOT NULL DEFAULT '',
+        updated_at REAL NOT NULL
+    )
+    """,
+    # PublishOperation（H.2/H.7）：staging→共享唯一通道；崩溃只允许落
+    # COMMITTED 或 DIRTY/UNKNOWN，不能谎称原子成功。
+    """
+    CREATE TABLE IF NOT EXISTS publish_operations (
+        publish_id TEXT PRIMARY KEY,
+        binding_id TEXT NOT NULL,
+        agent_run_id TEXT NOT NULL,
+        attempt_id TEXT NOT NULL,
+        workspace_epoch INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'STAGING',
+        manifest_json TEXT NOT NULL DEFAULT '[]',
+        preimage_digests_json TEXT NOT NULL DEFAULT '{}',
+        postimage_digests_json TEXT NOT NULL DEFAULT '{}',
+        committed_at REAL NOT NULL DEFAULT 0,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_publish_ops_attempt ON publish_operations(attempt_id)",
+    # ArtifactRecord（H.8/H.9）：内容寻址 immutable artifact snapshot，发布完成
+    # 后才写；validator 只验证这里引用的 digest。
+    """
+    CREATE TABLE IF NOT EXISTS artifact_records (
+        artifact_id TEXT PRIMARY KEY,
+        attempt_id TEXT NOT NULL,
+        agent_run_id TEXT NOT NULL,
+        publish_id TEXT NOT NULL DEFAULT '',
+        rel_path TEXT NOT NULL,
+        digest TEXT NOT NULL,
+        size INTEGER NOT NULL DEFAULT 0,
+        created_at REAL NOT NULL,
+        UNIQUE(artifact_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_artifact_records_attempt ON artifact_records(attempt_id)",
 )
 
 

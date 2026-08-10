@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 import uuid
@@ -24,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from ..common.id_generator import new_id
+from .operations import RuntimeConflictError, RuntimeOperationsMixin
 from .schema import RuntimeSchemaMixin, runtime_db_path
 
 #: D.6/D.9：binding 生命周期状态。v1 不扩容（D.8），迁移时旧 ACTIVE → SUPERSEDED。
@@ -36,12 +38,11 @@ BINDING_ROOT_OVERLAP = "BINDING_ROOT_OVERLAP"
 #: D.5：同一物理写根已被其他 binding 声明 → 冲突。
 ROOT_CLAIM_CONFLICT = "ROOT_CLAIM_CONFLICT"
 
+# RuntimeConflictError 统一由 operations 模块定义（本模块 import 复用，
+# 勿重复定义同名类——会遮蔽 operations 抛出的异常类导致调用方捕获不到）。
 
-class RuntimeConflictError(RuntimeError):
-    """权威库内状态冲突（CAS 失败/根重叠/根被占）。"""
 
-
-class RuntimeRepository(RuntimeSchemaMixin):
+class RuntimeRepository(RuntimeSchemaMixin, RuntimeOperationsMixin):
     """单 owner 权威库入口。每个 owner 一个实例（A.1）。"""
 
     def __init__(self, db_path: str | Path):
@@ -454,6 +455,22 @@ class RuntimeRepository(RuntimeSchemaMixin):
         roots_digest: str = "",
         workspace_epoch: int = 1,
     ) -> sqlite3.Row:
+        # D.6：相同规范化根集合 digest + 相同 writable 集合 → 复用同一 ACTIVE
+        # binding（§5 测试 4：并发相同 root set 只得到一个 ACTIVE binding）。
+        writable_json = _sorted_roots_json(writable_roots)
+        if roots_digest:
+            with self._runtime_connection() as conn:
+                existing = conn.execute(
+                    """
+                    SELECT * FROM workspace_bindings
+                    WHERE owner_id = ? AND status = 'ACTIVE'
+                      AND roots_digest = ? AND writable_roots_json = ?
+                    ORDER BY workspace_epoch DESC LIMIT 1
+                    """,
+                    (owner_id, roots_digest, writable_json),
+                ).fetchone()
+            if existing is not None:
+                return existing
         binding_id = _binding_id()
         now = time.time()
         with self._runtime_connection() as conn:
@@ -473,9 +490,9 @@ class RuntimeRepository(RuntimeSchemaMixin):
                     attempt_id,
                     int(workspace_epoch),
                     root_path,
-                    json.dumps(readable_roots or [], ensure_ascii=False),
-                    json.dumps(writable_roots or [], ensure_ascii=False),
-                    json.dumps(extra_write_roots or [], ensure_ascii=False),
+                    _sorted_roots_json(readable_roots),
+                    writable_json,
+                    _sorted_roots_json(extra_write_roots),
                     roots_digest,
                     now,
                     now,
@@ -530,7 +547,8 @@ class RuntimeRepository(RuntimeSchemaMixin):
     ) -> int:
         """D.9：CAS 标记旧 binding SUPERSEDED 并递增 epoch，返回新 epoch。
 
-        F.1：workspace_epoch 只在 binding 迁移/撤销/接管时变化。迁移流程
+        F.1：workspace_epoch 只在 binding 迁移/撤销/接管时变化；同一事务内
+        联动 agent_runs.workspace_epoch（F.6 fence 校验基准）。迁移流程
         （锁 claims→证明无 active 操作→CAS epoch→标 SUPERSEDED→转移 claims→
         新 binding）由 R2 AttemptExecutionSandbox 编排，本方法只做原子表动作。
         """
@@ -549,6 +567,15 @@ class RuntimeRepository(RuntimeSchemaMixin):
                 raise RuntimeConflictError(
                     f"binding 迁移 CAS 失败: {binding_id} epoch {expected_epoch}"
                 )
+            conn.execute(
+                """
+                UPDATE agent_runs
+                SET workspace_epoch = ?, updated_at = ?
+                WHERE agent_run_id = (SELECT agent_run_id FROM workspace_bindings
+                                      WHERE binding_id = ?)
+                """,
+                (new_epoch, now, binding_id),
+            )
             conn.commit()
         return new_epoch
 
@@ -561,25 +588,42 @@ class RuntimeRepository(RuntimeSchemaMixin):
         attempt_id: str,
         root_path: str,
     ) -> sqlite3.Row:
-        """声明物理写根（D.5：同库内唯一）。UNIQUE(root_path) 冲突 → 拒绝。
+        """声明物理写根（D.5：同库内唯一）。冲突 → ROOT_CLAIM_CONFLICT。
+
+        R2 起声明前规范化（§5 测试 5）：
+        - realpath 归一：symlink 别名指向同一物理路径视为同根；
+        - normcase 归一：大小写不敏感文件系统（macOS）别名视为同根；
+        - 父子包含关系拒绝：/a 与 /a/b 是同一物理写根区，不能分属两个声明；
+        - samefile 探测：既有声明的 mount/别名等价路径视为冲突。
 
         迁移时旧 claims 必须先被原子转移（D.9），否则新声明必然冲突。
         """
+        canonical = _canonical_root_path(root_path)
         claim_id = uuid.uuid4().hex
         try:
             with self._runtime_connection() as conn:
+                existing = conn.execute(
+                    "SELECT root_path FROM root_claims"
+                ).fetchall()
+                for row in existing:
+                    other = str(row["root_path"] or "")
+                    if _roots_overlap(canonical, other):
+                        raise RuntimeConflictError(
+                            f"{ROOT_CLAIM_CONFLICT}: 物理写根与既有声明重叠: "
+                            f"{canonical} vs {other}"
+                        )
                 conn.execute(
                     """
                     INSERT INTO root_claims(claim_id, binding_id, agent_run_id, attempt_id,
                                             root_path, created_at)
                     VALUES(?, ?, ?, ?, ?, ?)
                     """,
-                    (claim_id, binding_id, agent_run_id, attempt_id, root_path, time.time()),
+                    (claim_id, binding_id, agent_run_id, attempt_id, canonical, time.time()),
                 )
                 conn.commit()
         except sqlite3.IntegrityError as exc:
             raise RuntimeConflictError(
-                f"{ROOT_CLAIM_CONFLICT}: 物理写根已被声明: {root_path}"
+                f"{ROOT_CLAIM_CONFLICT}: 物理写根已被声明: {canonical}"
             ) from exc
         row = self.get_claim(claim_id)
         assert row is not None
@@ -592,9 +636,12 @@ class RuntimeRepository(RuntimeSchemaMixin):
             ).fetchone()
 
     def claim_for_root(self, root_path: str) -> sqlite3.Row | None:
+        # 与 claim_root 同一规范化：库里存 canonical，查询别名（大小写/
+        # symlink 拼写）必须归一后才能命中自己刚写入的行。
+        canonical = _canonical_root_path(root_path)
         with self._runtime_connection() as conn:
             return conn.execute(
-                "SELECT * FROM root_claims WHERE root_path = ?", (root_path,)
+                "SELECT * FROM root_claims WHERE root_path = ?", (canonical,)
             ).fetchone()
 
     def claims_for_binding(self, binding_id: str) -> list[sqlite3.Row]:
@@ -671,3 +718,71 @@ def _binding_id() -> str:
     # binding 不在 B.1 七类内（B.1 只列 run/task/taskrun/agentrun/attempt/session/
     # delegation），用无前缀 uuid 防与框架 ID 混淆。
     return uuid.uuid4().hex
+
+
+def _sorted_roots_json(roots: list[str] | None) -> str:
+    """根集合规范化 JSON：排序后序列化（D.6 digest 比较与顺序无关）。"""
+    return json.dumps(sorted(str(r).strip() for r in (roots or []) if str(r).strip()), ensure_ascii=False)
+
+
+def _canonical_root_path(root_path: str) -> str:
+    """root claim 规范化：realpath（symlink 别名）+ 大小写别名归一。
+
+    normcase 在 POSIX 是 no-op（大小写折叠只在 Windows），macOS 的
+    大小写不敏感须按文件系统实测：目标父目录大小写不敏感（探测同文件
+    大小写拼写等价）→ 路径转小写；Linux 大小写敏感 → 保持原样
+    （/A 与 /a 是真实不同路径，不得归一）。
+    """
+    try:
+        path = Path(str(root_path or "")).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError):
+        path = Path(str(root_path or ""))
+    if _fs_is_case_insensitive(path):
+        return str(path).lower()
+    return str(path)
+
+
+def _fs_is_case_insensitive(path: Path) -> bool:
+    """实测 path 所在文件系统是否大小写不敏感（macOS 默认卷 / Windows）。
+
+    大小写敏感性是卷属性、与具体目录无关；path 的父目录可能尚未创建
+    （claim 的子根），此时向上找最近的存在祖先探测，保证同一卷上所有
+    路径的归一结果一致。
+    """
+    parent = path.parent
+    while parent and not parent.exists():
+        parent = parent.parent
+    if not parent:
+        return False
+    probe = parent / f".caseprobe-{os.getpid()}-{uuid.uuid4().hex[:6]}"
+    try:
+        probe.write_text("x", encoding="utf-8")
+        upper = parent / probe.name.upper()
+        same = upper.exists() if upper != probe else False
+    except OSError:
+        return False
+    finally:
+        try:
+            probe.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return same
+
+
+def _roots_overlap(canonical: str, other: str) -> bool:
+    """两规范化写根是否重叠（测试 5）：相等/父子包含/samefile 别名。"""
+    if not other:
+        return False
+    if canonical == other:
+        return True
+    left = canonical.rstrip("/")
+    right = other.rstrip("/")
+    if left.startswith(right + "/") or right.startswith(left + "/"):
+        return True
+    try:
+        # mount/绑定别名：不同路径字符串同一物理文件/目录。
+        if os.path.exists(canonical) and os.path.exists(other) and os.path.samefile(canonical, other):
+            return True
+    except OSError:
+        pass
+    return False
