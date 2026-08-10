@@ -235,6 +235,39 @@ class RuntimeAcceptanceMixin:
             for row in rows
         ]
 
+    def validator_operation_by_assertion(
+        self,
+        contract_id: str,
+        assertion_key: str,
+        attempt_id: str,
+    ) -> dict[str, Any] | None:
+        """按 (契约, 断言标识, attempt) 查既有操作行（账本幂等用，只读）。
+
+        同契约同断言同 attempt 至多一条目标行（重放/重启不重复落账）；
+        返回行可能是 PENDING（中途崩溃残留，调用方用当前裁决 settle 收尾）
+        或终态（已落过，跳过）。与 closeout 的 assertion_key 判定单位一致。
+        """
+        with self._runtime_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM validator_operations "
+                "WHERE contract_id = ? AND assertion_key = ? AND attempt_id = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (contract_id, assertion_key, attempt_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "operation_id": row["operation_id"],
+            "attempt_id": row["attempt_id"],
+            "agent_run_id": row["agent_run_id"],
+            "contract_id": row["contract_id"],
+            "assertion_key": str(row["assertion_key"] or ""),
+            "validator_ref": row["validator_ref"],
+            "validator_kind": row["validator_kind"],
+            "status": row["status"],
+            "code_digest": row["code_digest"],
+        }
+
     def validator_operation(self, operation_id: str) -> dict[str, Any] | None:
         with self._runtime_connection() as conn:
             row = conn.execute(

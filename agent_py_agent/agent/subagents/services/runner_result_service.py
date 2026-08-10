@@ -131,6 +131,10 @@ class SubAgentRunnerResultService:
             # effective_permissions.owner_home 是快照默认值(无沙箱环境也非空),
             # 以它做门会把合法普通执行误判成必须 bwrap → 假 SANDBOX_UNAVAILABLE。
             owner_home=self.manager.owner_scope_root,
+            # R3 验收账本落账（R6 gate）：机器裁决持久化；LOCAL_UNMANAGED
+            # 时 manager.runtime_db 为 None，落账静默跳过。getattr 兼容
+            # 测试桩 Manager（无 runtime_db 属性 = 无权威库 = 跳过落账）。
+            repo=getattr(self.manager, "runtime_db", None),
         )
 
     def _post_result_side_effects(

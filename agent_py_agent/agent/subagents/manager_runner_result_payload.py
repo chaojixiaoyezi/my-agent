@@ -290,8 +290,13 @@ def apply_status_and_build_payload(
     now: float,
     *,
     owner_home: str = "",
+    repo=None,
 ) -> tuple[dict, BuildAndPersistContext]:
-    """Apply status to task and build output payload."""
+    """Apply status to task and build output payload.
+
+    repo：owner runtime.db 权威库（R3 验收账本落账用）；None =
+    LOCAL_UNMANAGED，跳过落账（兼容既有测试调用，行为不变）。
+    """
     result_meta = _runner_make_result_meta(params.ok, params.message, params.response, params.dry_run)
     cap_data = _runner_make_cap_data(
         _CapDataParams(
@@ -312,7 +317,9 @@ def apply_status_and_build_payload(
     apply_runner_result_fields(
         RunnerResultFieldParams(extracted.task, result_meta, status_context, extracted.parsed, now)
     )
-    _machine_verify_done_acceptance(extracted.task, extracted.tests, owner_home=owner_home)
+    _machine_verify_done_acceptance(
+        extracted.task, extracted.tests, owner_home=owner_home, repo=repo
+    )
     final_ok = result_meta["ok"]
     final_message = result_meta["message"]
     blockers = _runner_compute_blockers(final_ok, extracted.task.status, extracted.parsed, final_message)
@@ -331,7 +338,9 @@ def apply_status_and_build_payload(
     )
 
 
-def _machine_verify_done_acceptance(task: SubAgentTask, tests: list, *, owner_home: str = "") -> None:
+def _machine_verify_done_acceptance(
+    task: SubAgentTask, tests: list, *, owner_home: str = "", repo=None
+) -> None:
     """DONE 任务的验收证据绑定机器验证(问题3)。
 
     模型自述的 DONE/VERIFIED 不再自动成立:对 tests[] 中可机验条目逐条做进程内
@@ -365,6 +374,11 @@ def _machine_verify_done_acceptance(task: SubAgentTask, tests: list, *, owner_ho
             passed=False,
             reason="SANDBOX_UNAVAILABLE",
         )
+    # R3 权威验收账本落账（R6 gate：机器裁决持久化）。纯落账 fail-silent，
+    # 不改变下方 VERIFIED/UNVERIFIED 裁决与 blockers 路径。
+    from .services.acceptance_ledger import ledgerize_done_acceptance
+
+    ledgerize_done_acceptance(task, tests, result, owner_home=owner_home, repo=repo)
     if result.checked and result.passed:
         task.verification_status = VerificationStatus.VERIFIED.value
         return
