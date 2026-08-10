@@ -55,7 +55,8 @@ _BASE_RUNTIME_SQL = (
         status TEXT NOT NULL DEFAULT '',
         created_at REAL NOT NULL,
         updated_at REAL NOT NULL,
-        metadata_json TEXT NOT NULL DEFAULT '{}'
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        current_contract_id TEXT NOT NULL DEFAULT ''
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_task_runs_task ON task_runs(task_id)",
@@ -236,7 +237,73 @@ _BASE_RUNTIME_SQL = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_artifact_records_attempt ON artifact_records(attempt_id)",
+    # ---------------------------------------------------------------- R3（I 节）
+    # AcceptanceContract（I.2/I.6）：dispatch 前由框架编译、校验、冻结，
+    # 不可变；current_contract_id 在 task_runs 上 CAS 防分叉。模型只能
+    # propose assertions（I.1）；command/cwd/working_dir/裸程序结构性
+    # 不进契约（I.3），只作 inert evidence（I.4，读取不触发 subprocess）。
+    """
+    CREATE TABLE IF NOT EXISTS acceptance_contracts (
+        contract_id TEXT PRIMARY KEY,
+        task_run_id TEXT NOT NULL,
+        attempt_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'FROZEN',
+        compiled_json TEXT NOT NULL DEFAULT '{}',
+        digest TEXT NOT NULL,
+        inert_legacy_json TEXT NOT NULL DEFAULT '{}',
+        frozen_at REAL NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_contracts_task_run ON acceptance_contracts(task_run_id)",
+    # ValidatorOperation（A.8/I.8/I.9）：每次 validator 执行追到具体
+    # attempt；记录 code digest/argv/env/artifact digests/stdout/stderr。
+    # status：VERIFIED/FAILED/UNAVAILABLE/BLOCKED（sandbox 不可用 fail
+    # closed，不降级为 advisory）。
+    """
+    CREATE TABLE IF NOT EXISTS validator_operations (
+        operation_id TEXT PRIMARY KEY,
+        attempt_id TEXT NOT NULL,
+        agent_run_id TEXT NOT NULL,
+        contract_id TEXT NOT NULL DEFAULT '',
+        validator_ref TEXT NOT NULL,
+        validator_kind TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'PENDING',
+        code_digest TEXT NOT NULL DEFAULT '',
+        argv_json TEXT NOT NULL DEFAULT '[]',
+        env_json TEXT NOT NULL DEFAULT '{}',
+        artifact_digests_json TEXT NOT NULL DEFAULT '[]',
+        stdout_text TEXT NOT NULL DEFAULT '',
+        stderr_text TEXT NOT NULL DEFAULT '',
+        exit_code INTEGER NOT NULL DEFAULT -1,
+        started_at REAL NOT NULL DEFAULT 0,
+        settled_at REAL NOT NULL DEFAULT 0,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_validator_ops_attempt ON validator_operations(attempt_id)",
 )
+
+
+#: 存量库幂等迁移（CREATE TABLE IF NOT EXISTS 不更新既有表结构）。
+#: 每项为 (检查列, 表, ALTER SQL)；列已存在则跳过，多次启动安全。
+_RUNTIME_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    (
+        "current_contract_id",
+        "task_runs",
+        "ALTER TABLE task_runs ADD COLUMN current_contract_id TEXT NOT NULL DEFAULT ''",
+    ),
+)
+
+
+def _table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    try:
+        return any(
+            row["name"] == column
+            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        )
+    except sqlite3.OperationalError:
+        return False
 
 
 class RuntimeSchemaMixin:
@@ -246,7 +313,28 @@ class RuntimeSchemaMixin:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         with self._runtime_connection() as conn:
             self._execute_runtime_schema(conn, _BASE_RUNTIME_SQL)
+            self._apply_runtime_migrations(conn)
             conn.commit()
+
+    @staticmethod
+    def _apply_runtime_migrations(conn: sqlite3.Connection) -> None:
+        """幂等迁移存量库（R1/R2 建的库无 current_contract_id）。
+
+        并发安全：多个连接可能同时初始化同一库（Gateway/后台 worker 共用
+        owner 权威库）。目标态是「列存在」：
+        - 检测到列 → 跳过；
+        - 未检测到 → ALTER；并发窗口内另一连接已 ALTER（duplicate）→
+          视为迁移已达成，不抛错。
+        """
+        for column, table, alter_sql in _RUNTIME_MIGRATIONS:
+            if _table_has_column(conn, table, column):
+                continue
+            try:
+                conn.execute(alter_sql)
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
+                # 并发连接已先完成本列迁移，目标态已达成。
 
     @staticmethod
     def _execute_runtime_schema(conn: sqlite3.Connection, statements: tuple[str, ...]) -> None:

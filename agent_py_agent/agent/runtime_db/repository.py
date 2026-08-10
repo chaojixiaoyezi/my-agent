@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from ..common.id_generator import new_id
+from .acceptance_operations import RuntimeAcceptanceMixin
 from .operations import RuntimeConflictError, RuntimeOperationsMixin
 from .schema import RuntimeSchemaMixin, runtime_db_path
 
@@ -42,7 +43,7 @@ ROOT_CLAIM_CONFLICT = "ROOT_CLAIM_CONFLICT"
 # 勿重复定义同名类——会遮蔽 operations 抛出的异常类导致调用方捕获不到）。
 
 
-class RuntimeRepository(RuntimeSchemaMixin, RuntimeOperationsMixin):
+class RuntimeRepository(RuntimeSchemaMixin, RuntimeOperationsMixin, RuntimeAcceptanceMixin):
     """单 owner 权威库入口。每个 owner 一个实例（A.1）。"""
 
     def __init__(self, db_path: str | Path):

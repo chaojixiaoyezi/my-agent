@@ -23,7 +23,10 @@ from __future__ import annotations
 import time
 import uuid
 
-#: B.1 七类框架 ID → 前缀。prefix 一经发布不可改。
+#: B.1 框架 ID → 前缀。prefix 一经发布不可改。
+#: R3 扩展（同一不变量：实体 ID 由框架生成，不手拼）：
+#: contract_id → contract（AcceptanceContract），validator_operation_id → vop
+#: （ValidatorOperation，A.8 每操作追到 attempt_id）。
 ID_KIND_PREFIXES: dict[str, str] = {
     "run_id": "subagent",        # 既有 subagent run id
     "task_id": "task",           # R1: conversation task 权威记录
@@ -32,6 +35,8 @@ ID_KIND_PREFIXES: dict[str, str] = {
     "attempt_id": "attempt",     # 既有 runner attempt id
     "session_id": "session",     # 会话 id（派生或铸造）
     "delegation_id": "delegation",  # R1: parent→child 委托链
+    "contract_id": "contract",   # R3: AcceptanceContract（I.2 冻结契约）
+    "validator_operation_id": "vop",  # R3: ValidatorOperation（A.8）
 }
 
 #: 业务记录 id（route/evpkt/finding/...）不走本入口，保持 utils._new_id。

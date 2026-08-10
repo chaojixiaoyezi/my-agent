@@ -58,6 +58,18 @@ PUB_UNKNOWN = "UNKNOWN"
 #: 测试 10：同资源同 preimage 恰一发布，另一争用发布方收到此冲突码。
 RESOURCE_VERSION_CONFLICT = "RESOURCE_VERSION_CONFLICT"
 
+# I.9 ValidatorOperation 状态：sandbox 不可用 fail closed 为
+# UNAVAILABLE/BLOCKED，不降级为 advisory。
+VOP_PENDING = "PENDING"
+VOP_RUNNING = "RUNNING"
+VOP_VERIFIED = "VERIFIED"
+VOP_FAILED = "FAILED"
+VOP_UNAVAILABLE = "UNAVAILABLE"
+VOP_BLOCKED = "BLOCKED"
+
+# I.6 current_contract_id CAS 分叉冲突码。
+CONTRACT_DIVERGED = "CONTRACT_DIVERGED"
+
 #: 默认资源锁租期（秒）。lease 过期 ≠ 持有者死亡（G.8），reconcile 前不得
 #: 直接把资源交给第二 writer。
 DEFAULT_LEASE_SECONDS = 60
