@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import sys
@@ -323,8 +324,12 @@ def test_settle_stale_attempt_rejected(ctx):
 
     with pytest.raises(RuntimeConflictError, match="不是 current pointer"):
         repo.settle_operation(op["operation_id"], "SUCCEEDED")
-    # 结算被拒：操作行保持 EXECUTING（留给 recovery 标 UNKNOWN）。
-    assert repo.get_operation(op["operation_id"])["status"] == "EXECUTING"
+    # G4 补 4：create_attempt 事务内 takeover 收尾已把旧 attempt 的非终态
+    # 操作统一转 UNKNOWN（outcome_json.reason=takeover_recovery）——不留给
+    # 事后 recovery 补标，旧 attempt 的操作在接管瞬间就是「结果不可知」。
+    row = repo.get_operation(op["operation_id"])
+    assert row["status"] == "UNKNOWN"
+    assert json.loads(row["outcome_json"])["reason"] == "takeover_recovery"
 
 
 def test_settle_rejected_after_epoch_advance(ctx):
@@ -386,6 +391,88 @@ def test_operation_reopen_only_claimed(ctx):
     assert repo.can_reopen_operation(idle["operation_id"])
     repo.mark_operation_executing(idle["operation_id"])
     assert not repo.can_reopen_operation(idle["operation_id"])
+
+
+# ------------------------------------------------- G4 补（3.txt G4-2/3/4）
+def test_g4_mark_operation_atomic_start_gate(ctx):
+    """G4 补 3：原子 start 门——create 与 mark 之间发生 takeover 也无法把
+    旧 attempt 的操作置 EXECUTING。修复前 verify_fence 与 mark 是两步，
+    两步之间被推进 pointer 则 verify 已过、mark 却落进死 attempt。现在
+    current-pointer 条件并入同一 UPDATE，零窗口。
+    """
+    chain, repo = ctx
+    op = repo.create_tool_operation(
+        agent_run_id=chain["agent_run_id"],
+        attempt_id=chain["attempt_id"],
+        operation_type="write",
+    )
+    repo.create_attempt(chain["agent_run_id"])  # 接管：旧 attempt 失去执行权
+    with pytest.raises(RuntimeConflictError, match="无法进入 EXECUTING"):
+        repo.mark_operation_executing(
+            op["operation_id"],
+            agent_run_id=chain["agent_run_id"],
+            attempt_id=chain["attempt_id"],
+            tool_operation_generation=int(op["tool_operation_generation"]),
+        )
+    # 原子门拒绝 → 操作行停留在接管收尾状态（UNKNOWN，见 G4 补 4）。
+    assert repo.get_operation(op["operation_id"])["status"] == "UNKNOWN"
+
+
+def test_g4_mark_atomic_gate_passes_on_current_attempt(ctx):
+    """G4 补 3 正向：带 fence 参数在主链 current attempt 上正常置 EXECUTING。"""
+    chain, repo = ctx
+    op = repo.create_tool_operation(
+        agent_run_id=chain["agent_run_id"],
+        attempt_id=chain["attempt_id"],
+        operation_type="write",
+    )
+    executing = repo.mark_operation_executing(
+        op["operation_id"],
+        agent_run_id=chain["agent_run_id"],
+        attempt_id=chain["attempt_id"],
+        tool_operation_generation=int(op["tool_operation_generation"]),
+    )
+    assert executing["status"] == "EXECUTING"
+    assert executing["handler_started_at"] > 0
+
+
+def test_g4_create_attempt_takeover_cleanup(ctx):
+    """G4 补 4：takeover 以系统权威统一收尾旧 attempt——非终态操作
+    CLAIMED/EXECUTING → UNKNOWN(reason=takeover_recovery)，进行中
+    mutation（MUTATING）→ DIRTY(reason=takeover_recovery)。
+    同一事务（INSERT attempt + CAS current pointer + 收尾 + commit），
+    接管瞬间旧 attempt 的「结果不可知」即落账，不留给事后 recovery。
+    """
+    chain, repo = ctx
+    idle = repo.create_tool_operation(
+        agent_run_id=chain["agent_run_id"],
+        attempt_id=chain["attempt_id"],
+        operation_type="write",
+    )
+    running = repo.create_tool_operation(
+        agent_run_id=chain["agent_run_id"],
+        attempt_id=chain["attempt_id"],
+        operation_type="run_command",
+    )
+    repo.mark_operation_executing(running["operation_id"])
+    repo.begin_mutation(canonical_scope="scope:a", attempt_id=chain["attempt_id"])
+
+    new_attempt = repo.create_attempt(chain["agent_run_id"])  # takeover
+
+    for op_id in (idle["operation_id"], running["operation_id"]):
+        row = repo.get_operation(op_id)
+        assert row["status"] == "UNKNOWN"
+        assert json.loads(row["outcome_json"])["reason"] == "takeover_recovery"
+    mutation = repo.mutation_for_scope("scope:a")
+    assert mutation["state"] == "DIRTY"
+    assert mutation["dirty_reason"] == "takeover_recovery"
+    # 新 attempt 不受接管收尾污染：fence 可过、可正常建操作。
+    fresh = repo.create_tool_operation(
+        agent_run_id=chain["agent_run_id"],
+        attempt_id=new_attempt["attempt_id"],
+        operation_type="write",
+    )
+    assert fresh["status"] == "CLAIMED"
 
 
 # ------------------------------------------------------------------- 资源锁

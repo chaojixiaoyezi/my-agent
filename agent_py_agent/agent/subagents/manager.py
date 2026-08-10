@@ -56,6 +56,9 @@ class SubAgentManagerInitParams:
     takeover_chain_max_depth: int = 0
     owner_id: str = ""
     owner_home_dir: str = ""
+    # G4 补（3.txt G4-1）：显式执行模式。空 = 按 owner_home_dir 推断
+    # （有 home → MANAGED；无 → LOCAL_UNMANAGED，兼容存量调用）。
+    execution_mode: str = ""
     # 与工具循环同一把沙箱门:ShellTool.path_access_policy.owner_scope_root。
     # 验收机器执行(DONE 绑定)以它为准——effective_permissions.owner_home 是快照
     # 默认值,在无沙箱环境(如 SimpleAgent)也非空,会把验收误判成必须 bwrap。
@@ -81,6 +84,7 @@ class SubAgentManager(SubagentKernelMixin):
         takeover_chain_max_depth=0,
         owner_id="",
         owner_home_dir="",
+        execution_mode="",
         owner_scope_root="",
         owner_policy_snapshot=None,
     ):
@@ -270,6 +274,7 @@ def _init_params_from_kwargs(values: dict[str, object]) -> SubAgentManagerInitPa
         takeover_chain_max_depth=int(values.get("takeover_chain_max_depth") or 0),
         owner_id=str(values.get("owner_id") or ""),
         owner_home_dir=str(values.get("owner_home_dir") or ""),
+        execution_mode=str(values.get("execution_mode") or ""),
         owner_scope_root=str(values.get("owner_scope_root") or ""),
         owner_policy_snapshot=values.get("owner_policy_snapshot"),
     )
@@ -346,21 +351,32 @@ def _init_manager_state(manager: SubAgentManager, workspace: str | Path, params:
 
 
 def _attach_runtime_db(manager: SubAgentManager) -> None:
-    """R1：owner 权威 runtime.db（A.1 每 owner 一个）。
+    """R1 + G4 补（3.txt G4-1）：owner 权威 runtime.db 按显式模式挂载。
 
-    owner_home_dir 为空（无 home 上下文/纯测试）→ 不建权威库，create_run
-    只写投影（向后兼容）；有 home 上下文 → owner_home_dir/runtime.db 权威。
+    ExecutionMode.MANAGED：必须完整权威链——owner_home_dir 缺失或
+    RuntimeRepository 挂载失败 → 构造即抛（fail-closed，不延迟到调用
+    点、不静默降级；旧实现的 OSError→None 是把「没找到 DB」当旁路）。
+    ExecutionMode.LOCAL_UNMANAGED：显式选择本地非托管（纯文件层/投影），
+    create_run 只写投影，不挂权威库。
+    未显式传入 → 按有无 home 推断（兼容存量调用行为）。
     """
+    from ..runtime_db.execution_mode import ExecutionMode, resolve_execution_mode
     from ..runtime_db.repository import RuntimeRepository
     from ..runtime_db.schema import runtime_db_path
 
     manager.runtime_db = None
     home = str(getattr(manager, "owner_home_dir", "") or "").strip()
-    if home:
-        try:
-            manager.runtime_db = RuntimeRepository(runtime_db_path(home))
-        except OSError:
-            manager.runtime_db = None
+    explicit = str(getattr(manager, "execution_mode", "") or "").strip()
+    mode = resolve_execution_mode(explicit, has_home_dir=bool(home))
+    manager.execution_mode = mode
+    if mode is ExecutionMode.LOCAL_UNMANAGED:
+        return  # 显式非托管：不建权威库（纯投影）。
+    if not home:
+        raise ValueError(
+            "ExecutionMode.MANAGED 必须有 owner_home_dir（权威库挂载点）"
+        )
+    # MANAGED（显式或按 home 推断）：挂载失败即抛，绝不静默降级。
+    manager.runtime_db = RuntimeRepository(runtime_db_path(home))
 
 
 def _normalized_workspace_roots(primary: Path, roots: list[str | Path] | None) -> list[Path]:
@@ -396,5 +412,8 @@ def _normalize_debug_trace_level(value: object) -> int:
 def _apply_owner_scope(manager: SubAgentManager, params: SubAgentManagerInitParams) -> None:
     manager.owner_id = str(params.owner_id or "")
     manager.owner_home_dir = str(params.owner_home_dir or "")
+    # G4 补 1：显式执行模式先落实例（_attach_runtime_db 从实例读），
+    # 空字符串 = 未显式指定，由挂载逻辑按 home 推断。
+    manager.execution_mode = str(params.execution_mode or "")
     manager.owner_scope_root = str(params.owner_scope_root or "")
     manager.owner_policy_snapshot = dict(params.owner_policy_snapshot or {})

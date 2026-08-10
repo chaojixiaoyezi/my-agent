@@ -339,16 +339,25 @@ class RuntimeRepository(
         读当前 generation → 新 generation = +1 → UPDATE agent_runs 时以
         current_attempt_generation 为 CAS 条件；0 行命中 = 并发冲突，fail-closed。
         旧 attempt 行不可变（F.7）。
+
+        G4 补（3.txt G4-4）：takeover 原子收尾并入同一事务——旧 attempt 的
+        非终态 operation（CLAIMED/EXECUTING）统一转 UNKNOWN（无法证明零
+        副作用，绝不让旧 worker 事后写 SUCCEEDED——settle 单事务 fence
+        已拒，此处由系统权威闭环），其 workspace mutation 全部标 DIRTY
+        （G.14：reconcile 前阻止发布/验收/交付）。旧 worker 即使还活着
+        也只能看到 UNKNOWN/DIRTY，无法盲重放。
         """
         now = time.time()
         with self._runtime_connection() as conn:
             run = conn.execute(
-                "SELECT current_attempt_generation FROM agent_runs WHERE agent_run_id = ?",
+                "SELECT current_attempt_generation, current_attempt_id "
+                "FROM agent_runs WHERE agent_run_id = ?",
                 (agent_run_id,),
             ).fetchone()
             if run is None:
                 raise KeyError(f"agent_run 不存在: {agent_run_id}")
             generation = int(run["current_attempt_generation"]) + 1
+            old_attempt_id = str(run["current_attempt_id"] or "")
             attempt_id = new_id("attempt_id")
             conn.execute(
                 """
@@ -369,6 +378,27 @@ class RuntimeRepository(
             if updated != 1:
                 raise RuntimeConflictError(
                     f"attempt CAS 失败: {agent_run_id} generation {generation - 1}->{generation}"
+                )
+            if old_attempt_id:
+                conn.execute(
+                    """
+                    UPDATE tool_operations
+                    SET status = 'UNKNOWN', outcome_json = ?, updated_at = ?
+                    WHERE attempt_id = ? AND status IN ('CLAIMED', 'EXECUTING')
+                    """,
+                    (
+                        json.dumps({"reason": "takeover_recovery"}, ensure_ascii=False),
+                        now,
+                        old_attempt_id,
+                    ),
+                )
+                conn.execute(
+                    """
+                    UPDATE resource_mutations
+                    SET state = 'DIRTY', dirty_reason = 'takeover_recovery', updated_at = ?
+                    WHERE attempt_id = ? AND state != 'DIRTY'
+                    """,
+                    (now, old_attempt_id),
                 )
             conn.commit()
         row = self.get_attempt(attempt_id)

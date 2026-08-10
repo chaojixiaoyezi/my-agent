@@ -165,12 +165,14 @@ def _authorize_runtime_authority(
     """
     repo = getattr(manager, "runtime_db", None)
     if repo is None:
-        if str(getattr(manager, "owner_home_dir", "") or "").strip():
+        from ..runtime_db.execution_mode import expects_managed_authority
+
+        if expects_managed_authority(manager):
             raise AuthorizationError(
-                f"{request.operation}: 权威库不可用（owner_home_dir 存在但 "
+                f"{request.operation}: 权威库不可用（ExecutionMode.MANAGED 但 "
                 "runtime.db 未挂载，拒绝在无权威校验下执行）"
             )
-        return  # 无 home 上下文（纯文件层模式）→ 维持 R0 文件层防线
+        return  # LOCAL_UNMANAGED（纯文件层模式）→ 维持 R0 文件层防线
     run_id = str(getattr(task, "id", "") or "").strip()
     if not run_id:
         return

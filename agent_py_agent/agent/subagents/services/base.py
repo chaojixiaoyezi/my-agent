@@ -416,12 +416,14 @@ class SubAgentBaseService:
         """
         repo = getattr(self.manager, "runtime_db", None)
         if repo is None:
-            if str(getattr(self.manager, "owner_home_dir", "") or "").strip():
+            from ...runtime_db.execution_mode import expects_managed_authority
+
+            if expects_managed_authority(self.manager):
                 raise AuthorizationError(
-                    f"create_run: 权威库不可用（owner_home_dir 存在但 runtime.db "
-                    f"未挂载，run={task.id} 拒绝创建）"
+                    f"create_run: 权威库不可用（ExecutionMode.MANAGED 但 "
+                    f"runtime.db 未挂载，run={task.id} 拒绝创建）"
                 )
-            return  # 无 home 上下文（纯文件层模式）→ 只走投影（兼容）
+            return  # LOCAL_UNMANAGED（纯文件层/投影）→ 只走投影（显式选择）
         attrs = params.attributes if isinstance(params.attributes, dict) else {}
         owner_id = str(task.owner or params.owner or "").strip()
         if not owner_id:

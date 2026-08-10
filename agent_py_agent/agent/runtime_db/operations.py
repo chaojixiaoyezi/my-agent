@@ -502,21 +502,56 @@ class RuntimeOperationsMixin:
             ).fetchall()
         return list(rows)
 
-    def mark_operation_executing(self, operation_id: str) -> sqlite3.Row:
-        """G.2：CLAIMED→EXECUTING，CAS 写 handler_started_at（调 handler 前）。"""
+    def mark_operation_executing(
+        self,
+        operation_id: str,
+        *,
+        agent_run_id: str | None = None,
+        attempt_id: str | None = None,
+        tool_operation_generation: int | None = None,
+    ) -> sqlite3.Row:
+        """G.2 + G4 补：CLAIMED→EXECUTING 原子 start 门（调 handler 前）。
+
+        G4 补（3.txt G4-3）：传 fence 参数（主链 authority_fence 用）时，
+        current-pointer 条件并入同一 UPDATE——create 与 mark 之间发生
+        takeover 也无法把旧 attempt 的操作置 EXECUTING（原子判定，无
+        验证与写入之间的竞争窗口）。不传（测试/非主链路径）＝ 仅
+        CLAIMED CAS，行为与 G.2 一致。
+        """
         now = time.time()
         with self._runtime_connection() as conn:
-            updated = conn.execute(
-                """
-                UPDATE tool_operations
-                SET status = 'EXECUTING', handler_started_at = ?, updated_at = ?
-                WHERE operation_id = ? AND status = 'CLAIMED' AND handler_started_at = 0
-                """,
-                (now, now, operation_id),
-            ).rowcount
+            if all(v is not None for v in (agent_run_id, attempt_id, tool_operation_generation)):
+                updated = conn.execute(
+                    """
+                    UPDATE tool_operations
+                    SET status = 'EXECUTING', handler_started_at = ?, updated_at = ?
+                    WHERE operation_id = ? AND status = 'CLAIMED' AND handler_started_at = 0
+                      AND agent_run_id = ?
+                      AND attempt_id = (
+                          SELECT current_attempt_id FROM agent_runs r WHERE r.agent_run_id = ?)
+                      AND attempt_generation = (
+                          SELECT current_attempt_generation FROM agent_runs r WHERE r.agent_run_id = ?)
+                      AND tool_operation_generation = ?
+                    """,
+                    (
+                        now, now, operation_id,
+                        agent_run_id, agent_run_id, agent_run_id,
+                        tool_operation_generation,
+                    ),
+                ).rowcount
+            else:
+                updated = conn.execute(
+                    """
+                    UPDATE tool_operations
+                    SET status = 'EXECUTING', handler_started_at = ?, updated_at = ?
+                    WHERE operation_id = ? AND status = 'CLAIMED' AND handler_started_at = 0
+                    """,
+                    (now, now, operation_id),
+                ).rowcount
             if updated != 1:
                 raise RuntimeConflictError(
-                    f"operation 无法进入 EXECUTING: {operation_id} 非 CLAIMED 或已启动"
+                    f"operation 无法进入 EXECUTING: {operation_id} 非 CLAIMED、"
+                    f"已启动或 fence 失配(旧 attempt)"
                 )
             conn.commit()
         row = self.get_operation(operation_id)
@@ -529,47 +564,38 @@ class RuntimeOperationsMixin:
         outcome: str,
         details: dict[str, Any] | None = None,
     ) -> sqlite3.Row:
-        """G.3/G.5：settle 为 SUCCEEDED/FAILED/CANCELLED。
+        """G.3/G.5 + G4 补：settle 为 SUCCEEDED/FAILED/CANCELLED（单事务 CAS）。
 
         - CANCELLED 只允许 handler 未启动（started_at=0）且仍 CLAIMED/未 settle；
           已 EXECUTING 的操作无法证明零副作用 → 必须 UNKNOWN（G.4）。
         - 已 settle 的操作不可再次 settle（状态机单向，fail-closed）。
-        - G4：settle 前按操作行自身的 run/attempt/generation 重校验权威
-          fence（F.6 基准）——takeover/换代后旧 attempt 的操作不得结算：
-          attempt 已不是 current pointer、代数失配 → fail-closed。旧副作用
-          无法归因到 current attempt，只能留给 recovery 标 UNKNOWN。
+        - G4 补（3.txt G4-2）：fence 校验与最终 UPDATE 合并为一条带
+          current-pointer 条件的 UPDATE——settle 前先 verify、后 UPDATE
+          是两事务，二者之间可发生 takeover；现在 settle 的原子判定在
+          UPDATE 的 WHERE 里（attempt 必须仍是 current pointer 且代数
+          匹配），verify 与写入零窗口。rowcount=0 后的 SELECT 只用于
+          诊断报错原因，不构成状态决策。
+        - 旧 attempt 的操作结算被拒后保持非终态（EXECUTING/CLAIMED），
+          由 create_attempt 的 takeover 收尾统一转 UNKNOWN（G4 补 4）。
         """
         outcome = str(outcome or "").strip().upper()
         if outcome not in {OP_SUCCEEDED, OP_FAILED, OP_CANCELLED}:
             raise RuntimeConflictError(f"非法 settle 结果: {outcome!r}")
         now = time.time()
         with self._runtime_connection() as conn:
-            op = conn.execute(
-                "SELECT status, handler_started_at, agent_run_id, attempt_id, "
-                "tool_operation_generation FROM tool_operations "
-                "WHERE operation_id = ?",
-                (operation_id,),
-            ).fetchone()
-            if op is None:
-                raise KeyError(f"operation 不存在: {operation_id}")
-            if outcome == OP_CANCELLED and int(op["handler_started_at"]) != 0:
-                raise RuntimeConflictError(
-                    f"operation {operation_id} 已启动 handler(无法证明零副作用),"
-                    f"禁止 CANCELLED,只能 UNKNOWN"
-                )
-        # G4：settle 前重校验（用操作行自带的权威字段；fence 失配即拒绝结算）。
-        self.verify_fence(
-            agent_run_id=str(op["agent_run_id"]),
-            attempt_id=str(op["attempt_id"]),
-            tool_operation_id=operation_id,
-            tool_operation_generation=int(op["tool_operation_generation"]),
-        )
-        with self._runtime_connection() as conn:
             updated = conn.execute(
                 """
                 UPDATE tool_operations
                 SET status = ?, settled_at = ?, outcome_json = ?, updated_at = ?
-                WHERE operation_id = ? AND settled_at = 0
+                WHERE operation_id = ?
+                  AND settled_at = 0
+                  AND attempt_id = (
+                      SELECT current_attempt_id FROM agent_runs r
+                      WHERE r.agent_run_id = tool_operations.agent_run_id)
+                  AND attempt_generation = (
+                      SELECT current_attempt_generation FROM agent_runs r
+                      WHERE r.agent_run_id = tool_operations.agent_run_id)
+                  AND (? != 'CANCELLED' OR handler_started_at = 0)
                 """,
                 (
                     outcome,
@@ -577,14 +603,43 @@ class RuntimeOperationsMixin:
                     json.dumps(details or {}, ensure_ascii=False),
                     now,
                     operation_id,
+                    outcome,
                 ),
             ).rowcount
-            if updated != 1:
-                raise RuntimeConflictError(f"operation 已 settle,禁止二次 settle: {operation_id}")
-            conn.commit()
-        row = self.get_operation(operation_id)
-        assert row is not None
-        return row
+            if updated == 1:
+                conn.commit()
+                row = self.get_operation(operation_id)
+                assert row is not None
+                return row
+            # 诊断（不构成决策）：区分失败原因，报结构化错误。
+            op = conn.execute(
+                "SELECT status, settled_at, handler_started_at, agent_run_id, "
+                "attempt_id, attempt_generation, tool_operation_generation "
+                "FROM tool_operations WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if op is None:
+                raise KeyError(f"operation 不存在: {operation_id}")
+            if int(op["settled_at"]) != 0:
+                raise RuntimeConflictError(
+                    f"operation 已 settle,禁止二次 settle: {operation_id}"
+                )
+            if outcome == OP_CANCELLED and int(op["handler_started_at"]) != 0:
+                raise RuntimeConflictError(
+                    f"operation {operation_id} 已启动 handler(无法证明零副作用),"
+                    f"禁止 CANCELLED,只能 UNKNOWN"
+                )
+            current = conn.execute(
+                "SELECT current_attempt_id, current_attempt_generation "
+                "FROM agent_runs WHERE agent_run_id = ?",
+                (str(op["agent_run_id"]),),
+            ).fetchone()
+            raise RuntimeConflictError(
+                f"settle 拒绝: operation {operation_id} 已不是 current pointer"
+                f"(操作 attempt={op['attempt_id']}/gen={op['attempt_generation']},"
+                f"当前={current['current_attempt_id'] if current else '?'}/"
+                f"gen={current['current_attempt_generation'] if current else '?'})"
+            )
 
     def mark_operation_unknown(
         self,
