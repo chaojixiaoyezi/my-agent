@@ -56,7 +56,8 @@ _BASE_RUNTIME_SQL = (
         created_at REAL NOT NULL,
         updated_at REAL NOT NULL,
         metadata_json TEXT NOT NULL DEFAULT '{}',
-        current_contract_id TEXT NOT NULL DEFAULT ''
+        current_contract_id TEXT NOT NULL DEFAULT '',
+        closed_at REAL NOT NULL DEFAULT 0
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_task_runs_task ON task_runs(task_id)",
@@ -282,16 +283,63 @@ _BASE_RUNTIME_SQL = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_validator_ops_attempt ON validator_operations(attempt_id)",
+    # ---------------------------------------------------------------- R4（K 节）
+    # Outbox（K.3/K.4/K.6）：同库状态用本地事务；跨进程/外部副作用走
+    # at-least-once 投递 + effect_key 去重，不宣称 exactly-once（K.2）。
+    # status：PENDING/IN_FLIGHT/ACKED/FAILED/DEAD_LETTER。attempts 超限
+    # 进 DEAD_LETTER（可查询、可人工重放、evidence 保留完整证据）。
+    """
+    CREATE TABLE IF NOT EXISTS outbox_entries (
+        outbox_id TEXT PRIMARY KEY,
+        effect_key TEXT NOT NULL UNIQUE,
+        owner_id TEXT NOT NULL DEFAULT '',
+        task_run_id TEXT NOT NULL DEFAULT '',
+        scope TEXT NOT NULL DEFAULT '',
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'PENDING',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        claimed_at REAL NOT NULL DEFAULT 0,
+        claimed_by TEXT NOT NULL DEFAULT '',
+        next_retry_at REAL NOT NULL DEFAULT 0,
+        provider_evidence_json TEXT NOT NULL DEFAULT '{}',
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        settled_at REAL NOT NULL DEFAULT 0
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_outbox_status_retry ON outbox_entries(status, next_retry_at)",
+    "CREATE INDEX IF NOT EXISTS idx_outbox_task_run ON outbox_entries(task_run_id)",
+    # Inbox（K.4）：跨边界到达消息，effect_key UNIQUE 去重（at-least-once
+    # 语义下重复投递只处理一次）。
+    """
+    CREATE TABLE IF NOT EXISTS inbox_entries (
+        inbox_id TEXT PRIMARY KEY,
+        effect_key TEXT NOT NULL UNIQUE,
+        sender TEXT NOT NULL DEFAULT '',
+        task_run_id TEXT NOT NULL DEFAULT '',
+        scope TEXT NOT NULL DEFAULT '',
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'RECEIVED',
+        received_at REAL NOT NULL,
+        processed_at REAL NOT NULL DEFAULT 0
+    )
+    """,
 )
 
 
 #: 存量库幂等迁移（CREATE TABLE IF NOT EXISTS 不更新既有表结构）。
 #: 每项为 (检查列, 表, ALTER SQL)；列已存在则跳过，多次启动安全。
+#: 并发安全见 _apply_runtime_migrations（duplicate column 视为已达成）。
 _RUNTIME_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     (
         "current_contract_id",
         "task_runs",
         "ALTER TABLE task_runs ADD COLUMN current_contract_id TEXT NOT NULL DEFAULT ''",
+    ),
+    (
+        "closed_at",
+        "task_runs",
+        "ALTER TABLE task_runs ADD COLUMN closed_at REAL NOT NULL DEFAULT 0",
     ),
 )
 

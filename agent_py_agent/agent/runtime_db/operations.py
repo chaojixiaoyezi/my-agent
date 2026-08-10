@@ -70,6 +70,27 @@ VOP_BLOCKED = "BLOCKED"
 # I.6 current_contract_id CAS 分叉冲突码。
 CONTRACT_DIVERGED = "CONTRACT_DIVERGED"
 
+# R4（K 节）outbox 状态机（K.3/K.4/K.6）：
+# PENDING → IN_FLIGHT（claim 租约）→ ACKED（provider 确认）| FAILED（退避重试）
+# FAILED 重试超限 → DEAD_LETTER（可查询、可人工重放，K.6）。
+# reconcile（K.3）：provider query 确认实际副作用 —— confirmed 落 ACKED，
+# absent/unknown 回 PENDING 退避（at-least-once：宁可重发不可丢）。
+OUTBOX_PENDING = "PENDING"
+OUTBOX_IN_FLIGHT = "IN_FLIGHT"
+OUTBOX_ACKED = "ACKED"
+OUTBOX_FAILED = "FAILED"
+OUTBOX_DEAD_LETTER = "DEAD_LETTER"
+
+#: K.6：投递重试上限，超限进 dead-letter（完整证据保留，可人工重放）。
+MAX_DELIVERY_ATTEMPTS = 8
+
+# inbox 状态（K.4）：重复投递由 effect_key UNIQUE 去重，只处理一次。
+INBOX_RECEIVED = "RECEIVED"
+INBOX_PROCESSED = "PROCESSED"
+
+# 收口语义（K.5/测试 17）：required acceptance 未全 VERIFIED 不得成功交付。
+NOT_VERIFIED = "NOT_VERIFIED"
+
 #: 默认资源锁租期（秒）。lease 过期 ≠ 持有者死亡（G.8），reconcile 前不得
 #: 直接把资源交给第二 writer。
 DEFAULT_LEASE_SECONDS = 60
