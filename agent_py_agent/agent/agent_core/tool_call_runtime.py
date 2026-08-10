@@ -120,6 +120,7 @@ def _audit_source_worker_tool_scope_result(
 # 函数用途: 执行并审计一个已追踪工具调用，同时维护任务晋升、幂等记录和被动验收事实。
 def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
     from .authority_fence import (
+        AUTHORITY_FENCE_FAULT,
         authority_context,
         close_authority_operation,
         open_authority_operation,
@@ -138,6 +139,20 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
             return guard
         if authority is None:
             return None
+        if authority is AUTHORITY_FENCE_FAULT:
+            # G4：权威库故障 = 不能证明授权 → fail-closed，handler 不执行。
+            return apply_tool_execution_facts(
+                ToolHandlerOutcome(
+                    call.tool_name,
+                    False,
+                    "权威库故障，无法验证执行授权（fail-closed，拒绝执行）",
+                    error_code="TOOL_AUTHORITY_FENCE",
+                    failure_stage=ToolFailureStage.RUNTIME_GATE.value,
+                    handler_executed=False,
+                ),
+                failure_stage=ToolFailureStage.RUNTIME_GATE,
+                handler_executed=False,
+            )
         repo, agent_run_id, attempt_id = authority
         operation_id, block_reason = open_authority_operation(
             repo,

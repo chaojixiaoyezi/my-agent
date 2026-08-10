@@ -20,6 +20,7 @@ from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core.authority_fence import (
+    AUTHORITY_FENCE_FAULT,
     authority_context,
     close_authority_operation,
     open_authority_operation,
@@ -201,13 +202,52 @@ def test_authority_context_chain_matches_current_pointer(tmp_path):
     assert str(row["current_attempt_id"]) == attempt_id
 
 
-def test_authority_context_broken_repo_returns_none(tmp_path):
+def test_authority_context_broken_repo_returns_fail_closed_fault(tmp_path):
+    """G4（探针复现）：权威库故障 → AUTHORITY_FENCE_FAULT（fail-closed），
+    不是 None —— None 会让调用方跳过 fence 继续执行 handler（fail-open）。
+
+    修复前：except 把库异常静默降级成 None（且 RuntimeError 不在捕获
+    元组里会直接冒泡）；现在任何库故障都显式返回哨兵，调用方看到即拒。
+    """
     class _Broken:
+        def record_run_creation(self, **kwargs):
+            raise RuntimeError("boom")
+
         def agent_run_for_run_id(self, run_id):
             raise RuntimeError("boom")
 
     agent = SimpleNamespace(subagents=SimpleNamespace(runtime_db=_Broken()))
-    assert authority_context(agent, _params(run_id="run-x")) is None
+    assert authority_context(agent, _params(run_id="run-x")) is AUTHORITY_FENCE_FAULT
+
+
+def test_execute_traced_tool_call_fails_closed_when_authority_db_broken():
+    """G4：权威库故障时 handler 被 TOOL_AUTHORITY_FENCE 拦截，零执行。"""
+    class _BrokenRepo:
+        def record_run_creation(self, **kwargs):
+            raise RuntimeError("db broken")
+
+        def agent_run_for_run_id(self, run_id):
+            raise RuntimeError("db broken")
+
+    tools = _FenceTools()
+    agent = SimpleNamespace(
+        tools=tools,
+        subagents=SimpleNamespace(runtime_db=_BrokenRepo()),
+    )
+    params = _params(run_id="run-fault", task_id="task-fault")
+    call = _fence_call(run_id="run-fault")
+    request = ToolCallRuntimeRequest(
+        agent=agent,
+        request=ToolCallExecuteParams(params, 1, 1, call),
+        call=call,
+    )
+
+    execution = execute_traced_tool_call(request)
+
+    assert not execution.result.ok
+    assert execution.result.error_code == "TOOL_AUTHORITY_FENCE"
+    assert not execution.result.handler_executed
+    assert not tools.handler_called
 
 
 # -------------------------------------------------- open_authority_operation

@@ -125,6 +125,38 @@ def _validate_manifest_rel_path(rel: str) -> None:
         raise RuntimeConflictError(f"manifest 路径非法(含控制字符): {rel!r}")
 
 
+def _assert_publish_path_contained(root: Path, rel: str, label: str) -> None:
+    """G3：发布路径执行级文件系统校验（探针 symlink_publish_wrote_outside）。
+
+    stage 的字符串检查（H.3/_validate_manifest_rel_path）挡不住 DB 直改
+    与未来新增的写入路径；apply 前对 staging/shared 两侧逐项做第二道
+    拒绝式防线：
+    - symlink 组件拒绝：路径链上任何组件（含最后组件）是 symlink 即拒。
+      内核路径解析沿中间组件的 symlink 出根（os.replace 会把文件写到
+      链接指向的外部位置）；且 symlink 是 TOCTOU 面——resolve 校验后
+      链接被替换就绕过。最后组件是 symlink 同样拒绝：preimage 校验的
+      sha256_of 跟随链接读外部，os.replace 替换的只是链接本身（内容
+      寻址断裂）。
+    - 根包含：resolve 后必须仍在根内（B.2 拒绝式，防 .. 逃逸与 DB
+      直改注入的越界路径）。
+    fail-closed：任一检查不过 → 抛 RuntimeConflictError，publish 保持
+    STAGING，零副作用。
+    """
+    candidate = root / rel
+    cur: Path | None = candidate
+    while cur is not None and cur != root:
+        if cur.is_symlink():
+            raise RuntimeConflictError(
+                f"发布路径 {rel!r} 含 symlink 组件（{label} 侧）: {cur}"
+            )
+        cur = cur.parent
+    resolved = candidate.resolve()
+    if resolved != root and root not in resolved.parents:
+        raise RuntimeConflictError(
+            f"发布路径 {rel!r} 逃逸出 {label}（resolve 后 {resolved}）"
+        )
+
+
 class RuntimeOperationsMixin:
     # ------------------------------------------------------------- 三层 fence
     def current_fence(self, agent_run_id: str) -> dict[str, Any]:
@@ -329,6 +361,10 @@ class RuntimeOperationsMixin:
         - CANCELLED 只允许 handler 未启动（started_at=0）且仍 CLAIMED/未 settle；
           已 EXECUTING 的操作无法证明零副作用 → 必须 UNKNOWN（G.4）。
         - 已 settle 的操作不可再次 settle（状态机单向，fail-closed）。
+        - G4：settle 前按操作行自身的 run/attempt/generation 重校验权威
+          fence（F.6 基准）——takeover/换代后旧 attempt 的操作不得结算：
+          attempt 已不是 current pointer、代数失配 → fail-closed。旧副作用
+          无法归因到 current attempt，只能留给 recovery 标 UNKNOWN。
         """
         outcome = str(outcome or "").strip().upper()
         if outcome not in {OP_SUCCEEDED, OP_FAILED, OP_CANCELLED}:
@@ -336,7 +372,8 @@ class RuntimeOperationsMixin:
         now = time.time()
         with self._runtime_connection() as conn:
             op = conn.execute(
-                "SELECT status, handler_started_at FROM tool_operations "
+                "SELECT status, handler_started_at, agent_run_id, attempt_id, "
+                "tool_operation_generation FROM tool_operations "
                 "WHERE operation_id = ?",
                 (operation_id,),
             ).fetchone()
@@ -347,6 +384,14 @@ class RuntimeOperationsMixin:
                     f"operation {operation_id} 已启动 handler(无法证明零副作用),"
                     f"禁止 CANCELLED,只能 UNKNOWN"
                 )
+        # G4：settle 前重校验（用操作行自带的权威字段；fence 失配即拒绝结算）。
+        self.verify_fence(
+            agent_run_id=str(op["agent_run_id"]),
+            attempt_id=str(op["attempt_id"]),
+            tool_operation_id=operation_id,
+            tool_operation_generation=int(op["tool_operation_generation"]),
+        )
+        with self._runtime_connection() as conn:
             updated = conn.execute(
                 """
                 UPDATE tool_operations
@@ -789,6 +834,14 @@ class RuntimeOperationsMixin:
             )
         staging = Path(staging_root).resolve()
         shared = Path(shared_root).resolve()
+        # G3：执行级路径防线——每项（staging/shared 两侧）resolve 根包含 +
+        # symlink 组件拒绝。必须在 preimage CAS 之前：CAS 的 sha256_of/
+        # exists 也沿路径组件走，symlink 会把读/写带出共享根。
+        for item in manifest:
+            rel = str(item["path"])
+            _assert_publish_path_contained(shared, rel, "共享根")
+            if str(item["kind"]) != "deleted":
+                _assert_publish_path_contained(staging, rel, "staging")
         # H.4：publish 前的 preimage CAS。
         for item in manifest:
             rel = str(item["path"])

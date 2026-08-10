@@ -302,6 +302,45 @@ def test_operation_settle_once(ctx):
         repo.settle_operation(op["operation_id"], "FAILED")
 
 
+def test_settle_stale_attempt_rejected(ctx):
+    """G4（用户 takeover 复现）：takeover 后旧 attempt 的操作不得结算。
+
+    修复前：settle_operation 只查状态机（合法 outcome/未 settle），不重
+    校验 current attempt/epoch/generation —— 旧 attempt 的操作可被结算
+    SUCCEEDED（副作用无法归因到 current pointer）。现在 settle 前按操作
+    行自身权威字段重验 fence（F.6 基准），失配 fail-closed。
+    """
+    chain, repo = ctx
+    op = repo.create_tool_operation(
+        agent_run_id=chain["agent_run_id"],
+        attempt_id=chain["attempt_id"],
+        operation_type="write",
+    )
+    repo.mark_operation_executing(op["operation_id"])
+    repo.create_attempt(chain["agent_run_id"])  # takeover：推进 current pointer
+
+    with pytest.raises(RuntimeConflictError, match="不是 current pointer"):
+        repo.settle_operation(op["operation_id"], "SUCCEEDED")
+    # 结算被拒：操作行保持 EXECUTING（留给 recovery 标 UNKNOWN）。
+    assert repo.get_operation(op["operation_id"])["status"] == "EXECUTING"
+
+
+def test_settle_rejected_after_epoch_advance(ctx):
+    """G4：epoch 联动换代后旧操作同样不得结算（attempt generation 失配）。"""
+    chain, repo = ctx
+    op = repo.create_tool_operation(
+        agent_run_id=chain["agent_run_id"],
+        attempt_id=chain["attempt_id"],
+        operation_type="write",
+    )
+    repo.mark_operation_executing(op["operation_id"])
+    # 换代：新 attempt + epoch +1（F.1 联动）→ 旧操作结算被拒。
+    new_attempt = repo.create_attempt(chain["agent_run_id"])
+    assert int(new_attempt["attempt_generation"]) > 1
+    with pytest.raises(RuntimeConflictError):
+        repo.settle_operation(op["operation_id"], "FAILED")
+
+
 def test_operation_cancelled_requires_not_started(ctx):
     chain, repo = ctx
     # 已启动的 handler 无法证明零副作用 → CANCELLED 拒绝（G.5）。
@@ -607,6 +646,117 @@ def test_publish_manifest_accepts_normal_relative_paths(ctx):
     )
     row = repo.get_publish(pub["publish_id"])
     assert row["manifest_json"] != "[]"
+
+
+def test_publish_rejects_symlink_parent_escape(ctx, tmp_path):
+    """G3（探针 symlink_publish_wrote_outside 复现）：共享根下 symlink
+    目录把发布写出根外 —— apply 的 os.replace 沿中间组件 symlink 出根。
+
+    修复前：stage 只有字符串级路径检查（H.3），apply 前无文件系统级
+    resolve/symlink 校验 —— manifest 声明 link/evil.txt（link → 根外），
+    preimage 校验与 os.replace 都会写/读根外。
+    """
+    chain, repo = ctx
+    shared = tmp_path / "shared"
+    staging = tmp_path / "staging"
+    outside = tmp_path / "outside"
+    shared.mkdir()
+    staging.mkdir()
+    outside.mkdir()
+    (outside / "evil.txt").write_text("v1", encoding="utf-8")
+    (shared / "link").symlink_to(outside, target_is_directory=True)
+    # preimage digest 匹配根外文件 → 若没有 symlink 防线，publish 会把它
+    # 替换成 staging 内容（越界写）。
+    src = staging / "link" / "evil.txt"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_text("evil-payload", encoding="utf-8")
+    pub = repo.create_publish(
+        binding_id="binding-1",
+        agent_run_id=chain["agent_run_id"],
+        attempt_id=chain["attempt_id"],
+        workspace_epoch=1,
+    )
+    repo.stage_publish_manifest(
+        pub["publish_id"],
+        [{"path": "link/evil.txt", "kind": "updated", "preimage_digest": sha256_of(outside / "evil.txt")}],
+    )
+    with pytest.raises(RuntimeConflictError, match="symlink"):
+        repo.publish(publish_id=pub["publish_id"], staging_root=staging, shared_root=shared)
+    # 根外文件原封未动，publish 保持 STAGING（零副作用）。
+    assert (outside / "evil.txt").read_text(encoding="utf-8") == "v1"
+    assert repo.get_publish(pub["publish_id"])["status"] == "STAGING"
+
+
+def test_publish_rejects_db_tampered_dotdot_path(ctx, tmp_path):
+    """G3：DB 直改 manifest 绕开 stage 字符串检查 → 执行级 resolve 根包含兜底。
+
+    stage 的 _validate_manifest_rel_path 只在写入时拦字符串形态；manifest
+    存库后被人为改写（本地权威库被篡改）时，apply 前的 resolve 检查必须
+    独立再拦一次（B.2 拒绝式，不依赖存量数据可信）。
+    """
+    import sqlite3
+
+    chain, repo = ctx
+    shared = tmp_path / "shared"
+    staging = tmp_path / "staging"
+    shared.mkdir()
+    staging.mkdir()
+    pub = repo.create_publish(
+        binding_id="binding-1",
+        agent_run_id=chain["agent_run_id"],
+        attempt_id=chain["attempt_id"],
+        workspace_epoch=1,
+    )
+    repo.stage_publish_manifest(
+        pub["publish_id"],
+        [{"path": "a.txt", "kind": "created", "postimage_digest": "d" * 64}],
+    )
+    # 直改 manifest_json：注入逃逸路径。
+    import json
+
+    tampered = json.dumps(
+        [{"path": "../escape.txt", "kind": "created", "postimage_digest": "d" * 64}]
+    )
+    with sqlite3.connect(str(repo.db_path)) as conn:
+        conn.execute(
+            "UPDATE publish_operations SET manifest_json = ? WHERE publish_id = ?",
+            (tampered, pub["publish_id"]),
+        )
+        conn.commit()
+    with pytest.raises(RuntimeConflictError, match="逃逸"):
+        repo.publish(publish_id=pub["publish_id"], staging_root=staging, shared_root=shared)
+    assert not (tmp_path / "escape.txt").exists()
+    assert not (shared / "escape.txt").exists()
+
+
+def test_publish_rejects_staging_symlink_escape(ctx, tmp_path):
+    """G3：staging 侧 symlink 同样拒绝 —— os.replace 移动的是链接本身，
+    共享区会得到指向根外的 symlink（内容寻址断裂：digest 记账与实际
+    内容不符）。
+    """
+    chain, repo = ctx
+    shared = tmp_path / "shared"
+    staging = tmp_path / "staging"
+    outside = tmp_path / "outside"
+    shared.mkdir()
+    staging.mkdir()
+    outside.mkdir()
+    (outside / "evil.txt").write_text("payload", encoding="utf-8")
+    (staging / "link").symlink_to(outside, target_is_directory=True)
+    (staging / "link" / "evil.txt").write_text("real", encoding="utf-8")
+    pub = repo.create_publish(
+        binding_id="binding-1",
+        agent_run_id=chain["agent_run_id"],
+        attempt_id=chain["attempt_id"],
+        workspace_epoch=1,
+    )
+    repo.stage_publish_manifest(
+        pub["publish_id"],
+        [{"path": "link/evil.txt", "kind": "created", "postimage_digest": sha256_of(staging / "link" / "evil.txt")}],
+    )
+    with pytest.raises(RuntimeConflictError, match="symlink"):
+        repo.publish(publish_id=pub["publish_id"], staging_root=staging, shared_root=shared)
+    assert repo.get_publish(pub["publish_id"])["status"] == "STAGING"
 
 
 def test_publish_preimage_conflict(ctx, tmp_path):
