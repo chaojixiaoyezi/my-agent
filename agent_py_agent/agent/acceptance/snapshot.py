@@ -44,6 +44,18 @@ def _reflink_or_copy(src: Path, dst: Path) -> None:
     shutil.copy2(src, dst)
 
 
+class SnapshotMaterializeError(RuntimeError):
+    """物化失败：副本内容与记录 digest 不一致（验证后 live 被篡改/复制损坏）。
+
+    调用方必须 fail-closed：绝不让 validator 读未经内容寻址确认的副本。
+    """
+
+    def __init__(self, rel_path: str, detail: str) -> None:
+        super().__init__(f"snapshot materialize failed for {rel_path}: {detail}")
+        self.rel_path = rel_path
+        self.detail = detail
+
+
 @dataclass(frozen=True)
 class ArtifactSnapshot:
     """内容寻址快照：记录 digest 与实际文件已验证一致。"""
@@ -63,6 +75,12 @@ class ArtifactSnapshot:
         物化发生在验证时点之后：live 后续再变（工具改写/并发发布）都不
         影响物化副本 —— 消除「验证后到执行前」的 TOCTOU。reflink 优先，
         回退全量复制；文件小、一次性执行，开销可忽略。
+
+        G2：复制完成后对每个物化副本重算 digest 与记录比对。load 的
+        校验（T1）与物化（T2）之间存在窗口——live 若在 T1 后被篡改，
+        复制进来的就是篡改内容；只信 T1 的 digest 而不核副本会把这个
+        洞带进 validator 输入。副本 digest 与记录不一致 → 抛
+        SnapshotMaterializeError（fail-closed），绝不交付未确认副本。
         """
         root = Path(root)
         root.mkdir(parents=True, exist_ok=True)
@@ -72,6 +90,15 @@ class ArtifactSnapshot:
             dst = root / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
             _reflink_or_copy(src, dst)
+            try:
+                actual = sha256_of(dst)
+            except OSError as exc:
+                raise SnapshotMaterializeError(rel, f"物化副本不可读: {exc}") from exc
+            if actual != str(item.get("digest") or ""):
+                raise SnapshotMaterializeError(
+                    rel,
+                    "物化副本 digest 与记录不一致（验证后 live 被篡改或复制损坏）",
+                )
         return ArtifactSnapshot(shared_root=root, files=self.files)
 
 

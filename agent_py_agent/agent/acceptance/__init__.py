@@ -26,7 +26,7 @@ from .registry import (
     resolve_validator,
 )
 from .runner import run_contract_validation
-from .snapshot import ArtifactSnapshot, load_artifact_snapshot
+from .snapshot import ArtifactSnapshot, SnapshotMaterializeError, load_artifact_snapshot
 
 __all__ = [
     "CompiledContract",
@@ -41,5 +41,6 @@ __all__ = [
     "resolve_validator",
     "run_contract_validation",
     "ArtifactSnapshot",
+    "SnapshotMaterializeError",
     "load_artifact_snapshot",
 ]

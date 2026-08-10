@@ -22,6 +22,7 @@ import pytest
 from agent_py_agent.agent.acceptance import (
     CompiledContract,
     ContractCompileError,
+    SnapshotMaterializeError,
     ValidatorEntry,
     compile_acceptance_contract,
     load_artifact_snapshot,
@@ -295,6 +296,51 @@ def test_snapshot_materialize_isolates_from_live(repo, chain, tmp_path):
     ) is None
     assert (materialized.path_for("report.html")).read_text(encoding="utf-8") == GOOD_HTML
     assert (tmp_path / "materialized" / "report.html").read_text(encoding="utf-8") == GOOD_HTML
+
+
+def test_snapshot_materialize_recomputes_copy_digest(repo, chain, tmp_path):
+    """G2（探针 snapshot_metadata_digest_matches_copy 复现）：验证后、物化前
+    live 被篡改 → materialize 复制的是篡改内容，重算副本 digest 必须检出。
+
+    修复前：load（T1）只验 live 时点 digest，materialize（T2）复制时不重算
+    副本 digest —— 篡改发生在 T1 与 T2 之间时，副本与记录不符却静默通过。
+    """
+    shared = _publish_artifact(repo, chain, tmp_path, "report.html", GOOD_HTML)
+    snap = _validated_snapshot(repo, chain, shared)  # T1：验证通过
+    # T1 与物化之间 live 被篡改（工具并发改写/攻击者）
+    (shared / "report.html").write_text("<div>evil half-written</div>", encoding="utf-8")
+    with pytest.raises(SnapshotMaterializeError) as excinfo:
+        snap.materialize(tmp_path / "materialized")
+    assert "digest" in str(excinfo.value)
+    assert excinfo.value.rel_path == "report.html"
+
+
+def test_runner_blocks_when_materialize_detects_tamper(repo, chain, tmp_path):
+    """G2：验证后、物化前 live 被篡改 → 全部断言 BLOCKED，绝不 VERIFIED。
+
+    A.8 账本完整性：物化失败也逐条落 operation（BLOCKED），聚合方
+    「required 全 VERIFIED 才算过」不受绕过。
+    """
+    shared = _publish_artifact(repo, chain, tmp_path, "report.html", GOOD_HTML)
+    snap = _validated_snapshot(repo, chain, shared)
+    (shared / "report.html").write_text("<div>evil</div>", encoding="utf-8")
+    contract = _compile(
+        repo, chain, {"assertions": [{"validator": "artifact_acceptance", "artifact_kind": "html"}]}
+    )
+    _freeze(repo, chain, contract)
+    entries = {e.name: e for e in [resolve_validator("artifact_acceptance")]}
+    results = run_contract_validation(
+        repo=repo,
+        attempt_id=chain["attempt_id"],
+        agent_run_id=chain["agent_run_id"],
+        contract=contract.compiled,
+        snapshot=snap,
+        owner_home=tmp_path,
+        entries=entries,
+        contract_id=contract.contract_id,
+    )
+    assert [r["status"] for r in results] == ["BLOCKED"]
+    assert not any(r["status"] == "VERIFIED" for r in results)
 
 
 def test_runner_verifies_materialized_copy_when_live_tampered(repo, chain, tmp_path):

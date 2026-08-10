@@ -22,7 +22,7 @@ from ..contracts.artifact_acceptance import (
 )
 from .process_validator import ValidatorOutcome, run_process_validator
 from .registry import ValidatorEntry
-from .snapshot import ArtifactSnapshot
+from .snapshot import ArtifactSnapshot, SnapshotMaterializeError
 
 
 def _snapshot_paths_for_kind(snapshot: ArtifactSnapshot, artifact_kind: str) -> list[str]:
@@ -55,9 +55,24 @@ def run_contract_validation(
     H.9：先把已验证 snapshot 物化到独立临时目录，全部 validator 只读
     物化副本 —— live workspace 在验证后、执行前被改（TOCTOU）不影响
     验收输入；物化目录随本函数结束自动清理。
+
+    G2：物化本身在复制后重算副本 digest（见 snapshot.materialize），
+    不一致即物化失败 → 每条断言落 BLOCKED 账（A.8：required 断言一次
+    operation 都不少），绝不拿未经内容寻址确认的副本当验收输入。
     """
     with tempfile.TemporaryDirectory(prefix="artifact-snapshot-") as tmp:
-        materialized = snapshot.materialize(Path(tmp))
+        try:
+            materialized = snapshot.materialize(Path(tmp))
+        except SnapshotMaterializeError as exc:
+            return _blocked_for_materialize_failure(
+                repo=repo,
+                attempt_id=attempt_id,
+                agent_run_id=agent_run_id,
+                contract=contract,
+                entries=entries,
+                contract_id=contract_id,
+                reason=str(exc),
+            )
         return _run_assertions_against(
             repo=repo,
             attempt_id=attempt_id,
@@ -68,6 +83,53 @@ def run_contract_validation(
             entries=entries,
             contract_id=contract_id,
         )
+
+
+def _blocked_for_materialize_failure(
+    *,
+    repo: Any,
+    attempt_id: str,
+    agent_run_id: str,
+    contract: dict[str, Any],
+    entries: dict[str, ValidatorEntry],
+    contract_id: str,
+    reason: str,
+) -> list[dict[str, Any]]:
+    """物化失败（G2）：每条 required 断言落一次 BLOCKED operation 账。
+
+    物化失败意味着没有任何一条断言能拿到可信输入 —— 逐条记 BLOCKED
+    而非跳过，聚合方「required 全 VERIFIED 才算过」的判定不受影响
+    （BLOCKED ≠ VERIFIED，I.11）。
+    """
+    results: list[dict[str, Any]] = []
+    for assertion in contract.get("assertions", []):
+        ref = str(assertion.get("validator_ref") or "")
+        entry = entries.get(ref)
+        if entry is None:
+            raise ValueError(f"断言引用未注册 validator: {ref!r}")
+        operation_id = repo.create_validator_operation(
+            attempt_id=attempt_id,
+            agent_run_id=agent_run_id,
+            contract_id=contract_id,
+            validator_ref=ref,
+            validator_kind=str(entry.kind),
+            code_digest=str(entry.code_digest),
+            argv=[],
+            artifact_digests=[],
+        )
+        repo.settle_validator_operation(
+            operation_id,
+            status="BLOCKED",
+            stderr_text=f"snapshot 物化失败: {reason}",
+        )
+        results.append(
+            {
+                "validator_ref": ref,
+                "operation_id": operation_id,
+                "status": "BLOCKED",
+            }
+        )
+    return results
 
 
 def _run_assertions_against(
