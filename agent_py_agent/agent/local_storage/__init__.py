@@ -9,8 +9,6 @@ LocalStore 已经拆成几个职责清楚的小文件。
 
 from .control_plane import LocalStoreControlPlaneMixin
 from .control_plane_models import (
-    AgentEventInput,
-    AgentEventRecord,
     AgentRunRecord,
     AgentRuntimeQueryContext,
     AgentRuntimeQueryResult,
@@ -45,8 +43,6 @@ from .tool_operations import (
 )
 
 __all__ = [
-    "AgentEventInput",
-    "AgentEventRecord",
     "AgentRuntimeQueryContext",
     "AgentRuntimeQueryResult",
     "AgentRunRecord",

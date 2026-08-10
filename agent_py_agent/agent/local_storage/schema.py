@@ -118,20 +118,6 @@ _CONTROL_PLANE_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_agent_runs_status ON legacy_agent_runs(status)",
     "CREATE INDEX IF NOT EXISTS idx_agent_runs_updated ON legacy_agent_runs(updated_at)",
     """
-    CREATE TABLE IF NOT EXISTS agent_events (
-        event_id TEXT PRIMARY KEY,
-        root_task_id TEXT NOT NULL,
-        run_id TEXT NOT NULL,
-        parent_run_id TEXT NOT NULL DEFAULT '',
-        event_type TEXT NOT NULL,
-        payload_json TEXT NOT NULL DEFAULT '{}',
-        created_at REAL NOT NULL
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS idx_agent_events_root ON agent_events(root_task_id, created_at)",
-    "CREATE INDEX IF NOT EXISTS idx_agent_events_run ON agent_events(run_id, created_at)",
-    "CREATE INDEX IF NOT EXISTS idx_agent_events_type ON agent_events(event_type)",
-    """
     CREATE TABLE IF NOT EXISTS task_rollups (
         task_id TEXT PRIMARY KEY,
         status TEXT NOT NULL DEFAULT '',

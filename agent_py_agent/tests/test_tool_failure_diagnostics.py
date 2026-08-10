@@ -8,9 +8,6 @@ import pytest
 from agent_py_agent.agent.agent_core.tool_call_archive_record import (
     _attach_gate_and_refs,
 )
-from agent_py_agent.agent.agent_core.tool_runtime_ledger import (
-    _tool_event_payload,
-)
 from agent_py_agent.agent.backends.tool_protocol_adapter import (
     ProviderToolCallRequest,
     canonical_tool_calls_from_response,
@@ -245,7 +242,7 @@ def test_side_effect_store_failure_is_persistence_before_handler() -> None:
     assert invoked is False
 
 
-def test_archive_and_runtime_event_keep_the_same_execution_facts() -> None:
+def test_archive_record_keeps_execution_facts() -> None:
     call = canonical_history_call("diagnostic", {}, call_id="call-1")
     result = ToolResult.failed(
         call,
@@ -262,15 +259,11 @@ def test_archive_and_runtime_event_keep_the_same_execution_facts() -> None:
     }
 
     _attach_gate_and_refs(archive, result)
-    event = _tool_event_payload(archive, {})
 
     assert archive["failure_stage"] == "execution"
     assert archive["handler_executed"] is True
     assert archive["duration_ms"] == 17
     assert "tool_result_envelope" not in archive
-    assert event["failure_stage"] == "execution"
-    assert event["handler_executed"] is True
-    assert event["duration_ms"] == 17
 
 
 def test_invalid_or_success_failure_stage_is_rejected() -> None:

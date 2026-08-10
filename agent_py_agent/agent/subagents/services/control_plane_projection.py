@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ...local_storage.control_plane_models import AgentEventInput, AgentRunRecord
+from ...local_storage.control_plane_models import AgentRunRecord
 from ..models import SubAgentTask, task_has_failure_status
 
 
@@ -20,7 +20,6 @@ def sync_subagent_control_plane_projection(local_store: Any, task: SubAgentTask)
         return
     run_record = _agent_run_record_from_task(task)
     local_store.upsert_agent_run(run_record)
-    local_store.record_agent_event(_agent_event_from_task(task))
     local_store.rebuild_task_rollup(run_record.root_task_id)
 
 
@@ -134,19 +133,3 @@ def _runtime_scope_metadata(task: SubAgentTask) -> dict[str, object]:
     return {"runtime_identity": runtime_identity, "memory_scope": memory_scope, "config_scope": config_scope}
 
 
-def _agent_event_from_task(task: SubAgentTask) -> AgentEventInput:
-    root_task_id = task.root_id or task.id
-    return AgentEventInput(
-        root_task_id=root_task_id,
-        run_id=task.id,
-        parent_run_id=task.parent_id,
-        event_type="agent_run_saved",
-        payload={
-            "status": task.status,
-            "progress": float(task.progress or 0.0),
-            "current_step": task.current_step,
-            "latest_summary": task.latest_summary,
-            "checkpoint_ref": task.agent_run_checkpoint_json or task.checkpoint_ref or task.checkpoint_json,
-        },
-        created_at=float(task.updated_at or task.heartbeat_at or task.created_at or 0.0),
-    )

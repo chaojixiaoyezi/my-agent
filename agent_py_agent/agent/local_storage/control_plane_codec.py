@@ -11,7 +11,7 @@ import json
 import sqlite3
 from typing import Any
 
-from .control_plane_models import AgentEventRecord, AgentRunRecord, TaskRollupRecord
+from .control_plane_models import AgentRunRecord, TaskRollupRecord
 
 AGENT_RUN_UPSERT_SQL = """
 INSERT INTO legacy_agent_runs (
@@ -38,14 +38,6 @@ ON CONFLICT(run_id) DO UPDATE SET
     heartbeat_at=excluded.heartbeat_at,
     updated_at=excluded.updated_at,
     metadata_json=excluded.metadata_json
-"""
-
-AGENT_EVENT_INSERT_SQL = """
-INSERT INTO agent_events (
-    event_id, root_task_id, run_id, parent_run_id,
-    event_type, payload_json, created_at
-)
-VALUES (?, ?, ?, ?, ?, ?, ?)
 """
 
 TASK_ROLLUP_UPSERT_SQL = """
@@ -126,18 +118,6 @@ def agent_run_from_row(row: sqlite3.Row) -> AgentRunRecord:
         created_at=float(row["created_at"]),
         updated_at=float(row["updated_at"]),
         metadata=json_loads(row["metadata_json"]),
-    )
-
-
-def agent_event_from_row(row: sqlite3.Row) -> AgentEventRecord:
-    return AgentEventRecord(
-        event_id=row["event_id"],
-        root_task_id=row["root_task_id"],
-        run_id=row["run_id"],
-        parent_run_id=row["parent_run_id"],
-        event_type=row["event_type"],
-        payload=json_loads(row["payload_json"]),
-        created_at=float(row["created_at"]),
     )
 
 

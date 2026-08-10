@@ -172,49 +172,6 @@ def test_execute_traced_tool_call_passes_canonical_call_and_trusted_scope(tmp_pa
     )
 
 
-def test_tool_loop_record_appends_agent_event_with_explicit_scope(tmp_path):
-    store = LocalStore(tmp_path / "local.db", enable_fts=False)
-    agent = SimpleNamespace(root=tmp_path, local_store=store)
-    params = _loop_params(
-        run_id="run-child",
-        task_id="task-child",
-        task_attributes={
-            "parent_run_id": "run-parent",
-            "root_run_id": "run-root",
-            "root_task_id": "task-root",
-            "depth": 1,
-            "agent_kind": "child_agent",
-        },
-        write_boundary={},
-    )
-
-    call = _runtime_gate_call(run_id="run-child")
-    ToolLoopService(agent)._record_tool_call(
-        ToolCallRecordParams(
-            params=params,
-            tool_rounds=1,
-            idx=1,
-            call=call,
-            result=_runtime_gate_result(call),
-        )
-    )
-
-    events = store.list_agent_events(root_task_id="task-root", run_id="run-child")
-    tool_events = [event for event in events if event.event_type == "tool_call_finished"]
-    assert len(tool_events) == 1
-    event = tool_events[0]
-    assert event.parent_run_id == "run-parent"
-    assert event.payload["tool"] == "write_file"
-    assert event.payload["ok"] is True
-    assert event.payload["scope"]["run_id"] == "run-child"
-    assert event.payload["scope"]["parent_run_id"] == "run-parent"
-    assert event.payload["scope"]["root_run_id"] == "run-root"
-    assert event.payload["operation_id"] == "op-1"
-    assert event.payload["tool_operation_status"] == "succeeded"
-    assert event.payload["tool_operation_replayed"] is False
-    assert event.payload["effect_outcome"] == "confirmed"
-
-
 def test_runtime_ledger_locked_control_plane_does_not_crash_tool_loop():
     """控制面 SQLite 忙时不能让真实工具轮直接崩掉。"""
 
@@ -239,10 +196,6 @@ def test_runtime_ledger_locked_control_plane_does_not_crash_tool_loop():
 
 class _DiskIOStore:
     calls = 0
-
-    def record_agent_event(self, event):
-        type(self).calls += 1
-        raise sqlite3.OperationalError("disk I/O error")
 
     def record_runtime_gate_ledger(self, record):
         type(self).calls += 1
@@ -888,10 +841,6 @@ class _CapturingTools:
 
 class _LockedStore:
     calls = 0
-
-    def record_agent_event(self, event):
-        type(self).calls += 1
-        raise sqlite3.OperationalError("database is locked")
 
     def record_runtime_gate_ledger(self, record):
         type(self).calls += 1

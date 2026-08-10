@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from agent_py_agent.agent.local_storage import LocalStore
 from agent_py_agent.agent.local_storage.control_plane_models import (
-    AgentEventInput,
     AgentRunRecord,
     AgentRuntimeQueryContext,
 )
@@ -116,22 +115,11 @@ def test_local_store_control_plane_lists_agent_tree_and_rollup(tmp_path) -> None
 
     store.upsert_agent_run(parent)
     store.upsert_agent_run(child)
-    event = store.record_agent_event(
-        AgentEventInput(
-            root_task_id="task-root",
-            run_id="run-child",
-            parent_run_id="run-parent",
-            event_type="blocked",
-            payload={"reason": "missing evidence"},
-            created_at=102.0,
-        ),
-    )
     rollup = store.rebuild_task_rollup("task-root")
     tree = store.list_agent_tree("task-root")
     subtree = store.list_subtree("run-parent")
     blocked = store.list_blocked_runs("task-root")
 
-    assert event.event_type == "blocked"
     assert rollup.task_id == "task-root"
     assert rollup.running_agents == 1
     assert rollup.blocked_agents == 1

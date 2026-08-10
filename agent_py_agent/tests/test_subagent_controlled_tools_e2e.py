@@ -11,10 +11,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agent_py_agent.agent.subagents.manager import SubAgentManager
-from agent_py_agent.agent.subagents.recovery_report import (
-    RecoveryReportRequest,
-    write_recovery_report,
-)
 from agent_py_agent.agent.subagents.services.lifecycle import (
     RecordCapabilityGrantParams,
     RecordCapabilityRequestParams,
@@ -78,8 +74,8 @@ def _run_controlled_shell(tmp_path: Path, fixture: ControlledToolsFixture):
     return shell_result
 
 
-def _archive_stdout_and_report(fixture: ControlledToolsFixture, shell_result):
-    trash_result = move_to_task_trash(
+def _archive_stdout(fixture: ControlledToolsFixture, shell_result):
+    return move_to_task_trash(
         TaskTrashMoveRequest(
             task_dir=fixture.task_dir,
             source_path=shell_result.stdout_ref,
@@ -88,27 +84,13 @@ def _archive_stdout_and_report(fixture: ControlledToolsFixture, shell_result):
             actor_run_id=fixture.task.id,
         )
     )
-    recovery = write_recovery_report(
-        RecoveryReportRequest(
-            task_dir=fixture.task_dir,
-            run_id=fixture.task.id,
-            title="Controlled Tools E2E",
-            summary=shell_result.stdout_preview.strip(),
-            details="Shell stdout was moved to task trash after verification.",
-            artifact_refs=[trash_result.destination],
-            evidence_refs=[shell_result.audit_ref],
-        )
-    )
-    return trash_result, recovery
 
 
 def test_controlled_tools_local_e2e(tmp_path: Path) -> None:
     fixture = _prepare_controlled_shell_grant(tmp_path)
     shell_result = _run_controlled_shell(tmp_path, fixture)
-    trash_result, recovery = _archive_stdout_and_report(fixture, shell_result)
+    trash_result = _archive_stdout(fixture, shell_result)
 
     assert shell_result.executed is True
     assert shell_result.stdout_preview.strip() == "controlled-ok"
     assert trash_result.moved is True
-    assert recovery.written is True
-    assert Path(recovery.markdown_ref).read_text(encoding="utf-8").startswith("# Controlled Tools E2E")

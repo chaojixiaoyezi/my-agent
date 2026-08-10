@@ -14,10 +14,8 @@ from typing import Any
 
 from ..subagents.models import SUBAGENT_FAILED_RESULT_STATUSES, TaskStatus, task_status_in
 from .control_plane_codec import (
-    AGENT_EVENT_INSERT_SQL,
     AGENT_RUN_UPSERT_SQL,
     TASK_ROLLUP_UPSERT_SQL,
-    agent_event_from_row,
     agent_run_from_row,
     agent_run_values,
     json_dumps,
@@ -25,8 +23,6 @@ from .control_plane_codec import (
     task_rollup_values,
 )
 from .control_plane_models import (
-    AgentEventInput,
-    AgentEventRecord,
     AgentRunRecord,
     AgentRuntimeQueryContext,
     AgentRuntimeQueryResult,
@@ -56,63 +52,6 @@ class LocalStoreControlPlaneMixin:
         with self._connection() as conn:
             row = conn.execute("SELECT * FROM legacy_agent_runs WHERE run_id = ?", (run_id,)).fetchone()
         return agent_run_from_row(row) if row else None
-
-    def record_agent_event(self, event: AgentEventInput) -> AgentEventRecord:
-        event_id = event.event_id or str(uuid.uuid4())
-        created_at = event.created_at or time.time()
-        with self._connection() as conn:
-            conn.execute(
-                AGENT_EVENT_INSERT_SQL,
-                (
-                    event_id,
-                    event.root_task_id,
-                    event.run_id,
-                    event.parent_run_id,
-                    event.event_type,
-                    json_dumps(event.payload),
-                    float(created_at),
-                ),
-            )
-            conn.commit()
-        return AgentEventRecord(
-            event_id=event_id,
-            root_task_id=event.root_task_id,
-            run_id=event.run_id,
-            parent_run_id=event.parent_run_id,
-            event_type=event.event_type,
-            payload=dict(event.payload),
-            created_at=float(created_at),
-        )
-
-    def list_agent_events(
-        self,
-        *,
-        root_task_id: str = "",
-        run_id: str = "",
-        limit: int = 50,
-    ) -> list[AgentEventRecord]:
-        if limit <= 0:
-            return []
-        clauses: list[str] = []
-        params: list[Any] = []
-        if root_task_id:
-            clauses.append("root_task_id = ?")
-            params.append(root_task_id)
-        if run_id:
-            clauses.append("run_id = ?")
-            params.append(run_id)
-        where = "WHERE " + " AND ".join(clauses) if clauses else ""
-        with self._connection() as conn:
-            rows = conn.execute(
-                f"""
-                SELECT * FROM agent_events
-                {where}
-                ORDER BY created_at DESC
-                LIMIT ?
-                """,
-                [*params, limit],
-            ).fetchall()
-        return [agent_event_from_row(row) for row in rows]
 
     def rebuild_task_rollup(self, task_id: str) -> TaskRollupRecord:
         runs = self._agent_runs_for_task(task_id)

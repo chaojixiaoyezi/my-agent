@@ -34,28 +34,6 @@ class AgentRunRecord:
 
 
 @dataclass(frozen=True)
-class AgentEventInput:
-    root_task_id: str
-    run_id: str
-    parent_run_id: str = ""
-    event_type: str = ""
-    payload: dict[str, Any] = field(default_factory=dict)
-    created_at: float = 0.0
-    event_id: str = ""
-
-
-@dataclass(frozen=True)
-class AgentEventRecord:
-    event_id: str
-    root_task_id: str
-    run_id: str
-    parent_run_id: str
-    event_type: str
-    payload: dict[str, Any]
-    created_at: float
-
-
-@dataclass(frozen=True)
 class TaskRollupRecord:
     task_id: str
     status: str = ""

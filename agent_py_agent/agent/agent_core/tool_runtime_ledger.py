@@ -9,7 +9,6 @@ from ..common.value_parsing import text_value as _text
 from ..contracts.protocol_status import TOOL_STATUS_DONE, TOOL_STATUS_FAILED
 from ..conversation.authority import CONVERSATION_TRANSIENT_WORKSPACE_ATTR
 from ..local_storage import RuntimeGateLedgerRecord
-from ..local_storage.control_plane_models import AgentEventInput
 from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
 from ..tooling.runtime_contracts import tool_arguments_hash
 from ..user_space.network_grants import active_private_hosts
@@ -18,7 +17,6 @@ from .tool_guard.call_guardrail import tool_guardrail_policy, tool_guardrail_rec
 
 def persist_tool_runtime_ledger(agent: object, archive_record: dict[str, object]) -> None:
     store = getattr(agent, "local_store", None)
-    _best_effort_control_plane_write(lambda: _record_tool_agent_event(store, archive_record))
     if not hasattr(store, "record_runtime_gate_ledger"):
         return
     record = runtime_gate_ledger_record_from_archive(archive_record)
@@ -36,69 +34,6 @@ def _best_effort_control_plane_write(write_fn) -> None:
         write_fn()
     except (sqlite3.Error, OSError):
         return
-
-
-def _record_tool_agent_event(store: object, archive_record: dict[str, object]) -> None:
-    if not hasattr(store, "record_agent_event"):
-        return
-    run_id = _text(archive_record.get("run_id"))
-    if not run_id:
-        return
-    scope = _dict_value(archive_record.get("run_scope"))
-    root_task_id = (
-        _text(scope.get("root_task_id"))
-        or _text(archive_record.get("root_task_id"))
-        or _text(archive_record.get("task_id"))
-        or run_id
-    )
-    event = AgentEventInput(
-        root_task_id=root_task_id,
-        run_id=run_id,
-        parent_run_id=_text(scope.get("parent_run_id"))
-        or _text(archive_record.get("parent_run_id")),
-        event_type="tool_call_finished",
-        payload=_tool_event_payload(archive_record, scope),
-    )
-    store.record_agent_event(event)
-
-
-# LLM: 观测事件只投影 archive 的结构化事实，不能改变权威 operation store 的执行结论。
-# 函数用途: 为控制面生成工具完成事件，携带操作状态和副作用核对引用供排障使用。
-def _tool_event_payload(
-    archive_record: dict[str, object],
-    scope: dict[str, object],
-) -> dict[str, object]:
-    payload: dict[str, object] = {
-        "tool": _text(archive_record.get("tool")),
-        "ok": bool(archive_record.get("ok")),
-        "call_id": _text(archive_record.get("call_id")),
-        "operation_id": _operation_id(archive_record),
-        "scope": dict(scope),
-        "handler_executed": archive_record.get("handler_executed") is True,
-        "duration_ms": _nonnegative_int(archive_record.get("duration_ms")),
-    }
-    for key in (
-        "error_code",
-        "error_category",
-        "failure_stage",
-        "recommended_action",
-        "result_ref",
-        "tool_operation_status",
-        "tool_operation_action",
-        "tool_operation_idempotency_scope",
-        "tool_operation_reconciliation_source_ref",
-        "effect_outcome",
-        "effect_source_ref",
-    ):
-        value = _text(archive_record.get(key))
-        if value:
-            payload[key] = value
-    if "tool_operation_replayed" in archive_record:
-        payload["tool_operation_replayed"] = archive_record.get("tool_operation_replayed") is True
-    refs = archive_record.get("tool_result_refs")
-    if isinstance(refs, list):
-        payload["tool_result_refs"] = [item for item in refs if isinstance(item, dict)]
-    return payload
 
 
 def _nonnegative_int(value: object) -> int:
