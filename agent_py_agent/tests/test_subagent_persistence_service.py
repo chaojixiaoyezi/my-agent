@@ -669,3 +669,24 @@ def _assert_shared_workspace_facts(loaded, task) -> None:
 
 def _read_jsonl(path: str) -> list[dict[str, object]]:
     return [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_save_registers_id_path_mapping_when_runtime_db_attached(tmp_path) -> None:
+    """G1（B.3）：owner_home_dir 非空 → manager.runtime_db 挂载，save 走
+    id_path_mapping 登记；目录仍按 ID 命名（directory_id == ID，零破坏）。"""
+    manager = SubAgentManager(tmp_path, owner_home_dir=str(tmp_path / "owner-home"))
+
+    task = manager.create_run(goal="G1 映射登记", thought="t", plan=["p"])
+    task.status = "DONE"
+    manager.save(task)
+
+    assert manager.runtime_db is not None
+    with manager.runtime_db._runtime_connection() as conn:
+        row = conn.execute(
+            "SELECT id_kind, directory_id FROM id_path_mapping WHERE opaque_id = ?",
+            (task.id,),
+        ).fetchone()
+    assert row is not None
+    assert row["id_kind"] == "run_id"
+    assert row["directory_id"] == task.id  # 现形态：directory_id 即 ID，零破坏
+    assert (tmp_path / task.id / "task.json").exists()

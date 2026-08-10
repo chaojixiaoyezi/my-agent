@@ -204,18 +204,24 @@ class RuntimeAcceptanceMixin:
             )
 
     def artifact_records_for_attempt(self, attempt_id: str) -> list[dict[str, Any]]:
-        """本 attempt 已发布 artifact 的内容寻址记录（H.9 validator 输入源）。"""
+        """本 attempt 已发布 artifact 的内容寻址记录（H.9 validator 输入源）。
+
+        G2 补：主键独立 artifact_record_id，digest 是内容 hash；content_path
+        指向内容寻址 store（validator 只读该对象）。旧记录（迁移前）无
+        content_path → 回退 live 共享区读取（load_artifact_snapshot 兼容）。
+        """
         with self._runtime_connection() as conn:
             rows = conn.execute(
-                "SELECT artifact_id, rel_path, digest, size FROM artifact_records "
-                "WHERE attempt_id = ? ORDER BY rel_path",
+                "SELECT artifact_record_id, rel_path, content_digest, content_path, "
+                "size FROM artifact_records WHERE attempt_id = ? ORDER BY rel_path",
                 (attempt_id,),
             ).fetchall()
         return [
             {
-                "artifact_id": str(row["artifact_id"]),
+                "artifact_record_id": str(row["artifact_record_id"]),
                 "rel_path": str(row["rel_path"]),
-                "digest": str(row["digest"]),
+                "digest": str(row["content_digest"]),
+                "content_path": str(row["content_path"]),
                 "size": int(row["size"]),
             }
             for row in rows

@@ -6,6 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ...common.opaque_id import OpaqueIdError, validate_opaque_id
+from ...runtime_db.operations import directory_id_for_opaque
 from ...memory_archive.task_workspace import ensure_subagent_task_workspace
 from ..models import SubAgentTask
 
@@ -106,12 +107,13 @@ def _canonical_allowed_write_roots(
 
 
 def _manager_locator_root(workspace: str | Path, task: SubAgentTask) -> str:
-    # task.id 拼进路径前先过拒绝式校验：这里的解析结果会进 allowed_write_roots，
-    # 非法 ID 逃逸到 workspace 外会让模型获得任意写权限。fail-closed：非法即
-    # 返回空（调用方会忽略该 root）。
+    # task.id 拼进路径前先过拒绝式校验 + 走框架目录 ID（G1/B.3）：这里的解析
+    # 结果会进 allowed_write_roots，非法 ID 逃逸到 workspace 外会让模型获得任意
+    # 写权限。fail-closed：非法即返回空（调用方会忽略该 root）。directory_id
+    # 与权威库 id_path_mapping 登记值一致（directory_id 即 validate 结果）。
     try:
-        run_id = validate_opaque_id(task.id, kind="run_id")
-        return str((Path(workspace).expanduser() / run_id).resolve(strict=False))
+        directory_id = directory_id_for_opaque(task.id, kind="run_id")
+        return str((Path(workspace).expanduser() / directory_id).resolve(strict=False))
     except (OSError, RuntimeError, OpaqueIdError):
         return ""
 

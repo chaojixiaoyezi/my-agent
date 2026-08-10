@@ -37,6 +37,7 @@ ID_KIND_PREFIXES: dict[str, str] = {
     "delegation_id": "delegation",  # R1: parent→child 委托链
     "contract_id": "contract",   # R3: AcceptanceContract（I.2 冻结契约）
     "validator_operation_id": "vop",  # R3: ValidatorOperation（A.8）
+    "artifact_record_id": "artrec",  # G2补: ArtifactRecord 独立主键（H.8，digest 只是内容 hash）
     "outbox_id": "outbox",       # R4: Outbox 条目（K.4 at-least-once）
     "inbox_id": "inbox",         # R4: Inbox 条目（K.4 去重）
 }

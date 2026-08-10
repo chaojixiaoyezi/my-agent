@@ -17,6 +17,8 @@ import pytest
 
 from agent_py_agent.agent.runtime_db.operations import (
     RESOURCE_VERSION_CONFLICT,
+    OpaqueIdError,
+    directory_id_for_opaque,
     sha256_of,
 )
 from agent_py_agent.agent.runtime_db.repository import (
@@ -596,7 +598,9 @@ def test_publish_happy_path(ctx, tmp_path):
     assert (shared / "a.txt").read_text(encoding="utf-8") == "hello"
     artifacts = repo.artifacts_for_attempt(chain["attempt_id"])
     assert [a["rel_path"] for a in artifacts] == ["a.txt"]
-    assert artifacts[0]["digest"] == sha256_of(shared / "a.txt")
+    assert artifacts[0]["content_digest"] == sha256_of(shared / "a.txt")
+    assert artifacts[0]["content_path"]  # G2：内容寻址落盘，validator 只读该对象
+    assert Path(artifacts[0]["content_path"]).read_text(encoding="utf-8") == "hello"
 
 
 @pytest.mark.parametrize(
@@ -841,6 +845,159 @@ def test_publish_deleted(ctx, tmp_path):
     assert not target.exists()
 
 
+def test_publish_rejects_terminal_symlink_created(ctx, tmp_path):
+    """G3 补：created 项末段是 symlink → CAS 探测 openat(O_NOFOLLOW)
+    ELOOP 拒绝。修复前 target.exists() 跟随链接判「已存在」也能拦，但
+    仅靠路径级检查存在检查与 apply 之间的替换窗口；fd 层 O_NOFOLLOW
+    把探测与 apply 绑到同一父 fd，替换无隙可乘。"""
+    chain, repo = ctx
+    shared = tmp_path / "shared"
+    staging = tmp_path / "staging"
+    shared.mkdir()
+    staging.mkdir()
+    real = tmp_path / "real.txt"
+    real.write_text("outside", encoding="utf-8")
+    (shared / "a.txt").symlink_to(real)
+    (staging / "a.txt").write_text("new", encoding="utf-8")  # CAS 在 preimage 前拒绝,不会读到它
+    binding = repo.create_binding(
+        agent_run_id=chain["agent_run_id"],
+        attempt_id=chain["attempt_id"],
+        owner_id=OWNER,
+        root_path=str(shared),
+    )
+    pub = repo.create_publish(
+        binding_id=binding["binding_id"],
+        agent_run_id=chain["agent_run_id"],
+        attempt_id=chain["attempt_id"],
+        workspace_epoch=1,
+    )
+    repo.stage_publish_manifest(
+        pub["publish_id"],
+        [{"path": "a.txt", "kind": "created",
+          "postimage_digest": sha256_of(staging / "a.txt")}],
+    )
+    with pytest.raises(RuntimeConflictError, match="symlink"):
+        repo.publish(publish_id=pub["publish_id"], staging_root=staging, shared_root=shared)
+    assert repo.get_publish(pub["publish_id"])["status"] == "STAGING"  # fail-closed 零副作用
+    assert (shared / "a.txt").is_symlink()  # 链接未被跟随/替换
+
+
+def test_publish_rejects_terminal_symlink_updated(ctx, tmp_path):
+    """G3 补：updated 项末段是 symlink（指向根外）→ preimage CAS
+    openat(O_NOFOLLOW) ELOOP 拒绝。修复前 sha256_of 跟随链接把根外
+    文件内容当 preimage 比对（CAS 可通过），TOCTOU 面在读取与替换之间；
+    fd 层探测即拒绝，外部文件连读都不发生。"""
+    chain, repo = ctx
+    shared = tmp_path / "shared"
+    staging = tmp_path / "staging"
+    shared.mkdir()
+    staging.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    (shared / "a.txt").symlink_to(outside)
+    (staging / "a.txt").write_text("new", encoding="utf-8")
+    binding = repo.create_binding(
+        agent_run_id=chain["agent_run_id"],
+        attempt_id=chain["attempt_id"],
+        owner_id=OWNER,
+        root_path=str(shared),
+    )
+    pub = repo.create_publish(
+        binding_id=binding["binding_id"],
+        agent_run_id=chain["agent_run_id"],
+        attempt_id=chain["attempt_id"],
+        workspace_epoch=1,
+    )
+    repo.stage_publish_manifest(
+        pub["publish_id"],
+        [{"path": "a.txt", "kind": "updated", "preimage_digest": sha256_of(outside)}],
+    )
+    with pytest.raises(RuntimeConflictError, match="symlink"):
+        repo.publish(publish_id=pub["publish_id"], staging_root=staging, shared_root=shared)
+    assert outside.read_text(encoding="utf-8") == "secret"  # 外部未被写入
+    assert (shared / "a.txt").is_symlink()  # 链接未被替换
+
+
+def test_publish_rejects_terminal_symlink_deleted(ctx, tmp_path):
+    """G3 补：deleted 项末段是 symlink → CAS ELOOP 拒绝。修复前
+    is_file() 跟随链接判存在、unlink 只删链接（不逃逸但 preimage 校验
+    读了外部）；fd 层 fail-closed：链接既不读也不删。"""
+    chain, repo = ctx
+    shared = tmp_path / "shared"
+    staging = tmp_path / "staging"
+    shared.mkdir()
+    staging.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    link = shared / "a.txt"
+    link.symlink_to(outside)
+    binding = repo.create_binding(
+        agent_run_id=chain["agent_run_id"],
+        attempt_id=chain["attempt_id"],
+        owner_id=OWNER,
+        root_path=str(shared),
+    )
+    pub = repo.create_publish(
+        binding_id=binding["binding_id"],
+        agent_run_id=chain["agent_run_id"],
+        attempt_id=chain["attempt_id"],
+        workspace_epoch=1,
+    )
+    repo.stage_publish_manifest(
+        pub["publish_id"],
+        [{"path": "a.txt", "kind": "deleted", "preimage_digest": sha256_of(outside)}],
+    )
+    with pytest.raises(RuntimeConflictError, match="symlink"):
+        repo.publish(publish_id=pub["publish_id"], staging_root=staging, shared_root=shared)
+    assert link.is_symlink()  # 链接未被删
+
+
+def test_publish_creates_nested_parent_dirs(ctx, tmp_path):
+    """G3 补：created 项目标父目录不存在 → fd-relative 逐段 mkdirat
+    创建（O_NOFOLLOW 保证中间段无 symlink），发布成功。"""
+    chain, repo = ctx
+    shared = tmp_path / "shared"
+    staging = tmp_path / "staging"
+    shared.mkdir()
+    staging.mkdir()
+    pub = _staged_publish(repo, chain, shared, staging, "a/b/c.txt", "deep")
+    done = repo.publish(publish_id=pub["publish_id"], staging_root=staging, shared_root=shared)
+    assert done["status"] == "COMMITTED"
+    assert (shared / "a" / "b" / "c.txt").read_text(encoding="utf-8") == "deep"
+
+
+def test_publish_applies_permissions_fchmod(ctx, tmp_path):
+    """G3 补：permissions 项 fd-relative 后经 openat+O_NOFOLLOW 打开再
+    fchmod（路径不重解析），权限仍生效。"""
+    chain, repo = ctx
+    shared = tmp_path / "shared"
+    staging = tmp_path / "staging"
+    shared.mkdir()
+    staging.mkdir()
+    src = staging / "a.txt"
+    src.write_text("hi", encoding="utf-8")
+    binding = repo.create_binding(
+        agent_run_id=chain["agent_run_id"],
+        attempt_id=chain["attempt_id"],
+        owner_id=OWNER,
+        root_path=str(shared),
+    )
+    pub = repo.create_publish(
+        binding_id=binding["binding_id"],
+        agent_run_id=chain["agent_run_id"],
+        attempt_id=chain["attempt_id"],
+        workspace_epoch=1,
+    )
+    repo.stage_publish_manifest(
+        pub["publish_id"],
+        [{"path": "a.txt", "kind": "created", "postimage_digest": sha256_of(src),
+          "permissions": 0o640}],
+    )
+    done = repo.publish(publish_id=pub["publish_id"], staging_root=staging, shared_root=shared)
+    assert done["status"] == "COMMITTED"
+    assert (shared / "a.txt").stat().st_mode & 0o777 == 0o640
+
+
 @pytest.mark.parametrize("crash_point", ["after_fence", "after_preimage", "mid_apply"])
 def test_publish_crash_points_land_dirty(ctx, tmp_path, crash_point):
     """测试 13：publish 任一 crash point 只得到 COMMITTED 或 DIRTY/UNKNOWN。"""
@@ -1021,3 +1178,144 @@ def test_supersede_updates_run_epoch(ctx, tmp_path):
     run = repo.get_agent_run(chain["agent_run_id"])
     assert run["workspace_epoch"] == 2
     assert repo.get_binding(binding["binding_id"])["status"] == "SUPERSEDED"
+
+
+# ------------------------------------------------------------------ G1 补（B.3）
+# opaque ID → 框架目录 ID 映射：ID 不直接成为物理路径权威（3.txt B.3）。
+def test_directory_id_for_registers_then_returns_stable(repo):
+    """G1：首次查未登记 → 登记并返回 directory_id；重复查幂等返回同一值。"""
+    first = repo.directory_id_for("subagent-1780127110-469bfd0e", kind="run_id")
+    second = repo.directory_id_for("subagent-1780127110-469bfd0e", kind="run_id")
+    assert first == second == "subagent-1780127110-469bfd0e"
+    with repo._runtime_connection() as conn:
+        rows = conn.execute(
+            "SELECT opaque_id, id_kind, directory_id FROM id_path_mapping"
+        ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["directory_id"] == first
+    assert rows[0]["id_kind"] == "run_id"
+
+
+def test_register_id_path_idempotent(repo):
+    """G1：重复登记幂等，不产生第二行、不改首次登记值。"""
+    a = repo.register_id_path("subagent-abc123", kind="run_id")
+    b = repo.register_id_path("subagent-abc123", kind="run_id")
+    assert a == b
+    with repo._runtime_connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) AS n FROM id_path_mapping WHERE opaque_id = ?",
+            ("subagent-abc123",),
+        ).fetchone()["n"]
+    assert count == 1
+
+
+def test_directory_id_matches_local_validation(repo):
+    """G1：DB 登记值 == 模块级拒绝式校验结果（两路接线一致，无库环境不漂移）。"""
+    opaque = "subagent-1780127110-deadbeef"
+    assert repo.directory_id_for(opaque, kind="run_id") == directory_id_for_opaque(
+        opaque, kind="run_id"
+    )
+
+
+def test_invalid_id_rejected_fail_closed(repo):
+    """G1：非法 ID（路径形态）→ OpaqueIdError，不落表、不返回路径段。"""
+    for bad in ("../etc/passwd", "/abs/path", "a b"):
+        with pytest.raises(OpaqueIdError):
+            repo.register_id_path(bad, kind="run_id")
+        with pytest.raises(OpaqueIdError):
+            repo.directory_id_for(bad, kind="run_id")
+        with pytest.raises(OpaqueIdError):
+            directory_id_for_opaque(bad, kind="run_id")
+    with repo._runtime_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) AS n FROM id_path_mapping").fetchone()["n"] == 0
+
+
+# ------------------------------------------------------------------ G2 补（H.8/3.txt:303）
+# artifact record 主键独立 + 内容寻址 store：两个不同路径即使内容相同，
+# 也必须各有一条记录（修复前 INSERT OR IGNORE + digest 主键坍缩）。
+def test_publish_same_content_two_paths_keeps_two_records(ctx, tmp_path):
+    """G2（3.txt:303）：同内容不同路径 → 两条记录，artifact_record_id 独立，
+    content_digest 相同，content_path 指向同一内容寻址 store 文件（单副本）。"""
+    chain, repo = ctx
+    shared = tmp_path / "shared"
+    staging = tmp_path / "staging"
+    shared.mkdir()
+    staging.mkdir()
+    pub = _staged_publish(repo, chain, shared, staging, "a.txt", "same")
+    (staging / "b.txt").write_text("same", encoding="utf-8")
+    repo.stage_publish_manifest(
+        pub["publish_id"],
+        [
+            {"path": "a.txt", "kind": "created", "postimage_digest": sha256_of(staging / "a.txt")},
+            {"path": "b.txt", "kind": "created", "postimage_digest": sha256_of(staging / "b.txt")},
+        ],
+    )
+    repo.publish(publish_id=pub["publish_id"], staging_root=staging, shared_root=shared)
+
+    artifacts = repo.artifacts_for_attempt(chain["attempt_id"])
+    assert sorted(a["rel_path"] for a in artifacts) == ["a.txt", "b.txt"]
+    ids = {a["artifact_record_id"] for a in artifacts}
+    digests = {a["content_digest"] for a in artifacts}
+    paths = {a["content_path"] for a in artifacts}
+    assert len(ids) == 2  # 主键独立：不坍缩
+    assert len(digests) == 1  # 内容 hash 相同
+    assert len(paths) == 1  # 内容寻址：store 单副本
+    for a in artifacts:
+        assert Path(a["content_path"]).read_text(encoding="utf-8") == "same"
+
+
+def test_publish_store_immutable_and_shared_across_attempts(ctx, tmp_path):
+    """G2：两次发布同内容（不同路径）→ 同一 store 文件（内容寻址去重），
+    记录各自独立；store 内容保持发布时冻结（immutable）。"""
+    chain, repo = ctx
+    shared = tmp_path / "shared"
+    staging = tmp_path / "staging"
+    shared.mkdir()
+    staging.mkdir()
+    pub1 = _staged_publish(repo, chain, shared, staging, "a.txt", "stable")
+    repo.publish(publish_id=pub1["publish_id"], staging_root=staging, shared_root=shared)
+    pub2 = _staged_publish(repo, chain, shared, staging, "b.txt", "stable")
+    repo.publish(publish_id=pub2["publish_id"], staging_root=staging, shared_root=shared)
+
+    artifacts = repo.artifacts_for_attempt(chain["attempt_id"])
+    assert len(artifacts) == 2
+    assert len({a["artifact_record_id"] for a in artifacts}) == 2
+    assert len({a["content_path"] for a in artifacts}) == 1  # 同 digest 单副本
+    # store 内容保持发布时冻结（immutable：二次发布不改首次 store 文件）。
+    assert Path(artifacts[0]["content_path"]).read_text(encoding="utf-8") == "stable"
+
+
+def test_legacy_artifact_schema_migrates_pk_and_backfills_digest(tmp_path):
+    """G2：存量库（旧 artifact_records：artifact_id 主键存 digest）打开即迁移：
+    主键改名 artifact_record_id、补 content_digest 回填旧值、content_path 空
+    （旧记录无 store 内容，load 回退 live 兼容）。"""
+    import sqlite3
+
+    db = tmp_path / "runtime.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE artifact_records (artifact_id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL, "
+        "agent_run_id TEXT NOT NULL, publish_id TEXT NOT NULL DEFAULT '', rel_path TEXT NOT NULL, "
+        "digest TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL, "
+        "UNIQUE(artifact_id))"
+    )
+    conn.execute(
+        "INSERT INTO artifact_records(artifact_id, attempt_id, agent_run_id, publish_id, "
+        "rel_path, digest, size, created_at) VALUES('abc123digest', 'att1', 'run1', 'pub1', "
+        "'a.txt', 'abc123digest', 5, 1.0)"
+    )
+    conn.commit()
+    conn.close()
+
+    repo = RuntimeRepository(db)
+    with repo._runtime_connection() as c:
+        cols = [r["name"] for r in c.execute("PRAGMA table_info(artifact_records)").fetchall()]
+        pk = [r["name"] for r in c.execute("PRAGMA table_info(artifact_records)").fetchall() if r["pk"]]
+        row = c.execute(
+            "SELECT artifact_record_id, content_digest, content_path FROM artifact_records"
+        ).fetchone()
+    assert pk == ["artifact_record_id"]  # 主键独立化
+    assert "content_digest" in cols and "content_path" in cols
+    assert row["artifact_record_id"] == "abc123digest"
+    assert row["content_digest"] == "abc123digest"  # 旧值回填
+    assert row["content_path"] == ""  # 无 store 内容 → load 回退 live

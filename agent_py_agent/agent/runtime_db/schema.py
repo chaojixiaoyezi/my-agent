@@ -223,21 +223,39 @@ _BASE_RUNTIME_SQL = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_publish_ops_attempt ON publish_operations(attempt_id)",
     # ArtifactRecord（H.8/H.9）：内容寻址 immutable artifact snapshot，发布完成
-    # 后才写；validator 只验证这里引用的 digest。
+    # 后才写；validator 只验证这里引用的 digest。主键必须是独立
+    # artifact_record_id（G2 补，3.txt:303）：content_digest 只是内容 hash，
+    # 两个不同路径即使内容相同也各有一条记录；content_path 指向内容寻址
+    # store（publish 时冻结，validator 只读该对象，不读 live workspace）。
     """
     CREATE TABLE IF NOT EXISTS artifact_records (
-        artifact_id TEXT PRIMARY KEY,
+        artifact_record_id TEXT PRIMARY KEY,
         attempt_id TEXT NOT NULL,
         agent_run_id TEXT NOT NULL,
         publish_id TEXT NOT NULL DEFAULT '',
         rel_path TEXT NOT NULL,
-        digest TEXT NOT NULL,
+        content_digest TEXT NOT NULL,
         size INTEGER NOT NULL DEFAULT 0,
-        created_at REAL NOT NULL,
-        UNIQUE(artifact_id)
+        content_path TEXT NOT NULL DEFAULT '',
+        created_at REAL NOT NULL
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_artifact_records_attempt ON artifact_records(attempt_id)",
+    # ---------------------------------------------------------------- G1 补（3.txt B.3）
+    # opaque ID → 框架目录 ID 权威映射：ID 不直接成为物理路径权威（B.3）。
+    # 任何把 run_id/task_id/session_id/attempt_id/delegation_id 拼进路径的
+    # 公开入口先过 validate_opaque_id（拒绝式），再把映射登记进本表；
+    # directory_id 由框架生成（首次登记即固定，重复登记幂等）。目录名
+    # 轮换/迁移只改本表，不碰调用方拼接点。
+    """
+    CREATE TABLE IF NOT EXISTS id_path_mapping (
+        opaque_id TEXT PRIMARY KEY,
+        id_kind TEXT NOT NULL,
+        directory_id TEXT NOT NULL,
+        created_at REAL NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_id_path_mapping_kind ON id_path_mapping(id_kind)",
     # ---------------------------------------------------------------- R3（I 节）
     # AcceptanceContract（I.2/I.6）：dispatch 前由框架编译、校验、冻结，
     # 不可变；current_contract_id 在 task_runs 上 CAS 防分叉。模型只能
@@ -341,6 +359,31 @@ _RUNTIME_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
         "task_runs",
         "ALTER TABLE task_runs ADD COLUMN closed_at REAL NOT NULL DEFAULT 0",
     ),
+    # G2 补：artifact_records 主键独立化迁移（3.txt:303）。顺序敏感：
+    # 1) 加 content_digest 列 + 同项回填旧行（旧 artifact_id 值即原 digest；
+    #    回填绑定在 ADD 的条件上——列刚加的这次启动才执行，之后跳过；
+    #    此时列名仍叫 artifact_id，回填引用旧名）→ 2) 加 content_path →
+    #    3) 主键列改名 artifact_id→artifact_record_id（RENAME 保留主键
+    #    约束，sqlite ≥ 3.25）。全新建库已用新 schema，三项全部跳过。
+    (
+        "content_digest",
+        "artifact_records",
+        (
+            "ALTER TABLE artifact_records ADD COLUMN content_digest TEXT NOT NULL DEFAULT ''",
+            "UPDATE artifact_records SET content_digest = artifact_id "
+            "WHERE content_digest = ''",
+        ),
+    ),
+    (
+        "content_path",
+        "artifact_records",
+        "ALTER TABLE artifact_records ADD COLUMN content_path TEXT NOT NULL DEFAULT ''",
+    ),
+    (
+        "artifact_record_id",
+        "artifact_records",
+        "ALTER TABLE artifact_records RENAME COLUMN artifact_id TO artifact_record_id",
+    ),
 )
 
 
@@ -377,12 +420,15 @@ class RuntimeSchemaMixin:
         for column, table, alter_sql in _RUNTIME_MIGRATIONS:
             if _table_has_column(conn, table, column):
                 continue
-            try:
-                conn.execute(alter_sql)
-            except sqlite3.OperationalError as exc:
-                if "duplicate column" not in str(exc).lower():
-                    raise
-                # 并发连接已先完成本列迁移，目标态已达成。
+            # 迁移项支持单条 SQL 或同条件多语句元组（G2 回填绑定 ADD 条件）。
+            statements = alter_sql if isinstance(alter_sql, tuple) else (alter_sql,)
+            for statement in statements:
+                try:
+                    conn.execute(statement)
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column" not in str(exc).lower():
+                        raise
+                    # 并发连接已先完成本列迁移，目标态已达成。
 
     @staticmethod
     def _execute_runtime_schema(conn: sqlite3.Connection, statements: tuple[str, ...]) -> None:

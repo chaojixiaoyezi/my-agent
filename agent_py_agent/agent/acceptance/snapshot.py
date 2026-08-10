@@ -86,7 +86,10 @@ class ArtifactSnapshot:
         root.mkdir(parents=True, exist_ok=True)
         for item in self.files:
             rel = str(item["rel_path"])
-            src = self.shared_root / rel
+            # G2：优先从内容寻址 store 复制（发布时冻结，live 再变不影响）；
+            # 旧记录（无 store 路径）回退 live 共享区。
+            content_path = str(item.get("content_path") or "").strip()
+            src = Path(content_path) if content_path else (self.shared_root / rel)
             dst = root / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
             _reflink_or_copy(src, dst)
@@ -110,6 +113,10 @@ def load_artifact_snapshot(
     """从 artifact_records 记录构建已验证快照；任一 digest 不匹配 → None。
 
     返回 None = snapshot 无效（H.9：不得作为验收输入）。
+
+    G2 补：优先从内容寻址 store（record.content_path）读——那是发布时冻结
+    的 immutable 对象，live 共享区后来怎么改都不影响验收输入；旧记录
+    （迁移前，content_path 空）回退 live 共享区（digest 校验仍生效）。
     """
     shared = Path(shared_root)
     verified: list[dict[str, Any]] = []
@@ -117,7 +124,11 @@ def load_artifact_snapshot(
         rel = str(record.get("rel_path") or "")
         if not rel or rel.startswith("/") or ".." in rel.split("/"):
             return None  # rel_path 不合法（框架写入，理论上不会；防御）
-        path = shared / rel
+        content_path = str(record.get("content_path") or "").strip()
+        if content_path:
+            path = Path(content_path)
+        else:
+            path = shared / rel
         try:
             actual = sha256_of(path)
         except OSError:
@@ -129,6 +140,7 @@ def load_artifact_snapshot(
                 "rel_path": rel,
                 "digest": actual,
                 "size": path.stat().st_size,
+                "content_path": content_path,
             }
         )
     return ArtifactSnapshot(shared_root=shared, files=tuple(verified))

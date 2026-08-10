@@ -18,6 +18,7 @@ from typing import Any
 
 from ....common.json_io import locked_json_path, read_json_object_report, write_json_file_atomic
 from ....common.opaque_id import validate_opaque_id
+from ....runtime_db.operations import directory_id_for_opaque
 from ....common.value_parsing import sequence_strings
 from ....runtime_errors import runtime_error_report
 from ...models import (
@@ -300,6 +301,19 @@ def _merge_runner_session_payload(
     payload["updated_at"] = now
 
 
+def _directory_id_for_task(service: SubAgentPersistenceService, task: SubAgentTask) -> str:
+    """G1（3.txt B.3）：task.id（opaque）→ 框架目录 ID。
+
+    有权威库（manager.runtime_db）→ 走 id_path_mapping 映射（查表→无则
+    登记，首次登记即固定、重复幂等）；无库（纯投影环境）→ 退化本地校验，
+    结果与 DB 登记值一致（directory_id 即 validate 后的安全路径段）。
+    """
+    db = getattr(getattr(service, "manager", None), "runtime_db", None)
+    if db is not None:
+        return db.directory_id_for(task.id, kind="run_id")
+    return directory_id_for_opaque(task.id, kind="run_id")
+
+
 def _prepare_and_write_state(
     service: SubAgentPersistenceService,
     task: SubAgentTask,
@@ -336,7 +350,7 @@ def _prepare_and_write_state(
     state = build_agent_run_state(task)
     write_agent_run_state(state)
     locator_payload = build_agent_state_locator(task, state)
-    locator_dir = service.workspace / validate_opaque_id(task.id, kind="run_id")
+    locator_dir = service.workspace / _directory_id_for_task(service, task)
     locator_dir.mkdir(parents=True, exist_ok=True)
     write_json_file_atomic(locator_dir / "task.json", locator_payload)
     write_json_file_atomic(locator_dir / "run.json", locator_payload)

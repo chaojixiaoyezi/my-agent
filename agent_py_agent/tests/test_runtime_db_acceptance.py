@@ -267,11 +267,17 @@ def test_freeze_unknown_task_run(repo, chain):
 
 # ------------------------------------------------------------------- H.9
 def test_snapshot_tamper_invalidated(repo, chain, tmp_path):
-    """H.9：validator 只认内容寻址 immutable snapshot —— 篡改后 snapshot 失效。"""
+    """H.9+G2补：validator 只读内容寻址 store —— store 被篡改 → snapshot 失效；
+    live workspace 被篡改 → 不影响（发布时冻结的对象不受 live 再写影响）。"""
     shared = _publish_artifact(repo, chain, tmp_path, "report.html", GOOD_HTML)
     records = repo.artifact_records_for_attempt(chain["attempt_id"])
     assert load_artifact_snapshot(records=records, shared_root=shared) is not None
+    # G2：live 篡改不再使 snapshot 失效（验证源已是 store）。
     (shared / "report.html").write_text("tampered", encoding="utf-8")
+    assert load_artifact_snapshot(records=records, shared_root=shared) is not None
+    # store 对象被篡改（攻击者直接改 store）→ digest 失配 → snapshot 无效。
+    store_file = Path(records[0]["content_path"])
+    store_file.write_text("tampered", encoding="utf-8")
     assert load_artifact_snapshot(records=records, shared_root=shared) is None
 
 
@@ -284,31 +290,37 @@ def test_snapshot_rejects_bad_relpath(repo, chain, tmp_path):
 
 
 def test_snapshot_materialize_isolates_from_live(repo, chain, tmp_path):
-    """H.9：物化副本与 live workspace 解耦 —— live 篡改不影响物化副本。"""
+    """H.9+G2补：物化副本与 live workspace 解耦 —— live 篡改既不影响物化
+    副本，也不影响 snapshot 本身（源是发布时冻结的 store）。"""
     shared = _publish_artifact(repo, chain, tmp_path, "report.html", GOOD_HTML)
     snap = _validated_snapshot(repo, chain, shared)
     materialized = snap.materialize(tmp_path / "materialized")
-    # live 被篡改 → 原 snapshot 从此失效，但物化副本仍是验证时点的内容。
+    # live 被篡改 → snapshot 仍有效（G2：读 store），物化副本仍是最初内容。
     (shared / "report.html").write_text("tampered", encoding="utf-8")
     assert load_artifact_snapshot(
         records=repo.artifact_records_for_attempt(chain["attempt_id"]),
         shared_root=shared,
-    ) is None
+    ) is not None
     assert (materialized.path_for("report.html")).read_text(encoding="utf-8") == GOOD_HTML
     assert (tmp_path / "materialized" / "report.html").read_text(encoding="utf-8") == GOOD_HTML
 
 
 def test_snapshot_materialize_recomputes_copy_digest(repo, chain, tmp_path):
     """G2（探针 snapshot_metadata_digest_matches_copy 复现）：验证后、物化前
-    live 被篡改 → materialize 复制的是篡改内容，重算副本 digest 必须检出。
+    store 对象被篡改 → materialize 复制的是篡改内容，重算副本 digest 必须检出。
 
     修复前：load（T1）只验 live 时点 digest，materialize（T2）复制时不重算
     副本 digest —— 篡改发生在 T1 与 T2 之间时，副本与记录不符却静默通过。
+    G2 补后验证源是 store；纵深仍在：物化前 store 被改（T1 与 T2 之间）
+    → 副本 digest 与记录不符，物化必须抛错（绝不交付未确认副本）。
     """
     shared = _publish_artifact(repo, chain, tmp_path, "report.html", GOOD_HTML)
     snap = _validated_snapshot(repo, chain, shared)  # T1：验证通过
-    # T1 与物化之间 live 被篡改（工具并发改写/攻击者）
-    (shared / "report.html").write_text("<div>evil half-written</div>", encoding="utf-8")
+    # T1 与物化之间 store 对象被篡改（攻击者直接改 store/磁盘损坏）
+    records = repo.artifact_records_for_attempt(chain["attempt_id"])
+    Path(records[0]["content_path"]).write_text(
+        "<div>evil half-written</div>", encoding="utf-8"
+    )
     with pytest.raises(SnapshotMaterializeError) as excinfo:
         snap.materialize(tmp_path / "materialized")
     assert "digest" in str(excinfo.value)
@@ -316,14 +328,15 @@ def test_snapshot_materialize_recomputes_copy_digest(repo, chain, tmp_path):
 
 
 def test_runner_blocks_when_materialize_detects_tamper(repo, chain, tmp_path):
-    """G2：验证后、物化前 live 被篡改 → 全部断言 BLOCKED，绝不 VERIFIED。
+    """G2：验证后、物化前 store 对象被篡改 → 全部断言 BLOCKED，绝不 VERIFIED。
 
     A.8 账本完整性：物化失败也逐条落 operation（BLOCKED），聚合方
     「required 全 VERIFIED 才算过」不受绕过。
     """
     shared = _publish_artifact(repo, chain, tmp_path, "report.html", GOOD_HTML)
     snap = _validated_snapshot(repo, chain, shared)
-    (shared / "report.html").write_text("<div>evil</div>", encoding="utf-8")
+    records = repo.artifact_records_for_attempt(chain["attempt_id"])
+    Path(records[0]["content_path"]).write_text("<div>evil</div>", encoding="utf-8")
     contract = _compile(
         repo, chain, {"assertions": [{"validator": "artifact_acceptance", "artifact_kind": "html"}]}
     )

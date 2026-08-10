@@ -20,9 +20,11 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import time
 import uuid
@@ -30,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from ..common.id_generator import new_id
+from ..common.opaque_id import OpaqueIdError, validate_opaque_id
 
 # G.1 ToolOperation 六态。
 OP_CLAIMED = "CLAIMED"
@@ -157,8 +160,178 @@ def _assert_publish_path_contained(root: Path, rel: str, label: str) -> None:
         )
 
 
+def _sha256_fd(fd: int) -> str:
+    """从已打开的 fd 计算内容 digest（G3 补：digest 与后续复制强绑定
+    同一 fd，算 digest 与读内容之间无路径重解析窗口）。"""
+    digest = hashlib.sha256()
+    while True:
+        chunk = os.read(fd, 1 << 20)
+        if not chunk:
+            break
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _resolve_parent_fd(root_fd: int, rel: str, *, create_dirs: bool) -> tuple[int, str]:
+    """G3 补：从根 fd 逐段 openat（O_NOFOLLOW|O_DIRECTORY）到 rel 的父目录。
+
+    返回 (父目录 fd, 末段名)。父 fd 持有后，后续 read/rename/unlink 都
+    用 dir_fd 引用同一目录 inode——路径字符串不再被重新解析，CAS 与
+    apply 之间即使有人把目录换成 symlink 也不影响（3.txt G3 首选方案）。
+
+    fail-closed：
+    - 任一段是 symlink → openat(O_NOFOLLOW) ELOOP → RuntimeConflictError；
+    - 空段/点段/".." → 拒绝（防 DB 直改注入逃逸，openat 不跟 ".."）；
+    - 父目录不存在且 create_dirs → mkdirat 逐段创建（新建目录不可能是
+      symlink，创建后再 open O_NOFOLLOW 仍防并发替换）；
+    - 其余 OSError 上抛。
+    """
+    parts = rel.split("/")
+    if not parts or parts[0] == "" or any(seg in ("", ".", "..") for seg in parts):
+        raise RuntimeConflictError(f"发布路径非法段: {rel!r}")
+    fd = root_fd
+    for seg in parts[:-1]:
+        try:
+            fd = os.open(seg, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        except OSError as exc:
+            if create_dirs and exc.errno == errno.ENOENT:
+                os.mkdir(seg, dir_fd=fd)
+                fd = os.open(seg, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                continue
+            if exc.errno == errno.ELOOP:
+                raise RuntimeConflictError(f"发布路径 {rel!r} 含 symlink 组件: {seg}") from exc
+            raise
+    name = parts[-1]
+    if name in ("", ".", ".."):
+        raise RuntimeConflictError(f"发布路径非法末段: {rel!r}")
+    return fd, name
+
+
+def _exists_at(parent_fd: int, name: str, rel: str) -> bool:
+    """G3 补：父 fd 内 openat(O_NOFOLLOW) 探测末段是否存在。
+
+    不存在 → False；末段是 symlink → ELOOP → RuntimeConflictError
+    （G3：拒绝而非跟随，防 preimage 校验读外部）。
+    """
+    try:
+        probe = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    except OSError as exc:
+        if exc.errno == errno.ENOENT:
+            return False
+        if exc.errno == errno.ELOOP:
+            raise RuntimeConflictError(f"发布路径 {rel!r} 含 symlink 组件: {name}") from exc
+        raise
+    os.close(probe)
+    return True
+
+
+def _digest_at(parent_fd: int, name: str, rel: str) -> str:
+    """G3 补：父 fd 内 openat(O_NOFOLLOW) 打开末段并读 digest。
+
+    ENOENT → RuntimeConflictError（preimage 不存在）；末段 symlink →
+    ELOOP → RuntimeConflictError（不跟随）。
+    """
+    try:
+        probe = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    except OSError as exc:
+        if exc.errno == errno.ENOENT:
+            raise RuntimeConflictError(f"{RESOURCE_VERSION_CONFLICT}: {rel} 不存在/非文件") from exc
+        if exc.errno == errno.ELOOP:
+            raise RuntimeConflictError(f"发布路径 {rel!r} 含 symlink 组件: {name}") from exc
+        raise
+    try:
+        return _sha256_fd(probe)
+    finally:
+        os.close(probe)
+
+
+def _open_staged_file(parent_fd: int, name: str, rel: str) -> int:
+    """G3 补：打开 staging 文件（ENOENT → RuntimeConflictError 保持
+    「staging 缺失」语义；symlink → ELOOP → 拒绝）。"""
+    try:
+        return os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    except OSError as exc:
+        if exc.errno == errno.ENOENT:
+            raise RuntimeConflictError(f"staging 缺失发布文件: {rel}") from exc
+        if exc.errno == errno.ELOOP:
+            raise RuntimeConflictError(f"发布路径 {rel!r} 含 symlink 组件: {name}") from exc
+        raise
+
+
+def _write_store_from_fd(store_file: Path, src_fd: int) -> None:
+    """G2 补+G3 补：内容寻址落盘（同文件系统原子，H.5 同款写法）。
+
+    写 .tmp-{pid}-{uuid} 再 os.replace 到最终名：任何时刻 store 里要么
+    无该 digest 文件、要么是完整内容，绝无半写。数据源是已打开的 fd
+    （CAS 算 digest 的同一 fd）——复制内容与 digest 强绑定，staging
+    路径被并发替换也不影响。失败清理临时文件后上抛 → publish 停在
+    STAGING。
+    """
+    tmp = store_file.parent / f".tmp-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    try:
+        with open(tmp, "wb") as out:
+            os.lseek(src_fd, 0, os.SEEK_SET)
+            while True:
+                chunk = os.read(src_fd, 1 << 20)
+                if not chunk:
+                    break
+                out.write(chunk)
+        os.replace(tmp, store_file)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def directory_id_for_opaque(opaque_id: str, *, kind: str) -> str:
+    """G1 补（B.3）：opaque ID → 框架目录 ID。
+
+    ID 不直接成为物理路径权威：拼路径前先过 validate_opaque_id（拒绝式，
+    非法抛 OpaqueIdError，fail-closed），映射登记在 id_path_mapping。
+    directory_id 由框架决定——框架生成的 ID 形态本身即安全路径段
+    （subagent-1780127110-469bfd0e），且存量任务目录即按 ID 命名，直接
+    复用保证零破坏；目录名轮换时只改本函数 + 映射表迁移，不碰调用方。
+    """
+    return validate_opaque_id(opaque_id, kind=kind)
+
+
 class RuntimeOperationsMixin:
     # ------------------------------------------------------------- 三层 fence
+    def register_id_path(self, opaque_id: str, *, kind: str) -> str:
+        """B.3：登记 opaque ID → 目录 ID 映射（幂等）。
+
+        先拒绝式校验（非法 → OpaqueIdError 上抛，调用方 fail-closed）；
+        登记后返回 directory_id 供路径拼接。重复登记幂等，返回首次
+        登记的 directory_id。
+        """
+        directory_id = directory_id_for_opaque(opaque_id, kind=kind)
+        now = time.time()
+        with self._runtime_connection() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO id_path_mapping(opaque_id, id_kind,
+                                                      directory_id, created_at)
+                VALUES(?, ?, ?, ?)
+                """,
+                (opaque_id, kind, directory_id, now),
+            )
+            conn.commit()
+        return directory_id
+
+    def directory_id_for(self, opaque_id: str, *, kind: str) -> str:
+        """B.3：查映射；未登记先登记（路径拼接统一入口）。
+
+        ID 本身不直接当路径权威——查不到映射时先 register（校验+登记），
+        返回 DB 里固定下来的 directory_id。
+        """
+        with self._runtime_connection() as conn:
+            row = conn.execute(
+                "SELECT directory_id FROM id_path_mapping WHERE opaque_id = ?",
+                (opaque_id,),
+            ).fetchone()
+        if row is not None:
+            return str(row["directory_id"])
+        return self.register_id_path(opaque_id, kind=kind)
+
     def current_fence(self, agent_run_id: str) -> dict[str, Any]:
         """当前权威 fence 快照（F.6 校验基准，调用方不得自行拼装）。"""
         with self._runtime_connection() as conn:
@@ -795,6 +968,7 @@ class RuntimeOperationsMixin:
         staging_root: str | Path,
         shared_root: str | Path,
         crash_point: str = "",
+        artifact_store_root: str | Path | None = None,
     ) -> sqlite3.Row:
         """H.4-H.8：staging→共享唯一通道，preimage CAS + 原子 apply。
 
@@ -803,14 +977,22 @@ class RuntimeOperationsMixin:
         2. preimage CAS：逐项比对共享现文件 digest 与 manifest 声明的
            preimage（created=必须不存在；updated/deleted=必须存在且匹配），
            任一失配 → RESOURCE_VERSION_CONFLICT（测试 10）；
-        3. crash_point 注入（测试 13 用）：after_fence / after_preimage /
+        3. G2 补（H.8）：内容寻址落盘——apply 前把每个 postimage 复制进
+           artifact store（不可变、同 digest 单副本，写时先重算 staging
+           实际 digest 与 manifest 声明比对，防「声明 A 实为 B」）；
+           store 写入失败 → 停在 STAGING（无副作用，可重试）；
+        4. crash_point 注入（测试 13 用）：after_fence / after_preimage /
            mid_apply → 落 DIRTY 返回，不继续；
-        4. 逐项原子 apply：os.replace（同文件系统原子，H.5）；删除项 unlink；
+        5. 逐项原子 apply：fd-relative os.rename（G3 补，同文件系统原子
+           H.5，父目录 fd 在 CAS 前已固定，无 TOCTOU）；删除项 unlink；
            文件系统侧无法整树原子时库内 manifest 即 journal（H.6）；
-        5. 全部成功后 status=COMMITTED + committed_at（H.7），随后写
-           ArtifactRecord（H.8：发布完成才写）。
+        6. 全部成功后 status=COMMITTED + committed_at（H.7），随后写
+           ArtifactRecord（H.8：发布完成才写；主键独立 artifact_record_id，
+           content_digest 只是内容 hash，同内容不同路径各一条记录）。
 
         崩溃（真实进程死/注入）只可能观测到 COMMITTED 或 DIRTY/UNKNOWN。
+        artifact_store_root 缺省 = 共享区同级的 .artifacts（owner 级元数据，
+        不混入共享区交付内容）。
         """
         publish_row = self.get_publish(publish_id)
         if publish_row is None:
@@ -835,57 +1017,122 @@ class RuntimeOperationsMixin:
         staging = Path(staging_root).resolve()
         shared = Path(shared_root).resolve()
         # G3：执行级路径防线——每项（staging/shared 两侧）resolve 根包含 +
-        # symlink 组件拒绝。必须在 preimage CAS 之前：CAS 的 sha256_of/
-        # exists 也沿路径组件走，symlink 会把读/写带出共享根。
+        # symlink 组件拒绝（第一层防线，挡 DB 直改注入的越界路径）。随后
+        # G3 补 fd-relative 化：从根 fd 逐段 openat/O_NOFOLLOW，检查与使用
+        # 共用同一父 fd，路径不再重解析（TOCTOU 面消除）。
         for item in manifest:
             rel = str(item["path"])
             _assert_publish_path_contained(shared, rel, "共享根")
             if str(item["kind"]) != "deleted":
                 _assert_publish_path_contained(staging, rel, "staging")
-        # H.4：publish 前的 preimage CAS。
-        for item in manifest:
-            rel = str(item["path"])
-            target = shared / rel
-            expected = str(item["preimage_digest"] or "").strip()
-            kind = str(item["kind"])
-            if kind == "created":
-                if target.exists():
-                    raise RuntimeConflictError(
-                        f"{RESOURCE_VERSION_CONFLICT}: {rel} 已存在(预期 created)"
-                    )
-            else:
-                if not target.exists() or not target.is_file():
-                    raise RuntimeConflictError(
-                        f"{RESOURCE_VERSION_CONFLICT}: {rel} 不存在/非文件"
-                    )
-                actual = sha256_of(target)
-                if expected and actual != expected:
-                    raise RuntimeConflictError(
-                        f"{RESOURCE_VERSION_CONFLICT}: {rel} preimage digest 失配 "
-                        f"(期望 {expected[:12]}…,实际 {actual[:12]}…)"
-                    )
-        if crash_point == "after_preimage":
-            return self._set_publish_state(publish_id, PUB_DIRTY, {"stage": crash_point})
-        # H.6：逐项 apply（库内 manifest 即 journal；中间崩 → 部分项已写，
-        # 状态由 _set_publish_state 落 DIRTY，reconcile 用 journal 对账）。
-        applied = 0
+        open_fds: list[int] = []
         try:
+            # G3 补：持根 fd（O_NOFOLLOW 防根本身被换 symlink），逐段 openat
+            # 预解析每项父目录 fd；父 fd 固定后 CAS/apply 全程不重解析路径。
+            shared_fd = os.open(shared, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            staging_fd = os.open(staging, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            open_fds += [shared_fd, staging_fd]
+            resolved_items: list[tuple[int | None, str, int, str]] = []
             for item in manifest:
                 rel = str(item["path"])
                 kind = str(item["kind"])
                 if kind == "deleted":
-                    (shared / rel).unlink(missing_ok=True)
+                    s_parent: int | None = None
+                    s_name = ""
                 else:
-                    staged = staging / rel
-                    if not staged.exists() or not staged.is_file():
+                    try:
+                        s_parent, s_name = _resolve_parent_fd(staging_fd, rel, create_dirs=False)
+                    except FileNotFoundError:
                         raise RuntimeConflictError(
                             f"staging 缺失发布文件: {rel}"
+                        ) from None
+                    open_fds.append(s_parent)
+                try:
+                    d_parent, d_name = _resolve_parent_fd(
+                        shared_fd, rel, create_dirs=(kind != "deleted")
+                    )
+                except FileNotFoundError:
+                    raise RuntimeConflictError(
+                        f"{RESOURCE_VERSION_CONFLICT}: {rel} 不存在/非文件"
+                    ) from None
+                open_fds.append(d_parent)
+                resolved_items.append((s_parent, s_name, d_parent, d_name))
+            # H.4：preimage CAS（fd-relative：created 探测与 updated/deleted
+            # 读 digest 都走已固定的父 fd + openat(O_NOFOLLOW)，无路径重解析）。
+            for (s_parent, s_name, d_parent, d_name), item in zip(resolved_items, manifest):
+                rel = str(item["path"])
+                expected = str(item["preimage_digest"] or "").strip()
+                kind = str(item["kind"])
+                if kind == "created":
+                    if _exists_at(d_parent, d_name, rel):
+                        raise RuntimeConflictError(
+                            f"{RESOURCE_VERSION_CONFLICT}: {rel} 已存在(预期 created)"
                         )
-                    target = shared / rel
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(staged, target)  # 同文件系统原子（H.5）
+                else:
+                    actual = _digest_at(d_parent, d_name, rel)
+                    if expected and actual != expected:
+                        raise RuntimeConflictError(
+                            f"{RESOURCE_VERSION_CONFLICT}: {rel} preimage digest 失配 "
+                            f"(期望 {expected[:12]}…,实际 {actual[:12]}…)"
+                        )
+            if crash_point == "after_preimage":
+                return self._set_publish_state(publish_id, PUB_DIRTY, {"stage": crash_point})
+            # G2 补（H.8）：内容寻址落盘——发布即冻结。apply 前完成，失败停在
+            # STAGING（无副作用，可重试）。落盘内容以重算 digest 为权威：manifest
+            # 的 postimage_digest 是 staging 阶段算的，若 staging 被改则声明失配
+            # → fail-closed，绝不让「声明 A 实为 B」进 store/验收。
+            # G3 补：digest 计算与 store 复制共用同一 staging fd——「算的
+            # 内容」与「复制的内容」强绑定，无复制窗口。
+            if artifact_store_root is None:
+                artifact_store_root = Path(shared).parent / ".artifacts"
+            store_root = Path(artifact_store_root).resolve()
+            store_root.mkdir(parents=True, exist_ok=True)
+            for (s_parent, s_name, d_parent, d_name), item in zip(resolved_items, manifest):
+                if str(item["kind"]) == "deleted":
+                    continue
+                staged_fd = _open_staged_file(s_parent, s_name, str(item["path"]))
+                open_fds.append(staged_fd)
+                actual = _sha256_fd(staged_fd)
+                declared = str(item.get("postimage_digest") or "").strip()
+                if declared and actual != declared:
+                    raise RuntimeConflictError(
+                        f"postimage digest 失配(staging 被改): {str(item['path'])} "
+                        f"(声明 {declared[:12]}…,实际 {actual[:12]}…)"
+                    )
+                store_file = store_root / actual
+                if not store_file.exists():
+                    _write_store_from_fd(store_file, staged_fd)
+                item["_store_path"] = str(store_file)
+                item["_store_digest"] = actual
+            # H.6：逐项 apply（库内 manifest 即 journal；中间崩 → 部分项已写，
+            # 状态由 _set_publish_state 落 DIRTY，reconcile 用 journal 对账）。
+            # G3 补：fd-relative 原子替换——rename/unlink 都指已固定的父 fd
+            # 与末段名，目标目录/源目录不再按路径字符串解析。
+            applied = 0
+            for (s_parent, s_name, d_parent, d_name), item in zip(resolved_items, manifest):
+                rel = str(item["path"])
+                kind = str(item["kind"])
+                if kind == "deleted":
+                    try:
+                        os.unlink(d_name, dir_fd=d_parent)
+                    except FileNotFoundError:
+                        pass  # 现代码 unlink(missing_ok=True)
+                else:
+                    try:
+                        # 同文件系统原子（H.5）；父 fd 固定，不重解析路径。
+                        os.rename(s_name, d_name, src_dir_fd=s_parent, dst_dir_fd=d_parent)
+                    except OSError as exc:
+                        if exc.errno == errno.ENOENT:
+                            raise RuntimeConflictError(
+                                f"staging 缺失发布文件: {rel}"
+                            ) from exc
+                        raise
                     if int(item.get("permissions") or 0):
-                        target.chmod(int(item["permissions"]))
+                        tfd = os.open(d_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=d_parent)
+                        try:
+                            os.fchmod(tfd, int(item["permissions"]))
+                        finally:
+                            os.close(tfd)
                 applied += 1
                 if crash_point == "mid_apply" and applied == 1:
                     return self._set_publish_state(publish_id, PUB_DIRTY, {"stage": crash_point})
@@ -896,6 +1143,12 @@ class RuntimeOperationsMixin:
             return self._set_publish_state(
                 publish_id, PUB_DIRTY, {"stage": "apply", "error": str(exc)}
             )
+        finally:
+            for fd in open_fds:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
         # H.7/H.8：全量成功 → COMMITTED + ArtifactRecord。
         with self._runtime_connection() as conn:
             conn.execute(
@@ -909,22 +1162,29 @@ class RuntimeOperationsMixin:
             for item in manifest:
                 if str(item["kind"]) == "deleted":
                     continue
+                store_path = str(item.get("_store_path") or "")
+                content_digest = str(item.get("_store_digest") or "")
+                if not store_path or not content_digest:
+                    raise RuntimeConflictError(
+                        f"artifact 未落盘（发布流程缺陷）: {str(item['path'])}"
+                    )
                 conn.execute(
                     """
-                    INSERT OR IGNORE INTO artifact_records(artifact_id, attempt_id,
-                                                           agent_run_id, publish_id,
-                                                           rel_path, digest, size, created_at)
-                    VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO artifact_records(artifact_record_id, attempt_id,
+                                                 agent_run_id, publish_id, rel_path,
+                                                 content_digest, size, content_path,
+                                                 created_at)
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        str(item["postimage_digest"] or ""),
+                        new_id("artifact_record_id"),
                         str(publish_row["attempt_id"]),
                         str(publish_row["agent_run_id"]),
                         publish_id,
                         str(item["path"]),
-                        str(item["postimage_digest"] or ""),
-                        (shared / str(item["path"])).stat().st_size
-                        if (shared / str(item["path"])).exists() else 0,
+                        content_digest,
+                        Path(store_path).stat().st_size,
+                        store_path,
                         time.time(),
                     ),
                 )
