@@ -259,7 +259,8 @@ def test_text_adapter_rejects_unclosed_complete_block() -> None:
     assert TextToolProtocolAdapter().tool_calls(
         _request(SimpleNamespace(text=cases[0]), "text")
     ).calls == ()
-    # 好块 + 未闭合坏块:F10(J.5 安全前缀)只执行坏块之前的完整好块,坏块留痕违规
+    # 好块 + 未闭合坏块:G5(2026-08-10 用户裁决)任何协议错误 → 整轮零执行,
+    # 坏块之前的完整好块也不执行(不完整响应不能获得执行权)
     mixed = TextToolProtocolAdapter().tool_calls(
         _request(
             SimpleNamespace(
@@ -272,8 +273,7 @@ def test_text_adapter_rejects_unclosed_complete_block() -> None:
             "text",
         )
     )
-    assert len(mixed.calls) == 1, mixed
-    assert mixed.calls[0].arguments == {"command": "pytest -q"}, mixed
+    assert mixed.calls == (), mixed
     assert any("not closed" in v.detail for v in mixed.violations), mixed
 
 

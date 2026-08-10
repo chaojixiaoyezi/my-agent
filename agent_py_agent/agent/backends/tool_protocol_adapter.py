@@ -21,8 +21,6 @@ from .text_protocol_parser import (
     MAX_BLOCK_CHARS,
     MAX_RESPONSE_CHARS,
     MAX_TEXT_CALLS,
-    MAX_UNCLOSED_OPEN_MARKERS,
-    TextBlockScan,
     _TEXT_CLOSE,
     _TEXT_OPEN,
     scan_text_blocks,
@@ -279,25 +277,28 @@ class TextToolProtocolAdapter:
             )
         scan = scan_text_blocks(text)
         errors = _scan_errors(scan)
-        # J-6：未闭合 open 数 > 1 → 整轮拒绝，与流式 MalformedToolProtocolStreamAbort
-        # 对齐——同一响应里即使有合法好块也不执行（块序混乱即协议损坏）。
-        if scan.unclosed_count > MAX_UNCLOSED_OPEN_MARKERS:
+        # G5（用户裁决 2026-08-10）：任何协议错误 → 整轮零执行——未闭合、截断/
+        # JSON 损坏、fence 包裹、控制块混排、超限，任一出现即「不完整响应」，
+        # 本响应所有 text calls 都没有执行权（J.5 的 terminal violation 语义
+        # 扩展到所有协议错误；不再有「安全前缀」——坏块之前的完整好块也不执行）。
+        # 覆盖原「未闭合 > 1 整轮拒」（未闭合块本身即坏块，errors 非空）与
+        # 「第一个坏块之后截断」（安全前缀，已删除）。
+        if errors:
             return ProviderToolCallResult(violations=_scan_violations(errors, text))
-        # F10（J.5）：安全前缀——第一个坏块及其后的块（无论好坏）整体不执行，
-        # 只执行第一个坏块之前的完整好块（坏块位置之后的文本可能被坏块吞掉/
-        # 溢出，块序损坏即协议不可信）。terminal 违规（超长响应/控制块混排/
-        # 未闭合>1）已在上面整轮零执行。
-        payloads, errors = _safe_prefix_payloads(scan, errors)
+        payloads = list(scan.payloads)
         if len(payloads) > MAX_TEXT_CALLS:
-            # J-6：块数上限——超出的块违规不执行，之前的块照常执行（前缀语义）。
-            payloads = payloads[:MAX_TEXT_CALLS]
-            errors = [
-                *errors,
-                f"text response exceeds {MAX_TEXT_CALLS} tool calls; extra calls were not executed",
-            ]
-        violations = _scan_violations(errors, text)
-        if not payloads:
-            return ProviderToolCallResult(violations=violations)
+            # J-6 + G5：块数上限——超限即「不完整响应」，整轮拒绝，不执行任何块。
+            return ProviderToolCallResult(
+                violations=(
+                    ToolProtocolViolation(
+                        "PROTOCOL_VIOLATION",
+                        f"text response exceeds {MAX_TEXT_CALLS} tool calls; "
+                        "the whole response was not executed",
+                        "text",
+                        _protocol_evidence(text),
+                    ),
+                )
+            )
         calls: list[ToolCall] = []
         for index, payload in enumerate(payloads, start=1):
             tool_name = str(payload.pop("tool", "") or "").strip()
@@ -330,9 +331,9 @@ class TextToolProtocolAdapter:
                     ),
                 )
             )
-        # F10（J.5）：返回的 calls 恒为安全前缀——第一个坏块前的完整好块，
-        # 坏块及之后的块已在上游截断，违规并存返回留痕（调用方执行前缀+反馈）。
-        return ProviderToolCallResult(tuple(calls), violations)
+        # G5：走到这里 errors 必为空（全好块 + 不超限）——整轮零执行已在
+        # 上游按 errors 返回，calls 恒为全部好块。
+        return ProviderToolCallResult(tuple(calls))
 
 
 def anthropic_tool_choice(choice: ToolChoice) -> dict[str, str]:
@@ -392,44 +393,6 @@ def _text_control_block_violation(text: str) -> ToolProtocolViolation | None:
         "text response mixes a SUBAGENT_RESULT block with tool call blocks",
         "text",
         _protocol_evidence(text),
-    )
-
-
-def _safe_prefix_payloads(
-    scan: TextBlockScan,
-    errors: list[str],
-) -> tuple[list[dict[str, Any]], list[str]]:
-    """F10（J.5 安全前缀）：截断为第一个坏块之前的完整好块。
-
-    坏块 = 未闭合（close_index None）或解析失败（error 非 None）。坏块及其
-    后所有块（无论好坏）不执行——坏块位置之后的文本可能被坏块吞掉/溢出，
-    块序损坏即协议不可信；只执行第一个坏块之前的完整好块。全好块时原样
-    返回。截断本身作为一条违规留痕，让模型知道后续块未执行。
-    """
-    first_bad = next(
-        (block for block in scan.blocks if block.close_index is None or block.error is not None),
-        None,
-    )
-    if first_bad is None:
-        return list(scan.payloads), errors
-    position = next(
-        (index for index, block in enumerate(scan.blocks, start=1) if block is first_bad),
-        1,
-    )
-    trailing = sum(1 for block in scan.blocks if block.open_index >= first_bad.open_index)
-    if trailing > 1:
-        errors = [
-            *errors,
-            f"text response has a broken tool block at position {position}; "
-            "the broken block and all blocks after it were not executed",
-        ]
-    return (
-        [
-            block.payload
-            for block in scan.blocks
-            if block.open_index < first_bad.open_index and block.payload is not None
-        ],
-        errors,
     )
 
 

@@ -161,13 +161,9 @@ def tool_loop_response_decision(
         return ToolLoopResponseDecision("break", final, [], request.counters)
 
     adapted = _tool_calls_from_response(request)
-    if adapted.calls and adapted.violations:
-        # F10(J.5 安全前缀):adapter 已把 calls 截断为第一个坏块前的完整好块——
-        # 坏块及其后的块(无论好坏)整体不执行(块序损坏即协议不可信),terminal
-        # 违规(超长响应/控制块混排/未闭合>1)已整轮零执行。此处执行安全前缀
-        # +坏块留痕反馈,不整轮连坐前缀内的好块,避免任务原地重试烧 token。
-        _append_partial_violation_context(request, adapted.violations)
-        return _tool_calls_decision(request, list(adapted.calls))
+    # G5(2026-08-10 用户裁决):adapter 恒不返回 calls+violations 并存——任何
+    # 协议错误(未闭合/截断/JSON 损坏/fence/超限)即「不完整响应」,整轮零执行
+    # (calls==()),违规反馈走 _protocol_violation_decision;全好块才执行。
     if adapted.violations:
         return _protocol_violation_decision(request, adapted.violations)
     if adapted.calls:
@@ -220,35 +216,6 @@ def _native_tool_use_active(params: object) -> bool:
     from ..native_tool_protocol import native_tool_use_active
 
     return native_tool_use_active(params)
-
-
-def _append_partial_violation_context(
-    request: ToolLoopResponseDecisionRequest,
-    violations: tuple[ToolProtocolViolation, ...],
-) -> None:
-    """坏块留痕但不断轮:记录违规 trace,给模型轻量反馈(已执行的真实回执保留)。
-
-    F10(J.5):执行的是安全前缀——第一个坏块前的完整好块;坏块及其后的块
-    整体未执行,反馈里说清楚,模型才能知道后续块为什么没有回执。
-    """
-    payload = [item.to_dict() for item in violations]
-    state = getattr(request.params, "live_archive_state", None)
-    if isinstance(state, dict):
-        trace = state.setdefault("protocol_violation_trace", [])
-        if isinstance(trace, list):
-            trace.append(
-                {
-                    "turn_id": str(request.turn_id or ""),
-                    "violations": payload,
-                }
-            )
-    request.params.tool_context.append(
-        "[tool-protocol-violation]\n"
-        + json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        + "\n其中坏块及其后的工具块无效已忽略且未执行;本轮回执里出现的工具结果"
-        "均为真实执行(只执行了第一个坏块之前的完整块)。"
-        "请继续使用 [TOOL_CALL] 包裹单个 JSON 对象并闭合 [/TOOL_CALL]。"
-    )
 
 
 def _protocol_violation_decision(

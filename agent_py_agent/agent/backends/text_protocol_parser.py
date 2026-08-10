@@ -8,15 +8,17 @@ from __future__ import annotations
 - 流式 UI 转发（ToolBoundaryChunkFilter 增量 feed）
 都挂在这同一个确定性扫描器上，保证同一段文本无论怎么切分成网络 chunk，
 解析出的块、违规、未闭合计数完全一致（等价性天然成立——裁决永远对完整
-文本重扫，filter 只管 UI 转发什么）。
+文本重扫，filter 只管 UI 转发什么）。IncrementalTextToolParser 是 J.3 的
+「stream/final 共用同一解析器」落点：stream 的增量 feed 只是「累积 +
+重扫 scan_text_blocks」的封装，结构判定（open/close/未闭合/坏块）没有
+第二套实现。
 
-安全红线（2026-08-09 用户复核；F10 2026-08-09 收紧为安全前缀）：
-坏块永不执行——未闭合（[/TOOL_CALL] 缺失）与截断/JSON 损坏同罪，块边界
-标记是执行契约的一部分，漏闭合即未形成可执行调用。F10（J.5）起执行策略
-是安全前缀：第一个坏块及其后的块（无论好坏）整体不执行，只执行第一个坏
-块之前的完整好块——坏块位置之后的文本可能被坏块吞掉/溢出，块序损坏即
-协议不可信。scan 本身仍提取全部块（候选与坏块原因），截断是裁决层
-（tool_protocol_adapter）的策略。
+安全红线（2026-08-09 用户复核；G5 2026-08-10 收紧为整轮零执行）：
+任何协议错误 → 整轮零执行——未闭合（[/TOOL_CALL] 缺失）、截断/JSON
+损坏、fence 包裹、控制块混排、超限，任一出现即「不完整响应」，本响应
+所有 text calls 都没有执行权（J.5：terminal violation 时整轮无执行权；
+G5 扩展到所有协议错误）。scan 仍提取全部块（候选与坏块原因），零执行
+是裁决层（tool_protocol_adapter）的策略。
 """
 
 import json
@@ -31,7 +33,7 @@ _TEXT_CLOSE = "[/TOOL_CALL]"
 MAX_UNCLOSED_OPEN_MARKERS = 1  # 未闭合 open 数 > 1 → 整轮拒绝（好块也不执行）
 MAX_BLOCK_CHARS = 40_000  # 单个未闭合块体长度上限（finalize 级，仅未闭合块）
 MAX_RESPONSE_CHARS = 200_000  # 整个响应文本上限（terminal，整轮拒绝）
-MAX_TEXT_CALLS = 64  # 好块数量上限（超出部分违规不执行，之前好块照执行）
+MAX_TEXT_CALLS = 64  # 好块数量上限（G5：超限 → 整轮拒绝，不执行任何块）
 
 
 @dataclass(frozen=True)
@@ -64,8 +66,9 @@ def scan_text_blocks(text: str) -> TextBlockScan:
       = 普通文本回复（非违规）。
     - 字符串感知 close：[/TOOL_CALL] 只有当其前的块体 raw_decode 成完整 JSON
       对象（无残留）才算闭合；JSON 字符串里未闭合的 marker 文本被跳过。
-    - 坏块记 error 不阻塞扫描（继续找后续块，候选完整）；执行截断（安全前缀）
-      由裁决层 tool_protocol_adapter 决定，scan 本身不裁。
+    - 坏块记 error 不阻塞扫描（继续找后续块，候选完整）；整轮零执行由裁决层
+      tool_protocol_adapter 决定（G5：任何协议错误 → 本响应所有块都不执行），
+      scan 本身不裁。
     """
     if _TEXT_OPEN not in text and _TEXT_CLOSE not in text:
         return TextBlockScan((), 0)
@@ -81,7 +84,7 @@ def scan_text_blocks(text: str) -> TextBlockScan:
         close = _find_text_close(text, body_start)
         if close is None:
             # 未闭合 = 坏块，绝不执行；继续扫描后续块（坏块不阻塞扫描，
-            # 安全前缀截断在裁决层 tool_protocol_adapter）。
+            # 整轮零执行由裁决层 tool_protocol_adapter 决定）。
             unclosed += 1
             blocks.append(
                 ScannedTextBlock(
@@ -177,6 +180,52 @@ def scan_text_blocks(text: str) -> TextBlockScan:
     return TextBlockScan(tuple(blocks), unclosed)
 
 
+class IncrementalTextToolParser:
+    """统一增量文本工具协议解析器（J.3：stream 与 final 共用同一实现）。
+
+    扫描核心唯一：scan_text_blocks。final 裁决对完整文本调 complete(text)；
+    stream 用 feed(chunk) 累积，每次 feed 后对累积文本重扫取结构视图（
+    第一个块 open / 第一个完整块结束 / 未闭合计数 / 长写块体）。增量只是
+    「累积 + 重扫」的封装——任意 chunk 切分与 one-shot 的解析结果完全
+    一致（J.7 天然成立，因为裁决永远对完整文本重扫，视图只供 UI 转发与
+    流式中止使用，不参与执行决策）。重扫成本对 200KB 上限响应可忽略。
+    """
+
+    def __init__(self) -> None:
+        self._text = ""
+
+    def feed(self, chunk: str) -> None:
+        self._text += str(chunk or "")
+
+    @property
+    def text(self) -> str:
+        return self._text
+
+    def complete(self, text: str) -> TextBlockScan:
+        """final 全文解析（= scan_text_blocks，唯一扫描实现）。"""
+        return scan_text_blocks(str(text or ""))
+
+    def scan(self) -> TextBlockScan:
+        """对当前累积文本重扫（stream 视图的唯一结构来源）。"""
+        return scan_text_blocks(self._text)
+
+    def first_open_index(self) -> int | None:
+        """第一个块 open 的位置；无任何块 → None（可见文本转发边界）。"""
+        blocks = self.scan().blocks
+        return blocks[0].open_index if blocks else None
+
+    def next_close_at_or_after(self, cursor: int) -> int | None:
+        """第一个 close_index >= cursor 的块位置；无 → None。
+
+        与 first_complete_block_end 同一 scan，但按 cursor 过滤（长写
+        上限判定用：open 之后是否已有有效 close）。
+        """
+        for block in self.scan().blocks:
+            if block.close_index is not None and block.close_index >= cursor:
+                return block.close_index
+        return None
+
+
 def _find_text_close(text: str, body_start: int) -> int | None:
     cursor = body_start
     while True:
@@ -206,6 +255,7 @@ def _inline_json_tool_end_marker_valid(text: str, body_start: int, marker_pos: i
 
 
 __all__ = [
+    "IncrementalTextToolParser",
     "MAX_BLOCK_CHARS",
     "MAX_RESPONSE_CHARS",
     "MAX_TEXT_CALLS",

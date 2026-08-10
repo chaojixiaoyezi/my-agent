@@ -6,8 +6,10 @@
 2. 流式与全文对"未闭合 open 数 > 1 → 整轮拒绝"对齐（好块也不执行）。
 3. UI（filter 转发）永不出现块体原文与半截 marker（J-4）。
 4. J-6 常量接线：未闭合块体上限 / 响应总量 / 块数上限。
-5. F10（J.5）：terminal 违规整轮零执行；非 terminal 坏块按安全前缀——
-   只执行第一个坏块之前的完整好块，坏块及其后的块（无论好坏）不执行。
+5. G5（2026-08-10 用户裁决）：任何协议错误 → 整轮零执行——未闭合、截断/
+   JSON 损坏、fence 包裹、超限，任一出现即「不完整响应」，本响应所有 text
+   calls 都没有执行权（J.5 terminal 语义扩展到所有协议错误；不再有安全
+   前缀，坏块之前的完整好块也不执行）。
 """
 
 from __future__ import annotations
@@ -205,24 +207,24 @@ def test_adapter_more_than_one_unclosed_rejects_good_blocks_too() -> None:
     assert sum("not closed" in v.detail for v in result.violations) == 2
 
 
-def test_adapter_one_unclosed_safe_prefix_executes_prior_good_blocks() -> None:
-    # F10（J.5 安全前缀）：未闭合 ≤ 1 不整轮拒；坏块（此处为末尾未闭合块）及其后
-    # 不执行，只执行第一个坏块之前的完整好块。
+def test_adapter_any_unclosed_block_rejects_whole_response() -> None:
+    # G5（用户裁决）：任何协议错误 → 整轮零执行——完整好块 + 末尾未闭合块，
+    # 前面的完整好块也不执行（不完整响应不能获得执行权）。
     text = (
         '[TOOL_CALL]{"tool":"run_command","command":"pytest -q"}[/TOOL_CALL]'
         '[TOOL_CALL]{"tool":"run_command","command":"ls"}'
     )
     result = TextToolProtocolAdapter().tool_calls(_request(SimpleNamespace(text=text)))
 
-    assert len(result.calls) == 1
-    assert result.calls[0].arguments == {"command": "pytest -q"}
+    assert result.calls == ()
     assert any("not closed" in v.detail for v in result.violations)
 
 
-def test_adapter_broken_block_stops_later_blocks() -> None:
-    # F10（J.5 安全前缀）：第一个坏块（Markdown fence 包裹）后的完好块也不执行——
-    # 坏块位置之后的文本可能被坏块吞掉/溢出，块序损坏即协议不可信。只执行
-    # 第一个坏块之前的完整好块，并留痕说明后续块未执行。
+def test_adapter_any_broken_block_rejects_whole_response() -> None:
+    # G5（用户裁决）：任何协议错误 → 整轮零执行——fence 包裹的坏块存在时，
+    # 它之前的完整好块和之后的完好块都不执行（坏块位置之后的文本可能被坏块
+    # 吞掉/溢出，块序损坏即协议不可信；坏块之前的完整好块同样不执行，
+    # 因为响应整体「不完整」）。
     text = (
         '[TOOL_CALL]{"tool":"run_command","command":"pytest -q"}[/TOOL_CALL]\n'
         "```\n"
@@ -232,25 +234,25 @@ def test_adapter_broken_block_stops_later_blocks() -> None:
     )
     result = TextToolProtocolAdapter().tool_calls(_request(SimpleNamespace(text=text)))
 
-    assert [call.arguments for call in result.calls] == [{"command": "pytest -q"}]
+    assert result.calls == ()
     details = [v.detail for v in result.violations]
     assert any("Markdown fences" in detail for detail in details)
-    assert any(
-        "broken tool block at position 2" in detail and "not executed" in detail
-        for detail in details
-    ), details
 
 
 def test_adapter_enforces_text_call_limit() -> None:
-    # J-6：块数上限——超出的块违规不执行，之前的好块照常执行。
+    # J-6 + G5：块数上限——超限即「不完整响应」，整轮拒绝，不执行任何块。
     text = "".join(
         '[TOOL_CALL]{"tool":"run_command","command":"echo %d"}[/TOOL_CALL]' % i
         for i in range(MAX_TEXT_CALLS + 1)
     )
     result = TextToolProtocolAdapter().tool_calls(_request(SimpleNamespace(text=text)))
 
-    assert len(result.calls) == MAX_TEXT_CALLS
-    assert any("extra calls were not executed" in v.detail for v in result.violations)
+    assert result.calls == ()
+    assert any(
+        f"exceeds {MAX_TEXT_CALLS} tool calls" in v.detail
+        and "whole response was not executed" in v.detail
+        for v in result.violations
+    )
 
 
 def test_adapter_enforces_unclosed_block_chars() -> None:
