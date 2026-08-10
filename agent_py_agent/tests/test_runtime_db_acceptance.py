@@ -282,6 +282,50 @@ def test_snapshot_rejects_bad_relpath(repo, chain, tmp_path):
     assert load_artifact_snapshot(records=records, shared_root=shared) is None
 
 
+def test_snapshot_materialize_isolates_from_live(repo, chain, tmp_path):
+    """H.9：物化副本与 live workspace 解耦 —— live 篡改不影响物化副本。"""
+    shared = _publish_artifact(repo, chain, tmp_path, "report.html", GOOD_HTML)
+    snap = _validated_snapshot(repo, chain, shared)
+    materialized = snap.materialize(tmp_path / "materialized")
+    # live 被篡改 → 原 snapshot 从此失效，但物化副本仍是验证时点的内容。
+    (shared / "report.html").write_text("tampered", encoding="utf-8")
+    assert load_artifact_snapshot(
+        records=repo.artifact_records_for_attempt(chain["attempt_id"]),
+        shared_root=shared,
+    ) is None
+    assert (materialized.path_for("report.html")).read_text(encoding="utf-8") == GOOD_HTML
+    assert (tmp_path / "materialized" / "report.html").read_text(encoding="utf-8") == GOOD_HTML
+
+
+def test_runner_verifies_materialized_copy_when_live_tampered(repo, chain, tmp_path):
+    """H.9：runner 只读物化副本 —— 验证后 live 被改也不影响验收结果。
+
+    TOCTOU 修复前：load_artifact_snapshot 校验通过后 runner 直接读 live
+    shared root，工具在验证与执行之间改写 live 会让验收读到半成品。
+    """
+    shared = _publish_artifact(repo, chain, tmp_path, "report.html", GOOD_HTML)
+    snap = _validated_snapshot(repo, chain, shared)
+    materialized = snap.materialize(tmp_path / "materialized")
+    # 篡改 live（原 snapshot 已失效）：runner 若读 live 就会 FAILED/BLOCKED。
+    (shared / "report.html").write_text("<div>half-written</div>", encoding="utf-8")
+    contract = _compile(
+        repo, chain, {"assertions": [{"validator": "artifact_acceptance", "artifact_kind": "html"}]}
+    )
+    _freeze(repo, chain, contract)
+    entries = {e.name: e for e in [resolve_validator("artifact_acceptance")]}
+    results = run_contract_validation(
+        repo=repo,
+        attempt_id=chain["attempt_id"],
+        agent_run_id=chain["agent_run_id"],
+        contract=contract.compiled,
+        snapshot=materialized,
+        owner_home=tmp_path,
+        entries=entries,
+        contract_id=contract.contract_id,
+    )
+    assert results[0]["status"] == "VERIFIED"
+
+
 # ------------------------------------------------------------------- runner
 def test_runner_verified_ledger(repo, chain, tmp_path):
     """A.8/§6：required 断言全过 → VERIFIED；operation 账全字段留痕。"""

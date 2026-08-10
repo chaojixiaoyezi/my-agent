@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from ..contracts.artifact_acceptance import (
@@ -48,7 +50,37 @@ def run_contract_validation(
     entries: dict[str, ValidatorEntry],
     contract_id: str = "",
 ) -> list[dict[str, Any]]:
-    """执行契约全部 required 断言；每条结果带 operation_id（可审计）。"""
+    """执行契约全部 required 断言；每条结果带 operation_id（可审计）。
+
+    H.9：先把已验证 snapshot 物化到独立临时目录，全部 validator 只读
+    物化副本 —— live workspace 在验证后、执行前被改（TOCTOU）不影响
+    验收输入；物化目录随本函数结束自动清理。
+    """
+    with tempfile.TemporaryDirectory(prefix="artifact-snapshot-") as tmp:
+        materialized = snapshot.materialize(Path(tmp))
+        return _run_assertions_against(
+            repo=repo,
+            attempt_id=attempt_id,
+            agent_run_id=agent_run_id,
+            contract=contract,
+            snapshot=materialized,
+            owner_home=owner_home,
+            entries=entries,
+            contract_id=contract_id,
+        )
+
+
+def _run_assertions_against(
+    *,
+    repo: Any,
+    attempt_id: str,
+    agent_run_id: str,
+    contract: dict[str, Any],
+    snapshot: ArtifactSnapshot,
+    owner_home: Any,
+    entries: dict[str, ValidatorEntry],
+    contract_id: str = "",
+) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     for assertion in contract.get("assertions", []):
         ref = str(assertion.get("validator_ref") or "")

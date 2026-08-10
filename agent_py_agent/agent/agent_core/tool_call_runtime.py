@@ -119,8 +119,47 @@ def _audit_source_worker_tool_scope_result(
 # LLM: 最终 Tool Gateway 调用必须携带模型看到的同一 run 快照，不能在执行时重新扩大工具宇宙。
 # 函数用途: 执行并审计一个已追踪工具调用，同时维护任务晋升、幂等记录和被动验收事实。
 def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
+    from .authority_fence import (
+        authority_context,
+        close_authority_operation,
+        open_authority_operation,
+    )
     from .tool_call_archive_record import archive_tool_output_projection
     from .tool_loop.recovery import runtime_run_scope
+
+    # F7：权威 fence 主链接线 —— handler 前校验（attempt 仍是 current
+    # pointer）+ 完成后 settle；无权威库时 authority=None 静默跳过。
+    authority = authority_context(runtime_request.agent, runtime_request.request.params)
+    authority_state: dict[str, str] = {}
+
+    def pre_handler_gate(call):
+        guard = _pre_handler_gate(replace(runtime_request, call=call))
+        if guard is not None:
+            return guard
+        if authority is None:
+            return None
+        repo, agent_run_id, attempt_id = authority
+        operation_id, block_reason = open_authority_operation(
+            repo,
+            agent_run_id=agent_run_id,
+            attempt_id=attempt_id,
+            tool_name=call.tool_name,
+        )
+        if block_reason:
+            return apply_tool_execution_facts(
+                ToolHandlerOutcome(
+                    call.tool_name,
+                    False,
+                    block_reason,
+                    error_code="TOOL_AUTHORITY_FENCE",
+                    failure_stage=ToolFailureStage.RUNTIME_GATE.value,
+                    handler_executed=False,
+                ),
+                failure_stage=ToolFailureStage.RUNTIME_GATE,
+                handler_executed=False,
+            )
+        authority_state["operation_id"] = operation_id
+        return None
 
     one_shot_keys = _one_shot_tool_call_keys(runtime_request.payload)
     execution = runtime_request.agent.tools.execute_tool(
@@ -140,9 +179,7 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
         },
         cancellation_token=getattr(runtime_request.request.params, "cancellation_token", None),
         required_action=_required_action_for_call(runtime_request),
-        pre_handler_gate=lambda call: _pre_handler_gate(
-            replace(runtime_request, call=call)
-        ),
+        pre_handler_gate=pre_handler_gate,
         output_archiver=lambda call, outcome: archive_tool_output_projection(
             runtime_request.agent,
             runtime_request.request.params,
@@ -151,6 +188,13 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
         ),
     )
     result = execution.result
+    if authority is not None and authority_state.get("operation_id"):
+        repo, _agent_run_id, _attempt_id = authority
+        close_authority_operation(
+            repo,
+            authority_state["operation_id"],
+            ok=bool(result.ok),
+        )
     executable_payload = {
         "tool": execution.call.tool_name,
         "call_id": execution.call.call_id,

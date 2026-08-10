@@ -482,7 +482,7 @@ class RuntimeDeliveryMixin:
         now = now if now is not None else time.time()
         with self.transaction() as conn:
             run = conn.execute(
-                "SELECT task_run_id, status, closed_at, current_contract_id FROM task_runs "
+                "SELECT task_run_id, task_id, status, closed_at, current_contract_id FROM task_runs "
                 "WHERE task_run_id = ?",
                 (task_run_id,),
             ).fetchone()
@@ -495,28 +495,51 @@ class RuntimeDeliveryMixin:
                     "closed_at": float(run["closed_at"]),
                 }
             # ---- acceptance 轴（I.11）：required 全 VERIFIED 才可交付。
+            # 对照对象是契约冻结时要求的 required assertion 集合（compiled
+            # 的 assertions 恒为 I.5 升格后的 required 集合，非空），而不是
+            # validator_operations 里已跑过的行 —— 只跑了子集不能通过。
             contract_id = str(run["current_contract_id"] or "")
-            acceptance_ok = False
+            required_refs: set[str] = set()
             if contract_id:
-                rows = conn.execute(
-                    "SELECT validator_ref, status FROM validator_operations "
+                c_row = conn.execute(
+                    "SELECT compiled_json FROM acceptance_contracts "
                     "WHERE contract_id = ?",
                     (contract_id,),
-                ).fetchall()
-                verified_refs = {
-                    str(row["validator_ref"]) for row in rows if row["status"] == "VERIFIED"
-                }
-                all_refs = {
-                    str(row["validator_ref"]) for row in rows
-                }
-                if all_refs and verified_refs == all_refs:
-                    acceptance_ok = True
-            if not acceptance_ok:
+                ).fetchone()
+                if c_row is not None:
+                    compiled = json.loads(c_row["compiled_json"] or "{}")
+                    required_refs = {
+                        str(a.get("validator_ref") or "")
+                        for a in compiled.get("assertions", [])
+                        if a.get("required") and a.get("validator_ref")
+                    }
+            # 无契约/契约无 required 断言 → 不可交付（fail-closed）。
+            if not required_refs:
+                raise RuntimeConflictError(
+                    f"{NOT_VERIFIED}: task_run {task_run_id} 无 required "
+                    f"acceptance（contract={contract_id or '无契约'}），不可成功交付"
+                )
+            rows = conn.execute(
+                "SELECT validator_ref, status FROM validator_operations "
+                "WHERE contract_id = ?",
+                (contract_id,),
+            ).fetchall()
+            verified_refs = {
+                str(row["validator_ref"]) for row in rows if row["status"] == "VERIFIED"
+            }
+            if not required_refs <= verified_refs:
+                missing = sorted(required_refs - verified_refs)
                 raise RuntimeConflictError(
                     f"{NOT_VERIFIED}: task_run {task_run_id} 的 required acceptance "
-                    f"未全部 VERIFIED（contract={contract_id or '无契约'}），不可成功交付"
+                    f"未全部 VERIFIED（contract={contract_id}，缺失: {missing}），不可成功交付"
                 )
             # ---- delivery 轴（K.5）：最终用户消息 effect_key UNIQUE 只入队一次。
+            # owner 取 tasks 表真实 owner（outbox owner 供投递方按身份回执）。
+            owner_row = conn.execute(
+                "SELECT owner_id FROM tasks WHERE task_id = ?",
+                (str(run["task_id"]),),
+            ).fetchone()
+            owner_id = str(owner_row["owner_id"]) if owner_row is not None else ""
             final_key = f"final:{task_run_id}"
             if final_message is not None:
                 conn.execute(
@@ -530,7 +553,7 @@ class RuntimeDeliveryMixin:
                     (
                         new_id("outbox_id"),
                         final_key,
-                        str(run["task_run_id"]),
+                        owner_id,
                         task_run_id,
                         json.dumps(final_message, ensure_ascii=False, sort_keys=True),
                         now,

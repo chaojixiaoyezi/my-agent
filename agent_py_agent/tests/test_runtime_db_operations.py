@@ -87,6 +87,99 @@ def test_fence_operation_generation_invalid(ctx):
         )
 
 
+def test_fence_operation_generation_must_match_own_row(ctx):
+    """F.6：tool_operation_generation 必须等于操作行自己的 generation。"""
+    chain, repo = ctx
+    op = repo.create_tool_operation(
+        agent_run_id=chain["agent_run_id"],
+        attempt_id=chain["attempt_id"],
+        operation_type="write",
+    )
+    row = repo.get_operation(op["operation_id"])
+    own = int(row["tool_operation_generation"])
+    assert own == 1
+    # 代数 = 行自身值 → 放行。
+    repo.verify_fence(
+        agent_run_id=chain["agent_run_id"],
+        attempt_id=chain["attempt_id"],
+        tool_operation_id=op["operation_id"],
+        tool_operation_generation=own,
+    )
+    # 代数 ≠ 行自身值 → 拒绝（拿错代数防不了旧操作重放）。
+    with pytest.raises(RuntimeConflictError, match="≠ 行自身"):
+        repo.verify_fence(
+            agent_run_id=chain["agent_run_id"],
+            attempt_id=chain["attempt_id"],
+            tool_operation_id=op["operation_id"],
+            tool_operation_generation=own + 1,
+        )
+
+
+def test_fence_operation_generation_requires_operation_id(ctx):
+    """F.6：只有代数没有操作行 → 无从对照自身代数，拒绝凭空代数。"""
+    chain, repo = ctx
+    with pytest.raises(RuntimeConflictError, match="必须配 tool_operation_id"):
+        repo.verify_fence(
+            agent_run_id=chain["agent_run_id"],
+            attempt_id=chain["attempt_id"],
+            tool_operation_generation=3,
+        )
+
+
+def test_fence_unknown_operation_id_rejected(ctx):
+    chain, repo = ctx
+    with pytest.raises(RuntimeConflictError, match="tool_operation 不存在"):
+        repo.verify_fence(
+            agent_run_id=chain["agent_run_id"],
+            attempt_id=chain["attempt_id"],
+            tool_operation_id="tool_call:nope",
+        )
+
+
+def test_fence_operation_from_other_run_rejected(ctx):
+    """F.6：操作行属于其它 run → 拒绝（跨 run 重放）。"""
+    chain, repo = ctx
+    other = repo.record_run_creation(owner_id=OWNER, run_id="run-other", goal="g2")
+    op = repo.create_tool_operation(
+        agent_run_id=other["agent_run_id"],
+        attempt_id=other["attempt_id"],
+        operation_type="write",
+    )
+    with pytest.raises(RuntimeConflictError, match="属于其它 run"):
+        repo.verify_fence(
+            agent_run_id=chain["agent_run_id"],
+            attempt_id=chain["attempt_id"],
+            tool_operation_id=op["operation_id"],
+            tool_operation_generation=1,
+        )
+
+
+def test_fence_operation_stale_attempt_rejected(ctx):
+    """F.6：操作行挂在旧 attempt（已接管）→ 拒绝（旧行不获权）。"""
+    chain, repo = ctx
+    op = repo.create_tool_operation(
+        agent_run_id=chain["agent_run_id"],
+        attempt_id=chain["attempt_id"],
+        operation_type="write",
+    )
+    new = repo.create_attempt(chain["agent_run_id"])  # 接管：旧 attempt 下线
+    with pytest.raises(RuntimeConflictError, match="已不是 current pointer"):
+        repo.verify_fence(
+            agent_run_id=chain["agent_run_id"],
+            attempt_id=chain["attempt_id"],
+            tool_operation_id=op["operation_id"],
+            tool_operation_generation=1,
+        )
+    # 新 attempt 下同一操作行也不获权（行挂旧 attempt）。
+    with pytest.raises(RuntimeConflictError, match="属于其它 attempt"):
+        repo.verify_fence(
+            agent_run_id=chain["agent_run_id"],
+            attempt_id=new["attempt_id"],
+            tool_operation_id=op["operation_id"],
+            tool_operation_generation=1,
+        )
+
+
 def test_takeover_old_publish_rejected(ctx, tmp_path):
     """测试 9：takeover A 后旧 publish 拒绝（fence 在 publish 点重验）。"""
     chain, repo = ctx
@@ -465,6 +558,55 @@ def test_publish_happy_path(ctx, tmp_path):
     artifacts = repo.artifacts_for_attempt(chain["attempt_id"])
     assert [a["rel_path"] for a in artifacts] == ["a.txt"]
     assert artifacts[0]["digest"] == sha256_of(shared / "a.txt")
+
+
+@pytest.mark.parametrize(
+    "evil_path",
+    [
+        "../outside.txt",
+        "a/../../outside.txt",
+        "../../etc/passwd",
+        "a/../b.txt",
+        "/abs/path.txt",
+        "a//b.txt",
+        "a\\b.txt",
+        "a/./b.txt",
+        "a/\tb.txt",
+    ],
+)
+def test_publish_manifest_rejects_escaping_paths(ctx, evil_path):
+    """H.3/B.2：manifest 路径拒绝绝对路径、点段、反斜杠与控制字符（发布逃逸）。"""
+    chain, repo = ctx
+    pub = repo.create_publish(
+        binding_id="binding-1",
+        agent_run_id=chain["agent_run_id"],
+        attempt_id=chain["attempt_id"],
+        workspace_epoch=1,
+    )
+    with pytest.raises(RuntimeConflictError, match="manifest 路径非法"):
+        repo.stage_publish_manifest(
+            pub["publish_id"],
+            [{"path": evil_path, "kind": "updated"}],
+        )
+
+
+def test_publish_manifest_accepts_normal_relative_paths(ctx):
+    chain, repo = ctx
+    pub = repo.create_publish(
+        binding_id="binding-1",
+        agent_run_id=chain["agent_run_id"],
+        attempt_id=chain["attempt_id"],
+        workspace_epoch=1,
+    )
+    repo.stage_publish_manifest(
+        pub["publish_id"],
+        [
+            {"path": "output/report.md", "kind": "updated"},
+            {"path": "src/pkg/mod.go", "kind": "created"},
+        ],
+    )
+    row = repo.get_publish(pub["publish_id"])
+    assert row["manifest_json"] != "[]"
 
 
 def test_publish_preimage_conflict(ctx, tmp_path):

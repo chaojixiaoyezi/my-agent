@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..common.json_io import read_json_object_report, write_json_object
+from ..common.opaque_id import validate_opaque_id
 from ..runtime_errors import runtime_error_report
 
 if TYPE_CHECKING:
@@ -22,7 +23,8 @@ class SessionManager:
         self._session_root.mkdir(parents=True, exist_ok=True)
 
     def _get_session_path(self, session_id: str) -> Path:
-        """获取会话文件路径。"""
+        """获取会话文件路径（B.2：ID 拼路径前必须过拒绝式校验）。"""
+        validate_opaque_id(session_id, kind="session_id")
         return self._session_root / session_id / "session.json"
 
     def create_session(
@@ -110,7 +112,7 @@ class SessionManager:
         return sessions, load_errors
 
     def delete_session(self, session_id: str) -> bool:
-        session_dir = self._session_root / session_id
+        session_dir = self._get_session_path(session_id).parent
         if not session_dir.exists():
             return False
 

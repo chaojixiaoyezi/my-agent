@@ -224,6 +224,131 @@ def test_runtime_ledger_disk_io_error_does_not_crash_tool_loop():
     assert _DiskIOStore.calls >= 1  # 尝试写了台账、但磁盘 IO 错没把任务崩掉
 
 
+def test_runtime_ledger_appends_authority_event(tmp_path):
+    """A.3：工具完成事件写入权威 runtime_events（追到 attempt/task_run）。"""
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+
+    repo = RuntimeRepository(tmp_path / "home" / "runtime.db")
+    chain = repo.record_run_creation(owner_id="local/main", run_id="run-1", goal="g")
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    agent = SimpleNamespace(
+        local_store=store,
+        subagents=SimpleNamespace(runtime_db=repo),
+    )
+
+    persist_tool_runtime_ledger(
+        agent,
+        {
+            "run_id": "run-1",
+            "task_id": "task-1",
+            "tool": "write_file",
+            "ok": True,
+            "operation_id": "op-1",
+            "attempt_id": chain["attempt_id"],
+            "runtime_gate": {"gate": "tool_execution", "allowed": True},
+        },
+    )
+
+    events = [
+        e
+        for e in repo.events_for_attempt(chain["attempt_id"])
+        if e["event_type"] == "tool_completed"
+    ]
+    assert len(events) == 1
+    event = events[0]
+    assert event["agent_run_id"] == chain["agent_run_id"]
+    assert event["task_run_id"] == chain["task_run_id"]
+    assert event["payload"]["operation_id"] == "op-1"
+    assert event["payload"]["tool"] == "write_file"
+    assert event["payload"]["ok"] is True
+    assert event["payload"]["status"] == "done"
+
+
+def test_runtime_ledger_appends_failed_event_with_status(tmp_path):
+    """A.3：失败工具事件同样入权威流，status=failed。"""
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+
+    repo = RuntimeRepository(tmp_path / "home" / "runtime.db")
+    chain = repo.record_run_creation(owner_id="local/main", run_id="run-1", goal="g")
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    agent = SimpleNamespace(
+        local_store=store,
+        subagents=SimpleNamespace(runtime_db=repo),
+    )
+
+    persist_tool_runtime_ledger(
+        agent,
+        {
+            "run_id": "run-1",
+            "task_id": "task-1",
+            "tool": "write_file",
+            "ok": False,
+            "error_code": "TOOL_ERROR",
+            "operation_id": "op-2",
+            "attempt_id": chain["attempt_id"],
+            "runtime_gate": {"gate": "tool_execution", "allowed": True},
+        },
+    )
+
+    events = [
+        e
+        for e in repo.events_for_attempt(chain["attempt_id"])
+        if e["event_type"] == "tool_completed"
+    ]
+    assert len(events) == 1
+    assert events[0]["payload"]["ok"] is False
+    assert events[0]["payload"]["error_code"] == "TOOL_ERROR"
+    assert events[0]["payload"]["status"] == "failed"
+
+
+def test_runtime_ledger_without_authority_skips_silently(tmp_path):
+    """无权威库（无 home 上下文）→ 不写事件不崩，legacy 台账照写。"""
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    agent = SimpleNamespace(local_store=store)  # 没有 subagents
+
+    persist_tool_runtime_ledger(
+        agent,
+        {
+            "run_id": "run-1",
+            "task_id": "task-1",
+            "tool": "write_file",
+            "ok": True,
+            "operation_id": "op-1",
+            "runtime_gate": {"gate": "tool_execution", "allowed": True},
+        },
+    )
+
+    assert len(store.list_runtime_gate_ledger(run_id="run-1")) == 1
+
+
+class _BrokenAuthorityRepo:
+    def agent_run_for_run_id(self, run_id):
+        raise sqlite3.OperationalError("disk I/O error")
+
+
+def test_runtime_ledger_authority_write_error_does_not_crash_tool_loop(tmp_path):
+    """A.3 写入失败是尽力而为：权威事件丢一条可以、崩任务不行。"""
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    agent = SimpleNamespace(
+        local_store=store,
+        subagents=SimpleNamespace(runtime_db=_BrokenAuthorityRepo()),
+    )
+
+    persist_tool_runtime_ledger(
+        agent,
+        {
+            "run_id": "run-1",
+            "task_id": "task-1",
+            "tool": "write_file",
+            "ok": True,
+            "operation_id": "op-1",
+            "runtime_gate": {"gate": "tool_execution", "allowed": True},
+        },
+    )
+
+    assert len(store.list_runtime_gate_ledger(run_id="run-1")) == 1
+
+
 def test_execute_traced_tool_call_does_not_inject_audit_as_authority(tmp_path):
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
     store.record_runtime_gate_ledger(

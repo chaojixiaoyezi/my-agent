@@ -275,3 +275,92 @@ def test_closeout_final_message_null_ok(repo, chain):
     assert r["already_closed"] is False
     assert r["final_effect_key"] == ""
     assert len(repo.list_outbox(scope="final_message")) == 0
+
+
+# ------------------------------------------------------------- F3：契约 required 集合
+def _freeze_two_required(repo, chain):
+    """契约要求 2 条 required，只 VERIFIED 第 1 条（artifact_acceptance）。"""
+    contract = compile_acceptance_contract(
+        task_run_id=chain["task_run_id"],
+        attempt_id=chain["attempt_id"],
+        proposed={
+            "assertions": [
+                {"validator": "artifact_acceptance", "artifact_kind": "html"},
+                {"validator": "static_site_check", "artifact_kind": "html"},
+            ]
+        },
+    )
+    repo.freeze_contract(
+        contract_id=contract.contract_id,
+        task_run_id=chain["task_run_id"],
+        attempt_id=chain["attempt_id"],
+        compiled=contract.compiled,
+        digest=contract.digest,
+        inert_legacy=contract.inert_legacy,
+    )
+    op = repo.create_validator_operation(
+        attempt_id=chain["attempt_id"],
+        agent_run_id=chain["agent_run_id"],
+        contract_id=contract.contract_id,
+        validator_ref="artifact_acceptance",
+        validator_kind="pure",
+        code_digest="d",
+        artifact_digests=[],
+    )
+    repo.settle_validator_operation(op, status="VERIFIED", stdout_text="ok", exit_code=0)
+    return contract
+
+
+def test_closeout_rejects_partial_required_set(repo, chain):
+    """I.11：契约要求 2 条 required 只 VERIFIED 1 条 → NOT_VERIFIED 拒绝。
+
+    对照对象必须是契约冻结的 required assertion 集合，而不是
+    validator_operations 里已跑过的行 —— 旧实现 all_refs == verified_refs
+    只看已执行子集，只跑了部分会错误放行。
+    """
+    contract = _freeze_two_required(repo, chain)
+    with pytest.raises(RuntimeConflictError, match=NOT_VERIFIED):
+        repo.closeout_task_run(task_run_id=chain["task_run_id"], final_message={"text": "x"})
+    # 状态未动：契约要求的第 2 条补齐 VERIFIED 后才允许收口。
+    assert repo.get_task_run(chain["task_run_id"])["status"] != "done"
+    op2 = repo.create_validator_operation(
+        attempt_id=chain["attempt_id"],
+        agent_run_id=chain["agent_run_id"],
+        contract_id=contract.contract_id,
+        validator_ref="static_site_check",
+        validator_kind="pure",
+        code_digest="d",
+        artifact_digests=[],
+    )
+    repo.settle_validator_operation(op2, status="VERIFIED", stdout_text="ok", exit_code=0)
+    r = repo.closeout_task_run(task_run_id=chain["task_run_id"], final_message={"text": "x"})
+    assert r["acceptance_ok"] is True
+
+
+def test_closeout_extra_runs_do_not_substitute_required(repo, chain):
+    """I.11：跑过的行再多，缺契约 required 项仍拒绝（集合包含关系而非等价）。"""
+    contract = _freeze_two_required(repo, chain)
+    extra = repo.create_validator_operation(
+        attempt_id=chain["attempt_id"],
+        agent_run_id=chain["agent_run_id"],
+        contract_id=contract.contract_id,
+        validator_ref="document_acceptance",
+        validator_kind="pure",
+        code_digest="d",
+        artifact_digests=[],
+    )
+    repo.settle_validator_operation(extra, status="VERIFIED", stdout_text="ok", exit_code=0)
+    with pytest.raises(RuntimeConflictError, match=NOT_VERIFIED):
+        repo.closeout_task_run(task_run_id=chain["task_run_id"], final_message={"text": "x"})
+
+
+def test_closeout_outbox_owner_is_real_task_owner(repo, chain):
+    """K.4：outbox owner_id 取 tasks 表真实 owner，不是 task_run_id。"""
+    _freeze_and_verify(repo, chain)
+    repo.closeout_task_run(
+        task_run_id=chain["task_run_id"], final_message={"text": "完成"}
+    )
+    finals = repo.list_outbox(scope="final_message")
+    assert len(finals) == 1
+    assert finals[0]["owner_id"] == OWNER
+    assert finals[0]["owner_id"] != chain["task_run_id"]

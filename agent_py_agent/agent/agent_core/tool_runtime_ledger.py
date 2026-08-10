@@ -23,6 +23,48 @@ def persist_tool_runtime_ledger(agent: object, archive_record: dict[str, object]
     if record is None:
         return
     _best_effort_control_plane_write(lambda: store.record_runtime_gate_ledger(record))
+    # A.3：工具完成事件写入权威 runtime_events（agent_events 可从中重建），
+    # 与 legacy 台账并行 —— 权威事件流是审计/重建的单一事实源。
+    _append_runtime_event(agent, archive_record)
+
+
+def _append_runtime_event(agent: object, archive_record: dict[str, object]) -> None:
+    """把「工具调用完成」追进权威 runtime_events（A.3/A.8 追到 attempt）。
+
+    agent.subagents.runtime_db 是 owner 权威库（R1 接线）；无权威库
+    （无 home 上下文/纯测试）时静默跳过，legacy 台账不受影响。
+    """
+    repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+    if repo is None or not hasattr(repo, "append_event"):
+        return
+    run_id = _text(archive_record.get("run_id"))
+    operation_id = _text(archive_record.get("operation_id"))
+    if not run_id or not operation_id:
+        return
+    try:
+        agent_run_row = repo.agent_run_for_run_id(run_id)
+    except (sqlite3.Error, OSError):
+        return
+    if agent_run_row is None:
+        return
+    runtime_gate = _dict_value(archive_record.get("runtime_gate"))
+    payload = {
+        "operation_id": operation_id,
+        "tool": _text(archive_record.get("tool")),
+        "ok": bool(archive_record.get("ok")),
+        "error_code": _text(archive_record.get("error_code")),
+        "status": _ledger_status(archive_record, runtime_gate),
+        "idempotency_key": _text(archive_record.get("idempotency_key")),
+    }
+    _best_effort_control_plane_write(
+        lambda: repo.append_event(
+            event_type="tool_completed",
+            attempt_id=_text(archive_record.get("attempt_id")),
+            agent_run_id=str(agent_run_row["agent_run_id"]),
+            task_run_id=str(agent_run_row["task_run_id"] or ""),
+            payload=payload,
+        )
+    )
 
 
 def _best_effort_control_plane_write(write_fn) -> None:

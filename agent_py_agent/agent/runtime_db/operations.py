@@ -109,6 +109,22 @@ def sha256_of(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _validate_manifest_rel_path(rel: str) -> None:
+    """H.3：publish manifest 路径必须是共享根下的安全相对路径。
+
+    拒绝：绝对路径、点段（. / ..）、反斜杠、控制字符与空白（lstrip("/")
+    只剥前导斜杠，不足以挡 ../ 逃逸）。合法形态是斜杠分隔的相对段，
+    每段为非空且不含点段。
+    """
+    if rel.startswith("/") or "\\" in rel:
+        raise RuntimeConflictError(f"manifest 路径非法: {rel!r}")
+    segments = rel.split("/")
+    if any(seg in ("", ".", "..") for seg in segments):
+        raise RuntimeConflictError(f"manifest 路径非法(空段/点段): {rel!r}")
+    if any(ord(ch) < 32 for ch in rel):
+        raise RuntimeConflictError(f"manifest 路径非法(含控制字符): {rel!r}")
+
+
 class RuntimeOperationsMixin:
     # ------------------------------------------------------------- 三层 fence
     def current_fence(self, agent_run_id: str) -> dict[str, Any]:
@@ -134,6 +150,7 @@ class RuntimeOperationsMixin:
         agent_run_id: str,
         attempt_id: str | None = None,
         workspace_epoch: int | None = None,
+        tool_operation_id: str | None = None,
         tool_operation_generation: int | None = None,
     ) -> sqlite3.Row:
         """F.6：claim/renew/handler 前/settle/PublishOperation 五处统一校验。
@@ -142,7 +159,9 @@ class RuntimeOperationsMixin:
         - attempt_id 必须是当前 current pointer（F.7：旧 attempt 靠旧行不获权）；
         - attempt 行的 attempt_generation 必须等于 current_attempt_generation；
         - workspace_epoch 必须等于 agent_runs.workspace_epoch（F.1）；
-        - tool_operation_generation（给定时）必须等于该操作行自己的 generation。
+        - tool_operation_id（给定时）对应行必须存在、属于当前 run/attempt、
+          代数 ≥ 1；tool_operation_generation（给定时）必须等于该操作行
+          自己的 generation —— 调用方拿错代数（旧操作行/凭空代数）即拒绝。
 
         任一失配 → RuntimeConflictError（fail-closed）。返回 attempt 行供
         调用方继续使用。
@@ -168,13 +187,44 @@ class RuntimeOperationsMixin:
                 f"fence 失败: workspace_epoch {workspace_epoch} ≠ "
                 f"current {run['workspace_epoch']}"
             )
-        if tool_operation_generation is not None:
-            # 只校验代数本身合法（状态机迁移时行内校验 generation 一致性）。
-            if int(tool_operation_generation) < 1:
+        if tool_operation_id is not None:
+            op = self.get_operation(tool_operation_id)
+            if op is None:
                 raise RuntimeConflictError(
-                    f"fence 失败: 非法 tool_operation_generation "
-                    f"{tool_operation_generation}"
+                    f"fence 失败: tool_operation 不存在: {tool_operation_id}"
                 )
+            if str(op["agent_run_id"]) != str(agent_run_id):
+                raise RuntimeConflictError(
+                    f"fence 失败: tool_operation 属于其它 run: {op['agent_run_id']}"
+                )
+            if attempt_id is not None:
+                if str(op["attempt_id"]) != str(attempt_id):
+                    raise RuntimeConflictError(
+                        f"fence 失败: tool_operation 属于其它 attempt: {op['attempt_id']}"
+                    )
+                if int(op["attempt_generation"]) != run["current_attempt_generation"]:
+                    raise RuntimeConflictError(
+                        f"fence 失败: tool_operation attempt_generation "
+                        f"{op['attempt_generation']} ≠ current "
+                        f"{run['current_attempt_generation']}"
+                    )
+            op_generation = int(op["tool_operation_generation"])
+            if op_generation < 1:
+                raise RuntimeConflictError(
+                    f"fence 失败: 非法 tool_operation_generation {op_generation}"
+                )
+            if tool_operation_generation is not None and int(
+                tool_operation_generation
+            ) != op_generation:
+                raise RuntimeConflictError(
+                    f"fence 失败: tool_operation_generation "
+                    f"{tool_operation_generation} ≠ 行自身 {op_generation}"
+                )
+        elif tool_operation_generation is not None:
+            # 只有代数没有操作行 → 无从对照自身代数，拒绝（防凭空代数）。
+            raise RuntimeConflictError(
+                "fence 失败: tool_operation_generation 必须配 tool_operation_id"
+            )
         if attempt_id is None:
             return None
         return self.get_attempt(str(attempt_id))
@@ -654,12 +704,19 @@ class RuntimeOperationsMixin:
         publish_id: str,
         manifest: list[dict[str, Any]],
     ) -> sqlite3.Row:
-        """H.3：publish_manifest 记录路径/kind/preimage/postimage/权限。"""
+        """H.3：publish_manifest 记录路径/kind/preimage/postimage/权限。
+
+        B.2/H.3：manifest 路径是共享根下的相对路径——拒绝绝对路径、
+        点段（. / ..）、反斜杠与控制字符，防止发布路径逃逸出共享根。
+        """
         normalized: list[dict[str, Any]] = []
         for item in manifest:
-            rel = str(item.get("path") or "").strip().lstrip("/")
-            if not rel:
+            raw = str(item.get("path") or "").strip()
+            if not raw:
                 raise RuntimeConflictError("manifest 项缺少 path")
+            # 校验必须在剥前导斜杠之前：lstrip("/") 会把绝对路径伪装成相对路径。
+            _validate_manifest_rel_path(raw)
+            rel = raw.lstrip("/")
             kind = str(item.get("kind") or "updated").strip()
             if kind not in {"created", "updated", "deleted"}:
                 raise RuntimeConflictError(f"manifest 项非法 kind: {kind!r}")

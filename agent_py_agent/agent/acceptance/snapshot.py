@@ -12,12 +12,36 @@ workspace：输入源是 artifact_records 的 digest 记录，验证前重算实
 
 from __future__ import annotations
 
-import hashlib
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ..runtime_db.operations import sha256_of
+
+try:  # Linux reflink（CoW）；macOS 无 FICLONE → 回退全量复制
+    import fcntl
+
+    _FICLONE = 0x40049409
+except ImportError:  # pragma: no cover - 非 Linux 平台
+    fcntl = None  # type: ignore[assignment]
+    _FICLONE = 0
+
+
+def _reflink_or_copy(src: Path, dst: Path) -> None:
+    """reflink（CoW）优先复制；平台不支持/失败 → 全量复制（shutil.copy2）。
+
+    不用硬链接：live 文件同 inode 原地改写会穿透快照；reflink/copy
+    都是新 inode，物化副本与 live 彻底解耦。
+    """
+    if fcntl is not None:
+        try:
+            with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
+                fcntl.ioctl(fdst.fileno(), _FICLONE, fsrc.fileno())
+            return
+        except OSError:
+            pass
+    shutil.copy2(src, dst)
 
 
 @dataclass(frozen=True)
@@ -32,6 +56,23 @@ class ArtifactSnapshot:
             if item["rel_path"] == rel_path:
                 return self.shared_root / rel_path
         return None
+
+    def materialize(self, root: Path) -> "ArtifactSnapshot":
+        """把已验证文件复制到独立目录（H.9：validator 不再读 live workspace）。
+
+        物化发生在验证时点之后：live 后续再变（工具改写/并发发布）都不
+        影响物化副本 —— 消除「验证后到执行前」的 TOCTOU。reflink 优先，
+        回退全量复制；文件小、一次性执行，开销可忽略。
+        """
+        root = Path(root)
+        root.mkdir(parents=True, exist_ok=True)
+        for item in self.files:
+            rel = str(item["rel_path"])
+            src = self.shared_root / rel
+            dst = root / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            _reflink_or_copy(src, dst)
+        return ArtifactSnapshot(shared_root=root, files=self.files)
 
 
 def load_artifact_snapshot(

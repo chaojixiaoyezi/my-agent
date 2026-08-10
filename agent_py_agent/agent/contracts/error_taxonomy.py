@@ -1434,6 +1434,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.STOP.value,
         recovery_hint="当前 runner attempt 已被监督器废弃或被新 attempt 接替；旧 attempt 必须停止，等待同一逻辑任务的新 attempt 继续。",
     ),
+    "TOOL_AUTHORITY_FENCE": ErrorContract(
+        code="TOOL_AUTHORITY_FENCE",
+        category="orchestration",
+        retryable=False,
+        recommended_action=RecoveryAction.STOP.value,
+        recovery_hint="权威 fence 在 handler 前拒绝本次工具调用（attempt 已不是 current pointer 或代数失配）；本次调用不执行，等待权威链确认当前 attempt 后重试。",
+    ),
     "PROVIDER_TIMEOUT": ErrorContract(
         code="PROVIDER_TIMEOUT",
         category="model",

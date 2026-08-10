@@ -236,6 +236,31 @@ class TestSessionManager:
         result = manager.delete_session("sess_nonexistent")
         assert result is False
 
+    @pytest.mark.parametrize(
+        "malicious",
+        [
+            "../../etc/passwd",
+            "/etc/passwd",
+            "..",
+            ".",
+            "sess_1\\evil",
+            "sess_1 evil",
+            "sess_" + "A" * 200,
+        ],
+    )
+    def test_malicious_session_id_rejected_before_path_join(self, manager, malicious):
+        """B.2：session_id 拼路径前必须拒绝式校验（绝对路径/../点段/控制字符/超长）。"""
+        from agent_py_agent.agent.common.opaque_id import OpaqueIdError
+
+        with pytest.raises(OpaqueIdError):
+            manager.load_session(malicious)
+        with pytest.raises(OpaqueIdError):
+            manager.session_exists(malicious)
+        with pytest.raises(OpaqueIdError):
+            manager.delete_session(malicious)
+        # 拒绝发生在路径拼接之前：会话根目录下不得出现任何越界痕迹。
+        assert list(manager._session_root.iterdir()) == []
+
 
 class TestResumeSession:
     """测试会话恢复功能。"""
