@@ -300,7 +300,11 @@ def settle_required_action(snapshot: object | None, call: ToolCall, result: Tool
         action.blocked_reason = result.error_code
 
 
-def required_action_no_tool_decision(snapshot: object | None) -> str:
+def required_action_no_tool_decision(
+    snapshot: object | None,
+    *,
+    has_succeeded_evidence: bool = False,
+) -> str:
     """Return repair once, then a typed terminal status for remaining obligations."""
 
     if _assessment_failed(getattr(snapshot, "required_action_assessment", None)):
@@ -308,6 +312,16 @@ def required_action_no_tool_decision(snapshot: object | None) -> str:
     actions = tuple(getattr(snapshot, "required_actions", ()) or ())
     open_actions = [item for item in actions if item.status == "open"]
     if open_actions:
+        if has_succeeded_evidence:
+            # 本 run 已有真实成功执行证据(succeeded tool call):评估拆解粒度与
+            # 模型合并执行粒度不对齐是常态(真机铁证 G4-001 三轮 PASS/FAIL/FAIL:
+            # 评估拆 3 个 action,模型 2 次调用建完两文件+跑测试,第 3 个 action
+            # 永远等不到自己的调用)。义务已有真实执行证据,不再拿评估粒度卡死
+            # 已完成任务——防假完成由产物/验收校验把关,此门只防"纯 NL 声称"。
+            for item in open_actions:
+                item.status = "satisfied"
+                item.blocked_reason = ""
+            return "complete"
         if max(item.no_tool_attempts for item in open_actions) < 1:
             for item in open_actions:
                 item.no_tool_attempts += 1

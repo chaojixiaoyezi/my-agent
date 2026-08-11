@@ -521,7 +521,13 @@ def _required_action_no_tool_call_decision(
         getattr(snapshot, "required_actions", ()) or ()
     ) and not required_action_assessment_failed(snapshot):
         return None
-    outcome = required_action_no_tool_decision(snapshot)
+    # 本 run 真实成功执行证据(executed_tools 非空) → 义务已有动作证据,
+    # 收口不再拿评估拆解粒度卡死已完成任务(G4-001 真机铁证: 评估拆 3 个
+    # action、模型 2 次调用合并完成 → 第 3 个 action 无独立调用被误杀)。
+    outcome = required_action_no_tool_decision(
+        snapshot,
+        has_succeeded_evidence=bool(getattr(request.params, "executed_tools", ())),
+    )
     if outcome == "complete":
         return None
     if outcome == "repair":

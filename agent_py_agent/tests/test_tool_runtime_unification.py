@@ -859,6 +859,39 @@ def test_required_action_unknown_id_falls_back_to_tool_match(tmp_path: Path) -> 
     assert action.evidence_call_ids == ["call-1"]
 
 
+def test_required_action_open_with_execution_evidence_completes() -> None:
+    # G4-001 真机铁证(三轮 PASS/FAIL/FAIL): 评估拆解粒度与模型合并执行粒度
+    # 不对齐(评估拆 3 个 action、模型 2 次调用合并完成)时,open action 没有
+    # 自己的独立调用可销 → 旧逻辑 repair→unfinished 误杀已完成任务。修复:
+    # 本 run 已有真实成功执行证据(executed_tools 非空) → 义务已有动作证据,
+    # 收口门直接 complete;防假完成由产物/验收校验把关。
+    first = RequiredAction(
+        action_id="required-1",
+        source_turn_id="turn-user-1",
+        kind="execute",
+        allowed_tools=("command_tool",),
+        effect_ceiling="mutating",
+    )
+    second = RequiredAction(
+        action_id="required-2",
+        source_turn_id="turn-user-1",
+        kind="execute",
+        allowed_tools=("command_tool",),
+        effect_ceiling="mutating",
+    )
+    contract = build_effective_contract_snapshot(
+        run_id="run-1",
+        layers=(),
+        required_actions=(first, second),
+    )
+    assert (
+        required_action_no_tool_decision(contract, has_succeeded_evidence=True)
+        == "complete"
+    )
+    assert first.status == "satisfied"
+    assert second.status == "satisfied"
+
+
 def test_runtime_snapshot_rejects_policy_field_missing_from_public_schema() -> None:
     tool = _CountingTool()
     bad_effect_policy = replace(
