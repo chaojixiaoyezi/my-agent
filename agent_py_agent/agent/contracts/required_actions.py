@@ -386,17 +386,29 @@ def _result_proves_action(result: ToolResult) -> bool:
 def _action_for_call(snapshot: object | None, call: ToolCall) -> RequiredAction | None:
     actions = tuple(getattr(snapshot, "required_actions", ()) or ())
     if call.required_action_id:
-        return next(
+        exact = next(
             (item for item in actions if item.action_id == call.required_action_id),
             None,
         )
+        if exact is not None and exact.status == "open":
+            return exact
+        # id 指向不存在或已销账/阻塞的 action:回退工具匹配继续销账。真机铁证
+        # (G4-001): 评估产出多个允许同工具的 action 时,模型多次调用复用同一个
+        # required_action_id,精确匹配只销第一个,其余真实执行被漏销 → 收口门
+        # REQUIRED_ACTION_HAS_NO_EVIDENCE 误杀已完成任务。宽容 id 偏差不放松
+        # 执行证据(fail-closed 由 _result_proves_action 把关:动作没做照拦)。
     candidates = [
         item
         for item in actions
         if item.status == "open"
         and (not item.allowed_tools or call.tool_name in item.allowed_tools)
     ]
-    return candidates[0] if len(candidates) == 1 else None
+    if not candidates:
+        return None
+    # 多候选(评估产出多个允许同工具的 open action)按评估顺序先到先得分配:
+    # 真实调用次数足够则每个 open action 都被真实执行证据销账,杜绝"调用全成功
+    # 却因归属模糊整体漏销"的误杀;调用次数不足时剩余 open action 收口照拦。
+    return candidates[0]
 
 
 def _actions_from_structured_sources(

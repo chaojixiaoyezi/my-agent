@@ -769,6 +769,96 @@ def test_required_action_without_call_repairs_once_then_is_unfinished() -> None:
     assert action.evidence_call_ids == []
 
 
+def test_required_action_id_reuse_falls_back_and_drains_in_order(tmp_path: Path) -> None:
+    # G4-001 真机铁证(2026-08-11): 评估产出多个允许同工具的 open action 时,
+    # 模型多次调用复用同一个 required_action_id → 精确匹配只销第一个,其余真实
+    # 执行被漏销,收口门 REQUIRED_ACTION_HAS_NO_EVIDENCE 误杀已完成任务。
+    # 修复: id 指向已销账的 action 时回退工具匹配,多候选按评估顺序先到先得。
+    tool = _CountingTool(command=True)
+    first = RequiredAction(
+        action_id="required-1",
+        source_turn_id="turn-user-1",
+        kind="execute",
+        allowed_tools=("command_tool",),
+        effect_ceiling="mutating",
+    )
+    second = RequiredAction(
+        action_id="required-2",
+        source_turn_id="turn-user-1",
+        kind="execute",
+        allowed_tools=("command_tool",),
+        effect_ceiling="mutating",
+    )
+    contract = build_effective_contract_snapshot(
+        run_id="run-1",
+        layers=(),
+        required_actions=(first, second),
+    )
+
+    def run_call(call_id: str, action_id: str | None) -> None:
+        call = replace(
+            _call(tool, {"command": "true"}),
+            call_id=call_id,
+            required_action_id=action_id,
+        )
+        execution = ToolExecutor().execute(
+            ToolExecutorRequest(
+                call=call,
+                runtime_snapshot=_snapshot(tool),
+                workspace_root=tmp_path,
+                workspace_roots=(tmp_path,),
+                operation_store_required=False,
+            )
+        )
+        settle_required_action(contract, execution.call, execution.result)
+
+    # 第一次: 精确匹配销第一个
+    run_call("call-1", first.action_id)
+    assert first.status == "satisfied"
+    assert second.status == "open"
+    # 第二次复用同一 id(该 action 已销账): 回退工具匹配,按顺序销第二个
+    run_call("call-2", first.action_id)
+    assert first.status == "satisfied"
+    assert second.status == "satisfied"
+    assert first.evidence_call_ids == ["call-1"]
+    assert second.evidence_call_ids == ["call-2"]
+
+
+def test_required_action_unknown_id_falls_back_to_tool_match(tmp_path: Path) -> None:
+    # 模型携带不存在的 action id(幻觉/拼写): 回退工具匹配,不因 id 偏差漏销
+    # 真实执行(与复用 id 同根因,修复同源)。
+    tool = _CountingTool(command=True)
+    action = RequiredAction(
+        action_id="required-1",
+        source_turn_id="turn-user-1",
+        kind="execute",
+        allowed_tools=("command_tool",),
+        effect_ceiling="mutating",
+    )
+    contract = build_effective_contract_snapshot(
+        run_id="run-1",
+        layers=(),
+        required_actions=(action,),
+    )
+    call = replace(
+        _call(tool, {"command": "true"}),
+        call_id="call-1",
+        required_action_id="required-nope",
+    )
+    execution = ToolExecutor().execute(
+        ToolExecutorRequest(
+            call=call,
+            runtime_snapshot=_snapshot(tool),
+            workspace_root=tmp_path,
+            workspace_roots=(tmp_path,),
+            operation_store_required=False,
+        )
+    )
+    settle_required_action(contract, execution.call, execution.result)
+    assert action.status == "satisfied"
+    assert action.evidence_call_ids == ["call-1"]
+
+
 def test_runtime_snapshot_rejects_policy_field_missing_from_public_schema() -> None:
     tool = _CountingTool()
     bad_effect_policy = replace(
