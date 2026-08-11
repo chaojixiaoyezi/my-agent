@@ -761,9 +761,9 @@ def build_watch_stream_runtime_policy(*, surface: str = "ordinary") -> ToolRunti
                 for name in ("url", "watch_id", "source_ref", "source_id")
                 if name in names
             },
-            # seq 266 #1：url/watch_id/source_ref/source_id 是同一盯守源资源
-            # 的不同入口——watch_stream(url=...) 与 record_finding(watch_id=...)
-            # 锁同一 watch 域，跨入口互斥。
+            # seq 266 #1：url/watch_id/source_ref/source_id 都归到 watch 逻辑域；
+            # 参数值本身仍可能是不同别名，跨入口 canonical identity 由
+            # WatchStreamTool.effective_resource_scopes 在 claim 前补齐。
             resource_domains={
                 name: "watch"
                 for name in ("url", "watch_id", "source_ref", "source_id")

@@ -509,6 +509,10 @@ Operation ledger 继续使用现有 store，确保字段覆盖：`operation_id`�
 
 - `ConcurrencyPolicy(mode=serial|parallel_safe|barrier)`；未知、危险、审批、交互为 barrier。
 - resource scopes 是规范化 `(kind, access, identity)`；read/read 可并行，任一 write 且 identity 重叠即冲突。
+- `resource_domains` 只统一参数名所在的逻辑域；当 URL、引用和持久 ID 是同一资源的不同值入口时，
+  handler 必须通过 `effective_resource_scopes` 在 trusted parameter completion 后、operation claim 前补入
+  同一个 canonical identity。`watch_stream` 以 owner、规范化来源地址和 typed Audit scope 生成的
+  `watch_id` 为唯一锁身份；解析失败使用稳定保守域，不能空锁或另建旁路映射。
 - 按原 call 顺序构造 contiguous segments；segment 内并行，segment 间严格顺序；输出仍按原索引返回。
 - 不使用 `_CONTENT_OUTPUT_TOOLS` 或 reader/writer 工具名白名单决定并发。
 - approval gate 单独序列化，避免并发弹窗；单轮 output budget 在所有结果完成后只结算一次。

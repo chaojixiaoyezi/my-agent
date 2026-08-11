@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 
@@ -554,6 +555,106 @@ class TestLogicalScopeSemanticsPerSeq261:
         )
         assert not any(s.startswith("workspace:") for s in scopes)
         assert "logical:watch:https://example.com/feed" in scopes
+
+    def test_watch_url_alias_adds_the_same_canonical_watch_scope_as_watch_id(self, tmp_path):
+        """同一 watch 的 URL/open 与 watch_id 写入口必须在 claim 前互斥。"""
+        from agent_py_agent.agent.agent_core.runtime.record_finding_tool import (
+            RecordFindingTool,
+        )
+        from agent_py_agent.agent.ingestion.watch_state import watch_id_for
+        from agent_py_agent.agent.ingestion.watch_tool import WatchStreamTool
+        from agent_py_agent.agent.tooling.executor import _workspace_operation_scopes
+
+        owner_home = tmp_path / "owner"
+        agent = SimpleNamespace(
+            home_paths=SimpleNamespace(owner_home_dir=owner_home),
+            _current_run_params=None,
+        )
+        watch_tool = WatchStreamTool(agent)
+        url = "https://example.com/feed?cursor=<next>"
+        watch_id = watch_id_for(owner_home, "https://example.com/feed")
+
+        open_arguments = {"action": "open", "url": url}
+        request = SimpleNamespace(workspace_root=tmp_path, write_boundary=None)
+        open_scopes = _workspace_operation_scopes(
+            request,
+            SimpleNamespace(arguments=open_arguments),
+            SimpleNamespace(runtime_policy=watch_tool.runtime_policy, handler=watch_tool),
+        )
+        finding_tool = RecordFindingTool(agent)
+        finding_scopes = _workspace_operation_scopes(
+            request,
+            SimpleNamespace(arguments={"watch_id": watch_id}),
+            SimpleNamespace(
+                runtime_policy=finding_tool.runtime_policy,
+                handler=finding_tool,
+            ),
+        )
+
+        canonical = f"logical:watch:{watch_id}"
+        assert canonical in open_scopes
+        assert canonical in finding_scopes
+        assert set(open_scopes) & set(finding_scopes) == {canonical}
+
+    def test_watch_url_alias_keeps_named_audit_identity_isolated(self, tmp_path):
+        """同 URL 的普通 watch 与命名 Audit watch 不能误归成同一资源。"""
+        from agent_py_agent.agent.common.audit_activation import (
+            AUDIT_ATTR,
+            AUDIT_SOURCE_BINDING_PENDING_ATTR,
+        )
+        from agent_py_agent.agent.conversation.authority import (
+            CONVERSATION_REQUEST_ID_ATTR,
+        )
+        from agent_py_agent.agent.ingestion.watch_state import watch_id_for
+        from agent_py_agent.agent.ingestion.watch_tool import WatchStreamTool
+
+        owner_home = tmp_path / "owner"
+        audit_id = "audit-1"
+        agent = SimpleNamespace(
+            home_paths=SimpleNamespace(owner_home_dir=owner_home),
+            _current_run_params=SimpleNamespace(
+                task_attributes={
+                    AUDIT_ATTR: True,
+                    AUDIT_SOURCE_BINDING_PENDING_ATTR: True,
+                    CONVERSATION_REQUEST_ID_ATTR: audit_id,
+                }
+            ),
+        )
+        tool = WatchStreamTool(agent)
+        arguments = {
+            "action": "open",
+            "url": "https://example.com/feed?cursor=<next>",
+        }
+
+        scopes = tool.effective_resource_scopes(arguments, None, tmp_path)
+        canonical_url = "https://example.com/feed"
+        audit_scope = f"logical:watch:{watch_id_for(owner_home, canonical_url, audit_id)}"
+        ordinary_scope = f"logical:watch:{watch_id_for(owner_home, canonical_url)}"
+
+        assert scopes == (audit_scope,)
+        assert ordinary_scope not in scopes
+
+    def test_watch_source_ref_alias_projects_its_embedded_watch_id(self, tmp_path):
+        """Audit source_ref 必须复用引用内的 watch_id，不能锁整段引用。"""
+        from agent_py_agent.agent.ingestion.watch_tool import WatchStreamTool
+
+        agent = SimpleNamespace(
+            home_paths=SimpleNamespace(owner_home_dir=tmp_path / "owner"),
+            _current_run_params=None,
+        )
+        tool = WatchStreamTool(agent)
+        watch_id = "ws-0123456789"
+
+        scopes = tool.effective_resource_scopes(
+            {
+                "action": "inspect",
+                "source_ref": f"audit://{watch_id}/candidate/12:0",
+            },
+            None,
+            tmp_path,
+        )
+
+        assert scopes == (f"logical:watch:{watch_id}",)
 
 
 class TestResourceDomainAliasingPerSeq266:

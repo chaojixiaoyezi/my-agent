@@ -91,6 +91,7 @@ _SOURCE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _AUDIT_SOURCE_REF_RE = re.compile(
     r"^audit://(?P<watch_id>ws-[0-9a-f]{10})/candidate/(?P<ack_id>[0-9]+:[0-9]+)$"
 )
+_UNRESOLVED_WATCH_RESOURCE_SCOPE = "logical:watch:unresolved"
 _ACTION_PARAMETER_NAMES: dict[str, frozenset[str]] = {
     "open": frozenset(
         {
@@ -224,6 +225,28 @@ class WatchStreamTool(BaseTool):
         """The role-specific schema narrows actions; the read surface stays usable."""
 
         return ToolAvailability.ready()
+
+    def effective_resource_scopes(
+        self,
+        arguments: dict[str, Any],
+        write_boundary: dict[str, Any] | None,
+        workspace_root: Path,
+    ) -> tuple[str, ...]:
+        """Alias every watch handle to the durable ``watch_id`` before claim.
+
+        ``ResourceScopePolicy.resource_domains`` only aliases parameter names;
+        it cannot know that a URL and the returned ``watch_id`` name the same
+        persisted watch.  The executor calls this hook after trusted parameter
+        completion and before the mutating operation is claimed, so this is the
+        single safe seam for adding the canonical identity shared with
+        ``record_finding(watch_id=...)``.
+        """
+
+        _ = (write_boundary, workspace_root)
+        owner_home = self._owner_home()
+        if owner_home is None:
+            return (_UNRESOLVED_WATCH_RESOURCE_SCOPE,)
+        return _effective_watch_resource_scopes(self, owner_home, arguments)
 
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         owner_home = self._owner_home()
@@ -660,37 +683,18 @@ def _resolve_open_watch_context(
     if isinstance(resolved, ToolHandlerOutcome):
         return resolved
     url, mode, request_facts, adapter_facts = resolved
-    audit_id = _audit_root_task_id(tool.agent) if _audit_requested(tool) else ""
-    prepare_id = _audit_prepare_root_task_id(tool.agent)
-    watch_scope = _audit_watch_scope_id(tool.agent, audit_id)
-    if prepare_id:
-        from .source_binding import audit_prepare_probe_scope_id
-
-        prepare_request_id = _audit_prepare_request_id(tool.agent)
-        raw_boundary = params.get("record_boundary")
-        record_boundary = (
-            raw_boundary
-            if isinstance(raw_boundary, dict)
-            else {"mode": "line"} if url.lower().startswith("file://") else None
-        )
-        try:
-            watch_scope = audit_prepare_probe_scope_id(
-                task_id=prepare_id,
-                prepare_request_id=prepare_request_id,
-                source_id=params.get("source_id"),
-                source_mode=mode,
-                request_facts=request_facts,
-                adapter_facts=adapter_facts,
-                record_boundary=record_boundary,
-                poll_query_seconds=tuning_from_params(params).poll_query_seconds,
-            )
-        except (TypeError, ValueError) as exc:
-            return _err(
-                f"Audit 来源探针身份无效: {exc}",
-                "TOOL_INVALID_ARGUMENTS",
-                reported_code="AUDIT_SOURCE_IDENTITY_REQUIRED",
-            )
-    watch_id = watch_id_for(owner_home, url, watch_scope)
+    watch_identity = _watch_id_for_resolved_source(
+        tool,
+        owner_home,
+        params,
+        url=url,
+        mode=mode,
+        request_facts=request_facts,
+        adapter_facts=adapter_facts,
+    )
+    if isinstance(watch_identity, ToolHandlerOutcome):
+        return watch_identity
+    watch_id, audit_id, prepare_id = watch_identity
     loaded = _load_open_watch(
         owner_home,
         url,
@@ -954,10 +958,135 @@ def _open_watch_payload(
     return payload, transition
 
 
-def _resolve_open_source(
-    tool: WatchStreamTool, params: dict[str, Any]
+def _watch_id_for_resolved_source(
+    tool: WatchStreamTool,
+    owner_home: Path,
+    params: dict[str, Any],
+    *,
+    url: str,
+    mode: str,
+    request_facts: dict[str, Any],
+    adapter_facts: dict[str, str],
+) -> tuple[str, str, str] | ToolHandlerOutcome:
+    """Derive the exact durable identity used by ``open`` from typed facts."""
+
+    audit_id = _audit_root_task_id(tool.agent) if _audit_requested(tool) else ""
+    prepare_id = _audit_prepare_root_task_id(tool.agent)
+    watch_scope = _audit_watch_scope_id(tool.agent, audit_id)
+    if prepare_id:
+        from .source_binding import audit_prepare_probe_scope_id
+
+        prepare_request_id = _audit_prepare_request_id(tool.agent)
+        raw_boundary = params.get("record_boundary")
+        record_boundary = (
+            raw_boundary
+            if isinstance(raw_boundary, dict)
+            else {"mode": "line"} if url.lower().startswith("file://") else None
+        )
+        try:
+            watch_scope = audit_prepare_probe_scope_id(
+                task_id=prepare_id,
+                prepare_request_id=prepare_request_id,
+                source_id=params.get("source_id"),
+                source_mode=mode,
+                request_facts=request_facts,
+                adapter_facts=adapter_facts,
+                record_boundary=record_boundary,
+                poll_query_seconds=tuning_from_params(params).poll_query_seconds,
+            )
+        except (TypeError, ValueError) as exc:
+            return _err(
+                f"Audit 来源探针身份无效: {exc}",
+                "TOOL_INVALID_ARGUMENTS",
+                reported_code="AUDIT_SOURCE_IDENTITY_REQUIRED",
+            )
+    return watch_id_for(owner_home, url, watch_scope), audit_id, prepare_id
+
+
+def _visible_watch_ids_for_alias(
+    tool: WatchStreamTool,
+    owner_home: Path,
+    *,
+    source_url: str = "",
+    source_id: str = "",
+) -> tuple[str, ...]:
+    """Resolve persisted aliases only inside the caller's typed watch scope."""
+
+    selected_url = str(source_url or "").strip()
+    selected_source = str(source_id or "").strip()
+    matches: list[str] = []
+    for row in _visible_state_rows(tool, owner_home):
+        if selected_url and str(row.get("source_url") or "").strip() != selected_url:
+            continue
+        if selected_source and str(row.get("source_id") or "").strip() != selected_source:
+            continue
+        watch_id = str(row.get("watch_id") or "").strip()
+        if watch_id:
+            matches.append(watch_id)
+    return tuple(dict.fromkeys(matches))
+
+
+def _effective_watch_resource_scopes(
+    tool: WatchStreamTool,
+    owner_home: Path,
+    params: dict[str, Any],
+) -> tuple[str, ...]:
+    """Project URL/ref/source aliases onto the handler's durable watch id."""
+
+    explicit_watch_id = str(params.get("watch_id") or "").strip()
+    if explicit_watch_id:
+        return (f"logical:watch:{explicit_watch_id}",)
+
+    source_ref = str(params.get("source_ref") or "").strip()
+    if source_ref:
+        matched = _AUDIT_SOURCE_REF_RE.fullmatch(source_ref)
+        if matched is not None:
+            return (f"logical:watch:{matched.group('watch_id')}",)
+
+    normalized = _normalize_open_source(params) if params.get("url") else None
+    if isinstance(normalized, tuple):
+        url, mode, request_facts, adapter_facts = normalized
+        identity = _watch_id_for_resolved_source(
+            tool,
+            owner_home,
+            params,
+            url=url,
+            mode=mode,
+            request_facts=request_facts,
+            adapter_facts=adapter_facts,
+        )
+        if isinstance(identity, tuple):
+            return (f"logical:watch:{identity[0]}",)
+        persisted = _visible_watch_ids_for_alias(
+            tool,
+            owner_home,
+            source_url=url,
+            source_id=str(params.get("source_id") or ""),
+        )
+        if persisted:
+            return tuple(f"logical:watch:{watch_id}" for watch_id in persisted)
+
+    source_id = str(params.get("source_id") or "").strip()
+    if source_id:
+        persisted = _visible_watch_ids_for_alias(
+            tool,
+            owner_home,
+            source_id=source_id,
+        )
+        if persisted:
+            return tuple(f"logical:watch:{watch_id}" for watch_id in persisted)
+
+    # Invalid/missing handles cannot legitimately reach a mutating handler, but
+    # the operation path still receives a stable conservative scope rather than
+    # silently claiming with no resource protection.
+    return (_UNRESOLVED_WATCH_RESOURCE_SCOPE,)
+
+
+def _normalize_open_source(
+    params: dict[str, Any],
 ) -> tuple[str, str, dict[str, Any], dict[str, str]] | ToolHandlerOutcome:
-    """Resolve one source without assuming vendor, endpoint, or cursor names."""
+    """Normalize source identity without filesystem/network authorization I/O."""
+
     raw_value = params.get("url")
     if isinstance(raw_value, (list, tuple, dict, set)):
         return _err(
@@ -978,7 +1107,7 @@ def _resolve_open_source(
             "TOOL_INVALID_ARGUMENTS",
         )
     if raw.lower().startswith("file://") or raw.startswith("/"):
-        from .sources import file_path_of, normalize_file_url
+        from .sources import normalize_file_url
 
         if params.get("http_request") is not None or params.get("source_adapter") is not None:
             return _err(
@@ -990,11 +1119,6 @@ def _resolve_open_source(
             url = normalize_file_url(raw)
         except ValueError as exc:
             return _err(f"url 无效: {exc}", "TOOL_INVALID_ARGUMENTS")
-        decision = _file_access_policy(tool).check(file_path_of(url))
-        if not decision.allowed:
-            return _err(
-                f"文件路径访问被拒: {decision.message or decision.code}", "TOOL_PERMISSION_DENIED"
-            )
         return url, "", {}, {}
     if params.get("record_boundary") is not None:
         return _err(
@@ -1021,6 +1145,27 @@ def _resolve_open_source(
             f"HTTP 来源配置无效: {exc}(本地文件源请给 file:///绝对路径)",
             "TOOL_INVALID_ARGUMENTS",
         )
+    return url, (mode if mode in {"poll", "adapter"} else ""), request_facts, adapter_facts
+
+
+def _resolve_open_source(
+    tool: WatchStreamTool, params: dict[str, Any]
+) -> tuple[str, str, dict[str, Any], dict[str, str]] | ToolHandlerOutcome:
+    """Resolve one source without assuming vendor, endpoint, or cursor names."""
+
+    normalized = _normalize_open_source(params)
+    if isinstance(normalized, ToolHandlerOutcome):
+        return normalized
+    url, mode, request_facts, adapter_facts = normalized
+    if url.lower().startswith("file://"):
+        from .sources import file_path_of
+
+        decision = _file_access_policy(tool).check(file_path_of(url))
+        if not decision.allowed:
+            return _err(
+                f"文件路径访问被拒: {decision.message or decision.code}", "TOOL_PERMISSION_DENIED"
+            )
+        return normalized
     gate_error = _network_safety_error(
         _TOOL_NAME,
         url,
@@ -1030,7 +1175,7 @@ def _resolve_open_source(
     )
     if gate_error is not None:
         return gate_error
-    return url, (mode if mode in {"poll", "adapter"} else ""), request_facts, adapter_facts
+    return normalized
 
 
 def _pending_audit_source_binding_conflict(
