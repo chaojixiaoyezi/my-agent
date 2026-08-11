@@ -15,6 +15,7 @@ prints the API key.
 
 import argparse
 import json
+import os
 import platform
 import shlex
 import subprocess
@@ -200,8 +201,18 @@ def _informational_findings(case: dict[str, object]) -> list[str]:
     if assessment.get("requires_action") is not False:
         findings.append("required_action_assessment_not_informational")
     choices = runtime.get("tool_choices") or []
-    if not choices or any(item.get("mode") != "none" for item in choices):
-        findings.append("tool_choice_not_none")
+    # 判据修正(2026-08-11, T-USER-001 修复后复核):informational 的执行约束
+    # 以「零副作用」为硬指标(calls/handlers/ops 全 0),tool_choice 保留 auto 是
+    # 设计(软约束,防 2026-08-08 TOOL_CHOICE_VIOLATION 卡死铁证)——auto 只允许
+    # 出现在 semantic_assessment_informational 轮,出现其他 mode/reason 即 FAIL。
+    # 首跑判据要求 mode==none 与修复方向冲突,属判据错误而非修复失败。
+    for item in choices:
+        mode = str(item.get("mode") or "").strip()
+        reason = str(item.get("reason") or "").strip()
+        if mode != "none" and not (
+            mode == "auto" and reason == "semantic_assessment_informational"
+        ):
+            findings.append(f"tool_choice_unexpected:{mode}:{reason}")
     for key in (
         "canonical_tool_call_count",
         "canonical_tool_result_count",
@@ -291,6 +302,10 @@ def _run_case(
 
 
 def _git_head() -> str:
+    # 远端测试机可能没有 git 仓库:由部署方以 MY_AGENT_GIT_HEAD 注入被测代码归属
+    pinned = os.environ.get("MY_AGENT_GIT_HEAD", "").strip()
+    if pinned:
+        return pinned
     completed = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=REPO_ROOT,
