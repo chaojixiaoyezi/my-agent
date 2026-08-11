@@ -210,11 +210,15 @@ def _delay_command_result(seconds: int) -> ToolHandlerOutcome:
             "reason": "wait before checking progress again",
         },
     }
+    # 0ms 拦截、进程从未启动——副作用已证明未发生(not_started),不是「可能已生效」。
+    # 不标的话 operation coordinator 会按「handler 进入过」保守包成
+    # TOOL_OPERATION_OUTCOME_UNKNOWN,把可证明的零副作用撒谎成不确定。
     return ToolHandlerOutcome(
         "run_command",
         False,
         json.dumps(payload, ensure_ascii=False, indent=2),
         error_code="USE_WAIT_FOR_DELAY",
+        effect_outcome="not_started",
     )
 
 

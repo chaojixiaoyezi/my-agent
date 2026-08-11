@@ -321,6 +321,7 @@ class TestShellToolTimeout:
 
         assert result.ok is False
         assert result.error_code == "USE_WAIT_FOR_DELAY"
+        assert result.effect_outcome == "not_started"
         assert '"tool": "wait"' in result.output
 
 
