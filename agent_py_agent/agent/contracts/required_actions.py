@@ -222,6 +222,29 @@ def tool_choice_for_required_actions(
 def render_required_action_guidance(snapshot: object | None) -> str:
     actions = tuple(getattr(snapshot, "required_actions", ()) or ())
     if not actions:
+        # T-USER-001 真机铁证(2026-08-11):评估判 informational(requires_action=False)
+        # 时若不注入任何 guidance,主循环模型看不到「本条是信息性陈述」的信号,
+        # 会把纯陈述/告警内容当任务执行(9 次调用+写入文件)。这里注入模型可见的
+        # 结构化信号但不硬禁工具(auto 保留,防 2026-08-08 TOOL_CHOICE_VIOLATION
+        # 卡死铁证):软约束让模型自行收敛,硬约束只用于 UNKNOWN 兜底。
+        assessment = getattr(snapshot, "required_action_assessment", None)
+        if (
+            isinstance(assessment, dict)
+            and not _assessment_failed(assessment)
+            and assessment.get("requires_action") is False
+            and assessment.get("source") == "model_structured"
+        ):
+            return (
+                "[tool-system:required-action-assessment]\n"
+                + json.dumps(
+                    {"source": "model_structured", "requires_action": False},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                + "\n本条用户消息被评估为信息性陈述(requires_action=false)："
+                "不要求执行任何操作。请不要为它发起工具调用或写入任何文件，"
+                "直接如实回答即可；如确需工具，请先用一句话说明理由。"
+            )
         return ""
     visible = [
         {
