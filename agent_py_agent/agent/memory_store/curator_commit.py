@@ -156,7 +156,15 @@ class CuratorBatchCommitter:
                     continue
                 self._restore_transaction(manifest, paths_locked=True)
             _cleanup_transaction(directory)
-            self.run_log.append(_recovery_record(manifest, finished_at=current.isoformat()))
+            # 审计记录记恢复实际发生的时刻（真实时钟），不用调用方注入的 now：
+            # now 只用于 lease 过期判定（测试/回放可模拟未来），若审计也用它，
+            # 跨日分片时 rollback 记录会被写进未来分片，run_log 排序失真
+            # （recovered_rollback 与 succeeded 相对顺序错位）。
+            self.run_log.append(
+                _recovery_record(
+                    manifest, finished_at=datetime.now(timezone.utc).isoformat()
+                )
+            )
             recovered += 1
         return recovered
 
