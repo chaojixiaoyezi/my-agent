@@ -358,6 +358,82 @@ def _bind_main_agent_authority(agent, params: RunParams) -> RunParams:
     return replace(params, attempt_id=attempt_id)
 
 
+# 审计账本终态别名：运行时语义 → agent_runs 终态串（只认结构化字段）。
+_RUN_STATUS_ALIASES = {"ok": "done", "user_stop": "cancelled", "conversation_control": "cancelled"}
+
+
+def _settle_main_agent_run_status(
+    agent,
+    *,
+    run_id: str,
+    attempt_id: str,
+    runtime_status: str,
+    runtime_reason: str = "",
+    runtime_source: str = "",
+    tool_rounds: int = 0,
+) -> None:
+    """把主代理 run 的真实终态落进权威审计账本（fail-silent）。
+
+    修复②（run 级审计终态）：/ask 路径此前 agent_runs.status 恒 'created'、
+    attempt 恒 'running'、无 run 级完成事件。这里在 run 真实结束时按
+    结构化字段收口：runtime_status=='ok' → 'done'；cancelled 族
+    （user_stop/conversation_control）→ 'cancelled'；其余（unfinished/
+    blocked/failed…）原样透传。LOCAL_UNMANAGED（无 repo）/查无 run →
+    noop。审计是附加保证，任何失败绝不反噬执行路径。
+    """
+    terminal = _RUN_STATUS_ALIASES.get(runtime_status, runtime_status or "")
+    if not terminal or terminal in ("", "created", "running"):
+        return
+    if not run_id or not attempt_id:
+        return
+    repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+    if repo is None:
+        return  # LOCAL_UNMANAGED：显式选择本地投影库，无权威账本
+    try:
+        row = repo.agent_run_for_run_id(run_id)
+        if row is None:
+            return
+        repo.settle_agent_run(
+            agent_run_id=str(row["agent_run_id"]),
+            status=terminal,
+            payload={
+                "status": terminal,
+                "runtime_status": runtime_status,
+                "runtime_reason": runtime_reason,
+                "runtime_source": runtime_source,
+                "tool_rounds": int(tool_rounds or 0),
+            },
+        )
+    except Exception:  # noqa: BLE001 审计收口失败不回吐执行
+        pass
+
+
+def _settle_main_agent_run(agent, params: RunParams, result) -> None:
+    """正常返回路径收口：runtime_status=='ok' → 'done'，否则透传终态。"""
+    runtime_status = str(getattr(result, "runtime_status", "") or "").strip()
+    _settle_main_agent_run_status(
+        agent,
+        run_id=str(params.run_id or "").strip(),
+        attempt_id=str(params.attempt_id or "").strip(),
+        runtime_status=runtime_status,
+        runtime_reason=str(getattr(result, "runtime_reason", "") or "").strip(),
+        runtime_source=str(getattr(result, "runtime_source", "") or "").strip(),
+        tool_rounds=int(getattr(result, "tool_rounds", 0) or 0),
+    )
+
+
+def _settle_main_agent_run_exception(agent, params: RunParams, exc: BaseException) -> None:
+    """异常路径收口：InterruptedError → 'cancelled'，其余 → 'failed'。"""
+    status = "cancelled" if isinstance(exc, InterruptedError) else "failed"
+    _settle_main_agent_run_status(
+        agent,
+        run_id=str(params.run_id or "").strip(),
+        attempt_id=str(params.attempt_id or "").strip(),
+        runtime_status=status,
+        runtime_reason=type(exc).__name__,
+    )
+
+
 # LLM: 顶层运行和所有自动 Compact 续接共用这一返回缝隙；只有最终不再续接时才能投影 standalone 终态。
 # 函数用途: 执行一次完整请求，必要时续接 Compact，并在真正结束时收尾任务工作区。
 def _run_with_params(agent, user_prompt: str, params: RunParams):
@@ -392,6 +468,7 @@ def _run_with_params(agent, user_prompt: str, params: RunParams):
             if progress_decision.reason == "limit_reached":
                 result = mark_task_progress_limit_reached(result)
             finish_run_task_workspace_if_needed(agent, current_params, result)
+            _settle_main_agent_run(agent, current_params, result)
             return result
         next_params = _task_progress_continue_params(
             current_params, progress_decision, result
@@ -441,6 +518,7 @@ def _run_once_with_params(agent, user_prompt: str, params: RunParams):
             # lifecycle path.  Keep the durable runtime fact aligned with the
             # background claim even when the model/provider raises.
             update_runtime_fact_terminal_if_enabled(agent, params, exc)
+            _settle_main_agent_run_exception(agent, params, exc)
             raise
 
 

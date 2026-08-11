@@ -239,15 +239,26 @@ class FinalizationService:
             ctx,
             params.run_request_id,
         )
+        runtime_status = str(getattr(ctx.final_response, "runtime_status", "ok") or "ok")
+        runtime_reason = str(getattr(ctx.final_response, "runtime_reason", "") or "")
+        runtime_source = str(getattr(ctx.final_response, "runtime_source", "") or "")
+        # 修复①（假完成如实收口）：完成权只认结构化字段，模型自报文本不作数。
+        # 未完成终态把模型原文包进明确标注再投递，禁止用户把自报当最终成功。
+        honest_text = _honest_unfinished_response_text(
+            str(ctx.final_response.text or "").rstrip(),
+            runtime_status=runtime_status,
+            runtime_reason=runtime_reason,
+            runtime_source=runtime_source,
+        )
         return AgentRunResult(
             prompt=ctx.final_prompt,
             response=redact_executed_operation_labels(
-                ctx.final_response.text,
+                honest_text,
                 operation_verification,
             ),
             backend=ctx.final_response.backend,
             used_memories=len(ctx.memories),
-            model_response=str(ctx.final_response.text or "").rstrip(),
+            model_response=honest_text,
             tool_rounds=ctx.tool_rounds,
             executed_tools=ctx.executed_tools,
             archive_tool_calls=ctx.archive_tool_calls,
@@ -286,9 +297,9 @@ class FinalizationService:
             },
             main_context_bundle_path=ctx.main_context_bundle_path,
             main_context_bundle_markdown_path=ctx.main_context_bundle_markdown_path,
-            runtime_status=str(getattr(ctx.final_response, "runtime_status", "ok") or "ok"),
-            runtime_reason=str(getattr(ctx.final_response, "runtime_reason", "") or ""),
-            runtime_source=str(getattr(ctx.final_response, "runtime_source", "") or ""),
+            runtime_status=runtime_status,
+            runtime_reason=runtime_reason,
+            runtime_source=runtime_source,
             conversation_task_completed=conversation_task_completed(ctx.task_attributes),
             delivery_artifacts=_structured_delivery_artifacts(ctx),
             message_tool_deliveries=_message_tool_deliveries(ctx),
@@ -512,6 +523,46 @@ def _memory_archive_preview_limits(config) -> dict[int, int]:
 
 # LLM: Completion authority is the runtime turn outcome, never a phrase in model text.
 # 函数用途: 判断本轮是否为可关闭普通会话任务的正常最终响应；等待、后台交接和失败状态保持任务活跃。
+def _honest_unfinished_response_text(
+    model_text: str,
+    *,
+    runtime_status: str,
+    runtime_reason: str = "",
+    runtime_source: str = "",
+) -> str:
+    """未完成终态的如实收口文本（修复①：假完成如实收口）。
+
+    只消费结构化字段：仅当 required_action 返工门（runtime_source ==
+    "required_action_completion_gate"）判定未完成（unfinished/blocked，含
+    REQUIRED_ACTION_HAS_NO_EVIDENCE 一族）时，把模型原文包进明确的「任务
+    未完成」标注（附状态/原因/来源），禁止用户把模型自报当最终成功。
+    TASK_PROGRESS_OPEN / TOOL_ROUND_LIMIT_REACHED / REPEATED_TOOL_FAILURE
+    是渐进式交付/续跑的常态：模型文本本身已如实（或本轮无文本交给下一轮
+    续跑接管），叠加机器标注反而污染交付语义，故不包裹。不解析正文、不
+    关键词匹配——文本原样附注。
+    """
+    status = str(runtime_status or "").strip()
+    if not status or status.lower() == "ok":
+        return model_text
+    # 与 _schedule_typed_unfinished_continuation 的 gate 分支同一条精确条件。
+    if str(runtime_source or "").strip() != "required_action_completion_gate":
+        return model_text
+    note = f"状态：{status}"
+    reason = str(runtime_reason or "").strip()
+    if reason:
+        note += f"；原因：{reason}"
+    source = str(runtime_source or "").strip()
+    if source:
+        note += f"；来源：{source}"
+    text = str(model_text or "").rstrip()
+    if text:
+        return (
+            f"【任务未完成】本次执行未达成完整交付（{note}）。\n"
+            f"以下为本轮输出，仅作过程参考，不代表任务已完成：\n\n{text}"
+        )
+    return f"【任务未完成】本次执行未达成完整交付（{note}）。"
+
+
 def _conversation_turn_is_terminal(ctx: FinalizeContext) -> bool:
     response = ctx.final_response
     if str(getattr(response, "runtime_status", "ok") or "ok").strip().lower() != "ok":
@@ -538,10 +589,22 @@ def _schedule_typed_unfinished_continuation(agent: object, ctx: FinalizeContext)
     if str(attrs.get("conversation_work_kind") or "").strip().lower() == "audit":
         return
     reason = str(getattr(ctx.final_response, "runtime_reason", "") or "").strip().upper()
+    # 修复①（会话内纠正）：返工门捕获「模型自报完成但零执行证据」
+    # （REQUIRED_ACTION_HAS_NO_EVIDENCE 一族，runtime_status=unfinished）→
+    # 预算内自动续跑让模型真实执行；blocked（等用户输入/审批）不续跑避免
+    # 无意义空转。续跑本身受 resume 预算上限约束（ensure_ordinary_task_resume
+    # 的 resume_used vs resume_limit）。
+    gate_unfinished = (
+        str(getattr(ctx.final_response, "runtime_source", "") or "").strip()
+        == "required_action_completion_gate"
+        and str(getattr(ctx.final_response, "runtime_status", "") or "").strip().lower()
+        == "unfinished"
+    )
     # REPEATED_TOOL_FAILURE:软收口,任务未完成,自动续跑让模型换策略继续;
     # EXHAUSTED 变体(收益递减/硬门)不在此列,等用户介入。
     if reason not in {"TASK_PROGRESS_OPEN", "TOOL_ROUND_LIMIT_REACHED", "REPEATED_TOOL_FAILURE"}:
-        return
+        if not gate_unfinished:
+            return
     from ..conversation.runtime import (
         ensure_goal_progress_continuation,
         ensure_ordinary_task_resume,

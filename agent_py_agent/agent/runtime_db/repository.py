@@ -743,6 +743,70 @@ class RuntimeRepository(
             ).fetchall()
         return list(rows)
 
+    # -------------------------------------------------------- Run 级终态
+    def settle_agent_run(
+        self,
+        *,
+        agent_run_id: str,
+        status: str,
+        payload: dict[str, Any] | None = None,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """run 级终态收口（单事务 CAS，幂等，以第一次为准）。
+
+        此前 /ask 路径 agent_runs.status 恒 'created'（生产 UPDATE 只写
+        delegation_id/current_attempt_id/workspace_epoch），attempt 恒
+        'running'（ended_at=0），runtime_events 无 run 级完成事件——「每次
+        可审计」缺 run 级终态。本方法在 run 真实结束时落账：
+          - agent_runs.status：'' / 'created' → 终态；已终态 → noop
+            （并发/重复收口以第一次为准）；
+          - 全部未结 attempt（ended_at=0）：status=终态、ended_at=now；
+          - runtime_events 追加 'agent_run.completed'（payload 带终态
+            字段），事件绑定 attempt（A.8：每事件追到具体 attempt）。
+        """
+        now = time.time() if now is None else now
+        event_id = uuid.uuid4().hex
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT task_run_id, current_attempt_id FROM agent_runs "
+                "WHERE agent_run_id = ?",
+                (agent_run_id,),
+            ).fetchone()
+            if row is None:
+                return {"settled": False, "reason": "no_such_run"}
+            if str(row["current_attempt_id"] or "").strip():
+                attempt_id = str(row["current_attempt_id"])
+            else:
+                latest = conn.execute(
+                    "SELECT attempt_id FROM agent_attempts "
+                    "WHERE agent_run_id = ? ORDER BY started_at DESC LIMIT 1",
+                    (agent_run_id,),
+                ).fetchone()
+                attempt_id = str(latest["attempt_id"]) if latest is not None else ""
+            task_run_id = str(row["task_run_id"])
+            cur = conn.execute(
+                "UPDATE agent_runs SET status = ?, updated_at = ? WHERE agent_run_id = ? "
+                "AND status IN ('', 'created')",
+                (status, now, agent_run_id),
+            )
+            if cur.rowcount == 0:
+                return {"settled": False, "reason": "already_terminal"}
+            conn.execute(
+                "UPDATE agent_attempts SET status = ?, ended_at = ? "
+                "WHERE agent_run_id = ? AND ended_at = 0",
+                (status, now, agent_run_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO runtime_events(event_id, event_type, attempt_id, agent_run_id,
+                                          task_run_id, payload_json, created_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?)
+                """,
+                (event_id, "agent_run.completed", attempt_id, agent_run_id, task_run_id,
+                 json.dumps(payload or {}, ensure_ascii=False), now),
+            )
+        return {"settled": True, "event_id": event_id}
+
     # -------------------------------------------------------- RuntimeEvents
     def append_event(
         self,

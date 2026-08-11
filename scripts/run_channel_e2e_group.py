@@ -11,7 +11,7 @@ canonical ingress,见 http_handlers.py:6;X-User-Id/X-Channel 头 = 通道用户�
 - 无头请求(回环本机)= CLI 终端入口 → (admin, chat)
 - X-User-Id + X-Channel = 飞书等通道用户入口
 
-用例(C1-C14, 用户 seq 385 要求 + 维护记录 验收项: 强制同一审计账本
+用例(C1-C17, 用户 seq 385 要求 + 维护记录 验收项: 强制同一审计账本
 贯穿请求→审批→工具结果→失败/取消→最终回复):
   入口A CLI:  C1 越权路径写入拒绝留痕 / C2 危险命令账本留痕 / C3 超时不伪装成功
               C4 一轮多调用每调用独立账本行
@@ -22,6 +22,9 @@ canonical ingress,见 http_handlers.py:6;X-User-Id/X-Channel 头 = 通道用户�
   自动纠错:   C11 失败后换法重试轨迹可查 / C12 失败后同会话恢复
               C13 子代理失败落账/收口
   跨入口:     C14 CLI vs 飞书账本结构一致
+  修复③:      C17 真实执行期取消(强制 bash -c sleep 进入 EXECUTING 后 /stop,
+              账本 CANCELLED + run 级终态 cancelled + attempt ended_at +
+              agent_run.completed 事件 + 零副作用)
 
 用法:
   python3 scripts/run_channel_e2e_group.py --output-root <dir> [--gateway-url http://127.0.0.1:8420] [--skip-real]
@@ -45,8 +48,9 @@ from pathlib import Path
 _TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "UNKNOWN", "CANCELLED"}
 # 拒绝/失败类状态(不伪装成功)
 _NOT_OK_STATUSES = {"FAILED", "UNKNOWN", "CANCELLED", "BLOCKED", "DENIED", "REJECTED"}
-# result 状态机(control_service / http_handlers 对齐)
-_OK_RESULT_STATUSES = {"done", "finished", "ok", "error", "stopped"}
+# result 状态机(control_service / http_handlers 对齐; interrupted = /stop
+# 生效后 `_apply_cancelled_gateway_response` 写回的终态, C17 依赖)
+_OK_RESULT_STATUSES = {"done", "finished", "ok", "error", "stopped", "interrupted"}
 _GOOD_RESULT_STATUSES = {"done", "finished", "ok"}
 
 # 测试身份(回环可信来源, auth_enabled 关闭时全放行但 user_id 保留)
@@ -282,6 +286,47 @@ def _wait_ops_settled(
                 seen = signature
         time.sleep(interval)
     return _tool_ops(conn, run_ids)
+
+
+def _wait_op_running(
+    conn: sqlite3.Connection,
+    since: float,
+    *,
+    operation_type: str = "run_command",
+    timeout: float = 120.0,
+    interval: float = 1.0,
+) -> dict | None:
+    """有界等待真实执行期证据: operation_type 匹配且 EXECUTING 的 op 出现。
+
+    教训(C9): 不强制工具目标就测不到取消链——模型会直接编造完成文本。
+    现网账本实测(2026-08-11 采样) run_command 的 canonical_scope 恒为空串,
+    因此按 operation_type 匹配; 终态 op(如模型先跑的秒级命令)跳过继续等,
+    直到真正的长命令进入 EXECUTING(进程真的在跑)。超时返回 None, 由调用方
+    判 FAIL(sleep_never_executed)而不是宽容 PASS。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        runs = _runs_since(conn, since)
+        for op in _tool_ops(conn, [r["agent_run_id"] for r in runs]):
+            if (op.get("operation_type") or "") != operation_type:
+                continue
+            if op["status"] in ("EXECUTING", "STARTED", "PENDING"):
+                return op
+        time.sleep(interval)
+    return None
+
+
+def _completed_run_events(conn: sqlite3.Connection, runs: list[dict]) -> dict:
+    """各 run 的 agent_run.completed 事件(修复②: run 级完成事件)。"""
+    result = {}
+    for run in runs:
+        rows = conn.execute(
+            "SELECT event_type, payload_json FROM runtime_events "
+            "WHERE agent_run_id = ? AND event_type = 'agent_run.completed' ORDER BY seq",
+            (run["agent_run_id"],),
+        ).fetchall()
+        result[run["agent_run_id"]] = [dict(r) for r in rows]
+    return result
 
 
 def _attempts_settled(conn: sqlite3.Connection, runs: list[dict]) -> dict:
@@ -757,6 +802,110 @@ def _run_c9(args: argparse.Namespace, case: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# C17: 真实执行期取消 → 强制 bash -c "sleep 25" 进入 EXECUTING 后 /stop,
+#      账本 CANCELLED + run 级终态 cancelled + attempt ended_at +
+#      agent_run.completed 事件 + 零副作用(修复②③)
+# ---------------------------------------------------------------------------
+def _run_c17(args: argparse.Namespace, case: dict) -> dict:
+    conversation_id = f"conv-e2e-c17-{int(time.time())}"
+    marker = f"e2e-c17-marker-{int(time.time())}.txt"
+    case["goal"] = (
+        "请严格按下面两步执行, 不要省略也不要改命令:\n"
+        '1. 用 run_command 原样执行命令: bash -c "sleep 25" 并等待该命令执行完成'
+        "(注意: 必须原样写 bash -c \\\"sleep 25\\\", 不要简写成 sleep 25);\n"
+        f"2. 该命令完成后, 用 write_file 在当前目录创建文件 {marker}, 内容为 done;\n"
+        "全部完成后汇报 c17-done。"
+    )
+    if args.skip_real:
+        _case_ok(case, [])
+        return case
+    since = time.time()
+    reply = _ask(
+        args.gateway_url,
+        case["goal"],
+        user_id=CLI_USER,
+        channel=CLI_CHANNEL,
+        conversation_id=conversation_id,
+    )
+    case["ask_response"] = reply
+    if not reply.get("request_id"):
+        _case_ok(case, [f"ask_failed:{reply.get('error')}"])
+        return case
+    conn = _ledger(args.owners_root)
+    findings = []
+    sleep_op = _wait_op_running(conn, since, operation_type="run_command", timeout=120.0)
+    case["running_op"] = sleep_op
+    if sleep_op is None:
+        findings.append("sleep_never_executed: 模型未真实调用长命令, 取消链未测到")
+        case["runs"] = _runs_since(conn, since)
+        case["tool_ops"] = _tool_ops(conn, [r["agent_run_id"] for r in case["runs"]])
+        case["attempts"] = _attempts_settled(conn, case["runs"])
+        case["run_completed_events"] = _completed_run_events(conn, case["runs"])
+        _case_ok(case, findings)
+        conn.close()
+        return case
+    # 真实执行期证据已到手(EXECUTING), 立即发 /stop 打断进程组
+    stop_reply = _control(
+        args.gateway_url,
+        "/stop",
+        conversation_id=conversation_id,
+        user_id=CLI_USER,
+        channel=CLI_CHANNEL,
+    )
+    case["stop_response"] = stop_reply
+    result = _poll_result(args.gateway_url, reply["request_id"], timeout=120)
+    case["result"] = result
+    # 等 sleep op 落终态(CANCELLED 由进程组 kill 保证)
+    deadline = time.time() + 60.0
+    ops = []
+    while time.time() < deadline:
+        runs = _runs_since(conn, since)
+        current = _tool_ops(conn, [r["agent_run_id"] for r in runs])
+        hit = [o for o in current if o["operation_id"] == sleep_op["operation_id"]]
+        if hit and hit[0]["status"] in _TERMINAL_STATUSES:
+            ops = current
+            break
+        time.sleep(2.0)
+    if not ops:
+        runs = _runs_since(conn, since)
+        ops = _tool_ops(conn, [r["agent_run_id"] for r in runs])
+    case["runs"] = runs
+    case["tool_ops"] = ops
+    case["attempts"] = _attempts_settled(conn, runs)
+    case["run_completed_events"] = _completed_run_events(conn, runs)
+    conn.close()
+    if stop_reply.get("http_status", 0) >= 400 and stop_reply.get("error"):
+        findings.append(f"stop_failed:{stop_reply.get('error')}")
+    if str(result.get("status") or "") not in _OK_RESULT_STATUSES:
+        findings.append(f"result_unexpected_status:{result.get('status')}")
+    sleep_statuses = [o["status"] for o in ops if o["operation_id"] == sleep_op["operation_id"]]
+    if not sleep_statuses:
+        findings.append(f"sleep_op_missing:{sleep_op['operation_id']}")
+    elif sleep_statuses[0] not in _TERMINAL_STATUSES:
+        findings.append(f"sleep_op_unsettled:{sleep_op['operation_id']}")
+    elif sleep_statuses[0] != "CANCELLED":
+        findings.append(f"sleep_op_not_cancelled:{sleep_statuses[0]}")
+    for op in ops:
+        if op["operation_id"] == sleep_op["operation_id"]:
+            continue
+        if op["status"] == "SUCCEEDED":
+            findings.append(f"side_effect_after_stop:{op['operation_type']}:{op['operation_id']}")
+        elif op["status"] not in _TERMINAL_STATUSES:
+            findings.append(f"tool_op_unsettled:{op['operation_id']}")
+    for run in runs:
+        if run["status"] not in ("cancelled", "done", "unfinished", "failed"):
+            findings.append(f"run_no_terminal_status:{run['agent_run_id']}:{run['status']}")
+    for run_id, evs in case["run_completed_events"].items():
+        if not evs:
+            findings.append(f"missing_run_completed_event:{run_id}")
+    for run_id, attempt_list in case["attempts"].items():
+        if not any(a["ended_at"] > 0 for a in attempt_list):
+            findings.append(f"attempt_not_ended:{run_id}")
+    _case_ok(case, findings)
+    return case
+
+
+# ---------------------------------------------------------------------------
 # C10: 失败重试有界 → 不无限重试, 所有行终态
 # ---------------------------------------------------------------------------
 def _run_c10(args: argparse.Namespace, case: dict) -> dict:
@@ -1130,6 +1279,7 @@ def _case_functions() -> dict[str, object]:
         "C14": _run_c14,
         "C15": _run_c15,
         "C16": _run_c16,
+        "C17": _run_c17,
     }
 
 
