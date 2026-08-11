@@ -808,6 +808,11 @@ class ToolLoopService:
     ):
         return _final_response_after_unknown_outcome_halt(self._agent, params, tool_rounds)
 
+    def _final_response_after_no_action_gate(
+        self, params: ToolLoopExecuteParams, tool_rounds: int
+    ):
+        return _final_response_after_no_action_gate(self._agent, params, tool_rounds)
+
     def _execute_one_tool_call(self, request: ToolCallExecuteParams):
         return execute_one_tool_call(self._agent, request)
 
@@ -971,10 +976,19 @@ def _tool_step_or_limit(service: ToolLoopService, request: _ToolStepRequest):
             next_round,
         )
         return final_prompt, final_response, next_round
-    # unknown 副作用收口(T-USER-001):副作用结果不确定连续达阈值后不再给模型
-    # 工具权,按未完成收口并如实汇报(与 repeated_failure_halt 正交,不自动续跑)。
+    # unknown 副作用收口(T-USER-001):副作用结果不确定(单次即收口,对齐错误合同
+    # retryable=False)后不再给模型工具权,按未完成收口并如实汇报
+    # (与 repeated_failure_halt 正交,不自动续跑)。
     if getattr(request.params, "unknown_outcome_halt", None) is not None:
         final_prompt, final_response = service._final_response_after_unknown_outcome_halt(
+            request.params,
+            next_round,
+        )
+        return final_prompt, final_response, next_round
+    # no-action 闸收口(复核 seq 339):informational 轮模型反复抗拦截仍提调用,
+    # 连续达限后不再给工具权,收口轮等用户明确指示(与 unknown 收口正交)。
+    if getattr(request.params, "no_action_gate_halt", False):
+        final_prompt, final_response = service._final_response_after_no_action_gate(
             request.params,
             next_round,
         )
@@ -1143,46 +1157,44 @@ def _mark_repeated_failure_halt(agent, record: ToolCallRecordParams) -> None:
     )
 
 
-# T-USER-001 真机铁证(2026-08-11):TOOL_OPERATION_OUTCOME_UNKNOWN 连续出现后
+# T-USER-001 真机铁证(2026-08-11):TOOL_OPERATION_OUTCOME_UNKNOWN 出现后
 # 模型仍继续发起新调用(写文件命令 reconcile 成 unknown 后又连发 5 次调用)。
 # unknown 语义=「工具已执行但副作用是否完成不确定」(见 tool_operation_coordinator
-# reconcile 说明),继续调用只会制造更多不确定副作用 → 连续 2 次即收口,
-# 不再给模型工具权。与 repeated_failure_halt(同类失败计数)正交:unknown 不依赖
-# 失败类相同,success/普通失败(confirmed)都会清零连续段。
-_UNKNOWN_OUTCOME_STREAK_ATTR = "_unknown_outcome_streak"
-_UNKNOWN_OUTCOME_HALT_THRESHOLD = 2
-
-
+# reconcile 说明),继续调用只会制造更多不确定副作用。错误合同(error_taxonomy)
+# 已把 TOOL_OPERATION_OUTCOME_UNKNOWN 定为 retryable=False + MANUAL_REVIEW
+# (禁止自动重复执行)→ 首次出现即收口,不再给模型工具权,与本合同一致
+# (复核 seq 339:连续 2 次才收口与单次即 hard-stop 的合同矛盾,已改)。
+# 与 repeated_failure_halt(同类失败计数)正交:unknown 不依赖失败类相同。
+# 收口轮走 _final_response_after_unknown_outcome_halt,任务保持 unfinished 等用户核对。
 def _mark_unknown_outcome_halt(agent, record: ToolCallRecordParams) -> None:
     if record.params.repeated_failure_halt is not None:
         return
     if getattr(record.params, "unknown_outcome_halt", None) is not None:
         return
     effect = str(getattr(record.result, "effect_outcome", "") or "").strip().lower()
-    try:
-        streak = int(getattr(record.params, _UNKNOWN_OUTCOME_STREAK_ATTR, 0) or 0)
-    except (TypeError, ValueError):
-        streak = 0
     if effect != "unknown":
-        if streak:
-            object.__setattr__(record.params, _UNKNOWN_OUTCOME_STREAK_ATTR, 0)
-        return
-    streak += 1
-    object.__setattr__(record.params, _UNKNOWN_OUTCOME_STREAK_ATTR, streak)
-    if streak < _UNKNOWN_OUTCOME_HALT_THRESHOLD:
         return
     object.__setattr__(
         record.params,
         "unknown_outcome_halt",
-        (record.call.tool_name, "TOOL_OPERATION_OUTCOME_UNKNOWN", streak),
+        (record.call.tool_name, "TOOL_OPERATION_OUTCOME_UNKNOWN", 1),
     )
     record.params.tool_context.append(
         "[tool-system]\n"
-        f"工具 {record.call.tool_name} 已连续 {streak} 次副作用结果不确定"
+        f"工具 {record.call.tool_name} 出现副作用结果不确定"
         "(TOOL_OPERATION_OUTCOME_UNKNOWN)，系统无法确认操作是否生效。"
-        "本轮停止发起任何新的工具调用，按未完成状态如实汇报：只说明已经执行的操作"
-        "与不确定的事项，不要继续尝试、重做或验证。"
+        "按错误合同该结果不可重试、需人工核对。本轮停止发起任何新的工具调用，"
+        "按未完成状态如实汇报：只说明已经执行的操作与不确定的事项，"
+        "不要继续尝试、重做或验证。"
     )
+
+
+# no-action 结构化闸(复核 seq 339 第 2 点):评估判 informational(requires_action=False)
+# 时模型仍提出 ToolCall,不能直接进 handler——由执行层拦截(TOOL_ACTION_NOT_REQUIRED,
+# handler 不执行),有界拦截(连续 2 轮)后走收口轮等用户明确指示。
+# 判定只用结构化信号(assessment 状态 + 调用出现与否 + 轮数),不解析模型话术。
+_NO_ACTION_GATE_STREAK_ATTR = "_no_action_gate_streak"
+_NO_ACTION_GATE_HALT_LIMIT = 2
 
 
 # LLM: 四级阶梯的 L3 收益递减判定:连续多轮收口且每轮都没有任何成功工具结果
@@ -1302,8 +1314,9 @@ def _final_response_after_repeated_failure(
     return final_prompt, final_response
 
 
-# T-USER-001 收口:unknown 副作用连续出现后模型不再有工具权,基于真实工具记录
-# 给诚实总结;不自动续跑(用户未必要求继续,续跑会再造一轮不确定副作用)。
+# T-USER-001 收口:unknown 副作用出现(单次即收口,对齐错误合同)后模型不再有
+# 工具权,基于真实工具记录给诚实总结;不自动续跑(用户未必要求继续,续跑会再造
+# 一轮不确定副作用)。
 def _final_response_after_unknown_outcome_halt(
     agent, params: ToolLoopExecuteParams, tool_rounds: int
 ):
@@ -1323,6 +1336,32 @@ def _final_response_after_unknown_outcome_halt(
         final_response,
         runtime_status="unfinished",
         runtime_reason="TOOL_OPERATION_OUTCOME_UNKNOWN",
+        runtime_source="tool_loop",
+    )
+    return final_prompt, final_response
+
+
+# no-action 闸收口:informational 轮模型连续抗拦截提调用达限后不再给工具权,
+# 收口轮剥掉工具调用并按未完成交接(等用户明确指示,而非自动执行或自动完成)。
+def _final_response_after_no_action_gate(
+    agent, params: ToolLoopExecuteParams, tool_rounds: int
+):
+    final_prompt = build_tool_loop_prompt(agent, params)
+    final_response = generate_model_response(
+        ModelGenerateParams(
+            agent=agent,
+            params=params,
+            prompt=final_prompt,
+            tool_rounds=tool_rounds,
+        )
+    )
+    final_response = without_tool_call_after_limit(
+        params, final_response, reason="no_action_gate"
+    )
+    final_response = replace(
+        final_response,
+        runtime_status="unfinished",
+        runtime_reason="TOOL_ACTION_NOT_REQUIRED",
         runtime_source="tool_loop",
     )
     return final_prompt, final_response

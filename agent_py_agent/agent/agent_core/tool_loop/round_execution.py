@@ -9,6 +9,7 @@ from typing import ClassVar, Literal
 
 from ...backends import ModelResponse
 from ...concurrency.interrupt import is_interrupted, register_interrupt_callback
+from ...contracts.required_actions import required_action_assessment_failed
 from ...conversation.authority import conversation_transcript_is_authoritative
 from ...memory_archive import estimate_tokens
 from ...tooling.action_policy import ActionDecision
@@ -126,6 +127,11 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
         _bound_conversation_workspace_call(request.agent, call)
         for call in _calls_for_this_execution_round(request)
     ]
+    # no-action 结构化闸(复核 seq 339):评估判 informational(requires_action=False)
+    # 时模型仍提出的 ToolCall 一律不进 handler——全部转结构化拦截结果
+    # (TOOL_ACTION_NOT_REQUIRED, handler_executed=False),并做有界计数。
+    if _no_action_gate_active(request.params):
+        return _gate_all_calls_for_no_action(request, calls)
     progress = _ToolRoundProgress()
     position = 0
     while position < len(calls):
@@ -164,6 +170,86 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
     )
     _enforce_turn_context_budget(request.params, before_context_count)
     return progress.subagent_output_written
+
+
+# no-action 闸激活条件:与 tool_choice_for_required_actions 的 informational 分支
+# 完全一致(无 actions + 评估非 failed + source=model_structured + requires_action=False),
+# 纯结构化信号判定,不解析模型话术。actions 存在(open 或 settled)时闸不激活——
+# settled 场景模型仍需自主调用验证(修完文件后跑测试等),不能被误拦。
+def _no_action_gate_active(params: ToolLoopExecuteParams) -> bool:
+    snapshot = getattr(params, "effective_contract_snapshot", None)
+    if snapshot is None:
+        return False
+    if tuple(getattr(snapshot, "required_actions", ()) or ()):
+        return False
+    if required_action_assessment_failed(snapshot):
+        return False
+    assessment = getattr(snapshot, "required_action_assessment", None)
+    return (
+        isinstance(assessment, dict)
+        and assessment.get("source") == "model_structured"
+        and assessment.get("requires_action") is False
+    )
+
+
+def _no_action_gated_result(call: ToolCall) -> ToolResult:
+    payload = json.dumps(
+        {
+            "error": "本条消息被宿主评估为信息性陈述(requires_action=false),不执行任何操作。",
+            "hint": "如需执行操作,请由用户明确指示后重新发起。",
+        },
+        ensure_ascii=False,
+    )
+    return ToolResult.failed(
+        call,
+        payload,
+        error_code="TOOL_ACTION_NOT_REQUIRED",
+        failure_stage="runtime_gate",
+        facts=ToolFailureFacts(status="failed"),
+    )
+
+
+# 函数用途: informational 轮对模型提出的全部调用做有界结构化拦截——handler 不执行、
+# 每调用一条拦截结果(模型可读),连续 _NO_ACTION_GATE_HALT_LIMIT 轮拦截后设
+# no_action_gate_halt,由 _tool_step_or_limit 收口轮接管(剥工具调用,等用户明确指示)。
+def _gate_all_calls_for_no_action(
+    request: ToolRoundExecutionRequest,
+    calls: list[ToolCall],
+) -> bool:
+    from .._tool_loop_service import _NO_ACTION_GATE_HALT_LIMIT, _NO_ACTION_GATE_STREAK_ATTR
+
+    streak = 0
+    try:
+        streak = int(getattr(request.params, _NO_ACTION_GATE_STREAK_ATTR, 0) or 0)
+    except (TypeError, ValueError):
+        streak = 0
+    streak += 1
+    object.__setattr__(request.params, _NO_ACTION_GATE_STREAK_ATTR, streak)
+    for idx, call in enumerate(calls, start=1):
+        result = _no_action_gated_result(call)
+        _emit_tool_progress(
+            ToolProgressEvent(request, idx, call, "deferred", "未执行", result=result)
+        )
+        request.record_one(
+            ToolCallRecordParams(
+                request.params,
+                request.tool_rounds,
+                idx,
+                call,
+                result,
+                ("received", "gated", "persisted", "projected"),
+            )
+        )
+    if streak >= _NO_ACTION_GATE_HALT_LIMIT:
+        object.__setattr__(request.params, "no_action_gate_halt", True)
+    request.params.tool_context.append(
+        "[tool-system:no-action-gate]\n"
+        "本条用户消息被评估为信息性陈述(requires_action=false)，"
+        f"系统已拦截本轮 {len(calls)} 个工具调用（TOOL_ACTION_NOT_REQUIRED，未执行）。"
+        "请不要为这条消息执行任何操作或写入任何文件；直接如实回答即可，"
+        "如需执行操作请等用户明确指示。"
+    )
+    return False
 
 
 def _defer_unstarted_calls_if_needed(

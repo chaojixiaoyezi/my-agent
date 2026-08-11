@@ -1988,6 +1988,16 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.MANUAL_REVIEW.value,
         recovery_hint="MANAGED 权威链缺失（无权威库/run 未登记/attempt 为空），本次工具没有运行；修复装配后重试，禁止自行降级。",
     ),
+    "TOOL_ACTION_NOT_REQUIRED": ErrorContract(
+        code="TOOL_ACTION_NOT_REQUIRED",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint=(
+            "宿主评估本条消息为信息性陈述(requires_action=false)，执行层拒绝执行工具调用；"
+            "如需执行请由用户明确指示后重新发起。"
+        ),
+    ),
     "TOOL_OPERATION_IDENTITY_CONFLICT": ErrorContract(
         code="TOOL_OPERATION_IDENTITY_CONFLICT",
         category="tool",
