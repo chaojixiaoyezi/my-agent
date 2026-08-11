@@ -1974,6 +1974,20 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
         recovery_hint="权威副作用账本未能在执行前建立占位；本次工具没有运行，待存储恢复后可重试。",
     ),
+    "TOOL_RESOURCE_SCOPE_RESOLUTION_FAILED": ErrorContract(
+        code="TOOL_RESOURCE_SCOPE_RESOLUTION_FAILED",
+        category="tool",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="工具的资源作用域在 claim 前解析失败（实现缺陷），本次工具没有运行；上报该故障，禁止自行降级或无保护重试。",
+    ),
+    "TOOL_AUTHORITY_CONTEXT_MISSING": ErrorContract(
+        code="TOOL_AUTHORITY_CONTEXT_MISSING",
+        category="tool",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="MANAGED 权威链缺失（无权威库/run 未登记/attempt 为空），本次工具没有运行；修复装配后重试，禁止自行降级。",
+    ),
     "TOOL_OPERATION_IDENTITY_CONFLICT": ErrorContract(
         code="TOOL_OPERATION_IDENTITY_CONFLICT",
         category="tool",

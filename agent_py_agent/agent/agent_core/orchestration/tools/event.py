@@ -35,7 +35,15 @@ class RaiseEventTool(BaseTool):
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("mutating"),
         idempotency_policy=IdempotencyPolicy("operation"),
-        resource_scopes=ResourceScopePolicy(parameter_names=("thread_id", "task_id", "dedupe_key")),
+        # seq 253 闭合：thread_id/task_id/dedupe_key 是逻辑 ID 不是路径。
+        resource_scopes=ResourceScopePolicy(
+            parameter_names=("thread_id", "task_id", "dedupe_key"),
+            parameter_kinds={
+                "thread_id": "logical",
+                "task_id": "logical",
+                "dedupe_key": "logical",
+            },
+        ),
     )
 
     def __init__(self, agent: SimpleAgent):

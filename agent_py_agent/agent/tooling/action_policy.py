@@ -30,10 +30,10 @@ from .input_schema import validate_tool_input
 from .models import (
     ToolRuntime,
     ToolRuntimeSnapshot,
-    resource_scopes_for_runtime_policy,
     tool_effect_for_runtime_policy,
 )
 from .registry_rate_limit_policy import tool_rate_limit_policy
+from .workspace_scopes import authoritative_workspace_scopes
 from .runtime_boundary import exact_read_boundary_error
 from .runtime_contracts import ToolCall
 from .write_boundary import validate_write_boundary
@@ -157,9 +157,11 @@ class ActionPolicy:
         if rate_decision is not None:
             return rate_decision
 
-        scopes = resource_scopes_for_runtime_policy(
-            runtime.runtime_policy,
-            call.arguments,
+        scopes = authoritative_workspace_scopes(
+            workspace_root=request.workspace_root,
+            write_boundary=request.write_boundary,
+            policy=runtime.runtime_policy,
+            arguments=call.arguments,
             additional_scopes=tuple(
                 f"command_path:{item}" for item in command.paths
             )

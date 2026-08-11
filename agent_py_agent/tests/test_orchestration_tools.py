@@ -16,6 +16,24 @@ from agent_py_agent.agent.capability import CapabilityRouter
 from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
 
 
+def _register_authority_chain(agent: object, run_id: str, *, task_id: str = "") -> str:
+    """seq 253 闭合：MANAGED authority 门要求 run 登记真实权威链（生产同一
+    登记入口 record_run_creation），返回 current attempt_id。"""
+
+    repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+    if repo is None:
+        return "test-attempt"
+    record = repo.record_run_creation(
+        owner_id="owner-a",
+        goal=f"orchestration gate {run_id}",
+        conversation_task_id=task_id or f"task-{run_id}",
+        thread_id=f"thread-{run_id}",
+        run_id=run_id,
+        role="assistant",
+    )
+    return str(record["attempt_id"])
+
+
 def test_create_subagents_model_spec_uses_template_index_not_full_prompt():
     from agent_py_agent.agent.agent_core.orchestration.tool_specs import (
         build_create_subagents_model_spec,
@@ -178,6 +196,7 @@ class TestTaskProgressRegistryTool:
             AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path
         )
         agent._main_agent_run_id = "run-main"
+        attempt_id = _register_authority_chain(agent, "run-main")
 
         result = execute_registry_test_call(
             agent.tools,
@@ -189,6 +208,7 @@ class TestTaskProgressRegistryTool:
             },
             run_id="run-main",
             call_id="task-progress-valid",
+            attempt_id=attempt_id,
         )
 
         assert result.ok is True
@@ -252,6 +272,7 @@ class TestTaskProgressRegistryTool:
             },
             run_id="run-scoped",
             call_id="call-1",
+            attempt_id=_register_authority_chain(agent, "run-scoped", task_id="task-scoped"),
             write_boundary={"task_id": "task-scoped"},
         )
 
@@ -285,6 +306,7 @@ class TestTaskProgressRegistryTool:
             },
             run_id="run-main",
             call_id="task-progress-soft-feedback",
+            attempt_id=_register_authority_chain(agent, "run-main"),
         )
         payload = json.loads(result.output)
 

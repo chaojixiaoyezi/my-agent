@@ -9,10 +9,14 @@ and are deliberately not consulted for execution authority.
 """
 
 import json
+import logging
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from ..local_storage import (
     TOOL_OPERATION_FAILED,
@@ -26,6 +30,7 @@ from ..local_storage import (
     ToolOperationReopenRequest,
     new_tool_operation_holder,
 )
+from ..runtime_db.managed_operation_store import AuthorityContextMissing
 from .models import (
     ToolFailureStage,
     ToolHandlerOutcome,
@@ -54,6 +59,9 @@ class ToolOperationExecutionRequest:
     timeout_seconds: int
     invoke: Callable[[], ToolHandlerOutcome]
     reconcile: Callable[[ToolOperationRecord], ToolOperationReconciliation] | None = None
+    resource_scopes: tuple[str, ...] = ()
+    # seq 245 P2：调用者 attempt 身份透传（来源 = ToolCall.attempt_id）。
+    attempt_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -128,19 +136,26 @@ def _claim_operation(
                 idempotency_namespace=request.idempotency_namespace,
                 holder=holder,
                 lease_expires_at=lease_expires_at,
+                resource_scopes=request.resource_scopes,
+                attempt_id=request.attempt_id,
             )
         )
     except Exception as exc:  # noqa: BLE001 - authoritative store failures fail closed
+        authority_missing = isinstance(exc, AuthorityContextMissing)
         result = _operation_error(
             request.tool_name,
-            "TOOL_OPERATION_STORE_UNAVAILABLE",
-            "副作用操作账本无法建立执行占位，工具没有运行。",
+            "TOOL_AUTHORITY_CONTEXT_MISSING"
+            if authority_missing
+            else "TOOL_OPERATION_STORE_UNAVAILABLE",
+            "MANAGED 权威链缺失，无法建立执行占位，工具没有运行。"
+            if authority_missing
+            else "副作用操作账本无法建立执行占位，工具没有运行。",
         )
         _attach_operation_facts(
             result,
             request,
             status="not_started",
-            action="store_unavailable",
+            action="authority_missing" if authority_missing else "store_unavailable",
             diagnostic=type(exc).__name__,
         )
         return apply_tool_execution_facts(
@@ -474,7 +489,7 @@ def _execute_claimed_operation(
     request: ToolOperationExecutionRequest,
     claim: ToolOperationClaim,
 ) -> ToolHandlerOutcome:
-    result = request.invoke()
+    result = _invoke_with_lease_renewal(request, claim)
     operation_status = _operation_status_for_result(result)
     unknown_reason = ""
     if operation_status == TOOL_OPERATION_UNKNOWN:
@@ -561,6 +576,49 @@ def _completion_persistence_unknown_result(
         failure_stage=ToolFailureStage.PERSISTENCE.value,
         duration_ms=reported.duration_ms,
     )
+
+
+def _invoke_with_lease_renewal(
+    request: ToolOperationExecutionRequest,
+    claim: ToolOperationClaim,
+) -> ToolHandlerOutcome:
+    """invoke 期间续租守护线程（seq 258 #1：renew 生产调用链）。
+
+    长 handler（进程执行/等待）阻塞超过 lease 时，另一请求会按 lease 过期把
+    本 EXECUTING 行标 UNKNOWN 并释放锁 → 竞态抢锁。续租线程在 lease 过半前
+    滚动续租（holder CAS + workspace_epoch CAS 由 store 原语保证），invoke
+    一返回立即停止——handler 结果与续租成败无关（续不动 = 锁自然过期，
+    行为不劣化）。LOCAL store 无续租契约（结构化信号）→ 行为不变。
+    """
+    renew = getattr(request.store, "renew_tool_operation_lease", None)
+    if not callable(renew):
+        return request.invoke()
+    record = claim.record
+    remaining = max(0.0, float(record.lease_expires_at or 0) - time.time())
+    interval = max(0.5, remaining / 2.0)
+    stop = threading.Event()
+
+    def renew_loop() -> None:
+        while not stop.wait(interval):
+            try:
+                renew(
+                    operation_id=record.operation_id,
+                    holder_id=record.holder_id,
+                    lease_expires_at=time.time() + interval * 2 + 5,
+                    owner_id=record.owner_id,
+                    run_id=record.run_id,
+                )
+            except Exception:  # noqa: BLE001 - 续租失败只停线程，不影响 handler
+                logger.warning("tool operation lease renewal stopped", exc_info=True)
+                return
+
+    thread = threading.Thread(target=renew_loop, daemon=True)
+    thread.start()
+    try:
+        return request.invoke()
+    finally:
+        stop.set()
+        thread.join(timeout=5)
 
 
 def _operation_status_for_result(result: ToolHandlerOutcome) -> str:

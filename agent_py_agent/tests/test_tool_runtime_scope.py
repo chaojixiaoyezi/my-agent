@@ -7,6 +7,7 @@ outside their allowlist, even though the process-wide registry contains them.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
@@ -22,12 +23,41 @@ from agent_py_agent.tests._tool_runtime_harness import (
 )
 
 
+def _register_run(agent, run_id: str) -> str:
+    """MANAGED 真实装配：run 必须先登记权威链（record_run_creation 建 current
+    attempt），工具执行才能过 require_authority 门。对齐生产：真实 run 在执行
+    前由 create_run 登记（B 切片后主链按 manager 装配选权威 store）。幂等：
+    已登记的 run 直接跳过。返回真实 attempt_id（seq 248 #1：require_authority
+    strict 后调用者 attempt 必须与登记链一致，不能用占位 attempt）。"""
+    repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+    if repo is None:
+        return ""
+    with repo._runtime_connection() as conn:
+        existing = conn.execute(
+            "SELECT current_attempt_id FROM agent_runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+    if existing is not None:
+        return str(existing["current_attempt_id"] or "")
+    created = repo.record_run_creation(
+        owner_id="owner-scope-test",
+        goal=f"scope test {run_id}",
+        conversation_task_id=f"task-{run_id}",
+        thread_id=f"thread-{run_id}",
+        run_id=run_id,
+        role="assistant",
+    )
+    return str(created.get("attempt_id") or "")
+
+
 def _execute(agent, tool_name, arguments, *, allowed_tools=None, snapshot=None):
     runtime_snapshot = snapshot or agent.tools.runtime_snapshot(
         allowed_tools=allowed_tools,
         run_id="scope-test-run",
     )
     call = canonical_test_call(runtime_snapshot, tool_name, arguments)
+    attempt_id = _register_run(agent, call.run_id)
+    if attempt_id:
+        call = replace(call, attempt_id=attempt_id)
     return agent.tools.execute_tool(
         call,
         write_boundary=None,

@@ -96,6 +96,19 @@ class PublishAuditUpdateTool(BaseTool):
         idempotency_policy=IdempotencyPolicy("operation"),
         resource_scopes=ResourceScopePolicy(
             parameter_names=("source_probe_refs", "remove_source_ids"),
+            # seq 261 #3：probe refs / source ids 是逻辑 ID 不是写根；不标 logical
+            # 会被当 path 锁 workspace:{cwd}/<id>（子）+ 缺省 None 兜底锁
+            # workspace:{cwd}（父）→ 父子自冲突，publish 永远调不通。
+            parameter_kinds={
+                "source_probe_refs": "logical",
+                "remove_source_ids": "logical",
+            },
+            # seq 266 #1：probe refs / source ids 引用的是源资源（probe 条目 vs
+            # 持久源），各自统一域——同名参数跨工具不互相污染。
+            resource_domains={
+                "source_probe_refs": "source_probe",
+                "remove_source_ids": "source",
+            },
         ),
         promotes_task=True,
     )
@@ -222,6 +235,25 @@ class PublishAuditUpdateTool(BaseTool):
                 error_code="AUDIT_PREPARE_ALREADY_PUBLISHED",
             )
         return ToolAvailability.ready()
+
+    def effective_resource_scopes(
+        self,
+        arguments: dict[str, object],
+        write_boundary: dict | None,
+        workspace_root: object,
+    ) -> tuple[str, ...]:
+        """seq 266 #4：publish 修改的是「当前准备轮的命名 Audit」本身，不是
+        refs 引用的 probe/源。claim 前补锁 audit:{task_id}——同 Audit 的无
+        refs 发布与带不同 refs 发布必须互斥；task_id 从当前会话可信 attrs
+        取（与 availability/请求构造同一来源），取不到保守锁 audit:current，
+        绝不空锁。
+        """
+        try:
+            attrs = current_conversation_task_attributes(self.agent)
+            task_id = str(attrs.get("conversation_task_id") or "").strip()
+        except Exception:
+            task_id = ""
+        return (f"audit:{task_id}" if task_id else "audit:current",)
 
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         request, error = _audit_publish_request(self.agent, params)

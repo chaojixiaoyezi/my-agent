@@ -308,6 +308,56 @@ class SimpleAgentRuntimeMixin:
         return self.memory.search(query, top_k or self.config.memory_top_k)
 
 
+def _bind_main_agent_authority(agent, params: RunParams) -> RunParams:
+    """MANAGED 下主代理 run 登记权威链（seq 255 单一闭合：root/main AgentRun）。
+
+    主代理与子代理共用 agent.run：子代理 run 的权威链由 create_run
+    （record_run_creation）+ prepare_runner_attempt（create_attempt 轮换）
+    登记，runner 上下文非空 → 此处跳过（结构化信号，不重复轮换）。
+    主代理 run 无登记 → record_run_creation 建 root Task/TaskRun/AgentRun/
+    首 attempt；compact/账本续跑轮（同 run_id 已登记）→ create_attempt
+    轮换 current pointer（G4 语义：旧 attempt 非终态操作转 UNKNOWN）。
+
+    返回 replace 后的 params（attempt_id=DB current attempt，工具循环
+    `_loop_attempt_id` 回落读 params 即拿到权威 attempt，与子代理同源）；
+    LOCAL_UNMANAGED（无 repo）/无 run 上下文/子代理上下文 → 原样返回，
+    投影 id 行为不变。
+    """
+    from .runner.context import current_subagent_run_id
+
+    if current_subagent_run_id(agent):
+        return params  # 子代理 runner：登记链已由 create_run + prepare_runner_attempt 建立
+    subagents = getattr(agent, "subagents", None)
+    repo = getattr(subagents, "runtime_db", None)
+    run_id = str(params.run_id or "").strip()
+    if repo is None or not run_id:
+        return params  # LOCAL_UNMANAGED / 无 run 上下文 → 投影（显式选择）
+    if repo.agent_run_for_run_id(run_id) is None:
+        attrs = params.task_attributes if isinstance(params.task_attributes, dict) else {}
+        home_paths = getattr(agent, "home_paths", None)
+        owner_id = str(getattr(home_paths, "owner_id", "") or "local/main").strip()
+        # root Task 身份对齐门比对键：conversation_task_id 取调用方 task_id
+        # （run scope 的 task_id 兜底 = run_id），保证 require_authority 的
+        # tasks.task_id 比对与调用者声明一致，无需再回存 runtime_authority attrs。
+        task_id = str(params.task_id or run_id).strip()
+        record = repo.record_run_creation(
+            owner_id=owner_id,
+            goal=str(getattr(params, "root_user_prompt", "") or "")[:200],
+            conversation_task_id=task_id,
+            thread_id=str(attrs.get("conversation_thread_id") or "").strip(),
+            run_id=run_id,
+            role="main",
+        )
+        attempt_id = str(record.get("attempt_id") or "").strip()
+    else:
+        row = repo.agent_run_for_run_id(run_id)
+        attempt = repo.create_attempt(str(row["agent_run_id"]))
+        attempt_id = str(attempt["attempt_id"] or "").strip()
+    if not attempt_id:
+        return params
+    return replace(params, attempt_id=attempt_id)
+
+
 # LLM: 顶层运行和所有自动 Compact 续接共用这一返回缝隙；只有最终不再续接时才能投影 standalone 终态。
 # 函数用途: 执行一次完整请求，必要时续接 Compact，并在真正结束时收尾任务工作区。
 def _run_with_params(agent, user_prompt: str, params: RunParams):
@@ -355,6 +405,7 @@ def _run_with_params(agent, user_prompt: str, params: RunParams):
 
 def _run_once_with_params(agent, user_prompt: str, params: RunParams):
     params = attach_run_task_workspace_context(agent, params, user_prompt)
+    params = _bind_main_agent_authority(agent, params)
     root_user_prompt = params.root_user_prompt or user_prompt
     with current_prompt_scope(agent, user_prompt, params):
         if agent.config.enable_tools:

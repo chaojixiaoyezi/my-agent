@@ -97,11 +97,69 @@ class CancelSubagentsTool(BaseTool):
             by_parameter=(("dry_run", (("true", "read_only"), ("false", "dangerous"))),),
         ),
         idempotency_policy=IdempotencyPolicy("operation"),
-        resource_scopes=ResourceScopePolicy(parameter_names=("run_id", "run_ids", "root_id")),
+        # seq 253 闭合：run_id/run_ids/root_id 是逻辑 ID（任务标识），不是物理
+        # 路径——不标 logical 会被 scope 投影 resolve 成 workspace 假写根，与
+        # workspace_root 物理重叠 → RuntimeConflictError → store_unavailable。
+        resource_scopes=ResourceScopePolicy(
+            parameter_names=("run_id", "run_ids", "root_id"),
+            parameter_kinds={"run_id": "logical", "run_ids": "logical", "root_id": "logical"},
+            # seq 266 #1：run_id/run_ids 是同一 agent_run 资源的两个参数入口
+            # （handler 的 _explicit_run_ids 归一），必须锁同一 scope——
+            # 否则 cancel(run_id=r-1) 与 cancel(run_ids=[r-1]) 可同时过锁。
+            resource_domains={
+                "run_id": "agent_run",
+                "run_ids": "agent_run",
+                # root_id 是子树根（run_tree 域）；子树展开的具体 run 由
+                # effective_resource_scopes 在 claim 前锁到 agent_run 域。
+                "root_id": "run_tree",
+            },
+        ),
     )
 
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
+
+    def effective_resource_scopes(
+        self,
+        arguments: dict[str, object],
+        write_boundary: dict | None,
+        workspace_root: object,
+    ) -> tuple[str, ...]:
+        """seq 266 #3：claim 前展开运行期目标（root 子树 / status 过滤），
+        锁到具体 agent_run 域——否则 cancel(root_id=X) 可与直接点名
+        cancel(run_id=child-1) 并发改同一 run。展开失败保守锁稳定域
+        （run_tree:{root_id} / cancel:pool），绝不空锁。
+        """
+        root_id = str(arguments.get("root_id") or "").strip()
+        statuses: set[str] = set()
+        try:
+            status_result = _status_filter(arguments.get("status"))
+            if status_result.ok:
+                statuses = status_result.statuses
+        except Exception:
+            statuses = set()
+        # 显式 run_id/run_ids 已由参数投影锁 agent_run 域；无 root 无 status
+        # 时目标集为空——均无需 hook 补充。
+        if not root_id and not statuses:
+            return ()
+        try:
+            tasks = _list_runs_for_cancel(self.agent)
+        except Exception:
+            return (f"logical:run_tree:{root_id}",) if root_id else ("logical:cancel:pool",)
+        if not tasks.ok:
+            return (f"logical:run_tree:{root_id}",) if root_id else ("logical:cancel:pool",)
+        ids: list[str] = []
+        if root_id:
+            ids.extend(_subtree_ids(tasks.tasks, root_id))
+        if statuses and not root_id:
+            ids.extend(
+                str(task.id)
+                for task in tasks.tasks
+                if task_status_in(task.status, statuses)
+            )
+        if not ids:
+            return ()
+        return tuple(dict.fromkeys(f"logical:agent_run:{item}" for item in ids))
 
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         return execute_cancel_subagents(self.agent, params)

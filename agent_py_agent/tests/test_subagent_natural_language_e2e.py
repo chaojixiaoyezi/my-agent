@@ -245,15 +245,21 @@ def test_natural_language_root_drives_child_and_grandchild_e2e(tmp_path: Path) -
         runner_concurrency="1",
         runner_start_rate="1",
         subagent_workspace="subs",
+        # seq 261 测试方向：有 owner home → MANAGED 权威链（runtime.db 挂载 +
+        # 登记链生效），全程 public agent.run 无手工 record_run_creation——
+        # 主代理/子代理 run 与 attempt 必须是生产主链写出来的。
+        my_agent_home=str(tmp_path / "home"),
     )
     agent = SimpleAgent(config, tmp_path)
     backend = NaturalFurnitureRootBackend(site_dir)
     agent.backend = backend
     agent._subagent_worker_backend_override = backend.runner
 
+    main_run_id = "nl-e2e-main-run"
     result = agent.run(
         "用单文件html做一个高端现代家具品牌的网站首页，风格高级、简洁、有设计感，适合真实商业品牌使用。只输出完整html，不要注释。",
         save=False,
+        run_id=main_run_id,
     )
     records = _wait_for_subagent_records(agent, expected=2, artifact_path=site_dir / "index.html")
     site_check = run_static_site_check(
@@ -276,6 +282,47 @@ def test_natural_language_root_drives_child_and_grandchild_e2e(tmp_path: Path) -
     assert len(backend.runner.prompts) >= 3
     assert (site_dir / "index.html").exists()
     assert site_check.validation_result["ok"] is True
+
+    # seq 261 测试方向：登记链主入口证据（无手工 record_run_creation）。
+    # ① root/main AgentRun 必须是 public agent.run 经 _bind_main_agent_authority
+    # 写出来的：role=main、无 parent（根身份）。
+    repo = agent.subagents.runtime_db
+    assert repo is not None, "MANAGED（my_agent_home 已设）必须挂载 runtime.db"
+    main_run = repo.agent_run_for_run_id(main_run_id)
+    assert main_run is not None
+    assert str(main_run["role"]) == "main"
+    assert str(main_run["parent_agent_run_id"]) == ""
+
+    # ② current attempt：DB current pointer 非空且指向真实 attempt 行，
+    # attempt 反向归属主代理 AgentRun（不依赖调用方自报 attempt_id）。
+    attempt = repo.current_attempt(str(main_run["agent_run_id"]))
+    assert attempt is not None
+    assert str(attempt["attempt_id"]) == str(main_run["current_attempt_id"])
+    assert str(attempt["agent_run_id"]) == str(main_run["agent_run_id"])
+
+    # ③ create_subagents operation 归属：主代理工具循环执行的 operation
+    # 必须挂在主代理自己的 attempt/AgentRun 下（非别的 run），且已 settle
+    # （终态 = 锁已释放、结果已落账）。
+    from agent_py_agent.agent.runtime_db.operations import (
+        OP_CANCELLED,
+        OP_FAILED,
+        OP_SUCCEEDED,
+    )
+
+    main_attempt_ids = {
+        str(row["attempt_id"]) for row in repo.attempts_for_run(str(main_run["agent_run_id"]))
+    }
+    with repo.transaction() as conn:
+        ops = conn.execute(
+            "SELECT * FROM tool_operations WHERE operation_type = 'create_subagents'"
+        ).fetchall()
+    assert len(ops) >= 1, "主代理 create_subagents 必须留有 operation 行"
+    assert all(str(op["attempt_id"]) in main_attempt_ids for op in ops)
+    assert all(str(op["agent_run_id"]) == str(main_run["agent_run_id"]) for op in ops)
+    assert all(
+        str(op["status"]) in {OP_SUCCEEDED, OP_FAILED, OP_CANCELLED} for op in ops
+    )
+    assert all(float(op["settled_at"] or 0) > 0 for op in ops)
 
 
 def _wait_for_subagent_records(agent: SimpleAgent, *, expected: int, artifact_path: Path) -> list:

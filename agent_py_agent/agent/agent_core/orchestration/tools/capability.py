@@ -76,7 +76,12 @@ class ResolveCapabilityRequestsTool(BaseTool):
             by_parameter=(("decision", (("grant", "dangerous"), ("deny", "mutating"))),),
         ),
         idempotency_policy=IdempotencyPolicy("operation"),
-        resource_scopes=ResourceScopePolicy(parameter_names=("run_id", "request_id", "write_roots")),
+        # seq 253 闭合：run_id/request_id 是逻辑 ID；write_roots 是真实授权
+        # 目录（path，锁不能跳过）。
+        resource_scopes=ResourceScopePolicy(
+            parameter_names=("run_id", "request_id", "write_roots"),
+            parameter_kinds={"run_id": "logical", "request_id": "logical"},
+        ),
     )
 
     def __init__(self, agent: SimpleAgent):

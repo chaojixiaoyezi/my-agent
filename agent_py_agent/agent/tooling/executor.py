@@ -14,9 +14,14 @@ from typing import Any
 _LOGGER = logging.getLogger(__name__)
 
 from ..local_storage import ToolOperationRecord
+from ..runtime_db.managed_operation_store import (
+    AuthorityContextMissing,
+    ToolOperationAuthorityRequest,
+)
 from .action_policy import ActionDecision, ActionPolicy, ActionPolicyRequest
 from .cancellation import CancellationToken
 from .models import (
+    ResourceScopeResolutionError,
     ToolFailureStage,
     ToolHandlerOutcome,
     ToolInvocationContext,
@@ -24,6 +29,7 @@ from .models import (
     ToolOperationReconciliationContext,
     ToolRuntime,
     ToolRuntimeSnapshot,
+    apply_tool_execution_facts,
     output_policy_for_outcome,
 )
 from .output_projection import project_tool_output_body
@@ -332,6 +338,9 @@ def _invoke_with_operation_policy(
             )
         return invoke_registry_tool(_invoke_request(request, call))
 
+    blocked = _require_operation_authority(request, call)
+    if blocked is not None:
+        return blocked
     if decision.resolved_effect == "read_only":
         outcome = invoke()
         if (
@@ -343,6 +352,24 @@ def _invoke_with_operation_policy(
             outcome = invoke()
             outcome.result_envelope.setdefault("tool_resilience", {})["retry_attempts"] = 1
         return outcome
+    # seq 269 #3：mutating 路径 claim 前解析资源 scope，hook 故障 fail-closed
+    # （TOOL_RESOURCE_SCOPE_RESOLUTION_FAILED，handler 不执行），绝不静默
+    # 降级成无保护执行；read_only 路径无副作用不取锁，不受影响。
+    try:
+        resource_scopes = _workspace_operation_scopes(request, call, runtime)
+    except ResourceScopeResolutionError as exc:
+        return apply_tool_execution_facts(
+            ToolHandlerOutcome(
+                call.tool_name,
+                False,
+                f"资源 scope 解析失败（fail-closed，拒绝执行）: {exc}",
+                error_code="TOOL_RESOURCE_SCOPE_RESOLUTION_FAILED",
+                failure_stage=ToolFailureStage.RUNTIME_GATE.value,
+                handler_executed=False,
+            ),
+            failure_stage=ToolFailureStage.RUNTIME_GATE,
+            handler_executed=False,
+        )
     return execute_tool_operation(
         ToolOperationExecutionRequest(
             store=request.operation_store,
@@ -359,8 +386,118 @@ def _invoke_with_operation_policy(
             timeout_seconds=runtime.runtime_policy.timeout_policy.seconds,
             invoke=invoke,
             reconcile=_operation_reconciler(runtime, call),
+            resource_scopes=resource_scopes,
+            attempt_id=call.attempt_id,
         )
     )
+
+
+def _require_operation_authority(
+    request: ToolExecutorRequest,
+    call: ToolCall,
+) -> ToolHandlerOutcome | None:
+    """MANAGED 权威门（a1/a2/a3/l）：所有工具（含 read-only）handler 前过门。
+
+    store 提供 require_authority（duck-typing，LocalStore 无 → 无门）：
+    - 缺 repo / run 未登记 / current attempt 空 → AuthorityContextMissing →
+      统一 TOOL_AUTHORITY_CONTEXT_MISSING + handler=0（fail-closed，不懒建链）。
+    - 门自身故障（其它异常）→ TOOL_OPERATION_STORE_UNAVAILABLE（同族 fail-closed）。
+    read-only 只跳过副作用 operation，不绕过 authority（l 契约）。
+    """
+    require = getattr(request.operation_store, "require_authority", None)
+    if require is None:
+        return None
+    try:
+        require(
+            ToolOperationAuthorityRequest(
+                owner_id=request.operation_owner_id,
+                run_id=call.run_id,
+                task_id=_task_id(request),
+                operation_id=call.operation_id,
+                tool_name=call.tool_name,
+                attempt_id=call.attempt_id,
+            )
+        )
+        return None
+    except AuthorityContextMissing as exc:
+        return apply_tool_execution_facts(
+            ToolHandlerOutcome(
+                call.tool_name,
+                False,
+                str(exc),
+                error_code="TOOL_AUTHORITY_CONTEXT_MISSING",
+                failure_stage=ToolFailureStage.RUNTIME_GATE.value,
+                handler_executed=False,
+            ),
+            failure_stage=ToolFailureStage.RUNTIME_GATE,
+            handler_executed=False,
+        )
+    except Exception as exc:  # noqa: BLE001 - 权威门故障 fail-closed
+        return apply_tool_execution_facts(
+            ToolHandlerOutcome(
+                call.tool_name,
+                False,
+                "权威门故障，无法验证执行授权（fail-closed，拒绝执行）",
+                error_code="TOOL_OPERATION_STORE_UNAVAILABLE",
+                failure_stage=ToolFailureStage.RUNTIME_GATE.value,
+                handler_executed=False,
+            ),
+            failure_stage=ToolFailureStage.RUNTIME_GATE,
+            handler_executed=False,
+        )
+
+
+def _workspace_operation_scopes(
+    request: ToolExecutorRequest,
+    call: ToolCall,
+    runtime: ToolRuntime,
+) -> tuple[str, ...]:
+    """workspace 资源锁 scope 解析（seq 245 P5 单一权威 resolver 薄包装）。
+
+    唯一权威实现在 tooling/workspace_scopes.py；ActionPolicy（审计记录）与
+    concurrency（调度投影）共用同一解析结果，绝不各算一套。executor 层必有
+    workspace_root → 恒走 canonical 物理根归一化。
+    """
+    from .workspace_scopes import authoritative_workspace_scopes
+
+    scopes = authoritative_workspace_scopes(
+        workspace_root=request.workspace_root,
+        write_boundary=request.write_boundary,
+        policy=runtime.runtime_policy,
+        arguments=call.arguments,
+    )
+    # seq 253 #5：执行写根由工具结构化声明（BaseTool.effective_write_roots 协议），
+    # operation lock 与写边界共用同一提取器——替换按 internal_parameter 名字
+    # （__sandbox_write_roots）的特判：特判只能覆盖声明过该参数名的工具，
+    # 覆盖不了 apply_patch（写根在 patch 文本里）与 controlled_exec（写根在
+    # grant.path_scope）这类执行写根不在参数里的工具。
+    handler = getattr(runtime, "handler", None)
+    extractor = getattr(handler, "effective_write_roots", None)
+    if extractor is not None and request.workspace_root is not None:
+        for root in extractor(
+            call.arguments, request.write_boundary, request.workspace_root
+        ):
+            scopes = scopes + (f"workspace:{root}",)
+    # seq 266 #3：运行期才可确定的资源（cancel 的 root 子树/status 展开目标、
+    # audit 的当前 Audit、dispatch 的自动选池）由工具结构化声明
+    # （BaseTool.effective_resource_scopes 协议，BaseTool 默认 ()）在 claim 前
+    # 合并——参数投影覆盖不到的 scope 在此补齐；hook 内部解析失败必须自己
+    # 保守锁稳定域（不空锁）。seq 269 #3：hook 抛错 = 实现缺陷，转
+    # ResourceScopeResolutionError 向上传播，由调用方 fail-closed 拒绝执行，
+    # 绝不静默降级成无保护执行（mutating handler 无锁执行 = 并发安全漏洞）。
+    resource_extractor = getattr(handler, "effective_resource_scopes", None)
+    if resource_extractor is not None:
+        try:
+            for scope in resource_extractor(
+                call.arguments, request.write_boundary, request.workspace_root
+            ):
+                if str(scope or "").strip():
+                    scopes = scopes + (str(scope).strip(),)
+        except Exception as exc:  # noqa: BLE001 - hook 故障 fail-closed
+            raise ResourceScopeResolutionError(
+                f"{type(handler).__name__}.effective_resource_scopes failed: {exc}"
+            ) from exc
+    return tuple(dict.fromkeys(scopes))
 
 
 def _invoke_request(
@@ -729,7 +866,10 @@ def _task_id(request: ToolExecutorRequest) -> str:
         if isinstance(trusted, dict) and isinstance(trusted.get("run_scope"), dict)
         else {}
     )
-    return str(run_scope.get("task_id") or boundary.get("task_id") or request.call.run_id)
+    # run_id 不是 task 声明（seq 248 #4）：run_scope.task_id 兜底 run_id 会把
+    # 测试/非主链调用伪装成 task；权威链上 task_id 为空时请求也应为空，
+    # claim/authority 按「非空严格比对、空跳过」语义处理。
+    return str(run_scope.get("task_id") or boundary.get("task_id") or "")
 
 
 def _cancelled(request: ToolExecutorRequest) -> bool:

@@ -27,6 +27,7 @@ from agent_py_agent.agent.tooling.models import (
     ResourceScopePolicy,
     ToolAvailability,
     ToolHandlerOutcome,
+    ToolInputPolicy,
     ToolModelHints,
     ToolModelSpec,
     ToolRuntime,
@@ -87,6 +88,8 @@ def make_test_runtime_policy(
     output_trust: str = "runtime",
     output_redaction: str = "default",
     resource_parameters: tuple[str, ...] = (),
+    resource_parameter_kinds: dict[str, str] | None = None,
+    internal_parameters: tuple[str, ...] = (),
 ) -> ToolRuntimePolicy:
     """Build an explicit canonical runtime policy for a test-only handler."""
 
@@ -106,11 +109,13 @@ def make_test_runtime_policy(
         concurrency_policy=ConcurrencyPolicy(concurrency_mode),
         resource_scopes=ResourceScopePolicy(
             parameter_names=resource_parameters,
+            parameter_kinds=resource_parameter_kinds or {},
         ),
         output_policy=OutputPolicy(
             trust=output_trust,
             redaction=output_redaction,
         ),
+        input_policy=ToolInputPolicy(internal_parameters=internal_parameters),
     )
 
 
@@ -354,6 +359,47 @@ def execute_canonical_test_call(
     )
 
 
+def _authority_attempt_id(
+    register_with: object,
+    run_id: str,
+    *,
+    task_id: str = "",
+) -> str:
+    """MANAGED 下复用生产登记入口建立权威 attempt（seq 255 闭合：测试夹具与
+    生产共用 record_run_creation/create_attempt，不再手工拼身份）。
+
+    task_id 取调用方声明的任务（write_boundary/run_scope），登记链的
+    tasks.task_id 与 require_authority 的比对键对齐；缺省由生产兜底
+    （= run_id）。LOCAL_UNMANAGED / 无 runtime repo → ""（调用方保持
+    默认投影 attempt，门不生效路径行为不变）。
+    """
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+    from agent_py_agent.agent.agent_core.runtime_mixin import _bind_main_agent_authority
+
+    subagents = getattr(register_with, "subagents", None)
+    repo = getattr(subagents, "runtime_db", None)
+    if repo is None:
+        return ""
+    bound = _bind_main_agent_authority(
+        register_with,
+        RunParams(run_id=run_id, attempt_id="", task_id=task_id),
+    )
+    return str(getattr(bound, "attempt_id", "") or "")
+
+
+def _declared_task_id(
+    write_boundary: dict[str, object] | None,
+    trusted_run_context: dict[str, object] | None,
+) -> str:
+    """从调用方声明中提取 task_id（结构化字段，不做文本推断）。"""
+    for source in (write_boundary, (trusted_run_context or {}).get("run_scope")):
+        if isinstance(source, dict):
+            task_id = str(source.get("task_id") or "").strip()
+            if task_id:
+                return task_id
+    return ""
+
+
 def execute_registry_test_call(
     registry: object,
     tool_name: str,
@@ -371,8 +417,18 @@ def execute_registry_test_call(
     attempt_id: str = "test-attempt",
     operation_id: str = "",
     idempotency_key: str = "",
+    register_with: object | None = None,
 ) -> ToolResult:
     """Exercise a real registry through its canonical ToolCall-only entry."""
+
+    if register_with is not None and attempt_id == "test-attempt":
+        authoritative = _authority_attempt_id(
+            register_with,
+            run_id,
+            task_id=_declared_task_id(write_boundary, trusted_run_context),
+        )
+        if authoritative:
+            attempt_id = authoritative
 
     snapshot = registry.runtime_snapshot(allowed_tools=allowed_tools, run_id=run_id)
     call = canonical_test_call(
@@ -406,9 +462,18 @@ def execute_approved_registry_test_call(
     run_id: str = "test-run",
     call_id: str = "test-call",
     attempt_id: str = "test-attempt",
+    register_with: object | None = None,
 ) -> ToolResult:
     """Execute one dangerous registry call with its exact generated approval binding."""
 
+    if register_with is not None and attempt_id == "test-attempt":
+        authoritative = _authority_attempt_id(
+            register_with,
+            run_id,
+            task_id=_declared_task_id(write_boundary, None),
+        )
+        if authoritative:
+            attempt_id = authoritative
     snapshot = registry.runtime_snapshot(allowed_tools=allowed_tools, run_id=run_id)
     call = canonical_test_call(
         snapshot,

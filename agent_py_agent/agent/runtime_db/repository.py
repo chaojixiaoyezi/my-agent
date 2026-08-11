@@ -324,6 +324,20 @@ class RuntimeRepository(
                 "SELECT * FROM agent_runs WHERE run_id = ?", (run_id,)
             ).fetchone()
 
+    def task_id_for_run_id(self, run_id: str) -> str:
+        """授权门同款 JOIN：run_id → 权威链 task_id（runner 身份回填用）。"""
+        with self._runtime_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT tr.task_id
+                FROM agent_runs ar
+                JOIN task_runs tr ON tr.task_run_id = ar.task_run_id
+                WHERE ar.run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+        return str(row["task_id"]) if row is not None else ""
+
     def agent_runs_for_task_run(self, task_run_id: str) -> list[sqlite3.Row]:
         with self._runtime_connection() as conn:
             rows = conn.execute(
@@ -380,17 +394,42 @@ class RuntimeRepository(
                     f"attempt CAS 失败: {agent_run_id} generation {generation - 1}->{generation}"
                 )
             if old_attempt_id:
+                # outcome_json 保留 claim 元数据（holder/lease/resource_scopes/
+                # 幂等身份），takeover 原因并入 unknown_reason 键——整段覆盖会
+                # 抹掉 resource_scopes，旧 settle 被拒后的锁释放/标 DIRTY 拿
+                # 不到 scope（f2 sibling 撞锁）。
+                stale_rows = conn.execute(
+                    "SELECT operation_id, outcome_json FROM tool_operations "
+                    "WHERE attempt_id = ? AND status IN ('CLAIMED', 'EXECUTING')",
+                    (old_attempt_id,),
+                ).fetchall()
+                for stale in stale_rows:
+                    payload = {}
+                    try:
+                        loaded = json.loads(stale["outcome_json"])
+                    except (TypeError, json.JSONDecodeError):
+                        loaded = {}
+                    if isinstance(loaded, dict):
+                        payload = dict(loaded)
+                    payload["reason"] = "takeover_recovery"
+                    payload["unknown_reason"] = "takeover_recovery"
+                    conn.execute(
+                        """
+                        UPDATE tool_operations
+                        SET status = 'UNKNOWN', outcome_json = ?, updated_at = ?
+                        WHERE operation_id = ? AND status IN ('CLAIMED', 'EXECUTING')
+                        """,
+                        (json.dumps(payload, ensure_ascii=False), now, stale["operation_id"]),
+                    )
+                # seq 253 补：takeover 把旧 attempt 的非终态操作统一转 UNKNOWN
+                # 后，其持有锁必须同事务释放——UNKNOWN 是终态（结果不可知、
+                # worker 已不可信、不会再有人来 settle/删锁），锁残留会让同
+                # scope 的任何后续 claim 撞 UNIQUE(canonical_scope) 死锁（f2
+                # sibling），与 settle 终态删锁/_mark_unknown_single_transaction
+                # 的「终态即释放」语义一致。
                 conn.execute(
-                    """
-                    UPDATE tool_operations
-                    SET status = 'UNKNOWN', outcome_json = ?, updated_at = ?
-                    WHERE attempt_id = ? AND status IN ('CLAIMED', 'EXECUTING')
-                    """,
-                    (
-                        json.dumps({"reason": "takeover_recovery"}, ensure_ascii=False),
-                        now,
-                        old_attempt_id,
-                    ),
+                    "DELETE FROM resource_locks WHERE attempt_id = ?",
+                    (old_attempt_id,),
                 )
                 conn.execute(
                     """

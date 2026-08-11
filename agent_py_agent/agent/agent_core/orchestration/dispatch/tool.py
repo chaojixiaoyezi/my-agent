@@ -95,7 +95,14 @@ class DispatchSubagentsTool(BaseTool):
             by_parameter=(("dry_run", (("true", "read_only"), ("false", "mutating"))),),
         ),
         idempotency_policy=IdempotencyPolicy("operation"),
-        resource_scopes=ResourceScopePolicy(parameter_names=("run_ids",)),
+        # seq 253 闭合：run_ids 是逻辑 ID（任务标识）不是路径。
+        # seq 266 #1：run_ids 与 cancel 的 run_id/run_ids 是同一 agent_run
+        # 资源——cancel(run_id=r-1) 与 dispatch(run_ids=[r-1]) 必须互斥。
+        resource_scopes=ResourceScopePolicy(
+            parameter_names=("run_ids",),
+            parameter_kinds={"run_ids": "logical"},
+            resource_domains={"run_ids": "agent_run"},
+        ),
         input_policy=ToolInputPolicy(
             internal_parameters=("apply", "start_runners", "execute_runners", "no_probe"),
         ),
@@ -103,6 +110,20 @@ class DispatchSubagentsTool(BaseTool):
 
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
+
+    def effective_resource_scopes(
+        self,
+        arguments: dict[str, object],
+        write_boundary: dict | None,
+        workspace_root: object,
+    ) -> tuple[str, ...]:
+        """seq 266 #3 / seq 269 #1：所有派发（含显式 run_ids）都锁调度池——
+        单派发者语义：auto 与 explicit 可同时命中同一 run，若 auto 只锁 pool、
+        explicit 只锁 agent_run 则零交集（UNIQUE 精确串互斥拦不住），必须共享
+        pool 才能互斥；explicit 同时由参数投影补锁 agent_run 域（与
+        cancel/wait 跨工具互斥）。
+        """
+        return ("logical:dispatch:pool",)
 
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         unsupported_error = _unsupported_execution_param_error(params)

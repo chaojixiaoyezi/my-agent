@@ -45,6 +45,21 @@ class SendGuidanceTool(BaseTool):
         idempotency_policy=IdempotencyPolicy("operation"),
         resource_scopes=ResourceScopePolicy(
             parameter_names=("target_id", "run_ids", "root_id"),
+            # seq 258：target_id/run_ids/root_id 是代理/运行逻辑 ID 不是物理写根
+            # （同 wait：不标 logical 会父子自冲突）。
+            parameter_kinds={
+                "target_id": "logical",
+                "run_ids": "logical",
+                "root_id": "logical",
+            },
+            # seq 266 #1：target_id/run_ids 与 cancel/dispatch 的 run 参数是
+            # 同一 agent_run 资源——send_guidance(run_ids=[r-1]) 与
+            # cancel(run_id=r-1) 必须互斥（guidance 写 run 状态，cancel 也写）。
+            resource_domains={
+                "target_id": "agent_run",
+                "run_ids": "agent_run",
+                "root_id": "run_tree",
+            },
         ),
         input_policy=ToolInputPolicy(internal_parameters=("sender", "metadata")),
     )

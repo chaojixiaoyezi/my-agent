@@ -10,15 +10,34 @@ _TOOL_CALL_IDS = count(1)
 
 
 def _execute_cancel_subagents(agent: object, arguments: dict[str, object]):
-    """Exercise cancellation through the canonical ToolCall-only boundary."""
+    """Exercise cancellation through the canonical ToolCall-only boundary.
+
+    seq 253 闭合：MANAGED authority 门要求 run 登记真实权威链（record_run_
+    creation 建 tasks→task_runs→agent_runs→agent_attempts，与生产主链同一
+    登记入口）——测试装配不得用未登记假身份（TOOL_AUTHORITY_CONTEXT_MISSING）。
+    """
 
     sequence = next(_TOOL_CALL_IDS)
+    run_id = f"cancel-tool-run-{sequence}"
+    attempt_id = "test-attempt"
+    repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+    if repo is not None:
+        record = repo.record_run_creation(
+            owner_id="owner-a",
+            goal=f"cancel gate {run_id}",
+            conversation_task_id=f"task-{run_id}",
+            thread_id=f"thread-{run_id}",
+            run_id=run_id,
+            role="assistant",
+        )
+        attempt_id = str(record["attempt_id"])
     return execute_approved_registry_test_call(
         agent.tools,
         "cancel_subagents",
         arguments,
-        run_id=f"cancel-tool-run-{sequence}",
+        run_id=run_id,
         call_id=f"cancel-tool-call-{sequence}",
+        attempt_id=attempt_id,
     )
 
 

@@ -750,6 +750,17 @@ def _is_task_local_context(value: object) -> bool:
     return str(value or "").strip().lower() in {"task_local", "control_plane"}
 
 
+def _loop_attempt_id(agent, params: object) -> str:
+    """子代理 runner 的 attempt 身份：从当前 runner 上下文取（prepare_runner_attempt
+    轮换出的 DB attempt，与并行工具路径 round_execution 同源）优先——RunParams
+    构造时已把 attempt_id 兜底为 attempt-{ns} 投影（run_params.py），params 值
+    恒非空，放前面会短路掉 runner 上下文；主代理/唤醒轮上下文为空，回落
+    params 原值（与既有行为一致）。"""
+    from ..runner.context import current_subagent_attempt_id
+
+    return current_subagent_attempt_id(agent) or str(params.attempt_id or "").strip()
+
+
 def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecuteParams:
     params = seed.params
     archive_tool_calls: list[dict[str, object]] = list(params.carried_archive_tool_calls or [])
@@ -807,7 +818,7 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         one_shot_tool_calls=one_shot_tool_calls,
         executed_tools=executed_tools,
         archive_tool_calls=archive_tool_calls,
-        attempt_id=params.attempt_id,
+        attempt_id=_loop_attempt_id(agent, params),
         tool_runtime_snapshot=seed.tool_runtime_snapshot,
         tool_protocol_snapshot=seed.tool_protocol_snapshot,
         effective_contract_snapshot=seed.effective_contract_snapshot,

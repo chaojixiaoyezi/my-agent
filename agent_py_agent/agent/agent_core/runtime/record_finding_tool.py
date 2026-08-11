@@ -56,6 +56,14 @@ class RecordFindingTool(BaseTool):
         idempotency_policy=IdempotencyPolicy("operation"),
         resource_scopes=ResourceScopePolicy(
             parameter_names=("finding_id", "watch_id"),
+            # seq 258：finding_id/watch_id 是账本条目逻辑 ID 不是物理写根（同 wait）。
+            parameter_kinds={
+                "finding_id": "logical",
+                "watch_id": "logical",
+            },
+            # seq 266 #1：finding_id 与 watch_stream 的 watch_id 各属独立资源域
+            # （账本条目 vs 盯守源），跨工具统一域名防同名参数别名。
+            resource_domains={"finding_id": "finding", "watch_id": "watch"},
         ),
     )
 

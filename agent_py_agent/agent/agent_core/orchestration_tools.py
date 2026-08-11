@@ -151,8 +151,18 @@ class CreateSubagentsTool(BaseTool):
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("mutating"),
         idempotency_policy=IdempotencyPolicy("operation"),
+        # seq 253 锁层级自冲突：input_refs（artifact 引用）与
+        # replacement_for_run_ids（run id 列表）不是物理写根——缺省参数走
+        # None 兜底会锁 workspace:{cwd}（父锁），与 output_files 声明的工作
+        # 区内子路径锁父子重叠 → 同一事务自冲突 → TOOL_OPERATION_STORE_UNAVAILABLE
+        # → 工具从未运行（真机 natural-language e2e 实锤：子代理 0 创建）。
+        # 标 logical（seq 248 #6 既有机制）只让 output_files 锁 workspace。
         resource_scopes=ResourceScopePolicy(
             parameter_names=("output_files", "input_refs", "replacement_for_run_ids"),
+            parameter_kinds={
+                "input_refs": "logical",
+                "replacement_for_run_ids": "logical",
+            },
         ),
         input_policy=ToolInputPolicy(
             internal_parameters=("dry_run", "extra_write_roots"),

@@ -75,6 +75,7 @@ def test_saved_run_generates_request_id_before_externalized_tool_outputs(tmp_pat
             "max_chars": 80,
         },
         run_id=request_id,
+        register_with=agent,
         trusted_run_context={
             "run_scope": {
                 "request_id": request_id,

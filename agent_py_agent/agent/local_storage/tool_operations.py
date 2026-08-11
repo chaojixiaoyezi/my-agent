@@ -59,6 +59,11 @@ class ToolOperationClaimRequest:
     holder: ToolOperationHolder
     lease_expires_at: float
     now: float = 0.0
+    resource_scopes: tuple[str, ...] = ()
+    # seq 245 P2：调用者 attempt fence。ToolCall.attempt_id 是宿主注入的可信
+    # 身份，claim 用它同事务 CAS current_attempt_id（takeover 后旧 attempt 的
+    # 调用被拦截）；空 = 非主链直调（LOCAL/本地兼容），不做 CAS。
+    attempt_id: str = ""
 
 
 @dataclass(frozen=True)

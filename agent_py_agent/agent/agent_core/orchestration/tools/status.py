@@ -40,7 +40,14 @@ class InspectAgentTreeTool(BaseTool):
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("read_only"),
         concurrency_policy=ConcurrencyPolicy("parallel_safe"),
-        resource_scopes=ResourceScopePolicy(parameter_names=("root_id", "run_id")),
+        # seq 253 闭合：root_id/run_id 是逻辑 ID 不是路径。
+        # seq 266 #1：run_id 与 cancel/dispatch/wait 的 run 参数是同一
+        # agent_run 资源（统一域，跨工具互斥）。
+        resource_scopes=ResourceScopePolicy(
+            parameter_names=("root_id", "run_id"),
+            parameter_kinds={"root_id": "logical", "run_id": "logical"},
+            resource_domains={"run_id": "agent_run", "root_id": "run_tree"},
+        ),
     )
 
     def __init__(self, agent: SimpleAgent):

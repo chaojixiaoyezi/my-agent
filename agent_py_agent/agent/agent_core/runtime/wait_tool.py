@@ -26,6 +26,18 @@ class WaitTool(BaseTool):
         idempotency_policy=IdempotencyPolicy("operation"),
         resource_scopes=ResourceScopePolicy(
             parameter_names=("run_id", "task_id", "thread_id"),
+            # seq 258：run_id/task_id/thread_id 是逻辑 ID 不是物理写根——不标
+            # logical 会被当 path 锁（run_id="child-1" → workspace:{root}/child-1
+            # 子锁）与缺省参数 None 兜底父锁 workspace:{cwd} 父子重叠 →
+            # claim 阶段自冲突，handler 前被拒。
+            parameter_kinds={
+                "run_id": "logical",
+                "task_id": "logical",
+                "thread_id": "logical",
+            },
+            # seq 266 #1：wait(run_id=child-1) 与 cancel(run_id=child-1) 是
+            # 同一 agent_run 资源（等待 vs 取消同一 run，必须互斥）。
+            resource_domains={"run_id": "agent_run"},
         ),
         promotes_task=True,
     )

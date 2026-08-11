@@ -646,16 +646,36 @@ class RuntimeOperationsMixin:
         operation_id: str,
         reason: str,
     ) -> sqlite3.Row:
-        """G.4：EXECUTING owner 消失/timeout/无法证明零副作用 → UNKNOWN。"""
+        """G.4：EXECUTING owner 消失/timeout/无法证明零副作用 → UNKNOWN。
+
+        outcome_json 保留 claim 元数据（holder/lease/resource_scopes/幂等身份），
+        reason 并入 unknown_reason 键（与 _record_from_row 读取侧一致）——整段
+        覆盖会抹掉 resource_scopes，使 settle 失败后的锁释放/标 DIRTY 拿不到
+        scope（B 切片 d 红点 + f2 sibling 撞锁）。
+        """
         now = time.time()
         with self._runtime_connection() as conn:
+            row = conn.execute(
+                "SELECT outcome_json FROM tool_operations WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            payload = {}
+            if row is not None:
+                try:
+                    loaded = json.loads(row["outcome_json"])
+                except (TypeError, json.JSONDecodeError):
+                    loaded = {}
+                if isinstance(loaded, dict):
+                    payload = dict(loaded)
+            payload["reason"] = reason
+            payload["unknown_reason"] = reason
             updated = conn.execute(
                 """
                 UPDATE tool_operations
                 SET status = 'UNKNOWN', outcome_json = ?, updated_at = ?
                 WHERE operation_id = ? AND settled_at = 0
                 """,
-                (json.dumps({"reason": reason}, ensure_ascii=False), now, operation_id),
+                (json.dumps(payload, ensure_ascii=False), now, operation_id),
             ).rowcount
             if updated != 1:
                 raise RuntimeConflictError(

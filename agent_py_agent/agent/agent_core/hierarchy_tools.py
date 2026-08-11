@@ -63,7 +63,8 @@ class ScheduleChildSubagentsTool(BaseTool):
             by_parameter=(("dry_run", (("true", "read_only"), ("false", "mutating"))),),
         ),
         idempotency_policy=IdempotencyPolicy("operation"),
-        resource_scopes=ResourceScopePolicy(parameter_names=("children",)),
+        resource_scopes=ResourceScopePolicy(parameter_names=("children",),
+            parameter_kinds={"children": "logical"}),
         input_policy=ToolInputPolicy(internal_parameters=("apply", "extra_write_roots")),
     )
 

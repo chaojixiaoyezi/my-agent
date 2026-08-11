@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from copy import deepcopy
+from pathlib import Path
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -316,11 +317,29 @@ class ConcurrencyPolicy:
             raise ValueError(f"invalid tool concurrency mode: {self.mode}")
 
 
+class ResourceScopeResolutionError(RuntimeError):
+    """seq 269 #3：工具 effective_resource_scopes hook 在 claim 前解析失败。
+
+    hook 内部正常的「解析失败」必须自己保守锁稳定域（绝不空锁）；能抛出本
+    异常说明 hook 实现缺陷。executor 收到后 fail-closed 拒绝执行（
+    TOOL_RESOURCE_SCOPE_RESOLUTION_FAILED），绝不静默降级成无保护执行。
+    """
+
+
 @dataclass(frozen=True)
 class ResourceScopePolicy:
     mode: str = "from_arguments"
     parameter_names: tuple[str, ...] = ()
     static_scopes: tuple[str, ...] = ()
+    # seq 248 #6：参数值类型显式区分 path/logical。path = 真实物理写根，
+    # 归一化锁 "workspace:{canonical_path}"；logical = 逻辑 ID（session_id/
+    # artifact_ref 等），投影 "logical:{name}:{value}" 文本 scope，绝不 resolve
+    # 成 workspace 路径（此前所有字符串都被当路径锁错根）。缺省按 path。
+    parameter_kinds: dict[str, str] = field(default_factory=dict)
+    # seq 266 #1：资源域别名映射——参数名 → 同一底层资源域（run_id/run_ids/
+    # target_id → "agent_run"）。锁的是「同一资源」，不是「参数名+原值」；
+    # 投影 "logical:{domain}:{strip(value)}"。域名即参数名时无需映射。
+    resource_domains: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         mode = str(self.mode or "").strip().lower()
@@ -330,8 +349,36 @@ class ResourceScopePolicy:
             str(item).strip() for item in self.parameter_names if str(item).strip()
         )
         static_scopes = tuple(str(item).strip() for item in self.static_scopes if str(item).strip())
+        kinds = {
+            str(name).strip(): str(kind or "").strip().lower()
+            for name, kind in (self.parameter_kinds or {}).items()
+            if str(name).strip()
+        }
+        for name, kind in kinds.items():
+            if kind not in {"path", "logical"}:
+                raise ValueError(
+                    f"invalid resource scope parameter kind for {name!r}: {kind!r}"
+                )
+        domains = {
+            str(name).strip(): str(domain or "").strip()
+            for name, domain in (self.resource_domains or {}).items()
+            if str(name).strip() and str(domain or "").strip()
+        }
+        for name, domain in domains.items():
+            if domain == name:
+                raise ValueError(
+                    f"resource domain for {name!r} equals parameter name; omit it"
+                )
         if len(set(parameter_names)) != len(parameter_names):
             raise ValueError("resource scope parameter names must be unique")
+        if set(kinds) - set(parameter_names):
+            raise ValueError(
+                "resource scope parameter_kinds names must be subset of parameter_names"
+            )
+        if set(domains) - set(parameter_names):
+            raise ValueError(
+                "resource scope resource_domains names must be subset of parameter_names"
+            )
         if len(set(static_scopes)) != len(static_scopes):
             raise ValueError("declared resource scopes must be unique")
         if mode == "none" and (parameter_names or static_scopes):
@@ -345,6 +392,12 @@ class ResourceScopePolicy:
         object.__setattr__(self, "mode", mode)
         object.__setattr__(self, "parameter_names", parameter_names)
         object.__setattr__(self, "static_scopes", static_scopes)
+        object.__setattr__(self, "parameter_kinds", kinds)
+        # seq 269 #2：规范化后的 domains 必须写回——校验用的是规范化值，
+        # 运行时投影（workspace_scopes / models 回落路径）也必须是同一份；
+        # 漏写回会让带空格的参数名键永远查不到映射、静默退化成参数名域
+        # （校验过了但运行时没用上）。
+        object.__setattr__(self, "resource_domains", domains)
 
 
 @dataclass(frozen=True)
@@ -444,12 +497,17 @@ def resource_scopes_for_runtime_policy(
     scope_policy = policy.resource_scopes
     scopes = list(scope_policy.static_scopes)
     if scope_policy.mode == "from_arguments":
+        # seq 266 #1：与权威路径同一资源语义——参数名映射到资源域后再投影
+        # （run_id/run_ids → agent_run），避免同一 run 的不同参数入口投影出
+        # 不同 scope；先 strip 再构造，杜绝首尾空格别名绕过。
+        domains = scope_policy.resource_domains or {}
         for name in scope_policy.parameter_names:
             value = values.get(name)
             for item in value if isinstance(value, list) else [value]:
                 text = str(item or "").strip()
                 if text:
-                    scopes.append(f"{name}:{text}")
+                    domain = domains.get(name) or name
+                    scopes.append(f"{domain}:{text}")
     scopes.extend(str(item).strip() for item in additional_scopes if str(item).strip())
     return tuple(dict.fromkeys(scopes))
 
@@ -1110,6 +1168,35 @@ class BaseTool:
     ) -> ToolOperationReconciliation:
         _ = (params, context)
         return ToolOperationReconciliation()
+
+    # LLM: 只有执行写根不在 resource_scopes 参数里的工具覆盖本方法；默认无额外写根。
+    # 函数用途: 结构化声明执行写根（已解析的绝对路径字符串元组），operation lock
+    # 与写边界校验共用同一提取器（seq 253 #5 单一权威——不按工具名/内部参数名
+    # 特判，特判覆盖不了 apply_patch 的 patch 文本目标与 controlled_exec 的
+    # grant.path_scope 这类写根不在参数里的工具）。
+    def effective_write_roots(
+        self,
+        arguments: dict[str, Any],
+        write_boundary: dict[str, Any] | None,
+        workspace_root: Path,
+    ) -> tuple[str, ...]:
+        _ = (arguments, write_boundary, workspace_root)
+        return ()
+
+    # LLM: 只有运行期才能确定资源目标（cancel 的 root 子树展开/status 过滤、
+    # dispatch 的自动选池、audit 的当前 Audit）的工具覆盖本方法；默认无运行期资源。
+    # 函数用途: 结构化声明 claim 前要补锁的资源 scope（逻辑域文本串元组），
+    # executor 在 claim 前调用并合并（seq 266 #3 协议，BaseTool 正式默认——
+    # 不做 getattr 半协议）。hook 内部解析失败必须自己保守锁稳定域（绝不空锁）；
+    # 能抛异常 = hook 实现缺陷，由 executor fail-closed 拒绝执行（seq 269 #3）。
+    def effective_resource_scopes(
+        self,
+        arguments: dict[str, Any],
+        write_boundary: dict[str, Any] | None,
+        workspace_root: Path,
+    ) -> tuple[str, ...]:
+        _ = (arguments, write_boundary, workspace_root)
+        return ()
 
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         raise NotImplementedError
