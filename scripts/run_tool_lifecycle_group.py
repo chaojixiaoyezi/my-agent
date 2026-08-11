@@ -446,8 +446,16 @@ def _interrupt_when_model_in_flight(
     第②轮真机实证: 进程探测(interrupt_when_process)永远落在工具执行期
     (sleep 进程一出现工具早已启动), 命中工具执行 → 优雅 user_stop 不冒泡。
     改从 ledger 探测请求窗口: status in {"started", "first_token"} 且
-    is_probe=False(排除探针) → 短确认后 set_interrupt → InterruptedError
+    is_probe=False(排除探针) → set_interrupt → InterruptedError
     冒泡到同步调用线程(披露行为②的证据路径)。
+
+    时序铁证(G4-008 run4/run5 连续 FAIL): 原实现检测到在飞后固定
+    sleep(2.0) 再置位——deepseek-v4-flash 快速响应流实测 <2s 收完
+    (105 tokens, events 完整 finished), 2s 延迟系统性错过在飞窗口,
+    信号落到调用结束后被安全点消费成优雅 cancelled(不冒泡)。ledger
+    activity 流中持续更新、finished 才收尾, started/first_token 就是
+    调用期间的权威实时状态, 检测到立即置位必然命中在飞窗口, 由
+    gateway_helpers 流迭代轮询点消费并抛 InterruptedError。
     """
     from agent_py_agent.agent.concurrency.interrupt import set_interrupt
 
@@ -466,7 +474,6 @@ def _interrupt_when_model_in_flight(
             if getattr(record, "run_id", None) != run_id:
                 continue
             if getattr(record, "status", "") in {"started", "first_token"}:
-                time.sleep(2.0)
                 current_tid = thread.ident
                 if current_tid is not None:
                     set_interrupt(True, current_tid)
