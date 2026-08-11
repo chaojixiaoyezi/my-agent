@@ -294,13 +294,21 @@ def _run_model_case(
     user_input: str,
     run_kwargs: dict[str, object] | None = None,
     interrupt_when_process: str = "",
+    interrupt_in_flight_model: bool = False,
 ) -> dict[str, object]:
-    """真模型用例公共驱动器(含同步 run 的 interrupt 进程探测路径)。
+    """真模型用例公共驱动器(含同步 run 的 interrupt 探测路径)。
 
     同步路径 InterruptedError 冒泡(披露行为②): interrupt 命中模型请求进行中时
     _run_once_with_params 只 update_runtime_fact 后 re-raise, 异常会抛到调用线程。
     这里不吞掉: 把异常种类/消息记入 outcome.error, 与 result 终态并列, 供判据
     检查「上层不把 cancelled 呈现为普通失败、不重试/不恢复复活」。
+
+    interrupt 触发两种模式:
+    - interrupt_when_process: 等标记进程出现再打断(命中工具执行期 → 优雅取消,
+      不冒泡——第①轮真机实证);
+    - interrupt_in_flight_model: 轮询 ModelCallLedger, 等到本 run 的模型请求
+      在飞(started/first_token)再打断 → InterruptedError 冒泡(第②轮真机实证
+      的失败模式——进程探测永远落在工具执行期, 改从 ledger 探测请求窗口)。
     """
     run_id = f"lifecycle-{case_id.lower()}-{uuid.uuid4().hex[:10]}"
     kwargs: dict[str, object] = {
@@ -313,7 +321,7 @@ def _run_model_case(
     if run_kwargs:
         kwargs.update(run_kwargs)
     outcome: dict[str, object] = {}
-    if not interrupt_when_process:
+    if not interrupt_when_process and not interrupt_in_flight_model:
         try:
             outcome["result"] = agent.run(user_input, **kwargs)
         except Exception as exc:  # noqa: BLE001 - evidence must survive one failed case
@@ -329,12 +337,17 @@ def _run_model_case(
 
         thread = threading.Thread(target=target, name=f"g4-{case_id}", daemon=True)
         thread.start()
-        _interrupt_when_process_running(thread, interrupt_when_process)
+        if interrupt_in_flight_model:
+            _interrupt_when_model_in_flight(agent, thread, run_id)
+        else:
+            _interrupt_when_process_running(thread, interrupt_when_process)
         thread.join(timeout=420)
         clear_tid = thread.ident
         if clear_tid is not None:
             set_interrupt(False, clear_tid)
-        outcome["interrupt_when_process"] = interrupt_when_process
+        if interrupt_when_process:
+            outcome["interrupt_when_process"] = interrupt_when_process
+        outcome["interrupt_in_flight_model"] = interrupt_in_flight_model
         outcome["thread_alive_after_join"] = thread.is_alive()
         if thread.is_alive():
             outcome["error"] = str(outcome.get("error") or "run did not finish within join timeout")
@@ -359,11 +372,25 @@ def _run_model_case(
         "compression_applied": bool(getattr(result, "compression_applied", False)),
         "compact_continued": bool(getattr(result, "memory_compact_auto_continued", False)),
         "compact_continue_depth": int(getattr(result, "memory_compact_auto_continuation_depth", 0) or 0),
+        "memory_resume_context_injected": bool(
+            getattr(result, "memory_resume_context_injected", False)
+        ),
+        "memory_resume_context_query": str(
+            getattr(result, "memory_resume_context_query", "") or ""
+        ),
+        "memory_resume_context_matches": int(
+            getattr(result, "memory_resume_context_matches", 0) or 0
+        ),
+        "memory_resume_context_error": str(
+            getattr(result, "memory_resume_context_error", "") or ""
+        ),
     }
     if outcome.get("error"):
         case["run_error"] = outcome["error"]
-    if interrupt_when_process:
-        case["interrupt_when_process"] = interrupt_when_process
+    if interrupt_when_process or interrupt_in_flight_model:
+        if interrupt_when_process:
+            case["interrupt_when_process"] = interrupt_when_process
+        case["interrupt_in_flight_model"] = interrupt_in_flight_model
         case["thread_alive_after_join"] = outcome.get("thread_alive_after_join", False)
     return case
 
@@ -401,6 +428,49 @@ def _interrupt_when_process_running(
             if current_tid is not None:
                 set_interrupt(True, current_tid)
             return
+        time.sleep(1.0)
+    current_tid = thread.ident
+    if current_tid is not None:
+        set_interrupt(True, current_tid)
+
+
+def _interrupt_when_model_in_flight(
+    agent: Any,
+    thread: threading.Thread,
+    run_id: str,
+    *,
+    timeout_seconds: float = 300.0,
+) -> None:
+    """轮询 ModelCallLedger, 等到本 run 的模型请求在飞再打断。
+
+    第②轮真机实证: 进程探测(interrupt_when_process)永远落在工具执行期
+    (sleep 进程一出现工具早已启动), 命中工具执行 → 优雅 user_stop 不冒泡。
+    改从 ledger 探测请求窗口: status in {"started", "first_token"} 且
+    is_probe=False(排除探针) → 短确认后 set_interrupt → InterruptedError
+    冒泡到同步调用线程(披露行为②的证据路径)。
+    """
+    from agent_py_agent.agent.concurrency.interrupt import set_interrupt
+
+    ledger = getattr(agent, "_model_call_ledger", None)
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        if not thread.is_alive():
+            return
+        try:
+            records = ledger.records() if ledger is not None else ()
+        except Exception:  # noqa: BLE001 - probe must never kill the case
+            records = ()
+        for record in records:
+            if getattr(record, "is_probe", False):
+                continue
+            if getattr(record, "run_id", None) != run_id:
+                continue
+            if getattr(record, "status", "") in {"started", "first_token"}:
+                time.sleep(2.0)
+                current_tid = thread.ident
+                if current_tid is not None:
+                    set_interrupt(True, current_tid)
+                return
         time.sleep(1.0)
     current_tid = thread.ident
     if current_tid is not None:
@@ -488,8 +558,11 @@ def _findings_g4_002(case: dict[str, object]) -> list[str]:
     if not statuses:
         findings.append("no_subagent_status")
     for entry in statuses:
-        if entry.get("status") not in {"DONE", "VERIFIED"} and not (
-            entry.get("status") == "DONE" and entry.get("verification_status") == "VERIFIED"
+        # 收紧(维护记录): 必须 DONE + VERIFIED 双字段同时满足才通过,
+        # status=VERIFIED 单独或 DONE+UNVERIFIED 均不算完成。
+        if not (
+            entry.get("status") == "DONE"
+            and entry.get("verification_status") == "VERIFIED"
         ):
             findings.append(
                 f"subagent_not_done:{entry.get('run_id')}:{entry.get('status')}/{entry.get('verification_status')}"
@@ -513,6 +586,7 @@ def _run_g4_002(args: argparse.Namespace, run_root: Path) -> dict[str, object]:
     from agent_py_agent.agent.agent_core.orchestration_tools import _execute_create_subagents
 
     agent, workspace = _make_agent(args, run_root, "G4-002", enable_subagents=True)
+    start_wall = time.time()
     case: dict[str, object] = {"test_id": "G4-002", "kind": "mixed-injected-create-model-run"}
     try:
         outcome = _execute_create_subagents(
@@ -545,7 +619,7 @@ def _run_g4_002(args: argparse.Namespace, run_root: Path) -> dict[str, object]:
         try:
             report = agent.dispatch_subagents(
                 None,
-                params=params(
+                params=DispatchParams(
                     apply=True,
                     start_runners=True,
                     include_run_ids=run_ids,
@@ -561,6 +635,23 @@ def _run_g4_002(args: argparse.Namespace, run_root: Path) -> dict[str, object]:
             }
         except Exception as exc:  # noqa: BLE001
             case["dispatch_error"] = f"{type(exc).__name__}: {exc}"
+
+        # 第②轮实证: dispatch 返回后 runner 尚在推进(PLANNING→…→DONE),
+        # 立即读 final_statuses 全是 PLANNING; 必须轮询到终态(600s 上限,
+        # 每 5s 采样, 记录 timeline 供复核)。
+        _TERMINAL = {"DONE", "FAILED", "CANCELLED", "ABANDONED", "BLOCKED", "VERIFIED"}
+        deadline = time.time() + 600
+        status_history: list[dict[str, object]] = []
+        while time.time() < deadline:
+            current: dict[str, str] = {}
+            for task in agent.subagents.list_runs():
+                if task.id in run_ids:
+                    current[task.id] = str(task.status or "")
+            status_history.append({"t": round(time.time() - start_wall, 1), "statuses": dict(current)})
+            if current and all(s in _TERMINAL for s in current.values()):
+                break
+            time.sleep(5.0)
+        case["status_timeline"] = status_history
 
         final_statuses: list[dict[str, object]] = []
         for task in agent.subagents.list_runs():
@@ -631,12 +722,24 @@ def _run_g4_003(args: argparse.Namespace, run_root: Path) -> dict[str, object]:
     > max_tokens(本 harness 压低到 4096)时写 snapshot + 压缩 memories -> applied=True。
     """
     agent, workspace = _make_agent(args, run_root, "G4-003")
-    filler = ("这是一段用于撑大上下文触发压缩的重复文本。" * 1500)
+    # 第②轮实证: 1500 字重复 ×6 段 ≈ 259485 tokens > 200k context_window,
+    # preflight 压力门直接 context_overflow 中止(compact 无法帮忙)。
+    # 缩到 150 字 ×6 段 ≈ 19k tokens: 仍 > max_tokens(4096) 触发压缩, 远 < 200k 窗。
+    filler = ("这是一段用于撑大上下文触发压缩的重复文本。" * 150)
+    # 第③轮实证: 模型肉眼数 xyz 不稳定(5→4), 不是机制问题。数据文件由 harness
+    # 预写(内容确定), 判据=模型用 grep 机器统计 filler_data.txt -> count.txt=="6"。
+    data_file = workspace / "filler_data.txt"
+    data_file.write_text(
+        "\n".join([filler] * 6 + ["xyz"] * 6) + "\n",
+        encoding="utf-8",
+    )
     case = _run_model_case(
         agent,
         case_id="G4-003",
         user_input=(
-            "下面是需要你处理的长文本。请统计其中出现子串 \"xyz\" 的次数，"
+            "下面是需要你处理的长文本（隔离工作区里有内容一致的文件 filler_data.txt）。"
+            "请统计其中出现子串 \"xyz\" 的次数：用 run_command 执行 "
+            "grep -o 'xyz' filler_data.txt | wc -l 得到次数（不要用眼睛数），"
             f"把结果(一个数字)写入文件 count.txt，然后简要报告。\n\n{filler}\n"
             f"{filler}\n{filler}\nxyz\n{filler}\nxyz\n{filler}\nxyz\n{filler}\nxyz\n{filler}\nxyz\n{filler}\nxyz\n"
         ),
@@ -664,8 +767,15 @@ def _findings_g4_004(case: dict[str, object], workspace: Path) -> list[str]:
             findings.append("first_step_missing")
         if "second-step-done" not in content:
             findings.append("second_step_missing")
-    if not case.get("resume_evidence"):
+    evidence = case.get("resume_evidence") or {}
+    if not evidence.get("injected"):
         findings.append("no_resume_evidence")
+    if not evidence.get("query"):
+        findings.append("resume_query_empty")
+    if int(evidence.get("matches") or 0) <= 0:
+        findings.append("resume_no_matches")
+    if evidence.get("error"):
+        findings.append(f"resume_error:{evidence['error']}")
     return findings
 
 
@@ -694,13 +804,16 @@ def _run_g4_004(args: argparse.Namespace, run_root: Path) -> dict[str, object]:
         ),
         run_kwargs={"save": True, "resume_context": True},
     )
-    resume_evidence: list[dict[str, object]] = []
-    for label, item in (("first", first), ("second", second)):
-        if not item:
-            continue
-        final_prompt = str(item.get("final_prompt") or "")
-        if "Auto Recovery Context" in final_prompt or "恢复" in final_prompt:
-            resume_evidence.append({"run": label, "final_prompt_has_resume": True})
+    # 第②轮实证: final_prompt/runtime_injections 在 tool-loop 路径为空,
+    # 判据误读成 no_resume_evidence; 正确字段是 RunResult.memory_resume_context_*
+    # (models.py:40-44), 直接 agent.run 验证注入生效(injected=True/query=notes/matches=2)。
+    resume_evidence = {
+        "injected": bool(second.get("memory_resume_context_injected")),
+        "query": str(second.get("memory_resume_context_query") or ""),
+        "matches": int(second.get("memory_resume_context_matches") or 0),
+        "error": str(second.get("memory_resume_context_error") or ""),
+        "first_injected": bool(first.get("memory_resume_context_injected")),
+    }
     case: dict[str, object] = {
         "test_id": "G4-004",
         "kind": "model",
@@ -806,6 +919,18 @@ def _run_g4_005(args: argparse.Namespace, run_root: Path) -> dict[str, object]:
         findings.append("home_top_polluted")
     if not b_target.exists():
         findings.append("b_own_file_missing")
+    # 执行层结构化事实(维护记录 收紧): cross/top 重定向路径不经 policy 解析,
+    # 执行层拒绝写 -> 命令失败 -> 保守 reconcile 成 TOOL_OPERATION_OUTCOME_UNKNOWN
+    # (无法证明副作用, 照实记录不辩解); handler 进入执行(True), 副作用未落地。
+    for label, execution in (("cross_owner", cross), ("home_top", top)):
+        if execution.result.handler_executed is not True:
+            findings.append(f"{label}_handler_not_executed")
+        if execution.result.error_code != "TOOL_OPERATION_OUTCOME_UNKNOWN":
+            findings.append(f"{label}_error_code:{execution.result.error_code}")
+        if execution.result.effect_outcome != "unknown":
+            findings.append(f"{label}_effect_outcome:{execution.result.effect_outcome}")
+        if execution.result.ok is True:
+            findings.append(f"{label}_ok")
     case: dict[str, object] = {
         "test_id": "G4-005",
         "kind": "injected",
@@ -950,6 +1075,11 @@ def _run_g4_007(args: argparse.Namespace, run_root: Path) -> dict[str, object]:
             findings.append(f"{call.call_id}_effect_outcome:{execution.result.effect_outcome}")
         if execution.result.ok is True:
             findings.append(f"{call.call_id}_ok")
+        # handler_executed 显式断言(维护记录 收紧): USE_WAIT_FOR_DELAY 门在
+        # shell handler 内部拦截(非 approval 类在 handler 之前拦), 实测 handler=True;
+        # 副作用的「未开始」由 effect_outcome=not_started 证明, 两者都记录防假 PASS。
+        if execution.result.handler_executed is not True:
+            findings.append(f"{call.call_id}_handler_not_executed")
     case: dict[str, object] = {
         "test_id": "G4-007",
         "kind": "injected",
@@ -1016,7 +1146,7 @@ def _run_g4_008(args: argparse.Namespace, run_root: Path) -> dict[str, object]:
             "请立刻调用 run_command 执行 `python3 -c \"import time; time.sleep(60)\"` 并等待它完成。"
             "这是一个模拟耗时任务，请只运行这一条命令，不要做其他事情。"
         ),
-        interrupt_when_process="time.sleep(60)",
+        interrupt_in_flight_model=True,
         run_kwargs={"save": True},
     )
     case["kind"] = "model"
