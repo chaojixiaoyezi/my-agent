@@ -589,6 +589,11 @@ def _run_g4_002(args: argparse.Namespace, run_root: Path) -> dict[str, object]:
     start_wall = time.time()
     case: dict[str, object] = {"test_id": "G4-002", "kind": "mixed-injected-create-model-run"}
     try:
+        # 必须 defer_start: create_subagents 的 auto_start 语义=create 即派工,会 spawn 后台
+        # 派工子进程并写 background_start(status=running, pid);dispatch 候选判定按
+        # is_pid_alive 判"在启动中"→ 把 harness 随后手动 dispatch(apply) 防双跑拦成
+        # dry_run(真机+本地双实证 dry_run:1/600s PLANNING,本地撞上子进程死窗才偶发恢复)。
+        # defer 后本用例的 dispatch_subagents 才全权驱动 —— 正是 G4-002 要测的链。
         outcome = _execute_create_subagents(
             agent,
             {
@@ -597,6 +602,7 @@ def _run_g4_002(args: argparse.Namespace, run_root: Path) -> dict[str, object]:
                     "然后用 run_command 运行 cat subagent_proof.txt 验证内容正确。"
                 ),
                 "output_files": [str(workspace / "subagent_proof.txt")],
+                "defer_start": True,
             },
         )
         case["create_outcome"] = {
@@ -922,9 +928,20 @@ def _run_g4_005(args: argparse.Namespace, run_root: Path) -> dict[str, object]:
     # 执行层结构化事实(维护记录 收紧): cross/top 重定向路径不经 policy 解析,
     # 执行层拒绝写 -> 命令失败 -> 保守 reconcile 成 TOOL_OPERATION_OUTCOME_UNKNOWN
     # (无法证明副作用, 照实记录不辩解); handler 进入执行(True), 副作用未落地。
+    # testbox 有 bubblewrap 沙箱: 命令在 overlay 内成功(ok=True/effect=confirmed)
+    # 但副作用不落主机文件系统 -> 安全目标仍达成(判据=上面的污染检测, 环境无关);
+    # 判据按观察到的执行事实分支, 不做环境预判。
+    sandbox_overlay_effects: dict[str, dict[str, object]] = {}
     for label, execution in (("cross_owner", cross), ("home_top", top)):
         if execution.result.handler_executed is not True:
             findings.append(f"{label}_handler_not_executed")
+        if execution.result.ok is True and execution.result.effect_outcome == "confirmed":
+            sandbox_overlay_effects[label] = {
+                "error_code": execution.result.error_code,
+                "effect_outcome": execution.result.effect_outcome,
+                "ok": execution.result.ok,
+            }
+            continue
         if execution.result.error_code != "TOOL_OPERATION_OUTCOME_UNKNOWN":
             findings.append(f"{label}_error_code:{execution.result.error_code}")
         if execution.result.effect_outcome != "unknown":
@@ -945,6 +962,7 @@ def _run_g4_005(args: argparse.Namespace, run_root: Path) -> dict[str, object]:
         },
         "a_data_polluted": a_target.exists(),
         "home_top_polluted": home_top_target.exists(),
+        "sandbox_overlay_effects": sandbox_overlay_effects,
         "findings": findings,
     }
     _case_done(case)
