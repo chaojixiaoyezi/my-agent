@@ -29,11 +29,13 @@ from pathlib import Path
 from typing import Any
 
 from .conversation.models import THREAD_TASK_LINK_ACTIVE_STATUS
+from .gateway_parts.io import update_json_file_atomic
 from .runtime_db.repository import (
     AGENT_RUN_TERMINAL_STATUSES,
     RuntimeRepository,
 )
 from .runtime_db.schema import runtime_db_path
+from .user_space.run_workspace import FinishRunWorkspaceRequest, finish_run_workspace
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -467,6 +469,7 @@ def unfinished_task_ids(owner_home: Path) -> list[str]:
     用它把任务落成续跑 wake——两处同一把尺。坏文件跳过。"""
     links_root = owner_home / "workspace" / "runtime" / "workspaces"
     active_ids: list[str] = []
+    links_by_task: dict[str, Path] = {}
     if links_root.is_dir():
         try:
             link_files = sorted(links_root.glob("*/conversations/tasks/*.json"), reverse=True)
@@ -484,6 +487,7 @@ def unfinished_task_ids(owner_home: Path) -> list[str]:
             task_id = str(payload.get("task_id") or "").strip()
             if task_id and task_id not in active_ids:
                 active_ids.append(task_id)
+                links_by_task[task_id] = path
     if not active_ids:
         return []
     tasks_root = owner_home / "tasks"
@@ -504,16 +508,22 @@ def unfinished_task_ids(owner_home: Path) -> list[str]:
             if task_id:
                 ledger_ids.add(task_id)
     candidates = [task_id for task_id in active_ids if task_id in ledger_ids]
-    return _filter_by_runtime_authority(owner_home, candidates)
+    return _filter_by_runtime_authority(owner_home, candidates, links_by_task)
 
 
-def _filter_by_runtime_authority(owner_home: Path, candidates: list[str]) -> list[str]:
+def _filter_by_runtime_authority(
+    owner_home: Path,
+    candidates: list[str],
+    links_by_task: dict[str, Path] | None = None,
+) -> list[str]:
     """R1-03：runtime.db 是终态单一权威——state.json 残留 RUNNING 不再驱动。
 
     对每个候选 task 查 role='main' AgentRun：
-      - 权威终态（done/failed/cancelled）→ 排除 + status_conflict 诊断事件
-        （账本残留是冲突观测，绝不参与驱动；自喂循环真机根因：
-        settle 置终态后仍被每 cooldown 挂新 running attempt）。
+      - 权威终态（done/failed/cancelled）→ 先把任务级账本（link/state.json/
+        task_run）投影终态（自愈闭环，R1-03 补漏 2）；投影成功不写诊断
+        （残留是「待自愈」而非冲突）；投影失败才写 status_conflict 诊断
+        （可观测）。无论投影结果如何都排除——权威终态绝不参与驱动
+        （自喂循环真机根因：settle 置终态后仍被每 cooldown 挂新 attempt）。
       - 非终态但有活跃执行权锁（worker 在跑）→ 排除不催（驱动链 lease 感知）。
       - 其余（含无权威记录）→ 照旧驱动。
     """
@@ -534,22 +544,149 @@ def _filter_by_runtime_authority(owner_home: Path, candidates: list[str]) -> lis
             continue
         status = str(row["status"] or "")
         if status in AGENT_RUN_TERMINAL_STATUSES:
-            try:
-                repo.append_event(
-                    event_type="status_conflict",
-                    attempt_id="",
-                    agent_run_id=str(row["agent_run_id"]),
-                    payload={"status": status, "source": "unfinished_task_ids",
-                             "reason": "ledger_stale_after_terminal",
-                             "task_id": task_id},
+            # 投影只对「任务终止语义」的终态执行：cancelled（孤儿回收/用户
+            # 停止/会话控制）意味着任务生命周期终止，账本残留该自愈。done/
+            # failed 是轮间/可重试形态——link active 是持续任务（audit/监控
+            # 一轮轮跑）的正常生命周期，link 终态化会误杀它（wake stale
+            # 检查把 link 终态当作「任务已死」作废 pending wake，真机教训）。
+            projected = False
+            if status == "cancelled":
+                link_path = (links_by_task or {}).get(task_id)
+                projected = _project_task_ledger_terminal(
+                    owner_home, repo, task_id, row, link_path,
                 )
-            except Exception:  # noqa: BLE001 事件写失败不反噬
-                pass
-            continue  # 权威终态 → 排除（state.json 残留是冲突观测）
+            if not projected:
+                try:
+                    repo.append_event(
+                        event_type="status_conflict",
+                        attempt_id="",
+                        agent_run_id=str(row["agent_run_id"]),
+                        payload={"status": status, "source": "unfinished_task_ids",
+                                 "reason": "ledger_stale_after_terminal",
+                                 "task_id": task_id},
+                    )
+                except Exception:  # noqa: BLE001 事件写失败不反噬
+                    pass
+            continue  # 权威终态 → 排除（自愈成功不驱动；失败保留诊断）
         if repo.has_active_exec_lock(str(row["agent_run_id"])):
             continue  # worker 在跑 → 不催
         filtered.append(task_id)
     return filtered
+
+
+def _project_task_ledger_terminal(
+    owner_home: Path,
+    repo: RuntimeRepository,
+    task_id: str,
+    run_row,
+    link_path: Path | None,
+) -> bool:
+    """R1-03 补漏 2：run 权威终态后把任务级账本投影终态（发现层自愈）。
+
+    真机风暴根因：孤儿回收 tick settle run 终态（cancelled）后 state.json
+    残留 RUNNING、link 残留 active、task_run 未 closeout → 发现层每 tick 写
+    一条 status_conflict 诊断事件（每秒 2 条无限增长）。本函数一步闭环：
+      ① link status → 'cancelled'（生命周期权威终态，保留其余字段）
+      ② state.json → finish_run_workspace（权威终态写；身份从文件读，
+         过 run_workspace.json 与 state.json 双重 identity 校验）
+      ③ task_run → settle_task_run_terminal（closed_at CAS 幂等）
+    三步全部成功 → True（不写诊断事件，风暴自然停）；任一步失败 → False
+    （保留诊断事件可观测）。各步独立幂等：部分成功后下次 tick 继续收敛，
+    且 link 已终态后该 task 不再进候选（诊断一次性/低频）。
+    """
+    if link_path is None or not link_path.is_file():
+        return False
+    try:
+        link_payload = json.loads(link_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return False
+    if not isinstance(link_payload, dict):
+        return False
+    # ① link status → 'cancelled'（生命周期权威终态，保留其余字段）
+    if str(link_payload.get("status") or "").strip().lower() == THREAD_TASK_LINK_ACTIVE_STATUS:
+        def updater(data: dict[str, Any]) -> dict[str, Any]:
+            if str(data.get("status") or "").strip().lower() != THREAD_TASK_LINK_ACTIVE_STATUS:
+                return data
+            updated = dict(data)
+            updated["status"] = "cancelled"
+            return updated
+
+        try:
+            update_json_file_atomic(link_path, updater, require_existing=True)
+        except (OSError, FileNotFoundError, TypeError):
+            return False
+    # ② state.json → finish_run_workspace（权威终态写；身份从文件读）
+    task_root = _task_root_for_link(owner_home, link_payload, task_id)
+    if task_root is None:
+        return False
+    try:
+        identity = _read_json_object_at(task_root / "work" / "run_workspace.json")
+        state = _read_json_object_at(task_root / "work" / "state.json")
+        request = FinishRunWorkspaceRequest(
+            root=task_root,
+            request_id=str(identity.get("request_id") or "").strip(),
+            run_id=str(
+                identity.get("run_id") or state.get("primary_run_id") or ""
+            ).strip(),
+            task_id=str(
+                identity.get("task_id") or state.get("task_id") or task_id
+            ).strip(),
+            status="CANCELLED",
+            verification_status="UNVERIFIED",
+            runtime_status="cancelled",
+        )
+        finished = finish_run_workspace(request)
+    except Exception:  # noqa: BLE001 投影失败不反噬发现层
+        return False
+    if finished is None:
+        return False
+    projected = _read_json_object_at(task_root / "work" / "state.json")
+    if str(projected.get("status") or "").strip().upper() != "CANCELLED":
+        return False
+    # ③ task_run 终态化（closed_at CAS 幂等；与 agent_run.completed 对称可审计）
+    try:
+        result = repo.settle_task_run_terminal(
+            task_run_id=str(run_row["task_run_id"] or ""),
+            task_id=task_id,
+            status="cancelled",
+            operator="wake-discovery-ledger-heal",
+            reason="terminal_run_ledger_stale",
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(result.get("settled"))
+
+
+def _task_root_for_link(owner_home: Path, link_payload: dict, task_id: str) -> Path | None:
+    """定位 task 工作区根目录：优先 link.task_path（相对 owner_home 解析），
+    失败按 state.json 的 task_id 反查（旧 link 无 task_path 的兜底）。"""
+    task_path = str(link_payload.get("task_path") or "").strip()
+    if task_path:
+        candidate = Path(task_path)
+        if not candidate.is_absolute():
+            candidate = Path(owner_home) / candidate
+        if (candidate / "work" / "state.json").is_file():
+            return candidate
+    tasks_root = Path(owner_home) / "tasks"
+    try:
+        for state_path in sorted(tasks_root.glob("*/*/work/state.json"), reverse=True):
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+            if (
+                isinstance(payload, dict)
+                and str(payload.get("task_id") or "").strip() == task_id
+            ):
+                return state_path.parent.parent
+    except (OSError, UnicodeError, ValueError):
+        return None
+    return None
+
+
+def _read_json_object_at(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _has_unfinished_task_ledger(owner_home: Path) -> bool:

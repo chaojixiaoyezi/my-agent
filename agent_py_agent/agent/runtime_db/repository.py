@@ -1019,6 +1019,50 @@ class RuntimeRepository(
             )
         return {"settled": True, "event_id": event_id}
 
+    def settle_task_run_terminal(
+        self,
+        *,
+        task_run_id: str,
+        task_id: str = "",
+        status: str = "cancelled",
+        operator: str = "",
+        reason: str = "",
+        now: float | None = None,
+    ) -> dict[str, object]:
+        """task_run 任务级终态化（发现层账本自愈用，无 acceptance 轴）。
+
+        与 closeout_task_run 的区别：这是 run 已权威终态后把残留 task_run
+        投影终态的兜底（孤儿回收/收口闸的 settle 调用点不在交付链，没资格
+        走带 acceptance 轴的三轴收口）。closed_at=0 才写（CAS 幂等，并发/
+        重放以第一次为准）；写 task_run.closed 事件，与 agent_run.completed
+        对称可审计。
+        """
+        if str(status or "").strip() not in AGENT_RUN_TERMINAL_STATUSES:
+            return {"settled": False, "reason": "invalid_status"}
+        now = time.time() if now is None else now
+        with self.transaction() as conn:
+            cur = conn.execute(
+                "UPDATE task_runs SET status = ?, closed_at = ?, updated_at = ? "
+                "WHERE task_run_id = ? AND closed_at = 0",
+                (status, now, now, task_run_id),
+            )
+            if cur.rowcount == 0:
+                return {"settled": False, "reason": "already_terminal"}
+            self._append_event_conn(
+                conn,
+                event_type="task_run.closed",
+                attempt_id="",
+                agent_run_id="",
+                task_run_id=task_run_id,
+                payload={
+                    "status": status,
+                    "task_id": task_id,
+                    "operator": str(operator or ""),
+                    "reason": str(reason or ""),
+                },
+            )
+        return {"settled": True, "closed_at": now}
+
     # ------------------------------------------- R1-03 收口矩阵 + 孤儿兜底
     def classify_attempt_closeout(self, attempt_id: str) -> str | None:
         """R1-03 收口矩阵五档（v5，纯结构化 op 状态分类）。
