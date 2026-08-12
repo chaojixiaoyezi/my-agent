@@ -260,18 +260,18 @@ def _owner_has_soft_facts(owner_home: Path) -> bool:
 # 占满 64 容量运行池,真活的 user-a/user-b 被 LRU 逐出饿死(探针实锤)。
 # 函数用途: 让 scoped owner 在 Gateway 重启或 LRU 逐出后重新进入既有后台 lane。
 def _owner_memory_enabled(owner_home: Path) -> bool:
-    """owner memory_policy 总闸(读文件,与 resolve_effective_owner_policy 同源语义)。
+    """owner memory_policy 总闸(唯一 authority:判定走 canonical effective_memory_enabled,
+    读取走 canonical read_json_object_report,与 resolve_effective_owner_policy 同源)。
 
     文件缺失视为开启(老 owner 兼容)、坏 JSON 视为开启(发现层不因解析失败误杀,
     与「无法证明没活=有活」已删后的宽容语义一致)——只有显式 enabled=false 才短路。"""
-    policy_path = owner_home / "memory_policy.json"
-    try:
-        payload = json.loads(policy_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, ValueError):
-        return True
-    if not isinstance(payload, dict):
-        return True
-    return bool(payload.get("enabled", True))
+    from .common.json_io import read_json_object_report
+    from .user_space.owner_policy import effective_memory_enabled
+
+    report = read_json_object_report(
+        owner_home / "memory_policy.json", context="owner_wake.memory_policy"
+    )
+    return effective_memory_enabled(report.payload)
 
 
 def _has_pending_memory_curator_work(owner_home: Path) -> bool:

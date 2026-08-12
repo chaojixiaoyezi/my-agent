@@ -200,12 +200,20 @@ def _effective_network_enabled(
     return enabled if parent_policy is None else bool(enabled and parent_policy.network_enabled)
 
 
+def effective_memory_enabled(memory_policy: dict[str, Any]) -> bool:
+    """Memory 总闸判定（唯一 authority；resolve 与 owner_wake_discovery 等全部消费点共用）。
+
+    文件缺失/坏 JSON（read_json_object_report 报 load_error 但给空 payload）视为开启（老 owner
+    兼容、发现层不因解析失败误杀）——只有显式 enabled=false 才短路。"""
+    return bool(_dict_value(memory_policy).get("enabled", True))
+
+
 def _effective_memory_enabled(
     memory_policy: dict[str, Any],
     parent_policy: EffectiveOwnerPolicy | None,
 ) -> bool:
-    """Memory 总闸：文件缺失视为开启（老 owner 兼容），子代理 and 继承父开关。"""
-    enabled = bool(_dict_value(memory_policy).get("enabled", True))
+    """Memory 总闸：子代理 and 继承父开关（判定本体见 effective_memory_enabled）。"""
+    enabled = effective_memory_enabled(memory_policy)
     return enabled if parent_policy is None else bool(enabled and parent_policy.memory_enabled)
 
 
