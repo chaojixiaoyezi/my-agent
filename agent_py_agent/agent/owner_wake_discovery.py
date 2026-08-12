@@ -420,17 +420,11 @@ def _runtime_repo_for_owner(owner_home: Path) -> RuntimeRepository | None:
 def _main_run_row_for_task(repo: RuntimeRepository, task_id: str):
     """task 的 role='main' root AgentRun（终态/锁过滤的权威锚点）。
 
-    tasks → task_runs → agent_runs（role='main' 且 parent 空 = 主链根）。
+    SQL 与主链接线复用同一把尺（repository.main_agent_run_for_task，
+    R1-03 补漏：续跑登记与发现层过滤必须看到同一棵 run 树）。
     取最新一条；无权威记录 → None（发现层不据此裁决，照旧驱动）。
     """
-    return repo._runtime_connect().execute(
-        "SELECT ar.agent_run_id, ar.status FROM agent_runs ar "
-        "JOIN task_runs tr ON tr.task_run_id = ar.task_run_id "
-        "JOIN tasks t ON t.task_id = tr.task_id "
-        "WHERE t.task_id = ? AND ar.role = 'main' AND ar.parent_agent_run_id = '' "
-        "ORDER BY ar.created_at DESC LIMIT 1",
-        (task_id,),
-    ).fetchone()
+    return repo.main_agent_run_for_task(task_id)
 
 
 def _has_unfinished_subagent_run(owner_home: Path) -> bool:

@@ -333,14 +333,23 @@ def _bind_main_agent_authority(agent, params: RunParams) -> RunParams:
     run_id = str(params.run_id or "").strip()
     if repo is None or not run_id:
         return params  # LOCAL_UNMANAGED / 无 run 上下文 → 投影（显式选择）
-    if repo.agent_run_for_run_id(run_id) is None:
-        attrs = params.task_attributes if isinstance(params.task_attributes, dict) else {}
-        home_paths = getattr(agent, "home_paths", None)
-        owner_id = str(getattr(home_paths, "owner_id", "") or "local/main").strip()
-        # root Task 身份对齐门比对键：conversation_task_id 取调用方 task_id
-        # （run scope 的 task_id 兜底 = run_id），保证 require_authority 的
-        # tasks.task_id 比对与调用者声明一致，无需再回存 runtime_authority attrs。
-        task_id = str(params.task_id or run_id).strip()
+    attrs = params.task_attributes if isinstance(params.task_attributes, dict) else {}
+    home_paths = getattr(agent, "home_paths", None)
+    owner_id = str(getattr(home_paths, "owner_id", "") or "local/main").strip()
+    # root Task 身份对齐门比对键：conversation_task_id 取调用方 task_id
+    # （run scope 的 task_id 兜底 = run_id），保证 require_authority 的
+    # tasks.task_id 比对与调用者声明一致，无需再回存 runtime_authority attrs。
+    task_id = str(params.task_id or run_id).strip()
+    row = repo.agent_run_for_run_id(run_id)
+    if row is None:
+        # R1-03 补漏：主代理续跑身份（bg-main-thread-{thread}）可能与请求身份
+        # （req_{id}）不同，按 run_id 查不到对方登记。回退按 task 查主链
+        # role='main' root run——同一 task 已登记 → create_attempt 续挂
+        # （挂载闸轮换 generation + 执行权锁，终态放行由任务级闸裁决），
+        # 禁止分裂第二棵 run 树（真机实证：unfinished 任务续跑分裂出
+        # taskrun/agentrun 双份，create_attempt 挂载闸被绕过）。
+        row = repo.main_agent_run_for_task(task_id)
+    if row is None:
         record = repo.record_run_creation(
             owner_id=owner_id,
             goal=str(getattr(params, "root_user_prompt", "") or "")[:200],
@@ -351,7 +360,6 @@ def _bind_main_agent_authority(agent, params: RunParams) -> RunParams:
         )
         attempt_id = str(record.get("attempt_id") or "").strip()
     else:
-        row = repo.agent_run_for_run_id(run_id)
         attempt = repo.create_attempt(str(row["agent_run_id"]))
         attempt_id = str(attempt["attempt_id"] or "").strip()
     if not attempt_id:

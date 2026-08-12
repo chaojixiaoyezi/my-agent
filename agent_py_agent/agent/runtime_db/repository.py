@@ -367,6 +367,26 @@ class RuntimeRepository(
             ).fetchall()
         return list(rows)
 
+    def main_agent_run_for_task(self, task_id: str) -> sqlite3.Row | None:
+        """task 的 role='main' root AgentRun（终态/锁过滤的权威锚点）。
+
+        tasks → task_runs → agent_runs（role='main' 且 parent 空 = 主链根），
+        取最新一条。R1-03 补漏：主代理续跑身份（bg-main-thread-{thread}）与
+        gateway 请求身份（req_{id}）不同，按 run_id 查不到对方登记——回退
+        按 task 查主链 run，续跑必须复用原 run（create_attempt 轮换
+        generation），禁止同一 task 分裂第二棵 run 树（真机实证：unfinished
+        任务续跑分裂出 taskrun 双份，挂载闸被绕过）。无权威记录 → None。
+        """
+        with self._runtime_connection() as conn:
+            return conn.execute(
+                "SELECT ar.* FROM agent_runs ar "
+                "JOIN task_runs tr ON tr.task_run_id = ar.task_run_id "
+                "JOIN tasks t ON t.task_id = tr.task_id "
+                "WHERE t.task_id = ? AND ar.role = 'main' AND ar.parent_agent_run_id = '' "
+                "ORDER BY ar.created_at DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+
     # ---------------------------------------------------------- AgentAttempt
     def create_attempt(self, agent_run_id: str) -> sqlite3.Row:
         """单事务创建新 attempt + 原子取得执行权（R1-03 v5）。
