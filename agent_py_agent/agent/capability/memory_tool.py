@@ -240,10 +240,10 @@ class RememberTool(BaseTool):
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         action = str(params.get("action") or "add").strip().lower()
         if action not in {"add", "list", "replace", "remove", "batch"}:
-            return _memory_error("action 必须是 add/list/replace/remove/batch", "TOOL_INVALID_ARGUMENTS")
+            return _memory_error("action 必须是 add/list/replace/remove/batch", "TOOL_INVALID_ARGUMENTS", not_started=True)
         memory = getattr(self.agent, "memory", None)
         if memory is None or not hasattr(memory, "all"):
-            return _memory_error("正式长期记忆不可用", "TOOL_UNAVAILABLE")
+            return _memory_error("正式长期记忆不可用", "TOOL_UNAVAILABLE", not_started=True)
         if action == "list":
             return _memory_list_result(memory)
         operations = _memory_operations(params, action)
@@ -256,6 +256,7 @@ class RememberTool(BaseTool):
             return _memory_error(
                 "统一候选或晋升服务不可用，拒绝回退直接写长期记忆。",
                 "MEMORY_SERVICE_UNAVAILABLE",
+                not_started=True,
             )
         try:
             observed = candidates.observe_many(prepared)
@@ -337,7 +338,7 @@ def _prepare_observations(
     operations: list[dict[str, object]],
 ) -> list[CandidateObservation] | ToolHandlerOutcome:
     if not operations:
-        return _memory_error("operations 必须是非空数组", "TOOL_INVALID_ARGUMENTS")
+        return _memory_error("operations 必须是非空数组", "TOOL_INVALID_ARGUMENTS", not_started=True)
     observations: list[CandidateObservation] = []
     for index, operation in enumerate(operations, start=1):
         prepared = _prepare_observation(agent, memory, operation, index=index)
@@ -415,6 +416,7 @@ def _validated_action_origin(
         return _memory_error(
             f"第 {index} 个操作的 action 必须是 add/replace/remove",
             "TOOL_INVALID_ARGUMENTS",
+            not_started=True,
         )
     origin = str(operation.get("origin") or "").strip().lower()
     if origin not in _MEMORY_ORIGINS:
@@ -422,6 +424,7 @@ def _validated_action_origin(
             f"第 {index} 个操作缺少有效 origin",
             "TOOL_INVALID_ARGUMENTS",
             hint="必须显式使用 user_explicit/tool_verified/model_inferred。",
+            not_started=True,
         )
     return action, origin
 
@@ -444,12 +447,14 @@ def _resolved_target(
             f"第 {index} 个操作缺少 entry_id",
             "TOOL_INVALID_ARGUMENTS",
             hint="先 action=list 取得稳定 entry_id。",
+            not_started=True,
         )
     target = _memory_record(memory, entry_id)
     if target is None:
         return _memory_error(
             f"第 {index} 个操作的 entry_id 不存在",
             "MEMORY_ENTRY_NOT_FOUND",
+            not_started=True,
         )
     return entry_id, target
 
@@ -470,15 +475,16 @@ def _validated_candidate_body(
         else str(operation.get("content") or "").strip()
     )
     if not content:
-        return _memory_error(f"第 {index} 个操作缺少 content", "TOOL_INVALID_ARGUMENTS")
+        return _memory_error(f"第 {index} 个操作缺少 content", "TOOL_INVALID_ARGUMENTS", not_started=True)
     tags = _normalize_tags(operation.get("tags"))
     scan = scan_memory_content(content)
     if not scan.safe:
-        return _memory_error(scan.reason(), "MEMORY_INJECTION_BLOCKED")
+        return _memory_error(scan.reason(), "MEMORY_INJECTION_BLOCKED", not_started=True)
     if not classify_memory_retention(content, tags).durable:
         return _memory_error(
             "内容含临时验证码、解锁码或一次性凭据，不能进入长期候选。",
             "MEMORY_TRANSIENT_DATA_BLOCKED",
+            not_started=True,
         )
     return content, tags
 
@@ -515,18 +521,20 @@ def _validated_domain_fields(
         return _memory_error(
             f"第 {index} 个操作的 kind 必须是 fact/event/project；lesson 走 lesson 候选链。",
             "TOOL_INVALID_ARGUMENTS",
+            not_started=True,
         )
     if not subject_key and kind != "event":
         return _memory_error(
             f"第 {index} 个操作缺少稳定 subject_key",
             "TOOL_INVALID_ARGUMENTS",
+            not_started=True,
         )
     try:
         scope = _operation_scope(operation, target_attributes=attributes)
     except ValueError as exc:
-        return _memory_error(str(exc), "TOOL_INVALID_ARGUMENTS")
+        return _memory_error(str(exc), "TOOL_INVALID_ARGUMENTS", not_started=True)
     if scope.scope_type == "temporary" and not str(operation.get("valid_until") or "").strip():
-        return _memory_error("temporary scope 必须提供 valid_until。", "TOOL_INVALID_ARGUMENTS")
+        return _memory_error("temporary scope 必须提供 valid_until。", "TOOL_INVALID_ARGUMENTS", not_started=True)
     return _MemoryDomainFields(subject_key, kind, scope)
 
 
@@ -542,11 +550,13 @@ def _target_subject(
         return _memory_error(
             "旧条目缺少 subject_key，必须先运行 memory migrate。",
             "MEMORY_LEGACY_ENTRY_REQUIRES_MIGRATION",
+            not_started=True,
         )
     if requested and requested != authoritative:
         return _memory_error(
             "subject_key 与 entry_id 的正式记录不一致。",
             "MEMORY_TARGET_SCOPE_MISMATCH",
+            not_started=True,
         )
     return authoritative
 
@@ -761,7 +771,7 @@ def _memory_list_result(memory: object) -> ToolHandlerOutcome:
     try:
         entries = [_memory_record_payload(record) for record in memory.all()]
     except Exception as exc:  # noqa: BLE001
-        return _memory_error(f"读取失败: {exc}", "TOOL_EXECUTION_FAILED")
+        return _memory_error(f"读取失败: {exc}", "TOOL_EXECUTION_FAILED", not_started=True)
     return ToolHandlerOutcome(
         "remember",
         True,
@@ -795,7 +805,9 @@ def _memory_record_payload(record: object) -> dict[str, object]:
 
 # LLM: Tool errors carry stable codes; no caller should parse the Chinese message for control flow.
 # 函数用途: 构造 remember 的统一结构化失败结果。
-def _memory_error(message: str, code: str, *, hint: str = "") -> ToolHandlerOutcome:
+def _memory_error(
+    message: str, code: str, *, hint: str = "", not_started: bool = False
+) -> ToolHandlerOutcome:
     payload = {"error": message}
     if hint:
         payload["hint"] = hint
@@ -804,6 +816,9 @@ def _memory_error(message: str, code: str, *, hint: str = "") -> ToolHandlerOutc
         False,
         json.dumps(payload, ensure_ascii=False),
         error_code=code,
+        # not_started=已证明未触发副作用：coordinator 据此归 FAILED 而非 UNKNOWN，
+        # 让模型对确定性失败可以修正重试；只有候选写入失败（可能部分写入）不标。
+        effect_outcome="not_started" if not_started else "",
     )
 
 

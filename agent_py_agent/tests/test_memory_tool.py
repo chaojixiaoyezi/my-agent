@@ -91,6 +91,9 @@ def test_remember_missing_content_errors(tmp_path):
     )
     assert result.ok is False
     assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+    # 确定性参数错误发生在任何写入之前：必须显式声明"未触发副作用"，
+    # 否则 coordinator 因 handler_executed=True 误归 UNKNOWN（阻止自动重做）。
+    assert result.effect_outcome == "not_started"
 
 
 def test_remember_unavailable_when_no_memory():
