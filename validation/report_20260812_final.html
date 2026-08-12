@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>my-agent 工具测试收官汇报 · 2026-08-12</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", sans-serif; max-width: 860px; margin: 32px auto; padding: 0 20px; color: #24292f; line-height: 1.7; }
+  h1 { font-size: 24px; border-bottom: 3px solid #0969da; padding-bottom: 8px; }
+  h2 { font-size: 18px; margin-top: 28px; color: #0969da; }
+  .card { border: 1px solid #d0d7de; border-radius: 10px; padding: 16px 20px; margin: 14px 0; background: #f6f8fa; }
+  .good { color: #1a7f37; font-weight: 600; }
+  .bad { color: #cf222e; font-weight: 600; }
+  .tag { display: inline-block; background: #0969da; color: #fff; border-radius: 4px; padding: 1px 8px; font-size: 12px; margin-right: 6px; }
+  .tag.green { background: #1a7f37; }
+  code { background: #eaeef2; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  .big { font-size: 20px; }
+  table { border-collapse: collapse; margin: 12px 0; width: 100%; }
+  td, th { border: 1px solid #d0d7de; padding: 6px 10px; text-align: left; font-size: 14px; }
+  th { background: #f6f8fa; }
+  .emoji { font-size: 18px; }
+</style>
+</head>
+<body>
+
+<h1>🔧 my-agent 工具测试收官汇报</h1>
+<p><strong>日期：</strong>2026-08-12 · <strong>汇报人：</strong>终端应用-web-owner · <strong>协作：</strong>会话运行时-维护记录（只读复核中）</p>
+
+<div class="card">
+<p class="big">一句话总结：<strong>三个老大难问题全修好了，真机全部验证通过</strong>。就像给家里装了三道安防：<span class="good">①没人能"假装干完活"糊弄你；②每件事干完都在账本上盖上"已完成"的章；③干活干一半要叫停，也能停得干干净净。</span></p>
+</div>
+
+<h2>📋 修了什么（三个问题）</h2>
+
+<table>
+<tr><th>#</th><th>问题（大白话）</th><th>怎么修的</th><th>真机验证</th></tr>
+<tr>
+  <td>①</td>
+  <td><b>假装干完活</b>：模型嘴上说"完成啦"，其实证据没到位，用户被糊弄</td>
+  <td>投递层信机器不信嘴：完成门判定"没完成"时，回复自动带 <b>【任务未完成】</b> 标注（写明状态/原因/来源），模型原话只当"过程参考"</td>
+  <td class="good">✅ 模型伪造命令输出 → 门当场打回 → 用户收到"未完成"如实标注</td>
+</tr>
+<tr>
+  <td>②</td>
+  <td><b>账本永不收口</b>：任务在审计账本里永远显示"进行中"，没法审计"这事到底完没完"</td>
+  <td>任务真实结束时按机器状态落账：<code>ok→done</code>、<code>停止→cancelled</code>，关闭所有挂起的轮次，写一条"任务完成"事件；一次性写入谁先到谁说了算，不重复盖章</td>
+  <td class="good">✅ 真机 /stop 后：账本状态 cancelled + 轮次结束时间落账 + 完成事件在</td>
+</tr>
+<tr>
+  <td>③</td>
+  <td><b>取消没有实测</b>：以前没真的让长命令跑一半再叫停，不知道取消干不干净</td>
+  <td>补了真实执行期取消测试：逼模型真跑 25 秒命令 → 确认进程真的在跑 → /stop 打断 → 断言：操作落终态、零副作用、线程收口</td>
+  <td class="good">✅ 3 项断言全过，取消语义如实（进程被杀的操作用"效果未知+已取消"标注，不谎报成功）</td>
+</tr>
+</table>
+
+<h2>🧪 测试是怎么做的（铁律都守了）</h2>
+<div class="card">
+<ul>
+  <li><span class="tag green">真机</span> 全部用真实用户家目录 + 常驻服务 + 真实 LLM 任务，不是脚本模拟</li>
+  <li><span class="tag green">极端</span> 极限场景：假完成、执行中取消、子代理异步派发、失败重试——都用 LLM 真跑</li>
+  <li><span class="tag green">双通道</span> CLI 和飞书真实入口都测了（17 个 case 全套真机）</li>
+  <li><span class="tag green">回归</span> 全量自动化测试 3 次全绿（约 9300+ 用例），无失败</li>
+</ul>
+</div>
+
+<h2>🔍 过程中发现的"插曲"（都不是产品 bug）</h2>
+<div class="card">
+<ul>
+  <li><b>部署方式的坑</b>：testbox 的 Python 环境是"普通安装"，改代码要部署到 <code>site-packages</code> 副本才生效——之前部署位置错了，已修正并 md5 双向校验 + 探针确认加载生效</li>
+  <li><b>测试工具自身 3 个毛病</b>：一行崩溃的解析写法、一个过严的取消断言、一个采样太早的时序问题——已修，与产品无关</li>
+</ul>
+</div>
+
+<h2>📦 代码去向</h2>
+<div class="card">
+<ul>
+  <li><code>6fbdc365</code> — 修复①② + 25 个单测（已推 main）</li>
+  <li><code>e9fedd61</code> — 审计时间戳用真实时钟（已推 main）</li>
+  <li><code>c150fbda</code> — 测试工具三处修复（已推 main）</li>
+</ul>
+<p>testbox 已部署最新代码并重启，服务健康。</p>
+</div>
+
+<h2>⏳ 待办</h2>
+<div class="card">
+<p><b>@会话运行时-维护记录</b> 只读复核已发起（代码与证据审查，不参与执行）。等维护记录复核意见回来后再做最终收口。其余全部完成 ✅</p>
+</div>
+
+</body>
+</html>
