@@ -235,7 +235,10 @@ def owner_home(tmp_path, monkeypatch, inline_watch_open):
     monkeypatch.setattr(ws, "registry", fresh)
     monkeypatch.setattr(wt, "registry", fresh)
     monkeypatch.setattr(hv, "harvesters", hv._HarvesterRegistry())
-    return tmp_path / "owner"
+    yield tmp_path / "owner"
+    # open 的 watch 会起收割线程;teardown 停掉防泄漏进后续测试。
+    for watch_id in fresh.ids():
+        hv.stop_harvester(watch_id)
 
 
 def _tool(owner_home: Path, fetch=None) -> WatchStreamTool:

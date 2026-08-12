@@ -200,6 +200,11 @@ class WatchRegistry:
         with self._lock:
             self._states.pop(watch_id, None)
 
+    def ids(self) -> list[str]:
+        """当前注册的 watch_id 只读快照(测试 teardown 停止收割线程用)。"""
+        with self._lock:
+            return list(self._states.keys())
+
     def get_or_load(self, owner_home: Path, watch_id: str) -> WatchState | None:
         with self._lock:
             state = self._states.get(watch_id)

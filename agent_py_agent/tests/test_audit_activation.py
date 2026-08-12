@@ -51,6 +51,7 @@ from agent.conversation.control_commands import (
     parse_conversation_control,
     parse_conversation_task_command,
 )
+from agent.ingestion import harvester as hv
 from agent.ingestion import watch_state as ws
 from agent.ingestion import watch_tool as wt
 from agent.ingestion.watch_tool import WatchStreamTool
@@ -65,7 +66,11 @@ def owner_home(tmp_path, monkeypatch):
     fresh = ws.WatchRegistry()
     monkeypatch.setattr(ws, "registry", fresh)
     monkeypatch.setattr(wt, "registry", fresh)
-    return tmp_path / "owner"
+    yield tmp_path / "owner"
+    # 每个 open 的 audit 保证档 watch 都会起收割线程;teardown 必须停掉,
+    # 否则泄漏进后续测试(monkeypatch 窗口内先提交导致 DID NOT RAISE)。
+    for watch_id in fresh.ids():
+        hv.stop_harvester(watch_id)
 
 
 def _fetch_ok(request) -> tuple[bool, object, str]:

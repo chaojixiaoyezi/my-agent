@@ -57,6 +57,24 @@ from agent.memory_archive.tool_output_externalizer import (
 )
 from agent.settings import AgentConfig
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _stop_harvester_threads():
+    """每个测试后停掉本测试 open 的 watch 收割线程。
+
+    这些测试直接用真 SimpleAgent + 真实 home 路径 open audit 保证档 watch(无
+    inline_watch_open fixture → 后台 lane 起 watch-harvester 线程)。测试不停止就
+    泄漏进后续测试:失败测试的 monkeypatch 窗口内泄漏线程先置位 failed 导致
+    DID NOT RAISE。stop 对不存在的 watch_id 是 no-op,对只读测试无害。"""
+    yield
+    from agent.ingestion import harvester as hv
+    from agent.ingestion import watch_state as ws
+
+    for watch_id in ws.registry.ids():
+        hv.stop_harvester(watch_id)
+
 
 def _agent(tmp_path: Path) -> SimpleAgent:
     return SimpleAgent(
