@@ -54,11 +54,24 @@ def default_retention_payload() -> dict[str, object]:
     }
 
 
+# LLM: Memory 总闸是单一结构化 effective flag（memory-policy.v1.enabled）；关闭后
+# curator 调度/发现层判活/决策点召回全部短路，与 skill-policy 完全对称、互不级联。
+# 缺失该文件的老 owner 视为开启（默认 True，兼容既有行为）。
+# 函数用途: 返回新 owner 的 Memory 子系统默认策略。
+def default_memory_policy_payload() -> dict[str, object]:
+    return {
+        "schema_version": "memory-policy.v1",
+        "enabled": True,
+    }
+
+
 # LLM: Skill source allowlist 只约束来源，不在 seed 中复制 Skill 内容。
+# enabled 是单一结构化总闸（与 memory-policy 对称）:关闭后快照为空，与来源名单独立。
 # 函数用途: 返回新 owner 可见 Skill 来源的默认策略。
 def default_skill_policy_payload() -> dict[str, object]:
     return {
         "schema_version": "skill-policy.v1",
+        "enabled": True,
         "enabled_sources": ["owner", "workspace", "shared", "builtin"],
         "enabled_shared_skills": [],
         "disabled_skills": [],
@@ -75,6 +88,7 @@ def default_tool_policy_payload() -> dict[str, object]:
 
 
 __all__ = [
+    "default_memory_policy_payload",
     "default_permissions_payload",
     "default_quota_payload",
     "default_retention_payload",

@@ -77,6 +77,9 @@ class SkillsService:
     ) -> SkillSnapshot:
         workspace = Path(workspace_root or self.workspace_root).expanduser().resolve(strict=False)
         policy = self.policy_provider()
+        if not policy.skills_enabled:
+            # 总闸关闭：空快照（来源名单是细粒度控制，总闸是 effective flag——对称 memory_policy）
+            return _build_snapshot((), (), policy, workspace)
         roots = self._skill_roots(workspace, policy)
         manifest, discovery_errors = _build_manifest(roots)
         fingerprint = _snapshot_fingerprint(manifest, discovery_errors, policy, workspace)

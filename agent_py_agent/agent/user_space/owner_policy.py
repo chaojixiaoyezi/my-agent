@@ -19,6 +19,7 @@ class OwnerPolicyBundle:
     permissions: dict[str, Any]
     quota: dict[str, Any]
     retention: dict[str, Any]
+    memory_policy: dict[str, Any]
     skill_policy: dict[str, Any]
     tool_policy: dict[str, Any]
 
@@ -48,6 +49,8 @@ class EffectiveOwnerPolicy:
     max_depth: int
     max_disk_mb: int
     disabled_tools: tuple[str, ...]
+    memory_enabled: bool
+    skills_enabled: bool
     enabled_skill_sources: tuple[str, ...]
     enabled_shared_skills: tuple[str, ...]
     disabled_skills: tuple[str, ...]
@@ -74,7 +77,11 @@ class EffectiveOwnerPolicy:
             "tools": {
                 "disabled_tools": list(self.disabled_tools),
             },
+            "memory": {
+                "enabled": self.memory_enabled,
+            },
             "skills": {
+                "enabled": self.skills_enabled,
                 "enabled_sources": list(self.enabled_skill_sources),
                 "enabled_shared_skills": list(self.enabled_shared_skills),
                 "disabled_skills": list(self.disabled_skills),
@@ -94,6 +101,7 @@ def read_owner_policy_bundle_report(home: MyAgentHomePaths) -> OwnerPolicyBundle
     permissions = read_json_object_report(home.owner_permissions_json, context="owner_policy.permissions")
     quota = read_json_object_report(home.owner_quota_json, context="owner_policy.quota")
     retention = read_json_object_report(home.owner_retention_json, context="owner_policy.retention")
+    memory_policy = read_json_object_report(home.owner_memory_policy_json, context="owner_policy.memory_policy")
     skill_policy = read_json_object_report(home.owner_skill_policy_json, context="owner_policy.skill_policy")
     tool_policy = read_json_object_report(home.owner_tool_policy_json, context="owner_policy.tool_policy")
     return OwnerPolicyBundleReport(
@@ -101,6 +109,7 @@ def read_owner_policy_bundle_report(home: MyAgentHomePaths) -> OwnerPolicyBundle
             permissions=permissions.payload,
             quota=quota.payload,
             retention=retention.payload,
+            memory_policy=memory_policy.payload,
             skill_policy=skill_policy.payload,
             tool_policy=tool_policy.payload,
         ),
@@ -110,6 +119,7 @@ def read_owner_policy_bundle_report(home: MyAgentHomePaths) -> OwnerPolicyBundle
                 permissions.load_error,
                 quota.load_error,
                 retention.load_error,
+                memory_policy.load_error,
                 skill_policy.load_error,
                 tool_policy.load_error,
             )
@@ -128,12 +138,15 @@ def resolve_effective_owner_policy(
     permissions = bundle.permissions
     quota = bundle.quota
     tool_policy = bundle.tool_policy
+    memory_policy = bundle.memory_policy
     skill_policy = bundle.skill_policy
 
     filesystem = _dict_value(permissions.get("filesystem"))
     shell = _dict_value(permissions.get("shell"))
     network_enabled = _effective_network_enabled(permissions, parent_policy)
     disabled_tools = _effective_disabled_tools(tool_policy, network_enabled, parent_policy)
+    memory_enabled = _effective_memory_enabled(memory_policy, parent_policy)
+    skills_enabled = _effective_skills_enabled(skill_policy, parent_policy)
 
     return EffectiveOwnerPolicy(
         owner_id=str(getattr(home, "owner_id", "") or "local:main:main"),
@@ -165,6 +178,8 @@ def resolve_effective_owner_policy(
             parent_policy.max_disk_mb if parent_policy else 0,
         ),
         disabled_tools=tuple(sorted(disabled_tools)),
+        memory_enabled=memory_enabled,
+        skills_enabled=skills_enabled,
         enabled_skill_sources=_string_tuple(skill_policy.get("enabled_sources")),
         enabled_shared_skills=_child_capped_allowlist(
             _string_tuple(skill_policy.get("enabled_shared_skills")),
@@ -183,6 +198,24 @@ def _effective_network_enabled(
     network = _dict_value(permissions.get("network"))
     enabled = bool(network.get("enabled", True))
     return enabled if parent_policy is None else bool(enabled and parent_policy.network_enabled)
+
+
+def _effective_memory_enabled(
+    memory_policy: dict[str, Any],
+    parent_policy: EffectiveOwnerPolicy | None,
+) -> bool:
+    """Memory 总闸：文件缺失视为开启（老 owner 兼容），子代理 and 继承父开关。"""
+    enabled = bool(_dict_value(memory_policy).get("enabled", True))
+    return enabled if parent_policy is None else bool(enabled and parent_policy.memory_enabled)
+
+
+def _effective_skills_enabled(
+    skill_policy: dict[str, Any],
+    parent_policy: EffectiveOwnerPolicy | None,
+) -> bool:
+    """Skill 总闸：文件缺失视为开启（老 owner 兼容），子代理 and 继承父开关。"""
+    enabled = bool(_dict_value(skill_policy).get("enabled", True))
+    return enabled if parent_policy is None else bool(enabled and parent_policy.skills_enabled)
 
 
 def _effective_disabled_tools(

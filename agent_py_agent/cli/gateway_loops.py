@@ -318,6 +318,17 @@ _CURATOR_DAILY_QUOTA = 5000
 _CURATOR_CONSUMED_STATUSES = frozenset({"succeeded", "failed"})
 
 
+def _agent_memory_enabled(agent: object) -> bool:
+    """owner memory_policy 总闸(effective flag):关闭则 curator 不调度。
+
+    拿不到 effective policy 的路径(测试桩/旧装配)视为开启——与「memory_policy.json
+    缺失视为开启」的默认语义一致,短路只发生在显式 enabled=false 时。"""
+    policy = getattr(agent, "owner_policy", None)
+    if policy is None:
+        return True
+    return bool(getattr(policy, "memory_enabled", True))
+
+
 def _background_owner_workers(agent: object) -> int:
     value = getattr(getattr(agent, "config", None), "background_owner_workers", _BACKGROUND_OWNER_WORKERS)
     try:
@@ -639,6 +650,8 @@ class _BackgroundMainSupervisor:
             key = id(agent)
             if key in self._curator_inflight:
                 continue  # 该 owner 上一轮 curator 还在跑(LLM 提取中)→ 不重复提交
+            if not _agent_memory_enabled(agent):
+                continue  # owner memory_policy 总闸关闭:curator 不调度(effective flag,与 skill 对称)
             if not self._curator_has_pending_reason(agent) and not self._curator_quota_available():
                 continue  # 常规车道已到当日全局限额 → 顺延明天(紧急车道不受配额约束)
             self._curator_inflight[key] = self._get_executor().submit(

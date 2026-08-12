@@ -73,6 +73,7 @@ class MyAgentHomePaths:
     owner_permissions_json: Path
     owner_quota_json: Path
     owner_retention_json: Path
+    owner_memory_policy_json: Path
     owner_skill_policy_json: Path
     owner_tool_policy_json: Path
     owner_sessions_dir: Path

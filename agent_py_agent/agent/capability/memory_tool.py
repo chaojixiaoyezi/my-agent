@@ -223,6 +223,11 @@ class RememberTool(BaseTool):
     # LLM: Named Audit preparation cannot mutate owner Memory; availability is a structured runtime decision.
     # 函数用途: Audit 准备轮次禁用 owner 记忆变更，其他轮次保持可用。
     def availability(self) -> ToolAvailability:
+        policy = getattr(self.agent, "owner_policy", None)
+        if policy is not None and not bool(getattr(policy, "memory_enabled", True)):
+            return ToolAvailability.unavailable(
+                "owner memory_policy is disabled (effective flag, symmetric with skill_policy)"
+            )
         attributes = current_conversation_task_attributes(self.agent)
         if attributes.get(CONVERSATION_AUDIT_PREPARE_ATTR) is True:
             return ToolAvailability.unavailable(

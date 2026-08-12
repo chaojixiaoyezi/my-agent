@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .owner_policy_seed_payloads import (
+    default_memory_policy_payload,
     default_permissions_payload,
     default_quota_payload,
     default_retention_payload,
@@ -167,6 +168,7 @@ def v2_seed_jsons(paths: Any) -> tuple[tuple[Path, dict[str, object]], ...]:
         (paths.owner_permissions_json, default_permissions_payload()),
         (paths.owner_quota_json, default_quota_payload()),
         (paths.owner_retention_json, default_retention_payload()),
+        (paths.owner_memory_policy_json, default_memory_policy_payload()),
         (paths.owner_skill_policy_json, default_skill_policy_payload()),
         (paths.owner_tool_policy_json, default_tool_policy_payload()),
     )
@@ -205,6 +207,7 @@ def _owner_path_fields(home: Path) -> dict[str, Path]:
         "owner_permissions_json": owner_home_dir / "permissions.json",
         "owner_quota_json": owner_home_dir / "quota.json",
         "owner_retention_json": owner_home_dir / "retention.json",
+        "owner_memory_policy_json": owner_home_dir / "memory_policy.json",
         "owner_skill_policy_json": owner_home_dir / "skill_policy.json",
         "owner_tool_policy_json": owner_home_dir / "tool_policy.json",
         "owner_sessions_dir": owner_home_dir / "sessions",

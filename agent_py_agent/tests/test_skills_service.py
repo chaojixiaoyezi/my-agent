@@ -118,6 +118,7 @@ def test_owner_catalogs_share_public_skills_but_not_private_skills(tmp_path):
         )
         policy = SimpleNamespace(
             owner_id=owner_id,
+            skills_enabled=True,  # 总闸 effective flag(默认开启)
             enabled_skill_sources=("workspace", "owner", "shared", "builtin"),
             enabled_shared_skills=(),
             disabled_skills=(),

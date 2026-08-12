@@ -9,6 +9,7 @@ from typing import Any
 from ..common.path_segments import safe_path_segment
 from .home_layout import MyAgentHomePaths
 from .owner_policy_seed_payloads import (
+    default_memory_policy_payload,
     default_permissions_payload,
     default_quota_payload,
     default_retention_payload,
@@ -56,6 +57,7 @@ class OwnerHomeResult:
     permissions_json: Path
     quota_json: Path
     retention_json: Path
+    memory_policy_json: Path
     skill_policy_json: Path
     tool_policy_json: Path
     daily_memory_dir: Path
@@ -196,6 +198,7 @@ def _owner_home_result(root: Path, identity: OwnerIdentity, home_dir: Path) -> O
         permissions_json=home_dir / "permissions.json",
         quota_json=home_dir / "quota.json",
         retention_json=home_dir / "retention.json",
+        memory_policy_json=home_dir / "memory_policy.json",
         skill_policy_json=home_dir / "skill_policy.json",
         tool_policy_json=home_dir / "tool_policy.json",
         daily_memory_dir=memory / "daily",
@@ -278,6 +281,7 @@ def _owner_seed_jsons(result: OwnerHomeResult) -> tuple[tuple[Path, dict[str, ob
         (result.permissions_json, default_permissions_payload()),
         (result.quota_json, default_quota_payload()),
         (result.retention_json, default_retention_payload()),
+        (result.memory_policy_json, default_memory_policy_payload()),
         (result.skill_policy_json, default_skill_policy_payload()),
         (result.tool_policy_json, default_tool_policy_payload()),
     )

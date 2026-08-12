@@ -91,6 +91,7 @@ def skill_catalog_factory():
             directory.mkdir(parents=True, exist_ok=True)
         policy_values = {
             "owner_id": "test-owner",
+            "skills_enabled": True,  # 总闸 effective flag(默认开启,测试覆盖关闭路径时置 False)
             "enabled_skill_sources": ("workspace", "owner", "shared", "builtin"),
             "enabled_shared_skills": (),
             "disabled_skills": (),

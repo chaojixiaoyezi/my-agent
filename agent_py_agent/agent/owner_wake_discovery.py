@@ -259,7 +259,24 @@ def _owner_has_soft_facts(owner_home: Path) -> bool:
 # 真机 184 个 feishu 测试号被 state 缺失/每天必挂/对话即挂三条过宽判定天天挂起,
 # 占满 64 容量运行池,真活的 user-a/user-b 被 LRU 逐出饿死(探针实锤)。
 # 函数用途: 让 scoped owner 在 Gateway 重启或 LRU 逐出后重新进入既有后台 lane。
+def _owner_memory_enabled(owner_home: Path) -> bool:
+    """owner memory_policy 总闸(读文件,与 resolve_effective_owner_policy 同源语义)。
+
+    文件缺失视为开启(老 owner 兼容)、坏 JSON 视为开启(发现层不因解析失败误杀,
+    与「无法证明没活=有活」已删后的宽容语义一致)——只有显式 enabled=false 才短路。"""
+    policy_path = owner_home / "memory_policy.json"
+    try:
+        payload = json.loads(policy_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return True
+    if not isinstance(payload, dict):
+        return True
+    return bool(payload.get("enabled", True))
+
+
 def _has_pending_memory_curator_work(owner_home: Path) -> bool:
+    if not _owner_memory_enabled(owner_home):
+        return False  # 总闸关闭:curator 软活不判活(不占登记表工位,对称 skill 空快照)
     state_path = owner_home / "memory" / "curator" / "state.json"
     try:
         from .memory_store.curator_models import MemoryCuratorState

@@ -64,6 +64,9 @@ def push_relevant_memories_report(
         bounded_limit = max(0, int(limit or 0))
         if bounded_limit <= 0:
             return [], []
+        policy = getattr(agent, "owner_policy", None)
+        if policy is not None and not bool(getattr(policy, "memory_enabled", True)):
+            return [], []  # 总闸关闭:决策点召回短路(effective flag,对称 skill 空快照)
         query = _build_memory_query(trigger_type, context)
         routed = _route_formal_lessons(agent, query, bounded_limit)
         scope = MemoryRecallScope.from_runtime(

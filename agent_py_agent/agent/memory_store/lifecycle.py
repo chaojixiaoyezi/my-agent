@@ -42,6 +42,15 @@ def request_memory_curator_for_session(
     reason = _SESSION_EVENT_REASONS.get(normalized)
     if reason is None:
         raise ValueError("memory curator session event must be close or reset")
+    policy = getattr(agent, "owner_policy", None)
+    if policy is not None and not bool(getattr(policy, "memory_enabled", True)):
+        return MemoryCuratorLifecycleRequest(
+            event=normalized,
+            reason=reason,
+            requested=False,
+            pending_reasons=("memory_policy_disabled",),
+            requested_at="",
+        )  # 总闸关闭:会话关闭不登记 curator 请求(effective flag,与调度层短路同源)
     curator = getattr(agent, "memory_curator", None)
     request = getattr(curator, "request", None)
     if not callable(request):
