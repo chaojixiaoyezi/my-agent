@@ -66,6 +66,11 @@ _LOG_LEVELS = {
 @dataclass
 class _HomeProviderConfigFields:
     my_agent_home: str = ""
+    # B 切片：显式执行模式（managed / local_unmanaged）。空 = 未显式指定，
+    # 挂载逻辑按有无 owner_home_dir 推断（兼容存量调用）。SimpleAgent 构造
+    # 透传给 SubAgentManager（manager._attach_runtime_db 落枚举），让工具
+    # OperationStore 选择器按显式模式选 store，而不是按 home 隐式推断。
+    execution_mode: str = ""
     my_agent_owner_provider: str = "local"
     my_agent_owner_kind: str = "main"
     my_agent_owner_id: str = "main"

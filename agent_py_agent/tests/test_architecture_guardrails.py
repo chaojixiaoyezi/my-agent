@@ -31,6 +31,10 @@ BUNDLE_VARARG_FUNCTION_EXEMPTIONS = {
         "HTTPRequestHandler-style logging override accepts formatter arguments; "
         "drill harness script, not a product service parameter entry point."
     ),
+    "scripts/run_r1_02_proxy.py:log_message": (
+        "HTTPRequestHandler-style logging override accepts formatter arguments; "
+        "R1-02 resilience-drill proxy script, not a product service parameter entry point."
+    ),
     "scripts/watch_harness/content_source_simulator.py:log_message": (
         "HTTPRequestHandler-style logging override accepts formatter arguments; "
         "watch self-test harness script, not a product service parameter entry point."

@@ -28,7 +28,9 @@ def prepare_runner_attempt(manager: object, run_id: str, *, retry_reason: str = 
     strategy = build_subagent_recovery_strategy(
         SubagentRecoveryStrategyRequest(task=task)
     )
-    attempt_id = _framework_new_id("attempt_id")
+    attempt_id, runtime_task_id = _runtime_attempt_identity(manager, task)
+    if not attempt_id:
+        attempt_id = _framework_new_id("attempt_id")
     now = time.time()
     task.status = "RUNNING"
     task.verification_status = "UNVERIFIED"
@@ -39,6 +41,8 @@ def prepare_runner_attempt(manager: object, run_id: str, *, retry_reason: str = 
     task.updated_at = now
     task.heartbeat_at = now
     _record_runner_recovery_preflight(task, strategy, previous)
+    if runtime_task_id:
+        _persist_runtime_task_id(task, runtime_task_id)
     manager.save(task)
     if (
         not task_status_in(task.status, {TaskStatus.RUNNING.value})
@@ -142,6 +146,50 @@ def abandon_runner_attempt(
             f"runner_attempt: abandon attempt_id={normalized} reason={reason}",
         )
     return task
+
+
+def _runtime_attempt_identity(manager: object, task: SubAgentTask) -> tuple[str, str]:
+    """MANAGED 下把 runner attempt 落到权威链（seq 253 闭合）。
+
+    每次 runner 启动轮换 DB current attempt（create_attempt 的 G4 takeover
+    语义：CAS 换代 + 旧 attempt 非终态操作转 UNKNOWN/锁同事务释放），返回
+    (DB attempt_id, 权威链 task_id)。repo 缺失或 run 未登记 → ("", "")，
+    调用方回落投影 id（LOCAL_UNMANAGED / 旧 run 兼容，fail-closed 门后拦截
+    与现状一致）。task_id 优先读创建时回存的 runtime_authority，缺则按
+    授权门同款 JOIN 兜底查询（覆盖特性落地前已登记的老 run）。
+    """
+    repo = getattr(manager, "runtime_db", None)
+    if repo is None:
+        return "", ""
+    run_id = str(task.id or "").strip()
+    if not run_id:
+        return "", ""
+    row = repo.agent_run_for_run_id(run_id)
+    if row is None:
+        return "", ""
+    attempt = repo.create_attempt(str(row["agent_run_id"]))
+    task_id = _runtime_authority_task_id(task) or repo.task_id_for_run_id(run_id)
+    return str(attempt["attempt_id"] or ""), task_id
+
+
+def _runtime_authority_task_id(task: SubAgentTask) -> str:
+    attrs = getattr(task, "attributes", {})
+    if not isinstance(attrs, dict):
+        return ""
+    authority = attrs.get("runtime_authority")
+    if not isinstance(authority, dict):
+        return ""
+    return str(authority.get("task_id") or "").strip()
+
+
+def _persist_runtime_task_id(task: SubAgentTask, task_id: str) -> None:
+    """回填权威链 task_id 到任务属性（旧 run 在 prepare 时补全，run scope 读取）。"""
+    attributes = dict(getattr(task, "attributes", {}) or {})
+    authority = attributes.get("runtime_authority")
+    authority = dict(authority) if isinstance(authority, dict) else {}
+    authority["task_id"] = task_id
+    attributes["runtime_authority"] = authority
+    task.attributes = attributes
 
 
 def _record_runner_recovery_preflight(task: SubAgentTask, strategy: object, previous_status: str) -> None:

@@ -370,7 +370,10 @@ class WebSearchTool(BaseTool):
             effect_resolver=EffectResolverPolicy("read_only"),
             timeout_policy=TimeoutPolicy(self.timeout),
             concurrency_policy=ConcurrencyPolicy("parallel_safe"),
-            resource_scopes=ResourceScopePolicy(parameter_names=("query",)),
+            resource_scopes=ResourceScopePolicy(
+                parameter_names=("query",),
+                parameter_kinds={"query": "logical"},
+            ),
             output_policy=OutputPolicy(trust="external_data"),
         )
 

@@ -77,7 +77,10 @@ def _http(method: str, url: str, payload: dict | None = None,
             body = resp.read().decode("utf-8", errors="replace")
             if not body:
                 return {"http_status": resp.status, "raw": ""}
-            parsed = json.loads(body)
+            try:
+                parsed = json.loads(body)
+            except json.JSONDecodeError:
+                return {"http_status": resp.status, "raw": body}
             if isinstance(parsed, dict):
                 parsed["http_status"] = resp.status
                 return parsed

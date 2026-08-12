@@ -847,7 +847,8 @@ class SubmitCollaborationResultTool(BaseTool):
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("mutating"),
         idempotency_policy=IdempotencyPolicy("operation"),
-        resource_scopes=ResourceScopePolicy(parameter_names=("case_id", "request_id")),
+        resource_scopes=ResourceScopePolicy(parameter_names=("case_id", "request_id"),
+            parameter_kinds={"case_id": "logical", "request_id": "logical"}),
     )
 
     def __init__(self, agent: SimpleAgent):
@@ -922,7 +923,8 @@ class RaiseCollaborationTool(BaseTool):
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("mutating"),
         idempotency_policy=IdempotencyPolicy("operation"),
-        resource_scopes=ResourceScopePolicy(parameter_names=("case_id", "thread_id", "task_id")),
+        resource_scopes=ResourceScopePolicy(parameter_names=("case_id", "thread_id", "task_id"),
+            parameter_kinds={"case_id": "logical", "thread_id": "logical", "task_id": "logical"}),
         input_policy=ToolInputPolicy(internal_parameters=("__run_scope",)),
     )
 
@@ -970,7 +972,8 @@ class UpdateCollaborationTool(BaseTool):
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("mutating"),
         idempotency_policy=IdempotencyPolicy("operation"),
-        resource_scopes=ResourceScopePolicy(parameter_names=("case_id", "request_id")),
+        resource_scopes=ResourceScopePolicy(parameter_names=("case_id", "request_id"),
+            parameter_kinds={"case_id": "logical", "request_id": "logical"}),
     )
 
     def __init__(self, agent: SimpleAgent):
@@ -1019,7 +1022,8 @@ class InspectCollaborationTool(BaseTool):
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("read_only"),
         concurrency_policy=ConcurrencyPolicy("parallel_safe"),
-        resource_scopes=ResourceScopePolicy(parameter_names=("case_id", "agent_id")),
+        resource_scopes=ResourceScopePolicy(parameter_names=("case_id", "agent_id"),
+            parameter_kinds={"case_id": "logical", "agent_id": "logical"}),
     )
 
     def __init__(self, agent: SimpleAgent):

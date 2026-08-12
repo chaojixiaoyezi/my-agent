@@ -292,7 +292,10 @@ class TerminalSessionTool(BaseTool):
         ),
         sandbox_policy=SandboxPolicy("required"),
         idempotency_policy=IdempotencyPolicy("operation"),
-        resource_scopes=ResourceScopePolicy(parameter_names=("session_id", "working_dir")),
+        resource_scopes=ResourceScopePolicy(
+            parameter_names=("session_id", "working_dir"),
+            parameter_kinds={"session_id": "logical"},
+        ),
         output_policy=OutputPolicy(trust="external_data"),
         input_policy=ToolInputPolicy(
             internal_parameters=("__sandbox_write_roots", "__sandbox_read_roots", "__access_mode"),
@@ -310,6 +313,18 @@ class TerminalSessionTool(BaseTool):
 
     def __init__(self, shell_tool: ShellTool):
         self.shell_tool = shell_tool
+
+    # seq 253 #5：与 ShellTool 同沙箱语义——bwrap 可写全部 allowed_write_roots，
+    # 执行写根经协议结构化声明，operation lock 全量覆盖（不按 internal 参数名特判）。
+    def effective_write_roots(
+        self,
+        arguments: dict[str, Any],
+        write_boundary: dict[str, Any] | None,
+        workspace_root: Path,
+    ) -> tuple[str, ...]:
+        return self.shell_tool.effective_write_roots(
+            arguments, write_boundary, workspace_root
+        )
 
     @property
     def workspace_roots(self) -> list[Path]:

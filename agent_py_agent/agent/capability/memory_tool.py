@@ -211,7 +211,8 @@ class RememberTool(BaseTool):
             ),),
         ),
         idempotency_policy=IdempotencyPolicy("operation"),
-        resource_scopes=ResourceScopePolicy(parameter_names=("entry_id", "subject_key")),
+        resource_scopes=ResourceScopePolicy(parameter_names=("entry_id", "subject_key"),
+            parameter_kinds={"entry_id": "logical", "subject_key": "logical"}),
     )
 
     # LLM: 构造器只绑定 composition root 中已接线的 Candidate/Promotion/long-term 服务，不创建 fallback。

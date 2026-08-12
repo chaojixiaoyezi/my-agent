@@ -139,10 +139,21 @@ def test_cancelled_child_closes_leftover_open_request():
         task = agent.subagents.load(task.id)
         task.status = "BLOCKED"
         agent.subagents.save(task)
+        # seq 253 闭合：MANAGED authority 门要求 run 登记真实权威链。
+        repo = agent.subagents.runtime_db
+        record = repo.record_run_creation(
+            owner_id="owner-a",
+            goal="cancel gate test-run",
+            conversation_task_id="task-test-run",
+            thread_id="thread-test-run",
+            run_id="test-run",
+            role="assistant",
+        )
         result = execute_approved_registry_test_call(
             agent.tools,
             "cancel_subagents",
             {"run_ids": [task.id], "reason": "救不回来,了结"},
+            attempt_id=str(record["attempt_id"]),
         )
         assert result.ok
         reloaded = agent.subagents.load(task.id)

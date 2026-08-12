@@ -78,12 +78,14 @@ def test_group_runtime_never_loads_member_private_state_and_shared_stays_read_on
         "read_file",
         {"path": str(shared_skill)},
         call_id="group-shared-read",
+        register_with=group,
     )
     shared_write = execute_registry_test_call(
         group.tools,
         "write_file",
         {"path": str(shared_skill), "content": "tampered"},
         call_id="group-shared-write",
+        register_with=group,
     )
 
     assert not cross_read.ok

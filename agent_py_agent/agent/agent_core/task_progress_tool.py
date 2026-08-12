@@ -43,7 +43,11 @@ class TaskProgressTool(BaseTool):
         ),
         idempotency_policy=IdempotencyPolicy("operation"),
         concurrency_policy=ConcurrencyPolicy("serial"),
-        resource_scopes=ResourceScopePolicy(parameter_names=("run_id",)),
+        # seq 253 闭合：run_id 是逻辑 ID（run 标识）不是路径。
+        resource_scopes=ResourceScopePolicy(
+            parameter_names=("run_id",),
+            parameter_kinds={"run_id": "logical"},
+        ),
         input_policy=ToolInputPolicy(internal_parameters=("__run_scope",)),
     )
 

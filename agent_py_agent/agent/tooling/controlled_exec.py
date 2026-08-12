@@ -101,6 +101,24 @@ class ControlledExecTool(BaseTool):
         mutates_workspace=True,
     )
 
+    # seq 253 #5：controlled_exec 真实写边界来自父级授权 grant.path_scope
+    # （cwd 之外可写授权根）——只锁 resource_scopes 的 cwd 参数会漏掉 grant
+    # 授权根；经协议声明全部写根，operation lock 与写边界共用同一 grant 选择器。
+    def effective_write_roots(
+        self,
+        arguments: dict[str, Any],
+        write_boundary: dict[str, Any] | None,
+        workspace_root: Path,
+    ) -> tuple[str, ...]:
+        ref, _error = _select_controlled_exec_grant(arguments, write_boundary)
+        roots: list[str] = []
+        for raw in sequence_strings(ref.get("path_scope")):
+            path = Path(raw)
+            if not path.is_absolute():
+                path = workspace_root / path
+            roots.append(str(path.resolve()))
+        return tuple(roots)
+
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         return ToolHandlerOutcome(self.model_spec.name, False, "controlled_exec requires registry write_boundary", error_code="TOOL_EXECUTION_FAILED")
 

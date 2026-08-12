@@ -139,6 +139,7 @@ from .prompting_parts import PromptBuilder
 from .scheduler import SchedulerDueIndex, SchedulerRepository, SchedulerService, ScheduleTool
 from .settings import AgentConfig
 from .settings.runtime_guard_config import runtime_guard_policy
+from .runtime_db.operation_store_selector import select_operation_store
 from .subagents.manager import SubAgentManager
 from .tooling.registry import ToolRegistry, ToolRegistryParams
 from .tooling.vision_tools import vision_config_from_agent_config
@@ -706,6 +707,8 @@ def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
         takeover_chain_max_depth=agent.config.subagent_takeover_chain_max_depth,
         owner_id=str(getattr(agent.home_paths, "owner_id", "") or ""),
         owner_home_dir=str(getattr(agent.home_paths, "owner_home_dir", "") or ""),
+        # B 切片：配置显式执行模式透传（空 = 挂载逻辑按 home 推断，兼容存量）。
+        execution_mode=str(getattr(agent.config, "execution_mode", "") or ""),
         owner_scope_root=str(
             getattr(getattr(agent, "path_access_policy", None), "owner_scope_root", "") or ""
         ),
@@ -843,7 +846,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             memory_snapshot_provider=agent.memory.runtime_snapshot,
             persona_snapshot_provider=agent.persona_repository.runtime_snapshot,
             scheduler_snapshot_provider=agent.scheduler_service.runtime_snapshot,
-            operation_store=agent.local_store,
+            operation_store=select_operation_store(agent),
             operation_store_required=True,
             operation_owner_id=str(
                 getattr(agent.home_paths, "owner_id", "") or "local/main"

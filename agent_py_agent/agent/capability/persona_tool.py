@@ -189,7 +189,8 @@ class UpdatePersonaTool(BaseTool):
             ),),
         ),
         idempotency_policy=IdempotencyPolicy("operation"),
-        resource_scopes=ResourceScopePolicy(parameter_names=("target", "entry_id")),
+        resource_scopes=ResourceScopePolicy(parameter_names=("target", "entry_id"),
+            parameter_kinds={"target": "logical", "entry_id": "logical"}),
     )
 
     # 类用途: 把"更新用户人设/画像/工作约定"暴露成模型工具,落到 owner 的 SOUL/USER/AGENTS.md(每轮注入)。

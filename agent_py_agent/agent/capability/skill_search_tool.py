@@ -68,7 +68,8 @@ class SkillSearchTool(BaseTool):
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("read_only"),
         concurrency_policy=ConcurrencyPolicy("parallel_safe"),
-        resource_scopes=ResourceScopePolicy(parameter_names=("skill_id", "query")),
+        resource_scopes=ResourceScopePolicy(parameter_names=("skill_id", "query"),
+            parameter_kinds={"skill_id": "logical", "query": "logical"}),
     )
 
     # 类用途: 把 CapabilityRouter 的 skill 检索暴露成模型可调用的只读工具。

@@ -68,6 +68,7 @@ def test_raise_collaboration_uses_structured_root_task_scope(tmp_path) -> None:
         run_id="background-run-1",
         call_id="call-background-main",
         idempotency_key="raise-collaboration-background-main",
+        register_with=agent,
     )
     payload = json.loads(result.output)
 

@@ -28,6 +28,12 @@ workspace_root: ""
 # - 显式配置值优先；这里留空时才使用 MY_AGENT_HOME，适合测试或多 profile 隔离。
 my_agent_home: "~/.my-agent"
 
+# 显式执行模式（managed / local_unmanaged）：
+# - 空 = 未显式指定，按有无 owner home 推断（MANAGED if home else LOCAL_UNMANAGED）。
+# - managed：必须完整权威链（runtime.db 工具操作账本/锁），缺权威字段即拒绝执行。
+# - local_unmanaged：本地非托管（纯文件层/投影），不挂权威库。
+execution_mode: ""
+
 # 当前 owner 身份：
 # - 默认 local/main，表示本机 CLI 主用户。
 # - 接飞书/微信/QQ 等 provider 时，适配器可以把它改成 provider/user/id 或 provider/group/id。

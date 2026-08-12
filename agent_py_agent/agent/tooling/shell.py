@@ -818,6 +818,20 @@ class ShellTool(BaseTool):
             mutates_workspace=True,
         )
 
+    # seq 253 #5：bwrap 沙箱允许写全部 allowed_write_roots，执行写根不在
+    # working_dir 参数里——经 effective_write_roots 协议结构化声明（与写边界
+    # 校验同一 resolved_write_roots 解析器），operation lock 全量覆盖。
+    def effective_write_roots(
+        self,
+        arguments: dict[str, Any],
+        write_boundary: dict[str, Any] | None,
+        workspace_root: Path,
+    ) -> tuple[str, ...]:
+        _ = (arguments, workspace_root)
+        from .write_boundary import resolved_write_roots
+
+        return tuple(str(p) for p in resolved_write_roots(write_boundary, workspace_root))
+
     # LLM: attempt 沙箱不可用时必须在本轮工具快照阶段消失；最终执行仍会二次
     # 复检并 fail-closed，不能把 availability 当作权限或安全替代品。
     # 函数用途: 防止模型看到当前节点必然无法启动的 run_command，再反复尝试同一失败。

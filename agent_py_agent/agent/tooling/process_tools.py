@@ -104,7 +104,10 @@ class ProcessStatusTool(BaseTool):
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("read_only"),
         concurrency_policy=ConcurrencyPolicy("parallel_safe"),
-        resource_scopes=ResourceScopePolicy(parameter_names=("session_id",)),
+        resource_scopes=ResourceScopePolicy(
+            parameter_names=("session_id",),
+            parameter_kinds={"session_id": "logical"},
+        ),
     )
 
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
@@ -156,7 +159,10 @@ class KillProcessTool(BaseTool):
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("mutating"),
         idempotency_policy=IdempotencyPolicy("operation"),
-        resource_scopes=ResourceScopePolicy(parameter_names=("session_id",)),
+        resource_scopes=ResourceScopePolicy(
+            parameter_names=("session_id",),
+            parameter_kinds={"session_id": "logical"},
+        ),
     )
 
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:

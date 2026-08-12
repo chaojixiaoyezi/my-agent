@@ -429,7 +429,7 @@ class SubAgentBaseService:
         if not owner_id:
             owner_id = str(getattr(self.manager, "owner_id", "") or "").strip()
         try:
-            repo.record_run_creation(
+            record = repo.record_run_creation(
                 owner_id=owner_id,
                 goal=str(task.goal or "").strip(),
                 conversation_task_id=str(attrs.get("conversation_task_id") or "").strip(),
@@ -444,6 +444,9 @@ class SubAgentBaseService:
                 "runtime.db 权威写入失败(run=%s): %s", task.id, exc, exc_info=True
             )
             raise
+        # seq 253 闭合：链身份回存任务属性——runner 启动时轮换 DB attempt、
+        # run scope 携带 DB task_id（授权门比对键）都要从这里拿，不另起查询。
+        _persist_runtime_authority_attrs(task, record)
 
     def _prepare_run(self, params: CreateRunParams) -> dict[str, object]:
         """Prepare run paths and the caller-provided acceptance contract."""
@@ -588,3 +591,20 @@ def _task_permission_snapshot(manager: Any, params: CreateRunParams, parent_task
         parent_access_mode=params.parent_access_mode,
         owner_policy=getattr(manager, "owner_policy_snapshot", {}),
     )
+
+
+def _persist_runtime_authority_attrs(task: SubAgentTask, record: dict[str, object]) -> None:
+    """回存权威链身份到任务属性（save 前调用）。
+
+    只有 record_run_creation 成功返回才调用（LOCAL_UNMANAGED 早退不经过）。
+    子代理 runner 启动（attempt 轮换）、授权门比对（scope task_id）共用这份
+    单一权威来源，不另起查询。
+    """
+    attrs = dict(getattr(task, "attributes", {}) or {})
+    attrs["runtime_authority"] = {
+        "task_id": str(record.get("task_id") or "").strip(),
+        "task_run_id": str(record.get("task_run_id") or "").strip(),
+        "agent_run_id": str(record.get("agent_run_id") or "").strip(),
+        "attempt_id": str(record.get("attempt_id") or "").strip(),
+    }
+    task.attributes = attrs

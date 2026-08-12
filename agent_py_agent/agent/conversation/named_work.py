@@ -65,7 +65,8 @@ class StopNamedWorkTool(BaseTool):
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("dangerous"),
         idempotency_policy=IdempotencyPolicy("operation"),
-        resource_scopes=ResourceScopePolicy(parameter_names=("kind", "name")),
+        resource_scopes=ResourceScopePolicy(parameter_names=("kind", "name"),
+            parameter_kinds={"kind": "logical", "name": "logical"}),
     )
 
     def __init__(self, agent: object):

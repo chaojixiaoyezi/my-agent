@@ -137,7 +137,8 @@ class ScheduleTool(BaseTool):
                 ),),
             ),
             idempotency_policy=IdempotencyPolicy("operation"),
-            resource_scopes=ResourceScopePolicy(parameter_names=("job_id",)),
+            resource_scopes=ResourceScopePolicy(parameter_names=("job_id",),
+            parameter_kinds={"job_id": "logical"}),
             input_policy=ToolInputPolicy(internal_parameters=("__tool_call_id", "__run_scope")),
         )
 

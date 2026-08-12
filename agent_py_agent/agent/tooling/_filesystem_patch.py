@@ -96,6 +96,31 @@ class ApplyPatchTool(FileSystemTool):
             access_options,
         )
 
+    # seq 253 #5：apply_patch 的写目标在 patch 文本里（Add/Update/Delete File
+    # 逐目标），不在 resource_scopes 参数中——经协议从 patch 结构化解析全部
+    # 目标文件，operation lock 逐目标覆盖（多文件 patch 全上锁）。
+    def effective_write_roots(
+        self,
+        arguments: dict[str, Any],
+        write_boundary: dict[str, Any] | None,
+        workspace_root: Path,
+    ) -> tuple[str, ...]:
+        _ = write_boundary
+        try:
+            patch = _text_param(
+                arguments.get("patch"), name="patch", max_chars=_MAX_WRITE_TEXT_CHARS
+            )
+            changes = _parse_simple_patch(patch)
+        except (ValueError, TypeError):
+            return ()
+        roots: list[str] = []
+        for change in changes:
+            path = Path(str(change.get("path") or ""))
+            if not path.is_absolute():
+                path = workspace_root / path
+            roots.append(str(path.resolve()))
+        return tuple(roots)
+
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         try:
             patch = _text_param(params.get("patch"), name="patch", max_chars=_MAX_WRITE_TEXT_CHARS)

@@ -143,7 +143,10 @@ class ReadArtifactTool(BaseTool):
         self.runtime_policy = ToolRuntimePolicy(
             effect_resolver=EffectResolverPolicy("read_only"),
             concurrency_policy=ConcurrencyPolicy("parallel_safe"),
-            resource_scopes=ResourceScopePolicy(parameter_names=("artifact_ref",)),
+            resource_scopes=ResourceScopePolicy(
+                parameter_names=("artifact_ref",),
+                parameter_kinds={"artifact_ref": "logical"},
+            ),
             output_policy=OutputPolicy(trust="external_data"),
             input_policy=ToolInputPolicy(
                 internal_parameters=(

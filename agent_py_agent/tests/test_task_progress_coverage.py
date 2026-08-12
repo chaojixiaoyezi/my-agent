@@ -38,7 +38,7 @@ class TestTaskProgressCoverageTool:
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), execution_mode="local_unmanaged"), tmp_path)
         agent._main_agent_run_id = "run-main"
         tool = TaskProgressTool(agent)
 
@@ -593,7 +593,7 @@ class TestTaskProgressContinuationAndAliases:
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), execution_mode="local_unmanaged"), tmp_path)
         agent._main_agent_run_id = "run-main"
 
         result = _execute_task_progress(
@@ -630,7 +630,7 @@ class TestTaskProgressContinuationAndAliases:
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), execution_mode="local_unmanaged"), tmp_path)
         agent._main_agent_run_id = "run-main"
 
         result = _execute_task_progress(
@@ -662,7 +662,7 @@ def test_task_progress_rejects_old_action_aliases(tmp_path):
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
 
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), execution_mode="local_unmanaged"), tmp_path)
     agent._main_agent_run_id = "run-main"
 
     result = _execute_task_progress(
@@ -688,7 +688,7 @@ class TestTaskProgressCoverageRejectedAliases:
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), execution_mode="local_unmanaged"), tmp_path)
         agent._main_agent_run_id = "run-main"
 
         result = _execute_task_progress(
@@ -711,7 +711,7 @@ class TestTaskProgressCoverageRejectedAliases:
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), execution_mode="local_unmanaged"), tmp_path)
         agent._main_agent_run_id = "run-main"
 
         result = _execute_task_progress(
@@ -740,7 +740,7 @@ class TestTaskProgressCoverageRejectedAliases:
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), execution_mode="local_unmanaged"), tmp_path)
         agent._main_agent_run_id = "run-main"
 
         result = _execute_task_progress(
@@ -769,7 +769,7 @@ class TestTaskProgressCoverageRejectedAliases:
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), execution_mode="local_unmanaged"), tmp_path)
         agent._main_agent_run_id = "run-main"
 
         result = _execute_task_progress(
@@ -789,7 +789,7 @@ class TestTaskProgressCoverageRejectedAliases:
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), execution_mode="local_unmanaged"), tmp_path)
         agent._main_agent_run_id = "run-main"
 
         result = _execute_task_progress(
@@ -851,7 +851,7 @@ class TestTaskProgressQualityHints:
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), execution_mode="local_unmanaged"), tmp_path)
         agent._main_agent_run_id = "run-main"
 
         result = _execute_task_progress(
@@ -873,7 +873,7 @@ class TestTaskProgressQualityHints:
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), execution_mode="local_unmanaged"), tmp_path)
         agent._main_agent_run_id = "run-main"
 
         result = _execute_task_progress(
@@ -899,7 +899,7 @@ class TestTaskProgressQualityHints:
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), execution_mode="local_unmanaged"), tmp_path)
         agent._main_agent_run_id = "run-main"
 
         result = _execute_task_progress(
@@ -972,7 +972,7 @@ class TestTaskProgressQualityHints:
         from agent_py_agent.agent.settings import AgentConfig
 
         (tmp_path / "notes.md").write_text("ok\n", encoding="utf-8")
-        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), execution_mode="local_unmanaged"), tmp_path)
         agent._main_agent_run_id = "run-main"
         agent._current_tool_loop_params = SimpleNamespace(
             archive_tool_calls=[
@@ -1014,7 +1014,7 @@ class TestTaskProgressQualityHints:
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
 
-        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+        agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), execution_mode="local_unmanaged"), tmp_path)
         agent._main_agent_run_id = "run-main"
         agent._current_tool_loop_params = SimpleNamespace(
             archive_tool_calls=[

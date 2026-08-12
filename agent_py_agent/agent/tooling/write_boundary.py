@@ -225,6 +225,22 @@ def _locked_boundary_error(target: Path, write_boundary: dict[str, object], work
     return ""
 
 
+def resolved_write_roots(
+    write_boundary: dict[str, Any] | None,
+    workspace_root: Path,
+) -> list[Path]:
+    """权威归一化 allowed_write_roots（与写边界校验同一解析器）。
+
+    seq 248 #6：shell 类工具按此锁定 workspace-wide 写根——bwrap 沙箱允许写
+    全部 allowed_write_roots，锁不能只覆盖 working_dir（只锁 cwd 的假安全）。
+    """
+    if not write_boundary:
+        return []
+    return _boundary_paths(
+        write_boundary.get("allowed_write_roots"), workspace_root
+    )
+
+
 def _boundary_paths(
     raw_paths: object,
     workspace_root: Path,

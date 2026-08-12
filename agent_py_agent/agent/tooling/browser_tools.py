@@ -182,7 +182,10 @@ class BrowserTool(BaseTool):
             by_parameter=(("action", (("snapshot", "read_only"),)),),
         ),
         idempotency_policy=IdempotencyPolicy("operation"),
-        resource_scopes=ResourceScopePolicy(parameter_names=("session_id", "url")),
+        resource_scopes=ResourceScopePolicy(
+            parameter_names=("session_id", "url"),
+            parameter_kinds={"session_id": "logical", "url": "logical"},
+        ),
         output_policy=OutputPolicy(trust="external_data"),
         promotes_task=True,
         mutates_workspace=True,

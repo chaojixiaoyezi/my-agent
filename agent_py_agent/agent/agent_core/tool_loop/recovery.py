@@ -107,7 +107,9 @@ def runtime_run_scope(agent, params: ToolLoopExecuteParams) -> RunScope:
         request_id=params.request_id,
         attempt_id=params.attempt_id,
         session_id=text_value(attrs.get("conversation_thread_id")),
-        task_id=params.task_id or run_id,
+        # seq 253 闭合：子代理任务创建时回存的权威链 task_id 优先（授权门
+        # 比对键）；主代理/后台唤醒轮 attrs 无此键，原链不变。
+        task_id=_runtime_authority_task_id(attrs) or params.task_id or run_id,
         run_id=run_id,
         owner_type=text_value(getattr(home_paths, "owner_kind", "")) or "main",
         owner_id=text_value(getattr(home_paths, "owner_id", "")) or "local/main",
@@ -132,6 +134,17 @@ def runtime_run_scope(agent, params: ToolLoopExecuteParams) -> RunScope:
             )
         ),
     )
+
+
+def _runtime_authority_task_id(attrs: dict[str, object]) -> str:
+    """读任务属性里的权威链 task_id（create_run 时回存，授权门比对键）。
+
+    只对子代理生效：主代理/唤醒轮的 task_attributes 不携带 runtime_authority。
+    """
+    authority = attrs.get("runtime_authority")
+    if not isinstance(authority, dict):
+        return ""
+    return str(authority.get("task_id") or "").strip()
 
 
 def _load_runtime_task(agent, run_id: str) -> Any:

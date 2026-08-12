@@ -97,7 +97,10 @@ class WebFetchTool(BaseTool):
             ),
             idempotency_policy=IdempotencyPolicy("operation"),
             timeout_policy=TimeoutPolicy(self.timeout),
-            resource_scopes=ResourceScopePolicy(parameter_names=("url", "urls")),
+            resource_scopes=ResourceScopePolicy(
+                parameter_names=("url", "urls"),
+                parameter_kinds={"url": "logical", "urls": "logical"},
+            ),
             output_policy=OutputPolicy(trust="external_data"),
         )
 

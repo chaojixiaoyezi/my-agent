@@ -1072,18 +1072,21 @@ def test_agent_can_delegate_to_subagents_from_tool_call():
             "inspect_agent_tree",
             {},
             call_id="inspect-created-subagents",
+            register_with=agent,
         )
         dry_dispatch = execute_registry_test_call(
             agent.tools,
             "dispatch_subagents",
             {"dry_run": True, "max_runners": 1},
             call_id="dry-dispatch-created-subagents",
+            register_with=agent,
         )
         rejected_internal_switch = execute_registry_test_call(
             agent.tools,
             "dispatch_subagents",
             {"start_runners": True, "dry_run": True},
             call_id="reject-internal-dispatch-switch",
+            register_with=agent,
         )
 
         # 普通任务保留模型自然回复；程序核验单独证明实际发生的派工副作用。
@@ -1147,6 +1150,9 @@ def test_create_subagents_accepts_explicit_external_write_target_without_startin
             memory_path="memory.jsonl",
             subagent_workspace="subs",
             max_subagents=3,
+            # B 切片：测工具本体不走托管权威链（带 home 会被推断 MANAGED，
+            # 未登记 run 的测试调用会被权威门按契约拦截）。
+            execution_mode="local_unmanaged",
         )
         agent = SimpleAgent(cfg, workspace)
 

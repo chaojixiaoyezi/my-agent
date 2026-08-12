@@ -93,7 +93,8 @@ class AuthorizeNetworkHostTool(BaseTool):
                 by_parameter=(("action", (("grant", "dangerous"), ("revoke", "mutating"), ("list", "read_only"))),),
             ),
             idempotency_policy=IdempotencyPolicy("operation"),
-            resource_scopes=ResourceScopePolicy(parameter_names=("hosts",)),
+            resource_scopes=ResourceScopePolicy(parameter_names=("hosts",),
+            parameter_kinds={"hosts": "logical"}),
         )
 
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:

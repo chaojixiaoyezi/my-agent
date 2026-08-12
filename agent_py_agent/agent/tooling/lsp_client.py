@@ -450,10 +450,28 @@ class LspTool(BaseTool):
             sandbox_policy=SandboxPolicy("required"),
             idempotency_policy=IdempotencyPolicy("operation"),
             timeout_policy=TimeoutPolicy(30),
-            resource_scopes=ResourceScopePolicy(parameter_names=("server", "path")),
+            resource_scopes=ResourceScopePolicy(
+                parameter_names=("server", "path"),
+                parameter_kinds={"server": "logical"},
+            ),
             output_policy=OutputPolicy(redaction="source_code"),
             promotes_task=True,
         )
+
+    # seq 253 #5：LSP server 进程与 shell 同沙箱语义（registry_invoke 注入
+    # __sandbox_write_roots），可写全部 allowed_write_roots——执行写根经协议
+    # 结构化声明，operation lock 全量覆盖（原特判只认 internal_parameters
+    # 声明，漏掉 lsp 这类沙箱名单内但未声明 internal 参数的工具）。
+    def effective_write_roots(
+        self,
+        arguments: dict[str, Any],
+        write_boundary: dict[str, Any] | None,
+        workspace_root: Path,
+    ) -> tuple[str, ...]:
+        _ = (arguments, workspace_root)
+        from .write_boundary import resolved_write_roots
+
+        return tuple(str(p) for p in resolved_write_roots(write_boundary, workspace_root))
 
     # LLM: 配置检查不启动 server、不探测文件系统命令，避免仅渲染 Schema 就产生进程副作用。
     # 函数用途: 没有任何 LSP server 配置时从本轮工具快照中隐藏 lsp。

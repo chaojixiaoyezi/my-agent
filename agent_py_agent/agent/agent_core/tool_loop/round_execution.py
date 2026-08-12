@@ -406,6 +406,10 @@ def _parallel_segment_end(
         descriptor = describe_tool_concurrency(
             getattr(request.params, "tool_runtime_snapshot", None),
             call,
+            workspace_root=getattr(
+                request.agent, "effective_workspace_root", getattr(request.agent, "root", None)
+            ),
+            write_boundary=getattr(request.params, "write_boundary", None),
         )
         if not descriptor.parallel_eligible:
             break
