@@ -325,7 +325,11 @@ def _completed_run_events(conn: sqlite3.Connection, runs: list[dict]) -> dict:
             "WHERE agent_run_id = ? AND event_type = 'agent_run.completed' ORDER BY seq",
             (run["agent_run_id"],),
         ).fetchall()
-        result[run["agent_run_id"]] = [dict(r) for r in rows]
+        # 注意: conn 无 row_factory → fetchall() 返回 tuple, dict(row) 会把
+        # 每个字符串拆成 kv 序列(长度≠2 即崩), 必须显式按列索引构造。
+        result[run["agent_run_id"]] = [
+            {"event_type": r[0], "payload_json": r[1]} for r in rows
+        ]
     return result
 
 
@@ -884,7 +888,18 @@ def _run_c17(args: argparse.Namespace, case: dict) -> dict:
     elif sleep_statuses[0] not in _TERMINAL_STATUSES:
         findings.append(f"sleep_op_unsettled:{sleep_op['operation_id']}")
     elif sleep_statuses[0] != "CANCELLED":
-        findings.append(f"sleep_op_not_cancelled:{sleep_statuses[0]}")
+        # 产品取消语义(G4 单次 UNKNOWN fence): 进程组被 kill 的操作效果未知,
+        # 如实记 UNKNOWN + unknown_reason="effect_outcome_unknown:CANCELLED",
+        # 不虚报字面 CANCELLED。结构判据: 终态 UNKNOWN 且 unknown_reason
+        # 最后一段枚举 == CANCELLED 同样算"已取消"。
+        reason = ""
+        for op in ops:
+            if op["operation_id"] == sleep_op["operation_id"]:
+                reason = (op.get("outcome") or {}).get("unknown_reason") or ""
+                break
+        cancelled_marked = sleep_statuses[0] == "UNKNOWN" and reason.split(":")[-1] == "CANCELLED"
+        if not cancelled_marked:
+            findings.append(f"sleep_op_not_cancelled:{sleep_statuses[0]}")
     for op in ops:
         if op["operation_id"] == sleep_op["operation_id"]:
             continue
@@ -1060,8 +1075,22 @@ def _run_c13(args: argparse.Namespace, case: dict) -> dict:
     conn = _ledger(args.owners_root)
     runs = _runs_since(conn, since)
     deps = _delegations_since(conn, since)
-    # 子代理派发是异步的: 主请求结算时子代理往往还在工作(run2 实证), 有界等待
-    # 子 run 操作行全部终态且稳定后再断言, 避免把"还在跑"误判成"没落账"。
+    # 子代理派发是异步的: 主请求结算时子代理往往还在启动阶段, 尚无操作行,
+    # 而 _wait_ops_settled 对"零操作行"立即满足(父行已终态→签名稳定)提前返回,
+    # 会把"还没跑到"误判成 child_no_tool_ops。先有界等子 run 产生操作行
+    # (或子 run 已落终态/到点放弃), 再走稳定等待与断言。
+    child_run_ids = {r["agent_run_id"] for r in runs if r["parent_agent_run_id"]}
+    if child_run_ids:
+        deadline = time.time() + 240.0
+        while time.time() < deadline:
+            if _tool_ops(conn, list(child_run_ids)):
+                break
+            if all(
+                r["status"] in ("done", "cancelled", "unfinished", "failed")
+                for r in runs
+            ):
+                break
+            time.sleep(5.0)
     ops = _wait_ops_settled(conn, runs, timeout=240.0)
     case["runs"] = runs
     case["delegations"] = deps
