@@ -24,10 +24,26 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import socket
+
 from ..common.id_generator import new_id
 from .acceptance_operations import RuntimeAcceptanceMixin
 from .delivery_operations import RuntimeDeliveryMixin
-from .operations import RuntimeConflictError, RuntimeOperationsMixin
+from .operations import (
+    AGENT_RUN_TERMINAL_STATUSES,
+    EXEC_LOCK_GRACE_SECONDS,
+    EXEC_LOCK_LEASE_SECONDS,
+    EXEC_LOCK_SCOPE_PREFIX,
+    OP_CLAIMED,
+    OP_EXECUTING,
+    OP_FAILED,
+    OP_UNKNOWN,
+    RUN_STATUS_LEGACY_CREATED,
+    RuntimeConflictError,
+    RuntimeOperationsMixin,
+    exec_lock_scope,
+    holder_is_alive,
+)
 from .schema import RuntimeSchemaMixin, runtime_db_path
 
 #: D.6/D.9：binding 生命周期状态。v1 不扩容（D.8），迁移时旧 ACTIVE → SUPERSEDED。
@@ -52,8 +68,13 @@ class RuntimeRepository(
 ):
     """单 owner 权威库入口。每个 owner 一个实例（A.1）。"""
 
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_path: str | Path, *, instance_id: str = ""):
         self.db_path = Path(db_path)
+        # R1-03：执行权锁 holder 身份（host-pid 实例级，跨进程天然互斥，
+        # 同进程多次换代视为同一 worker 续跑——compact/账本续跑轮）。
+        # instance_id 可选注入：测试模拟另一进程（同进程多实例 pid 相同，
+        # 默认 identity 无法区分）。
+        self.instance_id = instance_id or f"{socket.gethostname()}-{os.getpid()}"
         self._init_runtime_schema()
 
     # ------------------------------------------------------------------ 事务
@@ -348,28 +369,80 @@ class RuntimeRepository(
 
     # ---------------------------------------------------------- AgentAttempt
     def create_attempt(self, agent_run_id: str) -> sqlite3.Row:
-        """CAS 创建新 attempt 并替换 current pointer（F.2/F.3）。
+        """单事务创建新 attempt + 原子取得执行权（R1-03 v5）。
 
-        读当前 generation → 新 generation = +1 → UPDATE agent_runs 时以
-        current_attempt_generation 为 CAS 条件；0 行命中 = 并发冲突，fail-closed。
-        旧 attempt 行不可变（F.7）。
+        挂载闸（防线分层）：自喂循环（settle 置 done 后仍被每 cooldown 挂新
+        running attempt，真机 agentrun-1786466638 被驱动 13 次实证）的根治在
+        发现层——owner_wake_discovery 终态过滤（终态 run 一律不催，不调本函数）
+        + 本函数执行权锁（活跃锁拒绝并发双挂载）。终态（done/failed/cancelled）
+        挂载本身是合法显式调度：子代理 followup 打回重跑（capability grant/
+        写授权后同 run 重挂）、policy due 周期轮换（run_id 稳定派生
+        bg-main-{thread_id}，成功轮 settle done 后下次 due 仍同 run 重挂）、
+        user-stop 恢复。任务级生命周期闸（子代理 _assert_runner_attempt_
+        start_allowed / policy 只对 active 任务调度）才是「该不该重跑」的裁决
+        者，run 级终态不拦截。未知状态（含历史 unfinished 遗留非法值）→
+        fail-closed 拒绝 + status_conflict 诊断事件（不写 settled/completed）。
+        '' 按 created 兼容映射（迁移红线）。
 
-        G4 补（3.txt G4-4）：takeover 原子收尾并入同一事务——旧 attempt 的
-        非终态 operation（CLAIMED/EXECUTING）统一转 UNKNOWN（无法证明零
-        副作用，绝不让旧 worker 事后写 SUCCEEDED——settle 单事务 fence
-        已拒，此处由系统权威闭环），其 workspace mutation 全部标 DIRTY
-        （G.14：reconcile 前阻止发布/验收/交付）。旧 worker 即使还活着
-        也只能看到 UNKNOWN/DIRTY，无法盲重放。
+        执行权锁三态（scope=attempt-exec:{agent_run_id}，与 CAS 换代同事务）：
+          - 缺失 → INSERT 锁（归属新 attempt）；
+          - 本实例持有 → 换代（compact/账本续跑轮 = 同一 worker 续跑）；
+          - 他人持有且活跃 → RuntimeConflictError（并发双挂载恰一成功）；
+          - 过期或持主判死 → 接管（删旧锁建新锁）。
+        锁释放四元组（scope+holder_instance+attempt_id+attempt_generation），
+        settle 终态即释放；takeover/接管同事务删旧锁。
+
+        CAS 换代（F.2/F.3）：0 行命中 = 并发冲突，fail-closed；旧 attempt
+        行不可变（F.7）。G4 takeover（G4-4）原子收尾：旧 attempt 非终态
+        operation 统一转 UNKNOWN、mutation 标 DIRTY（旧 worker 即使还活着
+        也只能看到 UNKNOWN/DIRTY，无法盲重放）。
         """
         now = time.time()
+        scope = exec_lock_scope(agent_run_id)
         with self._runtime_connection() as conn:
             run = conn.execute(
-                "SELECT current_attempt_generation, current_attempt_id "
-                "FROM agent_runs WHERE agent_run_id = ?",
+                "SELECT current_attempt_generation, current_attempt_id, "
+                "status, task_run_id, workspace_epoch FROM agent_runs "
+                "WHERE agent_run_id = ?",
                 (agent_run_id,),
             ).fetchone()
             if run is None:
                 raise KeyError(f"agent_run 不存在: {agent_run_id}")
+            status = str(run["status"] or "")
+            # 终态（done/failed/cancelled）挂载放行：见 docstring 防线分层——
+            # 自喂防护在发现层过滤 + 执行权锁，任务级生命周期闸裁决「该不该重跑」。
+            # 合法状态 = 现役（''/created）+ 全部终态；其余（历史 unfinished 等
+            # 非法值）→ fail-closed。
+            if status not in RUN_STATUS_LEGACY_CREATED and \
+                    status not in AGENT_RUN_TERMINAL_STATUSES:
+                self._append_event_conn(
+                    conn,
+                    event_type="status_conflict",
+                    attempt_id=str(run["current_attempt_id"] or ""),
+                    agent_run_id=agent_run_id,
+                    task_run_id=str(run["task_run_id"] or ""),
+                    payload={"status": status, "action": "create_attempt_blocked",
+                             "reason": "unknown_run_status"},
+                )
+                # 诊断事件先落库再拒绝：raise 会让 with 事务回滚，事件必须
+                # 先行 commit（拒绝路径本身不产生其他写，回滚空事务无害）。
+                conn.commit()
+                raise RuntimeConflictError(
+                    f"run 状态未知({status!r})，fail-closed 拒绝挂载: {agent_run_id}"
+                )
+            lock = conn.execute(
+                "SELECT * FROM resource_locks WHERE canonical_scope = ?", (scope,)
+            ).fetchone()
+            if lock is not None:
+                holder = str(lock["holder_instance"] or "")
+                if holder != self.instance_id and not self._lock_is_takeoverable(lock, now):
+                    raise RuntimeConflictError(
+                        f"执行权锁被 {holder} 持有（活跃），拒绝并发挂载: {scope}"
+                    )
+                # 接管：删旧锁（同事务），新 attempt 成为唯一持锁者
+                conn.execute(
+                    "DELETE FROM resource_locks WHERE canonical_scope = ?", (scope,)
+                )
             generation = int(run["current_attempt_generation"]) + 1
             old_attempt_id = str(run["current_attempt_id"] or "")
             attempt_id = new_id("attempt_id")
@@ -380,6 +453,21 @@ class RuntimeRepository(
                 VALUES(?, ?, ?, 'running', ?)
                 """,
                 (attempt_id, agent_run_id, generation, now),
+            )
+            conn.execute(
+                """
+                INSERT INTO resource_locks(lock_id, canonical_scope, holder_instance,
+                                           pid, start_token, attempt_id,
+                                           attempt_generation, workspace_epoch,
+                                           tool_operation_generation, lease_expires_at,
+                                           created_at, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+                """,
+                (uuid.uuid4().hex, scope, self.instance_id, os.getpid(),
+                 self._start_token(), attempt_id, generation,
+                 int(run["workspace_epoch"] or 1) if "workspace_epoch" in run.keys()
+                 else 1,
+                 now + EXEC_LOCK_LEASE_SECONDS, now, now),
             )
             updated = conn.execute(
                 """
@@ -443,6 +531,59 @@ class RuntimeRepository(
         row = self.get_attempt(attempt_id)
         assert row is not None
         return row
+
+    # ------------------------------------------------------ R1-03 辅助
+    def _start_token(self) -> str:
+        """本进程 /proc/<pid>/stat 第 22 字段（starttime）——PID 复用防护锚。"""
+        try:
+            with open(f"/proc/{os.getpid()}/stat", encoding="utf-8") as fh:
+                fields = fh.read().split()
+            return fields[21] if len(fields) >= 22 else ""
+        except OSError:
+            return ""
+
+    def _lock_is_takeoverable(self, lock: sqlite3.Row, now: float) -> bool:
+        """R1-03 锁接管判定：过期或持主判死 → 可接管；无法证明 → 保守拒。"""
+        if float(lock["lease_expires_at"] or 0) < now:
+            return True
+        return not holder_is_alive(int(lock["pid"] or 0),
+                                   str(lock["start_token"] or ""))
+
+    def has_active_exec_lock(self, agent_run_id: str, *, now: float | None = None) -> bool:
+        """R1-03 驱动链 lease 感知：run 是否被活跃执行权锁持有。
+
+        活跃 = 锁存在且不可接管（lease 未过期且持主存活）→ worker 在跑，
+        发现层不得重复催。判定与 create_attempt 同一把尺（_lock_is_takeoverable）。
+        """
+        lock = self._runtime_connect().execute(
+            "SELECT * FROM resource_locks WHERE canonical_scope = ?",
+            (exec_lock_scope(agent_run_id),),
+        ).fetchone()
+        if lock is None:
+            return False
+        return not self._lock_is_takeoverable(
+            lock, now if now is not None else time.time())
+
+    def _append_event_conn(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        event_type: str,
+        attempt_id: str,
+        agent_run_id: str,
+        task_run_id: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """事务内追加 runtime_events（A.3 append-only，调用方负责 commit）。"""
+        conn.execute(
+            """
+            INSERT INTO runtime_events(event_id, event_type, attempt_id, agent_run_id,
+                                      task_run_id, payload_json, created_at)
+            VALUES(?, ?, ?, ?, ?, ?, ?)
+            """,
+            (uuid.uuid4().hex, event_type, attempt_id, agent_run_id, task_run_id,
+             json.dumps(payload or {}, ensure_ascii=False), time.time()),
+        )
 
     def get_attempt(self, attempt_id: str) -> sqlite3.Row | None:
         with self._runtime_connection() as conn:
@@ -751,6 +892,7 @@ class RuntimeRepository(
         status: str,
         payload: dict[str, Any] | None = None,
         now: float | None = None,
+        attempt_id: str = "",
     ) -> dict[str, Any]:
         """run 级终态收口（单事务 CAS，幂等，以第一次为准）。
 
@@ -763,17 +905,62 @@ class RuntimeRepository(
           - 全部未结 attempt（ended_at=0）：status=终态、ended_at=now；
           - runtime_events 追加 'agent_run.completed'（payload 带终态
             字段），事件绑定 attempt（A.8：每事件追到具体 attempt）。
+
+        R1-03 收口闸（v5）：
+          - 终态集校验：status 必须 ∈ {done,failed,cancelled}（集中常量），
+            其余（含 unfinished 等 runtime_status 透传）→ 拒 + status_conflict
+            诊断事件——unfinished 是任务级可恢复语义，不是 agent_runs.status
+            合法写点，历史遗留异常值不得继续由 settle 制造；
+          - 未知状态 fail-closed：run 当前状态非 ''/created/终态集 →
+            不写 settled，留 status_conflict 事件；
+          - stale attempt 闸：传入 attempt_id 时校验其仍是 current
+            attempt（takeover 换代后旧 worker 自称收口 → 拒 +
+            closeout_blocked 事件）；
+          - 终态即释放：收口成功同事务释放执行权锁（scope=attempt-exec:
+            {agent_run_id}），锁不残留。
         """
         now = time.time() if now is None else now
         event_id = uuid.uuid4().hex
+        if str(status or "").strip() not in AGENT_RUN_TERMINAL_STATUSES:
+            with self.transaction() as conn:
+                self._append_event_conn(
+                    conn, event_type="status_conflict", attempt_id=attempt_id,
+                    agent_run_id=agent_run_id,
+                    payload={"status": str(status or ""), "action": "settle_blocked",
+                             "reason": "invalid_settle_status"},
+                )
+            return {"settled": False, "reason": "invalid_status"}
         with self.transaction() as conn:
             row = conn.execute(
-                "SELECT task_run_id, current_attempt_id FROM agent_runs "
-                "WHERE agent_run_id = ?",
+                "SELECT task_run_id, current_attempt_id, status AS run_status "
+                "FROM agent_runs WHERE agent_run_id = ?",
                 (agent_run_id,),
             ).fetchone()
             if row is None:
                 return {"settled": False, "reason": "no_such_run"}
+            cur_status = str(row["run_status"] or "")
+            if cur_status not in RUN_STATUS_LEGACY_CREATED and \
+                    cur_status not in AGENT_RUN_TERMINAL_STATUSES:
+                # 未知状态 fail-closed：不写 settled，留诊断事件
+                self._append_event_conn(
+                    conn, event_type="status_conflict",
+                    attempt_id=str(row["current_attempt_id"] or ""),
+                    agent_run_id=agent_run_id,
+                    task_run_id=str(row["task_run_id"] or ""),
+                    payload={"status": cur_status, "action": "settle_blocked",
+                             "reason": "unknown_run_status"},
+                )
+                return {"settled": False, "reason": "unknown_status"}
+            if str(attempt_id or "").strip():
+                if str(row["current_attempt_id"] or "") != attempt_id:
+                    self._append_event_conn(
+                        conn, event_type="closeout_blocked",
+                        attempt_id=attempt_id, agent_run_id=agent_run_id,
+                        task_run_id=str(row["task_run_id"] or ""),
+                        payload={"status": str(status or ""), "reason": "stale_attempt",
+                                 "current_attempt_id": str(row["current_attempt_id"] or "")},
+                    )
+                    return {"settled": False, "reason": "stale_attempt"}
             if str(row["current_attempt_id"] or "").strip():
                 attempt_id = str(row["current_attempt_id"])
             else:
@@ -796,6 +983,11 @@ class RuntimeRepository(
                 "WHERE agent_run_id = ? AND ended_at = 0",
                 (status, now, agent_run_id),
             )
+            # R1-03：终态即释放执行权锁（不残留，同事务）
+            conn.execute(
+                "DELETE FROM resource_locks WHERE canonical_scope = ?",
+                (exec_lock_scope(agent_run_id),),
+            )
             conn.execute(
                 """
                 INSERT INTO runtime_events(event_id, event_type, attempt_id, agent_run_id,
@@ -806,6 +998,126 @@ class RuntimeRepository(
                  json.dumps(payload or {}, ensure_ascii=False), now),
             )
         return {"settled": True, "event_id": event_id}
+
+    # ------------------------------------------- R1-03 收口矩阵 + 孤儿兜底
+    def classify_attempt_closeout(self, attempt_id: str) -> str | None:
+        """R1-03 收口矩阵五档（v5，纯结构化 op 状态分类）。
+
+          - 无 op 痕迹          → 'cancelled'（纯账本收口，无副作用可证明）
+          - 全 SUCCEEDED/CANCELLED → 'done'
+          - 含 FAILED           → 'failed'
+          - 含非终态/UNKNOWN    → None（停手，绝不自动裁决——UNKNOWN 是
+            结果不可知，无法证明零副作用）
+        执行层收口 ≠ 任务层收口：任务完成仍走 required_actions +
+        closeout_task_run + delivery 闸（本函数只裁决 attempt 执行痕迹）。
+        """
+        with self._runtime_connection() as conn:
+            attempt = conn.execute(
+                "SELECT * FROM agent_attempts WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+            if attempt is None:
+                return None
+            rows = conn.execute(
+                "SELECT status, outcome_json FROM tool_operations "
+                "WHERE attempt_id = ?", (attempt_id,),
+            ).fetchall()
+        if not rows:
+            return "cancelled"
+        for op in rows:
+            op_status = str(op["status"] or "")
+            if op_status in {OP_CLAIMED, OP_EXECUTING, OP_UNKNOWN}:
+                return None  # 停手
+            if op_status == OP_FAILED:
+                return "failed"
+        return "done"
+
+    def find_orphaned_attempts(
+        self,
+        *,
+        now: float | None = None,
+        grace_seconds: int | None = None,
+    ) -> list[sqlite3.Row]:
+        """R1-03 孤儿 attempt 兜底：执行权锁过期超出宽限期且 run 非终态。
+
+        判据（v5 四件套之 1/3）：锁 lease_expires_at < now-grace（grace 默认
+        2×lease）且 run status ∈ {''/created}——run 已终态的锁本应由 settle
+        同事务释放，残留锁不构成孤儿（不重复收口已终态 run）。
+        """
+        now = time.time() if now is None else now
+        grace = max(0, int(grace_seconds or EXEC_LOCK_GRACE_SECONDS))
+        with self._runtime_connection() as conn:
+            locks = conn.execute(
+                "SELECT * FROM resource_locks "
+                "WHERE canonical_scope LIKE ? AND lease_expires_at < ?",
+                (f"{EXEC_LOCK_SCOPE_PREFIX}%", now - grace),
+            ).fetchall()
+            orphans: list[sqlite3.Row] = []
+            for lock in locks:
+                run = conn.execute(
+                    "SELECT status FROM agent_runs WHERE agent_run_id = ?",
+                    (str(lock["canonical_scope"]).removeprefix(EXEC_LOCK_SCOPE_PREFIX),),
+                ).fetchone()
+                if run is None or str(run["status"] or "") not in RUN_STATUS_LEGACY_CREATED:
+                    continue  # 终态/未知状态 run：不兜底（fail-closed）
+                orphans.append(lock)
+        return orphans
+
+    def reclaim_orphaned_attempt(
+        self,
+        attempt_id: str,
+        *,
+        operator: str,
+        reason: str = "orphan_reclaim",
+    ) -> dict[str, Any]:
+        """R1-03 显式回收孤儿 attempt（人工/恢复器入口，普通 wake 不构成）。
+
+        判 failed 前置副作用门（v5 四件套之 4）：attempt 有外部副作用 op
+        且无 effect_key（无法验证幂等）→ 拒自动判 failed，交人工
+        （fail-closed——外部副作用结果不可知时绝不自动收口）。
+
+        回收动作 = settle_agent_run（终态集校验 + stale 闸 + 终态释放锁
+        全部复用；run 非终态才可能成功——CAS 以第一次为准）。
+        """
+        now = time.time()
+        with self._runtime_connection() as conn:
+            lock = conn.execute(
+                "SELECT * FROM resource_locks WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+            if lock is None:
+                return {"reclaimed": False, "reason": "no_exec_lock"}
+            if float(lock["lease_expires_at"] or 0) >= now and \
+                    holder_is_alive(int(lock["pid"] or 0),
+                                    str(lock["start_token"] or "")):
+                return {"reclaimed": False, "reason": "lock_active"}
+            rows = conn.execute(
+                "SELECT outcome_json FROM tool_operations WHERE attempt_id = ? "
+                "AND status IN ('EXECUTING', 'CLAIMED', 'UNKNOWN')",
+                (attempt_id,),
+            ).fetchall()
+        for op in rows:
+            try:
+                payload = json.loads(op["outcome_json"])
+            except (TypeError, json.JSONDecodeError):
+                payload = {}
+            if isinstance(payload, dict) and payload.get("side_effect") is True \
+                    and not str(payload.get("effect_key") or "").strip():
+                return {"reclaimed": False, "reason": "side_effect_gate"}
+        run = self.get_attempt(attempt_id)
+        if run is None:
+            return {"reclaimed": False, "reason": "no_such_attempt"}
+        closeout = self.classify_attempt_closeout(attempt_id)
+        if closeout is None:
+            return {"reclaimed": False, "reason": "nonterminal_ops"}
+        result = self.settle_agent_run(
+            agent_run_id=str(run["agent_run_id"]),
+            status=closeout,
+            attempt_id=attempt_id,
+            payload={"status": closeout, "reason": reason,
+                     "operator": str(operator or "")},
+        )
+        if not result.get("settled"):
+            return {"reclaimed": False, "reason": result.get("reason", "settle_failed")}
+        return {"reclaimed": True, "status": closeout, "attempt_id": attempt_id}
 
     # -------------------------------------------------------- RuntimeEvents
     def append_event(

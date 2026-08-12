@@ -47,6 +47,47 @@ _OPERATION_STATES = frozenset(
 #: G.5：CANCELLED 只允许能证明 handler 未启动（handler_started_at=0）的操作。
 _CANCELLABLE_FROM = (OP_CLAIMED,)
 
+# R1-03 收口闸：agent_runs 终态单一权威（v5 六轮评审闭合）。
+# '' 是旧 /ask 路径初始值，按 created 兼容映射（迁移红线，不得误伤）。
+AGENT_RUN_TERMINAL_STATUSES = frozenset({"done", "failed", "cancelled"})
+RUN_STATUS_LEGACY_CREATED = frozenset({"", "created"})
+#: 执行权锁 scope 前缀（R1-03）：scope=attempt-exec:{agent_run_id}，
+#: 唯一承载「同一时刻恰一 worker 持有 run 执行权」。
+EXEC_LOCK_SCOPE_PREFIX = "attempt-exec:"
+#: 执行权锁 lease：worker 每工具轮 renew（主/子代理共用），孤儿兜底
+#: 宽限期默认 2×lease（find_orphaned_attempts grace_seconds 缺省值）。
+EXEC_LOCK_LEASE_SECONDS = 60
+EXEC_LOCK_GRACE_SECONDS = 2 * EXEC_LOCK_LEASE_SECONDS
+
+
+def exec_lock_scope(agent_run_id: str) -> str:
+    """R1-03：run 执行权锁 canonical scope（排序键用途也要统一走这里）。"""
+    return f"{EXEC_LOCK_SCOPE_PREFIX}{agent_run_id}"
+
+
+def holder_is_alive(pid: int, start_token: str = "") -> bool:
+    """R1-03 持主判死：pid 不存在 → 死；start_token 失配（PID 复用）→ 死。
+
+    pid<=0 或无法读取 /proc（非 Linux）→ 保守视为存活（fail-closed：
+    无法证明死亡就不接管）。start_token 是 /proc/<pid>/stat 第 22 字段
+    （starttime），进程启动时记录，比对防 PID 复用。
+    """
+    if int(pid or 0) <= 0:
+        return True
+    try:
+        os.kill(int(pid), 0)
+    except OSError:
+        return False
+    if not start_token:
+        return True
+    try:
+        with open(f"/proc/{int(pid)}/stat", encoding="utf-8") as fh:
+            fields = fh.read().split()
+        return len(fields) >= 22 and fields[21] == str(start_token)
+    except OSError:
+        return True
+
+
 # G.12 mutation 状态。
 MUT_MUTATING = "MUTATING"
 MUT_STABLE = "STABLE"

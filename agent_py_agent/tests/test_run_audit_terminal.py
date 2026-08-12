@@ -4,8 +4,8 @@
 - Repository.settle_agent_run：单事务 CAS、幂等、先到先得、多 attempt 收口、
   事件绑定 attempt（A.8）、查无 run noop。
 - runtime_mixin._settle_main_agent_run / _settle_main_agent_run_exception：
-  ok→done、unfinished 透传、cancelled 族别名、InterruptedError→cancelled、
-  LOCAL_UNMANAGED noop、repo 异常 fail-silent。
+  ok→done、非终态（unfinished 等）不落账（R1-03）、cancelled 族别名、
+  InterruptedError→cancelled、LOCAL_UNMANAGED noop、repo 异常 fail-silent。
 - _finalization_service._honest_unfinished_response_text：ok 原样、
   非 ok 如实标注（附状态/原因/来源 + 模型原文）。
 - _schedule_typed_unfinished_continuation：返工门 unfinished → 预算内续跑；
@@ -121,17 +121,44 @@ def test_settle_closes_all_open_attempts_only(repo):
     second = repo.create_attempt(rec["agent_run_id"])
     repo.settle_agent_run(
         agent_run_id=rec["agent_run_id"],
-        status="unfinished",
-        payload={"status": "unfinished"},
+        status="done",
+        payload={"status": "done"},
     )
     attempts = _attempts(repo, rec["agent_run_id"])
     assert len(attempts) == 2
     for attempt in attempts:
-        assert attempt["status"] == "unfinished"
+        assert attempt["status"] == "done"
         assert attempt["ended_at"] > 0
     # 事件绑定 current attempt（第二个）
     events = _completed_events(repo, rec["agent_run_id"])
     assert events[0]["attempt_id"] == second["attempt_id"]
+
+
+def test_settle_rejects_non_terminal_status(repo):
+    """R1-03：unfinished 是任务级可恢复语义，不是 agent_runs.status 合法终态。
+
+    settle 拒写 + status_conflict 诊断事件；attempt 保持 running（发现层
+    继续驱动），绝不写 settled/completed。
+    """
+    rec = _record(repo)
+    result = repo.settle_agent_run(
+        agent_run_id=rec["agent_run_id"],
+        status="unfinished",
+        payload={"status": "unfinished"},
+    )
+    assert result == {"settled": False, "reason": "invalid_status"}
+    row = _run_row(repo, rec["agent_run_id"])
+    assert row["status"] == "created"
+    attempts = _attempts(repo, rec["agent_run_id"])
+    assert len(attempts) == 1
+    assert attempts[0]["status"] == "running"
+    assert attempts[0]["ended_at"] == 0
+    assert len(_completed_events(repo, rec["agent_run_id"])) == 0
+    conflict = repo._runtime_connect().execute(
+        "SELECT * FROM runtime_events WHERE agent_run_id = ? AND event_type = 'status_conflict'",
+        (rec["agent_run_id"],),
+    ).fetchall()
+    assert len(conflict) == 1
 
 
 def test_settle_event_falls_back_to_latest_attempt(repo):
@@ -173,7 +200,12 @@ def test_main_settle_ok_maps_to_done(repo):
     assert '"tool_rounds": 2' in payload
 
 
-def test_main_settle_unfinished_passthrough(repo):
+def test_main_settle_unfinished_not_terminal(repo):
+    """R1-03：unfinished 是任务级可恢复语义（返工门会续跑），不落账。
+
+    run 保持 created，发现层继续驱动；不写 completed 事件、不写
+    status_conflict 噪音（runtime_mixin 层直接过滤，不进 settle）。
+    """
     rec = _record(repo)
     result = SimpleNamespace(
         runtime_status="unfinished",
@@ -182,10 +214,10 @@ def test_main_settle_unfinished_passthrough(repo):
         tool_rounds=0,
     )
     _settle_main_agent_run(_agent(repo), _params(run_id="run-1", attempt_id=rec["attempt_id"]), result)
-    assert _run_row(repo, rec["agent_run_id"])["status"] == "unfinished"
-    payload = _completed_events(repo, rec["agent_run_id"])[0]["payload_json"]
-    assert '"runtime_reason": "REQUIRED_ACTION_HAS_NO_EVIDENCE"' in payload
-    assert '"runtime_source": "required_action_completion_gate"' in payload
+    assert _run_row(repo, rec["agent_run_id"])["status"] == "created"
+    assert _completed_events(repo, rec["agent_run_id"]) == []
+    assert len(_attempts(repo, rec["agent_run_id"])) == 1
+    assert _attempts(repo, rec["agent_run_id"])[0]["status"] == "running"
 
 
 def test_main_settle_user_stop_maps_cancelled(repo):

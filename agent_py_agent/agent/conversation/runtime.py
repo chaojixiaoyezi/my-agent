@@ -2921,6 +2921,8 @@ _HEARTBEAT_LOGGER = logging.getLogger("agent.conversation.background_claim_heart
 # 主代理 turn 还在推进的窗口内,重复拉起只有模型调用成本没有新信息(真机 celery
 # 46 分钟 18 次 task_ledger_resume)。死停最长 cooldown 内被发现(H 批前是 6h)。
 _TASK_RESUME_COOLDOWN_SECONDS = 900
+# R1-03 孤儿 attempt 回收频率：tick ~2min 一次，回收 5min 一趟
+_ORPHAN_RECLAIM_INTERVAL_SECONDS = 300
 
 _TASK_LINK_TERMINAL_STATUSES = frozenset(
     {
@@ -3663,6 +3665,7 @@ class _BackgroundSchedulerTickMixin:
         self._process_collaboration_cases(now=current)
         _maybe_supervise_orphans(self, current)
         self._enqueue_scheduler_runs(now=current)
+        self._reclaim_orphaned_attempts(now=current)
         self._enqueue_unfinished_task_resume_wakes(now=current)
         reports: list[BackgroundMainAgentReport] = []
         reported = _consume_pending_wake_signals(self, reports, current)
@@ -3696,6 +3699,47 @@ class _BackgroundSchedulerTickMixin:
         CollaborationCoordinator(
             store=self.collaboration_store, conversation_store=self.store
         ).tick(now=now)
+
+    def _reclaim_orphaned_attempts(self, *, now: float) -> None:
+        """R1-03 孤儿 attempt 兜底：锁过期超宽限且 run 非终态 → 按矩阵收口。
+
+        低频（tick ~2min 一次，这里每 5 分钟一趟）——正常 worker 每工具轮
+        续租，孤儿 = 崩溃/kill 遗留（kill-9 后旧锁残留，锁过期+持主判死
+        才可接管）。reclaim 内部有副作用门（有外部副作用且无 effect_key →
+        停手交人工，fail-closed），普通 wake tick 绝不构成绕过。
+        """
+        last = getattr(self, "_orphan_reclaim_last_at", 0.0)
+        if now - last < _ORPHAN_RECLAIM_INTERVAL_SECONDS:
+            return
+        self._orphan_reclaim_last_at = now
+        home = getattr(getattr(self, "runtime", None), "agent", None)
+        owner_home = getattr(getattr(home, "home_paths", None), "owner_home_dir", None)
+        if not owner_home:
+            return
+        try:
+            from ..owner_wake_discovery import _runtime_repo_for_owner
+            from ..runtime_db.operations import RuntimeConflictError
+
+            repo = _runtime_repo_for_owner(Path(owner_home))
+            if repo is None:
+                return
+            for attempt in repo.find_orphaned_attempts(now=now):
+                try:
+                    result = repo.reclaim_orphaned_attempt(
+                        str(attempt["attempt_id"]),
+                        operator="wake-tick-orphan-reclaim",
+                        reason="orphan_reclaim_tick",
+                    )
+                    if result.get("reclaimed"):
+                        _HEARTBEAT_LOGGER.info(
+                            "orphan attempt reclaimed: %s -> %s",
+                            attempt["attempt_id"], result.get("status"),
+                        )
+                except RuntimeConflictError as exc:
+                    # 竞态：刚被接管/已 settle——下一趟自然跳过，不重试不刷屏
+                    _HEARTBEAT_LOGGER.info("orphan reclaim skipped: %s", exc)
+        except Exception:
+            _HEARTBEAT_LOGGER.warning("orphan reclaim scan failed", exc_info=True)
 
     def _enqueue_unfinished_task_resume_wakes(self, *, now: float) -> None:
         """未完成任务(link 权威)→ 落一条 dedupe wake,让主代理续跑(claim/执行链全复用)。

@@ -43,6 +43,7 @@ from .runtime.run_params import (
     run_params_from_keywords,
     run_params_with_request_id,
 )
+from ..runtime_db.repository import AGENT_RUN_TERMINAL_STATUSES
 
 
 @dataclass
@@ -377,13 +378,19 @@ def _settle_main_agent_run_status(
     修复②（run 级审计终态）：/ask 路径此前 agent_runs.status 恒 'created'、
     attempt 恒 'running'、无 run 级完成事件。这里在 run 真实结束时按
     结构化字段收口：runtime_status=='ok' → 'done'；cancelled 族
-    （user_stop/conversation_control）→ 'cancelled'；其余（unfinished/
-    blocked/failed…）原样透传。LOCAL_UNMANAGED（无 repo）/查无 run →
-    noop。审计是附加保证，任何失败绝不反噬执行路径。
+    （user_stop/conversation_control）→ 'cancelled'；failed 等直接落账。
+
+    R1-03（收口闸）：unfinished/blocked/needs_user_input/approval_required
+    等是任务级可恢复 runtime_status（返工门/等待用户输入后还会续跑），
+    不是 agent_runs.status 合法终态——一律不 settle，run 保持 created，
+    发现层继续驱动。LOCAL_UNMANAGED（无 repo）/查无 run → noop。
+    审计是附加保证，任何失败绝不反噬执行路径。
     """
     terminal = _RUN_STATUS_ALIASES.get(runtime_status, runtime_status or "")
     if not terminal or terminal in ("", "created", "running"):
         return
+    if terminal not in AGENT_RUN_TERMINAL_STATUSES:
+        return  # R1-03：非终态不落账（unfinished 等），避免 status_conflict 噪音
     if not run_id or not attempt_id:
         return
     repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)

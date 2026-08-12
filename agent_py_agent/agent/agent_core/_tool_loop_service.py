@@ -13,6 +13,7 @@ from ..backends.errors import (
     is_incomplete_provider_response_error,
 )
 from ..concurrency.interrupt import is_interrupted
+from ..runtime_db.operations import exec_lock_scope
 from ..prompting_parts.builder import ToolSections, project_runtime_workspace_context
 from ..settings.runtime_guard_config import runtime_guard_int
 from ..subagents.services.session_progress import record_runtime_subagent_tool_progress
@@ -638,6 +639,39 @@ def execute_tool_loop(agent, params: ToolLoopExecuteParams):
     return _execute_tool_loop_service(ToolLoopService(agent), params)
 
 
+def _renew_exec_lock_if_held(agent, params: ToolLoopExecuteParams) -> None:
+    """R1-03 工具循环每轮续租执行权锁（lease 60s，fail-silent）。
+
+    锁语义：create_attempt 已原子取得 scope=attempt-exec:{agent_run_id}；
+    工具轮跨时可能超过 lease，必须续租，否则发现层/另一进程会误判
+    worker 死亡而接管（kill-9 接管至多一次的代价前提是活 worker 一直在续）。
+    同进程内换代（compact/续跑轮）= 同一 worker 续跑，CAS 自然命中；
+    已被接管（holder/generation 失配）→ renew CAS 拒，静默跳过——
+    旧 worker 的 settle 自会被 stale_attempt 闸拦住，不靠 renew 兜。
+    """
+    repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+    run_id = str(getattr(params, "run_id", "") or "")
+    attempt_id = str(getattr(params, "attempt_id", "") or "")
+    if repo is None or not run_id or not attempt_id:
+        return
+    try:
+        row = repo.agent_run_for_run_id(run_id)
+        if row is None:
+            return
+        scope = exec_lock_scope(str(row["agent_run_id"]))
+        lock = repo.lock_for_scope(scope)
+        if lock is None:
+            return  # 无锁（LOCAL_UNMANAGED/未建执行权）→ 无需续租
+        repo.renew_lock(
+            canonical_scope=scope,
+            holder_instance=repo.instance_id,
+            attempt_id=attempt_id,
+            attempt_generation=int(lock["attempt_generation"]),
+        )
+    except Exception:  # noqa: BLE001 续租失败绝不反噬执行路径
+        pass
+
+
 def _discard_stale_natural_reply_for_pending_turn_input(agent, params: ToolLoopExecuteParams) -> bool:
     """Keep task input out of the presentation-only receipt round."""
     if pending_natural_user_reply(params) is None or not has_pending_turn_input(agent, params):
@@ -661,6 +695,8 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
         if is_interrupted():
             final_response = _interrupted_conversation_response(service._agent)
             break
+        # R1-03：每轮续租执行权锁（fail-silent），活 worker 持续占有防误接管。
+        _renew_exec_lock_if_held(service._agent, params)
         tool_rounds, pending_final, drained = _pending_drain_outcome(service, params, tool_rounds)
         if drained and pending_final is None:
             continue

@@ -29,6 +29,11 @@ from pathlib import Path
 from typing import Any
 
 from .conversation.models import THREAD_TASK_LINK_ACTIVE_STATUS
+from .runtime_db.repository import (
+    AGENT_RUN_TERMINAL_STATUSES,
+    RuntimeRepository,
+)
+from .runtime_db.schema import runtime_db_path
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -388,6 +393,45 @@ def _scheduler_timestamp(value: object) -> float:
 # 待解阻(BLOCKED,能力批复/续派通道)。终态与人为暂停(PAUSED)不算。
 _UNFINISHED_RUN_STATUSES = frozenset({"PLANNING", "PENDING", "RUNNING", "BLOCKED"})
 
+# R1-03 发现层 repo 缓存：唤醒轮每 tick 调 unfinished_task_ids，每 tick 重建
+# RuntimeRepository（schema 初始化开销）不可接受。按 db 文件 mtime_ns 失效——
+# 外部写（settle/reclaim）后 mtime 变化，下次 tick 自动重建，读旧状态窗口 ≤ 1 tick。
+_RUNTIME_REPO_CACHE: dict[str, tuple[int, RuntimeRepository]] = {}
+
+
+def _runtime_repo_for_owner(owner_home: Path) -> RuntimeRepository | None:
+    """owner home 对应的权威库实例（模块级缓存，按 mtime_ns 失效）。
+
+    无 db 文件 → None（发现层 fail-open：无权威库时保持旧行为，不误杀）。
+    """
+    db_path = runtime_db_path(owner_home)
+    try:
+        mtime_ns = db_path.stat().st_mtime_ns
+    except OSError:
+        return None
+    cached = _RUNTIME_REPO_CACHE.get(str(db_path))
+    if cached is not None and cached[0] == mtime_ns:
+        return cached[1]
+    repo = RuntimeRepository(db_path)
+    _RUNTIME_REPO_CACHE[str(db_path)] = (mtime_ns, repo)
+    return repo
+
+
+def _main_run_row_for_task(repo: RuntimeRepository, task_id: str):
+    """task 的 role='main' root AgentRun（终态/锁过滤的权威锚点）。
+
+    tasks → task_runs → agent_runs（role='main' 且 parent 空 = 主链根）。
+    取最新一条；无权威记录 → None（发现层不据此裁决，照旧驱动）。
+    """
+    return repo._runtime_connect().execute(
+        "SELECT ar.agent_run_id, ar.status FROM agent_runs ar "
+        "JOIN task_runs tr ON tr.task_run_id = ar.task_run_id "
+        "JOIN tasks t ON t.task_id = tr.task_id "
+        "WHERE t.task_id = ? AND ar.role = 'main' AND ar.parent_agent_run_id = '' "
+        "ORDER BY ar.created_at DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+
 
 def _has_unfinished_subagent_run(owner_home: Path) -> bool:
     """owner 名下在册子代理 run 是否有未完成的(agents/<run-id>/state.json 的 status)。
@@ -465,7 +509,53 @@ def unfinished_task_ids(owner_home: Path) -> list[str]:
             task_id = str(payload.get("task_id") or "").strip()
             if task_id:
                 ledger_ids.add(task_id)
-    return [task_id for task_id in active_ids if task_id in ledger_ids]
+    candidates = [task_id for task_id in active_ids if task_id in ledger_ids]
+    return _filter_by_runtime_authority(owner_home, candidates)
+
+
+def _filter_by_runtime_authority(owner_home: Path, candidates: list[str]) -> list[str]:
+    """R1-03：runtime.db 是终态单一权威——state.json 残留 RUNNING 不再驱动。
+
+    对每个候选 task 查 role='main' AgentRun：
+      - 权威终态（done/failed/cancelled）→ 排除 + status_conflict 诊断事件
+        （账本残留是冲突观测，绝不参与驱动；自喂循环真机根因：
+        settle 置终态后仍被每 cooldown 挂新 running attempt）。
+      - 非终态但有活跃执行权锁（worker 在跑）→ 排除不催（驱动链 lease 感知）。
+      - 其余（含无权威记录）→ 照旧驱动。
+    """
+    if not candidates:
+        return []
+    repo = _runtime_repo_for_owner(owner_home)
+    if repo is None:
+        return candidates  # 无权威库：保持旧行为（fail-open 不误杀）
+    filtered: list[str] = []
+    for task_id in candidates:
+        try:
+            row = _main_run_row_for_task(repo, task_id)
+        except Exception:  # noqa: BLE001 审计是附加保证，查询失败不反噬驱动
+            filtered.append(task_id)
+            continue
+        if row is None:
+            filtered.append(task_id)
+            continue
+        status = str(row["status"] or "")
+        if status in AGENT_RUN_TERMINAL_STATUSES:
+            try:
+                repo.append_event(
+                    event_type="status_conflict",
+                    attempt_id="",
+                    agent_run_id=str(row["agent_run_id"]),
+                    payload={"status": status, "source": "unfinished_task_ids",
+                             "reason": "ledger_stale_after_terminal",
+                             "task_id": task_id},
+                )
+            except Exception:  # noqa: BLE001 事件写失败不反噬
+                pass
+            continue  # 权威终态 → 排除（state.json 残留是冲突观测）
+        if repo.has_active_exec_lock(str(row["agent_run_id"])):
+            continue  # worker 在跑 → 不催
+        filtered.append(task_id)
+    return filtered
 
 
 def _has_unfinished_task_ledger(owner_home: Path) -> bool:
