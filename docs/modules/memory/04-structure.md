@@ -91,6 +91,8 @@ flowchart TD
 | `SOUL.md` | 经用户确认的 AI 人格 | Curator 不可直接写 |
 | `AGENTS.md` | 经用户确认的长期合作方式 | Curator/子代理不可直接写 |
 | `retention.json` | Memory v2 保留期、legal hold 和维护节流的 typed policy | 不从自然语言判断删除目标 |
+| `memory_policy.json` | Memory 总闸(memory-policy.v1.enabled)；缺失/损坏视为开启 | 不直接由消费点读原始 JSON，不定义细粒度来源名单 |
+| `skill_policy.json` | Skill 总闸(enabled) + enabled_sources 等细粒度名单 | 总闸关闭时名单无意义(快照直接空) |
 | `memory/migration.json` | 一次性迁移完成 marker 和备份引用 | 不提供永久 legacy fallback |
 
 ## 生产服务与调用关系
@@ -112,6 +114,10 @@ flowchart TD
   `ToolReferenceQuery` 注入 `CuratorToolReferenceSource`，Memory 子包不反向导入 `memory_archive`。
 - `capability/memory_tool.py`：模型侧唯一 `remember` 工具；正式事实仍走 Candidate + Promotion。
 - `capability/persona_tool.py`：模型侧唯一 Persona 工具，写入由 PersonaRepository 控制。
+- `user_space/owner_policy.py`：`resolve_effective_owner_policy` 把 memory/skill 两个 policy 文件投影为
+  `EffectiveOwnerPolicy.memory_enabled/skills_enabled` 的单一 effective flag；所有消费点(curator 调度、
+  发现层判活、决策点召回、remember 工具 availability、skill 快照)只认该 flag，缺失文件视为开启，
+  子代理 and 继承父开关。关闭时消费点全部短路(不碰 LLM、不占登记表工位、快照为空)。
 - `cli/memory_admin_parser.py` 与 `cli/memory_admin_commands.py`：管理员统一入口，只委托上述 Service。
 
 ## Curator 提交与崩溃恢复
