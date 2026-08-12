@@ -15,7 +15,11 @@ from zoneinfo import ZoneInfo
 
 from .candidate_models import CandidateObservation, utc_now_iso
 from .candidates import CandidateService
-from .curator_backend import CuratorModelTimeoutError, extract_with_retries
+from .curator_backend import (
+    CuratorModelTimeoutError,
+    adaptive_timeout_seconds,
+    extract_with_retries,
+)
 from .curator_commit import (
     CuratorBatchCommit,
     CuratorBatchCommitError,
@@ -788,7 +792,13 @@ def _finalize_date(reason: str, timezone_name: str, *, started_at: str) -> str:
 # LLM: Lease covers all bounded retries plus commit/recovery margin and has one lower bound.
 # 函数用途: 计算一次 Curator lease 时长。
 def _lease_seconds(config: MemoryCuratorConfig) -> int:
-    return config.timeout_seconds * (config.max_retries + 1) + 90
+    # 模型调用超时按输入规模自适应放大(adaptive_timeout_seconds),lease 必须覆盖
+    # 最坏情况(输入达 max_input_chars 上限)的两次尝试加提交缓冲——否则长文提炼时
+    # lease 先于模型调用过期,运行中 batch 会被误判 busy/丢失。
+    worst_case_timeout = adaptive_timeout_seconds(
+        config.timeout_seconds, config.max_input_chars
+    )
+    return worst_case_timeout * (config.max_retries + 1) + 90
 
 
 # LLM: Owner timezone affects scheduling/date sharding only and never fact truth or ledger order.

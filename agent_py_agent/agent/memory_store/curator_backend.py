@@ -36,6 +36,20 @@ class CuratorModelTimeoutError(TimeoutError):
     pass
 
 
+# LLM: Timeout budget grows with the actual prompt so that long ingest (novel/長文 bulk load)
+# gets enough wall-clock budget on slow providers, while short inputs keep the configured base.
+# 函数用途: 按输入规模自适应放大模型调用超时(每 chars_per_unit 字符追加一个基础预算,封顶 max_multiplier 倍)。
+def adaptive_timeout_seconds(
+    base_timeout: int,
+    prompt_len: int,
+    *,
+    chars_per_unit: int = 2000,
+    max_multiplier: int = 8,
+) -> int:
+    units = max(0, prompt_len) // max(1, chars_per_unit)
+    return int(min(base_timeout * (1 + units), base_timeout * max_multiplier))
+
+
 # LLM: Retries reuse the identical bounded prompt/schema; switching provider/model cannot change
 # the host output contract or evidence checks.
 # 函数用途: 调用后台模型并返回严格解析的 CuratorExtraction。
@@ -49,13 +63,14 @@ def extract_with_retries(
         raise ValueError("CURATOR_INPUT_BUDGET_EXCEEDED")
     last_error: BaseException | None = None
     schema = curator_response_schema()
+    timeout_seconds = adaptive_timeout_seconds(config.timeout_seconds, len(prompt))
     for _attempt in range(config.max_retries + 1):
         try:
             response = call_backend_with_timeout(
                 backend,
                 prompt=prompt,
                 response_schema=schema,
-                timeout_seconds=config.timeout_seconds,
+                timeout_seconds=timeout_seconds,
             )
             return parse_curator_extraction(str(getattr(response, "text", "") or ""))
         except Exception as exc:

@@ -88,7 +88,9 @@ class _HangingBackend:
 
     def generate_structured(self, prompt: str, *, response_schema: dict[str, object]):
         del prompt, response_schema
-        time.sleep(3)
+        # 必须长于 adaptive 超时上限(base*8):测试输入 prompt 超 2000 字符会触发
+        # 超时自适应放大,若 sleep 太短会先等到 AssertionError 而非超时。
+        time.sleep(10)
         raise AssertionError("timed-out daemon result must never be committed")
 
 
