@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import select
 import socket
 import sys
 import threading
@@ -46,6 +45,9 @@ def _parse_args() -> argparse.Namespace:
                         help="隧道内转发字节阈值(TLS 密文计数, 8KB ≈ 已过握手+首帧)")
     parser.add_argument("--inject-after-seconds", type=float, default=3.0,
                         help="连接存活秒数阈值, 双条件都要满足才注入")
+    parser.add_argument("--inject-once", action="store_true",
+                        help="全局只注入一次: 首个满足条件的隧道注入后, 后续所有"
+                             "隧道不再注入(语义 = 单次断流注入, 观察客户端恢复)")
     parser.add_argument("--log", default="/tmp/r1-02-proxy.log")
     parser.add_argument("--upstream-addr", default="",
                         help="固定上游 host:port(缺省直连 CONNECT 目标)")
@@ -71,71 +73,98 @@ class _Log:
 
 def _relay_tunnel(client: socket.socket, upstream: socket.socket,
                   log: _Log, args: argparse.Namespace, conn_id: str,
-                  target: str, initial: bytes = b"") -> None:
+                  target: str, initial: bytes = b"",
+                  server: "_Server | None" = None) -> None:
     """双向转发; 上游->客户端方向计数, 达标后按 mode 断客户端连接。
+
+    实现为每方向一个独立泵线程 + 阻塞 sendall。旧单线程 select 实现在
+    非阻塞 socket 上 sendall 大数据块遇发送缓冲满时抛 BlockingIOError
+    (OSError 子类), 被误当对端关闭 -> 大请求/大响应半路断连
+    (RemoteDisconnected)。阻塞 sendall 由内核排队, 永不丢数据、永不误关。
 
     initial = CONNECT 请求之后 rfile 缓冲里已有的隧道首包(TLS ClientHello
     常与 CONNECT 请求同 TCP 段, 被 readline 缓冲走), 先转给上游。
     """
-    client.setblocking(False)
-    upstream.setblocking(False)
-    forwarded = 0
-    injected = False
-    opened_at = time.monotonic()
-    last_activity = opened_at
-    try:
-        if initial:
+    client.settimeout(1.0)
+    upstream.settimeout(1.0)
+    state: dict = {
+        "forwarded": 0,        # 上游->客户端累计字节(注入判据)
+        "injected": False,
+        "opened_at": time.monotonic(),
+        "last_activity": time.monotonic(),
+        "stop": threading.Event(),
+    }
+
+    def _inject_now(force: bool) -> bool:
+        """当前隧道是否应注入; --inject-once 下全局已注入则不再注入。"""
+        if state["injected"]:
+            return False
+        if args.inject_once and server is not None and server.inject_used:
+            return False
+        if not _should_inject(args, target, state["forwarded"],
+                              time.monotonic() - state["opened_at"], force=force):
+            return False
+        _do_inject(client, upstream, log, args, conn_id, target,
+                   state["forwarded"], time.monotonic() - state["opened_at"])
+        state["injected"] = True
+        if args.inject_once and server is not None:
+            server.mark_injected()
+        return True
+
+    def _pump(src: socket.socket, dst: socket.socket, toward_client: bool) -> None:
+        while not state["stop"].is_set():
             try:
-                upstream.sendall(initial)
+                data = src.recv(65536)
+            except socket.timeout:
+                # 1s 读超时仅用于空闲检测; 双向都空闲超 _IDLE_EXIT_SECONDS 则退出
+                if time.monotonic() - state["last_activity"] > _IDLE_EXIT_SECONDS:
+                    log.write({"type": "idle_exit", "conn": conn_id, "target": target})
+                    state["stop"].set()
+                continue
             except OSError:
                 return
-        while True:
-            readable, _, _ = select.select([client, upstream], [], [], 1.0)
-            if not readable:
-                if time.monotonic() - last_activity > _IDLE_EXIT_SECONDS:
-                    log.write({"type": "idle_exit", "conn": conn_id, "target": target})
+            if not data:
+                # EOF 前最后一次注入机会: 单批小响应场景下中间检查点
+                # 可能从未满足(字节/时间条件), 上游已结束 = 不再有数据
+                if toward_client and _inject_now(force=True):
+                    state["stop"].set()
                     return
-                continue
-            for sock in readable:
-                if sock is upstream:
-                    data = upstream.recv(65536)
-                    if not data:
-                        # EOF 前最后一次注入机会: 单批小响应场景下中间检查点
-                        # 可能从未满足(字节/时间条件), 上游已结束 = 不再有数据
-                        if not injected and _should_inject(args, target, forwarded,
-                                                           time.monotonic() - opened_at,
-                                                           force=True):
-                            _do_inject(client, upstream, log, args, conn_id, target,
-                                       forwarded, time.monotonic() - opened_at)
-                        return
-                    last_activity = time.monotonic()
-                    forwarded += len(data)
-                    try:
-                        client.sendall(data)
-                    except OSError:
-                        return
-                    if not injected and _should_inject(args, target, forwarded,
-                                                       time.monotonic() - opened_at):
-                        _do_inject(client, upstream, log, args, conn_id, target,
-                                   forwarded, time.monotonic() - opened_at)
-                        return
-                elif sock is client:
-                    data = client.recv(65536)
-                    if not data:
-                        return
-                    last_activity = time.monotonic()
-                    try:
-                        upstream.sendall(data)
-                    except OSError:
-                        return
-    except OSError:
-        return
-    finally:
-        for s in (client, upstream):
+                try:
+                    dst.shutdown(socket.SHUT_WR)
+                except OSError:
+                    pass
+                return
+            state["last_activity"] = time.monotonic()
+            if toward_client:
+                state["forwarded"] += len(data)
+                if _inject_now(force=False):
+                    # 注入: 这批数据已完整送达, 再按模式断客户端连接
+                    state["stop"].set()
+                    return
             try:
-                s.close()
+                dst.sendall(data)
             except OSError:
-                pass
+                return
+
+    if initial:
+        try:
+            upstream.sendall(initial)
+        except OSError:
+            return
+    pumps = [
+        threading.Thread(target=_pump, args=(client, upstream, False), daemon=True),
+        threading.Thread(target=_pump, args=(upstream, client, True), daemon=True),
+    ]
+    for t in pumps:
+        t.start()
+    for t in pumps:
+        # 阻塞 sendall 卡死场景(对端不读)由 join 超时兜底, close 打断后线程退出
+        t.join(timeout=5)
+    for s in (client, upstream):
+        try:
+            s.close()
+        except OSError:
+            pass
 
 
 def _do_inject(client: socket.socket, upstream: socket.socket,
@@ -226,7 +255,7 @@ class _Handler(BaseHTTPRequestHandler):
         # 本线程内阻塞转发: handler 不返回, 避免 finish()/下一轮读请求竞争 socket
         self.close_connection = True
         _relay_tunnel(self.connection, upstream, log, args, conn_id, target,
-                      initial=pending)
+                      initial=pending, server=self.server)  # type: ignore[arg-type]
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/health":
@@ -257,6 +286,12 @@ class _Server(ThreadingHTTPServer):
         super().__init__(addr, handler)
         self.log = log  # type: ignore[attr-defined]
         self.args = args  # type: ignore[attr-defined]
+        self.inject_used = False
+        self._inject_lock = threading.Lock()
+
+    def mark_injected(self) -> None:
+        with self._inject_lock:
+            self.inject_used = True
 
 
 def _main() -> int:
