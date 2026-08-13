@@ -843,16 +843,32 @@ def _iter_sse_data_lines(
     timeout: int,
     url: str,
     on_data_line,
+    wall_deadline: float | None = None,
 ) -> Iterator[str]:
     idle_deadline = _stream_deadline(timeout)
+    # 门槛3: 总墙钟硬顶(=effective 值, 调用方未显式注入时按同一 timeout 起算)。
+    # data 行只重置 idle_deadline 不动 wall_deadline——持续 data 续命下,
+    # 墙钟预算是唯一能掐断流的总时长硬顶(修掉「有 data 就永远等」的窗口)。
+    if wall_deadline is None:
+        wall_deadline = time.monotonic() + max(1, int(timeout or 0))
     for raw_line in response:
         if _provider_is_interrupted():
             raise InterruptedError("模型接口流式请求已被用户停止")
+        # idle 检查在前保持门槛2 语义(保活空行=stream_idle), wall 在后只拦
+        # 「data 持续续命超总预算」——同刻到期时 idle 赢, 不回归既有锁定。
         if time.monotonic() > idle_deadline:
             raise ProviderTimeoutError(
                 "模型接口流式响应空闲超时: "
                 f"request_timeout={timeout}s url={url}",
                 stage="stream_idle",
+            )
+        if time.monotonic() > wall_deadline:
+            raise ProviderTimeoutError(
+                "模型接口流式响应总墙钟超时: "
+                f"request_timeout={timeout}s url={url}",
+                # 门槛3: transport 总墙钟预算耗尽与墙钟守卫线程同族(总时长
+                # 超预算), 均为真实抛出路径, 按 wall_clock 落账。
+                stage="wall_clock",
             )
         # provider 流里可能混入坏字节/非 UTF-8 切片(分块边界把多字节字符截断),
         # 用 errors="replace" 兜底,不让单行解码异常崩掉整条流式响应。

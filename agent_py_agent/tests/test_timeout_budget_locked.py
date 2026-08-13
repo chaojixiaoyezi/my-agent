@@ -7,11 +7,14 @@ from __future__ import annotations
   2. native 协议下记账口径低估 IR(messages 不计入 estimate_tokens(prompt))
   3. 首 token 预算的 min clamp 与 effective=max(base, dynamic) 公式
   4. stream 后端 transport_owns_timeout=True -> 墙钟守卫不参与(掐断者是 idle 语义)
-  5. SSE idle: 无数据行约 request.timeout 秒掐断; 周期 data 行重置 deadline
+  5. SSE idle: 无数据行约 request.timeout 秒掐断; 周期 data 行重置 idle deadline
+     但总墙钟预算(wall_deadline, 门槛3)不被 data 重置, 超预算即掐(wall_clock)
   6. ProviderTimeoutError 在 ledger 记为 timed_out + stage(stream_idle/wall_clock/provider_declared)
-  7. ModelCallTimeoutParams 只带 call_id/timeout_seconds/timeout_stage/elapsed_seconds(无原始时间戳)
+  7. ModelCallTimeoutParams 只带 call_id/timeout_seconds/timeout_stage/elapsed_seconds/idle_silence_seconds(无原始时间戳)
 
 门槛2 更新 2/3: 原「无 elapsed 证据」锁定改为「参数层只暴露 elapsed, 不暴露时间戳」。
+门槛3 更新 5: 原「data 无限续命」锁定升级为「data 续命 idle + 总墙钟硬顶」——语义
+转变由先固化再改预告, 本文件按新语义变红后同步升级(见 test_sse_periodic_data_*)。
 
 B 阶段修恢复/证据字段时, 本文件 6/7 将按预期变红 -> 正是「先固化再改」的意义。
 """
@@ -236,6 +239,9 @@ def test_non_stream_backend_keeps_wall_guard() -> None:
 
 class _SSEHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
+        # 消费请求体: 不读则 handler 结束时连接上有未读数据,
+        # close 时发 RST 而非 FIN(客户端读到 ConnectionResetError 假噪声)
+        self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
         if self.path == "/hang":
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -301,11 +307,33 @@ def test_sse_silence_cut_off_after_request_timeout(sse_server: ThreadingHTTPServ
 
 
 def test_sse_periodic_data_resets_idle_deadline(sse_server: ThreadingHTTPServer) -> None:
-    """周期 data 行重置 deadline: 超 timeout 时长仍正常收完, 不掐断。"""
+    """周期 data 行只重置 idle deadline: 总墙钟预算(wall_deadline)不被重置。
+
+    门槛3 前锁定语义为「data 无限续命」; 门槛3 升级为「data 续命 idle,
+    但总墙钟预算到顶仍掐断(持续 data 超总预算)」——/live 总时长 1.5s
+    > timeout=1 的 wall 预算, 掐断为 wall_clock。idle 重置的正向行为由
+    test_sse_periodic_data_within_wall_budget_completes 保留(timeout=5)。
+    """
     elapsed, lines, exc = _call_stream(sse_server, "/live", timeout=1)
+    assert lines >= 1  # 已收多行(每 0.3s 一行), 后因总墙钟预算耗尽被掐
+    assert isinstance(exc, ProviderTimeoutError)
+    assert exc.stage == "wall_clock"  # 门槛3: data 续命下唯一能掐的是总墙钟
+    assert elapsed < 3.0  # 掐断时间≈timeout=1(墙钟预算), 非 server 自然结束
+    assert elapsed >= 0.8
+
+
+def test_sse_periodic_data_within_wall_budget_completes(
+    sse_server: ThreadingHTTPServer,
+) -> None:
+    """周期 data 行重置 idle deadline: 总时长(<wall 预算)内正常收完不掐断。
+
+    保留门槛2 锁定语义的正向面: 只要总墙钟预算未耗尽, data 续命使流
+    不被 idle 掐断(总时长 1.5s 仍 > 单次 data 间隔, 靠 idle 续命收完)。
+    """
+    elapsed, lines, exc = _call_stream(sse_server, "/live", timeout=5)
     assert lines == 6
     assert exc is None
-    assert elapsed >= 1.2  # 总时长超过单个 timeout, 靠心跳续命
+    assert elapsed >= 1.2  # 总时长超过单次 timeout 语义(0.3s 间隔), 靠 idle 续命
 
 
 # ---------------------------------------------------------------- 4. ledger 形态

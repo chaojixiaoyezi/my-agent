@@ -224,6 +224,9 @@ def test_idle_silence_zero_when_record_not_in_ledger() -> None:
 
 class _SSEHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
+        # 消费请求体: 不读则 handler 结束时连接上有未读数据,
+        # close 时发 RST 而非 FIN(客户端读到 ConnectionResetError 假噪声)
+        self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
         if self.path == "/noreply":
             # 连接建立但从不发 HTTP 响应头: 客户端阻塞在读头, read 超时
             # -> provider 网络层超时(provider_declared)。watchdog 尚未启动
