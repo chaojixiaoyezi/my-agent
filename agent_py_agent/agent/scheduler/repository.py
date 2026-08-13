@@ -9,6 +9,7 @@ the durable pre-admission pattern used by 通道运行时 and 长期助手.
 
 import hashlib
 import json
+import os
 import time
 import uuid
 from collections.abc import Iterator
@@ -45,7 +46,9 @@ _JOB_SCHEMA = "scheduler_job.v1"
 _RUN_SCHEMA = "scheduler_run.v1"
 _JOB_STATUSES = frozenset({"active", "paused", "deleted"})
 _ACTIVE_RUN_STATUSES = frozenset({"queued", "claimed", "running"})
-_TERMINAL_RUN_STATUSES = frozenset({"done", "failed", "cancelled", "skipped"})
+# P0-4(HANDOFF 文档线): unknown = 崩溃执行终态(进程死亡被证实后归类),
+# 与 done/failed/cancelled/skipped 并列, 终态不可改写。
+_TERMINAL_RUN_STATUSES = frozenset({"done", "failed", "cancelled", "skipped", "unknown"})
 _MAX_NAME_CHARS = 160
 _MAX_PROMPT_CHARS = 32_000
 _MAX_SKILL_REFS = 32
@@ -379,6 +382,8 @@ class _SchedulerRunOperations:
                 "claim_id": claim_id,
                 "claimed_at": current,
                 "claim_expires_at": current + max(1, int(lease_seconds or 1)),
+                # P0-4: 记录持有 claim 的进程身份(崩溃恢复判活的死亡证明来源)
+                "runner_pid": os.getpid(),
                 "updated_at": current,
             }
             store["runs"][run_id] = claimed
@@ -618,6 +623,42 @@ class _SchedulerStoreSupport:
             "corrupt": bool(job_errors or run_errors),
         }
 
+    def recover_interrupted_executions(
+        self,
+        *,
+        now: float | None = None,
+    ) -> list[str]:
+        """P0-4(HANDOFF 文档线): 崩溃 run 按进程死亡证明归 unknown 终态。
+
+        仅当租约已过期(claim_expires_at <= now)且 runner 进程被证实死亡
+        (pid 探活失败)才置 unknown; 进程仍存活(心跳慢/时钟偏差)保持原态
+        (fail-closed 不猜)。返回本次归 unknown 的 run_id 列表。
+        """
+        current = _now(now)
+        recovered: list[str] = []
+        with self._mutation_scope() as (store, admission):
+            for run_id, raw in list(store["runs"].items()):
+                run, _error = self._parse_run(raw)
+                if run is None:
+                    continue
+                if run["status"] not in {"claimed", "running"}:
+                    continue
+                if float(run.get("claim_expires_at") or 0.0) > current:
+                    continue  # 租约未过期, 不是崩溃候选
+                pid = int(run.get("runner_pid") or 0)
+                if pid > 0 and _process_alive(pid):
+                    continue  # 进程存活: 未证实死亡, fail-closed 保持原态
+                store["runs"][run_id] = {
+                    **run,
+                    "status": "unknown",
+                    "ended_at": current,
+                    "updated_at": current,
+                }
+                recovered.append(run_id)
+            if recovered:
+                self._write_store_unlocked(store, admission)
+        return recovered
+
     def _valid_runs(self, store: dict[str, Any]) -> tuple[list[dict[str, object]], list[str]]:
         """逐条解析 runs: 坏记录跳过并收集错误(与 _valid_jobs 同容错模式)。"""
         runs: list[dict[str, object]] = []
@@ -811,6 +852,26 @@ class SchedulerRepository(
         )
         self.due_index = due_index
         self.root.mkdir(parents=True, exist_ok=True)
+
+
+def _process_alive(pid: int) -> bool:
+    """进程存活探活(os.kill 信号 0, P0-4 崩溃恢复的死亡证明)。
+
+    存在(含 PermissionError=有进程但无权)算存活; ProcessLookupError=查无
+    此进程(已死/被回收); 其它 OSError 按不可证实处理(不猜)。pid<=0 视为
+    不可证实。
+    """
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
 
 
 def _new_job_payload(
