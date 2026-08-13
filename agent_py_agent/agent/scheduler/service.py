@@ -2,11 +2,14 @@ from __future__ import annotations
 
 """Bridge durable owner schedules into the existing same-thread wake queue."""
 
+import logging
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from .repository import (
     SchedulerConflictError,
@@ -64,6 +67,11 @@ class SchedulerRunHeartbeat:
             thread.join(timeout=min(2.0, self.interval_seconds + 0.5))
 
     def _loop(self) -> None:
+        # P0-2(HANDOFF 文档线): 瞬时 DB 错误(连接抖动/锁冲突)不再静默退出守护
+        # 线程——记录结构化日志并继续循环, 指数退避防紧循环(上限 8×interval);
+        # alive=False(租约被回收)仍退出; stop event 在退避 sleep 中也能打断
+        # (用 _stop.wait 做退避, 而非裸 sleep)。
+        consecutive_failures = 0
         while not self._stop.wait(self.interval_seconds):
             try:
                 alive = self.repository.heartbeat_run(
@@ -71,8 +79,23 @@ class SchedulerRunHeartbeat:
                     self.claim.claim_id,
                     lease_seconds=self.lease_seconds,
                 )
-            except Exception:
-                return
+            except Exception as exc:
+                consecutive_failures += 1
+                logger.warning(
+                    "调度心跳续租失败(瞬时错误, 不退出): run_id=%s claim_id=%s "
+                    "failures=%d error=%s",
+                    self.claim.run_id,
+                    self.claim.claim_id,
+                    consecutive_failures,
+                    type(exc).__name__,
+                )
+                backoff = min(
+                    self.interval_seconds * (2 ** min(consecutive_failures, 3)),
+                    self.interval_seconds * 8.0,
+                )
+                self._stop.wait(backoff)  # 退避期间 stop 可打断
+                continue
+            consecutive_failures = 0
             if not alive:
                 return
 
