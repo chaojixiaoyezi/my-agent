@@ -132,7 +132,10 @@ def test_ledger_records_timeout_stage_and_duration() -> None:
         ModelCallTimeoutParams(
             call_id="call-timeout",
             timeout_seconds=25.0,
-            timeout_stage="first_token",
+            # 门槛2 终审边界②: ledger 写入层 stage 合同封闭后, 只能写四值
+            # (stream_idle/wall_clock/provider_declared/provider_wall);
+            # "first_token" 不是超时 stage, 由新的 fail-closed 校验拒绝。
+            timeout_stage="wall_clock",
         )
     )
 
@@ -141,7 +144,7 @@ def test_ledger_records_timeout_stage_and_duration() -> None:
     assert timed_out.status == "timed_out"
     assert timed_out.events == ("started", "timeout")
     assert timed_out.timeout_seconds == 25.0
-    assert timed_out.timeout_stage == "first_token"
+    assert timed_out.timeout_stage == "wall_clock"
     assert timed_out.total_latency_seconds == 30.0
 
 

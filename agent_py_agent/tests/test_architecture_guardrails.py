@@ -27,6 +27,10 @@ BUNDLE_VARARG_FUNCTION_EXEMPTIONS = {
         "HTTPRequestHandler-style logging override accepts formatter arguments; "
         "not a product service parameter entry point."
     ),
+    "agent_py_agent/scripts/b_acceptance/timeout_budget_evidence.py:log_message": (
+        "HTTPRequestHandler-style logging override accepts formatter arguments; "
+        "门槛预算取证脚本(超时预算证据采集), not a product service parameter entry point."
+    ),
     "scripts/fake_provider_outage.py:log_message": (
         "HTTPRequestHandler-style logging override accepts formatter arguments; "
         "drill harness script, not a product service parameter entry point."

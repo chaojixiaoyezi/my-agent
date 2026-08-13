@@ -81,7 +81,9 @@ def test_llm_activation_timeout_budget_uses_probe_ledger(tmp_path: Path) -> None
 
     budget = build_model_timeout_budget(tmp_path / "timeout")
 
-    assert budget["estimate"]["source"] == "probe_5k_10k"
+    # source 带滑窗计数后缀(probe_5k_10k_n2, 门槛4 probe_min_samples=2 后
+    # 每点 2 条样本); 前缀证明 probe 统计真实生效(非 fixed-rate 回退)。
+    assert budget["estimate"]["source"].startswith("probe_5k_10k")
     assert budget["estimate"]["timeout_seconds"] > 0
     assert budget["estimate"]["cache_suspected"] is False
     assert budget["ledger_ref"].endswith("model_call_ledger.json")

@@ -30,7 +30,10 @@ _CLI_RUN_USER_ID = "local-agent"
 class CliRunConversationPersistenceError(RuntimeError):
     """The one-shot CLI input could not enter its authoritative transcript."""
 
-    error_code = "CLI_RUN_CONVERSATION_PERSISTENCE_UNAVAILABLE"
+    # 复用既有 taxonomy 同语义 contract(CONVERSATION_PERSISTENCE_UNAVAILABLE,
+    # category=state/retryable/「不执行模型或副作用」hint 与 cli_run 行为吻合),
+    # 不重复注册带 CLI_RUN_ 前缀的变体 code(error_code 精确匹配不做前缀归一)。
+    error_code = "CONVERSATION_PERSISTENCE_UNAVAILABLE"
 
 
 # LLM: Only cli_run enters here; it writes one owner-scoped user message before execution and

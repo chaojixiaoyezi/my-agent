@@ -371,3 +371,119 @@ def test_advancing_clock_idle_and_wall_expire_together(monkeypatch) -> None:
             )
         )
     assert err.value.stage == "stream_idle"  # 同刻到期 idle 优先
+
+
+# ---------------------------------------------------------------- 门槛2 终审边界①(seq1622-1): watchdog/parser 全链路同一 cutoff
+
+class _AbortGuard:
+    def __init__(self) -> None:
+        self.aborted: list[bool] = []
+
+    def abort(self) -> None:
+        self.aborted.append(True)
+
+
+def test_watchdog_uses_external_idle_deadline(monkeypatch) -> None:
+    """边界①: watchdog 初始 deadline 由外部传入, 不再构造时独立 time.monotonic() 起算。"""
+    import agent_py_agent.agent.backends.gateway_helpers as gh
+
+    guard = _AbortGuard()
+    times = iter([100.0])
+
+    def fake_monotonic() -> float:
+        return next(times)
+
+    monkeypatch.setattr(gh.time, "monotonic", fake_monotonic)
+    w = gh._StreamIdleWatchdog(guard, 5, idle_deadline=105.0)
+    # 时钟推进到 106.0(超外部 deadline 105.0) -> _check 到期 abort
+    monkeypatch.setattr(gh.time, "monotonic", lambda: 106.0)
+    w._check()
+    assert w.timed_out is True
+    assert guard.aborted == [True]
+
+
+def test_watchdog_touch_rolls_deadline_with_parser_offset(monkeypatch) -> None:
+    """边界①: touch 滚动 deadline 用与 parser 同一公式(now + _stream_deadline_offset)。"""
+    import agent_py_agent.agent.backends.gateway_helpers as gh
+
+    guard = _AbortGuard()
+    times = iter([100.0])
+
+    def fake_monotonic() -> float:
+        return next(times)
+
+    monkeypatch.setattr(gh.time, "monotonic", fake_monotonic)
+    w = gh._StreamIdleWatchdog(guard, 5, idle_deadline=105.0)
+    # touch 在 102.0: deadline 滚动到 102 + 5 = 107.0
+    monkeypatch.setattr(gh.time, "monotonic", lambda: 102.0)
+    w.touch()
+    monkeypatch.setattr(gh.time, "monotonic", lambda: 106.0)  # 未到 107.0
+    w._check()
+    assert w.timed_out is False
+    monkeypatch.setattr(gh.time, "monotonic", lambda: 107.5)  # 超滚动后 deadline
+    w._check()
+    assert w.timed_out is True
+
+
+def test_watchdog_shares_offset_floor_with_parser() -> None:
+    """边界①: <1s 预算 floor 由同一 _stream_deadline_offset 合同承载(watchdog/parser 无分叉)。"""
+    import agent_py_agent.agent.backends.gateway_helpers as gh
+
+    w = gh._StreamIdleWatchdog(_AbortGuard(), 0.5, idle_deadline=1.0)
+    assert w._timeout == pytest.approx(1.0)  # 同一 offset 公式, 非独立 max(1.0)
+    assert gh._stream_deadline_offset(0.5) == pytest.approx(1.0)
+    assert w._timeout == gh._stream_deadline_offset(0.5)
+
+
+def test_watchdog_and_parser_share_same_deadline_value(
+    sse_server: ThreadingHTTPServer, monkeypatch
+) -> None:
+    """边界① 全链路证明: watchdog 初始 idle_deadline == parser wall_deadline(同一浮点值)。
+
+    替换真实 watchdog 为捕获构造参数的探针 + 包装 _iter_sse_data_lines 捕获
+    wall_deadline——两个捕获值必须相等, 证明 _stream_with_watchdog 一次 start
+    派生后同时传入两条路径(不再是两条独立起算)。
+    """
+    import agent_py_agent.agent.backends.gateway_helpers as gh
+
+    captured: dict[str, object] = {}
+
+    class _ProbeWatchdog:
+        def __init__(self, guard: object, timeout: int | float, *, idle_deadline: float) -> None:
+            captured["watchdog_deadline"] = idle_deadline
+            self._timed_out = False
+
+        def start(self) -> None:
+            pass
+
+        def touch(self) -> None:
+            pass
+
+        def cancel(self) -> None:
+            pass
+
+        @property
+        def timed_out(self) -> bool:
+            return self._timed_out
+
+    real_iter = gh._iter_sse_data_lines
+
+    def spy_iter(*args: object, **kwargs: object):
+        captured["parser_wall_deadline"] = kwargs.get("wall_deadline")
+        yield from real_iter(*args, **kwargs)
+
+    monkeypatch.setattr(gh, "_StreamIdleWatchdog", _ProbeWatchdog)
+    monkeypatch.setattr(gh, "_iter_sse_data_lines", spy_iter)
+
+    port = int(sse_server.server_address[1])
+    request = GatewayRequest(
+        api_base=f"http://127.0.0.1:{port}",
+        api_key="test-key",
+        path="/data_finish",
+        payload={"model": "evidence"},
+        headers={},
+        timeout=5,
+    )
+    list(gh._stream_with_watchdog(request))
+    assert captured["watchdog_deadline"] is not None
+    assert captured["parser_wall_deadline"] == captured["watchdog_deadline"]

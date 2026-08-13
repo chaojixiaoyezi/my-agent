@@ -520,6 +520,10 @@ class TestPostStream:
     def test_stream_data_resets_idle_timeout_beyond_total_wall_time(
         self, mock_urlopen, mock_monotonic
     ):
+        # 门槛3 语义: data 行续命 idle_deadline, 但总墙钟预算(request timeout=30)
+        # 不被 data 重置。时钟序列: 第 1 行检查在 20s(预算内, data 续命),
+        # 第 2 行检查在 45s(已超 30s 总预算) -> wall_clock 掐断。
+        # 门槛3 前该断言为 len==2(data 无限续命), 新语义下超预算即掐。
         mock_monotonic.side_effect = [0, 0, 20, 20, 20, 45, 45, 45]
         mock_response = MagicMock()
         mock_response.__iter__ = MagicMock(
@@ -530,8 +534,11 @@ class TestPostStream:
         mock_urlopen.return_value = mock_response
 
         from agent_py_agent.agent.backends.gateway_helpers import post_stream
+        from agent_py_agent.agent.backends.errors import ProviderTimeoutError
 
-        assert len(post_stream(_request())) == 2
+        with pytest.raises(ProviderTimeoutError) as err:
+            post_stream(_request())
+        assert err.value.stage == "wall_clock"
 
 
 class TestPostStreamIter:

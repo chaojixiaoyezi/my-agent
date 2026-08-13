@@ -351,12 +351,17 @@ def test_d_discovery_still_finds_running_run(tmp_path, repo):
     assert task["task_id"] in unfinished_task_ids(tmp_path)
 
 
-def test_d_discovery_records_status_conflict_event(tmp_path, repo):  # RED
-    """stale 冲突必须留痕：runtime_events 追加 status_conflict 诊断事件。"""
+def test_d_discovery_no_status_conflict_for_done_stale_state(tmp_path, repo):
+    """done 终态 + state.json 残留 → 正常排除, 不写 status_conflict。
+
+    R1-03 收窄(bd27776a)后 status_conflict 只覆盖「投影失败」类真冲突
+    (create_attempt 挂未知状态 run 等, 见 test_a 断言 len==1)——done 轮间
+    形态是终态权威正常排除, 不洪泛诊断事件(修复前每秒 2 条无限增长)。
+    """
     task, _run = _make_owner_home_with_stale_state(tmp_path, repo, run_status="done")
     unfinished_task_ids(tmp_path)
-    assert _events_of_type(repo, "status_conflict"), \
-        f"task={task['task_id']} 应写 status_conflict 事件"
+    assert not _events_of_type(repo, "status_conflict"), \
+        f"task={task['task_id']} done 轮间形态不应写 status_conflict"
 
 
 # =================================================================== E. 驱动链 lease 感知

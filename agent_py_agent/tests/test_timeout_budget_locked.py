@@ -416,3 +416,56 @@ def test_json_roundtrip_of_locked_evidence(tmp_path: Path) -> None:
         / "scripts" / "b_acceptance" / "timeout_budget_evidence.py"
     )
     assert script.exists()
+
+
+# ---------------------------------------------------------------- 门槛2 终审边界②(seq1622-2): ledger 写入层 stage 封闭
+
+def test_ledger_timeout_rejects_unknown_stage() -> None:
+    """边界②: ledger.timeout 未知 stage fail-closed(与异常构造入口同一合同)。
+
+    修复前(steward seq1622-2): 封闭校验只在 ProviderTimeoutError 构造入口,
+    ModelCallLedger.timeout 可直接写入任意 stage——账本写入入口也必须封闭,
+    否则旁路调用可污染账本语义。
+    """
+    ledger = ModelCallLedger()
+    ledger.started(
+        ModelCallStartedParams(
+            call_id="c-unknown", backend="test", model="m", input_tokens=1
+        )
+    )
+    with pytest.raises(ValueError):
+        ledger.timeout(
+            ModelCallTimeoutParams(
+                call_id="c-unknown", timeout_seconds=1.0, timeout_stage="first_token"
+            )
+        )
+    # 拒绝后原 record 不被污染(仍 started, 未写入超时)
+    record = ledger.records()[0]
+    assert record.status == "started"
+    assert record.timeout_stage == ""
+
+
+def test_ledger_timeout_accepts_all_known_stages() -> None:
+    """边界②: 四值(三值+legacy provider_wall)全部可写入, 含 legacy 兼容读取。"""
+    for stage in ("stream_idle", "wall_clock", "provider_declared", "provider_wall"):
+        ledger = ModelCallLedger()
+        ledger.started(
+            ModelCallStartedParams(
+                call_id=f"c-{stage}", backend="test", model="m", input_tokens=1
+            )
+        )
+        record = ledger.timeout(
+            ModelCallTimeoutParams(
+                call_id=f"c-{stage}", timeout_seconds=1.0, timeout_stage=stage
+            )
+        )
+        assert record.status == "timed_out"
+        assert record.timeout_stage == stage
+
+
+def test_stage_contract_single_source_of_truth() -> None:
+    """边界②: 异常构造与账本写入共用同一 TIMEOUT_STAGES 集合(单一事实源)。"""
+    from agent_py_agent.agent.backends.errors import ProviderTimeoutError
+    from agent_py_agent.agent.contracts.model_call_ledger import TIMEOUT_STAGES
+
+    assert ProviderTimeoutError._KNOWN_STAGES is TIMEOUT_STAGES

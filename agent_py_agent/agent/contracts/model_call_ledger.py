@@ -7,6 +7,15 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+# 门槛2 终审边界②(steward seq1622-2): stage 合同单一事实源下沉到账本层。
+# ProviderTimeoutError 构造入口与 ModelCallLedger.timeout 写入入口共用同一
+# 集合——异常生产入口封闭不能只靠异常构造器, 账本写入也必须 fail-closed,
+# 否则旁路调用可写入未登记 stage 污染账本语义。四值 = 三值 + legacy
+# provider_wall(历史兼容读取, 读取端按 wall_clock 族处理)。
+TIMEOUT_STAGES = frozenset(
+    {"stream_idle", "wall_clock", "provider_declared", "provider_wall"}
+)
+
 
 @dataclass(frozen=True)
 class ModelCallLedgerOptions:
@@ -245,6 +254,14 @@ class ModelCallLedger:
             return updated
 
     def timeout(self, params: ModelCallTimeoutParams) -> ModelCallRecord:
+        # 门槛2 终审边界②: 账本写入 stage 封闭——未知 stage 抛 ValueError
+        # (fail-closed), 与 ProviderTimeoutError 构造入口同一合同集合, 防旁路
+        # 调用把未登记 stage 写进账本(legacy 读取语义由 TIMEOUT_STAGES 承载)。
+        if params.timeout_stage not in TIMEOUT_STAGES:
+            raise ValueError(
+                f"未知 timeout_stage: {params.timeout_stage!r} "
+                f"(合法: {sorted(TIMEOUT_STAGES)})"
+            )
         with self._lock:
             record = self._require_record(params.call_id)
             now = float(self.context.now())

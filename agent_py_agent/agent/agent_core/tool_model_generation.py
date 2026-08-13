@@ -476,10 +476,14 @@ def _record_provider_timeout(record: _ProviderTimeoutRecord) -> None:
     _trace_model_failure(record.request, record.exc)
 
 
-def _provider_timeout_idle_silence(ledger: object, call_id: str) -> float:
+def _provider_timeout_idle_silence(ledger: object, call_id: str) -> float | None:
     """最后活动(last_activity_at)到掐断时刻的静默时长（门槛2 第三证据字段），
-    只记秒数不混 token 延迟、不带 URL/prompt/响应内容；record 不在账或
-    ledger 异常时返回 0.0（行为不回归）。"""
+    只记秒数不混 token 延迟、不带 URL/prompt/响应内容。
+
+    门槛2 终审边界③(seq1622-3): record 不在账或 ledger 异常时返回 None 而非
+    0.0——与参数层合同一致(None=缺失/未计算, 数值含 0.0=真实计算), 不把
+    fallback 与「真实零静默」合并(此前 fallback 0.0 会污染账本语义)。
+    """
     try:
         for item in ledger.records():
             if item.call_id == call_id:
@@ -489,7 +493,7 @@ def _provider_timeout_idle_silence(ledger: object, call_id: str) -> float:
                 )
     except Exception:
         pass
-    return 0.0
+    return None
 
 
 def _provider_timeout_elapsed(ledger: object, call_id: str) -> float:

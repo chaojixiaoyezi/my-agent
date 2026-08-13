@@ -222,8 +222,14 @@ def _stream_with_watchdog(request: GatewayRequest) -> Iterator[str]:
             # 门槛3补证(steward seq1533-1): idle/watchdog/wall 共用同一 monotonic
             # cutoff——start 一次起算, wall_deadline 显式传入, idle 初始与其同基准,
             # 不再「watchdog 与 _iter_sse_data_lines 分别起算时间」。
+            # 门槛2 终审边界①(seq1622-1): watchdog 构造不再独立调用
+            # time.monotonic(), 初始 idle deadline 由调用方传入同一 start 派生
+            # 的 wall_deadline——watchdog/parser 全链路同一 cutoff 起点。
             start = time.monotonic()
-            watchdog = _StreamIdleWatchdog(response_guard, request.timeout)
+            wall_deadline = start + _stream_deadline_offset(request.timeout)
+            watchdog = _StreamIdleWatchdog(
+                response_guard, request.timeout, idle_deadline=wall_deadline
+            )
             watchdog.start()
             try:
                 yield from _iter_sse_data_lines(
@@ -231,7 +237,7 @@ def _stream_with_watchdog(request: GatewayRequest) -> Iterator[str]:
                     timeout=request.timeout,
                     url=request.url,
                     on_data_line=watchdog.touch,
-                    wall_deadline=start + _stream_deadline_offset(request.timeout),
+                    wall_deadline=wall_deadline,
                 )
                 if watchdog.timed_out:
                     raise _stream_idle_timeout_error(request)
@@ -257,12 +263,25 @@ def _stream_with_watchdog(request: GatewayRequest) -> Iterator[str]:
 
 
 class _StreamIdleWatchdog:
-    """Close one blocked response only after a full idle interval."""
+    """Close one blocked response only after a full idle interval.
 
-    def __init__(self, response_guard: _GatewayResponseGuard, timeout: int | float) -> None:
+    门槛2 终审边界①(seq1622-1): idle deadline 模型——初始 deadline 由调用方
+    传入(与 parser 的 wall_deadline 同一 start 派生值), data 触达后按与
+    parser 同一 offset 公式(`_stream_deadline_offset`)滚动。watchdog 不再
+    构造时独立调用 time.monotonic() 起算, 与 parser 全链路同一 cutoff 起点;
+    <1s 预算 floor 也由同一 offset 合同承载(parser 侧同 floor, 无分叉)。
+    """
+
+    def __init__(
+        self,
+        response_guard: _GatewayResponseGuard,
+        timeout: int | float,
+        *,
+        idle_deadline: float,
+    ) -> None:
         self._response_guard = response_guard
-        self._timeout = max(1.0, float(timeout or 0))
-        self._last_activity = time.monotonic()
+        self._timeout = _stream_deadline_offset(timeout)
+        self._idle_deadline = idle_deadline
         self._lock = threading.Lock()
         self._timer: threading.Timer | None = None
         self._cancelled = False
@@ -270,12 +289,13 @@ class _StreamIdleWatchdog:
 
     def start(self) -> None:
         with self._lock:
-            self._schedule_locked(self._timeout)
+            self._schedule_locked(self._idle_deadline - time.monotonic())
 
     def touch(self) -> None:
         with self._lock:
             if not self._cancelled:
-                self._last_activity = time.monotonic()
+                # 与 parser 的 idle_deadline 重置同一公式: now + offset
+                self._idle_deadline = time.monotonic() + self._timeout
 
     def cancel(self) -> None:
         with self._lock:
@@ -294,7 +314,7 @@ class _StreamIdleWatchdog:
         with self._lock:
             if self._cancelled:
                 return
-            remaining = self._timeout - (time.monotonic() - self._last_activity)
+            remaining = self._idle_deadline - time.monotonic()
             if remaining > 0:
                 self._schedule_locked(remaining)
                 return

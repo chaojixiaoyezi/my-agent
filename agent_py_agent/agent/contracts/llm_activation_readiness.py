@@ -121,8 +121,14 @@ def build_model_timeout_budget(workspace: Path) -> dict[str, object]:
     root.mkdir(parents=True, exist_ok=True)
     clock = _FakeClock()
     ledger = ModelCallLedger(context=ModelCallLedgerContext(now=clock.now))
-    _record_probe(ledger, clock, ProbeSample("probe-5k", 5000, 13.0))
-    _record_probe(ledger, clock, ProbeSample("probe-10k", 10000, 23.0))
+    # 门槛4(50936ea7) probe_min_samples 默认=2: 每 token 点必须记 >=2 条
+    # 样本, 否则 _estimate_from_required_probes 最小样本防线回退 fixed-rate
+    # (1 条样本=单样本噪声主导, 正是该防线要挡的)。每点 2 条: 5k/10k 各
+    # 两次采样(不同 latency), 窗口内 2 条 -> probe_5k_10k_n2 生效。
+    _record_probe(ledger, clock, ProbeSample("probe-5k-a", 5000, 12.0))
+    _record_probe(ledger, clock, ProbeSample("probe-5k-b", 5000, 13.0))
+    _record_probe(ledger, clock, ProbeSample("probe-10k-a", 10000, 22.0))
+    _record_probe(ledger, clock, ProbeSample("probe-10k-b", 10000, 23.0))
     estimate = estimate_first_token_timeout(
         FirstTokenTimeoutParams(
             input_tokens=15000,
@@ -150,7 +156,9 @@ def build_model_timeout_budget(workspace: Path) -> dict[str, object]:
 def timeout_budget_issues(budget: dict[str, object]) -> list[str]:
     estimate = budget.get("estimate") if isinstance(budget.get("estimate"), dict) else {}
     issues: list[str] = []
-    if estimate.get("source") != "probe_5k_10k":
+    # source 实际格式带滑窗计数后缀(probe_5k_10k_n2, 门槛4), 前缀匹配
+    # 判 probe 生效——精确匹配会把带 n 计数的真实 probe 误报缺失。
+    if not str(estimate.get("source") or "").startswith("probe_5k_10k"):
         issues.append("MODEL_TIMEOUT_PROBE_SOURCE_MISSING")
     if not isinstance(estimate.get("timeout_seconds"), (int, float)) or float(estimate["timeout_seconds"]) <= 0:
         issues.append("MODEL_TIMEOUT_SECONDS_INVALID")

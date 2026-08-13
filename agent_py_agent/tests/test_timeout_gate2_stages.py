@@ -214,10 +214,14 @@ def test_idle_silence_less_than_elapsed_after_activity() -> None:
     assert record.elapsed_seconds == pytest.approx(12.5)
 
 
-def test_idle_silence_zero_when_record_not_in_ledger() -> None:
-    """call_id 不在账 -> 0.0 不抛(与 elapsed 同兜底)。"""
+def test_idle_silence_none_when_record_not_in_ledger() -> None:
+    """call_id 不在账 -> None 不抛(缺失=未计算, 与参数层 None 合同一致)。
+
+    门槛2 终审边界③(seq1622-3): fallback 不再用 0.0——「缺失/回退」与
+    「真实零静默」结构化可辨识; ghost-call 缺失为 None, 真实零静默为 0.0。
+    """
     ledger = _clock_ledger(after=None)
-    assert _provider_timeout_idle_silence(ledger, "ghost-call") == 0.0
+    assert _provider_timeout_idle_silence(ledger, "ghost-call") is None
 
 
 # ---------------------------------------------------------------- C. 生产打标点行为测

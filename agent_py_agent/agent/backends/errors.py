@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..contracts.model_call_ledger import TIMEOUT_STAGES
+
 
 class ProviderRecoverableError(RuntimeError):
     """Base class for model-provider failures that can be retried or resumed."""
@@ -19,9 +21,9 @@ class ProviderTimeoutError(ProviderRecoverableError):
     # 门槛2 终审补证(seq1613b): stage 合同封闭——合法值集合三值 + legacy
     # provider_wall; 未知值构造即抛 ValueError(fail-closed), 防新路径写入
     # 未登记 stage 污染账本语义。
-    _KNOWN_STAGES = frozenset(
-        {"stream_idle", "wall_clock", "provider_declared", "provider_wall"}
-    )
+    # 终审边界②(seq1622-2): 集合引用账本层单一事实源 TIMEOUT_STAGES, 异常
+    # 生产入口与账本写入入口共用同一合同, 不再各自维护。
+    _KNOWN_STAGES = TIMEOUT_STAGES
 
     def __init__(self, message: str, *, stage: str = "provider_wall"):
         if stage not in self._KNOWN_STAGES:
