@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from agent_py_agent.agent.local_storage import LocalStore
+from agent_py_agent.agent.task_registry.registry import _FINAL_TASK_STATUSES
 
 
 def _reg(tmp_path):
@@ -85,3 +86,79 @@ def test_register_task_new_task_normal(tmp_path) -> None:
     reg = _reg(tmp_path)
     reg.register_task("p0-4", status="pending", goal="g")
     assert reg.lookup_task("p0-4")["status"] == "pending"
+
+
+# ---------------------------------------------------------------- P0-1 收口(seq1562): 原子条件 UPSERT 交错测试
+# 新实现无「先 SELECT 再 UPDATE」步骤——单条 UPSERT 在 SQLite 中天然原子,
+# TOCTOU 窗口不存在。下面两条真实 SQLite 连接验证: 已提交终态对「迟到
+# UPSERT 非终态」免疫(WHERE 拒绝), 与连接交错顺序无关。
+
+def _terminal_marks() -> str:
+    return ",".join("?" for _ in sorted(_FINAL_TASK_STATUSES))
+
+
+def test_upsert_atomic_rejects_late_write_over_terminal(tmp_path) -> None:
+    """连接 B 已提交终态后, 连接 A 迟到 UPSERT 非终态被 WHERE 拒绝。"""
+    import sqlite3
+
+    db_path = tmp_path / "interleave.db"
+    conn_a = sqlite3.connect(db_path)
+    conn_b = sqlite3.connect(db_path)
+    conn_a.execute(
+        """CREATE TABLE task_registry (
+            task_id TEXT PRIMARY KEY, session_id TEXT, user_id TEXT,
+            status TEXT, goal TEXT, created_at REAL, updated_at REAL)"""
+    )
+    conn_a.execute(
+        "INSERT INTO task_registry VALUES ('t', '', '', 'running', 'g', 1, 1)"
+    )
+    conn_a.commit()
+
+    conn_b.execute("UPDATE task_registry SET status='done', updated_at=2 WHERE task_id='t'")
+    conn_b.commit()  # B 连接先提交终态
+
+    marks = _terminal_marks()
+    cursor = conn_a.execute(
+        f"""INSERT INTO task_registry (task_id, session_id, user_id, status, goal, created_at, updated_at)
+            VALUES ('t', '', '', 'running', 'g', 1, 2)
+            ON CONFLICT(task_id) DO UPDATE SET status=excluded.status, updated_at=excluded.updated_at
+            WHERE excluded.status IN ({marks}) OR status NOT IN ({marks})""",
+        (*sorted(_FINAL_TASK_STATUSES), *sorted(_FINAL_TASK_STATUSES)),
+    )
+    conn_a.commit()
+    assert cursor.rowcount == 0  # WHERE 拒绝(当前 done 终态 + 新值 running 非终态)
+    final = conn_b.execute("SELECT status FROM task_registry WHERE task_id='t'").fetchone()
+    assert final[0] == "done"  # 终态未被迟到写覆盖
+
+
+def test_upsert_atomic_rejects_insert_after_late_terminal(tmp_path) -> None:
+    """连接 B 先插入终态后, 连接 A 迟到 UPSERT 非终态被拒绝(不复活)。"""
+    import sqlite3
+
+    db_path = tmp_path / "interleave2.db"
+    conn_a = sqlite3.connect(db_path)
+    conn_b = sqlite3.connect(db_path)
+    conn_a.execute(
+        """CREATE TABLE task_registry (
+            task_id TEXT PRIMARY KEY, session_id TEXT, user_id TEXT,
+            status TEXT, goal TEXT, created_at REAL, updated_at REAL)"""
+    )
+    conn_a.commit()
+
+    conn_b.execute(
+        "INSERT INTO task_registry VALUES ('t', '', '', 'cancelled', 'g', 1, 1)"
+    )
+    conn_b.commit()  # B 先插入终态
+
+    marks = _terminal_marks()
+    cursor = conn_a.execute(
+        f"""INSERT INTO task_registry (task_id, session_id, user_id, status, goal, created_at, updated_at)
+            VALUES ('t', '', '', 'pending', 'g', 1, 2)
+            ON CONFLICT(task_id) DO UPDATE SET status=excluded.status, updated_at=excluded.updated_at
+            WHERE excluded.status IN ({marks}) OR status NOT IN ({marks})""",
+        (*sorted(_FINAL_TASK_STATUSES), *sorted(_FINAL_TASK_STATUSES)),
+    )
+    conn_a.commit()
+    assert cursor.rowcount == 0  # 冲突且 WHERE 拒绝(当前 cancelled 终态)
+    final = conn_b.execute("SELECT status FROM task_registry WHERE task_id='t'").fetchone()
+    assert final[0] == "cancelled"  # 迟到 pending 未复活

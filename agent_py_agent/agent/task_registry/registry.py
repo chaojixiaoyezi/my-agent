@@ -64,25 +64,17 @@ class TaskRegistry:
         now = time.time()
 
         with self._store._connection() as conn:
-            # P0-1(HANDOFF 文档线): 终态任务不可被 register 复活——已存在且为
-            # 终态(done/cancelled/abandoned…)时, 只有新值同为终态才允许(幂等
-            # 终态确认); 新值非终态一律抛错 fail-closed, 与 update_task_status
-            # 的终态守卫同语义, 对齐「状态别名不隐式兼容、终态权威」铁律。
-            row = conn.execute(
-                "SELECT status FROM task_registry WHERE task_id = ?",
-                (values.task_id,),
-            ).fetchone()
-            if (
-                row is not None
-                and row[0] in _FINAL_TASK_STATUSES
-                and values.status not in _FINAL_TASK_STATUSES
-            ):
-                raise ValueError(
-                    f"终态任务不可复活: task_id={values.task_id} "
-                    f"status={row[0]} -> {values.status}"
-                )
-            conn.execute(
-                """
+            # P0-1(HANDOFF 文档线, seq1562 收口): 终态任务不可被 register 复活。
+            # 用同一写事务内的原子条件 UPSERT 替代「先 SELECT 再 UPDATE」(防
+            # TOCTOU——两条连接交错时迟到写不得覆盖已提交终态): ON CONFLICT
+            # DO UPDATE 的 WHERE 只放行「新值同为终态(幂等确认)」或「当前非
+            # 终态」; 其余(当前终态+新值非终态)被 WHERE 拒绝, rowcount=0,
+            # 再以 SELECT 确认存在终态行后抛错 fail-closed, 与
+            # update_task_status 的终态守卫同语义, 对齐终态权威铁律。
+            marks = ",".join("?" for _ in sorted(_FINAL_TASK_STATUSES))
+            terminal = sorted(_FINAL_TASK_STATUSES)
+            cursor = conn.execute(
+                f"""
                 INSERT INTO task_registry (task_id, session_id, user_id, status, goal, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(task_id) DO UPDATE SET
@@ -91,9 +83,30 @@ class TaskRegistry:
                     status=excluded.status,
                     goal=excluded.goal,
                     updated_at=excluded.updated_at
+                WHERE excluded.status IN ({marks}) OR status NOT IN ({marks})
                 """,
-                (values.task_id, values.session_id or "", values.user_id or "", values.status, values.goal, now, now),
+                (
+                    values.task_id,
+                    values.session_id or "",
+                    values.user_id or "",
+                    values.status,
+                    values.goal,
+                    now,
+                    now,
+                    *terminal,
+                    *terminal,
+                ),
             )
+            if cursor.rowcount == 0:
+                row = conn.execute(
+                    "SELECT status FROM task_registry WHERE task_id = ?",
+                    (values.task_id,),
+                ).fetchone()
+                if row is not None:
+                    raise ValueError(
+                        f"终态任务不可复活: task_id={values.task_id} "
+                        f"status={row[0]} -> {values.status}"
+                    )
             conn.commit()
 
     def lookup_task(self, task_id: str) -> dict | None:
