@@ -16,7 +16,19 @@ class ProviderTimeoutError(ProviderRecoverableError):
     （历史语义兼容读取，读取端按 wall_clock 族处理）。
     """
 
+    # 门槛2 终审补证(seq1613b): stage 合同封闭——合法值集合三值 + legacy
+    # provider_wall; 未知值构造即抛 ValueError(fail-closed), 防新路径写入
+    # 未登记 stage 污染账本语义。
+    _KNOWN_STAGES = frozenset(
+        {"stream_idle", "wall_clock", "provider_declared", "provider_wall"}
+    )
+
     def __init__(self, message: str, *, stage: str = "provider_wall"):
+        if stage not in self._KNOWN_STAGES:
+            raise ValueError(
+                f"未知 ProviderTimeoutError stage: {stage!r} "
+                f"(合法: stream_idle/wall_clock/provider_declared/provider_wall)"
+            )
         super().__init__(message)
         self.stage = stage
 

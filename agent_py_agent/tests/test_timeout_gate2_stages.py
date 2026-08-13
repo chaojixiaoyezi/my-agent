@@ -398,3 +398,76 @@ def test_stream_backend_delegates_to_transport_not_wall_guard() -> None:
         )
     )
     assert response.text == "ok"  # transport 拥有 idle 语义, 墙钟守卫不拦
+
+
+# ---------------------------------------------------------------- 门槛2 终审补证(seq1613c): idle_silence 缺失 vs 真实零值
+
+def test_idle_silence_none_when_not_computed() -> None:
+    """调用方不传 idle_silence(旧调用/缺失) -> 落账 None(缺失可辨识)。"""
+    from agent_py_agent.agent.agent_core.model.call_runtime import (
+        record_model_call_timeout,
+    )
+
+    ledger = ModelCallLedger()
+    ledger.started(
+        ModelCallStartedParams(
+            call_id="c-missing", backend="test", model="m", input_tokens=100
+        )
+    )
+    record_model_call_timeout(
+        ledger=ledger,
+        call_id="c-missing",
+        timeout_seconds=30.0,
+        timeout_stage="stream_idle",
+        elapsed_seconds=12.5,
+        # 不传 idle_silence_seconds -> 缺失
+    )
+    record = _timed_out_record(ledger, "c-missing")
+    assert record.idle_silence_seconds is None  # 缺失/回退可辨识
+    assert record.elapsed_seconds == 12.5
+
+
+def test_idle_silence_zero_is_real_not_missing() -> None:
+    """真实零静默(活动持续到超时瞬间) -> 落账 0.0, 与缺失 None 可辨识。"""
+    from agent_py_agent.agent.agent_core.model.call_runtime import (
+        record_model_call_timeout,
+    )
+
+    ledger = ModelCallLedger()
+    ledger.started(
+        ModelCallStartedParams(
+            call_id="c-zero", backend="test", model="m", input_tokens=100
+        )
+    )
+    record_model_call_timeout(
+        ledger=ledger,
+        call_id="c-zero",
+        timeout_seconds=30.0,
+        timeout_stage="stream_idle",
+        elapsed_seconds=30.0,
+        idle_silence_seconds=0.0,  # 真实计算: 静默 0 秒
+    )
+    record = _timed_out_record(ledger, "c-zero")
+    assert record.idle_silence_seconds == 0.0  # 真实零静默, 非缺失
+    assert record.elapsed_seconds == 30.0
+
+
+# ---------------------------------------------------------------- 门槛2 终审补证(seq1613b): stage 合同封闭校验
+
+def test_stage_contract_closed_unknown_rejected() -> None:
+    """未知 stage 构造即抛 ValueError(fail-closed, 合同封闭)。"""
+    with pytest.raises(ValueError):
+        ProviderTimeoutError("t", stage="unknown_stage")
+
+
+def test_stage_contract_all_known_accepted() -> None:
+    """四个合法 stage(三值+legacy provider_wall)全部可构造。"""
+    for stage in ("stream_idle", "wall_clock", "provider_declared", "provider_wall"):
+        err = ProviderTimeoutError("t", stage=stage)
+        assert err.stage == stage
+
+
+def test_legacy_default_stage_provider_wall() -> None:
+    """旧调用不传 stage -> 默认 provider_wall(legacy 兼容读取锚点)。"""
+    err = ProviderTimeoutError("legacy")
+    assert err.stage == "provider_wall"

@@ -374,7 +374,8 @@ def test_failed_branch_timeout_has_no_stage() -> None:
 
 def test_timeout_params_elapsed_evidence_field_locked() -> None:
     """ModelCallTimeoutParams 只带 5 字段: elapsed_seconds/idle_silence_seconds
-    是仅有的证据字段(默认 0.0 兼容), 无原始时间戳。"""
+    是仅有的证据字段, 无原始时间戳。idle_silence 默认 None=缺失/未计算,
+    数值(含 0.0)=真实计算——「缺失/回退」与「真实零静默」可辨识(seq1613c)。"""
     fields = set(ModelCallTimeoutParams.__dataclass_fields__.keys())
     assert fields == {
         "call_id",
@@ -386,7 +387,7 @@ def test_timeout_params_elapsed_evidence_field_locked() -> None:
     assert ModelCallTimeoutParams.__dataclass_fields__["elapsed_seconds"].default == 0.0
     assert (
         ModelCallTimeoutParams.__dataclass_fields__["idle_silence_seconds"].default
-        == 0.0
+        is None
     )
 
 

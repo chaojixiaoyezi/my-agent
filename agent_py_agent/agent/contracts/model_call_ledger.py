@@ -59,9 +59,9 @@ class ModelCallTimeoutParams:
     # 门槛2: 掐断时刻的真实墙钟经过(now - record.started_at), 证据链贯通——
     # record 层时间戳 + 参数层 elapsed 双持, 不再断在调用点。
     elapsed_seconds: float = 0.0
-    # 门槛2: 最后活动(last_activity_at)到超时的静默时长, 纯数值可空(默认 0.0),
-    # 只记秒数不混 token 延迟, 不带 URL/prompt/响应内容。
-    idle_silence_seconds: float = 0.0
+    # 门槛2(终审补证 seq1613c): 最后活动到超时的静默时长; None=缺失/未计算,
+    # 数值(含 0.0)=真实计算——「缺失/回退」与「真实零静默」结构化可辨识。
+    idle_silence_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -109,9 +109,9 @@ class ModelCallRecord:
     # 双持——total_latency 是 ledger 落账时刻自己算的, elapsed 是掐断时刻调用点算的,
     # 两者同源同值, 互相校验防账本自证。
     elapsed_seconds: float = 0.0
-    # 门槛2: 最后活动(last_activity_at)到超时的静默时长, 纯数值可空(默认 0.0),
-    # 只记秒数不混 token 延迟, 不带 URL/prompt/响应内容。
-    idle_silence_seconds: float = 0.0
+    # 门槛2(终审补证 seq1613c): 最后活动到超时的静默时长; None=缺失/未计算,
+    # 数值(含 0.0)=真实计算——「缺失/回退」与「真实零静默」可辨识。
+    idle_silence_seconds: float | None = None
     error_type: str = ""
     error_code: str = ""
     provider_attempt_count: int = 0
@@ -256,7 +256,11 @@ class ModelCallLedger:
                 timeout_seconds=max(0.0, float(params.timeout_seconds)),
                 timeout_stage=params.timeout_stage,
                 elapsed_seconds=max(0.0, float(params.elapsed_seconds)),
-                idle_silence_seconds=max(0.0, float(params.idle_silence_seconds)),
+                idle_silence_seconds=(
+                    max(0.0, float(params.idle_silence_seconds))
+                    if params.idle_silence_seconds is not None
+                    else None
+                ),
                 total_latency_seconds=max(0.0, now - record.started_at),
                 events=_append_event(record.events, "timeout"),
             )

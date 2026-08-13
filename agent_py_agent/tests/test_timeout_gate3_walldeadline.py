@@ -300,3 +300,74 @@ def test_same_cutoff_silence_idle_wins() -> None:
             )
         )
     assert err.value.stage == "stream_idle"  # 同刻到期 idle 优先
+
+
+# ---------------------------------------------------------------- 门槛2 终审补证(seq1613a): 推进时钟证明同一起算点
+
+def test_advancing_clock_proves_idle_uses_wall_origin(monkeypatch) -> None:
+    """推进钟证明 idle 初始与 wall_deadline 同一起算点(非进入函数时点独立起算)。
+
+    start=100.0, 显式 wall=105.0; 进入函数后第 1 次检查推进到 105.5:
+    - 若 idle 同基准(wall=105): 105.5 > 105 已到期 -> idle 先检查 -> stream_idle
+    - 若 idle 独立起算(进入时 100.5+5=105.5): 105.5 未到期 -> 走到 wall 检查
+      -> 105.5 > 105 -> wall_clock
+    两种实现给出不同 stage, 断言 stream_idle 即证明同基准。
+    """
+    import agent_py_agent.agent.backends.gateway_helpers as gh
+
+    times = iter([105.5])  # 第 1 次检查(检查顺序 idle 在前)就到期
+
+    def fake_monotonic() -> float:
+        return next(times)
+
+    monkeypatch.setattr(gh.time, "monotonic", fake_monotonic)
+
+    class _FakeLine:
+        def decode(self, *args: object) -> str:
+            return "keepalive\n\n"
+
+    wall_deadline = 100.0 + 5.0  # start=100.0 + offset(5.0)
+    with pytest.raises(ProviderTimeoutError) as err:
+        list(
+            gh._iter_sse_data_lines(
+                [_FakeLine()],
+                timeout=5,
+                url="http://fake/cutoff",
+                on_data_line=lambda: None,
+                wall_deadline=wall_deadline,
+            )
+        )
+    assert err.value.stage == "stream_idle"  # idle 与 wall 同基准(105)到期
+
+
+def test_advancing_clock_idle_and_wall_expire_together(monkeypatch) -> None:
+    """推进钟越过同基准 deadline: idle(先检查)与 wall 同刻到期 -> idle 赢。
+
+    检查点 106.0 > 105.0(wall 基准): idle 检查在前触发 stream_idle——
+    证明 idle 初始 == wall(同一 monotonic 起点)且同刻 idle 优先(seq1513)。
+    """
+    import agent_py_agent.agent.backends.gateway_helpers as gh
+
+    times = iter([106.0])
+
+    def fake_monotonic() -> float:
+        return next(times)
+
+    monkeypatch.setattr(gh.time, "monotonic", fake_monotonic)
+
+    class _FakeLine:
+        def decode(self, *args: object) -> str:
+            return "keepalive\n\n"
+
+    wall_deadline = 100.0 + 5.0
+    with pytest.raises(ProviderTimeoutError) as err:
+        list(
+            gh._iter_sse_data_lines(
+                [_FakeLine()],
+                timeout=5,
+                url="http://fake/cutoff",
+                on_data_line=lambda: None,
+                wall_deadline=wall_deadline,
+            )
+        )
+    assert err.value.stage == "stream_idle"  # 同刻到期 idle 优先
