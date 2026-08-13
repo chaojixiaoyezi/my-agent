@@ -308,7 +308,8 @@ class _StreamIdleWatchdog:
 def _stream_idle_timeout_error(request: GatewayRequest) -> ProviderTimeoutError:
     return ProviderTimeoutError(
         "模型接口流式响应空闲超时: "
-        f"request_timeout={request.timeout}s url={request.url}"
+        f"request_timeout={request.timeout}s url={request.url}",
+        stage="stream_idle",
     )
 
 
@@ -703,7 +704,8 @@ def _runtime_network_error(exc: BaseException, request: GatewayRequest) -> Runti
             "模型接口请求超时: "
             f"host={host} connect_timeout={_bounded_connect_timeout(request):g}s "
             f"request_timeout={request.timeout}s url={request.url} "
-            f"底层错误: {reason}"
+            f"底层错误: {reason}",
+            stage="provider_declared",
         )
     if _is_transient_network_error(exc):
         return ProviderTransientError(
@@ -849,7 +851,8 @@ def _iter_sse_data_lines(
         if time.monotonic() > idle_deadline:
             raise ProviderTimeoutError(
                 "模型接口流式响应空闲超时: "
-                f"request_timeout={timeout}s url={url}"
+                f"request_timeout={timeout}s url={url}",
+                stage="stream_idle",
             )
         # provider 流里可能混入坏字节/非 UTF-8 切片(分块边界把多字节字符截断),
         # 用 errors="replace" 兜底,不让单行解码异常崩掉整条流式响应。

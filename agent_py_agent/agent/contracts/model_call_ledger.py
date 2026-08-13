@@ -56,6 +56,12 @@ class ModelCallTimeoutParams:
     call_id: str
     timeout_seconds: float
     timeout_stage: str
+    # 门槛2: 掐断时刻的真实墙钟经过(now - record.started_at), 证据链贯通——
+    # record 层时间戳 + 参数层 elapsed 双持, 不再断在调用点。
+    elapsed_seconds: float = 0.0
+    # 门槛2: 最后活动(last_activity_at)到超时的静默时长, 纯数值可空(默认 0.0),
+    # 只记秒数不混 token 延迟, 不带 URL/prompt/响应内容。
+    idle_silence_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -99,6 +105,13 @@ class ModelCallRecord:
     output_tokens_seen: int = 0
     timeout_seconds: float | None = None
     timeout_stage: str = ""
+    # 门槛2: 调用点算出的掐断时刻墙钟经过(now - started_at), 与 total_latency_seconds
+    # 双持——total_latency 是 ledger 落账时刻自己算的, elapsed 是掐断时刻调用点算的,
+    # 两者同源同值, 互相校验防账本自证。
+    elapsed_seconds: float = 0.0
+    # 门槛2: 最后活动(last_activity_at)到超时的静默时长, 纯数值可空(默认 0.0),
+    # 只记秒数不混 token 延迟, 不带 URL/prompt/响应内容。
+    idle_silence_seconds: float = 0.0
     error_type: str = ""
     error_code: str = ""
     provider_attempt_count: int = 0
@@ -130,6 +143,8 @@ class ModelCallRecord:
             "output_tokens_seen": self.output_tokens_seen,
             "timeout_seconds": self.timeout_seconds,
             "timeout_stage": self.timeout_stage,
+            "elapsed_seconds": self.elapsed_seconds,
+            "idle_silence_seconds": self.idle_silence_seconds,
             "error_type": self.error_type,
             "error_code": self.error_code,
             "provider_attempt_count": self.provider_attempt_count,
@@ -240,6 +255,8 @@ class ModelCallLedger:
                 last_activity_at=now,
                 timeout_seconds=max(0.0, float(params.timeout_seconds)),
                 timeout_stage=params.timeout_stage,
+                elapsed_seconds=max(0.0, float(params.elapsed_seconds)),
+                idle_silence_seconds=max(0.0, float(params.idle_silence_seconds)),
                 total_latency_seconds=max(0.0, now - record.started_at),
                 events=_append_event(record.events, "timeout"),
             )

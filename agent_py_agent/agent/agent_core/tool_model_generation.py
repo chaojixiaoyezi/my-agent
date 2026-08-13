@@ -365,9 +365,43 @@ def _record_provider_timeout(record: _ProviderTimeoutRecord) -> None:
             record.request.agent,
             record.first_token_timeout_seconds,
         ),
-        timeout_stage="provider_wall",
+        # 门槛2: stage 由异常携带（stream_idle/wall_clock/provider_declared），
+        # getattr 兜底 provider_wall 兼容历史异常对象（门槛2 前无 stage 字段）。
+        timeout_stage=str(getattr(record.exc, "stage", "") or "provider_wall"),
+        elapsed_seconds=_provider_timeout_elapsed(record.ledger, record.call_id),
+        idle_silence_seconds=_provider_timeout_idle_silence(
+            record.ledger, record.call_id
+        ),
     )
     _trace_model_failure(record.request, record.exc)
+
+
+def _provider_timeout_idle_silence(ledger: object, call_id: str) -> float:
+    """最后活动(last_activity_at)到掐断时刻的静默时长（门槛2 第三证据字段），
+    只记秒数不混 token 延迟、不带 URL/prompt/响应内容；record 不在账或
+    ledger 异常时返回 0.0（行为不回归）。"""
+    try:
+        for item in ledger.records():
+            if item.call_id == call_id:
+                return max(
+                    0.0,
+                    float(ledger.context.now()) - float(item.last_activity_at),
+                )
+    except Exception:
+        pass
+    return 0.0
+
+
+def _provider_timeout_elapsed(ledger: object, call_id: str) -> float:
+    """掐断时刻的真实墙钟经过（now - record.started_at），与 record 层时间戳
+    双持贯通证据链；record 不在账或 ledger 异常时返回 0.0（行为不回归）。"""
+    try:
+        for item in ledger.records():
+            if item.call_id == call_id:
+                return max(0.0, float(ledger.context.now()) - float(item.started_at))
+    except Exception:
+        pass
+    return 0.0
 
 
 def _trace_model_failure(request: ModelGenerateParams, exc: BaseException) -> None:
@@ -428,7 +462,10 @@ def _wait_for_generation_result(
             raise InterruptedError("模型接口请求已被用户停止")
         remaining = timeout - (time.monotonic() - started)
         if remaining <= 0 and not transport_owns_timeout:
-            raise ProviderTimeoutError(f"模型接口请求超时: request_timeout={timeout:g}s")
+            raise ProviderTimeoutError(
+                f"模型接口请求超时: request_timeout={timeout:g}s",
+                stage="wall_clock",
+            )
         result = _poll_generation_result(
             results,
             _TOOL_STREAM_POLL_SECONDS if transport_owns_timeout else remaining,

@@ -8,7 +8,17 @@ class ProviderRecoverableError(RuntimeError):
 
 
 class ProviderTimeoutError(ProviderRecoverableError):
-    """The provider did not return before the configured request timeout."""
+    """The provider did not return before the configured request timeout.
+
+    ``stage`` 区分超时来源（门槛2）：``stream_idle``（SSE 数据流空闲掐断）、
+    ``wall_clock``（本进程墙钟守卫线程超时）、``provider_declared``（provider
+    网络层声明的 connect/read 超时）。旧调用不传时保持 ``provider_wall``
+    （历史语义兼容读取，读取端按 wall_clock 族处理）。
+    """
+
+    def __init__(self, message: str, *, stage: str = "provider_wall"):
+        super().__init__(message)
+        self.stage = stage
 
 
 class ProviderTransientError(ProviderRecoverableError):

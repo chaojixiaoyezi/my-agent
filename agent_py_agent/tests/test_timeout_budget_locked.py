@@ -8,8 +8,10 @@ from __future__ import annotations
   3. 首 token 预算的 min clamp 与 effective=max(base, dynamic) 公式
   4. stream 后端 transport_owns_timeout=True -> 墙钟守卫不参与(掐断者是 idle 语义)
   5. SSE idle: 无数据行约 request.timeout 秒掐断; 周期 data 行重置 deadline
-  6. ProviderTimeoutError 在 ledger 记为 timed_out + provider_wall(与墙钟不可区分)
-  7. ModelCallTimeoutParams 只有 call_id/timeout_seconds/timeout_stage(无 elapsed 证据)
+  6. ProviderTimeoutError 在 ledger 记为 timed_out + stage(stream_idle/wall_clock/provider_declared)
+  7. ModelCallTimeoutParams 只带 call_id/timeout_seconds/timeout_stage/elapsed_seconds(无原始时间戳)
+
+门槛2 更新 2/3: 原「无 elapsed 证据」锁定改为「参数层只暴露 elapsed, 不暴露时间戳」。
 
 B 阶段修恢复/证据字段时, 本文件 6/7 将按预期变红 -> 正是「先固化再改」的意义。
 """
@@ -342,22 +344,40 @@ def test_failed_branch_timeout_has_no_stage() -> None:
     assert record.error_type == "ProviderTimeoutError"
 
 
-def test_timeout_params_lack_elapsed_evidence_fields() -> None:
-    """ModelCallTimeoutParams 只有 3 字段: 无 elapsed/first-token/last-event(证据缺口锁定)。"""
+def test_timeout_params_elapsed_evidence_field_locked() -> None:
+    """ModelCallTimeoutParams 只带 5 字段: elapsed_seconds/idle_silence_seconds
+    是仅有的证据字段(默认 0.0 兼容), 无原始时间戳。"""
     fields = set(ModelCallTimeoutParams.__dataclass_fields__.keys())
-    assert fields == {"call_id", "timeout_seconds", "timeout_stage"}
+    assert fields == {
+        "call_id",
+        "timeout_seconds",
+        "timeout_stage",
+        "elapsed_seconds",
+        "idle_silence_seconds",
+    }
+    assert ModelCallTimeoutParams.__dataclass_fields__["elapsed_seconds"].default == 0.0
+    assert (
+        ModelCallTimeoutParams.__dataclass_fields__["idle_silence_seconds"].default
+        == 0.0
+    )
 
 
-def test_ledger_record_has_timestamps_but_timeout_never_exposes_elapsed() -> None:
-    """ModelCallRecord 本身带时间戳, 但 timeout 参数层不传 elapsed -> 证据链断在调用点。"""
-    # 锁定: record 结构有 started_at/first_token_at/last_activity_at, 但
-    # record_model_call_timeout 不接收也不落 elapsed 字段。
+def test_timeout_recording_exposes_elapsed_but_not_timestamps() -> None:
+    """参数层只暴露 elapsed_seconds/idle_silence_seconds(墙钟经过/静默时长),
+    不暴露 started_at 等原始时间戳。"""
     import inspect
 
     from agent_py_agent.agent.agent_core.model import call_runtime
 
     signature = inspect.signature(call_runtime.record_model_call_timeout)
-    assert set(signature.parameters.keys()) == {"ledger", "call_id", "timeout_seconds", "timeout_stage"}
+    assert set(signature.parameters.keys()) == {
+        "ledger",
+        "call_id",
+        "timeout_seconds",
+        "timeout_stage",
+        "elapsed_seconds",
+        "idle_silence_seconds",
+    }
 
 
 def test_json_roundtrip_of_locked_evidence(tmp_path: Path) -> None:

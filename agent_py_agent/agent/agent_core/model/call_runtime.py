@@ -173,12 +173,21 @@ def record_model_call_timeout(
     call_id: str,
     timeout_seconds: float,
     timeout_stage: str,
+    elapsed_seconds: float = 0.0,
+    idle_silence_seconds: float = 0.0,
 ) -> None:
+    """落超时账。``elapsed_seconds`` 是掐断时刻的真实墙钟经过
+    （调用方从 record.started_at 计算；门槛2 前证据链断在调用点，
+    参数层不暴露 elapsed）。``idle_silence_seconds`` 是最后活动到超时的
+    静默时长（调用方从 record.last_activity_at 计算，只记秒数不混
+    token 延迟）。"""
     ledger.timeout(
         ModelCallTimeoutParams(
             call_id=call_id,
             timeout_seconds=timeout_seconds,
             timeout_stage=timeout_stage,
+            elapsed_seconds=max(0.0, float(elapsed_seconds)),
+            idle_silence_seconds=max(0.0, float(idle_silence_seconds)),
         )
     )
 
