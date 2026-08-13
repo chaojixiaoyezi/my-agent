@@ -23,13 +23,19 @@ from .call_monitor import (
     estimate_first_token_timeout,
     is_cache_suspected,
 )
+from .context_pressure import model_visible_context_tokens
 from .usage import output_token_usage
 
 
 def start_model_call_record(request: object) -> tuple[ModelCallLedger, str, object]:
-    ledger = model_call_ledger(getattr(request, "agent", None))
+    agent = getattr(request, "agent", None)
+    ledger = model_call_ledger(agent)
     prompt = str(getattr(request, "prompt", "") or "")
-    input_tokens = estimate_tokens(prompt)
+    params = getattr(request, "params", None)
+    # 记账口径与统一可见口径对齐（门槛1）：text 协议恒等，native 协议计入
+    # IR messages/pending guidance/tools —— 首 token 预算按出站可见量估计，
+    # 避免多轮工具后 prefill 时间低估（真机 600s ProviderTimeout 根因之一）。
+    input_tokens = model_visible_context_tokens(agent, params, prompt)
     estimate = estimate_first_token_timeout(
         FirstTokenTimeoutParams(
             input_tokens=input_tokens,
@@ -46,8 +52,7 @@ def start_model_call_record(request: object) -> tuple[ModelCallLedger, str, obje
         f"{logical_call_id}:attempt-{physical_attempt}:"
         f"{uuid.uuid4().hex[:8]}"
     )
-    params = getattr(request, "params", None)
-    backend = getattr(getattr(request, "agent", None), "backend", None)
+    backend = getattr(agent, "backend", None)
     ledger.started(
         ModelCallStartedParams(
             call_id=call_id,

@@ -26,6 +26,7 @@ from agent_py_agent.agent.contracts.model_call_ledger import (
     ModelCallStartedParams,
     ModelCallTimeoutParams,
 )
+from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
 
 
 @dataclass
@@ -253,6 +254,12 @@ def test_same_logical_model_turn_preserves_distinct_physical_attempts() -> None:
             request_id="request-1",
             run_id="run-1",
             task_id="task-1",
+            # 门槛1 后记账走 model_visible_context_tokens, 需 run snapshot;
+            # text 协议下口径退化为 estimate_tokens(prompt), 不影响本测试意图
+            # (逻辑 turn 去重 + 物理 attempt 计数)。
+            tool_protocol_snapshot=make_test_protocol_snapshot(
+                run_id="run-1", source_protocol="text"
+            ),
         ),
     )
 
