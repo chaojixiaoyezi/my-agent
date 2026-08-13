@@ -162,3 +162,31 @@ def test_upsert_atomic_rejects_insert_after_late_terminal(tmp_path) -> None:
     assert cursor.rowcount == 0  # 冲突且 WHERE 拒绝(当前 cancelled 终态)
     final = conn_b.execute("SELECT status FROM task_registry WHERE task_id='t'").fetchone()
     assert final[0] == "cancelled"  # 迟到 pending 未复活
+
+
+# ---------------------------------------------------------------- P0-1 收口(seq1584/1585): 生产入口交错测试
+
+def test_production_entry_late_register_rejected_after_terminal(tmp_path) -> None:
+    """走生产入口 TaskRegistry.register_task: B 已提交终态后, A 迟到
+    register 非终态被拒(抛 ValueError), 覆盖生产入口/连接配置/异常路径。"""
+    reg_a = _reg(tmp_path)
+    reg_b = _reg(tmp_path)
+    reg_a.register_task("prod-1", status="pending", goal="g")
+    assert reg_b.update_task_status("prod-1", "done") is True  # B 提交终态
+    try:
+        reg_a.register_task("prod-1", status="running", goal="迟到")  # A 迟到写
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("生产入口迟到 register 非终态应抛 ValueError")
+    assert reg_b.lookup_task("prod-1")["status"] == "done"  # 终态未被覆盖
+
+
+def test_production_entry_terminal_idempotent_via_second_instance(tmp_path) -> None:
+    """走生产入口: 终态任务再 register 同族终态(另一实例) -> 允许, 不抛。"""
+    reg_a = _reg(tmp_path)
+    reg_b = _reg(tmp_path)
+    reg_a.register_task("prod-2", status="running", goal="g")
+    reg_a.update_task_status("prod-2", "done")
+    reg_b.register_task("prod-2", status="done", goal="确认")  # 幂等终态, 不抛
+    assert reg_b.lookup_task("prod-2")["status"] == "done"
