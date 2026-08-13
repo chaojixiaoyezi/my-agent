@@ -382,8 +382,10 @@ class _SchedulerRunOperations:
                 "claim_id": claim_id,
                 "claimed_at": current,
                 "claim_expires_at": current + max(1, int(lease_seconds or 1)),
-                # P0-4: 记录持有 claim 的进程身份(崩溃恢复判活的死亡证明来源)
+                # P0-4: 记录持有 claim 的进程身份(崩溃恢复判活的死亡证明来源);
+                # runner_start_time 供 pid 复用核对(seq1562 收口), 不可读时 None。
                 "runner_pid": os.getpid(),
+                "runner_start_time": _process_start_time(os.getpid()),
                 "updated_at": current,
             }
             store["runs"][run_id] = claimed
@@ -645,9 +647,23 @@ class _SchedulerStoreSupport:
                     continue
                 if float(run.get("claim_expires_at") or 0.0) > current:
                     continue  # 租约未过期, 不是崩溃候选
+                # P0-4 收口(seq1562): fail-closed 判定——
+                # ① unverifiable(pid 缺失/<=0/OSError): 保持原态(不归 unknown)
+                # ② alive 且 start_time 匹配(可核对时): 保持原态
+                # ③ alive 但 start_time 不匹配: pid 复用 = 原进程已死(死亡证明)
+                # ④ 仅 dead(ProcessLookupError 明确查无此进程)才是死亡证明
                 pid = int(run.get("runner_pid") or 0)
-                if pid > 0 and _process_alive(pid):
-                    continue  # 进程存活: 未证实死亡, fail-closed 保持原态
+                recorded_start = run.get("runner_start_time")
+                state = _process_state(pid)
+                if state == "unverifiable":
+                    continue  # 不可证实, fail-closed 保持原态
+                if state == "alive":
+                    if recorded_start is None:
+                        continue  # 无 start_time 可核对: 仅 pid 存活即保持
+                    current_start = _process_start_time(pid)
+                    if current_start is None or current_start == float(recorded_start):
+                        continue  # 同一进程存活(或当前不可读), 保持原态
+                    # current_start 可读且 != recorded_start: pid 复用, 原进程已死
                 store["runs"][run_id] = {
                     **run,
                     "status": "unknown",
@@ -854,24 +870,40 @@ class SchedulerRepository(
         self.root.mkdir(parents=True, exist_ok=True)
 
 
-def _process_alive(pid: int) -> bool:
-    """进程存活探活(os.kill 信号 0, P0-4 崩溃恢复的死亡证明)。
+def _process_state(pid: int) -> str:
+    """进程状态三态(os.kill 信号 0, P0-4 崩溃恢复的死亡证明, seq1562 收口)。
 
-    存在(含 PermissionError=有进程但无权)算存活; ProcessLookupError=查无
-    此进程(已死/被回收); 其它 OSError 按不可证实处理(不猜)。pid<=0 视为
-    不可证实。
+    alive: 进程存在(含 PermissionError=有进程但无权)。
+    dead: ProcessLookupError=明确查无此进程/已被回收(唯一死亡证明)。
+    unverifiable: 其它 OSError 或 pid<=0——调用方必须 fail-closed 保持
+    原态, 不得据此归 unknown。
     """
     if pid <= 0:
-        return False
+        return "unverifiable"
     try:
         os.kill(pid, 0)
-        return True
+        return "alive"
     except ProcessLookupError:
-        return False
+        return "dead"
     except PermissionError:
-        return True
+        return "alive"
     except OSError:
-        return False
+        return "unverifiable"
+
+
+def _process_start_time(pid: int) -> float | None:
+    """进程启动时刻(Linux /proc/<pid>/stat 字段 22, starttime ticks)。
+
+    供 P0-4 的 pid 复用核对: pid 存活但启动时刻与 claim 记录不匹配 = 原
+    进程已死、pid 被复用(死亡证明)。跨平台不可读时返回 None(调用方仅做
+    pid 探活, fail-closed 不猜)。
+    """
+    try:
+        stat = Path(f"/proc/{int(pid)}/stat").read_text(encoding="utf-8")
+        fields = stat.rsplit(")", 1)[-1].split()
+        return float(fields[19])  # starttime 是第 22 个字段(0-based 19)
+    except (OSError, ValueError, IndexError, TypeError):
+        return None
 
 
 def _new_job_payload(

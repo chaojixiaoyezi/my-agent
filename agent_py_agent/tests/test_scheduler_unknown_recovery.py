@@ -91,3 +91,72 @@ def test_clean_store_no_recovery(tmp_path) -> None:
     recovered = repo.recover_interrupted_executions(now=1_006.0)
     assert recovered == []
     assert repo.get_active_run(run_id)["status"] == "claimed"
+
+
+# ---------------------------------------------------------------- P1-4 收口(seq1562): fail-closed 三情形
+
+def test_missing_pid_keeps_state_fail_closed(tmp_path) -> None:
+    """runner_pid 缺失 -> 不可证实, 保持原态(不归 unknown)。"""
+    repo = _repository(tmp_path)
+    run_id = _make_claimed_run(repo)
+    store = json.loads(repo.store_path.read_text(encoding="utf-8"))
+    run = store["runs"][run_id]
+    run["claim_expires_at"] = 1_005.0  # 过期
+    run.pop("runner_pid", None)  # 身份缺失
+    run.pop("runner_start_time", None)
+    store["runs"][run_id] = run
+    repo.store_path.write_text(
+        json.dumps(store, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    assert repo.recover_interrupted_executions(now=1_006.0) == []
+    assert repo.get_active_run(run_id)["status"] == "claimed"  # fail-closed 保持
+
+
+def test_pid_reuse_detected_by_start_time(tmp_path, monkeypatch) -> None:
+    """pid 存活但 start_time 不匹配(pid 复用) -> 原进程已死, 归 unknown。"""
+    import agent_py_agent.agent.scheduler.repository as repo_mod
+
+    repo = _repository(tmp_path)
+    run_id = _make_claimed_run(repo)
+    store = json.loads(repo.store_path.read_text(encoding="utf-8"))
+    run = store["runs"][run_id]
+    run["claim_expires_at"] = 1_005.0
+    run["runner_pid"] = os.getpid()  # pid 存活(复用场景)
+    run["runner_start_time"] = 1.0  # 记录的启动时刻(旧)
+    store["runs"][run_id] = run
+    repo.store_path.write_text(
+        json.dumps(store, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    # 当前进程实际 start_time 与记录不同(模拟 pid 复用): 死亡证明成立
+    monkeypatch.setattr(repo_mod, "_process_start_time", lambda pid: 999.0)
+
+    recovered = repo.recover_interrupted_executions(now=1_006.0)
+    assert recovered == [run_id]  # pid 复用 = 原进程已死
+    assert repo.get_active_run(run_id) is None  # 归 unknown 终态
+
+
+def test_unverifiable_oserror_keeps_state_fail_closed(tmp_path, monkeypatch) -> None:
+    """os.kill 抛非 ProcessLookupError 的 OSError(不可判定) -> 保持原态。"""
+    import agent_py_agent.agent.scheduler.repository as repo_mod
+
+    repo = _repository(tmp_path)
+    run_id = _make_claimed_run(repo)
+    store = json.loads(repo.store_path.read_text(encoding="utf-8"))
+    run = store["runs"][run_id]
+    run["claim_expires_at"] = 1_005.0
+    run["runner_pid"] = os.getpid()
+    store["runs"][run_id] = run
+    repo.store_path.write_text(
+        json.dumps(store, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    def _raising_kill(pid, sig):  # 非 ProcessLookupError 的 OSError(不可判定)
+        raise OSError("unverifiable")
+
+    monkeypatch.setattr(repo_mod.os, "kill", _raising_kill)
+    assert repo.recover_interrupted_executions(now=1_006.0) == []
+    assert repo.get_active_run(run_id)["status"] == "claimed"  # fail-closed 保持
