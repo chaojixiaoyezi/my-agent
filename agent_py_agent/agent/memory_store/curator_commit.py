@@ -32,7 +32,12 @@ from .curator_run_log import (
     run_log_path,
     run_records_text,
 )
-from .curator_state import CuratorSuccessCommit, MemoryCuratorStateStore, build_success_state
+from .curator_state import (
+    CuratorStateCorruptError,
+    CuratorSuccessCommit,
+    MemoryCuratorStateStore,
+    build_success_state,
+)
 from .daily import (
     DailyMemoryEvent,
     DailyMemoryStore,
@@ -113,6 +118,10 @@ class CuratorBatchCommitter:
                 transaction = self._prepare_transaction(request, changes)
                 try:
                     self._apply_changes(changes)
+                except CuratorStateCorruptError:
+                    # state 仓库损坏不是 commit 失败: 原样冒泡, 由上层隔离留证,
+                    # 不伪装成 CURATOR_COMMIT_FAILED(回滚写 state 同样会失败)。
+                    raise
                 except Exception as exc:
                     try:
                         self._restore_transaction(transaction, paths_locked=True)

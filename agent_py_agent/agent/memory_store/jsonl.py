@@ -489,47 +489,9 @@ class _JsonlMemoryMutationMixin:
         self._after_commit_indexes(tombstones)
         return tombstones
 
-# LLM: This mixin owns reads and rebuildable search projections; it never becomes the formal memory authority.
-# 类用途: 从 active JSONL 读取并执行关键词、FTS 与可选向量召回。
-class _JsonlMemoryRecallMixin(JsonlMemoryIndexMixin):
-    # LLM: 向量库位于当前 owner memory 根且仅是 lazy projection；无 embedder 时必须完全关闭。
-    # 函数用途: 获取当前 owner 的可重建向量索引实例。
-    def _vector_store(self):
-        """本地 per-owner 向量库(memory_vectors.json,在 owner home 内)。无 embedder 返回 None。
-
-        只用本地文件,绝不碰共享向量库(零外部依赖、按 owner 天然隔离)。懒建缓存。
-        """
-        if self._embedder is None:
-            return None
-        if self._vector_store_cache is None:
-            from ..retrieval.vector_store import VectorStore
-
-            self._vector_store_cache = VectorStore(self.path.parent / "memory_vectors.json")
-        return self._vector_store_cache
-
-    # LLM: 向量写失败不改变权威提交；metadata 仍需携带可与 active JSONL 复核的完整身份。
-    # 函数用途: 尽力把一条正式记忆写入向量索引。
-    def _index_vector(self, record: MemoryRecord) -> None:
-        store = self._vector_store()
-        if store is None:
-            return
-        try:
-            vector = self._embedder.embed([record.content])[0]
-            store.upsert(_record_vec_id(record), vector, text=record.content, metadata=_record_payload(record))
-        except Exception:
-            pass  # 向量索引失败不打断记忆写入(JSONL 才是事实源)
-
-    # LLM: 删除只针对精确 entry ID 的派生向量，失败不能使索引获得事实权威。
-    # 函数用途: 尽力清除一条已删除记忆的向量项。
-    def _remove_vector(self, entry_id: str) -> None:
-        store = self._vector_store()
-        if store is None or not entry_id:
-            return
-        try:
-            store.remove(entry_id)
-        except Exception:
-            pass
-
+# LLM: 检索投影与生命周期治理分离:Search 只消费 active JSONL 并返回不含陈旧索引正文的召回。
+# 类用途: 提供关键词/语义融合与 scope 内确定性召回。
+class _JsonlMemorySearchMixin:
     # LLM: 每个向量命中必须按 active entry ID 和正文逐字复核，旧向量不能复活历史内容。
     # 函数用途: 返回经过正式 JSONL 二次核验的语义检索结果。
     def _semantic_records(self, query: str, top_k: int) -> list[MemoryRecord]:
@@ -553,6 +515,126 @@ class _JsonlMemoryRecallMixin(JsonlMemoryIndexMixin):
                 records.append(current)
         return records
 
+    # LLM: 搜索结果最终必须回到 active JSONL，并按确定性规则去重排序。
+    # 函数用途: 返回不含陈旧索引正文的长期记忆召回结果。
+    def search(self, query: str, top_k: int = 5) -> list[MemoryRecord]:
+        """搜索记忆，优先使用 LocalStore 索引，再读取 JSONL 正式源。
+
+        新手说明:
+        有 LocalStore 时优先走 SQLite/FTS5。
+        没有索引、索引为空或索引临时失败时，继续从正式 JSONL 检索。
+
+        query: 搜索文本。
+        top_k: 最多返回多少条结果。
+
+        返回说明:
+        返回 MemoryRecord 列表。LocalStore 是检索索引，JSONL 是正式记忆源。"""
+
+        candidate_limit = max(top_k * 4, top_k + 8)
+        records, _load_errors = self.search_report(query, top_k=candidate_limit)
+        if self._embedder is None:
+            selected = _rerank_memory_records(records, query, top_k)
+        else:
+            fused = self._fuse_semantic(query, records, candidate_limit)
+            selected = _select_diverse_memory_records(fused, top_k)
+        for record in selected:
+            self._note_access(record.entry_id)
+        return selected
+
+    # LLM: Runtime recall 先以 active JSONL 建 allowlist，再读取派生索引；陈旧 FTS/vector 命中不能复活删除版本。
+    # 函数用途: 在当前正式记录和显式 scope predicate 内做确定性召回。
+    def search_scoped(
+        self,
+        query: str,
+        top_k: int,
+        predicate: Callable[[MemoryRecord], bool],
+    ) -> list[MemoryRecord]:
+        if top_k <= 0:
+            return []
+        active = [record for record in self.all() if predicate(record)]
+        candidate_limit = max(top_k * 4, top_k + 8)
+        # 混合检索:BM25 词面 + 向量语义 RRF 融合(治"换词就召不回"),替代原纯子串+自管 RRF;
+        # embedder 缺失或端点抖动时自动降级纯 BM25(仍强于纯子串)。active JSONL 已建 allowlist,
+        # 索引命中不能复活删除版本;embedder 语义只在本列表内打分,不再走全库 _semantic_records。
+        if active:
+            from ..retrieval.hybrid import HybridRetriever
+
+            # BM25 臂拼入写路径生成的关键词(keywords_en),让英文查询词面命中中文记忆;
+            # embedding 臂本就跨语言(mean centering 实证),两臂互补。
+            def _index_text(record: MemoryRecord) -> str:
+                attrs = record.attributes if isinstance(record.attributes, dict) else {}
+                keywords = attrs.get("keywords_en") or []
+                if isinstance(keywords, list):
+                    suffix = " ".join(str(item) for item in keywords)
+                else:
+                    suffix = str(keywords)
+                return record.content + (" " + suffix if suffix else "")
+
+            ranked = HybridRetriever(self._embedder).rank(
+                query,
+                [(record.entry_id, _index_text(record)) for record in active],
+                top_k=candidate_limit,
+                # 注入侧阈值化:向量臂只留 cosine≥0.30 的真相关,弱相关不凑数带进 prompt。
+                # 词面臂(BM25)不受限——词面重合本身是相关信号;无 embedder 自动降级纯 BM25。
+                vector_min_score=0.30,
+            )
+            by_id = {record.entry_id: record for record in active}
+            keyword = [by_id[entry_id] for entry_id, _score in ranked if entry_id in by_id]
+        else:
+            keyword = []
+        selected = _rerank_memory_records(keyword, query, top_k)
+        for record in selected:
+            self._note_access(record.entry_id)
+        return selected
+
+    # LLM: RRF 只融合两个可重建候选列表，返回前仍使用稳定 entry ID 对齐。
+    # 函数用途: 合并关键词与语义召回顺序。
+    def _fuse_semantic(self, query: str, keyword_records: list[MemoryRecord], top_k: int) -> list[MemoryRecord]:
+        """关键词召回 + 语义召回 RRF 融合(检索拓宽 #1)。语义为空则退回纯关键词(不崩不退化)。"""
+        semantic = self._semantic_records(query, top_k)
+        if not semantic:
+            return keyword_records[:top_k]
+        from ..retrieval.lexical import reciprocal_rank_fusion
+
+        by_id: dict[str, MemoryRecord] = {}
+        for record in [*keyword_records, *semantic]:
+            by_id.setdefault(_record_vec_id(record), record)
+        fused = reciprocal_rank_fusion(
+            [[_record_vec_id(r) for r in keyword_records], [_record_vec_id(r) for r in semantic]]
+        )
+        return [by_id[doc_id] for doc_id, _score in fused if doc_id in by_id][:top_k]
+
+    # LLM: report 保留索引读取错误并从 authority fallback；错误不能伪装成“没有记忆”。
+    # 函数用途: 搜索正式记忆并返回可恢复的派生索引诊断。
+    def search_report(self, query: str, top_k: int = 5) -> tuple[list[MemoryRecord], list[dict]]:
+        """搜索记忆并保留可恢复的索引读取错误。
+
+        LocalStore 只是检索索引，不是记忆事实源。索引坏了时继续从当前 owner JSONL
+        检索，但把错误报告给调用方，避免上层误判为“没有记忆”。
+        """
+
+        candidate_limit = max(top_k * 4, top_k + 8)
+        indexed, load_errors = self._search_local_store_report(query, candidate_limit)
+        active_records = self.all()
+        active_by_id = {record.entry_id: record for record in active_records if record.entry_id}
+        # Index rows are projections only. Return the current source object and reject any
+        # missing/deleted ID so an old index cannot resurrect a removed or replaced body.
+        indexed = [
+            active_by_id[record.entry_id]
+            for record in indexed
+            if record.entry_id in active_by_id
+        ]
+        source_records = _search_memory_records(active_records, query, candidate_limit)
+        merged = _merge_search_result_groups(
+            (indexed, source_records),
+            top_k=candidate_limit,
+        )
+        return _rerank_memory_records(merged, query, top_k), load_errors
+
+
+# LLM: 生命周期治理与检索投影分离:Lifecycle 只做访问信号、总量闸与健康快照,不直接召回。
+# 类用途: 提供访问记录、flush、condense、过期视图与运行快照。
+class _JsonlMemoryLifecycleMixin:
     # LLM: all 只 materialize 当前 active、未过期的正式记忆，绝不合并 Daily/Candidate/ops。
     # 函数用途: 读取当前 owner 可召回的全部长期事实。
     def all(self) -> list[MemoryRecord]:
@@ -713,121 +795,47 @@ class _JsonlMemoryRecallMixin(JsonlMemoryIndexMixin):
             "semantic_index": "configured" if self._embedder is not None else "unconfigured",
         }
 
-    # LLM: 搜索结果最终必须回到 active JSONL，并按确定性规则去重排序。
-    # 函数用途: 返回不含陈旧索引正文的长期记忆召回结果。
-    def search(self, query: str, top_k: int = 5) -> list[MemoryRecord]:
-        """搜索记忆，优先使用 LocalStore 索引，再读取 JSONL 正式源。
 
-        新手说明:
-        有 LocalStore 时优先走 SQLite/FTS5。
-        没有索引、索引为空或索引临时失败时，继续从正式 JSONL 检索。
+# LLM: This mixin owns reads and rebuildable search projections; it never becomes the formal memory authority.
+# 类用途: 从 active JSONL 读取并执行关键词、FTS 与可选向量召回。
+class _JsonlMemoryRecallMixin(_JsonlMemorySearchMixin, _JsonlMemoryLifecycleMixin, JsonlMemoryIndexMixin):
+    # LLM: 向量库位于当前 owner memory 根且仅是 lazy projection；无 embedder 时必须完全关闭。
+    # 函数用途: 获取当前 owner 的可重建向量索引实例。
+    def _vector_store(self):
+        """本地 per-owner 向量库(memory_vectors.json,在 owner home 内)。无 embedder 返回 None。
 
-        query: 搜索文本。
-        top_k: 最多返回多少条结果。
-
-        返回说明:
-        返回 MemoryRecord 列表。LocalStore 是检索索引，JSONL 是正式记忆源。"""
-
-        candidate_limit = max(top_k * 4, top_k + 8)
-        records, _load_errors = self.search_report(query, top_k=candidate_limit)
-        if self._embedder is None:
-            selected = _rerank_memory_records(records, query, top_k)
-        else:
-            fused = self._fuse_semantic(query, records, candidate_limit)
-            selected = _select_diverse_memory_records(fused, top_k)
-        for record in selected:
-            self._note_access(record.entry_id)
-        return selected
-
-    # LLM: Runtime recall 先以 active JSONL 建 allowlist，再读取派生索引；陈旧 FTS/vector 命中不能复活删除版本。
-    # 函数用途: 在当前正式记录和显式 scope predicate 内做确定性召回。
-    def search_scoped(
-        self,
-        query: str,
-        top_k: int,
-        predicate: Callable[[MemoryRecord], bool],
-    ) -> list[MemoryRecord]:
-        if top_k <= 0:
-            return []
-        active = [record for record in self.all() if predicate(record)]
-        candidate_limit = max(top_k * 4, top_k + 8)
-        # 混合检索:BM25 词面 + 向量语义 RRF 融合(治"换词就召不回"),替代原纯子串+自管 RRF;
-        # embedder 缺失或端点抖动时自动降级纯 BM25(仍强于纯子串)。active JSONL 已建 allowlist,
-        # 索引命中不能复活删除版本;embedder 语义只在本列表内打分,不再走全库 _semantic_records。
-        if active:
-            from ..retrieval.hybrid import HybridRetriever
-
-            # BM25 臂拼入写路径生成的关键词(keywords_en),让英文查询词面命中中文记忆;
-            # embedding 臂本就跨语言(mean centering 实证),两臂互补。
-            def _index_text(record: MemoryRecord) -> str:
-                attrs = record.attributes if isinstance(record.attributes, dict) else {}
-                keywords = attrs.get("keywords_en") or []
-                if isinstance(keywords, list):
-                    suffix = " ".join(str(item) for item in keywords)
-                else:
-                    suffix = str(keywords)
-                return record.content + (" " + suffix if suffix else "")
-
-            ranked = HybridRetriever(self._embedder).rank(
-                query,
-                [(record.entry_id, _index_text(record)) for record in active],
-                top_k=candidate_limit,
-                # 注入侧阈值化:向量臂只留 cosine≥0.30 的真相关,弱相关不凑数带进 prompt。
-                # 词面臂(BM25)不受限——词面重合本身是相关信号;无 embedder 自动降级纯 BM25。
-                vector_min_score=0.30,
-            )
-            by_id = {record.entry_id: record for record in active}
-            keyword = [by_id[entry_id] for entry_id, _score in ranked if entry_id in by_id]
-        else:
-            keyword = []
-        selected = _rerank_memory_records(keyword, query, top_k)
-        for record in selected:
-            self._note_access(record.entry_id)
-        return selected
-
-    # LLM: RRF 只融合两个可重建候选列表，返回前仍使用稳定 entry ID 对齐。
-    # 函数用途: 合并关键词与语义召回顺序。
-    def _fuse_semantic(self, query: str, keyword_records: list[MemoryRecord], top_k: int) -> list[MemoryRecord]:
-        """关键词召回 + 语义召回 RRF 融合(检索拓宽 #1)。语义为空则退回纯关键词(不崩不退化)。"""
-        semantic = self._semantic_records(query, top_k)
-        if not semantic:
-            return keyword_records[:top_k]
-        from ..retrieval.lexical import reciprocal_rank_fusion
-
-        by_id: dict[str, MemoryRecord] = {}
-        for record in [*keyword_records, *semantic]:
-            by_id.setdefault(_record_vec_id(record), record)
-        fused = reciprocal_rank_fusion(
-            [[_record_vec_id(r) for r in keyword_records], [_record_vec_id(r) for r in semantic]]
-        )
-        return [by_id[doc_id] for doc_id, _score in fused if doc_id in by_id][:top_k]
-
-    # LLM: report 保留索引读取错误并从 authority fallback；错误不能伪装成“没有记忆”。
-    # 函数用途: 搜索正式记忆并返回可恢复的派生索引诊断。
-    def search_report(self, query: str, top_k: int = 5) -> tuple[list[MemoryRecord], list[dict]]:
-        """搜索记忆并保留可恢复的索引读取错误。
-
-        LocalStore 只是检索索引，不是记忆事实源。索引坏了时继续从当前 owner JSONL
-        检索，但把错误报告给调用方，避免上层误判为“没有记忆”。
+        只用本地文件,绝不碰共享向量库(零外部依赖、按 owner 天然隔离)。懒建缓存。
         """
+        if self._embedder is None:
+            return None
+        if self._vector_store_cache is None:
+            from ..retrieval.vector_store import VectorStore
 
-        candidate_limit = max(top_k * 4, top_k + 8)
-        indexed, load_errors = self._search_local_store_report(query, candidate_limit)
-        active_records = self.all()
-        active_by_id = {record.entry_id: record for record in active_records if record.entry_id}
-        # Index rows are projections only. Return the current source object and reject any
-        # missing/deleted ID so an old index cannot resurrect a removed or replaced body.
-        indexed = [
-            active_by_id[record.entry_id]
-            for record in indexed
-            if record.entry_id in active_by_id
-        ]
-        source_records = _search_memory_records(active_records, query, candidate_limit)
-        merged = _merge_search_result_groups(
-            (indexed, source_records),
-            top_k=candidate_limit,
-        )
-        return _rerank_memory_records(merged, query, top_k), load_errors
+            self._vector_store_cache = VectorStore(self.path.parent / "memory_vectors.json")
+        return self._vector_store_cache
+
+    # LLM: 向量写失败不改变权威提交；metadata 仍需携带可与 active JSONL 复核的完整身份。
+    # 函数用途: 尽力把一条正式记忆写入向量索引。
+    def _index_vector(self, record: MemoryRecord) -> None:
+        store = self._vector_store()
+        if store is None:
+            return
+        try:
+            vector = self._embedder.embed([record.content])[0]
+            store.upsert(_record_vec_id(record), vector, text=record.content, metadata=_record_payload(record))
+        except Exception:
+            pass  # 向量索引失败不打断记忆写入(JSONL 才是事实源)
+
+    # LLM: 删除只针对精确 entry ID 的派生向量，失败不能使索引获得事实权威。
+    # 函数用途: 尽力清除一条已删除记忆的向量项。
+    def _remove_vector(self, entry_id: str) -> None:
+        store = self._vector_store()
+        if store is None or not entry_id:
+            return
+        try:
+            store.remove(entry_id)
+        except Exception:
+            pass
 
     # LLM: 全量建索引只读 active authority，不修改 memory.jsonl 或生成第二份长期事实。
     # 函数用途: 从正式长期记忆重建 LocalStore/FTS 索引。
@@ -1249,14 +1257,18 @@ def _operation_timestamp(value: object, *, fallback: float) -> float:
     return timestamp if timestamp > 0 else fallback
 
 
-# LLM: identity 只做精确规范化幂等，不得扩展成 embedding/模糊语义合并。
-# 函数用途: 判断两条 role/kind/正文是否其实是同一条长期记忆。
-def _memory_identity_key(record: MemoryRecord) -> tuple[str, str, str]:
-    return (
+# LLM: v2 正式事实必须把显式 subject/scope 纳入精确幂等；legacy 无结构化身份时保持旧键兼容。
+# 函数用途: 判断两条 role/kind/正文是否属于同一结构化范围内的同一条长期记忆。
+def _memory_identity_key(record: MemoryRecord) -> tuple[str, ...]:
+    base = (
         fold_key(record.role),
         fold_key(record.kind),
         normalized_memory_content(record.content),
     )
+    subject_identity = _memory_subject_identity(record)
+    if not subject_identity[0]:
+        return base
+    return (*base, *subject_identity)
 
 
 # LLM: subject_key 只能从结构化 attributes 读取，不能从正文关键词推断。
@@ -1267,14 +1279,38 @@ def _memory_subject_key(record: MemoryRecord) -> str:
 
 
 # LLM: 同一主题在 personal/company/project 等不同 scope 可以并存；空 scope 仍作为 legacy 单一范围。
+# 存储级身份比较与写侧共用同一 canonical 合同：旧账本 task:<id> 与新写入 project:<id>
+# 是同一正式身份（project 单一权威），否则读时统一、写时双权威会生成第二条正式事实。
+# 非法/未知 scope 值保持原样隔离（fail-closed，不扩大合并范围）。
 # 函数用途: 构造长期事实冲突与召回去重共用的 subject+scope 身份。
 def _memory_subject_identity(record: MemoryRecord) -> tuple[str, str, str]:
     attributes = record.attributes if isinstance(record.attributes, dict) else {}
+    scope_type = str(attributes.get("scope_type") or "legacy")
+    scope_key = str(attributes.get("scope_key") or "legacy")
+    scope_type, scope_key = _canonical_scope_pair(scope_type, scope_key)
     return (
         _memory_subject_key(record),
-        fold_key(str(attributes.get("scope_type") or "legacy")),
-        fold_key(str(attributes.get("scope_key") or "legacy")),
+        fold_key(scope_type),
+        fold_key(scope_key),
     )
+
+
+# LLM: canonical 只在可识别 scope 类型上做，未知类型/坏值/空占位退回原字符串（fail-closed 隔离，
+# 空 scope 的 "legacy" 占位不得被 canonical 成 "project:legacy" 等真实键）。task:<id> 旧账本
+# 归一到 project:<id>，与写侧合同一致（一个概念一个权威位置）。
+# 函数用途: 把 scope 身份归一到共享合同键，坏值不动。
+def _canonical_scope_pair(scope_type: str, scope_key: str) -> tuple[str, str]:
+    if not scope_key or scope_key == "legacy":
+        return scope_type, scope_key
+    try:
+        from .scope_contract import canonical_scope_key
+
+        canonical = canonical_scope_key(scope_type, scope_key)
+    except (ValueError, TypeError):
+        return scope_type, scope_key
+    if canonical == scope_key:
+        return scope_type, scope_key
+    return scope_type, canonical
 
 
 # LLM: 同一 subject 的不同正文必须返回现有 entry_id，禁止静默覆盖或新增冲突副本。

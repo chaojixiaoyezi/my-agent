@@ -5,6 +5,8 @@ from __future__ import annotations
 # LLM: Gateway 内存 tick 不是运行权威；所有触发、租约和成功游标必须先后写同一个 state.json。
 # 模块用途: 在多线程/多进程下保证同一 owner 同时最多一个 Curator 提交。
 
+import hashlib
+import json
 import os
 import socket
 import uuid
@@ -25,10 +27,19 @@ from .curator_models import (
 )
 
 
+# LLM: 隔离失败退避冷却: 同 error_class 在此窗口内跳过重复隔离尝试(复用上次失败
+# 审计, 不新增行), 期满才再试一条新审计——防 quarantine 长期失败时 run_log 无限刷屏。
+_QUARANTINE_BACKOFF_SECONDS = 300
+
+
 # LLM: 损坏 state 不能被空默认覆盖，否则会丢增量游标并全量重放历史。
 # 类用途: 向维护器和 CLI 暴露稳定的 Curator state 损坏错误。
 class CuratorStateCorruptError(RuntimeError):
-    pass
+    # LLM: error_class 是结构化分类(unreadable/schema_invalid/lease_*/quarantined),
+    # 调用方据此隔离取证,禁止按 message 文本做自然语言匹配。
+    def __init__(self, message: str, *, error_class: str = "unreadable") -> None:
+        super().__init__(message)
+        self.error_class = error_class
 
 
 # LLM: lease 丢失表示另一进程已接管；旧运行不得继续提交或推进 cursor。
@@ -195,13 +206,202 @@ class MemoryCuratorStateStore:
     # LLM: read hook 便于测试注入，生产读取仍走同一严格 parser。
     # 函数用途: 在持锁临界区读取 state。
     def _load_unlocked(self) -> MemoryCuratorState:
+        # LLM: 损坏隔离哨兵存在时 fail-closed：load/request/acquire/commit 全部拒行,
+        # 绝不写空 state、不接管 lease、不推进 cursor,等待人工恢复。
+        if self._sentinel_path().exists():
+            raise CuratorStateCorruptError(
+                "memory curator state is quarantined, awaiting manual recovery",
+                error_class="quarantined",
+            )
         report = read_json_object_report(self.path, context="memory_curator.state")
         if report.load_error:
-            raise CuratorStateCorruptError("memory curator state is unreadable")
+            raise CuratorStateCorruptError(
+                "memory curator state is unreadable", error_class="unreadable"
+            )
         try:
             return MemoryCuratorState.from_dict(report.payload)
         except ValueError as exc:
-            raise CuratorStateCorruptError("memory curator state failed schema validation") from exc
+            raise CuratorStateCorruptError(
+                "memory curator state failed schema validation", error_class="schema_invalid"
+            ) from exc
+
+    # LLM: 损坏 state 被原子 rename 到 quarantine/ 并写哨兵; 原文件保留为不可变副本
+    # (含 cursor/lease/pending), 人工恢复可从副本取回权威游标, 绝不自动从头重跑。
+    # 顺序: 先写哨兵再 rename —— 哨兵写失败时原文件未动; rename 失败时哨兵已存在,
+    # 后续调用凭哨兵补做隔离, 状态机闭合, 无「已隔离但文件未移」的死角。
+    # 函数用途: 原子隔离损坏 state.json 并登记哨兵; 已隔离返回 None(不重复执行)。
+    def quarantine_corrupt(
+        self,
+        *,
+        error_class: str,
+        now: str = "",
+    ) -> dict[str, object] | None:
+        backoff = self._backoff_path()
+        try:
+            result = self._quarantine_corrupt_unlocked(error_class=error_class, now=now)
+            backoff.unlink(missing_ok=True)  # 隔离成功: 清除失败退避(环境已恢复)
+            return result
+        except Exception:
+            # 隔离写失败: 记录退避事实, 冷却窗口内不再重复尝试(防 run_log 无限刷屏)。
+            try:
+                attempt_count = 1
+                if backoff.exists():
+                    try:
+                        prior = json.loads(backoff.read_text(encoding="utf-8"))
+                        attempt_count = int(prior.get("attempt_count") or 0) + 1
+                    except (OSError, UnicodeError, ValueError, TypeError):
+                        attempt_count = 1
+                self.record_quarantine_backoff(
+                    error_class, now=now, attempt_count=attempt_count
+                )
+            except Exception:  # noqa: BLE001 退避留痕失败不掩盖原始隔离错误
+                pass
+            raise
+
+    def _quarantine_corrupt_unlocked(
+        self,
+        *,
+        error_class: str,
+        now: str = "",
+    ) -> dict[str, object] | None:
+        sentinel = self._sentinel_path()
+        if sentinel.exists() and not self.path.exists():
+            return None  # 已完成隔离
+        if not sentinel.exists() and not self.path.exists():
+            return None  # 缺失初始状态, 非损坏场景
+        if sentinel.exists() and self.path.exists():
+            # 哨兵先于 rename 写入、rename 未完成: 凭哨兵记录的路径补做隔离。
+            payload = _read_sentinel_payload(sentinel)
+            target = self.path.parent / str(payload.get("quarantine_path") or "")
+            if target == self.path or self.path.parent not in target.parents:
+                raise CuratorStateCorruptError(
+                    "memory curator quarantine marker has an invalid target",
+                    error_class="quarantine_marker_invalid",
+                )
+            if target.exists():
+                raise CuratorStateCorruptError(
+                    "memory curator quarantine target already exists",
+                    error_class="quarantine_target_exists",
+                )
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(self.path, target)
+            return payload
+        quarantined_at = normalize_iso_time(now, default=utc_now_iso(), allow_empty=False)
+        original_sha256 = _sha256_file(self.path)
+        stamp = quarantined_at.replace(":", "-").replace("+00:00", "Z").replace("+0000", "Z")
+        quarantine_dir = self.path.parent / "quarantine"
+        target = quarantine_dir / f"state-{stamp}-{original_sha256[:8]}.json"
+        payload: dict[str, object] = {
+            "schema": "memory-curator-corrupt-sentinel.v1",
+            "original_path": self.path.name,
+            "quarantine_path": str(target.relative_to(self.path.parent)),
+            "original_sha256": original_sha256,
+            "quarantined_at": quarantined_at,
+            "error_class": error_class,
+            "recovery": "manual",
+        }
+        write_json_file_atomic_unlocked(sentinel, payload, sort_keys=True)
+        quarantine_dir.mkdir(parents=True, exist_ok=True)
+        os.replace(self.path, target)
+        return payload
+
+    # LLM: 哨兵是唯一「已隔离」权威; 重复 run 凭它幂等, 不重复隔离、不伪造自愈。
+    # 函数用途: 返回损坏隔离哨兵元数据; 未隔离返回 None。
+    def corrupt_evidence(self) -> dict[str, object] | None:
+        sentinel = self._sentinel_path()
+        if not sentinel.exists():
+            return None
+        return _read_sentinel_payload(sentinel)
+
+    # LLM: 恢复是运维显式动作: 先原子写回重建 state, 再删哨兵(最后一步)。
+    # 删哨兵失败时哨兵仍在 → 下次恢复幂等重试; 哨兵已不在 → 拒绝重复执行。
+    # 函数用途: 在人工恢复校验通过后, 原子落回恢复 state 并移除隔离哨兵。
+    def restore_after_recovery(
+        self,
+        state: MemoryCuratorState,
+        *,
+        sentinel_evidence: dict[str, object],
+    ) -> MemoryCuratorState:
+        with locked_json_path(self.path):
+            if not self._sentinel_path().exists():
+                raise CuratorStateCorruptError(
+                    "no quarantine marker: nothing to recover",
+                    error_class="recover_noop",
+                )
+            current = _read_sentinel_payload(self._sentinel_path())
+            if current.get("original_sha256") != sentinel_evidence.get("original_sha256"):
+                raise CuratorStateCorruptError(
+                    "quarantine evidence changed during recovery",
+                    error_class="recover_evidence_changed",
+                )
+            self._write_unlocked(state)
+            self._sentinel_path().unlink(missing_ok=False)
+            return state
+
+    # LLM: 隔离写失败不能无限刷 run_log: marker 存在即进入冷却窗口(与 error_class 无关),
+    # 复用上一次失败审计(append 幂等, 不新增行), 冷却期满才再试一条新审计。
+    # error_class 不参与匹配: 隔离失败(如 quarantine 目录被占)后哨兵可能半写残留,
+    # 后续 tick 的损坏检测点漂移(load 报 unreadable → 哨兵检查报 quarantined),
+    # 同 error_class 匹配会把同一故障的镜像误判为新故障, 每 tick 重试 → 无限刷屏。
+    # 函数用途: 判断当前是否仍在隔离失败退避窗口内(环境级冷却)。
+    def quarantine_backoff_eligible(self, error_class: str, now: str = "") -> bool:
+        marker = self._backoff_path()
+        if not marker.exists():
+            return True
+        try:
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+            last = datetime.fromisoformat(str(payload.get("last_attempt_at") or ""))
+        except (OSError, UnicodeError, ValueError, TypeError):
+            return True  # marker 损坏/缺失: 不因退避状态阻断隔离尝试本身
+        if last.tzinfo is None:
+            return True
+        current = datetime.fromisoformat(
+            normalize_iso_time(now, default=utc_now_iso(), allow_empty=False)
+        )
+        elapsed = current.astimezone(timezone.utc) - last.astimezone(timezone.utc)
+        return elapsed.total_seconds() >= _QUARANTINE_BACKOFF_SECONDS
+
+    # LLM: 退避复用只读上次失败事实, 不新建状态; 解析失败视为无退避证据。
+    # 函数用途: 读取隔离失败退避 marker 内容(供复用上次失败审计)。
+    def quarantine_backoff_evidence(self) -> dict[str, object]:
+        marker = self._backoff_path()
+        if not marker.exists():
+            return {}
+        try:
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    # LLM: 退避 marker 只记结构化失败事实; 隔离成功后必须清除, 否则冷却窗口
+    # 会把后续真实损坏误判为退避(隔离成功即证明环境已恢复)。
+    # 函数用途: 记录隔离失败的最后尝试时间/次数/分类/一次性审计 run_id。
+    def record_quarantine_backoff(
+        self,
+        error_class: str,
+        *,
+        now: str = "",
+        attempt_count: int = 1,
+        run_id: str = "",
+    ) -> None:
+        payload = {
+            "schema": "memory-curator-quarantine-backoff.v1",
+            "error_class": str(error_class or "unreadable"),
+            "last_attempt_at": normalize_iso_time(
+                now, default=utc_now_iso(), allow_empty=False
+            ),
+            "attempt_count": max(1, int(attempt_count)),
+            "run_id": str(run_id or "").strip(),
+        }
+        write_json_file_atomic_unlocked(self._backoff_path(), payload, sort_keys=True)
+
+    # 函数用途: 定位损坏隔离哨兵路径(与 state.json 同目录)。
+    def _sentinel_path(self) -> Path:
+        return self.path.with_name("state.corrupt")
+
+    # 函数用途: 定位隔离失败退避 marker 路径(与 state.json 同目录)。
+    def _backoff_path(self) -> Path:
+        return self.path.with_name("state.quarantine-backoff")
 
     # LLM: 所有 state mutation 都用原子 replace，禁止裸 write_text 截断游标文件。
     # 函数用途: 在已持锁状态写回 state。
@@ -218,6 +418,34 @@ def _reason(value: str) -> str:
     return normalized
 
 
+# LLM: 隔离哨兵读取失败同样 fail-closed: 无法证明隔离状态时不得假装已隔离或从头运行。
+# 函数用途: 读取损坏隔离哨兵 JSON 元数据。
+def _read_sentinel_payload(sentinel: Path) -> dict[str, object]:
+    report = read_json_object_report(sentinel, context="memory_curator.corrupt_marker")
+    if report.load_error:
+        raise CuratorStateCorruptError(
+            "memory curator quarantine marker is unreadable",
+            error_class="quarantine_marker_unreadable",
+        )
+    payload = report.payload
+    if not isinstance(payload, dict):
+        raise CuratorStateCorruptError(
+            "memory curator quarantine marker is not an object",
+            error_class="quarantine_marker_unreadable",
+        )
+    return payload
+
+
+# LLM: 原文件 hash 用于隔离副本命名与人工恢复比对, 不读取/保存正文。
+# 函数用途: 计算 state.json 的 sha256 摘要。
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 16), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 # LLM: lease 过期只按结构化 expires_at 判断；解析失败视为损坏而非永远占用。
 # 函数用途: 判断当前 lease 是否仍有效。
 def _lease_live(lease: dict[str, object], *, now: datetime) -> bool:
@@ -226,9 +454,15 @@ def _lease_live(lease: dict[str, object], *, now: datetime) -> bool:
     try:
         expires = datetime.fromisoformat(str(lease.get("expires_at") or ""))
     except ValueError as exc:
-        raise CuratorStateCorruptError("memory curator lease has invalid expires_at") from exc
+        raise CuratorStateCorruptError(
+            "memory curator lease has invalid expires_at",
+            error_class="lease_invalid_expires_at",
+        ) from exc
     if expires.tzinfo is None:
-        raise CuratorStateCorruptError("memory curator lease expires_at lacks timezone")
+        raise CuratorStateCorruptError(
+            "memory curator lease expires_at lacks timezone",
+            error_class="lease_naive_expires_at",
+        )
     return expires.astimezone(timezone.utc) > now.astimezone(timezone.utc)
 
 

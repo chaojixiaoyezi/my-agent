@@ -19,6 +19,10 @@ from .curator_models import MemoryCuratorConfig, MemoryCuratorState
 
 _MESSAGE_PREVIEW_CHARS = 6_000
 _AUDIT_PREVIEW_CHARS = 1_000
+_SUCCESS_TOOL_STATUSES = frozenset(
+    {"success", "succeeded", "ok", "completed", "committed", "applied"}
+)
+_INCOMPLETE_TOOL_EFFECTS = frozenset({"unknown", "not_started", "failed"})
 
 ToolReferenceQuery = Callable[[Path, str, int], dict[str, object]]
 
@@ -90,6 +94,10 @@ class CuratorAuditInput:
     status: str
     operation_id: str
     tool_call_id: str
+    tool_name: str
+    tool_success: bool | None
+    error_code: str
+    effect_outcome: str
     session_id: str
     thread_id: str
     request_id: str
@@ -102,6 +110,29 @@ class CuratorAuditInput:
     artifact_size_bytes: int
     preview: str
 
+    # LLM: Event type plus both tool identity fields come from the owner audit row; an
+    # assistant round with status=ok must never become a tool reference merely by ID lookup.
+    # 函数用途: 判断这是否是一条具有完整宿主身份的真实工具调用事件。
+    def is_tool_call(self) -> bool:
+        tool_name = self.tool_name.strip().lower()
+        return (
+            self.event_type.strip().lower() == "tool_call"
+            and tool_name not in {"", "unknown"}
+            and bool(self.tool_call_id.strip())
+        )
+
+    # LLM: tool_success is the canonical ToolResult.ok projected by the host archive. A known
+    # unknown/not_started effect always fails closed; formal promotion still rechecks the
+    # authoritative operation ledger before any long-term write.
+    # 函数用途: 判断工具事件能否作为 Curator 的成功工具证据。
+    def is_verified_success(self) -> bool:
+        return (
+            self.is_tool_call()
+            and self.tool_success is True
+            and self.status.strip().lower() in _SUCCESS_TOOL_STATUSES
+            and self.effect_outcome.strip().lower() not in _INCOMPLETE_TOOL_EFFECTS
+        )
+
     # LLM: audit 引用不包含正文，只暴露 typed 状态、ID、hash 和 artifact/source refs。
     # 函数用途: 生成一条运行事件的最小证据引用。
     def ref(self) -> dict[str, object]:
@@ -112,6 +143,10 @@ class CuratorAuditInput:
             "status": self.status,
             "operation_id": self.operation_id,
             "tool_call_id": self.tool_call_id,
+            "tool_name": self.tool_name,
+            "tool_success": self.tool_success,
+            "error_code": self.error_code,
+            "effect_outcome": self.effect_outcome,
             "session_id": self.session_id,
             "thread_id": self.thread_id,
             "request_id": self.request_id,
@@ -410,6 +445,9 @@ def _audit_input(payload: dict[str, object]) -> CuratorAuditInput:
         or payload.get("output_ref")
         or ""
     )
+    tool_success = payload.get("tool_success")
+    if not isinstance(tool_success, bool):
+        tool_success = None
     return CuratorAuditInput(
         event_id=str(payload.get("event_id") or ""),
         event_type=str(
@@ -419,6 +457,10 @@ def _audit_input(payload: dict[str, object]) -> CuratorAuditInput:
         status=str(payload.get("status") or payload.get("effect_outcome") or ""),
         operation_id=str(payload.get("operation_id") or ""),
         tool_call_id=str(payload.get("tool_call_id") or payload.get("call_id") or ""),
+        tool_name=str(payload.get("tool_name") or payload.get("tool") or ""),
+        tool_success=tool_success,
+        error_code=str(payload.get("error_code") or ""),
+        effect_outcome=str(payload.get("effect_outcome") or ""),
         session_id=str(payload.get("session_id") or ""),
         thread_id=str(payload.get("thread_id") or ""),
         request_id=str(payload.get("request_id") or payload.get("gateway_request_id") or ""),

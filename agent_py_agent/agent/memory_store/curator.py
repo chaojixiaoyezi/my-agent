@@ -7,13 +7,16 @@ from __future__ import annotations
 # 模块用途: 调度增量策展、严格模型提取、整批提交、失败审计与保守自动晋升。
 
 import json
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from .candidate_models import CandidateObservation, utc_now_iso
+from ..common.json_io import read_json_object_report
+
+from .candidate_models import CandidateObservation, MemoryScope, utc_now_iso
 from .candidates import CandidateService
 from .curator_backend import (
     CuratorModelTimeoutError,
@@ -37,12 +40,15 @@ from .curator_models import (
     CuratorRunResult,
     MemoryCuratorConfig,
     MemoryCuratorState,
+    validate_curator_state,
 )
 from .curator_run_log import CuratorRunLog, CuratorRunRecord
 from .curator_state import (
     CuratorLeaseLostError,
+    CuratorStateCorruptError,
     CuratorSuccessCommit,
     MemoryCuratorStateStore,
+    _sha256_file,
 )
 from .curator_validation import CuratorCursorAdvance, next_cursors, validate_extraction
 from .daily import DailyMemoryEvent, DailyMemoryStore
@@ -112,47 +118,10 @@ class _RunContext:
     recovery: dict[str, object]
 
 
-# LLM: This is the only background Memory extraction service used by Gateway maintenance, CLI,
-# compact, task completion, and lifecycle signals.
-# 类用途: 执行一个 owner 的增量 Daily/Candidate 策展闭环。
-class MemoryCuratorService:
-    # LLM: Construction wires existing canonical services and creates only a transaction
-    # coordinator; it starts no thread, daemon, or second scheduler.
-    # 函数用途: 初始化唯一 Curator 服务及其可恢复提交器。
-    def __init__(
-        self,
-        *,
-        config: MemoryCuratorConfig,
-        dependencies: MemoryCuratorDependencies,
-    ) -> None:
-        self.config = config
-        self.dependencies = dependencies
-        self.backend = dependencies.backend
-        self.conversation_store = dependencies.conversation_store
-        self.audit_dir = Path(dependencies.audit_dir)
-        self.state_store = dependencies.state_store
-        self.daily_store = dependencies.daily_store
-        self.candidate_service = dependencies.candidate_service
-        self.run_log = dependencies.run_log
-        self.runs_dir = self.run_log.runs_dir
-        self.identity = dependencies.identity
-        self.provider_name = self.identity.provider or str(
-            getattr(self.backend, "name", "") or ""
-        )
-        self.model_name = self.identity.model
-        self.owner_id = self.identity.owner_id.strip()
-        self.timezone_name = self.identity.timezone_name.strip()
-        self.formal_memory_source = dependencies.formal_memory_source
-        self.tool_reference_source = dependencies.tool_reference_source
-        self.promotion_callback = dependencies.promotion_callback
-        self.migration_service = dependencies.migration_service
-        self.committer = CuratorBatchCommitter(
-            candidate_service=self.candidate_service,
-            daily_store=self.daily_store,
-            state_store=self.state_store,
-            run_log=self.run_log,
-        )
-
+# LLM: 触发/调度/失败结果与执行链分离:Lifecycle 只做持久化触发、lease 获取与结果构造,
+# 不直接读写 Daily/Candidate。
+# 类用途: 提供 Curator 触发登记、到期调度与失败结果构造。
+class _CuratorLifecycleMixin:
     # LLM: Triggers persist only a reason; compact/task/channel paths never call the model or
     # write Daily/long-term synchronously.
     # 函数用途: 幂等登记一次统一后台策展请求。
@@ -171,7 +140,10 @@ class MemoryCuratorService:
     def run_if_due(self, *, now: datetime | None = None) -> CuratorRunResult:
         if not self.config.enabled:
             return self._result(status="disabled", reason="interval")
-        state = self.state_store.load()
+        try:
+            state = self.state_store.load()
+        except CuratorStateCorruptError as exc:
+            return self._corrupt_failure("interval", exc)
         current = _localized_now(now, self.timezone_name)
         pending = _pending_reason(state.pending_reasons)
         if pending:
@@ -210,14 +182,21 @@ class MemoryCuratorService:
             return self._result(status="disabled", reason=reason)
         try:
             self.committer.recover_incomplete(now=now)
+        except CuratorStateCorruptError as exc:
+            # 崩溃恢复阶段也读 state: 损坏同样隔离留证, 不进无落账的 unleased 路径。
+            return self._corrupt_failure(reason, exc)
         except Exception as exc:
             return self._unleased_failure(reason, _failure_code(exc))
-        acquired = self.state_store.acquire(
-            reason=reason,
-            config_revision=self.config.revision(),
-            lease_seconds=_lease_seconds(self.config),
-            now=now,
-        )
+        try:
+            acquired = self.state_store.acquire(
+                reason=reason,
+                config_revision=self.config.revision(),
+                lease_seconds=_lease_seconds(self.config),
+                now=now,
+            )
+        except CuratorStateCorruptError as exc:
+            # 损坏 state 拒绝接管: 不 acquire、不消费、不自动重跑, 隔离留证转人工。
+            return self._corrupt_failure(reason, exc)
         if acquired is None:
             return self._result(status="busy", reason=reason)
         context = _run_context(reason, *acquired)
@@ -225,28 +204,6 @@ class MemoryCuratorService:
             return self._execute(context)
         except Exception as exc:
             return self._commit_failure(context, exc)
-
-    # LLM: Status exposes configuration and durable health only; no prompt, response, formal
-    # memory, candidate body, or user content is returned.
-    # 函数用途: 为 CLI/doctor 返回 Curator 当前配置与 state。
-    def status(self) -> dict[str, object]:
-        state = self.state_store.load()
-        return {
-            "enabled": self.config.enabled,
-            "provider": self.provider_name,
-            "model": self.model_name,
-            "config": {
-                "interval_seconds": self.config.interval_seconds,
-                "turn_threshold": self.config.turn_threshold,
-                "batch_message_limit": self.config.batch_message_limit,
-                "max_input_chars": self.config.max_input_chars,
-                "timeout_seconds": self.config.timeout_seconds,
-                "max_retries": self.config.max_retries,
-                "daily_finalize_hour": self.config.daily_finalize_hour,
-                "auto_promotion_policy": self.config.auto_promotion_policy,
-            },
-            "state": state.to_dict(),
-        }
 
     # LLM: Cooldown applies only to a durable failed pending request; it bounds provider retries
     # without deleting the reason or skipping input.
@@ -267,8 +224,193 @@ class MemoryCuratorService:
             return self._result(status="not_due", reason=pending)
         return self.run(reason=pending, now=current)
 
-    # LLM: Extraction and evidence validation complete before the transaction receives any
-    # canonical target content.
+    # LLM: Failure audit is appended before releasing the lease; old cursors and pending reasons
+    # remain, making a later retry safe.
+    # 函数用途: 记录一次持 lease 运行失败并返回稳定结果。
+    def _commit_failure(
+        self,
+        context: _RunContext,
+        exc: BaseException,
+    ) -> CuratorRunResult:
+        failure_code = _failure_code(exc)
+        finished_at = utc_now_iso()
+        try:
+            self.run_log.append(
+                _failed_run_record(
+                    context,
+                    provider=self.provider_name,
+                    model=self.model_name,
+                    finished_at=finished_at,
+                    failure_code=failure_code,
+                )
+            )
+        except Exception:
+            failure_code = "CURATOR_RUN_AUDIT_FAILED"
+        try:
+            self.state_store.commit_failure(
+                lease_id=context.lease_id,
+                failure_code=failure_code,
+                now=finished_at,
+            )
+        except CuratorStateCorruptError as exc:
+            # 失败落账阶段发现 state 损坏: 同样隔离留证, 不推进任何事实。
+            return self._corrupt_failure(context.reason, exc)
+        except CuratorLeaseLostError:
+            pass
+        return CuratorRunResult(
+            run_id=context.run_id,
+            status="failed",
+            reason=context.reason,
+            provider=self.provider_name,
+            model=self.model_name,
+            failure_code=failure_code,
+        )
+
+    # LLM: 损坏 state 的失败路径与普通失败分离: 独立错误码 CURATOR_STATE_CORRUPT(不伪装
+    # CURATOR_SCHEMA_INVALID), 原子 quarantine 原文件留不可变副本, run_log 落幂等审计。
+    # 哨兵存在后不再重复隔离; quarantine/哨兵写失败转 CURATOR_STATE_QUARANTINE_FAILED
+    # 保持可观测, 每 tick 单次尝试, 绝不循环重试或伪造自愈成功。
+    # 函数用途: 返回损坏隔离后的稳定失败结果并落无正文审计。
+    def _corrupt_failure(self, reason: str, exc: CuratorStateCorruptError) -> CuratorRunResult:
+        failure_code = "CURATOR_STATE_CORRUPT"
+        finished_at = utc_now_iso()
+        # 隔离失败退避: 同 error_class 在冷却窗口内复用上次失败审计(不新增行),
+        # 期满才再试——防 quarantine 长期失败时 run_log 无限刷屏。
+        if not self.state_store.quarantine_backoff_eligible(exc.error_class, now=finished_at):
+            return self._quarantine_backoff_reuse(reason, exc, finished_at)
+        quarantine: dict[str, object] | None = None
+        try:
+            quarantine = self.state_store.quarantine_corrupt(
+                error_class=exc.error_class,
+                now=finished_at,
+            )
+        except Exception:
+            failure_code = "CURATOR_STATE_QUARANTINE_FAILED"
+        if failure_code == "CURATOR_STATE_QUARANTINE_FAILED":
+            # 隔离写失败: 每次尝试都是独立失败事件。哨兵可能已由本次尝试半写成功,
+            # 不能用哨兵时间/派生 run_id(会与后续成功隔离的幂等记录碰撞); 用当前时刻
+            # + 一次性 run_id, 失败可观测且每次可见, 不伪造幂等。
+            run_id = "memory-curator-corrupt-" + uuid.uuid4().hex
+            record_time = finished_at
+            quarantine = {}
+            try:
+                # 记录退避事实(含本次一次性 run_id): 冷却窗口内复用本审计, 不新增行。
+                self.state_store.record_quarantine_backoff(
+                    exc.error_class, now=finished_at, run_id=run_id
+                )
+            except Exception:  # noqa: BLE001 退避留痕失败不掩盖隔离失败本身
+                pass
+        else:
+            if quarantine is None:
+                try:
+                    quarantine = self.state_store.corrupt_evidence() or {}
+                except Exception:
+                    quarantine = {}
+            run_id = _corrupt_run_id(quarantine)
+            # 审计时间戳用隔离时间(首次)或哨兵时间(重复 run): record_id 稳定, 幂等合并不刷屏。
+            record_time = str(quarantine.get("quarantined_at") or finished_at)
+        warnings = [
+            f"state_quarantined:{path}"
+            for path in [str(quarantine.get("quarantine_path") or "")]
+            if path
+        ]
+        record = CuratorRunRecord(
+            run_id=run_id,
+            lease_id="",
+            status="failed",
+            reason=reason,
+            provider=self.provider_name,
+            model=self.model_name,
+            started_at=record_time,
+            finished_at=record_time,
+            failure_code=failure_code,
+            warnings=tuple(warnings),
+        )
+        try:
+            self.run_log.append(record)
+        except Exception:
+            failure_code = "CURATOR_RUN_AUDIT_FAILED"
+        return CuratorRunResult(
+            run_id=run_id,
+            status="failed",
+            reason=reason,
+            provider=self.provider_name,
+            model=self.model_name,
+            failure_code=failure_code,
+        )
+
+    # LLM: 退避窗口内不重复尝试隔离, 复用上一次失败审计: 同 run_id/时间 → append
+    # 幂等合并不新增行(record_id 稳定), 失败仍可观测(上次审计在), 不伪造自愈。
+    # 函数用途: 隔离失败冷却期内返回与上次一致的可观测失败结果。
+    def _quarantine_backoff_reuse(
+        self,
+        reason: str,
+        exc: CuratorStateCorruptError,
+        finished_at: str,
+    ) -> CuratorRunResult:
+        marker = self.state_store.quarantine_backoff_evidence()
+        run_id = str(marker.get("run_id") or "").strip()
+        if not run_id:
+            run_id = "memory-curator-corrupt-" + uuid.uuid4().hex
+        record_time = str(marker.get("last_attempt_at") or finished_at)
+        record = CuratorRunRecord(
+            run_id=run_id,
+            lease_id="",
+            status="failed",
+            reason=reason,
+            provider=self.provider_name,
+            model=self.model_name,
+            started_at=record_time,
+            finished_at=record_time,
+            failure_code="CURATOR_STATE_QUARANTINE_FAILED",
+            warnings=(),
+        )
+        failure_code = "CURATOR_STATE_QUARANTINE_FAILED"
+        try:
+            self.run_log.append(record)  # 幂等: 同 record_id 合并不新增行
+        except Exception:
+            failure_code = "CURATOR_RUN_AUDIT_FAILED"
+        return CuratorRunResult(
+            run_id=run_id,
+            status="failed",
+            reason=reason,
+            provider=self.provider_name,
+            model=self.model_name,
+            failure_code=failure_code,
+        )
+
+    # LLM: A recovery error before lease acquisition cannot safely mutate state or fabricate a
+    # run ID; the pending durable request remains available for operator repair/retry.
+    # 函数用途: 返回未取得 lease 时的稳定失败结果。
+    def _unleased_failure(self, reason: str, failure_code: str) -> CuratorRunResult:
+        return CuratorRunResult(
+            run_id="",
+            status="failed",
+            reason=reason,
+            provider=self.provider_name,
+            model=self.model_name,
+            failure_code=failure_code,
+        )
+
+    # LLM: Simple non-running results share one enum validation and never synthesize a run ID.
+    # 函数用途: 构造 disabled、busy 或 not_due 结果。
+    def _result(self, *, status: str, reason: str) -> CuratorRunResult:
+        if status not in _RUN_STATUSES:
+            raise ValueError("unsupported memory curator result status")
+        return CuratorRunResult(
+            run_id="",
+            status=status,
+            reason=reason,
+            provider=self.provider_name,
+            model=self.model_name,
+        )
+
+
+# LLM: 提取/提交/晋升链与触发调度分离:Execution 只消费已持 lease 的上下文,把输入快照、
+# 模型提取、整批事务和提交后晋升收拢在一条可审计路径上。
+# 类用途: 提供 Curator 的持 lease 执行链。
+class _CuratorExecutionMixin:
+    # LLM: Extraction/evidence validation 全部在事务收到任何权威内容前完成。
     # 函数用途: 执行一个已持 lease 的提取、整批提交与提交后晋升。
     def _execute(self, context: _RunContext) -> CuratorRunResult:
         migration_warnings = self._preflight_migration()
@@ -285,9 +427,7 @@ class MemoryCuratorService:
             context, batch, validated, extra_warnings=migration_warnings
         )
 
-    # LLM: 升级自愈:legacy(v1 前)数据会在正式记忆读取时破坏读路径,所以必须在每次持 lease
-    # 提炼前自动迁移;apply 幂等(marker guard),失败只记 warning 不阻断提炼(读路径已容错,
-    # 下轮再试)。这是升级/部署/迁移永不因旧数据瘫痪的机制层兜底,不是一次性手工操作。
+    # LLM: 升级自愈:每次持 lease 提炼前幂等应用 Memory v2 迁移,失败只记 warning 不阻断。
     # 函数用途: 每次执行前应用 Memory v2 迁移,返回可展示的迁移 warning。
     def _preflight_migration(self) -> tuple[str, ...]:
         if self.migration_service is None:
@@ -303,8 +443,50 @@ class MemoryCuratorService:
             )
         return ()
 
-    # LLM: The batch committer writes state last; automatic promotion starts only after that
-    # transaction succeeds and cannot retroactively invalidate its cursor.
+    # LLM: Formal memory 走固定子预算;due 检查省略它,实际 run 包含它而不动游标契约。
+    # 函数用途: 收集一次有界增量输入快照。
+    def _collect(
+        self,
+        state: MemoryCuratorState,
+        *,
+        include_formal: bool,
+    ) -> CuratorInputBatch:
+        formal = ()
+        formal_memory_errors: list[dict[str, object]] = []
+        if include_formal and self.formal_memory_source is not None:
+            try:
+                formal = self.formal_memory_source.read(
+                    max_items=32,
+                    max_chars=min(6_000, max(1_000, self.config.max_input_chars // 4)),
+                )
+            except Exception as exc:
+                # 正式记忆是增强输入非主链依赖:读取失败降级为空并记入错误,不阻断提炼。
+                formal_memory_errors.append(
+                    {"code": _failure_code(exc), "detail": str(exc)[:200]}
+                )
+        formal_chars = len(
+            json.dumps([item.to_model() for item in formal], ensure_ascii=False)
+        )
+        input_config = replace(
+            self.config,
+            max_input_chars=max(
+                2_000,
+                self.config.max_input_chars - 7_000 - formal_chars,
+            ),
+        )
+        batch = collect_curator_inputs(
+            conversation_store=self.conversation_store,
+            audit_dir=self.audit_dir,
+            state=state,
+            config=input_config,
+            formal_memories=formal,
+            tool_reference_source=self.tool_reference_source,
+        )
+        if formal_memory_errors:
+            batch = replace(batch, formal_memory_errors=tuple(formal_memory_errors))
+        return batch
+
+    # LLM: committer 最后写 state;自动晋升只在事务成功后开始,不能回溯失效其游标。
     # 函数用途: 构造 Daily/Candidate、游标、run audit 并整批提交。
     def _commit_batch(
         self,
@@ -346,9 +528,30 @@ class MemoryCuratorService:
             raise
         except Exception as exc:
             raise CuratorBatchCommitError("curator batch commit failed") from exc
-        promoted, promotion_warnings = self._promote_eligible(
-            [item.candidate_id for item in committed.candidates]
+        return self._post_commit_report(
+            context, batch, prepared, committed, extra_warnings
         )
+
+    # LLM: 自动晋升在事务成功后执行,失败与已成功事务隔离且保持可重试。
+    # 函数用途: 提交成功后执行自动晋升并构造成功结果。
+    def _post_commit_report(
+        self,
+        context: _RunContext,
+        batch: CuratorInputBatch,
+        prepared: _PreparedOutputs,
+        committed: CuratorBatchCommit,
+        extra_warnings: tuple[str, ...],
+    ) -> CuratorRunResult:
+        # 权限合同:提交后的自动晋升同样只消费宿主已标 auto_eligible 的候选
+        # (与 _pending_promotable_candidate_ids 同判据,不重复走 selector 而直接过滤);
+        # lesson/hot/subagent/model_inferred 的 manual_required 候选永不回调晋升。
+        promotable = [
+            item.candidate_id
+            for item in committed.candidates
+            if str(getattr(item, "promotion_mode", "") or "").strip().lower()
+            == "auto_eligible"
+        ]
+        promoted, promotion_warnings = self._promote_eligible(promotable)
         warnings = (
             *prepared.warnings,
             *extra_warnings,
@@ -373,63 +576,12 @@ class MemoryCuratorService:
             warnings=warnings,
         )
 
-    # LLM: Formal memory has its own fixed sub-budget; due checks omit it and actual runs include
-    # it without reducing the exact ConversationStore/audit cursor contract.
-    # 函数用途: 收集一次有界增量输入快照。
-    def _collect(
-        self,
-        state: MemoryCuratorState,
-        *,
-        include_formal: bool,
-    ) -> CuratorInputBatch:
-        formal = ()
-        formal_memory_errors: list[dict[str, object]] = []
-        if include_formal and self.formal_memory_source is not None:
-            try:
-                formal = self.formal_memory_source.read(
-                    max_items=32,
-                    max_chars=min(6_000, max(1_000, self.config.max_input_chars // 4)),
-                )
-            except Exception as exc:
-                # 正式记忆(lessons/hot/long_term)是增强输入而非主链依赖:读取失败降级为空
-                # 并记入可降级错误,不阻断本次提炼(legacy/损坏文件的正式迁移由
-                # migration_service 自愈,读路径对单文件异常保持容错)。
-                formal_memory_errors.append(
-                    {"code": _failure_code(exc), "detail": str(exc)[:200]}
-                )
-        formal_chars = len(
-            json.dumps([item.to_model() for item in formal], ensure_ascii=False)
-        )
-        input_config = replace(
-            self.config,
-            max_input_chars=max(
-                2_000,
-                self.config.max_input_chars - 7_000 - formal_chars,
-            ),
-        )
-        batch = collect_curator_inputs(
-            conversation_store=self.conversation_store,
-            audit_dir=self.audit_dir,
-            state=state,
-            config=input_config,
-            formal_memories=formal,
-            tool_reference_source=self.tool_reference_source,
-        )
-        if formal_memory_errors:
-            batch = replace(batch, formal_memory_errors=tuple(formal_memory_errors))
-        return batch
-
-    # LLM: Promotion consumes only committed candidate IDs through the unique PromotionService;
-    # failure is isolated from the already-successful Curator transaction and remains retryable.
+    # LLM: 晋升只消费已提交候选 ID;失败与已成功事务隔离且保持可重试。
     # 函数用途: 执行保守自动晋升并返回数量和稳定警告码。
     def _pending_promotable_candidate_ids(self, *, limit: int = 32) -> list[str]:
-        """返回已落库、待晋升的合格候选 ID(纯结构化:只读 pending_review 状态,不解析正文)。
-
-        LLM: 用于 run_if_due 无新消息时的晋升兜底;取 user_explicit/tool_verified 且
-        promotion_target=long_term 的候选,以及 lesson 类型候选(promote 会自动再校验,
-        这里只是候选集)。lesson 专线与事实线并列:model_inferred/subagent_lesson 的
-        lesson 候选由 _automatic_policy_block 放行,重复/证据门槛在落库时强制。
-        失败静默返回空,绝不外抛。
+        """已落库、待晋升的合格候选 ID(纯结构化:只读 pending_review 状态;失败静默返空)。
+        LLM: 只取宿主已标 auto_eligible 的 user_explicit/tool_verified long_term 候选;
+        lesson/hot/subagent/model_inferred 一律 manual_required,永不出现在选择器。
         """
         try:
             rows = self.candidate_service.list(statuses={"pending_review"}, limit=limit)
@@ -437,15 +589,14 @@ class MemoryCuratorService:
             for row in rows:
                 origin = str(getattr(row, "origin", "") or "").strip().lower()
                 target = str(getattr(row, "promotion_target", "") or "").strip().lower()
-                candidate_type = str(getattr(row, "candidate_type", "") or "").strip().lower()
+                mode = str(getattr(row, "promotion_mode", "") or "").strip().lower()
+                # 权限闸:非 auto_eligible(含 legacy 归一 manual_required)一律不选。
+                if mode != "auto_eligible":
+                    continue
                 # user_explicit/tool_verified:target 为空或 long_term 都算可晋升候选——
                 # promote 入口会把 target=none 的 user_explicit 长期事实补成 long_term
                 # (模型偶发漏写 target,宿主确定性补全)。model_inferred/Persona 一律排除。
                 if origin in {"user_explicit", "tool_verified"} and target in {"", "none", "long_term"}:
-                    ids.append(str(getattr(row, "candidate_id", "") or ""))
-                    continue
-                # lesson 专线:模型/子代理推断的 lesson 候选(重复出现+多证据组才过落库门槛)。
-                if candidate_type == "lesson" and target == "lesson":
                     ids.append(str(getattr(row, "candidate_id", "") or ""))
             return ids
         except Exception:
@@ -466,70 +617,232 @@ class MemoryCuratorService:
                 promoted += 1
         return promoted, tuple(dict.fromkeys(warnings))
 
-    # LLM: Failure audit is appended before releasing the lease; old cursors and pending reasons
-    # remain, making a later retry safe.
-    # 函数用途: 记录一次持 lease 运行失败并返回稳定结果。
-    def _commit_failure(
+
+# LLM: This is the only background Memory extraction service used by Gateway maintenance, CLI,
+# compact, task completion, and lifecycle signals.
+# 类用途: 执行一个 owner 的增量 Daily/Candidate 策展闭环。
+class MemoryCuratorService(_CuratorExecutionMixin, _CuratorLifecycleMixin):
+    # LLM: Construction wires existing canonical services and creates only a transaction
+    # coordinator; it starts no thread, daemon, or second scheduler.
+    # 函数用途: 初始化唯一 Curator 服务及其可恢复提交器。
+    def __init__(
         self,
-        context: _RunContext,
-        exc: BaseException,
-    ) -> CuratorRunResult:
-        failure_code = _failure_code(exc)
-        finished_at = utc_now_iso()
+        *,
+        config: MemoryCuratorConfig,
+        dependencies: MemoryCuratorDependencies,
+    ) -> None:
+        self.config = config
+        self.dependencies = dependencies
+        self.backend = dependencies.backend
+        self.conversation_store = dependencies.conversation_store
+        self.audit_dir = Path(dependencies.audit_dir)
+        self.state_store = dependencies.state_store
+        self.daily_store = dependencies.daily_store
+        self.candidate_service = dependencies.candidate_service
+        self.run_log = dependencies.run_log
+        self.runs_dir = self.run_log.runs_dir
+        self.identity = dependencies.identity
+        self.provider_name = self.identity.provider or str(
+            getattr(self.backend, "name", "") or ""
+        )
+        self.model_name = self.identity.model
+        self.owner_id = self.identity.owner_id.strip()
+        self.timezone_name = self.identity.timezone_name.strip()
+        self.formal_memory_source = dependencies.formal_memory_source
+        self.tool_reference_source = dependencies.tool_reference_source
+        self.promotion_callback = dependencies.promotion_callback
+        self.migration_service = dependencies.migration_service
+        self.committer = CuratorBatchCommitter(
+            candidate_service=self.candidate_service,
+            daily_store=self.daily_store,
+            state_store=self.state_store,
+            run_log=self.run_log,
+        )
+
+    # LLM: Status exposes configuration and durable health only; no prompt, response, formal
+    # memory, candidate body, or user content is returned.
+    # 函数用途: 为 CLI/doctor 返回 Curator 当前配置与 state。
+    def recover(self) -> dict[str, object]:
+        """人工恢复通道(CLI memory curator recover): 凭权威审计链重建 state 解除隔离。
+
+        审计 seq1477 门槛2: 恢复须结构化/幂等/可审计, 不能由普通文本或「删哨兵」
+        单步触发。校验链(全部通过才执行任何写):
+          1. 隔离副本存在且 sha256 与哨兵一致(隔离完整性/防篡改)
+          2. run_log 存在成功审计 → 恢复点 = 最后一条成功 cursor_after(权威连续
+             账本; 损坏 run 被 fail-closed 从不 commit, 不可能越界推进成功链)
+          3. 副本可解析时其游标与最后成功审计等值(双向证明); 不等 → 拒绝转人工
+        全部通过 → 重建 state(游标=权威点, 清不可信 lease, 保留可解析副本的
+        pending/last_* 字段) → 先原子写 state 再删哨兵 → 恢复事件以
+        recovered_rollback/recovery 形态落 run_log 审计。
+        任一校验失败 → 拒绝执行(refused + 结构化原因), 不伪造自愈成功。
+        """
+        evidence = self.state_store.corrupt_evidence()
+        if evidence is None:
+            return {"status": "noop", "reason": "no_quarantine_marker"}
+        # 1. 隔离副本完整性: 存在 + hash 与哨兵一致
+        quarantine_path = self.state_store.path.parent / str(
+            evidence.get("quarantine_path") or ""
+        )
+        if not quarantine_path.is_file():
+            return {
+                "status": "refused",
+                "reason": "quarantine_copy_missing",
+                "evidence": _recover_evidence_summary(evidence),
+            }
+        if _sha256_file(quarantine_path) != str(evidence.get("original_sha256") or ""):
+            return {
+                "status": "refused",
+                "reason": "quarantine_copy_mismatch",
+                "evidence": _recover_evidence_summary(evidence),
+            }
+        # 2. 权威审计链: 成功记录按时间升序, 恢复点 = 最后一条 cursor_after
+        succeeded = [r for r in self.run_log.list() if r.status == "succeeded"]
+        if not succeeded:
+            return {
+                "status": "refused",
+                "reason": "no_authoritative_audit",
+                "evidence": _recover_evidence_summary(evidence),
+            }
+        last_success = succeeded[-1]
+        authoritative = last_success.cursor_after
+        if not isinstance(authoritative, dict) or not authoritative:
+            return {
+                "status": "refused",
+                "reason": "no_authoritative_cursor",
+                "evidence": _recover_evidence_summary(evidence),
+            }
+        # 3. 副本可解析时: 游标与审计链双向等值(未分裂/未越界)
+        copy_payload: dict[str, object] | None = None
+        try:
+            report = read_json_object_report(
+                quarantine_path, context="memory_curator.quarantine_copy"
+            )
+            if not report.load_error:
+                copy_payload = report.payload
+        except Exception:  # noqa: BLE001 副本解析失败不阻断(走纯审计重建)
+            copy_payload = None
+        if isinstance(copy_payload, dict):
+            copy_cursors = copy_payload.get("per_thread_cursors")
+            auth_cursors = authoritative.get("per_thread_cursors")
+            if isinstance(copy_cursors, dict) and copy_cursors != auth_cursors:
+                return {
+                    "status": "refused",
+                    "reason": "cursor_mismatch_with_audit",
+                    "evidence": _recover_evidence_summary(evidence),
+                }
+            copy_audit = copy_payload.get("last_processed_audit_event_id")
+            auth_audit = authoritative.get("last_audit_event_id")
+            if (
+                copy_audit is not None
+                and str(copy_audit or "") != str(auth_audit or "")
+            ):
+                return {
+                    "status": "refused",
+                    "reason": "audit_event_id_mismatch",
+                    "evidence": _recover_evidence_summary(evidence),
+                }
+        # 4. 重建 state: 游标/审计 = 权威链; 副本可解析时保留 pending/last_* 字段
+        try:
+            if isinstance(copy_payload, dict):
+                restored = MemoryCuratorState.from_dict(copy_payload)
+            else:
+                restored = MemoryCuratorState()
+            restored = replace(
+                restored,
+                last_processed_message_id=str(
+                    authoritative.get("last_processed_message_id") or ""
+                ),
+                last_processed_audit_event_id=str(
+                    authoritative.get("last_audit_event_id") or ""
+                ),
+                per_thread_cursors=dict(authoritative.get("per_thread_cursors") or {}),
+                active_lease={},  # 损坏前 lease 不可信, 绝不接管
+                last_failure_at="",
+                last_failure_code="",
+                last_committed_run_id=last_success.run_id,
+            )
+            if not isinstance(copy_payload, dict):
+                # 副本不可解析(unreadable): 计数从权威审计链累计(恢复点不丢账)。
+                restored = replace(
+                    restored,
+                    processed_count=sum(
+                        int(r.processed_messages or 0) + int(r.processed_audit_events or 0)
+                        for r in succeeded
+                    ),
+                    candidate_count=sum(int(r.candidates or 0) for r in succeeded),
+                    daily_event_count=sum(int(r.daily_events or 0) for r in succeeded),
+                )
+            validate_curator_state(restored)
+        except (TypeError, ValueError):
+            return {
+                "status": "refused",
+                "reason": "restored_state_invalid",
+                "evidence": _recover_evidence_summary(evidence),
+            }
+        # 5. 原子落回 + 删哨兵(最后一步), 然后写恢复审计
+        recovered_at = utc_now_iso()
+        try:
+            self.state_store.restore_after_recovery(
+                restored, sentinel_evidence=evidence
+            )
+        except CuratorStateCorruptError as exc:
+            return {
+                "status": "refused",
+                "reason": str(exc.error_class or "restore_failed"),
+                "evidence": _recover_evidence_summary(evidence),
+            }
+        audit_ok = True
         try:
             self.run_log.append(
-                _failed_run_record(
-                    context,
+                CuratorRunRecord(
+                    run_id="memory-curator-recover-" + uuid.uuid4().hex,
+                    lease_id="",
+                    status="recovered_rollback",
+                    phase="recovery",
+                    reason="admin",
                     provider=self.provider_name,
                     model=self.model_name,
-                    finished_at=finished_at,
-                    failure_code=failure_code,
+                    started_at=recovered_at,
+                    finished_at=recovered_at,
+                    cursor_after=dict(authoritative),
+                    recovery={
+                        "kind": "manual_from_quarantine",
+                        "sentinel_sha256": str(evidence.get("original_sha256") or ""),
+                        "quarantine_path": str(evidence.get("quarantine_path") or ""),
+                        "error_class": str(evidence.get("error_class") or ""),
+                        "restored_from_run_id": last_success.run_id,
+                        "restored_at": recovered_at,
+                    },
                 )
             )
-        except Exception:
-            failure_code = "CURATOR_RUN_AUDIT_FAILED"
-        try:
-            self.state_store.commit_failure(
-                lease_id=context.lease_id,
-                failure_code=failure_code,
-                now=finished_at,
-            )
-        except CuratorLeaseLostError:
-            pass
-        return CuratorRunResult(
-            run_id=context.run_id,
-            status="failed",
-            reason=context.reason,
-            provider=self.provider_name,
-            model=self.model_name,
-            failure_code=failure_code,
-        )
+        except Exception:  # noqa: BLE001 审计写失败不阻断已完成的恢复, 如实标注
+            audit_ok = False
+        return {
+            "status": "recovered",
+            "reason": "restored_from_authoritative_audit",
+            "restored_from_run_id": last_success.run_id,
+            "audit_recorded": audit_ok,
+            "evidence": _recover_evidence_summary(evidence),
+        }
 
-    # LLM: A recovery error before lease acquisition cannot safely mutate state or fabricate a
-    # run ID; the pending durable request remains available for operator repair/retry.
-    # 函数用途: 返回未取得 lease 时的稳定失败结果。
-    def _unleased_failure(self, reason: str, failure_code: str) -> CuratorRunResult:
-        return CuratorRunResult(
-            run_id="",
-            status="failed",
-            reason=reason,
-            provider=self.provider_name,
-            model=self.model_name,
-            failure_code=failure_code,
-        )
-
-    # LLM: Simple non-running results share one enum validation and never synthesize a run ID.
-    # 函数用途: 构造 disabled、busy 或 not_due 结果。
-    def _result(self, *, status: str, reason: str) -> CuratorRunResult:
-        if status not in _RUN_STATUSES:
-            raise ValueError("unsupported memory curator result status")
-        return CuratorRunResult(
-            run_id="",
-            status=status,
-            reason=reason,
-            provider=self.provider_name,
-            model=self.model_name,
-        )
+    def status(self) -> dict[str, object]:
+        state = self.state_store.load()
+        return {
+            "enabled": self.config.enabled,
+            "provider": self.provider_name,
+            "model": self.model_name,
+            "config": {
+                "interval_seconds": self.config.interval_seconds,
+                "turn_threshold": self.config.turn_threshold,
+                "batch_message_limit": self.config.batch_message_limit,
+                "max_input_chars": self.config.max_input_chars,
+                "timeout_seconds": self.config.timeout_seconds,
+                "max_retries": self.config.max_retries,
+                "daily_finalize_hour": self.config.daily_finalize_hour,
+                "auto_promotion_policy": self.config.auto_promotion_policy,
+            },
+            "state": state.to_dict(),
+        }
 
 
 # LLM: Prepared outputs bind host-created Daily records, canonical candidate observations, exact
@@ -572,27 +885,53 @@ def _prepare_outputs(
     )
     # 宿主确定性补全:模型偶发漏写 promotion_target 时,对"用户明确要求记住的长期事实/事件候选"
     # (user_explicit + long_term_fact/event + 空 target)补成 long_term——这是用户显式表达,符合
-    # 自主晋升语义;不补 model_inferred/Persona/lesson 等(那些必须人工)。纯结构化规则,不猜正文。
+    # 自主晋升语义;不补 model_inferred/Persona/lesson 等(那些必须人工)。同时按定版合同给
+    # 每条提炼候选确定性赋 promotion_mode(合格 user/tool 新 long_term fact/event/project→
+    # auto_eligible,其余一律 manual_required)。纯结构化规则,不猜正文,模型 Schema 不暴露该字段。
     candidates = tuple(
-        _fill_candidate_promotion_target(item) for item in extraction.candidates
+        _fill_candidate_promotion_authority(item) for item in extraction.candidates
     )
     return _PreparedOutputs(daily, candidates, cursor, tuple(extraction.warnings))
 
 
-# LLM: 仅对 user_explicit 的 long_term_fact/event 候选补全漏写的 promotion_target=long_term；
-# model_inferred/Persona/lesson/HOT 一律不补(必须人工审核),不扩大自动晋升面。
-# 函数用途: 返回 promotion_target 补全后的候选 observation(纯结构化规则,不解析正文)。
-def _fill_candidate_promotion_target(item: object) -> object:
+# LLM: 宿主只根据验证后的结构化来源、证据、动作、目标、范围和冲突赋权；正文与 confidence
+# 不参与权限判断，model_inferred/Persona/lesson/HOT 永远不能获得自动权限。
+# 函数用途: 返回 promotion_target 补全及 fail-closed promotion_mode 赋权后的候选 observation。
+def _fill_candidate_promotion_authority(item: object) -> object:
     target = str(getattr(item, "promotion_target", "") or "").strip().lower()
-    if target:
-        return item
     origin = str(getattr(item, "origin", "") or "").strip().lower()
     ctype = str(getattr(item, "candidate_type", "") or "").strip().lower()
-    if origin == "user_explicit" and ctype in {"long_term_fact", "event"}:
-        from dataclasses import replace
-
-        return replace(item, promotion_target="long_term")
-    return item
+    if not target and origin == "user_explicit" and ctype in {"long_term_fact", "event"}:
+        item = replace(item, promotion_target="long_term")
+        target = "long_term"
+    scope = MemoryScope.from_value(getattr(item, "scope", None))
+    evidence_complete = (
+        origin == "user_explicit"
+        and bool(getattr(item, "source_message_refs", ()))
+    ) or (
+        origin == "tool_verified"
+        and bool(getattr(item, "source_tool_refs", ()))
+    )
+    temporary_has_expiry = (
+        scope.scope_type != "temporary"
+        or bool(str(getattr(item, "valid_until", "") or "").strip())
+    )
+    # 权限：只有证据完整、范围可落、无冲突的 user/tool 新长期事实才可进入自动路径；
+    # Promotion 仍会重新核验真实 message/tool evidence、冲突和 expiry。
+    auto_eligible = (
+        origin in {"user_explicit", "tool_verified"}
+        and ctype in {"long_term_fact", "event", "project"}
+        and bool(str(getattr(item, "subject_key", "") or "").strip())
+        and str(getattr(item, "proposed_action", "") or "").strip().lower() == "add"
+        and target == "long_term"
+        and not str(getattr(item, "target_entry_id", "") or "").strip()
+        and not tuple(getattr(item, "conflicts_with", ()) or ())
+        and evidence_complete
+        and temporary_has_expiry
+    )
+    if auto_eligible:
+        return replace(item, promotion_mode="auto_eligible")
+    return replace(item, promotion_mode="manual_required")
 
 
 # LLM: Lease recovery metadata is copied from the host-generated lease only and never inferred
@@ -649,6 +988,27 @@ def _successful_run_record(
         ),
         recovery=context.recovery,
     )
+
+
+# LLM: 损坏 run_id 由原文件 sha256 派生, 首次(算文件)与重复(读哨兵)取值一致,
+# 保证同一损坏的重复维护 tick 落幂等审计, 不伪造自愈成功。
+# 函数用途: 从隔离元数据派生稳定损坏 run_id。
+# LLM: 恢复拒绝原因只带结构化证据标识(路径/hash 前缀/分类), 不复制损坏正文。
+# 函数用途: 生成恢复校验失败时返回的哨兵证据摘要。
+def _recover_evidence_summary(evidence: dict[str, object]) -> dict[str, object]:
+    return {
+        "quarantine_path": str(evidence.get("quarantine_path") or ""),
+        "original_sha256": str(evidence.get("original_sha256") or "")[:16],
+        "error_class": str(evidence.get("error_class") or ""),
+        "quarantined_at": str(evidence.get("quarantined_at") or ""),
+    }
+
+
+def _corrupt_run_id(quarantine: dict[str, object]) -> str:
+    digest = str(quarantine.get("original_sha256") or "")
+    if len(digest) < 16:
+        return "memory-curator-corrupt-" + uuid.uuid4().hex
+    return "memory-curator-corrupt-" + digest[:16]
 
 
 # LLM: Failure audit preserves the acquired lease and recovery provenance but never serializes
@@ -728,6 +1088,8 @@ def _failure_code(exc: BaseException) -> str:
         return value if value.startswith("CURATOR_") else "CURATOR_INPUT_INVALID"
     if isinstance(exc, CuratorLeaseLostError):
         return "CURATOR_LEASE_LOST"
+    if isinstance(exc, CuratorStateCorruptError):
+        return "CURATOR_STATE_CORRUPT"
     if isinstance(exc, (ValueError, TypeError, json.JSONDecodeError)):
         value = str(exc or "")
         return value if value.startswith("CURATOR_") else "CURATOR_SCHEMA_INVALID"

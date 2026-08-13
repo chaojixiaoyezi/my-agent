@@ -268,6 +268,14 @@ def _normalized_recovery(value: object) -> dict[str, object]:
             "recovered_at",
         },
         "transaction_rollback": {"kind", "prepared_at"},
+        "manual_from_quarantine": {
+            "kind",
+            "sentinel_sha256",
+            "quarantine_path",
+            "error_class",
+            "restored_from_run_id",
+            "restored_at",
+        },
     }
     if kind not in allowed or set(value) != allowed[kind]:
         raise ValueError("memory curator run recovery shape is invalid")

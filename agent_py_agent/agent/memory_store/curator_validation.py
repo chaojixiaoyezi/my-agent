@@ -18,10 +18,7 @@ from .candidate_models import (
 )
 from .curator_inputs import CuratorAuditInput, CuratorInputBatch, CuratorMessageInput
 from .curator_models import CURATOR_MODEL_ORIGINS, CuratorExtraction
-
-_SUCCESS_TOOL_STATUSES = frozenset(
-    {"success", "succeeded", "ok", "completed", "committed", "applied"}
-)
+from .scope_contract import canonical_scope_key
 
 
 # LLM: Provider evidence failures expose one stable persisted error code while retaining a
@@ -59,10 +56,12 @@ def validate_extraction(
     messages = {item.message_id: item for item in batch.messages}
     audits_by_event = {item.event_id: item for item in batch.audit_events}
     audits_by_call = {
-        item.tool_call_id: item for item in batch.audit_events if item.tool_call_id
+        item.tool_call_id: item for item in batch.audit_events if item.is_tool_call()
     }
     audits_by_operation = {
-        item.operation_id: item for item in batch.audit_events if item.operation_id
+        item.operation_id: item
+        for item in batch.audit_events
+        if item.is_tool_call() and item.operation_id
     }
     artifacts_by_ref = _artifacts_by_ref(batch)
     # 游标只按连续 processed 前缀推进(next_cursors):漏声明的输入自然停在游标前、
@@ -143,8 +142,8 @@ def _daily_tool_refs_tolerant(
         source = _tool_source(ref, by_event, by_call, by_operation)
         if source is None:
             continue  # 引用不在本批 owner 审计 → 剔除(不阻断)
-        if source.status.strip().lower() not in _SUCCESS_TOOL_STATUSES:
-            continue  # 失败/超时/unknown 工具 → 剔除(不阻断,经历仍进 summary)
+        if not source.is_verified_success():
+            continue  # 非工具轮或失败/超时/unknown 工具 → 剔除(不阻断,经历仍进 summary)
         resolved = source.ref()
         if owner_id:
             resolved["owner_id"] = owner_id
@@ -183,6 +182,8 @@ def _validated_daily(
         ref.get("role") == "user" for ref in message_refs
     ):
         raise CuratorEvidenceError("daily_user_explicit_without_user_message")
+    if draft.origin == "tool_verified" and not tool_refs:
+        raise CuratorEvidenceError("daily_tool_verified_without_tool")
     if not (message_refs or tool_refs or artifact_refs):
         raise CuratorEvidenceError("daily_without_evidence")
     references = [*message_refs, *tool_refs, *artifact_refs]
@@ -214,6 +215,16 @@ def _validated_candidate(
     owner_id: str,
 ):
     _require_curator_origin(observation.origin)
+    # 提交端对新 add 使用 MemoryScope.for_new_observation；验证端必须先用同一合同
+    # 归一合法 alias，并把坏 scope 转成可逐条丢弃的证据错误，不能让它在整批提交时
+    # 才以模糊 CURATOR_COMMIT_FAILED 连坐 Daily 和其他合法候选。replace/remove
+    # 保留旧 scope 原样，继续允许管理员通过精确 target 清理历史坏记录。
+    if str(observation.proposed_action or "").strip().lower() == "add":
+        try:
+            canonical_scope = MemoryScope.for_new_observation(observation.scope)
+        except (TypeError, ValueError) as exc:
+            raise CuratorEvidenceError("candidate_scope_invalid") from exc
+        observation = replace(observation, scope=canonical_scope)
     message_refs = _canonical_message_refs(observation.source_message_refs, messages)
     tool_refs = _canonical_tool_refs(
         observation.source_tool_refs,
@@ -348,10 +359,15 @@ def _canonical_observation_id(
     task_ids: tuple[str, ...],
     run_ids: tuple[str, ...],
 ) -> str:
+    scope = MemoryScope.from_value(observation.scope)
+    try:
+        canonical_key = canonical_scope_key(scope.scope_type, scope.scope_key)
+    except (ValueError, TypeError):
+        canonical_key = scope.scope_key  # 坏值保持原样，fail-closed 隔离
     material = {
         "candidate_type": str(observation.candidate_type or "").strip().lower(),
         "subject_key": str(observation.subject_key or "").strip().lower(),
-        "scope": MemoryScope.from_value(observation.scope).to_dict(),
+        "scope": {**scope.to_dict(), "scope_key": canonical_key},
         "proposed_action": str(observation.proposed_action or "").strip().lower(),
         "target_entry_id": str(observation.target_entry_id or "").strip(),
         "promotion_target": str(observation.promotion_target or "").strip().lower(),
@@ -446,7 +462,9 @@ def _canonical_tool_refs(
         source = _tool_source(ref, by_event, by_call, by_operation)
         if source is None:
             continue  # 引用不在本批 owner 审计 → 剔除(不阻断)
-        if require_success and source.status.strip().lower() not in _SUCCESS_TOOL_STATUSES:
+        if not source.is_tool_call():
+            continue  # assistant_tool_round 等普通 audit 事件不能冒充工具证据
+        if require_success and not source.is_verified_success():
             continue  # 非成功终态工具 → 剔除(不阻断)
         resolved = source.ref()
         if owner_id:

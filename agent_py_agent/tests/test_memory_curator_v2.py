@@ -347,8 +347,21 @@ def test_curator_prompt_requires_atomic_cross_scope_candidates() -> None:
     assert "公司服务器使用 Linux" in prompt
     assert "一次性要求只能是 session/temporary" in prompt
     assert "不要输出 quote" in prompt
+    assert "模型不得输出 promotion_mode" in prompt
+    assert "绝不能自动固化或替代审核" in prompt
+    assert "默认进审核，不自动晋升" not in prompt
+    assert "多次独立出现" in prompt
     assert '"message_ids": ["message-manifest-1"]' in prompt
     assert "不能遗漏、重复或加入清单外 ID" in prompt
+
+
+def test_curator_response_schema_does_not_expose_host_promotion_mode() -> None:
+    """宿主权限字段不属于模型输出合同，provider 不能自行声明或升权。"""
+    schema = curator_response_schema()
+    candidate = schema["properties"]["candidates"]["items"]
+
+    assert "promotion_mode" not in candidate["properties"]
+    assert "promotion_mode" not in candidate["required"]
 
 
 def test_curator_rejects_provider_attempt_to_author_quote(tmp_path: Path) -> None:
@@ -472,7 +485,9 @@ def test_curator_enriches_large_tool_output_ref_without_copying_body(
                 "action": "tool_call",
                 "created_at": "1970-01-01T00:00:12+00:00",
                 "status": "ok",
+                "tool_name": "read_file",
                 "tool_call_id": tool_call_id,
+                "tool_success": True,
                 "run_id": "run-1",
                 "task_id": "task-1",
                 "request_id": "request-1",
@@ -559,6 +574,169 @@ def test_curator_enriches_large_tool_output_ref_without_copying_body(
     assert "/private/source-must-not-leak" not in backend.prompts[0]
     assert len(json.dumps(asdict(daily), ensure_ascii=False)) < 10_000
     assert len(json.dumps(asdict(candidate), ensure_ascii=False)) < 10_000
+
+
+@pytest.mark.parametrize(
+    "claimed_event_id",
+    [
+        "audit-assistant-tool-round",
+        "audit-failed-tool-call",
+        "audit-status-only-tool-call",
+        "audit-unknown-effect-tool-call",
+    ],
+)
+def test_curator_drops_non_success_tool_verified_evidence(
+    tmp_path: Path,
+    claimed_event_id: str,
+) -> None:
+    """assistant_tool_round(status=ok) 和失败 tool_call 都不能伪装成
+    tool_verified；Daily 可保留用户经历，但非法 tool_ref 必须被剔除。"""
+    store, thread, message = _conversation(tmp_path)
+    audit_dir = tmp_path / "audit"
+    audit_dir.mkdir(parents=True)
+    audit_rows = [
+        {
+            "event_id": "audit-assistant-tool-round",
+            "action": "assistant_tool_round",
+            "created_at": "1970-01-01T00:00:12+00:00",
+            "status": "ok",
+            "run_id": "run-1",
+            "task_id": "task-1",
+            "request_id": "request-1",
+            "content_preview": "模型准备调用 update_persona。",
+        },
+        {
+            "event_id": "audit-failed-tool-call",
+            "action": "tool_call",
+            "created_at": "1970-01-01T00:00:13+00:00",
+            "status": "error",
+            "error_code": "TOOL_ACTION_NOT_REQUIRED",
+            "tool_name": "update_persona",
+            "tool_call_id": "call-update-persona-1",
+            "tool_success": False,
+            "effect_outcome": "not_started",
+            "run_id": "run-1",
+            "task_id": "task-1",
+            "request_id": "request-1",
+            "content_preview": "update_persona 被宿主拒绝。",
+        },
+        {
+            "event_id": "audit-status-only-tool-call",
+            "action": "tool_call",
+            "created_at": "1970-01-01T00:00:14+00:00",
+            "status": "ok",
+            "tool_name": "read_file",
+            "tool_call_id": "call-status-only-1",
+            "run_id": "run-1",
+            "task_id": "task-1",
+            "request_id": "request-1",
+            "content_preview": "只有 status，没有宿主成功布尔。",
+        },
+        {
+            "event_id": "audit-unknown-effect-tool-call",
+            "action": "tool_call",
+            "created_at": "1970-01-01T00:00:15+00:00",
+            "status": "ok",
+            "tool_name": "write_file",
+            "tool_call_id": "call-unknown-effect-1",
+            "tool_success": True,
+            "effect_outcome": "unknown",
+            "run_id": "run-1",
+            "task_id": "task-1",
+            "request_id": "request-1",
+            "content_preview": "副作用终态未知。",
+        },
+    ]
+    audit_dir.joinpath("1970-01-01.jsonl").write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in audit_rows),
+        encoding="utf-8",
+    )
+    output = _valid_output(thread.thread_id, message.message_id, message.content)
+    output["daily_events"][0]["origin"] = "tool_verified"
+    output["daily_events"][0]["message_refs"] = []
+    output["daily_events"][0]["tool_refs"] = [{"event_id": claimed_event_id}]
+    candidate = output["candidates"][0]
+    candidate["origin"] = "tool_verified"
+    candidate["source_message_refs"] = []
+    candidate["source_tool_refs"] = [{"event_id": claimed_event_id}]
+    output["processed_audit_refs"] = [
+        {"event_id": row["event_id"]} for row in audit_rows
+    ]
+    output["next_cursor"]["last_audit_event_id"] = audit_rows[-1]["event_id"]
+    service = _service(tmp_path, _StaticStructuredBackend(output), store)
+
+    result = service.run(reason="admin")
+
+    assert result.status == "succeeded"
+    assert result.daily_events == 0
+    assert result.candidates == 0
+    assert service.candidate_service.list() == []
+    assert service.daily_store.list(day="1970-01-01") == []
+    assert any(
+        "candidate:candidate_tool_verified_without_tool" in warning
+        for warning in result.warnings
+    )
+    assert any(
+        "daily:daily_tool_verified_without_tool" in warning
+        for warning in result.warnings
+    )
+    assert service.state_store.load().last_processed_audit_event_id == audit_rows[-1][
+        "event_id"
+    ]
+
+
+def test_curator_accepts_host_successful_tool_call_evidence(tmp_path: Path) -> None:
+    """只有完整工具身份、宿主成功布尔与已知 effect 的真实 tool_call
+    才能保留为 tool_verified 引用。"""
+    store, thread, message = _conversation(tmp_path)
+    audit_dir = tmp_path / "audit"
+    audit_dir.mkdir(parents=True)
+    event_id = "audit-successful-tool-call"
+    audit_dir.joinpath("1970-01-01.jsonl").write_text(
+        json.dumps(
+            {
+                "event_id": event_id,
+                "action": "tool_call",
+                "created_at": "1970-01-01T00:00:12+00:00",
+                "status": "ok",
+                "tool_name": "read_file",
+                "tool_call_id": "call-read-file-1",
+                "tool_success": True,
+                "effect_outcome": "confirmed",
+                "operation_id": "tool-operation-read-1",
+                "run_id": "run-1",
+                "task_id": "task-1",
+                "request_id": "request-1",
+                "content_preview": "read_file 已成功。",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    output = _valid_output(thread.thread_id, message.message_id, message.content)
+    output["daily_events"][0]["tool_refs"] = [{"event_id": event_id}]
+    candidate = output["candidates"][0]
+    candidate["origin"] = "tool_verified"
+    candidate["source_message_refs"] = []
+    candidate["source_tool_refs"] = [{"event_id": event_id}]
+    output["processed_audit_refs"] = [{"event_id": event_id}]
+    output["next_cursor"]["last_audit_event_id"] = event_id
+    service = _service(tmp_path, _StaticStructuredBackend(output), store)
+
+    result = service.run(reason="admin")
+
+    assert result.status == "succeeded"
+    assert result.candidates == 1
+    stored = service.candidate_service.list()[0]
+    assert stored.origin == "tool_verified"
+    assert stored.promotion_mode == "auto_eligible"
+    assert stored.source_tool_refs[0]["event_id"] == event_id
+    assert stored.source_tool_refs[0]["tool_name"] == "read_file"
+    assert stored.source_tool_refs[0]["tool_success"] is True
+    assert stored.source_tool_refs[0]["effect_outcome"] == "confirmed"
+    daily = service.daily_store.list(day="1970-01-01")[0]
+    assert daily.tool_refs[0]["event_id"] == event_id
 
 
 def test_curator_rejects_tool_artifact_ref_outside_owner_root(tmp_path: Path) -> None:
@@ -1077,8 +1255,11 @@ def test_curator_interval_and_daily_finalize_use_same_state_and_service(tmp_path
     assert daily_service.state_store.load().last_daily_finalize_date == "2026-08-04"
 
 
-def test_pending_promotable_candidate_ids_includes_lesson_candidates(tmp_path: Path) -> None:
-    """晋升兜底候选集:user_explicit 事实与 lesson 候选都捞;model_inferred 事实仍排除。"""
+def test_pending_promotable_candidate_ids_only_picks_host_authorized_auto(
+    tmp_path: Path,
+) -> None:
+    """晋升兜底候选集(定版合同):只捞宿主已标 auto_eligible 的 user_explicit/tool_verified
+    事实;lesson(即使 target=lesson)与 model_inferred 事实一律不捞;缺省权限=manual 不捞。"""
     from agent_py_agent.agent.memory_store.candidate_models import (
         CandidateObservation,
         MemoryScope,
@@ -1087,7 +1268,7 @@ def test_pending_promotable_candidate_ids_includes_lesson_candidates(tmp_path: P
     service = _service(tmp_path, _StaticStructuredBackend({}), ConversationStore(tmp_path / "c"))
     candidates = service.candidate_service
 
-    user_explicit = candidates.observe(
+    user_auto = candidates.observe(
         CandidateObservation(
             candidate_type="long_term_fact",
             content="个人电脑使用 macOS。",
@@ -1095,7 +1276,19 @@ def test_pending_promotable_candidate_ids_includes_lesson_candidates(tmp_path: P
             scope=MemoryScope("personal", "personal"),
             origin="user_explicit",
             promotion_target="long_term",
+            promotion_mode="auto_eligible",
             source_message_refs=({"message_id": "msg-1"},),
+        )
+    )
+    user_legacy_manual = candidates.observe(
+        CandidateObservation(
+            candidate_type="long_term_fact",
+            content="个人电脑使用 Linux。",
+            subject_key="device.personal.alt",
+            scope=MemoryScope("personal", "personal"),
+            origin="user_explicit",
+            promotion_target="long_term",
+            source_message_refs=({"message_id": "msg-2"},),
         )
     )
     lesson = candidates.observe(
@@ -1122,9 +1315,124 @@ def test_pending_promotable_candidate_ids_includes_lesson_candidates(tmp_path: P
 
     ids = service._pending_promotable_candidate_ids()
 
-    assert user_explicit.candidate_id in ids  # 用户明确事实:原路径保留
-    assert lesson.candidate_id in ids  # lesson 专线:兜底能捞起
-    assert inferred_fact.candidate_id not in ids  # model_inferred 事实:绝对权威块保护线仍在
+    assert user_auto.candidate_id in ids  # 宿主已授权:唯一可捞
+    assert user_legacy_manual.candidate_id not in ids  # 缺省/legacy=manual_required:不捞
+    assert lesson.candidate_id not in ids  # lesson 专线已取消:一律 manual,不捞
+    assert inferred_fact.candidate_id not in ids  # model_inferred 事实:不捞
+
+
+class _RecordingPromotion:
+    """记录被 Curator 提交自动晋升的候选 ID(不模拟闸,闸的真实性由 promotion 层测试证明)。"""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def __call__(self, candidate_id: str) -> object:
+        self.calls.append(candidate_id)
+        return SimpleNamespace(promoted=True)
+
+
+def test_curator_qualified_user_fact_still_auto_promotes(tmp_path: Path) -> None:
+    """1227 正例:合格 user_explicit 新 long_term 事实经 curator 提炼 → 宿主赋 auto_eligible →
+    落库 → 兜底 selector 捞起并提交自动晋升(真实提炼路径,含 _prepare_outputs 赋权)。"""
+    store, thread, message = _conversation(tmp_path)
+    backend = _StaticStructuredBackend(
+        _valid_output(thread.thread_id, message.message_id, message.content)
+    )
+    service = _service(tmp_path, backend, store)
+    recorder = _RecordingPromotion()
+    service.promotion_callback = recorder
+
+    result = service.run_if_due(now=datetime(2026, 8, 4, 12, tzinfo=timezone.utc))
+
+    assert result.status == "succeeded"
+    candidate = service.candidate_service.list()[0]
+    assert candidate.promotion_mode == "auto_eligible"  # 宿主确定性赋权已持久化
+    assert candidate.candidate_id in recorder.calls  # 兜底/提交后都提交自动晋升
+
+
+def test_curator_lesson_extraction_never_silently_promoted(tmp_path: Path) -> None:
+    """1227 反例:curator 提炼出的 lesson 候选一律 manual_required,
+    无论单次/重复出现都不会被 Curator 提交自动晋升。"""
+    store, thread, message = _conversation(tmp_path)
+    payload = _valid_output(thread.thread_id, message.message_id, message.content)
+    payload["candidates"] = [
+        {
+            "candidate_type": "lesson",
+            "content": "做 X 任务应先备份再修改。",
+            "subject_key": "lesson.task_x_backup_first",
+            "scope": {
+                "scope_type": "personal",
+                "scope_key": "personal",
+                "applies_when": "",
+                "excludes_when": "",
+            },
+            "origin": "model_inferred",
+            "source_message_refs": [{"message_id": message.message_id}],
+            "source_tool_refs": [],
+            "source_artifact_refs": [],
+            "observed_at": "1970-01-01T00:00:11+00:00",
+            "valid_from": None,
+            "valid_until": None,
+            "confidence": 0.9,
+            "proposed_action": "add",
+            "target_entry_id": None,
+            "conflicts_with": [],
+            "promotion_target": "lesson",
+        }
+    ]
+    backend = _StaticStructuredBackend(payload)
+    service = _service(tmp_path, backend, store)
+    recorder = _RecordingPromotion()
+    service.promotion_callback = recorder
+
+    result = service.run_if_due(now=datetime(2026, 8, 4, 12, tzinfo=timezone.utc))
+
+    assert result.status == "succeeded"
+    candidate = service.candidate_service.list()[0]
+    assert candidate.promotion_mode == "manual_required"  # lesson 一律人工审核
+    assert recorder.calls == []  # 不提交自动晋升(selector 不捞+promotion 闸双拒)
+    assert candidate.status == "pending_review"  # 候选保留待人工审核
+
+
+@pytest.mark.parametrize(
+    ("candidate_changes", "expected_status"),
+    [
+        ({"conflicts_with": ["memory-old"]}, "blocked_conflict"),
+        (
+            {
+                "scope": {
+                    "scope_type": "temporary",
+                    "scope_key": "temporary:session-1",
+                    "applies_when": "本次会话",
+                    "excludes_when": "会话结束后",
+                },
+                "valid_until": None,
+            },
+            "pending_review",
+        ),
+    ],
+)
+def test_curator_incomplete_auto_conditions_stay_manual(
+    tmp_path: Path,
+    candidate_changes: dict[str, object],
+    expected_status: str,
+) -> None:
+    """合格来源仍不足以授权；冲突或 temporary 缺 expiry 必须由宿主标人工审核。"""
+    store, thread, message = _conversation(tmp_path)
+    payload = _valid_output(thread.thread_id, message.message_id, message.content)
+    payload["candidates"][0].update(candidate_changes)
+    service = _service(tmp_path, _StaticStructuredBackend(payload), store)
+    recorder = _RecordingPromotion()
+    service.promotion_callback = recorder
+
+    result = service.run_if_due(now=datetime(2026, 8, 4, 12, tzinfo=timezone.utc))
+
+    assert result.status == "succeeded"
+    candidate = service.candidate_service.list()[0]
+    assert candidate.promotion_mode == "manual_required"
+    assert candidate.status == expected_status
+    assert recorder.calls == []
 
 
 def test_reinjection_chain_never_grows_formal_memory(tmp_path: Path) -> None:
@@ -1295,6 +1603,90 @@ def test_curator_dropped_daily_and_candidate_warn_but_advance_cursor(tmp_path: P
     assert "candidate" in " ".join(result.warnings)
 
 
+def test_curator_drops_raw_add_scope_without_rolling_back_valid_outputs(
+    tmp_path: Path,
+) -> None:
+    """模型给出 raw company key 时只丢该候选；合法 Candidate、Daily 和游标仍提交。"""
+    store, thread, message = _conversation(tmp_path)
+    output = _valid_output(thread.thread_id, message.message_id, message.content)
+    invalid = dict(output["candidates"][0])
+    invalid["content"] = "公司服务器使用 Linux。"
+    invalid["subject_key"] = "device.company.os"
+    invalid["scope"] = {
+        "scope_type": "company",
+        "scope_key": "default",
+        "applies_when": "公司服务器",
+        "excludes_when": "个人电脑",
+    }
+    output["candidates"].insert(0, invalid)
+    service = _service(tmp_path, _StaticStructuredBackend(output), store)
+
+    result = service.run(reason="admin")
+
+    assert result.status == "succeeded"
+    assert result.failure_code == ""
+    assert service.state_store.load().per_thread_cursors == {
+        thread.thread_id: message.message_id
+    }
+    candidates = service.candidate_service.list()
+    assert len(candidates) == 1
+    assert candidates[0].scope["scope_key"] == "personal"
+    assert len(service.daily_store.list(day="1970-01-01")) == 1
+    assert "dropped_evidence:candidate:candidate_scope_invalid" in result.warnings
+
+
+def test_curator_canonicalizes_task_alias_before_candidate_commit(tmp_path: Path) -> None:
+    """Curator 验证和 Candidate 提交共用 scope 合同，task alias 只落 project 正式键。"""
+    store, thread, message = _conversation(tmp_path)
+    output = _valid_output(thread.thread_id, message.message_id, message.content)
+    output["candidates"][0]["scope"] = {
+        "scope_type": "project",
+        "scope_key": "task:alpha",
+        "applies_when": "alpha 项目",
+        "excludes_when": "",
+    }
+    service = _service(tmp_path, _StaticStructuredBackend(output), store)
+
+    result = service.run(reason="admin")
+
+    assert result.status == "succeeded"
+    candidates = service.candidate_service.list()
+    assert len(candidates) == 1
+    assert candidates[0].scope["scope_key"] == "project:alpha"
+    assert not any("candidate_scope_invalid" in item for item in result.warnings)
+
+
+def test_curator_keeps_raw_scope_for_targeted_legacy_remove(tmp_path: Path) -> None:
+    """replace/remove 仍可精确引用并清理历史 raw scope，不套用新 add 的严格门。"""
+    store, thread, message = _conversation(tmp_path)
+    output = _valid_output(thread.thread_id, message.message_id, message.content)
+    output["candidates"][0].update(
+        {
+            "content": "移除旧公司环境记录。",
+            "subject_key": "device.company.os",
+            "scope": {
+                "scope_type": "company",
+                "scope_key": "default",
+                "applies_when": "旧公司环境",
+                "excludes_when": "",
+            },
+            "proposed_action": "remove",
+            "target_entry_id": "legacy-company-os",
+        }
+    )
+    service = _service(tmp_path, _StaticStructuredBackend(output), store)
+
+    result = service.run(reason="admin")
+
+    assert result.status == "succeeded"
+    candidates = service.candidate_service.list()
+    assert len(candidates) == 1
+    assert candidates[0].proposed_action == "remove"
+    assert candidates[0].target_entry_id == "legacy-company-os"
+    assert candidates[0].scope["scope_key"] == "default"
+    assert not any("candidate_scope_invalid" in item for item in result.warnings)
+
+
 def test_curator_unprocessed_claims_do_not_fail_batch(tmp_path: Path) -> None:
     """漏声明/出界声明不再整批失败:游标按连续 processed 前缀推进,未声明输入停在
     游标前、下轮重放(数据零丢失);daily/candidate 真实证据照常入库。精确相等校验
@@ -1315,3 +1707,95 @@ def test_curator_unprocessed_claims_do_not_fail_batch(tmp_path: Path) -> None:
     assert service.state_store.load().per_thread_cursors == {}
     # 真实证据引用(daily/candidate 引用本批真实 message)照常入库
     assert len(service.candidate_service.list()) == 1
+
+
+def test_curator_observation_id_normalizes_task_alias_scope() -> None:
+    """steward 1207：同一证据以 task:alpha/project:alpha 双写法重放，宿主 observation_id 必须一致。"""
+    from agent_py_agent.agent.memory_store.candidate_models import (
+        CandidateObservation,
+        MemoryScope,
+    )
+    from agent_py_agent.agent.memory_store.curator_validation import (
+        _canonical_observation_id,
+    )
+
+    def observation_for(scope_key: str) -> CandidateObservation:
+        return CandidateObservation(
+            candidate_type="long_term_fact",
+            content="个人电脑使用 macOS。",
+            subject_key="device.personal.os",
+            scope=MemoryScope("project", scope_key),
+            origin="user_explicit",
+            promotion_target="long_term",
+            source_message_refs=({"message_id": "msg-1"},),
+        )
+
+    task_alias = _canonical_observation_id(
+        observation_for("task:alpha"),
+        message_refs=[],
+        tool_refs=[],
+        artifact_refs=[],
+        task_ids=(),
+        run_ids=(),
+    )
+    canonical = _canonical_observation_id(
+        observation_for("project:alpha"),
+        message_refs=[],
+        tool_refs=[],
+        artifact_refs=[],
+        task_ids=(),
+        run_ids=(),
+    )
+    assert task_alias == canonical
+    # 坏值 scope（legacy 占位）不抛且保持原样，fail-closed 隔离，不阻断 curator 链路
+    legacy = _canonical_observation_id(
+        observation_for("legacy"),
+        message_refs=[],
+        tool_refs=[],
+        artifact_refs=[],
+        task_ids=(),
+        run_ids=(),
+    )
+    assert isinstance(legacy, str) and legacy.startswith("curator-observation-")
+
+
+def test_curator_task_alias_replay_does_not_duplicate_occurrence(tmp_path: Path) -> None:
+    """steward 1207：task:alpha 与 project:alpha 双写法只产生一个候选、occurrence 不重复计。"""
+    from agent_py_agent.agent.memory_store.candidate_models import (
+        CandidateObservation,
+        MemoryScope,
+    )
+    from agent_py_agent.agent.memory_store.curator_validation import (
+        _canonical_observation_id,
+    )
+
+    def observation_for(scope_key: str, observation_id: str = "") -> CandidateObservation:
+        return CandidateObservation(
+            candidate_type="long_term_fact",
+            content="个人电脑使用 macOS。",
+            subject_key="device.personal.os",
+            scope=MemoryScope("project", scope_key),
+            origin="user_explicit",
+            promotion_target="long_term",
+            source_message_refs=({"message_id": "msg-1"},),
+            observation_id=observation_id,
+        )
+
+    task_alias = observation_for("task:alpha")
+    canonical = observation_for("project:alpha")
+    task_id = _canonical_observation_id(
+        task_alias, message_refs=[], tool_refs=[], artifact_refs=[], task_ids=(), run_ids=()
+    )
+    project_id = _canonical_observation_id(
+        canonical, message_refs=[], tool_refs=[], artifact_refs=[], task_ids=(), run_ids=()
+    )
+    assert task_id == project_id
+
+    service = CandidateService(tmp_path / "memory" / "candidates.jsonl")
+    service.observe_many(
+        [observation_for("task:alpha", task_id), observation_for("project:alpha", project_id)]
+    )
+
+    current = service.list()
+    assert len(current) == 1
+    assert current[0].occurrence_count == 1
