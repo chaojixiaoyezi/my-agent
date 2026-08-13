@@ -339,6 +339,10 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     dynamic_timeout_safety_margin: float = 2.0
     dynamic_timeout_min: int = 30
     dynamic_timeout_max: int = 600
+    # 门槛4: probe 统计参数——每点最小样本数/滑窗上限/异常值去极值开关
+    probe_min_samples: int = 2
+    probe_window_samples: int = 5
+    probe_outlier_trim: bool = True
     max_auto_split_depth: int = 2
     max_auto_retry_attempts: int = 3
     model_speed_profile_path: str = ""

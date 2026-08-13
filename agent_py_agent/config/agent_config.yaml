@@ -333,6 +333,13 @@ runner_auto_concurrency: 15
 dynamic_timeout_safety_margin: 2.0
 dynamic_timeout_min: 30
 dynamic_timeout_max: 600
+# 门槛4: probe 统计参数(动态超时探针估计)。
+# - probe_min_samples: 每个 probe token 点最少样本数, 不足则回退 fixed-rate 估计。
+# - probe_window_samples: 滑窗上限, 每点最多取最近 N 条样本(防陈旧样本主导)。
+# - probe_outlier_trim: 异常值去极值开关, 开启且窗口>=3 时去掉最小最大取均值。
+probe_min_samples: 2
+probe_window_samples: 5
+probe_outlier_trim: true
 max_auto_split_depth: 2
 max_auto_retry_attempts: 3
 model_speed_profile_path: ""

@@ -302,6 +302,10 @@ def first_token_timeout_options(agent: object) -> FirstTokenTimeoutOptions:
         safety_margin=float_config(config, "dynamic_timeout_safety_margin", 1.5),
         min_timeout_seconds=float_config(config, "dynamic_timeout_min", 5.0),
         max_timeout_seconds=float_config(config, "dynamic_timeout_max", 120.0),
+        # 门槛4: probe 统计参数(最小样本数/滑窗上限/去极值开关), 默认 2/5/True
+        probe_min_samples=int(float_config(config, "probe_min_samples", 2)),
+        probe_window_samples=int(float_config(config, "probe_window_samples", 5)),
+        probe_outlier_trim=bool_config(config, "probe_outlier_trim", True),
     )
 
 
@@ -361,6 +365,15 @@ def float_config(config: object, name: str, default: float) -> float:
         return float(getattr(config, name, default))
     except (TypeError, ValueError):
         return default
+
+
+def bool_config(config: object, name: str, default: bool) -> bool:
+    raw = getattr(config, name, None)
+    if raw is None:
+        return default
+    if isinstance(raw, str):
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(raw)
 
 
 __all__ = [

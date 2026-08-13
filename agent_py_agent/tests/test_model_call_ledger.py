@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.agent.agent_core.model.call_monitor import (
     FirstTokenTimeoutContext,
     FirstTokenTimeoutOptions,
@@ -315,10 +317,17 @@ def test_estimates_prefill_and_first_token_timeout_without_probe_samples() -> No
 
 
 def test_estimates_first_token_timeout_from_5k_and_10k_probe_samples() -> None:
+    """门槛4 语义: 每点 2 条样本(>= min_samples) -> probe 估计(窗口均值)。
+
+    门槛4 前锁定为单样本即用; 「先固化再改」升级为最小样本数 2,
+    source 带窗口样本数(_n2)。单样本回退语义由 gate4 测试覆盖。
+    """
     clock = _FakeClock(0.0)
     ledger = ModelCallLedger(context=ModelCallLedgerContext(now=clock.now))
     _record_first_token_probe(ledger, clock, _ProbeSpec("probe-5k", 5000, 13.0))
+    _record_first_token_probe(ledger, clock, _ProbeSpec("probe-5k-b", 5000, 13.5))
     _record_first_token_probe(ledger, clock, _ProbeSpec("probe-10k", 10000, 23.0))
+    _record_first_token_probe(ledger, clock, _ProbeSpec("probe-10k-b", 10000, 23.5))
 
     estimate = estimate_first_token_timeout(
         FirstTokenTimeoutParams(
@@ -333,10 +342,11 @@ def test_estimates_first_token_timeout_from_5k_and_10k_probe_samples() -> None:
         )
     )
 
-    assert estimate.source == "probe_5k_10k"
+    # 窗口均值 13.25/23.25: slope=0.002, prefill(15000)=30, first_token=3.25
+    assert estimate.source == "probe_5k_10k_n2"
     assert estimate.prefill_seconds == 30.0
-    assert estimate.first_token_seconds == 3.0
-    assert estimate.timeout_seconds == 49.5
+    assert estimate.first_token_seconds == pytest.approx(3.25)
+    assert estimate.timeout_seconds == pytest.approx(49.875)
 
 
 def test_first_token_timeout_estimate_clamps_to_bounds() -> None:

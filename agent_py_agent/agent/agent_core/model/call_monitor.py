@@ -15,6 +15,12 @@ class FirstTokenTimeoutOptions:
     cache_suspected_min_input_tokens: int = 5000
     cache_suspected_max_ratio: float = 0.25
     cache_suspected_max_latency_seconds: float = 2.0
+    # 门槛4: probe 统计参数——最小样本数/滑窗上限/异常值去极值开关。
+    # 每个 probe token 点样本不足 min_samples 时回退 fixed-rate 估计;
+    # 窗口最多取最近 window_samples 条; trim 开启时窗口>=3 去掉极值取均值。
+    probe_min_samples: int = 2
+    probe_window_samples: int = 5
+    probe_outlier_trim: bool = True
 
 
 @dataclass(frozen=True)
@@ -86,13 +92,24 @@ def _estimate_from_required_probes(
     context: FirstTokenTimeoutContext,
 ) -> FirstTokenTimeoutEstimate | None:
     low_tokens, high_tokens = _ordered_probe_tokens(context.required_probe_tokens)
-    low_sample = _latest_probe_sample(ledger.records(), low_tokens)
-    high_sample = _latest_probe_sample(ledger.records(), high_tokens)
-    if low_sample is None or high_sample is None:
+    # 门槛4: 滑窗内取样本(每点最多最近 window_samples 条), 任一点不足
+    # min_samples 即回退 fixed-rate(最小样本数防线, 防单样本噪声主导)。
+    low_records = _probe_window_records(
+        ledger.records(),
+        low_tokens,
+        int(options.probe_window_samples),
+    )
+    high_records = _probe_window_records(
+        ledger.records(),
+        high_tokens,
+        int(options.probe_window_samples),
+    )
+    min_samples = max(1, int(options.probe_min_samples))
+    if len(low_records) < min_samples or len(high_records) < min_samples:
         return None
 
-    low_latency = float(low_sample.first_token_latency_seconds or 0.0)
-    high_latency = float(high_sample.first_token_latency_seconds or 0.0)
+    low_latency = _window_latency_seconds(low_records, bool(options.probe_outlier_trim))
+    high_latency = _window_latency_seconds(high_records, bool(options.probe_outlier_trim))
     slope = max(0.0, (high_latency - low_latency) / max(1, high_tokens - low_tokens))
     first_token_seconds = max(0.0, low_latency - (slope * low_tokens))
     prefill_seconds = slope * input_tokens
@@ -104,7 +121,10 @@ def _estimate_from_required_probes(
         timeout_seconds=timeout_seconds,
         prefill_seconds=prefill_seconds,
         first_token_seconds=first_token_seconds,
-        source=f"probe_{low_tokens // 1000}k_{high_tokens // 1000}k",
+        source=(
+            f"probe_{low_tokens // 1000}k_{high_tokens // 1000}k_"
+            f"n{min(len(low_records), len(high_records))}"
+        ),
     )
 
 
@@ -128,20 +148,38 @@ def _estimate_from_estimated_rate(
     )
 
 
-def _latest_probe_sample(
+def _probe_window_records(
     records: tuple[ModelCallRecord, ...],
     input_tokens: int,
-) -> ModelCallRecord | None:
-    for record in reversed(records):
+    window: int,
+) -> list[ModelCallRecord]:
+    """门槛4: 某 probe token 点的最近 window 条有效样本(时间倒序取窗口)。
+
+    有效样本: is_probe + input_tokens 精确匹配 + 有 first_token_latency +
+    first_token/finished + 非 cache_suspected(与旧 _latest_probe_sample 同判据,
+    从单条扩展为滑窗)。
+    """
+    matched = [
+        record
+        for record in reversed(records)
         if (
             record.is_probe
             and record.input_tokens == input_tokens
             and record.first_token_latency_seconds is not None
             and record.status in {"first_token", "finished"}
             and not record.cache_suspected
-        ):
-            return record
-    return None
+        )
+    ]
+    return matched[: max(1, int(window))]
+
+
+def _window_latency_seconds(records: list[ModelCallRecord], trim: bool) -> float:
+    """窗口样本的时延估计: trim 开启且样本>=3 时去掉最小最大后取均值
+    (异常值去极值); trim 关闭或样本<3 时全样本均值。"""
+    values = sorted(float(record.first_token_latency_seconds or 0.0) for record in records)
+    if trim and len(values) >= 3:
+        values = values[1:-1]
+    return sum(values) / max(1, len(values))
 
 
 def _ordered_probe_tokens(probe_tokens: tuple[int, int]) -> tuple[int, int]:
