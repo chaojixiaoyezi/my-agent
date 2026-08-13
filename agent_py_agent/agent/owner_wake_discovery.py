@@ -572,7 +572,10 @@ def _filter_by_runtime_authority(
                 projected = _project_task_ledger_terminal(
                     owner_home, repo, task_id, row, link_path,
                 )
-            if not projected:
+            # 诊断只覆盖「cancelled 投影失败」：done/failed 有意不投影（轮间形态，
+            # link active 是持续任务正常生命周期），不是冲突——写诊断会把
+            # 正常形态每 tick 记成 ledger_stale_after_terminal 无限洪泛。
+            if status == "cancelled" and not projected:
                 try:
                     repo.append_event(
                         event_type="status_conflict",

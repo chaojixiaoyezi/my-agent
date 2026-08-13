@@ -277,3 +277,66 @@ def test_projection_failure_keeps_diagnostic_event(stale_owner):
     assert len(_stale_conflict_events(repo)) == 1  # 诊断事件保留（一次性）
     # 部分自愈仍生效：link 已置终态，下次 tick 不再进候选 → 诊断不重复
     assert _read_json(stale_owner["link_path"])["status"] == "cancelled"
+
+
+def test_done_run_no_conflict_flood_across_ticks(tmp_path):
+    """【红测】done 终态 + link active（持续任务轮间正常形态）重复 maintenance tick
+    不产生 status_conflict 洪泛——隔离复现 testbox 42041 条根因。
+    当前实现每 tick 对 done/failed 无条件写诊断（projected 恒 False）→ 本测试红。"""
+    home = tmp_path / "home"
+    repo = RuntimeRepository(home / "runtime.db")
+    task_id = "audit-aggregate-capacity"
+    repo.record_run_creation(
+        owner_id="local/main",
+        goal="持续审计",
+        conversation_task_id=task_id,
+        run_id=task_id,
+        role="main",
+    )
+    run = repo.main_agent_run_for_task(task_id)
+    repo.settle_agent_run(
+        agent_run_id=run["agent_run_id"],
+        status="done",
+        attempt_id=run["current_attempt_id"],
+        payload={"status": "done", "runtime_status": "ok"},
+    )
+    task_root = home / "tasks" / "2026-08-12" / "audit"
+    (task_root / "work").mkdir(parents=True)
+    state = {"status": "RUNNING", "task_id": task_id, "primary_run_id": task_id,
+             "updated_at": _iso(1786517249.0)}
+    (task_root / "work" / "state.json").write_text(
+        __import__("json").dumps(state), encoding="utf-8"
+    )
+    link_dir = home / "workspace" / "runtime" / "workspaces" / "audit" / "conversations" / "tasks"
+    link_dir.mkdir(parents=True)
+    link = {"task_id": task_id, "status": "active",
+            "task_path": "tasks/2026-08-12/audit", "thread_id": "t", "goal": "持续审计"}
+    (link_dir / f"{task_id}.json").write_text(
+        __import__("json").dumps(link), encoding="utf-8"
+    )
+
+    for _ in range(5):  # 5 个 maintenance tick（testbox 60s 间隔 × 5 分钟）
+        unfinished_task_ids(home)
+
+    # 正常轮间形态不是冲突：不写诊断（当前实现红：每 tick 一条）
+    assert _stale_conflict_events(repo) == []
+    # 链路不受影响：link 仍 active（生命周期在册），run 终态仍不驱动
+    assert _read_json(link_dir / f"{task_id}.json")["status"] == "active"
+
+
+def test_cancelled_projection_failure_bounded_across_ticks(stale_owner):
+    """cancelled 投影失败诊断有界：link 终态化后不再进候选，
+    多 tick 重复维护不产生无界 runtime_events（锁定既有收敛行为）。"""
+    home = stale_owner["home"]
+    repo = stale_owner["repo"]
+    link = _read_json(stale_owner["link_path"])
+    link["task_path"] = "tasks/2026-08-12/no-such-task"
+    stale_owner["link_path"].write_text(
+        __import__("json").dumps(link, ensure_ascii=False), encoding="utf-8"
+    )
+    (stale_owner["task_root"] / "work" / "run_workspace.json").unlink()
+
+    for _ in range(3):
+        unfinished_task_ids(home)
+
+    assert len(_stale_conflict_events(repo)) == 1  # 有界：只有首次 tick 写
