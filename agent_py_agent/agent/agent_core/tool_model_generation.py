@@ -9,6 +9,8 @@ from threading import Thread
 
 from ..backends import ModelResponse
 from ..backends.errors import ProviderTimeoutError
+from ..backends.tool_ir import AssistantTurn, ToolResult
+from .tool_ir_history import native_tool_ir_history
 from ..concurrency.interrupt import (
     is_interrupted,
     register_interrupt_callback,
@@ -20,6 +22,7 @@ from .model.call_runtime import (
     effective_model_request_timeout_seconds as _effective_model_request_timeout_seconds,
 )
 from .model.call_runtime import (
+    model_call_ledger,
     observed_chunk_filter,
     record_model_call_failed,
     record_model_call_finished,
@@ -138,6 +141,11 @@ def _generate_or_recover_context_pressure(
         )
     except ProviderTimeoutError as exc:
         _record_provider_timeout(_provider_timeout_record(request, state, exc))
+        # 门槛5: 超时后按结构化 tool ledger 判定至多重试一次(只重发模型调用,
+        # 不重放工具); 资格不足或重试再超时则原样上抛(无第三次)。
+        retried = _retry_once_after_timeout(request)
+        if retried is not None:
+            return retried
         raise
     except Exception as exc:
         record_model_call_failed(state.ledger, state.call_id, exc)
@@ -150,6 +158,76 @@ def _generate_or_recover_context_pressure(
             )
         _trace_model_failure(request, exc)
         raise
+
+
+def _retry_once_after_timeout(request: ModelGenerateParams):
+    """门槛5: 超时后至多重试一次, 只重发模型调用不重放工具。
+
+    资格(fail-closed): IR 最后一条 tool_use 已确认(有配对 ToolResult)或
+    无工具才可重试; 孤儿 tool_use(截断/未确认/未知)一律不重试。每 logical
+    turn 全局最多一次: 同 logical 的物理尝试数 >1(本次超时已是首次)时不重试
+    ——重试再超时无第三次。重试走 start_model_call_record 开 attempt-2
+    新 call_id, physical_attempt 记账证明工具效果不重复。
+    """
+    if not _ir_last_tool_use_confirmed(request):
+        return None
+    if _logical_physical_attempt_count(request) > 1:
+        return None
+    retry_state = _start_model_generation(request)
+    try:
+        return _generate_with_wall_timeout(
+            request,
+            retry_state,
+            retry_state.first_token_timeout_seconds,
+        )
+    except ProviderTimeoutError as exc:
+        _record_provider_timeout(_provider_timeout_record(request, retry_state, exc))
+        return None  # 无第三次
+
+
+def _ir_last_tool_use_confirmed(request: ModelGenerateParams) -> bool:
+    """IR 最后一条 tool_use 是否已确认(有配对 ToolResult)。
+
+    结构化 tool ledger 判定(门槛5): 重试资格不靠消息形状。无工具或最后
+    tool_use 已收到配对回执 -> True(可重试); 孤儿 tool_use(截断/未确认/
+    未知) -> False(fail-closed 不重试)。IR 不可得时按无工具处理(不误杀)。
+    """
+    try:
+        history = native_tool_ir_history(request.params)
+    except Exception:
+        return True
+    last_call_id: str | None = None
+    for item in history:
+        if isinstance(item, AssistantTurn):
+            for call in item.tool_calls:
+                last_call_id = call.call_id  # 取最后一条 tool_use 的 id
+        elif isinstance(item, ToolResult):
+            if last_call_id is not None and item.call_id == last_call_id:
+                return True  # 最后 tool_use 已收到配对回执
+    return last_call_id is None  # 无工具 -> 可重试; 有孤儿 -> fail-closed
+
+
+def _logical_physical_attempt_count(request: ModelGenerateParams) -> int:
+    """同 logical turn 已落账的物理尝试数(门槛5 全局最多一次判定)。
+
+    从最近落账记录(本次超时)的 metadata.logical_call_id 取当前 logical 分组,
+    与 start_model_call_record 落账同源, 不重新推导。
+    """
+    try:
+        ledger = model_call_ledger(request.agent)
+        records = list(ledger.records())
+        if not records:
+            return 0
+        logical_id = str(records[-1].metadata.get("logical_call_id") or "")
+        if not logical_id:
+            return 0
+        return sum(
+            1
+            for record in records
+            if str(record.metadata.get("logical_call_id") or "") == logical_id
+        )
+    except Exception:
+        return 0
 
 
 def _provider_timeout_record(
