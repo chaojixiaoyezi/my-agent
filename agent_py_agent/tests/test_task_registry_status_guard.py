@@ -190,3 +190,27 @@ def test_production_entry_terminal_idempotent_via_second_instance(tmp_path) -> N
     reg_a.update_task_status("prod-2", "done")
     reg_b.register_task("prod-2", status="done", goal="确认")  # 幂等终态, 不抛
     assert reg_b.lookup_task("prod-2")["status"] == "done"
+
+
+# ---------------------------------------------------------------- P0-1 收口(seq1587/1588): 第二类生产入口竞态
+
+def test_production_entry_late_register_after_external_terminal_insert(tmp_path) -> None:
+    """第二类竞态走生产入口: 另一连接(raw SQL)先插入终态, 生产入口
+    register_task 迟到写非终态被拒——「无行→迟到终态」由生产入口覆盖。"""
+    import sqlite3
+
+    reg = _reg(tmp_path)
+    db_path = tmp_path / "local.db"
+    conn_b = sqlite3.connect(db_path)  # 另一条真实连接
+    conn_b.execute(
+        "INSERT INTO task_registry (task_id, session_id, user_id, status, goal, created_at, updated_at) "
+        "VALUES ('prod-3', '', '', 'cancelled', 'g', 1, 1)"
+    )
+    conn_b.commit()  # B 先插入终态(生产入口从未见过该行)
+    try:
+        reg.register_task("prod-3", status="pending", goal="迟到")  # A 生产入口迟到写
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("无行视图下迟到 register 非终态应抛 ValueError")
+    assert reg.lookup_task("prod-3")["status"] == "cancelled"  # 终态未被复活
