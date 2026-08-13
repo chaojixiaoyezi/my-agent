@@ -68,7 +68,14 @@ def _load_or_create_master_key(path: Path) -> bytes:
 class SecretStore:
     """密钥库:核心全自建,加密原语可选借 cryptography。
 
-    用法::
+    DEPRECATED(HANDOFF P2-5, 决策=停用, 记录见 DESIGN_LEDGER): 该能力
+    本轮不启用——生产命令/网关无任何实例化消费点(唯一实例化在本模块底部
+    工厂, 未接线), 真实密钥以 0o600 明文落盘 + /etc/my-agent 环境文件
+    承载。保留代码仅作回滚与后续切片参考, 不得新增生产调用方; 若需启用
+    必须先在 DESIGN_LEDGER 写设计并接线真实消费点(embedding key / provider
+    key 解析入口)。
+
+    用法(仅测试/参考)::
 
         store = SecretStore(home_root / "secrets")
         ref = store.register("minimax_api_key", "sk-...")    # 返回 sec_xxx,值不再出来

@@ -71,6 +71,16 @@
 - 默认安装进入透明容器 CLI：用户仍调用 `my-agent`，包装器只挂当前工作区和 `~/.my-agent`；宿主 venv 仅为显式 `--host` 开发模式。企业 worker 在启动和 K8s readiness 重跑同一 sandbox 自检。
 - 发布干净度分两层：工作树门检查 tracked 脏文件和未忽略 untracked 文件；制品门直接检查 wheel/zip/tar 内容、运行状态目录和大小预算。`.gitignore` 不是发布安全事实。
 - 普通通道对话以 `owner + channel + chat/topic` 的持久 transcript 为唯一多轮事实源；旧 dialogue memory 不得重复注入或挤占稳定偏好。thread 另外持久保存一个精确 `workspace_task_id`，作用等同 会话运行时 `SessionConfiguration` 中跨 turn 继承的 cwd；它只选择当前工作目录，不等于当前轮正在执行任务，也不从自然语言推断。
+- 公开 `my-agent run` 虽然不可追问，也必须把精确 user turn 在模型/工具执行前写入同一个 owner
+  `ConversationStore`，最终公开 assistant 投影再按同一 request 幂等追加；audit 仍只是经历档案，不能
+  成为 Memory 的第二消息权威。该 one-shot thread 只提供 transcript 与可核验 message ref，不预填
+  `conversation_task_id`，因此不会伪造会话任务 link；CLI 仍按独立 task/workspace 创建并收口。输入落账
+  失败在执行前 fail-closed，assistant 尾部落账失败只通过 typed degradation 暴露。此顺序对照 会话运行时
+  `run_hooks_and_record_inputs -> record_user_prompt_and_emit_turn_item -> run_turn` 的持久 user item 主链，
+  同时保留本项目 owner scope、Memory evidence 与 standalone lifecycle。
+- `cli_run` 的“无伪任务关联”不是无条件要求 `task_links=[]`：adapter 不得预填或主动 bind；若本轮没有
+  task-promoting tool，links 必须为空。若模型真实执行会晋升任务的工具，既有生命周期可以建立 link，
+  但 one-shot 收口后只能留下 `completed` 历史 link，`active_task_ids/active_task_links` 必须为空。
 - 普通会话只有一个持久 transcript 和一个 sticky `workspace_task_id`；每条用户消息都是新的 active turn，当前消息决定本轮聊天或工作。`/stop` 只中断眼前真实运行的 turn，历史、compact、memory、persona 和 cwd 都保留；没有 live turn 时不得借旧 task/goal 改状态。普通 `task_progress` 只提供 `read/update` 的可选恢复笔记，open item 不拦最终回复、不自动续跑、不要求用户选择、关闭或重开任务。若 sticky workspace 上一执行已终态，首个 `promotes_task` 工具会在同一 cwd 建立当前 request 的新执行 id 并记录 `continued_from_task_id`，旧终态不变；旧 link 只贡献 cwd，successor 的结构化 goal 必须取本轮精确用户输入，禁止复制旧执行目标；本轮输入缺失时 fail-closed，不创建 successor。后台续轮继续读取完整 thread summary/raw tail，但 task link、observation 与 progress 等运行投影只允许当前 task 及其持久 child lineage，不能把同会话旧项目重新暴露成任务菜单。结构化绝对写入路径可在统一工具入口无歧义绑定同 thread 的既有目录。只有用户显式创建的 `/goal` 才拥有可暂停、恢复和后台续跑的长期生命周期。该边界直接对照 会话运行时 的持久 thread/cwd + 单个 active turn，并采用 长期助手 的 session-local todo 仅作模型工作笔记；IM 只传结构化 owner/conversation/message 身份，不产生第二套语义。
 - 原生子代理创建入口必须有机器可校验的目标：`create_subagents.goal` 始终 required；单子代理直接使用该目标，`items` 批量模式同时携带总 goal 与每项独立 goal。不能只在工具说明里声称必填后容许空 `tool_use`。该约束对照 会话运行时 v2 `spawn_agent` 的 required `task_name + message`，不靠模型自然语言补救。
 - gateway 请求进入终态归档时，response 的 `done/interrupted/failed` 是最终状态权威；processing lease 只提供 owner/attempt/heartbeat 等运行字段，不能覆盖终态。归档目录、请求 JSON、response 与 `/status` 必须表达同一事实。
@@ -235,3 +245,21 @@
   性能缓存，明细见 REFACTORING_BACKLOG 同日条目）
 
 以后新增长期设计，只写摘要和链接，不再把完整方案塞回这个文件。
+
+## 2026-08-13 P2-5 SecretStore 决策：停用（DEPRECATED，不接线）
+
+HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用」。
+决策=停用（owner 授权执行席位决策，记录在案）：
+
+- 现状核对：SecretStore 唯一实例化点在模块 docstring 示例（无工厂函数），
+  生产命令/网关零消费点；embedding.py 仅用抽象 secret_resolver（注入，
+  不依赖 SecretStore 实例）；真实密钥以 0o600 明文 + /etc/my-agent 环境
+  文件承载。
+- 停用理由：接线涉及 provider key 解析链大改面（embedding key / 各
+  provider key 解析入口 + 配置开关 + 测试），收益低于风险；「支持加密
+  密钥库」承诺暂不兑现，如实文档声明避免误导。
+- 落地：secret_store.py 类 docstring 标注 DEPRECATED（不得新增生产调用
+  方，保留代码作回滚/后续切片参考）；如需启用必须先写设计并接线真实
+  消费点。
+- 验收：生产 grep 无新消费点；test_secret_store*.py 保留（类未删，测试
+  继续有效，验证既有行为不回归）。
