@@ -1449,7 +1449,7 @@
       "kind": "params",
       "note": "既有遗留(2026-08-13 登记): 参数过多, 待 code_size 切片合并参数对象; 非本棒引入",
       "severity": "hard",
-      "path": "acquire_locks",
+      "path": "agent_py_agent/agent/runtime_db/operations.py",
       "name": "acquire_locks"
     },
     {
@@ -1457,7 +1457,7 @@
       "kind": "params",
       "note": "既有遗留(2026-08-13 登记): 参数过多, 待 code_size 切片合并参数对象; 非本棒引入",
       "severity": "hard",
-      "path": "create_binding",
+      "path": "agent_py_agent/agent/runtime_db/repository.py",
       "name": "create_binding"
     },
     {
