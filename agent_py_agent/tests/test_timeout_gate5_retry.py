@@ -155,6 +155,12 @@ def test_no_tool_timeout_retries_once_and_succeeds() -> None:
     assert records[0].status == "timed_out"
     assert records[1].status == "finished"  # 重试成功记录统一收口
     assert records[1].finished_at is not None
+    # 字段级对账(seq1634 补证): attempt-2 用全新 call_id(非复用 attempt-1),
+    # 成功响应经 _finish_model_generation(retry_state) 收口落在 attempt-2 的
+    # call_id 上——「响应确实是重试产物」由 call_id 不同 + 唯一 finished 共同证明。
+    assert "attempt-1" in records[0].call_id
+    assert "attempt-2" in records[1].call_id
+    assert records[0].call_id != records[1].call_id
 
 
 # ---------------------------------------------------------------- 2. 已确认工具后超时: 重试不重放工具
