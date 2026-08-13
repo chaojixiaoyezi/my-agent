@@ -114,18 +114,33 @@ def test_outlier_trim_ignores_extreme_latency() -> None:
 # ---------------------------------------------------------------- 3. 滑窗上限
 
 def test_window_limits_to_recent_samples() -> None:
-    """滑窗上限=5: 第 6 条(最旧)大时延样本被排除, 不被陈旧样本主导。"""
+    """滑窗上限=5: 最早写入的陈旧极端样本被窗口排除(seq1554 证据缺口补强)。
+
+    陈旧样本 50/80 放在最早写入; trim 关闭 + 精确期望值下断言窗口确实
+    排除它——若 50/80 被计入窗口(6 条全取), trim=False 均值 12.83/20.33
+    -> prefill=1.5, 与 0.6 显著不同, 区分「滑窗排除」与「去极值」。
+    """
     ledger = _merge(
-        # 最旧一条(最后写入, reversed 取最近)大时延 -> 窗口 5 应排除
-        _probe_ledger(5000, [5.0, 5.2, 5.4, 5.6, 5.8, 50.0]),
-        _probe_ledger(10000, [8.0, 8.2, 8.4, 8.6, 8.8, 80.0]),
+        _probe_ledger(5000, [50.0, 5.0, 5.2, 5.4, 5.6, 5.8]),  # 50 最早写入
+        _probe_ledger(10000, [80.0, 8.0, 8.2, 8.4, 8.6, 8.8]),  # 80 最早写入
     )
-    est = _estimate(ledger, probe_window_samples=5)
+    est = _estimate(ledger, probe_window_samples=5, probe_outlier_trim=False)
     assert est.source.startswith("probe_")
-    assert est.source.endswith("_n5")  # 窗口 5 条
-    # 若 50.0 被计入(均值 12.8 vs 去极值后 5.4), prefill 会显著偏高——
-    # 断言贴近去极值后的合理值(5.4/8.4 斜率 0.0006, prefill=0.6)
-    assert est.prefill_seconds < 5.0  # 陈旧极值未主导
+    assert est.source.endswith("_n5")  # 窗口 5 条(每侧)
+    # trim=False 下窗口 5 条均值 5.4/8.4(50/80 不在窗口): slope=0.0006,
+    # prefill(1000)=0.6——若 50/80 被计入则 prefill=1.5, 断言精确区分
+    assert est.prefill_seconds == pytest.approx(0.6)
+
+
+def test_asymmetric_window_counts_independent() -> None:
+    """两侧窗口独立计数: low 2 条 + high 4 条 -> source 用 min=2(不对称安全)。"""
+    ledger = _merge(
+        _probe_ledger(5000, [5.0, 5.5]),  # 2 条(>= min_samples=2)
+        _probe_ledger(10000, [8.0, 8.1, 8.2, 8.3]),  # 4 条
+    )
+    est = _estimate(ledger)
+    assert est.source.startswith("probe_")
+    assert est.source.endswith("_n2")  # min(2, 4) = 2, 两侧独立取窗
 
 
 # ---------------------------------------------------------------- 4. 行为开关: trim 关闭
