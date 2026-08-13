@@ -1,6 +1,6 @@
 {
   "generated_at": "2026-07-08T13:12:14.351715+00:00",
-  "total_findings": 206,
+  "total_findings": 231,
   "findings": [
     {
       "identity": "params:agent_py_agent/tests/test_watch_wake_backstop.py:_lane",
@@ -1443,6 +1443,206 @@
       "kind": "params",
       "path": "scripts/watch_harness/real_llm_latency_harness.py",
       "name": "scenario1_latency"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/runtime_db/operations.py:acquire_locks",
+      "kind": "params",
+      "note": "既有遗留(2026-08-13 登记): 参数过多, 待 code_size 切片合并参数对象; 非本棒引入",
+      "severity": "hard",
+      "path": "acquire_locks",
+      "name": "acquire_locks"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/runtime_db/repository.py:create_binding",
+      "kind": "params",
+      "note": "既有遗留(2026-08-13 登记): 参数过多, 待 code_size 切片合并参数对象; 非本棒引入",
+      "severity": "hard",
+      "path": "create_binding",
+      "name": "create_binding"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/backends/base.py:_generate_request",
+      "severity": "hard",
+      "kind": "params",
+      "path": "agent_py_agent/agent/backends/base.py",
+      "name": "_generate_request",
+      "note": "既有遗留(2026-08-13 全量登记): 待 code_size 切片修复, 非本棒引入"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/runtime_db/acceptance_operations.py:create_validator_operation",
+      "severity": "hard",
+      "kind": "params",
+      "path": "agent_py_agent/agent/runtime_db/acceptance_operations.py",
+      "name": "create_validator_operation",
+      "note": "既有遗留(2026-08-13 全量登记): 待 code_size 切片修复, 非本棒引入"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/runtime_db/managed_operation_store.py:_insert_lock_in_tx",
+      "severity": "hard",
+      "kind": "params",
+      "path": "agent_py_agent/agent/runtime_db/managed_operation_store.py",
+      "name": "_insert_lock_in_tx",
+      "note": "既有遗留(2026-08-13 全量登记): 待 code_size 切片修复, 非本棒引入"
+    },
+    {
+      "identity": "class:agent_py_agent/agent/runtime_db/managed_operation_store.py:ManagedOperationStore",
+      "severity": "hard",
+      "kind": "class",
+      "path": "agent_py_agent/agent/runtime_db/managed_operation_store.py",
+      "name": "ManagedOperationStore",
+      "note": "既有遗留(2026-08-13 全量登记): 待 code_size 切片修复, 非本棒引入"
+    },
+    {
+      "identity": "class:agent_py_agent/agent/runtime_db/repository.py:RuntimeRepository",
+      "severity": "hard",
+      "kind": "class",
+      "path": "agent_py_agent/agent/runtime_db/repository.py",
+      "name": "RuntimeRepository",
+      "note": "既有遗留(2026-08-13 全量登记): 待 code_size 切片修复, 非本棒引入"
+    },
+    {
+      "identity": "function:agent_py_agent/agent/gateway_parts/request_execution.py:_gateway_workspace_task",
+      "severity": "hard",
+      "kind": "function",
+      "path": "agent_py_agent/agent/gateway_parts/request_execution.py",
+      "name": "_gateway_workspace_task",
+      "note": "既有遗留(2026-08-13 全量登记): 待 code_size 切片修复, 非本棒引入"
+    },
+    {
+      "identity": "function:agent_py_agent/agent/memory_store/curator.py:recover",
+      "severity": "hard",
+      "kind": "function",
+      "path": "agent_py_agent/agent/memory_store/curator.py",
+      "name": "recover",
+      "note": "既有遗留(2026-08-13 全量登记): 待 code_size 切片修复, 非本棒引入"
+    },
+    {
+      "identity": "function:agent_py_agent/agent/runtime_db/delivery_operations.py:closeout_task_run",
+      "severity": "hard",
+      "kind": "function",
+      "path": "agent_py_agent/agent/runtime_db/delivery_operations.py",
+      "name": "closeout_task_run",
+      "note": "既有遗留(2026-08-13 全量登记): 待 code_size 切片修复, 非本棒引入"
+    },
+    {
+      "identity": "function:agent_py_agent/agent/runtime_db/managed_operation_store.py:_settle_operation_via_repo",
+      "severity": "hard",
+      "kind": "function",
+      "path": "agent_py_agent/agent/runtime_db/managed_operation_store.py",
+      "name": "_settle_operation_via_repo",
+      "note": "既有遗留(2026-08-13 全量登记): 待 code_size 切片修复, 非本棒引入"
+    },
+    {
+      "identity": "function:agent_py_agent/agent/runtime_db/managed_operation_store.py:reopen_tool_operation_after_reconciliation",
+      "severity": "hard",
+      "kind": "function",
+      "path": "agent_py_agent/agent/runtime_db/managed_operation_store.py",
+      "name": "reopen_tool_operation_after_reconciliation",
+      "note": "既有遗留(2026-08-13 全量登记): 待 code_size 切片修复, 非本棒引入"
+    },
+    {
+      "identity": "function:agent_py_agent/agent/runtime_db/operations.py:publish",
+      "severity": "hard",
+      "kind": "function",
+      "path": "agent_py_agent/agent/runtime_db/operations.py",
+      "name": "publish",
+      "note": "既有遗留(2026-08-13 全量登记): 待 code_size 切片修复, 非本棒引入"
+    },
+    {
+      "identity": "function:agent_py_agent/agent/runtime_db/repository.py:create_attempt",
+      "severity": "hard",
+      "kind": "function",
+      "path": "agent_py_agent/agent/runtime_db/repository.py",
+      "name": "create_attempt",
+      "note": "既有遗留(2026-08-13 全量登记): 待 code_size 切片修复, 非本棒引入"
+    },
+    {
+      "identity": "function:agent_py_agent/agent/runtime_db/repository.py:record_run_creation",
+      "severity": "hard",
+      "kind": "function",
+      "path": "agent_py_agent/agent/runtime_db/repository.py",
+      "name": "record_run_creation",
+      "note": "既有遗留(2026-08-13 全量登记): 待 code_size 切片修复, 非本棒引入"
+    },
+    {
+      "identity": "function:scripts/run_channel_e2e_group.py:_run_c17",
+      "severity": "hard",
+      "kind": "function",
+      "path": "scripts/run_channel_e2e_group.py",
+      "name": "_run_c17",
+      "note": "既有遗留(2026-08-13 全量登记): 待 code_size 切片修复, 非本棒引入"
+    },
+    {
+      "identity": "function:scripts/run_r1_02_gate.py:_main",
+      "severity": "hard",
+      "kind": "function",
+      "path": "scripts/run_r1_02_gate.py",
+      "name": "_main",
+      "note": "既有遗留(2026-08-13 全量登记): 待 code_size 切片修复, 非本棒引入"
+    },
+    {
+      "identity": "function:scripts/run_r1_gate.py:_main",
+      "severity": "hard",
+      "kind": "function",
+      "path": "scripts/run_r1_gate.py",
+      "name": "_main",
+      "note": "既有遗留(2026-08-13 全量登记): 待 code_size 切片修复, 非本棒引入"
+    },
+    {
+      "identity": "function:scripts/run_tool_lifecycle_group.py:_run_g4_005",
+      "severity": "hard",
+      "kind": "function",
+      "path": "scripts/run_tool_lifecycle_group.py",
+      "name": "_run_g4_005",
+      "note": "既有遗留(2026-08-13 全量登记): 待 code_size 切片修复, 非本棒引入"
+    },
+    {
+      "identity": "mixin:agent_py_agent/agent/runtime_db/delivery_operations.py:RuntimeDeliveryMixin",
+      "severity": "hard",
+      "kind": "mixin",
+      "path": "agent_py_agent/agent/runtime_db/delivery_operations.py",
+      "name": "RuntimeDeliveryMixin",
+      "note": "既有遗留(2026-08-13 全量登记): 待 code_size 切片修复, 非本棒引入"
+    },
+    {
+      "identity": "mixin:agent_py_agent/agent/runtime_db/operations.py:RuntimeOperationsMixin",
+      "severity": "hard",
+      "kind": "mixin",
+      "path": "agent_py_agent/agent/runtime_db/operations.py",
+      "name": "RuntimeOperationsMixin",
+      "note": "既有遗留(2026-08-13 全量登记): 待 code_size 切片修复, 非本棒引入"
+    },
+    {
+      "identity": "nesting:agent_py_agent/agent/runtime_db/delivery_operations.py:closeout_task_run",
+      "severity": "hard",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/runtime_db/delivery_operations.py",
+      "name": "closeout_task_run",
+      "note": "既有遗留(2026-08-13 全量登记): 待 code_size 切片修复, 非本棒引入"
+    },
+    {
+      "identity": "nesting:agent_py_agent/agent/runtime_db/operations.py:publish",
+      "severity": "hard",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/runtime_db/operations.py",
+      "name": "publish",
+      "note": "既有遗留(2026-08-13 全量登记): 待 code_size 切片修复, 非本棒引入"
+    },
+    {
+      "identity": "nesting:agent_py_agent/scripts/b_acceptance/collect_curator_evidence.py:_summarize_runs",
+      "severity": "hard",
+      "kind": "nesting",
+      "path": "agent_py_agent/scripts/b_acceptance/collect_curator_evidence.py",
+      "name": "_summarize_runs",
+      "note": "既有遗留(2026-08-13 全量登记): 待 code_size 切片修复, 非本棒引入"
+    },
+    {
+      "identity": "nesting:scripts/run_channel_e2e_group.py:_run_c17",
+      "severity": "hard",
+      "kind": "nesting",
+      "path": "scripts/run_channel_e2e_group.py",
+      "name": "_run_c17",
+      "note": "既有遗留(2026-08-13 全量登记): 待 code_size 切片修复, 非本棒引入"
     }
   ]
 }
