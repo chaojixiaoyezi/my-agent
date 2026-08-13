@@ -600,6 +600,36 @@ class _SchedulerStoreSupport:
         if self.due_index is not None:
             self.due_index.sync_owner(self.due_owner, store)
 
+    def corruption_report(self) -> dict[str, object]:
+        """P1-3(HANDOFF 文档线): 结构化损坏报告——坏 job/run 被隔离后仍可查询。
+
+        坏记录(schema 不符/截断写/手改)由逐条解析跳过并在此汇总, 不再静默
+        丢弃; 不覆盖原文件(只读)。健康记录照常调度(隔离不瘫痪)。
+        """
+        with locked_json_path(self.store_path):
+            store = self._load_store_unlocked()
+            _jobs, job_errors = self._valid_jobs(store)
+            _runs, run_errors = self._valid_runs(store)
+        return {
+            "schema_version": store.get("schema_version"),
+            "owner": dict(store.get("owner") or {}),
+            "corrupt_jobs": job_errors,
+            "corrupt_runs": run_errors,
+            "corrupt": bool(job_errors or run_errors),
+        }
+
+    def _valid_runs(self, store: dict[str, Any]) -> tuple[list[dict[str, object]], list[str]]:
+        """逐条解析 runs: 坏记录跳过并收集错误(与 _valid_jobs 同容错模式)。"""
+        runs: list[dict[str, object]] = []
+        errors: list[str] = []
+        for raw in store["runs"].values():
+            run, error = self._parse_run(raw)
+            if run is not None:
+                runs.append(run)
+            if error:
+                errors.append(error)
+        return runs, sorted(set(errors))
+
     def _valid_jobs(self, store: dict[str, Any]) -> tuple[list[dict[str, object]], list[str]]:
         jobs: list[dict[str, object]] = []
         errors: list[str] = []
