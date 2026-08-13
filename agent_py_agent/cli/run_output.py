@@ -46,6 +46,9 @@ def make_run_chunk_writer(spinner: ThinkingSpinner, stream_state: dict[str, obje
     return _LocalRunChunkWriter(spinner, stream_state)
 
 
+# LLM: Print model-authored final content separately from program-owned runtime diagnostics;
+# typed transcript degradation is observable but must never rewrite or replace the model body.
+# 函数用途: 输出 CLI 最终回复、运行摘要及结构化降级提示，避免把系统诊断混入模型正文。
 def print_run_result(result, *, show_prompt: bool, streamed_text: str = "") -> None:
     if show_prompt:
         print("===== FINAL PROMPT =====")
@@ -65,6 +68,12 @@ def print_run_result(result, *, show_prompt: bool, streamed_text: str = "") -> N
         f"resume_context={1 if result.memory_resume_context_injected else 0}; "
         f"resume_tokens≈{result.memory_resume_context_token_estimate}]"
     )
+    if getattr(result, "conversation_persist_degraded", False) is True:
+        detail = str(getattr(result, "conversation_persist_error", "") or "").strip()
+        print(
+            "[conversation_persist_degraded] 最终回复已返回，但 assistant 会话记录未可靠落账。"
+            + (f" detail={detail}" if detail else "")
+        )
     _print_compact_suggestion(result)
 
 

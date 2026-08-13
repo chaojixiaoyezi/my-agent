@@ -58,6 +58,12 @@ def cmd_memory_curator_run(args: Any) -> int:
     return _run_admin_command(args, _curator_run_payload)
 
 
+# LLM: 恢复只读校验+原子落回, 不登记 trigger; 失败返回非零码(ok=false)。
+# 函数用途: 显式执行一次人工 Curator state 恢复。
+def cmd_memory_curator_recover(args: Any) -> int:
+    return _run_admin_command(args, _curator_recover_payload)
+
+
 # LLM: retention plan 是严格只读调用，不能因为 CLI 展示而创建 trash 或 audit。
 # 函数用途: 生成当前 owner 的 v2 保留期计划。
 def cmd_memory_retention_plan(args: Any) -> int:
@@ -232,6 +238,17 @@ def _curator_run_payload(agent: Any, args: Any) -> dict[str, object]:
         "request": request,
         "run": result.to_dict(),
         "curator": agent.memory_curator.status(),
+    }
+
+
+# LLM: recover 是人工恢复通道, 报告如实反映校验链结果; 拒绝与失败都不是「成功」。
+# 函数用途: 构造人工恢复 Curator state 的结构化报告。
+def _curator_recover_payload(agent: Any, _args: Any) -> dict[str, object]:
+    result = agent.memory_curator.recover()
+    return {
+        "ok": result.get("status") == "recovered",
+        "command": "memory curator recover",
+        "recover": result,
     }
 
 

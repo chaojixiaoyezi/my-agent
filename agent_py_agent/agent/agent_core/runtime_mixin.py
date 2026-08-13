@@ -11,18 +11,17 @@ import json
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 
+from ..runtime_db.repository import AGENT_RUN_TERMINAL_STATUSES
 from ._compression_service import CompressionService
 from ._finalization_service import FinalizationService
 from ._runtime_params import FinalizeContext
+from .cli_run_conversation import (
+    bind_cli_run_conversation,
+    persist_cli_run_assistant,
+)
 from .compact_auto_continuation import (
     compact_auto_continuation_decision,
     mark_compact_auto_continued,
-)
-from .task_progress_continuation import (
-    TaskProgressContinuationDecision,
-    mark_task_progress_continued,
-    mark_task_progress_limit_reached,
-    task_progress_continuation_decision,
 )
 from .run_task_workspace_writer import (
     attach_run_task_workspace_context,
@@ -43,7 +42,12 @@ from .runtime.run_params import (
     run_params_from_keywords,
     run_params_with_request_id,
 )
-from ..runtime_db.repository import AGENT_RUN_TERMINAL_STATUSES
+from .task_progress_continuation import (
+    TaskProgressContinuationDecision,
+    mark_task_progress_continued,
+    mark_task_progress_limit_reached,
+    task_progress_continuation_decision,
+)
 
 
 @dataclass
@@ -455,6 +459,9 @@ def _run_with_params(agent, user_prompt: str, params: RunParams):
     current_params = run_params_with_request_id(params)
     if not current_params.root_user_prompt:
         current_params = replace(current_params, root_user_prompt=user_prompt)
+    # Public ``my-agent run`` is single-shot, but its exact user input must already exist in
+    # ConversationStore before remember or Curator can claim message evidence.
+    current_params = bind_cli_run_conversation(agent, current_params, user_prompt)
     current_params = attach_run_task_workspace_context(agent, current_params, user_prompt)
     result = _run_once_with_params(agent, user_prompt, current_params)
     while True:
@@ -484,6 +491,7 @@ def _run_with_params(agent, user_prompt: str, params: RunParams):
                 result = mark_task_progress_limit_reached(result)
             finish_run_task_workspace_if_needed(agent, current_params, result)
             _settle_main_agent_run(agent, current_params, result)
+            persist_cli_run_assistant(agent, current_params, result)
             return result
         next_params = _task_progress_continue_params(
             current_params, progress_decision, result

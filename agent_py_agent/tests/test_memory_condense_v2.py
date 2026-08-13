@@ -177,7 +177,7 @@ def test_promote_triggers_condense_on_long_term_write(
     message = conversations.append_message(
         {"thread_id": thread.thread_id, "role": "user", "content": "祥子买了两次车。", "now": 11.0}
     )
-    content_hash = "sha256:" + hashlib.sha256("祥子买了两次车。".encode("utf-8")).hexdigest()
+    content_hash = "sha256:" + hashlib.sha256("祥子买了两次车。".encode()).hexdigest()
     message_ref = {
         "message_id": message.message_id,
         "thread_id": thread.thread_id,
@@ -196,6 +196,8 @@ def test_promote_triggers_condense_on_long_term_write(
             proposed_action="add",
             promotion_target="long_term",
             confidence=0.99,
+            # 权限合同:自动晋升路径需要宿主已授权 auto_eligible 的候选。
+            promotion_mode="auto_eligible",
         )
     )
 

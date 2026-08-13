@@ -106,7 +106,10 @@ def finish_run_task_workspace_if_needed(agent, params: object, result: object) -
         return ""
     attrs = getattr(params, "task_attributes", None)
     attrs = attrs if isinstance(attrs, dict) else {}
-    if any(
+    # A cli_run now has a ConversationStore transcript for Memory evidence, but it remains a
+    # standalone one-shot task whose workspace must be projected out of RUNNING here.  Gateway
+    # conversations keep their separate task-link lifecycle and continue to skip this projection.
+    if str(getattr(params, "source", "") or "").strip().lower() != "cli_run" and any(
         str(attrs.get(key) or "").strip()
         for key in ("conversation_thread_id", "conversation_task_id")
     ):
@@ -403,7 +406,15 @@ def _should_create_workspace(agent, params) -> bool:
     return bool(getattr(agent, "home_paths", None) is not None)
 
 
+# LLM: A thread id alone demotes interactive chat to a no-workspace turn, except cli_run whose
+# one-shot task identity is already explicit and whose thread exists only for transcript evidence.
+# 函数用途: 判断带会话身份的本轮是不是尚未真正工作的普通聊天；CLI 一次性任务不属于此类。
 def _unpromoted_conversation_turn(params: object) -> bool:
+    # cli_run is already an explicit standalone task.  Its ConversationStore thread exists only
+    # to preserve the authoritative transcript and Memory evidence, not to demote the task into a
+    # Gateway-style plain chat turn.
+    if str(getattr(params, "source", "") or "").strip().lower() == "cli_run":
+        return False
     attrs = getattr(params, "task_attributes", None)
     return bool(
         isinstance(attrs, dict)

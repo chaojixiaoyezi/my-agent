@@ -11,6 +11,9 @@ from __future__ import annotations
 import json
 import time
 
+from ..agent.agent_core.cli_run_conversation import (
+    CliRunConversationPersistenceError,
+)
 from ..agent.backends import ProviderRecoverableError
 from ..agent.gateway_parts import (
     gateway_paths,
@@ -149,6 +152,9 @@ def cmd_timeline(args) -> int:
     return 0
 
 
+# LLM: Public one-shot runs must render typed provider and transcript failures without traceback;
+# the command may not continue after an authoritative user-message persistence failure.
+# 函数用途: 执行一次 CLI Agent 请求，显示最终结果，并把模型或会话落账故障转成稳定中文退出信息。
 def cmd_run(args) -> int:
 
     agent = make_agent(args)
@@ -171,6 +177,13 @@ def cmd_run(args) -> int:
         )
     except ProviderRecoverableError as exc:
         print(provider_recoverable_cli_report(agent, exc))
+        return 2
+    except CliRunConversationPersistenceError as exc:
+        print(
+            "[cli_run_conversation_persistence]\n"
+            f"{exc}\n"
+            "本次模型和工具均未执行；请修复 ConversationStore 后使用同一请求重新运行。"
+        )
         return 2
     finally:
         spinner.stop()

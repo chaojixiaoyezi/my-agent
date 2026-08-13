@@ -20,6 +20,34 @@ def test_run_exit_code_rejects_old_success_alias() -> None:
     assert run_exit_code(SimpleNamespace(runtime_status="succeeded")) == 2
 
 
+def test_print_run_result_reports_typed_conversation_degradation(capsys) -> None:
+    from agent_py_agent.cli.run_output import print_run_result
+
+    result = SimpleNamespace(
+        response="实际最终回复",
+        prompt="最终 prompt",
+        backend="test",
+        used_memories=0,
+        tool_rounds=0,
+        memory_route_matches=0,
+        prompt_token_estimate=10,
+        runtime_injection_token_estimate=0,
+        archive_events=0,
+        memory_resume_context_injected=False,
+        memory_resume_context_token_estimate=0,
+        memory_compact_suggested=False,
+        conversation_persist_degraded=True,
+        conversation_persist_error="assistant transcript append failed",
+    )
+
+    print_run_result(result, show_prompt=False)
+
+    output = capsys.readouterr().out
+    assert "实际最终回复" in output
+    assert "conversation_persist_degraded" in output
+    assert "assistant transcript append failed" in output
+
+
 class TestRuntimeMixinCompress:
     """测试 memory 压缩相关方法。"""
 

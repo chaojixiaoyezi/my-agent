@@ -16,6 +16,7 @@ from .memory_admin_commands import (
     cmd_memory_candidates_list,
     cmd_memory_candidates_promote,
     cmd_memory_candidates_review,
+    cmd_memory_curator_recover,
     cmd_memory_curator_run,
     cmd_memory_curator_status,
     cmd_memory_migrate,
@@ -156,6 +157,17 @@ def _add_curator_commands(areas: argparse._SubParsersAction) -> None:
     )
     run.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     run.set_defaults(func=cmd_memory_curator_run)
+    recover = actions.add_parser(
+        "recover",
+        help="人工恢复损坏隔离的 Curator state（凭权威审计链重建游标）",
+        description=(
+            "结构化恢复通道: 校验隔离副本 hash 与哨兵一致、run_log 存在成功审计且"
+            "游标未分裂后才执行; 恢复事件落 run_log 审计。任一校验失败拒绝执行,"
+            "不伪造自愈成功。不能由普通文本或手动删哨兵触发。"
+        ),
+    )
+    recover.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    recover.set_defaults(func=cmd_memory_curator_recover)
 
 
 # LLM: plan/apply 是同一 RetentionService 的只读和执行阶段，不能保留另一套 scanner。

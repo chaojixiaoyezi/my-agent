@@ -3,6 +3,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from agent_py_agent.agent.agent_core.cli_run_conversation import (
+    CliRunConversationPersistenceError,
+)
 from agent_py_agent.agent.backends.errors import (
     ProviderRecoverableError,
     ProviderResponseError,
@@ -111,3 +114,35 @@ def test_provider_timeout_and_transient_share_recoverable_base() -> None:
     assert is_provider_recoverable_error(ProviderTimeoutError("timeout"))
     assert is_provider_recoverable_error(ProviderTransientError("429"))
     assert is_provider_recoverable_error(ProviderResponseError("bad payload"))
+
+
+def test_cmd_run_reports_conversation_persistence_failure_without_traceback(capsys) -> None:
+    agent = SimpleNamespace(
+        config=SimpleNamespace(request_timeout=23),
+        run=MagicMock(
+            side_effect=CliRunConversationPersistenceError(
+                "CLI run 用户消息无法可靠写入 ConversationStore，已在模型执行前停止。"
+            )
+        ),
+    )
+    args = SimpleNamespace(
+        config="config.yaml",
+        prompt="请记住一条事实",
+        inject=[],
+        prompt_file=[],
+        save=False,
+        show_prompt=False,
+        resume_context=None,
+    )
+
+    with (
+        patch("agent_py_agent.cli.local_commands.make_agent", return_value=agent),
+        patch("agent_py_agent.cli.local_commands.ThinkingSpinner", return_value=_NoopSpinner()),
+    ):
+        code = cmd_run(args)
+
+    output = capsys.readouterr().out
+    assert code == 2
+    assert "cli_run_conversation_persistence" in output
+    assert "模型和工具均未执行" in output
+    assert "Traceback" not in output
