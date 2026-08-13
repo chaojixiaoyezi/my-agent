@@ -81,13 +81,16 @@ class SchedulerRunHeartbeat:
                 )
             except Exception as exc:
                 consecutive_failures += 1
+                # P0-2 收口(seq1562): extra 结构化字段(run_id/claim_id/failures/
+                # error_type)供 JSON formatter 按字段检索落盘, 不依赖正文解析。
                 logger.warning(
-                    "调度心跳续租失败(瞬时错误, 不退出): run_id=%s claim_id=%s "
-                    "failures=%d error=%s",
-                    self.claim.run_id,
-                    self.claim.claim_id,
-                    consecutive_failures,
-                    type(exc).__name__,
+                    "调度心跳续租失败(瞬时错误, 不退出)",
+                    extra={
+                        "run_id": self.claim.run_id,
+                        "claim_id": self.claim.claim_id,
+                        "failures": consecutive_failures,
+                        "error_type": type(exc).__name__,
+                    },
                 )
                 backoff = min(
                     self.interval_seconds * (2 ** min(consecutive_failures, 3)),

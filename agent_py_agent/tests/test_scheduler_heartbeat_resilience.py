@@ -76,3 +76,24 @@ def test_heartbeat_stop_interrupts_failure_backoff() -> None:
     time.sleep(1.2)  # 至少进入一次失败退避
     hb.stop()
     assert not hb._thread.is_alive()  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------- P0-2 收口(seq1562): 结构化日志字段
+
+def test_heartbeat_failure_logs_structured_fields(caplog) -> None:
+    """瞬时失败日志以结构化字段可检索: extra 含 run_id/claim_id/failures/
+    error_type(不依赖正文解析, JSON formatter 可落盘检索)。"""
+    import logging
+
+    repo = _FlakyRepo(fail_first=1)
+    hb = SchedulerRunHeartbeat(repo, _claim(), lease_seconds=3)
+    with caplog.at_level(logging.WARNING, logger="agent_py_agent.agent.scheduler.service"):
+        hb.start()
+        time.sleep(1.5)  # 触发至少 1 次失败日志
+        hb.stop()
+    assert caplog.records, "应有失败日志"
+    record = caplog.records[0]
+    assert record.run_id == "run-heartbeat-test-0001"  # extra 结构化字段
+    assert record.claim_id == "claim-1"
+    assert record.failures == 1
+    assert record.error_type == "RuntimeError"
