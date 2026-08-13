@@ -1,6 +1,6 @@
 {
   "generated_at": "2026-07-08T13:12:14.351715+00:00",
-  "total_findings": 231,
+  "total_findings": 230,
   "findings": [
     {
       "identity": "params:agent_py_agent/tests/test_watch_wake_backstop.py:_lane",
@@ -778,13 +778,6 @@
       "kind": "nesting",
       "path": "agent_py_agent/agent/tooling/process_registry.py",
       "name": "kill"
-    },
-    {
-      "identity": "nesting:agent_py_agent/tests/test_concurrency_write_hardening.py:reader",
-      "severity": "high-risk",
-      "kind": "nesting",
-      "path": "agent_py_agent/tests/test_concurrency_write_hardening.py",
-      "name": "reader"
     },
     {
       "identity": "nesting:agent_py_agent/tests/test_concurrency_write_hardening.py:reader",
