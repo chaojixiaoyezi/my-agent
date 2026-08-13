@@ -16,6 +16,10 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 - task/run/artifact/evidence 只以 typed refs 传递；子代理自然语言摘要不决定 scope、审核状态或晋升。
 - dry-run、坏 result 和未找到正式 CandidateService 时不写候选；正式结果事实仍由 canonical task/result
   持有，Candidate 只是待审核的跨任务复用提议。
+- scope 统一：`memory_candidates.py::_task_scope` 是唯一构造点（`scope_type=project`、
+  `scope_key=f"project:{safe_id}"`）；新持久化一律 project 单一权威，`task:<id>` 仅旧账本召回
+  read alias，由 curator 侧 `canonical_scope_key` 归一，不允许以 `task:<id>` 新持久化；goal 只作
+  `applies_when` 人类说明。
 
 ## 2026-07-30 启动上下文必需字段
 

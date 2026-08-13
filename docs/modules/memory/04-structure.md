@@ -95,6 +95,14 @@ flowchart TD
 | `skill_policy.json` | Skill 总闸(enabled) + enabled_sources 等细粒度名单 | 总闸关闭时名单无意义(快照直接空) |
 | `memory/migration.json` | 一次性迁移完成 marker 和备份引用 | 不提供永久 legacy fallback |
 
+`my-agent run` 虽是一次性、不可追问的 CLI 任务，仍在任何模型/工具执行前把用户原文幂等写入
+ConversationStore，并在最终返回时追加 assistant 投影。两条消息共享本次 `request_id` 元数据；因此
+`remember(user_explicit)` 和后台 Curator 都回查同一消息权威，而不是改读 audit 或恢复旧 dialogue
+长期记忆旁路。该入口同时保留 standalone task workspace 的创建与终态投影；拥有 transcript 不会把
+CLI run 误变成 Gateway 普通聊天任务。adapter 本身不预填 `conversation_task_id` 或创建 task link；
+没有真实 task-promoting tool 的回合保持 links 为空。若模型实际调用会晋升任务的工具，既有任务生命周期
+可以建立真实 link，但 CLI 收口后它必须为 `completed`，且 `active_task_ids/active_task_links` 必须为空。
+
 ## 生产服务与调用关系
 
 - `memory_store/candidates.py`：唯一 CandidateService，负责稳定 `candidate_id`、观察去重、`occurrence_count` 和状态转换。
@@ -137,13 +145,30 @@ flowchart TD
 - `user_explicit` 必须由当前 owner ConversationStore 核验真实用户消息、quote 与 SHA-256。
 - `tool_verified` 必须由 Tools Agent 的 operation store 核验 `succeeded + ok=true + effect_outcome` 已知。
 - `model_inferred`、`subagent_finding`、`subagent_lesson` 不能绕过审核或 PersonaRepository。
-- 自动晋升只适用于证据完整、无冲突、动作是 add 的新 user/tool 长期事实。
-- replace/remove/merge、lesson、HOT、USER 范围歧义、SOUL、AGENTS 都必须审核或确认。
+- 晋升权限是持久化的 `promotion_mode` 枚举（`auto_eligible|manual_required`），由宿主在两个
+  入口确定性赋值：`remember` 工具（仅非 batch 单条 add 且 user_explicit/tool_verified）与
+  Curator（合格 user/tool 新 long_term fact/event/project 的 add）。模型 Schema 不暴露该字段，
+  任何文本不能修改权限；legacy 旧记录缺失时读取归一 `manual_required`（fail-closed），
+  非法值严格拒绝。权限不进入 `candidate_id`/observation key/`_same_candidate_identity`，
+  merge 单向吸收 manual；`schema_version` 不 bump。
+- 自动晋升只适用于同时满足「持久化 `auto_eligible` + 证据完整、无冲突、动作是 add 的新
+  user/tool 长期事实」；`automatic=True` 对 `manual_required` 在任何 mutation 之前返回稳定
+  `PROMOTION_MANUAL_REQUIRED`。Curator 选择器与提交后晋升都只消费 `auto_eligible` 候选。
+- replace/remove/merge、batch（即使单条）、lesson、HOT、USER 范围歧义、SOUL、AGENTS 都必须
+  审核或确认；lesson 的重复观察/多证据组只是人工批准后的晋升门槛，不再有自动专线。
+- v2 正式事实的精确幂等身份包含规范正文、`subject_key`、`scope_type` 与 `scope_key`；同一
+  subject/scope 重放返回原 entry，不同 scope 即使正文逐字相同也必须各自落为独立事实。底层空 add
+  提交会转成 `LONG_TERM_ADD_IDEMPOTENCY_IDENTITY_MISMATCH` 冲突，不再用另一个 scope 的正文命中
+  冒充成功，也不再抛 `StopIteration`。
+- 新 add Candidate 在写账本前校验可召回的 typed scope key；例如 personal 只能是
+  `personal/personal`，项目必须使用 `project:<id>` 或 `task:<id>`。旧坏键仍可严格读取，供管理员
+  审核、迁移或精确删除；replace/remove 从目标继承旧 scope，不会因升级而失去清理路径。
 
 ## Recall 与 Prompt 安全
 
 - 查询先取当前 owner 的正式记录，再按文本相关度、来源可信度、更新时间和结构化 scope 排序。
-- `subject_key + scope_type + scope_key` 去重；新时间不会自动压过旧事实。
+- `subject_key + scope_type + scope_key` 精确去重；不同 scope 的相同正文不会被底层全局正文键吞掉，
+  新时间也不会自动压过旧事实。
 - candidates、ops、Daily、rejected、superseded、expired 与 stale index 不进入正式 Prompt。
 - 所有历史记忆只通过一个 `<memory-context>` 注入；信封声明其为非权威数据。
 - planner 与 runner failure 的主动教训召回也遵守同一条；routing Markdown 只产生读取小票，不把 `### Routed memory authority` 原文作为第二种注入。

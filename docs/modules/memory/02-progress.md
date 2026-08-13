@@ -41,6 +41,27 @@
   `CURATOR_COMMIT_FAILED`。超时与撤销 Daily 目录写权限的提交故障都未推进游标、未增加 Daily/Candidate；
   恢复配置/权限后，同一 Gateway maintenance 安全重试成功且 occurrence 未虚增。
 - 最终全量、静态发布门禁与八部长文本最后验收仍按 Goal 继续执行，因此本条状态保持“开发中”，不提前宣称完成。
+- 2026-08-12 真机重复写暴露 promotion/storage 身份漂移：首次候选是
+  `personal/personal`，第二次被模型写成 `personal/local`，旧 `JsonlMemory` 只按 role/kind/正文
+  全 owner 去重，返回空提交后 Promotion 又按新 entry_id 查找，最终 `StopIteration -> TOOL_ERROR ->
+  UNKNOWN/unfinished`。现将 v2 正式事实幂等键统一为正文 + `subject_key/scope_type/scope_key`，同
+  scope 重放仍返回原 ID，不同 scope 的逐字相同正文可以并存；空提交身份漂移改为稳定 conflict，
+  不再伪造成功 ref 或抛迭代异常。
+- 同轮同时封住不可召回的新 scope：新 add Candidate 统一拒绝 `personal/local` 等类型/键不匹配值，
+  但旧 Candidate/正式记录仍可读取，replace/remove 可继承旧目标 scope 继续迁移或清理。新增 store、
+  Promotion 与 remember 回归覆盖同 key 重放、同类型不同 key 共存、空提交安全冲突，以及写账本前
+  `TOOL_INVALID_ARGUMENTS/not_started`；真实隔离 Gateway 与 testbox 复验仍待本轮后续证据。
+- 2026-08-12 同日定版并落地晋升权限合同（`promotion_mode`，seq1227）：候选账本新增持久化枚举
+  `auto_eligible|manual_required`，宿主（remember 工具与 Curator）确定性赋值，模型 Schema 与
+  任何文本都不能设置或修改。仅非 batch 单条 add 且 user_explicit/tool_verified 的合格新长期事实
+  可被标 `auto_eligible`；batch 即使单条、replace/remove、model_inferred、lesson/hot/subagent
+  一律 `manual_required`。`automatic=True` 对 manual 候选在证据/状态/target 任何 mutation 之前
+  返回稳定 `PROMOTION_MANUAL_REQUIRED`；Curator 选择器与提交后晋升都只消费 `auto_eligible`。
+  lesson 自动专线按定版删除（重复观察/多证据组只是人工批准后的晋升门槛）。权限不进入
+  `candidate_id`/observation key/identity 判定，同事实不同权限重放不增 occurrence、不能升权，
+  落库 merge 单向吸收 manual；legacy 缺失归一 manual（fail-closed），非法值严格拒绝，
+  `schema_version` 不 bump。修复了 `_post_commit_report` 不走选择器直接回调晋升的绕过，以及
+  batch 单条误判可自动的两处赋权漏洞；4 个测试文件覆盖 10 项验收矩阵与正反例。
 
 ## 2026-08-03 Audit 来源工作者的任务状态与工具归档隔离
 
@@ -352,6 +373,35 @@
 - 子代理只保留 task-local 状态、事件、artifact refs 和 compact，不拥有长期记忆。
 - 普通恢复、compact、tree 和 doctor 走当前 owner/task/run/agent refs，不再扫描 repo `data/*` 作为事实源。
 - owner projection/global index 是查找地图，可重建；canonical state 和 task workspace 才是权威。
+
+## 2026-08-12 CLI run ConversationStore 证据补齐
+
+- 真实隔离 B5 发现公开 `my-agent run` 会调用 `remember`，但用户输入只进 audit、不进
+  ConversationStore，导致 `user_explicit` 候选缺 `source_message_refs` 并永久停在
+  `blocked_missing_evidence`。
+- canonical 修复位于共享 `agent.run` 入口：仅 `source=cli_run` 在模型执行前建立 one-shot thread，
+  使用 `append_message_once` 写 user，并把精确 thread id 带入本轮；最终 assistant 投影同样幂等落账。
+  不预填 `conversation_task_id`，避免把 standalone CLI task 伪造成 active ConversationStore task link。
+- 用户输入落账失败时 fail closed，模型调用次数必须为零；assistant 落账失败只通过 typed
+  `conversation_persist_degraded/error` 暴露，不把 audit 升格为第二消息权威。
+- CLI 继续走 standalone workspace 终态投影；Gateway conversation 的既有跳过分支保持不变，避免
+  CLI `state.json` 残留 RUNNING 并制造 `status_conflict` 诊断噪音。
+- 新增 focused 测试覆盖真实 remember 晋升、message ref、user/assistant 幂等、失败分级、CLI
+  workspace DONE 与 Gateway skip 回归；本轮不重复运行全量 pytest。
+- 隔离 testbox B5R3 已用真实 `anthropic_compatible/deepseek-v4-flash` 和普通中文请求完成
+  `cli_run -> ConversationStore -> remember -> Candidate -> Promotion -> long_term`：CLI RC=0，user/assistant
+  两条消息共享同一 request/run/task lineage；唯一 Candidate 为 `promoted`，唯一
+  `source_message_ref` 精确指向本轮 user message，正式长期记忆复用同一证据；workspace=`DONE`、
+  unfinished 为空、agent run=`done`、`status_conflict=0`。同 request 的纯存储重放没有再次调用模型，
+  messages/Candidate/formal/ops/runtime/tool-operation 计数与 ID 全部不变。
+- B5R3 中模型为修正 `remember` 参数真实调用了任务型工具，因此产生一条真实 task link，最终为
+  `completed`，`active_task_ids/active_task_links` 均为空。验收口径是“adapter 不伪造 link；没有真实
+  task-promoting tool 时 links 为空；发生真实任务晋升时 link 必须终态”，不能把所有场景机械要求为
+  `task_links=[]`。生产 Gateway/飞书 PID 与 8420 监听在前后保持不变，隔离端口未监听；脱敏证据保存在
+  testbox `/root/memory-evidence/会话运行时-MEM-20260812-B5R3/`。
+- B5R-F0（缺显式 text 协议）和 B5R2（测试 shell 使用过期凭证）均在独立目录失败并保留原始证据，
+  没有手工补写 Memory。两次模型前失败都暴露既有通用缺口：CLI 打印 traceback，standalone workspace
+  残留 `RUNNING`；它们不影响本切片成功链，但必须另开窄修复，不能误报为已解决。
 
 ## 下一步
 

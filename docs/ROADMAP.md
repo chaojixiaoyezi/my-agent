@@ -29,8 +29,11 @@
 
 当前进展：已落地 owner 唯一 Candidate/Daily/Curator/Promotion/Lesson/HOT/Recall 主链、一次性 v1→v2
 Migration、Retention v2、统一管理员 CLI 与 Gateway owner-maintenance 接线；旧 learning/memory-gate/daily
-mirror 生产路径已删除。聚焦测试持续通过，正在补齐双层注释、联合/全量/静态门禁以及隔离真实
-Gateway、真实双模型、重启恢复和超长阅读最终验收，因此尚未标记完成。
+mirror 生产路径已删除。一次性 `my-agent run` 也已在模型前接入唯一 ConversationStore user 原文和
+Memory message ref，并保持 standalone workspace 生命周期；focused 回归通过，隔离 testbox B5R3 已用
+真实 DeepSeek 完成 remember、Candidate、Promotion、正式记忆、workspace 终态和同 request 存储重放，
+群内独立审查通过且无 P0/P1。最终全量/静态门禁、剩余真实 Gateway 触发矩阵、真实双模型、重启恢复和超长阅读仍待完成，
+因此尚未标记完成。
 
 设计与证据：`docs/modules/memory/03-purpose.md`、`04-structure.md`、`05-memory-v2-layout.md`、
 `06-runtime-memory-requirements.md`。

@@ -1,5 +1,15 @@
 # Subagent Progress
 
+## 2026-08-12 子代理候选 scope 统一规范
+
+- `services/memory_candidates.py::_task_scope` 是子代理候选的唯一 scope 构造点：`scope_type=project`、
+  `scope_key=f"project:{safe_id}"`（task/root ID 净化后截断 140，空则 digest）。
+- 新持久化一律 `project:<id>` 单一权威；`task:<id>` 只保留为旧账本召回兼容的 read alias，
+  curator 侧经 `canonical_scope_key` 归一，不允许再以 `task:<id>` 新持久化（避免 project/task 双正式身份）。
+- task 的 goal 只进入 `applies_when` 作为人类说明，不参与 scope 判定或归属。
+- 回归：curator observation_id 归一（test_curator_observation_id_normalizes_task_alias_scope）+ 重放幂等
+  （test_curator_task_alias_replay_does_not_duplicate_occurrence）。
+
 ## 2026-08-04 子代理经验统一进入 owner Memory Candidate
 
 - 删除 `SubAgentLearningService`、task-local `memory_gate` 及各自审核/导出状态机；子代理 workspace 只保留

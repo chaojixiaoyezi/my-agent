@@ -30,7 +30,23 @@ python3 -m pytest agent_py_agent/tests/test_tool_operation_idempotency.py agent_
 python3 -m pytest agent_py_agent/tests/test_log_redaction.py agent_py_agent/tests/test_registry_resilience_contract.py agent_py_agent/tests/test_tool_context_reducer.py agent_py_agent/tests/test_tool_output_externalizer.py agent_py_agent/tests/test_compact_semantic_summary.py agent_py_agent/tests/test_memory_artifact_read.py agent_py_agent/tests/test_tooling_filesystem.py agent_py_agent/tests/test_mcp_client.py agent_py_agent/tests/test_mcp_registration.py -q
 python3 -m pytest agent_py_agent/tests/test_compact_semantic_summary.py agent_py_agent/tests/test_native_tool_ir_compact_and_orphan_sweep.py -q
 python3 -m pytest agent_py_agent/tests/test_model_call_ledger.py agent_py_agent/tests/test_tool_model_generation.py agent_py_agent/tests/test_gateway_helpers.py agent_py_agent/tests/test_runtime_guidance.py agent_py_agent/tests/test_subagent_hierarchy_scheduler.py agent_py_agent/tests/test_subagent_hierarchy_scheduler_tool_roles.py agent_py_agent/tests/test_subagent_hierarchy_write_policy.py agent_py_agent/tests/test_subagent_capability_request_tool.py agent_py_agent/tests/test_subagent_natural_language_e2e.py agent_py_agent/tests/test_local_collaboration_subagent_integration.py agent_py_agent/tests/test_gateway_chat_conversation_context.py agent_py_agent/tests/test_tools/test_tool_loop.py agent_py_agent/tests/test_background_main_agent_runtime.py agent_py_agent/tests/test_gateway_orphan_reconciler.py -q
+python3 -m pytest agent_py_agent/tests/test_cli_run_conversation.py agent_py_agent/tests/test_cli_run_provider_timeout.py agent_py_agent/tests/test_runtime_mixin.py agent_py_agent/tests/test_run_task_workspace_writer.py agent_py_agent/tests/test_memory_tool.py::test_remember_user_explicit_goes_through_candidate_and_promotes agent_py_agent/tests/test_memory_tool.py::test_remember_single_add_tool_verified_authorized_auto_but_evidence_gate_blocks agent_py_agent/tests/test_gateway_chat_conversation_context.py::test_gateway_returns_answer_and_repairs_assistant_transcript_on_next_turn -q
 ```
+
+CLI Memory 入口回归必须证明：user 原文在首个模型调用前进入 ConversationStore，`remember(user_explicit)`
+取得唯一 user `source_message_ref` 并按统一 Promotion 晋升；相同 request/role 重放不重复，内容或
+run/task lineage 漂移 fail-closed；assistant 尾部落账失败只产生 typed degradation。one-shot thread 不得
+预填或遗留伪造/active task link：无 task-promoting tool 时 links 为空；真实工具晋升时只允许留下
+`completed` link，且 active ids/links 为空。standalone workspace 必须进入终态，Gateway 的既有会话 lifecycle 不变。
+真实 testbox 仍需另外保留 ConversationStore、candidate/formal memory、workspace、runtime event 与重放证据；
+定向单测不能替代真实 provider 运行。
+
+2026-08-12 的隔离 B5R3 已完成上述真实 provider 验证：`anthropic_compatible/deepseek-v4-flash`、CLI
+RC=0、ConversationStore user/assistant=2、Candidate/formal=1/1、唯一 user message ref、workspace
+`DONE`、`status_conflict=0`；同 request 纯存储重放前后全部语义计数和 ID 不变。真实工具晋升产生的
+唯一 link 为 `completed`，active ids/links 为空。脱敏原始证据位于 testbox
+`/root/memory-evidence/会话运行时-MEM-20260812-B5R3/`；该结果不替代 Goal 中尚未闭合的 Gateway/Curator、
+第二模型、重启恢复与长文本验收。
 
 `test_tools/test_tool_loop.py` 覆盖普通任务不会被旧进度清单劫持、显式 goal 的 open-plan 生命周期、工具轮数上限和
 后台 continuation；`test_tools/test_tool_loop_subagent_closeout.py` 覆盖子代理结构化收口与验收结果

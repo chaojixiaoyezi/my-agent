@@ -33,6 +33,7 @@
 | `target_entry_id` | replace/remove/merge 或 HOT 所指向的精确正式记录 ID。 |
 | `conflicts_with` | 与之冲突的正式 entry ID 列表；未解决时不能静默晋升。 |
 | `promotion_target` | 建议正式落点：user、long_term、lesson、hot、soul、agents 或 none。 |
+| `promotion_mode` | 宿主授予的晋升权限：`auto_eligible` 或 `manual_required`。默认 fail-closed 为 `manual_required`；模型 Schema 与任何文本都不能设置或修改它。 |
 | `status` | 唯一候选状态机中的当前状态。 |
 | `reviewer` | 最近审核者标识。 |
 | `review_note` | 审核说明，只供人读，不参与机器判定。 |
@@ -68,6 +69,21 @@
 - `reviewed`：宿主/管理员已审核形成的衍生候选，例如 HOT。
 - `migrated_legacy`：由一次性迁移从旧数据保全而来，仍需按策略审核。
 
+`promotion_mode`：
+
+- `auto_eligible`：宿主确定性授权，可以进入保守自动晋升路径。只授予非 batch 的单条
+  `user_explicit/tool_verified` 新 `long_term` 事实/事件/项目 add（完整 scope/subject/evidence、
+  无冲突、temporary 有 expiry 仍由 Promotion 做真实证据/冲突/过期双重验证）。
+- `manual_required`：必须人工 `approved` 后由 `automatic=False` 路径晋升。缺字段、非法值、
+  legacy 旧记录、batch（即使单条）、replace/remove、model_inferred、lesson/hot/subagent 一律落此档。
+
+`promotion_mode` 由宿主在 `remember` 工具（`_prepare_observations`）与 Curator
+（`_fill_candidate_promotion_authority`）两个入口确定性赋值；它**不进入**
+`candidate_id`、`stable_observation_key` 与 `_same_candidate_identity`——同一事实不同权限的重放
+不新增 occurrence、不能把已 manual 候选升权。落库 merge 只单向吸收：任一方向出现
+`manual_required` 即收敛为 `manual_required`。读取时缺失字段归一为 `manual_required`
+（fail-closed），非空非法值严格拒绝（账本整体拒绝加载）。`schema_version` 不因该字段 bump。
+
 `scope_type`：
 
 - `global`：当前 owner 的所有场景。
@@ -77,6 +93,12 @@
 - `task_class`：一类任务，例如 `task_class:engineering`。
 - `session`：只在一个 session 内适用。
 - `temporary`：一次性或有期限要求，不得沉淀为全局 USER 偏好。
+
+新建候选的 `scope_key` 必须能被运行时精确召回：`global` 和 `personal` 分别固定为
+`global`、`personal`；组织可用 `company` 或 `company:<id>`；项目可用
+`project:<id>` 或子代理任务的 `task:<id>`；其余类型分别使用
+`task_class:<id>`、`session:<id>`、`temporary:<id>`。读取旧账本仍允许发现不规范键，
+以便迁移或精确删除，但新 `add` 不再接受 `personal/local` 这类不可召回值。
 
 `status`：
 
@@ -198,6 +220,9 @@ Daily 只能通过检索、恢复或后续策展按需读取；它不默认整�
 
 保守自动晋升只允许同时满足以下条件的新 `long_term` add：
 
+- 候选持久化 `promotion_mode` 是宿主授予的 `auto_eligible`（权限闸：`automatic=True` 对
+  `manual_required` 在证据/状态/target 任何 mutation 之前返回稳定
+  `PROMOTION_MANUAL_REQUIRED`，不改候选状态）；
 - origin 是 `user_explicit` 或 `tool_verified`；
 - 精确证据可回查且属于当前 owner；
 - `subject_key` 与 scope 完整；
@@ -207,10 +232,17 @@ Daily 只能通过检索、恢复或后续策展按需读取；它不默认整�
 以下必须人工审核或明确确认：
 
 - replace、remove、merge；
+- batch（即使只含一条 add）；
 - USER 适用范围有歧义；
 - SOUL、AGENTS；
 - model/subagent 推断；
 - lesson、HOT 与 Skill 候选。
+
+Curator 后台链路同样只消费 `auto_eligible` 候选：`_pending_promotable_candidate_ids` 选择器
+与提交后晋升都按 `promotion_mode == "auto_eligible"` 过滤，lesson/hot/subagent/model_inferred
+（一律 `manual_required`）永不出现在自动晋升回调中；重复观察/多证据组只是人工批准后的晋升门槛，
+不是替代审核的自动专线。人工 `approved` 后 `automatic=False` 的晋升链路与 evidence_groups
+阈值逻辑不变。
 
 ## Lesson、Routing 与 HOT
 

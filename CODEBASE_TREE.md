@@ -21,6 +21,7 @@ agent_py_agent/
 |-- agent/
 |   |-- core.py                         # SimpleAgent 组合入口
 |   |-- agent_core/                     # 主代理运行时、工具循环、编排工具、closeout
+|   |   |-- cli_run_conversation.py     # 一次性 CLI 的权威 user/assistant transcript、幂等身份与失败分级
 |   |   |-- runtime/                    # guidance、active-turn compact carrier、wait policy、loop support
 |   |   |-- tool_loop/                  # 工具轮次执行、恢复、完成判断
 |   |   |-- tool_context/               # 工具结果上下文：reducer、窗口、microcompact、PTL 单轮重试
@@ -138,6 +139,7 @@ agent_py_agent/
 |       `-- tool_protocol_adapter.py   # native 事件或显式完整 text 帧到 canonical ToolCall 的唯一适配口
 |-- tests/                             # 单元、集成、真实链路回归
 |   |-- test_current_turn_execution.py # 当前轮成功/失败副作用事实投影回归
+|   |-- test_cli_run_conversation.py   # CLI transcript、Memory 消息证据、任务链接与 workspace 收口回归
 |   |-- test_memory_hardening.py       # 来源证据、候选、并发去重、hard delete 与信封安全回归
 |   |-- test_memory_candidate_daily_v2.py # Candidate/Daily v2 身份、状态、顺序、并发与大输出边界
 |   |-- test_memory_curator_v2.py      # Curator 触发、模型配置、权限、失败恢复与整批提交
