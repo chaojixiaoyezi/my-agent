@@ -146,13 +146,15 @@ def test_no_tool_timeout_retries_once_and_succeeds() -> None:
     response, agent = _run(_FlakyBackend(), params)
     assert response.text == "recovered"
     assert _FlakyBackend.calls == 2  # 恰好重试一次
-    # physical_attempt 记账: attempt-1(超时) + attempt-2(重试成功)
+    # 收口证据(seq1545): attempt-1=timed_out、attempt-2=finished,
+    # 成功响应与 attempt-2 对账(call_id 相同)
     records = _ledger(agent).records()
     assert len(records) == 2
     attempts = [r.metadata["physical_attempt"] for r in records]
     assert attempts == [1, 2]
     assert records[0].status == "timed_out"
-    assert records[1].status in {"started", "first_token", "finished"}
+    assert records[1].status == "finished"  # 重试成功记录统一收口
+    assert records[1].finished_at is not None
 
 
 # ---------------------------------------------------------------- 2. 已确认工具后超时: 重试不重放工具

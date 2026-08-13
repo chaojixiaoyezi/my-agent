@@ -100,9 +100,11 @@ def generate_model_response(request: ModelGenerateParams):
         return preflight
     _trace_model_start(request)
     state = _start_model_generation(request)
-    response = _generate_or_recover_context_pressure(request, state)
+    # 门槛5补证(维护记录): 返回与响应配对的 final_state——重试成功后
+    # 用 attempt-2 的 state 收口(其 call_id 落 finished), 不落在 attempt-1。
+    response, final_state = _generate_or_recover_context_pressure(request, state)
     _record_run_cost(request, response)  # 审计 #19/#2:真实 USD 成本累计到 owner/run 维度
-    return _finish_model_generation(request, state, response)
+    return _finish_model_generation(request, final_state, response)
 
 
 def _record_run_cost(request: ModelGenerateParams, response: object) -> None:
@@ -122,22 +124,33 @@ def _record_run_cost(request: ModelGenerateParams, response: object) -> None:
 
 def _generate_or_recover_context_pressure(
     request: ModelGenerateParams, state: _ModelGenerationState
-):
+) -> tuple[object, _ModelGenerationState]:
+    """返回 (response, 与之配对的收口 state)。重试成功后是 attempt-2 的
+    retry_state(其 call_id 由外层统一 finish 收口)——见 seq1545 补证。"""
     try:
-        return _generate_with_wall_timeout(
-            request,
+        return (
+            _generate_with_wall_timeout(
+                request,
+                state,
+                state.first_token_timeout_seconds,
+            ),
             state,
-            state.first_token_timeout_seconds,
         )
     except LongToolContentStreamAbort as exc:
-        return long_write_abort_response(
-            exc,
-            backend=str(getattr(request.agent.backend, "name", "") or ""),
+        return (
+            long_write_abort_response(
+                exc,
+                backend=str(getattr(request.agent.backend, "name", "") or ""),
+            ),
+            state,
         )
     except MalformedToolProtocolStreamAbort as exc:
-        return malformed_tool_protocol_abort_response(
-            exc,
-            backend=str(getattr(request.agent.backend, "name", "") or ""),
+        return (
+            malformed_tool_protocol_abort_response(
+                exc,
+                backend=str(getattr(request.agent.backend, "name", "") or ""),
+            ),
+            state,
         )
     except ProviderTimeoutError as exc:
         _record_provider_timeout(_provider_timeout_record(request, state, exc))
@@ -145,16 +158,20 @@ def _generate_or_recover_context_pressure(
         # 不重放工具); 资格不足或重试再超时则原样上抛(无第三次)。
         retried = _retry_once_after_timeout(request)
         if retried is not None:
-            return retried
+            retried_response, retried_state = retried
+            return retried_response, retried_state
         raise
     except Exception as exc:
         record_model_call_failed(state.ledger, state.call_id, exc)
         if is_context_window_error(exc):
-            return context_pressure_response(
-                request,
-                source="provider_error",
-                prompt_tokens=0,
-                detail=str(exc),
+            return (
+                context_pressure_response(
+                    request,
+                    source="provider_error",
+                    prompt_tokens=0,
+                    detail=str(exc),
+                ),
+                state,
             )
         _trace_model_failure(request, exc)
         raise
@@ -168,6 +185,10 @@ def _retry_once_after_timeout(request: ModelGenerateParams):
     turn 全局最多一次: 同 logical 的物理尝试数 >1(本次超时已是首次)时不重试
     ——重试再超时无第三次。重试走 start_model_call_record 开 attempt-2
     新 call_id, physical_attempt 记账证明工具效果不重复。
+
+    返回 (response, retry_state): retry_state 是 attempt-2 的收口 state,
+    由外层统一 finish(seq1545 补证——attempt-2 的 call_id 必须落 finished,
+    不能停留在 started/first_token)。
     """
     if not _ir_last_tool_use_confirmed(request):
         return None
@@ -175,11 +196,12 @@ def _retry_once_after_timeout(request: ModelGenerateParams):
         return None
     retry_state = _start_model_generation(request)
     try:
-        return _generate_with_wall_timeout(
+        response = _generate_with_wall_timeout(
             request,
             retry_state,
             retry_state.first_token_timeout_seconds,
         )
+        return response, retry_state
     except ProviderTimeoutError as exc:
         _record_provider_timeout(_provider_timeout_record(request, retry_state, exc))
         return None  # 无第三次
