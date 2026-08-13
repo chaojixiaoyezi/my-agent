@@ -639,3 +639,32 @@ def test_acquire_and_commit_fail_closed_when_quarantined(tmp_path: Path) -> None
     assert not _state_path(home).exists()
     corrupt = [e for e in _run_records(home) if e["failure_code"]]
     assert corrupt and all(e["failure_code"] == "CURATOR_STATE_CORRUPT" for e in corrupt)
+
+
+# ---------------------------------------------------------------- P0 遗留(seq1625): 纯未知字段 fail-closed
+
+def test_unknown_only_state_fail_closed(tmp_path: Path) -> None:
+    """非空但无任何已知字段的 state payload(如 {"not":"a state"}) -> 抛
+    ValueError, 不复用默认 state(seq1625 P0 遗留修复)。"""
+    from agent_py_agent.agent.memory_store.curator_models import MemoryCuratorState
+
+    with pytest.raises(ValueError):
+        MemoryCuratorState.from_dict({"not": "a state"})
+
+
+def test_empty_state_first_init_allowed(tmp_path: Path) -> None:
+    """空对象 {} = 无 state 首次初始化(允许, 返回默认 state)。"""
+    from agent_py_agent.agent.memory_store.curator_models import MemoryCuratorState
+
+    state = MemoryCuratorState.from_dict({})
+    assert state.processed_count == 0  # 默认 state
+
+
+def test_partial_unknown_keeps_known_fields(tmp_path: Path) -> None:
+    """部分未知(含已知字段) -> 按已知子集恢复(兼容旧 state 文件历史字段)。"""
+    from agent_py_agent.agent.memory_store.curator_models import MemoryCuratorState
+
+    state = MemoryCuratorState.from_dict(
+        {"processed_count": 42, "future_field": "legacy"}
+    )
+    assert state.processed_count == 42  # 已知字段恢复

@@ -120,15 +120,23 @@ class MemoryCuratorState:
     last_daily_finalize_date: str = ""
     last_committed_run_id: str = ""
 
-    # LLM: 未知未来字段可忽略，但游标/计数/lease 类型损坏必须 fail closed。
+    # LLM: 空对象=首次初始化(允许); 非空但无任何已知字段=纯未知字段
+    # fail-closed(seq1625 P0 遗留: {"not":"a state"} 不得静默复用默认 state);
+    # 部分未知(含已知字段)按已知子集恢复, 兼容旧 state 文件历史字段。
     # 函数用途: 从 state.json 严格恢复 durable state。
     @classmethod
     def from_dict(cls, payload: dict[str, object]) -> MemoryCuratorState:
         if not payload:
             return cls()
         known = cls.__dataclass_fields__
+        filtered = {key: value for key, value in payload.items() if key in known}
+        if not filtered:
+            unknown = sorted(str(key) for key in payload)
+            raise ValueError(
+                f"memory curator state contains only unknown fields: {unknown}"
+            )
         try:
-            state = cls(**{key: value for key, value in payload.items() if key in known})
+            state = cls(**filtered)
         except (TypeError, ValueError) as exc:
             raise ValueError("invalid memory curator state") from exc
         validate_curator_state(state)
