@@ -560,7 +560,7 @@ extensions_dir: "extensions"
 extension_plugins:
 
 # 真实模型接口地址
-api_base: "https://api.minimaxi.com/anthropic"
+api_base: "https://opencode.ai/zen/go"
 
 # API Key：
 # - 不要把真实 key 写进仓库
@@ -574,7 +574,7 @@ api_key: ""
 api_key_env: "AGENT_API_KEY"
 
 # 模型名称
-model_name: "MiniMax-M2.7"
+model_name: "deepseek-v4-flash"
 
 # HTTP 请求总超时秒数；超时会记录为 provider_timeout，runner 会按有上限的失败策略重试。
 request_timeout: 240
@@ -790,12 +790,12 @@ tool_embedding_api_key_env: ""
 # 工具调用协议在一次 run 开始前固定。native 会先探测当前
 # provider + endpoint + model + stream 是否支持原生 tool_use；text 只用于明确配置的
 # 非原生端点或协议调试。一个 run 内不会切换协议，native 失败也不会由 text 中途接管。
-tool_protocol: "native"
+tool_protocol: "text"
 # 显式声明必须走 text 协议（跳过 native probe）的模型名单，如 flash 类非 reasoning
 # 模型配 native 会静默失效（0 工具调用+幻觉，真机实证 2026-08-07 deepseek-v4-flash）。
 # 例：tool_protocol_text_models: ["text-01", "minimax"]
 # 空列表 = 全部模型照常 native probe；名单内模型由部署方显式配对 text。
-tool_protocol_text_models: []
+tool_protocol_text_models: ["deepseek-v4-flash"]
 
 # MCP 客户端（短板6）：连接外部 MCP server（Model Context Protocol，JSON-RPC over stdio），
 # 把社区现成工具（GitHub/数据库/Slack 等）动态注册成 mcp__<server>__<tool> 前缀的工具，
