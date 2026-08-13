@@ -64,6 +64,23 @@ class TaskRegistry:
         now = time.time()
 
         with self._store._connection() as conn:
+            # P0-1(HANDOFF 文档线): 终态任务不可被 register 复活——已存在且为
+            # 终态(done/cancelled/abandoned…)时, 只有新值同为终态才允许(幂等
+            # 终态确认); 新值非终态一律抛错 fail-closed, 与 update_task_status
+            # 的终态守卫同语义, 对齐「状态别名不隐式兼容、终态权威」铁律。
+            row = conn.execute(
+                "SELECT status FROM task_registry WHERE task_id = ?",
+                (values.task_id,),
+            ).fetchone()
+            if (
+                row is not None
+                and row[0] in _FINAL_TASK_STATUSES
+                and values.status not in _FINAL_TASK_STATUSES
+            ):
+                raise ValueError(
+                    f"终态任务不可复活: task_id={values.task_id} "
+                    f"status={row[0]} -> {values.status}"
+                )
             conn.execute(
                 """
                 INSERT INTO task_registry (task_id, session_id, user_id, status, goal, created_at, updated_at)

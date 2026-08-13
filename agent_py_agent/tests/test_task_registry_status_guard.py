@@ -45,3 +45,43 @@ def test_terminal_to_terminal_allowed(tmp_path) -> None:
     reg.update_task_status("t4", "done")
     assert reg.update_task_status("t4", "cancelled") is True  # 终态→终态(非复活)允许
     assert reg.lookup_task("t4")["status"] == "cancelled"
+
+
+# ---------------------------------------------------------------- P0-1 register_task 终态守卫(HANDOFF 文档线)
+
+def test_register_task_rejects_resurrecting_terminal(tmp_path) -> None:
+    """P0-1: 终态任务再 register 非终态 -> 抛 ValueError, 状态不复活。"""
+    reg = _reg(tmp_path)
+    reg.register_task("p0-1", status="running", goal="g")
+    reg.update_task_status("p0-1", "done")
+    try:
+        reg.register_task("p0-1", status="running", goal="复活")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("终态任务 register 非终态应抛 ValueError")
+    assert reg.lookup_task("p0-1")["status"] == "done"  # 状态仍终态, 没被复活
+
+
+def test_register_task_terminal_idempotent(tmp_path) -> None:
+    """P0-1: 终态任务再 register 同族终态 -> 允许(终态幂等确认, 非复活)。"""
+    reg = _reg(tmp_path)
+    reg.register_task("p0-2", status="running", goal="g")
+    reg.update_task_status("p0-2", "done")
+    reg.register_task("p0-2", status="done", goal="确认")  # 不抛
+    assert reg.lookup_task("p0-2")["status"] == "done"
+
+
+def test_register_task_overwrites_non_terminal(tmp_path) -> None:
+    """P0-1: 非终态任务 register 覆盖 -> 正常(register 语义不变)。"""
+    reg = _reg(tmp_path)
+    reg.register_task("p0-3", status="pending", goal="g")
+    reg.register_task("p0-3", status="running", goal="g2")  # 非终态覆盖正常
+    assert reg.lookup_task("p0-3")["status"] == "running"
+
+
+def test_register_task_new_task_normal(tmp_path) -> None:
+    """P0-1: 新任务 register -> 正常创建(回归)。"""
+    reg = _reg(tmp_path)
+    reg.register_task("p0-4", status="pending", goal="g")
+    assert reg.lookup_task("p0-4")["status"] == "pending"
