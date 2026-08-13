@@ -33,6 +33,49 @@ def test_exact_normalized_memory_add_is_idempotent(tmp_path: Path) -> None:
     assert len((tmp_path / "memory.jsonl").read_text(encoding="utf-8").splitlines()) == 1
 
 
+def test_exact_content_in_different_structured_scopes_can_coexist(tmp_path: Path) -> None:
+    memory = JsonlMemory(tmp_path / "memory.jsonl")
+    shared = {
+        "origin": "user_explicit",
+        "subject_key": "environment.shared_fact",
+    }
+
+    personal = memory.add(
+        "user",
+        "相同事实在个人与项目范围都成立。",
+        kind="fact",
+        attributes={
+            **shared,
+            "scope_type": "personal",
+            "scope_key": "personal",
+        },
+    )
+    project = memory.add(
+        "user",
+        "相同事实在个人与项目范围都成立。",
+        kind="fact",
+        attributes={
+            **shared,
+            "scope_type": "project",
+            "scope_key": "project:alpha",
+        },
+    )
+    replay = memory.add(
+        "USER",
+        "相同事实在个人与项目范围都成立。",
+        kind="FACT",
+        attributes={
+            **shared,
+            "scope_type": "project",
+            "scope_key": "project:alpha",
+        },
+    )
+
+    assert personal.entry_id != project.entry_id
+    assert replay.entry_id == project.entry_id
+    assert len(memory.all()) == 2
+
+
 def test_concurrent_duplicate_adds_commit_one_active_event(tmp_path: Path) -> None:
     path = tmp_path / "memory.jsonl"
 

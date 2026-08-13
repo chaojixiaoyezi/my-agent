@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from ..conversation.authority import (
@@ -247,7 +247,7 @@ class RememberTool(BaseTool):
         if action == "list":
             return _memory_list_result(memory)
         operations = _memory_operations(params, action)
-        prepared = _prepare_observations(self.agent, memory, operations)
+        prepared = _prepare_observations(self.agent, memory, operations, source_action=action)
         if isinstance(prepared, ToolHandlerOutcome):
             return prepared
         candidates = getattr(self.agent, "memory_candidates", None)
@@ -265,11 +265,14 @@ class RememberTool(BaseTool):
         promotion_results: list[dict[str, object]] = []
         active_changed = False
         for operation, candidate in zip(operations, observed, strict=True):
-            origin = str(operation.get("origin") or "")
+            # 持久候选权限是最终事实源：同一候选只要曾被 manual_required 吸收，后来即使
+            # 从单条 add 入口重放也不能再次尝试自动晋升。入口形态条件继续作为纵深校验。
             can_auto = (
-                len(operations) == 1
+                action == "add"
+                and len(operations) == 1
                 and str(operation.get("action") or "") == "add"
-                and origin in {"user_explicit", "tool_verified"}
+                and str(getattr(candidate, "promotion_mode", "") or "").strip().lower()
+                == "auto_eligible"
             )
             if not can_auto:
                 promotion_results.append(
@@ -336,6 +339,8 @@ def _prepare_observations(
     agent: object,
     memory: object,
     operations: list[dict[str, object]],
+    *,
+    source_action: str = "add",
 ) -> list[CandidateObservation] | ToolHandlerOutcome:
     if not operations:
         return _memory_error("operations 必须是非空数组", "TOOL_INVALID_ARGUMENTS", not_started=True)
@@ -345,6 +350,22 @@ def _prepare_observations(
         if isinstance(prepared, ToolHandlerOutcome):
             return prepared
         observations.append(prepared)
+    # 宿主确定性赋权(与 execute 的 can_auto 同规则,这里持久化到候选):仅顶层非 batch 的
+    # 单条 add 且 user_explicit/tool_verified 可自动;batch 即使一条、replace/remove、
+    # model_inferred/persona 一律 manual_required。模型任何文本不能改该权限。
+    single_add_auto = (
+        str(source_action or "").strip().lower() == "add"
+        and len(operations) == 1
+        and str(operations[0].get("action") or "").strip().lower() == "add"
+        and str(operations[0].get("origin") or "").strip().lower()
+        in {"user_explicit", "tool_verified"}
+    )
+    if single_add_auto:
+        observations[0] = replace(observations[0], promotion_mode="auto_eligible")
+    else:
+        observations = [
+            replace(item, promotion_mode="manual_required") for item in observations
+        ]
     return observations
 
 
@@ -630,7 +651,7 @@ def _operation_scope(
         if requested not in (None, "") and MemoryScope.from_value(requested) != authoritative:
             raise ValueError("scope 与 entry_id 的正式记录不一致。")
         return authoritative
-    return MemoryScope.from_value(requested)
+    return MemoryScope.for_new_observation(requested)
 
 
 # LLM: user_explicit evidence resolves the exact current Gateway request in ConversationStore, never a text search guess.

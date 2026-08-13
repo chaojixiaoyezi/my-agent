@@ -39,7 +39,8 @@ def test_subagent_lessons_and_findings_use_owner_candidate_service(tmp_path):
     current = candidates.list()
     assert {item.origin for item in current} == {"subagent_lesson", "subagent_finding"}
     assert {item.status for item in current} == {"pending_review"}
-    assert {item.scope["scope_key"] for item in current} == {"task:project-root"}
+    # 新持久化一律 project:<id>（单一权威；task:<id> 仅旧账本召回别名，不新写）
+    assert {item.scope["scope_key"] for item in current} == {"project:project-root"}
     assert not (tmp_path / "subagents" / "data" / "learning_drafts").exists()
 
 

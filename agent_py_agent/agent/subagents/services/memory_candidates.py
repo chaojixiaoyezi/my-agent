@@ -174,16 +174,19 @@ def _finding_observation(
 
 
 # LLM: task/root ID 决定 typed scope；自然语言 goal 只作为 applies_when 人类说明。
+# 新持久化一律 project:<id>（单一权威，task:<id> 仅旧账本召回别名），并经共享
+# 写侧合同归一，不允许以 task:<id> 新持久化（避免 project/task 双正式身份）。
 # 函数用途: 构造项目范围并保证 scope_key 符合统一稳定键合同。
 def _task_scope(task: SubAgentTask, task_id: str) -> MemoryScope:
     safe_id = re.sub(r"[^A-Za-z0-9_.:/-]+", "-", task_id).strip("-")[:140]
     if not safe_id:
         safe_id = _digest(task_id or str(getattr(task, "goal", "") or "task"))
-    return MemoryScope(
-        "project",
-        f"task:{safe_id}",
-        str(getattr(task, "goal", "") or "")[:500],
-        "",
+    return MemoryScope.for_new_observation(
+        {
+            "scope_type": "project",
+            "scope_key": f"project:{safe_id}",
+            "applies_when": str(getattr(task, "goal", "") or "")[:500],
+        }
     )
 
 

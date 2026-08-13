@@ -21,6 +21,7 @@ from .candidate_models import (
     CANDIDATE_ORIGINS,
     CANDIDATE_SCHEMA_VERSION,
     CANDIDATE_TYPES,
+    PROMOTION_MODES,
     PROMOTION_TARGETS,
     PROPOSED_ACTIONS,
     TERMINAL_CANDIDATE_STATUSES,
@@ -551,6 +552,7 @@ def _new_candidate(
         target_entry_id=observation.target_entry_id,
         conflicts_with=normalize_string_list(observation.conflicts_with),
         promotion_target=observation.promotion_target,
+        promotion_mode=observation.promotion_mode,
         status=status,
         reviewer="candidate-service" if status.startswith("blocked_") else "",
         review_note=_initial_review_note(status),
@@ -597,6 +599,9 @@ def _merge_candidate(
         occurrence_count=len(observation_keys),
         confidence=max(float(current.confidence), float(observation.confidence)),
         conflicts_with=_merge_strings(current.conflicts_with, observation.conflicts_with),
+        promotion_mode=_merge_promotion_mode(
+            current.promotion_mode, observation.promotion_mode
+        ),
         observation_keys=observation_keys,
         updated_at=utc_now_iso() if is_new else current.updated_at,
     )
@@ -630,8 +635,8 @@ def _initial_review_note(status: str) -> str:
     return ""
 
 
-# LLM: 外部 observation 只能使用统一枚举并保持简短正文；服务不自动猜 scope/subject。
-# 函数用途: 规范化一次候选观察。
+# LLM: 新 add observation 还必须使用可召回的规范 typed scope；replace/remove 保留旧目标键供迁移修复。
+# 函数用途: 规范化一次候选观察，并在写候选账本前拒绝不可召回的新增 scope。
 def _normalize_observation(observation: CandidateObservation) -> CandidateObservation:
     if not isinstance(observation, CandidateObservation):
         raise TypeError("candidate observation must use CandidateObservation")
@@ -639,9 +644,14 @@ def _normalize_observation(observation: CandidateObservation) -> CandidateObserv
     origin = str(observation.origin or "").strip().lower()
     content = str(observation.content or "").strip()
     subject_key = str(observation.subject_key or "").strip()
-    scope = MemoryScope.from_value(observation.scope)
     proposed_action = str(observation.proposed_action or "none").strip().lower()
+    scope = (
+        MemoryScope.for_new_observation(observation.scope)
+        if proposed_action == "add"
+        else MemoryScope.from_value(observation.scope)
+    )
     promotion_target = str(observation.promotion_target or "none").strip().lower()
+    promotion_mode = str(observation.promotion_mode or "").strip().lower()
     if candidate_type not in CANDIDATE_TYPES:
         raise ValueError(f"unsupported candidate_type: {candidate_type}")
     if origin not in CANDIDATE_ORIGINS:
@@ -650,6 +660,11 @@ def _normalize_observation(observation: CandidateObservation) -> CandidateObserv
         raise ValueError(f"unsupported proposed_action: {proposed_action}")
     if promotion_target not in PROMOTION_TARGETS:
         raise ValueError(f"unsupported promotion_target: {promotion_target}")
+    # 晋升权限 fail-closed:入口忘赋值/legacy 空值一律归 manual_required,非空非法值拒绝。
+    if not promotion_mode:
+        promotion_mode = "manual_required"
+    elif promotion_mode not in PROMOTION_MODES:
+        raise ValueError(f"unsupported promotion_mode: {promotion_mode}")
     if not content or len(content) > 2_000:
         raise ValueError("candidate content must contain 1..2000 characters")
     if not subject_key and candidate_type not in {"event", "discard"}:
@@ -666,6 +681,7 @@ def _normalize_observation(observation: CandidateObservation) -> CandidateObserv
         origin=origin,
         proposed_action=proposed_action,
         promotion_target=promotion_target,
+        promotion_mode=promotion_mode,
         confidence=confidence,
         target_entry_id=str(observation.target_entry_id or "").strip(),
     )
@@ -684,6 +700,17 @@ def _merge_refs(
 # 函数用途: 合并来源 task/run/entry ID。
 def _merge_strings(current: list[str], incoming: object) -> list[str]:
     return normalize_string_list([*current, *normalize_string_list(incoming)])
+
+
+# LLM: 权限吸收只朝收紧方向单向进行:任一观察要求人工则整条保持 manual_required,
+# 后续 auto_eligible 观察不得把已 manual 的候选降权;空/未知值 fail-closed 归 manual。
+# 函数用途: 合并两次观察的晋升权限(manual_required 吸收优先)。
+def _merge_promotion_mode(current: str, incoming: str) -> str:
+    if current == "manual_required" or incoming == "manual_required":
+        return "manual_required"
+    if current == "auto_eligible" and incoming == "auto_eligible":
+        return "auto_eligible"
+    return "manual_required"
 
 
 # LLM: 状态历史只记录状态、actor、note 和时间，不复制候选正文。

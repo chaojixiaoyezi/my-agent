@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,7 @@ from agent_py_agent.agent.memory_store.candidate_models import (
     MemoryScope,
 )
 from agent_py_agent.agent.memory_store.candidates import CandidateService
-from agent_py_agent.agent.memory_store.jsonl import JsonlMemory
+from agent_py_agent.agent.memory_store.jsonl import JsonlMemory, MemorySubjectConflict
 from agent_py_agent.agent.memory_store.lessons import HotRuleRepository, LessonRepository
 from agent_py_agent.agent.memory_store.promotion import (
     ConversationMessageEvidenceVerifier,
@@ -138,6 +139,7 @@ def _explicit(
             proposed_action=proposed_action,
             target_entry_id=target_entry_id,
             promotion_target=promotion_target,
+            promotion_mode="auto_eligible",
             confidence=0.99,
         )
     )
@@ -200,15 +202,208 @@ def test_same_subject_different_scope_can_coexist(tmp_path: Path):
         thread,
         content="公司服务器使用 Linux。",
         scope_type="company",
-        scope_key="company",
+        scope_key="company:acme",
     )
 
     assert service.promote(personal.candidate_id, automatic=True).promoted
     assert service.promote(company.candidate_id, automatic=True).promoted
     assert {record.attributes["scope_key"] for record in service.long_term.all()} == {
         "personal",
-        "company",
+        "company:acme",
     }
+
+
+def test_company_requires_typed_id_and_is_recallable(tmp_path: Path):
+    """company 合同（方案 A）：必须 company:<id>，写→晋升→search_scoped 闭环可召回。"""
+    from agent_py_agent.agent.memory_store.recall import (
+        MemoryRecallScope,
+        long_term_record_matches_scope,
+    )
+
+    service, conversations, thread = _runtime(tmp_path)
+    company = _explicit(
+        service,
+        conversations,
+        thread,
+        content="公司服务器使用 Linux。",
+        scope_type="company",
+        scope_key="company:acme",
+        subject_key="company.servers",
+    )
+
+    assert service.promote(company.candidate_id, automatic=True).promoted
+    record = service.long_term.all()[0]
+    assert record.attributes["scope_type"] == "company"
+    assert record.attributes["scope_key"] == "company:acme"
+    with_company = MemoryRecallScope.from_runtime(
+        task_attributes={"company_id": "company:acme"},
+    )
+    assert long_term_record_matches_scope(record, with_company)
+    assert not long_term_record_matches_scope(record, MemoryRecallScope.from_runtime())
+    # search_scoped 闭环：真实查询按 scope predicate 过滤，有 company_id 命中、无则不命中
+    hits = service.long_term.search_scoped(
+        "公司服务器",
+        top_k=5,
+        predicate=lambda item: long_term_record_matches_scope(item, with_company),
+    )
+    assert hits and hits[0].entry_id == record.entry_id
+    without_company = service.long_term.search_scoped(
+        "公司服务器",
+        top_k=5,
+        predicate=lambda item: long_term_record_matches_scope(
+            item, MemoryRecallScope.from_runtime()
+        ),
+    )
+    assert not any(item.entry_id == record.entry_id for item in without_company)
+
+
+def test_bare_company_scope_rejected_at_observe_entry(tmp_path: Path):
+    """裸 company/company 可写不可召回 → observe 入口直接拒写。"""
+    service, conversations, thread = _runtime(tmp_path)
+    with pytest.raises(ValueError):
+        _explicit(
+            service,
+            conversations,
+            thread,
+            content="公司服务器使用 Linux。",
+            scope_type="company",
+            scope_key="company",
+        )
+
+
+def test_normalized_equivalent_replay_reuses_original_entry(
+    tmp_path: Path,
+):
+    """规范化等价正文（多空格/全半角）重放必须复用原 entry，不得 blocked_conflict。"""
+    service, conversations, thread = _runtime(tmp_path)
+    first = _explicit(
+        service,
+        conversations,
+        thread,
+        content="测试环境使用 UTC。",
+        scope_type="project",
+        scope_key="project:alpha",
+        subject_key="environment.timezone",
+    )
+    replay = _explicit(
+        service,
+        conversations,
+        thread,
+        content="测试环境使用 ​ＵＴＣ。",  # 零宽 + 全角字母，NFKC/casefold 后与原正文等价
+        scope_type="project",
+        scope_key="project:alpha",
+        subject_key="environment.timezone",
+    )
+
+    original = service.promote(first.candidate_id, automatic=True)
+    result = service.promote(replay.candidate_id, automatic=True)
+
+    assert original.promoted is True
+    assert result.promoted is True
+    assert result.promotion_ref == original.promotion_ref
+    assert result.status != "blocked_conflict"
+    assert service.candidates.get(replay.candidate_id).status == "promoted"
+    assert len(service.long_term.all()) == 1
+
+
+def test_same_content_in_different_scope_promotes_as_distinct_fact(tmp_path: Path):
+    service, conversations, thread = _runtime(tmp_path)
+    alpha = _explicit(
+        service,
+        conversations,
+        thread,
+        content="测试环境使用 UTC。",
+        scope_type="project",
+        scope_key="project:alpha",
+        subject_key="environment.timezone",
+    )
+    beta = _explicit(
+        service,
+        conversations,
+        thread,
+        content="测试环境使用 UTC。",
+        scope_type="project",
+        scope_key="project:beta",
+        subject_key="environment.timezone",
+    )
+
+    first = service.promote(alpha.candidate_id, automatic=True)
+    second = service.promote(beta.candidate_id, automatic=True)
+
+    assert first.promoted is True
+    assert second.promoted is True
+    assert first.promotion_ref != second.promotion_ref
+    assert {record.attributes["scope_key"] for record in service.long_term.all()} == {
+        "project:alpha",
+        "project:beta",
+    }
+    assert service.candidates.get(beta.candidate_id).status == "promoted"
+
+
+def test_empty_long_term_add_commit_becomes_conflict_not_stop_iteration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    service, conversations, thread = _runtime(tmp_path)
+    candidate = _explicit(
+        service,
+        conversations,
+        thread,
+        content="测试环境使用 UTC。",
+        scope_type="project",
+        scope_key="project:alpha",
+        subject_key="environment.timezone",
+    )
+    monkeypatch.setattr(service.long_term, "apply_batch", lambda _operations: [])
+
+    result = service.promote(candidate.candidate_id, automatic=True)
+
+    assert result.promoted is False
+    assert result.status == "blocked_conflict"
+    assert result.reason_code == "LONG_TERM_ADD_IDEMPOTENCY_IDENTITY_MISMATCH"
+    assert service.candidates.get(candidate.candidate_id).status == "blocked_conflict"
+
+
+def test_approved_candidate_with_noncanonical_scope_blocks_at_promotion_boundary(
+    tmp_path: Path,
+):
+    """历史落账的脏 scope 候选（如 personal/local）重放必须 blocked，不落任何字节。"""
+    service, conversations, thread = _runtime(tmp_path)
+    candidate = _explicit(
+        service,
+        conversations,
+        thread,
+        content="测试环境使用 UTC。",
+        scope_type="personal",
+        scope_key="personal",
+        subject_key="environment.timezone",
+    )
+    service.candidates.transition(
+        candidate.candidate_id,
+        "approved",
+        reviewer="test-reviewer",
+        review_note="历史审核通过。",
+    )
+    # 模拟旧版本落账的脏 scope：直接改写候选账本文件（绕过观察入口校验）。
+    path = tmp_path / "owner" / "memory" / "candidates.jsonl"
+    rewritten: list[dict[str, object]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        row = json.loads(line)
+        if row.get("candidate_id") == candidate.candidate_id:
+            row["scope"]["scope_key"] = "local"
+        rewritten.append(row)
+    path.write_text(
+        "\n".join(json.dumps(item, ensure_ascii=False) for item in rewritten) + "\n",
+        encoding="utf-8",
+    )
+
+    result = service.promote(candidate.candidate_id, automatic=True)
+
+    assert result.promoted is False
+    assert result.status == "blocked_conflict"
+    assert result.reason_code == "SCOPE_NOT_RECALLABLE"
+    assert service.candidates.get(candidate.candidate_id).status == "blocked_conflict"
+    assert service.long_term.all() == []
 
 
 def test_model_inferred_never_auto_promotes(tmp_path: Path):
@@ -227,7 +422,35 @@ def test_model_inferred_never_auto_promotes(tmp_path: Path):
     result = service.promote(candidate.candidate_id, automatic=True)
 
     assert result.promoted is False
-    assert result.reason_code == "MODEL_INFERRED_FORMAL_AUTHORITY_FORBIDDEN"
+    # 权限闸先于权威块:model_inferred 一律 manual_required,automatic 路径直接拒绝。
+    assert result.reason_code == "PROMOTION_MANUAL_REQUIRED"
+    assert result.status == "pending_review"
+    assert service.long_term.all() == []
+
+
+def test_automatic_promotion_requires_explicit_auto_eligible_even_before_evidence(
+    tmp_path: Path,
+) -> None:
+    """空/legacy 权限也必须 fail-closed，且不得先把缺证据候选改成 blocked 状态。"""
+    service, _conversations, _thread = _runtime(tmp_path)
+    candidate = service.candidates.observe(
+        CandidateObservation(
+            candidate_type="long_term_fact",
+            content="个人电脑使用 macOS。",
+            subject_key="device.personal.os",
+            scope=MemoryScope("personal", "personal"),
+            origin="user_explicit",
+            source_message_refs=({"message_id": "missing-message"},),
+            promotion_target="long_term",
+        )
+    )
+
+    result = service.promote(candidate.candidate_id, automatic=True)
+
+    assert candidate.promotion_mode == "manual_required"
+    assert result.reason_code == "PROMOTION_MANUAL_REQUIRED"
+    assert result.status == "pending_review"
+    assert service.candidates.get(candidate.candidate_id).status == "pending_review"
     assert service.long_term.all() == []
 
 
@@ -292,8 +515,11 @@ def _lesson(
     return candidate
 
 
-def test_model_inferred_lesson_with_repeated_evidence_auto_promotes(tmp_path: Path):
-    """教训专线:model_inferred 的 lesson 候选,跨任务重复出现+多证据组 → 自动晋升落库。"""
+def test_model_inferred_lesson_never_auto_promotes_even_with_repeated_evidence(
+    tmp_path: Path,
+):
+    """定版合同:lesson 自动专线已取消——即使跨任务重复出现+多证据组,automatic 也拒绝,
+    重复次数/多证据组只是人工批准后的晋升门槛,不能替代审核。"""
     service, _conversations, _thread = _runtime(tmp_path)
     candidate = _lesson(
         service,
@@ -305,27 +531,39 @@ def test_model_inferred_lesson_with_repeated_evidence_auto_promotes(tmp_path: Pa
 
     result = service.promote(candidate.candidate_id, automatic=True)
 
-    assert result.promoted is True
+    assert result.promoted is False
+    assert result.reason_code == "PROMOTION_MANUAL_REQUIRED"
+    assert result.status == "pending_review"
+    assert service.lessons.list() == []
+
+    # 人工 approved + automatic=False 仍可晋升(重复次数是多证据晋升门槛)
+    service.review(candidate.candidate_id, approved=True, reviewer="admin")
+    manual = service.promote(candidate.candidate_id, reviewer="admin")
+    assert manual.promoted is True
     lessons = service.lessons.list()
     assert len(lessons) == 1
-    assert lessons[0].content == "做 X 任务应先备份再修改,否则数据会丢。"
-    assert lessons[0].evidence_groups == ("run:run-1", "run:run-2", "task:task-1", "task:task-2")
+    assert lessons[0].evidence_groups == (
+        "run:run-1",
+        "run:run-2",
+        "task:task-1",
+        "task:task-2",
+    )
 
 
 def test_model_inferred_single_occurrence_lesson_stays_cleanly_rejected(tmp_path: Path):
-    """教训专线安全阀:单次出现 → 干净失败(不崩溃),不落库;候选保持 approved 可再审。"""
+    """lesson 单次出现:权限闸干净拒绝(不崩溃),不落库,候选保持 pending 可再审。"""
     service, _conversations, _thread = _runtime(tmp_path)
     candidate = _lesson(service, content="做 X 任务应先备份再修改。", runs=("run-1",))
 
     result = service.promote(candidate.candidate_id, automatic=True)
 
     assert result.promoted is False
-    assert result.reason_code == "PROMOTION_THRESHOLD_NOT_MET"
+    assert result.reason_code == "PROMOTION_MANUAL_REQUIRED"
     assert service.lessons.list() == []
 
 
-def test_lesson_auto_promotion_keeps_mutation_and_conflict_blocks(tmp_path: Path):
-    """教训专线保留 mutation/conflict 检查:remove 动作与冲突引用仍被拦。"""
+def test_lesson_automatic_path_blocks_mutation_and_conflict_candidates(tmp_path: Path):
+    """lesson 一律 manual:remove 动作/冲突引用的 lesson 候选 automatic 均被权限闸拦。"""
     service, _conversations, _thread = _runtime(tmp_path)
     mutation = _lesson(
         service,
@@ -338,11 +576,11 @@ def test_lesson_auto_promotion_keeps_mutation_and_conflict_blocks(tmp_path: Path
     result = service.promote(mutation.candidate_id, automatic=True)
 
     assert result.promoted is False
-    assert result.reason_code == "AUTO_POLICY_MUTATION_REQUIRES_REVIEW"
+    assert result.reason_code == "PROMOTION_MANUAL_REQUIRED"
     assert service.lessons.list() == []
 
 
-def test_lesson_auto_promotion_rejects_conflicting_candidate(tmp_path: Path):
+def test_lesson_automatic_path_rejects_conflicting_candidate(tmp_path: Path):
     service, _conversations, _thread = _runtime(tmp_path)
     conflicting = _lesson(
         service,
@@ -354,7 +592,7 @@ def test_lesson_auto_promotion_rejects_conflicting_candidate(tmp_path: Path):
     result = service.promote(conflicting.candidate_id, automatic=True)
 
     assert result.promoted is False
-    assert result.reason_code == "AUTO_POLICY_CONFLICT_REQUIRES_REVIEW"
+    assert result.reason_code == "PROMOTION_MANUAL_REQUIRED"
     assert service.lessons.list() == []
 
 
@@ -371,6 +609,7 @@ def test_failed_tool_evidence_is_blocked(tmp_path: Path):
                 {"operation_id": "op-1", "run_id": "run-1", "status": "failed"},
             ),
             promotion_target="long_term",
+            promotion_mode="auto_eligible",
         )
     )
 
@@ -416,6 +655,7 @@ def test_non_success_or_unknown_tool_effect_never_promotes(
                 {"owner_id": "local/main", "run_id": "run-1", "operation_id": "op-1"},
             ),
             promotion_target="long_term",
+            promotion_mode="auto_eligible",
         )
     )
 
@@ -437,6 +677,7 @@ def test_confidence_cannot_replace_user_message_evidence(tmp_path: Path) -> None
             origin="user_explicit",
             confidence=1.0,
             promotion_target="long_term",
+            promotion_mode="auto_eligible",
         )
     )
 
@@ -891,3 +1132,189 @@ def test_search_scoped_english_keyword_hits_chinese_memory(tmp_path: Path):
     )
     assert hits, "英文关键词必须让 BM25 命中中文记忆"
     assert "祥子" in hits[0].content
+
+
+def test_old_task_alias_ledger_reused_by_new_project_candidate(tmp_path: Path):
+    """1197 单一权威：旧 task:<id> 账本 + 新 project:<id> 候选同内容同 subject →
+    复用原 entry_id，不生成第二条正式事实。"""
+    service, conversations, thread = _runtime(tmp_path)
+    content = "公司服务器统一使用 HTTPS 部署。"
+    # 模拟旧账本：task:<id> scope 已有一条同内容事实（旧代码 era 持久化）
+    old = service.long_term.apply_batch(
+        [
+            {
+                "action": "add",
+                "entry_id": "memory-old-task-ledger",
+                "role": "system",
+                "content": content,
+                "kind": "fact",
+                "tags": ["long_term_fact"],
+                "attributes": {
+                    "scope_type": "project",
+                    "scope_key": "task:alpha",
+                    "subject_key": "ops.deploy",
+                },
+                "source": "legacy",
+            }
+        ]
+    )[0]
+    assert old.entry_id == "memory-old-task-ledger"
+
+    # 新候选：project:<id>（写侧合同归一后的唯一正式键）
+    candidate = _explicit(
+        service,
+        conversations,
+        thread,
+        content=content,
+        scope_type="project",
+        scope_key="project:alpha",
+        subject_key="ops.deploy",
+    )
+
+    result = service.promote(candidate.candidate_id, automatic=True)
+
+    assert result.promoted is True
+    records = service.long_term.all()
+    # 仍只有旧账本一条，新候选晋升复用它而非新增
+    assert [record.entry_id for record in records] == ["memory-old-task-ledger"]
+    assert records[0].attributes["scope_key"] == "task:alpha"
+    assert service.candidates.get(candidate.candidate_id).promotion_ref.endswith(
+        "memory-old-task-ledger"
+    )
+
+
+def test_storage_task_alias_ledger_deduped_by_project_add_same_content(tmp_path: Path):
+    """1202 存储级：旧 task:<id> 账本 + 同 subject 同内容新 project:<id> add →
+    复用旧 entry_id 不新增（_memory_identity_key 走 canonical scope 合同）。"""
+    service, conversations, thread = _runtime(tmp_path)
+    content = "公司服务器统一使用 HTTPS 部署。"
+    old = service.long_term.apply_batch(
+        [
+            {
+                "action": "add",
+                "entry_id": "memory-old-task-ledger",
+                "role": "system",
+                "content": content,
+                "kind": "fact",
+                "tags": ["long_term_fact"],
+                "attributes": {
+                    "scope_type": "project",
+                    "scope_key": "task:alpha",
+                    "subject_key": "ops.deploy",
+                },
+                "source": "legacy",
+            }
+        ]
+    )[0]
+    assert old.entry_id == "memory-old-task-ledger"
+
+    # 新写入入口已归一为 project:alpha（单一权威键）
+    added = service.long_term.apply_batch(
+        [
+            {
+                "action": "add",
+                "role": "system",
+                "content": content,
+                "kind": "fact",
+                "tags": ["long_term_fact"],
+                "attributes": {
+                    "scope_type": "project",
+                    "scope_key": "project:alpha",
+                    "subject_key": "ops.deploy",
+                },
+                "source": "candidate:test",
+            }
+        ]
+    )
+
+    assert added == []
+    records = service.long_term.all()
+    assert [record.entry_id for record in records] == ["memory-old-task-ledger"]
+
+
+def test_storage_task_alias_ledger_conflicts_with_project_add_diff_content(tmp_path: Path):
+    """1202 存储级：旧 task:<id> 账本 + 同 subject 不同内容新 project:<id> add →
+    MemorySubjectConflict，不能并存（写时双权威被拒）。"""
+    service, conversations, thread = _runtime(tmp_path)
+    service.long_term.apply_batch(
+        [
+            {
+                "action": "add",
+                "entry_id": "memory-old-task-ledger",
+                "role": "system",
+                "content": "公司服务器统一使用 HTTPS 部署。",
+                "kind": "fact",
+                "tags": ["long_term_fact"],
+                "attributes": {
+                    "scope_type": "project",
+                    "scope_key": "task:alpha",
+                    "subject_key": "ops.deploy",
+                },
+                "source": "legacy",
+            }
+        ]
+    )
+
+    with pytest.raises(MemorySubjectConflict):
+        service.long_term.apply_batch(
+            [
+                {
+                    "action": "add",
+                    "role": "system",
+                    "content": "公司服务器统一使用 HTTP 部署。",
+                    "kind": "fact",
+                    "tags": ["long_term_fact"],
+                    "attributes": {
+                        "scope_type": "project",
+                        "scope_key": "project:alpha",
+                        "subject_key": "ops.deploy",
+                    },
+                    "source": "candidate:test",
+                }
+            ]
+        )
+    records = service.long_term.all()
+    assert [record.entry_id for record in records] == ["memory-old-task-ledger"]
+
+
+def test_old_task_alias_ledger_conflicts_with_new_project_candidate(tmp_path: Path):
+    """1202 晋升层：旧 task:<id> 账本 + 同 subject 不同内容新 project:<id> 候选 →
+    SUBJECT_SCOPE_CONFLICT_REQUIRES_REPLACE，不能并存。"""
+    service, conversations, thread = _runtime(tmp_path)
+    service.long_term.apply_batch(
+        [
+            {
+                "action": "add",
+                "entry_id": "memory-old-task-ledger",
+                "role": "system",
+                "content": "公司服务器统一使用 HTTPS 部署。",
+                "kind": "fact",
+                "tags": ["long_term_fact"],
+                "attributes": {
+                    "scope_type": "project",
+                    "scope_key": "task:alpha",
+                    "subject_key": "ops.deploy",
+                },
+                "source": "legacy",
+            }
+        ]
+    )
+
+    candidate = _explicit(
+        service,
+        conversations,
+        thread,
+        content="公司服务器统一使用 HTTP 部署。",
+        scope_type="project",
+        scope_key="project:alpha",
+        subject_key="ops.deploy",
+    )
+
+    result = service.promote(candidate.candidate_id, automatic=True)
+
+    assert result.promoted is False
+    assert result.status == "blocked_conflict"
+    assert result.reason_code == "SUBJECT_SCOPE_CONFLICT_REQUIRES_REPLACE"
+    records = service.long_term.all()
+    assert [record.entry_id for record in records] == ["memory-old-task-ledger"]
+    assert service.candidates.get(candidate.candidate_id).status == "blocked_conflict"

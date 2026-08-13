@@ -31,7 +31,7 @@ class MemoryRecallScope:
     ) -> MemoryRecallScope:
         pairs: list[tuple[str, str]] = [("global", "global"), ("personal", "personal")]
         attrs = task_attributes if isinstance(task_attributes, Mapping) else {}
-        _append_runtime_identity(pairs, "project", task_id, prefixes=("task", "project"))
+        _append_runtime_identity(pairs, "project", task_id)
         direct_fields = {
             "company": "company_id",
             "project": "project_id",
@@ -40,12 +40,7 @@ class MemoryRecallScope:
             "temporary": "temporary_scope_key",
         }
         for scope_type, field in direct_fields.items():
-            _append_runtime_identity(
-                pairs,
-                scope_type,
-                attrs.get(field),
-                prefixes=(scope_type,),
-            )
+            _append_runtime_identity(pairs, scope_type, attrs.get(field))
         _append_declared_scopes(pairs, attrs.get("memory_scope"))
         _append_declared_scopes(pairs, attrs.get("memory_scopes"))
         return cls(tuple(dict.fromkeys(pairs)))
@@ -124,6 +119,8 @@ def hot_memory_records(
 
 
 # LLM: 只接收显式 {scope_type, scope_key} 对象或对象数组，不从任意字符串推断 scope。
+# 显式声明与运行时身份共用同一 canonical 合同（raw 归一、task 别名归一到 project、
+# 嵌套/空 remainder/固定键错值 fail-closed），不再走弱校验放行坏值。
 # 函数用途: 合并调用方声明的附加 Memory 范围。
 def _append_declared_scopes(
     pairs: list[tuple[str, str]],
@@ -131,33 +128,58 @@ def _append_declared_scopes(
 ) -> None:
     if isinstance(value, Mapping):
         if "scope_type" in value or "scope_key" in value:
-            _append_scope_pair(pairs, value.get("scope_type"), value.get("scope_key"))
+            _append_declared_scope(pairs, value.get("scope_type"), value.get("scope_key"))
             return
         for scope_type, keys in value.items():
             values = keys if isinstance(keys, (list, tuple, set)) else (keys,)
             for scope_key in values:
-                _append_scope_pair(pairs, scope_type, scope_key)
+                _append_declared_scope(pairs, scope_type, scope_key)
         return
     if isinstance(value, (list, tuple)):
         for item in value:
             _append_declared_scopes(pairs, item)
 
 
-# LLM: host ID 同时接受原始稳定 ID 与明确类型前缀，方便旧 task ID 和项目 ID 采用同一精确比较。
+# LLM: 与写入侧共用 canonical 合同；坏值不扩大召回范围（fail-closed 静默跳过）。
+# 函数用途: 将一条显式声明 scope 归一为合法 keys 后追加。
+def _append_declared_scope(
+    pairs: list[tuple[str, str]],
+    scope_type: object,
+    scope_key: object,
+) -> None:
+    from .scope_contract import canonical_scope_key, scope_key_aliases
+
+    kind = str(scope_type or "").strip().lower()
+    key = str(scope_key or "").strip()
+    if not key:
+        return
+    try:
+        canonical = canonical_scope_key(kind, key)
+    except ValueError:
+        return  # 嵌套/空 remainder/固定键错值 → fail-closed 不追加
+    for alias in scope_key_aliases(kind, canonical):
+        _append_scope_pair(pairs, kind, alias)
+
+
+# LLM: 与写入侧共用 scope-key canonical 合同：raw 与 typed 落到同一键，
+# 不再对 typed 值重复加前缀（双前缀身份分裂债务），project 经别名补出 task:<id> 兼容。
 # 函数用途: 添加一个运行时身份对应的合法 scope keys。
 def _append_runtime_identity(
     pairs: list[tuple[str, str]],
     scope_type: str,
     value: object,
-    *,
-    prefixes: tuple[str, ...],
 ) -> None:
+    from .scope_contract import canonical_scope_key, scope_key_aliases
+
     key = str(value or "").strip()
     if not key:
         return
-    _append_scope_pair(pairs, scope_type, key)
-    for prefix in prefixes:
-        _append_scope_pair(pairs, scope_type, f"{prefix}:{key}")
+    try:
+        canonical = canonical_scope_key(scope_type, key)
+    except ValueError:
+        return  # 坏值不扩大召回范围（fail-closed 静默跳过）
+    for alias in scope_key_aliases(scope_type, canonical):
+        _append_scope_pair(pairs, scope_type, alias)
 
 
 # LLM: 只接受 Candidate schema 定义的 scope 类型和有限稳定 key；坏值不能扩大成 global。

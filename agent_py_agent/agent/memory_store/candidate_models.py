@@ -53,6 +53,10 @@ PROPOSED_ACTIONS = frozenset({"add", "replace", "remove", "merge", "none"})
 PROMOTION_TARGETS = frozenset(
     {"user", "long_term", "lesson", "hot", "soul", "agents", "none"}
 )
+# 晋升权限由宿主入口确定性计算并持久化到候选；模型文本/Schema 不能声明或升权。
+# auto_eligible=候选可走自动晋升路径（仍受 Promotion 双重核验）；manual_required=必须
+# 人工 approved + automatic=False 才能晋升。缺失/空按 manual_required fail-closed。
+PROMOTION_MODES = frozenset({"auto_eligible", "manual_required"})
 CANDIDATE_STATUSES = frozenset(
     {
         "observed",
@@ -150,6 +154,21 @@ class MemoryScope:
             raise ValueError("candidate scope condition is too long")
         return cls(scope_type, scope_key, applies_when, excludes_when)
 
+    # LLM: 新 add 候选必须使用可由 runtime 精确召回的规范 typed key；旧账本读取仍走 from_value。
+    # 函数用途: 校验新观察的 scope key 与 scope_type 一致，并归一为唯一持久化键
+    # （project 的 task:<id> 旧账本兼容输入归一到 project:<id>，阻止双正式身份）。
+    @classmethod
+    def for_new_observation(cls, value: object) -> MemoryScope:
+        scope = cls.from_value(value)
+        # 共享合同：已 canonical typed key 原样放行；raw/空/嵌套 typed prefix 拒绝
+        # （嵌套双前缀会让同一实体产生两个合法身份，recall 侧不生成、写入侧不收）。
+        from .scope_contract import validate_typed_scope_key
+
+        canonical = validate_typed_scope_key(scope.scope_type, scope.scope_key)
+        if canonical != scope.scope_key:
+            scope = cls(scope.scope_type, canonical, scope.applies_when, scope.excludes_when)
+        return scope
+
     # LLM: 输出字段名是持久化协议，不能为展示方便改名。
     # 函数用途: 把范围写成 JSON 可序列化对象。
     def to_dict(self) -> dict[str, str]:
@@ -179,6 +198,7 @@ class CandidateObservation:
     target_entry_id: str = ""
     conflicts_with: tuple[str, ...] = ()
     promotion_target: str = "long_term"
+    promotion_mode: str = ""
     observation_id: str = ""
 
 
@@ -220,6 +240,7 @@ class MemoryCandidate:
     content_redacted_at: str = ""
     observation_keys: list[str] = field(default_factory=list)
     status_history: list[dict[str, str]] = field(default_factory=list)
+    promotion_mode: str = ""
 
     # LLM: 持久化前完整验证，坏行不能被部分加载后继续覆盖。
     # 函数用途: 将候选转换为 JSONL 记录。
@@ -407,6 +428,13 @@ def validate_candidate(candidate: MemoryCandidate) -> None:
         raise ValueError(f"unsupported promotion_target: {candidate.promotion_target}")
     if candidate.status not in CANDIDATE_STATUSES:
         raise ValueError(f"unsupported candidate status: {candidate.status}")
+    # 晋升权限 fail-closed:legacy/新记录缺失或空一律归一 manual_required,
+    # 非空非法值严格拒绝;权限不参与 candidate_id/observation key/身份对比。
+    mode = str(candidate.promotion_mode or "").strip().lower()
+    if not mode:
+        candidate.promotion_mode = "manual_required"
+    elif mode not in PROMOTION_MODES:
+        raise ValueError(f"unsupported promotion_mode: {mode}")
     content = str(candidate.content or "").strip()
     if not content:
         if candidate.status not in TERMINAL_CANDIDATE_STATUSES:
@@ -470,6 +498,7 @@ __all__ = [
     "CandidateObservation",
     "MemoryCandidate",
     "MemoryScope",
+    "PROMOTION_MODES",
     "PROMOTION_TARGETS",
     "PROPOSED_ACTIONS",
     "SCOPE_TYPES",
