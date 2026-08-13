@@ -219,6 +219,10 @@ def _stream_with_watchdog(request: GatewayRequest) -> Iterator[str]:
         with _provider_interrupt_callback(response_guard.abort):
             if _provider_is_interrupted():
                 raise InterruptedError("模型接口流式请求已被用户停止")
+            # 门槛3补证(steward seq1533-1): idle/watchdog/wall 共用同一 monotonic
+            # cutoff——start 一次起算, wall_deadline 显式传入, idle 初始与其同基准,
+            # 不再「watchdog 与 _iter_sse_data_lines 分别起算时间」。
+            start = time.monotonic()
             watchdog = _StreamIdleWatchdog(response_guard, request.timeout)
             watchdog.start()
             try:
@@ -227,6 +231,7 @@ def _stream_with_watchdog(request: GatewayRequest) -> Iterator[str]:
                     timeout=request.timeout,
                     url=request.url,
                     on_data_line=watchdog.touch,
+                    wall_deadline=start + _stream_deadline_offset(request.timeout),
                 )
                 if watchdog.timed_out:
                     raise _stream_idle_timeout_error(request)
@@ -830,9 +835,16 @@ def _is_silent_bad_request(exc: urllib.error.HTTPError) -> bool:
     return "error" not in payload and "message" not in payload
 
 
-def _stream_deadline(timeout: int) -> float:
+def _stream_deadline_offset(timeout: int | float) -> float:
+    """预算秒数(浮点, 不截断): 最小 1.0s 防 0 预算死循环, 与门槛1/2 账本
+    effective 值一致——dynamic 预算可带小数(如 303.1), int() 截断会放大
+    0.05/0.5s 级预算(steward seq1533-2)。"""
+    return max(1.0, float(timeout or 0))
+
+
+def _stream_deadline(timeout: int | float) -> float:
     """Convert request timeout seconds into the next monotonic idle deadline."""
-    return time.monotonic() + max(1, int(timeout or 0))
+    return time.monotonic() + _stream_deadline_offset(timeout)
 
 
 # LLM: Check the current execution's interrupt flag at every SSE boundary before exposing provider data to higher layers.
@@ -845,12 +857,14 @@ def _iter_sse_data_lines(
     on_data_line,
     wall_deadline: float | None = None,
 ) -> Iterator[str]:
-    idle_deadline = _stream_deadline(timeout)
-    # 门槛3: 总墙钟硬顶(=effective 值, 调用方未显式注入时按同一 timeout 起算)。
-    # data 行只重置 idle_deadline 不动 wall_deadline——持续 data 续命下,
-    # 墙钟预算是唯一能掐断流的总时长硬顶(修掉「有 data 就永远等」的窗口)。
+    # 门槛3补证: 显式 wall_deadline 时 idle 初始与其共用同一 cutoff(同基准,
+    # 由 _stream_with_watchdog 一次 start 起算); 未显式时按进入时点兜底。
     if wall_deadline is None:
-        wall_deadline = time.monotonic() + max(1, int(timeout or 0))
+        wall_deadline = time.monotonic() + _stream_deadline_offset(timeout)
+    idle_deadline = wall_deadline
+    # 门槛3: 总墙钟硬顶(=effective 值)。data 行只重置 idle_deadline 不动
+    # wall_deadline——持续 data 续命下, 墙钟预算是唯一能掐断流的总时长硬顶
+    # (修掉「有 data 就永远等」的窗口)。
     for raw_line in response:
         if _provider_is_interrupted():
             raise InterruptedError("模型接口流式请求已被用户停止")

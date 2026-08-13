@@ -226,29 +226,36 @@ def test_wall_timeout_closes_stream_no_lingering(
     remaining = list(it)
     assert time.monotonic() - started < 0.5
     assert remaining == []
-    # 连接已关闭: 服务端写侧观察到客户端掐断(有限等待, 防 flake)
+    # 连接确已关闭(steward seq1533-3): 服务端写侧最终断言观察到客户端
+    # 掐断(BrokenPipe/ConnectionReset)——有限等待后必须为真, 否则流残留
     deadline = time.monotonic() + 2.0
     while not _SSEHandler.server_broken_pipe and time.monotonic() < deadline:
         time.sleep(0.05)
+    assert _SSEHandler.server_broken_pipe  # 最终断言: 连接确已关闭
 
 
 # ---------------------------------------------------------------- 5. wall_deadline 显式注入单测
 
 def test_wall_deadline_explicit_short_cutoff() -> None:
-    """显式注入更短的 wall_deadline: 远早于 idle 掐断(确定性, 不依赖网络)。"""
+    """显式注入更短的 wall_deadline: data 续命 idle 后 wall 快速掐断。
+
+    idle 初始与 wall 同基准(steward seq1533-1)后, wall 独立触发的唯一
+    场景=idle 已被 data 续命推后——本测试构造 data 行到达续命 idle,
+    第 2 行迭代时 wall(100ms) 到期而 idle(5s+) 未到 -> wall_clock。
+    """
 
     class _FakeLine:
         def __init__(self, text: bytes) -> None:
             self.text = text
 
         def decode(self, *args: object) -> str:
-            # 模拟真实网络逐行到达: 拖过显式注入的 50ms wall 预算
-            # (4 行 × 30ms = 120ms > 50ms), 迭代途中 wall 到期触发
-            time.sleep(0.03)
+            # 模拟真实网络逐行到达(60ms/行): 第 1 行(0.06s)未到 wall(0.1s)
+            # 并续命 idle, 第 2 行(0.12s)时 wall 到期 -> 掐断
+            time.sleep(0.06)
             return self.text.decode("utf-8", "replace")
 
-    fake = [_FakeLine(b'data: {"n":0}\n\n') for _ in range(4)]
-    wall_deadline = time.monotonic() + 0.05  # 50ms 硬顶, 远小于 timeout=5
+    fake = [_FakeLine(b'data: {"n":0}\n\n') for _ in range(3)]
+    wall_deadline = time.monotonic() + 0.1  # 100ms 硬顶, 远小于 timeout=5
     started = time.monotonic()
     with pytest.raises(ProviderTimeoutError) as err:
         list(
@@ -262,3 +269,34 @@ def test_wall_deadline_explicit_short_cutoff() -> None:
         )
     assert err.value.stage == "wall_clock"
     assert time.monotonic() - started < 1.0  # 不等到 idle(5s), 由 wall 快速掐
+
+
+def test_same_cutoff_silence_idle_wins() -> None:
+    """idle 初始与 wall 同基准(同刻到期), 无 data 续命时 idle 检查在前。
+
+    steward seq1533-1「保留同刻 idle 优先」的确定性证明: 同基准下静默/
+    保活(非 data)行不续命 idle, 同刻到期由检查顺序(先 idle 后 wall)定
+    stage=stream_idle。
+    """
+
+    class _FakeLine:
+        def __init__(self, text: bytes) -> None:
+            self.text = text
+
+        def decode(self, *args: object) -> str:
+            time.sleep(0.03)  # 60ms 内第 2 行迭代时 idle/wall 同刻到期
+            return self.text.decode("utf-8", "replace")
+
+    fake = [_FakeLine(b"keepalive\n\n") for _ in range(3)]  # 非 data 行, 不续命
+    wall_deadline = time.monotonic() + 0.05  # 与 idle 初始同一基准
+    with pytest.raises(ProviderTimeoutError) as err:
+        list(
+            _iter_sse_data_lines(
+                fake,
+                timeout=5,
+                url="http://fake/idle",
+                on_data_line=lambda: None,
+                wall_deadline=wall_deadline,
+            )
+        )
+    assert err.value.stage == "stream_idle"  # 同刻到期 idle 优先
