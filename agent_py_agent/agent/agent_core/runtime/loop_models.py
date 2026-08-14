@@ -39,6 +39,20 @@ class RunParams:
     # by this live request.  It is runtime state, never prompt text or persisted
     # task metadata, and survives ``dataclasses.replace`` continuations.
     conversation_task_binding_callback: object = None
+    # CLI 自动续跑契约(2026-08-14 根因3 设计 v2): 首轮创建后贯穿所有续跑轮,
+    # 保证同一 task/run/thread 链路(不每轮隐式生成新根)。
+    # - continuation_seq: 0=首轮, 1..N=续跑轮(事件账本/终态分层用)
+    # - continuation_root_task_id / root_run_id / root_thread_id: 首轮稳定 ID,
+    #   续跑轮复用(不新建 task/run/thread 根)
+    # - parent_attempt_id: 上一轮 attempt_id(树形链, 首轮为空)
+    # - continuation_prompt: 本轮续跑提示(带 is_continuation 标记, 不伪装用户请求)
+    continuation_seq: int = 0
+    continuation_root_task_id: str = ""
+    continuation_root_run_id: str = ""
+    continuation_root_thread_id: str = ""
+    continuation_root_request_id: str = ""
+    continuation_parent_attempt_id: str = ""
+    continuation_prompt: str = ""
 
 
 @dataclass(frozen=True)

@@ -61,25 +61,41 @@ def bind_cli_run_conversation(agent: object, params: object, user_prompt: str):
         raise CliRunConversationPersistenceError(
             "CLI run 无法建立可靠会话记录，已在模型执行前停止。"
         )
+    # 2026-08-14 根因3 设计 v2(审查意见1): 续跑轮复用同一 conversation
+    # thread(root channel id), 不因 request_id=root#cont-N 建新 thread——
+    # channel_conversation_id 用 root request_id, 消息带 is_continuation
+    # 标记, 不伪装成普通用户请求。
+    continuation_seq = int(getattr(params, "continuation_seq", 0) or 0)
+    continuation = continuation_seq > 0
+    # channel 身份用首轮 request_id(thread 的 channel_conversation_id),
+    # 不是 root_run_id(可能是另一值)。
+    root_request_id = str(
+        getattr(params, "continuation_root_request_id", "") or request_id
+    ).strip()
     try:
         thread = store.get_or_create_thread(
             {
                 "canonical_user_id": _CLI_RUN_USER_ID,
                 "channel": _CLI_RUN_CHANNEL,
-                "channel_conversation_id": request_id,
+                "channel_conversation_id": root_request_id if continuation else request_id,
                 "channel_user_id": _CLI_RUN_USER_ID,
                 "owner_id": _owner_id(agent),
                 "owner_home": _owner_home(agent),
-                "title": prompt[:80] or request_id,
+                "title": prompt[:80] or root_request_id,
             }
         )
+        metadata = _message_metadata(params)
+        if continuation:
+            metadata = dict(metadata or {})
+            metadata["is_continuation"] = True
+            metadata["continuation_seq"] = continuation_seq
         entry = store.append_message_once(
             {
                 "thread_id": thread.thread_id,
                 "role": "user",
                 "content": prompt,
                 "channel": _CLI_RUN_CHANNEL,
-                "metadata": _message_metadata(params),
+                "metadata": metadata,
             },
             dedupe_key=_dedupe_key(request_id, "user"),
         )
