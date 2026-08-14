@@ -626,3 +626,49 @@ def test_resume_round_blocked_is_unresumable(tmp_path):
     assert outcome.status == "unresumable"  # 不是 completed
     assert outcome.reason == "PROTOCOL_VIOLATION"
     assert len(fake.calls) == 2  # 首轮 + 1 续跑轮后停
+
+
+def test_resume_without_precreated_policy_ensures_and_continues(tmp_path):
+    """真机洞回归(2026-08-14 testbox): 真实 CLI run 从不预建 ordinary_task_
+    resume policy(它是收口 finalization 的 gateway 调度器路径产物), 旧实现
+    try_claim_cli_resume 找不到 policy 永远 False → 永不续跑(测试用 fake
+    agent 显式建 policy 掩盖)。修后 run_with_resume 先 ensure_ordinary_task_
+    resume 建同一 policy 再 claim——无 policy 场景也应正常续跑完成。"""
+    from agent_py_agent.agent.agent_core.runtime.run_params import (
+        run_params_with_request_id,
+    )
+    from agent_py_agent.cli.resume_loop import run_with_resume
+
+    class _NoPolicyAgent(_FakeRunAgent):
+        def __init__(self, tmp_path):
+            import time
+
+            from agent_py_agent.agent.conversation.store import ConversationStore
+
+            # 与 _FakeRunAgent 唯一区别: 不预建 policy(真实 CLI 场景)
+            self.conversation_store = ConversationStore(tmp_path / "conv")
+            self.calls = []
+            self._thread = self.conversation_store.get_or_create_thread(
+                {
+                    "canonical_user_id": "u", "channel": "cli_run",
+                    "channel_conversation_id": "req-nopol", "channel_user_id": "u",
+                    "owner_id": "local/main", "owner_home": str(tmp_path), "title": "t",
+                }
+            )
+            # 不发 set_progress_policy
+
+    fake = _NoPolicyAgent(tmp_path)
+    base = run_params_with_request_id(
+        RunParams(source="cli_run", task_id="task-nopol", task_attributes={})
+    )
+    outcome = run_with_resume(fake, initial_prompt="t", base_params=base, max_rounds=5)
+    # 不再 unresumable: 修后 ensure 自动建 policy 并续跑 3 轮完成
+    assert outcome.status == "completed"
+    assert len(fake.calls) == 3  # 首轮 + 2 续跑轮
+    # policy 已创建(预算单一权威落点)
+    policies = fake.conversation_store.list_progress_policies(enabled_only=True)
+    assert any(
+        p.task_id == "task-nopol"
+        and str((p.metadata or {}).get("kind") or "") == "ordinary_task_resume"
+        for p in policies
+    )

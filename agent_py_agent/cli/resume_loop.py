@@ -184,10 +184,38 @@ def run_with_resume(
     # 缺口A(双席复核 seq1834): 进入续跑循环前 claim 一次(整个循环持有,
     # lease 300s 覆盖进程内多轮)——CLI 与 gateway 同读同写同一 policy claim,
     # 已被其他 consumer 持有则整个续跑放弃(等 gateway/下次), 不双跑。
+    # 缺口A真机补充(2026-08-14 testbox): try_claim 依赖
+    # kind=ordinary_task_resume 的 policy, 但该 policy 由收口 finalization
+    # (_schedule_typed_unfinished_continuation)创建——那是 gateway 调度器
+    # 路径, CLI one-shot run 从不经过 → 找不到 policy 永远 False, 永不续跑
+    # (测试里 fake agent 显式建 policy 掩盖了此洞)。修: claim 前先
+    # ensure_ordinary_task_resume 建/递增同一 policy(预算单一权威),
+    # 预算耗尽(返回 False) → budget_exhausted, 与 gateway 互斥语义不变。
+    from ..agent.conversation.runtime import ensure_ordinary_task_resume
     from .resume_contract import try_claim_cli_resume
 
     store = getattr(agent, "conversation_store", None)
     if store is not None:
+        ensured = ensure_ordinary_task_resume(
+            agent,
+            task_id=runner.ctx.root_task_id,
+            thread_id=runner.ctx.root_thread_id,
+            store=store,
+            due_now=True,
+        )
+        if not ensured:
+            record_budget_exhausted(
+                agent=agent,
+                run_id=runner.ctx.root_run_id,
+                attempt_id=runner.ctx.parent_attempt_id,
+                budget_before=0,
+                budget_after=0,
+                reason="resume_limit_reached",
+            )
+            return CliResumeOutcome(
+                status="budget_exhausted", rounds=rounds, final_result=result,
+                reason="resume_limit_reached",
+            )
         if not try_claim_cli_resume(store, runner.ctx.root_task_id):
             return CliResumeOutcome(
                 status="unresumable", rounds=rounds, final_result=result,
