@@ -220,6 +220,60 @@ def test_main_settle_unfinished_not_terminal(repo):
     assert _attempts(repo, rec["agent_run_id"])[0]["status"] == "running"
 
 
+def test_main_settle_cli_oneshot_blocked_maps_failed(repo):
+    """CLI 一次性 run 以 blocked 真实结束 → 兜底落 failed 终态（不悬挂 attempt）。
+
+    问题C同族(2026-08-14 真机): aiohttp 首轮 break 收口后 attempt 仍卡
+    running/ended_at=0; local/main 遗留 20+ 条 created/running。CLI one-shot
+    没有 gateway 发现层再驱动, run 真实结束即必须落终态。
+    """
+    rec = _record(repo)
+    result = SimpleNamespace(
+        runtime_status="blocked",
+        runtime_reason="TOOL_PROTOCOL_VIOLATION",
+        runtime_source="tool_loop",
+        tool_rounds=7,
+    )
+    params = SimpleNamespace(
+        run_id="run-1", attempt_id=rec["attempt_id"], source="cli_run"
+    )
+    _settle_main_agent_run(_agent(repo), params, result)
+    row = _run_row(repo, rec["agent_run_id"])
+    assert row["status"] == "failed"
+    attempts = _attempts(repo, rec["agent_run_id"])
+    assert len(attempts) == 1
+    assert attempts[0]["status"] == "failed"
+    assert attempts[0]["ended_at"] > 0
+    events = _completed_events(repo, rec["agent_run_id"])
+    assert len(events) == 1
+    payload = events[0]["payload_json"]
+    assert '"runtime_status": "blocked"' in payload
+    assert '"runtime_reason": "TOOL_PROTOCOL_VIOLATION"' in payload
+    assert '"tool_rounds": 7' in payload
+
+
+def test_main_settle_cli_oneshot_unfinished_maps_failed(repo):
+    """CLI 一次性 run 达轮限/账本上限 unfinished 收口 → 同样兜底 failed。"""
+    rec = _record(repo)
+    result = SimpleNamespace(
+        runtime_status="unfinished",
+        runtime_reason="TOOL_ROUND_LIMIT_REACHED",
+        runtime_source="tool_loop",
+        tool_rounds=43,
+    )
+    params = SimpleNamespace(
+        run_id="run-1", attempt_id=rec["attempt_id"], source="cli_run"
+    )
+    _settle_main_agent_run(_agent(repo), params, result)
+    row = _run_row(repo, rec["agent_run_id"])
+    assert row["status"] == "failed"
+    attempts = _attempts(repo, rec["agent_run_id"])
+    assert attempts[0]["status"] == "failed"
+    assert attempts[0]["ended_at"] > 0
+    payload = _completed_events(repo, rec["agent_run_id"])[0]["payload_json"]
+    assert '"runtime_status": "unfinished"' in payload
+
+
 def test_main_settle_user_stop_maps_cancelled(repo):
     rec = _record(repo)
     result = SimpleNamespace(

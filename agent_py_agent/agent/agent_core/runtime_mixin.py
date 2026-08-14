@@ -16,6 +16,7 @@ from ._compression_service import CompressionService
 from ._finalization_service import FinalizationService
 from ._runtime_params import FinalizeContext
 from .cli_run_conversation import (
+    _is_cli_run,
     bind_cli_run_conversation,
     persist_cli_run_assistant,
 )
@@ -384,6 +385,7 @@ def _settle_main_agent_run_status(
     runtime_reason: str = "",
     runtime_source: str = "",
     tool_rounds: int = 0,
+    cli_one_shot: bool = False,
 ) -> None:
     """把主代理 run 的真实终态落进权威审计账本（fail-silent）。
 
@@ -397,12 +399,23 @@ def _settle_main_agent_run_status(
     不是 agent_runs.status 合法终态——一律不 settle，run 保持 created，
     发现层继续驱动。LOCAL_UNMANAGED（无 repo）/查无 run → noop。
     审计是附加保证，任何失败绝不反噬执行路径。
+
+    CLI 一次性 run 例外（问题C同族, 2026-08-14 真机）：source=cli_run 的
+    one-shot run 结束后**没有** gateway 发现层/wake 循环再驱动它。此前
+    blocked/unfinished 等非终态不 settle → attempt 永卡 running/ended_at=0
+    （testbox local/main 遗留 20+ 条 created/running，aiohttp 首轮 break 后
+    无 ended_at）。CLI 一次性 run 真实结束即兜底落 failed 终态，原始
+    runtime_status/runtime_reason 保留在 payload 证据，绝不写 DONE 撒谎；
+    gateway 等可续跑路径行为完全不变。
     """
     terminal = _RUN_STATUS_ALIASES.get(runtime_status, runtime_status or "")
     if not terminal or terminal in ("", "created", "running"):
         return
     if terminal not in AGENT_RUN_TERMINAL_STATUSES:
-        return  # R1-03：非终态不落账（unfinished 等），避免 status_conflict 噪音
+        if cli_one_shot and runtime_status:
+            terminal = "failed"
+        else:
+            return  # R1-03：非终态不落账（unfinished 等），避免 status_conflict 噪音
     if not run_id or not attempt_id:
         return
     repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
@@ -428,7 +441,11 @@ def _settle_main_agent_run_status(
 
 
 def _settle_main_agent_run(agent, params: RunParams, result) -> None:
-    """正常返回路径收口：runtime_status=='ok' → 'done'，否则透传终态。"""
+    """正常返回路径收口：runtime_status=='ok' → 'done'，否则透传终态。
+
+    CLI 一次性 run（source=cli_run）结束后非终态（blocked/unfinished 等）兜底
+    落 failed，杜绝 attempt 悬挂——见 _settle_main_agent_run_status 注释。
+    """
     runtime_status = str(getattr(result, "runtime_status", "") or "").strip()
     _settle_main_agent_run_status(
         agent,
@@ -438,6 +455,7 @@ def _settle_main_agent_run(agent, params: RunParams, result) -> None:
         runtime_reason=str(getattr(result, "runtime_reason", "") or "").strip(),
         runtime_source=str(getattr(result, "runtime_source", "") or "").strip(),
         tool_rounds=int(getattr(result, "tool_rounds", 0) or 0),
+        cli_one_shot=_is_cli_run(params),
     )
 
 
