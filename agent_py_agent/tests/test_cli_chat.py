@@ -578,6 +578,12 @@ class TestResumeCommand:
             def session_exists(self, session_id):
                 return session_id == "sess_real_1234"
 
+            def load_session(self, session_id):
+                class _S:
+                    user_id = ""
+
+                return _S()
+
         seen = {}
 
         def _fake_make_agent(args):
@@ -597,3 +603,95 @@ class TestResumeCommand:
         rc = chat_mod.cmd_resume(_Args())
         assert rc == 7  # 透传 cmd_chat 退出码
         assert seen["args"] is not None
+
+
+    def test_resume_cross_user_denied_fail_closed(self, monkeypatch):
+        """跨用户负例(双席 seq1966): session 归属他人 → fail-closed 拒绝, 不恢复。"""
+        from agent_py_agent.cli import chat as chat_mod
+
+        class _Session:
+            session_id = "sess_other_user"
+            user_id = "other-user"
+
+        class _FakeAgent:
+            config = object()
+
+        class _FakeConfig:
+            user_id = "current-user"
+
+        class _FakeAgent2:
+            config = _FakeConfig()
+
+        class _FakeManager:
+            def __init__(self, config):
+                self.config = config
+
+            def session_exists(self, session_id):
+                return True
+
+            def load_session(self, session_id):
+                return _Session()
+
+        seen = []
+
+        def _fake_make_agent(args):
+            return _FakeAgent2()
+
+        def _fake_cmd_chat(args):
+            seen.append(args)
+            return 0
+
+        monkeypatch.setattr(chat_mod, "make_agent", _fake_make_agent)
+        monkeypatch.setattr("agent_py_agent.agent.session.manager.SessionManager", _FakeManager)
+        monkeypatch.setattr(chat_mod, "cmd_chat", _fake_cmd_chat)
+
+        class _Args:
+            session_id = "sess_other_user"
+
+        rc = chat_mod.cmd_resume(_Args())
+        assert rc == 3  # 跨用户拒绝
+        assert seen == []  # 未转调 chat(未恢复他人会话)
+
+    def test_resume_own_user_allowed(self, monkeypatch):
+        """归属匹配(同 user_id) → 放行转调 chat。"""
+        from agent_py_agent.cli import chat as chat_mod
+
+        class _Session:
+            session_id = "sess_mine"
+            user_id = "current-user"
+
+        class _FakeConfig:
+            user_id = "current-user"
+
+        class _FakeAgent:
+            config = _FakeConfig()
+
+        class _FakeManager:
+            def __init__(self, config):
+                self.config = config
+
+            def session_exists(self, session_id):
+                return True
+
+            def load_session(self, session_id):
+                return _Session()
+
+        seen = []
+
+        def _fake_make_agent(args):
+            return _FakeAgent()
+
+        def _fake_cmd_chat(args):
+            seen.append(args)
+            return 0
+
+        monkeypatch.setattr(chat_mod, "make_agent", _fake_make_agent)
+        monkeypatch.setattr("agent_py_agent.agent.session.manager.SessionManager", _FakeManager)
+        monkeypatch.setattr(chat_mod, "cmd_chat", _fake_cmd_chat)
+
+        class _Args:
+            session_id = "sess_mine"
+
+        rc = chat_mod.cmd_resume(_Args())
+        assert rc == 0
+        assert len(seen) == 1

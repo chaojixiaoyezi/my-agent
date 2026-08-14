@@ -144,8 +144,19 @@ def cmd_resume(args) -> int:
             file=sys.stderr,
         )
         return 3
-    # 存在: 复用 chat 流程——_setup_session 会 load + touch 恢复该会话,
-    # 不会新建。make_agent 的重复构建是 CLI 单次启动成本, 可接受。
+    # 跨用户负例(双席 seq1966): session 归属校验——session 的 user_id 与
+    # 当前用户不符 → fail-closed 拒绝(拿到别人 session_id 也不能恢复)。
+    current_user = str(getattr(agent.config, "user_id", "") or "")
+    session = manager.load_session(session_id)
+    if session is not None and session.user_id and current_user \
+            and session.user_id != current_user:
+        print(
+            f"会话 {session_id} 属于其他用户({session.user_id}), 无权恢复",
+            file=sys.stderr,
+        )
+        return 3
+    # 存在且归属匹配: 复用 chat 流程——_setup_session 会 load + touch 恢复
+    # 该会话, 不会新建。make_agent 的重复构建是 CLI 单次启动成本, 可接受。
     return cmd_chat(args)
 
 
