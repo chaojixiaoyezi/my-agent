@@ -30,6 +30,7 @@ from ..local_storage import (
     ToolOperationReopenRequest,
     new_tool_operation_holder,
 )
+from ..contracts.error_taxonomy import error_contract
 from ..runtime_db.managed_operation_store import AuthorityContextMissing
 from .models import (
     ToolFailureStage,
@@ -626,6 +627,14 @@ def _operation_status_for_result(result: ToolHandlerOutcome) -> str:
         return TOOL_OPERATION_SUCCEEDED
     if result.effect_outcome == "not_started":
         return TOOL_OPERATION_FAILED
+    # 问题B(2026-08-14 真机实证, ④类复刻): handler 显式返回的「执行前确定性
+    # 失败」(taxonomy category=tool/path 且 retryable——参数/路径类, 副作用在
+    # 校验阶段就未发生) 即使 execute_authorized_tool 标了 handler_executed=True
+    # 也按 FAILED 终态归档。修复前一律 UNKNOWN → 系统禁止自动重试 → 模型
+    # 卡死到轮限(真机 outcome_json: effect_outcome_unknown:TOOL_INVALID_ARGUMENTS,
+    # apply_patch 无效补丁卡死整个复刻任务)。
+    if _is_deterministic_pre_handler_failure(result):
+        return TOOL_OPERATION_FAILED
     # Once a mutating/dangerous handler was entered, a generic failure cannot
     # prove that no side effect happened.  Only an explicit structured
     # ``not_started`` fact may make the operation terminal-failed; error text
@@ -633,6 +642,34 @@ def _operation_status_for_result(result: ToolHandlerOutcome) -> str:
     if result.effect_outcome == "unknown" or result.handler_executed:
         return TOOL_OPERATION_UNKNOWN
     return TOOL_OPERATION_FAILED
+
+
+# 执行前确定性失败族: handler 在副作用前显式返回的校验类错误码白名单——
+# 参数/路径/写入边界在触碰任何副作用目标前失败, 零副作用是结构化机器事实,
+# 即使 execute_authorized_tool 标了 handler_executed=True 也应终态 FAILED。
+# 不能用 taxonomy 动作/category 当判据: TOOL_TIMEOUT 与 TOOL_ERROR 也是
+# category=tool+retryable(+REPAIR_TOOL_ARGUMENTS), 但它们「可能已生效」
+# 必须保持 UNKNOWN(禁止自动重试)。白名单=只含校验阶段专属码, 新增校验码
+# 须同步登记(漏登=保守回 UNKNOWN, 安全方向)。
+_PRE_HANDLER_DETERMINISTIC_CODES = frozenset(
+    {
+        "TOOL_INVALID_ARGUMENTS",
+        "TOOL_INTERNAL_PARAMETER_FORBIDDEN",
+        "PATH_OUTSIDE_WORKSPACE",
+        "PATH_NOT_FOUND",
+        "WRITE_FORBIDDEN",
+        "PERSONA_WRITE_REQUIRES_TOOL",
+    }
+)
+
+
+def _is_deterministic_pre_handler_failure(result: ToolHandlerOutcome) -> bool:
+    code = str(result.error_code or "").upper()
+    contract = error_contract(code)
+    return (
+        code in _PRE_HANDLER_DETERMINISTIC_CODES
+        and contract.retryable
+    )
 
 
 def _unknown_outcome_result(

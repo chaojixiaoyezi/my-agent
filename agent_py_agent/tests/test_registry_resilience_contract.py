@@ -28,8 +28,10 @@ from agent_py_agent.agent.tooling.registry_invoke import (
     _sandbox_read_roots_for_invocation,
     _tool_params_with_runtime_boundary,
     _workspace_roots_for_invocation,
+    execute_authorized_tool,
     invoke_registry_tool,
 )
+from agent_py_agent.agent.tooling.models import ToolInvocationContext
 from agent_py_agent.agent.tooling.runtime_contracts import (
     ToolContentBlock,
     ToolResultRef,
@@ -553,6 +555,40 @@ def test_read_artifact_falls_back_to_task_work_root_for_legacy_boundary(
     )
 
     assert params["__artifact_read_root"] == str(tmp_path / "task" / "work")
+
+
+def test_deterministic_handler_failure_operation_status_failed(
+    tmp_path: Path,
+) -> None:
+    """问题B(2026-08-14 真机实证, ④类复刻): mutating 工具 handler 显式返回的
+    执行前确定性失败(TOOL_INVALID_ARGUMENTS, taxonomy category=tool/retryable)
+    必须终态 FAILED 而非 UNKNOWN——修复前一律 UNKNOWN → 系统禁止自动重试 →
+    模型卡死到轮限(真机: apply_patch 无效补丁卡死复刻任务,
+    outcome_json=effect_outcome_unknown:TOOL_INVALID_ARGUMENTS)。
+    """
+    from agent_py_agent.agent.tooling.tool_operation_coordinator import (
+        _operation_status_for_result,
+    )
+
+    tool = ApplyPatchTool(workspace_root=tmp_path)
+    result = execute_authorized_tool(
+        AuthorizedToolDispatchRequest(
+            tool_name="apply_patch",
+            tool=tool,
+            tool_params={"patch": "*** 非补丁文本，必触发参数校验失败 ***"},
+            workspace_root=tmp_path,
+            write_boundary=None,
+            invocation_context=ToolInvocationContext(
+                runtime_snapshot=None,
+                cancellation_token=None,
+            ),
+        )
+    )
+    assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+    # execute_authorized_tool 按统一入口语义标 handler_executed=True(能走到
+    # 派发=handler 被调用); 修复点=_operation_status_for_result 识别执行前
+    # 确定性失败族(category=tool/path 且 retryable), 即使 True 也终态 FAILED。
+    assert _operation_status_for_result(result) == "failed"
 
 
 def test_explicit_process_working_dir_overrides_selected_task_root(tmp_path: Path) -> None:
