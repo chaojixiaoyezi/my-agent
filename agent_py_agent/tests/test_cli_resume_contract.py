@@ -922,3 +922,53 @@ def test_handoff_write_on_budget_exhausted(tmp_path):
     assert pending[0]["user_prompt"] == "原任务描述"
     assert pending[0]["reason"] == "max_rounds_reached"
     assert pending[0]["root_task_id"] == "task-handoff"
+
+
+def test_gateway_handoff_continuation_rewrites_next_handoff(tmp_path):
+    """gateway 接管多轮: 续跑轮收口后仍可续跑(共享 gate True) → 续写移交单
+    供下个 tick 继续(同一 run 持续推进不截断)。"""
+    from types import SimpleNamespace as _NS
+
+    from agent_py_agent.agent.agent_core.runtime.run_params import (
+        run_params_with_request_id,
+    )
+    from agent_py_agent.agent.conversation.runtime import _run_handoff_continuation
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+
+    repo = RuntimeRepository(tmp_path / "home" / "runtime.db")
+    now = 1786001000.0
+    repo.create_continuation_handoff(
+        agent_run_id="", attempt_id="attempt-1", task_run_id="taskrun-1",
+        root_run_id="run-1", root_request_id="req-1", root_thread_id="thread-1",
+        root_task_id="task-1", user_prompt="原任务", continuation_seq=9,
+        reason="max_rounds_reached", now=now,
+    )
+
+    class _GatewayAgent(_FakeRunAgent):
+        def __init__(self, tmp_path):
+            super().__init__(tmp_path)
+            self.subagents = _NS(runtime_db=repo)
+
+        def run(self, prompt, *, params=None, save=False, source="cli_run",
+                resume_context=None, delivery_contract=None, on_chunk=None):
+            seq = int(getattr(params, "continuation_seq", 0) or 0)
+            self.calls.append((seq, str(prompt)[:40]))
+            # 续跑轮仍 unfinished(可续跑族) → 应续写移交单
+            return SimpleNamespace(
+                runtime_status="unfinished", runtime_reason="TOOL_ROUND_LIMIT_REACHED",
+                runtime_source="tool_loop", tool_rounds=2, attempt_id=f"attempt-{seq}",
+            )
+
+    fake = _GatewayAgent(tmp_path)
+    handoff = repo.pending_continuation_handoffs(limit=10)[0]
+    # 模拟 gateway 领取(CAS)
+    assert repo.consume_continuation_handoff(handoff["handoff_id"], consumed_by="gw", now=now)
+    _run_handoff_continuation(fake, handoff, now=now)
+    # 执行了续跑轮(seq=10 = handoff seq 9 + 1)
+    assert fake.calls and fake.calls[0][0] == 10
+    assert "max_rounds_reached" in fake.calls[0][1]  # 续跑提示含 handoff reason
+    # 续写移交单(seq=10, 下个 tick 继续)
+    pending = repo.pending_continuation_handoffs(limit=10)
+    assert len(pending) == 1
+    assert pending[0]["continuation_seq"] == 10
+    assert pending[0]["user_prompt"] == "原任务"

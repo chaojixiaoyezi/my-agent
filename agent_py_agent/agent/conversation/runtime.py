@@ -3789,13 +3789,54 @@ def _run_handoff_continuation(agent: object, handoff: dict, *, now: float) -> No
         continuation_seq=seq + 1,
         user_task=user_prompt,
     )
-    agent.run(
+    result = agent.run(
         prompt,
         params=params,
         source="gateway",
         resume_context=True,
         save=True,
     )
+    # 接管多轮(2026-08-14 长任务首要约束): gateway 驱动的续跑轮收口后若
+    # 仍可续跑(共享 gate), 续写移交单供下个 tick 继续——同一 run 持续
+    # 推进, 不截断; tick 每 ~2 分钟一次天然限速, 不风暴。
+    should, _reason = should_continue_task(result)
+    if not should:
+        return
+    next_reason = str(getattr(result, "runtime_reason", "") or "").strip()
+    if not next_reason:
+        next_reason = reason
+    try:
+        repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+        if repo is None or not callable(getattr(repo, "create_continuation_handoff", None)):
+            return
+        row = repo.agent_run_for_run_id(root_run_id)
+        latest_attempt = ""
+        task_run_id = ""
+        if row is not None:
+            task_run_id = str(row.get("task_run_id") or "")
+            try:
+                latest = repo._runtime_connect().execute(
+                    "SELECT attempt_id FROM agent_attempts "
+                    "WHERE agent_run_id = ? ORDER BY started_at DESC LIMIT 1",
+                    (str(row.get("agent_run_id") or ""),),
+                ).fetchone()
+                latest_attempt = str(latest["attempt_id"] or "") if latest else ""
+            except Exception:  # noqa: BLE001
+                latest_attempt = ""
+        repo.create_continuation_handoff(
+            agent_run_id="",
+            attempt_id=latest_attempt or str(handoff.get("attempt_id") or ""),
+            task_run_id=task_run_id,
+            root_run_id=root_run_id,
+            root_request_id=root_request_id,
+            root_thread_id=root_thread_id,
+            root_task_id=root_task_id,
+            user_prompt=user_prompt,
+            continuation_seq=seq + 1,
+            reason=next_reason,
+        )
+    except Exception:  # noqa: BLE001 续写失败: 下一轮由 lease/orphan 兜底
+        pass
 
 
 class _BackgroundSchedulerTickMixin:
