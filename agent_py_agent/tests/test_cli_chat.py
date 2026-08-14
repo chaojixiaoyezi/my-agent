@@ -695,3 +695,137 @@ class TestResumeCommand:
         rc = chat_mod.cmd_resume(_Args())
         assert rc == 0
         assert len(seen) == 1
+
+
+class TestChatSessionIdFailClosed:
+    """chat --session-id 显式指定入口同款 fail-closed(双席 seq1968 技术项)。"""
+
+    def test_chat_session_id_nonexistent_returns_empty(self, tmp_path, monkeypatch):
+        """显式 --session-id 不存在 → _setup_session 返回 ""(不再静默建新会话)。"""
+        from agent_py_agent.cli import chat as chat_mod
+
+        class _Config:
+            user_id = "u1"
+
+        class _FakeManager:
+            def __init__(self, config):
+                self.config = config
+
+            def load_session(self, session_id):
+                return None
+
+            def create_session(self, channel="chat"):
+                raise AssertionError("显式指定不存在时不得创建新会话")
+
+            def touch_session(self, session_id, channel=None):
+                pass
+
+        class _Args:
+            session_id = "sess_ghost_999"
+
+        result = chat_mod._setup_session(_Args(), _FakeManager(_Config()))
+        assert result == ""
+
+    def test_chat_session_id_cross_user_returns_empty(self, tmp_path, monkeypatch):
+        """显式 --session-id 跨用户 → _setup_session 返回 ""(不恢复他人会话)。"""
+        from agent_py_agent.cli import chat as chat_mod
+
+        class _Config:
+            user_id = "u1"
+
+        class _Session:
+            session_id = "sess_theirs"
+            user_id = "u2"
+
+        class _FakeManager:
+            def __init__(self, config):
+                self.config = config
+
+            def load_session(self, session_id):
+                return _Session()
+
+            def touch_session(self, session_id, channel=None):
+                raise AssertionError("跨用户不得 touch")
+
+        class _Args:
+            session_id = "sess_theirs"
+
+        result = chat_mod._setup_session(_Args(), _FakeManager(_Config()))
+        assert result == ""
+
+    def test_chat_session_id_own_user_restores(self, tmp_path, monkeypatch):
+        """显式 --session-id 归属匹配 → 恢复(非空返回值)。"""
+        from agent_py_agent.cli import chat as chat_mod
+
+        class _Config:
+            user_id = "u1"
+
+        class _Session:
+            session_id = "sess_mine2"
+            user_id = "u1"
+
+        touched = []
+
+        class _FakeManager:
+            def __init__(self, config):
+                self.config = config
+
+            def load_session(self, session_id):
+                return _Session()
+
+            def touch_session(self, session_id, channel=None):
+                touched.append(session_id)
+
+        class _Args:
+            session_id = "sess_mine2"
+
+        result = chat_mod._setup_session(_Args(), _FakeManager(_Config()))
+        assert result == "sess_mine2"
+        assert touched == ["sess_mine2"]
+
+    def test_cmd_chat_returns_3_when_session_setup_fails(self, monkeypatch, tmp_path):
+        """cmd_chat 在 _setup_session 失败(显式不存在/跨用户)时返回 3 不进入循环。"""
+        from agent_py_agent.cli import chat as chat_mod
+
+        class _FakeAgent:
+            config = SimpleNamespace(
+                gateway_workspace="/tmp/gw",
+                cli_chat_memory_limit=5,
+                gateway_ready_timeout_seconds=10,
+                user_id="u1",
+                session_workspace="/tmp/gw/sessions",
+            )
+            root = "/tmp"
+
+        class _FakeManager:
+            def __init__(self, config):
+                self.config = config
+
+        called = []
+
+        def _fake_make_agent(args):
+            return _FakeAgent()
+
+        def _fake_setup(args, manager):
+            return ""  # 失败
+
+        def _fake_init(args, agent):
+            called.append("init")
+            return {}
+
+        monkeypatch.setattr(chat_mod, "make_agent", _fake_make_agent)
+        monkeypatch.setattr(chat_mod, "_setup_session", _fake_setup)
+        monkeypatch.setattr(chat_mod, "_init_chat_state", _fake_init)
+        monkeypatch.setattr(chat_mod, "gateway_paths", lambda agent: None)
+        monkeypatch.setattr(chat_mod, "wait_for_gateway_running", lambda paths, timeout=10: (None, True))
+
+        class _Args:
+            session_id = "sess_ghost_999"
+            gateway = True
+            memory_limit = None
+            inject = []
+            prompt_file = []
+
+        rc = chat_mod.cmd_chat(_Args())
+        assert rc == 3
+        assert called == []  # 未初始化聊天状态

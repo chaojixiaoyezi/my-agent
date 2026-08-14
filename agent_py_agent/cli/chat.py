@@ -61,18 +61,33 @@ _CHAT_RESPONSE_STYLE_INJECT = (
 )
 
 
-def _setup_session(args, session_manager: SessionManager):
+def _setup_session(args, session_manager: SessionManager) -> str:
+    """入口会话选择(双席 seq1968 技术项): 所有显式指定 session 的入口对
+    不存在/跨用户 ID fail-closed——显式指定且不可恢复 → 返回 "" 表示失败
+    (cmd_chat 据此退出非 0), 绝不静默创建新会话; 未指定才创建新随机会话。"""
     if hasattr(args, "session_id") and args.session_id:
         session = session_manager.load_session(args.session_id)
         if session is None:
-            print(f"会话 {args.session_id} 不存在，将创建新会话。", file=sys.stderr)
-            session = session_manager.create_session(channel="chat")
-        else:
-            session_manager.touch_session(session.session_id, channel="chat")
-            print(f"已恢复会话: {session.session_id}")
-    else:
-        session = session_manager.create_session(channel="chat")
-        print(f"新会话: {session.session_id}")
+            print(
+                f"会话 {args.session_id} 不存在; 显式指定会话必须已存在"
+                f"(不带 --session-id 启动会创建新会话)",
+                file=sys.stderr,
+            )
+            return ""
+        current_user = str(
+            getattr(getattr(session_manager, "config", None), "user_id", "") or ""
+        )
+        if current_user and session.user_id and session.user_id != current_user:
+            print(
+                f"会话 {args.session_id} 属于其他用户({session.user_id}), 无权恢复",
+                file=sys.stderr,
+            )
+            return ""
+        session_manager.touch_session(session.session_id, channel="chat")
+        print(f"已恢复会话: {session.session_id}")
+        return session.session_id
+    session = session_manager.create_session(channel="chat")
+    print(f"新会话: {session.session_id}")
     return session.session_id
 
 
@@ -178,6 +193,10 @@ def cmd_chat(args) -> int:
 
     session_manager = SessionManager(agent.config)
     current_session_id = _setup_session(args, session_manager)
+    if not current_session_id:
+        # 显式指定 session 不存在/跨用户(fail-closed, 双席 seq1968)——已
+        # 报错, 不进入交互循环。
+        return 3
     state, build_history_context = _init_chat_state(agent)
     runtime_inject: list[str] = args.inject or []
     prompt_files: list[str] = args.prompt_file or []
