@@ -3724,6 +3724,12 @@ def _gateway_consume_policy_cas(store: object, policy: ProgressPolicy, *, now: f
 # 封顶 8×4=32 轮仍不完成则停(等用户显式「继续」或改配置), 防无限续烧额度。
 HANDOFF_BUDGET_SEGMENTS = 3
 
+# gateway 接管轮的单轮 wall-clock 上限(双席复核硬门4 seq1903): 模型回合
+# 600s 超时 + 5 次重试(10/25/45/100/180s)组合可挂 ~56 分钟不收口——watchdog
+# 到期中断该轮(结构化终态+释放 claim, 不续写移交单)。1200s 覆盖单回合
+# 慢生成, 同时封顶重试组合的总等待。
+_HANDOFF_ROUND_DEADLINE_SECONDS = 1200
+
 
 def _handoff_budget_exhausted(repo: object, root_run_id: str) -> bool:
     """同 run 已消费移交段数 ≥ 预算 → 预算耗尽(不再领取/续写)。"""
@@ -3824,13 +3830,36 @@ def _run_handoff_continuation(agent: object, handoff: dict, *, now: float) -> No
         continuation_seq=seq + 1,
         user_task=user_prompt,
     )
-    result = agent.run(
-        prompt,
-        params=params,
-        source="gateway",
-        resume_context=True,
-        save=True,
+    # 单轮 wall-clock deadline(双席复核硬门4 seq1903): gateway 后台续跑轮
+    # 此前无执行段级失控护栏——provider 超时+重试组合可挂 45+ 分钟不
+    # 收口(真机 verify-multiround3 attempt-10 坐实)。watchdog 到期调用
+    # interrupt_by_name(幂等, 只中断本 task 命名线程, 不误伤其他 run),
+    # agent.run 收到 InterruptedError → 结构化终态 + 释放, 不续写移交单
+    # (fail-closed)。daemon 线程 + finally cancel 保证正常路径无残留。
+    from ..concurrency.interrupt import interrupt_by_name
+
+    interrupt_name = conversation_request_interrupt_name(root_task_id)
+    watchdog = threading.Timer(
+        _HANDOFF_ROUND_DEADLINE_SECONDS,
+        lambda: interrupt_by_name(interrupt_name),
     )
+    watchdog.daemon = True
+    watchdog.start()
+    try:
+        with register_interruptible(interrupt_name):
+            result = agent.run(
+                prompt,
+                params=params,
+                source="gateway",
+                resume_context=True,
+                save=True,
+            )
+    except InterruptedError:
+        # deadline/watchdog 到期是预期控制流: 该轮被中断, 不续写移交单
+        # (fail-closed 释放——副作用状态可能 UNKNOWN, 不能盲续)。
+        return
+    finally:
+        watchdog.cancel()
     # 接管多轮(2026-08-14 长任务首要约束): gateway 驱动的续跑轮收口后若
     # 仍可续跑(共享 gate), 续写移交单供下个 tick 继续——同一 run 持续
     # 推进, 不截断; tick 每 ~2 分钟一次天然限速, 不风暴。

@@ -1073,3 +1073,60 @@ def test_gateway_consume_rejects_live_gateway_claim(tmp_path):
     )
     po = [p for p in store.list_progress_policies(enabled_only=True) if p.task_id == "task-other2"][0]
     assert _gateway_consume_policy_cas(store, po, now=now) is True
+
+
+def test_handoff_round_deadline_interrupts_and_does_not_rehandoff(tmp_path, monkeypatch):
+    """双席复核硬门4(seq1903): 单轮 wall-clock deadline——gateway 接管轮
+    挂起超时被 interrupt_by_name 中断(InterruptedError) → 不续写移交单
+    (fail-closed 释放), 不留 attempt 永久 running。"""
+    import threading as _threading
+    from types import SimpleNamespace as _NS
+
+    from agent_py_agent.agent.agent_core.runtime.run_params import (
+        run_params_with_request_id,
+    )
+    from agent_py_agent.agent.conversation import runtime as _runtime
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+
+    repo = RuntimeRepository(tmp_path / "home" / "runtime.db")
+    now = 1786003000.0
+    repo.create_continuation_handoff(
+        agent_run_id="", attempt_id="attempt-1", task_run_id="taskrun-d",
+        root_run_id="run-d", root_request_id="req-d", root_thread_id="thread-d",
+        root_task_id="task-d", user_prompt="任务D", continuation_seq=1,
+        reason="max_rounds_reached", now=now,
+    )
+    handoff = repo.pending_continuation_handoffs(limit=10)[0]
+    assert repo.consume_continuation_handoff(handoff["handoff_id"], consumed_by="gw", now=now)
+
+    class _StuckAgent(_FakeRunAgent):
+        def __init__(self, tmp_path):
+            super().__init__(tmp_path)
+            self.subagents = _NS(runtime_db=repo)
+
+        def run(self, prompt, *, params=None, save=False, source="cli_run",
+                resume_context=None, delivery_contract=None, on_chunk=None):
+            self.calls.append(1)
+            # 模拟挂起: 等待中断(InterruptedError)
+            from agent_py_agent.agent.concurrency.interrupt import (
+                interrupt_by_name,
+                register_interruptible,
+            )
+            from agent_py_agent.agent.conversation.control_commands import (
+                conversation_request_interrupt_name,
+            )
+
+            name = conversation_request_interrupt_name("task-d")
+            # 注册后立即触发中断(模拟 deadline 到期)
+            with register_interruptible(name):
+                interrupt_by_name(name)
+                raise InterruptedError("deadline")
+            raise AssertionError("unreachable")
+
+    fake = _StuckAgent(tmp_path)
+    # deadline 常量临时调小不必要——直接验证中断路径: agent.run 抛
+    # InterruptedError 被 _run_handoff_continuation 的 finally 清理,
+    # 且不续写移交单。
+    _runtime._run_handoff_continuation(fake, handoff, now=now)
+    assert fake.calls == [1]  # 执行了(被中断)
+    assert repo.pending_continuation_handoffs(limit=10) == []  # 不续写
