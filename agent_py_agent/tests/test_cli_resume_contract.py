@@ -15,12 +15,19 @@ from agent_py_agent.agent.agent_core.cli_run_conversation import (
     bind_cli_run_conversation,
 )
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 from agent_py_agent.cli.resume_contract import (
     CliContinuationContext,
     continuation_from_params,
+    record_budget_exhausted,
     resume_prompt_for,
     try_claim_cli_resume,
 )
+
+
+@pytest.fixture
+def repo(tmp_path):
+    return RuntimeRepository(tmp_path / "home" / "runtime.db")
 
 
 def _params(**overrides) -> RunParams:
@@ -222,3 +229,87 @@ def test_try_claim_cli_resume_no_policy(tmp_path):
 
     store = ConversationStore(tmp_path / "conv")
     assert try_claim_cli_resume(store, "no-such-task", now=time.time()) is False
+
+
+# ------------------------------------------------- 切片3: 轮/任务终态分层
+
+
+def test_settle_continuation_round_keeps_task_nonterminal(repo):
+    """续跑轮(seq>0) unfinished 不落 failed——任务级非终态由 resume_loop 决定。
+
+    审查意见3: continuation_seq>0 必须绕过 cli_one_shot 的「未完成即 failed」
+    兜底, 区分 round/attempt 终态与 task 终态。
+    """
+    from agent_py_agent.agent.agent_core.runtime_mixin import _settle_main_agent_run
+
+    rec = repo.record_run_creation(owner_id="local/main", goal="g", run_id="run-1", role="main")
+    params = SimpleNamespace(
+        run_id="run-1",
+        attempt_id=rec["attempt_id"],
+        source="cli_run",
+        continuation_seq=1,
+    )
+    result = SimpleNamespace(
+        runtime_status="unfinished",
+        runtime_reason="TOOL_ROUND_LIMIT_REACHED",
+        runtime_source="tool_loop",
+        tool_rounds=9,
+    )
+    _settle_main_agent_run(SimpleNamespace(subagents=SimpleNamespace(runtime_db=repo)), params, result)
+    # run 保持 created(任务级非终态), attempt 不落 failed
+    row = repo._runtime_connect().execute(
+        "SELECT status FROM agent_runs WHERE agent_run_id = ?", (rec["agent_run_id"],)
+    ).fetchone()
+    assert row["status"] == "created"
+    attempts = repo._runtime_connect().execute(
+        "SELECT status FROM agent_attempts WHERE agent_run_id = ?", (rec["agent_run_id"],)
+    ).fetchall()
+    assert all(a["status"] != "failed" for a in attempts)
+
+
+def test_settle_first_round_still_falls_back_failed(repo):
+    """首轮(seq=0) one-shot 兜底保留: unfinished → failed(问题C同族修复不回退)。"""
+    from agent_py_agent.agent.agent_core.runtime_mixin import _settle_main_agent_run
+
+    rec = repo.record_run_creation(owner_id="local/main", goal="g", run_id="run-2", role="main")
+    params = SimpleNamespace(
+        run_id="run-2",
+        attempt_id=rec["attempt_id"],
+        source="cli_run",
+        continuation_seq=0,
+    )
+    result = SimpleNamespace(
+        runtime_status="unfinished",
+        runtime_reason="TOOL_ROUND_LIMIT_REACHED",
+        runtime_source="tool_loop",
+        tool_rounds=7,
+    )
+    _settle_main_agent_run(SimpleNamespace(subagents=SimpleNamespace(runtime_db=repo)), params, result)
+    row = repo._runtime_connect().execute(
+        "SELECT status FROM agent_runs WHERE agent_run_id = ?", (rec["agent_run_id"],)
+    ).fetchone()
+    assert row["status"] == "failed"
+
+
+def test_record_budget_exhausted_event(repo):
+    """预算耗尽写 continuation_budget_exhausted 事件（审查意见5，绝不 DONE）。"""
+    from agent_py_agent.cli.resume_contract import record_budget_exhausted
+
+    rec = repo.record_run_creation(owner_id="local/main", goal="g", run_id="run-3", role="main")
+    agent = SimpleNamespace(subagents=SimpleNamespace(runtime_db=repo))
+    record_budget_exhausted(
+        agent=agent,
+        run_id="run-3",
+        attempt_id=rec["attempt_id"],
+        budget_before=3,
+        budget_after=3,
+        reason="resume_limit_reached",
+    )
+    rows = repo._runtime_connect().execute(
+        "SELECT * FROM runtime_events WHERE event_type = 'continuation_budget_exhausted'"
+    ).fetchall()
+    assert len(rows) == 1
+    payload = rows[0]["payload_json"]
+    assert '"budget_before": 3' in payload
+    assert '"budget_after": 3' in payload
+    assert '"needs_user_continue": true' in payload

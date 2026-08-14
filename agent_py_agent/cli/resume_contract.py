@@ -131,6 +131,49 @@ def try_claim_cli_resume(store: object, task_id: str, *, now: float | None = Non
     return True
 
 
+def record_budget_exhausted(
+    *,
+    agent: object,
+    run_id: str,
+    attempt_id: str,
+    task_run_id: str = "",
+    budget_before: int,
+    budget_after: int,
+    reason: str,
+) -> None:
+    """预算耗尽写 runtime_events continuation_budget_exhausted（fail-silent）。
+
+    2026-08-14 设计 v2 审查意见5: max_rounds/resume_limit 只是预算, 不是
+    成功条件——耗尽时必须写明确事件(含 budget before/after + 原因), 保留
+    首轮与每个 attempt, 绝不输出 DONE。
+    """
+    try:
+        subagents = getattr(agent, "subagents", None)
+        repo = getattr(subagents, "runtime_db", None)
+        if repo is None or not callable(getattr(repo, "append_event", None)):
+            return
+        if not run_id or not attempt_id:
+            return
+        row = repo.agent_run_for_run_id(run_id)
+        if row is None:
+            return
+        repo.append_event(
+            event_type="continuation_budget_exhausted",
+            attempt_id=attempt_id,
+            agent_run_id=str(row["agent_run_id"]),
+            task_run_id=task_run_id,
+            payload={
+                "budget_before": int(budget_before or 0),
+                "budget_after": int(budget_after or 0),
+                "reason": str(reason or ""),
+                "needs_user_continue": True,
+                "stage": "cli_resume_loop",
+            },
+        )
+    except Exception:  # noqa: BLE001 审计落账失败绝不反噬执行路径
+        pass
+
+
 def resume_prompt_for(
     *, continuation_reason: str, continuation_seq: int, user_task: str
 ) -> str:

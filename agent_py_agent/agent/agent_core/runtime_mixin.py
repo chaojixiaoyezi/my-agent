@@ -386,6 +386,7 @@ def _settle_main_agent_run_status(
     runtime_source: str = "",
     tool_rounds: int = 0,
     cli_one_shot: bool = False,
+    continuation_seq: int = 0,
 ) -> None:
     """把主代理 run 的真实终态落进权威审计账本（fail-silent）。
 
@@ -407,12 +408,19 @@ def _settle_main_agent_run_status(
     无 ended_at）。CLI 一次性 run 真实结束即兜底落 failed 终态，原始
     runtime_status/runtime_reason 保留在 payload 证据，绝不写 DONE 撒谎；
     gateway 等可续跑路径行为完全不变。
+
+    2026-08-14 根因3 设计 v2（审查意见3）轮/任务终态分层：**续跑轮**
+    （continuation_seq>0）的 unfinished/blocked 是任务级可恢复语义——由
+    resume_loop 决定是否继续，此处不落 failed（保留任务级非终态）；仅首轮
+    （seq=0）保持 one-shot 兜底。首轮失败账完整保留，续跑轮不覆盖。
     """
     terminal = _RUN_STATUS_ALIASES.get(runtime_status, runtime_status or "")
     if not terminal or terminal in ("", "created", "running"):
         return
     if terminal not in AGENT_RUN_TERMINAL_STATUSES:
-        if cli_one_shot and runtime_status:
+        # 续跑轮非终态不落账（任务级可恢复，resume_loop 决定）;
+        # 仅首轮 one-shot 兜底 failed。
+        if cli_one_shot and runtime_status and int(continuation_seq or 0) <= 0:
             terminal = "failed"
         else:
             return  # R1-03：非终态不落账（unfinished 等），避免 status_conflict 噪音
@@ -456,6 +464,7 @@ def _settle_main_agent_run(agent, params: RunParams, result) -> None:
         runtime_source=str(getattr(result, "runtime_source", "") or "").strip(),
         tool_rounds=int(getattr(result, "tool_rounds", 0) or 0),
         cli_one_shot=_is_cli_run(params),
+        continuation_seq=int(getattr(params, "continuation_seq", 0) or 0),
     )
 
 
