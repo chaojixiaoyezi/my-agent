@@ -421,3 +421,104 @@ def test_run_with_resume_unresumable_stops(tmp_path):
     outcome = run_with_resume(fake, initial_prompt="t", base_params=base, max_rounds=5)
     assert outcome.status == "unresumable"
     assert len(fake.calls) == 1  # 只首轮
+
+
+# ------------------------------------------------- 切片5: 崩溃/双消费者回归
+
+
+def test_claim_mutual_exclusion_second_consumer_skips(tmp_path):
+    """双 consumer：第一个 claim 后第二个在 lease 内跳过（防双跑）。
+
+    审查硬条件2: claim/lease CAS 可审计; 双 consumer 有可复现测试。
+    """
+    import time
+
+    from agent_py_agent.agent.conversation.store import ConversationStore
+
+    store = ConversationStore(tmp_path / "conv")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "u", "channel": "cli_run",
+            "channel_conversation_id": "req-1", "channel_user_id": "u",
+            "owner_id": "local/main", "owner_home": str(tmp_path), "title": "t",
+        }
+    )
+    store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id, "task_id": "task-1",
+            "interval_seconds": 180, "now": time.time(),
+            "metadata": {"kind": "ordinary_task_resume", "resume_used": 0, "resume_limit": 3},
+        }
+    )
+    # consumer A claim
+    assert try_claim_cli_resume(store, "task-1", now=1000.0) is True
+    # consumer B 在 lease 内 → 跳过
+    assert try_claim_cli_resume(store, "task-1", now=1100.0) is False
+    # lease 过期 → B 可接管
+    assert try_claim_cli_resume(store, "task-1", now=1400.0) is True
+
+
+def test_reclaim_after_process_crash(tmp_path):
+    """进程崩溃后 claim 残留：lease 过期即可重 claim（恢复矩阵）。
+
+    审查硬条件4: 进程崩溃、claim 后未建 attempt 有可复现测试。
+    """
+    import time
+
+    from agent_py_agent.agent.conversation.store import ConversationStore
+
+    store = ConversationStore(tmp_path / "conv")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "u", "channel": "cli_run",
+            "channel_conversation_id": "req-1", "channel_user_id": "u",
+            "owner_id": "local/main", "owner_home": str(tmp_path), "title": "t",
+        }
+    )
+    store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id, "task_id": "task-1",
+            "interval_seconds": 180, "now": time.time(),
+            "metadata": {"kind": "ordinary_task_resume", "resume_used": 0, "resume_limit": 3},
+        }
+    )
+    # 进程 A claim 后崩溃(lease 残留)
+    assert try_claim_cli_resume(store, "task-1", now=2000.0) is True
+    # 进程 B 在 lease 内发现残留 → 跳过
+    assert try_claim_cli_resume(store, "task-1", now=2100.0) is False
+    # lease(300s)过期 → 进程 B 可重 claim 继续
+    assert try_claim_cli_resume(store, "task-1", now=2400.0) is True
+
+
+def test_resume_round_attempt_chain(tmp_path):
+    """续跑轮 attempt 链：每轮 attempt_id 递增且 parent 指向上一轮。"""
+    from agent_py_agent.agent.agent_core.runtime.run_params import (
+        run_params_with_request_id,
+    )
+    from agent_py_agent.cli.resume_loop import run_with_resume
+
+    class _ChainAgent(_FakeRunAgent):
+        def run(self, prompt, *, params=None, **kw):
+            seq = int(getattr(params, "continuation_seq", 0) or 0)
+            self.calls.append((seq, str(getattr(params, "attempt_id", "")),
+                               str(getattr(params, "continuation_parent_attempt_id", ""))))
+            if seq == 0:
+                return SimpleNamespace(runtime_status="unfinished",
+                    runtime_reason="TOOL_ROUND_LIMIT_REACHED", runtime_source="tool_loop",
+                    tool_rounds=5, attempt_id="attempt-0")
+            if seq < 2:
+                return SimpleNamespace(runtime_status="unfinished",
+                    runtime_reason="TOOL_ROUND_LIMIT_REACHED", runtime_source="tool_loop",
+                    tool_rounds=5, attempt_id=f"attempt-{seq}")
+            return SimpleNamespace(runtime_status="ok", runtime_reason="",
+                runtime_source="", tool_rounds=2, attempt_id=f"attempt-{seq}")
+
+    fake = _ChainAgent(tmp_path)
+    base = run_params_with_request_id(RunParams(source="cli_run", task_attributes={}))
+    outcome = run_with_resume(fake, initial_prompt="t", base_params=base, max_rounds=5)
+    assert outcome.status == "completed"
+    # 链: 首轮 attempt=自动生成(无 parent) → cont-1 attempt-1 parent=首轮 → cont-2 attempt-2 parent=attempt-1
+    seq0, attempt0, parent0 = fake.calls[0]
+    assert seq0 == 0 and parent0 == ""
+    assert fake.calls[1] == (1, "attempt-1", attempt0)
+    assert fake.calls[2] == (2, "attempt-2", "attempt-1")

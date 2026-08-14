@@ -81,11 +81,14 @@ class ResumeRunOnce:
             thread_id = str(
                 (bound.task_attributes or {}).get("conversation_thread_id") or ""
             )
+            # parent_attempt 记首轮实际 attempt_id(bind 后 run_params 生成),
+            # 续跑轮 apply_to 用它作树形链起点。
             self.ctx = CliContinuationContext(
                 root_task_id=str(bound.task_id or bound.run_id or ""),
                 root_run_id=str(bound.run_id or bound.request_id or ""),
                 root_thread_id=thread_id,
                 root_request_id=str(bound.request_id or ""),
+                parent_attempt_id=str(bound.attempt_id or ""),
             )
             return result, bound
         if self.ctx is None:
@@ -144,6 +147,8 @@ def run_with_resume(
         )
         result, _bound = runner(prompt, seq, attempt_id=f"attempt-{seq}")
         rounds += 1
+        # 每轮后推进契约 parent_attempt：下一轮的 parent = 本轮 attempt
+        runner.ctx = runner.ctx.next(attempt_id=f"attempt-{seq}")
         should, reason = should_resume(result)
         if not should:
             return CliResumeOutcome(
