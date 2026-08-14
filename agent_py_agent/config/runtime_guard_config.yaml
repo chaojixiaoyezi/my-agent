@@ -124,9 +124,12 @@ max_tool_rounds: 5000
 
 # background_max_tool_rounds / background_max_tool_calls_per_round:
 #   内部后台唤醒只是同一任务的一次有界续跑切片，不应在一次 claim 内无限读取。
-#   默认最多 32 个模型工具轮、每轮执行前 4 个调用；未执行调用会留下明确回执，
+#   2026-08-14 owner 决策: 产品定位无人值守长任务(复刻/大型项目), 后台切片轮数
+#   与前台对齐为等效不限制(5000), 不再让 32 轮卡死长任务后台续跑; 防失控仍由
+#   repeated_failure_halt/unknown_command_budget/compact 防抖兜底, 5000 只是真失控
+#   死循环的最后硬顶。每轮执行前 4 个调用；未执行调用会留下明确回执，
 #   任务仍由同一持久会话和进度策略续接。真实用户新消息与到点计划任务不套此上限。
-background_max_tool_rounds: 32
+background_max_tool_rounds: 5000
 background_max_tool_calls_per_round: 4
 
 # runner_failure_retry_limit:

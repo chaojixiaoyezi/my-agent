@@ -989,15 +989,29 @@ class ShellTool(BaseTool):
                 "process": process_facts,
             },
             error_code="" if ok else error_code,
-            effect_outcome=self._failure_effect_outcome(command, ok, error_code),
+            effect_outcome=self._failure_effect_outcome(
+                command, ok, error_code, output, process_facts
+            ),
         )
 
     @staticmethod
-    def _failure_effect_outcome(command: str, ok: bool, error_code: str) -> str:
+    def _failure_effect_outcome(
+        command: str,
+        ok: bool,
+        error_code: str,
+        output: str = "",
+        process_facts: dict[str, object] | None = None,
+    ) -> str:
         """失败时声明副作用状态(长期助手 三态,判定层只认结构化信号):
 
         - 命令完整退出且是只读命令(analyze_command resolved_effect=read_only,如 grep/
           ls/diff)→ not_started:失败是明确的,重做安全,不再说成「结果不确定」。
+        - command not found(exit 127, shell 从未 exec 任何目标)→ not_started:
+          2026-08-14 ④类复刻真机实证——tar 未安装时 0.15s 立即失败(exit 127),
+          被归「副作用结果不确定」,模型拿不到真实原因只能请求人工核验,任务死。
+          exit 127 是 shell 的结构化事实:目标命令不存在,进程从未启动,零副作用
+          可证明;错误文本(command not found)是 shell 的固定契约输出,不是模型
+          自由文本,结构化匹配安全。
         - 超时 → unknown:进程可能部分生效,防重做(保持)。
         - 写命令失败 → 不声明:沿通用错误合同保守判 unknown(防重复副作用)。
         """
@@ -1007,6 +1021,14 @@ class ShellTool(BaseTool):
             return "unknown"
         if error_code != "COMMAND_FAILED":
             return ""
+        # exit 127 + shell 固定契约文本 → command not found,进程从未启动。
+        # 缺 output/process_facts(旧调用点)时保守不声明,沿通用合同。
+        if (
+            isinstance(process_facts, dict)
+            and int(process_facts.get("return_code") or 0) == 127
+            and "command not found" in (output or "")
+        ):
+            return "not_started"
         try:
             analysis = analyze_command(command)
         except Exception:  # noqa: BLE001 - 判定失败时保守不声明,沿通用合同
