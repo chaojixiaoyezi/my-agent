@@ -5406,3 +5406,44 @@ def _agent_config_int(config: object | None, key: str) -> int:
         return max(0, int(getattr(config, key)))
     except (TypeError, ValueError):
         return default_config_int(key, minimum=0)
+
+
+# ---------------------------------------------------------------------------
+# 共享续跑 gate(2026-08-14 根因3 设计 v2, 审查意见2): gateway 调度器与 CLI
+# resume_loop 用同一判断, 杜绝两份逻辑漂移。纯结构化, 禁 NL 匹配。
+
+
+# 可续跑收口 reason 白名单(与 _schedule_typed_unfinished_continuation 同一
+# gate 分支): 任务未完成、预算内可自动续跑。EXHAUSTED 变体(收益递减/硬门)
+# 不在此列, 等用户介入。
+CONTINUABLE_REASONS = frozenset(
+    {
+        "TASK_PROGRESS_OPEN",
+        "TOOL_ROUND_LIMIT_REACHED",
+        "REPEATED_TOOL_FAILURE",
+    }
+)
+
+
+def should_continue_task(final_response: object) -> tuple[bool, str]:
+    """判断一次收口后任务是否应自动续跑(结构化)。
+
+    返回 (should, reason): should=True 表示收口是可续跑族(unfinished 返工门
+    或 CONTINUABLE_REASONS), CLI resume_loop 据此续跑; blocked/协议违规/
+    UNKNOWN effect 等一律 False(恢复矩阵 truth table, 审查意见6)。
+
+    与 _finalization_service._schedule_typed_unfinished_continuation 的 gate
+    分支同一条精确条件: 返工门 unfinished 族 + 三个可续跑 reason。
+    """
+    reason = str(getattr(final_response, "runtime_reason", "") or "").strip().upper()
+    gate_unfinished = (
+        str(getattr(final_response, "runtime_source", "") or "").strip()
+        == "required_action_completion_gate"
+        and str(getattr(final_response, "runtime_status", "") or "").strip().lower()
+        == "unfinished"
+    )
+    if reason in CONTINUABLE_REASONS:
+        return True, reason
+    if gate_unfinished:
+        return True, "REQUIRED_ACTION_HAS_NO_EVIDENCE"
+    return False, reason or "not_continuable"

@@ -77,6 +77,60 @@ def continuation_from_params(params: RunParams) -> CliContinuationContext | None
     )
 
 
+# CLI 消费续跑 policy 的互斥 lease(2026-08-14 设计 v2 审查意见2):
+# gateway 调度器与 CLI resume_loop 可能同时扫描同一 policy——CLI 消费前
+# 先写 metadata.cli_claim(带时间戳), 已 claim 且 lease 未过期则跳过;
+# gateway 不读此标记(它仍是权威调度器), 但 CLI 侧保证自己不与 gateway
+# 双跑同一 task(CLI 只在首轮收口后立即续跑, 竞争窗口极窄)。
+_CLI_RESUME_LEASE_SECONDS = 300
+
+
+def try_claim_cli_resume(store: object, task_id: str, *, now: float | None = None) -> bool:
+    """尝试独占消费某 task 的续跑 policy(CLI 侧, CAS 语义)。
+
+    返回 True=可续跑(未 claim 或 lease 已过期); False=已被其他 consumer
+    持有(CLI 跳过本轮, 等 gateway/下次)。
+    """
+    import time as _time
+
+    current = now if now is not None else _time.time()
+    try:
+        policies = store.list_progress_policies(enabled_only=True)
+    except Exception:  # noqa: BLE001 读不到 policy 不阻断(无 policy=无可续跑)
+        return False
+    matching = [
+        p for p in policies if p.task_id == task_id
+        and str((p.metadata or {}).get("kind") or "") == "ordinary_task_resume"
+    ]
+    if not matching:
+        return False
+    policy = matching[0]
+    metadata = dict(policy.metadata or {})
+    claimed_at = metadata.get("cli_claim_at")
+    try:
+        claimed_at = float(claimed_at) if claimed_at else 0.0
+    except (TypeError, ValueError):
+        claimed_at = 0.0
+    if claimed_at > 0 and current - claimed_at < _CLI_RESUME_LEASE_SECONDS:
+        return False  # 已被 CLI 自己(或并发 consumer) claim, lease 未过期
+    metadata["cli_claim_at"] = current
+    metadata["cli_claim_owner"] = "cli_resume_loop"
+    try:
+        # mark_progress_reported 支持 metadata_updates(续跑预算递增同款
+        # 更新路径)——claim 标记写同一 policy 文件, 与预算记账同权威。
+        store.mark_progress_reported(
+            policy.policy_id,
+            now=current,
+            metadata_updates={
+                "cli_claim_at": current,
+                "cli_claim_owner": "cli_resume_loop",
+            },
+        )
+    except Exception:  # noqa: BLE001 CAS 失败保守跳过
+        return False
+    return True
+
+
 def resume_prompt_for(
     *, continuation_reason: str, continuation_seq: int, user_task: str
 ) -> str:

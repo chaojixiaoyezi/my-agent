@@ -19,6 +19,7 @@ from agent_py_agent.cli.resume_contract import (
     CliContinuationContext,
     continuation_from_params,
     resume_prompt_for,
+    try_claim_cli_resume,
 )
 
 
@@ -148,3 +149,76 @@ def test_bind_cli_run_conversation_continuation_reuses_thread(tmp_path):
     ]
     assert len(cont_msgs) == 1
     assert cont_msgs[0].metadata["continuation_seq"] == 1
+
+
+# ------------------------------------------------- 切片2: 共享 gate + claim 互斥
+
+
+def test_should_continue_task_truth_table():
+    """可续跑族与不可续跑族 truth table（审查意见6）。"""
+    from agent_py_agent.agent.conversation.runtime import should_continue_task
+
+    continuable = [
+        ("TOOL_ROUND_LIMIT_REACHED", "tool_loop", "unfinished"),
+        ("TASK_PROGRESS_OPEN", "tool_loop", "unfinished"),
+        ("REPEATED_TOOL_FAILURE", "tool_loop", "unfinished"),
+        ("REQUIRED_ACTION_HAS_NO_EVIDENCE", "required_action_completion_gate", "unfinished"),
+    ]
+    not_continuable = [
+        ("PROTOCOL_VIOLATION", "tool_protocol_adapter", "blocked"),
+        ("TOOL_OPERATION_OUTCOME_UNKNOWN", "tool_loop", "unfinished"),
+        ("BLOCKED", "x", "blocked"),
+        ("", "x", "ok"),
+        ("REQUIRED_ACTION_HAS_NO_EVIDENCE", "other_source", "unfinished"),
+    ]
+    for reason, source, status in continuable:
+        resp = SimpleNamespace(runtime_reason=reason, runtime_source=source, runtime_status=status)
+        assert should_continue_task(resp)[0] is True, (reason, source, status)
+    for reason, source, status in not_continuable:
+        resp = SimpleNamespace(runtime_reason=reason, runtime_source=source, runtime_status=status)
+        assert should_continue_task(resp)[0] is False, (reason, source, status)
+
+
+def test_try_claim_cli_resume_mutual_exclusion(tmp_path):
+    """CLI claim 互斥：已 claim 且 lease 未过期 → 跳过；过期后可重 claim。"""
+    import time
+
+    from agent_py_agent.agent.conversation.store import ConversationStore
+
+    store = ConversationStore(tmp_path / "conv")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "u",
+            "channel": "cli_run",
+            "channel_conversation_id": "req-1",
+            "channel_user_id": "u",
+            "owner_id": "local/main",
+            "owner_home": str(tmp_path),
+            "title": "t",
+        }
+    )
+    policy = store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "interval_seconds": 180,
+            "now": time.time(),
+            "metadata": {"kind": "ordinary_task_resume", "resume_used": 0, "resume_limit": 3},
+        }
+    )
+    # 首次 claim 成功
+    assert try_claim_cli_resume(store, "task-1", now=1000.0) is True
+    # lease 未过期（now 未推进 300s）→ 拒绝（防双 consumer）
+    assert try_claim_cli_resume(store, "task-1", now=1100.0) is False
+    # lease 过期 → 可重 claim
+    assert try_claim_cli_resume(store, "task-1", now=1400.0) is True
+
+
+def test_try_claim_cli_resume_no_policy(tmp_path):
+    """无续跑 policy 的 task → 不可续跑。"""
+    import time
+
+    from agent_py_agent.agent.conversation.store import ConversationStore
+
+    store = ConversationStore(tmp_path / "conv")
+    assert try_claim_cli_resume(store, "no-such-task", now=time.time()) is False

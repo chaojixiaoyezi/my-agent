@@ -589,22 +589,16 @@ def _schedule_typed_unfinished_continuation(agent: object, ctx: FinalizeContext)
     if str(attrs.get("conversation_work_kind") or "").strip().lower() == "audit":
         return
     reason = str(getattr(ctx.final_response, "runtime_reason", "") or "").strip().upper()
-    # 修复①（会话内纠正）：返工门捕获「模型自报完成但零执行证据」
-    # （REQUIRED_ACTION_HAS_NO_EVIDENCE 一族，runtime_status=unfinished）→
-    # 预算内自动续跑让模型真实执行；blocked（等用户输入/审批）不续跑避免
-    # 无意义空转。续跑本身受 resume 预算上限约束（ensure_ordinary_task_resume
-    # 的 resume_used vs resume_limit）。
-    gate_unfinished = (
-        str(getattr(ctx.final_response, "runtime_source", "") or "").strip()
-        == "required_action_completion_gate"
-        and str(getattr(ctx.final_response, "runtime_status", "") or "").strip().lower()
-        == "unfinished"
-    )
-    # REPEATED_TOOL_FAILURE:软收口,任务未完成,自动续跑让模型换策略继续;
-    # EXHAUSTED 变体(收益递减/硬门)不在此列,等用户介入。
-    if reason not in {"TASK_PROGRESS_OPEN", "TOOL_ROUND_LIMIT_REACHED", "REPEATED_TOOL_FAILURE"}:
-        if not gate_unfinished:
-            return
+    # 2026-08-14 根因3 设计 v2(审查意见2): gate 判断提取为共享函数
+    # should_continue_task(conversation/runtime.py)——gateway 调度器与 CLI
+    # resume_loop 用同一判断, 杜绝两份逻辑漂移。逻辑与旧内联 gate 完全等价:
+    # 返工门 unfinished 族 + {TASK_PROGRESS_OPEN, TOOL_ROUND_LIMIT_REACHED,
+    # REPEATED_TOOL_FAILURE}; blocked/协议违规/UNKNOWN 不续跑。
+    from ..conversation.runtime import should_continue_task
+
+    should, _reason = should_continue_task(ctx.final_response)
+    if not should:
+        return
     from ..conversation.runtime import (
         ensure_goal_progress_continuation,
         ensure_ordinary_task_resume,
