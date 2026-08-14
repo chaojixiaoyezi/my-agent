@@ -787,3 +787,63 @@ def test_gateway_suppresses_cli_claimed_policy(tmp_path):
     )
     other = [p for p in store.list_progress_policies(enabled_only=True) if p.task_id == "task-other"][0]
     assert _progress_policy_suppression_reason(store, other, now=now) == ""
+
+
+def test_gateway_execute_cas_aborted_when_cli_claims_in_window(tmp_path):
+    """双席复核硬门1(seq1845): gateway 读到"未 claim"后、执行前 CLI 写入
+    claim 的竞态窗口——gateway 执行前 CAS 领取被 aborted(不执行),
+    双向互斥闭合。CLI lease 过期后 gateway 可领取执行。"""
+    import time as _time
+
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+    from agent_py_agent.agent.conversation.runtime import _gateway_consume_policy_cas
+    from agent_py_agent.agent.conversation.store import ConversationStore
+    from agent_py_agent.cli.resume_contract import try_claim_cli_resume
+
+    store = ConversationStore(tmp_path / "conv")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "u", "channel": "cli_run",
+            "channel_conversation_id": "req-race", "channel_user_id": "u",
+            "owner_id": "local/main", "owner_home": str(tmp_path), "title": "t",
+        }
+    )
+    store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id, "task_id": "task-race",
+            "interval_seconds": 180, "now": _time.time(),
+            "metadata": {"kind": "ordinary_task_resume", "resume_used": 0, "resume_limit": 3},
+        }
+    )
+    policy = store.list_progress_policies(enabled_only=True)[0]
+    now = _time.time()
+    # 竞态窗口: gateway 读检查通过(未 claim) → CLI 先写入 claim
+    assert _gateway_consume_policy_cas(store, policy, now=now) is True  # gateway 领取
+    assert try_claim_cli_resume(store, "task-race", now=now) is False  # CLI 被 gateway 挡
+    # 反过来: CLI 先 claim → gateway 执行前 CAS 被 aborted
+    store2 = ConversationStore(tmp_path / "conv")
+    store2.set_progress_policy(
+        {
+            "thread_id": thread.thread_id, "task_id": "task-race2",
+            "interval_seconds": 180, "now": now,
+            "metadata": {"kind": "ordinary_task_resume", "resume_used": 0, "resume_limit": 3},
+        }
+    )
+    p2 = [p for p in store2.list_progress_policies(enabled_only=True) if p.task_id == "task-race2"][0]
+    assert try_claim_cli_resume(store2, "task-race2", now=now) is True  # CLI 先 claim
+    assert (
+        _gateway_consume_policy_cas(store2, p2, now=now) is False
+    )  # gateway 执行前被 aborted, 不双跑
+    # lease 过期后 gateway 可领取(CLI 崩溃/退出接管)
+    later = now + 400
+    assert _gateway_consume_policy_cas(store2, p2, now=later) is True
+    # 非 ordinary 类型不受互斥影响
+    store2.set_progress_policy(
+        {
+            "thread_id": thread.thread_id, "task_id": "task-other-race",
+            "interval_seconds": 180, "now": now,
+            "metadata": {"kind": "other_kind"},
+        }
+    )
+    po = [p for p in store2.list_progress_policies(enabled_only=True) if p.task_id == "task-other-race"][0]
+    assert _gateway_consume_policy_cas(store2, po, now=now) is True

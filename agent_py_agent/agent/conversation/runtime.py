@@ -3646,6 +3646,16 @@ def _consume_due_policies(
     for policy in runnable:
         if policy.thread_id in reported:
             continue
+        # 双席复核硬门1(seq1845): suppression 是读检查, gateway「读到未
+        # claim」后、CLI 写入 claim 前选中 policy 的窗口内仍需同一把 CAS
+        # 阻止 gateway 执行。执行前再走一次锁内 CAS 领取(gateway 与 CLI
+        # 同写 consumer/gateway_claim_at, 双向互斥), 领取失败=CLI 已持有
+        # 或已被并发 gateway 领取 → 跳过本轮。
+        if not _gateway_consume_policy_cas(scheduler.store, policy, now=current):
+            scheduler.last_progress_policy_suppressed.append(
+                (policy, "cli_claim_held_before_execute")
+            )
+            continue
         report = _consume_with_supply_guard(
             scheduler._supply_backoff,
             policy.thread_id,
@@ -3654,6 +3664,48 @@ def _consume_due_policies(
         )
         if report:
             reports.append(report)
+
+
+def _gateway_consume_policy_cas(store: object, policy: ProgressPolicy, *, now: float) -> bool:
+    """gateway 执行前的锁内 CAS 领取(与 CLI claim 双向互斥)。
+
+    2026-08-14 双席复核硬门1(seq1845 memory steward): 旧实现只有
+    _progress_policy_suppression_reason 的读检查——gateway 在读到"未
+    claim"后、CLI 写入 claim 前已选中 policy 的竞态窗口内, 无同一把
+    policy CAS 阻止 gateway 继续执行。此函数用 update_progress_policy_
+    atomic(flock 锁内读-改-写)在真正执行前做最终确认:
+    - CLI 的 cli_claim_at 在 lease 内 → updater 返回 None → aborted →
+      放弃执行(cli_claim_held_before_execute)
+    - 无 CLI claim / 已过期 → 写 consumer=gateway_scheduler +
+      gateway_claim_at(与 CLI 同文件锁, 双向互斥) → 放行
+    非 ordinary_task_resume 的 policy 不走续跑互斥(原样放行)。
+    """
+    from dataclasses import replace as _replace
+
+    if str((policy.metadata or {}).get("kind") or "") != "ordinary_task_resume":
+        return True
+    updater = getattr(store, "update_progress_policy_atomic", None)
+    if not callable(updater):
+        return True  # 无 CAS 能力的 store(fake/旧版) 保守放行
+
+    def _cas_consume(current_policy: ProgressPolicy):
+        metadata = dict(current_policy.metadata or {})
+        claimed_at = metadata.get("cli_claim_at")
+        try:
+            claimed_at = float(claimed_at) if claimed_at else 0.0
+        except (TypeError, ValueError):
+            claimed_at = 0.0
+        if claimed_at > 0 and now - claimed_at < CLI_RESUME_LEASE_SECONDS:
+            return None  # CLI 持有: 放弃(gateway 不并发消费)
+        metadata["consumer"] = "gateway_scheduler"
+        metadata["gateway_claim_at"] = now
+        return _replace(current_policy, metadata=metadata)
+
+    try:
+        _updated, _changed, aborted = updater(policy.policy_id, _cas_consume)
+    except Exception:  # noqa: BLE001 领取失败保守放弃(不双跑)
+        return False
+    return not aborted
 
 
 class _BackgroundSchedulerTickMixin:

@@ -3179,24 +3179,28 @@ class ConversationProgressStore(ConversationWakeStore):
         self,
         policy_id: str,
         updater: Callable[[ProgressPolicy], ProgressPolicy | None],
-    ) -> tuple[ProgressPolicy | None, bool]:
+    ) -> tuple[ProgressPolicy | None, bool, bool]:
         """锁内 CAS 更新一个进度策略（flock 跨进程互斥，读-改-写原子）。
 
         2026-08-14 双席复核硬门1（严格 CAS）：try_claim_cli_resume 此前是
         先读 policy、再 write_json_file_atomic——两个 CLI/gateway 消费者
         并发时读-改-写窗口内互相覆盖，无 expected-version 比对。此方法用
         gateway_parts.io 的 update_json_file_atomic（fcntl.flock 锁内
-        读-改-写）保证同文件系统内任意消费者的原子互斥：updater 返回
-        None = 条件不满足不落盘；返回 policy 且内容有实际变更 = CAS 成功。
-        返回值 (policy, changed)：changed=True 表示锁内比对后真正写盘。
+        读-改-写）保证同文件系统内任意消费者的原子互斥。
+        返回值 (policy, changed, aborted)：
+        - aborted=True = updater 返回 None（条件不满足，明确放弃，不落盘）
+        - changed=True = 锁内比对后内容真正写盘
+        - policy=None = 查无此 policy（require_existing 失败）
         """
         changed = False
+        aborted = False
 
         def _wrap(current: dict[str, Any]) -> dict[str, Any]:
-            nonlocal changed
+            nonlocal changed, aborted
             policy = ProgressPolicy.from_dict(current)
             updated = updater(policy)
             if updated is None:
+                aborted = True
                 return current  # 条件不满足: 原样返回, 内容无变更
             result = updated.to_dict()
             changed = result != current
@@ -3209,8 +3213,8 @@ class ConversationProgressStore(ConversationWakeStore):
                 require_existing=True,
             )
         except (FileNotFoundError, KeyError):
-            return None, False
-        return self.get_progress_policy(policy_id), changed
+            return None, False, False
+        return self.get_progress_policy(policy_id), changed, aborted
 
     def disable_progress_policy(
         self, policy_id: str, *, now: float | None = None

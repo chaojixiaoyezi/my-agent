@@ -127,6 +127,16 @@ def try_claim_cli_resume(store: object, task_id: str, *, now: float | None = Non
             claimed_at = 0.0
         if claimed_at > 0 and current - claimed_at < _CLI_RESUME_LEASE_SECONDS:
             return None  # lease 未过期: 条件不满足, 锁内不写盘(=CAS 失败)
+        # 双向互斥(双席复核硬门1 seq1845): gateway 执行前 CAS 领取写
+        # consumer=gateway_scheduler + gateway_claim_at——CLI 侧同读,
+        # gateway lease 内 CLI 也放弃, 不双跑。
+        gateway_claimed = metadata.get("gateway_claim_at")
+        try:
+            gateway_claimed = float(gateway_claimed) if gateway_claimed else 0.0
+        except (TypeError, ValueError):
+            gateway_claimed = 0.0
+        if gateway_claimed > 0 and current - gateway_claimed < _CLI_RESUME_LEASE_SECONDS:
+            return None  # gateway 正在消费(执行前领取未过期)
         metadata["cli_claim_at"] = current
         metadata["cli_claim_owner"] = "cli_resume_loop"
         # 预算语义(双席复核硬门2): 一次 claim 授予整条进程内续跑链——
@@ -139,12 +149,14 @@ def try_claim_cli_resume(store: object, task_id: str, *, now: float | None = Non
         return _replace(current_policy, metadata=metadata)
 
     try:
-        _updated, changed = store.update_progress_policy_atomic(
+        _updated, changed, aborted = store.update_progress_policy_atomic(
             policy.policy_id, _cas_updater
         )
     except Exception:  # noqa: BLE001 CAS 失败保守跳过
         return False
-    return bool(changed)  # 锁内比对后实际写盘=claim 成功
+    if aborted:
+        return False  # updater 明确放弃(lease 内被持有)
+    return True  # 锁内确认后(含幂等重写) claim 成功
 
 
 def record_budget_exhausted(

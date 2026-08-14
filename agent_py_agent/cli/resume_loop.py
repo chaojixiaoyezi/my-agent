@@ -87,14 +87,17 @@ class ResumeRunOnce:
             thread_id = str(
                 (bound.task_attributes or {}).get("conversation_thread_id") or ""
             )
-            # parent_attempt 记首轮实际 attempt_id(bind 后 run_params 生成),
-            # 续跑轮 apply_to 用它作树形链起点。
+            # parent_attempt 记首轮真实 DB attempt(双席复核 seq1845 硬门2:
+            # bound.attempt_id 是 agent.run 前的合成值, agent.run 内部
+            # create_attempt 才发放 DB 权威 attempt——首轮收口后从 DB 查
+            # 真实 attempt 作树形链起点, 不依赖 pre-run 值)。
+            real_first = self._latest_db_attempt()
             self.ctx = CliContinuationContext(
                 root_task_id=str(bound.task_id or bound.run_id or ""),
                 root_run_id=str(bound.run_id or bound.request_id or ""),
                 root_thread_id=thread_id,
                 root_request_id=str(bound.request_id or ""),
-                parent_attempt_id=str(bound.attempt_id or ""),
+                parent_attempt_id=real_first or str(bound.attempt_id or ""),
             )
             return result, bound
         if self.ctx is None:
@@ -129,6 +132,25 @@ class ResumeRunOnce:
         if real_attempt:
             self.ctx = self.ctx.next(attempt_id=real_attempt)
         return result, bound
+
+    def _task_run_id(self) -> str:
+        """从 runtime.db 查当前 agent_run 的 task_run_id（账本完整链）。
+
+        双席复核(seq1847 维护记录): continuation_budget_exhausted 事件此前
+        task_run_id 恒空——attempt/agent_run 有值不等于 task/run/attempt/
+        event ledger 完整闭合。预算事件补齐 task_run_id 后整链可反查。
+        """
+        try:
+            subagents = getattr(self.agent, "subagents", None)
+            repo = getattr(subagents, "runtime_db", None)
+            if repo is None or self.ctx is None:
+                return ""
+            row = repo.agent_run_for_run_id(self.ctx.root_run_id)
+            if row is None:
+                return ""
+            return str(row["task_run_id"] or "")
+        except Exception:  # noqa: BLE001 查不到保守返回空(fail-silent)
+            return ""
 
     def _latest_db_attempt(self) -> str:
         """从 runtime.db 查当前 agent_run 的最新 attempt（DB 权威链）。"""
@@ -208,6 +230,7 @@ def run_with_resume(
                 agent=agent,
                 run_id=runner.ctx.root_run_id,
                 attempt_id=runner.ctx.parent_attempt_id,
+                task_run_id=runner._task_run_id(),
                 budget_before=0,
                 budget_after=0,
                 reason="resume_limit_reached",
@@ -253,6 +276,7 @@ def run_with_resume(
                 agent=agent,
                 run_id=runner.ctx.root_run_id,
                 attempt_id=runner.ctx.parent_attempt_id,
+                task_run_id=runner._task_run_id(),
                 budget_before=rounds - 1,
                 budget_after=rounds,
                 reason="max_rounds_reached",
@@ -265,6 +289,7 @@ def run_with_resume(
         agent=agent,
         run_id=runner.ctx.root_run_id,
         attempt_id=runner.ctx.parent_attempt_id,
+        task_run_id=runner._task_run_id(),
         budget_before=rounds,
         budget_after=rounds,
         reason="resume_limit_reached",
