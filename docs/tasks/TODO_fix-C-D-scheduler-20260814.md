@@ -1,8 +1,9 @@
 # 问题 C/D 修复任务书（2026-08-14，测试真机挖出）
 
-> 测试期间 4 个实证产品问题：A（环境缺 tar，已修）/ B（INVALID_ARGUMENTS 误归
-> UNKNOWN，已修 ceb7d582）/ C（attempt 卡 running 无自愈）/ D（重启丢 processing
-> 请求）。本文档为 C/D 的修复任务书（证据 + 根因方向 + 验证方案），按序独立切片。
+> 测试期间实证产品问题：A（环境缺 tar，已修）/ B（INVALID_ARGUMENTS 误归
+> UNKNOWN，已修 ceb7d582 + 真机闭环）/ C（attempt 卡 running 无自愈，已修
+> 171dcb5e）/ D（重启丢 processing 请求，**2026-08-14 受控复现撤回=误判**——
+> 第4轮 req 实际在 done/，恢复机制正常）。本文档保留 C 的修复记录。
 
 ## 问题 C：solo 任务 attempt 卡 running 零推进且无自愈
 
@@ -48,7 +49,12 @@
 - 真机：复现卡死场景（kill 执行线程模拟）→ 看门狗在 N 分钟内救活/重开
 - 全量 gate + 部署 1.10 + 复跑④类复刻任务
 
-## 问题 D：gateway 重启丢 processing 队列请求
+## 问题 D：gateway 重启丢 processing 队列请求【已撤回 2026-08-14】
+
+> 撤回：受控复现（发请求→立即重启→查四目录）证明 req_1786676643072_75125_0
+> 在 done/（.json+.chunks），test-replicate run 1786676645 已建——重启恢复
+> 机制正常，请求未被丢弃。此前「消失」结论基于 done 目录只查头部的误读。
+> 第4轮真实问题=问题 C（attempt 卡 running），与队列无关。
 
 ### 真机证据（④类第4轮，req_1786676643072_75125_0）
 
