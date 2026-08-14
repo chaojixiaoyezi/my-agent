@@ -591,6 +591,27 @@ def test_deterministic_handler_failure_operation_status_failed(
     assert _operation_status_for_result(result) == "failed"
 
 
+def test_owner_quota_unavailable_deterministic_failure_failed() -> None:
+    """问题B同族(2026-08-14 真机, bs4 复刻): write_file 因 owner 配额无法
+    可靠读取 fail-closed(OWNER_QUOTA_UNAVAILABLE, 副作用零发生)必须终态 FAILED
+    而非 UNKNOWN——修复前归 UNKNOWN 禁止自动重试, bs4 最后一笔 write_file
+    (fix5.py)因此卡死到轮限(真机 outcome_json=effect_outcome_unknown:
+    OWNER_QUOTA_UNAVAILABLE)。归 FAILED 后模型可如实报告/换策略, 不再哑卡。
+    """
+    from agent_py_agent.agent.tooling._filesystem_read import owner_quota_error_result
+    from agent_py_agent.agent.tooling.tool_operation_coordinator import (
+        _operation_status_for_result,
+    )
+
+    outcome = owner_quota_error_result(
+        "write_file", RuntimeError("owner disk usage scan failed")
+    )
+    assert outcome.error_code == "OWNER_QUOTA_UNAVAILABLE"
+    # 与 TOOL_INVALID_ARGUMENTS 同族: 执行前确定性失败(retryable)即使
+    # execute_authorized_tool 标了 handler_executed=True 也终态 FAILED。
+    assert _operation_status_for_result(outcome) == "failed"
+
+
 def test_explicit_process_working_dir_overrides_selected_task_root(tmp_path: Path) -> None:
     task_root = tmp_path / "task"
     explicit = task_root / "output" / "project"

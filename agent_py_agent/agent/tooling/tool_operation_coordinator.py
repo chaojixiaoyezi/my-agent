@@ -651,6 +651,15 @@ def _operation_status_for_result(result: ToolHandlerOutcome) -> str:
 # category=tool+retryable(+REPAIR_TOOL_ARGUMENTS), 但它们「可能已生效」
 # 必须保持 UNKNOWN(禁止自动重试)。白名单=只含校验阶段专属码, 新增校验码
 # 须同步登记(漏登=保守回 UNKNOWN, 安全方向)。
+#
+# OWNER_QUOTA_UNAVAILABLE(2026-08-14 真机, bs4 复刻): owner 配额无法可靠读取
+# 时写入 fail-closed、副作用零发生(owner_quota_error_result 在触碰任何文件前
+# 显式拒绝), taxonomy=state/retryable——与 TOOL_INVALID_ARGUMENTS 同属「执行前
+# 确定性失败」族。修复前归 UNKNOWN → 禁止自动重试 → bs4 最后一笔 write_file
+# (fix5.py)因此卡死到轮限(真机 outcome_json=effect_outcome_unknown:
+# OWNER_QUOTA_UNAVAILABLE)。归 FAILED 后模型可如实报告/换策略, 不再哑卡。
+# OWNER_DISK_QUOTA_EXCEEDED 同样 fail-closed, 但 taxonomy retryable=False,
+# 由 effect_outcome/其他路径裁决, 不进本白名单(retryable 门保持)。
 _PRE_HANDLER_DETERMINISTIC_CODES = frozenset(
     {
         "TOOL_INVALID_ARGUMENTS",
@@ -659,6 +668,7 @@ _PRE_HANDLER_DETERMINISTIC_CODES = frozenset(
         "PATH_NOT_FOUND",
         "WRITE_FORBIDDEN",
         "PERSONA_WRITE_REQUIRES_TOOL",
+        "OWNER_QUOTA_UNAVAILABLE",
     }
 )
 
