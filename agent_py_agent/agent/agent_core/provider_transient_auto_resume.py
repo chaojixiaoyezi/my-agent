@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import TypeVar
 
 from ..backends import is_provider_recoverable_error, is_provider_transient_error
-from ..concurrency.interrupt import wait_interruptibly
+from ..concurrency.interrupt import is_interrupted, wait_interruptibly
 from ..concurrency.retry import apply_retry_jitter
 from ..settings.runtime_guard_config import RuntimeGuardPolicy, runtime_guard_data
 
@@ -55,13 +55,27 @@ def run_with_provider_transient_auto_resume(
 ) -> _T:
     delays = provider_transient_retry_delays(policy)
     for attempt, delay in enumerate(delays, start=1):
+        _raise_if_interrupted()
         try:
             return operation()
+        except InterruptedError:
+            raise  # 用户/任务中断绝不重试: 中断标记必须被消费, 不能进入退避重连
         except Exception as exc:
             _raise_unless_provider_transient(exc)
             # 配置阶梯+随机抖动(批3):多实例同撞限流时错峰重试,防共振雪崩。
             _wait_before_retry(on_chunk, _RetryNotice(attempt, len(delays), apply_retry_jitter(delay), exc))
+            _raise_if_interrupted()
+    _raise_if_interrupted()
     return operation()
+
+
+# LLM: 重试/退避循环必须检查任务中断(2026-08-14 真机, gateway 后台接管轮挂起):
+#   watchdog interrupt_by_name 只会标记已登记的线程, 而 guard worker 由
+#   _interrupt_generation_worker 显式 set_interrupt——本循环每轮开跑前/退避后
+#   都检查 is_interrupted(), 让中断标记被消费而不是在断流→退避→重连里空转。
+def _raise_if_interrupted() -> None:
+    if is_interrupted():
+        raise InterruptedError("provider 重试循环已收到任务中断, 停止重试")
 
 
 # LLM: 可重试判定升级(批3 2-1 收口):typed transient 之外,经分类器

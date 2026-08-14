@@ -225,6 +225,74 @@ def test_provider_incomplete_response_fails_fast_without_replaying_turn(monkeypa
     assert waits == []
 
 
+def test_provider_transient_never_retries_interrupted(monkeypatch) -> None:
+    """中断绝不重试: InterruptedError 立即上抛, 不进退避/重连。
+
+    2026-08-14 真机(gateway 后台接管轮挂起根因之一): 重试循环 `except Exception`
+    曾把 InterruptedError 吞掉并按 transient 分类重试, 中断标记无人消费 →
+    attempt 挂 25-70 分钟不收口。
+    """
+
+    calls = 0
+    waits: list[float] = []
+
+    def operation() -> None:
+        nonlocal calls
+        calls += 1
+        raise InterruptedError("模型接口流式请求已被用户停止")
+
+    monkeypatch.setattr(provider_transient_auto_resume, "wait_interruptibly", waits.append)
+    monkeypatch.setattr(
+        provider_transient_auto_resume,
+        "provider_transient_retry_delays",
+        lambda _policy=None: (10.0, 25.0),
+    )
+
+    import pytest
+
+    with pytest.raises(InterruptedError):
+        provider_transient_auto_resume.run_with_provider_transient_auto_resume(operation)
+    assert calls == 1
+    assert waits == [], "中断绝不进入退避等待"
+
+
+def test_provider_transient_retry_consumes_interrupt_checkpoint(monkeypatch) -> None:
+    """重试循环每轮开跑前检查中断标记: 已中断立即上抛, 不再继续重试。
+
+    2026-08-14 真机(gateway 后台接管轮挂起): watchdog interrupt_by_name 立了
+    中断标记, 但断流→退避→重连循环没有中断检查点 → 标记无人消费, 轮子空转。
+    修复后每轮开跑前 _raise_if_interrupted() 消费标记, 立即干净收口。
+    """
+
+    from agent_py_agent.agent.concurrency.interrupt import set_interrupt
+
+    calls = 0
+    waits: list[float] = []
+
+    def operation() -> None:
+        nonlocal calls
+        calls += 1
+        raise ProviderTransientError("HTTP 429: rate limited")
+
+    monkeypatch.setattr(provider_transient_auto_resume, "wait_interruptibly", waits.append)
+    monkeypatch.setattr(
+        provider_transient_auto_resume,
+        "provider_transient_retry_delays",
+        lambda _policy=None: (10.0,),
+    )
+
+    set_interrupt(True)  # 模拟 watchdog 已立中断标记
+    try:
+        import pytest
+
+        with pytest.raises(InterruptedError):
+            provider_transient_auto_resume.run_with_provider_transient_auto_resume(operation)
+    finally:
+        set_interrupt(False)  # 清旗, 不给测试线程留脏状态
+    assert calls == 0, "中断检查点在第一次 attempt 前直接消费, 不开跑"
+    assert waits == []
+
+
 def test_quota_exhaustion_is_persisted_as_manual_recovery_failure_for_subagents() -> None:
     from agent_py_agent.agent.agent_core.subagent_mixin import (
         _subagent_run_failure_type,
