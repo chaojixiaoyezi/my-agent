@@ -3708,6 +3708,96 @@ def _gateway_consume_policy_cas(store: object, policy: ProgressPolicy, *, now: f
     return not aborted
 
 
+def _consume_pending_handoffs(
+    scheduler: object,
+    reports: list[BackgroundMainAgentReport],
+    current: float,
+) -> None:
+    """消费 CLI 显式移交的续跑单(2026-08-14 长任务首要约束)。
+
+    CLI resume_loop 预算耗尽时写 runtime.db continuation_handoffs(owner
+    级共享权威, 不依赖进程 cwd 或入口私有 conversation store——CLI/gateway
+    store 隔离真机坐实导致任务截断)。gateway 调度器每 tick 扫描待接管单:
+    - CAS 领取(consumed_at=0 条件更新)防双消费
+    - 领取成功 → 执行一轮续跑(同一 run 续挂, 身份复用 handoff root)
+    - 执行后若任务仍可续跑, 由 CLI 同款收口路径(或本函数)续写移交单
+    fail-silent: 任何失败不阻断 tick 主流程。
+    """
+    agent = getattr(getattr(scheduler, "runtime", None), "agent", None)
+    repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+    if repo is None or not callable(getattr(repo, "pending_continuation_handoffs", None)):
+        return
+    try:
+        pending = repo.pending_continuation_handoffs(limit=5)
+    except Exception:  # noqa: BLE001 读不到移交单不阻断
+        return
+    for handoff in pending:
+        handoff_id = str(handoff.get("handoff_id") or "")
+        if not handoff_id:
+            continue
+        try:
+            if not repo.consume_continuation_handoff(
+                handoff_id, consumed_by="gateway_scheduler", now=current
+            ):
+                continue  # 已被并发消费者领取
+        except Exception:  # noqa: BLE001 CAS 失败跳过
+            continue
+        try:
+            _run_handoff_continuation(agent, handoff, now=current)
+        except Exception:  # noqa: BLE001 执行失败: 移交单已消费, 任务级非终态
+            # 由现有 lease/orphan 兜底或用户「继续」驱动, 不在此重试风暴
+            pass
+
+
+def _run_handoff_continuation(agent: object, handoff: dict, *, now: float) -> None:
+    """执行一轮 handoff 续跑(gateway 接管, 同一 run 续挂, 与 CLI 续跑轮同款)。
+
+    续跑上下文不依赖 conversation 历史——提示 = resume_prompt_for(user_prompt,
+    reason, seq+1)(唯一权威在 conversation 层), thread 只作审计账本。
+    """
+    from ..agent_core.runtime.loop_models import RunParams
+    from ..agent_core.runtime.run_params import run_params_with_request_id
+
+    del now
+    root_task_id = str(handoff.get("root_task_id") or "")
+    root_run_id = str(handoff.get("root_run_id") or "")
+    root_request_id = str(handoff.get("root_request_id") or "")
+    root_thread_id = str(handoff.get("root_thread_id") or "")
+    user_prompt = str(handoff.get("user_prompt") or "")
+    seq = int(handoff.get("continuation_seq") or 0)
+    reason = str(handoff.get("reason") or "")
+    if not root_task_id or not root_run_id or not user_prompt:
+        return
+    params = run_params_with_request_id(
+        RunParams(
+            source="gateway",
+            request_id=f"{root_run_id}#cont-{seq + 1}",
+            run_id=root_run_id,
+            task_id=root_task_id,
+            task_attributes={},
+            continuation_seq=seq + 1,
+            continuation_root_task_id=root_task_id,
+            continuation_root_run_id=root_run_id,
+            continuation_root_thread_id=root_thread_id,
+            continuation_root_request_id=root_request_id or root_run_id,
+            continuation_parent_attempt_id=str(handoff.get("attempt_id") or ""),
+            continuation_reason=reason,
+        )
+    )
+    prompt = resume_prompt_for(
+        continuation_reason=reason,
+        continuation_seq=seq + 1,
+        user_task=user_prompt,
+    )
+    agent.run(
+        prompt,
+        params=params,
+        source="gateway",
+        resume_context=True,
+        save=True,
+    )
+
+
 class _BackgroundSchedulerTickMixin:
     """Tick orchestration and one durable wake-signal execution."""
 
@@ -3723,6 +3813,7 @@ class _BackgroundSchedulerTickMixin:
         reported = _consume_pending_wake_signals(self, reports, current)
         _consume_observation_batches(self, reports, reported, current)
         _consume_due_policies(self, reports, reported, current)
+        _consume_pending_handoffs(self, reports, current)
         return reports
 
     def _maybe_gc_ledger(self, *, now: float) -> None:
@@ -5495,6 +5586,22 @@ def _agent_config_int(config: object | None, key: str) -> int:
 # gateway 调度器与 CLI resume_loop 同读同一 policy metadata——
 # cli.resume_contract 从此处 import(cli→conversation 方向合法, 反之违规)。
 CLI_RESUME_LEASE_SECONDS = 300
+
+
+def resume_prompt_for(
+    *, continuation_reason: str, continuation_seq: int, user_task: str
+) -> str:
+    """续跑提示：只引用结构化 continuation_reason + 原任务，不含验收语义。
+
+    2026-08-14 设计 v2(审查意见4)：提示词不得出现「代码规模/测试达标」
+    等专项验收词——完成判断只由结构化收口信号 + 预算决定。唯一权威在
+    conversation 层(gate 层): CLI resume_loop 与 gateway handoff 接管
+    用同一构造(cli.resume_contract 反向 import, 避免 RUNTIME_IMPORTS_CLI)。
+    """
+    return (
+        f"【系统续跑 #{continuation_seq}】上一轮因 {continuation_reason} 收口，"
+        f"任务尚未完成。请基于已有进度继续推进原任务：{user_task}"
+    )
 
 
 CONTINUABLE_REASONS = frozenset(

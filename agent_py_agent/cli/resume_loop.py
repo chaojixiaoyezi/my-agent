@@ -172,6 +172,44 @@ class ResumeRunOnce:
             return ""
 
 
+
+def _write_handoff(
+    agent: object,
+    runner: "ResumeRunOnce",
+    *,
+    seq: int,
+    reason: str,
+    user_prompt: str = "",
+) -> None:
+    """显式移交(2026-08-14 长任务首要约束 owner seq1856/steward seq1857):
+    预算耗尽/不可续跑收口时写 runtime.db 待接管移交单——runtime.db 是
+    owner 级共享权威(CLI 与 gateway 同库), gateway 调度器扫描接管续跑,
+    不依赖进程 cwd 或入口私有 conversation store(CLI/gateway store 隔离
+    真机坐实导致任务截断)。fail-silent: 移交失败不阻断执行路径。"""
+    try:
+        subagents = getattr(agent, "subagents", None)
+        repo = getattr(subagents, "runtime_db", None)
+        if repo is None or not callable(getattr(repo, "create_continuation_handoff", None)):
+            return
+        if runner.ctx is None:
+            return
+        repo.create_continuation_handoff(
+            agent_run_id="",
+            attempt_id=runner.ctx.parent_attempt_id,
+            task_run_id=runner._task_run_id(),
+            root_run_id=runner.ctx.root_run_id,
+            root_request_id=runner.ctx.root_request_id,
+            root_thread_id=runner.ctx.root_thread_id,
+            root_task_id=runner.ctx.root_task_id,
+            user_prompt=str(user_prompt or ""),
+            continuation_seq=int(seq or 0),
+            reason=str(reason or ""),
+        )
+    except Exception:  # noqa: BLE001 移交失败保守跳过
+        pass
+
+
+
 def run_with_resume(
     agent: object,
     *,
@@ -235,6 +273,10 @@ def run_with_resume(
                 budget_after=0,
                 reason="resume_limit_reached",
             )
+            _write_handoff(
+                agent, runner, seq=rounds, reason="resume_limit_reached",
+                user_prompt=initial_prompt,
+            )
             return CliResumeOutcome(
                 status="budget_exhausted", rounds=rounds, final_result=result,
                 reason="resume_limit_reached",
@@ -281,6 +323,10 @@ def run_with_resume(
                 budget_after=rounds,
                 reason="max_rounds_reached",
             )
+            _write_handoff(
+                agent, runner, seq=rounds, reason="max_rounds_reached",
+                user_prompt=initial_prompt,
+            )
             return CliResumeOutcome(
                 status="budget_exhausted", rounds=rounds, final_result=result,
                 reason="max_rounds_reached",
@@ -293,6 +339,10 @@ def run_with_resume(
         budget_before=rounds,
         budget_after=rounds,
         reason="resume_limit_reached",
+    )
+    _write_handoff(
+        agent, runner, seq=rounds, reason="resume_limit_reached",
+        user_prompt=initial_prompt,
     )
     return CliResumeOutcome(
         status="budget_exhausted", rounds=rounds, final_result=result,

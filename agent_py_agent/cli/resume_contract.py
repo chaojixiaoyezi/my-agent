@@ -205,12 +205,11 @@ def record_budget_exhausted(
 def resume_prompt_for(
     *, continuation_reason: str, continuation_seq: int, user_task: str
 ) -> str:
-    """续跑提示：只引用结构化 continuation_reason + 原任务，不含验收语义。
+    """续跑提示（唯一权威在 conversation/runtime.py, 此处转发兼容）。"""
+    from ..agent.conversation.runtime import resume_prompt_for as _impl
 
-    2026-08-14 设计 v2（审查意见4）：提示词不得出现「代码规模/测试达标」
-    等专项验收词——完成判断只由结构化收口信号 + 预算决定。
-    """
-    return (
-        f"【系统续跑 #{continuation_seq}】上一轮因 {continuation_reason} 收口，"
-        f"任务尚未完成。请基于已有进度继续推进原任务：{user_task}"
+    return _impl(
+        continuation_reason=continuation_reason,
+        continuation_seq=continuation_seq,
+        user_task=user_task,
     )

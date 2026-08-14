@@ -847,3 +847,78 @@ def test_gateway_execute_cas_aborted_when_cli_claims_in_window(tmp_path):
     )
     po = [p for p in store2.list_progress_policies(enabled_only=True) if p.task_id == "task-other-race"][0]
     assert _gateway_consume_policy_cas(store2, po, now=now) is True
+
+
+def test_continuation_handoff_repository_cas(tmp_path):
+    """handoff 移交单: 创建/待接管查询/幂等创建/CAS 消费防双领。"""
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+
+    repo = RuntimeRepository(tmp_path / "home" / "runtime.db")
+    now = 1786000000.0
+    hid = repo.create_continuation_handoff(
+        agent_run_id="agentrun-1", attempt_id="attempt-1", task_run_id="taskrun-1",
+        root_run_id="run-1", root_request_id="req-1", root_thread_id="thread-1",
+        root_task_id="task-1", user_prompt="原任务", continuation_seq=8,
+        reason="max_rounds_reached", now=now,
+    )
+    assert hid
+    pending = repo.pending_continuation_handoffs(limit=10)
+    assert len(pending) == 1
+    assert pending[0]["root_run_id"] == "run-1"
+    assert pending[0]["user_prompt"] == "原任务"
+    assert pending[0]["continuation_seq"] == 8
+    # 同 seq 幂等: 不重复创建
+    assert (
+        repo.create_continuation_handoff(
+            agent_run_id="agentrun-1", attempt_id="attempt-1", task_run_id="taskrun-1",
+            root_run_id="run-1", root_request_id="req-1", root_thread_id="thread-1",
+            root_task_id="task-1", user_prompt="原任务", continuation_seq=8,
+            reason="max_rounds_reached", now=now,
+        )
+        == ""
+    )
+    # CAS 消费: 第一个成功, 第二个失败(已被领)
+    assert repo.consume_continuation_handoff(hid, consumed_by="gw", now=now + 1) is True
+    assert repo.consume_continuation_handoff(hid, consumed_by="gw2", now=now + 2) is False
+    assert repo.pending_continuation_handoffs(limit=10) == []
+
+
+def test_handoff_write_on_budget_exhausted(tmp_path):
+    """CLI 预算耗尽路径写移交单(长任务显式移交, 不依赖 store 共享)。"""
+    from agent_py_agent.agent.agent_core.runtime.run_params import (
+        run_params_with_request_id,
+    )
+    from agent_py_agent.cli.resume_loop import run_with_resume
+
+    class _ExhaustAgent(_FakeRunAgent):
+        def __init__(self, tmp_path):
+            from types import SimpleNamespace as _NS
+
+            from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+
+            super().__init__(tmp_path)
+            self.subagents = _NS(runtime_db=RuntimeRepository(tmp_path / "home" / "runtime.db"))
+
+        def run(self, prompt, *, params=None, save=False, source="cli_run",
+                resume_context=None, delivery_contract=None, on_chunk=None):
+            seq = int(getattr(params, "continuation_seq", 0) or 0)
+            self.calls.append((seq, str(prompt)[:40]))
+            return SimpleNamespace(
+                runtime_status="unfinished", runtime_reason="TOOL_ROUND_LIMIT_REACHED",
+                runtime_source="tool_loop", tool_rounds=2, attempt_id=f"attempt-{seq}",
+            )
+
+    fake = _ExhaustAgent(tmp_path)
+    base = run_params_with_request_id(
+        RunParams(source="cli_run", task_id="task-handoff", task_attributes={})
+    )
+    # max_rounds=2: 首轮 + 1 续跑轮后预算耗尽 → 写移交单
+    outcome = run_with_resume(fake, initial_prompt="原任务描述", base_params=base, max_rounds=2)
+    assert outcome.status == "budget_exhausted"
+    # 移交单已写(同一 runtime.db, 无 conversation store 依赖)
+    repo = fake.subagents.runtime_db
+    pending = repo.pending_continuation_handoffs(limit=10)
+    assert len(pending) == 1
+    assert pending[0]["user_prompt"] == "原任务描述"
+    assert pending[0]["reason"] == "max_rounds_reached"
+    assert pending[0]["root_task_id"] == "task-handoff"

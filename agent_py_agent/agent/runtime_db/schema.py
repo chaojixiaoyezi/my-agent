@@ -149,6 +149,30 @@ _BASE_RUNTIME_SQL = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_runtime_events_attempt ON runtime_events(attempt_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_runtime_events_type ON runtime_events(event_type, created_at)",
+    # ------------------------------------------------- continuation_handoffs
+    # CLI 自动续跑显式移交(2026-08-14 长任务首要约束, owner seq1856 + steward
+    # seq1857): CLI 预算耗尽/正常收口时写待消费移交单, gateway 调度器扫描
+    # 接管续跑——owner/task 级共享权威(runtime.db, 不依赖进程 cwd 或入口
+    # 私有 conversation store)。consumed_at=0 且 lease 未过期 = 待接管;
+    # consume 是 CAS(consumed_at=0 条件更新)保证不双消费。
+    "CREATE TABLE IF NOT EXISTS continuation_handoffs ("
+    " handoff_id TEXT PRIMARY KEY,"
+    " task_run_id TEXT NOT NULL,"
+    " agent_run_id TEXT NOT NULL,"
+    " attempt_id TEXT NOT NULL,"
+    " root_run_id TEXT NOT NULL DEFAULT '',"
+    " root_request_id TEXT NOT NULL DEFAULT '',"
+    " root_thread_id TEXT NOT NULL DEFAULT '',"
+    " root_task_id TEXT NOT NULL DEFAULT '',"
+    " user_prompt TEXT NOT NULL DEFAULT '',"
+    " continuation_seq INTEGER NOT NULL DEFAULT 0,"
+    " reason TEXT NOT NULL DEFAULT '',"
+    " created_at REAL NOT NULL,"
+    " consumed_at REAL NOT NULL DEFAULT 0,"
+    " consumed_by TEXT NOT NULL DEFAULT ''"
+    ")",
+    "CREATE INDEX IF NOT EXISTS idx_handoffs_pending "
+    " ON continuation_handoffs(consumed_at, created_at)",
     # ---------------------------------------------------------------- R2（G/H 节）
     # ToolOperation 状态机（G.1）：CLAIMED→EXECUTING(CAS handler_started_at)→
     # SUCCEEDED/FAILED/CANCELLED；EXECUTING 后无法证明零副作用一律 UNKNOWN（G.4）。

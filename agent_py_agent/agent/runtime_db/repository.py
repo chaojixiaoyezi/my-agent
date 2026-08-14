@@ -1236,6 +1236,106 @@ class RuntimeRepository(
             conn.commit()
         return conn_row_to_event(self._fetch_event(event_id))
 
+    # ------------------------------------------------ continuation_handoffs
+    # CLI 自动续跑显式移交(2026-08-14 长任务首要约束): 写入待消费移交单,
+    # gateway 调度器 CAS 领取接管续跑。runtime.db 是 owner 级共享权威——
+    # 不依赖进程 cwd 或入口私有 conversation store(CLI/gateway store 隔离
+    # 真机坐实: 预算耗尽后 gateway 看不到 CLI 的 policy, 任务截断)。
+
+    def create_continuation_handoff(
+        self,
+        *,
+        agent_run_id: str,
+        attempt_id: str,
+        task_run_id: str = "",
+        root_run_id: str = "",
+        root_request_id: str = "",
+        root_thread_id: str = "",
+        root_task_id: str = "",
+        user_prompt: str = "",
+        continuation_seq: int = 0,
+        reason: str = "",
+        now: float | None = None,
+    ) -> str:
+        """写一条待接管移交单（同 agent_run+seq 幂等：已存在则跳过）。"""
+        import uuid
+
+        current = now if now is not None else time.time()
+        existing = self.pending_continuation_handoffs(
+            agent_run_id=agent_run_id, limit=10
+        )
+        if any(
+            int(row.get("continuation_seq") or 0) == int(continuation_seq or 0)
+            for row in existing
+        ):
+            return ""
+        handoff_id = uuid.uuid4().hex
+        with self._runtime_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO continuation_handoffs(
+                    handoff_id, task_run_id, agent_run_id, attempt_id,
+                    root_run_id, root_request_id, root_thread_id, root_task_id,
+                    user_prompt, continuation_seq, reason, created_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    handoff_id,
+                    str(task_run_id or ""),
+                    str(agent_run_id or ""),
+                    str(attempt_id or ""),
+                    str(root_run_id or ""),
+                    str(root_request_id or ""),
+                    str(root_thread_id or ""),
+                    str(root_task_id or ""),
+                    str(user_prompt or ""),
+                    int(continuation_seq or 0),
+                    str(reason or ""),
+                    current,
+                ),
+            )
+            conn.commit()
+        return handoff_id
+
+    def pending_continuation_handoffs(
+        self,
+        *,
+        limit: int = 20,
+        agent_run_id: str = "",
+    ) -> list[dict[str, Any]]:
+        """待接管移交单（consumed_at=0），最旧优先。"""
+        with self._runtime_connection() as conn:
+            if agent_run_id:
+                rows = conn.execute(
+                    "SELECT * FROM continuation_handoffs "
+                    "WHERE consumed_at = 0 AND agent_run_id = ? "
+                    "ORDER BY created_at ASC LIMIT ?",
+                    (agent_run_id, int(limit)),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM continuation_handoffs "
+                    "WHERE consumed_at = 0 "
+                    "ORDER BY created_at ASC LIMIT ?",
+                    (int(limit),),
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def consume_continuation_handoff(
+        self, handoff_id: str, *, consumed_by: str, now: float | None = None
+    ) -> bool:
+        """CAS 领取移交单（consumed_at=0 条件更新，防双消费）。"""
+        current = now if now is not None else time.time()
+        with self._runtime_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE continuation_handoffs "
+                "SET consumed_at = ?, consumed_by = ? "
+                "WHERE handoff_id = ? AND consumed_at = 0",
+                (current, str(consumed_by or ""), handoff_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
     def _fetch_event(self, event_id: str) -> sqlite3.Row | None:
         with self._runtime_connection() as conn:
             return conn.execute(
