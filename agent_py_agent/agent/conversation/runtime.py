@@ -3708,6 +3708,25 @@ def _gateway_consume_policy_cas(store: object, policy: ProgressPolicy, *, now: f
     return not aborted
 
 
+# gateway 接管段的预算上限(2026-08-14 长任务防失控): 与 policy resume_limit
+# 同语义——CLI 每段 8 轮(max_rounds)护栏, gateway 接管最多 3 段, 总轮数
+# 封顶 8×4=32 轮仍不完成则停(等用户显式「继续」或改配置), 防无限续烧额度。
+HANDOFF_BUDGET_SEGMENTS = 3
+
+
+def _handoff_budget_exhausted(repo: object, root_run_id: str) -> bool:
+    """同 run 已消费移交段数 ≥ 预算 → 预算耗尽(不再领取/续写)。"""
+    try:
+        row = repo._runtime_connect().execute(
+            "SELECT COUNT(*) AS n FROM continuation_handoffs "
+            "WHERE root_run_id = ? AND consumed_at > 0",
+            (str(root_run_id or ""),),
+        ).fetchone()
+        return int(row["n"] if row is not None else 0) >= HANDOFF_BUDGET_SEGMENTS
+    except Exception:  # noqa: BLE001 查不到保守放行
+        return False
+
+
 def _consume_pending_handoffs(
     scheduler: object,
     reports: list[BackgroundMainAgentReport],
@@ -3734,6 +3753,11 @@ def _consume_pending_handoffs(
     for handoff in pending:
         handoff_id = str(handoff.get("handoff_id") or "")
         if not handoff_id:
+            continue
+        # 预算闸(2026-08-14 防失控): 同 run 已消费移交段数达上限 → 不再接管
+        if _handoff_budget_exhausted(
+            repo, str(handoff.get("root_run_id") or "")
+        ):
             continue
         try:
             if not repo.consume_continuation_handoff(
@@ -3801,6 +3825,12 @@ def _run_handoff_continuation(agent: object, handoff: dict, *, now: float) -> No
     # 推进, 不截断; tick 每 ~2 分钟一次天然限速, 不风暴。
     should, _reason = should_continue_task(result)
     if not should:
+        return
+    # 预算闸: 同 run 已消费段数达上限 → 不续写(等用户显式「继续」)
+    if _handoff_budget_exhausted(
+        getattr(getattr(agent, "subagents", None), "runtime_db", None),
+        root_run_id,
+    ):
         return
     next_reason = str(getattr(result, "runtime_reason", "") or "").strip()
     if not next_reason:

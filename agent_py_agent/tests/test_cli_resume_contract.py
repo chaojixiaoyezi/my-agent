@@ -972,3 +972,59 @@ def test_gateway_handoff_continuation_rewrites_next_handoff(tmp_path):
     assert len(pending) == 1
     assert pending[0]["continuation_seq"] == 10
     assert pending[0]["user_prompt"] == "原任务"
+
+
+def test_handoff_budget_gate_stops_infinite_continuation(tmp_path):
+    """gateway 接管预算闸: 同 run 已消费移交段数达上限(HANDOFF_BUDGET_
+    SEGMENTS) → 不再领取/续写(防无限续烧额度, 等用户显式「继续」)。"""
+    from types import SimpleNamespace as _NS
+
+    from agent_py_agent.agent.agent_core.runtime.run_params import (
+        run_params_with_request_id,
+    )
+    from agent_py_agent.agent.conversation.runtime import (
+        HANDOFF_BUDGET_SEGMENTS,
+        _handoff_budget_exhausted,
+        _run_handoff_continuation,
+    )
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+
+    repo = RuntimeRepository(tmp_path / "home" / "runtime.db")
+    now = 1786002000.0
+    # 预算上限内的移交单(已消费)
+    for i in range(HANDOFF_BUDGET_SEGMENTS):
+        hid = repo.create_continuation_handoff(
+            agent_run_id="", attempt_id=f"attempt-{i}", task_run_id="taskrun-b",
+            root_run_id="run-b", root_request_id="req-b", root_thread_id="thread-b",
+            root_task_id="task-b", user_prompt="任务B", continuation_seq=1 + i,
+            reason="max_rounds_reached", now=now + i,
+        )
+        assert repo.consume_continuation_handoff(hid, consumed_by="gw", now=now + i + 1)
+    assert _handoff_budget_exhausted(repo, "run-b") is True  # 预算耗尽
+    assert _handoff_budget_exhausted(repo, "run-other") is False  # 其他 run 不受影响
+
+    class _BudgetAgent(_FakeRunAgent):
+        def __init__(self, tmp_path):
+            super().__init__(tmp_path)
+            self.subagents = _NS(runtime_db=repo)
+
+        def run(self, prompt, *, params=None, save=False, source="cli_run",
+                resume_context=None, delivery_contract=None, on_chunk=None):
+            self.calls.append(int(getattr(params, "continuation_seq", 0) or 0))
+            return SimpleNamespace(
+                runtime_status="unfinished", runtime_reason="TOOL_ROUND_LIMIT_REACHED",
+                runtime_source="tool_loop", tool_rounds=2, attempt_id="attempt-x",
+            )
+
+    # 预算耗尽后: 即使执行续跑轮也不续写移交单
+    fake = _BudgetAgent(tmp_path)
+    handoff = {
+        "handoff_id": "h", "root_run_id": "run-b", "root_task_id": "task-b",
+        "root_request_id": "req-b", "root_thread_id": "thread-b",
+        "user_prompt": "任务B", "continuation_seq": HANDOFF_BUDGET_SEGMENTS,
+        "reason": "max_rounds_reached", "attempt_id": "attempt-9",
+    }
+    _run_handoff_continuation(fake, handoff, now=now)
+    assert fake.calls == [HANDOFF_BUDGET_SEGMENTS + 1]  # 执行了一轮
+    pending = repo.pending_continuation_handoffs(limit=10)
+    assert pending == []  # 不续写移交单
