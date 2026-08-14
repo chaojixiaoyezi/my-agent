@@ -1393,6 +1393,21 @@ def test_recover_attempt_unknown_releases_lock_and_allows_mount(tmp_path):
     new_attempt = repo.create_attempt(str(rec["agent_run_id"]))
     assert str(new_attempt["attempt_id"]) != attempt_id
     assert str(new_attempt["attempt_id"])
+    # 账链关联(双席边界①): 新 attempt metadata 记 recovered_from_attempt_id,
+    # recovered → 新 attempt 可追溯, 且新 attempt 无 tool ledger 可证未重放
+    new_row = repo._runtime_connect().execute(
+        "SELECT metadata_json FROM agent_attempts WHERE attempt_id = ?",
+        (str(new_attempt["attempt_id"]),),
+    ).fetchone()
+    import json as _json
+    meta = _json.loads(new_row["metadata_json"] or "{}")
+    assert meta.get("recovered_from_attempt_id") == attempt_id
+    # 新 attempt 无工具操作(未重放原 UNKNOWN op)
+    ops = repo._runtime_connect().execute(
+        "SELECT count(*) FROM tool_operations WHERE attempt_id = ?",
+        (str(new_attempt["attempt_id"]),),
+    ).fetchone()
+    assert ops[0] == 0
 
 
 def test_recover_rejects_running_attempt(tmp_path):

@@ -497,13 +497,23 @@ class RuntimeRepository(
             generation = int(run["current_attempt_generation"]) + 1
             old_attempt_id = str(run["current_attempt_id"] or "")
             attempt_id = new_id("attempt_id")
+            # 账链关联(2026-08-15 双席边界①): 最新 attempt 为 recovered(人工
+            # 核对后显式恢复)时, 新 attempt metadata 记 recovered_from_attempt_id
+            # ——recovered → 新 attempt 的关联可追溯, 且可对照新 attempt 的
+            # tool ledger 确认未重放原 UNKNOWN 工具。
+            recovered_from = ""
+            if latest_attempt is not None and \
+                    str(latest_attempt["status"] or "") == ATTEMPT_STATUS_RECOVERED:
+                recovered_from = str(latest_attempt["attempt_id"] or "")
+            meta_json = json.dumps({"recovered_from_attempt_id": recovered_from},
+                                   ensure_ascii=False) if recovered_from else "{}"
             conn.execute(
                 """
                 INSERT INTO agent_attempts(attempt_id, agent_run_id, attempt_generation,
-                                           status, started_at)
-                VALUES(?, ?, ?, 'running', ?)
+                                           status, started_at, metadata_json)
+                VALUES(?, ?, ?, 'running', ?, ?)
                 """,
-                (attempt_id, agent_run_id, generation, now),
+                (attempt_id, agent_run_id, generation, now, meta_json),
             )
             conn.execute(
                 """
