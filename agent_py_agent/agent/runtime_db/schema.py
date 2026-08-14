@@ -155,6 +155,13 @@ _BASE_RUNTIME_SQL = (
     # 接管续跑——owner/task 级共享权威(runtime.db, 不依赖进程 cwd 或入口
     # 私有 conversation store)。consumed_at=0 且 lease 未过期 = 待接管;
     # consume 是 CAS(consumed_at=0 条件更新)保证不双消费。
+    # 原子性语义(双席复核硬门1 seq1906): CLI 收口路径在同一进程内顺序执行
+    # ——budget_exhausted 事件落账 → 移交单写入 → CLI 退出; 单线程无并发
+    # 窗口, 三者顺序原子(任一步失败, 任务保留非终态, gateway 凭 runtime.db
+    # 的 created 状态 + 已落账事件可重建移交——移交单幂等创建兜底)。
+    # claim 释放: CLI 正常退出 = 前台 claim lease 自然过期; gateway 领取
+    # 时同一 policy 锁内 CAS 双向检查(cli_claim_at/gateway_claim_at lease),
+    # 不会与存活 claim 并发执行。
     "CREATE TABLE IF NOT EXISTS continuation_handoffs ("
     " handoff_id TEXT PRIMARY KEY,"
     " task_run_id TEXT NOT NULL,"
