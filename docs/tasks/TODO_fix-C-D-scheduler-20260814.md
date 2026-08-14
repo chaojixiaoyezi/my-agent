@@ -17,23 +17,30 @@
 - **重启 gateway 后仍未自愈**（recover_interrupted_executions 未覆盖此形态，
   重启后无 recover 日志，attempt 保持 running）
 
-### 根因方向（需执行链确认）
+### 根因（2026-08-14 代码链确认）
 
 1. 执行线程异常退出（未捕获异常/线程死）时，attempt 状态机停留在 running——
-   正常路径（done/failed 收口）没走到，异常路径也没有兜底终态化
-2. recover_interrupted_executions（scheduler/repository.py）的重启恢复判据
-   可能只认「进程级中断标记」不认「attempt running 但无执行者」的形态
-3. generation 1+2 双 running 并存——重开（reopen）机制与执行线程死亡叠加，
-   没有 lease/心跳看门狗把死 attempt 终态化
+   正常路径（done/failed 收口）没走到
+2. **精确机制（关键）**：`_reclaim_orphaned_attempts`（conversation/runtime.py:3704，
+   每 5 分钟 tick）已有孤儿回收，但 `reclaim_orphaned_attempt`（repository.py:1125）
+   有 **fail-closed 副作用门**：attempt 有外部副作用 op（apply_patch/write_file 等）
+   且无 effect_key（无法验证幂等）→ **拒自动判 failed，交人工**——第3轮 attempt
+   正因有 apply_patch/write_file 操作被门拦住，回收永不执行 → 永久卡 running
+3. 副作用门拦截是**静默**的（无事件/无标记）——卡死不可见，wake 循环不驱动
+   created run，owner 无感知
+4. recover_interrupted_executions（scheduler 域）只覆盖 scheduler runs，
+   不覆盖 gateway 域 attempt
 
-### 修复方向（真根因）
+### 修复方向（真根因，保持安全）
 
-- **执行心跳/看门狗**：attempt 执行循环在每轮模型调用/工具轮之间更新心跳
-  （attempt 级 last_progress_at）；调度侧（wake/recover 循环）对
-  running 但心跳过期（如 >N 分钟零推进）+ 无活跃执行者（processing 计数）
-  的 attempt 终态化（标 UNKNOWN 触发重开 或 直接 failed）
-- **recover 覆盖扩展**：重启恢复时对 running attempt 且无 in-flight 执行者
-  的一律重开（而不是只认中断标记）
+- **拦截转可见**（治本最小改动）：reclaim 副作用门拦截时不得静默——把
+  attempt 标记为可见待处理（runtime_events 写 orphan_reclaim_blocked 事件 +
+  attempt 标 needs_input 或 run 标 needs_input），让 owner/wake 循环能发现、
+  人工可处理；不再无声卡 running
+- **执行心跳**（可选增强）：attempt 执行循环更新 last_progress_at，wake 循环
+  对 running+心跳过期+无执行者的 attempt 触发 reclaim 扫描（兜底）
+- **recover 覆盖扩展**：重启恢复时对 gateway 域 running attempt 且无 in-flight
+  执行者的一律重开（而不是只认中断标记）
 
 ### 验证方案
 
