@@ -1183,3 +1183,10 @@ def test_orphan_reclaim_nonterminal_ops_writes_visible_event(tmp_path):
     ).fetchall()
     assert len(events) == 1
     assert "nonterminal_ops" in events[0]["payload_json"]
+    # 幂等(双席 seq1947): 再次触发 reclaim 不重复刷事件
+    result2 = repo.reclaim_orphaned_attempt(attempt_id, operator="test", reason="x")
+    assert result2.get("reason") == "nonterminal_ops"
+    events2 = repo._runtime_connect().execute(
+        "SELECT 1 FROM runtime_events WHERE event_type = 'orphan_reclaim_blocked'",
+    ).fetchall()
+    assert len(events2) == 1  # 同 attempt 只写一次

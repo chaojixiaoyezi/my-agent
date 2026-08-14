@@ -1170,20 +1170,28 @@ class RuntimeRepository(
                 # 拦截转可见: 写 runtime_events 审计事件, owner/恢复器可发现并
                 # 人工处理; 不改 fail-closed 语义(外部副作用结果不可知时绝不
                 # 自动收口, 安全意图保持)。
+                # 幂等(双席复核 seq1947): 同 attempt+reason 只写一次, 防
+                # 每 ~5 分钟扫描周期重复刷事件。
                 try:
-                    self.append_event(
-                        event_type="orphan_reclaim_blocked",
-                        attempt_id=attempt_id,
-                        agent_run_id=str(lock["canonical_scope"] or "").removeprefix(
-                            EXEC_LOCK_SCOPE_PREFIX
-                        ),
-                        payload={
-                            "reason": "side_effect_gate",
-                            "operator": str(operator or ""),
-                            "hint": "attempt 有外部副作用且无 effect_key, 自动回收被拒; "
-                                    "请人工核对后处理",
-                        },
-                    )
+                    already = self._runtime_connect().execute(
+                        "SELECT 1 FROM runtime_events WHERE event_type = 'orphan_reclaim_blocked' "
+                        "AND attempt_id = ? AND payload_json LIKE ? LIMIT 1",
+                        (attempt_id, f"%\"reason\": \"side_effect_gate\"%"),
+                    ).fetchone()
+                    if already is None:
+                        self.append_event(
+                            event_type="orphan_reclaim_blocked",
+                            attempt_id=attempt_id,
+                            agent_run_id=str(lock["canonical_scope"] or "").removeprefix(
+                                EXEC_LOCK_SCOPE_PREFIX
+                            ),
+                            payload={
+                                "reason": "side_effect_gate",
+                                "operator": str(operator or ""),
+                                "hint": "attempt 有外部副作用且无 effect_key, 自动回收被拒; "
+                                        "请人工核对后处理",
+                            },
+                        )
                 except Exception:
                     pass  # 事件写入尽力而为, 不改变拦截语义
                 return {"reclaimed": False, "reason": "side_effect_gate"}
@@ -1199,20 +1207,29 @@ class RuntimeRepository(
             # 补可见: 写 runtime_events 审计事件, owner/恢复器可发现并人工
             # 处理(长期助手 同款 unknown 语义: 执行者死亡、副作用是否发生
             # 未知——诚实标注而非永久 running)。
+            # 幂等(双席复核 seq1947 核对点2): 同 attempt+reason 的 blocked
+            # 事件只写一次——孤儿回收每 ~5 分钟一趟, 不幂等会每周期刷一条
+            # 重复事件污染账本。已有同型事件 → 跳过本次写入。
             try:
-                self.append_event(
-                    event_type="orphan_reclaim_blocked",
-                    attempt_id=attempt_id,
-                    agent_run_id=str(lock["canonical_scope"] or "").removeprefix(
-                        EXEC_LOCK_SCOPE_PREFIX
-                    ),
-                    payload={
-                        "reason": "nonterminal_ops",
-                        "operator": str(operator or ""),
-                        "hint": "attempt 含结果未知(UNKNOWN)工具操作, 自动回收被拒; "
-                                "执行者可能已消失但副作用状态不可知——请人工核对后处理",
-                    },
-                )
+                already = self._runtime_connect().execute(
+                    "SELECT 1 FROM runtime_events WHERE event_type = 'orphan_reclaim_blocked' "
+                    "AND attempt_id = ? AND payload_json LIKE ? LIMIT 1",
+                    (attempt_id, f"%\"reason\": \"nonterminal_ops\"%"),
+                ).fetchone()
+                if already is None:
+                    self.append_event(
+                        event_type="orphan_reclaim_blocked",
+                        attempt_id=attempt_id,
+                        agent_run_id=str(lock["canonical_scope"] or "").removeprefix(
+                            EXEC_LOCK_SCOPE_PREFIX
+                        ),
+                        payload={
+                            "reason": "nonterminal_ops",
+                            "operator": str(operator or ""),
+                            "hint": "attempt 含结果未知(UNKNOWN)工具操作, 自动回收被拒; "
+                                    "执行者可能已消失但副作用状态不可知——请人工核对后处理",
+                        },
+                    )
             except Exception:
                 pass  # 事件写入尽力而为, 不改变拦截语义
             return {"reclaimed": False, "reason": "nonterminal_ops"}
