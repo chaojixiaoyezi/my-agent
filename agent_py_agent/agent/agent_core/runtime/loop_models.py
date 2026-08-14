@@ -53,6 +53,9 @@ class RunParams:
     continuation_root_request_id: str = ""
     continuation_parent_attempt_id: str = ""
     continuation_prompt: str = ""
+    # 上一轮收口原因(缺口F, 双席复核 seq1835): 续跑消息结构化 metadata
+    # 的一部分, 系统内部事件可追溯每轮续跑原因, 不依赖提示文本解析。
+    continuation_reason: str = ""
 
 
 @dataclass(frozen=True)

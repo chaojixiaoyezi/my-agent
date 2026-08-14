@@ -286,3 +286,93 @@ def test_gateway_conversation_identity_keeps_existing_workspace_skip(tmp_path) -
         (Path(workspace_root) / "work/state.json").read_text(encoding="utf-8")
     )
     assert state["status"] == "RUNNING"
+
+
+def test_cli_run_continuation_round_is_structured_internal_event(tmp_path) -> None:
+    """缺口F(双席复核 seq1835): 续跑轮消息是 typed continuation event——
+    role=system(不伪装成普通用户请求), metadata 显式记 is_continuation/
+    continuation_seq/continuation_reason/continuation_parent_attempt_id;
+    首轮用户原文 role=user 不受影响, dedupe_key 按轮派生互不破坏。"""
+    agent = _agent(tmp_path)
+    first_params = RunParams(
+        source="cli_run",
+        request_id="request-root",
+        run_id="run-root",
+        task_id="task-root",
+    )
+    bound_first = bind_cli_run_conversation(agent, first_params, "原始用户请求")
+    first_thread_id = bound_first.task_attributes["conversation_thread_id"]
+
+    resume_params = RunParams(
+        source="cli_run",
+        request_id="run-root#cont-1",
+        run_id="run-root",
+        task_id="task-root",
+        continuation_seq=1,
+        continuation_root_task_id="task-root",
+        continuation_root_run_id="run-root",
+        continuation_root_thread_id=first_thread_id,
+        continuation_root_request_id="request-root",
+        continuation_parent_attempt_id="attempt-0",
+        continuation_reason="TOOL_ROUND_LIMIT_REACHED",
+    )
+    bound_resume = bind_cli_run_conversation(
+        agent, resume_params, "【系统续跑 #1】上一轮因 TOOL_ROUND_LIMIT_REACHED 收口…"
+    )
+    assert (
+        bound_resume.task_attributes["conversation_thread_id"] == first_thread_id
+    )  # 同一 thread 复用
+
+    rows = agent.conversation_store.recent_messages(first_thread_id, limit=0)
+    assert [row.role for row in rows] == ["user", "system"]  # 首轮 user + 续跑 system
+    first_entry, resume_entry = rows
+    # 首轮 user 原文不动
+    assert first_entry.content == "原始用户请求"
+    assert first_entry.metadata["dedupe_key"] == "cli_run:request-root:user"
+    assert "is_continuation" not in first_entry.metadata
+    # 续跑轮 typed continuation event
+    assert resume_entry.content.startswith("【系统续跑 #1】")
+    assert resume_entry.metadata["is_continuation"] is True
+    assert resume_entry.metadata["continuation_seq"] == 1
+    assert resume_entry.metadata["continuation_reason"] == "TOOL_ROUND_LIMIT_REACHED"
+    assert resume_entry.metadata["continuation_parent_attempt_id"] == "attempt-0"
+    assert resume_entry.metadata["dedupe_key"] == "cli_run:run-root#cont-1:system"
+    # 结构化身份仍可反查
+    assert resume_entry.metadata["gateway_request_id"] == "run-root#cont-1"
+    assert resume_entry.metadata["run_id"] == "run-root"
+    assert resume_entry.metadata["task_id"] == "task-root"
+
+
+def test_cli_run_continuation_event_not_consumed_as_user_request(tmp_path) -> None:
+    """缺口F(双席复核 seq1835): 续跑 system 事件不被当成用户请求——
+    role=user 是记忆/curator 等消费方的用户证据过滤条件, 续跑消息
+    role=system 时按 role=user 收集的用户消息数不因续跑轮增加。"""
+    agent = _agent(tmp_path)
+    first_params = RunParams(
+        source="cli_run",
+        request_id="request-root-b",
+        run_id="run-root-b",
+        task_id="task-root-b",
+    )
+    bound_first = bind_cli_run_conversation(agent, first_params, "用户原文")
+    first_thread_id = bound_first.task_attributes["conversation_thread_id"]
+
+    resume_params = RunParams(
+        source="cli_run",
+        request_id="run-root-b#cont-1",
+        run_id="run-root-b",
+        task_id="task-root-b",
+        continuation_seq=1,
+        continuation_root_task_id="task-root-b",
+        continuation_root_run_id="run-root-b",
+        continuation_root_thread_id=first_thread_id,
+        continuation_root_request_id="request-root-b",
+        continuation_parent_attempt_id="attempt-0",
+        continuation_reason="TOOL_ROUND_LIMIT_REACHED",
+    )
+    bind_cli_run_conversation(agent, resume_params, "【系统续跑 #1】…")
+
+    rows = agent.conversation_store.recent_messages(first_thread_id, limit=0)
+    user_roles = [row for row in rows if row.role == "user"]
+    assert len(user_roles) == 1  # 只有首轮用户原文, 续跑轮不增 user
+    assert user_roles[0].content == "用户原文"

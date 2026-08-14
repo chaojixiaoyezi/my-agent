@@ -63,10 +63,16 @@ def bind_cli_run_conversation(agent: object, params: object, user_prompt: str):
         )
     # 2026-08-14 根因3 设计 v2(审查意见1): 续跑轮复用同一 conversation
     # thread(root channel id), 不因 request_id=root#cont-N 建新 thread——
-    # channel_conversation_id 用 root request_id, 消息带 is_continuation
-    # 标记, 不伪装成普通用户请求。
+    # channel_conversation_id 用 root request_id。
     continuation_seq = int(getattr(params, "continuation_seq", 0) or 0)
     continuation = continuation_seq > 0
+    # 缺口F(双席复核 seq1835): 续跑消息是带结构化元数据的 typed
+    # continuation event——role=system(非 user, 不伪装成普通用户请求,
+    # memory/curator 按 role=user 消费证据时天然排除), metadata 显式
+    # 记 is_continuation/continuation_seq/continuation_reason/
+    # continuation_parent_attempt_id; 首轮用户原文 role=user 不受影响,
+    # dedupe_key 按轮 request_id 派生互不破坏。
+    role = "system" if continuation else "user"
     # channel 身份用首轮 request_id(thread 的 channel_conversation_id),
     # 不是 root_run_id(可能是另一值)。
     root_request_id = str(
@@ -89,15 +95,21 @@ def bind_cli_run_conversation(agent: object, params: object, user_prompt: str):
             metadata = dict(metadata or {})
             metadata["is_continuation"] = True
             metadata["continuation_seq"] = continuation_seq
+            metadata["continuation_reason"] = str(
+                getattr(params, "continuation_reason", "") or ""
+            )
+            metadata["continuation_parent_attempt_id"] = str(
+                getattr(params, "continuation_parent_attempt_id", "") or ""
+            )
         entry = store.append_message_once(
             {
                 "thread_id": thread.thread_id,
-                "role": "user",
+                "role": role,
                 "content": prompt,
                 "channel": _CLI_RUN_CHANNEL,
                 "metadata": metadata,
             },
-            dedupe_key=_dedupe_key(request_id, "user"),
+            dedupe_key=_dedupe_key(request_id, role),
         )
         _require_matching_message_metadata(entry, params)
         _index_message_best_effort(agent, store, entry)

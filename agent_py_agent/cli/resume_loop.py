@@ -13,7 +13,7 @@ continuation_budget_exhausted 事件，绝不输出 DONE。
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ..agent.agent_core.cli_run_conversation import bind_cli_run_conversation
 from ..agent.agent_core.runtime.loop_models import RunParams
@@ -66,7 +66,13 @@ class ResumeRunOnce:
         self.delivery_contract = delivery_contract
         self.ctx: CliContinuationContext | None = None
 
-    def __call__(self, prompt: str, continuation_seq: int = 0, attempt_id: str = "") -> tuple:
+    def __call__(
+        self,
+        prompt: str,
+        continuation_seq: int = 0,
+        attempt_id: str = "",
+        continuation_reason: str = "",
+    ) -> tuple:
         """返回 (result, bound_params)。首轮后 self.ctx 建立。"""
         if continuation_seq == 0:
             bound = bind_cli_run_conversation(self.agent, self.base_params, prompt)
@@ -100,6 +106,13 @@ class ResumeRunOnce:
         bound = self.ctx.apply_to(
             self.base_params, seq=continuation_seq, attempt_id=""
         )
+        # 缺口F(双席复核 seq1835): 上轮收口原因写进 params——
+        # bind_cli_run_conversation 的续跑分支把它放进消息结构化 metadata
+        # (typed continuation event), 不依赖提示文本解析。
+        if continuation_reason:
+            bound = replace(
+                bound, continuation_reason=str(continuation_reason)
+            )
         result = self.agent.run(
             prompt,
             params=bound,
@@ -186,7 +199,10 @@ def run_with_resume(
             continuation_seq=seq,
             user_task=initial_prompt,
         )
-        result, _bound = runner(prompt, seq, attempt_id="")
+        # 缺口F: 上轮收口原因随 params 传续跑轮(消息结构化 metadata)
+        result, _bound = runner(
+            prompt, seq, attempt_id="", continuation_reason=reason
+        )
         rounds += 1
         # parent_attempt 推进在 ResumeRunOnce 内部完成（DB 真实 attempt）
         should, reason = should_resume(result)
