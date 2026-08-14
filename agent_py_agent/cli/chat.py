@@ -117,6 +117,38 @@ def _ensure_chat_memory_limit(args, agent) -> None:
         args.memory_limit = int(getattr(agent.config, "cli_chat_memory_limit", 5) or 0)
 
 
+# 函数用途: 显式 resume <session_id> 只连接指定会话(owner seq1943 语义③ +
+# 双席 seq1958 fail-closed): session 不存在/无效 → 报错退出(非 0), 绝不
+# 静默创建新会话或回退到其他历史。session/task/run/attempt 四层保持分开——
+# 本命令只决定"接哪条会话", 会话下的任务续跑仍由共享权威(runtime.db)驱动。
+def cmd_resume(args) -> int:
+    from ..agent.session.manager import SessionManager
+
+    session_id = str(getattr(args, "session_id", "") or "").strip()
+    if not session_id:
+        print(
+            "用法: my-agent resume <session_id>  (会话不存在时不创建新会话)",
+            file=sys.stderr,
+        )
+        return 3
+    try:
+        agent = make_agent(args)
+        manager = SessionManager(agent.config)
+    except Exception as exc:  # noqa: BLE001 初始化失败 fail-closed
+        print(f"初始化失败: {exc}", file=sys.stderr)
+        return 3
+    if not manager.session_exists(session_id):
+        print(
+            f"会话 {session_id} 不存在; resume 只连接已存在的会话"
+            f"(用 my-agent chat 创建新会话)",
+            file=sys.stderr,
+        )
+        return 3
+    # 存在: 复用 chat 流程——_setup_session 会 load + touch 恢复该会话,
+    # 不会新建。make_agent 的重复构建是 CLI 单次启动成本, 可接受。
+    return cmd_chat(args)
+
+
 # LLM: Local and Gateway chat share conversation/archive semantics; normal session exit only submits one best-effort Curator close reason.
 # 函数用途: 启动交互聊天并在正常关闭后登记统一后台会话提炼请求。
 def cmd_chat(args) -> int:

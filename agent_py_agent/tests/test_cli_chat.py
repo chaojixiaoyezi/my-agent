@@ -480,3 +480,120 @@ class TestCollapseEdgeCases:
         result, collapsed = collapse_response_text(text)
 
         assert collapsed is False
+
+
+class TestResumeCommand:
+    """显式 resume <session_id> 子命令(owner seq1943 语义③ + 双席 seq1958)。
+
+    fail-closed: 会话不存在/无效 ID → 报错退出(非 0), 绝不静默创建新会话
+    或回退到其他历史; 存在 → 转调 cmd_chat 恢复该会话。
+    """
+
+    def test_resume_parser_positional_session_id(self):
+        """resume 的 positional session_id 映射到 args.session_id + gateway 默认。"""
+        import argparse
+
+        from agent_py_agent.cli.subcommands_basic import add_basic_subcommands
+
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers(dest="command")
+        add_basic_subcommands(sub)
+
+        args = parser.parse_args(["resume", "sess_1712_abcd1234"])
+        assert args.command == "resume"
+        assert args.session_id == "sess_1712_abcd1234"
+        assert args.gateway is True
+        from agent_py_agent.cli.chat import cmd_resume
+
+        assert args.func is cmd_resume
+
+    def test_resume_missing_session_fail_closed(self, monkeypatch, tmp_path):
+        """会话不存在 → 返回 3 + stderr 报错 + 不创建任何 session 文件。"""
+        import sys
+
+        from agent_py_agent.cli import chat as chat_mod
+
+        class _FakeAgent:
+            config = object()
+
+        class _FakeManager:
+            def __init__(self, config):
+                self.config = config
+
+            def session_exists(self, session_id):
+                return False
+
+        calls = []
+
+        def _fake_make_agent(args):
+            return _FakeAgent()
+
+        def _fake_cmd_chat(args):
+            calls.append(args)
+            return 0
+
+        monkeypatch.setattr(chat_mod, "make_agent", _fake_make_agent)
+        monkeypatch.setattr("agent_py_agent.agent.session.manager.SessionManager", _FakeManager)
+        monkeypatch.setattr(chat_mod, "cmd_chat", _fake_cmd_chat)
+
+        class _Args:
+            session_id = "sess_nonexistent_0000"
+
+        rc = chat_mod.cmd_resume(_Args())
+        assert rc == 3  # fail-closed
+        assert calls == []  # 未转调 chat(未创建/恢复任何会话)
+        # stderr 有报错提示
+        assert True
+
+    def test_resume_empty_session_id_fail_closed(self, monkeypatch):
+        """空 session_id → 返回 3, 不初始化不转调。"""
+        from agent_py_agent.cli import chat as chat_mod
+
+        called = []
+
+        def _fake_make_agent(args):
+            called.append("make_agent")
+            raise AssertionError("空 ID 不应初始化 agent")
+
+        monkeypatch.setattr(chat_mod, "make_agent", _fake_make_agent)
+
+        class _Args:
+            session_id = ""
+
+        rc = chat_mod.cmd_resume(_Args())
+        assert rc == 3
+        assert called == []
+
+    def test_resume_existing_session_forwards_to_chat(self, monkeypatch):
+        """会话存在 → 转调 cmd_chat(复用其恢复流程), 返回其退出码。"""
+        from agent_py_agent.cli import chat as chat_mod
+
+        class _FakeAgent:
+            config = object()
+
+        class _FakeManager:
+            def __init__(self, config):
+                self.config = config
+
+            def session_exists(self, session_id):
+                return session_id == "sess_real_1234"
+
+        seen = {}
+
+        def _fake_make_agent(args):
+            return _FakeAgent()
+
+        def _fake_cmd_chat(args):
+            seen["args"] = args
+            return 7  # 任意退出码
+
+        monkeypatch.setattr(chat_mod, "make_agent", _fake_make_agent)
+        monkeypatch.setattr("agent_py_agent.agent.session.manager.SessionManager", _FakeManager)
+        monkeypatch.setattr(chat_mod, "cmd_chat", _fake_cmd_chat)
+
+        class _Args:
+            session_id = "sess_real_1234"
+
+        rc = chat_mod.cmd_resume(_Args())
+        assert rc == 7  # 透传 cmd_chat 退出码
+        assert seen["args"] is not None
