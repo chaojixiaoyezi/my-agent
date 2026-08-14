@@ -24,10 +24,27 @@ class _NoopSpinner:
         return None
 
 
-def test_cmd_run_reports_provider_timeout(capsys) -> None:
-    agent = SimpleNamespace(
+def _mock_agent(tmp_path, run_side_effect):
+    """构造 cmd_run 所需的 mock agent（含真实 ConversationStore 供会话绑定）。"""
+    from agent_py_agent.agent.conversation.store import ConversationStore
+
+    return SimpleNamespace(
         config=SimpleNamespace(request_timeout=23),
-        run=MagicMock(side_effect=ProviderTimeoutError("模型接口请求超时: request_timeout=23s")),
+        conversation_store=ConversationStore(tmp_path / "conv"),
+        run=MagicMock(side_effect=run_side_effect),
+        root=str(tmp_path),
+        runtime_guard_policy=None,
+        home_paths=SimpleNamespace(
+            owner_id="local/main",
+            owner_home_dir=str(tmp_path),
+        ),
+    )
+
+
+def test_cmd_run_reports_provider_timeout(capsys, tmp_path) -> None:
+    agent = _mock_agent(
+        tmp_path,
+        ProviderTimeoutError("模型接口请求超时: request_timeout=23s"),
     )
     args = SimpleNamespace(
         config="config.yaml",
@@ -52,11 +69,8 @@ def test_cmd_run_reports_provider_timeout(capsys) -> None:
     assert "memory-resume" in output
 
 
-def test_cmd_run_reports_provider_transient(capsys) -> None:
-    agent = SimpleNamespace(
-        config=SimpleNamespace(request_timeout=23),
-        run=MagicMock(side_effect=ProviderTransientError("HTTP 429: plan limited")),
-    )
+def test_cmd_run_reports_provider_transient(capsys, tmp_path) -> None:
+    agent = _mock_agent(tmp_path, ProviderTransientError("HTTP 429: plan limited"))
     args = SimpleNamespace(
         config="config.yaml",
         prompt="run a task",
@@ -80,11 +94,8 @@ def test_cmd_run_reports_provider_transient(capsys) -> None:
     assert "稍后重试" in output
 
 
-def test_cmd_run_reports_provider_response_error(capsys) -> None:
-    agent = SimpleNamespace(
-        config=SimpleNamespace(request_timeout=23),
-        run=MagicMock(side_effect=ProviderResponseError("missing choices")),
-    )
+def test_cmd_run_reports_provider_response_error(capsys, tmp_path) -> None:
+    agent = _mock_agent(tmp_path, ProviderResponseError("missing choices"))
     args = SimpleNamespace(
         config="config.yaml",
         prompt="run a task",

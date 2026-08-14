@@ -313,3 +313,111 @@ def test_record_budget_exhausted_event(repo):
     assert '"budget_before": 3' in payload
     assert '"budget_after": 3' in payload
     assert '"needs_user_continue": true' in payload
+
+
+# ------------------------------------------------- 切片4: resume_loop 循环
+
+
+class _FakeRunAgent:
+    """fake agent：首轮 unfinished，续跑轮逐个演进（第 3 轮 ok）。"""
+
+    def __init__(self, tmp_path):
+        from agent_py_agent.agent.conversation.store import ConversationStore
+
+        self.conversation_store = ConversationStore(tmp_path / "conv")
+        self.calls = []
+
+    def run(self, prompt, *, params=None, save=False, source="cli_run",
+            resume_context=None, delivery_contract=None, on_chunk=None):
+        seq = int(getattr(params, "continuation_seq", 0) or 0)
+        self.calls.append((seq, str(prompt)[:40]))
+        if seq == 0:
+            return SimpleNamespace(
+                runtime_status="unfinished", runtime_reason="TOOL_ROUND_LIMIT_REACHED",
+                runtime_source="tool_loop", tool_rounds=5, attempt_id="attempt-0",
+            )
+        if seq < 2:
+            return SimpleNamespace(
+                runtime_status="unfinished", runtime_reason="TOOL_ROUND_LIMIT_REACHED",
+                runtime_source="tool_loop", tool_rounds=5, attempt_id=f"attempt-{seq}",
+            )
+        return SimpleNamespace(
+            runtime_status="ok", runtime_reason="", runtime_source="",
+            tool_rounds=2, attempt_id=f"attempt-{seq}",
+        )
+
+
+def test_run_with_resume_loop_until_completed(tmp_path):
+    """首轮 unfinished → 自动续跑 2 轮 → 第 3 轮 ok 完成（同一契约链路）。"""
+    from agent_py_agent.agent.agent_core.runtime.run_params import (
+        run_params_with_request_id,
+    )
+    from agent_py_agent.cli.resume_loop import run_with_resume
+
+    fake = _FakeRunAgent(tmp_path)
+    base = run_params_with_request_id(
+        RunParams(source="cli_run", task_attributes={})
+    )
+    outcome = run_with_resume(
+        fake, initial_prompt="测试任务", base_params=base, max_rounds=5,
+    )
+    assert outcome.status == "completed"
+    assert outcome.rounds == 3  # 首轮 + 2 续跑轮
+    assert len(fake.calls) == 3
+    assert fake.calls[0][0] == 0
+    assert fake.calls[1][0] == 1
+    assert fake.calls[2][0] == 2
+    # 续跑提示不含验收词
+    assert "代码规模" not in fake.calls[1][1]
+    assert "达标" not in fake.calls[1][1]
+
+
+def test_run_with_resume_budget_exhausted(tmp_path):
+    """max_rounds 耗尽 → budget_exhausted（写事件，不 DONE）。"""
+    from agent_py_agent.agent.agent_core.runtime.run_params import (
+        run_params_with_request_id,
+    )
+    from agent_py_agent.cli.resume_loop import run_with_resume
+
+    class _AlwaysUnfinished(_FakeRunAgent):
+        def run(self, prompt, *, params=None, **kw):
+            seq = int(getattr(params, "continuation_seq", 0) or 0)
+            self.calls.append((seq, str(prompt)[:40]))
+            return SimpleNamespace(
+                runtime_status="unfinished", runtime_reason="TOOL_ROUND_LIMIT_REACHED",
+                runtime_source="tool_loop", tool_rounds=5, attempt_id=f"attempt-{seq}",
+            )
+
+    fake = _AlwaysUnfinished(tmp_path)
+    base = run_params_with_request_id(
+        RunParams(source="cli_run", task_attributes={})
+    )
+    outcome = run_with_resume(fake, initial_prompt="t", base_params=base, max_rounds=2)
+    assert outcome.status == "budget_exhausted"
+    assert outcome.reason == "max_rounds_reached"
+    assert len(fake.calls) == 3  # 首轮 + 2 续跑轮后停
+
+
+def test_run_with_resume_unresumable_stops(tmp_path):
+    """首轮 blocked（不可续跑族）→ 立即停止，不续跑。"""
+    from agent_py_agent.agent.agent_core.runtime.run_params import (
+        run_params_with_request_id,
+    )
+    from agent_py_agent.cli.resume_loop import run_with_resume
+
+    class _BlockedAgent(_FakeRunAgent):
+        def run(self, prompt, *, params=None, **kw):
+            self.calls.append((0, str(prompt)[:40]))
+            return SimpleNamespace(
+                runtime_status="blocked", runtime_reason="PROTOCOL_VIOLATION",
+                runtime_source="tool_protocol_adapter", tool_rounds=0,
+                attempt_id="attempt-0",
+            )
+
+    fake = _BlockedAgent(tmp_path)
+    base = run_params_with_request_id(
+        RunParams(source="cli_run", task_attributes={})
+    )
+    outcome = run_with_resume(fake, initial_prompt="t", base_params=base, max_rounds=5)
+    assert outcome.status == "unresumable"
+    assert len(fake.calls) == 1  # 只首轮

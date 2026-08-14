@@ -163,18 +163,38 @@ def cmd_run(args) -> int:
     stream_state = {"seen": False, "text": ""}
     on_chunk = make_run_chunk_writer(spinner, stream_state)
 
-    try:
-        result = agent.run(
-            args.prompt,
+    # 2026-08-14 根因3（CLI 自动续跑）: 首轮收口后可续跑族(共享 gate
+    # should_continue_task)在进程内自动续跑——同一 task/run/thread 链路,
+    # 直到完成/预算耗尽/不可续跑族。base_params 提供 request/run/task 根
+    # ID(由 run_params_with_request_id 生成), resume_loop 在其中贯穿契约。
+    from ..agent.agent_core.runtime.loop_models import RunParams
+    from ..agent.agent_core.runtime.run_params import run_params_with_request_id
+    from .resume_loop import run_with_resume
+
+    # 首先生成 request/run/task 根 ID(bind 前必须有非空 request_id),
+    # resume_loop 在其中贯穿续跑契约。
+    base_params = run_params_with_request_id(
+        RunParams(
             inject=args.inject or [],
             prompt_files=args.prompt_file or [],
-            save=args.save,
             source="cli_run",
-            delivery_contract=delivery_contract_from_file(getattr(args, "delivery_contract_file", "")),
-            resume_context=resume_context_override(args),
+            task_attributes={},
             recovery_next_actions=_default_run_recovery_next_actions(),
+            resume_context=resume_context_override(args),
+        )
+    )
+    try:
+        outcome = run_with_resume(
+            agent,
+            initial_prompt=args.prompt,
+            base_params=base_params,
+            save=bool(args.save),
+            delivery_contract=delivery_contract_from_file(
+                getattr(args, "delivery_contract_file", "")
+            ),
             on_chunk=on_chunk,
         )
+        result = outcome.final_result
     except ProviderRecoverableError as exc:
         print(provider_recoverable_cli_report(agent, exc))
         return 2

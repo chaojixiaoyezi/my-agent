@@ -371,9 +371,18 @@ class TestCmdRun:
         mock_result.recovery_snapshot_error = None
         mock_result.memory_resume_context_injected = False
         mock_result.memory_resume_context_token_estimate = 0
+        # 2026-08-14 cmd_run 改走 run_with_resume: mock 需提供 ok 收口
+        # (unresumable → 单轮结束返回 0) + conversation_store(会话绑定)。
+        mock_result.runtime_status = "ok"
+        mock_result.runtime_reason = ""
+        mock_result.runtime_source = ""
+
+        from agent_py_agent.agent.conversation.store import ConversationStore
 
         mock_agent = MagicMock()
         mock_agent.run.return_value = mock_result
+        mock_agent.conversation_store = ConversationStore(tmp_path / "conv")
+        mock_agent.home_paths = MagicMock(owner_id="local/main", owner_home_dir=str(tmp_path))
 
         with patch("agent_py_agent.cli.local_commands.make_agent", return_value=mock_agent), \
              patch("agent_py_agent.cli.local_commands.ThinkingSpinner"):
@@ -408,9 +417,19 @@ class TestCmdRun:
             memory_resume_context_injected=False,
             memory_resume_context_token_estimate=0,
             memory_compact_suggested=False,
+            runtime_status="ok",
+            runtime_reason="",
+            runtime_source="",
         )
 
+        from agent_py_agent.agent.conversation.store import ConversationStore
+
         class StreamingAgent:
+            def __init__(self):
+                self.conversation_store = ConversationStore(tmp_path / "conv")
+                self.home_paths = SimpleNamespace(owner_id="local/main", owner_home_dir=str(tmp_path))
+                self.config = SimpleNamespace(request_timeout=23)
+
             def run(self, *args, **kwargs):
                 kwargs["on_chunk"]("流式最终响应")
                 return result_payload
@@ -453,9 +472,19 @@ class TestCmdRun:
             memory_resume_context_injected=False,
             memory_resume_context_token_estimate=0,
             memory_compact_suggested=False,
+            runtime_status="ok",
+            runtime_reason="",
+            runtime_source="",
         )
 
+        from agent_py_agent.agent.conversation.store import ConversationStore
+
         class StreamingAgent:
+            def __init__(self):
+                self.conversation_store = ConversationStore(tmp_path / "conv")
+                self.home_paths = SimpleNamespace(owner_id="local/main", owner_home_dir=str(tmp_path))
+                self.config = SimpleNamespace(request_timeout=23)
+
             def run(self, *args, **kwargs):
                 kwargs["on_chunk"]("流式最终响应")
                 return result_payload
@@ -500,9 +529,19 @@ class TestCmdRun:
             memory_resume_context_injected=False,
             memory_resume_context_token_estimate=0,
             memory_compact_suggested=False,
+            runtime_status="ok",
+            runtime_reason="",
+            runtime_source="",
         )
 
+        from agent_py_agent.agent.conversation.store import ConversationStore
+
         class StreamingToolAgent:
+            def __init__(self):
+                self.conversation_store = ConversationStore(tmp_path / "conv")
+                self.home_paths = SimpleNamespace(owner_id="local/main", owner_home_dir=str(tmp_path))
+                self.config = SimpleNamespace(request_timeout=23)
+
             def run(self, *args, **kwargs):
                 kwargs["on_chunk"]('[TOOL_CALL]\n{"tool":"run_command"}\n[/TOOL_CALL]')
                 return result_payload
