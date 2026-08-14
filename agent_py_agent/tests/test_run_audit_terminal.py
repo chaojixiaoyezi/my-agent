@@ -256,12 +256,15 @@ def test_main_settle_cli_oneshot_blocked_maps_failed(repo):
 
 
 def test_main_settle_cli_oneshot_unfinished_maps_failed(repo):
-    """CLI 一次性 run 达轮限/账本上限 unfinished 收口 → 同样兜底 failed。"""
+    """缺口E(双席复核 seq1835): CLI 一次性 run 收口不可续跑族(blocked) →
+    兜底 failed(问题C同族不回退)。TOOL_ROUND_LIMIT_REACHED 已属可续跑族
+    (共享 gate True → 不落账, 由 resume_loop 续跑), 换 blocked 作不可续跑
+    族代表场景。"""
     rec = _record(repo)
     result = SimpleNamespace(
-        runtime_status="unfinished",
-        runtime_reason="TOOL_ROUND_LIMIT_REACHED",
-        runtime_source="tool_loop",
+        runtime_status="blocked",
+        runtime_reason="MISSING_EVIDENCE",
+        runtime_source="acceptance_gate",
         tool_rounds=43,
     )
     params = SimpleNamespace(
@@ -274,7 +277,7 @@ def test_main_settle_cli_oneshot_unfinished_maps_failed(repo):
     assert attempts[0]["status"] == "failed"
     assert attempts[0]["ended_at"] > 0
     payload = _completed_events(repo, rec["agent_run_id"])[0]["payload_json"]
-    assert '"runtime_status": "unfinished"' in payload
+    assert '"runtime_status": "blocked"' in payload
 
 
 def test_main_settle_user_stop_maps_cancelled(repo):

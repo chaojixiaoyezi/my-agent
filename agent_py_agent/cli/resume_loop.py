@@ -93,8 +93,12 @@ class ResumeRunOnce:
             return result, bound
         if self.ctx is None:
             raise RuntimeError("resume round without first-round continuation context")
+        # 缺口B(双席复核 seq1834): attempt_id 不传合成 ID——传空让
+        # run_params_with_request_id 生成 + agent.run 内部 create_attempt
+        # 发放 DB current attempt(同 run_id 续挂, 见 runtime_mixin:321-368),
+        # ctx 只记录 parent 关系, attempt 链是真实 DB 链。
         bound = self.ctx.apply_to(
-            self.base_params, seq=continuation_seq, attempt_id=attempt_id
+            self.base_params, seq=continuation_seq, attempt_id=""
         )
         result = self.agent.run(
             prompt,
@@ -105,7 +109,32 @@ class ResumeRunOnce:
             delivery_contract=self.delivery_contract,
             on_chunk=self.on_chunk,
         )
+        # 缺口B: 续跑轮 attempt 由 agent.run 内部 create_attempt 发放
+        # (DB current attempt, 同 run 续挂), 这里从 repo 查最新 attempt
+        # 记录为真实链——不合成 attempt-{seq}。
+        real_attempt = self._latest_db_attempt()
+        if real_attempt:
+            self.ctx = self.ctx.next(attempt_id=real_attempt)
         return result, bound
+
+    def _latest_db_attempt(self) -> str:
+        """从 runtime.db 查当前 agent_run 的最新 attempt（DB 权威链）。"""
+        try:
+            subagents = getattr(self.agent, "subagents", None)
+            repo = getattr(subagents, "runtime_db", None)
+            if repo is None or self.ctx is None:
+                return ""
+            row = repo.agent_run_for_run_id(self.ctx.root_run_id)
+            if row is None:
+                return ""
+            latest = repo._runtime_connect().execute(
+                "SELECT attempt_id FROM agent_attempts "
+                "WHERE agent_run_id = ? ORDER BY started_at DESC LIMIT 1",
+                (str(row["agent_run_id"]),),
+            ).fetchone()
+            return str(latest["attempt_id"] or "") if latest else ""
+        except Exception:  # noqa: BLE001 查不到保守返回空(沿用上轮 parent)
+            return ""
 
 
 def run_with_resume(
@@ -139,26 +168,47 @@ def run_with_resume(
             reason="no_continuation_contract",
         )
 
+    # 缺口A(双席复核 seq1834): 进入续跑循环前 claim 一次(整个循环持有,
+    # lease 300s 覆盖进程内多轮)——CLI 与 gateway 同读同写同一 policy claim,
+    # 已被其他 consumer 持有则整个续跑放弃(等 gateway/下次), 不双跑。
+    from .resume_contract import try_claim_cli_resume
+
+    store = getattr(agent, "conversation_store", None)
+    if store is not None:
+        if not try_claim_cli_resume(store, runner.ctx.root_task_id):
+            return CliResumeOutcome(
+                status="unresumable", rounds=rounds, final_result=result,
+                reason="claim_held_by_other_consumer",
+            )
     for seq in range(1, max_rounds + 1):
         prompt = resume_prompt_for(
             continuation_reason=reason,
             continuation_seq=seq,
             user_task=initial_prompt,
         )
-        result, _bound = runner(prompt, seq, attempt_id=f"attempt-{seq}")
+        result, _bound = runner(prompt, seq, attempt_id="")
         rounds += 1
-        # 每轮后推进契约 parent_attempt：下一轮的 parent = 本轮 attempt
-        runner.ctx = runner.ctx.next(attempt_id=f"attempt-{seq}")
+        # parent_attempt 推进在 ResumeRunOnce 内部完成（DB 真实 attempt）
         should, reason = should_resume(result)
         if not should:
+            # 缺口C(双席复核 seq1835): 不可续跑族收口(blocked/协议违规/
+            # UNKNOWN)必须标 unresumable, 不能误标 completed——只有
+            # runtime_status=ok 的任务完成才算 completed。
+            runtime_status = str(
+                getattr(result, "runtime_status", "") or ""
+            ).strip().lower()
+            if runtime_status == "ok":
+                return CliResumeOutcome(
+                    status="completed", rounds=rounds, final_result=result, reason=reason
+                )
             return CliResumeOutcome(
-                status="completed", rounds=rounds, final_result=result, reason=reason
+                status="unresumable", rounds=rounds, final_result=result, reason=reason
             )
         if rounds >= max_rounds + 1:
             record_budget_exhausted(
                 agent=agent,
                 run_id=runner.ctx.root_run_id,
-                attempt_id=str(getattr(result, "attempt_id", "") or ""),
+                attempt_id=runner.ctx.parent_attempt_id,
                 budget_before=rounds - 1,
                 budget_after=rounds,
                 reason="max_rounds_reached",
@@ -170,7 +220,7 @@ def run_with_resume(
     record_budget_exhausted(
         agent=agent,
         run_id=runner.ctx.root_run_id,
-        attempt_id=str(getattr(result, "attempt_id", "") or ""),
+        attempt_id=runner.ctx.parent_attempt_id,
         budget_before=rounds,
         budget_after=rounds,
         reason="resume_limit_reached",

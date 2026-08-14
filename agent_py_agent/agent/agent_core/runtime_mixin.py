@@ -10,6 +10,7 @@ import hashlib
 import json
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from types import SimpleNamespace
 
 from ..runtime_db.repository import AGENT_RUN_TERMINAL_STATUSES
 from ._compression_service import CompressionService
@@ -418,10 +419,26 @@ def _settle_main_agent_run_status(
     if not terminal or terminal in ("", "created", "running"):
         return
     if terminal not in AGENT_RUN_TERMINAL_STATUSES:
-        # 续跑轮非终态不落账（任务级可恢复，resume_loop 决定）;
-        # 仅首轮 one-shot 兜底 failed。
+        # 缺口E(双席复核 seq1835): 首轮可续跑族 unfinished 也保留任务级非终态
+        # (resume_loop 会续跑), 不落 failed——仅不可续跑族(blocked/协议违规/
+        # UNKNOWN, 共享 gate 判定 False)才 one-shot 兜底 failed(问题C同族
+        # 兜底保留)。续跑轮非终态一律不落账。
         if cli_one_shot and runtime_status and int(continuation_seq or 0) <= 0:
-            terminal = "failed"
+            from ..conversation.runtime import should_continue_task
+
+            # 共享 gate: 可续跑族(True) → 不落 failed(保留任务级非终态);
+            # 不可续跑族(False) → 兜底 failed。
+            should, _ = should_continue_task(
+                SimpleNamespace(
+                    runtime_status=runtime_status,
+                    runtime_reason=runtime_reason,
+                    runtime_source=runtime_source,
+                )
+            )
+            if not should:
+                terminal = "failed"
+            else:
+                return  # 可续跑族首轮不落账, resume_loop 续跑
         else:
             return  # R1-03：非终态不落账（unfinished 等），避免 status_conflict 噪音
     if not run_id or not attempt_id:

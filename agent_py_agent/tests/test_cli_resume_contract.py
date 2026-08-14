@@ -268,12 +268,40 @@ def test_settle_continuation_round_keeps_task_nonterminal(repo):
 
 
 def test_settle_first_round_still_falls_back_failed(repo):
-    """首轮(seq=0) one-shot 兜底保留: unfinished → failed(问题C同族修复不回退)。"""
+    """缺口E(双席复核 seq1835): 首轮不可续跑族(blocked)仍 one-shot 兜底 failed
+    (问题C同族兜底不回退)——TOOL_ROUND_LIMIT_REACHED 已属可续跑族, 换
+    blocked 作不可续跑族代表场景。"""
     from agent_py_agent.agent.agent_core.runtime_mixin import _settle_main_agent_run
 
     rec = repo.record_run_creation(owner_id="local/main", goal="g", run_id="run-2", role="main")
     params = SimpleNamespace(
         run_id="run-2",
+        attempt_id=rec["attempt_id"],
+        source="cli_run",
+        continuation_seq=0,
+    )
+    result = SimpleNamespace(
+        runtime_status="blocked",
+        runtime_reason="MISSING_EVIDENCE",
+        runtime_source="acceptance_gate",
+        tool_rounds=7,
+    )
+    _settle_main_agent_run(SimpleNamespace(subagents=SimpleNamespace(runtime_db=repo)), params, result)
+    row = repo._runtime_connect().execute(
+        "SELECT status FROM agent_runs WHERE agent_run_id = ?", (rec["agent_run_id"],)
+    ).fetchone()
+    assert row["status"] == "failed"
+
+
+def test_settle_first_round_continuable_keeps_nonterminal(repo):
+    """缺口E(双席复核 seq1835): 首轮可续跑族(unfinished + TOOL_ROUND_LIMIT_
+    REACHED, 共享 gate 判定 True)不落 failed——保留任务级非终态, resume_loop
+    续跑(旧语义此场景落 failed, 缺口 E 修正)。"""
+    from agent_py_agent.agent.agent_core.runtime_mixin import _settle_main_agent_run
+
+    rec = repo.record_run_creation(owner_id="local/main", goal="g", run_id="run-2b", role="main")
+    params = SimpleNamespace(
+        run_id="run-2b",
         attempt_id=rec["attempt_id"],
         source="cli_run",
         continuation_seq=0,
@@ -288,7 +316,32 @@ def test_settle_first_round_still_falls_back_failed(repo):
     row = repo._runtime_connect().execute(
         "SELECT status FROM agent_runs WHERE agent_run_id = ?", (rec["agent_run_id"],)
     ).fetchone()
-    assert row["status"] == "failed"
+    assert row["status"] == "created"  # 非终态保留, 等 resume_loop 续跑
+
+
+def test_settle_continuation_round_keeps_nonterminal(repo):
+    """缺口E(双席复核 seq1835): 续跑轮(seq>0)非终态一律不落账——轮内
+    unfinished 由 resume_loop 决定是否继续, 任务级终态不由此处覆盖。"""
+    from agent_py_agent.agent.agent_core.runtime_mixin import _settle_main_agent_run
+
+    rec = repo.record_run_creation(owner_id="local/main", goal="g", run_id="run-2c", role="main")
+    params = SimpleNamespace(
+        run_id="run-2c",
+        attempt_id=rec["attempt_id"],
+        source="cli_run",
+        continuation_seq=3,
+    )
+    result = SimpleNamespace(
+        runtime_status="unfinished",
+        runtime_reason="TOOL_ROUND_LIMIT_REACHED",
+        runtime_source="tool_loop",
+        tool_rounds=7,
+    )
+    _settle_main_agent_run(SimpleNamespace(subagents=SimpleNamespace(runtime_db=repo)), params, result)
+    row = repo._runtime_connect().execute(
+        "SELECT status FROM agent_runs WHERE agent_run_id = ?", (rec["agent_run_id"],)
+    ).fetchone()
+    assert row["status"] == "created"  # 续跑轮不覆盖任务级终态
 
 
 def test_record_budget_exhausted_event(repo):
@@ -322,10 +375,27 @@ class _FakeRunAgent:
     """fake agent：首轮 unfinished，续跑轮逐个演进（第 3 轮 ok）。"""
 
     def __init__(self, tmp_path):
+        import time
+
         from agent_py_agent.agent.conversation.store import ConversationStore
 
         self.conversation_store = ConversationStore(tmp_path / "conv")
         self.calls = []
+        # 建续跑 policy（kind=ordinary_task_resume），claim 互斥检查需要
+        self._thread = self.conversation_store.get_or_create_thread(
+            {
+                "canonical_user_id": "u", "channel": "cli_run",
+                "channel_conversation_id": "req-1", "channel_user_id": "u",
+                "owner_id": "local/main", "owner_home": str(tmp_path), "title": "t",
+            }
+        )
+        self.conversation_store.set_progress_policy(
+            {
+                "thread_id": self._thread.thread_id, "task_id": "task-1",
+                "interval_seconds": 180, "now": time.time(),
+                "metadata": {"kind": "ordinary_task_resume", "resume_used": 0, "resume_limit": 3},
+            }
+        )
 
     def run(self, prompt, *, params=None, save=False, source="cli_run",
             resume_context=None, delivery_contract=None, on_chunk=None):
@@ -356,7 +426,7 @@ def test_run_with_resume_loop_until_completed(tmp_path):
 
     fake = _FakeRunAgent(tmp_path)
     base = run_params_with_request_id(
-        RunParams(source="cli_run", task_attributes={})
+        RunParams(source="cli_run", task_id="task-1", task_attributes={})
     )
     outcome = run_with_resume(
         fake, initial_prompt="测试任务", base_params=base, max_rounds=5,
@@ -390,7 +460,7 @@ def test_run_with_resume_budget_exhausted(tmp_path):
 
     fake = _AlwaysUnfinished(tmp_path)
     base = run_params_with_request_id(
-        RunParams(source="cli_run", task_attributes={})
+        RunParams(source="cli_run", task_id="task-1", task_attributes={})
     )
     outcome = run_with_resume(fake, initial_prompt="t", base_params=base, max_rounds=2)
     assert outcome.status == "budget_exhausted"
@@ -416,7 +486,7 @@ def test_run_with_resume_unresumable_stops(tmp_path):
 
     fake = _BlockedAgent(tmp_path)
     base = run_params_with_request_id(
-        RunParams(source="cli_run", task_attributes={})
+        RunParams(source="cli_run", task_id="task-1", task_attributes={})
     )
     outcome = run_with_resume(fake, initial_prompt="t", base_params=base, max_rounds=5)
     assert outcome.status == "unresumable"
@@ -514,11 +584,45 @@ def test_resume_round_attempt_chain(tmp_path):
                 runtime_source="", tool_rounds=2, attempt_id=f"attempt-{seq}")
 
     fake = _ChainAgent(tmp_path)
-    base = run_params_with_request_id(RunParams(source="cli_run", task_attributes={}))
+    base = run_params_with_request_id(RunParams(source="cli_run", task_id="task-1", task_attributes={}))
     outcome = run_with_resume(fake, initial_prompt="t", base_params=base, max_rounds=5)
     assert outcome.status == "completed"
-    # 链: 首轮 attempt=自动生成(无 parent) → cont-1 attempt-1 parent=首轮 → cont-2 attempt-2 parent=attempt-1
+    # 缺口B(双席复核 seq1834): 续跑轮 attempt_id 不再合成 attempt-{seq},
+    # 传空由 agent.run 内部 create_attempt 发放 DB attempt——params 里
+    # attempt_id 应为空(真实 ID 由 runtime.db 发放, 不在 params 合成)。
     seq0, attempt0, parent0 = fake.calls[0]
     assert seq0 == 0 and parent0 == ""
-    assert fake.calls[1] == (1, "attempt-1", attempt0)
-    assert fake.calls[2] == (2, "attempt-2", "attempt-1")
+    seq1, attempt1, parent1 = fake.calls[1]
+    assert seq1 == 1
+    assert attempt1 == ""  # 不合成: DB 发放真实 attempt, params 不预置
+    assert parent1 == attempt0  # parent 链: cont-1 parent=首轮 attempt
+
+
+def test_resume_round_blocked_is_unresumable(tmp_path):
+    """续跑轮 blocked/协议违规收口必须标 unresumable，不能误标 completed。
+
+    缺口C(双席复核 seq1835): 只有 runtime_status=ok 才算 completed。
+    """
+    from agent_py_agent.agent.agent_core.runtime.run_params import (
+        run_params_with_request_id,
+    )
+    from agent_py_agent.cli.resume_loop import run_with_resume
+
+    class _FirstThenBlocked(_FakeRunAgent):
+        def run(self, prompt, *, params=None, **kw):
+            seq = int(getattr(params, "continuation_seq", 0) or 0)
+            self.calls.append((seq, str(prompt)[:40]))
+            if seq == 0:
+                return SimpleNamespace(runtime_status="unfinished",
+                    runtime_reason="TOOL_ROUND_LIMIT_REACHED", runtime_source="tool_loop",
+                    tool_rounds=5, attempt_id="attempt-0")
+            return SimpleNamespace(runtime_status="blocked",
+                runtime_reason="PROTOCOL_VIOLATION", runtime_source="tool_protocol_adapter",
+                tool_rounds=0, attempt_id=f"attempt-{seq}")
+
+    fake = _FirstThenBlocked(tmp_path)
+    base = run_params_with_request_id(RunParams(source="cli_run", task_id="task-1", task_attributes={}))
+    outcome = run_with_resume(fake, initial_prompt="t", base_params=base, max_rounds=5)
+    assert outcome.status == "unresumable"  # 不是 completed
+    assert outcome.reason == "PROTOCOL_VIOLATION"
+    assert len(fake.calls) == 2  # 首轮 + 1 续跑轮后停
