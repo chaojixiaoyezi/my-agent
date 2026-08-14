@@ -51,6 +51,15 @@ _CANCELLABLE_FROM = (OP_CLAIMED,)
 # '' 是旧 /ask 路径初始值，按 created 兼容映射（迁移红线，不得误伤）。
 AGENT_RUN_TERMINAL_STATUSES = frozenset({"done", "failed", "cancelled"})
 RUN_STATUS_LEGACY_CREATED = frozenset({"", "created"})
+# attempt 层未知终态（2026-08-15 双席核对点3/证据4, 长期助手 同款 unknown 语义）：
+# 执行者死亡 + 结果不可知(UNKNOWN op / 外部副作用未核实)——诚实标注, 绝不
+# 等同 failed(已知失败), 也绝不触发自动续跑(recovered 前 create_attempt
+# fail-closed 拒绝)。recovered = 人工核对后显式释放, 恢复路径的唯一出口。
+ATTEMPT_STATUS_UNKNOWN = "unknown"
+ATTEMPT_STATUS_RECOVERED = "recovered"
+_ATTEMPT_TERMINAL_STATUSES = frozenset(
+    {"done", "failed", "cancelled", ATTEMPT_STATUS_UNKNOWN, ATTEMPT_STATUS_RECOVERED}
+)
 #: 执行权锁 scope 前缀（R1-03）：scope=attempt-exec:{agent_run_id}，
 #: 唯一承载「同一时刻恰一 worker 持有 run 执行权」。
 EXEC_LOCK_SCOPE_PREFIX = "attempt-exec:"

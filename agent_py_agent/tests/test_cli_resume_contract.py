@@ -1176,17 +1176,241 @@ def test_orphan_reclaim_nonterminal_ops_writes_visible_event(tmp_path):
     result = repo.reclaim_orphaned_attempt(attempt_id, operator="test", reason="x")
     assert result.get("reclaimed") is False
     assert result.get("reason") == "nonterminal_ops"
-    # 可见事件已写(不再静默)
+    # 双席核对点3(2026-08-15): 拦截转结构化终态——attempt 标 unknown
+    assert result.get("marked_unknown") is True
+    attempt = repo._runtime_connect().execute(
+        "SELECT status, ended_at FROM agent_attempts WHERE attempt_id = ?",
+        (attempt_id,),
+    ).fetchone()
+    assert attempt["status"] == "unknown"
+    assert attempt["ended_at"] > 0
+    # 可见事件已写(不再静默): orphan_reclaim_blocked + attempt_unknown_terminal
     events = repo._runtime_connect().execute(
         "SELECT payload_json FROM runtime_events "
         "WHERE event_type = 'orphan_reclaim_blocked'",
     ).fetchall()
     assert len(events) == 1
     assert "nonterminal_ops" in events[0]["payload_json"]
-    # 幂等(双席 seq1947): 再次触发 reclaim 不重复刷事件
+    terminal = repo._runtime_connect().execute(
+        "SELECT payload_json FROM runtime_events "
+        "WHERE event_type = 'attempt_unknown_terminal'",
+    ).fetchall()
+    assert len(terminal) == 1
+    assert "nonterminal_ops" in terminal[0]["payload_json"]
+    # 幂等(双席 seq1947 + 核对点3): 再次触发 reclaim 直接 already_terminal,
+    # 不重复标记也不重复刷事件
     result2 = repo.reclaim_orphaned_attempt(attempt_id, operator="test", reason="x")
-    assert result2.get("reason") == "nonterminal_ops"
+    assert result2.get("reason") == "already_terminal"
     events2 = repo._runtime_connect().execute(
         "SELECT 1 FROM runtime_events WHERE event_type = 'orphan_reclaim_blocked'",
     ).fetchall()
     assert len(events2) == 1  # 同 attempt 只写一次
+    terminal2 = repo._runtime_connect().execute(
+        "SELECT 1 FROM runtime_events WHERE event_type = 'attempt_unknown_terminal'",
+    ).fetchall()
+    assert len(terminal2) == 1
+
+
+def test_reclaim_side_effect_gate_marks_unknown_and_keeps_lock(tmp_path):
+    """side_effect_gate 分支同款结构化终态(2026-08-15 双席核对点3):
+    外部副作用 op 无 effect_key → attempt 标 unknown + 执行权锁保留
+    (锁防并发写; create_attempt 的 unknown 闸拦自动接管)。"""
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+
+    repo = RuntimeRepository(tmp_path / "home" / "runtime.db")
+    now = 1786005000.0
+    rec = repo.record_run_creation(
+        owner_id="local/main", goal="g", run_id="run-side-effect", role="main"
+    )
+    attempt_id = str(rec["attempt_id"])
+    with repo.transaction() as conn:
+        conn.execute(
+            "INSERT INTO tool_operations(operation_id, agent_run_id, attempt_id, "
+            "attempt_generation, tool_operation_generation, operation_type, "
+            "status, created_at, updated_at, outcome_json) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                "op-se-1", str(rec["agent_run_id"]), attempt_id, 1, 1,
+                "publish", "UNKNOWN", now - 100, now - 100,
+                '{"side_effect": true, "args_hash": "sha256:y"}',
+            ),
+        )
+        conn.execute(
+            "INSERT INTO resource_locks(lock_id, canonical_scope, holder_instance, "
+            "pid, start_token, attempt_id, attempt_generation, workspace_epoch, "
+            "tool_operation_generation, lease_expires_at, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "lock-se-1", f"attempt-exec:{rec['agent_run_id']}",
+                "test-holder", 99999, "tok", attempt_id, 1, 1, 0,
+                now - 3600, now - 3700, now - 3700,
+            ),
+        )
+    result = repo.reclaim_orphaned_attempt(attempt_id, operator="test", reason="x")
+    assert result.get("reclaimed") is False
+    assert result.get("reason") == "side_effect_gate"
+    assert result.get("marked_unknown") is True
+    attempt = repo._runtime_connect().execute(
+        "SELECT status, ended_at FROM agent_attempts WHERE attempt_id = ?",
+        (attempt_id,),
+    ).fetchone()
+    assert attempt["status"] == "unknown"
+    assert attempt["ended_at"] > 0
+    # 执行权锁保留(不释放——recovered 前新 attempt 无法挂载)
+    lock = repo._runtime_connect().execute(
+        "SELECT 1 FROM resource_locks WHERE attempt_id = ?", (attempt_id,),
+    ).fetchone()
+    assert lock is not None
+    # 幂等: 再次 reclaim 不再重复标记
+    result2 = repo.reclaim_orphaned_attempt(attempt_id, operator="test", reason="x")
+    assert result2.get("reason") == "already_terminal"
+
+
+def test_create_attempt_blocked_while_unknown_prevents_auto_continue(tmp_path):
+    """unknown 终态不触发自动续跑(双席核对点3): 自动拉起(create_attempt)
+    撞 unknown 闸 fail-closed 抛 RuntimeConflictError + 写诊断事件——
+    recovered 前该 run 不会被任何调度器/唤醒轮自动挂载。"""
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+    from agent_py_agent.agent.runtime_db.operations import RuntimeConflictError
+
+    repo = RuntimeRepository(tmp_path / "home" / "runtime.db")
+    now = 1786006000.0
+    rec = repo.record_run_creation(
+        owner_id="local/main", goal="g", run_id="run-blocked-mount", role="main"
+    )
+    attempt_id = str(rec["attempt_id"])
+    with repo.transaction() as conn:
+        conn.execute(
+            "INSERT INTO tool_operations(operation_id, agent_run_id, attempt_id, "
+            "attempt_generation, tool_operation_generation, operation_type, "
+            "status, created_at, updated_at, outcome_json) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                "op-block-1", str(rec["agent_run_id"]), attempt_id, 1, 1,
+                "run_command", "UNKNOWN", now - 100, now - 100, "{}",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO resource_locks(lock_id, canonical_scope, holder_instance, "
+            "pid, start_token, attempt_id, attempt_generation, workspace_epoch, "
+            "tool_operation_generation, lease_expires_at, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "lock-block-1", f"attempt-exec:{rec['agent_run_id']}",
+                "test-holder", 99999, "tok", attempt_id, 1, 1, 0,
+                now - 3600, now - 3700, now - 3700,
+            ),
+        )
+    assert repo.reclaim_orphaned_attempt(attempt_id, operator="test", reason="x") \
+        .get("reason") == "nonterminal_ops"
+    # 自动挂载被拒(unknown 闸)
+    try:
+        repo.create_attempt(str(rec["agent_run_id"]))
+        raise AssertionError("create_attempt 应被 unknown 闸拒绝")
+    except RuntimeConflictError:
+        pass
+    # 诊断事件落账
+    blocked = repo._runtime_connect().execute(
+        "SELECT 1 FROM runtime_events WHERE event_type = 'attempt_unknown_blocked'",
+    ).fetchall()
+    assert len(blocked) == 1
+    # 新 attempt 未创建(run 保持 created + 原 attempt 终态)
+    runs = repo._runtime_connect().execute(
+        "SELECT status, current_attempt_id FROM agent_runs "
+        "WHERE agent_run_id = ?", (str(rec["agent_run_id"]),),
+    ).fetchall()
+    assert runs[0]["status"] == "created"
+    assert runs[0]["current_attempt_id"] == attempt_id
+
+
+def test_recover_attempt_unknown_releases_lock_and_allows_mount(tmp_path):
+    """人工恢复路径(双席证据4): recover_attempt_unknown 显式核对副作用后
+    释放执行权锁 + attempt → recovered + 审计事件; 之后 create_attempt
+    放行(同 run 新 attempt 挂载)。"""
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+
+    repo = RuntimeRepository(tmp_path / "home" / "runtime.db")
+    now = 1786007000.0
+    rec = repo.record_run_creation(
+        owner_id="local/main", goal="g", run_id="run-recover", role="main"
+    )
+    attempt_id = str(rec["attempt_id"])
+    with repo.transaction() as conn:
+        conn.execute(
+            "INSERT INTO tool_operations(operation_id, agent_run_id, attempt_id, "
+            "attempt_generation, tool_operation_generation, operation_type, "
+            "status, created_at, updated_at, outcome_json) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                "op-rec-1", str(rec["agent_run_id"]), attempt_id, 1, 1,
+                "run_command", "UNKNOWN", now - 100, now - 100, "{}",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO resource_locks(lock_id, canonical_scope, holder_instance, "
+            "pid, start_token, attempt_id, attempt_generation, workspace_epoch, "
+            "tool_operation_generation, lease_expires_at, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "lock-rec-1", f"attempt-exec:{rec['agent_run_id']}",
+                "test-holder", 99999, "tok", attempt_id, 1, 1, 0,
+                now - 3600, now - 3700, now - 3700,
+            ),
+        )
+    assert repo.reclaim_orphaned_attempt(attempt_id, operator="test", reason="x") \
+        .get("reason") == "nonterminal_ops"
+    # 非法 effect_disposition 拒绝
+    bad = repo.recover_attempt_unknown(
+        attempt_id, operator="human", effect_disposition="whatever"
+    )
+    assert bad.get("recovered") is False
+    assert bad.get("reason") == "invalid_effect_disposition"
+    # 显式恢复(人工核对, 副作用已入账)
+    ok = repo.recover_attempt_unknown(
+        attempt_id, operator="human-checker", effect_disposition="recorded",
+        reason="副作用已人工入账",
+    )
+    assert ok.get("recovered") is True
+    attempt = repo._runtime_connect().execute(
+        "SELECT status FROM agent_attempts WHERE attempt_id = ?", (attempt_id,),
+    ).fetchone()
+    assert attempt["status"] == "recovered"
+    # 执行权锁已释放
+    lock = repo._runtime_connect().execute(
+        "SELECT 1 FROM resource_locks WHERE attempt_id = ?", (attempt_id,),
+    ).fetchone()
+    assert lock is None
+    # 审计事件
+    rec_ev = repo._runtime_connect().execute(
+        "SELECT payload_json FROM runtime_events WHERE event_type = 'attempt_recovered'",
+    ).fetchall()
+    assert len(rec_ev) == 1
+    assert "recorded" in rec_ev[0]["payload_json"]
+    # recover 幂等: 已 recovered 再 recover 拒绝
+    again = repo.recover_attempt_unknown(
+        attempt_id, operator="human-checker", effect_disposition="confirmed_noop"
+    )
+    assert again.get("recovered") is False
+    assert again.get("reason") == "not_unknown"
+    # 恢复后自动挂载放行(同 run 新 attempt)
+    new_attempt = repo.create_attempt(str(rec["agent_run_id"]))
+    assert str(new_attempt["attempt_id"]) != attempt_id
+    assert str(new_attempt["attempt_id"])
+
+
+def test_recover_rejects_running_attempt(tmp_path):
+    """recover 只接受 unknown 终态——活 attempt(运行中)拒绝, 防误释放。"""
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+
+    repo = RuntimeRepository(tmp_path / "home" / "runtime.db")
+    rec = repo.record_run_creation(
+        owner_id="local/main", goal="g", run_id="run-live", role="main"
+    )
+    attempt_id = str(rec["attempt_id"])
+    result = repo.recover_attempt_unknown(
+        attempt_id, operator="human", effect_disposition="confirmed_noop"
+    )
+    assert result.get("recovered") is False
+    assert result.get("reason") == "not_unknown"
+    # 活 attempt 不受影响
+    attempt = repo._runtime_connect().execute(
+        "SELECT status FROM agent_attempts WHERE attempt_id = ?", (attempt_id,),
+    ).fetchone()
+    assert attempt["status"] == "running"

@@ -263,3 +263,32 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   消费点。
 - 验收：生产 grep 无新消费点；test_secret_store*.py 保留（类未删，测试
   继续有效，验证既有行为不回归）。
+
+## 2026-08-15 attempt 级 UNKNOWN 结构化终态 + 人工恢复路径（双席 seq1947 核对点3 / seq1948 证据4）
+
+【决策】孤儿回收遇 UNKNOWN 工具操作/外部副作用未核实 → attempt 层标
+结构化 `unknown` 终态（不再永久 running 无感知），但不释放执行权锁、
+不自动续跑；唯一出口 = 人工核对后显式 `recover_attempt_unknown`。
+
+- attempt 状态机：running → unknown（自动发现）→ recovered（人工恢复）。
+  unknown ≠ failed（已知失败才 failed）；unknown 不触发自动续跑
+  （create_attempt 的 unknown 闸 fail-closed 抛 RuntimeConflictError +
+  attempt_unknown_blocked 诊断事件，recovered 前任何自动拉起被拒）。
+- 锁语义：_mark_attempt_unknown 保留执行权锁（external 副作用未核实前
+  锁防并发写执行权）；recover 事务内 CAS（unknown → recovered）成功才
+  删锁 + 写 attempt_recovered 审计事件（含 operator/effect_disposition
+  结构化三值：confirmed_noop/recorded/abandoned）。
+- 幂等闭环：reclaim 前置 already_terminal（同 attempt 只标一次）；
+  orphan_reclaim_blocked / attempt_unknown_terminal 事件同 attempt+reason
+  只写一次（孤儿回收每 ~5 分钟一趟不刷屏）。
+- 四层保持分开：只动 agent_attempts；run 保持 created（可恢复后同 run
+  续挂新 attempt）；task/session 层不受影响。
+- side_effect_gate 与 nonterminal_ops 两分支同款（问题C 只补可见性，
+  本条目补结构化终态）。
+
+【验收】37 passed（test_cli_resume_contract 含 4 新用例：side_effect_gate
+标记、create_attempt 拦截、recover 放行+幂等、活 attempt 拒绝 recover）+
+全量 gate 回归。
+
+【待办】真机 zombie 复现四类原始证据（diff/工作树 + orphan_reclaim_blocked
+完整字段链 + 重启无重复 claim/handoff + UNKNOWN 人工核对/显式恢复路径）。

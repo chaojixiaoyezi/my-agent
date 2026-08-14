@@ -31,6 +31,8 @@ from .acceptance_operations import RuntimeAcceptanceMixin
 from .delivery_operations import RuntimeDeliveryMixin
 from .operations import (
     AGENT_RUN_TERMINAL_STATUSES,
+    ATTEMPT_STATUS_RECOVERED,
+    ATTEMPT_STATUS_UNKNOWN,
     EXEC_LOCK_GRACE_SECONDS,
     EXEC_LOCK_LEASE_SECONDS,
     EXEC_LOCK_SCOPE_PREFIX,
@@ -41,6 +43,7 @@ from .operations import (
     RUN_STATUS_LEGACY_CREATED,
     RuntimeConflictError,
     RuntimeOperationsMixin,
+    _ATTEMPT_TERMINAL_STATUSES,
     exec_lock_scope,
     holder_is_alive,
 )
@@ -449,6 +452,34 @@ class RuntimeRepository(
                 conn.commit()
                 raise RuntimeConflictError(
                     f"run 状态未知({status!r})，fail-closed 拒绝挂载: {agent_run_id}"
+                )
+            # attempt 层 unknown 闸（2026-08-15 双席核对点3）：最新 attempt
+            # 标 unknown（执行者死亡+结果未知）→ 自动挂载被拒——不能触发
+            # 自动续跑；recover_attempt_unknown 人工核对后（→ recovered）
+            # 才放行。锁保留在 _mark_attempt_unknown 时没有释放，即使此处
+            # 误过闸，takeover 也不应发生——本闸是结构化第一道。
+            latest_attempt = conn.execute(
+                "SELECT attempt_id, status FROM agent_attempts "
+                "WHERE agent_run_id = ? ORDER BY started_at DESC LIMIT 1",
+                (agent_run_id,),
+            ).fetchone()
+            if latest_attempt is not None and \
+                    str(latest_attempt["status"] or "") == ATTEMPT_STATUS_UNKNOWN:
+                self._append_event_conn(
+                    conn,
+                    event_type="attempt_unknown_blocked",
+                    attempt_id=str(latest_attempt["attempt_id"] or ""),
+                    agent_run_id=agent_run_id,
+                    task_run_id=str(run["task_run_id"] or ""),
+                    payload={"status": ATTEMPT_STATUS_UNKNOWN,
+                             "action": "create_attempt_blocked",
+                             "reason": "attempt_unknown_terminal",
+                             "hint": "执行者死亡且结果不可知, 自动拉起被拒; "
+                                     "人工核对后 recover_attempt_unknown 显式恢复"},
+                )
+                conn.commit()
+                raise RuntimeConflictError(
+                    f"attempt 未知终态(unknown)，fail-closed 拒绝挂载: {agent_run_id}"
                 )
             lock = conn.execute(
                 "SELECT * FROM resource_locks WHERE canonical_scope = ?", (scope,)
@@ -1095,6 +1126,44 @@ class RuntimeRepository(
                 return "failed"
         return "done"
 
+    def _mark_attempt_unknown(
+        self, attempt_id: str, agent_run_id: str, *, reason: str, operator: str
+    ) -> bool:
+        """attempt 标结构化 unknown 终态（CAS 幂等，单事务）。
+
+        2026-08-15 双席核对点3/证据4: 执行者死亡 + 结果不可知 → attempt
+        层终态标记 (status='unknown' + ended_at), 绝不等同 failed(已知失败),
+        也绝不触发自动续跑(执行权锁保留 + create_attempt 的 unknown 闸
+        fail-closed 拒绝——recovered 前任何自动拉起都会撞 RuntimeConflictError)。
+        四层保持分开: 只动 agent_attempts, run/task 层状态不落账。
+        """
+        now = time.time()
+        try:
+            with self.transaction() as conn:
+                cur = conn.execute(
+                    "UPDATE agent_attempts SET status = ?, ended_at = ? "
+                    "WHERE attempt_id = ? AND status = 'running'",
+                    (ATTEMPT_STATUS_UNKNOWN, now, attempt_id),
+                )
+                if cur.rowcount == 0:
+                    return False  # 已被其他路径终态化, 幂等跳过
+                self._append_event_conn(
+                    conn,
+                    event_type="attempt_unknown_terminal",
+                    attempt_id=attempt_id,
+                    agent_run_id=agent_run_id,
+                    payload={
+                        "status": ATTEMPT_STATUS_UNKNOWN,
+                        "reason": str(reason or ""),
+                        "operator": str(operator or ""),
+                        "hint": "执行者死亡且结果不可知, 自动回收停手; 执行权锁保留, "
+                                "恢复器须显式 recover_attempt_unknown 核对后释放",
+                    },
+                )
+            return True
+        except Exception:  # noqa: BLE001 标记尽力而为, 不改变 fail-closed 语义
+            return False
+
     def find_orphaned_attempts(
         self,
         *,
@@ -1153,6 +1222,14 @@ class RuntimeRepository(
                     holder_is_alive(int(lock["pid"] or 0),
                                     str(lock["start_token"] or "")):
                 return {"reclaimed": False, "reason": "lock_active"}
+            # 幂等闭环(2026-08-15): attempt 已标 unknown/recovered 终态 →
+            # 不再重复扫描/重复标/重复写事件(孤儿回收每 ~5 分钟一趟)。
+            attempt_row = conn.execute(
+                "SELECT status FROM agent_attempts WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+            if attempt_row is not None and \
+                    str(attempt_row["status"] or "") in _ATTEMPT_TERMINAL_STATUSES:
+                return {"reclaimed": False, "reason": "already_terminal"}
             rows = conn.execute(
                 "SELECT outcome_json FROM tool_operations WHERE attempt_id = ? "
                 "AND status IN ('EXECUTING', 'CLAIMED', 'UNKNOWN')",
@@ -1194,7 +1271,17 @@ class RuntimeRepository(
                         )
                 except Exception:
                     pass  # 事件写入尽力而为, 不改变拦截语义
-                return {"reclaimed": False, "reason": "side_effect_gate"}
+                # 2026-08-15 双席核对点3: 拦截转结构化终态——attempt 标 unknown
+                # + 执行权锁保留(外部副作用未核实, 锁防并发写; create_attempt
+                # 的 unknown 闸拦自动接管), 人工 recover 核对副作用后才释放。
+                marked = self._mark_attempt_unknown(
+                    attempt_id,
+                    str(lock["canonical_scope"] or "").removeprefix(EXEC_LOCK_SCOPE_PREFIX),
+                    reason="side_effect_gate",
+                    operator=operator,
+                )
+                return {"reclaimed": False, "reason": "side_effect_gate",
+                        "marked_unknown": marked}
         run = self.get_attempt(attempt_id)
         if run is None:
             return {"reclaimed": False, "reason": "no_such_attempt"}
@@ -1232,7 +1319,17 @@ class RuntimeRepository(
                     )
             except Exception:
                 pass  # 事件写入尽力而为, 不改变拦截语义
-            return {"reclaimed": False, "reason": "nonterminal_ops"}
+            # 2026-08-15 双席核对点3: 拦截转结构化终态——attempt 标 unknown
+            # + 执行权锁保留(UNKNOWN op 结果不可知; create_attempt 的 unknown
+            # 闸拦自动接管——recovered 前该 run 不会被自动拉起续跑)。
+            marked = self._mark_attempt_unknown(
+                attempt_id,
+                str(run["agent_run_id"] or ""),
+                reason="nonterminal_ops",
+                operator=operator,
+            )
+            return {"reclaimed": False, "reason": "nonterminal_ops",
+                    "marked_unknown": marked}
         result = self.settle_agent_run(
             agent_run_id=str(run["agent_run_id"]),
             status=closeout,
@@ -1243,6 +1340,60 @@ class RuntimeRepository(
         if not result.get("settled"):
             return {"reclaimed": False, "reason": result.get("reason", "settle_failed")}
         return {"reclaimed": True, "status": closeout, "attempt_id": attempt_id}
+
+    def recover_attempt_unknown(
+        self,
+        attempt_id: str,
+        *,
+        operator: str,
+        effect_disposition: str = "confirmed_noop",
+        reason: str = "",
+    ) -> dict[str, Any]:
+        """人工核对后的显式恢复（2026-08-15 双席证据4）：unknown → recovered。
+
+        UNKNOWN 终态的 attempt 只有这一条出口：恢复器（人/监督者）核对外部
+        副作用处置后显式调用——事务内 CAS（status='unknown' → 'recovered'）
+        成功才释放执行权锁（UNIQUE scope 允许新 attempt 挂载）+ 写
+        attempt_recovered 审计事件（含 operator/effect_disposition/reason）。
+        非 unknown 状态/已 recovered → 拒绝（幂等，不重复删锁/写事件）。
+        effect_disposition 结构化值：confirmed_noop(已核实无副作用) /
+        recorded(副作用已人工入账) / abandoned(副作用丢弃接受)。禁 NL 判定。
+        """
+        if str(effect_disposition or "") not in {"confirmed_noop", "recorded", "abandoned"}:
+            return {"recovered": False, "reason": "invalid_effect_disposition"}
+        now = time.time()
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT agent_run_id FROM agent_attempts WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+            if row is None:
+                return {"recovered": False, "reason": "no_such_attempt"}
+            cur = conn.execute(
+                "UPDATE agent_attempts SET status = ?, ended_at = ? "
+                "WHERE attempt_id = ? AND status = ?",
+                (ATTEMPT_STATUS_RECOVERED, now, attempt_id, ATTEMPT_STATUS_UNKNOWN),
+            )
+            if cur.rowcount != 1:
+                return {"recovered": False, "reason": "not_unknown"}
+            agent_run_id = str(row["agent_run_id"] or "")
+            conn.execute(
+                "DELETE FROM resource_locks WHERE canonical_scope = ?",
+                (exec_lock_scope(agent_run_id),),
+            )
+            self._append_event_conn(
+                conn,
+                event_type="attempt_recovered",
+                attempt_id=attempt_id,
+                agent_run_id=agent_run_id,
+                payload={
+                    "status": ATTEMPT_STATUS_RECOVERED,
+                    "operator": str(operator or ""),
+                    "effect_disposition": effect_disposition,
+                    "reason": str(reason or ""),
+                },
+            )
+        return {"recovered": True, "attempt_id": attempt_id, "agent_run_id": agent_run_id}
 
     # -------------------------------------------------------- RuntimeEvents
     def append_event(
