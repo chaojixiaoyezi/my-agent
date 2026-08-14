@@ -3697,6 +3697,17 @@ def _gateway_consume_policy_cas(store: object, policy: ProgressPolicy, *, now: f
             claimed_at = 0.0
         if claimed_at > 0 and now - claimed_at < CLI_RESUME_LEASE_SECONDS:
             return None  # CLI 持有: 放弃(gateway 不并发消费)
+        # 双席复核硬门2(seq1897 维护记录): 拒绝仍在 lease 内的既有
+        # gateway_claim_at——多 gateway 实例(或重启残留)并发时, 后到者
+        # 不能覆盖存活领取, 同一把锁内 CAS 保证 gateway-wide 互斥
+        # (不依赖「gateway 单例」假设)。
+        gateway_claimed = metadata.get("gateway_claim_at")
+        try:
+            gateway_claimed = float(gateway_claimed) if gateway_claimed else 0.0
+        except (TypeError, ValueError):
+            gateway_claimed = 0.0
+        if gateway_claimed > 0 and now - gateway_claimed < CLI_RESUME_LEASE_SECONDS:
+            return None  # 其他 gateway 实例持有: 放弃
         metadata["consumer"] = "gateway_scheduler"
         metadata["gateway_claim_at"] = now
         return _replace(current_policy, metadata=metadata)

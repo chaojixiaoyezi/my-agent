@@ -1028,3 +1028,48 @@ def test_handoff_budget_gate_stops_infinite_continuation(tmp_path):
     assert fake.calls == [HANDOFF_BUDGET_SEGMENTS + 1]  # 执行了一轮
     pending = repo.pending_continuation_handoffs(limit=10)
     assert pending == []  # 不续写移交单
+
+
+def test_gateway_consume_rejects_live_gateway_claim(tmp_path):
+    """双席复核硬门2(seq1897): gateway 锁内 CAS 拒绝仍在 lease 内的既有
+    gateway_claim_at——多 gateway 实例互斥不依赖单例假设; lease 过期后
+    可接管(重启残留让位)。"""
+    import time as _time
+
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+    from agent_py_agent.agent.conversation.runtime import _gateway_consume_policy_cas
+    from agent_py_agent.agent.conversation.store import ConversationStore
+
+    store = ConversationStore(tmp_path / "conv")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "u", "channel": "cli_run",
+            "channel_conversation_id": "req-gw2", "channel_user_id": "u",
+            "owner_id": "local/main", "owner_home": str(tmp_path), "title": "t",
+        }
+    )
+    store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id, "task_id": "task-gw2",
+            "interval_seconds": 180, "now": _time.time(),
+            "metadata": {"kind": "ordinary_task_resume", "resume_used": 0, "resume_limit": 3},
+        }
+    )
+    policy = store.list_progress_policies(enabled_only=True)[0]
+    now = _time.time()
+    # gateway A 领取成功
+    assert _gateway_consume_policy_cas(store, policy, now=now) is True
+    # gateway B(另一实例)在 lease 内 → 被拒(不覆盖存活领取)
+    assert _gateway_consume_policy_cas(store, policy, now=now + 10) is False
+    # lease 过期后 B 可接管(A 崩溃/退出让位)
+    assert _gateway_consume_policy_cas(store, policy, now=now + 400) is True
+    # 非 ordinary 类型不受互斥影响
+    store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id, "task_id": "task-other2",
+            "interval_seconds": 180, "now": now,
+            "metadata": {"kind": "other_kind"},
+        }
+    )
+    po = [p for p in store.list_progress_policies(enabled_only=True) if p.task_id == "task-other2"][0]
+    assert _gateway_consume_policy_cas(store, po, now=now) is True
