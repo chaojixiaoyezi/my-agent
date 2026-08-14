@@ -1130,3 +1130,56 @@ def test_handoff_round_deadline_interrupts_and_does_not_rehandoff(tmp_path, monk
     _runtime._run_handoff_continuation(fake, handoff, now=now)
     assert fake.calls == [1]  # 执行了(被中断)
     assert repo.pending_continuation_handoffs(limit=10) == []  # 不续写
+
+
+def test_orphan_reclaim_nonterminal_ops_writes_visible_event(tmp_path):
+    """僵尸 attempt 可见性(2026-08-15 真机 verify-mr4 坐实): 孤儿 reclaim
+    遇 UNKNOWN 工具操作 fail-closed 拒自动裁决时, 必须写 orphan_reclaim_
+    blocked 审计事件(不再静默)——attempt 永久 running 但 owner/恢复器可
+    发现并人工处理。"""
+    import time as _time
+
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+
+    repo = RuntimeRepository(tmp_path / "home" / "runtime.db")
+    now = 1786004000.0
+    rec = repo.record_run_creation(
+        owner_id="local/main", goal="g", run_id="run-zombie", role="main"
+    )
+    attempt_id = str(rec["attempt_id"])
+    # 构造: 过期执行锁 + UNKNOWN 工具操作(结果不可知)
+    with repo.transaction() as conn:
+        conn.execute(
+            "INSERT INTO tool_operations(operation_id, agent_run_id, attempt_id, "
+            "attempt_generation, tool_operation_generation, operation_type, "
+            "status, created_at, updated_at, outcome_json) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                "op-zombie-1", str(rec["agent_run_id"]), attempt_id, 1, 1,
+                "run_command", "UNKNOWN", now - 100, now - 100,
+                '{"args_hash": "sha256:x"}',
+            ),
+        )
+        # record_run_creation 不建执行锁(锁在 create_attempt 轮换时建)——
+        # 直接 INSERT 一条过期锁模拟僵尸 attempt
+        conn.execute(
+            "INSERT INTO resource_locks(lock_id, canonical_scope, holder_instance, "
+            "pid, start_token, attempt_id, attempt_generation, workspace_epoch, "
+            "tool_operation_generation, lease_expires_at, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "lock-zombie-1", f"attempt-exec:{rec['agent_run_id']}",
+                "test-holder", 99999, "tok", attempt_id, 1, 1, 0,
+                now - 3600, now - 3700, now - 3700,
+            ),
+        )
+    # 触发 reclaim(now 传参使宽限期成立)
+    result = repo.reclaim_orphaned_attempt(attempt_id, operator="test", reason="x")
+    assert result.get("reclaimed") is False
+    assert result.get("reason") == "nonterminal_ops"
+    # 可见事件已写(不再静默)
+    events = repo._runtime_connect().execute(
+        "SELECT payload_json FROM runtime_events "
+        "WHERE event_type = 'orphan_reclaim_blocked'",
+    ).fetchall()
+    assert len(events) == 1
+    assert "nonterminal_ops" in events[0]["payload_json"]

@@ -1192,6 +1192,29 @@ class RuntimeRepository(
             return {"reclaimed": False, "reason": "no_such_attempt"}
         closeout = self.classify_attempt_closeout(attempt_id)
         if closeout is None:
+            # 2026-08-15 真机(verify-mr4 attempt-10 僵尸坐实): UNKNOWN op
+            # fail-closed 拒自动裁决是安全设计(结果不可知绝不盲判), 但此前
+            # 此路径静默返回——attempt 永久 running 且无任何可见信号(问题C
+            # 只补了 side_effect_gate 的可见性, 漏了 nonterminal_ops)。
+            # 补可见: 写 runtime_events 审计事件, owner/恢复器可发现并人工
+            # 处理(长期助手 同款 unknown 语义: 执行者死亡、副作用是否发生
+            # 未知——诚实标注而非永久 running)。
+            try:
+                self.append_event(
+                    event_type="orphan_reclaim_blocked",
+                    attempt_id=attempt_id,
+                    agent_run_id=str(lock["canonical_scope"] or "").removeprefix(
+                        EXEC_LOCK_SCOPE_PREFIX
+                    ),
+                    payload={
+                        "reason": "nonterminal_ops",
+                        "operator": str(operator or ""),
+                        "hint": "attempt 含结果未知(UNKNOWN)工具操作, 自动回收被拒; "
+                                "执行者可能已消失但副作用状态不可知——请人工核对后处理",
+                    },
+                )
+            except Exception:
+                pass  # 事件写入尽力而为, 不改变拦截语义
             return {"reclaimed": False, "reason": "nonterminal_ops"}
         result = self.settle_agent_run(
             agent_run_id=str(run["agent_run_id"]),
