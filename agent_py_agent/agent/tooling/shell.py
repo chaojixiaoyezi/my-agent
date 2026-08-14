@@ -60,6 +60,23 @@ _TOOL_DEADLINE_UNIX_ENV = "MY_AGENT_TOOL_DEADLINE_UNIX"
 _TOOL_DEADLINE_MARGIN_SECONDS_ENV = "MY_AGENT_TOOL_DEADLINE_MARGIN_SECONDS"
 _WAIT_MIN_SECONDS = 60
 _WAIT_MAX_SECONDS = 7200
+
+# shell 解释器错误前缀白名单(command not found 判定用, 2026-08-14):
+# bash/sh/zsh 找不到命令时 stderr 固定以 "<shell>: " 开头(如
+# "/bin/bash: 行 1: cmd: 未找到命令" 中文 locale 亦然), 不随 locale 变;
+# 显式 `exit 127` 的命令自身 stderr 无此前缀——命令确实执行过, 副作用可能
+# 已发生, 不得误判 not_started。只做前缀白名单(结构化来源标识), 不匹配
+# 错误内容文本(禁 NL 匹配铁律)。
+_SHELL_ERROR_PREFIXES = (
+    "bash: ",
+    "/bin/bash: ",
+    "sh: ",
+    "/bin/sh: ",
+    "dash: ",
+    "/bin/dash: ",
+    "zsh: ",
+    "/bin/zsh: ",
+)
 _INTERNAL_AGENT_PATH_RE = re.compile(
     r"(?P<prefix>(?:^|[\s'\";|&])(?:\S*/)?tasks/\S+/work/agents(?:/|\b)|(?:^|[\s'\";|&])work/agents(?:/|\b))",
     re.I,
@@ -1023,14 +1040,17 @@ class ShellTool(BaseTool):
             return "unknown"
         if error_code != "COMMAND_FAILED":
             return ""
-        # exit 127 + stderr 非空 → command not found,进程从未启动。
-        # 缺 process_facts(旧调用点)时保守不声明,沿通用合同。
-        if (
-            isinstance(process_facts, dict)
-            and int(process_facts.get("return_code") or 0) == 127
-            and int(process_facts.get("stderr_chars") or 0) > 0
-        ):
-            return "not_started"
+        # exit 127 + stderr 来自 shell 解释器错误前缀 → command not found,
+        # 进程从未启动(bash 找不到命令报错固定以 "bash: " 等前缀开头, 不随
+        # locale 变; 显式 `exit 127` 的命令自身 stderr 无此前缀——命令确实
+        # 执行过, 副作用可能已发生, 不得误判 not_started)。缺 process_facts
+        # (旧调用点)时保守不声明, 沿通用合同。
+        if isinstance(process_facts, dict) and int(
+            process_facts.get("return_code") or 0
+        ) == 127:
+            stderr_head = str(process_facts.get("stderr_head") or "")
+            if stderr_head.startswith(_SHELL_ERROR_PREFIXES):
+                return "not_started"
         try:
             analysis = analyze_command(command)
         except Exception:  # noqa: BLE001 - 判定失败时保守不声明,沿通用合同
@@ -1065,8 +1085,12 @@ class ShellTool(BaseTool):
                     "status": "exited",
                     "return_code": int(result.returncode),
                     "command_succeeded": ok,
-                    # 结构化 stderr 非空信号(command not found 判定用, locale 无关)
+                    # 结构化 stderr 信号(command not found 判定用, locale 无关):
+                    # stderr_chars=stderr 字节数; stderr_head=stderr 前 80 字符——
+                    # 只用于 shell 解释器错误前缀白名单匹配(bash/sh/zsh 的
+                    # "bash: ..." 固定前缀, 不随 locale 变), 不匹配错误内容。
                     "stderr_chars": len(str(getattr(result, "stderr", "") or "")),
+                    "stderr_head": str(getattr(result, "stderr", "") or "")[:80],
                 },
             )
         except subprocess.TimeoutExpired:

@@ -338,6 +338,7 @@ def test_shell_tool_pipeline_cannot_hide_failed_gate(shell_tool: ShellTool) -> N
         "return_code": 7,
         "command_succeeded": False,
         "stderr_chars": 0,
+        "stderr_head": "",
     }
 
 
@@ -374,6 +375,25 @@ def test_shell_tool_explicit_exit_127_keeps_unknown(shell_tool: ShellTool) -> No
     assert result.error_code == "COMMAND_FAILED"
     assert result.result_envelope["process"]["return_code"] == 127
     assert result.result_envelope["process"]["stderr_chars"] == 0
+    assert result.effect_outcome != "not_started"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="exit 127 判定是 POSIX shell 契约")
+def test_shell_tool_exit_127_with_stderr_keeps_unknown(shell_tool: ShellTool) -> None:
+    """显式 exit 127 且带 stderr 输出的命令不得声明 not_started。
+
+    维护记录 边界: 显式 `exit 127`、带 stderr 的脚本——命令确实执行了
+    (stderr 有内容), 副作用可能已发生, 必须保持保守 unknown, 不能仅凭
+    return_code==127 就误判成零副作用。
+    """
+    result = shell_tool.execute(
+        {"command": "echo 'warning: something happened' >&2; exit 127"}
+    )
+    assert result.ok is False
+    assert result.error_code == "COMMAND_FAILED"
+    assert result.result_envelope["process"]["return_code"] == 127
+    assert result.result_envelope["process"]["stderr_chars"] > 0
+    # stderr 非空是命令真实执行过的结构化证据, 副作用不确定 → 不得 not_started
     assert result.effect_outcome != "not_started"
 
 
