@@ -82,14 +82,26 @@ def continuation_from_params(params: RunParams) -> CliContinuationContext | None
 # 先写 metadata.cli_claim(带时间戳), 已 claim 且 lease 未过期则跳过;
 # gateway 不读此标记(它仍是权威调度器), 但 CLI 侧保证自己不与 gateway
 # 双跑同一 task(CLI 只在首轮收口后立即续跑, 竞争窗口极窄)。
-_CLI_RESUME_LEASE_SECONDS = 300
+# CLI claim 的互斥 lease 秒数(双席复核硬门2: gateway 调度器与 CLI 同读
+# 同一 claim)。唯一权威在 conversation/runtime.py(gate 层, cli→conversation
+# import 方向合法, 反之违反导入边界 RUNTIME_IMPORTS_CLI)。
+from ..agent.conversation.runtime import CLI_RESUME_LEASE_SECONDS  # noqa: E402
+
+_CLI_RESUME_LEASE_SECONDS = CLI_RESUME_LEASE_SECONDS
 
 
 def try_claim_cli_resume(store: object, task_id: str, *, now: float | None = None) -> bool:
-    """尝试独占消费某 task 的续跑 policy(CLI 侧, CAS 语义)。
+    """尝试独占消费某 task 的续跑 policy(CLI 侧, 严格 CAS)。
 
     返回 True=可续跑(未 claim 或 lease 已过期); False=已被其他 consumer
     持有(CLI 跳过本轮, 等 gateway/下次)。
+
+    2026-08-14 双席复核硬门1: 旧实现先 list_progress_policies 读、再
+    mark_progress_reported 写——两个消费者(CLI vs gateway)并发时读-改-写
+    窗口内互相覆盖, 无 expected-version 比对。现在改用 store 的
+    update_progress_policy_atomic(fcntl.flock 锁内读-改-写, 同文件系统
+    任意消费者互斥): updater 内比对 cli_claim_at lease, 条件不满足返回
+    None=不写盘——严格 compare-and-set。
     """
     import time as _time
 
@@ -105,30 +117,34 @@ def try_claim_cli_resume(store: object, task_id: str, *, now: float | None = Non
     if not matching:
         return False
     policy = matching[0]
-    metadata = dict(policy.metadata or {})
-    claimed_at = metadata.get("cli_claim_at")
+
+    def _cas_updater(current_policy: object):
+        metadata = dict(current_policy.metadata or {})
+        claimed_at = metadata.get("cli_claim_at")
+        try:
+            claimed_at = float(claimed_at) if claimed_at else 0.0
+        except (TypeError, ValueError):
+            claimed_at = 0.0
+        if claimed_at > 0 and current - claimed_at < _CLI_RESUME_LEASE_SECONDS:
+            return None  # lease 未过期: 条件不满足, 锁内不写盘(=CAS 失败)
+        metadata["cli_claim_at"] = current
+        metadata["cli_claim_owner"] = "cli_resume_loop"
+        # 预算语义(双席复核硬门2): 一次 claim 授予整条进程内续跑链——
+        # resume_used 只在建/续 policy 时递增(ensure_ordinary_task_resume),
+        # 链内 max_rounds 轮次不重复记账; gateway 同读 cli_claim_at(见
+        # _progress_policy_suppression_reason)在 lease 内跳过该 task,
+        # 保证 claim 链内无并发消费者, resume_limit 与 max_rounds 不漂移。
+        from dataclasses import replace as _replace
+
+        return _replace(current_policy, metadata=metadata)
+
     try:
-        claimed_at = float(claimed_at) if claimed_at else 0.0
-    except (TypeError, ValueError):
-        claimed_at = 0.0
-    if claimed_at > 0 and current - claimed_at < _CLI_RESUME_LEASE_SECONDS:
-        return False  # 已被 CLI 自己(或并发 consumer) claim, lease 未过期
-    metadata["cli_claim_at"] = current
-    metadata["cli_claim_owner"] = "cli_resume_loop"
-    try:
-        # mark_progress_reported 支持 metadata_updates(续跑预算递增同款
-        # 更新路径)——claim 标记写同一 policy 文件, 与预算记账同权威。
-        store.mark_progress_reported(
-            policy.policy_id,
-            now=current,
-            metadata_updates={
-                "cli_claim_at": current,
-                "cli_claim_owner": "cli_resume_loop",
-            },
+        _updated, changed = store.update_progress_policy_atomic(
+            policy.policy_id, _cas_updater
         )
     except Exception:  # noqa: BLE001 CAS 失败保守跳过
         return False
-    return True
+    return bool(changed)  # 锁内比对后实际写盘=claim 成功
 
 
 def record_budget_exhausted(

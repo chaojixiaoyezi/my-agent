@@ -5186,9 +5186,32 @@ def _progress_policy_suppression_reason(
         return "durable_audit_source_worker_policy"
     if _policy_task_link_is_terminal(store, policy):
         return "terminal_task_link"
+    if _cli_claim_holds_policy(policy, now=now):
+        return "cli_claim_held"  # 双席复核硬门2: gateway 与 CLI 同读同一 claim
     if _progress_policy_is_stale(policy, now=now):
         return "stale_missed_interval"
     return ""
+
+
+def _cli_claim_holds_policy(policy: ProgressPolicy, *, now: float) -> bool:
+    """CLI resume_loop 的 cli_claim_at lease 内持有 → gateway 不并发消费。
+
+    2026-08-14 双席复核硬门2: resume_used=1 对应整条进程内续跑链的预算
+    语义成立的前提是 gateway 不会在 CLI claim 链内拉起同一 task。CLI 与
+    gateway 同读同一 policy metadata(cli_claim_at/cli_claim_owner)——
+    lease(300s) 内 gateway 调度器 suppress 该 policy, 链内无并发消费者;
+    lease 过期(CLI 崩溃/退出未释放)后 gateway 自然接管, 不双跑。
+    """
+    if str((policy.metadata or {}).get("kind") or "") != "ordinary_task_resume":
+        return False
+    claimed_at = (policy.metadata or {}).get("cli_claim_at")
+    try:
+        claimed_at = float(claimed_at) if claimed_at else 0.0
+    except (TypeError, ValueError):
+        claimed_at = 0.0
+    if claimed_at <= 0:
+        return False
+    return now - claimed_at < CLI_RESUME_LEASE_SECONDS
 
 
 def _is_legacy_child_watch_backstop_policy(policy: ProgressPolicy) -> bool:
@@ -5416,6 +5439,12 @@ def _agent_config_int(config: object | None, key: str) -> int:
 # 可续跑收口 reason 白名单(与 _schedule_typed_unfinished_continuation 同一
 # gate 分支): 任务未完成、预算内可自动续跑。EXHAUSTED 变体(收益递减/硬门)
 # 不在此列, 等用户介入。
+# CLI 自动续跑 claim 的互斥 lease 秒数(2026-08-14 双席复核硬门2):
+# gateway 调度器与 CLI resume_loop 同读同一 policy metadata——
+# cli.resume_contract 从此处 import(cli→conversation 方向合法, 反之违规)。
+CLI_RESUME_LEASE_SECONDS = 300
+
+
 CONTINUABLE_REASONS = frozenset(
     {
         "TASK_PROGRESS_OPEN",
