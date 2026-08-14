@@ -1165,6 +1165,27 @@ class RuntimeRepository(
                 payload = {}
             if isinstance(payload, dict) and payload.get("side_effect") is True \
                     and not str(payload.get("effect_key") or "").strip():
+                # 问题C(2026-08-14 真机实证): 副作用门拦截曾是静默的——attempt
+                # 永卡 running 且无任何可见信号(第3轮复刻任务卡死 30 分钟无感知)。
+                # 拦截转可见: 写 runtime_events 审计事件, owner/恢复器可发现并
+                # 人工处理; 不改 fail-closed 语义(外部副作用结果不可知时绝不
+                # 自动收口, 安全意图保持)。
+                try:
+                    self.append_event(
+                        event_type="orphan_reclaim_blocked",
+                        attempt_id=attempt_id,
+                        agent_run_id=str(lock["canonical_scope"] or "").removeprefix(
+                            EXEC_LOCK_SCOPE_PREFIX
+                        ),
+                        payload={
+                            "reason": "side_effect_gate",
+                            "operator": str(operator or ""),
+                            "hint": "attempt 有外部副作用且无 effect_key, 自动回收被拒; "
+                                    "请人工核对后处理",
+                        },
+                    )
+                except Exception:
+                    pass  # 事件写入尽力而为, 不改变拦截语义
                 return {"reclaimed": False, "reason": "side_effect_gate"}
         run = self.get_attempt(attempt_id)
         if run is None:

@@ -465,6 +465,13 @@ def test_g_reclaim_side_effect_gate(repo):  # RED
                                            operator="test-red")
     assert result["reclaimed"] is False
     assert result["reason"] == "side_effect_gate"
+    # 问题C(2026-08-14 真机): 拦截转可见——side_effect_gate 必须写
+    # runtime_events 审计事件(此前静默, attempt 永卡 running 无感知)。
+    events = _events_of_type(repo, "orphan_reclaim_blocked")
+    assert events, "side_effect_gate 拦截应留 orphan_reclaim_blocked 审计事件"
+    import json as _json
+    payload = _json.loads(events[0]["payload_json"])
+    assert payload["reason"] == "side_effect_gate"
 
 
 def test_g_reclaim_no_side_effect_ok(repo):  # RED
