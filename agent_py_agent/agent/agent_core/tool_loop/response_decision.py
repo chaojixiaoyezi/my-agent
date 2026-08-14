@@ -240,6 +240,12 @@ def _protocol_violation_decision(
                     "violations": payload,
                 }
             )
+    # 2026-08-14 双CLI复刻(bs4 run-r2): 协议违规只进内存 trace + warning 日志
+    # (CLI 路径 warning 不进输出文件), 磁盘上无结构化记录——审计断链。此处把
+    # provider 原始响应头/解析阶段/repair 计数/模型/协议/副作用事实落 runtime_events,
+    # 与 append-only 权威事件同库 (A.3/A.8: 每事件追到具体 attempt)。fail-silent,
+    # 审计附加保证绝不反噬执行路径。
+    _persist_protocol_violation_event(request, payload, model_output)
     request.params.tool_context.append(
         "[tool-protocol-violation]\n"
         + json.dumps(payload, ensure_ascii=False, sort_keys=True)
@@ -274,6 +280,72 @@ def _protocol_violation_decision(
         [],
         request.counters,
     )
+
+
+def _persist_protocol_violation_event(
+    request: ToolLoopResponseDecisionRequest,
+    violations: list[dict[str, str]],
+    model_output: str,
+) -> None:
+    """协议违规落 runtime_events 权威账本（fail-silent，审计附加保证）。
+
+    2026-08-14 双CLI复刻(bs4 run-r2): 协议违规只进内存 trace + warning 日志
+    (CLI 路径 warning 不进输出文件), 磁盘上无结构化记录——provider 原始响应、
+    解析阶段、repair 次数、终态全部不可审计。此处落 append-only 事件:
+    - provider 原始响应头(前 500 字, 含模型实际输出的工具协议风格, 如 XML
+      <tool_calls> vs [TOOL_CALL], 不截断关键证据);
+    - 结构化 violations(code/detail/source_protocol/evidence_preview);
+    - 解析阶段(text/native adapter)、模型、协议、repair 计数、是否将 break。
+    """
+    try:
+        params = request.params
+        # R1 接线模式: agent.subagents.runtime_db 是 owner 权威库
+        # (_tool_loop_service.py:652 同款); LOCAL_UNMANAGED 无权威库 → noop
+        subagents = getattr(request, "agent", None)
+        subagents = getattr(subagents, "subagents", None)
+        repo = getattr(subagents, "runtime_db", None)
+        if repo is None or not callable(getattr(repo, "append_event", None)):
+            return
+        run_id = str(getattr(params, "run_id", "") or "")
+        attempt_id = str(getattr(params, "attempt_id", "") or "")
+        if not run_id or not attempt_id:
+            return
+        row = repo.agent_run_for_run_id(run_id)
+        if row is None:
+            return
+        max_repairs = max(1, int(getattr(params, "max_protocol_repairs", 2) or 2))
+        will_break = request.counters.protocol_repairs >= max_repairs
+        protocol = getattr(request, "protocol", None)
+        protocol_snapshot = getattr(protocol, "runtime_snapshot", None)
+        if protocol_snapshot is None:
+            protocol_snapshot = getattr(request, "protocol_snapshot", None)
+        source_protocol = str(
+            getattr(protocol_snapshot, "source_protocol", "") or ""
+        )
+        capability = getattr(protocol_snapshot, "capability", None)
+        repo.append_event(
+            event_type="protocol_violation",
+            attempt_id=attempt_id,
+            agent_run_id=str(row["agent_run_id"]),
+            task_run_id=str(row["task_run_id"] or ""),
+            payload={
+                "turn_id": str(request.turn_id or ""),
+                "violations": violations,
+                "model_output_head": model_output[:500],
+                "source_protocol": source_protocol,
+                "model": str(getattr(capability, "model", "") or "")
+                if capability is not None
+                else "",
+                "provider": str(getattr(capability, "provider", "") or "")
+                if capability is not None
+                else "",
+                "protocol_repairs": request.counters.protocol_repairs,
+                "will_break": will_break,
+                "stage": "tool_protocol_adapter",
+            },
+        )
+    except Exception:  # noqa: BLE001 审计落账失败绝不反噬执行路径
+        pass
 
 
 def contains_protected_tool_marker(text: str) -> bool:

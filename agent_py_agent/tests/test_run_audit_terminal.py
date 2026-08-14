@@ -27,6 +27,9 @@ from agent_py_agent.agent.agent_core.runtime_mixin import (
     _settle_main_agent_run,
     _settle_main_agent_run_exception,
 )
+from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
+    _persist_protocol_violation_event,
+)
 from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 
 
@@ -517,3 +520,148 @@ def test_gate_unfinished_ordinary_task_resumes_with_budget(monkeypatch):
     assert goal.calls == []
     assert len(ordinary.calls) == 1
     assert ordinary.calls[0]["due_now"] is True
+
+
+# ------------------------------------------------- 协议违规落账（2026-08-14 双CLI复刻实证）
+
+
+def _violation_agent(repo):
+    return SimpleNamespace(
+        subagents=SimpleNamespace(runtime_db=repo),
+        config=SimpleNamespace(enable_tools=True),
+        backend=SimpleNamespace(name="fake"),
+        root=None,
+    )
+
+
+def _violation_snapshot():
+    from agent_py_agent.tests._tool_runtime_harness import (
+        make_test_model_spec,
+        make_test_protocol_snapshot,
+        runtime_snapshot_for_model_specs,
+    )
+
+    return runtime_snapshot_for_model_specs(
+        (
+            make_test_model_spec(
+                "list_files",
+                input_schema={
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                    "additionalProperties": False,
+                },
+            ),
+        ),
+        run_id="run-1",
+    ), make_test_protocol_snapshot(run_id="run-1", source_protocol="text")
+
+
+def _violation_request(repo, *, text, repairs=0, max_repairs=2, agent=None):
+    from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
+    from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
+        ToolLoopRepairCounters,
+        ToolLoopResponseDecisionRequest,
+        tool_loop_response_decision,
+    )
+    from agent_py_agent.agent.backends import ModelResponse
+
+    agent = _violation_agent(repo) if agent is None else agent
+    runtime_snapshot, protocol_snapshot = _violation_snapshot()
+    params = ToolLoopExecuteParams(
+        user_prompt="test",
+        memories=[],
+        runtime_injections=[],
+        prompt_files=[],
+        tool_catalog_section="",
+        tool_recommendations_section="",
+        tool_context=[],
+        effective_on_chunk=None,
+        allowed_tools=None,
+        write_boundary=None,
+        task_attributes={},
+        request_id="req-1",
+        run_id="run-1",
+        task_id="task-1",
+        one_shot_tool_calls=set(),
+        executed_tools=[],
+        archive_tool_calls=[],
+        delivery_contract={},
+        tool_runtime_snapshot=runtime_snapshot,
+        tool_protocol_snapshot=protocol_snapshot,
+        max_protocol_repairs=max_repairs,
+        attempt_id="attempt-1",
+    )
+    request = ToolLoopResponseDecisionRequest(
+        agent=agent,
+        params=params,
+        response=ModelResponse(text=text, backend="fake"),
+        counters=ToolLoopRepairCounters(protocol_repairs=repairs),
+    )
+    return request, tool_loop_response_decision(request)
+
+
+def test_protocol_violation_persists_runtime_event(repo):
+    """协议违规必须落 runtime_events(provider 原始响应头+结构化 violations)。
+
+    2026-08-14 bs4 run-r2: XML <tool_calls> 被拒后磁盘上无结构化记录——
+    审计断链。修复后: append-only 事件含 model_output_head(原始响应证据)、
+    violations、stage、repair 计数。
+    """
+    _record(repo)
+    request, _ = _violation_request(
+        repo,
+        text='<tool_calls>\n<tool_call><name>list_files</name>'
+        '<params><path>/tmp</path></params></tool_call>\n</tool_calls>',
+    )
+    _persist_protocol_violation_event(
+        request, [{"code": "PROTOCOL_VIOLATION", "detail": "x"}], request.response.text
+    )
+    rows = repo._runtime_connect().execute(
+        "SELECT * FROM runtime_events WHERE event_type = 'protocol_violation'"
+    ).fetchall()
+    assert len(rows) == 1
+    payload = rows[0]["payload_json"]
+    assert "model_output_head" in payload
+    assert "<tool_calls>" in payload  # provider 原始响应头保留证据
+    assert '"stage": "tool_protocol_adapter"' in payload
+    assert '"protocol_repairs": 0' in payload
+    assert '"will_break": false' in payload
+
+
+def test_protocol_violation_break_records_repair_count(repo):
+    """达到 max_repairs 的违规落账须标 will_break=true + 累计 repair 计数。"""
+    _record(repo)
+    request, decision = _violation_request(
+        repo,
+        text='[TOOL_CALL]\n{"tool": "read_file"}',
+        repairs=2,
+        max_repairs=2,
+    )
+    assert decision.action == "break"
+    # decision 内部已落账（_protocol_violation_decision 调 _persist）
+    rows = repo._runtime_connect().execute(
+        "SELECT * FROM runtime_events WHERE event_type = 'protocol_violation'"
+    ).fetchall()
+    assert len(rows) == 1
+    payload = rows[0]["payload_json"]
+    assert '"protocol_repairs": 2' in payload
+    assert '"will_break": true' in payload
+
+
+def test_protocol_violation_no_repo_is_silent(repo):
+    """无权威库(agent.subagents=None)时落账静默跳过,不反噬执行路径。"""
+    _record(repo)
+    request, _ = _violation_request(
+        repo,
+        text="bad",
+        agent=SimpleNamespace(
+            subagents=None,
+            config=SimpleNamespace(enable_tools=True),
+        ),
+    )
+    _persist_protocol_violation_event(request, [], "bad")  # 不应抛
+    rows = repo._runtime_connect().execute(
+        "SELECT * FROM runtime_events WHERE event_type = 'protocol_violation'"
+    ).fetchall()
+    assert len(rows) == 0
