@@ -337,6 +337,7 @@ def test_shell_tool_pipeline_cannot_hide_failed_gate(shell_tool: ShellTool) -> N
         "status": "exited",
         "return_code": 7,
         "command_succeeded": False,
+        "stderr_chars": 0,
     }
 
 
@@ -347,27 +348,32 @@ def test_shell_tool_command_not_found_effect_outcome_not_started(shell_tool: She
     2026-08-14 ④类复刻真机实证: tar 未安装时解压命令 0.15s 立即失败被归
     「副作用结果不确定」→ 模型拿不到真实原因 → 任务死在第一步。exit 127 是
     shell 从未 exec 的结构化事实,必须终态 FAILED 让模型能改命令继续。
+    判定只用结构化信号: return_code==127 且 stderr_chars>0——**不匹配错误
+    文本**(2026-08-14 真机: testbox 中文 locale 报「未找到命令」, 英文文本
+    匹配在中文环境失效, 违反「禁 NL 匹配」铁律)。
     """
     result = shell_tool.execute({"command": "definitely_not_a_command_xyz_12345 -x"})
     assert result.ok is False
     assert result.error_code == "COMMAND_FAILED"
     assert result.effect_outcome == "not_started"
     assert result.result_envelope["process"]["return_code"] == 127
+    assert result.result_envelope["process"]["stderr_chars"] > 0
     # 输出必须保留 shell 真实原因,模型才能改命令
-    assert "command not found" in result.output
+    assert result.output  # 非空即含 stderr 证据
 
 
 @pytest.mark.skipif(os.name == "nt", reason="exit 127 判定是 POSIX shell 契约")
 def test_shell_tool_explicit_exit_127_keeps_unknown(shell_tool: ShellTool) -> None:
-    """显式 exit 127(无 command not found 契约文本)不得声明 not_started。
+    """显式 exit 127(无 stderr 报错)不得声明 not_started。
 
     写命令显式退出 127 无法证明零副作用,保持保守 unknown(防重复副作用)。
-    判定必须同时满足: return_code==127 且输出含 shell 契约文本。
+    判定必须同时满足: return_code==127 且 stderr_chars>0(结构化, locale 无关)。
     """
     result = shell_tool.execute({"command": "printf 'side-effect-before'; exit 127"})
     assert result.ok is False
     assert result.error_code == "COMMAND_FAILED"
     assert result.result_envelope["process"]["return_code"] == 127
+    assert result.result_envelope["process"]["stderr_chars"] == 0
     assert result.effect_outcome != "not_started"
 
 

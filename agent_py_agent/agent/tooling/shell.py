@@ -1010,8 +1010,10 @@ class ShellTool(BaseTool):
           2026-08-14 ④类复刻真机实证——tar 未安装时 0.15s 立即失败(exit 127),
           被归「副作用结果不确定」,模型拿不到真实原因只能请求人工核验,任务死。
           exit 127 是 shell 的结构化事实:目标命令不存在,进程从未启动,零副作用
-          可证明;错误文本(command not found)是 shell 的固定契约输出,不是模型
-          自由文本,结构化匹配安全。
+          可证明。判定只用结构化信号: return_code==127 且 stderr 非空(bash 找
+          不到命令必写 stderr; 显式 `exit 127` 无 stderr)——**不匹配错误文本**
+          (2026-08-14 真机: testbox 中文 locale 报「未找到命令」, 英文文本匹配
+          在 Mac 测试过但在中文环境失效, 违反「禁 NL 匹配」铁律)。
         - 超时 → unknown:进程可能部分生效,防重做(保持)。
         - 写命令失败 → 不声明:沿通用错误合同保守判 unknown(防重复副作用)。
         """
@@ -1021,12 +1023,12 @@ class ShellTool(BaseTool):
             return "unknown"
         if error_code != "COMMAND_FAILED":
             return ""
-        # exit 127 + shell 固定契约文本 → command not found,进程从未启动。
-        # 缺 output/process_facts(旧调用点)时保守不声明,沿通用合同。
+        # exit 127 + stderr 非空 → command not found,进程从未启动。
+        # 缺 process_facts(旧调用点)时保守不声明,沿通用合同。
         if (
             isinstance(process_facts, dict)
             and int(process_facts.get("return_code") or 0) == 127
-            and "command not found" in (output or "")
+            and int(process_facts.get("stderr_chars") or 0) > 0
         ):
             return "not_started"
         try:
@@ -1063,6 +1065,8 @@ class ShellTool(BaseTool):
                     "status": "exited",
                     "return_code": int(result.returncode),
                     "command_succeeded": ok,
+                    # 结构化 stderr 非空信号(command not found 判定用, locale 无关)
+                    "stderr_chars": len(str(getattr(result, "stderr", "") or "")),
                 },
             )
         except subprocess.TimeoutExpired:
