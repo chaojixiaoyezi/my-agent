@@ -1224,7 +1224,8 @@ def _mark_unknown_outcome_halt(agent, record: ToolCallRecordParams) -> None:
                 or getattr(record.result, "error_code", "")
                 or ""
             ),
-            1,
+            effect,
+            bool(getattr(record.result, "handler_executed", False)),
         ),
     )
     record.params.tool_context.append(
@@ -1385,14 +1386,23 @@ def _final_response_after_unknown_outcome_halt(
     # 输出修正等), 收口按 REPEATED_TOOL_FAILURE(可续跑族, 模型开新轮读
     # reported_output_preview 修复); 「真未知」(retryable=False: 超时/
     # 执行者死/无码) 保持 TOOL_OPERATION_OUTCOME_UNKNOWN 单次收口不续跑。
+    # 双席 seq1992 收紧: 仅凭报码不足——「进程非零」不自动等于「无部分
+    # 副作用」。转 REPEATED_TOOL_FAILURE 必须叠加 handler_executed=False
+    # 或 effect_outcome 非 unknown(执行器已声明副作用边界): handler 真实
+    # 执行过的写命令失败(effect_outcome=unknown) 保持 UNKNOWN 人工核对闸。
     halt = getattr(params, "unknown_outcome_halt", None) or ()
     reported_code = str(halt[1] if len(halt) > 1 else "").strip().upper()
+    effect = str(halt[2] if len(halt) > 2 else "").strip().lower()
+    handler_executed = bool(halt[3] if len(halt) > 3 else True)
     try:
         from ..contracts.error_taxonomy import error_contract
 
         contract = error_contract(reported_code) if reported_code else None
         known_retryable_failure = bool(
-            contract is not None and contract.retryable and reported_code
+            contract is not None
+            and contract.retryable
+            and reported_code
+            and (not handler_executed or effect != "unknown")
         )
     except Exception:  # noqa: BLE001 判据失败保守走 unknown 不续跑
         known_retryable_failure = False
