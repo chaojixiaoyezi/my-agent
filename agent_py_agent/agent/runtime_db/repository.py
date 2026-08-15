@@ -1049,11 +1049,41 @@ class RuntimeRepository(
             # 未启动 op（CLAIMED 且 handler 从未启动）在终态收口时如实落
             # CANCELLED（G.5：CANCELLED 只允许能证明 handler 未启动的操作；
             # coordinator 同款 not_started 语义）——不残留 UNKNOWN 残账。
-            conn.execute(
-                "UPDATE tool_operations SET status = ?, settled_at = ? "
+            # 双席 seq1989 缺口4: outcome_json 必须 schema-valid——CANCELLED
+            # 后重复 claim 进 terminal replay, 空 result 会被 _result_from_record
+            # 降为 TOOL_OPERATION_OUTCOME_UNKNOWN; 写结构化取消结果
+            # (schema_version/not_started/handler_executed=false/closeout 信息)
+            # replay 才能如实读到「未启动已取消」而非降级 UNKNOWN。
+            _unstarted_ops = conn.execute(
+                "SELECT operation_id, operation_type FROM tool_operations "
                 "WHERE agent_run_id = ? AND status = ? AND handler_started_at = 0",
-                (OP_CANCELLED, now, agent_run_id, OP_CLAIMED),
-            )
+                (agent_run_id, OP_CLAIMED),
+            ).fetchall()
+            for _op in _unstarted_ops:
+                _cancel_result = json.dumps(
+                    {
+                        "schema": "managed_operation.v1",
+                        "result": {
+                            "schema_version": "tool_execution_result.v1",
+                            "tool": str(_op["operation_type"] or ""),
+                            "ok": False,
+                            "output": (
+                                "未启动(not_started): 整轮零执行, 操作从未执行, "
+                                "无副作用(G.5 CANCELLED)"
+                            ),
+                            "error_code": "TOOL_OPERATION_CANCELLED_NOT_STARTED",
+                            "effect_outcome": "not_started",
+                            "handler_executed": False,
+                        },
+                        "error_code": "TOOL_OPERATION_CANCELLED_NOT_STARTED",
+                    },
+                    ensure_ascii=False,
+                )
+                conn.execute(
+                    "UPDATE tool_operations SET status = ?, settled_at = ?, "
+                    "outcome_json = ? WHERE operation_id = ?",
+                    (OP_CANCELLED, now, _cancel_result, str(_op["operation_id"])),
+                )
             # R1-03：终态即释放执行权锁（不残留，同事务）
             conn.execute(
                 "DELETE FROM resource_locks WHERE canonical_scope = ?",

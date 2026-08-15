@@ -1596,3 +1596,82 @@ def test_protocol_repair_exhausted_format_only_continuable(tmp_path):
     assert decision2.response.runtime_status == "blocked"
     assert decision2.response.runtime_reason == "PROTOCOL_VIOLATION"
     assert should_continue_task(decision2.response)[0] is False
+
+
+def test_tool_call_unclosed_structural_gate():
+    """TOOL_CALL_UNCLOSED 结构门(双席 seq1989): 仅 tool_protocol_adapter +
+    unfinished 放行续跑; 其他 source/status 误标同一 reason 拒绝。"""
+    from agent_py_agent.agent.conversation.runtime import should_continue_task
+
+    ok = SimpleNamespace(
+        runtime_reason="TOOL_CALL_UNCLOSED",
+        runtime_source="tool_protocol_adapter",
+        runtime_status="unfinished",
+    )
+    assert should_continue_task(ok)[0] is True
+    # 反例: 错误 source / 错误 status / 缺 status
+    bad1 = SimpleNamespace(
+        runtime_reason="TOOL_CALL_UNCLOSED",
+        runtime_source="tool_loop",
+        runtime_status="unfinished",
+    )
+    bad2 = SimpleNamespace(
+        runtime_reason="TOOL_CALL_UNCLOSED",
+        runtime_source="tool_protocol_adapter",
+        runtime_status="blocked",
+    )
+    bad3 = SimpleNamespace(
+        runtime_reason="TOOL_CALL_UNCLOSED",
+        runtime_source="tool_protocol_adapter",
+        runtime_status="",
+    )
+    assert should_continue_task(bad1)[0] is False
+    assert should_continue_task(bad2)[0] is False
+    assert should_continue_task(bad3)[0] is False
+
+
+def test_settle_unstarted_op_cancelled_outcome_schema_valid(tmp_path):
+    """CANCELLED 未启动 op 的 outcome_json schema-valid(双席 seq1989 缺口4):
+    重放(replay)能如实读到取消结果, 不因空 result 降级 UNKNOWN。"""
+    import json as _json
+
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+
+    repo = RuntimeRepository(tmp_path / "home" / "runtime.db")
+    now = 1786010000.0
+    rec = repo.record_run_creation(
+        owner_id="local/main", goal="g", run_id="run-replay-safe", role="main"
+    )
+    attempt_id = str(rec["attempt_id"])
+    with repo.transaction() as conn:
+        conn.execute(
+            "INSERT INTO tool_operations(operation_id, agent_run_id, attempt_id, "
+            "attempt_generation, tool_operation_generation, operation_type, "
+            "status, handler_started_at, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                "op-replay-1", str(rec["agent_run_id"]), attempt_id, 1, 1,
+                "run_command", "CLAIMED", 0, now - 100, now - 100,
+            ),
+        )
+    assert repo.settle_agent_run(
+        agent_run_id=str(rec["agent_run_id"]),
+        status="done",
+        attempt_id=attempt_id,
+        payload={"status": "done"},
+    ).get("settled") is True
+    row = repo._runtime_connect().execute(
+        "SELECT status, outcome_json FROM tool_operations WHERE operation_id = 'op-replay-1'",
+    ).fetchone()
+    assert row["status"] == "CANCELLED"
+    payload = _json.loads(row["outcome_json"])
+    # schema-valid: result 带 schema_version + handler_executed=false + not_started
+    assert payload["schema"] == "managed_operation.v1"
+    result = payload["result"]
+    assert result["schema_version"] == "tool_execution_result.v1"
+    assert result["handler_executed"] is False
+    assert result["effect_outcome"] == "not_started"
+    assert result["error_code"] == "TOOL_OPERATION_CANCELLED_NOT_STARTED"
+    # 重放语义: _result_from_record 读 result 时 schema_version 匹配 → 不降 UNKNOWN
+    # (error_code 不是 TOOL_OPERATION_OUTCOME_UNKNOWN)
+    assert result["error_code"] != "TOOL_OPERATION_OUTCOME_UNKNOWN"

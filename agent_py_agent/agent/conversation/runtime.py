@@ -5740,13 +5740,20 @@ def should_continue_task(final_response: object) -> tuple[bool, str]:
     分支同一条精确条件: 返工门 unfinished 族 + 三个可续跑 reason。
     """
     reason = str(getattr(final_response, "runtime_reason", "") or "").strip().upper()
+    source = str(getattr(final_response, "runtime_source", "") or "").strip()
+    status = str(getattr(final_response, "runtime_status", "") or "").strip().lower()
     gate_unfinished = (
-        str(getattr(final_response, "runtime_source", "") or "").strip()
-        == "required_action_completion_gate"
-        and str(getattr(final_response, "runtime_status", "") or "").strip().lower()
-        == "unfinished"
+        source == "required_action_completion_gate"
+        and status == "unfinished"
     )
     if reason in CONTINUABLE_REASONS:
+        # 双席 seq1989 结构门: TOOL_CALL_UNCLOSED 只由协议适配器在
+        # unfinished 收口产生——补 source/status 精确约束, 防其他路径误标
+        # 同一 reason 被放行续跑(生产路径由 host 结构化赋值, 此处防御性)。
+        if reason == "TOOL_CALL_UNCLOSED" and not (
+            source == "tool_protocol_adapter" and status == "unfinished"
+        ):
+            return False, reason or "not_continuable"
         return True, reason
     if gate_unfinished:
         return True, "REQUIRED_ACTION_HAS_NO_EVIDENCE"
