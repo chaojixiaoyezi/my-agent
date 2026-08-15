@@ -432,7 +432,9 @@ def test_write_boundary_carries_current_task_workspace_roots(tmp_path):
     assert boundary["task_root"] == str(task_root)
     assert boundary["task_output_dir"] == str(task_root / "output")
     assert boundary["task_work_dir"] == str(task_root / "work")
-    assert "allowed_write_roots" not in boundary
+    # WRITE-02(2026-08-15): 主链任务无既有写根时注入任务 work/output 为沙箱写根,
+    # 旧语义(不注入→write_roots=None→owner home 全可写)改为收紧到任务目录。
+    assert boundary["allowed_write_roots"] == [str(task_root / "work"), str(task_root / "output")]
 
 
 def test_transient_audit_prepare_write_boundary_is_exact_work_and_output(tmp_path):

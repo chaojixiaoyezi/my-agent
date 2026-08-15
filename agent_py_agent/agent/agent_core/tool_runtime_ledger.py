@@ -163,6 +163,19 @@ def _attach_task_workspace_roots(boundary: dict[str, object], params: object) ->
     requested_output = _text(workspace.get("user_requested_output_dir"))
     if requested_output and not _text(boundary.get("user_requested_output_dir")):
         boundary["user_requested_output_dir"] = requested_output
+    # WRITE-02(2026-08-15 真机): CLI run(local) 的 write_boundary 初始无 allowed_write_roots,
+    # 导致沙箱 write_roots 为空——任务目录不可写、tmp 根回退项目目录(SANDBOX-01 复验受阻)。
+    # 主链任务(run_workspace 存在)且无既有写根时, 注入任务 work/output 为沙箱写根;
+    # task_local/control_plane 保持排除(子代理授权不得反向放大, 与 _main_task_write_roots 同规)。
+    scope = str(getattr(params, "context_scope", "") or "").strip().lower()
+    if scope in {"task_local", "control_plane"}:
+        return
+    existing = _string_list(boundary.get("allowed_write_roots"))
+    if not existing:
+        work_dir = _text(boundary.get("task_work_dir"))
+        output_dir = _text(boundary.get("task_output_dir"))
+        if work_dir and output_dir:
+            boundary["allowed_write_roots"] = [work_dir, output_dir]
 
 
 def _attach_remote_owner_task_write_scope(
