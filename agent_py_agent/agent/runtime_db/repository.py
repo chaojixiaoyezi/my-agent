@@ -27,6 +27,11 @@ from typing import Any
 import socket
 
 from ..common.id_generator import new_id
+# LLM: 与 scheduler P0-4 共用同一套进程死亡证明判定（RUN-01），禁止另写第二份判死实现。
+from ..scheduler.repository import (
+    _process_start_time as _proc_start_time,
+    _process_state as _proc_state,
+)
 from .acceptance_operations import RuntimeAcceptanceMixin
 from .delivery_operations import RuntimeDeliveryMixin
 from .operations import (
@@ -62,6 +67,16 @@ ROOT_CLAIM_CONFLICT = "ROOT_CLAIM_CONFLICT"
 
 # RuntimeConflictError 统一由 operations 模块定义（本模块 import 复用，
 # 勿重复定义同名类——会遮蔽 operations 抛出的异常类导致调用方捕获不到）。
+
+
+# LLM: 崩溃调和（RUN-01）依赖 attempt 记录的 runner 身份；start_time 仅 Linux /proc 可读，
+# 其他平台为 None（判死时仅做 pid 探活，fail-closed 不猜）。
+# 函数用途: 构造当前进程身份元数据（pid + 启动时刻），随 attempt 落账供崩溃恢复使用。
+def _runner_identity_metadata() -> dict[str, object]:
+    return {
+        "runner_pid": os.getpid(),
+        "runner_start_time": _proc_start_time(os.getpid()),
+    }
 
 
 class RuntimeRepository(
@@ -188,10 +203,11 @@ class RuntimeRepository(
             conn.execute(
                 """
                 INSERT INTO agent_attempts(attempt_id, agent_run_id, attempt_generation,
-                                           status, started_at)
-                VALUES(?, ?, 1, 'running', ?)
+                                           status, started_at, metadata_json)
+                VALUES(?, ?, 1, 'running', ?, ?)
                 """,
-                (attempt_id, agent_run_id, now),
+                (attempt_id, agent_run_id, now,
+                 json.dumps(_runner_identity_metadata(), ensure_ascii=False)),
             )
             conn.execute(
                 """
@@ -348,6 +364,70 @@ class RuntimeRepository(
             return conn.execute(
                 "SELECT * FROM agent_runs WHERE run_id = ?", (run_id,)
             ).fetchone()
+
+    def recover_stale_attempts(self, *, now: float | None = None) -> list[str]:
+        """RUN-01（2026-08-15 C1 真机实证）：普通 CLI run 崩溃后悬挂 attempt 的调和。
+
+        现象：CLI run 被 kill -9 后，agent_runs 卡 created、attempt 卡 running，
+        startup_recovery 的崩溃检测只覆盖子代理后台任务（无 pid 记录），导致
+        悬挂 attempt 永久不可见。本函数用 attempt 落账的 runner 身份做进程死亡
+        证明：仅当 pid 明确查无此进程（ProcessLookupError）或 pid 存活但
+        start_time 不匹配（pid 复用 = 原进程已死）才归 unknown；无 pid 记录、
+        进程存活且 start_time 匹配、或不可证实（unverifiable）一律保持原态
+        （fail-closed 不猜）。判定与 scheduler P0-4 recover_interrupted_executions
+        及 长期助手 cron/executions.py 同模式；只调和 current_attempt 非终态的 run。
+
+        函数用途: 把崩溃且进程死亡被证实的悬挂 run/attempt 收敛为 unknown 终态，
+        返回被调和（归 unknown）的 agent_run_id 列表。
+        """
+        from .operations import AGENT_RUN_TERMINAL_STATUSES as _TERMINAL
+
+        current = time.time() if now is None else now
+        recovered: list[str] = []
+        with self._runtime_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT ar.agent_run_id, ar.current_attempt_id,
+                       at.metadata_json, at.status AS attempt_status
+                FROM agent_runs ar
+                JOIN agent_attempts at ON at.attempt_id = ar.current_attempt_id
+                WHERE at.status IN ('running', 'created')
+                """,
+            ).fetchall()
+            for row in rows:
+                try:
+                    meta = json.loads(str(row["metadata_json"] or "{}"))
+                except (TypeError, ValueError):
+                    meta = {}
+                pid = int(meta.get("runner_pid") or 0)
+                if pid <= 0:
+                    continue  # 旧记录无身份，fail-closed 保持原态
+                state = _proc_state(pid)
+                if state == "dead":
+                    pass  # 明确查无此进程 = 死亡证明
+                elif state == "alive":
+                    recorded_start = meta.get("runner_start_time")
+                    if recorded_start is None:
+                        continue  # 无 start_time 可核对，仅 pid 存活即保持
+                    current_start = _proc_start_time(pid)
+                    if current_start is None or current_start == float(recorded_start):
+                        continue  # 同一进程存活（或当前不可读），保持原态
+                    # start_time 可读且不匹配：pid 已被复用，原进程已死
+                else:
+                    continue  # unverifiable，fail-closed
+                conn.execute(
+                    "UPDATE agent_attempts SET status='unknown', ended_at=? "
+                    "WHERE attempt_id=?",
+                    (current, str(row["current_attempt_id"] or "")),
+                )
+                conn.execute(
+                    "UPDATE agent_runs SET status='unknown', updated_at=? "
+                    "WHERE agent_run_id=?",
+                    (current, str(row["agent_run_id"] or "")),
+                )
+                recovered.append(str(row["agent_run_id"] or ""))
+            conn.commit()
+        return recovered
 
     def task_id_for_run_id(self, run_id: str) -> str:
         """授权门同款 JOIN：run_id → 权威链 task_id（runner 身份回填用）。"""
@@ -506,8 +586,11 @@ class RuntimeRepository(
             if latest_attempt is not None and \
                     str(latest_attempt["status"] or "") == ATTEMPT_STATUS_RECOVERED:
                 recovered_from = str(latest_attempt["attempt_id"] or "")
-            meta_json = json.dumps({"recovered_from_attempt_id": recovered_from},
-                                   ensure_ascii=False) if recovered_from else "{}"
+            meta_json = json.dumps(_runner_identity_metadata(), ensure_ascii=False)
+            if recovered_from:
+                meta = _runner_identity_metadata()
+                meta["recovered_from_attempt_id"] = recovered_from
+                meta_json = json.dumps(meta, ensure_ascii=False)
             conn.execute(
                 """
                 INSERT INTO agent_attempts(attempt_id, agent_run_id, attempt_generation,

@@ -309,8 +309,27 @@ def detect_active_work(agent: SimpleAgent) -> ActiveWorkSummary:
     _detect_orphan_processes(agent, summary)
     _detect_crashed_running_tasks(agent, summary)  # 审计 #18:崩溃后卡 RUNNING 的任务(原本不可见)
     _maybe_reconcile_crashed_tasks(agent, summary)  # opt-in(默认关):自动调和到 ABANDONED
+    _reconcile_stale_attempts(agent, summary)  # RUN-01:普通 CLI run 崩溃悬挂 attempt 归 unknown
 
     return summary
+
+
+# LLM: 只调和"进程死亡已被证实"的悬挂 attempt（RUN-01），fail-closed 不猜；
+# 与 _detect_crashed_running_tasks（子代理后台任务）互补，覆盖普通 CLI run。
+# 函数用途: 调用 runtime_db 的 recover_stale_attempts，把崩溃悬挂账本收敛为 unknown。
+def _reconcile_stale_attempts(agent: SimpleAgent, summary: ActiveWorkSummary) -> None:
+    try:
+        repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+        if repo is None:
+            return  # LOCAL_UNMANAGED 无权威账本
+        recovered = repo.recover_stale_attempts()
+    except Exception as exc:  # noqa: BLE001 恢复失败不阻断主链
+        _append_detection_error(summary, exc, "startup_recovery.recover_stale_attempts")
+        return
+    if recovered:
+        summary.crashed_tasks.extend(
+            {"run_id": run_id, "pid": -1, "status": "unknown"} for run_id in recovered
+        )
 
 
 def _render_orphan_processes(summary: ActiveWorkSummary) -> list[str]:
