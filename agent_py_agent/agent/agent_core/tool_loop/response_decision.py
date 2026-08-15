@@ -599,6 +599,15 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
             return ToolLoopResponseDecision(
                 "continue", None, [], _inc_empty_text(request.counters)
             )
+        # 第 4 层假完成 gate(2026-08-15 3×3 真机): 模型无工具调用轮主动收口
+        # 时,若 delivery contract 声明 verify_commands → 机器验证产物。
+        # 全过才保持收口;任一失败 → unfinished(DELIVERY_VERIFY_FAILED),
+        # 失败输出注入 tool_context, resume_loop 自动续跑让模型看到真实
+        # 编译/测试输出继续修——绝不把中间态文本当完成(cell1 52 轮/cell2
+        # 三次「继续推进」假完成实锤, 产物编译全不过)。
+        verified = _delivery_verify_no_tool_call_decision(request)
+        if verified is not None:
+            return verified
         return ToolLoopResponseDecision("break", request.response, [], request.counters)
     if request.counters.protected_marker_repairs < 1:
         return ToolLoopResponseDecision(
@@ -606,6 +615,59 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
         )
     final = protected_tool_marker_block_response(request.response.backend)
     return ToolLoopResponseDecision("break", final, [], request.counters)
+
+
+def _delivery_verify_no_tool_call_decision(
+    request: _NoToolCallsRequest,
+) -> ToolLoopResponseDecision | None:
+    """delivery contract 声明 verify_commands 时的收口机器验证 gate。
+
+    无 verify_commands → None（不干预，普通任务行为不变）。
+    验证全过 → None（保持自然收口）。任一失败 → unfinished 收口，
+    失败输出注入 tool_context（模型续跑轮直接可见），绝不标 ok。
+    """
+    contract = getattr(request.params, "delivery_contract", None)
+    if not isinstance(contract, dict):
+        return None
+    from ....cli.delivery_verify import (
+        delivery_verify_commands,
+        delivery_verify_failure_context,
+        run_delivery_verification,
+    )
+
+    if not delivery_verify_commands(contract):
+        return None
+    try:
+        from ..runner.context import current_run_task_workspace_root
+
+        workspace_root = current_run_task_workspace_root(request.agent, request.params)
+    except Exception:  # noqa: BLE001 workspace 拿不到不阻断
+        workspace_root = None
+    try:
+        all_ok, results = run_delivery_verification(request.params, workspace_root)
+    except Exception:  # noqa: BLE001 验证执行异常保守判失败（fail-closed）
+        all_ok, results = False, []
+    if all_ok:
+        return None
+    request.params.tool_context.append(delivery_verify_failure_context(results))
+    from dataclasses import replace as _replace
+
+    text = str(getattr(request.response, "text", "") or "")
+    return ToolLoopResponseDecision(
+        "break",
+        _replace(
+            request.response,
+            text=(
+                text + "\n\n[delivery-verify]\n产物未通过机器验证，任务未完成；"
+                "请根据上方验证失败输出继续修复，不要宣告完成。"
+            ),
+            runtime_status="unfinished",
+            runtime_reason="DELIVERY_VERIFY_FAILED",
+            runtime_source="delivery_verify",
+        ),
+        [],
+        request.counters,
+    )
 
 
 def _required_action_no_tool_call_decision(

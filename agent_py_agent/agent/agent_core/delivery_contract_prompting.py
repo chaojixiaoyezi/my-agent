@@ -30,7 +30,29 @@ def delivery_contract_preflight_findings(contract: dict[str, object]) -> list[di
                 "delivery_contract.artifacts must be a list of artifact objects.",
             )
         ]
-    return _artifact_preflight_findings(artifacts) if isinstance(artifacts, list) else []
+    findings = _artifact_preflight_findings(artifacts) if isinstance(artifacts, list) else []
+    # 收口机器验证 gate(2026-08-15 3×3): verify_commands 声明产物验收命令,
+    # 结构不合法 → warning(收口 gate 侧 fail-closed 不验证, 但绝不误放完成)。
+    verify = contract.get("verify_commands")
+    if verify is not None and not isinstance(verify, list):
+        findings.append(
+            _preflight_finding(
+                "DELIVERY_CONTRACT_VERIFY_COMMANDS_INVALID",
+                "verify_commands",
+                "delivery_contract.verify_commands must be a list of {cwd, command, timeout_seconds}.",
+            )
+        )
+    elif isinstance(verify, list):
+        for index, item in enumerate(verify):
+            if not isinstance(item, dict) or not str(item.get("command") or "").strip():
+                findings.append(
+                    _preflight_finding(
+                        "DELIVERY_CONTRACT_VERIFY_COMMAND_INVALID",
+                        f"verify_commands[{index}]",
+                        "verify_commands entries must be objects with a non-empty command.",
+                    )
+                )
+    return findings
 
 
 def _artifact_preflight_findings(artifacts: list[object]) -> list[dict[str, object]]:
