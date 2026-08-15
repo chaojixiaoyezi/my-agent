@@ -14,7 +14,7 @@ import time
 from ..agent.agent_core.cli_run_conversation import (
     CliRunConversationPersistenceError,
 )
-from ..agent.backends import ProviderRecoverableError
+from ..agent.backends import ProviderConnectionError, ProviderRecoverableError
 from ..agent.gateway_parts import (
     gateway_paths,
     gateway_request_counts,
@@ -197,6 +197,13 @@ def cmd_run(args) -> int:
         result = outcome.final_result
     except ProviderRecoverableError as exc:
         print(provider_recoverable_cli_report(agent, exc))
+        return 2
+    except ProviderConnectionError as exc:
+        print(
+            "[provider_connection]\n"
+            f"{exc}\n"
+            "模型接口无法连接（服务未启动/DNS/代理/配置错误），本次模型和工具均未执行。"
+        )
         return 2
     except CliRunConversationPersistenceError as exc:
         print(

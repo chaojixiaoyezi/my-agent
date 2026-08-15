@@ -20,6 +20,7 @@ from .base import (
 from .errors import (
     ProviderContextWindowError,
     ProviderQuotaExhaustedError,
+    ProviderConnectionError,
     ProviderRecoverableError,
     ProviderResponseError,
     ProviderTimeoutError,
@@ -48,6 +49,7 @@ __all__ = [
     "OpenAICompatibleBackend",
     "ProviderContextWindowError",
     "ProviderQuotaExhaustedError",
+    "ProviderConnectionError",
     "ProviderRecoverableError",
     "ProviderResponseError",
     "ProviderTimeoutError",

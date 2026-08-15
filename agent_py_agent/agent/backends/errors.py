@@ -9,6 +9,15 @@ class ProviderRecoverableError(RuntimeError):
     """Base class for model-provider failures that can be retried or resumed."""
 
 
+# LLM: NET-01(2026-08-15 C3 真机): 连接失败(Connection refused/DNS/配置错)是不可重试的
+# 配置性失败, 不能并入 ProviderRecoverableError(否则重试层会误重试); 单独成类让
+# CLI/Gateway 能给出稳定用户提示而不打印 traceback。参照 长期助手 error_classifier 的
+# connection 分类。
+# 类用途: 模型接口无法连接(服务未起/DNS/代理/配置错误)的 typed 错误。
+class ProviderConnectionError(RuntimeError):
+    """Model endpoint unreachable (connection refused/DNS/config), not retryable."""
+
+
 class ProviderTimeoutError(ProviderRecoverableError):
     """The provider did not return before the configured request timeout.
 

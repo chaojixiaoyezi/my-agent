@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .errors import (
+    ProviderConnectionError,
     ProviderContextWindowError,
     ProviderQuotaExhaustedError,
     ProviderResponseError,
@@ -739,7 +740,7 @@ def _runtime_network_error(exc: BaseException, request: GatewayRequest) -> Runti
             "本次请求可由重试/恢复/接管继续处理；"
             f"底层错误: {reason}"
         )
-    return RuntimeError(
+    return ProviderConnectionError(
         "网络请求失败: "
         f"无法连接模型接口 {host}（{request.url}）。"
         "请检查 DNS、网络/代理和 api_base 配置；"
