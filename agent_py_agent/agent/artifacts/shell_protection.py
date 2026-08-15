@@ -335,18 +335,23 @@ def workspace_tree_unchanged(
 
 
 def snapshot_digest_coverage(manifest: dict[str, tuple] | None) -> dict[str, object]:
-    """快照的证据强度元数据(双席 seq2127: 未 hash 大文件不能作为通用安全证明)。
+    """快照的证据强度元数据(双席 seq2127/2137/2138: 未 hash 大文件不能作为
+    通用安全证明)。
 
-    返回 digest_coverage_pct + unhashed_count + unhashed_paths(前 10)——调用方
-    写入 effect contract, 供 supervisor/safe_to_retry 层裁决「部分证明」的
-    信任度; 不把 (size, mtime) 相等当作内容未变的因果证明。
+    返回 digest_coverage_pct + unhashed_count + **完整** unhashed_paths——
+    双席 seq2137 实锤: 截断列表不能参与裁决(前 10 个恰在 target 内会漏掉
+    第 11 个越界文件, not_started 漏判放行)。unhashed_paths 是完整集合,
+    由消费端逐条判定; 展示层如需截断自行处理。truncated=False 表示集合
+    完整; 快照整体不可用(manifest=None)时 snapshot_available=False。
+    不把 (size, mtime) 相等当作内容未变的因果证明。
     """
     if not manifest:
         return {
-            "snapshot_available": bool(manifest),
+            "snapshot_available": False,
             "digest_coverage_pct": 0,
             "unhashed_count": 0,
             "unhashed_paths": [],
+            "truncated": False,
         }
     file_entries = [k for k, v in manifest.items() if not k.startswith("dir:")]
     unhashed = [k for k in file_entries if not manifest[k][3]]
@@ -355,7 +360,8 @@ def snapshot_digest_coverage(manifest: dict[str, tuple] | None) -> dict[str, obj
         "snapshot_available": True,
         "digest_coverage_pct": round(100 * (total - len(unhashed)) / total) if total else 100,
         "unhashed_count": len(unhashed),
-        "unhashed_paths": unhashed[:10],
+        "unhashed_paths": unhashed,
+        "truncated": False,
     }
 
 

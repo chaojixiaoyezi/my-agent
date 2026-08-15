@@ -662,6 +662,40 @@ def test_shell_postcheck_failure_blocks_success_gate():
     assert "ARTIFACT_POSTCHECK_FAILED" in result.output
 
 
+def test_snapshot_coverage_unhashed_paths_not_truncated():
+    """双席 seq2137/2138 漏判回归: unhashed_paths 必须是完整集合(>10 个
+    时第 11 个不能丢)——截断列表参与裁决会漏掉越界文件, not_started 误放行。"""
+    from agent_py_agent.agent.artifacts.shell_protection import (
+        snapshot_digest_coverage,
+        snapshot_workspace_tree,
+    )
+
+    tmp = Path("/tmp") / f"ws-z-cov-{uuid.uuid4().hex[:8]}"
+    tmp.mkdir(parents=True)
+    try:
+        # 构造 15 个大文件(>1MB, 无 digest) + 40 个小文件(有 digest)——
+        # 覆盖率 40/55=73% 过半, 快照可用, unhashed 完整集合参与判定
+        for idx in range(15):
+            with open(tmp / f"big{idx}.bin", "wb") as fh:
+                fh.write(b"x" * (1_000_001))
+        for idx in range(40):
+            (tmp / f"src{idx}.go").write_text("package a\n", encoding="utf-8")
+        manifest = snapshot_workspace_tree(tmp)
+        assert manifest is not None
+        coverage = snapshot_digest_coverage(manifest)
+        # 完整集合: 15 个 unhashed 全部返回, 不截断前 10
+        assert coverage["unhashed_count"] == 15
+        assert len(coverage["unhashed_paths"]) == 15
+        assert coverage["truncated"] is False
+        # 消费端遍历完整集合 → 第 11 个(如 big10.bin 在 target 外)会被判定
+        # 此处直接验证完整集合里能查到每个文件(判定逻辑在 shell.py 遍历
+        # 完整列表, 不再受 [:10] 影响)
+        assert any("big10.bin" in p for p in coverage["unhashed_paths"])
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_shell_unhashed_outside_target_blocks_not_started():
     """双席 seq2132 消费门: unhashed 大文件在命令产物目录(target)外 →
     not_started 不放行(保守 UNKNOWN); 全部在 target 内 → 保留 not_started。
