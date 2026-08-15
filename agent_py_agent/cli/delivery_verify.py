@@ -198,9 +198,71 @@ def run_delivery_verification(
                 "output": "",
             }
         ]
+    # 产物非占位检查（cell1 空壳假绿实锤）：不满足 → 不跑命令直接失败
+    precheck_ok, precheck_detail = _artifact_precheck(contract, workspace_root)
+    if not precheck_ok:
+        return VERIFY_FAILED, [
+            {
+                "command": "",
+                "ok": False,
+                "exit_code": -1,
+                "detail": f"产物预检未通过: {precheck_detail}",
+                "output": "",
+            }
+        ]
     results = [_run_one_verify(item, workspace_root) for item in commands]
     overall = VERIFY_PASSED if all(bool(item.get("ok")) for item in results) else VERIFY_FAILED
     return overall, results
+
+
+def _artifact_precheck(
+    contract: object, workspace_root: Path | None
+) -> tuple[bool, str]:
+    """产物非占位检查（3×3 cell1 空壳假绿实锤: go build 对 242 行空壳通过）。
+
+    结构化规则（禁 NL）：
+    - contract.artifacts 每项 path 解析（workspace 内）→ 必须存在且非空
+    - kind=go-module：目录内必须 ≥1 个 .go 源文件 且 ≥1 个 *_test.go
+      （空壳模块无测试文件时 `go test ./...` 返回 0「no test files」——
+      测试不存在≠测试通过，必须在此拦截）
+    任一不满足 → 验证不通过（fail-closed），不执行 verify_commands。
+    """
+    if workspace_root is None:
+        return False, "workspace 根缺失，产物无法定位（fail-closed）"
+    artifacts = contract.get("artifacts") if isinstance(contract, dict) else None
+    if not isinstance(artifacts, list) or not artifacts:
+        return True, ""  # 未声明产物 → 不额外检查（verify_commands 是唯一判据）
+    for index, item in enumerate(artifacts):
+        if not isinstance(item, dict):
+            return False, f"artifacts[{index}] 不是对象"
+        raw_path = str(item.get("path") or item.get("preferred_path") or "").strip()
+        if not raw_path:
+            continue
+        try:
+            candidate = Path(raw_path).expanduser()
+            resolved = (
+                candidate.resolve(strict=False)
+                if candidate.is_absolute()
+                else (workspace_root / candidate).resolve(strict=False)
+            )
+            resolved.relative_to(workspace_root)
+        except (OSError, RuntimeError, ValueError):
+            return False, f"artifacts[{index}] path 越界或不可解析: {raw_path}"
+        if not resolved.exists():
+            return False, f"artifacts[{index}] 产物不存在: {resolved}"
+        kind = str(item.get("kind") or "").strip().lower()
+        if kind == "go-module":
+            if not resolved.is_dir():
+                return False, f"artifacts[{index}] go-module 不是目录: {resolved}"
+            go_files = list(resolved.rglob("*.go"))
+            if not go_files:
+                return False, f"artifacts[{index}] go-module 无 .go 源文件: {resolved}"
+            if not any("_test.go" in path.name for path in go_files):
+                return False, (
+                    f"artifacts[{index}] go-module 无 *_test.go 测试文件"
+                    f"（空壳模块 go test 返回 0 是假绿，测试不存在≠通过）: {resolved}"
+                )
+    return True, ""
 
 
 def build_verification_id(params: object, contract: object) -> str:

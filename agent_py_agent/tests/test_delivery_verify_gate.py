@@ -407,3 +407,56 @@ def test_persist_event_idempotent_skip(tmp_path):
         "vid-1",
     )
     assert calls["append"] == 0  # 已存在 → 跳过
+
+
+# ---------- 空壳假绿拦截（cell1 实锤驱动） ----------
+
+
+def test_artifact_precheck_go_module_no_test_fails(tmp_path):
+    """go-module 无 *_test.go → 预检失败（空壳 go test 返回 0 是假绿）。"""
+    from agent_py_agent.cli.delivery_verify import _artifact_precheck
+
+    mod = tmp_path / "arrow-go"
+    mod.mkdir()
+    (mod / "util.go").write_text("package arrow\n")
+    contract = {"artifacts": [{"path": str(mod), "kind": "go-module"}]}
+    ok, detail = _artifact_precheck(contract, tmp_path)
+    assert ok is False
+    assert "无 *_test.go" in detail
+
+
+def test_artifact_precheck_go_module_with_test_ok(tmp_path):
+    from agent_py_agent.cli.delivery_verify import _artifact_precheck
+
+    mod = tmp_path / "arrow-go"
+    mod.mkdir()
+    (mod / "util.go").write_text("package arrow\n")
+    (mod / "util_test.go").write_text("package arrow\n")
+    contract = {"artifacts": [{"path": str(mod), "kind": "go-module"}]}
+    ok, _ = _artifact_precheck(contract, tmp_path)
+    assert ok is True
+
+
+def test_artifact_precheck_missing_artifact_fails(tmp_path):
+    from agent_py_agent.cli.delivery_verify import _artifact_precheck
+
+    contract = {"artifacts": [{"path": "output/arrow-go", "kind": "go-module"}]}
+    ok, detail = _artifact_precheck(contract, tmp_path)
+    assert ok is False
+    assert "产物不存在" in detail
+
+
+def test_run_verification_empty_shell_blocked(tmp_path):
+    """空壳 go-module（无测试文件）→ run 直接 VERIFY_FAILED 不跑命令。"""
+    mod = tmp_path / "arrow-go"
+    mod.mkdir()
+    (mod / "util.go").write_text("package arrow\n")
+    contract = {
+        "artifacts": [{"path": str(mod), "kind": "go-module"}],
+        "verify_commands": [{"command": "echo fake-ok", "cwd": str(mod)}],
+    }
+    state, results = run_delivery_verification(
+        _FakeParams(contract=contract), workspace_root=tmp_path
+    )
+    assert state == VERIFY_FAILED
+    assert "产物预检未通过" in results[0]["detail"]
