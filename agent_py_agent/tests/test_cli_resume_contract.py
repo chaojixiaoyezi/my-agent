@@ -170,6 +170,8 @@ def test_should_continue_task_truth_table():
         ("TASK_PROGRESS_OPEN", "tool_loop", "unfinished"),
         ("REPEATED_TOOL_FAILURE", "tool_loop", "unfinished"),
         ("REQUIRED_ACTION_HAS_NO_EVIDENCE", "required_action_completion_gate", "unfinished"),
+        # 2026-08-15: 未闭合工具块纯格式错误(整轮零执行已保证安全)可续跑
+        ("TOOL_CALL_UNCLOSED", "tool_protocol_adapter", "unfinished"),
     ]
     not_continuable = [
         ("PROTOCOL_VIOLATION", "tool_protocol_adapter", "blocked"),
@@ -1533,3 +1535,64 @@ def test_settle_marks_unstarted_claimed_ops_cancelled(tmp_path):
         "SELECT status FROM tool_operations WHERE operation_id = 'op-exec-1'",
     ).fetchone()
     assert exec_row["status"] == "EXECUTING"
+
+
+def test_protocol_repair_exhausted_format_only_continuable(tmp_path):
+    """repairs 耗尽的 break: violations 全为 TOOL_CALL_UNCLOSED(纯格式错误)
+    → unfinished 可续跑; 其他 violation → blocked fail-closed(2026-08-15 根因)。"""
+    from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
+        _protocol_violation_decision,
+    )
+
+    class _Violation:
+        def __init__(self, code):
+            self.code = code
+
+        def to_dict(self):
+            return {"code": self.code}
+
+    class _Response:
+        text = ""
+        backend = "anthropic_compatible"
+
+    class _Params:
+        protocol_violation_trace = None
+        live_archive_state = {}
+        tool_context = []
+        max_protocol_repairs = 1
+        run_id = ""
+        attempt_id = ""
+
+    class _Counters:
+        protocol_repairs = 99  # 超过 max_repairs → break 分支
+
+    class _Request:
+        response = _Response()
+        turn_id = "t1"
+        params = _Params()
+        counters = _Counters()
+        agent = None
+
+    # 纯格式类 → 可续跑(unfinished/TOOL_CALL_UNCLOSED)
+    req1 = _Request()
+    req1.params.live_archive_state = {}
+    decision1 = _protocol_violation_decision(
+        req1, (_Violation("TOOL_CALL_UNCLOSED"),)
+    )
+    assert decision1.action == "break"
+    assert decision1.response.runtime_status == "unfinished"
+    assert decision1.response.runtime_reason == "TOOL_CALL_UNCLOSED"
+    from agent_py_agent.agent.conversation.runtime import should_continue_task
+
+    assert should_continue_task(decision1.response)[0] is True
+
+    # 其他 violation(如 TOOL_CALL_IN_BODY) → blocked fail-closed
+    req2 = _Request()
+    req2.params.live_archive_state = {}
+    decision2 = _protocol_violation_decision(
+        req2, (_Violation("TOOL_CALL_IN_BODY"),)
+    )
+    assert decision2.action == "break"
+    assert decision2.response.runtime_status == "blocked"
+    assert decision2.response.runtime_reason == "PROTOCOL_VIOLATION"
+    assert should_continue_task(decision2.response)[0] is False

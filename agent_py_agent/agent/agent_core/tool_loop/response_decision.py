@@ -265,6 +265,30 @@ def _protocol_violation_decision(
             [],
             _inc_protocol(request.counters),
         )
+    # 2026-08-15 3×3 真机(cell1/cell2 三实例同构): deepseek-v4-flash 高频
+    # 输出未闭合 [TOOL_CALL] 块(约每 10-14 轮一次)。纯格式错误——整轮零
+    # 执行已保证安全(本轮 execute 权已取消, J.5 不变), 但任务级 blocked
+    # failed 会把长任务杀死。仅当 violations 全为格式类(TOOL_CALL_UNCLOSED)
+    # 时降级为可续跑族(unfinished, CLI resume_loop 下一轮重发完整工具块);
+    # 其他 violation 保持 blocked fail-closed。
+    if violations and all(
+        str(v.code or "") in {"TOOL_CALL_UNCLOSED"} for v in violations
+    ):
+        return ToolLoopResponseDecision(
+            "break",
+            ModelResponse(
+                text=(
+                    "本轮工具协议连续不符合运行约定(未闭合工具块)，系统没有执行"
+                    "任何正文或伪工具块。请重新发起请求，输出完整闭合的 [TOOL_CALL] 块。"
+                ),
+                backend=str(getattr(request.response, "backend", "") or ""),
+                runtime_status="unfinished",
+                runtime_reason="TOOL_CALL_UNCLOSED",
+                runtime_source="tool_protocol_adapter",
+            ),
+            [],
+            request.counters,
+        )
     return ToolLoopResponseDecision(
         "break",
         ModelResponse(

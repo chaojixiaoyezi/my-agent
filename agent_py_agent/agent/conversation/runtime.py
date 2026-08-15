@@ -5720,6 +5720,11 @@ CONTINUABLE_REASONS = frozenset(
         "TASK_PROGRESS_OPEN",
         "TOOL_ROUND_LIMIT_REACHED",
         "REPEATED_TOOL_FAILURE",
+        # 2026-08-15 3×3 真机: 模型输出未闭合 [TOOL_CALL] 纯格式错误——
+        # 整轮零执行已保证安全(J.5 不变), 任务级允许续跑(重发完整工具块);
+        # 仅 response_decision 对全 TOOL_CALL_UNCLOSED violations 产生此
+        # reason, 其他协议违规仍 blocked fail-closed。
+        "TOOL_CALL_UNCLOSED",
     }
 )
 
