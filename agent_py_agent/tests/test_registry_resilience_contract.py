@@ -612,6 +612,63 @@ def test_owner_quota_unavailable_deterministic_failure_failed() -> None:
     assert _operation_status_for_result(outcome) == "failed"
 
 
+def test_path_outside_workspace_deterministic_failure_failed() -> None:
+    """EXEC-03(2026-08-15 compact 场景真机): PATH_OUTSIDE_WORKSPACE 是校验
+    阶段确定性拒绝(零副作用), 但 taxonomy retryable=False——旧判定叠加
+    retryable 闸使其永不命中白名单 → 归 UNKNOWN → unknown 收口闸 → 模型无法
+    改路径重试, 任务死(真机: python heredoc working_dir 越界, RC=2)。
+    终态 FAILED 不授予自动重试(同参重放仍回 FAILED), 只解除收口让模型
+    读 recovery_hint 改参后以新调用继续——正是 retryable=False 的语义。
+    """
+    from agent_py_agent.agent.tooling.tool_operation_coordinator import (
+        _operation_status_for_result,
+    )
+
+    outcome = ToolHandlerOutcome(
+        "run_command",
+        False,
+        "COMMAND_ACCESS_DENIED: 多用户 owner 只能在当前任务工作区或结构化授权目录执行命令。",
+        error_code="PATH_OUTSIDE_WORKSPACE",
+        handler_executed=True,
+    )
+    assert _operation_status_for_result(outcome) == "failed"
+
+
+def test_write_forbidden_deterministic_failure_failed() -> None:
+    """EXEC-03 同族: WRITE_FORBIDDEN(permission/retryable=False)也是校验阶段
+    确定性拒绝——旧 retryable 闸使其归 UNKNOWN 收口; 白名单是唯一权威。
+    """
+    from agent_py_agent.agent.tooling.tool_operation_coordinator import (
+        _operation_status_for_result,
+    )
+
+    outcome = ToolHandlerOutcome(
+        "write_file",
+        False,
+        "write forbidden by policy",
+        error_code="WRITE_FORBIDDEN",
+        handler_executed=True,
+    )
+    assert _operation_status_for_result(outcome) == "failed"
+
+
+def test_non_whitelisted_mutating_failure_stays_unknown() -> None:
+    """安全回归: 白名单外且 handler 已执行过的失败(如 TOOL_ERROR)必须保持
+    UNKNOWN——不能因为放开 retryable 闸而放大自动重做风险。"""
+    from agent_py_agent.agent.tooling.tool_operation_coordinator import (
+        _operation_status_for_result,
+    )
+
+    outcome = ToolHandlerOutcome(
+        "write_file",
+        False,
+        "boom",
+        error_code="TOOL_ERROR",
+        handler_executed=True,
+    )
+    assert _operation_status_for_result(outcome) == "unknown"
+
+
 def test_explicit_process_working_dir_overrides_selected_task_root(tmp_path: Path) -> None:
     task_root = tmp_path / "task"
     explicit = task_root / "output" / "project"

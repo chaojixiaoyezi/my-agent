@@ -30,7 +30,6 @@ from ..local_storage import (
     ToolOperationReopenRequest,
     new_tool_operation_holder,
 )
-from ..contracts.error_taxonomy import error_contract
 from ..runtime_db.managed_operation_store import (
     AuthorityContextMissing,
     RuntimeConflictError,
@@ -687,8 +686,8 @@ def _operation_status_for_result(result: ToolHandlerOutcome) -> str:
 # 确定性失败」族。修复前归 UNKNOWN → 禁止自动重试 → bs4 最后一笔 write_file
 # (fix5.py)因此卡死到轮限(真机 outcome_json=effect_outcome_unknown:
 # OWNER_QUOTA_UNAVAILABLE)。归 FAILED 后模型可如实报告/换策略, 不再哑卡。
-# OWNER_DISK_QUOTA_EXCEEDED 同样 fail-closed, 但 taxonomy retryable=False,
-# 由 effect_outcome/其他路径裁决, 不进本白名单(retryable 门保持)。
+# OWNER_DISK_QUOTA_EXCEEDED 同样 fail-closed, 但可能部分生效语义未决,
+# 由 effect_outcome/其他路径裁决, 不进本白名单。
 _PRE_HANDLER_DETERMINISTIC_CODES = frozenset(
     {
         "TOOL_INVALID_ARGUMENTS",
@@ -702,13 +701,17 @@ _PRE_HANDLER_DETERMINISTIC_CODES = frozenset(
 )
 
 
+# LLM: 白名单是「校验阶段确定性拒绝」的唯一权威——判定不得再叠加 taxonomy
+# retryable 闸。EXEC-03(2026-08-15 compact 场景真机): PATH_OUTSIDE_WORKSPACE
+# (path/retryable=False)与 WRITE_FORBIDDEN(permission/retryable=False)是
+# 校验阶段零副作用拒绝, 但旧判定 `code in 白名单 and contract.retryable`
+# 使这两个码永不命中 → 归 UNKNOWN → unknown 收口闸 → 模型无法改路径重试,
+# 任务死。终态 FAILED 不授予自动重试(同参重放仍回 FAILED 不重执行), 只是
+# 解除 UNKNOWN 收口, 让模型读 recovery_hint 改参后以新调用继续——这正是
+# retryable=False 的语义(不自动重试同一操作, 允许人工/模型换参重来)。
 def _is_deterministic_pre_handler_failure(result: ToolHandlerOutcome) -> bool:
     code = str(result.error_code or "").upper()
-    contract = error_contract(code)
-    return (
-        code in _PRE_HANDLER_DETERMINISTIC_CODES
-        and contract.retryable
-    )
+    return code in _PRE_HANDLER_DETERMINISTIC_CODES
 
 
 def _unknown_outcome_result(
