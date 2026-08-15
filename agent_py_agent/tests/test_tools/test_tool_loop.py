@@ -1513,7 +1513,9 @@ def test_tool_round_limit_schedules_ordinary_task_resume(tmp_path):
     assert policies[0].metadata["kind"] == "ordinary_task_resume"
     assert policies[0].metadata["tool"] == "task_round_resume"
     assert policies[0].metadata["resume_used"] == 1
-    assert policies[0].metadata["resume_limit"] == 3
+    # 2026-08-15 3×3 对齐对照组: ordinary_task_resume_limit 已删除, 默认
+    # 0=不限制(自动续跑不停等用户), 预算耗尽仅显式 limit>0 时生效。
+    assert policies[0].metadata["resume_limit"] == 0
     # due_now expedite: next_due_at 提前到当前,调度器下一 tick 即拉起续跑。
     assert policies[0].next_due_at <= policies[0].metadata["expedited_at"]
 
@@ -1607,10 +1609,12 @@ def test_ordinary_task_resume_available_signal(tmp_path):
 
 
 def test_ordinary_task_resume_budget_exhausted_disables_policy(tmp_path):
-    """LLM: 普通任务续跑预算耗尽后 policy 退休,调度器不再拉起,等用户显式「继续」。
+    """LLM: 显式 limit>0 时预算耗尽后 policy 退休; 默认(不限制)不退休。
 
-    resume_used >= resume_limit 时 _schedule_typed_unfinished_continuation 必须
-    disable policy(否则 scheduler 每 interval 照拉,预算失去意义)。
+    2026-08-15 3×3 对齐对照组: ordinary_task_resume_limit 配置已删除——
+    默认 resume_limit=0 不限制(自动续跑不停等用户, 对照组 会话运行时/终端应用
+    无续跑预算概念)。显式传入 limit>0 的调用仍保留预算耗尽语义
+    (disable policy, 调度器不再拉起), 本测试固定该显式路径。
     """
     (tmp_path / "notes.txt").write_text("hello", encoding="utf-8")
     agent = SimpleAgent(
@@ -1660,22 +1664,34 @@ def test_ordinary_task_resume_budget_exhausted_disables_policy(tmp_path):
         }
     )
 
-    result = agent.run(
-        "读取 notes 并完成验证",
-        save=True,
-        task_id="task-limit",
-        task_attributes={
-            "conversation_thread_id": thread.thread_id,
-            "conversation_task_id": "task-limit",
-        },
-        source="gateway",
-    )
+    from agent_py_agent.agent.conversation.runtime import ensure_ordinary_task_resume
 
-    assert result.runtime_status == "unfinished"
+    # 显式 limit=3: 预置 resume_used=3 → 已耗尽 → policy 退休(disable)。
+    exhausted = ensure_ordinary_task_resume(
+        agent,
+        task_id=ledger_key,
+        thread_id=thread.thread_id,
+        store=agent.conversation_store,
+        limit=3,
+    )
+    assert exhausted is False
     policies = agent.conversation_store.list_progress_policies(enabled_only=False)
     assert len(policies) == 1
     assert not policies[0].enabled
     assert agent.conversation_store.list_progress_policies(enabled_only=True) == []
+
+    # 默认(不限制): 显式 limit 路径退休后再调用(同 policy 已 disable 会重建)——
+    # 默认 resume_limit=0 不限制, 返回 True 且 policy 保持 enabled。
+    renewed = ensure_ordinary_task_resume(
+        agent,
+        task_id=ledger_key,
+        thread_id=thread.thread_id,
+        store=agent.conversation_store,
+    )
+    assert renewed is True
+    active = agent.conversation_store.list_progress_policies(enabled_only=True)
+    assert len(active) == 1
+    assert active[0].metadata["resume_limit"] == 0
 
 
 def test_background_main_agent_no_ordinary_resume_policy(tmp_path):

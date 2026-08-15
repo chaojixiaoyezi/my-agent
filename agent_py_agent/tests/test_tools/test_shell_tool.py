@@ -365,26 +365,38 @@ def test_shell_tool_command_not_found_effect_outcome_not_started(shell_tool: She
 
 @pytest.mark.skipif(os.name == "nt", reason="exit 127 判定是 POSIX shell 契约")
 def test_shell_tool_explicit_exit_127_keeps_unknown(shell_tool: ShellTool) -> None:
-    """显式 exit 127(无 stderr 报错)不得声明 not_started。
+    """显式 exit 127(无 stderr 报错)→ 方案 Z 文件清单零变化 → not_started。
 
-    写命令显式退出 127 无法证明零副作用,保持保守 unknown(防重复副作用)。
-    判定必须同时满足: return_code==127 且 stderr_chars>0(结构化, locale 无关)。
+    2026-08-15 方案 Z: 「stderr 有无」从「推断副作用」升级为「实际检测文件
+    清单变化」——printf 只写 stdout 不触碰工作区文件, 失败后文件零变化 =
+    重做安全 → not_started。命令写文件后再 exit 127 → 文件变了 → 保持
+    unknown(seq 1804 防重做语义保留)。
     """
     result = shell_tool.execute({"command": "printf 'side-effect-before'; exit 127"})
     assert result.ok is False
     assert result.error_code == "COMMAND_FAILED"
     assert result.result_envelope["process"]["return_code"] == 127
     assert result.result_envelope["process"]["stderr_chars"] == 0
-    assert result.effect_outcome != "not_started"
+    # printf 不写文件 → 工作区零变化 → 明确失败可重做
+    assert result.effect_outcome == "not_started"
+    # 正例: 命令真实写文件后再 exit 127 → 文件变了 → 保守 unknown(不误放)
+    wrote = shell_tool.execute(
+        {"command": "printf x > side-effect.txt; exit 127"}
+    )
+    assert wrote.ok is False
+    assert wrote.effect_outcome != "not_started"
+    import shutil
+    shutil.rmtree(str(shell_tool.workspace_root), ignore_errors=True)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="exit 127 判定是 POSIX shell 契约")
 def test_shell_tool_exit_127_with_stderr_keeps_unknown(shell_tool: ShellTool) -> None:
-    """显式 exit 127 且带 stderr 输出的命令不得声明 not_started。
+    """显式 exit 127 且带 stderr 输出 → 方案 Z 文件清单零变化 → not_started。
 
-    维护记录 边界: 显式 `exit 127`、带 stderr 的脚本——命令确实执行了
-    (stderr 有内容), 副作用可能已发生, 必须保持保守 unknown, 不能仅凭
-    return_code==127 就误判成零副作用。
+    维护记录 边界原语义: stderr 非空=命令真实执行过=副作用不确定。
+    方案 Z 用「执行前后工作区文件清单比对」替代 stderr 推断——echo 只写
+    stderr 不触碰文件 → 零变化 → 明确失败可重做; 命令写文件后 exit 127 →
+    文件变了 → 保持保守 unknown。
     """
     result = shell_tool.execute(
         {"command": "echo 'warning: something happened' >&2; exit 127"}
@@ -393,8 +405,16 @@ def test_shell_tool_exit_127_with_stderr_keeps_unknown(shell_tool: ShellTool) ->
     assert result.error_code == "COMMAND_FAILED"
     assert result.result_envelope["process"]["return_code"] == 127
     assert result.result_envelope["process"]["stderr_chars"] > 0
-    # stderr 非空是命令真实执行过的结构化证据, 副作用不确定 → 不得 not_started
-    assert result.effect_outcome != "not_started"
+    # stderr 有内容但文件零变化 → 无文件副作用 → 明确失败可重做
+    assert result.effect_outcome == "not_started"
+    # 正例: 写文件后 exit 127 → 文件变了 → 保守 unknown
+    wrote = shell_tool.execute(
+        {"command": "echo 'warning: something happened' >&2; printf x > side-effect.txt; exit 127"}
+    )
+    assert wrote.ok is False
+    assert wrote.effect_outcome != "not_started"
+    import shutil
+    shutil.rmtree(str(shell_tool.workspace_root), ignore_errors=True)
 
 
 def test_shell_tool_error_code_comes_from_returncode_not_output_text(shell_tool: ShellTool) -> None:

@@ -6,7 +6,10 @@ from typing import Any
 
 DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS = 12_000
 DEFAULT_COMMAND_ACCESS_MODE = "workspace-write"
-DEFAULT_MODEL_MAX_TOKENS = 16_314
+# 2026-08-15 3×3 对齐对照组(终端应用 的 Anthropic SDK 默认 ~32000):
+# 16_314 是「每轮 1 工具」时代的保守值, 多工具并行(每轮 6-8 工具块)后偶发
+# stop_reason=max_tokens 截断(cell2 实测死亡)。端点实测接受 40000。
+DEFAULT_MODEL_MAX_TOKENS = 40_000
 
 
 @lru_cache(maxsize=1)

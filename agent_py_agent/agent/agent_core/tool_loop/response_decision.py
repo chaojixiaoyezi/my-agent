@@ -651,7 +651,9 @@ def _delivery_verify_no_tool_call_decision(
     contract = getattr(request.params, "delivery_contract", None)
     if not isinstance(contract, dict):
         return None
-    from ....cli.delivery_verify import (
+    # 2026-08-15 边界归位: delivery_verify 从 cli 层移到 agent_core.tool_loop
+    # (agent_core 禁导 cli, 打包边界检查 RUNTIME_IMPORTS_CLI 实锤)。
+    from .delivery_verify import (
         VERIFY_FAILED,
         VERIFY_PASSED,
         VERIFY_SKIPPED,

@@ -6,9 +6,10 @@ cmd_run 首轮收口后，若收口是可续跑族（共享 gate should_continue
 停止。续跑轮不走 cli_one_shot failed 兜底（切片3），任务级非终态由本循环
 决定。
 
-防失控双保险：resume_limit（policy 预算，默认 3，ensure_ordinary_task_resume
-单一权威递增）+ max_rounds（进程内护栏，默认 8）。预算耗尽写
-continuation_budget_exhausted 事件，绝不输出 DONE。
+防失控：max_rounds（进程内护栏，默认 8，读 cli_resume_max_rounds 可调大）。
+2026-08-15 3×3 对齐对照组：ordinary_task_resume_limit 预算已删除（会话运行时/
+终端应用 无续跑预算概念），自动续跑不再因预算耗尽停等用户——防失控由
+repeated_failure_halt / max_tool_rounds 等其它防线承担。
 """
 
 from __future__ import annotations

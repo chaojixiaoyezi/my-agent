@@ -5298,7 +5298,11 @@ def ensure_ordinary_task_resume(
             used = int((matching[0].metadata or {}).get("resume_used") or 0)
         except (TypeError, ValueError):
             used = 0
-        if used >= resume_limit:
+        # 2026-08-15 3×3 对齐对照组(会话运行时/终端应用 无续跑预算): 去掉
+        # ordinary_task_resume_limit 配置——resume_limit=0 表示不限制, 自动
+        # 续跑不再因预算耗尽停等用户; 防失控由 repeated_failure_halt/
+        # max_tool_rounds 等其它防线承担。显式传入 limit>0 仍生效(测试用)。
+        if resume_limit > 0 and used >= resume_limit:
             # 预算耗尽:退休 policy,调度器不再每间隔拉起;由用户显式「继续」驱动。
             selected_store.disable_progress_policy(matching[0].policy_id, now=current)
             return False
@@ -5353,18 +5357,15 @@ def ensure_ordinary_task_resume(
 
 
 def _ordinary_task_resume_limit(agent: object | None, explicit: int | None = None) -> int:
+    # 2026-08-15 3×3 对齐对照组: ordinary_task_resume_limit 配置已删除(对照组
+    # 会话运行时/终端应用 无续跑预算概念)。默认 0 = 不限制(自动续跑不停等用户);
+    # 显式传入 limit>0 仍生效(测试/特殊场景)。
     if explicit is not None:
         try:
-            return max(1, int(explicit))
+            return max(0, int(explicit))
         except (TypeError, ValueError):
             pass
-    try:
-        configured = int(
-            getattr(getattr(agent, "config", None), "ordinary_task_resume_limit", 0) or 0
-        )
-    except (TypeError, ValueError):
-        configured = 0
-    return configured if configured > 0 else 3
+    return 0
 
 
 def _thread_id_for_task(store: ConversationStore, task_id: str) -> str:

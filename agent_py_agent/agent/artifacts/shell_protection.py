@@ -10,6 +10,7 @@ after shell exits.
 
 from __future__ import annotations
 
+import os
 import shutil
 import time
 from dataclasses import asdict, dataclass
@@ -192,6 +193,63 @@ def _sha256_file(path: Path) -> str:
 def _safe_name(value: str) -> str:
     cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in value)
     return cleaned or "artifact"
+
+
+# 方案 Z(2026-08-15 3×3 死循环根治): 命令失败但工作区用户可见文件零变化时,
+# 执行器声明 effect=not_started(重做安全), 不误判 UNKNOWN。快照排除内部目录
+# (.sandbox-tmp 沙箱临时区/.git/系统数据) —— 这些目录的写入不构成用户可见副作用。
+_SNAPSHOT_EXCLUDE_DIRS = frozenset(
+    {".sandbox-tmp", ".git", ".my-agent", ".background_jobs", "__pycache__"}
+)
+# 快照上限: workspace 极大(>50000 文件)时跳过快照, 保守不声明(沿通用合同)。
+_SNAPSHOT_MAX_FILES = 50000
+
+
+def snapshot_workspace_tree(root: str | Path) -> dict[str, tuple[int, int]] | None:
+    """执行前快照 workspace 文件清单: relpath -> (size, mtime_ns)。
+
+    返回 None 表示快照不可用(目录缺失/超上限/IO 错误)——调用方必须保守,
+    不基于该信号声明 not_started。排除内部目录(.sandbox-tmp/.git 等), 因为
+    沙箱临时文件与版本库内部写入不构成用户可见副作用。
+    """
+    try:
+        base = Path(root).expanduser().resolve(strict=False)
+        if not base.is_dir():
+            return None
+        manifest: dict[str, tuple[int, int]] = {}
+        for dirpath, dirnames, filenames in os.walk(base):
+            dirnames[:] = [
+                d for d in dirnames if d not in _SNAPSHOT_EXCLUDE_DIRS
+            ]
+            for filename in filenames:
+                path = Path(dirpath) / filename
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                manifest[str(path.relative_to(base))] = (
+                    int(stat.st_size),
+                    int(stat.st_mtime_ns),
+                )
+                if len(manifest) > _SNAPSHOT_MAX_FILES:
+                    return None
+        return manifest
+    except (OSError, ValueError):
+        return None
+
+
+def workspace_tree_unchanged(
+    before: dict[str, tuple[int, int]] | None,
+    after: dict[str, tuple[int, int]] | None,
+) -> bool:
+    """执行前后清单一致 = 用户可见文件零变化(结构化, 不解析命令输出)。
+
+    必须 before/after 都非 None 才可能返回 True; 任一缺失返回 False(保守:
+    快照不可用时不得据此声明 not_started)。
+    """
+    if before is None or after is None:
+        return False
+    return before == after
 
 
 __all__ = [

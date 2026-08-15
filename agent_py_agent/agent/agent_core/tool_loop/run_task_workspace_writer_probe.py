@@ -33,15 +33,15 @@ def workspace_root_candidates_probe(agent: object, params: object) -> dict[str, 
 
     candidates: list[dict[str, object]] = []
     for label, value in (
-        ("subagent", _safe(_subagent_run_workspace, agent, params)),
-        ("internal", _safe(_internal_agent_run_workspace, params, attrs)),
+        ("subagent", _safe(lambda: _subagent_run_workspace(agent, params))),
+        ("internal", _safe(lambda: _internal_agent_run_workspace(params, attrs))),
         (
             "contract.task_workspace",
-            _safe(_workspace_root_from_mapping, contract, "task_workspace"),
+            _safe(lambda: _workspace_root_from_mapping(contract, "task_workspace")),
         ),
         (
             "attrs.run_workspace",
-            _safe(_workspace_root_from_mapping, attrs, "run_workspace"),
+            _safe(lambda: _workspace_root_from_mapping(attrs, "run_workspace")),
         ),
         (
             "agent._current_run_task_workspace",
@@ -103,8 +103,8 @@ def workspace_root_candidates_probe(agent: object, params: object) -> dict[str, 
     }
 
 
-def _safe(func, *args, **kwargs):  # noqa: ANN001 探针容错
+def _safe(func):  # noqa: ANN001 探针容错(架构守卫: 服务接口禁 *args/**kwargs, 调用方用 lambda 包裹)
     try:
-        return func(*args, **kwargs)
+        return func()
     except Exception as exc:  # noqa: BLE001 探针失败记录类型
         return f"<exc:{type(exc).__name__}>"

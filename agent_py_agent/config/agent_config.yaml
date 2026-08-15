@@ -587,7 +587,13 @@ model_name: "deepseek-v4-flash"
 request_timeout: 240
 
 # 允许模型最多生成多少 token
-max_tokens: 16314
+# 2026-08-15 3×3 真机+对照组对齐: 对照组 会话运行时(responses API 默认)与
+# 终端应用(Anthropic SDK 默认)均不设输出上限——my-agent 原 16314 是
+# 「每轮 1 工具」时代的保守值, 多工具并行(每轮 6-8 工具块)后偶发
+# stop_reason=max_tokens 截断(cell2 实测死亡)。工具运行时 端点实测接受
+# max_tokens=40000, 取 40000 对齐对照组「不设限」语义(截断重试两次后仍
+# 失败会收口)。
+max_tokens: 40000
 
 # 当前模型真实上下文窗口 token 数。compact/preflight 用它计算何时折叠；
 # 不要和 chat_context_window_chars 混用，后者只是聊天界面的字符预算。
@@ -615,6 +621,10 @@ stream_enabled: true
 # - 显式正数仍可限制,显式 0 才是真正不限制;单任务临时覆盖由任务属性显式传入。
 max_tool_rounds:
 max_tool_calls_per_round:
+# CLI run 进程内自动续跑轮数上限（默认 8）。2026-08-15 3×3 真机: 复刻类长任务
+# 每进程轮数太少会频繁收口重启(每轮 resume 预算独立), 无人值守 CLI 场景按任务
+# 长度调大(如 300); 普通交互任务 8 轮防失控语义不变。
+cli_resume_max_rounds: 300
 # 协议违规的修复机会次数（默认 2 = 3 次尝试后才 break）。模型输出格式偶发抖动
 # （工具调用混进正文/代码块）时，多给两次机会能显著提高长任务成活率。
 max_protocol_repairs: 2

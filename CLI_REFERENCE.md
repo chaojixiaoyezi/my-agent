@@ -160,6 +160,7 @@ Ctrl+C
 | `status` | 查看 gateway、LocalStore、subagent 和最近事件总览 | 否 | 否 |
 | `timeline` | 查看本地事实源最近事件 | 否 | 否 |
 | `run` | 运行一次智能体对话 | 默认写运行归档与恢复事实；不自动写正式长期记忆，可用 `--no-save` 关闭本次运行归档 | 是，除非配置 echo 后端 |
+| `resume` | 显式连接指定会话继续交流：`resume <session_id>`，不存在/无效 ID 报错退出（fail-closed，绝不静默建新会话） | 同 `run`（默认写归档，`--no-save` 关闭） | 是，除非配置 echo 后端 |
 | `remember` | 通过统一 Candidate/Promotion 主链保存用户明确确认的具体事实、事件或项目知识 | 是 | 否 |
 | `memory` | 统一管理 Candidate、后台 Curator、Retention、Doctor 与 Migration | 取决于子命令；list/status/plan 默认只读 | Curator run 可能调用后台模型 |
 | `memory-list` | 列出最近记忆 | 否 | 否 |

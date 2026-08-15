@@ -7,6 +7,7 @@ import shlex
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
@@ -499,9 +500,59 @@ def test_failure_effect_outcome_three_state_classification():
     assert classify("grep foo bar.txt", False, "COMMAND_FAILED") == "not_started"
     # 写命令(重定向)失败 → 不声明 → 保守 unknown
     assert classify("echo x > f.txt", False, "COMMAND_FAILED") == ""
+    # 方案 Z: 写命令失败但工作区文件零变化 → not_started(重做安全, go build
+    # 编译失败类验证命令不再被保守判 UNKNOWN 杀任务)
+    assert classify("go build ./...", False, "COMMAND_FAILED", workspace_unchanged=True) == "not_started"
+    # 写命令失败且文件已变化(rm -rf 删一半) → 仍不声明 → 保守 unknown(seq1992 语义不变)
+    assert classify("rm -rf x", False, "COMMAND_FAILED", workspace_unchanged=False) == ""
     # 超时 → unknown(进程可能部分生效)
     assert classify("sleep 100", False, "TOOL_TIMEOUT") == "unknown"
     # 成功 → 无声明
     assert classify("grep foo bar.txt", True, "") == ""
     # 未启动的前置失败(策略拒绝)→ 无声明(handler_executed=False 已足够)
     assert classify("rm -rf /", False, "COMMAND_POLICY_BLOCKED") == ""
+
+
+def test_workspace_tree_snapshot_and_unchanged():
+    """方案 Z 快照/比对: 排除内部目录(.sandbox-tmp/.git), 零变化=True,
+    任一缺失=False(保守), 内容变化/增删文件/改 mtime 都算变化。"""
+    from agent_py_agent.agent.artifacts.shell_protection import (
+        snapshot_workspace_tree,
+        workspace_tree_unchanged,
+    )
+
+    tmp = Path("/tmp") / f"ws-z-{uuid.uuid4().hex[:8]}"
+    (tmp / "src").mkdir(parents=True)
+    (tmp / ".sandbox-tmp").mkdir()
+    (tmp / ".git").mkdir()
+    (tmp / "src" / "a.go").write_text("package a\n", encoding="utf-8")
+    (tmp / ".sandbox-tmp" / "scratch").write_text("x", encoding="utf-8")
+    try:
+        before = snapshot_workspace_tree(tmp)
+        assert before is not None
+        # 内部目录被排除
+        assert ".sandbox-tmp/scratch" not in before
+        assert ".git" not in before
+        assert "src/a.go" in before
+        # 零变化 → True
+        after = snapshot_workspace_tree(tmp)
+        assert workspace_tree_unchanged(before, after) is True
+        # 改内容 → False
+        (tmp / "src" / "a.go").write_text("package a // changed\n", encoding="utf-8")
+        assert workspace_tree_unchanged(before, snapshot_workspace_tree(tmp)) is False
+        # 写回相同内容但 mtime 已变 → 仍 False(保守方向: 任何触碰都算变化,
+        # 不依赖内容哈希——与命令 touch 文件判变化一致)
+        (tmp / "src" / "a.go").write_text("package a\n", encoding="utf-8")
+        assert workspace_tree_unchanged(before, snapshot_workspace_tree(tmp)) is False
+        # 新增文件 → False
+        (tmp / "src" / "b.go").write_text("package b\n", encoding="utf-8")
+        assert workspace_tree_unchanged(before, snapshot_workspace_tree(tmp)) is False
+        # 任一清单缺失 → False(保守)
+        assert workspace_tree_unchanged(None, snapshot_workspace_tree(tmp)) is False
+        assert workspace_tree_unchanged(before, None) is False
+        assert workspace_tree_unchanged(None, None) is False
+        # 不存在的目录 → None(快照不可用)
+        assert snapshot_workspace_tree("/nonexistent/zzz") is None
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)

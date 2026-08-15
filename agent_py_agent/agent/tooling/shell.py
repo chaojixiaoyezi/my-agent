@@ -17,6 +17,8 @@ from agent_py_agent.agent.artifacts.shell_protection import (
     reconcile_shell_artifacts,
     shell_artifact_protection_note,
     snapshot_ready_artifacts,
+    snapshot_workspace_tree,
+    workspace_tree_unchanged,
 )
 from agent_py_agent.agent.common.json_io import append_jsonl_capped
 from agent_py_agent.agent.concurrency.interrupt import is_interrupted
@@ -978,6 +980,11 @@ class ShellTool(BaseTool):
                 f"ARTIFACT_BACKUP_FAILED: shell 执行前无法备份已登记产物: {exc}",
                 error_code="ARTIFACT_BACKUP_FAILED",
             )
+        # 方案 Z(2026-08-15 3×3 死循环根治): 执行前快照工作区文件清单。
+        # 失败且清单零变化 → 声明 effect=not_started(重做安全, 如 go build
+        # 编译失败), 不再被保守判 UNKNOWN 单次收口杀任务。快照失败返回 None,
+        # 判定侧对 None 保守不声明(沿通用合同)。
+        fs_before = snapshot_workspace_tree(self.workspace_root)
         artifact_summary: dict[str, Any] = {
             "snapshots": len(artifact_snapshots),
             "changed": [],
@@ -997,6 +1004,12 @@ class ShellTool(BaseTool):
         protection_note = shell_artifact_protection_note(artifact_summary)
         if protection_note:
             output = f"{output}\n{protection_note}"
+        # 方案 Z: 失败时比对执行前后文件清单——零变化 = 用户可见文件未被本次
+        # 命令触碰, 重做安全(go build 编译失败等验证类命令)。结构化事实,
+        # 不按命令名/报码放宽(seq1992 防的正是「文件已变还重跑」场景)。
+        fs_unchanged = workspace_tree_unchanged(
+            fs_before, snapshot_workspace_tree(self.workspace_root)
+        )
         return ToolHandlerOutcome(
             self.model_spec.name,
             ok,
@@ -1004,10 +1017,11 @@ class ShellTool(BaseTool):
             result_envelope={
                 "artifact_protection": artifact_summary,
                 "process": process_facts,
+                "workspace_tree_unchanged_on_failure": fs_unchanged,
             },
             error_code="" if ok else error_code,
             effect_outcome=self._failure_effect_outcome(
-                command, ok, error_code, output, process_facts
+                command, ok, error_code, output, process_facts, fs_unchanged
             ),
         )
 
@@ -1018,6 +1032,7 @@ class ShellTool(BaseTool):
         error_code: str,
         output: str = "",
         process_facts: dict[str, object] | None = None,
+        workspace_unchanged: bool = False,
     ) -> str:
         """失败时声明副作用状态(长期助手 三态,判定层只认结构化信号):
 
@@ -1055,7 +1070,16 @@ class ShellTool(BaseTool):
             analysis = analyze_command(command)
         except Exception:  # noqa: BLE001 - 判定失败时保守不声明,沿通用合同
             return ""
-        return "not_started" if analysis.resolved_effect == "read_only" else ""
+        if analysis.resolved_effect == "read_only":
+            return "not_started"
+        # 方案 Z(2026-08-15 3×3 真机): 写命令失败但工作区用户可见文件零变化
+        # → 进程未产生副作用, 重做安全。结构化信号是「执行前后文件清单一致」
+        # (快照比对, 不解析输出), 不是按命令名/报码放宽——go build 编译失败
+        # 这类验证命令不再被保守判 UNKNOWN 单次收口杀任务; rm -rf 删一半场景
+        # 文件已变 → 不满足 → 保持保守 unknown(seq1992 语义不变)。
+        if workspace_unchanged:
+            return "not_started"
+        return ""
 
     def _run_process_text(
         self,
