@@ -599,6 +599,16 @@ class _SplitTimeoutHTTPSConnection(http.client.HTTPSConnection):
     def connect(self) -> None:
         super().connect()
         if self.sock is not None:
+            # 2026-08-16 3×3 真机卡死根因(4 例, py-spy 线程栈实锤):
+            # Python 3.11 的 wrap_socket 是**惰性握手**——TLS 握手在首次
+            # send 时执行。旧代码在 connect() 里 wrap 后立刻
+            # settimeout(read_timeout), 握手因此用了长读超时(240-600s)
+            # 而非 connect_timeout(10s)——工具运行时 端点 TLS 无响应时
+            # 永久挂起(主线程 queue.get 等结果, guard 线程卡在握手)。
+            # 修复: 显式先完成握手(仍用 connect_timeout), 再切换长读超时。
+            # do_handshake 幂等(已握手则 no-op); 握手失败异常传播给上层
+            # 重试(与 TCP connect 失败同路径)。
+            self.sock.do_handshake()
             self.sock.settimeout(self._provider_read_timeout)
 
 
