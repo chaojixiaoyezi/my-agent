@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
 from dataclasses import dataclass, replace
 from pathlib import Path, PureWindowsPath
 
@@ -12,7 +13,9 @@ from ..conversation.authority import (
     CONVERSATION_TRANSIENT_WORKSPACE_ATTR,
 )
 from ..user_space.home_indexes import RunIndexRef, TaskIndexRef, register_run_ref, register_task_ref
+from ..common.json_io import append_jsonl_records
 from ..user_space.run_workspace import (
+    _now_iso,
     EnsureRunWorkspaceRequest,
     FinishRunWorkspaceRequest,
     activate_run_workspace,
@@ -125,6 +128,9 @@ def finish_run_task_workspace_if_needed(agent, params: object, result: object) -
         if finished is None:
             return ""
         _register_finished_run_task_ref(agent, params, finished, finish_request)
+        # SANDBOX-01(2026-08-15 真机): 沙箱 /tmp 映射在任务 work/.sandbox-tmp,
+        # 收口时必须发布到任务交付目录, 否则模型视角完成、用户视角产物消失。
+        _publish_sandbox_tmp_outputs(finished.root, finish_request.run_id)
         return str(finished.root)
     except (OSError, RuntimeError, ValueError):
         logging.getLogger(__name__).warning(
@@ -134,6 +140,48 @@ def finish_run_task_workspace_if_needed(agent, params: object, result: object) -
             exc_info=True,
         )
         return ""
+
+
+# LLM: SANDBOX-01 发布函数——只复制 .sandbox-tmp 下真实文件到 output/.sandbox-tmp/,
+# 保留相对目录结构; 复制失败的文件跳过但发布事实照实记录(timeline), 不掩盖不伪造。
+# 函数用途: 任务收口时把沙箱临时区产物发布到交付目录, 返回发布的相对路径列表。
+def _publish_sandbox_tmp_outputs(root: Path, run_id: str) -> list[str]:
+    try:
+        work_dir = root / "work"
+        sandbox_tmp = work_dir / ".sandbox-tmp"
+        output_dir = root / "output"
+        if not sandbox_tmp.is_dir():
+            return []
+        files = sorted(p for p in sandbox_tmp.rglob("*") if p.is_file())
+        if not files:
+            return []
+        published: list[str] = []
+        for src in files:
+            rel = src.relative_to(sandbox_tmp)
+            dst = output_dir / ".sandbox-tmp" / rel
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+                published.append(str(rel))
+            except OSError:
+                continue
+        if published:
+            append_jsonl_records(
+                work_dir / "timeline.jsonl",
+                [
+                    {
+                        "created_at": _now_iso(),
+                        "event_type": "sandbox_tmp_published",
+                        "run_id": run_id,
+                        "count": len(published),
+                        "source": str(sandbox_tmp),
+                        "target": str(output_dir / ".sandbox-tmp"),
+                    }
+                ],
+            )
+        return published
+    except OSError:
+        return []
 
 
 # LLM: 一个 standalone 终态只能构造一份 typed request，写 canonical state 和刷新索引都复用它。

@@ -390,3 +390,28 @@ def test_proc_mount_falls_back_to_empty_dir_when_procfs_probe_fails(tmp_path, mo
     assert "--proc" not in argv
     assert argv[argv.index("--dir") + 1] == "/proc"
     assert "--unshare-pid" in argv
+
+
+# LLM: SANDBOX-01(2026-08-15 真机): 沙箱 /tmp 映射根必须落在任务 write_roots[0]
+# (任务 work 目录)而非 workspace(项目目录)——否则项目目录被污染且任务收口无从发布。
+# 函数用途: 验证有 write_roots 时 tmp 根在 write_roots[0]/.sandbox-tmp。
+def test_sandbox_tmp_root_uses_write_roots(tmp_path):
+    from agent_py_agent.agent.tooling.sandbox import SandboxSpec, build_bwrap_argv
+
+    workspace = tmp_path / "project"
+    work_dir = tmp_path / "tasks" / "t1" / "work"
+    workspace.mkdir(parents=True)
+    work_dir.mkdir(parents=True)
+    spec = SandboxSpec(
+        workspace=workspace,
+        write_roots=[work_dir],
+        owner_home=tmp_path / "owner",
+        network_access=False,
+        bwrap_path="/usr/bin/bwrap",  # 本机无 bwrap，测试只验证 argv 构造
+    )
+    argv = build_bwrap_argv(spec)
+    joined = " ".join(argv)
+    assert str(work_dir / ".sandbox-tmp") in joined
+    assert "/tmp" in joined
+    # 项目目录不应被当作 tmp 根
+    assert str(workspace / ".sandbox-tmp") not in joined

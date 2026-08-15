@@ -146,3 +146,37 @@ def test_new_attempt_records_runner_identity(tmp_path):
         ).fetchone()
         meta = json.loads(row["metadata_json"])
         assert int(meta["runner_pid"]) == os.getpid()
+
+
+# LLM: SANDBOX-01(2026-08-15 真机): 任务收口必须把 work/.sandbox-tmp 产物发布到
+# output/.sandbox-tmp/ 并记录 timeline 事实, 否则"模型视角完成、用户视角产物消失"。
+# 函数用途: 验证收口发布函数复制产物且写 timeline 事件。
+def test_publish_sandbox_tmp_outputs(tmp_path):
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import _publish_sandbox_tmp_outputs
+
+    root = tmp_path / "task"
+    work = root / "work"
+    output = root / "output"
+    sandbox_tmp = work / ".sandbox-tmp"
+    (sandbox_tmp / "dsh-stability" / "proj").mkdir(parents=True)
+    (sandbox_tmp / "dsh-stability" / "proj" / "main.py").write_text("print(1)", encoding="utf-8")
+    (sandbox_tmp / "keep.txt").write_text("keep", encoding="utf-8")
+
+    published = _publish_sandbox_tmp_outputs(root, run_id="run-test")
+
+    assert len(published) == 2
+    assert (output / ".sandbox-tmp" / "dsh-stability" / "proj" / "main.py").is_file()
+    assert (output / ".sandbox-tmp" / "keep.txt").is_file()
+    timeline = (work / "timeline.jsonl").read_text(encoding="utf-8")
+    assert "sandbox_tmp_published" in timeline
+
+
+# LLM: 无 .sandbox-tmp 时发布为空且不产生 timeline 噪音。
+# 函数用途: 验证空发布路径幂等无副作用。
+def test_publish_sandbox_tmp_empty_noop(tmp_path):
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import _publish_sandbox_tmp_outputs
+
+    root = tmp_path / "task"
+    (root / "work").mkdir(parents=True)
+    assert _publish_sandbox_tmp_outputs(root, run_id="run-test") == []
+    assert not (root / "work" / "timeline.jsonl").exists()

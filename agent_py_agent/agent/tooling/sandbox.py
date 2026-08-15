@@ -176,7 +176,15 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
     # 下一请求源码消失，模型不知道丢了还谎称源码已备好（真机铁证 2026-08-08
     # celery/scrapy→Go 复刻）。rm -rf /tmp 只清任务区 .sandbox-tmp，
     # 沙箱隔离与写边界不变。
-    tmp_root = spec.workspace / ".sandbox-tmp"
+    # SANDBOX-01(2026-08-15 真机): tmp 根必须落在任务本地目录——此前用
+    # spec.workspace(项目目录)导致①项目目录被 .sandbox-tmp 污染②任务收口无从
+    # 发布产物(用户视角"模型说完成但产物消失")。write_roots[0]=任务 work 目录
+    # (CLI run 的 allowed_write_roots=[work_dir, output_dir])，收口时随任务发布。
+    # 无 write_roots(单租户 full_access)时保持 workspace 目录(旧行为, /tmp 即宿主)。
+    if spec.write_roots:
+        tmp_root = Path(spec.write_roots[0]) / ".sandbox-tmp"
+    else:
+        tmp_root = spec.workspace / ".sandbox-tmp"
     tmp_root.mkdir(parents=True, exist_ok=True)
     argv += ["--bind", str(tmp_root), "/tmp"]
     for ro in _SYSTEM_RO_ROOTS:
