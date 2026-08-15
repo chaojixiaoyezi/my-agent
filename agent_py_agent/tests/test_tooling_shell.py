@@ -514,8 +514,11 @@ def test_failure_effect_outcome_three_state_classification():
 
 
 def test_workspace_tree_snapshot_and_unchanged():
-    """方案 Z 快照/比对: 排除内部目录(.sandbox-tmp/.git), 零变化=True,
-    任一缺失=False(保守), 内容变化/增删文件/改 mtime 都算变化。"""
+    """方案 Z 快照/比对: 只排除 connector-owned 根级 .sandbox-tmp, 零变化
+    =True, 任一缺失=False(保守), 内容/增删/mtime/symlink/大小恢复都判变化。
+    双席 seq2103 阻断项 1-3: 遍历/stat 失败 → 整体 None(绝不出部分清单);
+    .git 等不再按 basename 排除(盲区); 小文件加 sha256 防「改内容+恢复
+    size/mtime」逃逸。"""
     from agent_py_agent.agent.artifacts.shell_protection import (
         snapshot_workspace_tree,
         workspace_tree_unchanged,
@@ -527,32 +530,92 @@ def test_workspace_tree_snapshot_and_unchanged():
     (tmp / ".git").mkdir()
     (tmp / "src" / "a.go").write_text("package a\n", encoding="utf-8")
     (tmp / ".sandbox-tmp" / "scratch").write_text("x", encoding="utf-8")
+    (tmp / ".git" / "config").write_text("[core]\n", encoding="utf-8")
     try:
         before = snapshot_workspace_tree(tmp)
         assert before is not None
-        # 内部目录被排除
+        # 只排除 connector-owned 根级 .sandbox-tmp; .git 不再排除(盲区修复)
         assert ".sandbox-tmp/scratch" not in before
-        assert ".git" not in before
+        assert ".git/config" in before
         assert "src/a.go" in before
+        # 清单含 sha256(kind, size, mtime_ns, sha, link_target 5 元)
+        assert before["src/a.go"][0] == "file"
+        assert len(before["src/a.go"][3]) == 64
         # 零变化 → True
         after = snapshot_workspace_tree(tmp)
         assert workspace_tree_unchanged(before, after) is True
         # 改内容 → False
         (tmp / "src" / "a.go").write_text("package a // changed\n", encoding="utf-8")
         assert workspace_tree_unchanged(before, snapshot_workspace_tree(tmp)) is False
-        # 写回相同内容但 mtime 已变 → 仍 False(保守方向: 任何触碰都算变化,
-        # 不依赖内容哈希——与命令 touch 文件判变化一致)
+        # 写回相同内容但 mtime 已变 → 仍 False(保守方向: 任何触碰都算变化)
         (tmp / "src" / "a.go").write_text("package a\n", encoding="utf-8")
         assert workspace_tree_unchanged(before, snapshot_workspace_tree(tmp)) is False
         # 新增文件 → False
         (tmp / "src" / "b.go").write_text("package b\n", encoding="utf-8")
         assert workspace_tree_unchanged(before, snapshot_workspace_tree(tmp)) is False
+        # .git 内部变化 → False(不再有 basename 盲区)
+        (tmp / ".git" / "config").write_text("[core]\n  bare = true\n", encoding="utf-8")
+        assert workspace_tree_unchanged(before, snapshot_workspace_tree(tmp)) is False
+        (tmp / ".git" / "config").write_text("[core]\n", encoding="utf-8")
         # 任一清单缺失 → False(保守)
         assert workspace_tree_unchanged(None, snapshot_workspace_tree(tmp)) is False
         assert workspace_tree_unchanged(before, None) is False
         assert workspace_tree_unchanged(None, None) is False
         # 不存在的目录 → None(快照不可用)
         assert snapshot_workspace_tree("/nonexistent/zzz") is None
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_workspace_tree_snapshot_adversarial():
+    """双席 seq2103 对抗用例: symlink 替换/遍历失败/读权限拒绝 → 判变化或
+    None(整体失败, 绝不出部分清单); 内容恢复+size/mtime 复原仍被 sha256 拦。"""
+    from agent_py_agent.agent.artifacts.shell_protection import (
+        snapshot_workspace_tree,
+        workspace_tree_unchanged,
+    )
+
+    tmp = Path("/tmp") / f"ws-z-adv-{uuid.uuid4().hex[:8]}"
+    (tmp / "src").mkdir(parents=True)
+    (tmp / "src" / "a.go").write_text("package a\n", encoding="utf-8")
+    try:
+        before = snapshot_workspace_tree(tmp)
+        assert before is not None
+        assert before["src/a.go"][0] == "file"
+        # symlink 替换: 内容相同但类型变 symlink → 判变化
+        (tmp / "src" / "a.go").unlink()
+        (tmp / "src" / "a.go").symlink_to("b.go")
+        (tmp / "src" / "b.go").write_text("package a\n", encoding="utf-8")
+        after = snapshot_workspace_tree(tmp)
+        assert after is not None
+        assert after["src/a.go"][0] == "symlink"
+        assert workspace_tree_unchanged(before, after) is False
+        # symlink 目标变化 → 判变化
+        (tmp / "src" / "a.go").unlink()
+        (tmp / "src" / "a.go").symlink_to("c.go")
+        (tmp / "src" / "c.go").write_text("package a\n", encoding="utf-8")
+        assert workspace_tree_unchanged(after, snapshot_workspace_tree(tmp)) is False
+        # 内容恢复+size/mtime 复原(写回同样内容, mtime 精确还原) → sha256 判变化
+        (tmp / "src" / "a.go").unlink()
+        (tmp / "src" / "b.go").unlink()
+        (tmp / "src" / "c.go").unlink()
+        (tmp / "src" / "a.go").write_text("package a\n", encoding="utf-8")
+        stat = before["src/a.go"]
+        # 精确还原 mtime 也无法伪造 sha256(内容已不同)
+        (tmp / "src" / "a.go").write_text("package a // X\n", encoding="utf-8")
+        import os as _os
+        _os.utime(tmp / "src" / "a.go", ns=(stat[2], stat[2]))
+        # 恢复同样 size 需同长度: 用等长不同内容
+        (tmp / "src" / "a.go").write_text("package b\n", encoding="utf-8")
+        _os.utime(tmp / "src" / "a.go", ns=(stat[2], stat[2]))
+        assert workspace_tree_unchanged(before, snapshot_workspace_tree(tmp)) is False
+        # 不可读文件(权限拒绝) → 整体 None(不产出部分清单, 双席阻断项 1)
+        (tmp / "src" / "a.go").chmod(0o000)
+        try:
+            assert snapshot_workspace_tree(tmp) is None
+        finally:
+            (tmp / "src" / "a.go").chmod(0o644)
     finally:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)

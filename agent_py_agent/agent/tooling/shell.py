@@ -997,10 +997,23 @@ class ShellTool(BaseTool):
             sandbox_write_roots,
             sandbox_read_roots,
         )
+        # 双席 seq2103 阻断项 4: postcheck 复核失败必须结构化阻断成功门——
+        # 不能只把 ARTIFACT_POSTCHECK_FAILED 追加到输出文本而让 ok/error_code
+        # 保持成功穿过结果门。结构化标记: postcheck_failed=True → error_code
+        # 覆盖为 ARTIFACT_POSTCHECK_FAILED + effect 不声明(沿通用合同 unknown),
+        # coordinator 按失败族处理, 绝不伪装成功。
+        postcheck_failed = False
         try:
             artifact_summary = reconcile_shell_artifacts(self.workspace_root, artifact_snapshots)
         except OSError as exc:
             output = f"{output}\nARTIFACT_POSTCHECK_FAILED: shell 执行后无法复核已登记产物: {exc}"
+            postcheck_failed = True
+            artifact_summary = {
+                "snapshots": len(artifact_snapshots),
+                "changed": [],
+                "invalid": [],
+                "postcheck_failed": str(exc),
+            }
         protection_note = shell_artifact_protection_note(artifact_summary)
         if protection_note:
             output = f"{output}\n{protection_note}"
@@ -1010,18 +1023,23 @@ class ShellTool(BaseTool):
         fs_unchanged = workspace_tree_unchanged(
             fs_before, snapshot_workspace_tree(self.workspace_root)
         )
+        effective_error = (
+            "ARTIFACT_POSTCHECK_FAILED"
+            if postcheck_failed
+            else ("" if ok else error_code)
+        )
         return ToolHandlerOutcome(
             self.model_spec.name,
-            ok,
+            ok and not postcheck_failed,
             output,
             result_envelope={
                 "artifact_protection": artifact_summary,
                 "process": process_facts,
                 "workspace_tree_unchanged_on_failure": fs_unchanged,
             },
-            error_code="" if ok else error_code,
+            error_code=effective_error,
             effect_outcome=self._failure_effect_outcome(
-                command, ok, error_code, output, process_facts, fs_unchanged
+                command, ok, effective_error, output, process_facts, fs_unchanged
             ),
         )
 

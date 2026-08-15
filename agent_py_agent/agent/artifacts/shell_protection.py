@@ -196,41 +196,66 @@ def _safe_name(value: str) -> str:
 
 
 # 方案 Z(2026-08-15 3×3 死循环根治): 命令失败但工作区用户可见文件零变化时,
-# 执行器声明 effect=not_started(重做安全), 不误判 UNKNOWN。快照排除内部目录
-# (.sandbox-tmp 沙箱临时区/.git/系统数据) —— 这些目录的写入不构成用户可见副作用。
-_SNAPSHOT_EXCLUDE_DIRS = frozenset(
-    {".sandbox-tmp", ".git", ".my-agent", ".background_jobs", "__pycache__"}
-)
+# 执行器声明 effect=not_started(重做安全), 不误判 UNKNOWN。
+#
+# 双席 seq2103/2104 阻断项 1-3 修正(2026-08-15):
+# - 快照完整性: 遍历/stat/相对路径转换任一失败 → 整体 None(绝不产出部分清单,
+#   部分清单相等后不得推出 not_started——违反 IO 失败保守语义)。
+# - 排除范围: 只排除 connector-owned 的根级 .sandbox-tmp(执行器沙箱挂载点,
+#   其写入是执行器自身的临时产物); 不再按 basename 在任意深度排除
+#   .git/__pycache__ 等(形成盲区——命令改版本库内部可逃过检测)。
+# - 逃逸检测: 清单记录 (文件类型, size, mtime_ns, symlink_target, 小文件
+#   sha256)——写入后恢复同样 size/mtime、替换 symlink、hardlink 改写都能被
+#   检测; 小文件(≤1MB, 源码场景全命中)加内容 digest 防「改内容+恢复 mtime」
+#   逃逸。快照信号是判定输入, 不单独作为因果证明(safe_to_retry 由上层裁决)。
+_SNAPSHOT_EXCLUDE_DIRS = frozenset({".sandbox-tmp"})
 # 快照上限: workspace 极大(>50000 文件)时跳过快照, 保守不声明(沿通用合同)。
 _SNAPSHOT_MAX_FILES = 50000
+# 内容 digest 阈值: ≤1MB 的文件记录 sha256(源码/配置场景全命中, 防
+# 「改内容后恢复 size/mtime」逃逸); 大文件只记 size/mtime(保守方向: 无法
+# 证明内容未变时由上层按快照属性决定, 不影响完整性标记)。
+_SNAPSHOT_CONTENT_DIGEST_MAX_BYTES = 1_000_000
 
 
-def snapshot_workspace_tree(root: str | Path) -> dict[str, tuple[int, int]] | None:
-    """执行前快照 workspace 文件清单: relpath -> (size, mtime_ns)。
+def snapshot_workspace_tree(root: str | Path) -> dict[str, tuple] | None:
+    """执行前快照 workspace 文件清单: relpath -> (kind, size, mtime_ns, sha256, link_target)。
 
-    返回 None 表示快照不可用(目录缺失/超上限/IO 错误)——调用方必须保守,
-    不基于该信号声明 not_started。排除内部目录(.sandbox-tmp/.git 等), 因为
-    沙箱临时文件与版本库内部写入不构成用户可见副作用。
+    返回 None 表示快照不可用(目录缺失/超上限/**任一 IO/遍历/转换失败**)——
+    调用方必须保守, 不基于该信号声明 not_started。绝不出部分清单:
+    一个文件 stat 失败即整体 None(双席 seq2103 阻断项 1)。
     """
     try:
         base = Path(root).expanduser().resolve(strict=False)
         if not base.is_dir():
             return None
-        manifest: dict[str, tuple[int, int]] = {}
-        for dirpath, dirnames, filenames in os.walk(base):
-            dirnames[:] = [
-                d for d in dirnames if d not in _SNAPSHOT_EXCLUDE_DIRS
-            ]
+        manifest: dict[str, tuple] = {}
+        for dirpath, dirnames, filenames in os.walk(base, onerror=_snapshot_walk_error):
+            dirnames[:] = [d for d in dirnames if d not in _SNAPSHOT_EXCLUDE_DIRS]
             for filename in filenames:
                 path = Path(dirpath) / filename
                 try:
-                    stat = path.stat()
-                except OSError:
-                    continue
-                manifest[str(path.relative_to(base))] = (
-                    int(stat.st_size),
-                    int(stat.st_mtime_ns),
+                    lstat = path.lstat()
+                    rel = path.relative_to(base)
+                except (OSError, ValueError):
+                    return None
+                entry: tuple = (
+                    "symlink" if lstat.st_mode & 0o170000 == 0o120000 else "file",
+                    int(lstat.st_size),
+                    int(lstat.st_mtime_ns),
+                    "",
+                    "",
                 )
+                if entry[0] == "symlink":
+                    try:
+                        entry = entry[:4] + (str(path.readlink()),)
+                    except OSError:
+                        return None
+                elif int(lstat.st_size) <= _SNAPSHOT_CONTENT_DIGEST_MAX_BYTES:
+                    try:
+                        entry = entry[:3] + (_sha256_file(path), "") + entry[4:]
+                    except OSError:
+                        return None
+                manifest[str(rel)] = entry
                 if len(manifest) > _SNAPSHOT_MAX_FILES:
                     return None
         return manifest
@@ -238,14 +263,20 @@ def snapshot_workspace_tree(root: str | Path) -> dict[str, tuple[int, int]] | No
         return None
 
 
+def _snapshot_walk_error(_exc: OSError) -> None:
+    """os.walk 遍历失败必须使快照整体失败——onerror 回调里抛错中断遍历。"""
+    raise _exc
+
+
 def workspace_tree_unchanged(
-    before: dict[str, tuple[int, int]] | None,
-    after: dict[str, tuple[int, int]] | None,
+    before: dict[str, tuple] | None,
+    after: dict[str, tuple] | None,
 ) -> bool:
     """执行前后清单一致 = 用户可见文件零变化(结构化, 不解析命令输出)。
 
     必须 before/after 都非 None 才可能返回 True; 任一缺失返回 False(保守:
-    快照不可用时不得据此声明 not_started)。
+    快照不可用时不得据此声明 not_started)。清单含文件类型/symlink 目标/
+    小文件内容 digest——写入后恢复 size/mtime、替换 symlink 均判变化。
     """
     if before is None or after is None:
         return False
