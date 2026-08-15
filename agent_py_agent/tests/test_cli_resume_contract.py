@@ -1725,3 +1725,68 @@ def test_cancelled_unstarted_op_replay_stable_not_unknown(tmp_path):
     )
     result_empty = _result_from_record(record_empty)
     assert result_empty.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
+
+
+def test_unknown_halt_reason_aligns_with_taxonomy(monkeypatch):
+    """第三层(2026-08-15 cell1): UNKNOWN halt 收口按触发报码对齐错误合同——
+    retryable=True 的已知失败(COMMAND_FAILED)→ REPEATED_TOOL_FAILURE 可续跑;
+    真未知(无码/retryable=False)→ TOOL_OPERATION_OUTCOME_UNKNOWN 不续跑。"""
+    import agent_py_agent.agent.agent_core._tool_loop_service as svc
+    from agent_py_agent.agent.backends import ModelResponse
+    from agent_py_agent.agent.conversation.runtime import should_continue_task
+
+    captured = {}
+
+    def _fake_generate(*a, **kw):
+        return ModelResponse(text="ok", backend="x")
+
+    def _fake_without(params, final, reason=None):
+        return final
+
+    def _fake_build(agent, params):
+        return "prompt"
+
+    monkeypatch.setattr(svc, "build_tool_loop_prompt", _fake_build)
+    monkeypatch.setattr(svc, "generate_model_response", _fake_generate)
+    monkeypatch.setattr(svc, "without_tool_call_after_limit", _fake_without)
+
+    class _P:
+        unknown_outcome_halt = ("run_command", "COMMAND_FAILED", 1)
+
+    # COMMAND_FAILED(taxonomy retryable=True) → REPEATED_TOOL_FAILURE 可续跑
+    resp = svc._final_response_after_unknown_outcome_halt(None, _P(), 5)
+    final = resp[1]
+    assert final.runtime_reason == "REPEATED_TOOL_FAILURE"
+    assert should_continue_task(final)[0] is True
+    # 真未知(无码) → TOOL_OPERATION_OUTCOME_UNKNOWN 不续跑
+    p2 = _P()
+    p2.unknown_outcome_halt = ("run_command", "", 1)
+    resp2 = svc._final_response_after_unknown_outcome_halt(None, p2, 5)
+    final2 = resp2[1]
+    assert final2.runtime_reason == "TOOL_OPERATION_OUTCOME_UNKNOWN"
+    assert should_continue_task(final2)[0] is False
+
+
+def test_unknown_outcome_keeps_reported_output_preview(tmp_path):
+    """UNKNOWN 包装保留失败输出有界摘要(2026-08-15 cell1): 模型可见编译错误。"""
+    from agent_py_agent.agent.tooling.tool_operation_coordinator import (
+        _unknown_outcome_result,
+    )
+    from agent_py_agent.agent.tooling.models import ToolHandlerOutcome
+
+    class _Req:
+        tool_name = "run_command"
+
+    reported = ToolHandlerOutcome(
+        "run_command",
+        False,
+        "compile error line 3: undefined: foo",
+        error_code="COMMAND_FAILED",
+        handler_executed=True,
+    )
+    result = _unknown_outcome_result(_Req(), reported)
+    import json as _json
+
+    payload = _json.loads(result.output)
+    assert payload["reported_error_code"] == "COMMAND_FAILED"
+    assert "compile error line 3" in payload["reported_output_preview"]

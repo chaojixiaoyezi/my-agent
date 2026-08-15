@@ -693,6 +693,12 @@ def _unknown_outcome_result(
     )
     envelope = dict(reported.result_envelope or {})
     envelope["reported_tool_result"] = _reported_tool_result_facts(reported)
+    # 2026-08-15 3×3 cell1 真机: COMMAND_FAILED(写命令失败, handler 真实执行
+    # 过)被 UNKNOWN 包装时原始失败输出被丢弃——模型拿不到编译错误文本无法
+    # 修复, 任务 failed 死路。给模型的 output 保留有界摘要(截断防大正文/
+    # 密钥), 模型可见失败原因; 账本侧(_reported_tool_result_facts)保持
+    # 不含 output 的安全归档不变。
+    reported_preview = str(reported.output or "")[:2000]
     return ToolHandlerOutcome(
         tool=request.tool_name,
         ok=False,
@@ -702,6 +708,7 @@ def _unknown_outcome_result(
                 "error": "工具调用已结束等待，但副作用是否完成仍不确定；系统已阻止自动重做。",
                 "error_code": "TOOL_OPERATION_OUTCOME_UNKNOWN",
                 "reported_error_code": reported_code,
+                "reported_output_preview": reported_preview,
             },
             ensure_ascii=False,
         ),

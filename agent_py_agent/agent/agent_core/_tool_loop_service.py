@@ -1210,10 +1210,22 @@ def _mark_unknown_outcome_halt(agent, record: ToolCallRecordParams) -> None:
     effect = str(getattr(record.result, "effect_outcome", "") or "").strip().lower()
     if effect != "unknown":
         return
+    # 2026-08-15 3×3 cell1 真机: 记录触发 UNKNOWN 的原始报码(如 COMMAND_FAILED)
+    # ——收口时按错误合同区分「结果已知的失败」(taxonomy retryable=True,
+    # 如命令失败读输出修正)与「真未知」(超时/执行者死/无码)——前者收口可
+    # 续跑(模型开新轮读 reported_output_preview 修复), 后者保持单次收口。
     object.__setattr__(
         record.params,
         "unknown_outcome_halt",
-        (record.call.tool_name, "TOOL_OPERATION_OUTCOME_UNKNOWN", 1),
+        (
+            record.call.tool_name,
+            str(
+                getattr(record.result, "reported_error_code", "")
+                or getattr(record.result, "error_code", "")
+                or ""
+            ),
+            1,
+        ),
     )
     record.params.tool_context.append(
         "[tool-system]\n"
@@ -1368,10 +1380,31 @@ def _final_response_after_unknown_outcome_halt(
     final_response = without_tool_call_after_limit(
         params, final_response, reason="unknown_outcome"
     )
+    # 2026-08-15 3×3 cell1 真机: 错误合同对齐——UNKNOWN 的触发报码若属
+    # taxonomy retryable=True 的「结果已知失败」(COMMAND_FAILED 命令失败读
+    # 输出修正等), 收口按 REPEATED_TOOL_FAILURE(可续跑族, 模型开新轮读
+    # reported_output_preview 修复); 「真未知」(retryable=False: 超时/
+    # 执行者死/无码) 保持 TOOL_OPERATION_OUTCOME_UNKNOWN 单次收口不续跑。
+    halt = getattr(params, "unknown_outcome_halt", None) or ()
+    reported_code = str(halt[1] if len(halt) > 1 else "").strip().upper()
+    try:
+        from ..contracts.error_taxonomy import error_contract
+
+        contract = error_contract(reported_code) if reported_code else None
+        known_retryable_failure = bool(
+            contract is not None and contract.retryable and reported_code
+        )
+    except Exception:  # noqa: BLE001 判据失败保守走 unknown 不续跑
+        known_retryable_failure = False
+    runtime_reason = (
+        "REPEATED_TOOL_FAILURE"
+        if known_retryable_failure
+        else "TOOL_OPERATION_OUTCOME_UNKNOWN"
+    )
     final_response = replace(
         final_response,
         runtime_status="unfinished",
-        runtime_reason="TOOL_OPERATION_OUTCOME_UNKNOWN",
+        runtime_reason=runtime_reason,
         runtime_source="tool_loop",
     )
     return final_prompt, final_response
