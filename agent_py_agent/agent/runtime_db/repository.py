@@ -36,6 +36,7 @@ from .operations import (
     EXEC_LOCK_GRACE_SECONDS,
     EXEC_LOCK_LEASE_SECONDS,
     EXEC_LOCK_SCOPE_PREFIX,
+    OP_CANCELLED,
     OP_CLAIMED,
     OP_EXECUTING,
     OP_FAILED,
@@ -1044,6 +1045,15 @@ class RuntimeRepository(
                 "WHERE agent_run_id = ? AND ended_at = 0",
                 (status, now, agent_run_id),
             )
+            # 2026-08-15 真机根因（3×3 cell2）：模型坏块整轮零执行留下的
+            # 未启动 op（CLAIMED 且 handler 从未启动）在终态收口时如实落
+            # CANCELLED（G.5：CANCELLED 只允许能证明 handler 未启动的操作；
+            # coordinator 同款 not_started 语义）——不残留 UNKNOWN 残账。
+            conn.execute(
+                "UPDATE tool_operations SET status = ?, settled_at = ? "
+                "WHERE agent_run_id = ? AND status = ? AND handler_started_at = 0",
+                (OP_CANCELLED, now, agent_run_id, OP_CLAIMED),
+            )
             # R1-03：终态即释放执行权锁（不残留，同事务）
             conn.execute(
                 "DELETE FROM resource_locks WHERE canonical_scope = ?",
@@ -1111,8 +1121,16 @@ class RuntimeRepository(
           - 无 op 痕迹          → 'cancelled'（纯账本收口，无副作用可证明）
           - 全 SUCCEEDED/CANCELLED → 'done'
           - 含 FAILED           → 'failed'
-          - 含非终态/UNKNOWN    → None（停手，绝不自动裁决——UNKNOWN 是
+          - 含 EXECUTING/UNKNOWN → None（停手，绝不自动裁决——可能已生效，
             结果不可知，无法证明零副作用）
+          - CLAIMED 且 handler_started_at=0 → 未启动（not_started，G.5
+            CANCELLED 语义：副作用可证明未发生）→ 不阻塞收口
+        2026-08-15 真机根因（3×3 cell2 两轮同构）：模型输出未闭合
+        [TOOL_CALL] 坏块（TOOL_CALL_UNCLOSED）→ 整轮零执行（J.5 安全设计）
+        → 该轮 op 停在 CLAIMED 且从未启动（45/45 实证 handler_started_at=0）
+        → 旧逻辑把它与可能已生效的 EXECUTING/UNKNOWN 同等判 None → 收口
+        标 TOOL_OPERATION_OUTCOME_UNKNOWN → 任务 failed。未启动 op 的
+        副作用可证明未发生，不该拖死可续跑任务。
         执行层收口 ≠ 任务层收口：任务完成仍走 required_actions +
         closeout_task_run + delivery 闸（本函数只裁决 attempt 执行痕迹）。
         """
@@ -1123,15 +1141,19 @@ class RuntimeRepository(
             if attempt is None:
                 return None
             rows = conn.execute(
-                "SELECT status, outcome_json FROM tool_operations "
+                "SELECT status, handler_started_at, outcome_json FROM tool_operations "
                 "WHERE attempt_id = ?", (attempt_id,),
             ).fetchall()
         if not rows:
             return "cancelled"
         for op in rows:
             op_status = str(op["status"] or "")
-            if op_status in {OP_CLAIMED, OP_EXECUTING, OP_UNKNOWN}:
-                return None  # 停手
+            if op_status == OP_CLAIMED:
+                if float(op["handler_started_at"] or 0) <= 0:
+                    continue  # 未启动 = 可证明零副作用（G.5）
+                return None  # 已启动的 CLAIMED 异常（理论不存在）仍 fail-closed
+            if op_status in {OP_EXECUTING, OP_UNKNOWN}:
+                return None  # 停手——可能已生效
             if op_status == OP_FAILED:
                 return "failed"
         return "done"

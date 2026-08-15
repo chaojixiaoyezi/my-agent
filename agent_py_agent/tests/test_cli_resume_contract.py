@@ -1429,3 +1429,107 @@ def test_recover_rejects_running_attempt(tmp_path):
         "SELECT status FROM agent_attempts WHERE attempt_id = ?", (attempt_id,),
     ).fetchone()
     assert attempt["status"] == "running"
+
+
+def test_classify_claimed_never_started_not_blocking(tmp_path):
+    """未启动 op（CLAIMED 且 handler_started_at=0）不阻塞收口(2026-08-15 根因):
+    模型坏块整轮零执行留下的 op, 副作用可证明未发生(G.5)——收口矩阵不再
+    把可续跑任务误判 UNKNOWN failed。"""
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+
+    repo = RuntimeRepository(tmp_path / "home" / "runtime.db")
+    now = 1786008000.0
+    rec = repo.record_run_creation(
+        owner_id="local/main", goal="g", run_id="run-unstarted", role="main"
+    )
+    attempt_id = str(rec["attempt_id"])
+    with repo.transaction() as conn:
+        conn.execute(
+            "INSERT INTO tool_operations(operation_id, agent_run_id, attempt_id, "
+            "attempt_generation, tool_operation_generation, operation_type, "
+            "status, handler_started_at, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                "op-unstarted-1", str(rec["agent_run_id"]), attempt_id, 1, 1,
+                "run_command", "CLAIMED", 0, now - 100, now - 100,
+            ),
+        )
+    # 未启动 CLAIMED 不阻塞
+    assert repo.classify_attempt_closeout(attempt_id) == "done"
+    # 已启动的 CLAIMED(异常)仍 fail-closed 停手
+    with repo.transaction() as conn:
+        conn.execute(
+            "INSERT INTO tool_operations(operation_id, agent_run_id, attempt_id, "
+            "attempt_generation, tool_operation_generation, operation_type, "
+            "status, handler_started_at, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                "op-started-1", str(rec["agent_run_id"]), attempt_id, 1, 2,
+                "run_command", "CLAIMED", now - 50, now - 100, now - 100,
+            ),
+        )
+    assert repo.classify_attempt_closeout(attempt_id) is None
+    # EXECUTING/UNKNOWN 仍 fail-closed 停手
+    with repo.transaction() as conn:
+        conn.execute(
+            "INSERT INTO tool_operations(operation_id, agent_run_id, attempt_id, "
+            "attempt_generation, tool_operation_generation, operation_type, "
+            "status, handler_started_at, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                "op-unk-1", str(rec["agent_run_id"]), attempt_id, 1, 3,
+                "run_command", "UNKNOWN", now - 50, now - 100, now - 100,
+            ),
+        )
+    assert repo.classify_attempt_closeout(attempt_id) is None
+
+
+def test_settle_marks_unstarted_claimed_ops_cancelled(tmp_path):
+    """终态收口时未启动 CLAIMED op 如实落 CANCELLED(G.5), 不留 UNKNOWN 残账。"""
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+
+    repo = RuntimeRepository(tmp_path / "home" / "runtime.db")
+    now = 1786009000.0
+    rec = repo.record_run_creation(
+        owner_id="local/main", goal="g", run_id="run-settle-unstarted", role="main"
+    )
+    attempt_id = str(rec["attempt_id"])
+    with repo.transaction() as conn:
+        conn.execute(
+            "INSERT INTO tool_operations(operation_id, agent_run_id, attempt_id, "
+            "attempt_generation, tool_operation_generation, operation_type, "
+            "status, handler_started_at, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                "op-unstarted-2", str(rec["agent_run_id"]), attempt_id, 1, 1,
+                "run_command", "CLAIMED", 0, now - 100, now - 100,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO tool_operations(operation_id, agent_run_id, attempt_id, "
+            "attempt_generation, tool_operation_generation, operation_type, "
+            "status, handler_started_at, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                "op-exec-1", str(rec["agent_run_id"]), attempt_id, 1, 2,
+                "run_command", "EXECUTING", now - 50, now - 100, now - 100,
+            ),
+        )
+    result = repo.settle_agent_run(
+        agent_run_id=str(rec["agent_run_id"]),
+        status="done",
+        attempt_id=attempt_id,
+        payload={"status": "done"},
+    )
+    assert result.get("settled") is True
+    # 未启动 op → CANCELLED + settled_at 落账
+    row = repo._runtime_connect().execute(
+        "SELECT status, settled_at FROM tool_operations WHERE operation_id = 'op-unstarted-2'",
+    ).fetchone()
+    assert row["status"] == "CANCELLED"
+    assert row["settled_at"] > 0
+    # 已启动 EXECUTING op 不被动(保持 fail-closed 原状)
+    exec_row = repo._runtime_connect().execute(
+        "SELECT status FROM tool_operations WHERE operation_id = 'op-exec-1'",
+    ).fetchone()
+    assert exec_row["status"] == "EXECUTING"
