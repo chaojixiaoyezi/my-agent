@@ -730,7 +730,7 @@ def _insert_lock_in_tx(
     重叠（parent/child 层级、hardlink 同 inode）在此显式判定：锁语义是
     「同一物理写根互斥」，串不同不代表根不同。
     """
-    _check_workspace_overlap_in_tx(conn, scope)
+    _check_workspace_overlap_in_tx(conn, scope, attempt_id=attempt_id)
     conn.execute(
         """
         INSERT INTO resource_locks(lock_id, canonical_scope, holder_instance,
@@ -757,17 +757,23 @@ def _insert_lock_in_tx(
     )
 
 
-def _check_workspace_overlap_in_tx(conn: Any, scope: str) -> None:
+def _check_workspace_overlap_in_tx(conn: Any, scope: str, *, attempt_id: str = "") -> None:
     """workspace 锁层级重叠 + hardlink 同 inode 冲突检测（fail-fast）。
 
     只对 workspace: 物理根锁判定；logical 锁是文本互斥，无物理层级。
     存在性不可判的（路径不存在）仅 parent/child 覆盖；inode 判定只在
     两端都是现存普通文件时成立（hardlink 只对文件有意义）。
+    WRITE-04(2026-08-15 真机): 同一 attempt 内声明的父子 scope(cwd=task_root +
+    写根=work)是同一执行者的合法资源声明, 不是并发冲突——重叠检测跳过同
+    attempt 已插入的锁; 跨 attempt/执行者的重叠仍拦截(并发保护不变)。
     """
     if not scope.startswith("workspace:"):
         return
     candidate = _norm_lock_path(scope[len("workspace:"):])
-    rows = conn.execute("SELECT canonical_scope FROM resource_locks").fetchall()
+    rows = conn.execute(
+        "SELECT canonical_scope FROM resource_locks WHERE attempt_id != ?",
+        (str(attempt_id or ""),),
+    ).fetchall()
     for row in rows:
         existing = str(row["canonical_scope"] or "")
         if not existing.startswith("workspace:"):

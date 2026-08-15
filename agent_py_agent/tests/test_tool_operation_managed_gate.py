@@ -1447,3 +1447,95 @@ def test_claim_runtime_conflict_maps_to_busy_conflict(tmp_path):
     )
     assert outcome.error_code == "TOOL_OPERATION_BUSY_CONFLICT"
     assert outcome.handler_executed is False
+
+
+# LLM: WRITE-04(2026-08-15 真机): 同一 attempt 声明父子 workspace scope
+# (cwd=task_root + 写根=work/output)是合法资源声明, 不应被重叠检测判为冲突;
+# 跨 attempt 的重叠仍必须拦截(并发保护)。
+# 函数用途: 验证同 attempt 父子 scope 可共存, 跨 attempt 仍冲突。
+def test_same_attempt_parent_child_scopes_coexist(tmp_path):
+    import sqlite3
+    from agent_py_agent.agent.runtime_db.managed_operation_store import (
+        _insert_lock_in_tx,
+        _check_workspace_overlap_in_tx,
+        RuntimeConflictError,
+    )
+    from agent_py_agent.agent.tooling.tool_operation_coordinator import new_tool_operation_holder
+
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.execute("CREATE TABLE resource_locks (canonical_scope TEXT UNIQUE, attempt_id TEXT)")
+    db.execute("BEGIN IMMEDIATE")
+    root = str(tmp_path / "task")
+    work = str(tmp_path / "task" / "work")
+    holder = new_tool_operation_holder()
+    # 同 attempt 先插父 scope 再插子 scope → 不冲突
+    db.execute("INSERT INTO resource_locks(canonical_scope, attempt_id) VALUES(?,?)", (f"workspace:{root}", "att-1"))
+    _check_workspace_overlap_in_tx(db, f"workspace:{work}", attempt_id="att-1")
+    db.execute("INSERT INTO resource_locks(canonical_scope, attempt_id) VALUES(?,?)", (f"workspace:{work}", "att-1"))
+    db.execute("COMMIT")
+    # 跨 attempt 重叠 → 冲突
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        _check_workspace_overlap_in_tx(db, f"workspace:{work}", attempt_id="att-2")
+        raised = False
+    except RuntimeConflictError:
+        raised = True
+    db.execute("ROLLBACK")
+    assert raised
+
+
+# LLM: WRITE-04 回归——同 attempt 内 run_command 的 cwd(task_root)+写根(work)不再自撞。
+# 函数用途: 端到端验证 claim 带父子 scopes 成功。
+def test_claim_with_parent_child_scopes_succeeds(tmp_path):
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+    from agent_py_agent.agent.runtime_db.managed_operation_store import (
+        ManagedOperationStore,
+        ToolOperationClaimRequest,
+    )
+    from agent_py_agent.agent.tooling.tool_operation_coordinator import new_tool_operation_holder
+
+    repo = RuntimeRepository(str(tmp_path / "runtime.db"))
+    run_id = "run-write04"
+    agent_run_id = "agentrun-write04"
+    task_run_id = "taskrun-write04"
+    attempt_id = "attempt-write04"
+    import time
+
+    now = time.time()
+    with repo._runtime_connection() as conn:
+        conn.execute(
+            "INSERT INTO task_runs(task_run_id, task_id, status, created_at, updated_at) VALUES(?,?,?,?,?)",
+            (task_run_id, run_id, "created", now, now),
+        )
+        conn.execute(
+            "INSERT INTO agent_runs(agent_run_id, task_run_id, run_id, role, status, current_attempt_id, "
+            "current_attempt_generation, workspace_epoch, created_at, updated_at) VALUES(?,?,?,?,?,?,1,1,?,?)",
+            (agent_run_id, task_run_id, run_id, "main", "running", attempt_id, now, now),
+        )
+        conn.execute(
+            "INSERT INTO agent_attempts(attempt_id, agent_run_id, attempt_generation, status, started_at) VALUES(?,?,1,'running',?)",
+            (attempt_id, agent_run_id, now),
+        )
+        conn.commit()
+    store = ManagedOperationStore(repo)
+    task_root = str(tmp_path / "task")
+    work = str(tmp_path / "task" / "work")
+    claim = store.claim_tool_operation(
+        ToolOperationClaimRequest(
+            owner_id="local/main",
+            run_id=run_id,
+            task_id="",
+            operation_id="op-write04",
+            tool="run_command",
+            args_hash="h",
+            idempotency_key="k",
+            idempotency_scope="operation",
+            idempotency_namespace="n",
+            holder=new_tool_operation_holder(),
+            lease_expires_at=now + 3600,
+            resource_scopes=(f"workspace:{task_root}", f"workspace:{work}", f"workspace:{work}/output"),
+            attempt_id=attempt_id,
+        )
+    )
+    assert str(getattr(claim.record, "operation_id", "") or "") == "op-write04"

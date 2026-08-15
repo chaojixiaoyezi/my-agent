@@ -148,7 +148,12 @@ def finish_run_task_workspace_if_needed(agent, params: object, result: object) -
 def _publish_sandbox_tmp_outputs(root: Path, run_id: str) -> list[str]:
     try:
         work_dir = root / "work"
+        # SANDBOX-01 适配: 沙箱 tmp 根实际在"沙箱 workspace"下——working_dir 未指定时
+        # 为任务根, 指定时为该目录; write_roots[0] 注入生效时为 work。两处都检查,
+        # 确保收口发布不依赖 tmp 根精确位置(真机: 任务根/.sandbox-tmp)。
         sandbox_tmp = work_dir / ".sandbox-tmp"
+        if not sandbox_tmp.is_dir():
+            sandbox_tmp = root / ".sandbox-tmp"
         output_dir = root / "output"
         if not sandbox_tmp.is_dir():
             return []
