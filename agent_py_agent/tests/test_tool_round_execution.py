@@ -543,6 +543,119 @@ def test_parallel_safe_readers_overlap_but_records_keep_provider_order():
     assert records == [0, 1], "durable ToolResult order follows provider call order"
 
 
+def test_parallel_limit_caps_parallel_safe_segment():
+    """EXEC-01: max_parallel_tool_calls 配置生效——超过上限的并行调用转串行,
+    全部仍执行, 不丢调用。"""
+    spec = make_test_model_spec(
+        "read_probe",
+        input_schema={
+            "type": "object",
+            "properties": {"slot": {"type": "integer"}},
+            "required": ["slot"],
+            "additionalProperties": False,
+        },
+    )
+    snapshot = runtime_snapshot_for_model_specs(
+        (spec,),
+        run_id=_ROUND_RUN_ID,
+        policies={
+            spec.name: make_test_runtime_policy(
+                "read_only",
+                concurrency_mode="parallel_safe",
+                resource_parameters=("slot",),
+            )
+        },
+    )
+    max_concurrency = [0]
+    in_flight: list[int] = []
+    records: list[int] = []
+    lock = threading.Lock()
+
+    def execute_one(request):
+        slot = int(request.call.arguments["slot"])
+        with lock:
+            max_concurrency[0] = max(max_concurrency[0], len(in_flight) + 1)
+            in_flight.append(slot)
+        time.sleep(0.02)
+        with lock:
+            in_flight.remove(slot)
+        return _success(request, f"read {slot}")
+
+    execute_tool_round(
+        _round_request(
+            agent=SimpleNamespace(),
+            params=SimpleNamespace(
+                task_attributes={"max_parallel_tool_calls": 2},
+                tool_context=[],
+                tool_runtime_snapshot=snapshot,
+                cancellation_token=CancellationToken(),
+            ),
+            tool_rounds=1,
+            response=ModelResponse(text="", backend="test"),
+            calls=[
+                {"tool": "read_probe", "slot": idx} for idx in range(5)
+            ],
+            execute_one=execute_one,
+            record_one=lambda record: records.append(int(record.call.arguments["slot"])),
+        )
+    )
+
+    assert max_concurrency[0] == 2, "parallel segment must be capped at the configured limit"
+    assert records == [0, 1, 2, 3, 4], "all calls still executed, provider order preserved"
+
+
+def test_parallel_limit_zero_means_unlimited():
+    """EXEC-01: 显式 0 = 不限制并行度(与 max_tool_rounds 0 同约定)。"""
+    spec = make_test_model_spec(
+        "read_probe",
+        input_schema={
+            "type": "object",
+            "properties": {"slot": {"type": "integer"}},
+            "required": ["slot"],
+            "additionalProperties": False,
+        },
+    )
+    snapshot = runtime_snapshot_for_model_specs(
+        (spec,),
+        run_id=_ROUND_RUN_ID,
+        policies={
+            spec.name: make_test_runtime_policy(
+                "read_only",
+                concurrency_mode="parallel_safe",
+                resource_parameters=("slot",),
+            )
+        },
+    )
+    rendezvous = threading.Barrier(4, timeout=2)
+    records: list[int] = []
+
+    def execute_one(request):
+        slot = int(request.call.arguments["slot"])
+        rendezvous.wait()
+        return _success(request, f"read {slot}")
+
+    execute_tool_round(
+        _round_request(
+            agent=SimpleNamespace(),
+            params=SimpleNamespace(
+                task_attributes={"max_parallel_tool_calls": 0},
+                tool_context=[],
+                tool_runtime_snapshot=snapshot,
+                cancellation_token=CancellationToken(),
+            ),
+            tool_rounds=1,
+            response=ModelResponse(text="", backend="test"),
+            calls=[
+                {"tool": "read_probe", "slot": idx} for idx in range(4)
+            ],
+            execute_one=execute_one,
+            record_one=lambda record: records.append(int(record.call.arguments["slot"])),
+        )
+    )
+
+    assert records == [0, 1, 2, 3], "barrier(4) proves all four overlapped (0 = unlimited)"
+
+
 def test_mutating_effect_is_a_barrier_even_if_manifest_marks_parallel_safe():
     spec = make_test_model_spec(
         "write_probe",

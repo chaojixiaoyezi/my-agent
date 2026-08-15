@@ -94,6 +94,9 @@ class _ToolConfigFields:
     enable_tools: bool = True
     max_tool_rounds: int | None = None
     max_tool_calls_per_round: int | None = None
+    # 单轮内并行执行工具的数量上限(EXEC-01):空值=代码默认 8;正数=上限;
+    # 0=不限制(与 max_tool_rounds 显式 0 同约定)。任务属性可单任务覆盖。
+    max_parallel_tool_calls: int | None = None
     # 模型输出格式偶发抖动（把工具调用写进正文/代码块/XML 标签）时，
     # 协议违规先给几次结构化修复机会再 break；1=只修一次就断（旧行为）。
     max_protocol_repairs: int = 2

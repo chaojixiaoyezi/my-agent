@@ -399,7 +399,11 @@ def _parallel_segment_end(
 ) -> int:
     descriptors = []
     position = start
-    while position < len(calls) and position - start < _MAX_PARALLEL_TOOL_CALLS:
+    parallel_limit = _max_parallel_tool_calls(request)
+    # 0=不限制(与 max_tool_rounds 显式 0 同约定);正数=该上限(EXEC-01)。
+    while position < len(calls) and (
+        parallel_limit <= 0 or position - start < parallel_limit
+    ):
         call = calls[position]
         if _should_defer_for_compact(request, call.tool_name):
             break
@@ -694,7 +698,21 @@ def _interrupted_result(call: ToolCall) -> ToolResult:
 #   截口落在换行处,并注明恢复路径(重新调用工具/读档案)。纯框架层,模型无感。
 _TURN_TOOL_CONTEXT_BUDGET_CHARS = 200_000
 _TURN_BUDGET_KEEP_CHARS = 20_000
+# EXEC-01: 单轮并行工具段默认上限(8)。可用配置 max_parallel_tool_calls
+# 覆盖(空=本默认;正数=上限;0=不限制),任务属性可单任务覆盖。
 _MAX_PARALLEL_TOOL_CALLS = 8
+
+
+# 函数用途: 读取单轮并行工具段上限——任务属性 > agent 配置 > 代码默认 8。
+def _max_parallel_tool_calls(request: ToolRoundExecutionRequest) -> int:
+    value = _task_attribute_int(request, "max_parallel_tool_calls")
+    if value is None:
+        value = _agent_config_int(request.agent, "max_parallel_tool_calls")
+    if value is None:
+        return _MAX_PARALLEL_TOOL_CALLS
+    if value < 0:
+        return _MAX_PARALLEL_TOOL_CALLS
+    return value
 
 
 # 函数用途: 本轮工具输出总量超预算时,把最大的几段裁到安全大小(裁口带提示)。
