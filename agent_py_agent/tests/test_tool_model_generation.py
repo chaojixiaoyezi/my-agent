@@ -687,10 +687,14 @@ def test_forced_tool_choice_turn_disables_thinking_for_provider_compat():
         assert backend.seen[-1]["tool_choice"] is choice
 
 
-def test_auto_tool_choice_turn_keeps_original_request_shape():
-    """auto 轮保持原请求形态,不传 thinking_disabled(对不识别该字段的端点零影响)。"""
+def test_auto_tool_choice_turn_disables_thinking():
+    """2026-08-15 慢因根因(3×3 curl 实测): 工具轮一律禁思考——deepseek-v4-flash
+    非推理模型, thinking 块吃掉 max_tokens 导致截断(带 thinking 41s+4000 token
+    全被思考吃光正文 0 输出; 禁 thinking 22s+3430 token 正文正常)。auto 轮
+    也必须传 thinking_disabled=True, 否则慢一倍+截断重试+截断收口假完成。
+    不识别该字段的端点(如 MiniMax)静默忽略, 行为不变。"""
     from agent_py_agent.agent.tooling.runtime_contracts import ToolChoice
 
     backend = _KwargRecordingBackend()
     _do_generate_with_tool_choice(backend, ToolChoice.auto("ordinary_tool_turn"))
-    assert "thinking_disabled" not in backend.seen[-1]
+    assert backend.seen[-1]["thinking_disabled"] is True
