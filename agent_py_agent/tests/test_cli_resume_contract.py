@@ -1675,3 +1675,53 @@ def test_settle_unstarted_op_cancelled_outcome_schema_valid(tmp_path):
     # 重放语义: _result_from_record 读 result 时 schema_version 匹配 → 不降 UNKNOWN
     # (error_code 不是 TOOL_OPERATION_OUTCOME_UNKNOWN)
     assert result["error_code"] != "TOOL_OPERATION_OUTCOME_UNKNOWN"
+
+
+def test_cancelled_unstarted_op_replay_stable_not_unknown(tmp_path):
+    """replay 实测(双席 seq1990): CANCELLED 未启动 op 的 outcome_json 经
+    _result_from_record 重放稳定返回取消结果, 不降级 TOOL_OPERATION_OUTCOME_UNKNOWN。"""
+    import json as _json
+
+    from agent_py_agent.agent.local_storage.tool_operations import ToolOperationRecord
+    from agent_py_agent.agent.tooling.tool_operation_coordinator import (
+        _result_from_record,
+    )
+
+    payload = {
+        "schema": "managed_operation.v1",
+        "result": {
+            "schema_version": "tool_execution_result.v1",
+            "tool": "run_command",
+            "ok": False,
+            "output": "未启动(not_started): 整轮零执行, 操作从未执行, 无副作用(G.5 CANCELLED)",
+            "error_code": "TOOL_OPERATION_CANCELLED_NOT_STARTED",
+            "effect_outcome": "not_started",
+            "handler_executed": False,
+        },
+        "error_code": "TOOL_OPERATION_CANCELLED_NOT_STARTED",
+    }
+    record = ToolOperationRecord(
+        owner_id="local/main", run_id="r1", task_id="", operation_id="op-replay-2",
+        tool="run_command", args_hash="h", idempotency_key="k", idempotency_scope="s",
+        idempotency_namespace="n", status="CANCELLED", holder_id="h1", holder_host="h",
+        holder_pid=1, holder_process_start_token="t", generation=1,
+        lease_expires_at=0.0, result=payload["result"], created_at=1.0,
+        updated_at=2.0, completed_at=2.0,
+    )
+    result = _result_from_record(record)
+    assert result.error_code != "TOOL_OPERATION_OUTCOME_UNKNOWN"
+    assert result.error_code == "TOOL_OPERATION_CANCELLED_NOT_STARTED"
+    assert result.effect_outcome == "not_started"
+    assert result.handler_executed is False
+    assert result.ok is False
+    # 空 result 的旧记录仍 fail-closed 降 UNKNOWN(不自动重做)——安全边界保持
+    record_empty = ToolOperationRecord(
+        owner_id="local/main", run_id="r1", task_id="", operation_id="op-replay-3",
+        tool="run_command", args_hash="h", idempotency_key="k", idempotency_scope="s",
+        idempotency_namespace="n", status="CANCELLED", holder_id="h1", holder_host="h",
+        holder_pid=1, holder_process_start_token="t", generation=1,
+        lease_expires_at=0.0, result={}, created_at=1.0, updated_at=2.0,
+        completed_at=2.0,
+    )
+    result_empty = _result_from_record(record_empty)
+    assert result_empty.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"

@@ -2012,6 +2012,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.MANUAL_REVIEW.value,
         recovery_hint="先前操作可能已产生副作用但终态缺失；先核对外部事实，禁止自动重复执行。",
     ),
+    "TOOL_OPERATION_CANCELLED_NOT_STARTED": ErrorContract(
+        code="TOOL_OPERATION_CANCELLED_NOT_STARTED",
+        category="tool",
+        retryable=False,
+        recommended_action=RecoveryAction.CONTINUE.value,
+        recovery_hint="操作从未启动(not_started, G.5 CANCELLED)，无副作用；任务层面可继续/重发。",
+    ),
     "TOOL_OPERATION_IN_FLIGHT": ErrorContract(
         code="TOOL_OPERATION_IN_FLIGHT",
         category="tool",
