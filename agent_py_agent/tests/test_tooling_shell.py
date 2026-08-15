@@ -568,6 +568,100 @@ def test_workspace_tree_snapshot_and_unchanged():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_workspace_tree_snapshot_dir_and_nested_sandbox():
+    """双席 seq2118: 空目录 mkdir/rmdir 判变化; 嵌套 .sandbox-tmp 不排除
+    (根级 connector-owned 排除, 防 basename 盲区); 特殊文件(fifo)→ 整体 None。"""
+    from agent_py_agent.agent.artifacts.shell_protection import (
+        snapshot_workspace_tree,
+        workspace_tree_unchanged,
+    )
+
+    tmp = Path("/tmp") / f"ws-z-dir-{uuid.uuid4().hex[:8]}"
+    (tmp / "src").mkdir(parents=True)
+    (tmp / "src" / "a.go").write_text("package a\n", encoding="utf-8")
+    try:
+        before = snapshot_workspace_tree(tmp)
+        assert before is not None
+        # 目录项进 manifest
+        assert "dir:src" in before
+        # 空目录变化: mkdir → 判变化
+        (tmp / "empty").mkdir()
+        assert workspace_tree_unchanged(before, snapshot_workspace_tree(tmp)) is False
+        (tmp / "empty").rmdir()
+        assert workspace_tree_unchanged(before, snapshot_workspace_tree(tmp)) is True
+        # 嵌套 .sandbox-tmp 不排除(用户子目录建同名不形成盲区)
+        (tmp / "src" / ".sandbox-tmp").mkdir()
+        (tmp / "src" / ".sandbox-tmp" / "x").write_text("x", encoding="utf-8")
+        nested = snapshot_workspace_tree(tmp)
+        assert nested is not None
+        assert "src/.sandbox-tmp/x" in nested
+        # 根级 .sandbox-tmp 仍排除(connector-owned)
+        (tmp / ".sandbox-tmp").mkdir()
+        (tmp / ".sandbox-tmp" / "scratch").write_text("x", encoding="utf-8")
+        root_snap = snapshot_workspace_tree(tmp)
+        assert root_snap is not None
+        assert ".sandbox-tmp/scratch" not in root_snap
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_workspace_tree_snapshot_special_file_none():
+    """双席 seq2118: 特殊文件(fifo)存在 → 快照整体 None(内容未变不可证明)。"""
+    import os as _os
+
+    from agent_py_agent.agent.artifacts.shell_protection import (
+        snapshot_workspace_tree,
+    )
+
+    tmp = Path("/tmp") / f"ws-z-fifo-{uuid.uuid4().hex[:8]}"
+    tmp.mkdir(parents=True)
+    try:
+        _os.mkfifo(tmp / "pipe")
+        assert snapshot_workspace_tree(tmp) is None
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_shell_postcheck_failure_blocks_success_gate():
+    """双席 seq2118 阻断项 4 回归: reconcile_shell_artifacts 抛 OSError →
+    结构化 ARTIFACT_POSTCHECK_FAILED + ok=False + effect 不声明(沿通用合同
+    unknown)——成功命令不得穿过结果门。"""
+    from unittest.mock import patch
+
+    from agent_py_agent.agent.tooling.shell import ShellTool
+
+    shell = ShellTool.__new__(ShellTool)
+    shell.model_spec = MagicMock()
+    shell.model_spec.name = "shell"
+    shell.workspace_root = "/tmp/ws-postcheck-zzz"
+    shell.workspace_roots = None
+    shell.path_access_policy = None
+    shell.access_mode = "workspace-write"
+    shell.max_output_chars = 2000
+    shell._run_process_text = MagicMock(
+        return_value=("echo ok", True, "", {"status": "exited", "return_code": 0})
+    )
+    with patch(
+        "agent_py_agent.agent.tooling.shell.snapshot_ready_artifacts",
+        return_value=[],
+    ), patch(
+        "agent_py_agent.agent.tooling.shell.reconcile_shell_artifacts",
+        side_effect=OSError("postcheck boom"),
+    ), patch(
+        "agent_py_agent.agent.tooling.shell.snapshot_workspace_tree",
+        return_value=None,
+    ):
+        result = shell._execute_with_artifact_protection(
+            "echo ok", Path("/tmp/ws-postcheck-zzz"), 10, None, None
+        )
+    assert result.ok is False, "postcheck 失败必须阻断成功门"
+    assert result.error_code == "ARTIFACT_POSTCHECK_FAILED"
+    assert result.effect_outcome == "", "postcheck 失败不声明 effect(沿通用合同 unknown)"
+    assert "ARTIFACT_POSTCHECK_FAILED" in result.output
+
+
 def test_workspace_tree_snapshot_adversarial():
     """双席 seq2103 对抗用例: symlink 替换/遍历失败/读权限拒绝 → 判变化或
     None(整体失败, 绝不出部分清单); 内容恢复+size/mtime 复原仍被 sha256 拦。"""

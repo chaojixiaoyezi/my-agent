@@ -218,11 +218,17 @@ _SNAPSHOT_CONTENT_DIGEST_MAX_BYTES = 1_000_000
 
 
 def snapshot_workspace_tree(root: str | Path) -> dict[str, tuple] | None:
-    """执行前快照 workspace 文件清单: relpath -> (kind, size, mtime_ns, sha256, link_target)。
+    """执行前快照 workspace 文件+目录清单: relpath -> (kind, size, mtime_ns, sha256, link_target)。
 
     返回 None 表示快照不可用(目录缺失/超上限/**任一 IO/遍历/转换失败**)——
     调用方必须保守, 不基于该信号声明 not_started。绝不出部分清单:
     一个文件 stat 失败即整体 None(双席 seq2103 阻断项 1)。
+
+    双席 seq2118 补充: ①目录项也进 manifest("dir:" 前缀条目)——mkdir/rmdir
+    空目录变化可检测(mkdir empty && exit 1 不再漏判); ②特殊文件(socket/
+    fifo/device, 非 regular 非 symlink)→ 快照整体 None(不可证明); ③
+    .sandbox-tmp 只按**根级**排除(canonical 根路径, 非任意深度 basename——
+    用户子目录建同名目录不能形成盲区)。
     """
     try:
         base = Path(root).expanduser().resolve(strict=False)
@@ -230,34 +236,79 @@ def snapshot_workspace_tree(root: str | Path) -> dict[str, tuple] | None:
             return None
         manifest: dict[str, tuple] = {}
         for dirpath, dirnames, filenames in os.walk(base, onerror=_snapshot_walk_error):
-            dirnames[:] = [d for d in dirnames if d not in _SNAPSHOT_EXCLUDE_DIRS]
+            dirpath_path = Path(dirpath)
+            # 根级 .sandbox-tmp 排除: 相对根的第一段 == .sandbox-tmp 才排除
+            # (connector-owned 沙箱挂载点); 嵌套同名目录照常纳入(防盲区)。
+            dirnames[:] = [
+                d
+                for d in dirnames
+                if not (
+                    d == ".sandbox-tmp"
+                    and dirpath_path.relative_to(base).parts == ()
+                )
+            ]
+            # 目录项进 manifest(mkdir/rmdir 检测)
+            try:
+                rel_dir = dirpath_path.relative_to(base)
+            except ValueError:
+                return None
+            if rel_dir.parts:
+                try:
+                    dstat = dirpath_path.lstat()
+                except OSError:
+                    return None
+                manifest["dir:" + str(rel_dir)] = (
+                    "dir",
+                    int(dstat.st_size),
+                    int(dstat.st_mtime_ns),
+                    "",
+                    "",
+                )
             for filename in filenames:
-                path = Path(dirpath) / filename
+                path = dirpath_path / filename
                 try:
                     lstat = path.lstat()
                     rel = path.relative_to(base)
                 except (OSError, ValueError):
                     return None
-                entry: tuple = (
-                    "symlink" if lstat.st_mode & 0o170000 == 0o120000 else "file",
-                    int(lstat.st_size),
-                    int(lstat.st_mtime_ns),
-                    "",
-                    "",
-                )
-                if entry[0] == "symlink":
+                mode_type = lstat.st_mode & 0o170000
+                if mode_type == 0o120000:  # symlink
+                    entry: tuple = (
+                        "symlink",
+                        int(lstat.st_size),
+                        int(lstat.st_mtime_ns),
+                        "",
+                        "",
+                    )
                     try:
                         entry = entry[:4] + (str(path.readlink()),)
                     except OSError:
                         return None
-                elif int(lstat.st_size) <= _SNAPSHOT_CONTENT_DIGEST_MAX_BYTES:
-                    try:
-                        entry = entry[:3] + (_sha256_file(path), "") + entry[4:]
-                    except OSError:
-                        return None
+                elif mode_type == 0o100000:  # regular file
+                    entry = (
+                        "file",
+                        int(lstat.st_size),
+                        int(lstat.st_mtime_ns),
+                        "",
+                        "",
+                    )
+                    if int(lstat.st_size) <= _SNAPSHOT_CONTENT_DIGEST_MAX_BYTES:
+                        try:
+                            entry = entry[:3] + (_sha256_file(path), "") + entry[4:]
+                        except OSError:
+                            return None
+                else:
+                    # 特殊文件(socket/fifo/device/dir): 不可证明内容未变 → 整体 None
+                    return None
                 manifest[str(rel)] = entry
                 if len(manifest) > _SNAPSHOT_MAX_FILES:
                     return None
+        # 双席 seq2118: 大文件(>1MB, 无内容 digest)占比过半 → 内容未变不可
+        # 证明 → 整体 None(保守, 不基于 size/mtime 推断内容未变)。
+        file_entries = [v for k, v in manifest.items() if not k.startswith("dir:")]
+        digest_coverage = sum(1 for v in file_entries if v[3])
+        if file_entries and digest_coverage * 2 < len(file_entries):
+            return None
         return manifest
     except (OSError, ValueError):
         return None

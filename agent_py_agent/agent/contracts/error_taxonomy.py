@@ -1187,6 +1187,15 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.READ_ARTIFACT_REF.value,
         recovery_hint="产物引用缺失；先按 refs 查找，找不到再重建产物。",
     ),
+    "ARTIFACT_POSTCHECK_FAILED": ErrorContract(
+        code="ARTIFACT_POSTCHECK_FAILED",
+        category="artifact",
+        # 2026-08-15 双席 seq2118: 命令已执行但已登记产物复核失败——产物状态
+        # 不确定, 禁止自动重做(retryable=False, 与 UNKNOWN 同族保守收口)。
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="命令已执行但已登记产物复核失败；产物状态不确定，记录诊断信息后按需人工核对。",
+    ),
     # —— read_artifact / reader / read_modes 语义错误码：底层产出小写码（artifact_not_registered 等），
     #    经 error_contract 的大小写归一化命中下列注册；缺注册会回落 UNKNOWN_ERROR 误导模型放弃。——
     "MISSING_ARTIFACT_REF": ErrorContract(
