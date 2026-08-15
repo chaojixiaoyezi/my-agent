@@ -1165,7 +1165,13 @@ def _mark_repeated_failure_halt(agent, record: ToolCallRecordParams) -> None:
     _soft_hint_after_failures(agent, record, count, failure_class)
     if count < _repeated_failure_halt_threshold(record.params):
         return
+    # EXEC-04: 同一 (工具, 失败类) 第二次触发软收口 → 升级硬收口。
+    # 原耗尽判定只看「连续无成功轮数」, 模型穿插成功调用会恒不耗尽 →
+    # 软收口清段+自动续跑无限循环(t4 真机: 空转 34 轮 160 调用 15 分钟)。
+    episode = _record_failure_episode(agent, record.call.tool_name, failure_class)
     exhausted = _repeated_failure_exhausted(agent, record, count)
+    if episode >= _EPISODE_HARD_HALT_LIMIT:
+        exhausted = True
     object.__setattr__(
         record.params,
         "repeated_failure_halt",
@@ -1173,11 +1179,17 @@ def _mark_repeated_failure_halt(agent, record: ToolCallRecordParams) -> None:
     )
     object.__setattr__(record.params, "repeated_failure_halt_exhausted", exhausted)
     if exhausted:
+        episode_note = (
+            f"（同一工具同一失败类型已第 {episode} 次触发收口，判定无法自行脱困）"
+            if episode >= _EPISODE_HARD_HALT_LIMIT
+            else ""
+        )
         record.params.tool_context.append(
             "[tool-system]\n"
             f"工具 {record.call.tool_name} 已连续 {count} 次以同一失败类型({failure_class})失败，"
             f"且已连续 {_repeated_failure_streak(agent)} 轮未取得任何成功工具结果"
             f"{'(达到硬门阈值)' if _hard_halt_hit(agent, record, count) else ''}。"
+            f"{episode_note}"
             "判定为无法自行脱困。本轮按未完成状态收口；请基于已有工具结果如实说明"
             "已做与未做的工作，等待用户提供新思路后继续。"
         )
@@ -1282,6 +1294,42 @@ def _repeated_failure_streak(agent) -> int:
 
 def _set_repeated_failure_streak(agent, value: int) -> None:
     object.__setattr__(agent, _STREAK_ATTR, value)
+
+
+# EXEC-04(2026-08-15 t4 对照真机): 同一工具+同一失败类第二次触发软收口即升级
+# 硬收口。原机制只有「连续 N 轮无任何成功工具结果」的耗尽判定, 但模型在
+# 失败段之间穿插成功调用(读文件/写 README)会让 streak 恒为 1、永不耗尽 →
+# 软收口清段+自动续跑无限循环, 直到外部 timeout(真机: edit_file 连续
+# TOOL_INVALID_ARGUMENTS 空转 34 轮 160 调用 15 分钟 RC=124, 轻量运行时/harness
+# 同模型 1 分钟完成)。同工具成功一次即清零本工具的 episode 计数(工具本身
+# 可用, 后续新错误重新给足两次机会)。
+_EPISODE_ATTR = "_repeated_failure_halt_episodes"
+# 同一 (工具, 失败类) 触发软收口达到该次数 → 升级硬收口, 不再自动续跑。
+_EPISODE_HARD_HALT_LIMIT = 2
+
+
+def _failure_episode_key(tool_name: str, failure_class: str) -> str:
+    return f"{tool_name}\x00{failure_class}"
+
+
+def _clear_failure_episodes_for_tool(agent, tool_name: str) -> None:
+    episodes = getattr(agent, _EPISODE_ATTR, None)
+    if not isinstance(episodes, dict) or not episodes:
+        return
+    prefix = f"{tool_name}\x00"
+    remaining = {key: value for key, value in episodes.items() if not key.startswith(prefix)}
+    object.__setattr__(agent, _EPISODE_ATTR, remaining)
+
+
+def _record_failure_episode(agent, tool_name: str, failure_class: str) -> int:
+    episodes = getattr(agent, _EPISODE_ATTR, None)
+    if not isinstance(episodes, dict):
+        episodes = {}
+    key = _failure_episode_key(tool_name, failure_class)
+    count = int(episodes.get(key) or 0) + 1
+    episodes[key] = count
+    object.__setattr__(agent, _EPISODE_ATTR, episodes)
+    return count
 
 
 # L1 软提示:同工具同类失败第 2 次即注入按失败类别的恢复指引(只提示一次,
@@ -1469,6 +1517,9 @@ def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
     _mark_unknown_outcome_halt(agent, record)
     if record.result.ok:
         record.params.executed_tools.append(record.result.tool_name)
+        # EXEC-04: 该工具成功一次即清零其失败 episode 计数——工具本身可用,
+        # 后续新错误重新给足两次收口机会, 不会被历史 episode 误升级硬收口。
+        _clear_failure_episodes_for_tool(agent, record.result.tool_name)
     archive_record = archive_tool_call_record(agent, record)
     _load_discovered_tools(record.params, archive_record)
     archive_tool_call_if_enabled(

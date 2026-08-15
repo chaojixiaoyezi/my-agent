@@ -42,8 +42,17 @@ from agent_py_agent.agent.contracts.required_actions import (
 _UNKNOWN_CODE = "TOOL_OPERATION_OUTCOME_UNKNOWN"
 
 
-def _result(effect_outcome: str):
-    return SimpleNamespace(effect_outcome=effect_outcome)
+def _result(
+    effect_outcome: str,
+    reported_error_code: str = "",
+    handler_executed: bool = False,
+):
+    return SimpleNamespace(
+        effect_outcome=effect_outcome,
+        reported_error_code=reported_error_code,
+        error_code=reported_error_code,
+        handler_executed=handler_executed,
+    )
 
 
 def _params(repeated_failure_halt=None, unknown_outcome_halt=None):
@@ -66,19 +75,37 @@ class TestMarkUnknownOutcomeHalt:
     def test_halt_after_single_unknown(self):
         # 复核 seq 339:错误合同已把单次 TOOL_OPERATION_OUTCOME_UNKNOWN 定为
         # retryable=False+MANUAL_REVIEW,首次出现即收口,不再等连续 2 次。
+        # 3×3 cell1 起收口记录 4 元组(工具, 原始报码, effect, handler_executed)。
         params = _params()
         _mark_unknown_outcome_halt(
-            None, _record("write_file", _result("unknown"), params)
+            None,
+            _record(
+                "write_file",
+                _result("unknown", reported_error_code=_UNKNOWN_CODE, handler_executed=True),
+                params,
+            ),
         )
-        assert params.unknown_outcome_halt == ("write_file", _UNKNOWN_CODE, 1)
+        assert params.unknown_outcome_halt == (
+            "write_file",
+            _UNKNOWN_CODE,
+            "unknown",
+            True,
+        )
         joined = "\n".join(params.tool_context)
         assert "副作用结果不确定" in joined
         assert "停止发起任何新的工具调用" in joined
 
     def test_halt_is_idempotent(self):
-        params = _params(unknown_outcome_halt=("write_file", _UNKNOWN_CODE, 1))
+        params = _params(
+            unknown_outcome_halt=("write_file", _UNKNOWN_CODE, "unknown", False)
+        )
         _mark_unknown_outcome_halt(None, _record("write_file", _result("unknown"), params))
-        assert params.unknown_outcome_halt == ("write_file", _UNKNOWN_CODE, 1)
+        assert params.unknown_outcome_halt == (
+            "write_file",
+            _UNKNOWN_CODE,
+            "unknown",
+            False,
+        )
         assert params.tool_context == [], "已收口不得重复追加提示"
 
     def test_repeated_failure_halt_short_circuits(self):
