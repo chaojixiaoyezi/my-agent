@@ -235,11 +235,16 @@ def _stream_with_watchdog(request: GatewayRequest) -> Iterator[str]:
             start = time.monotonic()
             wall_deadline = start + _stream_deadline_offset(request.timeout)
             # seq2173/2174: idle 窗口独立于总超时——stream_idle_timeout
-            # 设置时用其滚动(≤总超时, 边界①), 未设置时跟随总超时。
+            # 设置时初始与滚动都用其(≤总超时, 边界①), 未设置时跟随总超时。
+            # 初始 deadline 必须由独立 idle 间隔派生(不能复用 wall_deadline:
+            # 连接被吞=无任何 data→无 touch→初始调度即 idle 生效点, 用总
+            # 超时派生会让短 idle 完全不生效, 实测 600s 死等)。同一 start
+            # 起点(门槛3 seq1622-1)保持: 与 wall_deadline 同源自 start。
+            idle_deadline = start + _stream_idle_interval(request)
             watchdog = _StreamIdleWatchdog(
                 response_guard,
                 _stream_idle_interval(request),
-                idle_deadline=wall_deadline,
+                idle_deadline=idle_deadline,
             )
             watchdog.start()
             try:

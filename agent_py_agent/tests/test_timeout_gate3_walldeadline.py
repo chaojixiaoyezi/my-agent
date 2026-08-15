@@ -123,6 +123,7 @@ def _call_stream(
     sse_server: ThreadingHTTPServer,
     path: str,
     timeout: int = 1,
+    stream_idle_timeout: int | float | None = None,
 ) -> tuple[float, list[str], ProviderTimeoutError | None]:
     port = int(sse_server.server_address[1])
     request = GatewayRequest(
@@ -132,6 +133,7 @@ def _call_stream(
         payload={"model": "evidence"},
         headers={},
         timeout=timeout,
+        stream_idle_timeout=stream_idle_timeout,
     )
     started = time.monotonic()
     lines: list[str] = []
@@ -300,6 +302,28 @@ def test_same_cutoff_silence_idle_wins() -> None:
             )
         )
     assert err.value.stage == "stream_idle"  # 同刻到期 idle 优先
+
+
+def test_independent_idle_initial_cutoff_fires_before_total(
+    sse_server: ThreadingHTTPServer,
+) -> None:
+    """独立 stream_idle_timeout 的初始 cutoff 生效(seq2173/2174 集成级)。
+
+    连接被吞(首行后无任何 data)=无 touch→watchdog 初始调度即 idle 生效点。
+    若初始 deadline 错误复用总超时派生(wall_deadline), 短 idle 完全不
+    生效——本测试要求 idle=0.6s 先于总超时=5s 触发 stream_idle。
+    """
+    elapsed, lines, exc = _call_stream(
+        sse_server,
+        "/silent_after_first",
+        timeout=5,
+        stream_idle_timeout=0.6,
+    )
+    assert exc is not None
+    assert exc.stage == "stream_idle"
+    assert len(lines) == 1  # 只收到首行
+    assert elapsed < 2.0  # ≈0.6s 触发, 远小于总超时 5s
+    assert elapsed >= 0.4
 
 
 # ---------------------------------------------------------------- 门槛2 终审补证(seq1613a): 推进时钟证明同一起算点
