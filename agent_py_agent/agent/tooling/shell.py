@@ -16,6 +16,7 @@ from typing import Any
 from agent_py_agent.agent.artifacts.shell_protection import (
     reconcile_shell_artifacts,
     shell_artifact_protection_note,
+    snapshot_digest_coverage,
     snapshot_ready_artifacts,
     snapshot_workspace_tree,
     workspace_tree_unchanged,
@@ -1020,9 +1021,12 @@ class ShellTool(BaseTool):
         # 方案 Z: 失败时比对执行前后文件清单——零变化 = 用户可见文件未被本次
         # 命令触碰, 重做安全(go build 编译失败等验证类命令)。结构化事实,
         # 不按命令名/报码放宽(seq1992 防的正是「文件已变还重跑」场景)。
-        fs_unchanged = workspace_tree_unchanged(
-            fs_before, snapshot_workspace_tree(self.workspace_root)
-        )
+        # 双席 seq2127: 快照证据强度(digest 覆盖率)显式落 effect contract,
+        # 未 hash 大文件不把 size/mtime 相等当内容未变的因果证明——由上层
+        # supervisor/safe_to_retry 按覆盖率裁决信任度。
+        fs_after = snapshot_workspace_tree(self.workspace_root)
+        fs_unchanged = workspace_tree_unchanged(fs_before, fs_after)
+        fs_coverage = snapshot_digest_coverage(fs_after)
         effective_error = (
             "ARTIFACT_POSTCHECK_FAILED"
             if postcheck_failed
@@ -1036,6 +1040,7 @@ class ShellTool(BaseTool):
                 "artifact_protection": artifact_summary,
                 "process": process_facts,
                 "workspace_tree_unchanged_on_failure": fs_unchanged,
+                "snapshot_evidence": fs_coverage,
             },
             error_code=effective_error,
             effect_outcome=self._failure_effect_outcome(

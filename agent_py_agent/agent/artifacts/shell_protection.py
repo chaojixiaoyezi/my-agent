@@ -334,6 +334,31 @@ def workspace_tree_unchanged(
     return before == after
 
 
+def snapshot_digest_coverage(manifest: dict[str, tuple] | None) -> dict[str, object]:
+    """快照的证据强度元数据(双席 seq2127: 未 hash 大文件不能作为通用安全证明)。
+
+    返回 digest_coverage_pct + unhashed_count + unhashed_paths(前 10)——调用方
+    写入 effect contract, 供 supervisor/safe_to_retry 层裁决「部分证明」的
+    信任度; 不把 (size, mtime) 相等当作内容未变的因果证明。
+    """
+    if not manifest:
+        return {
+            "snapshot_available": bool(manifest),
+            "digest_coverage_pct": 0,
+            "unhashed_count": 0,
+            "unhashed_paths": [],
+        }
+    file_entries = [k for k, v in manifest.items() if not k.startswith("dir:")]
+    unhashed = [k for k in file_entries if not manifest[k][3]]
+    total = len(file_entries)
+    return {
+        "snapshot_available": True,
+        "digest_coverage_pct": round(100 * (total - len(unhashed)) / total) if total else 100,
+        "unhashed_count": len(unhashed),
+        "unhashed_paths": unhashed[:10],
+    }
+
+
 __all__ = [
     "ShellArtifactSnapshot",
     "reconcile_shell_artifacts",
