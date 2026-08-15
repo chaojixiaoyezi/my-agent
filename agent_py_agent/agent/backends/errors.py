@@ -107,11 +107,6 @@ def is_empty_provider_response_error(exc: BaseException) -> bool:
     return isinstance(exc, ProviderResponseError) and exc.error_code == "MODEL_EMPTY_RESPONSE"
 
 
-def is_incomplete_provider_response_error(exc: BaseException) -> bool:
-    """Return True when the provider explicitly stopped at its output-token limit."""
-    return isinstance(exc, ProviderResponseError) and exc.error_code == "MODEL_INCOMPLETE_RESPONSE"
-
-
 def is_provider_context_window_error(exc: BaseException) -> bool:
     """Return True for typed provider context-window failures."""
     return isinstance(exc, ProviderContextWindowError)

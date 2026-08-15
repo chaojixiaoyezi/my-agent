@@ -29,37 +29,23 @@ from .usage_metadata import (
     usage_dict,
 )
 
-# 会话运行时 treats an explicit provider-side incomplete terminal event as an error,
-# not as a successful assistant turn.  Anthropic-compatible providers expose the
-# same fact through ``stop_reason=max_tokens``; OpenAI-compatible providers use
-# ``finish_reason=length``.  Keep the decision structural and shared by both
-# adapters so an IM, CLI, or future channel cannot accidentally deliver a partial
-# response as a completed answer.
+# 会话运行时/长期助手 keep a length-truncated turn's completed text and continue the
+# loop instead of killing the run.  Anthropic-compatible providers expose the
+# fact through ``stop_reason=max_tokens``; OpenAI-compatible providers use
+# ``finish_reason=length``.  Truncation is no longer a fatal adapter error:
+# the adapter returns a ``truncated`` ModelResponse whose text is preserved and
+# whose tool blocks are dropped (a truncated tool call cannot be executed
+# safely), matching harness assembler behavior; the tool loop then continues
+# with the partial text as this turn's assistant message.
 _INCOMPLETE_STOP_REASONS = frozenset({"max_tokens", "length"})
 
 
-# LLM: provider 明确声明 length/max_tokens 时，这一轮不能成为成功答复或可执行工具轮；所有兼容后端必须共用同一结构化错误合同。
-# 函数用途: 检查供应商停止原因，并把被截断的响应转换成包含已收长度和工具块数量的明确异常。
-def _raise_for_incomplete_response(
-    stop_reason: object,
-    *,
-    backend: str,
-    partial_text_chars: int,
-    tool_use_blocks: int,
-) -> None:
-    reason = str(stop_reason or "").strip().lower()
-    if reason not in _INCOMPLETE_STOP_REASONS:
-        return
-    raise ProviderResponseError(
-        f"{backend} 模型响应未完成（stop_reason={reason}）",
-        error_code="MODEL_INCOMPLETE_RESPONSE",
-        details={
-            "backend": backend,
-            "stop_reason": reason,
-            "partial_text_chars": max(0, int(partial_text_chars)),
-            "tool_use_blocks": max(0, int(tool_use_blocks)),
-        },
-    )
+# LLM: 截断不再 raise 致命错误（真机 2026-08-16 长任务复刻：deepseek-v4-flash
+# 单轮输出上限内写长文件时 stop_reason=max_tokens → 适配器 raise → 整个 run
+# 终止 RC=2；harness/轻量运行时 同场景保留文本继续循环，任务不中断）。
+# 函数用途: 判断供应商停止原因是否属截断（max_tokens/length）。
+def _incomplete_stop_reason(stop_reason: object) -> bool:
+    return str(stop_reason or "").strip().lower() in _INCOMPLETE_STOP_REASONS
 
 
 def _bounded_output_tokens(configured: int, requested: int | None) -> int:
@@ -500,12 +486,17 @@ class OpenAICompatibleBackend(HttpBackend):
             lines("/chat/completions", openai_stream_payload(payload), headers),
             on_chunk=on_chunk,
         )
-        _raise_for_incomplete_response(
-            completion.stop_reason,
-            backend=self.name,
-            partial_text_chars=len(text),
-            tool_use_blocks=len(blocks),
-        )
+        if _incomplete_stop_reason(completion.stop_reason):
+            # 截断：保留已收文本，丢弃工具调用块（截断的工具调用不能安全执行），
+            # 标记 truncated 让工具循环下一轮继续（harness assembler 同款）。
+            return ModelResponse(
+                text=text,
+                backend=self.name,
+                usage=usage,
+                tool_use_blocks=[],
+                truncated=True,
+                stop_reason=completion.stop_reason,
+            )
         if not text and not blocks and payload.get("tools"):
             raise ProviderResponseError(
                 "OpenAI-compatible 流式响应没有文本或工具调用",
@@ -539,12 +530,16 @@ def _openai_non_stream_response(
             f"无法解析 OpenAI-compatible 响应: {_response_preview(obj)}"
         ) from exc
     finish_reason = str(choice.get("finish_reason") or "")
-    _raise_for_incomplete_response(
-        finish_reason,
-        backend=backend_name,
-        partial_text_chars=len(text),
-        tool_use_blocks=len(blocks),
-    )
+    if _incomplete_stop_reason(finish_reason):
+        # 截断：保留文本、丢弃工具块、标记 truncated（工具循环下一轮继续）。
+        return ModelResponse(
+            text=text,
+            backend=backend_name,
+            usage=usage_dict(obj.get("usage")),
+            tool_use_blocks=[],
+            truncated=True,
+            stop_reason=finish_reason,
+        )
     if not text and not blocks and tools_requested:
         raise ProviderResponseError(
             f"OpenAI-compatible 响应没有文本或工具调用: {_response_preview(obj)}",
@@ -877,12 +872,17 @@ class AnthropicCompatibleBackend(HttpBackend):
                 raise ProviderResponseError(
                     f"无法解析 Anthropic-compatible 响应: {_response_preview(obj)}"
                 ) from exc
-            _raise_for_incomplete_response(
-                obj.get("stop_reason"),
-                backend=self.name,
-                partial_text_chars=len(text),
-                tool_use_blocks=len(blocks),
-            )
+            if _incomplete_stop_reason(obj.get("stop_reason")):
+                # 截断：保留文本、丢弃工具块、标记 truncated（工具循环继续）。
+                return ModelResponse(
+                    text=text,
+                    backend=self.name,
+                    usage=usage_dict(obj.get("usage")),
+                    tool_use_blocks=[],
+                    assistant_content_blocks=[],
+                    truncated=True,
+                    stop_reason=str(obj.get("stop_reason") or ""),
+                )
             if text or blocks or attempt > 0 or not _anthropic_has_thinking_without_text(obj):
                 break
         # 原生 tool_use 下模型可能只回 tool_use 块、没有文本，这种是合法的，不报空响应。
@@ -912,12 +912,18 @@ class AnthropicCompatibleBackend(HttpBackend):
         text, usage, blocks, completion = "", {}, [], StreamCompletion()
         for attempt in range(2):
             text, usage, blocks, completion = self._stream_text_once(payload, headers, on_chunk)
-            _raise_for_incomplete_response(
-                completion.stop_reason,
-                backend=self.name,
-                partial_text_chars=len(text),
-                tool_use_blocks=len(blocks),
-            )
+            if _incomplete_stop_reason(completion.stop_reason):
+                # 截断：保留文本、丢弃工具块、标记 truncated（工具循环下一轮继续，
+                # harness assembler 同款：截断时丢弃全部 tool-call 块）。
+                return ModelResponse(
+                    text=text,
+                    backend=self.name,
+                    usage=usage,
+                    tool_use_blocks=[],
+                    assistant_content_blocks=[],
+                    truncated=True,
+                    stop_reason=completion.stop_reason,
+                )
             if text or blocks or attempt > 0:
                 break
         # 同非流式：只回 tool_use 块、无文本也合法，不报空响应。

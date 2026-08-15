@@ -10,7 +10,6 @@ from pathlib import Path
 from ..backends import ModelResponse
 from ..backends.errors import (
     is_empty_provider_response_error,
-    is_incomplete_provider_response_error,
 )
 from ..concurrency.interrupt import is_interrupted
 from ..runtime_db.operations import exec_lock_scope
@@ -180,32 +179,13 @@ def _should_retry_empty_model_response(
     )
 
 
-def _should_retry_incomplete_model_response(
-    params: ToolLoopExecuteParams,
-    exc: Exception,
-    provider_response_repairs: int,
-) -> bool:
-    # 长期助手 continues a length-truncated tool turn instead of discarding all
-    # completed work.  Keep the retry bounded and only enable it after durable
-    # tool results exist; a truncated ordinary chat answer remains terminal,
-    # matching 会话运行时's response.incomplete handling.
-    # 真机 2026-08-09:deepseek-v4-flash 在 工具运行时.ai 端输出上限低,子代理写大文件/
-    # 收尾提交轮一次截断重试后仍截断,直接 BLOCKED 导致任务永远走不完。截断恢复
-    # 每次注入「继续输出」上下文(不重来),放宽到 3 次让低上限模型有足够机会完成。
-    return (
-        is_incomplete_provider_response_error(exc)
-        and bool(params.executed_tools)
-        and provider_response_repairs < 3
-    )
-
-
 def _pending_turn_input_supersedes_unusable_response(
     agent: object,
     params: ToolLoopExecuteParams,
     exc: Exception,
 ) -> bool:
     """Keep a 会话运行时 steer in the same turn when the stale call has no usable result."""
-    unusable = is_empty_provider_response_error(exc) or is_incomplete_provider_response_error(exc)
+    unusable = is_empty_provider_response_error(exc)
     if not unusable or not has_pending_turn_input(agent, params):
         return False
     discard_pending_natural_user_reply(params)
@@ -223,32 +203,6 @@ def _empty_model_response_retry_context(params: ToolLoopExecuteParams) -> str:
             "上一轮模型接口返回了空文本；真实工具调用和工具结果已经保留在上方 tool-record/tool-output-record 中。",
             f"recent_executed_tools: {tools}",
             "请基于这些已完成结果继续：任务未完成就调用下一步工具，任务已完成才给最终回答。不要从头重复读取同一批材料。",
-        ]
-    )
-
-
-def _incomplete_model_response_retry_context(
-    params: ToolLoopExecuteParams,
-    exc: Exception,
-) -> str:
-    details = getattr(exc, "details", None)
-    details = details if isinstance(details, dict) else {}
-    stop_reason = str(details.get("stop_reason") or "unknown")
-    try:
-        partial_chars = max(0, int(details.get("partial_text_chars") or 0))
-    except (TypeError, ValueError):
-        partial_chars = 0
-    tools = ", ".join(str(item) for item in params.executed_tools[-6:]) or "(none)"
-    return "\n".join(
-        [
-            "[tool-system:model-incomplete-response]",
-            "上一轮模型响应被供应商输出上限截断；半截正文和半截工具参数都没有被当作成功或执行。",
-            f"stop_reason: {stop_reason}",
-            f"discarded_partial_text_chars: {partial_chars}",
-            f"recent_executed_tools: {tools}",
-            "真实 tool-record/tool-output-record 与已写产物仍然有效。请从当前进度继续，"
-            "不要重头复述或重复读取；优先直接发出下一步小而完整的工具调用，"
-            "若工作已经完成则只给简洁最终答复。",
         ]
     )
 
@@ -932,12 +886,6 @@ def _model_turn_or_retry(
             return "", None, False, True, provider_response_repairs
         if _should_retry_empty_model_response(loop_params, exc, provider_response_repairs):
             context = _empty_model_response_retry_context(loop_params)
-        elif _should_retry_incomplete_model_response(
-            loop_params,
-            exc,
-            provider_response_repairs,
-        ):
-            context = _incomplete_model_response_retry_context(loop_params, exc)
         else:
             raise
         loop_params.tool_context.append(context)

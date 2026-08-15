@@ -39,7 +39,9 @@ def _anthropic_text_stream(text: str, stop_reason: str) -> list[str]:
     )
 
 
-def test_anthropic_stream_max_tokens_is_structured_incomplete_error() -> None:
+def test_anthropic_stream_max_tokens_returns_truncated_response() -> None:
+    # 长任务真机(2026-08-16): stop_reason=max_tokens 不再 raise 致命错误终止 run;
+    # 保留已收文本、丢弃工具块、标记 truncated, 工具循环下一轮继续(harness 同款)。
     backend = AnthropicCompatibleBackend(_OPTIONS)
     calls: list[dict] = []
 
@@ -50,16 +52,12 @@ def test_anthropic_stream_max_tokens_is_structured_incomplete_error() -> None:
 
     backend.request_stream = fake_stream  # type: ignore[method-assign]
 
-    with pytest.raises(ProviderResponseError) as exc_info:
-        backend.generate("prompt")
+    response = backend.generate("prompt")
 
-    assert exc_info.value.error_code == "MODEL_INCOMPLETE_RESPONSE"
-    assert exc_info.value.details == {
-        "backend": "anthropic_compatible",
-        "stop_reason": "max_tokens",
-        "partial_text_chars": 4,
-        "tool_use_blocks": 0,
-    }
+    assert response.text == "半截产出"
+    assert response.truncated is True
+    assert response.stop_reason == "max_tokens"
+    assert response.tool_use_blocks == []
     assert len(calls) == 1
 
 
@@ -96,11 +94,12 @@ def test_anthropic_incomplete_tool_use_is_not_executed_as_a_valid_turn() -> None
     backend = AnthropicCompatibleBackend(_OPTIONS)
     backend.request_stream = lambda path, payload, headers: lines  # type: ignore[method-assign]
 
-    with pytest.raises(ProviderResponseError) as exc_info:
-        backend.generate("prompt", tools=[{"name": "write_file"}])
+    response = backend.generate("prompt", tools=[{"name": "write_file"}])
 
-    assert exc_info.value.error_code == "MODEL_INCOMPLETE_RESPONSE"
-    assert exc_info.value.details["stop_reason"] == "max_tokens"
+    assert response.truncated is True
+    assert response.stop_reason == "max_tokens"
+    assert response.tool_use_blocks == [], "半截的 tool_use 块不得当作有效调用执行"
+    assert response.text == "先说两句"
 
 
 def test_anthropic_tool_use_stop_reason_remains_valid() -> None:
@@ -132,7 +131,7 @@ def test_anthropic_tool_use_stop_reason_remains_valid() -> None:
     assert response.stop_reason == "tool_use"
 
 
-def test_anthropic_non_stream_max_tokens_is_incomplete_error() -> None:
+def test_anthropic_non_stream_max_tokens_returns_truncated_response() -> None:
     backend = AnthropicCompatibleBackend(replace(_OPTIONS, stream_enabled=False))
     backend.request_json = lambda path, payload, headers: {  # type: ignore[method-assign]
         "content": [{"type": "text", "text": "答案"}],
@@ -140,13 +139,14 @@ def test_anthropic_non_stream_max_tokens_is_incomplete_error() -> None:
         "usage": {"output_tokens": 64},
     }
 
-    with pytest.raises(ProviderResponseError) as exc_info:
-        backend.generate("prompt")
+    response = backend.generate("prompt")
 
-    assert exc_info.value.error_code == "MODEL_INCOMPLETE_RESPONSE"
+    assert response.text == "答案"
+    assert response.truncated is True
+    assert response.stop_reason == "max_tokens"
 
 
-def test_openai_stream_length_is_incomplete_error() -> None:
+def test_openai_stream_length_returns_truncated_response() -> None:
     backend = OpenAICompatibleBackend(_OPTIONS)
     backend.request_stream = lambda path, payload, headers: [  # type: ignore[method-assign]
         json.dumps({"choices": [{"delta": {"content": "partial"}}]}),
@@ -154,14 +154,15 @@ def test_openai_stream_length_is_incomplete_error() -> None:
         "[DONE]",
     ]
 
-    with pytest.raises(ProviderResponseError) as exc_info:
-        backend.generate("prompt")
+    response = backend.generate("prompt")
 
-    assert exc_info.value.error_code == "MODEL_INCOMPLETE_RESPONSE"
-    assert exc_info.value.details["backend"] == "openai_compatible"
+    assert response.text == "partial"
+    assert response.truncated is True
+    assert response.stop_reason == "length"
+    assert response.tool_use_blocks == []
 
 
-def test_openai_non_stream_length_is_incomplete_error() -> None:
+def test_openai_non_stream_length_returns_truncated_response() -> None:
     backend = OpenAICompatibleBackend(replace(_OPTIONS, stream_enabled=False))
     backend.request_json = lambda path, payload, headers: {  # type: ignore[method-assign]
         "choices": [
@@ -172,7 +173,8 @@ def test_openai_non_stream_length_is_incomplete_error() -> None:
         ]
     }
 
-    with pytest.raises(ProviderResponseError) as exc_info:
-        backend.generate("prompt")
+    response = backend.generate("prompt")
 
-    assert exc_info.value.error_code == "MODEL_INCOMPLETE_RESPONSE"
+    assert response.text == "partial"
+    assert response.truncated is True
+    assert response.stop_reason == "length"

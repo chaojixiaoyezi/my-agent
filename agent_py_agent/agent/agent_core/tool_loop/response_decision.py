@@ -608,7 +608,17 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
         verified = _delivery_verify_no_tool_call_decision(request)
         if verified is not None:
             return verified
-        return ToolLoopResponseDecision("break", request.response, [], request.counters)
+        final_response = request.response
+        if bool(getattr(final_response, "truncated", False)):
+            # EXEC-05 长任务真机: 最终答复被供应商输出上限截断(max_tokens/length)
+            # 不能当作完成交付——标记 unfinished, CLI RC=2, 用户可续跑补全。
+            final_response = replace(
+                final_response,
+                runtime_status="unfinished",
+                runtime_reason="MODEL_RESPONSE_TRUNCATED",
+                runtime_source="tool_loop",
+            )
+        return ToolLoopResponseDecision("break", final_response, [], request.counters)
     if request.counters.protected_marker_repairs < 1:
         return ToolLoopResponseDecision(
             "continue", None, [], _inc_protected_marker(request.counters)
