@@ -630,13 +630,16 @@ def _delivery_verify_no_tool_call_decision(
     if not isinstance(contract, dict):
         return None
     from ....cli.delivery_verify import (
-        delivery_verify_commands,
+        VERIFY_CONTRACT_INVALID,
+        VERIFY_FAILED,
+        VERIFY_PASSED,
+        VERIFY_SKIPPED,
+        _contract_hash,
         delivery_verify_failure_context,
+        persist_delivery_verify_event,
         run_delivery_verification,
     )
 
-    if not delivery_verify_commands(contract):
-        return None
     try:
         from ..runner.context import current_run_task_workspace_root
 
@@ -644,12 +647,29 @@ def _delivery_verify_no_tool_call_decision(
     except Exception:  # noqa: BLE001 workspace 拿不到不阻断
         workspace_root = None
     try:
-        all_ok, results = run_delivery_verification(request.params, workspace_root)
+        state, results = run_delivery_verification(request.params, workspace_root)
     except Exception:  # noqa: BLE001 验证执行异常保守判失败（fail-closed）
-        all_ok, results = False, []
-    if all_ok:
+        state, results = VERIFY_FAILED, []
+    contract_hash = _contract_hash(contract)
+    persist_delivery_verify_event(
+        request.agent, request.params, state, results, contract_hash
+    )
+    if state == VERIFY_SKIPPED:
         return None
-    request.params.tool_context.append(delivery_verify_failure_context(results))
+    if state == VERIFY_PASSED:
+        return None
+    # VERIFY_FAILED / VERIFY_CONTRACT_INVALID / cwd 越界 → 一律 unfinished
+    # fail-closed（双席 seq2004 硬缺口2: 坏合同不得伪装成自然收口）。
+    failure_text = (
+        delivery_verify_failure_context(results)
+        if state == VERIFY_FAILED
+        else (
+            "[tool-system delivery-verify-failed]\n"
+            "delivery contract 声明的 verify_commands 结构非法或 cwd 越界，"
+            "产物无法机器验证，任务未完成。"
+        )
+    )
+    request.params.tool_context.append(failure_text)
     from dataclasses import replace as _replace
 
     text = str(getattr(request.response, "text", "") or "")

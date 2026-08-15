@@ -5725,6 +5725,11 @@ CONTINUABLE_REASONS = frozenset(
         # 仅 response_decision 对全 TOOL_CALL_UNCLOSED violations 产生此
         # reason, 其他协议违规仍 blocked fail-closed。
         "TOOL_CALL_UNCLOSED",
+        # 2026-08-15 3×3 双席 seq2004 硬缺口1: 第 4 层收口机器验证 gate
+        # 产物未通过时标 DELIVERY_VERIFY_FAILED——必须进可续跑族, 否则
+        # resume_loop 判 unresumable 直接退出, 模型永远看不到验证输出。
+        # 结构门见下: 只接受 source=delivery_verify + status=unfinished。
+        "DELIVERY_VERIFY_FAILED",
     }
 )
 
@@ -5752,6 +5757,13 @@ def should_continue_task(final_response: object) -> tuple[bool, str]:
         # 同一 reason 被放行续跑(生产路径由 host 结构化赋值, 此处防御性)。
         if reason == "TOOL_CALL_UNCLOSED" and not (
             source == "tool_protocol_adapter" and status == "unfinished"
+        ):
+            return False, reason or "not_continuable"
+        # 双席 seq2004 硬缺口1 结构门: DELIVERY_VERIFY_FAILED 只由收口验证
+        # gate 在 unfinished 收口产生——补 source/status 精确约束, 防其他
+        # 路径误标同一 reason 被放行续跑(生产路径由 host 结构化赋值)。
+        if reason == "DELIVERY_VERIFY_FAILED" and not (
+            source == "delivery_verify" and status == "unfinished"
         ):
             return False, reason or "not_continuable"
         return True, reason
