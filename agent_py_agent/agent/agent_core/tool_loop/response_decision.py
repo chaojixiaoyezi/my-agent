@@ -7,6 +7,28 @@ from typing import ClassVar
 
 _LOGGER = logging.getLogger(__name__)
 
+
+def _append_workspace_diagnostic(probe: dict[str, object]) -> None:
+    """workspace 根缺失诊断 JSONL 落盘（双席 seq2075/2076：日志可能丢，需可追溯）。
+
+    fail-silent：写失败绝不影响收口判定。路径用临时目录（各环境可写）；
+    内容为探针结构化快照（不含完整 contract/密钥）。
+    """
+    try:
+        import os
+        import tempfile
+        import time
+
+        path = os.path.join(
+            tempfile.gettempdir(), "my-agent-workspace-diagnostics.jsonl"
+        )
+        record = dict(probe)
+        record["ts"] = int(time.time())
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    except Exception:  # noqa: BLE001 诊断落盘失败绝不影响判定
+        pass
+
 from ...backends import ModelResponse
 from ...backends.tool_protocol_adapter import (
     ProviderToolCallRequest,
@@ -640,10 +662,11 @@ def _delivery_verify_no_tool_call_decision(
         run_delivery_verification,
     )
 
-    # 2026-08-15 取证快照（双席 seq2072 要求，只加日志不改行为）：3×3 真机
+    # 2026-08-15 取证快照（双席 seq2072/2075/2076，只加日志不改行为）：3×3 真机
     # 收口时 workspace 根缺失（事件 failed「workspace 根缺失」）但 contract 非空
-    # （有 contract_hash）——矛盾点待快照定位。记录 gate 入口的 contract 结构
-    # 与 workspace 解析全过程，复现时拿真实值。
+    # （有 contract_hash）——矛盾点待快照定位。结构化诊断 JSONL 落盘
+    # （fail-silent），字段按双席最小清单（运行身份/参数边界/contract 形状/
+    # 解析链），绝不写完整 contract 或密钥。
     try:
         from ..runner.context import current_run_task_workspace_root
         from .run_task_workspace_writer_probe import (
@@ -652,20 +675,14 @@ def _delivery_verify_no_tool_call_decision(
 
         workspace_root = current_run_task_workspace_root(request.agent, request.params)
         if workspace_root is None:
+            probe = workspace_root_candidates_probe(request.agent, request.params)
             _LOGGER.warning(
-                "delivery-verify workspace root missing: run_id=%s attempt_id=%s "
-                "contract_type=%s contract_hash=%s task_workspace=%r task_root=%r "
-                "candidates=%r",
+                "delivery-verify workspace root missing: run_id=%s attempt_id=%s probe=%s",
                 str(getattr(request.params, "run_id", "") or ""),
                 str(getattr(request.params, "attempt_id", "") or ""),
-                type(contract).__name__,
-                _contract_hash(contract),
-                contract.get("task_workspace"),
-                (contract.get("task_workspace") or {}).get("task_root")
-                if isinstance(contract.get("task_workspace"), dict)
-                else None,
-                workspace_root_candidates_probe(request.agent, request.params),
+                probe,
             )
+            _append_workspace_diagnostic(probe)
     except Exception:  # noqa: BLE001 workspace 拿不到 → 根缺失 fail-closed（run 内拒绝执行）
         workspace_root = None
     try:
