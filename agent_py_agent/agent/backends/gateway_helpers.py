@@ -92,6 +92,13 @@ class GatewayRequest:
     headers: dict[str, str]
     timeout: int
     connect_timeout: float = 10.0
+    # 独立流式 idle 超时(seq2173/2174 规格, 2026-08-15 端点故障实锤):
+    # 连接被吞(服务端不发任何字节)时按此快速失败, 不再死等 timeout 派生
+    # 的大间隔(实测 600s→被 auto-respawn 误杀)。None/<=0 视为未设置,
+    # 跟随总超时(向后兼容); 有值则取 min(自身, 总超时派生) 保证
+    # idle ≤ 总预算(边界①)。thinking 等内部输出也是 SSE data 行,
+    # 会刷新 idle——120s 无任何输出才超时, 不误杀正常长思考。
+    stream_idle_timeout: int | float | None = None
 
     @property
     def url(self) -> str:
@@ -227,8 +234,12 @@ def _stream_with_watchdog(request: GatewayRequest) -> Iterator[str]:
             # 的 wall_deadline——watchdog/parser 全链路同一 cutoff 起点。
             start = time.monotonic()
             wall_deadline = start + _stream_deadline_offset(request.timeout)
+            # seq2173/2174: idle 窗口独立于总超时——stream_idle_timeout
+            # 设置时用其滚动(≤总超时, 边界①), 未设置时跟随总超时。
             watchdog = _StreamIdleWatchdog(
-                response_guard, request.timeout, idle_deadline=wall_deadline
+                response_guard,
+                _stream_idle_interval(request),
+                idle_deadline=wall_deadline,
             )
             watchdog.start()
             try:
@@ -870,6 +881,22 @@ def _stream_deadline_offset(timeout: int | float) -> float:
     effective 值一致——dynamic 预算可带小数(如 303.1), int() 截断会放大
     0.05/0.5s 级预算(steward seq1533-2)。"""
     return max(1.0, float(timeout or 0))
+
+
+def _stream_idle_interval(request: GatewayRequest) -> float:
+    """流式 idle 窗口秒数(seq2173/2174 规格)。
+
+    边界① idle ≤ 总预算: min(独立值, 总超时派生)——独立值大于总超时
+    时退化为总超时(否则 watchdog 比 parser 的总 deadline 还晚, 无意义)。
+    边界② 无效值回退: None/<=0 视为未设置, 跟随总超时(向后兼容)。
+    边界③ 同一 cutoff 起点: 调用方保证 watchdog 初始 deadline 与 parser
+    的 wall_deadline 同一 start 派生(门槛3, seq1622-1 结构不变)。
+    """
+    total = _stream_deadline_offset(request.timeout)
+    configured = request.stream_idle_timeout
+    if configured is None or float(configured) <= 0:
+        return total
+    return min(total, float(configured))
 
 
 def _stream_deadline(timeout: int | float) -> float:

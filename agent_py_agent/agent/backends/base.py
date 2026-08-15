@@ -110,6 +110,10 @@ class BackendOptions:
     context_window_tokens: int = 0
     temperature: float = 0.2
     stream_enabled: bool = True
+    # 独立流式 idle 超时(seq2173/2174): None=跟随总超时; 设置后流读取
+    # 在该间隔内无任何 SSE data 即快速失败(ProviderTimeout), 不再死等
+    # 总超时派生的大间隔。thinking 输出也是 data 行, 会刷新 idle。
+    stream_idle_timeout: int | float | None = None
 
 
 @dataclass(frozen=True)
@@ -244,6 +248,7 @@ class HttpBackend(BaseBackend):
         self.model_name = str(options.model_name)
         self.request_timeout = int(options.request_timeout)
         self.connect_timeout = float(options.connect_timeout)
+        self.stream_idle_timeout = options.stream_idle_timeout
         self.max_tokens = int(options.max_tokens)
         # 本地配置与供应商事实分开保存；不能再把 fallback 冒充 provider metadata。
         self.configured_context_window_tokens = int(options.context_window_tokens or 0)
@@ -359,6 +364,7 @@ class HttpBackend(BaseBackend):
             headers=headers,
             timeout=self.request_timeout,
             connect_timeout=self.connect_timeout,
+            stream_idle_timeout=self.stream_idle_timeout,
         )
 
     # LLM: 供应商上下文窗口只从模型 metadata API 的结构化字段读取；失败或字段缺失返回 0，
@@ -1078,6 +1084,7 @@ def get_backend(name: str, config: Any | None = None) -> BaseBackend:
         context_window_tokens=getattr(config, "model_context_window_tokens", 0),
         temperature=float(config.temperature),
         stream_enabled=getattr(config, "stream_enabled", True),
+        stream_idle_timeout=getattr(config, "stream_idle_timeout", None),
     )
 
     if name == "openai_compatible":

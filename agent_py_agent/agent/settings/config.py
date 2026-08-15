@@ -456,6 +456,10 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     api_key_env: str = "AGENT_API_KEY"
     model_name: str = "gpt-4o-mini"
     request_timeout: int = 240
+    # 独立流式 idle 超时(seq2173/2174): None/0=跟随总超时(向后兼容);
+    # 设置后流读取在该间隔内无任何 SSE data 即快速失败, 防连接被吞时
+    # 死等总超时派生的大间隔(实测 600s→auto-respawn 误杀)。
+    stream_idle_timeout: int | float | None = None
     max_tokens: int = DEFAULT_MODEL_MAX_TOKENS
     model_context_window_tokens: int = 200_000
     temperature: str = "0.2"

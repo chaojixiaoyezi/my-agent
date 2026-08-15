@@ -586,6 +586,13 @@ model_name: "deepseek-v4-flash"
 # HTTP 请求总超时秒数；超时会记录为 provider_timeout，runner 会按有上限的失败策略重试。
 request_timeout: 240
 
+# 独立流式 idle 超时秒数(seq2173/2174, 2026-08-15 端点故障实锤):
+# 连接被吞(服务端不发任何字节)时按此快速失败为 provider_timeout,
+# 不再死等总超时派生的大间隔(此前 600s→auto-respawn 误杀循环)。
+# 模型 thinking 等内部输出也是 SSE data 行, 会刷新 idle——120s 无任何
+# 输出才超时, 不误杀正常长思考。0/留空=跟随总超时。
+stream_idle_timeout: 120
+
 # 允许模型最多生成多少 token
 # 2026-08-15 3×3 真机+对照组对齐: 对照组 会话运行时(responses API 默认)与
 # 终端应用(Anthropic SDK 默认)均不设输出上限——my-agent 原 16314 是
