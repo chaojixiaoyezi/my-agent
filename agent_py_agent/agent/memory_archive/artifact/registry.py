@@ -1,0 +1,293 @@
+"""normalized artifact manifests for runtime memory.
+
+Human version:
+Artifact manifests turn arbitrary `artifact_refs` into small records with
+summary, hash, path, and existence metadata. The manifest stores references and
+checksums only; large output bodies stay in artifact files.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from ...common.json_io import write_jsonl_records
+from ...common.path_segments import safe_path_segment
+
+
+@dataclass(frozen=True)
+class ArtifactManifestResult:
+    """Task/run manifest paths produced while syncing artifacts."""
+
+    task_manifest_jsonl: Path
+    agent_manifest_jsonl: Path
+
+
+@dataclass(frozen=True)
+class SyncArtifactManifestsRequest:
+    """Bundle inputs for syncing task/run artifact manifests."""
+
+    task: Any
+    task_workspace_root: Path
+    agent_run_workspace_root: Path
+    now: float
+
+
+@dataclass(frozen=True)
+class _ArtifactRecordContext:
+    task_id: str
+    run_id: str
+    now: float
+    allowed_roots: tuple[Path, ...]
+
+
+@dataclass(frozen=True)
+class _ResolvedArtifactRef:
+    path: Path | None
+    status: str
+
+
+@dataclass(frozen=True)
+class _AllowedRootsRequest:
+    task: Any
+    task_dir: Path | None
+    task_workspace_root: Path
+    agent_run_workspace_root: Path
+    allowed_write_roots: list[str]
+
+
+def sync_artifact_manifests(
+    request: SyncArtifactManifestsRequest | Any = None,
+    *,
+    task: Any | None = None,
+    task_workspace_root: Path | None = None,
+    agent_run_workspace_root: Path | None = None,
+    now: float | None = None,
+) -> ArtifactManifestResult:
+    """Write task-level and run-level artifact manifests from task artifact refs."""
+
+    inputs = _coerce_sync_request(
+        request,
+        task=task,
+        task_workspace_root=task_workspace_root,
+        agent_run_workspace_root=agent_run_workspace_root,
+        now=now,
+    )
+    records = _artifact_records(
+        inputs.task,
+        inputs.now,
+        task_workspace_root=inputs.task_workspace_root,
+        agent_run_workspace_root=inputs.agent_run_workspace_root,
+    )
+    task_manifest = inputs.task_workspace_root / "artifacts" / "manifest.jsonl"
+    agent_manifest = inputs.agent_run_workspace_root / "artifacts" / "manifest.jsonl"
+    _write_manifest(task_manifest, records)
+    _write_manifest(agent_manifest, records)
+    return ArtifactManifestResult(task_manifest_jsonl=task_manifest, agent_manifest_jsonl=agent_manifest)
+
+
+def _coerce_sync_request(
+    request: SyncArtifactManifestsRequest | Any,
+    *,
+    task: Any | None,
+    task_workspace_root: Path | None,
+    agent_run_workspace_root: Path | None,
+    now: float | None,
+) -> SyncArtifactManifestsRequest:
+    if isinstance(request, SyncArtifactManifestsRequest):
+        return request
+    resolved_task = request if request is not None else task
+    if (
+        resolved_task is None
+        or task_workspace_root is None
+        or agent_run_workspace_root is None
+        or now is None
+    ):
+        raise TypeError(
+            "sync_artifact_manifests requires task, task_workspace_root, "
+            "agent_run_workspace_root, and now"
+        )
+    return SyncArtifactManifestsRequest(
+        task=resolved_task,
+        task_workspace_root=Path(task_workspace_root),
+        agent_run_workspace_root=Path(agent_run_workspace_root),
+        now=now,
+    )
+
+
+def _artifact_records(
+    task: Any,
+    now: float,
+    *,
+    task_workspace_root: Path,
+    agent_run_workspace_root: Path,
+) -> list[dict[str, object]]:
+    task_id = str(getattr(task, "root_id", "") or getattr(task, "id", "task"))
+    run_id = str(getattr(task, "id", "") or task_id)
+    task_dir = Path(str(getattr(task, "task_dir", ""))) if getattr(task, "task_dir", "") else None
+    context = _ArtifactRecordContext(
+        task_id=task_id,
+        run_id=run_id,
+        now=now,
+        allowed_roots=_allowed_roots(
+            _AllowedRootsRequest(
+                task=task,
+                task_dir=task_dir,
+                task_workspace_root=task_workspace_root,
+                agent_run_workspace_root=agent_run_workspace_root,
+                allowed_write_roots=getattr(task, "allowed_write_roots", []) or [],
+            )
+        ),
+    )
+    records: list[dict[str, object]] = []
+    for index, ref in enumerate(_artifact_refs(task), start=1):
+        resolved = _resolve_ref(ref, context.allowed_roots)
+        records.append(_artifact_record(context, index, ref, resolved))
+    return records
+
+
+def _artifact_record(
+    context: _ArtifactRecordContext,
+    index: int,
+    ref: str,
+    resolved: _ResolvedArtifactRef,
+) -> dict[str, object]:
+    exists = bool(resolved.path and resolved.status == "resolved" and resolved.path.is_file())
+    size_bytes = resolved.path.stat().st_size if exists and resolved.path else 0
+    digest = _sha256_file(resolved.path) if exists and resolved.path else ""
+    return {
+        "version": 1,
+        "artifact_id": _artifact_id(context.run_id, index, ref),
+        "task_id": context.task_id,
+        "run_id": context.run_id,
+        "ref": ref,
+        "path": str(resolved.path) if resolved.path else ref,
+        "kind": _artifact_kind(ref),
+        "resolution_status": resolved.status,
+        "exists": exists,
+        "size_bytes": size_bytes,
+        "sha256": digest,
+        "summary": _summary(ref, resolved.status, exists, size_bytes),
+        "content_externalized": True,
+        "source": "subagent_artifact_refs",
+        "created_at": _utc_iso(context.now),
+    }
+
+
+def _artifact_refs(task: Any) -> list[str]:
+    refs: list[str] = []
+    for item in list(getattr(task, "artifact_refs", []) or []):
+        text = str(item).strip()
+        if text and text not in refs:
+            refs.append(text)
+    return refs
+
+
+def _resolve_ref(ref: str, allowed_roots: tuple[Path, ...]) -> _ResolvedArtifactRef:
+    path = Path(ref).expanduser()
+    if path.is_absolute():
+        resolved = path.resolve(strict=False)
+        return (
+            _ResolvedArtifactRef(resolved, _path_status(resolved))
+            if _is_under_allowed_root(resolved, allowed_roots)
+            else _ResolvedArtifactRef(None, "blocked_outside_workspace")
+        )
+    for root in allowed_roots:
+        candidate = (root / path).resolve(strict=False)
+        if not _is_under_allowed_root(candidate, (root,)):
+            continue
+        if candidate.exists():
+            return _ResolvedArtifactRef(candidate, _path_status(candidate))
+    missing_candidate = (allowed_roots[0] / path).resolve(strict=False) if allowed_roots else path
+    if allowed_roots and not _is_under_allowed_root(missing_candidate, allowed_roots):
+        return _ResolvedArtifactRef(None, "blocked_outside_workspace")
+    return _ResolvedArtifactRef(missing_candidate, "missing")
+
+
+def _path_status(path: Path) -> str:
+    if path.is_file():
+        return "resolved"
+    if path.exists():
+        return "not_file"
+    return "missing"
+
+
+def _allowed_roots(request: _AllowedRootsRequest) -> tuple[Path, ...]:
+    roots = [
+        item
+        for item in [
+            request.task_dir,
+            getattr(request.task, "task_workspace_dir", "") or None,
+            getattr(request.task, "output_dir", "") or None,
+            request.task_workspace_root,
+            request.task_workspace_root.parent,
+            request.task_workspace_root.parent / "output",
+            request.agent_run_workspace_root,
+            *[Path(str(root)) for root in request.allowed_write_roots if str(root or "").strip()],
+        ]
+        if item is not None
+    ]
+    normalized: list[Path] = []
+    for root in roots:
+        resolved = Path(root).expanduser().resolve(strict=False)
+        if resolved not in normalized:
+            normalized.append(resolved)
+    return tuple(normalized)
+
+
+def _is_under_allowed_root(path: Path, allowed_roots: tuple[Path, ...]) -> bool:
+    for root in allowed_roots:
+        try:
+            path.relative_to(root.resolve(strict=False))
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _write_manifest(path: Path, records: list[dict[str, object]]) -> None:
+    write_jsonl_records(path, records)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _artifact_id(run_id: str, index: int, ref: str) -> str:
+    digest = hashlib.sha1(ref.encode("utf-8")).hexdigest()[:12]
+    return f"artifact-{safe_path_segment(run_id, default='item', replacement='_')}-{index}-{digest}"
+
+
+def _artifact_kind(ref: str) -> str:
+    suffix = Path(ref).suffix.lower()
+    if suffix in {".json", ".md", ".txt", ".log"}:
+        return "report"
+    if suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp"}:
+        return "image"
+    return "artifact"
+
+
+def _summary(ref: str, status: str, exists: bool, size_bytes: int) -> str:
+    if exists:
+        return f"{Path(ref).name or ref} ({size_bytes} bytes)"
+    if status == "blocked_outside_workspace":
+        return f"blocked artifact ref outside workspace: {ref}"
+    return f"unresolved artifact ref: {ref}"
+
+
+def _utc_iso(value: float) -> str:
+    return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
+
+
+__all__ = [
+    "ArtifactManifestResult",
+    "SyncArtifactManifestsRequest",
+    "sync_artifact_manifests",
+]
