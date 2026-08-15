@@ -96,3 +96,4 @@ yarn-error.log*
 # audit guarantee / learning draft runtime data (reusable test fixtures)
 /data/audit_guarantee_harness/
 /data/learning_drafts/
+blobs/
