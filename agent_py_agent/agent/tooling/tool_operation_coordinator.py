@@ -31,7 +31,10 @@ from ..local_storage import (
     new_tool_operation_holder,
 )
 from ..contracts.error_taxonomy import error_contract
-from ..runtime_db.managed_operation_store import AuthorityContextMissing
+from ..runtime_db.managed_operation_store import (
+    AuthorityContextMissing,
+    RuntimeConflictError,
+)
 from .models import (
     ToolFailureStage,
     ToolHandlerOutcome,
@@ -140,6 +143,28 @@ def _claim_operation(
                 resource_scopes=request.resource_scopes,
                 attempt_id=request.attempt_id,
             )
+        )
+    except RuntimeConflictError as exc:
+        # WRITE-03(2026-08-15 真机): 执行权/资源锁冲突是可预期并发语义(另一执行者
+        # 持有锁/attempt 已换代), 不是"账本不可用"——映射为可重试冲突码, 避免把
+        # 并发冲突误报成存储故障(子代理场景真机 UNAVAILABLE 掩盖了真实语义)。
+        result = _operation_error(
+            request.tool_name,
+            "TOOL_OPERATION_BUSY_CONFLICT",
+            f"工具执行冲突（另一执行者正在处理同一操作）: {exc}",
+            reported_error_code="TOOL_OPERATION_BUSY_CONFLICT",
+        )
+        _attach_operation_facts(
+            result,
+            request,
+            status="not_started",
+            action="busy_conflict",
+            diagnostic=type(exc).__name__,
+        )
+        return apply_tool_execution_facts(
+            result,
+            failure_stage=ToolFailureStage.RUNTIME_GATE,
+            handler_executed=False,
         )
     except Exception as exc:  # noqa: BLE001 - authoritative store failures fail closed
         authority_missing = isinstance(exc, AuthorityContextMissing)

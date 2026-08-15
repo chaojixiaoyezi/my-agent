@@ -1410,3 +1410,40 @@ def test_n_long_handler_renews_lease(tmp_path, monkeypatch):
     thread.join(timeout=10)
     assert not errors
     assert renew_count["n"] >= 1  # 修复前 0 → 红
+
+
+# LLM: WRITE-03(2026-08-15 真机): claim 阶段 RuntimeConflictError(执行权/资源锁冲突)
+# 必须映射为可重试冲突码, 不能误报成 TOOL_OPERATION_STORE_UNAVAILABLE(存储故障)。
+# 函数用途: 验证执行权冲突返回 BUSY_CONFLICT 且 handler 未执行。
+def test_claim_runtime_conflict_maps_to_busy_conflict(tmp_path):
+    from agent_py_agent.agent.runtime_db.managed_operation_store import RuntimeConflictError
+    from agent_py_agent.agent.tooling.tool_operation_coordinator import execute_tool_operation, ToolOperationExecutionRequest
+
+    class _FakeStore:
+        def claim_tool_operation(self, request):
+            raise RuntimeConflictError("执行权锁冲突: 另一执行者持有")
+
+        def finish_tool_operation(self, request):
+            raise AssertionError("不应走到 finish")
+
+    outcome = execute_tool_operation(
+        ToolOperationExecutionRequest(
+            store=_FakeStore(),
+            store_required=True,
+            owner_id="local/main",
+            run_id="run-1",
+            task_id="",
+            operation_id="op-1",
+            tool_name="run_command",
+            args_hash="h",
+            idempotency_key="k",
+            idempotency_scope="operation",
+            idempotency_namespace="n",
+            timeout_seconds=10,
+            invoke=lambda: (_ for _ in ()).throw(AssertionError("不应执行")),
+            attempt_id="att-1",
+            resource_scopes=(),
+        )
+    )
+    assert outcome.error_code == "TOOL_OPERATION_BUSY_CONFLICT"
+    assert outcome.handler_executed is False

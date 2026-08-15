@@ -1998,6 +1998,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "如需执行请由用户明确指示后重新发起。"
         ),
     ),
+    "TOOL_OPERATION_BUSY_CONFLICT": ErrorContract(
+        code="TOOL_OPERATION_BUSY_CONFLICT",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
+        recovery_hint="另一执行者正在处理同一操作（执行权/资源锁冲突），稍后重试或等待其完成。",
+    ),
     "TOOL_OPERATION_IDENTITY_CONFLICT": ErrorContract(
         code="TOOL_OPERATION_IDENTITY_CONFLICT",
         category="tool",
