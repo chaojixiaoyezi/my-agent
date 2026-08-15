@@ -215,12 +215,22 @@ def run_with_resume(
     *,
     initial_prompt: str,
     base_params: RunParams,
-    max_rounds: int = 8,
+    max_rounds: int | None = None,
     on_chunk: object = None,
     save: bool = False,
     delivery_contract: object = None,
 ) -> CliResumeOutcome:
-    """首轮 + 续跑轮循环（进程内，同一 task/run/thread 链路）。"""
+    """首轮 + 续跑轮循环（进程内，同一 task/run/thread 链路）。
+
+    2026-08-15 3×3 真机(cell2 bs4): max_rounds 硬编码 8 对复刻类长任务
+    太紧——续跑链 8 轮×resume_limit 3 次≈24 轮就预算耗尽死停等用户「继续」,
+    无人值守 CLI 场景任务必死。改为读配置 cli_resume_max_rounds(默认 8
+    保持现状, 普通交互任务防失控语义不变), 长任务部署可调大。
+    """
+    if max_rounds is None:
+        max_rounds = int(
+            getattr(getattr(agent, "config", None), "cli_resume_max_rounds", 0) or 8
+        )
     runner = ResumeRunOnce(
         agent,
         base_params=base_params,

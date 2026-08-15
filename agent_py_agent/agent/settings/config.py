@@ -210,6 +210,7 @@ class _RuntimeBudgetConfigFields:
     background_claim_ttl_seconds: int = 90
     background_claim_heartbeat_interval_seconds: int = 0
     background_completion_coalesce_seconds: int = 5
+    cli_resume_max_rounds: int = 8
     subagent_watch_interval_seconds: int = 120
     background_main_agent_allowed_tools: list[str] = field(default_factory=list)
 
