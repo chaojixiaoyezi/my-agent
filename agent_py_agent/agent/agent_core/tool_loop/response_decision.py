@@ -609,7 +609,19 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
         if verified is not None:
             return verified
         final_response = request.response
-        if bool(getattr(final_response, "truncated", False)):
+        if _no_delivery_artifact_produced(request.params):
+            # EXEC-06 长任务复刻真机(2026-08-16): 模型调过工具(读源码)但从未
+            # 写过任何交付产物就无工具收口 → 假完成(RC=0 零产物)。只在此前
+            # 调用过工具的"工具型任务"轮触发, 纯聊天(executed_tools 空)不受
+            # 影响; 只要曾经写过产物(write_file/edit_file/apply_patch)即放行。
+            # 标记 unfinished, CLI RC=2, resume 续跑让模型继续产出。
+            final_response = replace(
+                final_response,
+                runtime_status="unfinished",
+                runtime_reason="NO_DELIVERY_ARTIFACT_PRODUCED",
+                runtime_source="tool_loop",
+            )
+        elif bool(getattr(final_response, "truncated", False)):
             # EXEC-05 长任务真机: 最终答复被供应商输出上限截断(max_tokens/length)
             # 不能当作完成交付——标记 unfinished, CLI RC=2, 用户可续跑补全。
             final_response = replace(
@@ -808,3 +820,20 @@ def _unresolved_runtime_issue_request(
     return UnresolvedRuntimeIssueDecisionRequest(
         request.agent, request.params, request.response, request.counters
     )
+
+
+# EXEC-06: 本 run 调过工具但从没写过任何交付产物 = 收口可疑。
+# 结构化判定(禁 NL 匹配): executed_tools 非空(工具型任务)且不含任何
+# 写类工具 → 视为"任务未产出任何可交付物", 无工具收口不得当成完成。
+# 纯聊天/问答(executed_tools 空)不受影响; 写过产物(write/edit/apply_patch)
+# 即放行正常收口。
+_DELIVERY_PRODUCING_TOOLS = frozenset(
+    {"write_file", "edit_file", "apply_patch", "write_json", "write_yaml"}
+)
+
+
+def _no_delivery_artifact_produced(params: object) -> bool:
+    executed = list(getattr(params, "executed_tools", None) or [])
+    if not executed:
+        return False
+    return not any(str(item) in _DELIVERY_PRODUCING_TOOLS for item in executed)

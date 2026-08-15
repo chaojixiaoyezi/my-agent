@@ -165,6 +165,55 @@ def test_no_blocks_and_plain_text_breaks(tmp_path: Path):
     assert decision.response.text == "任务完成。"
 
 
+def test_executed_tools_without_artifact_produced_break_is_unfinished(tmp_path: Path):
+    """EXEC-06 长任务复刻真机(2026-08-16): 模型调过工具(读源码)但从没写过任何
+    交付产物(write_file/edit_file/apply_patch)就无工具收口 → 假完成(RC=0 零产物)。
+    系统必须把这种收口标记 unfinished, CLI RC=2, 让续跑继续产出。"""
+    from dataclasses import replace
+
+    response = ModelResponse(text="继续推进：先读完剩余模块再枚举端点。", backend="fake")
+    params = replace(_params(), executed_tools=["list_files", "read_file"])
+    decision = tool_loop_response_decision(
+        ToolLoopResponseDecisionRequest(
+            agent=_agent(tmp_path),
+            params=params,
+            response=response,
+            counters=ToolLoopRepairCounters(),
+        )
+    )
+    assert decision.action == "break"
+    assert decision.response.runtime_status == "unfinished"
+    assert decision.response.runtime_reason == "NO_DELIVERY_ARTIFACT_PRODUCED"
+
+
+def test_executed_read_only_tool_with_plain_text_no_artifact_stays_unfinished_even_having_run_tools(tmp_path: Path):
+    """写得过产物才能正常收口——写过 write_file 后无工具收口仍是完成。"""
+    from dataclasses import replace
+
+    response = ModelResponse(text="项目已交付，这是说明。", backend="fake")
+    params = replace(_params(), executed_tools=["list_files", "read_file", "write_file"])
+    decision = tool_loop_response_decision(
+        ToolLoopResponseDecisionRequest(
+            agent=_agent(tmp_path),
+            params=params,
+            response=response,
+            counters=ToolLoopRepairCounters(),
+        )
+    )
+    assert decision.action == "break"
+    assert decision.response.runtime_status != "unfinished"
+
+
+def test_pure_chat_no_tools_break_is_normal(tmp_path: Path):
+    """纯聊天/问答(executed_tools 空)无工具收口不受影响, 仍正常完成。"""
+    response = ModelResponse(text="你好，我是助手。", backend="fake")
+
+    decision = _decide(_agent(tmp_path), response)
+
+    assert decision.action == "break"
+    assert decision.response.runtime_status != "unfinished"
+
+
 def test_tool_use_input_tool_key_does_not_override_provider_name(tmp_path: Path):
     response = ModelResponse(
         text="",
