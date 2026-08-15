@@ -1,0 +1,21 @@
+{
+  "name": "collection_coverage_short_success",
+  "trace": "collection_coverage_short_success.jsonl",
+  "setup_files": [
+    {
+      "path": "source_data.json",
+      "content": "{\"sheets\":[{\"name\":\"week-1\",\"rows\":[{\"project\":\"demo\",\"url\":\"https://example.com/demo\"}]}]}"
+    }
+  ],
+  "expected": {
+    "contract_ok": false,
+    "blocked": false,
+    "block_reason": "",
+    "replay_error_codes": [],
+    "contract_error_codes": [
+      "COLLECTION_TOO_FEW_GROUPS",
+      "COLLECTION_GROUP_TOO_FEW_ITEMS",
+      "FINAL_STATUS_REJECTED"
+    ]
+  }
+}

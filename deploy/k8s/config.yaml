@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: my-agent-scale
+data:
+  MY_AGENT_DEPLOYMENT_MODE: "scale"
+  DATABASE_APP_ROLE: "my_agent_app"
+  WORKER_HANDLER: "agent_py_agent.agent.worker_handler:handle"
+  WORKER_DOWNSTREAM: "agent_py_agent.agent.scale_downstream:run"
+  MY_AGENT_HOME: "/var/lib/my-agent"
+  MY_AGENT_SCALE_WORKSPACE_ROOT: "/var/lib/my-agent-workspaces"
+  MY_AGENT_RELEASE_CHANNEL: "stable"
+  MY_AGENT_OWNER_STORE: "s3"
+  MY_AGENT_OWNER_S3_PREFIX: "my-agent"
+  MY_AGENT_OWNER_S3_REGION: "us-east-1"
+  MY_AGENT_OWNER_S3_SSE: "AES256"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.observability.svc:4318"
+  OTEL_SERVICE_NAME: "my-agent"
+  LLM_TENANT_RPS: "5"
+  LLM_TENANT_BURST: "10"
+  LLM_TENANT_TOKEN_BUDGET: "1000000"
+  LLM_BUDGET_WINDOW_SEC: "3600"
+  LLM_MAX_INFLIGHT: "32"
+  LLM_SLOT_LEASE_SECONDS: "900"

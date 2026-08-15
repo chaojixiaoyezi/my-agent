@@ -1,0 +1,39 @@
+{
+  "name": "model_claims_done_without_evidence_should_fail",
+  "task_type": "structured_data_artifact",
+  "artifacts": {
+    "required": [
+      {
+        "path": "report.json",
+        "min_size": 20,
+        "json_requirements": {
+          "required_keys": [
+            "claims",
+            "source_refs"
+          ],
+          "required_non_empty_paths": [
+            "claims",
+            "source_refs"
+          ]
+        }
+      }
+    ]
+  },
+  "tools": {
+    "required_calls": [
+      "write_file"
+    ],
+    "required_successful_calls": [
+      "write_file"
+    ]
+  },
+  "final_status": {
+    "allow_succeeded_only_if": [
+      "artifact_exists",
+      "artifact_non_empty",
+      "json_requirements_present",
+      "required_tool_calls_present",
+      "required_successful_tool_calls_present"
+    ]
+  }
+}

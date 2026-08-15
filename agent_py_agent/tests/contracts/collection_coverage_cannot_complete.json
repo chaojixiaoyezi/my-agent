@@ -1,0 +1,47 @@
+{
+  "name": "collection_coverage_cannot_complete",
+  "task_type": "collection_artifact",
+  "artifacts": {
+    "required": [
+      {
+        "path": "source_data.json",
+        "min_size": 10,
+        "json_requirements": {
+          "required_keys": [
+            "sheets"
+          ],
+          "required_non_empty_paths": [
+            "sheets[0].rows"
+          ]
+        },
+        "validation_contract": {
+          "collection_contract": {
+            "source_json_ref": "source_data.json",
+            "groups_path": "sheets",
+            "items_path": "rows",
+            "min_groups": 4,
+            "min_items_per_group": 2,
+            "required_item_fields": [
+              "project",
+              "url"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "tools": {
+    "required_successful_calls": [
+      "write_file"
+    ]
+  },
+  "final_status": {
+    "allow_succeeded_only_if": [
+      "artifact_exists",
+      "artifact_non_empty",
+      "json_requirements_present",
+      "collection_contract_present",
+      "required_successful_tool_calls_present"
+    ]
+  }
+}

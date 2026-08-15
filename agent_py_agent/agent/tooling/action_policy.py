@@ -1,0 +1,638 @@
+from __future__ import annotations
+
+"""The single pre-effect authorization decision for canonical tool calls."""
+
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Literal
+
+from ..contracts.gates.command_policy import CommandAnalysis, analyze_command
+from ..contracts.gates.path_url_command import (
+    PathUrlCommandFacts,
+    evaluate_path_url_command_gate,
+)
+from ..contracts.gates.tool_approval_binding import (
+    ApprovalBindingFacts,
+    evaluate_approval_binding_gate,
+)
+from ..contracts.gates.tool_guardrail import (
+    ToolGuardrailConfig,
+    ToolGuardrailFacts,
+    evaluate_tool_guardrail_gate,
+)
+from ..contracts.gates.tool_rate_limit import (
+    ToolRateLimitFacts,
+    evaluate_tool_rate_limit_gate,
+)
+from ..settings.runtime_guard_config import runtime_guard_bool, runtime_guard_int
+from .input_schema import validate_tool_input
+from .models import (
+    ToolRuntime,
+    ToolRuntimeSnapshot,
+    tool_effect_for_runtime_policy,
+)
+from .registry_rate_limit_policy import tool_rate_limit_policy
+from .workspace_scopes import authoritative_workspace_scopes
+from .runtime_boundary import exact_read_boundary_error
+from .runtime_contracts import ToolCall
+from .write_boundary import validate_write_boundary
+
+ActionStatus = Literal["allow", "ask", "deny"]
+_EFFECT_RANK = {"read_only": 0, "mutating": 1, "dangerous": 2}
+
+
+@dataclass(frozen=True)
+class ActionDecision:
+    status: ActionStatus
+    reason_codes: tuple[str, ...] = ()
+    evidence: dict[str, Any] = field(default_factory=dict)
+    approval_request: dict[str, Any] | None = None
+    sandbox_plan: dict[str, Any] = field(default_factory=dict)
+    resolved_effect: str = "read_only"
+    resource_scopes: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        status = str(self.status or "").strip().lower()
+        effect = str(self.resolved_effect or "").strip().lower()
+        if status not in {"allow", "ask", "deny"}:
+            raise ValueError(f"invalid action decision status: {status}")
+        if effect not in _EFFECT_RANK:
+            raise ValueError(f"invalid action effect: {effect}")
+        object.__setattr__(self, "status", status)
+        object.__setattr__(self, "resolved_effect", effect)
+        object.__setattr__(
+            self,
+            "reason_codes",
+            tuple(str(item).strip().upper() for item in self.reason_codes if str(item).strip()),
+        )
+        object.__setattr__(
+            self,
+            "resource_scopes",
+            tuple(str(item).strip() for item in self.resource_scopes if str(item).strip()),
+        )
+
+    @property
+    def allowed(self) -> bool:
+        return self.status == "allow"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "reason_codes": list(self.reason_codes),
+            "evidence": dict(self.evidence),
+            "approval_request": dict(self.approval_request or {}),
+            "sandbox_plan": dict(self.sandbox_plan),
+            "resolved_effect": self.resolved_effect,
+            "resource_scopes": list(self.resource_scopes),
+        }
+
+
+@dataclass(frozen=True)
+class ActionPolicyRequest:
+    call: ToolCall
+    runtime_snapshot: ToolRuntimeSnapshot
+    workspace_root: Path
+    workspace_roots: tuple[Path, ...] = ()
+    path_access_mode: str = "normal"
+    path_dangerous_roots: tuple[str, ...] = ()
+    owner_scope_root: str = ""
+    write_boundary: dict[str, object] | None = None
+    runtime_guard_policy: object | None = None
+    required_action: object | None = None
+    now: float = 0.0
+
+
+class ActionPolicy:
+    """Evaluate every host-owned gate once, before a handler can run."""
+
+    def decide(self, request: ActionPolicyRequest) -> ActionDecision:
+        call = request.call
+        snapshot = request.runtime_snapshot
+        runtime, early = _runtime_for_call(call, snapshot)
+        if early is not None:
+            return early
+        assert runtime is not None
+
+        schema_decision = _schema_decision(call, runtime)
+        if schema_decision is not None:
+            return schema_decision
+
+        effect, command = _resolved_effect(call, runtime)
+        required_decision = _required_action_decision(request, runtime, effect)
+        if required_decision is not None:
+            return required_decision
+
+        path_decision = _path_url_command_decision(request, runtime, effect)
+        if path_decision is not None:
+            return path_decision
+
+        boundary_decision = _task_boundary_decision(request, effect)
+        if boundary_decision is not None:
+            return boundary_decision
+
+        command_decision = _command_classification_decision(
+            call,
+            runtime,
+            command,
+            effect,
+            allowed_commands=_unknown_command_allowlist(request.runtime_guard_policy),
+        )
+        if command_decision is not None:
+            return command_decision
+
+        idempotency_decision = _idempotency_decision(call, runtime, effect)
+        if idempotency_decision is not None:
+            return idempotency_decision
+
+        approval_decision = _approval_decision(request, runtime, effect)
+        if approval_decision is not None:
+            return approval_decision
+
+        guardrail_decision = _guardrail_decision(request, effect)
+        if guardrail_decision is not None:
+            return guardrail_decision
+
+        rate_decision = _rate_limit_decision(request, effect)
+        if rate_decision is not None:
+            return rate_decision
+
+        scopes = authoritative_workspace_scopes(
+            workspace_root=request.workspace_root,
+            write_boundary=request.write_boundary,
+            policy=runtime.runtime_policy,
+            arguments=call.arguments,
+            additional_scopes=tuple(
+                f"command_path:{item}" for item in command.paths
+            )
+            if command is not None
+            else (),
+        )
+        return ActionDecision(
+            "allow",
+            evidence={
+                "tool_name": call.tool_name,
+                "call_id": call.call_id,
+                "schema_hash": call.schema_hash,
+                "snapshot_hash": snapshot.snapshot_hash,
+                "args_hash": call.args_hash,
+            },
+            sandbox_plan=_sandbox_plan(request, runtime, effect),
+            resolved_effect=effect,
+            resource_scopes=scopes,
+        )
+
+
+def _runtime_for_call(
+    call: ToolCall,
+    snapshot: ToolRuntimeSnapshot,
+) -> tuple[ToolRuntime | None, ActionDecision | None]:
+    if snapshot.run_id and call.run_id != snapshot.run_id:
+        return None, _deny("TOOL_RUN_SNAPSHOT_MISMATCH")
+    runtime = snapshot.runtime(call.tool_name)
+    if runtime is None or call.tool_name not in snapshot.available_tool_names:
+        return None, _deny("TOOL_NOT_IN_RUNTIME_SNAPSHOT")
+    if not runtime.exposure.model_visible:
+        return None, _deny("TOOL_NOT_MODEL_VISIBLE")
+    if call.schema_hash != runtime.model_spec.schema_hash:
+        return None, _deny("TOOL_SCHEMA_HASH_MISMATCH")
+    if not runtime.availability.available:
+        return None, _deny(
+            runtime.availability.error_code or "TOOL_UNAVAILABLE",
+            stage="runtime_gate",
+        )
+    return runtime, None
+
+
+def _schema_decision(call: ToolCall, runtime: ToolRuntime) -> ActionDecision | None:
+    # Host-only values are injected after the provider call and are deliberately
+    # absent from the model-visible schema.  Validate the exact provider-owned
+    # subset here; the executor separately rejects any model attempt to supply an
+    # internal field before trusted completion happens.
+    internal = set(runtime.runtime_policy.input_policy.internal_parameters)
+    model_arguments = {
+        key: value for key, value in call.arguments.items() if key not in internal
+    }
+    validation = validate_tool_input(model_arguments, runtime.model_spec.input_schema)
+    if validation.ok:
+        return None
+    return _deny(
+        validation.primary_error_code or "TOOL_INVALID_ARGUMENTS",
+        stage="validation",
+        evidence={
+            "tool_name": call.tool_name,
+            "issues": [item.to_dict() for item in validation.issues],
+        },
+    )
+
+
+def _resolved_effect(
+    call: ToolCall,
+    runtime: ToolRuntime,
+) -> tuple[str, CommandAnalysis | None]:
+    resolver = runtime.runtime_policy.effect_resolver
+    if resolver.strategy != "command":
+        return tool_effect_for_runtime_policy(runtime.runtime_policy, call.arguments), None
+    command = analyze_command(call.arguments.get(resolver.command_parameter))
+    return command.resolved_effect, command
+
+
+def _command_classification_decision(
+    call: ToolCall,
+    runtime: ToolRuntime,
+    command: CommandAnalysis | None,
+    effect: str,
+    *,
+    allowed_commands: frozenset[str] = frozenset(),
+) -> ActionDecision | None:
+    if command is None:
+        return None
+    evidence = {
+        "tool_name": call.tool_name,
+        "classification": command.classification,
+        "executables": [segment.executable for segment in command.segments],
+        "reason_codes": list(command.reason_codes),
+    }
+    if command.classification == "unknown":
+        executables = tuple(segment.executable for segment in command.segments)
+        if executables and allowed_commands and all(item in allowed_commands for item in executables):
+            # 部署者显式白名单：命令全部段落在 unknown_command_allowlist 中，视为
+            # 已声明的受信命令（按 mutating 语义继续走沙箱/边界/灾难保护）。
+            return None
+        # unknown 命令不进入人工审批（approval_request 无消费端，ask 只会卡死任务），
+        # 额度制在更前置的 runtime guard 层（agent_budget_stage，有 agent 身份）按
+        # 代理实例分桶管理；这里放行，沙箱/边界/灾难命令保护仍然兜底。
+        return None
+    if command.classification == "dangerous" and runtime.runtime_policy.approval_policy.mode == "never":
+        return _deny("COMMAND_DANGEROUS_DENIED", effect=effect, evidence=evidence)
+    return None
+
+
+def _required_action_decision(
+    request: ActionPolicyRequest,
+    runtime: ToolRuntime,
+    effect: str,
+) -> ActionDecision | None:
+    action = request.required_action
+    if action is None:
+        return None
+    # 只有 open(待销账)的 required action 才施加工具级执行约束。已 blocked/settled 的
+    # 动作(如评估器未给出任何可用证据工具而自动封死)约束已失效,继续拦截只会把
+    # "继续干活"类任务卡死:模型误以为要用户确认,而 approval 无消费端(真机实证:
+    # click 复刻任务 pwd/ls 只读命令因 2>&1 解析成 mutating 后撞 read_only ceiling,
+    # 模型放弃 run_command 改用 read_file,任务停滞)。
+    if str(getattr(action, "status", "") or "").strip().lower() != "open":
+        return None
+    allowed_tools = tuple(getattr(action, "allowed_tools", ()) or ())
+    # 只读调用不受 action 工具名单约束:读文件/查目录是任务推进的正常前置,评估模型
+    # 生成的 allowed_tools 常只列写/执行工具,漏只读工具会把"先读后改"卡死(真机铁证
+    # 2026-08-08: 修 main.go 的 action allowed_tools=[edit_file],模型 read_file 被
+    # REQUIRED_ACTION_TOOL_NOT_ALLOWED/TOOL_CHOICE_VIOLATION 连拦 3 轮 break)。
+    # 只读调用零副作用,effect_ceiling 已覆盖其效果上限,名单约束只施加于 mutating 以上。
+    if not (_EFFECT_RANK.get(effect, 0) <= _EFFECT_RANK["read_only"]):
+        if allowed_tools and runtime.model_spec.name not in allowed_tools:
+            return _deny("REQUIRED_ACTION_TOOL_NOT_ALLOWED", effect=effect)
+    ceiling = str(getattr(action, "effect_ceiling", "") or "").strip().lower()
+    if ceiling in _EFFECT_RANK and _EFFECT_RANK[effect] > _EFFECT_RANK[ceiling]:
+        return _deny("REQUIRED_ACTION_EFFECT_CEILING_EXCEEDED", effect=effect)
+    return None
+
+
+def _path_url_command_decision(
+    request: ActionPolicyRequest,
+    runtime: ToolRuntime,
+    effect: str,
+) -> ActionDecision | None:
+    boundary = request.write_boundary if isinstance(request.write_boundary, dict) else {}
+    payload = {"tool": request.call.tool_name, **request.call.arguments}
+    decision = evaluate_path_url_command_gate(
+        PathUrlCommandFacts(
+            payload=payload,
+            workspace_root=request.workspace_root,
+            workspace_roots=list(request.workspace_roots) or [request.workspace_root],
+            path_access_mode=request.path_access_mode,
+            path_dangerous_roots=request.path_dangerous_roots,
+            owner_scope_root=request.owner_scope_root,
+            allowed_private_hosts=_string_values(boundary.get("allowed_private_hosts")),
+            local_file_url_fields=runtime.runtime_policy.input_policy.local_file_url_parameters,
+            allow_shell_operators=_shell_operators_allowed(boundary),
+            allowed_commands=_controlled_exec_allowed_commands(boundary),
+        )
+    )
+    if decision.allowed:
+        return None
+    return _deny(
+        decision.finding_codes or ("PATH_URL_COMMAND_DENIED",),
+        effect=effect,
+        evidence={"gate": decision.to_dict()},
+    )
+
+
+def _idempotency_decision(
+    call: ToolCall,
+    runtime: ToolRuntime,
+    effect: str,
+) -> ActionDecision | None:
+    if effect == "read_only":
+        return None
+    scope = runtime.runtime_policy.idempotency_policy.scope
+    if scope not in {"operation", "business"}:
+        return _deny("TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING", effect=effect)
+    if not call.operation_id or not call.idempotency_key:
+        return _deny("TOOL_IDEMPOTENCY_KEY_MISSING", effect=effect)
+    return None
+
+
+def _task_boundary_decision(
+    request: ActionPolicyRequest,
+    effect: str,
+) -> ActionDecision | None:
+    boundary = request.write_boundary
+    write_error = validate_write_boundary(
+        request.call.tool_name,
+        request.call.arguments,
+        workspace_root=request.workspace_root,
+        workspace_roots=list(request.workspace_roots) or [request.workspace_root],
+        path_access_mode=request.path_access_mode,
+        path_dangerous_roots=list(request.path_dangerous_roots),
+        write_boundary=boundary,
+    )
+    if write_error:
+        return _deny(
+            "WRITE_FORBIDDEN",
+            effect=effect,
+            evidence={"boundary_error": write_error},
+        )
+    read_error = exact_read_boundary_error(
+        request.call.tool_name,
+        request.call.arguments,
+        workspace_root=request.workspace_root,
+        write_boundary=boundary,
+    )
+    if read_error:
+        return _deny(
+            "TOOL_PERMISSION_DENIED",
+            effect=effect,
+            evidence={"boundary_error": read_error},
+        )
+    return None
+
+
+def _approval_decision(
+    request: ActionPolicyRequest,
+    runtime: ToolRuntime,
+    effect: str,
+) -> ActionDecision | None:
+    mode = runtime.runtime_policy.approval_policy.mode
+    required = (
+        mode == "always"
+        or (mode == "mutating" and effect in {"mutating", "dangerous"})
+        or (mode == "dangerous" and effect == "dangerous")
+    )
+    if not required:
+        return None
+    boundary = request.write_boundary if isinstance(request.write_boundary, dict) else {}
+    approved = boundary.get("approved_actions")
+    approved_actions = tuple(approved) if isinstance(approved, (list, tuple)) else ()
+    decision = evaluate_approval_binding_gate(
+        ApprovalBindingFacts(
+            tool_name=request.call.tool_name,
+            run_id=request.call.run_id,
+            operation_id=request.call.operation_id,
+            idempotency_key=request.call.idempotency_key,
+            args_hash=request.call.args_hash,
+            approved_actions=approved_actions,
+        )
+    )
+    if decision.allowed:
+        return None
+    if "APPROVAL_BINDING_MISMATCH" in decision.finding_codes:
+        return _deny(
+            "APPROVAL_BINDING_MISMATCH",
+            effect=effect,
+            evidence={"gate": decision.to_dict()},
+        )
+    return _ask(
+        request.call,
+        "APPROVAL_REQUIRED",
+        effect=effect,
+        evidence={"gate": decision.to_dict()},
+        approval_kind="tool_action",
+    )
+
+
+def _guardrail_decision(
+    request: ActionPolicyRequest,
+    effect: str,
+) -> ActionDecision | None:
+    boundary = request.write_boundary if isinstance(request.write_boundary, dict) else {}
+    records = boundary.get("tool_guardrail_records")
+    policy = boundary.get("tool_guardrail_policy")
+    policy = policy if isinstance(policy, dict) else {}
+    record_items = tuple(records) if isinstance(records, (list, tuple)) else ()
+    decision = evaluate_tool_guardrail_gate(
+        ToolGuardrailFacts(
+            tool_name=request.call.tool_name,
+            args_hash=request.call.args_hash,
+            is_readonly=effect == "read_only",
+            result_hash=_latest_guardrail_result_hash(
+                record_items,
+                request.call.tool_name,
+                request.call.args_hash,
+            ),
+        ),
+        config=_tool_guardrail_config(policy, request.runtime_guard_policy),
+        records=record_items,
+    )
+    if decision.allowed:
+        return None
+    return _deny(
+        decision.finding_codes or ("TOOL_GUARDRAIL_DENIED",),
+        effect=effect,
+        evidence={"gate": decision.to_dict()},
+    )
+
+
+def _latest_guardrail_result_hash(
+    records: tuple[object, ...],
+    tool_name: str,
+    args_hash: str,
+) -> str:
+    for item in reversed(records):
+        if not isinstance(item, dict):
+            continue
+        if item.get("failed") is True:
+            return ""
+        if str(item.get("tool_name") or "") != tool_name:
+            continue
+        if str(item.get("args_hash") or "") != args_hash:
+            continue
+        return str(item.get("result_hash") or "")
+    return ""
+
+
+def _tool_guardrail_config(
+    boundary_policy: dict[str, object] | None,
+    runtime_policy: object = None,
+) -> ToolGuardrailConfig:
+    policy = boundary_policy if isinstance(boundary_policy, dict) else {}
+    return ToolGuardrailConfig(
+        repeat_fail_threshold=_int_value(
+            policy.get("repeat_fail_threshold"),
+            runtime_guard_int("repeat_fail_threshold", 10, policy=runtime_policy),
+        ),
+        readonly_no_progress_threshold=_int_value(
+            policy.get("readonly_no_progress_threshold"),
+            runtime_guard_int(
+                "readonly_no_progress_threshold",
+                3,
+                policy=runtime_policy,
+            ),
+        ),
+        terminal_block_enabled=(
+            policy.get("terminal_block_enabled")
+            if isinstance(policy.get("terminal_block_enabled"), bool)
+            else runtime_guard_bool(
+                "terminal_block_enabled",
+                False,
+                policy=runtime_policy,
+            )
+        ),
+    )
+
+
+def _rate_limit_decision(
+    request: ActionPolicyRequest,
+    effect: str,
+) -> ActionDecision | None:
+    boundary = request.write_boundary if isinstance(request.write_boundary, dict) else {}
+    records = boundary.get("tool_rate_limit_records")
+    decision = evaluate_tool_rate_limit_gate(
+        ToolRateLimitFacts(
+            tool_name=request.call.tool_name,
+            args_hash=request.call.args_hash,
+            now=request.now or time.time(),
+            operation_id=request.call.operation_id,
+        ),
+        policy=tool_rate_limit_policy(boundary, request.runtime_guard_policy),
+        records=tuple(records) if isinstance(records, (list, tuple)) else (),
+    )
+    if decision.allowed:
+        return None
+    return _deny(
+        decision.finding_codes or ("TOOL_RATE_LIMIT_DENIED",),
+        effect=effect,
+        evidence={"gate": decision.to_dict()},
+    )
+
+
+def _sandbox_plan(
+    request: ActionPolicyRequest,
+    runtime: ToolRuntime,
+    effect: str,
+) -> dict[str, Any]:
+    boundary = request.write_boundary if isinstance(request.write_boundary, dict) else {}
+    return {
+        "mode": runtime.runtime_policy.sandbox_policy.mode,
+        "effect": effect,
+        "read_roots": list(_string_values(boundary.get("allowed_read_roots"))),
+        "write_roots": list(_string_values(boundary.get("allowed_write_roots"))),
+        "network": str(boundary.get("network_access_mode") or "inherit"),
+    }
+
+
+def _shell_operators_allowed(boundary: dict[str, object]) -> bool:
+    if boundary.get("allow_shell_operators") is True:
+        return True
+    mode = str(boundary.get("shell_access_mode") or "").strip().lower().replace("_", "-")
+    return not mode or mode in {"workspace-write", "full-access"}
+
+
+def _controlled_exec_allowed_commands(boundary: dict[str, object]) -> tuple[str, ...]:
+    grants = boundary.get("controlled_exec_grants")
+    allowed: list[str] = []
+    for grant in grants if isinstance(grants, list) else []:
+        if not isinstance(grant, dict):
+            continue
+        for item in grant.get("command_allowlist") or []:
+            text = str(item or "").strip()
+            if text:
+                allowed.append(text)
+    return tuple(dict.fromkeys(allowed))
+
+
+def _unknown_command_allowlist(policy: object | None) -> frozenset[str]:
+    """Deployment-declared trusted executables for the unknown-command gate.
+
+    Read live from runtime_guard_config.yaml (key: unknown_command_allowlist).
+    Empty by default: unknown commands fall through to the per-agent rolling
+    window budget in agent_budget_stage instead of a hard deny, so ordinary
+    users need no configuration at all.
+    """
+    values = getattr(policy, "values", None)
+    if not isinstance(values, dict):
+        return frozenset()
+    raw = values.get("unknown_command_allowlist")
+    items = raw if isinstance(raw, (list, tuple)) else ()
+    return frozenset(
+        str(item).strip() for item in items if str(item).strip()
+    )
+
+
+def _string_values(value: object) -> tuple[str, ...]:
+    values = value if isinstance(value, (list, tuple)) else ()
+    return tuple(str(item).strip() for item in values if str(item).strip())
+
+
+def _int_value(value: object, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _deny(
+    codes: str | tuple[str, ...],
+    effect: str = "read_only",
+    stage: str = "authorization",
+    evidence: dict[str, Any] | None = None,
+) -> ActionDecision:
+    reason_codes = (codes,) if isinstance(codes, str) else tuple(codes)
+    return ActionDecision(
+        "deny",
+        reason_codes,
+        {"failure_stage": stage, **dict(evidence or {})},
+        resolved_effect=effect,
+    )
+
+
+def _ask(
+    call: ToolCall,
+    code: str,
+    *,
+    effect: str,
+    evidence: dict[str, Any],
+    approval_kind: str,
+) -> ActionDecision:
+    return ActionDecision(
+        "ask",
+        (code,),
+        evidence,
+        approval_request={
+            "kind": approval_kind,
+            "tool_name": call.tool_name,
+            "run_id": call.run_id,
+            "operation_id": call.operation_id,
+            "idempotency_key": call.idempotency_key,
+            "args_hash": call.args_hash,
+        },
+        resolved_effect=effect,
+    )
+
+
+__all__ = [
+    "ActionDecision",
+    "ActionPolicy",
+    "ActionPolicyRequest",
+    "ActionStatus",
+]

@@ -1,0 +1,25 @@
+{
+  "contract_ref": "../contracts/tool_failed_cannot_complete.json",
+  "tool_fixtures": {
+    "write_file": {
+      "output.md": {
+        "ok": false,
+        "error_code": "PATH_PERMISSION_DENIED"
+      }
+    }
+  },
+  "model_steps": [
+    {
+      "type": "tool_call",
+      "tool": "write_file",
+      "params": {
+        "path": "output.md",
+        "content": "## Summary\nshould have been written\n"
+      }
+    },
+    {
+      "type": "final",
+      "status": "SUCCEEDED"
+    }
+  ]
+}

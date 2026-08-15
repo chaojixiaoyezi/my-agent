@@ -1,0 +1,6 @@
+{"type":"contract_ref","path":"../contracts/simple_file_summary.json"}
+{"type":"tool_result","tool":"read_file","params":{"path":"input.txt"},"ok":true}
+{"type":"tool_result","tool":"write_file","params":{"path":"output.md"},"ok":true}
+{"type":"state_snapshot","status":"BLOCKED","failure_type":"NO_PROGRESS"}
+{"type":"acceptance_report","ok":false,"error_codes":["NO_PROGRESS"]}
+{"type":"final","status":"SUCCEEDED"}

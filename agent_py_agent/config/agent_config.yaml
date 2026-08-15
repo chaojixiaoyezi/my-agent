@@ -1,0 +1,904 @@
+# Simple Python Agent 配置文件
+# 说明：
+# - 这个项目只用标准库读取一个“够用版” YAML
+# - 支持的结构主要是 `key: value` 和简单列表
+# - 追求的是跨平台、轻依赖、够维护，不是完整 YAML 语法
+
+# 智能体名称：主要用于 CLI 输出和日志标识
+agent_name: "myagent"
+
+# 系统人格：每次请求都会放进最终 prompt 的 System 段
+system_prompt: "你是 my-agent，一个自主的 CLI 智能体，用工具、多通道网关和子代理完成真实工程与运营任务。\n沟通：尽量简短直接。除非用户要详细，否则别长篇、别加开场白和结尾总结、别堆能力清单、别用 emoji；能一两句说清就一两句。\n如实报告（最重要）：测试失败就贴失败输出；某步跳过了就说跳过；只做了一部分就说哪些没做完、卡在哪；做完且自己验证过了才说“完成”，直接说、不夸大不含糊；绝不拿旧的/局部的/没验证的结果冒充完整交付。\n别造轮子——先查你已有的能力：你是一个完整产品，不是从零写脚本的人。遇到“接通道/搭网关/做监控/调度/多用户”这类需求，先调 list_capabilities 查清自己有没有内置能力再动手；绝不自己搭外部服务、绝不把任务转给别的大模型——你就是那个大脑。\n安全：破坏性、不可逆、对外发送类操作先确认；不做未授权或越界的事；如实报告你做了什么。\n工作方式：复杂任务先想清楚再动手，边做边按事实更新判断，失败了自省调参再试、别机械重复；改代码先看现有风格和约定、写出来要像周围的代码；只做被要求的，不多不少。\n任务管理：多步骤/要建东西的任务，先用 task_progress 把要做的每一块登记成待办（比如建一个系统=后端/前端/数据/测试），开工把当前块标 in_progress，【真做完一块才标 done】——测试没过、只写一半、还有报错都不算；待办没清空时继续推进，确实无法继续就如实说明阻塞，不要声称已经完成。用户要「做/建一个能跑的东西」时，交付必须是建出来并亲手跑通的真成品——只交规格/架构/计划文档=没完成；自己扛不动的重活拆开派子代理并行建，你统筹整合成能跑的整体、跑通验证后再交付。"
+
+# 启动时是否自动检测未完成任务
+# - true: my-agent 启动时自动检测 gateway 状态、子代理任务和遗留请求，并提示用户
+# - false: 关闭自动检测，直接进入默认模式
+auto_detect_work_on_startup: true
+
+# 工作区根目录：
+# - 留空时使用当前启动 my-agent 的目录，和 会话运行时/通道运行时 这类工具一样把“你在哪个任务目录启动”视为本轮工作区。
+# - 场景测试、外部聊天工具或未来多项目模式可以把它指向某个独立目录。
+# - memory_path、subagent_workspace、gateway_workspace、prompt_files 和文件工具都会以这个目录为基础。
+# - 这就是“测试不能影响当前开发仓库”的关键开关。
+workspace_root: ""
+
+# my-agent 家目录：
+# - 默认 ~/.my-agent，作为本机固定 profile/home 目录。
+# - 这里放配置、共享能力、owner 空间和运行缓存；local/main 的记忆和任务在 owners/local/main/ 下。
+# - 显式配置值优先；这里留空时才使用 MY_AGENT_HOME，适合测试或多 profile 隔离。
+my_agent_home: "~/.my-agent"
+
+# 显式执行模式（managed / local_unmanaged）：
+# - 空 = 未显式指定，按有无 owner home 推断（MANAGED if home else LOCAL_UNMANAGED）。
+# - managed：必须完整权威链（runtime.db 工具操作账本/锁），缺权威字段即拒绝执行。
+# - local_unmanaged：本地非托管（纯文件层/投影），不挂权威库。
+execution_mode: ""
+
+# 当前 owner 身份：
+# - 默认 local/main，表示本机 CLI 主用户。
+# - 接飞书/微信/QQ 等 provider 时，适配器可以把它改成 provider/user/id 或 provider/group/id。
+# - 这只决定 audit/memory/compact/task 等 owner home 归属，不给子代理额外权限。
+my_agent_owner_provider: "local"
+my_agent_owner_kind: "main"
+my_agent_owner_id: "main"
+
+# 家目录运行时开关：
+# - SimpleAgent 启动时固定创建 ~/.my-agent owner home 基础目录和 SOUL/USER/AGENTS/memory 入口文件。
+# - home_context_enabled: 每轮 prompt 允许读取轻量 home 上下文，例如 memory.md 和匹配 lesson。
+# - home_lesson_auto_read_limit: 每轮最多自动读取多少个匹配 lesson 文件；0 表示不自动读 lesson。
+# - home_lesson_stale_caveat_days: 召回的 lesson 超过多少天未更新就附加"记忆可能过期"提示；0 表示不加提示。
+#   防止把陈旧记忆当现状：记忆反映写入时的事实，与当前代码/状态冲突时以现状为准。
+# - run_task_workspace_enabled: 保存 run 在第一轮模型调用前自动创建 tasks/date/task_slug/output 和 work 等目录，并把路径作为软运行状态提示给模型。
+home_context_enabled: true
+home_lesson_auto_read_limit: 3
+home_lesson_stale_caveat_days: 7
+run_task_workspace_enabled: true
+
+# 任务工作区路径模板：
+# - {date} 是任务创建日期，例如 2026-05-13。
+# - {task_slug} 是从任务名/用户意图生成的短安全目录名，例如 “分析 /Users/.../all-agent 架构” -> “all-agent-架构分析”。
+# - 默认结果形如 ~/.my-agent/owners/local/main/tasks/2026-05-13/all-agent-架构分析/。
+# - 同一 prompt/同一任务会复用同一个任务目录，并用 work/timeline.jsonl 记录多次 run；不同任务只是撞名时才追加 run/request 后缀。
+# - 每个任务目录只保留两块顶层内容：
+#   output/ 是可以复制走的最终交付物；work/ 是日志、状态、compact、草稿、子代理账本等过程材料。
+workspace_task_path_template: "tasks/{date}/{task_slug}"
+# 通道运行时 风格的可选 LLM 短标题：失败自动回退上面的确定性中文标题。
+# 默认关闭，避免普通 IM 每个新目录都多等一次模型请求；正式任务入口可按需开启。
+workspace_task_llm_title_enabled: false
+workspace_task_llm_title_input_chars: 2000
+
+# 默认模型后端：
+# - echo: 本地离线调试
+# - openai_compatible: 走 /chat/completions
+# - anthropic_compatible: 走 /v1/messages
+model_backend: "anthropic_compatible"
+
+# 记忆文件路径：JSONL 格式，每行一条记录
+memory_path: ""
+
+# 本地事实源（第一版）：SQLite + FTS5 + 文件系统 + JSONL
+# - SQLite: 保存结构化索引和审计事件，适合统计、过滤、恢复。
+# - FTS5: SQLite 自带全文检索扩展，能用时就走本地全文搜索；不能用时自动退回 LIKE。
+# - files: 正文和未来大 artifact 放文件系统，避免数据库过胖，也方便人工直接打开。
+# - events.jsonl: 追加式流水账，方便排查“什么时候写了什么”，后续也适合上传同步。
+# 普通用户不需要改这里；高级用户可以把这组路径放到独立数据盘或同步目录。
+local_store_path: ""
+local_store_files_dir: ""
+local_store_events_path: ""
+local_store_fts_enabled: true
+
+# 每轮请求最多带多少条相关记忆进入 prompt
+memory_top_k: 5
+
+# 后台 Memory Curator（统一每日经历提炼服务）：
+# - enabled: 是否启用后台策展；关闭时保留现有游标和候选，不调用辅助模型。
+# - provider: auto 表示继承主后端；指定 provider 时由统一后端工厂创建，不改变输出 Schema。
+# - model: 留空继承主模型；填写时只影响后台提炼模型，不改变主会话模型。
+# - interval_seconds: 有新经历且距离上次成功达到多少秒时触发，默认 3 小时。
+# - turn_threshold: 游标后累计多少个新用户轮次触发，默认 10 轮。
+# - batch_message_limit: 单批最多读取多少条 ConversationStore 消息。
+# - max_input_chars: 单批模型输入字符上限；长工具输出只传预览和引用。
+# - timeout_seconds: 单次后台模型调用超时秒数。
+# - max_retries: Schema、超时或模型错误后的有界重试次数；失败不推进游标。
+# - daily_finalize_hour: owner 当地时间每天收尾小时，取值 0-23。
+# - auto_promotion_policy: 自动晋升机器策略版本；conservative_v1 只允许精确证据、无冲突的新长期事实。
+# - lesson_min_occurrences: 普通教训晋升所需最少独立观察次数，默认 2。
+# - hot_min_occurrences: 已接受教训晋升 HOT 所需最少独立观察次数，默认 3。
+memory_curator_enabled: true
+memory_curator_provider: "auto"
+memory_curator_model: ""
+memory_curator_interval_seconds: 10800
+memory_curator_turn_threshold: 10
+memory_curator_batch_message_limit: 80
+memory_curator_max_input_chars: 40000
+memory_curator_timeout_seconds: 90
+memory_curator_max_retries: 1
+memory_curator_daily_finalize_hour: 23
+memory_curator_auto_promotion_policy: "conservative_v1"
+memory_lesson_min_occurrences: 2
+memory_hot_min_occurrences: 3
+
+# 是否自动持久化运行归档、恢复事实和 task workspace。
+# 该字段不把普通 user/assistant 正文写入正式 long_term；完整对话由 ConversationStore 掌权，
+# Daily/Candidate 只由统一 Memory Curator 生成。
+auto_save_memory: true
+# 记忆语义召回（检索拓宽 #1，默认 false=现状纯关键词）：开后记忆召回在关键词外加一路语义向量召回、
+# RRF 融合，治"换词就召不回"。向量只存各 owner 自己 home 本地文件（零依赖、不碰共享向量库、按用户隔离）。
+# 需配 memory_embedding_model（走 agent 同款 api 端点）；没配自动只走关键词，不崩不退化。
+memory_semantic_recall: false
+memory_embedding_model: ""  # embedding 模型名；embo* 自动走 MiniMax 原生协议（texts/type/vectors）
+memory_embedding_api_base: ""  # embedding 端点 base，缺省沿用 api_base；MiniMax 填 https://api.minimaxi.com/v1
+memory_embedding_api_key: ""  # embedding 独立 key（直配）；空→读 _env 或回退聊天 key
+memory_embedding_api_key_env: ""  # embedding key 的环境变量名（生产用，免把密钥写进 yaml）；空→回退聊天 key
+
+# Memory 新架构安全配置（第一版骨架）：
+# - 这些字段先定义“开关、等级、保留天数和规则路由模式”，具体 hook/routing 业务后续再接。
+# - 如果用户乱填 abcd、乱码、脚本片段、负数或越界数字，程序会自动回到默认值，不会崩溃。
+# - memory_archive_level 控制全量会话冷归档粒度：
+#   0: 尽量全量；1: 去掉重型工具展示数据；2: 摘要加关键事件；3: 最小恢复快照。
+# - memory_hook_retention_days 表示 hook 快照保留天数；0 表示不自动删除。
+# - memory_rule_routing_mode:
+#   off: 不做长期规则路由；soft: 命中后提示/自动读少量规则；strict: 强规则场景必须读权威文件。
+# - memory_rule_auto_read_limit 表示每轮最多自动读取多少条规则正文；0 表示不自动读取。
+# - memory_resume_auto_context_enabled 默认关闭，避免普通请求因为恢复检索变慢。
+# - memory_resume_auto_context_mode:
+#   off: 不注入恢复块；trigger: 只在用户消息里带 request/run/subagent/gwreq 等结构化恢复 ID 时触发；
+#     普通自然语言“继续、上次、昨天、恢复”等不会参与判断；需要人工明确恢复时用 --resume-context。
+#   always: 每轮都尝试注入恢复块，适合专门的恢复/排障会话。
+# - memory_resume_auto_context_limit 表示自动恢复最多拿多少条线索，范围 1-50。
+# - compact 提前提示优先读取当前模型后端暴露的真实上下文窗口；拿不到时按 200K 通用窗口估算。
+# - memory_compact_auto_trigger_percent 控制上下文使用到多少百分比时自动 compact：
+#   不写默认 90；0 表示 100；乱填回默认；大于100 => 100；小于50 => 50；50-100 => 按填写值。
+# - 保存型运行默认执行非破坏性 apply + auto resume + guard；save=false 时只生成计划，不写入 compact apply。
+# - 自动 compact 续接有绝对深度硬顶（见下方 memory_compact_auto_continue_max_depth，防无限续跑 H2）；未达硬顶时只要 compact 包可恢复就继续同一任务，不会因普通任务缺少验收/测试备注而停车。
+# - 运行中 raw archive 和 runtime_fact 是 compact/resume 的基础事实源，随持久化运行默认启用，不提供单独关闭开关。
+memory_archive_level: 3
+memory_hook_enabled: true
+memory_hook_archive_level: 3
+memory_hook_retention_days: 7
+memory_rule_routing_enabled: true
+memory_rule_routing_mode: "soft"
+memory_rule_auto_read_limit: 3
+memory_rule_receipt_enabled: true
+memory_resume_auto_context_enabled: false
+memory_resume_auto_context_mode: "trigger"
+memory_resume_auto_context_limit: 5
+memory_compact_auto_trigger_percent: 90
+# 单次 run 内 compact→自动续跑的绝对深度硬顶（与「连续无工具进展」软顶并存）。达到即强制
+# return 当前结果，防止持续高于阈值且每轮都调工具的任务无限 compact/续跑（H2）。
+memory_compact_auto_continue_max_depth: 50
+# 普通 standalone 任务 task_progress 账本驱动自动续跑上限（2026-08-07 假 DONE 根修）：
+# 0=内置默认(3)；显式 >0 覆盖。task_attributes["task_progress_continue_limit"] 优先于此。
+task_progress_auto_continue_limit: 0
+# compact 续跑时对卸掉的“中段历史”做一次 LLM 语义摘要：
+# - 续跑靠 carried archive 记录逐条重建工具历史；默认会对中段记录调一次摘要模型，用一条语义摘要
+#   折叠中段、原样保留首尾，把机械截断换成“这段做了什么/学到什么”的叙述，长任务续跑少丢上下文。
+# - 这是纯增强：只改续跑提示里的工具历史文本，不碰 raw archive / runtime_fact / work_state /
+#   artifact 等事实源，也不碰 native IR 历史；compact 包可恢复性不受影响。
+# - enabled=false 完全关闭（走纯机械重建）；摘要失败/超时/无可用后端时一律静默回退机械重建，
+#   绝不因摘要失败而让 compact 续跑崩。timeout=0 表示不设线程超时（不建议）。
+memory_compact_semantic_summary_enabled: true
+memory_compact_semantic_summary_protect_head: 2
+memory_compact_semantic_summary_protect_tail: 6
+memory_compact_semantic_summary_min_middle: 4
+memory_compact_semantic_summary_timeout_seconds: 20.0
+memory_compact_semantic_summary_max_input_chars: 12000
+
+# Memory / compact / artifact 默认预算：
+# - 这些值只控制“默认读取多少、预览多少、扫描多少”，不是数据保留上限。
+# - 用户后续觉得太保守或太激进时，可以只改这里，不需要改 Python 代码。
+memory_artifact_default_read_chars: 4000
+memory_archive_preview_level_0_chars: 2048
+memory_archive_preview_level_1_chars: 1024
+memory_archive_preview_level_2_chars: 512
+memory_archive_preview_level_3_chars: 160
+memory_archive_summary_chars: 96
+memory_archive_search_file_limit: 30
+memory_query_default_limit: 100
+memory_query_default_page_size: 100
+memory_query_content_preview_chars: 500
+memory_resume_archive_scan_limit: 0
+memory_resume_recommended_read_paths_limit: 20
+memory_doctor_recent_archive_file_limit: 5
+
+# 外部知识库配置：
+# - 默认全部为空，不会额外扫描，也不会拖慢普通聊天。
+# - index_file_name 是每个外部知识库目录里优先读取的索引文件名。
+# - directory_roots 是本地/挂载目录；api_sources 是查询接口；database_sources 是数据库连接或命名来源。
+# - 查询顺序固定为：目录 -> API -> 数据库，用户不需要再维护 query_order。
+external_knowledge_index_file_name: "MY_AGENT_INDEX.md"
+external_knowledge_directory_roots: []
+external_knowledge_api_sources: []
+external_knowledge_database_sources: []
+
+# 额外动态 prompt 文件
+prompt_files:
+  - "builtin:prompts/default.md"
+
+# 子代理配置
+# - 子代理默认应该像“不同职责的主代理”一样能独立干活。
+# - 角色模板只追加职责，不应该拿掉基础读写、汇报和任务目录内执行能力。
+enable_subagents: true
+
+# 子代理运行模式
+# - trusted_local_hardening: 默认本地硬化模式。保留系统安全底线，放宽流程型限制，优先把活干好。
+# - balanced: 后续用于更保守的日常默认。
+# - strict: 后续用于外部用户/高风险环境。
+subagent_mode: "trusted_local_hardening"
+
+# 单个任务最多允许登记多少个子代理。
+# 这个值只限制“最多能登记多少个同级子代理”，不强制主代理一定创建这么多。
+# 真实并发仍由调度器按机器和模型情况自动控制；复杂任务可让主代理自行规划拆分方式。
+max_subagents: 50
+task_max_subagents: 0
+task_max_grandchildren: 0
+
+# 子代理运行账本目录。
+# - 默认空值表示写入当前 owner home 的工作区运行目录。
+# - 用户明确填写路径时，按填写路径落盘。
+subagent_workspace: ""
+subagent_board_limit: 5
+subagent_allowed_tools: []
+
+# 子代理角色模板目录。
+# - [] 表示自动使用工作区 .agent/subagents/roles（如果存在）+ 内置模板。
+# - 模板只影响职责和检查重点，不应让代理失去基础读写/汇报能力。
+subagent_role_template_dirs: []
+subagent_spawn_default_count: 3
+subagent_cli_default_limit: 20
+subagent_probe_default_limit: 20
+subagent_hierarchy_default_max_depth: 0
+subagent_hierarchy_recovery_max_nodes: 200
+subagent_hierarchy_max_children_per_tool_call: 0
+subagent_descendant_scan_limit: 128
+subagent_takeover_chain_max_depth: 0
+subagent_context_summary_inline_json_chars: 900
+subagent_context_summary_inline_text_chars: 500
+
+# 子代理调试追踪等级。
+# - 0: 默认关闭
+# - 1-2: 记录生命周期、调度、验收等 refs-only 信息
+# - 3-5: 逐步增加 prompt/tool/response 预览或完整细节，建议只在真实 E2E 排障时开启
+subagent_debug_trace_level: 0
+
+# 子代理记忆保留策略：
+# - subagent_memory_retention_policy 只是机器记录里的策略名，不做封闭枚举硬卡。
+#   默认 parent_review_or_cleanup 表示：子代理结束前写总结，是否提升到父级/长期记忆由父级或用户复核。
+#   也可以写 delete_after_days、keep_forever 或你自己的策略名，运行时会原样记录，方便后续清理器识别。
+# - subagent_memory_delete_after_days 只有清理器/后续维护任务会用；0 表示不按天数自动删除。
+# - subagent_destroy_summary_required 控制子代理销毁/归档前是否要求留下最终总结事实。
+subagent_memory_retention_policy: "parent_review_or_cleanup"
+subagent_memory_delete_after_days: 0
+subagent_destroy_summary_required: true
+
+# 用户身份配置
+# - user_id: 当前本地用户标识，默认为 admin
+user_id: "admin"
+
+# 多租户鉴权配置
+# - auth_enabled: 是否启用鉴权，默认开启；关闭后所有人都有 admin 权限（方便本地开发）
+# - admin_user_id: 管理员用户 ID，外部通道携带此 user_id 时也获得 admin 权限
+auth_enabled: true
+admin_user_id: "admin"
+
+# 结果检查是否默认真实执行 runner 输出里的 tests：
+# - false: 保守默认，只检查 runner 填写的 tests 字段和证据，不自动跑命令。
+# - true: 普通收口默认执行 allowlist 内的 command/file/content 验证。
+# - 单次命令可用 `--execute-tests` / `--no-execute-tests` 覆盖这里。
+result_check_execute_tests: false
+
+# 结果检查真实执行 tests 时的单条测试超时秒数：
+# - 1 到 300 秒；超过范围会使用默认值。
+# - `subagents-tests --timeout` 可覆盖单次调用。
+result_check_timeout_seconds: 120
+
+# 合同/skill/小型真实验收的只读扫描预算：
+# - contract_status_* 只影响 `contracts status` 这类看板/汇总扫描，不会阻断任务。
+# - skill_guard_* 只影响单个 skill 目录扫描时的结构检查预算。
+# - small_real_acceptance_max_runtime_seconds 是小型真实验收 case 的最大声明运行时间；0 表示不做这个上限判断。
+# - real_run_review_* 只影响真实运行复盘时读取多大的 report/log 文件；0 表示不读取对应大文件。
+contract_status_max_scan_files: 1000
+contract_status_max_report_bytes: 2000000
+contract_status_recent_findings_limit: 20
+skill_guard_max_files: 50
+skill_guard_max_size_kb: 1024
+small_real_acceptance_max_runtime_seconds: 900
+real_run_review_max_report_bytes: 5000000
+real_run_review_max_log_bytes: 1000000
+
+# runner_failure_policy 控制 runner 临时失败后的总尝试次数：
+# - "auto": 当前等价于最多 2 次，也就是首次失败后下一轮 dispatch 再试一次
+# - "off" 或 "0": 不自动重试，总尝试次数为 1
+# - "3" 这类数字字符串：最多尝试 3 次
+# 只重试 runner_error、structured_output_parse_error、tool_result_missing、provider_timeout
+# 这类“执行通道/格式/临时工具结果/模型服务临时超时”问题；能力缺口、验收失败、通道 BROKEN 不自动重跑。
+runner_failure_policy: "auto"
+scheduler_mode: "auto"
+runner_concurrency: "auto"
+runner_start_rate: "auto"
+# create_subagents 自动启动时会用 watch/advance 推进本批 runner。
+# runner_start_rate 只限制每个调度切片启动多少个，后台会继续扫本批剩余项，不应让主代理立刻退出等人。
+
+# runner_timeout_seconds 控制单个 runner 的外层总时长保护：
+# - "off": 默认，不套外层总时长闹钟；长任务靠心跳、状态、取消/接管工具治理。
+# - "auto": 按任务文本和角色动态计算超时，适合压测或需要自动抢救卡死 runner 的场景。
+# - "120" 这类数字字符串：固定 120 秒。
+runner_timeout_seconds: "off"
+runner_timeout_by_role: []
+
+# runner_concurrency 为 auto 时的并发上限。
+# - 这个值适用于当前 dispatch 批次里要跑的 runner：子代理、孙代理或更深层代理都走同一套 runner。
+# - 0 表示 auto 不额外设上限，直接按本批 job 数跑；一般本地机器建议 4-16。
+runner_auto_concurrency: 15
+dynamic_timeout_safety_margin: 2.0
+dynamic_timeout_min: 30
+dynamic_timeout_max: 600
+# 门槛4: probe 统计参数(动态超时探针估计)。
+# - probe_min_samples: 每个 probe token 点最少样本数, 不足则回退 fixed-rate 估计。
+# - probe_window_samples: 滑窗上限, 每点最多取最近 N 条样本(防陈旧样本主导)。
+# - probe_outlier_trim: 异常值去极值开关, 开启且窗口>=3 时去掉最小最大取均值。
+probe_min_samples: 2
+probe_window_samples: 5
+probe_outlier_trim: true
+max_auto_split_depth: 2
+max_auto_retry_attempts: 3
+model_speed_profile_path: ""
+auto_bench_model_on_first_use: true
+
+# Gateway 本地控制面（第一版）：
+# - gateway 是后台常驻外壳，chat/TUI 后续会作为客户端 attach。
+# - 第一版先用本地文件管理状态：pid、heartbeat、state、stop request 和日志。
+# - 调整这些配置后，重启 gateway 即可生效；任务状态仍保存在 subagent/task 账本里。
+gateway_workspace: ""
+gateway_heartbeat_interval: 5
+gateway_stale_seconds: 120
+gateway_stop_timeout: 20
+
+# gateway 本地消息入口。
+# 这几个配置控制 `my-agent gateway ask/result` 这一层。
+# 当前还没有 HTTP/WebSocket 服务，先用本地文件队列：
+# - requests/pending：新请求，相当于收件箱。
+# - requests/processing：gateway 正在处理的请求；如果进程崩溃，重启会退回 pending。
+# - requests/done：处理完的请求原件，方便排查。
+# - responses：模型响应，`gateway result <request_id>` 读取这里。
+# - gateway_requests.jsonl：一行一条审计日志。
+# gateway_request_timeout 是 CLI 等待结果的默认时长，单位秒；交互 chat
+# 把它作为连续无请求租约/流式活动的超时，不用总墙钟误杀仍在工作的长任务。
+# gateway_request_poll_interval 是后台 worker 空闲时多久检查一次 pending，单位秒，可填小数。
+gateway_request_timeout: 300
+gateway_request_poll_interval: 0.2
+# gateway ask 两层限流（取代原 gateway_request_workers 单层总闸）：
+# - gateway_user_inflight_limit：每用户同时在飞上限（"小坑"，防一个用户独吞把别人饿死）。
+# - gateway_global_inflight_limit：全局同时在飞上限（"大坑"，高天花板；超出的留在 pending
+#   排队，不拒不崩）。两个都是先设的限制值（不是吞吐目标），按机器/模型承载力调。
+# - gateway_request_workers 已废弃不再接线，保留只为兼容存量配置。
+# - gateway_processing_timeout_seconds 用来判断 processing 请求是否已经卡死。
+# - gateway_request_max_attempts 控制卡死请求最多自动重试几次，超过后归档到 failed。
+gateway_user_inflight_limit: 8
+gateway_global_inflight_limit: 500
+gateway_request_workers: 10
+gateway_processing_timeout_seconds: 900
+gateway_request_max_attempts: 2
+# 后台 owner 整合 tick 线程池上限（每个活跃 scoped owner 的整合/唤醒 tick 独立线程；
+# 一个卡死 turn 不饿死其他 owner，超出的排队下一轮）。多用户高并发时按活跃大任务用户数调。
+background_owner_workers: 8
+# per-owner 作用域 agent 实例池上限（有界 LRU，超出逐出最久未用）。多用户高并发时按
+# 常驻活跃用户数调；每个实例含独立 home/记忆/local_store 句柄。
+owner_agent_pool_max_agents: 64
+# 磁盘级 owner 唤醒发现间隔（秒，0=关）：后台循环周期性扫 owners/ 把「有 enabled 进度策略/
+# 待处理唤醒信号」的 owner 种回活跃登记表。治网关重启/LRU 逐出后 scoped owner 的到点唤醒
+# 无人消费（盯守睡死）；登记表是易失的进程内结构，只有新入站请求才补记。
+background_owner_wake_rescan_seconds: 120
+# owner retention 后台扫描间隔（秒，0=关）：每拍只扫 owner_agent_pool_max_agents 个
+# 规范 owner home；每个 owner 仍由 retention.json 的 maintenance_interval_seconds 日级节流。
+# 该控制器只读结构化状态并执行清理，不创建 Agent、不调用 LLM。
+owner_maintenance_scan_interval_seconds: 60
+gateway_worker_join_timeout_seconds: 2
+gateway_ready_timeout_seconds: 10
+gateway_service_command_timeout_seconds: 30
+gateway_service_stop_timeout_seconds: 90
+
+# HTTP 服务端口（gateway 守护进程用）
+# - 默认 8420
+# - 设置为 0 则禁用 HTTP 服务
+gateway_port: 8420
+# 多用户通道默认按每条请求的用户/channel 解析 owner，在该用户作用域的 agent（独立
+# home/记忆/数据/成本/审计）上跑。远程通道身份缺失或 owner agent 创建失败时拒绝请求，
+# 绝不回退到基础 agent 串户；本机 CLI 没有远程身份时仍走 local main owner。
+gateway_per_user_owner_scoping: true
+
+# 网关 HTTP 绑定地址。默认 127.0.0.1(仅本机可达)。
+# 改成 0.0.0.0 等非回环地址会把网关暴露到网络,此时必须 auth_enabled=true,否则 fail-closed 拒绝启动
+# (防"绑 0.0.0.0 + 无鉴权 = 任意网络客户端被当 admin 驱动 agent")。
+gateway_bind_host: "127.0.0.1"
+
+# 网关局部信任 token(暴露部署用)。默认空 = 只靠回环来源信任(本机适配器/CLI 走 127.0.0.1)。
+# 非空时,非回环来源的请求必须携带匹配的 X-Gateway-Token 头才被信任(否则降为匿名 USER、绝不 admin)。
+gateway_auth_token: ""
+
+# 外部聊天工具 / TUI 文件适配器工作区。
+# 第一版 adapter file 会从 inbox 读 JSON 消息，把结果写到 outbox。
+adapter_workspace: ""
+
+# 飞书（Lark）通道适配器配置
+# - feishu_app_id / feishu_app_secret: 飞书应用凭证，从环境变量或配置文件读取
+# - feishu_verification_token: 飞书回调地址配置时的验证 token
+# - feishu_encrypt_key: 飞书消息加密 key（可选）
+# - feishu_callback_port: 本地 HTTP 回调服务端口，飞书会往这个地址推送事件
+# - feishu_connection_mode: long_connection(默认,支持交互卡片且免公网) / webhook(需公网回调地址)
+# - feishu_ws_proxy: 长连可选代理(空=走 HTTPS_PROXY 环境变量;TUN/代理环境直连飞书 WS 网关是黑洞,需显式填代理)
+feishu_app_id: ""
+feishu_app_secret: ""
+feishu_verification_token: ""
+feishu_encrypt_key: ""
+feishu_callback_port: 8421
+feishu_connection_mode: "long_connection"
+feishu_ws_proxy: ""
+# 个人私聊会话锁：默认开启；首次私聊发设置卡但仍处理本条消息，设置后闲置 3 小时才要求解锁。
+feishu_session_lock_enabled: true
+# 个人私聊连续 3 小时没有用户新消息后锁定；群聊不锁。
+feishu_personal_idle_lock_seconds: 10800
+
+# QQ 机器人通道适配器配置
+# - qq_app_id / qq_app_secret: QQ 机器人应用凭证
+qq_app_id: ""
+qq_app_secret: ""
+
+# 时区与周历（审计 #21，面向几十国用户按本地时区渲染日期/时间/本周范围）：
+# - timezone: IANA 时区名（如 Asia/Shanghai、America/New_York、Europe/London）；留空=服务器本地时间。
+#   也可用环境变量 AGENT_TIMEZONE 覆盖（优先级最高）。非法时区串只告警并回退，不会崩。
+# - week_start: 周起始（monday/sunday/saturday）；美国/中东常用 sunday/saturday，影响“本周”范围计算。
+timezone: ""
+week_start: "monday"
+
+# 会话工作区：
+# - 会话持久化目录，存储 session.json 和会话级别的上下文文件
+# - 每个会话对应一个目录：<session_workspace>/{session_id}/
+# - session.json 包含会话元数据：session_id、user_id、created_at、updated_at、last_active_channel、metadata
+session_workspace: ""
+
+# 长期主代理线程工作区：
+# - 保存 ConversationThread、MessageLog、ChannelBinding、ThreadTaskLink 和 ProgressPolicy。
+# - 这是后台主代理恢复/定时汇报/跨渠道继续上下文的机器账本。
+# - 不保存真实飞书/微信凭证，也不要求用户按工程字段写任务 prompt。
+conversation_workspace: ""
+
+# 长期会话读取和后台唤醒 prompt 预算：
+# - thread/pending/context/recent 这些 limit 只控制一次读取多少条账本记录，不删除原始文件。
+# - background_context_* 只裁剪注入后台主代理 prompt 的副本，不改消息、observation、case 或 agent tree 原文。
+# - background_claim_ttl_seconds 是后台主代理一次唤醒的 lease 有效期；运行中会 heartbeat 续约。
+# - background_claim_heartbeat_interval_seconds=0 表示按 TTL 自动取安全间隔。
+# - subagent_watch_interval_seconds 是 wait 工具登记“稍后查看子代理进度”的默认间隔；非精准闹钟，
+#   主代理忙或用户正在交互时会顺延到下一次后台 tick。非法或低于 60 会按 60 秒，最高 7200 秒。
+conversation_thread_list_limit: 100
+conversation_pending_wake_limit: 100
+conversation_context_recent_limit: 20
+conversation_unhandled_observation_limit: 20
+background_pending_wake_prompt_limit: 20
+background_context_max_string_chars: 1200
+background_context_max_list_items: 20
+background_context_max_dict_items: 80
+background_context_max_depth: 6
+# 整份后台状态副本的总预算；0 才表示关闭总量约束。原始账本和产物不受影响。
+background_context_max_total_tokens: 8000
+background_claim_ttl_seconds: 90
+background_claim_heartbeat_interval_seconds: 0
+# 多个成功子任务在很短时间内连续结束时，先合并完成信号再唤醒主代理；失败/阻塞不等待。
+background_completion_coalesce_seconds: 5
+subagent_watch_interval_seconds: 120
+# 后台主代理唤醒时允许看到和调用的控制工具。
+# - 留空表示使用默认控制工具 profile。
+# - 写了列表就只暴露列表里的工具；执行参数和 prompt 说明共用这一份。
+# - 这是唤醒场景的工具上限，不会给主代理或子代理额外提权。
+background_main_agent_allowed_tools: []
+
+# 多代理协作控制面工作区：
+# - 保存通用 case/request/evidence/decision 账本。
+# - 只保存轻量机器事实；大文件、日志、API 返回和截图必须用 evidence_refs 指向外部产物。
+# - 不把日志分析、GitHub 研究、文档生成等任务写成内置专项模板。
+collaboration_workspace: ""
+# 协作请求自动唤醒 responder 的最大并发数。
+# 普通 dispatch 仍按 dispatch_default_max_runners；只有已有 collaboration request
+# 等待多个代理响应时，才按这个上限一次推进多个 responder，避免协作证据串行排队。
+# 0 表示关闭自动放宽，完全按本轮 max_runners 执行。
+collaboration_auto_dispatch_max_runners: 8
+# 协作请求默认截止时间（秒）。
+# request_collaboration / raise_collaboration_event 如果没有显式传 deadline_at 或 deadline_seconds，
+# 系统会自动补这个相对 deadline，避免大规模协作因为少数 responder 慢/断网而无限等待。
+# 0 表示不自动补截止时间，只使用用户或模型显式给出的 deadline。
+collaboration_default_deadline_seconds: 120
+
+# 并发控制配置：
+# - concurrency_lock_enabled: 是否启用任务级读写锁，防止并发调度冲突
+# - task_lock_timeout_seconds: 获取任务锁超时时间（秒）
+concurrency_lock_enabled: true
+task_lock_timeout_seconds: 30
+
+# 审计日志配置：
+# - audit_enabled: 是否启用审计日志
+# - audit_log_path: 审计日志存储路径
+audit_enabled: true
+audit_log_path: ""
+
+# 前台 daemon 默认策略（高级 / 过渡期）：
+# - my-agent daemon 会读取这些配置，减少启动时的长参数。
+# - 当前 daemon 还不是完整 gateway/service；它是一个前台 watch 调度循环。
+# - 默认开启自动调度（mutate_state=true, start_runners=true），确保 gateway 启动后自动推进子代理任务。
+# - 安全边界：dry-run 优先；高风险操作（写文件、执行 runner）需要用户确认或显式配置。
+# - daemon_max_runners 是当前前台调度器的”每轮最多推进多少 runner”，不是未来 worker 并发数。
+# - daemon_max_runners: “auto” 当前会映射成保守值 1；未来 gateway 会改成自适应并发。
+# - 数字项里的 0 是显式策略值，不是”未设置”：
+#   daemon_max_cycles=0 表示持续运行
+#   daemon_limit=0 表示每个阶段不设记录条数上限
+#   daemon_max_cards=0 表示不限制能力卡数量
+#   daemon_interval=0 表示每轮之间不等待，通常只用于测试或单轮验证
+daemon_planner: true
+daemon_mutate_state: true
+daemon_start_runners: true
+daemon_interval: 30
+daemon_max_runners: "auto"
+daemon_limit: 0
+daemon_max_cycles: 0
+daemon_max_cards: 0
+daemon_probe: true
+daemon_reviewer: "parent-daemon"
+daemon_runner_instruction: ""
+
+# Gateway lease 心跳续期配置：
+# - lease_heartbeat_interval_seconds: worker 刷新一次 lease heartbeat 的间隔（默认 60 秒）。
+# - lease_stale_without_heartbeat_seconds: 超过此时间没有收到 heartbeat 就认为 lease 失效（默认 300 秒）。
+# - 这两个配置协同工作： heartbeat 定期刷新防止被误判为卡死，stale 检测确保真正卡死的请求能回收。
+lease_heartbeat_interval_seconds: 60
+lease_stale_without_heartbeat_seconds: 300
+
+# 日志级别：重新加载配置后会应用到 agent_py_agent 包内 logger
+log_level: "info"
+
+# 扩展目录（extensions_dir）：
+# - 只作为插件包/配置的工作目录约定；运行时绝不自动执行其中的 .py 文件。
+# - 大规模部署由管理员安装插件包，再在 extension_plugins 显式启用；普通用户没有审批弹窗。
+extensions_dir: "extensions"
+
+# 唯一正式插件加载链（按列表顺序）：
+# - entrypoint:<name>：从已安装包的 my_agent.plugins entry-point 组加载。
+# - package.module:<attribute>：从管理员已安装的可导入模块加载插件对象或工厂。
+# - 缺失、重复或注册失败会阻断 agent 启动（fail-closed），不会静默跳过。
+# - 默认空列表表示不加载第三方执行代码。
+extension_plugins:
+
+# 真实模型接口地址
+api_base: "https://opencode.ai/zen/go"
+
+# API Key：
+# - 不要把真实 key 写进仓库
+# - 本地运行时优先从环境变量读取
+# - 如果你非常确定这是本地私有文件，也可以手动填到这里，但不建议
+api_key: ""
+
+# API Key 对应的环境变量名
+# Windows PowerShell 示例：$env:AGENT_API_KEY="你的key"
+# macOS / Linux 示例：export AGENT_API_KEY="你的key"
+api_key_env: "AGENT_API_KEY"
+
+# 模型名称
+model_name: "deepseek-v4-flash"
+
+# HTTP 请求总超时秒数；超时会记录为 provider_timeout，runner 会按有上限的失败策略重试。
+request_timeout: 240
+
+# 允许模型最多生成多少 token
+max_tokens: 16314
+
+# 当前模型真实上下文窗口 token 数。compact/preflight 用它计算何时折叠；
+# 不要和 chat_context_window_chars 混用，后者只是聊天界面的字符预算。
+model_context_window_tokens: 200000
+
+# 采样温度
+temperature: 0.2
+
+# Anthropic API 版本
+anthropic_version: "2023-06-01"
+
+# 是否启用工具调用循环
+enable_tools: true
+
+# 是否启用流式模型响应；关闭后走一次性响应路径，便于排查模型接口问题。
+stream_enabled: true
+
+# 工具轮数和单代理工具预算：
+# - 空值=用代码默认 5000 轮(极高级别保护:正常深度任务几百轮远够,5000 只拦
+#   真失控死循环——失败类/工具变化的机械重试到不了 repeated_failure_halt,
+#   总轮数兜底是最后防线)。 不截停主循环:5000 等效
+#   不限制,但真失控有硬顶,不会无限烧时间/成本。
+# - 防失控专项防线:repeated_failure_halt(同类失败连续 15 次收口)、
+#   unknown_command_budget(200 次/10 分钟)、compact 防抖。
+# - 显式正数仍可限制,显式 0 才是真正不限制;单任务临时覆盖由任务属性显式传入。
+max_tool_rounds:
+max_tool_calls_per_round:
+# 协议违规的修复机会次数（默认 2 = 3 次尝试后才 break）。模型输出格式偶发抖动
+# （工具调用混进正文/代码块）时，多给两次机会能显著提高长任务成活率。
+max_protocol_repairs: 2
+tool_agent_budget_window_seconds:
+tool_agent_budget_max_calls:
+
+# 后台调度器的周期性孤儿 supervision（reconcile 兜底，零 LLM 成本）：
+# - 事件唤醒只覆盖"有人发信号"的死亡；宿主进程被 SIGKILL/断电类静默死亡不发任何 wake，
+#   而定时提醒策略只有模型调过 wait 才存在——靠这里按间隔巡查兜底。
+# - 动作：盯守死岗补建接管 run + durable 复活 PENDING/PLANNING 停滞孤儿（心跳新鲜的
+#   在岗 runner 绝不误碰；尝试爆表的留给模型裁决）。无候选即 no-op，近零开销。
+# - 0=关闭。
+orphan_supervision_interval_seconds: 60
+
+# 派工出口的机制层监督提醒（治"说了登记提醒却没真调"）：
+# - create_subagents 成功后，若该任务+线程没有已启用的循环提醒，机制层自动按此间隔登记
+#   一条监督 policy（不依赖模型自觉调 wait）；模型显式调过 wait 的不覆盖。
+# - 复用 wait 提醒的既有生命周期：任务收口自动退休、终态链接抑制、无进展指数退避。
+# - 0=关闭。
+dispatch_supervision_reminder_seconds: 180
+
+# 启动恢复自动调和崩溃卡死任务（审计 #18，opt-in，默认 false）：
+# - true：启动检测到"非终态但后台进程已退出"的崩溃任务时，自动把它调和到 ABANDONED（只改任务状态，
+#   进程已死不杀任何东西），解决无人值守 OOM/断电后任务永久卡 RUNNING。
+# - false（默认）：维持现有"检测 + 提示用户手动处理、系统不自动回收"策略不变。
+startup_auto_reconcile_crashed_tasks: false
+
+# 检索完备性软引导：
+# - 同一个工具在本轮累计系统失败达到此阈值时，向模型注入一次软提示：在下
+#   "数据不存在/不可行"这类绝对结论之前，先枚举已试渠道与未试渠道，换渠道再验证。
+# - 只是软提示（每个工具最多提示一次），不拦截任何调用、不做硬门。
+# - 0 表示关闭。
+tool_failure_channel_hint_threshold: 2
+
+# 单个代理滚动 artifact 正文读取预算（下面两个参数必须一起看）：
+# - window_seconds=600 + max_chars=240000 表示单个 run_id 最近 10 分钟最多读取 240000 字符正文。
+# - 任一配置为 0 表示关闭这个 artifact 正文读取预算。
+tool_artifact_read_budget_window_seconds: 600
+tool_artifact_read_budget_max_chars: 240000
+
+# 工具输出归档和工具调用解析预算：
+# - tool_output_externalize_min_chars: 工具输出达到多少字符或 UTF-8 bytes 后外置为 artifact；0 表示所有工具输出都外置。
+#   几 KB 的定位/抽取结果会直接进入下一轮上下文，避免模型只看到“命令完成”却看不到证据。
+# - tool_output_preview_chars: archive 记录里保留多少字符预览；完整内容走 artifact 引用读取。
+# - tool_payload_*: 只限制模型发来的单次工具调用 JSON 形状，防止坏 payload 撑爆上下文；不是业务字段枚举。
+tool_output_externalize_min_chars: 20000
+tool_output_preview_chars: 4000
+
+# 工具上下文回溯回收（microcompact）：
+# - 渲染 prompt 时，把窗口外的旧工具结果正文换成 artifact 锚点占位（read_artifact 可取回完整），
+#   只保留最近 N 个完整结果；解决"单条结果不大、但几十轮累积撑满 context"的问题。
+# - 只回收带可取回锚点且正文足够大的条目；系统提示、近窗口结果、无锚点条目原样保留。
+# - tool_context_microcompact_keep_recent: 保留最近多少个完整工具结果；0 表示关闭回收。
+# - tool_context_microcompact_min_chars: 正文达到多少字符才回收，低于该值的条目原样保留。
+tool_context_microcompact_keep_recent: 8
+tool_context_microcompact_min_chars: 1500
+
+# 单轮 PTL（prompt-too-long）重试：
+# - 模型接口实报"上下文超限"时，先回收最老 20% 工具结果正文直接重试本轮，
+#   轻量自救成功就不触发重量级 compact/resume；救不回再走原有 compact 路径。
+# - tool_context_ptl_retry_max: 单轮最多重试几次；0 表示关闭，直接走 compact。
+tool_context_ptl_retry_max: 3
+
+# read_file 工具最多返回多少字符，避免单次结果太长
+tool_read_max_chars: 50000
+
+# write_file 单次 inline content 推荐值
+# 默认 12000；超过推荐值的合法工具调用仍会落盘，但工具会提示后续改用 WRITE_FILE_RAW/data_base64，避免模型反复长写。
+tool_write_inline_max_chars: 12000
+
+# list_files 工具最多列出多少条结果
+tool_list_max_entries: 200
+
+# search_text 工具最多返回多少条匹配
+tool_search_max_matches: 50
+
+# web_fetch 返回给模型的默认预览字符上限。
+# 全文或二进制内容应保存为 artifact 引用，不要直接塞进上下文。
+tool_web_max_chars: 100000
+
+# web_search / web_fetch 工具默认超时秒数
+tool_http_timeout: 30
+
+# 路径访问策略，主代理和所有子代理共用：
+# - normal：默认模式。不再要求所有文件都在 workspace_root 里，只拒绝下面 path_dangerous_roots 里的危险目录。
+#   用户在 prompt 里明确说“写到某个目录”时，只要不落入危险目录，文件工具和子代理都可以使用。
+# - full：路径全开，不按危险目录拒绝。只建议在完全信任本机任务时使用。
+# 说明：workspace_root 仍是默认工作目录和相对路径基准，不再是普通产物写入的唯一白名单。
+path_access_mode: normal
+
+# normal 模式下默认拒绝访问/写入的危险目录。可以按机器环境调整。
+# 这里放的是系统目录和常见密钥目录，不包含用户项目目录、桌面、下载目录或 live-agent-runs。
+path_dangerous_roots:
+  - /etc
+  - /private/etc
+  - /System
+  - /bin
+  - /sbin
+  - /usr/bin
+  - /usr/sbin
+  - /var/db
+  - /var/root
+  - /root
+  - ~/.ssh
+  - ~/.gnupg
+  - ~/.aws
+  - ~/.kube
+  - ~/.docker
+
+# 命令运行权限档位。这里只暴露一个总开关，其他命令安全策略由运行时派生：
+# - restricted：保守模式，命令只能在配置工作区内执行，适合不信任任务。
+# - workspace-write：默认开发模式，命令可以在当前工作区内跑测试、构建、脚本和普通清理。
+# - full-access：完全访问模式，允许显式切到系统其他目录；rm -rf /、删除系统/家目录、格式化磁盘、关机等最后保护仍会拒绝。
+# 普通 rm/rmdir/chmod/sudo 不因名字本身被拒绝；真正的边界来自 access_mode、path_access_mode 和灾难命令保护。
+# 模型不需要知道 grant/path_scope/apply 之类内部字段；它只调用 run_command。
+access_mode: workspace-write
+
+# run_command 工具默认超时秒数
+tool_shell_timeout: 240
+
+# run_command 的 stdout/stderr 分别最多回显多少字符
+# 超出时只回显预览、总字符数和截断标记，完整大输出后续应走 artifact/日志引用
+tool_shell_output_max_chars: 12000
+
+# 工具目录里最多展示多少个工具条目
+# 这个值偏大也没问题，因为目录只放中等详细度信息，不会像完整手册那么占 prompt
+# 设为 30：随着进程管理(3)+浏览器自动化(5)等工具加入,默认工具总数已逼近 20;
+# 限额必须留出余量,否则尾部工具(如 list_tools/安全工具)会被分页挤出第一页不可见。
+tool_catalog_limit: 80
+
+# 工具目录展示模式：
+# - compact：给模型一份精简工具目录，默认推荐。
+# - full：给模型完整工具详情，适合调试模板/工具选择问题。
+# - retrieval_only：不铺完整目录，只靠 Recommended Tools 召回。
+# - off：关闭工具目录注入，通常只用于极限省 token 的实验。
+tool_catalog_mode: "compact"
+
+# 工具目录分页偏移；一般保持 0，调试目录分页时可和 tool_catalog_limit 配合。
+tool_catalog_offset: 0
+
+# 工具目录按类别过滤；空列表表示不过滤。
+# 例如 ["filesystem", "network"] 只展示文件和网络工具，但不改变真正授权。
+tool_catalog_categories: []
+
+# 渐进式披露：这些 category 的工具仍注册、仍受相同权限控制，但不进初始模型 schema；
+# 模型通过 tool_search 搜索并加载命中工具，list_tools 可查看完整注册表。显式 allowed_tools
+# 的后台/runner 回合本身已是结构化工具选择，不再延迟。默认收起协作、编排和 /goal 工具；
+# 普通任务仍可自主派子代理，只是先发现再调用。设为 [] 即恢复全部工具直出。
+tool_catalog_deferred_categories: ["collaboration", "orchestration", "goal"]
+
+# 工具目录条目是否带示例；默认关闭以控制每轮上下文，完整示例仍可通过 list_tools/tool_search 读取。
+tool_catalog_include_examples: false
+
+# 单个工具目录条目的字符上限；0 表示不截断。
+tool_catalog_entry_max_chars: 700
+
+# 工具目录分页/截断时是否提示 next_offset。
+tool_catalog_show_truncated_notice: true
+
+# Recommended Tools 单个详细工具说明字符上限；0 表示不截断。
+tool_detail_max_chars: 4000
+
+# 每次只把多少个最相关工具的“详细说明”注入 prompt
+# 这个值越小越省 token，但过小可能漏掉次优工具
+# Recommended Tools 只推荐当前已直接可见的工具；延迟工具由 tool_search 使用同一检索器查找。
+# 这个上限同时作为普通推荐的容量；检索结果要求 score>0，不会用无关工具凑数。
+tool_retrieval_limit: 12
+
+# 是否启用真实语义工具检索。开启但未配置 embedding model 时，语义通道明确标为
+# unconfigured 并只走关键词；端点故障时也降级关键词，错误可从 list_tools.tool_retrieval 查看。
+tool_vector_search_enabled: true
+
+# 工具语义检索 embedding。可独立配置；model 留空时复用 memory_embedding_*，两边都空则不发请求。
+# embo* 使用 MiniMax 原生协议，其余模型使用 OpenAI 兼容 /embeddings。
+tool_embedding_model: ""
+tool_embedding_api_base: ""
+tool_embedding_api_key: ""
+tool_embedding_api_key_env: ""
+
+# 工具调用协议在一次 run 开始前固定。native 会先探测当前
+# provider + endpoint + model + stream 是否支持原生 tool_use；text 只用于明确配置的
+# 非原生端点或协议调试。一个 run 内不会切换协议，native 失败也不会由 text 中途接管。
+tool_protocol: "text"
+# 显式声明必须走 text 协议（跳过 native probe）的模型名单，如 flash 类非 reasoning
+# 模型配 native 会静默失效（0 工具调用+幻觉，真机实证 2026-08-07 deepseek-v4-flash）。
+# 例：tool_protocol_text_models: ["text-01", "minimax"]
+# 空列表 = 全部模型照常 native probe；名单内模型由部署方显式配对 text。
+tool_protocol_text_models: ["deepseek-v4-flash"]
+
+# MCP 客户端（短板6）：连接外部 MCP server（Model Context Protocol，JSON-RPC over stdio），
+# 把社区现成工具（GitHub/数据库/Slack 等）动态注册成 mcp__<server>__<tool> 前缀的工具，
+# 模型可像内置工具一样调用，调用时转发给对应 server 的 tools/call。
+# - 仅 stdio 传输：用 command + args 启动 server 子进程（标准库 subprocess 实现，零新增依赖）。
+# - env：显式传给该 server 的额外环境变量（如凭证）；默认只继承 PATH/HOME 等安全基线，
+#   不会把父进程其他敏感变量漏给 server 子进程。日志里 secret 键值自动脱敏。
+# - timeout：单次 tools/call 超时（秒，默认 60）；connect_timeout：握手/发现超时（秒，默认 30）。
+# - effect：未知工具默认 dangerous，会进入幂等与审批硬门。只有部署者可用 tool_effects
+#   逐工具显式声明 read_only / mutating / dangerous；不要根据 server 自报信息自动降级。
+# - 默认空 = 不连任何 server、不启动任何子进程（零开销）。某 server 连不上只记日志跳过，
+#   不影响其他工具与主流程。
+# 注意：本仓配置用的是精简 YAML 解析器，dict 值必须写成单行 inline（flow）形式，
+#   不支持多行缩进块写法。示例（默认空，要用时替换 {} 为下面这种单行 dict）：
+#   mcp_servers: {"filesystem": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"], "tool_effects": {"read_file": "read_only", "write_file": "mutating"}}}
+#   真实 server 若会先 list/search 再 read，部署者必须把这些实际只读工具也逐个声明 read_only；
+#   未声明项继续 dangerous fail-closed，不能为了让模型跑通而整体降级 effect。
+#   带凭证的 server（凭证经 env 显式传入，日志自动脱敏）：
+#   mcp_servers: {"github": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_xxx"}, "timeout": 120}}
+mcp_servers: {}
+
+# Language Server Protocol：管理员安装 server 后在这里显式配置，运行时按需惰性启动。
+# JSON-RPC 走 stdio；owner-scoped 用户的 server 同样必须进入 bwrap，缺 sandbox 时 fail-closed。
+# 不扫描 PATH 猜 server，也不允许普通用户在请求里改 command。精简 YAML 要使用单行 inline dict。
+# initialization_options 会原样放进 initialize.initializationOptions，适配需要管理员启动参数的 server；
+# client capabilities 只声明 my-agent 已实现的 diagnostics/hover/definition/references/documentSymbol。
+# 例：lsp_servers: {"python": {"command": "pyright-langserver", "args": ["--stdio"], "timeout": 20, "initialization_options": {}}}
+lsp_servers: {}
+
+# 视觉理解（短板6）：辅助视觉模型配置，让 analyze_image 工具能看图（分析图片内容）。
+# my-agent 主模型（MiniMax-M2.7）不一定支持视觉，所以走一个独立的 anthropic_compatible 视觉端点：
+# analyze_image 把图片（本地路径或 http/https URL）转成 anthropic image block 调它，返回内容分析。
+# - URL 取图复用 web_fetch/browser 同一套 SSRF 防护，默认拒私网/内网/云 metadata 地址。
+# - 仅识别真实 PNG/JPEG/WebP/GIF（按文件二进制头判定，与扩展名无关），有 10 MB 大小上限。
+# - 可选加法：vision_api_base 与 vision_model_name 都填了才算“已配”；二者任一为空 = 未配视觉模型，
+#   analyze_image 仍注册但调用时返回 TOOL_UNAVAILABLE（带配置指引），对现有流程零影响、不崩。
+# - vision_api_key 留空则复用上面的主模型 api_key（视觉模型与主模型常同源同一把 key）；
+#   vision_anthropic_version 留空则复用主模型 anthropic_version。
+# 例（MiniMax 视觉模型，和主模型同源时只需填 base + model_name）：
+#   vision_api_base: "https://api.minimaxi.com/anthropic"
+#   vision_model_name: "MiniMax-VL-01"
+vision_api_base: ""
+vision_api_key: ""
+vision_model_name: ""
+vision_anthropic_version: ""
+vision_request_timeout: 120
+vision_max_tokens: 1024
+
+# Chat / CLI 默认展示和读取预算：
+# - 这些配置控制命令默认显示多少、交互历史带多少、长文本折叠多少。
+# - 后续前端配置页也应读取这些真实后端字段，而不是另写一套默认值。
+chat_history_max_turns: 20
+chat_history_assistant_preview_chars: 500
+# Agent 模型使用的同会话历史预算，与上面的界面展示预览严格分开。
+# 总量优先保留最新消息；单条过长时保留头尾，避免丢掉结论、路径和用户要求的后半段。
+conversation_history_max_turns: 20
+conversation_history_max_chars: 48000
+conversation_history_message_max_chars: 12000
+chat_transcript_max_chars: 500000
+chat_collapse_preview_lines: 12
+chat_collapse_preview_chars: 900
+chat_context_window_chars: 200000
+chat_transcript_scroll_lines: 10
+cli_status_limit: 5
+cli_timeline_limit: 20
+cli_memory_list_limit: 20
+cli_memory_search_limit: 5
+cli_chat_memory_limit: 5
+cli_memory_archive_limit: 20
+# memory-compact 默认不截断当前 scope 的匹配记录；如需调试小范围 compact，可在命令行显式传 --limit。
+cli_memory_route_limit: 5
+cli_local_search_limit: 5
+cli_local_search_preview_chars: 500
+cli_local_doctor_limit: 20
+cli_task_list_limit: 50
+cli_audit_limit: 100
+cli_audit_cleanup_days: 90
+
+# Dispatch 闭环保证配置：
+# - dispatch_max_consecutive_rounds: 最大连续调度轮数，防止无限循环
+# - dispatch_active_interval: 有任务变化时的调度间隔（秒）
+# - dispatch_idle_interval: 无任务变化时的调度间隔（秒）
+dispatch_max_consecutive_rounds: 20
+dispatch_active_interval: 5
+dispatch_idle_interval: 30
+dispatch_default_max_runners: 1
+dispatch_default_limit: 20
+dispatch_default_watch_interval: 30.0
+dispatch_pending_runner_scan_limit: 999
+
+# Watchdog 监控配置：
+# - watchdog_enabled: 是否启用 watchdog 监控 daemon 进程存活
+# - watchdog_interval: 检查间隔（秒）
+# - watchdog_max_restarts: 最多自动重启次数
+# - watchdog_restart_delay: 重启前等待时间（秒）
+watchdog_enabled: false
+watchdog_interval: 60
+watchdog_max_restarts: 3
+watchdog_restart_delay: 10

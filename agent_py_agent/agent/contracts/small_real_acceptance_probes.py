@@ -1,0 +1,87 @@
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from ..tooling.registry import ToolRegistry, ToolRegistryParams
+from ..tooling.runtime_contracts import ToolResult
+
+
+def small_real_registry(root: Path) -> ToolRegistry:
+    return ToolRegistry(
+        ToolRegistryParams(
+            workspace_root=root,
+            max_chars=6000,
+            max_entries=200,
+            max_matches=50,
+            web_max_chars=12000,
+            http_timeout=30,
+            catalog_limit=20,
+            retrieval_limit=3,
+            vector_search_enabled=False,
+            shell_tool_timeout=30,
+            shell_tool_output_max_chars=200,
+            # controlled_exec 只走现有 dry-run 合同，不进入真实处理器副作用。
+            operation_store_required=False,
+        )
+    )
+
+
+def read_file_probe(result: ToolResult) -> dict[str, object]:
+    return {
+        "probe_id": "read-file-success",
+        "operation_id": "op-read-file-success",
+        "tool": result.tool_name,
+        "effect": "read_only",
+        "mode": "read_only",
+        "tool_executor_ref": "tool_registry.execute_tool",
+        "result_schema_ref": "schema://tools/read_file/result",
+        "executed_actions": [],
+        "result": {"ok": result.ok, "payload": {"output": result.output}},
+    }
+
+
+def controlled_exec_probe(result: ToolResult) -> dict[str, object]:
+    return {
+        "probe_id": "controlled-exec-dry-run",
+        "operation_id": "op-controlled-exec-dry-run",
+        "tool": result.tool_name,
+        "effect": "dangerous",
+        "mode": "dry_run",
+        "tool_executor_ref": "tool_registry.execute_tool",
+        "result_schema_ref": "schema://tools/controlled_exec/result",
+        "idempotency_key": "idem-controlled-exec-pwd",
+        "args_hash": "sha256:controlled-exec-pwd",
+        "executed_actions": [],
+        "result": {"ok": result.ok, "payload": json_payload(result.output)},
+    }
+
+
+def controlled_exec_grant(root: Path) -> dict[str, object]:
+    return {
+        "grant_id": "grant-small-real",
+        "request_id": "req-small-real",
+        "run_id": "run-small-real",
+        "command_allowlist": ["pwd"],
+        "path_scope": [str(root)],
+        "network_scope": [],
+        "output_budget": {"stdout_bytes": 200, "stderr_bytes": 200},
+        "risk_level": "low",
+    }
+
+
+def json_payload(value: str) -> dict[str, object]:
+    try:
+        loaded = json.loads(value)
+    except json.JSONDecodeError:
+        return {"mode": "", "raw_parse_failed": True}
+    return loaded if isinstance(loaded, dict) else {"value": loaded}
+
+
+__all__ = [
+    "controlled_exec_grant",
+    "controlled_exec_probe",
+    "read_file_probe",
+    "small_real_registry",
+]

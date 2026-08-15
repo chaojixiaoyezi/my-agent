@@ -1,0 +1,301 @@
+from __future__ import annotations
+
+from ..contracts.protocol_status import COMPACT_STATUS_READY_AFTER_ACTION_GUARD
+from ..conversation.authority import conversation_transcript_is_authoritative
+from ..conversation.task_state import conversation_task_completed
+from ..memory_archive import run_memory_compact_auto_cycle
+from ..memory_archive.compact import MemoryCompactPlanOptions
+from ..memory_archive.compact_auto import MemoryCompactAutoCycleOptions
+from ._runtime_params import FinalizeContext
+from .runtime.context_compactor import runtime_compact_policy
+from .runtime.owner_roots import runtime_scope_root
+
+_CONTEXT_OVERFLOW_REASONS = {
+    "blackbox_output_overflow",
+    "context_length_exceeded",
+    "context_overflow",
+    "maximum_context_length",
+    "tool_output_context_overflow",
+}
+_MAX_CONSECUTIVE_NO_TOOL_PREFLIGHT_CONTINUATIONS = 3
+# H2 绝对硬顶：单次 run 内 compact→自动续跑的最大深度。no-tool 软顶只数「连续无工具进展」的
+# 续跑（某轮调了工具就清零），无法拦住「持续高于阈值且每轮都调工具」的任务无限续跑——depth 一路
+# 加、永不触顶。这个绝对硬顶与软顶并存：depth 到顶即强制 return，给清晰终止响应而非静默卡死。
+_DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH = 50
+
+
+def compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[str, int], *, request_id: str = "") -> dict:
+    if conversation_task_completed(ctx.task_attributes):
+        return _compact_auto_turn_complete_fields()
+    if _conversation_thread_owns_compaction(ctx):
+        return _conversation_thread_compact_fields(ctx)
+    if _compact_auto_continue_depth_exhausted(agent, ctx):
+        return _compact_auto_continuation_depth_cap_fields(_max_compact_auto_continue_depth(agent))
+    trigger = _compact_trigger_from_runtime(ctx)
+    if _should_return_after_continuation(ctx, trigger):
+        return _compact_auto_continuation_return_fields()
+    policy = runtime_compact_policy(agent, save=ctx.do_save, context_scope=ctx.context_scope)
+    cycle = run_memory_compact_auto_cycle(
+        runtime_scope_root(
+            agent,
+            context_scope=ctx.context_scope,
+            task_attributes=ctx.task_attributes,
+        ),
+        MemoryCompactAutoCycleOptions(
+            current_tokens=int(token_ledger.get("active", token_ledger["turn"])),
+            max_context_tokens=policy.context_window_tokens,
+            trigger_percent=policy.trigger_percent,
+            plan_options=MemoryCompactPlanOptions(
+                session_id=getattr(agent, "session_id", agent.config.agent_name),
+                request_id=ctx.request_id or request_id,
+                run_id=ctx.run_id or "",
+                task_id=ctx.task_id or "",
+            ),
+            allow_apply=policy.allow_persistent_apply,
+            owner_type=(
+                "subagent_run"
+                if str(ctx.context_scope or "").strip().lower() == "task_local"
+                else "main_agent"
+            ),
+            owner_id=ctx.run_id if str(ctx.context_scope or "").strip().lower() == "task_local" else "",
+            **trigger,
+        ),
+    )
+    suggestion = cycle["suggestion"]
+    trigger_payload = dict(cycle.get("trigger", {}))
+    auto_continue = _should_auto_continue_after_cycle(ctx, trigger_payload, cycle)
+    status = str(cycle["status"])
+    next_action = str(cycle["next_action"])
+    if status == COMPACT_STATUS_READY_AFTER_ACTION_GUARD and not auto_continue:
+        status = "applied_return_result"
+        next_action = "return_result_after_compact"
+    return _compact_auto_cycle_result_fields(
+        cycle,
+        trigger_payload,
+        {"status": status, "next_action": next_action, "auto_continue": auto_continue},
+    )
+
+
+def _conversation_thread_owns_compaction(ctx: FinalizeContext) -> bool:
+    """Keep one authoritative compact chain for the whole conversation.
+
+    Tool calls are model-visible items inside the active turn, not a reason to
+    fork the same user conversation into ``memory_compact_auto``.  Their live
+    prompt is reduced in the tool loop (the same turn), while completed turns
+    are compacted by the durable conversation transcript.
+    """
+    return bool(
+        str(getattr(ctx, "context_scope", "") or "") == "conversation"
+        and conversation_transcript_is_authoritative(ctx.task_attributes)
+    )
+
+
+def _conversation_thread_compact_fields(ctx: FinalizeContext) -> dict:
+    overflow = _runtime_code(getattr(ctx.final_response, "runtime_status", "")) in _CONTEXT_OVERFLOW_REASONS
+    return {
+        "memory_compact_suggested": False,
+        "memory_compact_status": "ok",
+        "memory_compact_ratio": 0.0,
+        "memory_compact_message": "conversation transcript owns the single compact chain",
+        "memory_compact_commands": [],
+        "memory_compact_trigger_reason": (
+            "conversation_context_pressure" if overflow else "conversation_thread_managed"
+        ),
+        "memory_compact_trigger_source": "conversation_store",
+        "memory_compact_trigger_forced": overflow,
+        "memory_compact_auto_status": "delegated_to_conversation_store",
+        "memory_compact_auto_next_action": (
+            "compact_conversation_and_retry" if overflow else "return_result"
+        ),
+        "memory_compact_auto_allowed_to_continue": False,
+        "memory_compact_auto_tool_execution": "none",
+        "memory_compact_auto_apply_id": "",
+        "memory_compact_auto_continue_ready": False,
+        "memory_compact_auto_continue_packet": {},
+    }
+
+
+def _compact_auto_cycle_result_fields(
+    cycle: dict[str, object],
+    trigger_payload: dict[str, object],
+    final_state: dict[str, object],
+) -> dict:
+    suggestion = cycle["suggestion"]
+    auto_continue = bool(final_state["auto_continue"])
+    return {
+        "memory_compact_suggested": bool(suggestion["should_prompt"]),
+        "memory_compact_status": str(suggestion["status"]),
+        "memory_compact_ratio": float(suggestion["token_budget"]["ratio"]),
+        "memory_compact_message": str(suggestion["message"]),
+        "memory_compact_commands": list(suggestion["recommended_commands"]),
+        "memory_compact_trigger_reason": str(trigger_payload.get("reason") or "normal_threshold"),
+        "memory_compact_trigger_source": str(trigger_payload.get("source") or "token_budget"),
+        "memory_compact_trigger_forced": bool(trigger_payload.get("forced")),
+        "memory_compact_auto_status": str(final_state["status"]),
+        "memory_compact_auto_next_action": str(final_state["next_action"]),
+        "memory_compact_auto_allowed_to_continue": auto_continue,
+        "memory_compact_auto_tool_execution": str(cycle["automatic_tool_execution"]),
+        "memory_compact_auto_apply_id": str(cycle["apply_id"]),
+        "memory_compact_auto_continue_ready": auto_continue and bool(cycle["continue_packet"].get("ready_to_continue")),
+        "memory_compact_auto_continue_packet": dict(cycle["continue_packet"]),
+    }
+
+
+def _max_compact_auto_continue_depth(agent: object) -> int:
+    config = getattr(agent, "config", None)
+    raw = getattr(config, "memory_compact_auto_continue_max_depth", None)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = 0
+    return value if value > 0 else _DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH
+
+
+def _compact_auto_continue_depth_exhausted(agent: object, ctx: FinalizeContext) -> bool:
+    # 只在「已经在续跑链里」（depth>=1）才考虑硬顶；首轮（depth=0）永不触顶。续跑链每加一层
+    # depth+1（见 runtime_mixin._compact_auto_continue_params），达到上限即强制收口。
+    depth = int(ctx.compact_auto_continue_depth or 0)
+    if depth < _max_compact_auto_continue_depth(agent):
+        return False
+    # 守望豁免：任务在派工时被【结构化声明】为长期运行（long_running，如持续盯守/常驻监控），
+    # 固定深度硬顶与"故意一直跑"直接冲突——声明过的任务放开硬顶、无限 compact 续跑。防跑飞
+    # 交给活性软顶：连续 N 轮零工具进展照样熔断（_should_return_after_continuation），所以
+    # "声明了却卡死"的任务仍会停。对的是派工方自己声明的任务性质，不做关键词猜测。
+    return not _long_running_declared(ctx)
+
+
+# 函数用途: 本 run 是否被派工方结构化声明为"故意长期运行"(task_attributes.long_running)。
+def _long_running_declared(ctx: FinalizeContext) -> bool:
+    attrs = getattr(ctx, "task_attributes", None)
+    return isinstance(attrs, dict) and attrs.get("long_running") is True
+
+
+def _should_return_after_continuation(ctx: FinalizeContext, trigger: dict[str, object]) -> bool:
+    if int(ctx.compact_auto_continue_depth or 0) <= 0:
+        return False
+    if _trigger_requires_continuation(trigger):
+        return int(ctx.compact_auto_no_tool_continue_depth or 0) >= _MAX_CONSECUTIVE_NO_TOOL_PREFLIGHT_CONTINUATIONS
+    return int(ctx.tool_rounds or 0) <= 0 and not list(ctx.executed_tools or [])
+
+
+def _should_auto_continue_after_cycle(ctx: FinalizeContext, trigger_payload: dict[str, object], cycle: dict[str, object]) -> bool:
+    if conversation_task_completed(ctx.task_attributes):
+        return False
+    if not bool(cycle.get("allowed_to_continue")):
+        return False
+    if _continuation_made_tool_progress(ctx):
+        return True
+    if bool(trigger_payload.get("forced")):
+        return True
+    source = _runtime_code(trigger_payload.get("source"))
+    reason = _runtime_code(trigger_payload.get("reason"))
+    status = _runtime_code(getattr(ctx.final_response, "runtime_status", ""))
+    runtime_reason = _runtime_code(getattr(ctx.final_response, "runtime_reason", ""))
+    runtime_source = _runtime_code(getattr(ctx.final_response, "runtime_source", ""))
+    return (
+        source in {"preflight", "provider_error", "runtime_status"}
+        or runtime_source in {"preflight", "provider_error", "runtime_status"}
+        or reason in _CONTEXT_OVERFLOW_REASONS
+        or status in _CONTEXT_OVERFLOW_REASONS
+        or runtime_reason in _CONTEXT_OVERFLOW_REASONS
+    )
+
+
+def _trigger_requires_continuation(trigger: dict[str, object]) -> bool:
+    if bool(trigger.get("force_trigger")):
+        return True
+    source = _runtime_code(trigger.get("trigger_source") or trigger.get("source"))
+    reason = _runtime_code(trigger.get("trigger_reason") or trigger.get("reason"))
+    return source in {"preflight", "provider_error", "runtime_status"} or reason in _CONTEXT_OVERFLOW_REASONS
+
+
+def _continuation_made_tool_progress(ctx: FinalizeContext) -> bool:
+    return int(ctx.tool_rounds or 0) > 0 or bool(list(ctx.executed_tools or []))
+
+
+def _compact_auto_continuation_return_fields() -> dict:
+    return {
+        "memory_compact_suggested": False,
+        "memory_compact_status": "ok",
+        "memory_compact_ratio": 0.0,
+        "memory_compact_message": "compact continuation returned after one no-tool model turn",
+        "memory_compact_commands": [],
+        "memory_compact_trigger_reason": "continuation_no_tool_progress",
+        "memory_compact_trigger_source": "auto_compact",
+        "memory_compact_trigger_forced": False,
+        "memory_compact_auto_status": "returned_after_continuation",
+        "memory_compact_auto_next_action": "return_result",
+        "memory_compact_auto_allowed_to_continue": False,
+        "memory_compact_auto_tool_execution": "none",
+        "memory_compact_auto_apply_id": "",
+        "memory_compact_auto_continue_ready": False,
+        "memory_compact_auto_continue_packet": {},
+    }
+
+
+def _compact_auto_continuation_depth_cap_fields(max_depth: int) -> dict:
+    return {
+        "memory_compact_suggested": False,
+        "memory_compact_status": "ok",
+        "memory_compact_ratio": 0.0,
+        "memory_compact_message": (
+            f"compact auto continuation reached the absolute depth cap ({max_depth}); "
+            "returning the current result instead of compacting again. "
+            "如需继续，请基于已落盘的进展和恢复引用发起新的一轮。"
+        ),
+        "memory_compact_commands": [],
+        "memory_compact_trigger_reason": "continuation_depth_cap_reached",
+        "memory_compact_trigger_source": "auto_compact",
+        "memory_compact_trigger_forced": False,
+        "memory_compact_auto_status": "returned_after_depth_cap",
+        "memory_compact_auto_next_action": "return_result",
+        "memory_compact_auto_allowed_to_continue": False,
+        "memory_compact_auto_tool_execution": "none",
+        "memory_compact_auto_apply_id": "",
+        "memory_compact_auto_continue_ready": False,
+        "memory_compact_auto_continue_packet": {},
+    }
+
+
+def _compact_auto_turn_complete_fields() -> dict:
+    return {
+        "memory_compact_suggested": False,
+        "memory_compact_status": "ok",
+        "memory_compact_ratio": 0.0,
+        "memory_compact_message": "conversation task turn complete; compact auto continuation skipped",
+        "memory_compact_commands": [],
+        "memory_compact_trigger_reason": "turn_complete",
+        "memory_compact_trigger_source": "runtime",
+        "memory_compact_trigger_forced": False,
+        "memory_compact_auto_status": "skipped_after_turn_complete",
+        "memory_compact_auto_next_action": "return_result",
+        "memory_compact_auto_allowed_to_continue": False,
+        "memory_compact_auto_tool_execution": "none",
+        "memory_compact_auto_apply_id": "",
+        "memory_compact_auto_continue_ready": False,
+        "memory_compact_auto_continue_packet": {},
+    }
+
+
+def _compact_trigger_from_runtime(ctx: FinalizeContext) -> dict[str, object]:
+    status = _runtime_code(getattr(ctx.final_response, "runtime_status", ""))
+    reason = _runtime_code(getattr(ctx.final_response, "runtime_reason", ""))
+    source = _runtime_code(getattr(ctx.final_response, "runtime_source", ""))
+    if status in _CONTEXT_OVERFLOW_REASONS or reason in _CONTEXT_OVERFLOW_REASONS:
+        return {
+            "trigger_reason": "provider_context_overflow",
+            "trigger_source": source or "runtime_status",
+            "force_trigger": True,
+        }
+    return {
+        "trigger_reason": "normal_threshold",
+        "trigger_source": "token_budget",
+        "force_trigger": False,
+    }
+
+
+def _runtime_code(value: object) -> str:
+    return str(value or "").strip().lower().replace("-", "_")
+
+
+__all__ = ["compact_auto_cycle_fields"]

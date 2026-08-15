@@ -1,0 +1,19 @@
+# Docker 构建上下文采用源码允许列表，避免本地 data/memory/logs/测试产物进入 builder。
+**
+!pyproject.toml
+!README.md
+!LICENSE
+!agent_py_agent/
+!agent_py_agent/**
+!deploy/
+!deploy/Dockerfile
+
+# 生产镜像不携带测试、缓存和运行状态。
+agent_py_agent/tests/
+agent_py_agent/data/
+agent_py_agent/memory/
+agent_py_agent/memory_archive/
+agent_py_agent/**/__pycache__/
+agent_py_agent/**/*.pyc
+agent_py_agent/**/*.pyo
+agent_py_agent/.pytest_cache/

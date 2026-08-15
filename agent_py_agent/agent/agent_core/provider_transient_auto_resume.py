@@ -1,0 +1,129 @@
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import TypeVar
+
+from ..backends import is_provider_recoverable_error, is_provider_transient_error
+from ..concurrency.interrupt import is_interrupted, wait_interruptibly
+from ..concurrency.retry import apply_retry_jitter
+from ..settings.runtime_guard_config import RuntimeGuardPolicy, runtime_guard_data
+
+_T = TypeVar("_T")
+
+DEFAULT_PROVIDER_TRANSIENT_RETRY_DELAYS_SECONDS = (10.0, 25.0, 45.0, 100.0, 180.0)
+
+
+@dataclass(frozen=True)
+class _RetryNotice:
+    attempt: int
+    total: int
+    delay: float
+    error: BaseException
+
+
+def provider_transient_retry_delays(policy: RuntimeGuardPolicy | None = None) -> tuple[float, ...]:
+    value = runtime_guard_data(policy=policy).get(
+        "provider_transient_auto_resume_delays_seconds",
+        DEFAULT_PROVIDER_TRANSIENT_RETRY_DELAYS_SECONDS,
+    )
+    if not isinstance(value, list | tuple):
+        value = DEFAULT_PROVIDER_TRANSIENT_RETRY_DELAYS_SECONDS
+    return tuple(
+        value
+        for value in _parsed_delays(value)
+        if value > 0
+    )
+
+
+def _parsed_delays(value: list | tuple) -> tuple[float, ...]:
+    parsed: list[float] = []
+    for item in value:
+        try:
+            parsed.append(float(item))
+        except (TypeError, ValueError):
+            continue
+    return tuple(parsed)
+
+
+def run_with_provider_transient_auto_resume(
+    operation: Callable[[], _T],
+    *,
+    on_chunk: Callable[[str], object] | None = None,
+    policy: RuntimeGuardPolicy | None = None,
+) -> _T:
+    delays = provider_transient_retry_delays(policy)
+    for attempt, delay in enumerate(delays, start=1):
+        _raise_if_interrupted()
+        try:
+            return operation()
+        except InterruptedError:
+            raise  # 用户/任务中断绝不重试: 中断标记必须被消费, 不能进入退避重连
+        except Exception as exc:
+            _raise_unless_provider_transient(exc)
+            # 配置阶梯+随机抖动(批3):多实例同撞限流时错峰重试,防共振雪崩。
+            _wait_before_retry(on_chunk, _RetryNotice(attempt, len(delays), apply_retry_jitter(delay), exc))
+            _raise_if_interrupted()
+    _raise_if_interrupted()
+    return operation()
+
+
+# LLM: 重试/退避循环必须检查任务中断(2026-08-14 真机, gateway 后台接管轮挂起):
+#   watchdog interrupt_by_name 只会标记已登记的线程, 而 guard worker 由
+#   _interrupt_generation_worker 显式 set_interrupt——本循环每轮开跑前/退避后
+#   都检查 is_interrupted(), 让中断标记被消费而不是在断流→退避→重连里空转。
+def _raise_if_interrupted() -> None:
+    if is_interrupted():
+        raise InterruptedError("provider 重试循环已收到任务中断, 停止重试")
+
+
+# LLM: 可重试判定升级(批3 2-1 收口):typed transient 之外,经分类器
+#   (contracts/provider_error_classifier,长期助手 蓝本)判为 rate_limit/
+#   overloaded/server_error/timeout 的裸异常同样进入重试;auth/billing/format/
+#   context_overflow/unknown 照旧上抛(context_overflow 由上层 ptl_retry 链
+#   接手压缩,unknown 保守快速浮出)。模型全程无感。
+# 函数用途: 这个错值不值得原地重试?值得就放行去等待,不值得立刻抛给上层。
+def _raise_unless_provider_transient(exc: Exception) -> None:
+    if is_provider_transient_error(exc):
+        return
+    # typed provider 错误语义明确,只信 is_provider_transient_error,不再用文本
+    # 分类器二次放大重试面(CI 回归实锤:ProviderTimeoutError 的 str 含 "timeout",
+    # 会被分类器误判 TIMEOUT/retryable 进入重试循环——但 my-agent 的 request_timeout
+    # 是整个模型回合的超时,重试每次都会同样超时,只会拖垮续航;原设计就是快速失败)。
+    # 文本分类器只兜"没有 typed 形态的裸异常"(如裸 RuntimeError("429"))。
+    if is_provider_recoverable_error(exc):
+        raise exc
+    from ..contracts.provider_error_classifier import classify_provider_error
+
+    if classify_provider_error(exc).retryable:
+        return
+    raise exc
+
+
+def _wait_before_retry(on_chunk: Callable[[str], object] | None, notice: _RetryNotice) -> None:
+    _emit_retry_notice(on_chunk, notice)
+    wait_interruptibly(notice.delay)
+
+
+def _emit_retry_notice(on_chunk: Callable[[str], object] | None, notice: _RetryNotice) -> None:
+    if not callable(on_chunk):
+        return
+    delay = _format_delay(notice.delay)
+    on_chunk(
+        "\n"
+        f"[provider_transient_auto_resume attempt={notice.attempt}/{notice.total}; wait_seconds={delay}]\n"
+        f"模型接口临时不可用或被限流，等待 {delay} 秒后自动重试当前模型回合。\n"
+        f"error={notice.error}\n"
+    )
+
+
+def _format_delay(value: float) -> str:
+    return str(int(value)) if float(value).is_integer() else f"{value:.1f}".rstrip("0").rstrip(".")
+
+
+__all__ = [
+    "DEFAULT_PROVIDER_TRANSIENT_RETRY_DELAYS_SECONDS",
+    "provider_transient_retry_delays",
+    "run_with_provider_transient_auto_resume",
+]

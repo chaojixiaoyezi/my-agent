@@ -1,0 +1,17 @@
+{
+  "contract_ref": "../contracts/model_claims_done_without_evidence_should_fail.json",
+  "model_steps": [
+    {
+      "type": "tool_call",
+      "tool": "write_file",
+      "params": {
+        "path": "report.json",
+        "content": "{\"claims\":[],\"source_refs\":[]}"
+      }
+    },
+    {
+      "type": "final",
+      "status": "SUCCEEDED"
+    }
+  ]
+}

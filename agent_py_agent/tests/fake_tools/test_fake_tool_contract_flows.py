@@ -1,0 +1,160 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+
+def test_failed_write_tool_cannot_be_counted_as_successful_artifact_work(tmp_path: Path):
+    from agent_py_agent.tests.support.contract_fixture_runner import (
+        FixtureRunFacts,
+        verify_contract_fixture,
+    )
+
+    contract = _fixture("missing_artifact_should_fail.json")
+    tool_trace = [
+        {
+            "tool": "write_file",
+            "params": {"path": "output.md"},
+            "result": {"ok": False, "error_code": "PATH_PERMISSION_DENIED"},
+        }
+    ]
+
+    result = verify_contract_fixture(
+        tmp_path,
+        contract,
+        FixtureRunFacts(tool_trace=tuple(tool_trace), final_status="SUCCEEDED"),
+    )
+
+    assert result.ok is False
+    assert "ARTIFACT_MISSING" in result.error_codes
+    assert "FINAL_STATUS_REJECTED" in result.error_codes
+
+
+def test_fake_tool_runner_covers_fetch_workbook_fixture_dangerous_and_timeout(tmp_path: Path):
+    from agent_py_agent.tests.support.fake_tools import FakeToolRunner
+
+    runner = FakeToolRunner(
+        tmp_path,
+        fixtures={
+            "web_fetch": {
+                "https://example.com/data.json": {"ok": True, "body": '{"rows":[{"项目":"demo"}]}'},
+                "https://example.com/timeout": {"ok": False, "error_code": "TOOL_TIMEOUT"},
+            }
+        },
+    )
+    source = tmp_path / "source.json"
+    source.write_text('{"sheets":[{"name":"Sheet1","rows":[{"项目":"demo"}]}]}', encoding="utf-8")
+
+    ok_fetch = runner.execute("web_fetch", {"url": "https://example.com/data.json"})
+    timeout_fetch = runner.execute("web_fetch", {"url": "https://example.com/timeout"})
+    workbook = runner.execute("write_workbook_fixture", {"source_json_path": "source.json", "path": "report.xlsx"})
+    dangerous = runner.execute("dangerous_command", {"command": "rm -rf /"})
+
+    assert ok_fetch["ok"] is True
+    assert timeout_fetch["error_code"] == "TOOL_TIMEOUT"
+    assert workbook["ok"] is True
+    assert (tmp_path / "report.xlsx").exists()
+    assert dangerous["ok"] is False
+    assert dangerous["error_code"] == "APPROVAL_REQUIRED"
+
+
+def test_fake_tool_runner_can_inject_write_failure_from_fixture(tmp_path: Path):
+    from agent_py_agent.tests.support.fake_tools import FakeToolRunner
+
+    runner = FakeToolRunner(
+        tmp_path,
+        fixtures={"write_file": {"output.md": {"ok": False, "error_code": "PATH_PERMISSION_DENIED"}}},
+    )
+
+    result = runner.execute("write_file", {"path": "output.md", "content": "demo"})
+
+    assert result["ok"] is False
+    assert result["error_code"] == "PATH_PERMISSION_DENIED"
+    assert not (tmp_path / "output.md").exists()
+
+
+def test_fake_file_tool_rejects_write_path_outside_run_dir(tmp_path: Path):
+    from agent_py_agent.tests.support.fake_tools import FakeToolRunner
+
+    runner = FakeToolRunner(tmp_path)
+
+    result = runner.execute("write_file", {"path": "../escape.md", "content": "bad"})
+
+    assert result["ok"] is False
+    assert result["error_code"] == "PATH_OUTSIDE_RUN_DIR"
+    assert not (tmp_path.parent / "escape.md").exists()
+
+
+def test_fake_file_tool_rejects_read_path_outside_run_dir(tmp_path: Path):
+    from agent_py_agent.tests.support.fake_tools import FakeToolRunner
+
+    outside = tmp_path.parent / "secret.txt"
+    outside.write_text("secret", encoding="utf-8")
+    runner = FakeToolRunner(tmp_path)
+
+    result = runner.execute("read_file", {"path": "../secret.txt"})
+
+    assert result["ok"] is False
+    assert result["error_code"] == "PATH_OUTSIDE_RUN_DIR"
+    assert result.get("content") is None
+
+
+def test_fake_tool_runner_wraps_invalid_tool_result_as_structured_error(tmp_path: Path):
+    from agent_py_agent.tests.support.fake_tools import FakeToolRunner
+
+    runner = FakeToolRunner(tmp_path, fixtures={"read_file": {"broken.txt": None}})
+
+    result = runner.execute("read_file", {"path": "broken.txt"})
+
+    assert result["ok"] is False
+    assert result["error_code"] == "TOOL_RESULT_INVALID"
+    assert runner.trace[-1]["result"]["error_code"] == "TOOL_RESULT_INVALID"
+
+
+def test_canonical_action_policy_blocks_invalid_or_unavailable_fake_calls(tmp_path: Path):
+    from agent_py_agent.agent.tooling.action_policy import ActionPolicy, ActionPolicyRequest
+    from agent_py_agent.tests._tool_runtime_harness import (
+        canonical_test_call,
+        make_test_model_spec,
+        make_test_runtime_policy,
+        runtime_snapshot_for_tools,
+    )
+
+    class _ReadTool:
+        model_spec = make_test_model_spec(
+            "read_file",
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        )
+        runtime_policy = make_test_runtime_policy()
+
+    snapshot = runtime_snapshot_for_tools({"read_file": _ReadTool()})
+    missing = ActionPolicy().decide(
+        ActionPolicyRequest(
+            canonical_test_call(snapshot, "read_file", {}),
+            snapshot,
+            tmp_path,
+        )
+    )
+    unavailable = ActionPolicy().decide(
+        ActionPolicyRequest(
+            canonical_test_call(snapshot, "write_file", {"path": "out.md"}),
+            snapshot,
+            tmp_path,
+        )
+    )
+
+    assert missing.status == "deny"
+    assert missing.reason_codes == ("TOOL_PARAMETER_REQUIRED",)
+    assert unavailable.status == "deny"
+    assert unavailable.reason_codes == ("TOOL_NOT_IN_RUNTIME_SNAPSHOT",)
+    assert not (tmp_path / "out.md").exists()
+
+
+def _fixture(name: str) -> dict[str, object]:
+    path = Path(__file__).parents[1] / "contracts" / name
+    return json.loads(path.read_text(encoding="utf-8"))

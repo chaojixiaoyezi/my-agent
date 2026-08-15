@@ -1,0 +1,77 @@
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+
+
+def response_usage(response: object) -> dict[str, object]:
+    usage = getattr(response, "usage", {})
+    return dict(usage) if isinstance(usage, Mapping) else {}
+
+
+def input_token_usage(response: object) -> int | None:
+    usage = response_usage(response)
+    return _first_positive_int(
+        (
+            usage.get("input_tokens"),
+            usage.get("prompt_tokens"),
+            usage.get("cache_creation_input_tokens"),
+        )
+    )
+
+
+def output_token_usage(response: object) -> int | None:
+    usage = response_usage(response)
+    return _first_positive_int((usage.get("output_tokens"), usage.get("completion_tokens")))
+
+
+def cached_input_token_usage(response: object) -> int:
+    """Return provider-reported cached input that is included in input/prompt totals."""
+    usage = response_usage(response)
+    for key in ("input_tokens_details", "prompt_tokens_details"):
+        details = usage.get(key)
+        if isinstance(details, Mapping):
+            value = _first_positive_int((details.get("cached_tokens"),))
+            if value is not None:
+                return value
+    # Anthropic's cache_read_input_tokens is separate from input_tokens, so it
+    # must not be subtracted from that already non-cached input count.
+    return 0
+
+
+def goal_token_usage(response: object) -> int:
+    """Match 会话运行时 goal accounting: non-cached input plus output tokens."""
+    input_tokens = input_token_usage(response) or 0
+    output_tokens = output_token_usage(response) or 0
+    return max(0, input_tokens - cached_input_token_usage(response)) + output_tokens
+
+
+def _first_positive_int(values: tuple[object, ...]) -> int | None:
+    for value in values:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed >= 0:
+            return parsed
+    return None
+
+
+def response_cost_usd(model: str, response: object) -> float:
+    """按模型单价把一次响应的 input/output token 换算成 USD 成本(审计 #19)。
+
+    token 缺失按 0;单价表见 llm_scale.model_pricing(未知模型保守默认,不低估)。供成本审计/计费累加。
+    """
+    from ...llm_scale.model_pricing import cost_usd
+
+    return cost_usd(model, input_token_usage(response) or 0, output_token_usage(response) or 0)
+
+
+__all__ = [
+    "cached_input_token_usage",
+    "goal_token_usage",
+    "input_token_usage",
+    "output_token_usage",
+    "response_cost_usd",
+    "response_usage",
+]

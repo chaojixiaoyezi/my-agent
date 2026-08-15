@@ -1,0 +1,413 @@
+"""个人私聊会话锁 + 密码解锁(
+
+钉:密码 scrypt 策略、闲置锁定阈值、群不锁、首设不可覆盖、改密验旧、
+解锁验证、暴破失败指数退避锁定(monotonic)、成功清零。
+"""
+
+from __future__ import annotations
+
+import time
+from threading import Event
+
+from agent.session_lock import (
+    DEFAULT_IDLE_SECONDS,
+    PasswordPolicyError,
+    SessionLockStore,
+    UnlockService,
+    hash_password,
+    validate_password_policy,
+    verify_password,
+)
+
+# ── 密码 crypto ──
+
+
+def test_password_hash_verify_roundtrip():
+    h = hash_password("Abcd1234")
+    assert h.startswith("scrypt$")
+    assert verify_password("Abcd1234", h) is True
+    assert verify_password("wrong", h) is False
+    assert verify_password("x", "garbage-not-a-hash") is False  # 坏格式不崩
+
+
+def test_password_policy():
+    validate_password_policy("Abcd1234")  # 合规不抛
+    for bad in ["short1A", "abcd1234", "ABCD1234", "Abcdefgh"]:  # 短/无大写/无小写/无数字
+        try:
+            validate_password_policy(bad)
+            raise AssertionError(f"应拦住:{bad}")
+        except PasswordPolicyError:
+            pass
+
+
+# ── 锁服务 ──
+
+
+def test_default_idle_lock_is_three_hours():
+    assert DEFAULT_IDLE_SECONDS == 3 * 60 * 60
+
+
+def _svc(tmp_path, *, idle=3600, mono=None):
+    store = SessionLockStore(tmp_path / "lock.db")
+    return UnlockService(store, idle_limit_seconds=idle, monotonic=mono or time.monotonic), store
+
+
+def test_first_contact_and_recent_activity_not_locked(tmp_path):
+    svc, _ = _svc(tmp_path)
+    assert svc.status("u1").locked is False  # 首次接触
+    svc.record_activity("u1")
+    assert svc.status("u1").locked is False  # 刚活跃
+
+
+def test_group_never_locked(tmp_path):
+    svc, store = _svc(tmp_path, idle=1)
+    store.record_activity("g1", now=time.time() - 9999)  # 很久没活动
+    assert svc.status("g1", is_group=True).locked is False  # 群聊永不锁
+    svc.record_activity("g1", is_group=True)  # 群活动不触碰锁状态
+    assert store.last_activity("g1") is not None  # (上面手动写的还在,但 record 群没写)
+
+
+def test_idle_locks_with_and_without_password(tmp_path):
+    svc, store = _svc(tmp_path, idle=1)
+    store.record_activity("u1", now=time.time() - 100)  # 闲置 100s > 1s
+    st = svc.status("u1")
+    assert st.locked is True and st.requires_password_setup is True  # 无密码→引导设置
+    store.set_password_hash("u1", hash_password("Abcd1234"))
+    st2 = svc.status("u1")
+    assert st2.locked is True and st2.requires_password_setup is False  # 有密码→要解锁
+
+
+def test_set_password_first_time_only(tmp_path):
+    svc, _ = _svc(tmp_path)
+    ok, _ = svc.set_password("u1", "Abcd1234")
+    assert ok is True
+    ok2, msg = svc.set_password("u1", "Zzzz9999")  # 已设过不能覆盖
+    assert ok2 is False and "改密码" in msg
+
+
+def test_set_password_policy_rejected(tmp_path):
+    svc, _ = _svc(tmp_path)
+    ok, msg = svc.set_password("u1", "weak")
+    assert ok is False and "不符合要求" in msg
+
+
+def test_unlock_correct_and_wrong(tmp_path):
+    svc, _ = _svc(tmp_path)
+    svc.set_password("u1", "Abcd1234")
+    assert svc.unlock("u1", "Abcd1234") is True
+    assert svc.unlock("u1", "nope") is False
+
+
+def test_change_password_requires_old(tmp_path):
+    svc, _ = _svc(tmp_path)
+    svc.set_password("u1", "Abcd1234")
+    ok, _ = svc.change_password("u1", "wrongold", "Newpass9")
+    assert ok is False  # 旧密码错
+    ok2, _ = svc.change_password("u1", "Abcd1234", "Newpass9")
+    assert ok2 is True and svc.unlock("u1", "Newpass9") is True  # 新密码生效
+
+
+def test_bruteforce_backoff_lockout(tmp_path):
+    clock = [1000.0]
+    svc, _ = _svc(tmp_path, mono=lambda: clock[0])
+    svc.set_password("u1", "Abcd1234")
+    # 前 4 次失败不锁定
+    for _ in range(4):
+        assert svc.unlock("u1", "bad") is False
+    assert svc.lockout_remaining("u1") == 0.0
+    # 第 5 次失败起进入退避锁定窗
+    assert svc.unlock("u1", "bad") is False
+    assert svc.lockout_remaining("u1") > 0.0
+    # 锁定窗内即便密码对也被节流拒(不验密码)
+    assert svc.unlock("u1", "Abcd1234") is False
+    # 时间前进过锁定窗后,正确密码解锁成功且清零
+    clock[0] += 100000.0
+    assert svc.unlock("u1", "Abcd1234") is True
+    assert svc.lockout_remaining("u1") == 0.0
+
+
+def test_events_emitted(tmp_path):
+    seen = []
+    store = SessionLockStore(tmp_path / "lock.db")
+    svc = UnlockService(store, events=lambda k, p: seen.append(k))
+    svc.set_password("u1", "Abcd1234")
+    svc.unlock("u1", "Abcd1234")
+    svc.unlock("u1", "bad")
+    kinds = set(seen)
+    assert "session_lock.password.set" in kinds
+    assert "session_lock.unlock.succeeded" in kinds
+    assert "session_lock.unlock.failed" in kinds
+
+
+# ── 飞书密码卡 + 回调分发 ──
+
+
+def test_build_password_card_modes():
+    from agent.session_lock.feishu_cards import PWD_ACTION_FIELD, build_password_card
+
+    for mode, action in [("set", "pwd_set"), ("unlock", "pwd_unlock"), ("change", "pwd_change")]:
+        card = build_password_card(mode=mode, user_id="u1")
+        form = next(e for e in card["elements"] if e.get("tag") == "form")
+        submit = next(e for e in form["elements"] if e.get("action_type") == "form_submit")
+        assert submit["value"][PWD_ACTION_FIELD] == action
+        assert submit["value"]["user_id"] == "u1"
+        # 所有密码输入框必须是密文模式(input_type=password → 显示 • 圆点,不明文)。
+        pwd_inputs = [e for e in form["elements"] if e.get("tag") == "input"]
+        assert pwd_inputs and all(e.get("input_type") == "password" for e in pwd_inputs)
+    # change 卡有旧+新两个输入框
+    change = build_password_card(mode="change", user_id="u1")
+    form = next(e for e in change["elements"] if e.get("tag") == "form")
+    names = {e.get("name") for e in form["elements"] if e.get("tag") == "input"}
+    assert names == {"old_pwd", "new_pwd"}
+
+
+def test_is_password_action():
+    from agent.session_lock.feishu_cards import is_password_action
+
+    assert is_password_action({"session_lock_action": "pwd_unlock", "user_id": "u1"}) is True
+    assert is_password_action({"token": "x", "choice": "confirm"}) is False  # persona 卡不误认
+    assert is_password_action({}) is False
+
+
+def test_handle_password_action_dispatch(tmp_path):
+    from agent.session_lock.feishu_cards import handle_password_action
+
+    svc, _ = _svc(tmp_path)
+    # set
+    r = handle_password_action(svc, {"session_lock_action": "pwd_set", "user_id": "u1"}, {"pwd": "Abcd1234"})
+    assert "✅" in r["elements"][0]["content"]
+    # unlock 对
+    r2 = handle_password_action(svc, {"session_lock_action": "pwd_unlock", "user_id": "u1"}, {"pwd": "Abcd1234"})
+    assert r2["header"]["template"] == "green"
+    # unlock 错(不回显密码)
+    r3 = handle_password_action(svc, {"session_lock_action": "pwd_unlock", "user_id": "u1"}, {"pwd": "nope"})
+    assert r3["header"]["template"] == "grey" and "nope" not in str(r3)
+    # change
+    r4 = handle_password_action(svc, {"session_lock_action": "pwd_change", "user_id": "u1"},
+                                {"old_pwd": "Abcd1234", "new_pwd": "Newpass9"})
+    assert svc.unlock("u1", "Newpass9") is True
+
+
+# ── 适配器锁门:首次要求设密码 ──
+
+
+def test_adapter_first_contact_sends_setup_card_but_keeps_message(tmp_path):
+    import tempfile
+
+    from agent.adapter.feishu import FeishuAdapter
+    from agent.adapter.protocol import IncomingMessage
+
+    a = FeishuAdapter(config={"feishu_session_lock_enabled": True, "my_agent_home": tempfile.mkdtemp()})
+    sent = []
+    a._send_password_card = lambda uid, mode: sent.append((uid, mode))
+
+    def _msg(ct="p2p"):
+        return IncomingMessage(channel="feishu", user_id="ou_x", content="hi", message_id="m",
+                               metadata={"feishu_chat_type": ct})
+
+    # 首次(无密码)→ 发设置卡，但首条真实消息仍进入 Agent
+    assert a._session_locked_gate(_msg()) is False
+    assert sent == [("ou_x", "set")]
+    # 设密码后 → 放行(未锁)
+    a._unlock.set_password("ou_x", "Abcd1234")
+    sent.clear()
+    assert a._session_locked_gate(_msg()) is False
+    assert sent == []
+    # 群聊永不拦
+    assert a._session_locked_gate(_msg("group")) is False
+
+
+def test_card_action_returns_inplace_replacement_not_new_message(tmp_path):
+    """密码卡提交:回调必须【返回】就地整卡替换响应({toast, card:{type:raw,data:已决卡}}),
+    交给 WS 同步回帧让飞书当场把原密码卡(含输入框+已输密码)替换掉——而不是返回 None 去另发一条
+    新消息(那样原卡+密码会残留在屏幕上,正是用户报的 bug)。"""
+    import tempfile
+
+    from agent.adapter.feishu import FeishuAdapter
+
+    a = FeishuAdapter(config={"feishu_session_lock_enabled": True, "my_agent_home": tempfile.mkdtemp()})
+    norm = {"value": {"session_lock_action": "pwd_set", "user_id": "ou_x"},
+            "form_value": {"pwd": "Abcd1234"}, "operator_open_id": "ou_x"}
+    resp = a._handle_card_action(norm)
+    # 返回就地替换响应(dict),而不是 None(None → 另发消息老路 → 原卡残留)
+    assert isinstance(resp, dict)
+    assert resp["card"]["type"] == "raw"
+    assert resp["card"]["data"]["header"]["template"] == "green"  # 设置成功 → 绿卡
+    assert resp["toast"]["type"] == "success"
+    # 密码确实设进去了,但绝不回显在响应里
+    assert a._unlock.unlock("ou_x", "Abcd1234") is True
+    assert "Abcd1234" not in str(resp)
+
+
+def test_persona_card_action_still_returns_none(tmp_path):
+    """回归护栏:非密码卡(persona 人设确认)回调仍返回 None(走另发消息老路,不误入就地替换)。"""
+    import tempfile
+
+    from agent.adapter.feishu import FeishuAdapter
+
+    a = FeishuAdapter(config={"feishu_session_lock_enabled": True, "my_agent_home": tempfile.mkdtemp()})
+    # persona 卡 value 带 token/choice、不带 session_lock_action → 不是密码动作
+    norm = {"value": {"token": "deadbeef", "choice": "decline"}, "form_value": {}, "operator_open_id": "ou_x"}
+    assert a._handle_card_action(norm) is None
+
+
+def test_adapter_gate_explicitly_disabled_passes_through():
+    from agent.adapter.feishu import FeishuAdapter
+    from agent.adapter.protocol import IncomingMessage
+
+    a = FeishuAdapter(config={"my_agent_home": "/tmp/x", "feishu_session_lock_enabled": False})
+    assert a._unlock is None
+    msg = IncomingMessage(channel="feishu", user_id="ou_x", content="hi", message_id="m", metadata={})
+    assert a._session_locked_gate(msg) is False  # 放行,零影响
+
+
+def test_adapter_gate_is_enabled_by_default_when_home_is_available(tmp_path):
+    from agent.adapter.feishu import FeishuAdapter
+
+    a = FeishuAdapter(config={"my_agent_home": str(tmp_path)})
+    assert a._unlock is not None
+
+
+def test_password_card_rejects_different_operator(tmp_path):
+    from agent.adapter.feishu import FeishuAdapter
+
+    a = FeishuAdapter(config={"my_agent_home": str(tmp_path)})
+    norm = {
+        "value": {"session_lock_action": "pwd_set", "user_id": "ou_owner"},
+        "form_value": {"pwd": "Abcd1234"},
+        "operator_open_id": "ou_other",
+    }
+    response = a._handle_card_action(norm)
+    assert response["toast"]["type"] == "error"
+    assert a._unlock.store.has_password("ou_owner") is False
+
+
+def _locked_adapter(tmp_path):
+    from agent.adapter.feishu import FeishuAdapter
+
+    adapter = FeishuAdapter(config={"my_agent_home": str(tmp_path)})
+    adapter._unlock.set_password("ou_owner", "Abcd1234")
+    adapter._unlock.store.record_activity(
+        "ou_owner",
+        now=time.time() - 4 * 60 * 60,
+    )
+    return adapter
+
+
+def _locked_message(message_id: str, content: str):
+    from agent.adapter.protocol import IncomingMessage
+
+    return IncomingMessage(
+        channel="feishu",
+        user_id="ou_owner",
+        content=content,
+        message_id=message_id,
+        conversation_id="oc_private",
+        metadata={"feishu_chat_type": "p2p"},
+    )
+
+
+def _unlock_card_action(adapter):
+    return adapter._handle_card_action(
+        {
+            "value": {
+                "session_lock_action": "pwd_unlock",
+                "user_id": "ou_owner",
+            },
+            "form_value": {"pwd": "Abcd1234"},
+            "operator_open_id": "ou_owner",
+        }
+    )
+
+
+def test_successful_card_unlock_resumes_the_original_message_once(tmp_path):
+    adapter = _locked_adapter(tmp_path)
+    received = []
+    resumed = Event()
+    adapter.on_message(lambda msg: (received.append(msg), resumed.set()))
+    adapter._send_password_card = lambda _uid, _mode: True
+    original = _locked_message("m-original", "请继续刚才的任务")
+
+    assert adapter._session_locked_gate(original) is True
+    response = _unlock_card_action(adapter)
+    assert response["toast"]["type"] == "success"
+    assert resumed.wait(2)
+    assert received == [original]
+
+    # 同一卡片重复回调、平台迟到重投都不能让原消息再执行。
+    _unlock_card_action(adapter)
+    assert adapter._session_locked_gate(original) is True
+    assert received == [original]
+
+
+def test_wrong_password_does_not_resume_original_message(tmp_path):
+    adapter = _locked_adapter(tmp_path)
+    received = []
+    adapter.on_message(received.append)
+    adapter._send_password_card = lambda _uid, _mode: True
+    original = _locked_message("m-locked", "不要丢掉这句话")
+
+    assert adapter._session_locked_gate(original) is True
+    response = adapter._handle_card_action(
+        {
+            "value": {
+                "session_lock_action": "pwd_unlock",
+                "user_id": "ou_owner",
+            },
+            "form_value": {"pwd": "wrong"},
+            "operator_open_id": "ou_owner",
+        }
+    )
+    assert response["toast"]["type"] == "error"
+    assert received == []
+    assert adapter._pending_unlock_messages.depth("ou_owner") == 1
+
+
+def test_unlock_resumes_multiple_locked_messages_in_arrival_order(tmp_path):
+    adapter = _locked_adapter(tmp_path)
+    received = []
+    resumed = Event()
+
+    def receive(msg):
+        received.append(msg.message_id)
+        if len(received) == 2:
+            resumed.set()
+
+    adapter.on_message(receive)
+    adapter._send_password_card = lambda _uid, _mode: True
+    assert adapter._session_locked_gate(_locked_message("m1", "第一句")) is True
+    assert adapter._session_locked_gate(_locked_message("m2", "第二句")) is True
+
+    _unlock_card_action(adapter)
+    assert resumed.wait(2)
+    assert received == ["m1", "m2"]
+
+
+def test_message_arriving_during_unlock_drain_waits_behind_original(tmp_path):
+    adapter = _locked_adapter(tmp_path)
+    first_started = Event()
+    release_first = Event()
+    all_resumed = Event()
+    received = []
+
+    def receive(msg):
+        received.append(msg.message_id)
+        if msg.message_id == "m1":
+            first_started.set()
+            assert release_first.wait(2)
+        if len(received) == 2:
+            all_resumed.set()
+
+    adapter.on_message(receive)
+    sent_cards = []
+    adapter._send_password_card = lambda uid, mode: sent_cards.append((uid, mode))
+    assert adapter._session_locked_gate(_locked_message("m1", "第一句")) is True
+    _unlock_card_action(adapter)
+    assert first_started.wait(2)
+
+    # 解锁 drain 尚未完成时到达的新消息仍进入同一 FIFO，不会抢在原消息前面。
+    assert adapter._session_locked_gate(_locked_message("m2", "第二句")) is True
+    release_first.set()
+    assert all_resumed.wait(2)
+    assert received == ["m1", "m2"]
+    assert sent_cards == [("ou_owner", "unlock")]

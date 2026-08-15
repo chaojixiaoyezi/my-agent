@@ -1,0 +1,478 @@
+"""Tests for rendering structured delivery contracts into model guidance."""
+
+from __future__ import annotations
+
+
+def test_render_delivery_contract_section_includes_staging_refs():
+    from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
+        render_delivery_contract_section,
+    )
+
+    text = render_delivery_contract_section(
+        {
+            "artifacts": [
+                {
+                    "kind": "xlsx",
+                    "preferred_path": "outputs/table_report/table_report.xlsx",
+                    "validation_contract": {
+                    "staging_contract": {
+                        "strategy": "data_then_tool_builder_then_workbook",
+                        "builder_tool": "write_file",
+                        "source_json_ref": "outputs/table_report/source_data.json",
+                        "workbook_ref": "outputs/table_report/table_report.xlsx",
+                        "checkpoint_shape_hints": {
+                            "outputs/table_report/source_data.json": '{"sheets":[{"name":"数据清单","rows":[{"记录名":"..."}]}]}'
+                        },
+                        "checkpoint_refs": [
+                            "outputs/table_report/source_data.json",
+                            "outputs/table_report/table_report.xlsx",
+                        ],
+                    }
+                    },
+                }
+            ]
+        }
+    )
+
+    assert "阶段产物" in text
+    assert "outputs/table_report/source_data.json" in text
+    assert "outputs/table_report/table_report.xlsx" in text
+    assert "data_to_workbook" not in text
+    assert "数据清单" in text
+    assert "记录名" in text
+    assert "阶段构建工具:" not in text
+
+
+def test_render_delivery_contract_section_skips_bad_artifact_items():
+    from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
+        render_delivery_contract_section,
+    )
+
+    text = render_delivery_contract_section(
+        {
+            "artifacts": [
+                "bad-artifact-entry",
+                {
+                    "kind": "xlsx",
+                    "preferred_path": "outputs/report.xlsx",
+                    "validation_contract": {
+                        "staging_contract": {
+                            "builder_tool": "data_to_workbook",
+                            "source_json_ref": "outputs/source_data.json",
+                            "workbook_ref": "outputs/report.xlsx",
+                            "checkpoint_refs": ["outputs/source_data.json", "outputs/report.xlsx"],
+                        }
+                    },
+                },
+            ]
+        }
+    )
+
+    assert "- 阶段产物:" in text
+    assert "阶段构建工具:" not in text
+
+
+def test_render_delivery_contract_section_includes_bootstrap_targets():
+    from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
+        render_delivery_contract_section,
+    )
+
+    text = render_delivery_contract_section(
+        {
+            "bootstrap_contract": {
+                "materialization_targets": [
+                    {
+                        "target_type": "checkpoint",
+                        "workspace_relative_path": "outputs/table_report/source_data.json",
+                    },
+                    {
+                        "target_type": "required_file",
+                        "workspace_relative_path": "outputs/static_site/index.html",
+                    },
+                ],
+                "startup_actions": [
+                    {"action": "materialize_target", "priority": 1},
+                    {
+                        "action": "materialize_checkpoint",
+                        "priority": 1,
+                        "checkpoint_ref": "outputs/table_report/source_data.json",
+                    },
+                    {
+                        "action": "invoke_builder_tool",
+                        "priority": 2,
+                        "builder_tool": "write_file",
+                        "source_ref": "outputs/table_report/source_data.json",
+                        "output_ref": "outputs/table_report/table_report.xlsx",
+                    },
+                ],
+            }
+        }
+    )
+
+    assert "开工参考" in text
+    assert "checkpoint: outputs/table_report/source_data.json" in text
+    assert "required_file: outputs/static_site/index.html" in text
+    assert "避免长期只做目录查看" in text
+    assert "先真实写出 checkpoint: outputs/table_report/source_data.json" in text
+    assert "给 outputs/table_report/source_data.json 写阶段草稿" in text
+    assert "最小有效骨架" in text
+    assert "空 JSON 数组" not in text
+    assert "write_file" in text
+
+
+def test_render_delivery_contract_section_summarizes_long_target_coverage_list():
+    from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
+        render_delivery_contract_section,
+    )
+
+    targets = [
+        {
+            "target_id": f"/tmp/source/fragment-{idx:03d}.md",
+            "source_ref": f"/tmp/source/fragment-{idx:03d}.md",
+        }
+        for idx in range(1, 30)
+    ]
+
+    text = render_delivery_contract_section(
+        {
+            "artifacts": [{"kind": "markdown", "path": "outputs/final_report.md"}],
+            "target_coverage_contract": {
+                "scope_label": "all source fragments",
+                "enforcement": "required",
+                "target_items": targets,
+            },
+        }
+    )
+
+    assert "target_count" in text
+    assert "targets_omitted" in text
+    assert "/tmp/source/fragment-001.md" in text
+    assert "/tmp/source/fragment-029.md" in text
+    assert "/tmp/source/fragment-015.md" not in text
+
+
+def test_render_delivery_contract_section_keeps_research_first_before_skeletons():
+    from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
+        render_delivery_contract_section,
+    )
+
+    text = render_delivery_contract_section(
+        {
+            "bootstrap_contract": {
+                "startup_actions": [
+                    {
+                        "action": "materialize_checkpoint",
+                        "priority": 1,
+                        "checkpoint_ref": "outputs/source_data.json",
+                        "research_first": True,
+                        "required_structured_fields": ["source_refs", "claims"],
+                    }
+                ],
+            }
+        }
+    )
+
+    assert "先完成来源采集/读取，再写 checkpoint: outputs/source_data.json" in text
+    assert "source_refs, claims" in text
+    assert "最小有效骨架" not in text
+
+
+def test_render_delivery_contract_section_avoids_skeleton_hint_for_source_evidence_checkpoint():
+    from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
+        render_delivery_contract_section,
+    )
+
+    text = render_delivery_contract_section(
+        {
+            "bootstrap_contract": {
+                "startup_actions": [
+                    {
+                        "action": "materialize_checkpoint",
+                        "checkpoint_materialization_mode": "source_evidence_first",
+                        "checkpoint_ref": "outputs/table_report/source_data.json",
+                        "requires_auditable_source_evidence": True,
+                        "required_structured_fields": ["source_refs", "claims", "completion_evidence"],
+                    }
+                ]
+            }
+        }
+    )
+
+    assert "先真实写出 checkpoint: outputs/table_report/source_data.json" in text
+    assert "source_refs" in text
+    assert "claims" in text
+    assert "最小有效骨架" not in text
+
+
+def test_render_delivery_contract_section_uses_generic_document_write_guidance():
+    from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
+        render_delivery_contract_section,
+    )
+
+    text = render_delivery_contract_section(
+        {
+            "bootstrap_contract": {
+                "startup_actions": [
+                    {
+                        "action": "invoke_builder_tool",
+                        "priority": 2,
+                        "builder_tool": "write_file",
+                        "source_ref": "outputs/docs/draft.md",
+                        "output_ref": "outputs/docs/final.pdf",
+                    }
+                ]
+            },
+            "artifacts": [
+                {
+                    "kind": "pdf",
+                    "preferred_path": "outputs/docs/final.pdf",
+                    "validation_contract": {
+                        "staging_contract": {
+                            "builder_tool": "write_file",
+                            "source_markdown_ref": "outputs/docs/draft.md",
+                            "pdf_ref": "outputs/docs/final.pdf",
+                            "checkpoint_refs": ["outputs/docs/source_index.json", "outputs/docs/draft.md"],
+                        }
+                    },
+                }
+            ],
+        }
+    )
+
+    assert "markdown_to_pdf" not in text
+    assert "write_file.data_base64" in text
+    assert "source_json_path=outputs/docs/draft.md" not in text
+
+
+def test_render_delivery_contract_section_uses_checkpoint_shape_hint_for_non_workbook_json():
+    from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
+        render_delivery_contract_section,
+    )
+
+    text = render_delivery_contract_section(
+        {
+            "artifacts": [
+                {
+                    "kind": "pdf",
+                    "preferred_path": "outputs/document_bundle/document_bundle_zh.pdf",
+                    "validation_contract": {
+                        "staging_contract": {
+                            "checkpoint_refs": [
+                                "outputs/document_bundle/source_index.json",
+                                "outputs/document_bundle/document_bundle_zh.md",
+                                "outputs/document_bundle/document_bundle_zh.pdf",
+                            ],
+                            "checkpoint_shape_hints": {
+                                "outputs/document_bundle/source_index.json": '[{"title":"...","authors":["..."],"date":"...","url":"...","abstract":"...","translated":true}]'
+                            },
+                        }
+                    },
+                }
+            ],
+            "recovery": {
+                "acceptance": {
+                    "runtime_findings": [
+                        {
+                            "code": "STAGED_JSON_NO_ROWS",
+                            "stage_ref": "outputs/document_bundle/source_index.json",
+                        }
+                    ]
+                }
+            },
+        }
+    )
+
+    assert '[{"title":"...","authors":["..."],"date":"...","url":"...","abstract":"...","translated":true}]' in text
+    assert '{"sheets":[{"name":"...","columns":[...],"rows":[{...}]}]}' not in text
+
+
+def test_render_delivery_contract_section_includes_generic_html_rules_only():
+    from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
+        render_delivery_contract_section,
+    )
+
+    text = render_delivery_contract_section(
+        {
+            "artifacts": [
+                {
+                    "kind": "html",
+                    "preferred_path": "outputs/html_report/index.html",
+                    "validation_contract": {
+                        "quality_requirements": {
+                            "complete_html_document": True,
+                            "single_file_no_external_assets": True,
+                        },
+                    },
+                }
+            ]
+        }
+    )
+
+    assert "HTML 必须包含完整 doctype/html/head/body 闭合结构" in text
+    assert "单文件产物不得引用 http/https 外部 CSS、字体、图片或脚本" in text
+    assert "HTML 链接不得使用这些 href 占位值" not in text
+
+
+def test_render_delivery_contract_section_renders_retired_finding_generically():
+    from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
+        render_delivery_contract_section,
+    )
+
+    text = render_delivery_contract_section(
+        {
+            "recovery": {
+                "acceptance": {
+                    "runtime_findings": [
+                        {
+                            "code": "OPEN_FILE_WRITE_SESSION",
+                            "session_id": "session-123",
+                            "next_chunk_index": 2,
+                            "manifest_path": "workspace/.agent_write_files/session-123/manifest.json",
+                            "preview_path": "workspace/.agent_write_files/session-123/write.tmp",
+                            "preview_materialized": True,
+                            "target_path": {"display": "outputs/report.py"},
+                            "resume_action": "append_from_next_chunk_then_finish",
+                            "chunk_content_read_required": False,
+                            "existing_chunks_authoritative": True,
+                        }
+                    ]
+                }
+            }
+        }
+    )
+
+    assert "恢复要求" in text
+    assert "runtime_finding=OPEN_FILE_WRITE_SESSION" in text
+    assert "旧分块写入 session" not in text
+    assert "write_file" in text
+    assert "session_id=session-123" not in text
+
+
+def test_render_delivery_contract_section_ignores_duplicate_retired_write_sessions():
+    from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
+        render_delivery_contract_section,
+    )
+
+    text = render_delivery_contract_section(_duplicate_open_session_contract())
+
+    assert "duplicate_open_write_files" not in text
+    assert "recommended_session_id=fetch-v3" not in text
+    assert "旧分块写入 session" not in text
+    assert "staged_json_invalid" in text
+    assert "Unterminated string starting at" in text
+    assert "staged_json_no_rows" in text
+    assert "required_columns=记录名, 地址" in text
+    assert "min_groups=21" in text
+    assert "min_items_per_group=10" in text
+    assert "required_item_fields=记录名, 地址, 指标值" in text
+    assert "item_evidence_required_fields=记录名, 地址, 指标值" in text
+    assert "require_verified_evidence=true" in text
+    assert "data_to_workbook" not in text
+
+
+def test_render_delivery_contract_section_does_not_render_retired_session_reconciliation():
+    from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
+        render_delivery_contract_section,
+    )
+
+    text = render_delivery_contract_section(
+        {
+            "recovery_reconciliation": {
+                "groups": [
+                    {
+                        "target_path": "outputs/report.py",
+                        "kept_session_id": "kept-session",
+                        "kept_next_chunk_index": 3,
+                        "kept_received_chunks": [0, 1, 2],
+                        "aborted_session_ids": ["stale-session"],
+                    }
+                ]
+            },
+            "recovery": {
+                "acceptance": {
+                    "runtime_findings": [
+                        {
+                            "code": "OPEN_FILE_WRITE_SESSION",
+                            "session_id": "stale-session",
+                            "next_chunk_index": 1,
+                            "target_path": {"display": "outputs/report.py"},
+                        }
+                    ]
+                }
+            },
+        }
+    )
+
+    assert "reconciled_open_write_file" not in text
+    assert "kept_session_id=kept-session" not in text
+    assert "旧分块写入 session" not in text
+    assert "runtime_finding=OPEN_FILE_WRITE_SESSION" in text
+    assert "session_id=stale-session" not in text
+
+
+def _duplicate_open_session_contract() -> dict[str, object]:
+    return {
+        "artifacts": [_xlsx_artifact_contract()],
+        "recovery": {
+            "acceptance": {
+                "runtime_findings": [
+                    _legacy_write_session("empty-session", 0, []),
+                    _legacy_write_session("fetch-v3", 2, [0, 1]),
+                    {
+                        "code": "STAGED_JSON_INVALID",
+                        "stage_ref": "outputs/table_report/source_data.json",
+                        "parse_error": "Unterminated string starting at: line 12 column 9",
+                    },
+                    {
+                        "code": "STAGED_JSON_NO_ROWS",
+                        "stage_ref": "outputs/table_report/source_data.json",
+                    },
+                ]
+            }
+        },
+    }
+
+
+def _xlsx_artifact_contract() -> dict[str, object]:
+    return {
+        "kind": "xlsx",
+        "preferred_path": "outputs/table_report/table_report.xlsx",
+        "validation_contract": {
+            "collection_contract": {
+                "groups_path": "sheets",
+                "items_path": "rows",
+                "min_groups": 21,
+                "min_items_per_group": 10,
+                "required_item_fields": ["记录名", "地址", "指标值"],
+            },
+            "evidence_contract": {
+                "require_verified": True,
+                "required_fields": ["记录名", "地址", "指标值"],
+            },
+            "required_columns": ["记录名", "地址"],
+            "staging_contract": {
+                "builder_tool": "write_file",
+                "checkpoint_shape_hints": {
+                    "outputs/table_report/source_data.json": '{"sheets":[{"name":"数据清单","rows":[{"记录名":"..."}]}]}'
+                },
+                "source_json_ref": "outputs/table_report/source_data.json",
+                "workbook_ref": "outputs/table_report/table_report.xlsx",
+                "checkpoint_refs": [
+                    "outputs/table_report/source_data.json",
+                    "outputs/table_report/table_report.xlsx",
+                ],
+            },
+        },
+    }
+
+
+def _legacy_write_session(session_id: str, next_chunk: int, chunks: list[int]) -> dict[str, object]:
+    return {
+        "code": "OPEN_FILE_WRITE_SESSION",
+        "session_id": session_id,
+        "next_chunk_index": next_chunk,
+        "received_chunks": chunks,
+        "preview_path": f"workspace/.agent_write_files/{session_id}/write.tmp",
+        "preview_materialized": bool(chunks),
+        "target_path": {"display": "outputs/table_report/fetch.py"},
+    }

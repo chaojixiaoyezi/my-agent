@@ -1,0 +1,36 @@
+# 每次提升流量前重建此 Job；失败即保持当前权重或回滚到 0。
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: my-agent-canary-analysis
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: gate
+          image: postgres:16-alpine
+          command:
+            - sh
+            - -ec
+            - |
+              wget -qO- http://my-agent-ingress-canary/readyz | grep -q '"ready"'
+              case "$CANARY_STARTED_AT_MS" in ''|*[!0-9]*) exit 2;; esac
+              case "$MAX_QUEUE_AGE_MS" in ''|*[!0-9]*) exit 2;; esac
+              failed="$(psql "$DATABASE_URL" -Atc "SELECT count(*) FROM ingress_messages WHERE release_channel='canary' AND status='failed' AND created_at >= $CANARY_STARTED_AT_MS")"
+              stale="$(psql "$DATABASE_URL" -Atc "SELECT count(*) FROM ingress_messages WHERE release_channel='canary' AND status IN ('pending','claimed') AND created_at < (extract(epoch from now())*1000)::bigint - $MAX_QUEUE_AGE_MS")"
+              test "$failed" = 0
+              test "$stale" = 0
+          env:
+            - { name: DATABASE_URL, valueFrom: { secretKeyRef: { name: my-agent-db, key: url } } }
+            - { name: CANARY_STARTED_AT_MS, valueFrom: { configMapKeyRef: { name: my-agent-canary-window, key: started_at_ms } } }
+            - { name: MAX_QUEUE_AGE_MS, value: "900000" }
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 70
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }

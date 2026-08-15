@@ -1,0 +1,14 @@
+{
+  "name": "missing_artifact_success",
+  "trace": "missing_artifact_success.jsonl",
+  "expected": {
+    "contract_ok": false,
+    "blocked": false,
+    "block_reason": "",
+    "replay_error_codes": [],
+    "contract_error_codes": [
+      "ARTIFACT_MISSING",
+      "FINAL_STATUS_REJECTED"
+    ]
+  }
+}

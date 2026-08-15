@@ -1,0 +1,83 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from agent_py_agent.agent.contracts.artifact_acceptance import validate_artifact
+from agent_py_agent.agent.contracts.artifact_acceptance_models import ArtifactAcceptanceRequest
+from agent_py_agent.tests.support.xlsx_fixtures import write_xlsx_fixture
+
+
+def test_markdown_artifact_requires_declared_sections_and_size(tmp_path: Path) -> None:
+    report_path = tmp_path / "report.md"
+    report_path.write_text("# Summary\nshort\n", encoding="utf-8")
+
+    result = validate_artifact(
+        ArtifactAcceptanceRequest(
+            path=report_path,
+            workspace_root=tmp_path,
+            validation_contract={"required_sections": ["Summary", "Evidence"], "min_size": 80},
+        )
+    )
+
+    assert result.ok is False
+    assert [item.code for item in result.findings] == [
+        "ARTIFACT_TOO_SMALL",
+        "MARKDOWN_REQUIRED_SECTION_MISSING",
+    ]
+
+
+def test_json_artifact_requires_declared_fields(tmp_path: Path) -> None:
+    report_path = tmp_path / "report.json"
+    report_path.write_text('{"risk_level":"low"}', encoding="utf-8")
+
+    result = validate_artifact(
+        ArtifactAcceptanceRequest(
+            path=report_path,
+            workspace_root=tmp_path,
+            validation_contract={"required_fields": ["risk_level", "evidence"]},
+        )
+    )
+
+    assert result.ok is False
+    assert [item.code for item in result.findings] == ["JSON_REQUIRED_FIELDS_MISSING"]
+    assert result.findings[0].value == "evidence"
+
+
+def test_csv_artifact_requires_declared_columns(tmp_path: Path) -> None:
+    csv_path = tmp_path / "report.csv"
+    csv_path.write_text("记录名,地址\nA,https://example.test\n", encoding="utf-8")
+
+    result = validate_artifact(
+        ArtifactAcceptanceRequest(
+            path=csv_path,
+            workspace_root=tmp_path,
+            validation_contract={"required_columns": ["记录名", "地址", "说明依据"]},
+        )
+    )
+
+    assert result.ok is False
+    assert [item.code for item in result.findings] == ["CSV_REQUIRED_COLUMNS_MISSING"]
+    assert result.findings[0].value == "说明依据"
+
+
+def test_xlsx_artifact_requires_declared_columns(tmp_path: Path) -> None:
+    xlsx_path = tmp_path / "report.xlsx"
+    write_xlsx_fixture(
+        tmp_path,
+        {
+            "path": "report.xlsx",
+            "sheets": [{"name": "summary", "rows": [{"记录名": "A", "地址": "https://example.test"}]}],
+        },
+    )
+
+    result = validate_artifact(
+        ArtifactAcceptanceRequest(
+            path=xlsx_path,
+            workspace_root=tmp_path,
+            validation_contract={"required_columns": ["记录名", "地址", "说明依据"]},
+        )
+    )
+
+    assert result.ok is True
+    assert [item.code for item in result.findings] == ["XLSX_MISSING_REQUIRED_COLUMNS"]
+    assert result.findings[0].value == "说明依据"

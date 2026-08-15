@@ -1,0 +1,5 @@
+{"type":"contract_ref","path":"../contracts/simple_file_summary.json"}
+{"type":"tool_result","tool":"read_file","params":{"path":"input.txt"},"ok":true}
+{"type":"tool_result","tool":"write_file","params":{"path":"output.md"},"ok":true}
+{"type":"closeout_snapshot","ok":false,"delivery_progress":{"failure_fingerprint":"same","work_progress_fingerprint":"same"}}
+{"type":"final","status":"SUCCEEDED"}

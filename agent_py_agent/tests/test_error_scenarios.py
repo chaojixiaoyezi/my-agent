@@ -1,0 +1,348 @@
+"""异常场景测试 - dispatch循环异常处理、memory_push异常场景、failure_analysis规则主链。"""
+from __future__ import annotations
+
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+
+class TestDispatchLoopExceptions:
+    """测试 dispatch 循环中的异常处理。"""
+
+    def test_task_not_found_during_dispatch(self, tmp_path: Path):
+        """任务不存在时的异常处理。"""
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import (
+            DispatchLoopReport,
+            dispatch_loop,
+        )
+
+        agent = MagicMock()
+        agent.config.runner_failure_policy = "auto"
+
+        # 模拟 load 抛出 FileNotFoundError
+        def load_side_effect(task_id):
+            raise FileNotFoundError(f"Task {task_id} not found")
+
+        agent.subagents.load.side_effect = load_side_effect
+        agent.subagents.list_runs.return_value = []
+        agent.has_pending_work = False
+
+        mock_report = MagicMock()
+        mock_report.records = []
+        agent.dispatch_subagents.return_value = mock_report
+
+        result = dispatch_loop(agent, router=None, max_consecutive_rounds=20)
+        assert isinstance(result, DispatchLoopReport)
+
+    def test_corrupted_task_file(self, tmp_path: Path):
+        """任务文件损坏时的行为。"""
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import (
+            DispatchLoopReport,
+            dispatch_loop,
+        )
+
+        agent = MagicMock()
+        agent.config.runner_failure_policy = "auto"
+
+        # 模拟 JSON 解析失败
+        def load_side_effect(task_id):
+            raise ValueError("Invalid JSON format")
+
+        agent.subagents.load.side_effect = load_side_effect
+        agent.subagents.list_runs.return_value = []
+        agent.has_pending_work = False
+
+        mock_report = MagicMock()
+        mock_report.records = []
+        agent.dispatch_subagents.return_value = mock_report
+
+        result = dispatch_loop(agent, router=None, max_consecutive_rounds=20)
+        assert isinstance(result, DispatchLoopReport)
+
+    def test_failure_introspection_uses_rules(self, tmp_path: Path):
+        """失败自省使用同一条规则主链。"""
+        from agent_py_agent.agent.agent_core.failure_analysis_service import (
+            FailureAnalysis,
+            FailureIntrospection,
+            FailureIntrospector,
+        )
+
+        introspector = FailureIntrospector()
+
+        mock_task = MagicMock()
+        mock_task.goal = "测试任务"
+        mock_runner_result = MagicMock()
+        mock_runner_result.ok = False
+        mock_runner_result.status = "BLOCKED"
+
+        failure_analysis = FailureAnalysis(
+            failure_type="timeout",
+            root_cause="task_too_large",
+            suggested_action="split_task",
+            should_retry=True,
+        )
+
+        result = introspector.introspect(mock_task, mock_runner_result, failure_analysis)
+        assert isinstance(result, FailureIntrospection)
+        assert result.confidence == 0.55
+
+    def test_failure_introspection_does_not_call_agent_run(self, tmp_path: Path):
+        """失败自省不额外调用模型。"""
+        from agent_py_agent.agent.agent_core.failure_analysis_service import (
+            FailureAnalysis,
+            FailureIntrospection,
+            FailureIntrospector,
+        )
+
+        agent = MagicMock()
+        # 模拟 LLM 返回无效 JSON
+        agent.run.return_value = MagicMock(response="这不是有效的JSON格式")
+
+        introspector = FailureIntrospector()
+
+        mock_task = MagicMock()
+        mock_task.goal = "测试任务"
+        mock_task.attributes = {}
+        mock_runner_result = MagicMock()
+        mock_runner_result.ok = False
+        mock_runner_result.status = "TIMEOUT"
+        mock_runner_result.runner_last_error = "timeout"
+
+        failure_analysis = FailureAnalysis(
+            failure_type="timeout",
+            root_cause="timeout_too_short",
+            suggested_action="increase_timeout",
+            should_retry=True,
+        )
+
+        result = introspector.introspect(mock_task, mock_runner_result, failure_analysis)
+        assert isinstance(result, FailureIntrospection)
+        assert result.confidence == 0.55
+        agent.run.assert_not_called()
+
+    def test_all_tasks_failed_and_no_retry(self, tmp_path: Path):
+        """所有任务都失败且不允许重试时的处理。"""
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import (
+            DispatchLoopReport,
+            dispatch_loop,
+        )
+
+        agent = MagicMock()
+        agent.config.runner_failure_policy = "no_retry"  # 不重试策略
+
+        mock_report = MagicMock()
+        # 所有记录都是失败的
+        failed_record = MagicMock()
+        failed_record.ok = False
+        failed_record.status = "FAILED"
+        mock_report.records = [failed_record]
+
+        agent.dispatch_subagents.return_value = mock_report
+        agent.subagents.list_runs.return_value = []
+        agent.has_pending_work = False
+
+        result = dispatch_loop(agent, router=None, max_consecutive_rounds=20)
+        assert isinstance(result, DispatchLoopReport)
+        assert result.rounds_count == 1
+
+
+class TestMemoryPushExceptions:
+    """测试 memory_push 在异常场景下的行为。"""
+
+    def test_memory_push_no_agent(self, tmp_path: Path):
+        """agent 为 None 时的处理。"""
+        from agent_py_agent.agent.memory_push import push_relevant_memories
+
+        result = push_relevant_memories(None, "timeout", {}, limit=3)
+        assert result == []
+
+    def test_memory_push_memory_is_none(self, tmp_path: Path):
+        """agent.memory 为 None 时的处理。"""
+        from agent_py_agent.agent.memory_push import push_relevant_memories
+
+        agent = MagicMock()
+        agent.memory = None
+
+        result = push_relevant_memories(agent, "timeout", {}, limit=3)
+        assert result == []
+
+    def test_memory_push_memory_has_no_search(self, tmp_path: Path):
+        """memory 没有 search 方法时的处理。"""
+        from agent_py_agent.agent.memory_push import push_relevant_memories
+
+        agent = MagicMock()
+        agent.memory = MagicMock(spec=[])  # 没有 search 方法
+
+        result = push_relevant_memories(agent, "timeout", {}, limit=3)
+        assert result == []
+
+    def test_memory_search_exception(self, tmp_path: Path):
+        """memory.search 抛出异常时的处理。"""
+        from agent_py_agent.agent.memory_push import push_relevant_memories
+
+        agent = MagicMock()
+        agent.memory = MagicMock()
+        agent.memory.search.side_effect = RuntimeError("Search failed")
+
+        result = push_relevant_memories(agent, "timeout", {}, limit=3)
+        assert result == []
+
+    def test_legacy_memory_entry_schema_is_removed(self, tmp_path: Path):
+        """旧 MemoryEntry/MemoryType 不能继续形成第二套 lesson Schema。"""
+        import agent_py_agent.agent.memory_push as memory_push
+
+        assert not hasattr(memory_push, "MemoryEntry")
+        assert not hasattr(memory_push, "MemoryType")
+
+    def test_direct_lesson_writer_is_removed(self, tmp_path: Path):
+        """失败/规划召回模块不得再暴露绕过 CandidateService 的写入口。"""
+        import agent_py_agent.agent.memory_push as memory_push
+
+        assert not hasattr(memory_push, "write_memory_with_type")
+
+
+class TestFailureIntrospectorRulePath:
+    """测试 failure_analysis_service 的规则自省主链。"""
+
+    def test_introspector_uses_rules(self, tmp_path: Path):
+        """失败自省使用规则分类。"""
+        from agent_py_agent.agent.agent_core.failure_analysis_service import (
+            FailureAnalysis,
+            FailureIntrospector,
+        )
+
+        introspector = FailureIntrospector()
+
+        mock_task = MagicMock()
+        mock_runner_result = MagicMock()
+        mock_runner_result.ok = False
+
+        analysis = FailureAnalysis(
+            failure_type="parse_error",
+            root_cause="malformed_input",
+            suggested_action="validate_input",
+            should_retry=True,
+        )
+
+        result = introspector.introspect(mock_task, mock_runner_result, analysis)
+        assert result.confidence == 0.55
+        assert result.analysis_reason.startswith("规则分类：")
+
+    def test_introspector_agent_run_is_not_called(self, tmp_path: Path):
+        """失败自省不额外调用模型。"""
+        from agent_py_agent.agent.agent_core.failure_analysis_service import (
+            FailureAnalysis,
+            FailureIntrospector,
+        )
+
+        agent = MagicMock()
+        agent.run.side_effect = RuntimeError("LLM API failed")
+
+        introspector = FailureIntrospector()
+
+        mock_task = MagicMock()
+        mock_task.goal = "测试"
+        mock_task.attributes = {}
+        mock_runner_result = MagicMock()
+        mock_runner_result.ok = False
+        mock_runner_result.status = "ERROR"
+        mock_runner_result.runner_last_error = "api_error"
+
+        analysis = FailureAnalysis(
+            failure_type="api_error",
+            root_cause="network_issue",
+            suggested_action="retry_later",
+            should_retry=True,
+        )
+
+        result = introspector.introspect(mock_task, mock_runner_result, analysis)
+        assert result.confidence == 0.55
+        assert result.root_cause == "network_issue"
+        agent.run.assert_not_called()
+
+    def test_introspector_invalid_json_response_is_ignored(self, tmp_path: Path):
+        """agent 返回内容不参与失败自省。"""
+        from agent_py_agent.agent.agent_core.failure_analysis_service import (
+            FailureAnalysis,
+            FailureIntrospector,
+        )
+
+        agent = MagicMock()
+        agent.run.return_value = MagicMock(response="This is not JSON at all")
+
+        introspector = FailureIntrospector()
+
+        mock_task = MagicMock()
+        mock_task.goal = "测试"
+        mock_task.attributes = {}
+        mock_runner_result = MagicMock()
+        mock_runner_result.ok = False
+        mock_runner_result.status = "TIMEOUT"
+        mock_runner_result.runner_last_error = ""
+
+        analysis = FailureAnalysis(
+            failure_type="timeout",
+            root_cause="slow_processing",
+            suggested_action="increase_timeout",
+            should_retry=True,
+        )
+
+        result = introspector.introspect(mock_task, mock_runner_result, analysis)
+        assert result.confidence == 0.55
+        agent.run.assert_not_called()
+
+    def test_introspector_missing_keys_in_response_is_ignored(self, tmp_path: Path):
+        """模型 JSON 不参与失败主链。"""
+        from agent_py_agent.agent.agent_core.failure_analysis_service import (
+            FailureAnalysis,
+            FailureIntrospector,
+        )
+
+        agent = MagicMock()
+        # JSON 缺少必需字段
+        agent.run.return_value = MagicMock(response='{"analysis_reason": "测试"}')
+
+        introspector = FailureIntrospector()
+
+        mock_task = MagicMock()
+        mock_task.goal = "测试"
+        mock_task.attributes = {}
+        mock_runner_result = MagicMock()
+        mock_runner_result.ok = False
+
+        analysis = FailureAnalysis(
+            failure_type="error",
+            root_cause="unknown",
+            suggested_action="manual_check",
+            should_retry=False,
+        )
+
+        result = introspector.introspect(mock_task, mock_runner_result, analysis)
+        assert isinstance(result.analysis_reason, str)
+        agent.run.assert_not_called()
+
+    def test_introspector_rules_include_params(self, tmp_path: Path):
+        """规则分类包含参数建议。"""
+        from agent_py_agent.agent.agent_core.failure_analysis_service import (
+            FailureAnalysis,
+            FailureIntrospector,
+        )
+
+        introspector = FailureIntrospector()
+
+        mock_task = MagicMock()
+        mock_runner_result = MagicMock()
+
+        analysis = FailureAnalysis(
+            failure_type="timeout",
+            root_cause="too_short",
+            suggested_action="increase_timeout",
+            should_adjust_timeout=True,
+            new_timeout_seconds=300,
+            should_retry=True,
+        )
+
+        result = introspector.introspect(mock_task, mock_runner_result, analysis)
+        assert "new_timeout_seconds" in result.suggested_params
+        assert result.suggested_params["new_timeout_seconds"] == 300

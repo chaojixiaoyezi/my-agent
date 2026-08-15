@@ -1,0 +1,32 @@
+{
+  "contract_ref": "../contracts/real_execution_required.json",
+  "tool_fixtures": {
+    "block_ip": {
+      "__default__": {
+        "ok": true,
+        "mode": "dry_run"
+      }
+    }
+  },
+  "model_steps": [
+    {
+      "type": "tool_call",
+      "tool": "write_file",
+      "params": {
+        "path": "report.md",
+        "content": "Summary\nDry-run plan only\n"
+      }
+    },
+    {
+      "type": "tool_call",
+      "tool": "block_ip",
+      "params": {
+        "ip": "203.0.113.10"
+      }
+    },
+    {
+      "type": "final",
+      "status": "SUCCEEDED"
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+name: Test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # 完整 fast suite 会真实覆盖 secrets/scale extras；较慢 runner 的 3.10/3.12
+    # 在 10 分钟总预算下已连续通过到 97% 后被平台取消。单测仍保留 60 秒超时。
+    timeout-minutes: 15
+
+    strategy:
+      matrix:
+        python-version:
+          - "3.10"
+          - "3.11"
+          - "3.12"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          # 默认 fast suite 覆盖 secrets 与 scale 正式能力；测试环境必须按声明
+          # 安装这些 feature extras，不能依赖 runner 预装，也不能在测试里临时跳过。
+          python3 -m pip install -e ".[dev,secrets,scale]"
+
+      - name: Run fast tests
+        run: python3 -m pytest -q -m "not slow and not e2e" --tb=short --timeout=60

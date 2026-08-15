@@ -1,0 +1,10 @@
+# monitor 的连续 proof/checkpoint 专用 RWO 卷；worker owner 主体数据不再挂 PVC，
+# PostgreSQL RLS 清单 + 版本化 S3 对象才是正式事实源。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: my-agent-monitor-state
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests: { storage: 10Gi }

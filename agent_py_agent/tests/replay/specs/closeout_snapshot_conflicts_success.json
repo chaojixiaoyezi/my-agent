@@ -1,0 +1,19 @@
+{
+  "name": "closeout_snapshot_conflicts_success",
+  "trace": "closeout_snapshot_conflicts_success.jsonl",
+  "setup_files": [
+    {
+      "path": "output.md",
+      "content": "## Summary\nDone\n\n## Checked Files\n- input.txt\n"
+    }
+  ],
+  "expected": {
+    "contract_ok": true,
+    "blocked": false,
+    "block_reason": "",
+    "replay_error_codes": [
+      "CLOSEOUT_SNAPSHOT_FINAL_CONFLICT"
+    ],
+    "contract_error_codes": []
+  }
+}

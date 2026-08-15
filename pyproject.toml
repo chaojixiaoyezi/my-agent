@@ -1,0 +1,124 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "my-agent"
+version = "0.3.0"
+description = "A small Python CLI agent with memory, tools, and auditable subagent workflows."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = [
+  "openpyxl>=3.1",
+  "prompt_toolkit>=3.0",
+  "tzdata>=2024.1",  # IANA 时区数据兜底(审计 #21):无系统 zoneinfo 的 Linux/容器也能解析用户时区
+  "charset-normalizer>=3.3",  # 文件编码探测(审计 #23):读 Shift-JIS/GBK/Latin-1 等非 UTF-8 企业文件
+  "lark-oapi>=1.4",  # 飞书默认长连接与密码/人格确认卡片回调
+]
+
+[project.optional-dependencies]
+dev = [
+  "coverage>=7.6",
+  "pytest>=8.0",
+  "pytest-timeout>=2",
+  "pytest-cov>=5",
+  "ruff>=0.8",
+]
+# Phase 1 加密密钥库:at-rest 加密的唯一外部库(stdlib 无 AES、密码学不能自建)。
+# 可选——不装则 SecretStore 降级到 0o600+base64 并诚实标注 encrypted=false。
+secrets = [
+  "cryptography>=42.0",
+]
+# Tier 0 企业规模化:存储抽象(SQLite↔PostgreSQL)。多 dialect 难自建得稳→借 SQLAlchemy(稳定性第一);
+# psycopg 是 PostgreSQL 驱动(不能自建)。不装则用现有 raw-sqlite3 local_storage,本扩展不影响现状。
+scale = [
+  "sqlalchemy>=2.0",
+  "psycopg[binary]>=3.1",
+  "fastapi>=0.115",   # Tier 0.2 异步两层架构接入层(ASGI 路由/校验,研究建议借库,自研高危)
+  "uvicorn>=0.30",    # ASGI 服务器(asyncio,扛 10 万并发连接;asyncio 是 stdlib,生产服务器借库)
+  "redis>=5.2",       # 跨副本一致限流/token+USD 预算/全局并发租约；Redis 协议客户端不自建
+  "boto3>=1.35",      # S3 兼容 owner 对象事实源；签名/重试/分片上传不能自建
+  "opentelemetry-sdk>=1.29",
+  "opentelemetry-exporter-otlp-proto-http>=1.29",
+  "opentelemetry-instrumentation-fastapi>=0.50b0",
+]
+
+[project.scripts]
+my-agent = "agent_py_agent.__main__:main"
+
+[tool.setuptools]
+include-package-data = false
+
+[tool.setuptools.packages.find]
+include = ["agent_py_agent*"]
+exclude = ["agent_py_agent.tests*"]
+
+[tool.setuptools.package-data]
+agent_py_agent = [
+  "config/*.yaml",
+  "prompts/*.md",
+  "skills/**/*",
+  "vendor/bin/*",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["agent_py_agent/tests"]
+python_files = ["test_*.py"]
+pythonpath = [".", "agent_py_agent"]
+addopts = "-q"
+markers = [
+  "slow: stress or long-running scenario tests",
+  "e2e: end-to-end workflow tests",
+  "integration: integration tests across modules",
+  "security: permission, auth, and boundary tests",
+  "contract: schema and interface contract tests",
+  "regression: tests for previously fixed bugs",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["agent_py_agent"]
+omit = [
+  "agent_py_agent/tests/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = [
+  "agent_py_agent/data",
+  "agent_py_agent/memory",
+  "agent_py_agent/memory_archive",
+  "my-agent-worktrees",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4"]
+ignore = [
+  "E501",   # line length — handled by formatter/editor
+  "E402",   # module-level import not at top — historical, many intentional
+  "F841",   # unused variable — historical debt
+  "F821",   # undefined name — historical (TYPE_CHECKING, runtime eval)
+  "SIM105", # suppressible exception — historical try/except patterns
+  "B007",   # unused loop variable — historical
+  "SIM108", # if-else-block vs ternary — readability preference
+  "SIM102", # collapsible-if — readability preference
+  "SIM103", # needless-bool — readability preference
+  "SIM117", # multiple-with — readability preference
+  "SIM118", # in-dict-keys — readability preference
+  "SIM110", # reimplemented-builtin — readability preference
+  "C408",   # unnecessary-collection-call — style preference
+  "E741",   # ambiguous variable name — historical (l, O, I)
+  "B023",   # function uses loop variable — historical
+  "B004",   # unreliable callable check — historical
+  "B905",   # zip without strict — historical
+  "F402",   # import shadowed by loop var — historical
+  "UP031",  # printf string formatting — historical
+  "F401",   # unused import — historical re-exports in __init__.py
+  "F811",   # redefined name — historical test imports
+]

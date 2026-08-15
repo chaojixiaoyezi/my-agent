@@ -1,0 +1,98 @@
+# Python build/runtime artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+
+# Test and coverage artifacts
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+
+# macOS
+.DS_Store
+**/.DS_Store
+._*
+.AppleDouble
+.LSOverride
+
+# OS/editor local files
+.env
+.env.*
+!.env.example
+.chat_history
+
+# Agent runtime state and generated memory
+agent_py_agent/data/
+agent_py_agent/memory/
+agent_py_agent/memory_archive/
+/.agent_delivery/
+/.agent_tool_outputs/
+/data/collaboration/
+/data/conversations/
+/data/gateway/
+/data/local_store/
+/data/memory.jsonl
+/data/memory.jsonl.lock
+/data/subagents/
+/gateway/
+/local_store/
+/memory/
+/memory_archive/
+/outputs/
+/workspace/
+data/notifications/
+data/sessions/
+logs/
+*.log
+
+# Generated governance/experiment artifacts
+.mutation_backups/
+mutation_test_report.json
+MagicMock/
+agent_py_agent/MagicMock/
+validation/live_lab/
+validation/cross_agent_benchmark/
+validation/real_runs/
+my-agent-worktrees/
+
+# Local real-run scratch outputs
+github-5week-5agents-*/
+github-year-deepseek-papers-*/
+shell_gateway_outputs/
+github_week*_trending.json
+make_excel.py
+make_excel_v2.py
+merge_github_trending.py
+
+# 模型助手 Code memory files (stored in ~/.模型助手/projects/, not in repo)
+# These are user-specific and should not be committed to git
+# If you want to track them, copy to docs/memory/ instead
+
+# Temporary files
+tmp/
+temp/
+
+# Node.js / Frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 真-LLM 自测台固定输出目录(产物留盘交测试方,不进库)
+/data/realllm_watch_harness/
+/data/audit_full_chain_harness/
+
+# audit guarantee / learning draft runtime data (reusable test fixtures)
+/data/audit_guarantee_harness/
+/data/learning_drafts/

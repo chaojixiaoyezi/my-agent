@@ -1,0 +1,17 @@
+{
+  "name": "runtime_issue_conflicts_success",
+  "trace": "runtime_issue_conflicts_success.jsonl",
+  "expected": {
+    "contract_ok": false,
+    "blocked": false,
+    "block_reason": "",
+    "replay_error_codes": [
+      "RUNTIME_ISSUE_FINAL_CONFLICT"
+    ],
+    "contract_error_codes": [
+      "TOOL_TRACE_EMPTY",
+      "RUNTIME_ISSUE_SUCCESS_CONFLICT",
+      "FINAL_STATUS_REJECTED"
+    ]
+  }
+}

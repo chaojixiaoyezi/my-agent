@@ -1,0 +1,16 @@
+# Cross-platform text handling.
+# Keep source files as UTF-8 text and normalize line endings in the repository.
+* text=auto
+
+*.py text eol=lf
+*.md text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+*.jsonl text eol=lf
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.sh text eol=lf

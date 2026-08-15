@@ -1,0 +1,17 @@
+{
+  "contract_ref": "../contracts/collection_coverage_cannot_complete.json",
+  "model_steps": [
+    {
+      "type": "tool_call",
+      "tool": "write_file",
+      "params": {
+        "path": "source_data.json",
+        "content": "{\"sheets\":[{\"name\":\"week-1\",\"rows\":[{\"project\":\"demo\",\"url\":\"https://example.com/demo\"}]}]}"
+      }
+    },
+    {
+      "type": "final",
+      "status": "SUCCEEDED"
+    }
+  ]
+}

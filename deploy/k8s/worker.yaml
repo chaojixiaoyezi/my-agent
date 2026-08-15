@@ -1,0 +1,111 @@
+# Tier 5: worker 层(无状态消费者,按队列深度扩缩)。Deployment + KEDA ScaledObject + PDB。
+# worker 不收 HTTP、纯消费队列(SKIP-LOCKED 分发),可横向加副本 —— 无状态是 my-agent 能多副本的根因。
+# 扩缩信号 = 队列待处理积压(IO/LLM-bound 负载,CPU 不准),研究核验三家都没做队列深度 HPA。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-agent-worker
+  labels: { app: my-agent, tier: worker, release: stable }
+spec:
+  replicas: 2   # 实际副本数由下方 KEDA ScaledObject 接管
+  selector:
+    matchLabels: { app: my-agent, tier: worker, release: stable }
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 50% }
+  template:
+    metadata:
+      labels: { app: my-agent, tier: worker, release: stable }
+    spec:
+      # 10 万用户生产执行池要求 Kubernetes >=1.36 的 Pod user namespace；
+      # 容器内 uid 只映射到本 Pod，bwrap 再做 tenant owner/workspace 二层隔离。
+      hostUsers: false
+      # LLM turn 可能数十秒;给在途消息跑完的余量(配 worker 池 SIGTERM→停领新活、心跳续租跑完在途)
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        # 节点预置到 /var/lib/kubelet/seccomp/my-agent/seccomp-bwrap.json；缺文件时
+        # Kubernetes 直接 CreateContainerError，不能退回 RuntimeDefault/Unconfined。
+        seccompProfile:
+          type: Localhost
+          localhostProfile: my-agent/seccomp-bwrap.json
+      containers:
+        - name: worker
+          image: my-agent:latest
+          command: ["python", "-m", "agent_py_agent.agent.worker_entry"]
+          envFrom:
+            - configMapRef: { name: my-agent-scale }
+            - secretRef: { name: my-agent-owner-store }
+          env:
+            - { name: DATABASE_URL, valueFrom: { secretKeyRef: { name: my-agent-db, key: url } } }
+            - { name: REDIS_URL, valueFrom: { secretKeyRef: { name: my-agent-redis, key: url } } }
+            - { name: FEISHU_APP_ID, valueFrom: { secretKeyRef: { name: my-agent-feishu, key: app_id } } }
+            - { name: FEISHU_APP_SECRET, valueFrom: { secretKeyRef: { name: my-agent-feishu, key: app_secret } } }
+            - { name: WORKER_CONCURRENCY, value: "4" }
+          resources:
+            requests: { cpu: "500m", memory: "512Mi" }
+            limits: { cpu: "2", memory: "1Gi" }
+          # worker 自身启动时也有同一硬门；probe 让 K8s 只把真能创建 namespace/mount
+          # 的 Pod 计入 ready，缺 binary、依赖、kernel userns 或 seccomp 权限都会失败。
+          startupProbe:
+            exec:
+              command: ["python", "-m", "agent_py_agent.agent.tooling.sandbox", "--quiet"]
+            periodSeconds: 5
+            failureThreshold: 12
+          readinessProbe:
+            exec:
+              command: ["python", "-m", "agent_py_agent.agent.tooling.sandbox", "--quiet"]
+            periodSeconds: 30
+            failureThreshold: 2
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: owner-cache, mountPath: /var/lib/my-agent }
+            - { name: workspace-cache, mountPath: /var/lib/my-agent-workspaces }
+      volumes:
+        - name: tmp
+          emptyDir: { sizeLimit: 256Mi }
+        - name: owner-cache
+          emptyDir: { sizeLimit: 4Gi }
+        - name: workspace-cache
+          emptyDir: { sizeLimit: 20Gi }
+---
+# KEDA 用 PostgreSQL scaler 直接读队列表的待处理积压做扩缩(零额外埋点)
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: my-agent-db-auth
+spec:
+  secretTargetRef:
+    - { parameter: connection, name: my-agent-db, key: url }
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: my-agent-worker
+spec:
+  scaleTargetRef:
+    name: my-agent-worker
+  minReplicaCount: 2
+  maxReplicaCount: 100
+  cooldownPeriod: 120
+  triggers:
+    - type: postgresql
+      metadata:
+        targetQueryValue: "20"   # 目标:每副本约 20 条待处理积压;积压涨则扩副本
+        query: "SELECT count(*) FROM ingress_messages WHERE status = 'pending' AND release_channel = 'stable'"
+      authenticationRef:
+        name: my-agent-db-auth
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: my-agent-worker
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: my-agent, tier: worker, release: stable }

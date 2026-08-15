@@ -1,0 +1,574 @@
+"""创建子代理的请求条目解析与响应 payload 组装（原 create_payload.py / create_items.py 并入）。"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+
+from ...action_protocol import subagent_schedule_envelope_from_payload
+from ...common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
+from ...contracts.idempotency import idempotency_key, operation_id
+from ...model_visible_refs import current_model_ref, current_model_ref_list, current_model_text
+from ...subagents.role_templates import role_template_snapshot_for_task
+from ..runner.ref_fields import (
+    _file_refs_from_value,
+    _normalize_file_ref,
+    params_output_refs,
+)
+from .child_result_index import child_result_index
+from .create_constraints import created_tasks, dispatchable_tasks, reused_tasks
+from .dispatch.state_contract import dispatch_state_contract_payload
+from .finding_relation import finding_investigation_payload
+
+
+@dataclass(frozen=True)
+class CreateSubagentsPayloadInput:
+    agent: object
+    resolutions: list
+    allowed_tools: object
+    request_params: dict[str, object]
+    auto_start: dict[str, object] | None = None
+    replacement_records: list[dict[str, object]] | None = None
+    conversation_bind_errors: list[dict[str, object]] | None = None
+
+
+def create_subagents_payload(request: CreateSubagentsPayloadInput) -> dict[str, object]:
+    agent = request.agent
+    resolutions = request.resolutions
+    auto_start = request.auto_start
+    request_params = request.request_params
+    tasks = [item.task for item in resolutions]
+    created = created_tasks(resolutions)
+    reused = reused_tasks(resolutions)
+    dispatchable = dispatchable_tasks(tasks)
+    pending_dispatch = _pending_dispatch_tasks(dispatchable, request_params, auto_start)
+    result_index = child_result_index(agent, tasks)
+    wait_tool_call = _wait_tool_call(agent)
+    payload: dict[str, object] = {
+        "created": len(created),
+        "created_run_ids": [task.id for task in created],
+        "reused_run_ids": [task.id for task in reused],
+        "dispatch_run_ids": [task.id for task in pending_dispatch],
+        "auto_start": _auto_start_payload(auto_start),
+        "next_action": _dispatch_next_action(dispatchable, request_params, auto_start, wait_tool_call),
+        "status_tool_call": _status_tool_call(auto_start, wait_tool_call),
+        "wait_tool_call": wait_tool_call,
+        "allowed_tools": request.allowed_tools or "automatic",
+        "operation_contract": _operation_contract(request_params, created, reused, pending_dispatch),
+        "replacement_records": request.replacement_records or [],
+        "conversation_bind_errors": request.conversation_bind_errors or [],
+        "scheduling_advice": _scheduling_advice(tasks, request_params, auto_start),
+        "child_result_index": result_index,
+        "child_output_read_order": _child_output_read_order(result_index),
+        "tasks": [_task_payload(task) for task in tasks],
+    }
+    payload.update(dispatch_state_contract_payload(agent))
+    payload["schedule_lifecycle"] = _schedule_lifecycle_payload(
+        tasks,
+        auto_start,
+        payload.get("current_turn_run_state"),
+    )
+    investigations = finding_investigation_payload(
+        tasks,
+        payload["schedule_lifecycle"],
+    )
+    if investigations:
+        payload["finding_investigations"] = investigations
+    payload["typed_envelope"] = subagent_schedule_envelope_from_payload(payload, tool="create_subagents").to_dict()
+    return payload
+
+
+def _auto_start_payload(auto_start: dict[str, object] | None) -> dict[str, object]:
+    if not isinstance(auto_start, dict):
+        return {"status": "not_attempted"}
+    allowed = {
+        "status",
+        "dispatch_mode",
+        "run_ids",
+        "deferred_run_ids",
+        "started_run_ids",
+        "failed_run_ids",
+        "warnings",
+    }
+    payload = {key: auto_start[key] for key in allowed if key in auto_start}
+    if str(payload.get("status") or "") == "started":
+        payload["acceptance_status"] = "accepted"
+    return payload or {"status": str(auto_start.get("status") or "unknown")}
+
+
+def _schedule_lifecycle_payload(
+    tasks: list[object],
+    auto_start: dict[str, object] | None,
+    current_state: object,
+) -> dict[str, object]:
+    """区分任务记录、调度接收与 runner 运行，禁止用一个 started 混称三层事实。"""
+    state = current_state if isinstance(current_state, dict) else {}
+    task_ids = [_task_text(task, "id") for task in tasks if _task_text(task, "id")]
+    raw_status = str((auto_start or {}).get("status") or "not_attempted")
+    accepted = (
+        _string_items((auto_start or {}).get("run_ids"))
+        if raw_status in {"started", "accepted"}
+        else []
+    )
+    running = [
+        run_id
+        for run_id in _string_items(state.get("running_run_ids"))
+        if run_id in task_ids
+    ]
+    failed = list(
+        dict.fromkeys(
+            [
+                *_string_items((auto_start or {}).get("failed_run_ids")),
+                *_string_items(state.get("blocked_run_ids")),
+            ]
+        )
+    )
+    if failed and accepted:
+        acceptance_status = "partially_accepted"
+    elif failed:
+        acceptance_status = "rejected"
+    elif accepted:
+        acceptance_status = "accepted"
+    elif raw_status == "deferred":
+        acceptance_status = "deferred"
+    else:
+        acceptance_status = "not_accepted"
+    return {
+        "requested_count": len(task_ids),
+        "recorded_run_ids": task_ids,
+        "accepted_run_ids": accepted,
+        "running_run_ids": running,
+        "failed_run_ids": failed,
+        "acceptance_status": acceptance_status,
+        "counts": {
+            "recorded": len(task_ids),
+            "accepted": len(accepted),
+            "running": len(running),
+            "failed": len(failed),
+        },
+        "authority": {
+            "recorded": "subagent_store",
+            "accepted": "background_dispatch_receipt",
+            "running": "task_state_machine",
+        },
+    }
+
+
+def _status_tool_call(auto_start: dict[str, object] | None, wait_tool_call: dict[str, object]) -> dict[str, object]:
+    if (auto_start or {}).get("status") == "started":
+        return {
+            "tool": "wait",
+            "params": dict(wait_tool_call.get("params") if isinstance(wait_tool_call.get("params"), dict) else {}),
+        }
+    return {"tool": "inspect_agent_tree", "params": {}}
+
+
+def _pending_dispatch_tasks(tasks: list, request_params: dict[str, object], auto_start: dict[str, object] | None) -> list:
+    if bool(request_params.get("defer_start")):
+        return tasks
+    deferred = set(_string_items((auto_start or {}).get("deferred_run_ids")))
+    if deferred:
+        return [task for task in tasks if _task_text(task, "id") in deferred]
+    if (auto_start or {}).get("status") in {"started", "not_needed"}:
+        return []
+    return tasks
+
+
+def _operation_contract(request_params: dict[str, object], created: list, reused: list, dispatch: list) -> dict[str, object]:
+    payload = {"params": request_params}
+    return {
+        "contract": "idempotency.v1",
+        "operation": "create_subagents",
+        "idempotency_key": idempotency_key("create_subagents", payload),
+        "operation_id": operation_id("create_subagents", payload),
+        "created_run_ids": [task.id for task in created],
+        "reused_run_ids": [task.id for task in reused],
+        "dispatch_run_ids": [task.id for task in dispatch],
+    }
+
+
+def _dispatch_next_action(
+    tasks,
+    request_params: dict[str, object],
+    auto_start: dict[str, object] | None = None,
+    wait_tool_call: dict[str, object] | None = None,
+) -> dict[str, object]:
+    run_ids = [task.id for task in tasks]
+    if not run_ids:
+        return {
+            "tool": "inspect_agent_tree",
+            "reason": "create_subagents 没有可调度的新 run；请读取代理树状态后决定是否汇报或进入验收。",
+            "params": {},
+        }
+    if bool(request_params.get("defer_start")):
+        return {
+            "tool": "dispatch_subagents",
+            "reason": "defer_start=true，本次只建任务记录；需要开跑时再显式推进这些 run_id。",
+            "params": {"dry_run": False, "run_ids": run_ids, "max_runners": len(run_ids)},
+        }
+    deferred = _string_items((auto_start or {}).get("deferred_run_ids"))
+    if deferred:
+        return {
+            "tool": "inspect_agent_tree",
+            "reason": "部分子代理已自动启动；defer_start=true 的子代理会留在 dispatch_run_ids，等前置产物出现后再显式启动。",
+            "params": {},
+        }
+    if (auto_start or {}).get("status") == "started":
+        return {
+            "tool": "wait",
+            "reason": "create_subagents 已把本批 run 交给后台调度；先登记等待提醒，避免高频轮询。",
+            "params": dict((wait_tool_call or {}).get("params") if isinstance((wait_tool_call or {}).get("params"), dict) else {}),
+        }
+    return {
+        "tool": "dispatch_subagents",
+        "reason": "create_subagents 自动启动未完成；如需继续推进、恢复或重跑，请调度这些 run_id。",
+        "params": {"dry_run": False, "run_ids": run_ids, "max_runners": len(run_ids)},
+    }
+
+
+def _task_payload(task: object) -> dict[str, object]:
+    return {
+        "id": _task_text(task, "id"),
+        "goal": current_model_text(_task_text(task, "goal")),
+        "status": _task_text(task, "status"),
+        "verification_status": _task_text(task, "verification_status"),
+        "task_root": current_model_ref(_task_text(task, "task_workspace_dir")),
+        "attributes": _task_attributes(task),
+    }
+
+
+def _child_output_read_order(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    result: list[dict[str, object]] = []
+    for row in rows:
+        result.append(
+            {
+                "run_id": str(row.get("run_id") or ""),
+                "agent_name": str(row.get("agent_name") or ""),
+                "role": str(row.get("role") or ""),
+                "status": str(row.get("status") or ""),
+                "expected_outputs": list(row.get("expected_outputs") or []),
+                "read_order": list(row.get("read_order") or []),
+            }
+        )
+    return result
+
+
+def _wait_tool_call(agent: object) -> dict[str, object]:
+    config = getattr(agent, "config", None)
+    try:
+        seconds = int(getattr(config, "subagent_watch_interval_seconds", 120))
+    except (TypeError, ValueError):
+        seconds = 120
+    if seconds < 60:
+        seconds = 60
+    if seconds > 7200:
+        seconds = 7200
+    return {
+        "tool": "wait",
+        "params": {
+            "seconds": seconds,
+            "reason": "wait before checking subagent progress again",
+        },
+    }
+
+
+def _task_text(task: object, field: str) -> str:
+    value = getattr(task, field, "")
+    return value if isinstance(value, str) else ""
+
+
+def _task_attributes(task: object) -> dict[str, object]:
+    attrs = getattr(task, "attributes", {}) or {}
+    if not isinstance(attrs, dict):
+        return {}
+    return {
+        str(key): projected
+        for key, value in attrs.items()
+        if (projected := _task_attribute_value(str(key), value)) not in ("", [], None)
+    }
+
+
+def _task_attribute_value(key: str, value: object) -> object:
+    ref_keys = {"input_refs", "output_refs", "output_files", "artifact_refs", "required_read_paths"}
+    if key in ref_keys:
+        return current_model_ref_list(value)
+    if isinstance(value, str):
+        return current_model_text(value)
+    return value
+
+
+def _scheduling_advice(tasks: list, request_params: dict[str, object], auto_start: dict[str, object] | None) -> list[dict[str, object]]:
+    del request_params
+    advice: list[dict[str, object]] = []
+    quality_tasks = [task for task in tasks if _is_dependent_quality_role(task) and _task_text(task, "id")]
+    deferred = set(_string_items((auto_start or {}).get("deferred_run_ids")))
+    early = [task for task in quality_tasks if _task_text(task, "id") not in deferred]
+    if early:
+        advice.append(
+            {
+                "code": "dependent_quality_task_started_early",
+                "run_ids": [_task_text(task, "id") for task in early],
+                "message": "测试、找错、验收、汇总这类任务通常依赖前置产物；如果产物还没出来，建议下次创建时给这些 item 设置 defer_start=true，等产物 refs 出现后再启动。",
+            }
+        )
+    return advice
+
+
+def _is_dependent_quality_role(task: object) -> bool:
+    snapshot = role_template_snapshot_for_task(task)
+    return bool(snapshot.get("depends_on_outputs"))
+
+
+def _string_items(value: object) -> list[str]:
+    if not isinstance(value, list | tuple | set):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+_BASE_FIELDS_EXCLUDED_FROM_ITEM = {
+    "items",
+    "goal",
+    "plan",
+    "context_manifest",
+    # covers 是"该子代理负责哪些清单项"的逐个绑定;顶层值若扇出到每个 item,任何一个
+    # 子代理 DONE 都会把全部绑定项打勾(假 credit)。batch 模式各 item 自带 covers。
+    "covers",
+    # Top-level delivery targets belong to the parent/root output. In batch mode
+    # each child keeps its own explicit output refs; shared files are coordinated
+    # by the parent prompt and task tree instead of a hidden create-time gate.
+    "output_files",
+    "output_refs",
+    "artifact_refs",
+    "required_output_files",
+    "required_output_refs",
+    "deliverables",
+    "final_output",
+    "final_output_path",
+}
+_SHARED_DIRECTIVE_ROLES = frozenset(
+    {
+        "primary_directive",
+        "directive",
+        "instruction",
+        "brief",
+    }
+)
+
+
+@dataclass(frozen=True)
+class CreateSubagentItem:
+    goal: str
+    params: dict[str, object]
+
+
+def create_items_from_params(params: dict[str, object]) -> list[CreateSubagentItem] | str:
+    protocol_error = _batch_protocol_error(params)
+    if protocol_error:
+        return protocol_error
+    raw_items = params.get("items")
+    if raw_items is None:
+        return []
+    items = _json_list_param(raw_items)
+    if not items:
+        # items 显式传了但为空(模型很常反射性带一个 items:[] )——当作"没传 items",
+        # 落到单 goal 模式用顶层 goal,而不是硬拒报错。真机实测:模型把单个子代理规格放顶层
+        # (goal/output_files)却带空 items,旧逻辑直接 TOOL_INVALID_ARGUMENTS,导致子代理一个
+        # 都派不出去、主代理只能退回独自写(B1 真机:create_subagents 14 次全失败)。对齐
+        # 终端应用 的"工具对模型格式宽容"。下游若连 goal 也没有,_prepare_single_mode 会给
+        # "缺少必填参数 goal" 的干净报错。
+        return []
+    parsed: list[CreateSubagentItem] = []
+    # index 用 0 基下标:错误文案里 items[N] 是方括号数组写法,模型按 JSON 下标理解;
+    # 旧的 1 基编号(items[2]=第2个)会让模型自纠时改错对象(真机空 goal 自纠场景)。
+    for index, raw in enumerate(items):
+        item = _create_item(params, raw, index)
+        if isinstance(item, str):
+            return item
+        parsed.append(item)
+    return parsed
+
+
+def _batch_protocol_error(params: dict[str, object]) -> str:
+    if "tasks" in params:
+        return "create_subagents 批量派工只接受 items；请把 tasks 改成 items。"
+    for key in ("replaces_run_ids", "supersedes_run_ids"):
+        if key in params:
+            return f"create_subagents 接管关系只接受 replacement_for_run_ids；请移除 {key}。"
+    raw_items = params.get("items")
+    item_error = _item_protocol_error(raw_items)
+    if item_error:
+        return item_error
+    return ""
+
+
+def _item_protocol_error(raw_items: object) -> str:
+    items = _json_list_param(raw_items) if raw_items is not None else []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        bad_key = _unsupported_replacement_key(item)
+        if bad_key:
+            return f"items[{index}] 接管关系只接受 replacement_for_run_ids；请移除 {bad_key}。"
+    return ""
+
+
+def _unsupported_replacement_key(params: dict[str, object]) -> str:
+    for key in ("replaces_run_ids", "supersedes_run_ids"):
+        if key in params:
+            return key
+    return ""
+
+
+def _create_item(
+    base_params: dict[str, object],
+    raw: object,
+    index: int,
+) -> CreateSubagentItem | str:
+    if not isinstance(raw, dict):
+        return f"items[{index}](第 {index + 1} 个)必须是 JSON 对象。整批未创建;修正后重发完整 items。"
+    goal = str(raw.get("goal") or "").strip()
+    if not goal:
+        # 空/全空白 goal 整批拒绝:一个空壳子代理落地就会 Context Gate BLOCKED 变僵尸
+        # (真机 0/22 根因#1)。文案给自纠指引,别让模型失败即放弃退回独自写。
+        return (
+            f"items[{index}](第 {index + 1} 个)缺少必填 goal——每个 item 必须自带非空 goal,"
+            "说清这个子代理具体做什么、产出什么。整批未创建,一个也没派出;补上 goal 后重发完整 items。"
+        )
+    merged = _create_item_params(base_params, raw, goal)
+    return CreateSubagentItem(goal=goal, params=merged)
+
+
+def _create_item_params(
+    base_params: dict[str, object],
+    raw: dict[str, object],
+    goal: str,
+) -> dict[str, object]:
+    merged = _base_item_defaults(base_params)
+    merged["_item_allowed_tools_explicit"] = "allowed_tools" in raw
+    merged.update(raw)
+    merged["goal"] = goal
+    _merge_item_required_read_paths(merged, base_params, goal)
+    return merged
+
+
+# 不自动变成每个子代理的硬输入依赖，避免一个来源清单卡住所有 worker。
+def _base_item_defaults(base_params: dict[str, object]) -> dict[str, object]:
+    return {
+        key: value
+        for key, value in base_params.items()
+        if key not in _BASE_FIELDS_EXCLUDED_FROM_ITEM
+    }
+
+
+# 顶层 required_read_paths 不自动复制到每个 worker，避免把一组输入清单误变成所有子代理的读提示。
+def _merge_item_required_read_paths(
+    merged: dict[str, object],
+    base_params: dict[str, object],
+    goal: str,
+) -> None:
+    refs = _merge_refs(
+        [
+            _shared_directive_pack_paths(base_params.get("context_packs")),
+            string_list(merged.get("required_read_paths"), TOOL_TEXT_LIST_OPTIONS),
+            _item_manifest_required_read_paths(merged.get("context_manifest")),
+            _existing_goal_file_refs(goal, output_refs=params_output_refs(merged)),
+        ]
+    )
+    if refs:
+        merged["required_read_paths"] = refs
+
+
+def _item_manifest_required_read_paths(value: object) -> list[str]:
+    if not isinstance(value, dict):
+        return []
+    return string_list(value.get("required_read_paths"), TOOL_TEXT_LIST_OPTIONS)
+
+
+def _shared_directive_pack_paths(value: object) -> list[str]:
+    packs = _context_pack_list(value)
+    paths: list[str] = []
+    for pack in packs:
+        role = str(pack.get("role") or pack.get("kind") or "").strip().lower()
+        if role not in _SHARED_DIRECTIVE_ROLES:
+            continue
+        paths.extend(string_list(pack.get("path") or pack.get("ref"), TOOL_TEXT_LIST_OPTIONS))
+    return paths
+
+
+def _existing_goal_file_refs(goal: str, *, output_refs: list[str]) -> list[str]:
+    refs = []
+    for ref in _file_refs_from_value(goal):
+        normalized = _normalize_file_ref(ref)
+        if not normalized or _ref_matches_any_output(normalized, output_refs):
+            continue
+        if _ref_exists_now(normalized):
+            refs.append(normalized)
+    return refs
+
+
+def _context_pack_list(value: object) -> list[dict[str, object]]:
+    if isinstance(value, dict):
+        return [dict(value)]
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _merge_refs(groups: list[list[str]]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for item in group:
+            _append_merged_ref(merged, seen, item)
+    return merged
+
+
+def _append_merged_ref(merged: list[str], seen: set[str], item: object) -> None:
+    normalized = _normalize_file_ref(item)
+    if not normalized or normalized in seen:
+        return
+    seen.add(normalized)
+    merged.append(normalized)
+
+
+def _ref_exists_now(ref: str) -> bool:
+    path = Path(ref).expanduser()
+    if path.is_absolute():
+        return path.exists()
+    return Path(ref).exists()
+
+
+def _ref_matches_any_output(ref: str, output_refs: list[str]) -> bool:
+    return any(_path_ref_matches(ref, output_ref) for output_ref in output_refs)
+
+
+def _path_ref_matches(left: str, right: str) -> bool:
+    left_text = str(left or "").strip().replace("\\", "/")
+    right_text = str(right or "").strip().replace("\\", "/")
+    if not left_text or not right_text:
+        return False
+    return (
+        left_text == right_text
+        or left_text.endswith("/" + right_text)
+        or right_text.endswith("/" + left_text)
+    )
+
+
+def _json_list_param(value: object) -> list[object]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        return [value]
+    text = str(value or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(parsed, list):
+        return parsed
+    if isinstance(parsed, dict):
+        return [parsed]
+    return []

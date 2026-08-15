@@ -1,0 +1,366 @@
+from __future__ import annotations
+
+import os
+import stat
+import subprocess
+import sys
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+
+from ..common.json_io import locked_json_path, read_json_object_report
+
+_QUOTA_LOCK_BASENAME = ".owner-quota"
+_DEFAULT_MAX_DISK_MB = 102_400
+_NATIVE_USAGE_SCAN_TIMEOUT_SECONDS = 15.0
+
+
+@dataclass(frozen=True)
+class OwnerQuotaChange:
+    """One owner-scoped file size change evaluated under the quota lock.
+
+    ``append`` makes ``final_size`` an added byte count.  This is deliberately
+    resolved while the owner lock is held, so two concurrent append operations
+    cannot both project from the same stale pre-lock file size.
+    """
+
+    path: Path
+    final_size: int | None
+    append: bool = False
+
+
+@dataclass(frozen=True)
+class OwnerQuotaProjection:
+    used_bytes: int
+    projected_bytes: int
+    max_bytes: int
+
+
+class OwnerQuotaUnavailable(RuntimeError):
+    """The authoritative owner quota or current usage could not be read safely."""
+
+
+class OwnerQuotaExceeded(RuntimeError):
+    def __init__(self, projection: OwnerQuotaProjection):
+        self.projection = projection
+        super().__init__(
+            "owner 磁盘配额不足: "
+            f"used_bytes={projection.used_bytes} "
+            f"projected_bytes={projection.projected_bytes} "
+            f"max_bytes={projection.max_bytes}"
+        )
+
+
+class OwnerQuotaAdmission:
+    """One owner-quota critical section shared by a whole durable mutation.
+
+    Repository writers often have to lock and read their authority file before
+    the exact final byte count is known.  Keeping the owner lock outside that
+    repository lock establishes one lock order for every writer:
+
+    ``owner quota -> repository/file lock -> mutation``.
+
+    The admission object deliberately rescans usage at ``check`` time.  This
+    lets a caller validate the complete multi-file mutation immediately before
+    it writes, without estimating from stale pre-lock state.
+    """
+
+    def __init__(self, enforcer: OwnerQuotaEnforcer, *, enabled: bool) -> None:
+        self._enforcer = enforcer
+        self.enabled = bool(enabled)
+
+    def check(self, changes: Iterable[OwnerQuotaChange]) -> OwnerQuotaProjection | None:
+        if not self.enabled:
+            return None
+        relevant = _normalized_owner_changes(self._enforcer.owner_root, changes)
+        if not relevant:
+            return None
+        try:
+            used = _owner_usage_bytes_for_admission(self._enforcer.owner_root)
+            current_sizes = {path: _logical_file_size(path) for path in relevant}
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise OwnerQuotaUnavailable("owner disk usage is unavailable") from exc
+        replaced = sum(current_sizes.values())
+        final = sum(
+            0
+            if change.final_size is None
+            else (
+                current_sizes[path] + change.final_size
+                if change.append
+                else change.final_size
+            )
+            for path, change in relevant.items()
+        )
+        projection = OwnerQuotaProjection(
+            used_bytes=used,
+            projected_bytes=max(0, used - replaced + final),
+            max_bytes=self._enforcer.max_bytes,
+        )
+        if projection.projected_bytes > projection.max_bytes and projection.projected_bytes > used:
+            raise OwnerQuotaExceeded(projection)
+        return projection
+
+
+class OwnerQuotaEnforcer:
+    """Cross-process admission gate for structured writes inside one owner home.
+
+    All file tools share the same owner-local lock.  The gate scans the
+    canonical owner home while holding that lock, computes the logical final
+    size of the whole batch, and only then lets the mutation proceed.  Deletes
+    and non-growing repairs remain possible when an owner is already over its
+    limit.
+    """
+
+    def __init__(self, owner_root: str | Path, *, max_bytes: int, policy_available: bool = True):
+        self.owner_root = Path(owner_root).expanduser().resolve(strict=False)
+        self.max_bytes = max(0, int(max_bytes))
+        self.policy_available = bool(policy_available)
+        self._lock_anchor = self.owner_root / _QUOTA_LOCK_BASENAME
+
+    @contextmanager
+    def admission(self) -> Iterator[OwnerQuotaAdmission]:
+        """Hold the owner gate while a repository computes and applies a mutation."""
+
+        if self.max_bytes <= 0:
+            yield OwnerQuotaAdmission(self, enabled=False)
+            return
+        if not self.policy_available:
+            raise OwnerQuotaUnavailable("owner quota policy is unavailable")
+        with _locked_owner_quota(self._lock_anchor):
+            yield OwnerQuotaAdmission(self, enabled=True)
+
+    @contextmanager
+    def reserve(self, changes: Iterable[OwnerQuotaChange]) -> Iterator[OwnerQuotaProjection | None]:
+        with self.admission() as admission:
+            projection = admission.check(changes)
+            yield projection
+
+
+def owner_quota_enforcer_from_policy(
+    owner_root: str | Path,
+    *,
+    quota_path: str | Path | None = None,
+) -> OwnerQuotaEnforcer:
+    """Build the canonical gate for non-Agent write entrances.
+
+    Feishu confirmation callbacks do not own a ``SimpleAgent`` instance, but
+    they still mutate the same owner Persona authority.  Reading that owner's
+    structured quota file here keeps those callbacks on the same gate.  A
+    malformed policy is fail-closed; a missing file uses the seeded product
+    default, matching ``resolve_effective_owner_policy``.
+    """
+
+    root = Path(owner_root).expanduser().resolve(strict=False)
+    path = Path(quota_path) if quota_path is not None else root / "quota.json"
+    report = read_json_object_report(path, context="owner_policy.quota")
+    raw = report.payload.get("max_disk_mb")
+    try:
+        max_disk_mb = int(raw)
+    except (TypeError, ValueError):
+        max_disk_mb = _DEFAULT_MAX_DISK_MB
+    if max_disk_mb <= 0:
+        max_disk_mb = _DEFAULT_MAX_DISK_MB
+    return OwnerQuotaEnforcer(
+        root,
+        max_bytes=max_disk_mb * 1024 * 1024,
+        policy_available=report.load_error is None,
+    )
+
+
+def owner_logical_usage_bytes(root: str | Path) -> int:
+    """Count regular-file bytes below an owner root without following symlinks.
+
+    Hard links are intentionally counted per visible path.  A logical quota
+    must not be bypassable by creating many links to the same inode.
+    """
+
+    owner_root = Path(root).expanduser().resolve(strict=False)
+    try:
+        root_info = owner_root.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return 0
+    except OSError as exc:
+        raise OwnerQuotaUnavailable("owner disk usage root is unavailable") from exc
+    if not stat.S_ISDIR(root_info.st_mode):
+        raise OwnerQuotaUnavailable("owner disk usage root is not a directory")
+    total = 0
+
+    def handle_walk_error(exc: OSError) -> None:
+        # A concurrently removed runtime directory no longer consumes quota.
+        # Other traversal failures (for example EACCES) remain fail-closed.
+        if isinstance(exc, FileNotFoundError):
+            return
+        raise exc
+
+    try:
+        for directory, dirnames, filenames in os.walk(
+            owner_root,
+            followlinks=False,
+            onerror=handle_walk_error,
+        ):
+            base = Path(directory)
+            dirnames[:] = [name for name in dirnames if not (base / name).is_symlink()]
+            for name in filenames:
+                path = base / name
+                if path == owner_root / f"{_QUOTA_LOCK_BASENAME}.lock":
+                    continue
+                try:
+                    info = path.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    # Atomic writers and SQLite may remove a temp/WAL file
+                    # after scandir returned it.  Missing entries consume no
+                    # current bytes, so skip only ENOENT and keep every other
+                    # stat failure fail-closed.
+                    continue
+                if stat.S_ISLNK(info.st_mode):
+                    continue
+                if stat.S_ISREG(info.st_mode):
+                    total += max(0, int(info.st_size))
+    except OSError as exc:
+        raise OwnerQuotaUnavailable("owner disk usage scan failed") from exc
+    return total
+
+
+def _owner_usage_bytes_for_admission(root: str | Path) -> int:
+    """Return exact regular-file usage without monopolising the Python runtime.
+
+    Large owner workspaces can contain hundreds of thousands of files.  Running
+    the authoritative walk in Python while the per-owner quota lock is held can
+    starve an otherwise healthy Gateway under concurrent background work.  On
+    Linux, delegate only the mechanical directory traversal to the system
+    ``find`` implementation; the same regular-file, no-symlink-following and
+    per-visible-hardlink semantics are preserved.  Unsupported platforms keep
+    the portable Python implementation.  Runtime scan failures remain
+    fail-closed instead of silently bypassing quota enforcement.
+    """
+
+    owner_root = Path(root).expanduser().resolve(strict=False)
+    native = _native_regular_file_usage_bytes(owner_root)
+    if native is not None:
+        return native
+    return owner_logical_usage_bytes(owner_root)
+
+
+def _native_regular_file_usage_bytes(owner_root: Path) -> int | None:
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        root_info = owner_root.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return 0
+    except OSError as exc:
+        raise OwnerQuotaUnavailable("owner disk usage root is unavailable") from exc
+    if not stat.S_ISDIR(root_info.st_mode):
+        raise OwnerQuotaUnavailable("owner disk usage root is not a directory")
+    find_path = next(
+        (
+            candidate
+            for candidate in ("/usr/bin/find", "/bin/find")
+            if os.access(candidate, os.X_OK)
+        ),
+        "",
+    )
+    if not find_path:
+        return None
+    lock_path = owner_root / f"{_QUOTA_LOCK_BASENAME}.lock"
+    try:
+        completed = subprocess.run(
+            [
+                find_path,
+                os.fspath(owner_root),
+                "-type",
+                "f",
+                "!",
+                "-path",
+                os.fspath(lock_path),
+                "-printf",
+                "%s\n",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_NATIVE_USAGE_SCAN_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError:
+        return None
+    except subprocess.TimeoutExpired as exc:
+        raise OwnerQuotaUnavailable("owner disk usage scan timed out") from exc
+    if completed.returncode != 0:
+        detail = str(completed.stderr or "").lower()
+        if any(token in detail for token in ("unknown predicate", "unrecognized", "illegal option")):
+            return None
+        raise OwnerQuotaUnavailable("owner disk usage scan failed")
+    try:
+        return sum(int(line) for line in completed.stdout.splitlines() if line)
+    except ValueError as exc:
+        raise OwnerQuotaUnavailable("owner disk usage scan returned invalid data") from exc
+
+
+def _normalized_owner_changes(
+    owner_root: Path,
+    changes: Iterable[OwnerQuotaChange],
+) -> dict[Path, OwnerQuotaChange]:
+    normalized: dict[Path, OwnerQuotaChange] = {}
+    for change in changes:
+        path = Path(change.path).expanduser().resolve(strict=False)
+        try:
+            path.relative_to(owner_root)
+        except ValueError:
+            continue
+        size = change.final_size
+        if size is not None and int(size) < 0:
+            raise ValueError("quota final_size must be non-negative")
+        if change.append and size is None:
+            raise ValueError("quota append change requires a byte count")
+        candidate = OwnerQuotaChange(
+            path=path,
+            final_size=None if size is None else int(size),
+            append=bool(change.append),
+        )
+        previous = normalized.get(path)
+        if previous is not None and previous.append and candidate.append:
+            candidate = OwnerQuotaChange(
+                path=path,
+                final_size=int(previous.final_size or 0) + int(candidate.final_size or 0),
+                append=True,
+            )
+        elif previous is not None and previous.append != candidate.append:
+            raise ValueError("quota batch cannot mix append and replacement for one path")
+        normalized[path] = candidate
+    return normalized
+
+
+def _logical_file_size(path: Path) -> int:
+    try:
+        info = path.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return 0
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return 0
+    return max(0, int(info.st_size))
+
+
+@contextmanager
+def _locked_owner_quota(path: Path) -> Iterator[None]:
+    manager = locked_json_path(path)
+    try:
+        manager.__enter__()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise OwnerQuotaUnavailable("owner quota lock is unavailable") from exc
+    try:
+        yield
+    finally:
+        manager.__exit__(None, None, None)
+
+
+__all__ = [
+    "OwnerQuotaAdmission",
+    "OwnerQuotaChange",
+    "OwnerQuotaEnforcer",
+    "OwnerQuotaExceeded",
+    "OwnerQuotaProjection",
+    "OwnerQuotaUnavailable",
+    "owner_quota_enforcer_from_policy",
+    "owner_logical_usage_bytes",
+]

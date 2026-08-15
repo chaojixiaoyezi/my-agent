@@ -1,0 +1,118 @@
+
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from ..common.json_io import locked_json_path, write_json_file_atomic_unlocked
+from ..common.opaque_id import validate_opaque_id
+from .exceptions import ConcurrencyConflictError
+
+if TYPE_CHECKING:
+    from ..settings.config import AgentConfig
+
+
+class OptimisticLock:
+
+    def __init__(self, config: AgentConfig):
+        self.config = config
+        self._workspace = Path(config.subagent_workspace)
+
+    def _get_lock_path(self, task_id: str) -> Path:
+        # 锁文件和任务文件在同一目录。task_id 是 opaque identifier（R0 #90）：
+        # 拼进路径前拒绝式校验，防 ../ 等注入在任意目录创建/锁定文件。
+        task_id = validate_opaque_id(task_id, kind="task_id")
+        task_dir = self._workspace / task_id
+        return task_dir / "task.json.lock"
+
+    def _ensure_task_dir(self, task_id: str) -> Path:
+        task_id = validate_opaque_id(task_id, kind="task_id")
+        task_dir = self._workspace / task_id
+        task_dir.mkdir(parents=True, exist_ok=True)
+        return task_dir
+
+    def acquire(self, task_id: str) -> int:
+        lock_path = self._get_lock_path(task_id)
+        return self._read_version(lock_path)
+
+    def _read_version(self, lock_path: Path) -> int:
+        """读当前版本号(缺失/损坏 → 1)。在 flock 临界区内复用,保证读到的是
+        没有被其它进程写到一半的完整记录。"""
+        if lock_path.exists():
+            try:
+                data = json.loads(lock_path.read_text(encoding="utf-8"))
+                return data.get("version", 1)
+            except (json.JSONDecodeError, KeyError, OSError):
+                pass
+
+        # 初始版本号为 1
+        return 1
+
+    def check(self, task_id: str, expected_version: int) -> bool:
+        current_version = self.acquire(task_id)
+        return current_version == expected_version
+
+    def release(self, task_id: str, expected_version: int) -> int:
+        lock_path = self._get_lock_path(task_id)
+        self._ensure_task_dir(task_id)
+
+        # 读-查-写整体套 flock(LOCK_EX),真正的 CAS:两进程同读 version=N 时,
+        # 后到者必然在 acquire 同一把 OS 锁后才能进来,届时读到的已是 N+1,
+        # 校验失败抛冲突——杜绝"两边都自以为成功"的丢更新(H4)。
+        with locked_json_path(lock_path):
+            current_version = self._read_version(lock_path)
+            if current_version != expected_version:
+                raise ConcurrencyConflictError(
+                    task_id=task_id,
+                    expected_version=expected_version,
+                    actual_version=current_version,
+                )
+
+            new_version = expected_version + 1
+            data = {
+                "version": new_version,
+                "updated_at": time.time(),
+            }
+            write_json_file_atomic_unlocked(lock_path, data)
+            return new_version
+
+    def cas_update(self, task_id: str, mutate, *, max_retries: int = 3) -> int:
+        """乐观锁 CAS 自动重试(C4):读版本 → 调 mutate()(幂等业务变更)→ release;版本冲突则重读重做。
+        mutate 是无参回调,冲突重试时会被重跑、必须幂等。超 max_retries 仍冲突则抛 ConcurrencyConflictError。"""
+        last_exc = None
+        for _ in range(max(1, max_retries)):
+            version = self.acquire(task_id)
+            mutate()
+            try:
+                return self.release(task_id, version)
+            except ConcurrencyConflictError as exc:
+                last_exc = exc
+        raise last_exc  # type: ignore[misc]
+
+    def get_version(self, task_id: str) -> int:
+        return self.acquire(task_id)
+
+    def set_version(self, task_id: str, version: int) -> None:
+        lock_path = self._get_lock_path(task_id)
+        self._ensure_task_dir(task_id)
+
+        data = {
+            "version": version,
+            "updated_at": time.time(),
+        }
+        # 与 release 同一把锁,原子落盘:set_version 是无条件覆写,但仍走原子
+        # temp+replace,避免写一半被并发读到半截 JSON(acquire 读会判损坏退化为 1)。
+        with locked_json_path(lock_path):
+            write_json_file_atomic_unlocked(lock_path, data)
+
+    def remove_lock(self, task_id: str) -> bool:
+        lock_path = self._get_lock_path(task_id)
+        if lock_path.exists():
+            lock_path.unlink()
+            return True
+        return False
+
+
+__all__ = ["OptimisticLock"]

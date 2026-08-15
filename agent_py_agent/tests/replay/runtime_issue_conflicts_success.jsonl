@@ -1,0 +1,3 @@
+{"type":"contract_ref","path":"../contracts/repeated_exploration_should_redirect_or_block.json"}
+{"type":"runtime_issue","code":"NO_PROGRESS","severity":"hard","blocks_success":true}
+{"type":"final","status":"SUCCEEDED"}

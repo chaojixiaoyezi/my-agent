@@ -1,0 +1,21 @@
+{
+  "contract_ref": "../contracts/missing_artifact_should_fail.json",
+  "model_steps": [
+    {
+      "type": "tool_call",
+      "tool": "missing_tool",
+      "params": {}
+    },
+    {
+      "type": "tool_call",
+      "tool": "dangerous_command",
+      "params": {
+        "command": "rm -rf /"
+      }
+    },
+    {
+      "type": "final",
+      "status": "SUCCEEDED"
+    }
+  ]
+}

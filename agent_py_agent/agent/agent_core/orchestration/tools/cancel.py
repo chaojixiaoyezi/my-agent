@@ -1,0 +1,903 @@
+from __future__ import annotations
+
+"""cancel_subagents control tool with TaskStatus-backed status filters."""
+
+import json
+import time
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+from ....common.audit_activation import structured_audit_source_worker_attributes
+from ....concurrency.interrupt import interrupt_by_name
+from ....runtime_errors import runtime_error_report
+from ....subagents.authorization_gate import OperationRequest, authorize_operation
+from ....subagents.model_capabilities import capability_request_requires_parent_resolution
+from ....subagents.models import FailureType, normalize_task_status, task_status_in
+from ....subagents.process_control import terminate_pid_with_escalation
+from ....subagents.runner_session_liveness import has_fresh_runner_session, runner_session_of
+from ....tooling.models import (
+    BaseTool,
+    EffectResolverPolicy,
+    IdempotencyPolicy,
+    ResourceScopePolicy,
+    ToolHandlerOutcome,
+    ToolRuntimePolicy,
+)
+from ...agent_tree.status import agent_tree_status_payload
+from ..create_policy import _current_run_id
+from ..tool_specs import build_cancel_subagents_model_spec
+
+if TYPE_CHECKING:
+    from ....core import SimpleAgent
+    from ....subagents.models import SubAgentTask
+
+
+@dataclass(frozen=True)
+class _CancelPayloadRequest:
+    ok: bool
+    params: dict[str, object]
+    cancelled: list[dict[str, object]]
+    failed: list[dict[str, object]]
+    skipped: list[dict[str, object]]
+    dry_run: bool
+
+
+@dataclass(frozen=True)
+class _CancelOneRequest:
+    task: SubAgentTask
+    params: dict[str, object]
+
+
+@dataclass(frozen=True)
+class CancelSubagentTaskRequest:
+    task: SubAgentTask
+    reason: str
+    kill_process: bool = True
+    source: str = "runtime"
+
+
+@dataclass(frozen=True)
+class _ResolveRunIdsResult:
+    ok: bool
+    run_ids: list[str]
+    error_payload: dict[str, object]
+
+
+@dataclass(frozen=True)
+class _CancellationContext:
+    reason: str
+    source: str
+    now: float
+    attempt_id: str
+    pid_report: dict[str, object]
+    closed_request_ids: list[str]
+    findings_ledger: str
+    findings_recorded: int
+
+
+@dataclass(frozen=True)
+class _ListRunsForCancelResult:
+    ok: bool
+    tasks: list[SubAgentTask]
+    error_payload: dict[str, object]
+
+
+@dataclass(frozen=True)
+class _StatusFilterResult:
+    ok: bool
+    statuses: set[str]
+    error_payload: dict[str, object]
+
+
+class CancelSubagentsTool(BaseTool):
+    model_spec = build_cancel_subagents_model_spec()
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy(
+            "dangerous",
+            by_parameter=(("dry_run", (("true", "read_only"), ("false", "dangerous"))),),
+        ),
+        idempotency_policy=IdempotencyPolicy("operation"),
+        # seq 253 闭合：run_id/run_ids/root_id 是逻辑 ID（任务标识），不是物理
+        # 路径——不标 logical 会被 scope 投影 resolve 成 workspace 假写根，与
+        # workspace_root 物理重叠 → RuntimeConflictError → store_unavailable。
+        resource_scopes=ResourceScopePolicy(
+            parameter_names=("run_id", "run_ids", "root_id"),
+            parameter_kinds={"run_id": "logical", "run_ids": "logical", "root_id": "logical"},
+            # seq 266 #1：run_id/run_ids 是同一 agent_run 资源的两个参数入口
+            # （handler 的 _explicit_run_ids 归一），必须锁同一 scope——
+            # 否则 cancel(run_id=r-1) 与 cancel(run_ids=[r-1]) 可同时过锁。
+            resource_domains={
+                "run_id": "agent_run",
+                "run_ids": "agent_run",
+                # root_id 是子树根（run_tree 域）；子树展开的具体 run 由
+                # effective_resource_scopes 在 claim 前锁到 agent_run 域。
+                "root_id": "run_tree",
+            },
+        ),
+    )
+
+    def __init__(self, agent: SimpleAgent):
+        self.agent = agent
+
+    def effective_resource_scopes(
+        self,
+        arguments: dict[str, object],
+        write_boundary: dict | None,
+        workspace_root: object,
+    ) -> tuple[str, ...]:
+        """seq 266 #3：claim 前展开运行期目标（root 子树 / status 过滤），
+        锁到具体 agent_run 域——否则 cancel(root_id=X) 可与直接点名
+        cancel(run_id=child-1) 并发改同一 run。展开失败保守锁稳定域
+        （run_tree:{root_id} / cancel:pool），绝不空锁。
+        """
+        root_id = str(arguments.get("root_id") or "").strip()
+        statuses: set[str] = set()
+        try:
+            status_result = _status_filter(arguments.get("status"))
+            if status_result.ok:
+                statuses = status_result.statuses
+        except Exception:
+            statuses = set()
+        # 显式 run_id/run_ids 已由参数投影锁 agent_run 域；无 root 无 status
+        # 时目标集为空——均无需 hook 补充。
+        if not root_id and not statuses:
+            return ()
+        try:
+            tasks = _list_runs_for_cancel(self.agent)
+        except Exception:
+            return (f"logical:run_tree:{root_id}",) if root_id else ("logical:cancel:pool",)
+        if not tasks.ok:
+            return (f"logical:run_tree:{root_id}",) if root_id else ("logical:cancel:pool",)
+        ids: list[str] = []
+        if root_id:
+            ids.extend(_subtree_ids(tasks.tasks, root_id))
+        if statuses and not root_id:
+            ids.extend(
+                str(task.id)
+                for task in tasks.tasks
+                if task_status_in(task.status, statuses)
+            )
+        if not ids:
+            return ()
+        return tuple(dict.fromkeys(f"logical:agent_run:{item}" for item in ids))
+
+    def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
+        return execute_cancel_subagents(self.agent, params)
+
+
+def execute_cancel_subagents(
+    agent: SimpleAgent,
+    params: dict[str, object],
+) -> ToolHandlerOutcome:
+    """Run canonical cancellation; model calls add Tool Gateway authority around it."""
+    run_ids_result = _resolve_run_ids(agent, params)
+    if not run_ids_result.ok:
+        payload = run_ids_result.error_payload
+        return _cancel_failure(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            _cancel_error_code(payload),
+        )
+    run_ids = run_ids_result.run_ids
+    if not run_ids:
+        return _cancel_failure(
+            "缺少 run_id/run_ids/root_id/status，未取消任何子代理。",
+            "TOOL_PARAMETER_REQUIRED",
+        )
+    status_filter_result = _status_filter(params.get("status"))
+    if not status_filter_result.ok:
+        payload = status_filter_result.error_payload
+        return _cancel_failure(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            _cancel_error_code(payload),
+        )
+    targets = _filter_existing_targets(
+        agent,
+        run_ids,
+        status_filter_result.statuses,
+    )
+    system_managed = _system_managed_source_workers(targets)
+    if system_managed:
+        payload = {
+            "ok": False,
+            "error_code": "AUDIT_SOURCE_WORKER_SYSTEM_MANAGED",
+            "error": (
+                "Audit 来源工作者由命名 Audit 的持久生命周期和租约控制器管理；"
+                "cancel_subagents 不能把保证来源改写成永久取消。"
+            ),
+            "protected_runs": system_managed,
+            "next_action": {
+                "control": "audit_named_clear",
+                "reason": "只有精确命名 Audit 的 clear 或父任务终止才能关闭来源工作者。",
+            },
+        }
+        return _cancel_failure(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            "AUDIT_SOURCE_WORKER_SYSTEM_MANAGED",
+        )
+    retry_required = _retry_required_targets(agent, targets)
+    if retry_required:
+        payload = {
+            "ok": False,
+            "error_code": "SUBAGENT_RETRY_REQUIRED",
+            "error": (
+                "至少一个目标仍满足同一 run 的结构化重试条件；本批没有取消任何子代理。"
+                "请调度原 run 继续，不能把可恢复失败改写成永久取消。"
+            ),
+            "protected_runs": retry_required,
+            "next_action": {
+                "tool": "dispatch_subagents",
+                "params": {
+                    "run_ids": [item["run_id"] for item in retry_required],
+                    "dry_run": False,
+                },
+                "reason": "复用原 run、checkpoint 和工作区继续执行，避免重做。",
+            },
+        }
+        return _cancel_failure(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            "SUBAGENT_RETRY_REQUIRED",
+        )
+    if bool(params.get("dry_run")):
+        return _cancel_payload_result(
+            agent,
+            _CancelPayloadRequest(
+                True,
+                params,
+                _dry_run_targets(targets),
+                [],
+                [],
+                True,
+            ),
+        )
+    return _execute_cancel_targets(agent, params, run_ids, targets)
+
+
+def _execute_cancel_targets(
+    agent: SimpleAgent,
+    params: dict[str, object],
+    run_ids: list[str],
+    targets: list[dict[str, object]],
+) -> ToolHandlerOutcome:
+    cancelled: list[dict[str, object]] = []
+    failed: list[dict[str, object]] = []
+    for item in targets:
+        task = item.get("task")
+        if task is None:
+            failed.append(
+                {
+                    "run_id": item.get("run_id", ""),
+                    "error": item.get("error", "load_failed"),
+                }
+            )
+            continue
+        try:
+            cancelled.append(
+                _cancel_one(agent, _CancelOneRequest(task=task, params=params))
+            )
+        except Exception as exc:  # pragma: no cover - defensive persistence/process edge cases.
+            failed.append(
+                {
+                    "run_id": getattr(task, "id", ""),
+                    **runtime_error_report(
+                        exc,
+                        context="cancel_subagents.cancel_one",
+                    ),
+                }
+            )
+    target_ids = {str(item.get("run_id", "")) for item in targets}
+    skipped = [
+        {"run_id": run_id, "reason": "status_filter_or_missing"}
+        for run_id in run_ids
+        if run_id not in target_ids
+    ]
+    return _cancel_payload_result(
+        agent,
+        _CancelPayloadRequest(
+            not failed,
+            params,
+            cancelled,
+            failed,
+            skipped,
+            False,
+        ),
+    )
+
+
+def _cancel_payload_result(
+    agent: SimpleAgent,
+    request: _CancelPayloadRequest,
+) -> ToolHandlerOutcome:
+    payload = {
+        "ok": request.ok,
+        "dry_run": request.dry_run,
+        "cancelled": request.cancelled,
+        "failed": request.failed,
+        "skipped": request.skipped,
+        "agent_tree": _compact_agent_tree(
+            agent_tree_status_payload(
+                agent,
+                {"root_id": request.params.get("root_id", "")},
+            )
+        ),
+    }
+    return ToolHandlerOutcome(
+        "cancel_subagents",
+        request.ok,
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        effect_outcome=(
+            "not_started"
+            if not request.ok and not request.cancelled
+            else ""
+        ),
+    )
+
+
+def _resolve_run_ids(agent: SimpleAgent, params: dict[str, object]) -> _ResolveRunIdsResult:
+    explicit = _explicit_run_ids(params)
+    root_id = str(params.get("root_id") or "").strip()
+    status_filter_result = _status_filter(params.get("status"))
+    if not status_filter_result.ok:
+        return _ResolveRunIdsResult(False, [], status_filter_result.error_payload)
+    status_filter = status_filter_result.statuses
+    ids = list(explicit)
+    if root_id:
+        tasks_result = _list_runs_for_cancel(agent)
+        if not tasks_result.ok:
+            return _ResolveRunIdsResult(False, [], tasks_result.error_payload)
+        tasks = tasks_result.tasks
+        ids.extend(_subtree_ids(tasks, root_id))
+    if status_filter and not explicit and not root_id:
+        tasks_result = _list_runs_for_cancel(agent)
+        if not tasks_result.ok:
+            return _ResolveRunIdsResult(False, [], tasks_result.error_payload)
+        tasks = tasks_result.tasks
+        ids.extend(str(task.id) for task in tasks if task_status_in(task.status, status_filter))
+    return _ResolveRunIdsResult(True, _dedupe(ids), {})
+
+
+def _list_runs_for_cancel(agent: SimpleAgent) -> _ListRunsForCancelResult:
+    try:
+        tasks = agent.subagents.list_runs()
+    except Exception as exc:
+        return _ListRunsForCancelResult(
+            False,
+            [],
+            {"ok": False, "error": runtime_error_report(exc, context="cancel_subagents.list_runs")},
+        )
+    return _ListRunsForCancelResult(True, tasks, {})
+
+
+def _explicit_run_ids(params: dict[str, object]) -> list[str]:
+    ids: list[str] = []
+    single = str(params.get("run_id") or "").strip()
+    if single:
+        ids.append(single)
+    raw_many = params.get("run_ids")
+    if isinstance(raw_many, str):
+        ids.extend(part.strip() for part in raw_many.split(","))
+    elif isinstance(raw_many, list):
+        ids.extend(str(part).strip() for part in raw_many)
+    return [item for item in ids if item]
+
+
+def _cancel_failure(output: str, error_code: str) -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(
+        "cancel_subagents",
+        False,
+        output,
+        error_code=error_code,
+        effect_outcome="not_started",
+    )
+
+
+def _cancel_error_code(error_payload: dict[str, object]) -> str:
+    """把 resolve/status 错误 payload 映射到准确分类码（避免无码兜底成 UNKNOWN_ERROR）。
+
+    - invalid_status_filter：status 取值非法，改参数可修 → TOOL_INVALID_ARGUMENTS。
+    - 其余（list_runs 抛错产出的 runtime_error_report）：运行时查询异常 → TOOL_EXECUTION_FAILED(可重试)。
+    """
+    if str(error_payload.get("error") or "") == "invalid_status_filter":
+        return "TOOL_INVALID_ARGUMENTS"
+    return "TOOL_EXECUTION_FAILED"
+
+
+def _status_filter(value: object) -> _StatusFilterResult:
+    if not value:
+        return _StatusFilterResult(True, set(), {})
+    statuses: set[str] = set()
+    invalid: list[str] = []
+    for item in _status_filter_values(value):
+        try:
+            statuses.add(normalize_task_status(item))
+        except ValueError:
+            invalid.append(str(item))
+    if invalid:
+        return _StatusFilterResult(
+            False,
+            set(),
+            {
+                "ok": False,
+                "error": "invalid_status_filter",
+                "invalid_statuses": invalid,
+                "message": "status 只接受当前 TaskStatus 协议值。",
+            },
+        )
+    return _StatusFilterResult(True, statuses, {})
+
+
+def _status_filter_values(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    if isinstance(value, list):
+        return [str(part).strip() for part in value if str(part).strip()]
+    return [str(value).strip()] if str(value).strip() else []
+
+
+def _subtree_ids(tasks: list[SubAgentTask], root_id: str) -> list[str]:
+    by_id = {str(task.id): task for task in tasks}
+    children: dict[str, list[str]] = {}
+    for task in tasks:
+        parent_id = str(getattr(task, "parent_id", "") or "")
+        if parent_id:
+            children.setdefault(parent_id, []).append(str(task.id))
+    found: list[str] = []
+    queue = [root_id]
+    while queue:
+        current = queue.pop(0)
+        if current in found:
+            continue
+        if current in by_id:
+            found.append(current)
+        queue.extend(children.get(current, []))
+    return found
+
+
+def _filter_existing_targets(agent: SimpleAgent, run_ids: list[str], status_filter: set[str]) -> list[dict[str, object]]:
+    targets: list[dict[str, object]] = []
+    for run_id in run_ids:
+        item = _load_cancel_target(agent, run_id)
+        task = item.get("task")
+        if task is None:
+            targets.append({"run_id": run_id, "error": item.get("error")})
+            continue
+        if status_filter and not task_status_in(getattr(task, "status", ""), status_filter):
+            continue
+        targets.append(item)
+    return targets
+
+
+def _load_cancel_target(agent: SimpleAgent, run_id: str) -> dict[str, object]:
+    try:
+        # 3.txt B.4：cancel 走统一授权查询门（owner 一致性 + 子树可见性）。
+        task = authorize_operation(
+            agent.subagents,
+            OperationRequest(
+                operation="cancel",
+                run_id=run_id,
+                requester_owner=_requester_owner(agent),
+                requester_run_id=_current_run_id(agent),
+            ),
+        )
+        return {"run_id": run_id, "task": task}
+    except Exception as exc:
+        return {"run_id": run_id, "task": None, "error": runtime_error_report(exc, context="cancel_subagents.load")}
+
+
+def _requester_owner(agent: SimpleAgent) -> str:
+    return str(getattr(getattr(agent, "home_paths", None), "owner_id", "") or "")
+
+
+def _retry_required_targets(
+    agent: SimpleAgent,
+    targets: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Protect retryable failed runs from model-authored cancellation.
+
+    The runner dispatcher owns retry eligibility.  Reusing its exact policy here
+    keeps cancellation and dispatch from disagreeing about whether the same run
+    can continue.  Explicit user /stop uses the separate control path and does
+    not pass through this model tool boundary.
+    """
+    from ...runner.dispatch import (
+        _can_retry_same_run,
+        _runner_max_attempts,
+        _same_run_redispatch_limit,
+    )
+
+    runtime_policy = getattr(agent, "runtime_guard_policy", None)
+    runner_max_attempts = _runner_max_attempts(
+        getattr(agent.config, "runner_failure_policy", "auto"),
+        runtime_policy=runtime_policy,
+    )
+    same_run_limit = _same_run_redispatch_limit(
+        getattr(agent.config, "same_run_redispatch_limit", None),
+        runtime_policy=runtime_policy,
+    )
+    protected: list[dict[str, object]] = []
+    for item in targets:
+        task = item.get("task")
+        if task is None or not _can_retry_same_run(
+            task,
+            runner_max_attempts,
+            same_run_limit,
+        ):
+            continue
+        protected.append(
+            {
+                "run_id": str(getattr(task, "id", "") or ""),
+                "status": str(getattr(task, "status", "") or ""),
+                "failure_type": str(getattr(task, "failure_type", "") or ""),
+                "runner_attempts": max(
+                    0,
+                    int(getattr(task, "runner_attempts", 0) or 0),
+                ),
+            }
+        )
+    return protected
+
+
+# LLM: A model-facing generic cancellation tool cannot terminate the
+# system-managed worker that carries an Audit source guarantee. Exact named
+# Audit control and lifecycle reconcilers call ``cancel_subagent_task`` directly.
+# 中文说明：模型可调用的通用取消工具不能关闭承担 Audit 来源保证的系统工作者；
+# 精确命名 clear 和父任务生命周期控制器仍复用底层统一取消原语。
+def _system_managed_source_workers(
+    targets: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    protected: list[dict[str, object]] = []
+    for item in targets:
+        task = item.get("task")
+        attrs = getattr(task, "attributes", {}) if task is not None else {}
+        if not structured_audit_source_worker_attributes(attrs):
+            continue
+        protected.append(
+            {
+                "run_id": str(getattr(task, "id", "") or ""),
+                "status": str(getattr(task, "status", "") or ""),
+                "worker_key": str(attrs.get("audit_source_worker_key") or ""),
+                "watch_id": str(attrs.get("audit_source_watch_id") or ""),
+            }
+        )
+    return protected
+
+
+def _dry_run_targets(targets: list[dict[str, object]]) -> list[dict[str, object]]:
+    result: list[dict[str, object]] = []
+    for item in targets:
+        task = item.get("task")
+        if task is None:
+            result.append({"run_id": item.get("run_id", ""), "error": item.get("error", "load_failed")})
+            continue
+        result.append({"run_id": getattr(task, "id", ""), "status": getattr(task, "status", "")})
+    return result
+
+
+def _cancel_one(agent: SimpleAgent, request: _CancelOneRequest) -> dict[str, object]:
+    params = request.params
+    reason = str(params.get("reason") or "cancel_subagents").strip()
+    return cancel_subagent_task(
+        agent,
+        CancelSubagentTaskRequest(
+            request.task,
+            reason,
+            bool(params.get("kill_process", True)),
+            "cancel_subagents",
+        ),
+    )
+
+
+def cancel_subagent_task(
+    agent: SimpleAgent,
+    request: CancelSubagentTaskRequest,
+) -> dict[str, object]:
+    """Cancel one canonical run through the same lifecycle path as /stop tooling."""
+    task = request.task
+    reason = request.reason
+    attempt_id = str(getattr(task, "runner_active_attempt_id", "") or "").strip()
+    if attempt_id:
+        task = agent.subagents.lifecycle.abandon_runner_attempt(task.id, attempt_id, reason=reason)
+    now = time.time()
+    pid_report = _terminate_task_pid(agent, task, request.kill_process)
+    if pid_report.get("status") == "no_pid":
+        # 线程形态没有 pid 可杀:走协作中断,工具循环在下个安全点体面收工。
+        pid_report["thread_interrupt"] = _interrupt_dispatch_thread(agent, task.id)
+    closed_request_ids = _close_pending_capability_requests(task, reason)
+    findings_ledger, findings_recorded = _findings_ledger_snapshot(task)
+    context = _CancellationContext(
+        reason,
+        request.source,
+        now,
+        attempt_id,
+        pid_report,
+        closed_request_ids,
+        findings_ledger,
+        findings_recorded,
+    )
+    task.attributes = _cancelled_attributes(task, context)
+    return _persist_cancelled_task(agent, task, context)
+
+
+def _cancelled_attributes(task: SubAgentTask, context: _CancellationContext) -> dict[str, object]:
+    attrs = dict(getattr(task, "attributes", {}) or {})
+    attrs["cancel_subagents"] = {
+        "cancel_status": "CANCELLED",
+        "source": context.source,
+        "reason": context.reason,
+        "cancelled_at": context.now,
+        "previous_status": str(getattr(task, "status", "") or ""),
+        "previous_failure_type": str(getattr(task, "failure_type", "") or ""),
+        "abandoned_attempt_id": context.attempt_id,
+        "pid_report": context.pid_report,
+        "closed_capability_request_ids": context.closed_request_ids,
+        # 增量结论账指针:取消了结 run,不了结它已确认的结论——账在哪、几条,随回执带给主代理。
+        "findings_ledger": context.findings_ledger,
+        "findings_recorded": context.findings_recorded,
+    }
+    return attrs
+
+
+def _persist_cancelled_task(
+    agent: SimpleAgent,
+    task: SubAgentTask,
+    context: _CancellationContext,
+) -> dict[str, object]:
+    # 结构化取消 = CANCELLED(中性"了结"),不是 ABANDONED(烂尾)。CANCELLED 已补进
+    # SUBAGENT_HANDLED_TERMINAL_STATUSES,继承终态语义(recovery 不再捡、compaction 不续传),
+    # 行为等价旧 ABANDONED;但状态名不再把"完成产物后收尾取消"误显成失败。ABANDONED 只留给
+    # startup_recovery 崩溃调和(进程已死)那种名副其实的烂尾。
+    task.status = "CANCELLED"
+    task.failure_type = FailureType.CANCELLED.value
+    task.ended_at = context.now
+    task.updated_at = context.now
+    task.runner_active_attempt_id = ""
+    agent.subagents.save(task)
+    agent.subagents.actions._append_task_work_log(
+        task,
+        f"cancel_subagents: status=CANCELLED reason={context.reason}",
+    )
+    conversation_link = _sync_cancelled_conversation_link(agent, task.id)
+    return {
+        "run_id": task.id,
+        "status": task.status,
+        "cancel_status": "CANCELLED",
+        "abandoned_attempt_id": context.attempt_id,
+        "pid_report": context.pid_report,
+        "conversation_link": conversation_link,
+        "findings_ledger": context.findings_ledger,
+        "findings_recorded": context.findings_recorded,
+    }
+
+
+def _sync_cancelled_conversation_link(agent: SimpleAgent, task_id: str) -> dict[str, object]:
+    """Retire an existing conversation task link without inventing a binding."""
+    store = getattr(agent, "conversation_store", None)
+    if store is None:
+        return {"status": "unavailable"}
+    try:
+        link = store.update_task_status({"task_id": task_id, "status": "cancelled"})
+    except Exception as exc:
+        return {
+            "status": "error",
+            "error": runtime_error_report(
+                exc,
+                context="cancel_subagents.conversation_link",
+            ),
+        }
+    return {"status": "updated" if link is not None else "not_linked"}
+
+
+# 函数用途: 取消时刻给出该 run 增量结论账的指针与行数(结构化事实,内容不判定)——
+#   主代理据此在整合报告里合并被取消路的已确认结论,取消不再等于结论丢失。
+def _findings_ledger_snapshot(task: SubAgentTask) -> tuple[str, int]:
+    path_text = str(getattr(task, "agent_run_findings_jsonl", "") or "").strip()
+    if not path_text:
+        return "", 0
+    try:
+        with open(path_text, encoding="utf-8") as handle:
+            return path_text, sum(1 for line in handle if line.strip())
+    except OSError:
+        return path_text, 0
+
+
+# LLM: 取消=对该子代理一切未决事项的"了结":它挂着的 OPEN 能力申请永远不会再被执行,
+#   留着会让父代理持续把一个已了结的子代理视为待裁决。CLOSED 是协议现有终态，
+#   原因落 constraints 审计。
+# 函数用途: 取消时把该子代理仍需父级裁决的申请逐条置 CLOSED,返回被关闭的申请 id。
+def _close_pending_capability_requests(task: SubAgentTask, reason: str) -> list[str]:
+    closed: list[str] = []
+    for request in getattr(task, "capability_requests", None) or []:
+        if not capability_request_requires_parent_resolution(getattr(request, "status", "OPEN")):
+            continue
+        request.status = "CLOSED"
+        constraints = dict(getattr(request, "constraints", {}) or {})
+        constraints["denial_reason"] = f"subagent_cancelled: {reason}"
+        request.constraints = constraints
+        closed.append(str(getattr(request, "id", "") or ""))
+    return [item for item in closed if item]
+
+
+# LLM: 进程终止统一走 subagents/process_control 的两阶段原语(SIGTERM 组→宽限→
+#   SIGKILL 升级),与出口孤儿回收同一手法;本函数只负责"要不要杀"的参数裁决。
+# 函数用途: 取消任务时按 kill_process 参数决定是否连后台进程一起收掉。
+# 函数用途: 按 run_id 找到 in-process 派工线程的登记名并递中断旗;
+#   返回 signaled/not_found(没登记=不是线程形态或线程已结束,无害)。
+def _interrupt_dispatch_thread(agent: SimpleAgent, run_id: str) -> str:
+    registry = getattr(agent, "_background_subagent_dispatches", None)
+    if not isinstance(registry, dict):
+        return "not_found"
+    for entry in registry.values():
+        data = entry if isinstance(entry, dict) else {}
+        run_ids = [str(item or "") for item in (data.get("run_ids") or [])]
+        if run_id not in run_ids:
+            continue
+        siblings = _active_shared_host_siblings(agent, run_id, run_ids)
+        if siblings is None:
+            return "shared_host_unknown"
+        if siblings:
+            return "shared_host_cooperative"
+        if interrupt_by_name(str(data.get("thread_name") or "")):
+            return "signaled"
+    return "not_found"
+
+
+def _terminate_task_pid(
+    agent: SimpleAgent,
+    task: SubAgentTask,
+    kill_process: bool,
+) -> dict[str, object]:
+    pid = _task_pid(task)
+    if not pid:
+        return {"status": "no_pid"}
+    if not kill_process:
+        return {"status": "skipped", "pid": pid}
+    siblings = _active_subprocess_host_siblings(agent, task, pid)
+    if siblings is None:
+        return {
+            "status": "shared_host_unknown",
+            "pid": pid,
+            "escalated": False,
+        }
+    if siblings:
+        # A subagents-dispatch process may host several runner attempts. The
+        # task attempt was fenced above, so this runner will stop at its next
+        # model/tool/commit boundary. Killing the shared PID here would also
+        # abort unrelated live tasks and force avoidable orphan recovery.
+        return {
+            "status": "shared_host_cooperative",
+            "pid": pid,
+            "escalated": False,
+            "shared_run_ids": siblings,
+        }
+    return terminate_pid_with_escalation(pid)
+
+
+def _active_subprocess_host_siblings(
+    agent: SimpleAgent,
+    task: SubAgentTask,
+    pid: int,
+) -> list[str] | None:
+    manager = getattr(agent, "subagents", None)
+    if not callable(getattr(manager, "list_runs", None)):
+        return None
+    try:
+        tasks = manager.list_runs()
+    except Exception:
+        # Process exclusivity is a destructive-action prerequisite. If the
+        # canonical task ledger cannot be read, fail closed to attempt fencing.
+        return None
+    current_id = str(getattr(task, "id", "") or "")
+    siblings: list[str] = []
+    for candidate in tasks:
+        candidate_id = str(getattr(candidate, "id", "") or "")
+        if not candidate_id or candidate_id == current_id:
+            continue
+        if not task_status_in(getattr(candidate, "status", ""), {"RUNNING"}):
+            continue
+        if not has_fresh_runner_session(candidate):
+            continue
+        session = runner_session_of(candidate)
+        if session.get("in_process") is not False:
+            continue
+        try:
+            candidate_pid = int(session.get("worker_pid") or 0)
+        except (TypeError, ValueError):
+            continue
+        if candidate_pid == pid:
+            siblings.append(candidate_id)
+    return sorted(set(siblings))
+
+
+def _active_shared_host_siblings(
+    agent: SimpleAgent,
+    run_id: str,
+    shared_run_ids: list[str],
+) -> list[str] | None:
+    candidate_ids = [
+        candidate_id
+        for candidate_id in shared_run_ids
+        if candidate_id and candidate_id != run_id
+    ]
+    # The dispatch registry is the authority for which run ids share this
+    # in-process host.  A single-run host is therefore proven exclusive without
+    # consulting the task ledger; requiring an unrelated manager here would
+    # turn a safe immediate interrupt into a false ``shared_host_unknown``.
+    if not candidate_ids:
+        return []
+    manager = getattr(agent, "subagents", None)
+    if not callable(getattr(manager, "load", None)):
+        return None
+    siblings: list[str] = []
+    for candidate_id in candidate_ids:
+        try:
+            candidate = manager.load(candidate_id)
+        except Exception:
+            return None
+        if task_status_in(getattr(candidate, "status", ""), {"RUNNING"}):
+            siblings.append(candidate_id)
+    return sorted(set(siblings))
+
+
+def _task_pid(task: SubAgentTask) -> int:
+    runner_session = runner_session_of(task) if has_fresh_runner_session(task) else {}
+    # An in-process runner is a thread inside the Gateway process.  Its
+    # worker_pid identifies the host process for liveness only; signalling it
+    # would terminate every user and task sharing that Gateway.  会话运行时 and
+    # 长期助手 interrupt in-process agents cooperatively and reserve OS signals
+    # for separately spawned workers, so make the persisted topology fact the
+    # authority before considering any legacy PID mirrors.
+    # Only the exact persisted boolean ``False`` authorizes OS signalling.
+    # Missing/corrupt topology fails closed to cooperative cancellation.
+    if not runner_session or runner_session.get("in_process") is not False:
+        return 0
+    # The fresh subprocess session is the sole authority for its OS PID.
+    # Legacy mirrors can be stale or can name the shared Gateway host, so they
+    # must never recover a destructive signal path when the session is absent.
+    try:
+        pid = int(runner_session.get("worker_pid") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return pid if pid > 0 else 0
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
+__all__ = [
+    "CancelSubagentTaskRequest",
+    "CancelSubagentsTool",
+    "cancel_subagent_task",
+    "execute_cancel_subagents",
+]
+
+
+def _compact_agent_tree(payload: dict[str, object]) -> dict[str, object]:
+    nodes = payload.get("nodes", [])
+    if isinstance(nodes, list):
+        return {
+            "nodes": [_compact_tree_node(node) for node in nodes if isinstance(node, dict)],
+            "counts": payload.get("counts", {}),
+        }
+    root = payload.get("tree")
+    if isinstance(root, dict):
+        return {"tree": _compact_tree_node(root), "counts": payload.get("counts", {})}
+    return {"counts": payload.get("counts", {})}
+
+
+def _compact_tree_node(node: dict[str, object]) -> dict[str, object]:
+    compact = {
+        "run_id": node.get("run_id") or node.get("id", ""),
+        "status": node.get("status", ""),
+        "channel_status": node.get("channel_status", ""),
+        "failure_type": node.get("failure_type", ""),
+    }
+    children = node.get("children", [])
+    if isinstance(children, list) and children:
+        compact["children"] = [_compact_tree_node(child) for child in children if isinstance(child, dict)]
+    return compact

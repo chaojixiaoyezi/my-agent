@@ -1,0 +1,18 @@
+{
+  "name": "repeated_exploration_should_redirect_or_block",
+  "task_type": "builder_backed_artifact",
+  "runtime": {
+    "required_issue_codes": [
+      "NO_PROGRESS"
+    ],
+    "forbid_succeeded_when_issue_codes_present": [
+      "NO_PROGRESS"
+    ]
+  },
+  "final_status": {
+    "allow_succeeded_only_if": [
+      "required_runtime_issue_codes_present",
+      "runtime_success_allowed"
+    ]
+  }
+}

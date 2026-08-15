@@ -1,0 +1,476 @@
+"""LLM: 测试飞书适配器 — 消息格式转换、webhook 验证、回调处理。
+
+给人看的解释：
+测试 FeishuAdapter 的各项能力：飞书消息解析、安全验证、token 获取。
+不实际发起飞书 HTTP 请求，所有外部调用均 mock。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from agent_py_agent.agent.adapter.feishu import (
+    FeishuAdapter,
+    _feishu_msg_api_with_retry,
+    _send_feishu_file,
+)
+from agent_py_agent.agent.adapter.protocol import IncomingMessage, OutgoingMessage
+
+
+class TestFeishuSignatureVerification:
+    """测试飞书签名验证逻辑。"""
+
+    def test_verify_token_success(self) -> None:
+        adapter = FeishuAdapter(
+            config={
+                "feishu_app_id": "app_id",
+                "feishu_app_secret": "secret",
+                "feishu_verification_token": "my_token",
+            },
+            callback_port=8421,
+        )
+        assert adapter.verify_feishu_signature("my_token", "123", "any_sig") is True
+
+    def test_verify_token_failure(self) -> None:
+        adapter = FeishuAdapter(
+            config={
+                "feishu_app_id": "app_id",
+                "feishu_app_secret": "secret",
+                "feishu_verification_token": "my_token",
+            },
+            callback_port=8421,
+        )
+        assert adapter.verify_feishu_signature("wrong_token", "123", "any_sig") is False
+
+    def test_verify_fail_closed_when_unconfigured(self) -> None:
+        # #4 fail-closed:既无 verification_token 也无 encrypt_key → 拒绝一切(不处理无验证事件)
+        adapter = FeishuAdapter(
+            config={"feishu_app_id": "app_id", "feishu_app_secret": "secret"},
+            callback_port=8421,
+        )
+        assert adapter.verify_feishu_signature("anything", "123", "sig") is False
+        assert adapter.verify_feishu_signature("", "", "") is False  # 缺 token 头也不放行
+
+    def test_verify_with_encrypt_key(self) -> None:
+        adapter = FeishuAdapter(
+            config={
+                "feishu_app_id": "app_id",
+                "feishu_app_secret": "secret",
+                "feishu_verification_token": "tok",
+                "feishu_encrypt_key": "encrypt_key_123",
+            },
+            callback_port=8421,
+        )
+        # SHA256 方式验证
+        source = "encrypt_key_123" + "456" + "tok"
+        expected = hmac.new(source.encode(), b"", hashlib.sha256).hexdigest()
+        assert adapter.verify_feishu_signature("tok", "456", expected) is True
+
+
+class TestFeishuTokenCaching:
+    """测试飞书 token 缓存逻辑。"""
+
+    def test_token_not_fetched_until_needed(self) -> None:
+        adapter = FeishuAdapter(
+            config={"feishu_app_id": "id", "feishu_app_secret": "secret"},
+            callback_port=8421,
+        )
+        assert adapter._tenant_access_token is None
+        # 初始未获取
+        assert adapter._token_expires_at == 0
+
+
+class TestFeishuMessageDispatch:
+    """测试飞书消息通过 on_message 回调分发。"""
+
+    def test_dispatch_calls_registered_callback(self) -> None:
+        adapter = FeishuAdapter(
+            config={"feishu_app_id": "id", "feishu_app_secret": "secret"},
+            callback_port=8421,
+        )
+        received: list[IncomingMessage] = []
+
+        def cb(msg: IncomingMessage) -> None:
+            received.append(msg)
+
+        adapter.on_message(cb)
+
+        test_msg = IncomingMessage(
+            channel="feishu",
+            user_id="ou_test",
+            content="test content",
+            message_id="om_123",
+        )
+        adapter._dispatch(test_msg)
+
+        assert len(received) == 1
+        assert received[0].content == "test content"
+
+
+class TestFeishuSendMessage:
+    """测试飞书发送消息逻辑（mock HTTP）。"""
+
+    def test_send_message_without_app_id_fails(self) -> None:
+        adapter = FeishuAdapter(
+            config={"feishu_app_id": "", "feishu_app_secret": ""},
+            callback_port=8421,
+        )
+        msg = OutgoingMessage(channel="feishu", user_id="ou_1", content="hello")
+        result = adapter.send_message("ou_1", msg)
+        assert result is False
+
+    def test_send_message_uses_stable_distinct_uuid_for_each_piece(self) -> None:
+        adapter = FeishuAdapter(
+            config={"feishu_app_id": "id", "feishu_app_secret": "secret"},
+            callback_port=8421,
+        )
+        message = OutgoingMessage(
+            channel="feishu",
+            user_id="ou_1",
+            content="甲" * 8_000 + "\n" + "乙" * 20,
+            metadata={"delivery_idempotency_key": "delivery-7"},
+        )
+        with patch.object(
+            adapter,
+            "_get_tenant_access_token",
+            return_value="tok",
+        ), patch(
+            "agent_py_agent.agent.adapter.feishu._send_feishu_rendered",
+            return_value=True,
+        ) as send:
+            assert adapter.send_message("ou_1", message) is True
+            first_uuids = [call.args[3] for call in send.call_args_list]
+            send.reset_mock()
+            assert adapter.send_message("ou_1", message) is True
+            second_uuids = [call.args[3] for call in send.call_args_list]
+
+        assert len(first_uuids) == 2
+        assert first_uuids[0] != first_uuids[1]
+        assert first_uuids == second_uuids
+        assert all(0 < len(value) <= 50 for value in first_uuids)
+
+    def test_transport_retry_requires_and_reuses_provider_uuid(self) -> None:
+        body = {
+            "receive_id": "ou_1",
+            "msg_type": "text",
+            "content": '{"text":"hello"}',
+            "uuid": "stable-uuid",
+        }
+        with patch(
+            "agent_py_agent.agent.adapter.feishu._feishu_msg_api",
+            side_effect=[TimeoutError("late response"), {"code": 0}],
+        ) as request, patch(
+            "agent_py_agent.agent.adapter.feishu.time.sleep"
+        ) as sleep:
+            result = _feishu_msg_api_with_retry(
+                "POST",
+                "/im/v1/messages?receive_id_type=open_id",
+                body,
+                "tok",
+            )
+
+        assert result == {"code": 0}
+        assert request.call_count == 2
+        assert request.call_args_list[0].args[2]["uuid"] == "stable-uuid"
+        assert request.call_args_list[1].args[2]["uuid"] == "stable-uuid"
+        sleep.assert_called_once_with(1.0)
+
+    def test_transport_timeout_without_provider_uuid_is_not_retried(self) -> None:
+        body = {
+            "receive_id": "ou_1",
+            "msg_type": "text",
+            "content": '{"text":"hello"}',
+        }
+        with patch(
+            "agent_py_agent.agent.adapter.feishu._feishu_msg_api",
+            side_effect=TimeoutError("late response"),
+        ) as request:
+            with pytest.raises(TimeoutError):
+                _feishu_msg_api_with_retry(
+                    "POST",
+                    "/im/v1/messages?receive_id_type=open_id",
+                    body,
+                    "tok",
+                )
+
+        assert request.call_count == 1
+
+    def test_non_retryable_http_error_is_not_retried_even_with_uuid(self) -> None:
+        body = {
+            "receive_id": "ou_1",
+            "msg_type": "text",
+            "content": '{"text":"hello"}',
+            "uuid": "stable-uuid",
+        }
+        error = urllib.error.HTTPError(
+            "https://open.feishu.cn",
+            400,
+            "bad request",
+            {},
+            None,
+        )
+        with patch(
+            "agent_py_agent.agent.adapter.feishu._feishu_msg_api",
+            side_effect=error,
+        ) as request:
+            with pytest.raises(urllib.error.HTTPError):
+                _feishu_msg_api_with_retry(
+                    "POST",
+                    "/im/v1/messages?receive_id_type=open_id",
+                    body,
+                    "tok",
+                )
+
+        assert request.call_count == 1
+
+    def test_file_message_reuses_stable_provider_uuid(self, tmp_path: Path) -> None:
+        artifact = tmp_path / "report.pdf"
+        artifact.write_bytes(b"report")
+        with patch(
+            "agent_py_agent.agent.adapter.feishu._upload_feishu",
+            return_value="file-key",
+        ), patch(
+            "agent_py_agent.agent.adapter.feishu._send_feishu_media",
+            return_value=True,
+        ) as send:
+            assert _send_feishu_file(
+                "ou_1",
+                artifact,
+                "tok",
+                "attachment-delivery-7",
+            )
+            first_uuid = send.call_args.args[4]
+            send.reset_mock()
+            assert _send_feishu_file(
+                "ou_1",
+                artifact,
+                "tok",
+                "attachment-delivery-7",
+            )
+            second_uuid = send.call_args.args[4]
+
+        assert first_uuid
+        assert first_uuid == second_uuid
+        assert len(first_uuid) <= 50
+
+
+class TestFeishuLifecycle:
+    """测试飞书适配器启停。"""
+
+    def test_start_stop_clean(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            adapter = FeishuAdapter(
+                config={"feishu_app_id": "", "feishu_app_secret": ""},
+                callback_port=0,  # 随机端口
+                workspace_root=Path(td),
+            )
+            adapter.start()
+            assert adapter.running is True
+
+            adapter.stop()
+            assert adapter.running is False
+
+    def test_double_start_is_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            adapter = FeishuAdapter(
+                config={"feishu_app_id": "", "feishu_app_secret": ""},
+                callback_port=0,
+                workspace_root=Path(td),
+            )
+            adapter.start()
+            first_state = adapter.running
+            adapter.start()  # 第二次启动
+            assert first_state is True
+            adapter.stop()
+
+    def test_stop_when_not_running(self) -> None:
+        adapter = FeishuAdapter(
+            config={"feishu_app_id": "", "feishu_app_secret": ""},
+            callback_port=8421,
+        )
+        # 未 start 就 stop 不应报错
+        adapter.stop()
+        assert adapter.running is False
+
+    def test_webhook_card_callback_can_set_private_chat_password(self, tmp_path: Path) -> None:
+        adapter = FeishuAdapter(
+            config={
+                "feishu_app_id": "id",
+                "feishu_app_secret": "secret",
+                "feishu_verification_token": "verify-me",
+                "feishu_connection_mode": "webhook",
+                "my_agent_home": str(tmp_path / "home"),
+            },
+            callback_port=0,
+        )
+        adapter.start()
+        try:
+            assert adapter._server is not None
+            port = int(adapter._server.server_address[1])
+            payload = {
+                "schema": "2.0",
+                "header": {"token": "verify-me"},
+                "event": {
+                    "operator": {"open_id": "ou_webhook"},
+                    "action": {
+                        "value": {
+                            "session_lock_action": "pwd_set",
+                            "user_id": "ou_webhook",
+                        },
+                        "form_value": {"pwd": "Abcd1234"},
+                    },
+                },
+            }
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{port}/feishu/callback",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=3) as response:
+                body = json.loads(response.read().decode("utf-8"))
+            assert body["card"]["data"]["header"]["template"] == "green"
+            assert adapter._unlock.store.has_password("ou_webhook") is True
+        finally:
+            adapter.stop()
+
+
+class TestFeishuProgressReaction:
+    """测试飞书原生 typing reaction(收到给消息贴 OnIt→处理完撤掉再回复)。任何失败都跳过 typing、绝不影响回复。"""
+
+    def _adapter(self) -> FeishuAdapter:
+        return FeishuAdapter(config={"feishu_app_id": "id", "feishu_app_secret": "secret"}, callback_port=8421)
+
+    def test_reaction_returns_message_and_reaction_handle(self) -> None:
+        adapter = self._adapter()
+        with patch.object(adapter, "_get_tenant_access_token", return_value="tok"), \
+             patch("agent_py_agent.agent.adapter.feishu_typing._add_reaction", return_value={"code": 0, "data": {"reaction_id": "rxn1"}}):
+            assert adapter.send_progress_placeholder("ou_1", "om_msg") == "om_msg:rxn1"
+
+    def test_reaction_empty_without_message_id(self) -> None:
+        # 没有消息 id(无处可贴)→ 返回""(typing 跳过)
+        adapter = self._adapter()
+        assert adapter.send_progress_placeholder("ou_1", "") == ""
+
+    def test_reaction_empty_on_api_failure(self) -> None:
+        # 无权限/接口失败 → 返回""(typing 跳过,不影响回复)
+        adapter = self._adapter()
+        with patch.object(adapter, "_get_tenant_access_token", return_value="tok"), \
+             patch("agent_py_agent.agent.adapter.feishu_typing._add_reaction", return_value={"code": 230001, "msg": "no permission"}):
+            assert adapter.send_progress_placeholder("ou_1", "om_msg") == ""
+
+    def test_reaction_empty_when_no_token(self) -> None:
+        adapter = self._adapter()
+        with patch.object(adapter, "_get_tenant_access_token", return_value=None):
+            assert adapter.send_progress_placeholder("ou_1", "om_msg") == ""
+
+    def test_finalize_removes_reaction_then_sends(self) -> None:
+        adapter = self._adapter()
+        msg = OutgoingMessage(channel="feishu", user_id="ou_1", content="答案")
+        with patch.object(adapter, "_get_tenant_access_token", return_value="tok"), \
+             patch("agent_py_agent.agent.adapter.feishu_typing._remove_reaction", return_value={"code": 0}) as rm, \
+             patch.object(adapter, "send_message", return_value=True) as send_msg:
+            assert adapter.finalize_response("ou_1", "om_msg:rxn1", msg) is True
+            rm.assert_called_once()  # 先撤掉"正在处理"reaction
+            send_msg.assert_called_once_with("ou_1", msg)  # 再发回复
+
+    def test_finalize_without_handle_just_sends(self) -> None:
+        adapter = self._adapter()
+        msg = OutgoingMessage(channel="feishu", user_id="ou_1", content="答案")
+        with patch("agent_py_agent.agent.adapter.feishu_typing._remove_reaction") as rm, \
+             patch.object(adapter, "send_message", return_value=True) as send_msg:
+            assert adapter.finalize_response("ou_1", "", msg) is True
+            rm.assert_not_called()  # 无句柄(没贴成 reaction)→不撤,直接发
+            send_msg.assert_called_once_with("ou_1", msg)
+
+    def test_finalize_remove_failure_still_sends(self) -> None:
+        # 撤 reaction 异常也绝不影响回复
+        adapter = self._adapter()
+        msg = OutgoingMessage(channel="feishu", user_id="ou_1", content="答案")
+        with patch.object(adapter, "_get_tenant_access_token", return_value="tok"), \
+             patch("agent_py_agent.agent.adapter.feishu_typing._remove_reaction", side_effect=Exception("boom")), \
+             patch.object(adapter, "send_message", return_value=True) as send_msg:
+            assert adapter.finalize_response("ou_1", "om_msg:rxn1", msg) is True
+            send_msg.assert_called_once_with("ou_1", msg)  # 撤失败也照常发回复
+
+
+class TestFeishuReplyEdit:
+    """测试引用回复 + 编辑消息(B)。"""
+
+    def _adapter(self) -> FeishuAdapter:
+        return FeishuAdapter(config={"feishu_app_id": "id", "feishu_app_secret": "secret"}, callback_port=8421)
+
+    def test_reply_message(self) -> None:
+        adapter = self._adapter()
+        with patch.object(adapter, "_get_tenant_access_token", return_value="tok"), \
+             patch("agent_py_agent.agent.adapter.feishu._reply_feishu_rendered", return_value=True) as rp:
+            assert adapter.reply_message("om_x", "答案") is True
+            rp.assert_called_once_with("om_x", "答案", "tok")
+
+    def test_reply_message_splits_long_result_and_attempts_every_piece(self) -> None:
+        adapter = self._adapter()
+        text = "甲" * 8_000 + "\n" + "乙" * 20
+        with patch.object(adapter, "_get_tenant_access_token", return_value="tok"), \
+             patch(
+                 "agent_py_agent.agent.adapter.feishu._reply_feishu_rendered",
+                 side_effect=[False, True],
+             ) as rp:
+            assert adapter.reply_message("om_x", text) is False
+            assert [call.args for call in rp.call_args_list] == [
+                ("om_x", "甲" * 8_000, "tok"),
+                ("om_x", "乙" * 20, "tok"),
+            ]
+
+    def test_reply_message_no_token(self) -> None:
+        adapter = self._adapter()
+        with patch.object(adapter, "_get_tenant_access_token", return_value=None):
+            assert adapter.reply_message("om_x", "答案") is False
+
+    def test_reply_message_uses_stable_uuid_when_key_is_present(self) -> None:
+        adapter = self._adapter()
+        with patch.object(
+            adapter,
+            "_get_tenant_access_token",
+            return_value="tok",
+        ), patch(
+            "agent_py_agent.agent.adapter.feishu._reply_feishu_rendered",
+            return_value=True,
+        ) as reply:
+            assert adapter.reply_message(
+                "om_x",
+                "答案",
+                "gateway-request-7",
+            ) is True
+
+        uuid_value = reply.call_args.args[3]
+        assert uuid_value
+        assert len(uuid_value) <= 50
+
+    def test_edit_message(self) -> None:
+        adapter = self._adapter()
+        with patch.object(adapter, "_get_tenant_access_token", return_value="tok"), \
+             patch("agent_py_agent.agent.adapter.feishu._edit_feishu_rendered", return_value=True) as ed:
+            assert adapter.edit_message("om_x", "新内容") is True
+            ed.assert_called_once_with("om_x", "新内容", "tok")
+
+    def test_finalize_with_reply_to_uses_reply(self) -> None:
+        # gateway 回复带 reply_to metadata → 引用用户原消息回复(而非普通发)
+        adapter = self._adapter()
+        msg = OutgoingMessage(channel="feishu", user_id="ou_1", content="答案", metadata={"reply_to": "om_orig"})
+        with patch.object(adapter, "reply_message", return_value=True) as rp, \
+             patch.object(adapter, "send_message") as sm:
+            assert adapter.finalize_response("ou_1", "", msg) is True
+            rp.assert_called_once_with("om_orig", "答案")
+            sm.assert_not_called()  # 有 reply_to→reply,不走普通 send

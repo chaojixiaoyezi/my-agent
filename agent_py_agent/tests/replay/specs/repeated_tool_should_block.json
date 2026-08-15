@@ -1,0 +1,14 @@
+{
+  "name": "repeated_tool_should_block",
+  "trace": "repeated_tool_should_block.jsonl",
+  "expected": {
+    "contract_ok": false,
+    "blocked": true,
+    "block_reason": "TOOL_GUARDRAIL_REPEAT_FAILURE_BLOCKED",
+    "replay_error_codes": [],
+    "contract_error_codes": [
+      "ARTIFACT_MISSING",
+      "REQUIRED_TOOL_CALL_MISSING"
+    ]
+  }
+}

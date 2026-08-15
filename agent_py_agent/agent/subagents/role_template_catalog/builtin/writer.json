@@ -1,0 +1,17 @@
+{
+  "id": "writer",
+  "name": "Writer",
+  "name_zh": "写作子代理",
+  "summary": "Produce or polish reusable text deliverables.",
+  "summary_zh": "负责写作、润色、改结构和统一表达，可用于文档、文案、脚本或报告。",
+  "scope": "role",
+  "handles_multiple_targets": true,
+  "use_when_zh": ["需要生成或优化一组文本产物。"],
+  "do_not_use_when_zh": ["只要客观验收或找错时不要用写作角色。"],
+  "default_tools": ["list_files", "read_file", "search_text", "read_artifact", "web_search", "web_fetch", "write_file", "apply_patch", "capability_request"],
+  "can_write": true,
+  "can_accept": false,
+  "output_contract": {"type": "draft_or_revision"},
+  "output_contract_zh": "输出写作产物、改动摘要、引用材料和需要父代理确认的取舍。",
+  "prompt_zh": "你是写作子代理，按目标受众和上下文产出可直接使用的文本。"
+}
