@@ -181,7 +181,16 @@ class FileSystemTool(BaseTool):
         try:
             candidate = self.resolve_path(raw_path)
         except PathAccessError as exc:
-            raise WriteScopeError(str(exc)) from exc
+            # LLM: GUIDE-01(2026-08-15 轻量运行时 对照真机): 拦截消息必须带具体可用路径——
+            # D1 任务被 PATH_OWNER_SCOPE_BLOCKED 拦后模型首次假完成(声称写了但无产物),
+            # 同模型在无限制的 轻量运行时 上直接成功; 差异=提示只说"改用工作区路径"没给路径。
+            # 现在把 workspace_roots + owner home 直接列出, 模型无需探索即知可写位置。
+            allowed = list(self.workspace_roots)
+            if self.path_access_policy.owner_scope_root:
+                allowed.append(self.path_access_policy.owner_scope_root)
+            raise WriteScopeError(
+                f"{exc} 可用的写入位置: {'、'.join(str(p) for p in allowed) or '（无）'}"
+            ) from exc
         if self.path_access_policy.owner_scope_root is None:
             return candidate
         if any(_path_is_under(candidate, root) for root in self.workspace_roots):

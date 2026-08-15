@@ -385,3 +385,30 @@ def test_apply_patch_rejects_unmatched_context(tmp_path: Path) -> None:
 
     assert not result.ok
     assert "上下文未命中" in result.output
+
+
+# LLM: GUIDE-01(2026-08-15 轻量运行时 对照真机): owner 模式写外部路径被拦时, 错误消息必须带
+# 具体可用写入位置(workspace_roots + owner home), 模型无需探索即知可写位置, 防止
+# "声称写了但实际无产物"的假完成。同模型在无限制的 轻量运行时 上直接成功, 差异在系统引导。
+# 函数用途: 验证 owner scope 拦截消息包含可用写入位置。
+def test_write_file_owner_block_message_lists_usable_roots(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    owner_home = tmp_path / "owner-home"
+    workspace.mkdir()
+    owner_home.mkdir()
+    tool = WriteFileTool(
+        workspace,
+        options=WriteFileToolOptions(
+            access_options=filesystem_access_options(
+                owner_scope_root=str(owner_home),
+                path_dangerous_roots=[],
+            )
+        ),
+    )
+
+    result = tool.execute({"path": str(tmp_path / "outside.txt"), "content": "bad"})
+
+    assert not result.ok
+    # 消息必须包含可用的 owner home 路径（模型据此知道往哪写）
+    assert str(owner_home) in result.output
+    assert "可用的写入位置" in result.output
