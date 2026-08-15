@@ -165,14 +165,26 @@ def test_no_blocks_and_plain_text_breaks(tmp_path: Path):
     assert decision.response.text == "任务完成。"
 
 
-def test_executed_tools_without_artifact_produced_break_is_unfinished(tmp_path: Path):
-    """EXEC-06 长任务复刻真机(2026-08-16): 模型调过工具(读源码)但从没写过任何
-    交付产物(write_file/edit_file/apply_patch)就无工具收口 → 假完成(RC=0 零产物)。
-    系统必须把这种收口标记 unfinished, CLI RC=2, 让续跑继续产出。"""
+def test_executed_tools_without_artifact_produced_continue_then_unfinished(tmp_path: Path):
+    """EXEC-06/06b 长任务复刻真机(2026-08-16): 模型调过工具(读源码)但从没写过任何
+    交付产物(write_file/edit_file/apply_patch)就无工具收口 → 假完成。
+    前 N 次应 continue(给机会继续产出), 连续 N 次仍零产物才 break+unfinished
+    (RC=2), 不哄不罚。"""
     from dataclasses import replace
 
     response = ModelResponse(text="继续推进：先读完剩余模块再枚举端点。", backend="fake")
     params = replace(_params(), executed_tools=["list_files", "read_file"])
+    for i in range(3):
+        decision = tool_loop_response_decision(
+            ToolLoopResponseDecisionRequest(
+                agent=_agent(tmp_path),
+                params=params,
+                response=response,
+                counters=ToolLoopRepairCounters(),
+            )
+        )
+        assert decision.action == "continue", f"第{i+1}次零产物收口应 continue"
+        assert getattr(params, "no_artifact_nudge_count", 0) == i + 1
     decision = tool_loop_response_decision(
         ToolLoopResponseDecisionRequest(
             agent=_agent(tmp_path),

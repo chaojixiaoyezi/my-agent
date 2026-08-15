@@ -611,10 +611,18 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
         final_response = request.response
         if _no_delivery_artifact_produced(request.params):
             # EXEC-06 长任务复刻真机(2026-08-16): 模型调过工具(读源码)但从未
-            # 写过任何交付产物就无工具收口 → 假完成(RC=0 零产物)。只在此前
-            # 调用过工具的"工具型任务"轮触发, 纯聊天(executed_tools 空)不受
-            # 影响; 只要曾经写过产物(write_file/edit_file/apply_patch)即放行。
-            # 标记 unfinished, CLI RC=2, resume 续跑让模型继续产出。
+            # 写过任何交付产物就无工具收口 → 假完成。只在此前调用过工具的
+            # "工具型任务"轮触发, 纯聊天(executed_tools 空)不受影响。
+            # 改进(EXEC-06b): 前 N 次这类收口应 **continue**(给模型机会继续产出),
+            # 因为模型常说"继续推进XXX"但本轮只输出计划; 连续 N 次仍无任何交付
+            # 产物才 unfinished 收口(RC=2 续跑), 不哄不罚。
+            nudge_count = int(getattr(request.params, "no_artifact_nudge_count", 0) or 0)
+            if nudge_count < _NO_ARTIFACT_CONTINUE_LIMIT:
+                object.__setattr__(
+                    request.params, "no_artifact_nudge_count", nudge_count + 1
+                )
+                request.params.tool_context.append(NO_ARTIFACT_NUDGE)
+                return ToolLoopResponseDecision("continue", None, [], request.counters)
             final_response = replace(
                 final_response,
                 runtime_status="unfinished",
@@ -837,3 +845,13 @@ def _no_delivery_artifact_produced(params: object) -> bool:
     if not executed:
         return False
     return not any(str(item) in _DELIVERY_PRODUCING_TOOLS for item in executed)
+
+
+# EXEC-06b: 无交付产物收口时给模型的继续提示与次数上限。
+_NO_ARTIFACT_CONTINUE_LIMIT = 3
+NO_ARTIFACT_NUDGE = (
+    "[tool-system]\n"
+    "本轮没有产出任何可交付文件（没有写文件/编辑/打补丁）。"
+    "如果任务还没完成，请继续调用工具完成实际产出——不要在产出前只输出计划或总结；"
+    "如果确实已完成且无需产物，请说明完成。"
+)
