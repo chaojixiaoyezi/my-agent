@@ -630,11 +630,11 @@ def _delivery_verify_no_tool_call_decision(
     if not isinstance(contract, dict):
         return None
     from ....cli.delivery_verify import (
-        VERIFY_CONTRACT_INVALID,
         VERIFY_FAILED,
         VERIFY_PASSED,
         VERIFY_SKIPPED,
         _contract_hash,
+        build_verification_id,
         delivery_verify_failure_context,
         persist_delivery_verify_event,
         run_delivery_verification,
@@ -644,15 +644,21 @@ def _delivery_verify_no_tool_call_decision(
         from ..runner.context import current_run_task_workspace_root
 
         workspace_root = current_run_task_workspace_root(request.agent, request.params)
-    except Exception:  # noqa: BLE001 workspace 拿不到不阻断
+    except Exception:  # noqa: BLE001 workspace 拿不到 → 根缺失 fail-closed（run 内拒绝执行）
         workspace_root = None
     try:
         state, results = run_delivery_verification(request.params, workspace_root)
     except Exception:  # noqa: BLE001 验证执行异常保守判失败（fail-closed）
         state, results = VERIFY_FAILED, []
     contract_hash = _contract_hash(contract)
+    verification_id = build_verification_id(request.params, contract)
     persist_delivery_verify_event(
-        request.agent, request.params, state, results, contract_hash
+        request.agent,
+        request.params,
+        state,
+        results,
+        contract_hash,
+        verification_id,
     )
     if state == VERIFY_SKIPPED:
         return None

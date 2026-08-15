@@ -104,7 +104,7 @@ def test_verify_commands_parsing_invalid():
 
 def test_run_verification_all_pass(tmp_path):
     contract = {"verify_commands": [{"command": "echo ok", "cwd": str(tmp_path)}]}
-    state, results = run_delivery_verification(_FakeParams(contract=contract))
+    state, results = run_delivery_verification(_FakeParams(contract=contract), workspace_root=tmp_path)
     assert state == VERIFY_PASSED
     assert len(results) == 1
     assert results[0]["ok"] is True
@@ -118,7 +118,7 @@ def test_run_verification_one_fails(tmp_path):
             {"command": "exit 3", "cwd": str(tmp_path)},
         ]
     }
-    state, results = run_delivery_verification(_FakeParams(contract=contract))
+    state, results = run_delivery_verification(_FakeParams(contract=contract), workspace_root=tmp_path)
     assert state == VERIFY_FAILED
     assert results[0]["ok"] is True
     assert results[1]["ok"] is False
@@ -131,7 +131,7 @@ def test_run_verification_timeout_fails(tmp_path):
             {"command": "sleep 5", "cwd": str(tmp_path), "timeout_seconds": 1}
         ]
     }
-    state, results = run_delivery_verification(_FakeParams(contract=contract))
+    state, results = run_delivery_verification(_FakeParams(contract=contract), workspace_root=tmp_path)
     assert state == VERIFY_FAILED
     assert "timeout" in results[0]["detail"]
 
@@ -198,7 +198,8 @@ def test_gate_no_contract_not_intervened():
 
 def test_gate_verify_pass_not_intervened(tmp_path):
     contract = {"verify_commands": [{"command": "echo ok", "cwd": str(tmp_path)}]}
-    assert _delivery_verify_no_tool_call_decision(_request(contract)) is None
+    # 无 workspace 根 → fail-closed（根缺失拒绝执行），不是不干预
+    assert _delivery_verify_no_tool_call_decision(_request(contract)) is not None
 
 
 def test_gate_verify_fail_unfinished(tmp_path):
@@ -290,3 +291,119 @@ def test_preflight_verify_commands_validation():
         {"verify_commands": [{"cwd": "x"}]}
     )
     assert any(f["code"] == "DELIVERY_CONTRACT_VERIFY_COMMAND_INVALID" for f in findings)
+
+
+# ---------- 双席 seq2013/2014 第二轮硬缺口 ----------
+
+
+def test_gate_workspace_root_missing_fail_closed(tmp_path):
+    """workspace 根缺失 → fail-closed 不执行（双席硬缺口1）。"""
+    contract = {"verify_commands": [{"command": "echo x", "cwd": str(tmp_path)}]}
+    request = _request(contract)
+    decision = _delivery_verify_no_tool_call_decision(request)
+    # workspace 拿不到（fake agent 无 workspace）→ run 内根缺失拒绝
+    assert decision is not None
+    assert decision.response.runtime_reason == "DELIVERY_VERIFY_FAILED"
+    assert any("workspace 根缺失" in line for line in request.params.tool_context)
+
+
+def test_run_verification_root_missing_fail_closed():
+    state, results = run_delivery_verification(
+        _FakeParams(contract={"verify_commands": [{"command": "echo x"}]}),
+        workspace_root=None,
+    )
+    assert state == VERIFY_FAILED
+    assert "workspace 根缺失" in results[0]["detail"]
+
+
+def test_verification_id_stable_and_distinct():
+    c1 = {"verify_commands": [{"command": "go build ./..."}]}
+    c2 = {"verify_commands": [{"command": "go test ./..."}]}
+    p1 = _FakeParams(contract=c1)
+    p1.attempt_id = "attempt-1"
+    p2 = _FakeParams(contract=c2)
+    p2.attempt_id = "attempt-1"
+    from agent_py_agent.cli.delivery_verify import build_verification_id
+
+    assert build_verification_id(p1, c1) == build_verification_id(p1, c1)  # 稳定
+    assert build_verification_id(p1, c1) != build_verification_id(p2, c2)  # 命令不同
+    p3 = _FakeParams(contract=c1)
+    p3.attempt_id = "attempt-2"
+    assert build_verification_id(p1, c1) != build_verification_id(p3, c1)  # attempt 不同
+
+
+def test_persist_event_uses_append_event(tmp_path):
+    """落账走权威 API append_event（双席 seq2014 实锤修复）。"""
+    from agent_py_agent.cli.delivery_verify import (
+        _contract_hash,
+        persist_delivery_verify_event,
+    )
+
+    calls = {"append": 0, "events": []}
+
+    class _FakeRepo:
+        def append_event(self, **kwargs):
+            calls["append"] += 1
+            calls["events"].append(kwargs)
+
+        def agent_run_for_run_id(self, run_id):
+            return {"agent_run_id": "agr-1"}
+
+        def list_runtime_events(self, **kwargs):
+            return []
+
+    class _FakeAgentWithRepo:
+        def __init__(self):
+            self.config = type("C", (), {"enable_tools": True})()
+            self.subagents = type("S", (), {"runtime_db": _FakeRepo()})()
+
+    params = _FakeParams(contract={"verify_commands": [{"command": "go build ./..."}]})
+    params.attempt_id = "attempt-1"
+    params.run_id = "run-1"
+    contract_hash = _contract_hash(params.delivery_contract)
+    persist_delivery_verify_event(
+        _FakeAgentWithRepo(), params, VERIFY_FAILED, [], contract_hash, "vid-1"
+    )
+    assert calls["append"] == 1
+    assert calls["events"][0]["event_type"] == "delivery_verify"
+    assert calls["events"][0]["attempt_id"] == "attempt-1"
+    assert calls["events"][0]["agent_run_id"] == "agr-1"
+    assert calls["events"][0]["payload"]["verification_id"] == "vid-1"
+
+
+def test_persist_event_idempotent_skip(tmp_path):
+    """同 verification_id 重复落账 → 幂等跳过（双席硬缺口3）。"""
+    from agent_py_agent.cli.delivery_verify import (
+        _contract_hash,
+        persist_delivery_verify_event,
+    )
+
+    calls = {"append": 0}
+
+    class _FakeRepo:
+        def append_event(self, **kwargs):
+            calls["append"] += 1
+
+        def agent_run_for_run_id(self, run_id):
+            return {"agent_run_id": "agr-1"}
+
+        def list_runtime_events(self, **kwargs):
+            return [{"payload_json": '{"verification_id": "vid-1"}'}]
+
+    class _FakeAgentWithRepo:
+        def __init__(self):
+            self.config = type("C", (), {"enable_tools": True})()
+            self.subagents = type("S", (), {"runtime_db": _FakeRepo()})()
+
+    params = _FakeParams(contract={"verify_commands": [{"command": "go build ./..."}]})
+    params.attempt_id = "attempt-1"
+    params.run_id = "run-1"
+    persist_delivery_verify_event(
+        _FakeAgentWithRepo(),
+        params,
+        VERIFY_FAILED,
+        [],
+        _contract_hash(params.delivery_contract),
+        "vid-1",
+    )
+    assert calls["append"] == 0  # 已存在 → 跳过

@@ -98,25 +98,26 @@ def _resolve_verify_cwd(
 ) -> tuple[Path | None, str]:
     """解析验证命令 cwd（受控边界：必须落在 workspace 根内）。
 
-    返回 (path, state)：path=None + VERIFY_CWD_OUT_OF_BOUNDS 表示越界/不可解析。
+    双席 seq2013/2014 硬缺口1：workspace 根缺失（无法解析）时绝对/相对
+    cwd 一律结构化拒绝（fail-closed），空 cwd 也不得落到宿主进程 cwd——
+    绝不跳过边界检查执行。
     """
+    if workspace_root is None:
+        return None, VERIFY_CWD_OUT_OF_BOUNDS
     if not cwd_text:
         return workspace_root, VERIFY_PASSED
     candidate = Path(cwd_text).expanduser()
     try:
         if candidate.is_absolute():
             resolved = candidate.resolve(strict=False)
-        elif workspace_root is not None:
-            resolved = (workspace_root / candidate).resolve(strict=False)
         else:
-            return None, VERIFY_CWD_OUT_OF_BOUNDS
+            resolved = (workspace_root / candidate).resolve(strict=False)
     except (OSError, RuntimeError):
         return None, VERIFY_CWD_OUT_OF_BOUNDS
-    if workspace_root is not None:
-        try:
-            resolved.relative_to(workspace_root)
-        except ValueError:
-            return None, VERIFY_CWD_OUT_OF_BOUNDS
+    try:
+        resolved.relative_to(workspace_root)
+    except ValueError:
+        return None, VERIFY_CWD_OUT_OF_BOUNDS
     if not resolved.is_dir():
         return None, VERIFY_CWD_OUT_OF_BOUNDS
     return resolved, VERIFY_PASSED
@@ -179,14 +180,43 @@ def run_delivery_verification(
     - VERIFY_CONTRACT_INVALID：声明了但结构非法，fail-closed（调用方必须
       按未通过收口，绝不放行自然收口）
     - VERIFY_PASSED/VERIFY_FAILED：全部命令的执行结果
+
+    双席 seq2013 硬缺口1：workspace 根缺失 → 结构化拒绝（fail-closed），
+    绝不跳过边界检查执行。
     """
     contract = getattr(params, "delivery_contract", None)
     commands, state = delivery_verify_commands(contract)
     if state != VERIFY_PASSED:
         return state, []
+    if workspace_root is None:
+        return VERIFY_FAILED, [
+            {
+                "command": "",
+                "ok": False,
+                "exit_code": -1,
+                "detail": "workspace 根缺失，验证无法受控执行（fail-closed）",
+                "output": "",
+            }
+        ]
     results = [_run_one_verify(item, workspace_root) for item in commands]
     overall = VERIFY_PASSED if all(bool(item.get("ok")) for item in results) else VERIFY_FAILED
     return overall, results
+
+
+def build_verification_id(params: object, contract: object) -> str:
+    """验证幂等 ID：attempt_id + contract hash + 命令摘要（双席 seq2013 硬缺口3）。"""
+    commands, _state = delivery_verify_commands(contract)
+    digest = hashlib.sha256(
+        json.dumps(
+            [str(item.get("command") or "") for item in commands],
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    attempt_id = str(getattr(params, "attempt_id", "") or "")
+    return hashlib.sha256(
+        f"{attempt_id}:{_contract_hash(contract)}:{digest}".encode("utf-8")
+    ).hexdigest()[:16]
 
 
 def persist_delivery_verify_event(
@@ -195,37 +225,71 @@ def persist_delivery_verify_event(
     state: str,
     results: list[dict[str, object]],
     contract_hash: str,
+    verification_id: str,
 ) -> None:
-    """验证结果落 runtime_events（append-only，审计可查；fail-silent）。"""
+    """验证结果落 runtime_events（权威 API append_event，幂等去重，审计可查）。
+
+    双席 seq2014 实锤修复：旧实现调 append_runtime_event（不存在），标准
+    RuntimeRepository 提供 append_event（repository.py:1461）——生产路径
+    从未落账。现改调 append_event（attempt_id+agent_run_id 必填），并带
+    verification_id 幂等：同 verification_id 已存在 → 跳过，不重复追加。
+    fail-silent：落账失败绝不影响收口判定。
+    """
     if state == VERIFY_SKIPPED:
         return
     try:
         repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
-        if repo is None or not callable(getattr(repo, "append_runtime_event", None)):
+        if repo is None or not callable(getattr(repo, "append_event", None)):
             return
-        from ..agent.conversation.runtime import durable_task_id
-
-        repo.append_runtime_event(
-            task_id=durable_task_id(params),
-            run_id=str(getattr(params, "run_id", "") or ""),
-            attempt_id=str(getattr(params, "attempt_id", "") or ""),
-            event_type="delivery_verify",
-            detail=json.dumps(
+        run_id = str(getattr(params, "run_id", "") or "")
+        attempt_id = str(getattr(params, "attempt_id", "") or "")
+        agent_run_id = ""
+        try:
+            row = repo.agent_run_for_run_id(run_id)
+            if row is not None:
+                agent_run_id = str(row.get("agent_run_id") or "")
+        except Exception:  # noqa: BLE001 查不到不阻断落账
+            pass
+        if not agent_run_id:
+            agent_run_id = run_id
+        payload = {
+            "state": state,
+            "contract_hash": contract_hash,
+            "verification_id": verification_id,
+            "results": [
                 {
-                    "state": state,
-                    "contract_hash": contract_hash,
-                    "results": [
-                        {
-                            "command": str(item.get("command") or ""),
-                            "ok": bool(item.get("ok")),
-                            "exit_code": int(item.get("exit_code") or -1),
-                            "detail": str(item.get("detail") or ""),
-                        }
-                        for item in results
-                    ],
-                },
-                ensure_ascii=False,
-            ),
+                    "command": str(item.get("command") or ""),
+                    "ok": bool(item.get("ok")),
+                    "exit_code": int(item.get("exit_code") or -1),
+                    "detail": str(item.get("detail") or ""),
+                }
+                for item in results
+            ],
+        }
+        # 幂等：同 verification_id（attempt+contract hash+命令摘要）已落账 → 跳过
+        try:
+            existing = repo.list_runtime_events(
+                attempt_id=attempt_id,
+                event_type="delivery_verify",
+                limit=20,
+            )
+            for row in existing or ():
+                try:
+                    row_payload = row.get("payload_json") or row.get("payload") or {}
+                    if isinstance(row_payload, str):
+                        row_payload = json.loads(row_payload)
+                    if (row_payload or {}).get("verification_id") == verification_id:
+                        return  # 已落账，幂等跳过
+                except (TypeError, ValueError):
+                    continue
+        except Exception:  # noqa: BLE001 查不到保守落账（append-only 无并发冲突）
+            pass
+        repo.append_event(
+            event_type="delivery_verify",
+            attempt_id=attempt_id,
+            agent_run_id=agent_run_id,
+            task_run_id=str(getattr(params, "task_run_id", "") or ""),
+            payload=payload,
         )
     except Exception:  # noqa: BLE001 落账失败绝不影响收口判定
         LOGGER.warning("persist delivery verify event failed", exc_info=True)
