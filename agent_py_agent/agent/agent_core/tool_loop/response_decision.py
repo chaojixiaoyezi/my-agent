@@ -265,14 +265,19 @@ def _protocol_violation_decision(
             [],
             _inc_protocol(request.counters),
         )
-    # 2026-08-15 3×3 真机(cell1/cell2 三实例同构): deepseek-v4-flash 高频
-    # 输出未闭合 [TOOL_CALL] 块(约每 10-14 轮一次)。纯格式错误——整轮零
-    # 执行已保证安全(本轮 execute 权已取消, J.5 不变), 但任务级 blocked
-    # failed 会把长任务杀死。仅当 violations 全为格式类(TOOL_CALL_UNCLOSED)
-    # 时降级为可续跑族(unfinished, CLI resume_loop 下一轮重发完整工具块);
-    # 其他 violation 保持 blocked fail-closed。
+    # 2026-08-15 3×3 真机(cell1/cell2/cell3 多实例同构): deepseek-v4-flash
+    # 高频输出未闭合工具块(约每 10-14 轮一次)。纯格式错误——整轮零执行
+    # 已保证安全(本轮 execute 权已取消, J.5 不变), 但任务级 blocked
+    # failed 会把长任务杀死。仅当 violations 全为格式类时降级为可续跑族
+    # (unfinished, CLI resume_loop 下一轮重发完整工具块); 其他 violation
+    # 保持 blocked fail-closed。格式类 = TOOL_CALL_UNCLOSED([TOOL_CALL]
+    # 未闭合) + PROTOCOL_VIOLATION@text(text parser 的「text tool block
+    # is not closed」未闭合块——唯一 error 类型, 纯格式); 其他来源的
+    # PROTOCOL_VIOLATION(如 native 流)不在内。
     if violations and all(
-        str(v.code or "") in {"TOOL_CALL_UNCLOSED"} for v in violations
+        str(v.code or "") in {"TOOL_CALL_UNCLOSED", "PROTOCOL_VIOLATION"}
+        and str(getattr(v, "source_protocol", "") or "") in {"text", ""}
+        for v in violations
     ):
         return ToolLoopResponseDecision(
             "break",

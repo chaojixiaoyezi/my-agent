@@ -1547,6 +1547,7 @@ def test_protocol_repair_exhausted_format_only_continuable(tmp_path):
     class _Violation:
         def __init__(self, code):
             self.code = code
+            self.source_protocol = "text"
 
         def to_dict(self):
             return {"code": self.code}
@@ -1579,6 +1580,16 @@ def test_protocol_repair_exhausted_format_only_continuable(tmp_path):
     decision1 = _protocol_violation_decision(
         req1, (_Violation("TOOL_CALL_UNCLOSED"),)
     )
+    # cell3 真机(2026-08-15): text parser 的未闭合块(PROTOCOL_VIOLATION@text)
+    # 同属格式类可续跑
+    req1b = _Request()
+    req1b.params.live_archive_state = {}
+    decision1b = _protocol_violation_decision(
+        req1b, (_Violation("PROTOCOL_VIOLATION"),)
+    )
+    assert decision1b.action == "break"
+    assert decision1b.response.runtime_status == "unfinished"
+    assert decision1b.response.runtime_reason == "TOOL_CALL_UNCLOSED"
     assert decision1.action == "break"
     assert decision1.response.runtime_status == "unfinished"
     assert decision1.response.runtime_reason == "TOOL_CALL_UNCLOSED"
