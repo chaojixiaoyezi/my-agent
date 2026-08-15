@@ -640,10 +640,32 @@ def _delivery_verify_no_tool_call_decision(
         run_delivery_verification,
     )
 
+    # 2026-08-15 取证快照（双席 seq2072 要求，只加日志不改行为）：3×3 真机
+    # 收口时 workspace 根缺失（事件 failed「workspace 根缺失」）但 contract 非空
+    # （有 contract_hash）——矛盾点待快照定位。记录 gate 入口的 contract 结构
+    # 与 workspace 解析全过程，复现时拿真实值。
     try:
         from ..runner.context import current_run_task_workspace_root
+        from .run_task_workspace_writer_probe import (
+            workspace_root_candidates_probe,
+        )
 
         workspace_root = current_run_task_workspace_root(request.agent, request.params)
+        if workspace_root is None:
+            _LOGGER.warning(
+                "delivery-verify workspace root missing: run_id=%s attempt_id=%s "
+                "contract_type=%s contract_hash=%s task_workspace=%r task_root=%r "
+                "candidates=%r",
+                str(getattr(request.params, "run_id", "") or ""),
+                str(getattr(request.params, "attempt_id", "") or ""),
+                type(contract).__name__,
+                _contract_hash(contract),
+                contract.get("task_workspace"),
+                (contract.get("task_workspace") or {}).get("task_root")
+                if isinstance(contract.get("task_workspace"), dict)
+                else None,
+                workspace_root_candidates_probe(request.agent, request.params),
+            )
     except Exception:  # noqa: BLE001 workspace 拿不到 → 根缺失 fail-closed（run 内拒绝执行）
         workspace_root = None
     try:
