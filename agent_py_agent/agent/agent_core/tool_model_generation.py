@@ -665,14 +665,17 @@ def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
         kwargs["tools"] = state.tools
         tool_choice = state.tool_choice or ToolChoice.auto()
         kwargs["tool_choice"] = tool_choice
-        # 2026-08-15 慢因根因(3×3 curl 实测): 工具轮一律禁思考——
-        # deepseek-v4-flash 非推理模型, thinking 块吃掉全部 max_tokens 导致
-        # stop_reason=max_tokens 截断(实测: 带 thinking 41s 且 4000 token 全被
-        # 思考吃光、正文 0 输出; 禁 thinking 22s、3430 token 正文正常完成)。
-        # 之前只在强制 tool_choice 时禁(部分兼容端点思考模式拒强制选择回哑
-        # 400)——auto 默认路径 thinking 开启 → 每轮慢一倍+截断重试+截断收口
-        # 假完成。兼容端点(如 MiniMax)不识别该字段时静默忽略, 行为不变。
-        kwargs["thinking_disabled"] = True
+        # 2026-08-15 慢因根因(3×3 curl 实测): 工具轮禁思考——deepseek-v4-flash
+        # 非推理模型, thinking 块吃掉全部 max_tokens 导致 stop_reason=max_tokens
+        # 截断(实测: 带 thinking 41s 且 4000 token 全被思考吃光、正文 0 输出;
+        # 禁 thinking 22s、3430 token 正文正常完成)。之前只在强制 tool_choice
+        # 时禁——auto 默认路径 thinking 开启 → 每轮慢一倍+截断重试+截断收口
+        # 假完成。
+        # 双席 seq2079 实锤: OpenAICompatible/legacy/Echo 的 generate 无
+        # thinking_disabled 参数, 一律传会 TypeError——仅 AnthropicCompatible
+        # (声明 supports_thinking_disabled) 传该字段, 其余 backend 不收到。
+        if getattr(backend, "supports_thinking_disabled", False):
+            kwargs["thinking_disabled"] = True
     if state.messages is not None:
         kwargs["messages"] = state.messages
     return backend.generate(prompt, **kwargs)

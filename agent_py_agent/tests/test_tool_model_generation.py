@@ -650,6 +650,9 @@ def test_model_generate_applies_dynamic_timeout_to_backend_request():
 
 class _KwargRecordingBackend:
     name = "kwarg-recording-backend"
+    # 模拟 AnthropicCompatibleBackend（双席 seq2079 修复后仅声明该属性的
+    # backend 收到 thinking_disabled；测试默认声明以覆盖 Anthropic 路径）
+    supports_thinking_disabled = True
 
     def __init__(self) -> None:
         self.seen: list[dict] = []
@@ -685,6 +688,18 @@ def test_forced_tool_choice_turn_disables_thinking_for_provider_compat():
         _do_generate_with_tool_choice(backend, choice)
         assert backend.seen[-1]["thinking_disabled"] is True
         assert backend.seen[-1]["tool_choice"] is choice
+
+
+def test_openai_compatible_backend_no_thinking_kwarg():
+    """双席 seq2079 实锤回归: OpenAICompatible/legacy 的 generate 无
+    thinking_disabled 参数——一律传会 TypeError。_do_backend_generate 只对
+    声明 supports_thinking_disabled 的 backend 传该字段。"""
+    from agent_py_agent.agent.tooling.runtime_contracts import ToolChoice
+
+    backend = _KwargRecordingBackend()
+    backend.supports_thinking_disabled = False
+    _do_generate_with_tool_choice(backend, ToolChoice.auto("ordinary_tool_turn"))
+    assert "thinking_disabled" not in backend.seen[-1]
 
 
 def test_auto_tool_choice_turn_disables_thinking():

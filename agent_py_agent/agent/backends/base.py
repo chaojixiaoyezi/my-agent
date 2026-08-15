@@ -694,6 +694,11 @@ def _openai_tool_use_blocks(message: dict[str, Any]) -> tuple[list[dict[str, Any
 
 
 class AnthropicCompatibleBackend(HttpBackend):
+    # 2026-08-15 双席 seq2079 实锤回归修复: 仅本 backend 的 generate 接收
+    # thinking_disabled(转 Anthropic payload thinking 字段)。_do_backend_generate
+    # 按此属性条件传参——OpenAICompatible/legacy/Echo 不声明则绝不收到该参数
+    # (旧实现一律传 → OpenAI-compatible 工具轮 TypeError)。
+    supports_thinking_disabled = True
     """适配 Anthropic 风格的 `/v1/messages` 接口。"""
 
     name = "anthropic_compatible"
