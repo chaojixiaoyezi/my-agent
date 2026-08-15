@@ -140,6 +140,8 @@ class TestShellToolBasics:
 
         assert result.ok is False
         assert "return_code=1" in result.output
+        # 进程完整退出自报失败 → 确定性 failed(非 unknown, 不触发收口闸)
+        assert result.effect_outcome == "failed"
 
     def test_capture_stdout_and_stderr(self, tmp_path: Path):
         """捕获 stdout 和 stderr。"""
@@ -486,19 +488,51 @@ class TestShellToolEdgeCases:
 
 
 def test_failure_effect_outcome_three_state_classification():
-    """失败副作用三态分类(长期助手 式,判定层只认结构化信号):
+    """失败副作用四态分类(长期助手 三态 + failed,判定层只认结构化信号):
 
     只读命令失败 → not_started(明确失败,重做安全,不再说成「结果不确定」);
-    写命令失败 → 不声明(沿通用合同保守 unknown 防重做);超时 → unknown(可能部分生效);
-    成功/未启动失败 → 无声明(handler_executed=False 已由上层判 not_started)。
+    进程完整退出自报失败(退出码已捕获)→ failed(确定性失败,模型读输出修正,
+    不归 unknown 禁继续——2026-08-15 长代码真机 unittest 校验失败任务死);
+    无退出码证据的写命令失败 → 不声明(沿通用合同保守 unknown 防重做);
+    超时 → unknown(可能部分生效);成功/未启动失败 → 无声明。
     """
     from agent_py_agent.agent.tooling.shell import ShellTool
 
     classify = ShellTool._failure_effect_outcome
     # 只读命令(grep)完整退出失败 → not_started
     assert classify("grep foo bar.txt", False, "COMMAND_FAILED") == "not_started"
-    # 写命令(重定向)失败 → 不声明 → 保守 unknown
+    # 写命令(重定向)失败但无退出码证据 → 不声明 → 保守 unknown
     assert classify("echo x > f.txt", False, "COMMAND_FAILED") == ""
+    # 写命令(重定向)失败但进程完整退出(退出码已捕获)→ 确定性 failed
+    assert (
+        classify(
+            "echo x > f.txt",
+            False,
+            "COMMAND_FAILED",
+            process_facts={"status": "exited", "return_code": 1},
+        )
+        == "failed"
+    )
+    # 校验命令(python3 -m unittest)失败且完整退出 → failed(长代码真机复现)
+    assert (
+        classify(
+            "cd pkg && python3 -m unittest discover -s tests -t . -v",
+            False,
+            "COMMAND_FAILED",
+            process_facts={"status": "exited", "return_code": 1},
+        )
+        == "failed"
+    )
+    # 进程被杀(无 exited 状态)→ 不声明 → 保守 unknown
+    assert (
+        classify(
+            "echo x > f.txt",
+            False,
+            "COMMAND_FAILED",
+            process_facts={"status": "killed", "return_code": None},
+        )
+        == ""
+    )
     # 超时 → unknown(进程可能部分生效)
     assert classify("sleep 100", False, "TOOL_TIMEOUT") == "unknown"
     # 成功 → 无声明

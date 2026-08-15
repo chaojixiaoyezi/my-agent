@@ -932,10 +932,15 @@ def test_s248_sandbox_shell_locks_all_allowed_write_roots(tmp_path):
 
 def test_s248_lock_rejects_parent_child_overlap(tmp_path):
     """seq 248 #6：UNIQUE 精确串拦不了 parent/child 物理重叠——先锁父根再
-    锁子路径必须 fail-fast RuntimeConflictError。"""
+    锁子路径必须 fail-fast RuntimeConflictError。WRITE-04 修订: 同一 attempt
+    的父子 scope 是同一执行者合法声明(跳过), 跨 attempt/执行者重叠仍拦截——
+    用第二个 run/attempt 验证冲突保护不变。"""
     repo = _repo(tmp_path)
     _agent_run_id, attempt_id = _direct_register_chain(
         repo, "run-s248h", task_id="task-s248h"
+    )
+    _other_run_id, other_attempt_id = _direct_register_chain(
+        repo, "run-s248h-other", task_id="task-s248h"
     )
     store_obj = select_operation_store(
         _agent(repo=repo, tools=None, store=_store(tmp_path), root=tmp_path)
@@ -949,12 +954,23 @@ def test_s248_lock_rejects_parent_child_overlap(tmp_path):
             resource_scopes=(f"workspace:{parent}",),
         )
     )
+    # 同一 attempt 的父子 scope → 允许(WRITE-04: 同执行者并行工具合法声明)
+    store_obj.claim_tool_operation(
+        _s248_claim_request(
+            run_id="run-s248h", task_id="task-s248h",
+            op_id="tool_call:attempt-s248h:call-1b",
+            holder=new_tool_operation_holder(), attempt_id=attempt_id,
+            resource_scopes=(f"workspace:{parent / 'sub'}",),
+            idempotency_key="key-s248-h1b",
+        )
+    )
+    # 跨 attempt 的父子重叠 → 仍 fail-fast
     with pytest.raises(RuntimeConflictError):
         store_obj.claim_tool_operation(
             _s248_claim_request(
-                run_id="run-s248h", task_id="task-s248h",
-                op_id="tool_call:attempt-s248h:call-2",
-                holder=new_tool_operation_holder(), attempt_id=attempt_id,
+                run_id="run-s248h-other", task_id="task-s248h",
+                op_id="tool_call:attempt-s248h-other:call-2",
+                holder=new_tool_operation_holder(), attempt_id=other_attempt_id,
                 resource_scopes=(f"workspace:{parent / 'sub'}",),
                 idempotency_key="key-s248-h2",
             )
@@ -963,10 +979,14 @@ def test_s248_lock_rejects_parent_child_overlap(tmp_path):
 
 def test_s248_lock_rejects_hardlink_same_inode(tmp_path):
     """seq 248 #6：hardlink 同 inode 是同一物理文件，串不同 UNIQUE 拦不了
-    ——inode 判定必须冲突（fail-fast）。"""
+    ——inode 判定必须冲突（fail-fast）。WRITE-04 修订: 同一 attempt 跳过,
+    跨 attempt/执行者仍拦截——用第二个 run/attempt 验证冲突保护不变。"""
     repo = _repo(tmp_path)
     _agent_run_id, attempt_id = _direct_register_chain(
         repo, "run-s248i", task_id="task-s248i"
+    )
+    _other_run_id, other_attempt_id = _direct_register_chain(
+        repo, "run-s248i-other", task_id="task-s248i"
     )
     store_obj = select_operation_store(
         _agent(repo=repo, tools=None, store=_store(tmp_path), root=tmp_path)
@@ -986,9 +1006,9 @@ def test_s248_lock_rejects_hardlink_same_inode(tmp_path):
     with pytest.raises(RuntimeConflictError):
         store_obj.claim_tool_operation(
             _s248_claim_request(
-                run_id="run-s248i", task_id="task-s248i",
-                op_id="tool_call:attempt-s248i:call-2",
-                holder=new_tool_operation_holder(), attempt_id=attempt_id,
+                run_id="run-s248i-other", task_id="task-s248i",
+                op_id="tool_call:attempt-s248i-other:call-2",
+                holder=new_tool_operation_holder(), attempt_id=other_attempt_id,
                 resource_scopes=(f"workspace:{second}",),
                 idempotency_key="key-s248-i2",
             )

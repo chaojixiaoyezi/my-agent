@@ -543,7 +543,9 @@ class ToolHandlerOutcome:
         self.failure_stage = _normalized_tool_failure_stage(self.failure_stage)
         self.duration_ms = _nonnegative_duration_ms(self.duration_ms)
         self.effect_outcome = str(self.effect_outcome or "").strip().lower()
-        if self.effect_outcome not in {"", "not_started", "unknown"}:
+        # failed=进程完整退出自报失败(确定性, 2026-08-15 长代码真机: unittest
+        # 校验命令失败被归 unknown 导致任务死; 退出码+输出是结构化确定事实)。
+        if self.effect_outcome not in {"", "not_started", "failed", "unknown"}:
             raise ValueError(f"invalid tool effect outcome: {self.effect_outcome}")
         if self.ok and self.effect_outcome:
             raise ValueError("successful tool result cannot report an incomplete effect outcome")

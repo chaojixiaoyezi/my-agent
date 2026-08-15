@@ -650,7 +650,11 @@ def _invoke_with_lease_renewal(
 def _operation_status_for_result(result: ToolHandlerOutcome) -> str:
     if result.ok:
         return TOOL_OPERATION_SUCCEEDED
-    if result.effect_outcome == "not_started":
+    # failed=handler 结构化声明的确定性失败(如进程完整退出自报退出码,
+    # 2026-08-15 长代码真机: unittest 校验失败被归 UNKNOWN 导致任务死)。
+    # 与 not_started 同属「结果是确定的」——终态 FAILED, 模型可读输出修正,
+    # 不触发 unknown 收口闸; 失败可能部分生效由模型观测文件/输出裁决。
+    if result.effect_outcome in {"not_started", "failed"}:
         return TOOL_OPERATION_FAILED
     # 问题B(2026-08-14 真机实证, ④类复刻): handler 显式返回的「执行前确定性
     # 失败」(taxonomy category=tool/path 且 retryable——参数/路径类, 副作用在

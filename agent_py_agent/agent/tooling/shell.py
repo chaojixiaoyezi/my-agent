@@ -1032,7 +1032,15 @@ class ShellTool(BaseTool):
           (2026-08-14 真机: testbox 中文 locale 报「未找到命令」, 英文文本匹配
           在 Mac 测试过但在中文环境失效, 违反「禁 NL 匹配」铁律)。
         - 超时 → unknown:进程可能部分生效,防重做(保持)。
-        - 写命令失败 → 不声明:沿通用错误合同保守判 unknown(防重复副作用)。
+        - 进程完整退出(process_facts.status=exited, return_code 已捕获)→ failed:
+          命令跑完并自己报告了退出码,结果是确定的——不是「副作用不确定」。
+          2026-08-15 长代码场景真机实证: `python3 -m unittest` 校验命令失败
+          (退出码 1, 输出完整)被旧逻辑归 unknown → 上层 TOOL_OPERATION_OUTCOME_UNKNOWN
+          → 模型禁止继续, 任务死。退出码+输出是进程边界的结构化事实, 与 harness/
+          轻量运行时/长期助手 一致: 模型读取输出修正后继续。副作用可能部分发生是模型可
+          观测的事实(读文件), 不是「结果未知」。
+        - 其他写命令失败且无退出码证据 → 不声明:沿通用错误合同保守判 unknown
+          (防重复副作用)。
         """
         if ok or not error_code:
             return ""
@@ -1055,7 +1063,19 @@ class ShellTool(BaseTool):
             analysis = analyze_command(command)
         except Exception:  # noqa: BLE001 - 判定失败时保守不声明,沿通用合同
             return ""
-        return "not_started" if analysis.resolved_effect == "read_only" else ""
+        if analysis.resolved_effect == "read_only":
+            return "not_started"
+        # 进程完整退出且退出码已捕获 → 确定性失败(failed)。只读命令的
+        # not_started 声明优先(重做安全语义更强); 走到这里说明命令可能有写
+        # 副作用, 但进程跑完自报退出码+完整输出, 结果是确定的——模型可读
+        # 输出修正, 不应归「副作用不确定」禁止继续(2026-08-15 长代码真机)。
+        if (
+            isinstance(process_facts, dict)
+            and str(process_facts.get("status") or "") == "exited"
+            and process_facts.get("return_code") is not None
+        ):
+            return "failed"
+        return ""
 
     def _run_process_text(
         self,
