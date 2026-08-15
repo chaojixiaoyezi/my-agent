@@ -349,7 +349,7 @@ def test_persist_event_uses_append_event(tmp_path):
         def agent_run_for_run_id(self, run_id):
             return {"agent_run_id": "agr-1"}
 
-        def list_runtime_events(self, **kwargs):
+        def events_for_attempt(self, attempt_id, **kwargs):
             return []
 
     class _FakeAgentWithRepo:
@@ -387,8 +387,13 @@ def test_persist_event_idempotent_skip(tmp_path):
         def agent_run_for_run_id(self, run_id):
             return {"agent_run_id": "agr-1"}
 
-        def list_runtime_events(self, **kwargs):
-            return [{"payload_json": '{"verification_id": "vid-1"}'}]
+        def events_for_attempt(self, attempt_id, **kwargs):
+            return [
+                {
+                    "event_type": "delivery_verify",
+                    "payload_json": '{"verification_id": "vid-1"}',
+                }
+            ]
 
     class _FakeAgentWithRepo:
         def __init__(self):
@@ -409,45 +414,64 @@ def test_persist_event_idempotent_skip(tmp_path):
     assert calls["append"] == 0  # 已存在 → 跳过
 
 
-# ---------- 空壳假绿拦截（cell1 实锤驱动） ----------
+def test_persist_event_idempotent_real_sqlite(tmp_path):
+    """真实 RuntimeRepository(SQLite) 幂等: 同 verification_id 重复落账只落一条。
+
+    双席 seq2016/2017 硬缺口3: 旧实现调 list_runtime_events(权威库不存在,
+    AttributeError 被吞 → 永不幂等, 每次重裁决重复落账)。此测试用真实
+    RuntimeRepository 证明 events_for_attempt + verification_id 去重在
+    SQLite 账本上生效, 不是 fake repo 自证。
+    """
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+    from agent_py_agent.cli.delivery_verify import (
+        _contract_hash,
+        persist_delivery_verify_event,
+    )
+
+    repo = RuntimeRepository(tmp_path / "home" / "runtime.db")
+    agent = SimpleNamespace(
+        config=SimpleNamespace(enable_tools=True),
+        subagents=SimpleNamespace(runtime_db=repo),
+    )
+    params = SimpleNamespace(
+        run_id="run-verify-1",
+        attempt_id="attempt-verify-1",
+        task_run_id="taskrun-verify-1",
+        delivery_contract={"verify_commands": [{"command": "go build ./..."}]},
+    )
+    contract_hash = _contract_hash(params.delivery_contract)
+    persist_delivery_verify_event(
+        agent, params, VERIFY_FAILED, [], contract_hash, "vid-real-1"
+    )
+    # 同 verification_id 第二次落账 → 幂等跳过
+    persist_delivery_verify_event(
+        agent, params, VERIFY_FAILED, [], contract_hash, "vid-real-1"
+    )
+    events = repo.events_for_attempt("attempt-verify-1", limit=50)
+    verify_events = [e for e in events if e.get("event_type") == "delivery_verify"]
+    assert len(verify_events) == 1, "同 verification_id 在真实 SQLite 只落一条"
+    payload = verify_events[0].get("payload") or verify_events[0].get("payload_json") or {}
+    if isinstance(payload, str):
+        import json as _json
+
+        payload = _json.loads(payload)
+    assert payload.get("verification_id") == "vid-real-1"
+    assert payload.get("state") == "failed"
 
 
-def test_artifact_precheck_go_module_no_test_fails(tmp_path):
-    """go-module 无 *_test.go → 预检失败（空壳 go test 返回 0 是假绿）。"""
-    from agent_py_agent.cli.delivery_verify import _artifact_precheck
-
-    mod = tmp_path / "arrow-go"
-    mod.mkdir()
-    (mod / "util.go").write_text("package arrow\n")
-    contract = {"artifacts": [{"path": str(mod), "kind": "go-module"}]}
-    ok, detail = _artifact_precheck(contract, tmp_path)
-    assert ok is False
-    assert "无 *_test.go" in detail
+# ---------- 产物预检移除（2026-08-15 owner seq2035 决策） ----------
+# 参考项目(会话运行时/工具运行时/终端交互)都没有「必须有源码+测试文件」的产物预检;
+# 撤掉后完成与否只由 verify_commands 真实输出裁决。空壳假绿的根治方向在底座
+# (让模型别假完成), 见 owner seq2035「接同模型跑 会话运行时 对照」。
 
 
-def test_artifact_precheck_go_module_with_test_ok(tmp_path):
-    from agent_py_agent.cli.delivery_verify import _artifact_precheck
+def test_run_verification_no_artifact_precheck(tmp_path):
+    """gate 不再做产物存在性预检: 只按 verify_commands 真实输出判结果。
 
-    mod = tmp_path / "arrow-go"
-    mod.mkdir()
-    (mod / "util.go").write_text("package arrow\n")
-    (mod / "util_test.go").write_text("package arrow\n")
-    contract = {"artifacts": [{"path": str(mod), "kind": "go-module"}]}
-    ok, _ = _artifact_precheck(contract, tmp_path)
-    assert ok is True
-
-
-def test_artifact_precheck_missing_artifact_fails(tmp_path):
-    from agent_py_agent.cli.delivery_verify import _artifact_precheck
-
-    contract = {"artifacts": [{"path": "output/arrow-go", "kind": "go-module"}]}
-    ok, detail = _artifact_precheck(contract, tmp_path)
-    assert ok is False
-    assert "产物不存在" in detail
-
-
-def test_run_verification_empty_shell_blocked(tmp_path):
-    """空壳 go-module（无测试文件）→ run 直接 VERIFY_FAILED 不跑命令。"""
+    撤掉 precheck 后, 产物是否存在不决定结果; 命令真实执行成功即 VERIFY_PASSED。
+    """
     mod = tmp_path / "arrow-go"
     mod.mkdir()
     (mod / "util.go").write_text("package arrow\n")
@@ -458,5 +482,5 @@ def test_run_verification_empty_shell_blocked(tmp_path):
     state, results = run_delivery_verification(
         _FakeParams(contract=contract), workspace_root=tmp_path
     )
-    assert state == VERIFY_FAILED
-    assert "产物预检未通过" in results[0]["detail"]
+    assert state == VERIFY_PASSED
+    assert results[0]["ok"] is True
