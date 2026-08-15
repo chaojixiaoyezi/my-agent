@@ -662,6 +662,28 @@ def test_shell_postcheck_failure_blocks_success_gate():
     assert "ARTIFACT_POSTCHECK_FAILED" in result.output
 
 
+def test_shell_unhashed_outside_target_blocks_not_started():
+    """双席 seq2132 消费门: unhashed 大文件在命令产物目录(target)外 →
+    not_started 不放行(保守 UNKNOWN); 全部在 target 内 → 保留 not_started。
+    用 _failure_effect_outcome 直接验证(纯判定函数, 不跑沙箱)。"""
+    from agent_py_agent.agent.tooling.shell import ShellTool
+
+    classify = ShellTool._failure_effect_outcome
+    # 基线: 无大文件 + 文件零变化 → not_started
+    assert classify(
+        "go build ./...", False, "COMMAND_FAILED", workspace_unchanged=True
+    ) == "not_started"
+    # 大文件在 target 外(unhashed_outside_target 非空 → 上层已把
+    # workspace_unchanged 置 False) → 不声明(保守 unknown)
+    assert classify(
+        "go build ./...", False, "COMMAND_FAILED", workspace_unchanged=False
+    ) == ""
+    # 只读命令不受影响(走 read_only 分支)
+    assert classify(
+        "grep foo bar.txt", False, "COMMAND_FAILED", workspace_unchanged=False
+    ) == "not_started"
+
+
 def test_workspace_tree_snapshot_adversarial():
     """双席 seq2103 对抗用例: symlink 替换/遍历失败/读权限拒绝 → 判变化或
     None(整体失败, 绝不出部分清单); 内容恢复+size/mtime 复原仍被 sha256 拦。"""

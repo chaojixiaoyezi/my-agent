@@ -1021,12 +1021,27 @@ class ShellTool(BaseTool):
         # 方案 Z: 失败时比对执行前后文件清单——零变化 = 用户可见文件未被本次
         # 命令触碰, 重做安全(go build 编译失败等验证类命令)。结构化事实,
         # 不按命令名/报码放宽(seq1992 防的正是「文件已变还重跑」场景)。
-        # 双席 seq2127: 快照证据强度(digest 覆盖率)显式落 effect contract,
-        # 未 hash 大文件不把 size/mtime 相等当内容未变的因果证明——由上层
-        # supervisor/safe_to_retry 按覆盖率裁决信任度。
+        # 双席 seq2132 消费门: 未 hash 大文件不能把 size/mtime 相等当内容未变
+        # 证明——**实际消费**而不是「供后续收紧」: 任一 unhashed 文件落在命令
+        # 产物目录(target, 即 owned output root, build 每次重写它=可重建范围)
+        # **之外** → not_started 不放行(保守 UNKNOWN); 全部在 target 内才保留
+        # not_started(可重建产物由 owned output root 结构化证明, 非文件名推断)。
         fs_after = snapshot_workspace_tree(self.workspace_root)
         fs_unchanged = workspace_tree_unchanged(fs_before, fs_after)
         fs_coverage = snapshot_digest_coverage(fs_after)
+        unhashed_outside_target: list[str] = []
+        try:
+            target_resolved = target.resolve()
+            for rel in fs_coverage.get("unhashed_paths") or []:
+                abs_path = (Path(self.workspace_root) / rel).resolve()
+                if not abs_path.is_relative_to(target_resolved):
+                    unhashed_outside_target.append(rel)
+        except (OSError, ValueError):
+            # 路径解析失败: 保守把全部 unhashed 视为 target 外(不声明)
+            unhashed_outside_target = list(fs_coverage.get("unhashed_paths") or [])
+        fs_coverage = dict(fs_coverage)
+        fs_coverage["unhashed_outside_target"] = unhashed_outside_target
+        fs_unchanged = fs_unchanged and not unhashed_outside_target
         effective_error = (
             "ARTIFACT_POSTCHECK_FAILED"
             if postcheck_failed
