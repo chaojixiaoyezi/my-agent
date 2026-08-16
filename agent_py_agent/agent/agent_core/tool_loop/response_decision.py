@@ -249,11 +249,9 @@ def _protocol_violation_decision(
     request.params.tool_context.append(
         "[tool-protocol-violation]\n"
         + json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        + "\n上一轮没有形成可执行工具调用（工具协议格式无效）。若仍需操作，请按以下唯一格式"
-        "重新发起——[TOOL_CALL] 包裹的单个 JSON 对象，参数直接平铺：\n"
-        '[TOOL_CALL]\n{"tool": "read_file", "path": "README.md"}\n[/TOOL_CALL]\n'
-        "写文件类似：{\"tool\": \"write_file\", \"path\": \"output/main.go\", "
-        "\"content\": \"package main...\"}。必须使用 Tool Catalog 里该工具自己的参数名；"
+        + "\n上一轮没有形成可执行工具调用（工具协议格式无效；文本 [TOOL_CALL] 块已随"
+        "EXEC-31b 移除，只接受结构化工具调用 tool_use）。请改用结构化工具调用"
+        "（tool_use）重新发起，使用 Tool Catalog 里该工具自己的参数名，参数直接平铺；"
         "不要用 args/arguments/param_name 包裹参数，不要写 => 或 <invoke> 风格，"
         "不要把工具调用写进正文、代码块或解释文字。"
     )
@@ -269,11 +267,11 @@ def _protocol_violation_decision(
     # 高频输出未闭合工具块(约每 10-14 轮一次)。纯格式错误——整轮零执行
     # 已保证安全(本轮 execute 权已取消, J.5 不变), 但任务级 blocked
     # failed 会把长任务杀死。仅当 violations 全为格式类时降级为可续跑族
-    # (unfinished, CLI resume_loop 下一轮重发完整工具块); 其他 violation
-    # 保持 blocked fail-closed。格式类 = TOOL_CALL_UNCLOSED([TOOL_CALL]
-    # 未闭合) + PROTOCOL_VIOLATION@text(text parser 的「text tool block
-    # is not closed」未闭合块——唯一 error 类型, 纯格式); 其他来源的
-    # PROTOCOL_VIOLATION(如 native 流)不在内。
+    # (unfinished, CLI resume_loop 下一轮重发); 其他 violation 保持 blocked
+    # fail-closed。格式类 = TOOL_CALL_UNCLOSED + 旧 text 快照的
+    # PROTOCOL_VIOLATION(EXEC-31b 起 text 快照只能来自旧数据/配置错误,
+    # 纯协议错误); native 流边界守卫(tool_stream/boundary.py)产出的
+    # 未闭合块 violations 带 source_protocol=native, 不在降级集合内。
     if violations and all(
         str(v.code or "") in {"TOOL_CALL_UNCLOSED", "PROTOCOL_VIOLATION"}
         and str(getattr(v, "source_protocol", "") or "") in {"text", ""}
@@ -284,7 +282,7 @@ def _protocol_violation_decision(
             ModelResponse(
                 text=(
                     "本轮工具协议连续不符合运行约定(未闭合工具块)，系统没有执行"
-                    "任何正文或伪工具块。请重新发起请求，输出完整闭合的 [TOOL_CALL] 块。"
+                    "任何正文或伪工具块。请改用结构化工具调用(tool_use)重新发起请求。"
                 ),
                 backend=str(getattr(request.response, "backend", "") or ""),
                 runtime_status="unfinished",
@@ -815,84 +813,3 @@ def _unresolved_runtime_issue_request(
     )
 
 
-# EXEC-06: 本 run 调过工具但从没写过任何交付产物 = 收口可疑。
-# 结构化判定(禁 NL 匹配): executed_tools 非空(工具型任务)且不含任何
-# 写类工具 → 视为"任务未产出任何可交付物", 无工具收口不得当成完成。
-# 纯聊天/问答(executed_tools 空)不受影响; 写过产物(write/edit/apply_patch)
-# 即放行正常收口。
-_DELIVERY_PRODUCING_TOOLS = frozenset(
-    {"write_file", "edit_file", "apply_patch", "write_json", "write_yaml"}
-)
-
-
-def _no_delivery_artifact_produced(params: object) -> bool:
-    executed = list(getattr(params, "executed_tools", None) or [])
-    if executed:
-        return not any(str(item) in _DELIVERY_PRODUCING_TOOLS for item in executed)
-    # EXEC-12: cli_run 任务入口零工具收口同样是零交付产物假完成（ma-x 真机：
-    # 模型首轮输出"收到具体需求后我会直接动手做"就无工具收口 → RC=0 零产物）。
-    # 仅限 cli_run（任务执行入口）；普通对话(source 非 cli_run)纯聊天收口不受影响。
-    return str(getattr(params, "source", "") or "") == "cli_run"
-
-
-# LLM: 交付目录(output_dir)是 cli_run 的交付合同事实源——模型把代码写在
-# work 过程目录不算交付(EXEC-34, ma-b r3 真机: 2238 行 work 产物但 output
-# 空, 模型输出一句 thinking 文本就 RC=0 假完成; 对照 会话运行时/轻量运行时 无 work/output
-# 之分, 产物即交付)。判定只用文件系统事实, 不解析收口文本。
-# 函数用途: 判断 cli_run 的交付目录是否为空(空=未交付)。
-def _delivery_output_dir_empty(params: object) -> bool:
-    if str(getattr(params, "source", "") or "") != "cli_run":
-        return False
-    # EXEC-37(owner 拍板): 任务千奇百怪, 很多任务没有落盘交付概念——
-    # 交付门只对"本轮执行过写工具"的任务型运行生效; 问答/纯读任务
-    # 模型说停就停。
-    executed = list(getattr(params, "executed_tools", None) or [])
-    if not any(str(item) in _DELIVERY_PRODUCING_TOOLS for item in executed):
-        return False
-    attrs = getattr(params, "task_attributes", None)
-    workspace = (attrs or {}).get("run_workspace") if isinstance(attrs, dict) else None
-    if not isinstance(workspace, dict):
-        return False  # 无 workspace 事实源时不拦(保持旧行为, 不误杀其他场景)
-    output_dir = str(workspace.get("output_dir") or "").strip()
-    # EXEC-37b(owner 追问"写了又删怎么办"): 本轮对 output 目录内做过写
-    # 操作(后来删除也算) = 有交付动作, 模型自决删除(重写/清理), 系统不拦
-    # 。只有从没写过 output 才算未交付。
-    archive = list(getattr(params, "archive_tool_calls", None) or [])
-    output_root = str(
-        (workspace.get("output_dir") if isinstance(workspace, dict) else "")
-        or ""
-    ).strip().rstrip("/")
-    if output_root:
-        for record in archive:
-            if not isinstance(record, dict):
-                continue
-            if str(record.get("tool") or "") not in _DELIVERY_PRODUCING_TOOLS:
-                continue
-            parameters = record.get("parameters")
-            if not isinstance(parameters, dict):
-                continue
-            for value in parameters.values():
-                text = str(value or "")
-                if text.startswith(output_root + "/") or text == output_root:
-                    return False
-    if not output_dir:
-        return False
-    from pathlib import Path
-
-    path = Path(output_dir)
-    if not path.exists():
-        return True
-    try:
-        return not any(path.iterdir())
-    except OSError:
-        return False
-
-
-# EXEC-06b: 无交付产物收口时给模型的继续提示与次数上限。
-_NO_ARTIFACT_CONTINUE_LIMIT = 3
-NO_ARTIFACT_NUDGE = (
-    "[tool-system]\n"
-    "本轮没有产出任何可交付文件（没有写文件/编辑/打补丁），或交付目录 output/ 仍为空。"
-    "如果任务还没完成，请继续调用工具完成实际产出，并把成品放进 output/ 交付目录——"
-    "不要只输出计划或总结；如果确实已完成且无需产物，请说明完成。"
-)

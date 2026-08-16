@@ -378,28 +378,48 @@ def test_record_budget_exhausted_event(repo):
 
 
 class _FakeRunAgent:
-    """fake agent：首轮 unfinished，续跑轮逐个演进（第 3 轮 ok）。"""
+    """fake agent：首轮 unfinished，续跑轮逐个演进（第 3 轮 ok）。
 
-    def __init__(self, tmp_path):
+    EXEC-39: 自动续跑需 active goal——__init__ 预建在 bind 将解析到的线程
+    (channel=cli / channel_user_id=local-agent / channel_conversation_id=
+    channel_id) 上; 测试 base 显式 request_id=channel_id 即复用同一线程。
+    """
+
+    def __init__(self, tmp_path, *, task_id="task-1", channel_id="req-1"):
         import time
 
+        from agent_py_agent.agent.agent_core.cli_run_conversation import (
+            _CLI_RUN_CHANNEL,
+            _CLI_RUN_USER_ID,
+        )
         from agent_py_agent.agent.conversation.store import ConversationStore
 
         self.conversation_store = ConversationStore(tmp_path / "conv")
         self.calls = []
-        # 建续跑 policy（kind=ordinary_task_resume），claim 互斥检查需要
+        # 建续跑 policy（kind=ordinary_task_resume），claim 互斥检查需要;
+        # thread 按 bind_cli_run_conversation 的真实 channel 身份预建,
+        # base.request_id=channel_id 时 bind 复用同一线程。
         self._thread = self.conversation_store.get_or_create_thread(
             {
-                "canonical_user_id": "u", "channel": "cli_run",
-                "channel_conversation_id": "req-1", "channel_user_id": "u",
+                "canonical_user_id": _CLI_RUN_USER_ID, "channel": _CLI_RUN_CHANNEL,
+                "channel_conversation_id": channel_id, "channel_user_id": _CLI_RUN_USER_ID,
                 "owner_id": "local/main", "owner_home": str(tmp_path), "title": "t",
             }
         )
         self.conversation_store.set_progress_policy(
             {
-                "thread_id": self._thread.thread_id, "task_id": "task-1",
+                "thread_id": self._thread.thread_id, "task_id": task_id,
                 "interval_seconds": 180, "now": time.time(),
                 "metadata": {"kind": "ordinary_task_resume", "resume_used": 0, "resume_limit": 3},
+            }
+        )
+        # EXEC-39: 自动续跑授权 gate 的 active goal, 与 bind 后
+        # root_thread_id/root_task_id 对齐。
+        self.conversation_store.create_goal(
+            {
+                "thread_id": self._thread.thread_id,
+                "objective": "继续推进任务直到完成",
+                "task_id": task_id,
             }
         )
 
@@ -432,7 +452,7 @@ def test_run_with_resume_loop_until_completed(tmp_path):
 
     fake = _FakeRunAgent(tmp_path)
     base = run_params_with_request_id(
-        RunParams(source="cli_run", task_id="task-1", task_attributes={})
+        RunParams(source="cli_run", request_id="req-1", task_id="task-1", task_attributes={})
     )
     outcome = run_with_resume(
         fake, initial_prompt="测试任务", base_params=base, max_rounds=5,
@@ -466,7 +486,7 @@ def test_run_with_resume_budget_exhausted(tmp_path):
 
     fake = _AlwaysUnfinished(tmp_path)
     base = run_params_with_request_id(
-        RunParams(source="cli_run", task_id="task-1", task_attributes={})
+        RunParams(source="cli_run", request_id="req-1", task_id="task-1", task_attributes={})
     )
     outcome = run_with_resume(fake, initial_prompt="t", base_params=base, max_rounds=2)
     assert outcome.status == "budget_exhausted"
@@ -590,7 +610,9 @@ def test_resume_round_attempt_chain(tmp_path):
                 runtime_source="", tool_rounds=2, attempt_id=f"attempt-{seq}")
 
     fake = _ChainAgent(tmp_path)
-    base = run_params_with_request_id(RunParams(source="cli_run", task_id="task-1", task_attributes={}))
+    base = run_params_with_request_id(
+        RunParams(source="cli_run", request_id="req-1", task_id="task-1", task_attributes={})
+    )
     outcome = run_with_resume(fake, initial_prompt="t", base_params=base, max_rounds=5)
     assert outcome.status == "completed"
     # 缺口B(双席复核 seq1834): 续跑轮 attempt_id 不再合成 attempt-{seq},
@@ -627,7 +649,9 @@ def test_resume_round_blocked_is_unresumable(tmp_path):
                 tool_rounds=0, attempt_id=f"attempt-{seq}")
 
     fake = _FirstThenBlocked(tmp_path)
-    base = run_params_with_request_id(RunParams(source="cli_run", task_id="task-1", task_attributes={}))
+    base = run_params_with_request_id(
+        RunParams(source="cli_run", request_id="req-1", task_id="task-1", task_attributes={})
+    )
     outcome = run_with_resume(fake, initial_prompt="t", base_params=base, max_rounds=5)
     assert outcome.status == "unresumable"  # 不是 completed
     assert outcome.reason == "PROTOCOL_VIOLATION"
@@ -649,6 +673,10 @@ def test_resume_without_precreated_policy_ensures_and_continues(tmp_path):
         def __init__(self, tmp_path):
             import time
 
+            from agent_py_agent.agent.agent_core.cli_run_conversation import (
+                _CLI_RUN_CHANNEL,
+                _CLI_RUN_USER_ID,
+            )
             from agent_py_agent.agent.conversation.store import ConversationStore
 
             # 与 _FakeRunAgent 唯一区别: 不预建 policy(真实 CLI 场景)
@@ -656,16 +684,24 @@ def test_resume_without_precreated_policy_ensures_and_continues(tmp_path):
             self.calls = []
             self._thread = self.conversation_store.get_or_create_thread(
                 {
-                    "canonical_user_id": "u", "channel": "cli_run",
-                    "channel_conversation_id": "req-nopol", "channel_user_id": "u",
+                    "canonical_user_id": _CLI_RUN_USER_ID, "channel": _CLI_RUN_CHANNEL,
+                    "channel_conversation_id": "req-nopol", "channel_user_id": _CLI_RUN_USER_ID,
                     "owner_id": "local/main", "owner_home": str(tmp_path), "title": "t",
                 }
             )
             # 不发 set_progress_policy
+            # EXEC-39: 自动续跑需 active goal——按新语义建一个
+            self.conversation_store.create_goal(
+                {
+                    "thread_id": self._thread.thread_id,
+                    "objective": "继续推进任务直到完成",
+                    "task_id": "task-nopol",
+                }
+            )
 
     fake = _NoPolicyAgent(tmp_path)
     base = run_params_with_request_id(
-        RunParams(source="cli_run", task_id="task-nopol", task_attributes={})
+        RunParams(source="cli_run", request_id="req-nopol", task_id="task-nopol", task_attributes={})
     )
     outcome = run_with_resume(fake, initial_prompt="t", base_params=base, max_rounds=5)
     # 不再 unresumable: 修后 ensure 自动建 policy 并续跑 3 轮完成
@@ -902,7 +938,7 @@ def test_handoff_write_on_budget_exhausted(tmp_path):
 
             from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 
-            super().__init__(tmp_path)
+            super().__init__(tmp_path, task_id="task-handoff")
             self.subagents = _NS(runtime_db=RuntimeRepository(tmp_path / "home" / "runtime.db"))
 
         def run(self, prompt, *, params=None, save=False, source="cli_run",
@@ -916,7 +952,7 @@ def test_handoff_write_on_budget_exhausted(tmp_path):
 
     fake = _ExhaustAgent(tmp_path)
     base = run_params_with_request_id(
-        RunParams(source="cli_run", task_id="task-handoff", task_attributes={})
+        RunParams(source="cli_run", request_id="req-1", task_id="task-handoff", task_attributes={})
     )
     # max_rounds=2: 首轮 + 1 续跑轮后预算耗尽 → 写移交单
     outcome = run_with_resume(fake, initial_prompt="原任务描述", base_params=base, max_rounds=2)

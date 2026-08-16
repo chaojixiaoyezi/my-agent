@@ -115,46 +115,6 @@ def test_manual_resume_runs_continuation_with_workspace(tmp_path):
     assert call["params"].task_attributes["run_workspace"]["task_root"] == task_root
 
 
-from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
-    _delivery_output_dir_empty,
-)
-
-
-def test_delivery_output_empty_detection(tmp_path):
-    """EXEC-34: output 交付目录空 = 未交付（结构事实，不猜收口文本）。"""
-    out = tmp_path / "output"
-    params = _NS(
-        source="cli_run",
-        task_attributes={"run_workspace": {"output_dir": str(out)}},
-        executed_tools=["write_file"],
-    )
-    # 目录不存在 → 未交付(任务型运行, EXEC-37)
-    assert _delivery_output_dir_empty(params) is True
-    out.mkdir()
-    # 空目录 → 未交付
-    assert _delivery_output_dir_empty(params) is True
-    (out / "pygorm").mkdir()
-    (out / "pygorm" / "db.py").write_text("x")
-    # 有产物 → 已交付
-    assert _delivery_output_dir_empty(params) is False
-
-
-def test_delivery_output_empty_skips_non_cli_run():
-    """非 cli_run（聊天/gateway）不受 output 空判定影响。"""
-    params = _NS(
-        source="gateway",
-        task_attributes={"run_workspace": {"output_dir": "/nonexistent/x"}},
-        executed_tools=[],
-    )
-    assert _delivery_output_dir_empty(params) is False
-
-
-def test_delivery_output_empty_no_workspace_facts():
-    """无 run_workspace 事实源时保守不拦（保持旧行为）。"""
-    params = _NS(source="cli_run", task_attributes={}, executed_tools=[])
-    assert _delivery_output_dir_empty(params) is False
-
-
 class _LinkStore(_FakeStore):
     """带 task link 状态的最小 store（EXEC-35b 测试）。"""
 
@@ -353,70 +313,6 @@ def test_manual_resume_repairs_channel_binding(tmp_path):
     assert bound is not None
     assert bound["thread_id"] == "thread-authoritative"
     assert bound["channel_conversation_id"] == "run-abc123"
-
-
-def test_delivery_output_empty_skips_pure_chat_runs(tmp_path):
-    """EXEC-37: 没执行过写工具的运行(问答/纯读)不适用交付门。"""
-    from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
-        _delivery_output_dir_empty,
-    )
-
-    params = _NS(
-        source="cli_run",
-        task_attributes={"run_workspace": {"output_dir": "/nonexistent/x"}},
-        executed_tools=[],
-    )
-    assert _delivery_output_dir_empty(params) is False
-
-
-def test_delivery_output_empty_checks_writer_runs(tmp_path):
-    """执行过写工具的 cli_run 仍受交付门约束。"""
-    from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
-        _delivery_output_dir_empty,
-    )
-
-    params = _NS(
-        source="cli_run",
-        task_attributes={"run_workspace": {"output_dir": "/nonexistent/x"}},
-        executed_tools=["read_file", "write_file"],
-    )
-    assert _delivery_output_dir_empty(params) is True
-
-
-def test_delivery_wrote_then_deleted_is_exempt(tmp_path):
-    """EXEC-37b: 写过 output 内文件(后来删了) = 有交付动作, 不拦。"""
-    from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
-        _delivery_output_dir_empty,
-    )
-
-    out = tmp_path / "output"
-    params = _NS(
-        source="cli_run",
-        task_attributes={"run_workspace": {"output_dir": str(out)}},
-        executed_tools=["write_file"],
-        archive_tool_calls=[
-            {"tool": "write_file", "parameters": {"path": str(out / "pygorm" / "db.py")}},
-        ],
-    )
-    assert _delivery_output_dir_empty(params) is False
-
-
-def test_delivery_never_wrote_output_still_checked(tmp_path):
-    """从没写过 output 内文件(写都写在 work) → 交付门仍拦。"""
-    from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
-        _delivery_output_dir_empty,
-    )
-
-    out = tmp_path / "output"
-    params = _NS(
-        source="cli_run",
-        task_attributes={"run_workspace": {"output_dir": str(out)}},
-        executed_tools=["write_file"],
-        archive_tool_calls=[
-            {"tool": "write_file", "parameters": {"path": str(tmp_path / "work" / "x.py")}},
-        ],
-    )
-    assert _delivery_output_dir_empty(params) is True
 
 
 def test_unknown_releases_after_fourth(tmp_path):

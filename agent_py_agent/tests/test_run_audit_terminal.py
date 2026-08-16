@@ -609,16 +609,14 @@ def test_protocol_violation_persists_runtime_event(repo):
 
     2026-08-14 bs4 run-r2: XML <tool_calls> 被拒后磁盘上无结构化记录——
     审计断链。修复后: append-only 事件含 model_output_head(原始响应证据)、
-    violations、stage、repair 计数。
+    violations、stage、repair 计数。EXEC-31b 起决策路径内部已落账, 调用方
+    不再单独补一笔(重复落账反而造成审计重复)。
     """
     _record(repo)
-    request, _ = _violation_request(
+    _violation_request(
         repo,
         text='<tool_calls>\n<tool_call><name>list_files</name>'
         '<params><path>/tmp</path></params></tool_call>\n</tool_calls>',
-    )
-    _persist_protocol_violation_event(
-        request, [{"code": "PROTOCOL_VIOLATION", "detail": "x"}], request.response.text
     )
     rows = repo._runtime_connect().execute(
         "SELECT * FROM runtime_events WHERE event_type = 'protocol_violation'"

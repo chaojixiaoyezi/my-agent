@@ -141,7 +141,9 @@ def test_native_run_never_falls_back_to_text_tool_blocks(tmp_path: Path):
     assert decision.counters.protocol_repairs == 1
 
 
-def test_explicit_text_run_accepts_one_complete_standalone_block(tmp_path: Path):
+def test_text_protocol_block_rejected_native_only(tmp_path: Path):
+    """EXEC-31b: 文本 [TOOL_CALL] 块不再被执行——text 快照只能来自旧数据/
+    配置错误, 一律判协议违规(首犯走修复轮), 不产出任何工具调用。"""
     response = ModelResponse(
         text='[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]',
         backend="fake",
@@ -149,11 +151,9 @@ def test_explicit_text_run_accepts_one_complete_standalone_block(tmp_path: Path)
 
     decision = _decide(_agent(tmp_path), response, source_protocol="text")
 
-    assert decision.action == "run_tools"
-    assert len(decision.calls) == 1
-    assert decision.calls[0].tool_name == "read_file"
-    assert decision.calls[0].arguments == {"path": "README.md"}
-    assert decision.calls[0].source_protocol == "text"
+    assert decision.action == "continue"  # 首犯: 修复轮, 不执行
+    assert len(decision.calls) == 0
+    assert decision.counters.protocol_repairs == 1
 
 
 def test_no_blocks_and_plain_text_breaks(tmp_path: Path):
@@ -165,57 +165,6 @@ def test_no_blocks_and_plain_text_breaks(tmp_path: Path):
     assert decision.response.text == "任务完成。"
 
 
-def test_executed_tools_without_artifact_produced_continue_then_unfinished(tmp_path: Path):
-    """EXEC-06/06b 长任务复刻真机(2026-08-16): 模型调过工具(读源码)但从没写过任何
-    交付产物(write_file/edit_file/apply_patch)就无工具收口 → 假完成。
-    前 N 次应 continue(给机会继续产出), 连续 N 次仍零产物才 break+unfinished
-    (RC=2), 不哄不罚。"""
-    from dataclasses import replace
-
-    response = ModelResponse(text="继续推进：先读完剩余模块再枚举端点。", backend="fake")
-    params = replace(_params(), executed_tools=["list_files", "read_file"])
-    for i in range(3):
-        decision = tool_loop_response_decision(
-            ToolLoopResponseDecisionRequest(
-                agent=_agent(tmp_path),
-                params=params,
-                response=response,
-                counters=ToolLoopRepairCounters(),
-            )
-        )
-        assert decision.action == "continue", f"第{i+1}次零产物收口应 continue"
-        assert getattr(params, "no_artifact_nudge_count", 0) == i + 1
-    decision = tool_loop_response_decision(
-        ToolLoopResponseDecisionRequest(
-            agent=_agent(tmp_path),
-            params=params,
-            response=response,
-            counters=ToolLoopRepairCounters(),
-        )
-    )
-    assert decision.action == "break"
-    assert decision.response.runtime_status == "unfinished"
-    assert decision.response.runtime_reason == "NO_DELIVERY_ARTIFACT_PRODUCED"
-
-
-def test_executed_read_only_tool_with_plain_text_no_artifact_stays_unfinished_even_having_run_tools(tmp_path: Path):
-    """写得过产物才能正常收口——写过 write_file 后无工具收口仍是完成。"""
-    from dataclasses import replace
-
-    response = ModelResponse(text="项目已交付，这是说明。", backend="fake")
-    params = replace(_params(), executed_tools=["list_files", "read_file", "write_file"])
-    decision = tool_loop_response_decision(
-        ToolLoopResponseDecisionRequest(
-            agent=_agent(tmp_path),
-            params=params,
-            response=response,
-            counters=ToolLoopRepairCounters(),
-        )
-    )
-    assert decision.action == "break"
-    assert decision.response.runtime_status != "unfinished"
-
-
 def test_pure_chat_no_tools_break_is_normal(tmp_path: Path):
     """纯聊天/问答(executed_tools 空)无工具收口不受影响, 仍正常完成。"""
     response = ModelResponse(text="你好，我是助手。", backend="fake")
@@ -224,37 +173,6 @@ def test_pure_chat_no_tools_break_is_normal(tmp_path: Path):
 
     assert decision.action == "break"
     assert decision.response.runtime_status != "unfinished"
-
-
-def test_cli_run_zero_tool_promise_then_unfinished(tmp_path: Path):
-    """EXEC-12: cli_run 任务入口零工具收口（模型首轮"我会动手做"就停）= 零交付
-    产物假完成。前 3 次 continue 给机会真正调工具, 仍零产物才 unfinished。"""
-    from dataclasses import replace
-
-    response = ModelResponse(text="收到具体需求后我会直接动手做。", backend="fake")
-    params = replace(_params(), source="cli_run")
-    for i in range(3):
-        decision = tool_loop_response_decision(
-            ToolLoopResponseDecisionRequest(
-                agent=_agent(tmp_path),
-                params=params,
-                response=response,
-                counters=ToolLoopRepairCounters(),
-            )
-        )
-        assert decision.action == "continue", f"第{i+1}次零工具收口应 continue"
-        assert getattr(params, "no_artifact_nudge_count", 0) == i + 1
-    decision = tool_loop_response_decision(
-        ToolLoopResponseDecisionRequest(
-            agent=_agent(tmp_path),
-            params=params,
-            response=response,
-            counters=ToolLoopRepairCounters(),
-        )
-    )
-    assert decision.action == "break"
-    assert decision.response.runtime_status == "unfinished"
-    assert decision.response.runtime_reason == "NO_DELIVERY_ARTIFACT_PRODUCED"
 
 
 def test_tool_use_input_tool_key_does_not_override_provider_name(tmp_path: Path):
@@ -322,14 +240,13 @@ def test_protocol_violation_gets_two_repairs_before_break(tmp_path: Path):
     assert third.counters.protocol_repairs == 2
 
 
-def test_protocol_violation_feedback_includes_flat_json_example(tmp_path: Path):
-    """修复轮反馈必须带 [TOOL_CALL] 平铺 JSON 正例。
+def test_protocol_violation_feedback_steers_structured_tool_use(tmp_path: Path):
+    """修复轮反馈必须指向结构化工具调用(tool_use), 不得再教已移除的文本
+    [TOOL_CALL] 协议(EXEC-31b: native 是唯一协议)。
 
     真机实证(2026-08-08, deepseek-v4-flash 经 OpenCode Go 网关):长代码任务里模型
     忽略系统提示中段的格式说明,输出 Perl 风格(tool => 'write_file'/args => {)或
-    XML 风格(<invoke name=...>)漂移;修复轮反馈带 JSON 正例时模型 100% 纠正。
-    正例必须参数平铺(与 _tool_call_protocol 及工具 schema 一致),不得用
-    args/arguments 包裹——解析器把整块 JSON 直接当 arguments 执行。
+    XML 风格(<invoke name=...>)漂移;修复轮反馈带明确纠偏时模型 100% 纠正。
     """
     agent = _agent(tmp_path)
     response = ModelResponse(
@@ -349,8 +266,7 @@ def test_protocol_violation_feedback_includes_flat_json_example(tmp_path: Path):
     assert decision.action == "continue"
     feedback = "\n".join(params.tool_context)
     assert "tool-protocol-violation" in feedback
-    assert '[TOOL_CALL]\n{"tool": "read_file", "path": "README.md"}\n[/TOOL_CALL]' in feedback
-    assert '{"tool": "write_file", "path": "output/main.go"' in feedback
+    assert "tool_use" in feedback  # 指向结构化工具调用
     assert "不要用 args/arguments/param_name 包裹参数" in feedback
     assert "=>" in feedback and "<invoke" in feedback  # 点名禁用风格,模型才知道错在哪
 
