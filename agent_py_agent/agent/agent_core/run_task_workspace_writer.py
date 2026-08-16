@@ -723,11 +723,23 @@ def _delivery_contract_with_workspace(contract: object, paths, *, primary_worksp
     if not isinstance(contract, dict):
         return contract
     result = dict(contract)
+    # 2026-08-16 3×3 真机: task_root 被重写为系统工作区后, contract 声明的
+    # verify_commands cwd(用户产物绝对路径, 如 /root/3x3/xxx/output/xxx-go)
+    # 落在系统工作区之外 → delivery_verify cwd 越界 fail-closed → 产物明明
+    # build+test 全过却判 DELIVERY_VERIFY_FAILED → 续跑浪费。保留部署者声明
+    # 的原始 task_root 供 verify 边界检查使用(verify 的 cwd 必须在
+    # declared_task_root 或系统工作区之一内)。
+    declared = result.get("task_workspace")
+    declared_root = ""
+    if isinstance(declared, dict):
+        declared_root = str(declared.get("task_root") or "").strip()
     task_workspace = {
         "task_root": str(paths.root),
         "output_dir": str(paths.output_dir),
         "work_dir": str(paths.work_dir),
     }
+    if declared_root:
+        task_workspace["declared_task_root"] = declared_root
     if primary_workspace_root is not None:
         task_workspace["source_workspace_root"] = str(primary_workspace_root)
         task_workspace["relative_input_root"] = str(primary_workspace_root)

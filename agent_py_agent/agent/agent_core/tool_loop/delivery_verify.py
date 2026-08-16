@@ -94,16 +94,35 @@ def delivery_verify_commands(
 
 
 def _resolve_verify_cwd(
-    cwd_text: str, workspace_root: Path | None
+    cwd_text: str,
+    workspace_root: Path | None,
+    contract: object | None = None,
 ) -> tuple[Path | None, str]:
     """解析验证命令 cwd（受控边界：必须落在 workspace 根内）。
 
     双席 seq2013/2014 硬缺口1：workspace 根缺失（无法解析）时绝对/相对
     cwd 一律结构化拒绝（fail-closed），空 cwd 也不得落到宿主进程 cwd——
     绝不跳过边界检查执行。
+
+    2026-08-16 3×3 真机: attach 把 task_workspace.task_root 重写为系统工作区
+    后, 部署者声明的 verify cwd(用户产物绝对路径)落在系统工作区外 → 误判
+    越界。附加边界: contract.task_workspace.declared_task_root(attach 保留
+    的部署者原始 task_root)——cwd 落在任一边界内即合法(verify 是部署者
+    信任面, 声明 cwd 必须仍可执行)。
     """
     if workspace_root is None:
         return None, VERIFY_CWD_OUT_OF_BOUNDS
+    boundaries: list[Path] = [workspace_root]
+    declared_root = ""
+    if isinstance(contract, dict):
+        tw = contract.get("task_workspace")
+        if isinstance(tw, dict):
+            declared_root = str(tw.get("declared_task_root") or "").strip()
+    if declared_root:
+        try:
+            boundaries.append(Path(declared_root).expanduser().resolve(strict=False))
+        except (OSError, RuntimeError):
+            pass
     if not cwd_text:
         return workspace_root, VERIFY_PASSED
     candidate = Path(cwd_text).expanduser()
@@ -114,20 +133,32 @@ def _resolve_verify_cwd(
             resolved = (workspace_root / candidate).resolve(strict=False)
     except (OSError, RuntimeError):
         return None, VERIFY_CWD_OUT_OF_BOUNDS
-    try:
-        resolved.relative_to(workspace_root)
-    except ValueError:
+    if not any(_within(resolved, boundary) for boundary in boundaries):
         return None, VERIFY_CWD_OUT_OF_BOUNDS
     if not resolved.is_dir():
         return None, VERIFY_CWD_OUT_OF_BOUNDS
     return resolved, VERIFY_PASSED
 
 
-def _run_one_verify(item: dict[str, object], workspace_root: Path | None) -> dict[str, object]:
+def _within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _run_one_verify(
+    item: dict[str, object],
+    workspace_root: Path | None,
+    contract: object | None = None,
+) -> dict[str, object]:
     """执行单条验证命令（subprocess+timeout，fail-closed：异常/超时=失败）。"""
     command = str(item.get("command") or "")
     timeout = int(item.get("timeout_seconds") or _VERIFY_DEFAULT_TIMEOUT_SECONDS)
-    cwd, cwd_state = _resolve_verify_cwd(str(item.get("cwd") or ""), workspace_root)
+    cwd, cwd_state = _resolve_verify_cwd(
+        str(item.get("cwd") or ""), workspace_root, contract=contract
+    )
     if cwd_state != VERIFY_PASSED:
         return {
             "command": command,
@@ -201,7 +232,7 @@ def run_delivery_verification(
     # 参考项目对齐（owner seq2035/2036 + 双席 seq2032/2033/2034）：不做
     # Go-only 产物路径预检——会话运行时/工具运行时/终端交互 均无此规则，它是事故
     # 后的语言特判，不能作为公共门槛。只按验证命令真实执行结果判定。
-    results = [_run_one_verify(item, workspace_root) for item in commands]
+    results = [_run_one_verify(item, workspace_root, contract=contract) for item in commands]
     overall = VERIFY_PASSED if all(bool(item.get("ok")) for item in results) else VERIFY_FAILED
     return overall, results
 
