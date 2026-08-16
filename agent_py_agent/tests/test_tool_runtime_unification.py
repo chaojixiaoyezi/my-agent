@@ -594,37 +594,11 @@ def test_soc_completed_action_report_disables_tools_for_native_and_text() -> Non
             tool_choice=choice,
         )
     )
-    text = canonical_tool_calls_from_response(
-        ProviderToolCallRequest(
-            response=ModelResponse(
-                text=('[TOOL_CALL]{"tool":"command_tool","command":"firewall block"}[/TOOL_CALL]'),
-                backend="fake",
-            ),
-            protocol=ToolProtocolSnapshot(
-                "run-1",
-                "text",
-                ProviderToolCapability(
-                    provider="fake",
-                    endpoint="local://fake",
-                    model="fake-model",
-                    stream=False,
-                    native_supported=False,
-                    evidence="test_probe",
-                ),
-            ),
-            runtime_snapshot=runtime_snapshot,
-            turn_id="turn-model-status-text",
-            attempt_id="attempt-status-text",
-            tool_choice=choice,
-        )
-    )
-
     # informational 评估不再硬禁工具(auto):催办/追问进度判 False 时禁工具会卡死真实
     # 任务(2026-08-08 真机铁证),调用是否放行交给主循环模型自主决定。
+    # (EXEC-31b: text 协议已删, 同契约只测 native。)
     assert [item.tool_name for item in native.calls] == ["command_tool"]
-    assert [item.tool_name for item in text.calls] == ["command_tool"]
     assert native.violations == ()
-    assert text.violations == ()
     assert tool.executions == 0
 
 

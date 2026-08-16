@@ -45,7 +45,8 @@ class _ScheduleChildrenTool(BaseTool):
         return ToolHandlerOutcome(self.model_spec.name, True, str(params))
 
 
-def test_text_adapter_keeps_flat_orchestration_arguments() -> None:
+def test_native_keeps_flat_orchestration_arguments() -> None:
+    # EXEC-31b: text adapter 已删;等价契约由 native tool_use 路径覆盖
     tool = _ScheduleChildrenTool()
     snapshot = runtime_snapshot_for_tools(
         {tool.model_spec.name: tool},
@@ -54,24 +55,28 @@ def test_text_adapter_keeps_flat_orchestration_arguments() -> None:
     result = canonical_tool_calls_from_response(
         ProviderToolCallRequest(
             response=SimpleNamespace(
-                text=(
-                    "[TOOL_CALL]\n"
-                    '{"tool":"schedule_child_subagents","dry_run":false,'
-                    '"children":[{"goal":"child goal","agent_name":"child"}]}\n'
-                    "[/TOOL_CALL]"
-                ),
-                tool_use_blocks=[],
+                text="",
+                tool_use_blocks=[
+                    {
+                        "id": "call-1",
+                        "name": "schedule_child_subagents",
+                        "input": {
+                            "dry_run": False,
+                            "children": [{"goal": "child goal", "agent_name": "child"}],
+                        },
+                    }
+                ],
             ),
             protocol=ToolProtocolSnapshot(
                 run_id=snapshot.run_id,
-                source_protocol="text",
+                source_protocol="native",
                 capability=ProviderToolCapability(
                     provider="test",
                     endpoint="local://test",
-                    model="text-only-test",
+                    model="test",
                     stream=False,
-                    native_supported=False,
-                    evidence="explicit-test-contract",
+                    native_supported=True,
+                    evidence="test-native-contract",
                 ),
             ),
             runtime_snapshot=snapshot,
