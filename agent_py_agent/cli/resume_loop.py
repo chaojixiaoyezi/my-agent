@@ -257,6 +257,18 @@ def run_with_resume(
         max_rounds = int(
             getattr(getattr(agent, "config", None), "cli_resume_max_rounds", 0) or 8
         )
+    # EXEC-35: 上次运行异常中断(429/kill)后, 旧 attempt 可能仍是 running
+    # (僵尸执行者)——conversation_workspace_execution_blocker 会拦工具
+    # (CONVERSATION_TASK_BINDING_FAILED, 真机 2026-08-16 双线 resume 实锤)。
+    # 复用 RUN-01 recover_stale_attempts(进程死亡证明)先调和僵尸 attempt,
+    # 再以接管者身份续跑。
+    repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+    recover = getattr(repo, "recover_stale_attempts", None)
+    if callable(recover):
+        try:
+            recover()
+        except Exception:  # noqa: BLE001 调和失败不拦续跑(旧行为), 保守继续
+            pass
     runner = ResumeRunOnce(
         agent,
         base_params=base_params,
