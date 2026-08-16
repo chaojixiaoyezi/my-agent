@@ -679,6 +679,13 @@ def _resolve_home_paths(config: AgentConfig):
 
 
 def _configured_home_root(config: AgentConfig) -> str | None:
+    # 2026-08-16 第三阶段真机: MY_AGENT_HOME env 显式指定（用户要求全新 CLI
+    # 隔离数据目录）被 config.my_agent_home 默认值（~/.my-agent）覆盖——
+    # 全新 home 从未生效，记忆/会话仍写默认 home。env 是部署者显式意图，
+    # 优先于 config 默认值；config 显式配置（非默认）仍可覆盖 env。
+    env_value = str(os.environ.get("MY_AGENT_HOME", "") or "").strip()
+    if env_value:
+        return env_value
     raw = str(getattr(config, "my_agent_home", "") or "").strip()
     return raw or None
 
