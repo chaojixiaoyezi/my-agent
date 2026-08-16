@@ -1029,11 +1029,15 @@ def _final_response_after_tool_limit(agent, params: ToolLoopExecuteParams, tool_
     if _executed_subagent_orchestration(params):
         params.tool_context.append("[tool-system]\n子代理调度状态请通过 dispatch_subagents/tree 状态结果继续查看；系统不再替主代理生成最终结论。")
     final_prompt = build_tool_loop_prompt(agent, params)
-    final_response = _halt_closeout_template_response(
-        agent, params,
-        runtime_reason="TOOL_ROUND_LIMIT_REACHED",
-        label="达到最大工具轮数限制",
+    final_response = generate_model_response(
+        ModelGenerateParams(
+            agent=agent,
+            params=params,
+            prompt=final_prompt,
+            tool_rounds=tool_rounds,
+        )
     )
+    final_response = without_tool_call_after_limit(params, final_response)
     final_response = replace(
         final_response,
         runtime_status="unfinished",
@@ -1315,25 +1319,6 @@ def _soft_hint_after_failures(
     )
 
 
-
-# LLM: EXEC-32: halt 收口不再额外调模型生成
-# "诚实总结"——模型最后一轮输出已记录在账本;最终回复用结构化模板文本,
-# 省一次全量上下文请求(每次 12-60s), 也消除"跑完还在调用模型"。
-# 函数用途: 构造 halt 收口的最终回复模板, 不发起模型请求。
-def _halt_closeout_template_response(
-    agent, params: ToolLoopExecuteParams, *, runtime_reason: str, label: str
-):
-    text = (
-        f"本轮已按系统约束收口（{label}）。\n"
-        "已执行过的工具调用与真实结果都记录在运行账本中；"
-        "尚未完成的部分按未完成交接，不会虚报为已完成。"
-    )
-    return ModelResponse(
-        text=text,
-        backend=str(getattr(getattr(agent, "backend", None), "name", "system") or "system"),
-    )
-
-
 def _recovery_hint_for_failure_class(failure_class: str) -> str:
     for prefixes, hint in _RECOVERY_HINT_BY_CODE_PREFIX:
         if failure_class.startswith(prefixes):
@@ -1349,10 +1334,13 @@ def _final_response_after_repeated_failure(
     agent, params: ToolLoopExecuteParams, tool_rounds: int
 ):
     final_prompt = build_tool_loop_prompt(agent, params)
-    final_response = _halt_closeout_template_response(
-        agent, params,
-        runtime_reason="REPEATED_TOOL_FAILURE",
-        label="工具连续失败",
+    final_response = generate_model_response(
+        ModelGenerateParams(
+            agent=agent,
+            params=params,
+            prompt=final_prompt,
+            tool_rounds=tool_rounds,
+        )
     )
     exhausted = _is_exhausted_halt(params)
     final_response = without_tool_call_after_limit(
@@ -1378,10 +1366,16 @@ def _final_response_after_unknown_outcome_halt(
     agent, params: ToolLoopExecuteParams, tool_rounds: int
 ):
     final_prompt = build_tool_loop_prompt(agent, params)
-    final_response = _halt_closeout_template_response(
-        agent, params,
-        runtime_reason="TOOL_OPERATION_OUTCOME_UNKNOWN",
-        label="最后一次操作结果未知（安全人工闸）",
+    final_response = generate_model_response(
+        ModelGenerateParams(
+            agent=agent,
+            params=params,
+            prompt=final_prompt,
+            tool_rounds=tool_rounds,
+        )
+    )
+    final_response = without_tool_call_after_limit(
+        params, final_response, reason="unknown_outcome"
     )
     # 2026-08-15 3×3 cell1 真机: 错误合同对齐——UNKNOWN 的触发报码若属
     # taxonomy retryable=True 的「结果已知失败」(COMMAND_FAILED 命令失败读
@@ -1428,10 +1422,16 @@ def _final_response_after_no_action_gate(
     agent, params: ToolLoopExecuteParams, tool_rounds: int
 ):
     final_prompt = build_tool_loop_prompt(agent, params)
-    final_response = _halt_closeout_template_response(
-        agent, params,
-        runtime_reason="TOOL_ACTION_NOT_REQUIRED",
-        label="信息性回复未执行操作",
+    final_response = generate_model_response(
+        ModelGenerateParams(
+            agent=agent,
+            params=params,
+            prompt=final_prompt,
+            tool_rounds=tool_rounds,
+        )
+    )
+    final_response = without_tool_call_after_limit(
+        params, final_response, reason="no_action_gate"
     )
     final_response = replace(
         final_response,
