@@ -518,6 +518,19 @@ def _execute_claimed_operation(
     operation_status = _operation_status_for_result(result)
     unknown_reason = ""
     if operation_status == TOOL_OPERATION_UNKNOWN:
+        # #226 埋点(2026-08-16): handler 执行后结果未知(0.02s 快速失败)——打印
+        # 结构化详情供真机抓现场(ok/error_code/effect_outcome/output 前 200 字)。
+        logger.warning(
+            "tool operation UNKNOWN: tool=%s run=%s ok=%s code=%s effect=%s "
+            "handler_executed=%s output=%r",
+            request.tool_name,
+            request.run_id,
+            bool(result.ok),
+            result.error_code,
+            result.effect_outcome,
+            result.handler_executed,
+            str(getattr(result, "output", "") or "")[:200],
+        )
         result = _unknown_outcome_result(request, result)
         unknown_reason = (
             f"effect_outcome_unknown:{result.reported_error_code or result.error_code}"
@@ -641,6 +654,18 @@ def _invoke_with_lease_renewal(
     thread.start()
     try:
         return request.invoke()
+    except Exception as exc:  # noqa: BLE001 - #226 埋点(2026-08-16): handler
+        # 抛异常直接冒泡会丢失现场——打印类型/信息/堆栈后重抛, tool loop 层
+        # 分类为 UNKNOWN_ERROR 时日志里可反查真实异常(0.02s 快速失败嫌疑点)。
+        logger.warning(
+            "tool handler invoke raised: tool=%s run=%s exc=%s:%s",
+            request.tool_name,
+            request.run_id,
+            type(exc).__name__,
+            str(exc)[:200],
+            exc_info=True,
+        )
+        raise
     finally:
         stop.set()
         thread.join(timeout=5)
