@@ -125,7 +125,7 @@ class _ToolConfigFields:
     tool_context_microcompact_keep_recent: int = 8
     tool_context_microcompact_min_chars: int = 1500
     tool_context_ptl_retry_max: int = 3
-    tool_read_max_chars: int = 50_000
+    tool_read_max_chars: int = 200_000
     tool_write_inline_max_chars: int = DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
     tool_list_max_entries: int = 200
     tool_search_max_matches: int = 50
