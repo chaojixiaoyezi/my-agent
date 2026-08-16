@@ -124,9 +124,13 @@ CLI `run_with_resume`/`run_manual_resume` 与 gateway `_run_handoff_continuation
 3. ✅ `run_manual_resume` 换用机器（用户显式 resume=授权, 预算-1=不限）。
 4. ✅ `_final_response_after_tool_limit` 承诺文案换用同源判定（EXEC-39 goal
    门 + policy 预算），"会自动继续"仅当机器真的会续。
-5. ⏳ 收尾待办：gateway `_run_handoff_continuation` 换用机器（其现状已按
-   handoff 合同工作, 换用属收敛性重构, 不影响实验线）；核对
-   CONVERSATION/CONTINUABLE_REASONS 白名单仍是机器唯一原因源。
+5. ✅ 收尾定案：gateway `_run_handoff_continuation` **有意不折叠进机器**——
+   该线的授权是移交单本身(写单即授权)、预算是 HANDOFF_BUDGET_SEGMENTS
+   段数预算, 与机器的 goal 授权/resume_limit 语义不同源; 强行套用一个
+   机器只会让事实失形。机器管辖 CLI 自动续跑与手动续跑两条线,
+   gateway 移交线保持独立(设计 §3 表格中"谁触发下一步"已区分)。
+   白名单 CONTINUABLE_REASONS 仍是机器唯一原因源(经 should_continue_task
+   以 continuable 事实输入)。
 
 ## 7. 验收
 
