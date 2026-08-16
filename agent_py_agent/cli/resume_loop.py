@@ -76,20 +76,24 @@ class ResumeRunOnce:
         """返回 (result, bound_params)。首轮后 self.ctx 建立。"""
         if continuation_seq == 0:
             bound = bind_cli_run_conversation(self.agent, self.base_params, prompt)
-            # EXEC-29: 首轮 bind/attach 后 task_attributes 里的 run_workspace
+            # EXEC-29: 首轮 attach 后 task_attributes 里的 run_workspace
             # (task_root/output_dir/work_dir)是后续续跑轮复用同一任务目录的
             # 唯一事实源。bind 只改 bound 不回写 base_params——续跑轮
             # apply_to(self.base_params) 会丢失首轮 workspace → 每次续跑
             # 新建"系统续跑-N"目录、output 分散、模型在新目录从头重写。
-            # 这里把首轮 bind 后的 task_attributes 回写 base_params,
+            # 这里只把 run_workspace 回写 base_params(不携带
+            # conversation_thread_id——它是首轮 bind 的会话身份, 续跑轮
+            # bind 自会重建; 带回会让工具执行层误判续跑轮为 conversation
+            # 任务 → CONVERSATION_TASK_BINDING_FAILED, EXEC-29 真机复验)。
             # 续跑轮 apply 后 attach_run_task_workspace_context 走
             # _existing_workspace_paths 复用首轮目录(对照 会话运行时/轻量运行时
             # 任务在同一目录持续)。
-            if self.base_params is not bound:
-                self.base_params = replace(
-                    self.base_params,
-                    task_attributes=dict(getattr(bound, "task_attributes", None) or {}),
-                )
+            bound_attrs = dict(getattr(bound, "task_attributes", None) or {})
+            workspace = bound_attrs.get("run_workspace")
+            if self.base_params is not bound and isinstance(workspace, dict):
+                merged = dict(getattr(self.base_params, "task_attributes", None) or {})
+                merged["run_workspace"] = dict(workspace)
+                self.base_params = replace(self.base_params, task_attributes=merged)
             result = self.agent.run(
                 prompt,
                 params=bound,
