@@ -569,7 +569,10 @@ def run_manual_resume(
     rounds = 1
     reason = "manual_resume"
     same_reason_streak = 0
-    for seq in range(2, max_rounds + 2):
+    # EXEC-35g: 循环 seq 从 start_seq+1 开始——首轮已用 start_seq, 循环
+    # 若从 2 开始会在 start_seq>2 时与首轮重叠(跨进程 resume 时同 seq 不同
+    # content → dedupe 冲突, 真机 ma-b-resume5 实锤)。
+    for seq in range(start_seq + 1, start_seq + max_rounds + 1):
         should, new_reason = should_resume(result)
         if should and new_reason == reason:
             same_reason_streak += 1
