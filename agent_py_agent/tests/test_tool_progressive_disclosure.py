@@ -152,11 +152,10 @@ def test_explicit_allowed_tools_are_structured_direct_exposure(tmp_path) -> None
 
 
 def test_core_tools_stay_in_main_catalog(tmp_path) -> None:
-    """通用核心工具(文件/命令)照常在主目录正文,不受折叠影响。"""
+    """EXEC-31b: native 下目录不展开条目(Schema 走原生通道),主目录只有说明行。"""
     agent = _agent(tmp_path)
-    body = agent.tools.render_catalog_section().split("⊞", 1)[0]
-    assert "read_file" in body
-    assert "run_command" in body
+    body = agent.tools.render_catalog_section()
+    assert "原生工具通道" in body
 
 
 def test_deferred_tools_surface_via_tool_search_not_initial_recommendations(tmp_path) -> None:
@@ -199,26 +198,26 @@ def test_list_tools_still_lists_all_including_deferred(tmp_path) -> None:
 
 
 def test_empty_deferred_restores_full_catalog(tmp_path) -> None:
-    """deferred=[] 完全恢复老行为:全部工具铺主目录,无折叠行(向后兼容)。"""
+    """EXEC-31b: native 下 deferred=[] 也不展开条目(展开只属已删的 text 渲染)。"""
     agent = _agent(tmp_path, tool_catalog_deferred_categories=[])
     section = agent.tools.render_catalog_section()
-    assert "raise_collaboration" in section  # 垂直工具回到主目录正文
-    assert "⊞" not in section  # 没有折叠行
+    assert "原生工具通道" in section
+    assert "raise_collaboration" not in section
 
 
 def test_deferred_shrinks_catalog_token_footprint(tmp_path) -> None:
-    """量化:开启 deferred 后主目录小于全量(瘦身真实发生,不是只挪位置)。"""
+    """EXEC-31b: native 下目录不展开, folded 与 full 正文相同(瘦身由原生 Schema 通道承担)。"""
     folded = _agent(tmp_path).tools.render_catalog_section()
     full = _agent(tmp_path, tool_catalog_deferred_categories=[]).tools.render_catalog_section()
-    assert len(folded) < len(full)
+    assert "原生工具通道" in folded
+    # deferred 提示行是唯一长度差(条目展开已随 text 渲染删除)
+    assert abs(len(folded) - len(full)) < 600  # 差=deferred 提示行(条目展开已删)
 
 
 def test_native_catalog_does_not_duplicate_provider_schemas(tmp_path) -> None:
     agent = _agent(tmp_path)
-    text = agent.tools.render_catalog_section(tool_protocol="text")
     native = agent.tools.render_catalog_section(tool_protocol="native")
 
     assert "结构化 Schema 为准" in native
-    assert "⊞" in native
-    assert "raise_collaboration" in native
-    assert len(native) < len(text) // 2
+    # EXEC-31b: 目录不展开 "[name 分类] 参数" 形式的工具条目
+    assert "[filesystem" not in native and "[api" not in native and "[web" not in native
