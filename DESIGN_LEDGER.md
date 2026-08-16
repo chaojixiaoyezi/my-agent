@@ -292,3 +292,15 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 
 【待办】真机 zombie 复现四类原始证据（diff/工作树 + orphan_reclaim_blocked
 完整字段链 + 重启无重复 claim/handoff + UNKNOWN 人工核对/显式恢复路径）。
+
+## 收口状态机（owner 四改之 2）【状态：设计完成，待实施】
+
+- 详见 `docs/design/closeout_state_machine.md`。
+- 摘要：把散在 _final_response_after_*/response_decision/resume_loop/
+  gateway 四处的"停下来后下一步"收拢为一个纯函数 `decide_closeout`——
+  终态 done/cancelled/wait_human/wait_handoff/resume_round；停止原因采集
+  方只报因，承诺文案由 state 唯一决定（"会自动继续"仅当 machine 真的会
+  续）。保留 EXEC-30/35/39 语义与 resume 能力（goal/cron 模式用）。
+- 参考：会话运行时 无系统侧收口机（模型自然停=done，goal 扩展只做目标层轮次）、
+  dsh /goal = goal-round-driver 同款。
+- 实施切 5 步（见文档 §6），每步独立提交。
