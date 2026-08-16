@@ -654,7 +654,7 @@ class ToolRegistry:
         self,
         *,
         allowed_tools: list[str] | None = None,
-        tool_protocol: str = "text",
+        tool_protocol: str = "native",
         runtime_snapshot: ToolRuntimeSnapshot | None = None,
     ) -> str:
         specs = self.specs(
@@ -718,7 +718,7 @@ class ToolRegistry:
         query: str,
         *,
         allowed_tools: list[str] | None = None,
-        tool_protocol: str = "text",
+        tool_protocol: str = "native",
         runtime_snapshot: ToolRuntimeSnapshot | None = None,
     ) -> str:
         specs = self.model_visible_specs(
@@ -937,7 +937,7 @@ def _render_tool_catalog_section(
     entries: list[str],
     content_transport_protocol: str,
     *,
-    tool_protocol: str = "text",
+    tool_protocol: str = "native",
 ) -> str:
     if not entries:
         entries = ["- none：当前执行上下文没有授权任何工具；缺能力时请上抛 capability_request。"]
@@ -947,26 +947,15 @@ def _render_tool_catalog_section(
     )
 
 
-def _tool_call_protocol(tool_protocol: str = "text") -> str:
+def _tool_call_protocol(tool_protocol: str = "native") -> str:
     protocol = str(tool_protocol or "").strip().lower()
-    if protocol == "native":
-        return _native_tool_call_protocol()
-    if protocol != "text":
-        raise ValueError(f"invalid tool protocol: {protocol or '<empty>'}")
-    return (
-        "# Tools\n"
-        "当你需要看文件、改代码、查网页或测接口时，可以调用工具。\n"
-        "工具调用格式必须严格写成：\n"
-        "[TOOL_CALL]\n"
-        '{"tool": "read_file", "path": "README.md"}\n'
-        "[/TOOL_CALL]\n"
-        "必须把工具参数直接放在同一个 JSON 对象里；不要写 param_name、args、arguments 或其他包裹参数。\n"
-        "必须使用 Tool Catalog 里该工具自己的参数名；不要把 path 当作所有工具的默认参数。\n"
-        "每次响应可以并行发出多个独立工具调用：每个工具一个 [TOOL_CALL] 块、连续书写。"
-        "只要多个操作互不依赖（例如同时读取多个文件、同时写入多个互不依赖的文件、"
-        "同时列出多个目录），就在同一轮里全部发出，不要一轮只发一个、浪费轮次。"
-        "拿到全部工具结果后，再输出最终答案，不要把工具调用块留在最后回复里。"
-    )
+    if protocol != "native":
+        # 2026-08-16 用户指示: 固定只用 native, text 协议(旧方法)删除。
+        raise ValueError(
+            f"invalid tool protocol: {protocol or '<empty>'!r}; "
+            "text protocol has been removed, only native is supported"
+        )
+    return _native_tool_call_protocol()
 
 
 def _native_tool_call_protocol() -> str:

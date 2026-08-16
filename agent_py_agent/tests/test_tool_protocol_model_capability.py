@@ -72,20 +72,20 @@ def test_failed_native_capability_probe_does_not_silently_select_text() -> None:
 
     with pytest.raises(
         ToolProtocolSelectionError,
-        match="explicitly select tool_protocol=text",
+        match="text fallback has been removed",
     ):
-        select_tool_protocol(agent, run_id="run-text")
+        select_tool_protocol(agent, run_id="run-native-fail")
 
     assert agent.backend.probes == 1
 
 
-def test_explicit_text_protocol_does_not_probe_native_transport() -> None:
+def test_explicit_text_protocol_is_rejected() -> None:
+    # 2026-08-16: text 协议已删除——显式配置 text 一律拒绝(fail-closed)。
     agent = _agent(native_supported=True, protocol="text")
 
-    snapshot = select_tool_protocol(agent, run_id="run-explicit-text")
+    with pytest.raises(ValueError, match="text protocol has been removed"):
+        select_tool_protocol(agent, run_id="run-explicit-text")
 
-    assert snapshot.source_protocol == "text"
-    assert snapshot.capability.evidence == "explicit_text_protocol_configuration"
     assert agent.backend.probes == 0
 
 
@@ -94,7 +94,7 @@ def test_tools_disabled_selects_non_native_snapshot_without_probe() -> None:
 
     snapshot = select_tool_protocol(agent, run_id="run-tools-disabled")
 
-    assert snapshot.source_protocol == "text"
+    assert snapshot.source_protocol == "native"
     assert snapshot.capability.evidence == "tools_disabled_for_run"
     assert agent.backend.probes == 0
 
@@ -104,18 +104,17 @@ def test_native_tool_use_requires_run_fixed_protocol_snapshot() -> None:
         native_tool_use_active(SimpleNamespace())
 
 
-def test_model_in_text_models_skips_probe_and_selects_text() -> None:
-    # deepseek-v4-flash 真机实证(2026-08-07):flash 类非 reasoning 模型配 native 静默失效
-    # (0 工具调用+幻觉,只见只读查询从不写文件),名单内模型必须显式走 text。
+def test_model_in_text_models_probes_native_as_usual() -> None:
+    # 2026-08-16: text 协议已删除(用户指示固定 native)——text 模型名单机制随之删除,
+    # 任何模型都走 native probe(deepseek-v4-flash 真机验证 native 工作正常)。
     agent = _agent(native_supported=True, text_models=["deepseek-v4-flash"])
     agent.backend.model_name = "deepseek-v4-flash"
 
-    snapshot = select_tool_protocol(agent, run_id="run-text-model")
+    snapshot = select_tool_protocol(agent, run_id="run-native-model")
 
-    assert snapshot.source_protocol == "text"
-    assert snapshot.capability.evidence == "model_declared_text_protocol_configuration"
-    assert agent.backend.probes == 0
-    assert native_tool_use_active(SimpleNamespace(tool_protocol_snapshot=snapshot)) is False
+    assert snapshot.source_protocol == "native"
+    assert agent.backend.probes == 1
+    assert native_tool_use_active(SimpleNamespace(tool_protocol_snapshot=snapshot)) is True
 
 
 def test_model_not_in_text_models_probes_native_as_usual() -> None:
@@ -136,11 +135,11 @@ def test_empty_text_models_leaves_native_probe_untouched() -> None:
     assert agent.backend.probes == 1
 
 
-def test_text_models_ignored_when_protocol_explicitly_text() -> None:
-    # 显式 text 已走最短路径;名单不改变行为,仅确保不 probe。
+def test_text_models_no_longer_exist_when_protocol_explicitly_text() -> None:
+    # 2026-08-16: text 协议已删除——显式 text + 名单配置同样被拒绝。
     agent = _agent(native_supported=True, protocol="text", text_models=["deepseek-v4-flash"])
 
-    snapshot = select_tool_protocol(agent, run_id="run-text-explicit")
+    with pytest.raises(ValueError, match="text protocol has been removed"):
+        select_tool_protocol(agent, run_id="run-text-explicit")
 
-    assert snapshot.source_protocol == "text"
     assert agent.backend.probes == 0
