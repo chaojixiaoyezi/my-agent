@@ -19,9 +19,6 @@ from pathlib import Path
 from ..agent.agent_core.cli_run_conversation import bind_cli_run_conversation
 from ..agent.agent_core.runtime.loop_models import RunParams
 from ..agent.conversation.closeout import (
-    SAME_REASON_RESUME_LIMIT as _SAME_REASON_RESUME_LIMIT,
-)
-from ..agent.conversation.closeout import (
     STATE_DONE,
     STATE_RESUME_ROUND,
     STATE_WAIT_HANDOFF,
@@ -425,30 +422,34 @@ def _closeout_after_decision(
     result: object,
     rounds: int,
     initial_prompt: str,
+    *,
+    write_events: bool = True,
 ) -> CliResumeOutcome:
     """EXEC-41: 执行收口机器的终态——落账/移交/返回都只按 outcome.state,
     不再散落分支推理。done → completed; wait_handoff(handoff=True) →
-    budget_exhausted 事件+移交单; 其余(wait_human/cancelled/no_active_goal)
-    → unresumable(缺口C: 只有 runtime_status=ok 才算 completed, 不误标)。"""
+    budget_exhausted 事件+移交单(write_events=False 时只返回状态, 手动
+    续跑不落账保持旧行为); 其余(wait_human/cancelled/no_active_goal) →
+    unresumable(缺口C: 只有 runtime_status=ok 才算 completed, 不误标)。"""
     if outcome.state == STATE_DONE:
         return CliResumeOutcome(
             status="completed", rounds=rounds, final_result=result,
             reason=outcome.reason or "task_completed",
         )
     if outcome.state == STATE_WAIT_HANDOFF and outcome.handoff:
-        record_budget_exhausted(
-            agent=agent,
-            run_id=runner.ctx.root_run_id,
-            attempt_id=runner.ctx.parent_attempt_id,
-            task_run_id=runner._task_run_id(),
-            budget_before=max(rounds - 1, 0),
-            budget_after=rounds,
-            reason=outcome.reason,
-        )
-        _write_handoff(
-            agent, runner, seq=rounds, reason=outcome.reason,
-            user_prompt=initial_prompt,
-        )
+        if write_events:
+            record_budget_exhausted(
+                agent=agent,
+                run_id=runner.ctx.root_run_id,
+                attempt_id=runner.ctx.parent_attempt_id,
+                task_run_id=runner._task_run_id(),
+                budget_before=max(rounds - 1, 0),
+                budget_after=rounds,
+                reason=outcome.reason,
+            )
+            _write_handoff(
+                agent, runner, seq=rounds, reason=outcome.reason,
+                user_prompt=initial_prompt,
+            )
         return CliResumeOutcome(
             status="budget_exhausted", rounds=rounds, final_result=result,
             reason=outcome.reason,
@@ -601,34 +602,38 @@ def run_manual_resume(
     rounds = 1
     reason = "manual_resume"
     same_reason_streak = 0
-    # EXEC-35g: 循环 seq 从 start_seq+1 开始——首轮已用 start_seq, 循环
+    # EXEC-35g: 续跑轮 seq 从 start_seq+1 开始——首轮已用 start_seq, 循环
     # 若从 2 开始会在 start_seq>2 时与首轮重叠(跨进程 resume 时同 seq 不同
     # content → dedupe 冲突, 真机 ma-b-resume5 实锤)。
-    for seq in range(start_seq + 1, start_seq + max_rounds + 1):
+    # EXEC-41(四改之 2 步骤 3): 收口判定换用 decide_closeout——用户显式
+    # run --resume 本身就是授权(active_goal=True 事实), 无 policy 预算
+    # (resume_budget_left=-1=不限), 同因/轮数护栏与自动续跑同款。
+    while True:
         should, new_reason = should_resume(result)
         if should and new_reason == reason:
             same_reason_streak += 1
-            if same_reason_streak >= _SAME_REASON_RESUME_LIMIT:
-                return CliResumeOutcome(
-                    status="budget_exhausted", rounds=rounds,
-                    final_result=result, reason="same_reason_resume_limit_reached",
-                )
         elif should:
             same_reason_streak = 1
         reason = new_reason
-        if not should:
-            runtime_status = str(
-                getattr(result, "runtime_status", "") or ""
-            ).strip().lower()
-            if runtime_status == "ok":
-                return CliResumeOutcome(
-                    status="completed", rounds=rounds, final_result=result,
-                    reason=reason,
-                )
-            return CliResumeOutcome(
-                status="unresumable", rounds=rounds, final_result=result,
-                reason=reason,
+        outcome = decide_closeout(
+            CloseoutFacts(
+                runtime_status=str(getattr(result, "runtime_status", "") or ""),
+                runtime_reason=str(getattr(result, "runtime_reason", "") or ""),
+                runtime_source=str(getattr(result, "runtime_source", "") or ""),
+                continuable=should,
+                active_goal=True,
+                resume_budget_left=-1,
+                same_reason_streak=same_reason_streak,
+                rounds=rounds,
+                max_rounds=max_rounds + 1,
             )
+        )
+        if outcome.state != STATE_RESUME_ROUND:
+            return _closeout_after_decision(
+                agent, runner, outcome, result, rounds, prompt,
+                write_events=False,
+            )
+        seq = start_seq + rounds
         next_prompt = resume_prompt_for(
             continuation_reason=reason,
             continuation_seq=seq,
@@ -638,10 +643,6 @@ def run_manual_resume(
             next_prompt, seq, attempt_id="", continuation_reason=reason
         )
         rounds += 1
-    return CliResumeOutcome(
-        status="budget_exhausted", rounds=rounds, final_result=result,
-        reason="max_rounds_reached",
-    )
 
 
 def _next_manual_resume_seq(agent: object, facts: dict) -> int | None:

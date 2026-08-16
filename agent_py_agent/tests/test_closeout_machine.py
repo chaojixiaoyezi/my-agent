@@ -32,7 +32,7 @@ def _oracle(facts: CloseoutFacts) -> CloseoutOutcome:
         return CloseoutOutcome(
             "wait_handoff", "same_reason_resume_limit_reached", "wait_handoff", True
         )
-    if int(facts.resume_budget_left or 0) <= 0:
+    if int(facts.resume_budget_left or 0) == 0:
         return CloseoutOutcome("wait_handoff", "resume_limit_reached", "wait_handoff", True)
     if int(facts.rounds or 0) >= int(facts.max_rounds or 0):
         return CloseoutOutcome("wait_handoff", "max_rounds_reached", "wait_handoff", True)
@@ -159,6 +159,17 @@ def test_budget_exhausted_forces_handoff():
     outcome = decide_closeout(facts)
     assert outcome.state == "wait_handoff"
     assert outcome.reason == "resume_limit_reached"
+
+
+def test_negative_budget_means_unbounded():
+    """<0 的预算=无预算概念(手动续跑/无 policy 场景): 不因预算停。"""
+    facts = CloseoutFacts(
+        runtime_status="unfinished", runtime_reason="TOOL_ROUND_LIMIT_REACHED",
+        runtime_source="tool_loop", continuable=True, active_goal=True,
+        resume_budget_left=-1, same_reason_streak=0, rounds=1, max_rounds=9,
+    )
+    outcome = decide_closeout(facts)
+    assert outcome.state == "resume_round"
 
 
 def test_max_rounds_reached_forces_handoff():

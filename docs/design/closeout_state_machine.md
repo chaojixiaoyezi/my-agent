@@ -89,10 +89,12 @@ class CloseoutFacts:
     runtime_status: str        # ok/unfinished/blocked/cancelled
     runtime_reason: str
     runtime_source: str
-    active_goal: bool          # EXEC-39 授权事实（load_goal 结果）
-    resume_budget_left: int    # policy resume_used/resume_limit 差（0=无预算）
+    continuable: bool          # should_continue_task 白名单 gate 的判定
+    active_goal: bool          # EXEC-39 授权事实（load_goal 结果/用户显式 resume）
+    resume_budget_left: int    # >0=剩余次数; 0=耗尽; <0=无预算概念(不限)
     same_reason_streak: int    # EXEC-30 连续同因计数
-    rounds: int                # 已跑代数
+    rounds: int                # 已跑代数（含首轮）
+    max_rounds: int            # 总代数上限（含首轮）
 
 @dataclass(frozen=True)
 class CloseoutOutcome:

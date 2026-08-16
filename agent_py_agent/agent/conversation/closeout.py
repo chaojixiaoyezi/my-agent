@@ -88,7 +88,8 @@ def decide_closeout(facts: CloseoutFacts) -> CloseoutOutcome:
             True,
         )
     # 预算闸(resume_limit, policy 单一权威): 无剩余自动续跑次数 → 移交。
-    if int(facts.resume_budget_left or 0) <= 0:
+    # 语义: >0=剩余次数; ==0=耗尽; <0=无预算概念(不限, 手动续跑/无 policy)。
+    if int(facts.resume_budget_left or 0) == 0:
         return CloseoutOutcome(
             STATE_WAIT_HANDOFF, "resume_limit_reached", "wait_handoff", True
         )
