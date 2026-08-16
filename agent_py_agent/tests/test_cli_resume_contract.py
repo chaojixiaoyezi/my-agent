@@ -172,6 +172,10 @@ def test_should_continue_task_truth_table():
         ("REQUIRED_ACTION_HAS_NO_EVIDENCE", "required_action_completion_gate", "unfinished"),
         # 2026-08-15: 未闭合工具块纯格式错误(整轮零执行已保证安全)可续跑
         ("TOOL_CALL_UNCLOSED", "tool_protocol_adapter", "unfinished"),
+        # EXEC-26/27: 工具/收口 gate 产生的"未完成"族同属返工门可续跑
+        ("OPERATION_INCOMPLETE", "tool_runtime", "unfinished"),
+        ("NO_DELIVERY_ARTIFACT_PRODUCED", "tool_loop", "unfinished"),
+        ("MODEL_RESPONSE_TRUNCATED", "tool_loop", "unfinished"),
     ]
     not_continuable = [
         ("PROTOCOL_VIOLATION", "tool_protocol_adapter", "blocked"),
