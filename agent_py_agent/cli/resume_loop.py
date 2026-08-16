@@ -19,6 +19,7 @@ from dataclasses import dataclass, replace
 
 from ..agent.agent_core.cli_run_conversation import bind_cli_run_conversation
 from ..agent.agent_core.runtime.loop_models import RunParams
+from ..agent.backends import ProviderRecoverableError
 from .resume_contract import (
     CliContinuationContext,
     record_budget_exhausted,
@@ -28,6 +29,22 @@ from .resume_contract import (
 # 用户指示(2026-08-16): 进程不能退出——连续不可续跑收口后进入退避节奏
 # (30s→60s→120s→180s 封顶, sleep≤180s 铁律), 退避后继续尝试, 进程存活。
 _UNCONTINUABLE_BACKOFF_START = 5
+
+
+def _continuation_backoff_sleep(consecutive: int) -> None:
+    """连续失败退避(sleep≤180s 铁律): <5 直接重试, ≥5 30s→60s→120s→180s 封顶。
+
+    用户指示(2026-08-16): 进程不能退出——不可续跑收口与 provider 可恢复错误
+    共用同一退避节奏, 退避后继续尝试, 进程存活。
+    """
+    if consecutive < _UNCONTINUABLE_BACKOFF_START:
+        return
+    time.sleep(
+        min(
+            180,
+            30 * (2 ** min(consecutive - _UNCONTINUABLE_BACKOFF_START, 3)),
+        )
+    )
 
 
 def record_uncontinuable_continuation(
@@ -272,9 +289,26 @@ def run_with_resume(
         save=save,
         delivery_contract=delivery_contract,
     )
-    result, _bound = runner(initial_prompt, 0, "")
+    consecutive_uncontinuable = 0  # 连续失败计数(不可续跑收口/provider 错误共用)
+    # 首轮：进程内重试直到成功(用户指示 2026-08-16: 进程不能退出)。provider
+    # 可恢复错误(MODEL_INCOMPLETE_RESPONSE 输出截断等)按退避节奏进程内重试,
+    # 不让异常冒泡到 cmd_run 的 except → return 退出——真机 cell2 2026-08-15:
+    # stop_reason=max_tokens → ProviderRecoverableError → 进程退出实锤(违反铁律)。
+    while True:
+        try:
+            result, _bound = runner(initial_prompt, 0, "")
+            break
+        except ProviderRecoverableError as exc:
+            consecutive_uncontinuable += 1
+            record_uncontinuable_continuation(
+                agent,
+                runner=runner,
+                seq=0,
+                reason=f"provider_recoverable:{type(exc).__name__}",
+                consecutive=consecutive_uncontinuable,
+            )
+            _continuation_backoff_sleep(consecutive_uncontinuable)
     rounds = 1
-    consecutive_uncontinuable = 0  # 连续不可续跑计数(首轮 blocked 分支会置 1)
     should, reason = should_resume(result)
     # 用户指示(2026-08-16): 进程不能退出——只有任务终态(ok)或无契约
     # (首轮连 task/run 都没建, 无法续跑)才返回; 其余收口(blocked/
@@ -355,9 +389,24 @@ def run_with_resume(
             user_task=initial_prompt,
         )
         # 缺口F: 上轮收口原因随 params 传续跑轮(消息结构化 metadata)
-        result, _bound = runner(
-            prompt, seq, attempt_id="", continuation_reason=reason
-        )
+        # 用户指示(2026-08-16): 进程不能退出——provider 可恢复错误(输出截断/
+        # 超时/限流)进程内退避重试同一续跑轮(不消耗 max_rounds), 异常不冒泡。
+        while True:
+            try:
+                result, _bound = runner(
+                    prompt, seq, attempt_id="", continuation_reason=reason
+                )
+                break
+            except ProviderRecoverableError as exc:
+                consecutive_uncontinuable += 1
+                record_uncontinuable_continuation(
+                    agent,
+                    runner=runner,
+                    seq=seq,
+                    reason=f"provider_recoverable:{type(exc).__name__}",
+                    consecutive=consecutive_uncontinuable,
+                )
+                _continuation_backoff_sleep(consecutive_uncontinuable)
         rounds += 1
         # parent_attempt 推进在 ResumeRunOnce 内部完成（DB 真实 attempt）
         should, reason = should_resume(result)
@@ -381,14 +430,10 @@ def run_with_resume(
                 reason=reason or "not_continuable",
                 consecutive=consecutive_uncontinuable,
             )
+            # 退避: <5 直接重试, ≥5 30s→60s→120s→180s 封顶(sleep ≤180s
+            # 铁律), 退避后重置计数继续尝试——进程存活等待链路/模型恢复。
+            _continuation_backoff_sleep(consecutive_uncontinuable)
             if consecutive_uncontinuable >= _UNCONTINUABLE_BACKOFF_START:
-                # 退避: 30s→60s→120s→180s 封顶(sleep ≤180s 铁律), 退避
-                # 后重置计数继续尝试——进程存活等待链路/模型恢复。
-                backoff = min(
-                    180,
-                    30 * (2 ** min(consecutive_uncontinuable - _UNCONTINUABLE_BACKOFF_START, 3)),
-                )
-                time.sleep(backoff)
                 consecutive_uncontinuable = 0
             continue
         if rounds >= max_rounds + 1:

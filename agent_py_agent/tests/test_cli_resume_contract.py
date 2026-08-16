@@ -505,6 +505,83 @@ def test_run_with_resume_unresumable_continues_in_process(tmp_path):
     assert len(fake.calls) == 2  # 首轮 blocked + 续跑轮 ok
 
 
+def test_run_with_resume_provider_error_first_round_retries(tmp_path):
+    """首轮 ProviderRecoverableError（输出截断）→ 进程内重试首轮不退出。
+
+    真机 cell2 2026-08-15: stop_reason=max_tokens → ProviderRecoverableError
+    → 冒泡到 cmd_run except → 进程退出（违反用户铁律「进程不能退出」）。
+    修复后: run_with_resume 进程内退避重试, 第二次成功即完成。
+    """
+    from agent_py_agent.agent.agent_core.runtime.run_params import (
+        run_params_with_request_id,
+    )
+    from agent_py_agent.agent.backends import ProviderResponseError
+    from agent_py_agent.cli.resume_loop import run_with_resume
+
+    class _TruncatedThenOk(_FakeRunAgent):
+        def run(self, prompt, *, params=None, **kw):
+            seq = int(getattr(params, "continuation_seq", 0) or 0)
+            self.calls.append((seq, str(prompt)[:40]))
+            if len(self.calls) == 1:  # 首轮第一次调用: 输出截断
+                raise ProviderResponseError(
+                    "模型响应未完成（stop_reason=max_tokens）",
+                    error_code="MODEL_INCOMPLETE_RESPONSE",
+                )
+            if seq == 0:
+                return SimpleNamespace(
+                    runtime_status="unfinished", runtime_reason="TOOL_ROUND_LIMIT_REACHED",
+                    runtime_source="tool_loop", tool_rounds=5, attempt_id="attempt-0",
+                )
+            return SimpleNamespace(
+                runtime_status="ok", runtime_reason="", runtime_source="tool_loop",
+                tool_rounds=2, attempt_id=f"attempt-{seq}",
+            )
+
+    fake = _TruncatedThenOk(tmp_path)
+    base = run_params_with_request_id(
+        RunParams(source="cli_run", task_id="task-1", task_attributes={})
+    )
+    outcome = run_with_resume(fake, initial_prompt="t", base_params=base, max_rounds=5)
+    assert outcome.status == "completed"
+    assert len(fake.calls) == 3  # 首轮截断重试 + 首轮成功 + 续跑轮 ok
+
+
+def test_run_with_resume_provider_error_continuation_retries(tmp_path):
+    """续跑轮 ProviderRecoverableError → 进程内重试同一续跑轮（不消耗轮次）。"""
+    from agent_py_agent.agent.agent_core.runtime.run_params import (
+        run_params_with_request_id,
+    )
+    from agent_py_agent.agent.backends import ProviderResponseError
+    from agent_py_agent.cli.resume_loop import run_with_resume
+
+    class _ContinuationTruncatedThenOk(_FakeRunAgent):
+        def run(self, prompt, *, params=None, **kw):
+            seq = int(getattr(params, "continuation_seq", 0) or 0)
+            self.calls.append((seq, str(prompt)[:40]))
+            if seq == 1 and self.calls.count((seq, str(prompt)[:40])) == 1:
+                raise ProviderResponseError(
+                    "模型响应未完成（stop_reason=max_tokens）",
+                    error_code="MODEL_INCOMPLETE_RESPONSE",
+                )
+            if seq == 0:
+                return SimpleNamespace(
+                    runtime_status="unfinished", runtime_reason="TOOL_ROUND_LIMIT_REACHED",
+                    runtime_source="tool_loop", tool_rounds=5, attempt_id="attempt-0",
+                )
+            return SimpleNamespace(
+                runtime_status="ok", runtime_reason="", runtime_source="tool_loop",
+                tool_rounds=2, attempt_id=f"attempt-{seq}",
+            )
+
+    fake = _ContinuationTruncatedThenOk(tmp_path)
+    base = run_params_with_request_id(
+        RunParams(source="cli_run", task_id="task-1", task_attributes={})
+    )
+    outcome = run_with_resume(fake, initial_prompt="t", base_params=base, max_rounds=5)
+    assert outcome.status == "completed"
+    assert len(fake.calls) == 3  # 首轮 + 续跑轮截断重试 + 续跑轮成功
+
+
 # ------------------------------------------------- 切片5: 崩溃/双消费者回归
 
 
