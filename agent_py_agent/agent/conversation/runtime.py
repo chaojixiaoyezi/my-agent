@@ -5738,6 +5738,11 @@ CONTINUABLE_REASONS = frozenset(
         "OPERATION_INCOMPLETE",
         "NO_DELIVERY_ARTIFACT_PRODUCED",
         "MODEL_RESPONSE_TRUNCATED",
+        # EXEC-28 阶段二 ma-b 真机: 写码 92 轮后工具上下文 398K 字符溢出,
+        # preflight 收口 context_overflow RC=2 不在白名单 → 直接退出, 已写
+        # 20 文件白费。对照 会话运行时 自动 compact 后任务继续。上下文溢出同属
+        # 返工门(compact→续跑), 应自动续跑。
+        "CONTEXT_OVERFLOW",
     }
 )
 
@@ -5782,6 +5787,10 @@ def should_continue_task(final_response: object) -> tuple[bool, str]:
             return False, reason or "not_continuable"
         if reason in {"NO_DELIVERY_ARTIFACT_PRODUCED", "MODEL_RESPONSE_TRUNCATED"} and not (
             source == "tool_loop" and status == "unfinished"
+        ):
+            return False, reason or "not_continuable"
+        if reason == "CONTEXT_OVERFLOW" and not (
+            source == "preflight" and status == "context_overflow"
         ):
             return False, reason or "not_continuable"
         return True, reason
