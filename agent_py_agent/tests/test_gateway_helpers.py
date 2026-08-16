@@ -53,10 +53,14 @@ def test_gateway_transport_splits_short_connect_and_long_read_timeouts():
     assert isinstance(proxy_handler, urllib.request.ProxyHandler)
     assert http_handler.connect_timeout == 10
     assert https_handler.connect_timeout == 10
-    assert http_handler.read_timeout == 600
-    assert https_handler.read_timeout == 600
+    # 2026-08-16 P0-TLS: socket 层 read_timeout 与 stream_idle_timeout 对齐
+    # (连接被吞时 watchdog abort 在 TLS 场景不能打断阻塞 recv, socket
+    # timeout 是最终兜底)——未配置 stream_idle 时取 120s 兜底, 不再跟随
+    # 总超时 600s。
+    assert http_handler.read_timeout == 120
+    assert https_handler.read_timeout == 120
     opener.open.assert_called_once()
-    assert opener.open.call_args.kwargs["timeout"] == 600
+    assert opener.open.call_args.kwargs["timeout"] == 120
 
 
 def test_gateway_transport_keeps_external_provider_proxy_configuration():

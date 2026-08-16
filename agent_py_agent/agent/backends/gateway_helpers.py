@@ -258,7 +258,12 @@ def _stream_with_watchdog(request: GatewayRequest) -> Iterator[str]:
                 if watchdog.timed_out:
                     raise _stream_idle_timeout_error(request)
             except (OSError, ValueError) as exc:
-                if watchdog.timed_out:
+                # 2026-08-16 P0-TLS: socket 层 read_timeout 已与
+                # stream_idle_timeout 对齐(见 _gateway_urlopen)——socket.timeout
+                # 是「连接被吞无数据」的最终兜底(abort/close 在 TLS 场景
+                # 不能打断阻塞 recv), 与 watchdog idle 超时等价, 必须
+                # 归为 stream_idle 而非原样抛 OSError。
+                if watchdog.timed_out or isinstance(exc, socket.timeout):
                     raise _stream_idle_timeout_error(request) from exc
                 raise
             except AttributeError as exc:
@@ -521,6 +526,18 @@ def _gateway_urlopen(req: urllib.request.Request, request: GatewayRequest):
 
     connect_timeout = _bounded_connect_timeout(request)
     read_timeout = max(1.0, float(request.timeout or 0))
+    # 2026-08-16 双席 seq2249 P0-TLS: socket 层 read timeout 是连接被吞
+    # (服务端不发字节)时的最终兜底——watchdog abort(close) 在 TLS 场景
+    # 不能打断已阻塞的 recv(实验 B 实锤: close 后阻塞 recv 不返回),
+    # stream_idle 的 abort 失效时只能靠 socket timeout。此前用
+    # request.timeout(240s) 但实测 660s+ 未触发(cell2 挂起实锤); 改为
+    # 与 stream_idle_timeout 对齐的短兜底, 保证挂起在 ~120s 内快速失败
+    # (机制已验证: settimeout 后 recv 按时抛 socket.timeout)。
+    _idle = request.stream_idle_timeout
+    if _idle is not None and float(_idle) > 0:
+        read_timeout = min(read_timeout, max(1.0, float(_idle)))
+    else:
+        read_timeout = min(read_timeout, 120.0)
     opener = urllib.request.build_opener(
         _provider_proxy_handler(req.full_url),
         _SplitTimeoutHTTPHandler(connect_timeout, read_timeout),
