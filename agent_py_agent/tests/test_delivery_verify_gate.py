@@ -307,6 +307,56 @@ def test_gate_workspace_root_missing_fail_closed(tmp_path):
     assert any("workspace 根缺失" in line for line in request.params.tool_context)
 
 
+def test_gate_workspace_resolved_runs_real_verify(tmp_path):
+    """回归（2026-08-16 3×3 实锤）：workspace 可解析时必须真正执行 verify。
+
+    修复前 `_delivery_verify_no_tool_call_decision` 从 `runner.context` 导入
+    `current_run_task_workspace_root`——该函数不存在 → ImportError 被 except
+    吞掉 → workspace_root 恒 None → 全过也判 DELIVERY_VERIFY_FAILED →
+    无限续跑（8/15 起所有 delivery_verify 事件全 failed 实锤）。
+    修复后从 `run_task_workspace_writer` 导入，workspace 可解析时
+    verify 全过 → 保持自然收口（返回 None，不干预）。
+    """
+    contract = {
+        "verify_commands": [{"command": "echo verify-ok", "cwd": str(tmp_path)}],
+        "task_workspace": {"task_root": str(tmp_path)},
+    }
+    agent = _FakeAgent()
+    agent._current_run_task_workspace = str(tmp_path)
+    request = _NoToolCallsRequest(
+        agent,
+        _FakeParams(contract=contract),
+        ModelResponse(text="done", backend="fake"),
+        _FakeCounters(),
+        has_protected_marker=False,
+    )
+    decision = _delivery_verify_no_tool_call_decision(request)
+    # verify 真实执行且全过 → 不干预（None），绝不误判 unfinished
+    assert decision is None
+    assert not any("delivery-verify" in line for line in request.params.tool_context)
+
+
+def test_gate_workspace_resolved_verify_failure_still_unfinished(tmp_path):
+    """workspace 可解析但 verify 命令真失败 → 仍 unfinished（真验证，非误伤）。"""
+    contract = {
+        "verify_commands": [{"command": "exit 3", "cwd": str(tmp_path)}],
+        "task_workspace": {"task_root": str(tmp_path)},
+    }
+    agent = _FakeAgent()
+    agent._current_run_task_workspace = str(tmp_path)
+    request = _NoToolCallsRequest(
+        agent,
+        _FakeParams(contract=contract),
+        ModelResponse(text="done", backend="fake"),
+        _FakeCounters(),
+        has_protected_marker=False,
+    )
+    decision = _delivery_verify_no_tool_call_decision(request)
+    assert decision is not None
+    assert decision.response.runtime_reason == "DELIVERY_VERIFY_FAILED"
+    assert any("FAIL" in line for line in request.params.tool_context)
+
+
 def test_run_verification_root_missing_fail_closed():
     state, results = run_delivery_verification(
         _FakeParams(contract={"verify_commands": [{"command": "echo x"}]}),

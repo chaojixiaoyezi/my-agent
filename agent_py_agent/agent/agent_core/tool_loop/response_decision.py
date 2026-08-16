@@ -670,7 +670,12 @@ def _delivery_verify_no_tool_call_decision(
     # （fail-silent），字段按双席最小清单（运行身份/参数边界/contract 形状/
     # 解析链），绝不写完整 contract 或密钥。
     try:
-        from ..runner.context import current_run_task_workspace_root
+        # 2026-08-16 3×3 真机实锤: 旧导入 `..runner.context` 不存在该函数
+        # (runner/context 只有 subagent 线程本地状态) → ImportError 被下方
+        # except 吞掉 → workspace_root 恒 None → 所有带 contract 的收口全部
+        # fail-closed「workspace 根缺失」→ DELIVERY_VERIFY_FAILED → 无限续跑
+        # (8/15 引入起 delivery verify 从未真正执行过, 事件全 failed)。
+        from ..run_task_workspace_writer import current_run_task_workspace_root
         from .run_task_workspace_writer_probe import (
             workspace_root_candidates_probe,
         )
