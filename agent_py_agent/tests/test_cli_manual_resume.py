@@ -252,3 +252,26 @@ def test_manual_resume_disables_stale_progress_policies(tmp_path):
     outcome = run_manual_resume(agent, task_ref=task_root)
     assert outcome.status == "completed"
     assert agent.conversation_store.disabled == ["p1"]  # 只停本任务的
+
+
+def test_next_seq_counts_continuation_history(tmp_path):
+    """EXEC-35e: 历史已有 N 个续跑消息 → 下一个 seq=N+1。"""
+    from agent_py_agent.cli.resume_loop import _next_manual_resume_seq
+
+    task_root, task_id = _make_task_facts(tmp_path)
+    agent = _FakeAgent(tmp_path, workspace_root=task_root)
+
+    class _SeqStore(_FakeStore):
+        def load_thread_for_channel(self, *, channel, channel_conversation_id, channel_user_id):
+            return SimpleNamespace(thread_id="thread-x")
+
+        def recent_messages(self, thread_id, *, limit=20):
+            return [
+                SimpleNamespace(metadata={"continuation_seq": 1}),
+                SimpleNamespace(metadata={"continuation_seq": 2}),
+                SimpleNamespace(metadata={}),
+            ]
+
+    agent.conversation_store = _SeqStore()
+    facts = _load_task_facts(agent, task_root)
+    assert _next_manual_resume_seq(agent, facts) == 3

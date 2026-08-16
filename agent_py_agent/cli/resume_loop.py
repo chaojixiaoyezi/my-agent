@@ -529,8 +529,13 @@ def run_manual_resume(
         f"继续执行之前的任务（{facts.get('title') or facts['task_id']}）。"
         "请基于现有工作目录里的进度继续推进直到完成交付。"
     )
+    # EXEC-35e: 续跑 seq 固定 1 会让每次 resume 用同一 dedupe_key
+    # (cli_run:{root}#cont-1:system) 但 content 不同(resume_prompt_for 按
+    # 上轮 reason 生成)→ append_message_once 抛 dedupe key reused。seq 从
+    # 历史最大 continuation_seq+1 开始, 每次 resume 是新的执行代数。
+    start_seq = _next_manual_resume_seq(agent, facts) or 1
     result, _bound = runner(
-        prompt, 1, "", continuation_reason="manual_resume"
+        prompt, start_seq, "", continuation_reason="manual_resume"
     )
     rounds = 1
     reason = "manual_resume"
@@ -573,6 +578,50 @@ def run_manual_resume(
         status="budget_exhausted", rounds=rounds, final_result=result,
         reason="max_rounds_reached",
     )
+
+
+def _next_manual_resume_seq(agent: object, facts: dict) -> int | None:
+    """从会话历史里数已有续跑轮数, 返回下一个可用 continuation_seq(EXEC-35e)。"""
+    store = getattr(agent, "conversation_store", None)
+    if store is None:
+        return None
+    thread_id = str(facts.get("thread_id") or "").strip()
+    if not thread_id:
+        loader = getattr(store, "load_thread_for_channel", None)
+        if not callable(loader):
+            return None
+        try:
+            from ..agent.agent_core.cli_run_conversation import (
+                _CLI_RUN_CHANNEL,
+                _CLI_RUN_USER_ID,
+            )
+
+            thread = loader(
+                channel=_CLI_RUN_CHANNEL,
+                channel_conversation_id=str(facts.get("request_id") or ""),
+                channel_user_id=_CLI_RUN_USER_ID,
+            )
+            thread_id = str(getattr(thread, "thread_id", "") or "").strip()
+        except Exception:  # noqa: BLE001 查不到不拦, 回落 seq=1
+            return None
+    if not thread_id:
+        return None
+    recent = getattr(store, "recent_messages", None)
+    if not callable(recent):
+        return None
+    try:
+        entries = recent(thread_id, limit=100)
+    except Exception:  # noqa: BLE001 消息读不到不拦
+        return None
+    max_seq = 0
+    for entry in entries:
+        meta = getattr(entry, "metadata", None) or {}
+        try:
+            seq = int((meta or {}).get("continuation_seq") or 0)
+        except (TypeError, ValueError):
+            continue
+        max_seq = max(max_seq, seq)
+    return max_seq + 1
 
 
 def _load_task_facts(agent: object, task_ref: str) -> dict | None:
