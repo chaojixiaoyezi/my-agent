@@ -860,11 +860,38 @@ def _no_delivery_artifact_produced(params: object) -> bool:
 def _delivery_output_dir_empty(params: object) -> bool:
     if str(getattr(params, "source", "") or "") != "cli_run":
         return False
+    # EXEC-37(owner 拍板): 任务千奇百怪, 很多任务没有落盘交付概念——
+    # 交付门只对"本轮执行过写工具"的任务型运行生效; 问答/纯读任务
+    # 模型说停就停。
+    executed = list(getattr(params, "executed_tools", None) or [])
+    if not any(str(item) in _DELIVERY_PRODUCING_TOOLS for item in executed):
+        return False
     attrs = getattr(params, "task_attributes", None)
     workspace = (attrs or {}).get("run_workspace") if isinstance(attrs, dict) else None
     if not isinstance(workspace, dict):
         return False  # 无 workspace 事实源时不拦(保持旧行为, 不误杀其他场景)
     output_dir = str(workspace.get("output_dir") or "").strip()
+    # EXEC-37b(owner 追问"写了又删怎么办"): 本轮对 output 目录内做过写
+    # 操作(后来删除也算) = 有交付动作, 模型自决删除(重写/清理), 系统不拦
+    # 。只有从没写过 output 才算未交付。
+    archive = list(getattr(params, "archive_tool_calls", None) or [])
+    output_root = str(
+        (workspace.get("output_dir") if isinstance(workspace, dict) else "")
+        or ""
+    ).strip().rstrip("/")
+    if output_root:
+        for record in archive:
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("tool") or "") not in _DELIVERY_PRODUCING_TOOLS:
+                continue
+            parameters = record.get("parameters")
+            if not isinstance(parameters, dict):
+                continue
+            for value in parameters.values():
+                text = str(value or "")
+                if text.startswith(output_root + "/") or text == output_root:
+                    return False
     if not output_dir:
         return False
     from pathlib import Path
