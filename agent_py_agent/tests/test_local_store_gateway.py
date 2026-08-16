@@ -36,7 +36,6 @@ def test_local_rebuild_indexes_memory_gateway_and_subagents():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
-            tool_protocol="text",
             model_backend="echo",
             my_agent_home=str(root / "home"),
             memory_path="memory.jsonl",
@@ -95,7 +94,6 @@ def _setup_agent_with_gateway(
     temp_dir = tempfile.TemporaryDirectory()
     root = Path(temp_dir.name)
     cfg = AgentConfig(
-        tool_protocol="text",
         model_backend="echo",
         gateway_workspace="gateway",
         local_store_path="local_store/local.db",
@@ -247,7 +245,6 @@ def test_gateway_recovery_uses_lease_heartbeat_before_started_at():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
-            tool_protocol="text",
             model_backend="echo",
             gateway_workspace="gateway",
             local_store_path="local_store/local.db",
@@ -293,7 +290,6 @@ def test_gateway_recovery_archives_processing_duplicate_when_response_exists():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
-            tool_protocol="text",
             model_backend="echo",
             gateway_workspace="gateway",
             local_store_path="local_store/local.db",
@@ -341,7 +337,6 @@ def test_file_adapter_writes_gateway_response_to_outbox():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
-            tool_protocol="text",
             model_backend="echo",
             gateway_workspace="gateway",
             adapter_workspace="adapter",

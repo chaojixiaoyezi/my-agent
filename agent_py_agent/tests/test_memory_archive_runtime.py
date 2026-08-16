@@ -227,7 +227,6 @@ def test_archive_live_tool_round_writes_before_turn_finalization():
 
 def test_live_archive_respects_archive_level_zero(tmp_path: Path) -> None:
     config = AgentConfig(
-        tool_protocol="text",
     )
     config.memory_archive_level = 0
     config.memory_archive_preview_level_0_chars = 1000
@@ -257,7 +256,6 @@ def test_live_archive_respects_archive_level_zero(tmp_path: Path) -> None:
 
 def test_live_archive_records_assistant_archive_errors(tmp_path: Path, monkeypatch) -> None:
     config = AgentConfig(
-        tool_protocol="text",
     )
     agent = SimpleNamespace(root=tmp_path, config=config, session_id="session-live")
     params = SimpleNamespace(
@@ -288,7 +286,6 @@ def test_live_archive_records_assistant_archive_errors(tmp_path: Path, monkeypat
 
 def test_runtime_fact_progress_records_write_errors(tmp_path: Path, monkeypatch) -> None:
     config = AgentConfig(
-        tool_protocol="text",
     )
     agent = SimpleNamespace(root=tmp_path, config=config, session_id="session-live")
     params = SimpleNamespace(
@@ -348,7 +345,6 @@ def test_archive_run_turn_skips_tool_records_already_written_live():
 
 def test_runtime_fact_progress_updates_without_raw_checkpoint(tmp_path: Path) -> None:
     config = AgentConfig(
-        tool_protocol="text",
     )
     agent = SimpleNamespace(root=tmp_path, config=config, session_id="session-live")
     params = SimpleNamespace(
@@ -382,7 +378,6 @@ def test_runtime_fact_progress_updates_without_raw_checkpoint(tmp_path: Path) ->
 
 def test_live_archive_and_runtime_fact_use_owner_home(tmp_path: Path) -> None:
     config = AgentConfig(
-        tool_protocol="text",
     )
     owner_home = tmp_path / "home" / "owners" / "providers" / "feishu" / "users" / "ou_123"
     agent = SimpleNamespace(
@@ -418,7 +413,6 @@ def test_live_archive_and_runtime_fact_use_owner_home(tmp_path: Path) -> None:
 
 def test_runtime_fact_progress_preserves_root_user_prompt(tmp_path: Path) -> None:
     config = AgentConfig(
-        tool_protocol="text",
     )
     agent = SimpleNamespace(root=tmp_path, config=config, session_id="session-live")
     params = SimpleNamespace(
@@ -442,7 +436,6 @@ def test_runtime_fact_progress_preserves_root_user_prompt(tmp_path: Path) -> Non
 
 def test_runtime_fact_terminal_preserves_live_progress(tmp_path: Path) -> None:
     config = AgentConfig(
-        tool_protocol="text",
     )
     agent = SimpleNamespace(root=tmp_path, config=config, session_id="session-live")
     params = SimpleNamespace(
@@ -477,7 +470,6 @@ def test_runtime_fact_terminal_preserves_live_progress(tmp_path: Path) -> None:
 
 def test_runtime_fact_terminal_records_user_interrupt_as_cancelled(tmp_path: Path) -> None:
     config = AgentConfig(
-        tool_protocol="text",
     )
     agent = SimpleNamespace(root=tmp_path, config=config, session_id="session-live")
     params = SimpleNamespace(

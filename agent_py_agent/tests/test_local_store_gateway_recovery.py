@@ -75,7 +75,6 @@ def _track_heartbeat_during_run(agent, paths, request_path) -> list[float]:
 
 def _make_recovery_agent(root: Path) -> SimpleAgent:
     cfg = AgentConfig(
-        tool_protocol="text",
         model_backend="echo",
         gateway_workspace="gateway",
         local_store_path="local_store/local.db",
@@ -205,7 +204,6 @@ def test_gateway_worker_refreshes_processing_lease_heartbeat_during_long_run():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
-            tool_protocol="text",
             model_backend="echo",
             gateway_workspace="gateway",
             gateway_heartbeat_interval=1,
@@ -238,7 +236,6 @@ def test_gateway_recovery_uses_lease_heartbeat_before_started_at():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
-            tool_protocol="text",
             model_backend="echo",
             gateway_workspace="gateway",
             local_store_path="local_store/local.db",
@@ -284,7 +281,6 @@ def test_gateway_recovery_archives_processing_duplicate_when_response_exists():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
-            tool_protocol="text",
             model_backend="echo",
             gateway_workspace="gateway",
             local_store_path="local_store/local.db",
@@ -332,7 +328,6 @@ def test_file_adapter_writes_gateway_response_to_outbox():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
-            tool_protocol="text",
             model_backend="echo",
             gateway_workspace="gateway",
             adapter_workspace="adapter",

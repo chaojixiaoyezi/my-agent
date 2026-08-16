@@ -64,7 +64,6 @@ def _agent(tmp_path) -> SimpleAgent:
     return SimpleAgent(
         AgentConfig(
             model_backend="echo",
-            tool_protocol="text",
             prompt_files=[],
             my_agent_home=str(tmp_path / "home"),
         ),

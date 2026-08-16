@@ -258,7 +258,6 @@ def test_two_provider_owners_write_separate_task_workspaces(tmp_path: Path):
     home = tmp_path / "home"
     feishu = SimpleAgent(
         AgentConfig(
-            tool_protocol="text",
             my_agent_home=str(home),
             my_agent_owner_provider="feishu",
             my_agent_owner_kind="user",
@@ -270,7 +269,6 @@ def test_two_provider_owners_write_separate_task_workspaces(tmp_path: Path):
     )
     wechat = SimpleAgent(
         AgentConfig(
-            tool_protocol="text",
             my_agent_home=str(home),
             my_agent_owner_provider="wechat",
             my_agent_owner_kind="user",
@@ -455,7 +453,6 @@ def test_prompt_builder_uses_only_recalled_memory_envelope(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
     cfg = AgentConfig(
-        tool_protocol="text",
         my_agent_home=str(home),
         prompt_files=[],
         home_lesson_auto_read_limit=2,

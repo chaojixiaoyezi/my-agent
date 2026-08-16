@@ -336,7 +336,6 @@ def test_finalization_skips_compact_cycle_after_structured_turn_completion(tmp_p
         AgentConfig(
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
-            tool_protocol="text",
         ),
         tmp_path,
     )
@@ -513,7 +512,6 @@ def test_run_auto_compact_apply_continues_once_after_continue_packet(tmp_path):
         AgentConfig(
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
-            tool_protocol="text",
         ),
         tmp_path,
     )
@@ -606,7 +604,6 @@ def test_run_auto_compact_apply_returns_after_no_tool_continuation(tmp_path):
         AgentConfig(
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
-            tool_protocol="text",
         ),
         tmp_path,
     )
@@ -675,7 +672,6 @@ def test_run_auto_compact_apply_can_repeat_when_continuation_makes_tool_progress
             model_backend="echo",
             enable_tools=True,
             my_agent_home=str(tmp_path / "home"),
-            tool_protocol="text",
             tool_context_ptl_retry_max=0,
         ),
         tmp_path,
@@ -1461,7 +1457,6 @@ def test_run_auto_compact_apply_continues_with_optional_work_notes_missing(tmp_p
         AgentConfig(
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
-            tool_protocol="text",
         ),
         tmp_path,
     )

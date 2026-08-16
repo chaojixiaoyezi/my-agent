@@ -322,7 +322,6 @@ def test_subagent_debug_trace_records_dispatch_reports_at_level_three(tmp_path):
 def test_subagent_debug_trace_records_runner_model_and_tool_stages(tmp_path):
     """等级 3 记录模型请求/响应和工具调用阶段，便于定位长 runner 卡点。"""
     cfg = AgentConfig(
-        tool_protocol="text",
         enable_tools=True,
         model_backend="echo",
         subagent_workspace="subs",
@@ -457,7 +456,6 @@ def _assert_ancestor_heartbeats_refreshed(
 def test_subagent_debug_trace_level_four_records_stage_previews(tmp_path):
     """等级 4 写 prompt/response/tool 的短预览，方便实时 tail 定位模型传参。"""
     cfg = AgentConfig(
-        tool_protocol="text",
         enable_tools=True,
         model_backend="echo",
         subagent_workspace="subs",
@@ -500,7 +498,6 @@ def test_subagent_debug_trace_level_four_records_stage_previews(tmp_path):
 def test_subagent_debug_trace_level_five_writes_detail_refs(tmp_path):
     """等级 5 把完整 prompt/response/tool payload/output 写到内部 detail 文件。"""
     cfg = AgentConfig(
-        tool_protocol="text",
         enable_tools=True,
         model_backend="echo",
         subagent_workspace="subs",
@@ -547,7 +544,6 @@ def test_subagent_debug_trace_level_five_writes_detail_refs(tmp_path):
 def test_subagent_debug_trace_records_runner_model_request_failure(tmp_path):
     """等级 3 记录模型请求异常，避免 trace 只停在 request_started。"""
     cfg = AgentConfig(
-        tool_protocol="text",
         enable_tools=True,
         model_backend="echo",
         subagent_workspace="subs",
@@ -578,7 +574,6 @@ def test_subagent_debug_trace_records_runner_model_request_failure(tmp_path):
 
 def test_subagent_run_failure_classifies_provider_timeout(tmp_path):
     cfg = AgentConfig(
-        tool_protocol="text",
         enable_tools=True,
         model_backend="echo",
         subagent_workspace="subs",
@@ -614,7 +609,6 @@ def test_subagent_run_failure_classifies_provider_transient(tmp_path, monkeypatc
         provider_transient_auto_resume, "provider_transient_retry_delays", lambda _policy=None: ()
     )
     cfg = AgentConfig(
-        tool_protocol="text",
         enable_tools=True,
         model_backend="echo",
         subagent_workspace="subs",

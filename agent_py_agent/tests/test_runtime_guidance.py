@@ -164,7 +164,6 @@ def test_two_real_agent_runs_do_not_cross_prompt_task_or_workspace(tmp_path, mon
 
     agent = SimpleAgent(
         AgentConfig(
-            tool_protocol="text",
             model_backend="echo",
             my_agent_home=str(tmp_path / ".my-agent"),
             memory_path="memory.jsonl",
@@ -1827,7 +1826,6 @@ def test_published_audit_sources_release_root_before_any_tool_round(
 
     agent = SimpleAgent(
         AgentConfig(
-            tool_protocol="text",
             model_backend="echo",
             my_agent_home=str(tmp_path / ".my-agent"),
             memory_path="memory.jsonl",

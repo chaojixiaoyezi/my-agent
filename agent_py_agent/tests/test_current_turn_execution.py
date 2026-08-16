@@ -440,7 +440,6 @@ def test_failed_final_mutation_discards_false_success_draft(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(
             model_backend="echo",
-            tool_protocol="text",
             prompt_files=[],
             my_agent_home=str(tmp_path / "home"),
         ),
@@ -493,7 +492,6 @@ def test_agent_run_keeps_operation_proof_out_of_model_authored_prose(
     agent = SimpleAgent(
         AgentConfig(
             model_backend="echo",
-            tool_protocol="text",
             prompt_files=[],
             my_agent_home=str(tmp_path / "home"),
         ),

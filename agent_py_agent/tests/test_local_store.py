@@ -180,7 +180,6 @@ def test_subagent_flow_indexes_logs_to_local_store():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
-            tool_protocol="text",
             model_backend="echo",
             memory_path="memory.jsonl",
             subagent_workspace="subs",
@@ -212,7 +211,6 @@ def test_gateway_request_indexes_logs_to_local_store():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
-            tool_protocol="text",
             model_backend="echo",
             memory_path="memory.jsonl",
             gateway_workspace="gateway",
@@ -244,7 +242,6 @@ def test_gateway_request_writes_runtime_fact_when_saved():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
-            tool_protocol="text",
             model_backend="echo",
             gateway_workspace="gateway",
             local_store_path="local_store/local.db",
@@ -282,7 +279,6 @@ def test_gateway_request_can_override_resume_context():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
-            tool_protocol="text",
             model_backend="echo",
             gateway_workspace="gateway",
             local_store_path="local_store/local.db",
@@ -315,7 +311,6 @@ def test_local_rebuild_indexes_memory_gateway_and_subagents():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
-            tool_protocol="text",
             model_backend="echo",
             my_agent_home=str(root / "home"),
             memory_path="memory.jsonl",

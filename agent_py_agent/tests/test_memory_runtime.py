@@ -222,7 +222,6 @@ def test_run_injects_only_formal_routed_lesson_in_memory_envelope(tmp_path):
     agent = SimpleAgent(
         AgentConfig(
             model_backend="echo",
-            tool_protocol="text",
             memory_rule_routing_enabled=True,
             memory_rule_routing_mode="soft",
             memory_rule_auto_read_limit=1,

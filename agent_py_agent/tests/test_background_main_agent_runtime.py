@@ -1346,7 +1346,6 @@ def test_thread_goal_waits_for_child_events_without_polling_or_chat_noise(tmp_pa
 
     agent = SimpleAgent(
         AgentConfig(
-            tool_protocol="text",
             enable_tools=True,
             memory_path="memory.jsonl",
             orphan_supervision_interval_seconds=0,
@@ -1442,7 +1441,6 @@ def test_thread_goal_waits_for_child_events_without_polling_or_chat_noise(tmp_pa
 def test_terminal_goal_children_trigger_one_integrating_closeout(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(
-            tool_protocol="text",
             enable_tools=True,
             memory_path="memory.jsonl",
             orphan_supervision_interval_seconds=0,

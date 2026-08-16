@@ -35,7 +35,6 @@ from agent_py_agent.tests._tool_runtime_harness import canonical_test_call
 def _agent_with_self_watch(tmp_path: Path, *, policy_enabled: bool = True):
     agent = SimpleAgent(
         AgentConfig(
-            tool_protocol="text",
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
             prompt_files=[],

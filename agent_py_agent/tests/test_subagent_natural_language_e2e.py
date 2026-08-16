@@ -237,7 +237,6 @@ def test_natural_language_root_drives_child_and_grandchild_e2e(tmp_path: Path) -
     site_dir = tmp_path / "site"
     site_dir.mkdir()
     config = AgentConfig(
-        tool_protocol="text",
         enable_tools=True,
         model_backend="echo",
         max_tool_rounds=8,
