@@ -341,7 +341,6 @@ def _protocol_evidence(text: str) -> str:
 __all__ = [
     "ProviderToolCallRequest",
     "ProviderToolCallResult",
-    "TextToolProtocolAdapter",
     "ToolProtocolViolation",
     "anthropic_tool_choice",
     "canonical_tool_calls_from_response",
