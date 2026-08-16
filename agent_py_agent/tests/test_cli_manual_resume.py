@@ -417,3 +417,24 @@ def test_delivery_never_wrote_output_still_checked(tmp_path):
         ],
     )
     assert _delivery_output_dir_empty(params) is True
+
+
+def test_unknown_releases_after_fourth(tmp_path):
+    """EXEC-38: 单轮内第 4 次未知副作用不再 halt(前 3 次保持人工闸)。"""
+    from agent_py_agent.agent.agent_core._tool_loop_service import (
+        _mark_unknown_outcome_halt,
+    )
+
+    params = _NS(repeated_failure_halt=None, unknown_outcome_halt=None, tool_context=[])
+    agent = _NS()
+    for i in range(1, 5):
+        record = _NS(
+            call=_NS(tool_name="run_command"),
+            result=_NS(ok=False, effect_outcome="unknown", error_code="EXECUTOR_DIED",
+                       reported_error_code="EXECUTOR_DIED", handler_executed=True),
+            params=params,
+        )
+        _mark_unknown_outcome_halt(agent, record)
+    # 前 3 次设 halt, 第 4 次放过(仍 halt 但那是第 3 次的值)
+    assert params._unknown_outcome_count == 4
+    assert any("不再拦截" in line for line in params.tool_context)

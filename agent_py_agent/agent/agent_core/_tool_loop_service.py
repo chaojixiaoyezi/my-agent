@@ -1165,6 +1165,18 @@ def _mark_repeated_failure_halt(agent, record: ToolCallRecordParams) -> None:
 def _mark_unknown_outcome_halt(agent, record: ToolCallRecordParams) -> None:
     if record.params.repeated_failure_halt is not None:
         return
+    # EXEC-38(owner 拍板): 未知副作用验证单轮内第 4 次放过——前 3 次按
+    # 人工闸收口, 第 4 次不拦(防死循环: 模型连续尝试都被同一未知拦住时,
+    # 硬卡不产出也是问题)。放行时注入如实报告要求, 绝不标 ok。
+    unknown_count = int(getattr(record.params, "_unknown_outcome_count", 0) or 0) + 1
+    object.__setattr__(record.params, "_unknown_outcome_count", unknown_count)
+    if unknown_count >= _UNKNOWN_OUTCOME_RELEASE_AFTER:
+        record.params.tool_context.append(
+            "[tool-system]\n"
+            "副作用未知验证已连续触发多次，本轮不再拦截。请按实际状态"
+            "如实报告或继续推进；绝不能把未验证的结果说成完成。"
+        )
+        return
     if getattr(record.params, "unknown_outcome_halt", None) is not None:
         return
     effect = str(getattr(record.result, "effect_outcome", "") or "").strip().lower()
@@ -1220,6 +1232,7 @@ def _mark_unknown_outcome_halt(agent, record: ToolCallRecordParams) -> None:
 # 时模型仍提出 ToolCall,不能直接进 handler——由执行层拦截(TOOL_ACTION_NOT_REQUIRED,
 # handler 不执行),有界拦截(连续 2 轮)后走收口轮等用户明确指示。
 # 判定只用结构化信号(assessment 状态 + 调用出现与否 + 轮数),不解析模型话术。
+_UNKNOWN_OUTCOME_RELEASE_AFTER = 4  # EXEC-38: 单轮内第 4 次未知副作用放过
 _NO_ACTION_GATE_STREAK_ATTR = "_no_action_gate_streak"
 _NO_ACTION_GATE_HALT_LIMIT = 2
 

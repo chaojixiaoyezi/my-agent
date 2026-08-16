@@ -609,29 +609,12 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
         if verified is not None:
             return verified
         final_response = request.response
-        if _no_delivery_artifact_produced(request.params) or _delivery_output_dir_empty(
-            request.params
-        ):
-            # EXEC-06 长任务复刻真机(2026-08-16): 模型调过工具(读源码)但从未
-            # 写过任何交付产物就无工具收口 → 假完成。只在此前调用过工具的
-            # "工具型任务"轮触发, 纯聊天(executed_tools 空)不受影响。
-            # 改进(EXEC-06b): 前 N 次这类收口应 **continue**(给模型机会继续产出),
-            # 因为模型常说"继续推进XXX"但本轮只输出计划; 连续 N 次仍无任何交付
-            # 产物才 unfinished 收口(RC=2 续跑), 不哄不罚。
-            nudge_count = int(getattr(request.params, "no_artifact_nudge_count", 0) or 0)
-            if nudge_count < _NO_ARTIFACT_CONTINUE_LIMIT:
-                object.__setattr__(
-                    request.params, "no_artifact_nudge_count", nudge_count + 1
-                )
-                request.params.tool_context.append(NO_ARTIFACT_NUDGE)
-                return ToolLoopResponseDecision("continue", None, [], request.counters)
-            final_response = replace(
-                final_response,
-                runtime_status="unfinished",
-                runtime_reason="NO_DELIVERY_ARTIFACT_PRODUCED",
-                runtime_source="tool_loop",
-            )
-        elif bool(getattr(final_response, "truncated", False)):
+        # EXEC-38(owner 拍板 2026-08-16): 程序验证收窄为只做"未知副作用"
+        # ——产物/交付目录验证删除(EXEC-06b/34/37 撤销)。理由: 任务千奇百怪,
+        # 很多任务没有落盘交付概念; 对照 会话运行时/轻量运行时 均无产出门, 模型自决
+        # 何时交付(EXEC-31 edit 回显 + prompt 禁重读已在行为层引导);
+        # 防假完成交由"如实报告"合同与 UNKNOWN 安全闸。
+        if bool(getattr(final_response, "truncated", False)):
             # EXEC-05 长任务真机: 最终答复被供应商输出上限截断(max_tokens/length)
             # 不能当作完成交付——标记 unfinished, CLI RC=2, 用户可续跑补全。
             final_response = replace(
