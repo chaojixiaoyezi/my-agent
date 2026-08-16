@@ -228,6 +228,11 @@ def _write_handoff(
 
 
 
+# EXEC-30: 同一收口 reason 连续续跑上限(对照 会话运行时/轻量运行时 写完即测即收的
+# 天然收敛的机制等价物)。同因 3 次仍不收敛=模型在同一模式无限迭代, 强制收口。
+_SAME_REASON_RESUME_LIMIT = 3
+
+
 def run_with_resume(
     agent: object,
     *,
@@ -258,6 +263,7 @@ def run_with_resume(
     )
     result, _bound = runner(initial_prompt, 0, "")
     rounds = 1
+    same_reason_streak = 0
     should, reason = should_resume(result)
     if not should:
         return CliResumeOutcome(
@@ -326,7 +332,35 @@ def run_with_resume(
         )
         rounds += 1
         # parent_attempt 推进在 ResumeRunOnce 内部完成（DB 真实 attempt）
-        should, reason = should_resume(result)
+        should, new_reason = should_resume(result)
+        # EXEC-30 续跑收敛 gate(阶段三 gorm 真机): 同一 runtime_reason 连续
+        # 续跑≥3 次说明模型在同一收口模式里无限迭代(13h/268 写操作不停,
+        # 对照 会话运行时/轻量运行时 写完即测即收)。同因循环到限强制收敛, 不再续跑——
+        # 与 EXEC-04'同类失败循环'防护同族, 防无人值守无限续跑。reason 变了
+        # (新问题)则重新计数, 不误杀有进展的续跑链。
+        if should and new_reason == reason:
+            same_reason_streak += 1
+            if same_reason_streak >= _SAME_REASON_RESUME_LIMIT:
+                record_budget_exhausted(
+                    agent=agent,
+                    run_id=runner.ctx.root_run_id,
+                    attempt_id=runner.ctx.parent_attempt_id,
+                    task_run_id=runner._task_run_id(),
+                    budget_before=rounds - 1,
+                    budget_after=rounds,
+                    reason="same_reason_resume_limit_reached",
+                )
+                _write_handoff(
+                    agent, runner, seq=rounds, reason="same_reason_resume_limit_reached",
+                    user_prompt=initial_prompt,
+                )
+                return CliResumeOutcome(
+                    status="budget_exhausted", rounds=rounds,
+                    final_result=result, reason="same_reason_resume_limit_reached",
+                )
+        elif should:
+            same_reason_streak = 1
+        reason = new_reason
         if not should:
             # 缺口C(双席复核 seq1835): 不可续跑族收口(blocked/协议违规/
             # UNKNOWN)必须标 unresumable, 不能误标 completed——只有
