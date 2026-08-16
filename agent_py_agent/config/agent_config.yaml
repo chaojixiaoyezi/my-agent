@@ -163,7 +163,7 @@ memory_rule_receipt_enabled: true
 memory_resume_auto_context_enabled: false
 memory_resume_auto_context_mode: "trigger"
 memory_resume_auto_context_limit: 5
-memory_compact_auto_trigger_percent: 90
+memory_compact_auto_trigger_percent: 70
 # 单次 run 内 compact→自动续跑的绝对深度硬顶（与「连续无工具进展」软顶并存）。达到即强制
 # return 当前结果，防止持续高于阈值且每轮都调工具的任务无限 compact/续跑（H2）。
 memory_compact_auto_continue_max_depth: 50
@@ -591,7 +591,7 @@ max_tokens: 16314
 
 # 当前模型真实上下文窗口 token 数。compact/preflight 用它计算何时折叠；
 # 不要和 chat_context_window_chars 混用，后者只是聊天界面的字符预算。
-model_context_window_tokens: 200000
+model_context_window_tokens: 128000
 
 # 采样温度
 temperature: 0.2

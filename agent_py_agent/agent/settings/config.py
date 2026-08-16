@@ -270,7 +270,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_resume_auto_context_enabled: bool = False
     memory_resume_auto_context_mode: str = "trigger"
     memory_resume_auto_context_limit: int = 5
-    memory_compact_auto_trigger_percent: int = 90
+    memory_compact_auto_trigger_percent: int = 70
     # 后台 Memory Curator 只读有界经历并输出严格 daily/candidate JSON；它没有工具循环和写人格权限。
     memory_curator_enabled: bool = True
     memory_curator_provider: str = "auto"
@@ -465,7 +465,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     model_name: str = "gpt-4o-mini"
     request_timeout: int = 240
     max_tokens: int = DEFAULT_MODEL_MAX_TOKENS
-    model_context_window_tokens: int = 200_000
+    model_context_window_tokens: int = 128_000
     temperature: str = "0.2"
     anthropic_version: str = "2023-06-01"
     chat_history_max_turns: int = 20
