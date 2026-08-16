@@ -278,6 +278,8 @@ my-agent run "总结这个项目" --no-save
 
 默认保存时，`run` 会写运行经历归档、轻量 `memory/hooks/YYYY-MM-DD.jsonl` recovery snapshot 和运行恢复事实；有结构化任务时还会写 task workspace。它不会把普通 user/assistant 正文写进正式长期记忆。`--no-save` 关闭这些本次运行归档及持久化 Compact；它不删除或绕过由 Gateway 入口独立维护的 ConversationStore 与 audit。
 
+非完成收口（未完成/预算耗尽/不可续跑族）的任务不会死：用 `run --resume <任务 ID 或任务目录>` 从持久事实源恢复同一任务继续（与 会话运行时 resume / 轻量运行时 --continue 对齐），此时可省略 `prompt`。
+
 如果配置打开 `memory_resume_auto_context_enabled: true`，`run/chat/gateway` 会在“继续、刚刚、恢复、run_id/request_id”等恢复场景里尝试读取归档和任务事实源，并把一段短小 `Recovery Brief` 注入本轮 prompt。默认关闭，避免普通请求被恢复检索拖慢。
 
 `run` 结束状态行会显示粗略 token 估算，例如 `prompt_tokens≈...`、`inject_tokens≈...`、`resume_tokens≈...`。这是保守估算，不是模型厂商 tokenizer 的精确计费值。
