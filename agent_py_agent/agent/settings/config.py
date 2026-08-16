@@ -270,7 +270,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_resume_auto_context_enabled: bool = False
     memory_resume_auto_context_mode: str = "trigger"
     memory_resume_auto_context_limit: int = 5
-    memory_compact_auto_trigger_percent: int = 70
+    memory_compact_auto_trigger_percent: int = 90
     # 后台 Memory Curator 只读有界经历并输出严格 daily/candidate JSON；它没有工具循环和写人格权限。
     memory_curator_enabled: bool = True
     memory_curator_provider: str = "auto"
