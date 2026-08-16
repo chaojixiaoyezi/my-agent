@@ -120,7 +120,7 @@ class _ToolConfigFields:
     tool_agent_budget_max_calls: int | None = None
     tool_artifact_read_budget_window_seconds: int = 600
     tool_artifact_read_budget_max_chars: int = 240_000
-    tool_output_externalize_min_chars: int = 20_000
+    tool_output_externalize_min_chars: int = 200_000
     tool_output_preview_chars: int = 4_000
     tool_context_microcompact_keep_recent: int = 8
     tool_context_microcompact_min_chars: int = 1500

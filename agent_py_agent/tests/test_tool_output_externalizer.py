@@ -106,7 +106,7 @@ def _canonical_record(
 def test_tool_loop_externalizes_large_tool_output_for_archive(tmp_path: Path) -> None:
     service = ToolLoopService(SimpleNamespace(root=tmp_path))
     params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
-    large_output = "line\n" + ("x" * 25_000)
+    large_output = "line\n" + ("x" * 250_000)
 
     service._record_tool_call(
         _canonical_record(
@@ -557,7 +557,7 @@ def test_tool_loop_records_live_raw_archive_for_each_tool_result(tmp_path: Path)
 def test_tool_loop_externalizer_falls_back_to_current_subagent_run_id(tmp_path: Path) -> None:
     service = ToolLoopService(SimpleNamespace(root=tmp_path, _current_subagent_run_id="runner-42"))
     params = _tool_loop_params(request_id="", run_id="", task_id="")
-    large_output = "line\n" + ("x" * 25_000)
+    large_output = "line\n" + ("x" * 250_000)
 
     service._record_tool_call(
         _canonical_record(
@@ -688,7 +688,7 @@ def test_tool_loop_read_file_archive_does_not_hide_live_result(tmp_path: Path) -
     agent = SimpleNamespace(root=tmp_path, config=AgentConfig(), session_id="session-live")
     service = ToolLoopService(agent)
     params = _tool_loop_params(request_id="req-read", run_id="run-read", task_id="task-read")
-    output = "CPX-001-ABCDEF1234\n" + ("x" * 25_000)
+    output = "CPX-001-ABCDEF1234\n" + ("x" * 250_000)
 
     service._record_tool_call(
         _canonical_record(
@@ -861,7 +861,7 @@ def test_tool_loop_writes_fail_safe_checkpoint_before_externalizing_large_output
 ) -> None:
     service = ToolLoopService(SimpleNamespace(root=tmp_path))
     params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
-    large_output = "danger\n" + ("x" * 25_000)
+    large_output = "danger\n" + ("x" * 250_000)
 
     service._record_tool_call(
         _canonical_record(
