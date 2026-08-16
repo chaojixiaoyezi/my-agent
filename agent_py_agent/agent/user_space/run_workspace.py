@@ -518,11 +518,20 @@ def _activate_task_state(path: Path, request: EnsureRunWorkspaceRequest) -> None
     current_task_id = str(current.get("task_id") or "").strip()
     incoming_task_id = str(incoming.get("task_id") or "").strip()
     if current_task_id == incoming_task_id:
+        # EXEC-35c(真机 2026-08-16): 同 task 新一轮执行接管(自动续跑/run
+        # --resume)时, 旧终态字段(finished_at/progress/runtime_reason/
+        # finished_status)必须重置——否则 materialize_promoted_task_workspace
+        # 把 finished 投影当终态拒绝复用, 工具全被 BINDING_FAILED 拦。
+        # 只重置本轮执行投影字段, 不碰 artifact/evidence 历史。
+        for key in ("finished_at", "finished_status", "runtime_reason"):
+            current.pop(key, None)
         current.update(
             {
                 "task_id": incoming["task_id"],
                 "primary_run_id": incoming["primary_run_id"],
                 "status": incoming["status"],
+                "progress": incoming.get("progress", 0.0),
+                "verification_status": incoming.get("verification_status", ""),
                 "updated_at": incoming["updated_at"],
             }
         )

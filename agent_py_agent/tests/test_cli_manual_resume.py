@@ -193,3 +193,33 @@ def test_manual_resume_keeps_active_link_untouched(tmp_path):
     agent.last_result = _ok_result()
     run_manual_resume(agent, task_ref=task_root)
     assert agent.conversation_store.updated is None
+
+
+from agent_py_agent.agent.user_space.run_workspace import _activate_task_state
+from agent_py_agent.agent.user_space.run_workspace import EnsureRunWorkspaceRequest
+
+
+def _state_request(task_id="t1", run_id="r1") -> EnsureRunWorkspaceRequest:
+    return EnsureRunWorkspaceRequest(
+        home="/tmp", template="", task_name="t", user_prompt="p",
+        request_id=run_id, run_id=run_id, task_id=task_id,
+        owner_id="o", owner_home="/tmp", source="cli_run",
+    )
+
+
+def test_activate_task_state_resets_terminal_fields(tmp_path):
+    """EXEC-35c: 同 task 重激活清掉 finished_at/runtime_reason(终态投影不残留)。"""
+    p = tmp_path / "state.json"
+    import json
+
+    p.write_text(json.dumps({
+        "task_id": "t1", "primary_run_id": "r1", "status": "DONE",
+        "progress": 1.0, "finished_at": "2026-08-16T11:00:00+00:00",
+        "runtime_reason": "OPERATION_INCOMPLETE", "artifact_refs": ["keep-me"],
+    }))
+    _activate_task_state(p, _state_request())
+    d = json.loads(p.read_text())
+    assert "finished_at" not in d
+    assert "runtime_reason" not in d
+    assert d["status"] == "RUNNING"
+    assert d["artifact_refs"] == ["keep-me"]  # 历史字段不丢

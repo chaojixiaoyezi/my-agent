@@ -114,6 +114,13 @@ def bind_cli_run_conversation(agent: object, params: object, user_prompt: str):
         _require_matching_message_metadata(entry, params)
         _index_message_best_effort(agent, store, entry)
     except Exception as exc:
+        _LOGGER.error(
+            "CLI run 用户消息写入失败(thread=%s, request=%s): %s: %s",
+            str((thread.thread_id if "thread" in dir() else "") or ""),
+            request_id,
+            type(exc).__name__,
+            exc,
+        )
         raise CliRunConversationPersistenceError(
             "CLI run 用户消息无法可靠写入 ConversationStore，已在模型执行前停止。"
         ) from exc

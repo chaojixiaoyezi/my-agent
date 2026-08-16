@@ -188,6 +188,12 @@ def cmd_run(args) -> int:
         except ProviderRecoverableError as exc:
             print(provider_recoverable_cli_report(agent, exc))
             return 2
+        except CliRunConversationPersistenceError as exc:
+            import traceback as _tb
+
+            _tb.print_exc()
+            print("[task_resume] 会话持久化失败", exc)
+            return 2
         result = outcome.final_result
         if outcome.status == "unresumable":
             print(
