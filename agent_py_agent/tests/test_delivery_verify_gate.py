@@ -331,8 +331,13 @@ def test_gate_workspace_resolved_runs_real_verify(tmp_path):
         has_protected_marker=False,
     )
     decision = _delivery_verify_no_tool_call_decision(request)
-    # verify 真实执行且全过 → 不干预（None），绝不误判 unfinished
-    assert decision is None
+    # verify 真实执行且全过 → 终态收口（break）：runtime_reason 清空、
+    # source=delivery_verify（bd88a585: 验收通过覆盖 TASK_PROGRESS_OPEN
+    # 等续跑原因，绝不误判 unfinished，也不因账本原因续跑）。
+    assert decision is not None
+    assert decision.response.runtime_status == "ok"
+    assert decision.response.runtime_reason == ""
+    assert decision.response.runtime_source == "delivery_verify"
     assert not any("delivery-verify" in line for line in request.params.tool_context)
 
 
