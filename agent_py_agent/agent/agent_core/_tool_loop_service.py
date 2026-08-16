@@ -12,8 +12,12 @@ from ..backends.errors import (
     is_empty_provider_response_error,
 )
 from ..concurrency.interrupt import is_interrupted
-from ..runtime_db.operations import exec_lock_scope
+from ..contracts.gates.tool_guardrail import (
+    consecutive_same_failure_count,
+    failure_class_of_result,
+)
 from ..prompting_parts.builder import ToolSections, project_runtime_workspace_context
+from ..runtime_db.operations import exec_lock_scope
 from ..settings.runtime_guard_config import runtime_guard_int
 from ..subagents.services.session_progress import record_runtime_subagent_tool_progress
 from ..tooling.operation_verification import render_current_turn_execution_facts
@@ -60,10 +64,6 @@ from .tool_guard.call_guardrail_config import (
 )
 from .tool_guard.call_guardrail_config import (
     repeated_failure_halt_threshold as configured_repeated_failure_halt_threshold,
-)
-from ..contracts.gates.tool_guardrail import (
-    consecutive_same_failure_count,
-    failure_class_of_result,
 )
 from .tool_guard.loop_hints import (
     append_tool_failure_channel_hint,
@@ -1016,7 +1016,7 @@ def _final_response_after_tool_limit(agent, params: ToolLoopExecuteParams, tool_
             "本轮已达到最大工具轮数限制，停止继续调用工具。这是一次未完成的阶段交接，不是任务完成。"
             "请只根据真实工具记录说明已经完成的工作、仍未完成的工作和当前限制；"
             "不要把尚未执行的动作写成正在执行或已经完成。"
-            "本任务已自动推进多次仍未完成，本次交接后暂停自动推进；"
+            "本次交接后暂停自动推进；"
             "请如实告诉用户：回复『继续』可让我接着做。"
         )
     else:
@@ -1054,23 +1054,50 @@ def _repeated_failure_halt_threshold(params: ToolLoopExecuteParams) -> int:
 
 
 def _ordinary_task_resume_available(agent, params: ToolLoopExecuteParams) -> bool | None:
-    """轮限收口提示词按续跑预算切换:还有预算说「会自动继续」,耗尽说「请回复『继续』」。
+    """轮限收口提示词按"会不会真的自动续跑"切换:会=「会自动继续」,不会=
+    「请回复『继续』」。
 
-    三值语义:True=本次收口后还有自动续跑预算;False=预算耗尽,本次收口后不再
-    自动续跑;None=查不到(沿用乐观文案,与 /goal 无限续跑语义一致)。判定完全用
-    结构化信号(policy metadata 的 resume_used/resume_limit),不做自然语言判断。
+    三值语义:True=本次收口后还有自动续跑预算且被授权;False=本次收口后
+    不会自动续跑;None=查不到(沿用乐观文案, 与 /goal 无限续跑语义一致)。
+    判定完全用结构化信号(EXEC-39 goal 授权 + policy metadata 的
+    resume_used/resume_limit),不做自然语言判断。EXEC-41(四改之 2 步骤 4):
+    承诺文案与收口机器 decide_closeout 同源——CLI 只有 active goal 才可能
+    自动续, 这里必须同判, 不许文案先行于机器行为(2026-08-07 真机教训)。
     """
     try:
         attrs = getattr(params, "task_attributes", None)
-        if isinstance(attrs, dict) and str(attrs.get("thread_goal_id") or "").strip():
+        attrs = attrs if isinstance(attrs, dict) else {}
+        if str(attrs.get("thread_goal_id") or "").strip():
             # /goal 任务无预算概念:用户显式目标即无限续跑授权。
             return True
         store = getattr(agent, "conversation_store", None)
-        if store is None or not callable(getattr(store, "list_progress_policies", None)):
-            return None
+        source = str(getattr(params, "source", "") or "").strip()
         from .runtime.task_identity import progress_ledger_id
 
-        task_id = str(progress_ledger_id(agent, params) or "").strip()
+        if source == "cli_run":
+            # EXEC-39: CLI 正常不自动续跑——只有 active goal 才可能自动续
+            # (decide_closeout 同源)。无 store/无 thread/无 active goal
+            # 一律 False(fail-closed), 与 _auto_resume_authorized 同判。
+            # task 身份用 bind 发放的 params.task_id(与 runner.ctx.root_
+            # task_id 同源), 不用 ledger path key(goal.task_id 按它匹配)。
+            task_id = str(getattr(params, "task_id", "") or "").strip()
+            if store is None or not task_id:
+                return False
+            thread_id = str(attrs.get("conversation_thread_id") or "").strip()
+            if not thread_id:
+                return False
+            try:
+                goal = store.load_goal(thread_id, task_id=task_id)
+            except Exception:  # noqa: BLE001 goal 读不到=fail-closed 不承诺续跑
+                return False
+            if goal is None or str(
+                getattr(goal, "status", "") or ""
+            ).strip().lower() != "active":
+                return False
+        else:
+            task_id = str(progress_ledger_id(agent, params) or "").strip()
+        if store is None or not callable(getattr(store, "list_progress_policies", None)):
+            return None
         if not task_id:
             return None
         matching = [

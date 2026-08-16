@@ -1637,6 +1637,66 @@ def test_ordinary_task_resume_available_signal(tmp_path):
     assert _ordinary_task_resume_available(object(), params()) is None
 
 
+def test_ordinary_task_resume_available_cli_run_requires_active_goal(tmp_path):
+    """EXEC-41(四改之 2 步骤 4): CLI 轮限收口承诺与 decide_closeout 同源——
+    无 active goal 的 cli_run 一律 False(承诺文案=「已暂停」), 有 active goal
+    才继续看 policy 预算; gateway 不受影响(仍按 policy 信号)。"""
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core._tool_loop_service import (
+        _ordinary_task_resume_available,
+    )
+
+    (tmp_path / "notes.txt").write_text("hello", encoding="utf-8")
+    agent = SimpleAgent(
+        _text_agent_config(enable_tools=True, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    thread = agent.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "cli",
+            "channel_conversation_id": "req-cli-signal",
+            "channel_user_id": "local-agent",
+        }
+    )
+
+    def params(**overrides) -> ToolLoopExecuteParams:
+        base = {
+            "task_attributes": {
+                "conversation_thread_id": thread.thread_id,
+            },
+            "context_scope": "default",
+            "source": "cli_run",
+            "run_id": "run-cli-signal",
+            "task_id": "task-cli-signal",
+        }
+        base.update(overrides)
+        return SimpleNamespace(**base)
+
+    # 无 goal: EXEC-39 停即停, 承诺文案必须是「已暂停」。
+    assert _ordinary_task_resume_available(agent, params()) is False
+    # 有 active goal: 授权成立, 无 policy = 首次续跑有预算 → 会自动继续。
+    agent.conversation_store.create_goal(
+        {
+            "thread_id": thread.thread_id,
+            "objective": "继续推进任务直到完成",
+            "task_id": "task-cli-signal",
+        }
+    )
+    assert _ordinary_task_resume_available(agent, params()) is True
+    # goal 变非 active(complete) → 不承诺续跑。
+    goal = agent.conversation_store.load_goal(thread.thread_id, task_id="task-cli-signal")
+    agent.conversation_store.update_goal(
+        {
+            "thread_id": thread.thread_id,
+            "goal_id": goal.goal_id,
+            "status": "complete",
+        }
+    )
+    assert _ordinary_task_resume_available(agent, params()) is False
+
+
 @pytest.mark.xfail(reason="EXEC-31b: native 下 natural-user-reply 经 IR 消息注入, 不再出现在 prompt 文本; 断言待适配")
 def test_ordinary_task_resume_budget_exhausted_disables_policy(tmp_path):
     """LLM: 普通任务续跑预算耗尽后 policy 退休,调度器不再拉起,等用户显式「继续」。
