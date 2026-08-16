@@ -18,7 +18,7 @@ from typing import Any
 
 from ..settings.defaults import DEFAULT_MODEL_MAX_TOKENS
 from ..tooling.runtime_contracts import ProviderToolCapability, ToolChoice
-from .errors import ProviderResponseError
+from .errors import ProviderRecoverableError, ProviderResponseError
 from .gateway_helpers import GatewayRequest, post_json, post_stream, post_stream_iter
 from .model_metadata import ProviderMetadataOptions, discover_provider_model_metadata
 from .stream_parsers import StreamCompletion
@@ -307,6 +307,13 @@ class HttpBackend(BaseBackend):
                 if supported
                 else "live_probe_returned_no_valid_structured_tool_call"
             )
+        except ProviderRecoverableError:
+            # EXEC-41b: provider 侧失败(429 额度/限流/超时/连接)不是"不支持
+            # native"——探针吞掉它会把配额耗尽误报成"模型无原生工具能力",
+            # 真机 2026-08-17 双线 quota 恢复前 resume 报
+            # ToolProtocolSelectionError(RC=1 且文案误导)。放行给调用方,
+            # CLI 走 provider_quota_exhausted_report 等优雅报告路径。
+            raise
         except Exception as exc:
             code = str(getattr(exc, "error_code", "") or "").strip().upper()
             suffix = f":{code}" if code else ""

@@ -649,3 +649,26 @@ class TestGetBackend:
         backend = get_backend("anthropic_compatible", config)
         assert isinstance(backend, AnthropicCompatibleBackend)
         assert backend.context_window_tokens == 200000
+
+
+def test_probe_reraises_provider_quota_error(tmp_path):
+    """EXEC-41b: 探针遇 provider 侧失败(配额/限流)必须放行, 不得吞成
+    "native 不支持"——真机 2026-08-17 双线 quota 恢复前 resume 被误报
+    ToolProtocolSelectionError(RC=1, 文案误导) 的根因。"""
+    from agent_py_agent.agent.backends.errors import ProviderQuotaExhaustedError
+
+    backend = HttpBackend(_DEFAULT_OPTIONS)
+    with patch.object(
+        backend, "generate", side_effect=ProviderQuotaExhaustedError("quota gone")
+    ):
+        with pytest.raises(ProviderQuotaExhaustedError):
+            backend.probe_tool_capability()
+
+
+def test_probe_records_non_provider_failure_as_unsupported(tmp_path):
+    """非 provider 异常(如本地解析/配置错)仍按旧语义落 evidence, 不抛。"""
+    backend = HttpBackend(_DEFAULT_OPTIONS)
+    with patch.object(backend, "generate", side_effect=ValueError("local bug")):
+        capability = backend.probe_tool_capability()
+    assert capability.native_supported is False
+    assert "live_probe_failed:ValueError" in capability.evidence
