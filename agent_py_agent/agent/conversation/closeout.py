@@ -70,10 +70,14 @@ def decide_closeout(facts: CloseoutFacts) -> CloseoutOutcome:
         return CloseoutOutcome(
             STATE_WAIT_HUMAN, reason or "not_continuable", "wait_human", False
         )
-    # 可续跑族, 但正常不自动续跑(EXEC-39): 无 active goal → 移交等用户/gateway。
+    # 可续跑族, 但正常不自动续跑(EXEC-39): 无 active goal → 停即停
+    # , 用户 run --resume 手动继续。不写移交单——移交单是
+    # gateway/cron 的接管入口, 无 goal 任务写单会被活着的调度器自动续跑,
+    # 违背 owner"正常不自动续跑"的拍板; 只有授权了自动续跑但预算/收敛
+    # 耗尽时才写单供 gateway 续接。
     if not facts.active_goal:
         return CloseoutOutcome(
-            STATE_WAIT_HANDOFF, "no_active_goal", "wait_handoff", True
+            STATE_WAIT_HANDOFF, "no_active_goal", "wait_handoff", False
         )
     # EXEC-30 同因收敛: 连续同因达上限强制收口移交, 不再续跑。
     if int(facts.same_reason_streak or 0) >= SAME_REASON_RESUME_LIMIT:

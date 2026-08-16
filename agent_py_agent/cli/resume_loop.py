@@ -18,6 +18,16 @@ from pathlib import Path
 
 from ..agent.agent_core.cli_run_conversation import bind_cli_run_conversation
 from ..agent.agent_core.runtime.loop_models import RunParams
+from ..agent.conversation.closeout import (
+    SAME_REASON_RESUME_LIMIT as _SAME_REASON_RESUME_LIMIT,
+)
+from ..agent.conversation.closeout import (
+    STATE_DONE,
+    STATE_RESUME_ROUND,
+    STATE_WAIT_HANDOFF,
+    CloseoutFacts,
+    decide_closeout,
+)
 from .resume_contract import (
     CliContinuationContext,
     record_budget_exhausted,
@@ -196,7 +206,7 @@ class ResumeRunOnce:
 
 def _write_handoff(
     agent: object,
-    runner: "ResumeRunOnce",
+    runner: ResumeRunOnce,
     *,
     seq: int,
     reason: str,
@@ -233,7 +243,7 @@ def _write_handoff(
 
 # EXEC-30: 同一收口 reason 连续续跑上限(对照 会话运行时/轻量运行时 写完即测即收的
 # 天然收敛的机制等价物)。同因 3 次仍不收敛=模型在同一模式无限迭代, 强制收口。
-_SAME_REASON_RESUME_LIMIT = 3
+# 常量权威在 conversation/closeout.py 的收口状态机, 这里 import 复用。
 
 
 def _auto_resume_authorized(agent: object, runner: object) -> bool:
@@ -275,6 +285,13 @@ def run_with_resume(
     太紧——续跑链 8 轮×resume_limit 3 次≈24 轮就预算耗尽死停等用户「继续」,
     无人值守 CLI 场景任务必死。改为读配置 cli_resume_max_rounds(默认 8
     保持现状, 普通交互任务防失控语义不变), 长任务部署可调大。
+
+    EXEC-41(四改之 2 步骤 2): 收口判定换用 decide_closeout 单一权威——
+    停止原因采集(should_resume 白名单 gate)与 goal 授权(_auto_resume_
+    authorized)以事实输入机器, 机器输出终态; 本函数只执行终态对应的
+    落账/移交/返回, 不再各自分支推理预算与收敛。行为与旧实现等价
+    (max_rounds=0 的退化配置除外: 旧实现回落 resume_limit_reached,
+    新实现判 max_rounds_reached)。
     """
     if max_rounds is None:
         max_rounds = int(
@@ -303,15 +320,12 @@ def run_with_resume(
     rounds = 1
     same_reason_streak = 0
     should, reason = should_resume(result)
-    if not should or not _auto_resume_authorized(agent, runner):
-        return CliResumeOutcome(
-            status="unresumable", rounds=rounds, final_result=result, reason=reason
-        )
     if runner.ctx is None or not runner.ctx.root_task_id:
         return CliResumeOutcome(
             status="unresumable", rounds=rounds, final_result=result,
             reason="no_continuation_contract",
         )
+    authorized = _auto_resume_authorized(agent, runner)
 
     # 缺口A(双席复核 seq1834): 进入续跑循环前 claim 一次(整个循环持有,
     # lease 300s 覆盖进程内多轮)——CLI 与 gateway 同读同写同一 policy claim,
@@ -327,7 +341,8 @@ def run_with_resume(
     from .resume_contract import try_claim_cli_resume
 
     store = getattr(agent, "conversation_store", None)
-    if store is not None:
+    budget_left = 1  # 通过 ensure+claim 即有至少一次预算; 无 store 不设预算
+    if should and authorized and store is not None:
         ensured = ensure_ordinary_task_resume(
             agent,
             task_id=runner.ctx.root_task_id,
@@ -358,7 +373,27 @@ def run_with_resume(
                 status="unresumable", rounds=rounds, final_result=result,
                 reason="claim_held_by_other_consumer",
             )
-    for seq in range(1, max_rounds + 1):
+    while True:
+        outcome = decide_closeout(
+            CloseoutFacts(
+                runtime_status=str(getattr(result, "runtime_status", "") or ""),
+                runtime_reason=str(getattr(result, "runtime_reason", "") or ""),
+                runtime_source=str(getattr(result, "runtime_source", "") or ""),
+                continuable=should,
+                active_goal=authorized,
+                resume_budget_left=budget_left,
+                same_reason_streak=same_reason_streak,
+                rounds=rounds,
+                # 机器语义: max_rounds 是总代数上限(含首轮), 而本函数参数
+                # max_rounds 是续跑轮上限——加回首轮。
+                max_rounds=max_rounds + 1,
+            )
+        )
+        if outcome.state != STATE_RESUME_ROUND:
+            return _closeout_after_decision(
+                agent, runner, outcome, result, rounds, initial_prompt
+            )
+        seq = rounds  # 续跑轮 seq 与已跑代数一致(1..max_rounds)
         prompt = resume_prompt_for(
             continuation_reason=reason,
             continuation_seq=seq,
@@ -378,75 +413,49 @@ def run_with_resume(
         # (新问题)则重新计数, 不误杀有进展的续跑链。
         if should and new_reason == reason:
             same_reason_streak += 1
-            if same_reason_streak >= _SAME_REASON_RESUME_LIMIT:
-                record_budget_exhausted(
-                    agent=agent,
-                    run_id=runner.ctx.root_run_id,
-                    attempt_id=runner.ctx.parent_attempt_id,
-                    task_run_id=runner._task_run_id(),
-                    budget_before=rounds - 1,
-                    budget_after=rounds,
-                    reason="same_reason_resume_limit_reached",
-                )
-                _write_handoff(
-                    agent, runner, seq=rounds, reason="same_reason_resume_limit_reached",
-                    user_prompt=initial_prompt,
-                )
-                return CliResumeOutcome(
-                    status="budget_exhausted", rounds=rounds,
-                    final_result=result, reason="same_reason_resume_limit_reached",
-                )
         elif should:
             same_reason_streak = 1
         reason = new_reason
-        if not should:
-            # 缺口C(双席复核 seq1835): 不可续跑族收口(blocked/协议违规/
-            # UNKNOWN)必须标 unresumable, 不能误标 completed——只有
-            # runtime_status=ok 的任务完成才算 completed。
-            runtime_status = str(
-                getattr(result, "runtime_status", "") or ""
-            ).strip().lower()
-            if runtime_status == "ok":
-                return CliResumeOutcome(
-                    status="completed", rounds=rounds, final_result=result, reason=reason
-                )
-            return CliResumeOutcome(
-                status="unresumable", rounds=rounds, final_result=result, reason=reason
-            )
-        if rounds >= max_rounds + 1:
-            record_budget_exhausted(
-                agent=agent,
-                run_id=runner.ctx.root_run_id,
-                attempt_id=runner.ctx.parent_attempt_id,
-                task_run_id=runner._task_run_id(),
-                budget_before=rounds - 1,
-                budget_after=rounds,
-                reason="max_rounds_reached",
-            )
-            _write_handoff(
-                agent, runner, seq=rounds, reason="max_rounds_reached",
-                user_prompt=initial_prompt,
-            )
-            return CliResumeOutcome(
-                status="budget_exhausted", rounds=rounds, final_result=result,
-                reason="max_rounds_reached",
-            )
-    record_budget_exhausted(
-        agent=agent,
-        run_id=runner.ctx.root_run_id,
-        attempt_id=runner.ctx.parent_attempt_id,
-        task_run_id=runner._task_run_id(),
-        budget_before=rounds,
-        budget_after=rounds,
-        reason="resume_limit_reached",
-    )
-    _write_handoff(
-        agent, runner, seq=rounds, reason="resume_limit_reached",
-        user_prompt=initial_prompt,
-    )
+
+
+def _closeout_after_decision(
+    agent: object,
+    runner: ResumeRunOnce,
+    outcome: object,
+    result: object,
+    rounds: int,
+    initial_prompt: str,
+) -> CliResumeOutcome:
+    """EXEC-41: 执行收口机器的终态——落账/移交/返回都只按 outcome.state,
+    不再散落分支推理。done → completed; wait_handoff(handoff=True) →
+    budget_exhausted 事件+移交单; 其余(wait_human/cancelled/no_active_goal)
+    → unresumable(缺口C: 只有 runtime_status=ok 才算 completed, 不误标)。"""
+    if outcome.state == STATE_DONE:
+        return CliResumeOutcome(
+            status="completed", rounds=rounds, final_result=result,
+            reason=outcome.reason or "task_completed",
+        )
+    if outcome.state == STATE_WAIT_HANDOFF and outcome.handoff:
+        record_budget_exhausted(
+            agent=agent,
+            run_id=runner.ctx.root_run_id,
+            attempt_id=runner.ctx.parent_attempt_id,
+            task_run_id=runner._task_run_id(),
+            budget_before=max(rounds - 1, 0),
+            budget_after=rounds,
+            reason=outcome.reason,
+        )
+        _write_handoff(
+            agent, runner, seq=rounds, reason=outcome.reason,
+            user_prompt=initial_prompt,
+        )
+        return CliResumeOutcome(
+            status="budget_exhausted", rounds=rounds, final_result=result,
+            reason=outcome.reason,
+        )
     return CliResumeOutcome(
-        status="budget_exhausted", rounds=rounds, final_result=result,
-        reason="resume_limit_reached",
+        status="unresumable", rounds=rounds, final_result=result,
+        reason=outcome.reason or "not_continuable",
     )
 
 

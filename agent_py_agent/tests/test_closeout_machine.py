@@ -27,7 +27,7 @@ def _oracle(facts: CloseoutFacts) -> CloseoutOutcome:
     if not facts.continuable:
         return CloseoutOutcome("wait_human", reason or "not_continuable", "wait_human", False)
     if not facts.active_goal:
-        return CloseoutOutcome("wait_handoff", "no_active_goal", "wait_handoff", True)
+        return CloseoutOutcome("wait_handoff", "no_active_goal", "wait_handoff", False)
     if int(facts.same_reason_streak or 0) >= 3:
         return CloseoutOutcome(
             "wait_handoff", "same_reason_resume_limit_reached", "wait_handoff", True
@@ -112,7 +112,8 @@ def test_blocked_protocol_violation_wait_human():
 
 
 def test_no_active_goal_means_no_auto_resume_exit39():
-    """EXEC-39: 可续跑族但无 active goal → wait_handoff(正常不自动续跑)。"""
+    """EXEC-39: 可续跑族但无 active goal → wait_handoff(正常不自动续跑),
+    不写移交单(避免被活着的 gateway 调度器自动接管)。"""
     facts = CloseoutFacts(
         runtime_status="unfinished", runtime_reason="TOOL_ROUND_LIMIT_REACHED",
         runtime_source="tool_loop", continuable=True, active_goal=False,
@@ -121,7 +122,7 @@ def test_no_active_goal_means_no_auto_resume_exit39():
     outcome = decide_closeout(facts)
     assert outcome.state == "wait_handoff"
     assert outcome.reason == "no_active_goal"
-    assert outcome.handoff is True
+    assert outcome.handoff is False
 
 
 def test_active_goal_with_budget_resumes():

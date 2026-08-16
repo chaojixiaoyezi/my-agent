@@ -72,6 +72,11 @@ after_*`）只负责报原因，不再各自决定命运、不再各自拼"会�
 | `wait_handoff` | unfinished（可续跑族 reason） | 写 continuation handoff | 用户 `run --resume` / gateway / cron |
 | `resume_round` | unfinished（可续跑族 reason） | 进程内自动续下一轮 | goal-round-driver（EXEC-39 授权） |
 
+`wait_handoff` 的移交单规则：只有"授权了自动续跑但预算/同因/轮数耗尽"
+才写移交单（供 gateway 续接）；无 active goal 的普通任务（EXEC-39 停即停）
+**不写单**——写单会被活着的 gateway 调度器自动接管，违背 owner"正常不
+自动续跑"的拍板。机器用 `handoff` 布尔区分（no_active_goal → False）。
+
 收敛护栏全部保留并收进机器输入：resume_limit 预算（policy 单一权威）、
 max_rounds（进程内护栏）、EXEC-30 同因 3 次收敛。`resume_round` 只在
 预算内才发，预算耗尽即降级 `wait_handoff`。
