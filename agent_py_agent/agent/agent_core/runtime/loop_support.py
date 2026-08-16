@@ -160,7 +160,7 @@ def _resolve_tool_sections(request: ToolSectionsRequest):
     # the full text catalog; a native-capable model receives canonical schemas
     # through the provider's tools field and must not get the same schemas
     # duplicated in prompt prose.
-    tool_protocol = str(getattr(request.protocol_snapshot, "source_protocol", "text") or "text")
+    tool_protocol = str(getattr(request.protocol_snapshot, "source_protocol", "native") or "native")
     tool_catalog = request.agent.tools.render_catalog_section(
         allowed_tools=request.allowed_tools,
         tool_protocol=tool_protocol,

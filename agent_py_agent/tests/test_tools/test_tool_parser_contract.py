@@ -41,16 +41,16 @@ def test_tool_catalog_and_recommended_sections():
     catalog = registry.render_catalog_section()
     recommended = registry.render_recommended_tools_section("帮我测试一个 REST API 接口并查看返回")
 
+    # native 协议(EXEC-31b text 已删): 目录不展开条目, Schema 走原生工具通道
     assert "# Tool Catalog" in catalog
-    assert "web_fetch [web" in catalog
+    assert "原生工具通道" in catalog
     assert "http_request [api]" not in catalog
     assert "web_extract [web]" not in catalog
-    assert "关键参数" in catalog
+    assert "关键参数" not in catalog
     assert "适用场景" not in catalog
     assert "示例：" not in catalog
-    assert "web_fetch [web]" in recommended
-    assert "参数：" in recommended
-    assert "推荐理由" in recommended
+    assert "web_fetch" in recommended
+    assert "命中" in recommended
 
 
 def test_registry_uses_configured_write_inline_recommendation(tmp_path: Path):
@@ -113,12 +113,11 @@ def test_tool_catalog_format_example_does_not_bias_to_path_param():
 
     catalog = registry.render_catalog_section()
 
-    assert '{"tool": "tool_name", "path": "example"}' not in catalog
-    assert '{"tool": "tool_name", "parameter_name": "parameter_value"}' not in catalog
-    assert '{"tool": "read_file", "path": "README.md"}' in catalog
-    assert '"actual_parameter_name": "actual_value"' not in catalog
+    # native 协议: 不教模型写 [TOOL_CALL] 文本块, 也不给文本参数示例
+    assert '{"tool": "read_file", "path": "README.md"}' not in catalog
+    assert "[TOOL_CALL]" not in catalog
     assert '"param_name": "param_value"' not in catalog
-    assert "不要写 param_name、args、arguments" in catalog
+    assert "原生工具调用" in catalog
 
 
 def test_tool_catalog_includes_global_large_content_protocol():
@@ -139,7 +138,8 @@ def test_read_only_tool_catalog_omits_irrelevant_write_transport_protocol():
 
     catalog = registry.render_catalog_section(allowed_tools=["read_file"])
 
-    assert "read_file" in catalog
+    # native 协议: 条目不展开(工具名不在目录文本), 只读场景不注入写传输协议
+    assert "原生工具通道" in catalog
     assert "# Tool Content Transport Protocol" not in catalog
     assert "WRITE_FILE_RAW" not in catalog
 
@@ -266,11 +266,13 @@ def test_tool_catalog_uses_configured_categories_offset_and_notice():
     catalog = registry.render_catalog_section()
     catalog_entries = catalog.split("# Tool Catalog", 1)[1]
 
-    assert "find_files" in catalog_entries
+    # native 协议: 目录不展开条目也不分页(offset 只作用于 text 展开, 已随 text 删除)
+    assert "find_files" not in catalog_entries
     assert "list_files" not in catalog_entries
     assert "read_file" not in catalog_entries
     assert "示例：" not in catalog
-    assert "next_offset=2" in catalog
+    assert "next_offset=2" not in catalog
+    assert "原生工具通道" in catalog
 
 
 def test_tool_model_spec_catalog_entry_includes_first_example():

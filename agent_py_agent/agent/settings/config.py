@@ -159,16 +159,9 @@ class _ToolConfigFields:
     tool_embedding_api_base: str = ""
     tool_embedding_api_key: str = ""
     tool_embedding_api_key_env: str = ""
-    # 工具调用协议在 run 开始前固定：native 先探测当前 provider+endpoint+model+stream
-    # 是否支持原生 tool_use；明确选择 text 时只启用隔离的 [TOOL_CALL] 适配器。
-    # 一个 run 内禁止 native/text 切换，native 失败也不会由 text 中途接管。
+    # 工具调用协议固定 native（EXEC-31b: text 协议已删除——对照组 会话运行时/轻量运行时/
+    # 终端交互 均只有 native；不支持原生 tool_use 的模型直接报错，不做文本降级）。
     tool_protocol: str = "native"
-    # 显式声明必须走 text 协议(跳过 native probe)的模型名单,用于已知不支持原生
-    # tool_use 的非 reasoning 模型。EXEC-08: 曾误放 deepseek-v4-flash——该模型经生产
-    # live probe 验证 native 正常,对照组(会话运行时/轻量运行时)同模型 native 均成功,2026-08-07 的
-    # "0 工具+幻觉"实证已被真机探针推翻,名单应保持为空除非部署方有新的真机证据。
-    # 空列表=全部模型照常 native probe;名单内模型由部署方显式配对 text。
-    tool_protocol_text_models: list[str] = field(default_factory=list)
     # MCP 客户端(短板6)：声明要连接的外部 MCP server，把社区现成工具(GitHub/DB/Slack 等)
     # 动态注册成 mcp__<server>__<tool> 前缀的工具。结构：
     #   {server_name: {command: str, args: [..], env: {..}, timeout: int, connect_timeout: int,

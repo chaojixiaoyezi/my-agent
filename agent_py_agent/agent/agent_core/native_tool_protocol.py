@@ -10,7 +10,6 @@ from ..tooling.runtime_contracts import (
 )
 
 _NATIVE_PROTOCOL = "native"
-_TEXT_PROTOCOL = "text"
 
 
 class ToolProtocolSelectionError(RuntimeError):
@@ -20,35 +19,21 @@ class ToolProtocolSelectionError(RuntimeError):
 
 
 def select_tool_protocol(agent: object, *, run_id: str) -> ToolProtocolSnapshot:
-    """Probe once before the run and select exactly one protocol."""
+    """Probe once before the run; native is the only supported protocol."""
 
     config = getattr(agent, "config", None)
     requested = native_tool_protocol_value(getattr(config, "tool_protocol", "native"))
     backend = getattr(agent, "backend", None)
     if not bool(getattr(config, "enable_tools", False)):
+        # 工具整体关闭:协议标记 native(工具列表为空),不再有 text 降级。
         capability = _declared_capability(
             backend,
-            native_supported=False,
+            native_supported=True,
             evidence="tools_disabled_for_run",
         )
-        return ToolProtocolSnapshot(run_id, _TEXT_PROTOCOL, capability)
-    if requested == _TEXT_PROTOCOL:
-        capability = _declared_capability(
-            backend,
-            native_supported=False,
-            evidence="explicit_text_protocol_configuration",
-        )
-        return ToolProtocolSnapshot(run_id, _TEXT_PROTOCOL, capability)
-    if _model_declared_text_protocol(config, backend):
-        # 模型名单显式声明(配置 tool_protocol_text_models):该模型不参与 native probe,
-        # 直接走 text。非 reasoning 模型配 native 会静默失效(0 工具调用+幻觉,真机实证
-        # 2026-08-07),名单是部署方显式配对,不是猜测。
-        capability = _declared_capability(
-            backend,
-            native_supported=False,
-            evidence="model_declared_text_protocol_configuration",
-        )
-        return ToolProtocolSnapshot(run_id, _TEXT_PROTOCOL, capability)
+        return ToolProtocolSnapshot(run_id, _NATIVE_PROTOCOL, capability)
+    if requested != _NATIVE_PROTOCOL:
+        raise ValueError(f"invalid tool protocol: {requested}")
 
     probe = getattr(backend, "probe_tool_capability", None)
     capability = probe() if callable(probe) else _declared_capability(
@@ -60,12 +45,11 @@ def select_tool_protocol(agent: object, *, run_id: str) -> ToolProtocolSnapshot:
         raise TypeError("backend probe_tool_capability must return ProviderToolCapability")
     if capability.native_supported:
         return ToolProtocolSnapshot(run_id, _NATIVE_PROTOCOL, capability)
-    # 安全边界:probe 未证明 native 支持时,必须显式选 text(不静默降级)——防止 model 声称支持
-    # native 但实际 probe 失败时,静默切 text 掩盖协议缺陷。换模型时若该模型确实不支持 native,
-    # 部署方显式配置 tool_protocol=text(有测试/文档/边界),与目标书"native/text 不混用"一致。
+    # 删除 text 协议后:probe 未证明 native 支持=该模型无法使用工具,
+    # 直接报错。
     raise ToolProtocolSelectionError(
-        "tool_protocol=native was configured, but the run-start provider probe "
-        "did not prove native tool support; explicitly select tool_protocol=text"
+        "the run-start provider probe did not prove native tool support "
+        "for this model; coding tasks require a native tool-use capable model"
     )
 
 
@@ -80,11 +64,9 @@ def native_tool_use_active(params: object) -> bool:
 
 def native_tool_protocol_value(tool_protocol: object) -> str:
     value = str(tool_protocol or "").strip().lower()
-    if not value:
+    if value in {"", _NATIVE_PROTOCOL}:
         return _NATIVE_PROTOCOL
-    if value not in {_NATIVE_PROTOCOL, _TEXT_PROTOCOL}:
-        raise ValueError(f"invalid tool protocol: {value}")
-    return value
+    raise ValueError(f"invalid tool protocol: {value}")
 
 
 def resolve_native_tools(agent: object, params: object) -> list[dict[str, Any]] | None:
@@ -105,17 +87,6 @@ def resolve_native_tools(agent: object, params: object) -> list[dict[str, Any]] 
     )
     tools = tool_model_specs_to_anthropic_tools(specs)
     return tools or None
-
-
-def _model_declared_text_protocol(config: object, backend: object) -> bool:
-    """True when the backend's model name is in the explicit text-protocol list."""
-    configured = getattr(config, "tool_protocol_text_models", None)
-    if not isinstance(configured, list) or not configured:
-        return False
-    model = str(getattr(backend, "model_name", "") or "").strip()
-    if not model:
-        return False
-    return model in {str(item or "").strip() for item in configured if str(item or "").strip()}
 
 
 def _declared_capability(

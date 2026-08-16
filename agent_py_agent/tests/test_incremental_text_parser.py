@@ -31,7 +31,6 @@ from agent_py_agent.agent.backends.text_protocol_parser import (
 )
 from agent_py_agent.agent.backends.tool_protocol_adapter import (
     ProviderToolCallRequest,
-    TextToolProtocolAdapter,
 )
 from agent_py_agent.agent.tooling.models import (
     EffectResolverPolicy,
@@ -191,90 +190,6 @@ def test_scan_text_blocks_empty_body_is_unclosed() -> None:
 
     assert scan.payloads == []
     assert scan.errors == ["text tool block is not closed"]
-
-
-def test_adapter_more_than_one_unclosed_rejects_good_blocks_too() -> None:
-    # 统一规则（J-6）：未闭合 open 数 > 1 → 整轮拒绝，同一响应里的好块也不执行
-    # ——与流式 MalformedToolProtocolStreamAbort 对齐（块序混乱即协议损坏）。
-    text = (
-        '[TOOL_CALL]{"tool":"run_command","command":"pytest -q"}[/TOOL_CALL]'
-        '[TOOL_CALL]{"tool":"run_command","command":"ls"}'
-        '[TOOL_CALL]{"tool":"run_command","command":"pwd"}'
-    )
-    result = TextToolProtocolAdapter().tool_calls(_request(SimpleNamespace(text=text)))
-
-    assert result.calls == ()
-    assert sum("not closed" in v.detail for v in result.violations) == 2
-
-
-def test_adapter_any_unclosed_block_rejects_whole_response() -> None:
-    # G5（用户裁决）：任何协议错误 → 整轮零执行——完整好块 + 末尾未闭合块，
-    # 前面的完整好块也不执行（不完整响应不能获得执行权）。
-    text = (
-        '[TOOL_CALL]{"tool":"run_command","command":"pytest -q"}[/TOOL_CALL]'
-        '[TOOL_CALL]{"tool":"run_command","command":"ls"}'
-    )
-    result = TextToolProtocolAdapter().tool_calls(_request(SimpleNamespace(text=text)))
-
-    assert result.calls == ()
-    assert any("not closed" in v.detail for v in result.violations)
-
-
-def test_adapter_any_broken_block_rejects_whole_response() -> None:
-    # G5（用户裁决）：任何协议错误 → 整轮零执行——fence 包裹的坏块存在时，
-    # 它之前的完整好块和之后的完好块都不执行（坏块位置之后的文本可能被坏块
-    # 吞掉/溢出，块序损坏即协议不可信；坏块之前的完整好块同样不执行，
-    # 因为响应整体「不完整」）。
-    text = (
-        '[TOOL_CALL]{"tool":"run_command","command":"pytest -q"}[/TOOL_CALL]\n'
-        "```\n"
-        '[TOOL_CALL]{"tool":"run_command","command":"ls"}[/TOOL_CALL]\n'
-        "```\n"
-        '[TOOL_CALL]{"tool":"run_command","command":"pwd"}[/TOOL_CALL]'
-    )
-    result = TextToolProtocolAdapter().tool_calls(_request(SimpleNamespace(text=text)))
-
-    assert result.calls == ()
-    details = [v.detail for v in result.violations]
-    assert any("Markdown fences" in detail for detail in details)
-
-
-def test_adapter_enforces_text_call_limit() -> None:
-    # J-6 + G5：块数上限——超限即「不完整响应」，整轮拒绝，不执行任何块。
-    text = "".join(
-        '[TOOL_CALL]{"tool":"run_command","command":"echo %d"}[/TOOL_CALL]' % i
-        for i in range(MAX_TEXT_CALLS + 1)
-    )
-    result = TextToolProtocolAdapter().tool_calls(_request(SimpleNamespace(text=text)))
-
-    assert result.calls == ()
-    assert any(
-        f"exceeds {MAX_TEXT_CALLS} tool calls" in v.detail
-        and "whole response was not executed" in v.detail
-        for v in result.violations
-    )
-
-
-def test_adapter_enforces_unclosed_block_chars() -> None:
-    # J-6：未闭合块体长度上限（finalize 级，仅未闭合块）。
-    text = '[TOOL_CALL]\n{"tool":"write_file","content":"' + "A" * (MAX_BLOCK_CHARS + 1)
-    result = TextToolProtocolAdapter().tool_calls(_request(SimpleNamespace(text=text)))
-
-    assert result.calls == ()
-    assert any(
-        f"exceeds {MAX_BLOCK_CHARS} chars" in v.detail for v in result.violations
-    )
-
-
-def test_adapter_enforces_response_chars() -> None:
-    # J-6：响应总量 terminal 上限——超限直接整轮拒绝。
-    text = "x" * (MAX_RESPONSE_CHARS + 1)
-    result = TextToolProtocolAdapter().tool_calls(_request(SimpleNamespace(text=text)))
-
-    assert result.calls == ()
-    assert [v.detail for v in result.violations] == [
-        f"text response exceeds {MAX_RESPONSE_CHARS} chars"
-    ]
 
 
 def test_filter_visible_and_cut_are_chunk_split_invariant() -> None:

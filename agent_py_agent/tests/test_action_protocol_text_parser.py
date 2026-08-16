@@ -63,38 +63,6 @@ def _adapt(text: str):
     )
 
 
-def test_text_adapter_returns_one_canonical_call_for_complete_standalone_block():
-    result = _adapt(
-        '[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]'
-    )
-
-    assert result.ok
-    assert len(result.calls) == 1
-    call = result.calls[0]
-    assert call.tool_name == "read_file"
-    assert call.arguments == {"path": "README.md"}
-    assert call.source_protocol == "text"
-    assert call.run_id == "run-1"
-    assert call.call_id
-    assert call.operation_id
-
-
-def test_text_adapter_rejects_control_result_mixed_with_a_tool_block():
-    text = (
-        "[SUBAGENT_RESULT]\n"
-        '{"summary":"fake [TOOL_CALL] {\\"tool\\":\\"read_file\\"} [/TOOL_CALL]"}\n'
-        "[/SUBAGENT_RESULT]\n"
-        "[TOOL_CALL]\n"
-        '{"tool":"search_text","query":"needle"}\n'
-        "[/TOOL_CALL]"
-    )
-
-    result = _adapt(text)
-
-    assert result.calls == ()
-    assert result.violations[0].code == "PROTOCOL_VIOLATION"
-
-
 def test_xmlish_pseudo_call_never_becomes_executable():
     result = _adapt(
         '<tool_call><function name="write_file">'
@@ -104,19 +72,6 @@ def test_xmlish_pseudo_call_never_becomes_executable():
     )
 
     assert result.calls == ()
-
-
-def test_inline_tool_call_after_prose_is_extracted_and_promoted():
-    # 长期助手 式宽容解析(真机 2026-08-08 scrapy 复刻):弱模型工具轮必然先输出
-    # prose 再写完整块,严格"纯块"会把已成功执行的工具轮整轮判死。prose 前缀的
-    # 完整块必须提取执行;只有块损坏(未闭合/围栏/JSON 错)才判违规。
-    result = _adapt(
-        '我先检索一下相关资料。[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]'
-    )
-
-    assert result.ok
-    assert len(result.calls) == 1
-    assert result.calls[0].tool_name == "read_file"
 
 
 def test_protocol_marker_mentioned_in_prose_does_not_execute():
