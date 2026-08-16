@@ -149,7 +149,7 @@ class _ToolConfigFields:
     # 渐进式披露:这些 category 仍注册，但不进初始模型 schema；通过 tool_search 加载。
     # 显式 allowed_tools 的结构化后台/runner profile 保持全量直出。[] 恢复全量。
     tool_catalog_deferred_categories: list[str] = field(
-        default_factory=lambda: ["collaboration", "orchestration", "goal"]
+        default_factory=lambda: ["collaboration", "orchestration", "goal", "web", "vision", "meta", "mcp"]
     )
     tool_detail_max_chars: int = 4000
     # 推荐区和 tool_search 的检索容量；search 有 score>0 过滤，不相关不会凑数。

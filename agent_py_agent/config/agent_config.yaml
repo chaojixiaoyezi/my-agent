@@ -768,7 +768,7 @@ tool_catalog_categories: []
 # 模型通过 tool_search 搜索并加载命中工具，list_tools 可查看完整注册表。显式 allowed_tools
 # 的后台/runner 回合本身已是结构化工具选择，不再延迟。默认收起协作、编排和 /goal 工具；
 # 普通任务仍可自主派子代理，只是先发现再调用。设为 [] 即恢复全部工具直出。
-tool_catalog_deferred_categories: ["collaboration", "orchestration", "goal"]
+tool_catalog_deferred_categories: ["collaboration", "orchestration", "goal", "web", "vision", "meta", "mcp"]
 
 # 工具目录条目是否带示例；默认关闭以控制每轮上下文，完整示例仍可通过 list_tools/tool_search 读取。
 tool_catalog_include_examples: false
