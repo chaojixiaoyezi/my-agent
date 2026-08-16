@@ -709,7 +709,17 @@ def _delivery_verify_no_tool_call_decision(
     if state == VERIFY_SKIPPED:
         return None
     if state == VERIFY_PASSED:
-        return None
+        # 2026-08-16 第三阶段真机(cell6 verify passed 后进程未退): 部署者验收
+        # 通过=任务完成——但模型收口 reason 若为 TASK_PROGRESS_OPEN(模型开了
+        # 账本未 closed) 等可续跑族 → should_continue_task=True → resume_loop
+        # 续跑 → verify passed 后继续烧 token(90+ 分钟未退)。修: 验收通过
+        # 强制收口为终态——清空续跑原因, 任何账本/轮限原因不得覆盖部署者验收。
+        passed = replace(
+            request.response,
+            runtime_reason="",
+            runtime_source="delivery_verify",
+        )
+        return ToolLoopResponseDecision("break", passed, [], request.counters)
     # VERIFY_FAILED / VERIFY_CONTRACT_INVALID / cwd 越界 → 一律 unfinished
     # fail-closed（双席 seq2004 硬缺口2: 坏合同不得伪装成自然收口）。
     failure_text = (
