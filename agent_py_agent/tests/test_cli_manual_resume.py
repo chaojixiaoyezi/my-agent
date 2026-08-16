@@ -328,3 +328,29 @@ def test_other_unknown_still_sets_halt():
     )
     _mark_unknown_outcome_halt(_NS(), record)
     assert params.unknown_outcome_halt is not None
+
+
+def test_manual_resume_repairs_channel_binding(tmp_path):
+    """EXEC-35f: resume 把 channel 绑定修正回任务 thread（单一权威）。"""
+    task_root, task_id = _make_task_facts(tmp_path)
+    agent = _FakeAgent(tmp_path, workspace_root=task_root)
+
+    class _ThreadStore(_FakeStore):
+        def __init__(self):
+            super().__init__()
+            self.bound = None
+
+        def thread_for_task(self, task_id):
+            return SimpleNamespace(thread_id="thread-authoritative")
+
+        def bind_channel(self, request):
+            self.bound = request
+            return SimpleNamespace(thread_id=request["thread_id"])
+
+    agent.conversation_store = _ThreadStore()
+    agent.last_result = _ok_result()
+    run_manual_resume(agent, task_ref=task_root)
+    bound = agent.conversation_store.bound
+    assert bound is not None
+    assert bound["thread_id"] == "thread-authoritative"
+    assert bound["channel_conversation_id"] == "run-abc123"

@@ -529,6 +529,35 @@ def run_manual_resume(
         f"继续执行之前的任务（{facts.get('title') or facts['task_id']}）。"
         "请基于现有工作目录里的进度继续推进直到完成交付。"
     )
+    # EXEC-35f: 反复 resume 时 channel_bindings 可能漂移(失败重试新建了
+    # thread, channel resolve 找到非任务 thread → dedupe 冲突/BINDING)。
+    # 任务 thread 的单一权威是 tasks/<id>.json 的 thread_id——resume 前
+    # 把 channel 绑定修正回任务 thread(thread_for_task 优先于 channel
+    # resolve)。
+    store_fix = getattr(agent, "conversation_store", None)
+    thread_for_task = getattr(store_fix, "thread_for_task", None)
+    bind_channel = getattr(store_fix, "bind_channel", None)
+    if callable(thread_for_task) and callable(bind_channel):
+        try:
+            task_thread = thread_for_task(facts["task_id"])
+            if task_thread is not None:
+                from ..agent.agent_core.cli_run_conversation import (
+                    _CLI_RUN_CHANNEL,
+                    _CLI_RUN_USER_ID,
+                )
+
+                bind_channel(
+                    {
+                        "channel": _CLI_RUN_CHANNEL,
+                        "channel_conversation_id": str(facts.get("request_id") or ""),
+                        "channel_user_id": _CLI_RUN_USER_ID,
+                        "canonical_user_id": _CLI_RUN_USER_ID,
+                        "thread_id": str(getattr(task_thread, "thread_id", "") or ""),
+                    }
+                )
+                facts["thread_id"] = str(getattr(task_thread, "thread_id", "") or "")
+        except Exception:  # noqa: BLE001 修正失败保守继续(旧行为)
+            pass
     # EXEC-35e: 续跑 seq 固定 1 会让每次 resume 用同一 dedupe_key
     # (cli_run:{root}#cont-1:system) 但 content 不同(resume_prompt_for 按
     # 上轮 reason 生成)→ append_message_once 抛 dedupe key reused。seq 从
