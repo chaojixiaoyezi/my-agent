@@ -174,6 +174,12 @@ def cmd_run(args) -> int:
     # EXEC-33: run --resume <task> 手动续跑已存在的任务(对照 会话运行时 resume/
     # 轻量运行时 --continue)——非完成收口后任务不再死。
     resume_ref = str(getattr(args, "resume", "") or "").strip()
+    if not resume_ref and not str(getattr(args, "prompt", "") or "").strip():
+        # prompt 位置参数改为可选(仅 --resume 续跑时可省)——普通 run 缺
+        # prompt 必须 fail-closed, 不进会话持久化(那里报错语义更绕)。
+        spinner.stop()
+        print("my-agent run: 缺少任务 prompt（--resume 续跑已有任务时不需要）")
+        return 2
     if resume_ref:
         try:
             outcome = run_manual_resume(

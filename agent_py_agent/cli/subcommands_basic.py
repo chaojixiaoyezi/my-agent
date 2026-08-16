@@ -78,7 +78,12 @@ def _add_status_timeline_run_commands(sub: argparse._SubParsersAction) -> None:
     timeline.set_defaults(func=cmd_timeline)
 
     run = sub.add_parser("run", help="运行一次智能体对话")
-    run.add_argument("prompt", help="用户任务 / prompt")
+    run.add_argument(
+        "prompt",
+        nargs="?",
+        default="",
+        help="用户任务 / prompt（--resume 续跑已有任务时省略）",
+    )
     run.add_argument("--inject", action="append", help="动态注入 prompt，可多次传入")
     run.add_argument("--prompt-file", action="append", help="额外动态 prompt 文件，可多次传入")
     run.add_argument(
