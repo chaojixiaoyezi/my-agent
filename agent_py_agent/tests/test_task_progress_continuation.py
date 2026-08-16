@@ -79,7 +79,7 @@ def _write_ledger(agent, payload, task_id="task-progress-1"):
 class TestContinuationDecision:
     def test_ledger_open_continues(self, tmp_path):
         agent = SimpleAgent(
-            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), tool_protocol="text"),
+            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), tool_protocol="native"),
             tmp_path,
         )
         _write_ledger(agent, _ledger_payload(next_action="写核心包 task/broker/worker"))
@@ -92,7 +92,7 @@ class TestContinuationDecision:
 
     def test_coverage_open_continues(self, tmp_path):
         agent = SimpleAgent(
-            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), tool_protocol="text"),
+            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), tool_protocol="native"),
             tmp_path,
         )
         _write_ledger(
@@ -111,7 +111,7 @@ class TestContinuationDecision:
 
     def test_ledger_closed_stops(self, tmp_path):
         agent = SimpleAgent(
-            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), tool_protocol="text"),
+            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), tool_protocol="native"),
             tmp_path,
         )
         _write_ledger(
@@ -129,7 +129,7 @@ class TestContinuationDecision:
 
     def test_no_ledger_stops(self, tmp_path):
         agent = SimpleAgent(
-            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), tool_protocol="text"),
+            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), tool_protocol="native"),
             tmp_path,
         )
         decision = task_progress_continuation_decision(agent, _params(), _ok_result())
@@ -141,7 +141,7 @@ class TestContinuationDecision:
         # (2026-08-07 真机铁证),它们不能排除账本驱动续跑——否则所有 gateway 任务
         # 都进 conversation 侧无人区(该侧续跑只认 thread_goal_id),假 DONE 依旧。
         agent = SimpleAgent(
-            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), tool_protocol="text"),
+            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), tool_protocol="native"),
             tmp_path,
         )
         _write_ledger(agent, _ledger_payload())
@@ -159,7 +159,7 @@ class TestContinuationDecision:
 
     def test_conversation_attrs_with_closed_ledger_stops(self, tmp_path):
         agent = SimpleAgent(
-            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), tool_protocol="text"),
+            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), tool_protocol="native"),
             tmp_path,
         )
         _write_ledger(
@@ -180,7 +180,7 @@ class TestContinuationDecision:
 
     def test_thread_goal_scoped_stops(self, tmp_path):
         agent = SimpleAgent(
-            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), tool_protocol="text"),
+            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), tool_protocol="native"),
             tmp_path,
         )
         _write_ledger(agent, _ledger_payload())
@@ -191,7 +191,7 @@ class TestContinuationDecision:
 
     def test_not_ok_stops(self, tmp_path):
         agent = SimpleAgent(
-            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), tool_protocol="text"),
+            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), tool_protocol="native"),
             tmp_path,
         )
         _write_ledger(agent, _ledger_payload())
@@ -201,7 +201,7 @@ class TestContinuationDecision:
 
     def test_depth_limit_stops(self, tmp_path):
         agent = SimpleAgent(
-            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), tool_protocol="text"),
+            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), tool_protocol="native"),
             tmp_path,
         )
         _write_ledger(agent, _ledger_payload())
@@ -213,7 +213,7 @@ class TestContinuationDecision:
 
     def test_attributes_override_limit(self, tmp_path):
         agent = SimpleAgent(
-            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), tool_protocol="text"),
+            AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), tool_protocol="native"),
             tmp_path,
         )
         _write_ledger(agent, _ledger_payload())
@@ -230,7 +230,7 @@ class TestContinuationDecision:
             AgentConfig(
                 model_backend="echo",
                 my_agent_home=str(tmp_path / "home"),
-                tool_protocol="text",
+                tool_protocol="native",
                 task_progress_auto_continue_limit=7,
             ),
             tmp_path,
@@ -321,7 +321,15 @@ class _CaptureBackend:
     def __init__(self):
         self.prompts: list[str] = []
 
-    def generate(self, prompt: str, on_chunk=None):
+    def probe_tool_capability(self):
+        from agent_py_agent.agent.tooling.runtime_contracts import ProviderToolCapability
+
+        return ProviderToolCapability(
+            provider=self.name, endpoint="local://capture", model="",
+            stream=False, native_supported=True, evidence="test_capture_native",
+        )
+
+    def generate(self, prompt: str, on_chunk=None, **kwargs):
         self.prompts.append(prompt)
         return ModelResponse(
             text=f"中间汇报 {len(self.prompts)}:继续推进。",
@@ -335,7 +343,7 @@ class TestRunIntegration:
             AgentConfig(
                 model_backend="echo",
                 my_agent_home=str(tmp_path / "home"),
-                tool_protocol="text",
+                tool_protocol="native",
             ),
             tmp_path,
         )

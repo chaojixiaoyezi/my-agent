@@ -188,6 +188,19 @@ class EchoBackend(BaseBackend):
 
     name = "echo"
 
+    def probe_tool_capability(self) -> ProviderToolCapability:
+        # EXEC-31b(text 删除后): echo 是本地测试后端, 工具循环在本地解析,
+        # 声明 native 支持(native 是唯一协议, 不再有 text 降级)。
+        return ProviderToolCapability(
+            provider=self.name,
+            endpoint=f"local://{self.name}",
+            model=str(getattr(self, "model_name", "") or ""),
+            stream=False,
+            native_supported=True,
+            evidence="echo_backend_declares_native",
+            observed_at=_utc_now_iso(),
+        )
+
     def generate(
         self,
         prompt: str,
