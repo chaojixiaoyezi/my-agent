@@ -118,13 +118,15 @@ CLI `run_with_resume`/`run_manual_resume` 与 gateway `_run_handoff_continuation
 
 ## 6. 实施切法（建议，每步可独立提交）
 
-1. 纯函数 `decide_closeout` + 穷举单测（fake facts 全组合 truth table）。
-2. `run_with_resume` 换用机器（行为等价：EXEC-30/35/39 语义不变）。
-3. `run_manual_resume` 与 gateway `_run_handoff_continuation` 换用。
-4. `_final_response_after_*` 的文案选择换用 guidance_key（停止原因采集
-   职责收敛为"报因"）。
-5. 收尾：删除各处的并行预算推理（`_ordinary_task_resume_available` 等），
-   确认 CONVERSATION/CONTINUABLE_REASONS 白名单仍是机器唯一原因源。
+1. ✅ 纯函数 `decide_closeout` + 穷举单测（fake facts 全组合 truth table）。
+   （已提交：agent/conversation/closeout.py + test_closeout_machine.py）
+2. ✅ `run_with_resume` 换用机器（行为等价：EXEC-30/35/39 语义不变）。
+3. ✅ `run_manual_resume` 换用机器（用户显式 resume=授权, 预算-1=不限）。
+4. ✅ `_final_response_after_tool_limit` 承诺文案换用同源判定（EXEC-39 goal
+   门 + policy 预算），"会自动继续"仅当机器真的会续。
+5. ⏳ 收尾待办：gateway `_run_handoff_continuation` 换用机器（其现状已按
+   handoff 合同工作, 换用属收敛性重构, 不影响实验线）；核对
+   CONVERSATION/CONTINUABLE_REASONS 白名单仍是机器唯一原因源。
 
 ## 7. 验收
 
