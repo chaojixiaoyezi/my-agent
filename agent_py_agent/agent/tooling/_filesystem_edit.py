@@ -45,7 +45,7 @@ from .models import (
 def _build_edit_file_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="edit_file",
-        description="把已有文本文件里的 old_string 精确替换成 new_string（带空白容错匹配）。改几行时首选，比 write_file 省、比 apply_patch 简单。",
+        description="把已有文本文件里的 old_string 精确替换成 new_string（带空白容错匹配）。改几行时首选，比 write_file 省、比 apply_patch 简单。编辑成功后结果里会包含替换位置的最新文件片段，可直接用于下一次编辑，无需 read_file 读回确认。",
         input_schema={
             "type": "object",
             "properties": {
@@ -153,10 +153,18 @@ class EditFileTool(FileSystemTool):
         except (OSError, UnicodeError) as exc:
             return ToolHandlerOutcome("edit_file", False, f"写入失败: {exc}", error_code="TOOL_EXECUTION_FAILED")
         note = "" if strategy == "exact" else f"（{strategy} 容错匹配）"
+        # EXEC-31: 编辑成功只回显"替换 N 处"，
+        # 模型手里文件状态越改越旧 → 每次 edit 前 read_file 读回最新状态
+        # (ma-a r2 真机: db.py 读 59 次、共 100+ 次读自己产物, 占 135min 的
+        # 48% 轮次; 对照 fc 的 Read/Edit 会把文件内容同步进上下文缓存,
+        # 会话运行时 的 apply_patch 回显 hunk 应用结果)。回显替换后的最新片段,
+        # 让模型直接用它做下一次编辑, 无需读回确认。
+        preview = _replaced_context_preview(content, updated, new, count)
+        rendered = f"已编辑 {self.display_path(target)}：替换 {count} 处{note}\n{preview}"
         return ToolHandlerOutcome(
             "edit_file",
             True,
-            f"已编辑 {self.display_path(target)}：替换 {count} 处{note}",
+            rendered,
             result_envelope={
                 "path": str(target),
                 "target_path": str(target),
@@ -181,6 +189,30 @@ def _replace_in_content(content: str, old: str, new: str, *, replace_all: bool) 
 
 _LINE_TRIM = ("line_trimmed", lambda line: line.strip())
 _WS_NORM = ("whitespace_normalized", lambda line: re.sub(r"\s+", " ", line).strip())
+
+
+# LLM: 编辑结果回显片段是模型免读回确认的事实源(EXEC-31)；片段取替换点
+# 前后各 8 行、new_string 超长时截前 12 行，输出上限 ~30 行防刷屏。
+# 函数用途: 生成"替换后文件的最新片段"文本，供模型直接用于下一次编辑。
+def _replaced_context_preview(before: str, after: str, new_text: str, count: int) -> str:
+    try:
+        pos = after.find(new_text) if count else -1
+        if pos < 0:
+            return ""
+        start = after.rfind("\n", 0, max(pos - 1, 0)) + 1
+        end_line = after.count("\n", 0, pos + len(new_text))
+        lines = after.split("\n")
+        head = max(0, end_line - 8)
+        tail = min(len(lines), end_line + 9)
+        shown = lines[head:tail]
+        if len(new_text.split("\n")) > 12:
+            first_lines = new_text.split("\n")[:12]
+            shown = lines[head:end_line - len(new_text.split("\n")) + 1] + first_lines + lines[end_line + 1:tail] if end_line + 1 <= tail else lines[head:end_line + 1]
+        body = "\n".join(shown)[:2400]
+        marker = "…" if len(shown) < (tail - head) else ""
+        return f"替换后最新片段（第 {head + 1}-{head + len(shown)} 行）{marker}：\n```\n{body}\n```"
+    except Exception:
+        return ""
 
 
 # 函数用途: 精确失配时的容错替换——按行规范化(先行首尾空白,再行内空白)滑窗
