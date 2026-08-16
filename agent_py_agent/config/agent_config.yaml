@@ -684,7 +684,7 @@ tool_context_microcompact_min_chars: 1500
 tool_context_ptl_retry_max: 3
 
 # read_file 工具最多返回多少字符，避免单次结果太长
-tool_read_max_chars: 200000
+tool_read_max_chars: 16000
 
 # write_file 单次 inline content 推荐值
 # 默认 12000；超过推荐值的合法工具调用仍会落盘，但工具会提示后续改用 WRITE_FILE_RAW/data_base64，避免模型反复长写。
