@@ -308,6 +308,19 @@ def run_with_resume(
                 consecutive=consecutive_uncontinuable,
             )
             _continuation_backoff_sleep(consecutive_uncontinuable)
+        except Exception as exc:  # noqa: BLE001 进程不退出铁律(2026-08-16 用户):
+            # 非 Provider 异常(sqlite 并发竞争/工具执行链未知异常等)同样进程内
+            # 退避续跑——真机 cell 进程消失根因: cmd_run 只捕获 Provider 两类
+            # 异常, 其余 traceback 冒泡=进程退出→守护脚本反复拉起(投机取巧)。
+            consecutive_uncontinuable += 1
+            record_uncontinuable_continuation(
+                agent,
+                runner=runner,
+                seq=0,
+                reason=f"cli_loop:{type(exc).__name__}:{str(exc)[:120]}",
+                consecutive=consecutive_uncontinuable,
+            )
+            _continuation_backoff_sleep(consecutive_uncontinuable)
     rounds = 1
     should, reason = should_resume(result)
     # 用户指示(2026-08-16): 进程不能退出——只有任务终态(ok)或无契约
@@ -404,6 +417,17 @@ def run_with_resume(
                     runner=runner,
                     seq=seq,
                     reason=f"provider_recoverable:{type(exc).__name__}",
+                    consecutive=consecutive_uncontinuable,
+                )
+                _continuation_backoff_sleep(consecutive_uncontinuable)
+            except Exception as exc:  # noqa: BLE001 进程不退出铁律(同首轮):
+                # 任何异常不冒泡退出——进程内退避后重试同一续跑轮。
+                consecutive_uncontinuable += 1
+                record_uncontinuable_continuation(
+                    agent,
+                    runner=runner,
+                    seq=seq,
+                    reason=f"cli_loop:{type(exc).__name__}:{str(exc)[:120]}",
                     consecutive=consecutive_uncontinuable,
                 )
                 _continuation_backoff_sleep(consecutive_uncontinuable)
