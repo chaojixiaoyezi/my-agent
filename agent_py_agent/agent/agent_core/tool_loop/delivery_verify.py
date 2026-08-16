@@ -411,6 +411,53 @@ def attempt_unknown_operation_count(agent: object, params: object) -> int:
     return count
 
 
+def attempt_unknown_operations(
+    agent: object, params: object
+) -> list[dict[str, object]]:
+    """attempt 内工具结果未知操作明细（seq2375）。
+
+    供 deferral 落账/用户通知保留未解决项摘要——计数合并（一轮一条）不能让
+    后续 reconciliation 误以为所有未知都已解决：每条带 tool/operation_id/
+    error_code/effect_outcome。查不到权威库时返回空列表。
+    """
+    repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+    if repo is None or not callable(getattr(repo, "events_for_attempt", None)):
+        return []
+    attempt_id = str(getattr(params, "attempt_id", "") or "")
+    if not attempt_id:
+        return []
+    try:
+        events = repo.events_for_attempt(attempt_id=attempt_id, limit=500)
+    except Exception:  # noqa: BLE001 查不到 → 空明细（不干预收口）
+        return []
+    ops: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for event in events or ():
+        if not isinstance(event, dict):
+            continue
+        if str(event.get("event_type") or "") != "tool_completed":
+            continue
+        payload = _event_payload(event)
+        if str(payload.get("error_code") or "") != UNKNOWN_OUTCOME_ERROR_CODE:
+            continue
+        operation_id = str(payload.get("operation_id") or "")
+        key = operation_id or str(payload.get("idempotency_key") or "")
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        ops.append(
+            {
+                "tool": str(payload.get("tool") or ""),
+                "operation_id": operation_id,
+                "idempotency_key": str(payload.get("idempotency_key") or ""),
+                "error_code": UNKNOWN_OUTCOME_ERROR_CODE,
+                "effect_outcome": str(payload.get("effect_outcome") or ""),
+            }
+        )
+    return ops
+
+
 def _delivery_verify_unknown_pending(
     state: str, results: list[dict[str, object]]
 ) -> bool:
@@ -570,6 +617,10 @@ def persist_closeout_deferral_event(
                 "unknown_operation_count": attempt_unknown_operation_count(
                     agent, params
                 ),
+                # seq2375：保留本轮所有未知 operation 明细——计数合并（一轮
+                # 一条）不能抹掉未解决项；后续 reconciliation 据此知晓哪些
+                # 操作仍未确定终态，避免误以为全部已解决。
+                "unknown_operations": attempt_unknown_operations(agent, params),
             },
         )
     except Exception:  # noqa: BLE001 落账失败绝不影响收口判定
