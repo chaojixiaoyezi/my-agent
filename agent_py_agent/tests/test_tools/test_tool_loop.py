@@ -207,7 +207,24 @@ class _SuccessfulCreateTools:
         return _successful_test_execution(call, '{"created": 1}')
 
 
-class _UnlimitedRoundsBackend:
+
+class _NativeFakeBackend:
+    """测试假后端基类: 声明 native 支持(EXEC-31b text 删除后所有假后端走 native)。"""
+
+    def probe_tool_capability(self):
+        from agent_py_agent.agent.tooling.runtime_contracts import ProviderToolCapability
+
+        return ProviderToolCapability(
+            provider=str(getattr(self, "name", "fake") or "fake"),
+            endpoint="local://fake",
+            model="",
+            stream=False,
+            native_supported=True,
+            evidence="test_fake_native",
+        )
+
+
+class _UnlimitedRoundsBackend(_NativeFakeBackend):
     name = "fake_unlimited_rounds_backend"
 
     def __init__(self):
@@ -221,7 +238,7 @@ class _UnlimitedRoundsBackend:
         return ModelResponse(text="无限轮数配置已正常收口", backend=self.name)
 
 
-class _GatewayNaturalDispatchReplyBackend:
+class _GatewayNaturalDispatchReplyBackend(_NativeFakeBackend):
     name = "fake_gateway_natural_dispatch_reply"
 
     def __init__(self):
@@ -258,7 +275,7 @@ class _GatewayNaturalDispatchReplyBackend:
         return ModelResponse(text="我先把两部分拆开整理，汇总好后一起给你。", backend=self.name)
 
 
-class _RepeatedMissingReadBackend:
+class _RepeatedMissingReadBackend(_NativeFakeBackend):
     name = "fake_repeated_missing_read_backend"
 
     def __init__(self):
@@ -277,7 +294,7 @@ class _RepeatedMissingReadBackend:
         return ModelResponse(text="已看到提示，改用其他路径继续推进。", backend=self.name)
 
 
-class _EmptyAfterToolBackend:
+class _EmptyAfterToolBackend(_NativeFakeBackend):
     name = "fake_empty_after_tool_backend"
 
     def __init__(self):
@@ -295,7 +312,7 @@ class _EmptyAfterToolBackend:
         )
 
 
-class _EmptyThenFinalAfterToolBackend:
+class _EmptyThenFinalAfterToolBackend(_NativeFakeBackend):
     name = "fake_empty_then_final_after_tool_backend"
 
     def __init__(self):
@@ -317,7 +334,7 @@ class _EmptyThenFinalAfterToolBackend:
         return ModelResponse(text="已根据工具结果继续完成。", backend=self.name)
 
 
-class _SeparatedEmptyResponsesBackend:
+class _SeparatedEmptyResponsesBackend(_NativeFakeBackend):
     name = "fake_separated_empty_responses_backend"
 
     def __init__(self):
@@ -348,7 +365,7 @@ class _SeparatedEmptyResponsesBackend:
         return ModelResponse(text="两次独立空响应后仍完成。", backend=self.name)
 
 
-class _IncompleteThenFinalAfterToolBackend:
+class _IncompleteThenFinalAfterToolBackend(_NativeFakeBackend):
     name = "fake_incomplete_then_final_after_tool_backend"
 
     def __init__(self):
@@ -378,7 +395,7 @@ class _IncompleteThenFinalAfterToolBackend:
         return ModelResponse(text="已从已完成工具结果继续收口。", backend=self.name)
 
 
-class _IncompleteWithoutToolBackend:
+class _IncompleteWithoutToolBackend(_NativeFakeBackend):
     name = "fake_incomplete_without_tool_backend"
 
     def __init__(self):
@@ -393,7 +410,7 @@ class _IncompleteWithoutToolBackend:
         )
 
 
-class _RepeatedIncompleteAfterToolBackend:
+class _RepeatedIncompleteAfterToolBackend(_NativeFakeBackend):
     name = "fake_repeated_incomplete_after_tool_backend"
 
     def __init__(self):
@@ -413,7 +430,7 @@ class _RepeatedIncompleteAfterToolBackend:
         )
 
 
-class _LongAppendPromptWindowBackend:
+class _LongAppendPromptWindowBackend(_NativeFakeBackend):
     name = "fake_long_append_prompt_window_backend"
 
     def __init__(self, rounds: int = 45):
