@@ -148,6 +148,23 @@ class PromptBuilder:
         )
         _tools = request.tools or ToolSections()
         system_prompt = request.system_prompt_override or self.config.system_prompt
+        # 2026-08-16 3×3 第二阶段真机（会话运行时 对照实证）：同一模型同一 prompt，
+        # 会话运行时 在「提示源码路径不存在」时持续探索（ls 目录树→发现父目录
+        # tar 包→自行解压→读源码 123 次做全量实现）；我们的模型 list_files
+        # 失败（PATH_NOT_FOUND）后停止探索，0 次读源码凭先验写核心子集
+        # （1232 行 vs 对照 4200 行，功能覆盖不全）。底座缺「探索-理解-
+        # 实现」的硬引导——带工具目录的任务场景统一注入探索纪律。
+        if _tools.tool_catalog_section:
+            system_prompt = (
+                f"{system_prompt}\n\n"
+                "# 探索纪律（实现前必读）\n"
+                "- 实现/复刻/修改代码前，必须先定位并阅读输入源码或现有代码："
+                "用 list_files/find_files 定位，read_file 覆盖核心模块。\n"
+                "- 提示给出的源码路径不存在时，主动尝试父目录、兄弟目录、工作区"
+                "内的源码包（如 *.tar.gz、同目录 src/ 下的文件）；"
+                "禁止未读源码凭先验直接实现。\n"
+                "- 未完成源码阅读与功能梳理前，不得开始写实现代码。\n"
+            )
         task_local = _is_task_local_context(request.context_scope)
         memory_text = _memory_text([] if task_local else request.memories)
         owner_scope = _owner_scope_text(self)
