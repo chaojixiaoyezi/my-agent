@@ -855,6 +855,22 @@ my-agent local-rebuild --reset
 | `--source <name>` | `all` | 只重建指定来源，可多次传入；可选 `all`、`memory`、`gateway`、`subagent`、`fts`。 |
 | `--reset` | `false` | 先清空 LocalStore records/events/FTS 再重建。 |
 
+## `resume`
+
+```powershell
+my-agent resume <session_id>
+```
+
+显式连接指定会话继续交流（fail-closed：会话不存在或 ID 无效时直接报错退出，绝不静默新建会话）。与 `chat --session-id` 的区别：chat 是隐式恢复（fail-open 会新建会话），`resume` 是显式命令。
+
+| 参数 | 说明 |
+| --- | --- |
+| `session_id` | 要恢复的会话 ID（如 `sess_1712_abcd1234`）。 |
+| `--inject <text>` | 启动时注入 prompt，可多次传入。 |
+| `--prompt-file <path>` | 启动时加载额外 prompt 文件，可多次传入。 |
+| `--memory-limit <n>` | 交互中 `/memory` 默认显示条数；默认读配置。 |
+| `--no-save` | 关闭本次运行归档与持久化 Compact；Gateway 模式仍记录 ConversationStore/审计。 |
+
 ## `chat`
 
 ```powershell
