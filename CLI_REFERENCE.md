@@ -284,12 +284,13 @@ my-agent run "总结这个项目" --no-save
 
 | 参数 | 说明 |
 | --- | --- |
-| `prompt` | 必填，用户任务或问题。 |
+| `prompt` | 用户任务或问题；`--resume` 续跑已有任务时可省略。 |
 | `--inject <text>` | 动态注入 prompt，可多次传入。 |
 | `--prompt-file <path>` | 加载额外动态 prompt 文件，可多次传入。 |
 | `--save` | 保存本次运行归档与恢复事实；不会把普通对话直接写入正式长期记忆。 |
 | `--no-save` | 不保存本次运行归档；Gateway 的 ConversationStore 与 audit 仍按入口合同记录。 |
 | `--show-prompt` | 打印最终拼装后的 prompt。 |
+| `--resume <task>` | 续跑已存在的任务（任务 ID 或任务目录路径），与 会话运行时 resume / 轻量运行时 --continue 对齐；续跑时省略 `prompt`。 |
 | `--delivery-contract-file <path>` | 读取结构化交付合同 JSON，供主代理按机器字段验收产物，不把合同塞进用户 prompt。 |
 | `--resume-context` | 本次请求临时启用恢复上下文注入，不用改配置文件。 |
 | `--no-resume-context` | 本次请求临时关闭恢复上下文注入。 |
