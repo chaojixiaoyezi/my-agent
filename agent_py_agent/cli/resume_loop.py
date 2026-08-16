@@ -470,6 +470,26 @@ def run_manual_resume(
             recovery_next_actions=[],
         )
     )
+    # EXEC-35b: 上次运行以终态(completed/failed/cancelled 等)收口的任务,
+    # promote_current_conversation_task 不会再续接终态 link(真机 2026-08-16:
+    # ma-b 假完成标 completed → resume 工具全被 BINDING_FAILED 拦)。用户
+    # 显式 run --resume 就是结构化"重新激活"命令——把终态 link 迁移回
+    # active, 再以接管者身份续跑。
+    store = getattr(agent, "conversation_store", None)
+    load_link = getattr(store, "load_task_link", None)
+    update_status = getattr(store, "update_task_status", None)
+    if callable(load_link) and callable(update_status):
+        try:
+            link = load_link(facts["task_id"])
+        except Exception:  # noqa: BLE001 link 读不到不拦(绑定时自然报错)
+            link = None
+        if link is not None and str(
+            getattr(link, "status", "") or ""
+        ).strip().lower() in {"completed", "done", "failed", "abandoned", "cancelled"}:
+            try:
+                update_status({"task_id": facts["task_id"], "status": "active"})
+            except Exception:  # noqa: BLE001 迁移失败保守继续(与旧行为一致)
+                pass
     runner = ResumeRunOnce(
         agent,
         base_params=base_params,

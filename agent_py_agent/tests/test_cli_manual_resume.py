@@ -154,3 +154,42 @@ def test_delivery_output_empty_no_workspace_facts():
         task_attributes={},
     )
     assert _delivery_output_dir_empty(params) is False
+
+
+class _LinkStore(_FakeStore):
+    """带 task link 状态的最小 store（EXEC-35b 测试）。"""
+
+    def __init__(self, link_status="completed"):
+        super().__init__()
+        self._status = link_status
+        self.updated = None
+
+    def load_task_link(self, task_id):
+        if self._status is None:
+            return None
+        return SimpleNamespace(task_id=task_id, status=self._status)
+
+    def update_task_status(self, request):
+        self.updated = request
+        return SimpleNamespace(task_id=request.get("task_id"), status=request.get("status"))
+
+
+def test_manual_resume_reactivates_terminal_task_link(tmp_path):
+    """EXEC-35b: 终态(completed)任务 link 在 resume 时被迁移回 active。"""
+    task_root, task_id = _make_task_facts(tmp_path)
+    agent = _FakeAgent(tmp_path, workspace_root=task_root)
+    agent.conversation_store = _LinkStore(link_status="completed")
+    agent.last_result = _ok_result()
+    outcome = run_manual_resume(agent, task_ref=task_root)
+    assert outcome.status == "completed"
+    assert agent.conversation_store.updated == {"task_id": task_id, "status": "active"}
+
+
+def test_manual_resume_keeps_active_link_untouched(tmp_path):
+    """active 任务 link 不需要迁移。"""
+    task_root, _ = _make_task_facts(tmp_path)
+    agent = _FakeAgent(tmp_path, workspace_root=task_root)
+    agent.conversation_store = _LinkStore(link_status="active")
+    agent.last_result = _ok_result()
+    run_manual_resume(agent, task_ref=task_root)
+    assert agent.conversation_store.updated is None
