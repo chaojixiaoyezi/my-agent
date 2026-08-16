@@ -42,6 +42,7 @@ from agent_py_agent.agent.agent_core.tool_loop.delivery_verify import (
     VERIFY_FAILED,
     VERIFY_PASSED,
     VERIFY_SKIPPED,
+    _delivery_verify_unknown_pending,
     delivery_verify_commands,
     run_delivery_verification,
 )
@@ -96,13 +97,31 @@ def _unknown_event(attempt_id="attempt-1", error_code=UNKNOWN_CODE):
     }
 
 
-def _verify_event(attempt_id, state, n=1):
+def _verify_event(attempt_id, state, results=None, n=1):
+    payload = {"state": state}
+    if results is not None:
+        payload["results"] = results
     return {
         "event_type": "delivery_verify",
         "attempt_id": attempt_id,
-        "payload": {"state": state},
+        "payload": payload,
         "_n": n,
     }
+
+
+def _known_failure_results():
+    """确定性失败：命令真实执行且非零退出码（断言不通过/缺 artifact）。"""
+    return [{"command": "go test ./...", "ok": False, "exit_code": 1, "outcome_class": "failed", "started": True, "effect_started": True, "detail": "FAIL"}]
+
+
+def _unknown_pending_results(outcome_class="timeout"):
+    """验证未决：命令已启动但结果不明（timeout/exec_error），效果可能已发生。"""
+    return [{"command": "go test ./...", "ok": False, "exit_code": -1, "outcome_class": outcome_class, "started": True, "effect_started": True, "detail": "timeout" if outcome_class == "timeout" else "exec error"}]
+
+
+def _rejected_results():
+    """执行前拒绝：命令未启动、无副作用（cwd/workspace 越界/命令不可解析）。"""
+    return [{"command": "go test ./...", "ok": False, "exit_code": -1, "outcome_class": "rejected", "started": False, "effect_started": False, "cause": "cwd_out_of_bounds", "detail": "cwd 越界"}]
 
 
 def _deferral_event(attempt_id="attempt-1"):
@@ -251,11 +270,31 @@ def test_gate_no_contract_not_intervened():
     assert _delivery_verify_no_tool_call_decision(_request(None)) is None
 
 
-def test_gate_no_unknown_not_intervened_even_with_contract(tmp_path):
-    """2026-08-16 新语义核心：无工具结果未知 → 模型自审收口，即使 contract
-    声明了 verify_commands 也不强制机器验证（程序验证只做未知错误）。"""
-    contract = {"verify_commands": [{"command": "echo ok", "cwd": str(tmp_path)}]}
-    assert _delivery_verify_no_tool_call_decision(_request(contract)) is None
+def test_gate_contract_forces_verify_even_without_unknown(tmp_path):
+    """群复核 seq2353/2356 纠偏：显式 verify_commands 是部署者验收合同——
+    无工具未知也强制执行机器验证（passed → 终态），不是 audit-only。"""
+    contract = {
+        "verify_commands": [{"command": "echo verify-ok", "cwd": str(tmp_path)}],
+        "task_workspace": {"task_root": str(tmp_path)},
+    }
+    agent = _FakeAgent(repo=_FakeRepo([]))  # 无 unknown 事件
+    agent._current_run_task_workspace = str(tmp_path)
+    request = _NoToolCallsRequest(
+        agent,
+        _FakeParams(contract=contract),
+        ModelResponse(text="done", backend="fake"),
+        _FakeCounters(),
+        has_protected_marker=False,
+    )
+    decision = _delivery_verify_no_tool_call_decision(request)
+    assert decision is not None
+    assert decision.response.runtime_status == "ok"
+    assert decision.response.runtime_source == "delivery_verify"
+
+
+def test_gate_no_contract_no_unknown_audit_only_not_intervened():
+    """无合同 + 无未知 → audit-only：模型自审直接结束（不干预）。"""
+    assert _delivery_verify_no_tool_call_decision(_request(None)) is None
 
 
 def test_gate_unknown_verify_fail_unfinished(tmp_path):
@@ -346,11 +385,11 @@ def test_gate_unknown_circuit_breaker_blocked_on_fourth():
     assert "未知" in response.text
 
 
-def test_gate_unknown_verify_failures_also_count_toward_breaker(tmp_path):
-    """验证失败同样计入熔断计数：failed 事件 3 次 + 本轮第 4 次 → 熔断。"""
+def test_gate_verify_known_failures_breaker_exhausted(tmp_path):
+    """seq2356：确定性失败（非零 exit_code）独立计数 → 第 4 次熔断
+    DELIVERY_VERIFY_FAILED_EXHAUSTED，不进 UNKNOWN_UNRESOLVED。"""
     repo = _FakeRepo(
-        [_unknown_event()]
-        + [_verify_event("attempt-1", VERIFY_FAILED) for _ in range(3)]
+        [_verify_event("attempt-1", VERIFY_FAILED, results=_known_failure_results()) for _ in range(3)]
     )
     contract = {"verify_commands": [{"command": "exit 1", "cwd": str(tmp_path)}]}
     agent = _FakeAgent(repo=repo)
@@ -364,7 +403,86 @@ def test_gate_unknown_verify_failures_also_count_toward_breaker(tmp_path):
     )
     decision = _delivery_verify_no_tool_call_decision(request)
     assert decision is not None
+    assert decision.response.runtime_reason == "DELIVERY_VERIFY_FAILED_EXHAUSTED"
+
+
+def test_gate_verify_unknown_pending_breaker_unresolved(tmp_path):
+    """seq2356：验证未决（timeout/exec error，exit_code=-1）独立计数 → 第 4 次
+    熔断 UNKNOWN_UNRESOLVED（与确定性失败分开）。"""
+    repo = _FakeRepo(
+        [_verify_event("attempt-1", VERIFY_FAILED, results=_unknown_pending_results()) for _ in range(3)]
+    )
+    contract = {"verify_commands": [{"command": "sleep 5", "cwd": str(tmp_path), "timeout_seconds": 1}]}
+    agent = _FakeAgent(repo=repo)
+    agent._current_run_task_workspace = str(tmp_path)
+    request = _NoToolCallsRequest(
+        agent,
+        _FakeParams(contract=contract),
+        ModelResponse(text="done", backend="fake"),
+        _FakeCounters(),
+        has_protected_marker=False,
+    )
+    decision = _delivery_verify_no_tool_call_decision(request)
+    assert decision is not None
     assert decision.response.runtime_reason == "UNKNOWN_UNRESOLVED"
+
+
+def test_verify_and_unknown_counts_are_independent(tmp_path):
+    """seq2356：确定性失败不计入 UNKNOWN 计数——3 条确定性失败 + 无未知 →
+    本轮真跑 passed → 正常终态，不误熔断。"""
+    repo = _FakeRepo(
+        [_verify_event("attempt-1", VERIFY_FAILED, results=_known_failure_results()) for _ in range(3)]
+    )
+    contract = {
+        "verify_commands": [{"command": "echo verify-ok", "cwd": str(tmp_path)}],
+        "task_workspace": {"task_root": str(tmp_path)},
+    }
+    agent = _FakeAgent(repo=repo)
+    agent._current_run_task_workspace = str(tmp_path)
+    request = _NoToolCallsRequest(
+        agent,
+        _FakeParams(contract=contract),
+        ModelResponse(text="done", backend="fake"),
+        _FakeCounters(),
+        has_protected_marker=False,
+    )
+    decision = _delivery_verify_no_tool_call_decision(request)
+    assert decision is not None
+    assert decision.response.runtime_status == "ok"
+    assert decision.response.runtime_source == "delivery_verify"
+
+
+def test_verify_rejected_counts_verify_family_not_unknown(tmp_path):
+    """seq2358：执行前拒绝（cwd/workspace 越界，rejected）归 known_failure
+    （VERIFY_FAILED 族）——3 条 rejected + 本轮 exit 1 → verify 熔断
+    DELIVERY_VERIFY_FAILED_EXHAUSTED，不是 UNKNOWN_UNRESOLVED。"""
+    repo = _FakeRepo(
+        [_verify_event("attempt-1", VERIFY_FAILED, results=_rejected_results()) for _ in range(3)]
+    )
+    contract = {"verify_commands": [{"command": "exit 1", "cwd": str(tmp_path)}]}
+    agent = _FakeAgent(repo=repo)
+    agent._current_run_task_workspace = str(tmp_path)
+    request = _NoToolCallsRequest(
+        agent,
+        _FakeParams(contract=contract),
+        ModelResponse(text="done", backend="fake"),
+        _FakeCounters(),
+        has_protected_marker=False,
+    )
+    decision = _delivery_verify_no_tool_call_decision(request)
+    assert decision is not None
+    assert decision.response.runtime_reason == "DELIVERY_VERIFY_FAILED_EXHAUSTED"
+
+
+def test_delivery_verify_unknown_pending_classification():
+    """seq2358 分类矩阵：rejected/确定性失败不算 UNKNOWN；timeout/exec_error
+    （命令已启动、效果可能已发生）算 UNKNOWN。"""
+    assert _delivery_verify_unknown_pending(VERIFY_FAILED, _rejected_results()) is False
+    assert _delivery_verify_unknown_pending(VERIFY_FAILED, _known_failure_results()) is False
+    assert _delivery_verify_unknown_pending(VERIFY_FAILED, _unknown_pending_results("timeout")) is True
+    assert _delivery_verify_unknown_pending(VERIFY_FAILED, _unknown_pending_results("exec_error")) is True
+    assert _delivery_verify_unknown_pending(VERIFY_FAILED, []) is False
+    assert _delivery_verify_unknown_pending(VERIFY_PASSED, _unknown_pending_results("timeout")) is False
 
 
 def test_gate_unknown_verify_passed_terminates_even_ledger_open(tmp_path):

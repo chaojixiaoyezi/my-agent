@@ -172,6 +172,11 @@ def _run_one_verify(
             "command": command,
             "ok": False,
             "exit_code": -1,
+            "outcome_class": "rejected",  # 执行前校验拒绝，命令未启动、无副作用
+            "started": False,
+            "effect_started": False,
+            "effect_class": "verify",  # verify 命令是部署者声明只读验收
+            "cause": "cwd_out_of_bounds",
             "detail": "cwd 越界或不可解析（必须位于 task workspace 内）",
             "output": "",
         }
@@ -188,22 +193,52 @@ def _run_one_verify(
             "command": command,
             "ok": completed.returncode == 0,
             "exit_code": completed.returncode,
+            "outcome_class": "ok" if completed.returncode == 0 else "failed",
+            "started": True,
+            "effect_started": True,
+            "effect_class": "verify",
+            "cause": "exit_code" if completed.returncode else "",
             "detail": f"cwd={cwd}",
             "output": output[:_VERIFY_OUTPUT_MAX_CHARS],
         }
     except subprocess.TimeoutExpired:
+        # 命令已启动但超时：效果可能已发生 → effect_unknown（计 UNKNOWN 熔断）
         return {
             "command": command,
             "ok": False,
             "exit_code": -1,
+            "outcome_class": "timeout",
+            "started": True,
+            "effect_started": True,
+            "effect_class": "verify",
+            "cause": "timeout",
             "detail": f"timeout after {timeout}s",
             "output": "",
         }
-    except Exception as exc:  # noqa: BLE001 执行异常保守判失败
+    except OSError as exc:
+        # exec 启动失败（命令不存在/不可执行）：未启动、无副作用 → 拒绝族
         return {
             "command": command,
             "ok": False,
             "exit_code": -1,
+            "outcome_class": "rejected",
+            "started": False,
+            "effect_started": False,
+            "effect_class": "verify",
+            "cause": "exec_rejected",
+            "detail": f"exec rejected: {exc}",
+            "output": "",
+        }
+    except Exception as exc:  # noqa: BLE001 启动后执行器异常：效果可能已发生
+        return {
+            "command": command,
+            "ok": False,
+            "exit_code": -1,
+            "outcome_class": "exec_error",
+            "started": True,
+            "effect_started": True,
+            "effect_class": "verify",
+            "cause": "exec_error",
             "detail": f"exec error: {exc}",
             "output": "",
         }
@@ -233,6 +268,7 @@ def run_delivery_verification(
                 "command": "",
                 "ok": False,
                 "exit_code": -1,
+                "outcome_class": "rejected",  # 执行前拒绝，命令未启动、无副作用
                 "detail": "workspace 根缺失，验证无法受控执行（fail-closed）",
                 "output": "",
             }
@@ -303,6 +339,7 @@ def persist_delivery_verify_event(
                     "command": str(item.get("command") or ""),
                     "ok": bool(item.get("ok")),
                     "exit_code": int(item.get("exit_code") or -1),
+                    "outcome_class": str(item.get("outcome_class") or ""),
                     "detail": str(item.get("detail") or ""),
                 }
                 for item in results
@@ -385,12 +422,50 @@ def attempt_unknown_operation_count(agent: object, params: object) -> int:
     return count
 
 
-def attempt_closeout_unresolved_count(agent: object, params: object) -> int:
-    """当前 attempt 内「收口兜底未决」事件数（持久化，重启不清零）。
+def _delivery_verify_unknown_pending(
+    state: str, results: list[dict[str, object]]
+) -> bool:
+    """delivery_verify 事件是否为「验证未决」（UNKNOWN 族）而非确定性失败。
 
-    计数 = delivery_verify 事件（failed/contract_invalid/cwd 越界，即机器
-    兜底验证未能给出通过结论）+ closeout_unknown_deferral 事件（无验证命令
-    时的未知核验提示）。达 CLOSEOUT_UNRESOLVED_LIMIT 即熔断放过。
+    群复核 seq2356/2358 执行阶段区分：只有命令已启动/效果可能已发生但结果
+    不明（outcome_class in {timeout, exec_error}）才计 UNKNOWN；执行前校验
+    拒绝（outcome_class=rejected：cwd/workspace 越界、命令不可解析、workspace
+    根缺失）是 known_failure（VERIFY_FAILED 族），不消耗 UNKNOWN 熔断。
+    无 results 或旧事件缺 outcome_class → 按拒绝族处理（不升级成 UNKNOWN）。
+    """
+    if state != VERIFY_FAILED:
+        return False
+    if not results:
+        return False
+    return any(
+        str(item.get("outcome_class") or "") in {"timeout", "exec_error"}
+        for item in results
+    )
+
+
+def attempt_verify_failure_count(agent: object, params: object) -> int:
+    """当前 attempt 内「合同验证确定性失败」次数（known_failure/VERIFY_FAILED）。
+
+    独立于 UNKNOWN 计数（seq2356）：只计 delivery_verify 事件里验证真实执行
+    且结果明确的失败（非零 exit_code）。达 CLOSEOUT_UNRESOLVED_LIMIT →
+    verify 修复熔断（DELIVERY_VERIFY_FAILED_EXHAUSTED），不进 UNKNOWN_UNRESOLVED。
+    """
+    return _count_delivery_verify_events(
+        agent,
+        params,
+        predicate=lambda payload: not _delivery_verify_unknown_pending(
+            str(payload.get("state") or ""), _payload_results(payload)
+        ),
+    )
+
+
+def attempt_unknown_resolution_count(agent: object, params: object) -> int:
+    """当前 attempt 内「UNKNOWN 未决」次数（验证未决 + 无合同未知核验 deferral）。
+
+    独立于 verify 失败计数（seq2356）：只计 delivery_verify 事件里验证本身
+    未决（timeout/exec error/cwd 越界/workspace 缺失 → 全部 exit_code=-1）+
+    closeout_unknown_deferral（无合同写副作用未知）。达上限 → UNKNOWN 熔断
+    （UNKNOWN_UNRESOLVED）。
     """
     repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
     if repo is None or not callable(getattr(repo, "events_for_attempt", None)):
@@ -412,17 +487,58 @@ def attempt_closeout_unresolved_count(agent: object, params: object) -> int:
             continue
         if event_type != "delivery_verify":
             continue
-        payload = event.get("payload")
-        if isinstance(payload, str):
-            try:
-                payload = json.loads(payload)
-            except (TypeError, ValueError):
-                payload = {}
+        payload = _event_payload(event)
         if not isinstance(payload, dict):
             continue
-        if str(payload.get("state") or "") != VERIFY_PASSED:
+        if _delivery_verify_unknown_pending(
+            str(payload.get("state") or ""), _payload_results(payload)
+        ):
             count += 1
     return count
+
+
+def _count_delivery_verify_events(
+    agent: object, params: object, *, predicate: object
+) -> int:
+    repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+    if repo is None or not callable(getattr(repo, "events_for_attempt", None)):
+        return 0
+    attempt_id = str(getattr(params, "attempt_id", "") or "")
+    if not attempt_id:
+        return 0
+    try:
+        events = repo.events_for_attempt(attempt_id=attempt_id, limit=500)
+    except Exception:  # noqa: BLE001 查不到 → 保守 0（不干预收口）
+        return 0
+    count = 0
+    for event in events or ():
+        if not isinstance(event, dict):
+            continue
+        if str(event.get("event_type") or "") != "delivery_verify":
+            continue
+        payload = _event_payload(event)
+        if not isinstance(payload, dict):
+            continue
+        if predicate(payload):
+            count += 1
+    return count
+
+
+def _event_payload(event: dict[str, object]) -> dict[str, object]:
+    payload = event.get("payload")
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (TypeError, ValueError):
+            payload = {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _payload_results(payload: dict[str, object]) -> list[dict[str, object]]:
+    raw = payload.get("results")
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, dict)]
+    return []
 
 
 def persist_closeout_deferral_event(

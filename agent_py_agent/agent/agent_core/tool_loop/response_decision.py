@@ -642,31 +642,31 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
 def _delivery_verify_no_tool_call_decision(
     request: _NoToolCallsRequest,
 ) -> ToolLoopResponseDecision | None:
-    """收口机器兜底 gate（2026-08-16 收口模式对齐 会话运行时，用户裁决）。
+    """收口机器验证 gate（2026-08-16 收口模式对齐 会话运行时 + 群复核加固）。
 
-    程序验证只做「未知错误」：
-    - attempt 内无工具结果未知族（TOOL_OPERATION_OUTCOME_UNKNOWN：写副作用
-      未知/超时/执行者死）→ None（不干预）。模型自审收口（收口审计纪律
-      提示词约束），即使 contract 声明了 verify_commands 也不强制机器验证
-      ——程序验证的触发条件是「状态未知」，不是「模型宣告完成」。
-    - 有未知 → 机器兜底：contract 声明验证命令 → 真跑验证裁决收口；无验证
-      命令 → 注入未知核验提示继续（模型核验实际状态后再收口）。
-    - 熔断（第 4 次放过）：同一 attempt 内收口兜底未决（验证失败/未知核验
-      提示）达 CLOSEOUT_UNRESOLVED_LIMIT 次 → 放过：BLOCKED/UNKNOWN_UNRESOLVED
-      + 通知用户，绝不无限重试（cell6 90 分钟死循环根治，2026-08-16 用户
-      裁决：放过 = 生成问题通知，不是宣布成功）。
+    三支裁决（verify_commands 是部署者显式验收合同，不是自动程序验证）：
+    1. 有 verify_commands 合同 → 收口强制执行机器验证（无论有无未知）：
+       passed=终态 delivery_verify 盖章；failed=unfinished 修复；验证失败
+       计数熔断（同 attempt 第 4 次放过 → BLOCKED 通知，绝不无限重试）。
+       合同声明但非法（CONTRACT_INVALID）→ fail-closed，绝不放行。
+    2. 无合同 + 无未知 → None（audit-only 直接结束，模型自审收口——收口
+       审计纪律提示词约束）。
+    3. 无合同 + 有未知（TOOL_OPERATION_OUTCOME_UNKNOWN：写副作用未知/超时/
+       执行者死）→ 注入未知核验提示 + deferral 计数熔断（第 4 次放过）。
+    群复核 seq2353/2354 纠偏：自动程序验证只做未知（无合同时）；显式验收
+    合同保留机器硬门——「只做未知」不适用于部署者明确要求的 verify_commands。
     """
     # 2026-08-15 边界归位: delivery_verify 从 cli 层移到 agent_core.tool_loop
     # (agent_core 禁导 cli, 打包边界检查 RUNTIME_IMPORTS_CLI 实锤)。
     from .delivery_verify import (
         CLOSEOUT_UNRESOLVED_LIMIT,
         UNKNOWN_OUTCOME_ERROR_CODE,
-        VERIFY_FAILED,
+        VERIFY_CONTRACT_INVALID,
         VERIFY_PASSED,
         VERIFY_SKIPPED,
         _contract_hash,
-        attempt_closeout_unresolved_count,
         attempt_unknown_operation_count,
+        attempt_unknown_resolution_count,
         build_verification_id,
         delivery_verify_commands,
         delivery_verify_failure_context,
@@ -675,57 +675,78 @@ def _delivery_verify_no_tool_call_decision(
         run_delivery_verification,
     )
 
-    unknown_count = attempt_unknown_operation_count(request.agent, request.params)
-    if unknown_count <= 0:
-        # 无未知 → 模型自审收口（收口审计纪律提示词约束），不干预。
-        return None
-
-    # 有未知 → 熔断检查（计数持久化于 runtime_events，重启不清零）。
-    # 本轮决策本身将落一条未决事件（deferral 或 verify failed），因此
-    # unresolved 已有 3 条时本轮即第 4 次 → 熔断放过。
-    unresolved = attempt_closeout_unresolved_count(request.agent, request.params)
-    if unresolved + 1 >= CLOSEOUT_UNRESOLVED_LIMIT:
-        return ToolLoopResponseDecision(
-            "break",
-            ModelResponse(
-                text=(
-                    "任务存在持续无法核验的工具结果未知状态（写副作用未知/超时/"
-                    "执行者死）：系统已连续多次机器兜底核实仍无法确定实际状态，"
-                    "已停止自动重试（第 4 次放过）。请人工核验目标系统实际状态后"
-                    "决定下一步；当前任务按「未知未解决」收口，不会自动宣告完成。"
-                ),
-                backend=str(getattr(request.response, "backend", "") or ""),
-                runtime_status="blocked",
-                runtime_reason="UNKNOWN_UNRESOLVED",
-                runtime_source="closeout_unknown_fallback",
-            ),
-            [],
-            request.counters,
-        )
-
-    # 机器兜底：验证命令只来自部署者 contract（信任面）。未声明 → 注入
-    # 未知核验提示让模型核验实际状态（每轮注入即一次未决计数，第 4 次熔断）；
-    # 声明了但结构非法（CONTRACT_INVALID）→ 走下方 fail-closed，绝不当作
-    # 「无验证命令」降级放行（双席 seq2004 硬缺口2 不变）。
     contract = getattr(request.params, "delivery_contract", None)
     _commands, verify_state = delivery_verify_commands(contract)
-    if verify_state == VERIFY_SKIPPED:
-        persist_closeout_deferral_event(
-            request.agent,
-            request.params,
-            diagnostic=f"unknown_operations={unknown_count}",
-        )
-        request.params.tool_context.append(
-            "[tool-system closeout-unknown]\n"
-            f"当前任务存在 {unknown_count} 个工具结果未知状态的操作（错误码 "
-            f"{UNKNOWN_OUTCOME_ERROR_CODE}：写副作用未知/超时/执行者死），系统无法"
-            "确认其实际结果。收口前请核验实际状态（检查文件/进程/重跑只读命令）；"
-            "无法核验时明确报告未知，不得宣告完成。"
-        )
-        return ToolLoopResponseDecision("continue", None, [], request.counters)
 
-    # 有验证命令 → 机器兜底验证（workspace 根缺失 → fail-closed，绝不跳过
-    # 边界检查执行；历史取证快照逻辑保留：根缺失时落诊断 JSONL 定位）。
+    if verify_state in (VERIFY_PASSED, VERIFY_CONTRACT_INVALID):
+        # 支 1：有验收合同（或声明但非法）→ 机器验证裁决，失败进修复链 +
+        # 熔断计数（第 4 次放过）。CONTRACT_INVALID 无法跑命令 → 直接 fail-closed。
+        return _contract_verify_decision(
+            request, contract, verify_state, run_delivery_verification,
+        )
+
+    # 支 2/3：无验收合同 → 自动程序验证只做未知错误。
+    unknown_count = attempt_unknown_operation_count(request.agent, request.params)
+    if unknown_count <= 0:
+        # 支 2：audit-only 直接结束（模型自审，收口审计纪律提示词约束）。
+        return None
+
+    # 支 3：有未知 → 落 deferral 事件（UNKNOWN 计数，持久化重启不清零）+
+    # 注入核验提示继续；第 4 次 deferral 即熔断放过（本轮落完 count 达上限）。
+    persist_closeout_deferral_event(
+        request.agent,
+        request.params,
+        diagnostic=f"unknown_operations={unknown_count}",
+    )
+    if attempt_unknown_resolution_count(request.agent, request.params) >= CLOSEOUT_UNRESOLVED_LIMIT:
+        return _closeout_circuit_breaker_response(request)
+    request.params.tool_context.append(
+        "[tool-system closeout-unknown]\n"
+        f"当前任务存在 {unknown_count} 个工具结果未知状态的操作（错误码 "
+        f"{UNKNOWN_OUTCOME_ERROR_CODE}：写副作用未知/超时/执行者死），系统无法"
+        "确认其实际结果。收口前请核验实际状态（检查文件/进程/重跑只读命令）；"
+        "无法核验时明确报告未知，不得宣告完成。"
+    )
+    return ToolLoopResponseDecision("continue", None, [], request.counters)
+
+
+def _contract_verify_decision(
+    request: _NoToolCallsRequest,
+    contract: object,
+    verify_state: str,
+    run_delivery_verification: object,
+) -> ToolLoopResponseDecision:
+    """支 1：显式 verify_commands 合同的收口机器验证裁决。
+
+    - passed → 终态收口 ok（runtime_source=delivery_verify，gate 层一票否决
+      续跑）。
+    - 确定性失败（known_failure：非零 exit_code）→ unfinished 修复；同 attempt
+      第 4 次确定性失败 → verify 修复熔断 DELIVERY_VERIFY_FAILED_EXHAUSTED。
+    - 验证未决（timeout/exec error/cwd 越界/workspace 缺失）→ UNKNOWN 计数，
+      第 4 次 → UNKNOWN_UNRESOLVED（两套计数独立，seq2356）。
+    - CONTRACT_INVALID → fail-closed（双席 seq2004 硬缺口2: 坏合同不得伪装
+      成自然收口）。
+    """
+    from .delivery_verify import (
+        CLOSEOUT_UNRESOLVED_LIMIT,
+        VERIFY_FAILED,
+        VERIFY_PASSED,
+        VERIFY_SKIPPED,
+        _contract_hash,
+        _delivery_verify_unknown_pending,
+        attempt_unknown_resolution_count,
+        attempt_verify_failure_count,
+        build_verification_id,
+        delivery_verify_failure_context,
+        persist_delivery_verify_event,
+    )
+
+    if verify_state == VERIFY_SKIPPED:
+        # 无验证命令（理论上支 1 不进来，防御）：audit-only 不干预。
+        return None
+
+    # workspace 根缺失 → fail-closed（绝不跳过边界检查执行；历史取证快照
+    # 逻辑保留：根缺失时落诊断 JSONL 定位）。
     try:
         from ..run_task_workspace_writer import current_run_task_workspace_root
         from .run_task_workspace_writer_probe import (
@@ -742,11 +763,16 @@ def _delivery_verify_no_tool_call_decision(
                 probe,
             )
             _append_workspace_diagnostic(probe)
-    except Exception:  # noqa: BLE001 workspace 拿不到 → 根缺失 fail-closed（run 内拒绝执行）
+    except Exception:  # noqa: BLE001 workspace 拿不到 → 根缺失 fail-closed
         workspace_root = None
-    try:
-        state, results = run_delivery_verification(request.params, workspace_root)
-    except Exception:  # noqa: BLE001 验证执行异常保守判失败（fail-closed）
+
+    if verify_state == VERIFY_PASSED:
+        try:
+            state, results = run_delivery_verification(request.params, workspace_root)
+        except Exception:  # noqa: BLE001 验证执行异常保守判失败（fail-closed）
+            state, results = VERIFY_FAILED, []
+    else:
+        # CONTRACT_INVALID：声明了但结构非法，无命令可跑 → fail-closed
         state, results = VERIFY_FAILED, []
     contract_hash = _contract_hash(contract)
     verification_id = build_verification_id(request.params, contract)
@@ -759,24 +785,34 @@ def _delivery_verify_no_tool_call_decision(
         verification_id,
     )
     if state == VERIFY_PASSED:
-        # 机器兜底验证通过 = 未知已核实 = 任务终态：清空续跑原因，任何账本/
-        # 轮限原因不得覆盖（gate 层 DELIVERY_VERIFY_PASSED 一票否决续跑）。
+        # 验收通过 = 任务终态：清空续跑原因，任何账本/轮限原因不得覆盖。
         passed = replace(
             request.response,
             runtime_reason="",
             runtime_source="delivery_verify",
         )
         return ToolLoopResponseDecision("break", passed, [], request.counters)
-    # VERIFY_FAILED / VERIFY_CONTRACT_INVALID / cwd 越界 → 一律 unfinished
-    # fail-closed（双席 seq2004 硬缺口2: 坏合同不得伪装成自然收口）。失败
-    # 事件计入熔断计数——模型修不好时第 4 次同样放过。
+
+    # failed → 分类熔断（seq2356 两套独立计数，本轮失败事件已落账）：
+    # 验证未决（timeout/exec error/cwd 越界/workspace 缺失）→ UNKNOWN 计数；
+    # 确定性失败（非零 exit_code）→ verify 修复计数。达上限即放过，不给
+    # 模型再修（否则无限修复链）。
+    if _delivery_verify_unknown_pending(state, results):
+        if attempt_unknown_resolution_count(request.agent, request.params) >= CLOSEOUT_UNRESOLVED_LIMIT:
+            return _closeout_circuit_breaker_response(request)
+    else:
+        if attempt_verify_failure_count(request.agent, request.params) >= CLOSEOUT_UNRESOLVED_LIMIT:
+            return _verify_exhausted_response(request)
+
+    # 未熔断 → unfinished 修复（fail-closed：坏合同/cwd 越界/根缺失不得伪装
+    # 成自然收口，双席 seq2004 硬缺口2）。
     failure_text = (
         delivery_verify_failure_context(results)
-        if state == VERIFY_FAILED
+        if results
         else (
             "[tool-system delivery-verify-failed]\n"
-            "delivery contract 声明的 verify_commands 结构非法或 cwd 越界，"
-            "产物无法机器验证，任务未完成。"
+            "delivery contract 声明的 verify_commands 结构非法、cwd 越界或"
+            "workspace 根缺失，产物无法机器验证，任务未完成。"
         )
     )
     request.params.tool_context.append(failure_text)
@@ -794,6 +830,59 @@ def _delivery_verify_no_tool_call_decision(
             runtime_status="unfinished",
             runtime_reason="DELIVERY_VERIFY_FAILED",
             runtime_source="delivery_verify",
+        ),
+        [],
+        request.counters,
+    )
+
+
+def _closeout_circuit_breaker_response(
+    request: _NoToolCallsRequest,
+) -> ToolLoopResponseDecision:
+    """UNKNOWN 熔断（第 4 次放过）：BLOCKED/UNKNOWN_UNRESOLVED + 通知用户。
+
+    只用于「状态仍无法确定」（验证未决/无合同写副作用未知），与 verify
+    确定性失败熔断（_verify_exhausted_response）分开（seq2356）。
+    """
+    return ToolLoopResponseDecision(
+        "break",
+        ModelResponse(
+            text=(
+                "任务存在持续无法核验的工具结果未知状态（写副作用未知/超时/"
+                "执行者死）：系统已连续多次机器兜底核实仍无法确定实际状态，"
+                "已停止自动重试（第 4 次放过）。请人工核验目标系统实际状态后"
+                "决定下一步；当前任务按「未知未解决」收口，不会自动宣告完成。"
+            ),
+            backend=str(getattr(request.response, "backend", "") or ""),
+            runtime_status="blocked",
+            runtime_reason="UNKNOWN_UNRESOLVED",
+            runtime_source="closeout_unknown_fallback",
+        ),
+        [],
+        request.counters,
+    )
+
+
+def _verify_exhausted_response(
+    request: _NoToolCallsRequest,
+) -> ToolLoopResponseDecision:
+    """verify 修复熔断（第 4 次放过）：验证反复确定性失败 → BLOCKED 通知。
+
+    与 UNKNOWN 熔断分开（seq2356）：明确是「验证反复失败」，reason 区分，
+    不进入 UNKNOWN_UNRESOLVED 语义。
+    """
+    return ToolLoopResponseDecision(
+        "break",
+        ModelResponse(
+            text=(
+                "任务产物反复未通过机器验证（连续 4 次确定性失败：编译/测试/"
+                "断言不通过），系统已停止自动修复重试（第 4 次放过）。请人工"
+                "检查验证失败输出后决定下一步；当前任务不会自动宣告完成。"
+            ),
+            backend=str(getattr(request.response, "backend", "") or ""),
+            runtime_status="blocked",
+            runtime_reason="DELIVERY_VERIFY_FAILED_EXHAUSTED",
+            runtime_source="closeout_unknown_fallback",
         ),
         [],
         request.counters,
