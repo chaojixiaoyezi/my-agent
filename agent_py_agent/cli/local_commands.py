@@ -202,7 +202,9 @@ def cmd_run(args) -> int:
                 "请确认传入的是任务 ID 或任务目录路径。"
             )
             return 2
-        return _finish_cli_run(agent, args, outcome)
+        spinner.stop()
+        print_run_result(result, show_prompt=args.show_prompt, streamed_text=str(stream_state["text"]))
+        return run_exit_code(result)
     # 首先生成 request/run/task 根 ID(bind 前必须有非空 request_id),
     # resume_loop 在其中贯穿续跑契约。
     base_params = run_params_with_request_id(
