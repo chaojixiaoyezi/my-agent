@@ -5730,6 +5730,14 @@ CONTINUABLE_REASONS = frozenset(
         # resume_loop 判 unresumable 直接退出, 模型永远看不到验证输出。
         # 结构门见下: 只接受 source=delivery_verify + status=unfinished。
         "DELIVERY_VERIFY_FAILED",
+        # EXEC-26 长任务复刻真机(2026-08-16): ma-a 写 4 个 .go(813 行)后收口,
+        # 最后一步写操作未验证成功 → OPERATION_INCOMPLETE RC=2, 但不在续跑
+        # 白名单 → CLI 直接退出, 已写代码白费。对照 会话运行时/轻量运行时 任务循环持续到
+        # 交付、无中途放弃出口。以下三类"未完成"同属返工门 unfinished 族,
+        # 应自动续跑(结构门按 source/status 精确放行):
+        "OPERATION_INCOMPLETE",
+        "NO_DELIVERY_ARTIFACT_PRODUCED",
+        "MODEL_RESPONSE_TRUNCATED",
     }
 )
 
@@ -5764,6 +5772,16 @@ def should_continue_task(final_response: object) -> tuple[bool, str]:
         # 路径误标同一 reason 被放行续跑(生产路径由 host 结构化赋值)。
         if reason == "DELIVERY_VERIFY_FAILED" and not (
             source == "delivery_verify" and status == "unfinished"
+        ):
+            return False, reason or "not_continuable"
+        # EXEC-26 结构门: 三个新增 reason 只由各自的工具/收口 gate 在
+        # unfinished 收口产生, 精确约束 source/status 防其他路径误标放行。
+        if reason == "OPERATION_INCOMPLETE" and not (
+            source == "tool_runtime" and status == "unfinished"
+        ):
+            return False, reason or "not_continuable"
+        if reason in {"NO_DELIVERY_ARTIFACT_PRODUCED", "MODEL_RESPONSE_TRUNCATED"} and not (
+            source == "tool_loop" and status == "unfinished"
         ):
             return False, reason or "not_continuable"
         return True, reason
