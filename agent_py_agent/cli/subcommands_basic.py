@@ -94,6 +94,11 @@ def _add_status_timeline_run_commands(sub: argparse._SubParsersAction) -> None:
         help="不保存本次运行归档；ConversationStore/Gateway 审计仍按各自入口语义处理",
     )
     run.add_argument("--show-prompt", action="store_true", help="打印最终拼装后的 prompt")
+    run.add_argument(
+        "--resume",
+        default="",
+        help="续跑已存在的任务（任务 ID 或任务目录路径）；EXEC-33 与对照 codex resume/pi --continue 对齐",
+    )
     run.add_argument("--delivery-contract-file", default="", help="结构化交付合同 JSON 文件")
     add_resume_context_switches(run)
     run.set_defaults(func=cmd_run)

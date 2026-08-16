@@ -169,8 +169,34 @@ def cmd_run(args) -> int:
     # ID(由 run_params_with_request_id 生成), resume_loop 在其中贯穿契约。
     from ..agent.agent_core.runtime.loop_models import RunParams
     from ..agent.agent_core.runtime.run_params import run_params_with_request_id
-    from .resume_loop import run_with_resume
+    from .resume_loop import run_manual_resume, run_with_resume
 
+    # EXEC-33: run --resume <task> 手动续跑已存在的任务(对照 会话运行时 resume/
+    # 轻量运行时 --continue)——非完成收口后任务不再死。
+    resume_ref = str(getattr(args, "resume", "") or "").strip()
+    if resume_ref:
+        try:
+            outcome = run_manual_resume(
+                agent,
+                task_ref=resume_ref,
+                save=bool(args.save),
+                delivery_contract=delivery_contract_from_file(
+                    getattr(args, "delivery_contract_file", "")
+                ),
+                on_chunk=on_chunk,
+            )
+        except ProviderRecoverableError as exc:
+            print(provider_recoverable_cli_report(agent, exc))
+            return 2
+        result = outcome.final_result
+        if outcome.status == "unresumable":
+            print(
+                "[task_resume]\n"
+                "无法续跑该任务：找不到任务事实源（task.yaml / run_workspace.json）。\n"
+                "请确认传入的是任务 ID 或任务目录路径。"
+            )
+            return 2
+        return _finish_cli_run(agent, args, outcome)
     # 首先生成 request/run/task 根 ID(bind 前必须有非空 request_id),
     # resume_loop 在其中贯穿续跑契约。
     base_params = run_params_with_request_id(

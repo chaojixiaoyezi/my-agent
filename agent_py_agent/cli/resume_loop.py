@@ -413,3 +413,201 @@ def run_with_resume(
         status="budget_exhausted", rounds=rounds, final_result=result,
         reason="resume_limit_reached",
     )
+
+
+# LLM: 手动续跑入口(EXEC-33, 对照 会话运行时 resume/轻量运行时 --continue/终端交互
+# --continue): 非完成收口(unresumable)后任务不再死——用户可 run --resume
+# <task_id|目录> 从持久事实源(task.yaml/run_workspace.json)恢复同一
+# task/run/thread 链继续。续跑轮走 ResumeRunOnce 的 continuation 路径
+# (bind 用 root_request_id 复用同一 ConversationStore thread), 与自动
+# resume_loop 共用全部契约与 EXEC-30 收敛 gate。
+# 函数用途: 恢复一个已存在 CLI 任务的执行; 找不到/不可恢复时明确报错。
+def run_manual_resume(
+    agent: object,
+    *,
+    task_ref: str,
+    max_rounds: int | None = None,
+    on_chunk: object = None,
+    save: bool = False,
+    delivery_contract: object = None,
+) -> CliResumeOutcome:
+    from pathlib import Path as _Path
+
+    from ..agent.agent_core.runtime.loop_models import RunParams
+    from ..agent.agent_core.runtime.run_params import run_params_with_request_id
+
+    facts = _load_task_facts(agent, task_ref)
+    if facts is None:
+        return CliResumeOutcome(
+            status="unresumable", rounds=0, final_result=None,
+            reason="task_facts_not_found",
+        )
+    base_params = run_params_with_request_id(
+        RunParams(
+            source="cli_run",
+            task_attributes={
+                "run_workspace": facts["run_workspace"],
+            },
+            run_id=facts["run_id"],
+            task_id=facts["task_id"],
+            request_id=facts["request_id"],
+            continuation_root_request_id=facts["request_id"],
+            continuation_root_run_id=facts["run_id"],
+            continuation_root_task_id=facts["task_id"],
+            continuation_root_thread_id=facts.get("thread_id", ""),
+            recovery_next_actions=[],
+        )
+    )
+    runner = ResumeRunOnce(
+        agent,
+        base_params=base_params,
+        on_chunk=on_chunk,
+        save=save,
+        delivery_contract=delivery_contract,
+    )
+    # 手动续跑没有首轮 result——直接用持久事实重建 ctx(同一 task/run/thread)。
+    runner.ctx = CliContinuationContext(
+        root_task_id=facts["task_id"],
+        root_run_id=facts["run_id"],
+        root_thread_id=facts.get("thread_id", ""),
+        root_request_id=facts["request_id"],
+        parent_attempt_id=facts.get("latest_attempt_id", ""),
+    )
+    if max_rounds is None:
+        max_rounds = int(
+            getattr(getattr(agent, "config", None), "cli_resume_max_rounds", 0) or 8
+        )
+    prompt = (
+        f"继续执行之前的任务（{facts.get('title') or facts['task_id']}）。"
+        "请基于现有工作目录里的进度继续推进直到完成交付。"
+    )
+    result, _bound = runner(
+        prompt, 1, "", continuation_reason="manual_resume"
+    )
+    rounds = 1
+    reason = "manual_resume"
+    same_reason_streak = 0
+    for seq in range(2, max_rounds + 2):
+        should, new_reason = should_resume(result)
+        if should and new_reason == reason:
+            same_reason_streak += 1
+            if same_reason_streak >= _SAME_REASON_RESUME_LIMIT:
+                return CliResumeOutcome(
+                    status="budget_exhausted", rounds=rounds,
+                    final_result=result, reason="same_reason_resume_limit_reached",
+                )
+        elif should:
+            same_reason_streak = 1
+        reason = new_reason
+        if not should:
+            runtime_status = str(
+                getattr(result, "runtime_status", "") or ""
+            ).strip().lower()
+            if runtime_status == "ok":
+                return CliResumeOutcome(
+                    status="completed", rounds=rounds, final_result=result,
+                    reason=reason,
+                )
+            return CliResumeOutcome(
+                status="unresumable", rounds=rounds, final_result=result,
+                reason=reason,
+            )
+        next_prompt = resume_prompt_for(
+            continuation_reason=reason,
+            continuation_seq=seq,
+            user_task=prompt,
+        )
+        result, _bound = runner(
+            next_prompt, seq, attempt_id="", continuation_reason=reason
+        )
+        rounds += 1
+    return CliResumeOutcome(
+        status="budget_exhausted", rounds=rounds, final_result=result,
+        reason="max_rounds_reached",
+    )
+
+
+def _load_task_facts(agent: object, task_ref: str) -> dict | None:
+    """从 task.yaml/run_workspace.json 读取持久事实源(EXEC-33)。"""
+    import json as _json
+    from pathlib import Path as _Path
+
+    home = getattr(agent, "home_paths", None)
+    tasks_root = None
+    if home is not None:
+        owner_home = str(getattr(home, "owner_home_dir", "") or "").strip()
+        if owner_home:
+            tasks_root = _Path(owner_home) / "tasks"
+
+    def _read_workspace_dir(candidate: _Path):
+        task_yaml = candidate / "task.yaml"
+        ws_json = candidate / "run_workspace.json"
+        if not task_yaml.exists() or not ws_json.exists():
+            return None
+        try:
+            # task.yaml 由 workspace 写入器生成, 是简单的 "key: JSON 值" 行格式
+            # (项目不依赖第三方 yaml 库, 这里做最小解析)。
+            meta: dict = {}
+            for line in task_yaml.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or ":" not in line:
+                    continue
+                key, _, value = line.partition(":")
+                value = value.strip()
+                if value:
+                    try:
+                        meta[key.strip()] = _json.loads(value)
+                    except Exception:
+                        meta[key.strip()] = value
+        except Exception:
+            return None
+        try:
+            ws = _json.loads(ws_json.read_text(encoding="utf-8")) or {}
+        except Exception:
+            return None
+        return meta, ws, candidate
+
+    ref = str(task_ref or "").strip()
+    candidates: list[_Path] = []
+    p = _Path(ref).expanduser()
+    if p.is_dir():
+        candidates.append(p / "work")
+        candidates.append(p)
+    if tasks_root is not None and tasks_root.exists():
+        # 目录名以 task 标题命名;task_id 存于 task.yaml——扫描所有任务目录的
+        # work/task.yaml 按 task_id 精确匹配(目录名含 ref 也收)。
+        for day_dir in tasks_root.iterdir():
+            if not day_dir.is_dir():
+                continue
+            for tdir in day_dir.iterdir():
+                if not tdir.is_dir():
+                    continue
+                if ref in tdir.name or ref in str(tdir):
+                    candidates.append(tdir / "work")
+                    candidates.append(tdir)
+                else:
+                    candidates.append(tdir / "work")
+    for cand in candidates:
+        hit = _read_workspace_dir(cand)
+        if not hit:
+            continue
+        meta, ws, work_dir = hit
+        task_id = str(meta.get("task_id") or meta.get("request_id") or "")
+        if task_id and task_id != ref and ref not in str(cand):
+            # 扫描候选按 task_id 精确匹配;目录路径含 ref 的候选放行(模糊输入)
+            continue
+        task_root = str(work_dir.parent)
+        return {
+            "task_id": task_id,
+            "run_id": str(meta.get("run_id") or meta.get("request_id") or ""),
+            "request_id": str(meta.get("request_id") or ""),
+            "thread_id": str(meta.get("thread_id") or ""),
+            "title": str(meta.get("task_title") or ""),
+            "latest_attempt_id": str(meta.get("latest_attempt_id") or ""),
+            "run_workspace": {
+                "task_root": task_root,
+                "output_dir": str(ws.get("output_dir") or _Path(task_root) / "output"),
+                "work_dir": str(ws.get("work_dir") or work_dir),
+            },
+        }
+    return None
