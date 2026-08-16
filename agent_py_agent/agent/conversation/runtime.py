@@ -5748,6 +5748,13 @@ def should_continue_task(final_response: object) -> tuple[bool, str]:
     reason = str(getattr(final_response, "runtime_reason", "") or "").strip().upper()
     source = str(getattr(final_response, "runtime_source", "") or "").strip()
     status = str(getattr(final_response, "runtime_status", "") or "").strip().lower()
+    # 2026-08-16 第三阶段真机(cell6): 部署者验收通过(delivery_verify+ok)=
+    # 契约完成=任务终态——任何续跑原因(TASK_PROGRESS_OPEN 账本未关等)不得
+    # 覆盖。与 DELIVERY_VERIFY_FAILED 结构门(下方)对称: passed 门在普通
+    # CONTINUABLE_REASONS 判断之前, 显式终态一票否决; 结构化字段判断,
+    # 不解析正文、不依赖 reason 清空的隐式行为。CLI/gateway 共用此 gate。
+    if source == "delivery_verify" and status == "ok":
+        return False, "DELIVERY_VERIFY_PASSED"
     gate_unfinished = (
         source == "required_action_completion_gate"
         and status == "unfinished"

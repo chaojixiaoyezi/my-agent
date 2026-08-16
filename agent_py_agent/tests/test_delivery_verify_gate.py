@@ -277,6 +277,68 @@ def test_should_continue_delivery_verify_wrong_status_false():
     assert should is False
 
 
+# ---------- DELIVERY_VERIFY_PASSED 结构门（2026-08-16 第三阶段） ----------
+# 部署者验收通过(delivery_verify+ok)=契约完成=任务终态——任何续跑原因
+# (TASK_PROGRESS_OPEN 账本未关等)不得覆盖; 结构化字段判断, 不解析正文。
+
+
+def test_should_continue_verify_passed_overrides_task_progress_open():
+    # 验收通过但模型账本未关(TASK_PROGRESS_OPEN)——passed 门一票否决续跑
+    response = ModelResponse(
+        text="x",
+        backend="fake",
+        runtime_status="ok",
+        runtime_reason="TASK_PROGRESS_OPEN",
+        runtime_source="delivery_verify",
+    )
+    should, reason = should_continue_task(response)
+    assert should is False
+    assert reason == "DELIVERY_VERIFY_PASSED"
+
+
+def test_should_continue_verify_passed_overrides_round_limit():
+    # 验收通过但轮限原因——同样被 passed 门否决
+    response = ModelResponse(
+        text="x",
+        backend="fake",
+        runtime_status="ok",
+        runtime_reason="TOOL_ROUND_LIMIT_REACHED",
+        runtime_source="delivery_verify",
+    )
+    should, reason = should_continue_task(response)
+    assert should is False
+    assert reason == "DELIVERY_VERIFY_PASSED"
+
+
+def test_should_continue_verify_passed_wrong_source_not_shortcut():
+    # source 不是 delivery_verify → 不走 passed 门, 按普通逻辑(此处不进
+    # CONTINUABLE_REASONS → 不续跑, 但 reason 不是 DELIVERY_VERIFY_PASSED)
+    response = ModelResponse(
+        text="x",
+        backend="fake",
+        runtime_status="ok",
+        runtime_reason="TASK_PROGRESS_OPEN",
+        runtime_source="tool_loop",
+    )
+    should, reason = should_continue_task(response)
+    assert should is True  # tool_loop + TASK_PROGRESS_OPEN 仍可续跑
+    assert reason == "TASK_PROGRESS_OPEN"
+
+
+def test_should_continue_verify_passed_wrong_status_not_shortcut():
+    # status 不是 ok(delivery_verify 未通过) → 不走 passed 门
+    response = ModelResponse(
+        text="x",
+        backend="fake",
+        runtime_status="unfinished",
+        runtime_reason="DELIVERY_VERIFY_FAILED",
+        runtime_source="delivery_verify",
+    )
+    should, reason = should_continue_task(response)
+    assert should is True  # failed 门: delivery_verify+unfinished 仍续跑
+    assert reason == "DELIVERY_VERIFY_FAILED"
+
+
 # ---------- preflight ----------
 
 
