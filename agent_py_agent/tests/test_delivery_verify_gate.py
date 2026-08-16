@@ -132,13 +132,14 @@ def _deferral_event(attempt_id="attempt-1"):
     }
 
 
-def _request(contract, repo=None, text="done", attempt_id="attempt-1", run_id="run-1"):
+def _request(contract, repo=None, text="done", attempt_id="attempt-1", run_id="run-1", turn_id=""):
     return _NoToolCallsRequest(
         _FakeAgent(repo=repo),
         _FakeParams(contract=contract, attempt_id=attempt_id, run_id=run_id),
         ModelResponse(text=text, backend="fake"),
         _FakeCounters(),
         has_protected_marker=False,
+        turn_id=turn_id,
     )
 
 
@@ -483,6 +484,33 @@ def test_delivery_verify_unknown_pending_classification():
     assert _delivery_verify_unknown_pending(VERIFY_FAILED, _unknown_pending_results("exec_error")) is True
     assert _delivery_verify_unknown_pending(VERIFY_FAILED, []) is False
     assert _delivery_verify_unknown_pending(VERIFY_PASSED, _unknown_pending_results("timeout")) is False
+
+
+def test_deferral_idempotent_same_turn():
+    """seq2371：deferral 按 attempt+turn_id 幂等——同收口轮重放不放大 UNKNOWN
+    计数（硬闭环：重复投递不把第 4 次熔断提前触发）。"""
+    repo = _FakeRepo([_unknown_event()])
+    request = _request(None, repo=repo, turn_id="turn-1")
+    _delivery_verify_no_tool_call_decision(request)
+    # 同 turn 重放（模拟 gateway 重复投递同轮）→ 幂等跳过，不落第二条 deferral
+    _delivery_verify_no_tool_call_decision(request)
+    deferrals = [
+        e for e in repo.events if e.get("event_type") == "closeout_unknown_deferral"
+    ]
+    assert len(deferrals) == 1
+    assert deferrals[0]["payload"]["deferral_key"] == "attempt-1:turn-1"
+
+
+def test_deferral_distinct_turns_count_separately():
+    """不同收口轮（不同 turn_id）各自计数——第 4 轮才熔断，不是首轮就合并。"""
+    repo = _FakeRepo([_unknown_event()])
+    for idx in range(3):
+        request = _request(None, repo=repo, turn_id=f"turn-{idx}")
+        _delivery_verify_no_tool_call_decision(request)
+    deferrals = [
+        e for e in repo.events if e.get("event_type") == "closeout_unknown_deferral"
+    ]
+    assert len(deferrals) == 3
 
 
 def test_gate_unknown_verify_passed_terminates_even_ledger_open(tmp_path):

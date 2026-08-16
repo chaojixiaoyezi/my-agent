@@ -215,21 +215,10 @@ def _run_one_verify(
             "detail": f"timeout after {timeout}s",
             "output": "",
         }
-    except OSError as exc:
-        # exec 启动失败（命令不存在/不可执行）：未启动、无副作用 → 拒绝族
-        return {
-            "command": command,
-            "ok": False,
-            "exit_code": -1,
-            "outcome_class": "rejected",
-            "started": False,
-            "effect_started": False,
-            "effect_class": "verify",
-            "cause": "exec_rejected",
-            "detail": f"exec rejected: {exc}",
-            "output": "",
-        }
-    except Exception as exc:  # noqa: BLE001 启动后执行器异常：效果可能已发生
+    except Exception as exc:  # noqa: BLE001 执行器异常：不靠异常类名裁决副作用
+        # 阶段（seq2368 边界）：OSError 也可能在调用开始/部分写入后发生，泛化
+        # Exception 也可能在效果发生前抛出——不确定时保守 UNKNOWN（exec_error），
+        # 只有执行前校验拒绝（cwd/workspace）才是确定未启动的 rejected。
         return {
             "command": command,
             "ok": False,
@@ -542,9 +531,14 @@ def _payload_results(payload: dict[str, object]) -> list[dict[str, object]]:
 
 
 def persist_closeout_deferral_event(
-    agent: object, params: object, diagnostic: str
+    agent: object, params: object, diagnostic: str, *, turn_id: str = ""
 ) -> None:
-    """未知核验提示落 runtime_events（熔断计数数据源，fail-silent）。"""
+    """未知核验提示落 runtime_events（熔断计数数据源，fail-silent）。
+
+    deferral_key = attempt_id + turn_id（seq2371 硬闭环：按唯一 reconciliation
+    cycle 去重——同一收口轮重放/重复投递不放大 UNKNOWN 计数；turn_id 为空时
+    退化为 attempt_id，同 attempt 只落一条，保守不放大）。
+    """
     try:
         repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
         if repo is None or not callable(getattr(repo, "append_event", None)):
@@ -561,6 +555,10 @@ def persist_closeout_deferral_event(
                     task_run_id = str(row.get("task_run_id") or "")
             except Exception:  # noqa: BLE001 查不到不阻断落账
                 pass
+        deferral_key = f"{attempt_id}:{str(turn_id or '')}"
+        # 幂等：同 attempt+turn_id 的 deferral 已落账 → 跳过（防重复投递放大计数）
+        if _deferral_key_already_logged(repo, attempt_id, deferral_key):
+            return
         repo.append_event(
             event_type="closeout_unknown_deferral",
             attempt_id=attempt_id,
@@ -568,6 +566,7 @@ def persist_closeout_deferral_event(
             task_run_id=task_run_id,
             payload={
                 "diagnostic": str(diagnostic or ""),
+                "deferral_key": deferral_key,
                 "unknown_operation_count": attempt_unknown_operation_count(
                     agent, params
                 ),
@@ -575,6 +574,25 @@ def persist_closeout_deferral_event(
         )
     except Exception:  # noqa: BLE001 落账失败绝不影响收口判定
         LOGGER.warning("persist closeout deferral event failed", exc_info=True)
+
+
+def _deferral_key_already_logged(
+    repo: object, attempt_id: str, deferral_key: str
+) -> bool:
+    """查该 attempt 是否已落同 deferral_key 的 deferral 事件（幂等去重）。"""
+    try:
+        events = repo.events_for_attempt(attempt_id=attempt_id, limit=100)
+    except Exception:  # noqa: BLE001 查不到 → 保守落账（append-only 无并发冲突）
+        return False
+    for event in events or ():
+        if not isinstance(event, dict):
+            continue
+        if str(event.get("event_type") or "") != "closeout_unknown_deferral":
+            continue
+        payload = _event_payload(event)
+        if str(payload.get("deferral_key") or "") == deferral_key:
+            return True
+    return False
 
 
 def delivery_verify_failure_context(results: list[dict[str, object]]) -> str:

@@ -167,6 +167,7 @@ class _NoToolCallsRequest:
     response: object
     counters: ToolLoopRepairCounters
     has_protected_marker: bool
+    turn_id: str = ""
 
 
 def tool_loop_response_decision(
@@ -198,6 +199,7 @@ def tool_loop_response_decision(
             request.response,
             request.counters,
             has_protected_marker,
+            turn_id=str(request.turn_id or ""),
         )
     )
 
@@ -691,12 +693,14 @@ def _delivery_verify_no_tool_call_decision(
         # 支 2：audit-only 直接结束（模型自审，收口审计纪律提示词约束）。
         return None
 
-    # 支 3：有未知 → 落 deferral 事件（UNKNOWN 计数，持久化重启不清零）+
+    # 支 3：有未知 → 落 deferral 事件（UNKNOWN 计数，持久化重启不清零，
+    # 按 attempt+turn_id 幂等去重——同收口轮重放不放大计数）+
     # 注入核验提示继续；第 4 次 deferral 即熔断放过（本轮落完 count 达上限）。
     persist_closeout_deferral_event(
         request.agent,
         request.params,
         diagnostic=f"unknown_operations={unknown_count}",
+        turn_id=str(getattr(request, "turn_id", "") or ""),
     )
     if attempt_unknown_resolution_count(request.agent, request.params) >= CLOSEOUT_UNRESOLVED_LIMIT:
         return _closeout_circuit_breaker_response(request)
