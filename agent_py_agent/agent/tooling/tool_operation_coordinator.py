@@ -31,7 +31,10 @@ from ..local_storage import (
     new_tool_operation_holder,
 )
 from ..contracts.error_taxonomy import error_contract
-from ..runtime_db.managed_operation_store import AuthorityContextMissing
+from ..runtime_db.managed_operation_store import (
+    AuthorityContextMissing,
+    RuntimeConflictError,
+)
 from .models import (
     ToolFailureStage,
     ToolHandlerOutcome,
@@ -140,6 +143,27 @@ def _claim_operation(
                 resource_scopes=request.resource_scopes,
                 attempt_id=request.attempt_id,
             )
+        )
+    except RuntimeConflictError as exc:
+        # 3×3 真机 2026-08-15 根因：资源锁冲突（残留死进程锁/并发互斥）是
+        # 确定性业务冲突，不是 store 故障——独立错误码如实分类（此前
+        # 混入 TOOL_OPERATION_STORE_UNAVAILABLE 导致 5 次复发排查方向错）。
+        result = _operation_error(
+            request.tool_name,
+            "TOOL_OPERATION_RESOURCE_CONFLICT",
+            str(exc) or "资源锁冲突，无法建立执行占位，工具没有运行。",
+        )
+        _attach_operation_facts(
+            result,
+            request,
+            status="not_started",
+            action="resource_conflict",
+            diagnostic=type(exc).__name__,
+        )
+        return apply_tool_execution_facts(
+            result,
+            failure_stage=ToolFailureStage.PERSISTENCE,
+            handler_executed=False,
         )
     except Exception as exc:  # noqa: BLE001 - authoritative store failures fail closed
         authority_missing = isinstance(exc, AuthorityContextMissing)

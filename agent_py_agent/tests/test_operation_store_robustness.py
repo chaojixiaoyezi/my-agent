@@ -1251,3 +1251,84 @@ def test_s253_controlled_exec_locks_grant_write_roots(tmp_path):
         f"workspace:{(tmp_path / 'out').resolve()}",
         f"workspace:{(tmp_path / 'docs').resolve()}",
     }  # 当前：只有 workspace:cwd(out) → 红
+
+
+# ============================================================== 3×3 残留锁 reap
+# 期望（修后）：claim 前同事务 reap「持有者进程已不存在」的 workspace 锁——
+# 被杀进程的残留锁不再永久阻塞重叠路径（真机 2026-08-15 cell3 第 5-6 次
+# STORE_UNAVAILABLE 根因：死进程锁 → RuntimeConflictError → 误分类）。
+# 现状（红测）：无 reap，残留锁永久冲突。
+
+def test_reap_dead_process_workspace_lock_unblocks_claim(tmp_path, monkeypatch):
+    # 本地 Mac 无 /proc（_process_alive 保守恒 True 不 reap）——monkeypatch
+    # 模拟 Linux：pid=99999999（死进程）判定为不存在。
+    import agent_py_agent.agent.runtime_db.managed_operation_store as _mos
+    monkeypatch.setattr(_mos, "_process_alive", lambda pid: int(pid or 0) != 99999999)
+    repo = _repo(tmp_path)
+    _agent_run_id, attempt_id = _direct_register_chain(repo, "run-reap", task_id="task-reap")
+    agent = _agent(repo=repo, tools=None, store=_store(tmp_path), root=tmp_path)
+    store_obj = select_operation_store(agent)
+    scope = f"workspace:{(tmp_path / 'out').resolve()}"
+    # 手工插入死进程（pid 99999999 必不存在）持有的残留锁
+    with repo._runtime_connection() as conn:
+        conn.execute(
+            "INSERT INTO resource_locks(lock_id, canonical_scope, holder_instance,"
+            " pid, start_token, attempt_id, attempt_generation, workspace_epoch,"
+            " tool_operation_generation, lease_expires_at, created_at, updated_at)"
+            " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "lock-dead-1", scope, "holder-dead", 99999999, "token-dead",
+                attempt_id, 1, 1, 1, 9999999999.0, 1.0, 1.0,
+            ),
+        )
+        conn.commit()
+    claim = store_obj.claim_tool_operation(
+        ToolOperationClaimRequest(
+            owner_id="owner-a", run_id="run-reap", task_id="task-reap",
+            operation_id="tool_call:attempt-reap:call-1", tool="reap_write",
+            args_hash="sha256:reap", idempotency_key="key-reap-1",
+            idempotency_scope="business", idempotency_namespace="reap_write",
+            holder=new_tool_operation_holder(), lease_expires_at=9999999999.0,
+            resource_scopes=(scope,), attempt_id=attempt_id,
+        )
+    )
+    assert claim.action == "execute"  # 残留锁被 reap，不再冲突
+    with repo._runtime_connection() as conn:
+        left = conn.execute(
+            "SELECT COUNT(*) AS n FROM resource_locks WHERE lock_id = 'lock-dead-1'"
+        ).fetchone()
+    assert left["n"] == 0  # 死锁已删除
+
+
+def test_live_process_lock_still_conflicts(tmp_path):
+    """活进程持有的 workspace 锁必须仍冲突（reap 只回收死进程锁）。"""
+    repo = _repo(tmp_path)
+    _agent_run_id, attempt_id = _direct_register_chain(repo, "run-live", task_id="task-live")
+    agent = _agent(repo=repo, tools=None, store=_store(tmp_path), root=tmp_path)
+    store_obj = select_operation_store(agent)
+    scope = f"workspace:{(tmp_path / 'live').resolve()}"
+    with repo._runtime_connection() as conn:
+        conn.execute(
+            "INSERT INTO resource_locks(lock_id, canonical_scope, holder_instance,"
+            " pid, start_token, attempt_id, attempt_generation, workspace_epoch,"
+            " tool_operation_generation, lease_expires_at, created_at, updated_at)"
+            " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "lock-live-1", scope, "holder-live", 1, "token-live",
+                attempt_id, 1, 1, 1, 9999999999.0, 1.0, 1.0,  # pid=1 恒存活
+            ),
+        )
+        conn.commit()
+    from agent_py_agent.agent.runtime_db.operations import RuntimeConflictError
+    import pytest as _pytest
+    with _pytest.raises(RuntimeConflictError):
+        store_obj.claim_tool_operation(
+            ToolOperationClaimRequest(
+                owner_id="owner-a", run_id="run-live", task_id="task-live",
+                operation_id="tool_call:attempt-live:call-1", tool="live_write",
+                args_hash="sha256:live", idempotency_key="key-live-1",
+                idempotency_scope="business", idempotency_namespace="live_write",
+                holder=new_tool_operation_holder(), lease_expires_at=9999999999.0,
+                resource_scopes=(scope,), attempt_id=attempt_id,
+            )
+        )

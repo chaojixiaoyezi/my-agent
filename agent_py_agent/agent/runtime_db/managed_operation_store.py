@@ -169,6 +169,10 @@ class ManagedOperationStore:
             )
         with self._repo._runtime_connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            # 3×3 真机 2026-08-15 根因：被杀进程的 workspace 锁残留
+            # （pid 已不存在）永久阻塞重叠路径的后续操作——claim 前先
+            # reap 死进程锁（同事务，幂等；活进程锁不受影响）。
+            _reap_dead_workspace_locks_in_tx(conn)
             # attempt 锚定（seq 248 #1/#4）：调用者 attempt 经 agent_attempts
             # 定位 agent_run（root/child 同 run_id 不再歧义），同一事务读
             # current pointer + 权威 task_id；空 task 声明跳过比对（attempt
@@ -755,6 +759,46 @@ def _insert_lock_in_tx(
             now,
         ),
     )
+
+
+def _process_alive(pid: int) -> bool:
+    """进程是否存活（/proc 存在性；pid<=0 或非 Linux 保守视为存活）。
+
+    非 Linux（Mac/Windows 开发环境）无 /proc——无法判定进程死活，保守
+    视为存活（不 reap，避免开发环境误删活锁）；reap 只在 Linux 生产
+    （/proc 存在）生效。
+    """
+    if int(pid or 0) <= 0:
+        return True
+    if not os.path.exists("/proc"):
+        return True
+    try:
+        return os.path.exists(f"/proc/{int(pid)}")
+    except (OSError, ValueError):
+        return True
+
+
+def _reap_dead_workspace_locks_in_tx(conn: Any) -> None:
+    """同事务删除持有者进程已不存在的 workspace 锁（幂等）。
+
+    3×3 真机 2026-08-15 根因（cell3 STORE_UNAVAILABLE 第 5-6 次复发）：
+    进程被 kill（冻结/重启）时其 workspace 锁残留 resource_locks——
+    `_check_workspace_overlap_in_tx` 把所有锁（含死进程的）当活锁判物理
+    重叠 → 后续所有重叠路径操作 RuntimeConflictError → coordinator 误
+    分类 TOOL_OPERATION_STORE_UNAVAILABLE，任务永久卡死。claim 前
+    reap：pid 已不存在的锁视为可回收删除；活进程锁（含 pid 复用误判时
+    的保守）不受影响。只处理 workspace: 物理锁；logical 锁文本互斥自管。
+    """
+    rows = conn.execute(
+        "SELECT lock_id, pid FROM resource_locks "
+        "WHERE canonical_scope LIKE 'workspace:%'"
+    ).fetchall()
+    for row in rows:
+        if not _process_alive(int(row["pid"] or 0)):
+            conn.execute(
+                "DELETE FROM resource_locks WHERE lock_id = ?",
+                (str(row["lock_id"]),),
+            )
 
 
 def _check_workspace_overlap_in_tx(conn: Any, scope: str) -> None:
