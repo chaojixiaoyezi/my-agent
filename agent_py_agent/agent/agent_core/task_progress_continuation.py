@@ -87,6 +87,14 @@ def task_progress_continuation_decision(
     # 测试铁证:wait 收尾薄视图轮 verdict=finish 后仍出现第 4/6/8 轮)。
     if str(getattr(result, "runtime_source", "") or "") == "model_user_reply":
         return TaskProgressContinuationDecision(False, "reply_round_closed")
+    # 2026-08-16 第三阶段真机(cell6 90 分钟主因): 部署者验收通过
+    # (delivery_verify+ok)=契约完成=任务终态——本请求内账本续跑只看
+    # open_count, 不看 verify → 模型收口 ok(verify passed)但账本未关 →
+    # 请求内无限续跑(b8f247e6 只修了 request 外 resume_loop 层)。
+    # 与 should_continue_task 的 DELIVERY_VERIFY_PASSED 门对称: 验收通过
+    # 一票否决账本续跑。
+    if str(getattr(result, "runtime_source", "") or "") == "delivery_verify":
+        return TaskProgressContinuationDecision(False, "delivery_verify_passed")
     # 后台主代理唤醒轮(非阻塞甩手掌柜叫回,source=background_main_agent)是
     # 「读状态、给回执」语义:任务推进由协作 case/wait 定时器/新的 wake 信号
     # 驱动,唤醒轮不得替 root task 续跑。若在此续跑,唤醒执行会与续跑互相
