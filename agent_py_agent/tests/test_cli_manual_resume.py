@@ -275,3 +275,56 @@ def test_next_seq_counts_continuation_history(tmp_path):
     agent.conversation_store = _SeqStore()
     facts = _load_task_facts(agent, task_root)
     assert _next_manual_resume_seq(agent, facts) == 3
+
+
+from types import SimpleNamespace as _NS
+
+
+def _timeout_record():
+    from agent_py_agent.agent.agent_core._tool_loop_service import (
+        ToolCallRecordParams,
+        _mark_unknown_outcome_halt,
+    )
+
+    params = _NS(
+        repeated_failure_halt=None,
+        unknown_outcome_halt=None,
+        tool_context=[],
+    )
+    record = _NS(
+        call=_NS(tool_name="run_command"),
+        result=_NS(
+            ok=False,
+            effect_outcome="unknown",
+            error_code="TOOL_TIMEOUT",
+            reported_error_code="TOOL_TIMEOUT",
+            handler_executed=True,
+        ),
+        params=params,
+    )
+    _mark_unknown_outcome_halt(_NS(), record)
+    return params
+
+
+def test_timeout_does_not_set_unknown_halt():
+    """EXEC-36: 命令超时不再触发 UNKNOWN 人工闸(模型可继续核验)。"""
+    params = _timeout_record()
+    assert params.unknown_outcome_halt is None
+    assert any("超时" in line for line in params.tool_context)
+
+
+def test_other_unknown_still_sets_halt():
+    """非超时的真未知仍保持人工闸(EXEC-27 安全语义不变)。"""
+    from agent_py_agent.agent.agent_core._tool_loop_service import (
+        _mark_unknown_outcome_halt,
+    )
+
+    params = _NS(repeated_failure_halt=None, unknown_outcome_halt=None, tool_context=[])
+    record = _NS(
+        call=_NS(tool_name="run_command"),
+        result=_NS(ok=False, effect_outcome="unknown", error_code="EXECUTOR_DIED",
+                   reported_error_code="EXECUTOR_DIED", handler_executed=True),
+        params=params,
+    )
+    _mark_unknown_outcome_halt(_NS(), record)
+    assert params.unknown_outcome_halt is not None

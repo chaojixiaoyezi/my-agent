@@ -1170,6 +1170,24 @@ def _mark_unknown_outcome_halt(agent, record: ToolCallRecordParams) -> None:
     effect = str(getattr(record.result, "effect_outcome", "") or "").strip().lower()
     if effect != "unknown":
         return
+    # EXEC-36: 命令超时(TOOL_TIMEOUT)不是"写副作用未知"——
+    # 进程组已被系统终止(_kill_process_group), 对照在超时时返回 partial
+    # output 让模型继续修。真机 2026-08-16: ma-b r4 模型写的死循环测试
+    # 300s 超时 → UNKNOWN 人工闸收口 RC=2, 任务死等人工;对照同场景模型
+    # 自己看超时输出排查修好。超时不设人工闸, 注入"可继续但勿原样重试"。
+    reported = str(
+        getattr(record.result, "reported_error_code", "")
+        or getattr(record.result, "error_code", "")
+        or ""
+    ).strip().upper()
+    if reported == "TOOL_TIMEOUT":
+        record.params.tool_context.append(
+            "[tool-system]\n"
+            "命令执行超时已被系统终止（进程组已清理）。"
+            "你可以继续调用工具核验结果、排查原因并修复；"
+            "不要原样重试同一条会超时的命令。"
+        )
+        return
     # 2026-08-15 3×3 cell1 真机: 记录触发 UNKNOWN 的原始报码(如 COMMAND_FAILED)
     # ——收口时按错误合同区分「结果已知的失败」(taxonomy retryable=True,
     # 如命令失败读输出修正)与「真未知」(超时/执行者死/无码)——前者收口可
