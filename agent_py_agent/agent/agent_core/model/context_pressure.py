@@ -183,7 +183,11 @@ def should_compact_before_more_tool_output(
     threshold = int(policy.trigger_tokens or 0)
     if threshold <= 0:
         return False
-    return estimate_tokens(str(current_prompt or "")) >= threshold
+    # EXEC-16: native 协议下工具结果在 IR messages 里、不在 prompt 文本里——
+    # estimate_tokens(prompt) 恒为静态前缀(≈9K), 永远到不了阈值 → compact 永不触发
+    # (ma 双线 36 轮仍 archive_events=0 实锤)。改用与 preflight 同口径的
+    # model_visible_context_tokens: native 下含 IR messages/tools/guidance。
+    return model_visible_context_tokens(agent, params, str(current_prompt or "")) >= threshold
 
 
 # LLM: 请求参数优先，Agent 配置兜底；这个顺序要与模型 preflight 保持一致。
@@ -198,6 +202,14 @@ def _params_save_enabled(agent: object, params: object) -> bool:
 # LLM: 仅在已经有真实工具结果时才延后更多内容工具，避免空工具轮无意义触发。
 # 函数用途: 检查当前模型上下文里是否已经积累过工具输出。
 def _has_previous_tool_context(params: object) -> bool:
+    # EXEC-16: native 协议下工具结果在 IR 历史里、tool_context 文本链只放
+    # "[assistant-tool-round-N]" 轮标记(不含 tool-record 前缀), 文本判定恒 False →
+    # compact 被误挡。native 下以 IR 历史是否有工具结果为准。
+    if native_tool_use_active(params):
+        from ...tooling.runtime_contracts import ToolResult
+
+        history = list(getattr(params, "tool_ir_history", None) or [])
+        return any(isinstance(item, ToolResult) for item in history)
     return any(_is_tool_result_context(item) for item in getattr(params, "tool_context", []) or [])
 
 
