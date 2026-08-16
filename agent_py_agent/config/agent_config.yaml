@@ -699,11 +699,11 @@ tool_context_microcompact_min_chars: 1500
 tool_context_ptl_retry_max: 3
 
 # read_file 工具最多返回多少字符，避免单次结果太长
-tool_read_max_chars: 50000
+tool_read_max_chars: 8000
 
 # write_file 单次 inline content 推荐值
 # 默认 12000；超过推荐值的合法工具调用仍会落盘，但工具会提示后续改用 WRITE_FILE_RAW/data_base64，避免模型反复长写。
-tool_write_inline_max_chars: 12000
+tool_write_inline_max_chars: 200000
 
 # list_files 工具最多列出多少条结果
 tool_list_max_entries: 200
@@ -817,12 +817,14 @@ tool_embedding_api_key_env: ""
 # 工具调用协议在一次 run 开始前固定。native 会先探测当前
 # provider + endpoint + model + stream 是否支持原生 tool_use；text 只用于明确配置的
 # 非原生端点或协议调试。一个 run 内不会切换协议，native 失败也不会由 text 中途接管。
-tool_protocol: "text"
+tool_protocol: "native"
 # 显式声明必须走 text 协议（跳过 native probe）的模型名单，如 flash 类非 reasoning
 # 模型配 native 会静默失效（0 工具调用+幻觉，真机实证 2026-08-07 deepseek-v4-flash）。
 # 例：tool_protocol_text_models: ["text-01", "minimax"]
 # 空列表 = 全部模型照常 native probe；名单内模型由部署方显式配对 text。
-tool_protocol_text_models: ["deepseek-v4-flash"]
+# 2026-08-16 3×3 实测：deepseek-v4-flash 的 native 协议工作正常（每轮 3s vs text 3-5min，28×）——
+# 移出名单走 native probe；text-01 等仍由部署方按实证配对。
+tool_protocol_text_models: []
 
 # MCP 客户端（短板6）：连接外部 MCP server（Model Context Protocol，JSON-RPC over stdio），
 # 把社区现成工具（GitHub/数据库/Slack 等）动态注册成 mcp__<server>__<tool> 前缀的工具，
