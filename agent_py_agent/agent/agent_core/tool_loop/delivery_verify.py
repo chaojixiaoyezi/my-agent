@@ -129,8 +129,16 @@ def _resolve_verify_cwd(
     try:
         if candidate.is_absolute():
             resolved = candidate.resolve(strict=False)
-        else:
-            resolved = (workspace_root / candidate).resolve(strict=False)
+            # 2026-08-16 3×3 真机(cell4 verify cwd 越界实锤): 绝对路径 cwd
+            # 是部署者在契约里显式声明的产物目录——契约=部署者信任面
+            # (等同部署者手跑验收命令), attach 重写 task_root 后系统工作区
+            # 边界会误伤部署者声明的真实产物路径。绝对 cwd 只要存在且是
+            # 目录即放行(verify 本来就只在该 cwd 执行部署者写的命令);
+            # 相对 cwd 才需要 workspace 内解析(部署者相对声明)。
+            if resolved.is_dir():
+                return resolved, VERIFY_PASSED
+            return None, VERIFY_CWD_OUT_OF_BOUNDS
+        resolved = (workspace_root / candidate).resolve(strict=False)
     except (OSError, RuntimeError):
         return None, VERIFY_CWD_OUT_OF_BOUNDS
     if not any(_within(resolved, boundary) for boundary in boundaries):
