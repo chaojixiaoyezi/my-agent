@@ -262,7 +262,7 @@ def test_next_seq_counts_continuation_history(tmp_path):
     agent = _FakeAgent(tmp_path, workspace_root=task_root)
 
     class _SeqStore(_FakeStore):
-        def load_thread_for_channel(self, *, channel, channel_conversation_id, channel_user_id):
+        def resolve_thread(self, *, channel, channel_conversation_id, channel_user_id):
             return SimpleNamespace(thread_id="thread-x")
 
         def recent_messages(self, thread_id, *, limit=20):

@@ -587,8 +587,8 @@ def _next_manual_resume_seq(agent: object, facts: dict) -> int | None:
         return None
     thread_id = str(facts.get("thread_id") or "").strip()
     if not thread_id:
-        loader = getattr(store, "load_thread_for_channel", None)
-        if not callable(loader):
+        resolver = getattr(store, "resolve_thread", None)
+        if not callable(resolver):
             return None
         try:
             from ..agent.agent_core.cli_run_conversation import (
@@ -596,7 +596,7 @@ def _next_manual_resume_seq(agent: object, facts: dict) -> int | None:
                 _CLI_RUN_USER_ID,
             )
 
-            thread = loader(
+            thread = resolver(
                 channel=_CLI_RUN_CHANNEL,
                 channel_conversation_id=str(facts.get("request_id") or ""),
                 channel_user_id=_CLI_RUN_USER_ID,
