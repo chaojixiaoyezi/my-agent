@@ -609,7 +609,9 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
         if verified is not None:
             return verified
         final_response = request.response
-        if _no_delivery_artifact_produced(request.params):
+        if _no_delivery_artifact_produced(request.params) or _delivery_output_dir_empty(
+            request.params
+        ):
             # EXEC-06 长任务复刻真机(2026-08-16): 模型调过工具(读源码)但从未
             # 写过任何交付产物就无工具收口 → 假完成。只在此前调用过工具的
             # "工具型任务"轮触发, 纯聊天(executed_tools 空)不受影响。
@@ -850,11 +852,37 @@ def _no_delivery_artifact_produced(params: object) -> bool:
     return str(getattr(params, "source", "") or "") == "cli_run"
 
 
+# LLM: 交付目录(output_dir)是 cli_run 的交付合同事实源——模型把代码写在
+# work 过程目录不算交付(EXEC-34, ma-b r3 真机: 2238 行 work 产物但 output
+# 空, 模型输出一句 thinking 文本就 RC=0 假完成; 对照 会话运行时/轻量运行时 无 work/output
+# 之分, 产物即交付)。判定只用文件系统事实, 不解析收口文本。
+# 函数用途: 判断 cli_run 的交付目录是否为空(空=未交付)。
+def _delivery_output_dir_empty(params: object) -> bool:
+    if str(getattr(params, "source", "") or "") != "cli_run":
+        return False
+    attrs = getattr(params, "task_attributes", None)
+    workspace = (attrs or {}).get("run_workspace") if isinstance(attrs, dict) else None
+    if not isinstance(workspace, dict):
+        return False  # 无 workspace 事实源时不拦(保持旧行为, 不误杀其他场景)
+    output_dir = str(workspace.get("output_dir") or "").strip()
+    if not output_dir:
+        return False
+    from pathlib import Path
+
+    path = Path(output_dir)
+    if not path.exists():
+        return True
+    try:
+        return not any(path.iterdir())
+    except OSError:
+        return False
+
+
 # EXEC-06b: 无交付产物收口时给模型的继续提示与次数上限。
 _NO_ARTIFACT_CONTINUE_LIMIT = 3
 NO_ARTIFACT_NUDGE = (
     "[tool-system]\n"
-    "本轮没有产出任何可交付文件（没有写文件/编辑/打补丁）。"
-    "如果任务还没完成，请继续调用工具完成实际产出——不要在产出前只输出计划或总结；"
-    "如果确实已完成且无需产物，请说明完成。"
+    "本轮没有产出任何可交付文件（没有写文件/编辑/打补丁），或交付目录 output/ 仍为空。"
+    "如果任务还没完成，请继续调用工具完成实际产出，并把成品放进 output/ 交付目录——"
+    "不要只输出计划或总结；如果确实已完成且无需产物，请说明完成。"
 )

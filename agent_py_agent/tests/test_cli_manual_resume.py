@@ -113,3 +113,44 @@ def test_manual_resume_runs_continuation_with_workspace(tmp_path):
     assert len(agent.run_calls) == 1
     call = agent.run_calls[0]
     assert call["params"].task_attributes["run_workspace"]["task_root"] == task_root
+
+
+from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
+    _delivery_output_dir_empty,
+)
+
+
+def test_delivery_output_empty_detection(tmp_path):
+    """EXEC-34: output 交付目录空 = 未交付（结构事实，不猜收口文本）。"""
+    out = tmp_path / "output"
+    params = RunParams(
+        request_id="r", run_id="r", task_id="t", source="cli_run",
+        task_attributes={"run_workspace": {"output_dir": str(out)}},
+    )
+    # 目录不存在 → 未交付
+    assert _delivery_output_dir_empty(params) is True
+    out.mkdir()
+    # 空目录 → 未交付
+    assert _delivery_output_dir_empty(params) is True
+    (out / "pygorm").mkdir()
+    (out / "pygorm" / "db.py").write_text("x")
+    # 有产物 → 已交付
+    assert _delivery_output_dir_empty(params) is False
+
+
+def test_delivery_output_empty_skips_non_cli_run():
+    """非 cli_run（聊天/gateway）不受 output 空判定影响。"""
+    params = RunParams(
+        request_id="r", run_id="r", task_id="t", source="gateway",
+        task_attributes={"run_workspace": {"output_dir": "/nonexistent/x"}},
+    )
+    assert _delivery_output_dir_empty(params) is False
+
+
+def test_delivery_output_empty_no_workspace_facts():
+    """无 run_workspace 事实源时保守不拦（保持旧行为）。"""
+    params = RunParams(
+        request_id="r", run_id="r", task_id="t", source="cli_run",
+        task_attributes={},
+    )
+    assert _delivery_output_dir_empty(params) is False
