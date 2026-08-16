@@ -438,3 +438,31 @@ def test_unknown_releases_after_fourth(tmp_path):
     # 前 3 次设 halt, 第 4 次放过(仍 halt 但那是第 3 次的值)
     assert params._unknown_outcome_count == 4
     assert any("不再拦截" in line for line in params.tool_context)
+
+
+def test_auto_resume_requires_active_goal(tmp_path):
+    """EXEC-39: 无 active goal 时不自动续跑(_auto_resume_authorized=False)。"""
+    from agent_py_agent.cli.resume_loop import _auto_resume_authorized
+
+    class _NoGoalStore(_FakeStore):
+        def load_goal(self, thread_id, *, goal_id="", task_id="", name=""):
+            return None
+
+    agent = _FakeAgent(tmp_path)
+    agent.conversation_store = _NoGoalStore()
+    runner = _NS(ctx=_NS(root_thread_id="t", root_task_id="task-1"))
+    assert _auto_resume_authorized(agent, runner) is False
+
+
+def test_auto_resume_with_active_goal(tmp_path):
+    """有 active goal 时授权自动续跑(dsh goal-driver 同款)。"""
+    from agent_py_agent.cli.resume_loop import _auto_resume_authorized
+
+    class _GoalStore(_FakeStore):
+        def load_goal(self, thread_id, *, goal_id="", task_id="", name=""):
+            return SimpleNamespace(status="active")
+
+    agent = _FakeAgent(tmp_path)
+    agent.conversation_store = _GoalStore()
+    runner = _NS(ctx=_NS(root_thread_id="t", root_task_id="task-1"))
+    assert _auto_resume_authorized(agent, runner) is True

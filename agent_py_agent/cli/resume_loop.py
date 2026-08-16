@@ -236,6 +236,29 @@ def _write_handoff(
 _SAME_REASON_RESUME_LIMIT = 3
 
 
+def _auto_resume_authorized(agent: object, runner: object) -> bool:
+    """EXEC-39(owner 拍板): 正常不自动续跑——只有任务有 active goal 时才
+    授权 CLI 自动续跑(dsh goal-round-driver 同款: 用户/模型显式设了持续
+    目标+预算, idle 驱动才启动)。无 goal 时收口即停, 用户 run --resume
+    手动继续。"""
+    store = getattr(agent, "conversation_store", None)
+    if store is None or runner.ctx is None:
+        return False
+    load_goal = getattr(store, "load_goal", None)
+    if not callable(load_goal):
+        return False
+    try:
+        goal = load_goal(
+            runner.ctx.root_thread_id,
+            task_id=str(runner.ctx.root_task_id or ""),
+        )
+    except Exception:  # noqa: BLE001 goal 读不到=fail-closed 不自动续跑
+        return False
+    return goal is not None and str(
+        getattr(goal, "status", "") or ""
+    ).strip().lower() == "active"
+
+
 def run_with_resume(
     agent: object,
     *,
@@ -280,7 +303,7 @@ def run_with_resume(
     rounds = 1
     same_reason_streak = 0
     should, reason = should_resume(result)
-    if not should:
+    if not should or not _auto_resume_authorized(agent, runner):
         return CliResumeOutcome(
             status="unresumable", rounds=rounds, final_result=result, reason=reason
         )
