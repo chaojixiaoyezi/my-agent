@@ -473,6 +473,34 @@ def test_run_with_resume_budget_exhausted(tmp_path):
     assert len(fake.calls) == 3  # 首轮 + 2 续跑轮后停
 
 
+def test_run_with_resume_first_round_usage_limit_raises(tmp_path):
+    """首轮 429 usage/quota limit → re-raise（不无限退避空转）。
+
+    2026-08-17 真机实锤(cell8 卡死根因): 429 被当 ProviderRecoverableError
+    无限退避——配额恢复前(分钟~小时级)空转烧资源。修复: usage/quota limit
+    re-raise 到 cmd_run 诚实报告(进程正常返回, 非任务中途消失)。
+    """
+    from agent_py_agent.agent.agent_core.runtime.run_params import (
+        run_params_with_request_id,
+    )
+    from agent_py_agent.agent.backends import ProviderUsageLimitError
+    from agent_py_agent.cli.resume_loop import run_with_resume
+
+    class _UsageLimited(_FakeRunAgent):
+        def run(self, prompt, *, params=None, **kw):
+            self.calls.append(("limited", str(prompt)[:20]))
+            raise ProviderUsageLimitError("HTTP 429: 5-hour usage limit reached")
+
+    fake = _UsageLimited(tmp_path)
+    base = run_params_with_request_id(
+        RunParams(source="cli_run", task_id="task-1", task_attributes={})
+    )
+    with pytest.raises(ProviderUsageLimitError):
+        run_with_resume(fake, initial_prompt="t", base_params=base, max_rounds=5)
+    # 只调了一次就 re-raise（不无限退避）
+    assert len(fake.calls) == 1
+
+
 def test_run_with_resume_unresumable_continues_in_process(tmp_path):
     """首轮 blocked（不可续跑族）→ 进程内继续下一轮（不退出），第二轮 ok 完成。
 

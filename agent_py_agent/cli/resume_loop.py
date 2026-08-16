@@ -19,7 +19,7 @@ from dataclasses import dataclass, replace
 
 from ..agent.agent_core.cli_run_conversation import bind_cli_run_conversation
 from ..agent.agent_core.runtime.loop_models import RunParams
-from ..agent.backends import ProviderRecoverableError
+from ..agent.backends import ProviderRecoverableError, is_provider_usage_limit_error
 from .resume_contract import (
     CliContinuationContext,
     record_budget_exhausted,
@@ -299,6 +299,14 @@ def run_with_resume(
             result, _bound = runner(initial_prompt, 0, "")
             break
         except ProviderRecoverableError as exc:
+            if is_provider_usage_limit_error(exc):
+                # 2026-08-17 真机实锤(cell8 卡死根因): 429 usage/quota limit
+                # 不是瞬时错误——无限退避=配额恢复前(分钟~小时级)空转烧资源
+                # (faulthandler: 首轮 25s+ 停在 _continuation_backoff_sleep)。
+                # re-raise 到 cmd_run 诚实报告(进程正常返回, 非任务中途消失,
+                # 不违反「进程不退出」铁律——配额耗尽与 budget_exhausted 同属
+                # 明确停止原因)。
+                raise
             consecutive_uncontinuable += 1
             record_uncontinuable_continuation(
                 agent,
@@ -411,6 +419,10 @@ def run_with_resume(
                 )
                 break
             except ProviderRecoverableError as exc:
+                if is_provider_usage_limit_error(exc):
+                    # 429 配额/用量限制(同首轮): 非瞬时错误, 不退避空转,
+                    # re-raise 到 cmd_run 诚实报告。
+                    raise
                 consecutive_uncontinuable += 1
                 record_uncontinuable_continuation(
                     agent,
