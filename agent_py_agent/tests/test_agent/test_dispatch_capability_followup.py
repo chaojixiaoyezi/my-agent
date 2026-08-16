@@ -72,7 +72,7 @@ def test_dispatch_routes_new_capability_request_then_reruns_worker(monkeypatch):
         root = Path(td)
         backend = CapabilityThenAcceptedBackend()
         monkeypatch.setattr("agent_py_agent.agent.core.get_backend", lambda _name, _config: backend)
-        cfg = AgentConfig(tool_protocol="text", model_backend="echo", subagent_workspace="subs")
+        cfg = AgentConfig( model_backend="echo", subagent_workspace="subs")
         agent = SimpleAgent(cfg, root)
         task = agent.subagents.create_run(
             goal="需要受控 shell 能力，授权后再继续执行并报告 refs。",
@@ -111,7 +111,7 @@ def test_capability_grant_reopens_exact_blocked_conversation_child(monkeypatch):
         root = Path(td)
         backend = CapabilityThenAcceptedBackend()
         monkeypatch.setattr("agent_py_agent.agent.core.get_backend", lambda _name, _config: backend)
-        cfg = AgentConfig(tool_protocol="text", model_backend="echo", subagent_workspace="subs")
+        cfg = AgentConfig( model_backend="echo", subagent_workspace="subs")
         agent = SimpleAgent(cfg, root)
         task = agent.subagents.create_run(
             goal="需要受控 shell 能力，授权后继续同一个子任务。",
@@ -172,7 +172,7 @@ def test_capability_grant_does_not_resurrect_stopped_conversation_child():
 
     with tempfile.TemporaryDirectory() as td:
         agent = SimpleAgent(
-            AgentConfig(tool_protocol="text", model_backend="echo", subagent_workspace="subs"),
+            AgentConfig( model_backend="echo", subagent_workspace="subs"),
             Path(td),
         )
         task = agent.subagents.create_run(goal="等待能力后继续", allowed_tools=["read_file"])
@@ -216,7 +216,7 @@ def test_dispatch_reruns_incomplete_output_after_write_grant(monkeypatch):
         root = Path(td)
         backend = IncompleteOutputThenAcceptedBackend()
         monkeypatch.setattr("agent_py_agent.agent.core.get_backend", lambda _name, _config: backend)
-        cfg = AgentConfig(tool_protocol="text", model_backend="echo", subagent_workspace="subs")
+        cfg = AgentConfig( model_backend="echo", subagent_workspace="subs")
         agent = SimpleAgent(cfg, root)
         task = agent.subagents.create_run(
             goal="写一个完整的单文件 HTML。",

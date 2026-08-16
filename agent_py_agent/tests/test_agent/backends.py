@@ -10,12 +10,34 @@ parent-planner dispatch).
 from agent_py_agent.agent.backends import BaseBackend, ModelResponse
 
 
-class StructuredSubagentBackend(BaseBackend):
+class _TestNativeBackend(BaseBackend):
+    """测试用后端基类：声明 native 工具能力（EXEC-31b 起 native 是唯一协议）。
+
+    BaseBackend 默认 probe 返回 native_supported=False，任何走 select_tool_
+    protocol 的测试后端都会被拒——测试后端都是"假装支持原生工具"的假后端。
+    """
+
+    def probe_tool_capability(self):
+        from agent_py_agent.agent.backends.base import ProviderToolCapability
+        from agent_py_agent.agent.backends.base import _utc_now_iso
+
+        return ProviderToolCapability(
+            provider=str(self.name or "test"),
+            endpoint=f"local://{self.name or 'test'}",
+            model=str(getattr(self, "model_name", "") or ""),
+            stream=bool(getattr(self, "stream_enabled", False)),
+            native_supported=True,
+            evidence="test_backend_declares_native_tools",
+            observed_at=_utc_now_iso(),
+        )
+
+
+class StructuredSubagentBackend(_TestNativeBackend):
     """测试用后端：直接返回 runner 结构化结果。"""
 
     name = "structured_subagent_backend"
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         assert "[SUBAGENT_RESULT]" in prompt
         return ModelResponse(
             text=(
@@ -52,12 +74,12 @@ class StructuredSubagentBackend(BaseBackend):
         )
 
 
-class AcceptedSubagentBackend(BaseBackend):
+class AcceptedSubagentBackend(_TestNativeBackend):
     """测试用后端：返回可直接验收的结构化结果。"""
 
     name = "accepted_subagent_backend"
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         assert "[SUBAGENT_RESULT]" in prompt
         return ModelResponse(
             text=(
@@ -90,7 +112,7 @@ class AcceptedSubagentBackend(BaseBackend):
         )
 
 
-class CapabilityThenAcceptedBackend(BaseBackend):
+class CapabilityThenAcceptedBackend(_TestNativeBackend):
     """测试用后端：先申请 controlled_exec，授权后完成。"""
 
     name = "capability_then_accepted_backend"
@@ -98,7 +120,7 @@ class CapabilityThenAcceptedBackend(BaseBackend):
     def __init__(self):
         self.calls = 0
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         assert "[SUBAGENT_RESULT]" in prompt
         self.calls += 1
         if self.calls == 1:
@@ -107,7 +129,7 @@ class CapabilityThenAcceptedBackend(BaseBackend):
         return ModelResponse(text=_controlled_exec_done_result(), backend=self.name)
 
 
-class IncompleteOutputThenAcceptedBackend(BaseBackend):
+class IncompleteOutputThenAcceptedBackend(_TestNativeBackend):
     """测试用后端：先返回半截产物阻塞，授权继续写后完成。"""
 
     name = "incomplete_output_then_accepted_backend"
@@ -116,7 +138,7 @@ class IncompleteOutputThenAcceptedBackend(BaseBackend):
         self.calls = 0
         self.prompts: list[str] = []
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         assert "[SUBAGENT_RESULT]" in prompt
         self.prompts.append(prompt)
         self.calls += 1
@@ -222,7 +244,7 @@ def _controlled_exec_done_result() -> str:
     )
 
 
-class BoundaryWriteSubagentBackend(BaseBackend):
+class BoundaryWriteSubagentBackend(_TestNativeBackend):
     """测试用后端：先尝试越界写文件，再根据工具拦截结果收口。"""
 
     name = "boundary_write_subagent_backend"
@@ -231,17 +253,20 @@ class BoundaryWriteSubagentBackend(BaseBackend):
         self.prompts: list[str] = []
         self.target_path = target_path
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         self.prompts.append(prompt)
         if len(self.prompts) == 1:
             assert "allowed_write_roots" in prompt
             return ModelResponse(
-                text=(
-                    "[TOOL_CALL]\n"
-                    f'{{"tool": "write_file", "path": "{self.target_path}", "content": "bad"}}\n'
-                    "[/TOOL_CALL]"
-                ),
+                text="",
                 backend=self.name,
+                tool_use_blocks=[
+                    {
+                        "id": "call-boundary-write-1",
+                        "name": "write_file",
+                        "input": {"path": self.target_path, "content": "bad"},
+                    }
+                ],
             )
 
         assert "PATH_DANGEROUS_ROOT_BLOCKED" in prompt or "runtime gate denied" in prompt
@@ -274,7 +299,7 @@ class BoundaryWriteSubagentBackend(BaseBackend):
         )
 
 
-class HierarchicalScheduleSubagentBackend(BaseBackend):
+class HierarchicalScheduleSubagentBackend(_TestNativeBackend):
     """测试用后端：主节点 runner 通过层级调度工具创建下一层子节点。"""
 
     name = "hierarchical_schedule_subagent_backend"
@@ -282,23 +307,23 @@ class HierarchicalScheduleSubagentBackend(BaseBackend):
     def __init__(self):
         self.prompts: list[str] = []
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         self.prompts.append(prompt)
         if len(self.prompts) == 1:
-            assert "schedule_child_subagents [orchestration" in prompt
+            assert "schedule_child_subagents" in prompt
             return _hierarchical_schedule_tool_call_response(self.name)
 
         assert "child-catalog" in prompt
         return _hierarchical_schedule_result_response(self.name)
 
 
-class CoordinatorAnalysisOnlyBackend(BaseBackend):
+class CoordinatorAnalysisOnlyBackend(_TestNativeBackend):
     """测试用后端：coordinator 只分析下一步派工，但没有真正调用 schedule_child_subagents。"""
 
     name = "coordinator_analysis_only_backend"
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
-        assert "schedule_child_subagents [orchestration" in prompt
+    def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
+        assert "schedule_child_subagents" in prompt
         return ModelResponse(
             text=(
                 "[SUBAGENT_RESULT]\n"
@@ -325,24 +350,26 @@ class CoordinatorAnalysisOnlyBackend(BaseBackend):
 
 def _hierarchical_schedule_tool_call_response(backend: str) -> ModelResponse:
     return ModelResponse(
-        text=(
-            "[TOOL_CALL]\n"
-            "{"
-            '"tool":"schedule_child_subagents",'
-            '"dry_run":false,'
-            '"max_depth":3,'
-            '"max_children":4,'
-            '"children":[{'
-            '"role":"coordinator",'
-            '"agent_name":"child-catalog",'
-            '"goal":"作为主节点的下一层，继续拆分目录和条目列表实现任务",'
-            '"allowed_tools":["schedule_child_subagents","dispatch_subagents","inspect_agent_tree","read_file","write_file"],'
-            '"acceptance_checks":["必须只通过父节点汇报 refs 和状态"]'
-            "}]"
-            "}\n"
-            "[/TOOL_CALL]"
-        ),
+        text="",
         backend=backend,
+        tool_use_blocks=[
+            {
+                "id": "call-hier-schedule-1",
+                "name": "schedule_child_subagents",
+                "input": {
+                    "dry_run": False,
+                    "max_depth": 3,
+                    "max_children": 4,
+                    "children": [
+                        {
+                            "role": "coordinator",
+                            "agent_name": "child-catalog",
+                            "goal": "作为主节点的下一层，继续拆分目录和条目列表实现任务",
+                        }
+                    ],
+                },
+            }
+        ],
     )
 
 
@@ -375,7 +402,7 @@ def _hierarchical_schedule_result_response(backend: str) -> ModelResponse:
     )
 
 
-class FlakyThenAcceptedSubagentBackend(BaseBackend):
+class FlakyThenAcceptedSubagentBackend(_TestNativeBackend):
     """测试用后端：第一次模型调用失败，第二次返回可验收结果。"""
 
     name = "flaky_then_accepted_subagent_backend"
@@ -383,7 +410,7 @@ class FlakyThenAcceptedSubagentBackend(BaseBackend):
     def __init__(self):
         self.calls = 0
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
             raise RuntimeError("temporary runner backend outage")
@@ -420,7 +447,7 @@ class FlakyThenAcceptedSubagentBackend(BaseBackend):
         )
 
 
-class RepairingSubagentBackend(BaseBackend):
+class RepairingSubagentBackend(_TestNativeBackend):
     """测试用后端：第一次漏掉结构化块，修复回合补齐。"""
 
     name = "repairing_subagent_backend"
@@ -428,7 +455,7 @@ class RepairingSubagentBackend(BaseBackend):
     def __init__(self):
         self.prompts: list[str] = []
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         self.prompts.append(prompt)
         if len(self.prompts) == 1:
             assert "[SUBAGENT_RESULT]" in prompt
@@ -467,7 +494,7 @@ class RepairingSubagentBackend(BaseBackend):
         )
 
 
-class CoordinatorToolLimitBlockedBackend(BaseBackend):
+class CoordinatorToolLimitBlockedBackend(_TestNativeBackend):
     """测试用后端：coordinator 子层已完成，但收尾继续要工具并在修复回合误报 BLOCKED。"""
 
     name = "coordinator_tool_limit_blocked_backend"
@@ -475,17 +502,19 @@ class CoordinatorToolLimitBlockedBackend(BaseBackend):
     def __init__(self):
         self.prompts: list[str] = []
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         self.prompts.append(prompt)
         if len(self.prompts) <= 2:
             return ModelResponse(
-                text=(
-                    "直接 child 已经完成并验收，但我还想再查一次 proof.txt。\n"
-                    "[TOOL_CALL]\n"
-                    '{"tool":"read_file","path":"proof.txt"}\n'
-                    "[/TOOL_CALL]"
-                ),
+                text="直接 child 已经完成并验收，但我还想再查一次 proof.txt。",
                 backend=self.name,
+                tool_use_blocks=[
+                    {
+                        "id": "call-coord-read-1",
+                        "name": "read_file",
+                        "input": {"path": "proof.txt"},
+                    }
+                ],
             )
 
         assert "# SubAgent Runner Output Repair" in prompt or "已达到最大工具轮数限制" in prompt
@@ -515,7 +544,7 @@ class CoordinatorToolLimitBlockedBackend(BaseBackend):
         )
 
 
-class ParentPlannerBackend(BaseBackend):
+class ParentPlannerBackend(_TestNativeBackend):
     """测试用后端：返回父代理 planner 结构化结果。"""
 
     name = "parent_planner_backend"
@@ -524,7 +553,7 @@ class ParentPlannerBackend(BaseBackend):
         self.decision = decision
         self.prompts: list[str] = []
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         self.prompts.append(prompt)
         assert "[PARENT_PLANNER_RESULT]" in prompt
         return ModelResponse(
