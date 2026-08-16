@@ -166,14 +166,17 @@ def test_should_continue_task_truth_table():
     from agent_py_agent.agent.conversation.runtime import should_continue_task
 
     continuable = [
-        ("TOOL_ROUND_LIMIT_REACHED", "tool_loop", "unfinished"),
-        ("TASK_PROGRESS_OPEN", "tool_loop", "unfinished"),
         ("REPEATED_TOOL_FAILURE", "tool_loop", "unfinished"),
         ("REQUIRED_ACTION_HAS_NO_EVIDENCE", "required_action_completion_gate", "unfinished"),
         # 2026-08-15: 未闭合工具块纯格式错误(整轮零执行已保证安全)可续跑
         ("TOOL_CALL_UNCLOSED", "tool_protocol_adapter", "unfinished"),
     ]
     not_continuable = [
+        # 2026-08-16 第 4 条(用户裁决+通道运行时 对照): 普通任务正常不自动续跑——
+        # 账本未关(TASK_PROGRESS_OPEN)与轮限收口(TOOL_ROUND_LIMIT_REACHED)
+        # 不再自动 resume(通道运行时: max_turns 到达即停等用户确认)。
+        ("TOOL_ROUND_LIMIT_REACHED", "tool_loop", "unfinished"),
+        ("TASK_PROGRESS_OPEN", "tool_loop", "unfinished"),
         ("PROTOCOL_VIOLATION", "tool_protocol_adapter", "blocked"),
         ("TOOL_OPERATION_OUTCOME_UNKNOWN", "tool_loop", "unfinished"),
         ("BLOCKED", "x", "blocked"),
@@ -253,7 +256,7 @@ def test_settle_continuation_round_keeps_task_nonterminal(repo):
     )
     result = SimpleNamespace(
         runtime_status="unfinished",
-        runtime_reason="TOOL_ROUND_LIMIT_REACHED",
+        runtime_reason="REPEATED_TOOL_FAILURE",
         runtime_source="tool_loop",
         tool_rounds=9,
     )
@@ -271,8 +274,8 @@ def test_settle_continuation_round_keeps_task_nonterminal(repo):
 
 def test_settle_first_round_still_falls_back_failed(repo):
     """缺口E(双席复核 seq1835): 首轮不可续跑族(blocked)仍 one-shot 兜底 failed
-    (问题C同族兜底不回退)——TOOL_ROUND_LIMIT_REACHED 已属可续跑族, 换
-    blocked 作不可续跑族代表场景。"""
+    (问题C同族兜底不回退)——用 blocked 作不可续跑族代表场景
+    (2026-08-16 第 4 条后 TOOL_ROUND_LIMIT_REACHED 亦不再可续跑)。"""
     from agent_py_agent.agent.agent_core.runtime_mixin import _settle_main_agent_run
 
     rec = repo.record_run_creation(owner_id="local/main", goal="g", run_id="run-2", role="main")
@@ -310,7 +313,7 @@ def test_settle_first_round_continuable_keeps_nonterminal(repo):
     )
     result = SimpleNamespace(
         runtime_status="unfinished",
-        runtime_reason="TOOL_ROUND_LIMIT_REACHED",
+        runtime_reason="REPEATED_TOOL_FAILURE",
         runtime_source="tool_loop",
         tool_rounds=7,
     )
@@ -335,7 +338,7 @@ def test_settle_continuation_round_keeps_nonterminal(repo):
     )
     result = SimpleNamespace(
         runtime_status="unfinished",
-        runtime_reason="TOOL_ROUND_LIMIT_REACHED",
+        runtime_reason="REPEATED_TOOL_FAILURE",
         runtime_source="tool_loop",
         tool_rounds=7,
     )
@@ -405,12 +408,12 @@ class _FakeRunAgent:
         self.calls.append((seq, str(prompt)[:40]))
         if seq == 0:
             return SimpleNamespace(
-                runtime_status="unfinished", runtime_reason="TOOL_ROUND_LIMIT_REACHED",
+                runtime_status="unfinished", runtime_reason="REPEATED_TOOL_FAILURE",
                 runtime_source="tool_loop", tool_rounds=5, attempt_id="attempt-0",
             )
         if seq < 2:
             return SimpleNamespace(
-                runtime_status="unfinished", runtime_reason="TOOL_ROUND_LIMIT_REACHED",
+                runtime_status="unfinished", runtime_reason="REPEATED_TOOL_FAILURE",
                 runtime_source="tool_loop", tool_rounds=5, attempt_id=f"attempt-{seq}",
             )
         return SimpleNamespace(
@@ -456,7 +459,7 @@ def test_run_with_resume_budget_exhausted(tmp_path):
             seq = int(getattr(params, "continuation_seq", 0) or 0)
             self.calls.append((seq, str(prompt)[:40]))
             return SimpleNamespace(
-                runtime_status="unfinished", runtime_reason="TOOL_ROUND_LIMIT_REACHED",
+                runtime_status="unfinished", runtime_reason="REPEATED_TOOL_FAILURE",
                 runtime_source="tool_loop", tool_rounds=5, attempt_id=f"attempt-{seq}",
             )
 
@@ -529,7 +532,7 @@ def test_run_with_resume_provider_error_first_round_retries(tmp_path):
                 )
             if seq == 0:
                 return SimpleNamespace(
-                    runtime_status="unfinished", runtime_reason="TOOL_ROUND_LIMIT_REACHED",
+                    runtime_status="unfinished", runtime_reason="REPEATED_TOOL_FAILURE",
                     runtime_source="tool_loop", tool_rounds=5, attempt_id="attempt-0",
                 )
             return SimpleNamespace(
@@ -565,7 +568,7 @@ def test_run_with_resume_provider_error_continuation_retries(tmp_path):
                 )
             if seq == 0:
                 return SimpleNamespace(
-                    runtime_status="unfinished", runtime_reason="TOOL_ROUND_LIMIT_REACHED",
+                    runtime_status="unfinished", runtime_reason="REPEATED_TOOL_FAILURE",
                     runtime_source="tool_loop", tool_rounds=5, attempt_id="attempt-0",
                 )
             return SimpleNamespace(
@@ -663,11 +666,11 @@ def test_resume_round_attempt_chain(tmp_path):
                                str(getattr(params, "continuation_parent_attempt_id", ""))))
             if seq == 0:
                 return SimpleNamespace(runtime_status="unfinished",
-                    runtime_reason="TOOL_ROUND_LIMIT_REACHED", runtime_source="tool_loop",
+                    runtime_reason="REPEATED_TOOL_FAILURE", runtime_source="tool_loop",
                     tool_rounds=5, attempt_id="attempt-0")
             if seq < 2:
                 return SimpleNamespace(runtime_status="unfinished",
-                    runtime_reason="TOOL_ROUND_LIMIT_REACHED", runtime_source="tool_loop",
+                    runtime_reason="REPEATED_TOOL_FAILURE", runtime_source="tool_loop",
                     tool_rounds=5, attempt_id=f"attempt-{seq}")
             return SimpleNamespace(runtime_status="ok", runtime_reason="",
                 runtime_source="", tool_rounds=2, attempt_id=f"attempt-{seq}")
@@ -705,7 +708,7 @@ def test_resume_round_blocked_continues_not_exit(tmp_path):
             self.calls.append((seq, str(prompt)[:40]))
             if seq == 0:
                 return SimpleNamespace(runtime_status="unfinished",
-                    runtime_reason="TOOL_ROUND_LIMIT_REACHED", runtime_source="tool_loop",
+                    runtime_reason="REPEATED_TOOL_FAILURE", runtime_source="tool_loop",
                     tool_rounds=5, attempt_id="attempt-0")
             if seq == 1:
                 return SimpleNamespace(runtime_status="blocked",
@@ -998,7 +1001,7 @@ def test_handoff_write_on_budget_exhausted(tmp_path):
             seq = int(getattr(params, "continuation_seq", 0) or 0)
             self.calls.append((seq, str(prompt)[:40]))
             return SimpleNamespace(
-                runtime_status="unfinished", runtime_reason="TOOL_ROUND_LIMIT_REACHED",
+                runtime_status="unfinished", runtime_reason="REPEATED_TOOL_FAILURE",
                 runtime_source="tool_loop", tool_rounds=2, attempt_id=f"attempt-{seq}",
             )
 
@@ -1049,7 +1052,7 @@ def test_gateway_handoff_continuation_rewrites_next_handoff(tmp_path):
             self.calls.append((seq, str(prompt)[:40]))
             # 续跑轮仍 unfinished(可续跑族) → 应续写移交单
             return SimpleNamespace(
-                runtime_status="unfinished", runtime_reason="TOOL_ROUND_LIMIT_REACHED",
+                runtime_status="unfinished", runtime_reason="REPEATED_TOOL_FAILURE",
                 runtime_source="tool_loop", tool_rounds=2, attempt_id=f"attempt-{seq}",
             )
 
@@ -1106,7 +1109,7 @@ def test_handoff_budget_gate_stops_infinite_continuation(tmp_path):
                 resume_context=None, delivery_contract=None, on_chunk=None):
             self.calls.append(int(getattr(params, "continuation_seq", 0) or 0))
             return SimpleNamespace(
-                runtime_status="unfinished", runtime_reason="TOOL_ROUND_LIMIT_REACHED",
+                runtime_status="unfinished", runtime_reason="REPEATED_TOOL_FAILURE",
                 runtime_source="tool_loop", tool_rounds=2, attempt_id="attempt-x",
             )
 

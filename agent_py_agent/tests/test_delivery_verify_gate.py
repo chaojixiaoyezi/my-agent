@@ -476,7 +476,7 @@ def test_should_continue_verify_passed_wrong_source_not_shortcut():
         runtime_source="tool_loop",
     )
     should, reason = should_continue_task(response)
-    assert should is True  # tool_loop + TASK_PROGRESS_OPEN 仍可续跑
+    assert should is False  # 2026-08-16 第 4 条: tool_loop + TASK_PROGRESS_OPEN 不再续跑
     assert reason == "TASK_PROGRESS_OPEN"
 
 

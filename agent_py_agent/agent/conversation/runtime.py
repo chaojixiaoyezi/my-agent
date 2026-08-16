@@ -5718,8 +5718,12 @@ def resume_prompt_for(
 
 CONTINUABLE_REASONS = frozenset(
     {
-        "TASK_PROGRESS_OPEN",
-        "TOOL_ROUND_LIMIT_REACHED",
+        # 2026-08-16 用户裁决+deepseek/通道运行时 对照: 普通任务「正常不自动
+        # 续跑」。TASK_PROGRESS_OPEN(账本未关)与 TOOL_ROUND_LIMIT_REACHED
+        # (轮限收口)不再自动 resume——通道运行时 实证 max_turns 到达即停等
+        # 用户确认, 账本只是状态记录不驱动续跑。自动 resume 机制保留, 但
+        # 只由未来的 goal 模式/定时模式显式接入(普通任务触发收敛为异常族)。
+        # 保留的均为异常族: 失败退避/格式错误重发/机器验证失败修复。
         "REPEATED_TOOL_FAILURE",
         # 2026-08-15 3×3 真机: 模型输出未闭合 [TOOL_CALL] 纯格式错误——
         # 整轮零执行已保证安全(J.5 不变), 任务级允许续跑(重发完整工具块);
