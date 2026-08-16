@@ -842,9 +842,12 @@ _DELIVERY_PRODUCING_TOOLS = frozenset(
 
 def _no_delivery_artifact_produced(params: object) -> bool:
     executed = list(getattr(params, "executed_tools", None) or [])
-    if not executed:
-        return False
-    return not any(str(item) in _DELIVERY_PRODUCING_TOOLS for item in executed)
+    if executed:
+        return not any(str(item) in _DELIVERY_PRODUCING_TOOLS for item in executed)
+    # EXEC-12: cli_run 任务入口零工具收口同样是零交付产物假完成（ma-x 真机：
+    # 模型首轮输出"收到具体需求后我会直接动手做"就无工具收口 → RC=0 零产物）。
+    # 仅限 cli_run（任务执行入口）；普通对话(source 非 cli_run)纯聊天收口不受影响。
+    return str(getattr(params, "source", "") or "") == "cli_run"
 
 
 # EXEC-06b: 无交付产物收口时给模型的继续提示与次数上限。

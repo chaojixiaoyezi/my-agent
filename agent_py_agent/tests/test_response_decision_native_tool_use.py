@@ -226,6 +226,37 @@ def test_pure_chat_no_tools_break_is_normal(tmp_path: Path):
     assert decision.response.runtime_status != "unfinished"
 
 
+def test_cli_run_zero_tool_promise_then_unfinished(tmp_path: Path):
+    """EXEC-12: cli_run 任务入口零工具收口（模型首轮"我会动手做"就停）= 零交付
+    产物假完成。前 3 次 continue 给机会真正调工具, 仍零产物才 unfinished。"""
+    from dataclasses import replace
+
+    response = ModelResponse(text="收到具体需求后我会直接动手做。", backend="fake")
+    params = replace(_params(), source="cli_run")
+    for i in range(3):
+        decision = tool_loop_response_decision(
+            ToolLoopResponseDecisionRequest(
+                agent=_agent(tmp_path),
+                params=params,
+                response=response,
+                counters=ToolLoopRepairCounters(),
+            )
+        )
+        assert decision.action == "continue", f"第{i+1}次零工具收口应 continue"
+        assert getattr(params, "no_artifact_nudge_count", 0) == i + 1
+    decision = tool_loop_response_decision(
+        ToolLoopResponseDecisionRequest(
+            agent=_agent(tmp_path),
+            params=params,
+            response=response,
+            counters=ToolLoopRepairCounters(),
+        )
+    )
+    assert decision.action == "break"
+    assert decision.response.runtime_status == "unfinished"
+    assert decision.response.runtime_reason == "NO_DELIVERY_ARTIFACT_PRODUCED"
+
+
 def test_tool_use_input_tool_key_does_not_override_provider_name(tmp_path: Path):
     response = ModelResponse(
         text="",
