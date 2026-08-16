@@ -273,7 +273,7 @@ class ReadFileTool(FileSystemTool):
 
     model_spec = ToolModelSpec(
         name="read_file",
-        description="读取文本文件内容；普通文件、大工具输出路径和历史产物路径都优先用这个入口。可直接读任意绝对路径，包括 workspace 外、用户在任务里指定的输入目录/文件，无需 shell 或额外授权——不要为读取输入文件提 capability_request。",
+        description="读取文本文件内容；普通文件、大工具输出路径和历史产物路径都优先用这个入口。默认一次返回整个文件——理解或复刻一个源码文件时直接读全文，不要自己分段反复读同一个文件；只有文件极大（几十万字符以上）或只需确认某几行时才用 start_line/end_line/max_chars。可直接读任意绝对路径，包括 workspace 外、用户在任务里指定的输入目录/文件，无需 shell 或额外授权——不要为读取输入文件提 capability_request。",
         input_schema={
             "type": "object",
             "properties": {
