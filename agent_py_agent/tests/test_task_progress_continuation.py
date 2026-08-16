@@ -338,7 +338,25 @@ class _CaptureBackend:
     def __init__(self):
         self.prompts: list[str] = []
 
-    def generate(self, prompt: str, on_chunk=None):
+    def probe_tool_capability(self):
+        # native 协议删除 text 后（2026-08-16）：run-start 协议选择器要求 probe
+        # 证明 native 支持，否则 ToolProtocolSelectionError（text 无降级路径）。
+        # 本测试意图是账本续跑逻辑，协议只是通道——显式声明 native 支持。
+        from agent_py_agent.agent.tooling.runtime_contracts import (
+            ProviderToolCapability,
+        )
+
+        return ProviderToolCapability(
+            provider=self.name,
+            endpoint=f"fake://{self.name}",
+            model=self.name,
+            stream=False,
+            native_supported=True,
+            evidence="fake_capture_backend_declares_native",
+        )
+
+    def generate(self, prompt: str, on_chunk=None, **kwargs):
+        del kwargs  # 真实调用会带 tools/tool_choice 等参数，本 fake 只记录 prompt
         self.prompts.append(prompt)
         return ModelResponse(
             text=f"中间汇报 {len(self.prompts)}:继续推进。",

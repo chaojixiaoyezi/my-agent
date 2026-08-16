@@ -1,16 +1,24 @@
-"""第 4 层收口机器验证 gate 测试（2026-08-15 3×3 假完成根治 + 双席 seq2004 硬缺口）。
+"""收口机器兜底 gate 测试（2026-08-16 收口模式对齐 会话运行时：程序验证只做未知错误）。
 
 覆盖：
 1. delivery_verify_commands 结构解析（合法/缺 command/非 list/非 dict/空列表）
 2. run_delivery_verification 执行（全过/任一失败/超时/cwd 不可解析/无 contract/
    坏合同 fail-closed）
 3. cwd 受控边界（绝对 cwd 越出 workspace → fail-closed）
-4. _delivery_verify_no_tool_call_decision 裁决（无 contract 不干预/全过不干预/
-   失败 → unfinished+DELIVERY_VERIFY_FAILED+tool_context 注入/坏合同 fail-closed）
-5. should_continue_task 结构门（DELIVERY_VERIFY_FAILED + delivery_verify +
+4. _delivery_verify_no_tool_call_decision 裁决（2026-08-16 新语义）：
+   - attempt 内无工具结果未知族 → 不干预（模型自审收口，即使有 contract
+     也不强制机器验证）
+   - 有未知 + contract 验证命令 → 机器兜底：passed → 终态收口 ok；
+     failed/坏合同/cwd 越界 → unfinished + DELIVERY_VERIFY_FAILED（fail-closed）
+   - 有未知 + 无验证命令 → 注入未知核验提示 + continue + deferral 事件落账
+   - 熔断（第 4 次放过）：同一 attempt 内兜底未决达 4 次 →
+     BLOCKED/UNKNOWN_UNRESOLVED 通知用户，绝不无限重试
+5. attempt_unknown_operation_count / attempt_closeout_unresolved_count 计数
+   （runtime_events 持久化，只计结构化未知族，重启不清零）
+6. should_continue_task 结构门（DELIVERY_VERIFY_FAILED + delivery_verify +
    unfinished → 可续跑；source/status 不匹配 → 不续跑）——双席硬缺口 1
-6. delivery_contract_preflight_findings 新字段校验
-7. 回归探针：test_cli_resume_contract（resume_loop 对 unfinished 续跑）
+7. delivery_contract_preflight_findings 新字段校验
+8. 回归探针：test_cli_resume_contract（resume_loop 对 unfinished 续跑）
 """
 
 from __future__ import annotations
@@ -38,18 +46,39 @@ from agent_py_agent.agent.agent_core.tool_loop.delivery_verify import (
     run_delivery_verification,
 )
 
+UNKNOWN_CODE = "TOOL_OPERATION_OUTCOME_UNKNOWN"
+
+
+class _FakeRepo:
+    """runtime_events 假权威库（events_for_attempt / append_event / agent_run）。"""
+
+    def __init__(self, events=None):
+        self.events = list(events or [])
+
+    def events_for_attempt(self, attempt_id: str, *, limit: int = 500):
+        return [e for e in self.events if str(e.get("attempt_id")) == str(attempt_id)][:limit]
+
+    def append_event(self, **kwargs):
+        self.events.append(kwargs)
+
+    def agent_run_for_run_id(self, run_id: str):
+        return {"agent_run_id": f"agent-run-{run_id}", "task_run_id": f"task-run-{run_id}"}
+
 
 class _FakeParams:
-    def __init__(self, contract=None, executed_tools=None):
+    def __init__(self, contract=None, executed_tools=None, attempt_id="attempt-1", run_id="run-1"):
         self.delivery_contract = contract
         self.executed_tools = executed_tools or []
         self.tool_context: list[str] = []
+        self.attempt_id = attempt_id
+        self.run_id = run_id
 
 
 class _FakeAgent:
-    def __init__(self):
+    def __init__(self, repo=None):
         self.config = type("C", (), {"enable_tools": True})()
-        self.subagents = None  # 无 runtime_db → 落账 fail-silent
+        self.subagents = type("S", (), {"runtime_db": repo})() if repo is not None else None
+        self._current_run_task_workspace = None
 
 
 class _FakeCounters:
@@ -58,10 +87,36 @@ class _FakeCounters:
     protected_marker_repairs = 0
 
 
-def _request(contract, text="done"):
+def _unknown_event(attempt_id="attempt-1", error_code=UNKNOWN_CODE):
+    """工具结果未知族事件（写副作用未知/超时/执行者死 → 对账后仍无终态）。"""
+    return {
+        "event_type": "tool_completed",
+        "attempt_id": attempt_id,
+        "payload": {"error_code": error_code, "ok": False, "status": "failed"},
+    }
+
+
+def _verify_event(attempt_id, state, n=1):
+    return {
+        "event_type": "delivery_verify",
+        "attempt_id": attempt_id,
+        "payload": {"state": state},
+        "_n": n,
+    }
+
+
+def _deferral_event(attempt_id="attempt-1"):
+    return {
+        "event_type": "closeout_unknown_deferral",
+        "attempt_id": attempt_id,
+        "payload": {},
+    }
+
+
+def _request(contract, repo=None, text="done", attempt_id="attempt-1", run_id="run-1"):
     return _NoToolCallsRequest(
-        _FakeAgent(),
-        _FakeParams(contract=contract),
+        _FakeAgent(repo=repo),
+        _FakeParams(contract=contract, attempt_id=attempt_id, run_id=run_id),
         ModelResponse(text=text, backend="fake"),
         _FakeCounters(),
         has_protected_marker=False,
@@ -196,15 +251,26 @@ def test_gate_no_contract_not_intervened():
     assert _delivery_verify_no_tool_call_decision(_request(None)) is None
 
 
-def test_gate_verify_pass_not_intervened(tmp_path):
+def test_gate_no_unknown_not_intervened_even_with_contract(tmp_path):
+    """2026-08-16 新语义核心：无工具结果未知 → 模型自审收口，即使 contract
+    声明了 verify_commands 也不强制机器验证（程序验证只做未知错误）。"""
     contract = {"verify_commands": [{"command": "echo ok", "cwd": str(tmp_path)}]}
-    # 无 workspace 根 → fail-closed（根缺失拒绝执行），不是不干预
-    assert _delivery_verify_no_tool_call_decision(_request(contract)) is not None
+    assert _delivery_verify_no_tool_call_decision(_request(contract)) is None
 
 
-def test_gate_verify_fail_unfinished(tmp_path):
+def test_gate_unknown_verify_fail_unfinished(tmp_path):
+    """有未知 + 验证命令真失败 → unfinished + DELIVERY_VERIFY_FAILED（机器兜底
+    裁决：未知未核实 ≠ 完成）。"""
     contract = {"verify_commands": [{"command": "exit 7", "cwd": str(tmp_path)}]}
-    request = _request(contract)
+    agent = _FakeAgent(repo=_FakeRepo([_unknown_event()]))
+    agent._current_run_task_workspace = str(tmp_path)
+    request = _NoToolCallsRequest(
+        agent,
+        _FakeParams(contract=contract),
+        ModelResponse(text="done", backend="fake"),
+        _FakeCounters(),
+        has_protected_marker=False,
+    )
     decision = _delivery_verify_no_tool_call_decision(request)
     assert decision is not None
     assert decision.action == "break"
@@ -216,9 +282,10 @@ def test_gate_verify_fail_unfinished(tmp_path):
     assert "产物未通过机器验证" in response.text
 
 
-def test_gate_invalid_contract_fail_closed(tmp_path):
+def test_gate_unknown_invalid_contract_fail_closed():
+    """有未知 + contract 结构非法 → fail-closed（坏合同不得伪装成自然收口）。"""
     contract = {"verify_commands": "bad"}
-    request = _request(contract)
+    request = _request(contract, repo=_FakeRepo([_unknown_event()]))
     decision = _delivery_verify_no_tool_call_decision(request)
     assert decision is not None
     response = decision.response
@@ -228,12 +295,100 @@ def test_gate_invalid_contract_fail_closed(tmp_path):
 
 
 def test_gate_cwd_out_of_bounds_fail_closed(tmp_path):
+    """绝对 cwd 越出 workspace 根 → fail-closed（双席硬缺口 3）。"""
     outside = tmp_path.parent / "outside-xyz"
     contract = {"verify_commands": [{"command": "echo x", "cwd": str(outside)}]}
-    request = _request(contract)
+    agent = _FakeAgent(repo=_FakeRepo([_unknown_event()]))
+    agent._current_run_task_workspace = str(tmp_path)
+    request = _NoToolCallsRequest(
+        agent,
+        _FakeParams(contract=contract),
+        ModelResponse(text="done", backend="fake"),
+        _FakeCounters(),
+        has_protected_marker=False,
+    )
     decision = _delivery_verify_no_tool_call_decision(request)
     assert decision is not None
     assert decision.response.runtime_reason == "DELIVERY_VERIFY_FAILED"
+
+
+def test_gate_unknown_no_contract_injects_nudge_and_defers():
+    """有未知 + 无验证命令 → 注入未知核验提示 + continue + deferral 事件落账
+    （模型去核验实际状态后再收口；每轮注入计一次未决，第 4 次熔断）。"""
+    repo = _FakeRepo([_unknown_event()])
+    request = _request(None, repo=repo)
+    decision = _delivery_verify_no_tool_call_decision(request)
+    assert decision is not None
+    assert decision.action == "continue"
+    assert any("closeout-unknown" in line for line in request.params.tool_context)
+    assert "TOOL_OPERATION_OUTCOME_UNKNOWN" in request.params.tool_context[-1]
+    # deferral 事件已落账（熔断计数数据源）
+    assert any(
+        e.get("event_type") == "closeout_unknown_deferral" for e in repo.events
+    )
+
+
+def test_gate_unknown_circuit_breaker_blocked_on_fourth():
+    """熔断（第 4 次放过）：同 attempt 兜底未决 ≥ 4 → BLOCKED/UNKNOWN_UNRESOLVED
+    通知用户，绝不无限重试（cell6 90 分钟死循环根治）。"""
+    repo = _FakeRepo(
+        [_unknown_event()] + [_deferral_event() for _ in range(3)]
+    )
+    request = _request(None, repo=repo)
+    decision = _delivery_verify_no_tool_call_decision(request)
+    assert decision is not None
+    assert decision.action == "break"
+    response = decision.response
+    assert response.runtime_status == "blocked"
+    assert response.runtime_reason == "UNKNOWN_UNRESOLVED"
+    assert response.runtime_source == "closeout_unknown_fallback"
+    assert "第 4 次放过" in response.text
+    assert "未知" in response.text
+
+
+def test_gate_unknown_verify_failures_also_count_toward_breaker(tmp_path):
+    """验证失败同样计入熔断计数：failed 事件 3 次 + 本轮第 4 次 → 熔断。"""
+    repo = _FakeRepo(
+        [_unknown_event()]
+        + [_verify_event("attempt-1", VERIFY_FAILED) for _ in range(3)]
+    )
+    contract = {"verify_commands": [{"command": "exit 1", "cwd": str(tmp_path)}]}
+    agent = _FakeAgent(repo=repo)
+    agent._current_run_task_workspace = str(tmp_path)
+    request = _NoToolCallsRequest(
+        agent,
+        _FakeParams(contract=contract),
+        ModelResponse(text="done", backend="fake"),
+        _FakeCounters(),
+        has_protected_marker=False,
+    )
+    decision = _delivery_verify_no_tool_call_decision(request)
+    assert decision is not None
+    assert decision.response.runtime_reason == "UNKNOWN_UNRESOLVED"
+
+
+def test_gate_unknown_verify_passed_terminates_even_ledger_open(tmp_path):
+    """机器兜底验证通过 = 未知已核实 = 任务终态：runtime_reason 清空、
+    source=delivery_verify（bd88a585/bd620bc1 语义保留）。"""
+    contract = {
+        "verify_commands": [{"command": "echo verify-ok", "cwd": str(tmp_path)}],
+        "task_workspace": {"task_root": str(tmp_path)},
+    }
+    repo = _FakeRepo([_unknown_event()])
+    agent = _FakeAgent(repo=repo)
+    agent._current_run_task_workspace = str(tmp_path)
+    request = _NoToolCallsRequest(
+        agent,
+        _FakeParams(contract=contract),
+        ModelResponse(text="done", backend="fake"),
+        _FakeCounters(),
+        has_protected_marker=False,
+    )
+    decision = _delivery_verify_no_tool_call_decision(request)
+    assert decision is not None
+    assert decision.response.runtime_status == "ok"
+    assert decision.response.runtime_reason == ""
+    assert decision.response.runtime_source == "delivery_verify"
 
 
 # ---------- should_continue_task 结构门（双席硬缺口 1） ----------
@@ -361,7 +516,7 @@ def test_preflight_verify_commands_validation():
 def test_gate_workspace_root_missing_fail_closed(tmp_path):
     """workspace 根缺失 → fail-closed 不执行（双席硬缺口1）。"""
     contract = {"verify_commands": [{"command": "echo x", "cwd": str(tmp_path)}]}
-    request = _request(contract)
+    request = _request(contract, repo=_FakeRepo([_unknown_event()]))
     decision = _delivery_verify_no_tool_call_decision(request)
     # workspace 拿不到（fake agent 无 workspace）→ run 内根缺失拒绝
     assert decision is not None
@@ -376,14 +531,17 @@ def test_gate_workspace_resolved_runs_real_verify(tmp_path):
     `current_run_task_workspace_root`——该函数不存在 → ImportError 被 except
     吞掉 → workspace_root 恒 None → 全过也判 DELIVERY_VERIFY_FAILED →
     无限续跑（8/15 起所有 delivery_verify 事件全 failed 实锤）。
-    修复后从 `run_task_workspace_writer` 导入，workspace 可解析时
-    verify 全过 → 保持自然收口（返回 None，不干预）。
+    修复后从 `run_task_workspace_writer` 导入；2026-08-16 起触发条件收敛为
+    「attempt 内有工具结果未知」——本测试带 unknown 事件，验证真实执行且
+    全过 → 终态收口（break）：runtime_reason 清空、source=delivery_verify
+    （bd88a585: 验收通过覆盖 TASK_PROGRESS_OPEN 等续跑原因）。
     """
     contract = {
         "verify_commands": [{"command": "echo verify-ok", "cwd": str(tmp_path)}],
         "task_workspace": {"task_root": str(tmp_path)},
     }
-    agent = _FakeAgent()
+    repo = _FakeRepo([_unknown_event()])
+    agent = _FakeAgent(repo=repo)
     agent._current_run_task_workspace = str(tmp_path)
     request = _NoToolCallsRequest(
         agent,
@@ -393,9 +551,6 @@ def test_gate_workspace_resolved_runs_real_verify(tmp_path):
         has_protected_marker=False,
     )
     decision = _delivery_verify_no_tool_call_decision(request)
-    # verify 真实执行且全过 → 终态收口（break）：runtime_reason 清空、
-    # source=delivery_verify（bd88a585: 验收通过覆盖 TASK_PROGRESS_OPEN
-    # 等续跑原因，绝不误判 unfinished，也不因账本原因续跑）。
     assert decision is not None
     assert decision.response.runtime_status == "ok"
     assert decision.response.runtime_reason == ""
@@ -409,7 +564,8 @@ def test_gate_workspace_resolved_verify_failure_still_unfinished(tmp_path):
         "verify_commands": [{"command": "exit 3", "cwd": str(tmp_path)}],
         "task_workspace": {"task_root": str(tmp_path)},
     }
-    agent = _FakeAgent()
+    repo = _FakeRepo([_unknown_event()])
+    agent = _FakeAgent(repo=repo)
     agent._current_run_task_workspace = str(tmp_path)
     request = _NoToolCallsRequest(
         agent,

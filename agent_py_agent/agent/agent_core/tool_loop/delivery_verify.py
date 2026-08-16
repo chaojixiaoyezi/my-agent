@@ -339,6 +339,128 @@ def persist_delivery_verify_event(
         LOGGER.warning("persist delivery verify event failed", exc_info=True)
 
 
+#: 收口兜底熔断上限：同一 attempt 内 closeout 未决事件（工具结果未知导致的
+#: 验证失败/未知核验提示）达 4 次即熔断——放过，转 BLOCKED/UNKNOWN_UNRESOLVED
+#: 通知用户，绝不无限重试（2026-08-16 用户裁决：第 4 次放过生成问题通知）。
+CLOSEOUT_UNRESOLVED_LIMIT = 4
+
+#: 工具结果「未知」族的唯一结构化错误码（写副作用未知/超时/执行者死 → 对账
+#: 后仍无终态）。known_failure 等已知失败不在此族，不参与兜底与熔断计数。
+UNKNOWN_OUTCOME_ERROR_CODE = "TOOL_OPERATION_OUTCOME_UNKNOWN"
+
+
+def attempt_unknown_operation_count(agent: object, params: object) -> int:
+    """当前 attempt 内「工具结果未知」操作数（runtime_events 持久化计数）。
+
+    信号 = tool_completed 事件 payload.error_code == TOOL_OPERATION_OUTCOME_UNKNOWN
+    （F6 工具完成事件已接写权威 runtime_events）。只计结构化未知族，不混入
+    known_failure/取消。查不到权威库时保守返回 0（不干预正常收口）。
+    """
+    repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+    if repo is None or not callable(getattr(repo, "events_for_attempt", None)):
+        return 0
+    attempt_id = str(getattr(params, "attempt_id", "") or "")
+    if not attempt_id:
+        return 0
+    try:
+        events = repo.events_for_attempt(attempt_id=attempt_id, limit=500)
+    except Exception:  # noqa: BLE001 查不到 → 保守 0（不干预收口）
+        return 0
+    count = 0
+    for event in events or ():
+        if not isinstance(event, dict):
+            continue
+        if str(event.get("event_type") or "") != "tool_completed":
+            continue
+        payload = event.get("payload")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (TypeError, ValueError):
+                payload = {}
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("error_code") or "") == UNKNOWN_OUTCOME_ERROR_CODE:
+            count += 1
+    return count
+
+
+def attempt_closeout_unresolved_count(agent: object, params: object) -> int:
+    """当前 attempt 内「收口兜底未决」事件数（持久化，重启不清零）。
+
+    计数 = delivery_verify 事件（failed/contract_invalid/cwd 越界，即机器
+    兜底验证未能给出通过结论）+ closeout_unknown_deferral 事件（无验证命令
+    时的未知核验提示）。达 CLOSEOUT_UNRESOLVED_LIMIT 即熔断放过。
+    """
+    repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+    if repo is None or not callable(getattr(repo, "events_for_attempt", None)):
+        return 0
+    attempt_id = str(getattr(params, "attempt_id", "") or "")
+    if not attempt_id:
+        return 0
+    try:
+        events = repo.events_for_attempt(attempt_id=attempt_id, limit=500)
+    except Exception:  # noqa: BLE001 查不到 → 保守 0（不干预收口）
+        return 0
+    count = 0
+    for event in events or ():
+        if not isinstance(event, dict):
+            continue
+        event_type = str(event.get("event_type") or "")
+        if event_type == "closeout_unknown_deferral":
+            count += 1
+            continue
+        if event_type != "delivery_verify":
+            continue
+        payload = event.get("payload")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (TypeError, ValueError):
+                payload = {}
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("state") or "") != VERIFY_PASSED:
+            count += 1
+    return count
+
+
+def persist_closeout_deferral_event(
+    agent: object, params: object, diagnostic: str
+) -> None:
+    """未知核验提示落 runtime_events（熔断计数数据源，fail-silent）。"""
+    try:
+        repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+        if repo is None or not callable(getattr(repo, "append_event", None)):
+            return
+        run_id = str(getattr(params, "run_id", "") or "")
+        attempt_id = str(getattr(params, "attempt_id", "") or "")
+        agent_run_id = ""
+        task_run_id = ""
+        if run_id:
+            try:
+                row = repo.agent_run_for_run_id(run_id)
+                if row is not None:
+                    agent_run_id = str(row.get("agent_run_id") or "")
+                    task_run_id = str(row.get("task_run_id") or "")
+            except Exception:  # noqa: BLE001 查不到不阻断落账
+                pass
+        repo.append_event(
+            event_type="closeout_unknown_deferral",
+            attempt_id=attempt_id,
+            agent_run_id=agent_run_id or run_id,
+            task_run_id=task_run_id,
+            payload={
+                "diagnostic": str(diagnostic or ""),
+                "unknown_operation_count": attempt_unknown_operation_count(
+                    agent, params
+                ),
+            },
+        )
+    except Exception:  # noqa: BLE001 落账失败绝不影响收口判定
+        LOGGER.warning("persist closeout deferral event failed", exc_info=True)
+
+
 def delivery_verify_failure_context(results: list[dict[str, object]]) -> str:
     """验证失败输出拼 tool_context 文本（模型据此修复，纯事实）。"""
     lines = ["[tool-system delivery-verify-failed]"]
