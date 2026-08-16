@@ -470,29 +470,39 @@ def test_run_with_resume_budget_exhausted(tmp_path):
     assert len(fake.calls) == 3  # 首轮 + 2 续跑轮后停
 
 
-def test_run_with_resume_unresumable_stops(tmp_path):
-    """首轮 blocked（不可续跑族）→ 立即停止，不续跑。"""
+def test_run_with_resume_unresumable_continues_in_process(tmp_path):
+    """首轮 blocked（不可续跑族）→ 进程内继续下一轮（不退出），第二轮 ok 完成。
+
+    用户指示(2026-08-16): 进程不能退出（按一年任务设计）——收口后
+    进程内续跑，任务终态(runtime_status=ok)才退出。
+    """
     from agent_py_agent.agent.agent_core.runtime.run_params import (
         run_params_with_request_id,
     )
     from agent_py_agent.cli.resume_loop import run_with_resume
 
-    class _BlockedAgent(_FakeRunAgent):
+    class _BlockedThenOk(_FakeRunAgent):
         def run(self, prompt, *, params=None, **kw):
-            self.calls.append((0, str(prompt)[:40]))
+            seq = int(getattr(params, "continuation_seq", 0) or 0)
+            self.calls.append((seq, str(prompt)[:40]))
+            if seq == 0:
+                return SimpleNamespace(
+                    runtime_status="blocked", runtime_reason="PROTOCOL_VIOLATION",
+                    runtime_source="tool_protocol_adapter", tool_rounds=0,
+                    attempt_id="attempt-0",
+                )
             return SimpleNamespace(
-                runtime_status="blocked", runtime_reason="PROTOCOL_VIOLATION",
-                runtime_source="tool_protocol_adapter", tool_rounds=0,
-                attempt_id="attempt-0",
+                runtime_status="ok", runtime_reason="", runtime_source="tool_loop",
+                tool_rounds=1, attempt_id=f"attempt-{seq}",
             )
 
-    fake = _BlockedAgent(tmp_path)
+    fake = _BlockedThenOk(tmp_path)
     base = run_params_with_request_id(
         RunParams(source="cli_run", task_id="task-1", task_attributes={})
     )
     outcome = run_with_resume(fake, initial_prompt="t", base_params=base, max_rounds=5)
-    assert outcome.status == "unresumable"
-    assert len(fake.calls) == 1  # 只首轮
+    assert outcome.status == "completed"  # 第二轮 ok 才退出
+    assert len(fake.calls) == 2  # 首轮 blocked + 续跑轮 ok
 
 
 # ------------------------------------------------- 切片5: 崩溃/双消费者回归
@@ -600,10 +610,12 @@ def test_resume_round_attempt_chain(tmp_path):
     assert parent1 == attempt0  # parent 链: cont-1 parent=首轮 attempt
 
 
-def test_resume_round_blocked_is_unresumable(tmp_path):
-    """续跑轮 blocked/协议违规收口必须标 unresumable，不能误标 completed。
+def test_resume_round_blocked_continues_not_exit(tmp_path):
+    """续跑轮 blocked/协议违规收口不再退出进程——进程内继续下一轮。
 
-    缺口C(双席复核 seq1835): 只有 runtime_status=ok 才算 completed。
+    用户指示(2026-08-16)+缺口C(seq1835)语义保留: 只有 runtime_status=ok
+    才算 completed 退出; blocked 收口记录后继续续跑(不误标 completed,
+    也不退出进程)。
     """
     from agent_py_agent.agent.agent_core.runtime.run_params import (
         run_params_with_request_id,
@@ -618,16 +630,19 @@ def test_resume_round_blocked_is_unresumable(tmp_path):
                 return SimpleNamespace(runtime_status="unfinished",
                     runtime_reason="TOOL_ROUND_LIMIT_REACHED", runtime_source="tool_loop",
                     tool_rounds=5, attempt_id="attempt-0")
-            return SimpleNamespace(runtime_status="blocked",
-                runtime_reason="PROTOCOL_VIOLATION", runtime_source="tool_protocol_adapter",
-                tool_rounds=0, attempt_id=f"attempt-{seq}")
+            if seq == 1:
+                return SimpleNamespace(runtime_status="blocked",
+                    runtime_reason="PROTOCOL_VIOLATION", runtime_source="tool_protocol_adapter",
+                    tool_rounds=0, attempt_id=f"attempt-{seq}")
+            return SimpleNamespace(runtime_status="ok",
+                runtime_reason="", runtime_source="tool_loop",
+                tool_rounds=1, attempt_id=f"attempt-{seq}")
 
     fake = _FirstThenBlocked(tmp_path)
     base = run_params_with_request_id(RunParams(source="cli_run", task_id="task-1", task_attributes={}))
     outcome = run_with_resume(fake, initial_prompt="t", base_params=base, max_rounds=5)
-    assert outcome.status == "unresumable"  # 不是 completed
-    assert outcome.reason == "PROTOCOL_VIOLATION"
-    assert len(fake.calls) == 2  # 首轮 + 1 续跑轮后停
+    assert outcome.status == "completed"  # blocked 后进程内继续，第三轮 ok 才退出
+    assert len(fake.calls) == 3  # 首轮 + blocked 续跑轮 + ok 续跑轮
 
 
 def test_resume_without_precreated_policy_ensures_and_continues(tmp_path):

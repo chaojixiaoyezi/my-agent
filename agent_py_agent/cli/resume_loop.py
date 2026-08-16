@@ -14,6 +14,7 @@ repeated_failure_halt / max_tool_rounds 等其它防线承担。
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, replace
 
 from ..agent.agent_core.cli_run_conversation import bind_cli_run_conversation
@@ -23,6 +24,38 @@ from .resume_contract import (
     record_budget_exhausted,
     resume_prompt_for,
 )
+
+# 用户指示(2026-08-16): 进程不能退出——连续不可续跑收口后进入退避节奏
+# (30s→60s→120s→180s 封顶, sleep≤180s 铁律), 退避后继续尝试, 进程存活。
+_UNCONTINUABLE_BACKOFF_START = 5
+
+
+def record_uncontinuable_continuation(
+    agent: object,
+    *,
+    runner: object,
+    seq: int,
+    reason: str,
+    consecutive: int,
+) -> None:
+    """记录一次不可续跑收口(进程内继续下一轮的决策痕迹)。
+
+    用户指示(2026-08-16)后不再退出进程——每次收口都留记录
+    (原因/轮次/连续次数), 审计可追溯; 连续次数 ≥ 阈值时进入退避。
+    记录失败不阻断续跑。
+    """
+    try:
+        run_id = getattr(runner, "ctx", None)
+        run_id = getattr(run_id, "root_run_id", "") if run_id is not None else ""
+        logger = getattr(agent, "logger", None)
+        if logger is not None and hasattr(logger, "warning"):
+            logger.warning(
+                "cli_uncontinuable_continuation run_id=%s seq=%s reason=%s "
+                "consecutive=%s action=continue_in_process",
+                run_id, seq, reason, consecutive,
+            )
+    except Exception:  # noqa: BLE001 - 记录失败不阻断续跑
+        pass
 
 
 @dataclass(frozen=True)
@@ -241,15 +274,29 @@ def run_with_resume(
     )
     result, _bound = runner(initial_prompt, 0, "")
     rounds = 1
+    consecutive_uncontinuable = 0  # 连续不可续跑计数(首轮 blocked 分支会置 1)
     should, reason = should_resume(result)
-    if not should:
-        return CliResumeOutcome(
-            status="unresumable", rounds=rounds, final_result=result, reason=reason
-        )
+    # 用户指示(2026-08-16): 进程不能退出——只有任务终态(ok)或无契约
+    # (首轮连 task/run 都没建, 无法续跑)才返回; 其余收口(blocked/
+    # 协议违规/UNKNOWN/unfinished)一律进入续跑循环进程内继续。
     if runner.ctx is None or not runner.ctx.root_task_id:
         return CliResumeOutcome(
             status="unresumable", rounds=rounds, final_result=result,
             reason="no_continuation_contract",
+        )
+    if str(getattr(result, "runtime_status", "") or "").strip().lower() == "ok":
+        return CliResumeOutcome(
+            status="completed", rounds=rounds, final_result=result, reason=reason
+        )
+    if not should:
+        # 首轮不可续跑族: 记录后进入续跑循环(进程内继续, 不退出)
+        consecutive_uncontinuable = 1
+        record_uncontinuable_continuation(
+            agent,
+            runner=runner,
+            seq=0,
+            reason=reason or "not_continuable",
+            consecutive=1,
         )
 
     # 缺口A(双席复核 seq1834): 进入续跑循环前 claim 一次(整个循环持有,
@@ -297,6 +344,10 @@ def run_with_resume(
                 status="unresumable", rounds=rounds, final_result=result,
                 reason="claim_held_by_other_consumer",
             )
+    # 用户指示(2026-08-16): 进程不能退出(按一年任务长度设计)——收口后
+    # 进程内继续下一轮, 不返回 unresumable。连续不可续跑计数 + 退避
+    # (维护记录 点2/6: violation 会话内修复, 连续失败转退避不
+    # busy-loop 不退出; 任务终态/显式 stop 才允许退出)。
     for seq in range(1, max_rounds + 1):
         prompt = resume_prompt_for(
             continuation_reason=reason,
@@ -311,9 +362,10 @@ def run_with_resume(
         # parent_attempt 推进在 ResumeRunOnce 内部完成（DB 真实 attempt）
         should, reason = should_resume(result)
         if not should:
-            # 缺口C(双席复核 seq1835): 不可续跑族收口(blocked/协议违规/
-            # UNKNOWN)必须标 unresumable, 不能误标 completed——只有
-            # runtime_status=ok 的任务完成才算 completed。
+            # 只有 runtime_status=ok 的任务完成才算 completed 退出
+            # (缺口C seq1835 语义保留); 其余收口(blocked/协议违规/UNKNOWN)
+            # 不再退出进程——记录原因后进程内继续下一轮(resume 续跑),
+            # 连续不可续跑按退避节奏重试, 永不因收口原因退出。
             runtime_status = str(
                 getattr(result, "runtime_status", "") or ""
             ).strip().lower()
@@ -321,9 +373,24 @@ def run_with_resume(
                 return CliResumeOutcome(
                     status="completed", rounds=rounds, final_result=result, reason=reason
                 )
-            return CliResumeOutcome(
-                status="unresumable", rounds=rounds, final_result=result, reason=reason
+            consecutive_uncontinuable += 1
+            record_uncontinuable_continuation(
+                agent,
+                runner=runner,
+                seq=seq,
+                reason=reason or "not_continuable",
+                consecutive=consecutive_uncontinuable,
             )
+            if consecutive_uncontinuable >= _UNCONTINUABLE_BACKOFF_START:
+                # 退避: 30s→60s→120s→180s 封顶(sleep ≤180s 铁律), 退避
+                # 后重置计数继续尝试——进程存活等待链路/模型恢复。
+                backoff = min(
+                    180,
+                    30 * (2 ** min(consecutive_uncontinuable - _UNCONTINUABLE_BACKOFF_START, 3)),
+                )
+                time.sleep(backoff)
+                consecutive_uncontinuable = 0
+            continue
         if rounds >= max_rounds + 1:
             record_budget_exhausted(
                 agent=agent,
