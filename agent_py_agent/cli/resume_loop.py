@@ -490,6 +490,22 @@ def run_manual_resume(
                 update_status({"task_id": facts["task_id"], "status": "active"})
             except Exception:  # noqa: BLE001 迁移失败保守继续(与旧行为一致)
                 pass
+    # EXEC-35d: 旧执行者的进度 policy 残留会让 conversation_task_execution_
+    # state 判 running(真机 2026-08-16: 429 收口后 3 个 policy 未停用 →
+    # resume 工具仍被 BINDING_FAILED 拦)。用户显式 resume = 接管, 停用
+    # 该任务的全部进度 policy, 再由本轮执行重新建立。
+    list_policies = getattr(store, "list_progress_policies", None)
+    disable_policy = getattr(store, "disable_progress_policy", None)
+    if callable(list_policies) and callable(disable_policy):
+        try:
+            for policy in list_policies(enabled_only=False):
+                if str(getattr(policy, "task_id", "") or "") == facts["task_id"]:
+                    try:
+                        disable_policy(str(getattr(policy, "policy_id", "") or ""))
+                    except Exception:  # noqa: BLE001 单个停用失败不拦续跑
+                        pass
+        except Exception:  # noqa: BLE001 policy 列表读不到保守继续
+            pass
     runner = ResumeRunOnce(
         agent,
         base_params=base_params,

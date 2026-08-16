@@ -223,3 +223,32 @@ def test_activate_task_state_resets_terminal_fields(tmp_path):
     assert "runtime_reason" not in d
     assert d["status"] == "RUNNING"
     assert d["artifact_refs"] == ["keep-me"]  # 历史字段不丢
+
+
+class _PolicyStore(_LinkStore):
+    """带进度 policy 的最小 store（EXEC-35d 测试）。"""
+
+    def __init__(self):
+        super().__init__(link_status=None)
+        self.disabled = []
+
+    def list_progress_policies(self, *, enabled_only=False):
+        return [
+            SimpleNamespace(policy_id="p1", task_id="run-abc123"),
+            SimpleNamespace(policy_id="p2", task_id="other-task"),
+        ]
+
+    def disable_progress_policy(self, policy_id):
+        self.disabled.append(policy_id)
+        return True
+
+
+def test_manual_resume_disables_stale_progress_policies(tmp_path):
+    """EXEC-35d: resume 停用该任务残留的进度 policy(接管旧执行者)。"""
+    task_root, task_id = _make_task_facts(tmp_path)
+    agent = _FakeAgent(tmp_path, workspace_root=task_root)
+    agent.conversation_store = _PolicyStore()
+    agent.last_result = _ok_result()
+    outcome = run_manual_resume(agent, task_ref=task_root)
+    assert outcome.status == "completed"
+    assert agent.conversation_store.disabled == ["p1"]  # 只停本任务的
