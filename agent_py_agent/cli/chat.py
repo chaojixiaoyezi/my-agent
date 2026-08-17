@@ -201,7 +201,27 @@ def cmd_chat(args) -> int:
     runtime_inject: list[str] = args.inject or []
     prompt_files: list[str] = args.prompt_file or []
 
-    if _has_prompt_toolkit() and not bool(getattr(args, "plain", False)):
+    # P4 入口集成（2026-08-17）：TS TUI 优先（node + 产物可用时拉起 长期助手
+    # 形态前端）；否则回退 Python TUI / plain（唯一回退，禁双 renderer 抢
+    # stdin——TS TUI 独占终端直到退出）。
+    from .chat_parts.tui_ts_launcher import try_launch_ts_tui
+
+    ts_tui_started = False
+    if not bool(getattr(args, "plain", False)):
+        try:
+            gateway_base = (
+                f"http://127.0.0.1:{int(getattr(agent.config, 'gateway_port', 8420) or 8420)}"
+            )
+            ts_tui_started = try_launch_ts_tui(
+                gateway_base_url=gateway_base,
+                session_id=str(current_session_id or ""),
+                model=str(getattr(agent.config, "model_name", "") or "unknown"),
+            )
+        except Exception:  # noqa: BLE001 launcher 任何失败都不阻断入口
+            ts_tui_started = False
+    if ts_tui_started:
+        result = 0
+    elif _has_prompt_toolkit() and not bool(getattr(args, "plain", False)):
         result = run_tui(params=TuiRunParams(
             agent=agent, args=args, use_gateway=use_gateway, paths=paths,
             runtime_inject=runtime_inject, prompt_files=prompt_files,
