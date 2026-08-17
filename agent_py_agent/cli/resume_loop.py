@@ -201,43 +201,6 @@ class ResumeRunOnce:
 
 
 
-def _write_handoff(
-    agent: object,
-    runner: ResumeRunOnce,
-    *,
-    seq: int,
-    reason: str,
-    user_prompt: str = "",
-) -> None:
-    """显式移交(2026-08-14 长任务首要约束 owner seq1856/steward seq1857):
-    预算耗尽/不可续跑收口时写 runtime.db 待接管移交单——runtime.db 是
-    owner 级共享权威(CLI 与 gateway 同库), gateway 调度器扫描接管续跑,
-    不依赖进程 cwd 或入口私有 conversation store(CLI/gateway store 隔离
-    真机坐实导致任务截断)。fail-silent: 移交失败不阻断执行路径。"""
-    try:
-        subagents = getattr(agent, "subagents", None)
-        repo = getattr(subagents, "runtime_db", None)
-        if repo is None or not callable(getattr(repo, "create_continuation_handoff", None)):
-            return
-        if runner.ctx is None:
-            return
-        repo.create_continuation_handoff(
-            agent_run_id="",
-            attempt_id=runner.ctx.parent_attempt_id,
-            task_run_id=runner._task_run_id(),
-            root_run_id=runner.ctx.root_run_id,
-            root_request_id=runner.ctx.root_request_id,
-            root_thread_id=runner.ctx.root_thread_id,
-            root_task_id=runner.ctx.root_task_id,
-            user_prompt=str(user_prompt or ""),
-            continuation_seq=int(seq or 0),
-            reason=str(reason or ""),
-        )
-    except Exception:  # noqa: BLE001 移交失败保守跳过
-        pass
-
-
-
 # EXEC-30: 同一收口 reason 连续续跑上限(对照 会话运行时/轻量运行时 写完即测即收的
 # 天然收敛的机制等价物)。同因 3 次仍不收敛=模型在同一模式无限迭代, 强制收口。
 # 常量权威在 conversation/closeout.py 的收口状态机, 这里 import 复用。
@@ -357,10 +320,6 @@ def run_with_resume(
                 budget_after=0,
                 reason="resume_limit_reached",
             )
-            _write_handoff(
-                agent, runner, seq=rounds, reason="resume_limit_reached",
-                user_prompt=initial_prompt,
-            )
             return CliResumeOutcome(
                 status="budget_exhausted", rounds=rounds, final_result=result,
                 reason="resume_limit_reached",
@@ -425,17 +384,24 @@ def _closeout_after_decision(
     *,
     write_events: bool = True,
 ) -> CliResumeOutcome:
-    """EXEC-41: 执行收口机器的终态——落账/移交/返回都只按 outcome.state,
-    不再散落分支推理。done → completed; wait_handoff(handoff=True) →
-    budget_exhausted 事件+移交单(write_events=False 时只返回状态, 手动
-    续跑不落账保持旧行为); 其余(wait_human/cancelled/no_active_goal) →
-    unresumable(缺口C: 只有 runtime_status=ok 才算 completed, 不误标)。"""
+    """EXEC-41: 执行收口机器的终态——落账/返回都只按 outcome.state, 不再
+    散落分支推理。done → completed; wait_handoff → no_active_goal 是
+    "正常不自动续跑"(EXEC-39) 标 unresumable, 预算/同因/轮数耗尽标
+    budget_exhausted + 落账事件(write_events=False 时手动续跑只返回状态);
+    其余(wait_human/cancelled) → unresumable(缺口C: 只有 runtime_status=ok
+    才算 completed, 不误标)。2026-08-17 owner 拍板删除 gateway 移交线——
+    不再写移交单, 任务停下后唯一续跑入口是用户显式 run --resume。"""
     if outcome.state == STATE_DONE:
         return CliResumeOutcome(
             status="completed", rounds=rounds, final_result=result,
             reason=outcome.reason or "task_completed",
         )
-    if outcome.state == STATE_WAIT_HANDOFF and outcome.handoff:
+    if outcome.state == STATE_WAIT_HANDOFF:
+        if outcome.reason == "no_active_goal":
+            return CliResumeOutcome(
+                status="unresumable", rounds=rounds, final_result=result,
+                reason=outcome.reason,
+            )
         if write_events:
             record_budget_exhausted(
                 agent=agent,
@@ -445,10 +411,6 @@ def _closeout_after_decision(
                 budget_before=max(rounds - 1, 0),
                 budget_after=rounds,
                 reason=outcome.reason,
-            )
-            _write_handoff(
-                agent, runner, seq=rounds, reason=outcome.reason,
-                user_prompt=initial_prompt,
             )
         return CliResumeOutcome(
             status="budget_exhausted", rounds=rounds, final_result=result,

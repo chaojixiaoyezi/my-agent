@@ -501,7 +501,7 @@ class _FailingRuntimeFactBackend:
 
 
 def test_agent_run_closes_runtime_fact_when_model_raises(tmp_path: Path) -> None:
-    config = AgentConfig(tool_protocol="text", enable_tools=True, memory_path="memory.jsonl")
+    config = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
     agent = SimpleAgent(config, tmp_path)
     agent.backend = _FailingRuntimeFactBackend()
 

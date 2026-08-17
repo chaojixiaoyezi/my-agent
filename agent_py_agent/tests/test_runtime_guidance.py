@@ -855,7 +855,7 @@ def test_task_steer_stays_as_latest_native_user_turn_across_later_model_rounds(t
 
 def test_text_protocol_keeps_steer_in_transcript_without_building_native_ir(tmp_path) -> None:
     agent = SimpleAgent(
-        AgentConfig(model_backend="echo", tool_protocol="text", subagent_workspace="subs"),
+        AgentConfig(model_backend="echo", subagent_workspace="subs"),
         tmp_path,
     )
     agent.conversation_store.append_guidance(

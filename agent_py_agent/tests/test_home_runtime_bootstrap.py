@@ -14,7 +14,7 @@ def test_simple_agent_initializes_my_agent_home(tmp_path: Path):
     home = tmp_path / "home"
 
     agent = SimpleAgent(
-        AgentConfig(tool_protocol="text", my_agent_home=str(home), prompt_files=[]), repo
+        AgentConfig(my_agent_home=str(home), prompt_files=[]), repo
     )
 
     assert agent.home_paths.root == home.resolve()
@@ -31,7 +31,7 @@ def test_simple_agent_rewrites_runtime_config_paths_to_owner_home(tmp_path: Path
     home = tmp_path / "home"
 
     agent = SimpleAgent(
-        AgentConfig(tool_protocol="text", my_agent_home=str(home), prompt_files=[]), repo
+        AgentConfig(my_agent_home=str(home), prompt_files=[]), repo
     )
 
     owner_home = home / "owners" / "local" / "main"
@@ -54,7 +54,7 @@ def test_saved_run_creates_home_task_workspace(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
     cfg = AgentConfig(
-        tool_protocol="text", my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
+        my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
 
@@ -87,7 +87,7 @@ def test_saved_run_uses_prompt_slug_when_only_machine_ids_are_available(tmp_path
     repo = tmp_path / "repo"
     home = tmp_path / "home"
     cfg = AgentConfig(
-        tool_protocol="text", my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
+        my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
 
@@ -113,7 +113,7 @@ def test_same_prompt_new_run_reuses_task_workspace_with_timeline(tmp_path: Path)
     repo = tmp_path / "repo"
     home = tmp_path / "home"
     cfg = AgentConfig(
-        tool_protocol="text", my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
+        my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
 
@@ -158,7 +158,7 @@ def test_same_task_resume_refreshes_run_identity_without_losing_workspace_facts(
     repo = tmp_path / "repo"
     home = tmp_path / "home"
     cfg = AgentConfig(
-        tool_protocol="text", my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
+        my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
 
@@ -210,7 +210,7 @@ def test_workspace_identity_does_not_reuse_old_state_json(tmp_path: Path):
         encoding="utf-8",
     )
     cfg = AgentConfig(
-        tool_protocol="text", my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
+        my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
 
@@ -225,7 +225,7 @@ def test_long_project_prompt_gets_short_relevant_task_workspace_name(tmp_path: P
     repo = tmp_path / "repo"
     home = tmp_path / "home"
     cfg = AgentConfig(
-        tool_protocol="text", my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
+        my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
 
@@ -294,7 +294,7 @@ def test_saved_run_writes_main_context_bundle_v1(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
     cfg = AgentConfig(
-        tool_protocol="text", my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
+        my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
 
@@ -344,7 +344,7 @@ def test_no_save_run_keeps_main_context_bundle_ephemeral(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
     cfg = AgentConfig(
-        tool_protocol="text", my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
+        my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
 
@@ -364,7 +364,7 @@ def test_task_local_run_does_not_inject_main_context_bundle(tmp_path: Path):
     run_home = tmp_path / "task" / "work" / "agents" / "run-local"
     run_home.mkdir(parents=True)
     cfg = AgentConfig(
-        tool_protocol="text", my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
+        my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
 
@@ -386,7 +386,7 @@ def test_no_save_run_does_not_create_task_workspace_or_daily_memory(tmp_path: Pa
     repo = tmp_path / "repo"
     home = tmp_path / "home"
     cfg = AgentConfig(
-        tool_protocol="text", my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
+        my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
 
@@ -403,7 +403,7 @@ def test_remember_promotes_owner_fact_without_daily_or_ops_body_mirror(tmp_path:
     repo = tmp_path / "repo"
     home = tmp_path / "home"
     cfg = AgentConfig(
-        tool_protocol="text", my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
+        my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
     legacy_path = repo / "memory.jsonl"
@@ -485,7 +485,7 @@ def test_prompt_builder_uses_only_recalled_memory_envelope(tmp_path: Path):
 def test_prompt_builder_reads_home_entry_files_every_round(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
-    cfg = AgentConfig(tool_protocol="text", my_agent_home=str(home), prompt_files=[])
+    cfg = AgentConfig(my_agent_home=str(home), prompt_files=[])
     agent = SimpleAgent(cfg, repo)
     agent.home_paths.owner_soul_md.write_text("人格规则：先证据后判断。\n", encoding="utf-8")
     agent.home_paths.owner_user_md.write_text("用户偏好：短汇报但要有验证。\n", encoding="utf-8")
@@ -513,7 +513,7 @@ def test_prompt_builder_reads_home_entry_files_every_round(tmp_path: Path):
 def test_prompt_builder_ignores_legacy_root_home_files(tmp_path: Path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
-    cfg = AgentConfig(tool_protocol="text", my_agent_home=str(home), prompt_files=[])
+    cfg = AgentConfig(my_agent_home=str(home), prompt_files=[])
     agent = SimpleAgent(cfg, repo)
     agent.home_paths.owner_memory_md.write_text("owner 当前记忆。\n", encoding="utf-8")
     agent.home_paths.memory_md.write_text("旧根污染记忆。\n", encoding="utf-8")

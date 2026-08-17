@@ -891,185 +891,8 @@ def test_gateway_execute_cas_aborted_when_cli_claims_in_window(tmp_path):
     assert _gateway_consume_policy_cas(store2, po, now=now) is True
 
 
-def test_continuation_handoff_repository_cas(tmp_path):
-    """handoff 移交单: 创建/待接管查询/幂等创建/CAS 消费防双领。"""
-    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
-
-    repo = RuntimeRepository(tmp_path / "home" / "runtime.db")
-    now = 1786000000.0
-    hid = repo.create_continuation_handoff(
-        agent_run_id="agentrun-1", attempt_id="attempt-1", task_run_id="taskrun-1",
-        root_run_id="run-1", root_request_id="req-1", root_thread_id="thread-1",
-        root_task_id="task-1", user_prompt="原任务", continuation_seq=8,
-        reason="max_rounds_reached", now=now,
-    )
-    assert hid
-    pending = repo.pending_continuation_handoffs(limit=10)
-    assert len(pending) == 1
-    assert pending[0]["root_run_id"] == "run-1"
-    assert pending[0]["user_prompt"] == "原任务"
-    assert pending[0]["continuation_seq"] == 8
-    # 同 seq 幂等: 不重复创建
-    assert (
-        repo.create_continuation_handoff(
-            agent_run_id="agentrun-1", attempt_id="attempt-1", task_run_id="taskrun-1",
-            root_run_id="run-1", root_request_id="req-1", root_thread_id="thread-1",
-            root_task_id="task-1", user_prompt="原任务", continuation_seq=8,
-            reason="max_rounds_reached", now=now,
-        )
-        == ""
-    )
-    # CAS 消费: 第一个成功, 第二个失败(已被领)
-    assert repo.consume_continuation_handoff(hid, consumed_by="gw", now=now + 1) is True
-    assert repo.consume_continuation_handoff(hid, consumed_by="gw2", now=now + 2) is False
-    assert repo.pending_continuation_handoffs(limit=10) == []
 
 
-def test_handoff_write_on_budget_exhausted(tmp_path):
-    """CLI 预算耗尽路径写移交单(长任务显式移交, 不依赖 store 共享)。"""
-    from agent_py_agent.agent.agent_core.runtime.run_params import (
-        run_params_with_request_id,
-    )
-    from agent_py_agent.cli.resume_loop import run_with_resume
-
-    class _ExhaustAgent(_FakeRunAgent):
-        def __init__(self, tmp_path):
-            from types import SimpleNamespace as _NS
-
-            from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
-
-            super().__init__(tmp_path, task_id="task-handoff")
-            self.subagents = _NS(runtime_db=RuntimeRepository(tmp_path / "home" / "runtime.db"))
-
-        def run(self, prompt, *, params=None, save=False, source="cli_run",
-                resume_context=None, delivery_contract=None, on_chunk=None):
-            seq = int(getattr(params, "continuation_seq", 0) or 0)
-            self.calls.append((seq, str(prompt)[:40]))
-            return SimpleNamespace(
-                runtime_status="unfinished", runtime_reason="TOOL_ROUND_LIMIT_REACHED",
-                runtime_source="tool_loop", tool_rounds=2, attempt_id=f"attempt-{seq}",
-            )
-
-    fake = _ExhaustAgent(tmp_path)
-    base = run_params_with_request_id(
-        RunParams(source="cli_run", request_id="req-1", task_id="task-handoff", task_attributes={})
-    )
-    # max_rounds=2: 首轮 + 1 续跑轮后预算耗尽 → 写移交单
-    outcome = run_with_resume(fake, initial_prompt="原任务描述", base_params=base, max_rounds=2)
-    assert outcome.status == "budget_exhausted"
-    # 移交单已写(同一 runtime.db, 无 conversation store 依赖)
-    repo = fake.subagents.runtime_db
-    pending = repo.pending_continuation_handoffs(limit=10)
-    assert len(pending) == 1
-    assert pending[0]["user_prompt"] == "原任务描述"
-    assert pending[0]["reason"] == "max_rounds_reached"
-    assert pending[0]["root_task_id"] == "task-handoff"
-
-
-def test_gateway_handoff_continuation_rewrites_next_handoff(tmp_path):
-    """gateway 接管多轮: 续跑轮收口后仍可续跑(共享 gate True) → 续写移交单
-    供下个 tick 继续(同一 run 持续推进不截断)。"""
-    from types import SimpleNamespace as _NS
-
-    from agent_py_agent.agent.agent_core.runtime.run_params import (
-        run_params_with_request_id,
-    )
-    from agent_py_agent.agent.conversation.runtime import _run_handoff_continuation
-    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
-
-    repo = RuntimeRepository(tmp_path / "home" / "runtime.db")
-    now = 1786001000.0
-    repo.create_continuation_handoff(
-        agent_run_id="", attempt_id="attempt-1", task_run_id="taskrun-1",
-        root_run_id="run-1", root_request_id="req-1", root_thread_id="thread-1",
-        root_task_id="task-1", user_prompt="原任务", continuation_seq=9,
-        reason="max_rounds_reached", now=now,
-    )
-
-    class _GatewayAgent(_FakeRunAgent):
-        def __init__(self, tmp_path):
-            super().__init__(tmp_path)
-            self.subagents = _NS(runtime_db=repo)
-
-        def run(self, prompt, *, params=None, save=False, source="cli_run",
-                resume_context=None, delivery_contract=None, on_chunk=None):
-            seq = int(getattr(params, "continuation_seq", 0) or 0)
-            self.calls.append((seq, str(prompt)[:40]))
-            # 续跑轮仍 unfinished(可续跑族) → 应续写移交单
-            return SimpleNamespace(
-                runtime_status="unfinished", runtime_reason="TOOL_ROUND_LIMIT_REACHED",
-                runtime_source="tool_loop", tool_rounds=2, attempt_id=f"attempt-{seq}",
-            )
-
-    fake = _GatewayAgent(tmp_path)
-    handoff = repo.pending_continuation_handoffs(limit=10)[0]
-    # 模拟 gateway 领取(CAS)
-    assert repo.consume_continuation_handoff(handoff["handoff_id"], consumed_by="gw", now=now)
-    _run_handoff_continuation(fake, handoff, now=now)
-    # 执行了续跑轮(seq=10 = handoff seq 9 + 1)
-    assert fake.calls and fake.calls[0][0] == 10
-    assert "max_rounds_reached" in fake.calls[0][1]  # 续跑提示含 handoff reason
-    # 续写移交单(seq=10, 下个 tick 继续)
-    pending = repo.pending_continuation_handoffs(limit=10)
-    assert len(pending) == 1
-    assert pending[0]["continuation_seq"] == 10
-    assert pending[0]["user_prompt"] == "原任务"
-
-
-def test_handoff_budget_gate_stops_infinite_continuation(tmp_path):
-    """gateway 接管预算闸: 同 run 已消费移交段数达上限(HANDOFF_BUDGET_
-    SEGMENTS) → 不再领取/续写(防无限续烧额度, 等用户显式「继续」)。"""
-    from types import SimpleNamespace as _NS
-
-    from agent_py_agent.agent.agent_core.runtime.run_params import (
-        run_params_with_request_id,
-    )
-    from agent_py_agent.agent.conversation.runtime import (
-        HANDOFF_BUDGET_SEGMENTS,
-        _handoff_budget_exhausted,
-        _run_handoff_continuation,
-    )
-    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
-
-    repo = RuntimeRepository(tmp_path / "home" / "runtime.db")
-    now = 1786002000.0
-    # 预算上限内的移交单(已消费)
-    for i in range(HANDOFF_BUDGET_SEGMENTS):
-        hid = repo.create_continuation_handoff(
-            agent_run_id="", attempt_id=f"attempt-{i}", task_run_id="taskrun-b",
-            root_run_id="run-b", root_request_id="req-b", root_thread_id="thread-b",
-            root_task_id="task-b", user_prompt="任务B", continuation_seq=1 + i,
-            reason="max_rounds_reached", now=now + i,
-        )
-        assert repo.consume_continuation_handoff(hid, consumed_by="gw", now=now + i + 1)
-    assert _handoff_budget_exhausted(repo, "run-b") is True  # 预算耗尽
-    assert _handoff_budget_exhausted(repo, "run-other") is False  # 其他 run 不受影响
-
-    class _BudgetAgent(_FakeRunAgent):
-        def __init__(self, tmp_path):
-            super().__init__(tmp_path)
-            self.subagents = _NS(runtime_db=repo)
-
-        def run(self, prompt, *, params=None, save=False, source="cli_run",
-                resume_context=None, delivery_contract=None, on_chunk=None):
-            self.calls.append(int(getattr(params, "continuation_seq", 0) or 0))
-            return SimpleNamespace(
-                runtime_status="unfinished", runtime_reason="TOOL_ROUND_LIMIT_REACHED",
-                runtime_source="tool_loop", tool_rounds=2, attempt_id="attempt-x",
-            )
-
-    # 预算耗尽后: 即使执行续跑轮也不续写移交单
-    fake = _BudgetAgent(tmp_path)
-    handoff = {
-        "handoff_id": "h", "root_run_id": "run-b", "root_task_id": "task-b",
-        "root_request_id": "req-b", "root_thread_id": "thread-b",
-        "user_prompt": "任务B", "continuation_seq": HANDOFF_BUDGET_SEGMENTS,
-        "reason": "max_rounds_reached", "attempt_id": "attempt-9",
-    }
-    _run_handoff_continuation(fake, handoff, now=now)
-    assert fake.calls == [HANDOFF_BUDGET_SEGMENTS + 1]  # 执行了一轮
-    pending = repo.pending_continuation_handoffs(limit=10)
-    assert pending == []  # 不续写移交单
 
 
 def test_gateway_consume_rejects_live_gateway_claim(tmp_path):
@@ -1116,62 +939,6 @@ def test_gateway_consume_rejects_live_gateway_claim(tmp_path):
     po = [p for p in store.list_progress_policies(enabled_only=True) if p.task_id == "task-other2"][0]
     assert _gateway_consume_policy_cas(store, po, now=now) is True
 
-
-def test_handoff_round_deadline_interrupts_and_does_not_rehandoff(tmp_path, monkeypatch):
-    """双席复核硬门4(seq1903): 单轮 wall-clock deadline——gateway 接管轮
-    挂起超时被 interrupt_by_name 中断(InterruptedError) → 不续写移交单
-    (fail-closed 释放), 不留 attempt 永久 running。"""
-    import threading as _threading
-    from types import SimpleNamespace as _NS
-
-    from agent_py_agent.agent.agent_core.runtime.run_params import (
-        run_params_with_request_id,
-    )
-    from agent_py_agent.agent.conversation import runtime as _runtime
-    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
-
-    repo = RuntimeRepository(tmp_path / "home" / "runtime.db")
-    now = 1786003000.0
-    repo.create_continuation_handoff(
-        agent_run_id="", attempt_id="attempt-1", task_run_id="taskrun-d",
-        root_run_id="run-d", root_request_id="req-d", root_thread_id="thread-d",
-        root_task_id="task-d", user_prompt="任务D", continuation_seq=1,
-        reason="max_rounds_reached", now=now,
-    )
-    handoff = repo.pending_continuation_handoffs(limit=10)[0]
-    assert repo.consume_continuation_handoff(handoff["handoff_id"], consumed_by="gw", now=now)
-
-    class _StuckAgent(_FakeRunAgent):
-        def __init__(self, tmp_path):
-            super().__init__(tmp_path)
-            self.subagents = _NS(runtime_db=repo)
-
-        def run(self, prompt, *, params=None, save=False, source="cli_run",
-                resume_context=None, delivery_contract=None, on_chunk=None):
-            self.calls.append(1)
-            # 模拟挂起: 等待中断(InterruptedError)
-            from agent_py_agent.agent.concurrency.interrupt import (
-                interrupt_by_name,
-                register_interruptible,
-            )
-            from agent_py_agent.agent.conversation.control_commands import (
-                conversation_request_interrupt_name,
-            )
-
-            name = conversation_request_interrupt_name("task-d")
-            # 注册后立即触发中断(模拟 deadline 到期)
-            with register_interruptible(name):
-                interrupt_by_name(name)
-                raise InterruptedError("deadline")
-            raise AssertionError("unreachable")
-
-    fake = _StuckAgent(tmp_path)
-    # deadline 常量临时调小不必要——直接验证中断路径: agent.run 抛
-    # InterruptedError 被 _run_handoff_continuation 的 finally 清理,
-    # 且不续写移交单。
-    _runtime._run_handoff_continuation(fake, handoff, now=now)
-    assert fake.calls == [1]  # 执行了(被中断)
-    assert repo.pending_continuation_handoffs(limit=10) == []  # 不续写
 
 
 def test_orphan_reclaim_nonterminal_ops_writes_visible_event(tmp_path):
@@ -1311,8 +1078,8 @@ def test_create_attempt_blocked_while_unknown_prevents_auto_continue(tmp_path):
     """unknown 终态不触发自动续跑(双席核对点3): 自动拉起(create_attempt)
     撞 unknown 闸 fail-closed 抛 RuntimeConflictError + 写诊断事件——
     recovered 前该 run 不会被任何调度器/唤醒轮自动挂载。"""
-    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
     from agent_py_agent.agent.runtime_db.operations import RuntimeConflictError
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 
     repo = RuntimeRepository(tmp_path / "home" / "runtime.db")
     now = 1786006000.0
@@ -1829,10 +1596,10 @@ def test_unknown_halt_reason_aligns_with_taxonomy(monkeypatch):
 
 def test_unknown_outcome_keeps_reported_output_preview(tmp_path):
     """UNKNOWN 包装保留失败输出有界摘要(2026-08-15 cell1): 模型可见编译错误。"""
+    from agent_py_agent.agent.tooling.models import ToolHandlerOutcome
     from agent_py_agent.agent.tooling.tool_operation_coordinator import (
         _unknown_outcome_result,
     )
-    from agent_py_agent.agent.tooling.models import ToolHandlerOutcome
 
     class _Req:
         tool_name = "run_command"

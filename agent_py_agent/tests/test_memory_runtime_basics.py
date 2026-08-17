@@ -57,7 +57,6 @@ def _read_jsonl(path: Path) -> list[dict]:
 
 
 def _test_config(tmp_path: Path, **kwargs) -> AgentConfig:
-    kwargs.setdefault("tool_protocol", "text")
     return AgentConfig(my_agent_home=str(tmp_path / "home"), **kwargs)
 
 
@@ -216,7 +215,7 @@ def test_provider_saved_run_writes_only_owner_task_workspace(tmp_path):
 
 def test_run_surfaces_compact_suggestion_without_persistence(tmp_path):
     """LLM: Tests save=False keeps compact read-only while saved runs auto-apply."""
-    agent = SimpleAgent(AgentConfig(model_backend="echo", tool_protocol="text"), tmp_path)
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
     agent.backend.context_window_tokens = 20
 
     result = agent.run("请生成足够长的 compact 提示触发内容", save=False)
@@ -236,7 +235,7 @@ def test_run_surfaces_compact_suggestion_without_persistence(tmp_path):
 
 
 def test_run_context_overflow_uses_same_compact_cycle_even_below_threshold(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", tool_protocol="text"), tmp_path)
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
     agent.backend = RuntimeOverflowBackend()
 
     result = agent.run("普通短任务，但后端报告上下文溢出", save=False)
@@ -252,7 +251,7 @@ def test_run_context_overflow_uses_same_compact_cycle_even_below_threshold(tmp_p
 
 
 def test_run_context_error_uses_same_compact_cycle(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", tool_protocol="text"), tmp_path)
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
     backend = RaisingContextBackend()
     agent.backend = backend
 
@@ -265,7 +264,7 @@ def test_run_context_error_uses_same_compact_cycle(tmp_path):
 
 
 def test_run_preflights_prompt_over_context_before_provider_call(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", tool_protocol="text"), tmp_path)
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
     backend = NeverCalledBackend()
     agent.backend = backend
 
@@ -279,7 +278,7 @@ def test_run_preflights_prompt_over_context_before_provider_call(tmp_path):
 
 def test_run_uses_provider_usage_for_active_compact_budget_not_cumulative(tmp_path):
     agent = SimpleAgent(
-        AgentConfig(model_backend="echo", prompt_files=[], tool_protocol="text"),
+        AgentConfig(model_backend="echo", prompt_files=[]),
         tmp_path,
     )
     backend = SequenceUsageBackend(
@@ -330,7 +329,7 @@ def test_active_compact_budget_excludes_full_archive_tool_history(tmp_path):
 
 def test_run_no_save_blocks_persistent_auto_compact_apply(tmp_path):
     """LLM: Tests that save=False remains a hard persistence boundary for auto compact apply."""
-    agent = SimpleAgent(AgentConfig(model_backend="echo", tool_protocol="text"), tmp_path)
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
     agent.backend.context_window_tokens = 20
 
     result = agent.run(
@@ -351,7 +350,7 @@ def test_run_no_save_blocks_persistent_auto_compact_apply(tmp_path):
 
 def test_run_no_save_does_not_write_raw_archive(tmp_path):
     """LLM: Tests that agent.run() with save=False does not write any raw archive files."""
-    agent = SimpleAgent(AgentConfig(model_backend="echo", tool_protocol="text"), tmp_path)
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
 
     result = agent.run("不要归档这轮对话", save=False)
 
@@ -363,7 +362,7 @@ def test_run_no_save_does_not_write_raw_archive(tmp_path):
 
 def test_run_no_save_does_not_write_runtime_fact(tmp_path):
     """LLM: Tests that save=False does not write runtime fact sources."""
-    agent = SimpleAgent(AgentConfig(model_backend="echo", tool_protocol="text"), tmp_path)
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
 
     result = agent.run(
         "子代理已完成，请写恢复锚点",

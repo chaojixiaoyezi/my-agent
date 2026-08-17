@@ -21,22 +21,22 @@ def _oracle(facts: CloseoutFacts) -> CloseoutOutcome:
     status = str(facts.runtime_status or "").strip().lower()
     reason = str(facts.runtime_reason or "").strip()
     if status == "ok":
-        return CloseoutOutcome("done", "", "done", False)
+        return CloseoutOutcome("done", "", "done")
     if status == "cancelled":
-        return CloseoutOutcome("cancelled", reason or "user_stop", "cancelled", False)
+        return CloseoutOutcome("cancelled", reason or "user_stop", "cancelled")
     if not facts.continuable:
-        return CloseoutOutcome("wait_human", reason or "not_continuable", "wait_human", False)
+        return CloseoutOutcome("wait_human", reason or "not_continuable", "wait_human")
     if not facts.active_goal:
-        return CloseoutOutcome("wait_handoff", "no_active_goal", "wait_handoff", False)
+        return CloseoutOutcome("wait_handoff", "no_active_goal", "wait_handoff")
     if int(facts.same_reason_streak or 0) >= 3:
         return CloseoutOutcome(
-            "wait_handoff", "same_reason_resume_limit_reached", "wait_handoff", True
+            "wait_handoff", "same_reason_resume_limit_reached", "wait_handoff"
         )
     if int(facts.resume_budget_left or 0) == 0:
-        return CloseoutOutcome("wait_handoff", "resume_limit_reached", "wait_handoff", True)
+        return CloseoutOutcome("wait_handoff", "resume_limit_reached", "wait_handoff")
     if int(facts.rounds or 0) >= int(facts.max_rounds or 0):
-        return CloseoutOutcome("wait_handoff", "max_rounds_reached", "wait_handoff", True)
-    return CloseoutOutcome("resume_round", reason or "continuable", "resume_round", False)
+        return CloseoutOutcome("wait_handoff", "max_rounds_reached", "wait_handoff")
+    return CloseoutOutcome("resume_round", reason or "continuable", "resume_round")
 
 
 _STATUSES = ["ok", "cancelled", "unfinished", "blocked", "context_overflow"]
@@ -81,7 +81,6 @@ def test_ok_closeout_is_done_regardless_of_goal_and_budget():
     )
     outcome = decide_closeout(facts)
     assert outcome.state == "done"
-    assert outcome.handoff is False
 
 
 def test_cancelled_is_terminal():
@@ -108,7 +107,6 @@ def test_blocked_protocol_violation_wait_human():
     outcome = decide_closeout(facts)
     assert outcome.state == "wait_human"
     assert outcome.reason == "PROTOCOL_VIOLATION"
-    assert outcome.handoff is False
 
 
 def test_no_active_goal_means_no_auto_resume_exit39():
@@ -122,7 +120,6 @@ def test_no_active_goal_means_no_auto_resume_exit39():
     outcome = decide_closeout(facts)
     assert outcome.state == "wait_handoff"
     assert outcome.reason == "no_active_goal"
-    assert outcome.handoff is False
 
 
 def test_active_goal_with_budget_resumes():

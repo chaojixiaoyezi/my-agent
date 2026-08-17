@@ -43,41 +43,42 @@ class CloseoutFacts:
 
 
 # LLM: 机器输出——state 是唯一命运判定, guidance_key 是唯一承诺文案选择键
-# (见 _final_response_after_* 改造步骤 4), handoff 决定是否写移交单。
+# (见 _final_response_after_* 改造步骤 4)。2026-08-17 owner 拍板删除 gateway
+# 移交线后不再有 handoff 标志: 预算/同因/轮数耗尽只是"停, 等用户继续"。
 # 函数用途: decide_closeout 的返回值, 调用方按 state 执行、不另做分支判断。
 @dataclass(frozen=True)
 class CloseoutOutcome:
     state: str
     reason: str
     guidance_key: str
-    handoff: bool
 
 
 # LLM: 收口判定单一权威。规则顺序即优先级: 终态 > 白名单 > goal 授权 >
-# 收敛护栏(同因/预算/轮数)。语义必须与 run_with_resume/run_manual_resume/
-# gateway _run_handoff_continuation 现有行为一一对应(行为等价迁移, 不是
-# 新语义); 任何规则变更要同步 docs/design/closeout_state_machine.md。
+# 收敛护栏(同因/预算/轮数)。语义必须与 run_with_resume/run_manual_resume
+# 现有行为一一对应(行为等价迁移, 不是新语义); 2026-08-17 owner 拍板删除
+# gateway 移交线后机器只服务 CLI 两条线; 任何规则变更要同步
+# docs/design/closeout_state_machine.md。
 # 函数用途: 输入一轮收口后的事实, 输出下一步终态; 纯函数, 无副作用。
 def decide_closeout(facts: CloseoutFacts) -> CloseoutOutcome:
     status = str(facts.runtime_status or "").strip().lower()
     reason = str(facts.runtime_reason or "").strip()
     if status == "ok":
-        return CloseoutOutcome(STATE_DONE, "", "done", False)
+        return CloseoutOutcome(STATE_DONE, "", "done")
     if status == "cancelled":
-        return CloseoutOutcome(STATE_CANCELLED, reason or "user_stop", "cancelled", False)
+        return CloseoutOutcome(STATE_CANCELLED, reason or "user_stop", "cancelled")
     # 不可续跑族(blocked/协议违规/UNKNOWN 副作用等): 等用户显式继续, 不自动跑。
     if not facts.continuable:
         return CloseoutOutcome(
-            STATE_WAIT_HUMAN, reason or "not_continuable", "wait_human", False
+            STATE_WAIT_HUMAN, reason or "not_continuable", "wait_human"
         )
     # 可续跑族, 但正常不自动续跑(EXEC-39): 无 active goal → 停即停
-    # , 用户 run --resume 手动继续。不写移交单——移交单是
-    # gateway/cron 的接管入口, 无 goal 任务写单会被活着的调度器自动续跑,
-    # 违背 owner"正常不自动续跑"的拍板; 只有授权了自动续跑但预算/收敛
-    # 耗尽时才写单供 gateway 续接。
+    # , 用户 run --resume 手动继续。2026-08-17 owner 拍板
+    # 删除 gateway 移交线——不再有"写单供调度器接管"这一步, 任务停下
+    # 后唯一续跑入口是用户显式 run --resume(或后续 goal/cron 模式按
+    # 持久事实新建的驱动)。
     if not facts.active_goal:
         return CloseoutOutcome(
-            STATE_WAIT_HANDOFF, "no_active_goal", "wait_handoff", False
+            STATE_WAIT_HANDOFF, "no_active_goal", "wait_handoff"
         )
     # EXEC-30 同因收敛: 连续同因达上限强制收口移交, 不再续跑。
     if int(facts.same_reason_streak or 0) >= SAME_REASON_RESUME_LIMIT:
@@ -85,18 +86,17 @@ def decide_closeout(facts: CloseoutFacts) -> CloseoutOutcome:
             STATE_WAIT_HANDOFF,
             "same_reason_resume_limit_reached",
             "wait_handoff",
-            True,
         )
     # 预算闸(resume_limit, policy 单一权威): 无剩余自动续跑次数 → 移交。
     # 语义: >0=剩余次数; ==0=耗尽; <0=无预算概念(不限, 手动续跑/无 policy)。
     if int(facts.resume_budget_left or 0) == 0:
         return CloseoutOutcome(
-            STATE_WAIT_HANDOFF, "resume_limit_reached", "wait_handoff", True
+            STATE_WAIT_HANDOFF, "resume_limit_reached", "wait_handoff"
         )
     # 进程内护栏(max_rounds, 总代数上限含首轮): 已达上限 → 移交。
     if int(facts.rounds or 0) >= int(facts.max_rounds or 0):
         return CloseoutOutcome(
-            STATE_WAIT_HANDOFF, "max_rounds_reached", "wait_handoff", True
+            STATE_WAIT_HANDOFF, "max_rounds_reached", "wait_handoff"
         )
     # 全部护栏通过且 goal 授权 → 自动续下一轮(goal-round-driver 同款)。
-    return CloseoutOutcome(STATE_RESUME_ROUND, reason or "continuable", "resume_round", False)
+    return CloseoutOutcome(STATE_RESUME_ROUND, reason or "continuable", "resume_round")

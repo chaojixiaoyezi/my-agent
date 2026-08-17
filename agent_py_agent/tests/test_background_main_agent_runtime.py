@@ -1298,7 +1298,7 @@ def test_thread_goal_turn_with_no_tool_calls_stops_auto_continuation(tmp_path) -
 
 def test_thread_goal_with_tool_progress_schedules_exactly_one_next_turn(tmp_path) -> None:
     agent = SimpleAgent(
-        AgentConfig(tool_protocol="text", enable_tools=True, memory_path="memory.jsonl"),
+        AgentConfig(enable_tools=True, memory_path="memory.jsonl"),
         tmp_path,
     )
     agent.backend = _GoalToolProgressBackend()

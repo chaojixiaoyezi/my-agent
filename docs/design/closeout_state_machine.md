@@ -69,13 +69,15 @@ after_*`）只负责报原因，不再各自决定命运、不再各自拼"会�
 | `done` | ok | 无 | — |
 | `cancelled` | cancelled/user_stop | 无 | — |
 | `wait_human` | blocked / PROTOCOL_VIOLATION / UNKNOWN 副作用 | 无（人工闸） | 用户 `run --resume`（结构化重激活 link） |
-| `wait_handoff` | unfinished（可续跑族 reason） | 写 continuation handoff | 用户 `run --resume` / gateway / cron |
+| `wait_handoff` | unfinished（可续跑族 reason） | 停止等待（2026-08-17 起不再写移交单） | 用户 `run --resume`（后续 goal/cron 模式按持久事实新建驱动） |
 | `resume_round` | unfinished（可续跑族 reason） | 进程内自动续下一轮 | goal-round-driver（EXEC-39 授权） |
 
-`wait_handoff` 的移交单规则：只有"授权了自动续跑但预算/同因/轮数耗尽"
-才写移交单（供 gateway 续接）；无 active goal 的普通任务（EXEC-39 停即停）
-**不写单**——写单会被活着的 gateway 调度器自动接管，违背 owner"正常不
-自动续跑"的拍板。机器用 `handoff` 布尔区分（no_active_goal → False）。
+2026-08-17 owner 拍板：删除 gateway 移交线（continuation_handoffs 表 +
+_consume_pending_handoffs/_run_handoff_continuation）。理由：任务不丢靠
+task.yaml/run_workspace.json/runtime.db 三处落盘而非移交单；移交单只是
+"谁自动接力"的中间传话筒，与 progress policy / goal 续跑通道重叠；EXEC-39
+已定"正常不自动续跑"。删除后 `wait_handoff` 语义 = "停止，等用户显式
+run --resume"；no_active_goal 也归此态（调用方按其 reason 区分）。
 
 收敛护栏全部保留并收进机器输入：resume_limit 预算（policy 单一权威）、
 max_rounds（进程内护栏）、EXEC-30 同因 3 次收敛。`resume_round` 只在
@@ -101,7 +103,7 @@ class CloseoutOutcome:
     state: str                 # done/cancelled/wait_human/wait_handoff/resume_round
     reason: str
     guidance_key: str          # 唯一文案选择键（见 §5）
-    handoff: bool              # 是否写移交单
+    # (2026-08-17 移交线删除后不再有 handoff 字段)
 ```
 
 `decide_closeout(facts) -> CloseoutOutcome` 纯函数（可穷举单测）。
@@ -124,13 +126,13 @@ CLI `run_with_resume`/`run_manual_resume` 与 gateway `_run_handoff_continuation
 3. ✅ `run_manual_resume` 换用机器（用户显式 resume=授权, 预算-1=不限）。
 4. ✅ `_final_response_after_tool_limit` 承诺文案换用同源判定（EXEC-39 goal
    门 + policy 预算），"会自动继续"仅当机器真的会续。
-5. ✅ 收尾定案：gateway `_run_handoff_continuation` **有意不折叠进机器**——
-   该线的授权是移交单本身(写单即授权)、预算是 HANDOFF_BUDGET_SEGMENTS
-   段数预算, 与机器的 goal 授权/resume_limit 语义不同源; 强行套用一个
-   机器只会让事实失形。机器管辖 CLI 自动续跑与手动续跑两条线,
-   gateway 移交线保持独立(设计 §3 表格中"谁触发下一步"已区分)。
-   白名单 CONTINUABLE_REASONS 仍是机器唯一原因源(经 should_continue_task
-   以 continuable 事实输入)。
+5. ✅ 收尾定案(2026-08-17 owner 拍板升级)：gateway 移交线**整体删除**——
+   移交单/扫描消费/段数预算全部移除(任务不丢靠落盘三事实源, 移交单只是
+   "谁自动接力"的中间层, 与 policy/goal 通道重叠, 且 EXEC-39 已定正常不
+   自动续跑)。机器只管辖 CLI 自动续跑与手动续跑两条线; 后续 goal/cron
+   模式需要自动接力时, 按持久事实(task link/state.json/runtime.db)新建
+   单一权威驱动, 不再恢复移交单机制。白名单 CONTINUABLE_REASONS 仍是
+   机器唯一原因源(经 should_continue_task 以 continuable 事实输入)。
 
 ## 7. 验收
 

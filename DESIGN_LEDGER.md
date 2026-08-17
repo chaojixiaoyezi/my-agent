@@ -304,3 +304,15 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 参考：会话运行时 无系统侧收口机（模型自然停=done，goal 扩展只做目标层轮次）、
   dsh /goal = goal-round-driver 同款。
 - 实施切 5 步（见文档 §6），每步独立提交。
+
+## gateway 移交线删除与自动接力重建方向【状态：已删除，重建待 goal/cron 设计】
+
+- 2026-08-17 owner 拍板删除 gateway 移交线(EXEC-42, 见 ISSUES.md)。
+- 结论: 任务不丢靠落盘(task.yaml/run_workspace.json/runtime.db), 不靠
+  移交单; 移交单只是"谁自动接力"的中间层, 与 progress policy / goal
+  续跑通道重叠; EXEC-39 已定正常不自动续跑。
+- 重建方向(goal/cron 模式设计时): 以持久事实为单一权威新建自动接力
+  驱动——未完成任务 = task link active + state.json 非终态 + runtime.db
+  非终态(现有 unfinished_task_ids 三源交叉已具备), 驱动 = goal-round
+  driver(dsh 同款)+ cron tick; 同时解决唤醒轮每 2 分钟全量扫描问题
+  (增量游标/单次扫描多消费)。

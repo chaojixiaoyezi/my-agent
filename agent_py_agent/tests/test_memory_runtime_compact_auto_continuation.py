@@ -540,7 +540,7 @@ def test_run_auto_compact_apply_continues_once_after_continue_packet(tmp_path):
 def test_run_auto_compact_apply_continues_with_home_entries_and_packet(tmp_path):
     home = tmp_path / "home"
     agent = SimpleAgent(
-        AgentConfig(model_backend="echo", my_agent_home=str(home), tool_protocol="text"),
+        AgentConfig(model_backend="echo", my_agent_home=str(home)),
         tmp_path,
     )
     backend = ContextOverflowThenCaptureBackend()
@@ -579,7 +579,7 @@ def test_run_auto_compact_apply_continues_with_home_entries_and_packet(tmp_path)
 def test_run_auto_compact_continuation_reuses_original_task_workspace(tmp_path):
     home = tmp_path / "home"
     agent = SimpleAgent(
-        AgentConfig(model_backend="echo", my_agent_home=str(home), tool_protocol="text"),
+        AgentConfig(model_backend="echo", my_agent_home=str(home)),
         tmp_path,
     )
     backend = ContextOverflowThenCaptureBackend()
@@ -1740,7 +1740,7 @@ def test_compact_continuation_carries_active_turn_user_input_on_text_protocol():
         "text": "先修复验收失败再收口。",
     }
     agent = SimpleNamespace(
-        config=SimpleNamespace(tool_protocol="text", enable_tools=True),
+        config=SimpleNamespace(enable_tools=True),
         backend=SimpleNamespace(name="echo"),
     )
 

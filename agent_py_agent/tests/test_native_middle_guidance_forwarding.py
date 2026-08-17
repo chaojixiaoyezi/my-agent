@@ -168,7 +168,7 @@ def test_native_messages_forward_new_guidance_but_not_old():
 def test_text_protocol_unaffected():
     agent = SimpleNamespace(
         backend=SimpleNamespace(name="anthropic_compatible"),
-        config=SimpleNamespace(tool_protocol="text", enable_tools=True),
+        config=SimpleNamespace(enable_tools=True),
         tools=SimpleNamespace(),
     )
     params = SimpleNamespace(
