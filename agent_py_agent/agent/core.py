@@ -679,15 +679,18 @@ def _resolve_home_paths(config: AgentConfig):
 
 
 def _configured_home_root(config: AgentConfig) -> str | None:
-    # LLM: MY_AGENT_HOME 环境变量优先于配置值——配置 yaml 的默认值 (~/.my-agent) 非空时
-    # 若仍"配置优先"会让环境变量隔离通道名存实亡(测试/多 profile 隔离静默失效, 2026-08-15
-    # VM 真机实证)。参照 长期助手 env_loader 与 12-factor: 运行时注入的环境变量 > 配置默认值。
-    # 函数用途: 解析 my-agent home 根目录, 环境变量优先, 配置值为默认兜底。
-    env_home = str(os.environ.get("MY_AGENT_HOME", "") or "").strip()
-    if env_home:
-        return env_home
+    # LLM: home 根解析的单一权威。优先级: 显式配置值(非空) > MY_AGENT_HOME
+    # 环境变量 > ~/.my-agent 兜底(home_layout.resolve_my_agent_home)。
+    # 前提: 配置 yaml 默认留空(""=未固定)——只有用户显式填了 home 才是"固定
+    # profile", 固定值应胜过运行时注入; 未固定时环境变量注入生效(12-factor,
+    # 参照 长期助手 env_loader)。2026-08-15 VM 真机"环境变量被 YAML 默认值挡住"
+    # 的教训已通过 YAML 默认改空解决, 不再需要环境变量无条件压过显式配置。
+    # 函数用途: 解析 my-agent home 根目录。
     raw = str(getattr(config, "my_agent_home", "") or "").strip()
-    return raw or None
+    if raw:
+        return raw
+    env_home = str(os.environ.get("MY_AGENT_HOME", "") or "").strip()
+    return env_home or None
 
 
 def _register_owner_ref_if_possible(paths, owner) -> None:
