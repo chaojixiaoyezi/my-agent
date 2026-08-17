@@ -51,6 +51,10 @@ def test_card_and_prompt_defaults_match_shipped_config():
         "collaboration",
         "orchestration",
         "goal",
+        "web",
+        "vision",
+        "meta",
+        "mcp",
     ]
     assert defaults.tool_catalog_include_examples is shipped.tool_catalog_include_examples is False
     assert defaults.tool_catalog_entry_max_chars == shipped.tool_catalog_entry_max_chars == 700
