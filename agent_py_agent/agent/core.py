@@ -21,6 +21,7 @@ from .agent_core import (
     SimpleAgentDispatchMixin,
     SimpleAgentRuntimeMixin,
     SimpleAgentSubagentMixin,
+    SleepTool,
     TaskProgressTool,
     WaitTool,
     execute_cancel_subagents,
@@ -1016,6 +1017,9 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(CancelSubagentsTool(agent))
     agent.tools.register(InspectAgentTreeTool(agent))
     agent.tools.register(WaitTool(agent))
+    # clock.sleep(扫描治理第二步, 对齐 会话运行时 handlers/sleep.rs): 模型主动定时
+    # 等待, 落 wake_queue 字条, 事件可提前唤醒; 不是进程内打盹。
+    agent.tools.register(SleepTool(agent))
     agent.tools.register(SendGuidanceTool(agent))
     agent.tools.register(DispatchSubagentsTool(agent))
     agent.tools.register(ResolveCapabilityRequestsTool(agent))
@@ -1043,5 +1047,6 @@ __all__ = [
     "TaskProgressTool",
     "SubmitCollaborationResultTool",
     "UpdateCollaborationTool",
+    "SleepTool",
     "WaitTool",
 ]

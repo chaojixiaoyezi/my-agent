@@ -3108,6 +3108,20 @@ def _consume_pending_wake_signals(
     return reported
 
 
+def _cancel_sleep_wake_on_event(scheduler: BackgroundMainAgentScheduler, signal: WakeSignal) -> None:
+    """事件唤醒到达时取消该任务的 sleep 字条(提前醒, 闹钟作废)。"""
+    task_id = str(getattr(signal, "root_task_id", "") or "").strip()
+    if not task_id:
+        return
+    try:
+        agent = getattr(getattr(scheduler, "runtime", None), "agent", None)
+        repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+        if repo is not None and callable(getattr(repo, "cancel_wakes_for_task", None)):
+            repo.cancel_wakes_for_task(task_id)
+    except Exception:  # noqa: BLE001 清不掉不影响唤醒本身
+        pass
+
+
 def _skip_pending_wake_signal(
     scheduler: BackgroundMainAgentScheduler,
     signal: WakeSignal,
@@ -3165,6 +3179,9 @@ def _consume_wake_signal_batch(
     if _is_scheduler_wake_signal(signal):
         return
     reported.add(report.thread_id)
+    # 扫描治理: 事件唤醒=提前醒——该任务的 sleep 字条作废(闹钟取消),
+    # 不重复唤醒(fail-silent, 清不掉下轮对账兜底)。
+    _cancel_sleep_wake_on_event(scheduler, signal)
     scheduler._mark_sibling_signals(wake_signals, signal, current, handled)
     if len(wake_batch) <= 1:
         return
