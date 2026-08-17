@@ -139,7 +139,7 @@ def _tool(
             task_attributes=task_attributes,
             tool_protocol_snapshot=ToolProtocolSnapshot(
                 run_id="watch-test-run",
-                source_protocol="native",
+                source_protocol="text",
                 capability=ProviderToolCapability(
                     provider="test",
                     endpoint="local://watch-test",
