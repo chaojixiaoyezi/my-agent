@@ -496,7 +496,18 @@ def test_runtime_fact_terminal_records_user_interrupt_as_cancelled(tmp_path: Pat
 class _FailingRuntimeFactBackend:
     name = "failing_runtime_fact_backend"
 
-    def generate(self, prompt: str, on_chunk=None):
+    def probe_tool_capability(self):
+        from agent_py_agent.agent.backends.base import ProviderToolCapability
+        from agent_py_agent.agent.backends.base import _utc_now_iso
+
+        return ProviderToolCapability(
+            provider=self.name, endpoint="local://failing", model="",
+            stream=False, native_supported=True,
+            evidence="test_backend_declares_native_tools",
+            observed_at=_utc_now_iso(),
+        )
+
+    def generate(self, prompt: str, on_chunk=None, **kwargs):
         raise RuntimeError("model turn failed")
 
 
