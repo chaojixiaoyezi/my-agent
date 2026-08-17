@@ -316,3 +316,29 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   非终态(现有 unfinished_task_ids 三源交叉已具备), 驱动 = goal-round
   driver(dsh 同款)+ cron tick; 同时解决唤醒轮每 2 分钟全量扫描问题
   (增量游标/单次扫描多消费)。
+
+## 唤醒轮全量扫描治理【状态：设计定案，待实施】
+
+- 实锤(2026-08-17 源码核查): BackgroundMainAgentScheduler.tick() 无内部
+  节流, supervisor 轮询 1-5s 单飞提交——tick 内 _enqueue_unfinished_task_
+  resume_wakes(glob 全部 task link + 全部 tasks/*/*/work/state.json + 每候选
+  查 runtime.db)与 _consume_due_policies(全量读 policies 目录)以 1-5s 节奏
+  反复全量扫描; 孤儿回收/账本 gc 已有 5min/6h 频率门, 但前两者没有。
+- 参考实现(已读源码):
+  - 长期助手(cron/jobs.py get_due_jobs + gateway/run.py housekeeping):
+    单一 jobs.json 每 tick 全读但内存按 next_run_at 过滤(单小文件, 无
+    目录树遍历/无逐候选 DB 查); tick 60s; 文件锁单 tick; catch-up 折叠
+    (过期 recurring 只补跑一次并快进 next_run_at, 防重启爆量); 家务
+    按 tick_count%N 分频(5min/每小时), 重活不进每 tick。
+  - 通道运行时(src/infra/heartbeat-runner-scheduler.ts + commitments/store.js):
+    到期即数据——SQLite due_earliest_ms/due_latest_ms 索引 WHERE 查询,
+    per-agent 内存 nextDueMs Map(不到期不重查), cadence 由系统 cron 每
+    agent 一个 monitor job 携带持久化权威; 事件唤醒过集中 cooldown
+    (min-spacing + flood 环形缓冲)。无中央全量扫描。
+- 治理方案(定案, 分步实施):
+  1) tick 内节流门: scheduler.tick 加最小间隔(如 15-30s 全量 pass, 期间
+    只做便宜消费); 2) _consume_due_policies 按 next_due_at 索引只取到期
+    (policies 目录单文件化或内存有序索引); 3) unfinished_task_ids 三源
+    对账从热 tick 移到低频层(5min, 长期助手 分频同款), 热层只查内存缓存
+    的到期任务集, 由事件(任务状态变更/wake)失效刷新; 4) catch-up 折叠:
+    漏窗任务补跑一次并快进(我们已有 wake cooldown, 对齐即可)。
