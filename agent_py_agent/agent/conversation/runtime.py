@@ -3860,6 +3860,12 @@ class _BackgroundSchedulerTickMixin:
                         # 档案没了(任务已终结/未挂线程) → 清字条, 不唤醒
                         repo.complete_wake(wake_id)
                         continue
+                    link_status = self._task_link_status(thread.thread_id, task_id)
+                    if link_status in {"terminal", "missing"}:
+                        # DESIGN_LEDGER 铁律: 排队的定时/生命周期 wake 在任务
+                        # 终态后直接作废, 不能复活任务。
+                        repo.complete_wake(wake_id)
+                        continue
                     self.store.raise_wake_signal(
                         {
                             "thread_id": thread.thread_id,
@@ -3892,17 +3898,27 @@ class _BackgroundSchedulerTickMixin:
             from ..owner_wake_discovery import unfinished_task_ids
 
             unfinished = set(unfinished_task_ids(Path(owner_home)))
+            pending = repo.list_pending_wakes(limit=1000)
+            pending_tasks = {str(row.get("root_task_id") or "") for row in pending}
             # EXEC-39(owner 拍板): 普通任务不自动续跑——字条只给有 active goal
             # 授权的任务补(goal 任务自动续跑合法, 与 _auto_resume_authorized
             # 同源); 普通任务只在模型自己 sleep 时短期待机, 不靠对账自动唤醒。
+            # audit 任务另有观察/audit 唤醒通道, goal_tick 会双重拉起主代理
+            # (H 批实锤: capacity wake 冻结回复被二次模型调用打破)。
+            # 已有 pending 字条的任务不重写到期时间——否则每 5min 对账都会把
+            # 闹钟往后推, 永远不响(对账只补缺失, 不续命)。
             for task_id in unfinished:
-                if self._task_has_active_goal(task_id):
-                    repo.upsert_wake(
-                        root_task_id=task_id,
-                        next_due_at=now + _TASK_RESUME_COOLDOWN_SECONDS,
-                        kind="goal_tick",
-                    )
-            pending = repo.list_pending_wakes(limit=1000)
+                if task_id in pending_tasks:
+                    continue
+                if not self._task_has_active_goal(task_id):
+                    continue
+                if self._task_work_kind(task_id) == "audit":
+                    continue
+                repo.upsert_wake(
+                    root_task_id=task_id,
+                    next_due_at=now + _TASK_RESUME_COOLDOWN_SECONDS,
+                    kind="goal_tick",
+                )
             for row in pending:
                 tid = str(row.get("root_task_id") or "")
                 if tid and tid not in unfinished:
@@ -3922,6 +3938,43 @@ class _BackgroundSchedulerTickMixin:
             ).strip().lower() == "active"
         except Exception:  # noqa: BLE001 读不到=fail-closed 不自动补字条
             return False
+
+    def _task_work_kind(self, task_id: str) -> str:
+        """任务的 work_kind(link 权威); 读不到返回空串(fail-open 补字条)。"""
+        try:
+            thread = self.store.thread_for_task(task_id)
+            if thread is None:
+                return ""
+            links, _errors = self.store.task_links_report(thread.thread_id)
+            for link in links:
+                if str(getattr(link, "task_id", "") or "") == task_id:
+                    return str(getattr(link, "work_kind", "") or "").strip().lower()
+        except Exception:  # noqa: BLE001
+            pass
+        return ""
+
+    def _task_link_status(self, thread_id: str, task_id: str) -> str:
+        """热层唤醒前核 link 状态: active/terminal/missing/unknown。
+
+        terminal(completed/cancelled/interrupted/abandoned/superseded)与
+        missing(link 不存在)都作废闹钟——DESIGN_LEDGER 铁律: 排队的定时或
+        生命周期 wake 在任务终态后直接作废, 不能复活任务。unknown(账本读
+        失败)不在这里作废, 唤醒信号照发, 由消费链 _wake_signal_root_is_
+        inactive 再核(fail-open, 读失败不丢闹钟)。"""
+        try:
+            links, _errors = self.store.task_links_report(thread_id)
+        except Exception:  # noqa: BLE001
+            return "unknown"
+        status = None
+        for link in links:
+            if str(getattr(link, "task_id", "") or "") == task_id:
+                status = str(getattr(link, "status", "") or "").strip().lower()
+                break
+        if status is None:
+            return "missing"
+        if status == "active":
+            return "active"
+        return "terminal"
 
     def _enqueue_scheduler_runs(self, *, now: float) -> None:
         if self.scheduler_service is None:

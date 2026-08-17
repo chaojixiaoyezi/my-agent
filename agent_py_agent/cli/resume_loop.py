@@ -21,6 +21,7 @@ from ..agent.agent_core.runtime.loop_models import RunParams
 from ..agent.conversation.closeout import (
     STATE_DONE,
     STATE_RESUME_ROUND,
+    STATE_SLEEP_WAIT,
     STATE_WAIT_HANDOFF,
     CloseoutFacts,
     decide_closeout,
@@ -47,6 +48,23 @@ def should_resume(result: object) -> tuple[bool, str]:
     from ..agent.conversation.runtime import should_continue_task
 
     return should_continue_task(result)
+
+
+# LLM: CLI 续跑线与 wake_queue 闹钟字条的生命周期桥——用户显式 resume
+# 与收口终态都代表"该任务的闹钟作废/已消费": resume 入口 = 事件提前醒
+# (对齐 gateway 侧 _cancel_sleep_wake_on_event 与 会话运行时 sleep 可被新输入
+# 打断语义); 终态收口 = 任务不再自动醒(EXEC-39), 清 pending 字条防僵尸
+# 到期重醒。只清字条不清历史行, fail-silent(清不掉由 5min 对账兜底)。
+# 函数用途: 取消某任务全部 pending 唤醒字条; 续跑入口与收口执行器共用。
+def _cancel_task_wake_notes(agent: object, task_id: str) -> None:
+    if not task_id:
+        return
+    try:
+        repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+        if repo is not None and callable(getattr(repo, "cancel_wakes_for_task", None)):
+            repo.cancel_wakes_for_task(task_id)
+    except Exception:  # noqa: BLE001 清不掉不拦续跑/收口, 对账兜底
+        pass
 
 
 class ResumeRunOnce:
@@ -311,6 +329,8 @@ def run_with_resume(
             due_now=True,
         )
         if not ensured:
+            # 预算耗尽 = 停: 清该任务闹钟字条, 不靠到期重醒白烧预算。
+            _cancel_task_wake_notes(agent, runner.ctx.root_task_id)
             record_budget_exhausted(
                 agent=agent,
                 run_id=runner.ctx.root_run_id,
@@ -343,6 +363,12 @@ def run_with_resume(
                 # 机器语义: max_rounds 是总代数上限(含首轮), 而本函数参数
                 # max_rounds 是续跑轮上限——加回首轮。
                 max_rounds=max_rounds + 1,
+                sleeping=bool(
+                    str(getattr(result, "runtime_source", "") or "").strip()
+                    == "clock_sleep_tool"
+                    and str(getattr(result, "runtime_reason", "") or "").strip()
+                    == "CLOCK_SLEEP_WAITING"
+                ),
             )
         )
         if outcome.state != STATE_RESUME_ROUND:
@@ -389,14 +415,24 @@ def _closeout_after_decision(
     "正常不自动续跑"(EXEC-39) 标 unresumable, 预算/同因/轮数耗尽标
     budget_exhausted + 落账事件(write_events=False 时手动续跑只返回状态);
     其余(wait_human/cancelled) → unresumable(缺口C: 只有 runtime_status=ok
-    才算 completed, 不误标)。2026-08-17 owner 拍板删除 gateway 移交线——
-    不再写移交单, 任务停下后唯一续跑入口是用户显式 run --resume。"""
+    才算 completed, 不误标)。sleep_wait → unresumable 但**不清字条**(字条
+    就是闹钟, 到期由调度器唤醒)。除 sleep_wait 外所有终态都清任务闹钟
+    字条(EXEC-39: 停即停, 不自动醒, 防僵尸到期重醒)。2026-08-17 owner
+    拍板删除 gateway 移交线——不再写移交单, 任务停下后唯一续跑入口是
+    用户显式 run --resume。"""
+    if outcome.state == STATE_SLEEP_WAIT:
+        return CliResumeOutcome(
+            status="unresumable", rounds=rounds, final_result=result,
+            reason=outcome.reason or "clock_sleep",
+        )
     if outcome.state == STATE_DONE:
+        _cancel_task_wake_notes(agent, runner.ctx.root_task_id)
         return CliResumeOutcome(
             status="completed", rounds=rounds, final_result=result,
             reason=outcome.reason or "task_completed",
         )
     if outcome.state == STATE_WAIT_HANDOFF:
+        _cancel_task_wake_notes(agent, runner.ctx.root_task_id)
         if outcome.reason == "no_active_goal":
             return CliResumeOutcome(
                 status="unresumable", rounds=rounds, final_result=result,
@@ -416,6 +452,8 @@ def _closeout_after_decision(
             status="budget_exhausted", rounds=rounds, final_result=result,
             reason=outcome.reason,
         )
+    # wait_human / cancelled: 任务等用户显式继续, 闹钟作废(EXEC-39)。
+    _cancel_task_wake_notes(agent, runner.ctx.root_task_id)
     return CliResumeOutcome(
         status="unresumable", rounds=rounds, final_result=result,
         reason=outcome.reason or "not_continuable",
@@ -558,6 +596,10 @@ def run_manual_resume(
     # 上轮 reason 生成)→ append_message_once 抛 dedupe key reused。seq 从
     # 历史最大 continuation_seq+1 开始, 每次 resume 是新的执行代数。
     start_seq = _next_manual_resume_seq(agent, facts) or 1
+    # wake_queue 生命周期: 用户显式 run --resume = 事件提前醒(对齐 会话运行时
+    # sleep 可被新输入打断), 该任务 pending 字条(sleep/goal_tick)作废,
+    # 防到期后重复唤醒已人工接管的轮。
+    _cancel_task_wake_notes(agent, facts["task_id"])
     result, _bound = runner(
         prompt, start_seq, "", continuation_reason="manual_resume"
     )

@@ -1617,3 +1617,105 @@ def test_unknown_outcome_keeps_reported_output_preview(tmp_path):
     payload = _json.loads(result.output)
     assert payload["reported_error_code"] == "COMMAND_FAILED"
     assert "compile error line 3" in payload["reported_output_preview"]
+
+
+def test_run_with_resume_sleep_wait_keeps_pending_note(tmp_path):
+    """调度改造 2b: 模型睡完收口 sleep_wait → unresumable(clock_sleep),
+    且 sleep 字条保留——它就是闹钟, 到期由调度器唤醒, 不许在收口时误清。
+    """
+    import time
+
+    from agent_py_agent.agent.agent_core.runtime.run_params import (
+        run_params_with_request_id,
+    )
+    from agent_py_agent.cli.resume_loop import run_with_resume
+
+    class _SleepAgent(_FakeRunAgent):
+        def __init__(self, tmp_path):
+            super().__init__(tmp_path)
+            self.subagents = SimpleNamespace(
+                runtime_db=RuntimeRepository(tmp_path / "rt.db")
+            )
+
+        def run(self, prompt, *, params=None, **kw):
+            self.calls.append((0, str(prompt)[:40]))
+            return SimpleNamespace(
+                runtime_status="unfinished",
+                runtime_reason="CLOCK_SLEEP_WAITING",
+                runtime_source="clock_sleep_tool",
+                tool_rounds=1,
+                attempt_id="attempt-0",
+            )
+
+    fake = _SleepAgent(tmp_path)
+    repo = fake.subagents.runtime_db
+    repo.upsert_wake(
+        root_task_id="task-1", next_due_at=time.time() + 300, kind="sleep",
+        root_run_id="run-1",
+    )
+    base = run_params_with_request_id(
+        RunParams(source="cli_run", task_id="task-1", task_attributes={})
+    )
+    outcome = run_with_resume(
+        fake, initial_prompt="t", base_params=base, max_rounds=5,
+    )
+    assert outcome.status == "unresumable"
+    assert outcome.reason == "clock_sleep"
+    assert len(repo.list_pending_wakes()) == 1  # 字条保留
+
+
+def test_run_with_resume_done_closeout_cancels_pending_notes(tmp_path):
+    """终态 done 收口清闹钟字条(EXEC-39: 停即停, 不自动醒, 防僵尸到期重醒)。"""
+    import time
+
+    from agent_py_agent.agent.agent_core.runtime.run_params import (
+        run_params_with_request_id,
+    )
+    from agent_py_agent.cli.resume_loop import run_with_resume
+
+    class _DoneAgent(_FakeRunAgent):
+        def __init__(self, tmp_path):
+            super().__init__(tmp_path)
+            self.subagents = SimpleNamespace(
+                runtime_db=RuntimeRepository(tmp_path / "rt.db")
+            )
+
+        def run(self, prompt, *, params=None, **kw):
+            self.calls.append((0, str(prompt)[:40]))
+            return SimpleNamespace(
+                runtime_status="ok", runtime_reason="", runtime_source="",
+                tool_rounds=2, attempt_id="attempt-0",
+            )
+
+    fake = _DoneAgent(tmp_path)
+    repo = fake.subagents.runtime_db
+    repo.upsert_wake(
+        root_task_id="task-1", next_due_at=time.time() + 300, kind="sleep",
+        root_run_id="run-1",
+    )
+    base = run_params_with_request_id(
+        RunParams(source="cli_run", task_id="task-1", task_attributes={})
+    )
+    outcome = run_with_resume(
+        fake, initial_prompt="t", base_params=base, max_rounds=5,
+    )
+    assert outcome.status == "completed"
+    assert repo.list_pending_wakes() == []
+
+
+def test_cancel_task_wake_notes_bridge(tmp_path):
+    """_cancel_task_wake_notes: 有账本清字条; 无账本/坏账本 fail-silent。"""
+    from agent_py_agent.cli.resume_loop import _cancel_task_wake_notes
+
+    agent = SimpleNamespace(
+        subagents=SimpleNamespace(runtime_db=RuntimeRepository(tmp_path / "rt.db"))
+    )
+    repo = agent.subagents.runtime_db
+    repo.upsert_wake(root_task_id="task-1", next_due_at=1.0, kind="sleep")
+    repo.upsert_wake(root_task_id="task-2", next_due_at=1.0, kind="goal_tick")
+    _cancel_task_wake_notes(agent, "task-1")
+    pending = repo.list_pending_wakes()
+    assert [row["root_task_id"] for row in pending] == ["task-2"]
+    # 无账本 agent: 不抛异常
+    _cancel_task_wake_notes(SimpleNamespace(subagents=None), "task-1")
+    _cancel_task_wake_notes(agent, "")  # 空 task_id 直接返回

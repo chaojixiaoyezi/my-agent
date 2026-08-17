@@ -22,7 +22,8 @@ agent_py_agent/
 |   |-- core.py                         # SimpleAgent 组合入口
 |   |-- agent_core/                     # 主代理运行时、工具循环、编排工具、closeout
 |   |   |-- cli_run_conversation.py     # 一次性 CLI 的权威 user/assistant transcript、幂等身份与失败分级
-|   |   |-- runtime/                    # guidance、active-turn compact carrier、wait policy、loop support
+|   |   |-- runtime/                    # guidance、active-turn compact carrier、wait policy、sleep 闹钟、loop support
+|   |   |   |-- sleep_tool.py           # clock.sleep 工具：模型主动定时等待，写 wake_queue 字条、事件提前醒取消
 |   |   |-- tool_loop/                  # 工具轮次执行、恢复、完成判断
 |   |   |-- tool_context/               # 工具结果上下文：reducer、窗口、microcompact、PTL 单轮重试
 |   |   |-- orchestration/              # create/dispatch/cancel/inspect 子代理工具实现
@@ -85,6 +86,7 @@ agent_py_agent/
 |   |-- memory_push.py                 # planner/runner 决策点只召回正式 Lesson/HOT，并复用唯一 memory-context 信封
 |   |-- memory_archive/                # compact、audit、tool output artifact、task workspace refs
 |   |-- local_storage/                 # SQLite/FTS/文件事实源；ledger_redaction.py 精确擦除已删事实但保留幂等身份
+|   |-- runtime_db/                     # SQLite 运行事实源：wake_queue 闹钟字条账本(schema.py 建表+repository.py 读写)
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
 |   |   |-- control_service.py         # owner/thread 持久根任务的即时状态、纠偏和中断
 |   |   |-- channel_health.py          # adapter PID/heartbeat/逐通道状态的 fail-closed 健康投影
@@ -95,6 +97,7 @@ agent_py_agent/
 |   |   |-- compact_guard.py            # 结构化完整回合选择、连续失败冷却与 typed compact 错误
 |   |   |-- compact_checkpoint.py       # owner-scoped 完整 compact 恢复点与代际引用
 |   |   |-- task_runtime_state.py      # 后台续轮读取精确任务进度的结构化运行事实
+|   |   |-- runtime.py                  # 后台主代理调度热循环：wake_queue 到期消费、三源对账(5min)、事件提前醒取消闹钟
 |   |   |-- control_commands.py        # CLI/IM 共用 typed slash dispatcher、task command 与状态渲染
 |   |   |-- goal_tools.py              # 持续目标轮精确 scoped 的 get_goal/update_goal
 |   |   |-- authority.py               # 标记会话 transcript 为当前多轮对话唯一事实源
@@ -142,6 +145,9 @@ agent_py_agent/
 |   |-- test_current_turn_execution.py # 当前轮成功/失败副作用事实投影回归
 |   |-- test_cli_run_conversation.py   # CLI transcript、Memory 消息证据、任务链接与 workspace 收口回归
 |   |-- test_closeout_machine.py      # 收口状态机 truth table 穷举测试(全组合+场景)
+|   |-- test_wake_queue.py             # wake_queue 字条 CRUD、到期弹出、跨进程唤醒、对账与清理边界
+|   |-- test_scheduler_wake_tick.py    # 调度器 tick 新契约: 到期字条→wake_queue_due、对账分频、EXEC-39 门、audit 跳过
+|   |-- test_sleep_tool.py             # clock.sleep 参数边界、字条落盘、唤醒取消与错误码回归
 |   |-- test_memory_hardening.py       # 来源证据、候选、并发去重、hard delete 与信封安全回归
 |   |-- test_memory_candidate_daily_v2.py # Candidate/Daily v2 身份、状态、顺序、并发与大输出边界
 |   |-- test_memory_curator_v2.py      # Curator 触发、模型配置、权限、失败恢复与整批提交

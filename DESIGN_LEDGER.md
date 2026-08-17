@@ -317,7 +317,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   driver(dsh 同款)+ cron tick; 同时解决唤醒轮每 2 分钟全量扫描问题
   (增量游标/单次扫描多消费)。
 
-## 唤醒轮全量扫描治理【状态：设计定案，待实施】
+## 唤醒轮全量扫描治理【状态：已实施 2b——wake_queue 热层+对账分频，收尾项见下节】
 
 - 实锤(2026-08-17 源码核查): BackgroundMainAgentScheduler.tick() 无内部
   节流, supervisor 轮询 1-5s 单飞提交——tick 内 _enqueue_unfinished_task_
@@ -342,3 +342,54 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
     对账从热 tick 移到低频层(5min, 长期助手 分频同款), 热层只查内存缓存
     的到期任务集, 由事件(任务状态变更/wake)失效刷新; 4) catch-up 折叠:
     漏窗任务补跑一次并快进(我们已有 wake cooldown, 对齐即可)。
+
+## wake_queue 闹钟字条与 clock.sleep 设计【状态：2a/2b/2c 已落地，待真机验证】
+
+- 定案(2026-08-17 owner 确认): wake 表不是"调度任务表", 而是**任务自己写的
+  闹钟字条**("我在 T 时刻醒")。写入方两类: 1) 模型主动 `clock.sleep`(对齐
+  会话运行时-rs core/src/tools/handlers/sleep.rs, 1s..12h, 可被新输入/事件打断);
+  2) reconcile 对账层给 active-goal 任务补 `goal_tick` 字条(EXEC-39 同源:
+  普通任务不自动醒)。唤醒方是系统侧 BackgroundMainAgentScheduler 热 tick
+  弹到期字条(跨进程唤醒, 与 会话运行时 进程内 sleep 不同——我们回合结束进程退
+  出, 不能挂进程等)。
+- 表语义(runtime_db/schema.py + repository.py):
+  - 每任务一条 pending 字条, (task_id, kind) 幂等 upsert, 新写覆盖旧时间;
+  - 到期弹出 = 同事务 SELECT 到期行 + 置 woke, 再派 wake 并 complete/cancel,
+    避免同秒双消费; task 终态(completed/cancelled/interrupted 等)或事件提前
+    醒(wake signal 消费成功)时 cancel_wakes_for_task 清字条;
+  - 清理: 无全表扫描。已弹出字条归 complete/cancel 终态, 由既有低频 gc 与
+    唤醒侧检查归档(task archive 时核对)回收, 不新增专扫。
+- 已实施:
+  1) schema 建 wake_queue 表 + (status,next_due_at)/task 索引, repository
+     upsert/pop_due(事务内选+标记)/complete/cancel/list/stale;
+  2a) 热 tick 改 `_consume_due_wake_queue`(索引化到期查询) + `_reconcile_
+     wake_queue` 降到 5min(只给 active-goal 任务补 goal_tick);
+  2b) SleepTool 注册 + `_cancel_sleep_wake_on_event` 事件提前醒桥;
+  2c) 睡眠收口闭环 + 字条生命周期:
+     - 工具循环自然停出口 `_sleep_wait_closeout_if_asleep`: 本轮最后工具是
+       sleep 且纯 ok 收口 → CLOCK_SLEEP_WAITING/clock_sleep_tool;
+     - decide_closeout 新增 sleep_wait 态(sleeping 结构化事实, 优先级
+       done > cancelled > sleep_wait): 任务非终态、字条保留、不进续跑族;
+     - CLI 字条生命周期: sleep_wait 不清字条; done/wait_handoff/wait_human/
+       cancelled/预算耗尽清字条; run --resume 入口清字条(用户显式续跑=
+       事件提前醒, 会话运行时 sleep 可打断语义);
+     - 热层弹出前核 link 终态(terminal/missing 直接作废闹钟, 不复活任务);
+       对账只补缺失字条不重写到期时间(否则每 5min 把闹钟往后推, 永远不响);
+     - 对账跳过 audit work_kind 任务(自有观察/audit 唤醒通道, 防双重拉起)。
+  3) 测试: test_wake_queue + test_sleep_tool + test_scheduler_wake_tick(旧
+     task_ledger_resume_wake 契约重写) + closeout truth table(含 sleeping
+     维度) + resume 合同睡眠/清条场景, 全部通过。
+- 改完后与 长期助手 差异(对比 cron/jobs.py + gateway/run.py housekeeping):
+  - 长期助手 是**用户显式排程表**(schedule 工具写 jobs, scheduler 到期跑);
+    我们是**模型自报闹钟字条**(sleep/goal_tick 写 wake_queue, tick 弹),
+    schedule 工具链(owner 持久 at/every/cron)是另一条独立主链, 不与字条混;
+  - 长期助手 tick 60s 全读单 JSON 文件内存过滤; 我们 tick 更热但走 SQLite
+    (status,next_due_at) 索引只取到期行, 且 wake 派发本身有 per-task
+    cooldown(_TASK_RESUME_COOLDOWN_SECONDS=900) 吸收风暴;
+  - 长期助手 catch-up 折叠(过期 recurring 补跑一次快进); 我们字条到期后由
+    同一 cooldown + pop 事务的单次消费天然折叠, 不重复派;
+  - 长期助手 家务按 tick_count%N 分频; 我们对账层(5min)+孤儿回收/账本 gc
+    (既有 5min/6h 门)同构。
+- 收尾项(真机): sleep 端到端真实验证(gateway 模式下模型 sleep → 回合结束
+  sleep_wait → 到期调度器唤醒续轮), 三源对账分频观测, goal_tick 稳态节奏
+  (弹→醒→再武装)真机确认。完成后把上节治理清单状态改为"已实施"。

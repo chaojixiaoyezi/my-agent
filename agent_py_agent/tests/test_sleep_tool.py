@@ -85,3 +85,70 @@ def test_sleep_bounds_accept_min_and_max(tmp_path: Path) -> None:
     assert tool.execute(_params(_MIN_SECONDS)).ok is True
     assert tool.execute(_params(_MAX_SECONDS)).ok is True
     assert len(repo.list_pending_wakes()) == 1
+
+
+def test_loop_closeout_marks_sleep_round_as_waiting():
+    """收口转换(2b): 本轮最后工具是 sleep 且自然停 → CLOCK_SLEEP_WAITING。"""
+    from agent_py_agent.agent.agent_core._tool_loop_service import (
+        _sleep_wait_closeout_if_asleep,
+    )
+    from agent_py_agent.agent.backends import ModelResponse
+
+    params = SimpleNamespace(executed_tools=["list_files", "sleep"])
+    response = ModelResponse(text="好的, 我先休息。", backend="test")
+    converted = _sleep_wait_closeout_if_asleep(params, response)
+    assert converted.runtime_status == "unfinished"
+    assert converted.runtime_reason == "CLOCK_SLEEP_WAITING"
+    assert converted.runtime_source == "clock_sleep_tool"
+
+
+def test_loop_closeout_sleep_not_last_tool_no_conversion():
+    """sleep 后模型继续干别的 → 不降级(字条由终态清条/到期唤醒兜底)。"""
+    from agent_py_agent.agent.agent_core._tool_loop_service import (
+        _sleep_wait_closeout_if_asleep,
+    )
+    from agent_py_agent.agent.backends import ModelResponse
+
+    params = SimpleNamespace(executed_tools=["sleep", "write_file"])
+    response = ModelResponse(text="完成。", backend="test")
+    assert _sleep_wait_closeout_if_asleep(params, response) is response
+
+
+def test_loop_closeout_no_sleep_no_conversion():
+    from agent_py_agent.agent.agent_core._tool_loop_service import (
+        _sleep_wait_closeout_if_asleep,
+    )
+    from agent_py_agent.agent.backends import ModelResponse
+
+    params = SimpleNamespace(executed_tools=["write_file"])
+    response = ModelResponse(text="完成。", backend="test")
+    assert _sleep_wait_closeout_if_asleep(params, response) is response
+
+
+def test_loop_closeout_structured_reason_not_overridden():
+    """已有结构化收口理由(轮限/阻断)不覆盖, 由其自身语义收口。"""
+    from agent_py_agent.agent.agent_core._tool_loop_service import (
+        _sleep_wait_closeout_if_asleep,
+    )
+    from agent_py_agent.agent.backends import ModelResponse
+
+    params = SimpleNamespace(executed_tools=["sleep"])
+    response = ModelResponse(
+        text="", backend="test", runtime_status="unfinished",
+        runtime_reason="TOOL_ROUND_LIMIT_REACHED", runtime_source="tool_loop",
+    )
+    assert _sleep_wait_closeout_if_asleep(params, response) is response
+
+
+def test_loop_closeout_sleep_then_cancelled_not_overridden():
+    from agent_py_agent.agent.agent_core._tool_loop_service import (
+        _sleep_wait_closeout_if_asleep,
+    )
+    from agent_py_agent.agent.backends import ModelResponse
+
+    params = SimpleNamespace(executed_tools=["sleep"])
+    response = ModelResponse(
+        text="", backend="test", runtime_status="cancelled",
+        runtime_reason="user_stop", runtime_source="conversation_control",
+    )
+    assert _sleep_wait_closeout_if_asleep(params, response) is response

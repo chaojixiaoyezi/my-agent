@@ -19,6 +19,7 @@ STATE_CANCELLED = "cancelled"
 STATE_WAIT_HUMAN = "wait_human"
 STATE_WAIT_HANDOFF = "wait_handoff"
 STATE_RESUME_ROUND = "resume_round"
+STATE_SLEEP_WAIT = "sleep_wait"
 
 # EXEC-30: 同一收口 reason 连续续跑上限(对照 会话运行时/轻量运行时 写完即测即收的
 # 天然收敛机制的机制等价物)。同因 3 次仍不收敛=模型在同一模式无限迭代,
@@ -40,6 +41,9 @@ class CloseoutFacts:
     same_reason_streak: int
     rounds: int
     max_rounds: int
+    # 模型本轮最后动作是 clock.sleep 且成功落字条(工具循环结构化判定,
+    # 不与 reason 字符串重复推导): 收口走 sleep_wait 而不是 done/wait_human。
+    sleeping: bool = False
 
 
 # LLM: 机器输出——state 是唯一命运判定, guidance_key 是唯一承诺文案选择键
@@ -66,6 +70,11 @@ def decide_closeout(facts: CloseoutFacts) -> CloseoutOutcome:
         return CloseoutOutcome(STATE_DONE, "", "done")
     if status == "cancelled":
         return CloseoutOutcome(STATE_CANCELLED, reason or "user_stop", "cancelled")
+    # 模型主动 sleep 收口(调度改造 2b): 任务保持非终态等闹钟, 不标 done,
+    # 也不进续跑族(否则 CLI 立刻再开一轮, 睡觉作废); wake_queue 到期由
+    # 调度器唤醒。用户中断(cancelled)优先级更高, 先杀闹钟。
+    if facts.sleeping:
+        return CloseoutOutcome(STATE_SLEEP_WAIT, "clock_sleep", "sleep_wait")
     # 不可续跑族(blocked/协议违规/UNKNOWN 副作用等): 等用户显式继续, 不自动跑。
     if not facts.continuable:
         return CloseoutOutcome(

@@ -68,6 +68,7 @@ after_*`）只负责报原因，不再各自决定命运、不再各自拼"会�
 |---|---|---|---|
 | `done` | ok | 无 | — |
 | `cancelled` | cancelled/user_stop | 无 | — |
+| `sleep_wait` | unfinished / CLOCK_SLEEP_WAITING（clock_sleep_tool） | 任务保持非终态等闹钟（调度改造 2b） | wake_queue 字条到期 → 调度器热层弹出并唤醒；期间有新输入（用户消息/子代理完成）提前醒、闹钟作废 |
 | `wait_human` | blocked / PROTOCOL_VIOLATION / UNKNOWN 副作用 | 无（人工闸） | 用户 `run --resume`（结构化重激活 link） |
 | `wait_handoff` | unfinished（可续跑族 reason） | 停止等待（2026-08-17 起不再写移交单） | 用户 `run --resume`（后续 goal/cron 模式按持久事实新建驱动） |
 | `resume_round` | unfinished（可续跑族 reason） | 进程内自动续下一轮 | goal-round-driver（EXEC-39 授权） |
@@ -97,18 +98,23 @@ class CloseoutFacts:
     same_reason_streak: int    # EXEC-30 连续同因计数
     rounds: int                # 已跑代数（含首轮）
     max_rounds: int            # 总代数上限（含首轮）
+    sleeping: bool = False     # 调度改造 2b: 工具循环判定本轮最后动作是 clock.sleep
 
 @dataclass(frozen=True)
 class CloseoutOutcome:
-    state: str                 # done/cancelled/wait_human/wait_handoff/resume_round
+    state: str                 # done/cancelled/sleep_wait/wait_human/wait_handoff/resume_round
     reason: str
     guidance_key: str          # 唯一文案选择键（见 §5）
     # (2026-08-17 移交线删除后不再有 handoff 字段)
 ```
 
 `decide_closeout(facts) -> CloseoutOutcome` 纯函数（可穷举单测）。
-CLI `run_with_resume`/`run_manual_resume` 与 gateway `_run_handoff_continuation`
-都调它；停止原因采集方不直接拼命运文案。
+CLI `run_with_resume`/`run_manual_resume` 都调它；`sleeping` 事实由工具循环
+`_sleep_wait_closeout_if_asleep` 结构化产出（本轮最后工具是 sleep 且自然停
+→ CLOCK_SLEEP_WAITING/clock_sleep_tool），调用方原样传入，机器只认字段不
+认文案。优先级：done > cancelled > sleep_wait > 不可续跑族 > goal/预算/轮数。
+`sleep_wait` 不进可续跑族（否则 CLI 立刻再开一轮，睡觉作废），字条保留由
+wake_queue 到期唤醒。
 
 ## 5. 承诺文案单一权威
 
@@ -116,7 +122,9 @@ CLI `run_with_resume`/`run_manual_resume` 与 gateway `_run_handoff_continuation
 读 policy 自行决定"会自动继续"还是"请回复继续"——这必须改成读
 `CloseoutOutcome.state`：只有 `resume_round` 才写"会自动继续"；
 `wait_handoff`/`wait_human` 一律写"已暂停，回复『继续』（run --resume）
-我会接着做"。承诺与机器行为一一对应，不允许文案先行于状态。
+我会接着做"。`sleep_wait` 的承诺由 SleepTool 回执给出（"已安排 N 秒后
+唤醒，等待期间有新输入会提前唤醒"），机器只保证任务非终态 + 字条在册。
+承诺与机器行为一一对应，不允许文案先行于状态。
 
 ## 6. 实施切法（建议，每步可独立提交）
 
@@ -136,8 +144,11 @@ CLI `run_with_resume`/`run_manual_resume` 与 gateway `_run_handoff_continuation
 
 ## 7. 验收
 
-- 穷举测试：facts 组合 → state 映射 truth table 全覆盖；
+- 穷举测试：facts 组合 → state 映射 truth table 全覆盖（含 sleeping 维度）；
 - 行为回归：resume 合同 45 项 + manual resume 22 项 + gateway resume 场景
   测试全过；
-- 真机：goal 模式下自动续跑轮在预算内推进、预算尽后移交单出现且不再自跑；
+- 睡眠链路（调度改造 2b）：sleep 字条落库 → 自然停降级 CLOCK_SLEEP_WAITING
+  → sleep_wait 不清字条 → 到期热层弹字条发 wake_queue_due；终态(done/
+  wait_handoff/wait_human/cancelled)清字条；
+- 真机：goal 模式下自动续跑轮在预算内推进、预算尽后停且不再自跑；
   普通 run 收口即停（EXEC-39 语义不变）。
