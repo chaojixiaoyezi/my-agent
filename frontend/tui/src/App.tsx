@@ -4,8 +4,9 @@
  * 排队：polling 中再提交 → queuedPrompt，当前轮 done 后自动再提交。
  */
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Box, Text, useApp, useInput } from "ink";
+import { Box, Text, useApp, useInput, useStdout } from "ink";
 import TextInput from "ink-text-input";
+import { COMMANDS } from "./commands.js";
 import { TuiHttpClient } from "./protocol/client.js";
 import type { ClientError, ResultResponse } from "./protocol/types.js";
 import { MessageList, StatusBar } from "./components/ui.js";
@@ -78,14 +79,49 @@ export function App({ client, sessionId, model, history: _history }: AppProps) {
     [client, sessionId],
   );
 
+  // 输入历史（↑↓）与斜杠补全（Tab）
+  const inputHistoryRef = useRef<string[]>([]);
+  const historyIdxRef = useRef(-1);
+  const tabCycleRef = useRef(0);
+
   useInput((_input, keys) => {
-    if (keys.escape) exit();
+    if (keys.escape) {
+      exit();
+      return;
+    }
+    // ↑↓ 输入历史（仅空闲时）
+    if ((keys.upArrow || keys.downArrow) && state.phase === "idle") {
+      const history = inputHistoryRef.current;
+      if (history.length === 0) return;
+      const next = keys.upArrow
+        ? Math.max(0, historyIdxRef.current === -1 ? history.length - 1 : historyIdxRef.current - 1)
+        : Math.min(history.length - 1, historyIdxRef.current + 1);
+      historyIdxRef.current = next;
+      setInput(history[next] ?? "");
+      return;
+    }
+    // Tab 斜杠补全：/ 开头循环候选命令
+    if (keys.tab && input.startsWith("/")) {
+      const prefix = input.slice(1).toLowerCase();
+      const matches = COMMANDS.filter((c) => c.name.startsWith(prefix));
+      if (matches.length === 0) return;
+      const idx = tabCycleRef.current % matches.length;
+      tabCycleRef.current += 1;
+      setInput(`/${matches[idx].name} `);
+      return;
+    }
+    tabCycleRef.current = 0;
   });
 
   const onSubmit = useCallback(
     (value: string) => {
       const trimmed = value.trim();
       if (!trimmed) return;
+      // 记录输入历史（完整版②：↑↓ 复用）
+      const history = inputHistoryRef.current;
+      if (history[history.length - 1] !== trimmed) history.push(trimmed);
+      if (history.length > 100) history.shift();
+      historyIdxRef.current = -1;
       setInput("");
       // 命令处理（P3）：/ 开头走命令目录；会话控制（stop/btw/goal）走 /control
       const cmd = parseCommand(trimmed);
@@ -151,17 +187,24 @@ export function App({ client, sessionId, model, history: _history }: AppProps) {
   );
 
   const messages = state.messages;
+  // 消息滚屏（完整版②）：消息区高度 = 终端行数 - 固定区（标题/输入/状态/提示），
+  // 始终显示最近的消息（窗口滚动语义）
+  const { stdout } = useStdout();
+  const rows = stdout.rows ?? 24;
+  const fixedRows = 6; // 标题1 + 输入1 + 状态1 + 提示1 + 边距2
+  const msgHeight = Math.max(5, rows - fixedRows);
+  const visibleMessages = messages.slice(-msgHeight);
 
   return (
     <Box flexDirection="column" paddingX={1}>
       <Box marginBottom={1}>
-        <Text bold color="#06b6d4">
+        <Text bold color={theme.colors.heading}>
           myagent TUI
         </Text>
-        <Text color="#9ca3af"> (gateway client)</Text>
+        <Text color={theme.colors.dim}> (gateway client)</Text>
       </Box>
       <Box flexDirection="column" marginBottom={1}>
-        <MessageList messages={messages} theme={theme} />
+        <MessageList messages={visibleMessages} theme={theme} />
       </Box>
       <Box>
         <Text color={theme.colors.prompt}>❯ </Text>
