@@ -40,6 +40,7 @@ ID_KIND_PREFIXES: dict[str, str] = {
     "artifact_record_id": "artrec",  # G2补: ArtifactRecord 独立主键（H.8，digest 只是内容 hash）
     "outbox_id": "outbox",       # R4: Outbox 条目（K.4 at-least-once）
     "inbox_id": "inbox",         # R4: Inbox 条目（K.4 去重）
+    "wake_intent_id": "wakeint", # #233: wake_intents 唯一 intent id（producer 铸造）
 }
 
 #: 业务记录 id（route/evpkt/finding/...）不走本入口，保持 utils._new_id。
