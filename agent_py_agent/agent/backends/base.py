@@ -279,6 +279,14 @@ class HttpBackend(BaseBackend):
         cached = self._provider_tool_capability_cache
         if cached is not None:
             return cached
+        # 2026-08-17 真机: gateway 进程环境缺 AGENT_API_KEY → generate 抛
+        # ValueError("api_key 为空") 被探针 except 吞成"不支持 native",
+        # 用户看到误导性 ToolProtocolSelectionError。配置错误≠模型能力,
+        # 先结构化检查 key 并原样上抛(调用方显示真实原因)。
+        if hasattr(self, "api_key") and not str(self.api_key or "").strip():
+            raise ValueError(
+                "api_key 为空：无法执行工具能力探针（检查 AGENT_API_KEY 环境变量或配置）"
+            )
         evidence = ""
         for _attempt in range(1, _PROBE_MAX_ATTEMPTS + 1):
             nonce = secrets.token_hex(8)

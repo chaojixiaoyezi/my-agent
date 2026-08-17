@@ -47,9 +47,11 @@ def select_tool_protocol(agent: object, *, run_id: str) -> ToolProtocolSnapshot:
         return ToolProtocolSnapshot(run_id, _NATIVE_PROTOCOL, capability)
     # 删除 text 协议后:probe 未证明 native 支持=该模型无法使用工具,
     # 直接报错。
+    # 消息带 evidence 帮助区分"模型没调工具/本地失败/协议失败"等真实原因。
     raise ToolProtocolSelectionError(
         "the run-start provider probe did not prove native tool support "
-        "for this model; coding tasks require a native tool-use capable model"
+        f"for this model (evidence={capability.evidence}); coding tasks "
+        "require a native tool-use capable model"
     )
 
 

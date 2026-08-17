@@ -737,3 +737,11 @@ def test_probe_non_provider_exception_not_retried(tmp_path):
         assert cap.native_supported is False
         assert "live_probe_failed:ValueError" in cap.evidence
         assert gen.call_count == 1
+
+
+def test_probe_missing_api_key_raises_config_error(tmp_path):
+    """2026-08-17 真机: gateway 环境缺 key 时探针必须原样报配置错, 不得吞成
+    "不支持 native"误导用户。"""
+    backend = HttpBackend(_options(api_key=""))
+    with pytest.raises(ValueError, match="api_key"):
+        backend.probe_tool_capability()
