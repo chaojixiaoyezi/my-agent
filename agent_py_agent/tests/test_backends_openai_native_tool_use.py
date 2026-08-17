@@ -179,7 +179,8 @@ def test_openai_length_native_arguments_are_rejected_as_incomplete() -> None:
         ]
     }
 
-    with pytest.raises(ProviderResponseError) as exc_info:
-        backend.generate("read", tools=_TOOLS)
-
-    assert exc_info.value.error_code == "MODEL_INCOMPLETE_RESPONSE"
+    # EXEC-31b 截断修复链: length+截断参数不再抛 ProviderResponseError,
+    # 改为 truncated=True 响应, 由 native 截断续写修复(不再文本协议时代抛错)。
+    response = backend.generate("read", tools=_TOOLS)
+    assert response.truncated is True
+    assert getattr(response, "stop_reason", "") == "length"
