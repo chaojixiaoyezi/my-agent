@@ -1704,9 +1704,12 @@ class RuntimeRepository(
     ) -> dict[str, object]:
         """CAS claim：pending → claimed（claim_generation+1，绑定 token/lease）。
 
-        只认 pending——claimed/cancelled/expired/handed_off 均拒绝（防双跑）。
-        claim_generation 递增与 claim_token/lease_owner/lease_until 绑定，
-        旧租约回收后不得凭旧 generation 认领（规格 §2/§4 硬不变量 8）。
+        原子条件含规格前置（seq2425）：status=pending + due（next_wake_at<=now）
+        + 未过期（expires_at 为空或 > now）。policy/来源授权/circuit 由
+        dispatcher 上层裁决（见 owner_wake_discovery 来源断言）。claim_generation
+        递增与 claim_token/lease_owner/lease_until 绑定，旧租约回收后不得凭旧
+        generation 认领（规格 §2/§4 硬不变量 8）。返回实际 claim_generation
+        作为 claim ledger 代际证据。
         """
         now = time.time() if now is None else now
         with self.transaction() as conn:
@@ -1714,12 +1717,27 @@ class RuntimeRepository(
                 "UPDATE wake_intents SET status = 'claimed',"
                 " claim_generation = claim_generation + 1, claim_token = ?,"
                 " lease_owner = ?, lease_until = ?, claimed_at = ?, updated_at = ?"
-                " WHERE intent_id = ? AND status = 'pending'",
-                (claim_token, lease_owner, now + max(1.0, lease_seconds), now, now, intent_id),
+                " WHERE intent_id = ? AND status = 'pending'"
+                " AND next_wake_at <= ? AND (expires_at IS NULL OR expires_at > ?)",
+                (
+                    claim_token,
+                    lease_owner,
+                    now + max(1.0, lease_seconds),
+                    now,
+                    now,
+                    intent_id,
+                    now,
+                    now,
+                ),
             )
             if cur.rowcount == 0:
-                return {"claimed": False, "reason": "not_pending"}
-        return {"claimed": True, "intent_id": intent_id, "claim_generation": None}
+                return {"claimed": False, "reason": "not_pending_or_not_due"}
+            row = conn.execute(
+                "SELECT claim_generation FROM wake_intents WHERE intent_id = ?",
+                (intent_id,),
+            ).fetchone()
+        generation = int(row[0]) if row is not None else None
+        return {"claimed": True, "intent_id": intent_id, "claim_generation": generation}
 
     def handoff_wake_intent(
         self, intent_id: str, *, handoff_id: str, now: float | None = None
@@ -1728,14 +1746,16 @@ class RuntimeRepository(
 
         handed_off 仅表示「intent 已可靠交给新 attempt」，不表示模型完成
         （模型完成在 attempt ledger）。handed_off 后禁止回退（规格 §2）。
+        seq2425：handoff 只写 handed_off_at，**不写 finished_at**——finished_at
+        仅表 cancelled/expired 的 intent 生命周期结束，不污染完成语义。
         """
         now = time.time() if now is None else now
         with self.transaction() as conn:
             cur = conn.execute(
                 "UPDATE wake_intents SET status = 'handed_off', handoff_id = ?,"
-                " handed_off_at = ?, finished_at = ?, updated_at = ?"
+                " handed_off_at = ?, updated_at = ?"
                 " WHERE intent_id = ? AND status = 'claimed'",
-                (handoff_id, now, now, now, intent_id),
+                (handoff_id, now, now, intent_id),
             )
             if cur.rowcount == 0:
                 return {"handed_off": False, "reason": "not_claimed"}

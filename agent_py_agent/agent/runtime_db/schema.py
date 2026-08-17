@@ -398,6 +398,7 @@ _BASE_RUNTIME_SQL = (
         wake_reason TEXT NOT NULL DEFAULT '',
         source_event_id TEXT NOT NULL DEFAULT '',
         retry_event_id TEXT NOT NULL DEFAULT '',
+        retry_generation INTEGER NOT NULL DEFAULT 0,
         provenance_ref TEXT NOT NULL DEFAULT '',
         provider_scope_ref TEXT NOT NULL DEFAULT '',
         continuation_policy TEXT NOT NULL DEFAULT '',
@@ -435,6 +436,18 @@ _BASE_RUNTIME_SQL = (
 #: 每项为 (检查列, 表, ALTER SQL)；列已存在则跳过，多次启动安全。
 #: 并发安全见 _apply_runtime_migrations（duplicate column 视为已达成）。
 _RUNTIME_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    # seq2425：wake_intents 补列迁移（CREATE TABLE IF NOT EXISTS 不更新既有表；
+    # 存量 owner 库需幂等 ALTER 补列）。
+    (
+        "retry_generation",
+        "wake_intents",
+        "ALTER TABLE wake_intents ADD COLUMN retry_generation INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "payload_schema_version",
+        "wake_intents",
+        "ALTER TABLE wake_intents ADD COLUMN payload_schema_version TEXT NOT NULL DEFAULT 'v1'",
+    ),
     (
         "current_contract_id",
         "task_runs",

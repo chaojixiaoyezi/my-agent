@@ -67,11 +67,11 @@ def test_claim_cas_pending_only(repo):
     assert row["claim_generation"] == 1
     assert row["claim_token"] == "t1"
     assert row["lease_until"] == NOW + 300
-    # 二次 claim 拒绝（非 pending）
+    # 二次 claim 拒绝（非 pending——原子条件 status='pending' AND due）
     r2 = repo.claim_wake_intent("intent-1", lease_owner="gw-2", lease_seconds=300,
                                 claim_token="t2", now=NOW)
     assert r2["claimed"] is False
-    assert r2["reason"] == "not_pending"
+    assert r2["reason"] == "not_pending_or_not_due"
 
 
 def test_handoff_claimed_only_and_no_rollback(repo):
