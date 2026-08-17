@@ -87,18 +87,24 @@ def validate_wake_intent_authorization(
         return False, "policy_generation_invalid"
     if generation < 0:
         return False, "policy_generation_missing"
-    if callable(policy_validator):
-        try:
-            if not policy_validator(policy, generation):
-                return False, "policy_generation_not_current_or_revoked"
-        except Exception:  # noqa: BLE001 validator 异常保守拒绝（fail-closed）
-            return False, "policy_validator_error"
-    if callable(provider_circuit_open):
-        try:
-            if provider_circuit_open(provider_scope_ref):
-                return False, "provider_circuit_open_or_quota_frozen"
-        except Exception:  # noqa: BLE001 circuit 检查异常保守拒绝（fail-closed）
-            return False, "provider_circuit_check_error"
+    # seq2444 硬门：无注入必须拒绝（fail-closed），不允许「无注入按
+    # generation>=0 过渡放行」——policy/circuit 基建未接入时 dispatcher
+    # 不消费，杜绝未授权执行。测试用 fake 注入覆盖；真实 Gateway 启用前
+    # 必须确认注入存在并有拒绝证据。
+    if not callable(policy_validator):
+        return False, "policy_validator_required"
+    if not callable(provider_circuit_open):
+        return False, "provider_circuit_required"
+    try:
+        if not policy_validator(policy, generation):
+            return False, "policy_generation_not_current_or_revoked"
+    except Exception:  # noqa: BLE001 validator 异常保守拒绝（fail-closed）
+        return False, "policy_validator_error"
+    try:
+        if provider_circuit_open(provider_scope_ref):
+            return False, "provider_circuit_open_or_quota_frozen"
+    except Exception:  # noqa: BLE001 circuit 检查异常保守拒绝（fail-closed）
+        return False, "provider_circuit_check_error"
     return True, ""
 
 
@@ -108,17 +114,24 @@ def dispatch_due_wake_intent(
     *,
     lease_owner: str,
     lease_seconds: float,
+    policy_validator: object,
+    provider_circuit_open: object,
     now: float | None = None,
 ) -> WakeDispatchOutcome:
     """对单条 due intent 执行授权校验 + CAS claim（不创建 attempt——attempt
     由调用方在 claim 成功后创建，保证「仅 dispatcher claim 后可建 attempt」）。
 
-    claim 前的授权校验是不可绕过入口门（#236）：校验失败 → 标 last_error_ref
-    并保持 pending（可被 reconciler 审计），不 claim、不执行。
+    claim 前的授权校验是不可绕过入口门（#236）：policy_validator /
+    provider_circuit_open 必传（seq2444 无注入拒绝 fail-closed），校验失败 →
+    标 last_error_ref 并保持 pending（可被 reconciler 审计），不 claim、不执行。
     """
     now = time.time() if now is None else now
     intent_id = str(row.get("intent_id") or "")
-    ok, reject_reason = validate_wake_intent_authorization(row)
+    ok, reject_reason = validate_wake_intent_authorization(
+        row,
+        policy_validator=policy_validator,
+        provider_circuit_open=provider_circuit_open,
+    )
     if not ok:
         try:
             repo.mark_wake_intent_rejected(intent_id, error_ref=f"authorization:{reject_reason}", now=now)

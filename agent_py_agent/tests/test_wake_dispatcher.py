@@ -33,14 +33,28 @@ def _intent(repo, intent_id, dedup_key, source="cron", wake_reason="cron_due",
     )
 
 
+def _ok_validator(policy, generation):
+    return True
+
+
+def _ok_circuit(scope):
+    return False  # circuit 未冻结
+
+
 def _dispatch(repo, intent_id, **kw):
+    kw.setdefault("policy_validator", _ok_validator)
+    kw.setdefault("provider_circuit_open", _ok_circuit)
     return dispatch_due_wake_intent(repo, repo.get_wake_intent(intent_id),
                                     lease_owner="gw-1", lease_seconds=300, now=NOW, **kw)
 
 
 def test_authorization_async_cron_ok(repo):
     _intent(repo, "a1", "k1")
-    ok, reason = validate_wake_intent_authorization(repo.get_wake_intent("a1"))
+    ok, reason = validate_wake_intent_authorization(
+        repo.get_wake_intent("a1"),
+        policy_validator=_ok_validator,
+        provider_circuit_open=_ok_circuit,
+    )
     assert ok, reason
     out = _dispatch(repo, "a1")
     assert out.claimed and out.reason == "dispatched"

@@ -586,10 +586,15 @@ class _BackgroundMainSupervisor:
                     continue
                 for row in due:
                     try:
+                        # seq2444：policy_validator/provider_circuit_open 必传，
+                        # 未注入 → 授权校验拒绝（fail-closed，不 claim）——真实
+                        # policy/circuit 基建落成后从 owner 依赖注入。
                         outcome = dispatch_due_wake_intent(
                             repo, row,
                             lease_owner=_wake_dispatcher_instance_id(self._base_agent),
                             lease_seconds=_wake_dispatcher_lease_seconds(self._base_agent),
+                            policy_validator=None,
+                            provider_circuit_open=None,
                         )
                     except Exception:  # noqa: BLE001 单 intent 异常不阻断
                         continue
