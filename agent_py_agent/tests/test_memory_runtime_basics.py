@@ -63,7 +63,18 @@ def _test_config(tmp_path: Path, **kwargs) -> AgentConfig:
 class RuntimeOverflowBackend:
     name = "runtime-overflow"
 
-    def generate(self, prompt: str, on_chunk=None):
+    def probe_tool_capability(self):
+        from agent_py_agent.agent.backends.base import ProviderToolCapability
+        from agent_py_agent.agent.backends.base import _utc_now_iso
+
+        return ProviderToolCapability(
+            provider=str(self.name or "test"), endpoint="local://test-backend",
+            model="", stream=False, native_supported=True,
+            evidence="test_backend_declares_native_tools",
+            observed_at=_utc_now_iso(),
+        )
+
+    def generate(self, prompt: str, on_chunk=None, **kwargs):
         return ModelResponse(
             text="context overflow response",
             backend=self.name,
@@ -76,11 +87,22 @@ class SequenceUsageBackend:
     name = "sequence-usage"
     context_window_tokens = 20_000
 
+    def probe_tool_capability(self):
+        from agent_py_agent.agent.backends.base import ProviderToolCapability
+        from agent_py_agent.agent.backends.base import _utc_now_iso
+
+        return ProviderToolCapability(
+            provider=str(self.name or "test"), endpoint="local://test-backend",
+            model="", stream=False, native_supported=True,
+            evidence="test_backend_declares_native_tools",
+            observed_at=_utc_now_iso(),
+        )
+
     def __init__(self, usages: list[dict[str, int]]):
         self.usages = usages
         self.prompts: list[str] = []
 
-    def generate(self, prompt: str, on_chunk=None):
+    def generate(self, prompt: str, on_chunk=None, **kwargs):
         self.prompts.append(prompt)
         usage = self.usages[min(len(self.prompts) - 1, len(self.usages) - 1)]
         return ModelResponse(text=f"usage response {len(self.prompts)}", backend=self.name, usage=usage)
@@ -90,10 +112,21 @@ class RaisingContextBackend:
     name = "raising-context"
     context_window_tokens = 100_000
 
+    def probe_tool_capability(self):
+        from agent_py_agent.agent.backends.base import ProviderToolCapability
+        from agent_py_agent.agent.backends.base import _utc_now_iso
+
+        return ProviderToolCapability(
+            provider=self.name, endpoint="local://raising-context", model="",
+            stream=False, native_supported=True,
+            evidence="test_backend_declares_native_tools",
+            observed_at=_utc_now_iso(),
+        )
+
     def __init__(self):
         self.calls = 0
 
-    def generate(self, prompt: str, on_chunk=None):
+    def generate(self, prompt: str, on_chunk=None, **kwargs):
         self.calls += 1
         raise ProviderContextWindowError("maximum context length exceeded")
 
@@ -102,10 +135,21 @@ class NeverCalledBackend:
     name = "never-called"
     context_window_tokens = 20
 
+    def probe_tool_capability(self):
+        from agent_py_agent.agent.backends.base import ProviderToolCapability
+        from agent_py_agent.agent.backends.base import _utc_now_iso
+
+        return ProviderToolCapability(
+            provider=str(self.name or "test"), endpoint="local://test-backend",
+            model="", stream=False, native_supported=True,
+            evidence="test_backend_declares_native_tools",
+            observed_at=_utc_now_iso(),
+        )
+
     def __init__(self):
         self.calls = 0
 
-    def generate(self, prompt: str, on_chunk=None):
+    def generate(self, prompt: str, on_chunk=None, **kwargs):
         self.calls += 1
         raise AssertionError("backend should not be called after preflight overflow")
 
