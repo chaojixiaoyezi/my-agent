@@ -93,13 +93,18 @@ export class TuiHttpClient {
     };
   }
 
-  /** GET /result/<id> → 终态（processing/queued 时返回 undefined + 状态） */
+  /** GET /result/<id> → 终态（processing 返回 202 / queued 返回 404）。
+   *  2026-08-17 真机实锤：/result 对处理中请求返回 202（非 200），
+   *  curl 只测完成请求会漏掉——TUI 路径测试抓到的 contract 差异。 */
   async result(requestId: string): Promise<{ done: ResultResponse } | { pending: "processing" | "queued" }> {
     const res = await this.request(`/result/${encodeURIComponent(requestId)}`, {
       method: "GET",
     });
     if (res.status === 404) {
       return { pending: "queued" };
+    }
+    if (res.status === 202) {
+      return { pending: "processing" };
     }
     if (res.status !== 200) {
       throw await this.errorFrom(res);

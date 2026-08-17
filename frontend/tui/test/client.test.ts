@@ -96,8 +96,8 @@ describe("TuiHttpClient contract", () => {
     expect("done" in outcome).toBe(true);
   });
 
-  it("result: processing 未完成态不判完成", async () => {
-    const fetchMock = vi.fn(async () => jsonResponse({ status: "processing" }));
+  it("result: processing 未完成态返回 202（真机实锤的 contract）", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ status: "processing" }, 202));
     const client = new TuiHttpClient({ baseUrl: "http://127.0.0.1:8420", fetchImpl: fetchMock as typeof fetch });
     const outcome = await client.result("req-x");
     expect("pending" in outcome && outcome.pending === "processing").toBe(true);

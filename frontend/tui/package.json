@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "description": "my-agent TUI：TypeScript + Ink 终端客户端（P0: HTTP contract 薄客户端）",
-  "bin": { "my-agent-tui": "dist/entry.js" },
+  "bin": {
+    "my-agent-tui": "dist/entry.js"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
@@ -12,7 +14,8 @@
   },
   "dependencies": {
     "ink": "^5.2.0",
-    "react": "^18.3.1"
+    "react": "^18.3.1",
+    "ink-text-input": "^6.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
