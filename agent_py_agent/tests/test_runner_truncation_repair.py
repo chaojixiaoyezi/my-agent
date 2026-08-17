@@ -13,7 +13,7 @@ from pathlib import Path
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
-from agent_py_agent.tests.test_agent.backends import BaseBackend
+from agent_py_agent.tests.test_agent.backends import _TestNativeBackend
 
 FULL_BLOCK = (
     "[SUBAGENT_RESULT]\n"
@@ -39,14 +39,14 @@ PENDING_BLOCK = (
 )
 
 
-class _ScriptedBackend(BaseBackend):
+class _ScriptedBackend(_TestNativeBackend):
     name = "scripted_truncation_backend"
 
     def __init__(self, scripts: list[str]):
         self.scripts = scripts
         self.prompts: list[str] = []
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         self.prompts.append(prompt)
         text = self.scripts[min(len(self.prompts), len(self.scripts)) - 1]
         return ModelResponse(text=text, backend=self.name)
