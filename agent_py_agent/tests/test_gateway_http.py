@@ -224,6 +224,156 @@ class TestGatewayHTTPIntegration:
         except Exception as e:
             pytest.skip(f"HTTP server not reachable: {e}")
 
+
+def _post_ask(port: int, body: dict) -> tuple[int, dict]:
+    """POST /ask 助手：返回 (status, json)。"""
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(
+        f"http://localhost:{port}/ask",
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8", "replace")
+        try:
+            return e.code, json.loads(raw)
+        except ValueError:
+            return e.code, {"raw": raw}
+
+
+class TestIdempotencyReplay:
+    """知衡 seq 2553 边界②：幂等重放必须同 key 同 payload 才重放，
+    同 key 异 payload → 409 IDEMPOTENCY_CONFLICT，owner/conversation 隔离。"""
+
+    @pytest.fixture
+    def mock_paths(self, tmp_path: Path) -> MockGatewayPaths:
+        return MockGatewayPaths(tmp_path)
+
+    @pytest.fixture
+    def http_server(self, mock_paths: MockGatewayPaths):
+        """Start HTTP server on a free port."""
+        from agent_py_agent.agent.gateway_parts.http_service import GatewayHTTPServer
+
+        port = find_free_port()
+        server = GatewayHTTPServer(port, mock_paths)
+        server.start()
+        yield server, port
+        server.stop()
+
+    def test_same_key_same_payload_replays(self, http_server, mock_paths: MockGatewayPaths):
+        """同 key 同 payload（同会话同 prompt）→ 同一 request_id + replayed:true。"""
+        import urllib.error
+        import urllib.request
+
+        _, port = http_server
+        base = {"prompt": "证据重放测试", "chat_session_id": "idem-sess-1", "idempotency_key": "idem-key-1"}
+        status1, data1 = _post_ask(port, {**base, "save": True})
+        status2, data2 = _post_ask(port, {**base, "save": True})
+        try:
+            assert status1 == 202 and data1["status"] == "queued"
+            assert status2 == 202 and data2["status"] == "accepted"
+            assert data2["replayed"] is True
+            assert data2["request_id"] == data1["request_id"]
+        except urllib.error.URLError as e:
+            pytest.skip(f"HTTP server not reachable: {e}")
+
+    def test_same_key_diff_payload_conflict_409(self, http_server, mock_paths: MockGatewayPaths):
+        """同 key 异 payload（prompt 不同）→ 409 IDEMPOTENCY_CONFLICT + 原 request_id。"""
+        _, port = http_server
+        status1, data1 = _post_ask(
+            port, {"prompt": "原请求", "chat_session_id": "idem-sess-2", "idempotency_key": "idem-key-2"}
+        )
+        status2, data2 = _post_ask(
+            port, {"prompt": "改了词的请求", "chat_session_id": "idem-sess-2", "idempotency_key": "idem-key-2"}
+        )
+        assert status1 == 202
+        assert status2 == 409
+        assert data2.get("error_code") == "IDEMPOTENCY_CONFLICT"
+        assert data2.get("request_id") == data1["request_id"]
+
+    def test_same_key_diff_conversation_new_request(self, http_server, mock_paths: MockGatewayPaths):
+        """同 key 异 conversation（chat_session_id 不同）→ 各自新请求，不重放。"""
+        _, port = http_server
+        status1, data1 = _post_ask(
+            port, {"prompt": "会话A", "chat_session_id": "idem-sess-A", "idempotency_key": "idem-key-3"}
+        )
+        status2, data2 = _post_ask(
+            port, {"prompt": "会话A", "chat_session_id": "idem-sess-B", "idempotency_key": "idem-key-3"}
+        )
+        assert status1 == 202 and status2 == 202
+        assert data1["request_id"] != data2["request_id"]
+        assert "replayed" not in data2
+
+    def test_legacy_file_without_digest_replays(self, http_server, mock_paths: MockGatewayPaths):
+        """升级前旧文件（无 idempotency_digest）→ 兼容放行重放，不误 409。"""
+        from agent_py_agent.agent.gateway_parts.http_handlers import (
+            _find_request_by_idempotency_key,
+        )
+
+        _, port = http_server
+        legacy = {
+            "id": "req_legacy_1",
+            "request_id": "req_legacy_1",
+            "kind": "ask",
+            "goal": "旧请求",
+            "idempotency_key": "idem-key-legacy",
+            "metadata": {"user_id": "admin", "channel": "chat"},
+            "conversation": {"channel_conversation_id": "idem-sess-legacy"},
+        }
+        (mock_paths.inbox / "req_legacy_1.json").write_text(
+            json.dumps(legacy, ensure_ascii=False), encoding="utf-8"
+        )
+        hit = _find_request_by_idempotency_key(mock_paths, "admin", "chat", "idem-sess-legacy", "idem-key-legacy")
+        assert hit is not None
+        assert hit[0] == "req_legacy_1"
+        assert hit[1] is None  # 无指纹 → 第二元素 None，handle_ask 走兼容放行
+        status, data = _post_ask(
+            port,
+            {"prompt": "旧请求", "chat_session_id": "idem-sess-legacy", "idempotency_key": "idem-key-legacy"},
+        )
+        assert status == 202
+        assert data.get("replayed") is True
+        assert data["request_id"] == "req_legacy_1"
+
+    def test_owner_isolation_in_lookup(self, tmp_path: Path):
+        """owner 隔离：同 key 同 conversation 异 user → 不命中（查重按 owner 前缀）。"""
+        from agent_py_agent.agent.gateway_parts.http_handlers import (
+            _find_request_by_idempotency_key,
+        )
+
+        paths = MockGatewayPaths(tmp_path)
+        req = {
+            "id": "req_owner_1",
+            "request_id": "req_owner_1",
+            "kind": "ask",
+            "goal": "ownerA",
+            "idempotency_key": "idem-key-owner",
+            "metadata": {"user_id": "owner-A", "channel": "chat"},
+            "conversation": {"channel_conversation_id": "idem-sess-owner"},
+        }
+        (paths.inbox / "req_owner_1.json").write_text(json.dumps(req, ensure_ascii=False), encoding="utf-8")
+        # 异 user 同 key 同 conversation → 不命中（各自独立请求，不重放）
+        assert _find_request_by_idempotency_key(paths, "owner-B", "chat", "idem-sess-owner", "idem-key-owner") is None
+        # 同 user 同 conversation 同 key → 命中
+        hit = _find_request_by_idempotency_key(paths, "owner-A", "chat", "idem-sess-owner", "idem-key-owner")
+        assert hit is not None and hit[0] == "req_owner_1"
+
+    def test_payload_digest_deterministic_and_sensitive(self):
+        """digest 确定性：同 body 同摘要；prompt/conversation/save 任一变化 → 摘要变化。"""
+        from agent_py_agent.agent.gateway_parts.http_handlers import _idempotency_payload_digest
+
+        body = {"prompt": "你好", "chat_session_id": "s1", "save": True}
+        d1 = _idempotency_payload_digest(body, "你好")
+        assert d1 == _idempotency_payload_digest(dict(body), "你好")
+        assert d1 != _idempotency_payload_digest({"prompt": "你好吗", "chat_session_id": "s1", "save": True}, "你好吗")
+        assert d1 != _idempotency_payload_digest({"prompt": "你好", "chat_session_id": "s2", "save": True}, "你好")
+        assert d1 != _idempotency_payload_digest({"prompt": "你好", "chat_session_id": "s1", "save": False}, "你好")
+
     def test_result_not_found(self, http_server, mock_paths: MockGatewayPaths):
         """GET /result/<id> returns 404 for unknown request."""
         import urllib.request

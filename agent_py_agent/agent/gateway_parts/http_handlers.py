@@ -8,6 +8,7 @@ typed slash commands. System commands must resolve before active-turn steering
 or queue writes so their syntax never reaches transcript or model execution.
 """
 
+import hashlib
 import json
 import time
 from collections.abc import Callable
@@ -439,12 +440,27 @@ def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
     # ——断线重连不重复提交的后端事实支撑
     idem_key = str(body.get("idempotency_key") or "").strip()
     if idem_key:
+        digest = _idempotency_payload_digest(body, goal)
         existing = _find_request_by_idempotency_key(
             server.paths, user_id, channel, _http_conversation_id(body), idem_key
         )
-        if existing:
+        if existing is not None:
+            original_id, stored_digest = existing
+            # 知衡 seq 2553 边界②：幂等语义=同 key 同 payload 重放；同 key 异
+            # payload 静默重放会把新请求错绑旧 request_id——必须 409 冲突拒绝。
+            # 无落盘指纹（旧文件）保守放行重放（兼容升级前在途请求）。
+            if stored_digest and stored_digest != digest:
+                handler._send_json(
+                    409,
+                    {
+                        "error": "idempotency conflict: same idempotency_key with different payload",
+                        "error_code": "IDEMPOTENCY_CONFLICT",
+                        "request_id": original_id,
+                    },
+                )
+                return
             handler._send_json(
-                202, {"request_id": existing, "status": "accepted", "replayed": True}
+                202, {"request_id": original_id, "status": "accepted", "replayed": True}
             )
             return
     request_data = _build_ask_request(_AskRequestContext(body, goal, request_id, user_id, channel))
@@ -595,9 +611,10 @@ def _gateway_control_scope(
 
 def _find_request_by_idempotency_key(
     paths, user_id: str, channel: str, conversation_id: str, idem_key: str
-) -> str | None:
+) -> tuple[str, str | None] | None:
     """幂等查重（群复核 P1）：扫 inbox/processing/done 已落文件的请求，
-    匹配 owner(channel+user)+conversation+idempotency_key → 返回原 request_id。
+    匹配 owner(channel+user)+conversation+idempotency_key →
+    返回 (request_id, 落盘幂等指纹)；旧文件无指纹 → 第二元素 None。
 
     只读扫描（文件即事实），失败保守不命中（不阻断正常入队）。"""
     for directory in (paths.inbox, paths.processing, paths.done):
@@ -624,8 +641,28 @@ def _find_request_by_idempotency_key(
             conv = req.get("conversation") or {}
             if str(conv.get("channel_conversation_id") or "") != conversation_id:
                 continue
-            return str(req.get("request_id") or req.get("id") or "")
+            return (
+                str(req.get("request_id") or req.get("id") or ""),
+                str(req.get("idempotency_digest") or "") or None,
+            )
     return None
+
+
+def _idempotency_payload_digest(body: dict, goal: str) -> str:
+    """幂等 payload 指纹（知衡 seq 2553 边界②）：对定义请求语义的字段做
+    canonical 摘要——goal（prompt 实效值）+ conversation scope + save +
+    system_task（若有）。同 key 异 payload 必须冲突拒绝，不能静默重放。"""
+    digest_src: dict[str, object] = {
+        "goal": goal,
+        "conversation": _http_conversation_id(body),
+        "save": bool(body.get("save")),
+    }
+    system_task = body.get("system_task")
+    if isinstance(system_task, dict):
+        digest_src["system_task"] = system_task
+    return hashlib.sha256(
+        json.dumps(digest_src, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
 
 
 def _build_ask_request(context: _AskRequestContext) -> dict:
@@ -661,6 +698,9 @@ def _build_ask_request(context: _AskRequestContext) -> dict:
     }
     if payload_idem:
         payload["idempotency_key"] = payload_idem
+        # 幂等 payload 指纹落盘（知衡 seq 2553 边界②）：重放时比对，
+        # 同 key 异 payload → 409 IDEMPOTENCY_CONFLICT
+        payload["idempotency_digest"] = _idempotency_payload_digest(context.body, context.goal)
     system_task = context.body.get("system_task")
     if isinstance(system_task, dict):
         payload["system_task"] = dict(system_task)
