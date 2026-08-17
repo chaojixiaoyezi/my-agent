@@ -436,6 +436,8 @@ _BASE_RUNTIME_SQL = (
     # 一律 fail-closed 拒绝。generation 更新与 revoked_at 变更同事务原子化
     # （set_wake_policy）。后续大策略系统只能经同一 policy-validator contract
     # 替换，禁止并行第二套「当前策略」。
+    # seq2463①：**保留撤销历史**——partial unique index 仅约束「未撤销行」
+    # （revoked_at=0）唯一；旧代行保留（revoked_at 非 0）可审计，不被删除。
     """
     CREATE TABLE IF NOT EXISTS wake_policies (
         policy_id TEXT PRIMARY KEY,
@@ -446,11 +448,12 @@ _BASE_RUNTIME_SQL = (
         allowed_sources TEXT NOT NULL DEFAULT '',
         provider_scope_ref TEXT NOT NULL DEFAULT '',
         revoked_at REAL NOT NULL DEFAULT 0,
-        updated_at REAL NOT NULL,
-        UNIQUE(owner_id, continuation_policy)
+        updated_at REAL NOT NULL
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_wake_policies_owner ON wake_policies(owner_id, continuation_policy)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_wake_policies_active"
+    " ON wake_policies(owner_id, continuation_policy) WHERE revoked_at = 0",
     # ------------------------------------------------ wake_dispatches（#233）
     # claim→outbox→执行席 acceptance→CAS handed_off 的 canonical dispatch 台账
     # （seq2455/2457/2458 硬合同）：

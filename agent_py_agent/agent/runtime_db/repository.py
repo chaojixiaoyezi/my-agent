@@ -1740,28 +1740,6 @@ class RuntimeRepository(
         generation = int(row[0]) if row is not None else None
         return {"claimed": True, "intent_id": intent_id, "claim_generation": generation}
 
-    def handoff_wake_intent(
-        self, intent_id: str, *, handoff_id: str, now: float | None = None
-    ) -> dict[str, object]:
-        """CAS handoff：claimed → handed_off（dispatch 持久化+执行席接收后）。
-
-        handed_off 仅表示「intent 已可靠交给新 attempt」，不表示模型完成
-        （模型完成在 attempt ledger）。handed_off 后禁止回退（规格 §2）。
-        seq2425：handoff 只写 handed_off_at，**不写 finished_at**——finished_at
-        仅表 cancelled/expired 的 intent 生命周期结束，不污染完成语义。
-        """
-        now = time.time() if now is None else now
-        with self.transaction() as conn:
-            cur = conn.execute(
-                "UPDATE wake_intents SET status = 'handed_off', handoff_id = ?,"
-                " handed_off_at = ?, updated_at = ?"
-                " WHERE intent_id = ? AND status = 'claimed'",
-                (handoff_id, now, now, intent_id),
-            )
-            if cur.rowcount == 0:
-                return {"handed_off": False, "reason": "not_claimed"}
-        return {"handed_off": True, "intent_id": intent_id}
-
     def release_wake_intent_lease(
         self,
         intent_id: str,
@@ -1907,8 +1885,10 @@ class RuntimeRepository(
         """写入/更新 canonical 策略（seq2458 合同：generation 更新与 revoked_at
         变更同事务原子化——旧代次先置 revoked，再落新行）。
 
-        UNIQUE(owner_id, continuation_policy)：同一 owner 同一策略类型最多一条
-        当前行；新 generation 写入即旧行 revoked，杜绝两套「当前策略」并存。
+        seq2463①：**保留撤销历史**——不用 INSERT OR REPLACE（那会删旧行），
+        改普通 INSERT：先 UPDATE 未撤销旧行置 revoked_at，再 INSERT 新行。
+        partial unique index（revoked_at=0 才唯一）保证同 owner+policy 至多一条
+        未撤销行；历史行（已撤销）保留可审计。
         """
         now = time.time() if now is None else now
         with self.transaction() as conn:
@@ -1918,7 +1898,7 @@ class RuntimeRepository(
                 (now, now, owner_id, continuation_policy),
             )
             conn.execute(
-                "INSERT OR REPLACE INTO wake_policies ("
+                "INSERT INTO wake_policies ("
                 " policy_id, owner_id, scope_ref, continuation_policy,"
                 " policy_generation, allowed_sources, provider_scope_ref,"
                 " revoked_at, updated_at"
@@ -1971,10 +1951,17 @@ class RuntimeRepository(
         return dict(row) if row is not None else None
 
     def wake_policy_allows(self, row: dict[str, Any]) -> bool:
-        """canonical 策略授权裁决（seq2455/2457 硬合同，唯一授权源）。
+        """canonical 策略授权裁决（seq2455/2457/2463 硬合同，唯一授权源）。
 
-        无记录 / 代际不匹配 / 已撤销 / 来源不在白名单 / provider scope 不匹配
-        → False（fail-closed）。只读 intent 行结构化字段，不解析自然语言。
+        fail-closed 全链（任一不满足 → False）：
+          - 无当前未撤销策略行 / 代际不匹配 → 拒
+          - allowed_sources 为空 → 拒（白名单缺失不隐式放大授权，不隐式 wildcard）
+          - provider_scope_ref 为空 → 拒
+          - source 不在白名单 → 拒
+          - provider scope 与 intent 不匹配 → 拒
+          - scope_ref 为空 → 拒；非空 → 与 intent 的 owner/task/run 派生作用域
+            做前缀匹配（owner[:task[:run]]），owner 级策略不得越过作用域。
+        只读 intent 行结构化字段，不解析自然语言。
         """
         owner_id = str(row.get("owner_id") or "")
         continuation_policy = str(row.get("continuation_policy") or "").strip()
@@ -1984,6 +1971,8 @@ class RuntimeRepository(
             return False
         source = str(row.get("source") or "").strip()
         provider_scope_ref = str(row.get("provider_scope_ref") or "").strip()
+        task_id = str(row.get("task_id") or "").strip()
+        run_id = str(row.get("run_id") or "").strip()
         policy = self.current_wake_policy(owner_id, continuation_policy)
         if policy is None:
             return False
@@ -1992,12 +1981,43 @@ class RuntimeRepository(
         if int(policy["policy_generation"]) != policy_generation:
             return False
         allowed = {s.strip() for s in str(policy["allowed_sources"] or "").split(",") if s.strip()}
-        if allowed and source not in allowed:
+        if not allowed:
+            return False  # 空白名单 fail-closed（seq2463②：不隐式 wildcard）
+        if source not in allowed:
             return False
         policy_scope = str(policy["provider_scope_ref"] or "").strip()
-        if policy_scope and policy_scope != provider_scope_ref:
+        if not policy_scope:
+            return False  # 空 provider scope fail-closed
+        if policy_scope != provider_scope_ref:
+            return False
+        scope_ref = str(policy["scope_ref"] or "").strip()
+        if not scope_ref:
+            return False  # 空作用域 fail-closed（seq2463②：owner 级策略不得越过作用域）
+        if not self._policy_scope_matches(scope_ref, owner_id, task_id, run_id):
             return False
         return True
+
+    @staticmethod
+    def _policy_scope_matches(scope_ref: str, owner_id: str, task_id: str, run_id: str) -> bool:
+        """policy.scope_ref 必须是被授权作用域的段前缀（* 为显式通配段）。
+
+        scope_ref="owner" → 该 owner 全部；"owner:task" → 该 task；"owner:task:run"
+        → 该 run。更窄的 policy 不能授权更宽的 intent（防止 owner 级策略越过
+        作用域）。显式 wildcard "*" 字段受审计（写策略时留痕）。
+        """
+        if scope_ref == "*":
+            return True
+        parts = [p for p in scope_ref.split(":") if p]
+        if not parts:
+            return False
+        effective = [owner_id]
+        if task_id:
+            effective.append(task_id)
+        if run_id:
+            effective.append(run_id)
+        if len(parts) > len(effective):
+            return False
+        return all(p == e or p == "*" for p, e in zip(parts, effective))
 
     # ------------------------------------------------- provider_circuits（#233）
     def freeze_provider_circuit(
@@ -2154,7 +2174,17 @@ class RuntimeRepository(
         provider/模型副作用才允许开始（acceptance 后）。
         """
         now = time.time() if now is None else now
+        attempt_id = str(attempt_id or "").strip()
+        if not attempt_id:
+            return {"accepted": False, "reason": "attempt_id_required"}
         with self.transaction() as conn:
+            # seq2463③：attempt_id 必须是 canonical agent_attempts 的受控 ref
+            # （执行席创建 attempt 后回传），不存在则拒绝——防任意字符串抢占。
+            attempt_exists = conn.execute(
+                "SELECT 1 FROM agent_attempts WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+            if attempt_exists is None:
+                return {"accepted": False, "reason": "attempt_not_found"}
             d = conn.execute(
                 "SELECT * FROM wake_dispatches WHERE dispatch_id = ?", (dispatch_id,)
             ).fetchone()
@@ -2199,12 +2229,39 @@ class RuntimeRepository(
             )
         return {"accepted": True, "idempotent": False, "intent_id": d["intent_id"]}
 
+    def _dispatch_owned_by(self, conn, dispatch_id: str, *, claim_token: str,
+                           expected_generation: int, lease_owner: str) -> dict | None:
+        """终结 CAS 受控调用方身份校验（seq2463⑤）：dispatch 行必须匹配
+        调用方持有的 claim_token / claim_generation / lease_owner，否则视为
+        终结别人的 dispatch → 拒绝。返回 dispatch 行 dict 或 None。"""
+        d = conn.execute(
+            "SELECT * FROM wake_dispatches WHERE dispatch_id = ?", (dispatch_id,)
+        ).fetchone()
+        if d is None:
+            return None
+        if str(d["claim_token"] or "") != claim_token:
+            return None
+        if int(d["claim_generation"] or -1) != int(expected_generation):
+            return None
+        if str(d["lease_owner"] or "") != lease_owner:
+            return None
+        return dict(d)
+
     def fail_wake_dispatch(
-        self, dispatch_id: str, *, error_ref: str, now: float | None = None
+        self, dispatch_id: str, *, error_ref: str, claim_token: str,
+        expected_generation: int, lease_owner: str, now: float | None = None,
     ) -> dict[str, object]:
-        """执行席拒绝/接收失败：dispatch→failed（intent 保持 claimed，等 reconciler）。"""
+        """执行席拒绝/接收失败：dispatch→failed（intent 保持 claimed，等 reconciler）。
+
+        seq2463⑤：终结 CAS 校验 claim_token/generation/lease_owner 配对——任意
+        持有事件 ID 的路径不能终结别人的 dispatch。
+        """
         now = time.time() if now is None else now
         with self.transaction() as conn:
+            if self._dispatch_owned_by(conn, dispatch_id, claim_token=claim_token,
+                                       expected_generation=expected_generation,
+                                       lease_owner=lease_owner) is None:
+                return {"failed": False, "reason": "not_owned_or_not_dispatched"}
             cur = conn.execute(
                 "UPDATE wake_dispatches SET status = 'failed',"
                 " last_error_ref = ?, updated_at = ?"
@@ -2216,11 +2273,19 @@ class RuntimeRepository(
         return {"failed": True}
 
     def release_wake_dispatch(
-        self, dispatch_id: str, *, now: float | None = None
+        self, dispatch_id: str, *, claim_token: str,
+        expected_generation: int, lease_owner: str, now: float | None = None,
     ) -> dict[str, object]:
-        """无已知副作用 + lease 回收：dispatch→released（与 release_wake_intent_lease 配对）。"""
+        """无已知副作用 + lease 回收：dispatch→released（与 release_wake_intent_lease 配对）。
+
+        seq2463⑤：终结 CAS 校验 claim_token/generation/lease_owner 配对。
+        """
         now = time.time() if now is None else now
         with self.transaction() as conn:
+            if self._dispatch_owned_by(conn, dispatch_id, claim_token=claim_token,
+                                       expected_generation=expected_generation,
+                                       lease_owner=lease_owner) is None:
+                return {"released": False, "reason": "not_owned_or_not_dispatched"}
             cur = conn.execute(
                 "UPDATE wake_dispatches SET status = 'released', updated_at = ?"
                 " WHERE dispatch_id = ? AND status = 'dispatched'",
@@ -2231,10 +2296,16 @@ class RuntimeRepository(
         return {"released": True}
 
     def mark_wake_dispatch_reconciliation(
-        self, dispatch_id: str, *, error_ref: str, now: float | None = None
+        self, dispatch_id: str, *, error_ref: str, claim_token: str,
+        expected_generation: int, lease_owner: str, now: float | None = None,
     ) -> dict[str, object]:
+        """dispatch→reconciliation（seq2463⑤：终结 CAS 校验调用方身份配对）。"""
         now = time.time() if now is None else now
         with self.transaction() as conn:
+            if self._dispatch_owned_by(conn, dispatch_id, claim_token=claim_token,
+                                       expected_generation=expected_generation,
+                                       lease_owner=lease_owner) is None:
+                return {"marked": False, "reason": "not_owned_or_not_markable"}
             cur = conn.execute(
                 "UPDATE wake_dispatches SET status = 'reconciliation',"
                 " last_error_ref = ?, reconciliation_ref = ?, updated_at = ?"

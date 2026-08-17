@@ -74,22 +74,15 @@ def test_claim_cas_pending_only(repo):
     assert r2["reason"] == "not_pending_or_not_due"
 
 
-def test_handoff_claimed_only_and_no_rollback(repo):
+def test_handoff_only_via_canonical_accept(repo):
+    """seq2463④：handoff_wake_intent 已删除——claimed→handed_off 唯一路径是
+    accept_wake_dispatch（需真实 attempt + lease 未过期 + handoff 匹配）。
+    旧入口不存在的直接证明：无 handoff_wake_intent 方法。"""
+    assert not hasattr(repo, "handoff_wake_intent")
     _intent(repo)
-    # 未 claim 直接 handoff → 拒绝
-    assert repo.handoff_wake_intent("intent-1", handoff_id="h1", now=NOW)["handed_off"] is False
-    repo.claim_wake_intent("intent-1", lease_owner="gw", lease_seconds=300,
-                           claim_token="t", now=NOW)
-    r = repo.handoff_wake_intent("intent-1", handoff_id="h1", now=NOW)
-    assert r["handed_off"] is True
-    row = repo.get_wake_intent("intent-1")
-    assert row["status"] == "handed_off"
-    assert row["handoff_id"] == "h1"
-    assert row["handed_off_at"] == NOW
-    # handed_off 后 cancel/claim 都拒绝（禁回退）
-    assert repo.cancel_wake_intent("intent-1", reason="x", now=NOW)["cancelled"] is False
-    assert repo.claim_wake_intent("intent-1", lease_owner="gw", lease_seconds=300,
-                                  claim_token="t2", now=NOW)["claimed"] is False
+    # 未 claim 的 intent 不能经 accept 置 handed_off（dispatch 不存在）
+    assert repo.accept_wake_dispatch("no-such-dispatch", handoff_id="h1",
+                                     attempt_id="a1", now=NOW)["accepted"] is False
 
 
 def test_release_lease_requires_expired_and_token_and_generation(repo):
