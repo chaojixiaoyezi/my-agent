@@ -1776,6 +1776,12 @@ class RuntimeRepository(
         claim_generation 匹配——租约未过期或代际不匹配一律拒绝（防活跃 lease
         被误释放 / 旧代际凭旧 token 操作）。未知副作用走
         mark_wake_intent_lease_expired（保持 claimed，不隐式重放）。
+
+        seq2461 锁定：claim 后到 acceptance 前 lease 回收不得绕过 active gate
+        ——**存在未完成的 dispatched dispatch ledger 记录时禁止 release**
+        （等价阻止重认领）。dispatch 必须先行终态化（accepted/released/failed/
+        reconciliation）后，release 才放行回 pending；accept 时已回填
+        active_attempt_id 的 intent 由 active_attempt_id='' 条件天然拒绝。
         """
         now = time.time() if now is None else now
         with self.transaction() as conn:
@@ -1785,7 +1791,10 @@ class RuntimeRepository(
                 " claim_token = '', lease_owner = '', lease_until = 0, updated_at = ?"
                 " WHERE intent_id = ? AND status = 'claimed' AND claim_token = ?"
                 " AND lease_until <= ? AND claim_generation = ?"
-                " AND active_attempt_id = ''",
+                " AND active_attempt_id = ''"
+                " AND NOT EXISTS (SELECT 1 FROM wake_dispatches wd"
+                "  WHERE wd.intent_id = wake_intents.intent_id"
+                "  AND wd.status = 'dispatched')",
                 (now, intent_id, claim_token, now, int(expected_generation)),
             )
             if cur.rowcount == 0:
@@ -1942,6 +1951,16 @@ class RuntimeRepository(
     def current_wake_policy(
         self, owner_id: str, continuation_policy: str
     ) -> dict[str, Any] | None:
+        """按 owner+continuation_policy 选唯一未撤销 generation（seq2461 锁定）。
+
+        读取规则（唯一索引本身不能替代）：UNIQUE(owner_id, continuation_policy)
+        保证同 owner+policy 至多一行；本方法再以 `revoked_at=0` 过滤 +
+        `ORDER BY updated_at DESC LIMIT 1` 防御性收敛——**只返回未撤销的当前
+        代次**。旧代撤销（set_wake_policy 同事务置 revoked）后本方法即返回 None
+        → wake_policy_allows fail-closed（无「两套当前策略」并存）。调用方用
+        返回行继续校验 scope/allowed_sources/provider_scope_ref（见
+        wake_policy_allows）。
+        """
         with self._runtime_connection() as conn:
             row = conn.execute(
                 "SELECT * FROM wake_policies"

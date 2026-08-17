@@ -282,6 +282,49 @@ def test_release_pair_returns_to_pending(repo):
     assert repo.get_wake_dispatch(c["dispatch_id"])["status"] == "released"
 
 
+def test_release_blocked_by_pending_dispatch(repo):
+    """seq2461 锁定①：claim 后到 acceptance 前 lease 回收不得绕过 active gate——
+    存在未完成的 dispatched dispatch 记录时 release 拒绝（等价阻止重认领）。"""
+    _intent(repo)
+    c = _claim(repo)
+    # dispatch 仍 dispatched（未 accept），lease 已过期 → release 拒绝
+    ri = repo.release_wake_intent_lease("intent-1", claim_token=c["claim_token"],
+                                        expected_generation=c["claim_generation"],
+                                        now=NOW + 301)
+    assert ri["released"] is False
+    assert repo.get_wake_intent("intent-1")["status"] == "claimed"
+    # dispatch 终态化（fail）后 → release 放行回 pending（可被 reconciler 重认领）
+    repo.fail_wake_dispatch(c["dispatch_id"], error_ref="reconciled", now=NOW + 302)
+    ri2 = repo.release_wake_intent_lease("intent-1", claim_token=c["claim_token"],
+                                         expected_generation=c["claim_generation"],
+                                         now=NOW + 303)
+    assert ri2["released"] is True
+    assert repo.get_wake_intent("intent-1")["status"] == "pending"
+
+
+def test_policy_current_unique_old_gen_revoked(repo):
+    """seq2461 锁定②：current_wake_policy 只返回唯一未撤销代次；旧代撤销 +
+    全撤销后读取规则 fail-closed。"""
+    repo.set_wake_policy(policy_id="p1", owner_id="local/main",
+                         continuation_policy="async", policy_generation=1,
+                         allowed_sources="cron", provider_scope_ref="opencode", now=NOW)
+    repo.set_wake_policy(policy_id="p2", owner_id="local/main",
+                         continuation_policy="async", policy_generation=2,
+                         allowed_sources="cron", provider_scope_ref="opencode", now=NOW + 1)
+    cur = repo.current_wake_policy("local/main", "async")
+    assert cur["policy_id"] == "p2" and cur["policy_generation"] == 2
+    # 旧代 gen1 行已 revoked（set_wake_policy 同事务原子撤销）
+    conn_rows = repo.wake_policy_allows({"owner_id": "local/main",
+                                         "continuation_policy": "async",
+                                         "policy_generation": 1,
+                                         "source": "cron",
+                                         "provider_scope_ref": "opencode"})
+    assert conn_rows is False
+    # 全撤销 → current None（fail-closed）
+    repo.revoke_wake_policy(owner_id="local/main", continuation_policy="async", now=NOW + 2)
+    assert repo.current_wake_policy("local/main", "async") is None
+
+
 def test_release_requires_no_active_attempt(repo):
     """active attempt 未清 → release 拒绝（防未知副作用被误释放）。"""
     _intent(repo)
