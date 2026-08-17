@@ -176,6 +176,30 @@ def test_ensure_wake_policy_ok_and_fail_closed(repo):
         )
 
 
+def test_cron_policy_idempotent_reuse_keeps_gen1_intent_valid(repo):
+    """seq2478③：幂等复用保持 generation 稳定 → 旧 gen1 intent 不失效；
+    policy 升级 gen2 → 旧 gen1 intent 被 wake_policy_allows 拒绝（stale）。"""
+    task_id = _real_task(repo)
+    ensure_wake_policy(repo, owner_id="local/main", continuation_policy="async",
+                       policy_generation=1, allowed_sources="cron",
+                       provider_scope_ref="opencode", scope_ref="local/main", now=NOW)
+    register_wake_intent(repo, owner_id="local/main", task_id=task_id, source="cron",
+                         wake_reason="cron_due", continuation_policy="async",
+                         provider_scope_ref="opencode", policy_generation=1,
+                         next_wake_at=NOW - 1, source_event_id="ev-cron-1",
+                         due_window="cron", now=NOW)
+    # 幂等复用模拟（_ensure_cron_wake_policy 同绑定分支）：current 仍 gen1 → intent 放行
+    cur = repo.current_wake_policy("local/main", "async")
+    assert cur["policy_generation"] == 1
+    intent_row = repo.due_wake_intents(now=NOW)[0]
+    assert repo.wake_policy_allows(intent_row) is True
+    # stale-intent：policy 升级 gen2 → 旧 gen1 intent 拒绝（不 claim）
+    ensure_wake_policy(repo, owner_id="local/main", continuation_policy="async",
+                       policy_generation=2, allowed_sources="cron",
+                       provider_scope_ref="opencode", scope_ref="local/main", now=NOW + 1)
+    assert repo.wake_policy_allows(intent_row) is False
+
+
 # ------------------------------------------------------- 端到端闭环
 def test_producer_to_dispatcher_to_accept_end_to_end(repo):
     """policy 注册 → intent 写入 → dispatcher claim → 真实 attempt accept →

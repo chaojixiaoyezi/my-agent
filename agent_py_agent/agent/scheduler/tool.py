@@ -481,11 +481,19 @@ def _provider_scope_ref(agent: object) -> str:
 
 
 def _ensure_cron_wake_policy(agent: object, *, task_id: str) -> str | None:
-    """注册 owner 级 async cron 策略（canonical wake_policies，幂等）。
+    """注册 owner 级 async cron 策略（canonical wake_policies，幂等复用）。
 
     fail-closed：owner 无 runtime.db / 策略注册异常 → 返回错误串（调用方
-    拒绝创建定时任务）；成功返回 None。scope_ref = owner:task（task 级，
-    seq2463 作用域匹配：更窄的 policy 不能授权更宽的 intent）。
+    拒绝创建定时任务）；成功返回 None。
+    scope_ref = owner 级（seq2478③）：一个 owner 可有多个 cron job（不同
+    task）共享一条 owner:async cron 策略；若用 owner:task 会互相覆盖导致
+    旧 job intent 因 scope 不匹配失效。owner 级 scope + allowed_sources=cron
+    即为「该 owner 的 cron 来源授权」，task 白名单不再重判（dispatcher
+    wake_policy_allows 消费时核对）。
+    幂等复用（seq2478③）：当前已有未撤销的 async 策略且 generation 相同 +
+    allowed_sources 含 cron + provider_scope_ref 相同 → 直接复用不重写，
+    **保持 generation 稳定**（重复注册不会升级 generation，旧 gen1 intent
+    不失效）。仅当绑定变化（无策略/代际不同/来源或 scope 不同）才注册。
     """
     try:
         from ..runtime_db.repository import RuntimeRepository
@@ -504,15 +512,25 @@ def _ensure_cron_wake_policy(agent: object, *, task_id: str) -> str | None:
         task_id = str(task_id or "").strip()
         if not task_id:
             return "定时任务缺少绑定任务（wake policy 作用域无法确定）"
+        provider_scope_ref = _provider_scope_ref(agent)
         repo = RuntimeRepository(db_path)
+        current = repo.current_wake_policy(owner_id, "async")
+        if current is not None and int(current.get("revoked_at") or 0) == 0:
+            same = (
+                int(current.get("policy_generation") or -1) == 1
+                and "cron" in {s.strip() for s in str(current.get("allowed_sources") or "").split(",")}
+                and str(current.get("provider_scope_ref") or "").strip() == provider_scope_ref
+            )
+            if same:
+                return None  # 幂等复用：相同绑定不重写，旧 intent 不失效
         ensure_wake_policy(
             repo,
             owner_id=owner_id,
             continuation_policy="async",
             policy_generation=1,
             allowed_sources="cron",
-            provider_scope_ref=_provider_scope_ref(agent),
-            scope_ref=f"{owner_id}:{task_id}",
+            provider_scope_ref=provider_scope_ref,
+            scope_ref=owner_id,
         )
         return None
     except Exception as exc:  # noqa: BLE001 注册失败 fail-closed

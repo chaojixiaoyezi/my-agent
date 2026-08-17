@@ -290,18 +290,37 @@ class SchedulerDueIndex:
 
 
 def _ensure_due_index_columns(conn: sqlite3.Connection) -> None:
-    """存量 scheduler_due_owners 补 job_id/task_id 列（幂等，列存在则跳过）。"""
+    """存量 scheduler_due_owners 补 job_id/task_id 列（幂等 + 并发互斥）。
+
+    seq2478①：isolation_level=None（autocommit）下 PRAGMA 检查与 ALTER 之间无
+    原子性——多 Gateway 首启并发时两个连接都读到缺列 → 后到者 duplicate
+    column 直接抛错。用 BEGIN IMMEDIATE 获取写锁包住 check+alter（后到连接
+    等锁后重读列已存在 → 跳过）；若后到连接撞 duplicate column（另一连接已
+    先完成）→ 视为迁移已达成，不抛。finally 只 COMMIT 本函数开启的事务，
+    不碰调用方已存在的事务。
+    """
+    began = False
     try:
+        if not getattr(conn, "in_transaction", False):
+            conn.execute("BEGIN IMMEDIATE")
+            began = True
         columns = {
             str(row["name"]) for row in conn.execute("PRAGMA table_info(scheduler_due_owners)")
         }
         for column in ("job_id", "task_id"):
             if column not in columns:
-                conn.execute(
-                    f"ALTER TABLE scheduler_due_owners ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
-                )
+                try:
+                    conn.execute(
+                        f"ALTER TABLE scheduler_due_owners ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                    )
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column" not in str(exc).lower():
+                        raise
     except (OSError, sqlite3.Error):
         raise
+    finally:
+        if began:
+            conn.execute("COMMIT")
 
 
 def _load_legacy_due_rows(

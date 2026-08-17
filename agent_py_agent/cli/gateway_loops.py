@@ -956,6 +956,7 @@ class _GatewaySchedulerDueController:
         )
         current = float(time.time() if now is None else now)
         announced = 0
+        existing = 0
         rejected = 0
         owners_dir = getattr(getattr(self._base_agent, "home_paths", None), "owners_dir", None)
         for row in rows:
@@ -1002,7 +1003,7 @@ class _GatewaySchedulerDueController:
                         flush=True,
                     )
                     continue
-                register_wake_intent(
+                result = register_wake_intent(
                     repo,
                     owner_id=owner_id_full,
                     task_id=task_id,
@@ -1015,14 +1016,17 @@ class _GatewaySchedulerDueController:
                     source_event_id=str(row.job_id or ""),
                     due_window="cron",
                 )
-                announced += 1
+                if result.get("created"):
+                    announced += 1  # 新 intent 落库
+                else:
+                    existing += 1  # 同 source_event_id 幂等重复（非新拉起）
             except Exception as exc:  # noqa: BLE001 单 owner 异常不阻断其他
                 rejected += 1
                 _print_gateway_loop_error("gateway_scheduler_due.producer", owner_id_full, exc)
-        if announced or rejected:
+        if announced or rejected or existing:
             print(
                 f"[gateway-scheduler-due] cron producer: intents={announced} "
-                f"rejected={rejected}",
+                f"existing={existing} rejected={rejected}",
                 flush=True,
             )
         return announced
