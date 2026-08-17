@@ -2190,6 +2190,26 @@ class RuntimeRepository(
             ).fetchone()
             if d is None:
                 return {"accepted": False, "reason": "dispatch_not_found"}
+            # seq2466②：attempt 必须归属于本 dispatch 的 intent（owner/task/run
+            # 受控关联）——不能把同库任意现存 attempt 绑到该 dispatch。
+            intent_row = conn.execute(
+                "SELECT owner_id, task_id, run_id FROM wake_intents WHERE intent_id = ?",
+                (d["intent_id"],),
+            ).fetchone()
+            if intent_row is None:
+                return {"accepted": False, "reason": "intent_not_found"}
+            atr = self._attempt_owner_task_run(conn, attempt_id)
+            if atr is None:
+                return {"accepted": False, "reason": "attempt_chain_not_found"}
+            attempt_owner, attempt_task, attempt_run = atr
+            if attempt_owner != str(intent_row["owner_id"] or ""):
+                return {"accepted": False, "reason": "attempt_owner_mismatch"}
+            intent_task = str(intent_row["task_id"] or "").strip()
+            if intent_task and intent_task != attempt_task:
+                return {"accepted": False, "reason": "attempt_task_mismatch"}
+            intent_run = str(intent_row["run_id"] or "").strip()
+            if intent_run and intent_run != attempt_run:
+                return {"accepted": False, "reason": "attempt_run_mismatch"}
             status = str(d["status"] or "")
             if status == "accepted":
                 if str(d["handoff_id"] or "") == handoff_id and \
@@ -2228,6 +2248,26 @@ class RuntimeRepository(
                 (handoff_id, attempt_id, now, now, dispatch_id),
             )
         return {"accepted": True, "idempotent": False, "intent_id": d["intent_id"]}
+
+    @staticmethod
+    def _attempt_owner_task_run(conn: sqlite3.Connection, attempt_id: str) -> tuple[str, str, str] | None:
+        """attempt → agent_runs → task_runs → tasks 链取 (owner_id, task_id, run_id)。
+
+        seq2466②：accept 时校验 attempt 归属于 intent 的 owner/task/run——
+        不能只验证 ID 存在。查不到权威链 → None（拒绝）。
+        """
+        row = conn.execute(
+            "SELECT t.owner_id, tr.task_id, ar.run_id"
+            " FROM agent_attempts aa"
+            " JOIN agent_runs ar ON ar.agent_run_id = aa.agent_run_id"
+            " JOIN task_runs tr ON tr.task_run_id = ar.task_run_id"
+            " JOIN tasks t ON t.task_id = tr.task_id"
+            " WHERE aa.attempt_id = ?",
+            (attempt_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return (str(row["owner_id"] or ""), str(row["task_id"] or ""), str(row["run_id"] or ""))
 
     def _dispatch_owned_by(self, conn, dispatch_id: str, *, claim_token: str,
                            expected_generation: int, lease_owner: str) -> dict | None:

@@ -618,6 +618,71 @@ class RuntimeSchemaMixin:
                     if "duplicate column" not in str(exc).lower():
                         raise
                     # 并发连接已先完成本列迁移，目标态已达成。
+        # seq2466①：wake_policies 表级 UNIQUE 约束迁移（表重建移除旧约束）。
+        # 4945883f 建的旧表带 `UNIQUE(owner_id, continuation_policy)`，会撞
+        # 历史保留修复（旧行 revoked + 新 generation INSERT）；SQLite 不能
+        # ALTER DROP CONSTRAINT，故用事务内表重建（CREATE new + 拷贝 +
+        # DROP + RENAME）移除表级约束，保留 partial unique index
+        # （仅 revoked_at=0 唯一）。原子可回滚（同一事务）。
+        RuntimeSchemaMixin._rebuild_wake_policies_constraint(conn)
+
+    @staticmethod
+    def _rebuild_wake_policies_constraint(conn: sqlite3.Connection) -> None:
+        """检测旧表级 UNIQUE → 事务内重建 wake_policies（移除表级约束）。
+
+        并发安全：重建在单事务内（CREATE+拷贝+DROP+RENAME 全或无）；若并发
+        连接已先重建（约束已移除/表不存在），捕获 OperationalError 后复检
+        sqlite_master——旧约束已消失即视为迁移达成。
+        """
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='wake_policies'"
+        ).fetchone()
+        if row is None:
+            return
+        create_sql = str(row["sql"] or "")
+        if "UNIQUE(owner_id, continuation_policy)" not in create_sql:
+            return  # 已是新 schema（无表级 UNIQUE），无需重建
+        try:
+            conn.execute(
+                "CREATE TABLE wake_policies_new ("
+                " policy_id TEXT PRIMARY KEY,"
+                " owner_id TEXT NOT NULL,"
+                " scope_ref TEXT NOT NULL DEFAULT '',"
+                " continuation_policy TEXT NOT NULL,"
+                " policy_generation INTEGER NOT NULL DEFAULT 1,"
+                " allowed_sources TEXT NOT NULL DEFAULT '',"
+                " provider_scope_ref TEXT NOT NULL DEFAULT '',"
+                " revoked_at REAL NOT NULL DEFAULT 0,"
+                " updated_at REAL NOT NULL"
+                ")"
+            )
+            conn.execute(
+                "INSERT INTO wake_policies_new (policy_id, owner_id, scope_ref,"
+                " continuation_policy, policy_generation, allowed_sources,"
+                " provider_scope_ref, revoked_at, updated_at)"
+                " SELECT policy_id, owner_id, scope_ref, continuation_policy,"
+                " policy_generation, allowed_sources, provider_scope_ref,"
+                " revoked_at, updated_at FROM wake_policies"
+            )
+            conn.execute("DROP TABLE wake_policies")
+            conn.execute("ALTER TABLE wake_policies_new RENAME TO wake_policies")
+            # DROP 连带删索引 → RENAME 后重建（含 partial unique 当前代索引）
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_wake_policies_owner"
+                " ON wake_policies(owner_id, continuation_policy)"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_wake_policies_active"
+                " ON wake_policies(owner_id, continuation_policy) WHERE revoked_at = 0"
+            )
+        except sqlite3.OperationalError as exc:
+            # 并发连接已先重建（wake_policies 已无旧约束即达成）
+            check = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='wake_policies'"
+            ).fetchone()
+            if check is not None and "UNIQUE(owner_id, continuation_policy)" not in str(check["sql"]):
+                return
+            raise exc
 
     @staticmethod
     def _execute_runtime_schema(conn: sqlite3.Connection, statements: tuple[str, ...]) -> None:

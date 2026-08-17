@@ -26,10 +26,10 @@ def repo(tmp_path):
 
 def _intent(repo, intent_id="intent-1", dedup_key="k1", *, source="cron",
             wake_reason="cron_due", policy="async", generation=1,
-            scope="opencode", task_id="", run_id="", **kw):
+            scope="opencode", task_id="", run_id="", owner_id="local/main", **kw):
     kw.setdefault("next_wake_at", NOW - 1)
     return repo.create_wake_intent(
-        intent_id=intent_id, dedup_key=dedup_key, owner_id="local/main",
+        intent_id=intent_id, dedup_key=dedup_key, owner_id=owner_id,
         source=source, wake_reason=wake_reason,
         continuation_policy=policy, policy_generation=generation,
         provider_scope_ref=scope, task_id=task_id, run_id=run_id, now=NOW, **kw,
@@ -307,6 +307,33 @@ def test_accept_idempotent_on_duplicate_delivery(repo):
     assert r3["accepted"] is False
 
 
+def test_accept_attempt_owner_mismatch_rejected(repo):
+    """seq2466②：attempt 归属校验——跨 owner 的 attempt 不能绑到本 dispatch。"""
+    _intent(repo, "ow-1", "k-ow", owner_id="other-user")  # intent 属 other-user
+    c = _claim(repo, "ow-1")
+    aid = _real_attempt(repo)  # attempt 属 local/main
+    r = repo.accept_wake_dispatch(c["dispatch_id"], handoff_id=c["handoff_id"],
+                                  attempt_id=aid, now=NOW + 1)
+    assert r["accepted"] is False and r["reason"] == "attempt_owner_mismatch"
+    assert repo.get_wake_intent("ow-1")["status"] == "claimed"
+
+
+def test_accept_attempt_task_mismatch_rejected(repo):
+    """seq2466②：intent 绑定 task 时，attempt 属其他 task → 拒绝。"""
+    task_a = repo.create_task(owner_id="local/main", title="a")
+    task_b = repo.create_task(owner_id="local/main", title="b")
+    tr_a = repo.create_task_run(task_id=task_a["task_id"])
+    tr_b = repo.create_task_run(task_id=task_b["task_id"])
+    ar_b = repo.create_agent_run(task_run_id=tr_b["task_run_id"], role="main")
+    attempt_b = repo.create_attempt(ar_b["agent_run_id"])
+    _intent(repo, "tm-1", "k-tm", task_id=task_a["task_id"])  # intent 绑 task_a
+    c = _claim(repo, "tm-1")
+    r = repo.accept_wake_dispatch(c["dispatch_id"], handoff_id=c["handoff_id"],
+                                  attempt_id=str(attempt_b["attempt_id"]), now=NOW + 1)
+    assert r["accepted"] is False and r["reason"] == "attempt_task_mismatch"
+    assert repo.get_wake_intent("tm-1")["status"] == "claimed"
+
+
 def test_accept_wrong_handoff_rejected(repo):
     _intent(repo)
     c = _claim(repo)
@@ -482,3 +509,65 @@ def test_fail_dispatch_records_error_intent_claimed(repo):
     assert r["failed"] is True
     assert repo.get_wake_dispatch(c["dispatch_id"])["status"] == "failed"
     assert repo.get_wake_intent("intent-1")["status"] == "claimed"
+
+
+# -------------------------------------------------- 存量库迁移（seq2466①）
+OLD_WAKE_POLICIES = """
+CREATE TABLE wake_policies (
+    policy_id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    scope_ref TEXT NOT NULL DEFAULT '',
+    continuation_policy TEXT NOT NULL,
+    policy_generation INTEGER NOT NULL DEFAULT 1,
+    allowed_sources TEXT NOT NULL DEFAULT '',
+    provider_scope_ref TEXT NOT NULL DEFAULT '',
+    revoked_at REAL NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL,
+    UNIQUE(owner_id, continuation_policy)
+)"""
+
+
+def test_legacy_wake_policies_constraint_rebuilt(tmp_path):
+    """seq2466①：4945883f 旧 schema（表级 UNIQUE）启动 → init 表重建移除旧约束，
+    历史保留修复在真实存量库可用（旧行 revoked + 新 generation INSERT 不撞约束）。"""
+    import sqlite3
+    from pathlib import Path
+    db = tmp_path / "home" / "runtime.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db)
+    conn.executescript(OLD_WAKE_POLICIES)
+    conn.execute(
+        "INSERT INTO wake_policies (policy_id, owner_id, scope_ref, continuation_policy,"
+        " policy_generation, allowed_sources, provider_scope_ref, revoked_at, updated_at)"
+        " VALUES ('p1', 'local/main', 'local/main', 'async', 1, 'cron', 'opencode', 0, ?)",
+        (NOW,),
+    )
+    conn.commit()
+    conn.close()
+    repo = RuntimeRepository(db)  # init：_execute_runtime_schema + _apply_runtime_migrations
+    # 表级 UNIQUE 已移除（sqlite_master 无 UNIQUE(owner_id, continuation_policy)）
+    conn = sqlite3.connect(db)
+    create_sql = str(conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='wake_policies'"
+    ).fetchone()[0])
+    conn.close()
+    assert "UNIQUE(owner_id, continuation_policy)" not in create_sql
+    # partial unique index 存在
+    with repo._runtime_connection() as rconn:
+        idx = rconn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='uq_wake_policies_active'"
+        ).fetchone()
+        assert idx is not None
+    # 旧行 revoked + 新 generation INSERT 不撞旧约束 → 历史保留修复可用
+    repo.set_wake_policy(policy_id="p2", owner_id="local/main",
+                         continuation_policy="async", policy_generation=2,
+                         allowed_sources="cron", provider_scope_ref="opencode",
+                         scope_ref="local/main", now=NOW + 1)
+    cur = repo.current_wake_policy("local/main", "async")
+    assert cur["policy_id"] == "p2" and cur["policy_generation"] == 2
+    with repo._runtime_connection() as rconn:
+        rows = rconn.execute(
+            "SELECT policy_id, revoked_at FROM wake_policies WHERE continuation_policy='async'"
+        ).fetchall()
+    ids = {r["policy_id"]: r["revoked_at"] for r in rows}
+    assert "p1" in ids and int(ids["p1"]) > 0  # 历史行保留 + 已 revoked
