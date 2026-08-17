@@ -517,9 +517,24 @@ class _BackgroundMainSupervisor:
 
     def _safe_tick(self, scheduler: BackgroundMainAgentScheduler, label: str) -> list[object]:
         try:
-            return list(scheduler.tick() or [])
+            result = list(scheduler.tick() or [])
+            self._consecutive_tick_failures = 0
+            return result
         except Exception as exc:
             _print_gateway_loop_error("gateway_background_main.iteration", f"background-main:{label}", exc)
+            # 防御纵深(2026-08-17 真机实锤): 单点持续失败(如 attempt unknown
+            # 挂载被拒)若每轮都抛, 无 sleep 的 tick 循环会空转烧 CPU/刷日志
+            # 拖慢同进程请求线程——连续失败按 30s→60s→120s→180s 封顶退避
+            # (sleep≤180s 铁律), 成功即清零。
+            self._consecutive_tick_failures = getattr(self, "_consecutive_tick_failures", 0) + 1
+            consecutive = self._consecutive_tick_failures
+            if consecutive >= 5:
+                time.sleep(
+                    min(
+                        180,
+                        30 * (2 ** min(consecutive - 5, 3)),
+                    )
+                )
             return []
 
     def _maybe_seed_wake_pending_owners(self) -> None:

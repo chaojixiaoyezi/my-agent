@@ -3133,7 +3133,44 @@ def _skip_pending_wake_signal(
         # Ordinary late child lifecycle signals cannot revive an inactive root.
         scheduler._mark_signal(signal, current, handled)
         return True
+    if _wake_targets_unknown_attempt(scheduler, signal):
+        # attempt unknown 终态（执行者死亡+结果未知）：create_attempt
+        # fail-closed 拒绝自动拉起（repository 闸），该 wake 每轮消费必败
+        # （真机 2026-08-17 实锤：gateway 每秒挂载失败刷屏拖慢交互）。
+        # 持久标记 handled 跳过；人工 recover_attempt_unknown 后由发现层
+        # 重新落 wake 才续跑。
+        scheduler._mark_signal(signal, current, handled)
+        return True
     return False
+
+
+def _wake_targets_unknown_attempt(scheduler: object, signal: WakeSignal) -> bool:
+    """wake 的 root_task_id 主链 run 最新 attempt 为 unknown 终态？
+
+    unknown = 执行者死亡+结果未知：自动拉起永远被 fail-closed 拒绝，等人工
+    recover_attempt_unknown。发现层已排除不再产新 wake，这里是消费端兜底
+    （存量 wake）。查询失败保守不跳过（fail-open，不误杀正常唤醒）。
+    """
+    task_id = str(getattr(signal, "root_task_id", "") or "").strip()
+    if not task_id:
+        return False
+    from ..runtime_db.repository import ATTEMPT_STATUS_UNKNOWN
+
+    agent = getattr(getattr(scheduler, "runtime", None), "agent", None)
+    repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+    if repo is None or not callable(getattr(repo, "main_agent_run_for_task", None)) or \
+            not callable(getattr(repo, "current_attempt", None)):
+        return False
+    try:
+        row = repo.main_agent_run_for_task(task_id)
+        if row is None:
+            return False
+        latest = repo.current_attempt(str(row["agent_run_id"]))
+        if latest is None:
+            return False
+        return str(latest["status"] or "") == ATTEMPT_STATUS_UNKNOWN
+    except Exception:  # noqa: BLE001 查询失败保守不跳过
+        return False
 
 
 def _consume_wake_signal_batch(

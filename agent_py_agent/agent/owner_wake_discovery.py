@@ -32,6 +32,7 @@ from .conversation.models import THREAD_TASK_LINK_ACTIVE_STATUS
 from .gateway_parts.io import update_json_file_atomic
 from .runtime_db.repository import (
     AGENT_RUN_TERMINAL_STATUSES,
+    ATTEMPT_STATUS_UNKNOWN,
     RuntimeRepository,
 )
 from .runtime_db.schema import runtime_db_path
@@ -539,6 +540,17 @@ def _filter_by_runtime_authority(
             continue
         if row is None:
             filtered.append(task_id)
+            continue
+        # attempt unknown 终态（执行者死亡+结果未知）→ 排除不驱动：
+        # create_attempt fail-closed 拒绝自动拉起（repository 闸），发现层
+        # 不该把它当普通未完成任务每轮唤醒——unknown 需人工
+        # recover_attempt_unknown 显式恢复，恢复前唤醒=纯空转（真机
+        # 2026-08-17 实锤：gateway 每秒挂载失败刷屏拖慢交互）。
+        try:
+            latest_attempt = repo.current_attempt(str(row["agent_run_id"]))
+        except Exception:  # noqa: BLE001 查询失败不反噬驱动（fail-open）
+            latest_attempt = None
+        if latest_attempt is not None and str(latest_attempt["status"] or "") == ATTEMPT_STATUS_UNKNOWN:
             continue
         status = str(row["status"] or "")
         if status in AGENT_RUN_TERMINAL_STATUSES:

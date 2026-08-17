@@ -788,3 +788,121 @@ def test_seed_registry_preserves_hard_owners_when_soft_evicted(tmp_path) -> None
     assert {o.owner_id for o in registry.snapshot()} == {"u-z-hard1", "u-z-hard2"}
     assert registry.hard_snapshot() != []
     assert registry.soft_snapshot() == []
+
+
+def _make_unknown_attempt_repo(owner_home: Path, *, task_id: str, run_id: str):
+    """构造「attempt unknown 终态」的权威库：run + UNKNOWN 工具操作 + 过期锁，
+    reclaim_orphaned_attempt 标 UNKNOWN（执行者死亡+结果未知的诚实终态）。"""
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+
+    repo = RuntimeRepository(owner_home / "runtime.db")
+    run = repo.record_run_creation(
+        owner_id="local/main", goal="g", conversation_task_id=task_id,
+        run_id=run_id, role="main",
+    )
+    attempt_id = str(run["attempt_id"])
+    now = 1787000000.0
+    with repo.transaction() as conn:
+        conn.execute(
+            "INSERT INTO tool_operations(operation_id, agent_run_id, attempt_id, "
+            "attempt_generation, tool_operation_generation, operation_type, "
+            "status, created_at, updated_at, outcome_json) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            ("op-u", str(run["agent_run_id"]), attempt_id, 1, 1,
+             "run_command", "UNKNOWN", now - 100, now - 100, "{}"),
+        )
+        conn.execute(
+            "INSERT INTO resource_locks(lock_id, canonical_scope, holder_instance, "
+            "pid, start_token, attempt_id, attempt_generation, workspace_epoch, "
+            "tool_operation_generation, lease_expires_at, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("lock-u", f"attempt-exec:{run['agent_run_id']}",
+             "dead-holder", 99999, "tok", attempt_id, 1, 1, 0,
+             now - 3600, now - 3700, now - 3700),
+        )
+    assert repo.reclaim_orphaned_attempt(
+        attempt_id, operator="test", reason="x"
+    ).get("reason") == "nonterminal_ops"
+    return repo
+
+
+def test_unknown_attempt_task_not_discovered(tmp_path) -> None:
+    """2026-08-17 真机回归: attempt unknown 终态(执行者死亡+结果未知)
+    fail-closed 拒绝自动拉起, 发现层必须排除——否则每轮唤醒=每轮挂载失败
+    刷屏拖慢 gateway(真机 501 行日志 485 行同一 RuntimeConflictError)。"""
+    from agent_py_agent.agent.owner_wake_discovery import unfinished_task_ids
+
+    owners = tmp_path / "owners"
+    home = _owner_home(owners, "unknown", "users", "u-unknown")
+    _write_link(home, "req-unknown", "active")
+    _write_task(home, "2026-08-08", "unknown-task", "RUNNING", task_id="req-unknown")
+    _write_link(home, "req-normal", "active")
+    _write_task(home, "2026-08-08", "normal-task", "RUNNING", task_id="req-normal")
+    _make_unknown_attempt_repo(home, task_id="req-unknown", run_id="run-unknown")
+
+    found = unfinished_task_ids(home)
+
+    # unknown 排除(不驱动), 同 owner 正常任务照常驱动
+    assert found == ["req-normal"]
+
+
+def test_recovered_attempt_task_discovered_again(tmp_path) -> None:
+    """人工 recover_attempt_unknown(副作用已入账)后 attempt→recovered,
+    任务重新进入驱动范围——自动拉起不再被拒, 不死锁在排除态。"""
+    from agent_py_agent.agent.owner_wake_discovery import unfinished_task_ids
+
+    owners = tmp_path / "owners"
+    home = _owner_home(owners, "unknown", "users", "u-rec")
+    _write_link(home, "req-rec", "active")
+    _write_task(home, "2026-08-08", "rec-task", "RUNNING", task_id="req-rec")
+    repo = _make_unknown_attempt_repo(home, task_id="req-rec", run_id="run-rec")
+
+    assert unfinished_task_ids(home) == []
+
+    ok = repo.recover_attempt_unknown(
+        "attempt-u-rec" if False else repo.current_attempt(
+            repo.main_agent_run_for_task("req-rec")["agent_run_id"]
+        )["attempt_id"],
+        operator="human-checker", effect_disposition="recorded",
+        reason="人工核对副作用已入账",
+    )
+    assert ok.get("recovered") is True
+
+    assert unfinished_task_ids(home) == ["req-rec"]
+
+
+def test_wake_targeting_unknown_attempt_detected(tmp_path) -> None:
+    """消费端兜底: wake 的 root_task_id 主链 run 最新 attempt 为 unknown 终态
+    → 该 wake 应持久跳过(不每轮消费失败刷屏)。normal run 不受影响。"""
+    from agent_py_agent.agent.conversation.runtime import _wake_targets_unknown_attempt
+
+    owners = tmp_path / "owners"
+    home = _owner_home(owners, "unknown", "users", "u-wake")
+    _write_link(home, "req-u", "active")
+    _write_task(home, "2026-08-08", "u-task", "RUNNING", task_id="req-u")
+    _write_link(home, "req-n", "active")
+    _write_task(home, "2026-08-08", "n-task", "RUNNING", task_id="req-n")
+    repo = _make_unknown_attempt_repo(home, task_id="req-u", run_id="run-u")
+    repo.record_run_creation(
+        owner_id="local/main", goal="g", conversation_task_id="req-n",
+        run_id="run-n", role="main",
+    )
+
+    class _Subagents:
+        runtime_db = repo
+
+    class _Agent:
+        subagents = _Subagents()
+
+    class _Runtime:
+        agent = _Agent()
+
+    class _Scheduler:
+        runtime = _Runtime()
+
+    class _Signal:
+        def __init__(self, root_task_id: str) -> None:
+            self.root_task_id = root_task_id
+
+    assert _wake_targets_unknown_attempt(_Scheduler(), _Signal("req-u")) is True
+    assert _wake_targets_unknown_attempt(_Scheduler(), _Signal("req-n")) is False
+    assert _wake_targets_unknown_attempt(_Scheduler(), _Signal("")) is False
