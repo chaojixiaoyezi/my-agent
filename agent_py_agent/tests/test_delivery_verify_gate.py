@@ -29,7 +29,7 @@ from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
 )
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.conversation.runtime import should_continue_task
-from agent_py_agent.cli.delivery_verify import (
+from agent_py_agent.agent.agent_core.tool_loop.delivery_verify import (
     VERIFY_CONTRACT_INVALID,
     VERIFY_FAILED,
     VERIFY_PASSED,
@@ -334,7 +334,7 @@ def test_verification_id_stable_and_distinct():
 
 def test_persist_event_uses_append_event(tmp_path):
     """落账走权威 API append_event（双席 seq2014 实锤修复）。"""
-    from agent_py_agent.cli.delivery_verify import (
+    from agent_py_agent.agent.agent_core.tool_loop.delivery_verify import (
         _contract_hash,
         persist_delivery_verify_event,
     )
@@ -373,7 +373,7 @@ def test_persist_event_uses_append_event(tmp_path):
 
 def test_persist_event_idempotent_skip(tmp_path):
     """同 verification_id 重复落账 → 幂等跳过（双席硬缺口3）。"""
-    from agent_py_agent.cli.delivery_verify import (
+    from agent_py_agent.agent.agent_core.tool_loop.delivery_verify import (
         _contract_hash,
         persist_delivery_verify_event,
     )
@@ -425,7 +425,7 @@ def test_persist_event_idempotent_real_sqlite(tmp_path):
     from types import SimpleNamespace
 
     from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
-    from agent_py_agent.cli.delivery_verify import (
+    from agent_py_agent.agent.agent_core.tool_loop.delivery_verify import (
         _contract_hash,
         persist_delivery_verify_event,
     )
