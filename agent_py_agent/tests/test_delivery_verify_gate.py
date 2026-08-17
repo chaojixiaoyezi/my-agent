@@ -323,7 +323,7 @@ def test_verification_id_stable_and_distinct():
     p1.attempt_id = "attempt-1"
     p2 = _FakeParams(contract=c2)
     p2.attempt_id = "attempt-1"
-    from agent_py_agent.cli.delivery_verify import build_verification_id
+    from agent_py_agent.agent.agent_core.tool_loop.delivery_verify import build_verification_id
 
     assert build_verification_id(p1, c1) == build_verification_id(p1, c1)  # 稳定
     assert build_verification_id(p1, c1) != build_verification_id(p2, c2)  # 命令不同
