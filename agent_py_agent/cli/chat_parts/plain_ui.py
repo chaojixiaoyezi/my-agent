@@ -38,7 +38,11 @@ def _make_chunk_handler(agent_name: str, next_message_id: int, *, preview_chars:
             sys.stdout.flush()
             stream_started_ref[0] = True
         if stream_truncated_ref[0] and _is_progress_chunk(chunk):
-            sys.stdout.write(_normalized_progress_chunk(chunk))
+            sys.stdout.write(_normalized_progress_chunk(_style_tool_line(chunk)))
+            sys.stdout.flush()
+            return True
+        if _is_progress_chunk(chunk):
+            sys.stdout.write(_normalized_progress_chunk(_style_tool_line(chunk)))
             sys.stdout.flush()
             return True
         remaining = max(0, preview_chars - stream_visible_chars_ref[0])
@@ -64,6 +68,22 @@ def _is_progress_chunk(chunk: str) -> bool:
     if not text:
         return False
     return text.startswith(("[工具]", "[TOOL", "[MAIN_AGENT_", "工具 ", "tool "))
+
+
+def _style_tool_line(chunk: str) -> str:
+    """工具进度行着色（2026-08-17 用户反馈「看不到输出」的渲染升级）：
+    `[工具]` 前缀青色，完成绿，失败红，其余保持原样——终端应用 风格
+    一眼看清代理在干什么、干得怎么样。非工具行原样返回。"""
+    text = strip_ansi(chunk)
+    if not text.startswith(("[工具]", "[TOOL", "工具 ")):
+        return chunk
+    if "失败" in text or "FAILED" in text.upper():
+        color = "\033[38;2;239;68;68m"  # red
+    elif "完成" in text or "OK" in text.upper():
+        color = "\033[38;2;34;197;94m"  # green
+    else:
+        color = "\033[38;2;6;182;212m"  # cyan
+    return color + text + "\033[0m"
 
 
 def _normalized_progress_chunk(chunk: str) -> str:

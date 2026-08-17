@@ -25,12 +25,24 @@ def _plain_handle_command(cfg: PlainHandleCommandConfig) -> bool | None:
     if is_exit_command(cfg.user):
         _wait_for_exit(cfg)
         return True
+    if cfg.user == "/clear":
+        _clear_screen()
+        return False
     if cfg.user == "/expand" or cfg.user.startswith("/expand "):
         _handle_expand_command(cfg.user, cfg.assistant_outputs)
         return False
     if _handle_shared_slash_command(cfg):
         return False
     return None
+
+
+def _clear_screen() -> None:
+    """/clear 清屏（ANSI，跨平台；非 tty 时无副作用）。"""
+    import sys
+
+    if sys.stdout.isatty():
+        sys.stdout.write("\033[2J\033[H")
+        sys.stdout.flush()
 
 
 def _wait_for_exit(cfg: PlainHandleCommandConfig) -> None:

@@ -27,6 +27,7 @@ CHAT_HELP_TEXT = (
     "/audit <name> status           Show one named Audit\n"
     "/audit <name> clear            Stop one named Audit\n"
     "/expand [last|number]          Expand a collapsed assistant response\n"
+    "/clear                        Clear the screen\n"
     "/exit                         Exit chat\n"
     "/memory [query]                Search memory\n"
     "/remember <content>            Save a memory note\n"

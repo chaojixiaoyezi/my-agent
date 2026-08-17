@@ -92,6 +92,17 @@ def test_verbose_command_is_persisted_per_conversation_without_calling_model(tmp
     assert "工具步骤摘要" in first.message
     assert current.verbose_level == "on"
     assert current.history == ()
+    # 2026-08-17 默认改 on 后, other 会话是默认值——显式 /verbose off
+    # 切走后仍保持 off(「本会话设置不影响其他会话」语义不变)。
+    _run_command(agent, "/verbose off", _conversation(chat="oc_other"))
+    other = _gateway_conversation_context(
+        _GatewayConversationLoadRequest(
+            agent,
+            {"conversation": _conversation(chat="oc_other")},
+            "gw-v4",
+            "另一个会话",
+        )
+    )
     assert other.verbose_level == "off"
     status = _run_command(agent, "/v", _conversation())
     assert status.message == "当前详细过程模式：开启。"
@@ -107,6 +118,9 @@ def test_verbose_invalid_level_does_not_change_thread_state(tmp_path) -> None:
         ),
         tmp_path,
     )
+    # 2026-08-17 默认改 on 后显式初始化: 先 /verbose off 建立基线,
+    # 再跑无效输入——语义不变(无效输入不改变显式设置)。
+    _run_command(agent, "/verbose off", _conversation())
     result = _run_command(agent, "/verbose everything", _conversation())
     current = _gateway_conversation_context(
         _GatewayConversationLoadRequest(

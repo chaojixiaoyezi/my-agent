@@ -320,7 +320,10 @@ class ConversationThread:
     # the summary on later turns.
     # 字段用途: 保存已压缩历史中的结构化操作核验证据；不从摘要或聊天正文反向推断。
     compact_operation_evidence: dict[str, Any] = field(default_factory=dict)
-    verbose_level: str = "off"
+    # 2026-08-17 用户反馈「TUI 看不到输出」根因: tool_progress chunk 默认
+    # off 被滤掉——改为默认 on(开箱可见工具调用, 终端应用 同款体验),
+    # /verbose off 可显式关。
+    verbose_level: str = "on"
     created_at: float = 0.0
     updated_at: float = 0.0
     channel_bindings: tuple[ChannelBinding, ...] = ()
