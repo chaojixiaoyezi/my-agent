@@ -2921,6 +2921,9 @@ _HEARTBEAT_LOGGER = logging.getLogger("agent.conversation.background_claim_heart
 # 主代理 turn 还在推进的窗口内,重复拉起只有模型调用成本没有新信息(真机 celery
 # 46 分钟 18 次 task_ledger_resume)。死停最长 cooldown 内被发现(H 批前是 6h)。
 _TASK_RESUME_COOLDOWN_SECONDS = 900
+# 三源对账降频(2026-08-17 扫描治理): 全量扫任务档案只作低频兜底(5 分钟),
+# 热层每 tick 只消费 wake_queue 到期字条(索引查询)。长期助手 分频同款。
+_WAKE_RECONCILE_INTERVAL_SECONDS = 300.0
 # R1-03 孤儿 attempt 回收频率：tick ~2min 一次，回收 5min 一趟
 _ORPHAN_RECLAIM_INTERVAL_SECONDS = 300
 
@@ -3805,62 +3808,86 @@ class _BackgroundSchedulerTickMixin:
             _HEARTBEAT_LOGGER.warning("orphan reclaim scan failed", exc_info=True)
 
     def _enqueue_unfinished_task_resume_wakes(self, *, now: float) -> None:
-        """未完成任务(link 权威)→ 落一条 dedupe wake,让主代理续跑(claim/执行链全复用)。
+        """扫描治理(2026-08-17 owner 拍板): 热层消费到期字条 + 低频三源对账。
 
-        真机:celery 复刻 RUNNING 6h 无人驱动——发现层已把 RUNNING 任务判为硬事实进池,
-        但 tick 只消费 wake/policy,没有消费者会把账本变成待驱动信号,主代理永远不被
-        拉起。这里把每个未完成任务 id 反查会话线程(store 的 tasks/<id>.json 链接),
-        按 dedupe_key 落 wake:同一任务同一轮不重复写(已有 pending wake 命中返回),
-        消费后隔 cooldown 再写 → 按节奏续跑直到任务终态。
+        热层(每 tick): pop wake_queue 到期行(索引查询, 不翻任务目录)——每行
+        先核线程档案(thread_for_task), 档案在 → raise_wake_signal 唤醒; 不在
+        → 任务已终结, 清字条不唤醒。唤醒即清行(一次性闹钟; 执行链本身有
+        claim/lease/orphan 兜底)。
 
-        cooldown:子代理正在跑/主代理刚被拉起干活的窗口内不重复催促(真机 celery
-        46 分钟 18 次 task_ledger_resume,大多落在主代理 turn 还在推进的空档,只有
-        模型调用成本没有新信息)。距上次落 wake 不足 cooldown 的跳过,死停最长
-        cooldown 内被发现(对比 H 批前 6h 无人驱动)。"""
+        低频兜底(每 _WAKE_RECONCILE_INTERVAL_SECONDS): unfinished_task_ids
+        三源全量对账一次——未完成任务没字条 → upsert(冷却后到期); 字条在但
+        任务已终结 → 清字条(僵尸不累积)。
+        """
+        self._consume_due_wake_queue(now=now)
+        last = getattr(self, "_wake_reconcile_last_at", 0.0)
+        if now - last >= _WAKE_RECONCILE_INTERVAL_SECONDS:
+            self._wake_reconcile_last_at = now
+            self._reconcile_wake_queue(now=now)
+
+    def _consume_due_wake_queue(self, *, now: float) -> None:
+        """热层: 到期字条 → 核档案 → 唤醒/清行。"""
         try:
-            home = getattr(getattr(self, "runtime", None), "agent", None)
-            owner_home = getattr(getattr(home, "home_paths", None), "owner_home_dir", None)
-            if not owner_home:
+            agent = getattr(getattr(self, "runtime", None), "agent", None)
+            repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+            if repo is None or not callable(getattr(repo, "pop_due_wakes", None)):
                 return
-            from ..owner_wake_discovery import unfinished_task_ids
-
-            last_raised = getattr(self, "_task_resume_last_raised", None)
-            if last_raised is None:
-                last_raised = {}
-                self._task_resume_last_raised = last_raised
-            for task_id in unfinished_task_ids(Path(owner_home)):
+            for wake in repo.pop_due_wakes(now=now, limit=64):
+                task_id = str(wake.get("root_task_id") or "").strip()
+                wake_id = str(wake.get("wake_id") or "").strip()
+                if not task_id or not wake_id:
+                    continue
                 try:
-                    raised_at = last_raised.get(task_id)
-                    if raised_at is not None and now - raised_at < _TASK_RESUME_COOLDOWN_SECONDS:
-                        continue  # 冷却期:不重复催促(子代理在跑/刚催过都算在窗口内)
                     thread = self.store.thread_for_task(task_id)
                     if thread is None:
-                        continue  # 会话链接未建(任务没挂到线程)→ 下轮再试
-                    links, _link_errors = self.store.task_links_report(thread.thread_id)
-                    if _link_errors:
+                        # 档案没了(任务已终结/未挂线程) → 清字条, 不唤醒
+                        repo.complete_wake(wake_id)
                         continue
-                    if any(
-                        str(link.work_kind or "").strip().lower() in {"audit", "goal"}
-                        for link in links
-                        if str(link.task_id or "").strip() == task_id
-                    ):
-                        continue  # audit/goal 有自己的唤醒通道,续跑 wake 会双重拉起主代理
                     self.store.raise_wake_signal(
                         {
                             "thread_id": thread.thread_id,
                             "urgency": "normal",
-                            "reason": "task_ledger_resume",
+                            "reason": "wake_queue_due",
                             "root_task_id": task_id,
-                            "source_agent_id": "task-ledger-resume",
+                            "source_agent_id": "wake-queue",
                             "summary": task_id,
-                            "dedupe_key": f"task-resume:{task_id}",
+                            "dedupe_key": f"wake-queue:{task_id}",
                         }
                     )
-                    last_raised[task_id] = now
                 except Exception:
-                    _HEARTBEAT_LOGGER.warning("task resume wake enqueue failed", exc_info=True)
+                    _HEARTBEAT_LOGGER.warning(
+                        "wake queue consume failed task=%s", task_id, exc_info=True
+                    )
+                repo.complete_wake(wake_id)
         except Exception:
-            _HEARTBEAT_LOGGER.warning("task resume wake scan failed", exc_info=True)
+            _HEARTBEAT_LOGGER.warning("wake queue consume scan failed", exc_info=True)
+
+    def _reconcile_wake_queue(self, *, now: float) -> None:
+        """低频三源对账: 同步"等待者名单"(wake_queue)与任务档案。"""
+        try:
+            agent = getattr(getattr(self, "runtime", None), "agent", None)
+            owner_home = getattr(getattr(agent, "home_paths", None), "owner_home_dir", None)
+            repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+            if not owner_home or repo is None or not callable(
+                getattr(repo, "upsert_wake", None)
+            ):
+                return
+            from ..owner_wake_discovery import unfinished_task_ids
+
+            unfinished = set(unfinished_task_ids(Path(owner_home)))
+            for task_id in unfinished:
+                repo.upsert_wake(
+                    root_task_id=task_id,
+                    next_due_at=now + _TASK_RESUME_COOLDOWN_SECONDS,
+                    kind="task_resume",
+                )
+            pending = repo.list_pending_wakes(limit=1000)
+            for row in pending:
+                tid = str(row.get("root_task_id") or "")
+                if tid and tid not in unfinished:
+                    repo.cancel_wakes_for_task(tid)  # 已终结 → 清字条(僵尸不累积)
+        except Exception:
+            _HEARTBEAT_LOGGER.warning("wake queue reconcile failed", exc_info=True)
 
     def _enqueue_scheduler_runs(self, *, now: float) -> None:
         if self.scheduler_service is None:

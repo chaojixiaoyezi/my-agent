@@ -1642,6 +1642,15 @@ class RuntimeRepository(
             conn.commit()
             return int(cursor.rowcount or 0)
 
+    def list_pending_wakes(self, *, limit: int = 1000) -> list[dict[str, Any]]:
+        """当前待醒字条清单(对账用: 同步"等待者名单"与任务档案)。"""
+        with self._runtime_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM wake_queue WHERE status = 'pending' LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     def stale_wakes(self, *, now: float, woke_timeout_seconds: float) -> list[dict[str, Any]]:
         """woke 超过超时仍未 complete 的字条(叫了没人干完)——僵尸候补,
         消费者逐条核任务档案后清行。"""
