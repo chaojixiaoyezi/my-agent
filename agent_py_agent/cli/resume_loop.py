@@ -18,6 +18,7 @@ import time
 from dataclasses import dataclass, replace
 
 from ..agent.agent_core.cli_run_conversation import bind_cli_run_conversation
+from ..agent.agent_core.native_tool_protocol import ToolProtocolSelectionError
 from ..agent.agent_core.runtime.loop_models import RunParams
 from ..agent.backends import ProviderRecoverableError, is_provider_usage_limit_error
 from .resume_contract import (
@@ -316,6 +317,11 @@ def run_with_resume(
                 consecutive=consecutive_uncontinuable,
             )
             _continuation_backoff_sleep(consecutive_uncontinuable)
+        except ToolProtocolSelectionError as exc:
+            # 2026-08-17 MiniMax 端点实锤: tool protocol 能力错误(probe 重试后
+            # 仍不通过=端点持续不可用/模型确实不支持 native)不是瞬时错误——
+            # 无限退避=空转烧资源(同 429 语义)。re-raise 到 cmd_run 诚实报告。
+            raise
         except Exception as exc:  # noqa: BLE001 进程不退出铁律(2026-08-16 用户):
             # 非 Provider 异常(sqlite 并发竞争/工具执行链未知异常等)同样进程内
             # 退避续跑——真机 cell 进程消失根因: cmd_run 只捕获 Provider 两类
@@ -432,6 +438,9 @@ def run_with_resume(
                     consecutive=consecutive_uncontinuable,
                 )
                 _continuation_backoff_sleep(consecutive_uncontinuable)
+            except ToolProtocolSelectionError as exc:
+                # 同首轮：能力错误（probe 重试后仍不通过）非瞬时错误，诚实退出。
+                raise
             except Exception as exc:  # noqa: BLE001 进程不退出铁律(同首轮):
                 # 任何异常不冒泡退出——进程内退避后重试同一续跑轮。
                 consecutive_uncontinuable += 1

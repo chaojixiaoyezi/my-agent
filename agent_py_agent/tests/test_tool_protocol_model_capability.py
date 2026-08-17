@@ -76,7 +76,8 @@ def test_failed_native_capability_probe_does_not_silently_select_text() -> None:
     ):
         select_tool_protocol(agent, run_id="run-native-fail")
 
-    assert agent.backend.probes == 1
+    # 2026-08-17 探针重试（MiniMax 端点偶发失败实锤）：重试耗尽才拒绝
+    assert agent.backend.probes == 3
 
 
 def test_explicit_text_protocol_is_rejected() -> None:

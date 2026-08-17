@@ -14,6 +14,7 @@ import time
 from ..agent.agent_core.cli_run_conversation import (
     CliRunConversationPersistenceError,
 )
+from ..agent.agent_core.native_tool_protocol import ToolProtocolSelectionError
 from ..agent.backends import ProviderRecoverableError
 from ..agent.gateway_parts import (
     gateway_paths,
@@ -197,6 +198,11 @@ def cmd_run(args) -> int:
         result = outcome.final_result
     except ProviderRecoverableError as exc:
         print(provider_recoverable_cli_report(agent, exc))
+        return 2
+    except ToolProtocolSelectionError as exc:
+        # 2026-08-17 MiniMax 端点实锤: probe 重试后仍失败=端点持续不可用/
+        # 模型确实不支持 native——诚实报告退出（不无限退避、不假装成功）。
+        print(f"工具协议能力不可用（native probe 重试后仍失败）：{exc}")
         return 2
     except CliRunConversationPersistenceError as exc:
         print(

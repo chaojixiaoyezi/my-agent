@@ -270,3 +270,49 @@ def test_resolve_native_tools_uses_typed_discovery_state():
             "runtime_snapshot": "snapshot",
         }
     ]
+
+
+def test_probe_retries_transient_failure_then_succeeds():
+    """2026-08-17 MiniMax 端点实锤：探针是真实网络请求，偶发失败不应误杀
+    run——前两次失败第三次成功 → 重试后选中 native。"""
+    import itertools
+
+    class _FlakyBackend:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.name = "flaky"
+            self.model_name = "test-model"
+            self.stream_enabled = False
+
+        def probe_tool_capability(self) -> ProviderToolCapability:
+            self.calls += 1
+            if self.calls < 3:
+                return ProviderToolCapability(
+                    provider=self.name, endpoint="local://flaky",
+                    model=self.model_name, stream=False,
+                    native_supported=False, evidence="live_probe_failed:transient",
+                )
+            return ProviderToolCapability(
+                provider=self.name, endpoint="local://flaky",
+                model=self.model_name, stream=False,
+                native_supported=True, evidence="live_probe_returned_structured_tool_call",
+            )
+
+    backend = _FlakyBackend()
+    agent = SimpleNamespace(
+        config=SimpleNamespace(tool_protocol="native", enable_tools=True),
+        backend=backend,
+    )
+    snapshot = select_tool_protocol(agent, run_id="run-flaky")
+    assert snapshot.source_protocol == "native"
+    assert backend.calls == 3
+
+
+def test_probe_retries_exhausted_still_fail_closed():
+    """持续失败（重试耗尽）→ 仍 fail-closed 拒绝（不静默降级）。"""
+    agent = _agent(protocol="native", native_supported=False)
+    import pytest as _pytest
+
+    with _pytest.raises(ToolProtocolSelectionError) as exc_info:
+        select_tool_protocol(agent, run_id="run-fail")
+    assert "3 attempts" in str(exc_info.value)
