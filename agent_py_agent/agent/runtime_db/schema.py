@@ -421,6 +421,7 @@ _BASE_RUNTIME_SQL = (
         handoff_id TEXT NOT NULL DEFAULT '',
         idempotency_key TEXT NOT NULL DEFAULT '',
         attempt_count INTEGER NOT NULL DEFAULT 0,
+        active_attempt_id TEXT NOT NULL DEFAULT '',
         last_error_ref TEXT NOT NULL DEFAULT '',
         cancelled_reason TEXT NOT NULL DEFAULT '',
         created_at REAL NOT NULL,
@@ -429,6 +430,80 @@ _BASE_RUNTIME_SQL = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_wake_intents_due ON wake_intents(status, next_wake_at)",
     "CREATE INDEX IF NOT EXISTS idx_wake_intents_owner ON wake_intents(owner_id, status)",
+    # ------------------------------------------------ wake_policies（#233）
+    # canonical 策略授权源（seq2455/2457/2458 硬合同）：wake 调度唯一授权事实。
+    # 无记录 / 代际不匹配 / 已撤销 / 来源不在白名单 / provider scope 不匹配 →
+    # 一律 fail-closed 拒绝。generation 更新与 revoked_at 变更同事务原子化
+    # （set_wake_policy）。后续大策略系统只能经同一 policy-validator contract
+    # 替换，禁止并行第二套「当前策略」。
+    """
+    CREATE TABLE IF NOT EXISTS wake_policies (
+        policy_id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        scope_ref TEXT NOT NULL DEFAULT '',
+        continuation_policy TEXT NOT NULL,
+        policy_generation INTEGER NOT NULL DEFAULT 1,
+        allowed_sources TEXT NOT NULL DEFAULT '',
+        provider_scope_ref TEXT NOT NULL DEFAULT '',
+        revoked_at REAL NOT NULL DEFAULT 0,
+        updated_at REAL NOT NULL,
+        UNIQUE(owner_id, continuation_policy)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_wake_policies_owner ON wake_policies(owner_id, continuation_policy)",
+    # ------------------------------------------------ wake_dispatches（#233）
+    # claim→outbox→执行席 acceptance→CAS handed_off 的 canonical dispatch 台账
+    # （seq2455/2457/2458 硬合同）：
+    # - claim+record 同事务（同一 runtime.db）：intent pending→claimed + dispatch
+    #   行（status=dispatched、唯一 dispatch_event_id + 唯一 handoff_id）。
+    # - 执行席先创建 attempt（拿 attempt_id）→ 同一 attempt_id 落 outbox →
+    #   确认可靠接收后 accept_wake_dispatch 同事务 CAS：dispatch→accepted +
+    #   intent claimed→handed_off（写 handed_off_at/active_attempt_id）。
+    # - 内存 registry.record 只算候选入池，不单独触发 handed_off。
+    # - accepted 后 provider/模型副作用才允许开始（effect_started 只作信号；
+    #   未知副作用/provider request ref 放 canonical attempt ledger）。
+    # - lease 已过期的迟到 receipt → reconciliation，不得把旧 intent 标 handed_off。
+    # - 重复投递靠 owner acceptance 按 event/attempt 幂等。
+    """
+    CREATE TABLE IF NOT EXISTS wake_dispatches (
+        dispatch_id TEXT PRIMARY KEY,
+        intent_id TEXT NOT NULL,
+        claim_generation INTEGER NOT NULL,
+        claim_token TEXT NOT NULL,
+        owner_id TEXT NOT NULL DEFAULT '',
+        lease_owner TEXT NOT NULL DEFAULT '',
+        lease_until REAL NOT NULL DEFAULT 0,
+        dispatch_event_id TEXT NOT NULL DEFAULT '',
+        handoff_id TEXT NOT NULL DEFAULT '',
+        attempt_id TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'dispatched',
+        accepted_at REAL NOT NULL DEFAULT 0,
+        effect_started INTEGER NOT NULL DEFAULT 0,
+        outcome TEXT NOT NULL DEFAULT '',
+        last_error_ref TEXT NOT NULL DEFAULT '',
+        reconciliation_ref TEXT NOT NULL DEFAULT '',
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        UNIQUE(intent_id, claim_generation),
+        UNIQUE(dispatch_event_id),
+        UNIQUE(handoff_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_wake_dispatches_intent ON wake_dispatches(intent_id)",
+    "CREATE INDEX IF NOT EXISTS idx_wake_dispatches_status ON wake_dispatches(status, created_at)",
+    # ------------------------------------------------ provider_circuits（#233）
+    # provider circuit 冻结投影（seq2455/2457）：provider_scope_ref + retry_after
+    # + 冻结状态 + reason（可审计来源）。frozen=1 且 now<retry_after → circuit
+    # open（拒消费）；429/quota 耗尽由 gateway 写入，恢复后显式 recover。
+    """
+    CREATE TABLE IF NOT EXISTS provider_circuits (
+        provider_scope_ref TEXT PRIMARY KEY,
+        frozen INTEGER NOT NULL DEFAULT 0,
+        retry_after REAL NOT NULL DEFAULT 0,
+        reason TEXT NOT NULL DEFAULT '',
+        updated_at REAL NOT NULL
+    )
+    """,
 )
 
 
@@ -447,6 +522,12 @@ _RUNTIME_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
         "payload_schema_version",
         "wake_intents",
         "ALTER TABLE wake_intents ADD COLUMN payload_schema_version TEXT NOT NULL DEFAULT 'v1'",
+    ),
+    # seq2458 硬合同③：intent 级 active attempt 唯一门（claim/accept/release 共查）。
+    (
+        "active_attempt_id",
+        "wake_intents",
+        "ALTER TABLE wake_intents ADD COLUMN active_attempt_id TEXT NOT NULL DEFAULT ''",
     ),
     (
         "current_contract_id",

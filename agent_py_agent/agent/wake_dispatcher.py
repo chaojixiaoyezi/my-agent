@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import time
+import uuid
 from dataclasses import dataclass
 
 #: 来源授权：interactive 仅允许事件类来源（禁周期扫描）。
@@ -38,6 +39,9 @@ class WakeDispatchOutcome:
     claimed: bool
     reason: str  # dispatched / rejected_policy / rejected_source / rejected_circuit / rejected_not_due / claimed_failed
     generation: int = 0
+    dispatch_id: str = ""
+    dispatch_event_id: str = ""
+    handoff_id: str = ""
 
 
 def validate_wake_intent_authorization(
@@ -63,9 +67,11 @@ def validate_wake_intent_authorization(
       - provider_scope_ref 空（interactive/async 都要）→ 拒绝（provider circuit
         路由统一需要，seq2436：不能只对 async）
       - policy_generation < 0 → 拒绝
-      - policy_validator 返回 False → 拒绝（匹配当前 policy ledger 且未撤销）
+      - policy_validator 返回 False → 拒绝（canonical policy ledger：无记录/
+        代际不匹配/已撤销/来源不在白名单/provider scope 不匹配——seq2455/2457）
       - provider_circuit_open 返回 True → 拒绝（429/配额冻结该 provider）
-    返回 (ok, reason)。
+    返回 (ok, reason)。policy_validator 合同：接收完整 intent 行
+    `policy_validator(row) -> bool`（内部查 canonical wake_policies，字段门不重复）。
     """
     policy = str(row.get("continuation_policy") or "").strip()
     if policy not in {"interactive", "async"}:
@@ -94,7 +100,7 @@ def validate_wake_intent_authorization(
     if not callable(provider_circuit_open):
         return False, "provider_circuit_required"
     try:
-        if not policy_validator(policy, generation):
+        if not policy_validator(row):
             return False, "policy_generation_not_current_or_revoked"
     except Exception:  # noqa: BLE001 validator 异常保守拒绝（fail-closed）
         return False, "policy_validator_error"
@@ -141,11 +147,17 @@ def dispatch_due_wake_intent(
             pass
         return WakeDispatchOutcome(intent_id, claimed=False, reason=f"rejected_{reject_reason}")
 
-    claim = repo.claim_wake_intent(
+    # claim + 落 dispatch outbox 同事务（seq2458 合同：durable outbox + 唯一
+    # event/handoff id）。claim 成功只意味着「抢单 + outbox 已持久」；intent
+    # 置 handed_off 必须等执行席 accept_wake_dispatch（可靠接收后才允许
+    # provider/模型副作用开始）——本函数不 handoff。
+    claim = repo.claim_and_record_wake_dispatch(
         intent_id,
         lease_owner=lease_owner,
         lease_seconds=lease_seconds,
         claim_token=f"{lease_owner}:{int(now * 1000)}",
+        dispatch_event_id=f"wake-event-{int(now * 1000)}-{uuid.uuid4().hex[:12]}",
+        handoff_id=f"handoff-{int(now * 1000)}-{uuid.uuid4().hex[:12]}",
         now=now,
     )
     if not claim.get("claimed"):
@@ -157,6 +169,9 @@ def dispatch_due_wake_intent(
         claimed=True,
         reason="dispatched",
         generation=int(claim.get("claim_generation") or 0),
+        dispatch_id=str(claim.get("dispatch_id") or ""),
+        dispatch_event_id=str(claim.get("dispatch_event_id") or ""),
+        handoff_id=str(claim.get("handoff_id") or ""),
     )
 
 

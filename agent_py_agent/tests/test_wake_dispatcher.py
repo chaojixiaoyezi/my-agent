@@ -33,7 +33,7 @@ def _intent(repo, intent_id, dedup_key, source="cron", wake_reason="cron_due",
     )
 
 
-def _ok_validator(policy, generation):
+def _ok_validator(row):
     return True
 
 
@@ -150,11 +150,11 @@ def test_no_injected_gate_still_rejects_bad_fields(repo):
 def test_injected_validator_rejection_still_fail_closed(repo):
     """有注入时注入核对仍 fail-closed（不因弹性门放松）——policy ledger 撤销/异常拒绝。"""
     _intent(repo, "l1", "k12", generation=3)
-    out = _dispatch(repo, "l1", policy_validator=lambda p, g: False)
+    out = _dispatch(repo, "l1", policy_validator=lambda row: False)
     assert not out.claimed
     assert "rejected_policy_generation_not_current_or_revoked" in out.reason
     _intent(repo, "l2", "k13")
-    out = _dispatch(repo, "l2", policy_validator=lambda p, g: (_ for _ in ()).throw(RuntimeError("boom")))
+    out = _dispatch(repo, "l2", policy_validator=lambda row: (_ for _ in ()).throw(RuntimeError("boom")))
     assert not out.claimed
     assert "rejected_policy_validator_error" in out.reason
     # circuit 冻结 → 拒绝
@@ -162,3 +162,20 @@ def test_injected_validator_rejection_still_fail_closed(repo):
     out = _dispatch(repo, "l3", provider_circuit_open=lambda s: True)
     assert not out.claimed
     assert "rejected_provider_circuit_open_or_quota_frozen" in out.reason
+
+
+def test_claim_records_dispatch_ledger(repo):
+    """claim 成功必须同事务落 wake_dispatches outbox（唯一 event/handoff id）。"""
+    _intent(repo, "m1", "k15")
+    out = _dispatch(repo, "m1")
+    assert out.claimed
+    assert out.dispatch_id and out.dispatch_event_id and out.handoff_id
+    row = repo.get_wake_intent("m1")
+    assert row["status"] == "claimed"  # claim 不等于 handoff
+    dispatches = repo.wake_dispatches_for_intent("m1")
+    assert len(dispatches) == 1
+    d = dispatches[0]
+    assert d["status"] == "dispatched"
+    assert d["dispatch_event_id"] == out.dispatch_event_id
+    assert d["handoff_id"] == out.handoff_id
+    assert d["claim_generation"] == out.generation

@@ -586,30 +586,36 @@ class _BackgroundMainSupervisor:
                     continue
                 for row in due:
                     try:
-                        # seq2444：policy_validator/provider_circuit_open 必传，
-                        # 未注入 → 授权校验拒绝（fail-closed，不 claim）——真实
-                        # policy/circuit 基建落成后从 owner 依赖注入。
+                        # seq2455/2457 硬合同：policy_validator 查 canonical
+                        # wake_policies（唯一授权源，无记录/代际不匹配/撤销/来源
+                        # 白名单/provider scope 不匹配 → 拒）；provider_circuit_open
+                        # 查 provider_circuits 冻结投影（frozen + retry_after）。
+                        # 当前无 policy 注册 → 全部 fail-closed 拒绝（shadow
+                        # 安全态），真实 producer 接入（#233-3/4）后放行。
                         outcome = dispatch_due_wake_intent(
                             repo, row,
                             lease_owner=_wake_dispatcher_instance_id(self._base_agent),
                             lease_seconds=_wake_dispatcher_lease_seconds(self._base_agent),
-                            policy_validator=None,
-                            provider_circuit_open=None,
+                            policy_validator=lambda r: repo.wake_policy_allows(r),
+                            provider_circuit_open=lambda scope: repo.provider_circuit_frozen(
+                                scope, now=time.time(),
+                            ),
                         )
                     except Exception:  # noqa: BLE001 单 intent 异常不阻断
                         continue
                     if outcome.claimed:
-                        # claim 成功 → owner 进池，下一轮执行一轮（唯一 attempt 入口）。
-                        # seq2450 硬门：**不在此处立即 handoff**——handed_off 只在
-                        # durable wake_dispatch ledger 写入 + 执行席明确接收后才允许；
-                        # 当前保持 claimed，等 wake_dispatch ledger（intent_id+
-                        # claim_generation/token+attempt/handoff 关联）建成 + owner
-                        # 执行轮回调后接，避免「intent 已交接但无 attempt」丢失窗口。
+                        # claim + outbox 已持久（claim_and_record_wake_dispatch
+                        # 同事务落 wake_dispatches，含唯一 event/handoff id）。
+                        # seq2450/2458 硬门：owner 进 registry 只是**候选入池**
+                        # （执行席接收的 acceptance receipt 才把 intent 置
+                        # handed_off）；此处绝不 handoff——等执行席创建 attempt
+                        # 后 accept_wake_dispatch 幂等确认，provider 副作用才开始。
                         self._registry.record(owner_identity, hard=True)
                         dispatched += 1
                         print(
                             f"[gateway-background-main] wake intent dispatched: "
-                            f"{outcome.intent_id} owner={getattr(owner_identity, 'owner_id', '')}",
+                            f"{outcome.intent_id} dispatch={outcome.dispatch_id} "
+                            f"owner={getattr(owner_identity, 'owner_id', '')}",
                             flush=True,
                         )
             if dispatched:

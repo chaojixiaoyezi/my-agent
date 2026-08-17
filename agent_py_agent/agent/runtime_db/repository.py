@@ -1718,7 +1718,8 @@ class RuntimeRepository(
                 " claim_generation = claim_generation + 1, claim_token = ?,"
                 " lease_owner = ?, lease_until = ?, claimed_at = ?, updated_at = ?"
                 " WHERE intent_id = ? AND status = 'pending'"
-                " AND next_wake_at <= ? AND (expires_at IS NULL OR expires_at > ?)",
+                " AND next_wake_at <= ? AND (expires_at IS NULL OR expires_at > ?)"
+                " AND active_attempt_id = ''",
                 (
                     claim_token,
                     lease_owner,
@@ -1783,7 +1784,8 @@ class RuntimeRepository(
                 " claim_generation = claim_generation + 1,"
                 " claim_token = '', lease_owner = '', lease_until = 0, updated_at = ?"
                 " WHERE intent_id = ? AND status = 'claimed' AND claim_token = ?"
-                " AND lease_until <= ? AND claim_generation = ?",
+                " AND lease_until <= ? AND claim_generation = ?"
+                " AND active_attempt_id = ''",
                 (now, intent_id, claim_token, now, int(expected_generation)),
             )
             if cur.rowcount == 0:
@@ -1879,6 +1881,365 @@ class RuntimeRepository(
                 "SELECT status, count(*) AS n FROM wake_intents GROUP BY status"
             ).fetchall()
         return {str(row["status"]): int(row["n"]) for row in rows}
+
+    # -------------------------------------------------- wake_policies（#233）
+    def set_wake_policy(
+        self,
+        *,
+        policy_id: str,
+        owner_id: str,
+        continuation_policy: str,
+        policy_generation: int,
+        allowed_sources: str = "",
+        provider_scope_ref: str = "",
+        scope_ref: str = "",
+        now: float | None = None,
+    ) -> dict[str, object]:
+        """写入/更新 canonical 策略（seq2458 合同：generation 更新与 revoked_at
+        变更同事务原子化——旧代次先置 revoked，再落新行）。
+
+        UNIQUE(owner_id, continuation_policy)：同一 owner 同一策略类型最多一条
+        当前行；新 generation 写入即旧行 revoked，杜绝两套「当前策略」并存。
+        """
+        now = time.time() if now is None else now
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE wake_policies SET revoked_at = ?, updated_at = ?"
+                " WHERE owner_id = ? AND continuation_policy = ? AND revoked_at = 0",
+                (now, now, owner_id, continuation_policy),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO wake_policies ("
+                " policy_id, owner_id, scope_ref, continuation_policy,"
+                " policy_generation, allowed_sources, provider_scope_ref,"
+                " revoked_at, updated_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)",
+                (
+                    policy_id, owner_id, scope_ref, continuation_policy,
+                    int(policy_generation), allowed_sources, provider_scope_ref, now,
+                ),
+            )
+        return {"set": True, "policy_id": policy_id}
+
+    def revoke_wake_policy(
+        self,
+        *,
+        owner_id: str,
+        continuation_policy: str,
+        now: float | None = None,
+    ) -> dict[str, object]:
+        now = time.time() if now is None else now
+        with self.transaction() as conn:
+            cur = conn.execute(
+                "UPDATE wake_policies SET revoked_at = ?, updated_at = ?"
+                " WHERE owner_id = ? AND continuation_policy = ? AND revoked_at = 0",
+                (now, now, owner_id, continuation_policy),
+            )
+            if cur.rowcount == 0:
+                return {"revoked": False, "reason": "not_current"}
+        return {"revoked": True}
+
+    def current_wake_policy(
+        self, owner_id: str, continuation_policy: str
+    ) -> dict[str, Any] | None:
+        with self._runtime_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM wake_policies"
+                " WHERE owner_id = ? AND continuation_policy = ? AND revoked_at = 0"
+                " ORDER BY updated_at DESC LIMIT 1",
+                (owner_id, continuation_policy),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def wake_policy_allows(self, row: dict[str, Any]) -> bool:
+        """canonical 策略授权裁决（seq2455/2457 硬合同，唯一授权源）。
+
+        无记录 / 代际不匹配 / 已撤销 / 来源不在白名单 / provider scope 不匹配
+        → False（fail-closed）。只读 intent 行结构化字段，不解析自然语言。
+        """
+        owner_id = str(row.get("owner_id") or "")
+        continuation_policy = str(row.get("continuation_policy") or "").strip()
+        try:
+            policy_generation = int(row.get("policy_generation") or -1)
+        except (TypeError, ValueError):
+            return False
+        source = str(row.get("source") or "").strip()
+        provider_scope_ref = str(row.get("provider_scope_ref") or "").strip()
+        policy = self.current_wake_policy(owner_id, continuation_policy)
+        if policy is None:
+            return False
+        if int(policy["revoked_at"] or 0) != 0:
+            return False
+        if int(policy["policy_generation"]) != policy_generation:
+            return False
+        allowed = {s.strip() for s in str(policy["allowed_sources"] or "").split(",") if s.strip()}
+        if allowed and source not in allowed:
+            return False
+        policy_scope = str(policy["provider_scope_ref"] or "").strip()
+        if policy_scope and policy_scope != provider_scope_ref:
+            return False
+        return True
+
+    # ------------------------------------------------- provider_circuits（#233）
+    def freeze_provider_circuit(
+        self,
+        provider_scope_ref: str,
+        *,
+        retry_after: float,
+        reason: str,
+        now: float | None = None,
+    ) -> dict[str, object]:
+        """429/quota 冻结 provider（可审计来源 reason）。"""
+        now = time.time() if now is None else now
+        with self.transaction() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO provider_circuits ("
+                " provider_scope_ref, frozen, retry_after, reason, updated_at"
+                ") VALUES (?, 1, ?, ?, ?)",
+                (provider_scope_ref, retry_after, reason, now),
+            )
+        return {"frozen": True, "provider_scope_ref": provider_scope_ref}
+
+    def recover_provider_circuit(
+        self, provider_scope_ref: str, *, now: float | None = None
+    ) -> dict[str, object]:
+        now = time.time() if now is None else now
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE provider_circuits SET frozen = 0, retry_after = 0,"
+                " reason = '', updated_at = ? WHERE provider_scope_ref = ?",
+                (now, provider_scope_ref),
+            )
+        return {"recovered": True, "provider_scope_ref": provider_scope_ref}
+
+    def provider_circuit_frozen(self, provider_scope_ref: str, *, now: float | None = None) -> bool:
+        """circuit open（冻结且未过 retry_after）→ True，dispatcher 拒消费。"""
+        now = time.time() if now is None else now
+        with self._runtime_connection() as conn:
+            row = conn.execute(
+                "SELECT frozen, retry_after FROM provider_circuits"
+                " WHERE provider_scope_ref = ?",
+                (provider_scope_ref,),
+            ).fetchone()
+        if row is None:
+            return False
+        return int(row["frozen"] or 0) == 1 and float(row["retry_after"] or 0) > now
+
+    # ------------------------------------------------ wake_dispatches（#233）
+    def claim_and_record_wake_dispatch(
+        self,
+        intent_id: str,
+        *,
+        lease_owner: str,
+        lease_seconds: float,
+        claim_token: str,
+        dispatch_event_id: str,
+        handoff_id: str,
+        now: float | None = None,
+    ) -> dict[str, object]:
+        """claim + 落 dispatch outbox 同事务（同一 runtime.db，seq2458 合同①/③）。
+
+        - intent pending→claimed（CAS 含 active_attempt_id='' 门：同 intent 同时
+          最多一个 active attempt）。
+        - 同一事务 INSERT wake_dispatches（status=dispatched、唯一
+          dispatch_event_id + 唯一 handoff_id）——崩溃后 outbox 行已持久，可重放。
+        内存 registry.record 在 dispatcher 上层仍执行（候选入池），但只有
+        accept_wake_dispatch 才把 intent 置 handed_off（执行席可靠接收）。
+        """
+        now = time.time() if now is None else now
+        dispatch_id = f"wake-dispatch-{int(now * 1000)}-{uuid.uuid4().hex[:12]}"
+        with self.transaction() as conn:
+            cur = conn.execute(
+                "UPDATE wake_intents SET status = 'claimed',"
+                " claim_generation = claim_generation + 1, claim_token = ?,"
+                " lease_owner = ?, lease_until = ?, claimed_at = ?, updated_at = ?"
+                " WHERE intent_id = ? AND status = 'pending'"
+                " AND next_wake_at <= ? AND (expires_at IS NULL OR expires_at > ?)"
+                " AND active_attempt_id = ''",
+                (
+                    claim_token,
+                    lease_owner,
+                    now + max(1.0, lease_seconds),
+                    now,
+                    now,
+                    intent_id,
+                    now,
+                    now,
+                ),
+            )
+            if cur.rowcount == 0:
+                return {"claimed": False, "reason": "not_pending_or_not_due"}
+            row = conn.execute(
+                "SELECT claim_generation FROM wake_intents WHERE intent_id = ?",
+                (intent_id,),
+            ).fetchone()
+            generation = int(row[0]) if row is not None else None
+            conn.execute(
+                "INSERT INTO wake_dispatches ("
+                " dispatch_id, intent_id, claim_generation, claim_token, owner_id,"
+                " lease_owner, lease_until, dispatch_event_id, handoff_id, attempt_id,"
+                " status, created_at, updated_at"
+                ") SELECT ?, ?, ?, ?, owner_id, ?, ?, ?, ?, '', 'dispatched', ?, ?"
+                " FROM wake_intents WHERE intent_id = ?",
+                (
+                    dispatch_id, intent_id, generation, claim_token, lease_owner,
+                    now + max(1.0, lease_seconds), dispatch_event_id, handoff_id,
+                    now, now, intent_id,
+                ),
+            )
+        return {
+            "claimed": True,
+            "intent_id": intent_id,
+            "claim_generation": generation,
+            "claim_token": claim_token,
+            "dispatch_id": dispatch_id,
+            "dispatch_event_id": dispatch_event_id,
+            "handoff_id": handoff_id,
+        }
+
+    def get_wake_dispatch(self, dispatch_id: str) -> dict[str, Any] | None:
+        with self._runtime_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM wake_dispatches WHERE dispatch_id = ?", (dispatch_id,)
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def wake_dispatches_for_intent(self, intent_id: str) -> list[dict[str, Any]]:
+        with self._runtime_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM wake_dispatches WHERE intent_id = ?"
+                " ORDER BY created_at ASC",
+                (intent_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def accept_wake_dispatch(
+        self,
+        dispatch_id: str,
+        *,
+        handoff_id: str,
+        attempt_id: str,
+        now: float | None = None,
+    ) -> dict[str, object]:
+        """执行席可靠接收后 CAS：dispatch dispatched→accepted + intent
+        claimed→handed_off（同一 runtime.db 单事务，seq2458 合同①②）。
+
+        前置硬门（全部满足才 CAS）：
+          - dispatch 行存在且 status='dispatched'（或已 accepted 且 handoff/attempt
+            一致 → 幂等返回成功，重复投递安全）。
+          - dispatch.handoff_id == 传入 handoff_id（唯一 handoff 事件）。
+          - intent status='claimed' AND claim_generation/token 与 dispatch 一致。
+          - **当前 lease 未过期（lease_until > now）**——lease 已过期的迟到
+            receipt → 拒绝并转 reconciliation，不得把旧 intent 标 handed_off。
+        成功后 intent.active_attempt_id=attempt_id（intent 级 active 门），
+        provider/模型副作用才允许开始（acceptance 后）。
+        """
+        now = time.time() if now is None else now
+        with self.transaction() as conn:
+            d = conn.execute(
+                "SELECT * FROM wake_dispatches WHERE dispatch_id = ?", (dispatch_id,)
+            ).fetchone()
+            if d is None:
+                return {"accepted": False, "reason": "dispatch_not_found"}
+            status = str(d["status"] or "")
+            if status == "accepted":
+                if str(d["handoff_id"] or "") == handoff_id and \
+                        str(d["attempt_id"] or "") == attempt_id:
+                    return {"accepted": True, "idempotent": True, "intent_id": d["intent_id"]}
+                return {"accepted": False, "reason": "already_accepted_mismatch"}
+            if status != "dispatched":
+                return {"accepted": False, "reason": f"not_dispatched:{status}"}
+            if str(d["handoff_id"] or "") != handoff_id:
+                return {"accepted": False, "reason": "handoff_mismatch"}
+            if float(d["lease_until"] or 0) <= now:
+                conn.execute(
+                    "UPDATE wake_dispatches SET status = 'reconciliation',"
+                    " reconciliation_ref = 'late_receipt_lease_expired',"
+                    " last_error_ref = 'late_receipt_lease_expired', updated_at = ?"
+                    " WHERE dispatch_id = ? AND status = 'dispatched'",
+                    (now, dispatch_id),
+                )
+                return {"accepted": False, "reason": "lease_expired_reconciliation"}
+            cur = conn.execute(
+                "UPDATE wake_intents SET status = 'handed_off', handoff_id = ?,"
+                " handed_off_at = ?, active_attempt_id = ?, updated_at = ?"
+                " WHERE intent_id = ? AND status = 'claimed'"
+                " AND claim_generation = ? AND claim_token = ?",
+                (
+                    handoff_id, now, attempt_id, now,
+                    d["intent_id"], int(d["claim_generation"]), d["claim_token"],
+                ),
+            )
+            if cur.rowcount == 0:
+                return {"accepted": False, "reason": "intent_not_claimed_generation_mismatch"}
+            conn.execute(
+                "UPDATE wake_dispatches SET status = 'accepted', handoff_id = ?,"
+                " attempt_id = ?, accepted_at = ?, updated_at = ?"
+                " WHERE dispatch_id = ? AND status = 'dispatched'",
+                (handoff_id, attempt_id, now, now, dispatch_id),
+            )
+        return {"accepted": True, "idempotent": False, "intent_id": d["intent_id"]}
+
+    def fail_wake_dispatch(
+        self, dispatch_id: str, *, error_ref: str, now: float | None = None
+    ) -> dict[str, object]:
+        """执行席拒绝/接收失败：dispatch→failed（intent 保持 claimed，等 reconciler）。"""
+        now = time.time() if now is None else now
+        with self.transaction() as conn:
+            cur = conn.execute(
+                "UPDATE wake_dispatches SET status = 'failed',"
+                " last_error_ref = ?, updated_at = ?"
+                " WHERE dispatch_id = ? AND status = 'dispatched'",
+                (error_ref, now, dispatch_id),
+            )
+            if cur.rowcount == 0:
+                return {"failed": False, "reason": "not_dispatched"}
+        return {"failed": True}
+
+    def release_wake_dispatch(
+        self, dispatch_id: str, *, now: float | None = None
+    ) -> dict[str, object]:
+        """无已知副作用 + lease 回收：dispatch→released（与 release_wake_intent_lease 配对）。"""
+        now = time.time() if now is None else now
+        with self.transaction() as conn:
+            cur = conn.execute(
+                "UPDATE wake_dispatches SET status = 'released', updated_at = ?"
+                " WHERE dispatch_id = ? AND status = 'dispatched'",
+                (now, dispatch_id),
+            )
+            if cur.rowcount == 0:
+                return {"released": False, "reason": "not_dispatched"}
+        return {"released": True}
+
+    def mark_wake_dispatch_reconciliation(
+        self, dispatch_id: str, *, error_ref: str, now: float | None = None
+    ) -> dict[str, object]:
+        now = time.time() if now is None else now
+        with self.transaction() as conn:
+            cur = conn.execute(
+                "UPDATE wake_dispatches SET status = 'reconciliation',"
+                " last_error_ref = ?, reconciliation_ref = ?, updated_at = ?"
+                " WHERE dispatch_id = ? AND status IN ('dispatched', 'failed')",
+                (error_ref, error_ref, now, dispatch_id),
+            )
+            if cur.rowcount == 0:
+                return {"marked": False, "reason": "not_markable"}
+        return {"marked": True}
+
+    def clear_wake_intent_active_attempt(
+        self, intent_id: str, *, attempt_id: str, now: float | None = None
+    ) -> dict[str, object]:
+        """attempt 终态时清除 intent 级 active 门（CAS 按 attempt_id，防误清新代次）。"""
+        now = time.time() if now is None else now
+        with self.transaction() as conn:
+            cur = conn.execute(
+                "UPDATE wake_intents SET active_attempt_id = '', updated_at = ?"
+                " WHERE intent_id = ? AND active_attempt_id = ?",
+                (now, intent_id, attempt_id),
+            )
+            if cur.rowcount == 0:
+                return {"cleared": False, "reason": "not_matching_attempt"}
+        return {"cleared": True}
 
 
 def conn_row_to_event(row: sqlite3.Row) -> dict[str, Any]:
