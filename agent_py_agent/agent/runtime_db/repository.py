@@ -1606,6 +1606,224 @@ class RuntimeRepository(
             ).fetchall()
         return [conn_row_to_event(row) for row in rows]
 
+    # ------------------------------------------------ wake_intents（#233）
+    # 叫醒意图单一权威状态机接口（规格 docs/design/WAKE_INTENT_SCHEDULING_SPEC.md）。
+    # 状态：pending→claimed→handed_off + cancelled/expired；reconciliation 派生
+    # 状态在 task/attempt ledger，intent 保持 claimed 直到显式恢复流程接管。
+    # 硬不变量：仅 dispatcher claim 成功后创建 attempt；producer/queue/reconciler
+    # 禁调模型禁建 attempt（调用方层保证，本层只提供 CAS 原语）。
+
+    def create_wake_intent(
+        self,
+        *,
+        intent_id: str,
+        dedup_key: str,
+        owner_id: str,
+        source: str,
+        wake_reason: str,
+        next_wake_at: float,
+        task_id: str = "",
+        run_id: str = "",
+        parent_run_id: str = "",
+        root_run_id: str = "",
+        execution_mode: str = "interactive",
+        source_event_id: str = "",
+        retry_event_id: str = "",
+        provenance_ref: str = "",
+        provider_scope_ref: str = "",
+        continuation_policy: str = "",
+        policy_generation: int = 0,
+        priority: int = 0,
+        not_before: float = 0,
+        due_window: str = "",
+        retry_after: float = 0,
+        expires_at: float | None = None,
+        idempotency_key: str = "",
+        now: float | None = None,
+    ) -> dict[str, object]:
+        """producer 写 intent（dedup UNIQUE 冲突 → 幂等返回已存在）。
+
+        dedup_key 由调用方（producer）按规格 §3 稳定计算
+        （effective_source_event_id = retry_event_id or source_event_id），
+        不含 attempt_id / provider key。UNIQUE 冲突 = 同一来源同一 due window
+        已有 intent → 返回 existing=True，不覆盖。
+        """
+        now = time.time() if now is None else now
+        with self.transaction() as conn:
+            existing = conn.execute(
+                "SELECT intent_id FROM wake_intents WHERE dedup_key = ?",
+                (dedup_key,),
+            ).fetchone()
+            if existing is not None:
+                return {"created": False, "existing": True, "intent_id": existing["intent_id"]}
+            conn.execute(
+                "INSERT INTO wake_intents ("
+                " intent_id, dedup_key, task_id, run_id, parent_run_id, root_run_id,"
+                " owner_id, execution_mode, source, wake_reason, source_event_id,"
+                " retry_event_id, provenance_ref, provider_scope_ref, continuation_policy,"
+                " policy_generation, priority, not_before, next_wake_at, due_window,"
+                " retry_after, expires_at, status, idempotency_key, created_at, updated_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
+                (
+                    intent_id, dedup_key, task_id, run_id, parent_run_id, root_run_id,
+                    owner_id, execution_mode, source, wake_reason, source_event_id,
+                    retry_event_id, provenance_ref, provider_scope_ref, continuation_policy,
+                    policy_generation, priority, not_before, next_wake_at, due_window,
+                    retry_after, expires_at, idempotency_key, now, now,
+                ),
+            )
+        return {"created": True, "existing": False, "intent_id": intent_id}
+
+    def due_wake_intents(
+        self, *, limit: int = 50, now: float | None = None
+    ) -> list[dict[str, Any]]:
+        """due intent 查询（规格 §2 派生公式，persistent 索引 (status, next_wake_at)）。
+
+        due = pending AND next_wake_at<=now AND (expires_at IS NULL OR now<expires_at)。
+        policy 有效性（continuation_policy+policy_generation 匹配当前 ledger 且未撤销）
+        由 dispatcher 层结合 policy ledger 裁决，本层只按表内到期事实过滤。
+        """
+        now = time.time() if now is None else now
+        with self._runtime_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM wake_intents WHERE status = 'pending' "
+                "AND next_wake_at <= ? AND (expires_at IS NULL OR expires_at > ?) "
+                "ORDER BY next_wake_at ASC LIMIT ?",
+                (now, now, int(limit)),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def claim_wake_intent(
+        self,
+        intent_id: str,
+        *,
+        lease_owner: str,
+        lease_seconds: float,
+        claim_token: str,
+        now: float | None = None,
+    ) -> dict[str, object]:
+        """CAS claim：pending → claimed（claim_generation+1，绑定 token/lease）。
+
+        只认 pending——claimed/cancelled/expired/handed_off 均拒绝（防双跑）。
+        claim_generation 递增与 claim_token/lease_owner/lease_until 绑定，
+        旧租约回收后不得凭旧 generation 认领（规格 §2/§4 硬不变量 8）。
+        """
+        now = time.time() if now is None else now
+        with self.transaction() as conn:
+            cur = conn.execute(
+                "UPDATE wake_intents SET status = 'claimed',"
+                " claim_generation = claim_generation + 1, claim_token = ?,"
+                " lease_owner = ?, lease_until = ?, claimed_at = ?, updated_at = ?"
+                " WHERE intent_id = ? AND status = 'pending'",
+                (claim_token, lease_owner, now + max(1.0, lease_seconds), now, now, intent_id),
+            )
+            if cur.rowcount == 0:
+                return {"claimed": False, "reason": "not_pending"}
+        return {"claimed": True, "intent_id": intent_id, "claim_generation": None}
+
+    def handoff_wake_intent(
+        self, intent_id: str, *, handoff_id: str, now: float | None = None
+    ) -> dict[str, object]:
+        """CAS handoff：claimed → handed_off（dispatch 持久化+执行席接收后）。
+
+        handed_off 仅表示「intent 已可靠交给新 attempt」，不表示模型完成
+        （模型完成在 attempt ledger）。handed_off 后禁止回退（规格 §2）。
+        """
+        now = time.time() if now is None else now
+        with self.transaction() as conn:
+            cur = conn.execute(
+                "UPDATE wake_intents SET status = 'handed_off', handoff_id = ?,"
+                " handed_off_at = ?, finished_at = ?, updated_at = ?"
+                " WHERE intent_id = ? AND status = 'claimed'",
+                (handoff_id, now, now, now, intent_id),
+            )
+            if cur.rowcount == 0:
+                return {"handed_off": False, "reason": "not_claimed"}
+        return {"handed_off": True, "intent_id": intent_id}
+
+    def release_wake_intent_lease(
+        self, intent_id: str, *, claim_token: str, now: float | None = None
+    ) -> dict[str, object]:
+        """lease 过期且已确认无已知副作用 → claimed 退回 pending（可重认领）。
+
+        必须先确认无已知副作用（调用方裁决）；未知副作用走
+        mark_wake_intent_lease_expired（保持 claimed，不隐式重放）。
+        """
+        now = time.time() if now is None else now
+        with self.transaction() as conn:
+            cur = conn.execute(
+                "UPDATE wake_intents SET status = 'pending',"
+                " claim_generation = claim_generation + 1,"
+                " claim_token = '', lease_owner = '', lease_until = 0, updated_at = ?"
+                " WHERE intent_id = ? AND status = 'claimed' AND claim_token = ?",
+                (now, intent_id, claim_token),
+            )
+            if cur.rowcount == 0:
+                return {"released": False, "reason": "not_claimed_or_token_mismatch"}
+        return {"released": True, "intent_id": intent_id}
+
+    def mark_wake_intent_lease_expired(
+        self, intent_id: str, *, error_ref: str, now: float | None = None
+    ) -> dict[str, object]:
+        """lease 过期且副作用未知 → 保持 claimed + 标 last_error_ref。
+
+        intent 不迁移（reconciliation_required 是 task/attempt ledger 派生状态），
+        等待显式恢复流程接管（重认领 CAS 或 cancelled/expired）。
+        """
+        now = time.time() if now is None else now
+        with self.transaction() as conn:
+            cur = conn.execute(
+                "UPDATE wake_intents SET last_error_ref = ?, updated_at = ?"
+                " WHERE intent_id = ? AND status = 'claimed'",
+                (error_ref, now, intent_id),
+            )
+            if cur.rowcount == 0:
+                return {"marked": False, "reason": "not_claimed"}
+        return {"marked": True, "intent_id": intent_id}
+
+    def cancel_wake_intent(
+        self, intent_id: str, *, reason: str, now: float | None = None
+    ) -> dict[str, object]:
+        """取消：pending/claimed → cancelled（仅未 handed_off 可取消）。"""
+        now = time.time() if now is None else now
+        with self.transaction() as conn:
+            cur = conn.execute(
+                "UPDATE wake_intents SET status = 'cancelled', cancelled_reason = ?,"
+                " finished_at = ?, updated_at = ?"
+                " WHERE intent_id = ? AND status IN ('pending', 'claimed')",
+                (reason, now, now, intent_id),
+            )
+            if cur.rowcount == 0:
+                return {"cancelled": False, "reason": "not_cancellable"}
+        return {"cancelled": True, "intent_id": intent_id}
+
+    def expire_stale_wake_intents(self, *, grace_seconds: float, now: float | None = None) -> int:
+        """pending 超宽限（next_wake_at + grace）未被 claim → expired（进 reconciler 审计）。"""
+        now = time.time() if now is None else now
+        cutoff = now - max(0.0, grace_seconds)
+        with self.transaction() as conn:
+            cur = conn.execute(
+                "UPDATE wake_intents SET status = 'expired', finished_at = ?, updated_at = ?"
+                " WHERE status = 'pending' AND next_wake_at < ?",
+                (now, now, cutoff),
+            )
+            return int(cur.rowcount or 0)
+
+    def get_wake_intent(self, intent_id: str) -> dict[str, Any] | None:
+        with self._runtime_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM wake_intents WHERE intent_id = ?", (intent_id,)
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def wake_intent_status_counts(self) -> dict[str, int]:
+        """状态计数（审计/验收：525 零调度等证据来源）。"""
+        with self._runtime_connection() as conn:
+            rows = conn.execute(
+                "SELECT status, count(*) AS n FROM wake_intents GROUP BY status"
+            ).fetchall()
+        return {str(row["status"]): int(row["n"]) for row in rows}
+
 
 def conn_row_to_event(row: sqlite3.Row) -> dict[str, Any]:
     return {

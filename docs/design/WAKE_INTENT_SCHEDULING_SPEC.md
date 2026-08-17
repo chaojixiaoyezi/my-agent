@@ -33,17 +33,18 @@
 | `next_wake_at` | REAL | ✅ | 到期时间（Unix ts）——**due 的唯一权威事实**（写入方把 not_before/retry_after 折叠为 max(not_before, now+retry_delay)） |
 | `due_window` | TEXT | ✅ | 到期窗口标签（§3），参与 dedup |
 | `retry_after` | REAL | 可空 | **原因/审计字段**：记录 429/quota 恢复来源，折叠进 `next_wake_at`，不作为独立调度判据 |
-| `expires_at` | REAL | 可空 | intent 硬过期（超时未 claim → expired） |
-| `status` | TEXT | ✅ | `pending` / `claimed` / `handed_off` / `cancelled` / `expired`（§2） |
-| `claim_generation` | INTEGER | ✅ | 租约/claim 代次（claim 递增；旧租约回收后防误认领） |
+| `expires_at` | REAL | 可空 | intent 硬过期（超时未 claim → expired）。**NULL = 无硬过期**（不参与 due 截止条件；`now < expires_at` 仅在非 NULL 时生效） |
+| `status` | TEXT | ✅ | `pending` / `claimed` / `handed_off` / `cancelled` / `expired`（§2，intent 状态机仅这 5 态） |
+| `claim_generation` | INTEGER | ✅ | 租约/claim 代次（**每次 claim/reclaim 递增**，与 claim_token/lease_owner/lease_until 绑定；旧租约回收后不得凭旧 generation 认领） |
 | `claim_token` | TEXT | 可空 | 原子 claim 令牌（CAS 用） |
 | `lease_owner` | TEXT | 可空 | 持有 lease 的 gateway/执行席 |
 | `lease_until` | REAL | 可空 | lease 过期时间 |
 | `claimed_at` | REAL | 可空 | claim 时间 |
-| `finished_at` | REAL | 可空 | intent 生命周期结束时间 |
+| `handed_off_at` | REAL | 可空 | **可靠交接时间**（dispatch/handoff 已持久化+执行席接收）——不读作模型完成时间 |
+| `finished_at` | REAL | 可空 | intent 生命周期结束时间（cancelled/expired）——**不表示模型完成** |
 | `handoff_id` / `dispatch_id` | TEXT | 可空 | 交给执行席的 dispatch/handoff 标识（落 attempt ledger） |
-| `idempotency_key` | TEXT | ✅ | 投递幂等键（provider 副作用去重） |
 | `attempt_count` | INTEGER | ✅ | 该 intent 已创建的 attempt 数 |
+| `idempotency_key` | TEXT | 可空 | **provider 副作用幂等键——在 attempt/handoff 时生成（attempt ledger），intent 初始不要求**（§3 分层） |
 | `last_error_ref` | TEXT | 可空 | 最近失败原因（受控 ref，非自由文本） |
 | `cancelled_reason` | TEXT | 可空 | 撤销原因（终态/用户取消/policy 失效） |
 | `created_at` | REAL | ✅ | |
@@ -54,18 +55,20 @@
 
 ## 2. 状态机
 
-**due 权威**：`due = pending AND next_wake_at <= now AND now < expires_at AND policy 有效（continuation_policy + policy_generation 存在）`（持久索引 `(status, next_wake_at)` 派生），`next_wake_at` 是唯一权威事实（`not_before`/`retry_after` 只作原因/审计字段，由写入方折叠进 next_wake_at，**不存在双重时钟**）。claim 用 CAS（`status: pending → claimed` + `claim_generation` 递增）。
+**due 权威**：`due = pending AND next_wake_at <= now AND (expires_at IS NULL OR now < expires_at) AND policy 有效（continuation_policy + policy_generation 匹配当前 policy ledger 且未撤销）`（持久索引 `(status, next_wake_at)` 派生），`next_wake_at` 是唯一权威事实（`not_before`/`retry_after` 只作原因/审计字段，由写入方折叠进 next_wake_at，**不存在双重时钟**）。claim 用 CAS（`status: pending → claimed` + `claim_generation` 递增）。
 
-**canonical status token**：`status` 只存 `handed_off`（可靠交接）；`handoff_id` + `handed_off_at` 表达「已交给执行席」，`finished_at` 不得被解释成模型完成——执行结果另存 dispatch/attempt ledger。
+**canonical status token**：`status` 只存 `handed_off`（可靠交接）；`handoff_id` + `handed_off_at` 表达「已交给执行席」，`finished_at` 只表 intent 生命周期结束（cancelled/expired）——**两者都不表示模型完成**；执行结果另存 dispatch/attempt ledger。
+
+**状态域澄清（seq2416）**：`reconciliation_required` / `orphaned` / `blocked` / `deferred` **不属于 intent 状态**——它们是 task/attempt ledger 的派生/审计状态。intent 状态机只有 5 态：`pending / claimed / handed_off / cancelled / expired`。需要表达这些语义时，通过 `last_error_ref` + 在 task/attempt ledger 标记实现，intent 保持 `claimed` 直到显式恢复流程接管（重认领 CAS 或转 cancelled/expired）。
 
 ### 可执行 CAS 状态转移表
 
 | 转移 | 前置（全部满足才 CAS） | 副作用 |
 |---|---|---|
-| `pending → claimed` | status=pending、next_wake_at<=now、now<expires_at、continuation_policy+policy_generation 存在、配额/circuit 可用 | claim_generation+1，写 claim_token/lease_owner/lease_until |
+| `pending → claimed` | status=pending、next_wake_at<=now、expires_at 为空或 now<expires_at、policy 有效（continuation_policy+policy_generation 匹配当前 policy ledger 且未撤销）、**来源授权**（interactive 仅 inbound/user_continue；async 允许 cron/heartbeat/sleep/retry/recovery）、配额/circuit 可用 | claim_generation+1，写 claim_token/lease_owner/lease_until |
 | `claimed → handed_off` | status=claimed、dispatch/handoff 已在权威 ledger 持久化 + 执行席接收 | 写 handoff_id/handed_off_at |
 | `claimed → pending`（lease 过期，无已知副作用） | status=claimed、lease_until<=now、**已确认无已知副作用** | claim_generation+1（防旧租约误认领），清 claim_token/lease_owner/lease_until |
-| `claimed → reconciliation_required`（lease 过期，未知副作用） | status=claimed、lease_until<=now、副作用未知 | 标 last_error_ref，等待 reconciliation/人工，**不隐式重放** |
+| `claimed`（lease 过期，未知副作用）→ 标 last_error_ref + task/attempt ledger 标记 `reconciliation_required`，intent 保持 claimed | status=claimed、lease_until<=now、副作用未知 | 等待 reconciliation/人工，**不隐式重放** |
 | `pending/claimed → cancelled` | 用户取消/任务终态/policy 失效；**仅未 handed_off 可取消** | 写 cancelled_reason |
 | `pending → expired` | next_wake_at+宽限期超时仍未被 claim | 终态，进 reconciler 审计 |
 | `handed_off → 任何` | **禁止回退** | — |
@@ -77,14 +80,21 @@
 ## 3. dedup_key 组成
 
 ```
+effective_source_event_id = retry_event_id or source_event_id  # retry 优先，无 retry 用原 source
 dedup_key = sha256(f"{owner_id}:{task_id}:{run_id or ''}:"
-                   f"{policy_generation}:{source}:{wake_reason}:{source_event_id or ''}:{due_window}")
+                   f"{policy_generation}:{source}:{wake_reason}:{effective_source_event_id or ''}:{due_window}")
 ```
 
 - **不依赖 attempt_id**（producer 写 intent 时 attempt 尚未创建）。
-- 重试 / 新的明确唤醒 → 必须生成**新**的 dedup_key（新的 source_event_id / due_window / policy_generation）。
+- **重试必须产生新的来源事件**：producer 生成新 `retry_event_id`（+ retry_generation）→ 新 dedup_key。同一 source_event_id 的重复投递撞 key 被 UNIQUE 拒（幂等）；重试是新来源事件，天然新 key。
 - UNIQUE 约束：同一来源同一 due window 只允许一条 intent，防多 gateway/重启重复拉起。
-- 重试 lineage（`parent_attempt_id` / `retry_of`）与 provider `idempotency_key` 放在 **attempt ledger**，不参与 intent dedup。
+- **两层 key 分层（seq2416 方案 b 写死）**：
+  - **intent_dedup_key**：producer 写 intent 时稳定计算（owner/task/run + policy_generation + source + wake_reason + source_event_id/retry_event_id + due_window），不含 attempt_id、不含 provider key。
+  - **provider idempotency_key**：在 attempt/handoff 时生成（attempt ledger），intent 初始不要求。
+- **三场景 key 归属**：
+  - **crash-after-claim**：用 intent claim（`claim_generation` CAS + claim_token）防双跑；provider 幂等 key 防副作用重复（执行席用同一 provider key 重发）。
+  - **未知副作用**：intent 保持 `claimed` 不自动 replay，走 `last_error_ref` + task/attempt ledger 标记 reconciliation_required；不产生新 attempt/provider key。
+  - **显式新 attempt（重试）**：producer 生成新 retry_event_id → 新 intent dedup_key；执行席生成新 provider idempotency_key（attempt ledger 记 parent_attempt_id/retry_of lineage）。
 
 ## 4. 四层职责 + 授权不变量
 
@@ -116,7 +126,7 @@ dedup_key = sha256(f"{owner_id}:{task_id}:{run_id or ''}:"
   - 冻结/隔离 525 条遗留任务：迁移到 `PAUSED/ORPHANED/RECONCILIATION_REQUIRED`（带 reason/last_seen/来源/provenance，不批量删不标完成），迁移前后计数落账。
   - 定义状态转移、CAS 条件、唯一键、attempt/lease 关系（本规格）。
 - **第 1 步**：建 `wake_intents` 表 + repository（字段/CAS/dedup/索引）。
-- **第 2 步**：dispatcher 只消费「到期且有授权」的 intent（`status=pending AND next_wake_at<=now AND continuation_policy=async`），原子 claim 后创建 attempt；旧路径只 shadow/dual-write，**不 dual-execute**。
+- **第 2 步**：dispatcher 只消费「**policy 有效 + 来源授权 + 到期 + 配额/circuit 可用**」的 intent（`status=pending AND next_wake_at<=now AND 未过期 AND policy 匹配当前 generation 未撤销 AND 来源授权`），**不用 async 作全局执行门槛**（seq2416：interactive 来源 ∈ {inbound, user_continue} 事件驱动，禁周期扫描；async 来源 ∈ {cron, heartbeat, sleep, retry, recovery} 按策略），原子 claim 后创建 attempt；旧路径只 shadow/dual-write，**不 dual-execute**。
 - **第 3 步**：接入事件投递（入站/cron/heartbeat/sleep/subagent_completed/provider_recovery 写 intent）+ 精确定时器（持久 due 索引 + 最小堆，睡到最近到期点；重启后从索引重建）。
 - **第 4 步**：sleep/progress/wait 归一到同一挂起记录（sleep 不占 worker/LLM 槽）；sleep 产生的 `sleep_until` wake intent 与 progress/wait 的 suspension fact 在 source adapter 契约中明确。
 - **第 5 步**：reconciler（低频安全网 10-30 分钟，仅审计+补 intent）+ 525 迁移验证 + 双 gateway/重启/429/终态竞态/重复副作用验收（见 §7）。

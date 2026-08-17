@@ -378,6 +378,56 @@ _BASE_RUNTIME_SQL = (
         processed_at REAL NOT NULL DEFAULT 0
     )
     """,
+    # ------------------------------------------------ wake_intents（#233）
+    # 叫醒意图单一权威状态机（规格 docs/design/WAKE_INTENT_SCHEDULING_SPEC.md）：
+    # 唤醒只认信号源（入站/cron/heartbeat/sleep/子代理完成/中断恢复），来源统一
+    # 写 intent，dispatcher 唯一消费。字段/状态机/CAS/dedup 按规格 §1-§3。
+    # intent 只存受控 ref，不存 prompt/正文/密钥/大 payload（§8）。
+    """
+    CREATE TABLE IF NOT EXISTS wake_intents (
+        intent_id TEXT PRIMARY KEY,
+        dedup_key TEXT NOT NULL UNIQUE,
+        task_id TEXT NOT NULL DEFAULT '',
+        run_id TEXT NOT NULL DEFAULT '',
+        parent_run_id TEXT NOT NULL DEFAULT '',
+        root_run_id TEXT NOT NULL DEFAULT '',
+        attempt_id TEXT NOT NULL DEFAULT '',
+        owner_id TEXT NOT NULL,
+        execution_mode TEXT NOT NULL DEFAULT 'interactive',
+        source TEXT NOT NULL,
+        wake_reason TEXT NOT NULL DEFAULT '',
+        source_event_id TEXT NOT NULL DEFAULT '',
+        retry_event_id TEXT NOT NULL DEFAULT '',
+        provenance_ref TEXT NOT NULL DEFAULT '',
+        provider_scope_ref TEXT NOT NULL DEFAULT '',
+        continuation_policy TEXT NOT NULL DEFAULT '',
+        policy_generation INTEGER NOT NULL DEFAULT 0,
+        payload_schema_version TEXT NOT NULL DEFAULT 'v1',
+        priority INTEGER NOT NULL DEFAULT 0,
+        not_before REAL NOT NULL DEFAULT 0,
+        next_wake_at REAL NOT NULL,
+        due_window TEXT NOT NULL DEFAULT '',
+        retry_after REAL NOT NULL DEFAULT 0,
+        expires_at REAL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        claim_generation INTEGER NOT NULL DEFAULT 0,
+        claim_token TEXT NOT NULL DEFAULT '',
+        lease_owner TEXT NOT NULL DEFAULT '',
+        lease_until REAL NOT NULL DEFAULT 0,
+        claimed_at REAL NOT NULL DEFAULT 0,
+        handed_off_at REAL NOT NULL DEFAULT 0,
+        finished_at REAL NOT NULL DEFAULT 0,
+        handoff_id TEXT NOT NULL DEFAULT '',
+        idempotency_key TEXT NOT NULL DEFAULT '',
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        last_error_ref TEXT NOT NULL DEFAULT '',
+        cancelled_reason TEXT NOT NULL DEFAULT '',
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_wake_intents_due ON wake_intents(status, next_wake_at)",
+    "CREATE INDEX IF NOT EXISTS idx_wake_intents_owner ON wake_intents(owner_id, status)",
 )
 
 
