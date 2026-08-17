@@ -642,7 +642,7 @@ def _delivery_verify_no_tool_call_decision(
     contract = getattr(request.params, "delivery_contract", None)
     if not isinstance(contract, dict):
         return None
-    from ....cli.delivery_verify import (
+    from .delivery_verify import (
         VERIFY_FAILED,
         VERIFY_PASSED,
         VERIFY_SKIPPED,
