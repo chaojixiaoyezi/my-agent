@@ -599,7 +599,22 @@ class _BackgroundMainSupervisor:
                     except Exception:  # noqa: BLE001 单 intent 异常不阻断
                         continue
                     if outcome.claimed:
-                        # claim 成功 → owner 进池，下一轮执行一轮（唯一 attempt 入口）
+                        # claim 成功 → owner 进池，下一轮执行一轮（唯一 attempt 入口）；
+                        # 执行权已可靠移交（owner 池保证执行、attempt ledger 追踪结果），
+                        # 立即 handoff 完成 intent 闭环 pending→claimed→handed_off（seq2436
+                        # 缺口 2：只抢单不标记 → intent 永远卡 claimed）。handoff 失败
+                        # 不阻断：卡 claimed 由 lease 过期 + reconciler 回收重放兜底。
+                        try:
+                            repo.handoff_wake_intent(
+                                outcome.intent_id,
+                                handoff_id=f"{_wake_dispatcher_instance_id(self._base_agent)}:{outcome.generation}",
+                            )
+                        except Exception:  # noqa: BLE001 handoff 失败不阻断入池
+                            _print_gateway_loop_error(
+                                "gateway_background_main.wake_handoff",
+                                outcome.intent_id,
+                                exc,
+                            )
                         self._registry.record(owner_identity, hard=True)
                         dispatched += 1
                         print(

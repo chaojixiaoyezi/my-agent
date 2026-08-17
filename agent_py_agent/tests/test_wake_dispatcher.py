@@ -116,3 +116,40 @@ def test_claim_fails_when_not_due(repo):
     out = _dispatch(repo, "h1")
     assert not out.claimed
     assert "not_pending_or_not_due" in out.reason
+
+
+def test_no_injected_gate_fields_fallback_ok(repo):
+    """弹性门（综合群复核 seq2444 收窄）：无注入时字段级门兜底放行，
+    绝不因 policy/circuit 基建未接入让 dispatcher 整体瘫痪。"""
+    _intent(repo, "i1", "k9")
+    out = _dispatch(repo, "i1", policy_validator=None, provider_circuit_open=None)
+    assert out.claimed and out.reason == "dispatched"
+    assert repo.get_wake_intent("i1")["status"] == "claimed"
+
+
+def test_no_injected_gate_still_rejects_bad_fields(repo):
+    """无注入也不放行坏字段：字段级门始终 fail-closed。"""
+    _intent(repo, "j1", "k10", policy="")  # policy 空 → 字段门拒绝
+    out = _dispatch(repo, "j1", policy_validator=None, provider_circuit_open=None)
+    assert not out.claimed
+    assert "rejected_policy_missing_or_invalid" in out.reason
+    _intent(repo, "j2", "k11", scope="", generation=-1)  # scope 空 + generation -1
+    out = _dispatch(repo, "j2", policy_validator=None, provider_circuit_open=None)
+    assert not out.claimed
+
+
+def test_injected_validator_rejection_still_fail_closed(repo):
+    """有注入时注入核对仍 fail-closed（不因弹性门放松）——policy ledger 撤销/异常拒绝。"""
+    _intent(repo, "l1", "k12", generation=3)
+    out = _dispatch(repo, "l1", policy_validator=lambda p, g: False)
+    assert not out.claimed
+    assert "rejected_policy_generation_not_current_or_revoked" in out.reason
+    _intent(repo, "l2", "k13")
+    out = _dispatch(repo, "l2", policy_validator=lambda p, g: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert not out.claimed
+    assert "rejected_policy_validator_error" in out.reason
+    # circuit 冻结 → 拒绝
+    _intent(repo, "l3", "k14")
+    out = _dispatch(repo, "l3", provider_circuit_open=lambda s: True)
+    assert not out.claimed
+    assert "rejected_provider_circuit_open_or_quota_frozen" in out.reason
