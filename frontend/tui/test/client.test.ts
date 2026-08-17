@@ -196,7 +196,8 @@ describe("TuiHttpClient contract", () => {
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe("http://127.0.0.1:8420/control");
     const body = JSON.parse((init as RequestInit).body as string);
-    expect(body.command).toBe("stop");
+    // 2026-08-17 真机实锤：后端期望斜杠语法（/stop）
+    expect(body.command).toBe("/stop");
     expect(body.conversation.canonical_user_id).toBe("local-agent");
   });
 });

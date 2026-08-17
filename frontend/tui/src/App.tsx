@@ -41,6 +41,8 @@ export function App({ client, sessionId, model, history }: AppProps) {
   const busyRef = useRef(false);
   const stateRef = useRef<SessionState>(state);
   stateRef.current = state;
+  // /stop 主动中断当前轮询（2026-08-17 真机：stop 后 poll 等超时报错）
+  const pollAbortRef = useRef<AbortController | null>(null);
 
   /** 一轮完整提交：ask（幂等）→ pollUntilDone（progress + result 收口） */
   const runTurn = useCallback(
@@ -48,12 +50,18 @@ export function App({ client, sessionId, model, history }: AppProps) {
       if (busyRef.current) return;
       busyRef.current = true;
       const key = makeIdempotencyKey();
+      const controller = new AbortController();
+      pollAbortRef.current = controller;
       try {
         dispatch({ type: "submit", prompt, sessionId });
         const accepted = await client.ask(buildAskRequest(prompt, sessionId, key));
-        const outcome = await client.pollUntilDone(accepted.request_id, (events) => {
-          dispatch({ type: "progress", events });
-        });
+        const outcome = await client.pollUntilDone(
+          accepted.request_id,
+          (events) => {
+            dispatch({ type: "progress", events });
+          },
+          controller.signal,
+        );
         // ctx 实时：从 result 的结构化 token 估计取（有则显示真实值）
         const final = outcome.final as ResultResponse;
         const rec = final as Record<string, unknown>;
@@ -65,7 +73,12 @@ export function App({ client, sessionId, model, history }: AppProps) {
         dispatch({ type: "done", result: outcome.final });
       } catch (err) {
         const e = err as ClientError;
-        dispatch({ type: "error", message: e.message });
+        // /stop 主动中断不算错误（真机 2026-08-17）
+        if (controller.signal.aborted) {
+          dispatch({ type: "done", result: { ok: true, response: "（已停止）" } });
+        } else {
+          dispatch({ type: "error", message: e.message });
+        }
       } finally {
         busyRef.current = false;
         // 排队消费：polling 期间提交的消息在 done 后自动再跑
@@ -155,6 +168,10 @@ export function App({ client, sessionId, model, history }: AppProps) {
             },
             args || undefined,
           );
+          if (command.control === "stop") {
+            // /stop 主动中断当前轮询（真机 2026-08-17：stop 后 poll 等超时）
+            pollAbortRef.current?.abort();
+          }
           dispatch({ type: "done", result: { ok: true, response: `/${name} 已发送` } });
         } catch (err) {
           const e = err as ClientError;

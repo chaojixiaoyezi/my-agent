@@ -102,6 +102,13 @@ export function markdownToBlocks(text: string): MdBlock[] {
         flushCode();
         pendingQuote = true;
         break;
+      case "paragraph_open":
+        flushCode();
+        // 段落边界：已有内容时插空行块，防止 markdownToLines 把相邻段落合并
+        if (blocks.length > 0 && blocks[blocks.length - 1].kind !== "empty") {
+          blocks.push({ kind: "empty", text: "" });
+        }
+        break;
       case "hr":
         flushCode();
         blocks.push({ kind: "hr", text: "" });

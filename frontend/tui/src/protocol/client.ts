@@ -136,12 +136,14 @@ export class TuiHttpClient {
       .map((m) => ({ role: m.role as "user" | "assistant", text: m.text ?? "" }));
   }
 
-  /** POST /control（会话控制，带 conversation scope） */
+  /** POST /control（会话控制，带 conversation scope）。
+   *  2026-08-17 真机实锤：后端 parse_conversation_control 期望斜杠语法
+   *  （/stop、/btw 内容、/goal 内容），裸 "stop" 会 400。 */
   async control(command: ControlCommand, conversation: ControlRequest["conversation"], text?: string): Promise<unknown> {
-    const body: ControlRequest = { command, conversation };
-    if (text !== undefined) {
-      body.text = text;
-    }
+    const body: ControlRequest = {
+      command: command === "stop" ? "/stop" : `/${command} ${text ?? ""}`.trim(),
+      conversation,
+    };
     const res = await this.request("/control", {
       method: "POST",
       headers: { "content-type": "application/json" },
