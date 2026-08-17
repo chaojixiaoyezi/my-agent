@@ -8,7 +8,6 @@ from typing import Any
 
 from .chat_style import CHAT_RESPONSE_STYLE_INJECT
 from .history import chat_history_max_turns
-from .renderer import GREEN, RESET
 from .tui_worker_paths import _worker_gateway_path, _worker_local_path
 from .tui_worker_stream import (
     _append_stream_text,
@@ -178,9 +177,12 @@ def _make_stream_callbacks(cfg: TuiWorkerConfig, next_message_id: int, spinner):
         if stream_started_ref[0]:
             return
         spinner.stop()
-        from .rendering import _cprint
+        from .rendering import _cprint, tui_styled_text
 
-        _cprint(f"\n{GREEN}{cfg.agent.config.agent_name}#{next_message_id}>{RESET}")
+        _cprint("")
+        # 会话运行时 助手 marker: ⏺(magenta)后接流式正文。
+        if not tui_styled_text("assistant-marker", "⏺ "):
+            _cprint(f"{cfg.agent.config.agent_name}> ")
         stream_started_ref[0] = True
 
     def on_stream_chunk(chunk: str) -> bool:

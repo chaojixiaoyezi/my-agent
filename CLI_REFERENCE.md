@@ -153,6 +153,23 @@ my-agent scenario-test
 Ctrl+C
 ```
 
+## 聊天 TUI 快捷键（2026-08-17 对齐 会话运行时 界面）
+
+| 按键 | 作用 |
+|---|---|
+| `Enter` | 发送 |
+| `Ctrl+C` | 打断当前回合（无运行内容时再按 = 退出） |
+| `Ctrl+D` | 退出 |
+| `Ctrl+L` | 清屏（只清显示，历史保留） |
+| `Ctrl+O` | 复制最近一条助手回复 |
+| `Alt+R` | 切换 `/verbose` 详细档位（对齐 会话运行时 raw output 切换） |
+| `Ctrl+R` | 历史搜索（prompt_toolkit 内建） |
+| `PageUp/PageDown` | 对话流翻页 |
+
+界面视觉对齐 会话运行时：顶部状态行 `my-agent · <模型> · <工作目录> · <活动/耗时> · ⟿ 上下文`，
+用户行 `> ` 青色、助手 marker `⏺` magenta、统计行 `⟿` 灰色（配色见
+会话运行时-rs/tui/styles.md 同款约定）。
+
 ## 命令总览
 
 | 命令 | 用途 | 写文件 | 真实 API |

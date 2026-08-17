@@ -6,8 +6,7 @@ import time
 from dataclasses import dataclass
 
 from .control_runtime import ChatControlExecution, ChatControlState, execute_chat_control
-from .rendering import _cprint, progress_bar, startup_banner
-from .tui_activity import format_activity_text
+from .rendering import _cprint, startup_banner
 from .tui_params import (
     MakeTuiAppParams,
     StartWorkerParams,
@@ -66,34 +65,68 @@ class TuiLoopContext:
 CONTEXT_WINDOW = 200_000
 COLLAPSE_PREVIEW_CHARS = 900
 
+# 会话运行时 TUI 视觉语言(会话运行时-rs/tui/styles.md): 品牌/marker 用 magenta,
+# 状态指示 cyan, 次级信息 dim, 成功 green, 错误 red; 状态行用 " · " 拼接。
+# 旋转帧与 会话运行时 chatwidget/status_surfaces.rs 的 braille spinner 同款。
+SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
-def _tui_get_status_text(
+
+def _format_tokens_compact(value: object) -> str:
+    """对齐 会话运行时 status/helpers.rs format_tokens_compact: 8.5K / 3.4M。"""
+    value = max(0, int(value or 0))
+    if value == 0:
+        return "0"
+    if value < 1000:
+        return str(value)
+    if value >= 1_000_000_000_000:
+        scaled, suffix = value / 1_000_000_000_000.0, "T"
+    elif value >= 1_000_000_000:
+        scaled, suffix = value / 1_000_000_000.0, "B"
+    elif value >= 1_000_000:
+        scaled, suffix = value / 1_000_000.0, "M"
+    else:
+        scaled, suffix = value / 1000.0, "K"
+    decimals = 2 if scaled < 10 else 1 if scaled < 100 else 0
+    return f"{scaled:.{decimals}f}{suffix}"
+
+
+def _tui_status_fragments(
     refs: TuiStatusRefs,
     model: str,
     *,
-    context_window_chars: int = CONTEXT_WINDOW,
-) -> str:
+    workspace: str = "",
+) -> list[tuple[str, str]]:
+    """会话运行时 风格状态行(FormattedText): 品牌 · 模型 · 工作目录 · 活动/耗时 · 上下文。
+
+    运行中: 前导 braille spinner + 秒数 + 当前活动(工具/思考); 空闲: 只
+    显示品牌/模型/目录; token 有值才显示 ⟿ 紧凑量。样式类在
+    tui_ui_setup._make_tui_style 注册。
+    """
     with refs.state_lock:
         tokens = refs.last_token_estimate_ref[0]
-    window = max(1, int(context_window_chars or CONTEXT_WINDOW))
-    pct = tokens / window if window else 0
-    bar = progress_bar(pct)
-    pieces = [
-        f"model {model}",
-        f"ctx {tokens / 1000:.1f}K/{window / 1000:.0f}K",
-        f"[{bar}] {pct:.0%}",
-    ]
-    return " | ".join(pieces)
-
-
-def _tui_get_activity_text(refs: TuiStatusRefs) -> str:
-    with refs.state_lock:
-        thinking = refs.thinking_line_ref[0] if refs.thinking_line_ref else ""
         started_at = refs.running_started_at_ref[0]
         running = bool(refs.is_running_ref[0])
-    if not thinking:
-        return ""
-    return format_activity_text(thinking, started_at, running, now=time.perf_counter())
+        thinking = refs.thinking_line_ref[0] if refs.thinking_line_ref else ""
+    fragments: list[tuple[str, str]] = [
+        ("class:status-brand", " my-agent"),
+        ("class:status-meta", f" · {model}"),
+    ]
+    if workspace:
+        fragments.append(("class:status-meta", f" · {workspace}"))
+    if running and started_at:
+        now = time.perf_counter()
+        frame = SPINNER_FRAMES[int((now - started_at) * 8) % len(SPINNER_FRAMES)]
+        fragments.append(("class:activity", f" {frame}"))
+        fragments.append(("class:status-meta", f" {now - started_at:.1f}s"))
+        if thinking:
+            fragments.append(("class:activity", f" · {thinking}"))
+    elif thinking:
+        fragments.append(("class:status-meta", f" · {thinking}"))
+    if tokens:
+        fragments.append(
+            ("class:status-meta", f" · ⟿ {_format_tokens_compact(tokens)} ctx")
+        )
+    return fragments
 
 
 def _tui_handle_expand_command(raw: str, assistant_outputs: list[str]) -> bool:

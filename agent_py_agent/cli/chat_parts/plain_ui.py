@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from .input_loop import parse_expand_target
 from .plain_state import PLAIN_CHAT_PROMPT
 from .renderer import strip_ansi
-from .rendering import GRAY, GREEN, _cprint, collapse_response_text, style_text
+from .rendering import GRAY, MAGENTA, _cprint, collapse_response_text, style_text
 
 
 @dataclass(frozen=True)
@@ -34,7 +34,7 @@ def _make_chunk_handler(agent_name: str, next_message_id: int, *, preview_chars:
 
     def on_chunk(chunk: str) -> bool:
         if not stream_started_ref[0]:
-            sys.stdout.write(f"{style_text(f'{agent_name}#{next_message_id}>', GREEN)} ")
+            sys.stdout.write(f"{style_text('⏺', MAGENTA)} ")
             sys.stdout.flush()
             stream_started_ref[0] = True
         if stream_truncated_ref[0] and _is_progress_chunk(chunk):
@@ -80,12 +80,12 @@ def _render_assistant_response(request: AssistantResponseRenderRequest) -> None:
     request.assistant_outputs.append(request.text)
     message_id = len(request.assistant_outputs)
     if collapsed:
-        _cprint(f"{style_text(f'{request.agent_name}#{message_id}>', GREEN)} {preview}")
+        _cprint(f"{style_text('⏺', MAGENTA)} {preview}")
         _cprint(
             style_text(f"[回复较长，已自动折叠。输入 /expand {message_id} 或 /expand last 查看全文。]", GRAY)
         )
         return
-    _cprint(f"{style_text(f'{request.agent_name}#{message_id}>', GREEN)} {request.text}")
+    _cprint(f"{style_text('⏺', MAGENTA)} {request.text}")
 
 
 def _handle_expand_command(raw: str, assistant_outputs: list[str]) -> None:

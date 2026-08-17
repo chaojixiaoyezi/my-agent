@@ -28,7 +28,7 @@ def test_finish_gateway_response_does_not_reprint_streamed_text():
     printed = "\n".join(call.args[0] for call in mock_print.call_args_list)
     assert "streamed final" not in printed
     assert "gateway_request" not in printed
-    assert "工具轮数" in printed
+    assert "⟿" in printed and "轮" in printed
 
 
 def test_finish_gateway_response_reprints_when_stream_text_missing(capsys):
@@ -55,7 +55,7 @@ def test_finish_gateway_response_reprints_when_stream_text_missing(capsys):
     assert cfg.assistant_outputs == ["你好，有什么可以帮你的？"]
     assert "你好，有什么可以帮你的？" in capsys.readouterr().out
     printed = "\n".join(call.args[0] for call in mock_print.call_args_list)
-    assert "工具轮数" in printed
+    assert "⟿" in printed and "轮" in printed
 
 
 def test_finish_gateway_response_user_stop_is_silent():
@@ -84,4 +84,4 @@ def test_finish_gateway_response_user_stop_is_silent():
     assert cfg.assistant_outputs == []
     printed = "\n".join(call.args[0] for call in mock_print.call_args_list)
     assert "当前任务已停止" not in printed
-    assert "工具轮数" not in printed
+    assert "⟿" not in printed and "轮" not in printed

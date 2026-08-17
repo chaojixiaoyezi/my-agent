@@ -1,22 +1,17 @@
-
-
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .rendering import set_tui_output_sink, set_tui_stream_sink
-from .tui import (
-    TuiStatusRefs,
-    _tui_get_activity_text,
-    _tui_get_status_text,
-    _tui_handle_expand_command,
-)
+from .tui import TuiStatusRefs, _tui_status_fragments
 from .tui_keybindings import TuiCreateKeybindingsParams, _tui_create_keybindings
 from .tui_params import MakeTuiAppParams
 from .tui_transcript_store import (
     APP_REDRAW_INTERVAL_SECONDS,
     TuiTranscriptStore,
+    set_active_transcript_store,
 )
 
 
@@ -24,7 +19,7 @@ from .tui_transcript_store import (
 class StatusBarConfig:
     refs: TuiStatusRefs
     model_name: str
-    context_window_chars: int
+    workspace_name: str
 
 
 @dataclass
@@ -38,42 +33,36 @@ class TranscriptSinkRequest:
 
 APP_RENDER_POSTPONE_SECONDS = 1 / 60
 
+# 会话运行时 风格按键提示(styles.md: 次级信息 dim; 与 tui_keybindings 实际绑定一致)。
+_HINT_TEXT = (
+    " Enter 发送 · Ctrl+C 打断/退出 · Ctrl+L 清屏 · Ctrl+O 复制上一条回复 · "
+    "Alt+R 详细档位 · /status /stop /goal /btw /verbose /help"
+)
 
-def _make_activity_bar(
-    config: StatusBarConfig,
-):
+
+def _make_status_bar(config: StatusBarConfig):
     from prompt_toolkit.layout import FormattedTextControl, Window
 
     return Window(
         content=FormattedTextControl(
-            lambda: [
-                (
-                    "class:activity-bar",
-                    f" {_tui_get_activity_text(config.refs)} ",
-                )
-            ],
-        ),
-        height=1,
-        style="class:activity-bar",
-    )
-
-
-def _make_status_bar(
-    config: StatusBarConfig,
-):
-    from prompt_toolkit.layout import FormattedTextControl, Window
-
-    return Window(
-        content=FormattedTextControl(
-            lambda: [
-                (
-                    "class:status-bar",
-                    f" {_tui_get_status_text(config.refs, config.model_name, context_window_chars=config.context_window_chars)} ",
-                )
-            ],
+            lambda: _tui_status_fragments(
+                config.refs,
+                config.model_name,
+                workspace=config.workspace_name,
+            )
         ),
         height=1,
         style="class:status-bar",
+    )
+
+
+def _make_hint_bar():
+    from prompt_toolkit.layout import FormattedTextControl, Window
+
+    return Window(
+        content=FormattedTextControl([("class:hint", _HINT_TEXT)]),
+        height=1,
+        style="class:hint",
     )
 
 
@@ -97,7 +86,7 @@ def _make_input_prompt_window() -> Any:
     from prompt_toolkit.layout import FormattedTextControl, Window
 
     return Window(
-        content=FormattedTextControl([("class:prompt", "❯ ")]),
+        content=FormattedTextControl([("class:prompt", "> ")]),
         width=2,
         dont_extend_width=True,
         style="class:prompt",
@@ -107,6 +96,8 @@ def _make_input_prompt_window() -> Any:
 def _make_transcript_area() -> Any:
     from prompt_toolkit.layout.dimension import Dimension
     from prompt_toolkit.widgets import TextArea
+
+    from .tui_lexer import TranscriptLexer
 
     return TextArea(
         text="",
@@ -118,6 +109,7 @@ def _make_transcript_area() -> Any:
         scrollbar=True,
         height=Dimension(weight=1),
         style="class:transcript",
+        lexer=TranscriptLexer(),
     )
 
 
@@ -129,6 +121,7 @@ def _install_transcript_sink(
     max_chars: int = 500_000,
 ) -> None:
     store = TuiTranscriptStore(output_area, follow_ref, app_ref, max_chars=max_chars)
+    set_active_transcript_store(store)
 
     set_tui_output_sink(store.append_history)
     set_tui_stream_sink(store.append_stream, finish=store.finish_stream)
@@ -148,17 +141,18 @@ def make_tui_app(params: MakeTuiAppParams):
     history_file.parent.mkdir(parents=True, exist_ok=True)
 
     status_config = _make_status_bar_config(params)
-    activity_bar = _make_activity_bar(status_config)
     status_bar = _make_status_bar(status_config)
+    hint_bar = _make_hint_bar()
     input_area = _make_input_area(str(history_file))
 
     use_app_scrollback = _app_scrollback_enabled(params.args)
     output_area = _make_transcript_area() if use_app_scrollback else None
     transcript_follow_ref = [True] if use_app_scrollback else None
     input_row = VSplit([_make_input_prompt_window(), input_area])
+    # 会话运行时 布局: 顶部状态行(品牌·模型·目录·活动), 中间对话流, 底部提示行+输入。
     body = (
-        [output_area, activity_bar, status_bar, Window(height=1), input_row]
-        if output_area is not None else [activity_bar, status_bar, Window(height=1), input_row]
+        [status_bar, output_area, hint_bar, input_row]
+        if output_area is not None else [status_bar, hint_bar, input_row]
     )
     layout = Layout(HSplit(body), focused_element=input_area)
 
@@ -183,6 +177,11 @@ def make_tui_app(params: MakeTuiAppParams):
 
 def _make_status_bar_config(params: MakeTuiAppParams) -> StatusBarConfig:
     config = params.agent.config
+    root = getattr(params.agent, "root", None)
+    try:
+        workspace_name = Path(root).name if root else ""
+    except (TypeError, ValueError):
+        workspace_name = ""
     return StatusBarConfig(
         refs=TuiStatusRefs(
             params.state_lock,
@@ -193,7 +192,7 @@ def _make_status_bar_config(params: MakeTuiAppParams) -> StatusBarConfig:
             params.thinking_line_ref,
         ),
         model_name=config.model_name,
-        context_window_chars=int(getattr(config, "chat_context_window_chars", 200_000) or 200_000),
+        workspace_name=str(workspace_name or ""),
     )
 
 
@@ -234,9 +233,22 @@ def _make_tui_keybindings(
 def _make_tui_style():
     from prompt_toolkit.styles import Style
 
+    # 对齐 会话运行时s.md: 正文默认前景色, 头部 bold, 次级 dim; cyan=用户/
+    # 状态指示, green=成功, red=错误, magenta=品牌 marker。不用重底色块。
     return Style.from_dict(
-        {"activity-bar": "bg:#121827 #d6e4ff bold", "status-bar": "bg:#1a1a2e #8ec5ff bold",
-         "transcript": "#f8fafc", "input-area": "#f8fafc", "prompt": "#f8fafc bold"}
+        {
+            "status-brand": "ansimagenta bold",
+            "status-meta": "ansigray",
+            "activity": "ansicyan",
+            "hint": "ansigray",
+            "transcript": "",
+            "input-area": "",
+            "prompt": "ansicyan bold",
+            "user-prompt": "ansicyan bold",
+            "assistant-marker": "ansimagenta bold",
+            "footer": "ansigray",
+            "error": "ansired",
+        }
     )
 
 
@@ -246,5 +258,6 @@ def _configure_transcript_sink(request: TranscriptSinkRequest) -> None:
         max_chars = int(getattr(request.params.agent.config, "chat_transcript_max_chars", 500_000) or 500_000)
         _install_transcript_sink(request.output_area, request.transcript_follow_ref, request.app_ref, max_chars=max_chars)
         return
+    set_active_transcript_store(None)
     set_tui_output_sink(None)
     set_tui_stream_sink(None)

@@ -13,6 +13,7 @@ agent_py_agent/
 |   |-- memory_admin_parser.py          # Memory v2 唯一管理员命令树与中文参数帮助
 |   |-- memory_admin_commands.py        # Candidate/Curator/Retention/Doctor/Migration 共用正式 Service 的 CLI 适配
 |   |-- chat_parts/                     # TUI、gateway client、stream/render worker
+|   |   |-- tui_lexer.py                # 会话运行时 风格对话流行前缀 Lexer(> 用户行/⏺ 助手 marker/⟿ 统计行)
 |   |   `-- control_runtime.py          # CLI 对共享会话控制协议及窗口级精确中断的运行适配
 |   |-- home_runtime_commands.py        # owner home 状态、daily/task workspace/index 维护命令
 |   |-- gateway_process.py              # gateway 进程入口

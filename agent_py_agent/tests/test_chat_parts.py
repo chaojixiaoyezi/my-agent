@@ -76,8 +76,22 @@ def test_tui_transcript_store_uses_configured_max_chars() -> None:
     assert store.history == "bcdef"
 
 
-def test_tui_status_uses_configured_context_window() -> None:
-    from agent_py_agent.cli.chat_parts.tui import TuiStatusRefs, _tui_get_status_text
+def test_tui_transcript_store_styled_append_keeps_marker_text() -> None:
+    from agent_py_agent.cli.chat_parts.tui_transcript_store import TuiTranscriptStore
+
+    area = SimpleNamespace(text="", buffer=SimpleNamespace(cursor_position=0))
+    app = SimpleNamespace(invalidated=False, invalidate=lambda: setattr(app, "invalidated", True))
+    store = TuiTranscriptStore(area, [True], [app], max_chars=100)
+
+    store.append_styled("user-prompt", "> 你好")
+    store.append_styled("assistant-marker", "⏺ ")
+
+    assert "> 你好" in area.text
+    assert "⏺ " in area.text
+
+
+def test_tui_status_shows_brand_model_and_compact_tokens() -> None:
+    from agent_py_agent.cli.chat_parts.tui import TuiStatusRefs, _tui_status_fragments
 
     refs = TuiStatusRefs(
         state_lock=threading.Lock(),
@@ -88,10 +102,12 @@ def test_tui_status_uses_configured_context_window() -> None:
         thinking_line_ref=[""],
     )
 
-    status = _tui_get_status_text(refs, "model-x", context_window_chars=100_000)
+    fragments = _tui_status_fragments(refs, "model-x", workspace="ws")
+    text = "".join(item[1] for item in fragments)
 
-    assert "ctx 50.0K/100K" in status
-    assert "50%" in status
+    assert "my-agent" in text
+    assert "model-x" in text
+    assert "50.0K" in text
 
 
 def test_gateway_timing_reports_current_context_tokens_before_cumulative_ledger() -> None:
@@ -299,7 +315,7 @@ def test_tui_input_prompt_is_stable_separate_window(tmp_path) -> None:
 
     assert input_area.window.get_line_prefix is None
     assert prompt_window.width == 2
-    assert prompt_window.content.text == [("class:prompt", "❯ ")]
+    assert prompt_window.content.text == [("class:prompt", "> ")]
 
 
 def test_tui_transcript_sink_appends_and_follows(monkeypatch) -> None:

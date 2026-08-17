@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import threading
@@ -10,8 +9,27 @@ from .renderer import strip_ansi
 MAX_TRANSCRIPT_CHARS = 500_000
 APP_REDRAW_INTERVAL_SECONDS = 1 / 30
 
+# 当前激活的 transcript store(布局安装时设置, 供 Ctrl+L 清屏等按键直用)。
+_ACTIVE_STORE: "TuiTranscriptStore | None" = None
+
+
+def set_active_transcript_store(store: "TuiTranscriptStore | None") -> None:
+    global _ACTIVE_STORE
+    _ACTIVE_STORE = store
+
+
+def clear_active_transcript() -> bool:
+    if _ACTIVE_STORE is not None:
+        _ACTIVE_STORE.clear()
+        return True
+    return False
+
 
 class TuiTranscriptStore:
+    """会话运行时 风格对话流: 纯文本存储 + 行前缀标记(> / ⏺ / ⟿), 样式由
+    TranscriptLexer 按行前缀渲染——保留 TextArea 的滚动/跟随/光标能力。
+    """
+
     def __init__(
         self,
         output_area: Any,
@@ -37,6 +55,11 @@ class TuiTranscriptStore:
             self._append_history_locked(cleaned)
             self._render_locked(force=True)
 
+    def append_styled(self, style: str, text: str) -> None:
+        # 样式由行前缀决定(见 tui_lexer.py), 这里只需把带标记的文本落盘。
+        del style
+        self.append_history(text)
+
     def append_stream(self, text: str) -> None:
         cleaned = strip_ansi(text)
         with self.lock:
@@ -47,6 +70,12 @@ class TuiTranscriptStore:
     def finish_stream(self) -> None:
         with self.lock:
             self._commit_live_stream_locked()
+            self._render_locked(force=True)
+
+    def clear(self) -> None:
+        with self.lock:
+            self.history = ""
+            self.live_stream = ""
             self._render_locked(force=True)
 
     def _append_history_locked(self, text: str) -> None:

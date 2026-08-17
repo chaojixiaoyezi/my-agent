@@ -149,13 +149,12 @@ def _compact_visible_text(text: str) -> str:
 
 def _print_gateway_timing(ctx, request_id: str, response: dict) -> None:
     elapsed = time.perf_counter() - ctx.started_at
+    from .tui import _format_tokens_compact
+
+    ctx_tokens = _format_tokens_compact(current_context_token_estimate(response))
     _publish_timing(
         ctx,
-        f"[耗时 {elapsed:.2f}s; "
-        f"工具轮数 {response.get('tool_rounds', 0)}; "
-        f"ctx_tokens~{current_context_token_estimate(response)}; "
-        f"prompt_tokens~{response.get('prompt_token_estimate', 0)}; "
-        f"resume_context={1 if response.get('memory_resume_context_injected') else 0}]",
+        f"⟿ {elapsed:.1f}s · {response.get('tool_rounds', 0)} 轮 · {ctx_tokens} ctx",
     )
 
 
@@ -206,12 +205,12 @@ def _print_local_timing(ctx, result) -> None:
         _cprint(result.prompt)
         _cprint("===== RESPONSE =====")
     elapsed = time.perf_counter() - ctx.started_at
+    from .tui import _format_tokens_compact
+
     _publish_timing(
         ctx,
-        f"[耗时 {elapsed:.2f}s; 工具轮数 {result.tool_rounds}; "
-        f"ctx_tokens~{current_context_token_estimate(result)}; "
-        f"prompt_tokens~{result.prompt_token_estimate}; "
-        f"resume_context={1 if result.memory_resume_context_injected else 0}]",
+        f"⟿ {elapsed:.1f}s · {result.tool_rounds} 轮 · "
+        f"{_format_tokens_compact(current_context_token_estimate(result))} ctx",
     )
 
 

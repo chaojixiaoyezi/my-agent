@@ -12,7 +12,6 @@ from ...agent.conversation.control_commands import parse_conversation_task_comma
 from ...agent.conversation.models import new_id
 from .input_loop import is_show_prompt_command
 from .plain_state import ChatJob
-from .renderer import BLUE, BOLD, style_text
 from .rendering import _cprint
 from .tui import (
     TuiExitRefs,
@@ -60,6 +59,10 @@ def _tui_create_keybindings(params: TuiCreateKeybindingsParams):
     kb.add("enter")(lambda e: _handle_enter_keybinding(e, params))
     kb.add("c-c")(lambda e: _handle_ctrl_c_keybinding(e, params))
     kb.add("c-d")(lambda e: _handle_ctrl_d_keybinding(e, params))
+    # 会话运行时 风格快捷键: Ctrl+L 清屏, Ctrl+O 复制上一条回复, Alt+R 切换详细档位。
+    kb.add("c-l")(lambda e: _handle_ctrl_l_keybinding(e, params))
+    kb.add("c-o")(lambda e: _handle_ctrl_o_keybinding(e, params))
+    kb.add("escape", "r")(lambda e: _handle_alt_r_keybinding(e, params))
     if params.transcript_area is not None:
         kb.add("pageup")(lambda e: _scroll_transcript(params, -params.transcript_scroll_lines))
         kb.add("pagedown")(lambda e: _scroll_transcript(params, params.transcript_scroll_lines))
@@ -127,18 +130,21 @@ def _tui_enqueue_job(params: TuiCreateKeybindingsParams, text: str) -> None:
 
 
 def _print_enqueued_prompt(text: str) -> None:
-    from .rendering import terminal_rule
-
+    # 会话运行时 用户行: 每行 "> " 前缀, 由 TranscriptLexer 渲染成青色。
     lines = [line.rstrip() for line in text.splitlines()] or [text]
-    _cprint(f"\n{terminal_rule()}")
-    for index, line in enumerate(lines):
-        ball = style_text("●", BLUE) if index == 0 else " "
-        _cprint(f"{ball}  {style_text(line, BLUE, BOLD)}")
     _cprint("")
+    for line in lines:
+        _cprint(f"> {line}")
     _cprint("")
 
 
 def _handle_ctrl_c_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
+    # 会话运行时 语义: Ctrl+C 打断当前回合; 没有运行内容时再按才是退出。
+    with params.state_lock:
+        active = bool(params.is_running_ref[0]) or int(params.pending_jobs_ref[0] or 0) > 0
+    if active:
+        _tui_handle_command(params=_handle_command_params(params, "/stop"))
+        return
     _request_exit(params)
     event.app.exit()
 
@@ -146,6 +152,33 @@ def _handle_ctrl_c_keybinding(event, params: TuiCreateKeybindingsParams) -> None
 def _handle_ctrl_d_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
     _request_exit(params)
     event.app.exit()
+
+
+def _handle_ctrl_l_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
+    """会话运行时 Ctrl+L: 清屏(只清对话流显示, 历史与后台状态保留)。"""
+    from .tui_transcript_store import clear_active_transcript
+
+    if not clear_active_transcript() and params.transcript_area is not None:
+        params.transcript_area.text = ""
+        if params.transcript_area.buffer is not None:
+            params.transcript_area.buffer.cursor_position = 0
+    event.app.invalidate()
+
+
+def _handle_ctrl_o_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
+    """会话运行时 Ctrl+O: 复制最近一条助手回复到剪贴板。"""
+    if not params.assistant_outputs:
+        return
+    try:
+        event.app.clipboard.set_text(params.assistant_outputs[-1])
+    except Exception:  # noqa: BLE001 剪贴板不可用时静默(与 会话运行时 一致)
+        pass
+    event.app.invalidate()
+
+
+def _handle_alt_r_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
+    """会话运行时 Alt+R(toggle raw output)映射为 /verbose 档位切换。"""
+    _tui_handle_command(params=_handle_command_params(params, "/verbose"))
 
 
 def _request_exit(params: TuiCreateKeybindingsParams) -> None:

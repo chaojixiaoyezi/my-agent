@@ -30,6 +30,9 @@ from .renderer import (
     supports_ansi,
 )
 
+# 会话运行时 风格 TUI 的辅助色(会话运行时s.md: 品牌/marker 用 magenta)
+MAGENTA = "\033[35m"
+
 # prompt_toolkit is optional
 try:
     from prompt_toolkit import print_formatted_text as _pt_print
@@ -61,6 +64,21 @@ def set_tui_stream_sink(
 def finish_tui_stream() -> None:
     if _TUI_STREAM_FINISH is not None:
         _TUI_STREAM_FINISH()
+
+
+def tui_styled_text(style: str, text: str) -> bool:
+    """会话运行时 风格样式片段直写(不带换行): TUI 下进 transcript store 的
+    styled 通道, 无 TUI 时返回 False 由调用方走普通打印。"""
+    sink = _TUI_OUTPUT_SINK
+    if sink is not None and callable(getattr(sink, "append_styled", None)):
+        sink.append_styled(style, text)
+        return True
+    return False
+
+
+def tui_styled_line(style: str, text: str) -> bool:
+    """同 tui_styled_text, 带换行。"""
+    return tui_styled_text(style, text + "\n")
 
 
 def _cprint(text: str) -> None:
