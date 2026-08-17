@@ -180,9 +180,13 @@ def runtime_snapshot_for_model_specs(
 def make_test_protocol_snapshot(
     *,
     run_id: str = "test-run",
-    source_protocol: str = "text",
+    source_protocol: str = "native",
 ) -> ToolProtocolSnapshot:
-    """Declare the protocol selected at the start of one test run."""
+    """Declare the protocol selected at the start of one test run.
+
+    EXEC-31b: native 是唯一协议——默认即 native; 仍传 text 的调用方属于
+    测试文本拒绝路径, 保留显式覆盖。"""
+
 
     return ToolProtocolSnapshot(
         run_id=run_id,
