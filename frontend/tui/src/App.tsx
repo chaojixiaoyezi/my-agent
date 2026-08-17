@@ -7,8 +7,9 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
 import TextInput from "ink-text-input";
 import { TuiHttpClient } from "./protocol/client.js";
-import type { ClientError } from "./protocol/types.js";
+import type { ClientError, ResultResponse } from "./protocol/types.js";
 import { MessageList, StatusBar } from "./components/ui.js";
+import { themeByName } from "./theme.js";
 import { commandByName, helpText, parseCommand } from "./commands.js";
 import {
   buildAskRequest,
@@ -31,7 +32,9 @@ export function App({ client, sessionId, model, history: _history }: AppProps) {
     createInitialSession(),
   );
   const [input, setInput] = useState("");
-  const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const [themeName, setThemeName] = useState<"dark" | "light">("dark");
+  const [ctxTokens, setCtxTokens] = useState(0);
+  const theme = themeByName(themeName);
   const busyRef = useRef(false);
   const stateRef = useRef<SessionState>(state);
   stateRef.current = state;
@@ -49,6 +52,14 @@ export function App({ client, sessionId, model, history: _history }: AppProps) {
         const outcome = await client.pollUntilDone(accepted.request_id, (events) => {
           dispatch({ type: "progress", events });
         });
+        // ctx 实时：从 result 的结构化 token 估计取（有则显示真实值）
+        const final = outcome.final as ResultResponse;
+        const rec = final as Record<string, unknown>;
+        const tokenEst =
+          Number(rec.current_context_token_estimate ?? 0) ||
+          Number(rec.prompt_token_estimate ?? 0) ||
+          Number(rec.turn_token_estimate ?? 0);
+        if (tokenEst > 0) setCtxTokens(tokenEst);
         dispatch({ type: "done", result: outcome.final });
       } catch (err) {
         const e = err as ClientError;
@@ -125,8 +136,9 @@ export function App({ client, sessionId, model, history: _history }: AppProps) {
           exit();
           return;
         case "theme": {
-          const next = args === "light" ? "light" : args === "dark" ? "dark" : theme === "dark" ? "light" : "dark";
-          setTheme(next);
+          const next: "dark" | "light" =
+            args === "light" ? "light" : args === "dark" ? "dark" : themeName === "dark" ? "light" : "dark";
+          setThemeName(next);
           dispatch({ type: "done", result: { ok: true, response: `主题已切换为 ${next}` } });
           return;
         }
@@ -149,20 +161,22 @@ export function App({ client, sessionId, model, history: _history }: AppProps) {
         <Text color="#9ca3af"> (gateway client)</Text>
       </Box>
       <Box flexDirection="column" marginBottom={1}>
-        <MessageList messages={messages} />
+        <MessageList messages={messages} theme={theme} />
       </Box>
       <Box>
-        <Text color="#22c55e">❯ </Text>
+        <Text color={theme.colors.prompt}>❯ </Text>
         <TextInput value={input} onChange={setInput} onSubmit={onSubmit} />
       </Box>
       <StatusBar
         phase={state.phase}
         model={model}
         ctxPercent={0}
+        ctxTokens={ctxTokens}
         error={state.error}
         queued={state.queuedPrompt}
+        theme={theme}
       />
-      <Text color="#9ca3af">输入消息回车发送 · Esc 退出</Text>
+      <Text color={theme.colors.dim}>输入消息回车发送 · Esc 退出</Text>
     </Box>
   );
 }

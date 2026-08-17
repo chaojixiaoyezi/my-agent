@@ -1,47 +1,128 @@
 /**
- * 渲染组件（P1-P2）：消息列表 / 工具观察行 / 状态条。
- * 约束：tool_progress 是观察事件（不等于成功），工具状态以结构化结果为准；
- * 工具行着色（进行中青/完成绿/失败红，同 Python 侧 plain_ui 语义）。
+ * 渲染组件（完整版）：消息列表（markdown 渲染）/ 工具观察行（单行合并）/
+ * 状态条。主题化：全部颜色来自 theme（/theme dark|light 真换肤）。
  */
 import React from "react";
 import { Box, Text } from "ink";
 import type { ChatMessage, ToolLine } from "../state/session.js";
+import type { Theme } from "../theme.js";
+import { markdownToLines, type InlineSegment } from "../markdown.js";
 
-const CYAN = "#06b6d4";
-const GREEN = "#22c55e";
-const RED = "#ef4444";
-const GRAY = "#9ca3af";
-const BLUE = "#3b82f6";
-const GRAY_DIM = "#6b7280";
-
-/** 工具行着色：进行中青 / 完成绿 / 失败红 */
-export function toolStatusColor(status: string): string {
-  if (status.includes("失败") || status.toUpperCase().includes("FAILED")) return RED;
-  if (status.includes("完成") || status.toUpperCase().includes("OK")) return GREEN;
-  return CYAN;
+/** 工具行着色：进行中青 / 完成绿 / 失败红（theme） */
+export function toolStatusColor(theme: Theme, status: string): string {
+  const c = theme.colors;
+  if (status.includes("失败") || status.toUpperCase().includes("FAILED")) return c.toolFail;
+  if (status.includes("完成") || status.toUpperCase().includes("OK")) return c.toolDone;
+  return c.toolStart;
 }
 
-/** 工具行渲染（紧凑单行，2026-08-17 用户指示参考 hermes：一个工具一行） */
-function ToolLineRow({ line }: { line: ToolLine }) {
+/** 内联分段渲染（**bold** / `code` / [link]） */
+function InlineText({ segments, theme }: { segments: InlineSegment[]; theme: Theme }) {
+  const c = theme.colors;
+  return (
+    <Text wrap="wrap">
+      {segments.map((seg, i) =>
+        seg.bold ? (
+          <Text key={i} bold>
+            {seg.text}
+          </Text>
+        ) : seg.code ? (
+          <Text key={i} color={c.code}>
+            {seg.text}
+          </Text>
+        ) : seg.link ? (
+          <Text key={i} color={c.link} underline>
+            {seg.text}
+          </Text>
+        ) : (
+          <Text key={i}>{seg.text}</Text>
+        ),
+      )}
+    </Text>
+  );
+}
+
+/** 工具行渲染（紧凑单行） */
+function ToolLineRow({ line, theme }: { line: ToolLine; theme: Theme }) {
+  const c = theme.colors;
   const detail = line.detail.length > 80 ? `${line.detail.slice(0, 80)}…` : line.detail;
   const toolLabel = line.tool ? ` ${line.tool}` : "";
   const statusLabel = line.status ? ` ${line.status}` : "";
   const detailLabel = detail ? `: ${detail}` : "";
   return (
-    <Text color={toolStatusColor(line.status)}>
+    <Text color={toolStatusColor(theme, line.status)}>
       [工具] round={line.round ?? 0}#{line.callIndex ?? 1}
       {toolLabel}
       {statusLabel}
-      <Text color={GRAY_DIM}>{detailLabel}</Text>
+      <Text color={c.toolDetail}>{detailLabel}</Text>
     </Text>
   );
 }
 
-export function MessageRow({ msg }: { msg: ChatMessage }) {
+/** markdown 块渲染（heading/code/text/list/quote/hr） */
+function MarkdownBody({ text, theme }: { text: string; theme: Theme }) {
+  const c = theme.colors;
+  const blocks = markdownToLines(text);
+  return (
+    <Box flexDirection="column">
+      {blocks.map((block, i) => {
+        switch (block.kind) {
+          case "heading":
+            return (
+              <Text key={i} color={c.heading} bold>
+                {"#".repeat(block.level ?? 1)} {block.text}
+              </Text>
+            );
+          case "code":
+            return (
+              <Box key={i} flexDirection="column" borderStyle="round" borderColor={c.border} paddingX={1}>
+                {block.text.split("\n").map((line, j) => (
+                  <Text key={j} color={c.code}>
+                    {line}
+                  </Text>
+                ))}
+              </Box>
+            );
+          case "list":
+            return (
+              <Text key={i} wrap="wrap">
+                <Text color={c.toolStart}>• </Text>
+                <InlineText segments={block.segments ?? [{ text: block.text }]} theme={theme} />
+              </Text>
+            );
+          case "quote":
+            return (
+              <Text key={i} wrap="wrap" color={c.status}>
+                <Text color={c.border}>│ </Text>
+                <InlineText segments={block.segments ?? [{ text: block.text }]} theme={theme} />
+              </Text>
+            );
+          case "hr":
+            return (
+              <Text key={i} color={c.border}>
+                ───────────────────────────────
+              </Text>
+            );
+          case "empty":
+            return <Text key={i}> </Text>;
+          default:
+            return (
+              <Text key={i} wrap="wrap" color={c.assistant}>
+                <InlineText segments={block.segments ?? [{ text: block.text }]} theme={theme} />
+              </Text>
+            );
+        }
+      })}
+    </Box>
+  );
+}
+
+export function MessageRow({ msg, theme }: { msg: ChatMessage; theme: Theme }) {
+  const c = theme.colors;
   if (msg.role === "user") {
     return (
       <Box flexDirection="column" marginBottom={1}>
-        <Text color={BLUE} bold>
+        <Text color={c.user} bold>
           ● {msg.text}
         </Text>
       </Box>
@@ -54,31 +135,29 @@ export function MessageRow({ msg }: { msg: ChatMessage }) {
         <Box flexDirection="column">
           {toolLines.map((line, i) =>
             typeof line === "string" ? (
-              <Text key={i} color={GRAY}>
+              <Text key={i} color={c.status}>
                 {line}
               </Text>
             ) : (
-              <ToolLineRow key={line.key} line={line} />
+              <ToolLineRow key={line.key} line={line} theme={theme} />
             ),
           )}
         </Box>
       )}
       {msg.text ? (
-        <Text wrap="wrap" color="#e5e7eb">
-          {msg.text}
-        </Text>
+        <MarkdownBody text={msg.text} theme={theme} />
       ) : (
-        <Text color={GRAY}>…</Text>
+        <Text color={c.dim}>…</Text>
       )}
     </Box>
   );
 }
 
-export function MessageList({ messages }: { messages: ChatMessage[] }) {
+export function MessageList({ messages, theme }: { messages: ChatMessage[]; theme: Theme }) {
   return (
     <Box flexDirection="column">
       {messages.map((msg, i) => (
-        <MessageRow key={i} msg={msg} />
+        <MessageRow key={i} msg={msg} theme={theme} />
       ))}
     </Box>
   );
@@ -88,39 +167,27 @@ export interface StatusBarProps {
   phase: string;
   model: string;
   ctxPercent: number;
+  ctxTokens: number;
   error: string;
   queued: string | null;
+  theme: Theme;
 }
 
-export function StatusBar({ phase, model, ctxPercent, error, queued }: StatusBarProps) {
-  const phaseText =
-    phase === "polling" || phase === "submitting"
-      ? `处理中… ${spinner(0)}`
-      : phase === "done"
-        ? "完成"
-        : phase === "error"
-          ? "错误"
-          : "就绪";
+export function StatusBar({ phase, model, ctxPercent, ctxTokens, error, queued, theme }: StatusBarProps) {
+  const c = theme.colors;
+  const busy = phase === "polling" || phase === "submitting";
+  const phaseText = busy ? "处理中…" : phase === "done" ? "完成" : phase === "error" ? "错误" : "就绪";
   const bar = progressBar(ctxPercent, 10);
   return (
     <Box flexDirection="column">
-      <Text color={GRAY}>
-        {phase === "polling" || phase === "submitting" ? (
-          <Text color={CYAN}>✷ {phaseText}</Text>
-        ) : (
-          <Text>{phaseText}</Text>
-        )}{" "}
-        | model {model} | ctx {Math.round(ctxPercent * 200)}K/200K | [{bar}]
+      <Text color={c.status}>
+        {busy ? <Text color={c.toolStart}>✷ {phaseText}</Text> : <Text>{phaseText}</Text>} | model {model} | ctx{" "}
+        {Math.round(ctxTokens / 1000)}K/200K | [{bar}]
       </Text>
-      {queued ? <Text color={GRAY}>（排队：{queued.slice(0, 24)}…）</Text> : null}
-      {error ? <Text color={RED}>⚠ {error}</Text> : null}
+      {queued ? <Text color={c.dim}>（排队：{queued.slice(0, 24)}…）</Text> : null}
+      {error ? <Text color={c.toolFail}>⚠ {error}</Text> : null}
     </Box>
   );
-}
-
-function spinner(frame: number): string {
-  const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-  return frames[frame % frames.length];
 }
 
 function progressBar(ratio: number, width: number): string {
