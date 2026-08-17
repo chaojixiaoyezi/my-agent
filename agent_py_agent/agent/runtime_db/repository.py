@@ -1542,6 +1542,117 @@ class RuntimeRepository(
             )
         return {"recovered": True, "attempt_id": attempt_id, "agent_run_id": agent_run_id}
 
+    # -------------------------------------------------------- wake_queue
+    # LLM: 调度唤醒字条(2026-08-17 扫描治理 owner 拍板)——"任务自己留的闹钟"。
+    # 每任务一行待醒字条(upsert 幂等); hot tick 只 pop 到期行(索引查询);
+    # 事件(用户消息/子代理完成)可提前置醒; woke 后由消费者核任务档案再拉
+    # 起, 档案证明已终结 → 清行(僵尸即清, 不累积)。
+    def upsert_wake(
+        self,
+        *,
+        root_task_id: str,
+        next_due_at: float,
+        kind: str = "sleep",
+        root_run_id: str = "",
+        root_thread_id: str = "",
+    ) -> sqlite3.Row:
+        """写/更新一个任务的唤醒字条(同一任务只保留一条待醒行)。"""
+        now = time.time()
+        with self._runtime_connection() as conn:
+            row = conn.execute(
+                "SELECT wake_id FROM wake_queue WHERE root_task_id = ? "
+                "AND status != 'woke' ORDER BY created_at DESC LIMIT 1",
+                (str(root_task_id),),
+            ).fetchone()
+            if row is not None:
+                conn.execute(
+                    "UPDATE wake_queue SET next_due_at = ?, kind = ?, "
+                    "root_run_id = ?, root_thread_id = ?, updated_at = ? "
+                    "WHERE wake_id = ?",
+                    (
+                        float(next_due_at), str(kind), str(root_run_id),
+                        str(root_thread_id), now, str(row["wake_id"]),
+                    ),
+                )
+                conn.commit()
+                return conn.execute(
+                    "SELECT * FROM wake_queue WHERE wake_id = ?",
+                    (str(row["wake_id"]),),
+                ).fetchone()
+            wake_id = uuid.uuid4().hex
+            conn.execute(
+                "INSERT INTO wake_queue(wake_id, root_task_id, root_run_id, "
+                "root_thread_id, kind, next_due_at, status, created_at, updated_at) "
+                "VALUES(?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+                (
+                    wake_id, str(root_task_id), str(root_run_id),
+                    str(root_thread_id), str(kind), float(next_due_at), now, now,
+                ),
+            )
+            conn.commit()
+            return conn.execute(
+                "SELECT * FROM wake_queue WHERE wake_id = ?", (wake_id,)
+            ).fetchone()
+
+    def pop_due_wakes(self, *, now: float, limit: int = 64) -> list[dict[str, Any]]:
+        """取出到期的待醒字条(CAS 标 woke, 防双叫); 只索引查询不翻目录。
+
+        选+标在同一事务内完成: 先用索引选出 pending 且到期的行, 再把这些
+        wake_id 置 woke——二次 pop 时 status 已非 pending 不会再选(不用
+        woke_at 时间戳判别, 同秒多次 pop 不会串)。"""
+        current = float(now)
+        with self._runtime_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM wake_queue WHERE status = 'pending' "
+                "AND next_due_at <= ? ORDER BY next_due_at LIMIT ?",
+                (current, int(limit)),
+            ).fetchall()
+            if rows:
+                ids = [str(row["wake_id"]) for row in rows]
+                placeholders = ",".join("?" for _ in ids)
+                conn.execute(
+                    f"UPDATE wake_queue SET status = 'woke', woke_at = ? "
+                    f"WHERE wake_id IN ({placeholders})",
+                    (current, *ids),
+                )
+                conn.commit()
+            # 返回行反映"已被领取"状态(本事务内刚置 woke)
+            popped = [dict(row) for row in rows]
+            for item in popped:
+                item["status"] = "woke"
+                item["woke_at"] = current
+            return popped
+
+    def complete_wake(self, wake_id: str) -> bool:
+        """字条处理完毕(任务已拉起/已确认终结)——删除该行。"""
+        with self._runtime_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM wake_queue WHERE wake_id = ?", (str(wake_id),)
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def cancel_wakes_for_task(self, root_task_id: str) -> int:
+        """任务终止/接管时清掉它的全部字条, 返回删除行数。"""
+        with self._runtime_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM wake_queue WHERE root_task_id = ?",
+                (str(root_task_id),),
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0)
+
+    def stale_wakes(self, *, now: float, woke_timeout_seconds: float) -> list[dict[str, Any]]:
+        """woke 超过超时仍未 complete 的字条(叫了没人干完)——僵尸候补,
+        消费者逐条核任务档案后清行。"""
+        with self._runtime_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM wake_queue WHERE status = 'woke' AND woke_at > 0 "
+                "AND woke_at <= ?",
+                (float(now) - float(woke_timeout_seconds),),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     # -------------------------------------------------------- RuntimeEvents
     def append_event(
         self,

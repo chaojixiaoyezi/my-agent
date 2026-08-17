@@ -256,6 +256,29 @@ _BASE_RUNTIME_SQL = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_id_path_mapping_kind ON id_path_mapping(id_kind)",
+    # ---------------------------------------------------------------- wake_queue
+    # 调度唤醒字条(2026-08-17 扫描治理, owner 拍板): "任务自己留的闹钟"。
+    # 模型 sleep/任务收口等待/goal tick/子代理等待时写一行"几点醒"; 调度器
+    # hot tick 只查 next_due_at<=now 的到期行(索引查询, 不翻任务目录)。
+    # 每任务一行待醒字条(upsert 幂等); 事件(用户消息/子代理完成)可提前置醒。
+    # woke 后由消费者核任务档案(link/state.json/runtime.db)再拉起——
+    # 档案证明已终结 → 清行(僵尸即清, 不累积)。
+    """
+    CREATE TABLE IF NOT EXISTS wake_queue (
+        wake_id TEXT PRIMARY KEY,
+        root_task_id TEXT NOT NULL,
+        root_run_id TEXT NOT NULL DEFAULT '',
+        root_thread_id TEXT NOT NULL DEFAULT '',
+        kind TEXT NOT NULL DEFAULT 'sleep',
+        next_due_at REAL NOT NULL,
+        woke_at REAL NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_wake_queue_due ON wake_queue(status, next_due_at)",
+    "CREATE INDEX IF NOT EXISTS idx_wake_queue_task ON wake_queue(root_task_id)",
     # ---------------------------------------------------------------- R3（I 节）
     # AcceptanceContract（I.2/I.6）：dispatch 前由框架编译、校验、冻结，
     # 不可变；current_contract_id 在 task_runs 上 CAS 防分叉。模型只能
