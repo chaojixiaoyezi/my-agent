@@ -245,6 +245,12 @@ class ScheduleTool(BaseTool):
         skill_refs = _skill_refs(self.agent, params.get("skill_ids"))
         if isinstance(skill_refs, ToolHandlerOutcome):
             return skill_refs
+        # A2：cron 策略注册（fail-closed）——owner 没有 async cron 策略时，到点的
+        # cron producer 会拒绝写 intent（不绕过授权拉起）。注册失败 → 创建失败
+        # （绝不静默建一个永远触发的定时任务）。放在参数验证之后、建 job 之前。
+        policy_error = _ensure_cron_wake_policy(self.agent, task_id=source_task_id)
+        if policy_error is not None:
+            return _error(policy_error, "WAKE_POLICY_REQUIRED")
         current = time.time()
         schedule = _schedule_from_params(self.agent, params, now=current)
         job, deduped = repository.create_job(
@@ -462,6 +468,55 @@ def _run_projection(run: dict[str, object]) -> dict[str, object]:
         "error_message": run.get("error_message") or "",
         "response_preview": str(run.get("response") or "")[:500],
     }
+
+
+def _provider_scope_ref(agent: object) -> str:
+    """模型通道 scope（provider circuit 路由 / 授权匹配用）。"""
+    scope = str(getattr(agent, "model_provider", "") or "").strip()
+    if not scope:
+        scope = str(
+            getattr(getattr(agent, "model_config", None), "provider", "") or ""
+        ).strip()
+    return scope or "opencode"
+
+
+def _ensure_cron_wake_policy(agent: object, *, task_id: str) -> str | None:
+    """注册 owner 级 async cron 策略（canonical wake_policies，幂等）。
+
+    fail-closed：owner 无 runtime.db / 策略注册异常 → 返回错误串（调用方
+    拒绝创建定时任务）；成功返回 None。scope_ref = owner:task（task 级，
+    seq2463 作用域匹配：更窄的 policy 不能授权更宽的 intent）。
+    """
+    try:
+        from ..runtime_db.repository import RuntimeRepository
+        from ..runtime_db.schema import runtime_db_path
+        from ..wake_producer import ensure_wake_policy
+
+        home_root = getattr(getattr(agent, "home_paths", None), "owner_home_dir", None)
+        if not home_root:
+            return "当前 owner 没有可用的运行时目录（wake policy 无法注册）"
+        db_path = runtime_db_path(home_root)
+        if not db_path.is_file():
+            return "当前 owner 运行时数据库缺失（wake policy 无法注册）"
+        owner_id = str(getattr(getattr(agent, "home_paths", None), "owner_id", "") or "").strip()
+        if not owner_id:
+            owner_id = "local/main"
+        task_id = str(task_id or "").strip()
+        if not task_id:
+            return "定时任务缺少绑定任务（wake policy 作用域无法确定）"
+        repo = RuntimeRepository(db_path)
+        ensure_wake_policy(
+            repo,
+            owner_id=owner_id,
+            continuation_policy="async",
+            policy_generation=1,
+            allowed_sources="cron",
+            provider_scope_ref=_provider_scope_ref(agent),
+            scope_ref=f"{owner_id}:{task_id}",
+        )
+        return None
+    except Exception as exc:  # noqa: BLE001 注册失败 fail-closed
+        return f"定时任务策略注册失败（{type(exc).__name__}）"
 
 
 def _success(action: str, payload: dict[str, object]) -> ToolHandlerOutcome:

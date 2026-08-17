@@ -4,6 +4,8 @@ import json
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+from agent_py_agent.agent.runtime_db.schema import runtime_db_path
 from agent_py_agent.agent.scheduler.repository import SchedulerRepository
 from agent_py_agent.agent.scheduler.tool import (
     ScheduleTool,
@@ -37,9 +39,17 @@ def _agent(tmp_path, *, with_thread: bool = True):
         if with_thread
         else {}
     )
+    owner_home_dir = tmp_path / "home" / "feishu" / "user-1"
+    owner_home_dir.mkdir(parents=True, exist_ok=True)
+    RuntimeRepository(runtime_db_path(owner_home_dir))  # 建权威库（真实 owner 必有）
     return SimpleNamespace(
         scheduler_repository=repository,
         config=SimpleNamespace(timezone="Asia/Shanghai"),
+        home_paths=SimpleNamespace(
+            owner_home_dir=owner_home_dir,
+            owner_id="feishu/user-1",
+        ),
+        model_provider="opencode",
         _current_run_params=RunParams(
             request_id="request-1",
             task_id="task-1",

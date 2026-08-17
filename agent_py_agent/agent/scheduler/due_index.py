@@ -33,6 +33,8 @@ class DueOwner:
     owner_kind: str
     owner_id: str
     next_due_at: float
+    job_id: str = ""
+    task_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -60,7 +62,7 @@ class SchedulerDueIndex:
     ) -> float:
         provider, owner_kind, owner_id = _owner_key(owner)
         current = float(time.time() if now is None else now)
-        next_due_at = _earliest_due_at(store, now=current)
+        next_due_at, job_id, task_id = _earliest_due_meta(store, now=current)
         try:
             with self._connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
@@ -68,10 +70,13 @@ class SchedulerDueIndex:
                     conn.execute(
                         """
                         INSERT INTO scheduler_due_owners (
-                            provider, owner_kind, owner_id, next_due_at, lease_until, updated_at
-                        ) VALUES (?, ?, ?, ?, 0, ?)
+                            provider, owner_kind, owner_id, next_due_at, lease_until,
+                            job_id, task_id, updated_at
+                        ) VALUES (?, ?, ?, ?, 0, ?, ?, ?)
                         ON CONFLICT(provider, owner_kind, owner_id) DO UPDATE SET
                             next_due_at = excluded.next_due_at,
+                            job_id = excluded.job_id,
+                            task_id = excluded.task_id,
                             lease_until = CASE
                                 WHEN scheduler_due_owners.next_due_at = excluded.next_due_at
                                 THEN scheduler_due_owners.lease_until
@@ -80,7 +85,8 @@ class SchedulerDueIndex:
                             updated_at = excluded.updated_at
                         WHERE excluded.updated_at >= scheduler_due_owners.updated_at
                         """,
-                        (provider, owner_kind, owner_id, next_due_at, current),
+                        (provider, owner_kind, owner_id, next_due_at,
+                         job_id, task_id, current),
                     )
                 else:
                     conn.execute(
@@ -110,7 +116,7 @@ class SchedulerDueIndex:
                 conn.execute("BEGIN IMMEDIATE")
                 rows = conn.execute(
                     """
-                    SELECT provider, owner_kind, owner_id, next_due_at
+                    SELECT provider, owner_kind, owner_id, next_due_at, job_id, task_id
                     FROM scheduler_due_owners
                     WHERE next_due_at <= ? AND lease_until <= ?
                     ORDER BY next_due_at, provider, owner_kind, owner_id
@@ -139,6 +145,8 @@ class SchedulerDueIndex:
                 owner_kind=str(row["owner_kind"]),
                 owner_id=str(row["owner_id"]),
                 next_due_at=float(row["next_due_at"]),
+                job_id=str(row["job_id"] or ""),
+                task_id=str(row["task_id"] or ""),
             )
             for row in rows
         ]
@@ -158,8 +166,9 @@ class SchedulerDueIndex:
                 conn.executemany(
                     """
                     INSERT INTO scheduler_due_owners (
-                        provider, owner_kind, owner_id, next_due_at, lease_until, updated_at
-                    ) VALUES (?, ?, ?, ?, 0, ?)
+                        provider, owner_kind, owner_id, next_due_at, lease_until,
+                        job_id, task_id, updated_at
+                    ) VALUES (?, ?, ?, ?, 0, '', '', ?)
                     ON CONFLICT(provider, owner_kind, owner_id) DO UPDATE SET
                         next_due_at = excluded.next_due_at,
                         lease_until = CASE
@@ -201,7 +210,7 @@ class SchedulerDueIndex:
             with self._connect() as conn:
                 rows = conn.execute(
                     """
-                    SELECT provider, owner_kind, owner_id, next_due_at
+                    SELECT provider, owner_kind, owner_id, next_due_at, job_id, task_id
                     FROM scheduler_due_owners
                     ORDER BY next_due_at, provider, owner_kind, owner_id
                     """
@@ -214,6 +223,8 @@ class SchedulerDueIndex:
                 owner_kind=str(row["owner_kind"]),
                 owner_id=str(row["owner_id"]),
                 next_due_at=float(row["next_due_at"]),
+                job_id=str(row["job_id"] or ""),
+                task_id=str(row["task_id"] or ""),
             )
             for row in rows
         ]
@@ -236,11 +247,17 @@ class SchedulerDueIndex:
                         owner_id TEXT NOT NULL,
                         next_due_at REAL NOT NULL,
                         lease_until REAL NOT NULL DEFAULT 0,
+                        job_id TEXT NOT NULL DEFAULT '',
+                        task_id TEXT NOT NULL DEFAULT '',
                         updated_at REAL NOT NULL,
                         PRIMARY KEY (provider, owner_kind, owner_id)
                     )
                     """
                 )
+                # 存量索引表迁移（A2：cron producer 需要 job/task 身份）。
+                # CREATE TABLE IF NOT EXISTS 不更新既有表——按列存在性补列，
+                # 投影数据是派生的，缺列历史行以默认空串重同步即可。
+                _ensure_due_index_columns(conn)
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS scheduler_due_meta (
@@ -270,6 +287,21 @@ class SchedulerDueIndex:
         except (OSError, sqlite3.Error) as exc:
             raise SchedulerDueIndexError("scheduler due index migration state read failed") from exc
         return bool(row is not None and str(row["value"]) == "complete")
+
+
+def _ensure_due_index_columns(conn: sqlite3.Connection) -> None:
+    """存量 scheduler_due_owners 补 job_id/task_id 列（幂等，列存在则跳过）。"""
+    try:
+        columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(scheduler_due_owners)")
+        }
+        for column in ("job_id", "task_id"):
+            if column not in columns:
+                conn.execute(
+                    f"ALTER TABLE scheduler_due_owners ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                )
+    except (OSError, sqlite3.Error):
+        raise
 
 
 def _load_legacy_due_rows(
@@ -352,16 +384,32 @@ def _owner_key(owner: dict[str, object]) -> tuple[str, str, str]:
     return provider, owner_kind, owner_id
 
 
-def _earliest_due_at(store: dict[str, object], *, now: float) -> float:
-    candidates: list[float] = []
+def _earliest_due_meta(
+    store: dict[str, object], *, now: float
+) -> tuple[float, str, str]:
+    """最早到期 job 的 (next_due_at, job_id, source_task_id)。
+
+    A2（cron producer）需要 job 身份来写 wake_intent（source_event_id=job_id、
+    task_id=source_task_id，dedup 稳定）；runs（已在执行的调度 run）不产生
+    新叫醒单——jobs 优先，无 active job 才回落 runs 的到期时间（job 信息留空，
+    producer 侧对无 task_id 的 due 保持 fail-closed 拒绝）。
+    """
     jobs = store.get("jobs")
     if isinstance(jobs, dict):
-        for raw in jobs.values():
+        earliest: tuple[float, str, str] | None = None
+        for job_id, raw in jobs.items():
             if not isinstance(raw, dict) or str(raw.get("status") or "") != "active":
                 continue
             value = _positive_timestamp(raw.get("next_run_at"))
-            if value > 0:
-                candidates.append(value)
+            if value > 0 and (earliest is None or value < earliest[0]):
+                earliest = (
+                    value,
+                    str(job_id),
+                    str(raw.get("source_task_id") or "").strip(),
+                )
+        if earliest is not None:
+            return earliest
+    candidates: list[float] = []
     runs = store.get("runs")
     if isinstance(runs, dict):
         for raw in runs.values():
@@ -373,7 +421,12 @@ def _earliest_due_at(store: dict[str, object], *, now: float) -> float:
             else:
                 value = _positive_timestamp(raw.get("claim_expires_at")) or now
             candidates.append(value)
-    return min(candidates) if candidates else 0.0
+    return (min(candidates) if candidates else 0.0), "", ""
+
+
+def _earliest_due_at(store: dict[str, object], *, now: float) -> float:
+    """兼容包装：只取最早到期时间（legacy 扫描等调用点）。"""
+    return _earliest_due_meta(store, now=now)[0]
 
 
 def _positive_timestamp(value: Any) -> float:

@@ -16,10 +16,18 @@ def _owner(owner_id: str) -> dict[str, object]:
     return {"provider": "feishu", "kind": "user", "id": owner_id}
 
 
-def _store(*, next_run_at: float = 0.0, run: dict[str, object] | None = None) -> dict[str, object]:
+def _store(
+    *,
+    next_run_at: float = 0.0,
+    run: dict[str, object] | None = None,
+    source_task_id: str = "",
+) -> dict[str, object]:
     jobs = {}
     if next_run_at:
-        jobs["job-1"] = {"status": "active", "next_run_at": next_run_at}
+        job = {"status": "active", "next_run_at": next_run_at}
+        if source_task_id:
+            job["source_task_id"] = source_task_id
+        jobs["job-1"] = job
     runs = {"run-1": run} if run is not None else {}
     return {"jobs": jobs, "runs": runs}
 
@@ -178,14 +186,40 @@ def test_owner_repository_projects_raw_identity_without_exposing_canonical_path(
     ]
 
 
-def test_gateway_due_controller_records_only_claimed_scoped_owners(monkeypatch, tmp_path) -> None:
+def test_gateway_due_controller_writes_cron_intent_not_direct_registry(monkeypatch, tmp_path) -> None:
+    """A2：cron due 写 wake_intent（source=cron）替代直录 registry。
+
+    无 cron policy 的 owner → fail-closed 拒绝（registry 零记录）；有 policy +
+    到点 job → intent 落库（announced=1），registry 仍零记录（拉起唯一走
+    dispatcher）。
+    """
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+    from agent_py_agent.agent.runtime_db.schema import runtime_db_path
+    from agent_py_agent.agent.wake_producer import ensure_wake_policy
     from agent_py_agent.cli import gateway_loops
 
+    owners_dir = tmp_path / "owners"
+    owner_home = owners_dir / "providers" / "feishu" / "users" / "alice"
+    owner_home.mkdir(parents=True)
+    repo = RuntimeRepository(runtime_db_path(owner_home))
+    ensure_wake_policy(
+        repo, owner_id="providers/feishu/users/alice", continuation_policy="async",
+        policy_generation=1, allowed_sources="cron",
+        provider_scope_ref="opencode", scope_ref="providers/feishu/users/alice:task-a",
+    )
+
     index = SchedulerDueIndex(tmp_path / "scheduler.sqlite3")
-    index.sync_owner(_owner("alice"), _store(next_run_at=100), now=50)
+    index.sync_owner(
+        _owner("alice"), _store(next_run_at=100, source_task_id="task-a"), now=50,
+    )
     index.sync_owner(
         {"provider": "local", "kind": "main", "id": "local/main"},
         _store(next_run_at=100),
+        now=50,
+    )
+    index.sync_owner(
+        {"provider": "feishu", "kind": "user", "id": "nopolicy"},
+        _store(next_run_at=100, source_task_id="task-x"),
         now=50,
     )
     registry = ActiveOwnerRegistry()
@@ -197,14 +231,23 @@ def test_gateway_due_controller_records_only_claimed_scoped_owners(monkeypatch, 
             background_owner_workers=8,
         ),
         scheduler_repository=SimpleNamespace(due_index=index),
-        home_paths=SimpleNamespace(global_index_dir=tmp_path),
+        home_paths=SimpleNamespace(
+            global_index_dir=tmp_path,
+            owners_dir=owners_dir,
+        ),
     )
     context = SimpleNamespace(agent=SimpleNamespace())
     monkeypatch.setattr(gateway_loops, "_gateway_agent_from_context", lambda _context: base)
     monkeypatch.setattr(gateway_loops, "shared_active_owner_registry", lambda _agent: registry)
 
     controller = gateway_loops._GatewaySchedulerDueController(context)
-    assert controller.tick(now=100) == 1
-    assert [(row.provider, row.owner_kind, row.owner_id) for row in registry.snapshot()] == [
-        ("feishu", "user", "alice")
-    ]
+    assert controller.tick(now=100) == 1  # 只有 alice（有 policy + task）写 intent
+    # 不直录 registry——拉起唯一走 dispatcher（seq2470 收敛）
+    assert registry.snapshot() == []
+    due = repo.due_wake_intents(now=100)
+    assert len(due) == 1
+    assert due[0]["source"] == "cron"
+    assert due[0]["task_id"] == "task-a"
+    assert due[0]["owner_id"] == "providers/feishu/users/alice"
+    assert due[0]["continuation_policy"] == "async"
+    assert due[0]["provider_scope_ref"] == "opencode"

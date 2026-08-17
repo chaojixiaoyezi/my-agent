@@ -938,12 +938,26 @@ class _GatewaySchedulerDueController:
             stop_event.wait(self.interval)
 
     def tick(self, *, now: float | None = None) -> int:
+        """A2：cron producer——到期 owner 写 wake_intent（source=cron），不再直录 registry。
+
+        唯一拉起路径收敛到 dispatcher（seq2470：cron due 曾是最后一条「直录
+        registry」旧拉起残留）。本层只写 intent，不 claim、不建 attempt、不调
+        模型（硬不变量 1/2）。fail-closed：owner 无 cron 策略 / intent 无绑定
+        任务 / 注册失败 → 计数拒绝，绝不绕过授权直接拉起。
+        """
+        from ..agent.runtime_db.repository import RuntimeRepository
+        from ..agent.runtime_db.schema import runtime_db_path
+        from ..agent.wake_producer import register_wake_intent
+
         rows = self._due_index.claim_due_owners(
             now=now,
             limit=self._claim_limit,
             lease_seconds=self._lease_seconds,
         )
+        current = float(time.time() if now is None else now)
         announced = 0
+        rejected = 0
+        owners_dir = getattr(getattr(self._base_agent, "home_paths", None), "owners_dir", None)
         for row in rows:
             if row.provider == "local" and row.owner_kind == "main":
                 continue
@@ -951,11 +965,64 @@ class _GatewaySchedulerDueController:
                 owner = OwnerIdentity.provider_group(row.provider, row.owner_id)
             else:
                 owner = OwnerIdentity.provider_user(row.provider, row.owner_id)
-            self._registry.record(owner)
-            announced += 1
-        if announced:
+            # 权威 owner_id 格式与 home_paths.owner_id 一致（owner_resolver._owner_id）：
+            # providers/{provider}/{bucket}/{id}——policy/intent 查对必须同格式。
+            owner_id_full = (
+                f"providers/{row.provider}/"
+                f"{'groups' if row.owner_kind == 'group' else 'users'}/{row.owner_id}"
+            )
+            owner_home = _owner_home_for(owners_dir, row.provider, row.owner_kind, row.owner_id)
+            if owner_home is None:
+                rejected += 1
+                continue
+            db_path = runtime_db_path(owner_home)
+            if not db_path.is_file():
+                rejected += 1
+                continue
+            try:
+                repo = RuntimeRepository(db_path)
+                # producer 侧只确认「owner 有未撤销的 async 策略」（来源白名单/
+                # scope/代际核对是 dispatcher 消费 intent 时经 wake_policy_allows
+                # 做的——producer 不重复裁决，避免两套判断）。
+                policy = repo.current_wake_policy(owner_id_full, "async")
+                if policy is None:
+                    rejected += 1
+                    print(
+                        f"[gateway-scheduler-due] cron producer rejected (no cron policy): "
+                        f"owner={owner_id_full}",
+                        flush=True,
+                    )
+                    continue
+                task_id = str(row.task_id or "").strip()
+                if not task_id:
+                    rejected += 1
+                    print(
+                        f"[gateway-scheduler-due] cron producer rejected (intent needs task): "
+                        f"owner={owner_id_full} job={row.job_id}",
+                        flush=True,
+                    )
+                    continue
+                register_wake_intent(
+                    repo,
+                    owner_id=owner_id_full,
+                    task_id=task_id,
+                    source="cron",
+                    wake_reason="cron_due",
+                    continuation_policy="async",
+                    provider_scope_ref=str(policy.get("provider_scope_ref") or ""),
+                    policy_generation=int(policy.get("policy_generation") or 0),
+                    next_wake_at=current,
+                    source_event_id=str(row.job_id or ""),
+                    due_window="cron",
+                )
+                announced += 1
+            except Exception as exc:  # noqa: BLE001 单 owner 异常不阻断其他
+                rejected += 1
+                _print_gateway_loop_error("gateway_scheduler_due.producer", owner_id_full, exc)
+        if announced or rejected:
             print(
-                f"[gateway-scheduler-due] due owners announced: {announced}",
+                f"[gateway-scheduler-due] cron producer: intents={announced} "
+                f"rejected={rejected}",
                 flush=True,
             )
         return announced
@@ -1207,6 +1274,31 @@ def _wake_rescan_interval_seconds(agent: SimpleAgent) -> float:
 def _wake_dispatcher_lease_seconds(agent: SimpleAgent) -> float:
     value = _float_config(agent, "wake_dispatcher_lease_seconds", default=300.0)
     return max(1.0, value)
+
+
+def _owner_home_for(
+    owners_dir: str | Path | None,
+    provider: str,
+    owner_kind: str,
+    owner_id: str,
+) -> Path | None:
+    """按 provider/kind/id 定位单个 owner 目录（新式 + legacy 双布局）。
+
+    与 _owner_homes_iter 同构；给 cron producer 用（按索引行定向找库，不全量
+    遍历）。找不到返回 None（调用方 fail-closed 拒绝）。
+    """
+    if not owners_dir:
+        return None
+    owners_root = Path(owners_dir)
+    bucket = "users" if owner_kind == "user" else "groups"
+    candidates = (
+        owners_root / "providers" / provider / bucket / owner_id,
+        owners_root / provider / owner_id,  # legacy
+    )
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return None
 
 
 def _wake_dispatcher_instance_id(agent: SimpleAgent) -> str:
