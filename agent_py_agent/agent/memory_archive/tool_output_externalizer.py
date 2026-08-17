@@ -75,15 +75,14 @@ def externalize_tool_output_record(request: ExternalizeToolOutputRequest) -> dic
         return record
     if _output_requires_recovery_artifact(output, resolved):
         path = _write_output_artifact(request, output, digest)
+        # _write_output_artifact 内部已 _append_index 写 kind=tool_output 行
+        # (带 path)——这里不需要再补 tool_call 行, 否则同 path 双行会破坏
+        # read_artifact 的唯一 basename 修复匹配。
         record.update({
             "output_externalized": True,
             "output_path": str(path),
             "artifact_ref": str(path),
         })
-        # 恢复产物也落 index 行(带 artifact 路径)——否则 context bundle 的
-        # tool_output_source_refs 只扫 index.jsonl 发现不了大输出恢复产物,
-        # 产物更新合同返回 no_matching_tool_output_artifacts(合同测试实锤)。
-        _append_tool_call_index(request, record, digest)
     else:
         _append_tool_call_index(request, record, digest)
     return record
@@ -270,10 +269,10 @@ def _append_tool_call_index(request: ExternalizeToolOutputRequest, record: dict[
         "parameters": _safe_parameters(request.parameters),
         **_index_metadata_from_record(record),
         "source_input": _source_input(request.parameters),
-        "path": str(record.get("output_path") or ""),
+        "path": "",
         "sha256": digest,
         "size_bytes": int(record.get("output_size_bytes", 0) or 0),
-        "output_externalized": bool(record.get("output_externalized") or False),
+        "output_externalized": False,
         "created_at": created_at,
     }
     index_path = tool_output_root(request.root) / "index.jsonl"

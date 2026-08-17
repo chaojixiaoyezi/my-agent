@@ -5,39 +5,16 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .tool_output_externalizer import (
-    tool_output_index_paths_for_lookup,
-    tool_output_root,
-)
+from .tool_output_externalizer import tool_output_index_paths_for_lookup
 
 _INTERNAL_LEDGER_TOOLS = {"task_progress"}
 
 
 def tool_output_source_refs(workspace: str | Path, scope: dict[str, Any]) -> list[dict[str, Any]]:
+    # 大输出恢复产物经 _write_output_artifact→_append_index 已写 kind=tool_output
+    # 行(带 path)进 index.jsonl, 直接读 index 即可, 无需另扫 artifact 文件。
     rows = _read_tool_output_index(Path(workspace))
-    # 大输出恢复产物以独立 artifact json 存在(kind=tool_output 载荷)——
-    # index.jsonl 只记 tool_call 行; 不扫 artifact 文件则 context bundle
-    # 产物更新发现不了它们(no_matching_tool_output_artifacts, 合同测试实锤)。
-    rows.extend(_read_tool_output_artifact_rows(Path(workspace)))
     return [_source_ref(row) for row in rows if _is_tool_output_row(row) and _matches_scope(row, scope)]
-
-
-def _read_tool_output_artifact_rows(workspace: Path) -> list[dict[str, Any]]:
-    root = tool_output_root(workspace)
-    if not root.is_dir():
-        return []
-    rows: list[dict[str, Any]] = []
-    for path in sorted(root.glob("*.json")):
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001 坏文件跳过(审计仍可查原文件)
-            continue
-        if not isinstance(payload, dict) or str(payload.get("kind") or "") != "tool_output":
-            continue
-        row = dict(payload)
-        row["path"] = str(path)
-        rows.append(row)
-    return rows
 
 
 def tool_call_source_refs(workspace: str | Path, scope: dict[str, Any]) -> list[dict[str, Any]]:
