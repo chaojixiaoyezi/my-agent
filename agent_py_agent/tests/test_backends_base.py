@@ -672,3 +672,68 @@ def test_probe_records_non_provider_failure_as_unsupported(tmp_path):
         capability = backend.probe_tool_capability()
     assert capability.native_supported is False
     assert "live_probe_failed:ValueError" in capability.evidence
+
+
+def _probe_response(nonce: str) -> ModelResponse:
+    """合法结构化探针回应: 带与 nonce 一致的 tool_use 块。"""
+    return ModelResponse(
+        text="",
+        backend="test",
+        tool_use_blocks=[{"id": "tu-1", "name": "my_agent_capability_probe",
+                          "input": {"nonce": nonce}}],
+    )
+
+def _echoing_probe_generate(prompt, *args, **kwargs):
+    """从探针 prompt 里抠出真 nonce, 返回合法结构化回应(模拟模型正常调用)。"""
+    import re as _re
+
+    match = _re.search(r"nonce ([0-9a-f]+)\.", str(prompt))
+    return _probe_response(match.group(1) if match else "")
+
+
+def test_probe_retries_on_model_flake_then_passes(tmp_path):
+    """弱模型抖动: 前两次回散文(无 tool_use), 第三次结构化调用 → 通过并缓存。"""
+    backend = HttpBackend(_DEFAULT_OPTIONS)
+    calls = {"n": 0}
+
+    def _flaky(prompt, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return ModelResponse(text="prose flake", backend="test")
+        return _echoing_probe_generate(prompt)
+
+    with patch.object(backend, "generate", side_effect=_flaky) as gen:
+        cap = backend.probe_tool_capability()
+        assert cap.native_supported is True
+        assert cap.evidence == "live_probe_returned_structured_tool_call"
+        assert gen.call_count == 3  # 重试到成功为止
+        # 成功结果缓存: 再探不重发
+        assert backend.probe_tool_capability() is cap
+        assert gen.call_count == 3
+
+
+def test_probe_flake_failure_is_not_cached(tmp_path):
+    """全重试耗尽仍失败 → 不支持 + **不缓存**(下次再探, 弱模型不永久判死)。"""
+    backend = HttpBackend(_DEFAULT_OPTIONS)
+    with patch.object(
+        backend, "generate",
+        return_value=ModelResponse(text="prose", backend="test"),
+    ) as gen:
+        cap = backend.probe_tool_capability()
+        assert cap.native_supported is False
+        assert cap.evidence == "live_probe_returned_no_valid_structured_tool_call"
+        assert gen.call_count == 3
+    # 未缓存: 第二次 probe 重新发起尝试且这次成功
+    with patch.object(backend, "generate", side_effect=_echoing_probe_generate) as gen2:
+        assert backend.probe_tool_capability().native_supported is True
+        assert gen2.call_count == 1
+
+
+def test_probe_non_provider_exception_not_retried(tmp_path):
+    """本地确定性异常不重试(重试无意义), 立即落 evidence。"""
+    backend = HttpBackend(_DEFAULT_OPTIONS)
+    with patch.object(backend, "generate", side_effect=ValueError("local bug")) as gen:
+        cap = backend.probe_tool_capability()
+        assert cap.native_supported is False
+        assert "live_probe_failed:ValueError" in cap.evidence
+        assert gen.call_count == 1

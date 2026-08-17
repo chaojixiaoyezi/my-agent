@@ -110,6 +110,11 @@ class _OpenAIGenerateRequest:
     max_output_tokens: int | None = None
 
 
+# 原生工具能力探针的最大尝试次数(弱模型偶发无视强制 tool_choice 回散文,
+# 单发误判"不支持 native"; 有界重试后仍无结构化调用才判不支持)。
+_PROBE_MAX_ATTEMPTS = 3
+
+
 class BaseBackend:
     """所有后端适配器都要实现的基类接口。"""
 
@@ -260,39 +265,61 @@ class HttpBackend(BaseBackend):
         self.stream_timeout_is_idle = self.stream_enabled
 
     def probe_tool_capability(self) -> ProviderToolCapability:
-        """Run one harmless structured-call probe and cache the observed result."""
+        """Run a harmless structured-call probe (bounded retries) and cache only
+        a proven-positive result.
 
+        真机 2026-08-17 MiniMax 弱模型: 探针单发时灵时不灵(模型偶尔无视
+        强制 tool_choice 回散文)→ 单发探针把"没调用工具"误判成"模型不
+        支持 native", 聊天直接报 ToolProtocolSelectionError。修: ①同一
+        探针最多重试 _PROBE_MAX_ATTEMPTS 次(每次新 nonce), 一次结构化
+        调用即通过; ②失败不缓存——进程存活期间下一轮再探(弱模型抖动
+        不永久判死), 只有成功结果进缓存。本地确定性异常(非 provider)
+        不重试, 立即落 evidence。
+        """
         cached = self._provider_tool_capability_cache
         if cached is not None:
             return cached
-        nonce = secrets.token_hex(8)
-        probe_tool = {
-            "name": "my_agent_capability_probe",
-            "description": "Internal protocol capability probe with no host-side effect.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "nonce": {
-                        "type": "string",
-                        "description": "Copy the nonce from the user request exactly.",
-                    }
-                },
-                "required": ["nonce"],
-                "additionalProperties": False,
-            },
-        }
         evidence = ""
-        supported = False
-        try:
-            response = self.generate(
-                (
-                    "Call my_agent_capability_probe exactly once with nonce "
-                    f"{nonce}. Do not answer in prose."
-                ),
-                tools=[probe_tool],
-                tool_choice=ToolChoice.specific("my_agent_capability_probe"),
-                thinking_disabled=True,
-            )
+        for _attempt in range(1, _PROBE_MAX_ATTEMPTS + 1):
+            nonce = secrets.token_hex(8)
+            probe_tool = {
+                "name": "my_agent_capability_probe",
+                "description": "Internal protocol capability probe with no host-side effect.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "nonce": {
+                            "type": "string",
+                            "description": "Copy the nonce from the user request exactly.",
+                        }
+                    },
+                    "required": ["nonce"],
+                    "additionalProperties": False,
+                },
+            }
+            try:
+                response = self.generate(
+                    (
+                        "Call my_agent_capability_probe exactly once with nonce "
+                        f"{nonce}. Do not answer in prose."
+                    ),
+                    tools=[probe_tool],
+                    tool_choice=ToolChoice.specific("my_agent_capability_probe"),
+                    thinking_disabled=True,
+                )
+            except ProviderRecoverableError:
+                # EXEC-41b: provider 侧失败(429 额度/限流/超时/连接)不是"不支持
+                # native"——探针吞掉它会把配额耗尽误报成"模型无原生工具能力",
+                # 真机 2026-08-17 双线 quota 恢复前 resume 报
+                # ToolProtocolSelectionError(RC=1 且文案误导)。放行给调用方,
+                # CLI 走 provider_quota_exhausted_report 等优雅报告路径。
+                raise
+            except Exception as exc:
+                # 本地确定性异常(解析/配置错)重试无意义, 立即落 evidence。
+                code = str(getattr(exc, "error_code", "") or "").strip().upper()
+                suffix = f":{code}" if code else ""
+                evidence = f"live_probe_failed:{type(exc).__name__}{suffix}"
+                break
             blocks = list(getattr(response, "tool_use_blocks", None) or ())
             supported = any(
                 isinstance(block, dict)
@@ -302,33 +329,29 @@ class HttpBackend(BaseBackend):
                 and str(block["input"].get("nonce") or "") == nonce
                 for block in blocks
             )
-            evidence = (
-                "live_probe_returned_structured_tool_call"
-                if supported
-                else "live_probe_returned_no_valid_structured_tool_call"
-            )
-        except ProviderRecoverableError:
-            # EXEC-41b: provider 侧失败(429 额度/限流/超时/连接)不是"不支持
-            # native"——探针吞掉它会把配额耗尽误报成"模型无原生工具能力",
-            # 真机 2026-08-17 双线 quota 恢复前 resume 报
-            # ToolProtocolSelectionError(RC=1 且文案误导)。放行给调用方,
-            # CLI 走 provider_quota_exhausted_report 等优雅报告路径。
-            raise
-        except Exception as exc:
-            code = str(getattr(exc, "error_code", "") or "").strip().upper()
-            suffix = f":{code}" if code else ""
-            evidence = f"live_probe_failed:{type(exc).__name__}{suffix}"
-        capability = ProviderToolCapability(
+            if supported:
+                capability = ProviderToolCapability(
+                    provider=str(self.name or type(self).__name__),
+                    endpoint=self._tool_endpoint(),
+                    model=self.model_name,
+                    stream=self.stream_enabled,
+                    native_supported=True,
+                    evidence="live_probe_returned_structured_tool_call",
+                    observed_at=_utc_now_iso(),
+                )
+                self._provider_tool_capability_cache = capability
+                return capability
+            evidence = "live_probe_returned_no_valid_structured_tool_call"
+        # 重试耗尽仍未证明: 不缓存(下次 turn 再探), 如实报不支持。
+        return ProviderToolCapability(
             provider=str(self.name or type(self).__name__),
             endpoint=self._tool_endpoint(),
             model=self.model_name,
             stream=self.stream_enabled,
-            native_supported=supported,
-            evidence=evidence,
+            native_supported=False,
+            evidence=evidence or "live_probe_returned_no_valid_structured_tool_call",
             observed_at=_utc_now_iso(),
         )
-        self._provider_tool_capability_cache = capability
-        return capability
 
     def _tool_endpoint(self) -> str:
         return self.api_base
