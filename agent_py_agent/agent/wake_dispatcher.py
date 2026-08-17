@@ -43,7 +43,12 @@ class WakeDispatchOutcome:
     generation: int = 0
 
 
-def validate_wake_intent_authorization(row: dict) -> tuple[bool, str]:
+def validate_wake_intent_authorization(
+    row: dict,
+    *,
+    policy_validator: object = None,
+    provider_circuit_open: object = None,
+) -> tuple[bool, str]:
     """授权校验（#236，不可绕过入口门）：policy 有效 + 来源授权 + 空值拒绝。
 
     结构化信号铁律：只读 intent 行字段，不解析任何自然语言。
@@ -52,8 +57,15 @@ def validate_wake_intent_authorization(row: dict) -> tuple[bool, str]:
       - source 不在受控枚举 → 拒绝
       - interactive + source 不在 INTERACTIVE_SOURCES → 拒绝（禁周期扫描）
       - async + source 不在 ASYNC_SOURCES → 拒绝
-      - async 且 provider_scope_ref 空 → 拒绝（circuit 路由需要）
+      - provider_scope_ref 空（interactive/async 都要）→ 拒绝（provider circuit
+        路由统一需要，seq2436：不能只对 async）
       - policy_generation < 0 → 拒绝
+      - policy_validator 注入且返回 False → 拒绝（匹配当前 policy ledger 且未
+        撤销；无注入 validator 时按 generation>=0 过渡放行——policy ledger
+        基建落成后必须注入）
+      - provider_circuit_open 注入且对 provider_scope_ref 返回 True → 拒绝
+        （429/配额冻结该 provider；无注入 circuit 时默认放行——circuit 存储
+        落成后必须注入）
     返回 (ok, reason)。
     """
     policy = str(row.get("continuation_policy") or "").strip()
@@ -66,14 +78,27 @@ def validate_wake_intent_authorization(row: dict) -> tuple[bool, str]:
         return False, "source_not_allowed_for_interactive"
     if policy == "async" and source not in ASYNC_SOURCES:
         return False, "source_not_allowed_for_async"
+    provider_scope_ref = str(row.get("provider_scope_ref") or "").strip()
+    if not provider_scope_ref:
+        return False, "provider_scope_ref_missing"
     try:
         generation = int(row.get("policy_generation") or -1)
     except (TypeError, ValueError):
         return False, "policy_generation_invalid"
     if generation < 0:
         return False, "policy_generation_missing"
-    if policy == "async" and not str(row.get("provider_scope_ref") or "").strip():
-        return False, "provider_scope_ref_missing"
+    if callable(policy_validator):
+        try:
+            if not policy_validator(policy, generation):
+                return False, "policy_generation_not_current_or_revoked"
+        except Exception:  # noqa: BLE001 validator 异常保守拒绝（fail-closed）
+            return False, "policy_validator_error"
+    if callable(provider_circuit_open):
+        try:
+            if provider_circuit_open(provider_scope_ref):
+                return False, "provider_circuit_open_or_quota_frozen"
+        except Exception:  # noqa: BLE001 circuit 检查异常保守拒绝（fail-closed）
+            return False, "provider_circuit_check_error"
     return True, ""
 
 

@@ -88,9 +88,11 @@ def test_authorization_unknown_source_rejected(repo):
 
 
 def test_authorization_interactive_inbound_ok(repo):
-    """interactive inbound 是唯一允许的交互来源（C：入站走 dispatcher 管线）。"""
+    """interactive inbound 是唯一允许的交互来源（C：入站走 dispatcher 管线）。
+    规格 §1：provider_scope_ref 是所有 intent 必填（provider circuit 统一路由），
+    interactive 也强制非空（seq2436）。"""
     _intent(repo, "g1", "k7", source="inbound", wake_reason="user_message",
-            policy="interactive", scope="")
+            policy="interactive", scope="provider-opencode")
     out = _dispatch(repo, "g1")
     assert out.claimed and out.reason == "dispatched"
 

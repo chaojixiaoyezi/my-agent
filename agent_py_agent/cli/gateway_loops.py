@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import sys
 import threading
 import time
@@ -1198,30 +1199,47 @@ def _wake_dispatcher_instance_id(agent: SimpleAgent) -> str:
 
 
 def _owner_homes_iter(owners_dir: str | Path):
-    """遍历 owners/providers/<provider>/{users,groups}/<id>，产出 (OwnerIdentity, home)。
+    """遍历 owner 库（新式 providers/ + legacy owners/<provider>/<id>），产出 (OwnerIdentity, home)。
 
-    与 owner_wake_discovery._candidate_owner_homes 同构（provider/bucket/id 三级），
-    供 dispatcher 逐 owner 库查 due intent。"""
-    providers_root = Path(owners_dir) / "providers"
-    if not providers_root.is_dir():
-        return
-    for provider_dir in sorted(providers_root.iterdir()):
-        if not provider_dir.is_dir():
-            continue
-        for bucket, owner_kind in (("users", "user"), ("groups", "group")):
-            bucket_dir = provider_dir / bucket
-            if not bucket_dir.is_dir():
+    新式：owners/providers/<provider>/{users,groups}/<id>。
+    Legacy/local（seq2436 缺口 4）：owners/<provider>/<id>（如 owners/local/main 主 owner）——
+    base/local owner 的 wake_intent 也必须进入 dispatcher 查询，不能漏掉。
+    与 owner_wake_discovery._candidate_owner_homes 同构（provider/bucket/id 三级）。"""
+    owners_root = Path(owners_dir)
+    providers_root = owners_root / "providers"
+    if providers_root.is_dir():
+        for provider_dir in sorted(providers_root.iterdir()):
+            if not provider_dir.is_dir():
                 continue
-            for owner_home in sorted(bucket_dir.iterdir()):
-                if not owner_home.is_dir():
+            for bucket, owner_kind in (("users", "user"), ("groups", "group")):
+                bucket_dir = provider_dir / bucket
+                if not bucket_dir.is_dir():
                     continue
-                try:
-                    identity = OwnerIdentity.provider_user(provider_dir.name, owner_home.name) \
-                        if owner_kind == "user" \
-                        else OwnerIdentity.provider_group(provider_dir.name, owner_home.name)
-                except Exception:  # noqa: BLE001 单 owner 构造失败跳过
-                    continue
-                yield identity, owner_home
+                for owner_home in sorted(bucket_dir.iterdir()):
+                    if not owner_home.is_dir():
+                        continue
+                    try:
+                        identity = OwnerIdentity.provider_user(provider_dir.name, owner_home.name) \
+                            if owner_kind == "user" \
+                            else OwnerIdentity.provider_group(provider_dir.name, owner_home.name)
+                    except Exception:  # noqa: BLE001 单 owner 构造失败跳过
+                        continue
+                    yield identity, owner_home
+    # Legacy/local 布局：owners/<provider>/<id>（local/main 主 owner 等）
+    for provider_dir in sorted(owners_root.iterdir()):
+        if not provider_dir.is_dir() or provider_dir.name == "providers":
+            continue
+        for owner_home in sorted(provider_dir.iterdir()):
+            if not owner_home.is_dir():
+                continue
+            try:
+                if provider_dir.name == "local" and owner_home.name == "main":
+                    identity = OwnerIdentity.local_main()
+                else:
+                    identity = OwnerIdentity.provider_user(provider_dir.name, owner_home.name)
+            except Exception:  # noqa: BLE001 单 owner 构造失败跳过
+                continue
+            yield identity, owner_home
 
 
 def _positive_int_config(agent: SimpleAgent, key: str, *, default: int) -> int:
