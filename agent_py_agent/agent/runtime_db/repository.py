@@ -2267,6 +2267,28 @@ class RuntimeRepository(
             )
         return {"accepted": True, "idempotent": False, "intent_id": d["intent_id"]}
 
+    def has_unfinished_attempt_for_scope(
+        self, owner_id: str, task_id: str, run_id: str = ""
+    ) -> bool:
+        """owner/task/run 作用域存在未完成 canonical attempt（ended_at=0）。
+
+        reaper attempt 关联窗口检查（seq2490①/2492②）：dispatch.attempt_id 空
+        不代表从未建 attempt——「canonical attempt 已落但 acceptance 未回写」
+        窗口内 intent 不得释放（否则孤儿 attempt + 重派）。按
+        agent_attempts→agent_runs→task_runs→tasks 权威链过滤 owner/task/run。
+        """
+        with self._runtime_connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM agent_attempts aa"
+                " JOIN agent_runs ar ON ar.agent_run_id = aa.agent_run_id"
+                " JOIN task_runs tr ON tr.task_run_id = ar.task_run_id"
+                " JOIN tasks t ON t.task_id = tr.task_id"
+                " WHERE aa.ended_at = 0 AND t.owner_id = ? AND tr.task_id = ?"
+                " AND (? = '' OR ar.run_id = ?) LIMIT 1",
+                (owner_id, task_id, run_id, run_id),
+            ).fetchone()
+        return row is not None
+
     @staticmethod
     def _attempt_owner_task_run(conn: sqlite3.Connection, attempt_id: str) -> tuple[str, str, str] | None:
         """attempt → agent_runs → task_runs → tasks 链取 (owner_id, task_id, run_id)。
@@ -2352,6 +2374,72 @@ class RuntimeRepository(
             if cur.rowcount == 0:
                 return {"released": False, "reason": "not_dispatched"}
         return {"released": True}
+
+    def release_wake_intent_and_dispatch(
+        self,
+        intent_id: str,
+        *,
+        dispatch_id: str,
+        claim_token: str,
+        expected_generation: int,
+        lease_owner: str,
+        now: float | None = None,
+    ) -> dict[str, object]:
+        """原子回收：dispatch 终态化 + intent 回 pending 同一事务（seq2492③）。
+
+        群复核硬门（2492③/2493①）：两步各自事务之间有崩溃窗口（dispatch 已
+        released 而 intent 仍 claimed → 永久卡单）——本方法在同一事务内：
+          - 重校验 lease_until<=now + claim_token/generation/lease_owner（
+            lease 下沉，不依赖调用顺序）
+          - dispatch 行 lease 字段与 intent 一致
+          - dispatch dispatched→released + intent claimed→pending 原子完成
+        任一校验失败 → 整体回滚（不留下半完成状态）。
+        """
+        now = time.time() if now is None else now
+        with self.transaction() as conn:
+            intent_row = conn.execute(
+                "SELECT * FROM wake_intents WHERE intent_id = ?", (intent_id,)
+            ).fetchone()
+            if intent_row is None:
+                return {"released": False, "reason": "intent_not_found"}
+            if str(intent_row["status"] or "") != "claimed":
+                return {"released": False, "reason": "intent_not_claimed"}
+            if str(intent_row["claim_token"] or "") != claim_token:
+                return {"released": False, "reason": "claim_token_mismatch"}
+            if int(intent_row["claim_generation"] or -1) != int(expected_generation):
+                return {"released": False, "reason": "claim_generation_mismatch"}
+            if str(intent_row["lease_owner"] or "") != lease_owner:
+                return {"released": False, "reason": "lease_owner_mismatch"}
+            if float(intent_row["lease_until"] or 0) > now:
+                return {"released": False, "reason": "lease_not_expired"}
+            d = conn.execute(
+                "SELECT * FROM wake_dispatches WHERE dispatch_id = ?", (dispatch_id,)
+            ).fetchone()
+            if d is None:
+                return {"released": False, "reason": "dispatch_not_found"}
+            if str(d["status"] or "") != "dispatched":
+                return {"released": False, "reason": f"not_dispatched:{d['status']}"}
+            # dispatch/intent lease 字段一致（同一 claim 的证据）
+            if float(d["lease_until"] or 0) != float(intent_row["lease_until"] or 0):
+                return {"released": False, "reason": "dispatch_intent_lease_mismatch"}
+            if str(d["claim_token"] or "") != claim_token:
+                return {"released": False, "reason": "dispatch_token_mismatch"}
+            # 同事务原子：dispatch 终态化 + intent 回 pending
+            conn.execute(
+                "UPDATE wake_dispatches SET status = 'released', updated_at = ?"
+                " WHERE dispatch_id = ? AND status = 'dispatched'",
+                (now, dispatch_id),
+            )
+            conn.execute(
+                "UPDATE wake_intents SET status = 'pending',"
+                " claim_generation = claim_generation + 1,"
+                " claim_token = '', lease_owner = '', lease_until = 0, updated_at = ?"
+                " WHERE intent_id = ? AND status = 'claimed' AND claim_token = ?"
+                " AND lease_until <= ? AND claim_generation = ?"
+                " AND active_attempt_id = ''",
+                (now, intent_id, claim_token, now, int(expected_generation)),
+            )
+        return {"released": True, "intent_id": intent_id}
 
     def mark_wake_dispatch_reconciliation(
         self, dispatch_id: str, *, error_ref: str, claim_token: str,

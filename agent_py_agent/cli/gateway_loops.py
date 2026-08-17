@@ -641,16 +641,22 @@ class _BackgroundMainSupervisor:
             owners_dir = getattr(getattr(self._base_agent, "home_paths", None), "owners_dir", None)
             if not owners_dir:
                 return
-            limit = _positive_int_config(self._base_agent, "wake_reaper_max_per_tick", default=20)
+            # seq2492④：全局 budget/cursor——reaper 处理量跨 owner 累计封顶
+            # （不是每 owner 各 20），10 万 owner 时总处理量不随 owner 数放大。
+            budget = _positive_int_config(self._base_agent, "wake_reaper_max_per_tick", default=50)
+            spent = 0
             for owner_identity, owner_home in _owner_homes_iter(owners_dir):
+                if spent >= budget:
+                    break
                 db_path = runtime_db_path(owner_home)
                 if not db_path.is_file():
                     continue
                 try:
                     repo = RuntimeRepository(db_path)
-                    counts = reap_expired_claimed_intents(repo, limit=limit)
+                    counts = reap_expired_claimed_intents(repo, limit=budget - spent)
                 except Exception:  # noqa: BLE001 单 owner 库异常不阻断其他
                     continue
+                spent += int(counts.get("released") or 0) + int(counts.get("reconciled") or 0)
                 if sum(counts.values()):
                     print(
                         f"[gateway-background-main] wake reaper: "

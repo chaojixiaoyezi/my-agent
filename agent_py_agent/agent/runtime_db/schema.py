@@ -430,6 +430,8 @@ _BASE_RUNTIME_SQL = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_wake_intents_due ON wake_intents(status, next_wake_at)",
     "CREATE INDEX IF NOT EXISTS idx_wake_intents_owner ON wake_intents(owner_id, status)",
+    # reaper 有界扫描（seq2492④）：claimed + lease_until 复合索引。
+    "CREATE INDEX IF NOT EXISTS idx_wake_intents_lease ON wake_intents(status, lease_until)",
     # ------------------------------------------------ wake_policies（#233）
     # canonical 策略授权源（seq2455/2457/2458 硬合同）：wake 调度唯一授权事实。
     # 无记录 / 代际不匹配 / 已撤销 / 来源不在白名单 / provider scope 不匹配 →
