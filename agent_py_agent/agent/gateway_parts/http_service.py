@@ -22,6 +22,7 @@ from .http_handlers import (
     handle_admin_summary,
     handle_ask,
     handle_control,
+    handle_commands,
     handle_history,
     handle_progress,
     handle_result,
@@ -117,6 +118,10 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
             # `/history` 只读 owner-scoped 会话历史（TUI 重启接续，2026-08-17）
             self._handle_history()
             return
+        if self.path == "/commands":
+            # `/commands` 后端权威会话控制命令表（TUI 斜杠补全来源）
+            self._handle_commands()
+            return
         if self.path.startswith("/sessions/") and self.path.endswith("/channels"):
             self._handle_session_channels()
             return
@@ -173,6 +178,9 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
 
     def _handle_history(self) -> None:
         handle_history(self, _server_instance)
+
+    def _handle_commands(self) -> None:
+        handle_commands(self, _server_instance)
 
     def _handle_progress(self) -> None:
         handle_progress(self, _server_instance)

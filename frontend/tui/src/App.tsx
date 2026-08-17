@@ -43,11 +43,21 @@ export function App({ client, sessionId, model, history }: AppProps) {
   stateRef.current = state;
   // /stop 主动中断当前轮询（2026-08-17 真机：stop 后 poll 等超时报错）
   const pollAbortRef = useRef<AbortController | null>(null);
+  // 后端权威命令表（群复核 P1）：启动拉取，Tab 补全/帮助以后端为准 + 本地命令
+  const [serverCommands, setServerCommands] = useState<{ name: string }[]>([]);
+  useEffect(() => {
+    void client.commands().then((cmds) => setServerCommands(cmds)).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /** 一轮完整提交：ask（幂等）→ pollUntilDone（progress + result 收口） */
   const runTurn = useCallback(
     async (prompt: string) => {
-      if (busyRef.current) return;
+      if (busyRef.current) {
+        // 群复核 P1：busy 时不再静默丢弃——进 reducer 排队（done 后消费）
+        dispatch({ type: "queue", prompt });
+        return;
+      }
       busyRef.current = true;
       const key = makeIdempotencyKey();
       const controller = new AbortController();
@@ -81,10 +91,10 @@ export function App({ client, sessionId, model, history }: AppProps) {
         }
       } finally {
         busyRef.current = false;
-        // 排队消费：polling 期间提交的消息在 done 后自动再跑
+        // 排队消费：polling 期间提交的消息在 done 后自动再跑（consume 防重复）
         const queued = stateRef.current.queuedPrompt;
         if (queued) {
-          dispatch({ type: "done", result: { ok: true, response: "" } });
+          dispatch({ type: "consume_queue" });
           void runTurn(queued);
         }
       }
@@ -114,14 +124,19 @@ export function App({ client, sessionId, model, history }: AppProps) {
       setInput(history[next] ?? "");
       return;
     }
-    // Tab 斜杠补全：/ 开头循环候选命令
+    // Tab 斜杠补全：/ 开头循环候选命令（后端权威 + 本地命令合并）
     if (keys.tab && input.startsWith("/")) {
       const prefix = input.slice(1).toLowerCase();
-      const matches = COMMANDS.filter((c) => c.name.startsWith(prefix));
+      const serverNames = serverCommands.map((c) => c.name);
+      const merged = [
+        ...COMMANDS.map((c) => c.name),
+        ...serverNames.filter((n) => !COMMANDS.some((c) => c.name === n)),
+      ];
+      const matches = merged.filter((n) => n.startsWith(prefix));
       if (matches.length === 0) return;
       const idx = tabCycleRef.current % matches.length;
       tabCycleRef.current += 1;
-      setInput(`/${matches[idx].name} `);
+      setInput(`/${matches[idx]} `);
       return;
     }
     tabCycleRef.current = 0;

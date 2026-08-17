@@ -16,13 +16,13 @@ export interface MultiLineInputProps {
 
 export function MultiLineInput({ value, onChange, onSubmit, theme }: MultiLineInputProps) {
   useInput((input, key) => {
-    if (key.return) {
-      onSubmit(value);
+    // 群复核 P1：先判 Ctrl+J 换行再判 Enter（Ink 可能把 LF 报成 return）
+    if (key.ctrl && input === "j") {
+      onChange(value + "\n");
       return;
     }
-    if (key.ctrl && input === "j") {
-      // Ctrl+J 换行（多行编辑）
-      onChange(value + "\n");
+    if (key.return) {
+      onSubmit(value);
       return;
     }
     if (key.backspace || key.delete) {

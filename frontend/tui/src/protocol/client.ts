@@ -110,15 +110,33 @@ export class TuiHttpClient {
       throw await this.errorFrom(res);
     }
     const data = (await res.json()) as ResultResponse & { status?: string };
+    const status = String(data.status ?? "").toLowerCase();
+    // 群复核 P1 终态 fail-closed：failed/interrupted/cancelled 也是终态
+    // （不能落 pending 一直轮询）；404=queued（未知/过期请求由轮询超时兜底）。
+    if (status === "failed" || status === "interrupted" || status === "cancelled") {
+      return { done: data };
+    }
     // 未完成态：processing/queued 由网关返回的 status 字段标识（无 response 字段）
     if (
-      data.status === "processing" ||
-      data.status === "queued" ||
+      status === "processing" ||
+      status === "queued" ||
       (data.response === undefined && data.ok === undefined)
     ) {
-      return { pending: data.status === "processing" ? "processing" : "queued" };
+      return { pending: status === "processing" ? "processing" : "queued" };
     }
     return { done: data };
+  }
+
+  /** GET /commands → 后端权威会话控制命令表（群复核 P1：补全不复制命令表） */
+  async commands(): Promise<{ name: string; usage: string; description: string }[]> {
+    const res = await this.request("/commands", { method: "GET" });
+    if (res.status !== 200) {
+      throw await this.errorFrom(res);
+    }
+    const data = (await res.json()) as { commands?: { name?: string; usage?: string; description?: string }[] };
+    return (data.commands ?? [])
+      .filter((c) => c.name)
+      .map((c) => ({ name: c.name as string, usage: c.usage ?? "", description: c.description ?? "" }));
   }
 
   /** GET /history?session=<id> → 只读会话历史（TUI 重启接续，2026-08-17） */
@@ -137,12 +155,16 @@ export class TuiHttpClient {
   }
 
   /** POST /control（会话控制，带 conversation scope）。
-   *  2026-08-17 真机实锤：后端 parse_conversation_control 期望斜杠语法
-   *  （/stop、/btw 内容、/goal 内容），裸 "stop" 会 400。 */
+   *  2026-08-17 群复核 P0-2：后端 _http_conversation_id 只读顶层字段
+   *  （conversation_id/session_id/...），scope 必须放顶层（canonical body），
+   *  嵌套 conversation 保留供其他消费者。斜杠语法（/stop）同前。 */
   async control(command: ControlCommand, conversation: ControlRequest["conversation"], text?: string): Promise<unknown> {
     const body: ControlRequest = {
       command: command === "stop" ? "/stop" : `/${command} ${text ?? ""}`.trim(),
       conversation,
+      // 顶层 canonical scope（后端鉴权/选会话的事实来源）
+      conversation_id: conversation.channel_conversation_id,
+      session_id: conversation.channel_conversation_id,
     };
     const res = await this.request("/control", {
       method: "POST",
@@ -176,10 +198,14 @@ export class TuiHttpClient {
       // 1) 先收 progress 观察流（非权威，失败可退避重试）
       try {
         const prog = await this.progress(requestId, cursor);
-        if (prog.events.length > 0) {
+        // 群复核 P1：/progress 的 next 会跨过被过滤的行——空页但 next 前进
+        // 也必须推进游标，否则卡旧页漏后续可见事件（真机/夹具未覆盖）。
+        if (prog.next > cursor) {
           cursor = prog.next;
-          collected.push(...prog.events);
-          onEvents?.(prog.events, cursor);
+          if (prog.events.length > 0) {
+            collected.push(...prog.events);
+            onEvents?.(prog.events, cursor);
+          }
         }
         retries = 0;
       } catch (err) {

@@ -83,9 +83,13 @@ export interface ResultResponse {
 /** 控制命令类型（POST /control，会话控制专用） */
 export type ControlCommand = "stop" | "btw" | "goal";
 
-/** POST /control 请求体（command 为斜杠语法文本：/stop、/btw 内容、/goal 内容） */
+/** POST /control 请求体（command 为斜杠语法文本：/stop、/btw 内容、/goal 内容；
+ *  scope 同时放顶层 canonical（后端 _http_conversation_id 事实来源）+ 嵌套
+ *  conversation（兼容其他消费者），2026-08-17 群复核 P0-2） */
 export interface ControlRequest {
   command: string;
+  conversation_id?: string;
+  session_id?: string;
   /** conversation scope（必带，防误控其他会话） */
   conversation: {
     channel: string;

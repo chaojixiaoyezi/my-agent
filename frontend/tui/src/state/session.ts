@@ -82,7 +82,18 @@ export interface QueueAction {
   prompt: string;
 }
 
-export type SessionAction = SubmitAction | ProgressAction | DoneAction | ErrorAction | QueueAction;
+/** 消费排队（done 后由 UI 取出排队消息再提交） */
+export interface ConsumeQueueAction {
+  type: "consume_queue";
+}
+
+export type SessionAction =
+  | SubmitAction
+  | ProgressAction
+  | DoneAction
+  | ErrorAction
+  | QueueAction
+  | ConsumeQueueAction;
 
 /**
  * 状态机 reducer：
@@ -150,6 +161,9 @@ export function sessionReducer(state: SessionState, action: SessionAction): Sess
     case "queue": {
       return { ...state, queuedPrompt: action.prompt };
     }
+    case "consume_queue": {
+      return { ...state, queuedPrompt: null };
+    }
     case "error": {
       return { ...state, phase: "idle", error: action.message, queuedPrompt: null };
     }
@@ -184,8 +198,14 @@ export function mergeToolLines(existing: (ToolLine | string)[], incoming: (ToolL
     if (typeof line === "string") continue;
     merged.set(line.key, line);
   }
+  const newTextLines: string[] = [];
   for (const line of incoming) {
-    if (typeof line === "string") continue;
+    if (typeof line === "string") {
+      // 群复核 P1：后续 assistant_commentary 不能丢（assistant 骨架出现后
+      // 观察文本继续追加）
+      newTextLines.push(line);
+      continue;
+    }
     const prev = merged.get(line.key);
     // 完成/失败等终态覆盖开始态；同态不重复追加
     if (prev) {
@@ -194,7 +214,7 @@ export function mergeToolLines(existing: (ToolLine | string)[], incoming: (ToolL
       merged.set(line.key, line);
     }
   }
-  return [...textLines, ...merged.values()];
+  return [...textLines, ...newTextLines, ...merged.values()];
 }
 
 /** 提交动作的参数（供 UI 调用 client.ask） */

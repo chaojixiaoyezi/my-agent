@@ -179,13 +179,16 @@ def _read_public_progress_events(path, since: int) -> tuple[list[dict[str, objec
     except (OSError, UnicodeError):
         return [], since
     events: list[dict[str, object]] = []
-    for line in lines[since : since + 200]:
+    for index, line in enumerate(lines[since : since + 200]):
         try:
             row = json.loads(line)
         except (json.JSONDecodeError, TypeError):
             continue
         if not isinstance(row, dict):
             continue
+        # 稳定 event_id（群复核 P1）：全局行号（chunk 内唯一、单调），
+        # 客户端去重/缺口检测的事实来源
+        event_id = f"{since + index}"
         if row.get("kind") == "assistant_commentary":
             # Model commentary is safe at every verbose level only after the
             # same user-facing projection used by final channel delivery.
@@ -193,7 +196,7 @@ def _read_public_progress_events(path, since: int) -> tuple[list[dict[str, objec
                 project_user_reply(row.get("text", "")).content
             ).strip()
             if text:
-                events.append({"kind": "assistant_commentary", "text": text})
+                events.append({"kind": "assistant_commentary", "text": text, "seq": event_id})
             continue
         if row.get("kind") != "tool_progress":
             continue
@@ -201,7 +204,7 @@ def _read_public_progress_events(path, since: int) -> tuple[list[dict[str, objec
         progress = row.get("progress")
         if level not in {"on", "full"} or not isinstance(progress, dict):
             continue
-        events.append({"level": level, **progress})
+        events.append({"level": level, "seq": event_id, **progress})
     return events, min(len(lines), since + 200)
 
 
@@ -432,6 +435,18 @@ def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
         body["system_task"] = task_command.to_request_payload()
         goal = task_command.prompt
     request_id = request_id_factory()
+    # 幂等（群复核 P1）：同 owner+conversation+idempotency_key 重放返回原 request
+    # ——断线重连不重复提交的后端事实支撑
+    idem_key = str(body.get("idempotency_key") or "").strip()
+    if idem_key:
+        existing = _find_request_by_idempotency_key(
+            server.paths, user_id, channel, _http_conversation_id(body), idem_key
+        )
+        if existing:
+            handler._send_json(
+                202, {"request_id": existing, "status": "accepted", "replayed": True}
+            )
+            return
     request_data = _build_ask_request(_AskRequestContext(body, goal, request_id, user_id, channel))
     pending_path = server.paths.inbox / f"{request_id}.json"
     try:
@@ -578,11 +593,57 @@ def _gateway_control_scope(
     )
 
 
+def _find_request_by_idempotency_key(
+    paths, user_id: str, channel: str, conversation_id: str, idem_key: str
+) -> str | None:
+    """幂等查重（群复核 P1）：扫 inbox/processing/done 已落文件的请求，
+    匹配 owner(channel+user)+conversation+idempotency_key → 返回原 request_id。
+
+    只读扫描（文件即事实），失败保守不命中（不阻断正常入队）。"""
+    for directory in (paths.inbox, paths.processing, paths.done):
+        if not directory.is_dir():
+            continue
+        try:
+            files = directory.glob("*.json")
+        except OSError:
+            continue
+        for path in files:
+            try:
+                req = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, ValueError):
+                continue
+            if not isinstance(req, dict):
+                continue
+            if str(req.get("idempotency_key") or "") != idem_key:
+                continue
+            metadata = req.get("metadata") or {}
+            if str(metadata.get("channel") or "") != channel:
+                continue
+            if str(metadata.get("user_id") or "") != user_id:
+                continue
+            conv = req.get("conversation") or {}
+            if str(conv.get("channel_conversation_id") or "") != conversation_id:
+                continue
+            return str(req.get("request_id") or req.get("id") or "")
+    return None
+
+
 def _build_ask_request(context: _AskRequestContext) -> dict:
     raw_metadata = context.body.get("metadata")
     metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
     metadata["user_id"] = context.user_id
     metadata["channel"] = context.channel
+    # 群复核 P1（ask 幂等/resume 公共契约）：idempotency_key/resume_context
+    # 必须持久化落文件（重放查重/断线重连的事实来源）
+    idem_key = str(context.body.get("idempotency_key") or "").strip()
+    if idem_key:
+        metadata["idempotency_key"] = idem_key
+        payload_idem = idem_key
+    else:
+        payload_idem = ""
+    resume_context = context.body.get("resume_context")
+    if resume_context is not None:
+        metadata["resume_context"] = bool(resume_context)
     payload = {
         "id": context.request_id,
         "request_id": context.request_id,
@@ -598,6 +659,8 @@ def _build_ask_request(context: _AskRequestContext) -> dict:
         "user_id": context.user_id,
         "conversation": _http_conversation_payload(context),
     }
+    if payload_idem:
+        payload["idempotency_key"] = payload_idem
     system_task = context.body.get("system_task")
     if isinstance(system_task, dict):
         payload["system_task"] = dict(system_task)
@@ -696,12 +759,38 @@ def handle_history(handler, server) -> None:
     handler._send_json(200, {"session": session_id, "messages": messages[-limit * 2 :]})
 
 
-def _can_read_owner_history(handler, server, access) -> bool:
-    """history 沿 /result 同一 owner 事实（loopback 免鉴权）。"""
-    from .http_handlers import _can_read_finished_request as _base
+# 会话控制命令权威表（群复核 P1：slash 补全来自后端权威，前端不复制命令表）。
+# 与 conversation/control_commands.py 支持的斜杠语法对齐。
+_TUI_CONTROL_COMMANDS = (
+    {"name": "stop", "usage": "/stop", "description": "停止当前任务"},
+    {"name": "btw", "usage": "/btw <内容>", "description": "给当前任务改向"},
+    {"name": "goal", "usage": "/goal <内容>", "description": "设置目标"},
+    {"name": "status", "usage": "/status", "description": "当前状态"},
+)
 
+
+def handle_commands(handler, server) -> None:
+    """GET /commands → 后端权威会话控制命令表（TUI 斜杠补全/帮助的事实来源）。"""
+    if server is None:
+        handler._send_json(500, {"error": "server not initialized"})
+        return
+    user_id, permission = _request_identity(handler)
+    if not _all_user_access(_ResultAccessContext("", user_id, permission)):
+        handler._send_json(403, {"error": "forbidden"})
+        return
+    handler._send_json(
+        200,
+        {"commands": [dict(c) for c in _TUI_CONTROL_COMMANDS]},
+    )
+
+
+def _can_read_owner_history(handler, server, access) -> bool:
+    """history 鉴权（群复核 P1 修正）：admin/loopback 放行；非 all-user
+    保守拒绝——history 是 owner 级聚合，没有单请求文件可做细粒度 owner
+    证明，之前把 session_id 当 request_id 混用 _can_read_finished_request
+    是错的（非 loopback 会全 403 或错判）。带认证客户端接入时再细化。"""
     try:
-        return _base(server.paths, access)
+        return _all_user_access(access)
     except Exception:  # noqa: BLE001 鉴权失败保守拒绝
         return False
 

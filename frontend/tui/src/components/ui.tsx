@@ -8,6 +8,12 @@ import type { ChatMessage, ToolLine } from "../state/session.js";
 import type { Theme } from "../theme.js";
 import { markdownToLines, type InlineSegment } from "../markdown.js";
 
+/** 过滤终端控制序列（群复核 P1：工具输出/回复不得注入终端） */
+const ANSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*(\x07|\x1b\\)/g;
+export function stripAnsi(text: string): string {
+  return text.replace(ANSI_RE, "");
+}
+
 /** 工具行着色：进行中青 / 完成绿 / 失败红（theme） */
 export function toolStatusColor(theme: Theme, status: string): string {
   const c = theme.colors;
@@ -45,7 +51,8 @@ function InlineText({ segments, theme }: { segments: InlineSegment[]; theme: The
 /** 工具行渲染（紧凑单行） */
 function ToolLineRow({ line, theme }: { line: ToolLine; theme: Theme }) {
   const c = theme.colors;
-  const detail = line.detail.length > 80 ? `${line.detail.slice(0, 80)}…` : line.detail;
+  const rawDetail = stripAnsi(line.detail);
+  const detail = rawDetail.length > 80 ? `${rawDetail.slice(0, 80)}…` : rawDetail;
   const toolLabel = line.tool ? ` ${line.tool}` : "";
   const statusLabel = line.status ? ` ${line.status}` : "";
   const detailLabel = detail ? `: ${detail}` : "";
