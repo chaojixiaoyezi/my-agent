@@ -1790,6 +1790,26 @@ class RuntimeRepository(
                 return {"released": False, "reason": "not_expired_or_token_or_generation_mismatch"}
         return {"released": True, "intent_id": intent_id}
 
+    def mark_wake_intent_rejected(
+        self, intent_id: str, *, error_ref: str, now: float | None = None
+    ) -> dict[str, object]:
+        """授权校验拒绝（#236）：pending 保持 + 标 last_error_ref（reconciler 审计）。
+
+        与 lease-expired 不同：这是「不可绕过入口门」拒绝（policy/来源/scope
+        无效），intent 保持 pending 但不被 dispatcher 消费——可被 reconciler
+        审计或取消，绝不 claim 执行。
+        """
+        now = time.time() if now is None else now
+        with self.transaction() as conn:
+            cur = conn.execute(
+                "UPDATE wake_intents SET last_error_ref = ?, updated_at = ?"
+                " WHERE intent_id = ? AND status = 'pending'",
+                (error_ref, now, intent_id),
+            )
+            if cur.rowcount == 0:
+                return {"marked": False, "reason": "not_pending"}
+        return {"marked": True, "intent_id": intent_id}
+
     def mark_wake_intent_lease_expired(
         self,
         intent_id: str,

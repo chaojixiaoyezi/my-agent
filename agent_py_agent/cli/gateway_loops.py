@@ -46,6 +46,7 @@ from ..agent.owner_scoped_pool import shared_active_owner_registry
 from ..agent.owner_wake_discovery import (
     OwnerWakeCursor,
     discover_owner_home_page,
+    discover_wake_pending_owner_page,
     seed_registry_page_from_disk,
 )
 from ..agent.runtime_errors import runtime_error_report
@@ -436,7 +437,8 @@ class _BackgroundMainSupervisor:
 
     def tick(self) -> bool:
         self._maybe_write_heartbeat()
-        self._maybe_seed_wake_pending_owners()
+        self._maybe_seed_wake_pending_owners()  # #233: shadow 计数，不再拉起
+        self._dispatch_due_wake_intents()  # #233: dispatcher 唯一执行入口
         reports = self._collect_finished_ticks()
         self._sync_owner_schedulers()
         self._recover_active_watch_harvesters()
@@ -519,6 +521,12 @@ class _BackgroundMainSupervisor:
             return []
 
     def _maybe_seed_wake_pending_owners(self) -> None:
+        """#233 第 2 步：旧「信号源→拉起」路径停用，只留 shadow 计数。
+
+        群一致（seq2432/2433 A）：直接停旧拉起，绝不与新 dispatcher 双跑；
+        计数供 shadow 比对（第 6 步删）。dispatcher 只消费 wake_intents
+        （due + 授权 + CAS claim 后创建 attempt），本方法不再种入 registry。
+        """
         if self._wake_rescan_interval <= 0:
             return
         now = time.monotonic()
@@ -529,15 +537,74 @@ class _BackgroundMainSupervisor:
         if not owners_dir:
             return
         limit = _positive_int_config(self._base_agent, "owner_agent_pool_max_agents", default=64)
-        page = seed_registry_page_from_disk(
-            self._registry,
-            owners_dir,
-            limit=limit,
-            after_cursor=self._wake_discovery_cursor,
-        )
+        try:
+            page = discover_wake_pending_owner_page(owners_dir, limit=limit,
+                                                    after_cursor=self._wake_discovery_cursor)
+        except Exception as exc:  # noqa: BLE001 shadow 失败不影响主循环
+            _print_gateway_loop_error("gateway_background_main.wake_shadow",
+                                      "wake-pending-shadow", exc)
+            return
         self._wake_discovery_cursor = page.next_cursor
-        if page.seeded:
-            print(f"[gateway-background-main] wake-pending owners seeded from disk: {page.seeded}", flush=True)
+        if page.hard_owners or page.soft_owners:
+            print(
+                f"[gateway-background-main] wake-pending owners shadow "
+                f"(not seeded, dispatcher owns execution): hard={len(page.hard_owners)} "
+                f"soft={len(page.soft_owners)}",
+                flush=True,
+            )
+
+    def _dispatch_due_wake_intents(self) -> None:
+        """#233 dispatcher tick：唯一执行入口消费 due intent。
+
+        对每个 owner 库查 due intents → 授权校验（#236 不可绕过入口门）→
+        CAS claim → claim 成功才把 owner 种入 registry（下一轮 submit 执行
+        一轮 = 唯一 attempt 创建点）。旧路径已停（_maybe_seed 只 shadow），
+        因此「claim 成功 → owner 执行」是唯一拉起路径。
+        """
+        try:
+            from ..agent.wake_dispatcher import dispatch_due_wake_intent
+            from ..agent.runtime_db.repository import RuntimeRepository
+            from ..agent.runtime_db.schema import runtime_db_path
+
+            owners_dir = getattr(getattr(self._base_agent, "home_paths", None), "owners_dir", None)
+            if not owners_dir:
+                return
+            limit = _positive_int_config(self._base_agent, "wake_dispatcher_max_per_tick", default=20)
+            dispatched = 0
+            for owner_identity, owner_home in _owner_homes_iter(owners_dir):
+                db_path = runtime_db_path(owner_home)
+                if not db_path.is_file():
+                    continue
+                try:
+                    repo = RuntimeRepository(db_path)
+                except Exception:  # noqa: BLE001 单 owner 库异常不阻断其他
+                    continue
+                try:
+                    due = repo.due_wake_intents(limit=limit)
+                except Exception:  # noqa: BLE001
+                    continue
+                for row in due:
+                    try:
+                        outcome = dispatch_due_wake_intent(
+                            repo, row,
+                            lease_owner=_wake_dispatcher_instance_id(self._base_agent),
+                            lease_seconds=_wake_dispatcher_lease_seconds(self._base_agent),
+                        )
+                    except Exception:  # noqa: BLE001 单 intent 异常不阻断
+                        continue
+                    if outcome.claimed:
+                        # claim 成功 → owner 进池，下一轮执行一轮（唯一 attempt 入口）
+                        self._registry.record(owner_identity, hard=True)
+                        dispatched += 1
+                        print(
+                            f"[gateway-background-main] wake intent dispatched: "
+                            f"{outcome.intent_id} owner={getattr(owner_identity, 'owner_id', '')}",
+                            flush=True,
+                        )
+            if dispatched:
+                print(f"[gateway-background-main] wake dispatcher: {dispatched} intents claimed", flush=True)
+        except Exception as exc:  # noqa: BLE001 dispatcher 异常绝不影响主循环
+            _print_gateway_loop_error("gateway_background_main.dispatcher", "wake-dispatcher", exc)
 
     def _sync_owner_schedulers(self) -> None:
         # 登记本唯一入口:registry snapshot(controller claim_due_owners / wake seed 分页种回)。
@@ -1045,17 +1112,29 @@ class _GatewayOrphanReconciler:
         return reports
 
     def _seed_owner_registry(self) -> None:
+        """#233 第 2 步：旧 seed 路径 shadow（群一致 seq2432/2433 A）——不种入
+        registry（不再拉起），只计数供比对。dispatcher 是唯一执行入口。"""
         owners_dir = getattr(getattr(self._base_agent, "home_paths", None), "owners_dir", None)
         if not owners_dir:
             return
         limit = _positive_int_config(self._base_agent, "owner_agent_pool_max_agents", default=64)
-        page = seed_registry_page_from_disk(
-            self._registry,
-            owners_dir,
-            limit=limit,
-            after_cursor=self._discovery_cursor,
-        )
+        try:
+            page = discover_wake_pending_owner_page(
+                owners_dir,
+                limit=limit,
+                after_cursor=self._discovery_cursor,
+            )
+        except Exception as exc:  # noqa: BLE001 shadow 失败不影响主循环
+            _print_gateway_loop_error("gateway_background_main.owner_shadow",
+                                      "owner-seed-shadow", exc)
+            return
         self._discovery_cursor = page.next_cursor
+        if page.hard_owners or page.soft_owners:
+            print(
+                f"[gateway-background-main] owner seed shadow (not seeded): "
+                f"hard={len(page.hard_owners)} soft={len(page.soft_owners)}",
+                flush=True,
+            )
 
     def _ensure_owner_pool(self) -> object | None:
         if self._owner_pool is not None:
@@ -1106,6 +1185,43 @@ def _record_background_main_reports(agent: SimpleAgent, reports: list[object]) -
 def _wake_rescan_interval_seconds(agent: SimpleAgent) -> float:
     value = _float_config(agent, "background_owner_wake_rescan_seconds", default=120.0)
     return max(0.0, value)
+
+
+def _wake_dispatcher_lease_seconds(agent: SimpleAgent) -> float:
+    value = _float_config(agent, "wake_dispatcher_lease_seconds", default=300.0)
+    return max(1.0, value)
+
+
+def _wake_dispatcher_instance_id(agent: SimpleAgent) -> str:
+    """dispatcher lease_owner 身份（host-pid，跨进程天然互斥）。"""
+    return f"gateway-{socket.gethostname()}-{os.getpid()}"
+
+
+def _owner_homes_iter(owners_dir: str | Path):
+    """遍历 owners/providers/<provider>/{users,groups}/<id>，产出 (OwnerIdentity, home)。
+
+    与 owner_wake_discovery._candidate_owner_homes 同构（provider/bucket/id 三级），
+    供 dispatcher 逐 owner 库查 due intent。"""
+    providers_root = Path(owners_dir) / "providers"
+    if not providers_root.is_dir():
+        return
+    for provider_dir in sorted(providers_root.iterdir()):
+        if not provider_dir.is_dir():
+            continue
+        for bucket, owner_kind in (("users", "user"), ("groups", "group")):
+            bucket_dir = provider_dir / bucket
+            if not bucket_dir.is_dir():
+                continue
+            for owner_home in sorted(bucket_dir.iterdir()):
+                if not owner_home.is_dir():
+                    continue
+                try:
+                    identity = OwnerIdentity.provider_user(provider_dir.name, owner_home.name) \
+                        if owner_kind == "user" \
+                        else OwnerIdentity.provider_group(provider_dir.name, owner_home.name)
+                except Exception:  # noqa: BLE001 单 owner 构造失败跳过
+                    continue
+                yield identity, owner_home
 
 
 def _positive_int_config(agent: SimpleAgent, key: str, *, default: int) -> int:
