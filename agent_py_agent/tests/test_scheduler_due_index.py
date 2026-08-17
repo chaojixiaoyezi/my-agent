@@ -251,3 +251,56 @@ def test_gateway_due_controller_writes_cron_intent_not_direct_registry(monkeypat
     assert due[0]["owner_id"] == "providers/feishu/users/alice"
     assert due[0]["continuation_policy"] == "async"
     assert due[0]["provider_scope_ref"] == "opencode"
+
+
+def test_concurrent_first_start_no_half_migration(tmp_path) -> None:
+    """双 Gateway 并发首启：同一索引路径两连接同时初始化 → 无半迁移。
+
+    seq2487 补测项：BEGIN IMMEDIATE 包住 check+alter 后，两个进程/线程并发
+    建表必须得到完整 schema（job_id/task_id 列齐全 + 唯一约束 + 索引在），
+    且失败不留下半迁移状态（重复列报 duplicate column 幂等视为达成）。
+    """
+    import sqlite3
+
+    from agent_py_agent.agent.scheduler.due_index import SchedulerDueIndex
+
+    path = tmp_path / "scheduler_due.sqlite3"
+    errors: list[Exception] = []
+    barrier = threading.Barrier(2)
+
+    def _boot() -> None:
+        try:
+            barrier.wait(timeout=10)
+            SchedulerDueIndex(path)  # __init__ 即 _ensure_schema
+        except Exception as exc:  # noqa: BLE001 收集并发异常供断言
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_boot) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not errors, f"并发初始化异常: {errors}"
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(scheduler_due_owners)")}
+        # 无半迁移：job_id/task_id 两列都齐全（不是只加了一列）
+        assert {"job_id", "task_id"} <= columns, f"半迁移状态，列缺失: {columns}"
+        # 唯一约束仍在（PRIMARY KEY provider/owner_kind/owner_id 由表结构保证）
+        index_names = {
+            str(row["name"]) for row in conn.execute("PRAGMA index_list(scheduler_due_owners)")
+        }
+        assert "scheduler_due_owner_ready_idx" in index_names
+        # 并发写入也不撞唯一约束（双 Gateway 各写一行）
+        with conn:
+            conn.execute(
+                "INSERT INTO scheduler_due_owners"
+                " (provider, owner_kind, owner_id, next_due_at, updated_at)"
+                " VALUES ('feishu', 'user', 'a1', 100, 1)"
+            )
+            conn.execute(
+                "INSERT INTO scheduler_due_owners"
+                " (provider, owner_kind, owner_id, next_due_at, updated_at)"
+                " VALUES ('feishu', 'user', 'a2', 100, 1)"
+            )
