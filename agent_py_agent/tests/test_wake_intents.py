@@ -92,13 +92,27 @@ def test_handoff_claimed_only_and_no_rollback(repo):
                                   claim_token="t2", now=NOW)["claimed"] is False
 
 
-def test_release_lease_requires_token_match(repo):
+def test_release_lease_requires_expired_and_token_and_generation(repo):
+    """群复核门禁（seq2431/2433）：lease_until<=now + token + generation 三条件。"""
     _intent(repo)
     repo.claim_wake_intent("intent-1", lease_owner="gw", lease_seconds=300,
                            claim_token="t1", now=NOW)
+    # 租约未过期（lease_until = NOW+300 > now）→ 拒绝释放
+    assert repo.release_wake_intent_lease(
+        "intent-1", claim_token="t1", expected_generation=1, now=NOW
+    )["released"] is False
     # token 不匹配 → 拒绝
-    assert repo.release_wake_intent_lease("intent-1", claim_token="wrong", now=NOW)["released"] is False
-    r = repo.release_wake_intent_lease("intent-1", claim_token="t1", now=NOW)
+    assert repo.release_wake_intent_lease(
+        "intent-1", claim_token="wrong", expected_generation=1, now=NOW + 301
+    )["released"] is False
+    # generation 不匹配 → 拒绝
+    assert repo.release_wake_intent_lease(
+        "intent-1", claim_token="t1", expected_generation=9, now=NOW + 301
+    )["released"] is False
+    # 三条件齐（租约过期 + token + generation）→ 释放成功
+    r = repo.release_wake_intent_lease(
+        "intent-1", claim_token="t1", expected_generation=1, now=NOW + 301
+    )
     assert r["released"] is True
     row = repo.get_wake_intent("intent-1")
     assert row["status"] == "pending"
@@ -110,7 +124,16 @@ def test_mark_lease_expired_keeps_claimed(repo):
     _intent(repo)
     repo.claim_wake_intent("intent-1", lease_owner="gw", lease_seconds=300,
                            claim_token="t", now=NOW)
-    r = repo.mark_wake_intent_lease_expired("intent-1", error_ref="unknown_effect", now=NOW)
+    # 租约未过期 → 拒绝标记
+    assert repo.mark_wake_intent_lease_expired(
+        "intent-1", error_ref="unknown_effect", claim_token="t",
+        expected_generation=1, now=NOW
+    )["marked"] is False
+    # 租约过期 + token + generation → 标记成功，保持 claimed
+    r = repo.mark_wake_intent_lease_expired(
+        "intent-1", error_ref="unknown_effect", claim_token="t",
+        expected_generation=1, now=NOW + 301
+    )
     assert r["marked"] is True
     row = repo.get_wake_intent("intent-1")
     assert row["status"] == "claimed"  # 保持 claimed，不隐式重放

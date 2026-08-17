@@ -1762,11 +1762,18 @@ class RuntimeRepository(
         return {"handed_off": True, "intent_id": intent_id}
 
     def release_wake_intent_lease(
-        self, intent_id: str, *, claim_token: str, now: float | None = None
+        self,
+        intent_id: str,
+        *,
+        claim_token: str,
+        expected_generation: int,
+        now: float | None = None,
     ) -> dict[str, object]:
-        """lease 过期且已确认无已知副作用 → claimed 退回 pending（可重认领）。
+        """lease 已过期（lease_until<=now）且已确认无已知副作用 → claimed 退回 pending。
 
-        必须先确认无已知副作用（调用方裁决）；未知副作用走
+        群复核门禁（seq2431/2433）：原子条件必须含 lease_until<=now 与
+        claim_generation 匹配——租约未过期或代际不匹配一律拒绝（防活跃 lease
+        被误释放 / 旧代际凭旧 token 操作）。未知副作用走
         mark_wake_intent_lease_expired（保持 claimed，不隐式重放）。
         """
         now = time.time() if now is None else now
@@ -1775,30 +1782,39 @@ class RuntimeRepository(
                 "UPDATE wake_intents SET status = 'pending',"
                 " claim_generation = claim_generation + 1,"
                 " claim_token = '', lease_owner = '', lease_until = 0, updated_at = ?"
-                " WHERE intent_id = ? AND status = 'claimed' AND claim_token = ?",
-                (now, intent_id, claim_token),
+                " WHERE intent_id = ? AND status = 'claimed' AND claim_token = ?"
+                " AND lease_until <= ? AND claim_generation = ?",
+                (now, intent_id, claim_token, now, int(expected_generation)),
             )
             if cur.rowcount == 0:
-                return {"released": False, "reason": "not_claimed_or_token_mismatch"}
+                return {"released": False, "reason": "not_expired_or_token_or_generation_mismatch"}
         return {"released": True, "intent_id": intent_id}
 
     def mark_wake_intent_lease_expired(
-        self, intent_id: str, *, error_ref: str, now: float | None = None
+        self,
+        intent_id: str,
+        *,
+        error_ref: str,
+        claim_token: str,
+        expected_generation: int,
+        now: float | None = None,
     ) -> dict[str, object]:
-        """lease 过期且副作用未知 → 保持 claimed + 标 last_error_ref。
+        """lease 已过期（lease_until<=now）且副作用未知 → 保持 claimed + 标 last_error_ref。
 
-        intent 不迁移（reconciliation_required 是 task/attempt ledger 派生状态），
-        等待显式恢复流程接管（重认领 CAS 或 cancelled/expired）。
+        原子条件同 release（lease_until<=now + token + generation），防止租约
+        未过期/旧代际误标。intent 不迁移（reconciliation_required 是
+        task/attempt ledger 派生状态），等待显式恢复流程接管。
         """
         now = time.time() if now is None else now
         with self.transaction() as conn:
             cur = conn.execute(
                 "UPDATE wake_intents SET last_error_ref = ?, updated_at = ?"
-                " WHERE intent_id = ? AND status = 'claimed'",
-                (error_ref, now, intent_id),
+                " WHERE intent_id = ? AND status = 'claimed' AND claim_token = ?"
+                " AND lease_until <= ? AND claim_generation = ?",
+                (error_ref, now, intent_id, claim_token, now, int(expected_generation)),
             )
             if cur.rowcount == 0:
-                return {"marked": False, "reason": "not_claimed"}
+                return {"marked": False, "reason": "not_expired_or_token_or_generation_mismatch"}
         return {"marked": True, "intent_id": intent_id}
 
     def cancel_wake_intent(
