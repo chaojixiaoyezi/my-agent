@@ -5,8 +5,8 @@
  */
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
-import TextInput from "ink-text-input";
 import { COMMANDS } from "./commands.js";
+import { MultiLineInput } from "./components/multilineInput.js";
 import { TuiHttpClient } from "./protocol/client.js";
 import type { ClientError, ResultResponse } from "./protocol/types.js";
 import { MessageList, StatusBar } from "./components/ui.js";
@@ -226,7 +226,7 @@ export function App({ client, sessionId, model, history }: AppProps) {
       </Box>
       <Box>
         <Text color={theme.colors.prompt}>❯ </Text>
-        <TextInput value={input} onChange={setInput} onSubmit={onSubmit} />
+        <MultiLineInput value={input} onChange={setInput} onSubmit={onSubmit} theme={theme} />
       </Box>
       <StatusBar
         phase={state.phase}
