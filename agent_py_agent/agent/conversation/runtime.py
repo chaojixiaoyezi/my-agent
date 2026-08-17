@@ -3875,12 +3875,16 @@ class _BackgroundSchedulerTickMixin:
             from ..owner_wake_discovery import unfinished_task_ids
 
             unfinished = set(unfinished_task_ids(Path(owner_home)))
+            # EXEC-39(owner 拍板): 普通任务不自动续跑——字条只给有 active goal
+            # 授权的任务补(goal 任务自动续跑合法, 与 _auto_resume_authorized
+            # 同源); 普通任务只在模型自己 sleep 时短期待机, 不靠对账自动唤醒。
             for task_id in unfinished:
-                repo.upsert_wake(
-                    root_task_id=task_id,
-                    next_due_at=now + _TASK_RESUME_COOLDOWN_SECONDS,
-                    kind="task_resume",
-                )
+                if self._task_has_active_goal(task_id):
+                    repo.upsert_wake(
+                        root_task_id=task_id,
+                        next_due_at=now + _TASK_RESUME_COOLDOWN_SECONDS,
+                        kind="goal_tick",
+                    )
             pending = repo.list_pending_wakes(limit=1000)
             for row in pending:
                 tid = str(row.get("root_task_id") or "")
@@ -3888,6 +3892,19 @@ class _BackgroundSchedulerTickMixin:
                     repo.cancel_wakes_for_task(tid)  # 已终结 → 清字条(僵尸不累积)
         except Exception:
             _HEARTBEAT_LOGGER.warning("wake queue reconcile failed", exc_info=True)
+
+    def _task_has_active_goal(self, task_id: str) -> bool:
+        """EXEC-39 同源: 任务是否持有 active goal(自动续跑授权)。"""
+        try:
+            thread = self.store.thread_for_task(task_id)
+            if thread is None:
+                return False
+            goal = self.store.load_goal(thread.thread_id, task_id=task_id)
+            return goal is not None and str(
+                getattr(goal, "status", "") or ""
+            ).strip().lower() == "active"
+        except Exception:  # noqa: BLE001 读不到=fail-closed 不自动补字条
+            return False
 
     def _enqueue_scheduler_runs(self, *, now: float) -> None:
         if self.scheduler_service is None:
