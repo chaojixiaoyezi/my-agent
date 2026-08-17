@@ -121,6 +121,21 @@ export class TuiHttpClient {
     return { done: data };
   }
 
+  /** GET /history?session=<id> → 只读会话历史（TUI 重启接续，2026-08-17） */
+  async history(sessionId: string, limit = 50): Promise<{ role: "user" | "assistant"; text: string }[]> {
+    const res = await this.request(
+      `/history?session=${encodeURIComponent(sessionId)}&limit=${limit}`,
+      { method: "GET" },
+    );
+    if (res.status !== 200) {
+      throw await this.errorFrom(res);
+    }
+    const data = (await res.json()) as { messages?: { role?: string; text?: string }[] };
+    return (data.messages ?? [])
+      .filter((m) => m.role === "user" || m.role === "assistant")
+      .map((m) => ({ role: m.role as "user" | "assistant", text: m.text ?? "" }));
+  }
+
   /** POST /control（会话控制，带 conversation scope） */
   async control(command: ControlCommand, conversation: ControlRequest["conversation"], text?: string): Promise<unknown> {
     const body: ControlRequest = { command, conversation };

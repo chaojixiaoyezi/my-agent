@@ -27,11 +27,13 @@ export interface AppProps {
   history?: { role: "user" | "assistant"; text: string }[];
 }
 
-export function App({ client, sessionId, model, history: _history }: AppProps) {
+export function App({ client, sessionId, model, history }: AppProps) {
   const { exit } = useApp();
-  const [state, dispatch] = React.useReducer(sessionReducer, undefined, () =>
-    createInitialSession(),
-  );
+  const [state, dispatch] = React.useReducer(sessionReducer, undefined, () => ({
+    ...createInitialSession(),
+    // 历史恢复（完整版③）：启动时注入 /history 拉取的会话历史（重启接续）
+    messages: (history ?? []).map((h) => ({ role: h.role, text: h.text })),
+  }));
   const [input, setInput] = useState("");
   const [themeName, setThemeName] = useState<"dark" | "light">("dark");
   const [ctxTokens, setCtxTokens] = useState(0);
@@ -39,7 +41,6 @@ export function App({ client, sessionId, model, history: _history }: AppProps) {
   const busyRef = useRef(false);
   const stateRef = useRef<SessionState>(state);
   stateRef.current = state;
-  // P1 不做历史恢复（群复核：HTTP 无 history 端点，P4 接 /history API 或明确降级）
 
   /** 一轮完整提交：ask（幂等）→ pollUntilDone（progress + result 收口） */
   const runTurn = useCallback(

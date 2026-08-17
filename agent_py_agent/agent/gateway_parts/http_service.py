@@ -22,6 +22,7 @@ from .http_handlers import (
     handle_admin_summary,
     handle_ask,
     handle_control,
+    handle_history,
     handle_progress,
     handle_result,
     handle_session_bind,
@@ -112,6 +113,10 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
             # `/progress` 只读 typed event，并在 handler 内复用 `/result` 的 owner 权限事实。
             self._handle_progress()
             return
+        if self.path.startswith("/history"):
+            # `/history` 只读 owner-scoped 会话历史（TUI 重启接续，2026-08-17）
+            self._handle_history()
+            return
         if self.path.startswith("/sessions/") and self.path.endswith("/channels"):
             self._handle_session_channels()
             return
@@ -165,6 +170,9 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
 
     def _handle_result(self) -> None:
         handle_result(self, _server_instance)
+
+    def _handle_history(self) -> None:
+        handle_history(self, _server_instance)
 
     def _handle_progress(self) -> None:
         handle_progress(self, _server_instance)

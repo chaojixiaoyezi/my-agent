@@ -631,6 +631,78 @@ def _first_conversation_id(payload: dict) -> str:
     return ""
 
 
+def handle_history(handler, server) -> None:
+    """GET /history?session=<id>&limit=N → 只读 owner-scoped 会话历史。
+
+    2026-08-17 TUI 重启接续：从 requests/done 投影 {prompt, response} 对，
+    按 conversation.channel_conversation_id 过滤（owner 鉴权同 /result）。
+    返回 [{role, text}] 时间正序（最新 N 条，默认 50）。"""
+    from urllib.parse import parse_qs, urlsplit
+
+    if server is None:
+        handler._send_json(500, {"error": "server not initialized"})
+        return
+    parsed = urlsplit(handler.path)
+    query = parse_qs(parsed.query)
+    session_id = (query.get("session") or [""])[0].strip()
+    try:
+        limit = max(1, min(200, int((query.get("limit") or ["50"])[0])))
+    except (TypeError, ValueError):
+        limit = 50
+    if not session_id or "/" in session_id or "\\" in session_id:
+        handler._send_json(400, {"error": "invalid session id"})
+        return
+    # owner 鉴权：沿 /result 同一事实（loopback 免鉴权，否则要求 owner 匹配）
+    user_id, permission = _request_identity(handler)
+    access = _ResultAccessContext(session_id, user_id, permission)
+    if not _can_read_owner_history(handler, server, access):
+        handler._send_json(403, {"error": "forbidden"})
+        return
+    done_dir = server.paths.requests / "done"
+    if not done_dir.is_dir():
+        handler._send_json(200, {"session": session_id, "messages": []})
+        return
+    messages: list[dict[str, str]] = []
+    try:
+        request_files = sorted(done_dir.glob("*.json"), key=lambda p: p.stat().st_mtime)
+    except OSError:
+        request_files = []
+    for path in request_files:
+        try:
+            req = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            continue
+        conv = req.get("conversation") or {}
+        if str(conv.get("channel_conversation_id") or "") != session_id:
+            continue
+        prompt = str(req.get("prompt") or "").strip()
+        if not prompt:
+            continue
+        messages.append({"role": "user", "text": prompt})
+        # 对应 response 文件（最终回答权威）
+        response_path = server.paths.responses / f"{path.stem}.json"
+        try:
+            resp = json.loads(response_path.read_text(encoding="utf-8"))
+            response_text = str(resp.get("response") or "").strip()
+        except (OSError, UnicodeError, ValueError):
+            response_text = ""
+        if response_text:
+            messages.append({"role": "assistant", "text": response_text})
+        if len(messages) >= limit * 2:
+            break
+    handler._send_json(200, {"session": session_id, "messages": messages[-limit * 2 :]})
+
+
+def _can_read_owner_history(handler, server, access) -> bool:
+    """history 沿 /result 同一 owner 事实（loopback 免鉴权）。"""
+    from .http_handlers import _can_read_finished_request as _base
+
+    try:
+        return _base(server.paths, access)
+    except Exception:  # noqa: BLE001 鉴权失败保守拒绝
+        return False
+
+
 def handle_stop(handler, server) -> None:
     if require_admin_handler(handler):
         return  # 停网关需管理员:已发 403(鉴权未接线时返回 False,回环本机请求放行)

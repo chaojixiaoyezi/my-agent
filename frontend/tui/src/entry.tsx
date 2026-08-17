@@ -23,10 +23,19 @@ function parseArgs(argv: string[]): { baseUrl: string; sessionId: string; model:
   };
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const { baseUrl, sessionId, model } = parseArgs(process.argv.slice(2));
   const client = new TuiHttpClient({ baseUrl });
-  render(<App client={client} sessionId={sessionId} model={model} />);
+  // 历史恢复（完整版③）：启动时拉取本会话历史注入（TUI 重启接续）
+  let history: { role: "user" | "assistant"; text: string }[] = [];
+  try {
+    history = await client.history(sessionId);
+  } catch {
+    history = []; // 历史不可用不阻塞启动
+  }
+  render(<App client={client} sessionId={sessionId} model={model} history={history} />);
 }
+
+void main();
 
 main();
