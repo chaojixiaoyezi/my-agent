@@ -61,6 +61,16 @@ def without_tool_call_after_limit(
                 "不要总结或宣告完成。"
             ),
         )
+    if reason == "unknown_outcome":
+        return replace(
+            response,
+            text=(
+                "上一次工具执行结果未知（TOOL_OPERATION_OUTCOME_UNKNOWN），"
+                "系统已停止新的工具调用（未知副作用单次即收口，防不确定副作用继续）。"
+                "模型在收口阶段仍输出工具调用请求，后续工具请求不会被执行；"
+                "请只基于已有工具结果如实说明已完成与未完成的工作，等待用户指示。"
+            ),
+        )
     return replace(
         response,
         text=(
