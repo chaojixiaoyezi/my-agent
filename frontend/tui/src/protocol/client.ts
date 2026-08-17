@@ -27,14 +27,22 @@ export interface TuiClientOptions {
   pollIntervalMs?: number;
   /** 单次轮询超时（ms） */
   pollTimeoutMs?: number;
-  /** 轮询重试次数（网络抖动退避上限） */
-  maxPollRetries?: number;
+  /** 断线重连窗口（ms）：网络类错误在此窗口内持续退避重试，超窗才报错 */
+  reconnectWindowMs?: number;
   fetchImpl?: typeof fetch;
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 300;
 const DEFAULT_POLL_TIMEOUT_MS = 30000;
-const DEFAULT_MAX_POLL_RETRIES = 5;
+const DEFAULT_RECONNECT_WINDOW_MS = 120000;
+
+/** 断线类错误判定：fetch 连接失败（network）或网关 5xx（重启窗口常见） */
+function isRetryableNetworkError(err: unknown): boolean {
+  if (!err || typeof err !== "object" || !("kind" in err)) return false;
+  const e = err as ClientError;
+  if (e.kind === "network") return true;
+  return e.kind === "http" && e.status !== undefined && e.status >= 500;
+}
 
 function clientError(err: unknown, kind: ClientError["kind"], status?: number): ClientError {
   if (err && typeof err === "object" && "kind" in err) {
@@ -52,7 +60,7 @@ export class TuiHttpClient {
     this.options = {
       pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
       pollTimeoutMs: DEFAULT_POLL_TIMEOUT_MS,
-      maxPollRetries: DEFAULT_MAX_POLL_RETRIES,
+      reconnectWindowMs: DEFAULT_RECONNECT_WINDOW_MS,
       fetchImpl: globalThis.fetch,
       ...options,
     };
@@ -181,16 +189,24 @@ export class TuiHttpClient {
    * 轮询状态机：progress cursor 推进 → result 收口。
    * 返回：{ events: 本次新增事件, final: 终态结果, requestId }
    * 完成判定唯一权威 = /result 终态（progress 轮空不判完成）。
+   *
+   * 未完成项③ 断线重连：网络类错误（连接拒绝/5xx 网关重启窗口）在
+   * reconnectWindowMs 内持续退避重试（interval 起、2 倍递增、30s 封顶），
+   * 网关重启后自动续上且不丢游标；超窗才抛 network 错误（带可操作提示）。
+   * 协议/4xx 错误非断线问题，立即抛。
    */
   async pollUntilDone(
     requestId: string,
     onEvents?: (events: ProgressEvent[], cursor: number) => void,
-    signal?: AbortSignal,
+    options?: { signal?: AbortSignal; onNetworkRetry?: (attempt: number) => void },
   ): Promise<{ final: ResultResponse; events: ProgressEvent[]; requestId: string }> {
+    const signal = options?.signal;
+    const onNetworkRetry = options?.onNetworkRetry;
     let cursor = 0;
-    let retries = 0;
+    let networkAttempts = 0;
     const collected: ProgressEvent[] = [];
-    const deadline = Date.now() + this.options.pollTimeoutMs;
+    const startedAt = Date.now();
+    const deadline = startedAt + this.options.pollTimeoutMs;
     for (;;) {
       if (signal?.aborted) {
         throw { kind: "timeout", message: "poll aborted" } satisfies ClientError;
@@ -207,14 +223,20 @@ export class TuiHttpClient {
             onEvents?.(prog.events, cursor);
           }
         }
-        retries = 0;
       } catch (err) {
-        retries += 1;
-        if (retries > this.options.maxPollRetries) {
-          throw clientError(err, "network");
+        if (!isRetryableNetworkError(err)) {
+          throw err; // 协议/4xx：非断线问题立即抛
         }
-        // 退避后重试（网络抖动），不丢游标
-        await sleep(Math.min(1000, this.options.pollIntervalMs * retries));
+        networkAttempts += 1;
+        onNetworkRetry?.(networkAttempts);
+        if (Date.now() - startedAt >= this.options.reconnectWindowMs) {
+          throw {
+            kind: "network",
+            message: `网关连接中断超过 ${Math.round(this.options.reconnectWindowMs / 1000)}s，请确认网关已启动后重试（/stop 可中断等待）`,
+          } satisfies ClientError;
+        }
+        // 退避：interval 起 2 倍递增 30s 封顶（网关重启通常 10-30s 内恢复）
+        await sleep(Math.min(30000, this.options.pollIntervalMs * 2 ** Math.min(networkAttempts, 5)));
         continue;
       }
       // 2) 以 /result 判终态（权威）

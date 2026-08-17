@@ -148,7 +148,7 @@ describe("TuiHttpClient contract", () => {
     expect(progressCalls).toBeGreaterThan(0);
   });
 
-  it("pollUntilDone: 网络抖动退避重试后恢复（不丢游标）", async () => {
+  it("pollUntilDone: 断线抖动退避重试后恢复（不丢游标）", async () => {
     const real = JSON.parse(fixture("result-complete.json")) as ResultResponse;
     let fails = 0;
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
@@ -163,7 +163,7 @@ describe("TuiHttpClient contract", () => {
     const client = new TuiHttpClient({
       baseUrl: "http://127.0.0.1:8420",
       pollIntervalMs: 1,
-      maxPollRetries: 5,
+      reconnectWindowMs: 5000,
       fetchImpl: fetchMock as typeof fetch,
     });
     const result = await client.pollUntilDone("req-x");
@@ -171,17 +171,77 @@ describe("TuiHttpClient contract", () => {
     expect(fails).toBe(2);
   });
 
-  it("pollUntilDone: 连续失败超过重试上限 → 结构化 network 错误", async () => {
+  it("pollUntilDone: 网关 5xx（重启窗口）退避重试后恢复", async () => {
+    const real = JSON.parse(fixture("result-complete.json")) as ResultResponse;
+    let fails = 0;
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes("/progress/") && fails < 3) {
+        fails += 1;
+        return jsonResponse({ error: "server restarting" }, 503);
+      }
+      if (url.includes("/result/")) return jsonResponse(real);
+      return jsonResponse({ request_id: "req-x", events: [], next: 0 });
+    });
+    const client = new TuiHttpClient({
+      baseUrl: "http://127.0.0.1:8420",
+      pollIntervalMs: 1,
+      reconnectWindowMs: 5000,
+      fetchImpl: fetchMock as typeof fetch,
+    });
+    const result = await client.pollUntilDone("req-x");
+    expect(result.final).toBeDefined();
+    expect(fails).toBe(3);
+  });
+
+  it("pollUntilDone: 4xx 协议错误不重试立即抛", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ error: "bad" }, 400));
+    const client = new TuiHttpClient({
+      baseUrl: "http://127.0.0.1:8420",
+      pollIntervalMs: 1,
+      reconnectWindowMs: 5000,
+      fetchImpl: fetchMock as typeof fetch,
+    });
+    await expect(client.pollUntilDone("req-x")).rejects.toMatchObject({ kind: "http", status: 400 });
+  });
+
+  it("pollUntilDone: 断线超窗口 → 结构化 network 错误（带可操作提示）", async () => {
     const fetchMock = vi.fn(async () => {
       throw new TypeError("fetch failed");
     });
     const client = new TuiHttpClient({
       baseUrl: "http://127.0.0.1:8420",
       pollIntervalMs: 1,
-      maxPollRetries: 2,
+      reconnectWindowMs: 30,
       fetchImpl: fetchMock as typeof fetch,
     });
     await expect(client.pollUntilDone("req-x")).rejects.toMatchObject({ kind: "network" });
+    await expect(client.pollUntilDone("req-x")).rejects.toMatchObject({
+      message: expect.stringContaining("网关连接中断"),
+    });
+  });
+
+  it("pollUntilDone: onNetworkRetry 回调报告重连次数", async () => {
+    const real = JSON.parse(fixture("result-complete.json")) as ResultResponse;
+    let fails = 0;
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes("/progress/") && fails < 2) {
+        fails += 1;
+        throw new TypeError("fetch failed");
+      }
+      if (url.includes("/result/")) return jsonResponse(real);
+      return jsonResponse({ request_id: "req-x", events: [], next: 0 });
+    });
+    const client = new TuiHttpClient({
+      baseUrl: "http://127.0.0.1:8420",
+      pollIntervalMs: 1,
+      reconnectWindowMs: 5000,
+      fetchImpl: fetchMock as typeof fetch,
+    });
+    const attempts: number[] = [];
+    await client.pollUntilDone("req-x", undefined, { onNetworkRetry: (n) => attempts.push(n) });
+    expect(attempts).toEqual([1, 2]);
   });
 
   it("control: POST /control 带 conversation scope", async () => {

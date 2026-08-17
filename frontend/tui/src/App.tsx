@@ -3,7 +3,7 @@
  * 流程：输入 → ask（幂等键防重复）→ progress 轮询（观察流）→ result 收口。
  * 排队：polling 中再提交 → queuedPrompt，当前轮 done 后自动再提交。
  */
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { COMMANDS } from "./commands.js";
 import { MultiLineInput } from "./components/multilineInput.js";
@@ -12,6 +12,7 @@ import type { ClientError, ResultResponse } from "./protocol/types.js";
 import { MessageList, StatusBar } from "./components/ui.js";
 import { themeByName } from "./theme.js";
 import { commandByName, helpText, parseCommand } from "./commands.js";
+import { flattenMessages, viewportSlice } from "./rowModel.js";
 import {
   buildAskRequest,
   createInitialSession,
@@ -37,7 +38,10 @@ export function App({ client, sessionId, model, history }: AppProps) {
   const [input, setInput] = useState("");
   const [themeName, setThemeName] = useState<"dark" | "light">("dark");
   const [ctxTokens, setCtxTokens] = useState(0);
-  const theme = themeByName(themeName);
+  // 未完成项③ 断线重连：网关中断时状态条提示重连中
+  const [reconnecting, setReconnecting] = useState(false);
+  // 主题对象稳定引用（行组件 memo 依赖 theme 引用相等）
+  const theme = useMemo(() => themeByName(themeName), [themeName]);
   const busyRef = useRef(false);
   const stateRef = useRef<SessionState>(state);
   stateRef.current = state;
@@ -70,7 +74,10 @@ export function App({ client, sessionId, model, history }: AppProps) {
           (events) => {
             dispatch({ type: "progress", events });
           },
-          controller.signal,
+          {
+            signal: controller.signal,
+            onNetworkRetry: (attempt) => setReconnecting(attempt > 0),
+          },
         );
         // ctx 实时：从 result 的结构化 token 估计取（有则显示真实值）
         const final = outcome.final as ResultResponse;
@@ -91,6 +98,7 @@ export function App({ client, sessionId, model, history }: AppProps) {
         }
       } finally {
         busyRef.current = false;
+        setReconnecting(false); // 断线重连状态复位（成功/失败/中断都复位）
         // 排队消费：polling 期间提交的消息在 done 后自动再跑（consume 防重复）
         const queued = stateRef.current.queuedPrompt;
         if (queued) {
@@ -224,9 +232,14 @@ export function App({ client, sessionId, model, history }: AppProps) {
   // 始终显示最近的消息（窗口滚动语义）
   const { stdout } = useStdout();
   const rows = stdout.rows ?? 24;
+  const columns = stdout.columns ?? 80;
   const fixedRows = 6; // 标题1 + 输入1 + 状态1 + 提示1 + 边距2
   const msgHeight = Math.max(5, rows - fixedRows);
-  const visibleMessages = messages.slice(-msgHeight);
+  // 未完成项① 虚拟滚动：行展开缓存（messages/宽度不变不重算）+ 贴底视口切片。
+  // 长对话只渲染视口内的行；行组件 memo 化后增量渲染只动变化行。
+  const contentWidth = Math.max(20, columns - 2); // paddingX=1 两侧
+  const flatRows = useMemo(() => flattenMessages(messages, contentWidth), [messages, contentWidth]);
+  const visibleRows = useMemo(() => viewportSlice(flatRows, msgHeight), [flatRows, msgHeight]);
 
   return (
     <Box flexDirection="column" paddingX={1}>
@@ -237,7 +250,7 @@ export function App({ client, sessionId, model, history }: AppProps) {
         <Text color={theme.colors.dim}> (gateway client)</Text>
       </Box>
       <Box flexDirection="column" marginBottom={1}>
-        <MessageList messages={visibleMessages} theme={theme} />
+        <MessageList rows={visibleRows} theme={theme} />
       </Box>
       <Box>
         <Text color={theme.colors.prompt}>❯ </Text>
@@ -250,6 +263,7 @@ export function App({ client, sessionId, model, history }: AppProps) {
         ctxTokens={ctxTokens}
         error={state.error}
         queued={state.queuedPrompt}
+        reconnecting={reconnecting}
         theme={theme}
       />
       <Text color={theme.colors.dim}>输入消息回车发送 · Esc 退出</Text>

@@ -2,11 +2,12 @@
  * 渲染组件（完整版）：消息列表（markdown 渲染）/ 工具观察行（单行合并）/
  * 状态条。主题化：全部颜色来自 theme（/theme dark|light 真换肤）。
  */
-import React from "react";
+import React, { memo } from "react";
 import { Box, Text } from "ink";
-import type { ChatMessage, ToolLine } from "../state/session.js";
 import type { Theme } from "../theme.js";
-import { markdownToLines, type InlineSegment } from "../markdown.js";
+import type { InlineSegment } from "../markdown.js";
+import type { FlattenedRow, RenderRow } from "../rowModel.js";
+import { truncateByWidth } from "../width.js";
 
 /** 过滤终端控制序列（群复核 P1：工具输出/回复不得注入终端） */
 const ANSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*(\x07|\x1b\\)/g;
@@ -48,123 +49,87 @@ function InlineText({ segments, theme }: { segments: InlineSegment[]; theme: The
   );
 }
 
-/** 工具行渲染（紧凑单行） */
-function ToolLineRow({ line, theme }: { line: ToolLine; theme: Theme }) {
-  const c = theme.colors;
-  const rawDetail = stripAnsi(line.detail);
-  const detail = rawDetail.length > 80 ? `${rawDetail.slice(0, 80)}…` : rawDetail;
-  const toolLabel = line.tool ? ` ${line.tool}` : "";
-  const statusLabel = line.status ? ` ${line.status}` : "";
-  const detailLabel = detail ? `: ${detail}` : "";
-  return (
-    <Text color={toolStatusColor(theme, line.status)}>
-      [工具] round={line.round ?? 0}#{line.callIndex ?? 1}
-      {toolLabel}
-      {statusLabel}
-      <Text color={c.toolDetail}>{detailLabel}</Text>
-    </Text>
-  );
-}
+/** 工具行渲染（紧凑单行，detail 按显示宽度截 80） */
+const ToolLineRow = memo(function ToolLineRow({ text, theme }: { text: string; theme: Theme }) {
+  return <Text color={toolStatusColor(theme, text)}>{text}</Text>;
+});
 
-/** markdown 块渲染（heading/code/text/list/quote/hr） */
-function MarkdownBody({ text, theme }: { text: string; theme: Theme }) {
+/**
+ * 扁平渲染行（未完成项① 虚拟滚动：行模型渲染）。
+ * 行组件 memo 化——长对话增量渲染只处理视口内变化行。
+ */
+export const RenderRowLine = memo(function RenderRowLine({
+  row,
+  msgEnd,
+  theme,
+}: {
+  row: RenderRow;
+  msgEnd: boolean;
+  theme: Theme;
+}) {
   const c = theme.colors;
-  const blocks = markdownToLines(text);
-  return (
-    <Box flexDirection="column">
-      {blocks.map((block, i) => {
-        switch (block.kind) {
-          case "heading":
-            return (
-              <Text key={i} color={c.heading} bold>
-                {"#".repeat(block.level ?? 1)} {block.text}
-              </Text>
-            );
-          case "code":
-            return (
-              <Box key={i} flexDirection="column" borderStyle="round" borderColor={c.border} paddingX={1}>
-                {block.text.split("\n").map((line, j) => (
-                  <Text key={j} color={c.code}>
-                    {line}
-                  </Text>
-                ))}
-              </Box>
-            );
-          case "list":
-            return (
-              <Text key={i} wrap="wrap">
-                <Text color={c.toolStart}>• </Text>
-                <InlineText segments={block.segments ?? [{ text: block.text }]} theme={theme} />
-              </Text>
-            );
-          case "quote":
-            return (
-              <Text key={i} wrap="wrap" color={c.status}>
-                <Text color={c.border}>│ </Text>
-                <InlineText segments={block.segments ?? [{ text: block.text }]} theme={theme} />
-              </Text>
-            );
-          case "hr":
-            return (
-              <Text key={i} color={c.border}>
-                ───────────────────────────────
-              </Text>
-            );
-          case "empty":
-            return <Text key={i}> </Text>;
-          default:
-            return (
-              <Text key={i} wrap="wrap" color={c.assistant}>
-                <InlineText segments={block.segments ?? [{ text: block.text }]} theme={theme} />
-              </Text>
-            );
-        }
-      })}
-    </Box>
-  );
-}
-
-export function MessageRow({ msg, theme }: { msg: ChatMessage; theme: Theme }) {
-  const c = theme.colors;
-  if (msg.role === "user") {
-    return (
-      <Box flexDirection="column" marginBottom={1}>
-        <Text color={c.user} bold>
-          ● {msg.text}
+  let content: React.ReactNode;
+  switch (row.kind) {
+    case "user":
+      content = (
+        <Text bold color={c.user}>
+          {row.text}
         </Text>
-      </Box>
-    );
+      );
+      break;
+    case "tool":
+      content = <Text color={toolStatusColor(theme, row.text)}>{row.text}</Text>;
+      break;
+    case "commentary":
+      content = <Text color={c.status}>{row.text}</Text>;
+      break;
+    case "heading":
+      content = (
+        <Text bold color={c.heading}>
+          {row.text}
+        </Text>
+      );
+      break;
+    case "code":
+      content = <Text color={c.code}>{row.text}</Text>;
+      break;
+    case "list":
+      content = (
+        <Text>
+          <Text color={c.toolStart}>{row.text.slice(0, 2)}</Text>
+          <InlineText segments={row.segments ?? [{ text: row.text.slice(2) }]} theme={theme} />
+        </Text>
+      );
+      break;
+    case "quote":
+      content = (
+        <Text color={c.status}>
+          <Text color={c.border}>{row.text.slice(0, 2)}</Text>
+          <InlineText segments={row.segments ?? [{ text: row.text.slice(2) }]} theme={theme} />
+        </Text>
+      );
+      break;
+    case "hr":
+      content = <Text color={c.border}>{row.text}</Text>;
+      break;
+    case "empty":
+      content = <Text> </Text>;
+      break;
+    default:
+      content = (
+        <Text color={c.assistant}>
+          <InlineText segments={row.segments ?? [{ text: row.text }]} theme={theme} />
+        </Text>
+      );
   }
-  const toolLines = msg.toolLines ?? [];
-  return (
-    <Box flexDirection="column" marginBottom={1}>
-      {toolLines.length > 0 && (
-        <Box flexDirection="column">
-          {toolLines.map((line, i) =>
-            typeof line === "string" ? (
-              <Text key={i} color={c.status}>
-                {line}
-              </Text>
-            ) : (
-              <ToolLineRow key={line.key} line={line} theme={theme} />
-            ),
-          )}
-        </Box>
-      )}
-      {msg.text ? (
-        <MarkdownBody text={msg.text} theme={theme} />
-      ) : (
-        <Text color={c.dim}>…</Text>
-      )}
-    </Box>
-  );
-}
+  return <Box marginBottom={msgEnd ? 1 : 0}>{content}</Box>;
+});
 
-export function MessageList({ messages, theme }: { messages: ChatMessage[]; theme: Theme }) {
+export function MessageList({ rows, theme }: { rows: FlattenedRow[]; theme: Theme }) {
   return (
     <Box flexDirection="column">
-      {messages.map((msg, i) => (
-        <MessageRow key={i} msg={msg} theme={theme} />
+      {rows.map((entry, i) => (
+        <RenderRowLine key={i} row={entry.row} msgEnd={entry.msgEnd} theme={theme} />
       ))}
     </Box>
   );
@@ -177,10 +142,12 @@ export interface StatusBarProps {
   ctxTokens: number;
   error: string;
   queued: string | null;
+  /** 未完成项③：网关断线重连中（轮询退避窗口内） */
+  reconnecting?: boolean;
   theme: Theme;
 }
 
-export function StatusBar({ phase, model, ctxPercent, ctxTokens, error, queued, theme }: StatusBarProps) {
+export function StatusBar({ phase, model, ctxPercent, ctxTokens, error, queued, reconnecting, theme }: StatusBarProps) {
   const c = theme.colors;
   const busy = phase === "polling" || phase === "submitting";
   const phaseText = busy ? "处理中…" : phase === "done" ? "完成" : phase === "error" ? "错误" : "就绪";
@@ -188,10 +155,11 @@ export function StatusBar({ phase, model, ctxPercent, ctxTokens, error, queued, 
   return (
     <Box flexDirection="column">
       <Text color={c.status}>
-        {busy ? <Text color={c.toolStart}>✷ {phaseText}</Text> : <Text>{phaseText}</Text>} | model {model} | ctx{" "}
+        {busy ? <Text color={c.toolStart}>✷ {phaseText}</Text> : <Text>{phaseText}</Text>}
+        {reconnecting ? <Text color={c.toolFail}> ⚠ 网关重连中…</Text> : null} | model {model} | ctx{" "}
         {Math.round(ctxTokens / 1000)}K/200K | [{bar}]
       </Text>
-      {queued ? <Text color={c.dim}>（排队：{queued.slice(0, 24)}…）</Text> : null}
+      {queued ? <Text color={c.dim}>（排队：{truncateByWidth(queued, 24).text}）</Text> : null}
       {error ? <Text color={c.toolFail}>⚠ {error}</Text> : null}
     </Box>
   );
