@@ -679,17 +679,30 @@ def _resolve_home_paths(config: AgentConfig):
 
 
 def _configured_home_root(config: AgentConfig) -> str | None:
-    # LLM: home 根解析的单一权威。优先级: 显式配置值(非空) > MY_AGENT_HOME
-    # 环境变量 > ~/.my-agent 兜底(home_layout.resolve_my_agent_home)。
-    # 前提: 配置 yaml 默认留空(""=未固定)——只有用户显式填了 home 才是"固定
-    # profile", 固定值应胜过运行时注入; 未固定时环境变量注入生效(12-factor,
-    # 参照 长期助手 env_loader)。2026-08-15 VM 真机"环境变量被 YAML 默认值挡住"
-    # 的教训已通过 YAML 默认改空解决, 不再需要环境变量无条件压过显式配置。
+    # LLM: home 根解析的单一权威。优先级:
+    #   1) 显式配置的非默认 home(用户固定 profile) > 环境变量;
+    #   2) 配置为空或恰等于内置默认(~/.my-agent) = "未固定", 环境变量注入
+    #      优先(12-factor, 参照 长期助手 env_loader);
+    #   3) 都空 → None(调用方走 ~/.my-agent 兜底)。
+    # "恰等于默认"的判定解决三向冲突: 2026-08-15 真机(YAML 默认值挡住 env)、
+    # 测试隔离(conftest 注入 env + 显式 tmp home, 显式值必须赢)、用户显式
+    # 固定 profile(固定值必须赢)——配置 yaml 默认已留空, 但仍兼容旧部署里
+    # 写着 ~/.my-agent 的存量配置。
     # 函数用途: 解析 my-agent home 根目录。
     raw = str(getattr(config, "my_agent_home", "") or "").strip()
-    if raw:
-        return raw
     env_home = str(os.environ.get("MY_AGENT_HOME", "") or "").strip()
+    if raw:
+        try:
+            # 内置默认是字面 ~/.my-agent(不经 env——resolve_my_agent_home(None)
+            # 会把 env 卷进来当默认, 判断就错了)。
+            default_home = Path("~/.my-agent").expanduser().resolve()
+            configured = Path(raw).expanduser().resolve()
+        except OSError:
+            configured = None
+        if configured is None or configured != default_home:
+            return raw
+        # 配置值就是内置默认 → 视为未固定, env 优先
+        return env_home or raw
     return env_home or None
 
 

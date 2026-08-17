@@ -173,7 +173,7 @@ def test_text_protocol_unaffected():
     )
     params = SimpleNamespace(
         tool_protocol_snapshot=make_test_protocol_snapshot(
-            run_id="run-1", source_protocol="native"
+            run_id="run-1", source_protocol="text"
         ),
         tool_ir_history=_one_call_ir(),
         live_archive_state={},

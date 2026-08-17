@@ -257,7 +257,7 @@ def _tool_loop_params() -> ToolLoopExecuteParams:
         one_shot_tool_calls=set(),
         executed_tools=[],
         archive_tool_calls=[],
-        tool_protocol_snapshot=make_test_protocol_snapshot(source_protocol="native"),
+        tool_protocol_snapshot=make_test_protocol_snapshot(source_protocol="text"),
     )
 
 
