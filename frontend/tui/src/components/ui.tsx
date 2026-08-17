@@ -5,19 +5,36 @@
  */
 import React from "react";
 import { Box, Text } from "ink";
-import type { ChatMessage } from "../state/session.js";
+import type { ChatMessage, ToolLine } from "../state/session.js";
 
 const CYAN = "#06b6d4";
 const GREEN = "#22c55e";
 const RED = "#ef4444";
 const GRAY = "#9ca3af";
 const BLUE = "#3b82f6";
+const GRAY_DIM = "#6b7280";
 
 /** 工具行着色：进行中青 / 完成绿 / 失败红 */
-export function toolLineColor(line: string): string {
-  if (line.includes("失败") || line.toUpperCase().includes("FAILED")) return RED;
-  if (line.includes("完成") || line.toUpperCase().includes("OK")) return GREEN;
+export function toolStatusColor(status: string): string {
+  if (status.includes("失败") || status.toUpperCase().includes("FAILED")) return RED;
+  if (status.includes("完成") || status.toUpperCase().includes("OK")) return GREEN;
   return CYAN;
+}
+
+/** 工具行渲染（紧凑单行，2026-08-17 用户指示参考 hermes：一个工具一行） */
+function ToolLineRow({ line }: { line: ToolLine }) {
+  const detail = line.detail.length > 80 ? `${line.detail.slice(0, 80)}…` : line.detail;
+  const toolLabel = line.tool ? ` ${line.tool}` : "";
+  const statusLabel = line.status ? ` ${line.status}` : "";
+  const detailLabel = detail ? `: ${detail}` : "";
+  return (
+    <Text color={toolStatusColor(line.status)}>
+      [工具] round={line.round ?? 0}#{line.callIndex ?? 1}
+      {toolLabel}
+      {statusLabel}
+      <Text color={GRAY_DIM}>{detailLabel}</Text>
+    </Text>
+  );
 }
 
 export function MessageRow({ msg }: { msg: ChatMessage }) {
@@ -35,11 +52,15 @@ export function MessageRow({ msg }: { msg: ChatMessage }) {
     <Box flexDirection="column" marginBottom={1}>
       {toolLines.length > 0 && (
         <Box flexDirection="column">
-          {toolLines.map((line, i) => (
-            <Text key={i} color={toolLineColor(line)} dimColor={false}>
-              {line}
-            </Text>
-          ))}
+          {toolLines.map((line, i) =>
+            typeof line === "string" ? (
+              <Text key={i} color={GRAY}>
+                {line}
+              </Text>
+            ) : (
+              <ToolLineRow key={line.key} line={line} />
+            ),
+          )}
         </Box>
       )}
       {msg.text ? (

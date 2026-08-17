@@ -9,6 +9,7 @@ import TextInput from "ink-text-input";
 import { TuiHttpClient } from "./protocol/client.js";
 import type { ClientError } from "./protocol/types.js";
 import { MessageList, StatusBar } from "./components/ui.js";
+import { commandByName, helpText, parseCommand } from "./commands.js";
 import {
   buildAskRequest,
   createInitialSession,
@@ -30,6 +31,7 @@ export function App({ client, sessionId, model, history: _history }: AppProps) {
     createInitialSession(),
   );
   const [input, setInput] = useState("");
+  const [theme, setTheme] = useState<"dark" | "light">("dark");
   const busyRef = useRef(false);
   const stateRef = useRef<SessionState>(state);
   stateRef.current = state;
@@ -74,9 +76,66 @@ export function App({ client, sessionId, model, history: _history }: AppProps) {
       const trimmed = value.trim();
       if (!trimmed) return;
       setInput("");
+      // 命令处理（P3）：/ 开头走命令目录；会话控制（stop/btw/goal）走 /control
+      const cmd = parseCommand(trimmed);
+      if (cmd) {
+        void handleCommand(cmd.name, cmd.args);
+        return;
+      }
       void runTurn(trimmed);
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [runTurn],
+  );
+
+  const handleCommand = useCallback(
+    async (name: string, args: string) => {
+      const command = commandByName(name);
+      if (!command) {
+        dispatch({ type: "error", message: `未知命令 /${name}（/help 查看）` });
+        return;
+      }
+      if (command.control) {
+        try {
+          await client.control(
+            command.control,
+            {
+              channel: "chat",
+              channel_conversation_id: sessionId,
+              channel_user_id: "local-agent",
+              canonical_user_id: "local-agent",
+            },
+            args || undefined,
+          );
+          dispatch({ type: "done", result: { ok: true, response: `/${name} 已发送` } });
+        } catch (err) {
+          const e = err as ClientError;
+          dispatch({ type: "error", message: `/${name} 失败: ${e.message}` });
+        }
+        return;
+      }
+      switch (command.local) {
+        case "help":
+          dispatch({ type: "done", result: { ok: true, response: helpText() } });
+          return;
+        case "clear":
+          process.stdout.write("\x1b[2J\x1b[H");
+          return;
+        case "exit":
+          exit();
+          return;
+        case "theme": {
+          const next = args === "light" ? "light" : args === "dark" ? "dark" : theme === "dark" ? "light" : "dark";
+          setTheme(next);
+          dispatch({ type: "done", result: { ok: true, response: `主题已切换为 ${next}` } });
+          return;
+        }
+        default:
+          dispatch({ type: "error", message: `命令 /${name} 未实现` });
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [client, sessionId, exit, theme],
   );
 
   const messages = state.messages;

@@ -10,11 +10,22 @@ import type { AskRequest, ProgressEvent, ResultResponse } from "../protocol/type
 
 export type SessionPhase = "idle" | "submitting" | "polling" | "done" | "error";
 
+/** 工具观察行（结构化，一个工具一行：开始显示、完成同位置更新状态色，
+ *  2026-08-17 用户指示参考 hermes 紧凑风格——不占两行） */
+export interface ToolLine {
+  key: string; // round#call_index（合并键）
+  round?: number;
+  callIndex?: number;
+  tool: string;
+  status: string; // 开始/完成/失败…
+  detail: string;
+}
+
 export interface ChatMessage {
   role: "user" | "assistant";
   text: string;
-  /** 工具观察行（tool_progress 投影） */
-  toolLines?: string[];
+  /** 观察行：工具行（按 key 合并更新）+ assistant_commentary 文本行 */
+  toolLines?: (ToolLine | string)[];
 }
 
 export interface SessionState {
@@ -111,10 +122,9 @@ export function sessionReducer(state: SessionState, action: SessionAction): Sess
           messages: [...state.messages, { role: "assistant", text: "", toolLines: events }],
         };
       }
-      const messages = [
-        ...state.messages.slice(0, -1),
-        { ...last, toolLines: [...(last.toolLines ?? []), ...events] },
-      ];
+      // 合并更新：同一工具（round#call）完成时更新原行状态，不新增行
+      const merged = mergeToolLines(last.toolLines ?? [], events);
+      const messages = [...state.messages.slice(0, -1), { ...last, toolLines: merged }];
       return { ...state, messages };
     }
     case "done": {
@@ -148,17 +158,43 @@ export function sessionReducer(state: SessionState, action: SessionAction): Sess
   }
 }
 
-/** progress 事件 → 显示行（tool_progress 结构化 → `[工具] round=N #C tool 状态: detail`） */
-export function progressEventToLine(ev: ProgressEvent): string {
+/** progress 事件 → 工具行（结构化；assistant_commentary 保持文本） */
+export function progressEventToLine(ev: ProgressEvent): ToolLine | string {
   if (ev.kind === "assistant_commentary") {
     return ev.text;
   }
-  const round = ev.round !== undefined ? `round=${ev.round}` : "";
-  const call = ev.call_index !== undefined ? ` #${ev.call_index}` : "";
-  const tool = ev.tool ?? "";
-  const status = ev.status ?? ev.phase ?? "";
-  const detail = ev.detail ? `: ${ev.detail}` : "";
-  return `[工具] ${round}${call} ${tool} ${status}${detail}`.trim();
+  const round = ev.round ?? 0;
+  const callIndex = ev.call_index ?? 1;
+  return {
+    key: `${round}#${callIndex}`,
+    round,
+    callIndex,
+    tool: ev.tool ?? "",
+    status: ev.status ?? ev.phase ?? "",
+    detail: ev.detail ?? "",
+  };
+}
+
+/** 合并工具行：同 key 更新状态（完成/失败覆盖开始），新 key 追加 */
+export function mergeToolLines(existing: (ToolLine | string)[], incoming: (ToolLine | string)[]): (ToolLine | string)[] {
+  const merged = new Map<string, ToolLine>();
+  // 保留既有工具行（文本行原样透传）
+  const textLines = existing.filter((l): l is string => typeof l === "string");
+  for (const line of existing) {
+    if (typeof line === "string") continue;
+    merged.set(line.key, line);
+  }
+  for (const line of incoming) {
+    if (typeof line === "string") continue;
+    const prev = merged.get(line.key);
+    // 完成/失败等终态覆盖开始态；同态不重复追加
+    if (prev) {
+      merged.set(line.key, { ...prev, status: line.status, detail: line.detail || prev.detail });
+    } else {
+      merged.set(line.key, line);
+    }
+  }
+  return [...textLines, ...merged.values()];
 }
 
 /** 提交动作的参数（供 UI 调用 client.ask） */
