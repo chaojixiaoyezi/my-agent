@@ -263,7 +263,7 @@ def test_same_logical_model_turn_preserves_distinct_physical_attempts() -> None:
             # text 协议下口径退化为 estimate_tokens(prompt), 不影响本测试意图
             # (逻辑 turn 去重 + 物理 attempt 计数)。
             tool_protocol_snapshot=make_test_protocol_snapshot(
-                run_id="run-1", source_protocol="text"
+                run_id="run-1", source_protocol="native"
             ),
         ),
     )

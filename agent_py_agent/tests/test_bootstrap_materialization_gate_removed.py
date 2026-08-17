@@ -24,8 +24,13 @@ def test_bootstrap_contract_does_not_redirect_pure_inspection_tool_calls(tmp_pat
             agent=_agent(tmp_path),
             params=params,
             response=ModelResponse(
-                text='[TOOL_CALL]\n{"tool":"list_files","path":"."}\n[/TOOL_CALL]',
+                text="",
                 backend="fake",
+                tool_use_blocks=[{
+                    "id": "call-bootstrap-list-1",
+                    "name": "list_files",
+                    "input": {"path": "."},
+                }],
             ),
             counters=ToolLoopRepairCounters(),
         )
@@ -48,11 +53,13 @@ def test_bootstrap_contract_does_not_block_repeated_evidence_calls(tmp_path: Pat
                 agent=agent,
                 params=params,
                 response=ModelResponse(
-                    text=(
-                        '[TOOL_CALL]\n{"tool":"web_search",'
-                        '"query":"project weekly growth","limit":5}\n[/TOOL_CALL]'
-                    ),
+                    text="",
                     backend="fake",
+                    tool_use_blocks=[{
+                        "id": "call-bootstrap-search-1",
+                        "name": "web_search",
+                        "input": {"query": "project weekly growth", "limit": 5},
+                    }],
                 ),
                 counters=ToolLoopRepairCounters(),
             )
@@ -110,7 +117,7 @@ def _params() -> ToolLoopExecuteParams:
         archive_tool_calls=[],
         tool_runtime_snapshot=runtime_snapshot_for_model_specs(specs, run_id="run-1"),
         tool_protocol_snapshot=make_test_protocol_snapshot(
-            run_id="run-1", source_protocol="text"
+            run_id="run-1", source_protocol="native"
         ),
         delivery_contract={
             "bootstrap_contract": {

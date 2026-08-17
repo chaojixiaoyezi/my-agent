@@ -82,7 +82,7 @@ def _fetch_ok(request) -> tuple[bool, object, str]:
 def _text_protocol_snapshot() -> ToolProtocolSnapshot:
     return ToolProtocolSnapshot(
         run_id="audit-activation-test",
-        source_protocol="text",
+        source_protocol="native",
         capability=ProviderToolCapability(
             provider="test",
             endpoint="local://audit-activation-test",

@@ -149,7 +149,7 @@ def test_text_protocol_block_rejected_native_only(tmp_path: Path):
         backend="fake",
     )
 
-    decision = _decide(_agent(tmp_path), response, source_protocol="text")
+    decision = _decide(_agent(tmp_path), response, source_protocol="native")
 
     assert decision.action == "continue"  # 首犯: 修复轮, 不执行
     assert len(decision.calls) == 0
@@ -253,7 +253,7 @@ def test_protocol_violation_feedback_steers_structured_tool_use(tmp_path: Path):
         text="[TOOL_CALL]\ntool => 'write_file', args => { path => 'output/main.go' }\n[/TOOL_CALL]",
         backend="fake",
     )
-    params = _params(source_protocol="text")
+    params = _params(source_protocol="native")
 
     decision = tool_loop_response_decision(
         ToolLoopResponseDecisionRequest(

@@ -97,7 +97,7 @@ def _canonical_test_call(
         call_id=call_id,
         tool_name=tool_name,
         arguments=arguments,
-        source_protocol="text",
+        source_protocol="native",
         schema_hash="sha256:test-schema",
         run_id=run_id,
         turn_id=f"{run_id}:turn-1",

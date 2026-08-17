@@ -113,7 +113,7 @@ def test_tool_loop_retries_until_provider_recovers():
             tool_runtime_snapshot=agent.tools.runtime_snapshot(run_id="run-1"),
             tool_protocol_snapshot=make_test_protocol_snapshot(
                 run_id="run-1",
-                source_protocol="text",
+                source_protocol="native",
             ),
         )
         prompt, response = next_tool_loop_model_response(agent, params, tool_rounds=1)
@@ -172,7 +172,7 @@ def test_tool_loop_falls_back_to_compact_when_disabled():
             tool_runtime_snapshot=agent.tools.runtime_snapshot(run_id="run-1"),
             tool_protocol_snapshot=make_test_protocol_snapshot(
                 run_id="run-1",
-                source_protocol="text",
+                source_protocol="native",
             ),
         )
         prompt, response = next_tool_loop_model_response(agent, params, tool_rounds=1)
