@@ -64,6 +64,14 @@ def trace_runner_model_request_started(request: RunnerModelStageTraceRequest) ->
 
 
 def trace_runner_model_response_received(request: RunnerModelStageTraceRequest) -> None:
+    # EXEC-31b: native 下工具调用在 tool_use_blocks(text 常为空)——trace 只记 text
+    # 会让 debug preview 变成空串, 丢调工具名事实。detail 里并入工具块名。
+    text = str(getattr(request.response, "text", "") or "")
+    blocks = list(getattr(request.response, "tool_use_blocks", None) or [])
+    tool_names = [str(block.get("name") or "") for block in blocks if isinstance(block, dict)]
+    detail_text = text
+    if tool_names:
+        detail_text = (detail_text + "\n" if detail_text else "") + "[tool_use] " + ", ".join(tool_names)
     _trace_runner_stage(
         RunnerStageTraceBundle(
             agent=request.agent,
@@ -72,9 +80,10 @@ def trace_runner_model_response_received(request: RunnerModelStageTraceRequest) 
             tool_rounds=request.tool_rounds,
             payload={
                 "backend": str(getattr(request.response, "backend", "") or ""),
-                "response_chars": len(str(getattr(request.response, "text", "") or "")),
+                "response_chars": len(text),
+                "tool_use_names": tool_names,
             },
-            detail_payload={"response": str(getattr(request.response, "text", "") or "")},
+            detail_payload={"response": detail_text},
         )
     )
 

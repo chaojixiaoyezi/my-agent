@@ -33,15 +33,31 @@ def _trace_records(workspace):
 class _TraceToolBackend(BaseBackend):
     name = "trace_tool_backend"
 
+    def probe_tool_capability(self):
+        from agent_py_agent.agent.backends.base import ProviderToolCapability
+        from agent_py_agent.agent.backends.base import _utc_now_iso
+
+        return ProviderToolCapability(
+            provider=self.name, endpoint="local://trace-tool", model="",
+            stream=False, native_supported=True,
+            evidence="test_backend_declares_native_tools",
+            observed_at=_utc_now_iso(),
+        )
+
     def __init__(self):
         self.calls = 0
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
             return ModelResponse(
-                text='[TOOL_CALL]\n{"tool":"list_files","path":"."}\n[/TOOL_CALL]',
+                text="",
                 backend=self.name,
+                tool_use_blocks=[{
+                    "id": "call-trace-list-1",
+                    "name": "list_files",
+                    "input": {"path": "."},
+                }],
             )
         return ModelResponse(
             text=(
@@ -68,23 +84,56 @@ class _TraceToolBackend(BaseBackend):
 
 
 class _FailingTraceBackend(BaseBackend):
+    def probe_tool_capability(self):
+        from agent_py_agent.agent.backends.base import ProviderToolCapability
+        from agent_py_agent.agent.backends.base import _utc_now_iso
+
+        return ProviderToolCapability(
+            provider=self.name, endpoint=f"local://{self.name}", model="",
+            stream=False, native_supported=True,
+            evidence="test_backend_declares_native_tools",
+            observed_at=_utc_now_iso(),
+        )
+
     name = "failing_trace_backend"
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         raise RuntimeError("trace backend failed")
 
 
 class _ProviderTimeoutBackend(BaseBackend):
+    def probe_tool_capability(self):
+        from agent_py_agent.agent.backends.base import ProviderToolCapability
+        from agent_py_agent.agent.backends.base import _utc_now_iso
+
+        return ProviderToolCapability(
+            provider=self.name, endpoint=f"local://{self.name}", model="",
+            stream=False, native_supported=True,
+            evidence="test_backend_declares_native_tools",
+            observed_at=_utc_now_iso(),
+        )
+
     name = "provider_timeout_backend"
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         raise ProviderTimeoutError("模型接口请求超时: request_timeout=17s")
 
 
 class _ProviderTransientBackend(BaseBackend):
+    def probe_tool_capability(self):
+        from agent_py_agent.agent.backends.base import ProviderToolCapability
+        from agent_py_agent.agent.backends.base import _utc_now_iso
+
+        return ProviderToolCapability(
+            provider=self.name, endpoint=f"local://{self.name}", model="",
+            stream=False, native_supported=True,
+            evidence="test_backend_declares_native_tools",
+            observed_at=_utc_now_iso(),
+        )
+
     name = "provider_transient_backend"
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         raise ProviderTransientError("网络请求失败: 模型接口临时断开")
 
 
@@ -489,7 +538,8 @@ def test_subagent_debug_trace_level_four_records_stage_previews(tmp_path):
     )
     assert "observe detailed runner previews" in model_started["task_goal_preview"]
     assert model_started["prompt_preview"]
-    assert "TOOL_CALL" in model_received["response_preview"]
+    # EXEC-31b: native 下响应 preview 里是结构化工具块名, 不再有 [TOOL_CALL] 文本。
+    assert "list_files" in model_received["response_preview"]
     assert "list_files" in tool_started["tool_payload_preview"]
     assert tool_finished["tool_output_preview"]
     assert "prompt_detail_ref" not in model_started
