@@ -415,19 +415,32 @@ class _FailedMutationFalseClaimBackend:
     name = "failed-mutation-false-claim"
     context_window_tokens = 200_000
 
+    def probe_tool_capability(self):
+        from agent_py_agent.agent.backends.base import ProviderToolCapability
+        from agent_py_agent.agent.backends.base import _utc_now_iso
+
+        return ProviderToolCapability(
+            provider=str(self.name or "test"), endpoint="local://test-backend",
+            model="", stream=False, native_supported=True,
+            evidence="test_backend_declares_native_tools",
+            observed_at=_utc_now_iso(),
+        )
+
     def __init__(self) -> None:
         self.calls = 0
 
-    def generate(self, prompt: str, on_chunk=None, tools=None, messages=None) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None, tools=None, messages=None, **kwargs) -> ModelResponse:
         del on_chunk, tools, messages
         self.calls += 1
         if self.calls == 1:
             return ModelResponse(
-                text=(
-                    '[TOOL_CALL]\n{"tool":"always_fail_mutation"}\n'
-                    "[/TOOL_CALL]"
-                ),
+                text="",
                 backend=self.name,
+                tool_use_blocks=[{
+                    "id": "call-mutation-1",
+                    "name": "always_fail_mutation",
+                    "input": {},
+                }],
             )
         if self.calls == 2:
             return ModelResponse(text="已经成功完成修改。", backend=self.name)
@@ -469,18 +482,31 @@ class _RememberListThenFalseClaimBackend:
     name = "remember-list-then-false-claim"
     context_window_tokens = 200_000
 
+    def probe_tool_capability(self):
+        from agent_py_agent.agent.backends.base import ProviderToolCapability
+        from agent_py_agent.agent.backends.base import _utc_now_iso
+
+        return ProviderToolCapability(
+            provider=str(self.name or "test"), endpoint="local://test-backend",
+            model="", stream=False, native_supported=True,
+            evidence="test_backend_declares_native_tools",
+            observed_at=_utc_now_iso(),
+        )
+
     def __init__(self) -> None:
         self.calls = 0
 
-    def generate(self, _prompt: str, on_chunk=None, tools=None, messages=None) -> ModelResponse:
+    def generate(self, _prompt: str, on_chunk=None, tools=None, messages=None, **kwargs) -> ModelResponse:
         del on_chunk, tools, messages
         self.calls += 1
         if self.calls == 1:
             return ModelResponse(
-                text=(
-                    '[TOOL_CALL]\n{"tool":"remember","action":"list"}\n'
-                    "[/TOOL_CALL]"
-                ),
+                text="",
+                tool_use_blocks=[{
+                    "id": "call-remember-list-1",
+                    "name": "remember",
+                    "input": {"action": "list"},
+                }],
                 backend=self.name,
             )
         return ModelResponse(text="我已经删除了记忆。", backend=self.name)

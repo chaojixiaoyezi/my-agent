@@ -26,23 +26,39 @@ class _RememberOnceBackend:
     name = "cli-run-remember-once"
     context_window_tokens = 200_000
 
+    def probe_tool_capability(self):
+        from agent_py_agent.agent.backends.base import ProviderToolCapability
+        from agent_py_agent.agent.backends.base import _utc_now_iso
+
+        return ProviderToolCapability(
+            provider=str(self.name or "test"), endpoint="local://test-backend",
+            model="", stream=False, native_supported=True,
+            evidence="test_backend_declares_native_tools",
+            observed_at=_utc_now_iso(),
+        )
+
     def __init__(self) -> None:
         self.calls = 0
 
-    def generate(self, prompt: str, on_chunk=None, tools=None, messages=None) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None, tools=None, messages=None, **kwargs) -> ModelResponse:
         del prompt, on_chunk, tools, messages
         self.calls += 1
         if self.calls == 1:
             return ModelResponse(
-                text=(
-                    "[TOOL_CALL]\n"
-                    '{"tool":"remember","action":"add","content":"用户的阅读清单代号是雪松",'
-                    '"kind":"fact","origin":"user_explicit",'
-                    '"subject_key":"personal.reading-list-code",'
-                    '"scope":{"scope_type":"personal","scope_key":"personal"}}\n'
-                    "[/TOOL_CALL]"
-                ),
+                text="",
                 backend=self.name,
+                tool_use_blocks=[{
+                    "id": "call-remember-1",
+                    "name": "remember",
+                    "input": {
+                        "action": "add",
+                        "content": "用户的阅读清单代号是雪松",
+                        "kind": "fact",
+                        "origin": "user_explicit",
+                        "subject_key": "personal.reading-list-code",
+                        "scope": {"scope_type": "personal", "scope_key": "personal"},
+                    },
+                }],
             )
         return ModelResponse(text="已经按实际结果保存。", backend=self.name)
 
@@ -51,10 +67,21 @@ class _StaticBackend:
     name = "cli-run-static"
     context_window_tokens = 200_000
 
+    def probe_tool_capability(self):
+        from agent_py_agent.agent.backends.base import ProviderToolCapability
+        from agent_py_agent.agent.backends.base import _utc_now_iso
+
+        return ProviderToolCapability(
+            provider=str(self.name or "test"), endpoint="local://test-backend",
+            model="", stream=False, native_supported=True,
+            evidence="test_backend_declares_native_tools",
+            observed_at=_utc_now_iso(),
+        )
+
     def __init__(self) -> None:
         self.calls = 0
 
-    def generate(self, prompt: str, on_chunk=None, tools=None, messages=None) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None, tools=None, messages=None, **kwargs) -> ModelResponse:
         del prompt, on_chunk, tools, messages
         self.calls += 1
         return ModelResponse(text="本次运行已完成。", backend=self.name)
