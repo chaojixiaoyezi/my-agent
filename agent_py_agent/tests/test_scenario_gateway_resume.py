@@ -23,7 +23,7 @@ def _write_echo_config(tmp_path: Path) -> Path:
     config_path.write_text(
         'workspace_root: "workspace"\n'
         'model_backend: "echo"\n'
-        'tool_protocol: "text"\n'
+        
         'subagent_workspace: ".my_agent/subagents"\n'
         'gateway_workspace: ".my_agent/gateway"\n'
         "gateway_port: 0\n"

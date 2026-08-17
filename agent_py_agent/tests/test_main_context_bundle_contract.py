@@ -366,7 +366,7 @@ def test_context_bundle_latest_cli_reports_observability_payload(tmp_path: Path,
         f'workspace_root: "{workspace}"\n'
         f'my_agent_home: "{home}"\n'
         'model_backend: "echo"\n'
-        'tool_protocol: "text"\n'
+        
         'memory_path: "data/memory.jsonl"\n'
         'local_store_path: "data/local_store/local.db"\n'
         'local_store_files_dir: "data/local_store/files"\n'
@@ -433,6 +433,9 @@ def test_main_context_bundle_artifacts_can_be_updated_from_tool_output_index(
             call_id="1-1",
             output="large output\n" + ("x" * 25_000),
             ok=True,
+            # 默认 externalize 阈值 200K, 25K 输出不会落 artifact——显式 min_chars=1
+            # 强制走恢复产物路径, 验证 bundle 产物更新合同。
+            min_chars=1,
             request_id="request-artifact",
             run_id="run-artifact",
             task_id="task-artifact",

@@ -40,7 +40,7 @@ def _write_config(tmp_path: Path, extra: str = "") -> Path:
         'workspace_root: "workspace"\n'
         f'my_agent_home: "{(tmp_path / "home").as_posix()}"\n'
         'model_backend: "echo"\n'
-        'tool_protocol: "text"\n'
+        
         'subagent_workspace: "subagents"\n'
         'local_store_path: "local_store/local.db"\n'
         'local_store_files_dir: "local_store/files"\n'

@@ -82,7 +82,7 @@ def _write_home_config(tmp_path: Path) -> Path:
         'workspace_root: "workspace"\n'
         f'my_agent_home: "{home}"\n'
         'model_backend: "echo"\n'
-        'tool_protocol: "text"\n'
+        
         'subagent_workspace: "subagents"\n'
         'local_store_path: "local_store/local.db"\n'
         'local_store_files_dir: "local_store/files"\n'
