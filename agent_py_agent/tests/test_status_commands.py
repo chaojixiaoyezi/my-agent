@@ -356,6 +356,10 @@ class TestCmdRun:
         args.save = True
         args.show_prompt = False
         args.resume_context = None
+        # EXEC-33b: cmd_run 现在读 args.resume——MagicMock 默认真值会把普通 run
+        # 误判成续跑路径; 显式置空。
+        args.resume = ""
+        args.delivery_contract_file = ""
 
         mock_result = MagicMock()
         mock_result.response = "测试响应"
@@ -401,6 +405,10 @@ class TestCmdRun:
         args.save = True
         args.show_prompt = False
         args.resume_context = None
+        # EXEC-33b: cmd_run 现在读 args.resume——MagicMock 默认真值会把普通 run
+        # 误判成续跑路径; 显式置空。
+        args.resume = ""
+        args.delivery_contract_file = ""
 
         result_payload = SimpleNamespace(
             response="流式最终响应",
@@ -455,6 +463,10 @@ class TestCmdRun:
         args.save = True
         args.show_prompt = False
         args.resume_context = None
+        # EXEC-33b: cmd_run 现在读 args.resume——MagicMock 默认真值会把普通 run
+        # 误判成续跑路径; 显式置空。
+        args.resume = ""
+        args.delivery_contract_file = ""
 
         result_payload = SimpleNamespace(
             response="流式最终响应",
@@ -513,6 +525,10 @@ class TestCmdRun:
         args.save = True
         args.show_prompt = False
         args.resume_context = None
+        # EXEC-33b: cmd_run 现在读 args.resume——MagicMock 默认真值会把普通 run
+        # 误判成续跑路径; 显式置空。
+        args.resume = ""
+        args.delivery_contract_file = ""
 
         result_payload = SimpleNamespace(
             response="最终已经完成，文件在当前目录。",
@@ -569,6 +585,10 @@ class TestCmdRun:
         args.save = True
         args.show_prompt = False
         args.resume_context = None
+        # EXEC-33b: cmd_run 现在读 args.resume——MagicMock 默认真值会把普通 run
+        # 误判成续跑路径; 显式置空。
+        args.resume = ""
+        args.delivery_contract_file = ""
 
         result_payload = SimpleNamespace(
             response="[RUNTIME_BLOCKED] blocked",
