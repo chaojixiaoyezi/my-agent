@@ -118,13 +118,22 @@ def test_claim_fails_when_not_due(repo):
     assert "not_pending_or_not_due" in out.reason
 
 
-def test_no_injected_gate_fields_fallback_ok(repo):
-    """弹性门（综合群复核 seq2444 收窄）：无注入时字段级门兜底放行，
-    绝不因 policy/circuit 基建未接入让 dispatcher 整体瘫痪。"""
+def test_no_injected_gate_rejected_fail_closed(repo):
+    """无注入必拒（seq2450 大橘硬门）：policy_validator / provider_circuit_open
+    未注入 → 结构化拒绝，保持 pending 可审计，绝不兜底放行。"""
     _intent(repo, "i1", "k9")
     out = _dispatch(repo, "i1", policy_validator=None, provider_circuit_open=None)
-    assert out.claimed and out.reason == "dispatched"
-    assert repo.get_wake_intent("i1")["status"] == "claimed"
+    assert not out.claimed
+    assert out.reason == "rejected_policy_validator_required"
+    row = repo.get_wake_intent("i1")
+    assert row["status"] == "pending"
+    assert "authorization:policy_validator_required" in row["last_error_ref"]
+    # 有 policy 无 circuit → 同样拒绝（两者都必传）
+    _intent(repo, "i2", "k9b")
+    out = _dispatch(repo, "i2", policy_validator=_ok_validator, provider_circuit_open=None)
+    assert not out.claimed
+    assert out.reason == "rejected_provider_circuit_required"
+    assert repo.get_wake_intent("i2")["status"] == "pending"
 
 
 def test_no_injected_gate_still_rejects_bad_fields(repo):

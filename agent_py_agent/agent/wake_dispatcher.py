@@ -17,11 +17,8 @@
 
 from __future__ import annotations
 
-import logging
 import time
 from dataclasses import dataclass
-
-_LOGGER = logging.getLogger(__name__)
 
 #: 来源授权：interactive 仅允许事件类来源（禁周期扫描）。
 INTERACTIVE_SOURCES = frozenset({"inbound", "user_continue"})
@@ -52,12 +49,12 @@ def validate_wake_intent_authorization(
     """授权校验（#236，不可绕过入口门）：policy 有效 + 来源授权 + 空值拒绝。
 
     结构化信号铁律：只读 intent 行字段，不解析任何自然语言。
-    弹性门（综合群复核 seq2435-2444，不做死硬门）：字段级校验始终执行
-    （fail-closed）；policy_validator / provider_circuit_open 为可选注入——
-    注入存在时叠加 ledger/circuit 核对（拒绝证据落 last_error_ref），未注入
-    时以字段门为准（policy 枚举 + source 枚举 + generation>=0 + scope 非空），
-    绝不因基建未接入让 dispatcher 整体瘫痪（seq2444 的「无注入全拒」收窄为
-    字段兜底 + 打警告日志可审计）。
+    不可绕过入口门（#236，seq2444/2450 fail-closed）：字段级校验始终执行
+    （policy 枚举/source 枚举/generation>=0/scope 非空）；policy_validator /
+    provider_circuit_open 必传且 callable——无注入 → 结构化拒绝
+    （policy_validator_required / provider_circuit_required）并保持 pending，
+    **不允许 warning 日志替代机器门**。真实 Gateway 注入真实 policy ledger /
+    circuit 后才能消费 due（seq2450 大橘硬门）。
     拒绝条件：
       - continuation_policy 空或不在 {interactive, async} → 拒绝
       - source 不在受控枚举 → 拒绝
@@ -89,31 +86,23 @@ def validate_wake_intent_authorization(
         return False, "policy_generation_invalid"
     if generation < 0:
         return False, "policy_generation_missing"
-    # 可选注入（不做死硬门）：有注入叠加 ledger/circuit 核对；无注入走
-    # 字段兜底放行（上面的字段门已 fail-closed），并打警告日志留审计线索
-    # （policy/circuit 基建落成后从 owner 依赖注入即可自动升级校验）。
-    if callable(policy_validator):
-        try:
-            if not policy_validator(policy, generation):
-                return False, "policy_generation_not_current_or_revoked"
-        except Exception:  # noqa: BLE001 validator 异常保守拒绝（fail-closed）
-            return False, "policy_validator_error"
-    else:
-        _LOGGER.warning(
-            "wake dispatcher: policy_validator 未注入，policy ledger 核对跳过"
-            "（字段门兜底：policy=%s generation=%s）", policy, generation,
-        )
-    if callable(provider_circuit_open):
-        try:
-            if provider_circuit_open(provider_scope_ref):
-                return False, "provider_circuit_open_or_quota_frozen"
-        except Exception:  # noqa: BLE001 circuit 检查异常保守拒绝（fail-closed）
-            return False, "provider_circuit_check_error"
-    else:
-        _LOGGER.warning(
-            "wake dispatcher: provider_circuit_open 未注入，circuit 核对跳过"
-            "（scope=%s）", provider_scope_ref,
-        )
+    # 硬门（seq2444/2450）：无注入必须拒绝（fail-closed），不允许
+    # 「无注入 generation>=0 兜底放行」——policy/circuit 基建未接入时
+    # dispatcher 不消费，杜绝未授权执行。
+    if not callable(policy_validator):
+        return False, "policy_validator_required"
+    if not callable(provider_circuit_open):
+        return False, "provider_circuit_required"
+    try:
+        if not policy_validator(policy, generation):
+            return False, "policy_generation_not_current_or_revoked"
+    except Exception:  # noqa: BLE001 validator 异常保守拒绝（fail-closed）
+        return False, "policy_validator_error"
+    try:
+        if provider_circuit_open(provider_scope_ref):
+            return False, "provider_circuit_open_or_quota_frozen"
+    except Exception:  # noqa: BLE001 circuit 检查异常保守拒绝（fail-closed）
+        return False, "provider_circuit_check_error"
     return True, ""
 
 
@@ -132,9 +121,11 @@ def dispatch_due_wake_intent(
 
     claim 前的授权校验是不可绕过入口门（#236）：字段级门始终执行（policy 枚举 /
     source 枚举 / generation>=0 / scope 非空，fail-closed）；policy_validator /
-    provider_circuit_open 为可选注入（有注入叠加 ledger/circuit 核对，无注入走
-    字段兜底不瘫痪 dispatcher——综合群复核 seq2435-2444 弹性门）。校验失败 →
-    标 last_error_ref 并保持 pending（可被 reconciler 审计），不 claim、不执行。
+    provider_circuit_open **必传且 callable**（seq2450 大橘硬门），无注入 →
+    结构化拒绝（policy_validator_required / provider_circuit_required）并保持
+    pending，绝不 claim、绝不执行——运行态禁止「无真实 policy/circuit 兜底放行」，
+    warning 不能替代机器门。校验失败 → 标 last_error_ref 并保持 pending
+    （可被 reconciler 审计），不 claim、不执行。
     """
     now = time.time() if now is None else now
     intent_id = str(row.get("intent_id") or "")
