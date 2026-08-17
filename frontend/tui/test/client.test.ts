@@ -241,7 +241,7 @@ describe("TuiHttpClient contract", () => {
     });
     const attempts: number[] = [];
     await client.pollUntilDone("req-x", undefined, { onNetworkRetry: (n) => attempts.push(n) });
-    expect(attempts).toEqual([1, 2]);
+    expect(attempts).toEqual([1, 2, 0]); // 末位 0 = 网络恢复复位（状态条重连标志消失）
   });
 
   it("control: POST /control 带 conversation scope", async () => {

@@ -29,12 +29,19 @@ export interface TuiClientOptions {
   pollTimeoutMs?: number;
   /** 断线重连窗口（ms）：网络类错误在此窗口内持续退避重试，超窗才报错 */
   reconnectWindowMs?: number;
+  /** 单次 HTTP 请求超时（ms）：防 fetch 半开连接挂起冻结整个轮询 */
+  requestTimeoutMs?: number;
   fetchImpl?: typeof fetch;
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 300;
-const DEFAULT_POLL_TIMEOUT_MS = 30000;
+// 2026-08-18 真机实锤：30s 总预算对长任务（600 字文章 60-90s）必然 poll timeout
+// ——预算只应拦「悬挂」，不能拦正常长任务。默认 10 分钟。
+const DEFAULT_POLL_TIMEOUT_MS = 600000;
 const DEFAULT_RECONNECT_WINDOW_MS = 120000;
+// 2026-08-18 真机实锤：gateway 重启瞬间 fetch 可半开挂起（分钟级），
+// 无请求级超时则重连机制整体失效。10s 上限足够单次轮询往返。
+const DEFAULT_REQUEST_TIMEOUT_MS = 10000;
 
 /** 断线类错误判定：fetch 连接失败（network）或网关 5xx（重启窗口常见） */
 function isRetryableNetworkError(err: unknown): boolean {
@@ -61,6 +68,7 @@ export class TuiHttpClient {
       pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
       pollTimeoutMs: DEFAULT_POLL_TIMEOUT_MS,
       reconnectWindowMs: DEFAULT_RECONNECT_WINDOW_MS,
+      requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
       fetchImpl: globalThis.fetch,
       ...options,
     };
@@ -206,7 +214,7 @@ export class TuiHttpClient {
     let networkAttempts = 0;
     const collected: ProgressEvent[] = [];
     const startedAt = Date.now();
-    const deadline = startedAt + this.options.pollTimeoutMs;
+    let deadline = startedAt + this.options.pollTimeoutMs;
     for (;;) {
       if (signal?.aborted) {
         throw { kind: "timeout", message: "poll aborted" } satisfies ClientError;
@@ -214,6 +222,11 @@ export class TuiHttpClient {
       // 1) 先收 progress 观察流（非权威，失败可退避重试）
       try {
         const prog = await this.progress(requestId, cursor);
+        // 网络恢复：复位重连标志（状态条「网关重连中」立即消失）
+        if (networkAttempts > 0) {
+          networkAttempts = 0;
+          onNetworkRetry?.(0);
+        }
         // 群复核 P1：/progress 的 next 会跨过被过滤的行——空页但 next 前进
         // 也必须推进游标，否则卡旧页漏后续可见事件（真机/夹具未覆盖）。
         if (prog.next > cursor) {
@@ -236,7 +249,11 @@ export class TuiHttpClient {
           } satisfies ClientError;
         }
         // 退避：interval 起 2 倍递增 30s 封顶（网关重启通常 10-30s 内恢复）
-        await sleep(Math.min(30000, this.options.pollIntervalMs * 2 ** Math.min(networkAttempts, 5)));
+        const backoff = Math.min(30000, this.options.pollIntervalMs * 2 ** Math.min(networkAttempts, 5));
+        // 2026-08-18 真机实锤：重连等待必须顺延 poll 预算——断线期间任务仍在
+        // 排队/requeue，等待不算「悬挂」
+        deadline += backoff;
+        await sleep(backoff);
         continue;
       }
       // 2) 以 /result 判终态（权威）
@@ -253,8 +270,16 @@ export class TuiHttpClient {
 
   private async request(path: string, init: RequestInit): Promise<Response> {
     try {
-      return await this.fetchImpl(`${this.options.baseUrl}${path}`, init);
+      // 请求级超时（防半开连接挂起）；调用方已有 signal 时组合（poll 取消优先）
+      const timeoutSignal = AbortSignal.timeout(this.options.requestTimeoutMs);
+      const signal =
+        init.signal != null && typeof AbortSignal.any === "function"
+          ? AbortSignal.any([init.signal, timeoutSignal])
+          : (init.signal ?? timeoutSignal);
+      return await this.fetchImpl(`${this.options.baseUrl}${path}`, { ...init, signal });
     } catch (err) {
+      // AbortError（超时/主动取消）统一按 network 处理——重连逻辑接管；
+      // 主动 poll 取消在 pollUntilDone 顶层判 signal.aborted 区分。
       throw clientError(err, "network");
     }
   }
