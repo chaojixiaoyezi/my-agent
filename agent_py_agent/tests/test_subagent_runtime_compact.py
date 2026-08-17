@@ -21,11 +21,22 @@ class _TwoOverflowChildBackend:
     name = "two-overflow-child"
     context_window_tokens = 60_000
 
+    def probe_tool_capability(self):
+        from agent_py_agent.agent.backends.base import ProviderToolCapability
+        from agent_py_agent.agent.backends.base import _utc_now_iso
+
+        return ProviderToolCapability(
+            provider=self.name, endpoint="local://two-overflow", model="",
+            stream=False, native_supported=True,
+            evidence="test_backend_declares_native_tools",
+            observed_at=_utc_now_iso(),
+        )
+
     def __init__(self, output_path: Path):
         self.output_path = output_path
         self.prompts: list[str] = []
 
-    def generate(self, prompt: str, on_chunk=None):
+    def generate(self, prompt: str, on_chunk=None, **kwargs):
         self.prompts.append(prompt)
         turn = len(self.prompts)
         if turn in {1, 3}:
@@ -38,20 +49,18 @@ class _TwoOverflowChildBackend:
                 usage={"input_tokens": 19_500, "output_tokens": 10},
             )
         if turn == 2:
+            # EXEC-31b: native 下文本 [TOOL_CALL] 是伪调用(零执行), 改结构化块。
             return ModelResponse(
-                text=(
-                    "[TOOL_CALL]\n"
-                    + json.dumps(
-                        {
-                            "tool": "write_file",
-                            "path": str(self.output_path),
-                            "content": "child progress",
-                        }
-                    )
-                    + "\n"
-                    "[/TOOL_CALL]"
-                ),
+                text="",
                 backend=self.name,
+                tool_use_blocks=[{
+                    "id": "call-compact-write-2",
+                    "name": "write_file",
+                    "input": {
+                        "path": str(self.output_path),
+                        "content": "child progress",
+                    },
+                }],
                 usage={"input_tokens": 500, "output_tokens": 100},
             )
         return ModelResponse(

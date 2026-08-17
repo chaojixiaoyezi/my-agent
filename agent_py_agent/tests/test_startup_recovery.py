@@ -56,6 +56,9 @@ def mock_agent():
     agent.config.gateway_stale_seconds = 120
     agent.root = Path("/tmp/test_agent")
     agent.subagents = Mock()
+    # RUN-01(_reconcile_stale_attempts) 会读 runtime_db.recover_stale_attempts——
+    # 预置空返回值, 否则 MagicMock 真值不可迭代 TypeError。
+    agent.subagents.runtime_db.recover_stale_attempts.return_value = []
     agent.local_store = Mock()
     return agent
 

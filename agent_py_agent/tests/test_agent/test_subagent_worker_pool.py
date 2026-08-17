@@ -7,6 +7,7 @@ from pathlib import Path
 
 from agent_py_agent.agent.agent_core.orchestration.dispatch.params import DispatchParams
 from agent_py_agent.agent.backends import BaseBackend, ModelResponse
+from .backends import _TestNativeBackend
 from agent_py_agent.agent.capability import CapabilityRouter
 from agent_py_agent.agent.capability.config import CapabilityConfig
 from agent_py_agent.agent.core import SimpleAgent
@@ -40,12 +41,12 @@ def _accepted_result(summary: str) -> ModelResponse:
     )
 
 
-class CountingAcceptedBackend(BaseBackend):
+class CountingAcceptedBackend(_TestNativeBackend):
     def __init__(self):
         self.lock = threading.Lock()
         self.calls = 0
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         assert "[SUBAGENT_RESULT]" in prompt
         with self.lock:
             self.calls += 1
@@ -54,12 +55,12 @@ class CountingAcceptedBackend(BaseBackend):
         return _accepted_result(f"worker call {call_no}")
 
 
-class OneSlowOneFastBackend(BaseBackend):
+class OneSlowOneFastBackend(_TestNativeBackend):
     def __init__(self):
         self.lock = threading.Lock()
         self.calls = 0
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         assert "[SUBAGENT_RESULT]" in prompt
         with self.lock:
             self.calls += 1
