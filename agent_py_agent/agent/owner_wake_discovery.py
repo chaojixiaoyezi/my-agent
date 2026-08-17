@@ -238,15 +238,21 @@ def _owner_fact_kind(owner_home: Path) -> str:
 
 
 def _owner_has_hard_facts(owner_home: Path) -> bool:
+    # 2026-08-17 #233 第 0 步止血：移除「任务状态 = 唤醒资格」两条
+    # (_has_unfinished_subagent_run / _has_unfinished_task_ledger)——它们把
+    # 常驻通道产生的大量 active 对话任务（525 条，runtime.db 无权威 run 记录）
+    # 判为 hard 事实 → 唤醒轮每 2 分钟拉起 → 烧满配额 + gateway 50% CPU
+    # (1.10 实证)。对齐 6 项目调研共识（长期助手/通道运行时/会话运行时/终端交互/
+    # deepseek-harness/轻量运行时 均无「扫任务状态拉起模型」）：唤醒只认信号源。
+    # 中断恢复改由 dispatcher 阶段按「近期 interrupted_run 证据 + 新鲜度 +
+    # 重试上限」写 wake_intent 接入（#233 规格 step 3），不再全量扫任务状态。
     if any(
         _has_pending_wake_signal(store_root) or _has_enabled_progress_policy(store_root)
         for store_root in _store_roots(owner_home)
     ):
         return True
     return (
-        _has_unfinished_subagent_run(owner_home)
-        or _has_unfinished_task_ledger(owner_home)
-        or _has_incomplete_watch_lane(owner_home)
+        _has_incomplete_watch_lane(owner_home)
         or _has_due_scheduler_fact(owner_home)
     )
 
@@ -444,31 +450,6 @@ def _main_run_row_for_task(repo: RuntimeRepository, task_id: str):
     取最新一条；无权威记录 → None（发现层不据此裁决，照旧驱动）。
     """
     return repo.main_agent_run_for_task(task_id)
-
-
-def _has_unfinished_subagent_run(owner_home: Path) -> bool:
-    """owner 名下在册子代理 run 是否有未完成的(agents/<run-id>/state.json 的 status)。
-
-    ``owner_home/agents`` 是 owner 级全局投影，不是 SubAgentManager 的工作区。
-    权威任务记录会分布在 workspace runtime 下，而这个投影专门用来让
-    owner 级扫描不用猜每个 workspace slug。
-
-    倒序扫(run 目录名带时间戳,新的更可能未完成),命中即停;坏文件跳过。"""
-    agents_dir = owner_home / "agents"
-    if not agents_dir.is_dir():
-        return False
-    try:
-        task_files = sorted(agents_dir.glob("*/state.json"), reverse=True)
-    except OSError:
-        return False
-    for path in task_files:
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, ValueError):
-            continue
-        if isinstance(payload, dict) and str(payload.get("status") or "").strip().upper() in _UNFINISHED_RUN_STATUSES:
-            return True
-    return False
 
 
 def unfinished_task_ids(owner_home: Path) -> list[str]:
@@ -707,15 +688,6 @@ def _read_json_object_at(path: Path) -> dict[str, Any]:
     except (OSError, UnicodeError, ValueError):
         return {}
     return payload if isinstance(payload, dict) else {}
-
-
-def _has_unfinished_task_ledger(owner_home: Path) -> bool:
-    """owner 名下普通任务账本是否有未完成的(见 unfinished_task_ids)。
-
-    主代理要靠 tick 驱动续跑;gateway 重启/逐出后发现层不认 RUNNING 账本 → owner
-    永不进池 → 任务停摆(真机:celery 复刻 RUNNING 6h 无人驱动,主代理会话停在闸门
-    拦截处)。"""
-    return bool(unfinished_task_ids(owner_home))
 
 
 def _has_incomplete_watch_lane(owner_home: Path) -> bool:
