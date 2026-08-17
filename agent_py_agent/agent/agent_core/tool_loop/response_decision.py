@@ -714,14 +714,20 @@ def _required_action_no_tool_call_decision(
 ) -> ToolLoopResponseDecision | None:
     from ...contracts.required_actions import (
         render_required_action_guidance,
-        required_action_assessment_failed,
         required_action_no_tool_decision,
     )
 
     snapshot = getattr(request.params, "effective_contract_snapshot", None)
     if not tuple(
         getattr(snapshot, "required_actions", ()) or ()
-    ) and not required_action_assessment_failed(snapshot):
+    ):
+        # 无显式义务(actions 为空)时 gate 唯一可能产出就是"评估失败→blocked";
+        # 评估失败(弱模型/供应商不支持结构化输出)不能一票否决每个无工具
+        # 回合——真机 2026-08-17 MiniMax: 纯聊天消息被 REQUIRED_ACTION_
+        # ASSESSMENT_FAILED 拦成 blocked, TUI 每条消息都显示"任务未完成"。
+        # 显式合同任务走 structured_contract 路径(actions 非空)不受影响;
+        # 评估成功且 requires_action=False 的 informational 轮由
+        # _no_action_gate_active 单独管理(拦截错误工具调用, 见 round_execution)。
         return None
     # 本 run 真实成功执行证据(executed_tools 非空) → 义务已有动作证据,
     # 收口不再拿评估拆解粒度卡死已完成任务(G4-001 真机铁证: 评估拆 3 个
@@ -741,17 +747,15 @@ def _required_action_no_tool_call_decision(
         )
         return ToolLoopResponseDecision("continue", None, [], request.counters)
     actions = tuple(getattr(snapshot, "required_actions", ()) or ())
-    if not actions and required_action_assessment_failed(snapshot):
-        reason = "REQUIRED_ACTION_ASSESSMENT_FAILED"
-    else:
-        reason = next(
-            (
-                str(item.blocked_reason or "").strip()
-                for item in actions
-                if item.status == outcome and str(item.blocked_reason or "").strip()
-            ),
-            f"REQUIRED_ACTION_{outcome.upper()}",
-        )
+    # 到达此处必有 actions(空 actions 已在入口 return None)。
+    reason = next(
+        (
+            str(item.blocked_reason or "").strip()
+            for item in actions
+            if item.status == outcome and str(item.blocked_reason or "").strip()
+        ),
+        f"REQUIRED_ACTION_{outcome.upper()}",
+    )
     return ToolLoopResponseDecision(
         "break",
         replace(

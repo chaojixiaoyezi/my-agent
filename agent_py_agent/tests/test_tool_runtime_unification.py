@@ -932,3 +932,63 @@ def test_controlled_exec_boolean_apply_has_exact_effect_mapping() -> None:
 
     assert tool_effect_for_runtime_policy(policy, {"apply": False}) == "read_only"
     assert tool_effect_for_runtime_policy(policy, {"apply": True}) == "dangerous"
+
+
+def test_assessment_failed_no_actions_does_not_block_plain_turn() -> None:
+    """真机 2026-08-17 MiniMax: 语义评估失败(弱模型出不了严格 JSON)+ 无显式
+    义务时, 无工具回合不得被 REQUIRED_ACTION_ASSESSMENT_FAILED 拦成 blocked
+    (TUI 每条聊天消息都显示"任务未完成"); 应放行交给主循环与其余验收门。
+    显式合同任务(actions 非空)仍走原门, 不受影响。"""
+    from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
+        _NoToolCallsRequest,
+        _required_action_no_tool_call_decision,
+    )
+
+    contract = build_effective_contract_snapshot(
+        run_id="run-assessment-failed-chat",
+        layers=(),
+        required_actions=(),
+        required_action_assessment={
+            "source": "model_structured",
+            "error": "TypeError: bad json",
+            "requires_action": None,
+        },
+    )
+    params = SimpleNamespace(
+        effective_contract_snapshot=contract,
+        executed_tools=[],
+        tool_context=[],
+    )
+    request = _NoToolCallsRequest(
+        agent=SimpleNamespace(),
+        params=params,
+        response=ModelResponse(text="2", backend="test"),
+        counters=SimpleNamespace(),
+        has_protected_marker=False,
+    )
+    assert _required_action_no_tool_call_decision(request) is None
+
+
+def test_required_action_gate_still_blocks_open_actions_without_evidence() -> None:
+    """护栏不因上一条修复失效: 有 open action 且无执行证据仍 block。"""
+    contract = build_effective_contract_snapshot(
+        run_id="run-open-action",
+        layers=(),
+        required_actions=[
+            RequiredAction(
+                action_id="a1",
+                kind="execute",
+                description="run the tests",
+                success_criteria="tests pass",
+                allowed_tools=("run_command",),
+                effect_ceiling="mutating",
+                acceptable_exits=("blocked",),
+                source_turn_id="turn-1",
+            )
+        ],
+        required_action_assessment={
+            "source": "structured_contract",
+            "requires_action": True,
+        },
+    )
+    assert required_action_no_tool_decision(contract) in {"repair", "unfinished", "blocked"}
