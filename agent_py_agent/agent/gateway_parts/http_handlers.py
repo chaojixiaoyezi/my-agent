@@ -624,7 +624,9 @@ def _http_conversation_id(body: dict) -> str:
 
 
 def _first_conversation_id(payload: dict) -> str:
-    for key in ("conversation_id", "session_id", "thread_id", "channel_conversation_id"):
+    # 2026-08-17 TUI 历史恢复实锤: TUI ask 传 chat_session_id, 之前不在
+    # 识别列表 → conversation 回退 default → /history 按 session 匹配不到。
+    for key in ("conversation_id", "session_id", "thread_id", "channel_conversation_id", "chat_session_id"):
         value = str(payload.get(key) or "").strip()
         if value:
             return value
@@ -658,7 +660,7 @@ def handle_history(handler, server) -> None:
     if not _can_read_owner_history(handler, server, access):
         handler._send_json(403, {"error": "forbidden"})
         return
-    done_dir = server.paths.requests / "done"
+    done_dir = server.paths.done
     if not done_dir.is_dir():
         handler._send_json(200, {"session": session_id, "messages": []})
         return
@@ -675,7 +677,8 @@ def handle_history(handler, server) -> None:
         conv = req.get("conversation") or {}
         if str(conv.get("channel_conversation_id") or "") != session_id:
             continue
-        prompt = str(req.get("prompt") or "").strip()
+        # HTTP /ask 的 done 文件 prompt 在 goal 字段（2026-08-17 真机实核）
+        prompt = str(req.get("prompt") or req.get("goal") or "").strip()
         if not prompt:
             continue
         messages.append({"role": "user", "text": prompt})
