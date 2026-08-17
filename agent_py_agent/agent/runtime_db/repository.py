@@ -1861,6 +1861,24 @@ class RuntimeRepository(
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def stale_claimed_wake_intents(
+        self, *, limit: int = 20, now: float | None = None
+    ) -> list[dict[str, Any]]:
+        """claimed + 租约已过期（lease_until<=now）的 intent（bounded reaper 输入）。
+
+        群定稿（seq2481/2484①）：回收执行者每轮按此查询限量处理——无 dispatch/
+        无 attempt/无已知副作用 → CAS release 回 pending；有 attempt 或副作用
+        未知 → mark reconciliation，禁止自动重放。租约未过期的一律不碰。
+        """
+        now = time.time() if now is None else now
+        with self._runtime_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM wake_intents WHERE status = 'claimed' AND lease_until <= ?"
+                " ORDER BY lease_until ASC LIMIT ?",
+                (now, int(limit)),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def wake_intent_status_counts(self) -> dict[str, int]:
         """状态计数（审计/验收：525 零调度等证据来源）。"""
         with self._runtime_connection() as conn:

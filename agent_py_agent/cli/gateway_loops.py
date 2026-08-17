@@ -440,6 +440,7 @@ class _BackgroundMainSupervisor:
         self._maybe_write_heartbeat()
         self._maybe_seed_wake_pending_owners()  # #233: shadow 计数，不再拉起
         self._dispatch_due_wake_intents()  # #233: dispatcher 唯一执行入口
+        self._reap_stale_wake_intents()  # #233: bounded reaper（防僵尸卡单）
         reports = self._collect_finished_ticks()
         self._sync_owner_schedulers()
         self._recover_active_watch_harvesters()
@@ -622,6 +623,42 @@ class _BackgroundMainSupervisor:
                 print(f"[gateway-background-main] wake dispatcher: {dispatched} intents claimed", flush=True)
         except Exception as exc:  # noqa: BLE001 dispatcher 异常绝不影响主循环
             _print_gateway_loop_error("gateway_background_main.dispatcher", "wake-dispatcher", exc)
+
+    def _reap_stale_wake_intents(self) -> None:
+        """#233 bounded reaper：回收租约过期的 claimed intent（防僵尸卡单）。
+
+        群定稿（seq2481/2484①）：同主循环内独立 reconciler 函数（不塞进
+        dispatcher claim）。对每个 owner 库限量回收——无 attempt → dispatch
+        终态化 + intent 回 pending（下次 due 再派，覆盖 claim 后崩溃没派出去）；
+        有 attempt/副作用未知 → mark reconciliation 禁自动重放。单库异常
+        不阻断其他。
+        """
+        try:
+            from ..agent.runtime_db.repository import RuntimeRepository
+            from ..agent.runtime_db.schema import runtime_db_path
+            from ..agent.wake_reaper import reap_expired_claimed_intents
+
+            owners_dir = getattr(getattr(self._base_agent, "home_paths", None), "owners_dir", None)
+            if not owners_dir:
+                return
+            limit = _positive_int_config(self._base_agent, "wake_reaper_max_per_tick", default=20)
+            for owner_identity, owner_home in _owner_homes_iter(owners_dir):
+                db_path = runtime_db_path(owner_home)
+                if not db_path.is_file():
+                    continue
+                try:
+                    repo = RuntimeRepository(db_path)
+                    counts = reap_expired_claimed_intents(repo, limit=limit)
+                except Exception:  # noqa: BLE001 单 owner 库异常不阻断其他
+                    continue
+                if sum(counts.values()):
+                    print(
+                        f"[gateway-background-main] wake reaper: "
+                        f"{counts} owner={getattr(owner_identity, 'owner_id', '')}",
+                        flush=True,
+                    )
+        except Exception as exc:  # noqa: BLE001 reaper 异常绝不影响主循环
+            _print_gateway_loop_error("gateway_background_main.reaper", "wake-reaper", exc)
 
     def _sync_owner_schedulers(self) -> None:
         # 登记本唯一入口:registry snapshot(controller claim_due_owners / wake seed 分页种回)。
