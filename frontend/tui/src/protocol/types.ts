@@ -39,10 +39,21 @@ export interface AskAccepted {
   status: "accepted";
 }
 
-/** progress 事件（/progress 投影面） */
+/** progress 事件（/progress 投影面，2026-08-17 真机实核结构：
+ *  assistant_commentary 带 text；tool_progress 是结构化字段
+ *  level/round/call_index/tool/phase/status/detail——不是 {kind,text}） */
 export type ProgressEvent =
   | { kind: "assistant_commentary"; text: string }
-  | { kind: "tool_progress"; text: string; round?: number };
+  | {
+      kind: "tool_progress";
+      level?: string;
+      round?: number;
+      call_index?: number;
+      tool?: string;
+      phase?: string;
+      status?: string;
+      detail?: string;
+    };
 
 /** GET /progress 响应 */
 export interface ProgressResponse {

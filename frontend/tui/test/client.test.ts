@@ -17,16 +17,32 @@ function fixture(name: string): string {
   return readFileSync(join(FIX, name), "utf-8");
 }
 
-/** 从真实 chunks.jsonl 构造分页的 /progress mock 响应 */
+/** 从真实 chunks.jsonl 构造分页的 /progress mock 响应（模拟 /progress 投影输出：
+ *  tool_progress 为结构化字段 level/round/call_index/tool/phase/status/detail，
+ *  2026-08-17 真机实核；assistant_commentary 带 text） */
 function progressPages(chunksFile: string, pageSize = 3) {
   const rows = fixture(chunksFile)
     .split("\n")
     .filter((l) => l.trim())
     .map((l) => JSON.parse(l));
-  // 只投影 contract 允许的 kind（assistant_commentary / tool_progress）
-  const projected = rows
+  const projected: ProgressEvent[] = rows
     .filter((r) => r.kind === "tool_progress" || r.kind === "assistant_commentary")
-    .map((r) => ({ kind: r.kind, text: r.text, round: r.round }));
+    .map((r) => {
+      if (r.kind === "assistant_commentary") {
+        return { kind: "assistant_commentary" as const, text: String(r.text ?? "") };
+      }
+      const p = r.progress ?? {};
+      return {
+        kind: "tool_progress" as const,
+        level: p.level ?? r.verbose_level,
+        round: p.round ?? r.round,
+        call_index: p.call_index ?? r.call_index,
+        tool: p.tool ?? r.tool,
+        phase: p.phase ?? r.phase,
+        status: p.status ?? r.status,
+        detail: p.detail ?? r.detail,
+      };
+    });
   const pages: { events: ProgressEvent[]; next: number }[] = [];
   for (let i = 0; i < projected.length; i += pageSize) {
     pages.push({ events: projected.slice(i, i + pageSize), next: Math.min(i + pageSize, projected.length) });

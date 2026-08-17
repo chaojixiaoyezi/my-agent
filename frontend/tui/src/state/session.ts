@@ -87,13 +87,13 @@ export function sessionReducer(state: SessionState, action: SessionAction): Sess
       if (state.phase === "polling" || state.phase === "submitting") {
         return { ...state, queuedPrompt: action.prompt };
       }
-      const messages =
-        state.phase === "done" || state.phase === "error"
-          ? [...state.messages, { role: "user" as const, text: action.prompt }]
-          : [...state.messages, { role: "user" as const, text: action.prompt }];
+      const messages = [...state.messages, { role: "user" as const, text: action.prompt }];
       return {
         ...state,
-        phase: "submitting",
+        // 2026-08-17 真机修复：phase 直接进 polling（ask 后立即轮询，
+        // progress/done 都按 polling 放行；旧代码停在 submitting 导致
+        // 工具行事件全被丢弃）
+        phase: "polling",
         messages,
         requestId: "",
         error: "",
@@ -102,7 +102,7 @@ export function sessionReducer(state: SessionState, action: SessionAction): Sess
     }
     case "progress": {
       if (state.phase !== "polling") return state;
-      const events = action.events.map((e) => e.text);
+      const events = action.events.map(progressEventToLine);
       const last = state.messages[state.messages.length - 1];
       if (!last || last.role !== "assistant") {
         // 观察流先于最终文本到达：补一条空的 assistant 消息承载工具行
@@ -146,6 +146,19 @@ export function sessionReducer(state: SessionState, action: SessionAction): Sess
     default:
       return state;
   }
+}
+
+/** progress 事件 → 显示行（tool_progress 结构化 → `[工具] round=N #C tool 状态: detail`） */
+export function progressEventToLine(ev: ProgressEvent): string {
+  if (ev.kind === "assistant_commentary") {
+    return ev.text;
+  }
+  const round = ev.round !== undefined ? `round=${ev.round}` : "";
+  const call = ev.call_index !== undefined ? ` #${ev.call_index}` : "";
+  const tool = ev.tool ?? "";
+  const status = ev.status ?? ev.phase ?? "";
+  const detail = ev.detail ? `: ${ev.detail}` : "";
+  return `[工具] ${round}${call} ${tool} ${status}${detail}`.trim();
 }
 
 /** 提交动作的参数（供 UI 调用 client.ask） */
