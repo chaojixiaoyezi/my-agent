@@ -177,8 +177,29 @@ def _handle_ctrl_o_keybinding(event, params: TuiCreateKeybindingsParams) -> None
 
 
 def _handle_alt_r_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
-    """会话运行时 Alt+R(toggle raw output)映射为 /verbose 档位切换。"""
-    _tui_handle_command(params=_handle_command_params(params, "/verbose"))
+    """会话运行时 Alt+R(toggle raw output)映射为 /verbose 档位循环 off→on→full→off。
+
+    读当前会话的持久 verbose_level(与 control_runtime._execute_local_verbose
+    同一线程身份), 结构化算出下一档再发显式命令——不做自然语言解析。
+    """
+    current = "off"
+    try:
+        store = getattr(params.agent, "conversation_store", None)
+        if store is not None:
+            thread = store.get_or_create_thread(
+                {
+                    "canonical_user_id": "local-agent",
+                    "channel": "chat",
+                    "channel_conversation_id": params.current_session_id or "default",
+                    "channel_user_id": "local-agent",
+                    "title": "会话设置",
+                }
+            )
+            current = str(getattr(thread, "verbose_level", "off") or "off").strip().lower()
+    except Exception:  # noqa: BLE001 读不到按 off 起步, 不拦切换
+        current = "off"
+    next_level = {"off": "on", "on": "full", "full": "off"}.get(current, "on")
+    _tui_handle_command(params=_handle_command_params(params, f"/verbose {next_level}"))
 
 
 def _request_exit(params: TuiCreateKeybindingsParams) -> None:
