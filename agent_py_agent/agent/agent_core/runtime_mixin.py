@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
@@ -315,6 +316,9 @@ class SimpleAgentRuntimeMixin:
         return self.memory.search(query, top_k or self.config.memory_top_k)
 
 
+_WAKE_ACCEPT_LOGGER = logging.getLogger("agent.runtime.wake_accept")
+
+
 def _bind_main_agent_authority(agent, params: RunParams) -> RunParams:
     """MANAGED 下主代理 run 登记权威链（seq 255 单一闭合：root/main AgentRun）。
 
@@ -370,7 +374,56 @@ def _bind_main_agent_authority(agent, params: RunParams) -> RunParams:
         attempt_id = str(attempt["attempt_id"] or "").strip()
     if not attempt_id:
         return params
+    # #233-3/4 acceptance 接线：仅后台 owner scheduler 驱动 run（source=
+    # background_main_agent）建 attempt 后，若该 owner/task 存在「已 claim 但未
+    # accept」的 wake dispatch（dispatcher 已落 outbox，执行席可靠接收），
+    # accept_wake_dispatch 幂等确认 → intent claimed→handed_off + dispatch→accepted。
+    # 只认结构化信号（source 精确匹配 + pending dispatch 存在），不做任何文本判断；
+    # 用户手动 run（source=gateway/cli_run 等）不触碰 wake 状态机（pending 查询
+    # 按 owner/task/run 精确过滤，手动 run 若无 pending dispatch 自然 noop）。
+    # 失败 fail-silent：accept 异常绝不影响 run 主流程（dispatch 保持 dispatched，
+    # reaper 兜底按 lease/attempt 证据回收）。
+    _accept_wake_dispatch_for_run(repo, params, owner_id, task_id, attempt_id)
     return replace(params, attempt_id=attempt_id)
+
+
+def _accept_wake_dispatch_for_run(
+    repo: object,
+    params: RunParams,
+    owner_id: str,
+    task_id: str,
+    attempt_id: str,
+    *,
+    now: float | None = None,
+) -> None:
+    """建 attempt 后按 pending dispatch 幂等 accept（#233-3/4，fail-silent）。"""
+    try:
+        if str(getattr(params, "source", "") or "").strip() != "background_main_agent":
+            return  # 只对 owner scheduler 后台 run 接线（结构化判据，非文本）
+        if not callable(getattr(repo, "pending_dispatch_for_scope", None)):
+            return  # LOCAL_UNMANAGED / 旧 repo 无该方法 → 不接线
+        run_id = str(getattr(params, "run_id", "") or "").strip()
+        pending = repo.pending_dispatch_for_scope(owner_id, task_id, run_id, now=now)
+        if pending is None:
+            return  # 该 run 无 pending dispatch（普通后台轮/无 wake intent）
+        outcome = repo.accept_wake_dispatch(
+            str(pending["dispatch_id"] or ""),
+            handoff_id=str(pending["handoff_id"] or ""),
+            attempt_id=attempt_id,
+            now=now,
+        )
+        if not outcome.get("accepted"):
+            _WAKE_ACCEPT_LOGGER.warning(
+                "wake dispatch accept rejected: %s reason=%s",
+                pending.get("dispatch_id"),
+                outcome.get("reason"),
+            )
+    except Exception:  # noqa: BLE001 accept 失败绝不影响 run 主流程
+        _WAKE_ACCEPT_LOGGER.warning(
+            "wake dispatch accept failed (fail-silent): task=%s attempt=%s",
+            task_id, attempt_id,
+            exc_info=True,
+        )
 
 
 # 审计账本终态别名：运行时语义 → agent_runs 终态串（只认结构化字段）。

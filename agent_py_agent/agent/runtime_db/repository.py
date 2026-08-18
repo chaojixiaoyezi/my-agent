@@ -2267,6 +2267,32 @@ class RuntimeRepository(
             )
         return {"accepted": True, "idempotent": False, "intent_id": d["intent_id"]}
 
+    def pending_dispatch_for_scope(
+        self, owner_id: str, task_id: str, run_id: str = "", *, now: float | None = None
+    ) -> dict[str, Any] | None:
+        """owner/task/run 作用域下「已 claim 但未 accept」的 dispatch（acceptance 接线输入）。
+
+        #233-3/4：执行席（owner scheduler）建 attempt 前查询——返回关联 intent
+        status='claimed' 且 dispatch status='dispatched'、lease 未过期的行
+        （含 dispatch_id/handoff_id），供 _bind_main_agent_authority 建 attempt 后
+        accept_wake_dispatch 幂等确认。无 pending dispatch → None（普通 run 不
+        触碰 wake 状态机）。只读查询，不做任何状态迁移。
+        """
+        now = time.time() if now is None else now
+        with self._runtime_connection() as conn:
+            row = conn.execute(
+                "SELECT wd.dispatch_id, wd.handoff_id, wd.intent_id"
+                " FROM wake_dispatches wd"
+                " JOIN wake_intents wi ON wi.intent_id = wd.intent_id"
+                " WHERE wi.owner_id = ? AND wi.task_id = ?"
+                " AND (? = '' OR wi.run_id = ?)"
+                " AND wi.status = 'claimed' AND wd.status = 'dispatched'"
+                " AND wd.lease_until > ?"
+                " ORDER BY wd.created_at ASC LIMIT 1",
+                (owner_id, task_id, run_id, run_id, now),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def has_unfinished_attempt_for_scope(
         self, owner_id: str, task_id: str, run_id: str = ""
     ) -> bool:
