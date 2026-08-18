@@ -19,6 +19,7 @@ export type RenderRowKind =
   | "list"
   | "quote"
   | "hr"
+  | "table"
   | "empty";
 
 export interface RenderRow {
@@ -48,10 +49,10 @@ export function toolLineToText(line: ToolLine): string {
 export function messageToRows(msg: ChatMessage, contentWidth: number): RenderRow[] {
   const rows: RenderRow[] = [];
   if (msg.role === "user") {
-    // 首行带 ● 前缀（视觉与原 Text wrap 一致），其余行纯文本
+    // 首行带 ❯ 前缀（2026-08-18 free-code 风格：❯ 表示用户输入），其余行纯文本
     const lines = wrapByWidth(msg.text, Math.max(2, contentWidth - 2));
     lines.forEach((line, i) => {
-      rows.push({ kind: "user", text: i === 0 ? `● ${line}` : line });
+      rows.push({ kind: "user", text: i === 0 ? `❯ ${line}` : line });
     });
     return rows;
   }
@@ -71,12 +72,52 @@ export function messageToRows(msg: ChatMessage, contentWidth: number): RenderRow
   return rows;
 }
 
+/** 表格行 → 对齐渲染行（free-code/claude-code 风格：│ 列 │ 列 │ + 表头分隔线）
+ * 列宽 = 该列最大 displayWidth + 2 padding；超宽列截断（不劈中文）。 */
+function tableToRenderRows(block: { rows?: string[][] }, contentWidth: number): RenderRow[] {
+  const raw = block.rows ?? [];
+  if (raw.length === 0) return [];
+  const colCount = Math.max(...raw.map((r) => r.length), 0);
+  if (colCount === 0) return [];
+  const cols = Array.from({ length: colCount }, (_, c) => raw.map((r) => r[c] ?? ""));
+  // 可用宽度：边框字符（每列 | + 分隔）外留 1 边距
+  const borderWidth = colCount + 1;
+  const usable = Math.max(8, contentWidth - borderWidth);
+  // 每列目标宽度：自然宽（含 2 padding）→ 超可用时按比例压缩
+  const natural = cols.map((cells) => Math.max(2, ...cells.map((cell) => displayWidth(cell) + 2)));
+  const totalNatural = natural.reduce((a, b) => a + b, 0);
+  const widths = natural.map((w) =>
+    totalNatural <= usable ? w : Math.max(2, Math.floor((w / totalNatural) * usable)),
+  );
+  const renderCells = (cells: string[]): string => {
+    const padded = cells.map((cell, c) => {
+      const max = widths[c] ?? 2;
+      const fit = truncateByWidth(cell, Math.max(1, max - 2)).text;
+      return " " + fit + " ".repeat(Math.max(0, max - 2 - displayWidth(fit))) + " ";
+    });
+    return `│${padded.join("│")}│`;
+  };
+  const out: RenderRow[] = [];
+  raw.forEach((cells, i) => {
+    out.push({ kind: "table", text: renderCells(cells) });
+    if (i === 0) {
+      // 表头下分隔线
+      const seg = widths.map((w) => "─".repeat(w));
+      out.push({ kind: "table", text: `├${seg.join("┼")}┤` });
+    }
+  });
+  return out;
+}
+
 /** markdown 文本 → 渲染行（块级展开：代码块文本边框、其余按宽度 wrap） */
 function markdownRowsToRenderRows(text: string, contentWidth: number): RenderRow[] {
   const rows: RenderRow[] = [];
   const blocks = markdownToLines(text);
   for (const block of blocks) {
     switch (block.kind) {
+      case "table":
+        rows.push(...tableToRenderRows(block, contentWidth));
+        break;
       case "code": {
         // 文本边框（视觉等价 Box border，但可逐行裁剪）
         const inner = Math.max(2, contentWidth - 4);
@@ -125,7 +166,12 @@ function markdownRowsToRenderRows(text: string, contentWidth: number): RenderRow
 }
 
 /**
- * 全部消息扁平化为渲染行（消息末行打 msgEnd 标）。
+ * 全部消息扁平化为渲染行。
+ * 三一致原则（2026-08-18 复读根修）：消息间距必须是扁平行的一部分——
+ * 每条消息后追加一条空行（msgEnd 标记），行模型行数 == 实际渲染行数。
+ * 旧实现用 RenderRowLine 的 marginBottom=1 做间距：margin 占 Ink 渲染行但
+ * 不计入行模型 → 视口内渲染行数 > 视口高度 → 终端滚行 → 屏幕残留旧帧 →
+ * 同一文本出现在两处（真机「报告交付复读」根因）。
  * 纯函数：App 用 useMemo(messages, contentWidth) 缓存——长对话只重算增量。
  */
 export function flattenMessages(messages: ChatMessage[], contentWidth: number): FlattenedRow[] {
@@ -135,6 +181,8 @@ export function flattenMessages(messages: ChatMessage[], contentWidth: number): 
     for (let i = 0; i < rows.length; i += 1) {
       flat.push({ row: rows[i], msgEnd: i === rows.length - 1 });
     }
+    // 消息间距 = 扁平空行（计入行数；渲染层不再用 margin）
+    flat.push({ row: { kind: "empty", text: "" }, msgEnd: true });
   }
   return flat;
 }

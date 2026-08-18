@@ -240,30 +240,34 @@ export function App({ client, sessionId, model, history }: AppProps) {
   );
 
   const messages = state.messages;
-  // 消息滚屏（完整版②）：消息区高度 = 终端行数 - 固定区（标题/输入/状态/提示），
-  // 始终显示最近的消息（窗口滚动语义）
+  // 消息滚屏（完整版②）：消息区高度 = 终端行数 - 固定区（标题/分隔线/状态/帮助/输入），
+  // 始终显示最近的消息（窗口滚动语义）。2026-08-18 free-code 布局：分隔线分层。
   const { stdout } = useStdout();
   const rows = stdout.rows ?? 24;
   const columns = stdout.columns ?? 80;
-  const fixedRows = 6; // 标题1 + 输入1 + 状态1 + 提示1 + 边距2
+  const fixedRows = 8; // 标题1 + 标题分隔线1 + 状态1 + 帮助1 + 输入分隔线1 + 输入1 + 边距2
   const msgHeight = Math.max(5, rows - fixedRows);
   // 未完成项① 虚拟滚动：行展开缓存（messages/宽度不变不重算）+ 贴底视口切片。
   // 长对话只渲染视口内的行；行组件 memo 化后增量渲染只动变化行。
   const contentWidth = Math.max(20, columns - 2); // paddingX=1 两侧
   const flatRows = useMemo(() => flattenMessages(messages, contentWidth), [messages, contentWidth]);
   const visibleRows = useMemo(() => viewportSlice(flatRows, msgHeight), [flatRows, msgHeight]);
+  const divider = "─".repeat(Math.max(8, columns - 2));
 
   return (
     <Box flexDirection="column" paddingX={1}>
-      <Box marginBottom={1}>
+      {/* 标题 + 分隔线（free-code 分层） */}
+      <Box marginBottom={1} flexDirection="column">
         <Text bold color={theme.colors.heading}>
           myagent TUI
         </Text>
-        <Text color={theme.colors.dim}> (gateway client)</Text>
+        <Text color={theme.colors.border}>{divider}</Text>
       </Box>
-      <Box flexDirection="column" marginBottom={1}>
+      {/* 消息区（虚拟滚动视口，行模型=渲染行数，2026-08-18 复读根修） */}
+      <Box flexDirection="column">
         <MessageList rows={visibleRows} theme={theme} showTools={showTools} />
       </Box>
+      {/* 状态条 + 帮助键提示（free-code PromptInputFooter 风格） */}
       <StatusBar
         phase={state.phase}
         model={model}
@@ -274,11 +278,16 @@ export function App({ client, sessionId, model, history }: AppProps) {
         reconnecting={reconnecting}
         theme={theme}
       />
-      <Text color={theme.colors.dim}>输入消息回车发送 · Esc 退出 · /show 切换工具行显示</Text>
-      {/* 2026-08-18 照搬 free-code：输入框贴底（消息区/状态/提示在上） */}
-      <Box marginTop={1}>
-        <Text color={theme.colors.prompt}>❯ </Text>
-        <MultiLineInput value={input} onChange={setInput} onSubmit={onSubmit} theme={theme} />
+      <Text color={theme.colors.dim}>
+        Enter 发送 · Esc 退出 · /show 切换工具行 · /theme 换肤
+      </Text>
+      {/* 2026-08-18 照搬 free-code：输入框贴底 + 分隔线（打字区域视觉分层） */}
+      <Box marginTop={1} flexDirection="column">
+        <Text color={theme.colors.border}>{divider}</Text>
+        <Box>
+          <Text color={theme.colors.prompt}>❯ </Text>
+          <MultiLineInput value={input} onChange={setInput} onSubmit={onSubmit} theme={theme} />
+        </Box>
       </Box>
     </Box>
   );
