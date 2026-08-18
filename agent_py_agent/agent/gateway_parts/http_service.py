@@ -30,6 +30,7 @@ from .http_handlers import (
     handle_session_channels,
     handle_status,
     handle_stop,
+    handle_stream,
 )
 from .io import update_json_file_atomic
 
@@ -114,6 +115,10 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
             # `/progress` 只读 typed event，并在 handler 内复用 `/result` 的 owner 权限事实。
             self._handle_progress()
             return
+        if self.path.startswith("/stream/"):
+            # `/stream/<id>` SSE 流式端点（2026-08-18 B 方案：TUI 长任务不超时）
+            self._handle_stream()
+            return
         if self.path.startswith("/history"):
             # `/history` 只读 owner-scoped 会话历史（TUI 重启接续，2026-08-17）
             self._handle_history()
@@ -184,6 +189,9 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
 
     def _handle_progress(self) -> None:
         handle_progress(self, _server_instance)
+
+    def _handle_stream(self) -> None:
+        handle_stream(self, _server_instance)
 
     def _handle_ask(self) -> None:
         handle_ask(self, _server_instance, _generate_request_id)

@@ -43,6 +43,25 @@ const DEFAULT_RECONNECT_WINDOW_MS = 120000;
 // 无请求级超时则重连机制整体失效。10s 上限足够单次轮询往返。
 const DEFAULT_REQUEST_TIMEOUT_MS = 10000;
 
+/** SSE 帧解析：event: X\ndata: {...}\n\n → {event, data}；非事件帧返回 null */
+function parseSseFrame(frame: string): { event: string; data: unknown } | null {
+  let event = "";
+  let data = "";
+  for (const line of frame.split("\n")) {
+    if (line.startsWith("event: ")) {
+      event = line.slice(7).trim();
+    } else if (line.startsWith("data: ")) {
+      data += line.slice(6);
+    }
+  }
+  if (!event || !data) return null;
+  try {
+    return { event, data: JSON.parse(data) };
+  } catch {
+    return null;
+  }
+}
+
 /** 断线类错误判定：fetch 连接失败（network）或网关 5xx（重启窗口常见） */
 function isRetryableNetworkError(err: unknown): boolean {
   if (!err || typeof err !== "object" || !("kind" in err)) return false;
@@ -265,6 +284,92 @@ export class TuiHttpClient {
         throw { kind: "timeout", message: `poll timeout: ${requestId}` } satisfies ClientError;
       }
       await sleep(this.options.pollIntervalMs);
+    }
+  }
+
+  /**
+   * 流式收尾（2026-08-18 B 方案，对齐 codex/free-code 推送架构）：
+   * fetch /stream/<id> 读 SSE——progress 增量事件 + done 终态事件。
+   * 无轮询预算：长任务（几十轮工具）随便跑，流不断就一直跟；
+   * 断线走窗口退避重连（?since=cursor 续传，不丢不重）。
+   * 完成判定唯一权威 = done 事件（服务端 responses 文件终态）。
+   */
+  async streamUntilDone(
+    requestId: string,
+    onEvents?: (events: ProgressEvent[]) => void,
+    options?: { signal?: AbortSignal; onNetworkRetry?: (attempt: number) => void },
+  ): Promise<{ final: ResultResponse; events: ProgressEvent[]; requestId: string }> {
+    const collected: ProgressEvent[] = [];
+    let cursor = 0;
+    let networkAttempts = 0;
+    const startedAt = Date.now();
+    for (;;) {
+      if (options?.signal?.aborted) {
+        throw { kind: "timeout", message: "poll aborted" } satisfies ClientError;
+      }
+      try {
+        // 长连接请求不走 request()（其 10s 请求级超时会误杀流）；只用调用方 signal
+        const res = await this.fetchImpl(
+          `${this.options.baseUrl}/stream/${encodeURIComponent(requestId)}?since=${cursor}`,
+          { method: "GET", signal: options?.signal },
+        );
+        if (res.status === 404) {
+          throw { kind: "http", status: 404, message: `request not found: ${requestId}` } satisfies ClientError;
+        }
+        if (res.status !== 200 || !res.body) {
+          throw { kind: "http", status: res.status, message: `stream HTTP ${res.status}` } satisfies ClientError;
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "";
+        let streamEnded = false;
+        while (!streamEnded) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          let idx: number;
+          while ((idx = buf.indexOf("\n\n")) !== -1) {
+            const frame = buf.slice(0, idx);
+            buf = buf.slice(idx + 2);
+            const parsed = parseSseFrame(frame);
+            if (!parsed) continue;
+            if (parsed.event === "progress") {
+              const data = parsed.data as { events?: ProgressEvent[]; next?: number };
+              const evs = data.events ?? [];
+              const next = Number(data.next ?? cursor);
+              if (evs.length > 0) {
+                collected.push(...evs);
+                onEvents?.(evs);
+              }
+              cursor = Math.max(cursor, next);
+              if (networkAttempts > 0) {
+                networkAttempts = 0;
+                options?.onNetworkRetry?.(0);
+              }
+            } else if (parsed.event === "done") {
+              return { final: parsed.data as ResultResponse, events: collected, requestId };
+            }
+            // heartbeat 忽略（保活帧）
+          }
+        }
+        // 流结束但无 done：服务端异常关闭 → 按断线处理（重连续传）
+        throw { kind: "network", message: "stream ended without done event" } satisfies ClientError;
+      } catch (err) {
+        if (options?.signal?.aborted) throw err;
+        // fetch 原始异常（TypeError 等）包装为结构化 network（对齐 request()）
+        const wrapped =
+          err && typeof err === "object" && "kind" in err ? (err as ClientError) : clientError(err, "network");
+        if (!isRetryableNetworkError(wrapped)) throw wrapped;
+        networkAttempts += 1;
+        options?.onNetworkRetry?.(networkAttempts);
+        if (Date.now() - startedAt >= this.options.reconnectWindowMs) {
+          throw {
+            kind: "network",
+            message: `网关连接中断超过 ${Math.round(this.options.reconnectWindowMs / 1000)}s，请确认网关已启动后重试（/stop 可中断等待）`,
+          } satisfies ClientError;
+        }
+        await sleep(Math.min(30000, this.options.pollIntervalMs * 2 ** Math.min(networkAttempts, 5)));
+      }
     }
   }
 

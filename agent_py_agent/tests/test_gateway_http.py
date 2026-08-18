@@ -503,3 +503,106 @@ class TestConcurrency:
         server.stop()
 
         assert len(errors) == 0 or all(isinstance(e, Exception) for e in errors)
+
+
+class TestStreamEndpoint:
+    """SSE 流式端点（2026-08-18 B 方案）：progress 增量 + done 终态 + 心跳。"""
+
+    @pytest.fixture
+    def mock_paths(self, tmp_path: Path) -> MockGatewayPaths:
+        return MockGatewayPaths(tmp_path)
+
+    @pytest.fixture
+    def http_server(self, mock_paths: MockGatewayPaths):
+        from agent_py_agent.agent.gateway_parts.http_service import GatewayHTTPServer
+
+        port = find_free_port()
+        server = GatewayHTTPServer(port, mock_paths)
+        server.start()
+        yield server, port
+        server.stop()
+
+    def _read_events(self, port: int, request_id: str, max_events: int = 3, timeout: float = 6.0) -> list[str]:
+        """读 SSE 流前 max_events 个事件（逐行解析 event:/data:）。"""
+        import socket
+
+        s = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+        try:
+            s.sendall(f"GET /stream/{request_id} HTTP/1.1\r\nHost: localhost\r\n\r\n".encode())
+            buf = b""
+            events: list[str] = []
+            while len(events) < max_events:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+                # 解析 SSE 帧（event: X\ndata: {...}\n\n）
+                while b"\n\n" in buf:
+                    frame, buf = buf.split(b"\n\n", 1)
+                    lines = frame.decode("utf-8", "replace").split("\n")
+                    event_type = ""
+                    data = ""
+                    for line in lines:
+                        if line.startswith("event: "):
+                            event_type = line[7:].strip()
+                        elif line.startswith("data: "):
+                            data = line[6:].strip()
+                    if event_type:
+                        events.append(f"{event_type}:{data}")
+        finally:
+            s.close()
+        return events
+
+    def test_stream_pushes_progress_then_done(self, http_server, mock_paths: MockGatewayPaths):
+        """chunk 有 progress 事件 + responses 有终态 → 流按 progress→done 推送。"""
+        _, port = http_server
+        rid = "req_stream_1"
+        # request 文件（404 检查需要：三处任一存在即已知请求）
+        (mock_paths.processing / f"{rid}.json").write_text("{}", encoding="utf-8")
+        # 写 progress chunk（2 行公开事件）
+        (mock_paths.processing / f"{rid}.chunks.jsonl").write_text(
+            json.dumps({"kind": "tool_progress", "verbose_level": "on",
+                        "progress": {"tool": "ls", "round": 1, "call_index": 1,
+                                     "phase": "running", "status": "running", "detail": "e1"}})
+            + "\n"
+            + json.dumps({"kind": "assistant_commentary", "text": "思考中"})
+            + "\n",
+            encoding="utf-8",
+        )
+        # 先起流再写终态（验证 done 推送）
+        import threading
+        import urllib.request
+
+        events: list[str] = []
+        done = threading.Event()
+
+        def reader() -> None:
+            events.extend(self._read_events(port, rid, max_events=2, timeout=8.0))
+            done.set()
+
+        t = threading.Thread(target=reader)
+        t.start()
+        time.sleep(0.5)
+        (mock_paths.responses / f"{rid}.json").write_text(
+            json.dumps({"ok": True, "response": "完成", "request_id": rid}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        assert done.wait(10)
+        joined = "\n".join(events)
+        assert "progress:" in joined
+        assert '"tool": "ls"' in joined
+        assert '"思考中"' in joined
+        assert "done:" in joined
+        assert '"完成"' in joined
+
+    def test_stream_unknown_request_returns_404(self, http_server, mock_paths: MockGatewayPaths):
+        """未知 request → 404（与 /result 同语义）。"""
+        import urllib.error
+        import urllib.request
+
+        _, port = http_server
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/stream/nonexistent", timeout=3)
+            assert False, "expected 404"
+        except urllib.error.HTTPError as e:
+            assert e.code == 404

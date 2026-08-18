@@ -261,3 +261,71 @@ describe("TuiHttpClient contract", () => {
     expect(body.conversation.canonical_user_id).toBe("local-agent");
   });
 });
+
+describe("streamUntilDone (2026-08-18 B 方案 SSE 流式)", () => {
+  function sseResponse(frames: string): Response {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(frames));
+        controller.close();
+      },
+    });
+    return { status: 200, body: stream, ok: true } as unknown as Response;
+  }
+
+  it("progress 增量 + done 终态（无轮询预算）", async () => {
+    const frames =
+      'event: progress\ndata: {"request_id":"req-s1","events":[{"level":"on","seq":"0","tool":"ls","round":1,"call_index":1,"phase":"running","status":"running","detail":"e1"}],"next":1}\n\n' +
+      'event: done\ndata: {"ok":true,"response":"完成","request_id":"req-s1"}\n\n';
+    const client = new TuiHttpClient({
+      baseUrl: "http://127.0.0.1:8420",
+      fetchImpl: (async () => sseResponse(frames)) as typeof fetch,
+    });
+    const collected: ProgressEvent[] = [];
+    const outcome = await client.streamUntilDone("req-s1", (events) => collected.push(...events));
+    expect(collected).toHaveLength(1);
+    expect(collected[0].tool).toBe("ls");
+    expect(outcome.final.response).toBe("完成");
+  });
+
+  it("流结束无 done → network 错误（服务端异常关闭按断线处理）", async () => {
+    const client = new TuiHttpClient({
+      baseUrl: "http://127.0.0.1:8420",
+      pollIntervalMs: 1,
+      reconnectWindowMs: 30, // 小窗口：重试耗尽快速抛错
+      fetchImpl: (async () => sseResponse("event: progress\ndata: {}\n\n")) as typeof fetch,
+    });
+    await expect(client.streamUntilDone("req-x")).rejects.toMatchObject({ kind: "network" });
+  });
+
+  it("断线重连：连接失败退避后重试成功", async () => {
+    let calls = 0;
+    const frames =
+      'event: progress\ndata: {"request_id":"req-s2","events":[{"level":"on","seq":"0","tool":"ls","round":1,"call_index":1,"phase":"running","status":"running","detail":"x"}],"next":1}\n\n' +
+      'event: done\ndata: {"ok":true,"response":"ok","request_id":"req-s2"}\n\n';
+    const fetchMock = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) throw new TypeError("fetch failed");
+      return sseResponse(frames);
+    });
+    const client = new TuiHttpClient({
+      baseUrl: "http://127.0.0.1:8420",
+      pollIntervalMs: 1,
+      reconnectWindowMs: 5000,
+      fetchImpl: fetchMock as typeof fetch,
+    });
+    const attempts: number[] = [];
+    const outcome = await client.streamUntilDone("req-s2", undefined, { onNetworkRetry: (n) => attempts.push(n) });
+    expect(outcome.final.response).toBe("ok");
+    expect(calls).toBe(2);
+    expect(attempts).toEqual([1, 0]); // 1 次失败 + 恢复复位
+  });
+
+  it("404 → 结构化 http 错误", async () => {
+    const client = new TuiHttpClient({
+      baseUrl: "http://127.0.0.1:8420",
+      fetchImpl: (async () => ({ status: 404, ok: false }) as unknown as Response) as typeof fetch,
+    });
+    await expect(client.streamUntilDone("req-none")).rejects.toMatchObject({ kind: "http", status: 404 });
+  });
+});

@@ -69,7 +69,9 @@ export function App({ client, sessionId, model, history }: AppProps) {
       try {
         dispatch({ type: "submit", prompt, sessionId });
         const accepted = await client.ask(buildAskRequest(prompt, sessionId, key));
-        const outcome = await client.pollUntilDone(
+        // 2026-08-18 B 方案：SSE 流式收尾（对齐 codex/free-code 推送架构，
+        // 无轮询预算——长任务不超时；断线窗口退避重连续传）
+        const outcome = await client.streamUntilDone(
           accepted.request_id,
           (events) => {
             dispatch({ type: "progress", events });

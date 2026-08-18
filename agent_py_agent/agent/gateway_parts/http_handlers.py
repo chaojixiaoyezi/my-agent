@@ -139,6 +139,95 @@ def handle_result(handler, server) -> None:
 
 # LLM: progress 读取沿用 result 的请求 owner 鉴权；chunk 正文和 response 都不能自证身份。
 # 函数用途: 按行游标返回当前 request 已启用的 typed 工具进度。
+# LLM: SSE 流式端点与 /progress 同源（_read_public_progress_events 游标），
+# 对齐 会话运行时/终端交互 推送架构（2026-08-18 用户裁决 B 方案）——TUI 由
+# 短轮询改流式接收：无轮询预算、长任务不超时。连接保持到终态或客户端断开。
+def handle_stream(handler, server) -> None:
+    """GET /stream/<request_id> → text/event-stream。
+
+    事件：progress（增量 progress 事件）/ done（终态 result）/ heartbeat（15s 保活）。
+    终态判定唯一权威 = responses 文件（与 /result 同源）；客户端断开静默退出。"""
+    parsed = urlsplit(handler.path)
+    request_id = parsed.path[len("/stream/") :]
+    if server is None:
+        handler._send_json(500, {"error": "server not initialized"})
+        return
+    if not request_id or request_id != request_id.replace("/", "").replace("\\", ""):
+        handler._send_json(400, {"error": "invalid request id"})
+        return
+    user_id, permission = _request_identity(handler)
+    access = _ResultAccessContext(request_id, user_id, permission)
+    if not _can_read_finished_request(server.paths, access):
+        handler._send_json(403, {"error": "forbidden", "request_id": request_id})
+        return
+    # 与 /result 同语义：request 文件三处都不在 → 404（客户端区分
+    # 「不存在」vs「处理中」；处理中/终态都走流）
+    request_known = any(
+        (folder / f"{request_id}.json").exists()
+        for folder in (server.paths.inbox, server.paths.processing, server.paths.done)
+    )
+    if not request_known:
+        handler._send_json(404, {"error": "not found", "request_id": request_id})
+        return
+    # 断线重连续传：?since=<cursor> 从指定游标开始推（对齐 /progress 语义）
+    raw_since = parse_qs(parsed.query).get("since", ["0"])[0]
+    try:
+        since = max(0, int(raw_since))
+    except (TypeError, ValueError):
+        handler._send_json(400, {"error": "since must be a non-negative integer"})
+        return
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+    handler.send_header("Cache-Control", "no-cache")
+    handler.send_header("X-Accel-Buffering", "no")  # 反代理缓冲关闭
+    handler.end_headers()
+    last_heartbeat = time.time()
+    try:
+        while True:
+            # 1) 终态判定（权威）：responses 文件存在即终态（含 failed/interrupted）
+            response_path = server.paths.responses / f"{request_id}.json"
+            if response_path.exists():
+                result, _ = _read_payload_report(
+                    response_path, context="gateway.http_stream.result"
+                )
+                _sse_write(
+                    handler,
+                    "done",
+                    result if isinstance(result, dict) else {"ok": True, "request_id": request_id},
+                )
+                return
+            # 2) progress 增量（游标推进，复用 /progress 的过滤/缺口语义）
+            chunk_path = gateway_chunk_path(server.paths, request_id)
+            actual_path = next(
+                (path for path in gateway_chunk_path_candidates(chunk_path) if path.exists()),
+                None,
+            )
+            if actual_path is not None:
+                events, next_cursor = _read_public_progress_events(actual_path, since)
+                if next_cursor > since:
+                    since = next_cursor
+                    if events:
+                        _sse_write(
+                            handler,
+                            "progress",
+                            {"request_id": request_id, "events": events, "next": next_cursor},
+                        )
+            # 3) 心跳保活（15s）
+            if time.time() - last_heartbeat >= 15:
+                _sse_write(handler, "heartbeat", {"t": int(time.time())})
+                last_heartbeat = time.time()
+            time.sleep(0.3)
+    except (BrokenPipeError, ConnectionResetError, OSError):
+        return  # 客户端断开：静默退出，不污染网关
+
+
+def _sse_write(handler, event: str, data: object) -> None:
+    """写一条 SSE 帧：event: <type>\\ndata: <json>\\n\\n"""
+    payload = json.dumps(data, ensure_ascii=False)
+    handler.wfile.write(f"event: {event}\ndata: {payload}\n\n".encode("utf-8"))
+    handler.wfile.flush()
+
+
 def handle_progress(handler, server) -> None:
     parsed = urlsplit(handler.path)
     request_id = parsed.path[len("/progress/") :]
