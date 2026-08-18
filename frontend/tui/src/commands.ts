@@ -12,7 +12,7 @@ export interface TuiCommand {
   /** control 命令映射（走 /control） */
   control?: ControlCommand;
   /** 本地处理器 */
-  local?: "help" | "clear" | "exit" | "theme";
+  local?: "help" | "clear" | "exit" | "theme" | "show";
 }
 
 export const COMMANDS: TuiCommand[] = [
@@ -20,6 +20,7 @@ export const COMMANDS: TuiCommand[] = [
   { name: "clear", usage: "/clear", description: "清屏", local: "clear" },
   { name: "exit", usage: "/exit", description: "退出 TUI", local: "exit" },
   { name: "theme", usage: "/theme [dark|light]", description: "切换主题", local: "theme" },
+  { name: "show", usage: "/show", description: "切换工具行显示", local: "show" },
   { name: "stop", usage: "/stop", description: "停止当前任务（/control）", control: "stop" },
   { name: "btw", usage: "/btw <内容>", description: "给当前任务改向（/control）", control: "btw" },
   { name: "goal", usage: "/goal <内容>", description: "设置目标（/control）", control: "goal" },

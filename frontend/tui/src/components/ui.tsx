@@ -125,10 +125,20 @@ export const RenderRowLine = memo(function RenderRowLine({
   return <Box marginBottom={msgEnd ? 1 : 0}>{content}</Box>;
 });
 
-export function MessageList({ rows, theme }: { rows: FlattenedRow[]; theme: Theme }) {
+export function MessageList({
+  rows,
+  theme,
+  showTools = true,
+}: {
+  rows: FlattenedRow[];
+  theme: Theme;
+  /** 2026-08-18 照搬 free-code：工具行显示可切换（/show）——隐藏工具行时保留正文/评论 */
+  showTools?: boolean;
+}) {
+  const visible = showTools ? rows : rows.filter((entry) => entry.row.kind !== "tool");
   return (
     <Box flexDirection="column">
-      {rows.map((entry, i) => (
+      {visible.map((entry, i) => (
         <RenderRowLine key={i} row={entry.row} msgEnd={entry.msgEnd} theme={theme} />
       ))}
     </Box>

@@ -40,6 +40,8 @@ export function App({ client, sessionId, model, history }: AppProps) {
   const [ctxTokens, setCtxTokens] = useState(0);
   // 未完成项③ 断线重连：网关中断时状态条提示重连中
   const [reconnecting, setReconnecting] = useState(false);
+  // 2026-08-18 照搬 free-code：工具行显示可切换（/show；默认显示）
+  const [showTools, setShowTools] = useState(true);
   // 主题对象稳定引用（行组件 memo 依赖 theme 引用相等）
   const theme = useMemo(() => themeByName(themeName), [themeName]);
   const busyRef = useRef(false);
@@ -221,6 +223,14 @@ export function App({ client, sessionId, model, history }: AppProps) {
           dispatch({ type: "done", result: { ok: true, response: `主题已切换为 ${next}` } });
           return;
         }
+        case "show": {
+          setShowTools((v) => !v);
+          dispatch({
+            type: "done",
+            result: { ok: true, response: showTools ? "工具行已隐藏" : "工具行已显示" },
+          });
+          return;
+        }
         default:
           dispatch({ type: "error", message: `命令 /${name} 未实现` });
       }
@@ -252,11 +262,7 @@ export function App({ client, sessionId, model, history }: AppProps) {
         <Text color={theme.colors.dim}> (gateway client)</Text>
       </Box>
       <Box flexDirection="column" marginBottom={1}>
-        <MessageList rows={visibleRows} theme={theme} />
-      </Box>
-      <Box>
-        <Text color={theme.colors.prompt}>❯ </Text>
-        <MultiLineInput value={input} onChange={setInput} onSubmit={onSubmit} theme={theme} />
+        <MessageList rows={visibleRows} theme={theme} showTools={showTools} />
       </Box>
       <StatusBar
         phase={state.phase}
@@ -268,7 +274,12 @@ export function App({ client, sessionId, model, history }: AppProps) {
         reconnecting={reconnecting}
         theme={theme}
       />
-      <Text color={theme.colors.dim}>输入消息回车发送 · Esc 退出</Text>
+      <Text color={theme.colors.dim}>输入消息回车发送 · Esc 退出 · /show 切换工具行显示</Text>
+      {/* 2026-08-18 照搬 free-code：输入框贴底（消息区/状态/提示在上） */}
+      <Box marginTop={1}>
+        <Text color={theme.colors.prompt}>❯ </Text>
+        <MultiLineInput value={input} onChange={setInput} onSubmit={onSubmit} theme={theme} />
+      </Box>
     </Box>
   );
 }
