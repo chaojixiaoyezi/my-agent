@@ -1210,9 +1210,21 @@ def _mark_unknown_outcome_halt(agent, record: ToolCallRecordParams) -> None:
     effect = str(getattr(record.result, "effect_outcome", "") or "").strip().lower()
     if effect != "unknown":
         return
+    reported_code = str(
+        getattr(record.result, "reported_error_code", "")
+        or getattr(record.result, "error_code", "")
+        or ""
+    ).strip().upper()
+    # 2026-08-18 对齐 会话运行时（用户指示，bs4 复刻真机实锤）：TOOL_TIMEOUT 是
+    # 执行器主动终止（进程组已回收、无孙进程孤儿，shell._communicate_process
+    # 保证），不属于「结果未知」——会话运行时 对超时的语义=命令失败（模型看
+    # 输出继续/换方案），不做单次收口。超时走 retryable 失败路径
+    # （taxonomy TOOL_TIMEOUT retryable=True），模型可重试或换实现。
+    if reported_code == "TOOL_TIMEOUT":
+        return
     # 2026-08-15 3×3 cell1 真机: 记录触发 UNKNOWN 的原始报码(如 COMMAND_FAILED)
     # ——收口时按错误合同区分「结果已知的失败」(taxonomy retryable=True,
-    # 如命令失败读输出修正)与「真未知」(超时/执行者死/无码)——前者收口可
+    # 如命令失败读输出修正)与「真未知」(执行者死/无码)——前者收口可
     # 续跑(模型开新轮读 reported_output_preview 修复), 后者保持单次收口。
     object.__setattr__(
         record.params,
@@ -1398,11 +1410,16 @@ def _final_response_after_unknown_outcome_halt(
         from ..contracts.error_taxonomy import error_contract
 
         contract = error_contract(reported_code) if reported_code else None
+        # 2026-08-18 对齐 会话运行时：TOOL_TIMEOUT 一律按可续跑（执行器主动终止、
+        # 进程组已回收，非「真未知」）；兼容修复前已记录 halt 的存量状态。
         known_retryable_failure = bool(
             contract is not None
             and contract.retryable
             and reported_code
-            and (not handler_executed or effect != "unknown")
+            and (
+                reported_code == "TOOL_TIMEOUT"
+                or (not handler_executed or effect != "unknown")
+            )
         )
     except Exception:  # noqa: BLE001 判据失败保守走 unknown 不续跑
         known_retryable_failure = False

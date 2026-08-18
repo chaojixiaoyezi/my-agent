@@ -97,7 +97,10 @@ class ShellToolOptions:
     owner_scope_root: str = ""  # 多用户隔离:per-user owner home;空=不隔离
     protected_persona_root: str = ""
     access_mode: str = _DEFAULT_ACCESS_MODE
-    default_timeout: int = 30
+    # 2026-08-18 对齐 会话运行时 shell 超时（会话运行时 exec 默认 120s）：30s 对
+    # 「下载依赖/工具链」类命令（go mod tidy 实测 60s+）必然误杀，且
+    # 误杀后果是整任务收口（见 _mark_unknown_outcome_halt TOOL_TIMEOUT 豁免）。
+    default_timeout: int = 120
     max_output_chars: int = _DEFAULT_MAX_OUTPUT_CHARS
 
 
