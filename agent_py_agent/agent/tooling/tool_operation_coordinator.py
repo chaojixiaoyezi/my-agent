@@ -691,7 +691,7 @@ def _operation_status_for_result(result: ToolHandlerOutcome) -> str:
     # → 单次收口终止整个任务（go build 编译错误输出完整仍被杀）。
     # 静默失败（无输出、无失败证据）保持 UNKNOWN（副作用不可证明原则）。
     if (
-        str(getattr(result, "tool_name", "") or "") == "run_command"
+        str(getattr(result, "tool", "") or "") == "run_command"
         and result.error_code == "COMMAND_FAILED"
         and str(getattr(result, "output", "") or "").strip()
     ):

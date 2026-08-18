@@ -100,6 +100,7 @@ def collect_anthropic_stream_with_tools(
 def collect_anthropic_stream_with_completion(
     lines: Iterable[str],
     on_chunk: Callable[[str], None] | None = None,
+    on_thinking: Callable[[str], None] | None = None,
 ) -> tuple[str, dict[str, Any], list[dict[str, Any]], StreamCompletion]:
     """Like ``collect_anthropic_stream_with_tools`` but also returns the stream's
     ``StreamCompletion`` health check (truncation detection for the native path).
@@ -107,6 +108,9 @@ def collect_anthropic_stream_with_completion(
     The fourth value captures the generator's return value (whether ``message_stop``
     was seen, the final ``stop_reason``, and whether a tool_use JSON buffer was left
     open). Text/3-tuple callers are unaffected.
+
+    ``on_thinking`` (2026-08-18 思考标签) receives incremental reasoning text
+    verbatim; ``None`` keeps the existing no-callback behavior.
     """
     parts: list[str] = []
     accumulated = ""
@@ -123,6 +127,9 @@ def collect_anthropic_stream_with_completion(
         if block is not None:
             blocks.append(block)
             continue
+        thinking = str(getattr(event, "thinking", "") or "")
+        if thinking and on_thinking is not None:
+            on_thinking(thinking)
         event_usage = getattr(event, "usage", None)
         if event_usage:
             usage = merge_usage(usage, event_usage)
