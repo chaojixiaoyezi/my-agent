@@ -96,7 +96,18 @@ def canonical_tool_calls_from_response(
     elif request.protocol.source_protocol == "native":
         adapted = _native_tool_calls(request)
     else:
-        adapted = TextToolProtocolAdapter().tool_calls(request)
+        # 2026-08-18 text 协议残留清理：协议只剩 native（native_tool_protocol
+        # 构造时 fail-closed），非 native 一律整轮拒绝，不再有 text 解析路径。
+        adapted = ProviderToolCallResult(
+            violations=(
+                ToolProtocolViolation(
+                    "PROTOCOL_VIOLATION",
+                    f"unsupported tool protocol: {request.protocol.source_protocol!r}",
+                    str(request.protocol.source_protocol or ""),
+                    _protocol_evidence(str(getattr(request.response, "text", "") or "")),
+                ),
+            )
+        )
     return _enforce_tool_choice(request, adapted)
 
 
@@ -251,91 +262,6 @@ def _native_tool_calls(request: ProviderToolCallRequest) -> ProviderToolCallResu
     return ProviderToolCallResult(tuple(calls), tuple(violations))
 
 
-class TextToolProtocolAdapter:
-    """Isolated adapter for explicitly selected non-native runs.
-
-    It accepts only one or more complete, top-level TOOL_CALL blocks and
-    rejects prose, Markdown fences, code snippets and partial markers.
-    """
-
-    def tool_calls(self, request: ProviderToolCallRequest) -> ProviderToolCallResult:
-        text = str(getattr(request.response, "text", "") or "")
-        control_violation = _text_control_block_violation(text)
-        if control_violation is not None:
-            return ProviderToolCallResult(violations=(control_violation,))
-        # J-6：响应总量 terminal 上限——超限直接整轮拒绝，不解析任何块。
-        if len(text) > MAX_RESPONSE_CHARS:
-            return ProviderToolCallResult(
-                violations=(
-                    ToolProtocolViolation(
-                        "PROTOCOL_VIOLATION",
-                        f"text response exceeds {MAX_RESPONSE_CHARS} chars",
-                        "text",
-                        _protocol_evidence(text),
-                    ),
-                )
-            )
-        scan = scan_text_blocks(text)
-        errors = _scan_errors(scan)
-        # G5（用户裁决 2026-08-10）：任何协议错误 → 整轮零执行——未闭合、截断/
-        # JSON 损坏、fence 包裹、控制块混排、超限，任一出现即「不完整响应」，
-        # 本响应所有 text calls 都没有执行权（J.5 的 terminal violation 语义
-        # 扩展到所有协议错误；不再有「安全前缀」——坏块之前的完整好块也不执行）。
-        # 覆盖原「未闭合 > 1 整轮拒」（未闭合块本身即坏块，errors 非空）与
-        # 「第一个坏块之后截断」（安全前缀，已删除）。
-        if errors:
-            return ProviderToolCallResult(violations=_scan_violations(errors, text))
-        payloads = list(scan.payloads)
-        if len(payloads) > MAX_TEXT_CALLS:
-            # J-6 + G5：块数上限——超限即「不完整响应」，整轮拒绝，不执行任何块。
-            return ProviderToolCallResult(
-                violations=(
-                    ToolProtocolViolation(
-                        "PROTOCOL_VIOLATION",
-                        f"text response exceeds {MAX_TEXT_CALLS} tool calls; "
-                        "the whole response was not executed",
-                        "text",
-                        _protocol_evidence(text),
-                    ),
-                )
-            )
-        calls: list[ToolCall] = []
-        for index, payload in enumerate(payloads, start=1):
-            tool_name = str(payload.pop("tool", "") or "").strip()
-            runtime = request.runtime_snapshot.runtime(tool_name)
-            if runtime is None:
-                return ProviderToolCallResult(
-                    violations=(
-                        ToolProtocolViolation(
-                            "TOOL_UNAVAILABLE",
-                            f"text block {index} names a tool outside the run snapshot",
-                            "text",
-                            tool_name[:160],
-                        ),
-                    )
-                )
-            call_id = _text_call_id(request.turn_id, index, tool_name, payload)
-            calls.append(
-                ToolCall(
-                    call_id=call_id,
-                    tool_name=tool_name,
-                    arguments=payload,
-                    source_protocol="text",
-                    schema_hash=runtime.model_spec.schema_hash,
-                    run_id=request.protocol.run_id,
-                    turn_id=request.turn_id,
-                    attempt_id=request.attempt_id,
-                    required_action_id=_required_action_id(
-                        tool_name,
-                        request.required_actions,
-                    ),
-                )
-            )
-        # G5：走到这里 errors 必为空（全好块 + 不超限）——整轮零执行已在
-        # 上游按 errors 返回，calls 恒为全部好块。
-        return ProviderToolCallResult(tuple(calls))
-
-
 def anthropic_tool_choice(choice: ToolChoice) -> dict[str, str]:
     if choice.mode == "auto":
         return {"type": "auto"}
@@ -377,48 +303,6 @@ def _native_prose_violation(text: str) -> ToolProtocolViolation | None:
     )
 
 
-def _text_control_block_violation(text: str) -> ToolProtocolViolation | None:
-    # 治撒谎红线(2026-08-09 复核):模型在【同一个响应里】既交结果块又夹带工具
-    # 调用 = 伪造控制结果(宣称完成还想继续干活),整轮拒绝并留痕。纯结果块
-    # (无论前后有无 prose)是 text 协议的正常收口格式,绝不能误杀——误杀会让
-    # 合法 closeout 在工具循环里被无限打回(真机/测试 2026-08-09 实证)。
-    lowered = text.lower()
-    if "[subagent_result]" not in lowered or "[/subagent_result]" not in lowered:
-        return None
-    has_tool_call = _TEXT_OPEN in text or _TEXT_CLOSE in text
-    if not has_tool_call:
-        return None
-    return ToolProtocolViolation(
-        "PROTOCOL_VIOLATION",
-        "text response mixes a SUBAGENT_RESULT block with tool call blocks",
-        "text",
-        _protocol_evidence(text),
-    )
-
-
-def _scan_errors(scan: TextBlockScan) -> list[str]:
-    # 统一 parser 的违规清单：坏块原因 + J-6 未闭合块体超长（仅未闭合块）。
-    errors = list(scan.errors)
-    for block in scan.blocks:
-        if block.close_index is None and block.body_chars > MAX_BLOCK_CHARS:
-            errors.append(
-                f"text tool block is not closed and exceeds {MAX_BLOCK_CHARS} chars"
-            )
-    return errors
-
-
-def _scan_violations(errors: list[str], text: str) -> tuple[ToolProtocolViolation, ...]:
-    return tuple(
-        ToolProtocolViolation(
-            "PROTOCOL_VIOLATION",
-            error,
-            "text",
-            _protocol_evidence(text),
-        )
-        for error in errors
-    )
-
-
 def _required_action_id(tool_name: str, actions: tuple[object, ...]) -> str:
     for action in actions:
         if str(getattr(action, "status", "") or "").strip().lower() != "open":
@@ -427,24 +311,6 @@ def _required_action_id(tool_name: str, actions: tuple[object, ...]) -> str:
         if not allowed or tool_name in allowed:
             return str(getattr(action, "action_id", "") or "").strip()
     return ""
-
-
-def _text_call_id(
-    turn_id: str,
-    index: int,
-    tool_name: str,
-    arguments: dict[str, Any],
-) -> str:
-    payload = json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    digest = hashlib.sha256(
-        f"{turn_id}:{index}:{tool_name}:{payload}".encode()
-    ).hexdigest()[:24]
-    return f"text_call_{digest}"
-
-
-def _bounded_preview(text: str, limit: int = 320) -> str:
-    value = str(text or "").strip()
-    return value if len(value) <= limit else value[:limit] + "..."
 
 
 def _protocol_evidence(text: str) -> str:

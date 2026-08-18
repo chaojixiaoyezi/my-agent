@@ -1298,7 +1298,7 @@ def test_thread_goal_turn_with_no_tool_calls_stops_auto_continuation(tmp_path) -
 
 def test_thread_goal_with_tool_progress_schedules_exactly_one_next_turn(tmp_path) -> None:
     agent = SimpleAgent(
-        AgentConfig(tool_protocol="text", enable_tools=True, memory_path="memory.jsonl"),
+        AgentConfig(tool_protocol="native", enable_tools=True, memory_path="memory.jsonl"),
         tmp_path,
     )
     agent.backend = _GoalToolProgressBackend()
@@ -1346,7 +1346,7 @@ def test_thread_goal_waits_for_child_events_without_polling_or_chat_noise(tmp_pa
 
     agent = SimpleAgent(
         AgentConfig(
-            tool_protocol="text",
+            tool_protocol="native",
             enable_tools=True,
             memory_path="memory.jsonl",
             orphan_supervision_interval_seconds=0,
@@ -1442,7 +1442,7 @@ def test_thread_goal_waits_for_child_events_without_polling_or_chat_noise(tmp_pa
 def test_terminal_goal_children_trigger_one_integrating_closeout(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(
-            tool_protocol="text",
+            tool_protocol="native",
             enable_tools=True,
             memory_path="memory.jsonl",
             orphan_supervision_interval_seconds=0,

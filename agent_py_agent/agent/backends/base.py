@@ -206,6 +206,20 @@ class EchoBackend(BaseBackend):
 
     name = "echo"
 
+    def probe_tool_capability(self) -> ProviderToolCapability:
+        # 2026-08-18 text 协议残留清理：text fallback 已删，echo 是测试确定性
+        # backend（generate 只输出固定文本、不产生工具调用），声明 native 支持
+        # 让协议选择通过——工具执行与否由 generate 是否产出 tool_use 决定。
+        return ProviderToolCapability(
+            provider=self.name,
+            endpoint=f"local://{self.name}",
+            model=str(getattr(self, "model_name", "") or ""),
+            stream=bool(getattr(self, "stream_enabled", False)),
+            native_supported=True,
+            evidence="echo_test_backend_declares_native",
+            observed_at=_utc_now_iso(),
+        )
+
     def generate(
         self,
         prompt: str,

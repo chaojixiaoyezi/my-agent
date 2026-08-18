@@ -15,7 +15,7 @@ from agent_py_agent.agent.settings import AgentConfig
 def _agent_with_thread(tmp_path: Path):
     agent = SimpleAgent(
         AgentConfig(
-            tool_protocol="text",
+            tool_protocol="native",
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
             prompt_files=[],

@@ -194,7 +194,7 @@ def test_archive_record_keeps_artifact_integrity_failure_envelope(tmp_path: Path
         "write_file",
         {"path": "app.js"},
         call_id="1-1",
-        source_protocol="text",
+        source_protocol="native",
         run_id=params.run_id,
         turn_id="run-1:round-1",
         attempt_id=params.request_id,
@@ -243,7 +243,7 @@ def test_archive_record_keeps_safe_unknown_operation_facts(tmp_path: Path):
         "send_message",
         {"message": "hello"},
         call_id="1-1",
-        source_protocol="text",
+        source_protocol="native",
         run_id=params.run_id,
         turn_id="run-1:round-1",
         attempt_id=params.request_id,
@@ -338,7 +338,7 @@ def _params(*, archive_tool_calls: list[dict[str, object]] | None = None):
         archive_tool_calls=list(archive_tool_calls or []),
         tool_protocol_snapshot=make_test_protocol_snapshot(
             run_id="run-1",
-            source_protocol="text",
+            source_protocol="native",
         ),
         tool_runtime_snapshot=runtime_snapshot_for_model_specs((), run_id="run-1"),
     )

@@ -97,7 +97,7 @@ def _canonical_test_call(
         call_id=call_id,
         tool_name=tool_name,
         arguments=arguments,
-        source_protocol="text",
+        source_protocol="native",
         schema_hash="sha256:test-schema",
         run_id=run_id,
         turn_id=f"{run_id}:turn-1",
@@ -460,7 +460,7 @@ def test_tool_loop_and_prompt_transcript():
         (workspace / "notes.txt").write_text("hello tool world", encoding="utf-8")
         cfg = _text_agent_config(
             enable_tools=True,
-            tool_protocol="text",
+            tool_protocol="native",
             memory_path="memory.jsonl",
         )
         agent = SimpleAgent(cfg, workspace)
@@ -846,7 +846,7 @@ def test_tool_loop_rejects_unclosed_write_then_executes_complete_repair():
         workspace = Path(td)
         cfg = _text_agent_config(
             enable_tools=True,
-            tool_protocol="text",
+            tool_protocol="native",
             memory_path="memory.jsonl",
         )
         agent = SimpleAgent(cfg, workspace)

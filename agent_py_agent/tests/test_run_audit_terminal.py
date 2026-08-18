@@ -557,7 +557,7 @@ def _violation_snapshot():
             ),
         ),
         run_id="run-1",
-    ), make_test_protocol_snapshot(run_id="run-1", source_protocol="text")
+    ), make_test_protocol_snapshot(run_id="run-1", source_protocol="native")
 
 
 def _violation_request(repo, *, text, repairs=0, max_repairs=2, agent=None):

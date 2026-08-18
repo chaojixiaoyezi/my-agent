@@ -17,7 +17,7 @@ from agent.tooling.runtime_contracts import ProviderToolCapability, ToolProtocol
 def _text_protocol_snapshot(run_id: str) -> ToolProtocolSnapshot:
     return ToolProtocolSnapshot(
         run_id=run_id,
-        source_protocol="text",
+        source_protocol="native",
         capability=ProviderToolCapability(
             provider="test",
             endpoint="local://watch-test",

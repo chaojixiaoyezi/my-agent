@@ -110,7 +110,7 @@ def _params() -> ToolLoopExecuteParams:
         archive_tool_calls=[],
         tool_runtime_snapshot=runtime_snapshot_for_model_specs(specs, run_id="run-1"),
         tool_protocol_snapshot=make_test_protocol_snapshot(
-            run_id="run-1", source_protocol="text"
+            run_id="run-1", source_protocol="native"
         ),
         delivery_contract={
             "bootstrap_contract": {

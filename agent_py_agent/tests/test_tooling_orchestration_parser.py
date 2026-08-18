@@ -64,7 +64,7 @@ def test_text_adapter_keeps_flat_orchestration_arguments() -> None:
             ),
             protocol=ToolProtocolSnapshot(
                 run_id=snapshot.run_id,
-                source_protocol="text",
+                source_protocol="native",
                 capability=ProviderToolCapability(
                     provider="test",
                     endpoint="local://test",

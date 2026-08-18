@@ -131,8 +131,8 @@ PROMPT = "请继续处理项目并产出最终报告。" * 30
 
 def test_start_record_text_identity_with_ir_rounds() -> None:
     """text 协议: 多轮 IR 后记账口径仍 == estimate_tokens(prompt) 恒等。"""
-    agent = _agent(protocol="text")
-    params = _params(protocol="text", prompt=PROMPT)
+    agent = _agent(protocol="native")
+    params = _params(protocol="native", prompt=PROMPT)
     _record_ir_rounds(agent, params, rounds=8, body_chars=400)
     assert _recorded_input_tokens(agent, params, PROMPT) == estimate_tokens(PROMPT)
 

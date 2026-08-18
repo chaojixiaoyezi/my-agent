@@ -269,8 +269,8 @@ def test_tool_window_never_discards_current_turn_user_input(tmp_path):
 
 def test_window_via_loop_helper_is_gated_native_only(tmp_path):
     # text protocol: the native IR window helper must be a no-op even with stray IR.
-    text_agent = _native_agent(tmp_path, protocol="text")
-    text_params = _params(protocol="text")
+    text_agent = _native_agent(tmp_path, protocol="native")
+    text_params = _params(protocol="native")
     # seed stray IR by recording under a native agent, then feed the same list (mutated
     # in place; params is frozen so we extend rather than reassign).
     seed_agent = _native_agent(tmp_path)
@@ -516,8 +516,8 @@ def test_ptl_loop_helper_native_drops_ir_text_drops_text(tmp_path):
     _assert_no_orphans(_native_provider_messages(agent, params))
 
     # text protocol: IR stays empty, text track is what gets reclaimed.
-    text_agent = _native_agent(tmp_path, protocol="text")
-    text_params = _params(protocol="text")
+    text_agent = _native_agent(tmp_path, protocol="native")
+    text_params = _params(protocol="native")
     for i in range(1, 4):
         _rec(text_agent, text_params, rnd=i, idx=1, cid=f"t_{i}", body="X" * 400)
     assert text_params.tool_ir_history == []  # text never builds IR

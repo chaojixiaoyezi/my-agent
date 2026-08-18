@@ -66,7 +66,7 @@ def test_subagent_reuses_generic_compact_in_own_home_without_owner_memory_pollut
 ) -> None:
     agent = SimpleAgent(
         AgentConfig(
-            tool_protocol="text",
+            tool_protocol="native",
             model_backend="echo",
             enable_tools=True,
             my_agent_home=str(tmp_path / "home"),
@@ -135,7 +135,7 @@ def test_task_local_preflight_uses_the_configured_exact_compact_threshold(
     run_home.mkdir(parents=True)
     agent = SimpleNamespace(
         config=AgentConfig(
-            tool_protocol="text",
+            tool_protocol="native",
             auto_save_memory=True,
             memory_compact_auto_trigger_percent=90,
             model_context_window_tokens=1_000,

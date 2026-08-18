@@ -190,7 +190,7 @@ def test_auto_resume_context_recovers_cross_day_handoff_task(tmp_path):
     """LLM: Tests that auto resume context recovers cross-day handoff tasks with task fact sources."""
     agent = SimpleAgent(
         AgentConfig(
-            tool_protocol="text",
+            tool_protocol="native",
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
             memory_resume_auto_context_enabled=True,
@@ -229,7 +229,7 @@ def test_auto_resume_context_recovers_cross_day_gateway_request(tmp_path):
     """LLM: Tests that auto resume context recovers cross-day gateway requests with gateway fact sources."""
     agent = SimpleAgent(
         AgentConfig(
-            tool_protocol="text",
+            tool_protocol="native",
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
             memory_resume_auto_context_enabled=True,

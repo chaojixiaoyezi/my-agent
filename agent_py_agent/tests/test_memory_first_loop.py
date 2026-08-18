@@ -145,7 +145,7 @@ def test_compression_hook_failure_blocks_run_and_audits_event(tmp_path, monkeypa
     monkeypatch.setattr(compression_service, "write_compression_snapshot", boom)
     agent = SimpleAgent(
         AgentConfig(
-            tool_protocol="text",
+            tool_protocol="native",
             model_backend="echo",
             max_tokens=1,
             local_store_path="local_store/local.db",
@@ -231,7 +231,7 @@ def _runtime_context_capture_agent(captured: dict[str, object]):
         memory_lessons = EmptyFormalRepository()
         config = SimpleNamespace(
             enable_tools=False,
-            tool_protocol="text",
+            tool_protocol="native",
             memory_top_k=1,
             memory_rule_routing_enabled=True,
             memory_rule_routing_mode="soft",

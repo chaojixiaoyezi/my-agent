@@ -116,7 +116,7 @@ def test_scale_turn_reuses_gateway_transcript_and_isolates_other_conversation(tm
     workspace = tmp_path / "workspace"
     agent = SimpleAgent(
         AgentConfig(
-            tool_protocol="text",
+            tool_protocol="native",
             model_backend="echo",
             my_agent_home=str(home_root),
             prompt_files=[],
@@ -183,7 +183,7 @@ def test_scale_group_members_share_group_conversation_without_becoming_owner(tmp
     workspace = tmp_path / "workspace"
     agent = SimpleAgent(
         AgentConfig(
-            tool_protocol="text",
+            tool_protocol="native",
             model_backend="echo",
             my_agent_home=str(home_root),
             prompt_files=[],

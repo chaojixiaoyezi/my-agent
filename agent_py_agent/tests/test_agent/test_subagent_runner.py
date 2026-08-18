@@ -63,7 +63,7 @@ class PromptCaptureAcceptedBackend(BaseBackend):
 def test_subagent_runner_dry_run_and_execute():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
-        cfg = AgentConfig(tool_protocol="text", model_backend="echo", subagent_workspace="subs")
+        cfg = AgentConfig(tool_protocol="native", model_backend="echo", subagent_workspace="subs")
         agent = SimpleAgent(cfg, root)
         task = agent.subagents.create_run(
             goal="读取配置并总结",
@@ -110,7 +110,7 @@ def test_subagent_runner_uses_child_system_prompt_not_parent_root_identity():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
-            tool_protocol="text",
+            tool_protocol="native",
             model_backend="echo",
             subagent_workspace="subs",
             system_prompt="你是 my-agent 的真实 E2E root 节点。",
@@ -151,7 +151,7 @@ def test_subagent_runner_parses_structured_output():
     """LLM: Verifies structured output parsing populates evidence, capability_requests, artifacts, etc."""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
-        cfg = AgentConfig(tool_protocol="text", model_backend="echo", subagent_workspace="subs")
+        cfg = AgentConfig(tool_protocol="native", model_backend="echo", subagent_workspace="subs")
         agent = SimpleAgent(cfg, root)
         agent.backend = StructuredSubagentBackend()
         task = agent.subagents.create_run(
@@ -243,7 +243,7 @@ def test_subagent_runner_enforces_write_boundary_at_tool_layer():
         danger.mkdir()
         target_path = str(danger / "README.md")
         cfg = AgentConfig(
-            tool_protocol="text",
+            tool_protocol="native",
             model_backend="echo",
             subagent_workspace="subs",
             path_dangerous_roots=[str(danger)],
@@ -272,7 +272,7 @@ def test_subagent_runner_can_schedule_children_from_current_node_context():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
-            tool_protocol="text",
+            tool_protocol="native",
             enable_tools=True,
             model_backend="echo",
             subagent_workspace="subs",
@@ -327,7 +327,7 @@ def test_subagent_runner_repairs_missing_structured_output():
     """LLM: Verifies the repair round-trip when the first model response lacks a structured block."""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
-        cfg = AgentConfig(tool_protocol="text", model_backend="echo", subagent_workspace="subs")
+        cfg = AgentConfig(tool_protocol="native", model_backend="echo", subagent_workspace="subs")
         agent = SimpleAgent(cfg, root)
         backend = RepairingSubagentBackend()
         agent.backend = backend
@@ -365,7 +365,7 @@ def test_subagent_runner_does_not_override_coordinator_tool_limit_status():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
-            tool_protocol="text",
+            tool_protocol="native",
             enable_tools=True,
             model_backend="echo",
             subagent_workspace="subs",

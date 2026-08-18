@@ -25,7 +25,7 @@ def test_group_runtime_never_loads_member_private_state_and_shared_stays_read_on
     home = tmp_path / "home"
     pool = OwnerScopedAgentPool(
         AgentConfig(
-            tool_protocol="text", model_backend="echo", my_agent_home=str(home), prompt_files=[]
+            tool_protocol="native", model_backend="echo", my_agent_home=str(home), prompt_files=[]
         ),
         tmp_path / "service-checkout",
     )

@@ -55,7 +55,7 @@ class _ScriptedBackend(BaseBackend):
 def _run_with(scripts: list[str]):
     with tempfile.TemporaryDirectory() as td:
         agent = SimpleAgent(
-            AgentConfig(tool_protocol="text", model_backend="echo", subagent_workspace="subs"),
+            AgentConfig(tool_protocol="native", model_backend="echo", subagent_workspace="subs"),
             Path(td),
         )
         agent.backend = _ScriptedBackend(scripts)

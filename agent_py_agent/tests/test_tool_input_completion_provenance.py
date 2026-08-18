@@ -610,7 +610,7 @@ def test_archive_compaction_preserves_value_free_input_audit() -> None:
     call = canonical_history_call(
         "capture",
         {},
-        source_protocol="text",
+        source_protocol="native",
     )
     result = canonical_history_result(
         call,

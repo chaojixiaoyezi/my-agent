@@ -418,15 +418,28 @@ class _FailedMutationFalseClaimBackend:
     def __init__(self) -> None:
         self.calls = 0
 
-    def generate(self, prompt: str, on_chunk=None, tools=None, messages=None) -> ModelResponse:
+    def probe_tool_capability(self):
+        # 2026-08-18 text 协议残留清理：probe 是协议选择必选项（text fallback 已删）
+        from agent_py_agent.agent.tooling.runtime_contracts import ProviderToolCapability
+        return ProviderToolCapability(
+            provider=self.name,
+            endpoint=f"local://{self.name}",
+            model="",
+            stream=False,
+            native_supported=True,
+            evidence="test_backend_declares_native",
+            observed_at="",
+        )
+
+    def generate(self, prompt: str, on_chunk=None, tools=None, tool_choice=None, messages=None) -> ModelResponse:
         del on_chunk, tools, messages
         self.calls += 1
         if self.calls == 1:
             return ModelResponse(
-                text=(
-                    '[TOOL_CALL]\n{"tool":"always_fail_mutation"}\n'
-                    "[/TOOL_CALL]"
-                ),
+                text="",
+                tool_use_blocks=[
+                    {"id": "call-mutation", "name": "always_fail_mutation", "input": {}}
+                ],
                 backend=self.name,
             )
         if self.calls == 2:
@@ -440,7 +453,7 @@ def test_failed_final_mutation_discards_false_success_draft(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(
             model_backend="echo",
-            tool_protocol="text",
+            tool_protocol="native",
             prompt_files=[],
             my_agent_home=str(tmp_path / "home"),
         ),
@@ -473,15 +486,28 @@ class _RememberListThenFalseClaimBackend:
     def __init__(self) -> None:
         self.calls = 0
 
-    def generate(self, _prompt: str, on_chunk=None, tools=None, messages=None) -> ModelResponse:
+    def probe_tool_capability(self):
+        # 2026-08-18 text 协议残留清理：probe 是协议选择必选项（text fallback 已删）
+        from agent_py_agent.agent.tooling.runtime_contracts import ProviderToolCapability
+        return ProviderToolCapability(
+            provider=self.name,
+            endpoint=f"local://{self.name}",
+            model="",
+            stream=False,
+            native_supported=True,
+            evidence="test_backend_declares_native",
+            observed_at="",
+        )
+
+    def generate(self, _prompt: str, on_chunk=None, tools=None, tool_choice=None, messages=None) -> ModelResponse:
         del on_chunk, tools, messages
         self.calls += 1
         if self.calls == 1:
             return ModelResponse(
-                text=(
-                    '[TOOL_CALL]\n{"tool":"remember","action":"list"}\n'
-                    "[/TOOL_CALL]"
-                ),
+                text="",
+                tool_use_blocks=[
+                    {"id": "call-remember", "name": "remember", "input": {"action": "list"}}
+                ],
                 backend=self.name,
             )
         return ModelResponse(text="我已经删除了记忆。", backend=self.name)
@@ -493,7 +519,7 @@ def test_agent_run_keeps_operation_proof_out_of_model_authored_prose(
     agent = SimpleAgent(
         AgentConfig(
             model_backend="echo",
-            tool_protocol="text",
+            tool_protocol="native",
             prompt_files=[],
             my_agent_home=str(tmp_path / "home"),
         ),

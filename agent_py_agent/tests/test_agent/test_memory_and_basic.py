@@ -21,7 +21,7 @@ def test_run_does_not_auto_save_formal_memory():
         cfg = AgentConfig(
             memory_path="memory.jsonl",
             prompt_files=["prompts/default.md"],
-            tool_protocol="text",
+            tool_protocol="native",
         )
         agent = SimpleAgent(cfg, root)
         result = agent.run("记住我喜欢表格", inject=["回答要短"])

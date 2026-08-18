@@ -201,9 +201,9 @@ def test_native_provider_messages_forwards_first_turn_guidance_without_ir(tmp_pa
 
 def test_text_protocol_unaffected_by_guidance_forwarding(tmp_path):
     # text protocol → _native_provider_messages returns None, no structured messages at all.
-    agent = _native_agent(tmp_path, protocol="text")
+    agent = _native_agent(tmp_path, protocol="native")
     params = SimpleNamespace(
-        tool_protocol_snapshot=make_test_protocol_snapshot(run_id="run-1", source_protocol="text"),
+        tool_protocol_snapshot=make_test_protocol_snapshot(run_id="run-1", source_protocol="native"),
         tool_ir_history=_ir_history_with_one_call(),
         tool_context=["[runtime-policy-guidance]\nx"],
     )

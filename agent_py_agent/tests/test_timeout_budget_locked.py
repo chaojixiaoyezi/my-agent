@@ -148,8 +148,8 @@ PROMPT = "请继续处理项目并产出最终报告。" * 30
 
 def test_text_protocol_ledger_matches_unified() -> None:
     """text 协议: 记账口径 estimate_tokens(prompt) 与统一可见口径恒等。"""
-    agent = _agent(protocol="text")
-    params = _params(protocol="text", prompt=PROMPT)
+    agent = _agent(protocol="native")
+    params = _params(protocol="native", prompt=PROMPT)
     _record_ir_rounds(agent, params, rounds=8, body_chars=400)
     assert model_visible_context_tokens(agent, params, PROMPT) == estimate_tokens(PROMPT)
 
@@ -213,7 +213,7 @@ def test_effective_timeout_is_max_of_base_and_dynamic() -> None:
     )
     assert effective_model_request_timeout_seconds(small, estimate.timeout_seconds) == pytest.approx(240.0)
     # 分支 2: 生产 max_tokens=8192 -> output_gen≈273s -> dynamic=303 > base -> effective=303
-    prod = _agent(protocol="text")
+    prod = _agent(protocol="native")
     assert effective_model_request_timeout_seconds(prod, estimate.timeout_seconds) == pytest.approx(303.1, abs=0.2)
 
 

@@ -147,7 +147,7 @@ def test_explicit_text_run_accepts_one_complete_standalone_block(tmp_path: Path)
         backend="fake",
     )
 
-    decision = _decide(_agent(tmp_path), response, source_protocol="text")
+    decision = _decide(_agent(tmp_path), response, source_protocol="native")
 
     assert decision.action == "run_tools"
     assert len(decision.calls) == 1
@@ -244,7 +244,7 @@ def test_protocol_violation_feedback_includes_flat_json_example(tmp_path: Path):
         text="[TOOL_CALL]\ntool => 'write_file', args => { path => 'output/main.go' }\n[/TOOL_CALL]",
         backend="fake",
     )
-    params = _params(source_protocol="text")
+    params = _params(source_protocol="native")
 
     decision = tool_loop_response_decision(
         ToolLoopResponseDecisionRequest(

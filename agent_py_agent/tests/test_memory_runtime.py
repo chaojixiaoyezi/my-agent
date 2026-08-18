@@ -222,7 +222,7 @@ def test_run_injects_only_formal_routed_lesson_in_memory_envelope(tmp_path):
     agent = SimpleAgent(
         AgentConfig(
             model_backend="echo",
-            tool_protocol="text",
+            tool_protocol="native",
             memory_rule_routing_enabled=True,
             memory_rule_routing_mode="soft",
             memory_rule_auto_read_limit=1,
@@ -264,7 +264,7 @@ def test_run_writes_raw_archive_when_saved(tmp_path):
 
 
 def test_run_no_save_does_not_write_raw_archive(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", tool_protocol="text"), tmp_path)
+    agent = SimpleAgent(AgentConfig(model_backend="echo", tool_protocol="native"), tmp_path)
 
     result = agent.run("不要归档这轮对话", save=False)
 
@@ -275,7 +275,7 @@ def test_run_no_save_does_not_write_raw_archive(tmp_path):
 
 
 def test_run_no_save_does_not_write_runtime_fact(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", tool_protocol="text"), tmp_path)
+    agent = SimpleAgent(AgentConfig(model_backend="echo", tool_protocol="native"), tmp_path)
 
     result = agent.run(
         "子代理已完成，请写恢复锚点",

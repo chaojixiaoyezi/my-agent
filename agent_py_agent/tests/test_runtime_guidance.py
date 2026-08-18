@@ -85,7 +85,7 @@ def _tool_loop_params(**overrides) -> ToolLoopExecuteParams:
         archive_tool_calls=[],
         tool_protocol_snapshot=make_test_protocol_snapshot(
             run_id="main-run-1",
-            source_protocol="text",
+            source_protocol="native",
         ),
     )
     for key, value in overrides.items():
@@ -95,7 +95,7 @@ def _tool_loop_params(**overrides) -> ToolLoopExecuteParams:
             params,
             tool_protocol_snapshot=make_test_protocol_snapshot(
                 run_id=params.run_id,
-                source_protocol="text",
+                source_protocol="native",
             ),
         )
     if "tool_runtime_snapshot" not in overrides:
@@ -164,7 +164,7 @@ def test_two_real_agent_runs_do_not_cross_prompt_task_or_workspace(tmp_path, mon
 
     agent = SimpleAgent(
         AgentConfig(
-            tool_protocol="text",
+            tool_protocol="native",
             model_backend="echo",
             my_agent_home=str(tmp_path / ".my-agent"),
             memory_path="memory.jsonl",
@@ -856,7 +856,7 @@ def test_task_steer_stays_as_latest_native_user_turn_across_later_model_rounds(t
 
 def test_text_protocol_keeps_steer_in_transcript_without_building_native_ir(tmp_path) -> None:
     agent = SimpleAgent(
-        AgentConfig(model_backend="echo", tool_protocol="text", subagent_workspace="subs"),
+        AgentConfig(model_backend="echo", tool_protocol="native", subagent_workspace="subs"),
         tmp_path,
     )
     agent.conversation_store.append_guidance(
@@ -1827,7 +1827,7 @@ def test_published_audit_sources_release_root_before_any_tool_round(
 
     agent = SimpleAgent(
         AgentConfig(
-            tool_protocol="text",
+            tool_protocol="native",
             model_backend="echo",
             my_agent_home=str(tmp_path / ".my-agent"),
             memory_path="memory.jsonl",

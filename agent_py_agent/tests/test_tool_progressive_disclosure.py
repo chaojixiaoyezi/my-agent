@@ -215,7 +215,7 @@ def test_deferred_shrinks_catalog_token_footprint(tmp_path) -> None:
 
 def test_native_catalog_does_not_duplicate_provider_schemas(tmp_path) -> None:
     agent = _agent(tmp_path)
-    text = agent.tools.render_catalog_section(tool_protocol="text")
+    text = agent.tools.render_catalog_section(tool_protocol="native")
     native = agent.tools.render_catalog_section(tool_protocol="native")
 
     assert "结构化 Schema 为准" in native

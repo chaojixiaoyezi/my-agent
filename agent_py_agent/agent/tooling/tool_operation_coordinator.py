@@ -684,6 +684,18 @@ def _operation_status_for_result(result: ToolHandlerOutcome) -> str:
     # apply_patch 无效补丁卡死整个复刻任务)。
     if _is_deterministic_pre_handler_failure(result):
         return TOOL_OPERATION_FAILED
+    # 2026-08-18 对齐 会话运行时（bs4 复刻真机实锤）：run_command 的 COMMAND_FAILED
+    # 带完整输出（退出码 + stdout/stderr）= 结构化失败事实（命令已执行且已
+    # 失败、输出说明原因），不是「结果未知」——会话运行时 对 shell 命令失败=
+    # 失败文本，模型可重试/换方案。此前 handler_executed=True 一律 UNKNOWN
+    # → 单次收口终止整个任务（go build 编译错误输出完整仍被杀）。
+    # 静默失败（无输出、无失败证据）保持 UNKNOWN（副作用不可证明原则）。
+    if (
+        str(getattr(result, "tool_name", "") or "") == "run_command"
+        and result.error_code == "COMMAND_FAILED"
+        and str(getattr(result, "output", "") or "").strip()
+    ):
+        return TOOL_OPERATION_FAILED
     # Once a mutating/dangerous handler was entered, a generic failure cannot
     # prove that no side effect happened.  Only an explicit structured
     # ``not_started`` fact may make the operation terminal-failed; error text

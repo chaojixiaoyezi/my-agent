@@ -67,7 +67,7 @@ def _canonical_record(
         tool_name,
         arguments,
         call_id=f"{tool_rounds}-{idx}",
-        source_protocol="text",
+        source_protocol="native",
         run_id=run_id,
         turn_id=f"{run_id}:round-{tool_rounds}",
         attempt_id=attempt_id,
@@ -972,7 +972,7 @@ def _tool_loop_params(*, request_id: str, run_id: str, task_id: str) -> ToolLoop
         archive_tool_calls=[],
         tool_protocol_snapshot=make_test_protocol_snapshot(
             run_id=snapshot_run_id,
-            source_protocol="text",
+            source_protocol="native",
         ),
         tool_runtime_snapshot=runtime_snapshot_for_model_specs(
             (write_file_spec,),

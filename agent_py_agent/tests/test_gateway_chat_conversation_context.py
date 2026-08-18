@@ -392,7 +392,7 @@ def test_audit_prepare_projection_does_not_use_global_compact_or_sibling_artifac
 def test_gateway_run_persists_user_and_assistant_for_next_turn(tmp_path):
     agent = SimpleAgent(
         AgentConfig(
-            tool_protocol="text",
+            tool_protocol="native",
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
             prompt_files=[],
@@ -856,7 +856,7 @@ def test_gateway_same_turn_pressure_without_new_structured_progress_stops(tmp_pa
 def test_gateway_foreground_turn_holds_shared_conversation_execution_lane(tmp_path, monkeypatch):
     agent = SimpleAgent(
         AgentConfig(
-            tool_protocol="text",
+            tool_protocol="native",
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
             prompt_files=[],
@@ -914,7 +914,7 @@ def test_gateway_foreground_turn_holds_shared_conversation_execution_lane(tmp_pa
 def test_gateway_foreground_turn_waits_for_existing_conversation_lane(tmp_path, monkeypatch):
     agent = SimpleAgent(
         AgentConfig(
-            tool_protocol="text",
+            tool_protocol="native",
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
             prompt_files=[],
@@ -998,7 +998,7 @@ def test_gateway_foreground_turn_waits_for_existing_conversation_lane(tmp_path, 
 def test_two_gateway_foreground_turns_share_one_lane_and_fresh_history(tmp_path, monkeypatch):
     agent = SimpleAgent(
         AgentConfig(
-            tool_protocol="text",
+            tool_protocol="native",
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
             prompt_files=[],
@@ -1361,7 +1361,7 @@ def test_gateway_chat_history_isolated_by_real_conversation_id(tmp_path):
 def test_gateway_conversation_turns_do_not_leak_into_owner_global_memory(tmp_path):
     agent = SimpleAgent(
         AgentConfig(
-            tool_protocol="text",
+            tool_protocol="native",
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
             prompt_files=[],
@@ -1442,7 +1442,7 @@ def test_gateway_fails_closed_before_model_when_user_turn_cannot_persist(tmp_pat
 def test_gateway_ordinary_chat_accepts_legacy_cleared_goal_tombstone(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(
-            tool_protocol="text",
+            tool_protocol="native",
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
             prompt_files=[],
@@ -1658,7 +1658,7 @@ def test_gateway_returns_answer_and_repairs_assistant_transcript_on_next_turn(
 def test_gateway_authoritative_transcript_filters_legacy_dialogue_but_keeps_formal_fact(tmp_path):
     agent = SimpleAgent(
         AgentConfig(
-            tool_protocol="text",
+            tool_protocol="native",
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
             prompt_files=[],
@@ -1695,7 +1695,7 @@ def test_gateway_authoritative_transcript_filters_legacy_dialogue_but_keeps_form
 def test_authoritative_transcript_overfetches_past_legacy_dialogue_for_formal_fact(tmp_path):
     agent = SimpleAgent(
         AgentConfig(
-            tool_protocol="text",
+            tool_protocol="native",
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
             prompt_files=[],

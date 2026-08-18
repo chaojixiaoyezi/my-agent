@@ -125,7 +125,7 @@ class _SlowBackend:
 def _runtime_parts(tmp_path, *, enable_tools: bool, backend=None):
     agent = SimpleAgent(
         AgentConfig(
-            tool_protocol="text",
+            tool_protocol="native",
             enable_tools=enable_tools,
             memory_path="memory.jsonl",
         ),

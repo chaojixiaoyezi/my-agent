@@ -168,12 +168,12 @@ def test_native_messages_forward_new_guidance_but_not_old():
 def test_text_protocol_unaffected():
     agent = SimpleNamespace(
         backend=SimpleNamespace(name="anthropic_compatible"),
-        config=SimpleNamespace(tool_protocol="text", enable_tools=True),
+        config=SimpleNamespace(tool_protocol="native", enable_tools=True),
         tools=SimpleNamespace(),
     )
     params = SimpleNamespace(
         tool_protocol_snapshot=make_test_protocol_snapshot(
-            run_id="run-1", source_protocol="text"
+            run_id="run-1", source_protocol="native"
         ),
         tool_ir_history=_one_call_ir(),
         live_archive_state={},

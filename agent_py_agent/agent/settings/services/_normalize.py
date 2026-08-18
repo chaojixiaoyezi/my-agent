@@ -383,7 +383,9 @@ def _normalize_tool_catalog_fields(out: dict[str, object], defaults: object) -> 
     _append_warning(warnings, warn)
     protocol, protocol_warn = CoercionService.coerce_choice(
         "tool_protocol", out.get("tool_protocol"), defaults.tool_protocol,
-        choices=("text", "native"),
+        # 2026-08-18 text 协议残留清理：协议只剩 native（迁移已全量落地），
+        # text 不再是合法配置值——旧 text 配置归一为默认并告警。
+        choices=("native",),
     )
     out["tool_protocol"] = protocol
     _append_warning(warnings, protocol_warn)

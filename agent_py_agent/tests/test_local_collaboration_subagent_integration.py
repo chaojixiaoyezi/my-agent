@@ -530,7 +530,7 @@ def _dispatch_one_child(agent: SimpleAgent, run_id: str, backend):
 
 def _agent(tmp_path) -> SimpleAgent:
     return SimpleAgent(
-        AgentConfig(tool_protocol="text", enable_tools=True, memory_path="memory.jsonl"), tmp_path
+        AgentConfig(tool_protocol="native", enable_tools=True, memory_path="memory.jsonl"), tmp_path
     )
 
 

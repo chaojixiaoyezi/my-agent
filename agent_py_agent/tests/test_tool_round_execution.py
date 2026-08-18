@@ -65,7 +65,7 @@ def _canonical_calls(payloads: list[dict[str, object]]) -> list[ToolCall]:
                 call_id=f"round-test-call-{index}",
                 tool_name=tool_name,
                 arguments=payload,
-                source_protocol="text",
+                source_protocol="native",
                 schema_hash="sha256:round-test-schema",
                 run_id=_ROUND_RUN_ID,
                 turn_id=f"{_ROUND_RUN_ID}:turn",

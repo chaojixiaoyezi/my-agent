@@ -256,8 +256,8 @@ def test_archive_stamps_real_provider_id_onto_result_call_id(tmp_path):
 
 
 def test_text_protocol_keeps_canonical_call_id_and_no_native_ir(tmp_path):
-    agent = _native_agent(tmp_path, protocol="text")
-    params = _params(protocol="text")
+    agent = _native_agent(tmp_path, protocol="native")
+    params = _params(protocol="native")
     _record(
         agent, params, tool_rounds=3, idx=2,
         tool_name="read_file", call_id="text-call-1", arguments={"path": "p"},
@@ -409,8 +409,8 @@ def test_subagent_closeout_noop_for_text_protocol(tmp_path):
         _record_subagent_result_ir_if_native,
     )
 
-    agent = _native_agent(tmp_path, protocol="text")
-    params = _params(protocol="text")
+    agent = _native_agent(tmp_path, protocol="native")
+    params = _params(protocol="native")
     _record_subagent_result_ir_if_native(agent, params, "[SUBAGENT_RESULT]\n{}")
     assert params.tool_ir_history == []
 

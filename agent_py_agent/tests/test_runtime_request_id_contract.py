@@ -37,7 +37,7 @@ def test_saved_run_generates_request_id_before_externalized_tool_outputs(tmp_pat
     (tmp_path / "big.txt").write_text("TRACE-RUN-ID\n" + ("x" * 3000), encoding="utf-8")
     agent = SimpleAgent(
         AgentConfig(
-            tool_protocol="text",
+            tool_protocol="native",
             enable_tools=True,
             memory_path="memory.jsonl",
             my_agent_home=str(tmp_path / "home"),

@@ -76,7 +76,7 @@ def test_dispatch_parallel_runner_pool_respects_start_rate(monkeypatch):
         backend = CountingAcceptedBackend()
         monkeypatch.setattr("agent_py_agent.agent.core.get_backend", lambda _name, _config: backend)
         cfg = AgentConfig(
-            tool_protocol="text",
+            tool_protocol="native",
             model_backend="worker-pool-test",
             subagent_workspace="subs",
             runner_concurrency="3",
@@ -116,7 +116,7 @@ def test_dispatch_parallel_runner_pool_does_not_broadcast_specific_instruction(
 ):
     captured: list[tuple[str, str]] = []
     cfg = AgentConfig(
-        tool_protocol="text",
+        tool_protocol="native",
         model_backend="worker-pool-test",
         subagent_workspace="subs",
         runner_concurrency="2",
@@ -174,7 +174,7 @@ def test_dispatch_parallel_runner_pool_does_not_broadcast_specific_instruction(
 def test_dispatch_single_runner_keeps_specific_instruction(monkeypatch, tmp_path):
     captured: list[str] = []
     cfg = AgentConfig(
-        tool_protocol="text",
+        tool_protocol="native",
         model_backend="worker-pool-test",
         subagent_workspace="subs",
         runner_concurrency="2",
@@ -229,7 +229,7 @@ def test_dispatch_worker_reuses_parent_runtime_context_config(monkeypatch, tmp_p
 
     captured: list[tuple[int, int, str]] = []
     cfg = AgentConfig(
-        tool_protocol="text",
+        tool_protocol="native",
         model_backend="worker-pool-test",
         subagent_workspace="subs",
         runner_concurrency="1",
@@ -325,7 +325,7 @@ def _capture_runner_ids(monkeypatch, agent, captured: list[str]) -> None:
 def test_dispatch_blocks_invalid_scoped_run_id_with_valid_child_hint(monkeypatch, tmp_path):
     captured: list[str] = []
     cfg = AgentConfig(
-        tool_protocol="text",
+        tool_protocol="native",
         model_backend="worker-pool-test",
         subagent_workspace="subs",
         runner_concurrency="1",
@@ -372,7 +372,7 @@ def test_dispatch_parallel_runner_pool_timeout_does_not_block_other_workers(monk
     backend = OneSlowOneFastBackend()
     monkeypatch.setattr("agent_py_agent.agent.core.get_backend", lambda _name, _config: backend)
     cfg = AgentConfig(
-        tool_protocol="text",
+        tool_protocol="native",
         model_backend="worker-pool-test",
         subagent_workspace="subs",
         runner_concurrency="2",
