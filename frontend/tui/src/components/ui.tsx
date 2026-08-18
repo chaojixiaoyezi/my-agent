@@ -152,12 +152,14 @@ export function StatusBar({ phase, model, ctxPercent, ctxTokens, error, queued, 
   const busy = phase === "polling" || phase === "submitting";
   const phaseText = busy ? "处理中…" : phase === "done" ? "完成" : phase === "error" ? "错误" : "就绪";
   const bar = progressBar(ctxPercent, 10);
+  // ctx 进行中显示 …（token 只在完成时由 result 更新；0 会误导「用完了」）
+  const ctxText = busy && ctxTokens <= 0 ? "…" : `${Math.round(ctxTokens / 1000)}K`;
   return (
     <Box flexDirection="column">
       <Text color={c.status}>
         {busy ? <Text color={c.toolStart}>✷ {phaseText}</Text> : <Text>{phaseText}</Text>}
-        {reconnecting ? <Text color={c.toolFail}> ⚠ 网关重连中…</Text> : null} | model {model} | ctx{" "}
-        {Math.round(ctxTokens / 1000)}K/200K | [{bar}]
+        {reconnecting ? <Text color={c.toolFail}> ⚠ 网关重连中…</Text> : null} | model {model} | ctx {ctxText}
+        /200K | [{bar}]
       </Text>
       {queued ? <Text color={c.dim}>（排队：{truncateByWidth(queued, 24).text}）</Text> : null}
       {error ? <Text color={c.toolFail}>⚠ {error}</Text> : null}
