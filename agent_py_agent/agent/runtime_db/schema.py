@@ -509,6 +509,26 @@ _BASE_RUNTIME_SQL = (
         updated_at REAL NOT NULL
     )
     """,
+    # ------------------------------------------------ wake_legacy_migrations（#233 第 5 步）
+    # 525 遗留 active 任务隔离台账（spec §6 第 5 步 / §8「不批量删不标完成，只迁移隔离+保留证据」）。
+    # 独立于 tasks：可逆（按 migration_version 删行即回滚）；不污染 resume 读取的 tasks.status。
+    # 只存受控 ref（link path / runtime_task_id / state.json path），不存正文/密钥/大 payload。
+    """
+    CREATE TABLE IF NOT EXISTS wake_legacy_migrations (
+        task_id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        isolation_state TEXT NOT NULL,
+        reason TEXT NOT NULL DEFAULT '',
+        last_seen REAL NOT NULL DEFAULT 0,
+        source TEXT NOT NULL DEFAULT '',
+        provenance_ref TEXT NOT NULL DEFAULT '',
+        migration_version TEXT NOT NULL DEFAULT '',
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_wake_legacy_owner ON wake_legacy_migrations(owner_id, isolation_state)",
+    "CREATE INDEX IF NOT EXISTS idx_wake_legacy_state ON wake_legacy_migrations(isolation_state, last_seen)",
 )
 
 

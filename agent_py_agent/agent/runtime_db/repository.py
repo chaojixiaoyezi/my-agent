@@ -95,6 +95,22 @@ class RuntimeRepository(
         finally:
             conn.close()
 
+    def set_metadata(self, key: str, value: str) -> None:
+        """写 metadata（幂等：key 冲突更新）。迁移 before/after 计数落账用。"""
+        with self.transaction() as conn:
+            conn.execute(
+                "INSERT INTO metadata(key, value) VALUES(?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+
+    def get_metadata(self, key: str) -> str | None:
+        with self._runtime_connection() as conn:
+            row = conn.execute(
+                "SELECT value FROM metadata WHERE key = ?", (key,)
+            ).fetchone()
+        return str(row["value"]) if row is not None else None
+
     # -------------------------------------------- A.4/A.5/A.6/A.9 主链写入
     def record_run_creation(
         self,
@@ -1886,6 +1902,101 @@ class RuntimeRepository(
                 "SELECT status, count(*) AS n FROM wake_intents GROUP BY status"
             ).fetchall()
         return {str(row["status"]): int(row["n"]) for row in rows}
+
+    def wake_intent_for_task(self, owner_id: str, task_id: str) -> dict[str, Any] | None:
+        """owner/task 作用域下最新非终态 intent（pending/claimed/handed_off）。
+
+        reconciler 判据（#233 第 5 步）：存在非终态 intent → 无需补写；只有
+        终态（cancelled/expired）或不存在 → 才是补写目标（可重武装）。"""
+        with self._runtime_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM wake_intents WHERE owner_id = ? AND task_id = ?"
+                " AND status IN ('pending', 'claimed', 'handed_off')"
+                " ORDER BY updated_at DESC LIMIT 1",
+                (owner_id, task_id),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    # --------------------------------------- wake_legacy_migrations（#233 第 5 步）
+    def list_active_tasks(
+        self, owner_id: str, *, limit: int = 1000
+    ) -> list[dict[str, Any]]:
+        """owner 名下 status='active' 任务（525 迁移扫描输入）。
+
+        只读不判活（preserve step 0 止血：任务状态不再等于唤醒资格）——迁移用它
+        枚举候选，reconciler 判活走 unfinished_task_ids（link+ledger+authority）。
+        """
+        with self._runtime_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM tasks WHERE owner_id = ? AND status = 'active'"
+                " ORDER BY updated_at ASC LIMIT ?",
+                (owner_id, int(limit)),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def upsert_legacy_migration(
+        self,
+        *,
+        task_id: str,
+        owner_id: str,
+        isolation_state: str,
+        reason: str,
+        last_seen: float,
+        source: str,
+        provenance_ref: str,
+        migration_version: str,
+        now: float | None = None,
+    ) -> dict[str, object]:
+        """写/更新隔离台账行（幂等：ON CONFLICT 保留首隔离状态，只刷 last_seen）。
+
+        可逆：DELETE WHERE migration_version 即回滚一批；tasks 完全不动。
+        """
+        now = time.time() if now is None else now
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT isolation_state FROM wake_legacy_migrations WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            existing = row is not None
+            conn.execute(
+                "INSERT INTO wake_legacy_migrations ("
+                " task_id, owner_id, isolation_state, reason, last_seen, source,"
+                " provenance_ref, migration_version, created_at, updated_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(task_id) DO UPDATE SET"
+                " last_seen = excluded.last_seen, updated_at = excluded.updated_at",
+                (
+                    task_id, owner_id, isolation_state, reason, last_seen, source,
+                    provenance_ref, migration_version,
+                    row["created_at"] if existing else now,
+                    now,
+                ),
+            )
+        return {"upserted": True, "task_id": task_id, "existing": existing}
+
+    def get_legacy_migration(self, task_id: str) -> dict[str, Any] | None:
+        with self._runtime_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM wake_legacy_migrations WHERE task_id = ?", (task_id,)
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def legacy_migration_counts_by_state(self) -> dict[str, int]:
+        """隔离台账按状态计数（迁移 before/after 证据）。"""
+        with self._runtime_connection() as conn:
+            rows = conn.execute(
+                "SELECT isolation_state, count(*) AS n FROM wake_legacy_migrations"
+                " GROUP BY isolation_state"
+            ).fetchall()
+        return {str(row["isolation_state"]): int(row["n"]) for row in rows}
+
+    def count_active_tasks(self, owner_id: str) -> int:
+        with self._runtime_connection() as conn:
+            row = conn.execute(
+                "SELECT count(*) AS n FROM tasks WHERE owner_id = ? AND status = 'active'",
+                (owner_id,),
+            ).fetchone()
+        return int(row["n"]) if row is not None else 0
 
     # -------------------------------------------------- wake_policies（#233）
     def set_wake_policy(

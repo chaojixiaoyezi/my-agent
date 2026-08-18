@@ -381,6 +381,11 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 策略/待处理唤醒信号」的 owner 种回活跃登记表。治网关重启/LRU 逐出后 scoped owner 的
     # 到点唤醒无人消费=盯守睡死(登记表是易失的进程内结构,只有新入站请求才补记)。
     background_owner_wake_rescan_seconds: int = 120
+    # #233-5 reconciler：低频安全网（仅审计+补 intent，禁模型/禁 attempt）。
+    # 迁移期 10min；step 6 稳定后调 1800（30min）+ jitter，信号丢失临时缩短。
+    wake_reconciler_interval_seconds: int = 600
+    wake_reconciler_jitter_seconds: int = 30
+    wake_reconciler_max_per_tick: int = 50
     # owner retention 扫描控制器每拍只处理一个有界页，不创建 Agent、不调用 LLM。
     # 每个 owner 的 retention.json 另有日级执行节流；0 关闭网关自动扫描。
     owner_maintenance_scan_interval_seconds: int = 60

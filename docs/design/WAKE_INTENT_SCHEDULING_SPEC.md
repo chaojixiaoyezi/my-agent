@@ -129,8 +129,8 @@ dedup_key = sha256(f"{owner_id}:{task_id}:{run_id or ''}:"
 - **第 2 步**：dispatcher 只消费「**policy 有效 + 来源授权 + 到期 + 配额/circuit 可用**」的 intent（`status=pending AND next_wake_at<=now AND 未过期 AND policy 匹配当前 generation 未撤销 AND 来源授权`），**不用 async 作全局执行门槛**（seq2416：interactive 来源 ∈ {inbound, user_continue} 事件驱动，禁周期扫描；async 来源 ∈ {cron, heartbeat, sleep, retry, recovery} 按策略），原子 claim 后创建 attempt；旧路径只 shadow/dual-write，**不 dual-execute**。
 - **第 3 步**：接入事件投递（入站/cron/heartbeat/sleep/subagent_completed/provider_recovery 写 intent）+ 精确定时器（持久 due 索引 + 最小堆，睡到最近到期点；重启后从索引重建）。
 - **第 4 步**：sleep/progress/wait 归一到同一挂起记录（sleep 不占 worker/LLM 槽）；sleep 产生的 `sleep_until` wake intent 与 progress/wait 的 suspension fact 在 source adapter 契约中明确。
-- **第 5 步**：reconciler（低频安全网 10-30 分钟，仅审计+补 intent）+ 525 迁移验证 + 双 gateway/重启/429/终态竞态/重复副作用验收（见 §7）。
-- **第 6 步**：旧路径双写 shadow/计数比对验证无重复/漏写后，删除旧执行路径，参数化 reconciler 频率（迁移期 10 分钟，稳定后 30 分钟 + jitter，信号丢失临时缩短）。
+- **第 5 步**：reconciler（低频安全网 10-30 分钟，仅审计+补 intent）+ 525 迁移验证 + 双 gateway/重启/429/终态竞态/重复副作用验收（见 §7）。**✅ 已实施（bbcb6970 之后）**：`wake_reconciler.py`（审计+补 intent，零模型/零 attempt）+ `wake_legacy_migration.py`（525 隔离台账，独立表可逆）+ `scripts/migrate_legacy_wake_tasks.py` + gateway 低频 tick 接线（`wake_reconciler_*` 配置）。旧 seed/discover 保留为 reconciler 素材，shadow 计数供第 6 步比对。
+- **第 6 步**：旧路径双写 shadow/计数比对验证无重复/漏写后，删除旧执行路径，参数化 reconciler 频率（迁移期 10 分钟，稳定后 30 分钟 + jitter，信号丢失临时缩短）。**（待办）**：验证后删 `_maybe_seed_wake_pending_owners`/`_seed_owner_registry`/`seed_registry_from_disk` 等 shadow-only 包装；`wake_reconciler_interval_seconds` 调 1800。
 
 ## 7. 证据化验收矩阵（可证伪）
 

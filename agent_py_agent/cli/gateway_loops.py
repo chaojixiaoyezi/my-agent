@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import socket
 import sys
 import threading
@@ -379,6 +380,10 @@ class _BackgroundMainSupervisor:
         self._wake_rescan_interval = _wake_rescan_interval_seconds(self._base_agent)
         self._next_wake_rescan_at = 0.0
         self._wake_discovery_cursor: OwnerWakeCursor | None = None
+        # #233-5 reconciler：低频安全网（审计+补 intent，禁模型/禁 attempt）。
+        # 迁移期 10min；step 6 稳定后调 1800（30min）+ jitter。
+        self._next_wake_reconciler_at = 0.0
+        self._reconciler_cursor: OwnerWakeCursor | None = None
         # Named Audit harvesters live inside the Gateway process. A clean
         # restart reacquires only sources whose exact persisted parent Audit is
         # still active. Ordinary turn-scoped watches never gain background
@@ -441,6 +446,7 @@ class _BackgroundMainSupervisor:
         self._maybe_seed_wake_pending_owners()  # #233: shadow 计数，不再拉起
         self._dispatch_due_wake_intents()  # #233: dispatcher 唯一执行入口
         self._reap_stale_wake_intents()  # #233: bounded reaper（防僵尸卡单）
+        self._reconcile_missing_wake_intents()  # #233-5: 低频安全网（禁模型/禁 attempt）
         reports = self._collect_finished_ticks()
         self._sync_owner_schedulers()
         self._recover_active_watch_harvesters()
@@ -680,6 +686,62 @@ class _BackgroundMainSupervisor:
                     )
         except Exception as exc:  # noqa: BLE001 reaper 异常绝不影响主循环
             _print_gateway_loop_error("gateway_background_main.reaper", "wake-reaper", exc)
+
+    def _reconcile_missing_wake_intents(self) -> None:
+        """#233-5 低频安全网：审计 + 补写缺失 intent（禁模型/禁 attempt）。
+
+        镜像 reaper 的有界结构：monotonic 节流（迁移期 10min + jitter）+ 跨
+        owner 全局 budget。对每个 owner 调 wake_reconciler.reconcile_missing_
+        wake_intents——补写经 producer（同 dedup/授权门），无 policy/无 run 的
+        legacy 任务标隔离台账（ORPHANED/RECONCILIATION_REQUIRED）。单 owner
+        异常不阻断其他。
+        """
+        current = time.monotonic()
+        # 防御：测试/部分初始化（object.__new__ 绕过 __init__）可能缺字段 →
+        # getattr 默认 0（首次即到期），与其他 tick 方法（_recover_active_watch_
+        # harvesters 同款）一致，绝不让缺失字段炸掉 tick 编排。
+        next_reconciler_at = float(getattr(self, "_next_wake_reconciler_at", 0.0) or 0.0)
+        if current < next_reconciler_at:
+            return
+        owners_dir = getattr(getattr(self._base_agent, "home_paths", None), "owners_dir", None)
+        if not owners_dir:
+            return
+        interval = _positive_int_config(self._base_agent, "wake_reconciler_interval_seconds", default=600)
+        jitter = _float_config(self._base_agent, "wake_reconciler_jitter_seconds", default=30)
+        self._next_wake_reconciler_at = current + interval + random.uniform(0.0, max(0.0, jitter))
+        try:
+            from ..agent.runtime_db.repository import RuntimeRepository
+            from ..agent.runtime_db.schema import runtime_db_path
+            from ..agent.wake_reconciler import reconcile_missing_wake_intents
+            # 全局 budget：处理量跨 owner 累计封顶（10 万 owner 时总处理量不随 owner 数放大）。
+            budget = _positive_int_config(self._base_agent, "wake_reconciler_max_per_tick", default=50)
+            spent = 0
+            for owner_identity, owner_home in _owner_homes_iter(owners_dir):
+                if spent >= budget:
+                    break
+                db_path = runtime_db_path(owner_home)
+                if not db_path.is_file():
+                    continue
+                try:
+                    repo = RuntimeRepository(db_path)
+                    counts = reconcile_missing_wake_intents(
+                        repo,
+                        owner_id=getattr(owner_identity, "owner_id", ""),
+                        owner_home=owner_home,
+                        limit=budget - spent,
+                    )
+                except Exception:  # noqa: BLE001 单 owner 库异常不阻断其他
+                    continue
+                spent += int(counts.get("backfilled") or 0) + int(counts.get("orphaned") or 0) \
+                    + int(counts.get("reconciliation_required") or 0)
+                if sum(counts.values()):
+                    print(
+                        f"[gateway-background-main] wake reconciler: "
+                        f"{counts} owner={getattr(owner_identity, 'owner_id', '')}",
+                        flush=True,
+                    )
+        except Exception as exc:  # noqa: BLE001 reconciler 异常绝不影响主循环
+            _print_gateway_loop_error("gateway_background_main.reconciler", "wake-reconciler", exc)
 
     def _sync_owner_schedulers(self) -> None:
         # 登记本唯一入口:registry snapshot(controller claim_due_owners / wake seed 分页种回)。
