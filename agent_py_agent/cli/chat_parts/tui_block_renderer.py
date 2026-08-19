@@ -696,12 +696,7 @@ def _render_thinking(block: TuiBlock, context: TuiRenderContext) -> tuple[Format
         )
         lines: list[FormattedLine] = list(activity_lines)
         if context.detailed_transcript and block.text:
-            rendered = render_markdown(
-                block.text,
-                MarkdownRenderContext(width=max(1, context.width - 2)),
-            )
-            for line in rendered:
-                lines.append((("class:tui-thinking-detail", "  "), *line) if line else ())
+            lines.extend(_thinking_content_lines(block.text, context, closed=False))
         return tuple(lines)
     detail = block.text or block.detail
     if not detail:
@@ -722,10 +717,33 @@ def _render_thinking(block: TuiBlock, context: TuiRenderContext) -> tuple[Format
             continuation_prefix=(("class:tui-thinking", "  "),),
         )
     )
-    rendered = render_markdown(detail, MarkdownRenderContext(width=max(1, context.width - 2)))
-    for line in rendered:
-        lines.append((("class:tui-thinking-detail", "  "), *line) if line else ())
+    lines.extend(_thinking_content_lines(detail, context, closed=True))
     return tuple(lines)
+
+
+# LLM: 思考正文统一浅灰 + 括号包裹（与正文区分）；closed 时首行（ 尾行 ），
+# 活动态只加首括号（内容仍在增长）。
+# 函数用途: 生成括号包裹的浅灰思考内容行。
+def _thinking_content_lines(
+    detail: str,
+    context: TuiRenderContext,
+    *,
+    closed: bool,
+) -> list[FormattedLine]:
+    rendered = render_markdown(detail, MarkdownRenderContext(width=max(1, context.width - 2)))
+    last_visible = max((i for i, line in enumerate(rendered) if line), default=-1)
+    out: list[FormattedLine] = []
+    for idx, line in enumerate(rendered):
+        if not line:
+            out.append(())
+            continue
+        if idx == 0:
+            out.append((("class:tui-thinking-detail", "（"), *line))
+        else:
+            out.append((("class:tui-thinking-detail", "  "), *line))
+        if closed and idx == last_visible:
+            out[-1] = (*out[-1], ("class:tui-thinking-detail", "）"))
+    return out
 
 
 def _thinking_title(block: TuiBlock) -> str:
