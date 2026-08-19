@@ -1,5 +1,19 @@
 # STATUS
 
+## 2026-08-18 剪贴板复制走本机原生工具（自动复制/输入框复制粘贴）
+
+- 用户真机四问：模型 401（配置问题，见下）、拖选自动复制不行、输入框粘贴不了、
+  输入框复制显示成功但系统剪贴板没内容。
+- 根因：`_write_selection_clipboard` 只写 app clipboard + tmux buffer + OSC 52；OSC 52 在
+  iTerm2 默认禁用、macOS Terminal.app 不支持 → 系统剪贴板为空，粘贴随之失效。
+- 修复：本地（无 `SSH_CONNECTION`）额外用
+  `pbcopy`/`wl-copy`/`xclip`/`xsel`/`clip` 写系统剪贴板，先于 tmux/OSC 52 启动（避免切焦
+  竞态）；SSH 会话跳过 native（写的是远端剪贴板）；Linux 工具探测结果缓存；Ctrl-V 遇空
+  应用剪贴板提示走 `Cmd-V/Ctrl-Shift-V`（bracketed paste）。TUI 需重开进程生效。
+- 模型 401 根因：重启 gateway 时漏了 `MY_AGENT_RUNTIME_CONFIG=/root/.my-agent/config/
+  testbox-single-gateway.yaml`（MiniMax 直连配置），回落 工具运行时 默认端点用 MiniMax key
+  → 401。已带正确配置重启（pid 1290720）并 `gateway ask` 实测通过。
+
 ## 2026-08-18 候选消息实时流式 + 每轮阶段计时
 
 - 真机实测底座问题：模型→Gateway 已流式，Gateway→TUI 把正文暂存 `_model_segment` 到工具边界或
