@@ -844,28 +844,20 @@ def _required_action_contract_snapshot(
     from ...contracts.effective_contract_snapshot import build_effective_contract_snapshot
     from ...contracts.required_actions import (
         RequiredActionAssessment,
-        assess_required_actions,
         restore_required_actions_from_records,
+        structured_required_action_assessment,
     )
 
-    # EXEC-20: cli_run 是任务执行入口, 不存在"信息性陈述"场景——跳过模型预评估
-    # 。真机两次实证: 该评估对正常任务消息
-    # 误判 requires_action=false → 整轮工具被 no-action-gate 硬拦(TOOL_ACTION_NOT_REQUIRED)
-    # → 任务假失败。跳过评估不跳过 required_actions 契约本身: 协作/显式合同路径不变。
-    if str(getattr(params, "source", "") or "") == "cli_run":
-        assessment = RequiredActionAssessment(
-            source="cli_run_task",
-            requires_action=True,
-        )
-    else:
-        assessment = assess_required_actions(
-            backend=getattr(agent, "backend", None),
-            user_prompt=params.root_user_prompt or params.user_prompt,
-            runtime_snapshot=tool_runtime_snapshot,
-            run_id=params.run_id,
-            source_turn_id=params.request_id or params.attempt_id or params.run_id,
-            structured_sources=(params.task_attributes, params.delivery_contract),
-        )
+    # 按 会话运行时 语义：不做每次 turn 的模型预评估（对照组 会话运行时/轻量运行时/harness 均无此机制；
+    # 真机铁证 2026-08-08：评估误判 requires_action=false 会把正常任务整轮工具硬拦成
+    # 假失败，且评估从不硬禁工具、失败也不禁——预评估只有延迟成本）。显式结构化合同
+    # （协作/派工/delivery contract）路径不变，见 structured_required_action_assessment。
+    assessment = structured_required_action_assessment(
+        (params.task_attributes, params.delivery_contract),
+        runtime_snapshot=tool_runtime_snapshot,
+        run_id=params.run_id,
+        source_turn_id=params.request_id or params.attempt_id or params.run_id,
+    )
     metadata = {
         "source": assessment.source,
         "error": assessment.error,

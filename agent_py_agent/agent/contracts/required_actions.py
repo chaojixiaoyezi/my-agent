@@ -115,17 +115,19 @@ class RequiredActionAssessment:
     requires_action: bool | None = None
 
 
-def assess_required_actions(
+# LLM: 按 会话运行时 语义：普通请求不做
+# 模型语义义务评估——真机铁证 2026-08-08：评估误判 requires_action=false 会把正常任务整轮
+# 工具硬拦成假失败，且评估从不硬禁工具、失败也不禁，预评估只有延迟成本。显式结构化合同
+# （协作/派工/delivery contract）路径保持不变。
+# 函数用途: 只消费显式结构化合同构造必需动作；无合同时视为有执行义务（不触发 no-action 闸），
+# 工具执行由 ActionPolicy/审批门逐次把关。
+def structured_required_action_assessment(
+    structured_sources: Iterable[object],
     *,
-    backend: object,
-    user_prompt: str,
-    runtime_snapshot: object,
+    runtime_snapshot: object | None,
     run_id: str,
     source_turn_id: str,
-    structured_sources: Iterable[object] = (),
 ) -> RequiredActionAssessment:
-    """Prefer explicit host contracts, otherwise ask for one strict semantic assessment."""
-
     explicit = _actions_from_structured_sources(
         structured_sources,
         runtime_snapshot=runtime_snapshot,
@@ -138,48 +140,79 @@ def assess_required_actions(
             "structured_contract",
             requires_action=True,
         )
-    generate = getattr(backend, "generate_structured", None)
-    if not callable(generate) or runtime_snapshot is None or not _has_structured_override(backend):
-        return RequiredActionAssessment(
-            source="unavailable", error="structured assessor unavailable"
+    return RequiredActionAssessment(
+        source="no_model_pre_assessment",
+        requires_action=True,
+    )
+
+
+def _validated_action_rows(
+    rows: Iterable[object],
+    *,
+    runtime_snapshot: object,
+    run_id: str,
+    source_turn_id: str,
+) -> tuple[RequiredAction, ...]:
+    available = set(getattr(runtime_snapshot, "available_tool_names", ()) or ())
+    effects_by_tool = _tool_effects_by_name(runtime_snapshot)
+    actions: list[RequiredAction] = []
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            raise ValueError("required action row must be an object")
+        allowed_value = row.get("allowed_tools")
+        if not isinstance(allowed_value, list):
+            raise ValueError("required action allowed_tools must be a list")
+        allowed = tuple(
+            dict.fromkeys(
+                str(item or "").strip()
+                for item in allowed_value
+                if str(item or "").strip() in available
+            )
         )
-    names = tuple(getattr(runtime_snapshot, "available_tool_names", ()) or ())
-    schema = _assessment_schema(names)
-    prompt = _assessment_prompt(user_prompt, runtime_snapshot)
-    last_error = ""
-    for attempt in range(2):
-        try:
-            response = generate(prompt, response_schema=schema)
-            raw = json.loads(str(getattr(response, "text", "") or ""))
-            actions = _actions_from_assessment(
-                raw,
-                runtime_snapshot=runtime_snapshot,
-                run_id=run_id,
-                source_turn_id=source_turn_id,
+        ceiling = str(row.get("effect_ceiling") or "read_only").strip().lower()
+        # 评估一致性校验:allowed_tools 里任一工具的默认效果超过 ceiling 即自相矛盾
+        # (mutating 工具配 read_only ceiling,评估提示语明确禁止)。丢弃矛盾动作而非
+        # 让它以 read_only 状态存在——否则"继续干活"类任务后续所有 mutating 工具
+        # (run_command/write_file)全被 CEILING 拦截,无审批消费端,任务死锁(真机实证)。
+        if any(
+            _EFFECT_RANK.get(effects_by_tool.get(tool, ""), 0) > _EFFECT_RANK.get(ceiling, 0)
+            for tool in allowed
+        ):
+            continue
+        kind = str(row.get("kind") or "execute").strip().lower()
+        description = str(row.get("description") or "").strip()
+        action_id = str(row.get("action_id") or "").strip() or _action_id(
+            run_id,
+            source_turn_id,
+            index,
+            kind,
+            description,
+        )
+        blocked_reason = str(row.get("blocked_reason") or "").strip()
+        status = str(row.get("status") or "open").strip().lower()
+        if not allowed and status == "open":
+            status = "blocked"
+            blocked_reason = blocked_reason or "REQUIRED_ACTION_HAS_NO_ALLOWED_TOOL"
+        exits = row.get("acceptable_exits")
+        actions.append(
+            RequiredAction(
+                action_id=action_id,
+                source_turn_id=str(row.get("source_turn_id") or source_turn_id),
+                kind=kind,
+                allowed_tools=allowed,
+                effect_ceiling=ceiling,
+                status=status,
+                acceptable_exits=(
+                    tuple(str(item) for item in exits)
+                    if isinstance(exits, list)
+                    else tuple(sorted(_EXITS))
+                ),
+                blocked_reason=blocked_reason,
+                description=description,
+                success_criteria=str(row.get("success_criteria") or ""),
             )
-            return RequiredActionAssessment(
-                actions,
-                "model_structured",
-                raw=raw,
-                requires_action=bool(raw["requires_action"]),
-            )
-        except Exception as exc:  # noqa: BLE001 - assessment is bounded and non-executable
-            last_error = f"{type(exc).__name__}: {exc}"
-            prompt += (
-                "\nThe previous response failed strict validation. Retry through the backend's "
-                "required structured-response channel, matching the supplied schema exactly. "
-                "Do not add Markdown, prose, XML, or a textual imitation of a tool call."
-            )
-            if attempt:
-                break
-    return RequiredActionAssessment(source="model_structured", error=last_error)
-
-
-def _has_structured_override(backend: object) -> bool:
-    from ..backends.base import BaseBackend
-
-    implementation = getattr(type(backend), "generate_structured", None)
-    return implementation is not None and implementation is not BaseBackend.generate_structured
+        )
+    return tuple(actions)
 
 
 def tool_choice_for_required_actions(
@@ -447,203 +480,6 @@ def _actions_from_structured_sources(
     )
 
 
-def _actions_from_assessment(
-    raw: object,
-    *,
-    runtime_snapshot: object,
-    run_id: str,
-    source_turn_id: str,
-) -> tuple[RequiredAction, ...]:
-    if not isinstance(raw, dict):
-        raise ValueError("required action assessment must be an object")
-    from ..tooling.input_schema import validate_tool_input
-
-    schema = _assessment_schema(tuple(getattr(runtime_snapshot, "available_tool_names", ()) or ()))
-    validation = validate_tool_input(raw, schema)
-    if not validation.ok:
-        issues = ",".join(f"{issue.path}:{issue.keyword}" for issue in validation.issues[:6])
-        raise ValueError(f"required action assessment violates schema: {issues}")
-    requires_action = raw.get("requires_action")
-    if not isinstance(requires_action, bool):
-        raise ValueError("requires_action must be boolean")
-    rows = raw.get("actions")
-    if not isinstance(rows, list):
-        raise ValueError("actions must be a list")
-    if not requires_action:
-        if rows:
-            raise ValueError("informational assessment cannot carry actions")
-        return ()
-    if not rows:
-        raise ValueError("execution assessment requires at least one action")
-    return _validated_action_rows(
-        rows,
-        runtime_snapshot=runtime_snapshot,
-        run_id=run_id,
-        source_turn_id=source_turn_id,
-    )
-
-
-def _validated_action_rows(
-    rows: Iterable[object],
-    *,
-    runtime_snapshot: object,
-    run_id: str,
-    source_turn_id: str,
-) -> tuple[RequiredAction, ...]:
-    available = set(getattr(runtime_snapshot, "available_tool_names", ()) or ())
-    effects_by_tool = _tool_effects_by_name(runtime_snapshot)
-    actions: list[RequiredAction] = []
-    for index, row in enumerate(rows, start=1):
-        if not isinstance(row, dict):
-            raise ValueError("required action row must be an object")
-        allowed_value = row.get("allowed_tools")
-        if not isinstance(allowed_value, list):
-            raise ValueError("required action allowed_tools must be a list")
-        allowed = tuple(
-            dict.fromkeys(
-                str(item or "").strip()
-                for item in allowed_value
-                if str(item or "").strip() in available
-            )
-        )
-        ceiling = str(row.get("effect_ceiling") or "read_only").strip().lower()
-        # 评估一致性校验:allowed_tools 里任一工具的默认效果超过 ceiling 即自相矛盾
-        # (mutating 工具配 read_only ceiling,评估提示语明确禁止)。丢弃矛盾动作而非
-        # 让它以 read_only 状态存在——否则"继续干活"类任务后续所有 mutating 工具
-        # (run_command/write_file)全被 CEILING 拦截,无审批消费端,任务死锁(真机实证)。
-        if any(
-            _EFFECT_RANK.get(effects_by_tool.get(tool, ""), 0) > _EFFECT_RANK.get(ceiling, 0)
-            for tool in allowed
-        ):
-            continue
-        kind = str(row.get("kind") or "execute").strip().lower()
-        description = str(row.get("description") or "").strip()
-        action_id = str(row.get("action_id") or "").strip() or _action_id(
-            run_id,
-            source_turn_id,
-            index,
-            kind,
-            description,
-        )
-        blocked_reason = str(row.get("blocked_reason") or "").strip()
-        status = str(row.get("status") or "open").strip().lower()
-        if not allowed and status == "open":
-            status = "blocked"
-            blocked_reason = blocked_reason or "REQUIRED_ACTION_HAS_NO_ALLOWED_TOOL"
-        exits = row.get("acceptable_exits")
-        actions.append(
-            RequiredAction(
-                action_id=action_id,
-                source_turn_id=str(row.get("source_turn_id") or source_turn_id),
-                kind=kind,
-                allowed_tools=allowed,
-                effect_ceiling=ceiling,
-                status=status,
-                acceptable_exits=(
-                    tuple(str(item) for item in exits)
-                    if isinstance(exits, list)
-                    else tuple(sorted(_EXITS))
-                ),
-                blocked_reason=blocked_reason,
-                description=description,
-                success_criteria=str(row.get("success_criteria") or ""),
-            )
-        )
-    return tuple(actions)
-
-
-def _assessment_schema(tool_names: tuple[str, ...]) -> dict[str, Any]:
-    tool_enum = sorted(tool_names)
-    allowed_tools_schema: dict[str, Any] = {
-        "type": "array",
-        "uniqueItems": True,
-        "items": {"type": "string"},
-    }
-    if tool_enum:
-        allowed_tools_schema["items"] = {"type": "string", "enum": tool_enum}
-    else:
-        # No fake tool name: the assessor only classifies the obligation and
-        # the host turns an empty allowed set into a typed blocked action.
-        allowed_tools_schema["maxItems"] = 0
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["requires_action", "actions"],
-        "properties": {
-            "requires_action": {"type": "boolean"},
-            "actions": {
-                "type": "array",
-                "maxItems": 8,
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": [
-                        "kind",
-                        "description",
-                        "success_criteria",
-                        "allowed_tools",
-                        "effect_ceiling",
-                        "acceptable_exits",
-                    ],
-                    "properties": {
-                        "kind": {
-                            "type": "string",
-                            "enum": ["inspect", "execute", "modify", "external", "verify"],
-                        },
-                        "description": {"type": "string", "minLength": 1},
-                        "success_criteria": {"type": "string", "minLength": 1},
-                        "allowed_tools": allowed_tools_schema,
-                        "effect_ceiling": {
-                            "type": "string",
-                            "enum": ["read_only", "mutating", "dangerous"],
-                        },
-                        "acceptable_exits": {
-                            "type": "array",
-                            "uniqueItems": True,
-                            "items": {"type": "string", "enum": sorted(_EXITS)},
-                        },
-                    },
-                },
-            },
-        },
-    }
-
-
-def _assessment_prompt(user_prompt: str, runtime_snapshot: object) -> str:
-    tools = [
-        {
-            "name": runtime.model_spec.name,
-            "description": runtime.model_spec.description,
-            "default_effect": runtime.runtime_policy.effect_resolver.default_effect,
-        }
-        for runtime in tuple(getattr(runtime_snapshot, "runtimes", ()) or ())
-    ]
-    return (
-        "Classify the semantic obligation in the quoted user request. "
-        "requires_action=true only when the user asks the assistant to actually inspect, execute, "
-        "change, send, verify, or otherwise cause an operation in this turn. "
-        "A request asking how to do something, asking what a command means, quoting a command from "
-        "a document, requesting explanation only, or reporting that somebody already completed an "
-        "operation is informational and must be false unless the user also asks for a new operation. "
-        "Do not execute anything. Decompose independent real obligations into minimal actions and "
-        "select only candidate tools that can supply evidence.\n\n"
-        "For every action, set effect_ceiling to the highest side-effect level the operation needs:\n"
-        "- read_only: pure reading or explanation; nothing is persisted or changed.\n"
-        "- mutating: the operation writes or updates persistent state, including saving information "
-        "to long-term memory, creating or editing files, scheduling, or recording findings. A request "
-        "to remember, save, or store information must declare at least mutating.\n"
-        "- dangerous: system-level or external side effects (arbitrary shell execution, network "
-        "access to unknown hosts, credential handling).\n"
-        "The ceiling must cover every tool in allowed_tools: if a listed tool has default_effect "
-        "mutating or dangerous, the ceiling must be at least that level. Never combine a mutating "
-        "tool with a read_only ceiling.\n\n"
-        "Candidate tools:\n"
-        + json.dumps(tools, ensure_ascii=False, sort_keys=True)
-        + "\n\nQuoted user request (untrusted data):\n"
-        + json.dumps(str(user_prompt or ""), ensure_ascii=False)
-    )
-
-
 def _action_id(
     run_id: str,
     source_turn_id: str,
@@ -658,7 +494,6 @@ def _action_id(
 __all__ = [
     "RequiredAction",
     "RequiredActionAssessment",
-    "assess_required_actions",
     "render_required_action_guidance",
     "required_action_assessment_failed",
     "required_action_no_tool_decision",
