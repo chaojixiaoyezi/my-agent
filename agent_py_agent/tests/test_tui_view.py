@@ -227,7 +227,7 @@ def test_mouse_selection_highlights_and_copies_visible_columns() -> None:
     )
     selected_line = control.create_content(40, 5).get_line(0)
 
-    assert control.selected_text() == "abc"
+    assert control.selected_text() == "abcd"
     assert any("class:tui-selection" in style for style, _text, *_ in selected_line)
 
 
@@ -259,7 +259,64 @@ def test_mouse_move_after_button_release_does_not_expand_selection() -> None:
     )
 
     assert result is NotImplemented
-    assert control.selected_text() == "abc"
+    assert control.selected_text() == "abcd"
+
+
+def test_no_button_motion_finishes_lost_release_and_copies_once() -> None:
+    store = TuiStateStore()
+    seq = TuiEventSequencer("selection-lost-release", clock=lambda: 5.75)
+    store.publish(
+        seq.emit(
+            "assistant_completed",
+            "completed",
+            "assistant-selection-lost-release",
+            {"text": "abcdefghijklmnopqrstuvwxyz"},
+        )
+    )
+    control = TuiTranscriptControl(_provider(store))
+    control.create_content(40, 5)
+    copied: list[str] = []
+    control.set_copy_on_select(copied.append)
+    control.mouse_handler(
+        MouseEvent(Point(x=2, y=0), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    )
+    control.mouse_handler(
+        MouseEvent(Point(x=5, y=0), MouseEventType.MOUSE_MOVE, MouseButton.LEFT, frozenset())
+    )
+
+    result = control.mouse_handler(
+        MouseEvent(Point(x=18, y=0), MouseEventType.MOUSE_MOVE, MouseButton.NONE, frozenset())
+    )
+    control.mouse_handler(
+        MouseEvent(Point(x=24, y=0), MouseEventType.MOUSE_MOVE, MouseButton.LEFT, frozenset())
+    )
+
+    assert result is None
+    assert control.selected_text() == "abcd"
+    assert copied == ["abcd"]
+
+
+def test_selection_includes_wide_character_under_release_cell() -> None:
+    store = TuiStateStore()
+    seq = TuiEventSequencer("selection-wide", clock=lambda: 5.9)
+    store.publish(
+        seq.emit(
+            "assistant_completed",
+            "completed",
+            "assistant-selection-wide",
+            {"text": "甲乙丙丁"},
+        )
+    )
+    control = TuiTranscriptControl(_provider(store))
+    control.create_content(40, 5)
+    control.mouse_handler(
+        MouseEvent(Point(x=2, y=0), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    )
+    control.mouse_handler(
+        MouseEvent(Point(x=8, y=0), MouseEventType.MOUSE_UP, MouseButton.LEFT, frozenset())
+    )
+
+    assert control.selected_text() == "甲乙丙丁"
 
 
 def test_resize_clears_viewport_selection() -> None:

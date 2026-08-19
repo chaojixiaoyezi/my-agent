@@ -79,6 +79,11 @@ python3 -m pytest -q --tb=short agent_py_agent/tests/test_verification_runtime.p
 终端交互 TUI parity 的 focused 命令覆盖 typed event/reducer、Markdown/diff、spinner、权限续跑、输入、
 history/search/paste/completion/queue/stash、follow/unseen、session-history、真实 Gateway readiness、title、
 鼠标选择/OSC52、PTY recorder 和 ANSI replay。
+鼠标回归还必须覆盖：释放 cell 本身进入选区，中文宽字符不被截断；窗口外丢失 mouse-up 后，首个
+`MouseButton.NONE` motion 或下一次 fresh press 只结束旧拖动，后续 hover 不再扩展；一次 settled selection
+只自动复制一次，并同时保留 prompt_toolkit、OSC52 与 tmux buffer 路径。运行中普通输入还要证明下一次
+真实模型调用能看到该输入；若 exact turn 已结束，TUI 只能挂接 Gateway 返回的 canonical queued request，
+不得再次提交正文。
 富 transcript 追补还必须覆盖：未声明能力的 Gateway 不公开 thinking/display 且继续按 verbose 裁剪；TUI
 声明能力后逐轮 commentary、provider 明示 thinking、edit/overwrite/patch diff、write preview、命令
 stdout/stderr/exit code 均走结构化事件；失败后最后一次 workspace mutation 的软续跑只触发一次，简单写入

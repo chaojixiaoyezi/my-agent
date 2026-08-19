@@ -127,6 +127,8 @@ class TuiTranscriptControl(UIControl):
         self._unseen_block_ids: frozenset[str] = frozenset()
         self._selection: TuiTextSelection | None = None
         self._selection_dragging = False
+        self._selection_copied = False
+        self._copy_on_select: Callable[[str], None] | None = None
         self._selection_width = 0
         self._last_lines: tuple[FormattedLine, ...] = ()
         self._lock = threading.Lock()
@@ -260,6 +262,40 @@ class TuiTranscriptControl(UIControl):
         with self._lock:
             self._selection = None
             self._selection_dragging = False
+            self._selection_copied = False
+
+    # LLM: Copy-on-select is a UI projection callback installed only after Application exists;
+    # selection coordinates and clipboard transport remain separate authorities.
+    # 函数用途: 绑定鼠标松手后的复制动作；传入 None 时只保留高亮而不写剪贴板。
+    def set_copy_on_select(self, callback: Callable[[str], None] | None) -> None:
+        with self._lock:
+            self._copy_on_select = callback
+
+    # LLM: Every terminal release shape, lost-release recovery, and fresh-press fallback must end
+    # one drag exactly once. The callback runs outside the selection lock to avoid UI re-entry.
+    # 函数用途: 收口当前拖选、按可选终点更新范围，并把最终可见文本自动复制一次。
+    def _finish_selection(self, point: Point | None = None) -> bool:
+        callback: Callable[[str], None] | None = None
+        selected_text = ""
+        with self._lock:
+            selection = self._selection
+            if selection is None or not self._selection_dragging:
+                return False
+            if point is not None:
+                selection = TuiTextSelection(
+                    selection.anchor,
+                    _bounded_selection_point(point, self._line_count),
+                )
+                self._selection = selection
+            self._selection_dragging = False
+            if not self._selection_copied:
+                selected_text = _selected_text(self._last_lines, selection)
+                self._selection_copied = True
+                callback = self._copy_on_select
+        self.provider.invalidate()
+        if callback is not None and selected_text.strip():
+            callback(selected_text)
+        return True
 
     # LLM: baseline 只在从 follow 进入手动滚动时冻结，继续滚动不能吞掉已累计的未读 block。
     # 函数用途: 开始一次离尾浏览并记录当时已存在的可计数消息。
@@ -291,13 +327,20 @@ class TuiTranscriptControl(UIControl):
             mouse_event.event_type == MouseEventType.MOUSE_DOWN
             and mouse_event.button == MouseButton.LEFT
         ):
+            # 终端交互 同类兜底：模式 1002 终端可能在窗口外丢失上一轮 release；
+            # 新 press 先收口旧拖选，不能让旧 anchor 延续到下一次点击。
+            self._finish_selection()
             point = _bounded_selection_point(mouse_event.position, self._line_count)
             with self._lock:
                 self._selection = TuiTextSelection(point, point)
                 self._selection_dragging = True
+                self._selection_copied = False
             self.provider.invalidate()
             return None
         if mouse_event.event_type == MouseEventType.MOUSE_MOVE:
+            if mouse_event.button != MouseButton.LEFT:
+                # 终端启用 1003 后，无按键 motion 是窗口外松手的可靠补偿信号。
+                return None if self._finish_selection() else NotImplemented
             with self._lock:
                 selection = self._selection
                 if selection is None or not self._selection_dragging:
@@ -309,17 +352,8 @@ class TuiTranscriptControl(UIControl):
             self.provider.invalidate()
             return None
         if mouse_event.event_type == MouseEventType.MOUSE_UP:
-            with self._lock:
-                selection = self._selection
-                if selection is None or not self._selection_dragging:
-                    return NotImplemented
-                self._selection = TuiTextSelection(
-                    selection.anchor,
-                    _bounded_selection_point(mouse_event.position, self._line_count),
-                )
-                self._selection_dragging = False
-            self.provider.invalidate()
-            return None
+            # 不筛 button：部分终端把 release 编成 NONE/UNKNOWN 或保留 motion bit。
+            return None if self._finish_selection(mouse_event.position) else NotImplemented
         return NotImplemented
 
 
@@ -373,6 +407,13 @@ class TuiTranscriptView:
     # 函数用途: 清除当前可见 transcript 的选区。
     def clear_selection(self) -> None:
         self._active_control().clear_selection()
+
+    # LLM: Both normal and detailed transcript controls share one clipboard projection callback;
+    # whichever viewport is active owns the selection and invokes it only when its drag settles.
+    # 函数用途: 为普通与详细 transcript 同时启用松手自动复制。
+    def set_copy_on_select(self, callback: Callable[[str], None] | None) -> None:
+        self.control.set_copy_on_select(callback)
+        self.modal_control.set_copy_on_select(callback)
 
     # LLM: footer 高度来自当前 frame 的显式换行与滚动指示器，不能固定为一行而裁掉 help 菜单。
     # 函数用途: 告诉 prompt_toolkit 当前 footer 应占多少终端行。
@@ -569,7 +610,8 @@ def _bounded_selection_point(point: Point, line_count: int) -> Point:
     )
 
 
-# LLM: selection range 以 `(line, display-column)` 排序并使用半开区间，避免拖选方向改变复制结果。
+# LLM: selection range stores the terminal cells under anchor/focus. Extraction converts the
+# inclusive focus cell to a half-open display-column boundary so the glyph under the pointer is kept.
 # 函数用途: 返回从上到下、从左到右排列的选区端点。
 def _ordered_selection(selection: TuiTextSelection) -> tuple[Point, Point]:
     anchor_key = (selection.anchor.y, selection.anchor.x)
@@ -597,7 +639,7 @@ def _selected_text(
     for line_index in range(max(0, start.y), last_line + 1):
         text = fragments_text(lines[line_index])
         start_column = start.x if line_index == start.y else 0
-        end_column = end.x if line_index == end.y else display_width_text(text)
+        end_column = end.x + 1 if line_index == end.y else display_width_text(text)
         selected.append(_slice_display_columns(text, start_column, end_column))
     return "\n".join(selected)
 
@@ -634,7 +676,7 @@ def _decorate_selection(
         return line
     text_width = display_width_text(fragments_text(line))
     lower = start.x if line_index == start.y else 0
-    upper = end.x if line_index == end.y else text_width
+    upper = end.x + 1 if line_index == end.y else text_width
     if upper <= lower:
         return line
     decorated: list[tuple[str, str]] = []

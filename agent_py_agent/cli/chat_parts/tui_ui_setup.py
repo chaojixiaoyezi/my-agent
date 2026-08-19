@@ -17,7 +17,11 @@ from .tui_input import (
     TuiQueuedPlaceholderProcessor,
 )
 from .tui_interaction import TuiInteractionState
-from .tui_keybindings import TuiCreateKeybindingsParams, _tui_create_keybindings
+from .tui_keybindings import (
+    TuiCreateKeybindingsParams,
+    _tui_create_keybindings,
+    _write_selection_clipboard,
+)
 from .tui_params import MakeTuiAppParams
 from .tui_runtime import TuiRuntime
 from .tui_terminal import TuiTerminalTitleController
@@ -585,6 +589,16 @@ def _assemble_tui_application(
     )
     _configure_escape_timeouts(app)
     parts.transcript_view.provider.set_invalidate_callback(app.invalidate)
+
+    # LLM: Full-screen mouse tracking suppresses native terminal selection, so settled transcript
+    # selections must update the application clipboard and OSC 52 immediately, like 终端交互.
+    # 函数用途: 在鼠标松手后自动复制最终选区，并保留高亮供用户确认。
+    def copy_settled_selection(text: str) -> None:
+        _write_selection_clipboard(app, text)
+        parts.runtime.set_notice(f"Copied {len(text)} chars", duration_seconds=1.2)
+        app.invalidate()
+
+    parts.transcript_view.set_copy_on_select(copy_settled_selection)
     app._my_agent_title_controller = parts.title_controller
     set_tui_output_sink(parts.runtime.write_console)
     return app

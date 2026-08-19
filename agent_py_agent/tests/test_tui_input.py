@@ -483,6 +483,65 @@ def test_reconciliation_queues_once_only_after_explicit_rejection(monkeypatch, t
     params.stop_event.set()
 
 
+def test_gateway_queued_active_input_attaches_exact_next_turn_without_resubmit(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from agent_py_agent.cli.chat_client_context import (
+        ActiveTurnInputDelivery,
+        ActiveTurnInputResult,
+    )
+
+    runtime = TuiRuntime("active-turn-server-queued")
+    jobs: Queue[ChatJob] = Queue()
+
+    class Agent:
+        def request_active_turn_input(self, *_args, **_kwargs):
+            return ActiveTurnInputResult(
+                ActiveTurnInputDelivery.QUEUED,
+                request_id="gwreq-next-turn",
+                disposition="queued",
+            )
+
+    params = SimpleNamespace(
+        use_gateway=True,
+        state_lock=threading.Lock(),
+        is_running_ref=[True],
+        running_request_id_ref=["gwreq-ending"],
+        pending_jobs_ref_for_enqueue=[0],
+        runtime_inject=[],
+        prompt_files=[],
+        args=SimpleNamespace(no_save=False, resume_context=None),
+        jobs=jobs,
+        tui_runtime=runtime,
+        current_session_id="session-next-turn",
+        stop_event=threading.Event(),
+        agent=Agent(),
+        paths=SimpleNamespace(root=tmp_path),
+        active_input_reconciler=None,
+    )
+    monkeypatch.setattr(tui_keybindings, "ACTIVE_TURN_RETRY_INITIAL_SECONDS", 0.05)
+
+    assert tui_keybindings._tui_submit_active_turn_input(
+        params,
+        "当前回合来不及就直接进入下一回合",
+        display_text="当前回合来不及就直接进入下一回合",
+    )
+    deadline = time.time() + 2.0
+    while jobs.empty() and time.time() < deadline:
+        time.sleep(0.01)
+
+    assert jobs.qsize() == 1
+    queued_job = jobs.get_nowait()
+    assert queued_job.request_id == "gwreq-next-turn"
+    assert queued_job.gateway_request_id == "gwreq-next-turn"
+    assert queued_job.client_message_id.startswith("steer-")
+    assert queued_job.inject_complete is True
+    assert runtime.store.snapshot().pending_steers == ()
+    assert params.pending_jobs_ref_for_enqueue == [1]
+    params.stop_event.set()
+
+
 def test_ctrl_c_with_transcript_selection_copies_before_interrupt(monkeypatch) -> None:
     copied: list[str] = []
     runtime = TuiRuntime("selection-copy")
@@ -509,6 +568,40 @@ def test_osc52_clipboard_sequence_wraps_for_tmux() -> None:
 
     assert direct == "\x1b]52;c;YWJj\x07"
     assert wrapped == "\x1bPtmux;\x1b\x1b]52;c;YWJj\x07\x1b\\"
+
+
+def test_tmux_clipboard_buffer_uses_write_through(monkeypatch) -> None:
+    calls: list[tuple[list[str], str]] = []
+
+    class Result:
+        returncode = 0
+
+    def fake_run(args, *, input, **_kwargs):
+        calls.append((list(args), input))
+        return Result()
+
+    monkeypatch.delenv("LC_TERMINAL", raising=False)
+    monkeypatch.setattr(tui_keybindings.subprocess, "run", fake_run)
+
+    assert tui_keybindings._load_tmux_clipboard_buffer("甲乙")
+    assert calls == [(["tmux", "load-buffer", "-w", "-"], "甲乙")]
+
+
+def test_tmux_clipboard_buffer_avoids_iterm2_write_through(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    class Result:
+        returncode = 0
+
+    def fake_run(args, **_kwargs):
+        calls.append(list(args))
+        return Result()
+
+    monkeypatch.setenv("LC_TERMINAL", "iTerm2")
+    monkeypatch.setattr(tui_keybindings.subprocess, "run", fake_run)
+
+    assert tui_keybindings._load_tmux_clipboard_buffer("copy")
+    assert calls == [["tmux", "load-buffer", "-"]]
 
 
 def test_permission_y_n_shortcuts_use_typed_decisions(monkeypatch) -> None:

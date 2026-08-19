@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import base64
 import os
+import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
@@ -1285,6 +1286,13 @@ def _write_selection_clipboard(application: Any, text: str) -> None:
     encoded = normalized.encode("utf-8")
     if not encoded or len(encoded) > 100_000:
         return
+    if os.environ.get("TMUX"):
+        threading.Thread(
+            target=_load_tmux_clipboard_buffer,
+            args=(normalized,),
+            name="my-agent-tui-clipboard",
+            daemon=True,
+        ).start()
     output = getattr(application, "output", None)
     write_raw = getattr(output, "write_raw", None)
     if not callable(write_raw):
@@ -1294,6 +1302,29 @@ def _write_selection_clipboard(application: Any, text: str) -> None:
     flush = getattr(output, "flush", None)
     if callable(flush):
         flush()
+
+
+# LLM: tmux may drop DCS passthrough when allow-passthrough is off. Its own paste buffer is the
+# reliable local authority; -w additionally asks tmux to forward the same text to the outer client.
+# 函数用途: 在后台把已选文本写入 tmux buffer；失败时保留 OSC 52 和应用内剪贴板兜底。
+def _load_tmux_clipboard_buffer(text: str) -> bool:
+    args = ["tmux", "load-buffer"]
+    if os.environ.get("LC_TERMINAL") != "iTerm2":
+        args.append("-w")
+    args.append("-")
+    try:
+        result = subprocess.run(
+            args,
+            input=str(text or ""),
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2.0,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
 
 
 # LLM: tmux passthrough 只包裹固定 OSC 52 控制骨架和 Base64 payload；payload 不得含未编码终端控制字符。

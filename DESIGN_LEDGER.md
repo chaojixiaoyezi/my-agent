@@ -538,9 +538,11 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 空闲动画时钟不应让静态长历史失效。完整 frame key 由 renderer 统一决定；connection/thinking 活动时
   才加入可见动画字段，thinking 周期取 glyph 与稳定词长的最小公倍数，禁止经验魔数。20k block LRU
   和 20k stable display window 是性能边界，不是新的会话事实源。
-- transcript 鼠标选择只持有当前 viewport 显示列，resize 清除；Ctrl-C 有选择时先写 prompt_toolkit
-  clipboard 与 OSC52/tmux passthrough，否则才进入审批取消、turn interrupt 或双击退出。审批 overlay
-  继续允许 Page/wheel/Ctrl-Home/End 查看上文，Up/Down 仍专属于选项导航。
+- transcript 鼠标选择只持有当前 viewport 显示列，resize 清除；anchor/focus 都表示鼠标所在终端 cell，
+  最终 focus cell 必须包含在高亮和复制文本中，不能把光标下的中文宽字符截掉。任何形式的 mouse-up 都结束
+  拖动；1003 无按键 motion 和下一次 fresh press 负责收口窗口外遗失的 release。松手自动写
+  prompt_toolkit clipboard、OSC52 和 tmux buffer，Ctrl-C 仍可重复复制；无选择时才进入审批取消、turn
+  interrupt 或双击退出。审批 overlay 继续允许 Page/wheel/Ctrl-Home/End 查看上文，Up/Down 仍专属于选项导航。
 - 审批 y/n 只能匹配 option 的 structured `decision`，不匹配 Yes/No/中文 label。普通工具结果最多六行；
   用户显式进入 transcript 并 Ctrl-E 后才展开全部，避免大输出常驻主视图。
 - 终端交互 独有 model picker、permission mode carousel、team/buddy/voice/browser 等不造空壳；帮助和补全
@@ -569,9 +571,10 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 ## 2026-08-18 TUI 拖选生命周期、终端头像与富工具记录【状态：已完成；沙箱洁净度另行复验】
 
 - 对照 会话运行时 `tui/event_stream.rs` 可见其明确丢弃 mouse event，并通过 raw scrollback 提供复制友好视图；
-  本项目继续保留已经验收的应用内鼠标选择和 OSC52，但必须补齐独立 `mouse down -> drag -> mouse up`
-  生命周期。既有非空选区只能在左键仍按下时随 `MOUSE_MOVE` 更新，`MOUSE_UP` 更新最后端点并立即结束拖动；
-  松开后的普通移动不得修改选区或触发全屏高亮。
+  本项目需要 终端交互 同类的应用内选择，因此进一步对照 `src/ink/components/App.tsx` 的 lost-release
+  recovery 与 `useCopyOnSelect.ts`。既有非空选区只能在左键仍按下时随 `MOUSE_MOVE` 更新；任何 release、
+  无按键 motion 或下一次 fresh press 都会结束旧拖动。focus cell 按包含语义高亮，松手自动复制且保留选区，
+  普通 hover 不得继续扩展或触发全屏高亮。
 - 终端头像属于纯显示资产，不进入事件、状态、prompt、history 或权限合同。宽卡使用固定宽度 styled
   fragments 表达参考图的长兔耳、浅色头发、红色发饰/衣裙、红伞和小兔；窄卡使用同语义紧凑稿。所有行
   必须按显示列居中和裁剪，80/120/140 与窄终端都不能越界。
