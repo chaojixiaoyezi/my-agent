@@ -1,5 +1,16 @@
 # STATUS
 
+## 2026-08-18 `.13` 单 Gateway 部署收口
+
+- 本地代码提交 `4b6d0246a9324dc99eb4c8a99d0e975d68fda8eb` 已部署到测试机
+  `192.0.2.13:/root/my-agent`；部署前源码、脏补丁、进程与 tmux 证据保存在
+  `/root/tui-parity-evidence/deploy-20260819T085713CST/`，可用于回滚。
+- 测试机已停止 `18420` 至 `18425` 的六个隔离 Gateway，只保留 `127.0.0.1:8420` 主实例；
+  `dsh-input`、`dsh-render`、`dsh-isolation`、`dsh-lifecycle`、`dsh-steer-e2e` 和 `dsh-replica`
+  六个 TUI 均从同一 Gateway workspace attach 并进入 READY，用户原有 TUI 未停止。
+- 后续真机功能、极限、并发和恢复测试一律使用这一个 Gateway；多个用例通过独立 TUI/会话制造并行，
+  不再为测试场景启动额外 Gateway。
+
 ## 2026-08-18 活动输入/控制回执候选提交前收口
 
 - 本轮把活动回合 ordinary input、`/btw`/`/stop` 控制、Gateway 唯一终态、attempt/lease fence、Adapter

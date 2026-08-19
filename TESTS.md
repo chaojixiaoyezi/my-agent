@@ -6,6 +6,11 @@
 约 10,000 行以上，或用户明确要求时，才追加一次 `python3 -m pytest -q --tb=short`。静态检查、文档同步、
 严格代码尺寸、diff 和 clean-package 守卫仍按发布风险执行，不用全仓 pytest 代替。
 
+测试机上的所有真机用例只使用一个真实 Gateway。需要并行时启动多个独立 TUI/会话并统一连接该实例，
+不得为 input、render、lifecycle、isolation、replica 或 steer 等用例另开端口和 Gateway。每轮真机测试前先
+确认只有一个 Gateway 进程和一个配置端口；故障恢复用例顺序重启或中断这个实例。合同单测中的 fake
+Gateway 可以并行，但不能作为“单 Gateway 多客户端”验收的替代证据。
+
 2026-08-18 活动输入/控制回执提交候选先运行 12 个原失败文件的 focused 组合，再运行一次修复后的完整
 `pytest -q --tb=short`，两者均到 100% 且退出 0。changed-file Ruff、doc sync 和 diff check 通过；全仓
 Ruff 的 112 项属于当前 HEAD 存量扫描结果，本轮变更文件为 0。strict code-size 仍有 25 个 hard finding，
