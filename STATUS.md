@@ -1,5 +1,21 @@
 # STATUS
 
+## 2026-08-18 移除每次 run 的模型语义义务预评估（偶发首字延迟根因）
+
+- 用户复现：写 10000 字小说响应慢、首字长时间不出现。stages_ms + run 内部四阶段
+  插桩（MY_AGENT_STAGE_DEBUG=1）+ py-spy 定位：`assess_required_actions` 每次 run
+  无条件调一次非流式模型评估，且 generate_structured 未设输出上限（全局 16314）
+  → 端点慢/模型啰嗦时 30s+ 偶发阻塞。
+- 按 会话运行时 语义修复：
+  删除 assess_required_actions 及 _assessment_prompt/_assessment_schema/
+  _actions_from_assessment/_has_structured_override 与 4 个相关测试；新增
+  structured_required_action_assessment 只消费显式结构化合同（协作/派工不变），
+  无合同时 requires_action=True（不触发 no-action 闸），工具执行由 ActionPolicy/
+  审批门逐次把关。
+- 真机验证（tmux 真实 TUI）：1 万字小说 220s→123s（-44%）；一句话回复 2.9s 总耗时
+  （此前 8-42s 波动）；流式正文/thinking 块/可折叠过程段/终稿全部正常。
+- focused 回归 1149 passed。
+
 ## 2026-08-18 剪贴板复制走本机原生工具（自动复制/输入框复制粘贴）
 
 - 用户真机四问：模型 401（配置问题，见下）、拖选自动复制不行、输入框粘贴不了、
