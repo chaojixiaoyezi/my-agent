@@ -172,6 +172,9 @@ class BufferedChunkStreamWriter:
     _last_flush_at: float = field(default_factory=time.monotonic)
     _verbose_level: str = "off"
     _model_segment: list[str] = field(default_factory=list)
+    _model_delta_buffer: list[str] = field(default_factory=list)
+    _model_delta_chars: int = 0
+    _last_model_delta_flush_at: float = field(default_factory=time.monotonic)
     _commentary_emitted: bool = False
     _identifier_redactions: tuple[tuple[object, str], ...] = ()
     _observed_tool_rounds: int = 0
@@ -184,15 +187,28 @@ class BufferedChunkStreamWriter:
     # LLM: rich transcript 逐模型轮暂存 commentary，普通客户端仍只保留首段；任何暂存段都只能在真实工具边界公开。
     # 函数用途: 接收供应商可见文本增量，等待工具边界确认它是过程说明。
     def write_model(self, text: str) -> None:
-        """Keep one tentative model segment until its lifecycle is known.
+        """Keep one tentative model segment and stream rich-client deltas live.
 
         A provider delta is not yet an accepted user reply: the same generation
         may go on to call a tool, be invalidated by steering, or be replaced by
         the final structured response.  Only the sanitized commentary emitted
         at a real tool boundary and the terminal response file are public.
+
+        Rich clients (TUI) additionally receive ``model_delta`` events in real
+        time so the candidate reply appears while it is being generated.  The
+        per-batch redaction is a display-level projection: text split across
+        batches may show one raw prefix briefly, and the sanitized commentary /
+        canonical terminal response always settles the final transcript.
         """
-        if text and (self.rich_transcript or not self._commentary_emitted):
+        if not text:
+            return
+        if self.rich_transcript or not self._commentary_emitted:
             self._model_segment.append(text)
+        if self.rich_transcript:
+            self._model_delta_buffer.append(text)
+            self._model_delta_chars += len(text)
+            if self._model_delta_should_flush(text):
+                self._flush_model_deltas()
 
     def set_verbose_level(self, level: str) -> None:
         normalized = str(level or "off").strip().lower()
@@ -208,6 +224,8 @@ class BufferedChunkStreamWriter:
         segment so the same run can answer without waiting for final closeout.
         """
         self._model_segment.clear()
+        self._model_delta_buffer.clear()
+        self._model_delta_chars = 0
         self._commentary_emitted = False
         del client_message_ids
 
@@ -246,6 +264,9 @@ class BufferedChunkStreamWriter:
             self.flush()
 
     def flush(self) -> None:
+        # Live model deltas must reach the chunk file before any boundary event
+        # that freezes the segment (commentary/progress/permission/compact).
+        self._flush_model_deltas()
         if not self._buffer:
             return
         text = "".join(self._buffer)
@@ -482,6 +503,41 @@ class BufferedChunkStreamWriter:
         elapsed = time.monotonic() - self._last_flush_at
         return elapsed >= max(0.0, float(self.flush_interval_seconds))
 
+    # LLM: model delta 批量节奏与 runtime progress 相同（128 字符/换行/0.08 秒），
+    # 事件频率有界，多个并发请求各写各的 chunk 文件，底座不会成为吞吐瓶颈。
+    # 函数用途: 判断当前候选消息增量批是否达到发布阈值。
+    def _model_delta_should_flush(self, latest_text: str) -> bool:
+        if self._model_delta_chars >= max(1, int(self.flush_chars)):
+            return True
+        if latest_text.endswith("\n"):
+            return True
+        elapsed = time.monotonic() - self._last_model_delta_flush_at
+        return elapsed >= max(0.0, float(self.flush_interval_seconds))
+
+    # LLM: 增量只做展示级脱敏（路径与结构化标识），不做 project_user_reply——
+    # 那会把未完成文本当成终稿投影；canonical 终稿始终全量脱敏并覆盖流式正文。
+    # 函数用途: 把当前候选消息增量批脱敏后写入 typed model_delta 事件。
+    def _flush_model_deltas(self) -> None:
+        if not self._model_delta_buffer:
+            return
+        raw = "".join(self._model_delta_buffer)
+        self._model_delta_buffer.clear()
+        self._model_delta_chars = 0
+        self._last_model_delta_flush_at = time.monotonic()
+        content = redact_structured_identifiers(
+            redact_host_absolute_paths(raw),
+            self._identifier_redactions,
+        )
+        if not content:
+            return
+        write_chunk_event(
+            self.chunk_path,
+            {
+                "kind": "model_delta",
+                "text": content,
+            },
+        )
+
 
 # LLM: Gateway stream sanitization accepts only the frozen schema and known numeric fields;
 # unknown keys and all content-bearing values are dropped before the public event is written.
@@ -533,6 +589,20 @@ class _GatewayAskRunContext:
     response_path: Path
     request_id: str
     on_chunk: object
+    stages: dict[str, float] | None = None
+
+
+# LLM: 阶段计时只记请求准备/执行的关键间隔（毫秒），用于定位每轮固定开销；它不参与任何
+# 业务判定，失败时静默跳过，避免测量代码反噬执行路径。
+# 函数用途: 把「自某起点以来的耗时」写入可选的请求阶段字典。
+def _record_gateway_stage(
+    stages: dict[str, float] | None,
+    key: str,
+    started_mono: float,
+) -> None:
+    if stages is None:
+        return
+    stages[key] = round((time.monotonic() - started_mono) * 1000, 1)
 
 
 # LLM: This value is the resolved 会话运行时 thread workspace, not proof that the current turn
@@ -821,7 +891,9 @@ def _run_gateway_ask(context: _GatewayAskRunContext):
         # Reserve the thread before reading compact/history/task state.  A turn
         # queued behind another turn must see that prior turn's final transcript,
         # not the stale snapshot from the time it entered the Gateway.
+        _conversation_prep_started = time.monotonic()
         conversation = _gateway_conversation_context(load_request)
+        _record_gateway_stage(context.stages, "conversation_prep_ms", _conversation_prep_started)
         _require_gateway_conversation_ready(request, conversation)
         if conversation.compact_generation > preflight.compact_generation:
             _publish_gateway_compact_boundary(
@@ -921,10 +993,12 @@ def _run_gateway_turn_with_conversation_compact(
                 tuple(carried_active_turn_user_inputs),
             )
         )
+        _run_started = time.monotonic()
         result = context.agent.run(
             prompt,
             params=run_params,
         )
+        _record_gateway_stage(context.stages, "run_ms", _run_started)
         if str(getattr(result, "runtime_status", "") or "").strip().lower() != "context_overflow":
             return result, current
         released_input_ids = release_active_turn_inputs_for_compact(
@@ -2616,6 +2690,7 @@ def _execute_gateway_request_body(context: dict, on_chunk) -> None:
                 context["response_path"],
                 context["request_id"],
                 on_chunk,
+                context.get("stage_timings"),
             )
         )
     except ValueError as exc:
@@ -2674,6 +2749,14 @@ def _finalize_gateway_response(context: dict, response: dict) -> None:
     _copy_final_lease_fields(response, context["request_path"])
     response["ended_at"] = ended_at
     response["duration_seconds"] = round(ended_at - context["started_at"], 3)
+    stages = context.get("stage_timings")
+    if stages:
+        response["stages_ms"] = dict(stages)
+        logger.info(
+            "gateway request stages request_id=%s stages=%s",
+            context.get("request_id") or "",
+            json.dumps(stages, ensure_ascii=False),
+        )
 
 
 def _project_observed_gateway_run_facts(
@@ -2710,7 +2793,12 @@ def _handle_gateway_request(
     refresh_lease: bool = False,
     worker_id: str = "",
 ) -> dict:
+    started_mono = time.monotonic()
     context = _prepare_gateway_request_context(agent, request_path)
+    stage_timings: dict[str, float] = {
+        "request_read_ms": round((time.monotonic() - started_mono) * 1000, 1)
+    }
+    context["stage_timings"] = stage_timings
     response = context["response"]
     if context.get("skip_execution"):
         _finalize_gateway_response(context, response)
@@ -2739,6 +2827,7 @@ def _handle_gateway_request(
         rich_transcript=_gateway_client_supports_rich_transcript(context["request"]),
     )
 
+    execution_started_mono = time.monotonic()
     try:
         _execute_gateway_request_body({**context, "agent": agent}, chunk_writer)
     except Exception as exc:
@@ -2759,6 +2848,8 @@ def _handle_gateway_request(
     finally:
         _stop_gateway_request_lease(lease_stop, lease_thread)
         chunk_writer.close()
+        _record_gateway_stage(stage_timings, "execution_ms", execution_started_mono)
+        stage_timings["total_ms"] = round((time.monotonic() - started_mono) * 1000, 1)
     _project_observed_gateway_run_facts(response, chunk_writer)
     if _gateway_cancel_requested(request_path, context["request_id"]):
         _apply_cancelled_gateway_response(response)

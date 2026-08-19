@@ -952,3 +952,15 @@ def test_gateway_claim_fence_write_failure_rolls_back_to_inbox(tmp_path, monkeyp
     assert not (paths.processing / f"{request_id}.json").exists()
     assert not (paths.terminal / f"{request_id}.json").exists()
     assert not gateway_response_path(paths, request_id).exists()
+
+
+def test_plain_projection_fails_closed_for_model_delta_rows() -> None:
+    from agent_py_agent.agent.gateway_parts.response_renderer import (
+        project_gateway_stream_chunk,
+    )
+
+    text, terminal = project_gateway_stream_chunk(
+        {"kind": "model_delta", "text": "candidate 正文"}
+    )
+    assert text == ""
+    assert terminal is False

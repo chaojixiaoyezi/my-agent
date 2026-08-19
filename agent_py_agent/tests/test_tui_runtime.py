@@ -503,3 +503,92 @@ def test_gateway_permission_resolution_calls_exact_sink_once() -> None:
             "decision": "denied",
         }
     )
+
+
+def _assistant_blocks(runtime) -> list:
+    return [
+        block
+        for block in runtime.store.snapshot().stable_blocks
+        if block.role == "assistant"
+    ]
+
+
+def test_gateway_model_delta_streams_into_live_assistant_block() -> None:
+    runtime = TuiRuntime("session-delta")
+    runtime.enqueue_prompt("request-delta", "stream", queued=False)
+    turn = runtime.begin_turn("request-delta")
+
+    assert turn.on_gateway_event({"kind": "model_delta", "text": "第一"})
+    assert turn.on_gateway_event({"kind": "model_delta", "text": "段。"})
+
+    active = [
+        block for block in runtime.store.snapshot().active_blocks
+        if block.role == "assistant"
+    ]
+    assert len(active) == 1
+    assert active[0].text == "第一段。"
+    assert _assistant_blocks(runtime) == []
+
+
+def test_gateway_commentary_freezes_streamed_deltas_as_process_without_duplicate() -> None:
+    runtime = TuiRuntime("session-commentary")
+    runtime.enqueue_prompt("request-commentary", "stream", queued=False)
+    turn = runtime.begin_turn("request-commentary")
+
+    turn.on_gateway_event({"kind": "model_delta", "text": "先看"})
+    turn.on_gateway_event({"kind": "model_delta", "text": "文件。"})
+    assert turn.on_gateway_event(
+        {"kind": "assistant_commentary", "text": "先看文件。"}
+    )
+
+    assistant = _assistant_blocks(runtime)
+    assert len(assistant) == 1
+    assert assistant[0].text == "先看文件。"  # 不重复追加
+    assert assistant[0].metadata.get("process") is True
+
+
+def test_gateway_commentary_without_delta_stream_falls_back_to_full_text() -> None:
+    runtime = TuiRuntime("session-old-gateway")
+    runtime.enqueue_prompt("request-old", "old", queued=False)
+    turn = runtime.begin_turn("request-old")
+
+    assert turn.on_gateway_event(
+        {"kind": "assistant_commentary", "text": "旧 Gateway 整段正文"}
+    )
+
+    assistant = _assistant_blocks(runtime)
+    assert len(assistant) == 1
+    assert assistant[0].text == "旧 Gateway 整段正文"
+    assert assistant[0].metadata.get("process") is True
+
+
+def test_local_tool_progress_freezes_commentary_as_process() -> None:
+    runtime = TuiRuntime("session-local-process")
+    runtime.begin_turn("request-local")
+    turn = runtime._turns["request-local"]
+
+    turn.write_model("先检查")
+    turn.write_progress({"tool": "read_file", "phase": "started", "status": "开始"}, "legacy")
+
+    assistant = _assistant_blocks(runtime)
+    assert len(assistant) == 1
+    assert assistant[0].text == "先检查"
+    assert assistant[0].metadata.get("process") is True
+
+
+def test_finalize_overwrites_streamed_deltas_without_duplicate() -> None:
+    runtime = TuiRuntime("session-final-stream")
+    runtime.enqueue_prompt("request-final-stream", "stream", queued=False)
+    turn = runtime.begin_turn("request-final-stream")
+
+    turn.on_gateway_event({"kind": "model_delta", "text": "最终"})
+    turn.on_gateway_event({"kind": "model_delta", "text": "答案"})
+    runtime.complete_turn(
+        "request-final-stream",
+        TuiTurnSummary(response_text="最终答案", ok=True),
+    )
+
+    assistant = _assistant_blocks(runtime)
+    assert len(assistant) == 1
+    assert assistant[0].text == "最终答案"
+    assert "process" not in assistant[0].metadata

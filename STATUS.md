@@ -1,5 +1,18 @@
 # STATUS
 
+## 2026-08-18 候选消息实时流式 + 每轮阶段计时
+
+- 真机实测底座问题：模型→Gateway 已流式，Gateway→TUI 把正文暂存 `_model_segment` 到工具边界或
+  终稿才发布（观感非流式）；每轮调用模型前固定约 13s 本地准备。设计见 DESIGN_LEDGER 同日条目。
+- Gateway 侧：rich 客户端新增实时 `model_delta` typed 事件（128 字符/换行/0.08s 批量落盘，展示级
+  脱敏）；`assistant_commentary` 保留为工具边界冻结标记；普通客户端/飞书 projection fail-closed 不变。
+- TUI 侧：`model_delta` 实时追加活动助手块；工具边界段冻结为可折叠 process（默认折叠，Ctrl+O 展开），
+  本地/Gateway 双路径一致；终稿由 canonical terminal 覆盖且不重复。
+- 阶段计时：响应新增 `stages_ms`（request_read/conversation_prep/run/execution/total）并打结构化日志，
+  用于定位 13s 构成；缓存修复待真机测量后实施。
+- focused 测试：gateway/tui/chat 切片 1137 passed、3 skipped、5 xfailed；ruff 全过。待部署
+  `192.0.2.13` 真机复验流式实时性与 stages_ms。
+
 ## 2026-08-18 TUI 拖选、自动复制与下一轮输入追补
 
 - 用户真机复现了拖选松手后仍随 hover 扩展，以及鼠标已经到末字、高亮仍停在前方。根因是 transcript

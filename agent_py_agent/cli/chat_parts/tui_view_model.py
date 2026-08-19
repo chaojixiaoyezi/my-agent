@@ -796,6 +796,7 @@ def _public_metadata(payload: dict[str, Any]) -> dict[str, Any]:
         "trigger_tokens",
         "dropped_pairs",
         "preserved_pairs",
+        "process",
     }
     return {key: payload[key] for key in allowed if key in payload}
 

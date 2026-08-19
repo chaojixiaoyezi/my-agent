@@ -278,6 +278,26 @@
 
 以后新增长期设计，只写摘要和链接，不再把完整方案塞回这个文件。
 
+## 2026-08-18 候选消息实时流式 + 每轮阶段计时【状态：本地 focused 通过，待真机部署复验】
+
+- 底座问题（真机实测 18.5s/简单回复）：模型→Gateway 已是流式，但 Gateway→TUI 把正文暂存
+  `_model_segment` 直到工具边界或终稿才发布，观感非流式；且每轮调用模型前固定约 13s 准备。
+- 契约改动（`request_execution.py` BufferedChunkStreamWriter）：rich 客户端（TUI）在 `write_model`
+  收到增量时按既有节奏（128 字符/换行/0.08s）实时发布 typed `model_delta` 事件（展示级脱敏，
+  不做 `project_user_reply`——那会把未完成文本当终稿投影）；`assistant_commentary` 保留为工具边界的
+  冻结/归过程标记（带全文，兼容旧客户端）。普通客户端/飞书 adapter 不消费 `model_delta`
+  （projection fail-closed），行为不变；未来渠道要流式 = 请求侧开 rich 能力 + adapter 侧自选投递节奏
+  （如飞书限频合并更新），不改 Gateway。增量在 steering 时与 `_model_segment` 同步清空。
+- TUI 侧（`tui_runtime.py`）：`model_delta` → 实时追加活动 assistant 块；`assistant_commentary` 在已有
+  流式活动块时只冻结（不重复追加），无活动块时回退旧契约整段落地；冻结段带 `process` 标记 →
+  renderer 默认折叠为摘要行（Ctrl+O 展开，与工具块同一层级）。终稿仍以 canonical terminal 为准，
+  `finalize` 覆盖流式正文且不重复。本地模式工具边界同样归为 process，TUI 双路径一致。
+- 阶段计时：请求响应新增 `stages_ms`（`request_read_ms/conversation_prep_ms/run_ms/execution_ms/total_ms`），
+  同值打结构化日志；终端归档整体携带，可作为测试证据。13s 的缓存修复待真机测量后定，不先猜。
+- 测试：writer（rich 实时 delta/非 rich 不发/边界顺序/脱敏/steering 清空）、TUI（delta 实时块/
+  冻结不重复/旧 Gateway 回退/process 标记/终稿覆盖）、plain projection fail-closed 均已补；
+  gateway/tui/chat 切片 1137 passed。
+
 ## 2026-08-13 P2-5 SecretStore 决策：停用（DEPRECATED，不接线）
 
 HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用」。

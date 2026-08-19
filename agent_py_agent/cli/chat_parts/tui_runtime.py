@@ -235,7 +235,7 @@ class _TuiPermissionController:
                 raise RuntimeError("another TUI permission request is already pending")
             pending = _PendingTuiPermission(request, threading.Event())
             self._pending = pending
-            self._owner._complete_active_assistant()
+            self._owner._complete_active_assistant(process=True)
             self._publish("permission_requested", request.to_dict(), phase="waiting_permission")
             return pending
 
@@ -888,7 +888,7 @@ class TuiTurnEventAdapter:
         del legacy_text
         progress = dict(event or {})
         with self._lock:
-            self._complete_active_assistant()
+            self._complete_active_assistant(process=True)
             self._publish_tool_progress(progress)
 
     # LLM: Gateway typed row 返回是否已消费；未知 kind 留给 shared projector fail-closed，不读取 row text 猜类型。
@@ -970,15 +970,24 @@ class TuiTurnEventAdapter:
         )
 
     # LLM: complete 只冻结当前 segment 一次；phase 显式传入且不得由文本内容决定。
-    # 函数用途: 结束活动助手块并清空 adapter 指针。
-    def _complete_active_assistant(self, *, phase: str = "completed") -> None:
+    # process 标记表示该段是工具边界前的模型过程说明，renderer 据此折叠展示。
+    # 函数用途: 结束活动助手块（可选归为可折叠过程）并清空 adapter 指针。
+    def _complete_active_assistant(
+        self,
+        *,
+        phase: str = "completed",
+        process: bool = False,
+    ) -> None:
         if not self._assistant_block_id:
             return
+        payload: dict[str, Any] = {"text": self._assistant_text}
+        if process:
+            payload["process"] = True
         self.runtime._publish(
             "assistant_completed",
             phase,
             self._assistant_block_id,
-            {"text": self._assistant_text},
+            payload,
             request_id=self.request_id,
         )
         self._assistant_block_id = ""
@@ -1088,10 +1097,19 @@ def _consume_gateway_turn_event(
     if kind == "tool_progress" and isinstance(payload.get("progress"), dict):
         adapter.write_progress(dict(payload["progress"]))
         return True
-    if kind == "assistant_commentary":
+    if kind == "model_delta":
         adapter.write_model(str(payload.get("text") or ""))
+        return True
+    if kind == "assistant_commentary":
+        # 新 Gateway 已实时流式 model_delta，此事件只是真实工具边界的冻结标记：
+        # 把当前候选段归为可折叠过程。兼容旧 Gateway（无 model_delta 事件）时，
+        # 无活动块说明正文整段尚未到达，仍需按旧契约落地全文。
         with adapter._lock:
-            adapter._complete_active_assistant()
+            if adapter._assistant_block_id:
+                adapter._complete_active_assistant(process=True)
+            else:
+                adapter.write_model(str(payload.get("text") or ""))
+                adapter._complete_active_assistant(process=True)
         return True
     if kind == "assistant_thinking":
         return adapter.write_thinking(

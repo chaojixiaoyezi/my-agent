@@ -509,3 +509,81 @@ def test_failed_commentary_delivery_is_not_retried_or_allowed_to_delay_final() -
     final["value"] = "最终答案"
     assert worker.run_once() == 1
     assert store.pending() == []
+
+
+# LLM: 候选消息流式——rich 客户端逐批收到脱敏 model_delta，普通客户端保持旧契约。
+def test_rich_writer_streams_live_model_deltas(tmp_path) -> None:
+    path = tmp_path / "request.chunks.jsonl"
+    writer = BufferedChunkStreamWriter(path, rich_transcript=True, flush_chars=16)
+    writer.write_model("第一段")
+    assert not any(row["kind"] == "model_delta" for row in _rows(path))
+    writer.write_model("，继续")
+    writer.close()
+
+    deltas = [row for row in _rows(path) if row.get("kind") == "model_delta"]
+    assert [row["text"] for row in deltas] == ["第一段，继续"]
+    commentary = [row for row in _rows(path) if row.get("kind") == "assistant_commentary"]
+    assert commentary == []
+
+
+def test_non_rich_writer_never_emits_model_delta(tmp_path) -> None:
+    path = tmp_path / "request.chunks.jsonl"
+    writer = BufferedChunkStreamWriter(path)
+    writer.write_model("普通客户端正文")
+    writer.write_progress(
+        {"tool": "read_file", "phase": "started", "status": "开始"},
+        "legacy",
+    )
+    writer.close()
+
+    assert not any(row["kind"] == "model_delta" for row in _rows(path))
+    commentary = [row for row in _rows(path) if row.get("kind") == "assistant_commentary"]
+    assert [row["text"] for row in commentary] == ["普通客户端正文"]
+
+
+def test_model_deltas_flush_before_commentary_boundary(tmp_path) -> None:
+    path = tmp_path / "request.chunks.jsonl"
+    writer = BufferedChunkStreamWriter(path, rich_transcript=True, flush_chars=8)
+    writer.write_model("先看文件。")
+    writer.write_progress(
+        {"tool": "read_file", "phase": "started", "status": "开始"},
+        "legacy-1",
+    )
+    writer.close()
+
+    kinds = [row["kind"] for row in _rows(path)]
+    assert kinds.index("model_delta") < kinds.index("assistant_commentary")
+    assert kinds.index("model_delta") < kinds.index("tool_progress")
+
+
+def test_model_deltas_are_redacted_and_steering_clears_pending(tmp_path) -> None:
+    path = tmp_path / "request.chunks.jsonl"
+    writer = BufferedChunkStreamWriter(path, rich_transcript=True, flush_chars=4)
+    writer.set_identifier_redactions((("om_secret_conversation", "当前会话"),))
+    writer.write_model("检查 /root/private/secret 与 om_secret_conversation")
+    writer.close()
+
+    deltas = [row for row in _rows(path) if row.get("kind") == "model_delta"]
+    assert deltas
+    assert "om_secret_conversation" not in deltas[-1]["text"]
+    assert "/root/private/secret" not in deltas[-1]["text"]
+
+    steered_path = tmp_path / "steered.chunks.jsonl"
+    steered = BufferedChunkStreamWriter(steered_path, rich_transcript=True, flush_chars=4)
+    steered.write_model("旧候选")
+    steered.begin_active_turn_input(("client-1",))
+    steered.write_model("新候选的说明")
+    steered.write_progress(
+        {"tool": "read_file", "phase": "started", "status": "开始"},
+        "legacy",
+    )
+    steered.close()
+
+    steered_deltas = [row for row in _rows(steered_path) if row.get("kind") == "model_delta"]
+    assert [row["text"] for row in steered_deltas] == ["新候选的说明"]
+
+
+def _rows(path) -> list[dict]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]

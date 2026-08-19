@@ -623,7 +623,7 @@ def _render_user(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedL
 
 
 # LLM: assistant marker 与 Markdown 只做视觉组合，Markdown token 不获得 block phase 或业务控制权。
-# 函数用途: 渲染带 ● marker 的助手 Markdown 块。
+# 函数用途: 渲染带 ● marker 的助手 Markdown 块；工具边界前的过程段默认折叠为摘要。
 def _render_assistant(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedLine, ...]:
     content_width = max(1, context.width - 2)
     markdown_lines = render_markdown(block.text, MarkdownRenderContext(width=content_width))
@@ -634,10 +634,22 @@ def _render_assistant(block: TuiBlock, context: TuiRenderContext) -> tuple[Forma
             lines.append(())
             continue
         marker = "● " if first_content else "  "
-        style = "class:tui-assistant-marker" if first_content else ""
+        if first_content and block.metadata.get("process"):
+            style = "class:tui-muted"
+        else:
+            style = "class:tui-assistant-marker" if first_content else ""
         lines.append(((style, marker), *line))
         first_content = False
-    return tuple(lines or [(("class:tui-assistant-marker", "●"),)])
+    rendered = tuple(lines or [(("class:tui-assistant-marker", "●"),)])
+    if (
+        block.metadata.get("process")
+        and not context.detailed_transcript
+        and not context.show_all
+    ):
+        content = [line for line in rendered if fragments_text(line)]
+        if len(content) > 1:
+            return (*content[:1], _tool_hidden_line(len(content) - 1, context))
+    return rendered
 
 
 # LLM: thinking 展开/折叠只由 context mode 与 typed phase 决定，正文内容不能触发展开。
