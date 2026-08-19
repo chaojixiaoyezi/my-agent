@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import os
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
@@ -568,7 +571,32 @@ def _run_with_params(agent, user_prompt: str, params: RunParams):
         current_params = next_params
 
 
+# LLM: 阶段诊断日志只在 MY_AGENT_STAGE_DEBUG=1 时输出，用于定位 run 内部耗时构成；
+# 默认零开销，不参与任何业务判定。
+# 函数用途: 输出一次 agent.run 的细粒度阶段时间戳（按 request/run id 关联）。
+def _log_run_stage(
+    stage: str,
+    params: object,
+    *,
+    started_mono: float | None = None,
+) -> None:
+    if os.environ.get("MY_AGENT_STAGE_DEBUG") != "1":
+        return
+    elapsed = ""
+    if started_mono is not None:
+        elapsed = f" elapsed_ms={round((time.monotonic() - started_mono) * 1000, 1)}"
+    logging.getLogger(__name__).info(
+        "gateway run stage request_id=%s run_id=%s stage=%s%s",
+        getattr(params, "request_id", "") or "",
+        getattr(params, "run_id", "") or "",
+        stage,
+        elapsed,
+    )
+
+
 def _run_once_with_params(agent, user_prompt: str, params: RunParams):
+    _run_stage_started = time.monotonic()
+    _log_run_stage("run_started", params)
     params = attach_run_task_workspace_context(agent, params, user_prompt)
     params = _bind_main_agent_authority(agent, params)
     root_user_prompt = params.root_user_prompt or user_prompt
@@ -592,15 +620,19 @@ def _run_once_with_params(agent, user_prompt: str, params: RunParams):
                 task_attributes=params.task_attributes,
             ),
         )
+        _log_run_stage("context_ready", params, started_mono=_run_stage_started)
         try:
             loop_result = _execute_runtime_loop(
                 agent,
                 _runtime_loop_params(user_prompt, prepared, params),
             )
+            _log_run_stage("loop_done", params, started_mono=_run_stage_started)
             ctx = agent._build_finalize_context(
                 _finalize_params(root_user_prompt, prepared, loop_result, params)
             )
-            return agent._get_services().finalization.finalize(ctx)
+            result = agent._get_services().finalization.finalize(ctx)
+            _log_run_stage("finalize_done", params, started_mono=_run_stage_started)
+            return result
         except BaseException as exc:
             # 会话运行时 and 长期助手 both close every run through one terminal
             # lifecycle path.  Keep the durable runtime fact aligned with the

@@ -2,6 +2,7 @@
 # 模块用途: 统一调用模型，处理超时、流式输出和上下文压力，并让用户停止能真正传到模型连接。
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from queue import Empty, Queue
@@ -748,21 +749,35 @@ def _publish_transport_retry(sink_owner: object, event: dict[str, object]) -> No
 
 def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
     # text 协议(tools/messages 均为 None)保持原调用形态，不传新关键字，旁路/伪后端零改动。
+    _generate_started = time.monotonic()
     if state.tools is None and state.messages is None:
-        return backend.generate(prompt, on_chunk=state.on_chunk)
-    kwargs: dict[str, object] = {"on_chunk": state.on_chunk}
-    if state.tools is not None:
-        kwargs["tools"] = state.tools
-        tool_choice = state.tool_choice or ToolChoice.auto()
-        kwargs["tool_choice"] = tool_choice
-        if tool_choice.mode != "auto":
-            # LLM: 强制 tool_choice(specific/required/none)必须同时关思考——部分兼容端点
-            # (如 工具运行时 zen)在思考模式下拒绝强制工具选择,回哑 400;不识别该字段的
-            # 端点(如 MiniMax)静默忽略。与 generate_structured 的 thinking_disabled 同一形态。
-            kwargs["thinking_disabled"] = True
-    if state.messages is not None:
-        kwargs["messages"] = state.messages
-    return backend.generate(prompt, **kwargs)
+        result = backend.generate(prompt, on_chunk=state.on_chunk)
+    else:
+        kwargs: dict[str, object] = {"on_chunk": state.on_chunk}
+        if state.tools is not None:
+            kwargs["tools"] = state.tools
+            tool_choice = state.tool_choice or ToolChoice.auto()
+            kwargs["tool_choice"] = tool_choice
+            if tool_choice.mode != "auto":
+                # LLM: 强制 tool_choice(specific/required/none)必须同时关思考——部分兼容端点
+                # (如 工具运行时 zen)在思考模式下拒绝强制工具选择,回哑 400;不识别该字段的
+                # 端点(如 MiniMax)静默忽略。与 generate_structured 的 thinking_disabled 同一形态。
+                kwargs["thinking_disabled"] = True
+        if state.messages is not None:
+            kwargs["messages"] = state.messages
+        result = backend.generate(prompt, **kwargs)
+    if os.environ.get("MY_AGENT_STAGE_DEBUG") == "1":
+        import logging
+
+        logging.getLogger(__name__).info(
+
+            "gateway run stage request_id=%s run_id=%s stage=model_generate"
+            " elapsed_ms=%s",
+            getattr(state.params, "request_id", "") or "",
+            getattr(state.params, "run_id", "") or "",
+            round((time.monotonic() - _generate_started) * 1000, 1),
+        )
+    return result
 
 
 def _tool_write_inline_max_chars(request: ModelGenerateParams) -> int | None:
