@@ -833,6 +833,10 @@ class AnthropicCompatibleBackend(HttpBackend):
                 tool_choice=ToolChoice.specific(tool_name),
                 messages=messages,
                 stream_response=False,
+                # 评估信封只承载短 JSON（requires_action + 有界 actions）；无界输出会让
+                # 每次 run 的语义义务评估在端点慢/模型啰嗦时生成到全局 max_tokens 才停，
+                # 造成 30s+ 的偶发首字延迟。1024 足够完整信封，超限按截断重试一次。
+                max_output_tokens=1024,
                 temperature=0.0,
                 # LLM: 强制工具信封不需要推理；部分兼容端点(如 工具运行时 zen)在思考模式下拒绝强制 tool_choice，
                 # 显式关闭 thinking 可同时满足该约束并节省结构化调用的延迟与 token。
