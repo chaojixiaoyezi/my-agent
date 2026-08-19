@@ -256,6 +256,19 @@ class TuiRenderCacheStats:
     entries: int
 
 
+# LLM: 流式活动块（phase=delta/active thinking）每帧 seq 都变，渲染 miss 后若每次都全量
+# 重渲染，万字级正文在 show_all 展开/滚动时每帧数十毫秒拖垮事件循环。短时间窗内复用
+# 最近一次渲染，增量 0.15s 后自然追上，稳定块不受影响。
+# 函数用途: 判断 block 是否处于逐帧更新的流式活动状态。
+_LIVE_BLOCK_RENDER_THROTTLE_SECONDS = 0.15
+
+
+def _is_live_stream_block(block: TuiBlock) -> bool:
+    if block.phase == "delta":
+        return True
+    return block.role == "thinking" and block.phase not in TERMINAL_RENDER_PHASES
+
+
 # LLM: TuiBlockRenderCache 只缓存 immutable block 输出；key 含 updated_seq/宽度/显示模式，绝不跨语义版本复用。
 # 类用途: 避免流式活动块更新时重新渲染全部稳定历史，并把缓存限制在显式上限内。
 class TuiBlockRenderCache:
@@ -266,9 +279,11 @@ class TuiBlockRenderCache:
         self._entries: OrderedDict[tuple[Any, ...], tuple[FormattedLine, ...]] = OrderedDict()
         self._hits = 0
         self._misses = 0
+        self._live_last_key: dict[str, tuple[Any, ...]] = {}
+        self._live_last_at: dict[str, float] = {}
 
     # LLM: render 使用 block identity/update 与必要 context 字段；稳定块不被 spinner frame 误伤。
-    # 函数用途: 返回缓存或新渲染的单 block 行。
+    # 函数用途: 返回缓存或新渲染的单 block 行；流式活动块在节流窗内复用最近一次渲染。
     def render(self, block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedLine, ...]:
         key = _block_cache_key(block, context)
         cached = self._entries.get(key)
@@ -276,10 +291,20 @@ class TuiBlockRenderCache:
             self._entries.move_to_end(key)
             self._hits += 1
             return cached
+        if context.now is not None and _is_live_stream_block(block):
+            last_key = self._live_last_key.get(block.block_id)
+            if last_key is not None and context.now - self._live_last_at.get(block.block_id, 0.0) < _LIVE_BLOCK_RENDER_THROTTLE_SECONDS:
+                stale = self._entries.get(last_key)
+                if stale is not None:
+                    # 复用最近一次渲染：流式增量不逐帧全量重渲染（万字块展开时避免卡死）。
+                    return stale
         rendered = _render_block(block, context)
         self._entries[key] = rendered
         self._entries.move_to_end(key)
         self._misses += 1
+        if _is_live_stream_block(block):
+            self._live_last_key[block.block_id] = key
+            self._live_last_at[block.block_id] = context.now
         while len(self._entries) > self.max_entries:
             self._entries.popitem(last=False)
         return rendered
