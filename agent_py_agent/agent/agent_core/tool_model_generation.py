@@ -749,11 +749,23 @@ def _publish_transport_retry(sink_owner: object, event: dict[str, object]) -> No
 
 def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
     # text 协议(tools/messages 均为 None)保持原调用形态，不传新关键字，旁路/伪后端零改动。
+    thinking_sink = getattr(
+        getattr(getattr(state, "params", None), "effective_on_chunk", None),
+        "write_thinking_delta",
+        None,
+    )
+    # 只在宿主 writer 提供 thinking 增量入口时透传；旧后端/测试 fake 不接收该参数。
+    thinking_delta = thinking_sink if callable(thinking_sink) else None
     _generate_started = time.monotonic()
     if state.tools is None and state.messages is None:
-        result = backend.generate(prompt, on_chunk=state.on_chunk)
+        kwargs: dict[str, object] = {"on_chunk": state.on_chunk}
+        if thinking_delta is not None:
+            kwargs["on_thinking_delta"] = thinking_delta
+        result = backend.generate(prompt, **kwargs)
     else:
         kwargs: dict[str, object] = {"on_chunk": state.on_chunk}
+        if thinking_delta is not None:
+            kwargs["on_thinking_delta"] = thinking_delta
         if state.tools is not None:
             kwargs["tools"] = state.tools
             tool_choice = state.tool_choice or ToolChoice.auto()
@@ -767,15 +779,19 @@ def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
             kwargs["messages"] = state.messages
         result = backend.generate(prompt, **kwargs)
     if os.environ.get("MY_AGENT_STAGE_DEBUG") == "1":
-        import logging
+        # 诊断行走 stderr（gateway 的 nohup 2>&1 已并入日志文件）。
+        import sys
 
-        logging.getLogger(__name__).info(
-
+        print(
             "gateway run stage request_id=%s run_id=%s stage=model_generate"
-            " elapsed_ms=%s",
-            getattr(state.params, "request_id", "") or "",
-            getattr(state.params, "run_id", "") or "",
-            round((time.monotonic() - _generate_started) * 1000, 1),
+            " elapsed_ms=%s"
+            % (
+                getattr(state.params, "request_id", "") or "",
+                getattr(state.params, "run_id", "") or "",
+                round((time.monotonic() - _generate_started) * 1000, 1),
+            ),
+            file=sys.stderr,
+            flush=True,
         )
     return result
 

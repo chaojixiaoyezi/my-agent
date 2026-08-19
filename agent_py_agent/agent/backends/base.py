@@ -781,6 +781,7 @@ class AnthropicCompatibleBackend(HttpBackend):
         tool_choice: ToolChoice | None = None,
         messages: list[dict[str, Any]] | None = None,
         thinking_disabled: bool = False,
+        on_thinking_delta: Callable[[str], None] | None = None,
     ) -> ModelResponse:
         """Call the Anthropic-compatible messages endpoint.
 
@@ -796,6 +797,7 @@ class AnthropicCompatibleBackend(HttpBackend):
             tool_choice=tool_choice,
             messages=messages,
             thinking_disabled=thinking_disabled,
+            on_thinking_delta=on_thinking_delta,
         )
 
     def generate_structured(
@@ -884,6 +886,7 @@ class AnthropicCompatibleBackend(HttpBackend):
         stream_response: bool | None = None,
         temperature: float | None = None,
         thinking_disabled: bool = False,
+        on_thinking_delta: Callable[[str], None] | None = None,
     ) -> ModelResponse:
         payload: dict[str, Any] = {
             "model": self.model_name,
@@ -919,7 +922,12 @@ class AnthropicCompatibleBackend(HttpBackend):
         }
         use_stream = self.stream_enabled if stream_response is None else stream_response
         if use_stream:
-            return self._generate_stream(payload, headers, on_chunk=on_chunk)
+            return self._generate_stream(
+                payload,
+                headers,
+                on_chunk=on_chunk,
+                on_thinking_delta=on_thinking_delta,
+            )
         return self._generate_non_stream(payload, headers)
 
     # LLM: 非流式 Anthropic 响应必须同时保留可见正文、规范化工具调用和可安全回放的完整 assistant 块；三者不能互相替代。
@@ -976,11 +984,17 @@ class AnthropicCompatibleBackend(HttpBackend):
         payload: dict[str, Any],
         headers: dict[str, str],
         on_chunk: Callable[[str], None] | None = None,
+        on_thinking_delta: Callable[[str], None] | None = None,
     ) -> ModelResponse:
         """Parse Anthropic SSE and retry the same stream path once when no text is visible."""
         text, usage, blocks, completion = "", {}, [], StreamCompletion()
         for attempt in range(2):
-            text, usage, blocks, completion = self._stream_text_once(payload, headers, on_chunk)
+            text, usage, blocks, completion = self._stream_text_once(
+                payload,
+                headers,
+                on_chunk,
+                on_thinking_delta=on_thinking_delta,
+            )
             if _incomplete_stop_reason(completion.stop_reason):
                 # 截断：保留文本、丢弃工具块、标记 truncated（工具循环下一轮继续，
                 # harness assembler 同款：截断时丢弃全部 tool-call 块）。
@@ -1016,10 +1030,14 @@ class AnthropicCompatibleBackend(HttpBackend):
         payload: dict[str, Any],
         headers: dict[str, str],
         on_chunk: Callable[[str], None] | None,
+        *,
+        on_thinking_delta: Callable[[str], None] | None = None,
     ) -> tuple[str, dict[str, Any], list[dict[str, Any]], StreamCompletion]:
         lines = self.request_stream_iter if on_chunk is not None else self.request_stream
         return collect_anthropic_stream_with_completion(
-            lines("/v1/messages", payload, headers), on_chunk=on_chunk
+            lines("/v1/messages", payload, headers),
+            on_chunk=on_chunk,
+            on_thinking_delta=on_thinking_delta,
         )
 
 

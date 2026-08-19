@@ -699,6 +699,8 @@ class TuiTurnEventAdapter:
         self.thinking_block_id = f"thinking:{request_id}:0"
         self._thinking_active = False
         self._thinking_index = 0
+        self._thinking_text = ""
+        self._thinking_started_at = 0.0
         self._assistant_index = 0
         self._assistant_block_id = ""
         self._assistant_text = ""
@@ -725,10 +727,12 @@ class TuiTurnEventAdapter:
                 {"activity": "Thinking"},
                 request_id=self.request_id,
             )
+            self._thinking_started_at = time.time()
             self.runtime._publish(
                 "thinking_started",
                 "started",
                 self.thinking_block_id,
+                {"started_at": self._thinking_started_at},
                 request_id=self.request_id,
             )
             self._thinking_active = True
@@ -844,6 +848,50 @@ class TuiTurnEventAdapter:
     def write_thinking(self, text: str, *, duration_seconds: float = 0.0) -> bool:
         return _publish_turn_thinking(self, text, duration_seconds=duration_seconds)
 
+    # LLM: thinking_delta 是 gateway 流式思考增量；首个增量复用 turn 的活动 thinking 块，
+    # 之后逐块追加（Ctrl+O 展开可见实时内容），思考结束后由 thinking_completed 冻结。
+    # 函数用途: 把一次模型调用的流式思考增量追加到活动 thinking 块。
+    def write_thinking_delta(self, text: str) -> bool:
+        content = str(text or "")
+        if not content:
+            return False
+        with self._lock:
+            if not self._thinking_active:
+                return False
+            self._thinking_text += content
+            self.runtime._publish(
+                "thinking_delta",
+                "delta",
+                self.thinking_block_id,
+                {"text": content},
+                request_id=self.request_id,
+            )
+        return True
+
+    # LLM: 完整 thinking 事件到达时若流式增量块已活动，直接冻结（完整文本覆盖增量，
+    # 不重复建块）；无活动块时按旧契约一次性 started+completed。
+    # 函数用途: 收口一次模型调用的思考块（流式增量或一次性全文）。
+    def finalize_thinking(self, text: str, *, duration_seconds: float = 0.0) -> bool:
+        with self._lock:
+            if self._thinking_active:
+                content = str(text or "")
+                if content:
+                    self._thinking_text = content
+                self.runtime._publish(
+                    "thinking_completed",
+                    "completed",
+                    self.thinking_block_id,
+                    {
+                        "text": self._thinking_text,
+                        "duration_seconds": max(0.0, float(duration_seconds or 0.0)),
+                    },
+                    request_id=self.request_id,
+                )
+                self._thinking_active = False
+                self._thinking_text = ""
+                return True
+        return _publish_turn_thinking(self, text, duration_seconds=duration_seconds)
+
     # LLM: Context usage is a status-only typed projection. It must not create transcript blocks,
     # parse labels, or retain any provider-visible content beyond the numeric whitelist.
     # 函数用途: 接收本地模型调用产生的实时上下文快照并刷新输入框上方状态条。
@@ -922,19 +970,25 @@ class TuiTurnEventAdapter:
             self._publish_turn_terminal(summary)
             self._finished = True
 
-    # LLM: thinking terminal 使用空完整 text，使 reducer 可冻结但 renderer 不留下虚假历史思考块。
+    # LLM: thinking terminal 携带完整思考文本与真实耗时，renderer 折叠显示
+    # “Thought for Xs”并允许 Ctrl+O 展开；无思考内容时与旧行为一致（不留下空历史块）。
     # 函数用途: 关闭当前等待模型的 thinking block。
     def _complete_thinking(self) -> None:
         if not self._thinking_active:
             return
+        elapsed = max(0.0, time.time() - self._thinking_started_at)
         self.runtime._publish(
             "thinking_completed",
             "completed",
             self.thinking_block_id,
-            {"text": ""},
+            {
+                "text": self._thinking_text,
+                "duration_seconds": round(elapsed, 1),
+            },
             request_id=self.request_id,
         )
         self._thinking_active = False
+        self._thinking_text = ""
 
     # LLM: streaming token 是 UI 临时估计，只累计已发布 assistant delta 的字符/字节并写 typed status；终态精确 summary 可覆盖。
     # 函数用途: 更新当前回合的保守输出 token 计数，让长回合状态行即时可见。
@@ -1112,10 +1166,13 @@ def _consume_gateway_turn_event(
                 adapter._complete_active_assistant(process=True)
         return True
     if kind == "assistant_thinking":
-        return adapter.write_thinking(
+        # 完整 thinking 事件：冻结流式增量块（若有），否则按旧契约一次性建块。
+        return adapter.finalize_thinking(
             str(payload.get("text") or ""),
             duration_seconds=float(payload.get("duration_seconds") or 0.0),
         )
+    if kind == "thinking_delta":
+        return adapter.write_thinking_delta(str(payload.get("text") or ""))
     if kind == "assistant_final":
         final_text = str(payload.get("text") or "")
         adapter.write_model(final_text)

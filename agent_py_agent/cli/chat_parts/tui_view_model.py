@@ -785,6 +785,7 @@ def _public_metadata(payload: dict[str, Any]) -> dict[str, Any]:
         "display",
         "invocation",
         "duration_seconds",
+        "started_at",
         "request_id",
         "model",
         "version",

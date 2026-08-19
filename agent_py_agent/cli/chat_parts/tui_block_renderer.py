@@ -681,36 +681,28 @@ def _render_assistant(block: TuiBlock, context: TuiRenderContext) -> tuple[Forma
 # 函数用途: 渲染活动 spinner 或已完成思考摘要/详细正文。
 def _render_thinking(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedLine, ...]:
     if block.phase not in {"completed", "failed", "interrupted"}:
-        word = _stable_spinner_choice(block.block_id, SPINNER_WORDS)
-        glyph = SPINNER_GLYPHS[context.spinner_index % len(SPINNER_GLYPHS)]
-        highlight_start = context.spinner_index % max(1, len(word))
-        highlight_end = min(len(word), highlight_start + 2)
+        started_at = float(block.metadata.get("started_at") or 0.0)
+        elapsed = max(0, int(context.now - started_at)) if started_at and context.now else 0
+        title = f"Thinking {elapsed // 60}:{elapsed % 60:02d}"
         suffix = _spinner_status_suffix(block, context)
-        tip = _stable_spinner_choice(block.block_id + ":tip", SPINNER_TIPS)
-        spinner_style = "class:tui-error" if _spinner_is_stalled(context) else "class:tui-spinner"
-        highlight_style = (
-            "class:tui-error"
-            if _spinner_is_stalled(context)
-            else "class:tui-spinner-highlight"
-        )
         activity_lines = wrap_fragments(
             (
-                (spinner_style, glyph + " "),
-                (spinner_style, word[:highlight_start]),
-                (highlight_style, word[highlight_start:highlight_end]),
-                (spinner_style, word[highlight_end:] + "…"),
+                ("class:tui-thinking", "∴ "),
+                ("class:tui-thinking", title),
                 ("class:tui-muted", suffix),
             ),
             width=context.width,
             continuation_prefix=(("class:tui-muted", "  "),),
         )
-        tip_lines = wrap_fragments(
-            (("class:tui-muted", tip),),
-            width=context.width,
-            first_prefix=(("class:tui-muted", "  ⎿\u00a0Tip: "),),
-            continuation_prefix=(("class:tui-muted", "    "),),
-        )
-        return (*activity_lines, *tip_lines)
+        lines: list[FormattedLine] = list(activity_lines)
+        if context.detailed_transcript and block.text:
+            rendered = render_markdown(
+                block.text,
+                MarkdownRenderContext(width=max(1, context.width - 2)),
+            )
+            for line in rendered:
+                lines.append((("class:tui-thinking-detail", "  "), *line) if line else ())
+        return tuple(lines)
     detail = block.text or block.detail
     if not detail:
         return ()
@@ -736,8 +728,6 @@ def _render_thinking(block: TuiBlock, context: TuiRenderContext) -> tuple[Format
     return tuple(lines)
 
 
-# LLM: thinking 耗时只读上游 duration_seconds 展示事实，不能参与 timeout、任务状态或是否展开的判断。
-# 函数用途: 生成 `Thought` 或 `Thought for 10s` 的折叠标题。
 def _thinking_title(block: TuiBlock) -> str:
     try:
         duration = max(0.0, float(block.metadata.get("duration_seconds") or 0.0))

@@ -16,12 +16,15 @@ class StreamEvent:
     ``tool_use_block`` is populated on native Anthropic/OpenAI tool-call paths,
     once a tool_use content block has finished accumulating its input JSON; it
     holds ``{"id","name","input"}``. Text/usage consumers ignore it.
+    ``thinking_content`` carries live thinking deltas for rich transcript sinks;
+    text/usage consumers ignore it.
     """
 
     content: str = ""
     usage: dict[str, Any] | None = None
     tool_use_block: dict[str, Any] | None = None
     assistant_content_block: dict[str, Any] | None = None
+    thinking_content: str = ""
 
 
 # 截断检测的常量:Anthropic message_delta.stop_reason 取这些值时，表示模型在写完整
@@ -169,9 +172,17 @@ def anthropic_stream_events(lines: Iterable[str]) -> Iterator[StreamEvent]:
             )
             continue
         text = obj.get("delta", {}).get("text", "") if event_type == "content_block_delta" else ""
+        thinking = (
+            obj.get("delta", {}).get("thinking", "")
+            if event_type == "content_block_delta"
+            and obj.get("delta", {}).get("type") == "thinking_delta"
+            else ""
+        )
         usage = _anthropic_usage(obj, event_type)
         if text or usage:
             yield StreamEvent(content=str(text or ""), usage=usage or None)
+        elif thinking:
+            yield StreamEvent(thinking_content=str(thinking or ""))
     return StreamCompletion(
         saw_message_stop=saw_message_stop,
         stop_reason=stop_reason,

@@ -587,3 +587,30 @@ def _rows(path) -> list[dict]:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_rich_writer_streams_thinking_deltas_and_redacts(tmp_path) -> None:
+    path = tmp_path / "thinking.chunks.jsonl"
+    writer = BufferedChunkStreamWriter(path, rich_transcript=True)
+    writer.set_identifier_redactions((("om_secret_thread", "当前会话"),))
+    writer.write_thinking_delta("先分析 om_secret_thread 的权限")
+    writer.write_thinking_delta("再决定动作")
+    writer.close()
+
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    deltas = [row for row in rows if row.get("kind") == "thinking_delta"]
+    assert [row["text"] for row in deltas] == ["先分析 当前会话 的权限", "再决定动作"]
+
+
+def test_non_rich_writer_never_emits_thinking_delta(tmp_path) -> None:
+    path = tmp_path / "thinking-plain.chunks.jsonl"
+    writer = BufferedChunkStreamWriter(path)
+    writer.write_thinking_delta("隐藏的思考")
+    writer.close()
+
+    if not path.exists():
+        return  # 非 rich writer 不落任何事件，文件甚至不会创建
+    assert not any(
+        json.loads(line).get("kind") == "thinking_delta"
+        for line in path.read_text(encoding="utf-8").splitlines()
+    )

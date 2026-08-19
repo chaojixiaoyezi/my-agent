@@ -100,6 +100,7 @@ def collect_anthropic_stream_with_tools(
 def collect_anthropic_stream_with_completion(
     lines: Iterable[str],
     on_chunk: Callable[[str], None] | None = None,
+    on_thinking_delta: Callable[[str], None] | None = None,
 ) -> tuple[str, dict[str, Any], list[dict[str, Any]], StreamCompletion]:
     """Like ``collect_anthropic_stream_with_tools`` but also returns the stream's
     ``StreamCompletion`` health check (truncation detection for the native path).
@@ -107,6 +108,8 @@ def collect_anthropic_stream_with_completion(
     The fourth value captures the generator's return value (whether ``message_stop``
     was seen, the final ``stop_reason``, and whether a tool_use JSON buffer was left
     open). Text/3-tuple callers are unaffected.
+    ``on_thinking_delta`` receives live thinking deltas for rich transcript sinks;
+    text/usage callers ignore it.
     """
     parts: list[str] = []
     accumulated = ""
@@ -126,6 +129,10 @@ def collect_anthropic_stream_with_completion(
         event_usage = getattr(event, "usage", None)
         if event_usage:
             usage = merge_usage(usage, event_usage)
+        thinking = str(getattr(event, "thinking_content", "") or "")
+        if thinking and callable(on_thinking_delta):
+            on_thinking_delta(thinking)
+            continue
         content = str(getattr(event, "content", "") or "")
         if not content:
             continue

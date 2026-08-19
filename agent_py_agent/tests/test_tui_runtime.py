@@ -592,3 +592,32 @@ def test_finalize_overwrites_streamed_deltas_without_duplicate() -> None:
     assert len(assistant) == 1
     assert assistant[0].text == "最终答案"
     assert "process" not in assistant[0].metadata
+
+
+def test_gateway_thinking_delta_streams_into_active_block_with_timer() -> None:
+    runtime = TuiRuntime("session-think-delta")
+    runtime.enqueue_prompt("request-think-delta", "novel", queued=False)
+    turn = runtime.begin_turn("request-think-delta")
+
+    assert turn.on_gateway_event({"kind": "thinking_delta", "text": "先思考"})
+    assert turn.on_gateway_event({"kind": "thinking_delta", "text": "再落笔"})
+
+    active = [
+        block for block in runtime.store.snapshot().active_blocks
+        if block.role == "thinking"
+    ]
+    assert len(active) == 1
+    assert active[0].text == "先思考再落笔"
+    assert active[0].metadata.get("started_at", 0) > 0
+
+    assert turn.on_gateway_event(
+        {"kind": "assistant_thinking", "text": "完整思考", "duration_seconds": 12.0}
+    )
+
+    settled = [
+        block for block in runtime.store.snapshot().stable_blocks
+        if block.role == "thinking"
+    ]
+    assert len(settled) == 1
+    assert settled[0].text == "完整思考"
+    assert settled[0].metadata.get("duration_seconds") == 12.0

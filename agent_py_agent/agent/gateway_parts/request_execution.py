@@ -326,6 +326,27 @@ class BufferedChunkStreamWriter:
             },
         )
 
+    # LLM: thinking_delta 是流式思考的展示级增量，只做路径/标识脱敏（同 model_delta，
+    # 不做 project_user_reply——那会把未完成思考当终稿投影）；canonical assistant_thinking
+    # 始终全量脱敏并覆盖流式内容。
+    # 函数用途: 实时转发 provider 流式思考增量（rich 客户端，思考期间即可见）。
+    def write_thinking_delta(self, text: str) -> None:
+        if not self.rich_transcript:
+            return
+        content = redact_structured_identifiers(
+            redact_host_absolute_paths(str(text or "")),
+            self._identifier_redactions,
+        )
+        if not content:
+            return
+        write_chunk_event(
+            self.chunk_path,
+            {
+                "kind": "thinking_delta",
+                "text": content,
+            },
+        )
+
     # LLM: provider retry 只向显式 rich 客户端公开有界结构化进度；原始异常和 endpoint 不得进入公开 chunk。
     # 函数用途: 在传输层或模型回合退避期间立即显示重连次数和等待秒数。
     def write_provider_retry(
