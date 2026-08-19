@@ -34,8 +34,7 @@ class _TraceToolBackend(BaseBackend):
     name = "trace_tool_backend"
 
     def probe_tool_capability(self):
-        from agent_py_agent.agent.backends.base import ProviderToolCapability
-        from agent_py_agent.agent.backends.base import _utc_now_iso
+        from agent_py_agent.agent.backends.base import ProviderToolCapability, _utc_now_iso
 
         return ProviderToolCapability(
             provider=self.name, endpoint="local://trace-tool", model="",
@@ -85,8 +84,7 @@ class _TraceToolBackend(BaseBackend):
 
 class _FailingTraceBackend(BaseBackend):
     def probe_tool_capability(self):
-        from agent_py_agent.agent.backends.base import ProviderToolCapability
-        from agent_py_agent.agent.backends.base import _utc_now_iso
+        from agent_py_agent.agent.backends.base import ProviderToolCapability, _utc_now_iso
 
         return ProviderToolCapability(
             provider=self.name, endpoint=f"local://{self.name}", model="",
@@ -103,8 +101,7 @@ class _FailingTraceBackend(BaseBackend):
 
 class _ProviderTimeoutBackend(BaseBackend):
     def probe_tool_capability(self):
-        from agent_py_agent.agent.backends.base import ProviderToolCapability
-        from agent_py_agent.agent.backends.base import _utc_now_iso
+        from agent_py_agent.agent.backends.base import ProviderToolCapability, _utc_now_iso
 
         return ProviderToolCapability(
             provider=self.name, endpoint=f"local://{self.name}", model="",
@@ -121,8 +118,7 @@ class _ProviderTimeoutBackend(BaseBackend):
 
 class _ProviderTransientBackend(BaseBackend):
     def probe_tool_capability(self):
-        from agent_py_agent.agent.backends.base import ProviderToolCapability
-        from agent_py_agent.agent.backends.base import _utc_now_iso
+        from agent_py_agent.agent.backends.base import ProviderToolCapability, _utc_now_iso
 
         return ProviderToolCapability(
             provider=self.name, endpoint=f"local://{self.name}", model="",

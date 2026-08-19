@@ -22,8 +22,8 @@ def _agent_with_thread(tmp_path: Path):
         tmp_path,
     )
     from agent_py_agent.agent.gateway_parts.request_execution import (
-        _GatewayConversationLoadRequest,
         _gateway_conversation_context,
+        _GatewayConversationLoadRequest,
     )
 
     conversation = _gateway_conversation_context(

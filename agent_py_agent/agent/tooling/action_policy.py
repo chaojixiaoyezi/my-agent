@@ -33,9 +33,9 @@ from .models import (
     tool_effect_for_runtime_policy,
 )
 from .registry_rate_limit_policy import tool_rate_limit_policy
-from .workspace_scopes import authoritative_workspace_scopes
 from .runtime_boundary import exact_read_boundary_error
 from .runtime_contracts import ToolCall
+from .workspace_scopes import authoritative_workspace_scopes
 from .write_boundary import validate_write_boundary
 
 ActionStatus = Literal["allow", "ask", "deny"]

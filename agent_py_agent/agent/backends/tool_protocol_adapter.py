@@ -18,11 +18,11 @@ from ..tooling.runtime_contracts import (
     ToolProtocolSnapshot,
 )
 from .text_protocol_parser import (
+    _TEXT_CLOSE,
+    _TEXT_OPEN,
     MAX_BLOCK_CHARS,
     MAX_RESPONSE_CHARS,
     MAX_TEXT_CALLS,
-    _TEXT_CLOSE,
-    _TEXT_OPEN,
     scan_text_blocks,
 )
 

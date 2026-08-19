@@ -84,11 +84,12 @@ l = test_l_managed_readonly_requires_authority
 from __future__ import annotations
 
 import os
-import pytest
 import sqlite3
 import threading
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core.tool_call_runtime import (
@@ -1417,7 +1418,10 @@ def test_n_long_handler_renews_lease(tmp_path, monkeypatch):
 # 函数用途: 验证执行权冲突返回 BUSY_CONFLICT 且 handler 未执行。
 def test_claim_runtime_conflict_maps_to_busy_conflict(tmp_path):
     from agent_py_agent.agent.runtime_db.managed_operation_store import RuntimeConflictError
-    from agent_py_agent.agent.tooling.tool_operation_coordinator import execute_tool_operation, ToolOperationExecutionRequest
+    from agent_py_agent.agent.tooling.tool_operation_coordinator import (
+        ToolOperationExecutionRequest,
+        execute_tool_operation,
+    )
 
     class _FakeStore:
         def claim_tool_operation(self, request):
@@ -1455,10 +1459,11 @@ def test_claim_runtime_conflict_maps_to_busy_conflict(tmp_path):
 # 函数用途: 验证同 attempt 父子 scope 可共存, 跨 attempt 仍冲突。
 def test_same_attempt_parent_child_scopes_coexist(tmp_path):
     import sqlite3
+
     from agent_py_agent.agent.runtime_db.managed_operation_store import (
-        _insert_lock_in_tx,
-        _check_workspace_overlap_in_tx,
         RuntimeConflictError,
+        _check_workspace_overlap_in_tx,
+        _insert_lock_in_tx,
     )
     from agent_py_agent.agent.tooling.tool_operation_coordinator import new_tool_operation_holder
 
@@ -1488,11 +1493,11 @@ def test_same_attempt_parent_child_scopes_coexist(tmp_path):
 # LLM: WRITE-04 回归——同 attempt 内 run_command 的 cwd(task_root)+写根(work)不再自撞。
 # 函数用途: 端到端验证 claim 带父子 scopes 成功。
 def test_claim_with_parent_child_scopes_succeeds(tmp_path):
-    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
     from agent_py_agent.agent.runtime_db.managed_operation_store import (
         ManagedOperationStore,
         ToolOperationClaimRequest,
     )
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
     from agent_py_agent.agent.tooling.tool_operation_coordinator import new_tool_operation_holder
 
     repo = RuntimeRepository(str(tmp_path / "runtime.db"))

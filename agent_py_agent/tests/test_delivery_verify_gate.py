@@ -22,13 +22,6 @@ import pytest
 from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
     delivery_contract_preflight_findings,
 )
-from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
-    _NoToolCallsRequest,
-    ToolLoopResponseDecision,
-    _delivery_verify_no_tool_call_decision,
-)
-from agent_py_agent.agent.backends import ModelResponse
-from agent_py_agent.agent.conversation.runtime import should_continue_task
 from agent_py_agent.agent.agent_core.tool_loop.delivery_verify import (
     VERIFY_CONTRACT_INVALID,
     VERIFY_FAILED,
@@ -37,6 +30,13 @@ from agent_py_agent.agent.agent_core.tool_loop.delivery_verify import (
     delivery_verify_commands,
     run_delivery_verification,
 )
+from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
+    ToolLoopResponseDecision,
+    _delivery_verify_no_tool_call_decision,
+    _NoToolCallsRequest,
+)
+from agent_py_agent.agent.backends import ModelResponse
+from agent_py_agent.agent.conversation.runtime import should_continue_task
 
 
 class _FakeParams:
@@ -424,11 +424,11 @@ def test_persist_event_idempotent_real_sqlite(tmp_path):
     """
     from types import SimpleNamespace
 
-    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
     from agent_py_agent.agent.agent_core.tool_loop.delivery_verify import (
         _contract_hash,
         persist_delivery_verify_event,
     )
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 
     repo = RuntimeRepository(tmp_path / "home" / "runtime.db")
     agent = SimpleNamespace(

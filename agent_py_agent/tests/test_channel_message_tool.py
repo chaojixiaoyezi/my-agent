@@ -668,10 +668,6 @@ def test_send_message_is_registered_but_hidden_without_proactive_owner_route(
         "current owner has no proactive channel binding",
     ) in snapshot.unavailable_tools
     assert agent.tools.tools["send_message"]._delivery is agent.delivery_service
-    assert (
-        agent.tools.tools["list_capabilities"].sources.channel_registry
-        is agent.channel_registry
-    )
 
 
 def test_send_message_is_visible_when_owner_has_a_proactive_route(tmp_path: Path) -> None:

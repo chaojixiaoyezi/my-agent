@@ -69,7 +69,7 @@ class ArtifactSnapshot:
                 return self.shared_root / rel_path
         return None
 
-    def materialize(self, root: Path) -> "ArtifactSnapshot":
+    def materialize(self, root: Path) -> ArtifactSnapshot:
         """把已验证文件复制到独立目录（H.9：validator 不再读 live workspace）。
 
         物化发生在验证时点之后：live 后续再变（工具改写/并发发布）都不

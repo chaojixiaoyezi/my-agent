@@ -11,9 +11,9 @@ from pathlib import Path
 
 from agent_py_agent.agent.memory_store.candidate_models import MemoryCandidate
 from agent_py_agent.agent.memory_store.lessons import (
+    HOT_MAX_INJECT_CHARS,
     HOT_SCHEMA_VERSION,
     LESSON_SCHEMA_VERSION,
-    HOT_MAX_INJECT_CHARS,
     HotRuleRecord,
     HotRuleRepository,
     LessonRecord,

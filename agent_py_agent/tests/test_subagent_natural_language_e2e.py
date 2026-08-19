@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import pytest
-
 import json
 import re
 import time
 from pathlib import Path
+
+import pytest
 
 from agent_py_agent.agent.backends import BaseBackend, ModelResponse
 from agent_py_agent.agent.core import SimpleAgent
@@ -17,8 +17,7 @@ class NaturalFurnitureRootBackend(BaseBackend):
     name = "natural_furniture_root_backend"
 
     def probe_tool_capability(self):
-        from agent_py_agent.agent.backends.base import ProviderToolCapability
-        from agent_py_agent.agent.backends.base import _utc_now_iso
+        from agent_py_agent.agent.backends.base import ProviderToolCapability, _utc_now_iso
 
         return ProviderToolCapability(
             provider=str(self.name or "nl-e2e"), endpoint="local://nl-e2e",
@@ -80,8 +79,7 @@ class NaturalFurnitureRunnerBackend(BaseBackend):
     name = "natural_furniture_runner_backend"
 
     def probe_tool_capability(self):
-        from agent_py_agent.agent.backends.base import ProviderToolCapability
-        from agent_py_agent.agent.backends.base import _utc_now_iso
+        from agent_py_agent.agent.backends.base import ProviderToolCapability, _utc_now_iso
 
         return ProviderToolCapability(
             provider=str(self.name or "nl-e2e"), endpoint="local://nl-e2e",

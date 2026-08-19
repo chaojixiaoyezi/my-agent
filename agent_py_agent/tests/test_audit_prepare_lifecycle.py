@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from agent.agent_core.orchestration.create_policy import (
     prepare_audit_child_creation_scope,
 )
@@ -56,8 +57,6 @@ from agent.memory_archive.tool_output_externalizer import (
     externalize_tool_output_record,
 )
 from agent.settings import AgentConfig
-
-import pytest
 
 
 @pytest.fixture(autouse=True)

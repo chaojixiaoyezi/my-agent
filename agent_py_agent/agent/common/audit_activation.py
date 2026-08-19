@@ -203,7 +203,8 @@ def audit_worker_tool_scope(attrs: Any) -> tuple[str, ...]:
         ]
         if any(refs):
             return AUDIT_SOURCE_WORKER_TOOLS
-        return AUDIT_SOURCE_WORKER_TOOLS[:2]
+        # 无显式 refs: 只给采集面(watch_stream); 文件工具留给有 refs 的读取边界。
+        return AUDIT_SOURCE_WORKER_TOOLS[:1]
     if structured_audit_source_binding_attributes(attrs):
         return AUDIT_SOURCE_BINDING_TOOLS
     return ()

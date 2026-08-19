@@ -116,21 +116,12 @@ class ToolRegistryParams:
     runtime_guard_policy: object | None = None
     # MCP 客户端(短板6)：要连接的外部 MCP server 声明。默认空 = 不连、不起子进程(零开销)。
     mcp_servers: dict[str, Any] | None = None
-    lsp_servers: dict[str, Any] | None = None
     # 视觉理解(短板6)：辅助视觉模型配置(VisionModelConfig)。默认 None = 未配视觉模型,
     # analyze_image 注册但调用时返回 TOOL_UNAVAILABLE(可选加法,零默认影响)。
-    vision_config: Any | None = None
     # 真实语义工具检索的 embedding provider；未配置时 vector 通道明确显示 unconfigured。
     tool_embedder: Any | None = None
     # list_capabilities 只读运行时实际配置，不再把“代码里有适配器”虚报成“已经配置可用”。
-    capability_config: Any | None = None
     # 通道状态和当前绑定来自 composition root 注入的唯一 registry/ConversationStore 事实。
-    channel_registry: Any | None = None
-    channel_binding_provider: Callable[[], Any | None] | None = None
-    skill_snapshot_provider: Callable[[], Any] | None = None
-    memory_snapshot_provider: Callable[[], dict[str, object]] | None = None
-    persona_snapshot_provider: Callable[[], dict[str, object]] | None = None
-    scheduler_snapshot_provider: Callable[[], dict[str, object]] | None = None
     # 生产 SimpleAgent 注入 owner 自己的权威 LocalStore；裸 registry/合同探针可不注入。
     operation_store: object | None = None
     # 副作用默认 fail-closed；只有明确的无副作用合同探针/单元测试可显式关闭。
@@ -778,9 +769,6 @@ def _close_registry_clients(registry: ToolRegistry) -> None:
             pass
     registry._mcp_clients = []
     registry._mcp_retry_state.clear()
-    lsp_manager = getattr(registry, "_lsp_manager", None)
-    if lsp_manager is not None:
-        lsp_manager.close_all()
 
 
 def _prepare_registry_clients_for_run(registry: ToolRegistry) -> None:

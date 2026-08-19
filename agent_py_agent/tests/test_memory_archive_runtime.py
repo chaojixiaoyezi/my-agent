@@ -497,8 +497,7 @@ class _FailingRuntimeFactBackend:
     name = "failing_runtime_fact_backend"
 
     def probe_tool_capability(self):
-        from agent_py_agent.agent.backends.base import ProviderToolCapability
-        from agent_py_agent.agent.backends.base import _utc_now_iso
+        from agent_py_agent.agent.backends.base import ProviderToolCapability, _utc_now_iso
 
         return ProviderToolCapability(
             provider=self.name, endpoint="local://failing", model="",

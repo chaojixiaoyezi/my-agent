@@ -18,8 +18,8 @@ from typing import Any
 
 from ....common.json_io import locked_json_path, read_json_object_report, write_json_file_atomic
 from ....common.opaque_id import validate_opaque_id
-from ....runtime_db.operations import directory_id_for_opaque
 from ....common.value_parsing import sequence_strings
+from ....runtime_db.operations import directory_id_for_opaque
 from ....runtime_errors import runtime_error_report
 from ...models import (
     SUBAGENT_FAILED_RESULT_STATUSES,

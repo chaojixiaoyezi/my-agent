@@ -5,9 +5,10 @@ from agent_py_agent.agent.conversation.runtime import (
 )
 
 
-def test_record_finding_present_in_background_tool_profiles() -> None:
-    assert "record_finding" in SCHEDULED_BACKGROUND_ALLOWED_TOOLS
-    assert "record_finding" in SUBAGENT_INTEGRATION_ALLOWED_TOOLS
+def test_record_finding_absent_from_background_tool_profiles() -> None:
+    """record_finding 工具已下线: 结论落账走宿主审计链, 后台 profile 不再暴露它。"""
+    assert "record_finding" not in SCHEDULED_BACKGROUND_ALLOWED_TOOLS
+    assert "record_finding" not in SUBAGENT_INTEGRATION_ALLOWED_TOOLS
 
 
 def test_scheduled_prompt_does_not_impose_an_audit_workflow() -> None:

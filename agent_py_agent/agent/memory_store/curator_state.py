@@ -26,7 +26,6 @@ from .curator_models import (
     MemoryCuratorState,
 )
 
-
 # LLM: 隔离失败退避冷却: 同 error_class 在此窗口内跳过重复隔离尝试(复用上次失败
 # 审计, 不新增行), 期满才再试一条新审计——防 quarantine 长期失败时 run_log 无限刷屏。
 _QUARANTINE_BACKOFF_SECONDS = 300

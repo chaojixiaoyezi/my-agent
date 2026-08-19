@@ -21,7 +21,6 @@ from agent_py_agent.agent.contracts.model_call_ledger import (
     ModelCallStartedParams,
 )
 
-
 # ---------------------------------------------------------------- helpers
 
 def _probe_ledger(tokens: int, latencies: list[float]) -> ModelCallLedger:

@@ -27,9 +27,9 @@ from dataclasses import dataclass, field
 
 from ...backends import ModelResponse
 from ...backends.text_protocol_parser import (
-    IncrementalTextToolParser,
     _TEXT_CLOSE,
     _TEXT_OPEN,
+    IncrementalTextToolParser,
     scan_text_blocks,
 )
 from ...tooling.content_transport_policy import (

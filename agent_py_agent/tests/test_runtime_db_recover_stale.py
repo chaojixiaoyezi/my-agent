@@ -152,7 +152,9 @@ def test_new_attempt_records_runner_identity(tmp_path):
 # output/.sandbox-tmp/ 并记录 timeline 事实, 否则"模型视角完成、用户视角产物消失"。
 # 函数用途: 验证收口发布函数复制产物且写 timeline 事件。
 def test_publish_sandbox_tmp_outputs(tmp_path):
-    from agent_py_agent.agent.agent_core.run_task_workspace_writer import _publish_sandbox_tmp_outputs
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
+        _publish_sandbox_tmp_outputs,
+    )
 
     root = tmp_path / "task"
     work = root / "work"
@@ -174,7 +176,9 @@ def test_publish_sandbox_tmp_outputs(tmp_path):
 # LLM: SANDBOX-01 适配——tmp 根在任务根(working_dir 未指定时的沙箱 workspace)时也发布。
 # 函数用途: 验证任务根/.sandbox-tmp 的产物被收口发布。
 def test_publish_sandbox_tmp_at_task_root(tmp_path):
-    from agent_py_agent.agent.agent_core.run_task_workspace_writer import _publish_sandbox_tmp_outputs
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
+        _publish_sandbox_tmp_outputs,
+    )
 
     root = tmp_path / "task"
     (root / "work").mkdir(parents=True)
@@ -192,7 +196,9 @@ def test_publish_sandbox_tmp_at_task_root(tmp_path):
 # LLM: 无 .sandbox-tmp 时发布为空且不产生 timeline 噪音。
 # 函数用途: 验证空发布路径幂等无副作用。
 def test_publish_sandbox_tmp_empty_noop(tmp_path):
-    from agent_py_agent.agent.agent_core.run_task_workspace_writer import _publish_sandbox_tmp_outputs
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
+        _publish_sandbox_tmp_outputs,
+    )
 
     root = tmp_path / "task"
     (root / "work").mkdir(parents=True)

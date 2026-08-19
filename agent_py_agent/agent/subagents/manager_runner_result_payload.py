@@ -360,11 +360,11 @@ def _machine_verify_done_acceptance(
     """
     if not task_has_status(task, TaskStatus.DONE):
         return
+    from ..tooling.sandbox import SandboxUnavailable
     from .services.acceptance_verification import (
         AcceptanceVerificationResult,
         verify_done_acceptance,
     )
-    from ..tooling.sandbox import SandboxUnavailable
 
     try:
         result = verify_done_acceptance(task, tests, owner_home=owner_home)

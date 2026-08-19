@@ -21,7 +21,6 @@ from ..agent.agent_core.runtime.loop_models import RunParams
 from ..agent.conversation.closeout import (
     STATE_DONE,
     STATE_RESUME_ROUND,
-    STATE_SLEEP_WAIT,
     STATE_WAIT_HANDOFF,
     CloseoutFacts,
     decide_closeout,
@@ -363,12 +362,6 @@ def run_with_resume(
                 # 机器语义: max_rounds 是总代数上限(含首轮), 而本函数参数
                 # max_rounds 是续跑轮上限——加回首轮。
                 max_rounds=max_rounds + 1,
-                sleeping=bool(
-                    str(getattr(result, "runtime_source", "") or "").strip()
-                    == "clock_sleep_tool"
-                    and str(getattr(result, "runtime_reason", "") or "").strip()
-                    == "CLOCK_SLEEP_WAITING"
-                ),
             )
         )
         if outcome.state != STATE_RESUME_ROUND:
@@ -415,16 +408,10 @@ def _closeout_after_decision(
     "正常不自动续跑"(EXEC-39) 标 unresumable, 预算/同因/轮数耗尽标
     budget_exhausted + 落账事件(write_events=False 时手动续跑只返回状态);
     其余(wait_human/cancelled) → unresumable(缺口C: 只有 runtime_status=ok
-    才算 completed, 不误标)。sleep_wait → unresumable 但**不清字条**(字条
-    就是闹钟, 到期由调度器唤醒)。除 sleep_wait 外所有终态都清任务闹钟
-    字条(EXEC-39: 停即停, 不自动醒, 防僵尸到期重醒)。2026-08-17 owner
+    才算 completed, 不误标)。所有终态都清任务闹钟字条(EXEC-39: 停即停,
+    不自动醒, 防僵尸到期重醒)。2026-08-17 owner
     拍板删除 gateway 移交线——不再写移交单, 任务停下后唯一续跑入口是
     用户显式 run --resume。"""
-    if outcome.state == STATE_SLEEP_WAIT:
-        return CliResumeOutcome(
-            status="unresumable", rounds=rounds, final_result=result,
-            reason=outcome.reason or "clock_sleep",
-        )
     if outcome.state == STATE_DONE:
         _cancel_task_wake_notes(agent, runner.ctx.root_task_id)
         return CliResumeOutcome(

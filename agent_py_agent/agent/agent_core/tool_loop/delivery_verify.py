@@ -218,7 +218,7 @@ def build_verification_id(params: object, contract: object) -> str:
     ).hexdigest()[:16]
     attempt_id = str(getattr(params, "attempt_id", "") or "")
     return hashlib.sha256(
-        f"{attempt_id}:{_contract_hash(contract)}:{digest}".encode("utf-8")
+        f"{attempt_id}:{_contract_hash(contract)}:{digest}".encode()
     ).hexdigest()[:16]
 
 

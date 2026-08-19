@@ -768,10 +768,6 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
             continue
         if verdict == "stop":
             final_response = routed_response if routed_response is not None else final_response
-            # 睡眠收口(调度改造 2b): 模型本轮最后执行 sleep 工具且自然停,
-            # 把 ok 收口降级为 sleep 等待态——任务保持非终态、字条保留,
-            # 到期由 wake_queue 调度器唤醒。
-            final_response = _sleep_wait_closeout_if_asleep(params, final_response)
             break
         final_prompt, final_response, tool_rounds = _tool_step_or_limit(
             service,
@@ -814,30 +810,7 @@ def _routed_action_step(action):
     return "stop", action.response
 
 
-# LLM: 睡眠收口判定(调度改造 2b, 对齐 会话运行时 sleep 可打断语义的跨进程版)。
-# 只认 executed_tools 的**最后一个元素**是 "sleep"(模型睡完就停)且当前
-# 收口是纯自然停(无任何结构化 reason/source 抢占)——其余情况不动原收口
-# (模型睡完继续干活/其他 gate 已判定时, 字条由终态清条或到期唤醒兜底)。
-# 输出 CLOCK_SLEEP_WAITING + clock_sleep_tool 供 decide_closeout 走
-# sleep_wait: 任务保持非终态、字条保留, 不进可续跑白名单。
-# 函数用途: 自然停止出口把"睡了"的回合标成 sleep 等待收口。
-def _sleep_wait_closeout_if_asleep(params, response):
-    executed = getattr(params, "executed_tools", None) or ()
-    if not executed or str(executed[-1]) != "sleep":
-        return response
-    if str(getattr(response, "runtime_reason", "") or "").strip() or str(
-        getattr(response, "runtime_source", "") or ""
-    ).strip():
-        # 已有结构化收口理由(未完成/阻断等)不覆盖, 由其自身语义收口。
-        return response
-    if str(getattr(response, "runtime_status", "") or "ok").strip() != "ok":
-        return response
-    return replace(
-        response,
-        runtime_status="unfinished",
-        runtime_reason="CLOCK_SLEEP_WAITING",
-        runtime_source="clock_sleep_tool",
-    )
+
 
 
 # 函数用途: 把 pending 延迟工具调用的双分支收成一次裁决,返回(轮数, 最终回复, 是否命中)。

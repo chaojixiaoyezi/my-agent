@@ -1258,7 +1258,7 @@ class RuntimeOperationsMixin:
                             os.fchmod(tfd, int(item["permissions"]))
                         finally:
                             os.close(tfd)
-                applied += 1
+                applied += 1  # noqa: SIM113
                 if crash_point == "mid_apply" and applied == 1:
                     return self._set_publish_state(publish_id, PUB_DIRTY, {"stage": crash_point})
         except RuntimeConflictError:

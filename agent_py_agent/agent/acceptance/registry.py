@@ -21,10 +21,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..contracts.artifact_acceptance import (
+    _validate_pdf_request,
+    _validate_xlsx_request,
     validate_by_artifact_kind,
     validate_static_site_artifact,
-    _validate_xlsx_request,
-    _validate_pdf_request,
 )
 
 #: I.3：模型永远不能提交的执行字段（编译器剥离为 inert evidence）。

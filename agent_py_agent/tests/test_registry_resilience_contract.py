@@ -423,7 +423,7 @@ def test_process_tools_receive_structured_sandbox_write_roots(tmp_path: Path) ->
         "task_root": str(task_root),
         "task_work_dir": str(allowed),
     }
-    for tool_name in ("run_command", "terminal_session", "lsp"):
+    for tool_name in ("run_command", "terminal_session"):
         tool_params = {"action": "start"} if tool_name == "terminal_session" else {"action": "status"}
         params = _tool_params_with_runtime_boundary(
             AuthorizedToolDispatchRequest(
@@ -437,10 +437,7 @@ def test_process_tools_receive_structured_sandbox_write_roots(tmp_path: Path) ->
         )
         assert params["__sandbox_write_roots"] == [str(allowed), str(output)]
         assert params["__sandbox_read_roots"] == [str(readable)]
-        if tool_name in {"run_command", "terminal_session"}:
-            assert params["__access_mode"] == "workspace-write"
-        else:
-            assert "__access_mode" not in params
+        assert params["__access_mode"] == "workspace-write"
         assert "working_dir" not in params
 
 

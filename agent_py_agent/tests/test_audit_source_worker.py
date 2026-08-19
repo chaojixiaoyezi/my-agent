@@ -724,7 +724,7 @@ def test_one_exact_worker_per_watch_is_idempotent(
     assert all(row["ok"] is True for row in second)
     assert len(tasks) == source_count
     assert len({task.attributes[AUDIT_SOURCE_WORKER_KEY_ATTR] for task in tasks}) == source_count
-    assert all(task.allowed_tools == ["watch_stream", "record_finding"] for task in tasks)
+    assert all(task.allowed_tools == ["watch_stream"] for task in tasks)
     assert all("schedule_child_subagents" not in task.allowed_tools for task in tasks)
     assert all(task.attributes.get("_exact_allowed_tools") is None for task in tasks)
     assert all(task.attributes["dynamic_timeout_seconds"] == 300 for task in tasks)
@@ -944,7 +944,6 @@ def test_existing_audit_child_is_adopted_as_the_exact_source_worker(
     )
     assert persisted.allowed_tools == [
         "watch_stream",
-        "record_finding",
     ]
     assert "write_file" not in persisted.allowed_tools
     assert "run_command" not in persisted.allowed_tools
@@ -1494,7 +1493,6 @@ def test_source_worker_context_uses_exact_read_scope(
 
     assert task.allowed_tools == [
         "watch_stream",
-        "record_finding",
         "read_file",
         "read_artifact",
     ]
@@ -1917,7 +1915,7 @@ def test_source_worker_without_explicit_refs_has_no_file_tools_or_read_prompt(
     context = agent.subagents.runner_context.build_execution_context(task.id)
     prompt = _build_subagent_runner_prompt(context)
 
-    assert task.allowed_tools == ["watch_stream", "record_finding"]
+    assert task.allowed_tools == ["watch_stream"]
     runtime_profile = context.context_bundle["runtime_profile"]
     assert AUDIT_OBJECTIVE_ATTR not in runtime_profile
     assert runtime_profile["source_profile"] == {

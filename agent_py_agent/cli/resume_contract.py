@@ -32,7 +32,7 @@ class CliContinuationContext:
     continuation_seq: int = 0
     parent_attempt_id: str = ""
 
-    def next(self, *, attempt_id: str) -> "CliContinuationContext":
+    def next(self, *, attempt_id: str) -> CliContinuationContext:
         """推进到下一轮：seq+1，parent_attempt 指向刚结束的轮。"""
         return replace(
             self,

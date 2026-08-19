@@ -46,7 +46,6 @@ from agent_py_agent.agent.memory_store.lessons import (
 from agent_py_agent.agent.memory_store.migration import MemoryMigrationService
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 
-
 # ---------- 辅助(与既有 curator/migration 测试同一构造约定) ----------
 
 

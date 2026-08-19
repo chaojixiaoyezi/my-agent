@@ -129,7 +129,7 @@ def test_settle_failed_retry_then_dead_letter(repo, chain):
     assert len(dl) == 1
     assert dl[0]["attempts"] == 8
     # 完整证据：8 次 attempt 的 evidence 全保留（K.6）。
-    assert [k for k in dl[0]["provider_evidence"]] == [
+    assert list(dl[0]["provider_evidence"]) == [
         f"attempt_{i}" for i in range(1, 9)
     ]
     # 可查询（K.6）：按 task_run/owner/状态过滤。
@@ -424,9 +424,7 @@ def test_closeout_pre_upgrade_contract_and_rows_compat(repo, chain):
         },
     )
     # 模拟旧契约：冻结前把 assertion_key 从 compiled 里剥掉。
-    compiled_legacy = {
-        k: v for k, v in contract.compiled.items()
-    }
+    compiled_legacy = dict(contract.compiled.items())
     compiled_legacy["assertions"] = [
         {k: v for k, v in a.items() if k != "assertion_key"}
         for a in compiled_legacy["assertions"]

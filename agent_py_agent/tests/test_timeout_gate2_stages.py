@@ -22,9 +22,9 @@ import pytest
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core.tool_model_generation import (
     ModelGenerateParams,
-    _ProviderTimeoutRecord,
     _provider_timeout_elapsed,
     _provider_timeout_idle_silence,
+    _ProviderTimeoutRecord,
     _record_provider_timeout,
     generate_model_response,
 )
@@ -38,7 +38,6 @@ from agent_py_agent.agent.contracts.model_call_ledger import (
     ModelCallStartedParams,
 )
 from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
-
 
 # ---------------------------------------------------------------- helpers
 

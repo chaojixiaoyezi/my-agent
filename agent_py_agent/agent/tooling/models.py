@@ -6,9 +6,9 @@ import hashlib
 import json
 import re
 from copy import deepcopy
-from pathlib import Path
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from ..contracts.error_taxonomy import error_contract

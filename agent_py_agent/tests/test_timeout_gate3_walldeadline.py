@@ -53,7 +53,7 @@ class _SSEHandler(BaseHTTPRequestHandler):
             try:
                 n = 0
                 while time.monotonic() < end:
-                    self.wfile.write(f"data: {{\"n\":{n}}}\n\n".encode("utf-8"))
+                    self.wfile.write(f"data: {{\"n\":{n}}}\n\n".encode())
                     self.wfile.flush()
                     n += 1
                     time.sleep(_DATA_INTERVAL)
@@ -66,7 +66,7 @@ class _SSEHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
             for n in range(3):
-                self.wfile.write(f"data: {{\"n\":{n}}}\n\n".encode("utf-8"))
+                self.wfile.write(f"data: {{\"n\":{n}}}\n\n".encode())
                 self.wfile.flush()
                 time.sleep(_DATA_INTERVAL)
             return

@@ -129,8 +129,7 @@ def test_dispatch_state_running_subagent_suggests_wait_not_polling():
 
     state = payload["current_turn_run_state"]
     assert state["next_action"] == "wait_for_subagent_completion_event"
-    assert state["suggested_tool_call"]["tool"] == "wait"
-    assert state["suggested_tool_call"]["seconds"] >= 10
+    assert state["suggested_tool_call"]["tool"] == "inspect_agent_tree"
 
 
 def test_dispatch_state_completed_alias_does_not_suggest_closeout():

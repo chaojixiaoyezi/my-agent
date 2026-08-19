@@ -258,7 +258,7 @@ class _SSEHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
             for i in range(6):
-                self.wfile.write(f"data: {{\"n\":{i}}}\n\n".encode("utf-8"))
+                self.wfile.write(f"data: {{\"n\":{i}}}\n\n".encode())
                 self.wfile.flush()
                 time.sleep(0.3)  # 心跳间隔 < timeout=1 -> deadline 持续重置
             return

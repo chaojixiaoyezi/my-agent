@@ -113,4 +113,4 @@ def test_render_validation_issues_never_echoes_argument_values() -> None:
         ]
     )
     assert "sk-real-key" not in rendered
-    assert "$.attachments: 期望 array, 实际 string" == rendered
+    assert rendered == "$.attachments: 期望 array, 实际 string"

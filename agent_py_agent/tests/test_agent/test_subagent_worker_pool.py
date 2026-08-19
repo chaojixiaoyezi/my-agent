@@ -7,12 +7,13 @@ from pathlib import Path
 
 from agent_py_agent.agent.agent_core.orchestration.dispatch.params import DispatchParams
 from agent_py_agent.agent.backends import BaseBackend, ModelResponse
-from .backends import _TestNativeBackend
 from agent_py_agent.agent.capability import CapabilityRouter
 from agent_py_agent.agent.capability.config import CapabilityConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.subagents.manager_runner_result_payload import RecordRunnerResultParams
+
+from .backends import _TestNativeBackend
 
 
 def _accepted_result(summary: str) -> ModelResponse:

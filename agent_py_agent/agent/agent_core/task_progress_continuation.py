@@ -208,8 +208,8 @@ def _ledger_key(agent: object, params: object) -> str:
 
 def _read_progress_ledger(agent: object, task_id: str) -> dict[str, Any]:
     try:
-        from .runtime.owner_roots import runtime_owner_root
         from ..task_progress import read_task_progress
+        from .runtime.owner_roots import runtime_owner_root
 
         progress = read_task_progress(runtime_owner_root(agent), task_id)
         return progress if isinstance(progress, dict) else {}

@@ -154,8 +154,10 @@ def test_manual_resume_keeps_active_link_untouched(tmp_path):
     assert agent.conversation_store.updated is None
 
 
-from agent_py_agent.agent.user_space.run_workspace import _activate_task_state
-from agent_py_agent.agent.user_space.run_workspace import EnsureRunWorkspaceRequest
+from agent_py_agent.agent.user_space.run_workspace import (
+    EnsureRunWorkspaceRequest,
+    _activate_task_state,
+)
 
 
 def _state_request(task_id="t1", run_id="r1") -> EnsureRunWorkspaceRequest:

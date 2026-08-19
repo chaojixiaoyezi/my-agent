@@ -153,40 +153,6 @@ def test_background_run_without_task_does_not_invent_conversation_task_identity(
     assert params.task_attributes is None
 
 
-def test_taskless_internal_background_wait_does_not_create_task_or_thread(tmp_path) -> None:
-    from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run_params
-
-    agent = SimpleAgent(
-        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
-        tmp_path,
-    )
-    params = _run_params(
-        "thread-internal-event",
-        BackgroundRunRequest(
-            thread_id="thread-internal-event",
-            task_id="",
-            reason="audit_finding_reported",
-        ),
-        agent,
-    )
-    before_threads = agent.conversation_store.list_threads(limit=0)
-    agent._current_run_params = params
-    # The real runtime exposes this transient execution id while the turn is
-    # active.  It must not be promoted into a durable task identity.
-    agent._main_agent_run_id = params.run_id
-    try:
-        result = agent.tools.tools["sleep"].execute({"duration_seconds": 60, "reason": "check again later"})
-    finally:
-        delattr(agent, "_current_run_params")
-        delattr(agent, "_main_agent_run_id")
-
-    assert result.ok is False
-    assert result.error_code == "TOOL_INVALID_ARGUMENTS"
-    assert "任务身份" in str(result.output or "")
-    assert agent.conversation_store.list_threads(limit=0) == before_threads
-    assert agent.conversation_store.list_progress_policies(enabled_only=True) == []
-
-
 def test_internal_background_run_uses_bounded_existing_tool_loop_controls() -> None:
     from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run_params
     from agent_py_agent.agent.settings.runtime_guard_config import RuntimeGuardPolicy
@@ -1420,7 +1386,7 @@ def test_thread_goal_waits_for_child_events_without_polling_or_chat_noise(tmp_pa
     )
     reports = scheduler.tick()
 
-    assert "wait" in params.allowed_tools
+    assert "inspect_agent_tree" in params.allowed_tools
     assert "create_subagents" in params.allowed_tools
     assert reports == []
     assert backend.prompts == []

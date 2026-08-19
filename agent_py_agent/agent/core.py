@@ -21,7 +21,6 @@ from .agent_core import (
     SimpleAgentDispatchMixin,
     SimpleAgentRuntimeMixin,
     SimpleAgentSubagentMixin,
-    SleepTool,
     TaskProgressTool,
     execute_cancel_subagents,
 )
@@ -33,7 +32,6 @@ from .agent_core.parameters import (
     _non_negative_int,
     _one_shot_tool_call_key,
     _positive_int,
-    _sleep_with_stop,
 )
 from .agent_core.planner_service import (
     PARENT_PLANNER_READ_TOOLS,
@@ -134,7 +132,6 @@ from .settings import AgentConfig
 from .settings.runtime_guard_config import runtime_guard_policy
 from .subagents.manager import SubAgentManager
 from .tooling.registry import ToolRegistry, ToolRegistryParams
-from .tooling.vision_tools import vision_config_from_agent_config
 from .user_space.home_indexes import register_owner_ref
 from .user_space.home_layout import ensure_my_agent_home
 from .user_space.home_root import configured_home_root
@@ -830,16 +827,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             artifact_root=runtime_owner_root(agent),
             runtime_guard_policy=getattr(agent, "runtime_guard_policy", None),
             mcp_servers=dict(getattr(config, "mcp_servers", {}) or {}),
-            lsp_servers=dict(getattr(config, "lsp_servers", {}) or {}),
-            vision_config=vision_config_from_agent_config(config),
-            tool_embedder=_build_tool_embedder(config),
-            capability_config=config,
-            channel_registry=agent.channel_registry,
-            channel_binding_provider=lambda: _current_delivery_context(agent),
-            skill_snapshot_provider=agent.current_skill_snapshot,
-            memory_snapshot_provider=agent.memory.runtime_snapshot,
-            persona_snapshot_provider=agent.persona_repository.runtime_snapshot,
-            scheduler_snapshot_provider=agent.scheduler_service.runtime_snapshot,
+                        tool_embedder=_build_tool_embedder(config),
             operation_store=select_operation_store(agent),
             operation_store_required=True,
             operation_owner_id=str(
@@ -980,9 +968,6 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(CreateSubagentsTool(agent))
     agent.tools.register(CancelSubagentsTool(agent))
     agent.tools.register(InspectAgentTreeTool(agent))
-    # clock.sleep(扫描治理第二步, 对齐 会话运行时 handlers/sleep.rs): 模型主动定时
-    # 等待, 落 wake_queue 字条, 事件可提前唤醒; 不是进程内打盹。
-    agent.tools.register(SleepTool(agent))
     agent.tools.register(SendGuidanceTool(agent))
     agent.tools.register(DispatchSubagentsTool(agent))
     agent.tools.register(ResolveCapabilityRequestsTool(agent))
@@ -1006,5 +991,4 @@ __all__ = [
     "SendGuidanceTool",
     "SimpleAgent",
     "TaskProgressTool",
-    "SleepTool",
 ]

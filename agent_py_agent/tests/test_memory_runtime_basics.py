@@ -64,8 +64,7 @@ class RuntimeOverflowBackend:
     name = "runtime-overflow"
 
     def probe_tool_capability(self):
-        from agent_py_agent.agent.backends.base import ProviderToolCapability
-        from agent_py_agent.agent.backends.base import _utc_now_iso
+        from agent_py_agent.agent.backends.base import ProviderToolCapability, _utc_now_iso
 
         return ProviderToolCapability(
             provider=str(self.name or "test"), endpoint="local://test-backend",
@@ -88,8 +87,7 @@ class SequenceUsageBackend:
     context_window_tokens = 20_000
 
     def probe_tool_capability(self):
-        from agent_py_agent.agent.backends.base import ProviderToolCapability
-        from agent_py_agent.agent.backends.base import _utc_now_iso
+        from agent_py_agent.agent.backends.base import ProviderToolCapability, _utc_now_iso
 
         return ProviderToolCapability(
             provider=str(self.name or "test"), endpoint="local://test-backend",
@@ -113,8 +111,7 @@ class RaisingContextBackend:
     context_window_tokens = 100_000
 
     def probe_tool_capability(self):
-        from agent_py_agent.agent.backends.base import ProviderToolCapability
-        from agent_py_agent.agent.backends.base import _utc_now_iso
+        from agent_py_agent.agent.backends.base import ProviderToolCapability, _utc_now_iso
 
         return ProviderToolCapability(
             provider=self.name, endpoint="local://raising-context", model="",
@@ -136,8 +133,7 @@ class NeverCalledBackend:
     context_window_tokens = 20
 
     def probe_tool_capability(self):
-        from agent_py_agent.agent.backends.base import ProviderToolCapability
-        from agent_py_agent.agent.backends.base import _utc_now_iso
+        from agent_py_agent.agent.backends.base import ProviderToolCapability, _utc_now_iso
 
         return ProviderToolCapability(
             provider=str(self.name or "test"), endpoint="local://test-backend",

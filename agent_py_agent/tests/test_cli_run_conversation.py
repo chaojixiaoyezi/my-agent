@@ -27,8 +27,7 @@ class _RememberOnceBackend:
     context_window_tokens = 200_000
 
     def probe_tool_capability(self):
-        from agent_py_agent.agent.backends.base import ProviderToolCapability
-        from agent_py_agent.agent.backends.base import _utc_now_iso
+        from agent_py_agent.agent.backends.base import ProviderToolCapability, _utc_now_iso
 
         return ProviderToolCapability(
             provider=str(self.name or "test"), endpoint="local://test-backend",
@@ -68,8 +67,7 @@ class _StaticBackend:
     context_window_tokens = 200_000
 
     def probe_tool_capability(self):
-        from agent_py_agent.agent.backends.base import ProviderToolCapability
-        from agent_py_agent.agent.backends.base import _utc_now_iso
+        from agent_py_agent.agent.backends.base import ProviderToolCapability, _utc_now_iso
 
         return ProviderToolCapability(
             provider=str(self.name or "test"), endpoint="local://test-backend",

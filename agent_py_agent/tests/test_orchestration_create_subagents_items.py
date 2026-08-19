@@ -70,7 +70,7 @@ class TestCreateSubagentsItemsMode:
         assert payload["created"] == 3
         assert payload["auto_start"]["status"] == "started"
         assert payload["auto_start"]["run_ids"] == ["run_1", "run_2", "run_3"]
-        assert payload["next_action"]["tool"] == "wait"
+        assert payload["next_action"]["tool"] == "inspect_agent_tree"
 
     def test_items_are_capped_by_max_subagents(self):
         """items[] 超过容量时整批拒绝，避免无声丢失一部分任务。"""

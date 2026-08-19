@@ -10,19 +10,14 @@ from ._filesystem_read import ReadFileTool, filesystem_access_options
 from ._filesystem_search import SearchTextTool
 from ._filesystem_write import WriteFileTool, WriteFileToolOptions
 from .artifact import ReadArtifactTool
-from .browser_tools import browser_tools
-from .capabilities_tool import CapabilityInventorySources, ListCapabilitiesTool
 from .controlled_exec import ControlledExecTool
-from .lsp_client import LspTool
 from .models import (
     HybridToolRetriever,
     KeywordToolSearchProvider,
     VectorToolSearchProvider,
 )
-from .process_tools import KillProcessTool, ListProcessesTool, ProcessStatusTool
 from .pty_sessions import TerminalSessionTool
 from .shell import ShellTool, ShellToolOptions
-from .vision_tools import AnalyzeImageTool, VisionModelConfig
 from .web import WebFetchTool
 from .web_search import WebSearchTool
 
@@ -44,36 +39,13 @@ def build_tool_retriever(params: Any) -> HybridToolRetriever:
     )
 
 
-# LLM: 基础工具只在这里成批装配；ListCapabilitiesTool 通过 provider 读取注册完成后的同一 registry 状态。
-# 函数用途: 注册所有基础工具，并让能力自我描述看到当前 Agent 的真实配置和工具集合。
+# LLM: 基础工具只在这里成批装配。
+# 函数用途: 注册所有基础工具。
 def register_base_tools(registry: Any, params: Any) -> None:
     _register_filesystem_tools(registry, params)
     _register_network_tools(registry, params)
-    _register_vision_tools(registry, params)
-    registry.register(
-        ListCapabilitiesTool(
-            CapabilityInventorySources(
-                config=getattr(params, "capability_config", None),
-                runtime_snapshot_provider=lambda: registry.runtime_snapshot(),
-                channel_registry=getattr(params, "channel_registry", None),
-                channel_binding_provider=getattr(params, "channel_binding_provider", None),
-                skill_snapshot_provider=getattr(params, "skill_snapshot_provider", None),
-                memory_snapshot_provider=getattr(params, "memory_snapshot_provider", None),
-                persona_snapshot_provider=getattr(params, "persona_snapshot_provider", None),
-                scheduler_snapshot_provider=getattr(params, "scheduler_snapshot_provider", None),
-            )
-        )
-    )
 
 
-def _register_vision_tools(registry: Any, params: Any) -> None:
-    """注册看图工具 analyze_image(短板6 视觉理解)。
-
-    视觉是可选加法:vision_config 为 None 时给一个空 VisionModelConfig,工具照常注册,
-    但调用时返回 TOOL_UNAVAILABLE 带配置指引——没配视觉模型对现有流程零影响、不崩。
-    """
-    vision_config = getattr(params, "vision_config", None) or VisionModelConfig()
-    registry.register(AnalyzeImageTool(vision_config))
 
 
 def _register_filesystem_tools(registry: Any, params: Any) -> None:
@@ -139,23 +111,7 @@ def _register_network_tools(registry: Any, params: Any) -> None:
     )
     registry.register(shell_tool)
     registry.register(TerminalSessionTool(shell_tool))
-    lsp_tool = LspTool(
-        registry.workspace_root,
-        registry.workspace_roots,
-        params.owner_scope_root,
-        getattr(params, "lsp_servers", None),
-    )
-    registry.register(lsp_tool)
-    registry._lsp_manager = lsp_tool.manager
-    # 后台进程管理:管住 run_command(run_in_background=true) 起的后台进程
-    # (注册表 + 列表/查状态/杀进程组),让模型不再只剩日志文件管不了进程。
-    registry.register(ListProcessesTool())
-    registry.register(ProcessStatusTool())
-    registry.register(KillProcessTool())
-    # 浏览器自动化:补 web_fetch 抓不到的 JS 渲染/SPA/需点击填表的动态页面
-    # (惰性启动 headless Chromium,导航走 SSRF 防护,a11y 快照给无视觉模型用)。
-    for browser_tool in browser_tools():
-        registry.register(browser_tool)
+    # 后台进程管理由 run_command 自带 (& 后台/ps/kill) 覆盖,不注册独立工具。
     # controlled_exec is an internal tool used by capability grants.
     # flows, but ToolRegistry hides it from the default model-facing catalog.
     registry.register(ControlledExecTool())

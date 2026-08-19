@@ -755,7 +755,10 @@ def test_claim_strict_cas_concurrent_consumers_only_one_wins(tmp_path):
 
     t1 = threading.Thread(target=_claimer, args=(store,))
     t2 = threading.Thread(target=_claimer, args=(store2,))
-    t1.start(); t2.start(); t1.join(); t2.join()
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
 
     assert sorted(results) == [False, True]  # 恰一个成功
     claimed = store.get_progress_policy(
@@ -1617,51 +1620,6 @@ def test_unknown_outcome_keeps_reported_output_preview(tmp_path):
     payload = _json.loads(result.output)
     assert payload["reported_error_code"] == "COMMAND_FAILED"
     assert "compile error line 3" in payload["reported_output_preview"]
-
-
-def test_run_with_resume_sleep_wait_keeps_pending_note(tmp_path):
-    """调度改造 2b: 模型睡完收口 sleep_wait → unresumable(clock_sleep),
-    且 sleep 字条保留——它就是闹钟, 到期由调度器唤醒, 不许在收口时误清。
-    """
-    import time
-
-    from agent_py_agent.agent.agent_core.runtime.run_params import (
-        run_params_with_request_id,
-    )
-    from agent_py_agent.cli.resume_loop import run_with_resume
-
-    class _SleepAgent(_FakeRunAgent):
-        def __init__(self, tmp_path):
-            super().__init__(tmp_path)
-            self.subagents = SimpleNamespace(
-                runtime_db=RuntimeRepository(tmp_path / "rt.db")
-            )
-
-        def run(self, prompt, *, params=None, **kw):
-            self.calls.append((0, str(prompt)[:40]))
-            return SimpleNamespace(
-                runtime_status="unfinished",
-                runtime_reason="CLOCK_SLEEP_WAITING",
-                runtime_source="clock_sleep_tool",
-                tool_rounds=1,
-                attempt_id="attempt-0",
-            )
-
-    fake = _SleepAgent(tmp_path)
-    repo = fake.subagents.runtime_db
-    repo.upsert_wake(
-        root_task_id="task-1", next_due_at=time.time() + 300, kind="sleep",
-        root_run_id="run-1",
-    )
-    base = run_params_with_request_id(
-        RunParams(source="cli_run", task_id="task-1", task_attributes={})
-    )
-    outcome = run_with_resume(
-        fake, initial_prompt="t", base_params=base, max_rounds=5,
-    )
-    assert outcome.status == "unresumable"
-    assert outcome.reason == "clock_sleep"
-    assert len(repo.list_pending_wakes()) == 1  # 字条保留
 
 
 def test_run_with_resume_done_closeout_cancels_pending_notes(tmp_path):

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import pytest
-
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from agent_py_agent.agent.tooling.runtime_contracts import ToolFailureFacts, ToolResult
 from agent_py_agent.tests._tool_runtime_harness import (

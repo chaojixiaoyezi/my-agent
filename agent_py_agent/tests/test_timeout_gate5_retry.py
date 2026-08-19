@@ -36,7 +36,6 @@ from agent_py_agent.tests._tool_runtime_harness import (
     make_test_protocol_snapshot,
 )
 
-
 # ---------------------------------------------------------------- helpers
 
 def _agent(request_timeout: float = 0.05) -> SimpleNamespace:

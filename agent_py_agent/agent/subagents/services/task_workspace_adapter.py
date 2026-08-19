@@ -6,8 +6,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from ...common.opaque_id import OpaqueIdError, validate_opaque_id
-from ...runtime_db.operations import directory_id_for_opaque
 from ...memory_archive.task_workspace import ensure_subagent_task_workspace
+from ...runtime_db.operations import directory_id_for_opaque
 from ..models import SubAgentTask
 
 

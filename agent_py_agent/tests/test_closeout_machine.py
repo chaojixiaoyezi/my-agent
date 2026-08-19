@@ -24,8 +24,6 @@ def _oracle(facts: CloseoutFacts) -> CloseoutOutcome:
         return CloseoutOutcome("done", "", "done")
     if status == "cancelled":
         return CloseoutOutcome("cancelled", reason or "user_stop", "cancelled")
-    if facts.sleeping:
-        return CloseoutOutcome("sleep_wait", "clock_sleep", "sleep_wait")
     if not facts.continuable:
         return CloseoutOutcome("wait_human", reason or "not_continuable", "wait_human")
     if not facts.active_goal:
@@ -49,16 +47,16 @@ _ROUND_CAPS = [(1, 9), (9, 9), (10, 9)]
 
 
 @pytest.mark.parametrize(
-    "status,reason,continuable,goal,streak,budget,rounds,max_rounds,sleeping",
+    "status,reason,continuable,goal,streak,budget,rounds,max_rounds",
     list(
         product(
             _STATUSES, _REASONS, [False, True], [False, True],
-            _STREAKS, _BUDGETS, *zip(*_ROUND_CAPS), [False, True],
+            _STREAKS, _BUDGETS, *zip(*_ROUND_CAPS),
         )
     ),
 )
 def test_truth_table_full_sweep(
-    status, reason, continuable, goal, streak, budget, rounds, max_rounds, sleeping
+    status, reason, continuable, goal, streak, budget, rounds, max_rounds
 ):
     facts = CloseoutFacts(
         runtime_status=status,
@@ -70,7 +68,6 @@ def test_truth_table_full_sweep(
         same_reason_streak=streak,
         rounds=rounds,
         max_rounds=max_rounds,
-        sleeping=sleeping,
     )
     assert decide_closeout(facts) == _oracle(facts)
 
@@ -192,7 +189,6 @@ def test_guidance_key_matches_state_invariants():
         "wait_human": "wait_human",
         "wait_handoff": "wait_handoff",
         "resume_round": "resume_round",
-        "sleep_wait": "sleep_wait",
     }
     combos = list(
         product(
@@ -210,47 +206,3 @@ def test_guidance_key_matches_state_invariants():
         assert mapping[outcome.state] == outcome.guidance_key
 
 
-def test_sleep_wait_closeout_keeps_task_non_terminal():
-    """调度改造 2b: 模型睡完收口 → sleep_wait, 与 goal/预算/可续跑无关。"""
-    facts = CloseoutFacts(
-        runtime_status="unfinished", runtime_reason="CLOCK_SLEEP_WAITING",
-        runtime_source="clock_sleep_tool", continuable=False, active_goal=True,
-        resume_budget_left=9, same_reason_streak=0, rounds=1, max_rounds=9,
-        sleeping=True,
-    )
-    outcome = decide_closeout(facts)
-    assert outcome.state == "sleep_wait"
-    assert outcome.reason == "clock_sleep"
-    assert outcome.guidance_key == "sleep_wait"
-
-
-def test_sleep_never_becomes_auto_resume_round():
-    """sleeping 即使 active_goal+预算充足也不进 resume_round(睡觉不作废)。"""
-    facts = CloseoutFacts(
-        runtime_status="unfinished", runtime_reason="CLOCK_SLEEP_WAITING",
-        runtime_source="clock_sleep_tool", continuable=True, active_goal=True,
-        resume_budget_left=9, same_reason_streak=0, rounds=1, max_rounds=9,
-        sleeping=True,
-    )
-    assert decide_closeout(facts).state == "sleep_wait"
-
-
-def test_user_cancel_beats_sleep():
-    """用户中断(cancelled)优先级高于 sleep: 闹钟先死。"""
-    facts = CloseoutFacts(
-        runtime_status="cancelled", runtime_reason="user_stop",
-        runtime_source="conversation_control", continuable=False,
-        active_goal=False, resume_budget_left=0, same_reason_streak=0,
-        rounds=1, max_rounds=9, sleeping=True,
-    )
-    assert decide_closeout(facts).state == "cancelled"
-
-
-def test_ok_status_beats_sleeping_flag():
-    """runtime ok 仍优先 done(工具循环只在非 ok 时才标 sleeping, 防误杀)。"""
-    facts = CloseoutFacts(
-        runtime_status="ok", runtime_reason="", runtime_source="tool_loop",
-        continuable=False, active_goal=False, resume_budget_left=0,
-        same_reason_streak=0, rounds=1, max_rounds=9, sleeping=True,
-    )
-    assert decide_closeout(facts).state == "done"

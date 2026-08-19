@@ -37,8 +37,8 @@ _FRAMEWORK_PREFIXES = ("subagent", "attempt", "session", "thread", "dispatch", "
 # 占位符或从提示词抄来的自由文本。校验器只认框架形态，避免把任意用户输入
 # 当 ID 拼进路径。
 _KNOWN_SHAPES = re.compile(
-    rf"^(?:subagent|attempt|session|thread|dispatch|task|run|agent|session)-"
-    rf"[0-9]{{9,11}}-[0-9a-f]{{8}}$"
+    r"^(?:subagent|attempt|session|thread|dispatch|task|run|agent|session)-"
+    r"[0-9]{9,11}-[0-9a-f]{8}$"
 )
 
 

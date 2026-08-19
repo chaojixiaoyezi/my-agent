@@ -152,9 +152,9 @@ def test_unconfigured_optional_tools_are_absent_and_report_unavailable(tmp_path)
         spec.name
         for spec in agent.tools.specs(include_orchestration=True)
     }
-    assert "analyze_image" not in names
-    assert "lsp" not in names
-    assert agent.tools._lsp_manager.clients == {}
+    # 可选依赖工具(playwright/lsp/vision)已下线, 注册表不再包含它们。
+    for removed in ("analyze_image", "lsp", "browser"):
+        assert removed not in names
 
     result = _execute(
         agent,

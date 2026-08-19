@@ -15,7 +15,6 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from ..common.json_io import read_json_object_report
-
 from .candidate_models import CandidateObservation, MemoryScope, utc_now_iso
 from .candidates import CandidateService
 from .curator_backend import (
