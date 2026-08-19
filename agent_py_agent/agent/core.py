@@ -23,7 +23,6 @@ from .agent_core import (
     SimpleAgentSubagentMixin,
     SleepTool,
     TaskProgressTool,
-    WaitTool,
     execute_cancel_subagents,
 )
 from .agent_core.orchestration.dispatch.lock import _DispatchWatchLock
@@ -74,25 +73,17 @@ from .agent_core.runner.prompts import (
     _build_subagent_runner_repair_prompt,
 )
 from .agent_core.runtime.owner_roots import runtime_owner_root
-from .agent_core.runtime.record_finding_tool import RecordFindingTool
 from .backends import get_backend
 from .capability import CapabilityRouter, from_tool_model_spec
 from .capability.channel_message_tool import SendMessageTool
 from .capability.memory_tool import RememberTool
-from .capability.network_authorization_tool import AuthorizeNetworkHostTool
 from .capability.persona_repository import PersonaRepository
 from .capability.persona_tool import UpdatePersonaTool
 from .capability.runtime_config_reload import default_capability_config_path
 from .capability.session_search_tool import SessionSearchTool
 from .capability.skill_search_tool import SkillSearchTool
 from .capability.skill_service import SkillsService
-from .collaboration import (
-    CollaborationStore,
-    InspectCollaborationTool,
-    RaiseCollaborationTool,
-    SubmitCollaborationResultTool,
-    UpdateCollaborationTool,
-)
+from .collaboration import CollaborationStore
 from .common.audit_activation import AUDIT_RUN_EPOCH_ATTR
 from .contracts.model_call_ledger import ModelCallLedger
 from .conversation import ConversationStore
@@ -979,23 +970,16 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(ScheduleTool(agent))
     # 内网主机出站授权:用户点名的内网监控目标(跨机数据源)经属主确认后进白名单,解除
     # NETWORK_PRIVATE_HOST_BLOCKED;不放松出站闸本身,只接通闸已内置的 allowed_private_hosts。
-    agent.tools.register(AuthorizeNetworkHostTool(agent))
     # 高吞吐数据流盯守摄取层:代码层结构化预聚合/初筛/背压把 100+/s 压成候选批,主代理与
     # 所有 Agent 共用；游标和统计跨轮、跨重启持久，业务定性始终留给模型。
     agent.tools.register(WatchStreamTool(agent))
     # 增量结论账(收尾一公里):确认一条结论就持久化一条到 findings.jsonl,收尾崩/重派/
     # 被取消都不丢;整合/收口层从账合并,最终报告只是汇总视图。子代理与主代理长任务共用。
-    agent.tools.register(RecordFindingTool(agent))
-    agent.tools.register(RaiseCollaborationTool(agent))
-    agent.tools.register(InspectCollaborationTool(agent))
-    agent.tools.register(SubmitCollaborationResultTool(agent))
-    agent.tools.register(UpdateCollaborationTool(agent))
     if not agent.config.enable_subagents:
         return
     agent.tools.register(CreateSubagentsTool(agent))
     agent.tools.register(CancelSubagentsTool(agent))
     agent.tools.register(InspectAgentTreeTool(agent))
-    agent.tools.register(WaitTool(agent))
     # clock.sleep(扫描治理第二步, 对齐 会话运行时 handlers/sleep.rs): 模型主动定时
     # 等待, 落 wake_queue 字条, 事件可提前唤醒; 不是进程内打盹。
     agent.tools.register(SleepTool(agent))
@@ -1014,8 +998,6 @@ __all__ = [
     "CreateSubagentsTool",
     "DispatchSubagentsTool",
     "InspectAgentTreeTool",
-    "InspectCollaborationTool",
-    "RaiseCollaborationTool",
     "RaiseEventTool",
     "ONE_SHOT_TOOL_NAMES",
     "PARENT_PLANNER_READ_TOOLS",
@@ -1024,8 +1006,5 @@ __all__ = [
     "SendGuidanceTool",
     "SimpleAgent",
     "TaskProgressTool",
-    "SubmitCollaborationResultTool",
-    "UpdateCollaborationTool",
     "SleepTool",
-    "WaitTool",
 ]

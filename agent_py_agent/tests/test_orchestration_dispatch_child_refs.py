@@ -203,6 +203,5 @@ def test_dispatch_payload_tells_runner_to_continue_unfinished_children():
     assert direct["needs_more_dispatch"] is True
     assert direct["unfinished_run_ids"] == ["child-a", "child-b"]
     assert direct["next_action"] == "wait_for_running_direct_children"
-    assert direct["suggested_tool_call"]["tool"] == "wait"
-    assert direct["suggested_tool_call"]["seconds"] == 120
+    assert direct["suggested_tool_call"]["tool"] == "inspect_agent_tree"
     assert direct["running_run_ids"] == ["child-b"]

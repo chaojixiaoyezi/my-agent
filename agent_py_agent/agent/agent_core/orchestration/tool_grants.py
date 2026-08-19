@@ -11,7 +11,6 @@ CODING_SUBAGENT_TOOLS = [
     "web_search",
     "web_fetch",
     "watch_stream",
-    "record_finding",
     "write_file",
     "apply_patch",
     "run_command",
@@ -20,10 +19,6 @@ CODING_SUBAGENT_TOOLS = [
     "inspect_agent_tree",
     "send_guidance",
     "raise_event",
-    "raise_collaboration",
-    "inspect_collaboration",
-    "submit_collaboration_result",
-    "update_collaboration",
     "capability_request",
 ]
 READ_ONLY_SUBAGENT_TOOLS = [
@@ -35,9 +30,6 @@ READ_ONLY_SUBAGENT_TOOLS = [
     "web_search",
     "web_fetch",
     "inspect_agent_tree",
-    # 结论账只写本 run 自己的 findings.jsonl(内部记账面,不碰用户空间)——纯分析/
-    # 研读任务正是"结论只活在对话里"的重灾区,读侧预设也要能记账。
-    "record_finding",
 ]
 _CODING_TOOL_PRESETS = {"coding"}
 

@@ -283,7 +283,7 @@ def _active_child_output_not_ready_result(
         "error": "active_child_output_not_ready",
         "message": "Requested path is a declared output for a currently active child agent and is not ready yet.",
         "path": str(target),
-        "suggested_tool_call": {"tool": "wait", "seconds": 60, "reason": "wait for active child output"},
+        "suggested_tool_call": {"tool": "inspect_agent_tree", "params": {}, "reason": "check active child status"},
         "status_tool_call": {"tool": "inspect_agent_tree", "params": {}},
         "result_fields_to_read": ["child_result_index.read_order", "child_result_index.primary_artifact_refs"],
     }

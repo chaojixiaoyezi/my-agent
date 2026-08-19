@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import os
+import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -580,17 +580,23 @@ def _log_run_stage(
     *,
     started_mono: float | None = None,
 ) -> None:
+    # 诊断行走 stderr（gateway 的 nohup 2>&1 已并入日志文件）；logging 在 gateway
+    # 进程无 handler 时 INFO 会被 lastResort 吞掉，不能用 logger。
     if os.environ.get("MY_AGENT_STAGE_DEBUG") != "1":
         return
     elapsed = ""
     if started_mono is not None:
         elapsed = f" elapsed_ms={round((time.monotonic() - started_mono) * 1000, 1)}"
-    logging.getLogger(__name__).info(
-        "gateway run stage request_id=%s run_id=%s stage=%s%s",
-        getattr(params, "request_id", "") or "",
-        getattr(params, "run_id", "") or "",
-        stage,
-        elapsed,
+    print(
+        "gateway run stage request_id=%s run_id=%s stage=%s%s"
+        % (
+            getattr(params, "request_id", "") or "",
+            getattr(params, "run_id", "") or "",
+            stage,
+            elapsed,
+        ),
+        file=sys.stderr,
+        flush=True,
     )
 
 

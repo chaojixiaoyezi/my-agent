@@ -88,12 +88,11 @@ def _private_host_recovery_note(code: str, url: str) -> str:
     host = urllib.parse.urlsplit(url).hostname or ""
     return (
         f"(目标 {host} 是内网/私网地址,默认出站防护拦截——这是授权缺口,不是网络故障。"
-        "若它正是用户任务指定的目标: 主代理→经用户确认后调 authorize_network_host(confirmed=true) "
-        "把它加入白名单再重试;子代理→调 capability_request(capability_type=network, "
+        "若它正是用户任务指定的目标: 主代理→如实向用户说明内网访问缺口(当前底座不提供白名单授权),"
+        "或与用户确认后换公网来源;子代理→调 capability_request(capability_type=network, "
         f"network_scope=[\"{host}\"], requested_tools=[\"web_fetch\"]) 申请授权,等父代理处理期间"
         "继续其他可做的工作,不要因此放弃(abandon)整个任务。)"
     )
-
 
 def _effective_allow_private_resolution(value: bool | None) -> bool:
     if value is not None:

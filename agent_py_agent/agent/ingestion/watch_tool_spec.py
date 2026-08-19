@@ -56,7 +56,7 @@ _PARAMETERS = {
     "对准确 ack_id 再次提交同一结构并加 review=true，同时提供原条的"
     " source_ref/event_sha256，不带 delivery_ref；需要升级时可在这一行内联 finding。"
     "程序只追加新版本、保留原判断，不重复计数或重新消费原记录；"
-    "record_finding 只记结论，不能替代 review 更正 verdict。hit 是模型已经确认满足"
+    "结论由宿主自动落账；更正 verdict 必须走 review。hit 是模型已经确认满足"
     "本次 Audit 汇报条件的结构化结论，因此该行必须同时携带 finding。"
     "宿主由结构化 hit 机械绑定 requires_llm_report=true；模型无需重复填写这个布尔值，"
     "但若显式填写只能为 true。宿主不从 note 或原文猜是否命中",
@@ -641,7 +641,7 @@ def _surface_description(surface: str, parameters: dict[str, str]) -> str:
             "不要为尚未 pull 的"
             "批次猜测 delivery_ref。如果提交后才发现某条判错，必须对该条用"
             " review=true 和准确 ack_id/source_ref/event_sha256 追加更正；"
-            "不要用 record_finding 代替 verdict 更正。"
+            "不要用普通结论/note 行代替 verdict 更正。"
         )
         parameters["max_wait_seconds"] = (
             parameters["max_wait_seconds"] + " 仅 action=pull 可用；其他 action 必须省略。"

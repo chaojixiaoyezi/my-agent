@@ -93,13 +93,6 @@ _OPTIONAL_CAPABILITY_SPECS = (
         "直接描述完整任务，无需指定内部执行方式",
     ),
     (
-        frozenset(("wait",)),
-        "当前任务非阻塞等待",
-        "available",
-        "当前任务可以暂时让出执行资源，稍后仍在原任务继续；它不是定时提醒",
-        "由任务运行过程按需使用",
-    ),
-    (
         frozenset(("schedule",)),
         "持久定时与提醒",
         "available",

@@ -42,8 +42,8 @@ def _agent_with_self_watch(tmp_path: Path, *, policy_enabled: bool = True):
         tmp_path,
     )
     from agent_py_agent.agent.gateway_parts.request_execution import (
-        _GatewayConversationLoadRequest,
         _gateway_conversation_context,
+        _GatewayConversationLoadRequest,
     )
 
     store = agent.conversation_store
@@ -90,7 +90,7 @@ def _agent_with_self_watch(tmp_path: Path, *, policy_enabled: bool = True):
                 "interval_seconds": 600,
                 "metadata": {
                     "kind": "subagent_progress_watch",
-                    "tool": "wait",
+                    "tool": "sleep",
                     "scope": "own_task_tree",
                     "reason": "",
                     "watch_run_id": task_id,
@@ -156,7 +156,7 @@ def test_realistic_watch_of_other_run_still_marks_that_run_running(tmp_path):
             "interval_seconds": 300,
             "metadata": {
                 "kind": "subagent_progress_watch",
-                "tool": "wait",
+                "tool": "sleep",
                 "scope": "own_task_tree",
                 "reason": "",
                 "watch_run_id": child_id,
@@ -180,27 +180,6 @@ def test_realistic_watch_of_other_run_still_marks_that_run_running(tmp_path):
     assert "progress_policy" in state["sources"]
 
 
-def test_wait_without_run_id_leaves_watch_run_id_empty(tmp_path):
-    """修复验证：wait 无显式 run_id 时 watch_run_id 置空（写侧防复发）。"""
-    agent, thread_id, task_id = _agent_with_self_watch(tmp_path, policy_enabled=False)
-    from agent_py_agent.agent.agent_core.runtime.wait_tool import WaitTool
-
-    outcome = WaitTool(agent).execute({"seconds": 600, "thread_id": thread_id, "task_id": task_id})
-    assert outcome.ok
-    policies = agent.conversation_store.list_progress_policies_report()
-    matches = [
-        p
-        for p in policies[0]
-        if str(getattr(p, "thread_id", "") or "") == thread_id
-        and str(getattr(p, "task_id", "") or "") == task_id
-    ]
-    assert matches
-    policy = matches[0]
-    metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
-    assert str(metadata.get("watch_run_id") or "") == ""
-    assert metadata.get("kind") == "subagent_progress_watch"
-
-
 def _retire_with_child(agent, store, thread_id, child_id, *, task_id):
     store.set_progress_policy(
         {
@@ -209,7 +188,7 @@ def _retire_with_child(agent, store, thread_id, child_id, *, task_id):
             "interval_seconds": 300,
             "metadata": {
                 "kind": "subagent_progress_watch",
-                "tool": "wait",
+                "tool": "sleep",
                 "scope": "own_task_tree",
                 "reason": "",
                 "watch_run_id": child_id,
@@ -277,7 +256,7 @@ def test_executor_running_blocks_writing_tools_only(tmp_path):
             "interval_seconds": 300,
             "metadata": {
                 "kind": "subagent_progress_watch",
-                "tool": "wait",
+                "tool": "sleep",
                 "scope": "own_task_tree",
                 "reason": "",
                 "watch_run_id": task_id,
@@ -292,7 +271,7 @@ def test_executor_running_blocks_writing_tools_only(tmp_path):
     # run_command 在无 bwrap 测试环境被 availability 隐藏,不在快照中;契约
     # 测试验证声明驱动机制本身,写类集合取快照内必在的文件系统写工具。
     writing = {"write_file", "edit_file", "apply_patch"}
-    exempt = {"wait", "read_file", "list_files", "cancel_subagents", "inspect_agent_tree"}
+    exempt = {"read_file", "list_files", "cancel_subagents", "inspect_agent_tree"}
     # 先写工具后豁免工具:豁免工具 promote 成功后同轮 TURN_ACTIVE 置位,后续
     # 写工具放行——「首轮绑定后同轮放行」是既有语义,与声明无关,避免串扰。
     for tool_name in sorted(writing) + sorted(exempt):

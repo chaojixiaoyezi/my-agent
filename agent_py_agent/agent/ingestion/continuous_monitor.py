@@ -15,7 +15,6 @@ from agent_py_agent.agent.ingestion.harvester import ensure_harvester
 from agent_py_agent.agent.ingestion.source_http import SourceHttpRequest
 from agent_py_agent.agent.ingestion.watch_state import list_states, load_state
 from agent_py_agent.agent.ingestion.watch_tool import WatchStreamTool
-from agent_py_agent.agent.user_space.network_grants import active_private_hosts
 
 
 @dataclass(frozen=True)
@@ -88,7 +87,7 @@ def recover_active_audit_harvesters(agent: object) -> int:
         def fetch(request: SourceHttpRequest, *, home: Path = owner_home):
             return tool._fetch_json_pinned(
                 request,
-                active_private_hosts(home),
+                (),
                 None,
             )
 

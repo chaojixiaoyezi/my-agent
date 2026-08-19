@@ -350,8 +350,8 @@ def test_items_without_output_files_get_task_local_child_output_ref(tmp_path):
     assert payload["child_result_index"][0]["read_order"] == []
     assert payload["child_output_read_order"][0]["expected_outputs"] == [first]
     assert payload["child_output_read_order"][0]["read_order"] == payload["child_result_index"][0]["read_order"]
-    assert payload["status_tool_call"]["tool"] == "wait"
-    assert payload["wait_tool_call"]["tool"] == "wait"
+    assert payload["status_tool_call"]["tool"] == "inspect_agent_tree"
+    assert "wait_tool_call" not in payload
     assert "subagent_workspace" not in payload
     assert "agent_work_dir" not in payload["tasks"][0]
     assert payload["tasks"][0]["attributes"]["system_default_output_ref"] is True

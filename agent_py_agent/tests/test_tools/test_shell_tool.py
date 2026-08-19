@@ -88,27 +88,6 @@ def test_shell_tool_default_timeout(shell_tool: ShellTool) -> None:
     assert "超时" in result.output or "timeout" in result.output.lower()
 
 
-def test_shell_tool_pure_sleep_suggests_wait(shell_tool: ShellTool) -> None:
-    """Pure delay commands should not block the shell worker."""
-    result = shell_tool.execute({"command": "sleep 30"})
-    payload = json.loads(result.output)
-
-    assert result.ok is False
-    assert result.error_code == "USE_WAIT_FOR_DELAY"
-    assert payload["suggested_tool_call"]["tool"] == "wait"
-    assert payload["suggested_tool_call"]["seconds"] == 60
-
-
-def test_shell_tool_sleep_then_echo_suggests_wait(shell_tool: ShellTool) -> None:
-    """A delay followed only by a marker echo should not block the shell worker."""
-    result = shell_tool.execute({"command": 'sleep 60 && echo "done"'})
-    payload = json.loads(result.output)
-
-    assert result.ok is False
-    assert result.error_code == "USE_WAIT_FOR_DELAY"
-    assert payload["suggested_tool_call"]["tool"] == "wait"
-
-
 def test_shell_tool_routes_internal_agent_status_paths_to_agent_tree(tmp_path: Path) -> None:
     """Shell should not bypass the agent tree status surface."""
     workspace = tmp_path / "workspace"

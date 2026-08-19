@@ -29,7 +29,7 @@ from agent.agent_core.runner.context import (
     restore_current_subagent_context,
     set_current_subagent_context,
 )
-from agent.agent_core.runtime.record_finding_tool import RecordFindingTool
+from agent.agent_core.runtime.record_finding_tool import execute_record_finding
 from agent.common.audit_activation import (
     AUDIT_ATTR,
     AUDIT_OBJECTIVE_ATTR,
@@ -1535,7 +1535,7 @@ def test_historical_review_without_delivery_ref_requires_exact_identity(
         }
         reviewed = tool.execute(review_params)
         duplicate_review = tool.execute(review_params)
-        duplicate_finding = RecordFindingTool(tool.agent).execute(
+        duplicate_finding = execute_record_finding(tool.agent, 
             {
                 "claim": "复核更正后需要升级",
                 "kind": "hit",
@@ -4062,15 +4062,15 @@ def test_source_worker_finding_is_bound_to_acked_source_ref_and_idempotent(
             ],
             "requires_llm_report": True,
         }
-        first = _payload(RecordFindingTool(tool.agent).execute(params))
-        second = _payload(RecordFindingTool(tool.agent).execute(params))
-        denied = RecordFindingTool(tool.agent).execute(
+        first = _payload(execute_record_finding(tool.agent, params))
+        second = _payload(execute_record_finding(tool.agent, params))
+        denied = execute_record_finding(tool.agent, 
             {
                 **params,
                 "evidence_refs": ["audit://ws-0000000000/candidate/1:0"],
             }
         )
-        missing_audit_ref = RecordFindingTool(tool.agent).execute(
+        missing_audit_ref = execute_record_finding(tool.agent, 
             {
                 **params,
                 "evidence_refs": ["https://evidence.invalid/case/42"],

@@ -14,7 +14,6 @@ from ..conversation.authority import CONVERSATION_TRANSIENT_WORKSPACE_ATTR
 from ..local_storage import RuntimeGateLedgerRecord
 from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
 from ..tooling.runtime_contracts import tool_arguments_hash
-from ..user_space.network_grants import active_private_hosts
 from .tool_guard.call_guardrail import tool_guardrail_policy, tool_guardrail_records
 
 
@@ -103,7 +102,6 @@ def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[st
     _attach_remote_owner_task_write_scope(merged, agent, params)
     _attach_transient_named_work_write_scope(merged, agent, params)
     _attach_active_child_output_locks(merged, agent, params)
-    _attach_owner_network_grants(merged, agent)
     guardrail_rows = tool_guardrail_records(agent)
     if guardrail_rows:
         merged["tool_guardrail_records"] = _merged_tool_guardrail_rows(
@@ -386,24 +384,6 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
-
-
-def _attach_owner_network_grants(boundary: dict[str, object], agent: object) -> None:
-    """把 owner 授权过的内网主机灌进 allowed_private_hosts(N1 接线:授权存储 → 出站闸)。
-    这里是主/子代理每次工具调用共用的 boundary chokepoint,一处灌入,network_safety 出站闸与
-    path_url_command 预检闸同时放行。必须逐次新鲜读盘:授权发生在 run 中途(authorize_network_host),
-    init 期缓存会漏掉同轮生效;grant 目录只有几个小 JSON,读一次微秒级。与既有值取并集不覆盖。"""
-    owner_home = _text(getattr(getattr(agent, "home_paths", None), "owner_home_dir", ""))
-    if not owner_home:
-        return
-    hosts = active_private_hosts(Path(owner_home))
-    if not hosts:
-        return
-    existing = _string_list(boundary.get("allowed_private_hosts"))
-    boundary["allowed_private_hosts"] = [
-        *existing,
-        *(host for host in hosts if host not in existing),
-    ]
 
 
 def _attach_active_child_output_locks(

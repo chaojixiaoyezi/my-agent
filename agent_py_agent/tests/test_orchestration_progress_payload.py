@@ -63,8 +63,8 @@ def test_runner_context_dispatch_suggests_wait_for_running_direct_child() -> Non
 
     direct = json.loads(result.output)["direct_children"]
     assert direct["next_action"] == "wait_for_running_direct_children"
-    assert direct["suggested_tool_call"]["tool"] == "wait"
-    assert "不要因为等待而重复" in direct["wait_hint"]
+    assert direct["suggested_tool_call"]["tool"] == "inspect_agent_tree"
+    assert "不要重复 inspect_agent_tree" in direct["wait_hint"]
 
 
 def test_runner_context_dispatch_keeps_completed_alias_under_status_review() -> None:

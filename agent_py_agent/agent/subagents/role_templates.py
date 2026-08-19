@@ -22,10 +22,6 @@ SHELL_TOOL = "run_command"
 CAPABILITY_REQUEST_TOOL = "capability_request"
 MAIN_EVENT_TOOLS = ["raise_event"]
 COLLABORATION_TOOLS = [
-    "raise_collaboration",
-    "inspect_collaboration",
-    "submit_collaboration_result",
-    "update_collaboration",
 ]
 ROLE_BASE_TOOLS = [
     *READ_ONLY_TOOLS,
@@ -39,7 +35,6 @@ ROLE_BASE_TOOLS = [
 COORDINATOR_TOOLS = [
     "schedule_child_subagents",
     "dispatch_subagents",
-    "wait",
     "inspect_agent_tree",
     "send_guidance",
     *ROLE_BASE_TOOLS,

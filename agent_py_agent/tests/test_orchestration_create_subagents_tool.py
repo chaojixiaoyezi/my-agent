@@ -297,7 +297,7 @@ class TestCreateSubagentsToolExecute:
         assert payload["auto_start"]["status"] == "started"
         assert payload["auto_start"]["dispatch_mode"] == "background"
         assert "agent_tree" not in payload["auto_start"]
-        assert payload["next_action"]["tool"] == "wait"
+        assert payload["next_action"]["tool"] == "inspect_agent_tree"
 
     def test_auto_start_process_command_runs_direct_dispatch_for_created_run_ids(self):
         """真实后台进程只跑精确 run_id 的一轮 dispatch，不再抢父进程 watch lock。"""

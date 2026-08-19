@@ -63,7 +63,7 @@ AUDIT_PULL_GUIDANCE = (
     "遗漏记录的结论；遗漏记录保持 pending，下一次 pull 只重投这些记录并生成新的引用。"
     "令牌不能重复或跨批引用，数组顺序本身不作为身份。"
     "首次需要升级的发现随同"
-    "对应 verdict 的 finding 字段一次落账，后续补证或组合结论再用 record_finding。"
+    "对应 verdict 的 finding 字段一次落账，后续补证或组合结论同样随该行 finding 落账。"
     "delivery_ref 始终是 watch_stream 的顶层参数，绝不能放进 verdicts。首次判断提交"
     "顶层 delivery_ref，以及本轮各条结果中相邻的 verdict_token 和判断；程序会从可信"
     "交付账绑定每行的 ack_id/source_ref/event_sha256，无需机械复制。历史复核才显式带"

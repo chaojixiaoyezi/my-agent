@@ -36,11 +36,11 @@ def test_deferred_collaboration_tools_collapsed_in_main_catalog(tmp_path) -> Non
     assert "⊞" in section  # 折叠行存在
     body, fold = section.split("⊞", 1)
     # 垂直工具的完整条目不在主目录正文(瘦身的关键)
-    assert "raise_collaboration" not in body
-    assert "inspect_collaboration" not in body
+    assert "get_goal" not in body
+    assert "create_goal" not in body
     # 折叠名单列出它们，模型可据此发起 tool_search。
-    assert "raise_collaboration" in fold
-    assert "inspect_collaboration" in fold
+    assert "get_goal" in fold
+    assert "create_goal" in fold
 
 
 def test_native_visible_surface_defers_goal_orchestration_and_collaboration(tmp_path) -> None:
@@ -51,7 +51,7 @@ def test_native_visible_surface_defers_goal_orchestration_and_collaboration(tmp_
     assert "remember" in names
     assert "get_goal" not in names
     assert "inspect_agent_tree" not in names
-    assert "raise_collaboration" not in names
+    assert "create_goal" not in names
 
 
 def test_tool_search_returns_compact_candidates_without_loading(tmp_path) -> None:
@@ -193,8 +193,8 @@ def test_list_tools_still_lists_all_including_deferred(tmp_path) -> None:
     agent = _agent(tmp_path)
     result = agent.tools.tools["list_tools"].execute({})
     assert result.ok
-    assert "raise_collaboration" in result.output
-    assert "inspect_collaboration" in result.output
+    assert "get_goal" in result.output
+    assert "create_goal" in result.output
 
 
 def test_empty_deferred_restores_full_catalog(tmp_path) -> None:

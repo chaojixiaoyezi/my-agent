@@ -239,7 +239,7 @@ class WatchStreamTool(BaseTool):
         persisted watch.  The executor calls this hook after trusted parameter
         completion and before the mutating operation is claimed, so this is the
         single safe seam for adding the canonical identity shared with
-        ``record_finding(watch_id=...)``.
+        ``watch_stream`` (``watch_id``).
         """
 
         _ = (write_boundary, workspace_root)
@@ -2767,7 +2767,7 @@ def _render_verdict_tool_result(
     result["correction_contract"] = (
         "若后续证据表明某条已签收判断有误，先对该条准确 ack_id/source_ref/"
         "event_sha256 再次调用 verdict，设 review=true 并提交更正后的 verdict/score/"
-        "note；需要升级时可在同一复核行内携带 finding。record_finding 不会修改旧 verdict。"
+        "note；需要升级时可在同一复核行内携带 finding。补证/组合结论不会修改旧 verdict。"
     )
     payload = {"action": "verdict", "watch_id": state.watch_id, **result}
     attach_audit_receipt(

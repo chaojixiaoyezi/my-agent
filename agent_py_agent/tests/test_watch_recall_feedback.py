@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from agent_py_agent.agent.agent_core.runtime.record_finding_tool import RecordFindingTool
+from agent_py_agent.agent.agent_core.runtime.record_finding_tool import execute_record_finding
 from agent_py_agent.agent.ingestion.config import IngestTuning
 from agent_py_agent.agent.ingestion.engine import Candidate, StreamDigestEngine
 from agent_py_agent.agent.ingestion.watch_feedback import (
@@ -195,8 +195,10 @@ def test_record_finding_links_watch_feedback(tmp_path):
         _current_run_task_workspace=str(task_root),
         subagents=None,
     )
-    tool = RecordFindingTool(agent)
-    result = tool.execute({"claim": "事件 evt-1 结果端 diverted 确认", "watch_id": state.watch_id, "stream_pos": 42})
+    result = execute_record_finding(
+        agent,
+        {"claim": "事件 evt-1 结果端 diverted 确认", "watch_id": state.watch_id, "stream_pos": 42},
+    )
     assert result.ok
     payload = json.loads(result.output)
     assert payload["watch_feedback_linked"] is True
@@ -212,7 +214,7 @@ def test_record_finding_without_watch_params_unchanged(tmp_path):
         _current_run_task_workspace=str(task_root),
         subagents=None,
     )
-    result = RecordFindingTool(agent).execute({"claim": "普通结论"})
+    result = execute_record_finding(agent, {"claim": "普通结论"})
     assert result.ok
     assert "watch_feedback_linked" not in json.loads(result.output)
 
@@ -225,6 +227,6 @@ def test_record_finding_rejects_malformed_watch_id(tmp_path):
         _current_run_task_workspace=str(task_root),
         subagents=None,
     )
-    result = RecordFindingTool(agent).execute({"claim": "x", "watch_id": "../../etc", "stream_pos": 1})
+    result = execute_record_finding(agent, {"claim": "x", "watch_id": "../../etc", "stream_pos": 1})
     assert result.ok  # 结论账主通道不受影响
     assert json.loads(result.output)["watch_feedback_linked"] is False

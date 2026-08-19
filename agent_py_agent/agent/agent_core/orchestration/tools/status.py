@@ -188,14 +188,12 @@ def _cached_cooldown_payload_before_render(agent: SimpleAgent, params: dict[str,
 
 
 def _apply_cooldown_wait_policy(payload: dict[str, object], cooldown_seconds: float) -> None:
-    wait_seconds = max(60, int(cooldown_seconds) or 0)
-    wait_call = {"tool": "wait", "seconds": wait_seconds, "reason": "inspect_agent_tree cooldown"}
     policy = dict(payload.get("policy") if isinstance(payload.get("policy"), dict) else {})
     policy["next_step"] = "刚刚已经查看过同一代理树；除非需要验收、接管或已有新事实，否则先推进汇总/等待子代理产物，不要高频轮询。"
-    policy["suggested_tool_call"] = wait_call
+    policy["suggested_tool_call"] = None
     payload["policy"] = policy
     direct_children = dict(payload.get("direct_children") if isinstance(payload.get("direct_children"), dict) else {})
-    direct_children["suggested_tool_call"] = wait_call
+    direct_children["suggested_tool_call"] = None
     payload["direct_children"] = direct_children
 
 
@@ -203,7 +201,6 @@ def _cooldown_payload(value: object, cooldown_seconds: float) -> dict[str, objec
     previous = value if isinstance(value, dict) else {}
     status = previous.get("status_buckets") if isinstance(previous.get("status_buckets"), dict) else {}
     nodes = previous.get("nodes") if isinstance(previous.get("nodes"), list) else []
-    wait_seconds = max(60, int(cooldown_seconds) or 0)
     return {
         "schema_version": previous.get("schema_version", "agent_tree_status.v1"),
         "root_id": previous.get("root_id", ""),
@@ -224,7 +221,7 @@ def _cooldown_payload(value: object, cooldown_seconds: float) -> dict[str, objec
             ),
             "unfinished_run_ids": _unfinished_run_ids(nodes),
             "next_action": "end_turn_or_continue_own_work",
-            "suggested_tool_call": {"tool": "wait", "seconds": wait_seconds, "reason": "登记非阻塞进度提醒后结束本回合;子代理有进展会用事件唤醒你,别原地轮询"},
+            "suggested_tool_call": None,
         },
     }
 

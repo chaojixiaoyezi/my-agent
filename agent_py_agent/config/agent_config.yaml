@@ -216,6 +216,7 @@ external_knowledge_api_sources: []
 external_knowledge_database_sources: []
 
 # 额外动态 prompt 文件
+additional_write_roots: []  # 沙箱额外可写根（任务 work/output 之外）；测试共享工作区等场景配置
 prompt_files:
   - "builtin:prompts/default.md"
 

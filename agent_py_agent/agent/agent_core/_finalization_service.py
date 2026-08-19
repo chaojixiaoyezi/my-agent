@@ -570,7 +570,6 @@ def _conversation_turn_is_terminal(ctx: FinalizeContext) -> bool:
     reason = str(getattr(response, "runtime_reason", "") or "").strip().lower()
     return reason not in {
         "background_dispatch",
-        "wait",
         "repeated_tool_failure",
         "repeated_tool_failure_exhausted",
     }

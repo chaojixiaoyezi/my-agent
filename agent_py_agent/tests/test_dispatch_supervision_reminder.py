@@ -38,18 +38,15 @@ def test_dispatch_supervision_registers_policy_when_none(tmp_path):
     assert policy.interval_seconds == 180
 
 
-def test_dispatch_supervision_does_not_override_model_wait(tmp_path):
+def test_dispatch_supervision_does_not_override_existing_policy(tmp_path):
     agent = _agent(tmp_path)
-    registered = json.loads(
-        agent.tools.tools["wait"].execute(
-            {"task_id": "req_dispatch_task", "seconds": 90, "reason": "模型自己登记的盯守"}
-        ).output
-    )
+    registered = register_dispatch_supervision_policy(agent)
+    assert registered is not None and registered["existing"] is False
     result = register_dispatch_supervision_policy(agent)
     assert result is not None and result["existing"] is True
     assert result["policy_id"] == registered["policy_id"]
     kept = agent.conversation_store.get_progress_policy(registered["policy_id"])
-    assert kept is not None and kept.enabled is True and kept.interval_seconds == 90
+    assert kept is not None and kept.enabled is True and kept.interval_seconds == 180
     # 没有第二条同任务 policy 被塞进来
     same_task = [
         p

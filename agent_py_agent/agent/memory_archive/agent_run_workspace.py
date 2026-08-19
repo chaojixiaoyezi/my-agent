@@ -287,7 +287,7 @@ def _write_final_report(path: Path, task: Any, task_id: str) -> None:
 
 
 def _write_findings(path: Path, task: Any, now: float) -> None:
-    # 增量结论账(收尾一公里):findings.jsonl 里可能有 record_finding 工具边干边写的行,
+    # 增量结论账(收尾一公里):findings.jsonl 里可能有宿主审计链边干边写的行,
     # task.findings 只有最终结果块解析出的行。曾整文件覆盖写——收尾一崩/最终块缺失,
     # 工具行全灭。改按 id 幂等合并(与 shared 侧同一把尺),两边都留。
     from .shared_workspace import _finding_records, _merge_jsonl_by_id

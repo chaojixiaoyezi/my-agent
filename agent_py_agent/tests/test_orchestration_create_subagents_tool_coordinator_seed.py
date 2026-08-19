@@ -383,21 +383,6 @@ class TestLogicalIdToolsSelfConflictRegression:
     修复=逐工具把逻辑 ID 标 logical，只让真实写路径进 workspace scope。
     """
 
-    def test_wait_run_id_is_logical_not_path(self):
-        from agent_py_agent.agent.agent_core.runtime.wait_tool import WaitTool
-        from agent_py_agent.agent.tooling.workspace_scopes import authoritative_workspace_scopes
-
-        tool = WaitTool(MagicMock())
-        root = Path("/tmp/wait-logical-id")
-        scopes = authoritative_workspace_scopes(
-            workspace_root=root,
-            write_boundary=None,
-            policy=tool.runtime_policy,
-            arguments={"run_id": "child-1"},
-        )
-        assert not any(s.startswith("workspace:") for s in scopes)
-        assert "logical:agent_run:child-1" in scopes
-
     def test_guidance_target_id_is_logical_not_path(self):
         from agent_py_agent.agent.agent_core.runtime.guidance_tool import SendGuidanceTool
         from agent_py_agent.agent.tooling.workspace_scopes import authoritative_workspace_scopes
@@ -432,56 +417,6 @@ class TestLogicalIdToolsSelfConflictRegression:
         assert "logical:agent_run:r-2" in scopes
         assert len(scopes) == 2
         assert not any("[" in s or "]" in s for s in scopes)
-
-    def test_record_finding_ids_are_logical(self):
-        from agent_py_agent.agent.agent_core.runtime.record_finding_tool import RecordFindingTool
-        from agent_py_agent.agent.tooling.workspace_scopes import authoritative_workspace_scopes
-
-        tool = RecordFindingTool(MagicMock())
-        root = Path("/tmp/finding-logical-id")
-        scopes = authoritative_workspace_scopes(
-            workspace_root=root,
-            write_boundary=None,
-            policy=tool.runtime_policy,
-            arguments={"finding_id": "f-1"},
-        )
-        assert not any(s.startswith("workspace:") for s in scopes)
-        assert "logical:finding:f-1" in scopes
-
-
-class TestLogicalScopeSemanticsPerSeq261:
-    """seq 261 复核反例：logical scope 必须是「按值的文本互斥」。
-
-    锁语义（managed_operation_store）：logical scope 纯文本互斥（
-    UNIQUE(canonical_scope) 精确串，_paths_overlap 只判 workspace: 前缀）——
-    两操作冲突 ⇔ scope 交集非空。因此：
-    - 缺省/空 logical 参数不得产 scope：共享 "logical:{name}:null" 会让
-      无关调用（wait child-1 与 wait child-2）互相拦截（假互斥）。
-    - list 必须逐元素投影：整体 json.dumps 一条 scope 时 [r-1,r-2] 与
-      [r-2,r-3] 交集为 0，共同目标 r-2 不互斥（假并发）。
-    """
-
-    def test_unrelated_wait_calls_share_no_scope_when_other_ids_missing(self):
-        """无关缺参调用不冲突：wait(child-1) 与 wait(child-2) 零交集。"""
-        from agent_py_agent.agent.agent_core.runtime.wait_tool import WaitTool
-        from agent_py_agent.agent.tooling.workspace_scopes import authoritative_workspace_scopes
-
-        tool = WaitTool(MagicMock())
-        root = Path("/tmp/wait-unrelated")
-        a = authoritative_workspace_scopes(
-            workspace_root=root, write_boundary=None,
-            policy=tool.runtime_policy, arguments={"run_id": "child-1"},
-        )
-        b = authoritative_workspace_scopes(
-            workspace_root=root, write_boundary=None,
-            policy=tool.runtime_policy, arguments={"run_id": "child-2"},
-        )
-        assert not set(a) & set(b)
-        assert not any(":null" in s for s in a)
-        assert not any(":null" in s for s in b)
-        assert "logical:task_id" not in " ".join(a)
-        assert "logical:thread_id" not in " ".join(a)
-        assert a == ("logical:agent_run:child-1",)
 
     def test_overlapping_logical_lists_conflict_on_shared_element(self):
         """重叠 logical list 必冲突：run_ids=[r-1,r-2] 与 [r-2,r-3] 在 r-2 互斥。"""
@@ -559,7 +494,7 @@ class TestLogicalScopeSemanticsPerSeq261:
     def test_watch_url_alias_adds_the_same_canonical_watch_scope_as_watch_id(self, tmp_path):
         """同一 watch 的 URL/open 与 watch_id 写入口必须在 claim 前互斥。"""
         from agent_py_agent.agent.agent_core.runtime.record_finding_tool import (
-            RecordFindingTool,
+            execute_record_finding,
         )
         from agent_py_agent.agent.ingestion.watch_state import watch_id_for
         from agent_py_agent.agent.ingestion.watch_tool import WatchStreamTool
@@ -581,7 +516,7 @@ class TestLogicalScopeSemanticsPerSeq261:
             SimpleNamespace(arguments=open_arguments),
             SimpleNamespace(runtime_policy=watch_tool.runtime_policy, handler=watch_tool),
         )
-        finding_tool = RecordFindingTool(agent)
+        finding_tool = watch_tool
         finding_scopes = _workspace_operation_scopes(
             request,
             SimpleNamespace(arguments={"watch_id": watch_id}),
@@ -833,6 +768,8 @@ class TestResourceScopePolicyNormalizationPerSeq269:
         assert policy.resource_domains == {"run_id": "agent_run"}, (
             "规范化后的 domains 必须写回（校验值 = 运行时使用值）"
         )
+        from pathlib import Path
+
         from agent_py_agent.agent.tooling.models import (
             EffectResolverPolicy,
             ToolRuntimePolicy,
@@ -840,7 +777,6 @@ class TestResourceScopePolicyNormalizationPerSeq269:
         from agent_py_agent.agent.tooling.workspace_scopes import (
             authoritative_workspace_scopes,
         )
-        from pathlib import Path
 
         scopes = authoritative_workspace_scopes(
             workspace_root=Path("/tmp/domain-writeback"),
@@ -875,8 +811,8 @@ class TestResourceScopePolicyNormalizationPerSeq269:
         from agent_py_agent.agent.tooling.models import (
             BaseTool,
             EffectResolverPolicy,
-            ResourceScopeResolutionError,
             ResourceScopePolicy,
+            ResourceScopeResolutionError,
             ToolRuntimePolicy,
         )
 

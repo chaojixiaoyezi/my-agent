@@ -570,7 +570,7 @@ def _audit_floor_allowance(engine: StreamDigestEngine, now: float) -> int:
 
 def _remember_positions(engine: StreamDigestEngine, digest: CallDigest, now: float) -> None:
     """对账环登记(B3 的接缝):模型看得见的每条事件(候选行 + 被压组示例)都记
-    (stream_pos → 特征键);record_finding 回传 watch_id+stream_pos 即可把确认对回
+    (stream_pos → 特征键);确认行回传 watch_id+stream_pos 即可把确认对回
     结构特征。被压组示例标记抽检来源(确认它=筛漏了它=倾斜证据)。"""
     for candidate in digest.candidates:
         keys = event_feature_keys(engine, engine._flat(candidate.event), now)

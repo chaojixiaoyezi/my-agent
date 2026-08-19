@@ -261,8 +261,8 @@ def pending_request_row(case: CollaborationCase, request: CollaborationRequest) 
         "context_refs": list(request.context_refs),
         "created_at": request.created_at,
         "updated_at": request.updated_at,
-        "recommended_tools": ["inspect_collaboration", "submit_collaboration_result", "update_collaboration"],
-        "next_action_zh": "查自己负责的范围；有命中就提交证据，没有命中也提交未命中说明。",
+        "recommended_tools": [],
+        "next_action_zh": "在 SUBAGENT_RESULT 的证据/结论里原样引用 case_ref/request_ref 回应；有命中就提交证据，没有命中也提交未命中说明。",
     }
 
 

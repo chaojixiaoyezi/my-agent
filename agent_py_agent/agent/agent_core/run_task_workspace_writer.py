@@ -229,7 +229,7 @@ def _terminal_workspace_status(params: object, result: object) -> str:
     runtime_reason = str(getattr(result, "runtime_reason", "") or "").strip().lower()
     attrs = getattr(params, "task_attributes", None)
     attrs = attrs if isinstance(attrs, dict) else {}
-    if runtime_reason in {"background_dispatch", "wait"}:
+    if runtime_reason in {"background_dispatch"}:
         return ""
     if str(attrs.get("thread_goal_id") or "").strip() and runtime_status != "ok":
         return ""

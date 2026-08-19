@@ -5,12 +5,9 @@ import json
 from typing import Any
 
 _ORCHESTRATION_TOOLS = {
-    "inspect_collaboration",
     "create_subagents",
     "dispatch_subagents",
     "inspect_agent_tree",
-    "raise_collaboration",
-    "update_collaboration",
     "schedule_child_subagents",
 }
 _MAX_INLINE_JSON = 900

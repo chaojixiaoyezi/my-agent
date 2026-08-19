@@ -462,9 +462,8 @@ class TestInspectAgentTreeTool:
         assert second["status"] == "POLL_COOLDOWN"
         assert "inspect_agent_tree_recent_duplicate" in second["warnings"]
         assert "不要高频轮询" in second["policy"]["next_step"]
-        assert second["policy"]["suggested_tool_call"]["tool"] == "wait"
-        assert second["policy"]["suggested_tool_call"]["seconds"] == 120
-        assert second["direct_children"]["suggested_tool_call"]["tool"] == "wait"
+        assert second["policy"]["suggested_tool_call"] is None
+        assert second["direct_children"]["suggested_tool_call"] is None
         assert "tasks" not in second
 
     def test_repeated_tree_inspection_skips_full_kernel_render_when_state_unchanged(self, tmp_path):
@@ -517,8 +516,8 @@ class TestInspectAgentTreeTool:
         second = json.loads(tool.execute({"root_id": child.id}).output)
 
         assert second["cooldown_seconds"] == 240
-        assert second["policy"]["suggested_tool_call"]["seconds"] == 240
-        assert second["direct_children"]["suggested_tool_call"]["seconds"] == 240
+        assert second["policy"]["suggested_tool_call"] is None
+        assert second["direct_children"]["suggested_tool_call"] is None
 
     def test_tree_inspection_cooldown_does_not_hide_status_changes(self, tmp_path):
         """cooldown 只能压缩没变化的树，不能把已完成子代理继续显示成运行中。"""
@@ -568,112 +567,9 @@ class TestInspectAgentTreeTool:
             InspectAgentTreeTool(mock_agent).execute({"scope": "root_tree"}).output
         )
 
-        assert payload["coordination_advice"]["suggested_tool_call"]["tool"] == "wait"
-        assert payload["policy"]["suggested_tool_call"]["tool"] == "wait"
-        assert "调用 wait" in payload["policy"]["next_step"]
-
-    def test_main_agent_registers_wait_tool(self, tmp_path):
-        from agent_py_agent.agent.core import SimpleAgent
-        from agent_py_agent.agent.settings import AgentConfig
-
-        agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
-
-        assert "wait" in agent.tools.tools
-        result = json.loads(
-            agent.tools.tools["wait"]
-            .execute({"seconds": 5, "task_id": "root-task-1", "reason": "等子代理完成"})
-            .output
-        )
-        assert result["ok"] is True
-        assert result["scheduled"] is True
-        assert result["interval_seconds"] == 60
-        assert result["reason"] == "等子代理完成"
-        policy = agent.conversation_store.get_progress_policy(result["policy_id"])
-        assert policy is not None
-        assert policy.task_id == "root-task-1"
-        assert policy.metadata["kind"] == "subagent_progress_watch"
-
-    def test_wait_tool_uses_configured_default_and_caps_user_seconds(self, tmp_path):
-        from agent_py_agent.agent.core import SimpleAgent
-        from agent_py_agent.agent.settings import AgentConfig
-
-        agent = SimpleAgent(
-            AgentConfig(
-                model_backend="echo", subagent_workspace="subs", subagent_watch_interval_seconds=240
-            ),
-            tmp_path,
-        )
-
-        defaulted = json.loads(agent.tools.tools["wait"].execute({"task_id": "task-a"}).output)
-        capped = json.loads(
-            agent.tools.tools["wait"].execute({"task_id": "task-b", "seconds": 99999}).output
-        )
-
-        assert defaulted["interval_seconds"] == 240
-        assert capped["interval_seconds"] == 7200
-
-    def test_wait_tool_ignores_interval_seconds_alias(self, tmp_path):
-        from agent_py_agent.agent.core import SimpleAgent
-        from agent_py_agent.agent.settings import AgentConfig
-
-        agent = SimpleAgent(
-            AgentConfig(
-                model_backend="echo", subagent_workspace="subs", subagent_watch_interval_seconds=180
-            ),
-            tmp_path,
-        )
-
-        payload = json.loads(
-            agent.tools.tools["wait"]
-            .execute({"task_id": "task-alias", "interval_seconds": 600})
-            .output
-        )
-
-        assert payload["ok"] is True
-        assert payload["interval_seconds"] == 180
-
-    def test_wait_tool_never_blocks_registers_nonblocking_reminder(self, tmp_path):
-        """wait 改为事件驱动:任何模式(含曾经会阻塞的 cli_run)都不再原地 sleep,只登记非阻塞进度
-        提醒并让模型结束本回合等事件唤醒——父代理派完子代理后不被卡死、能继续响应。"""
-        from types import SimpleNamespace
-
-        from agent_py_agent.agent.core import SimpleAgent
-        from agent_py_agent.agent.settings import AgentConfig
-
-        agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
-        agent._current_run_params = SimpleNamespace(source="cli_run", task_id="task-cli-wait")
-
-        payload = json.loads(
-            agent.tools.tools["wait"]
-            .execute(
-                {
-                    "seconds": 60,
-                    "reason": "等子代理",
-                    # Unknown/legacy extras cannot turn internal wait into an
-                    # IM delivery route.  User reminders belong to schedule.
-                    "route_channel": "feishu",
-                    "route_target": "ou_other_user",
-                }
-            )
-            .output
-        )
-
-        assert payload["mode"] == "nonblocking_schedule"
-        assert payload["next_action"] == "end_turn_and_yield"
-        assert payload["scheduled"] is True
-        assert payload["delivery_scope"] == "internal_agent_only"
-        assert payload["user_notification_created"] is False
-        assert "用户提醒" in payload["guidance"]
-        assert "slept_seconds" not in payload
-
-        policy = agent.conversation_store.get_progress_policy(payload["policy_id"])
-        assert policy is not None
-        assert policy.route_channel == "internal"
-        assert policy.route_target == ""
-
-        spec = agent.tools.tools["wait"].model_spec
-        assert "用户的未来提醒使用 schedule" in spec.description
-        assert "提醒" not in spec.keywords
+        assert payload["coordination_advice"]["suggested_tool_call"] is None
+        assert payload["policy"]["suggested_tool_call"] is None
+        assert "派工监督提醒/完成事件会自动唤醒" in payload["policy"]["next_step"]
 
     def test_tree_inspection_cooldown_can_be_disabled(self, tmp_path):
         import json

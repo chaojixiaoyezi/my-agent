@@ -1103,7 +1103,7 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REQUEST_CAPABILITY.value,
         recovery_hint=(
             "目标是内网/私网地址,默认出站防护拦截(授权缺口,不是网络故障)。若这正是用户任务指定的目标:"
-            "主代理→调用 authorize_network_host，并通过统一危险动作审批门后重试；子代理→用 capability_request"
+            "主代理→如实向用户说明内网访问缺口(当前底座不提供白名单授权),或换公网来源；子代理→用 capability_request"
             "(capability_type=network, network_scope=[该主机])申请,等父代理授权期间继续其他工作,"
             "不要因此放弃任务。与任务无关的内网地址才换公网来源。"
         ),
@@ -1115,7 +1115,7 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REQUEST_CAPABILITY.value,
         recovery_hint=(
             "域名解析到私网/特殊地址;不要继续请求。若它是用户任务指定的内网目标,"
-            "走 authorize_network_host / capability_request(capability_type=network) 授权通路;否则换公网来源。"
+            "走 capability_request(capability_type=network) 授权通路;否则换公网来源。"
         ),
     ),
     "NETWORK_DNS_REBINDING_BLOCKED": ErrorContract(

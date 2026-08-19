@@ -44,16 +44,14 @@ def create_subagents_payload(request: CreateSubagentsPayloadInput) -> dict[str, 
     dispatchable = dispatchable_tasks(tasks)
     pending_dispatch = _pending_dispatch_tasks(dispatchable, request_params, auto_start)
     result_index = child_result_index(agent, tasks)
-    wait_tool_call = _wait_tool_call(agent)
     payload: dict[str, object] = {
         "created": len(created),
         "created_run_ids": [task.id for task in created],
         "reused_run_ids": [task.id for task in reused],
         "dispatch_run_ids": [task.id for task in pending_dispatch],
         "auto_start": _auto_start_payload(auto_start),
-        "next_action": _dispatch_next_action(dispatchable, request_params, auto_start, wait_tool_call),
-        "status_tool_call": _status_tool_call(auto_start, wait_tool_call),
-        "wait_tool_call": wait_tool_call,
+        "next_action": _dispatch_next_action(dispatchable, request_params, auto_start),
+        "status_tool_call": _status_tool_call(auto_start),
         "allowed_tools": request.allowed_tools or "automatic",
         "operation_contract": _operation_contract(request_params, created, reused, pending_dispatch),
         "replacement_records": request.replacement_records or [],
@@ -155,12 +153,7 @@ def _schedule_lifecycle_payload(
     }
 
 
-def _status_tool_call(auto_start: dict[str, object] | None, wait_tool_call: dict[str, object]) -> dict[str, object]:
-    if (auto_start or {}).get("status") == "started":
-        return {
-            "tool": "wait",
-            "params": dict(wait_tool_call.get("params") if isinstance(wait_tool_call.get("params"), dict) else {}),
-        }
+def _status_tool_call(auto_start: dict[str, object] | None) -> dict[str, object]:
     return {"tool": "inspect_agent_tree", "params": {}}
 
 
@@ -192,7 +185,6 @@ def _dispatch_next_action(
     tasks,
     request_params: dict[str, object],
     auto_start: dict[str, object] | None = None,
-    wait_tool_call: dict[str, object] | None = None,
 ) -> dict[str, object]:
     run_ids = [task.id for task in tasks]
     if not run_ids:
@@ -216,9 +208,9 @@ def _dispatch_next_action(
         }
     if (auto_start or {}).get("status") == "started":
         return {
-            "tool": "wait",
-            "reason": "create_subagents 已把本批 run 交给后台调度；先登记等待提醒，避免高频轮询。",
-            "params": dict((wait_tool_call or {}).get("params") if isinstance((wait_tool_call or {}).get("params"), dict) else {}),
+            "tool": "inspect_agent_tree",
+            "reason": "create_subagents 已把本批 run 交给后台调度；结束本回合等派工监督/完成事件唤醒，确需查看时用 inspect_agent_tree（自带冷却，避免高频轮询）。",
+            "params": {},
         }
     return {
         "tool": "dispatch_subagents",
@@ -252,25 +244,6 @@ def _child_output_read_order(rows: list[dict[str, object]]) -> list[dict[str, ob
             }
         )
     return result
-
-
-def _wait_tool_call(agent: object) -> dict[str, object]:
-    config = getattr(agent, "config", None)
-    try:
-        seconds = int(getattr(config, "subagent_watch_interval_seconds", 120))
-    except (TypeError, ValueError):
-        seconds = 120
-    if seconds < 60:
-        seconds = 60
-    if seconds > 7200:
-        seconds = 7200
-    return {
-        "tool": "wait",
-        "params": {
-            "seconds": seconds,
-            "reason": "wait before checking subagent progress again",
-        },
-    }
 
 
 def _task_text(task: object, field: str) -> str:

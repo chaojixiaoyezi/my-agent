@@ -27,19 +27,9 @@ from ...common.json_io import (
     read_jsonl_objects_report,
 )
 from ...conversation.authority import CONVERSATION_REQUEST_ID_ATTR
-from ...tooling.models import (
-    BaseTool,
-    EffectResolverPolicy,
-    IdempotencyPolicy,
-    ResourceScopePolicy,
-    ToolHandlerOutcome,
-    ToolModelHints,
-    ToolModelSpec,
-    ToolRuntimePolicy,
-)
+from ...tooling.models import ToolHandlerOutcome
 from ..runner.context import current_subagent_attempt_id, current_subagent_run_id
 
-_TOOL_NAME = "record_finding"
 _MAX_CLAIM_CHARS = 2000
 _MAX_REFS = 20
 # Owner-facing finding wakes may inline one complete ordinary-sized source
@@ -50,105 +40,73 @@ _WATCH_ID_PATTERN = re.compile(r"^ws-[0-9a-f]{10}$")
 _FINDING_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
 
-class RecordFindingTool(BaseTool):
-    runtime_policy = ToolRuntimePolicy(
-        effect_resolver=EffectResolverPolicy("mutating"),
-        idempotency_policy=IdempotencyPolicy("operation"),
-        resource_scopes=ResourceScopePolicy(
-            parameter_names=("finding_id", "watch_id"),
-            # seq 258：finding_id/watch_id 是账本条目逻辑 ID 不是物理写根（同 wait）。
-            parameter_kinds={
-                "finding_id": "logical",
-                "watch_id": "logical",
-            },
-            # seq 266 #1：finding_id 与 watch_stream 的 watch_id 各属独立资源域
-            # （账本条目 vs 盯守源），跨工具统一域名防同名参数别名。
-            resource_domains={"finding_id": "finding", "watch_id": "watch"},
-        ),
-    )
-
-    def __init__(self, agent: object) -> None:
-        self.agent = agent
-        self.model_spec = build_record_finding_model_spec()
-
-    def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
-        claim = str(params.get("claim") or "").strip()
-        if not claim:
-            return ToolHandlerOutcome(
-                _TOOL_NAME,
-                False,
-                "缺少 claim:一句话写清你确认了什么。",
-                error_code="TOOL_PARAMETER_REQUIRED",
-            )
-        ledger_path, ledger_scope = _findings_ledger_path(self.agent)
-        if not ledger_path:
-            return ToolHandlerOutcome(
-                _TOOL_NAME,
-                False,
-                "当前上下文没有可用的结论账本(没有运行中的任务工作区)。",
-                error_code="TOOL_UNAVAILABLE",
-            )
-        audit_context, audit_error = _audit_finding_context(self.agent, params)
-        if audit_error:
-            return ToolHandlerOutcome(
-                _TOOL_NAME,
-                False,
-                audit_error,
-                error_code="TOOL_PERMISSION_DENIED",
-            )
-        requested_id = str(params.get("finding_id") or "").strip()
-        if requested_id and not _FINDING_ID_PATTERN.fullmatch(requested_id):
-            return ToolHandlerOutcome(
-                _TOOL_NAME,
-                False,
-                "finding_id 格式无效。",
-                error_code="TOOL_INVALID_ARGUMENTS",
-            )
-        record = _finding_record(
-            self.agent,
-            claim,
-            params,
-            audit_context=audit_context,
-        )
-        try:
-            path = Path(ledger_path)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            recorded, revision = _append_finding_revision(path, record)
-        except OSError as exc:
-            return ToolHandlerOutcome(
-                _TOOL_NAME,
-                False,
-                f"结论账本写入失败: {exc}",
-                error_code="TOOL_PERSISTENCE_FAILED",
-            )
-        payload = {
-            "ok": True,
-            "recorded": recorded,
-            "reused": not recorded,
-            "finding_id": record["id"],
-            "revision": revision,
-            "ledger_ref": ledger_path,
-            "ledger_scope": ledger_scope,
-            "guidance": (
-                "已入账。这条结论已持久化:之后收尾崩、重派、任务被取消都不会丢,整合轮会从账合并。"
-                "继续干活;最终结果块只需汇总,不必重复粘贴每条账。"
-            ),
-        }
-        linked = _link_watch_feedback(self.agent, params)
-        if linked is not None:
-            payload["watch_feedback_linked"] = linked
-        if audit_context:
-            from ...ingestion.source_worker import (
-                reconcile_audit_finding_outbox,
-            )
-
-            payload["coordination_event"] = reconcile_audit_finding_outbox(
-                self.agent,
-                current_subagent_run_id(self.agent),
-            )
+def execute_record_finding(agent: object, params: dict[str, object]) -> ToolHandlerOutcome:
+    claim = str(params.get("claim") or "").strip()
+    if not claim:
         return ToolHandlerOutcome(
-            _TOOL_NAME, True, json.dumps(payload, ensure_ascii=False, indent=2)
+            "record_finding",
+            False,
+            "缺少 claim:一句话写清你确认了什么。",
+            error_code="TOOL_PARAMETER_REQUIRED",
         )
+    ledger_path, ledger_scope = _findings_ledger_path(agent)
+    if not ledger_path:
+        return ToolHandlerOutcome(
+            "record_finding",
+            False,
+            "当前上下文没有可用的结论账本(没有运行中的任务工作区)。",
+            error_code="TOOL_UNAVAILABLE",
+        )
+    audit_context, audit_error = _audit_finding_context(agent, params)
+    if audit_error:
+        return ToolHandlerOutcome(
+            "record_finding",
+            False,
+            audit_error,
+            error_code="TOOL_PERMISSION_DENIED",
+        )
+    requested_id = str(params.get("finding_id") or "").strip()
+    if requested_id and not _FINDING_ID_PATTERN.fullmatch(requested_id):
+        return ToolHandlerOutcome(
+            "record_finding",
+            False,
+            "finding_id 格式无效。",
+            error_code="TOOL_INVALID_ARGUMENTS",
+        )
+    record = _finding_record(agent, claim, params, audit_context=audit_context)
+    try:
+        path = Path(ledger_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        recorded, revision = _append_finding_revision(path, record)
+    except OSError as exc:
+        return ToolHandlerOutcome(
+            "record_finding",
+            False,
+            f"结论账本写入失败: {exc}",
+            error_code="TOOL_PERSISTENCE_FAILED",
+        )
+    payload = {
+        "ok": True,
+        "recorded": recorded,
+        "reused": not recorded,
+        "finding_id": record["id"],
+        "revision": revision,
+        "ledger_ref": ledger_path,
+        "ledger_scope": ledger_scope,
+    }
+    linked = _link_watch_feedback(agent, params)
+    if linked is not None:
+        payload["watch_feedback_linked"] = linked
+    if audit_context:
+        from ...ingestion.source_worker import reconcile_audit_finding_outbox
+
+        payload["coordination_event"] = reconcile_audit_finding_outbox(
+            agent,
+            current_subagent_run_id(agent),
+        )
+    return ToolHandlerOutcome(
+        "record_finding", True, json.dumps(payload, ensure_ascii=False, indent=2)
+    )
 
 
 def _finding_record(
@@ -614,92 +572,3 @@ def _run_ledger_path(agent: object, run_id: str) -> str:
     return str(getattr(task, "agent_run_findings_jsonl", "") or "").strip()
 
 
-def build_record_finding_model_spec() -> ToolModelSpec:
-    return ToolModelSpec(
-        name=_TOOL_NAME,
-        # collaboration = 默认 deferred 目录(tool_catalog_deferred_categories):不进主代理
-        # 全局 catalog 正文(渐进式披露,防目录膨胀挤压上下文);子代理 runner 经 allowed_tools
-        # 显式授权 + 执行合同"确认即记账"引导,不依赖全局目录曝光。
-        # 追加式结论账(每次生成新 id 追加一行)对重试天然安全;side-effect 工具不声明
-        # 幂等策略会被 tool_manifest 门整体 DENY——真机实锤:盯守主代理逐条入账被
-        # TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING 拦死,findings 恒空、只能改走 write_file。
-        description=(
-            "把一条【已确认的结论/发现/完成事实】立刻写进本 run 的结论账本(findings.jsonl,追加一行)。"
-            "确认一条记一条:之后收尾再崩、任务被取消,账还在,整合轮照样能收走;"
-            "最终报告只是账本的汇总视图。"
-        ),
-        # 增补盯守特异词(盯守任务上推荐区能把本工具的详细说明浮现进 prompt);
-        # 只放特异词,别放"上报/汇报"类通用词——通用词会让普通任务也拉进推荐区,prompt 白胖一截。
-        input_schema={
-            "type": "object",
-            "properties": {
-                "claim": {
-                    "type": "string",
-                    "description": "必填：一句话写清已确认的结论，含事件 ID 或模块名等关键标识。",
-                },
-                "evidence_refs": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "证据指针列表，如文件路径、事件 ID 或 URL。",
-                },
-                "kind": {
-                    "type": "string",
-                    "description": "结论类型标签，如 hit、module_done、analysis；默认 finding。",
-                },
-                "confidence": {"type": "string", "description": "置信来源的一句话说明。"},
-                "finding_id": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128,
-                    "description": "更新既有 finding 时原样传回稳定编号；首次可省略。",
-                },
-                "stage": {"type": "string", "description": "Audit finding 当前阶段；只保存事实。"},
-                "needs_evidence": {"type": "boolean", "description": "是否仍需补充证据。"},
-                "urgency": {
-                    "type": "string",
-                    "enum": ["normal", "urgent"],
-                    "description": "统一事件唤醒优先级。",
-                },
-                "requires_llm_report": {
-                    "type": "boolean",
-                    "description": "是否要求协调轮生成面向用户的模型回复。",
-                },
-                "watch_id": {"type": "string", "description": "盯守候选所属 watch ID。"},
-                "stream_pos": {"type": "integer", "description": "候选行的 stream_pos。"},
-            },
-            "required": ["claim"],
-            "additionalProperties": False,
-        },
-        hints=ToolModelHints(
-            category="collaboration",
-            use_cases=(
-                "盯守任务确认一条真命中后立刻入账，供主代理核验整合",
-                "建站或编码任务完成一个模块并验证通过后记录完成事实",
-                "长分析任务得出中间结论后先入账再继续",
-            ),
-            avoid_when=(
-                "还没确认的猜测不要入账，拿不准的先验证",
-                "不要把整篇报告塞进 claim，一条结论一行账",
-            ),
-            keywords=(
-                "结论",
-                "发现",
-                "命中",
-                "记账",
-                "finding",
-                "record",
-                "确认",
-                "落账",
-                "持久化",
-                "盯守",
-                "watch_stream",
-            ),
-        ),
-    )
-
-
-__all__ = [
-    "RecordFindingTool",
-    "append_inline_audit_finding",
-    "build_record_finding_model_spec",
-]

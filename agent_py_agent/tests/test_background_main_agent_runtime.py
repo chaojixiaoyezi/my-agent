@@ -175,14 +175,14 @@ def test_taskless_internal_background_wait_does_not_create_task_or_thread(tmp_pa
     # active.  It must not be promoted into a durable task identity.
     agent._main_agent_run_id = params.run_id
     try:
-        result = agent.tools.tools["wait"].execute({"seconds": 60, "reason": "check again later"})
+        result = agent.tools.tools["sleep"].execute({"duration_seconds": 60, "reason": "check again later"})
     finally:
         delattr(agent, "_current_run_params")
         delattr(agent, "_main_agent_run_id")
 
     assert result.ok is False
-    assert result.error_code == "TOOL_PARAMETER_REQUIRED"
-    assert json.loads(result.output)["error"] == "task_id_required"
+    assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+    assert "任务身份" in str(result.output or "")
     assert agent.conversation_store.list_threads(limit=0) == before_threads
     assert agent.conversation_store.list_progress_policies(enabled_only=True) == []
 
@@ -952,8 +952,7 @@ def test_named_background_run_keeps_work_name_as_workspace_title(tmp_path) -> No
 
 
 def _native_probe(self):
-    from agent_py_agent.agent.backends.base import ProviderToolCapability
-    from agent_py_agent.agent.backends.base import _utc_now_iso
+    from agent_py_agent.agent.backends.base import ProviderToolCapability, _utc_now_iso
 
     return ProviderToolCapability(
         provider=str(self.name or "bg-test"), endpoint="local://bg-test",
@@ -989,48 +988,6 @@ class _NaturalCompletionBackend:
     def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         self.prompts.append(prompt)
         return ModelResponse(text="任务全部完成。", backend=self.name)
-
-
-class _CollaborationRehearsalBackend:
-    name = "collaboration-rehearsal"
-
-    def __init__(self, *, case_id: str):
-        self.case_id = case_id
-        self.prompts: list[str] = []
-        self.calls = 0
-
-    def probe_tool_capability(self):
-        return _native_probe(self)
-
-    def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
-        self.calls += 1
-        self.prompts.append(prompt)
-        if self.calls == 1:
-            assert "collaboration_case_closed" in prompt
-            assert self.case_id in prompt
-            return ModelResponse(
-                text="",
-                backend=self.name,
-                tool_use_blocks=[{
-                    "id": "call-rehearsal-inspect-1",
-                    "name": "inspect_collaboration",
-                    "input": {"case_id": self.case_id},
-                }],
-            )
-        if self.calls == 2:
-            assert "artifact://source-a/e1" in prompt
-            assert "artifact://source-b/e2" in prompt
-            return ModelResponse(
-                text="",
-                backend=self.name,
-                tool_use_blocks=[{
-                    "id": "call-rehearsal-tree-2",
-                    "name": "inspect_agent_tree",
-                    "input": {},
-                }],
-            )
-        assert '"does_not_dispatch": true' in prompt
-        return ModelResponse(text="协作演练完成：已读取 case 状态和代理树。", backend=self.name)
 
 
 class _BlockedCollaborationBackend:
@@ -5247,8 +5204,7 @@ def test_urgent_wake_uses_full_background_tool_profile(tmp_path) -> None:
     prompt = backend.prompts[0]
 
     assert "create_subagents" in prompt
-    assert "raise_collaboration" in prompt
-    assert "submit_collaboration_result" in prompt
+    assert "dispatch_subagents" in prompt
 
 
 def test_background_runtime_uses_configured_allowed_tools(tmp_path) -> None:
@@ -5305,7 +5261,7 @@ def test_background_runtime_applies_owner_disabled_tools(tmp_path) -> None:
         tmp_path,
     )
     agent.owner_policy = type(
-        "OwnerPolicy", (), {"disabled_tools": ("create_subagents", "raise_collaboration")}
+        "OwnerPolicy", (), {"disabled_tools": ("create_subagents", "dispatch_subagents")}
     )()
     backend = _CapturingBackend()
     agent.backend = backend
@@ -5334,7 +5290,7 @@ def test_background_runtime_applies_owner_disabled_tools(tmp_path) -> None:
     prompt = backend.prompts[0]
 
     assert "create_subagents: 创建" not in prompt
-    assert "raise_collaboration: 发起" not in prompt
+    assert "dispatch_subagents: 推进" not in prompt
     assert "removed_tools" in prompt
 
 

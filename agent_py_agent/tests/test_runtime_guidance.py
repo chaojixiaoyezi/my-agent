@@ -29,7 +29,6 @@ from agent_py_agent.agent.agent_core.runtime.guidance import (
 from agent_py_agent.agent.agent_core.runtime.guidance_tool import SendGuidanceTool
 from agent_py_agent.agent.agent_core.tool_loop.completion import (
     ToolRoundCompletionRequest,
-    _soft_wait_reply_facts,
     completion_response_after_tool_round,
     queue_followup_after_post_failure_workspace_mutation,
     queue_interim_reply_for_active_named_work,
@@ -1263,98 +1262,6 @@ def test_natural_reply_prompt_treats_fact_carrier_as_invisible(tmp_path) -> None
     assert "请根据上面的结构化事实" not in prompt
 
 
-def test_soft_wait_reply_facts_include_current_request_guidance_and_live_delegation() -> None:
-    params = _tool_loop_params(
-        root_user_prompt="完成日志分析器并跑通测试",
-        executed_tools=["task_progress", "create_subagents", "wait"],
-        active_turn_user_inputs=[
-            {
-                "schema_version": "active-turn-user-input.v1",
-                "input_ids": ["guidance-1"],
-                "text": "时间过滤也支持 Unix 秒。",
-            }
-        ],
-    )
-    agent = SimpleNamespace(
-        subagent_run_ids_for_request=lambda task_id: (
-            ["run-1", "run-2"] if task_id == "task-1" else []
-        ),
-        subagents=SimpleNamespace(
-            list_runs=lambda: [
-                SimpleNamespace(id="run-1", status="RUNNING"),
-                SimpleNamespace(id="run-2", status="DONE"),
-            ]
-        ),
-    )
-
-    facts = _soft_wait_reply_facts(
-        ToolRoundCompletionRequest(
-            agent=agent,
-            params=params,
-            response=ModelResponse(text="", backend="test"),
-            before_executed_count=2,
-            subagent_output_written=False,
-            tool_rounds=3,
-        )
-    )
-
-    assert facts == {
-        "wait_registered": True,
-        "reply_is_interim": True,
-        "task_continues_without_more_user_input": True,
-        "current_user_request": "完成日志分析器并跑通测试",
-        "completed_action_count": 3,
-        "tool_round_count": 3,
-        "turn_execution": {
-            "presentation_only": True,
-            "tool_execution_observed": True,
-            "executed_tool_count": 3,
-            "successful_operation_count": 0,
-            "failed_operation_count": 0,
-        },
-        "current_user_guidance_count": 1,
-        "current_user_guidance": ["时间过滤也支持 Unix 秒。"],
-        "delegated_work": {"total": 2, "status_counts": {"DONE": 1, "RUNNING": 1}},
-    }
-
-
-def test_soft_wait_reply_delegation_status_counts_are_mutually_exclusive() -> None:
-    params = _tool_loop_params(
-        root_user_prompt="继续整合项目",
-        executed_tools=["wait"],
-    )
-    agent = SimpleNamespace(
-        subagent_run_ids_for_request=lambda task_id: (
-            ["run-running", "run-done", "run-blocked"] if task_id == "task-1" else []
-        ),
-        subagents=SimpleNamespace(
-            list_runs=lambda: [
-                SimpleNamespace(id="run-running", status="RUNNING"),
-                SimpleNamespace(id="run-done", status="DONE"),
-                SimpleNamespace(id="run-blocked", status="BLOCKED"),
-            ]
-        ),
-    )
-
-    facts = _soft_wait_reply_facts(
-        ToolRoundCompletionRequest(
-            agent=agent,
-            params=params,
-            response=ModelResponse(text="", backend="test"),
-            before_executed_count=0,
-            subagent_output_written=False,
-            tool_rounds=1,
-        )
-    )
-
-    delegated = facts["delegated_work"]
-    assert delegated == {
-        "total": 3,
-        "status_counts": {"BLOCKED": 1, "DONE": 1, "RUNNING": 1},
-    }
-    assert sum(delegated["status_counts"].values()) == delegated["total"]
-
-
 def test_open_subagents_queue_interim_reply_without_reading_model_prose() -> None:
     params = _tool_loop_params(
         root_user_prompt="并行完成三项检查后汇总",
@@ -2425,43 +2332,6 @@ def test_direct_root_final_is_replaced_by_model_interim_while_child_runs(
     assert response.text.startswith("三项检查已经完成两项")
 
 
-def test_soft_wait_reply_facts_bound_long_user_text_without_losing_ends() -> None:
-    request_text = "任务开头" + ("甲" * 5000) + "任务结尾"
-    guidance_text = "补充开头" + ("乙" * 2000) + "补充结尾"
-    params = _tool_loop_params(
-        root_user_prompt=request_text,
-        active_turn_user_inputs=[
-            {
-                "schema_version": "active-turn-user-input.v1",
-                "input_ids": ["guidance-long"],
-                "text": guidance_text,
-            }
-        ],
-    )
-
-    facts = _soft_wait_reply_facts(
-        ToolRoundCompletionRequest(
-            agent=SimpleNamespace(),
-            params=params,
-            response=ModelResponse(text="", backend="test"),
-            before_executed_count=0,
-            subagent_output_written=False,
-            tool_rounds=1,
-        )
-    )
-
-    bounded_request = str(facts["current_user_request"])
-    bounded_guidance = str(facts["current_user_guidance"][0])
-    assert len(bounded_request) == 4000
-    assert bounded_request.startswith("任务开头")
-    assert bounded_request.endswith("任务结尾")
-    assert facts["current_user_request_truncated"] is True
-    assert len(bounded_guidance) == 1200
-    assert bounded_guidance.startswith("补充开头")
-    assert bounded_guidance.endswith("补充结尾")
-    assert facts["current_user_guidance_truncated"] is True
-
-
 def test_natural_reply_does_not_guess_runtime_state_from_prose() -> None:
     response = ModelResponse(
         text="已在后台启动源码解析和复刻工作，分析完成后再回来汇报进展。",
@@ -2512,7 +2382,7 @@ def test_natural_reply_discards_unauthorized_tool_call_after_bounded_retry(tmp_p
     params = _tool_loop_params(task_id="task-1")
     queue_natural_user_reply(
         params,
-        kind="wait",
+        kind="background_dispatch",
         facts={"reply_is_interim": True},
     )
 
@@ -2523,7 +2393,7 @@ def test_natural_reply_discards_unauthorized_tool_call_after_bounded_retry(tmp_p
     assert response.text == "继续原任务收尾（第 2 次表达）。"
     assert response.tool_use_blocks == []
     assert response.runtime_status == "ok"
-    assert response.runtime_reason == "wait"
+    assert response.runtime_reason == "background_dispatch"
     assert response.runtime_source == "model_user_reply_unauthorized_tools_discarded"
 
 
@@ -2549,7 +2419,7 @@ def test_natural_reply_does_not_salvage_internal_protocol_from_rejected_tool_cal
     params = _tool_loop_params(task_id="task-1")
     queue_natural_user_reply(
         params,
-        kind="wait",
+        kind="background_dispatch",
         facts={"reply_is_interim": True},
     )
 

@@ -38,7 +38,7 @@ def test_items_mode_reuses_existing_contract_children_and_returns_dispatch_contr
     assert second["reused_run_ids"] == first["created_run_ids"]
     assert second["dispatch_run_ids"] == []
     assert second["auto_start"]["run_ids"] == first["created_run_ids"]
-    assert second["next_action"]["tool"] == "wait"
+    assert second["next_action"]["tool"] == "inspect_agent_tree"
     assert len(agent.subagents.list_runs()) == 3
 
 
@@ -61,7 +61,7 @@ def test_reused_done_children_are_excluded_from_dispatch_contract(tmp_path):
     assert second["reused_run_ids"] == first["created_run_ids"]
     assert second["dispatch_run_ids"] == []
     assert second["auto_start"]["run_ids"] == first["created_run_ids"][1:]
-    assert second["next_action"]["tool"] == "wait"
+    assert second["next_action"]["tool"] == "inspect_agent_tree"
 
 
 def test_generic_single_worker_reuses_explicit_idempotency_contract(tmp_path):

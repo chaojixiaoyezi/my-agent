@@ -150,6 +150,7 @@ class BaseBackend:
         tools: list[dict[str, Any]] | None = None,
         tool_choice: ToolChoice | None = None,
         messages: list[dict[str, Any]] | None = None,
+        on_thinking_delta: Callable[[str], None] | None = None,
     ) -> ModelResponse:
         """Generate one assistant response for the supplied prompt.
 
@@ -219,8 +220,9 @@ class EchoBackend(BaseBackend):
         tools: list[dict[str, Any]] | None = None,
         tool_choice: ToolChoice | None = None,
         messages: list[dict[str, Any]] | None = None,
+        on_thinking_delta: Callable[[str], None] | None = None,
     ) -> ModelResponse:
-        del tools, tool_choice, messages  # echo backend never speaks native tool_use
+        del tools, tool_choice, messages, on_thinking_delta  # echo backend never speaks native tool_use
         lines = [line.strip() for line in prompt.splitlines() if line.strip()]
         if "# User Task" in prompt:
             task = prompt.split("# User Task", 1)[-1]

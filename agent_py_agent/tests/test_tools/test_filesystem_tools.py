@@ -430,7 +430,7 @@ def test_read_file_reports_active_child_declared_output_not_ready(tmp_path: Path
     assert result.ok is False
     assert result.error_code == "PATH_NOT_FOUND"
     assert payload["error"] == "active_child_output_not_ready"
-    assert payload["suggested_tool_call"]["tool"] == "wait"
+    assert payload["suggested_tool_call"]["tool"] == "inspect_agent_tree"
     assert payload["status_tool_call"]["tool"] == "inspect_agent_tree"
 
 

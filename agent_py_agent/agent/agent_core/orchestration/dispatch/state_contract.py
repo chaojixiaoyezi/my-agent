@@ -139,14 +139,14 @@ def _attach_state_next_action(state: dict[str, object]) -> None:
         return
     if running:
         state["next_action"] = "wait_for_subagent_completion_event"
-        state["suggested_tool_call"] = {"tool": "wait", "seconds": 120, "reason": "等待运行中的子代理完成或产出新事件"}
+        state["suggested_tool_call"] = {"tool": "inspect_agent_tree", "params": {}, "reason": "先结束本回合,派工监督/完成事件会自动唤醒"}
         return
     if accepted:
         state["next_action"] = "wait_for_subagent_runner_acceptance"
         state["suggested_tool_call"] = {
-            "tool": "wait",
-            "seconds": 120,
-            "reason": "后台调度已接收，等待 runner 状态或完成事件",
+            "tool": "inspect_agent_tree",
+            "params": {},
+            "reason": "后台调度已接收，先结束本回合,完成事件会自动唤醒",
         }
         return
     if load_errors:

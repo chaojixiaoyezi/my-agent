@@ -102,14 +102,10 @@ def _unfinished_child_payload(children: dict[str, object]) -> dict[str, object]:
 def _wait_for_running_children_payload(run_ids: list[str]) -> dict[str, object]:
     return {
         "next_action": "wait_for_running_direct_children",
-        "suggested_tool_call": {
-            "tool": "wait",
-            "seconds": 120,
-            "reason": "等待运行中的直接子代理完成或产出新事件",
-        },
+        "suggested_tool_call": {"tool": "inspect_agent_tree", "params": {}},
         "wait_hint": (
             "仍有直接 child 正在 RUNNING；这是正常后台执行状态。"
-            "登记 wait 后继续自己的工作或回复用户，不要因为等待而重复 inspect_agent_tree、dispatch_subagents 或重新 create_subagents。"
+            "先结束本回合，派工监督提醒/完成事件会自动唤醒；不要重复 inspect_agent_tree、dispatch_subagents 或重新 create_subagents。"
         ),
         "running_run_ids": run_ids,
     }

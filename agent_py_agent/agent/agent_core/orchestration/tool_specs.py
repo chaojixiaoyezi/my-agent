@@ -73,7 +73,7 @@ def _hints(
 def build_create_subagents_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="create_subagents",
-        description="把'宽形状'的活派给子代理并行干、只收结论:涉及多个独立目标、可并行模块、或需要独立验证时，由你按真实拆解自主决定需要几个；不要为了显得忙而派，也不要把同一任务重复派。工具参数 goal 是本批派工说明，与用户命令 /goal 无关；普通聊天中的实际任务也可以派工。goal 始终必填。单个具体目标直接创建 1 个；多个不同目标给总 goal 和 items，且每项必须有独立 goal、不得重复。运行时会按 owner、当前任务和单次调用容量整批校验，超限或重复都会整批拒绝，不会偷偷丢掉部分任务。已知单一改动点、一两步能完成的窄任务自己直接做。相对时间沿用当前日期/年份;只有 defer_start=true 才只建不跑。子代理的目标若是【内网/私网地址】(如 192.168.x.x 数据源),先用 authorize_network_host 授权再派——否则子代理会被出站防护拦截(NETWORK_PRIVATE_HOST_BLOCKED)。",
+        description="把'宽形状'的活派给子代理并行干、只收结论:涉及多个独立目标、可并行模块、或需要独立验证时，由你按真实拆解自主决定需要几个；不要为了显得忙而派，也不要把同一任务重复派。工具参数 goal 是本批派工说明，与用户命令 /goal 无关；普通聊天中的实际任务也可以派工。goal 始终必填。单个具体目标直接创建 1 个；多个不同目标给总 goal 和 items，且每项必须有独立 goal、不得重复。运行时会按 owner、当前任务和单次调用容量整批校验，超限或重复都会整批拒绝，不会偷偷丢掉部分任务。已知单一改动点、一两步能完成的窄任务自己直接做。相对时间沿用当前日期/年份;只有 defer_start=true 才只建不跑。子代理的目标若是【内网/私网地址】(如 192.168.x.x 数据源),当前底座不提供白名单授权——直接说明访问缺口或换公网来源,不要派工到会被出站防护拦截(NETWORK_PRIVATE_HOST_BLOCKED)的目标。",
         input_schema=_input_schema(
             _CREATE_PARAMETERS,
             _CREATE_PARAMETER_SCHEMA,
@@ -277,7 +277,7 @@ def build_resolve_capability_requests_model_spec() -> ToolModelSpec:
         hints=_hints(
             use_cases=(
                 "子代理报告 PENDING_CAPABILITY_REQUEST / capability_request 未决，需要父级解锁目录或授权工具",
-                "网络类申请(capability_type=network,子代理撞 NETWORK_PRIVATE_HOST_BLOCKED):先用 authorize_network_host 把用户点名的内网主机落白名单,再 grant——只 grant 工具解决不了出站拦截",
+                "网络类申请(capability_type=network,子代理撞 NETWORK_PRIVATE_HOST_BLOCKED):底座不提供内网白名单授权,授权侧只能说明访问缺口或换公网来源",
             ),
             avoid_when=("没有未决请求时不要调用；查看子代理详情用 inspect_agent_tree",),
             keywords=("capability", "授权", "解锁", "拒绝", "grant", "deny", "capreq", "权限"),

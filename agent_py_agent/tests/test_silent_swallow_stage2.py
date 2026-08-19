@@ -165,19 +165,6 @@ class TestSilentSwallowNowLogs:
             loop._clear_pending_work(_Locked())
         assert any("_clear_pending_work failed" in r.message for r in caplog.records)
 
-    def test_is_known_subagent_run_list_failure_logs(self, caplog):
-        """collaboration list_runs 故障回退 False 但记日志(不把系统不可用伪装成无匹配)。"""
-        from agent_py_agent.agent.collaboration import tools as collab_tools
-
-        manager = MagicMock()
-        manager.list_runs.side_effect = RuntimeError("list down")
-        agent = SimpleNamespace(subagents=manager)
-        with caplog.at_level(logging.WARNING):
-            result = collab_tools._is_known_subagent_run(agent, "run-1")
-        assert result is False
-        assert any("list_runs failed" in r.message for r in caplog.records)
-
-
 # ── M5: runner 结果 / context bundle 原子写 ──────────────────────────────────
 
 

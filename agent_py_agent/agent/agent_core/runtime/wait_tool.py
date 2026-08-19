@@ -2,16 +2,7 @@ from __future__ import annotations
 
 import json
 
-from ...tooling.models import (
-    BaseTool,
-    EffectResolverPolicy,
-    IdempotencyPolicy,
-    ResourceScopePolicy,
-    ToolHandlerOutcome,
-    ToolModelHints,
-    ToolModelSpec,
-    ToolRuntimePolicy,
-)
+from ...tooling.models import ToolHandlerOutcome
 from ..runner.context import current_subagent_run_id
 from .task_identity import durable_task_id
 
@@ -20,176 +11,6 @@ _MIN_SECONDS = 60
 _MAX_SECONDS = 7200
 
 
-class WaitTool(BaseTool):
-    runtime_policy = ToolRuntimePolicy(
-        effect_resolver=EffectResolverPolicy("mutating"),
-        idempotency_policy=IdempotencyPolicy("operation"),
-        resource_scopes=ResourceScopePolicy(
-            parameter_names=("run_id", "task_id", "thread_id"),
-            # seq 258：run_id/task_id/thread_id 是逻辑 ID 不是物理写根——不标
-            # logical 会被当 path 锁（run_id="child-1" → workspace:{root}/child-1
-            # 子锁）与缺省参数 None 兜底父锁 workspace:{cwd} 父子重叠 →
-            # claim 阶段自冲突，handler 前被拒。
-            parameter_kinds={
-                "run_id": "logical",
-                "task_id": "logical",
-                "thread_id": "logical",
-            },
-            # seq 266 #1：wait(run_id=child-1) 与 cancel(run_id=child-1) 是
-            # 同一 agent_run 资源（等待 vs 取消同一 run，必须互斥）。
-            resource_domains={"run_id": "agent_run"},
-        ),
-        promotes_task=True,
-    )
-
-    def __init__(self, agent: object) -> None:
-        self.agent = agent
-        self.model_spec = build_wait_model_spec()
-
-    def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
-        if _truthy(params.get("cancel")):
-            # cancel 不走 _target:那条路会在没绑线程时顺手新建内部线程,取消场景不该有副作用。
-            return _cancel_result(self.agent, params)
-        _promote_wait_conversation(self.agent, params)
-        interval = _seconds(params.get("seconds"), self.agent)
-        target = _target(self.agent, params)
-        if isinstance(target, ToolHandlerOutcome):
-            return target
-        thread_id, task_id = target
-        actionable = _actionable_audit_input(self.agent, task_id)
-        if actionable:
-            return _error(
-                "actionable_audit_input_pending",
-                (
-                    "当前 Audit 已有完整持久化但尚未签收的记录，wait 不能替代立即可推进的工作。"
-                    "由你根据任务目标自行处理或委派；若已有真实后台执行者，可直接结束本轮，"
-                    "其完成事件和持久任务续跑会继续唤醒，不要再次空等。"
-                ),
-                error_code="WAIT_ACTIONABLE_INPUT_PENDING",
-                facts=actionable,
-            )
-        # 同一任务+线程重复登记 = 【更新】提醒(模型每轮唤醒常带新游标/新原因重新 wait),
-        #   旧的先退休再登记新的——不堆积多份同任务 policy 互相打架(实测一次 5 分钟盯守
-        #   堆出 11 份,全靠调度器去重兜底;更新语义从源头治)。
-        _disable_same_watch_policies(self.agent.conversation_store, thread_id, task_id)
-        policy = self.agent.conversation_store.set_progress_policy(
-            {
-                "thread_id": thread_id,
-                "task_id": task_id,
-                "interval_seconds": interval,
-                # 会话运行时 wait is an internal runtime yield.  Keep the
-                # route fixed at the execution boundary as well as hiding it
-                # from the model schema: unknown/legacy extra arguments must
-                # never turn wait into an outbound notification surface.
-                "route_channel": "internal",
-                "route_target": "",
-                "metadata": {
-                    "kind": "subagent_progress_watch",
-                    "tool": _TOOL_NAME,
-                    "scope": str(params.get("scope") or "own_task_tree"),
-                    "reason": str(params.get("reason") or "").strip(),
-                    # 只 watch 显式点名的 run;无 run_id 的 wait 是「interval 唤醒自己」,
-                    # watch_run_id 绝不能 fallback 成 task_id(self-watch):否则父任务
-                    # 会被自己的 policy 判 running,唤醒轮续接被 workspace blocker 拦成
-                    # CONVERSATION_TASK_BINDING_FAILED 死锁(真机 2026-08-09)。
-                    "watch_run_id": str(params.get("run_id") or "").strip(),
-                },
-            }
-        )
-        payload = {
-            "ok": True,
-            "scheduled": True,
-            "mode": "nonblocking_schedule",
-            "delivery_scope": "internal_agent_only",
-            "user_notification_created": False,
-            "policy_id": policy.policy_id,
-            "thread_id": thread_id,
-            "task_id": task_id,
-            "interval_seconds": policy.interval_seconds,
-            "min_seconds": _MIN_SECONDS,
-            "max_seconds": _MAX_SECONDS,
-            "next_due_at": policy.next_due_at,
-            "reason": str(params.get("reason") or "").strip(),
-            "next_action": "end_turn_and_yield",
-            "guidance": (
-                "已登记当前任务的内部非阻塞唤醒,到点系统会自动唤醒你继续当前任务。"
-                "它不会创建用户提醒、定时任务或出站消息；用户要求未来提醒时必须使用 schedule。"
-                "wait 永不阻塞当前回合——不会原地睡等。"
-                "现在请把本回合该说的说完并结束本回合:到点提醒、子代理完成事件或用户新消息都会把你叫回来接着干。"
-                "提醒按 interval 循环触发;任务收口(验收通过)后自动停止,不再需要时也可用 cancel=true 手动停。"
-                "不要原地循环轮询。"
-            ),
-        }
-        return ToolHandlerOutcome(_TOOL_NAME, True, json.dumps(payload, ensure_ascii=False, indent=2))
-
-
-def _promote_wait_conversation(agent: object, params: dict[str, object]) -> None:
-    """真实 wait 是结构化定时/后台事实，此刻才把普通会话绑定成任务。"""
-    from ...conversation.task_promotion import promote_current_conversation_task
-
-    promote_current_conversation_task(agent, goal=str(params.get("reason") or ""))
-
-
-_WAIT_USE_CASES = [
-    "当前任务需要让出执行权，并在稍后由同一个 Agent 恢复",
-    "外部状态尚未就绪，稍后根据持久任务状态重新决定下一步",
-    "任务不再需要内部唤醒时，用 cancel=true 取消对应 policy",
-]
-_WAIT_AVOID_WHEN = [
-    "用户要求未来提醒、定时执行或到点向用户发消息时不要使用 wait；必须使用 schedule。"
-    "wait 只唤醒 agent 自己，route_channel=internal，不会创建用户通知。",
-    "需要取消、接管、恢复或给子代理补充提示时不要只设提醒，应使用对应控制工具",
-    "已有可立即推进的工作时，wait 不应替代正常工具调用",
-    "当前持久任务已有未签收输入时不能使用 wait；先处理、委派，或在真实后台执行者已运行时直接结束本轮",
-]
-
-
-def build_wait_model_spec() -> ToolModelSpec:
-    return ToolModelSpec(
-        name=_TOOL_NAME,
-        description=(
-            "登记一个只在当前任务内部生效、到点自动唤醒 agent 的非阻塞等待(按间隔循环触发)："
-            "等子代理进度、盯持续增长的"
-            "文件/数据源、周期性自查、长任务阶段性推进都用它。登记后结束本回合，到点系统会自动"
-            "唤醒你继续当前任务；永不原地睡等。它不创建用户提醒或出站消息；用户的未来提醒使用 schedule。"
-        ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "seconds": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": f"多少秒后内部唤醒；不填用配置，最低 {_MIN_SECONDS}，最高 {_MAX_SECONDS}。",
-                },
-                "run_id": {"type": "string", "description": "要查看的代理 run；默认当前 task/run。"},
-                "task_id": {"type": "string", "description": "绑定任务；默认当前运行任务。"},
-                "thread_id": {"type": "string", "description": "绑定会话线程；默认按 task_id 查找或创建内部线程。"},
-                "scope": {"type": "string", "description": "查看范围提示，默认 own_task_tree。"},
-                "reason": {"type": "string", "description": "等待原因与下次醒来要做的事。"},
-                "cancel": {"type": "boolean", "description": "true 时取消当前任务或会话已登记的循环唤醒。"},
-            },
-            "additionalProperties": False,
-        },
-        hints=ToolModelHints(
-            category="orchestration",
-            use_cases=tuple(_WAIT_USE_CASES),
-            avoid_when=tuple(_WAIT_AVOID_WHEN),
-            keywords=("等待", "watch", "yield", "wait", "冷却", "不要轮询", "监控", "盯", "持续", "巡检", "子代理进度"),
-            examples=(
-                '{"tool":"wait","seconds":120,"reason":"刚启动子代理，稍后看一次进度"}',
-                '{"tool":"wait","seconds":120,"reason":"盯守日志文件增量，醒来后从上次行号继续读新行，有目标事件才上报"}',
-                '{"tool":"wait","cancel":true,"reason":"盯守任务已结束，停止循环提醒"}',
-            ),
-        ),
-    )
-
-
-# 函数用途: 派工出口的机制层监督提醒(治"说了登记提醒却没真调"实锤:模型宣称已登记
-#   非阻塞等待,owner store 的 progress_policies/ 却是空目录——整个盯守窗口零定时唤醒,
-#   中途上报只能等完成事件)。create_subagents 成功后由机制层自动登记,不依赖模型自觉;
-#   已有 enabled 同任务提醒(模型真调过 wait / 上次派工已登记)则不动,不覆盖模型显式
-#   间隔。生命周期完全复用 wait 提醒既有机制:收口自动退休、终态链接抑制、无进展退避。
-#   best-effort:任何失败返回 None,绝不影响派工本身。
 def register_dispatch_supervision_policy(
     agent: object,
     *,
@@ -301,56 +122,7 @@ def _enabled_policy_for(store, thread_id: str, task_id: str):
     return None
 
 
-# 函数用途: 退休"同一线程+同一任务"上已登记的循环提醒——wait 重复登记按更新语义处理。
-def _disable_same_watch_policies(store, thread_id: str, task_id: str) -> None:
-    if not callable(getattr(store, "list_progress_policies", None)):
-        return
-    for policy in store.list_progress_policies(enabled_only=True):
-        if policy.thread_id == thread_id and policy.task_id == task_id:
-            store.disable_progress_policy(policy.policy_id)
-
-
-def _truthy(value: object) -> bool:
-    if isinstance(value, bool):
-        return value
-    return str(value or "").strip().lower() in {"true", "1", "yes"}
-
-
-# 函数用途: 停掉当前任务/会话上已登记的循环提醒（模型显式收手的开关；任务结构化结束时
-#   系统也会自动退休，这里是“任务仍在但确定不用再盯”的手动出口）。按 task_id 或
-#   显式 thread_id 匹配,禁用所有命中的 enabled policy。
-def _cancel_result(agent: object, params: dict[str, object]) -> ToolHandlerOutcome:
-    store = getattr(agent, "conversation_store", None)
-    if store is None or not callable(getattr(store, "list_progress_policies", None)):
-        return _error(
-            "conversation_store_unavailable",
-            "当前运行时没有会话调度存储，没有可取消的提醒。",
-            error_code="TOOL_UNAVAILABLE",
-        )
-    task_id = _task_id(agent, params)
-    thread_id = str(params.get("thread_id") or "").strip()
-    cancelled: list[str] = []
-    for policy in store.list_progress_policies(enabled_only=True):
-        if (task_id and policy.task_id == task_id) or (thread_id and policy.thread_id == thread_id):
-            store.disable_progress_policy(policy.policy_id)
-            cancelled.append(policy.policy_id)
-    payload = {
-        "ok": True,
-        "mode": "cancel",
-        "task_id": task_id,
-        "cancelled_policy_ids": cancelled,
-        "cancelled_count": len(cancelled),
-        "guidance": "循环提醒已停止；若任务已有结果，请核对事实后直接给出最终回复。",
-    }
-    return ToolHandlerOutcome(_TOOL_NAME, True, json.dumps(payload, ensure_ascii=False, indent=2))
-
-
-def _seconds(value: object, agent: object) -> int:
-    if value is None:
-        return _clamp_interval(getattr(getattr(agent, "config", None), "subagent_watch_interval_seconds", 120), default=120)
-    return _clamp_interval(value, default=_MIN_SECONDS)
-
-
+# 函数用途: 监督间隔夹在 60s~7200s，缺省用配置默认值。
 def _clamp_interval(value: object, *, default: int) -> int:
     parsed = _interval_int(value)
     if parsed is None:
@@ -438,69 +210,6 @@ def _task_id(agent: object, params: dict[str, object]) -> str:
 # or business meaning; it only prevents a delay primitive from replacing work
 # that is already durably available.
 # 函数用途: Audit 已有待签收数据时拒绝继续空等，并把精确积压事实返回给模型自行决策。
-def _actionable_audit_input(
-    agent: object,
-    fallback_task_id: str,
-) -> dict[str, object] | None:
-    from ...common.audit_activation import (
-        attributes_request_audit,
-        audit_lineage_task_id,
-        current_audit_attributes,
-    )
-
-    attrs = current_audit_attributes(agent)
-    if not attributes_request_audit(attrs):
-        return None
-    task_id = audit_lineage_task_id(agent) or str(fallback_task_id or "").strip()
-    if not task_id:
-        return None
-    from ...ingestion.audit_state import audit_task_source_facts
-
-    pending_sources: list[dict[str, object]] = []
-    pending_total = 0
-    try:
-        sources = audit_task_source_facts(agent, task_id)
-    except Exception:
-        return None
-    for source in sources:
-        receipt = source.get("audit_receipt")
-        if not isinstance(receipt, dict):
-            continue
-        pending = _nonnegative_int(receipt.get("pending"))
-        if pending <= 0:
-            continue
-        pending_total += pending
-        pending_sources.append(
-            {
-                "watch_id": str(source.get("watch_id") or ""),
-                "pending": pending,
-                "collection_active": bool(source.get("collection_active")),
-                "window_complete": bool(source.get("window_complete")),
-            }
-        )
-    if pending_total <= 0:
-        return None
-    return {
-        "task_id": task_id,
-        "pending_records": pending_total,
-        "sources": pending_sources,
-        "wait_allowed": False,
-        "reason_code": "durable_input_already_available",
-    }
-
-
-# LLM: Receipt counters are typed non-negative integers; malformed projections
-# fail closed to zero here and remain visible through their source-state error.
-# 函数用途: 安全读取积压计数，避免异常值把普通等待误拦。
-def _nonnegative_int(value: object) -> int:
-    if isinstance(value, bool):
-        return 0
-    try:
-        return max(0, int(value))
-    except (TypeError, ValueError):
-        return 0
-
-
 def _error(
     code: str,
     message: str,
@@ -522,4 +231,4 @@ def _error(
     )
 
 
-__all__ = ["WaitTool", "build_wait_model_spec", "register_dispatch_supervision_policy"]
+__all__ = ["register_dispatch_supervision_policy"]

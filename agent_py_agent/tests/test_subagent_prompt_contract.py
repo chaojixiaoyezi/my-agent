@@ -225,41 +225,6 @@ def test_runner_prompt_keeps_worker_template_details_compact():
     assert "你是找茬子代理" not in prompt
 
 
-def test_runner_prompt_exposes_generic_collaboration_control_plane_when_tools_are_allowed():
-    """协作工具已授权时，真实子代理要看到通用控制面动作，而不是只靠自然语言猜。"""
-    context = SubAgentExecutionContext(
-        run_id="worker-collab",
-        generated_at=1.0,
-        goal="观察本地线索，需要其他代理补充证据时发起协作。",
-        thought="",
-        plan=[],
-        role="worker",
-        allowed_tools=[
-            "raise_collaboration",
-            "raise_collaboration",
-            "submit_collaboration_result",
-            "update_collaboration",
-            "update_collaboration",
-            "inspect_collaboration",
-        ],
-        acceptance_checks=["有协作需要时留下 case/request/evidence 引用"],
-    )
-
-    prompt = _build_subagent_runner_prompt(context)
-
-    assert "协作控制面" in prompt
-    assert "raise_collaboration" in prompt
-    assert "submit_collaboration_result" in prompt
-    assert "update_collaboration" in prompt
-    assert "inspect_collaboration" in prompt
-    assert "优先用这个单步工具打开 case 并发出 request" in prompt
-    assert "不要因为缺 case_id 就新开重复 case" in prompt
-    assert "query_hints 是软提示" in prompt
-    assert "collaboration://case/" in prompt
-    assert "collaboration://request/" in prompt
-    assert "不要只在 summary 里说已经协作" in prompt
-
-
 def test_runner_prompt_tells_targeted_responder_to_reuse_existing_collaboration_request():
     """已有请求点名当前 runner 时，优先响应 request，不应再开新 case。"""
     context = SubAgentExecutionContext(
@@ -270,10 +235,8 @@ def test_runner_prompt_tells_targeted_responder_to_reuse_existing_collaboration_
         plan=[],
         role="worker",
         allowed_tools=[
-            "raise_collaboration",
-            "inspect_collaboration",
-            "submit_collaboration_result",
-            "update_collaboration",
+            "read_file",
+            "search_text",
         ],
         context_bundle={
             "collaboration": {
@@ -284,11 +247,7 @@ def test_runner_prompt_tells_targeted_responder_to_reuse_existing_collaboration_
                         "case_ref": "collaboration://case/case-123",
                         "request_ref": "collaboration://request/creq-456",
                         "question": "请补一条证据引用。",
-                        "recommended_tools": [
-                            "inspect_collaboration",
-                            "submit_collaboration_result",
-                            "update_collaboration",
-                        ],
+                        "recommended_tools": [],
                     }
                 ]
             }
@@ -301,9 +260,8 @@ def test_runner_prompt_tells_targeted_responder_to_reuse_existing_collaboration_
     assert "点名给你的协作请求" in prompt
     assert "case-123" in prompt
     assert "creq-456" in prompt
-    assert "优先复用已有 case/request" in prompt
-    assert "不要另开 raise_collaboration" in prompt
-    assert "inspect_collaboration -> submit_collaboration_result -> update_collaboration" in prompt
+    assert "原样引用 case_ref/request_ref 回应" in prompt
+    assert "另开重复 case" in prompt
 
 
 def test_runner_prompt_uses_normal_context_summary_for_task_local_recovery(tmp_path: Path):

@@ -587,7 +587,7 @@ def _structured_from_registered_products(agent, params: SubagentFinalizeParams):
 
 
 def _ledger_findings(agent, run_id: str, cap: int = 100) -> list[dict[str, object]]:
-    """读取本 run 的增量结论账(record_finding 工具边干边写的 findings.jsonl),供合成
+    """读取本 run 的增量结论账(宿主审计链边干边写的 findings.jsonl),供合成
     收尾输出把账带回结构化结果——收尾崩/结果块缺失时结论不清零。代码只搬运不定性。"""
     if not run_id:
         return []

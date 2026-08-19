@@ -20,10 +20,6 @@ _DEFAULT_LEAF_CODING_TOOLS = [
     "inspect_agent_tree",
     "send_guidance",
     "raise_event",
-    "raise_collaboration",
-    "inspect_collaboration",
-    "submit_collaboration_result",
-    "update_collaboration",
     "capability_request",
 ]
 

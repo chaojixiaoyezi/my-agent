@@ -79,7 +79,6 @@ AUDIT_SOURCE_OPEN_FIELDS = (
 # 函数用途: 一源一子代理无论在哪条路径绑定，都只能看见并执行同一组最小工具。
 AUDIT_SOURCE_WORKER_TOOLS = (
     "watch_stream",
-    "record_finding",
     "read_file",
     "read_artifact",
 )

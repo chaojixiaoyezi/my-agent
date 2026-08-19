@@ -685,10 +685,11 @@ def _render_thinking(block: TuiBlock, context: TuiRenderContext) -> tuple[Format
         elapsed = max(0, int(context.now - started_at)) if started_at and context.now else 0
         title = f"Thinking {elapsed // 60}:{elapsed % 60:02d}"
         suffix = _spinner_status_suffix(block, context)
+        title_style = "class:tui-error" if _spinner_is_stalled(context) else "class:tui-thinking"
         activity_lines = wrap_fragments(
             (
-                ("class:tui-thinking", "∴ "),
-                ("class:tui-thinking", title),
+                (title_style, "∴ "),
+                (title_style, title),
                 ("class:tui-muted", suffix),
             ),
             width=context.width,

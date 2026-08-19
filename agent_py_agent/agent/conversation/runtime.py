@@ -339,21 +339,14 @@ _BACKGROUND_WORK_TOOLS = (
     "edit_file",
     "run_command",
     "watch_stream",
-    "record_finding",
     "task_progress",
     "resolve_capability_requests",
     "cancel_subagents",
-    "authorize_network_host",
 )
 
 DEFAULT_BACKGROUND_ALLOWED_TOOLS = (
-    "wait",
     "inspect_agent_tree",
     "raise_event",
-    "raise_collaboration",
-    "inspect_collaboration",
-    "submit_collaboration_result",
-    "update_collaboration",
     "dispatch_subagents",
     "send_guidance",
     "create_subagents",
@@ -361,14 +354,12 @@ DEFAULT_BACKGROUND_ALLOWED_TOOLS = (
 )
 
 # A typed finding is already durable before it wakes the owner Agent.  The
-# reporting turn may inspect, coordinate, investigate and deliver it, but must
-# not record the same event again under model-chosen prose or a second id.  This
-# is the same authority split as 会话运行时's event/delivery lifecycle: the producer
-# owns persistence, while the consumer owns acknowledgement and presentation.
-# Proactive delivery uses the common typed send_message receipt; final text is
-# internal coordination output and is never a second sender.
+# reporting turn may inspect, coordinate, investigate and deliver it, but does
+# not get a persistence tool: the producer owns persistence, the consumer owns
+# acknowledgement and presentation.  Proactive delivery uses the common typed
+# send_message receipt; final text is internal coordination output.
 AUDIT_FINDING_ALLOWED_TOOLS = (
-    *(tool for tool in DEFAULT_BACKGROUND_ALLOWED_TOOLS if tool != "record_finding"),
+    *DEFAULT_BACKGROUND_ALLOWED_TOOLS,
     "send_message",
 )
 
@@ -387,13 +378,8 @@ GOAL_SUBAGENTS_ACTIVE_ALLOWED_TOOLS = GOAL_BACKGROUND_ALLOWED_TOOLS
 GOAL_SUBAGENTS_TERMINAL_ALLOWED_TOOLS = GOAL_BACKGROUND_ALLOWED_TOOLS
 
 CONTROL_ACTION_DESCRIPTIONS = {
-    "wait": "登记到点自动唤醒你的非阻塞提醒；等子代理进度、盯持续变化的数据/文件都用它，不要原地轮询。",
     "inspect_agent_tree": "只读查看主/子/孙代理状态树。",
     "raise_event": "记录普通进展、阻塞或需要主代理处理的事件。",
-    "raise_collaboration": "发起协作；没有 case_id 时开 case，有 question/target 时同步发 request。",
-    "inspect_collaboration": "只读查看协作 case 或待处理协作请求。",
-    "submit_collaboration_result": "提交协作命中、未命中、证据引用和限制说明。",
-    "update_collaboration": "更新协作 case 或 request；带 target_agent_ids 可改派请求。",
     "dispatch_subagents": "只有需要推进、恢复或调度时才调用。",
     "send_guidance": "给正在运行的代理追加软提示。",
     "create_subagents": "创建并启动新的下级代理。",
@@ -404,7 +390,6 @@ CONTROL_ACTION_DESCRIPTIONS = {
     "edit_file": "修订/整合已有交付文件。",
     "run_command": "运行 import/测试做交付前自检。",
     "watch_stream": "读取有持久游标和覆盖账的数据源；Audit 模式按完整记录和 ack/source_ref 对账。",
-    "record_finding": "可选地把一条带证据引用的任务事实写入耐久账本。",
     "task_progress": "更新任务清单进展。",
     "resolve_capability_requests": "批准或拒绝子代理的能力申请,让它能继续干。",
     "cancel_subagents": "了结救不回来的子代理(重派/给提示都无效时),别让空壳拖住整个任务收尾。",
@@ -1548,7 +1533,6 @@ def _internal_subagent_continuation(request: BackgroundRunRequest) -> bool:
     return str(wake.get("registered_by_tool") or "").strip() in {
         "goal_progress_continuation",
         "dispatch_supervision_auto",
-        "wait",
     }
 
 

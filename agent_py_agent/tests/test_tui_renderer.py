@@ -348,17 +348,16 @@ def test_spinner_metrics_stall_color_and_bottom_order_match_reference() -> None:
         ),
     )
     texts = _frame_lines(frame)
-    spinner_index = next(
-        index for index, text in enumerate(texts) if text.startswith(("✻ ", "✢ ", "✶ "))
+    thinking_index = next(
+        index for index, text in enumerate(texts) if text.startswith("∴ Thinking")
     )
-    spinner_line = frame.transcript_lines[spinner_index]
+    thinking_line = frame.transcript_lines[thinking_index]
 
-    assert texts.index("● done") < spinner_index
-    assert texts.index("● Read") < spinner_index
-    assert "31s" in texts[spinner_index]
-    assert "↓ 1.2k tokens" in texts[spinner_index]
-    assert {style for style, _text in spinner_line[:-1]} == {"class:tui-error"}
-    assert "⎿\u00a0Tip:" in texts[spinner_index + 1]
+    assert texts.index("● done") < thinking_index
+    assert texts.index("● Read") < thinking_index
+    assert "31s" in texts[thinking_index]
+    assert "↓ 1.2k tokens" in texts[thinking_index]
+    assert {style for style, _text in thinking_line[:-1]} == {"class:tui-error"}
 
 
 def test_visible_assistant_stream_hides_global_activity_spinner() -> None:
@@ -395,7 +394,7 @@ def test_completed_thinking_collapses_and_detailed_mode_expands() -> None:
     )
     assert _frame_lines(collapsed) == ["∴ Thought for 10s (ctrl+o to expand)"]
     assert _frame_lines(detailed)[0] == "∴ Thought for 10s"
-    assert "  private reasoning" in _frame_lines(detailed)
+    assert "（private reasoning）" in _frame_lines(detailed)
     assert fragments_text(detailed.footer).startswith("  Showing detailed transcript")
 
 
@@ -416,23 +415,32 @@ def test_block_cache_reuses_stable_history_when_active_stream_changes() -> None:
     assert stats.entries == 3
 
 
-def test_thinking_cache_key_covers_the_real_highlight_cycle() -> None:
+def test_thinking_cache_key_covers_timer_and_stall_cycle() -> None:
     cache = TuiBlockRenderCache(max_entries=10)
     block = TuiBlock(
         block_id="spinner:thinking",
         kind="thinking_started",
         role="thinking",
         phase="started",
+        metadata={"started_at": 100.0},
     )
 
-    first = cache.render(block, TuiRenderContext(width=80, spinner_index=0))
-    after_old_magic_cycle = cache.render(
+    first = cache.render(
         block,
-        TuiRenderContext(width=80, spinner_index=120),
+        TuiRenderContext(width=80, now=100.0, status_started_at=100.0, status_last_event_at=99.0),
+    )
+    second_elapsed = cache.render(
+        block,
+        TuiRenderContext(width=80, now=105.0, status_started_at=100.0, status_last_event_at=104.0),
+    )
+    third_stalled = cache.render(
+        block,
+        TuiRenderContext(width=80, now=110.0, status_started_at=100.0, status_last_event_at=101.0),
     )
 
-    assert after_old_magic_cycle != first
-    assert cache.stats().misses == 2
+    assert second_elapsed != first
+    assert third_stalled != second_elapsed
+    assert cache.stats().misses == 3
 
 
 def test_tool_preview_is_bounded_and_show_all_expands_it() -> None:

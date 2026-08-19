@@ -58,9 +58,6 @@ _ACCESS_MODES = frozenset({"restricted", "workspace-write", "full-access"})
 _ACCESS_MODE_RANK = {"restricted": 0, "workspace-write": 1, "full-access": 2}
 _TOOL_DEADLINE_UNIX_ENV = "MY_AGENT_TOOL_DEADLINE_UNIX"
 _TOOL_DEADLINE_MARGIN_SECONDS_ENV = "MY_AGENT_TOOL_DEADLINE_MARGIN_SECONDS"
-_WAIT_MIN_SECONDS = 60
-_WAIT_MAX_SECONDS = 7200
-
 # shell 解释器错误前缀白名单(command not found 判定用, 2026-08-14):
 # bash/sh/zsh 找不到命令时 stderr 固定以 "<shell>: " 开头(如
 # "/bin/bash: 行 1: cmd: 未找到命令" 中文 locale 亦然), 不随 locale 变;
@@ -141,102 +138,6 @@ def _parsed_command_or_error(tool_name: str, raw_command: object) -> str | ToolH
         return ToolHandlerOutcome(tool_name, False, str(exc), error_code="COMMAND_TOO_LONG")
     except ValueError as exc:
         return ToolHandlerOutcome(tool_name, False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
-
-
-def _pure_delay_seconds(command: str) -> int | None:
-    try:
-        tokens = shlex.split(command.strip().rstrip(";"))
-    except ValueError:
-        return None
-    if not tokens:
-        return None
-    head = tokens[0].lower()
-    if head == "sleep":
-        return _leading_sleep_delay_seconds(tokens[1:])
-    if head == "timeout":
-        return _timeout_delay_seconds(tokens[1:])
-    if head == "start-sleep":
-        return _start_sleep_delay_seconds(tokens[1:])
-    return None
-
-
-def _leading_sleep_delay_seconds(tokens: list[str]) -> int | None:
-    if len(tokens) == 1:
-        return _delay_token_seconds(tokens[0])
-    if (
-        len(tokens) >= 3
-        and tokens[1] in {"&&", ";"}
-        and tokens[2].lower() in {"echo", "printf", "true"}
-    ):
-        return _delay_token_seconds(tokens[0])
-    return None
-
-
-def _delay_token_seconds(value: str) -> int | None:
-    text = str(value or "").strip().lower()
-    if not text:
-        return None
-    multiplier = 1
-    if text.endswith(("s", "m", "h")):
-        suffix = text[-1]
-        text = text[:-1]
-        multiplier = {"s": 1, "m": 60, "h": 3600}[suffix]
-    try:
-        seconds = float(text) * multiplier
-    except ValueError:
-        return None
-    if seconds <= 0 or seconds != seconds:
-        return None
-    return max(1, int(seconds))
-
-
-def _timeout_delay_seconds(tokens: list[str]) -> int | None:
-    positional: list[str] = []
-    index = 0
-    while index < len(tokens):
-        token = tokens[index].lower()
-        if token in {"/t", "-t"} and index + 1 < len(tokens):
-            return _delay_token_seconds(tokens[index + 1])
-        if token in {"/nobreak", "-nobreak"}:
-            index += 1
-            continue
-        positional.append(tokens[index])
-        index += 1
-    return _delay_token_seconds(positional[0]) if len(positional) == 1 else None
-
-
-def _start_sleep_delay_seconds(tokens: list[str]) -> int | None:
-    if len(tokens) == 1:
-        return _delay_token_seconds(tokens[0])
-    for index, token in enumerate(tokens):
-        if token.lower() in {"-seconds", "-s"} and index + 1 < len(tokens):
-            return _delay_token_seconds(tokens[index + 1])
-    return None
-
-
-def _delay_command_result(seconds: int) -> ToolHandlerOutcome:
-    suggested_seconds = min(_WAIT_MAX_SECONDS, max(_WAIT_MIN_SECONDS, seconds))
-    payload = {
-        "ok": False,
-        "error": "use_wait_for_delay",
-        "message": "run_command does not execute pure delay commands. Use wait so progress watching does not block the local shell.",
-        "requested_seconds": seconds,
-        "suggested_tool_call": {
-            "tool": "wait",
-            "seconds": suggested_seconds,
-            "reason": "wait before checking progress again",
-        },
-    }
-    # 0ms 拦截、进程从未启动——副作用已证明未发生(not_started),不是「可能已生效」。
-    # 不标的话 operation coordinator 会按「handler 进入过」保守包成
-    # TOOL_OPERATION_OUTCOME_UNKNOWN,把可证明的零副作用撒谎成不确定。
-    return ToolHandlerOutcome(
-        "run_command",
-        False,
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        error_code="USE_WAIT_FOR_DELAY",
-        effect_outcome="not_started",
-    )
 
 
 def _internal_agent_status_command(command: str) -> dict[str, object] | None:
@@ -940,10 +841,6 @@ class ShellTool(BaseTool):
                 json.dumps(internal_status_ref, ensure_ascii=False, indent=2),
                 error_code="WRONG_STATUS_SURFACE",
             )
-        delay_seconds = _pure_delay_seconds(command)
-        if delay_seconds is not None:
-            return _delay_command_result(delay_seconds)
-
         timeout = _timeout_from_params(params, self.default_timeout)
         if timeout <= 0:
             return ToolHandlerOutcome(

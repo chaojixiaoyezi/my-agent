@@ -321,22 +321,6 @@ class TestShellToolTimeout:
         assert result.ok is False
         assert "超时" in result.output
 
-    def test_pure_delay_uses_wait_surface(self, tmp_path: Path):
-        """纯等待命令不应占住 shell worker。"""
-        from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
-
-        workspace = tmp_path / "workspace"
-        workspace.mkdir()
-
-        tool = ShellTool(workspace, options=ShellToolOptions(default_timeout=30))
-        result = tool.execute({"command": "sleep 100"})
-
-        assert result.ok is False
-        assert result.error_code == "USE_WAIT_FOR_DELAY"
-        assert result.effect_outcome == "not_started"
-        assert '"tool": "wait"' in result.output
-
-
 class TestShellToolValidation:
     """测试命令校验。"""
 

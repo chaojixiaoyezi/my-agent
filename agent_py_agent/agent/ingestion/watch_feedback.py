@@ -6,15 +6,15 @@
 
 - B2 抽检车道:对被压组的常态流按【轮换】抽代表样本(每签名组被抽次数升序,少抽的
   先抽)喂给模型判,撞见结构筛盲区。有界:每 call 上限 + 每分钟允额(独立滑窗)。
-- B3 反馈学习:模型经 record_finding 确认一条候选后(带 watch_id+stream_pos),把该
-  事件的【结构特征键】(字面取值/首记号,与引擎取值计数器同键)记入学习库;此后同键
+- B3 反馈学习:宿主把带 watch_id+stream_pos 的确认写入收件箱后,把该事件的
+  【结构特征键】(字面取值/首记号,与引擎取值计数器同键)记入学习库;此后同键
   事件走反馈车道直接抬升——锚定在已确认真目标上,不猜。特征洪泛有界(每特征每窗口
   抬升上限),持续抬而无新确认的特征自动退休(新确认自动复活)。
 - B4 自适应倾斜:抽检允额按本源的结构化盲区证据(抽检确认过 / 反馈车道在干活 /
   筛长期零抬升)在 base 与 tilt 两档间切换——筛得差的源多抽。
 
-对账通路:引擎发出候选/示例时把 (stream_pos → 特征键) 记入有界环;record_finding
-只回传 watch_id+stream_pos(收件箱 ndjson,append-only);引擎属主消费收件箱,环上
+对账通路:引擎发出候选/示例时把 (stream_pos → 特征键) 记入有界环;确认行只回传
+watch_id+stream_pos(收件箱 ndjson,append-only);引擎属主消费收件箱,环上
 命中即注册特征。跨进程成立(收件箱在盘上),环随引擎快照持久化。
 """
 
@@ -297,7 +297,7 @@ def inbox_path(owner_home: Path, watch_id: str) -> Path:
 
 
 def append_confirmation(owner_home: Path, watch_id: str, stream_pos: int) -> bool:
-    """record_finding 侧:把一条确认(watch_id+stream_pos)追加进收件箱。best-effort:
+    """确认侧:把一条确认(watch_id+stream_pos)追加进收件箱。best-effort:
     watch 不存在/写失败都返回 False,绝不影响结论账主通道。"""
     state_file = Path(owner_home) / "watch_state" / f"{watch_id}.json"
     if not state_file.is_file():

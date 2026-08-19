@@ -107,54 +107,6 @@ _REQUIRED_OUTPUT_GUIDE = (
 )
 
 
-COLLABORATION_CONTROL_PLANE_TOOLS = (
-    "inspect_collaboration",
-    "raise_collaboration",
-    "submit_collaboration_result",
-    "update_collaboration",
-)
-
-COLLABORATION_TOOL_HINTS = (
-    ("inspect_collaboration", "- inspect_collaboration：先读取已有 case/request 状态，避免重复开 case 或重复提交同一份证据。"),
-    (
-        "inspect_collaboration",
-        "- inspect_collaboration：如果你知道自己被要求协作、但不知道 case_id/request_id，"
-        "先用它按自己的 agent_id/agent_name/role 查询待响应请求；不要因为缺 case_id 就新开重复 case。",
-    ),
-    (
-        "raise_collaboration",
-        "- raise_collaboration：如果你发现需要其他代理、其他数据源或上级共同补证据，"
-        "优先用这个单步工具打开 case 并发出 request；不要只在 output.json 里写 collaboration_required。"
-        "它接受 observed_facts/query_hints/response_contract 等开放世界字段，不要求业务专项格式。",
-    ),
-    (
-        "raise_collaboration",
-        "- raise_collaboration：发现需要多代理共同研判、补证据、换数据源或跟踪阻塞时，"
-        "打开通用协作 case，写清 title、summary、entities 和 required_capabilities。",
-    ),
-    (
-        "raise_collaboration",
-        "- raise_collaboration：需要其他代理补证据时发起请求，写清 question、target_agent_ids 或 required_capabilities；"
-        "如果发现的是可被多方查证的线索，把 observed_facts、query_intent、query_hints、response_contract 和 context_refs 一起交出去。"
-        "query_hints 是软提示，响应代理可自行拆分或改写。请求引用形如 collaboration://request/<id>。",
-    ),
-    (
-        "submit_collaboration_result",
-        "- submit_collaboration_result：回应协作请求时提交 refs-first 证据，优先给 evidence_refs/artifact_refs、matched、confidence 和简短 summary，"
-        "不要把长正文塞进消息。",
-    ),
-    (
-        "update_collaboration",
-        "- update_collaboration：完成、阻塞或需要返工时更新 request 状态，把 actor_agent_id、summary 和必要的 request 引用写清楚。",
-    ),
-    (
-        "update_collaboration",
-        "- update_collaboration：原目标没有证据、不可用或更合适的来源已出现时，用结构化 target_agent_ids 改派；"
-        "不要只在 summary 里说已经协作或已经转派。",
-    ),
-)
-
-
 # 子代理默认 thought / plan 模板的权威位置；create_policy 派工链路只引用不复制。
 SUBAGENT_DEFAULT_THOUGHT = "根据父代理派工执行，并保留可验收证据。"
 SUBAGENT_DEFAULT_PLAN: tuple[str, ...] = ("理解目标", "执行任务", "产出证据", "交回真实结果和证据")
@@ -389,7 +341,7 @@ def _build_audit_source_runner_prompt(
             "如果提交后才发现某条判错，对该条追加 review=true 的结构化"
             "更正：原样提供 ack_id/source_ref/event_sha256，提交更正后的"
             "verdict/score/note，不带 delivery_ref；需要升级的 finding 可与复核"
-            "同行原子落账。record_finding 不能更改已有 verdict；"
+            "同行原子落账。补证/组合结论不会更改已有 verdict；"
             "delivery_ref 不能代替逐条语义判断；"
             "未拉取的数据留在队列，已经签收的数据不要凭记忆重做。是否形成 finding、"
             "是否需要事件升级，由你依据用户目标、来源资料和实际证据判断。"
@@ -448,7 +400,7 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
         "- capability_request 工具返回 OPEN 后，最终结果块写 status=PENDING_CAPABILITY_REQUEST 或 BLOCKED，"
         "不要继续假装能力已经授权或命令已经执行。",
     ]
-    lines.extend(_collaboration_control_plane_lines(context))
+    lines.extend(_targeted_request_lines(context))
     lines.extend(_controlled_exec_contract_lines(context))
     lines.extend(_current_role_template_lines(context))
     lines.extend(_root_execution_contract_lines(context))
@@ -520,35 +472,13 @@ def required_product_contract_lines(context: SubAgentExecutionContext) -> list[s
     ]
 
 
-def _collaboration_control_plane_lines(context: SubAgentExecutionContext) -> list[str]:
-    tools = set(context.allowed_tools or [])
-    granted = [tool for tool in COLLABORATION_CONTROL_PLANE_TOOLS if tool in tools]
-    if not granted:
-        return []
-    return [
-        *_collaboration_intro_lines(),
-        *_targeted_request_lines(context),
-        *_collaboration_tool_lines(tools),
-        *_collaboration_closeout_lines(),
-    ]
-
-
-def _collaboration_intro_lines() -> list[str]:
-    return [
-        "- 协作控制面：你已获得部分多代理协作工具。"
-        "当任务需要兄弟代理、上级代理或其他数据源共同补证据/换来源时，"
-        "不要只在自然语言报告里描述协作，应该用已授权工具留下结构化 case、request 或 evidence 引用。"
-    ]
-
-
 def _targeted_request_lines(context: SubAgentExecutionContext) -> list[str]:
     requests = _targeted_collaboration_requests(context)
     if not requests:
         return []
     lines = [
-        "- 点名给你的协作请求：优先复用已有 case/request；"
-        "处理顺序是 inspect_collaboration -> submit_collaboration_result -> update_collaboration。"
-        "除非发现全新问题，不要另开 raise_collaboration。"
+        "- 点名给你的协作请求：在最终 SUBAGENT_RESULT 的证据/结论里原样引用 case_ref/request_ref 回应；"
+        "不要把请求内容重述成新问题或另开重复 case。"
     ]
     for request in requests[:3]:
         lines.extend(_single_targeted_request_lines(request))
@@ -577,18 +507,6 @@ def _request_ref_line(request: dict[str, object]) -> str:
         f"request_ref={request.get('request_ref') or ''}; "
         f"question={request.get('question') or ''}"
     )
-
-
-def _collaboration_tool_lines(tools: set[str]) -> list[str]:
-    lines: list[str] = []
-    for name, message in COLLABORATION_TOOL_HINTS:
-        if name in tools:
-            lines.append(message)
-    return lines
-
-
-def _collaboration_closeout_lines() -> list[str]:
-    return ["- 协作结果要落到账本或产物：最终 evidence_packets/next_actions 中引用 collaboration://case/<id>、collaboration://request/<id> 或真实 artifact/evidence refs，方便上级从 tree/case 状态继续看和调度。"]
 
 
 def _targeted_collaboration_requests(context: SubAgentExecutionContext) -> list[dict[str, object]]:
