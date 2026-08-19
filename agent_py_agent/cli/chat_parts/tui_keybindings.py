@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import base64
 import os
+import shutil
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -740,14 +742,22 @@ def _handle_bracketed_paste(event, params: TuiCreateKeybindingsParams) -> None:
 
 
 # LLM: Ctrl-V 只读取 prompt_toolkit 应用剪贴板；系统剪贴板仍由终端通过 bracketed paste 注入，不能在 TUI 内猜平台命令。
-# 函数用途: 把本 TUI 刚复制的文本粘贴到输入框，支持替换当前选区。
+# 函数用途: 把本 TUI 刚复制的文本粘贴到输入框，支持替换当前选区；应用剪贴板为空时给出可操作提示。
 def _handle_clipboard_paste(event, params: TuiCreateKeybindingsParams) -> None:
     clipboard = getattr(event.app, "clipboard", None)
     get_data = getattr(clipboard, "get_data", None)
     if not callable(get_data):
         return
     data = get_data()
-    _insert_pasted_text(event, params, str(getattr(data, "text", "") or ""))
+    text = str(getattr(data, "text", "") or "")
+    if not text:
+        _required_tui_runtime(params).set_notice(
+            "应用剪贴板为空：系统粘贴请用 Cmd-V / Ctrl-Shift-V",
+            duration_seconds=1.6,
+        )
+        event.app.invalidate()
+        return
+    _insert_pasted_text(event, params, text)
 
 
 def _handle_command_params(params: TuiCreateKeybindingsParams, text: str) -> TuiHandleCommandParams:
@@ -1324,7 +1334,7 @@ def _copy_transcript_selection(event, params: TuiCreateKeybindingsParams) -> boo
 
 
 # LLM: clipboard 输出仅编码用户已显式选中的可见文本；超大文本仍进 app clipboard，但不发送可能被终端截断的 OSC 52。
-# 函数用途: 同时写 prompt_toolkit 内部剪贴板和终端 OSC 52 剪贴板。
+# 函数用途: 同时写 prompt_toolkit 内部剪贴板、本机系统剪贴板和终端 OSC 52 剪贴板。
 def _write_selection_clipboard(application: Any, text: str) -> None:
     from prompt_toolkit.clipboard import ClipboardData
 
@@ -1333,6 +1343,15 @@ def _write_selection_clipboard(application: Any, text: str) -> None:
     encoded = normalized.encode("utf-8")
     if not encoded or len(encoded) > 100_000:
         return
+    # native 路径先于 tmux/OSC 52 启动（终端交互 同款）：无 SSH_CONNECTION 时本机
+    # 剪贴板工具直接写系统剪贴板，避免快速切走焦点后粘贴被 tmux 等待拖慢。
+    if not os.environ.get("SSH_CONNECTION"):
+        threading.Thread(
+            target=_copy_native_clipboard,
+            args=(normalized,),
+            name="my-agent-tui-clipboard-native",
+            daemon=True,
+        ).start()
     if os.environ.get("TMUX"):
         threading.Thread(
             target=_load_tmux_clipboard_buffer,
@@ -1349,6 +1368,63 @@ def _write_selection_clipboard(application: Any, text: str) -> None:
     flush = getattr(output, "flush", None)
     if callable(flush):
         flush()
+
+
+# LLM: SSH 会话（tmux pane 继承 SSH_TTY）不能以 SSH_TTY 判断远端；SSH_CONNECTION 在 tmux 默认
+# update-environment 中会被清除，本地 attach 后 native 自动恢复。失败静默，OSC 52 可能已成功。
+# 函数用途: 用本机剪贴板工具把文本写入系统剪贴板（仅本地无 SSH 会话时；远端写的是远端剪贴板）。
+def _copy_native_clipboard(text: str) -> None:
+    if os.environ.get("SSH_CONNECTION"):
+        return
+    if sys.platform == "darwin":
+        _run_clipboard_tool(["pbcopy"], text)
+        return
+    if sys.platform.startswith("linux"):
+        tool = _linux_clipboard_tool()
+        if tool is not None:
+            _run_clipboard_tool(tool, text)
+        return
+    if sys.platform == "win32":
+        _run_clipboard_tool(["clip"], text)
+
+
+_linux_clipboard_tool_cache: list[str] | None = None
+_linux_clipboard_tool_lock = threading.Lock()
+
+
+# LLM: Linux 剪贴板工具探测结果缓存，避免每次鼠标松手重复探测（终端交互 同款缓存）。
+# 函数用途: 按 Wayland→X11 顺序探测可用剪贴板命令；无可用返回 None。
+def _linux_clipboard_tool() -> list[str] | None:
+    global _linux_clipboard_tool_cache
+    with _linux_clipboard_tool_lock:
+        if _linux_clipboard_tool_cache is not None:
+            return _linux_clipboard_tool_cache or None
+        for candidate in (
+            ["wl-copy"],
+            ["xclip", "-selection", "clipboard"],
+            ["xsel", "--clipboard", "--input"],
+        ):
+            if shutil.which(candidate[0]) is not None:
+                _linux_clipboard_tool_cache = candidate
+                return candidate
+        _linux_clipboard_tool_cache = []
+        return None
+
+
+def _run_clipboard_tool(args: list[str], text: str) -> bool:
+    try:
+        result = subprocess.run(
+            args,
+            input=str(text or ""),
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2.0,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
 
 
 # LLM: tmux may drop DCS passthrough when allow-passthrough is off. Its own paste buffer is the

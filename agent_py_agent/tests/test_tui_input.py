@@ -788,3 +788,90 @@ def test_permission_y_n_shortcuts_use_typed_decisions(monkeypatch) -> None:
     params.transcript_state.enter(runtime.store.snapshot())
     params.transcript_state.open_search(0)
     assert tui_keybindings._transcript_scroll_active(params) is False
+
+
+def test_native_clipboard_runs_pbcopy_when_local_macos(monkeypatch) -> None:
+    calls: list[tuple[list[str], str]] = []
+
+    class Result:
+        returncode = 0
+
+    def fake_run(args, *, input, **_kwargs):
+        calls.append((list(args), input))
+        return Result()
+
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.setattr(tui_keybindings.sys, "platform", "darwin")
+    monkeypatch.setattr(tui_keybindings.subprocess, "run", fake_run)
+
+    assert tui_keybindings._run_clipboard_tool(["pbcopy"], "正文") is True
+    tui_keybindings._copy_native_clipboard("正文")
+    assert calls[1] == (["pbcopy"], "正文")
+
+
+def test_native_clipboard_skipped_over_ssh(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_run(args, *, input, **_kwargs):
+        calls.append(args[0])
+        return type("R", (), {"returncode": 0})()
+
+    monkeypatch.setenv("SSH_CONNECTION", "192.168.1.13 54321 10.0.0.1 22")
+    monkeypatch.setattr(tui_keybindings.sys, "platform", "darwin")
+    monkeypatch.setattr(tui_keybindings.subprocess, "run", fake_run)
+
+    tui_keybindings._copy_native_clipboard("远端不写本机剪贴板")
+    assert calls == []
+
+
+def test_linux_clipboard_tool_probe_wayland_then_x11_and_caches(monkeypatch) -> None:
+    monkeypatch.setattr(tui_keybindings, "_linux_clipboard_tool_cache", None)
+    monkeypatch.setattr(
+        tui_keybindings.shutil,
+        "which",
+        lambda name: "/usr/bin/" + name if name in {"wl-copy", "xsel"} else None,
+    )
+
+    assert tui_keybindings._linux_clipboard_tool() == ["wl-copy"]
+    # 第二次命中缓存，不再探测
+    monkeypatch.setattr(
+        tui_keybindings.shutil,
+        "which",
+        lambda name: None,
+    )
+    assert tui_keybindings._linux_clipboard_tool() == ["wl-copy"]
+
+
+def test_linux_clipboard_tool_falls_back_to_xclip(monkeypatch) -> None:
+    monkeypatch.setattr(tui_keybindings, "_linux_clipboard_tool_cache", None)
+    monkeypatch.setattr(
+        tui_keybindings.shutil,
+        "which",
+        lambda name: "/usr/bin/xclip" if name == "xclip" else None,
+    )
+
+    assert tui_keybindings._linux_clipboard_tool() == ["xclip", "-selection", "clipboard"]
+
+
+def test_write_selection_clipboard_starts_native_thread_when_local(monkeypatch) -> None:
+    from prompt_toolkit.clipboard import InMemoryClipboard
+
+    started: list[tuple[str, tuple]] = []
+    output = SimpleNamespace(
+        write_raw=lambda payload: None,
+        flush=lambda: None,
+    )
+    app = SimpleNamespace(clipboard=InMemoryClipboard(), output=output)
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("TMUX", raising=False)
+
+    def fake_start(thread_self, **kwargs):
+        started.append((thread_self._target.__name__, thread_self._args))
+        return None
+
+    monkeypatch.setattr(tui_keybindings.threading.Thread, "start", fake_start)
+
+    tui_keybindings._write_selection_clipboard(app, "本地复制")
+
+    assert [name for name, _ in started] == ["_copy_native_clipboard"]
+    assert app.clipboard.get_data().text == "本地复制"
