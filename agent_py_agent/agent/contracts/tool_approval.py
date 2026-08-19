@@ -16,7 +16,9 @@ ToolApprovalDecisionValue = Literal[
     "cancelled",
     "unavailable",
 ]
-_DECISION_VALUES = frozenset({"approved", "denied", "cancelled", "unavailable"})
+_DECISION_VALUES = frozenset(
+    {"approved", "approved_session", "denied", "cancelled", "unavailable"}
+)
 
 
 # LLM: ToolApprovalCallIdentity 只暴露生成审批 binding 所需的 canonical ToolCall 字段；合同层不得反向导入 tooling 实现。
@@ -235,6 +237,13 @@ def build_tool_approval_request(
                 "id": "allow_once",
                 "label": "Yes",
                 "decision": "approved",
+                "feedback_type": "accept",
+                "feedback_placeholder": "tell my-agent what to do next",
+            },
+            {
+                "id": "allow_session",
+                "label": "Yes, always for this session",
+                "decision": "approved_session",
                 "feedback_type": "accept",
                 "feedback_placeholder": "tell my-agent what to do next",
             },

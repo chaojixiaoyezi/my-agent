@@ -6,11 +6,21 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.agent.capability.persona_repository import (
     PersonaMutationRequest,
     PersonaRepository,
 )
 from agent_py_agent.agent.capability.persona_tool import UpdatePersonaTool
+
+
+@pytest.fixture(autouse=True)
+def _reset_persona_rate_limit():
+    from agent_py_agent.agent.capability.persona_tool import _reset_persona_update_rate_limit
+    _reset_persona_update_rate_limit()
+    yield
+    _reset_persona_update_rate_limit()
 from agent_py_agent.agent.conversation.authority import CONVERSATION_AUDIT_PREPARE_ATTR
 from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
 

@@ -317,6 +317,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     local_store_events_path: str = ""
     local_store_fts_enabled: bool = True
     prompt_files: list[str] = field(default_factory=lambda: ["builtin:prompts/default.md"])
+    # 额外可写根（沙箱写边界扩展）：任务 work/output 之外的目录也允许模型写入。
+    # 会话运行时 对应 sandbox_workspace_write.writable_roots；测试/用户可配置共享工作区。
+    additional_write_roots: list[str] = field(default_factory=list)
     enable_subagents: bool = True
     subagent_mode: str = "trusted_local_hardening"
     max_subagents: int = 50

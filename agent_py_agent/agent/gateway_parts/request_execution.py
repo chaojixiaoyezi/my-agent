@@ -21,7 +21,7 @@ from ..common.audit_activation import (
     AUDIT_ATTR,
 )
 from ..concurrency.interrupt import is_interrupted
-from ..contracts.tool_approval import ToolApprovalRequest
+from ..contracts.tool_approval import ToolApprovalDecision, ToolApprovalRequest
 from ..conversation.active_turn_input import (
     exclude_active_turn_user_input_ids,
     merge_active_turn_user_inputs,
@@ -180,6 +180,9 @@ class BufferedChunkStreamWriter:
     _observed_tool_rounds: int = 0
     interactive_approvals: bool = False
     rich_transcript: bool = False
+    # 会话级审批缓存（会话运行时 ApprovedForSession）：用户选"本次会话允许"后，
+    # 同工具同参数哈希的后续调用直接放行，不再弹确认框。
+    _session_approved_keys: set[str] = field(default_factory=set)
 
     def __call__(self, text: str) -> None:
         self.write(text)
@@ -435,6 +438,25 @@ class BufferedChunkStreamWriter:
         request = ToolApprovalRequest.from_mapping(request_value)
         if not self.interactive_approvals:
             return unavailable_gateway_permission_decision(request).to_dict()
+        session_key = _permission_session_key(request)
+        if session_key and session_key in self._session_approved_keys:
+            # 会话级已批准：直接放行，不弹确认框（会话运行时 ApprovedForSession）。
+            decision = ToolApprovalDecision(request.permission_id, "approved")
+            write_chunk_event(
+                self.chunk_path,
+                {
+                    "kind": "permission_requested",
+                    "permission": request.to_dict(),
+                },
+            )
+            write_chunk_event(
+                self.chunk_path,
+                {
+                    "kind": "permission_resolved",
+                    **decision.to_dict(),
+                },
+            )
+            return decision.to_dict()
         self.flush()
         self._write_model_commentary_at_boundary()
         write_chunk_event(
@@ -449,6 +471,11 @@ class BufferedChunkStreamWriter:
             request,
             cancellation_token=cancellation_token,
         )
+        if (
+            session_key
+            and str(decision.decision or "").strip().lower() == "approved_session"
+        ):
+            self._session_approved_keys.add(session_key)
         write_chunk_event(
             self.chunk_path,
             {
@@ -2869,6 +2896,9 @@ def _handle_gateway_request(
     finally:
         _stop_gateway_request_lease(lease_stop, lease_thread)
         chunk_writer.close()
+        # 回合结束必收口未消费的补充消息（会话运行时 语义：pending input 不得挂在已结束
+        # turn 上占 conversation lane；否则同 thread 后续请求全部排队挂起——#7 实证）。
+        _settle_pending_gateway_guidance(agent, context["request_id"])
         _record_gateway_stage(stage_timings, "execution_ms", execution_started_mono)
         stage_timings["total_ms"] = round((time.monotonic() - started_mono) * 1000, 1)
     _project_observed_gateway_run_facts(response, chunk_writer)
@@ -2877,6 +2907,34 @@ def _handle_gateway_request(
     _finalize_gateway_response(context, response)
     _complete_gateway_request_audit(agent, context, request_path, response)
     return response
+
+
+# LLM: 会话级审批键 = 工具名 + 参数哈希（会话运行时 规范化命令 key 的等价物）；同一调用
+# 再次出现时不再询问。permission_id 因 request 变化不含在内。
+# 函数用途: 生成审批会话缓存的稳定键。
+def _permission_session_key(request: ToolApprovalRequest) -> str:
+    binding = getattr(request, "binding", None)
+    if not isinstance(binding, dict):
+        return ""
+    tool = str(binding.get("tool_name") or "").strip()
+    args_hash = str(binding.get("args_hash") or "").strip()
+    if not tool or not args_hash:
+        return ""
+    return f"{tool}:{args_hash}"
+
+
+# LLM: 回合结束时未消费的 steer/guidance 必须收口（reject），否则残留消息占住
+# conversation lane，同一 thread 的后续请求永久排队（#7 真机实证：进行中提交的消息
+# 在回合结束后挂 processing）。收口失败留给 recovery 兜底，静默不反噬执行路径。
+# 函数用途: 在回合终态落账前拒绝该回合仍挂起的补充消息。
+def _settle_pending_gateway_guidance(agent: SimpleAgent, request_id: str) -> None:
+    store = getattr(agent, "conversation_store", None)
+    if store is None or not str(request_id or "").strip():
+        return
+    try:
+        store.reject_pending_guidance_for_turn(request_id, reject_reserved=True)
+    except Exception:  # noqa: BLE001 收口失败不阻断回合收尾，recovery 会再次处理
+        pass
 
 
 # LLM: capability 缺失或非布尔真值一律视为不支持，避免普通 Gateway/IM 请求在无人确认时永久挂起。

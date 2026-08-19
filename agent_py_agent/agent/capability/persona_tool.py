@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import copy
 import json
+import threading
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -217,6 +219,13 @@ class UpdatePersonaTool(BaseTool):
         read_result = _persona_read_result(repository, request)
         if read_result is not None:
             return read_result
+        # 只读分支（list/history/status）不计数；只限写更新。
+        if request.target == "user" and _persona_update_rate_limited():
+            return _err(
+                "人格更新过于频繁（30 秒内最多 3 次）。普通任务不需要反复更新人设，"
+                "只在用户明确表达长期设定时更新。",
+                "PERSONA_UPDATE_RATE_LIMITED",
+            )
         if request.target == "user":
             operations = request.operations or (
                 _PersonaToolOperation(
@@ -373,6 +382,31 @@ def _parse_rollback_version(
     if parsed < 1:
         return _err("rollback_version 必须是正整数", "TOOL_INVALID_ARGUMENTS")
     return parsed
+
+
+# LLM: 时间窗限频只防模型重复写人格（K-CTX 真机实证：普通任务反复 update_persona）；
+# 只读操作不限。全局进程级计数，30 秒窗口内最多 2 次写更新。
+# 函数用途: 判定当前人格写更新是否超过频率上限。
+_persona_update_lock = threading.Lock()
+_persona_update_timestamps: list[float] = []
+
+
+def _persona_update_rate_limited() -> bool:
+    now = time.monotonic()
+    with _persona_update_lock:
+        _persona_update_timestamps[:] = [
+            item for item in _persona_update_timestamps if now - item < 30.0
+        ]
+        if len(_persona_update_timestamps) >= 3:
+            return True
+        _persona_update_timestamps.append(now)
+        return False
+
+
+def _reset_persona_update_rate_limit() -> None:
+    """测试钩子：清空限频时间窗，避免测试间状态污染。"""
+    with _persona_update_lock:
+        _persona_update_timestamps.clear()
 
 
 # LLM: Read-only Persona actions bypass consent and mutation while sharing repository diagnostics.

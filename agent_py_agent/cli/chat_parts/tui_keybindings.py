@@ -39,6 +39,8 @@ TRANSCRIPT_SCROLL_LINES = 10
 PASTE_FEEDBACK_SECONDS = 0.1
 ACTIVE_TURN_RETRY_INITIAL_SECONDS = 0.25
 ACTIVE_TURN_RETRY_MAX_SECONDS = 3.0
+# 单条消息字符上限（会话运行时 同款 2^20）：超限拒发且保留原文，绝不静默丢失。
+MAX_USER_INPUT_CHARS = 1 << 20
 
 
 # LLM: 参数束中的 tui_runtime 与 transcript view 是唯一显示入口；计时 refs 只实现双击退出，不代表业务状态。
@@ -362,6 +364,15 @@ def _submit_input_area(event, params: TuiCreateKeybindingsParams) -> None:
     if not display_text:
         return
     text = interaction.expand_draft(draft).strip()
+    if len(text) > MAX_USER_INPUT_CHARS:
+        # 会话运行时 语义：超限拒发 + 保留原文（不丢输入），避免大粘贴静默丢失。
+        _set_input_draft(params, TuiDraft(str(buffer.text or ""), int(buffer.cursor_position)))
+        _required_tui_runtime(params).set_notice(
+            f"消息超过 {MAX_USER_INPUT_CHARS} 字符上限（{len(text)}），未发送",
+            duration_seconds=2.4,
+        )
+        event.app.invalidate()
+        return
     _remember_input(params.input_area, text)
     _set_input_draft(params, TuiDraft("", 0))
     _reset_exit_arms(params)

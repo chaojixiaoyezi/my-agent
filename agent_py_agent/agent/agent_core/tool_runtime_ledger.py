@@ -95,6 +95,11 @@ def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[st
     merged = dict(boundary) if isinstance(boundary, dict) else {}
     _attach_runtime_approved_actions(merged, params)
     _attach_task_workspace_roots(merged, params)
+    # 配置级额外写根（additional_write_roots）：测试共享工作区等场景扩展沙箱写域。
+    extra_roots = _string_list(getattr(getattr(agent, "config", None), "additional_write_roots", ()))
+    if extra_roots:
+        existing = _string_list(merged.get("allowed_write_roots"))
+        merged["allowed_write_roots"] = list(dict.fromkeys([*existing, *extra_roots]))
     _attach_remote_owner_task_write_scope(merged, agent, params)
     _attach_transient_named_work_write_scope(merged, agent, params)
     _attach_active_child_output_locks(merged, agent, params)

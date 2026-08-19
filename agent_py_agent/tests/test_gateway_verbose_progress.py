@@ -614,3 +614,80 @@ def test_non_rich_writer_never_emits_thinking_delta(tmp_path) -> None:
         json.loads(line).get("kind") == "thinking_delta"
         for line in path.read_text(encoding="utf-8").splitlines()
     )
+
+
+def test_gateway_round_end_settles_pending_guidance(tmp_path, monkeypatch) -> None:
+    from agent_py_agent.agent.gateway_parts import request_execution
+
+    settled: list[tuple[str, bool]] = []
+
+    class FakeStore:
+        def reject_pending_guidance_for_turn(self, turn_id, *, reject_reserved=False):
+            settled.append((turn_id, reject_reserved))
+            return {"rejected": 0}
+
+    agent = SimpleNamespace(conversation_store=FakeStore())
+
+    request_execution._settle_pending_gateway_guidance(agent, "req-1")
+    assert settled == [("req-1", True)]
+
+    request_execution._settle_pending_gateway_guidance(agent, "")
+    assert len(settled) == 1
+
+
+def test_gateway_session_approval_cache_reuses_approved_call(tmp_path, monkeypatch) -> None:
+    from agent_py_agent.agent.contracts.tool_approval import ToolApprovalDecision
+    from agent_py_agent.agent.gateway_parts.request_execution import (
+        wait_for_gateway_permission_decision,
+    )
+
+    path = tmp_path / "session.chunks.jsonl"
+    writer = BufferedChunkStreamWriter(path, rich_transcript=True, interactive_approvals=True)
+    request = {
+        "permission_id": "approval:abc",
+        "request_id": "req-1",
+        "tool_name": "run_command",
+        "round": 1,
+        "call_index": 1,
+        "title": "Tool use",
+        "description": "run_command(ls)",
+        "binding": {
+            "tool_name": "run_command",
+            "run_id": "run-1",
+            "operation_id": "op-1",
+            "idempotency_key": "idem-1",
+            "args_hash": "h1",
+        },
+        "options": [
+            {"id": "allow_once", "label": "Yes", "decision": "approved"},
+            {"id": "allow_session", "label": "Yes session", "decision": "approved_session"},
+            {"id": "deny", "label": "No", "decision": "denied"},
+        ],
+    }
+    # 第一次：模拟用户在审批框选了"本次会话允许"
+    monkeypatch.setattr(
+        request_execution,
+        "wait_for_gateway_permission_decision",
+        lambda chunk_path, req, cancellation_token=None: ToolApprovalDecision(
+            req.permission_id, "approved_session"
+        ),
+    )
+    first = writer.request_permission(request)
+    assert first["decision"] == "approved_session"
+
+    # 第二次：同 binding 直接放行（不弹框，不再等待）
+    calls: list[str] = []
+
+    def fail_wait(chunk_path, req, cancellation_token=None):
+        calls.append("wait")
+        raise AssertionError("session-approved call must not wait")
+
+    monkeypatch.setattr(request_execution, "wait_for_gateway_permission_decision", fail_wait)
+    request2 = dict(request)
+    request2["permission_id"] = "approval:abc2"
+    second = writer.request_permission(request2)
+    assert second["decision"] == "approved"
+    assert calls == []
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert rows[-1]["kind"] == "permission_resolved"
+    assert rows[-1]["decision"] == "approved"
