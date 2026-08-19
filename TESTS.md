@@ -2,15 +2,52 @@
 
 当前测试文档只保留常用入口。完整文件清单以 `agent_py_agent/tests/` 为准，不再手工维护旧表格。
 
+默认按改动范围运行 focused tests，不重复运行全仓 pytest。只有本轮生产代码和测试代码新增、删除累计
+约 10,000 行以上，或用户明确要求时，才追加一次 `python3 -m pytest -q --tb=short`。静态检查、文档同步、
+严格代码尺寸、diff 和 clean-package 守卫仍按发布风险执行，不用全仓 pytest 代替。
+
+2026-08-18 活动输入/控制回执提交候选先运行 12 个原失败文件的 focused 组合，再运行一次修复后的完整
+`pytest -q --tb=short`，两者均到 100% 且退出 0。changed-file Ruff、doc sync 和 diff check 通过；全仓
+Ruff 的 112 项属于当前 HEAD 存量扫描结果，本轮变更文件为 0。strict code-size 仍有 25 个 hard finding，
+因此本轮只允许部署到 `.13` 测试机，不得据此推远端分支或宣称严格发布 gate 全绿。clean-package 必须在
+新增源码/测试先进入 Git index 后重跑；未跟踪正式源码被它拦住属于预期行为，不能用排除规则绕过。
+
+2026-08-18 活动回合普通输入与上下文可观察性追补使用以下 focused 组合：
+
+```bash
+python3 -m pytest -q --tb=short \
+  agent_py_agent/tests/test_chat_client_context.py \
+  agent_py_agent/tests/test_tui_input.py \
+  agent_py_agent/tests/test_tui_runtime.py \
+  agent_py_agent/tests/test_tui_renderer.py \
+  agent_py_agent/tests/test_runtime_guidance.py \
+  agent_py_agent/tests/test_gateway_verbose_progress.py
+```
+
+必须分别证明：薄客户端 `/ask` payload 带精确 `message_id/expected_turn_id` 和完整执行选项；运行中 Enter
+在真实 Gateway ID 已知后才进入活动回合，提交窗口的本地 `chat-*` 不得冒充 turn；pending
+receipt 在真实注入事件前不进入稳定历史；外部 ID 不得移除本地 pending；Gateway 拒绝只撤销同一 receipt
+并保留 follow-up queue；pending/queue 位于 fixed input-status pane 而非 transcript；rich/non-rich 客户端的
+确认事件边界不扩大；active→queued 必须保留 inject/files/save/resume/client capabilities 且 chat-style 只
+出现一次；guidance receipt 必须重算 embedded entry digest；队列文件名与正文 ID 冲突必须按文件名失败
+归档且 provider 零调用；context usage 与 active-turn compaction 事件
+不携带正文。`.13` 还必须用真实长回合
+覆盖“连续两条补充、滚离尾部、注入确认、结束竞态”四步，单元测试不能替代真机通过。
+
+Gateway chunk JSONL 的两个本机 reader 必须共享 byte-offset 合同：只消费换行已完整落盘的 UTF-8 行，末尾
+半行保留原 offset，下一次补齐后恰好交付一次；暂时读取失败不得把 offset 清零造成重复。focused 使用
+`test_gateway_client.py + test_gateway_streaming.py` 同时覆盖富 TUI 与普通 CLI。
+
 ## Focused Commands
 
 ```bash
+python3 -m pytest agent_py_agent/tests/test_tui_reference_fixture_server.py agent_py_agent/tests/test_tui_events.py agent_py_agent/tests/test_tui_view_model.py agent_py_agent/tests/test_tui_ansi_snapshot.py agent_py_agent/tests/test_tui_markdown.py agent_py_agent/tests/test_tui_renderer.py agent_py_agent/tests/test_tui_runtime.py agent_py_agent/tests/test_tui_view.py agent_py_agent/tests/test_tui_input.py agent_py_agent/tests/test_tui_interaction.py agent_py_agent/tests/test_tui_paste.py agent_py_agent/tests/test_tui_preflight.py agent_py_agent/tests/test_tui_terminal.py agent_py_agent/tests/test_tui_transcript.py agent_py_agent/tests/test_tui_worker_paths.py agent_py_agent/tests/test_tui_pty.py agent_py_agent/tests/test_chat_prompt_queue.py agent_py_agent/tests/test_cli_chat.py agent_py_agent/tests/test_chat_parts.py agent_py_agent/tests/test_gateway_client.py agent_py_agent/tests/test_gateway_helpers.py agent_py_agent/tests/test_gateway_streaming.py agent_py_agent/tests/test_channel_message_tool.py agent_py_agent/tests/test_runtime_gate_ledger.py agent_py_agent/tests/test_tool_loop_recovery_scope.py agent_py_agent/tests/test_tool_round_execution.py -q
 python3 -m pytest agent_py_agent/tests/test_owner_resolver.py agent_py_agent/tests/test_config_normalize.py -q
 python3 -m pytest agent_py_agent/tests/test_subagent_manager_core.py agent_py_agent/tests/test_manager_board_class.py agent_py_agent/tests/test_subagent_coordinator_due_check.py -q
 python3 -m pytest agent_py_agent/tests/test_lease.py agent_py_agent/tests/test_gateway_heartbeat.py -q
 python3 -m pytest agent_py_agent/tests/test_planner.py agent_py_agent/tests/test_agent/test_dispatch_capability_followup.py -q
 python3 -m pytest agent_py_agent/tests/test_code_size_script.py agent_py_agent/tests/test_architecture_guardrails.py -q
-python3 -m pytest agent_py_agent/tests/test_sandbox.py agent_py_agent/tests/test_owner_scoped_pip_env.py agent_py_agent/tests/test_path_access_owner_scope.py agent_py_agent/tests/test_graceful_shutdown.py -q
+python3 -m pytest agent_py_agent/tests/test_registry_resilience_contract.py agent_py_agent/tests/test_attempt_sandbox.py agent_py_agent/tests/test_sandbox.py agent_py_agent/tests/test_tooling_shell.py agent_py_agent/tests/test_owner_scoped_pip_env.py agent_py_agent/tests/test_path_access_owner_scope.py agent_py_agent/tests/test_graceful_shutdown.py -q
 python3 -m pytest agent_py_agent/tests/test_shell_orphan_kill.py agent_py_agent/tests/test_process_registry_tools.py agent_py_agent/tests/test_shell_bg_log_cap.py -q
 python3 -m pytest agent_py_agent/tests/test_container_install.py agent_py_agent/tests/test_check_clean_package.py -q
 python3 -m pytest agent_py_agent/tests/test_mcp_registration.py agent_py_agent/tests/test_offline_contract_matrix_gate.py -q
@@ -31,7 +68,84 @@ python3 -m pytest agent_py_agent/tests/test_log_redaction.py agent_py_agent/test
 python3 -m pytest agent_py_agent/tests/test_compact_semantic_summary.py agent_py_agent/tests/test_native_tool_ir_compact_and_orphan_sweep.py -q
 python3 -m pytest agent_py_agent/tests/test_model_call_ledger.py agent_py_agent/tests/test_tool_model_generation.py agent_py_agent/tests/test_gateway_helpers.py agent_py_agent/tests/test_runtime_guidance.py agent_py_agent/tests/test_subagent_hierarchy_scheduler.py agent_py_agent/tests/test_subagent_hierarchy_scheduler_tool_roles.py agent_py_agent/tests/test_subagent_hierarchy_write_policy.py agent_py_agent/tests/test_subagent_capability_request_tool.py agent_py_agent/tests/test_subagent_natural_language_e2e.py agent_py_agent/tests/test_local_collaboration_subagent_integration.py agent_py_agent/tests/test_gateway_chat_conversation_context.py agent_py_agent/tests/test_tools/test_tool_loop.py agent_py_agent/tests/test_background_main_agent_runtime.py agent_py_agent/tests/test_gateway_orphan_reconciler.py -q
 python3 -m pytest agent_py_agent/tests/test_cli_run_conversation.py agent_py_agent/tests/test_cli_run_provider_timeout.py agent_py_agent/tests/test_runtime_mixin.py agent_py_agent/tests/test_run_task_workspace_writer.py agent_py_agent/tests/test_memory_tool.py::test_remember_user_explicit_goes_through_candidate_and_promotes agent_py_agent/tests/test_memory_tool.py::test_remember_single_add_tool_verified_authorized_auto_but_evidence_gate_blocks agent_py_agent/tests/test_gateway_chat_conversation_context.py::test_gateway_returns_answer_and_repairs_assistant_transcript_on_next_turn -q
+python3 -m pytest -q --tb=short agent_py_agent/tests/test_verification_runtime.py agent_py_agent/tests/test_verification_project_facts.py agent_py_agent/tests/test_current_turn_execution.py agent_py_agent/tests/test_runtime_guidance.py agent_py_agent/tests/test_model_call_ledger.py
 ```
+
+终端交互 TUI parity 的 focused 命令覆盖 typed event/reducer、Markdown/diff、spinner、权限续跑、输入、
+history/search/paste/completion/queue/stash、follow/unseen、session-history、真实 Gateway readiness、title、
+鼠标选择/OSC52、PTY recorder 和 ANSI replay。
+富 transcript 追补还必须覆盖：未声明能力的 Gateway 不公开 thinking/display 且继续按 verbose 裁剪；TUI
+声明能力后逐轮 commentary、provider 明示 thinking、edit/overwrite/patch diff、write preview、命令
+stdout/stderr/exit code 均走结构化事件；失败后最后一次 workspace mutation 的软续跑只触发一次，简单写入
+和已有后续检查不触发。供应商网络回归还要用真实 `ConnectionRefusedError/ECONNREFUSED` 证明传输层
+`2/5/15` 秒三次退避、模型回合层 `10/25/45/100/180` 秒五次恢复和富 TUI typed retry 提示；普通
+`"connection refused"` 字符串、DNS 与无效地址不得取得重试权。常用定向命令为：
+
+```bash
+python3 -m pytest -q --tb=short agent_py_agent/tests/test_provider_connection_error.py agent_py_agent/tests/test_provider_transient_auto_resume.py agent_py_agent/tests/test_runtime_error_reports.py agent_py_agent/tests/test_gateway_helpers.py agent_py_agent/tests/test_gateway_verbose_progress.py agent_py_agent/tests/test_gateway_streaming.py agent_py_agent/tests/test_gateway_client.py agent_py_agent/tests/test_tool_model_generation.py agent_py_agent/tests/test_tui_runtime.py agent_py_agent/tests/test_tui_renderer.py agent_py_agent/tests/test_tui_worker_paths.py agent_py_agent/tests/test_tool_round_execution.py agent_py_agent/tests/test_tools/test_edit_file_tool.py agent_py_agent/tests/test_tooling_filesystem_write.py agent_py_agent/tests/test_tools/test_shell_tool.py agent_py_agent/tests/test_current_turn_execution.py agent_py_agent/tests/test_runtime_guidance.py agent_py_agent/tests/test_tui_pty.py agent_py_agent/tests/test_tui_ansi_snapshot.py agent_py_agent/tests/test_tui_view.py
+```
+`test_tui_pty.py` 必须保存固定 TERM/locale、
+终端尺寸和 reference/target fixture 身份；golden 只允许脱敏后的 ANSI/结构化片段。矩阵项目只有在
+对应 test 与测试机 evidence run 同时存在时才能标为 `VERIFIED`。外部 终端交互 provider 健康不属于
+UI 验收前提，参考客户端使用 loopback deterministic Anthropic fixture；MiniMax-M2.7 只用于 my-agent
+真实链路，不得把 key 写入 pytest output、录屏或 fixture。
+
+真实代码任务的交付验收必须把“命令退出 0”和“有测试覆盖”分开：`go test ./...` 出现 `[no test files]`
+只能证明 package 可装载，不能证明行为测试通过。还要检查 output 总大小、隐藏目录和 cache/debug 文件；
+process sandbox 回归需证明 canonical `task_work_dir/.sandbox-tmp` 承载 `/tmp`，项目 cwd 不出现
+`.sandbox-tmp`，owner-scoped 环境的 `TMPDIR=/tmp`、`XDG_CACHE_HOME=/tmp/.cache`。
+
+写后验证新鲜度回归必须覆盖“verify 成功→workspace mutation→read/search→plain final”仍产生一次软核对；
+同一 verification event 不循环提醒，执行新的真实 verify 后才能形成新周期。验证 envelope 必须从
+`metadata.handler_details` 读回。模型调用账本还必须证明明细超过 `max_records` 后 request/run 的 logical、
+physical、provider attempt/retry 和 status 累计数不截断；旧任务 response 的 128 不能再当精确总数。
+
+完成收口与 operation 审计要分层回归：`succeeded mutation -> not_started tail` 仍保留 partial 审计，
+但 no-effect 尾部不能触发整项 `OPERATION_INCOMPLETE`。末尾 `failed/not_started` 与 plain final 冲突时，
+必须先把 `completion_conflict.v1` 和被拒绝草稿送回同一 active turn，原工具 schema 仍可调用；至少覆盖
+“第一轮返工调用修复工具并形成 succeeded”“连续两次只口头完成后才安全收口”“新的失败 call id 不重置
+全 turn 返工预算”。`unknown/cancelled/incomplete/unverified` 不得进入通用带工具返工，显式 required action
+仍使用自己的结构化 gate，不能借该路径绕过。owner-scoped shell 环境还必须证明 `TMPDIR=/tmp`、`XDG_CACHE_HOME=/tmp/.cache`、
+`NPM_CONFIG_CACHE=/tmp/.cache/npm`，同时 `HOME` 只读边界和凭据擦洗不变。
+
+终端交互 命令/输入追补至少覆盖：`/context` 使用自动 compact 同一估算而不写状态；手动 `/compact` 取得
+同一 run lane、写 checkpoint 并推进 generation，live turn 时拒绝；可选摘要要求不能覆盖 operation evidence；
+`/effort` 在 backend 没有结构化能力时查询成功但设置失败且不改参数；Up/Down 先走 ASCII/CJK/恰好满行的
+软折视觉行；`N new messages ↓` 左键释放后恢复 follow-tail。对应 focused 文件为
+`test_conversation_control_commands.py`、`test_chat_control_runtime.py`、`test_gateway_conversation_compact.py`、
+`test_gateway_conversation_control.py`、`test_tui_input.py` 和 `test_tui_view.py`。
+
+外部消息工具还要覆盖两个对称面：无 proactive owner route 时，`send_message` 实现仍注册但必须出现在
+`runtime_snapshot.unavailable_tools`，且不进入 specs/retrieval；有真实 provider、target、owner root 与
+proactive capability 时仍进入可见/可执行快照。对应 `test_channel_message_tool.py`，真机再用同一句普通中文
+问候比较修复前后的工具块数量。
+
+2026-08-18 命令/输入追补最终本地 89 项 focused tests、`.13` 精确 23 项到 100%；changed-file Ruff、
+py_compile、doc-sync、strict code-size 与 diff check 通过。改动远小于 10,000 行，未重复全仓 pytest。
+远端输出、TUI capture、进程与部署 hash 保存在
+`/root/tui-parity-evidence/context-controls-20260818T1630CST/`。
+
+2026-08-18 本轮只运行相关 focused 文件：本地与 `.13` 均到 100%（保留预期 xfail），changed-file
+Ruff 与 py_compile 通过。改动远低于 10,000 行，按用户约定没有重复运行全仓 pytest。Tornado 真机任务
+只证明核心 10 项测试曾通过；examples 在其后修改却未复测，所以整体结果明确记为未通过。后续
+aiohttp→Go 在最终修改后重新 build、通过 29 项测试和 HTTP E2E，作为 EXEC-44 的真实闭环证据；其末尾
+no-effect 清理又形成 EXEC-45 的独立反例，二者不能混写成同一结果。
+
+测试机 evidence 分轮保存在 `/root/tui-parity-evidence/`：reference、mainchain、input-state、transcript、
+interrupt、permission 和 final run。最终 `long-session-10k-optimized.json` 在 120×29 下建立 10k 回合/
+20k stable block、39,999 rendered lines；idle animation tick 复用同一 frame，平均 6.4ms，真实可见状态
+变化重绘平均 45.8ms。该压测与 `test_idle_animation_tick_reuses_static_long_transcript_frame` 一起证明“不在
+空闲时全量重建”，不能只引用首帧时间。
+
+本轮 TUI focused suite 327 项运行到 100%。代码与测试变更超过 10,000 行，因此额外执行一次全仓 pytest：
+缓存记录收集 24,663 项，运行到 100% 且退出 0；此后不重复执行。最终 `.13` 部署后的 reducer/view/
+renderer/runtime 回归 49 项和 changed-file Ruff 均通过。全仓 Ruff 尚有 119 项历史问题，而独立 clean
+`main@2d5a964f` 为 122 项；本任务没有新增 lint debt。doc sync、strict code-size、diff 与 staged
+clean-package 守卫通过。
+
+`CODE_SIZE_BASELINE.json` 在本轮只登记 clean `main@2d5a964f` 已存在的 10 个严格 size finding；登记前在
+独立 HEAD archive 上复跑并得到同一身份集合。新 TUI/审批/中断代码不得借该 baseline 隐藏新增 blocker，
+每轮仍执行 `python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`。
 
 CLI Memory 入口回归必须证明：user 原文在首个模型调用前进入 ConversationStore，`remember(user_explicit)`
 取得唯一 user `source_message_ref` 并按统一 Promotion 晋升；相同 request/role 重放不重复，内容或
@@ -88,6 +202,54 @@ summary/窗口标记、遗失最新用户纠正、留下 tool-use/tool-result �
 Gateway/IM 投递回归还必须覆盖：同一进度批次重试使用稳定 provider 幂等键，不同 progress cursor 与
 最终回复使用不同键。身份只取可信 message ID、request ID、phase 和 cursor，不能从回复正文猜测；
 否则平台可能把同一请求后续的真实进度或最终回复当作重复消息吞掉。
+终态权威回归必须另外制造合法、截断和陈旧的孤立 `responses/<id>.json` 以及
+`done/failed` 投影，证明它们不会让 provider 跳过执行、让 stale 请求消失、让活动输入误判
+终态或让 CLI/TUI/plain 提前结束；只有 schema 和内外层 request ID 都匹配的
+`requests/terminal/<id>.json` 可以返回最终答复。
+必须再覆盖 provider 已成功、紧接着 `/stop` 先把同 attempt 写成 closing/cancel 的顺序：ACK 仍应把
+已进入模型的 guidance 收成 consumed，不得永久卡在 submitted；相反 stop 在 provider admission 之前
+先赢时必须零次调用 provider。audit clear、linked task stop 和 window stop 均要通过同一 T 锁路径。
+同 ID 恢复回归还要在 canonical 已存在后人为放回一份 owner/prompt/options 不同的 hot
+processing 文件，即使两者最终文案相同也必须保留 hot 并报冲突；只有重算后的
+`gateway_request_fingerprint.v1` 一致才能幂等退役热文件。
+同时在 inbox 文件已移入 processing、attempt/lease/fingerprint 栅栏尚未成功的精确写入点注入
+`OSError`，验证 claim 返回失败、原请求回到 inbox，且 processing/canonical/response 都不留半成品。
+
+Adapter durable ingress 的 focused 命令为
+`python3 -m pytest agent_py_agent/tests/test_adapter_ingress.py agent_py_agent/tests/test_adapter_manager.py -q --tb=short`。
+必须证明 route callback 在媒体和 POST 前已经落盘可信身份与 canonical digest；same-id/same-body 幂等，
+diff-body 隔离；媒体瞬时失败停在 prepared 且 POST 尚未发生；Gateway 响应丢失按原 body 重试，
+submission 落盘后崩溃不重 POST；唯一 worker 继续推进
+input-status/result/control-status/placeholder，IO callback 不持 store lock；ingress/reply 两类持久 row 必须覆盖
+A/B store 同时读取、租约未过期拒绝 B、过期后 B 以更大 epoch 接管、A 的旧 epoch CAS 失败。还要断言
+POST 直接发送持久 `gateway_payload`，progress handle 可变，429/5xx 保持 WAIT，auth/config 隔离且不发送
+伪终态正文，input `terminal_unknown` 清占位并留下 durable unknown receipt。`/btw` unknown 必须保存
+`operation_id/receipt_id/control_state`，以 operation ID 而非目标 `request_id` 建 `control_receipt` watcher。
+同一 target turn 的两条 `/btw` 必须生成两个 pending 文件和两份独立终态；目标初始为空时，首次 GET 可在
+同 epoch CAS 绑定，后续不同 target 必须 quarantine。stop rejected 必须有明确回复，stop
+`terminal_unknown` 必须清占位并留下 durable unknown receipt，二者都不能静默完成。control pending 还要
+冻结 channel/user/conversation/chat type/chat id，逐项路由漂移均 fail-closed；`/control-status` GET 必须
+发送这五项结构化身份头，不能把可猜的 operation ID 当鉴权能力。
+
+Slash 控制操作回执的 focused 命令为
+`python3 -m pytest agent_py_agent/tests/test_gateway_control_operation.py agent_py_agent/tests/test_gateway_conversation_control.py agent_py_agent/tests/test_gateway_http.py -q --tb=short`。
+必须覆盖副作用前 prepared、执行前 executing、结果落盘 completed 和崩溃 terminal_unknown 四个切点；同一
+message ID/正文只执行一次，同 ID/异正文零次新增副作用并返回冲突。`/control-status/<operation_id>` 只可
+读取 authenticated owner 的回执；`/btw` 可以从已有 guidance receipt 推进 accepted/rejected，其他控制和
+没有 guidance 证据的 unknown 均不能因 GET、TUI 重连或 adapter 重启而再次执行。若 wrapper 已越过
+executing、但 guidance 尚未落盘就崩溃，只能在 exact turn 终态证据下收为 rejected；active、recoverable、
+corrupt、absent 四种非终态证明都必须保持 terminal_unknown。群聊回执必须冻结
+`channel_chat_type/channel_chat_id`；同 message ID 改群身份应在副作用前冲突，GET 对账仍进入原 group owner。
+回执还必须冻结首次解析的 canonical owner ref；在 `prepared` 落盘后切换 per-owner 配置再重试，effect、steer、
+stop、task link 和子代理取消仍只能命中原 owner，不能按新配置重算。
+TUI 控制 outbox 的 focused 命令为
+`python3 -m pytest agent_py_agent/tests/test_tui_control_delivery.py agent_py_agent/tests/test_chat_control_runtime.py agent_py_agent/tests/test_tui_input.py -q --tb=short`。
+必须证明 persist-before-POST、两次传输请求复用同一 message ID、收到 operation ID 后永久 GET-only、
+terminal_unknown/conflict 不换 ID 重做、重启恢复原行，以及未绑定 exact turn 时 `/btw`/`/stop` 零次发送。
+长控制正在执行时，重复 POST 与 GET 还必须在有界短时间内返回同一 `executing` 回执，effect 调用次数仍为
+一；原 worker 释放 C 后才能出现 completed 或确证中断后的 terminal_unknown。Gateway IO focused 还要模拟
+无 fcntl 的 Windows 分支，证明 `msvcrt` lock/unlock 成对发生，而不是仅发告警后无锁运行。
+还要证明明确 lock contention 才返回未领取，坏句柄等错误会上抛；两种跨进程原语都缺失时必须 fail-closed。
 
 停止后续接回归必须覆盖：新 gateway request 的 `task_id` 与原持久 task 不同时，`/btw` 仍从
 `task_attributes.conversation_task_id` 消费一次；`/stop` 只中断当前真实 live turn，没有运行内容时

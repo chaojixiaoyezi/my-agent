@@ -51,6 +51,7 @@ def _handle_shared_slash_command(cfg: PlainHandleCommandConfig) -> bool:
             runtime_inject=cfg.runtime_inject,
             prompt_files=cfg.prompt_files,
             print_line=print,
+            conversation_id=str(cfg.current_session_id or "default"),
             control_executor=lambda command: execute_chat_control(
                 ChatControlExecution(
                     agent=cfg.agent,

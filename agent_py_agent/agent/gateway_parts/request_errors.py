@@ -26,6 +26,29 @@ class SystemCommandRoutingError(RuntimeError):
     error_code = "SYSTEM_COMMAND_ROUTING_ERROR"
 
 
+# LLM: Client-visible failure prose is selected only from structured error_code; raw exception text remains operator evidence and must not be parsed to decide UI behavior.
+# 函数用途: 把 Gateway 结构化错误码转换成 TUI、飞书和未来 Web 共用的安全中文提示。
+def gateway_client_error_message(error_code: object) -> str:
+    code = str(error_code or "").strip().upper()
+    messages = {
+        "PROVIDER_REQUEST_REJECTED": (
+            "模型服务拒绝了当前配置。请检查接口地址、模型名称和密钥是否属于同一服务后重试。"
+        ),
+        "PROVIDER_CONFIGURATION_INVALID": (
+            "模型服务配置不可用。请检查接口地址、模型名称和密钥是否属于同一服务后重试。"
+        ),
+        "PROVIDER_CONNECTION_FAILED": "无法连接模型服务，请检查网络、代理和接口地址后重试。",
+        "TOOL_PROTOCOL_CAPABILITY_UNAVAILABLE": (
+            "模型工具能力检查未通过，当前任务尚未开始。请检查模型是否支持原生工具调用。"
+        ),
+        "PROVIDER_QUOTA_EXHAUSTED": "模型服务当前没有可用额度，请补充额度或切换可用配置后重试。",
+        "PROVIDERTRANSIENTERROR": "模型服务暂时不可用，系统已停止本轮请求，请稍后重试。",
+        "PROVIDERTIMEOUTERROR": "模型服务响应超时，系统已停止本轮请求，请稍后重试。",
+        "PROVIDERCONNECTIONERROR": "无法连接模型服务，请检查网络、代理和接口地址后重试。",
+    }
+    return messages.get(code, "任务处理失败，请稍后重试；如持续失败，请查看运行诊断。")
+
+
 def gateway_request_load_error_response(
     request_path: Path,
     load_error: dict,
@@ -56,6 +79,45 @@ def gateway_request_load_error_response(
         "lease_owner": "",
         "lease_started_at": 0,
         "lease_heartbeat_at": 0,
+    }
+
+
+# LLM: The queue filename is the canonical request id. This builder exposes payload-id corruption
+# as a structured terminal failure and never echoes the conflicting id as a response authority.
+# 函数用途: 请求文件名和正文 ID 冲突时生成失败答复，阻止它串到别的回合或调用模型。
+def gateway_request_identity_error_response(
+    request_path: Path,
+    request: dict,
+    identity_error: dict,
+    *,
+    request_id: str,
+) -> dict:
+    now = time.time()
+    return {
+        "id": request_id,
+        "kind": str(request.get("kind") or "unknown"),
+        "ok": False,
+        "status": "failed",
+        "created_at": request.get("created_at", 0),
+        "started_at": now,
+        "ended_at": now,
+        "duration_seconds": 0,
+        "response": "",
+        "error_code": "GATEWAY_REQUEST_IDENTITY_CONFLICT",
+        "error": str(
+            identity_error.get("message")
+            or "gateway request filename and payload identity conflict"
+        ),
+        "request_identity_error": dict(identity_error),
+        "backend": "",
+        "used_memories": 0,
+        "tool_rounds": 0,
+        "prompt": "",
+        "request_file": str(request_path),
+        "attempts": int(request.get("attempts") or 0),
+        "lease_owner": str(request.get("lease_owner") or ""),
+        "lease_started_at": request.get("lease_started_at", 0),
+        "lease_heartbeat_at": request.get("lease_heartbeat_at", 0),
     }
 
 
@@ -128,6 +190,7 @@ def gateway_owner_scope_error_response(
 ) -> dict:
     """远程请求无法建立隔离 owner 时的终态响应；不得留 processing 重试或共享回退。"""
     now = time.time()
+    error_code = str(getattr(error, "error_code", "") or "OWNER_SCOPE_UNAVAILABLE")
     return {
         "id": request_id,
         "kind": str(request.get("kind") or "ask"),
@@ -138,8 +201,9 @@ def gateway_owner_scope_error_response(
         "ended_at": now,
         "duration_seconds": 0,
         "response": "",
-        "error_code": str(getattr(error, "error_code", "") or "OWNER_SCOPE_UNAVAILABLE"),
+        "error_code": error_code,
         "error": f"{type(error).__name__}: {error}",
+        "user_error": gateway_client_error_message(error_code),
         "backend": "",
         "used_memories": 0,
         "tool_rounds": 0,
@@ -173,6 +237,9 @@ def gateway_unhandled_worker_error_response(
     except (TypeError, ValueError):
         started_at = now
     report = runtime_error_report(error, context="gateway.worker.unhandled")
+    error_code = str(
+        getattr(error, "error_code", "") or "GATEWAY_WORKER_UNHANDLED_ERROR"
+    )
     return {
         "id": request_id,
         "kind": str(request.get("kind") or "ask"),
@@ -183,10 +250,9 @@ def gateway_unhandled_worker_error_response(
         "ended_at": now,
         "duration_seconds": round(max(0.0, now - started_at), 3),
         "response": "",
-        "error_code": str(
-            getattr(error, "error_code", "") or "GATEWAY_WORKER_UNHANDLED_ERROR"
-        ),
+        "error_code": error_code,
         "error": f"{type(error).__name__}: {error}",
+        "user_error": gateway_client_error_message(error_code),
         "worker_error": report,
         "backend": "",
         "used_memories": 0,

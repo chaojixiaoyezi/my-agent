@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .backends.errors import (
+    ProviderConfigurationError,
     ProviderRecoverableError,
     ProviderResponseError,
     is_provider_timeout_error,
@@ -111,6 +112,17 @@ def runtime_error_report(exc: BaseException, *, context: str = "") -> dict[str, 
         )
     if isinstance(exc, ProviderRecoverableError):
         return _report(exc, _provider_supply_template(exc), context=context)
+    if isinstance(exc, ProviderConfigurationError):
+        return _report(
+            exc,
+            _template(
+                "provider_configuration",
+                "模型服务配置不可用；请检查接口地址、模型名称和密钥组合后重试。",
+                "provider endpoint/model/credential configuration rejected",
+                recoverable=False,
+            ),
+            context=context,
+        )
     if isinstance(exc, (OSError, UnicodeError, ValueError)):
         return _report(
             exc,
@@ -157,10 +169,18 @@ def _report(
     ).to_dict()
 
 
-def _template(category: str, model_message: str, operator_message: str) -> RuntimeErrorTemplate:
+# LLM: Error templates carry an explicit recoverability bit so permanent provider/configuration facts cannot inherit the recoverable default by accident.
+# 函数用途: 构造统一错误报告模板；只有调用方明确传入时才把错误标为不可恢复。
+def _template(
+    category: str,
+    model_message: str,
+    operator_message: str,
+    *,
+    recoverable: bool = True,
+) -> RuntimeErrorTemplate:
     return RuntimeErrorTemplate(
         category=category,
-        recoverable=True,
+        recoverable=recoverable,
         model_message=model_message,
         operator_message=operator_message,
     )

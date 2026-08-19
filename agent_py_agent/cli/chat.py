@@ -6,17 +6,9 @@ import queue
 import sys
 import threading
 
-# Gateway imports
-from ..agent.gateway_parts import (
-    gateway_paths,
-    render_gateway_status,
-    wait_for_gateway_running,
-)
-from ..agent.memory_api import request_memory_curator_for_session_best_effort
-from ..agent.session import SessionManager, generate_session_id
-
-# Public symbols used by chat CLI tests and helpers.
-from .chat_parts import (
+# Public symbols used by chat CLI tests and helpers. Import the renderer leaf directly; importing
+# chat_parts.__init__ would eagerly load Gateway adapters and duplicate the TUI/plain runtime.
+from .chat_parts.renderer import (
     BLUE,
     BOLD,
     COLLAPSE_PREVIEW_CHARS,
@@ -25,30 +17,23 @@ from .chat_parts import (
     CYAN,
     GRAY,
     GREEN,
-    MAX_HISTORY_TURNS,
     RESET,
     YELLOW,
-    ChatJob,
     collapse_response_text,
     progress_bar,
     startup_banner,
     terminal_rule,
 )
-
-# Chat helper imports from chat_parts.
-from .chat_parts.history import (
-    append_conversation_turn,
-    build_history_context,
-    chat_assistant_preview_chars,
-    chat_history_max_turns,
-)
-from .chat_parts.input_loop import handle_common_slash_command
-from .chat_parts.plain import PLAIN_CHAT_PROMPT, run_plain
-from .chat_parts.plain_state import RunPlainConfig
-from .chat_parts.tui import TuiRunParams, run_tui
-from .common import make_agent, resume_context_override
 from .models import ChatJob
 from .thinking_spinner import ThinkingSpinner
+
+# LLM: Keep module import lightweight. Every helper below preserves the former public patch point
+# while importing its implementation only when that path is actually used.
+# 模块用途: 编排聊天会话；Gateway TUI 使用轻量客户端快速首屏，普通终端和 direct 模式仍按需
+# 加载完整智能体。
+
+MAX_HISTORY_TURNS = 20
+PLAIN_CHAT_PROMPT = "user> "
 
 # Chat response style injected into CLI sessions.
 _CHAT_RESPONSE_STYLE_INJECT = (
@@ -61,7 +46,133 @@ _CHAT_RESPONSE_STYLE_INJECT = (
 )
 
 
-def _setup_session(args, session_manager: SessionManager) -> str:
+# LLM: Tests and non-interactive commands may patch this public function. The structured marker is
+# set only after TTY/gateway routing is decided and never from natural-language input.
+# 函数用途: 按聊天入口类型创建轻量 Gateway 客户端或完整智能体。
+def make_agent(args):
+    if getattr(args, "_gateway_client_mode", False) is True:
+        from .chat_client_context import make_gateway_chat_client
+
+        return make_gateway_chat_client(args)
+    from .common import make_agent as _make_agent
+
+    return _make_agent(args)
+
+
+# LLM: Lazy wrapper preserves the historic chat module symbol without importing Gateway runtime
+# during CLI argument parsing or the immediate boot frame.
+# 函数用途: 根据轻量客户端或完整智能体计算 Gateway 文件协议路径。
+def gateway_paths(agent):
+    from ..agent.gateway_parts.paths import gateway_paths as _gateway_paths
+
+    return _gateway_paths(agent)
+
+
+# LLM: Status rendering remains owned by gateway_parts; this wrapper is compatibility-only.
+# 函数用途: 按需加载并展示 Gateway 状态。
+def render_gateway_status(agent, paths):
+    from ..agent.gateway_parts.status_rendering import render_gateway_status as _render
+
+    return _render(agent, paths)
+
+
+# LLM: Readiness remains the canonical monotonic Gateway wait; wrapper keeps startup imports small.
+# 函数用途: 按需等待 Gateway 在限定时间内就绪。
+def wait_for_gateway_running(paths, timeout: float = 3.0):
+    from ..agent.gateway_parts.status_rendering import wait_for_gateway_running as _wait
+
+    return _wait(paths, timeout=timeout)
+
+
+# LLM: Factory-shaped compatibility symbol allows existing tests to patch SessionManager while
+# avoiding session/runtime-error imports before the TUI route is selected.
+# 函数用途: 按需创建当前配置对应的会话管理器。
+def SessionManager(config):  # noqa: N802 - compatibility with the former imported class
+    from ..agent.session.manager import SessionManager as _SessionManager
+
+    return _SessionManager(config)
+
+
+# LLM: History helpers stay canonical in chat_parts.history and are loaded only after client setup.
+# 函数用途: 按配置构造本地 direct 模式的最近对话上下文。
+def build_history_context(
+    conversation_history: list[tuple[str, str]],
+    history_lock: threading.Lock,
+    *,
+    max_turns: int = 20,
+    assistant_preview_chars: int = 500,
+) -> str:
+    from .chat_parts.history import build_history_context as _build
+
+    return _build(
+        conversation_history,
+        history_lock,
+        max_turns=max_turns,
+        assistant_preview_chars=assistant_preview_chars,
+    )
+
+
+# LLM: Compatibility wrapper for config-derived history limits.
+# 函数用途: 读取当前聊天最多保留多少轮历史。
+def chat_history_max_turns(config) -> int:
+    from .chat_parts.history import chat_history_max_turns as _limit
+
+    return _limit(config)
+
+
+# LLM: Compatibility wrapper for config-derived assistant preview size.
+# 函数用途: 读取历史上下文中助手回复的最大预览字符数。
+def chat_assistant_preview_chars(config) -> int:
+    from .chat_parts.history import chat_assistant_preview_chars as _limit
+
+    return _limit(config)
+
+
+# LLM: Explicit resume alone loads the ConversationStore history projection; new sessions skip it.
+# 函数用途: 按需恢复指定 Gateway 会话的完整问答历史。
+def load_gateway_chat_history(
+    agent: object,
+    session_id: str,
+    *,
+    max_turns: int,
+):
+    from .chat_parts.history import load_gateway_chat_history as _load
+
+    return _load(agent, session_id, max_turns=max_turns)
+
+
+# LLM: Plain and TUI runners stay patchable at this module boundary for focused tests.
+# 函数用途: 按需加载并运行普通终端聊天循环。
+def run_plain(config):
+    from .chat_parts.plain import run_plain as _run_plain
+
+    return _run_plain(config)
+
+
+# LLM: TUI imports occur only after lightweight config/session setup and remain on the main thread.
+# 函数用途: 按需加载并运行 prompt_toolkit 全屏聊天界面。
+def run_tui(*, params):
+    from .chat_parts.tui import run_tui as _run_tui
+
+    return _run_tui(params=params)
+
+
+# LLM: Full-agent close semantics retain the canonical memory API; lightweight clients use the
+# Gateway lifecycle contract in _request_chat_session_close instead.
+# 函数用途: 为完整智能体的会话关闭登记一次 best-effort 记忆策展请求。
+def request_memory_curator_for_session_best_effort(agent, *, event: str) -> bool:
+    from ..agent.memory_api import request_memory_curator_for_session_best_effort as _request
+
+    return _request(agent, event=event)
+
+
+# LLM: Preserve the common CLI helper without importing SimpleAgent at chat module load time.
+# 函数用途: 读取命令参数中是否临时覆盖恢复上下文开关。
+def resume_context_override(args) -> bool | None:
+    return getattr(args, "resume_context", None)
+
+
+def _setup_session(args, session_manager) -> str:
     """入口会话选择(双席 seq1968 技术项): 所有显式指定 session 的入口对
     不存在/跨用户 ID fail-closed——显式指定且不可恢复 → 返回 "" 表示失败
     (cmd_chat 据此退出非 0), 绝不静默创建新会话; 未指定才创建新随机会话。"""
@@ -175,17 +286,19 @@ def cmd_resume(args) -> int:
     return cmd_chat(args)
 
 
-# LLM: Local and Gateway chat share conversation/archive semantics; normal session exit only submits one best-effort Curator close reason.
-# 函数用途: 启动交互聊天并在正常关闭后登记统一后台会话提炼请求。
+# LLM: Local and Gateway chat share conversation/archive semantics；显式 session 恢复只读 canonical ConversationStore，读取错误 fail-closed，正常退出只提交一次 Curator close reason。
+# 函数用途: 启动或恢复交互聊天、加载最近完整问答用于界面显示，并在正常关闭后登记统一后台会话提炼请求。
 def cmd_chat(args) -> int:
+    use_gateway = bool(args.gateway)
+    use_tui = _has_prompt_toolkit() and not bool(getattr(args, "plain", False))
+    args._gateway_client_mode = bool(use_gateway and use_tui)
     agent = make_agent(args)
     _ensure_chat_memory_limit(args, agent)
-    use_gateway = bool(args.gateway)
     paths = gateway_paths(agent)
-    if use_gateway:
+    if use_gateway and not use_tui:
         _, alive = wait_for_gateway_running(
             paths,
-            timeout=float(getattr(agent.config, "gateway_ready_timeout_seconds", 10) or 10),
+            timeout=float(getattr(agent.config, "gateway_ready_timeout_seconds", 3) or 3),
         )
         if not alive:
             print("gateway 未在运行。请先执行: my-agent gateway start", file=sys.stderr)
@@ -198,10 +311,22 @@ def cmd_chat(args) -> int:
         # 报错, 不进入交互循环。
         return 3
     state, build_history_context = _init_chat_state(agent)
+    if str(getattr(args, "session_id", "") or "").strip():
+        restored = load_gateway_chat_history(
+            agent,
+            current_session_id,
+            max_turns=chat_history_max_turns(agent.config),
+        )
+        if restored.load_errors:
+            print("会话历史读取失败，未进入聊天。", file=sys.stderr)
+            return 3
+        state["conversation_history"].extend(restored.turns)
     runtime_inject: list[str] = args.inject or []
     prompt_files: list[str] = args.prompt_file or []
 
-    if _has_prompt_toolkit() and not bool(getattr(args, "plain", False)):
+    if use_tui:
+        from .chat_parts.tui_params import TuiRunParams
+
         result = run_tui(params=TuiRunParams(
             agent=agent, args=args, use_gateway=use_gateway, paths=paths,
             runtime_inject=runtime_inject, prompt_files=prompt_files,
@@ -220,6 +345,8 @@ def cmd_chat(args) -> int:
             current_session_id=current_session_id,
         ))
     else:
+        from .chat_parts.plain_state import RunPlainConfig
+
         result = run_plain(RunPlainConfig(
             agent=agent, args=args, use_gateway=use_gateway, paths=paths,
             runtime_inject=runtime_inject, prompt_files=prompt_files,
@@ -230,11 +357,14 @@ def cmd_chat(args) -> int:
             session_manager=session_manager,
             current_session_id=current_session_id,
         ))
-    request_memory_curator_for_session_best_effort(agent, event="close")
+    _request_chat_session_close(agent, current_session_id)
     return result
 
 
-render_gateway_status = render_gateway_status
-wait_for_gateway_running = wait_for_gateway_running
-resume_context_override = resume_context_override
-PLAIN_CHAT_PROMPT = PLAIN_CHAT_PROMPT
+# LLM: Lightweight clients must signal the already-running Gateway rather than promoting to a full
+# local agent during exit; full/direct clients retain the existing Memory API call.
+# 函数用途: 在退出聊天后登记会话关闭，轻量和完整客户端各走其唯一权威入口。
+def _request_chat_session_close(agent, session_id: str) -> bool:
+    if getattr(agent, "gateway_client_only", False) is True:
+        return bool(agent.request_session_lifecycle(session_id, event="close"))
+    return request_memory_curator_for_session_best_effort(agent, event="close")

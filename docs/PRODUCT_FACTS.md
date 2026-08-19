@@ -1,6 +1,6 @@
 # 当前产品事实
 
-更新时间：2026-07-30（1.10 CST 2026-07-30）。本文是 `my-agent` 当前能力状态的唯一权威页；README、路线图和历史审计
+更新时间：2026-08-18（`my-agent` 测试机 CST 2026-08-18）。本文是当前工作树能力状态的唯一权威页；README、路线图和历史审计
 只能引用这里，不能把“代码存在”“测试存在”或“设计完成”写成已经稳定可用。
 
 ## 状态定义
@@ -11,6 +11,24 @@
 - **仅设计**：只有方案、接口预留或文档，不应向用户宣称可用。
 
 状态只描述当前工作树。它不等同于已发布版本；未提交、未推送的能力不属于远程 `main`。
+
+## 2026-08-18 终端交互 风格 TUI
+
+- **状态：稳定（当前工作树与 `.13` 测试部署）**。Python/prompt_toolkit 单一 typed TUI 已覆盖消息块、
+  Markdown/code/diff、thinking/tool/permission、输入/history/search/paste/completion/queue、scroll/transcript/
+  mouse/resize、interrupt/exit 和 canonical session resume；终端交互 独有能力只做显式映射或不适用。
+- 85 项行为矩阵全部关闭：38 `VERIFIED`、38 `MAPPED_VERIFIED`、9 `NOT_APPLICABLE`；10k 回合/20k block
+  压测和 80/120/140 列回归通过。测试详情见 `docs/design/TUI_终端交互_PARITY_MATRIX.md`。
+- `/context` 是自动 compact 同口径只读视图；自动 compact 按配置的 90% 窗口阈值运行，手动
+  `/compact [instructions]` 只在空闲会话沿同一 checkpoint/generation 主链执行。`/effort` 可查询能力，
+  但当前 MiniMax-M2.7 接口没有可调档位，设置会显式失败且不改变模型参数。
+- 模型可见工具按每轮 runtime snapshot 的真实 availability 生成；本地 transcript 没有主动外部通道时
+  不再展示 `send_message`，有结构化 provider/target/root/proactive capability 的 owner 才展示。该结论已由
+  `.13` 同一普通中文问候修复前后 A/B 复验。
+- 测试部署仅为 `192.0.2.13:/root/my-agent`；Gateway 为 MiniMax-M2.7、8420、队列 0/0，TUI 留在
+  tmux `my-agent-tui:work`。最终部署/回滚/ANSI/secret 扫描证据位于
+  `/root/tui-parity-evidence/final-20260818T071817CST/final-deploy/`。
+- 该状态不适用于 `192.0.2.10`、青禾的 `my_agent` 或其它 checkout，也不代表远程 `main` 已发布。
 
 ## 1.10 测试部署不变量
 

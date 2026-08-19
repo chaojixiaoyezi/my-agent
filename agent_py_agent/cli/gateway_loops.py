@@ -15,7 +15,6 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from types import SimpleNamespace
 
 from ..agent.concurrency import DurableDaemonThreadPoolExecutor
 from ..agent.conversation import (
@@ -33,6 +32,9 @@ from ..agent.gateway_parts import (
     recover_gateway_processing_requests,
     write_json_file,
 )
+from ..agent.gateway_parts.input_delivery_service import reconcile_gateway_input_receipts
+from ..agent.gateway_parts.queue_service import GatewayClaim
+from ..agent.gateway_parts.recovery import repair_gateway_terminal_projections
 from ..agent.gateway_parts.request_worker import (
     AdmissionLimits,
     _process_claimed_gateway_request_path,
@@ -56,13 +58,16 @@ from ..agent.user_space.owner_resolver import (
     home_paths_with_owner,
     resolve_owner_home,
 )
-from .common import make_agent
 from .models import GatewayRunContext
 
 
+# LLM: GatewayRunContext owns the one long-lived base-agent composition root; every base-owner controller and request lane must reuse it, while owner-scoped isolation remains delegated to OwnerScopedAgentPool.
+# 函数用途: 取得 Gateway 启动时已经初始化好的基础智能体，禁止后台线程再次加载配置并构造整套智能体。
 def _gateway_agent_from_context(context: GatewayRunContext) -> SimpleAgent:
-    root = getattr(context.agent, "root", "")
-    return make_agent(SimpleNamespace(config=str(context.config_path), workspace_root=str(root or "")))
+    agent = context.agent
+    if agent is None:
+        raise RuntimeError("GatewayRunContext 缺少已初始化的 agent")
+    return agent
 
 
 def _gateway_request_loop(context: GatewayRunContext, paths: GatewayPaths, stop_event: threading.Event) -> None:
@@ -85,14 +90,16 @@ def _gateway_request_loop(context: GatewayRunContext, paths: GatewayPaths, stop_
 class _RequestDispatcher:
     """两层限流派发者:admission(request_worker.admission)→ claim → 提交执行池。
 
-    执行线程首用时懒建【线程私有】agent(与原 per-worker agent 的线程隔离语义一致,
-    线程驻留复用,不跨线程共享实例);活跃 owner 登记表仍与后台主代理循环共享。
+    所有执行线程复用 GatewayRunContext 的 owner 级 agent；每轮可变字段由
+    ThreadLocalAgentAttribute 隔离，远程用户/群继续由 OwnerScopedAgentPool 分流。
+    不再给每个执行线程重复构造 backend、工具表、记忆和 capability cache。
     stale lease 恢复扫描随派发节流跑(原 worker-0 职责收进派发者)。"""
 
     def __init__(self, context: GatewayRunContext, paths: GatewayPaths) -> None:
         self.context = context
         self.paths = paths
         self.bootstrap_agent = _gateway_agent_from_context(context)
+        _attach_shared_owner_registry(self.bootstrap_agent, context)
         self.limits = AdmissionLimits.from_config(self.bootstrap_agent.config)
         # The request file and lease are authoritative.  If a provider/tool
         # call wedges during process shutdown, the next Gateway reclaims that
@@ -102,11 +109,26 @@ class _RequestDispatcher:
         )
         self._scan_gate = GatewayInboxScanGate()
         self._recover_throttle = _RecoverThrottle(self.bootstrap_agent)
-        self._thread_agents = threading.local()
+        self._next_input_reconcile_at = 0.0
+        self._next_terminal_projection_at = 0.0
 
     def tick(self) -> int:
+        # New work gets the first bounded slice. Historical projection and
+        # reconciliation scans must never sit in front of an interactive request.
+        dispatched = 0
         try:
-            if self._recover_throttle.due():
+            dispatched = dispatch_pending_requests(
+                self.paths,
+                self.limits,
+                self._submit,
+                scan_gate=self._scan_gate,
+            )
+        except Exception as exc:
+            _print_gateway_loop_error("gateway_request_dispatch.iteration", "dispatcher", exc)
+        # Recovery and projections are independent durability domains. One
+        # damaged receipt must not starve normal jobs or another repair domain.
+        if self._recover_throttle.due():
+            try:
                 recover_gateway_processing_requests(
                     self.paths,
                     startup=False,
@@ -114,22 +136,56 @@ class _RequestDispatcher:
                     timeout_seconds=self.bootstrap_agent.config.gateway_processing_timeout_seconds,
                     agent=self.bootstrap_agent,
                 )
-            return dispatch_pending_requests(self.paths, self.limits, self._submit, scan_gate=self._scan_gate)
-        except Exception as exc:
-            _print_gateway_loop_error("gateway_request_dispatch.iteration", "dispatcher", exc)
-            return 0
+            except Exception as exc:
+                _print_gateway_loop_error("gateway_request_recovery.iteration", "recovery", exc)
+        now = time.monotonic()
+        if now >= self._next_terminal_projection_at:
+            self._next_terminal_projection_at = now + 0.75
+            try:
+                repair_gateway_terminal_projections(
+                    self.paths,
+                    agent=self.bootstrap_agent,
+                    limit=16,
+                )
+            except Exception as exc:
+                _print_gateway_loop_error(
+                    "gateway_terminal_projection.iteration",
+                    "terminal-projector",
+                    exc,
+                )
+        if now >= self._next_input_reconcile_at:
+            self._next_input_reconcile_at = now + 0.75
+            try:
+                reconcile_gateway_input_receipts(
+                    self.paths,
+                    self.bootstrap_agent,
+                    limit=64,
+                )
+            except Exception as exc:
+                _print_gateway_loop_error(
+                    "gateway_input_reconcile.iteration",
+                    "input-reconciler",
+                    exc,
+                )
+        return dispatched
 
-    def _submit(self, processing_path, user_key: str, conversation_key: str) -> None:
-        self._executor.submit(self._execute, processing_path, user_key, conversation_key)
+    def _submit(self, claim: GatewayClaim, user_key: str, conversation_key: str) -> None:
+        self._executor.submit(self._execute, claim, user_key, conversation_key)
 
-    def _execute(self, processing_path, user_key: str, conversation_key: str) -> None:
+    def _execute(self, claim: GatewayClaim, user_key: str, conversation_key: str) -> None:
         from ..agent.observability.concurrency_metrics import gateway_worker_busy
 
+        agent = None
+        processing_path = claim.path
         gateway_worker_busy(1)
         try:
             agent = self._thread_agent()
             _process_claimed_gateway_request_path(
-                agent, self.paths, processing_path, f"gw-exec-{threading.get_ident()}"
+                agent,
+                self.paths,
+                processing_path,
+                f"gw-exec-{threading.get_ident()}",
+                claim=claim,
             )
         except Exception as exc:
             _print_gateway_loop_error("gateway_request_execute", processing_path.stem, exc)
@@ -138,6 +194,9 @@ class _RequestDispatcher:
                     self.paths,
                     processing_path,
                     exc,
+                    agent=agent,
+                    expected_execution_attempt_id=claim.execution_attempt_id,
+                    expected_lease_epoch=claim.lease_epoch,
                 )
             except Exception as terminalize_exc:
                 _print_gateway_loop_error(
@@ -150,12 +209,7 @@ class _RequestDispatcher:
             admission.release(user_key, conversation_key=conversation_key)
 
     def _thread_agent(self) -> SimpleAgent:
-        agent = getattr(self._thread_agents, "agent", None)
-        if agent is None:
-            agent = _gateway_agent_from_context(self.context)
-            _attach_shared_owner_registry(agent, self.context)
-            self._thread_agents.agent = agent
-        return agent
+        return self.bootstrap_agent
 
     def shutdown(self) -> None:
         self._executor.shutdown(wait=False)

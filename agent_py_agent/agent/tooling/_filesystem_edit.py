@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from ..user_space.owner_quota import OwnerQuotaChange, OwnerQuotaExceeded, OwnerQuotaUnavailable
+from ._filesystem_display import build_text_diff_display
 from ._filesystem_helpers import _MAX_WRITE_TEXT_CHARS, _text_param
 from ._filesystem_read import (
     FileSystemAccessOptions,
@@ -103,6 +104,8 @@ class EditFileTool(FileSystemTool):
     ):
         super().__init__(workspace_root, workspace_roots, access_options)
 
+    # LLM: 编辑成功必须同时保留模型用最新片段和有界结构化 diff；后者只供富客户端展示，不参与工具成功或文件状态判断。
+    # 函数用途: 替换目标文本、原子写回文件，并返回可供终端高亮展示的增删行事实。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         try:
             target = self.resolve_write_path(
@@ -170,6 +173,11 @@ class EditFileTool(FileSystemTool):
                 "target_path": str(target),
                 "replacement_count": count,
                 "strategy": strategy,
+                "display": build_text_diff_display(
+                    self.display_path(target),
+                    content,
+                    updated,
+                ),
             },
         )
 

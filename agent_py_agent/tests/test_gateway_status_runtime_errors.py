@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 
 def _gateway_paths(tmp_path: Path):
     from agent_py_agent.agent.gateway_parts.paths import GatewayPaths
@@ -116,3 +118,24 @@ def test_render_gateway_status_reports_bad_processing_record(tmp_path: Path):
 
     assert any("gateway processing_load_error=" in line for line in lines)
     assert any("gateway.status.processing.read" in line for line in lines)
+
+
+def test_wait_for_gateway_running_honors_monotonic_deadline(monkeypatch, tmp_path: Path):
+    """Gateway readiness timeout should not oversleep its configured budget."""
+    from agent_py_agent.agent.gateway_parts import status_rendering
+
+    clock = {"now": 10.0}
+    sleeps: list[float] = []
+
+    monkeypatch.setattr(status_rendering, "gateway_running", lambda _paths: (0, False))
+    monkeypatch.setattr(status_rendering.time, "monotonic", lambda: clock["now"])
+
+    def advance(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock["now"] += seconds
+
+    monkeypatch.setattr(status_rendering.time, "sleep", advance)
+
+    assert status_rendering.wait_for_gateway_running(_gateway_paths(tmp_path), 0.45) == (0, False)
+    assert sum(sleeps) == pytest.approx(0.45)
+    assert max(sleeps) <= 0.2

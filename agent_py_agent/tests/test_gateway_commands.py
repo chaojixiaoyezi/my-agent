@@ -445,23 +445,22 @@ class TestGatewayRunStateHelpers:
 
         assert command[command.index("--workspace-root") + 1] == str(workspace.resolve())
 
-    def test_gateway_worker_agent_reuses_context_workspace_root(self, tmp_path: Path):
+    def test_gateway_worker_agent_reuses_initialized_context_agent(self, tmp_path: Path):
         from agent_py_agent.cli.gateway_loops import _gateway_agent_from_context
         from agent_py_agent.cli.models import GatewayRunContext
 
-        workspace = tmp_path / "all-agent"
+        initialized = SimpleNamespace(root=tmp_path / "all-agent")
         context = GatewayRunContext(
-            agent=SimpleNamespace(root=workspace),
+            agent=initialized,
             paths=SimpleNamespace(),
             config_path=tmp_path / "config.yaml",
         )
 
-        with patch("agent_py_agent.cli.gateway_loops.make_agent") as mock_make_agent:
-            _gateway_agent_from_context(context)
+        with patch("agent_py_agent.cli.common.make_agent") as mock_make_agent:
+            resolved = _gateway_agent_from_context(context)
 
-        args = mock_make_agent.call_args.args[0]
-        assert args.config == str(tmp_path / "config.yaml")
-        assert args.workspace_root == str(workspace)
+        assert resolved is initialized
+        mock_make_agent.assert_not_called()
 
     def test_gateway_service_loop_waits_only_for_stop_record(self, tmp_path: Path):
         import threading

@@ -408,6 +408,33 @@ def _format_process_result(result: subprocess.CompletedProcess[str], max_output_
     )
 
 
+# LLM: shell 富展示直接读取 CompletedProcess 的 stdout/stderr/returncode；renderer 不得从格式化 output 文本反解析机器事实，预览仍有独立硬上限。
+# 函数用途: 为终端生成分栏的标准输出、错误输出、行数和截断状态。
+def _command_display(
+    result: subprocess.CompletedProcess[str],
+    max_output_chars: int,
+) -> dict[str, object]:
+    stdout = str(result.stdout or "")
+    stderr = str(result.stderr or "")
+    preview_limit = min(max(1, int(max_output_chars or 1)), 12_000)
+    stdout_preview, stdout_truncated = _bounded_output(stdout, preview_limit)
+    stderr_preview, stderr_truncated = _bounded_output(stderr, preview_limit)
+    return {
+        "kind": "command",
+        "return_code": int(result.returncode),
+        "stdout": stdout_preview,
+        "stderr": stderr_preview,
+        "stdout_lines": stdout.count("\n") + (1 if stdout else 0),
+        "stderr_lines": stderr.count("\n") + (1 if stderr else 0),
+        "stdout_truncated": stdout_truncated,
+        "stderr_truncated": stderr_truncated,
+    }
+
+
+# LLM: owner-scoped 子进程的 home 是只读底图；标准临时目录和 XDG cache 必须显式指向
+# 沙箱内 /tmp。npm 是已验证会忽略 XDG 并写 ``$HOME/.npm`` 的标准工具例外，因此只覆盖其官方
+# cache 变量；未知工具仍使用开放世界的 TMPDIR/XDG 路径。凭据擦洗仍先执行，不能因此恢复 secret。
+# 函数用途: 构造 shell 子进程环境，并把普通缓存及 npm 缓存安全地放进任务持久临时区。
 def _subprocess_text_env(owner_home: object = None) -> dict[str, str]:
     env = dict(os.environ)
     env.setdefault("PYTHONIOENCODING", "utf-8")
@@ -419,6 +446,9 @@ def _subprocess_text_env(owner_home: object = None) -> dict[str, str]:
         from ._subprocess_env_scrub import scrub_subprocess_env
 
         env = scrub_subprocess_env(env)
+        env["TMPDIR"] = "/tmp"
+        env["XDG_CACHE_HOME"] = "/tmp/.cache"
+        env["NPM_CONFIG_CACHE"] = "/tmp/.cache/npm"
     return env
 
 
@@ -961,6 +991,8 @@ class ShellTool(BaseTool):
             return target
         return target
 
+    # LLM: shell 结果 envelope 同时保存内部 process 事实和独立 public display；display 只用于富客户端，不得参与副作用裁决。
+    # 函数用途: 执行前后保护已登记产物，并把命令输出整理成模型结果和终端展示数据。
     def _execute_with_artifact_protection(
         self,
         command: str,
@@ -990,6 +1022,7 @@ class ShellTool(BaseTool):
             sandbox_write_roots,
             sandbox_read_roots,
         )
+        display = process_facts.pop("_display", None)
         try:
             artifact_summary = reconcile_shell_artifacts(self.workspace_root, artifact_snapshots)
         except OSError as exc:
@@ -997,14 +1030,17 @@ class ShellTool(BaseTool):
         protection_note = shell_artifact_protection_note(artifact_summary)
         if protection_note:
             output = f"{output}\n{protection_note}"
+        result_envelope: dict[str, object] = {
+            "artifact_protection": artifact_summary,
+            "process": process_facts,
+        }
+        if isinstance(display, dict):
+            result_envelope["display"] = display
         return ToolHandlerOutcome(
             self.model_spec.name,
             ok,
             output,
-            result_envelope={
-                "artifact_protection": artifact_summary,
-                "process": process_facts,
-            },
+            result_envelope=result_envelope,
             error_code="" if ok else error_code,
             effect_outcome=self._failure_effect_outcome(
                 command, ok, error_code, output, process_facts
@@ -1077,6 +1113,8 @@ class ShellTool(BaseTool):
             return "failed"
         return ""
 
+    # LLM: 正常退出必须同时返回结构化 process facts 和 `_display` 暂存；异常分支保持原错误合同，不能伪造 stdout/stderr。
+    # 函数用途: 运行前台命令并将退出事实、模型文本和终端预览一次性整理出来。
     def _run_process_text(
         self,
         command: str,
@@ -1111,6 +1149,7 @@ class ShellTool(BaseTool):
                     # "bash: ..." 固定前缀, 不随 locale 变), 不匹配错误内容。
                     "stderr_chars": len(str(getattr(result, "stderr", "") or "")),
                     "stderr_head": str(getattr(result, "stderr", "") or "")[:80],
+                    "_display": _command_display(result, self.max_output_chars),
                 },
             )
         except subprocess.TimeoutExpired:

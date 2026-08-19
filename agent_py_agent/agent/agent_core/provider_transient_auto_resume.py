@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -30,11 +29,7 @@ def provider_transient_retry_delays(policy: RuntimeGuardPolicy | None = None) ->
     )
     if not isinstance(value, list | tuple):
         value = DEFAULT_PROVIDER_TRANSIENT_RETRY_DELAYS_SECONDS
-    return tuple(
-        value
-        for value in _parsed_delays(value)
-        if value > 0
-    )
+    return tuple(value for value in _parsed_delays(value) if value > 0)
 
 
 def _parsed_delays(value: list | tuple) -> tuple[float, ...]:
@@ -52,6 +47,7 @@ def run_with_provider_transient_auto_resume(
     *,
     on_chunk: Callable[[str], object] | None = None,
     policy: RuntimeGuardPolicy | None = None,
+    retry_guard: Callable[[], bool] | None = None,
 ) -> _T:
     delays = provider_transient_retry_delays(policy)
     for attempt, delay in enumerate(delays, start=1):
@@ -62,10 +58,16 @@ def run_with_provider_transient_auto_resume(
             raise  # 用户/任务中断绝不重试: 中断标记必须被消费, 不能进入退避重连
         except Exception as exc:
             _raise_unless_provider_transient(exc)
+            if callable(retry_guard) and not retry_guard():
+                raise
             # 配置阶梯+随机抖动(批3):多实例同撞限流时错峰重试,防共振雪崩。
-            _wait_before_retry(on_chunk, _RetryNotice(attempt, len(delays), apply_retry_jitter(delay), exc))
+            _wait_before_retry(
+                on_chunk, _RetryNotice(attempt, len(delays), apply_retry_jitter(delay), exc)
+            )
             _raise_if_interrupted()
     _raise_if_interrupted()
+    if callable(retry_guard) and not retry_guard():
+        raise RuntimeError("provider retry blocked by durable request state")
     return operation()
 
 
@@ -106,16 +108,43 @@ def _wait_before_retry(on_chunk: Callable[[str], object] | None, notice: _RetryN
     wait_interruptibly(notice.delay)
 
 
+# LLM: 支持 typed retry sink 时只发送结构化序号/等待值；旧 callback 继续接收兼容文本且不参与重试裁决。
+# 函数用途: 在模型回合级退避开始前，把重连进度交给当前客户端显示。
 def _emit_retry_notice(on_chunk: Callable[[str], object] | None, notice: _RetryNotice) -> None:
     if not callable(on_chunk):
         return
     delay = _format_delay(notice.delay)
+    if _publish_typed_retry_notice(on_chunk, notice):
+        return
     on_chunk(
         "\n"
         f"[provider_transient_auto_resume attempt={notice.attempt}/{notice.total}; wait_seconds={delay}]\n"
         f"模型接口临时不可用或被限流，等待 {delay} 秒后自动重试当前模型回合。\n"
         f"error={notice.error}\n"
     )
+
+
+# LLM: typed sink 是可选显示能力，异常或明确拒绝时退回既有 callback；绝不能让 UI 通知破坏真实重试。
+# 函数用途: 尝试向富客户端发布一次模型回合级重连事件。
+def _publish_typed_retry_notice(
+    on_chunk: Callable[[str], object],
+    notice: _RetryNotice,
+) -> bool:
+    sink = getattr(on_chunk, "write_provider_retry", None)
+    if not callable(sink):
+        return False
+    try:
+        return bool(
+            sink(
+                scope="model_turn",
+                attempt=notice.attempt,
+                total=notice.total,
+                delay_seconds=notice.delay,
+                error_type=type(notice.error).__name__,
+            )
+        )
+    except Exception:
+        return False
 
 
 def _format_delay(value: float) -> str:

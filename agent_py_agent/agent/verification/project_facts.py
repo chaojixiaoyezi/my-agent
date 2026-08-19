@@ -113,6 +113,9 @@ def classify_verification_command(
     )
 
 
+# LLM: known manifest defaults are structured fast paths, while package/Makefile declarations remain open extension points;
+# add ecosystems here only when their canonical verifier is stable and independently classifiable from exact command tokens.
+# 函数用途: 根据项目清单列出可作为真实验证证据的标准命令，不读取用户提示或模型总结。
 def _verify_commands(root: Path) -> list[str]:
     verify: list[str] = []
     if (root / "scripts" / "run_tests.sh").is_file():
@@ -131,6 +134,10 @@ def _verify_commands(root: Path) -> list[str]:
         )
     if (root / "pytest.ini").is_file() or "[tool.pytest" in _read_small(root / "pyproject.toml"):
         verify.append("pytest")
+    if (root / "go.mod").is_file():
+        verify.extend(("go test", "go build"))
+    if (root / "Cargo.toml").is_file():
+        verify.extend(("cargo test", "cargo check", "cargo build"))
     makefile = _read_small(root / "Makefile")
     if makefile:
         verify.extend(

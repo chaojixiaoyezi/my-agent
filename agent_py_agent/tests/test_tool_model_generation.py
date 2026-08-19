@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -18,12 +19,49 @@ from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParam
 from agent_py_agent.agent.agent_core.tool_model_generation import (
     ModelGenerateParams,
     _effective_model_request_timeout_seconds,
+    _publish_transport_retry,
     generate_model_response,
 )
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.backends.errors import ProviderContextWindowError, ProviderTimeoutError
+from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.tooling.content_transport_policy import RECOVERY_WRITE_CHUNK_CHARS
 from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
+
+
+def test_transport_retry_projection_uses_structured_attempt_event() -> None:
+    projected: list[dict[str, object]] = []
+
+    class Sink:
+        def write_provider_retry(self, **payload: object) -> bool:
+            projected.append(dict(payload))
+            return True
+
+    _publish_transport_retry(
+        Sink(),
+        {
+            "status": "failed",
+            "retry_scheduled": True,
+            "retry_attempt": 2,
+            "retry_total": 3,
+            "retry_wait_seconds": 5.0,
+            "error_type": "URLError",
+        },
+    )
+    _publish_transport_retry(
+        Sink(),
+        {"status": "failed", "retry_scheduled": False, "error_type": "URLError"},
+    )
+
+    assert projected == [
+        {
+            "scope": "transport",
+            "attempt": 2,
+            "total": 3,
+            "delay_seconds": 5.0,
+            "error_type": "URLError",
+        }
+    ]
 
 
 class _BlockingBackend:
@@ -36,6 +74,22 @@ class _BlockingBackend:
         self.entered.set()
         time.sleep(0.08)
         return ModelResponse(text="late response", backend=self.name)
+
+
+class _SubmissionInspectingBackend:
+    name = "submission-inspecting-backend"
+
+    def __init__(self, store: ConversationStore, dedupe_key: str) -> None:
+        self.store = store
+        self.dedupe_key = dedupe_key
+        self.observed_status = ""
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        del prompt, on_chunk
+        receipt = self.store.guidance_once_receipt(self.dedupe_key)
+        self.observed_status = str(receipt.status if receipt is not None else "")
+        assert receipt is not None and receipt.submission_id
+        return ModelResponse(text="accepted", backend=self.name)
 
 
 class _InterruptibleBlockingBackend:
@@ -259,6 +313,59 @@ def _tool_loop_params() -> ToolLoopExecuteParams:
         archive_tool_calls=[],
         tool_protocol_snapshot=make_test_protocol_snapshot(source_protocol="text"),
     )
+
+
+def test_provider_boundary_commits_guidance_batch_before_backend_io(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    dedupe_key = "thread/provider-boundary"
+    entry = store.append_guidance_once(
+        {
+            "target_type": "request",
+            "target_id": "request-provider-boundary",
+            "message": "模型触网前必须整批提交",
+            "metadata": {
+                "dedupe_key": dedupe_key,
+                "expected_turn_id": "request-provider-boundary",
+            },
+        },
+        dedupe_key=dedupe_key,
+    )
+    assert store.claim_guidance_once_for_turn(
+        entry,
+        expected_turn_id="request-provider-boundary",
+        attempt_id="attempt-provider-boundary",
+    )
+    backend = _SubmissionInspectingBackend(store, dedupe_key)
+    agent = SimpleNamespace(
+        backend=backend,
+        conversation_store=store,
+        config=SimpleNamespace(request_timeout=10),
+        _current_subagent_run_id="",
+    )
+    params = replace(
+        _tool_loop_params(),
+        request_id="request-provider-boundary",
+        attempt_id="attempt-provider-boundary",
+        live_archive_state={
+            "_guidance_ack_ids": {entry.guidance_id},
+            "_guidance_ack_entries": {entry.guidance_id: entry},
+        },
+    )
+
+    response = generate_model_response(
+        ModelGenerateParams(
+            agent=agent,
+            params=params,
+            prompt="continue",
+            tool_rounds=0,
+        )
+    )
+
+    assert response.text == "accepted"
+    assert backend.observed_status == "submitted"
+    receipt = store.guidance_once_receipt(dedupe_key)
+    assert receipt is not None and receipt.status == "submitted"
+    assert params.live_archive_state["_guidance_submission_id"] == receipt.submission_id
 
 
 def test_model_generate_enforces_request_timeout_when_backend_blocks():

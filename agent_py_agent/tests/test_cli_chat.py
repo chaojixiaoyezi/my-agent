@@ -434,6 +434,80 @@ class TestChatCommandRuntime:
         tui.assert_not_called()
         plain.assert_called_once()
 
+    def test_cmd_chat_publishes_recovered_gateway_history_to_tui(self):
+        """显式恢复时要在创建 TUI 前加载权威完整问答。"""
+        from agent_py_agent.cli import chat as chat_mod
+        from agent_py_agent.cli.chat_parts.history import GatewayChatHistorySnapshot
+
+        args = SimpleNamespace(
+            gateway=False,
+            inject=[],
+            prompt_file=[],
+            session_id="sess-resume",
+            memory_limit=5,
+            plain=False,
+        )
+        agent = MagicMock()
+        agent.config.chat_history_max_turns = 20
+        agent.config.chat_history_assistant_preview_chars = 500
+        captured: list[tuple[str, str]] = []
+
+        def run_tui(*, params):
+            captured.extend(params.conversation_history)
+            return 0
+
+        with patch("agent_py_agent.cli.chat.make_agent", return_value=agent), \
+             patch("agent_py_agent.cli.chat.SessionManager"), \
+             patch("agent_py_agent.cli.chat._setup_session", return_value="sess-resume"), \
+             patch("agent_py_agent.cli.chat.gateway_paths", return_value=object()), \
+             patch("agent_py_agent.cli.chat._has_prompt_toolkit", return_value=True), \
+             patch(
+                 "agent_py_agent.cli.chat.load_gateway_chat_history",
+                 return_value=GatewayChatHistorySnapshot(
+                     turns=(("恢复问题", "恢复回答"),),
+                     thread_id="thread-resume",
+                 ),
+             ), \
+             patch("agent_py_agent.cli.chat.run_tui", side_effect=run_tui), \
+             patch("agent_py_agent.cli.chat.request_memory_curator_for_session_best_effort"):
+            result = chat_mod.cmd_chat(args)
+
+        assert result == 0
+        assert captured == [("恢复问题", "恢复回答")]
+
+    def test_cmd_chat_fails_closed_when_recovered_history_is_corrupt(self, capsys):
+        """显式恢复读到损坏账本时不能悄悄显示空历史。"""
+        from agent_py_agent.cli import chat as chat_mod
+        from agent_py_agent.cli.chat_parts.history import GatewayChatHistorySnapshot
+
+        args = SimpleNamespace(
+            gateway=False,
+            inject=[],
+            prompt_file=[],
+            session_id="sess-bad",
+            memory_limit=5,
+            plain=False,
+        )
+        agent = MagicMock()
+        agent.config.chat_history_max_turns = 20
+
+        with patch("agent_py_agent.cli.chat.make_agent", return_value=agent), \
+             patch("agent_py_agent.cli.chat.SessionManager"), \
+             patch("agent_py_agent.cli.chat._setup_session", return_value="sess-bad"), \
+             patch("agent_py_agent.cli.chat.gateway_paths", return_value=object()), \
+             patch(
+                 "agent_py_agent.cli.chat.load_gateway_chat_history",
+                 return_value=GatewayChatHistorySnapshot(
+                     load_errors=({"error_code": "jsonl_corrupt"},),
+                 ),
+             ), \
+             patch("agent_py_agent.cli.chat.run_tui") as tui:
+            result = chat_mod.cmd_chat(args)
+
+        assert result == 3
+        assert "会话历史读取失败" in capsys.readouterr().err
+        tui.assert_not_called()
+
 
 class TestCollapseEdgeCases:
     """测试文本折叠边界场景。"""

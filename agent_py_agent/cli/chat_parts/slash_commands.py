@@ -1,4 +1,7 @@
 
+# LLM: 本模块是 chat 系统斜杠命令的目录与分派入口；帮助/补全共享 CHAT_SLASH_COMMANDS，执行权仍归 typed parser 和显式 handler。
+# 模块用途: 列出当前聊天命令、渲染帮助文字，并即时处理控制、记忆、提示文件和保证档命令。
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -8,31 +11,18 @@ from ...agent.conversation.control_commands import (
     parse_conversation_task_command,
     system_slash_command_name,
 )
-from .slash_command_types import SlashCommandContext
+from .slash_command_types import CHAT_SLASH_COMMANDS, SlashCommandContext
 
-CHAT_HELP_TEXT = (
-    "Available commands:\n"
-    "/help                         Show help\n"
-    "/status                       Show the current window status\n"
-    "/btw <content>                Steer the current running turn once\n"
-    "/stop                         Stop the current running turn\n"
-    "/goal <duration> <name> <task> Start a named persistent conversation goal\n"
-    "/goal <name> clear             Stop one named persistent goal\n"
-    "/goal pause|resume|clear       Control the only persistent goal\n"
-    "/goal edit <objective>        Edit the current persistent goal\n"
-    "/verbose [off|on|full]         Show or change detailed progress\n"
-    "/audit help                    Show Audit command help\n"
-    "/audit <name> prepare <text>   Prepare or revise one named Audit\n"
-    "/audit <duration> <name> <task> Start one named Audit\n"
-    "/audit <name> status           Show one named Audit\n"
-    "/audit <name> clear            Stop one named Audit\n"
-    "/expand [last|number]          Expand a collapsed assistant response\n"
-    "/exit                         Exit chat\n"
-    "/memory [query]                Search memory\n"
-    "/remember <content>            Save a memory note\n"
-    "/prompt-file <path>            Add a prompt file\n"
-    "/show-prompt <question>        Show the final prompt and answer\n"
-)
+
+# LLM: help renderer 只投影结构化目录项，保持既有 30 列用法栏；不能把帮助文本反向作为命令解析器。
+# 函数用途: 生成 plain/TUI 共用的命令帮助正文。
+def _render_chat_help_text() -> str:
+    lines = ["Available commands:"]
+    lines.extend(f"{spec.usage:<30} {spec.summary}" for spec in CHAT_SLASH_COMMANDS)
+    return "\n".join(lines) + "\n"
+
+
+CHAT_HELP_TEXT = _render_chat_help_text()
 
 
 SlashHandler = Callable[[str, SlashCommandContext, bool], bool | None]
@@ -101,6 +91,22 @@ def _handle_remember_command(
     del include_plain_help
     if not user.startswith("/remember "):
         return None
+    if getattr(ctx.agent, "gateway_client_only", False) is True:
+        result = ctx.agent.request_memory(
+            operation="remember",
+            session_id=ctx.conversation_id,
+            content=user[len("/remember "):],
+            limit=1,
+        )
+        records = result.get("records") if isinstance(result, dict) else []
+        if result.get("ok") and isinstance(records, list) and records:
+            ctx.print_line(f"Remembered: {str(records[0].get('content') or '')}")
+        else:
+            ctx.print_line(
+                "记忆保存失败："
+                + str(result.get("error_code") or "GATEWAY_UNAVAILABLE")
+            )
+        return True
     rec = ctx.agent.remember(user[len("/remember "):], kind="fact")
     ctx.print_line(f"Remembered: {rec.content}")
     return True
@@ -113,6 +119,22 @@ def _handle_memory_command(
     if not user.startswith("/memory"):
         return None
     query = user[len("/memory"):].strip()
+    if getattr(ctx.agent, "gateway_client_only", False) is True:
+        result = ctx.agent.request_memory(
+            operation="search" if query else "recent",
+            session_id=ctx.conversation_id,
+            query=query,
+            limit=ctx.memory_limit,
+        )
+        if not result.get("ok"):
+            ctx.print_line(
+                "记忆读取失败："
+                + str(result.get("error_code") or "GATEWAY_UNAVAILABLE")
+            )
+            return True
+        records = result.get("records")
+        _print_memory_records(ctx, records if isinstance(records, list) else [])
+        return True
     records = ctx.agent.recall(query, ctx.memory_limit) if query else _recent_memory(ctx)
     _print_memory_records(ctx, records)
     return True
@@ -127,7 +149,15 @@ def _print_memory_records(ctx: SlashCommandContext, records) -> None:
         ctx.print_line("No memory records found.")
         return
     for rec in records:
-        ctx.print_line(f"- [{rec.kind}] {rec.role}: {rec.content}")
+        if isinstance(rec, dict):
+            kind = str(rec.get("kind") or "")
+            role = str(rec.get("role") or "")
+            content = str(rec.get("content") or "")
+        else:
+            kind = str(getattr(rec, "kind", "") or "")
+            role = str(getattr(rec, "role", "") or "")
+            content = str(getattr(rec, "content", "") or "")
+        ctx.print_line(f"- [{kind}] {role}: {content}")
 
 
 def _handle_prompt_file_command(
@@ -190,6 +220,7 @@ def is_show_prompt_command(user: str) -> tuple[bool, str]:
 
 __all__ = [
     "CHAT_HELP_TEXT",
+    "CHAT_SLASH_COMMANDS",
     "handle_common_slash_command",
     "is_exit_command",
     "is_show_prompt_command",

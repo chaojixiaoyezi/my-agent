@@ -60,6 +60,77 @@ class TestWriteJsonFileAtomic:
 
         assert target.exists()
 
+    def test_windows_byte_range_lock_is_used_without_fcntl(self, tmp_path: Path, monkeypatch):
+        """Windows 分支必须真正获取并释放 byte-range lock，不能只发降级告警。"""
+        import agent_py_agent.agent.gateway_parts.io as gateway_io
+
+        calls: list[tuple[int, int, int]] = []
+
+        class FakeMsvcrt:
+            LK_LOCK = 1
+            LK_UNLCK = 2
+            LK_NBLCK = 3
+
+            @staticmethod
+            def locking(fd: int, mode: int, count: int) -> None:
+                calls.append((fd, mode, count))
+
+        monkeypatch.setattr(gateway_io, "fcntl", None)
+        monkeypatch.setattr(gateway_io, "msvcrt", FakeMsvcrt)
+        with (tmp_path / "windows.lock").open("a+", encoding="utf-8") as handle:
+            gateway_io._flock_exclusive(handle)
+            gateway_io._flock_unlock(handle)
+
+        assert [mode for _fd, mode, _count in calls] == [
+            FakeMsvcrt.LK_LOCK,
+            FakeMsvcrt.LK_UNLCK,
+        ]
+        assert (tmp_path / "windows.lock").stat().st_size == 1
+
+    def test_windows_nonblocking_lock_distinguishes_busy_from_invalid_handle(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ):
+        """只有明确锁冲突可返回 False，句柄等底座错误必须上抛。"""
+        import errno
+
+        import agent_py_agent.agent.gateway_parts.io as gateway_io
+
+        class FakeMsvcrt:
+            LK_LOCK = 1
+            LK_UNLCK = 2
+            LK_NBLCK = 3
+            failure = OSError(errno.EACCES, "busy")
+
+            @classmethod
+            def locking(cls, _fd: int, _mode: int, _count: int) -> None:
+                raise cls.failure
+
+        monkeypatch.setattr(gateway_io, "fcntl", None)
+        monkeypatch.setattr(gateway_io, "msvcrt", FakeMsvcrt)
+        with (tmp_path / "windows-nonblocking.lock").open("a+", encoding="utf-8") as handle:
+            assert gateway_io._try_flock_exclusive(handle) is False
+            FakeMsvcrt.failure = OSError(errno.EINVAL, "invalid")
+            with pytest.raises(OSError, match="invalid"):
+                gateway_io._try_flock_exclusive(handle)
+
+    def test_cross_process_lock_fails_closed_without_platform_primitive(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ):
+        """没有 POSIX/Windows 锁原语时不得静默退化成进程内锁。"""
+        import agent_py_agent.agent.gateway_parts.io as gateway_io
+
+        monkeypatch.setattr(gateway_io, "fcntl", None)
+        monkeypatch.setattr(gateway_io, "msvcrt", None)
+        with (tmp_path / "unsupported.lock").open("a+", encoding="utf-8") as handle:
+            with pytest.raises(RuntimeError, match="cross-process file locking"):
+                gateway_io._flock_exclusive(handle)
+            with pytest.raises(RuntimeError, match="cross-process file locking"):
+                gateway_io._try_flock_exclusive(handle)
+
 
 class TestReadJsonFile:
     """测试 read_json_file() 函数。"""

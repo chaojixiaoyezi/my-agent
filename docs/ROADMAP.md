@@ -19,6 +19,43 @@
 
 来自 STATUS.md，当前最急迫的任务已清空，下面保留中长期项。
 
+### TUI 活动回合输入与四路极限轮转复验
+
+状态：代码主链已收口，待 `.13` 部署复验与结构拆分
+
+解决问题：旧 TUI 在长任务运行时把普通 Enter 当成下一轮队列，用户补充消息要等当前任务结束才执行；
+queue preview 又位于可滚动 transcript，离开尾部后看不见。并行实验室若完成后长期空闲，也会浪费四路
+换时间的测试目标。
+
+当前进展：ordinary input 和控制操作均已使用稳定 message/operation ID、exact expected turn、持久 outbox、
+accepted/rejected/unknown 三态和 GET-only reconciler；Gateway terminal、attempt lease、guidance mailbox、
+Adapter ingress/reply 也已收进同一结构化事实链。response loss、同 ID 异正文、active/final/stop/provider ACK
+竞态和客户端重启已有定向测试；修复后的全量 pytest 到 100%、退出 0。
+
+待做：先在 `.13` 备份后部署并复验 response lost、明确拒绝、final race、客户端重启和多路 IM/TUI；随后由
+独立 agent 处理三类剩余底座：一是 ordinary/control 共用的最外层 message route binding，二是普通 ChatJob
+从 Enter 到 Gateway bind 的 durable SUBMITTING/stop-btw latch，三是 Gateway input receipt 冻结 canonical
+owner 与 result/input-status 的 exact issuer 鉴权。另按 strict report 拆掉 25 个超长/深嵌套/多参数 hard
+finding，禁止把它们加入 baseline。未执行项不能写成通过。
+
+边界：只部署 `192.0.2.13:/root/my-agent`，保持 tmux 观察会话和远端 key/config/runtime 数据；不触碰
+青禾项目或 PID 830976。本轮已经执行修复后的完整 pytest，不再为小改重复全仓测试。
+
+### npm 缓存全新 Node 任务真机复验
+
+状态：待验证
+
+解决问题：Fiber→TypeScript 因 npm 默认写只读 `$HOME/.npm` 先失败一次，让模型浪费调用自行探索环境
+workaround；需要一项全新 Node 任务证明底座默认值首次就生效。
+
+当前进展：EXEC-45 已由 Fiber 真实请求闭环；owner-scoped shell 增加标准
+`NPM_CONFIG_CACHE=/tmp/.cache/npm`，不修改 `HOME` 或写边界，并已部署 `.13`。本地和远端 focused tests、
+Ruff、py_compile 已通过；Fiber 自身早于部署启动，只能证明模型 workaround，不算底座 E2E。测试者在下一
+Node 任务仍只观察，不能修改任务产物。
+
+边界：仍只修改 `/Users/example/my-agent`、部署 `192.0.2.13:/root/my-agent`；不触碰青禾项目，
+不输出测试机 key，小于 10,000 行的本轮修复只跑 focused tests。
+
 ### Memory v2 单一主链收敛
 
 状态：代码迁移完成，最终全量与真实模型验证中
@@ -61,6 +98,11 @@ tools/subagents 均已完成聚焦验证；旧 workflow package/mode/config/CLI/
 compact，语义摘要另保留中段非成功副作用事实。完整门禁、本地 8899 基础 CLI、MiniMax 长链/极端
 CLI、1.10 双 Feishu owner scope 与真实出站均已通过；新的桌面客户端入站仍按产品事实页保留为外部
 验收边界。
+Fiber 真实长任务新增一个待发布切片：末尾 `return_code=143` 已被 operation 正确标为 failed，但模型仍按
+stdout 片段口头完成。当前候选已对照 会话运行时 active-turn/Stop-hook，把明确 failed/not_started 的 final 冲突
+改为最多两次的同轮带工具返工；unknown 等不确定副作用仍直接 fail-closed。本地结构化回归已通过，待
+`.13` 部署后用普通中文真实任务证明模型确实修正命令、产生新的 succeeded 终态且 TUI 不再先退回空输入框，
+通过后再移入完成事实。
 极端 MiniMax CLI 发现并删除了旧“绝对路径写飞后静默搬进 task output”兼容层。显式绝对路径现在保留
 原目标身份，由唯一写边界返回明确成功或 `WRITE_FORBIDDEN`；相对 `output/`、`work/` 任务落位不变。
 修复后的真实链已在 CLI 和 1.10 正式 owner scope 验证“成功—拒绝—继续成功”及模型准确部分结果。
@@ -146,7 +188,7 @@ Gateway/Feishu，并完成本地 8899、MiniMax-M2.7 和两个既有真实飞书
 
 解决问题：LocalStore 一致性诊断、gateway 请求崩溃恢复、adapter 文件协议。
 
-已有：`local-doctor`、`local-rebuild`、gateway failed 归档、processing lease、保守 worker pool、runner session heartbeat 账本、`adapter file`、启动恢复结构化检测错误、后台 dispatch 启动标记错误报告；普通回复/主动消息/附件已共用 DeliveryService 与 adapter registry；当前会话的 typed slash dispatcher 已统一 `/status`、`/btw`、`/stop`、`/goal`、`/verbose` 与 `/audit` 入口，未知 `/XXXX` fail-closed，命令词不进入模型；`/stop` 已改为优先中断当前窗口精确 live request，再持久清理 task/subagent。普通派工/等待/完成新增瘦身 LLM 回复轮与最终 delivery snapshot；后台 claim 具备 90 秒 fail-safe 和同进程域死 owner 立即接管，Gateway signal shutdown 有 typed forensics。
+已有：`local-doctor`、`local-rebuild`、gateway failed 归档、processing lease、保守 worker pool、runner session heartbeat 账本、`adapter file`、启动恢复结构化检测错误、后台 dispatch 启动标记错误报告；普通回复/主动消息/附件已共用 DeliveryService 与 adapter registry；adapter 入站现已在媒体和 Gateway POST 前落盘可信 channel/user/conversation/provider message identity 与 canonical digest，由单 worker 恢复精确 POST body、输入/结果/控制回执、占位和回送，ingress/reply row 都以 owner/epoch/expiry 短租约实现跨进程接管和旧结果 fencing，冲突正文隔离，429/5xx 保持等待，auth/config 与 input terminal-unknown 进入无正文持久终态；`/btw` unknown 按独立 operation ID 恢复而不拿目标 turn 去重，首次 GET 可单向绑定空 target，控制回执 watcher 冻结并发送 channel/user/conversation/chat type/chat id 身份供 Gateway 精确鉴权，stop rejected/terminal-unknown 也有明确或 durable unknown 收口；当前会话的 typed slash dispatcher 已统一 `/status`、`/btw`、`/stop`、`/goal`、`/verbose` 与 `/audit` 入口，未知 `/XXXX` fail-closed，命令词不进入模型；`/stop` 已改为优先中断当前窗口精确 live request，再持久清理 task/subagent。普通派工/等待/完成新增瘦身 LLM 回复轮与最终 delivery snapshot；后台 claim 具备 90 秒 fail-safe 和同进程域死 owner 立即接管，Gateway signal shutdown 有 typed forensics。
 
 待做：LocalStore compact/backup/export、gateway 请求优先级、独立子进程隔离版 runner worker、adapter HTTP/WebSocket 版，以及第二个生产 IM 的真实 API/媒体/重启复验。系统命令与窗口级 `/stop` 已随 `7776a03f` 部署 1.10，并由两个既有真实飞书客户端在运行中完成中断、无迟到回复、停止后续聊和 transcript 不含命令的复验。
 

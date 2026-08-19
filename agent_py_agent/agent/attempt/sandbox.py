@@ -205,15 +205,18 @@ class AttemptExecutionSandbox:
             f"SANDBOX_UNAVAILABLE: 平台无沙箱实现: {self._platform}"
         )
 
+    # LLM: extra_write_roots 来自当前工具的结构化 allowed_write_roots，首项是 canonical
+    # task work 临时根；必须先于 attempt_view，避免 build_bwrap_argv 把项目 cwd 当 /tmp 后端。
+    # 函数用途: 为 Linux 组装 bwrap 参数，并让任务临时区与当前项目目录分离。
     def _linux_argv(self, command_argv: list[str]) -> list[str]:
         spec = SandboxSpec(
             owner_home=self.spec.owner_home,
             workspace=self.spec.attempt_view,
             public_ro_roots=self.spec.public_read_roots,
             write_roots=(
+                *self.spec.extra_write_roots,
                 self.spec.attempt_view,
                 self.spec.staging_root,
-                *self.spec.extra_write_roots,
             ),
             bwrap_path=self.spec.bwrap_path,
             protected_persona_root=self.spec.protected_persona_root,

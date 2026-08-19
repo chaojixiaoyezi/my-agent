@@ -23,8 +23,11 @@ from .call_monitor import (
     estimate_first_token_timeout,
     is_cache_suspected,
 )
-from .context_pressure import model_visible_context_tokens
+from .context_pressure import model_visible_context_snapshot
 from .usage import output_token_usage
+
+# LLM: 本模块把 provider/model 生命周期写入唯一 ModelCallLedger，并只投影结构化计数与超时事实。
+# 模块用途: 连接一次真实模型调用与账本、动态超时、流式活动观测和最终统计。
 
 
 def start_model_call_record(request: object) -> tuple[ModelCallLedger, str, object]:
@@ -35,7 +38,8 @@ def start_model_call_record(request: object) -> tuple[ModelCallLedger, str, obje
     # 记账口径与统一可见口径对齐（门槛1）：text 协议恒等，native 协议计入
     # IR messages/pending guidance/tools —— 首 token 预算按出站可见量估计，
     # 避免多轮工具后 prefill 时间低估（真机 600s ProviderTimeout 根因之一）。
-    input_tokens = model_visible_context_tokens(agent, params, prompt)
+    context_snapshot = model_visible_context_snapshot(agent, params, prompt)
+    input_tokens = context_snapshot.current_tokens
     estimate = estimate_first_token_timeout(
         FirstTokenTimeoutParams(
             input_tokens=input_tokens,
@@ -71,7 +75,23 @@ def start_model_call_record(request: object) -> tuple[ModelCallLedger, str, obje
             },
         )
     )
+    _publish_model_context_usage(request, context_snapshot.to_public_dict())
     return ledger, call_id, estimate
+
+
+# LLM: Live context display is an optional typed sink capability. Missing capabilities stay
+# silent; raw prompts, messages, guidance, and tool schemas must never be passed to the sink.
+# 函数用途: 在每次真实模型调用开始前，把无正文的 token 构成快照送给支持实时状态的客户端。
+def _publish_model_context_usage(
+    request: object,
+    usage: dict[str, object],
+) -> bool:
+    params = getattr(request, "params", None)
+    sink = getattr(params, "effective_on_chunk", None)
+    writer = getattr(sink, "write_context_usage", None)
+    if not callable(writer):
+        return False
+    return writer(usage) is not False
 
 
 def observed_chunk_filter(
@@ -209,6 +229,8 @@ def model_call_ledger(agent: object) -> ModelCallLedger:
     return ledger
 
 
+# LLM: 优先读取不受明细裁剪影响的累计 scope；仅为旧账本或测试私有注入保留 retained-record 回退。
+# 函数用途: 汇总当前 request/run 的逻辑回合、物理调用、HTTP 尝试、重试和终态数量。
 def model_call_summary(
     agent: object,
     *,
@@ -220,6 +242,12 @@ def model_call_summary(
         return _empty_model_call_summary()
     request_id = str(request_id or "").strip()
     run_id = str(run_id or "").strip()
+    cumulative = ledger.cumulative_summary(request_id=request_id, run_id=run_id)
+    if cumulative is not None:
+        return {
+            "schema": "model_call_summary.v1",
+            **cumulative,
+        }
     records = [
         record
         for record in ledger.records()

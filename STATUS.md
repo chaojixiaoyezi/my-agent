@@ -1,5 +1,135 @@
 # STATUS
 
+## 2026-08-18 活动输入/控制回执候选提交前收口
+
+- 本轮把活动回合 ordinary input、`/btw`/`/stop` 控制、Gateway 唯一终态、attempt/lease fence、Adapter
+  durable ingress/reply watcher 收进结构化持久状态机；孤立 `responses/*.json` 只作可修复投影，不能再跳过
+  provider 或把请求伪装成完成。
+- 第一次全量 pytest 暴露 24 个失败；其中一处是真实 Compact 空输入仍误取 exact-turn 锁，其余主要是旧测试
+  仍断言裸 enum、worker path、worker-name lease owner 和 response-as-authority。完成底层修复及合同迁移后，
+  12 文件定向回归和修复后的全量 `pytest -q --tb=short` 均运行到 100%、退出 0。
+- 本轮所有变更 Python 文件 Ruff、doc sync 与 `git diff --check` 已通过。全仓 Ruff 仍有 112 个存量问题；
+  strict code-size 报告 25 个新增 hard finding（集中在 conversation guidance、Gateway receipt/terminal 与
+  TUI reconciler 的超长函数、嵌套和参数对象），没有通过改 baseline 隐藏。
+- 当前只是准备提交/部署到 `192.0.2.13` 的候选；测试机实际版本、启动状态和回滚证据必须以本轮部署后
+  的新记录为准。不会推送 GitHub，也不会把 key、owner 数据或运行目录打进提交/部署包。
+
+## 2026-08-18 第四路补充消息未插入与四路续跑
+
+- `dsh-lifecycle` 的两条普通输入并未丢失：旧 TUI 显示 `Press up to edit queued messages`，随后在长任务结束
+  后分别成为两个新回合。根因是 `_tui_enqueue_job` 无条件创建 ChatJob；HTTP `/ask` 已有 active-turn steer，
+  但本地文件队列 TUI 绕过了这条路。queue preview 同时被追加到滚动 transcript，所以离尾观察时会消失。
+- 本地候选让 Gateway 活动回合普通 Enter 先调用 canonical `/control`，使用 opaque client `message_id` 建立
+  fixed pending receipt；runtime 真注入同 ID 后才转为稳定 user block，拒绝竞态才回原 ChatJob queue。
+  外部 ID 不得收走本地 pending，普通 Gateway 客户端不接收 rich 确认事件。
+- 一小时 replica 没显示 compact 的另一原因也已明确：durable conversation compact 只处理已完成 transcript
+  前缀，单个长 active turn 的 native tool IR 会在 128k 窗口、115.2k 触发线附近内部裁剪。旧实现只写 INFO，
+  无 durable/UI 证据；候选增加无正文的 turn-local compaction 事件，并与 conversation generation 明确分栏。
+- 本地 6 个 focused 文件运行到 100%（保留既有 xfail），py_compile 和 changed-file Ruff 通过；尚未部署
+  `.13`，因此 C17 由 `VERIFIED` 重开为 `IMPLEMENTED`。四个非 replica TUI 已发现空闲并立即续上第二轮，
+  当前底部均显示 `esc to interrupt`。
+
+## 2026-08-18 Fiber 143 收口冲突与 会话运行时 式同轮返工候选
+
+- 已从 `.13` 的 owner runtime DB 复核真实操作，不是根据 TUI 文案推测：末尾 operation
+  `tool_operation:713825…` 为 `FAILED`，结果含 `COMMAND_FAILED`、`failure_stage=execution`、
+  `handler_executed=true`、`effect_outcome=failed` 和 `return_code=143`；HTTP stdout 成功片段与非零终态同时
+  完整送达。因此“模型提示不全”不是主因，缺口位于模型给出 final 后的 runtime 处置方式。
+- 会话运行时 对照确认：普通工具结果在同一 active turn 继续采样，plain assistant 才自然结束；Stop hook 要求
+  返工时把 continuation prompt 写回同一 turn，并不另开无工具短轮替模型改写答案。当前候选按该结构将
+  明确 `failed/not_started` 的冲突投影为 `completion_conflict.v1`，同时携带 typed 失败和被拒绝草稿，保留
+  原工具面；全 turn 最多两次，新的 succeeded operation 后自然 final。
+- `unknown/cancelled/incomplete/unverified` 仍不自动恢复工具执行，两次返工耗尽仍落
+  `OPERATION_INCOMPLETE`，没有把 143 特判成功。已通过已知失败→同轮修复成功、两次忽略→安全收口、
+  新 call id 不重置预算、unknown 不获工具返工和实际 143 字段分类的 focused tests。候选尚未部署 `.13`，
+  因此此处不宣称真实 MiniMax 返工 E2E 已完成。
+
+## 2026-08-18 上下文命令、输入视觉行与 Fiber 产物核验
+
+- 终端交互 的 `/context`、`/compact` 和 `/effort` 已逐项核对并映射：前两者复用 my-agent 唯一
+  owner/thread compact 主链，后者只暴露 provider/backend 真实能力；当前 MiniMax-M2.7 无可调 effort，
+  因此不会用 prompt 或 temperature 冒充设置成功。自动 compact 仍在每轮前按 90% 阈值触发。
+- 输入 Up/Down 现先走真实软折视觉行（含 CJK 宽字符和恰好填满行的边界），到顶/底后才进入 queue/history；
+  `N new messages ↓` 已有左键回尾 handler，仍可用 PageDown、滚轮与 Ctrl-End 导航。
+- `.13` 真机先用普通问候建立会话，再完成手动 compact generation 1 与 `/context` 复查。该问候同时暴露
+  本地会话错误展示 `send_message`：修复前 2 次失败调用，底层 ToolAvailability 修复后同一问候为 0 次工具
+  调用并直接回复；真实主动通道绑定仍保留该工具。
+- Fiber→TypeScript 请求已结束，不能判为“完整等价”：原版同口径为 169 个生产 Go 文件、27,354 功能行；
+  产物只有 5 个 `src` 文件、1,093 功能行，约为 4.0%。Jest 18 项直接运行通过，但有 open-handle/强制退出
+  警告；多个中间件是 stub/no-op，缺完整 client/binder/hooks/state/services 等公开面。完整对照在最终汇报表。
+- 本切片本地 89 项、`.13` 最终 23 项 focused tests 到 100%；Ruff、py_compile、doc-sync、strict code-size
+  和 diff check 通过。改动远低于 10,000 行，按用户约定未重复全仓 pytest。测试机 Gateway/TUI 为
+  PID 967623/967625，8420 正常监听；用户另一条 PID 830976 全程未触碰。证据位于
+  `/root/tui-parity-evidence/context-controls-20260818T1630CST/`。
+
+## 2026-08-18 Tornado 真机任务、验证收口与调用统计
+
+- 第二个真实复刻目标为 `tornadoweb/tornado`：筛选时 GitHub 22,178 stars，35 个非测试 Python 文件按
+  非空/非注释/docstring 排除口径为 12,606 功能行，符合“10,000 stars 以上、10,000-30,000 功能行”。
+  测试者只在 TUI 输入一次普通中文需求，请求为
+  `gwreq-1787028618-969099c5d1c3444691e5e669b6765c55`。
+- 被测 Agent 自主运行 181 个工具轮；核心 `go build . && go test -v .` 曾通过 10 项测试，但随后修补了
+  examples，只做了 grep/read，没有重新编译/运行 examples，最终正文仍停在“让我完成最终验证”，Gateway
+  却写成 `ok=true/status=done`。因此本轮只算“核心测试曾通过”，整体交付明确不通过，不能用终态字段掩盖。
+- 该任务同时完成 SANDBOX-02 真机复验：约 122MB 构建临时数据只留在
+  `work/.sandbox-tmp`，最终 output 约 240KB，未发现 `.sandbox-tmp/.cache/.gocache/gomodcache`；通用临时根
+  修复已从“待复验”升级为“已修复已验证”。
+- 假收口根因已在通用底座修复：被动验证事实统一写入 canonical `handler_details`；Go/Cargo manifest
+  命令进入 typed verify 分类；一次成功验证后的文件修改会保持 stale，即使后面只有 read/search 也不能
+  清除；软提醒按“工作根 + 最近验证事件 ID/状态”去重，新一轮真实验证后才重新武装。代码已部署 `.13`，
+  本地与远端五个 focused 文件均到 100%，下一真实代码任务负责 E2E 复验。
+- 旧 `ModelCallLedger` 只保留 128 条明细，最终统计也错误地只数 retained records。现在明细仍有界，但
+  request/run 累计 logical/model/provider 数独立保存；超过 128 条的 focused 回归证明 7 次调用在仅保留
+  4 条明细时仍报告 7。Tornado transcript 有 183 个 assistant-thinking 回合块，旧 response 的 128 只能
+  视为下限。MiniMax 当前官方规则是 Token-Based，并按对应 API 目录价折算共享套餐额度；控制台/接口只给
+  整数百分比。官方剩余额度接口在部署后返回通用模型 5 小时窗口剩 85%、周窗口剩 93%，查询过程未输出
+  或落盘 key。
+- 真机证据位于 `/root/tui-parity-evidence/rich-transcript-20260818/tornado-false-closeout/`，包含请求、
+  chunks、response、任务状态、output inventory、事件摘要、hash 与 secret scan；备份为
+  `/root/tui-closeout-ledger-backup.20260818T135038/predeploy-files.tar.gz`。Gateway/TUI 已分别以 PID
+  922966/922999 重启，PID 830976 保持不动。
+
+## 2026-08-18 终端交互 富 transcript 真机追补
+
+- 用户截图复验纠正了上一轮“fixture 已覆盖即等于真实 Gateway 已覆盖”的证据错误：原 Gateway 在非 full
+  verbose 下删除工具 output，只发布首段 commentary，provider thinking 仅留内部历史，文件工具也没有
+  可供 TUI 渲染的 diff/write envelope，因此真实 MiniMax 会话确实只看到工具名。
+- 当前修复以显式 `rich_transcript` 客户端能力接通逐轮 commentary、可折叠 provider thinking、结构化
+  diff/write/patch/command 展示；plain/IM/其它 Gateway 客户端保持最小输出。失败后最后一次工作区修补新增
+  一次性结构化软续跑，不解析模型文案，也不建立新的完成硬门。
+- 本地相关 Gateway/TUI/ToolRuntime/closeout/PTY focused tests 已运行到 100%（预期 xfail 保留）；changed-file
+  Ruff 通过，strict code-size 在把超限 2 行的 adapter helper 移出类体后通过。本轮远低于 10,000 行，按
+  用户约定不重复全仓 pytest。
+- `.13` 已备份并部署到 `192.0.2.13:/root/my-agent`，只重启 PID 对应的 Gateway 和 tmux `work` TUI。
+  首个真实请求 `gwreq-1787021814-bf2c56532474434883093fa46525b878` 显示了 thinking、逐轮说明、写入预览、
+  红蓝 diff、命令输出和红色编译错误，但在 127 个工具轮后被旧底座误判的 `ECONNREFUSED` 终止，不能算交付通过。
+- typed 连接拒绝现按 HTTP `2/5/15` 秒和模型回合 `10/25/45/100/180` 秒两层有界退避；修复部署后，独立续作请求
+  `gwreq-1787024422-feb643f53ff74a8ba06c674f50c421e4` 在 2,311.866 秒内完成 197 个工具轮；旧 response
+  报告 128 次模型调用，现已确认这是明细保留上限而非总数。模型自主完成 3,021 行 Go 源码、Linux
+  可执行文件、构建和 CLI 冒烟；测试者没有旁路修改任务产物。
+- 该真实任务同时暴露新的交付洁净度缺口：`go test ./...` 实际报告两个 package 均为 `[no test files]`，且模型复制
+  项目时把 29MB `.gocache` 和 106MB `.sandbox-tmp` 一并带进 137MB 交付目录。当前底座修复不写 Go/Click 特判：
+  process boundary 把 canonical `task_work_dir` 排为独立 `/tmp` 后端，并将 owner-scoped `TMPDIR/XDG_CACHE_HOME`
+  指向沙箱临时区；本地四个 sandbox/registry/shell focused 文件和 `.13` 六个关键定向用例均运行到 100%，
+  修复已部署并只重启本任务 Gateway/TUI；后续 Tornado→Go 真机任务已证明缓存只留 task work，最终 output
+  无 cache/debug 目录，SANDBOX-02 复验通过。
+
+## 2026-08-18 终端交互 TUI 可观察行为复刻验收
+
+- 当前工作树已用 Python/prompt_toolkit 单一 typed 状态链完成 终端交互 TUI 可观察行为复刻；品牌、
+  模型和 终端交互 独有能力只按 my-agent 真实合同映射，不复制 TypeScript/Ink 运行时，也不创建第二份
+  会话、工具、审批或历史事实源。
+- parity matrix 85 项全部关闭：38 `VERIFIED`、38 `MAPPED_VERIFIED`、9 `NOT_APPLICABLE`；未说明的
+  用户可见差异为 0。10k 回合/20k stable block 压测空闲 frame 平均 6.4ms，真实状态重绘平均 45.8ms。
+- 本地 TUI focused 327 项到 100%；本轮代码/测试超过 10,000 行，额外一次全仓 pytest 收集 24,663 项、
+  运行到 100% 且退出 0。changed-file Ruff、doc sync、strict code-size、diff 和 staged clean-package
+  通过；全仓 Ruff 的 119 项均由 clean HEAD 的 122 项历史集合覆盖，不属于本任务新增。
+- `192.0.2.13:/root/my-agent` 最终包覆盖 70 个文件、删除 5 个废弃文件，hash、rollback、ANSI、
+  focused test、Gateway/TUI 健康和 secret 扫描证据位于
+  `/root/tui-parity-evidence/final-20260818T071817CST/final-deploy/`。该事实只属于 `.13`，与青禾的
+  `my_agent` checkout、机器和任务无关。
+- 当前能力仍只是本工作树和 `.13` 测试部署事实；尚未 commit/push，不代表远程 `main` 已发布。
+
 ## 2026-07-26 当前轮副作用核验与 Memory 底座封板
 
 - 对照 会话运行时 的 typed tool response items 和 长期助手 的工具句柄/会话边界后，没有增加自然语言分类器、

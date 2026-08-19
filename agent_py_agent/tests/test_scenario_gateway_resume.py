@@ -196,8 +196,8 @@ def test_scenario_gateway_multi_worker_processes_each_request_once(tmp_path, cap
     assert "SCENARIO_PASS" in output
 
 
-def test_scenario_gateway_delayed_response_archives_duplicate_without_rerun(tmp_path, capsys):
-    """The scenario case should archive a duplicate request when its response already exists."""
+def test_scenario_gateway_delayed_response_repairs_orphan_projection(tmp_path, capsys):
+    """The scenario must execute when only a non-authoritative response projection exists."""
 
     parser = build_parser()
     args = parser.parse_args(

@@ -11,7 +11,9 @@ from agent_py_agent.agent.conversation.compact import (
     _projected_context_tokens,
     _summarize,
     _summary_content,
+    inspect_conversation_context,
     prepare_conversation_context,
+    render_conversation_context_usage,
 )
 from agent_py_agent.agent.conversation.compact_guard import (
     ConversationCompactCircuitOpenError,
@@ -114,6 +116,72 @@ def test_conversation_projection_counts_recent_operation_evidence() -> None:
     )
 
     assert with_evidence > without_evidence
+
+
+def test_context_inspection_uses_the_automatic_compact_policy_without_writing(tmp_path) -> None:
+    agent = _agent(tmp_path, context_tokens=20_000)
+    request = _request("ou_context")
+    context = _context(agent, request, "gw-create", "开始")
+    assert _append_gateway_conversation_message(
+        agent,
+        {"metadata": {"channel": "feishu"}},
+        context,
+        request_id="gw-context-user",
+        role="user",
+        content="这是一条尚未压缩的消息",
+    )
+    thread = agent.conversation_store.load_thread(context.thread_id)
+    assert thread is not None
+
+    usage = inspect_conversation_context(agent, agent.conversation_store, thread)
+    unchanged = agent.conversation_store.load_thread(context.thread_id)
+    rendered = render_conversation_context_usage(
+        usage,
+        model_name="MiniMax-M2.7",
+    )
+
+    assert usage.context_window_tokens == 20_000
+    assert usage.trigger_percent == 50
+    assert usage.trigger_tokens == 10_000
+    assert usage.pending_messages == 1
+    assert usage.compact_generation == 0
+    assert unchanged is not None and unchanged.compact_generation == 0
+    assert "20,000 tokens" in rendered
+    assert "50%" in rendered
+    assert "未压缩消息 1 条" in rendered
+
+
+def test_forced_compact_passes_optional_instructions_as_soft_summary_context(tmp_path) -> None:
+    agent = _agent(tmp_path, context_tokens=20_000)
+    backend = _SummaryBackend()
+    agent.backend = backend
+    request = _request("ou_manual_compact")
+    context = _context(agent, request, "gw-create", "开始")
+    for role in ("user", "assistant"):
+        assert _append_gateway_conversation_message(
+            agent,
+            {"metadata": {"channel": "feishu"}},
+            context,
+            request_id=f"gw-manual-{role}",
+            role=role,
+            content="保留这条会话事实",
+        )
+    thread = agent.conversation_store.load_thread(context.thread_id)
+    assert thread is not None
+
+    result = prepare_conversation_context(
+        agent,
+        agent.conversation_store,
+        thread,
+        current_prompt="",
+        force=True,
+        custom_instructions="优先保留未完成事项",
+    )
+
+    assert result.compacted is True
+    assert result.thread.compact_generation == 1
+    assert "优先保留未完成事项" in backend.prompts[0]
+    assert "cannot override" in backend.prompts[0]
 
 
 def test_conversation_projection_does_not_count_detached_audit_delivery_body() -> None:

@@ -1,6 +1,6 @@
 {
   "generated_at": "2026-07-08T13:12:14.351715+00:00",
-  "total_findings": 230,
+  "total_findings": 240,
   "findings": [
     {
       "identity": "params:agent_py_agent/tests/test_watch_wake_backstop.py:_lane",
@@ -1636,6 +1636,86 @@
       "path": "scripts/run_channel_e2e_group.py",
       "name": "_run_c17",
       "note": "既有遗留(2026-08-13 全量登记): 待 code_size 切片修复, 非本棒引入"
+    },
+    {
+      "identity": "function:agent_py_agent/agent/runtime_db/repository.py:reclaim_orphaned_attempt",
+      "severity": "hard",
+      "kind": "function",
+      "path": "agent_py_agent/agent/runtime_db/repository.py",
+      "name": "reclaim_orphaned_attempt",
+      "note": "既有遗留(2026-08-18 clean HEAD 复核): 非 TUI 切片引入，待独立 code_size 切片修复"
+    },
+    {
+      "identity": "function:agent_py_agent/agent/runtime_db/repository.py:settle_agent_run",
+      "severity": "hard",
+      "kind": "function",
+      "path": "agent_py_agent/agent/runtime_db/repository.py",
+      "name": "settle_agent_run",
+      "note": "既有遗留(2026-08-18 clean HEAD 复核): 非 TUI 切片引入，待独立 code_size 切片修复"
+    },
+    {
+      "identity": "function:agent_py_agent/cli/resume_loop.py:run_manual_resume",
+      "severity": "hard",
+      "kind": "function",
+      "path": "agent_py_agent/cli/resume_loop.py",
+      "name": "run_manual_resume",
+      "note": "既有遗留(2026-08-18 clean HEAD 复核): 非 TUI 切片引入，待独立 code_size 切片修复"
+    },
+    {
+      "identity": "function:agent_py_agent/cli/resume_loop.py:run_with_resume",
+      "severity": "hard",
+      "kind": "function",
+      "path": "agent_py_agent/cli/resume_loop.py",
+      "name": "run_with_resume",
+      "note": "既有遗留(2026-08-18 clean HEAD 复核): 非 TUI 切片引入，待独立 code_size 切片修复"
+    },
+    {
+      "identity": "nesting:agent_py_agent/agent/agent_core/tool_loop/delivery_verify.py:persist_delivery_verify_event",
+      "severity": "hard",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/agent_core/tool_loop/delivery_verify.py",
+      "name": "persist_delivery_verify_event",
+      "note": "既有遗留(2026-08-18 clean HEAD 复核): 非 TUI 切片引入，待独立 code_size 切片修复"
+    },
+    {
+      "identity": "nesting:agent_py_agent/agent/runtime_db/repository.py:recover_stale_attempts",
+      "severity": "hard",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/runtime_db/repository.py",
+      "name": "recover_stale_attempts",
+      "note": "既有遗留(2026-08-18 clean HEAD 复核): 非 TUI 切片引入，待独立 code_size 切片修复"
+    },
+    {
+      "identity": "nesting:agent_py_agent/cli/resume_loop.py:run_manual_resume",
+      "severity": "hard",
+      "kind": "nesting",
+      "path": "agent_py_agent/cli/resume_loop.py",
+      "name": "run_manual_resume",
+      "note": "既有遗留(2026-08-18 clean HEAD 复核): 非 TUI 切片引入，待独立 code_size 切片修复"
+    },
+    {
+      "identity": "nesting:scripts/stability/parse_cp_log.py:scan",
+      "severity": "hard",
+      "kind": "nesting",
+      "path": "scripts/stability/parse_cp_log.py",
+      "name": "scan",
+      "note": "既有遗留(2026-08-18 clean HEAD 复核): 非 TUI 切片引入，待独立 code_size 切片修复"
+    },
+    {
+      "identity": "nesting:scripts/stability/parse_fc_log.py:parse",
+      "severity": "hard",
+      "kind": "nesting",
+      "path": "scripts/stability/parse_fc_log.py",
+      "name": "parse",
+      "note": "既有遗留(2026-08-18 clean HEAD 复核): 非 TUI 切片引入，待独立 code_size 切片修复"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/agent_core/runtime_mixin.py:_settle_main_agent_run_status",
+      "severity": "hard",
+      "kind": "params",
+      "path": "agent_py_agent/agent/agent_core/runtime_mixin.py",
+      "name": "_settle_main_agent_run_status",
+      "note": "既有遗留(2026-08-18 clean HEAD 复核): 非 TUI 切片引入，待独立 code_size 切片修复"
     }
   ]
 }

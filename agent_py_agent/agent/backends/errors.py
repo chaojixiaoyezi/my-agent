@@ -9,13 +9,39 @@ class ProviderRecoverableError(RuntimeError):
     """Base class for model-provider failures that can be retried or resumed."""
 
 
-# LLM: NET-01(2026-08-15 C3 真机): 连接失败(Connection refused/DNS/配置错)是不可重试的
-# 配置性失败, 不能并入 ProviderRecoverableError(否则重试层会误重试); 单独成类让
-# CLI/Gateway 能给出稳定用户提示而不打印 traceback。参照 长期助手 error_classifier 的
-# connection 分类。
-# 类用途: 模型接口无法连接(服务未起/DNS/代理/配置错误)的 typed 错误。
-class ProviderConnectionError(RuntimeError):
-    """Model endpoint unreachable (connection refused/DNS/config), not retryable."""
+# LLM: Permanent endpoint/model/credential mismatches share one typed provider boundary; callers may render them as configuration failures but must never retry or reinterpret them as model capability evidence.
+# 类用途: 归类需要修改模型服务配置才能恢复的问题，避免被当成程序错误或瞬时断线反复重试。
+class ProviderConfigurationError(RuntimeError):
+    """Base class for permanent provider configuration failures."""
+
+    error_code = "PROVIDER_CONFIGURATION_INVALID"
+
+
+# LLM: ProviderConnectionError 只承载尚未证明可瞬时恢复的 DNS/地址/代理配置失败；typed ECONNREFUSED 已在 transport 边界归 ProviderTransientError。
+# 类用途: 表示需要用户检查模型接口地址、DNS 或代理配置的不可重试连接错误。
+class ProviderConnectionError(ProviderConfigurationError):
+    """Model endpoint is unreachable because endpoint/DNS/proxy configuration is invalid."""
+
+    error_code = "PROVIDER_CONNECTION_FAILED"
+
+
+# LLM: A provider-declared 4xx rejection is a typed permanent provider/configuration fact; it must bypass capability fallback and transport retry while retaining structured status/details for diagnostics.
+# 类用途: 表示模型服务明确拒绝了当前请求或配置，提醒调用方检查接口、模型和密钥组合，而不是误报为工具能力不足。
+class ProviderRequestRejectedError(ProviderConfigurationError):
+    """The provider permanently rejected the configured request."""
+
+    error_code = "PROVIDER_REQUEST_REJECTED"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int = 0,
+        details: object | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = max(0, int(status_code or 0))
+        self.details = details
 
 
 class ProviderTimeoutError(ProviderRecoverableError):
@@ -82,6 +108,12 @@ def is_provider_recoverable_error(exc: BaseException) -> bool:
     return isinstance(exc, ProviderRecoverableError)
 
 
+# LLM: Configuration failures are typed provider facts but intentionally excluded from recoverable retries.
+# 函数用途: 判断错误是否必须先修改接口、模型或密钥配置才能继续。
+def is_provider_configuration_error(exc: BaseException) -> bool:
+    return isinstance(exc, ProviderConfigurationError)
+
+
 def is_provider_timeout_error(exc: BaseException) -> bool:
     """Return True when the model-provider request timed out."""
     return isinstance(exc, ProviderTimeoutError)
@@ -127,6 +159,17 @@ def provider_recoverable_report(exc: BaseException, *, timeout_seconds: object =
         "模型接口出现可恢复异常，本次 run 已停止当前请求。\n"
         f"error={exc}\n"
         "建议下一步：查看已写入的任务状态和产物，然后从未完成部分继续。"
+    )
+
+
+# LLM: Permanent provider configuration reports are shared by direct CLI and service adapters; do not include secrets or infer remediation from raw message text.
+# 函数用途: 给用户说明模型服务配置不匹配，并保留原始错误供本机诊断。
+def provider_configuration_report(exc: BaseException) -> str:
+    return (
+        "[provider_configuration]\n"
+        "模型服务拒绝或无法使用当前配置，本次模型和工具均未执行。\n"
+        f"error={exc}\n"
+        "请检查接口地址、模型名称和密钥是否属于同一服务后重试。"
     )
 
 

@@ -1,3 +1,5 @@
+# LLM: 本模块集中定义 plain chat 的共享 DTO、任务对象和有界历史 helper；TUI 复用 ChatJob 时不得另造不兼容任务协议。
+# 模块用途: 保存普通终端聊天所需的参数束、队列任务、历史常量和小型状态辅助函数。
 
 from __future__ import annotations
 
@@ -151,6 +153,8 @@ def resume_context_override(args) -> str | None:
     return None
 
 
+# LLM: ChatJob 是 plain/TUI worker 队列中的唯一任务对象；user 是模型正文，display_text 只保存用户原始输入用于队列编辑投影。
+# 类用途: 携带一次待执行聊天输入、注入、文件、请求身份和结构化系统任务。
 class ChatJob:
 
     __slots__ = (
@@ -160,8 +164,18 @@ class ChatJob:
         "prompt_files",
         "request_id",
         "system_task",
+        "display_text",
+        "gateway_request_id",
+        "client_message_id",
+        "save",
+        "resume_context",
+        "tool_approval",
+        "rich_transcript",
+        "inject_complete",
     )
 
+    # LLM: display_text 缺省回落到 user，只影响可编辑队列显示；request_id/system_task 仍是执行与控制的机器事实。
+    # 函数用途: 创建一条可由 plain 或 TUI worker 串行消费的聊天任务。
     def __init__(
         self,
         *,
@@ -171,6 +185,14 @@ class ChatJob:
         prompt_files: list[str],
         request_id: str,
         system_task: dict[str, object] | None = None,
+        display_text: str = "",
+        gateway_request_id: str = "",
+        client_message_id: str = "",
+        save: bool = True,
+        resume_context: bool | None = None,
+        tool_approval: bool = False,
+        rich_transcript: bool = False,
+        inject_complete: bool = False,
     ) -> None:
         self.user = user
         self.show_prompt = show_prompt
@@ -178,3 +200,11 @@ class ChatJob:
         self.prompt_files = prompt_files
         self.request_id = request_id
         self.system_task = dict(system_task or {})
+        self.display_text = str(display_text or user)
+        self.gateway_request_id = str(gateway_request_id or "")
+        self.client_message_id = str(client_message_id or "")
+        self.save = bool(save)
+        self.resume_context = resume_context if isinstance(resume_context, bool) else None
+        self.tool_approval = bool(tool_approval)
+        self.rich_transcript = bool(rich_transcript)
+        self.inject_complete = bool(inject_complete)

@@ -76,6 +76,24 @@ def active_turn_user_input_texts(
     ]
 
 
+# LLM: Unconsumed packets must return to the canonical guidance mailbox before a compact restart.
+# Filtering uses structured guidance ids and never compares user text.
+# 函数用途: 从跨轮携带包中移除尚未被模型接收、需要重新认领的补充消息。
+def exclude_active_turn_user_input_ids(
+    packets: Iterable[dict[str, object]] | None,
+    excluded_ids: Iterable[str],
+) -> list[dict[str, object]]:
+    excluded = {str(item or "").strip() for item in excluded_ids if str(item or "").strip()}
+    if not excluded:
+        return merge_active_turn_user_inputs(packets)
+    return [
+        packet
+        for raw in packets or []
+        if (packet := _normalized_packet(raw)) is not None
+        and not excluded.intersection(str(item) for item in packet["input_ids"])
+    ]
+
+
 def _normalized_packet(raw: object) -> dict[str, object] | None:
     if not isinstance(raw, dict):
         return None
@@ -104,6 +122,7 @@ def _normalized_packet(raw: object) -> dict[str, object] | None:
 __all__ = [
     "active_turn_user_input_texts",
     "append_active_turn_user_input",
+    "exclude_active_turn_user_input_ids",
     "merge_active_turn_user_inputs",
     "packet_from_guidance",
 ]

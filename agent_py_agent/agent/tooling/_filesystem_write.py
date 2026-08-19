@@ -1,3 +1,6 @@
+# LLM: 本模块是 write_file 的 canonical 原子写入实现；富展示只能投影写入前后事实，不能改变路径、配额、persona 或 artifact 合同。
+# 模块用途: 校验文本或二进制内容并安全写入文件，同时给模型和终端返回可追踪的写入结果。
+
 from __future__ import annotations
 
 import base64
@@ -13,6 +16,11 @@ from ..contracts.artifact_acceptance import ArtifactAcceptanceRequest, validate_
 from ..contracts.recovery import RecoveryAction
 from ..run_intent import reference_write_feedback
 from ..user_space.owner_quota import OwnerQuotaChange, OwnerQuotaExceeded, OwnerQuotaUnavailable
+from ._filesystem_display import (
+    build_text_diff_display,
+    build_write_display,
+    existing_utf8_text_for_display,
+)
 from ._filesystem_helpers import _MAX_WRITE_TEXT_CHARS, _required_path, _text_param
 from ._filesystem_read import (
     FileSystemAccessOptions,
@@ -166,6 +174,8 @@ class WriteFileTool(FileSystemTool):
             ),
         )
 
+    # LLM: 写入成功除了 artifact 合同，还要提供有界结构化预览给富终端；预览不参与验收、路径授权或成功判断。
+    # 函数用途: 校验并原子写入文本/二进制文件，同时返回终端可展示的行数和内容预览。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         try:
             request = _write_request(self, params)
@@ -209,6 +219,11 @@ class WriteFileTool(FileSystemTool):
             return ToolHandlerOutcome(
                 "write_file", False, persona_error, error_code="PERSONA_INJECTION_BLOCKED"
             )
+        before_content = (
+            existing_utf8_text_for_display(request.target)
+            if request.mode == "overwrite" and request.content is not None
+            else None
+        )
         target = _prepare_write_target(self, request.target)
         write_error = _atomic_write_or_error(self, target, request)
         if write_error is not None:
@@ -228,6 +243,19 @@ class WriteFileTool(FileSystemTool):
         )
         result = _write_result("write_file", target, output, web_decision)
         result.result_envelope["bytes_written"] = len(request.data)
+        if before_content is not None and request.content is not None:
+            result.result_envelope["display"] = build_text_diff_display(
+                self.display_path(target),
+                before_content,
+                request.content,
+            )
+        else:
+            result.result_envelope["display"] = build_write_display(
+                path=self.display_path(target),
+                content=request.content,
+                mode=request.mode,
+                bytes_written=len(request.data),
+            )
         if feedback:
             result.result_envelope["soft_feedback"] = feedback
         return result

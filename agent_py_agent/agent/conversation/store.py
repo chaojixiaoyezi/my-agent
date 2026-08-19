@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import threading
 import time
 from collections.abc import Callable
@@ -20,6 +21,7 @@ from ..gateway_parts.daemon_metadata import build_process_identity, process_iden
 from ..gateway_parts.io import (
     locked_file_transition,
     read_json_file,
+    read_json_file_report,
     update_json_file_atomic,
     write_json_file_atomic,
 )
@@ -63,6 +65,118 @@ from .workspace_paths import validated_durable_work_path
 class JsonlReadReport:
     rows: list[dict[str, Any]]
     load_errors: list[dict[str, Any]]
+
+
+# LLM: This receipt is the durable idempotency and delivery authority for one guidance ingress.
+# The JSONL row is only its FIFO projection; pending/reserved/submitted/consumed/rejected lives here.
+# 类用途: 记录补充消息从等待、当前尝试预留、提交模型、确认消费到拒绝的唯一持久状态。
+@dataclass(frozen=True)
+class GuidanceOnceReceipt:
+    dedupe_key: str
+    input_digest: str
+    status: str
+    entry: GuidanceEntry
+    updated_at: float
+    attempt_id: str = ""
+    submission_id: str = ""
+    submitted_at: float = 0.0
+    migration: dict[str, Any] = field(default_factory=dict)
+
+    # LLM: Receipt serialization stays schema-neutral at the store boundary; callers consume
+    # typed fields and must not infer delivery state from filenames or prose.
+    # 函数用途: 把幂等回执转换成原子 JSON 文件可保存的字典。
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": "conversation_guidance_once.v4",
+            "dedupe_key": self.dedupe_key,
+            "input_digest": self.input_digest,
+            "status": self.status,
+            "entry": self.entry.to_dict(),
+            "updated_at": self.updated_at,
+            "attempt_id": self.attempt_id,
+            "submission_id": self.submission_id,
+            "submitted_at": self.submitted_at,
+            **({"migration": dict(self.migration)} if self.migration else {}),
+        }
+
+    # LLM: Invalid or partial receipt payloads fail closed so retry never invents acceptance.
+    # 函数用途: 从持久化字典恢复幂等回执，并校验关键身份和状态字段。
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> GuidanceOnceReceipt:
+        entry = data.get("entry")
+        schema_version = str(data.get("schema_version") or "").strip()
+        status = str(data.get("status") or "").strip().lower()
+        migration = data.get("migration")
+        migration = dict(migration) if isinstance(migration, dict) else {}
+        if schema_version == "conversation_guidance_once.v1":
+            legacy_status = status
+            status = {
+                "pending": "pending",
+                "claimed": "submitted",
+                # v1 accepted meant only that Gateway had appended the row. It never proved
+                # provider consumption, so the explicit migration keeps it unresolved.
+                "accepted": "submitted",
+                "consumed": "consumed",
+                "rejected": "rejected",
+            }.get(status, "")
+            migration = {
+                "from_schema": "conversation_guidance_once.v1",
+                "from_status": legacy_status,
+                "decision": "legacy_gateway_acceptance_is_not_provider_consumption",
+                "migrated_at": time.time(),
+            }
+        elif schema_version == "conversation_guidance_once.v2":
+            legacy_status = status
+            status = {
+                "pending": "pending",
+                # v2 could not prove whether provider submission had begun, so
+                # migration chooses the duplicate-safe unresolved side.
+                "claimed": "submitted",
+                "consumed": "consumed",
+                "rejected": "rejected",
+            }.get(status, "")
+            migration = {
+                "from_schema": "conversation_guidance_once.v2",
+                "from_status": legacy_status,
+                "decision": "legacy_claim_is_provider_submission_unknown",
+                "migrated_at": time.time(),
+            }
+        elif schema_version == "conversation_guidance_once.v3":
+            legacy_status = status
+            migration = {
+                "from_schema": "conversation_guidance_once.v3",
+                "from_status": legacy_status,
+                "decision": "legacy_submission_has_no_atomic_batch_identity",
+                "migrated_at": time.time(),
+            }
+        elif schema_version != "conversation_guidance_once.v4":
+            status = ""
+        if not isinstance(entry, dict) or status not in {
+            "pending",
+            "reserved",
+            "submitted",
+            "consumed",
+            "rejected",
+        }:
+            raise DataCorruptionError("conversation guidance receipt is invalid")
+        receipt = cls(
+            dedupe_key=str(data.get("dedupe_key") or "").strip(),
+            input_digest=str(data.get("input_digest") or "").strip(),
+            status=status,
+            entry=GuidanceEntry.from_dict(entry),
+            updated_at=float(data.get("updated_at") or 0.0),
+            attempt_id=str(data.get("attempt_id") or "").strip(),
+            submission_id=(
+                str(data.get("submission_id") or "").strip()
+                or ("legacy-unknown" if status == "submitted" else "")
+            ),
+            submitted_at=float(data.get("submitted_at") or 0.0),
+            migration=migration,
+        )
+        if not receipt.dedupe_key or not receipt.input_digest or not receipt.entry.guidance_id:
+            raise DataCorruptionError("conversation guidance receipt identity is invalid")
+        _validate_guidance_once_receipt(receipt, legacy=bool(migration))
+        return receipt
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -227,6 +341,11 @@ class ConversationBaseStore:
         self.policies_dir = self.root / "progress_policies"
         self.observations_dir = self.root / "observations"
         self.guidance_dir = self.root / "guidance"
+        self.guidance_dedupe_dir = self.root / "guidance_dedupe"
+        self.guidance_turn_index_dir = self.root / "guidance_turn_index"
+        self.guidance_input_index_dir = self.root / "guidance_input_index"
+        self.guidance_submission_batches_dir = self.root / "guidance_submission_batches"
+        self.guidance_ack_batches_dir = self.root / "guidance_ack_batches"
         self.goals_dir = self.root / "goals"
         self.wake_queue_dir = self.root / "wake_queue"
         self.wake_handled_dir = self.wake_queue_dir / "handled"
@@ -255,6 +374,11 @@ class ConversationBaseStore:
             self.policies_dir,
             self.observations_dir,
             self.guidance_dir,
+            self.guidance_dedupe_dir,
+            self.guidance_turn_index_dir,
+            self.guidance_input_index_dir,
+            self.guidance_submission_batches_dir,
+            self.guidance_ack_batches_dir,
             self.goals_dir,
             self.background_claims_dir,
             self.wake_dedupe_dir,
@@ -285,6 +409,51 @@ class ConversationBaseStore:
         return (
             self.guidance_dir / f"{safe_file_stem(target_type)}.{safe_file_stem(target_id)}.jsonl"
         )
+
+    # LLM: Dedupe keys may contain channel and thread identifiers, so filenames use a full
+    # cryptographic digest while the original key remains inside the validated receipt.
+    # 函数用途: 返回一条 guidance 幂等回执的唯一安全文件路径。
+    def _guidance_dedupe_path(self, dedupe_key: str) -> Path:
+        digest = hashlib.sha256(str(dedupe_key).encode("utf-8")).hexdigest()
+        return self.guidance_dedupe_dir / f"{digest}.json"
+
+    # LLM: The per-turn folder is a bounded lookup projection, never delivery authority. Receipt
+    # state remains canonical and every ref stores the original dedupe key for validation.
+    # 函数用途: 返回精确回合的补充消息索引目录，避免结束时扫描所有历史回执。
+    def _guidance_turn_index_path(self, expected_turn_id: str, dedupe_key: str) -> Path:
+        turn_digest = hashlib.sha256(str(expected_turn_id).encode("utf-8")).hexdigest()
+        receipt_digest = hashlib.sha256(str(dedupe_key).encode("utf-8")).hexdigest()
+        return self.guidance_turn_index_dir / turn_digest / f"{receipt_digest}.json"
+
+    # LLM: Gateway ingress ids are opaque and owner-scoped; only their digest appears in a path.
+    # 函数用途: 返回普通消息回执到 guidance 回执的反向索引路径，供崩溃恢复找回半完成接入。
+    def _guidance_input_index_path(self, gateway_input_request_id: str) -> Path:
+        digest = hashlib.sha256(gateway_input_request_id.encode("utf-8")).hexdigest()
+        return self.guidance_input_index_dir / f"{digest}.json"
+
+    # LLM: One provider-ack batch is immutable and addressed by exact turn plus its guidance ids.
+    # 函数用途: 返回模型一次确认接收整批补充消息的原子提交文件位置。
+    def _guidance_ack_batch_path(
+        self,
+        expected_turn_id: str,
+        guidance_ids: tuple[str, ...],
+    ) -> Path:
+        turn_digest = hashlib.sha256(expected_turn_id.encode("utf-8")).hexdigest()
+        batch_source = json.dumps(sorted(guidance_ids), ensure_ascii=False, separators=(",", ":"))
+        batch_digest = hashlib.sha256(batch_source.encode("utf-8")).hexdigest()
+        return self.guidance_ack_batches_dir / turn_digest / f"{batch_digest}.json"
+
+    # LLM: A provider call id is host-generated and immutable. Hashing it under the exact turn
+    # yields one atomic provider-boundary authority without exposing identifiers in filenames.
+    # 函数用途: 返回一次模型物理调用所对应的补充消息提交批次文件。
+    def _guidance_submission_batch_path(
+        self,
+        expected_turn_id: str,
+        provider_call_id: str,
+    ) -> Path:
+        turn_digest = hashlib.sha256(expected_turn_id.encode("utf-8")).hexdigest()
+        batch_digest = hashlib.sha256(provider_call_id.encode("utf-8")).hexdigest()
+        return self.guidance_submission_batches_dir / turn_digest / f"{batch_digest}.json"
 
     # LLM: One sanitized path per thread is the sole durable goal record authority.
     # 函数用途: 返回当前 conversation thread 唯一的持续目标文件路径。
@@ -2078,28 +2247,1146 @@ def _guidance_entries(
     return entries, errors
 
 
+# LLM: Guidance construction is shared by ordinary append and idempotent ingress. Retry-only
+# fields such as ``now`` never alter an already prepared entry.
+# 函数用途: 校验补充消息并构造一条尚未写盘的 guidance 记录。
+def _guidance_entry_from_request(
+    request: dict[str, Any],
+    *,
+    guidance_id: str = "",
+) -> GuidanceEntry:
+    target_type = normalize_guidance_target_type(request.get("target_type"))
+    target_id = str(request.get("target_id") or "").strip()
+    message = str(request.get("message") or "").strip()
+    if not target_type or not target_id:
+        raise ValueError("target_type and target_id are required")
+    if not message:
+        raise ValueError("guidance message is required")
+    metadata = request.get("metadata")
+    return GuidanceEntry(
+        guidance_id=str(guidance_id or "").strip() or new_id("guidance"),
+        target_type=target_type,
+        target_id=target_id,
+        message=message,
+        sender=str(request.get("sender") or "").strip(),
+        priority=str(request.get("priority") or "normal").strip() or "normal",
+        delivery=str(request.get("delivery") or "next_turn").strip() or "next_turn",
+        created_at=now(request.get("now")),
+        metadata=dict(metadata) if isinstance(metadata, dict) else {},
+    )
+
+
+# LLM: The digest covers every semantic input that could make reuse unsafe, but excludes time and
+# the generated guidance id so a transport retry remains byte-independent.
+# 函数用途: 为幂等键计算正文、目标和结构化元数据的稳定指纹。
+def _guidance_input_digest(request: dict[str, Any]) -> str:
+    metadata = request.get("metadata")
+    canonical_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+    canonical_metadata.pop("dedupe_key", None)
+    canonical = {
+        "target_type": normalize_guidance_target_type(request.get("target_type")),
+        "target_id": str(request.get("target_id") or "").strip(),
+        "message": str(request.get("message") or "").strip(),
+        "sender": str(request.get("sender") or "").strip(),
+        "priority": str(request.get("priority") or "normal").strip() or "normal",
+        "delivery": str(request.get("delivery") or "next_turn").strip() or "next_turn",
+        "metadata": canonical_metadata,
+    }
+    encoded = json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+# LLM: The embedded entry, not the stored digest string, reconstructs receipt identity. Server-only
+# dedupe metadata is removed exactly as append does, while target/message and state combinations are
+# validated before any queue repair can trust the row.
+# 函数用途: 重算幂等补充回执的正文指纹，并校验状态、尝试和提交字段是否自洽。
+def _validate_guidance_once_receipt(
+    receipt: GuidanceOnceReceipt,
+    *,
+    legacy: bool,
+) -> None:
+    entry = receipt.entry
+    metadata = dict(entry.metadata) if isinstance(entry.metadata, dict) else {}
+    if str(metadata.get("dedupe_key") or "").strip() != receipt.dedupe_key:
+        raise DataCorruptionError("conversation guidance receipt metadata key mismatch")
+    reconstructed = {
+        "target_type": entry.target_type,
+        "target_id": entry.target_id,
+        "message": entry.message,
+        "sender": entry.sender,
+        "priority": entry.priority,
+        "delivery": entry.delivery,
+        "metadata": metadata,
+    }
+    if (
+        normalize_guidance_target_type(entry.target_type) != entry.target_type
+        or not str(entry.target_id or "").strip()
+        or not str(entry.message or "").strip()
+        or _guidance_input_digest(reconstructed) != receipt.input_digest
+    ):
+        raise DataCorruptionError("conversation guidance receipt input digest mismatch")
+    if (
+        not math.isfinite(receipt.updated_at)
+        or not math.isfinite(receipt.submitted_at)
+        or receipt.updated_at < 0
+        or receipt.submitted_at < 0
+    ):
+        raise DataCorruptionError("conversation guidance receipt timestamp is invalid")
+    if legacy:
+        return
+    state_fields_valid = {
+        "pending": (
+            not receipt.attempt_id
+            and not receipt.submission_id
+            and receipt.submitted_at == 0
+        ),
+        "reserved": (
+            bool(receipt.attempt_id)
+            and not receipt.submission_id
+            and receipt.submitted_at == 0
+        ),
+        "submitted": (
+            bool(receipt.attempt_id)
+            and bool(receipt.submission_id)
+            and receipt.submitted_at > 0
+        ),
+        "consumed": (
+            bool(receipt.attempt_id)
+            and bool(receipt.submission_id)
+            and receipt.submitted_at > 0
+        ),
+        "rejected": not receipt.submission_id and receipt.submitted_at == 0,
+    }
+    if not state_fields_valid.get(receipt.status, False):
+        raise DataCorruptionError("conversation guidance receipt state fields are invalid")
+
+
 class ConversationGuidanceStore(ConversationObservationStore):
-    def append_guidance(self, request: dict[str, Any]) -> GuidanceEntry:
-        target_type = normalize_guidance_target_type(request.get("target_type"))
-        target_id = str(request.get("target_id") or "").strip()
-        message = str(request.get("message") or "").strip()
-        if not target_type or not target_id:
-            raise ValueError("target_type and target_id are required")
-        if not message:
-            raise ValueError("guidance message is required")
-        entry = GuidanceEntry(
-            guidance_id=new_id("guidance"),
-            target_type=target_type,
-            target_id=target_id,
-            message=message,
-            sender=str(request.get("sender") or "").strip(),
-            priority=str(request.get("priority") or "normal").strip() or "normal",
-            delivery=str(request.get("delivery") or "next_turn").strip() or "next_turn",
-            created_at=now(request.get("now")),
-            metadata=request.get("metadata") if isinstance(request.get("metadata"), dict) else {},
+    # LLM: Runtime prompt mutation and terminal receipt settlement for one exact turn share this
+    # cross-process lock, mirroring 会话运行时's active_turn mutex around queue admission and finish.
+    # 函数用途: 返回一个精确活动回合的补充消息状态转换锁。
+    def guidance_turn_transition_guard(self, expected_turn_id: str):
+        turn_id = str(expected_turn_id or "").strip()
+        if not turn_id:
+            raise ValueError("guidance turn transition requires expected_turn_id")
+        digest = hashlib.sha256(turn_id.encode("utf-8")).hexdigest()
+        return locked_file_transition(
+            self.guidance_turn_index_dir / f".{digest}.transition"
         )
-        append_jsonl(self._guidance_path(target_type, target_id), entry.to_dict(), sort_keys=True)
+
+    # LLM: Plain guidance append remains the non-idempotent internal primitive. External ingress
+    # with a stable message id must call ``append_guidance_once`` instead.
+    # 函数用途: 追加一条不带重试语义的内部补充消息。
+    def append_guidance(self, request: dict[str, Any]) -> GuidanceEntry:
+        entry = _guidance_entry_from_request(request)
+        append_jsonl(
+            self._guidance_path(entry.target_type, entry.target_id),
+            entry.to_dict(),
+            sort_keys=True,
+        )
         return entry
+
+    # LLM: The receipt is written before the queue row, then the exact prepared entry is repaired
+    # under one cross-process transition lock. This closes both append-before-index and
+    # index-before-append crash windows without scanning every guidance file.
+    # 函数用途: 按稳定消息 ID 只追加一次补充消息，进程崩溃后重试也会返回同一条记录。
+    def append_guidance_once(
+        self,
+        request: dict[str, Any],
+        *,
+        dedupe_key: str,
+    ) -> GuidanceEntry:
+        key = str(dedupe_key or "").strip()
+        if not key:
+            raise ValueError("guidance dedupe_key is required")
+        digest = _guidance_input_digest(request)
+        receipt_path = self._guidance_dedupe_path(key)
+        transition = receipt_path.with_name(f".{receipt_path.name}.transition")
+        with locked_file_transition(transition):
+            receipt = self._read_guidance_once_receipt(receipt_path)
+            if receipt is not None:
+                if receipt.dedupe_key != key or receipt.input_digest != digest:
+                    raise DataCorruptionError(
+                        f"conversation guidance dedupe key reused with different input: {key}"
+                    )
+                if receipt.status in {"pending", "reserved", "submitted"}:
+                    self._ensure_guidance_turn_receipt_index(receipt)
+                    self._ensure_guidance_input_receipt_index(receipt)
+                    self._ensure_guidance_once_entry(receipt.entry)
+                return receipt.entry
+            metadata = request.get("metadata")
+            prepared_request = {
+                **request,
+                "metadata": {
+                    **(metadata if isinstance(metadata, dict) else {}),
+                    "dedupe_key": key,
+                },
+            }
+            entry = _guidance_entry_from_request(prepared_request)
+            receipt = GuidanceOnceReceipt(
+                dedupe_key=key,
+                input_digest=digest,
+                status="pending",
+                entry=entry,
+                updated_at=time.time(),
+            )
+            write_json_file_atomic(receipt_path, receipt.to_dict())
+            self._ensure_guidance_turn_receipt_index(receipt)
+            self._ensure_guidance_input_receipt_index(receipt)
+            self._ensure_guidance_once_entry(entry)
+            return entry
+
+    # LLM: Receipt lookup repairs a prepared-but-not-appended row before exposing state. Missing
+    # receipts mean no idempotent delivery fact exists; unreadable receipts fail closed.
+    # 函数用途: 查询一条补充消息的持久回执，供 Gateway 对账网络超时。
+    def guidance_once_receipt(self, dedupe_key: str) -> GuidanceOnceReceipt | None:
+        key = str(dedupe_key or "").strip()
+        if not key:
+            return None
+        receipt_path = self._guidance_dedupe_path(key)
+        transition = receipt_path.with_name(f".{receipt_path.name}.transition")
+        with locked_file_transition(transition):
+            receipt = self._read_guidance_once_receipt(receipt_path)
+            if receipt is None:
+                return None
+            if receipt.dedupe_key != key:
+                raise DataCorruptionError("conversation guidance receipt key mismatch")
+            if receipt.status in {"pending", "reserved", "submitted"}:
+                self._ensure_guidance_turn_receipt_index(receipt)
+                self._ensure_guidance_input_receipt_index(receipt)
+                self._ensure_guidance_once_entry(receipt.entry)
+            delivered = self._read_guidance_delivered().get(receipt.entry.guidance_id, 0.0)
+            return replace(receipt, entry=replace(receipt.entry, delivered_at=delivered))
+
+    # LLM: Competing runtime-claim and terminal-reject edges use this same receipt lock. The
+    # returned state is the winner; callers must never overwrite a conflicting terminal outcome.
+    # 函数用途: 原子推进补充消息状态，并把并发竞争中真正获胜的状态返回给调用方。
+    def mark_guidance_once_status(self, dedupe_key: str, status: str) -> GuidanceOnceReceipt:
+        key = str(dedupe_key or "").strip()
+        normalized = str(status or "").strip().lower()
+        if not key or normalized not in {"submitted", "consumed", "rejected"}:
+            raise ValueError("guidance receipt requires submitted, consumed, or rejected status")
+        receipt_path = self._guidance_dedupe_path(key)
+        transition = receipt_path.with_name(f".{receipt_path.name}.transition")
+        with locked_file_transition(transition):
+            receipt = self._read_guidance_once_receipt(receipt_path)
+            if receipt is None:
+                raise KeyError(f"conversation guidance receipt not found: {key}")
+            if receipt.dedupe_key != key:
+                raise DataCorruptionError("conversation guidance receipt key mismatch")
+            if receipt.status == normalized:
+                return receipt
+            allowed = (
+                receipt.status == "pending" and normalized == "rejected"
+            ) or (
+                receipt.status == "reserved" and normalized == "submitted"
+            ) or (
+                receipt.status == "submitted" and normalized == "consumed"
+            )
+            if not allowed:
+                return receipt
+            updated = replace(receipt, status=normalized, updated_at=time.time())
+            write_json_file_atomic(receipt_path, updated.to_dict())
+            return updated
+
+    # LLM: Runtime admission validates the exact turn and reserves pending input for one durable
+    # attempt. A reserved/submitted receipt is never inherited by another attempt implicitly.
+    # 函数用途: 在模型安全点为当前执行尝试首次预留补充消息，其他尝试不能重复注入。
+    def claim_guidance_once_for_turn(
+        self,
+        entry: GuidanceEntry,
+        *,
+        expected_turn_id: str,
+        attempt_id: str,
+    ) -> bool:
+        metadata = entry.metadata if isinstance(entry.metadata, dict) else {}
+        dedupe_key = str(metadata.get("dedupe_key") or "").strip()
+        if not dedupe_key:
+            return True
+        receipt_path = self._guidance_dedupe_path(dedupe_key)
+        transition = receipt_path.with_name(f".{receipt_path.name}.transition")
+        with locked_file_transition(transition):
+            receipt = self._read_guidance_once_receipt(receipt_path)
+            if receipt is None or receipt.entry.guidance_id != entry.guidance_id:
+                raise DataCorruptionError("conversation guidance receipt entry mismatch")
+            receipt_metadata = (
+                receipt.entry.metadata if isinstance(receipt.entry.metadata, dict) else {}
+            )
+            receipt_turn_id = str(receipt_metadata.get("expected_turn_id") or "").strip()
+            if receipt_turn_id and receipt_turn_id != str(expected_turn_id or "").strip():
+                return False
+            if receipt.status != "pending":
+                return False
+            normalized_attempt_id = str(attempt_id or "").strip()
+            if not normalized_attempt_id:
+                raise ValueError("guidance reservation requires attempt_id")
+            updated = replace(
+                receipt,
+                status="reserved",
+                attempt_id=normalized_attempt_id,
+                updated_at=time.time(),
+            )
+            write_json_file_atomic(receipt_path, updated.to_dict())
+            return True
+
+    # LLM: This transition runs immediately before the provider call while holding the exact-turn
+    # guard. Only rows reserved by the same durable attempt can cross into submission-unknown state.
+    # 函数用途: 在真正调用模型前把本批补充消息标记为已开始提交，并返回对应消息 ID。
+    def mark_guidance_entries_submitted(
+        self,
+        expected_turn_id: str,
+        entries: list[GuidanceEntry] | tuple[GuidanceEntry, ...],
+        *,
+        attempt_id: str,
+        provider_call_id: str = "",
+        now: float | None = None,
+    ) -> tuple[str, ...]:
+        turn_id = str(expected_turn_id or "").strip()
+        normalized_attempt_id = str(attempt_id or "").strip()
+        if not turn_id or not normalized_attempt_id:
+            raise ValueError("guidance submission requires turn and attempt ids")
+        prepared = tuple(
+            entry for entry in entries if str(getattr(entry, "guidance_id", "") or "").strip()
+        )
+        if not prepared:
+            return ()
+        guidance_ids = tuple(str(entry.guidance_id) for entry in prepared)
+        call_id = str(provider_call_id or "").strip()
+        if not call_id:
+            legacy_source = json.dumps(
+                [normalized_attempt_id, *sorted(guidance_ids)],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            call_id = f"legacy-{hashlib.sha256(legacy_source.encode('utf-8')).hexdigest()}"
+        submitted_at = now if now is not None else time.time()
+        items = [
+            {
+                "guidance_id": str(entry.guidance_id),
+                "dedupe_key": str(
+                    (entry.metadata if isinstance(entry.metadata, dict) else {}).get("dedupe_key")
+                    or ""
+                ).strip(),
+            }
+            for entry in prepared
+        ]
+        batch = {
+            "schema_version": "conversation_guidance_submission_batch.v1",
+            "expected_turn_id": turn_id,
+            "attempt_id": normalized_attempt_id,
+            "provider_call_id": call_id,
+            "items": items,
+            "status": "submitted",
+            "committed_at": submitted_at,
+        }
+        with self.guidance_turn_transition_guard(turn_id):
+            batch_path = self._guidance_submission_batch_path(turn_id, call_id)
+            report = read_json_file_report(
+                batch_path,
+                context="conversation.guidance_submission_batch.read",
+            )
+            if report.load_error is not None:
+                raise DataCorruptionError("conversation guidance submission batch is unreadable")
+            if report.payload:
+                stable_keys = (
+                    "schema_version",
+                    "expected_turn_id",
+                    "attempt_id",
+                    "provider_call_id",
+                    "items",
+                )
+                if {key: report.payload.get(key) for key in stable_keys} != {
+                    key: batch.get(key) for key in stable_keys
+                }:
+                    raise DataCorruptionError("conversation guidance submission batch conflicts")
+                if str(report.payload.get("status") or "") != "submitted":
+                    raise DataCorruptionError("rejected guidance submission cannot be replayed")
+                batch = dict(report.payload)
+            else:
+                self._validate_guidance_submission_batch_locked(batch, allow_projected=False)
+                write_json_file_atomic(batch_path, batch)
+            self._apply_guidance_submission_batch_locked(batch)
+        return guidance_ids
+
+    # LLM: Only a structured provider pre-execution rejection may move the same attempt from
+    # submitted back to reserved. Transport ambiguity and another attempt can never use this edge.
+    # 函数用途: 模型明确因上下文超限拒绝请求时，把同一批消息恢复为本尝试可重新提交状态。
+    def restore_submitted_guidance_for_retry(
+        self,
+        expected_turn_id: str,
+        entries: list[GuidanceEntry] | tuple[GuidanceEntry, ...],
+        *,
+        attempt_id: str,
+        provider_call_id: str = "",
+    ) -> tuple[str, ...]:
+        turn_id = str(expected_turn_id or "").strip()
+        normalized_attempt_id = str(attempt_id or "").strip()
+        if not turn_id or not normalized_attempt_id:
+            raise ValueError("guidance retry restore requires turn and attempt ids")
+        call_id = str(provider_call_id or "").strip()
+        restored: list[str] = []
+        with self.guidance_turn_transition_guard(turn_id):
+            if call_id:
+                batch_path = self._guidance_submission_batch_path(turn_id, call_id)
+                report = read_json_file_report(
+                    batch_path,
+                    context="conversation.guidance_submission_batch.retry",
+                )
+                if report.load_error is not None or not report.payload:
+                    raise DataCorruptionError("guidance retry submission batch is unavailable")
+                batch = dict(report.payload)
+                if (
+                    str(batch.get("attempt_id") or "") != normalized_attempt_id
+                    or str(batch.get("provider_call_id") or "") != call_id
+                ):
+                    raise DataCorruptionError("guidance retry submission batch mismatch")
+                if str(batch.get("status") or "") == "submitted":
+                    batch["status"] = "rejected"
+                    batch["rejected_at"] = time.time()
+                    write_json_file_atomic(batch_path, batch)
+                self._apply_guidance_submission_batch_locked(batch)
+            for entry in entries:
+                metadata = entry.metadata if isinstance(entry.metadata, dict) else {}
+                dedupe_key = str(metadata.get("dedupe_key") or "").strip()
+                if not dedupe_key:
+                    continue
+                receipt_path = self._guidance_dedupe_path(dedupe_key)
+                transition = receipt_path.with_name(f".{receipt_path.name}.transition")
+                with locked_file_transition(transition):
+                    receipt = self._read_guidance_once_receipt(receipt_path)
+                    receipt_metadata = (
+                        receipt.entry.metadata
+                        if receipt is not None and isinstance(receipt.entry.metadata, dict)
+                        else {}
+                    )
+                    if (
+                        receipt is None
+                        or receipt.entry.guidance_id != entry.guidance_id
+                        or str(receipt_metadata.get("expected_turn_id") or "").strip()
+                        != turn_id
+                        or receipt.attempt_id != normalized_attempt_id
+                    ):
+                        raise DataCorruptionError("guidance retry restore mismatch")
+                    if receipt.status == "reserved" and not receipt.submission_id:
+                        restored.append(entry.guidance_id)
+                        continue
+                    if receipt.status != "submitted" or (
+                        call_id and receipt.submission_id != call_id
+                    ):
+                        raise DataCorruptionError("guidance retry restore was not submitted")
+                    write_json_file_atomic(
+                        receipt_path,
+                        replace(
+                            receipt,
+                            status="reserved",
+                            submission_id="",
+                            submitted_at=0.0,
+                            updated_at=time.time(),
+                        ).to_dict(),
+                    )
+                    restored.append(entry.guidance_id)
+        return tuple(restored)
+
+    # LLM: A submission batch is the all-or-nothing provider-boundary authority. Validation checks
+    # every immutable guidance/key pair before the single batch file can be committed.
+    # 函数用途: 校验一次模型调用对应的补充消息整批身份和当前预留状态。
+    def _validate_guidance_submission_batch_locked(
+        self,
+        batch: dict[str, Any],
+        *,
+        allow_projected: bool,
+    ) -> None:
+        turn_id = str(batch.get("expected_turn_id") or "").strip()
+        attempt_id = str(batch.get("attempt_id") or "").strip()
+        call_id = str(batch.get("provider_call_id") or "").strip()
+        items = batch.get("items")
+        if (
+            batch.get("schema_version") != "conversation_guidance_submission_batch.v1"
+            or not turn_id
+            or not attempt_id
+            or not call_id
+            or not isinstance(items, list)
+            or not items
+            or str(batch.get("status") or "") not in {"submitted", "rejected"}
+        ):
+            raise DataCorruptionError("conversation guidance submission batch is invalid")
+        seen_ids: set[str] = set()
+        seen_keys: set[str] = set()
+        for item in items:
+            if not isinstance(item, dict):
+                raise DataCorruptionError("conversation guidance submission item is invalid")
+            guidance_id = str(item.get("guidance_id") or "").strip()
+            dedupe_key = str(item.get("dedupe_key") or "").strip()
+            if not guidance_id or guidance_id in seen_ids:
+                raise DataCorruptionError("conversation guidance submission item id conflicts")
+            seen_ids.add(guidance_id)
+            if not dedupe_key:
+                continue
+            if dedupe_key in seen_keys:
+                raise DataCorruptionError("conversation guidance submission receipt key conflicts")
+            seen_keys.add(dedupe_key)
+            receipt_path = self._guidance_dedupe_path(dedupe_key)
+            transition = receipt_path.with_name(f".{receipt_path.name}.transition")
+            with locked_file_transition(transition):
+                receipt = self._read_guidance_once_receipt(receipt_path)
+                metadata = (
+                    receipt.entry.metadata
+                    if receipt is not None and isinstance(receipt.entry.metadata, dict)
+                    else {}
+                )
+                if (
+                    receipt is None
+                    or receipt.entry.guidance_id != guidance_id
+                    or str(metadata.get("expected_turn_id") or "").strip() != turn_id
+                    or receipt.attempt_id != attempt_id
+                ):
+                    raise DataCorruptionError("guidance submission reservation mismatch")
+                if not allow_projected and receipt.status != "reserved":
+                    raise DataCorruptionError("guidance submission was not reserved")
+
+    # LLM: Individual receipts are projections of the atomic batch. Replaying old batches never
+    # overwrites a newer submission id; rejected batches only release their own exact projection.
+    # 函数用途: 根据一份已提交或已拒绝的批次幂等修复每条补充消息回执。
+    def _apply_guidance_submission_batch_locked(self, batch: dict[str, Any]) -> None:
+        self._validate_guidance_submission_batch_locked(batch, allow_projected=True)
+        call_id = str(batch.get("provider_call_id") or "").strip()
+        batch_status = str(batch.get("status") or "")
+        submitted_at = float(batch.get("committed_at") or time.time())
+        for item in batch.get("items", []):
+            key = str(item.get("dedupe_key") or "").strip()
+            if not key:
+                continue
+            receipt_path = self._guidance_dedupe_path(key)
+            transition = receipt_path.with_name(f".{receipt_path.name}.transition")
+            with locked_file_transition(transition):
+                receipt = self._read_guidance_once_receipt(receipt_path)
+                if receipt.status in {"consumed", "rejected"}:
+                    continue
+                if batch_status == "submitted":
+                    if receipt.status == "submitted" and receipt.submission_id != call_id:
+                        continue
+                    if receipt.status not in {"reserved", "submitted"}:
+                        raise DataCorruptionError("guidance submission projection state is invalid")
+                    updated = replace(
+                        receipt,
+                        status="submitted",
+                        submission_id=call_id,
+                        submitted_at=submitted_at,
+                        updated_at=submitted_at,
+                    )
+                else:
+                    if receipt.status == "submitted" and receipt.submission_id != call_id:
+                        continue
+                    if receipt.status == "reserved" and receipt.submission_id not in {"", call_id}:
+                        continue
+                    updated = replace(
+                        receipt,
+                        status="reserved",
+                        submission_id="",
+                        submitted_at=0.0,
+                        updated_at=float(batch.get("rejected_at") or time.time()),
+                    )
+                if updated != receipt:
+                    write_json_file_atomic(receipt_path, updated.to_dict())
+
+    # LLM: Recovery and terminal settlement replay atomic submission batches before interpreting
+    # receipt states, so a crash during the Nth receipt projection never splits one provider call.
+    # 函数用途: 修复精确回合的模型提交批次投影，并返回发现的损坏批次数。
+    def _repair_committed_guidance_submission_batches_locked(self, turn_id: str) -> int:
+        turn_digest = hashlib.sha256(turn_id.encode("utf-8")).hexdigest()
+        errors = 0
+        batches: list[dict[str, Any]] = []
+        for path in sorted((self.guidance_submission_batches_dir / turn_digest).glob("*.json")):
+            report = read_json_file_report(
+                path,
+                context="conversation.guidance_submission_batch.repair",
+            )
+            payload = report.payload
+            if (
+                report.load_error is not None
+                or payload.get("schema_version")
+                != "conversation_guidance_submission_batch.v1"
+                or str(payload.get("expected_turn_id") or "") != turn_id
+            ):
+                errors += 1
+                continue
+            batches.append(dict(payload))
+        batches.sort(
+            key=lambda item: (
+                float(item.get("committed_at") or 0.0),
+                float(item.get("rejected_at") or 0.0),
+                str(item.get("provider_call_id") or ""),
+            )
+        )
+        for batch in batches:
+            try:
+                self._apply_guidance_submission_batch_locked(batch)
+            except Exception:
+                errors += 1
+        return errors
+
+    # LLM: Read-only pending checks use the same exact-turn and receipt-state rules as claim, but
+    # never mutate delivery fate; the later claim remains the only admission decision point.
+    # 函数用途: 判断一条补充消息能否由指定回合认领，供运行循环做无副作用的待处理检查。
+    def guidance_available_for_turn(
+        self,
+        entry: GuidanceEntry,
+        *,
+        expected_turn_id: str,
+    ) -> bool:
+        metadata = entry.metadata if isinstance(entry.metadata, dict) else {}
+        dedupe_key = str(metadata.get("dedupe_key") or "").strip()
+        if not dedupe_key:
+            return True
+        receipt = self.guidance_once_receipt(dedupe_key)
+        if receipt is None or receipt.entry.guidance_id != entry.guidance_id:
+            raise DataCorruptionError("conversation guidance receipt entry mismatch")
+        receipt_metadata = (
+            receipt.entry.metadata if isinstance(receipt.entry.metadata, dict) else {}
+        )
+        receipt_turn_id = str(receipt_metadata.get("expected_turn_id") or "").strip()
+        if receipt_turn_id and receipt_turn_id != str(expected_turn_id or "").strip():
+            return False
+        return receipt.status == "pending"
+
+    # LLM: Turn terminalization owns the same turn lock as runtime prompt mutation, then settles
+    # only this turn's indexed receipts. Corruption is counted locally and cannot block other turns.
+    # 函数用途: 回合结束时原子拒绝尚未消费的补充消息，并返回本回合状态计数。
+    def reject_pending_guidance_for_turn(
+        self,
+        expected_turn_id: str,
+        *,
+        reject_reserved: bool = False,
+    ) -> dict[str, int]:
+        turn_id = str(expected_turn_id or "").strip()
+        if not turn_id:
+            return {
+                "rejected": 0,
+                "reserved": 0,
+                "submitted": 0,
+                "consumed": 0,
+                "retired_legacy": 0,
+                "errors": 0,
+            }
+        with self.guidance_turn_transition_guard(turn_id):
+            return self._reject_pending_guidance_for_turn_locked(
+                turn_id,
+                reject_reserved=reject_reserved,
+            )
+
+    # LLM: Only a caller that has proved the owning execution attempt dead may release reserved
+    # rows. Submitted rows crossed the provider boundary and always remain delivery-unknown.
+    # 函数用途: 在请求租约已确认失效后，把尚未开始模型提交的预留消息恢复为可再次认领。
+    def release_reserved_guidance_for_turn(
+        self,
+        expected_turn_id: str,
+        *,
+        dead_attempt_id: str = "",
+    ) -> dict[str, int]:
+        turn_id = str(expected_turn_id or "").strip()
+        summary: dict[str, Any] = {
+            "released": 0,
+            "released_guidance_ids": [],
+            "submitted": 0,
+            "errors": 0,
+        }
+        if not turn_id:
+            return summary
+        expected_attempt = str(dead_attempt_id or "").strip()
+        with self.guidance_turn_transition_guard(turn_id):
+            summary["errors"] += self._repair_committed_guidance_submission_batches_locked(
+                turn_id
+            )
+            turn_digest = hashlib.sha256(turn_id.encode("utf-8")).hexdigest()
+            index_dir = self.guidance_turn_index_dir / turn_digest
+            for index_path in sorted(index_dir.glob("*.json")):
+                index_report = read_json_file_report(
+                    index_path,
+                    context="conversation.guidance_turn_index.release",
+                )
+                dedupe_key = str(index_report.payload.get("dedupe_key") or "").strip()
+                if index_report.load_error is not None or not dedupe_key:
+                    summary["errors"] += 1
+                    continue
+                receipt_path = self._guidance_dedupe_path(dedupe_key)
+                transition = receipt_path.with_name(f".{receipt_path.name}.transition")
+                try:
+                    with locked_file_transition(transition):
+                        receipt = self._read_guidance_once_receipt(receipt_path)
+                        metadata = (
+                            receipt.entry.metadata
+                            if receipt is not None and isinstance(receipt.entry.metadata, dict)
+                            else {}
+                        )
+                        if (
+                            receipt is None
+                            or str(metadata.get("expected_turn_id") or "").strip() != turn_id
+                        ):
+                            summary["errors"] += 1
+                            continue
+                        if receipt.status == "submitted":
+                            summary["submitted"] += 1
+                            continue
+                        if receipt.status != "reserved" or (
+                            expected_attempt and receipt.attempt_id != expected_attempt
+                        ):
+                            continue
+                        write_json_file_atomic(
+                            receipt_path,
+                            replace(
+                                receipt,
+                                status="pending",
+                                attempt_id="",
+                                submitted_at=0.0,
+                                updated_at=time.time(),
+                            ).to_dict(),
+                        )
+                        summary["released"] += 1
+                        summary["released_guidance_ids"].append(receipt.entry.guidance_id)
+                except Exception:
+                    summary["errors"] += 1
+        return summary
+
+    # LLM: Caller holds the exact turn guard; per-receipt locks retain retry idempotency while the
+    # bounded turn index prevents one corrupt historical receipt from poisoning every close.
+    # 函数用途: 在已持有回合锁时逐条结算当前回合索引。
+    def _reject_pending_guidance_for_turn_locked(
+        self,
+        turn_id: str,
+        *,
+        reject_reserved: bool = False,
+    ) -> dict[str, int]:
+        summary = {
+            "rejected": 0,
+            "reserved": 0,
+            "submitted": 0,
+            "consumed": 0,
+            "retired_legacy": 0,
+            "errors": 0,
+        }
+        summary["errors"] += self._repair_committed_guidance_submission_batches_locked(
+            turn_id
+        )
+        summary["errors"] += self._repair_committed_guidance_ack_batches_locked(turn_id)
+        turn_digest = hashlib.sha256(turn_id.encode("utf-8")).hexdigest()
+        index_dir = self.guidance_turn_index_dir / turn_digest
+        for index_path in sorted(index_dir.glob("*.json")):
+            index_report = read_json_file_report(
+                index_path,
+                context="conversation.guidance_turn_index.read",
+            )
+            dedupe_key = str(index_report.payload.get("dedupe_key") or "").strip()
+            if index_report.load_error is not None or not dedupe_key:
+                summary["errors"] += 1
+                continue
+            receipt_path = self._guidance_dedupe_path(dedupe_key)
+            transition = receipt_path.with_name(f".{receipt_path.name}.transition")
+            try:
+                with locked_file_transition(transition):
+                    receipt = self._read_guidance_once_receipt(receipt_path)
+                    if receipt is None:
+                        summary["errors"] += 1
+                        continue
+                    metadata = (
+                        receipt.entry.metadata if isinstance(receipt.entry.metadata, dict) else {}
+                    )
+                    if str(metadata.get("expected_turn_id") or "").strip() != turn_id:
+                        summary["errors"] += 1
+                        continue
+                    # Gateway terminalization holds its outer exact-turn lock. A reserved row is
+                    # then proven not to have an atomic submission batch and is safe to reject.
+                    if receipt.status == "pending" or (
+                        reject_reserved and receipt.status == "reserved"
+                    ):
+                        receipt = replace(
+                            receipt,
+                            status="rejected",
+                            submission_id="",
+                            updated_at=time.time(),
+                        )
+                        write_json_file_atomic(receipt_path, receipt.to_dict())
+                    if receipt.status in summary:
+                        summary[receipt.status] += 1
+            except Exception:
+                summary["errors"] += 1
+        # Internal non-idempotent request guidance has no receipt state. The
+        # delivered projection is its only durable retirement fact, so close it
+        # under the same exact-turn guard instead of letting stop replay it.
+        entries, load_errors = self.recent_guidance_report(
+            "request",
+            turn_id,
+            limit=0,
+            include_delivered=False,
+        )
+        legacy_ids = tuple(
+            entry.guidance_id
+            for entry in entries
+            if not str(
+                (entry.metadata if isinstance(entry.metadata, dict) else {}).get("dedupe_key")
+                or ""
+            ).strip()
+        )
+        if legacy_ids:
+            self.mark_guidance_delivered(legacy_ids)
+            summary["retired_legacy"] += len(legacy_ids)
+        summary["errors"] += len(load_errors)
+        return summary
+
+    # LLM: Provider success commits one immutable turn-level batch before repairing individual
+    # receipts. The batch is authority across a crash between receipt files; terminal settlement
+    # repairs the whole batch before it may reject any pending row.
+    # 函数用途: 模型确认收到整批补充消息后，原子提交批次并把每条回执补齐为已消费。
+    def consume_submitted_guidance_for_turn(
+        self,
+        expected_turn_id: str,
+        entries: list[GuidanceEntry] | tuple[GuidanceEntry, ...],
+        *,
+        provider_call_id: str = "",
+        now: float | None = None,
+    ) -> tuple[str, ...]:
+        turn_id = str(expected_turn_id or "").strip()
+        if not turn_id:
+            raise ValueError("guidance provider ack requires expected_turn_id")
+        prepared = tuple(
+            entry for entry in entries if str(getattr(entry, "guidance_id", "") or "").strip()
+        )
+        if not prepared:
+            return ()
+        guidance_ids = tuple(str(entry.guidance_id) for entry in prepared)
+        items: list[dict[str, str]] = []
+        for entry in prepared:
+            metadata = entry.metadata if isinstance(entry.metadata, dict) else {}
+            receipt_turn = str(metadata.get("expected_turn_id") or "").strip()
+            if receipt_turn and receipt_turn != turn_id:
+                raise DataCorruptionError("guidance provider ack turn mismatch")
+            key = str(metadata.get("dedupe_key") or "").strip()
+            items.append({"guidance_id": str(entry.guidance_id), "dedupe_key": key})
+        committed_at = now if now is not None else time.time()
+        call_id = str(provider_call_id or "").strip()
+        batch = {
+            "schema_version": "conversation_guidance_ack_batch.v3",
+            "expected_turn_id": turn_id,
+            "items": items,
+            "provider_call_id": call_id,
+            "committed_at": committed_at,
+        }
+        with self.guidance_turn_transition_guard(turn_id):
+            if call_id:
+                submission_path = self._guidance_submission_batch_path(turn_id, call_id)
+                submission_report = read_json_file_report(
+                    submission_path,
+                    context="conversation.guidance_submission_batch.ack",
+                )
+                submission = submission_report.payload
+                if (
+                    submission_report.load_error is not None
+                    or not submission
+                    or str(submission.get("status") or "") != "submitted"
+                    or str(submission.get("provider_call_id") or "") != call_id
+                ):
+                    raise DataCorruptionError("guidance provider ack has no submitted batch")
+                self._apply_guidance_submission_batch_locked(submission)
+            batch_path = self._guidance_ack_batch_path(turn_id, guidance_ids)
+            report = read_json_file_report(batch_path, context="conversation.guidance_ack_batch.read")
+            if report.load_error is not None:
+                raise DataCorruptionError("conversation guidance ack batch is unreadable")
+            if report.payload:
+                stable_existing = {
+                    key: report.payload.get(key)
+                    for key in (
+                        "schema_version",
+                        "expected_turn_id",
+                        "items",
+                        "provider_call_id",
+                    )
+                }
+                stable_batch = {key: batch.get(key) for key in stable_existing}
+                if stable_existing != stable_batch:
+                    raise DataCorruptionError("conversation guidance ack batch conflicts")
+                batch = dict(report.payload)
+                committed_at = float(batch.get("committed_at") or committed_at)
+            else:
+                self._validate_guidance_ack_batch_locked(batch)
+                write_json_file_atomic(batch_path, batch)
+            self._apply_guidance_ack_batch_locked(batch)
+        self.mark_guidance_delivered(guidance_ids, now=committed_at)
+        return guidance_ids
+
+    # LLM: Compatibility callers still receive the same result, but the exact turn is taken only
+    # from structured receipt metadata and the batch commit remains the authority.
+    # 函数用途: 兼容旧调用方式，从本批结构化元数据提取精确回合后提交模型消费。
+    def mark_guidance_entries_consumed(
+        self,
+        entries: list[GuidanceEntry] | tuple[GuidanceEntry, ...],
+        *,
+        now: float | None = None,
+    ) -> tuple[str, ...]:
+        turn_ids = {
+            str((entry.metadata if isinstance(entry.metadata, dict) else {}).get("expected_turn_id") or "").strip()
+            for entry in entries
+            if str((entry.metadata if isinstance(entry.metadata, dict) else {}).get("expected_turn_id") or "").strip()
+        }
+        if len(turn_ids) != 1:
+            raise ValueError("guidance provider ack requires one exact turn")
+        return self.consume_submitted_guidance_for_turn(next(iter(turn_ids)), entries, now=now)
+
+    # LLM: Caller holds the exact turn lock. Validation checks each immutable guidance/key pair
+    # before the journal commit so a malformed entry cannot create a poisoned authoritative batch.
+    # 函数用途: 校验模型确认批次中的每条消息、回执键和精确回合完全对应。
+    def _validate_guidance_ack_batch_locked(self, batch: dict[str, Any]) -> None:
+        turn_id = str(batch.get("expected_turn_id") or "").strip()
+        items = batch.get("items")
+        if (
+            batch.get("schema_version")
+            not in {"conversation_guidance_ack_batch.v2", "conversation_guidance_ack_batch.v3"}
+            or not turn_id
+            or not isinstance(items, list)
+            or not items
+        ):
+            raise DataCorruptionError("conversation guidance ack batch is invalid")
+        seen_ids: set[str] = set()
+        seen_keys: set[str] = set()
+        provider_call_id = str(batch.get("provider_call_id") or "").strip()
+        for item in items:
+            if not isinstance(item, dict):
+                raise DataCorruptionError("conversation guidance ack item is invalid")
+            guidance_id = str(item.get("guidance_id") or "").strip()
+            dedupe_key = str(item.get("dedupe_key") or "").strip()
+            if not guidance_id or guidance_id in seen_ids:
+                raise DataCorruptionError("conversation guidance ack item id conflicts")
+            seen_ids.add(guidance_id)
+            if not dedupe_key:
+                continue
+            if dedupe_key in seen_keys:
+                raise DataCorruptionError("conversation guidance ack receipt key conflicts")
+            seen_keys.add(dedupe_key)
+            receipt_path = self._guidance_dedupe_path(dedupe_key)
+            transition = receipt_path.with_name(f".{receipt_path.name}.transition")
+            with locked_file_transition(transition):
+                receipt = self._read_guidance_once_receipt(receipt_path)
+                metadata = (
+                    receipt.entry.metadata
+                    if receipt is not None and isinstance(receipt.entry.metadata, dict)
+                    else {}
+                )
+                if (
+                    receipt is None
+                    or receipt.entry.guidance_id != guidance_id
+                    or str(metadata.get("expected_turn_id") or "").strip() != turn_id
+                    or receipt.status not in {"submitted", "consumed"}
+                    or (
+                        provider_call_id
+                        and receipt.status == "submitted"
+                        and receipt.submission_id != provider_call_id
+                    )
+                ):
+                    raise DataCorruptionError("committed guidance receipt does not match batch")
+
+    # LLM: Caller holds the exact turn lock. A committed v2 batch makes every paired receipt
+    # consumed; individual receipt files are repairable projections of that one journal fact.
+    # 函数用途: 把一份已校验的模型确认批次补写到各条 guidance 回执。
+    def _apply_guidance_ack_batch_locked(self, batch: dict[str, Any]) -> None:
+        self._validate_guidance_ack_batch_locked(batch)
+        for item in batch.get("items", []):
+            key = str(item.get("dedupe_key") or "").strip()
+            if not key:
+                continue
+            receipt_path = self._guidance_dedupe_path(key)
+            transition = receipt_path.with_name(f".{receipt_path.name}.transition")
+            with locked_file_transition(transition):
+                receipt = self._read_guidance_once_receipt(receipt_path)
+                if receipt.status != "consumed":
+                    receipt = replace(receipt, status="consumed", updated_at=time.time())
+                    write_json_file_atomic(receipt_path, receipt.to_dict())
+                self._project_guidance_transcript(receipt.entry)
+
+    # LLM: Transcript is an idempotent projection of consumed receipt authority. Ack-batch replay
+    # calls this even for already-consumed rows, closing crashes after receipt commit but before log.
+    # 函数用途: 把已消费补充消息按 guidance ID 最多写入一次对应会话记录。
+    def _project_guidance_transcript(self, entry: GuidanceEntry) -> bool:
+        metadata = entry.metadata if isinstance(entry.metadata, dict) else {}
+        if metadata.get("record_in_transcript") is not True:
+            return True
+        guidance_id = str(entry.guidance_id or "").strip()
+        thread_id = str(metadata.get("thread_id") or "").strip()
+        message = str(entry.message or "").strip()
+        if not guidance_id or not thread_id or not message:
+            return False
+        attribution: dict[str, str] = {}
+        if entry.target_type == "task" and entry.target_id:
+            attribution["task_id"] = entry.target_id
+        elif entry.target_type == "request" and entry.target_id:
+            attribution["gateway_request_id"] = entry.target_id
+        try:
+            self.append_message_once(
+                {
+                    "thread_id": thread_id,
+                    "role": "user",
+                    "content": message,
+                    "channel": str(metadata.get("channel") or "internal"),
+                    "channel_message_id": str(metadata.get("channel_message_id") or ""),
+                    "metadata": {
+                        "kind": "active_turn_user_input",
+                        "guidance_id": guidance_id,
+                        **attribution,
+                    },
+                },
+                dedupe_key=f"active-turn-input:{guidance_id}",
+            )
+        except Exception:
+            return False
+        return True
+
+    # LLM: Terminal paths call this while holding the exact turn lock, so crash-recovery of a
+    # committed provider batch finishes before any pending receipt can be rejected.
+    # 函数用途: 修复精确回合中已提交但尚未逐条落完的模型确认批次，返回损坏批次数。
+    def _repair_committed_guidance_ack_batches_locked(self, turn_id: str) -> int:
+        turn_digest = hashlib.sha256(turn_id.encode("utf-8")).hexdigest()
+        errors = 0
+        for path in sorted((self.guidance_ack_batches_dir / turn_digest).glob("*.json")):
+            try:
+                report = read_json_file_report(path, context="conversation.guidance_ack_batch.read")
+                payload = report.payload
+                if (
+                    report.load_error is not None
+                    or payload.get("schema_version")
+                    not in {
+                        "conversation_guidance_ack_batch.v2",
+                        "conversation_guidance_ack_batch.v3",
+                    }
+                    or str(payload.get("expected_turn_id") or "") != turn_id
+                ):
+                    raise DataCorruptionError("conversation guidance ack batch is invalid")
+                self._apply_guidance_ack_batch_locked(payload)
+                self.mark_guidance_delivered(
+                    tuple(
+                        str(item.get("guidance_id") or "")
+                        for item in payload.get("items", [])
+                        if isinstance(item, dict)
+                    ),
+                    now=float(payload.get("committed_at") or time.time()),
+                )
+            except Exception:
+                errors += 1
+        return errors
+
+    # LLM: Receipt reads distinguish missing files from corrupt payloads; corruption can never be
+    # interpreted as a retry miss that creates another guidance row.
+    # 函数用途: 在已持有该回执 transition lock 时读取并校验 JSON。
+    def _read_guidance_once_receipt(self, path: Path) -> GuidanceOnceReceipt | None:
+        report = read_json_file_report(path, context="conversation.guidance_once.read")
+        if report.load_error is not None:
+            raise DataCorruptionError(f"conversation guidance receipt is unreadable: {path.name}")
+        if not report.payload:
+            if path.exists():
+                raise DataCorruptionError(
+                    f"conversation guidance receipt is empty or invalid: {path.name}"
+                )
+            return None
+        receipt = GuidanceOnceReceipt.from_dict(report.payload)
+        if report.payload.get("schema_version") != "conversation_guidance_once.v4":
+            write_json_file_atomic(path, receipt.to_dict())
+        return receipt
+
+    # LLM: This projection is repaired whenever an active receipt is opened. Terminalization can
+    # therefore inspect only one exact turn; corrupt refs are isolated to that turn.
+    # 函数用途: 为活动补充回执写入一个按回合分桶的小索引引用。
+    def _ensure_guidance_turn_receipt_index(self, receipt: GuidanceOnceReceipt) -> None:
+        metadata = receipt.entry.metadata if isinstance(receipt.entry.metadata, dict) else {}
+        turn_id = str(metadata.get("expected_turn_id") or "").strip()
+        if not turn_id:
+            return
+        index_path = self._guidance_turn_index_path(turn_id, receipt.dedupe_key)
+        expected = {
+            "schema_version": "conversation_guidance_turn_ref.v1",
+            "expected_turn_id": turn_id,
+            "dedupe_key": receipt.dedupe_key,
+        }
+        report = read_json_file_report(index_path, context="conversation.guidance_turn_index.read")
+        if report.load_error is not None:
+            raise DataCorruptionError("conversation guidance turn index is unreadable")
+        if report.payload:
+            if report.payload != expected:
+                raise DataCorruptionError("conversation guidance turn index conflicts")
+            return
+        write_json_file_atomic(index_path, expected)
+
+    # LLM: This projection links a prepared Gateway input to its authoritative guidance receipt.
+    # It is repaired with the queue projections so a crash before HTTP disposition remains recoverable.
+    # 函数用途: 为 Gateway 普通消息写反向索引，避免 guidance 已写但入口回执仍 pending 时失联。
+    def _ensure_guidance_input_receipt_index(self, receipt: GuidanceOnceReceipt) -> None:
+        metadata = receipt.entry.metadata if isinstance(receipt.entry.metadata, dict) else {}
+        input_request_id = str(metadata.get("gateway_input_request_id") or "").strip()
+        if not input_request_id:
+            return
+        index_path = self._guidance_input_index_path(input_request_id)
+        expected = {
+            "schema_version": "conversation_guidance_input_ref.v1",
+            "gateway_input_request_id": input_request_id,
+            "dedupe_key": receipt.dedupe_key,
+            "expected_turn_id": str(metadata.get("expected_turn_id") or "").strip(),
+        }
+        report = read_json_file_report(index_path, context="conversation.guidance_input_index.read")
+        if report.load_error is not None:
+            raise DataCorruptionError("conversation guidance input index is unreadable")
+        if report.payload:
+            if report.payload != expected:
+                raise DataCorruptionError("conversation guidance input index conflicts")
+            return
+        write_json_file_atomic(index_path, expected)
+
+    # LLM: Recovery follows one exact owner-scoped reverse index and never scans prose or all
+    # historical receipts to guess which steer belongs to a Gateway input.
+    # 函数用途: 按 Gateway 普通消息请求 ID 查询已建立的 guidance 回执和精确回合。
+    def guidance_receipt_for_gateway_input(
+        self,
+        gateway_input_request_id: str,
+    ) -> tuple[GuidanceOnceReceipt | None, str]:
+        input_request_id = str(gateway_input_request_id or "").strip()
+        if not input_request_id:
+            return None, ""
+        index_path = self._guidance_input_index_path(input_request_id)
+        report = read_json_file_report(index_path, context="conversation.guidance_input_index.read")
+        if report.load_error is not None:
+            raise DataCorruptionError("conversation guidance input index is unreadable")
+        if not report.payload:
+            return None, ""
+        if (
+            report.payload.get("schema_version") != "conversation_guidance_input_ref.v1"
+            or str(report.payload.get("gateway_input_request_id") or "") != input_request_id
+        ):
+            raise DataCorruptionError("conversation guidance input index is invalid")
+        dedupe_key = str(report.payload.get("dedupe_key") or "").strip()
+        turn_id = str(report.payload.get("expected_turn_id") or "").strip()
+        if not dedupe_key:
+            raise DataCorruptionError("conversation guidance input index has no receipt key")
+        return self.guidance_once_receipt(dedupe_key), turn_id
+
+    # LLM: Recovery compares the exact prepared entry before appending. A duplicate id with
+    # different content is corruption, while an identical row is a successful crash replay.
+    # 函数用途: 确保回执对应的 guidance 队列行存在且只存在一次。
+    def _ensure_guidance_once_entry(self, entry: GuidanceEntry) -> None:
+        path = self._guidance_path(entry.target_type, entry.target_id)
+        if not path.exists():
+            append_jsonl(path, entry.to_dict(), sort_keys=True)
+            return
+        report = read_jsonl_report(path, context="conversation.guidance_once.queue")
+        if report.load_errors:
+            raise DataCorruptionError(
+                f"conversation guidance queue is unreadable: {entry.target_type}:{entry.target_id}"
+            )
+        matches = [
+            GuidanceEntry.from_dict(row)
+            for row in report.rows
+            if str(row.get("guidance_id") or "") == entry.guidance_id
+        ]
+        if matches:
+            if any(item.to_dict() != entry.to_dict() for item in matches) or len(matches) != 1:
+                raise DataCorruptionError(
+                    f"conversation guidance id has conflicting rows: {entry.guidance_id}"
+                )
+            return
+        append_jsonl(path, entry.to_dict(), sort_keys=True)
 
     def recent_guidance(
         self,
@@ -2137,9 +3424,31 @@ class ConversationGuidanceStore(ConversationObservationStore):
         )
         entries, parse_errors = _guidance_entries(report.rows, delivered)
         if not include_delivered:
-            entries = [item for item in entries if item.delivered_at <= 0]
+            pending_entries: list[GuidanceEntry] = []
+            for item in entries:
+                try:
+                    if self._guidance_entry_is_pending(item):
+                        pending_entries.append(item)
+                except Exception as exc:
+                    error = runtime_error_report(exc, context="conversation.guidance.receipt")
+                    error["guidance_id"] = item.guidance_id
+                    parse_errors.append(error)
+            entries = pending_entries
         selected = entries if limit <= 0 else entries[-limit:]
         return selected, [*report.load_errors, *parse_errors]
+
+    # LLM: For idempotent ingress the receipt, not the delivered side index, is authoritative.
+    # Non-idempotent internal guidance keeps the established delivered-index behavior.
+    # 函数用途: 判断一条 guidance 是否仍可被运行时读取，拒绝和已消费记录不会再次注入。
+    def _guidance_entry_is_pending(self, entry: GuidanceEntry) -> bool:
+        metadata = entry.metadata if isinstance(entry.metadata, dict) else {}
+        dedupe_key = str(metadata.get("dedupe_key") or "").strip()
+        if not dedupe_key:
+            return entry.delivered_at <= 0
+        receipt = self.guidance_once_receipt(dedupe_key)
+        if receipt is None or receipt.entry.guidance_id != entry.guidance_id:
+            raise DataCorruptionError("conversation guidance receipt entry mismatch")
+        return receipt.status == "pending"
 
     def pending_guidance(
         self, target_type: str, target_id: str, *, limit: int = 20

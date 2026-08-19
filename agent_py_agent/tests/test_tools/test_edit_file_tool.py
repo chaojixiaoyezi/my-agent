@@ -21,6 +21,12 @@ def test_exact_single_replace(tmp_path):
     res = _tool(tmp_path).execute({"path": "a.py", "old_string": "timeout = 30", "new_string": "timeout = 60"})
     assert res.ok and "替换 1 处" in res.output
     assert f.read_text(encoding="utf-8") == "x = 1\ntimeout = 60\ny = 2\n"
+    display = res.result_envelope["display"]
+    assert display["kind"] == "diff"
+    assert display["path"] == "a.py"
+    assert display["lines_added"] == 1
+    assert display["lines_removed"] == 1
+    assert {row["kind"] for row in display["lines"]} >= {"add", "remove"}
 
 
 def test_ambiguous_without_replace_all_errors(tmp_path):

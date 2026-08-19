@@ -77,6 +77,18 @@ class _PromptScopeSnapshot:
     previous_skills: object
 
 
+# LLM: Gateway conversation compact may release only this attempt's pre-provider active inputs;
+# callers outside agent_core use this narrow runtime boundary instead of importing private leaves.
+# 函数用途: 在 Compact 续跑前释放本轮尚未提交给模型的活动回合补充消息。
+def release_active_turn_inputs_for_compact(
+    agent: object,
+    params: object,
+) -> tuple[str, ...]:
+    from .runtime.guidance import release_reserved_turn_input_after_attempt
+
+    return release_reserved_turn_input_after_attempt(agent, params)
+
+
 @contextmanager
 def current_prompt_scope(agent, user_prompt: str, params: RunParams | None = None):
     """Expose one thread-local run/tool scope without requiring a model turn."""
@@ -514,7 +526,16 @@ def _run_with_params(agent, user_prompt: str, params: RunParams):
             depth=current_params.compact_auto_continue_depth,
         )
         if decision.should_continue:
-            next_params = _compact_auto_continue_params(current_params, decision.injection, result)
+            released_input_ids = release_active_turn_inputs_for_compact(
+                agent,
+                current_params,
+            )
+            next_params = _compact_auto_continue_params(
+                current_params,
+                decision.injection,
+                result,
+                released_active_turn_input_ids=released_input_ids,
+            )
             continued = _run_once_with_params(agent, decision.user_prompt, next_params)
             result = mark_compact_auto_continued(
                 continued, result, depth=next_params.compact_auto_continue_depth
@@ -589,8 +610,17 @@ def _run_once_with_params(agent, user_prompt: str, params: RunParams):
             raise
 
 
-def _compact_auto_continue_params(params: RunParams, injection: str, source_result) -> RunParams:
-    from ..conversation.active_turn_input import merge_active_turn_user_inputs
+def _compact_auto_continue_params(
+    params: RunParams,
+    injection: str,
+    source_result,
+    *,
+    released_active_turn_input_ids: tuple[str, ...] = (),
+) -> RunParams:
+    from ..conversation.active_turn_input import (
+        exclude_active_turn_user_input_ids,
+        merge_active_turn_user_inputs,
+    )
 
     incoming_archive_calls = _merged_archive_tool_calls(
         getattr(source_result, "archive_tool_calls", None),
@@ -611,9 +641,12 @@ def _compact_auto_continue_params(params: RunParams, injection: str, source_resu
             params.carried_archive_tool_calls,
             incoming_archive_calls,
         ),
-        carried_active_turn_user_inputs=merge_active_turn_user_inputs(
-            params.carried_active_turn_user_inputs,
-            getattr(source_result, "active_turn_user_inputs", None),
+        carried_active_turn_user_inputs=exclude_active_turn_user_input_ids(
+            merge_active_turn_user_inputs(
+                params.carried_active_turn_user_inputs,
+                getattr(source_result, "active_turn_user_inputs", None),
+            ),
+            released_active_turn_input_ids,
         ),
     )
 

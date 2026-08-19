@@ -55,10 +55,25 @@ def record_tool_verification(
             if states:
                 additions["verification_state"] = states
         if additions:
-            return replace(result, metadata={**result.metadata, **additions})
+            return _with_verification_metadata(result, additions)
     except (AttributeError, OSError, RuntimeError, TypeError, ValueError, sqlite3.Error):
         pass
     return result
+
+
+# LLM: verification facts belong to the canonical handler_details envelope used by archive and live prompt projection;
+# never attach a second top-level metadata shape that downstream readers cannot observe.
+# 函数用途: 把测试证据合并进公共工具结果信封，让归档、compact 和收口逻辑读取同一份结构化事实。
+def _with_verification_metadata(
+    result: ToolResult,
+    additions: dict[str, object],
+) -> ToolResult:
+    metadata = dict(result.metadata)
+    raw_details = metadata.get("handler_details")
+    details = dict(raw_details) if isinstance(raw_details, dict) else {}
+    details.update(additions)
+    metadata["handler_details"] = details
+    return replace(result, metadata=metadata)
 
 
 def _record_command(
@@ -118,9 +133,27 @@ def _mark_writes(
             "status": state["status"],
             "root": state["root"],
             "changed_paths": state["changed_paths"],
+            **_last_verification_ref(state),
         }
         for state in states
     ]
+
+
+# LLM: a stale-cycle signature must use the durable verification event, not prose or a changing list of edits;
+# this lets closeout remind once per real verify-then-edit cycle without looping after every additional write.
+# 函数用途: 从仓库状态中提取上一次真实验证的编号和结果，供收口去重使用。
+def _last_verification_ref(state: dict[str, Any]) -> dict[str, object]:
+    evidence = state.get("evidence")
+    if not isinstance(evidence, dict):
+        return {}
+    result: dict[str, object] = {
+        "last_verification_status": str(evidence.get("status") or ""),
+    }
+    try:
+        result["last_verification_id"] = int(evidence.get("id") or 0)
+    except (TypeError, ValueError):
+        result["last_verification_id"] = 0
+    return result
 
 
 def _verification_context(

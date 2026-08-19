@@ -199,7 +199,7 @@ def example(...):
 远端提交前最小严格 gate：
 
 ```bash
-python3 -m pytest -q --tb=short
+python3 -m pytest <与改动直接相关的测试文件> -q --tb=short
 ruff check agent_py_agent scripts
 python3 scripts/check_doc_sync.py
 python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
@@ -208,7 +208,11 @@ python3 scripts/check_clean_package.py .
 ```
 
 要求：
-- 改动涉及特定模块时，先跑对应 focused tests，再跑上面的全量严格 gate。
+- 默认只跑与改动直接相关的 focused tests；不要为了常规小中型改动重复跑全仓 pytest。
+- 仅当本轮生产代码和测试代码的新增、删除累计达到约 10,000 行，或用户另行明确要求时，才在 focused tests
+  之外追加 `python3 -m pytest -q --tb=short` 全仓测试。
+- Ruff、doc sync、strict code-size、diff 和 clean-package 仍属于远端提交前严格 gate，不受上述 pytest
+  频率限制。
 - 任一命令失败时，默认不得推送远端、不得合并到 `main`；除非用户明确要求绕过，并且最终汇报写清失败命令、风险和原因。
 - 如果线上 CI 被禁用或被 billing 阻塞，最终汇报必须明确说明“本地严格 gate 已通过/未通过”，以及线上 CI 没有作为验收来源。
 - 如果本轮不提交远端，只是本地探索、草稿或小切片开发，继续按改动风险运行 focused tests、语法检查、doc sync 或必要 guard；不强制每次都跑全量严格 gate。

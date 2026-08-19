@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -18,7 +19,11 @@ from typing import Any
 
 from ..settings.defaults import DEFAULT_MODEL_MAX_TOKENS
 from ..tooling.runtime_contracts import ProviderToolCapability, ToolChoice
-from .errors import ProviderRecoverableError, ProviderResponseError
+from .errors import (
+    ProviderConfigurationError,
+    ProviderRecoverableError,
+    ProviderResponseError,
+)
 from .gateway_helpers import GatewayRequest, post_json, post_stream, post_stream_iter
 from .model_metadata import ProviderMetadataOptions, discover_provider_model_metadata
 from .stream_parsers import StreamCompletion
@@ -70,7 +75,8 @@ class ModelResponse:
     # 每块形如 {"id","name","input"}。文本协议下恒为空，不影响现有行为。
     tool_use_blocks: list[dict[str, Any]] = field(default_factory=list)
     # Anthropic Messages 返回的 assistant content blocks，经输入白名单清洗后保留原顺序。
-    # 它只供下一轮原生消息回放（例如 thinking/text/tool_use），不拼进 text，也不投递给用户。
+    # 它主要供下一轮原生消息回放；只有显式 rich transcript sink 会另行投影 type=thinking 的正文，
+    # signature/redacted_thinking/tool_use 仍不得进入用户可见事件。
     assistant_content_blocks: list[dict[str, Any]] = field(default_factory=list)
     # native 流式响应在 message_stop 前 EOF，或 stop_reason∈{max_tokens,length} 且仍有
     # 未闭合的 tool_use 参数缓冲 → True：这次响应（含 tool_use 参数 JSON）疑似被截断。
@@ -255,6 +261,7 @@ class HttpBackend(BaseBackend):
         # 当成 provider 事实。新代码应读取 configured_context_window_tokens。
         self.context_window_tokens = self.configured_context_window_tokens
         self._provider_tool_capability_cache: ProviderToolCapability | None = None
+        self._provider_tool_capability_lock = threading.Lock()
         self._provider_context_window_cache: int | None = None
         self.model_metadata: dict[str, Any] = {}
         self.temperature = float(options.temperature)
@@ -279,6 +286,17 @@ class HttpBackend(BaseBackend):
         cached = self._provider_tool_capability_cache
         if cached is not None:
             return cached
+        # 同一 Gateway/owner 的 Agent 会被多个请求线程复用。探针必须 single-flight，
+        # 否则冷启动并发会重复烧请求，并让一个成功、一个失败的结果互相打架。
+        with self._provider_tool_capability_lock:
+            cached = self._provider_tool_capability_cache
+            if cached is not None:
+                return cached
+            return self._probe_tool_capability_uncached()
+
+    # LLM: Caller holds `_provider_tool_capability_lock`; this method may perform provider I/O and only a proven-positive capability is cached.
+    # 函数用途: 真正执行一次有界工具能力探测；Gateway 并发请求只能由一个线程进入。
+    def _probe_tool_capability_uncached(self) -> ProviderToolCapability:
         # 2026-08-17 真机: gateway 进程环境缺 AGENT_API_KEY → generate 抛
         # ValueError("api_key 为空") 被探针 except 吞成"不支持 native",
         # 用户看到误导性 ToolProtocolSelectionError。配置错误≠模型能力,
@@ -315,12 +333,12 @@ class HttpBackend(BaseBackend):
                     tool_choice=ToolChoice.specific("my_agent_capability_probe"),
                     thinking_disabled=True,
                 )
-            except ProviderRecoverableError:
+            except (ProviderRecoverableError, ProviderConfigurationError):
                 # EXEC-41b: provider 侧失败(429 额度/限流/超时/连接)不是"不支持
                 # native"——探针吞掉它会把配额耗尽误报成"模型无原生工具能力",
                 # 真机 2026-08-17 双线 quota 恢复前 resume 报
-                # ToolProtocolSelectionError(RC=1 且文案误导)。放行给调用方,
-                # CLI 走 provider_quota_exhausted_report 等优雅报告路径。
+                # ToolProtocolSelectionError(RC=1 且文案误导)。服务端明确 4xx 拒绝同样
+                # 属于 provider/configuration 事实，必须原样放行，不能降级成能力不足。
                 raise
             except Exception as exc:
                 # 本地确定性异常(解析/配置错)重试无意义, 立即落 evidence。

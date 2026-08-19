@@ -21,6 +21,72 @@ class ModelVisibleContextBudget:
     remaining_to_compact_tokens: int
 
 
+# LLM: This snapshot is the public, read-only projection of the exact preflight total plus
+# estimated provider-visible component shares; component totals must add back to current_tokens.
+# 类用途: 保存一次真实模型调用前的上下文总量、窗口、压缩线和各组成部分，供 TUI 实时展示。
+@dataclass(frozen=True)
+class ModelVisibleContextSnapshot:
+    context_window_tokens: int
+    compact_trigger_tokens: int
+    current_tokens: int
+    prompt_tokens: int
+    messages_tokens: int
+    runtime_guidance_tokens: int
+    tool_schema_tokens: int
+    protocol: str
+
+    # LLM: Public serialization exposes only bounded numeric facts and the frozen schema id;
+    # prompts, messages, tool definitions, and guidance content must never enter the UI event.
+    # 函数用途: 把上下文快照转换成可安全发送给 TUI 的结构化字典，不包含任何正文。
+    def to_public_dict(self) -> dict[str, object]:
+        return {
+            "schema": "model_visible_context_usage.v1",
+            "estimated": True,
+            "context_window_tokens": self.context_window_tokens,
+            "compact_trigger_tokens": self.compact_trigger_tokens,
+            "current_tokens": self.current_tokens,
+            "prompt_tokens": self.prompt_tokens,
+            "messages_tokens": self.messages_tokens,
+            "runtime_guidance_tokens": self.runtime_guidance_tokens,
+            "tool_schema_tokens": self.tool_schema_tokens,
+            "protocol": self.protocol,
+        }
+
+
+# LLM: This is the only constructor for live context-display facts. It reuses the same
+# runtime_compact_policy and provider-visible estimator as preflight instead of adding a UI budget.
+# 函数用途: 计算一次即将发给模型的上下文构成，让状态条与自动 compact 使用同一口径。
+def model_visible_context_snapshot(
+    agent: object,
+    params: object | None,
+    prompt: str,
+) -> ModelVisibleContextSnapshot:
+    protocol, current, components = _model_visible_context_components(
+        agent,
+        params,
+        prompt,
+    )
+    policy = runtime_compact_policy(
+        agent,
+        save=_params_save_enabled(agent, params),
+        context_scope=str(getattr(params, "context_scope", "") or "default"),
+    )
+    window = max(0, int(policy.context_window_tokens or 0))
+    trigger = max(0, int(policy.trigger_tokens or 0))
+    if not policy.allow_persistent_apply or trigger <= 0:
+        trigger = window
+    return ModelVisibleContextSnapshot(
+        context_window_tokens=window,
+        compact_trigger_tokens=trigger,
+        current_tokens=current,
+        prompt_tokens=components["prompt_tokens"],
+        messages_tokens=components["messages_tokens"],
+        runtime_guidance_tokens=components["runtime_guidance_tokens"],
+        tool_schema_tokens=components["tool_schema_tokens"],
+        protocol=protocol,
+    )
+
+
 def model_visible_context_budget(
     agent: object,
     params: object | None = None,
@@ -37,16 +103,10 @@ def model_visible_context_budget(
         if prompt is not None
         else str(getattr(agent, "_current_user_prompt", "") or "")
     )
-    policy = runtime_compact_policy(
-        agent,
-        save=_params_save_enabled(agent, resolved_params),
-        context_scope=str(getattr(resolved_params, "context_scope", "") or "default"),
-    )
-    window = max(0, int(policy.context_window_tokens or 0))
-    trigger = max(0, int(policy.trigger_tokens or 0))
-    if not policy.allow_persistent_apply or trigger <= 0:
-        trigger = window
-    current = max(0, model_visible_context_tokens(agent, resolved_params, resolved_prompt))
+    snapshot = model_visible_context_snapshot(agent, resolved_params, resolved_prompt)
+    window = snapshot.context_window_tokens
+    trigger = snapshot.compact_trigger_tokens
+    current = snapshot.current_tokens
     return ModelVisibleContextBudget(
         context_window_tokens=window,
         compact_trigger_tokens=trigger,
@@ -123,8 +183,29 @@ def preflight_context_pressure_response(request: object) -> ModelResponse | None
 # fixed schema disappear from the compact decision.
 # 函数用途: 统一统计文字 prompt、原生工具 schema、原生工具消息和待转发运行时引导。
 def model_visible_context_tokens(agent: object, params: object, prompt: str) -> int:
+    return _model_visible_context_components(agent, params, prompt)[1]
+
+
+# LLM: Component estimates are derived only from the four actual provider-visible values. They
+# are proportionally normalized so their displayed sum is exactly the canonical total estimate.
+# 函数用途: 分别估算 prompt、历史消息、运行指引和工具定义的占比，同时保持总数与原 compact 口径一致。
+def _model_visible_context_components(
+    agent: object,
+    params: object | None,
+    prompt: str,
+) -> tuple[str, int, dict[str, int]]:
     if not native_tool_use_active(params):
-        return estimate_tokens(str(prompt or ""))
+        current = estimate_tokens(str(prompt or ""))
+        return (
+            "text",
+            current,
+            {
+                "prompt_tokens": current,
+                "messages_tokens": 0,
+                "runtime_guidance_tokens": 0,
+                "tool_schema_tokens": 0,
+            },
+        )
 
     from ...backends.message_adapter import AnthropicMessageAdapter
     from ..tool_ir_guidance import unforwarded_runtime_guidance
@@ -145,14 +226,56 @@ def model_visible_context_tokens(agent: object, params: object, prompt: str) -> 
         getattr(params, "tool_context", None),
         already_forwarded,
     )
-    return estimate_tokens(
-        {
-            "initial_user_prompt": str(prompt or ""),
-            "messages": messages,
-            "pending_runtime_guidance": guidance,
-            "tools": resolve_native_tools(agent, params) or [],
-        }
+    tools = resolve_native_tools(agent, params) or []
+    payload = {
+        "initial_user_prompt": str(prompt or ""),
+        "messages": messages,
+        "pending_runtime_guidance": guidance,
+        "tools": tools,
+    }
+    current = estimate_tokens(payload)
+    components = _normalize_context_component_tokens(
+        current,
+        (
+            ("prompt_tokens", str(prompt or "")),
+            ("messages_tokens", messages),
+            ("runtime_guidance_tokens", guidance),
+            ("tool_schema_tokens", tools),
+        ),
     )
+    return "native", current, components
+
+
+# LLM: The estimator has per-object overhead and rounding, so independently estimated categories
+# cannot be added directly. Integer proportional allocation preserves ordering and the exact total.
+# 函数用途: 把各部分的原始估算按比例分摊到总 token，避免分类相加与状态条总数对不上。
+def _normalize_context_component_tokens(
+    total_tokens: int,
+    values: tuple[tuple[str, object], ...],
+) -> dict[str, int]:
+    total = max(0, int(total_tokens or 0))
+    weights = [
+        estimate_tokens(value) if value not in (None, "", [], (), {}) else 0
+        for _, value in values
+    ]
+    weight_total = sum(weights)
+    if weight_total <= 0:
+        return {
+            key: total if index == 0 else 0
+            for index, (key, _) in enumerate(values)
+        }
+    allocated = [weight * total // weight_total for weight in weights]
+    remainder = total - sum(allocated)
+    order = sorted(
+        range(len(values)),
+        key=lambda index: (-(weights[index] * total % weight_total), index),
+    )
+    for index in order[:remainder]:
+        allocated[index] += 1
+    return {
+        key: allocated[index]
+        for index, (key, _) in enumerate(values)
+    }
 
 
 # LLM: save 的请求级显式值优先于 Agent 默认值，保持与 runtime_compact_policy 的保存语义一致。
@@ -272,9 +395,11 @@ def _input_tokens(request: object, prompt_tokens: int) -> int:
 
 __all__ = [
     "ModelVisibleContextBudget",
+    "ModelVisibleContextSnapshot",
     "context_pressure_response",
     "is_context_window_error",
     "model_visible_context_budget",
+    "model_visible_context_snapshot",
     "model_visible_context_tokens",
     "preflight_context_pressure_response",
     "safe_inline_tool_result_tokens",

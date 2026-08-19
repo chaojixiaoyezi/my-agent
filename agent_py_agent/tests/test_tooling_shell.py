@@ -44,6 +44,16 @@ class TestShellToolBasics:
             for item in model_spec.hints.avoid_when
         )
 
+    def test_owner_scoped_env_routes_standard_cache_to_sandbox_tmp(self, tmp_path: Path):
+        """只读 owner home 下的构建器与 npm 应默认使用沙箱 /tmp，而不是写 home 或项目。"""
+        from agent_py_agent.agent.tooling.shell import _subprocess_text_env
+
+        env = _subprocess_text_env(tmp_path / "owner")
+
+        assert env["TMPDIR"] == "/tmp"
+        assert env["XDG_CACHE_HOME"] == "/tmp/.cache"
+        assert env["NPM_CONFIG_CACHE"] == "/tmp/.cache/npm"
+
     def test_run_simple_command(self, tmp_path: Path):
         """执行简单命令。"""
         from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions

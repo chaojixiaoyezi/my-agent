@@ -21,6 +21,24 @@ def test_parse_conversation_controls_are_explicit() -> None:
     assert parse_conversation_control("先停一下") is None
 
 
+def test_parse_context_compact_and_effort_commands() -> None:
+    context = parse_conversation_control("/context")
+    compact = parse_conversation_control("/compact 优先保留未完成事项")
+    effort = parse_conversation_control("/effort high")
+    effort_status = parse_conversation_control("/effort status")
+    invalid_effort = parse_conversation_control("/effort extreme")
+
+    assert context is not None and context.kind == "context" and context.valid
+    assert compact is not None and compact.kind == "compact" and compact.valid
+    assert compact.value == "优先保留未完成事项"
+    assert effort is not None and effort.kind == "effort" and effort.value == "high"
+    assert effort.operation == "set" and effort.valid
+    assert effort_status is not None and effort_status.operation == "view"
+    assert invalid_effort is not None and invalid_effort.valid is False
+    assert parse_conversation_control("/context extra").valid is False
+    assert parse_conversation_control("请帮我 compact 一下") is None
+
+
 def test_parse_goal_lifecycle_commands() -> None:
     view = parse_conversation_control("/goal")
     create = parse_conversation_control("/goal 连续整理一周资料")

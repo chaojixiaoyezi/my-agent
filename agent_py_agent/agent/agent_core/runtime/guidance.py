@@ -58,15 +58,46 @@ def acknowledge_injected_turn_input(
     )
     if guidance_ids:
         entries = _guidance_ack_entries(state, guidance_ids)
-        delivered_ids = [
-            guidance_id
+        acknowledged_entries = [
+            entries[guidance_id]
             for guidance_id in guidance_ids
-            if _persist_guidance_transcript(store, entries.get(guidance_id))
+            if entries.get(guidance_id) is not None
         ]
+        delivered_ids: list[str] = []
+        if acknowledged_entries:
+            turn_id = str(getattr(params, "request_id", "") or "").strip() or durable_task_id(
+                params
+            )
+            def consume() -> list[str]:
+                return list(
+                    store.consume_submitted_guidance_for_turn(
+                        turn_id,
+                        acknowledged_entries,
+                        provider_call_id=str(
+                            state.get("_guidance_submission_id") or ""
+                        ).strip(),
+                        now=now,
+                    )
+                )
+
+            delivered_ids = list(
+                _run_active_turn_transition(params, "acknowledge", consume)
+            )
+            consumed_entries = [
+                entry
+                for entry in acknowledged_entries
+                if str(getattr(entry, "guidance_id", "") or "") in delivered_ids
+            ]
+            for entry in consumed_entries:
+                _persist_guidance_transcript(store, entry)
+            _complete_active_turn_user_reply_segment(
+                params,
+                _guidance_client_message_ids(consumed_entries),
+            )
         if delivered_ids:
-            store.mark_guidance_delivered(delivered_ids, now=now)
             guidance_pending.difference_update(delivered_ids)
             _forget_guidance_ack_entries(state, delivered_ids)
+            state.pop("_guidance_submission_id", None)
             acknowledged += len(delivered_ids)
 
     event_pending = state.get("_task_event_ack_ids")
@@ -81,6 +112,137 @@ def acknowledge_injected_turn_input(
         event_pending.difference_update(event_ids)
     acknowledged += len(event_ids)
     return acknowledged
+
+
+# LLM: Prompt assembly only reserves guidance. This explicit edge advances the exact batch to
+# submitted immediately before a provider call, separating safe pre-call crashes from unknown I/O.
+# 函数用途: 在模型请求发出前，将当前尝试已注入的补充消息批量标记为开始提交。
+def mark_injected_turn_input_submitted(
+    agent: object,
+    params: object,
+    *,
+    provider_call_id: str = "",
+    now: float | None = None,
+) -> int:
+    state = getattr(params, "live_archive_state", None)
+    store = getattr(agent, "conversation_store", None)
+    if store is None or not isinstance(state, dict):
+        return 0
+    guidance_pending = state.get("_guidance_ack_ids")
+    guidance_ids = (
+        sorted(str(item) for item in guidance_pending if str(item or "").strip())
+        if isinstance(guidance_pending, set)
+        else []
+    )
+    entries = _guidance_ack_entries(state, guidance_ids)
+    submitted_entries = [
+        entries[guidance_id]
+        for guidance_id in guidance_ids
+        if entries.get(guidance_id) is not None
+    ]
+    if not submitted_entries:
+        return 0
+    turn_id = str(getattr(params, "request_id", "") or "").strip() or durable_task_id(params)
+    attempt_id = (
+        str(getattr(params, "attempt_id", "") or "").strip()
+        or str(getattr(params, "run_id", "") or "").strip()
+        or turn_id
+    )
+    def submit() -> int:
+        count = len(
+            store.mark_guidance_entries_submitted(
+                turn_id,
+                submitted_entries,
+                attempt_id=attempt_id,
+                provider_call_id=provider_call_id,
+                now=now,
+            )
+        )
+        if count and str(provider_call_id or "").strip():
+            state["_guidance_submission_id"] = str(provider_call_id).strip()
+        return count
+
+    return int(_run_active_turn_transition(params, "submit", submit))
+
+
+# LLM: A typed provider context rejection proves no prompt execution. Only that caller may restore
+# this attempt's submitted rows to reserved for a smaller retry; transport failures never call it.
+# 函数用途: 模型明确拒绝当前上下文时，将本批补充消息恢复为同一尝试可再次提交。
+def restore_injected_turn_input_for_provider_retry(agent: object, params: object) -> int:
+    state = getattr(params, "live_archive_state", None)
+    store = getattr(agent, "conversation_store", None)
+    if store is None or not isinstance(state, dict):
+        return 0
+    pending = state.get("_guidance_ack_ids")
+    guidance_ids = (
+        sorted(str(item) for item in pending if str(item or "").strip())
+        if isinstance(pending, set)
+        else []
+    )
+    entries = _guidance_ack_entries(state, guidance_ids)
+    prepared = [entries[item] for item in guidance_ids if entries.get(item) is not None]
+    if not prepared:
+        return 0
+    turn_id = str(getattr(params, "request_id", "") or "").strip() or durable_task_id(params)
+    attempt_id = (
+        str(getattr(params, "attempt_id", "") or "").strip()
+        or str(getattr(params, "run_id", "") or "").strip()
+        or turn_id
+    )
+    provider_call_id = str(state.get("_guidance_submission_id") or "").strip()
+    def restore() -> int:
+        return len(
+            store.restore_submitted_guidance_for_retry(
+                turn_id,
+                prepared,
+                attempt_id=attempt_id,
+                provider_call_id=provider_call_id,
+            )
+        )
+
+    restored = int(_run_active_turn_transition(params, "restore", restore))
+    if restored:
+        state.pop("_guidance_submission_id", None)
+    return restored
+
+
+# LLM: A compact continuation starts a fresh execution attempt. After the old attempt has returned,
+# reserved rows are provably pre-provider and must go back to pending instead of carrying bare text.
+# 函数用途: 在 Compact 重开模型循环前释放本尝试未提交的补充消息，并返回其结构化 ID。
+def release_reserved_turn_input_after_attempt(
+    agent: object,
+    params: object,
+) -> tuple[str, ...]:
+    state = getattr(params, "live_archive_state", None)
+    pending = state.get("_guidance_ack_ids") if isinstance(state, dict) else None
+    guidance_ids = (
+        tuple(sorted(str(item) for item in pending if str(item or "").strip()))
+        if isinstance(pending, (set, list, tuple))
+        else ()
+    )
+    # No receipt was reserved in this attempt, so acquiring the Gateway turn lock would turn a
+    # normal compact into an exact-turn lifecycle error in direct/fake runtimes.
+    if not guidance_ids:
+        return ()
+    store = getattr(agent, "conversation_store", None)
+    release = getattr(store, "release_reserved_guidance_for_turn", None)
+    if not callable(release):
+        return ()
+    turn_id = str(getattr(params, "request_id", "") or "").strip() or durable_task_id(params)
+    if not turn_id:
+        return ()
+    attempt_id = (
+        str(getattr(params, "attempt_id", "") or "").strip()
+        or str(getattr(params, "run_id", "") or "").strip()
+        or turn_id
+    )
+
+    def release_reserved() -> tuple[str, ...]:
+        summary = release(turn_id, dead_attempt_id=attempt_id)
+        ids = summary.get("released_guidance_ids", []) if isinstance(summary, dict) else []
+        return tuple(str(item) for item in ids if str(item or "").strip())
+
+    return tuple(_run_active_turn_transition(params, "release", release_reserved))
 
 
 def inject_pending_guidance(agent: object, params: object, *, now: float | None = None) -> bool:
@@ -112,10 +274,55 @@ def inject_pending_guidance(agent: object, params: object, *, now: float | None 
         entries.extend(store.pending_guidance("thread", thread_id, limit=20))
     entries = _guidance_not_yet_injected(params, _dedupe_guidance(entries))
     warning = _render_guidance_lookup_error(thread_lookup_error)
-    if not entries and not warning:
-        return False
-    user_input = _render_guidance_user_input(entries)
+    turn_id = request_id or task_id
     tool_context = getattr(params, "tool_context", None)
+    if entries and turn_id:
+        attempt_id = (
+            str(getattr(params, "attempt_id", "") or "").strip()
+            or run_id
+            or turn_id
+        )
+        def reserve_and_inject() -> list[Any]:
+            with store.guidance_turn_transition_guard(turn_id):
+                claimed = _claim_guidance_for_active_turn(
+                    store,
+                    entries,
+                    turn_id,
+                    attempt_id,
+                )
+                _inject_claimed_guidance(params, claimed, tool_context)
+                return claimed
+
+        entries = list(_run_active_turn_transition(params, "reserve", reserve_and_inject))
+    if warning and isinstance(tool_context, list):
+        tool_context.append(warning)
+    runtime_injections = getattr(params, "runtime_injections", None)
+    if warning and isinstance(runtime_injections, list):
+        runtime_injections.append(warning)
+    return bool(entries or warning)
+
+
+# LLM: Gateway provides the outer exact-turn lock while ConversationStore owns the inner mailbox
+# lock. Keeping this one callback boundary enforces T -> M for both reserve and submit.
+# 函数用途: 在宿主提供的精确回合转换锁内执行补充消息状态变更；普通本地运行直接执行。
+def _run_active_turn_transition(params: object, phase: str, operation):
+    callback = getattr(params, "active_turn_transition_callback", None)
+    if callable(callback):
+        return callback(str(phase), operation)
+    return operation()
+
+
+# LLM: Caller holds the exact turn transition guard from receipt claim through every prompt/state
+# mutation. Terminalization cannot reject or archive between claim and this local admission edge.
+# 函数用途: 把已认领补充消息加入当前模型提示，并登记稍后的消费确认。
+def _inject_claimed_guidance(
+    params: object,
+    entries: list[Any],
+    tool_context: object,
+) -> None:
+    if not entries:
+        return
+    user_input = _render_guidance_user_input(entries)
     if user_input:
         # 会话运行时 steer is a real user turn, not a system/runtime hint.  Keep one
         # chronological text marker for the text protocol and one provider-neutral
@@ -130,15 +337,12 @@ def inject_pending_guidance(agent: object, params: object, *, now: float | None 
 
             record_user_turn_ir(params, user_input)
         append_active_turn_user_input(params, packet_from_guidance(entries, user_input))
-        _begin_active_turn_user_reply_segment(params)
-    if warning and isinstance(tool_context, list):
-        tool_context.append(warning)
-    runtime_injections = getattr(params, "runtime_injections", None)
-    if warning and isinstance(runtime_injections, list):
-        runtime_injections.append(warning)
+        _begin_active_turn_user_reply_segment(
+            params,
+            _guidance_client_message_ids(entries),
+        )
     _remember_injected_guidance(params, entries)
     _queue_guidance_ack(params, entries)
-    return True
 
 
 # LLM: A request/task steer arriving during model generation invalidates that stale model action.
@@ -157,21 +361,78 @@ def has_pending_request_guidance(agent: object, params: object) -> bool:
             entries.extend(store.pending_guidance("request", task_id, limit=1))
         if task_id:
             entries.extend(store.pending_guidance("task", task_id, limit=1))
-        return bool(_guidance_not_yet_injected(params, _dedupe_guidance(entries)))
+        candidates = _guidance_not_yet_injected(params, _dedupe_guidance(entries))
+        turn_id = request_id or task_id
+        return any(
+            store.guidance_available_for_turn(entry, expected_turn_id=turn_id)
+            for entry in candidates
+        )
     except Exception:
         return False
+
+
+# LLM: Claim is the durable equivalent of 会话运行时 appending into the exact active turn_state under
+# its active-turn lock. Rejected or stale-turn receipts are filtered before any prompt mutation.
+# 函数用途: 在模型安全点原子认领属于当前精确回合的补充消息。
+def _claim_guidance_for_active_turn(
+    store: object,
+    entries: list[Any],
+    turn_id: str,
+    attempt_id: str,
+) -> list[Any]:
+    claimed: list[Any] = []
+    for entry in entries:
+        if store.claim_guidance_once_for_turn(
+            entry,
+            expected_turn_id=turn_id,
+            attempt_id=attempt_id,
+        ):
+            claimed.append(entry)
+    return claimed
 
 
 # LLM: User steering may arrive after the run's first commentary; only the Gateway stream
 # sink owns whether another user-visible model segment can be emitted.
 # 函数用途：通知当前输出流“这是新的真实用户输入”，让当前轮可再自然回复一次。
-def _begin_active_turn_user_reply_segment(params: object) -> None:
+def _begin_active_turn_user_reply_segment(
+    params: object,
+    client_message_ids: tuple[str, ...],
+) -> None:
     sink = getattr(params, "effective_on_chunk", None)
     if sink is None:
         sink = getattr(params, "on_chunk", None)
     begin = getattr(sink, "begin_active_turn_input", None)
     if callable(begin):
-        begin()
+        begin(client_message_ids)
+
+
+# LLM: The consumed UI event belongs to the provider-accepted prompt boundary, not the earlier
+# prompt assembly/claim edge. Only the sink may publish that exact client correlation event.
+# 函数用途: 模型确认收到补充输入后，通知输出流发布真正的已消费事件。
+def _complete_active_turn_user_reply_segment(
+    params: object,
+    client_message_ids: tuple[str, ...],
+) -> None:
+    sink = getattr(params, "effective_on_chunk", None)
+    if sink is None:
+        sink = getattr(params, "on_chunk", None)
+    complete = getattr(sink, "complete_active_turn_input", None)
+    if callable(complete):
+        complete(client_message_ids)
+
+
+# LLM: Client correlation reads only the structured channel_message_id written by ingress;
+# guidance text and ordering labels never become identity.
+# 函数用途: 提取本批已注入补充消息的客户端 ID，供同一 TUI 精确收起等待提示。
+def _guidance_client_message_ids(entries: list[Any]) -> tuple[str, ...]:
+    result: list[str] = []
+    for entry in entries:
+        metadata = getattr(entry, "metadata", None)
+        metadata = metadata if isinstance(metadata, dict) else {}
+        message_id = str(metadata.get("channel_message_id") or "").strip()
+        if message_id and message_id not in result:
+            result.append(message_id)
+    return tuple(result)
 
 
 def _pending_task_events(agent: object, params: object) -> list[WakeSignal]:
@@ -330,44 +591,14 @@ def _forget_guidance_ack_entries(state: dict[str, object], guidance_ids: list[st
         entries.pop(guidance_id, None)
 
 
+# LLM: ConversationStore owns the idempotent transcript projection so runtime and crash repair share
+# one implementation; this wrapper only preserves the runtime call boundary.
+# 函数用途: 请求会话存储补写一条已消费 guidance 的用户消息投影。
 def _persist_guidance_transcript(store: object, entry: Any) -> bool:
-    if entry is None:
+    projector = getattr(store, "_project_guidance_transcript", None)
+    if entry is None or not callable(projector):
         return False
-    metadata = getattr(entry, "metadata", None)
-    metadata = metadata if isinstance(metadata, dict) else {}
-    if metadata.get("record_in_transcript") is not True:
-        return True
-    guidance_id = str(getattr(entry, "guidance_id", "") or "").strip()
-    thread_id = str(metadata.get("thread_id") or "").strip()
-    message = str(getattr(entry, "message", "") or "").strip()
-    if not guidance_id or not thread_id or not message:
-        return False
-    target_type = str(getattr(entry, "target_type", "") or "").strip()
-    target_id = str(getattr(entry, "target_id", "") or "").strip()
-    attribution: dict[str, str] = {}
-    if target_type == "task" and target_id:
-        attribution["task_id"] = target_id
-    elif target_type == "request" and target_id:
-        attribution["gateway_request_id"] = target_id
-    try:
-        store.append_message_once(
-            {
-                "thread_id": thread_id,
-                "role": "user",
-                "content": message,
-                "channel": str(metadata.get("channel") or "internal"),
-                "channel_message_id": str(metadata.get("channel_message_id") or ""),
-                "metadata": {
-                    "kind": "active_turn_user_input",
-                    "guidance_id": guidance_id,
-                    **attribution,
-                },
-            },
-            dedupe_key=f"active-turn-input:{guidance_id}",
-        )
-    except Exception:
-        return False
-    return True
+    return bool(projector(entry))
 
 
 def render_subagent_guidance_section(store: object, run_id: str, *, now: float | None = None) -> str:

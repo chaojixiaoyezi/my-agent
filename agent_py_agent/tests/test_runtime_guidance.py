@@ -31,9 +31,11 @@ from agent_py_agent.agent.agent_core.tool_loop.completion import (
     ToolRoundCompletionRequest,
     _soft_wait_reply_facts,
     completion_response_after_tool_round,
+    queue_followup_after_post_failure_workspace_mutation,
     queue_interim_reply_for_active_named_work,
     queue_interim_reply_for_open_subagents,
     queue_reply_for_audit_prepare,
+    queue_reply_for_incomplete_final_mutation,
 )
 from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
     discard_pending_natural_user_reply,
@@ -263,6 +265,194 @@ def test_conversation_guidance_can_be_delivered_once(tmp_path) -> None:
     assert delivered[0].delivered_at == 3.0
 
 
+def test_conversation_guidance_idempotency_reuses_one_entry_and_terminal_receipt(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    request = {
+        "target_type": "request",
+        "target_id": "request-1",
+        "message": "同一条补充只保存一次",
+        "sender": "user-1",
+        "metadata": {
+            "channel_message_id": "message-1",
+            "expected_turn_id": "request-1",
+        },
+        "now": 10.0,
+    }
+
+    first = store.append_guidance_once(request, dedupe_key="thread-1/message-1")
+    replay = store.append_guidance_once(
+        {**request, "now": 20.0},
+        dedupe_key="thread-1/message-1",
+    )
+    assert store.claim_guidance_once_for_turn(
+        first,
+        expected_turn_id="request-1",
+        attempt_id="attempt-1",
+    )
+    store.mark_guidance_entries_submitted(
+        "request-1",
+        [first],
+        attempt_id="attempt-1",
+        provider_call_id="provider-call-1",
+    )
+    store.consume_submitted_guidance_for_turn(
+        "request-1",
+        [first],
+        provider_call_id="provider-call-1",
+    )
+    receipt = store.guidance_once_receipt("thread-1/message-1")
+
+    assert replay.guidance_id == first.guidance_id
+    assert replay.created_at == 10.0
+    assert receipt is not None and receipt.status == "consumed"
+    rows = store.recent_guidance("request", "request-1", limit=0)
+    assert [item.guidance_id for item in rows] == [first.guidance_id]
+
+
+def test_guidance_receipt_recomputes_embedded_entry_digest(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    dedupe_key = "thread-1/message-tampered"
+    store.append_guidance_once(
+        {
+            "target_type": "request",
+            "target_id": "request-tampered",
+            "message": "原始补充",
+            "metadata": {"expected_turn_id": "request-tampered"},
+        },
+        dedupe_key=dedupe_key,
+    )
+    path = store._guidance_dedupe_path(dedupe_key)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["entry"]["message"] = "被改过但保留旧 digest"
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    with pytest.raises(DataCorruptionError, match="input digest mismatch"):
+        store.guidance_once_receipt(dedupe_key)
+
+
+def test_guidance_receipt_v3_migration_is_persisted_as_v4(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    dedupe_key = "thread-1/message-v3"
+    store.append_guidance_once(
+        {
+            "target_type": "request",
+            "target_id": "request-v3",
+            "message": "迁移旧回执",
+            "metadata": {"expected_turn_id": "request-v3"},
+        },
+        dedupe_key=dedupe_key,
+    )
+    path = store._guidance_dedupe_path(dedupe_key)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["schema_version"] = "conversation_guidance_once.v3"
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    receipt = store.guidance_once_receipt(dedupe_key)
+    migrated = json.loads(path.read_text(encoding="utf-8"))
+
+    assert receipt is not None and receipt.migration["from_schema"].endswith(".v3")
+    assert migrated["schema_version"] == "conversation_guidance_once.v4"
+
+
+def test_guidance_submission_batch_repairs_partial_receipt_projection(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import agent_py_agent.agent.conversation.store as store_module
+
+    store = ConversationStore(tmp_path / "conversations")
+    dedupe_key = "thread/submission-crash"
+    entry = store.append_guidance_once(
+        {
+            "target_type": "request",
+            "target_id": "request-submission-crash",
+            "message": "整批提交后逐条投影崩溃",
+            "metadata": {
+                "dedupe_key": dedupe_key,
+                "expected_turn_id": "request-submission-crash",
+            },
+        },
+        dedupe_key=dedupe_key,
+    )
+    assert store.claim_guidance_once_for_turn(
+        entry,
+        expected_turn_id="request-submission-crash",
+        attempt_id="attempt-submission-crash",
+    )
+    original_write = store_module.write_json_file_atomic
+    failed = False
+
+    def fail_first_receipt_projection(path, payload):
+        nonlocal failed
+        if (
+            not failed
+            and path.parent == store.guidance_dedupe_dir
+            and payload.get("status") == "submitted"
+        ):
+            failed = True
+            raise OSError("simulated receipt projection crash")
+        return original_write(path, payload)
+
+    monkeypatch.setattr(store_module, "write_json_file_atomic", fail_first_receipt_projection)
+    with pytest.raises(OSError, match="projection crash"):
+        store.mark_guidance_entries_submitted(
+            "request-submission-crash",
+            [entry],
+            attempt_id="attempt-submission-crash",
+            provider_call_id="provider-submission-crash",
+        )
+    receipt = store.guidance_once_receipt(dedupe_key)
+    assert receipt is not None and receipt.status == "reserved"
+
+    monkeypatch.setattr(store_module, "write_json_file_atomic", original_write)
+    summary = store.release_reserved_guidance_for_turn(
+        "request-submission-crash",
+        dead_attempt_id="attempt-submission-crash",
+    )
+
+    assert summary["released"] == 0
+    assert summary["submitted"] == 1
+    repaired = store.guidance_once_receipt(dedupe_key)
+    assert repaired is not None and repaired.status == "submitted"
+    assert repaired.submission_id == "provider-submission-crash"
+
+
+def test_conversation_guidance_idempotency_repairs_crash_between_receipt_and_queue(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    request = {
+        "target_type": "request",
+        "target_id": "request-crash",
+        "message": "崩溃恢复后仍然只能有一条",
+        "metadata": {"channel_message_id": "message-crash"},
+    }
+    ensure_entry = store._ensure_guidance_once_entry
+
+    def crash_after_receipt(_entry):
+        raise OSError("simulated crash after receipt")
+
+    monkeypatch.setattr(store, "_ensure_guidance_once_entry", crash_after_receipt)
+    with pytest.raises(OSError, match="simulated crash"):
+        store.append_guidance_once(request, dedupe_key="thread-1/message-crash")
+    assert store.pending_guidance("request", "request-crash", limit=0) == []
+
+    monkeypatch.setattr(store, "_ensure_guidance_once_entry", ensure_entry)
+    recovered = store.append_guidance_once(
+        request,
+        dedupe_key="thread-1/message-crash",
+    )
+    replay = store.append_guidance_once(
+        request,
+        dedupe_key="thread-1/message-crash",
+    )
+
+    assert replay.guidance_id == recovered.guidance_id
+    rows = store.recent_guidance("request", "request-crash", limit=0)
+    assert [item.guidance_id for item in rows] == [recovered.guidance_id]
+
+
 def test_send_guidance_tool_writes_run_guidance(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     result = SendGuidanceTool(agent).execute(
@@ -411,24 +601,28 @@ def test_active_turn_user_input_reopens_the_model_reply_sink_once(tmp_path) -> N
             "target_id": "main-run-1",
             "message": "顺便回答一句，原任务继续。",
             "now": 10.0,
+            "metadata": {"channel_message_id": "steer-client-1"},
         }
     )
 
     class Sink:
         def __init__(self) -> None:
             self.started = 0
+            self.client_message_ids: tuple[str, ...] = ()
 
         def __call__(self, _text: str) -> None:
             return None
 
-        def begin_active_turn_input(self) -> None:
+        def begin_active_turn_input(self, client_message_ids: tuple[str, ...]) -> None:
             self.started += 1
+            self.client_message_ids = client_message_ids
 
     sink = Sink()
     params = _tool_loop_params(run_id="main-run-1", effective_on_chunk=sink)
 
     assert inject_pending_guidance(agent, params, now=11.0) is True
     assert sink.started == 1
+    assert sink.client_message_ids == ("steer-client-1",)
 
 
 def test_active_turn_injects_matching_subagent_events_in_fifo_and_acks_after_model_accepts_prompt(
@@ -1192,6 +1386,207 @@ def test_open_subagents_queue_interim_reply_without_reading_model_prose() -> Non
     }
 
 
+def test_post_failure_workspace_mutation_followup_is_soft_and_only_queued_once(
+    tmp_path,
+) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    params = _tool_loop_params(
+        context_scope="conversation",
+        archive_tool_calls=[
+            {
+                "tool": "run_command",
+                "call_id": "call-build-failed",
+                "ok": False,
+                "handler_executed": True,
+                "error_code": "COMMAND_FAILED",
+                "parameters": {"command": "go test ./..."},
+            },
+            {
+                "tool": "write_file",
+                "call_id": "call-fix",
+                "operation_id": "operation-fix",
+                "ok": True,
+                "handler_executed": True,
+                "tool_operation_status": "succeeded",
+                "parameters": {"path": "cmd.go", "content": "package main\n"},
+            },
+        ],
+    )
+
+    assert queue_followup_after_post_failure_workspace_mutation(agent, params) is True
+    assert "post_failure_workspace_mutation_followup.v1" in params.tool_context[-1]
+    assert "不是完成硬门" in params.tool_context[-1]
+    assert queue_followup_after_post_failure_workspace_mutation(agent, params) is False
+
+
+def test_unknown_completion_conflict_keeps_fail_closed_no_tools_reply(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    params = _tool_loop_params(
+        context_scope="conversation",
+        live_archive_state={},
+        archive_tool_calls=[
+            {
+                "tool": "run_command",
+                "call_id": "call-command-unknown",
+                "operation_id": "operation-command-unknown",
+                "ok": False,
+                "handler_executed": True,
+                "tool_operation_status": "unknown",
+                "effect_outcome": "unknown",
+                "error_code": "TOOL_OPERATION_OUTCOME_UNKNOWN",
+                "parameters": {"command": "deploy"},
+            }
+        ],
+    )
+
+    assert queue_reply_for_incomplete_final_mutation(
+        agent,
+        params,
+        response=ModelResponse(text="已经部署完成。", backend="fake"),
+        tool_rounds=1,
+    ) is True
+    assert not any("completion_conflict.v1" in item for item in params.tool_context)
+    phase = pending_natural_user_reply(params)
+    assert phase is not None
+    assert phase["kind"] == "operation_incomplete"
+    assert phase["facts"]["latest_mutating_operation"]["status"] == "unknown"
+
+
+def test_new_failed_call_id_does_not_reset_completion_repair_budget(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    records: list[dict[str, object]] = []
+    params = _tool_loop_params(
+        context_scope="conversation",
+        live_archive_state={},
+        archive_tool_calls=records,
+    )
+
+    for index in range(1, 4):
+        records.append(
+            {
+                "tool": "run_command",
+                "call_id": f"call-command-failed-{index}",
+                "operation_id": f"operation-command-failed-{index}",
+                "ok": False,
+                "handler_executed": True,
+                "tool_operation_status": "failed",
+                "effect_outcome": "failed",
+                "error_code": "COMMAND_FAILED",
+                "failure_stage": "execution",
+                "parameters": {"command": f"check-{index}"},
+            }
+        )
+        assert queue_reply_for_incomplete_final_mutation(
+            agent,
+            params,
+            response=ModelResponse(text=f"第 {index} 次声称完成。", backend="fake"),
+            tool_rounds=index,
+        ) is True
+
+    repairs = [item for item in params.tool_context if "completion_conflict.v1" in item]
+    assert len(repairs) == 2
+    assert '"repair_attempt":1' in repairs[0]
+    assert '"repair_attempt":2' in repairs[1]
+    phase = pending_natural_user_reply(params)
+    assert phase is not None
+    assert phase["kind"] == "operation_incomplete"
+
+
+def test_stale_verification_followup_rearms_only_after_a_new_verification_cycle(
+    tmp_path,
+) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    root = str((tmp_path / "project").resolve())
+    records = [
+        {
+            "tool": "run_command",
+            "call_id": "call-check-1",
+            "ok": False,
+            "handler_executed": True,
+            "error_code": "COMMAND_FAILED",
+            "parameters": {"command": "go test ."},
+            "tool_result_envelope": {
+                "verification_evidence": {
+                    "id": 11,
+                    "root": root,
+                    "status": "failed",
+                }
+            },
+        },
+        {
+            "tool": "write_file",
+            "call_id": "call-fix-1",
+            "ok": True,
+            "handler_executed": True,
+            "tool_operation_status": "succeeded",
+            "parameters": {"path": f"{root}/main.go"},
+            "tool_result_envelope": {
+                "verification_state": [
+                    {
+                        "root": root,
+                        "status": "stale",
+                        "last_verification_id": 11,
+                        "last_verification_status": "failed",
+                        "changed_paths": [f"{root}/main.go"],
+                    }
+                ]
+            },
+        },
+        {
+            "tool": "search_text",
+            "call_id": "call-read",
+            "ok": True,
+            "handler_executed": True,
+            "parameters": {"query": "func"},
+        },
+    ]
+    params = _tool_loop_params(context_scope="conversation", archive_tool_calls=records)
+
+    assert queue_followup_after_post_failure_workspace_mutation(agent, params) is True
+    assert "post_failure_workspace_mutation_followup.v2" in params.tool_context[-1]
+    assert queue_followup_after_post_failure_workspace_mutation(agent, params) is False
+
+    records.extend(
+        [
+            {
+                "tool": "run_command",
+                "call_id": "call-check-2",
+                "ok": True,
+                "handler_executed": True,
+                "parameters": {"command": "go test ."},
+                "tool_result_envelope": {
+                    "verification_evidence": {
+                        "id": 12,
+                        "root": root,
+                        "status": "passed",
+                    }
+                },
+            },
+            {
+                "tool": "write_file",
+                "call_id": "call-fix-2",
+                "ok": True,
+                "handler_executed": True,
+                "tool_operation_status": "succeeded",
+                "parameters": {"path": f"{root}/example.go"},
+                "tool_result_envelope": {
+                    "verification_state": [
+                        {
+                            "root": root,
+                            "status": "stale",
+                            "last_verification_id": 12,
+                            "last_verification_status": "passed",
+                            "changed_paths": [f"{root}/example.go"],
+                        }
+                    ]
+                },
+            },
+        ]
+    )
+
+    assert queue_followup_after_post_failure_workspace_mutation(agent, params) is True
+
+
 def test_active_named_audit_replaces_premature_final_with_model_interim(
     tmp_path,
 ) -> None:
@@ -1833,8 +2228,7 @@ def test_published_audit_sources_release_root_before_any_tool_round(
         name = "provision_reply"
 
         def probe_tool_capability(self):
-            from agent_py_agent.agent.backends.base import ProviderToolCapability
-            from agent_py_agent.agent.backends.base import _utc_now_iso
+            from agent_py_agent.agent.backends.base import ProviderToolCapability, _utc_now_iso
 
             return ProviderToolCapability(
                 provider=self.name, endpoint="local://provision-reply",

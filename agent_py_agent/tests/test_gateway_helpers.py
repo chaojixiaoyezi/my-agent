@@ -1,4 +1,5 @@
 """网关助手测试 - gateway_helpers.py HTTP POST、SSE 流式请求。"""
+
 from __future__ import annotations
 
 import http.client
@@ -18,6 +19,7 @@ from agent_py_agent.agent.backends.gateway_helpers import GatewayRequest
 
 class IterableBytesIO(BytesIO):
     """BytesIO that iterates over lines."""
+
     def __iter__(self):
         return iter(self.readline, b"")
 
@@ -51,10 +53,10 @@ def test_gateway_transport_splits_short_connect_and_long_read_timeouts():
 
     proxy_handler, http_handler, https_handler = build_opener.call_args.args
     assert isinstance(proxy_handler, urllib.request.ProxyHandler)
-    assert http_handler.connect_timeout == 10
-    assert https_handler.connect_timeout == 10
-    assert http_handler.read_timeout == 600
-    assert https_handler.read_timeout == 600
+    assert http_handler.transport_options.connect_timeout == 10
+    assert https_handler.transport_options.connect_timeout == 10
+    assert http_handler.transport_options.read_timeout == 600
+    assert https_handler.transport_options.read_timeout == 600
     opener.open.assert_called_once()
     assert opener.open.call_args.kwargs["timeout"] == 600
 
@@ -124,8 +126,7 @@ def test_http_connection_switches_socket_to_read_timeout_after_connect():
 
     connection = gateway_helpers._SplitTimeoutHTTPConnection(
         "api.example.com",
-        connect_timeout=7,
-        read_timeout=600,
+        transport_options=gateway_helpers._SplitTimeoutOptions(7, 600, None),
     )
     connection.sock = MagicMock()
     with patch.object(http.client.HTTPConnection, "connect"):
@@ -141,6 +142,7 @@ class TestPostJson:
     def test_empty_api_key_raises(self):
         """验证空 api_key 抛出 ValueError。"""
         from agent_py_agent.agent.backends.gateway_helpers import post_json
+
         with pytest.raises(ValueError, match="api_key 为空"):
             post_json(_request(api_key=""))
 
@@ -155,6 +157,7 @@ class TestPostJson:
         mock_urlopen.return_value = mock_response
 
         from agent_py_agent.agent.backends.gateway_helpers import post_json
+
         result = post_json(_request(payload={"model": "gpt-4"}))
         assert result == {"content": "test response"}
 
@@ -162,15 +165,23 @@ class TestPostJson:
     def test_http_error_handling(self, mock_urlopen):
         """验证 HTTP 错误被包装为 RuntimeError。"""
         from io import BytesIO
+
         body = BytesIO(b"invalid key")
         mock_urlopen.side_effect = urllib.error.HTTPError(
-            "https://api.example.com", 401, "Unauthorized",
-            {"Content-Type": "application/json"}, body
+            "https://api.example.com",
+            401,
+            "Unauthorized",
+            {"Content-Type": "application/json"},
+            body,
         )
 
+        from agent_py_agent.agent.backends.errors import ProviderRequestRejectedError
         from agent_py_agent.agent.backends.gateway_helpers import post_json
-        with pytest.raises(RuntimeError, match="HTTP 401"):
+
+        with pytest.raises(ProviderRequestRejectedError, match="HTTP 401") as exc_info:
             post_json(_request(api_key="bad-key"))
+        assert exc_info.value.status_code == 401
+        assert exc_info.value.error_code == "PROVIDER_REQUEST_REJECTED"
 
     @patch("agent_py_agent.agent.backends.gateway_helpers._provider_retry_wait")
     @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
@@ -179,7 +190,9 @@ class TestPostJson:
         from io import BytesIO
 
         silent = urllib.error.HTTPError(
-            "https://api.example.com", 400, "Bad Request",
+            "https://api.example.com",
+            400,
+            "Bad Request",
             {"Content-Type": "application/json"},
             BytesIO(b'{"model":"deepseek-v4-flash"}'),
         )
@@ -190,6 +203,7 @@ class TestPostJson:
         mock_urlopen.side_effect = [silent, second]
 
         from agent_py_agent.agent.backends.gateway_helpers import post_json
+
         assert post_json(_request()) == {"content": "after retry"}
         assert mock_urlopen.call_count == 2
 
@@ -200,7 +214,9 @@ class TestPostJson:
         from io import BytesIO
 
         silent = urllib.error.HTTPError(
-            "https://api.example.com", 400, "Bad Request",
+            "https://api.example.com",
+            400,
+            "Bad Request",
             {"Content-Type": "application/json"},
             BytesIO(b'{"model":"deepseek-v4-flash"}'),
         )
@@ -208,6 +224,7 @@ class TestPostJson:
 
         from agent_py_agent.agent.backends.errors import ProviderTransientError
         from agent_py_agent.agent.backends.gateway_helpers import post_json
+
         with pytest.raises(ProviderTransientError):
             post_json(_request())
         assert mock_urlopen.call_count == 4  # 首轮 + 3 次重试后抛
@@ -218,14 +235,18 @@ class TestPostJson:
         from io import BytesIO
 
         explicit = urllib.error.HTTPError(
-            "https://api.example.com", 400, "Bad Request",
+            "https://api.example.com",
+            400,
+            "Bad Request",
             {"Content-Type": "application/json"},
             BytesIO(b'{"error":{"message":"model not found"}}'),
         )
         mock_urlopen.side_effect = explicit
 
+        from agent_py_agent.agent.backends.errors import ProviderRequestRejectedError
         from agent_py_agent.agent.backends.gateway_helpers import post_json
-        with pytest.raises(RuntimeError, match="HTTP 400"):
+
+        with pytest.raises(ProviderRequestRejectedError, match="HTTP 400"):
             post_json(_request())
         assert mock_urlopen.call_count == 1
 
@@ -331,6 +352,41 @@ class TestPostJson:
 
     @patch("agent_py_agent.agent.backends.gateway_helpers._provider_retry_wait")
     @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
+    def test_connection_refused_errno_retries_with_structured_schedule(
+        self,
+        mock_urlopen,
+        mock_sleep,
+    ):
+        """系统级 ECONNREFUSED 先按 2/5/15 秒传输退避，并向 observer 公布精确进度。"""
+        import errno
+
+        refused = urllib.error.URLError(
+            ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused")
+        )
+        second = MagicMock()
+        second.read.return_value = json.dumps({"content": "after reconnect"}).encode()
+        second.__enter__ = MagicMock(return_value=second)
+        second.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.side_effect = [refused, second]
+
+        from agent_py_agent.agent.backends.gateway_helpers import (
+            post_json,
+            provider_attempt_observer,
+        )
+
+        events: list[dict[str, object]] = []
+        with provider_attempt_observer(events.append):
+            assert post_json(_request()) == {"content": "after reconnect"}
+
+        failed = next(event for event in events if event["status"] == "failed")
+        assert failed["retry_scheduled"] is True
+        assert failed["retry_attempt"] == 1
+        assert failed["retry_total"] == 3
+        assert failed["retry_wait_seconds"] == 2.0
+        mock_sleep.assert_called_once_with(2.0)
+
+    @patch("agent_py_agent.agent.backends.gateway_helpers._provider_retry_wait")
+    @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
     def test_proxy_tunnel_503_retries_before_success(self, mock_urlopen, mock_sleep):
         """验证代理隧道层 503 也按临时 provider 网络问题重试。"""
         transient = urllib.error.URLError("Tunnel connection failed: 503 Service Unavailable")
@@ -348,14 +404,15 @@ class TestPostJson:
 
     @patch("agent_py_agent.agent.backends.gateway_helpers._provider_retry_wait")
     @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
-    def test_retryable_network_disconnect_exhaustion_is_transient_error(self, mock_urlopen, mock_sleep):
+    def test_retryable_network_disconnect_exhaustion_is_transient_error(
+        self, mock_urlopen, mock_sleep
+    ):
         """验证多次断线后仍归类为 provider 临时错误，方便父级重试/接管而不是当业务失败。"""
         from agent_py_agent.agent.backends.errors import ProviderTransientError
         from agent_py_agent.agent.backends.gateway_helpers import post_json
 
         mock_urlopen.side_effect = [
-            urllib.error.URLError("Remote end closed connection without response")
-            for _ in range(4)
+            urllib.error.URLError("Remote end closed connection without response") for _ in range(4)
         ]
 
         with pytest.raises(ProviderTransientError, match="临时断开|连接被重置"):
@@ -432,6 +489,7 @@ class TestPostJson:
         mock_urlopen.side_effect = urllib.error.URLError("[Errno 11001] getaddrinfo failed")
 
         from agent_py_agent.agent.backends.gateway_helpers import post_json
+
         with pytest.raises(RuntimeError, match="网络请求失败.*api.example.com"):
             post_json(_request())
 
@@ -442,6 +500,7 @@ class TestPostStream:
     def test_empty_api_key_raises(self):
         """验证空 api_key 抛出 ValueError。"""
         from agent_py_agent.agent.backends.gateway_helpers import post_stream
+
         with pytest.raises(ValueError, match="api_key 为空"):
             post_stream(_request(api_key="", payload={"stream": True}))
 
@@ -461,6 +520,7 @@ class TestPostStream:
         mock_urlopen.return_value = mock_response
 
         from agent_py_agent.agent.backends.gateway_helpers import post_stream
+
         result = post_stream(_request())
         assert '{"content": "line1"}' in result
         assert '{"content": "line2"}' in result
@@ -480,6 +540,7 @@ class TestPostStream:
         mock_urlopen.return_value = mock_response
 
         from agent_py_agent.agent.backends.gateway_helpers import post_stream
+
         result = post_stream(_request())
         assert len(result) == 1
         assert "actual" in result[0]
@@ -495,12 +556,15 @@ class TestPostStream:
         mock_urlopen.return_value = mock_response
 
         from agent_py_agent.agent.backends.gateway_helpers import post_stream
+
         result = post_stream(_request())
         assert len(result) == 1
 
     @patch("agent_py_agent.agent.backends.gateway_helpers.time.monotonic")
     @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
-    def test_stream_heartbeat_comments_do_not_reset_idle_timeout(self, mock_urlopen, mock_monotonic):
+    def test_stream_heartbeat_comments_do_not_reset_idle_timeout(
+        self, mock_urlopen, mock_monotonic
+    ):
         """只有真实 SSE data 才算模型进展，注释心跳不能无限续命。"""
         from agent_py_agent.agent.backends.errors import ProviderTimeoutError
         from agent_py_agent.agent.backends.gateway_helpers import post_stream
@@ -533,8 +597,8 @@ class TestPostStream:
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_urlopen.return_value = mock_response
 
-        from agent_py_agent.agent.backends.gateway_helpers import post_stream
         from agent_py_agent.agent.backends.errors import ProviderTimeoutError
+        from agent_py_agent.agent.backends.gateway_helpers import post_stream
 
         with pytest.raises(ProviderTimeoutError) as err:
             post_stream(_request())
@@ -547,6 +611,7 @@ class TestPostStreamIter:
     def test_empty_api_key_raises(self):
         """验证空 api_key 抛出 ValueError。"""
         from agent_py_agent.agent.backends.gateway_helpers import post_stream_iter
+
         with pytest.raises(ValueError, match="api_key 为空"):
             list(post_stream_iter(_request(api_key="", payload={"stream": True})))
 
@@ -564,6 +629,7 @@ class TestPostStreamIter:
         mock_urlopen.return_value = mock_response
 
         from agent_py_agent.agent.backends.gateway_helpers import post_stream_iter
+
         result = list(post_stream_iter(_request()))
         assert len(result) == 2
         assert '{"token": "hello"}' in result[0]
@@ -575,13 +641,19 @@ class TestPostStreamIter:
 
         from agent_py_agent.agent.backends.errors import ProviderTransientError
 
-        body = BytesIO(b'{"type":"error","error":{"type":"api_error","message":"input new_sensitive"}}')
+        body = BytesIO(
+            b'{"type":"error","error":{"type":"api_error","message":"input new_sensitive"}}'
+        )
         mock_urlopen.side_effect = urllib.error.HTTPError(
-            "https://api.example.com", 500, "Server Error",
-            {"Content-Type": "application/json"}, body
+            "https://api.example.com",
+            500,
+            "Server Error",
+            {"Content-Type": "application/json"},
+            body,
         )
 
         from agent_py_agent.agent.backends.gateway_helpers import post_stream_iter
+
         with pytest.raises(ProviderTransientError, match="HTTP 500.*input new_sensitive"):
             list(post_stream_iter(_request()))
 
@@ -591,6 +663,7 @@ class TestPostStreamIter:
         mock_urlopen.side_effect = urllib.error.URLError("[Errno 11001] getaddrinfo failed")
 
         from agent_py_agent.agent.backends.gateway_helpers import post_stream_iter
+
         with pytest.raises(RuntimeError, match="网络请求失败.*api.example.com"):
             list(post_stream_iter(_request()))
 
@@ -604,6 +677,7 @@ class TestPostStreamIter:
         mock_urlopen.return_value = mock_response
 
         from agent_py_agent.agent.backends.gateway_helpers import post_stream_iter
+
         result = list(post_stream_iter(_request()))
         assert result == []
 
@@ -638,10 +712,17 @@ def test_stream_watchdog_aborts_hanging_stream():
             return False
 
     req = GatewayRequest(
-        api_base="https://api.example.com", api_key="k", path="/v1/chat",
-        payload={}, headers={"Content-Type": "application/json"}, timeout=1,
+        api_base="https://api.example.com",
+        api_key="k",
+        path="/v1/chat",
+        payload={},
+        headers={"Content-Type": "application/json"},
+        timeout=1,
     )
-    with patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen", return_value=HangingResponse()):
+    with patch(
+        "agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen",
+        return_value=HangingResponse(),
+    ):
         start = _t.monotonic()
         with pytest.raises(ProviderTimeoutError, match="流式响应空闲超时"):
             list(post_stream(req))
@@ -812,6 +893,73 @@ def test_user_interrupt_aborts_hanging_provider_stream_without_waiting_for_timeo
 
     assert closed.is_set()
     assert not thread.is_alive()
+    assert isinstance(outcome.get("error"), InterruptedError)
+
+
+def test_user_interrupt_aborts_response_header_wait_before_http_response_exists():
+    from agent_py_agent.agent.backends.gateway_helpers import post_stream
+    from agent_py_agent.agent.concurrency.interrupt import interrupt_by_name, register_interruptible
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    server.settimeout(5)
+    port = server.getsockname()[1]
+    request_received = threading.Event()
+    server_done = threading.Event()
+    outcome: dict[str, object] = {}
+
+    def hold_response_headers() -> None:
+        connection: socket.socket | None = None
+        try:
+            connection, _address = server.accept()
+            connection.settimeout(5)
+            received = b""
+            while b"\r\n\r\n" not in received:
+                chunk = connection.recv(4096)
+                if not chunk:
+                    return
+                received += chunk
+            request_received.set()
+            while connection.recv(4096):
+                pass
+        finally:
+            if connection is not None:
+                connection.close()
+            server.close()
+            server_done.set()
+
+    def provider_worker() -> None:
+        try:
+            with register_interruptible("provider-header-stop"):
+                post_stream(
+                    GatewayRequest(
+                        api_base=f"http://127.0.0.1:{port}",
+                        api_key="key",
+                        path="/v1/chat",
+                        payload={},
+                        headers={"Content-Type": "application/json"},
+                        timeout=600,
+                        connect_timeout=5,
+                    )
+                )
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    server_thread = threading.Thread(target=hold_response_headers, daemon=True)
+    worker_thread = threading.Thread(target=provider_worker)
+    server_thread.start()
+    worker_thread.start()
+    assert request_received.wait(timeout=2)
+
+    started = time.monotonic()
+    assert interrupt_by_name("provider-header-stop") is True
+    worker_thread.join(timeout=2)
+    elapsed = time.monotonic() - started
+
+    assert not worker_thread.is_alive()
+    assert server_done.wait(timeout=2)
+    assert elapsed < 1.5
     assert isinstance(outcome.get("error"), InterruptedError)
 
 

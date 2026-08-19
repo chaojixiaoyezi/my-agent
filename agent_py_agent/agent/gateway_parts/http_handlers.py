@@ -8,6 +8,7 @@ typed slash commands. System commands must resolve before active-turn steering
 or queue writes so their syntax never reaches transcript or model execution.
 """
 
+import hashlib
 import json
 import time
 from collections.abc import Callable
@@ -18,18 +19,41 @@ from urllib.parse import parse_qs, urlsplit
 from ..auth.middleware import _handler_peer_ip, require_admin_handler, require_trusted_source
 from ..conversation.channels import project_user_reply, redact_host_absolute_paths
 from ..conversation.control_commands import (
+    ConversationControlCommand,
+    ConversationControlResult,
     parse_conversation_control,
     parse_conversation_task_command,
 )
-from ..runtime_errors import runtime_error_report
+from ..runtime_errors import DataCorruptionError, runtime_error_report
+from .client_service import execute_gateway_client_memory, read_gateway_client_history
+from .control_operation_service import (
+    GatewayControlOperationConflict,
+    GatewayControlOperationIdentityRequired,
+    execute_gateway_control_operation,
+    gateway_control_operation_status_payload,
+    read_gateway_control_operation,
+    reconcile_gateway_control_operation,
+)
 from .control_service import (
     GatewayControlScope,
-    execute_gateway_conversation_control,
+    active_turn_guidance_dedupe_key,
     request_gateway_memory_curator_lifecycle,
     steer_active_conversation_if_running,
 )
-from .io import gateway_request_counts
+from .input_delivery_service import (
+    bind_gateway_input_active_locked,
+    gateway_input_guidance_binding,
+    gateway_input_status_payload,
+    gateway_input_transition,
+    load_or_prepare_gateway_input_locked,
+    queue_gateway_input_locked,
+    read_gateway_input_receipt,
+    reconcile_gateway_input_request,
+)
+from .io import gateway_request_counts, write_json_file_atomic
 from .paths import gateway_chunk_path, gateway_chunk_path_candidates
+from .request_client import GatewayAskExecutionOptions
+from .response_renderer import read_gateway_terminal_envelope_report
 
 
 @dataclass(frozen=True)
@@ -71,6 +95,28 @@ def _can_read_payload(payload: dict, user_id: str, permission: Any) -> bool:
         return True
     payload_user = payload.get("user_id", payload.get("metadata", {}).get("user_id", ""))
     return payload_user == user_id
+
+
+# LLM: Control receipts are issued to an authenticated channel+user pair. Raw user ids can collide
+# across providers, so ordinary callers must match both facts; only explicit all-user permission
+# may cross this boundary.
+# 函数用途: 校验当前 HTTP 身份是否可以读取指定控制操作回执。
+def _can_read_control_operation(handler, receipt) -> bool:
+    user_id, channel = _request_channel(handler)
+    _permission_user_id, permission = _request_identity(handler)
+    if permission is None or bool(getattr(permission, "can_access_all_users", False)):
+        return True
+    headers = getattr(handler, "headers", {})
+    conversation_id = str(headers.get("X-Conversation-Id") or "").strip()
+    chat_type = str(headers.get("X-Channel-Chat-Type") or "").strip().lower()
+    chat_id = str(headers.get("X-Channel-Chat-Id") or "").strip()
+    return (
+        receipt.user_id == user_id
+        and receipt.channel == channel
+        and receipt.conversation_id == conversation_id
+        and receipt.channel_chat_type == chat_type
+        and receipt.channel_chat_id == chat_id
+    )
 
 
 def handle_status(handler, server) -> None:
@@ -123,17 +169,110 @@ def handle_result(handler, server) -> None:
     if server is None:
         handler._send_json(500, {"error": "server not initialized"})
         return
+    if not request_id or request_id != request_id.replace("/", "").replace("\\", ""):
+        handler._send_json(400, {"error": "invalid request id"})
+        return
     user_id, permission = _request_identity(handler)
     access = _ResultAccessContext(request_id, user_id, permission)
-    response_path = server.paths.responses / f"{request_id}.json"
-    if response_path.exists():
-        _send_finished_result(handler, server.paths, response_path, access)
+    if _send_archived_terminal_result(
+        handler,
+        server.paths,
+        access,
+        repair_response_projection=True,
+    ):
         return
     if _send_pending_state(handler, server.paths.processing, "processing", access):
         return
     if _send_pending_state(handler, server.paths.inbox, "queued", access):
         return
+    # 终态可能在两次热队列检查之间提交，再读一次 canonical；独立 response
+    # 或 done/failed 投影永远不能把请求提升为完成。
+    if _send_archived_terminal_result(
+        handler,
+        server.paths,
+        access,
+        repair_response_projection=True,
+    ):
+        return
     handler._send_json(404, {"error": "not found", "request_id": request_id})
+
+
+# LLM: Input delivery status is authorized from the stored authenticated prepared request, not
+# caller-supplied owner fields. It exposes the stable ingress state without creating a model job.
+# 函数用途: 返回一条普通消息是在活动回合等待、已消费、已排队还是终态未知。
+def handle_input_status(handler, server) -> None:
+    request_id = handler.path[len("/input-status/") :]
+    if server is None:
+        handler._send_json(500, {"error": "server not initialized"})
+        return
+    if not request_id or request_id != request_id.replace("/", "").replace("\\", ""):
+        handler._send_json(400, {"error": "invalid request id"})
+        return
+    try:
+        receipt = read_gateway_input_receipt(server.paths, request_id)
+    except DataCorruptionError:
+        handler._send_json(
+            503,
+            {"error": "input delivery status is unavailable", "request_id": request_id},
+        )
+        return
+    if receipt is None:
+        handler._send_json(404, {"error": "not found", "request_id": request_id})
+        return
+    user_id, permission = _request_identity(handler)
+    if not _can_read_payload(receipt.prepared_request, user_id, permission):
+        handler._send_json(403, {"error": "forbidden", "request_id": request_id})
+        return
+    handler._send_json(200, gateway_input_status_payload(receipt))
+
+
+# LLM: Terminal archives contain the canonical full response. This lazy repair makes /result survive
+# a crash after archive commit but before the response projection, without rerunning the agent.
+# 函数用途: 从完成或失败归档恢复最终答复，并补写缺失的 response 文件。
+def _send_archived_terminal_result(
+    handler,
+    paths,
+    access: _ResultAccessContext,
+    *,
+    repair_response_projection: bool = False,
+) -> bool:
+    archive_path = paths.terminal / f"{access.request_id}.json"
+    if not archive_path.exists():
+        return False
+    terminal_report = read_gateway_terminal_envelope_report(
+        archive_path,
+        request_id=access.request_id,
+        context="gateway.http_terminal_archive.read",
+    )
+    payload = terminal_report.payload
+    if terminal_report.load_error is not None:
+        status = 500 if _all_user_access(access) else 403
+        body = {"error": "terminal result unavailable", "request_id": access.request_id}
+        if _all_user_access(access):
+            body["result_load_error"] = terminal_report.load_error
+        handler._send_json(status, body)
+        return True
+    if not _can_read_payload(payload, access.user_id, access.permission):
+        handler._send_json(403, {"error": "forbidden", "request_id": access.request_id})
+        return True
+    terminal_response = payload.get("terminal_response")
+    if not isinstance(terminal_response, dict) or not terminal_response:
+        handler._send_json(
+            500,
+            {"error": "terminal response is missing", "request_id": access.request_id},
+        )
+        return True
+    response_path = paths.responses / f"{access.request_id}.json"
+    try:
+        if repair_response_projection or not response_path.exists():
+            write_json_file_atomic(response_path, terminal_response)
+    except OSError:
+        # The canonical archive is already durable; serving it remains safe
+        # even if this best-effort projection cannot be repaired now.
+        pass
+    result = terminal_response if _all_user_access(access) else _public_result(terminal_response)
+    handler._send_json(200, result)
+    return True
 
 
 # LLM: progress 读取沿用 result 的请求 owner 鉴权；chunk 正文和 response 都不能自证身份。
@@ -225,26 +364,6 @@ def _send_pending_state(handler, folder, status: str, access: _ResultAccessConte
     return True
 
 
-def _send_finished_result(handler, paths, response_path, access: _ResultAccessContext) -> None:
-    if not _can_read_finished_request(paths, access):
-        handler._send_json(403, {"error": "forbidden", "request_id": access.request_id})
-        return
-    result, result_load_error = _read_payload_report(response_path, context="gateway.http_result.read")
-    if result_load_error:
-        response = {
-            "error": "failed to read result",
-            "request_id": access.request_id,
-        }
-        if _all_user_access(access):
-            response["result_load_error"] = result_load_error
-        handler._send_json(
-            500,
-            response,
-        )
-        return
-    handler._send_json(200, result if _all_user_access(access) else _public_result(result))
-
-
 def _all_user_access(access: _ResultAccessContext) -> bool:
     return access.permission is None or access.permission.can_access_all_users
 
@@ -261,6 +380,7 @@ _PUBLIC_RESULT_FIELDS = (
     "duration_seconds",
     "response",
     "error_code",
+    "user_error",
     "backend",
     "used_memories",
     "tool_rounds",
@@ -296,7 +416,7 @@ def _public_result(result: dict) -> dict[str, object]:
             if key in delivery
         }
     if result.get("ok") is False and result.get("error_code"):
-        public["error"] = "任务处理失败，请稍后重试。"
+        public["error"] = str(public.get("user_error") or "任务处理失败，请稍后重试。")
     return public
 
 
@@ -310,7 +430,7 @@ def _can_read_finished_request(paths, access: _ResultAccessContext) -> bool:
     if _all_user_access(access):
         return True
     found_request = False
-    for folder in (paths.processing, paths.inbox, paths.done, paths.failed):
+    for folder in (paths.processing, paths.inbox, paths.terminal, paths.done, paths.failed):
         request_path = folder / f"{access.request_id}.json"
         if not request_path.exists():
             continue
@@ -400,49 +520,213 @@ def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
             if server.agent is None:
                 handler._send_json(500, {"error": "server control service not initialized"})
                 return
-            result = execute_gateway_conversation_control(
-                server.agent,
-                server.paths,
-                command,
-                _gateway_control_scope(handler, body, user_id=user_id, channel=channel),
+            if not command.valid:
+                payload = ConversationControlResult(
+                    command.kind,
+                    False,
+                    command.usage,
+                ).to_dict()
+                payload.update({"status": "control", "disposition": "system_command"})
+                handler._send_json(200, payload)
+                return
+            _handle_persistent_control_operation(
+                handler,
+                server,
+                command=command,
+                command_text=goal,
+                scope=_gateway_control_scope(
+                    handler,
+                    body,
+                    user_id=user_id,
+                    channel=channel,
+                ),
             )
-            payload = result.to_dict()
-            payload.update({"status": "control", "disposition": "system_command"})
-            handler._send_json(200, payload)
             return
-        active_turn = _route_ask_to_active_turn(
-            server,
-            body=body,
+        request_id, client_input_digest = _http_idempotent_request_identity(
+            body,
             goal=goal,
             user_id=user_id,
             channel=channel,
         )
-        if active_turn is not None and active_turn.ok:
-            handler._send_json(
-                202,
-                {
-                    "request_id": active_turn.request_id,
-                    "status": "steered",
-                    "disposition": "active_turn_input",
-                },
+        if request_id:
+            _handle_idempotent_ordinary_ask(
+                handler,
+                server,
+                body=body,
+                goal=goal,
+                user_id=user_id,
+                channel=channel,
+                request_id=request_id,
+                client_input_digest=client_input_digest,
+                allow_active_turn=True,
             )
             return
     else:
         body = dict(body)
         body["system_task"] = task_command.to_request_payload()
         goal = task_command.prompt
+    request_id, client_input_digest = _http_idempotent_request_identity(
+        body,
+        goal=goal,
+        user_id=user_id,
+        channel=channel,
+    )
+    if request_id:
+        _handle_idempotent_ordinary_ask(
+            handler,
+            server,
+            body=body,
+            goal=goal,
+            user_id=user_id,
+            channel=channel,
+            request_id=request_id,
+            client_input_digest=client_input_digest,
+            allow_active_turn=False,
+        )
+        return
     request_id = request_id_factory()
     request_data = _build_ask_request(_AskRequestContext(body, goal, request_id, user_id, channel))
-    pending_path = server.paths.inbox / f"{request_id}.json"
     try:
-        pending_path.write_text(json.dumps(request_data, ensure_ascii=False, indent=2), encoding="utf-8")
+        pending_path = server.paths.inbox / f"{request_id}.json"
+        pending_path.write_text(
+            json.dumps(request_data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        from ..observability.concurrency_metrics import gateway_request_enqueued
+
+        gateway_request_enqueued()
     except OSError as exc:
         handler._send_json(500, {"error": f"failed to write request: {exc}"})
         return
-    from ..observability.concurrency_metrics import gateway_request_enqueued
-
-    gateway_request_enqueued()  # §6-A 进队计数:/ask 直写 inbox 不经 write_gateway_request,单独补点
     handler._send_json(202, {"request_id": request_id, "status": "queued"})
+
+
+# LLM: One stable ingress receipt decides active-turn versus queued disposition before any retry
+# reruns routing. The receipt lock is outside the exact active-turn lock, giving one lock order.
+# 函数用途: 幂等处理普通消息，在当前回合补充和下一轮排队之间只选择一次并可断线恢复。
+def _handle_idempotent_ordinary_ask(
+    handler,
+    server,
+    *,
+    body: dict,
+    goal: str,
+    user_id: str,
+    channel: str,
+    request_id: str,
+    client_input_digest: str,
+    allow_active_turn: bool,
+) -> None:
+    routed_body = dict(body)
+    metadata = routed_body.get("metadata")
+    metadata = dict(metadata) if isinstance(metadata, dict) else {}
+    client_message_id = str(metadata.get("message_id") or "").strip()
+    metadata.update(
+        {
+            "client_input_digest": client_input_digest,
+            "gateway_input_request_id": request_id,
+        }
+    )
+    routed_body["metadata"] = metadata
+    prepared_request = _build_ask_request(
+        _AskRequestContext(routed_body, goal, request_id, user_id, channel)
+    )
+    scope = _gateway_control_scope(
+        handler,
+        routed_body,
+        user_id=user_id,
+        channel=channel,
+    )
+    guidance_key = active_turn_guidance_dedupe_key(scope)
+    try:
+        with gateway_input_transition(server.paths, request_id):
+            receipt, created = load_or_prepare_gateway_input_locked(
+                server.paths,
+                request_id=request_id,
+                client_input_digest=client_input_digest,
+                client_message_id=client_message_id,
+                guidance_dedupe_key=guidance_key,
+                prepared_request=prepared_request,
+            )
+            if created and receipt.state == "pending" and allow_active_turn:
+                active_turn = _route_ask_to_active_turn(
+                    server,
+                    body=routed_body,
+                    goal=goal,
+                    user_id=user_id,
+                    channel=channel,
+                )
+                if active_turn is None or active_turn.delivery_status == "rejected":
+                    receipt, _created = queue_gateway_input_locked(server.paths, receipt)
+                else:
+                    guidance_binding = None
+                    binding_unreadable = False
+                    try:
+                        from .request_worker import _resolve_request_agent
+
+                        owner_agent = _resolve_request_agent(
+                            server.agent,
+                            receipt.prepared_request,
+                        )
+                        guidance_binding = gateway_input_guidance_binding(
+                            receipt,
+                            owner_agent.conversation_store,
+                        )
+                    except Exception:
+                        binding_unreadable = True
+                    if guidance_binding is not None:
+                        guidance, target_turn_id = guidance_binding
+                        receipt = bind_gateway_input_active_locked(
+                            server.paths,
+                            receipt,
+                            target_turn_id=target_turn_id,
+                            guidance_dedupe_key=str(guidance.dedupe_key),
+                        )
+                    elif not binding_unreadable:
+                        # A successful authoritative miss proves append never
+                        # happened, so queueing cannot duplicate model input.
+                        receipt, _created = queue_gateway_input_locked(
+                            server.paths,
+                            receipt,
+                        )
+            elif (created and receipt.state == "pending") or receipt.state == "queued":
+                receipt, _created = queue_gateway_input_locked(server.paths, receipt)
+    except ValueError as exc:
+        handler._send_json(
+            409,
+            {
+                "error": str(exc),
+                "error_code": "IDEMPOTENCY_CONFLICT",
+                "request_id": request_id,
+            },
+        )
+        return
+    except DataCorruptionError as exc:
+        handler._send_json(
+            503,
+            {
+                "error": "gateway input receipt is temporarily unavailable",
+                "error_code": type(exc).__name__,
+            },
+        )
+        return
+    except OSError as exc:
+        handler._send_json(500, {"error": f"failed to persist input disposition: {exc}"})
+        return
+    if receipt.state in {"pending", "active_pending", "terminal_unknown"}:
+        try:
+            from .request_worker import _resolve_request_agent
+
+            owner_agent = _resolve_request_agent(server.agent, receipt.prepared_request)
+            reconcile_gateway_input_request(
+                server.paths,
+                request_id=request_id,
+                conversation_store=owner_agent.conversation_store,
+                target_terminal=(receipt.state == "terminal_unknown"),
+            )
+            receipt = read_gateway_input_receipt(server.paths, request_id) or receipt
+        except Exception:
+            pass
+    handler._send_json(202, gateway_input_status_payload(receipt))
 
 
 # LLM: Lifecycle 请求只接受 close/reset 枚举且不进入模型队列；owner 仍由已认证 scope 解析。
@@ -536,6 +820,12 @@ def handle_control(handler, server) -> None:
     if command is None:
         handler._send_json(400, {"error": "unsupported conversation control"})
         return
+    if not command.valid:
+        handler._send_json(
+            200,
+            ConversationControlResult(command.kind, False, command.usage).to_dict(),
+        )
+        return
     user_id, channel = _request_channel(handler)
     if getattr(handler, "_auth_middleware", None) is None:
         user_id = str(body.get("user_id") or user_id).strip()
@@ -543,13 +833,199 @@ def handle_control(handler, server) -> None:
     if not _http_conversation_id(body):
         handler._send_json(400, {"error": "conversation_id is required"})
         return
-    result = execute_gateway_conversation_control(
+    _handle_persistent_control_operation(
+        handler,
+        server,
+        command=command,
+        command_text=str(body.get("command", body.get("prompt", "")) or ""),
+        scope=_gateway_control_scope(
+            handler,
+            body,
+            user_id=user_id,
+            channel=channel,
+        ),
+    )
+
+
+# LLM: Both HTTP control entrypoints must prepare the same durable operation before invoking any
+# command service. Response loss therefore replays the stored result instead of repeating effects.
+# 函数用途: 持久、幂等地执行一条 HTTP 控制命令，并返回独立 operation_id 供客户端对账。
+def _handle_persistent_control_operation(
+    handler,
+    server,
+    *,
+    command: ConversationControlCommand,
+    command_text: str,
+    scope: GatewayControlScope,
+) -> None:
+    try:
+        receipt = execute_gateway_control_operation(
+            server.agent,
+            server.paths,
+            command,
+            scope,
+            command_text=command_text,
+        )
+    except GatewayControlOperationIdentityRequired as exc:
+        handler._send_json(
+            400,
+            {
+                "error": str(exc),
+                "error_code": "CONTROL_OPERATION_ID_REQUIRED",
+            },
+        )
+        return
+    except GatewayControlOperationConflict as exc:
+        handler._send_json(
+            409,
+            {
+                "error": str(exc),
+                "error_code": "IDEMPOTENCY_CONFLICT",
+            },
+        )
+        return
+    except DataCorruptionError as exc:
+        handler._send_json(
+            503,
+            {
+                "error": str(exc),
+                "error_code": "CONTROL_OPERATION_RECEIPT_CORRUPT",
+            },
+        )
+        return
+    except OSError as exc:
+        handler._send_json(
+            503,
+            {
+                "error": "failed to persist control operation",
+                "error_code": type(exc).__name__,
+            },
+        )
+        return
+    payload = gateway_control_operation_status_payload(receipt)
+    status = 202 if (
+        receipt.state != "completed"
+        or str(payload.get("delivery_status") or "") == "unknown"
+    ) else 200
+    handler._send_json(status, payload)
+
+
+# LLM: Polling authenticates against the receipt owner before read-only reconciliation. A GET can
+# refresh an existing `/btw` receipt but cannot execute any control effect.
+# 函数用途: 返回一条持久控制操作的结果或投递三态，供 TUI、IM 和 Web 断线后继续对账。
+def handle_control_status(handler, server) -> None:
+    if require_trusted_source(handler):
+        return
+    if server is None or server.agent is None:
+        handler._send_json(500, {"error": "server control service not initialized"})
+        return
+    operation_id = handler.path.split("?", 1)[0].removeprefix("/control-status/").strip()
+    try:
+        receipt = read_gateway_control_operation(server.paths, operation_id)
+    except (DataCorruptionError, ValueError) as exc:
+        handler._send_json(
+            503,
+            {
+                "error": str(exc),
+                "error_code": "CONTROL_OPERATION_RECEIPT_CORRUPT",
+            },
+        )
+        return
+    if receipt is None:
+        handler._send_json(404, {"error": "control operation not found"})
+        return
+    if not _can_read_control_operation(handler, receipt):
+        handler._send_json(403, {"error": "forbidden"})
+        return
+    try:
+        receipt = reconcile_gateway_control_operation(
+            server.agent,
+            server.paths,
+            operation_id,
+        ) or receipt
+    except (DataCorruptionError, OSError, ValueError) as exc:
+        handler._send_json(
+            503,
+            {
+                "error": str(exc),
+                "error_code": "CONTROL_OPERATION_RECONCILE_FAILED",
+            },
+        )
+        return
+    handler._send_json(200, gateway_control_operation_status_payload(receipt))
+
+
+# LLM: 记忆 API 复用 trusted-source、owner scope 和 Gateway 内部服务；前端不能直接指定 owner home 或记忆文件。
+# 函数用途: 接收薄客户端的 recent/search/remember 操作并返回安全记录投影。
+def handle_client_memory(handler, server) -> None:
+    if require_trusted_source(handler):
+        return
+    if server is None or server.agent is None:
+        handler._send_json(500, {"error": "server client service not initialized"})
+        return
+    try:
+        body = handler._read_json()
+    except json.JSONDecodeError as exc:
+        handler._send_json(400, {"error": f"invalid JSON: {exc}"})
+        return
+    user_id, channel = _request_channel(handler)
+    if not _http_conversation_id(body):
+        handler._send_json(400, {"error": "conversation_id is required"})
+        return
+    result = execute_gateway_client_memory(
         server.agent,
-        server.paths,
-        command,
-        _gateway_control_scope(handler, body, user_id=user_id, channel=channel),
+        scope=_gateway_control_scope(
+            handler,
+            body,
+            user_id=user_id,
+            channel=channel,
+        ),
+        operation=str(body.get("operation") or ""),
+        query=str(body.get("query") or ""),
+        content=str(body.get("content") or ""),
+        kind=str(body.get("kind") or "fact"),
+        limit=_request_limit(body, default=5),
     )
     handler._send_json(200, result.to_dict())
+
+
+# LLM: 历史 API 只读取 authenticated owner/thread 的完整问答投影；resume 不得迫使客户端构造本地 SimpleAgent。
+# 函数用途: 返回指定聊天会话最近若干个可恢复回合。
+def handle_client_history(handler, server) -> None:
+    if require_trusted_source(handler):
+        return
+    if server is None or server.agent is None:
+        handler._send_json(500, {"error": "server client service not initialized"})
+        return
+    try:
+        body = handler._read_json()
+    except json.JSONDecodeError as exc:
+        handler._send_json(400, {"error": f"invalid JSON: {exc}"})
+        return
+    user_id, channel = _request_channel(handler)
+    if not _http_conversation_id(body):
+        handler._send_json(400, {"error": "conversation_id is required"})
+        return
+    result = read_gateway_client_history(
+        server.agent,
+        scope=_gateway_control_scope(
+            handler,
+            body,
+            user_id=user_id,
+            channel=channel,
+        ),
+        max_turns=_request_limit(body, default=20),
+    )
+    handler._send_json(200, result.to_dict())
+
+
+# LLM: 前端数量只作为资源上限，非法值不能变成无限查询或改变 owner 路由。
+# 函数用途: 从 HTTP JSON 中读取有界正整数条数。
+def _request_limit(body: dict[str, Any], *, default: int) -> int:
+    try:
+        return max(1, min(200, int(body.get("limit") or default)))
+    except (TypeError, ValueError):
+        return default
 
 
 def _gateway_control_scope(
@@ -601,7 +1077,77 @@ def _build_ask_request(context: _AskRequestContext) -> dict:
     system_task = context.body.get("system_task")
     if isinstance(system_task, dict):
         payload["system_task"] = dict(system_task)
+    if _ask_body_has_execution_options(context.body):
+        payload.update(GatewayAskExecutionOptions.from_payload(context.body).to_payload())
     return payload
+
+
+# LLM: Legacy HTTP/IM callers may omit all execution options, but once any option is supplied the
+# complete normalized snapshot is persisted so active-to-queued fallback cannot depend on defaults
+# from a later process.
+# 函数用途: 判断 `/ask` 正文是否显式携带了会改变执行行为的选项。
+def _ask_body_has_execution_options(body: dict[str, Any]) -> bool:
+    return any(
+        key in body
+        for key in (
+            "inject",
+            "prompt_files",
+            "save",
+            "include_prompt",
+            "resume_context",
+            "client_capabilities",
+        )
+    )
+
+
+# LLM: Stable request identity uses authenticated scope plus the opaque client message id. The
+# separate input digest includes canonical content, so reusing that id for other input fails closed.
+# 函数用途: 为可重试普通消息生成固定 Gateway 请求 ID 和服务端计算的内容指纹。
+def _http_idempotent_request_identity(
+    body: dict,
+    *,
+    goal: str,
+    user_id: str,
+    channel: str,
+) -> tuple[str, str]:
+    metadata = body.get("metadata")
+    metadata = dict(metadata) if isinstance(metadata, dict) else {}
+    message_id = str(metadata.get("message_id") or "").strip()
+    if not message_id:
+        return "", ""
+    conversation_id = _http_conversation_id(body)
+    identity = {
+        "user_id": str(user_id or "").strip(),
+        "channel": str(channel or "").strip(),
+        "conversation_id": conversation_id,
+        "message_id": message_id,
+    }
+    identity_json = json.dumps(
+        identity,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    request_id = "gwreq-msg-" + hashlib.sha256(identity_json.encode("utf-8")).hexdigest()[:32]
+    canonical_metadata = {
+        key: value
+        for key, value in metadata.items()
+        if key != "client_input_digest"
+    }
+    canonical_input = {
+        **identity,
+        "goal": str(goal or ""),
+        "metadata": canonical_metadata,
+        "system_task": body.get("system_task") if isinstance(body.get("system_task"), dict) else {},
+        "execution_options": GatewayAskExecutionOptions.from_payload(body).to_payload(),
+    }
+    input_json = json.dumps(
+        canonical_input,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return request_id, hashlib.sha256(input_json.encode("utf-8")).hexdigest()
 
 
 def _http_conversation_payload(context: _AskRequestContext) -> dict:

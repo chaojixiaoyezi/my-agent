@@ -398,7 +398,9 @@ background_owner_wake_rescan_seconds: 120
 # 该控制器只读结构化状态并执行清理，不创建 Agent、不调用 LLM。
 owner_maintenance_scan_interval_seconds: 60
 gateway_worker_join_timeout_seconds: 2
-gateway_ready_timeout_seconds: 10
+# CLI/TUI 等待 Gateway 就绪的最长秒数。TUI 会先显示连接状态再后台探测；默认 3 秒，
+# 避免 Gateway 未启动时让用户面对长时间空白或无响应。
+gateway_ready_timeout_seconds: 3
 gateway_service_command_timeout_seconds: 30
 gateway_service_stop_timeout_seconds: 90
 

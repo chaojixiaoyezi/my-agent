@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.model.context_pressure import (
     model_visible_context_budget,
+    model_visible_context_snapshot,
     model_visible_context_tokens,
     preflight_context_pressure_response,
     safe_inline_tool_result_tokens,
@@ -191,6 +192,70 @@ def test_preflight_native_counts_tool_schemas_before_first_tool_call(monkeypatch
     assert response.runtime_status == "context_overflow"
     assert response.runtime_source == "preflight"
     assert f"model_visible_tokens={visible}" in response.text
+
+
+def test_live_context_snapshot_reuses_exact_total_and_exposes_no_content(monkeypatch) -> None:
+    agent = SimpleNamespace(
+        config=AgentConfig(
+            auto_save_memory=True,
+            enable_tools=True,
+            tool_protocol="native",
+            memory_compact_auto_trigger_percent=90,
+            model_context_window_tokens=128_000,
+        ),
+        backend=SimpleNamespace(context_window_tokens=128_000, name="fake"),
+    )
+    params = SimpleNamespace(
+        context_scope="conversation",
+        save=True,
+        tool_protocol_snapshot=make_test_protocol_snapshot(source_protocol="native"),
+        live_archive_state={},
+        tool_context=["private-guidance"],
+        tool_ir_history=[],
+    )
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.model.context_pressure.resolve_native_tools",
+        lambda _agent, _params: [
+            {
+                "name": "secret_tool_name",
+                "description": "secret schema content",
+                "input_schema": {"type": "object"},
+            }
+        ],
+    )
+
+    snapshot = model_visible_context_snapshot(agent, params, "private prompt")
+    public = snapshot.to_public_dict()
+
+    assert snapshot.current_tokens == model_visible_context_tokens(
+        agent,
+        params,
+        "private prompt",
+    )
+    assert snapshot.context_window_tokens == 128_000
+    assert snapshot.compact_trigger_tokens == 115_200
+    assert sum(
+        (
+            snapshot.prompt_tokens,
+            snapshot.messages_tokens,
+            snapshot.runtime_guidance_tokens,
+            snapshot.tool_schema_tokens,
+        )
+    ) == snapshot.current_tokens
+    assert set(public) == {
+        "schema",
+        "estimated",
+        "context_window_tokens",
+        "compact_trigger_tokens",
+        "current_tokens",
+        "prompt_tokens",
+        "messages_tokens",
+        "runtime_guidance_tokens",
+        "tool_schema_tokens",
+        "protocol",
+    }
+    assert "private" not in repr(public)
+    assert "secret" not in repr(public)
 
 
 def test_inline_tool_result_budget_reuses_current_compact_headroom(monkeypatch) -> None:

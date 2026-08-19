@@ -1,3 +1,6 @@
+# LLM: 本模块负责 Gateway 请求入队、claim 和 worker 调度；文件 payload 的会话身份与客户端能力必须保持结构化且可审计。
+# 模块用途: 接收 Gateway 请求、写入队列并驱动后台 worker 可靠处理。
+
 from __future__ import annotations
 
 """Request execution and handling for gateway.
@@ -9,16 +12,15 @@ the worker creates a model turn.
 
 import threading
 import time
+import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..concurrency.interrupt import register_interruptible
 from ..conversation.control_commands import (
     conversation_request_interrupt_name,
-    parse_conversation_task_command,
-    system_slash_command_name,
 )
 from ..observability.concurrency_metrics import (
     gateway_admission_blocked_set,
@@ -26,53 +28,36 @@ from ..observability.concurrency_metrics import (
     gateway_worker_busy,
     record_gateway_queue_wait,
 )
-from .audit_service import audit_request_queued
+from ..runtime_errors import DataCorruptionError
 from .io import (
-    append_gateway_history,
+    append_gateway_history_once,
     gateway_response_path,
-    new_gateway_request_id,
     read_json_file,
     read_json_file_report,
     update_json_file_atomic,
-    write_json_file,
+    write_json_file_atomic,
 )
 from .paths import GatewayPaths, gateway_chunk_path
 from .queue_service import (
+    GatewayClaim,
     archive_request,
     claim_request,
     ensure_gateway_folders,
-    materialize_missing_archive,
 )
-from .recovery import _gateway_request_attempts
+from .recovery import _gateway_request_attempts, gateway_terminal_projection_folder
+from .request_client import GatewayAskParams, submit_gateway_ask
 from .request_errors import (
     gateway_owner_scope_error_response,
+    gateway_request_identity_error_response,
     gateway_request_load_error_response,
     gateway_request_processing_state_error_response,
     gateway_unhandled_worker_error_response,
 )
 from .request_execution import _handle_gateway_request
-from .response_renderer import read_gateway_response_file
+from .response_renderer import read_gateway_terminal_response_file
 
 if TYPE_CHECKING:
     from ...core import SimpleAgent
-
-
-@dataclass
-class GatewayAskParams:
-    prompt: str
-    inject: list[str] | None = None
-    prompt_files: list[str] | None = None
-    save: bool = True
-    include_prompt: bool = False
-    resume_context: bool | None = None
-    chat_session_id: str = ""
-    channel_user_id: str = "local-agent"
-    canonical_user_id: str = "local-agent"
-    agent: SimpleAgent | None = field(default=None, repr=False)
-    system_task: dict[str, object] | None = None
-
-
-_DEFAULT_GATEWAY_CLI_SESSION_ID = "default"
 
 
 @dataclass(frozen=True)
@@ -249,7 +234,7 @@ def _positive_int(value: object, fallback: int) -> int:
 def dispatch_pending_requests(
     paths: GatewayPaths,
     limits: AdmissionLimits,
-    submit: Callable[[Path, str, str], None],
+    submit: Callable[[GatewayClaim, str, str], None],
     scan_gate: GatewayInboxScanGate | None = None,
 ) -> int:
     """两层限流的派发扫描:按 (recovery, created_at) 顺序认领在限内的请求并交给 submit;
@@ -282,7 +267,7 @@ def dispatch_pending_requests(
 def _admit_and_submit(
     paths: GatewayPaths,
     request: _PendingGatewayRequest,
-    lane: tuple[AdmissionLimits, Callable[[Path, str, str], None]],
+    lane: tuple[AdmissionLimits, Callable[[GatewayClaim, str, str], None]],
 ) -> str:
     limits, submit = lane
     user_key = request_user_key(request.payload)
@@ -294,12 +279,12 @@ def _admit_and_submit(
         conversation_key=conversation_key,
     ):
         return "blocked"
-    processing_path = claim_request(paths, request.path)
-    if processing_path is None:
+    claim = claim_request(paths, request.path)
+    if claim is None:
         admission.release(user_key, conversation_key=conversation_key)  # 别的扫描抢先认领了:坑退回
         return "raced"
     try:
-        submit(processing_path, user_key, conversation_key)
+        submit(claim, user_key, conversation_key)
     except Exception:
         # 提交失败不能漏坑;请求留在 processing,由恢复扫描收尸。
         admission.release(user_key, conversation_key=conversation_key)
@@ -307,76 +292,17 @@ def _admit_and_submit(
     return "claimed"
 
 
-def submit_gateway_ask(
-    paths: GatewayPaths,
-    *,
-    params: GatewayAskParams,
-) -> tuple[str, Path, Path]:
-    from .io import write_gateway_request
-
-    prompt = str(params.prompt or "").strip()
-    system_task = dict(params.system_task or {})
-    if not system_task:
-        task_command = parse_conversation_task_command(prompt)
-        if task_command is not None:
-            if not task_command.valid:
-                raise ValueError(task_command.usage)
-            prompt = task_command.prompt
-            system_task = task_command.to_request_payload()
-    if system_slash_command_name(prompt):
-        raise ValueError("系统命令不能作为普通 Gateway 请求提交，请使用对应控制入口")
-
-    # Request IDs join queue files, responses, chunk streams, and audits across clients.
-    request_id = new_gateway_request_id()
-
-    payload = {
-        "id": request_id,
-        "kind": "ask",
-        "prompt": prompt,
-        "inject": params.inject or [],
-        "prompt_files": params.prompt_files or [],
-        "save": params.save,
-        "include_prompt": params.include_prompt,
-        "created_at": time.time(),
-        "client_pid": 0,
-        "status": "pending",
-        "priority": "interactive",
-        "source": "cli_chat" if params.chat_session_id else "cli_gateway",
-        "attempts": 0,
-    }
-    if params.resume_context is not None:
-        payload["resume_context"] = bool(params.resume_context)
-    if system_task:
-        payload["system_task"] = system_task
-    payload["conversation"] = _gateway_conversation_payload(params)
-    request_path = write_gateway_request(paths, payload)
-    response_path = gateway_response_path(paths, request_id)
-    if params.agent is not None:
-        audit_request_queued(
-            params.agent,
-            {**payload, "status": "queued", "ok": False},
-            request_path,
-            response_path,
-        )
-    return request_id, request_path, response_path
-
-
-def _gateway_conversation_payload(params: GatewayAskParams) -> dict:
-    session_id = str(params.chat_session_id or _DEFAULT_GATEWAY_CLI_SESSION_ID)
-    return {
-        "channel": "chat" if params.chat_session_id else "gateway-cli",
-        "channel_conversation_id": session_id,
-        "channel_user_id": str(params.channel_user_id or "local-agent"),
-        "canonical_user_id": str(params.canonical_user_id or "local-agent"),
-    }
-
-
+# LLM: Synchronous worker callers wait on the immutable canonical terminal record. A response
+# projection may be repaired later but can never end the wait by itself.
+# 函数用途: 等待指定 Gateway 请求的唯一终态归档并返回其完整答复。
 def wait_for_gateway_response(paths: GatewayPaths, request_id: str, timeout: float) -> dict:
-    path = gateway_response_path(paths, request_id)
+    path = paths.terminal / f"{request_id}.json"
     deadline = time.time() + max(0.0, timeout)
     while time.time() <= deadline:
-        payload = read_gateway_response_file(
-            path, request_id=request_id, context="gateway.worker.response.read"
+        payload = read_gateway_terminal_response_file(
+            path,
+            request_id=request_id,
+            context="gateway.worker.terminal.read",
         )
         if payload:
             return payload
@@ -477,6 +403,9 @@ class OwnerScopeUnavailableError(RuntimeError):
     error_code = "OWNER_SCOPE_UNAVAILABLE"
 
 
+# LLM: Ordinary Gateway requests resolve owner once from structured ingress facts. Durable
+# operation receipts use the paired exact-owner helper so later config cannot reroute recovery.
+# 函数用途: 为普通请求解析并取得当前实际 owner-scoped Agent。
 def _resolve_request_agent(agent, request_payload: dict):
     """按请求 owner 取作用域 agent(多用户飞书 per-用户隔离)。
 
@@ -484,14 +413,37 @@ def _resolve_request_agent(agent, request_payload: dict):
     owner 作用域的 agent 上,home/记忆/数据/成本/审计天然隔离；远程身份缺失或 owner agent
     建立失败必须 fail-closed，绝不回退到共享 main agent 串户。
     """
+    owner = _resolve_request_owner_identity(agent, request_payload)
+    return _resolve_request_agent_for_owner(agent, owner)
+
+
+# LLM: This resolver freezes the actual owner chosen at ingress. Durable receipts must persist
+# the returned identity and must not rerun channel routing after configuration changes.
+# 函数用途: 按当前可信请求事实解析本次实际使用的唯一 owner 身份，但不创建作用域 Agent。
+def _resolve_request_owner_identity(agent, request_payload: dict):
+    from ..user_space.owner_resolver import owner_identity_from_config
+
+    base_owner = owner_identity_from_config(getattr(agent, "config", None))
     if not bool(getattr(getattr(agent, "config", None), "gateway_per_user_owner_scoping", False)):
-        return agent
+        return base_owner
     owner = _owner_from_request(agent, request_payload)
     if owner is None:
         if _is_remote_channel_request(request_payload):
             raise OwnerScopeUnavailableError(
                 "远程通道请求缺少可信 user_id/channel，已拒绝共享 owner 回退"
             )
+        return base_owner
+    return owner
+
+
+# LLM: A persisted owner identity is machine authority. This path intentionally ignores later
+# owner-routing config changes and resolves exactly that owner or fails closed.
+# 函数用途: 根据已经持久化的 owner 身份取得唯一作用域 Agent，供控制回执恢复和对账。
+def _resolve_request_agent_for_owner(agent, owner):
+    from ..user_space.owner_resolver import owner_identity_from_config
+
+    base_owner = owner_identity_from_config(getattr(agent, "config", None))
+    if owner == base_owner:
         return agent
     _record_active_owner(agent, owner)  # 登记进共享活跃表,让后台主代理循环能逐 owner tick 叫回
     try:
@@ -599,14 +551,20 @@ def _process_gateway_request_path(
     request_path: Path,
     worker_id: str,
 ) -> bool:
-    processing_path = claim_request(paths, request_path)
-    if processing_path is None:
+    claim = claim_request(paths, request_path)
+    if claim is None:
         return False
     # §6-A 量化探针:worker 忙数 gauge(上限=gateway_request_workers)。贴着这个上限跑
     # =顶层槽位饱和,第 4 个并发用户只能在 pending 里排队。
     gateway_worker_busy(1)
     try:
-        return _process_claimed_gateway_request_path(agent, paths, processing_path, worker_id)
+        return _process_claimed_gateway_request_path(
+            agent,
+            paths,
+            claim.path,
+            worker_id,
+            claim=claim,
+        )
     finally:
         gateway_worker_busy(-1)
 
@@ -616,21 +574,49 @@ def _process_claimed_gateway_request_path(
     paths: GatewayPaths,
     processing_path: Path,
     worker_id: str,
+    *,
+    claim: GatewayClaim | None = None,
 ) -> bool:
     request_report = read_json_file_report(processing_path, context="gateway.worker.request.read")
     if request_report.load_error is not None:
         request_id = processing_path.stem
-        if gateway_response_path(paths, request_id).exists():
-            archive_request(processing_path, paths.done, request_id)
-            return True
         response = gateway_request_load_error_response(processing_path, request_report.load_error)
         _finish_claimed_gateway_request(paths, processing_path, request_id, response)
         return True
     request_payload = request_report.payload
     request_id = str(request_payload.get("id") or processing_path.stem)
     request_payload.setdefault("id", request_id)
-    if gateway_response_path(paths, request_id).exists():
-        archive_request(processing_path, paths.done, request_id)
+    expected_attempt_id = (
+        claim.execution_attempt_id
+        if claim is not None
+        else str(request_payload.get("execution_attempt_id") or "").strip()
+    )
+    expected_lease_epoch = (
+        claim.lease_epoch if claim is not None else _request_lease_epoch(request_payload)
+    )
+    if claim is not None and (
+        request_id != claim.request_id
+        or str(request_payload.get("execution_attempt_id") or "").strip()
+        != claim.execution_attempt_id
+        or _request_lease_epoch(request_payload) != claim.lease_epoch
+    ):
+        return False
+    identity_error = request_payload.get("request_identity_error")
+    if isinstance(identity_error, dict):
+        response = gateway_request_identity_error_response(
+            processing_path,
+            request_payload,
+            identity_error,
+            request_id=request_id,
+        )
+        _finish_claimed_gateway_request(
+            paths,
+            processing_path,
+            request_id,
+            response,
+            expected_execution_attempt_id=expected_attempt_id,
+            expected_lease_epoch=expected_lease_epoch,
+        )
         return True
     if bool(request_payload.get("cancel_requested")):
         with register_interruptible(conversation_request_interrupt_name(request_id)):
@@ -640,7 +626,15 @@ def _process_claimed_gateway_request_path(
                 refresh_lease=False,
                 worker_id=worker_id,
             )
-        _finish_claimed_gateway_request(paths, processing_path, request_id, response)
+        _finish_claimed_gateway_request(
+            paths,
+            processing_path,
+            request_id,
+            response,
+            conversation_store=_conversation_store_for_request(agent, request_payload),
+            expected_execution_attempt_id=expected_attempt_id,
+            expected_lease_epoch=expected_lease_epoch,
+        )
         return True
     try:
         request_agent = _resolve_request_agent(agent, request_payload)
@@ -651,7 +645,14 @@ def _process_claimed_gateway_request_path(
             exc,
             request_id=request_id,
         )
-        _finish_claimed_gateway_request(paths, processing_path, request_id, response)
+        _finish_claimed_gateway_request(
+            paths,
+            processing_path,
+            request_id,
+            response,
+            expected_execution_attempt_id=expected_attempt_id,
+            expected_lease_epoch=expected_lease_epoch,
+        )
         return True
     with register_interruptible(conversation_request_interrupt_name(request_id)):
         response = _process_claimed_gateway_request(
@@ -660,16 +661,40 @@ def _process_claimed_gateway_request_path(
                 processing_path,
                 request_payload,
                 request_id,
-                worker_id,
+                str(
+                    (claim.lease_owner if claim is not None else "")
+                    or request_payload.get("lease_owner")
+                    or worker_id
+                ),
             )
         )
-    _finish_claimed_gateway_request(paths, processing_path, request_id, response)
+    _finish_claimed_gateway_request(
+        paths,
+        processing_path,
+        request_id,
+        response,
+        conversation_store=request_agent.conversation_store,
+        expected_execution_attempt_id=expected_attempt_id,
+        expected_lease_epoch=expected_lease_epoch,
+    )
     return True
 
 
 def _process_claimed_gateway_request(context: _ClaimedGatewayRequestContext) -> dict:
     from ..runtime_errors import runtime_error_report
     from .logging import _report_gateway_side_effect_error
+
+    if (
+        str(context.request_payload.get("status") or "") == "processing"
+        and str(context.request_payload.get("execution_attempt_id") or "").strip()
+        and _request_lease_epoch(context.request_payload) > 0
+    ):
+        return _handle_gateway_request(
+            context.agent,
+            context.processing_path,
+            refresh_lease=True,
+            worker_id=context.worker_id,
+        )
 
     def mark_processing(current: dict) -> dict:
         payload = current or dict(context.request_payload)
@@ -712,6 +737,10 @@ def _mark_request_processing(request_payload: dict, worker_id: str) -> None:
         created_at = 0.0
     if created_at > 0:
         record_gateway_queue_wait(lease_now - created_at)
+    try:
+        previous_epoch = max(0, int(request_payload.get("lease_epoch") or 0))
+    except (TypeError, ValueError):
+        previous_epoch = 0
     request_payload.update(
         {
             "status": "processing",
@@ -719,9 +748,20 @@ def _mark_request_processing(request_payload: dict, worker_id: str) -> None:
             "lease_owner": worker_id,
             "lease_started_at": lease_now,
             "lease_heartbeat_at": lease_now,
+            "lease_epoch": previous_epoch + 1,
+            "execution_attempt_id": f"gateway-attempt-{uuid.uuid4().hex}",
             "updated_at": lease_now,
         }
     )
+
+
+# LLM: Persisted lease epochs may come from interrupted recovery and are never inferred from text.
+# 函数用途: 安全读取请求的非负执行代次，坏值按零处理。
+def _request_lease_epoch(request_payload: dict) -> int:
+    try:
+        return max(0, int(request_payload.get("lease_epoch") or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _finish_claimed_gateway_request(
@@ -729,25 +769,52 @@ def _finish_claimed_gateway_request(
     processing_path: Path,
     request_id: str,
     response: dict,
+    *,
+    conversation_store: object | None = None,
+    expected_execution_attempt_id: str = "",
+    expected_lease_epoch: int = 0,
 ) -> None:
-    target_folder = paths.done if response.get("ok") else paths.failed
-    _attach_archived_chunk_stream(paths, request_id, target_folder, response)
-    response_path = gateway_response_path(paths, str(response.get("id", processing_path.stem)))
-    final_request_load_error = _write_final_request_archive_payload(processing_path, response)
-    if final_request_load_error is not None:
-        response["final_request_load_error"] = final_request_load_error
-    if not response_path.exists():
-        write_json_file(response_path, response)
-    append_gateway_history(paths, response)
-    archived = archive_request(processing_path, target_folder, request_id)
-    if not archived and not processing_path.exists():
-        materialize_missing_archive(target_folder, request_id, response)
+    response_id = str(response.get("id") or "").strip()
+    if response_id != request_id:
+        raise DataCorruptionError(
+            "gateway terminal response identity conflicts with the claimed request"
+        )
+    target_folder = gateway_terminal_projection_folder(paths, response)
+    response_path = gateway_response_path(paths, request_id)
+    archive_result = archive_request(
+        paths,
+        processing_path,
+        target_folder,
+        request_id,
+        conversation_store=conversation_store,
+        terminal_response=response,
+        expected_execution_attempt_id=expected_execution_attempt_id,
+        expected_lease_epoch=expected_lease_epoch,
+    )
+    if not archive_result.terminal_committed:
+        return
+    from .recovery import repair_gateway_chunk_projection
+
+    try:
+        repair_gateway_chunk_projection(paths, request_id, response)
+    except Exception as exc:
+        from .logging import _report_gateway_side_effect_error
+
+        _report_gateway_side_effect_error("archive_gateway_chunk_stream", request_id, exc)
+    # responses 是 canonical terminal 的可修复投影；合法但陈旧的独立 JSON 也必须覆盖，
+    # 不能因“文件存在”反过来成为终态权威。
+    write_json_file_atomic(response_path, response)
+    append_gateway_history_once(paths, response)
 
 
 def terminalize_unhandled_claimed_gateway_request(
     paths: GatewayPaths,
     processing_path: Path,
     error: BaseException,
+    *,
+    agent: SimpleAgent | None = None,
+    expected_execution_attempt_id: str = "",
+    expected_lease_epoch: int = 0,
 ) -> None:
     """Fail closed when a claimed request raises before its normal handler.
 
@@ -778,7 +845,26 @@ def terminalize_unhandled_claimed_gateway_request(
         processing_path,
         request_id,
         response,
+        conversation_store=(
+            _conversation_store_for_request(agent, request)
+            if agent is not None and report.load_error is None
+            else None
+        ),
+        expected_execution_attempt_id=expected_execution_attempt_id,
+        expected_lease_epoch=expected_lease_epoch,
     )
+
+
+# LLM: Terminalization may need the owner-scoped ConversationStore, but owner resolution failure
+# must never fall back to the bootstrap agent and cross an isolation boundary.
+# 函数用途: 尽力取得请求所属的会话存储，失败时返回空供收口继续归档。
+def _conversation_store_for_request(agent: SimpleAgent | None, payload: dict) -> object | None:
+    if agent is None:
+        return None
+    try:
+        return _resolve_request_agent(agent, payload).conversation_store
+    except Exception:
+        return None
 
 
 def _attach_archived_chunk_stream(
@@ -809,39 +895,3 @@ def _archive_gateway_chunk_stream(
         report["target_path"] = str(target)
         return None, report
     return target, None
-
-
-def _write_final_request_archive_payload(processing_path: Path, response: dict) -> dict | None:
-    report = read_json_file_report(processing_path, context="gateway.worker.final_request.read")
-    if report.load_error is not None:
-        return report.load_error
-    request_payload = report.payload
-    if not request_payload:
-        return None
-    terminal_status = str(response.get("status") or ("done" if response.get("ok") else "failed"))
-    request_payload.update(
-        {
-            # The response is the authoritative terminal outcome.  Keeping the
-            # lease's earlier ``processing`` value after moving this file into a
-            # terminal archive makes /status and recovery disagree with /result.
-            "status": terminal_status,
-            "attempts": response.get("attempts", request_payload.get("attempts", 0)),
-            "lease_owner": response.get("lease_owner", request_payload.get("lease_owner", "")),
-            "lease_started_at": response.get(
-                "lease_started_at", request_payload.get("lease_started_at", 0)
-            ),
-            "lease_heartbeat_at": response.get(
-                "lease_heartbeat_at", request_payload.get("lease_heartbeat_at", 0)
-            ),
-            "completed_at": response.get("ended_at", time.time()),
-            # The archived queue record is often the first artifact inspected
-            # after a failed long run.  Persist the same typed terminal cause as
-            # the response record so operators do not have to correlate a
-            # second file just to distinguish provider timeout from a code bug.
-            "ok": bool(response.get("ok")),
-            "error_code": str(response.get("error_code") or ""),
-            "error": str(response.get("error") or ""),
-        }
-    )
-    write_json_file(processing_path, request_payload)
-    return None

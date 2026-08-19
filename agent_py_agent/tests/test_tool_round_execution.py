@@ -15,7 +15,9 @@ from agent_py_agent.agent.agent_core.subagent.progress_closeout import (
     subagent_progress_closeout_response,
 )
 from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
+    ToolProgressEvent,
     ToolRoundExecutionRequest,
+    _structured_tool_progress,
     execute_tool_round,
     subagent_output_json_response,
 )
@@ -134,6 +136,123 @@ def _success(
     )
 
 
+def test_structured_tool_progress_projects_bounded_public_display() -> None:
+    call = _canonical_calls([{"tool": "edit_file", "path": "src/ui.py"}])[0]
+    request = _round_request(
+        agent=SimpleNamespace(
+            home_paths=SimpleNamespace(owner_home_dir="/private/owner")
+        ),
+        params=SimpleNamespace(tool_context=[]),
+        tool_rounds=2,
+        response=ModelResponse(text="", backend="test"),
+        calls=[{"tool": "edit_file", "path": "src/ui.py"}],
+        execute_one=lambda _request: None,
+        record_one=lambda _record: None,
+    )
+    result = ToolResult.succeeded(
+        call,
+        "edited",
+        facts=ToolSuccessFacts(
+            effect_outcome="confirmed",
+            metadata={
+                "handler_details": {
+                    "display": {
+                        "kind": "diff",
+                        "path": "/private/owner/task/src/ui.py",
+                        "lines_added": 1,
+                        "lines_removed": 1,
+                        "lines": [
+                            {
+                                "kind": "remove",
+                                "old_line": 7,
+                                "new_line": None,
+                                "text": "old",
+                                "private_extra": "must-not-pass",
+                            },
+                            {
+                                "kind": "add",
+                                "old_line": None,
+                                "new_line": 7,
+                                "text": "new",
+                            },
+                        ],
+                    }
+                }
+            },
+        ),
+    )
+
+    payload = _structured_tool_progress(
+        ToolProgressEvent(request, 1, call, "finished", "完成", result=result),
+        "edit_file",
+        "src/ui.py",
+    )
+
+    display = payload["display"]
+    assert display["path"] == "~/.my-agent/owner/task/src/ui.py"
+    assert display["lines_added"] == 1
+    assert "private_extra" not in display["lines"][0]
+
+
+def test_structured_tool_progress_projects_multi_file_patch_without_private_fields() -> None:
+    call = _canonical_calls([{"tool": "apply_patch", "patch": "redacted"}])[0]
+    request = _round_request(
+        agent=SimpleNamespace(
+            home_paths=SimpleNamespace(owner_home_dir="/private/owner")
+        ),
+        params=SimpleNamespace(tool_context=[]),
+        tool_rounds=3,
+        response=ModelResponse(text="", backend="test"),
+        calls=[{"tool": "apply_patch", "patch": "redacted"}],
+        execute_one=lambda _request: None,
+        record_one=lambda _record: None,
+    )
+    result = ToolResult.succeeded(
+        call,
+        "patched",
+        facts=ToolSuccessFacts(
+            effect_outcome="confirmed",
+            metadata={
+                "handler_details": {
+                    "display": {
+                        "kind": "patch",
+                        "files": [
+                            {
+                                "kind": "diff",
+                                "path": "/private/owner/task/a.py",
+                                "lines_added": 1,
+                                "lines_removed": 0,
+                                "lines": [
+                                    {
+                                        "kind": "add",
+                                        "old_line": None,
+                                        "new_line": 1,
+                                        "text": "new",
+                                        "private_extra": "must-not-pass",
+                                    }
+                                ],
+                            }
+                        ],
+                        "hidden_files": 2,
+                    }
+                }
+            },
+        ),
+    )
+
+    payload = _structured_tool_progress(
+        ToolProgressEvent(request, 1, call, "finished", "完成", result=result),
+        "apply_patch",
+        "",
+    )
+
+    display = payload["display"]
+    assert display["kind"] == "patch"
+    assert display["hidden_files"] == 2
+    assert display["files"][0]["path"] == "~/.my-agent/owner/task/a.py"
+    assert "private_extra" not in display["files"][0]["lines"][0]
+
+
 def _failure(
     request,
     output: str,
@@ -158,6 +277,222 @@ def _failure(
         result,
         ("received", "normalized", "failed", "reconciled", "persisted", "projected"),
     )
+
+
+def _approval_pending(request) -> ToolExecution:
+    result = ToolResult.failed(
+        request.call,
+        "approval required",
+        error_code="APPROVAL_REQUIRED",
+        failure_stage="authorization",
+        facts=ToolFailureFacts(
+            status="approval_required",
+            handler_executed=False,
+            effect_outcome="not_started",
+        ),
+    )
+    return ToolExecution(
+        request.call,
+        ActionDecision(
+            "ask",
+            ("APPROVAL_REQUIRED",),
+            approval_request={"tool_name": request.call.tool_name},
+            resolved_effect="dangerous",
+        ),
+        result,
+        ("received", "normalized", "validated", "authorized", "approval_pending"),
+    )
+
+
+def test_tool_round_approval_resumes_same_call_without_model_retry() -> None:
+    executed: list[ToolCall] = []
+    recorded: list[ToolResult] = []
+
+    class ApprovalConsumer:
+        def request_permission(self, payload, *, cancellation_token=None):
+            del cancellation_token
+            assert payload["binding"]["args_hash"] == executed[0].args_hash
+            return {
+                "permission_id": payload["permission_id"],
+                "decision": "approved",
+                "feedback": "only inspect the target",
+            }
+
+    params = SimpleNamespace(
+        tool_context=[],
+        effective_on_chunk=ApprovalConsumer(),
+        request_id="approval-request",
+        cancellation_token=CancellationToken(),
+        runtime_approved_actions=[],
+    )
+
+    def execute_one(request):
+        executed.append(request.call)
+        if len(executed) == 1:
+            return _approval_pending(request)
+        binding = params.runtime_approved_actions[0]
+        assert binding["tool_name"] == request.call.tool_name
+        assert binding["operation_id"] == request.call.operation_id
+        assert binding["idempotency_key"] == request.call.idempotency_key
+        assert binding["args_hash"] == request.call.args_hash
+        return _success(request, "fixture-ok")
+
+    execute_tool_round(
+        _round_request(
+            agent=SimpleNamespace(),
+            params=params,
+            tool_rounds=1,
+            response=ModelResponse(text="", backend="test"),
+            calls=[{"tool": "run_command", "command": "printf fixture"}],
+            execute_one=execute_one,
+            record_one=lambda record: recorded.append(record.result),
+        )
+    )
+
+    assert len(executed) == 2
+    assert executed[0].call_id == executed[1].call_id
+    assert executed[0].arguments == executed[1].arguments
+    assert [result.output for result in recorded] == ["fixture-ok"]
+    assert "only inspect the target" in params.tool_context[-1]
+
+
+def test_tool_round_permission_denial_records_one_nonexecuted_result() -> None:
+    executed: list[ToolCall] = []
+    recorded: list[ToolResult] = []
+
+    class DenialConsumer:
+        def request_permission(self, payload, *, cancellation_token=None):
+            del cancellation_token
+            return {
+                "permission_id": payload["permission_id"],
+                "decision": "denied",
+                "feedback": "use a read-only approach",
+            }
+
+    params = SimpleNamespace(
+        tool_context=[],
+        effective_on_chunk=DenialConsumer(),
+        request_id="denial-request",
+        cancellation_token=CancellationToken(),
+        runtime_approved_actions=[],
+        runtime_rejected_actions=[],
+    )
+
+    def execute_one(request):
+        executed.append(request.call)
+        return _approval_pending(request)
+
+    execute_tool_round(
+        _round_request(
+            agent=SimpleNamespace(),
+            params=params,
+            tool_rounds=1,
+            response=ModelResponse(text="", backend="test"),
+            calls=[{"tool": "run_command", "command": "printf fixture"}],
+            execute_one=execute_one,
+            record_one=lambda record: recorded.append(record.result),
+        )
+    )
+
+    assert len(executed) == 1
+    assert len(recorded) == 1
+    assert recorded[0].error_code == "APPROVAL_REJECTED"
+    assert recorded[0].handler_executed is False
+    assert "use a read-only approach" in recorded[0].output
+    assert params.runtime_rejected_actions[0]["decision"] == "denied"
+    assert params.runtime_rejected_actions[0]["args_hash"] == executed[0].args_hash
+
+
+def test_tool_round_same_call_after_denial_is_rejected_without_second_prompt() -> None:
+    executed: list[ToolCall] = []
+    recorded: list[ToolResult] = []
+    permission_prompts: list[str] = []
+
+    class DenialConsumer:
+        def request_permission(self, payload, *, cancellation_token=None):
+            del cancellation_token
+            permission_prompts.append(payload["permission_id"])
+            return {
+                "permission_id": payload["permission_id"],
+                "decision": "denied",
+            }
+
+    params = SimpleNamespace(
+        tool_context=[],
+        effective_on_chunk=DenialConsumer(),
+        request_id="repeat-denial-request",
+        cancellation_token=CancellationToken(),
+        runtime_approved_actions=[],
+        runtime_rejected_actions=[],
+    )
+
+    def execute_one(request):
+        executed.append(request.call)
+        return _approval_pending(request)
+
+    for tool_rounds in (1, 2):
+        execute_tool_round(
+            _round_request(
+                agent=SimpleNamespace(),
+                params=params,
+                tool_rounds=tool_rounds,
+                response=ModelResponse(text="", backend="test"),
+                calls=[{"tool": "terminal_session", "action": "start", "command": "sh"}],
+                execute_one=execute_one,
+                record_one=lambda record: recorded.append(record.result),
+            )
+        )
+
+    assert len(executed) == 2
+    assert len(permission_prompts) == 1
+    assert len(params.runtime_rejected_actions) == 1
+    assert [result.error_code for result in recorded] == [
+        "APPROVAL_REJECTED",
+        "APPROVAL_REJECTED",
+    ]
+    assert "没有再次询问" in recorded[1].output
+    assert all(result.handler_executed is False for result in recorded)
+
+
+def test_tool_round_changed_args_after_denial_may_request_permission_again() -> None:
+    permission_prompts: list[str] = []
+
+    class DenialConsumer:
+        def request_permission(self, payload, *, cancellation_token=None):
+            del cancellation_token
+            permission_prompts.append(payload["binding"]["args_hash"])
+            return {
+                "permission_id": payload["permission_id"],
+                "decision": "denied",
+            }
+
+    params = SimpleNamespace(
+        tool_context=[],
+        effective_on_chunk=DenialConsumer(),
+        request_id="changed-args-denial-request",
+        cancellation_token=CancellationToken(),
+        runtime_approved_actions=[],
+        runtime_rejected_actions=[],
+    )
+
+    def execute_one(request):
+        return _approval_pending(request)
+
+    for tool_rounds, command in ((1, "sh"), (2, "python3 -q")):
+        execute_tool_round(
+            _round_request(
+                agent=SimpleNamespace(),
+                params=params,
+                tool_rounds=tool_rounds,
+                response=ModelResponse(text="", backend="test"),
+                calls=[{"tool": "terminal_session", "action": "start", "command": command}],
+                execute_one=execute_one,
+                record_one=lambda record: None,
+            )
+        )
+
+    assert len(permission_prompts) == 2
+    assert permission_prompts[0] != permission_prompts[1]
 
 
 def test_tool_round_defers_dependent_dispatch_after_schedule():

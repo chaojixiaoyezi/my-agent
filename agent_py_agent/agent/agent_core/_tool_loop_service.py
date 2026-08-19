@@ -37,6 +37,7 @@ from .runtime.guidance import (
     acknowledge_injected_turn_input,
     has_pending_turn_input,
     inject_pending_turn_input,
+    restore_injected_turn_input_for_provider_retry,
 )
 from .runtime.live_archive import (
     archive_tool_call_if_enabled,
@@ -77,6 +78,7 @@ from .tool_ir_history import record_tool_call_ir, replace_compaction_summary_ir
 from .tool_loop.completion import (
     ToolRoundCompletionRequest,
     completion_response_after_tool_round,
+    queue_followup_after_post_failure_workspace_mutation,
     queue_interim_reply_for_active_named_work,
     queue_interim_reply_for_open_subagents,
     queue_interim_reply_for_tool_round_limit,
@@ -189,9 +191,9 @@ def _pending_turn_input_supersedes_unusable_response(
     if not unusable or not has_pending_turn_input(agent, params):
         return False
     discard_pending_natural_user_reply(params)
-    # Move the durable mailbox item into this turn before retrying.  The normal
-    # acknowledgement still happens only after the next model response accepts
-    # the prompt, so a crash leaves the guidance replayable.
+    # Move the durable mailbox item into this turn before retrying. Prompt
+    # assembly reserves it; the explicit pre-provider edge records submission,
+    # so an ambiguous crash is observable but never replayed into another call.
     return inject_pending_turn_input(agent, params)
 
 
@@ -382,19 +384,63 @@ def _settle_native_ir_window(
             omitted_count=dropped,
             preserved_count=_native_tool_result_count(params),
         )
+    after_tokens = estimator()
+    preserved_pairs = _native_tool_result_count(params)
+    _publish_native_ir_compaction(
+        params,
+        before_tokens=before_tokens,
+        after_tokens=after_tokens,
+        trigger_tokens=trigger_tokens,
+        dropped_pairs=dropped,
+        preserved_pairs=preserved_pairs,
+    )
     _LOGGER.info(
         "native tool history compacted: before_tokens=%d after_tokens=%d "
         "trigger_tokens=%d dropped_pairs=%d preserved_pairs=%d "
         "semantic_summary=%s summary_chars=%d",
         before_tokens,
-        estimator(),
+        after_tokens,
         trigger_tokens,
         dropped,
-        _native_tool_result_count(params),
+        preserved_pairs,
         bool(semantic_summary),
         len(semantic_summary),
     )
     return dropped
+
+
+# LLM: Mid-turn IR compaction emits a content-free typed fact through the existing chunk sink;
+# the per-run generation lives only in canonical live_archive_state and is not conversation compact.
+# 函数用途: 记录当前活动回合第几次裁剪，并把前后 token 与整对工具数量投给支持的客户端。
+def _publish_native_ir_compaction(
+    params: ToolLoopExecuteParams,
+    *,
+    before_tokens: int,
+    after_tokens: int,
+    trigger_tokens: int,
+    dropped_pairs: int,
+    preserved_pairs: int,
+) -> bool:
+    state = params.live_archive_state
+    generation = 1
+    if isinstance(state, dict):
+        generation = max(0, int(state.get("_native_ir_compact_generation") or 0)) + 1
+        state["_native_ir_compact_generation"] = generation
+    sink = params.effective_on_chunk
+    writer = getattr(sink, "write_context_compaction", None)
+    if not callable(writer):
+        return False
+    return writer(
+        {
+            "schema": "model_visible_context_compaction.v1",
+            "generation": generation,
+            "before_tokens": max(0, int(before_tokens or 0)),
+            "after_tokens": max(0, int(after_tokens or 0)),
+            "trigger_tokens": max(0, int(trigger_tokens or 0)),
+            "dropped_pairs": max(0, int(dropped_pairs or 0)),
+            "preserved_pairs": max(0, int(preserved_pairs or 0)),
+        }
+    ) is not False
 
 
 # LLM: Count only canonical ToolResult items after pairwise reduction; callers use this for
@@ -526,6 +572,9 @@ def _retry_after_provider_context_overflow(
     retry_max = int(getattr(getattr(agent, "config", None), "tool_context_ptl_retry_max", DEFAULT_PTL_RETRY_MAX) or 0)
     retries = 0
     while retries < retry_max and _is_provider_context_overflow(response):
+        # Provider explicitly rejected this physical call before executing the
+        # prompt. Retire its atomic submission batch before any PTL/preflight retry.
+        restore_injected_turn_input_for_provider_retry(agent, params)
         if not _ptl_reclaim_oldest(agent, params):
             break
         retries += 1
@@ -700,6 +749,11 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
                 params,
                 response=final_response,
                 tool_rounds=tool_rounds,
+            ):
+                continue
+            if queue_followup_after_post_failure_workspace_mutation(
+                service._agent,
+                params,
             ):
                 continue
             if queue_reply_for_audit_prepare(
@@ -896,12 +950,19 @@ def _model_turn_or_retry(
             lambda: next_tool_loop_model_response(agent, loop_params, tool_rounds),
             on_chunk=loop_params.effective_on_chunk,
             policy=getattr(agent, "runtime_guard_policy", None),
+            retry_guard=lambda: not _active_turn_input_delivery_is_ambiguous(
+                loop_params
+            ),
         )
         account_goal_model_response(agent, loop_params, response)
-        # Runtime events stay durable while the provider is in flight. Acknowledge
-        # only after one model response was successfully generated from the prompt
-        # that contained them; a crash/error before this point leaves them retryable.
-        acknowledge_injected_turn_input(agent, loop_params)
+        # Provider submission is already durable and therefore never blindly
+        # replayed after an ambiguous transport failure. Successful response is
+        # the only edge that advances the exact batch to consumed.
+        if _model_response_deferred_prompt_consumption(response):
+            if str(getattr(response, "runtime_source", "") or "") == "provider_error":
+                restore_injected_turn_input_for_provider_retry(agent, loop_params)
+        else:
+            acknowledge_injected_turn_input(agent, loop_params)
         # 会话运行时/长期助手 scope stream retries to one sampling request.  A later
         # successful model turn proves the provider recovered, so an isolated
         # empty response many tool rounds later gets its own bounded repair
@@ -926,6 +987,27 @@ def _model_turn_or_retry(
             True,
             provider_response_repairs + 1,
         )
+
+
+# LLM: A transient exception after active-turn input reached provider admission is delivery
+# unknown. The model-turn auto-resumer must not rebuild the prompt under a new provider call id.
+# 函数用途: 判断本轮是否携带不能安全自动重发的用户补充消息。
+def _active_turn_input_delivery_is_ambiguous(loop_params: object) -> bool:
+    state = getattr(loop_params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return False
+    pending = state.get("_guidance_ack_ids")
+    return bool(
+        str(state.get("_guidance_submission_id") or "").strip()
+        or (isinstance(pending, set) and pending)
+    )
+
+
+# LLM: Context-pressure responses are lifecycle signals, not provider acceptance of the prompt.
+# Preflight never crossed I/O; provider_error is an explicit pre-execution rejection safe to retry.
+# 函数用途: 判断本次结构化响应是否要求先压缩并保留待确认输入，而不是确认已消费。
+def _model_response_deferred_prompt_consumption(response: object) -> bool:
+    return str(getattr(response, "runtime_status", "") or "") == "context_overflow"
 
 
 def _response_action(agent, loop_params: ToolLoopExecuteParams, response, repair_counters: ToolLoopRepairCounters):

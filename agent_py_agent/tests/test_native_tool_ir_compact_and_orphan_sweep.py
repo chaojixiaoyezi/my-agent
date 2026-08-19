@@ -188,6 +188,15 @@ class _SummaryBackend:
         )
 
 
+class _ContextCompactionSink:
+    def __init__(self) -> None:
+        self.rows: list[dict[str, object]] = []
+
+    def write_context_compaction(self, value: dict[str, object]) -> bool:
+        self.rows.append(dict(value))
+        return True
+
+
 # === Step 3: window reclaim → IR integer-pair drop, no orphans ================
 
 
@@ -339,12 +348,14 @@ def test_shared_native_window_counts_large_tool_call_arguments(tmp_path):
     agent.config.model_context_window_tokens = 10_000
     agent.config.memory_compact_auto_trigger_percent = 90
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
+    sink = _ContextCompactionSink()
     params = replace(
         _params(),
         context_scope="conversation",
         consume_pending_turn_input=False,
         save=True,
         task_attributes={CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True},
+        effective_on_chunk=sink,
     )
     _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
 
@@ -372,7 +383,23 @@ def test_shared_native_window_counts_large_tool_call_arguments(tmp_path):
     assert "STATE-6-" in str(messages)
     assert params.tool_context[0].startswith("[tool-context-window]")
     remaining = len(tool_use)
-
+    assert len(sink.rows) == 1
+    event = sink.rows[0]
+    assert event["schema"] == "model_visible_context_compaction.v1"
+    assert event["generation"] == 1
+    assert event["before_tokens"] >= event["trigger_tokens"] == 9_000
+    assert event["after_tokens"] < event["before_tokens"]
+    assert event["dropped_pairs"] > 0
+    assert event["preserved_pairs"] == remaining
+    assert set(event) == {
+        "schema",
+        "generation",
+        "before_tokens",
+        "after_tokens",
+        "trigger_tokens",
+        "dropped_pairs",
+        "preserved_pairs",
+    }
     build_tool_loop_prompt(agent, params)
 
     assert len(_message_block_ids(_native_provider_messages(agent, params))[0]) == remaining

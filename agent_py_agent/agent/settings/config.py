@@ -404,7 +404,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 否则降为匿名 USER。默认空=只靠回环 peer 信任(适配器/CLI 走 127.0.0.1)。
     gateway_auth_token: str = ""
     gateway_worker_join_timeout_seconds: int = 2
-    gateway_ready_timeout_seconds: int = 10
+    gateway_ready_timeout_seconds: int = 3
     gateway_service_command_timeout_seconds: int = 30
     gateway_service_stop_timeout_seconds: int = 90
     adapter_workspace: str = ""

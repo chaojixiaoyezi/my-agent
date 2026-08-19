@@ -117,7 +117,13 @@ def _multi_worker_verify(setup: MultiWorkerScenarioSetup, results: WorkerRunResu
         and all(payload.get("status") == "done" for payload in responses.values())
         and all(payload.get("attempts") == 1 for payload in responses.values())
         and set(response_backends) == {"scenario-worker-0", "scenario-worker-1"}
-        and set(done_owners) == {"scenario-worker-0", "scenario-worker-1"}
+        and len(done_owners) == setup.request_count
+        and len(set(done_owners)) == setup.request_count
+        and all(owner.startswith("gateway-attempt-") for owner in done_owners)
+        and all(
+            payload.get("lease_owner") == payload.get("execution_attempt_id")
+            for payload in done_payloads.values()
+        )
         and not pending_left
         and not processing_left
         and not failed_left

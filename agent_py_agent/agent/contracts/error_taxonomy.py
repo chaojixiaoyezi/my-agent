@@ -1,3 +1,6 @@
+# LLM: 本模块是工具/合同错误码到恢复动作的唯一分类表；控制流读取 code，不得解析用户或模型错误文案。
+# 模块用途: 给工具结果、恢复状态机和用户汇报提供一致的错误类别、重试性与处理建议。
+
 from __future__ import annotations
 
 import re
@@ -113,6 +116,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=True,
         recommended_action=RecoveryAction.REQUEST_APPROVAL.value,
         recovery_hint="当前动作需要审批；先走审批链路，或者改成不需要高危权限的安全动作。",
+    ),
+    "APPROVAL_REJECTED": ErrorContract(
+        code="APPROVAL_REJECTED",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="用户已拒绝当前精确工具调用；不要重复同一动作，按反馈改用安全方案或停止。",
     ),
     "APPROVAL_BINDING_MISMATCH": ErrorContract(
         code="APPROVAL_BINDING_MISMATCH",
@@ -1016,6 +1026,27 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.SWITCH_BACKEND.value,
         recovery_hint="当前模型供应商额度已耗尽；不要用同一凭据原地重试，切换已配置的可用后端。",
     ),
+    "PROVIDER_CONFIGURATION_INVALID": ErrorContract(
+        code="PROVIDER_CONFIGURATION_INVALID",
+        category="model",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="模型供应商配置无效；检查已脱敏的端点、模型名与凭据来源后再启动请求。",
+    ),
+    "PROVIDER_CONNECTION_FAILED": ErrorContract(
+        code="PROVIDER_CONNECTION_FAILED",
+        category="model",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="无法建立模型供应商连接；检查网络和服务状态，不要把连接失败当成任务完成。",
+    ),
+    "PROVIDER_REQUEST_REJECTED": ErrorContract(
+        code="PROVIDER_REQUEST_REJECTED",
+        category="model",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="模型供应商明确拒绝了请求；按结构化错误修正请求或切换后端，不要原样重放。",
+    ),
     "OWNER_DISK_QUOTA_EXCEEDED": ErrorContract(
         code="OWNER_DISK_QUOTA_EXCEEDED",
         category="resource",
@@ -1447,6 +1478,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=True,
         recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
         recovery_hint="模型接口超时来自 typed provider error；退避后继续当前未完成部分，不要把它当成任务成功或业务失败。",
+    ),
+    "UNSUPPORTED_OPERATION": ErrorContract(
+        code="UNSUPPORTED_OPERATION",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="当前对象或后端不支持该操作；读取能力事实并改用受支持的参数或工具。",
     ),
     "TRANSIENT_ERROR": ErrorContract(
         code="TRANSIENT_ERROR",

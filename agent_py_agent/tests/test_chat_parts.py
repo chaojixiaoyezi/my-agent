@@ -17,6 +17,7 @@ from agent_py_agent.cli.chat_parts.history import (
     ConversationTurn,
     append_conversation_turn,
     build_history_context,
+    load_gateway_chat_history,
 )
 from agent_py_agent.cli.chat_parts.rendering import collapse_response_text, startup_banner
 
@@ -63,51 +64,123 @@ def test_history_append_trims_to_configured_turn_count() -> None:
     assert history == [("second", "b"), ("third", "c")]
 
 
-def test_tui_transcript_store_uses_configured_max_chars() -> None:
-    from agent_py_agent.cli.chat_parts.tui_transcript_store import TuiTranscriptStore
+def test_gateway_history_restore_uses_only_complete_foreground_cli_turns() -> None:
+    rows = [
+        SimpleNamespace(
+            channel="cli_chat",
+            role="user",
+            content="第一问",
+            metadata={"gateway_request_id": "req-1"},
+        ),
+        SimpleNamespace(
+            channel="cli_chat",
+            role="assistant",
+            content="第一答",
+            metadata={"gateway_request_id": "req-1"},
+        ),
+        SimpleNamespace(
+            channel="cli_chat",
+            role="user",
+            content="残缺问题",
+            metadata={"gateway_request_id": "req-incomplete"},
+        ),
+        SimpleNamespace(
+            channel="cli_chat",
+            role="user",
+            content="后台任务触发",
+            metadata={"gateway_request_id": "req-background"},
+        ),
+        SimpleNamespace(
+            channel="cli_chat",
+            role="assistant",
+            content="后台审计消息",
+            metadata={
+                "gateway_request_id": "req-background",
+                "task_id": "task-audit",
+                "reason": "audit_finding",
+                "background_delivery_reason": "scheduled",
+            },
+        ),
+        SimpleNamespace(
+            channel="feishu",
+            role="user",
+            content="其它通道问题",
+            metadata={"gateway_request_id": "req-other-channel"},
+        ),
+        SimpleNamespace(
+            channel="feishu",
+            role="assistant",
+            content="其它通道回答",
+            metadata={"gateway_request_id": "req-other-channel"},
+        ),
+    ]
 
-    area = SimpleNamespace(text="", buffer=SimpleNamespace(cursor_position=0))
-    app = SimpleNamespace(invalidated=False, invalidate=lambda: setattr(app, "invalidated", True))
-    store = TuiTranscriptStore(area, [True], [app], max_chars=5)
+    class Store:
+        def resolve_thread_report(self, **kwargs):
+            assert kwargs == {
+                "channel": "chat",
+                "channel_conversation_id": "sess-resume",
+                "channel_user_id": "local-agent",
+            }
+            return SimpleNamespace(thread_id="thread-resume"), None
 
-    store.append_history("abcdef")
+        def recent_messages_report(self, thread_id, *, limit):
+            assert thread_id == "thread-resume"
+            assert limit == 16
+            return rows, []
 
-    assert area.text == "bcdef"
-    assert store.history == "bcdef"
-
-
-def test_tui_transcript_store_styled_append_keeps_marker_text() -> None:
-    from agent_py_agent.cli.chat_parts.tui_transcript_store import TuiTranscriptStore
-
-    area = SimpleNamespace(text="", buffer=SimpleNamespace(cursor_position=0))
-    app = SimpleNamespace(invalidated=False, invalidate=lambda: setattr(app, "invalidated", True))
-    store = TuiTranscriptStore(area, [True], [app], max_chars=100)
-
-    store.append_styled("user-prompt", "> 你好")
-    store.append_styled("assistant-marker", "⏺ ")
-
-    assert "> 你好" in area.text
-    assert "⏺ " in area.text
-
-
-def test_tui_status_shows_brand_model_and_compact_tokens() -> None:
-    from agent_py_agent.cli.chat_parts.tui import TuiStatusRefs, _tui_status_fragments
-
-    refs = TuiStatusRefs(
-        state_lock=threading.Lock(),
-        is_running_ref=[False],
-        pending_jobs_ref=[0],
-        running_started_at_ref=[0.0],
-        last_token_estimate_ref=[50_000],
-        thinking_line_ref=[""],
+    snapshot = load_gateway_chat_history(
+        SimpleNamespace(conversation_store=Store()),
+        "sess-resume",
+        max_turns=2,
     )
 
-    fragments = _tui_status_fragments(refs, "model-x", workspace="ws")
-    text = "".join(item[1] for item in fragments)
+    assert snapshot.thread_id == "thread-resume"
+    assert snapshot.turns == (("第一问", "第一答"),)
+    assert snapshot.load_errors == ()
 
-    assert "my-agent" in text
-    assert "model-x" in text
-    assert "50.0K" in text
+
+def test_gateway_history_restore_preserves_structured_load_error() -> None:
+    load_error = {"error_code": "jsonl_corrupt", "line_number": 3}
+
+    class Store:
+        def resolve_thread_report(self, **_kwargs):
+            return SimpleNamespace(thread_id="thread-bad"), None
+
+        def recent_messages_report(self, _thread_id, *, limit):
+            assert limit == 16
+            return [], [load_error]
+
+    snapshot = load_gateway_chat_history(
+        SimpleNamespace(conversation_store=Store()),
+        "sess-bad",
+        max_turns=2,
+    )
+
+    assert snapshot.turns == ()
+    assert snapshot.load_errors == (load_error,)
+
+
+def test_plain_turn_inject_skips_client_history_for_gateway() -> None:
+    from agent_py_agent.cli.chat_parts.plain_handlers import PlainJobContext, _turn_inject
+
+    history_calls: list[str] = []
+    ctx = PlainJobContext(
+        job=SimpleNamespace(inject=["本轮附加"]),
+        agent=object(),
+        args=object(),
+        paths=object(),
+        assistant_outputs=[],
+        build_history_context=lambda: history_calls.append("called") or "旧历史",
+    )
+
+    gateway_inject = _turn_inject(ctx, include_history=False)
+    direct_inject = _turn_inject(ctx, include_history=True)
+
+    assert history_calls == ["called"]
+    assert gateway_inject[0] == "本轮附加"
+    assert "旧历史" not in gateway_inject
+    assert direct_inject[-1] == "旧历史"
 
 
 def test_gateway_timing_reports_current_context_tokens_before_cumulative_ledger() -> None:
@@ -237,25 +310,6 @@ def test_plain_explicit_exit_does_not_run_shutdown_twice() -> None:
     wait_for_exit.assert_called_once()
 
 
-def test_tui_stream_chunks_are_emitted_immediately(capsys) -> None:
-    from agent_py_agent.cli.chat_parts.tui_worker_stream import (
-        _append_stream_text,
-        _flush_stream_buf,
-    )
-
-    pending = [""]
-    _append_stream_text("hello", pending)
-    first = capsys.readouterr().out
-    _append_stream_text(" world", pending)
-    second = capsys.readouterr().out
-    _flush_stream_buf(pending)
-    tail = capsys.readouterr().out
-
-    assert "hello" in first
-    assert " world" in second
-    assert tail == "\n"
-
-
 def test_cprint_uses_plain_print_when_stdout_is_not_tty(monkeypatch, capsys):
     """非 TTY 管道下不要调用 prompt_toolkit，避免 Windows console 报错。"""
     from agent_py_agent.cli.chat_parts import rendering
@@ -271,102 +325,36 @@ def test_cprint_uses_plain_print_when_stdout_is_not_tty(monkeypatch, capsys):
     assert "hello" in capsys.readouterr().out
 
 
-def test_tui_stream_chunks_strip_ansi_but_keep_text(capsys):
-    from agent_py_agent.cli.chat_parts.tui_worker_stream import _append_stream_text
-
-    pending = [""]
-    _append_stream_text("\033[38;2;34;197;94mhello\033[0m", pending)
-
-    out = capsys.readouterr().out
-    assert out == "hello"
-    assert "\033[" not in out
-
-
-def test_tui_default_mode_streams_visible_chunks() -> None:
-    from agent_py_agent.cli.chat_parts.tui_worker import _make_stream_callbacks
-
-    cfg = SimpleNamespace(
-        args=SimpleNamespace(app_scrollback=False),
-        agent=SimpleNamespace(config=SimpleNamespace(agent_name="myagent")),
-        stream_buf_ref=[""],
-        stream_visible_text_ref=[""],
-    )
-    spinner = SimpleNamespace(stopped=False, stop=lambda: setattr(spinner, "stopped", True))
-
-    with patch("agent_py_agent.cli.chat_parts.rendering._write_stream_text") as mock_write:
-        _begin, on_chunk = _make_stream_callbacks(cfg, 1, spinner)
-        visible = on_chunk("hello")
-
-    assert visible is True
-    assert spinner.stopped is True
-    assert cfg.stream_visible_text_ref == ["hello"]
-    mock_write.assert_called_once_with("hello")
-
-
 def test_tui_input_prompt_is_stable_separate_window(tmp_path) -> None:
     pytest.importorskip("prompt_toolkit")
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
     from agent_py_agent.cli.chat_parts.tui_ui_setup import (
         _make_input_area,
         _make_input_prompt_window,
     )
 
-    input_area = _make_input_area(str(tmp_path / ".chat_history"))
+    input_area = _make_input_area(
+        str(tmp_path / ".chat_history"),
+        TuiRuntime("input-test"),
+        tmp_path,
+    )
     prompt_window = _make_input_prompt_window()
 
     assert input_area.window.get_line_prefix is None
     assert prompt_window.width == 2
-    assert prompt_window.content.text == [("class:prompt", "> ")]
+    assert prompt_window.content.text == [("class:tui-input-marker", "❯\u00a0")]
 
 
-def test_tui_transcript_sink_appends_and_follows(monkeypatch) -> None:
-    pytest.importorskip("prompt_toolkit")
-    from agent_py_agent.cli.chat_parts import rendering
+def test_tui_escape_timeouts_keep_meta_window_short() -> None:
     from agent_py_agent.cli.chat_parts.tui_ui_setup import (
-        _install_transcript_sink,
-        _make_transcript_area,
+        ESCAPE_SEQUENCE_TIMEOUT_SECONDS,
+        TERMINAL_ESCAPE_PREFIX_TIMEOUT_SECONDS,
+        _configure_escape_timeouts,
     )
 
-    area = _make_transcript_area()
-    follow = [True]
-    app = type("App", (), {"invalidated": False, "invalidate": lambda self: setattr(self, "invalidated", True)})()
+    application = SimpleNamespace(timeoutlen=1.0, ttimeoutlen=0.5)
 
-    _install_transcript_sink(area, follow, [app])
-    try:
-        rendering._cprint("\033[38;2;34;197;94mhello\033[0m")
-    finally:
-        rendering.set_tui_output_sink(None)
-        rendering.set_tui_stream_sink(None)
+    _configure_escape_timeouts(application)
 
-    assert area.text == "hello\n"
-    assert area.buffer.cursor_position == len(area.text)
-    assert app.invalidated is True
-
-
-def test_tui_transcript_stream_stays_live_until_finished(monkeypatch) -> None:
-    pytest.importorskip("prompt_toolkit")
-    from agent_py_agent.cli.chat_parts.tui_ui_setup import (
-        TuiTranscriptStore,
-        _make_transcript_area,
-    )
-
-    area = _make_transcript_area()
-    follow = [True]
-    app = type("App", (), {"invalidate": lambda self: None})()
-    store = TuiTranscriptStore(area, follow, [app])
-
-    monkeypatch.setattr(
-        "agent_py_agent.cli.chat_parts.tui_transcript_store.time.monotonic",
-        lambda: 100.0,
-    )
-    store.append_history("myagent#1>\n")
-    store.append_stream("hello")
-
-    assert area.text == "myagent#1>\nhello"
-    assert store.history == "myagent#1>\n"
-    assert store.live_stream == "hello"
-
-    store.finish_stream()
-
-    assert area.text == "myagent#1>\nhello"
-    assert store.history == "myagent#1>\nhello"
-    assert store.live_stream == ""
+    assert application.timeoutlen == ESCAPE_SEQUENCE_TIMEOUT_SECONDS == 0.1
+    assert application.ttimeoutlen == TERMINAL_ESCAPE_PREFIX_TIMEOUT_SECONDS == 0.05

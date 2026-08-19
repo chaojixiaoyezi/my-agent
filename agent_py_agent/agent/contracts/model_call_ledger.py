@@ -7,6 +7,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+# LLM: 本模块同时维护有界模型调用明细与按 request/run 聚合的累计观测；裁剪明细不得截断最终计数。
+# 模块用途: 记录模型调用、供应商 HTTP 尝试和超时等结构化事实，供运行时诊断与最终结果展示。
+
 # 门槛2 终审边界②(steward seq1622-2): stage 合同单一事实源下沉到账本层。
 # ProviderTimeoutError 构造入口与 ModelCallLedger.timeout 写入入口共用同一
 # 集合——异常生产入口封闭不能只靠异常构造器, 账本写入也必须 fail-closed,
@@ -165,7 +168,95 @@ class ModelCallRecord:
         }
 
 
+# LLM: 聚合态只保存计数、去重键和展示集合，不保存 prompt、响应正文、请求体或密钥。
+# 类用途: 在详细调用记录被裁剪后继续保留某个 request/run 的准确累计统计。
+@dataclass
+class _ModelCallAggregate:
+    logical_call_counts: dict[str, int] = field(default_factory=dict)
+    physical_model_attempt_count: int = 0
+    provider_http_attempt_count: int = 0
+    provider_http_retry_count: int = 0
+    status_counts: dict[str, int] = field(default_factory=dict)
+    backends: set[str] = field(default_factory=set)
+    models: set[str] = field(default_factory=set)
+
+    # LLM: 每个新 call_id 恰好调用一次；同 call_id 的状态变化必须走 observe_update，避免重复累计。
+    # 函数用途: 把一条新模型调用加入累计统计，并登记逻辑回合、后端、模型和初始状态。
+    def observe_new(self, record: ModelCallRecord) -> None:
+        logical_call_id = _logical_call_id(record)
+        self.logical_call_counts[logical_call_id] = (
+            self.logical_call_counts.get(logical_call_id, 0) + 1
+        )
+        self.physical_model_attempt_count += 1
+        self.provider_http_attempt_count += max(0, record.provider_attempt_count)
+        self.provider_http_retry_count += max(0, record.provider_attempt_count - 1)
+        self.status_counts[record.status] = self.status_counts.get(record.status, 0) + 1
+        if record.backend:
+            self.backends.add(record.backend)
+        if record.model:
+            self.models.add(record.model)
+
+    # LLM: replacement delta 维护当前终态分布和尝试数；身份字段变化也必须成对撤销旧值再登记新值。
+    # 函数用途: 在同一调用收到首 token、完成、失败、超时或 HTTP 尝试事件时更新累计统计。
+    def observe_update(
+        self,
+        previous: ModelCallRecord,
+        current: ModelCallRecord,
+    ) -> None:
+        previous_logical = _logical_call_id(previous)
+        current_logical = _logical_call_id(current)
+        if previous_logical != current_logical:
+            _decrement_counter(self.logical_call_counts, previous_logical)
+            self.logical_call_counts[current_logical] = (
+                self.logical_call_counts.get(current_logical, 0) + 1
+            )
+        if previous.status != current.status:
+            _decrement_counter(self.status_counts, previous.status)
+            self.status_counts[current.status] = self.status_counts.get(current.status, 0) + 1
+        provider_delta = current.provider_attempt_count - previous.provider_attempt_count
+        retry_delta = max(0, current.provider_attempt_count - 1) - max(
+            0,
+            previous.provider_attempt_count - 1,
+        )
+        self.provider_http_attempt_count = max(
+            0,
+            self.provider_http_attempt_count + provider_delta,
+        )
+        self.provider_http_retry_count = max(
+            0,
+            self.provider_http_retry_count + retry_delta,
+        )
+        if current.backend:
+            self.backends.add(current.backend)
+        if current.model:
+            self.models.add(current.model)
+
+    # LLM: 返回值只含公开统计，不泄露内部 logical id 集合或可变容器引用。
+    # 函数用途: 生成最终结果和 runtime facts 可直接消费的累计统计快照。
+    def to_summary(self) -> dict[str, object]:
+        logical_count = len(self.logical_call_counts)
+        physical_count = max(0, self.physical_model_attempt_count)
+        statuses = {
+            status: max(0, int(self.status_counts.get(status, 0)))
+            for status in ("started", "first_token", "finished", "failed", "timed_out")
+        }
+        return {
+            "logical_model_turn_count": logical_count,
+            "physical_model_attempt_count": physical_count,
+            "model_retry_count": max(0, physical_count - logical_count),
+            "provider_http_attempt_count": max(0, self.provider_http_attempt_count),
+            "provider_http_retry_count": max(0, self.provider_http_retry_count),
+            "status_counts": statuses,
+            "backends": sorted(self.backends),
+            "models": sorted(self.models),
+        }
+
+
+# LLM: ledger 是模型调用观测的唯一进程内事实源；明细有界，但当前 request/run 累计值必须保持准确。
+# 类用途: 线程安全地登记模型调用生命周期，并向超时估算和最终响应提供记录与汇总。
 class ModelCallLedger:
+    # LLM: 聚合 scope 使用有界 LRU，容量至少覆盖全部 retained record 的 request/run 双键。
+    # 函数用途: 初始化线程安全明细账本和不会被 128 条明细裁剪截断的累计统计。
     def __init__(
         self,
         options: ModelCallLedgerOptions | None = None,
@@ -175,6 +266,7 @@ class ModelCallLedger:
         self.context = context or ModelCallLedgerContext()
         self._records: list[ModelCallRecord] = []
         self._index: dict[str, int] = {}
+        self._scope_aggregates: dict[tuple[str, str], _ModelCallAggregate] = {}
         self._lock = threading.RLock()
 
     def started(self, params: ModelCallStartedParams) -> ModelCallRecord:
@@ -348,16 +440,57 @@ class ModelCallLedger:
         with self._lock:
             return tuple(self._records)
 
+    # LLM: request_id 优先于 run_id，与最终化调用方现有筛选合同一致；返回副本而非内部 aggregate。
+    # 函数用途: 查询一次请求或运行的完整累计调用统计，即使早期明细已经超过上限被裁剪。
+    def cumulative_summary(
+        self,
+        *,
+        request_id: str = "",
+        run_id: str = "",
+    ) -> dict[str, object] | None:
+        scope_key = _selected_scope_key(request_id=request_id, run_id=run_id)
+        if scope_key is None:
+            return None
+        with self._lock:
+            aggregate = self._scope_aggregates.get(scope_key)
+            return aggregate.to_summary() if aggregate is not None else None
+
+    # LLM: 新 call_id 先进入累计态再裁剪明细；重复 call_id 只走 replacement delta，不能重复计数。
+    # 函数用途: 新增或替换一条模型调用记录，并维持累计统计与明细索引一致。
     def _append_or_replace(self, record: ModelCallRecord) -> None:
         if record.call_id in self._index:
             self._replace(record)
             return
         self._records.append(record)
+        for aggregate in self._aggregates_for(record):
+            aggregate.observe_new(record)
         self._rebuild_index()
         self._trim_records()
 
+    # LLM: 所有生命周期更新必须经过此入口，先计算 aggregate delta，再原子替换 retained detail。
+    # 函数用途: 更新同一调用的状态、时延或 HTTP 尝试，同时保持累计统计准确。
     def _replace(self, record: ModelCallRecord) -> None:
-        self._records[self._index[record.call_id]] = record
+        index = self._index[record.call_id]
+        previous = self._records[index]
+        for aggregate in self._aggregates_for(record):
+            aggregate.observe_update(previous, record)
+        self._records[index] = record
+
+    # LLM: scope LRU 只限制历史 request/run 数，不删除当前 retained detail 对应的累计键。
+    # 函数用途: 取得一条调用所属 request/run 的累计容器，并控制长寿命进程的统计内存上限。
+    def _aggregates_for(self, record: ModelCallRecord) -> tuple[_ModelCallAggregate, ...]:
+        aggregates: list[_ModelCallAggregate] = []
+        for scope_key in _model_call_scope_keys(record):
+            aggregate = self._scope_aggregates.pop(scope_key, None)
+            if aggregate is None:
+                aggregate = _ModelCallAggregate()
+            self._scope_aggregates[scope_key] = aggregate
+            aggregates.append(aggregate)
+        max_scopes = max(2, max(1, int(self.options.max_records)) * 2)
+        while len(self._scope_aggregates) > max_scopes:
+            oldest_scope = next(iter(self._scope_aggregates))
+            del self._scope_aggregates[oldest_scope]
+        return tuple(aggregates)
 
     def _require_record(self, call_id: str) -> ModelCallRecord:
         if call_id not in self._index:
@@ -379,6 +512,49 @@ def _append_event(events: tuple[str, ...], event: str) -> tuple[str, ...]:
     if events and events[-1] == event:
         return events
     return events + (event,)
+
+
+# LLM: scope identity 只读结构化 request_id/run_id，禁止从 prompt、错误文案或路径推断。
+# 函数用途: 列出一条调用所属的请求和运行统计键，空身份不建账。
+def _model_call_scope_keys(record: ModelCallRecord) -> tuple[tuple[str, str], ...]:
+    keys: list[tuple[str, str]] = []
+    if record.request_id:
+        keys.append(("request", record.request_id))
+    if record.run_id:
+        keys.append(("run", record.run_id))
+    return tuple(keys)
+
+
+# LLM: 查询优先级必须与旧 model_call_summary 筛选条件一致，避免同传两种 identity 时重复合并。
+# 函数用途: 把调用方给出的 request/run 参数解析为唯一累计统计键。
+def _selected_scope_key(
+    *,
+    request_id: str,
+    run_id: str,
+) -> tuple[str, str] | None:
+    normalized_request = str(request_id or "").strip()
+    if normalized_request:
+        return ("request", normalized_request)
+    normalized_run = str(run_id or "").strip()
+    if normalized_run:
+        return ("run", normalized_run)
+    return None
+
+
+# LLM: logical_call_id 是重试去重事实；缺失时只回退稳定 call_id，不解析其它 metadata 文本。
+# 函数用途: 取得累计统计用于区分逻辑回合与物理重试的唯一键。
+def _logical_call_id(record: ModelCallRecord) -> str:
+    return str(record.metadata.get("logical_call_id") or record.call_id)
+
+
+# LLM: 引用计数归零时删除键，防逻辑回合或状态集合残留幽灵项。
+# 函数用途: 安全减少内部引用计数，供罕见的同 call_id 身份或状态替换使用。
+def _decrement_counter(counter: dict[str, int], key: str) -> None:
+    remaining = int(counter.get(key, 0)) - 1
+    if remaining > 0:
+        counter[key] = remaining
+    else:
+        counter.pop(key, None)
 
 
 __all__ = [

@@ -273,6 +273,41 @@ def test_sandbox_exec_owner_scoped_returns_platform_sandbox_argv(tmp_path, monke
     assert argv[-1] == "echo hi"
 
 
+# LLM: task work 是 host-authored 临时根；即使命令 cwd 位于更深项目目录，Linux /tmp
+# 也不能回写 project/.sandbox-tmp，否则普通复制交付会携带构建缓存。
+# 函数用途: 验证 attempt 沙箱优先用结构化任务 work 根承载持久 /tmp。
+def test_linux_attempt_tmp_stays_outside_project_cwd(tmp_path, monkeypatch):
+    from agent_py_agent.agent.tooling.sandbox import SandboxReadiness
+
+    owner = tmp_path / "owner"
+    task_work = owner / "tasks" / "t1" / "work"
+    task_output = owner / "tasks" / "t1" / "output"
+    project = task_work / "project"
+    for path in (owner, task_work, task_output, project):
+        path.mkdir(parents=True, exist_ok=True)
+    spec = AttemptSandboxSpec(
+        attempt_view=project,
+        staging_root=project,
+        shared_workspace=owner,
+        owner_home=owner,
+        extra_write_roots=(task_work, task_output),
+        bwrap_path="/fake/bwrap",
+    )
+    sandbox = AttemptExecutionSandbox(spec)
+    sandbox._platform = "Linux"
+    sandbox._ready = SandboxReadiness(True, "SANDBOX_READY", "ok")
+
+    argv = sandbox.build_argv(["true"])
+
+    bind_pairs = {
+        (argv[index + 1], argv[index + 2])
+        for index, item in enumerate(argv)
+        if item == "--bind"
+    }
+    assert (str(task_work / ".sandbox-tmp"), "/tmp") in bind_pairs
+    assert (str(project / ".sandbox-tmp"), "/tmp") not in bind_pairs
+
+
 def test_sandbox_exec_unscoped_uses_full_access_but_still_sandboxed(tmp_path):
     """G6/E.8：单租户（owner_home 空）也进沙箱——full_access 档（文件语义不变，
     网关统一+进程隔离）。macOS profile 不加 deny；Linux 整根 bind。"""

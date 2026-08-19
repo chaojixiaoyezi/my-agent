@@ -1,5 +1,45 @@
 # Verification：开发推进
 
+## 2026-08-18 Fiber 143 收口冲突返工
+
+- Fiber→TypeScript 前台最后一条 E2E `run_command` 实际完成 HTTP 请求后由清理命令收到 SIGTERM，权威
+  operation 仍明确落为 `FAILED`：`COMMAND_FAILED / failure_stage=execution / handler_executed=true /
+  effect_outcome=failed / return_code=143`。模型看到了完整回执，却依据 stdout 的成功片段输出“完成”；因此
+  根因不是工具结果丢失，而是 completion 把冲突草稿直接切到无工具表达轮，模型没有机会修正命令并复验。
+- 对照 会话运行时 `session/turn.rs`、`hook_runtime.rs`、`protocol/items.rs` 和 Stop-hook E2E 后，已把明确
+  `failed/not_started` 的冲突改为同一 active turn 的 `completion_conflict.v1` continuation。原工具面保留，
+  同时给模型最近 typed 终态和被拒绝草稿；全 turn 最多两次。修复产生新的 succeeded operation 后自然收口，
+  两次仍只口头完成才进入 `OPERATION_INCOMPLETE`。
+- `unknown/cancelled/incomplete/unverified` 继续直接 fail-closed，不因这次体验修复恢复自动副作用重放。
+  本地 fake provider 回归已证明：已知失败可在第一个返工轮调用修复工具并以 `runtime_status=ok` 完成；连续
+  两次忽略冲突后才进入无工具未完成回复；unknown 从未收到 completion repair 工具轮。真实 `.13` 候选部署
+  与同类 143/非零退出返工仍待执行，因此当前只记本地机制通过，不记真机 E2E。
+
+## 2026-08-18 aiohttp 真机闭环与 no-effect 尾部裁决
+
+- aiohttp→Go 请求在最终源码复制后自主重新 build、通过 29 项行为测试并完成 HTTP 200 E2E，证明
+  `handler_details` 中的 durable verification state 能跨 read/search 保持 stale，并由新的真实验证收口。
+  EXEC-44 从待真机复验升级为已验证；测试者没有修改任务文件。
+- 同一请求最后一个可选清理命令在 handler 前被安全策略拒绝，旧逻辑却让 `not_started` 覆盖此前成功
+  mutation，并把完整 operation 历史误投影成整项未完成。completion 现以最后一项 effect-bearing mutation
+  为权威：连续 no-effect 尾部仍留审计，但不推翻最近 succeeded；known failed/not_started 冲突走上述有界
+  同轮返工，unknown 等不确定终态仍直接 fail-closed。
+- current-turn focused 回归覆盖成功后 no-effect 尾部放行、只有 no-effect 仍阻断和 unknown 尾部仍阻断；
+  本地与 `.13` py_compile、Ruff、测试均通过。当前 Fiber→TypeScript 请求只用于观察真实收口，开发者不
+  旁路补产物。
+
+## 2026-08-18 写后验证新鲜度与真实代码任务反例
+
+- Tornado→Go 真机请求在核心 build/test 成功后又修改 examples，随后只有 grep/read 就尝试收口；最终
+  examples 未复测，因此整体交付不通过。该反例证明“最后一条工具是不是 write”不能代表验证新鲜度。
+- `record_tool_verification` 现在把 `verification_evidence/state` 合并进 canonical
+  `metadata.handler_details`，与 archive/model/closeout 读取位置一致；文件修改保留最近 durable
+  verification event 的 ID/状态并把根置 stale，read/search 不会清除。
+- `project_facts` 按 `go.mod/Cargo.toml` manifest 增加 Go/Cargo 的规范 build/test 分类。completion 只按
+  root + verification event ID/status 去重软核对；同一周期不循环，新的真实验证后才能重新武装。
+- 本地和 `.13` 的 verification runtime/project facts/current-turn/runtime-guidance focused tests 到
+  100%，py_compile 与 Ruff 通过。修复已部署；下一真实代码任务负责 E2E 证明最后修改后确实重新验证。
+
 ## 2026-07-31 审计结果送达引用
 
 - `message_tool_delivery.v1` 的归档白名单现在可以保留有界的 `evidence_refs`。引用来自已持久化的

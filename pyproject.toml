@@ -12,6 +12,8 @@ license = { file = "LICENSE" }
 dependencies = [
   "openpyxl>=3.1",
   "prompt_toolkit>=3.0",
+  "markdown-it-py>=4.2,<5",  # TUI Markdown 用成熟 CommonMark token，终端布局/样式仍由本项目 renderer 控制
+  "Pygments>=2.20,<3",  # TUI fenced code 的语言 lexer；只输出本项目 style role，不注入 ANSI
   "tzdata>=2024.1",  # IANA 时区数据兜底(审计 #21):无系统 zoneinfo 的 Linux/容器也能解析用户时区
   "charset-normalizer>=3.3",  # 文件编码探测(审计 #23):读 Shift-JIS/GBK/Latin-1 等非 UTF-8 企业文件
   "lark-oapi>=1.4",  # 飞书默认长连接与密码/人格确认卡片回调
@@ -23,6 +25,8 @@ dev = [
   "pytest>=8.0",
   "pytest-timeout>=2",
   "pytest-cov>=5",
+  "hypothesis>=6.112,<7",  # 仅开发验收：状态机生成/收缩输入、事件与生命周期序列，固定 seed 可重放最小失败路径
+  "pyte>=0.8.2,<0.9",  # 仅开发验收：成熟 VTXXX 屏幕模拟器用于 PTY ANSI checkpoint 重放，产品运行时不依赖
   "ruff>=0.8",
 ]
 # Phase 1 加密密钥库:at-rest 加密的唯一外部库(stdlib 无 AES、密码学不能自建)。

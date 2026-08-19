@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 
-from .chat import cmd_chat, cmd_resume
+from .chat_command_parser import add_chat_subcommands
 from .common import DEFAULT_CAPABILITY_CONFIG, add_resume_context_switches
 from .context_bundle_commands import cmd_context_bundle
 from .home_runtime_commands import add_home_runtime_subcommands
@@ -49,7 +49,8 @@ def _add_capability_config_arg(p: argparse.ArgumentParser) -> None:
 
 def add_basic_subcommands(sub: argparse._SubParsersAction) -> None:
     _add_status_timeline_run_commands(sub)
-    _add_memory_chat_commands(sub)
+    _add_memory_commands(sub)
+    add_chat_subcommands(sub)
     _add_context_bundle_command(sub)
 
 
@@ -109,7 +110,7 @@ def _add_status_timeline_run_commands(sub: argparse._SubParsersAction) -> None:
     run.set_defaults(func=cmd_run)
 
 
-def _add_memory_chat_commands(sub: argparse._SubParsersAction) -> None:
+def _add_memory_commands(sub: argparse._SubParsersAction) -> None:
     remember = sub.add_parser("remember", help="显式确认并经统一候选/晋升链保存具体长期知识")
     remember.add_argument("content", help="要长期保存的具体事实、事件或项目知识")
     remember.add_argument(
@@ -128,72 +129,6 @@ def _add_memory_chat_commands(sub: argparse._SubParsersAction) -> None:
     memory_search.add_argument("query", help="搜索关键词")
     memory_search.add_argument("--limit", type=int, default=None, help="最多显示条数；默认读配置")
     memory_search.set_defaults(func=cmd_memory_search)
-
-    chat = sub.add_parser("chat", help="启动交互循环，反复与智能体交流")
-    chat.add_argument("--inject", action="append", help="启动时注入 prompt，可多次传入")
-    chat.add_argument("--prompt-file", action="append", help="启动时加载额外 prompt 文件，可多次传入")
-    chat.add_argument("--memory-limit", type=int, default=None, help="交互中 /memory 默认显示条数；默认读配置")
-    chat.add_argument(
-        "--no-save",
-        action="store_true",
-        help=(
-            "关闭本次运行归档与持久化 Compact；Gateway 模式仍记录 ConversationStore/审计，"
-            "且不会直接写正式长期记忆"
-        ),
-    )
-    transport = chat.add_mutually_exclusive_group()
-    transport.add_argument("--gateway", action="store_true", dest="gateway", help="使用正式后台 gateway（默认）")
-    transport.add_argument("--direct", action="store_false", dest="gateway", help="开发调试：在当前前台进程直接调用模型")
-    chat.set_defaults(gateway=True)
-    chat.add_argument(
-        "--gateway-timeout",
-        type=float,
-        help=(
-            "gateway 模式连续无请求活动后停止等待的秒数，"
-            "默认使用配置 gateway_request_timeout"
-        ),
-    )
-    chat.add_argument("--session-id", help="恢复指定会话，不传则创建新会话")
-    add_resume_context_switches(chat)
-    chat.set_defaults(func=cmd_chat)
-
-    # 显式 resume(owner seq1943 语义③ + 双席 seq1958 fail-closed):
-    # 只连接指定会话, 不存在/无效 ID 报错退出(非 0), 绝不静默建新会话。
-    # 与 chat --session-id 的区别: chat 是隐式恢复(fail-open 建新会话),
-    # resume 是显式命令(fail-closed)。
-    resume = sub.add_parser(
-        "resume",
-        help="显式连接指定会话继续交流: resume <session_id> (不存在则报错退出)",
-    )
-    resume.add_argument("session_id", help="要恢复的会话 ID(如 sess_1712_abcd1234)")
-    resume.add_argument("--inject", action="append", help="启动时注入 prompt，可多次传入")
-    resume.add_argument("--prompt-file", action="append", help="启动时加载额外 prompt 文件，可多次传入")
-    resume.add_argument("--memory-limit", type=int, default=None, help="交互中 /memory 默认显示条数；默认读配置")
-    resume.add_argument(
-        "--no-save",
-        action="store_true",
-        help=(
-            "关闭本次运行归档与持久化 Compact；Gateway 模式仍记录 "
-            "ConversationStore/审计，且不会直接写正式长期记忆"
-        ),
-    )
-    transport_resume = resume.add_mutually_exclusive_group()
-    transport_resume.add_argument("--gateway", action="store_true", dest="gateway",
-                                  help="使用正式后台 gateway（默认）")
-    transport_resume.add_argument("--direct", action="store_false", dest="gateway",
-                                  help="开发调试：在当前前台进程直接调用模型")
-    resume.set_defaults(gateway=True)
-    resume.add_argument(
-        "--gateway-timeout",
-        type=float,
-        help=(
-            "gateway 模式连续无请求活动后停止等待的秒数，"
-            "默认使用配置 gateway_request_timeout"
-        ),
-    )
-    add_resume_context_switches(resume)
-    resume.set_defaults(func=cmd_resume)
-
 
 def _add_archive_search_args(parser) -> None:
     parser.add_argument("--layer", choices=["all", "raw", "hook"], default="all", help="搜索哪一层归档")

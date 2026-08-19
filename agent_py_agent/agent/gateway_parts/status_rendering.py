@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+# LLM: Gateway liveness is the canonical readiness fact for CLI and TUI startup. Waiting uses a
+# monotonic bounded deadline so wall-clock jumps cannot extend or shorten the configured budget.
+# 模块用途: 提供 Gateway 存活探测和状态展示；交互界面通过这里判断是否可以开始发送请求。
+
 """Gateway status and liveness rendering helpers."""
 
 import json
@@ -47,8 +51,11 @@ def gateway_running_report(paths: GatewayPaths) -> GatewayRunningReport:
     return GatewayRunningReport(pid_report.pid, bool(pid_report.pid), pid_report.load_error)
 
 
-def wait_for_gateway_running(paths: GatewayPaths, timeout: float = 10.0) -> tuple[int, bool]:
-    deadline = time.time() + max(0.0, timeout)
+# LLM: This wait must honor the configured upper bound and return the last observed PID. Keep
+# readiness polling here as the sole source used by plain CLI and visible TUI preflight.
+# 函数用途: 在给定秒数内轮询 Gateway 存活状态，成功立即返回，超时则返回最后观察结果。
+def wait_for_gateway_running(paths: GatewayPaths, timeout: float = 3.0) -> tuple[int, bool]:
+    deadline = time.monotonic() + max(0.0, timeout)
     last_pid = 0
     while True:
         pid, alive = gateway_running(paths)
@@ -56,9 +63,10 @@ def wait_for_gateway_running(paths: GatewayPaths, timeout: float = 10.0) -> tupl
             last_pid = pid
         if alive:
             return pid, True
-        if time.time() >= deadline:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             return pid or last_pid, False
-        time.sleep(0.2)
+        time.sleep(min(0.2, remaining))
 
 
 def render_gateway_status(agent: SimpleAgent, paths: GatewayPaths) -> list[str]:

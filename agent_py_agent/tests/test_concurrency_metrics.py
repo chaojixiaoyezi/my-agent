@@ -61,7 +61,17 @@ def test_enqueue_vs_claim_counters_split_starvation_from_first_turn_stall() -> N
 
 
 def _state() -> SimpleNamespace:
-    return SimpleNamespace(tools=None, messages=None, on_chunk=None)
+    return SimpleNamespace(
+        agent=SimpleNamespace(conversation_store=None),
+        params=SimpleNamespace(),
+        ledger=None,
+        call_id="test-call",
+        retry_sink=None,
+        tools=None,
+        messages=None,
+        on_chunk=None,
+        tool_choice=None,
+    )
 
 
 class _InflightCheckingBackend:

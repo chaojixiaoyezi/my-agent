@@ -76,7 +76,7 @@ def test_runtime_records_child_test_under_structured_root_task(tmp_path: Path):
 
     result = record_tool_verification(agent, call, result)
 
-    fact = result.metadata["verification_evidence"]
+    fact = result.metadata["handler_details"]["verification_evidence"]
     repository = VerificationEvidenceRepository(owner_home)
     context = VerificationContext("providers/feishu/users/owner-a", "thread-1", "root-task")
     assert (fact["status"], fact["scope"]) == ("passed", "full")
@@ -105,7 +105,12 @@ def test_successful_file_write_makes_same_root_task_evidence_stale(tmp_path: Pat
 
     repository = VerificationEvidenceRepository(owner_home)
     context = VerificationContext("providers/feishu/users/owner-a", "thread-1", "root-task")
-    assert write_result.metadata["verification_state"][0]["status"] == "stale"
+    state = write_result.metadata["handler_details"]["verification_state"][0]
+    assert state["status"] == "stale"
+    assert state["last_verification_id"] == test_result.metadata["handler_details"][
+        "verification_evidence"
+    ]["id"]
+    assert state["last_verification_status"] == "passed"
     assert repository.status(context, root=project)["status"] == "stale"
 
 
@@ -130,6 +135,6 @@ def test_failed_write_and_arbitrary_command_do_not_change_evidence(tmp_path: Pat
 
     repository = VerificationEvidenceRepository(owner_home)
     context = VerificationContext("providers/feishu/users/owner-a", "thread-1", "root-task")
-    assert "verification_evidence" not in arbitrary.metadata
-    assert "verification_state" not in failed_write.metadata
+    assert "verification_evidence" not in arbitrary.metadata.get("handler_details", {})
+    assert "verification_state" not in failed_write.metadata.get("handler_details", {})
     assert repository.status(context, root=project)["status"] == "unverified"

@@ -120,15 +120,56 @@ def test_result_pending_state_reports_bad_request_file(
     assert data["request_load_error"]["context"] == "gateway.http_pending.read"
 
 
-def test_result_finished_state_reports_bad_response_file(
+def test_result_ignores_bad_standalone_response_file(
     http_server,
     mock_paths: MockGatewayPaths,
 ):
-    """GET /result should expose a structured error for bad response JSON."""
+    """GET /result must not promote a standalone response projection to terminal."""
     server, port = http_server
     (mock_paths.responses / "broken.json").write_text("{bad json", encoding="utf-8")
 
     status, data = _read_result(port, "broken")
 
+    assert status == 404
+    assert data["request_id"] == "broken"
+
+
+def test_result_reports_bad_canonical_terminal_file(
+    http_server,
+    mock_paths: MockGatewayPaths,
+):
+    """GET /result exposes corruption only from the canonical terminal authority."""
+    server, port = http_server
+    (mock_paths.terminal / "broken.json").write_text("{bad json", encoding="utf-8")
+
+    status, data = _read_result(port, "broken")
+
     assert status == 500
-    assert data["result_load_error"]["context"] == "gateway.http_result.read"
+    assert data["result_load_error"]["context"] == "gateway.http_terminal_archive.read"
+
+
+def test_result_rejects_cross_request_canonical_terminal(
+    http_server,
+    mock_paths: MockGatewayPaths,
+) -> None:
+    _server, port = http_server
+    (mock_paths.terminal / "request-a.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "gateway_terminal_request.v1",
+                "id": "request-b",
+                "terminal_response": {
+                    "id": "request-b",
+                    "ok": True,
+                    "response": "must not escape another request",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    status, data = _read_result(port, "request-a")
+
+    assert status == 500
+    assert data["result_load_error"]["category"] == "data_corruption"
+    assert "response" not in data

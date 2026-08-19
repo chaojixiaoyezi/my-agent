@@ -1,0 +1,57 @@
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+from agent_py_agent.cli.chat_parts.tui_threading import _refresh_loop
+
+
+class _FiniteStop:
+    def __init__(self, ticks: int) -> None:
+        self._remaining = ticks
+
+    def wait(self, _timeout: float) -> bool:
+        if self._remaining <= 0:
+            return True
+        self._remaining -= 1
+        return False
+
+
+class _RefreshDecisions:
+    def __init__(self, decisions: list[bool]) -> None:
+        self._decisions = iter(decisions)
+
+    def needs_periodic_refresh(self) -> bool:
+        return next(self._decisions)
+
+
+def test_runtime_periodic_refresh_stops_when_visible_animation_finishes(monkeypatch) -> None:
+    clock = iter([10.0, 10.2, 11.0, 11.2, 12.0])
+    monkeypatch.setattr(
+        "agent_py_agent.cli.chat_parts.tui_runtime.time.monotonic",
+        lambda: next(clock),
+    )
+    runtime = TuiRuntime("refresh-runtime")
+    assert runtime.needs_periodic_refresh() is False
+
+    runtime.publish_connection_check()
+    assert runtime.needs_periodic_refresh() is True
+    runtime.resolve_connection_check(ok=True)
+    runtime.set_notice("Saved", duration_seconds=0.5)
+    assert runtime.needs_periodic_refresh() is True
+    assert runtime.needs_periodic_refresh() is False
+
+
+def test_refresh_loop_invalidates_only_active_ticks() -> None:
+    app = SimpleNamespace(invalidate_calls=0)
+
+    def invalidate() -> None:
+        app.invalidate_calls += 1
+
+    app.invalidate = invalidate
+    _refresh_loop(
+        _FiniteStop(3),
+        [app],
+        _RefreshDecisions([False, True, False]),
+    )
+    assert app.invalidate_calls == 1

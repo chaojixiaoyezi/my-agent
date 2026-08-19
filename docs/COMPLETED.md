@@ -4,6 +4,42 @@
 
 最近收口重点：
 
+- EXEC-44 写后验证新鲜度已由 aiohttp→Go 真机任务闭环：最后一次源码复制后，被测 Agent 自主重新
+  build、运行 29 项行为测试并完成 HTTP 200 E2E，随后才输出 final。验证事实只来自 canonical
+  `handler_details` 与 durable event；read/search 不清 stale，Go/Cargo manifest 分类不读项目名或 prompt。
+  证据保存在 `.13:/root/tui-parity-evidence/rich-transcript-20260818/aiohttp-closeout/`，测试者未旁路修改产物。
+- SANDBOX-02 已由 Tornado→Go 真机任务闭环：约 122MB 构建缓存/临时文件留在 canonical
+  `work/.sandbox-tmp`，约 240KB 最终 output 未发现 `.sandbox-tmp/.cache/.gocache/gomodcache`。这证明
+  `task_work_dir` 优先 sandbox root 与 `TMPDIR/XDG_CACHE_HOME=/tmp` 的通用修复生效，不依赖 Go/Tornado
+  特判。旧 Click→Go 的 137MB 污染证据继续保留，不改写历史。
+- 模型调用账本现把“最多 128 条明细”和“完整 request/run 累计数”分开：logical turn、物理 model
+  attempt、provider HTTP attempt/retry 与终态分布在明细裁剪后仍准确，且不保存 prompt、response、key。
+  超限 focused 回归、本地/`.13` Ruff 与测试通过；旧任务 response 中的 128 已更正为 retained-detail 下限。
+- 终端交互 TUI 可观察行为复刻已在 `my-agent` 以 Python/prompt_toolkit 单一 typed 状态链完成：
+  typed journal/reducer、stable/active blocks、Markdown/code/diff、spinner/tool/permission、输入/history/
+  search/completion/paste/queue、scroll/transcript/mouse/resize、interrupt/exit 和 canonical history resume
+  均已接通，旧字符串 lexer/transcript/stream 路径已删除。85 项矩阵结案为 38 `VERIFIED`、38
+  `MAPPED_VERIFIED`、9 `NOT_APPLICABLE`。`192.0.2.13:/root/my-agent` 最终部署 70 个文件、删除
+  5 个废弃文件并保留回滚包；MiniMax-M2.7 Gateway/TUI 健康，secret 实值扫描 0 命中。详细任务见
+  `docs/tasks/completed/TASK-20260818-终端交互-tui-parity.md`。
+- 后续四路真机观察已重开其中 C17：旧版运行中普通 Enter 实际等待为下一回合，且 queue preview 会随
+  transcript 滚走。该回归不改写本条历史验收事实；当前修复与 `.13` 复验状态以 `docs/ROADMAP.md`、
+  `STATUS.md` 和 parity matrix 的 `IMPLEMENTED` 行为准，完成前不得继续引用旧 EV-QUEUE 宣称已通过。
+- 用户后续体验指出的软折输入 Up/Down 与不可点击 unseen pill 已按 终端交互 的视觉行/回尾行为补齐；
+  `/context` 读取自动 compact 同一估算，`/compact [instructions]` 复用唯一 checkpoint/CAS 主链，自动
+  compact 继续按 90% 阈值在每轮前运行。`/effort` 入口只报告后端真实能力；当前 MiniMax-M2.7 没有可调
+  effort 参数，设置会明确拒绝而不伪造生效。
+- `.13` 真实普通问候、`/context` 与 `/compact` 已把 generation 从 0 推进到 1 并复查 summary/pending；
+  同一问候还发现本地 owner 没有主动通道却暴露 `send_message`。当前以工具自身 availability 在每轮 snapshot
+  前核对结构化通道事实，修复前 2 次失败调用、修复后 0 次；本地和远端 12 项消息工具 focused 回归通过。
+- Fiber→TypeScript 最终请求为 188 次 logical/model/provider attempt、0 retry、186 工具轮和 `done/ok`。
+  但产物仅 1,093 功能源码行，约为原版 27,354 行的 4.0%；18 项 Jest 直跑虽过，仍有 open-handle 警告、
+  stub/no-op 中间件和大量公开能力缺失，因此只算可运行核心子集，不算完整等价复刻。
+- 用户截图追补的鼠标松开后选区失控、终端兔耳少女头像、逐轮 commentary、可折叠 provider thinking、
+  红蓝行号 diff、写入预览和命令 stdout/stderr/退出码已在 `.13` 真机可见。首个 Click→Go 请求因旧
+  `ECONNREFUSED` 分类失败，修复双层有界退避后，独立续作以 197 个工具轮完成 3,021 行 Go 源码和
+  可执行文件；当时 response 的 128 是账本明细上限，不再表述为精确调用总数。`[no test files]` 仍不能
+  说成自动测试覆盖，旧缓存污染由随后 Tornado→Go 真实任务完成通用复验。
 - 工具运行时已收敛为唯一链：`required_actions -> ToolRuntimeSnapshot -> ToolChoice ->
   provider adapter -> canonical ToolCall -> ActionPolicy -> ToolExecutor -> operation/reconcile -> canonical
   ToolResult -> settlement -> CompletionGate`。旧重复 Schema/审批/effect/执行入口、native 正文提升、

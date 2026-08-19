@@ -176,10 +176,11 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
     # 下一请求源码消失，模型不知道丢了还谎称源码已备好（真机铁证 2026-08-08
     # celery/scrapy→Go 复刻）。rm -rf /tmp 只清任务区 .sandbox-tmp，
     # 沙箱隔离与写边界不变。
-    # SANDBOX-01(2026-08-15 真机): tmp 根必须落在任务本地目录——此前用
-    # spec.workspace(项目目录)导致①项目目录被 .sandbox-tmp 污染②任务收口无从
-    # 发布产物(用户视角"模型说完成但产物消失")。write_roots[0]=任务 work 目录
-    # (CLI run 的 allowed_write_roots=[work_dir, output_dir])，收口时随任务发布。
+    # SANDBOX-01/02 真机: tmp 根必须落在任务本地目录——此前用 spec.workspace
+    # (项目目录)导致①项目目录被 .sandbox-tmp 污染②任务收口无从发布产物。
+    # process boundary 只在 canonical task_work_dir 属于 allowed_write_roots 时把它
+    # 排在首位；Attempt sandbox 必须保留该顺序，再追加当前 cwd/staging。
+    # 因而 write_roots[0] 是任务 work，而不是更深的项目目录或 output。
     # 无 write_roots(单租户 full_access)时保持 workspace 目录(旧行为, /tmp 即宿主)。
     if spec.write_roots:
         tmp_root = Path(spec.write_roots[0]) / ".sandbox-tmp"

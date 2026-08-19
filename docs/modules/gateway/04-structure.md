@@ -1,5 +1,53 @@
 # Gateway Structure
 
+## TUI 活动回合输入确认与 rich context 事件
+
+- `cli/chat_client_context.py::GatewayChatClientAgent.request_active_turn_input` 是薄 TUI 的活动输入 HTTP
+  入口；它只调用本机 `/control`，携带 owner conversation 与 opaque `message_id`，返回值只表示 steer 是否
+  被 Gateway 接收，不能创建 fallback request。
+- `agent_core/runtime/guidance.py` 从持久 guidance 的结构化 `channel_message_id` 提取本批关联 ID；正文和
+  FIFO 位置均不参与身份。`BufferedChunkStreamWriter.begin_active_turn_input(ids)` 在 rich client 上写
+  `active_turn_input_consumed`，普通客户端不扩大公开面。
+- `cli/chat_parts/tui_runtime.py` 保存 session-local pending receipt，Gateway event 只提升本 TUI 已登记的
+  精确 ID；未知外部 ID 被消费但不创建本地消息。`tui_view_model.py` 分开保存 `pending_steers` 与
+  `queued_inputs`，`tui_block_renderer.py` 把两者固定在 composer 上方，不放进滚动 transcript。
+- `model_visible_context_usage.v1` 与 `model_visible_context_compaction.v1` 都只允许数字白名单穿过 rich
+  chunk。usage 是最新模型调用前的展示快照；compaction 是 active-turn native IR 的 turn-local 事实，均不
+  获得 ConversationStore compact 权威。
+
+## 最终效果裁决与 owner-scoped 命令环境
+
+- Gateway 最终 presentation 同时保留两类结构化事实：完整 `operation_verification` 供审计；最近
+  effect-bearing mutation 供“是否必须改写 final”裁决。handler 前的 `not_started` 尾部属于前者，不能
+  覆盖此前 succeeded effect；unknown/failed/cancelled/incomplete 仍拥有阻断权。required action 使用
+  独立 gate，任何层都不能从模型正文判断。
+- owner-scoped `run_command` 继续由 sandbox 提供只读 home 与 task `/tmp` 映射。子进程环境在 secret scrub
+  后设置 `TMPDIR=/tmp`、`XDG_CACHE_HOME=/tmp/.cache`，并为标准 npm 增加
+  `NPM_CONFIG_CACHE=/tmp/.cache/npm`。admin/无 owner scope 不改环境，`HOME` 也不被伪造；Gateway 不按
+  项目名、目标语言或命令文本扩展写权限。
+
+## TUI 工具审批、Compact 边界和传输中断
+
+- `cli/chat_parts/tui_preflight.py` 只负责真实 Gateway readiness 到 typed connection block 的启动门；它不创建
+  request、不读取 key，也不在 ready 前启动 worker。`cmd_chat` 的同步 wait 只供 plain/non-TUI 路径。
+- `agent/contracts/tool_approval.py` 定义共享 `ToolApprovalRequest/ToolApprovalDecision`。授权只认
+  `tool_name/run_id/operation_id/idempotency_key/args_hash` 组成的 binding 和有限 decision 枚举；标题、
+  option label、feedback 都只用于展示或后续模型上下文。
+- `agent/gateway_parts/permission_bridge.py` 是跨进程决定桥。目标固定为 processing chunk 同级的
+  `.approvals/<sha256(request_id)[:24]>/<sha256(permission_id)[:24]>.json`；路径不接受外部 id 拼接，
+  原子文件在 schema、request id、permission id、完整 binding 全部匹配后才消费。
+- `request_execution.BufferedChunkStreamWriter` 是 Gateway typed 事件唯一出口：模型 delta、工具 progress、
+  `permission_requested/resolved`、`conversation_compacted` 共用同一 chunk cursor。writer 是否等待审批只读
+  请求的显式 `client_capabilities.tool_approval`；没有该能力时不得按 source、终端在线或文案猜测。
+- `cli/chat_parts/gateway_client.py` 把 chunk object 交给 TUI typed consumer；consumer 成功时不再走 legacy
+  文本投影，最终 response file 仍是请求终态事实。坏行有界跳过，cursor 继续前进，不能重放已消费事件。
+- Gateway server 是模型历史注入的唯一位置；TUI resume 的 `load_gateway_chat_history()` 只做显示投影，按
+  `channel=cli_chat/source=cli_chat/gateway_request_id` 成对恢复 foreground user/assistant，不把这些行再次
+  发给 Gateway worker，也不接受 background/半回合/其它 channel 混入。
+- `agent/backends/gateway_helpers.py` 在真实 HTTP 读边界惰性注册 interrupt callback，header 等待和 SSE
+  阻塞都关闭同一 response/socket；任务结束注销回调。该传输清理只使当前调用退出，不替代 conversation
+  `/stop`、task 状态或 Gateway response 终态。
+
 ## Memory Curator 后台接线
 
 - `cli/gateway_loops.py::_run_memory_curator_if_due` 使用当前 owner scheduler 已持有的 scoped agent，不能
@@ -42,7 +90,12 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   的完整 summary/raw tail，同时把 task link、observation 与 progress 等运行投影收敛到精确 current task
   及其持久 child lineage，不从正文分类任务，也不向模型重建历史任务菜单。
 - `_finalization_service` 把 `ModelCallLedger` 的 logical turn、物理 model attempt 与 provider HTTP
-  attempt 计数写入内部 run result 和 runtime facts；这些字段只观测，不参与任务完成裁决。
+  attempt 计数写入内部 run result 和 runtime facts；这些字段只观测，不参与任务完成裁决。ledger 的
+  `records()` 只保留最近 128 条诊断明细，按 request/run 的同源 aggregate 单独累计完整计数，不能再用
+  retained detail 长度冒充总量；aggregate 不保存 prompt、response、请求体或 key。
+- 普通代码任务的验证新鲜度只读工具结果 `metadata.handler_details` 内的 typed verification envelope：
+  成功 workspace mutation 使最近验证 stale，read/search 不改变该事实。completion soft followup 以
+  root + durable verification event ID/status 去重；它不执行测试、不把普通任务改成硬门，也不解析正文。
 
 ## 2026-07-27 工具轮窗口与持久会话 Compact 的边界
 
@@ -88,6 +141,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   最多阻塞控制调用 `100 ms`；慢关闭在 daemon thread 继续，不能把 `/stop` 拖到 provider 超时。
 - `agent/backends/gateway_helpers.py`：模型 JSON/SSE 响应读取在真正发请求时惰性挂接中断回调；
   `/stop` 会关闭正在读取的响应并报为 `InterruptedError`，不得包装成可重试的 provider 网络故障。
+  系统级 `ConnectionRefusedError/ECONNREFUSED` 属于可恢复供应故障，先按 `2/5/15` 秒执行三次物理 HTTP
+  退避；DNS、地址和代理配置错误仍快速失败。每次物理 attempt 把 retry 序号和等待值写入同一 model-call
+  ledger，不从异常文本决定是否重试。
   流式 `request_timeout` 按 会话运行时 语义是有效 SSE `data:` 事件之间的 idle timeout（空闲超时），不是整轮
   总墙钟上限；注释、空行、半行和静默不能续期。与 concurrency 的依赖保持请求时惰性解析，避免
   backend/runtime 初始化环。
@@ -106,7 +162,8 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   留给 scheduler 确认，避免双消费。
 - `agent/gateway_parts/request_execution.py`：live turn 注入新的真实用户输入时，只重新开放一次模型自然
   commentary 段；普通工具轮仍不会反复把碎碎念送给用户。旧模型片段先丢弃，新的 commentary/final 继续
-  由同一个 request 的原回复投递链送出。
+  由同一个 request 的原回复投递链送出。显式 rich writer 还把 transport/model-turn retry 的结构化
+  层级、序号和等待值投影成即时 system block；不公开原始异常、endpoint 或 key，也不混入模型 commentary。
 - `agent/agent_core/tool_loop/natural_user_reply.py`：非阻塞 `wait` 等需要中途回复时，短回复仍由模型按
   结构化事实自然撰写；它不建立第二个执行上下文，也不改变 thread/task 状态。
   presentation-only 参数明确把 `allowed_tools` 和 native tool IR 置空；部分兼容模型仍可能违规返回
@@ -323,7 +380,10 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/conversation/compact.py`、`compact_guard.py`、`compact_checkpoint.py`、`history_index.py`、
   `control_commands.py`：分别承载 owner/thread 唯一自动 compact、结构化近期尾部与失败熔断、
   完整恢复点、owner-local 旧聊天检索投影，以及 CLI/IM 共用 typed slash/task command；
-  `/verbose off|on|full` 的持久状态仍在唯一 thread schema 中，不从自然语言推断 owner 或 compact 成败。
+  `/context` 只读自动压缩同一估算，`/compact` 复用同一 run lane/checkpoint/CAS，`/effort` 只投影真实后端
+  参数能力；`/verbose off|on|full` 的持久状态仍在唯一 thread schema 中，不从自然语言推断 owner 或 compact 成败。
+- `agent/capability/channel_message_tool.py`：`send_message` 的模型可见性与执行前检共用 owner provider/target、
+  owner root 和 registry proactive capability；无外部通道的本地 transcript 只隐藏当前快照，不删除唯一工具实现。
 - `agent/conversation/authority.py`、`task_promotion.py`：普通 transcript 唯一权威标记，以及任务候选的
   结构化选择、已完成或已中断任务重开、误建占位任务 supersede、提升和完成关闭。
 - `agent/gateway_parts/supervisor.py`：gateway supervisor 的启动、停止、重启、heartbeat 健康判断和

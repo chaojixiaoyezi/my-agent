@@ -3,7 +3,8 @@ from __future__ import annotations
 
 """HTTP service for gateway using standard library http.server.
 
-这个文件实现 gateway 的 HTTP 接口：POST /ask、GET /result/<id>、GET /progress/<id>、GET /status、POST /stop。
+这个文件实现 gateway 的 HTTP 接口：POST /ask、POST /control、GET /control-status/<id>、
+GET /result/<id>、GET /progress/<id>、GET /status、POST /stop。
 用标准库 http.server + threading 实现并发。
 支持多租户鉴权：外部通道请求需要 X-User-Id / X-Channel header。
 """
@@ -21,7 +22,11 @@ from ..runtime_errors import runtime_error_report
 from .http_handlers import (
     handle_admin_summary,
     handle_ask,
+    handle_client_history,
+    handle_client_memory,
     handle_control,
+    handle_control_status,
+    handle_input_status,
     handle_progress,
     handle_result,
     handle_session_bind,
@@ -108,6 +113,12 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         if self.path.startswith("/result/"):
             self._handle_result()
             return
+        if self.path.startswith("/input-status/"):
+            self._handle_input_status()
+            return
+        if self.path.startswith("/control-status/"):
+            self._handle_control_status()
+            return
         if self.path.startswith("/progress/"):
             # `/progress` 只读 typed event，并在 handler 内复用 `/result` 的 owner 权限事实。
             self._handle_progress()
@@ -130,6 +141,12 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/control":
             self._handle_control()
+            return
+        if self.path == "/client/memory":
+            self._handle_client_memory()
+            return
+        if self.path == "/client/history":
+            self._handle_client_history()
             return
         if self.path == "/stop":
             self._handle_stop()
@@ -166,6 +183,17 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
     def _handle_result(self) -> None:
         handle_result(self, _server_instance)
 
+    # LLM: Thin clients poll the durable ingress receipt separately from task results so an active
+    # input consumed by the current turn can close without inventing a second response job.
+    # 函数用途: 转发普通消息投递状态查询。
+    def _handle_input_status(self) -> None:
+        handle_input_status(self, _server_instance)
+
+    # LLM: Control operation polling is separate from task results and active input receipts.
+    # 函数用途: 转发持久控制操作状态查询。
+    def _handle_control_status(self) -> None:
+        handle_control_status(self, _server_instance)
+
     def _handle_progress(self) -> None:
         handle_progress(self, _server_instance)
 
@@ -174,6 +202,16 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
 
     def _handle_control(self) -> None:
         handle_control(self, _server_instance)
+
+    # LLM: HTTP handler only forwards authenticated JSON to the Gateway client service; it never reads memory files itself.
+    # 函数用途: 处理薄客户端的记忆查询和显式保存请求。
+    def _handle_client_memory(self) -> None:
+        handle_client_memory(self, _server_instance)
+
+    # LLM: HTTP handler returns owner-scoped paired history and cannot expose raw transcript paths.
+    # 函数用途: 处理薄客户端的会话历史恢复请求。
+    def _handle_client_history(self) -> None:
+        handle_client_history(self, _server_instance)
 
     def _handle_stop(self) -> None:
         handle_stop(self, _server_instance)

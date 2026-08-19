@@ -19,10 +19,24 @@ from .authority import (
 )
 from .channels import redact_host_absolute_paths
 
-ControlKind = Literal["status", "steer", "stop", "goal", "audit", "verbose", "unsupported"]
+ControlKind = Literal[
+    "status",
+    "context",
+    "compact",
+    "effort",
+    "steer",
+    "stop",
+    "goal",
+    "audit",
+    "verbose",
+    "unsupported",
+]
 TaskCommandKind = Literal["audit_prepare"]
 
 _STATUS_COMMAND = re.compile(r"^/status(?:\s+(.*))?$", re.IGNORECASE)
+_CONTEXT_COMMAND = re.compile(r"^/context(?:\s+(.*))?$", re.IGNORECASE)
+_COMPACT_COMMAND = re.compile(r"^/compact(?:\s*(.*))?$", re.IGNORECASE | re.DOTALL)
+_EFFORT_COMMAND = re.compile(r"^/effort(?:\s+(\S+))?\s*$", re.IGNORECASE)
 _STEER_COMMAND = re.compile(r"^/btw(?:\s+(.*))?$", re.IGNORECASE)
 _STOP_COMMAND = re.compile(r"^/stop(?:\s+(.*))?$", re.IGNORECASE)
 _GOAL_COMMAND = re.compile(r"^/goal(?:\s+(.*))?$", re.IGNORECASE)
@@ -90,6 +104,9 @@ class NamedConversationWorkStatus:
     elapsed_seconds: float = 0.0
 
 
+# LLM: Control responses keep task status and transport delivery status separate; ``ok`` reports
+# command semantics while delivery_status preserves accepted/rejected/unknown for retry safety.
+# 类用途: 表示一条会话控制命令的结构化结果，并在跨进程边界保留投递三态。
 @dataclass(frozen=True)
 class ConversationControlResult:
     kind: ControlKind
@@ -97,6 +114,10 @@ class ConversationControlResult:
     message: str
     request_id: str = ""
     status: ConversationTaskStatus | None = None
+    delivery_status: Literal["", "accepted", "rejected", "unknown"] = ""
+    guidance_dedupe_key: str = ""
+    operation_id: str = ""
+    control_state: str = ""
 
     # LLM: HTTP/IM boundaries receive a plain typed projection, never a dataclass repr.
     # 函数用途：把控制结果转换成可以安全跨进程传输的普通字典。
@@ -107,6 +128,14 @@ class ConversationControlResult:
             "message": self.message,
             "request_id": self.request_id,
         }
+        if self.delivery_status:
+            payload["delivery_status"] = self.delivery_status
+        if self.guidance_dedupe_key:
+            payload["guidance_dedupe_key"] = self.guidance_dedupe_key
+        if self.operation_id:
+            payload["operation_id"] = self.operation_id
+        if self.control_state:
+            payload["control_state"] = self.control_state
         if self.status is not None:
             task_status = asdict(self.status)
             task_status["task"] = redact_host_absolute_paths(str(task_status.get("task") or ""))
@@ -139,6 +168,27 @@ def parse_conversation_command(
     raw = str(text or "").strip()
     if match := _STATUS_COMMAND.fullmatch(raw):
         return _argumentless_command("status", match.group(1), "/status")
+    if match := _CONTEXT_COMMAND.fullmatch(raw):
+        return _argumentless_command("context", match.group(1), "/context")
+    if match := _COMPACT_COMMAND.fullmatch(raw):
+        instructions = str(match.group(1) or "").strip()
+        return ConversationControlCommand(
+            "compact",
+            value=instructions,
+            operation="run",
+            usage="用法：/compact [可选的摘要要求]",
+        )
+    if match := _EFFORT_COMMAND.fullmatch(raw):
+        value = str(match.group(1) or "").strip().lower()
+        if value in {"current", "status"}:
+            value = ""
+        return ConversationControlCommand(
+            "effort",
+            value=value,
+            operation="set" if value and value != "help" else value or "view",
+            valid=not value or value in {"low", "medium", "high", "max", "auto", "help"},
+            usage="用法：/effort [low|medium|high|max|auto]",
+        )
     if match := _STOP_COMMAND.fullmatch(raw):
         return _argumentless_command("stop", match.group(1), "/stop")
     if match := _STEER_COMMAND.fullmatch(raw):
@@ -167,6 +217,12 @@ def parse_conversation_command(
             "steer",
             valid=False,
             usage="用法：/btw 你的补充要求",
+        )
+    if raw.lower().startswith("/effort"):
+        return ConversationControlCommand(
+            "effort",
+            valid=False,
+            usage="用法：/effort [low|medium|high|max|auto]",
         )
     if reject_unknown_slash and (name := system_slash_command_name(raw)):
         return ConversationControlCommand(
@@ -349,7 +405,7 @@ def _split_head(value: str) -> tuple[str, str]:
 # LLM: Status/stop reject trailing prose instead of silently changing command scope.
 # 函数用途：构造不接参数的控制命令；多余内容会返回明确用法。
 def _argumentless_command(
-    kind: Literal["status", "stop"],
+    kind: Literal["status", "context", "stop"],
     trailing: object,
     usage: str,
 ) -> ConversationControlCommand:

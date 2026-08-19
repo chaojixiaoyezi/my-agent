@@ -243,6 +243,15 @@ def test_ledger_records_each_physical_provider_attempt() -> None:
 
 
 def test_same_logical_model_turn_preserves_distinct_physical_attempts() -> None:
+    class _ContextSink:
+        def __init__(self) -> None:
+            self.rows: list[dict[str, object]] = []
+
+        def write_context_usage(self, usage: dict[str, object]) -> bool:
+            self.rows.append(dict(usage))
+            return True
+
+    sink = _ContextSink()
     agent = SimpleNamespace(
         backend=SimpleNamespace(
             name="test-backend",
@@ -265,6 +274,7 @@ def test_same_logical_model_turn_preserves_distinct_physical_attempts() -> None:
             tool_protocol_snapshot=make_test_protocol_snapshot(
                 run_id="run-1", source_protocol="native"
             ),
+            effective_on_chunk=sink,
         ),
     )
 
@@ -277,6 +287,12 @@ def test_same_logical_model_turn_preserves_distinct_physical_attempts() -> None:
     assert len(records) == 2
     assert records[0].metadata["logical_call_id"] == records[1].metadata["logical_call_id"]
     assert [record.metadata["physical_attempt"] for record in records] == [1, 2]
+    assert len(sink.rows) == 2
+    assert all(row["schema"] == "model_visible_context_usage.v1" for row in sink.rows)
+    assert [row["current_tokens"] for row in sink.rows] == [
+        records[0].input_tokens,
+        records[1].input_tokens,
+    ]
     assert model_call_summary(agent, request_id="request-1") == {
         "schema": "model_call_summary.v1",
         "logical_model_turn_count": 1,
@@ -288,6 +304,62 @@ def test_same_logical_model_turn_preserves_distinct_physical_attempts() -> None:
             "started": 2,
             "first_token": 0,
             "finished": 0,
+            "failed": 0,
+            "timed_out": 0,
+        },
+        "backends": ["test-backend"],
+        "models": ["test-model"],
+    }
+
+
+def test_summary_counts_all_calls_after_detail_retention_limit() -> None:
+    agent = SimpleNamespace()
+    ledger = ModelCallLedger(options=ModelCallLedgerOptions(max_records=4))
+    agent._model_call_ledger = ledger
+
+    for index in range(7):
+        call_id = f"call-{index}"
+        ledger.started(
+            ModelCallStartedParams(
+                call_id=call_id,
+                backend="test-backend",
+                model="test-model",
+                input_tokens=10,
+                request_id="request-over-limit",
+                run_id="run-over-limit",
+                metadata={"logical_call_id": f"logical-{index // 2}"},
+            )
+        )
+        ledger.provider_attempt(
+            ModelCallProviderAttemptParams(
+                call_id=call_id,
+                attempt_id=f"http-{index}-1",
+                status="failed" if index == 3 else "response_opened",
+                retry_scheduled=index == 3,
+            )
+        )
+        if index == 3:
+            ledger.provider_attempt(
+                ModelCallProviderAttemptParams(
+                    call_id=call_id,
+                    attempt_id=f"http-{index}-2",
+                    status="response_opened",
+                )
+            )
+        ledger.finished(ModelCallFinishParams(call_id=call_id, output_tokens=1))
+
+    assert len(ledger.records()) == 4
+    assert model_call_summary(agent, request_id="request-over-limit") == {
+        "schema": "model_call_summary.v1",
+        "logical_model_turn_count": 4,
+        "physical_model_attempt_count": 7,
+        "model_retry_count": 3,
+        "provider_http_attempt_count": 8,
+        "provider_http_retry_count": 1,
+        "status_counts": {
+            "started": 0,
+            "first_token": 0,
+            "finished": 7,
             "failed": 0,
             "timed_out": 0,
         },

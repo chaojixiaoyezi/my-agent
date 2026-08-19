@@ -23,6 +23,7 @@ from ...agent.conversation.control_commands import (
     render_conversation_task_status,
     render_verbose_control,
 )
+from ...agent.conversation.models import new_id
 
 
 @dataclass(frozen=True)
@@ -47,11 +48,13 @@ class ChatControlExecution:
 def execute_chat_control(
     execution: ChatControlExecution,
     command: ConversationControlCommand,
+    *,
+    message_id: str = "",
 ) -> ConversationControlResult:
     if not command.valid:
         return ConversationControlResult(command.kind, False, command.usage)
     if execution.use_gateway:
-        return _execute_gateway_control(execution, command)
+        return _execute_gateway_control(execution, command, message_id=message_id)
     return _execute_local_control(execution, command)
 
 
@@ -60,51 +63,147 @@ def execute_chat_control(
 def _execute_gateway_control(
     execution: ChatControlExecution,
     command: ConversationControlCommand,
+    *,
+    message_id: str = "",
 ) -> ConversationControlResult:
     port = int(getattr(getattr(execution.agent, "config", None), "gateway_port", 0) or 0)
     if port <= 0:
         return ConversationControlResult(command.kind, False, "Gateway 控制入口未启用。")
+    expected_turn_id = (
+        str(execution.state.request_id or "").strip()
+        if command.kind in {"steer", "stop"}
+        else ""
+    )
+    client_message_id = str(message_id or new_id("control")).strip()
     payload = {
         "command": _command_text(command),
         "user_id": "local-agent",
         "channel": "chat",
         "conversation_id": execution.state.session_id or "default",
-    }
-    request = urllib.request.Request(
-        f"http://127.0.0.1:{port}/control",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "X-User-Id": "local-agent",
-            "X-Channel": "chat",
+        "metadata": {
+            "message_id": client_message_id,
+            "expected_turn_id": expected_turn_id,
         },
-    )
-    timeout = max(
-        10.0,
-        float(
-            getattr(
-                getattr(execution.agent, "config", None),
-                "gateway_service_command_timeout_seconds",
-                30,
-            )
-            or 30
-        ),
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            body = json.loads(response.read().decode("utf-8", "replace"))
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+    }
+    timeout = _gateway_control_timeout(execution, command)
+    body: dict[str, object] = {}
+    last_error: BaseException | None = None
+    for _attempt in range(2):
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/control",
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-User-Id": "local-agent",
+                "X-Channel": "chat",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                decoded = json.loads(response.read().decode("utf-8", "replace"))
+                body = decoded if isinstance(decoded, dict) else {}
+                break
+        except urllib.error.HTTPError as exc:
+            body = _http_error_body(exc)
+            return _gateway_control_result_from_body(command.kind, body)
+        except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+            last_error = exc
+    if not body:
         return ConversationControlResult(
             command.kind,
             False,
-            f"Gateway 控制入口暂时不可用：{type(exc).__name__}。",
+            f"Gateway 控制入口暂时不可用：{type(last_error).__name__ if last_error else 'UnknownError'}。",
+            control_state="transport_unknown",
         )
-    return ConversationControlResult(
-        command.kind,
-        bool(body.get("ok")),
-        str(body.get("message") or "控制命令没有返回结果。"),
-        request_id=str(body.get("request_id") or ""),
+    return _gateway_control_result_from_body(command.kind, body)
+
+
+# LLM: Polling a stable control operation is read-only; it never resubmits the command text or
+# invents a new client message id after a TUI/adapter reconnect.
+# 函数用途: 按 Gateway 返回的 operation_id 查询控制命令最终状态。
+def request_gateway_control_status(
+    execution: ChatControlExecution,
+    operation_id: str,
+) -> ConversationControlResult:
+    stable_id = str(operation_id or "").strip()
+    port = int(getattr(getattr(execution.agent, "config", None), "gateway_port", 0) or 0)
+    if not stable_id or port <= 0:
+        return ConversationControlResult(
+            "unsupported",
+            False,
+            "控制操作编号无效。",
+            operation_id=stable_id,
+            control_state="transport_unknown",
+        )
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/control-status/{stable_id}",
+        headers={"X-User-Id": "local-agent", "X-Channel": "chat"},
     )
+    try:
+        with urllib.request.urlopen(request, timeout=2.0) as response:
+            decoded = json.loads(response.read().decode("utf-8", "replace"))
+            body = decoded if isinstance(decoded, dict) else {}
+    except urllib.error.HTTPError as exc:
+        body = _http_error_body(exc)
+    except (urllib.error.URLError, OSError, json.JSONDecodeError):
+        return ConversationControlResult(
+            "unsupported",
+            False,
+            "控制操作状态暂时无法读取。",
+            operation_id=stable_id,
+            control_state="transport_unknown",
+        )
+    return _gateway_control_result_from_body(
+        str(body.get("kind") or "unsupported"),
+        body,
+    )
+
+
+# LLM: Control HTTP responses preserve operation identity and delivery state separately from the
+# user-facing message; callers must never infer retry safety from ``ok`` or prose.
+# 函数用途: 把控制 HTTP 字典恢复成共享 ConversationControlResult。
+def _gateway_control_result_from_body(
+    fallback_kind: str,
+    body: dict[str, object],
+) -> ConversationControlResult:
+    delivery_status = str(body.get("delivery_status") or "")
+    if delivery_status not in {"", "accepted", "rejected", "unknown"}:
+        delivery_status = ""
+    control_state = str(body.get("control_state") or "")
+    error_code = str(body.get("error_code") or "")
+    try:
+        http_status = int(body.get("_http_status") or 0)
+    except (TypeError, ValueError):
+        http_status = 0
+    if error_code == "IDEMPOTENCY_CONFLICT":
+        control_state = "conflict"
+    elif http_status in {400, 401, 403}:
+        control_state = "rejected"
+    elif http_status >= 429:
+        control_state = "transport_unknown"
+    return ConversationControlResult(
+        str(body.get("kind") or fallback_kind or "unsupported"),
+        bool(body.get("ok")),
+        str(body.get("message") or body.get("error") or "控制命令没有返回结果。"),
+        request_id=str(body.get("request_id") or ""),
+        delivery_status=delivery_status,
+        guidance_dedupe_key=str(body.get("guidance_dedupe_key") or ""),
+        operation_id=str(body.get("operation_id") or ""),
+        control_state=control_state,
+    )
+
+
+# LLM: Structured HTTP errors such as idempotency conflicts are terminal protocol facts; reading
+# their JSON body prevents the client from retrying them as transport failures.
+# 函数用途: 从 urllib HTTPError 中读取控制接口的结构化错误对象。
+def _http_error_body(exc: urllib.error.HTTPError) -> dict[str, object]:
+    try:
+        payload = json.loads(exc.read().decode("utf-8", "replace"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+    result = payload if isinstance(payload, dict) else {}
+    result["_http_status"] = int(exc.code)
+    return result
 
 
 # LLM: Local control targets only the exact run currently mounted in this chat window.
@@ -115,6 +214,24 @@ def _execute_local_control(
 ) -> ConversationControlResult:
     state = execution.state
     request_id = str(state.request_id or "").strip()
+    if command.kind in {"context", "compact"}:
+        return ConversationControlResult(
+            command.kind,
+            False,
+            f"/{command.kind} 需要使用 canonical Gateway 会话；请用 chat --gateway。",
+        )
+    if command.kind == "effort":
+        viewing = command.operation in {"view", "help"}
+        prefix = (
+            "用法：/effort [low|medium|high|max|auto]\n"
+            if command.operation == "help"
+            else ""
+        )
+        return ConversationControlResult(
+            "effort",
+            viewing,
+            prefix + "当前模型接口由供应商管理推理强度，未声明可调 effort 档位；未改变任何模型参数。",
+        )
     if command.kind == "status":
         status = _local_status(execution)
         return ConversationControlResult(
@@ -265,6 +382,12 @@ def _cancel_local_subagents(agent: object, request_id: str) -> None:
 # LLM: Re-serialization preserves the parsed command instead of trusting arbitrary caller text.
 # 函数用途：把结构化命令还原成 Gateway 可以再次校验的规范文本。
 def _command_text(command: ConversationControlCommand) -> str:
+    if command.kind == "context":
+        return "/context"
+    if command.kind == "compact":
+        return f"/compact {command.value}".rstrip()
+    if command.kind == "effort":
+        return f"/effort {command.value}".rstrip()
     if command.kind == "steer":
         return f"/btw {command.value}"
     if command.kind == "goal":
@@ -299,6 +422,27 @@ def _command_text(command: ConversationControlCommand) -> str:
     if command.kind == "unsupported":
         return f"/{command.operation or 'unsupported'}"
     return f"/{command.kind}"
+
+
+# LLM: Manual compact may make one real summary-model call, so its client timeout must cover the
+# provider request timeout; all cheap controls retain the bounded service-command timeout.
+# 函数用途: 为普通控制和手动压缩选择不同的 HTTP 等待上限。
+def _gateway_control_timeout(
+    execution: ChatControlExecution,
+    command: ConversationControlCommand,
+) -> float:
+    config = getattr(execution.agent, "config", None)
+    service_timeout = max(
+        10.0,
+        float(getattr(config, "gateway_service_command_timeout_seconds", 30) or 30),
+    )
+    if command.kind != "compact":
+        return service_timeout
+    provider_timeout = max(
+        0.0,
+        float(getattr(config, "request_timeout", 0) or 0),
+    )
+    return max(service_timeout, provider_timeout + 30.0)
 
 
 def _duration_token(seconds: int) -> str:

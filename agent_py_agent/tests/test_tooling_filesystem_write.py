@@ -24,6 +24,16 @@ def test_write_file_writes_text_and_creates_parent_dirs(tmp_path: Path) -> None:
 
     assert result.ok
     assert (workspace / "deep/nested/file.txt").read_text(encoding="utf-8") == "hello"
+    assert result.result_envelope["display"] == {
+        "kind": "write",
+        "path": "deep/nested/file.txt",
+        "mode": "overwrite",
+        "bytes": 5,
+        "binary": False,
+        "total_lines": 1,
+        "lines": ["hello"],
+        "hidden_lines": 0,
+    }
 
 
 def test_write_file_overwrites_atomically(tmp_path: Path) -> None:
@@ -37,6 +47,11 @@ def test_write_file_overwrites_atomically(tmp_path: Path) -> None:
 
     assert result.ok
     assert target.read_text(encoding="utf-8") == "new"
+    display = result.result_envelope["display"]
+    assert display["kind"] == "diff"
+    assert display["path"] == "existing.txt"
+    assert display["lines_added"] == 1
+    assert display["lines_removed"] == 1
 
 
 def test_write_file_appends_atomically(tmp_path: Path) -> None:
@@ -361,8 +376,43 @@ def test_apply_patch_add_update_delete_and_move(tmp_path: Path) -> None:
     assert add.ok
     assert update.ok
     assert delete.ok
+    assert add.result_envelope["display"]["kind"] == "diff"
+    assert add.result_envelope["display"]["lines_added"] == 2
+    assert update.result_envelope["display"]["path"] == "moved.txt"
+    assert update.result_envelope["display"]["lines_added"] == 1
+    assert update.result_envelope["display"]["lines_removed"] == 1
+    assert delete.result_envelope["display"]["lines_removed"] == 2
     assert not (workspace / "notes.txt").exists()
     assert not (workspace / "moved.txt").exists()
+
+
+def test_apply_patch_returns_bounded_multi_file_diff_display(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "old.txt").write_text("before\n", encoding="utf-8")
+    tool = ApplyPatchTool(workspace)
+
+    result = tool.execute(
+        {
+            "patch": (
+                "*** Begin Patch\n"
+                "*** Update File: old.txt\n"
+                "-before\n"
+                "+after\n"
+                "*** Add File: new.txt\n"
+                "+created\n"
+                "*** End Patch\n"
+            )
+        }
+    )
+
+    assert result.ok
+    display = result.result_envelope["display"]
+    assert display["kind"] == "patch"
+    assert display["hidden_files"] == 0
+    assert [item["path"] for item in display["files"]] == ["old.txt", "new.txt"]
+    assert display["files"][0]["lines_removed"] == 1
+    assert display["files"][1]["lines_added"] == 1
 
 
 def test_apply_patch_rejects_unmatched_context(tmp_path: Path) -> None:

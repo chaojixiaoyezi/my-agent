@@ -25,6 +25,20 @@ from agent_py_agent.cli import gateway_client
 from agent_py_agent.cli.chat_parts.gateway_client import poll_gateway_chunks
 
 
+# LLM: Client polling tests must create the same canonical terminal envelope as the worker; a
+# standalone response dict is intentionally not accepted as completion evidence.
+# 函数用途: 为 Gateway 客户端轮询测试构造唯一终态归档。
+def _terminal_envelope(request_id: str, response: dict) -> dict:
+    terminal_response = {"id": request_id, **response}
+    return {
+        "schema_version": "gateway_terminal_request.v1",
+        "id": request_id,
+        "status": str(terminal_response.get("status") or "done"),
+        "turn_phase": "closed",
+        "terminal_response": terminal_response,
+    }
+
+
 def test_default_gateway_entry_can_reach_chat_handler():
     """默认 gateway 入口必须能找到 chat 处理函数。"""
 
@@ -56,6 +70,30 @@ def test_submit_gateway_ask_uses_collision_safe_ids(tmp_path, monkeypatch):
     assert len(list(paths.inbox.glob("*.json"))) == len(ids)
 
 
+def test_submit_gateway_ask_records_explicit_rich_transcript_capability(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+
+    _request_id, request_path, _response_path = submit_gateway_ask(
+        paths,
+        params=GatewayAskParams(
+            prompt="hello",
+            save=False,
+            interactive_approvals=True,
+            rich_transcript=True,
+        ),
+    )
+
+    payload = read_json_file(request_path)
+    assert payload["client_capabilities"] == {
+        "tool_approval": True,
+        "rich_transcript": True,
+    }
+
+
 def test_gateway_json_polling_suppresses_stream_chunks(tmp_path, capsys):
     """`gateway ask --json` must keep stdout parseable JSON, without streamed text before it."""
 
@@ -77,12 +115,16 @@ def test_gateway_json_polling_suppresses_stream_chunks(tmp_path, capsys):
     )
     paths.processing.mkdir(parents=True)
     paths.responses.mkdir(parents=True)
+    paths.terminal.mkdir(parents=True)
     (paths.processing / f"{request_id}.chunks.jsonl").write_text(
         json.dumps({"text": "STREAMED"}) + "\n",
         encoding="utf-8",
     )
     response_path = paths.responses / f"{request_id}.json"
-    response_path.write_text(json.dumps({"ok": True, "response": "DONE"}), encoding="utf-8")
+    (paths.terminal / f"{request_id}.json").write_text(
+        json.dumps(_terminal_envelope(request_id, {"ok": True, "response": "DONE"})),
+        encoding="utf-8",
+    )
 
     result = gateway_client._poll_gateway_response(
         gateway_client.GatewayAskContext(
@@ -102,7 +144,7 @@ def test_gateway_json_polling_suppresses_stream_chunks(tmp_path, capsys):
     assert capsys.readouterr().out == ""
 
 
-def test_gateway_poll_reports_bad_response_json(tmp_path):
+def test_gateway_poll_reports_bad_canonical_terminal_json(tmp_path):
     request_id = "gw-bad-response"
     paths = GatewayPaths(
         root=tmp_path,
@@ -121,8 +163,9 @@ def test_gateway_poll_reports_bad_response_json(tmp_path):
     )
     paths.processing.mkdir(parents=True)
     paths.responses.mkdir(parents=True)
+    paths.terminal.mkdir(parents=True)
     response_path = paths.responses / f"{request_id}.json"
-    response_path.write_text("{bad json", encoding="utf-8")
+    (paths.terminal / f"{request_id}.json").write_text("{bad json", encoding="utf-8")
 
     result = gateway_client._poll_gateway_response(
         gateway_client.GatewayAskContext(
@@ -138,10 +181,10 @@ def test_gateway_poll_reports_bad_response_json(tmp_path):
     payload = result.payload
 
     assert payload["error_code"] == "GATEWAY_RESPONSE_LOAD_ERROR"
-    assert payload["response_load_error"]["context"] == "gateway.cli.response.read"
+    assert payload["response_load_error"]["context"] == "gateway.cli.terminal.read"
 
 
-def test_gateway_result_reports_bad_response_json(tmp_path, monkeypatch, capsys):
+def test_gateway_result_reports_bad_canonical_terminal_json(tmp_path, monkeypatch, capsys):
     agent = SimpleAgent(
         AgentConfig(
             model_backend="echo",
@@ -154,8 +197,8 @@ def test_gateway_result_reports_bad_response_json(tmp_path, monkeypatch, capsys)
     )
     request_id = "gw-result-bad-response"
     paths = gateway_paths(agent)
-    paths.responses.mkdir(parents=True, exist_ok=True)
-    gateway_response_path(paths, request_id).write_text("{bad json", encoding="utf-8")
+    paths.terminal.mkdir(parents=True, exist_ok=True)
+    (paths.terminal / f"{request_id}.json").write_text("{bad json", encoding="utf-8")
     monkeypatch.setattr(gateway_client, "make_agent", lambda _args: agent)
 
     code = gateway_client.cmd_gateway_result(
@@ -165,7 +208,7 @@ def test_gateway_result_reports_bad_response_json(tmp_path, monkeypatch, capsys)
     assert code == 2
     payload = json.loads(capsys.readouterr().out)
     assert payload["error_code"] == "GATEWAY_RESPONSE_LOAD_ERROR"
-    assert payload["response_load_error"]["context"] == "gateway.cli.result.response.read"
+    assert payload["response_load_error"]["context"] == "gateway.cli.result.terminal.read"
 
 
 def test_gateway_stream_chunk_skips_bad_line_and_continues(tmp_path, capsys):
@@ -208,6 +251,27 @@ def test_gateway_stream_reads_archived_chunk_file(tmp_path, capsys):
     captured = capsys.readouterr()
     assert consumed == 1
     assert captured.out == "ARCHIVED"
+
+
+def test_gateway_stream_waits_for_incomplete_jsonl_tail(tmp_path, capsys):
+    class Spinner:
+        def stop(self) -> None:
+            pass
+
+    chunk_path = tmp_path / "req.chunks.jsonl"
+    chunk_path.write_text('{"text":"半截', encoding="utf-8")
+    state = gateway_client.GatewayStreamState()
+
+    assert gateway_client._stream_chunk_lines(chunk_path, Spinner(), state) == 0
+    assert state.chunk_offset == 0
+    assert capsys.readouterr().err == ""
+    with chunk_path.open("a", encoding="utf-8") as handle:
+        handle.write('内容"}\n')
+
+    assert gateway_client._stream_chunk_lines(chunk_path, Spinner(), state) == 1
+    captured = capsys.readouterr()
+    assert captured.out == "半截内容"
+    assert captured.err == ""
 
 
 def test_typed_commentary_is_visible_but_does_not_hide_final_response(tmp_path, capsys):
@@ -270,19 +334,24 @@ def test_chat_gateway_poll_drains_chunks_when_response_is_ready(tmp_path):
     from agent_py_agent.cli.chat_parts.gateway_client import GatewayChunkPollRequest
 
     chunk_path = tmp_path / "req.chunks.jsonl"
-    response_path = tmp_path / "response.json"
+    terminal_path = tmp_path / "terminal.json"
     chunk_path.write_text(
         json.dumps({"text": "hello"}) + "\n" + json.dumps({"text": " world"}) + "\n",
         encoding="utf-8",
     )
-    response_path.write_text(json.dumps({"ok": True, "response": "hello world"}), encoding="utf-8")
+    terminal_path.write_text(
+        json.dumps(
+            _terminal_envelope("terminal", {"ok": True, "response": "hello world"})
+        ),
+        encoding="utf-8",
+    )
     seen: list[str] = []
     visible_chunks_ref = [0]
 
     response = poll_gateway_chunks(
         GatewayChunkPollRequest(
             chunk_path,
-            response_path,
+            terminal_path,
             9999999999,
             lambda chunk: seen.append(chunk) or True,
             [0],
@@ -300,7 +369,7 @@ def test_chat_gateway_poll_uses_processing_activity_as_inactivity_lease(tmp_path
 
     chunk_path = tmp_path / "req.chunks.jsonl"
     processing_path = tmp_path / "req.json"
-    response_path = tmp_path / "response.json"
+    terminal_path = tmp_path / "terminal.json"
     processing_path.write_text("{}", encoding="utf-8")
 
     def active_request() -> None:
@@ -309,8 +378,13 @@ def test_chat_gateway_poll_uses_processing_activity_as_inactivity_lease(tmp_path
         time.sleep(0.04)
         processing_path.write_text('{"heartbeat": 2}', encoding="utf-8")
         time.sleep(0.04)
-        response_path.write_text(
-            json.dumps({"ok": True, "response": "finished after initial deadline"}),
+        terminal_path.write_text(
+            json.dumps(
+                _terminal_envelope(
+                    "terminal",
+                    {"ok": True, "response": "finished after initial deadline"},
+                )
+            ),
             encoding="utf-8",
         )
 
@@ -319,7 +393,7 @@ def test_chat_gateway_poll_uses_processing_activity_as_inactivity_lease(tmp_path
     response = poll_gateway_chunks(
         GatewayChunkPollRequest(
             chunk_path,
-            response_path,
+            terminal_path,
             time.time() + 0.05,
             lambda _chunk: False,
             [0],
@@ -336,13 +410,13 @@ def test_chat_commentary_does_not_claim_terminal_response_stream(tmp_path):
     from agent_py_agent.cli.chat_parts.gateway_client import GatewayChunkPollRequest
 
     chunk_path = tmp_path / "req.chunks.jsonl"
-    response_path = tmp_path / "response.json"
+    terminal_path = tmp_path / "req.json"
     chunk_path.write_text(
         json.dumps({"kind": "assistant_commentary", "text": "我先检查。"}) + "\n",
         encoding="utf-8",
     )
-    response_path.write_text(
-        json.dumps({"ok": True, "response": "检查完成。"}),
+    terminal_path.write_text(
+        json.dumps(_terminal_envelope("req", {"ok": True, "response": "检查完成。"})),
         encoding="utf-8",
     )
     seen: list[str] = []
@@ -351,7 +425,7 @@ def test_chat_commentary_does_not_claim_terminal_response_stream(tmp_path):
     response = poll_gateway_chunks(
         GatewayChunkPollRequest(
             chunk_path,
-            response_path,
+            terminal_path,
             9999999999,
             lambda chunk: seen.append(chunk) or True,
             [0],
@@ -362,6 +436,72 @@ def test_chat_commentary_does_not_claim_terminal_response_stream(tmp_path):
     assert response["response"] == "检查完成。"
     assert seen == ["我先检查。"]
     assert visible_chunks_ref == [0]
+
+
+def test_chat_gateway_typed_consumer_bypasses_legacy_projection(tmp_path):
+    from agent_py_agent.cli.chat_parts.gateway_client import GatewayChunkPollRequest
+
+    chunk_path = tmp_path / "req.chunks.jsonl"
+    terminal_path = tmp_path / "req.json"
+    rows = [
+        {"kind": "assistant_commentary", "text": "typed commentary"},
+        {"kind": "assistant_final", "text": "typed final"},
+    ]
+    chunk_path.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    terminal_path.write_text(
+        json.dumps(_terminal_envelope("req", {"ok": True, "response": "typed final"})),
+        encoding="utf-8",
+    )
+    typed: list[dict] = []
+    legacy: list[str] = []
+    visible_chunks_ref = [0]
+
+    response = poll_gateway_chunks(
+        GatewayChunkPollRequest(
+            chunk_path,
+            terminal_path,
+            9999999999,
+            lambda chunk: legacy.append(chunk) or True,
+            [0],
+            visible_chunks_ref,
+            on_event=lambda event: typed.append(event) or True,
+        )
+    )
+
+    assert response["response"] == "typed final"
+    assert typed == rows
+    assert legacy == []
+    assert visible_chunks_ref == [1]
+
+
+def test_chat_gateway_typed_consumer_failure_falls_back_to_text(tmp_path, capsys):
+    from agent_py_agent.cli.chat_parts import gateway_client as chat_gateway_client
+    from agent_py_agent.cli.chat_parts.gateway_client import ChunkFilePollRequest
+
+    chunk_path = tmp_path / "req.chunks.jsonl"
+    chunk_path.write_text(json.dumps({"text": "fallback"}) + "\n", encoding="utf-8")
+    seen: list[str] = []
+
+    def broken_consumer(_event):
+        raise RuntimeError("render failed")
+
+    chunks, visible, _offset = chat_gateway_client._poll_chunk_file(
+        ChunkFilePollRequest(
+            chunk_path,
+            lambda chunk: seen.append(chunk) or True,
+            0,
+            0,
+            0,
+            broken_consumer,
+        )
+    )
+
+    assert (chunks, visible) == (1, 1)
+    assert seen == ["fallback"]
+    assert "consumer_exception" in capsys.readouterr().err
 
 
 def test_chat_gateway_chunk_poll_reads_only_new_tail(tmp_path):
@@ -384,6 +524,32 @@ def test_chat_gateway_chunk_poll_reads_only_new_tail(tmp_path):
     assert seen == ["first", "second"]
     assert chunks == 2
     assert visible == 2
+
+
+def test_chat_gateway_chunk_poll_keeps_partial_tail_for_next_read(tmp_path, capsys):
+    from agent_py_agent.cli.chat_parts import gateway_client as chat_gateway_client
+    from agent_py_agent.cli.chat_parts.gateway_client import ChunkFilePollRequest
+
+    chunk_path = tmp_path / "req.chunks.jsonl"
+    chunk_path.write_text('{"text":"未写完', encoding="utf-8")
+    seen: list[str] = []
+
+    chunks, visible, offset = chat_gateway_client._poll_chunk_file(
+        ChunkFilePollRequest(chunk_path, lambda chunk: seen.append(chunk) or True, 0, 0, 0)
+    )
+    assert (chunks, visible, offset) == (0, 0, 0)
+    assert capsys.readouterr().err == ""
+    with chunk_path.open("a", encoding="utf-8") as handle:
+        handle.write('的行"}\n')
+
+    chunks, visible, offset = chat_gateway_client._poll_chunk_file(
+        ChunkFilePollRequest(chunk_path, lambda chunk: seen.append(chunk) or True, chunks, visible, offset)
+    )
+
+    assert seen == ["未写完的行"]
+    assert (chunks, visible) == (1, 1)
+    assert offset == chunk_path.stat().st_size
+    assert capsys.readouterr().err == ""
 
 
 def test_chat_gateway_chunk_poll_reads_archived_tail(tmp_path):
@@ -412,12 +578,15 @@ def test_chat_gateway_poll_skips_bad_chunk_line_and_continues(tmp_path):
     from agent_py_agent.cli.chat_parts.gateway_client import GatewayChunkPollRequest
 
     chunk_path = tmp_path / "req.chunks.jsonl"
-    response_path = tmp_path / "response.json"
+    terminal_path = tmp_path / "req.json"
     chunk_path.write_text(
         "{bad json\n" + json.dumps({"text": "ok"}) + "\n",
         encoding="utf-8",
     )
-    response_path.write_text(json.dumps({"ok": True, "response": "done"}), encoding="utf-8")
+    terminal_path.write_text(
+        json.dumps(_terminal_envelope("req", {"ok": True, "response": "done"})),
+        encoding="utf-8",
+    )
     seen: list[str] = []
     visible_chunks_ref = [0]
     chunks_printed_ref = [0]
@@ -425,7 +594,7 @@ def test_chat_gateway_poll_skips_bad_chunk_line_and_continues(tmp_path):
     response = poll_gateway_chunks(
         GatewayChunkPollRequest(
             chunk_path,
-            response_path,
+            terminal_path,
             9999999999,
             lambda chunk: seen.append(chunk) or True,
             chunks_printed_ref,
@@ -439,18 +608,18 @@ def test_chat_gateway_poll_skips_bad_chunk_line_and_continues(tmp_path):
     assert visible_chunks_ref == [1]
 
 
-def test_chat_gateway_poll_reports_bad_response_json(tmp_path):
+def test_chat_gateway_poll_reports_bad_canonical_terminal_json(tmp_path):
     from agent_py_agent.cli.chat_parts.gateway_client import GatewayChunkPollRequest
 
     chunk_path = tmp_path / "req.chunks.jsonl"
-    response_path = tmp_path / "response.json"
+    terminal_path = tmp_path / "req.json"
     chunk_path.write_text("", encoding="utf-8")
-    response_path.write_text("{bad json", encoding="utf-8")
+    terminal_path.write_text("{bad json", encoding="utf-8")
 
     response = poll_gateway_chunks(
         GatewayChunkPollRequest(
             chunk_path,
-            response_path,
+            terminal_path,
             time.time() + 0.2,
             lambda _chunk: False,
             [0],
@@ -458,7 +627,7 @@ def test_chat_gateway_poll_reports_bad_response_json(tmp_path):
     )
 
     assert response["error_code"] == "GATEWAY_RESPONSE_LOAD_ERROR"
-    assert response["response_load_error"]["context"] == "gateway.chat.response.read"
+    assert response["response_load_error"]["context"] == "gateway.chat.terminal.read"
 
 
 def test_gateway_response_poll_state_reads_only_when_file_changes(tmp_path):
@@ -512,19 +681,24 @@ def test_chat_gateway_poll_consumes_but_does_not_show_invisible_chunks(tmp_path)
     from agent_py_agent.cli.chat_parts.gateway_client import GatewayChunkPollRequest
 
     chunk_path = tmp_path / "req.chunks.jsonl"
-    response_path = tmp_path / "response.json"
+    terminal_path = tmp_path / "req.json"
     chunk_path.write_text(
         json.dumps({"text": "   \n"}) + "\n",
         encoding="utf-8",
     )
-    response_path.write_text(json.dumps({"ok": True, "response": "archived response"}), encoding="utf-8")
+    terminal_path.write_text(
+        json.dumps(
+            _terminal_envelope("req", {"ok": True, "response": "archived response"})
+        ),
+        encoding="utf-8",
+    )
 
     chunks_printed_ref = [0]
     visible_chunks_ref = [0]
     response = poll_gateway_chunks(
         GatewayChunkPollRequest(
             chunk_path,
-            response_path,
+            terminal_path,
             9999999999,
             lambda _chunk: False,
             chunks_printed_ref,
@@ -584,7 +758,7 @@ def test_plain_gateway_commentary_does_not_hide_terminal_response(
         ),
         agent=SimpleNamespace(config=SimpleNamespace(agent_name="agent")),
         args=SimpleNamespace(no_save=False, gateway_timeout=1),
-        paths=SimpleNamespace(),
+        paths=SimpleNamespace(terminal=tmp_path / "terminal"),
         assistant_outputs=[],
         build_history_context=lambda: "",
     )
@@ -651,7 +825,7 @@ def test_plain_gateway_user_stop_is_silent(
         ),
         agent=SimpleNamespace(config=SimpleNamespace(agent_name="agent")),
         args=SimpleNamespace(no_save=False, gateway_timeout=1),
-        paths=SimpleNamespace(),
+        paths=SimpleNamespace(terminal=tmp_path / "terminal"),
         assistant_outputs=[],
         build_history_context=lambda: "",
     )
@@ -724,8 +898,8 @@ def test_plain_local_user_stop_is_silent(monkeypatch):
     assert timing_calls == []
 
 
-def test_gateway_worker_reports_processing_lease_write_failure(tmp_path, monkeypatch):
-    """A lease file write failure must surface as a local gateway failure."""
+def test_gateway_claim_fence_write_failure_rolls_back_to_inbox(tmp_path, monkeypatch):
+    """A claim-fence write failure must leave a retryable inbox request, not a half claim."""
 
     agent = SimpleAgent(
         AgentConfig(
@@ -760,18 +934,21 @@ def test_gateway_worker_reports_processing_lease_write_failure(tmp_path, monkeyp
             raise OSError("simulated long-path lease write failure")
         return None
 
-    monkeypatch.setattr(
-        "agent_py_agent.agent.gateway_parts.request_worker.update_json_file_atomic",
-        lambda path, _updater, **_kwargs: fail_processing_lease_write(path, {}),
-    )
+    from agent_py_agent.agent.gateway_parts import queue_service
+
+    original_write = queue_service.write_json_file_atomic
+
+    def write_or_fail(path, payload):
+        if path.parent == paths.processing and path.name == f"{request_id}.json":
+            return fail_processing_lease_write(path, payload)
+        return original_write(path, payload)
+
+    monkeypatch.setattr(queue_service, "write_json_file_atomic", write_or_fail)
 
     processed = _process_gateway_requests(agent, paths)
 
-    assert processed == 1
-    assert gateway_response_path(paths, request_id).exists()
-    assert (paths.failed / f"{request_id}.json").exists()
+    assert processed == 0
+    assert (paths.inbox / f"{request_id}.json").exists()
     assert not (paths.processing / f"{request_id}.json").exists()
-    response = read_json_file(gateway_response_path(paths, request_id))
-    assert response["ok"] is False
-    assert response["error_code"] == "GATEWAY_REQUEST_PROCESSING_STATE_WRITE_ERROR"
-    assert response["processing_state_error"]["context"] == "gateway.worker.processing_state.write"
+    assert not (paths.terminal / f"{request_id}.json").exists()
+    assert not gateway_response_path(paths, request_id).exists()

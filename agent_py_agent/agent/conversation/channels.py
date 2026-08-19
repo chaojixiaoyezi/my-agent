@@ -1,3 +1,6 @@
+# LLM: 本模块定义通道投递、用户可见投影和本地 transcript 路由常量；调用方不得从正文猜路由或授权。
+# 模块用途: 为 Gateway、CLI 和消息出口提供统一的通道身份、投递信封与安全正文投影。
+
 from __future__ import annotations
 
 import re
@@ -11,6 +14,9 @@ from .user_visible_text import sanitize_user_visible_text
 # DeliveryService 以 registry capabilities 为权威，因此新增 IM 通过注册 proactive 能力扩展，不改此常量。
 # internal/chat/gateway-cli 没有主动能力，不会外发。
 PROACTIVE_PUSH_CHANNELS = frozenset({"feishu"})
+LOCAL_CHAT_CHANNEL = "chat"
+LOCAL_CHAT_SOURCE = "cli_chat"
+LOCAL_AGENT_USER_ID = "local-agent"
 
 # LLM: 本地会话路由的交付提交是权威 transcript append，不能按“未注册 IM”
 # 处理。未知外部通道不在此集合中，因此仍 fail-closed，不会因为没有

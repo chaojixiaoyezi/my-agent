@@ -119,14 +119,42 @@
   compact continuation 通过 typed carrier 保留，不能改成 system injection、任务专属 guidance history 或第二份 prompt。
   子代理生命周期事件也在同一 active turn 的安全点按精确 task id 读取；新事件使旧模型动作失效，只有模型成功
   读取后才确认消费。启动当前后台轮的 wake 仍由 scheduler 单独确认，禁止 active turn 与 scheduler 双消费。
-  `/status`、`/btw`、`/stop`、`/goal`、`/verbose` 必须绕过同会话普通消息队列，由 CLI、Feishu
+  `/status`、`/context`、`/compact`、`/effort`、`/btw`、`/stop`、`/goal`、`/verbose` 必须绕过同会话普通消息队列，由 CLI、Feishu
   和未来 IM 共用；`/audit` 只把去前缀后的正文作为新任务排队。旧 `/btw` 列表、永久 prompt 注入和
   `/btw-clear` 不再是产品能力。Gateway 生命周期 `POST /stop` 仍是管理员接口；会话 `/stop` 的控制目标
   只认 owner+thread 的当前 live request 和它的结构化 task link，自然语言“停一下/改一下”不获得硬控制权。
+- `/context` 只读同一 owner/thread 的真实 pending transcript、模型窗口和 `runtime_compact_policy`，与自动
+  compact 共用 `_projected_context_tokens` 估算；它不能创建 thread、写摘要或推进 cursor。`/compact [可选要求]`
+  只能在没有 live turn 时申请同一 conversation run lane，再复用自动 compact 的 summary candidate、完整
+  checkpoint 与 generation CAS 强制推进；可选要求只是摘要软上下文，不能覆盖结构化 operation evidence。
+  自动 compact 仍按唯一配置阈值在每轮前触发，不因手动入口建立第二条历史。`/effort` 只认 provider/backend
+  明示的结构化推理档位与 setter；当前 MiniMax-M2.7 Anthropic-compatible 接口没有生效的 effort 参数，因此
+  查询应如实显示 provider-managed，设置必须失败且不得偷换成 temperature、prompt 文案或伪持久状态。
+- TUI 输入的 Up/Down 必须先依据输入 Window 的真实显示宽度和 Unicode cell width 在软折视觉行间移动，
+  到视觉顶/底后才能进入逻辑换行、queue 或 history；不能只按 `\n` 判定。手动离开 transcript 尾部后，
+  `N new messages ↓` 是带 typed mouse handler 的按钮，左键释放与 Ctrl-End 共用 `move_end()` 恢复 follow-tail，
+  不从显示文字反向解析未读状态。
+- 工具是否展示给模型与能否执行必须共用一次 `ToolRegistry.runtime_snapshot`。像 `send_message` 这类依赖
+  当前 owner 外部通道的工具，availability 必须在每轮用结构化 provider/target/root/capability 判定；没有
+  proactive route 时从 schema、tool search 和调用快照同时移除，但实现仍留在唯一 registry。不能先暴露
+  一个客观不可用工具，再靠 handler 错误和模型重试收敛，也不能按普通问候或中文关键词隐藏。
 - `/goal` 是当前 conversation thread 上的特殊持久 overlay，不创建第二个聊天、Agent 或工作区事实源。每 thread 同时最多一个 active/paused/blocked 目标；它绑定一个持久根任务，通过去重 wake 自动续跑，只能由 typed command 暂停/恢复/修改/清除，由 `update_goal` 在真正完成或确实阻塞时进入终态。`/stop` 遇到 active goal 只暂停它，不清除目标。
 - `/audit` 是显式前缀才能启用的特殊任务模式。入口只负责把 guarantee/window 写入结构化 task attributes，子代理按调度关系继承，watch 只读这些字段。prompt、goal、summary 或普通句子中出现 `/audit` 文字都不能激活保证。
 - 子代理数量由主模型按真实可独立分解项决定，不向普通用户暴露固定数量命令。调度层同时核对本批/任务/owner/全局余量；整批超限就结构化拒绝，不静默截断、不边创建边失败，也不允许用重复假工作填数量。
-- Feishu 入站回调只负责提交和即时反馈，模型执行不占用 WS/webhook 回调线程；最终回复由持久化 delivery worker 轮询同一 request_id 后回送，重启不得重新执行任务。
+- Feishu 等 IM 入站回调在任何媒体、Gateway POST 或通道 IO 前，必须先持久化 authenticated
+  `channel/user/conversation/provider_message_id`、原始规范 payload 与 SHA-256 digest。same-id/same-body
+  只复用原 row，same-id/different-body 写独立 quarantine 且不覆盖首条事实。唯一 adapter delivery worker
+  依次推进媒体、精确 POST body、结构化 submission、占位、input/result/control receipt watcher 和最终回送。
+  ingress 与 reply row 的每个外部阶段都先用短文件锁领取 `owner/epoch/expiry`，网络、媒体和 provider IO
+  均在锁外运行，结果只允许同 epoch CAS；过期接管递增 epoch，旧进程不得迟到写回。POST 响应丢失从
+  `payload_ready` 原样重放持久 `gateway_payload`，响应已落盘后的 adapter 崩溃从 `submitted` 恢复而不再
+  POST。轮询 429/5xx 只保持 WAIT，auth/config 错误隔离；input `terminal_unknown` 清占位并持久收成
+  unknown，二者都不能伪造成用户最终正文。控制 submission 另保留 `operation_id/receipt_id/control_state`；
+  `/btw` unknown 只能以 operation ID 查询 `/control-status/<operation_id>`，不能按目标 turn 去重。目标
+  `request_id` 允许初始为空，只能由首次 GET 在同 epoch CAS 单向绑定，之后漂移必须隔离。stop rejected
+  返回明确控制结果，stop `terminal_unknown` 清占位并落 durable unknown，不能静默标成 completed。
+  control watcher 另冻结 `channel/user/conversation/channel_chat_type/channel_chat_id` 为 immutable issuer route，
+  GET 必须携带同名结构化身份头由 Gateway 精确核对；operation ID 只用于定位，不能充当访问凭据。
 - 用户通道正文只能使用统一 user-facing projection；`MAIN_AGENT/RUN/SUBAGENT` 内部协议留在运行时，禁止原样进入 Gateway response、飞书回复或 assistant transcript。产物发送只有一个 `send_message` 工具：目标固定为当前 owner，附件必须命中该 owner 的 artifact registry、真实路径和 hash；同会话下一轮从 transcript metadata 复用最近产物，不能因“发我”重新生成或复制。
 - 普通任务采用 会话运行时 式完成边界：主模型依据同一 thread history、真实工具结果、测试结果和子代理事实直接
   给出自然最终答复。运行时不再要求 `submit_for_acceptance`，不扫描目录推断完成，不生成完成 marker，
@@ -393,3 +421,220 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 收尾项(真机): sleep 端到端真实验证(gateway 模式下模型 sleep → 回合结束
   sleep_wait → 到期调度器唤醒续轮), 三源对账分频观测, goal_tick 稳态节奏
   (弹→醒→再武装)真机确认。完成后把上节治理清单状态改为"已实施"。
+
+## 2026-08-18 活动输入与外部消息持久投递收口【状态：本地 focused 通过；真机竞态复验中】
+
+- 对照 会话运行时 `active_turn` 锁，普通补充消息以稳定 client message ID 和首次绑定的 exact turn 为唯一身份。
+  Gateway 的 turn transition 与 conversation mailbox guard 按 `T -> M -> receipt` 顺序裁决；全局“当前活动”
+  投影冲突、文件暂缺或损坏只能返回 unknown，不能把仍活跃回合的 pending 回执粗暴改成 rejected。
+- TUI 在 POST 前写单一 session outbox；提交拿到真实 Gateway ID 后只读 `/input-status` 对账。worker 尚未取得
+  canonical ID 时 `running_request_id` 保持为空，本地 `chat-*` 永不冒充 expected turn。active→queued 会冻结
+  inject、prompt files、save、resume、客户端能力和一次 chat-style 注入；拒绝后本地排队与服务器排队语义一致。
+- guidance receipt v4 读取时从 embedded entry 重算正文 digest、核对 server-owned dedupe key 和状态字段组合；
+  v3 只经显式迁移写回 v4，不能因版本条件写反而反复重写或让被篡改正文沿旧 digest 进入模型。
+- Gateway 请求文件名是 claim 锁、active turn 与唯一终态归档共用的请求 ID 权威。claim 后若正文 `id` 或
+  可选 `request_id` 与文件名不一致，必须在同一 T 锁内规范为文件名、保留结构化 identity error，并由
+  worker 在任何 owner 解析和 provider 调用前失败收口；正文不能把已认领文件重定向到另一个回合。
+- claim 同时保存 `gateway_request_fingerprint.v1`，指纹覆盖 owner/conversation、prompt/task 和所有会改变
+  执行的 options，但排除 lease/status/projection 运行字段。canonical terminal 必须携带并重算该指纹；
+  恢复器只能删除与 canonical 指纹相同的 hot 请求，不能因 request ID 相同或最终文案恰好相同就合并。
+- inbox→processing 移动与 attempt/lease/fingerprint 栅栏是一个 T 锁转换；栅栏原子写失败时必须在同锁
+  内把原文件回滚到 inbox。不得留下 `status=pending` 的半认领 processing，因为 worker 和 stale
+  recovery 都不能把它冒充为有效执行。
+- worker 收口只认结构化 `committed/already_committed/stale_claim/conflict/retryable_io`；旧 attempt 的迟到
+  答复只能得到 `stale_claim` 并丢弃，不能再根据“processing 文件不见了”猜测缺档或从 response 反造终态。
+- stop、steer、provider admission/ACK 与 terminal 共用 exact-turn T 锁。reserve/submit 只允许 open 且未 cancel；
+  provider 已成功返回后的 ACK 可在同 attempt 的 closing/cancel 状态下先收口 consumed，但 canonical terminal
+  已存在或 attempt 已更换时必须拒绝。所有 audit/task/window stop 入口都调用同一个持 T 的
+  `_mark_request_stopping_locked`，不得在锁外写 closing。
+- 独立 `responses/<id>.json` 和 `done/failed` 永远只是展示投影，不能把 processing
+  自动晋升为完成。HTTP `/result`、CLI/TUI/plain 轮询、同步 worker 等待、stale 恢复和普通
+  输入对账都只读 `requests/terminal/<id>.json` 中经共享 reader 校验的 schema、文件名/
+  内外层 request ID、请求指纹与 `terminal_response`。合法但
+  陈旧的 response 由 canonical terminal 全量覆盖；孤立投影是需隔离的损坏事实，不能遮蔽 stale、
+  阻止重放或完成回合。旧格式迁移只能走显式隔离工具，恢复和 worker 主链不在线猜测。
+- TUI `/btw`、`/stop` 经 `/control` 时携带稳定 message ID 和窗口当前 exact turn ID；服务端 `/stop` 只在
+  T 锁内重读到同一 owner/scope 的开放回合后写 closing。观察到 A 后切到 B 的控制请求不能作用于 B。
+- Gateway TUI 的有效 slash 控制在 HTTP 前写 session-scoped control outbox；同一行冻结命令、message ID
+  与 Enter 时观察到的 exact turn。拿到 `operation_id` 后只能 GET 状态，不能再次 POST；重启会恢复待对账
+  行。非 steer 的 `terminal_unknown` 是终态；`/btw` 即使 wrapper 进入 unknown，也继续按同 operation ID
+  只读查询已有 guidance receipt，直到 accepted/rejected，不能提前删除 outbox。`/btw`、`/stop` 在
+  canonical turn 尚未绑定时明确不发送，避免服务端猜测后来的回合。
+- `/ask` 与 `/control` 中所有有效 slash 控制在任何副作用前先写唯一
+  `gateway_control_operation.v2` 回执；稳定 operation ID 只由 authenticated issuer/channel/conversation
+  和 opaque client message ID 生成，命令正文、expected turn 与权限事实进入独立 digest。同 ID 同正文只
+  重放首次结果，同 ID 异正文在副作用前 409；缺稳定 message ID 的外部控制直接 400。`prepared` 可安全
+  执行，`executing` 崩溃重启后只能转 `terminal_unknown`，禁止把“响应没收到”当失败后自动重做
+  `/compact`、`/goal`、`/audit`、`/verbose` 或 `/stop`。独立 `operation_id` 用于
+  `/control-status/<id>`，目标回合继续单列为 `request_id`；`/btw` 的状态查询只读已有 guidance receipt，
+  不得借 GET 再追加一次补充消息。若进程在 `executing` 落盘后、guidance receipt 写入前终止，GET 只能在
+  同一 T 锁内以 exact turn 的 canonical terminal/closed 事实证明“从未投递”后转 rejected；活动、待恢复、
+  缺失或损坏证据都继续 unknown，不能猜测后自动排入下一轮。
+- control receipt 还冻结 `channel_chat_type/channel_chat_id` 和首次服务端解析出的 canonical
+  `owner_provider/owner_kind/owner_id`；通道事实进入输入 digest，owner ref 使用独立完整性摘要。副作用执行和
+  状态查询都只从回执恢复 exact owner，后续切换 owner-scoping 配置也不得重算到另一存储。adapter 对账必须
+  从持久 payload 延续 issuer channel/user/conversation/chat type/chat id，
+  通过 `X-User-Id/X-Channel/X-Conversation-Id/X-Channel-Chat-Type/X-Channel-Chat-Id` 查询；同一 provider
+  message ID 不能通过修改群聊身份重放到另一个 owner。
+- Gateway 的 canonical 文件事务锁在 POSIX 使用 `flock`、Windows 使用 `msvcrt` 第 0 字节范围锁；两者都
+  是真实跨进程阻塞互斥。平台同时缺少两种标准原语时必须 fail-closed，不能以告警后继续运行的方式依赖
+  进程内线程锁而宣称 turn/receipt exactly-once；Windows 非阻塞分支也只把明确 lock violation 当竞争，
+  句柄和文件错误必须原样上抛。
+- 控制副作用的唯一 winner 仍在 C 锁内从 executing 走到终态，避免没有 provider 幂等键时误重放；重复
+  POST 和 GET 使用同一 C 锁的非阻塞探针。锁正在被长 `/compact` 占用时立即返回原子 `executing` 回执，
+  不堆积 HTTP 线程；只有锁已经释放且回执仍为 executing，查询者才有权把崩溃边界收成 unknown。
+- IM adapter 在媒体下载、Gateway POST 和占位回复之前先写 durable ingress；same-id/same-body 重放，异正文
+  quarantine，唯一 worker 继续推进 input receipt、request result、control receipt 和最终回送。
+  ingress/reply 已用逐 row owner/epoch/expiry claim 实现跨进程 fencing，旧 epoch 的迟到结果不能写回；
+  `/btw` unknown 已按独立 operation receipt 恢复。不支持幂等键的 provider delivery-unknown 仍列为后续风险。
+
+## 2026-08-18 终端交互 TUI 可观察行为复刻【状态：已验收；C17 活动回合输入重开待真机复验】
+
+- 功能规格：`docs/design/FEATURE-20260818-终端交互-tui-parity.md`。
+- 逐项账本：`docs/design/TUI_终端交互_PARITY_MATRIX.md`；只有双端 PTY/ANSI 或确定性测试证据才能把
+  项目升级为 `VERIFIED/MAPPED_VERIFIED`，源码阅读和肉眼相似都不算完成。
+- 产品边界：只修改 `my-agent`，Python/prompt_toolkit 原生实现；终端交互 和 会话运行时 只读。终端交互
+  命令、品牌和独有能力不复制，按 my-agent 的真实 dispatcher/ToolRuntime/ActionPolicy/session 合同映射。
+- 状态链：`runtime/Gateway typed facts -> TuiEventAdapter -> versioned journal -> reducer -> stable/active blocks
+  -> renderer` 是唯一显示主链。worker 不直接打印屏幕字符串，renderer 不从中文/英文正文猜工具、权限、
+  中断或完成状态；未知事件 fail-closed 并留下有界诊断。
+- 活动语义：thinking/text/tool/permission 都有稳定 `block_id`；delta 只更新 active block，terminal event
+  原子冻结到 stable history，一次 terminal 之后不能因迟到/重复事件回退或双显。
+- 输入语义：多行、history/search/paste/completion/queue/interrupt/exit 全部产出 typed intent。Gateway
+  活动回合中的普通 Enter 复用 canonical `/control` steer，不再错误等待为下一轮；TUI 先按客户端
+  `message_id` 固定显示 pending receipt，只有 runtime 在真实 guidance 注入点回传相同 ID 后才转为稳定
+  user block。控制竞态拒绝时撤下 receipt，并且只允许同一正文回到既有 canonical ChatJob queue，不能丢失、
+  双发或启动平行 worker。真正的 follow-up queue 仍可用 Up 原子回取编辑。
+- 2026-08-18 `.13` 真机又证明 `/control` 的传输结果不能只用 bool【状态：已确认问题，方案待用户确认】。
+  服务端已持久追加并在 active turn 消费后，HTTP 响应仍可能在客户端 2 秒窗口内丢失；若把该 unknown 当
+  rejected，正文会再次进入 follow-up queue。推荐合同是 `accepted/rejected/unknown` 三态，并让同一 owner/
+  thread/目标 turn 下的 opaque `channel_message_id` 成为 guidance 持久幂等键：unknown 保留 receipt，以同 ID
+  查询或重试；只有 durable explicit rejection 才恰好转 queue 一次。单纯加长 timeout 不是正确性修复。
+- 权限语义：UI 只是现有 ActionPolicy/ToolExecutor 请求与决定的交互投影；如果底层缺少续跑合同，先补
+  通用 typed continuation，不在 TUI 内执行工具或重放用户 prompt。
+- 权限底座已接通：TUI capability 显式声明、Gateway 原子 decision bridge、同 ToolCall 续跑、拒绝/取消
+  ledger 和相同 `tool_name + args_hash` 防重复询问共用一条 ToolRuntime 主链；危险硬门仍直接 deny，不能
+  为了展示确认框而弱化。
+- 终端交互已收敛到 prompt_toolkit alternate screen：多行/反斜杠换行、FileHistory/Ctrl-R、slash/path
+  completion、bracketed paste、单槽 stash、canonical queue、双 Esc/Ctrl-C/Ctrl-D、scroll/follow/unseen、
+  transcript/search、mouse、resize、title 和 `?` help 都只修改 typed UI/intent state。
+- renderer 已覆盖欢迎卡、用户头尾 10k 显示裁剪、Markdown/table/code/diff、thinking 折叠、全局 spinner
+  metrics/stall、工具卡、审批 overlay、compact generation 边界和错误/中断；流式 assistant 可见时隐藏
+  spinner，工具活跃时不误判 stalled。
+- pending steer 与 follow-up queue 按 会话运行时 `bottom_pane/pending_input_preview.rs` 固定在 composer 上方，
+  每条最多三行预览；它们不再作为 transcript 尾块随滚动消失。模型可见上下文则只接收 runtime 的数字
+  白名单快照，固定显示当前估算、窗口和唯一 compact 触发线。活动回合原生工具 IR 真发生裁剪时另发
+  `model_visible_context_compaction.v1` 计数事件；它不冒充 durable conversation compact generation。
+- 会话恢复只投影 `cmd_chat` 已从 canonical session 加载的 user/assistant history；TUI 不另读写正文。
+  journal、diagnostic、block cache 和 stable display window 均有显式上限，迟到/重复事件仍由 seen identity
+  拒绝，裁剪不产生第二会话账。
+- Gateway 启动状态必须是实际 readiness 的投影：alternate screen 先出现，后台 preflight 发布
+  `connection_started/resolved`，成功后才启动唯一 worker；同步 pre-wait 只保留给 plain 模式。失败以
+  typed error 和非零返回码关闭，不能假装已经可连接。
+- 空闲动画时钟不应让静态长历史失效。完整 frame key 由 renderer 统一决定；connection/thinking 活动时
+  才加入可见动画字段，thinking 周期取 glyph 与稳定词长的最小公倍数，禁止经验魔数。20k block LRU
+  和 20k stable display window 是性能边界，不是新的会话事实源。
+- transcript 鼠标选择只持有当前 viewport 显示列，resize 清除；Ctrl-C 有选择时先写 prompt_toolkit
+  clipboard 与 OSC52/tmux passthrough，否则才进入审批取消、turn interrupt 或双击退出。审批 overlay
+  继续允许 Page/wheel/Ctrl-Home/End 查看上文，Up/Down 仍专属于选项导航。
+- 审批 y/n 只能匹配 option 的 structured `decision`，不匹配 Yes/No/中文 label。普通工具结果最多六行；
+  用户显式进入 transcript 并 Ctrl-E 后才展开全部，避免大输出常驻主视图。
+- 终端交互 独有 model picker、permission mode carousel、team/buddy/voice/browser 等不造空壳；帮助和补全
+  只列 my-agent 当前真实 dispatcher/键位。该映射属于用户明确允许的“命令/功能替换”，最终逐项记录在
+  parity matrix，不用自然语言假装能力存在。
+- 参考验收：外部 终端交互 provider 不作为 UI fixture 依赖，使用 loopback deterministic Anthropic
+  协议服务驱动黑盒；MiniMax-M2.7 只做 my-agent 真机验收。两类证据分开，key 不进入任何 artifact。
+- 测试机边界：仅 `192.0.2.13:/root/my-agent`，tmux `my-agent-tui`；现有 dirty tree 不归本任务，
+  每轮按精确文件 hash 部署，并保留 `/root/tui-parity-evidence/baseline-20260818T0043CST` 回滚基线。
+- 原验收矩阵共 85 项。2026-08-18 后续四路真机观察重开 C17：旧实现把运行中普通 Enter 错送下一轮，且
+  queue preview 位于可滚动 transcript。当前为 37 `VERIFIED`、38 `MAPPED_VERIFIED`、9
+  `NOT_APPLICABLE`、1 `IMPLEMENTED`；C17 只有本地确定性回归，必须部署 `.13` 并完成真实活动回合
+  插入/结束竞态/滚动观察后才能恢复 `VERIFIED`，不得沿用旧 EV-QUEUE 冒充通过。
+- reducer 仍是唯一实例和唯一 handler registry；权限处理器与 Gateway typed-row dispatch 仅以同文件内部
+  controller/helper 拆分类体，使 strict code-size 不新增 hard blocker，不产生第二状态机、facade 或 fallback。
+- 发布测试频率以改动规模为准：默认 focused tests；生产/测试代码新增、删除累计约 10,000 行以上或用户
+  明确要求时，才额外跑一次全仓 pytest。本轮超过阈值，已运行一次到 100%/exit 0，后续不重复浪费时间。
+- 待讨论的底座优化候选：以“每次推理吸收的相关新证据量”为观测指标，允许聚合已经就绪且相互独立的
+  读取、搜索、检查和工具结果，减少频繁重放增长前缀造成的近二次缓存读取成本。该候选不能写死固定
+  100K 批量，也不能跨越权限、失败、用户 steer、工具依赖或分支决策边界；当前仅记录，不占用五路 TUI
+  Goal，不修改模型调度主链。
+- `.13` 最终 evidence 位于 `/root/tui-parity-evidence/final-20260818T071817CST/final-deploy/`：70 文件
+  hash 一致、5 个废弃文件不存在、回滚包齐全，Gateway 在 `/root` canonical workspace 为 running，
+  `my-agent-tui:work` 为 120×29 idle；实际 key 字节扫描证据和部署文件均为 0 命中。
+
+## 2026-08-18 TUI 拖选生命周期、终端头像与富工具记录【状态：已完成；沙箱洁净度另行复验】
+
+- 对照 会话运行时 `tui/event_stream.rs` 可见其明确丢弃 mouse event，并通过 raw scrollback 提供复制友好视图；
+  本项目继续保留已经验收的应用内鼠标选择和 OSC52，但必须补齐独立 `mouse down -> drag -> mouse up`
+  生命周期。既有非空选区只能在左键仍按下时随 `MOUSE_MOVE` 更新，`MOUSE_UP` 更新最后端点并立即结束拖动；
+  松开后的普通移动不得修改选区或触发全屏高亮。
+- 终端头像属于纯显示资产，不进入事件、状态、prompt、history 或权限合同。宽卡使用固定宽度 styled
+  fragments 表达参考图的长兔耳、浅色头发、红色发饰/衣裙、红伞和小兔；窄卡使用同语义紧凑稿。所有行
+  必须按显示列居中和裁剪，80/120/140 与窄终端都不能越界。
+- 真实复刻测试只允许测试者在 `my-agent-tui:work` 输入一次普通自然语言需求；项目筛选的 star、语言和
+  代码量是测试前外部证据，不写进模型控制协议。任务开始后只能观察被测 Agent 自己的工具、权限、日志、
+  产物和终态，不能由开发者旁路补代码或把旁路产物计作通过。
+- 富 transcript 必须由 `client_capabilities.rich_transcript=true` 显式开启；plain、IM 和其它 Gateway
+  客户端保持原有最小公开面。支持的 TUI 才接收逐模型轮 commentary、provider 明示 `type=thinking` 正文和
+  工具 `display`。signature、`redacted_thinking`、普通 text 与未知 handler envelope 字段不得冒充思考或
+  穿透公开事件。
+- 文件和命令展示以 handler 结构化事实为唯一来源：`edit_file`、覆盖式 `write_file`、单/多文件
+  `apply_patch` 生成有界行号 diff；新文件生成十行预览；`run_command` 分开投影 stdout、stderr 与退出码。
+  renderer 只负责颜色、折叠和宽度，不能从 output 文案反解增删行或成功状态。
+- 真实长任务若更早有失败、最后一条工具是注册表声明的成功 workspace mutation，且之后没有任何工具记录，
+  主循环只丢弃一次过早收口草稿并注入结构化软提醒，让模型自主选择复核或明确解释。该规则不解析草稿、
+  不设置 blocked/unfinished，也不影响简单写文件或已经有后续检查的回合。
+- 模型网络故障必须按系统异常事实分类：`ConnectionRefusedError` / `errno=ECONNREFUSED` 是服务端点临时
+  拒绝连接，先走 HTTP 传输层有界退避，再走模型回合级有界恢复；DNS、无效地址和其它未证明为瞬时的
+  连接故障继续快速失败。富 TUI 从结构化 retry 事件显示层级、序号和等待秒数，不能解析错误文案决定
+  是否重试，也不能把重连提示混成 assistant commentary。
+- Click→Go 恢复任务证明 rich transcript 与长链收口已可用，也暴露了与界面无关的 workspace 污染：
+  Attempt sandbox 曾把当前项目 cwd 放在结构化 task roots 之前，导致 `/tmp` 实际映射到
+  `project/.sandbox-tmp`；只读 owner home 又让标准 build cache 首次失败。对照 会话运行时 把 tmp 作为独立
+  writable root 的边界，当前通用修复只使用 `task_work_dir`、sandbox write roots 和 XDG 环境事实：
+  task work 排为临时根首项，owner-scoped `TMPDIR/XDG_CACHE_HOME` 指向 sandbox `/tmp`。不解析命令、语言、
+  文件名或模型正文，也不增加 Go/Click 专项交付过滤器。
+
+## 2026-08-18 写后验证新鲜度与模型调用累计观测【状态：已部署并由真实任务验证】
+
+- Tornado→Go 真机任务证明“最后一个工具是否为写操作”不是可靠的新鲜度合同：测试成功后再写 examples，
+  后续 grep/read 会让旧规则误以为已有检查并允许收口。唯一机器事实改为 verification ledger 中的
+  `verification_id/status/root/command` 与成功 workspace mutation 造成的 stale 状态；read/search 既不验证
+  也不清除 stale。
+- 工具结果的验证 envelope 必须写入 canonical `metadata.handler_details`，archive、模型投影和收口读取
+  同一位置；不得在 metadata 顶层再造只有写入端可见的旁路字段。Go/Cargo 的规范 build/test 命令由
+  `go.mod/Cargo.toml` manifest 结构化识别，不读项目名、prompt 或模型正文。
+- 收口提醒仍是软核对，不是普通任务完成硬门：signature 由 stale root 与最近 durable verification event
+  ID/状态构成，同一个验证→修改周期只提醒一次；模型执行新的真实验证后才形成新周期并可再次提醒。
+- `ModelCallLedger.records()` 继续只保留最近 128 条明细供超时估算和诊断；最终 request/run 统计改由同一
+  线程安全 ledger 的有界 scope aggregate 累计 logical turn、物理 attempt、provider HTTP attempt/retry、
+  状态、backend/model。累计态不保存 prompt、响应正文、请求体或 key，明细裁剪不得再截断用户可见计数。
+- SANDBOX-02 已由同一 Tornado 任务真实闭环：构建临时数据留在 task work，最终 output 无缓存目录；该项
+  由 ROADMAP 移入完成。后续 aiohttp→Go 任务在最后一批源码修改后重新 build、跑过 29 项行为测试并完成
+  HTTP 200 E2E，验证新鲜度也已闭环；测试者没有旁路补产物。
+
+## 2026-08-18 收口效果权威、会话运行时 式返工与 owner-scoped 构建缓存【状态：代码已修复；真机返工复验中】
+
+- operation ledger 是完整审计事实，不等于“最后一条记录覆盖整项任务”的完成裁决。`not_started` 已经
+  结构化证明 handler 未执行、没有副作用，因此末尾连续 no-effect 尝试不能推翻此前最近一项 succeeded
+  effect；记录仍保留并使整体 operation 投影显示 partial。只有 `not_started` 且此前没有成功效果时，仍形成
+  当前收口冲突；显式 required action 继续由独立结构化 gate 管理。
+- 已明确 `failed/not_started` 的末尾效果与模型 final 冲突时，不再立即丢进无工具表达轮。该冲突会把
+  `completion_conflict.v1`、最近 typed 终态和被拒绝草稿写回同一 active turn，保留原工具面供主模型定位、
+  修复和重新验证；全 turn 最多两次，不能靠换 call id 无限重新武装。若新的 effect-bearing operation 形成
+  succeeded 终态，模型自然 final 直接交付；两次仍未解决才按 `OPERATION_INCOMPLETE` 安全收口。
+- `unknown/cancelled/incomplete/unverified` 不进入上述通用带工具返工。它们可能已经发生、仍在运行、已取消或
+  缺少权威终态，自动重放会破坏幂等/取消边界，因此继续直接 fail-closed；只有工具自己的结构化 reconcile
+  能改变 unknown。该分流只读 operation status/error/failure stage/effect outcome，不解析模型完成措辞。
+- 该模式直接对照 会话运行时 `会话运行时-rs/core/src/session/turn.rs`：工具调用设置 `needs_follow_up`，结果回到同一轮；
+  plain assistant 才自然结束。需要阻止收尾时，`hook_runtime.rs` 的 Stop hook 通过
+  `build_hook_prompt_message` 把 continuation prompt 写回同一 turn，原工具能力仍在，而不是另开一轮替换最终
+  答案；`core/tests/suite/hooks.rs::stop_hook_can_block_multiple_times_in_same_turn` 还验证了同一 turn 的多次返工。
+  my-agent 的两次上限与 unknown 安全门是基于自身 operation 合同的有界适配，不宣称 会话运行时 有同名完成判定。
+- owner home 继续是只读身份底图，不能为包管理器扩大写边界。开放世界默认缓存统一由
+  `TMPDIR=/tmp`、`XDG_CACHE_HOME=/tmp/.cache` 表达；对已实证不采用 XDG 的标准 npm，仅增加其正式
+  `NPM_CONFIG_CACHE=/tmp/.cache/npm`。环境注入发生在凭据擦洗之后，不修改 `HOME`，也不恢复 key。
+- 以上均为通用运行时合同，不读取项目名、语言转换目标或模型说明。末尾 no-effect、已知失败返工成功、两次
+  返工耗尽和 unknown 禁止自动续做的 focused tests 已通过；真实 Fiber 143 样本确认权威字段为
+  `FAILED/COMMAND_FAILED/execution/effect_outcome=failed/return_code=143`。候选部署后的真实返工结果继续记入
+  稳定性台账，未完成前不冒充 E2E。

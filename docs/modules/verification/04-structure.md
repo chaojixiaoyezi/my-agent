@@ -24,7 +24,10 @@ Compact 不建立第二套验证链。live tool-context 与 archive 共用一个
 2. `runtime.py` 从 `ToolCallEnvelope.scope.root_task_id` 取得任务树身份。
 3. `run_command` 只有命中项目声明的规范命令且进程真实退出时才写事件。
 4. 文件工具只有返回 `ok=true` 时才登记 changed paths，并把旧状态投影为 stale。
-5. 精简 `verification_evidence` / `verification_state` 随工具上下文和 archive 供主模型使用。
+5. 精简 `verification_evidence` / `verification_state` 固定嵌入 canonical
+   `ToolResult.metadata.handler_details`，随工具上下文和 archive 供主模型使用；metadata 顶层不保留第二份
+   旁路。成功验证后若发生 workspace mutation，state 记录最近 verification event ID/status 并置 stale；
+   read/search 不改变 stale，只有新的真实规范验证命令产生新周期。
 6. `tool_call_archive_record.py` 对其他结构化副作用证据使用显式字段白名单；当前接受
    `message_tool_delivery.v1` 的成功状态、当前 owner 标记、receipt、用户投影、附件引用和有界
    `evidence_refs`，以及
@@ -35,6 +38,20 @@ Compact 不建立第二套验证链。live tool-context 与 archive 共用一个
    provider 日志猜测；该证据只供 conversation source-delivery 收口，不写入 verification SQLite。
    `evidence_refs` 只把送达回执关联到同一 owner 已持久化的 Audit 记录，不复制记录正文，也不能反向
    生成工具成功、授权或验证事实。
+
+主代理 completion 只消费上述 typed verification state：stale root + 最近 durable event ID/status 组成
+一次性 followup signature，同一 verify→write 周期最多软核对一次，新 verify 才重新武装。它不执行命令、
+不扫描项目、不解析模型正文，也不把普通任务升级为完成硬门。`project_facts.py` 从 manifest 发现 Python、
+Node、Go、Rust 等规范命令；开放格式仍允许合同/配置扩展，不能按项目名或 prompt 写专项分支。
+
+operation 的完整审计投影与 completion 的当前效果权威保持分层。末尾 `not_started` 表示 handler 前已有
+结构化证据证明无效果，它继续计入 partial ledger，但不会覆盖此前最近一项 succeeded effect；只有
+not_started 而无任何先前成功仍形成收口冲突。`failed/not_started` 冲突先走 会话运行时 Stop-hook 风格的同一
+active-turn continuation：`completion_conflict.v1` 携带 typed 终态和被拒绝草稿，原工具 schema 不撤销，
+全 turn 最多两次供模型修复/复验；新的 succeeded effect 允许自然 final，两次耗尽才进入无工具的
+`OPERATION_INCOMPLETE` 安全回复。`unknown/cancelled/incomplete/unverified` 不重新授予通用工具执行，避免
+重放未知副作用或越过取消边界。显式 required action 仍由独立结构化 gate 裁决；所有分流只读 typed record，
+不解析最终正文措辞。
 
 工具失败诊断沿同一公共出口保留四个正交事实：
 

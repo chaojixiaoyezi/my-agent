@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 from agent_py_agent.agent.backends.errors import ProviderTransientError
 from agent_py_agent.agent.gateway_parts.paths import GatewayPaths
+from agent_py_agent.agent.gateway_parts.queue_service import GatewayClaim
 
 
 def test_background_main_loop_survives_tick_exceptions_and_reports_supply_error(monkeypatch, capsys) -> None:
@@ -103,6 +104,10 @@ def test_request_worker_initialization_error_is_terminalized(tmp_path, monkeypat
                 "created_at": 1.0,
                 "attempts": 1,
                 "status": "processing",
+                "turn_phase": "open",
+                "execution_attempt_id": "attempt-test",
+                "lease_epoch": 1,
+                "lease_owner": "attempt-test",
             }
         ),
         encoding="utf-8",
@@ -122,7 +127,11 @@ def test_request_worker_initialization_error_is_terminalized(tmp_path, monkeypat
         lambda user_key, *, conversation_key: released.append((user_key, conversation_key)),
     )
 
-    dispatcher._execute(processing, "user-1", "conversation-1")
+    dispatcher._execute(
+        GatewayClaim(processing, "req-ast", "attempt-test", 1, "attempt-test"),
+        "user-1",
+        "conversation-1",
+    )
 
     response = json.loads((paths.responses / "req-ast.json").read_text(encoding="utf-8"))
     archived = json.loads((paths.failed / "req-ast.json").read_text(encoding="utf-8"))

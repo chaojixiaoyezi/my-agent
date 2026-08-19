@@ -19,6 +19,8 @@ from ...conversation.authority import (
 from ...tooling.operation_verification import (
     build_operation_verification,
     incomplete_final_mutation_facts,
+    post_failure_workspace_mutation_followup_facts,
+    post_failure_workspace_mutation_followup_signature,
     public_operation_verification,
 )
 from .._runtime_params import ToolLoopExecuteParams
@@ -31,6 +33,13 @@ from .round_execution import subagent_output_json_response
 _MAX_WAIT_REPLY_REQUEST_CHARS = 4000
 _MAX_WAIT_REPLY_GUIDANCE_CHARS = 1200
 _MAX_WAIT_REPLY_GUIDANCE_ITEMS = 5
+_POST_FAILURE_MUTATION_FOLLOWUP_SIGNATURE_KEY = (
+    "post_failure_workspace_mutation_followup_signature"
+)
+_COMPLETION_CONFLICT_REPAIR_STATE_KEY = "completion_conflict_repair"
+_MAX_COMPLETION_CONFLICT_REPAIRS = 2
+_MAX_COMPLETION_CONFLICT_DRAFT_CHARS = 1200
+_REPAIRABLE_COMPLETION_CONFLICT_STATUSES = frozenset({"failed", "not_started"})
 
 
 @dataclass(frozen=True)
@@ -248,11 +257,12 @@ def queue_interim_reply_for_tool_round_limit(
     return True
 
 
-# LLM: When the final mutating call has no succeeded terminal record, discard
-# the ordinary prose draft and let a no-tools presentation turn explain the
-# typed facts. No claim wording is parsed and no business-specific tool is
-# hard-coded here.
-# 函数用途: 阻止“程序记录失败、最终正文却说成功”，同时保持正常聊天和已成功操作不多走一轮。
+# LLM: Mirror 会话运行时 Stop-hook continuation semantics for a repairable completion
+# conflict: keep the same active turn and tool surface, return typed facts plus
+# the rejected draft to the model, and only enter the no-tools fail-closed reply
+# after a bounded retry budget. Unknown/cancelled/incomplete/unverified effects
+# never regain general tool authority here. No model prose is parsed.
+# 函数用途: 末尾副作用明确失败或未执行时，先让同一主模型带工具返工；不确定副作用或返工耗尽才安全收口。
 def queue_reply_for_incomplete_final_mutation(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -268,6 +278,102 @@ def queue_reply_for_incomplete_final_mutation(
     )
     if not operation_facts:
         return False
+    latest = operation_facts.get("latest_mutating_operation")
+    latest = latest if isinstance(latest, dict) else {}
+    latest_status = str(latest.get("status") or "unverified")
+    if latest_status in _REPAIRABLE_COMPLETION_CONFLICT_STATUSES:
+        if _queue_completion_conflict_repair(
+            params,
+            response=response,
+            operation_facts=operation_facts,
+        ):
+            return True
+    _queue_completion_conflict_fallback(
+        agent,
+        params,
+        response=response,
+        operation_facts=operation_facts,
+        tool_rounds=tool_rounds,
+    )
+    return True
+
+
+# LLM: The repair counter is host-owned state for this active turn, not a model
+# claim and not a per-call retry switch. A new failed call therefore consumes
+# the same bounded budget instead of rearming an unbounded completion loop.
+# 函数用途: 把一次收口冲突写成 会话运行时 Stop-hook 风格的续作提示，并保留原工具能力让模型修复和复验。
+def _queue_completion_conflict_repair(
+    params: ToolLoopExecuteParams,
+    *,
+    response: ModelResponse,
+    operation_facts: dict[str, object],
+) -> bool:
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return False
+    repair_state = state.get(_COMPLETION_CONFLICT_REPAIR_STATE_KEY)
+    repair_state = repair_state if isinstance(repair_state, dict) else {}
+    attempts = _nonnegative_int(repair_state.get("attempts"))
+    if attempts >= _MAX_COMPLETION_CONFLICT_REPAIRS:
+        repair_state["exhausted"] = True
+        state[_COMPLETION_CONFLICT_REPAIR_STATE_KEY] = repair_state
+        return False
+    attempt = attempts + 1
+    draft = _bounded_reply_fact_text(
+        str(getattr(response, "text", "") or ""),
+        _MAX_COMPLETION_CONFLICT_DRAFT_CHARS,
+    )
+    latest = operation_facts.get("latest_mutating_operation")
+    verification = operation_facts.get("operation_verification")
+    envelope: dict[str, object] = {
+        "schema": "completion_conflict.v1",
+        "conflict": "final_draft_after_unsucceeded_mutation",
+        "repair_attempt": attempt,
+        "max_repair_attempts": _MAX_COMPLETION_CONFLICT_REPAIRS,
+        "latest_mutating_operation": dict(latest) if isinstance(latest, dict) else {},
+        "operation_verification": (
+            dict(verification) if isinstance(verification, dict) else {}
+        ),
+    }
+    if draft:
+        envelope["rejected_completion_draft"] = draft
+    latest_envelope = envelope["latest_mutating_operation"]
+    repair_state = {
+        "attempts": attempt,
+        "exhausted": False,
+        "last_model_turn_id": str(state.get("_current_model_turn_id") or ""),
+        "latest_status": str(
+            latest_envelope.get("status")
+            if isinstance(latest_envelope, dict)
+            else "unverified"
+        ),
+    }
+    state[_COMPLETION_CONFLICT_REPAIR_STATE_KEY] = repair_state
+    params.tool_context.append(
+        "# Completion conflict repair\n"
+        "```json\n"
+        + json.dumps(envelope, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n```\n"
+        "上一份最终草稿与本轮权威工具终态冲突，已暂缓交付。你仍处于同一个 active turn，"
+        "并继续拥有原来的工具。请先根据失败阶段、错误码和真实工具输出定位问题，选择安全的修复或替代方法，"
+        "再用新的结构化成功回执复验；不要只重复完成结论，也不要盲目重放可能产生副作用的命令。"
+        "如果确实无法安全推进，请基于真实证据明确说明阻碍、已尝试动作和需要用户补充的条件。"
+    )
+    return True
+
+
+# LLM: This is the last safety boundary after repair exhaustion or an uncertain
+# effect. It may use the no-tools presentation phase because automatic tool use
+# is no longer safe; the original draft remains non-authoritative context only.
+# 函数用途: 返工耗尽或副作用不确定时，用结构化事实生成未完成说明并停止继续自动执行。
+def _queue_completion_conflict_fallback(
+    agent: object,
+    params: ToolLoopExecuteParams,
+    *,
+    response: ModelResponse,
+    operation_facts: dict[str, object],
+    tool_rounds: int,
+) -> None:
     facts = _interim_reply_facts(agent, params, tool_rounds=tool_rounds)
     facts["task_continues_without_more_user_input"] = False
     facts.update(operation_facts)
@@ -276,6 +382,49 @@ def queue_reply_for_incomplete_final_mutation(
         kind="operation_incomplete",
         facts=facts,
         draft=str(getattr(response, "text", "") or ""),
+    )
+
+
+# LLM: Repair counters accept only finite non-negative integers; malformed live
+# state must fail to zero instead of expanding the continuation budget.
+# 函数用途: 安全读取收口返工次数，避免损坏状态造成无限续作。
+def _nonnegative_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+# LLM: 该入口按 durable verification event 去重软提醒：read/search 不能清除 stale，
+# 同一测试周期只提醒一次；新测试后再修改才形成新周期。它不解析草稿，也不设置 blocked/unfinished。
+# 函数用途: 在真实验证过期时丢弃一次过早收口草稿，给模型继续验证或明确解释的机会。
+def queue_followup_after_post_failure_workspace_mutation(
+    agent: object,
+    params: ToolLoopExecuteParams,
+) -> bool:
+    if str(getattr(params, "context_scope", "") or "") == "task_local":
+        return False
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return False
+    facts = post_failure_workspace_mutation_followup_facts(
+        agent,
+        list(getattr(params, "archive_tool_calls", None) or []),
+    )
+    if not facts:
+        return False
+    signature = post_failure_workspace_mutation_followup_signature(facts)
+    if state.get(_POST_FAILURE_MUTATION_FOLLOWUP_SIGNATURE_KEY) == signature:
+        return False
+    state[_POST_FAILURE_MUTATION_FOLLOWUP_SIGNATURE_KEY] = signature
+    params.tool_context.append(
+        "# Post-failure workspace follow-up\n"
+        "```json\n"
+        + json.dumps(facts, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n```\n"
+        "这是当前请求的结构化工具与验证账本事实，不是完成硬门。最近一次有效验证之后工作区又发生了修改，"
+        "且普通读取或搜索不能证明修改后的版本可用。请依据用户目标自主决定：若需要复核，就调用合适的检查工具并根据真实结果继续修复；"
+        "若客观上无需复核，就直接给出明确最终说明。不要只描述下一步准备做什么。"
     )
     return True
 
@@ -738,6 +887,7 @@ def _is_task_local_round(request: ToolRoundCompletionRequest) -> bool:
 __all__ = [
     "ToolRoundCompletionRequest",
     "completion_response_after_tool_round",
+    "queue_followup_after_post_failure_workspace_mutation",
     "queue_interim_reply_for_active_named_work",
     "queue_interim_reply_for_open_subagents",
     "queue_interim_reply_for_tool_round_limit",

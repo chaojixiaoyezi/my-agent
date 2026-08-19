@@ -323,6 +323,9 @@ def test_shell_tool_nonzero_return_code(shell_tool: ShellTool) -> None:
     assert result.ok is False
     assert result.error_code == "COMMAND_FAILED"
     assert "return_code=1" in result.output
+    display = result.result_envelope["display"]
+    assert display["kind"] == "command"
+    assert display["return_code"] == 1
 
 
 @pytest.mark.skipif(os.name == "nt", reason="pipefail is a POSIX shell contract")

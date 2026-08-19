@@ -1,212 +1,618 @@
+# LLM: 本模块只把 TuiRuntime 的 typed snapshot 接入 prompt_toolkit 布局；不得恢复字符串 transcript、前缀 lexer 或第二状态 store。
+# 模块用途: 创建 终端交互 风格的行内对话区、权限区、输入区和底部提示，并连接重绘与命令输出。
+
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .rendering import set_tui_output_sink, set_tui_stream_sink
-from .tui import TuiStatusRefs, _tui_status_fragments
+from .rendering import set_tui_output_sink
+from .tui_block_renderer import TuiRenderContext
+from .tui_input import (
+    TuiCompletionMenuControl,
+    TuiHistoryAutoSuggest,
+    TuiInputCompleter,
+    TuiQueuedPlaceholderProcessor,
+)
+from .tui_interaction import TuiInteractionState
 from .tui_keybindings import TuiCreateKeybindingsParams, _tui_create_keybindings
 from .tui_params import MakeTuiAppParams
-from .tui_transcript_store import (
-    APP_REDRAW_INTERVAL_SECONDS,
-    TuiTranscriptStore,
-    set_active_transcript_store,
-)
+from .tui_runtime import TuiRuntime
+from .tui_terminal import TuiTerminalTitleController
+from .tui_transcript import TuiTranscriptModeState
+from .tui_view import TuiTranscriptView, make_tui_transcript_view
 
-
-@dataclass
-class StatusBarConfig:
-    refs: TuiStatusRefs
-    model_name: str
-    workspace_name: str
-
-
-@dataclass
-class TranscriptSinkRequest:
-    output_area: Any | None
-    transcript_follow_ref: list[bool] | None
-    app_ref: list[Any]
-    app: Any
-    params: MakeTuiAppParams
-
-
+APP_REDRAW_INTERVAL_SECONDS = 1 / 60
 APP_RENDER_POSTPONE_SECONDS = 1 / 60
-
-# 会话运行时 风格按键提示(styles.md: 次级信息 dim; 与 tui_keybindings 实际绑定一致)。
-_HINT_TEXT = (
-    " Enter 发送 · Ctrl+C 打断/退出 · Ctrl+L 清屏 · Ctrl+O 复制上一条回复 · "
-    "Alt+R 详细档位 · /status /stop /goal /btw /verbose /help"
-)
+ESCAPE_SEQUENCE_TIMEOUT_SECONDS = 0.1
+TERMINAL_ESCAPE_PREFIX_TIMEOUT_SECONDS = 0.05
 
 
-def _make_status_bar(config: StatusBarConfig):
-    from prompt_toolkit.layout import FormattedTextControl, Window
-
-    return Window(
-        content=FormattedTextControl(
-            lambda: _tui_status_fragments(
-                config.refs,
-                config.model_name,
-                workspace=config.workspace_name,
-            )
-        ),
-        height=1,
-        style="class:status-bar",
-    )
-
-
-def _make_hint_bar():
-    from prompt_toolkit.layout import FormattedTextControl, Window
-
-    return Window(
-        content=FormattedTextControl([("class:hint", _HINT_TEXT)]),
-        height=1,
-        style="class:hint",
-    )
-
-
-def _make_input_area(history_file_path: str) -> Any:
-    from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+# LLM: 输入 buffer 保留 FileHistory、typed queue placeholder 与结构化命令/路径补全；多行编辑由 keybinding 区分发送与换行。
+# 函数用途: 创建底部可增长到八行的聊天输入框。
+def _make_input_area(
+    history_file_path: str,
+    runtime: TuiRuntime,
+    workspace: Path,
+) -> Any:
     from prompt_toolkit.history import FileHistory
     from prompt_toolkit.layout.dimension import Dimension
     from prompt_toolkit.widgets import TextArea
 
     return TextArea(
         height=Dimension(min=1, max=8),
-        style="class:input-area",
-        multiline=False,
-        wrap_lines=False,
+        dont_extend_height=True,
+        style="class:tui-input",
+        multiline=True,
+        wrap_lines=True,
         history=FileHistory(history_file_path),
-        auto_suggest=AutoSuggestFromHistory(),
+        auto_suggest=TuiHistoryAutoSuggest(),
+        completer=TuiInputCompleter(workspace),
+        complete_while_typing=True,
+        input_processors=[TuiQueuedPlaceholderProcessor(runtime)],
     )
 
 
+# LLM: 输入 marker 是纯显示前缀；用户提交后的 transcript 背景块由 reducer/renderer 独立生成。
+# 函数用途: 创建 终端交互 风格的 `❯ ` 输入提示。
 def _make_input_prompt_window() -> Any:
     from prompt_toolkit.layout import FormattedTextControl, Window
 
     return Window(
-        content=FormattedTextControl([("class:prompt", "> ")]),
+        content=FormattedTextControl([("class:tui-input-marker", "❯\u00a0")]),
         width=2,
         dont_extend_width=True,
-        style="class:prompt",
     )
 
 
-def _make_transcript_area() -> Any:
-    from prompt_toolkit.layout.dimension import Dimension
+# LLM: context factory 只读取公开配置、typed TUI status/block 和显示时钟；模型正文与业务对象不得成为动画事实源。
+# 函数用途: 为当前终端宽度生成带回合耗时、实时上下文、token 和工具活动状态的渲染上下文。
+def _make_render_context_factory(
+    params: MakeTuiAppParams,
+    interaction: TuiInteractionState,
+    transcript_state: TuiTranscriptModeState,
+):
+    agent_name = str(getattr(params.agent.config, "agent_name", "my-agent") or "my-agent")
+    model_name = str(getattr(params.agent.config, "model_name", "") or "")
+    root = getattr(params.agent, "root", "")
+    try:
+        workspace = str(Path(root)) if root else ""
+    except (TypeError, ValueError):
+        workspace = ""
+    runtime = _required_runtime(params)
+
+    def make_context(width: int) -> TuiRenderContext:
+        interaction_snapshot = interaction.snapshot()
+        transcript_snapshot = transcript_state.snapshot()
+        view_snapshot = runtime.store.snapshot()
+        status = view_snapshot.status
+        return TuiRenderContext(
+            width=width,
+            agent_name=agent_name,
+            model_name=model_name,
+            workspace=workspace,
+            detailed_transcript=transcript_snapshot.active,
+            show_all=transcript_snapshot.show_all,
+            spinner_index=int(time.monotonic() * 4),
+            now=time.time(),
+            status_started_at=status.started_at,
+            status_last_event_at=status.last_event_at,
+            context_tokens=status.context_tokens,
+            context_usage=status.context_usage,
+            output_tokens=status.output_tokens,
+            has_active_tools=any(
+                block.role == "tool"
+                and block.phase not in {"completed", "failed", "interrupted"}
+                for block in view_snapshot.active_blocks
+            ),
+            notice=runtime.notice(),
+            has_stash=interaction_snapshot.has_stash,
+            is_pasting=interaction_snapshot.is_pasting,
+            help_open=interaction_snapshot.help_open,
+        )
+
+    return make_context
+
+
+# LLM: overlay Window 的高度直接来自 typed frame 行数；零行时不占布局空间，也不根据文案猜权限状态。
+# 函数用途: 创建动态高度的底部权限面板区域。
+def _make_overlay_window(view: TuiTranscriptView) -> Any:
+    from prompt_toolkit.layout import Window
+
+    return Window(
+        content=view.overlay_control,
+        height=lambda: len(view.provider.frame(view.provider.last_width).overlay_lines),
+        dont_extend_height=True,
+    )
+
+
+# LLM: 权限 feedback TextArea 只编辑 reducer 当前 permission 的普通说明；read_only 条件由显式 feedback_mode 控制。
+# 函数用途: 创建 终端交互 `Tab to amend` 展开后的单行补充说明框。
+def _make_permission_feedback_area(runtime: TuiRuntime) -> Any:
+    from prompt_toolkit.filters import Condition
     from prompt_toolkit.widgets import TextArea
 
-    from .tui_lexer import TranscriptLexer
+    feedback_active = Condition(
+        lambda: bool(
+            (permission := runtime.store.snapshot().permission)
+            and permission.feedback_mode
+        )
+    )
+
+    def prompt() -> list[tuple[str, str]]:
+        permission = runtime.store.snapshot().permission
+        placeholder = (
+            permission.feedback_placeholder
+            if permission is not None
+            else ""
+        )
+        return [("class:tui-muted", f"  › {placeholder}: " if placeholder else "  › ")]
 
     return TextArea(
-        text="",
-        multiline=True,
-        read_only=True,
-        focusable=True,
-        focus_on_click=False,
-        wrap_lines=True,
-        scrollbar=True,
-        height=Dimension(weight=1),
-        style="class:transcript",
-        lexer=TranscriptLexer(),
+        height=1,
+        dont_extend_height=True,
+        multiline=False,
+        wrap_lines=False,
+        read_only=~feedback_active,
+        style="class:tui-permission-feedback",
+        prompt=prompt,
     )
 
 
-def _install_transcript_sink(
-    output_area: Any,
-    follow_ref: list[bool],
-    app_ref: list[Any],
-    *,
-    max_chars: int = 500_000,
+# LLM: listener 只在同一 permission 的 feedback_mode 中提交文本草稿；程序化投影和面板关闭不会生成事件。
+# 函数用途: 连接权限补充说明输入与 typed TUI runtime。
+def _wire_permission_feedback_area(area: Any, runtime: TuiRuntime) -> None:
+    def on_feedback_changed(buffer: Any) -> None:
+        permission = runtime.store.snapshot().permission
+        text = str(buffer.text or "")
+        if (
+            permission is None
+            or not permission.feedback_mode
+            or permission.feedback == text
+        ):
+            return
+        runtime.update_permission_feedback(permission.permission_id, text)
+
+    area.buffer.on_text_changed += on_feedback_changed
+
+
+# LLM: input status Window 只展示 typed pending steer、follow-up queue、context usage 和 interaction stash。
+# LLM: 零行时不占高度，也不能改变 transcript anchor。
+# 函数用途: 创建输入框上方的待插入消息、下一轮队列、实时上下文与草稿状态区域。
+def _make_input_status_window(view: TuiTranscriptView) -> Any:
+    from prompt_toolkit.layout import Window
+
+    return Window(
+        content=view.input_status_control,
+        height=lambda: len(
+            view.provider.frame(view.provider.last_width).input_status_lines
+        ),
+        dont_extend_height=True,
+    )
+
+
+# LLM: 历史搜索使用独立单行 Buffer；主输入只显示当前 match，query 永远不会混入待提交 prompt。
+# 函数用途: 创建带动态 `search prompts:` 前缀的 Ctrl-R 搜索底栏。
+def _make_history_search_area(interaction: TuiInteractionState) -> Any:
+    from prompt_toolkit.widgets import TextArea
+
+    return TextArea(
+        height=1,
+        dont_extend_height=True,
+        multiline=False,
+        wrap_lines=False,
+        style="class:tui-history-search",
+        prompt=lambda: [
+            (
+                "class:tui-muted",
+                "  "
+                + (
+                    "no matching prompt: "
+                    if interaction.snapshot().history_failed_match
+                    else "search prompts: "
+                ),
+            )
+        ],
+    )
+
+
+# LLM: query listener 只在 active search 中把结构化匹配结果投影到主 Buffer；程序化清空搜索框时不会改草稿。
+# 函数用途: 连接搜索输入变化与主输入中的历史匹配预览。
+def _wire_history_search_area(
+    history_search_area: Any,
+    input_area: Any,
+    interaction: TuiInteractionState,
 ) -> None:
-    store = TuiTranscriptStore(output_area, follow_ref, app_ref, max_chars=max_chars)
-    set_active_transcript_store(store)
+    from prompt_toolkit.document import Document
 
-    set_tui_output_sink(store.append_history)
-    set_tui_stream_sink(store.append_stream, finish=store.finish_stream)
+    def on_query_changed(buffer: Any) -> None:
+        if not interaction.snapshot().history_search_active:
+            return
+        draft = interaction.update_history_query(str(buffer.text or ""))
+        if draft is None:
+            return
+        input_area.buffer.set_document(
+            Document(draft.text, cursor_position=draft.cursor_position),
+            bypass_readonly=True,
+        )
+
+    history_search_area.buffer.on_text_changed += on_query_changed
 
 
-def _app_scrollback_enabled(args: Any) -> bool:
-    if getattr(args, "plain", False):
-        return False
-    return bool(getattr(args, "app_scrollback", True))
+# LLM: `?` 本身不进入 Buffer；一旦用户真正输入其它正文，帮助必须从同一 interaction state 幂等关闭。
+# 函数用途: 让普通文字输入自动收起快捷键帮助，同时保留刚输入的字符和光标位置。
+def _wire_help_dismiss_on_input(
+    input_area: Any,
+    interaction: TuiInteractionState,
+) -> None:
+    def on_input_changed(buffer: Any) -> None:
+        if str(buffer.text or ""):
+            interaction.close_help()
+
+    input_area.buffer.on_text_changed += on_input_changed
 
 
-def make_tui_app(params: MakeTuiAppParams):
-    from prompt_toolkit.application import Application
-    from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
+# LLM: transcript 搜索使用独立一行 Buffer；正文全文与命中坐标由 TuiTranscriptModeState/provider 管理，query 不进入 chat history。
+# 函数用途: 创建 less 风格 `/` transcript 搜索输入框。
+def _make_transcript_search_area() -> Any:
+    from prompt_toolkit.widgets import TextArea
 
-    history_file = params.agent.root / ".chat_history"
-    history_file.parent.mkdir(parents=True, exist_ok=True)
-
-    status_config = _make_status_bar_config(params)
-    status_bar = _make_status_bar(status_config)
-    hint_bar = _make_hint_bar()
-    input_area = _make_input_area(str(history_file))
-
-    use_app_scrollback = _app_scrollback_enabled(params.args)
-    output_area = _make_transcript_area() if use_app_scrollback else None
-    transcript_follow_ref = [True] if use_app_scrollback else None
-    input_row = VSplit([_make_input_prompt_window(), input_area])
-    # 会话运行时 布局: 顶部状态行(品牌·模型·目录·活动), 中间对话流, 底部提示行+输入。
-    body = (
-        [status_bar, output_area, hint_bar, input_row]
-        if output_area is not None else [status_bar, hint_bar, input_row]
+    return TextArea(
+        height=1,
+        dont_extend_height=True,
+        multiline=False,
+        wrap_lines=False,
+        style="class:tui-transcript-search",
+        prompt=[("class:tui-muted", "  /")],
     )
-    layout = Layout(HSplit(body), focused_element=input_area)
 
-    kb = _make_tui_keybindings(params, input_area, output_area, transcript_follow_ref)
-    style = _make_tui_style()
 
-    app_ref: list[Any] = [None]
+# LLM: query listener 只更新 transcript typed state，再让 provider 按当前宽度计算可见 match；它不直接扫描 block metadata。
+# 函数用途: 连接 transcript 搜索框与高亮/跳转。
+def _wire_transcript_search_area(
+    search_area: Any,
+    view: TuiTranscriptView,
+    transcript_state: TuiTranscriptModeState,
+) -> None:
+    def on_query_changed(buffer: Any) -> None:
+        if not transcript_state.snapshot().search_open:
+            return
+        transcript_state.update_search_query(str(buffer.text or ""))
+        view.provider.frame(view.provider.last_width)
+        view.jump_search_match(transcript_state.current_match_line())
+
+    search_area.buffer.on_text_changed += on_query_changed
+
+
+# LLM: 搜索状态行只显示 state 已计算的 count/current；零匹配错误不是控制信号。
+# 函数用途: 创建 transcript 搜索栏右侧的命中计数或无结果提示。
+def _make_transcript_search_status_window(
+    transcript_state: TuiTranscriptModeState,
+) -> Any:
+    from prompt_toolkit.layout import FormattedTextControl, Window
+    from prompt_toolkit.layout.dimension import Dimension
+
+    def text() -> list[tuple[str, str]]:
+        snapshot = transcript_state.snapshot()
+        if snapshot.search_query and snapshot.match_count == 0:
+            return [("class:tui-error", "no matches ")]
+        if snapshot.match_count:
+            return [
+                (
+                    "class:tui-muted",
+                    f"{snapshot.current_match}/{snapshot.match_count}  ",
+                )
+            ]
+        return []
+
+    return Window(
+        content=FormattedTextControl(text),
+        width=Dimension(min=0, max=20),
+        height=1,
+        dont_extend_height=True,
+    )
+
+
+# LLM: footer 与 transcript 共享 frame；普通状态固定一行，显式 help 状态按其真实换行数占高。
+# 函数用途: 创建快捷键、运行状态和 `?` 帮助区域。
+def _make_footer_window(view: TuiTranscriptView) -> Any:
+    from prompt_toolkit.layout import Window
+
+    return Window(
+        content=view.footer_control,
+        height=view.footer_line_count,
+        dont_extend_height=True,
+        style="class:tui-footer",
+    )
+
+
+# LLM: 输入上下横线是固定视觉组件，不承载 mode/permission 状态，也不从终端内容测算长度。
+# 函数用途: 创建随当前可用宽度铺满的输入分隔线。
+def _make_input_rule_window() -> Any:
+    from prompt_toolkit.layout import Window
+
+    return Window(
+        height=1,
+        char="─",
+        style="class:tui-input-rule",
+        dont_extend_height=True,
+    )
+
+
+# LLM: transcript 与输入框之间保留 终端交互 的单空行，不能并入消息 block 或会话历史。
+# 函数用途: 创建一行纯布局间距。
+def _make_input_spacer() -> Any:
+    from prompt_toolkit.layout import Window
+
+    return Window(height=1, dont_extend_height=True)
+
+
+# LLM: runtime 是 mandatory dependency；缺失时必须显式失败，禁止回退创建 legacy transcript store。
+# 函数用途: 校验并返回 app 与 worker 共享的 TuiRuntime。
+def _required_runtime(params: MakeTuiAppParams) -> TuiRuntime:
+    runtime = params.tui_runtime
+    if not isinstance(runtime, TuiRuntime):
+        raise TypeError("MakeTuiAppParams.tui_runtime must be TuiRuntime")
+    return runtime
+
+
+# LLM: 两个超时分别约束终端 ESC 前缀拆包和 prompt_toolkit 多键歧义；必须一起收紧并保留短窗识别 Alt/Meta 组合键。
+# 函数用途: 配置单按 Esc 的低延迟，同时继续识别同批送达的 Alt+Enter、Alt+R 等组合键。
+def _configure_escape_timeouts(application: Any) -> None:
+    application.ttimeoutlen = TERMINAL_ESCAPE_PREFIX_TIMEOUT_SECONDS
+    application.timeoutlen = ESCAPE_SEQUENCE_TIMEOUT_SECONDS
+
+
+# LLM: 组件束只保存同一 Application 的 typed runtime、state、controls 和 filters；不得被用作第二状态源或跨 app 复用。
+# 类用途: 汇总界面组装和按键注册共同使用的控件与模式条件。
+@dataclass(frozen=True)
+class _TuiAppParts:
+    runtime: TuiRuntime
+    interaction: TuiInteractionState
+    transcript_state: TuiTranscriptModeState
+    title_controller: TuiTerminalTitleController
+    input_area: Any
+    history_search_area: Any
+    transcript_view: TuiTranscriptView
+    transcript_search_area: Any
+    permission_feedback_area: Any
+    history_search_active: Any
+    permission_active: Any
+    permission_feedback_active: Any
+    transcript_search_active: Any
+
+
+# LLM: 控件准备只创建一个 runtime/store 视图并连接 typed listeners；history 目录创建是本函数唯一文件系统副作用。
+# 函数用途: 创建 TUI 所需的状态、控件和动态模式条件。
+def _prepare_tui_app_parts(params: MakeTuiAppParams) -> _TuiAppParts:
+    from prompt_toolkit.filters import Condition
+
+    runtime = _required_runtime(params)
+    interaction = TuiInteractionState(runtime.store.invalidate)
+    transcript_state = TuiTranscriptModeState(runtime.store.invalidate)
+    title_controller = TuiTerminalTitleController(
+        str(getattr(params.agent.config, "agent_name", "my-agent") or "my-agent")
+    )
+    history_file = Path(params.agent.root) / ".chat_history"
+    history_file.parent.mkdir(parents=True, exist_ok=True)
+    input_area = _make_input_area(str(history_file), runtime, Path(params.agent.root))
+    _wire_help_dismiss_on_input(input_area, interaction)
+    history_search_area = _make_history_search_area(interaction)
+    _wire_history_search_area(history_search_area, input_area, interaction)
+    history_search_active = Condition(
+        lambda: interaction.snapshot().history_search_active
+    )
+    permission_active = Condition(
+        lambda: runtime.store.snapshot().permission is not None
+    )
+    permission_feedback_active = Condition(
+        lambda: bool(
+            (permission := runtime.store.snapshot().permission)
+            and permission.feedback_mode
+        )
+    )
+    transcript_view = make_tui_transcript_view(
+        runtime.store,
+        _make_render_context_factory(params, interaction, transcript_state),
+        transcript_state=transcript_state,
+    )
+    transcript_search_area = _make_transcript_search_area()
+    _wire_transcript_search_area(
+        transcript_search_area,
+        transcript_view,
+        transcript_state,
+    )
+    permission_feedback_area = _make_permission_feedback_area(runtime)
+    _wire_permission_feedback_area(permission_feedback_area, runtime)
+    transcript_search_active = Condition(
+        lambda: transcript_state.snapshot().search_open
+    )
+    return _TuiAppParts(
+        runtime=runtime,
+        interaction=interaction,
+        transcript_state=transcript_state,
+        title_controller=title_controller,
+        input_area=input_area,
+        history_search_area=history_search_area,
+        transcript_view=transcript_view,
+        transcript_search_area=transcript_search_area,
+        permission_feedback_area=permission_feedback_area,
+        history_search_active=history_search_active,
+        permission_active=permission_active,
+        permission_feedback_active=permission_feedback_active,
+        transcript_search_active=transcript_search_active,
+    )
+
+
+# LLM: normal body 的条件只引用 parts 中共享 filters；permission 覆盖层出现时必须隐藏输入、补全、历史与 footer。
+# 函数用途: 组装普通聊天和权限确认共用的主布局。
+def _make_normal_tui_body(parts: _TuiAppParts) -> Any:
+    from prompt_toolkit.filters import has_completions
+    from prompt_toolkit.layout import ConditionalContainer, HSplit, VSplit, Window
+    from prompt_toolkit.layout.dimension import Dimension
+
+    input_area = parts.input_area
+    transcript_view = parts.transcript_view
+    permission_active = parts.permission_active
+    input_row = VSplit([_make_input_prompt_window(), input_area])
+    return HSplit(
+        [
+            transcript_view.window,
+            _make_overlay_window(transcript_view),
+            ConditionalContainer(
+                content=parts.permission_feedback_area,
+                filter=parts.permission_feedback_active,
+            ),
+            ConditionalContainer(
+                content=_make_input_status_window(transcript_view),
+                filter=~permission_active,
+            ),
+            ConditionalContainer(
+                content=_make_input_spacer(),
+                filter=~permission_active,
+            ),
+            ConditionalContainer(
+                content=_make_input_rule_window(),
+                filter=~permission_active,
+            ),
+            ConditionalContainer(
+                content=input_row,
+                filter=~permission_active,
+            ),
+            ConditionalContainer(
+                content=_make_input_rule_window(),
+                filter=~permission_active,
+            ),
+            ConditionalContainer(
+                content=Window(
+                    content=TuiCompletionMenuControl(input_area.buffer),
+                    height=Dimension(min=1, max=6),
+                    dont_extend_height=True,
+                ),
+                filter=(
+                    has_completions
+                    & ~parts.history_search_active
+                    & ~permission_active
+                ),
+            ),
+            ConditionalContainer(
+                content=parts.history_search_area,
+                filter=parts.history_search_active & ~permission_active,
+            ),
+            ConditionalContainer(
+                content=_make_footer_window(transcript_view),
+                filter=(
+                    ~permission_active
+                    & ~has_completions
+                    & ~parts.history_search_active
+                ),
+            ),
+        ]
+    )
+
+
+# LLM: transcript modal body 始终复用同一个 view/state；搜索关闭时只替换底栏，不创建或复制正文控件。
+# 函数用途: 组装详细 transcript 浏览和搜索布局。
+def _make_transcript_tui_body(parts: _TuiAppParts) -> Any:
+    from prompt_toolkit.layout import ConditionalContainer, HSplit, VSplit
+
+    transcript_view = parts.transcript_view
+    return HSplit(
+        [
+            transcript_view.modal_window,
+            _make_input_rule_window(),
+            ConditionalContainer(
+                content=VSplit(
+                    [
+                        parts.transcript_search_area,
+                        _make_transcript_search_status_window(parts.transcript_state),
+                    ]
+                ),
+                filter=parts.transcript_search_active,
+            ),
+            ConditionalContainer(
+                content=_make_footer_window(transcript_view),
+                filter=~parts.transcript_search_active,
+            ),
+        ]
+    )
+
+
+# LLM: Application 组装必须保留同一个 parts 生命周期、alternate screen、显式块状输入光标、60Hz 合并上限、事件/活动动画触发重绘、鼠标与 before_render 焦点同步；不得另建 runtime。
+# 函数用途: 用准备好的控件和两个模式布局创建 终端交互 同类全屏终端 Application。
+def _assemble_tui_application(
+    params: MakeTuiAppParams,
+    parts: _TuiAppParts,
+    normal_body: Any,
+    transcript_body: Any,
+) -> Any:
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.cursor_shapes import CursorShape
+    from prompt_toolkit.layout import DynamicContainer, Layout
+
+    body = DynamicContainer(
+        lambda: (
+            normal_body
+            if parts.runtime.store.snapshot().permission is not None
+            else transcript_body
+            if parts.transcript_state.snapshot().active
+            else normal_body
+        )
+    )
+    layout = Layout(body, focused_element=parts.input_area)
+    key_bindings = _make_tui_keybindings(params, parts)
     app = Application(
         layout=layout,
-        key_bindings=kb,
-        style=style,
-        full_screen=use_app_scrollback,
+        key_bindings=key_bindings,
+        style=_make_tui_style(),
+        full_screen=True,
         erase_when_done=False,
-        mouse_support=use_app_scrollback,
-        min_redraw_interval=APP_REDRAW_INTERVAL_SECONDS if use_app_scrollback else None,
-        max_render_postpone_time=APP_RENDER_POSTPONE_SECONDS if use_app_scrollback else 0.01,
+        mouse_support=True,
+        cursor=CursorShape.BLOCK,
+        min_redraw_interval=APP_REDRAW_INTERVAL_SECONDS,
+        max_render_postpone_time=APP_RENDER_POSTPONE_SECONDS,
+        before_render=lambda application: _before_tui_render(
+            application,
+            parts.input_area,
+            parts.transcript_view,
+            parts.transcript_search_area,
+            parts.permission_feedback_area,
+            parts.title_controller,
+            parts.runtime,
+        ),
     )
-    _configure_transcript_sink(TranscriptSinkRequest(output_area, transcript_follow_ref, app_ref, app, params))
-
+    _configure_escape_timeouts(app)
+    parts.transcript_view.provider.set_invalidate_callback(app.invalidate)
+    app._my_agent_title_controller = parts.title_controller
+    set_tui_output_sink(parts.runtime.write_console)
     return app
 
 
-def _make_status_bar_config(params: MakeTuiAppParams) -> StatusBarConfig:
-    config = params.agent.config
-    root = getattr(params.agent, "root", None)
-    try:
-        workspace_name = Path(root).name if root else ""
-    except (TypeError, ValueError):
-        workspace_name = ""
-    return StatusBarConfig(
-        refs=TuiStatusRefs(
-            params.state_lock,
-            params.is_running_ref,
-            params.pending_jobs_ref,
-            params.running_started_at_ref,
-            params.last_token_estimate_ref,
-            params.thinking_line_ref,
-        ),
-        model_name=config.model_name,
-        workspace_name=str(workspace_name or ""),
+# LLM: make_tui_app 只组合一个 typed view/store；stdout 命令结果经 runtime.write_console 转成 system event，流式正文由 worker adapter 直发。
+# 函数用途: 构建并返回完整 prompt_toolkit Application。
+def make_tui_app(params: MakeTuiAppParams):
+    parts = _prepare_tui_app_parts(params)
+    return _assemble_tui_application(
+        params,
+        parts,
+        _make_normal_tui_body(parts),
+        _make_transcript_tui_body(parts),
     )
 
 
+# LLM: keybinding 参数携带 typed view/runtime；滚动、输入队列和命令输出不得访问 TextArea transcript 私有 buffer。
+# 函数用途: 把 app 状态组装为输入控制器参数。
 def _make_tui_keybindings(
     app_config: MakeTuiAppParams,
-    input_area: Any,
-    output_area: Any | None,
-    transcript_follow_ref: list[bool] | None,
+    parts: _TuiAppParts,
 ):
     return _tui_create_keybindings(
         TuiCreateKeybindingsParams(
-            input_area,
-            output_area,
-            transcript_follow_ref,
+            parts.input_area,
+            parts.transcript_view,
+            None,
             app_config.agent,
             app_config.args,
             app_config.runtime_inject,
@@ -225,39 +631,164 @@ def _make_tui_keybindings(
             app_config.jobs,
             app_config.pending_jobs_ref_for_enqueue,
             app_config.current_session_id,
+            parts.interaction,
+            parts.history_search_area,
+            parts.transcript_state,
+            parts.transcript_search_area,
+            parts.permission_feedback_area,
             int(getattr(app_config.agent.config, "chat_transcript_scroll_lines", 10) or 10),
+            app_config.tui_runtime,
         )
     )
 
 
+# LLM: resize 可由 transcript state 在 render 时关闭搜索；此同步只修正焦点归属，不读取 query 文案或触发模式变化。
+# 函数用途: 在每帧前保证 chat、transcript 和 transcript-search 的焦点与 typed mode 一致。
+def _sync_transcript_focus(
+    application: Any,
+    input_area: Any,
+    transcript_view: TuiTranscriptView,
+    transcript_search_area: Any,
+) -> None:
+    snapshot = transcript_view.transcript_state.snapshot()
+    current = application.layout.current_control
+    if snapshot.active:
+        if snapshot.search_open:
+            if current is not transcript_search_area.control:
+                application.layout.focus(transcript_search_area)
+        elif current is transcript_search_area.control or current is input_area.control:
+            application.layout.focus(transcript_view.modal_window)
+        return
+    if current is transcript_search_area.control or current is transcript_view.modal_control:
+        application.layout.focus(input_area)
+
+
+# LLM: permission overlay 比 transcript/history/chat 焦点优先；只读状态也聚焦专用控件，避免按键落入隐藏主输入。
+# 函数用途: 在审批出现时接管焦点，并在关闭后把临时控件归还给普通界面。
+def _sync_permission_focus(
+    application: Any,
+    input_area: Any,
+    permission_feedback_area: Any,
+    runtime: TuiRuntime,
+) -> bool:
+    from prompt_toolkit.document import Document
+
+    permission = runtime.store.snapshot().permission
+    current = application.layout.current_control
+    if permission is None:
+        if current is permission_feedback_area.control:
+            application.layout.focus(input_area)
+        return False
+    if str(permission_feedback_area.text or "") != permission.feedback:
+        permission_feedback_area.buffer.set_document(
+            Document(permission.feedback, cursor_position=len(permission.feedback)),
+            bypass_readonly=True,
+        )
+    if current is not permission_feedback_area.control:
+        application.layout.focus(permission_feedback_area)
+    return True
+
+
+# LLM: before-render 只同步焦点并更新公开终端标题；两者都读取 typed state，不触发业务事件或模型调用。
+# 函数用途: 执行每帧 TUI 的轻量终端副作用。
+def _before_tui_render(
+    application: Any,
+    input_area: Any,
+    transcript_view: TuiTranscriptView,
+    transcript_search_area: Any,
+    permission_feedback_area: Any,
+    title_controller: TuiTerminalTitleController,
+    runtime: TuiRuntime,
+) -> None:
+    permission_focused = _sync_permission_focus(
+        application,
+        input_area,
+        permission_feedback_area,
+        runtime,
+    )
+    if not permission_focused:
+        _sync_transcript_focus(
+            application,
+            input_area,
+            transcript_view,
+            transcript_search_area,
+        )
+    title_controller.update(application.output, runtime.store.snapshot())
+
+
+# LLM: style role 名必须与 block/Markdown renderer 一一对应；颜色是显示主题，不参与状态判断。
+# 函数用途: 定义 终端交互 参考主题的 prompt_toolkit 样式表。
 def _make_tui_style():
     from prompt_toolkit.styles import Style
 
-    # 对齐 会话运行时s.md: 正文默认前景色, 头部 bold, 次级 dim; cyan=用户/
-    # 状态指示, green=成功, red=错误, magenta=品牌 marker。不用重底色块。
     return Style.from_dict(
         {
-            "status-brand": "ansimagenta bold",
-            "status-meta": "ansigray",
-            "activity": "ansicyan",
-            "hint": "ansigray",
-            "transcript": "",
-            "input-area": "",
-            "prompt": "ansicyan bold",
-            "user-prompt": "ansicyan bold",
-            "assistant-marker": "ansimagenta bold",
-            "footer": "ansigray",
-            "error": "ansired",
+            "tui-transcript": "",
+            "tui-input": "#ffffff",
+            "tui-input-marker": "#ffffff bold",
+            "tui-placeholder": "#949494",
+            "tui-input-rule": "#808080",
+            "tui-tip-accent": "#d78787",
+            "tui-footer": "#949494",
+            "tui-new-messages": "#949494 bg:#3a3a3a",
+            "tui-selection": "#ffffff bg:#5f5f87",
+            "tui-user-marker": "#4e4e4e bg:#3a3a3a",
+            "tui-user-text": "#ffffff bg:#3a3a3a",
+            "tui-user-fill": "bg:#3a3a3a",
+            "tui-assistant-marker": "#ffffff",
+            "tui-accent": "#d7d7af",
+            "tui-muted": "#949494",
+            "tui-strong": "#ffffff bold",
+            "tui-heading": "#ffffff bold",
+            "tui-em": "italic",
+            "tui-strike": "strike",
+            "tui-link": "#afd7ff underline",
+            "tui-code-inline": "#afd7ff",
+            "tui-code-keyword": "#5fd7ff bold",
+            "tui-code-string": "#ff5f5f",
+            "tui-code-number": "#d7d7af",
+            "tui-code-comment": "#949494 italic",
+            "tui-code-builtin": "#5fd7ff",
+            "tui-code-operator": "#ffffff",
+            "tui-code-punctuation": "#949494",
+            "tui-diff-add": "#d7efff bg:#33465c",
+            "tui-diff-remove": "#ffd7d7 bg:#5c3338",
+            "tui-diff-header": "#87afff bold",
+            "tui-diff-context": "#d0d0d0",
+            "tui-quote-mark": "#808080 italic",
+            "tui-spinner": "#d78787",
+            "tui-spinner-highlight": "#ffaf87",
+            "tui-thinking": "#949494",
+            "tui-thinking-detail": "#949494",
+            "tui-context-label": "#6c6c6c",
+            "tui-context-safe": "#87afaf",
+            "tui-context-warning": "#d7af5f",
+            "tui-context-danger": "#ff8787 bold",
+            "tui-tool-marker": "#ffffff",
+            "tui-tool-title": "#ffffff",
+            "tui-tool-output": "#c6c6c6",
+            "tui-tool-output-error": "#ff8787",
+            "tui-error": "#ff5f5f",
+            "tui-welcome-heading": "#d7d7af bold",
+            "tui-welcome-divider": "#d7d7af dim",
+            "tui-avatar-hair": "#ffd7af",
+            "tui-avatar-ribbon": "#ff8787 bold",
+            "tui-avatar-face": "#ffd7d7 bold",
+            "tui-avatar-dress": "#ff875f bold",
+            "tui-avatar-umbrella": "#ff5f5f bold",
+            "tui-avatar-bunny": "#ffd7d7",
+            "tui-permission-accent": "#d7d7af",
+            "tui-permission-title": "#ffffff bold",
+            "tui-permission-selected": "#ffffff bg:#3a3a3a",
+            "tui-permission-feedback": "#ffffff",
+            "tui-completion": "#949494 bg:default",
+            "tui-completion-selected": "#afd7ff bg:default",
+            "tui-history-search": "#949494",
+            "tui-transcript-search": "#ffffff",
+            "tui-search-match": "bg:#5f5f00",
+            "tui-search-current": "#000000 bg:#ffff5f bold",
         }
     )
 
 
-def _configure_transcript_sink(request: TranscriptSinkRequest) -> None:
-    if request.output_area is not None and request.transcript_follow_ref is not None:
-        request.app_ref[0] = request.app
-        max_chars = int(getattr(request.params.agent.config, "chat_transcript_max_chars", 500_000) or 500_000)
-        _install_transcript_sink(request.output_area, request.transcript_follow_ref, request.app_ref, max_chars=max_chars)
-        return
-    set_active_transcript_store(None)
-    set_tui_output_sink(None)
-    set_tui_stream_sink(None)
+__all__ = ["make_tui_app"]

@@ -1,11 +1,11 @@
 
 from __future__ import annotations
 
-"""gateway delayed response scenario test.
+"""gateway orphan response projection scenario test.
 
 给人看的解释：
-模拟 gateway 响应已经存在时，worker 不应该再次调用模型。
-验证系统能检测已有响应、直接归档请求、不重复执行。
+模拟只有 response 投影、没有 canonical terminal 的情况。
+验证 worker 不会把孤立投影当成完成事实，而会执行请求并用权威结果修复投影。
 从 gateway_cases.py 拆出来，让那个文件不超 400 行。
 """
 
@@ -51,7 +51,7 @@ def _delayed_response_setup(args):
         {
             "id": request_id,
             "kind": "ask",
-            "prompt": "gateway delayed response scenario: this should not run twice.",
+            "prompt": "gateway orphan response projection scenario: execute canonical request.",
             "inject": [],
             "prompt_files": [],
             "save": False,
@@ -107,10 +107,10 @@ class _DelayedResponseRunRequest:
 def _delayed_response_verify(ctx: _DelayedResponseVerifyContext) -> int:
     final_ok = (
         ctx.processed == 1
-        and ctx.run_called["value"] is False
+        and ctx.run_called["value"] is True
         and ctx.done_path.exists()
-        and ctx.response.get("response") == "late response already arrived"
-        and ctx.response.get("backend") == "scenario-delayed-response"
+        and ctx.response.get("response") == "canonical response replaced orphan projection"
+        and ctx.response.get("backend") == "scenario-fresh-response"
         and ctx.done_payload.get("id") == ctx.request_id
         and not ctx.pending_left
         and not ctx.processing_left
@@ -119,7 +119,7 @@ def _delayed_response_verify(ctx: _DelayedResponseVerifyContext) -> int:
     write_scenario_summary(
         ctx.paths,
         ok=final_ok,
-        reason="gateway delayed response handling passed" if final_ok else "gateway delayed response handling failed",
+        reason="gateway orphan projection handling passed" if final_ok else "gateway orphan projection handling failed",
         extra={
             "case": "gateway-delayed-response",
             "request_id": ctx.request_id,
@@ -156,19 +156,24 @@ def _collect_delayed_response_result(request: _DelayedResponseRunRequest) -> _De
 
 def run_scenario_gateway_delayed_response_case(args) -> int:
     paths, agent, gpaths, request_id, request_path, response_path = _delayed_response_setup(args)
-    print_scenario_step(1, "Create a pending request with an already-arrived response")
+    print_scenario_step(1, "Create a pending request with an orphan response projection")
     print(f"request_path={request_path} exists={request_path.exists()}")
     print(f"response_path={response_path} exists={response_path.exists()}")
 
     run_called = {"value": False}
 
-    def fail_if_called(user_prompt: str, *, params=None) -> AgentRunResult:
+    def run_canonical_request(user_prompt: str, *, params=None) -> AgentRunResult:
         run_called["value"] = True
-        raise AssertionError("agent.run should not be called when response already exists")
+        return AgentRunResult(
+            prompt=f"canonical prompt: {user_prompt}",
+            response="canonical response replaced orphan projection",
+            backend="scenario-fresh-response",
+            used_memories=0,
+        )
 
-    agent.run = fail_if_called  # type: ignore[method-assign]
+    agent.run = run_canonical_request  # type: ignore[method-assign]
 
-    print_scenario_step(2, "Let worker claim the duplicate request")
+    print_scenario_step(2, "Let worker execute and repair the orphan projection")
     verify_ctx = _collect_delayed_response_result(
         _DelayedResponseRunRequest(paths, agent, gpaths, request_id, request_path, response_path, run_called)
     )

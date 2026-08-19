@@ -591,7 +591,7 @@ def cmd_gateway_start(args) -> int:
     ready = _wait_for_gateway_start_ready(
         paths,
         process,
-        timeout=float(getattr(agent.config, "gateway_ready_timeout_seconds", 10) or 10),
+        timeout=float(getattr(agent.config, "gateway_ready_timeout_seconds", 3) or 3),
     )
     print(f"gateway starting pid={process.pid}")
     print(f"state: {paths.state}")

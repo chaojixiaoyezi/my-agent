@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import threading
 import time
+import urllib.error
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -17,6 +19,7 @@ from agent_py_agent.cli.chat_parts.control_runtime import (
     ChatControlState,
     _command_text,
     execute_chat_control,
+    request_gateway_control_status,
 )
 from agent_py_agent.cli.chat_parts.slash_command_types import SlashCommandContext
 from agent_py_agent.cli.chat_parts.slash_commands import handle_common_slash_command
@@ -264,6 +267,147 @@ def test_gateway_control_uses_configured_service_command_timeout(monkeypatch) ->
     assert urlopen.call_args.kwargs["timeout"] == 37.0
 
 
+def test_gateway_btw_carries_stable_identity_and_exact_turn(monkeypatch) -> None:
+    response = MagicMock()
+    response.__enter__.return_value.read.return_value = (
+        b'{"ok": true, "kind": "steer", "message": "pending", '
+        b'"request_id": "turn-a", "operation_id": "gwctl-msg-abc", '
+        b'"guidance_dedupe_key": "guidance-key", "delivery_status": "unknown"}'
+    )
+    urlopen = MagicMock(return_value=response)
+    monkeypatch.setattr(
+        "agent_py_agent.cli.chat_parts.control_runtime.urllib.request.urlopen",
+        urlopen,
+    )
+    execution = ChatControlExecution(
+        SimpleNamespace(
+            config=SimpleNamespace(
+                gateway_port=8420,
+                gateway_service_command_timeout_seconds=37,
+            )
+        ),
+        True,
+        ChatControlState(
+            True,
+            0,
+            "长任务",
+            time.perf_counter(),
+            "session-steer",
+            request_id="turn-a",
+        ),
+    )
+
+    result = execute_chat_control(execution, _command("/btw 请先核对证据"))
+
+    request = urlopen.call_args.args[0]
+    payload = json.loads(request.data.decode("utf-8"))
+    assert payload["metadata"]["expected_turn_id"] == "turn-a"
+    assert str(payload["metadata"]["message_id"]).startswith("control-")
+    assert result.delivery_status == "unknown"
+    assert result.operation_id == "gwctl-msg-abc"
+    assert result.guidance_dedupe_key == "guidance-key"
+
+
+def test_gateway_control_transport_retry_reuses_one_message_id(monkeypatch) -> None:
+    response = MagicMock()
+    response.__enter__.return_value.read.return_value = (
+        b'{"ok": true, "kind": "compact", "message": "done", '
+        b'"operation_id": "gwctl-stable", "control_state": "completed"}'
+    )
+    urlopen = MagicMock(
+        side_effect=[urllib.error.URLError("response lost"), response]
+    )
+    monkeypatch.setattr(
+        "agent_py_agent.cli.chat_parts.control_runtime.urllib.request.urlopen",
+        urlopen,
+    )
+    execution = ChatControlExecution(
+        SimpleNamespace(
+            config=SimpleNamespace(
+                gateway_port=8420,
+                gateway_service_command_timeout_seconds=2,
+                request_timeout=2,
+            )
+        ),
+        True,
+        ChatControlState(False, 0, "", 0.0, "session-retry"),
+    )
+
+    result = execute_chat_control(
+        execution,
+        _command("/compact 保留未完成事项"),
+        message_id="control-stable",
+    )
+
+    payloads = [
+        json.loads(call.args[0].data.decode("utf-8"))
+        for call in urlopen.call_args_list
+    ]
+    assert [item["metadata"]["message_id"] for item in payloads] == [
+        "control-stable",
+        "control-stable",
+    ]
+    assert result.operation_id == "gwctl-stable"
+    assert result.control_state == "completed"
+
+
+def test_gateway_control_status_is_read_only_and_preserves_delivery(monkeypatch) -> None:
+    response = MagicMock()
+    response.__enter__.return_value.read.return_value = (
+        b'{"ok": true, "kind": "steer", "message": "accepted", '
+        b'"request_id": "turn-a", "operation_id": "gwctl-one", '
+        b'"control_state": "completed", "delivery_status": "accepted"}'
+    )
+    urlopen = MagicMock(return_value=response)
+    monkeypatch.setattr(
+        "agent_py_agent.cli.chat_parts.control_runtime.urllib.request.urlopen",
+        urlopen,
+    )
+    execution = ChatControlExecution(
+        SimpleNamespace(config=SimpleNamespace(gateway_port=8420)),
+        True,
+        ChatControlState(False, 0, "", 0.0, "session-status"),
+    )
+
+    result = request_gateway_control_status(execution, "gwctl-one")
+
+    request = urlopen.call_args.args[0]
+    assert request.full_url.endswith("/control-status/gwctl-one")
+    assert request.data is None
+    assert result.operation_id == "gwctl-one"
+    assert result.request_id == "turn-a"
+    assert result.delivery_status == "accepted"
+    assert result.control_state == "completed"
+
+
+def test_gateway_manual_compact_timeout_covers_one_provider_call(monkeypatch) -> None:
+    response = MagicMock()
+    response.__enter__.return_value.read.return_value = (
+        b'{"ok": true, "message": "compacted", "request_id": ""}'
+    )
+    urlopen = MagicMock(return_value=response)
+    monkeypatch.setattr(
+        "agent_py_agent.cli.chat_parts.control_runtime.urllib.request.urlopen",
+        urlopen,
+    )
+    execution = ChatControlExecution(
+        SimpleNamespace(
+            config=SimpleNamespace(
+                gateway_port=8420,
+                gateway_service_command_timeout_seconds=37,
+                request_timeout=240,
+            )
+        ),
+        True,
+        ChatControlState(False, 0, "", 0.0, "session-compact"),
+    )
+
+    result = execute_chat_control(execution, _command("/compact 保留未完成事项"))
+
+    assert result.ok is True
+    assert urlopen.call_args.kwargs["timeout"] == 270.0
+
+
 def test_local_status_does_not_show_guidance_history(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", model_name="MiniMax-M2.7"), tmp_path)
     execution = ChatControlExecution(
@@ -281,6 +425,9 @@ def test_local_status_does_not_show_guidance_history(tmp_path) -> None:
 
 
 def test_gateway_goal_command_serialization_preserves_operation_and_value() -> None:
+    assert _command_text(_command("/context")) == "/context"
+    assert _command_text(_command("/compact 保留决策")) == "/compact 保留决策"
+    assert _command_text(_command("/effort high")) == "/effort high"
     assert _command_text(_command("/goal")) == "/goal"
     assert _command_text(_command("/goal 连续检查发布健康")) == "/goal 连续检查发布健康"
     assert _command_text(_command("/goal edit 改为每日检查")) == "/goal edit 改为每日检查"

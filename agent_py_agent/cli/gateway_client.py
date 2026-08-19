@@ -22,7 +22,6 @@ from ..agent.gateway_parts import (
     gateway_chunk_path,
     gateway_chunk_path_candidates,
     gateway_paths,
-    gateway_response_path,
     gateway_running,
     log_gateway_payload,
     print_gateway_response,
@@ -30,12 +29,12 @@ from ..agent.gateway_parts import (
     wait_for_gateway_response,
     wait_for_gateway_running,
 )
+from ..agent.gateway_parts.io import read_complete_utf8_rows
 from ..agent.gateway_parts.response_renderer import (
     GatewayResponsePollState,
     project_gateway_stream_chunk,
-    read_gateway_response_file,
-    # Keep CLI ask polling on the same response-state reader used by chat/TUI.
-    read_gateway_response_file_when_ready,
+    read_gateway_terminal_response_file,
+    read_gateway_terminal_response_file_when_ready,
 )
 from .chat import cmd_chat
 from .common import make_agent, resume_context_override
@@ -57,7 +56,7 @@ class GatewayAskContext:
 @dataclass(frozen=True)
 class GatewayPollRequest:
     chunk_path: Path
-    response_path: Path
+    terminal_path: Path
     deadline: float
     spinner: ThinkingSpinner
     stream_output: bool
@@ -196,13 +195,17 @@ _MAX_CHUNK_READ_BYTES = 8 * 1024 * 1024
 
 
 def _read_stream_chunk_data(readable_chunk_path: Path, state: GatewayStreamState | None) -> str:
-    with open(readable_chunk_path, encoding="utf-8") as f:
-        if state is not None:
-            f.seek(max(0, state.chunk_offset))
-        data = f.read(_MAX_CHUNK_READ_BYTES)
-        if state is not None:
-            state.chunk_offset = f.tell()
-        return data
+    offset = state.chunk_offset if state is not None else 0
+    rows, next_offset, decode_error = read_complete_utf8_rows(
+        readable_chunk_path,
+        offset,
+        max_bytes=_MAX_CHUNK_READ_BYTES,
+    )
+    if decode_error:
+        print("gateway stream chunk load_error category=utf8_decode", file=sys.stderr)
+    if state is not None:
+        state.chunk_offset = next_offset
+    return "\n".join(rows)
 
 
 def _readable_chunk_path(chunk_path: Path) -> Path | None:
@@ -245,6 +248,9 @@ def _flush_stream_chunks(request: GatewayPollRequest, state: GatewayStreamState)
     return _stream_chunk_lines(request.chunk_path, request.spinner, state)
 
 
+# LLM: Local CLI polling shares the same canonical terminal authority as HTTP, TUI, and adapter;
+# chunks are display-only and an orphan response projection must never finish the wait.
+# 函数用途: 在输出流式进度的同时等待唯一终态归档。
 def _wait_for_gateway_response(request: GatewayPollRequest) -> GatewayPollResult:
     stream_state = GatewayStreamState()
     response: dict[str, Any] = {}
@@ -252,10 +258,11 @@ def _wait_for_gateway_response(request: GatewayPollRequest) -> GatewayPollResult
 
     while time.time() <= request.deadline:
         _flush_stream_chunks(request, stream_state)
-        response = read_gateway_response_file_when_ready(
-            request.response_path,
+        response = read_gateway_terminal_response_file_when_ready(
+            request.terminal_path,
             state=response_poll_state,
-            context="gateway.cli.response.read",
+            request_id=request.terminal_path.stem,
+            context="gateway.cli.terminal.read",
         )
         if response:
             _flush_stream_chunks(request, stream_state)
@@ -265,13 +272,25 @@ def _wait_for_gateway_response(request: GatewayPollRequest) -> GatewayPollResult
     return GatewayPollResult(response, bool(stream_state.visible_chunks))
 
 
+# LLM: The submitted response path remains a repairable projection; derive completion from the
+# exact request id under requests/terminal instead.
+# 函数用途: 为一次 ask 组装流路径、终态路径和超时上限并执行轮询。
 def _poll_gateway_response(ctx: GatewayAskContext) -> GatewayPollResult:
     chunk_path = gateway_chunk_path(ctx.paths, ctx.request_id)
     spinner = ThinkingSpinner()
     if ctx.stream_output:
         spinner.start()
     deadline = time.time() + max(0.0, ctx.timeout)
-    result = _wait_for_gateway_response(GatewayPollRequest(chunk_path, ctx.response_path, deadline, spinner, ctx.stream_output))
+    terminal_path = ctx.paths.terminal / f"{ctx.request_id}.json"
+    result = _wait_for_gateway_response(
+        GatewayPollRequest(
+            chunk_path,
+            terminal_path,
+            deadline,
+            spinner,
+            ctx.stream_output,
+        )
+    )
     if ctx.stream_output:
         spinner.stop()
     return result
@@ -333,7 +352,7 @@ def cmd_gateway_ask(args) -> int:
     paths = gateway_paths(agent)
     pid, alive = wait_for_gateway_running(
         paths,
-        timeout=float(getattr(agent.config, "gateway_ready_timeout_seconds", 10) or 10),
+        timeout=float(getattr(agent.config, "gateway_ready_timeout_seconds", 3) or 3),
     )
     if not alive:
         print("gateway 未在运行。请先执行: my-agent gateway start", file=sys.stderr)
@@ -361,17 +380,21 @@ def cmd_gateway_ask(args) -> int:
     )
 
 
+# LLM: CLI result reads the canonical terminal envelope. responses/*.json is only a projection and
+# cannot authorize, complete, or replace a request.
+# 函数用途: 按请求 ID 显示已封存的 Gateway 最终结果。
 def cmd_gateway_result(args) -> int:
 
     agent = make_agent(args)
     paths = gateway_paths(agent)
-    payload = read_gateway_response_file(
-        gateway_response_path(paths, args.request_id),
+    terminal_path = paths.terminal / f"{args.request_id}.json"
+    payload = read_gateway_terminal_response_file(
+        terminal_path,
         request_id=args.request_id,
-        context="gateway.cli.result.response.read",
+        context="gateway.cli.result.terminal.read",
     )
     if not payload:
-        print(f"未找到 gateway 响应: {args.request_id}", file=sys.stderr)
-        print(f"response: {gateway_response_path(paths, args.request_id)}")
+        print(f"未找到 gateway 终态结果: {args.request_id}", file=sys.stderr)
+        print(f"terminal: {terminal_path}")
         return 2
     return print_gateway_response(payload, json_mode=args.json, show_prompt=args.show_prompt)

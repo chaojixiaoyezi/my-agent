@@ -14,7 +14,10 @@ from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
     ToolProgressEvent,
     _public_progress_text,
 )
-from agent_py_agent.agent.agent_core.tool_model_generation import _model_chunk_callback
+from agent_py_agent.agent.agent_core.tool_model_generation import (
+    _model_chunk_callback,
+    _publish_provider_thinking,
+)
 from agent_py_agent.agent.conversation.control_commands import parse_conversation_control
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts import request_execution
@@ -140,6 +143,90 @@ def test_progress_chunk_respects_on_and_full_levels(tmp_path) -> None:
     assert "secret result" in _render_gateway_progress(events[1])
 
 
+def test_rich_transcript_keeps_each_commentary_tool_display_and_thinking(tmp_path) -> None:
+    path = tmp_path / "request.chunks.jsonl"
+    writer = BufferedChunkStreamWriter(path, rich_transcript=True)
+    writer.write_model("先看文件。")
+    writer.write_progress(
+        {"tool": "read_file", "phase": "started", "status": "开始"},
+        "legacy-1",
+    )
+    writer.write_model("再运行检查。")
+    writer.write_progress(
+        {
+            "tool": "run_command",
+            "phase": "started",
+            "status": "开始",
+            "output": "kept output",
+            "display": {"kind": "command", "stdout": "ok"},
+        },
+        "legacy-2",
+    )
+    writer.write_thinking("provider thought", duration_seconds=2.4)
+    writer.close()
+
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert [row["text"] for row in rows if row["kind"] == "assistant_commentary"] == [
+        "先看文件。",
+        "再运行检查。",
+    ]
+    progress = [row["progress"] for row in rows if row["kind"] == "tool_progress"][-1]
+    assert progress["output"] == "kept output"
+    assert progress["display"] == {"kind": "command", "stdout": "ok"}
+    thinking = next(row for row in rows if row["kind"] == "assistant_thinking")
+    assert thinking["text"] == "provider thought"
+    assert thinking["duration_seconds"] == 2.4
+
+
+def test_non_rich_transcript_drops_display_and_provider_thinking(tmp_path) -> None:
+    path = tmp_path / "request.chunks.jsonl"
+    writer = BufferedChunkStreamWriter(path)
+    writer.write_progress(
+        {
+            "tool": "run_command",
+            "phase": "finished",
+            "output": "hidden output",
+            "display": {"kind": "command", "stdout": "hidden"},
+        },
+        "legacy",
+    )
+    writer.write_thinking("hidden thought", duration_seconds=1.0)
+    writer.close()
+
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert "output" not in rows[0]["progress"]
+    assert "display" not in rows[0]["progress"]
+    assert not any(row["kind"] == "assistant_thinking" for row in rows)
+
+
+def test_model_finish_projects_only_explicit_thinking_blocks() -> None:
+    captured: list[tuple[str, float]] = []
+
+    class Sink:
+        def write_thinking(self, text: str, *, duration_seconds: float = 0.0) -> None:
+            captured.append((text, duration_seconds))
+
+    request = SimpleNamespace(
+        params=SimpleNamespace(effective_on_chunk=Sink()),
+    )
+    response = SimpleNamespace(
+        assistant_content_blocks=[
+            {"type": "thinking", "thinking": "visible", "signature": "must-not-leak"},
+            {"type": "redacted_thinking", "data": "must-not-leak"},
+            {"type": "text", "text": "ordinary answer"},
+        ]
+    )
+
+    _publish_provider_thinking(
+        request,
+        SimpleNamespace(started_at=time.monotonic() - 2.0),
+        response,
+    )
+
+    assert captured[0][0] == "visible"
+    assert captured[0][1] >= 2.0
+
+
 def test_first_real_model_segment_becomes_sanitized_commentary_at_tool_boundary(
     tmp_path,
 ) -> None:
@@ -147,7 +234,7 @@ def test_first_real_model_segment_becomes_sanitized_commentary_at_tool_boundary(
     writer = BufferedChunkStreamWriter(path)
     writer.write_model(
         "我先检查 /root/private/project/main.py。\n"
-        "[TOOL_CALL]\n{\"name\":\"read_file\"}\n[/TOOL_CALL]\n"
+        '[TOOL_CALL]\n{"name":"read_file"}\n[/TOOL_CALL]\n'
     )
     writer.write_progress(
         {"tool": "read_file", "phase": "started", "status": "任意展示文字"},
@@ -164,7 +251,9 @@ def test_first_real_model_segment_becomes_sanitized_commentary_at_tool_boundary(
     commentary = [row for row in rows if row.get("kind") == "assistant_commentary"]
     events, cursor = _read_public_progress_events(path, 0)
 
-    assert commentary == [{"t": commentary[0]["t"], "kind": "assistant_commentary", "text": "我先检查 main.py。"}]
+    assert commentary == [
+        {"t": commentary[0]["t"], "kind": "assistant_commentary", "text": "我先检查 main.py。"}
+    ]
     assert events == [{"kind": "assistant_commentary", "text": "我先检查 main.py。"}]
     assert _render_gateway_progress(events[0]) == "我先检查 main.py。"
     assert cursor == len(rows)
@@ -181,7 +270,7 @@ def test_live_user_input_opens_one_new_model_commentary_segment(tmp_path) -> Non
         "legacy-1",
     )
     writer.write_model("这段旧工具轮文字不能发出。\n")
-    writer.begin_active_turn_input()
+    writer.begin_active_turn_input(("steer-client-1",))
     writer.write_model("记得，原任务要输出 JSON 和 Markdown。\n")
     writer.write_progress(
         {"tool": "read_file", "phase": "started", "status": "任意展示文字"},
@@ -205,6 +294,33 @@ def test_live_user_input_opens_one_new_model_commentary_segment(tmp_path) -> Non
     assert "反复打开" not in json.dumps(commentary, ensure_ascii=False)
 
 
+def test_rich_stream_confirms_exact_active_turn_input_ids(tmp_path) -> None:
+    path = tmp_path / "request.chunks.jsonl"
+    writer = BufferedChunkStreamWriter(path, rich_transcript=True)
+
+    writer.begin_active_turn_input(("steer-1", "steer-2"))
+    writer.complete_active_turn_input(("steer-1", "steer-2"))
+    writer.close()
+
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert rows[0]["kind"] == "active_turn_input_consumed"
+    assert rows[0]["client_message_ids"] == ["steer-1", "steer-2"]
+
+    ordinary_path = tmp_path / "ordinary.chunks.jsonl"
+    ordinary = BufferedChunkStreamWriter(ordinary_path, rich_transcript=False)
+    ordinary.begin_active_turn_input(("steer-private",))
+    ordinary.close()
+    ordinary_rows = (
+        [
+            json.loads(line)
+            for line in ordinary_path.read_text(encoding="utf-8").splitlines()
+        ]
+        if ordinary_path.exists()
+        else []
+    )
+    assert all(row.get("kind") != "active_turn_input_consumed" for row in ordinary_rows)
+
+
 def test_runtime_notice_is_not_mislabeled_as_model_commentary(tmp_path) -> None:
     path = tmp_path / "request.chunks.jsonl"
     writer = BufferedChunkStreamWriter(path)
@@ -218,6 +334,39 @@ def test_runtime_notice_is_not_mislabeled_as_model_commentary(tmp_path) -> None:
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
     assert not any(row.get("kind") == "assistant_commentary" for row in rows)
+
+
+def test_rich_gateway_provider_retry_is_immediate_structured_runtime_progress(tmp_path) -> None:
+    path = tmp_path / "request.chunks.jsonl"
+    writer = BufferedChunkStreamWriter(path, rich_transcript=True)
+
+    accepted = writer.write_provider_retry(
+        scope="transport",
+        attempt=1,
+        total=3,
+        delay_seconds=2.0,
+        error_type="URLError",
+    )
+    writer.close()
+
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert accepted is True
+    assert rows == [
+        {
+            "t": rows[0]["t"],
+            "kind": "runtime_progress",
+            "text": "模型服务暂时不可用，2 秒后自动重连（连接 1/3）",
+            "verbose_level": "full",
+            "retry": {
+                "scope": "transport",
+                "attempt": 1,
+                "total": 3,
+                "wait_seconds": 2.0,
+                "error_type": "URLError",
+            },
+        }
+    ]
+    assert "api_base" not in json.dumps(rows, ensure_ascii=False)
 
 
 def test_model_generation_prefers_typed_model_chunk_sink() -> None:
@@ -288,16 +437,22 @@ def test_full_progress_redacts_credentials_and_internal_protocol() -> None:
     )
     event = ToolProgressEvent(request, 1, {}, "finished", "完成")
 
-    assert _public_progress_text(
-        event,
-        "api_key=super-secret /owner/alice/report.txt",
-        max_chars=200,
-    ) == "[REDACTED] ~/.my-agent/owner/report.txt"
-    assert _public_progress_text(
-        event,
-        "[RUN_TOOL_EVIDENCE_BLOCKED] private payload",
-        max_chars=200,
-    ) == "（内部运行状态已省略）"
+    assert (
+        _public_progress_text(
+            event,
+            "api_key=super-secret /owner/alice/report.txt",
+            max_chars=200,
+        )
+        == "[REDACTED] ~/.my-agent/owner/report.txt"
+    )
+    assert (
+        _public_progress_text(
+            event,
+            "[RUN_TOOL_EVIDENCE_BLOCKED] private payload",
+            max_chars=200,
+        )
+        == "（内部运行状态已省略）"
+    )
 
 
 def test_reply_worker_advances_progress_cursor_without_resubmitting_task() -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from agent_py_agent.agent.backends.errors import (
     ProviderContextWindowError,
+    ProviderRequestRejectedError,
     ProviderTimeoutError,
     ProviderTransientError,
 )
@@ -59,6 +60,17 @@ def test_provider_timeout_and_response_errors_are_recoverable() -> None:
     context_window = runtime_error_report(ProviderContextWindowError("prompt too large"))
     assert context_window["recoverable"] is True
     assert context_window["category"] == "provider_response"
+
+
+def test_provider_request_rejection_is_configuration_error_not_programmer_bug() -> None:
+    payload = runtime_error_report(
+        ProviderRequestRejectedError("HTTP 401: model rejected", status_code=401)
+    )
+
+    assert payload["recoverable"] is False
+    assert payload["category"] == "provider_configuration"
+    assert payload["error_type"] == "ProviderRequestRejectedError"
+    assert payload["category"] != "programmer_bug"
 
 
 def test_unexpected_exception_is_still_programmer_bug() -> None:

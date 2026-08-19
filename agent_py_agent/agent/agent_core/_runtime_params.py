@@ -1,3 +1,6 @@
+# LLM: 本模块集中定义一次 Agent run、工具循环和收口阶段的参数合同；新增控制状态必须是宿主注入的结构化字段并随 replace/续跑传播。
+# 模块用途: 保存模型循环、工具执行、压缩和归档阶段共享的不可变参数束。
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -43,6 +46,8 @@ class FinalizeContext:
     tool_runtime_evidence: dict[str, object] = field(default_factory=dict)
 
 
+# LLM: ToolLoopExecuteParams 是工具调用的 run 级事实源；临时批准/拒绝只能由当前审批等待链追加，不能来自模型参数。
+# 类用途: 汇总一轮工具循环所需的上下文、协议快照、取消令牌和临时审批决定。
 @dataclass(frozen=True)
 class ToolLoopExecuteParams:
     user_prompt: str
@@ -98,6 +103,8 @@ class ToolLoopExecuteParams:
     # These structured packets cross compact continuations; provider text is
     # still emitted through UserTurn IR/tool_context at its chronological point.
     active_turn_user_inputs: list[dict[str, object]] = field(default_factory=list)
+    # Gateway-only typed callback serializes reservation/submission with exact-turn close.
+    active_turn_transition_callback: object = None
     # Progressive disclosure: an explicit tool_search selection makes these
     # already-authorized deferred tools visible to the next model call only.
     loaded_tool_names: set[str] = field(default_factory=set)
@@ -113,6 +120,11 @@ class ToolLoopExecuteParams:
     repeated_failure_halt: tuple[str, str, int] | None = None
     # 真收口标记:True 时本轮不再自动续跑,等用户提供新思路。
     repeated_failure_halt_exhausted: bool = False
+    # 当前 run 内已由交互审批确认的精确 ActionPolicy binding；不持久化、不按工具名泛化。
+    runtime_approved_actions: list[dict[str, str]] = field(default_factory=list)
+    # 当前 run 内用户已拒绝/取消的精确工具参数指纹；provider 重建 call identity 时仍按
+    # tool_name + args_hash 阻止同一调用再次弹框，参数变化后才允许重新请求。
+    runtime_rejected_actions: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

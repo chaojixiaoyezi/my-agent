@@ -1,3 +1,5 @@
+# LLM: 本模块是 action/run scope 与共享 refs 的 typed 协议权威；所有 to_dict 出口必须只产生 JSON 原生类型。
+# 模块用途: 定义任务范围、产物证据、子代理和 compact 包的结构化信封，供运行时、工具和持久化链共享。
 """Typed action protocol for shared refs, subagents, and compaction packets.
 
 Was split across action_protocol_core / action_protocol_tooling /
@@ -66,6 +68,8 @@ def _jsonish_value(value: object, *, default: object) -> object:
 # core types (was action_protocol_core.py)
 # ===========================================================================
 
+# LLM: RunScope 是工具可信上下文的单一身份来源；新增字段时必须同步 JSON 投影、反序列化和工具输入测试。
+# 类用途: 保存一次运行的请求、任务、owner、层级和交付证据范围，并安全投影到工具执行链。
 @dataclass(frozen=True)
 class RunScope:
     request_id: str = ""
@@ -87,9 +91,15 @@ class RunScope:
     task_load_error: dict[str, Any] = field(default_factory=dict)
     delivery_evidence_refs: tuple[str, ...] = ()
 
+    # LLM: 工具 Schema 在 Python 进程内校验投影值，不能依赖 json.dumps 事后把 tuple 隐式变成 array。
+    # 函数用途: 输出只含 JSON 原生容器的运行范围字典，供可信参数补全和持久化直接使用。
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["delivery_evidence_refs"] = list(self.delivery_evidence_refs)
+        return payload
 
+    # LLM: 反序列化继续以不可变 tuple 保存证据引用；外部 list 只存在于 JSON 投影边界。
+    # 函数用途: 从持久化或网络字典恢复并清洗一份不可变运行范围。
     @classmethod
     def from_dict(cls, payload: dict[str, Any] | None) -> RunScope:
         data = payload if isinstance(payload, dict) else {}

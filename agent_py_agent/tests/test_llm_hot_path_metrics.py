@@ -39,7 +39,17 @@ class _RaisingBackend:
 
 
 def _state() -> SimpleNamespace:
-    return SimpleNamespace(tools=None, messages=None, on_chunk=None)  # text 协议路径
+    return SimpleNamespace(
+        agent=SimpleNamespace(conversation_store=None),
+        params=SimpleNamespace(),
+        ledger=None,
+        call_id="test-call",
+        retry_sink=None,
+        tools=None,
+        messages=None,
+        on_chunk=None,
+        tool_choice=None,
+    )  # text 协议路径
 
 
 def test_record_llm_call_emits_red_and_tokens() -> None:

@@ -1,5 +1,115 @@
 # Gateway Progress
 
+## 2026-08-18 TUI 活动回合普通输入与上下文可观察性候选
+
+- 四路真机观察证明旧 TUI 在 Gateway 回合运行时仍把普通 Enter 建成下一条 `ChatJob`；两条补充消息虽然
+  没丢，却一直等到长任务结束后才分别启动新回合。问题位于本地 TUI input routing，不是 provider 或
+  Gateway guidance 丢消息。
+- 当前运行中普通输入走 canonical `/ask`，每条正文先写 session outbox，再携带 opaque client
+  `message_id` 和 exact `expected_turn_id`。HTTP 回包丢失后只按稳定 ingress ID 查询 `/input-status`；
+  `runtime.guidance` 真正确认 provider 消费后才把精确消息转成稳定 user block。外部 ID、重复 ID 和顺序
+  数量都不能替代精确匹配。
+- Gateway 明确拒绝当前轮竞态时，TUI 只撤下对应 receipt，再由已有 ChatJob queue 接管同一正文；不会由
+  HTTP client 自行建立第二请求。active→queued 的 prepared request 冻结 inject/files/save/resume、客户端
+  能力和一次 chat-style 注入；提交前本地 `chat-*` 不会冒充 exact turn。pending steer 与真正 follow-up
+  queue 已移出可滚动 transcript，固定在 composer 上方并按 会话运行时 每条三行预览，滚动离底后仍可见。
+- 已有 receipt 的重放只按首次绑定 turn 在 `Gateway T -> mailbox M -> receipt` 锁序下裁决；全局 active
+  投影冲突、文件暂缺或损坏保持 unknown。guidance receipt v4 从 embedded entry 重算 digest，并把 v3
+  显式迁移写回 v4，不能用保存的摘要字符串掩盖正文篡改。
+- 同轮上下文另增加两类 rich-only、无正文事件：每次模型调用前的数字 usage 快照，以及 native IR 真正
+  裁剪 ToolCall/ToolResult 对时的前后 token/对数。后者不推进 conversation compact generation，解决一小时
+  单 active turn 发生内部裁剪却没有可见证据的问题。
+- 本地薄客户端、TUI input/worker、runtime guidance 与 Gateway control focused 组合均到 100%，py_compile
+  与 changed-file Ruff 通过；`.13` 五路仍在做真实活动回合插入、结束竞态、滚动、compact 和隔离复验。
+
+## 2026-08-18 `/context`、手动 compact 与真实 effort 能力
+
+- `/context` 只读精确 owner/thread，并用自动 compact 同一 policy、token estimator 和 uncompacted tail
+  显示模型窗口、90% 触发线、generation、summary 与 pending 消息；不创建 thread、不写状态。
+- `/compact [可选摘要要求]` 在无 live turn 时申请正常请求共用的 conversation run lane，随后复用既有
+  summary candidate、完整 checkpoint 和 generation CAS 强制压缩。可选要求是软上下文，不能覆盖权威
+  operation evidence；并发、摘要失败或 checkpoint/CAS 失败均不推进 cursor。
+- `/effort` 不把界面档位冒充模型参数。只有 backend 明示结构化 levels/setter 才可设置；当前测试模型
+  MiniMax-M2.7 的 Anthropic-compatible 接口没有生效的 effort 档位，所以查询显示 provider-managed，
+  设置明确失败且不改 temperature/prompt。CLI/local 非 canonical 会话不伪造 `/context` 或 `/compact`。
+- 真机用普通中文问候建立 2 条 transcript 后，首次手动 compact 因上一 foreground lane 尚未释放而安全
+  拒绝；6 秒后重试写入 generation 1，随后 `/context` 显示 pending=0、summary=有。查询、自动和手动入口
+  均命中同一 thread，未建立第二份历史。
+- 同一问候还发现本地 TUI 无外部通道却暴露 `send_message`。修复复用 ToolAvailability：注册实现保留，
+  每轮 runtime snapshot 在缺 proactive owner route 时从 model schema/search/execution 一起移除；有真实绑定
+  时仍可见。修复前同一请求失败调用 2 次，修复后工具调用 0 次并直接最终回复。
+
+## 2026-08-18 aiohttp 收口反例、effect-bearing 终态与 Fiber 复验
+
+- aiohttp→Go 真机请求精确累计 60 次 logical/model/provider HTTP attempt，零 provider retry；最终源码复制
+  后自主 build、通过 29 项测试并完成 HTTP 200 E2E，EXEC-44 的 verification stale 修复由此闭环。
+- 该请求最后一个可选清理命令在 handler 前被安全策略拒绝。旧 Gateway presentation 把
+  `not_started` 尾部和历史失败改写为整项 `OPERATION_INCOMPLETE`；现以最近 effect-bearing mutation
+  为收口权威，完整 partial ledger 继续保留。unknown/failed 等真实效果和仅有 blocked 尾部仍阻断。
+- 模型调用累计不再受 128 条明细上限影响；aiohttp response 与 chunks 对账为 60/60/60、retry=0，证明
+  request aggregate 进入真实 Gateway result。Fiber→TypeScript 后续以 188/188/188、retry=0、186 工具轮
+  结束；测试者只从 TUI/队列观察并核验产物，没有修改任务文件。
+- Fiber 首次 `npm install` 还暴露 owner home 只读时 npm 忽略 XDG cache；底座已在 owner-scoped 凭据擦洗
+  后增加 `NPM_CONFIG_CACHE=/tmp/.cache/npm`，本地及 `.13` focused 通过并完成部署。该 Fiber 请求早于部署
+  启动，仍需下一项新 Node 任务证明首次安装 E2E。
+
+## 2026-08-18 验证新鲜度与模型调用累计统计
+
+- Tornado→Go 真机请求在核心 10 项测试成功后再次写 examples，随后只有 grep/read 便尝试收口；最终正文
+  仍是“让我完成最终验证”，Gateway 却投影 `done`。本轮结果据此判为整体未通过，不从自然语言正文反向
+  修改 task 状态。
+- 被动验证 envelope 现统一嵌入工具结果 canonical `handler_details`。manifest 结构化识别 Go/Cargo 的
+  build/test 命令；成功验证后的 workspace mutation 把根标 stale，之后的 read/search 不会清除。completion
+  以 root + 最近 verification event ID/status 做一次性 signature，新真实验证才重新武装软核对。
+- 模型调用明细仍最多 128 条，但同一 ledger 另维护有界 request/run aggregate。最终 logical/model/provider
+  统计不再因明细裁剪停在 128；该修复只观测结构化生命周期，不读取 prompt、response、endpoint 或 key。
+- 本地与 `.13` 五个 focused 文件、py_compile、Ruff 已通过；精确包部署后 Gateway/TUI 以 PID
+  922966/922999 恢复，另一条 PID 830976 未触碰。真实 E2E 收口行为留给下一项代码任务复验。
+
+## 2026-08-18 长任务连接拒绝双层退避与 TUI 可见重连
+
+- Click Python→Go 真机任务在 127 个工具轮、约 26 分钟后收到远端
+  `ConnectionRefusedError(errno=ECONNREFUSED)`。旧 transport 把它与 DNS/api_base 配错合并为不可恢复
+  `ProviderConnectionError`，因此既没有执行既有 `2/5/15` 秒 HTTP 退避，也没有进入
+  `10/25/45/100/180` 秒模型回合恢复，最终被 Gateway 误投影为 `programmer_bug` 并直接终止。
+- 当前分类只读取异常类型、`errno` 和受控异常链：typed `ECONNREFUSED` 归
+  `ProviderTransientError`，先用三次传输退避，耗尽后再用五次模型回合退避；纯同名字符串、DNS 和其它
+  未证明为瞬时的连接错误仍快速失败。用户中断继续优先退出，不进入重连。
+- provider attempt observer 继续先写唯一 model-call ledger，同时把 `retry_scheduled/attempt/total/wait`
+  投影给显式 rich Gateway writer。TUI 立即显示“连接 1/3”或“模型回合 1/5”，公开事件不含 endpoint、
+  原始异常或 key；普通客户端继续沿旧 runtime-progress 策略，不扩大 transcript。
+- 本地连接分类、物理 HTTP attempt、模型回合恢复、runtime error、Gateway rich stream、model generation
+  和 TUI 定向回归已通过；修复包只覆盖五个 provider/Gateway 文件并部署到 `.13`，保留精确回滚目录。
+
+## 2026-08-18 TUI typed stream、可中断传输与工具审批续跑
+
+- 最终候选已精确部署到 `192.0.2.13:/root/my-agent`：70 个文件与本机 SHA-256 一致、5 个废弃
+  文件确认不存在，覆盖前文件已打回滚包。canonical `/root` Gateway 为 running/8420/队列 0/0，
+  `my-agent-tui:work` 在 80→120 resize、帮助页和 idle 首帧后仍存活；MiniMax-M2.7 key 只从既有环境读取，
+  实际 key 字节扫描部署文件和 evidence 均为 0 命中。
+- TUI Gateway 启动不再在 alternate screen 前同步阻塞：`tui_preflight.py` 在画面内发布 typed
+  `connection_started/resolved`，轮询 canonical Gateway readiness 成功后才启动唯一 chat worker；超时
+  发布 typed error、返回 rc=2。plain 模式保留进入输入循环前的同步 readiness 等待。
+- chat TUI 请求只有在 `client_capabilities.tool_approval=true` 时才启用交互审批；普通 CLI、IM 或未声明
+  客户端遇到 `ask` 一律立即 `unavailable` 并关闭式失败，不等待一个不存在的界面。
+- Gateway 的唯一 chunk writer 先写 `permission_requested`，再等待按 request/permission 哈希定位的原子
+  decision 文件；读取端逐字段核对 `request_id`、`permission_id` 和完整 canonical binding，消费后只删除
+  当前决定文件。TUI 回写 `approved/denied/cancelled` 后，同一 `ToolCall` 在原工具轮继续，不重交用户 prompt、
+  不增加第二执行器。
+- 同一 run 内拒绝/取消会把 `tool_name + args_hash` 指纹写入现有 ToolRuntime ledger；provider 即使换了
+  operation/call id 重提完全相同调用，也只产生一条未执行结果而不再次弹框。参数真的改变后仍可重新 ask。
+- `/stop` 的 typed interrupt 现在会关闭阻塞中的 HTTP response/header/SSE socket，并把该退出映射为
+  `InterruptedError`；provider idle timeout、普通网络错误和用户中断不再混成可重试故障。
+- Gateway TUI worker 不再把客户端已加载 history 作为新的模型输入注入；服务端仍是 conversation context
+  的唯一注入点。客户端只在显式 session resume 时投影同 request 成对的 foreground `cli_chat`
+  user/assistant 行，忽略 background、其它 channel 和不完整 request。
+- Gateway 在 canonical conversation `compact_generation` 前进时写
+  `conversation_compacted` typed chunk；事件只含 generation，不复制摘要正文。TUI 以稳定 compact block
+  显示边界，conversation store 仍是唯一会话/Compact 权威。
+- 定向回归覆盖 readiness、交互/非交互审批、精确 decision binding、同调用拒绝去重、参数变化再询问、
+  socket 中断、session history 单一注入、compact boundary、typed stream/final 去重。测试机最终部署与
+  MiniMax-M2.7 证据只记录 run id 和文件 hash，不记录 API key。
+
 ## 2026-08-04 Memory Curator 复用 owner 后台 lane
 
 - Gateway 没有新增 Memory daemon。每个已解析 owner 的既有 background-main supervisor 在 scheduler

@@ -1,8 +1,11 @@
+# LLM: 本模块执行一轮 canonical ToolCall，并保持审批、并发、取消、记录和 provider 调用顺序的结构化一致性。
+# 模块用途: 编排单轮工具调用，输出配对结果与进度事件，并在用户拒绝后阻止完全相同的调用重复弹框。
+
 from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from typing import ClassVar, Literal
@@ -10,6 +13,10 @@ from typing import ClassVar, Literal
 from ...backends import ModelResponse
 from ...concurrency.interrupt import is_interrupted, register_interrupt_callback
 from ...contracts.required_actions import required_action_assessment_failed
+from ...contracts.tool_approval import (
+    ToolApprovalDecision,
+    build_tool_approval_request,
+)
 from ...conversation.authority import conversation_transcript_is_authoritative
 from ...memory_archive import estimate_tokens
 from ...tooling.action_policy import ActionDecision
@@ -302,6 +309,12 @@ def _execute_parallel_step(
     )
     transition_index = 0
     for outcome_idx, outcome_call, started_at, execution in outcomes:
+        execution = _resolve_tool_approval(
+            request,
+            outcome_idx,
+            outcome_call,
+            execution,
+        )
         wrote_output, transition = _record_execution(
             request,
             outcome_idx,
@@ -345,6 +358,8 @@ def _execute_parallel_step(
     return parallel_end
 
 
+# LLM: 串行步骤在首次 ActionPolicy ask 时暂停同一 ToolCall，收到精确批准后才重入 executor；不得先记录 approval_required 再让模型重提。
+# 函数用途: 执行、审批并记录一条顺序工具调用。
 def _execute_serial_step(
     request: ToolRoundExecutionRequest,
     calls: list[ToolCall],
@@ -366,6 +381,7 @@ def _execute_serial_step(
         execution = request.execute_one(
             ToolCallExecuteParams(request.params, request.tool_rounds, idx, call)
         )
+        execution = _resolve_tool_approval(request, idx, call, execution)
     wrote_output, transition = _record_execution(request, idx, started_at, execution)
     progress.handled_count = idx
     progress.subagent_output_written |= wrote_output
@@ -382,6 +398,195 @@ def _execute_serial_step(
     elif _round_context_over_compact_budget(request, before_context_count):
         _record_remaining_content_calls_as_deferred(request, calls, start_idx=idx + 1)
         progress.deferred_reason = "上下文需要先 compact/resume"
+
+
+# LLM: 审批 consumer 是 effective_on_chunk 上的宿主能力；无 consumer/unavailable 保留旧 approval_required 终态，绝不擅自批准。
+# 函数用途: 等待一条审批决定，并在批准时用原 call identity 重新执行同一工具调用。
+def _resolve_tool_approval(
+    request: ToolRoundExecutionRequest,
+    idx: int,
+    original_call: ToolCall,
+    execution: ToolExecution,
+) -> ToolExecution:
+    if execution.decision.status != "ask":
+        return execution
+    on_chunk = getattr(request.params, "effective_on_chunk", None)
+    consumer = getattr(on_chunk, "request_permission", None)
+    if not callable(consumer):
+        return execution
+    approval_request = build_tool_approval_request(
+        execution.call,
+        request_id=request.params.request_id,
+        round_number=request.tool_rounds,
+        call_index=idx,
+        description=_approval_description(request, idx, execution.call),
+    )
+    prior_rejection = _matching_runtime_rejection(request.params, approval_request.binding)
+    if prior_rejection is not None:
+        prior_decision = str(prior_rejection.get("decision") or "denied")
+        if prior_decision not in {"denied", "cancelled"}:
+            prior_decision = "denied"
+        return _rejected_approval_execution(
+            execution,
+            ToolApprovalDecision(approval_request.permission_id, prior_decision),
+            repeated=True,
+        )
+    try:
+        raw_decision = consumer(
+            approval_request.to_dict(),
+            cancellation_token=request.params.cancellation_token,
+        )
+        decision = (
+            raw_decision
+            if isinstance(raw_decision, ToolApprovalDecision)
+            else ToolApprovalDecision.from_mapping(raw_decision)
+            if isinstance(raw_decision, Mapping)
+            else ToolApprovalDecision(approval_request.permission_id, "unavailable")
+        )
+    except (TypeError, ValueError):
+        decision = ToolApprovalDecision(approval_request.permission_id, "unavailable")
+    if decision.permission_id != approval_request.permission_id:
+        return execution
+    if decision.approved:
+        approved_actions = getattr(request.params, "runtime_approved_actions", None)
+        if not isinstance(approved_actions, list):
+            return execution
+        approved_actions.append(
+            approval_request.approved_binding(decision)
+        )
+        resumed = request.execute_one(
+            ToolCallExecuteParams(
+                request.params,
+                request.tool_rounds,
+                idx,
+                original_call,
+            )
+        )
+        if decision.feedback:
+            tool_context = getattr(request.params, "tool_context", None)
+            if isinstance(tool_context, list):
+                tool_context.append(
+                    "[tool-approval-feedback]\n"
+                    f"用户批准 {original_call.tool_name} 时补充：{decision.feedback}"
+                )
+        return resumed
+    if decision.decision == "unavailable":
+        return execution
+    rejected_actions = getattr(request.params, "runtime_rejected_actions", None)
+    if isinstance(rejected_actions, list):
+        rejected_actions.append(approval_request.rejected_binding(decision))
+    return _rejected_approval_execution(execution, decision)
+
+
+# LLM: 重复拒绝只比较当前 run 中宿主记录的 tool_name + args_hash；自然语言反馈、展示说明和 provider call id 都不能改变裁决。
+# 函数用途: 查找用户是否已拒绝或取消过完全相同的工具参数，命中后直接复用拒绝而不再次询问。
+def _matching_runtime_rejection(
+    params: object,
+    binding: Mapping[str, str],
+) -> dict[str, str] | None:
+    tool_name = str(binding.get("tool_name") or "").strip()
+    args_hash = str(binding.get("args_hash") or "").strip()
+    if not tool_name or not args_hash:
+        return None
+    runtime_items = getattr(params, "runtime_rejected_actions", None)
+    if not isinstance(runtime_items, list):
+        return None
+    for item in reversed(runtime_items):
+        if not isinstance(item, Mapping):
+            continue
+        if (
+            str(item.get("tool_name") or "").strip() == tool_name
+            and str(item.get("args_hash") or "").strip() == args_hash
+            and str(item.get("decision") or "").strip() in {"denied", "cancelled"}
+        ):
+            return {str(key): str(value or "") for key, value in item.items()}
+    return None
+
+
+# LLM: 审批说明复用现有公开进度脱敏链，仅显示 tool 与有界 path/command 摘要；完整 arguments 不进入 UI event。
+# 函数用途: 生成 终端交互 工具确认框中的一行调用说明。
+def _approval_description(
+    request: ToolRoundExecutionRequest,
+    idx: int,
+    call: ToolCall,
+) -> str:
+    detail = _payload_progress_detail(call)
+    public_detail = _public_progress_text(
+        ToolProgressEvent(request, idx, call, "started", "等待审批"),
+        detail,
+        max_chars=240,
+    )
+    return f"{call.tool_name}({public_detail})" if public_detail else call.tool_name
+
+
+# LLM: 拒绝/取消必须形成与原 tool_use 配对的单一终态结果，handler_executed=False；repeated 仅改变说明，授权仍来自结构化决定。
+# 函数用途: 把首次或重复的用户拒绝/取消转换为标准 ToolExecution，并明确告知模型不要重试相同调用。
+def _rejected_approval_execution(
+    execution: ToolExecution,
+    decision: ToolApprovalDecision,
+    *,
+    repeated: bool = False,
+) -> ToolExecution:
+    cancelled = decision.decision == "cancelled"
+    code = "CANCELLED" if cancelled else "APPROVAL_REJECTED"
+    status = "cancelled" if cancelled else "failed"
+    if repeated:
+        message = (
+            "用户此前已经取消了完全相同的工具调用，本次没有再次询问，也没有执行。"
+            if cancelled
+            else "用户此前已经拒绝了完全相同的工具调用，本次没有再次询问，也没有执行。"
+        )
+    else:
+        message = "用户取消了这次工具调用，工具没有执行。" if cancelled else "用户拒绝了这次工具调用，工具没有执行。"
+    if decision.feedback:
+        message = (
+            f"{message}\n用户反馈：{decision.feedback}\n"
+            "请按反馈调整做法，不要再次尝试完全相同的工具调用。"
+        )
+    else:
+        message = (
+            f"{message}\n停止当前操作并等待用户说明下一步；"
+            "不要再次尝试完全相同的工具调用。"
+        )
+    action_decision = ActionDecision(
+        "deny",
+        (code,),
+        {
+            "failure_stage": "authorization",
+            "approval_id": decision.permission_id,
+            "approval_decision": decision.decision,
+            "repeated_rejection": repeated,
+        },
+        resolved_effect=execution.decision.resolved_effect,
+    )
+    result = ToolResult.failed(
+        execution.call,
+        message,
+        error_code=code,
+        failure_stage="authorization",
+        facts=ToolFailureFacts(
+            status=status,
+            metadata={
+                "action_decision": action_decision.to_dict(),
+                "approval_decision": decision.to_dict(),
+            },
+        ),
+    )
+    return ToolExecution(
+        execution.call,
+        action_decision,
+        result,
+        (
+            "received",
+            "normalized",
+            "validated",
+            "authorized",
+            "approval_pending",
+            "cancelled" if cancelled else "user_denied",
+            "persisted",
+            "projected",
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -458,8 +663,8 @@ def _execute_parallel_segment(
             ]
             executions = [future.result() for future in futures]
     return [
-        (idx, execution.call, started_at, execution)
-        for (idx, _call, started_at), execution in zip(
+        (idx, original_call, started_at, execution)
+        for (idx, original_call, started_at), execution in zip(
             scheduled,
             executions,
             strict=True,
@@ -1043,6 +1248,15 @@ def _structured_tool_progress(
         output = _public_progress_text(event, event.result.output, max_chars=1600)
         if output:
             payload["output"] = output
+        handler_details = event.result.metadata.get("handler_details")
+        raw_display = (
+            handler_details.get("display")
+            if isinstance(handler_details, dict)
+            else None
+        )
+        display = _public_progress_display(event, raw_display)
+        if display:
+            payload["display"] = display
     if event.started_at is not None:
         payload["elapsed_seconds"] = round(
             max(0.0, time.monotonic() - event.started_at),
@@ -1074,6 +1288,108 @@ def _public_progress_text(
     keep_head = max_chars * 2 // 3
     keep_tail = max_chars - keep_head
     return f"{text[:keep_head]}\n…（内容过长，已省略）…\n{text[-keep_tail:]}"
+
+
+# LLM: 富工具展示只接受已知公共字段并逐字符串复用凭据/路径脱敏；未知 handler envelope 键永远不能直接穿透到 Gateway/TUI。
+# 函数用途: 将 diff、patch、write、command 的内部 display envelope 投影成有界、可安全渲染的结构化数据。
+def _public_progress_display(
+    event: ToolProgressEvent,
+    value: object,
+) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    kind = str(value.get("kind") or "").strip().lower()
+    if kind == "diff":
+        rows: list[dict[str, object]] = []
+        raw_rows = value.get("lines")
+        if isinstance(raw_rows, list):
+            for raw in raw_rows[:180]:
+                if not isinstance(raw, dict):
+                    continue
+                row_kind = str(raw.get("kind") or "context").strip().lower()
+                if row_kind not in {"header", "context", "add", "remove"}:
+                    row_kind = "context"
+                rows.append(
+                    {
+                        "kind": row_kind,
+                        "old_line": _optional_progress_int(raw.get("old_line")),
+                        "new_line": _optional_progress_int(raw.get("new_line")),
+                        "text": _public_progress_text(event, raw.get("text"), max_chars=360),
+                    }
+                )
+        return {
+            "kind": "diff",
+            "path": _public_progress_text(event, value.get("path"), max_chars=240),
+            "lines_added": _nonnegative_progress_int(value.get("lines_added")),
+            "lines_removed": _nonnegative_progress_int(value.get("lines_removed")),
+            "lines": rows,
+            "hidden_lines": _nonnegative_progress_int(value.get("hidden_lines")),
+        }
+    if kind == "write":
+        raw_lines = value.get("lines")
+        lines = [
+            _public_progress_text(event, line, max_chars=360)
+            for line in (raw_lines[:180] if isinstance(raw_lines, list) else [])
+        ]
+        return {
+            "kind": "write",
+            "path": _public_progress_text(event, value.get("path"), max_chars=240),
+            "mode": str(value.get("mode") or "overwrite")[:16],
+            "bytes": _nonnegative_progress_int(value.get("bytes")),
+            "binary": value.get("binary") is True,
+            "total_lines": _nonnegative_progress_int(value.get("total_lines")),
+            "lines": lines,
+            "hidden_lines": _nonnegative_progress_int(value.get("hidden_lines")),
+        }
+    if kind == "patch":
+        raw_files = value.get("files")
+        source_files = raw_files if isinstance(raw_files, list) else []
+        files: list[dict[str, object]] = []
+        for raw_file in source_files[:20]:
+            projected = _public_progress_display(event, raw_file)
+            if projected.get("kind") == "diff":
+                files.append(projected)
+        return {
+            "kind": "patch",
+            "files": files,
+            "hidden_files": (
+                _nonnegative_progress_int(value.get("hidden_files"))
+                + max(0, len(source_files) - 20)
+            ),
+        }
+    if kind == "command":
+        return {
+            "kind": "command",
+            "return_code": _optional_progress_int(value.get("return_code")),
+            "stdout": _public_progress_text(event, value.get("stdout"), max_chars=8_000),
+            "stderr": _public_progress_text(event, value.get("stderr"), max_chars=8_000),
+            "stdout_lines": _nonnegative_progress_int(value.get("stdout_lines")),
+            "stderr_lines": _nonnegative_progress_int(value.get("stderr_lines")),
+            "stdout_truncated": value.get("stdout_truncated") is True,
+            "stderr_truncated": value.get("stderr_truncated") is True,
+        }
+    summary = _public_progress_text(event, value.get("summary"), max_chars=800)
+    return {"kind": kind[:40] or "generic", "summary": summary} if summary else {}
+
+
+# LLM: display 计数只能由结构化数值进入，畸形值归零且不能通过异常打断真实工具执行。
+# 函数用途: 将展示计数规范为非负整数。
+def _nonnegative_progress_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+# LLM: diff 的空侧行号必须保持 None，不能用 0 冒充真实文件行；其它合法数值规范为非负整数。
+# 函数用途: 安全读取可选的旧/新文件行号或命令退出码。
+def _optional_progress_int(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _finished_status(result: ToolResult) -> str:

@@ -90,3 +90,40 @@ def test_declared_package_script_is_detected_without_prompt_inference(tmp_path: 
     assert facts.verify_commands == ("pnpm run test", "pnpm run lint")
     assert result is not None
     assert (result.canonical_command, result.scope) == ("pnpm run test", "targeted")
+
+
+def test_go_manifest_exposes_build_and_test_verification_without_prompt_inference(
+    tmp_path: Path,
+):
+    root = tmp_path / "go-project"
+    root.mkdir()
+    (root / "go.mod").write_text("module example.test/demo\n\ngo 1.21\n", encoding="utf-8")
+
+    facts = project_facts_for(root)
+    full_test = classify_verification_command(
+        "go test -v . 2>&1",
+        cwd=root,
+        exit_code=0,
+        output="PASS",
+    )
+    targeted_build = classify_verification_command(
+        "go build ./cmd/demo",
+        cwd=root,
+        exit_code=1,
+        output="build failed",
+    )
+
+    assert facts is not None
+    assert facts.verify_commands == ("go test", "go build")
+    assert full_test is not None
+    assert (full_test.kind, full_test.scope, full_test.status) == (
+        "test",
+        "full",
+        "passed",
+    )
+    assert targeted_build is not None
+    assert (targeted_build.kind, targeted_build.scope, targeted_build.status) == (
+        "build",
+        "targeted",
+        "failed",
+    )

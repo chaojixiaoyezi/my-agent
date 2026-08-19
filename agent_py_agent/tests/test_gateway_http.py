@@ -21,6 +21,7 @@ class MockGatewayPaths:
         self.processing = self.root / "requests" / "processing"
         self.done = self.root / "requests" / "done"
         self.failed = self.root / "requests" / "failed"
+        self.terminal = self.root / "requests" / "terminal"
         self.responses = self.root / "responses"
         self.stop_request = self.root / "gateway_stop.request"
         self.state = self.root / "gateway_state.json"
@@ -29,7 +30,14 @@ class MockGatewayPaths:
         self.heartbeat = self.root / "gateway_heartbeat.json"
         self.log = self.root / "gateway.log"
         # Create directories
-        for path in (self.inbox, self.processing, self.done, self.failed, self.responses):
+        for path in (
+            self.inbox,
+            self.processing,
+            self.done,
+            self.failed,
+            self.terminal,
+            self.responses,
+        ):
             path.mkdir(parents=True, exist_ok=True)
 
 

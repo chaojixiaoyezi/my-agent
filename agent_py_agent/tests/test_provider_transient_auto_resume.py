@@ -62,6 +62,54 @@ def test_provider_transient_model_turn_retries_with_configured_schedule(
     assert "秒后自动重试当前模型回合" in joined, "通知文本展示实际等待秒数(含抖动)"
 
 
+def test_provider_transient_prefers_typed_retry_sink(monkeypatch) -> None:
+    calls = 0
+    waits: list[float] = []
+    typed: list[dict[str, object]] = []
+    legacy: list[str] = []
+
+    class RetrySink:
+        def __call__(self, text: str) -> None:
+            legacy.append(text)
+
+        def write_provider_retry(self, **payload: object) -> bool:
+            typed.append(dict(payload))
+            return True
+
+    def operation() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ProviderTransientError("temporary outage")
+        return "ok"
+
+    monkeypatch.setattr(provider_transient_auto_resume, "wait_interruptibly", waits.append)
+    monkeypatch.setattr(provider_transient_auto_resume, "apply_retry_jitter", lambda value: value)
+    monkeypatch.setattr(
+        provider_transient_auto_resume,
+        "provider_transient_retry_delays",
+        lambda _policy=None: (10.0,),
+    )
+
+    result = provider_transient_auto_resume.run_with_provider_transient_auto_resume(
+        operation,
+        on_chunk=RetrySink(),
+    )
+
+    assert result == "ok"
+    assert waits == [10.0]
+    assert legacy == []
+    assert typed == [
+        {
+            "scope": "model_turn",
+            "attempt": 1,
+            "total": 1,
+            "delay_seconds": 10.0,
+            "error_type": "ProviderTransientError",
+        }
+    ]
+
+
 def test_provider_transient_model_turn_raises_after_schedule_exhausted(
     tmp_path: Path,
     monkeypatch,
@@ -88,7 +136,9 @@ def test_provider_transient_model_turn_raises_after_schedule_exhausted(
     except ProviderTransientError as exc:
         assert "HTTP 429" in str(exc)
     else:
-        raise AssertionError("provider transient errors must surface after retry schedule is exhausted")
+        raise AssertionError(
+            "provider transient errors must surface after retry schedule is exhausted"
+        )
 
     assert agent.backend.calls == 3
     assert len(sleeps) == 2, "重试次数仍由配置阶梯决定"
@@ -103,7 +153,9 @@ def test_provider_transient_empty_schedule_disables_auto_resume(
     from agent_py_agent.agent.agent_core import provider_transient_auto_resume
 
     monkeypatch.setattr(provider_transient_auto_resume, "wait_interruptibly", lambda _delay: None)
-    monkeypatch.setattr(provider_transient_auto_resume, "provider_transient_retry_delays", lambda _policy=None: ())
+    monkeypatch.setattr(
+        provider_transient_auto_resume, "provider_transient_retry_delays", lambda _policy=None: ()
+    )
 
     agent = SimpleAgent(
         AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
@@ -299,9 +351,7 @@ def test_quota_exhaustion_is_persisted_as_manual_recovery_failure_for_subagents(
     )
 
     assert (
-        _subagent_run_failure_type(
-            ProviderQuotaExhaustedError("HTTP 429: insufficient_quota")
-        )
+        _subagent_run_failure_type(ProviderQuotaExhaustedError("HTTP 429: insufficient_quota"))
         == FailureType.PROVIDER_QUOTA_EXHAUSTED.value
     )
     assert (

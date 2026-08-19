@@ -1,4 +1,4 @@
-"""Response rendering and response-file polling for gateway CLI output.
+"""Response rendering and canonical-terminal polling for gateway CLI output.
 
 Human status lines show cumulative context pressure when available, while JSON
 mode preserves the raw fields. Client polling also lives here so chat/TUI/gateway
@@ -13,9 +13,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .io import gateway_response_path, read_json_file_report
+from ..runtime_errors import DataCorruptionError, runtime_error_report
+from .io import (
+    GatewayJsonReadReport,
+    gateway_response_path,
+    read_json_file_report,
+    validated_gateway_request_fingerprint,
+)
 from .paths import GatewayPaths
-from .request_errors import gateway_response_load_error_response
+from .request_errors import gateway_client_error_message, gateway_response_load_error_response
 
 
 @dataclass
@@ -108,7 +114,12 @@ def print_gateway_response(
         if response:
             print(response)
         else:
-            print(str(payload.get("error", "gateway 请求没有返回内容。") or "gateway 请求没有返回内容。"))
+            print(
+                str(
+                    payload.get("user_error")
+                    or gateway_client_error_message(payload.get("error_code"))
+                )
+            )
 
     # Human CLI status uses cumulative context pressure; JSON mode keeps both token fields.
     status_line = (
@@ -164,3 +175,105 @@ def read_gateway_response_file_when_ready(
         return {}
     state.stat_signature = signature
     return read_gateway_response_file(path, request_id=request_id, context=context)
+
+
+# LLM: This is the shared canonical-envelope validator for HTTP, worker, CLI, TUI, and projectors.
+# It verifies schema, filename/inner ids, and every present immutable request fingerprint.
+# 函数用途: 读取并校验 Gateway 唯一终态归档，返回带结构化错误的报告。
+def read_gateway_terminal_envelope_report(
+    terminal_path: Path,
+    *,
+    request_id: str | None = None,
+    context: str = "gateway.terminal.read",
+) -> GatewayJsonReadReport:
+    path = Path(terminal_path)
+    if not path.exists():
+        return GatewayJsonReadReport({})
+    report = read_json_file_report(path, context=context)
+    expected_id = str(request_id or path.stem).strip()
+    if report.load_error is not None:
+        return report
+    payload = report.payload
+    terminal_response = payload.get("terminal_response") if isinstance(payload, dict) else None
+    actual_id = str(payload.get("id") or "").strip() if isinstance(payload, dict) else ""
+    response_id = (
+        str(terminal_response.get("id") or "").strip()
+        if isinstance(terminal_response, dict)
+        else ""
+    )
+    try:
+        valid = (
+            payload.get("schema_version") == "gateway_terminal_request.v1"
+            and bool(expected_id)
+            and actual_id == expected_id
+            and isinstance(terminal_response, dict)
+            and bool(terminal_response)
+            and response_id == expected_id
+        )
+        if not valid:
+            raise DataCorruptionError("gateway canonical terminal response is invalid")
+        validated_gateway_request_fingerprint(payload, expected_id)
+    except DataCorruptionError as exc:
+        return GatewayJsonReadReport(
+            {},
+            runtime_error_report(exc, context=context),
+        )
+    return GatewayJsonReadReport(dict(payload))
+
+
+# LLM: Only a validated canonical envelope may be unwrapped as a response. Load/corruption errors
+# remain typed client failures rather than being mistaken for missing or successful completion.
+# 函数用途: 从通过校验的唯一终态归档取出完整最终答复。
+def read_gateway_terminal_response_file(
+    terminal_path: Path,
+    *,
+    request_id: str | None = None,
+    context: str = "gateway.terminal.read",
+) -> dict[str, Any]:
+    path = Path(terminal_path)
+    expected_id = str(request_id or path.stem).strip()
+    report = read_gateway_terminal_envelope_report(
+        path,
+        request_id=expected_id,
+        context=context,
+    )
+    if report.load_error is not None:
+        return gateway_response_load_error_response(
+            path,
+            report.load_error,
+            request_id=expected_id,
+        )
+    terminal_response = report.payload.get("terminal_response")
+    return dict(terminal_response) if isinstance(terminal_response, dict) else {}
+
+
+# LLM: Stat caching is only an IO optimization; a changed canonical terminal file is still fully
+# schema/identity validated before the caller can observe completion.
+# 函数用途: 只在唯一终态归档新建或变化时读取完整答复。
+def read_gateway_terminal_response_file_when_ready(
+    terminal_path: Path,
+    *,
+    state: GatewayResponsePollState,
+    request_id: str | None = None,
+    context: str = "gateway.terminal.read",
+) -> dict[str, Any]:
+    path = Path(terminal_path)
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return {}
+    except OSError:
+        return read_gateway_terminal_response_file(
+            path,
+            request_id=request_id,
+            context=context,
+        )
+    signature = (int(stat.st_mtime_ns), int(stat.st_size))
+    if state.stat_signature == signature:
+        return {}
+    state.stat_signature = signature
+    return read_gateway_terminal_response_file(
+        path,
+        request_id=request_id,
+        context=context,
+    )

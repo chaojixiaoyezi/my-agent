@@ -16,12 +16,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..agent_core.runtime_mixin import RunParams
+from ..agent_core.runtime_mixin import RunParams, release_active_turn_inputs_for_compact
 from ..common.audit_activation import (
     AUDIT_ATTR,
 )
 from ..concurrency.interrupt import is_interrupted
-from ..conversation.active_turn_input import merge_active_turn_user_inputs
+from ..contracts.tool_approval import ToolApprovalRequest
+from ..conversation.active_turn_input import (
+    exclude_active_turn_user_input_ids,
+    merge_active_turn_user_inputs,
+)
 from ..conversation.audit_lifecycle import (
     AuditLifecycleError,
     audit_scope_payload,
@@ -71,12 +75,17 @@ from .audit_service import (
 )
 from .io import (
     gateway_response_path,
+    gateway_turn_transition,
     read_json_file,
     read_json_file_report,
     update_json_file_atomic,
 )
 from .lease_service import refresh_processing_lease, start_lease_heartbeat
-from .paths import gateway_chunk_path, gateway_paths
+from .paths import GatewayPaths, gateway_chunk_path, gateway_paths, gateway_paths_from_root
+from .permission_bridge import (
+    unavailable_gateway_permission_decision,
+    wait_for_gateway_permission_decision,
+)
 from .recovery import _gateway_request_attempts
 from .request_errors import (
     ConversationPersistenceError,
@@ -84,7 +93,7 @@ from .request_errors import (
     UserReplyUnavailableError,
     gateway_request_load_error_response,
 )
-from .response_renderer import is_silent_user_stop, read_gateway_response_file
+from .response_renderer import is_silent_user_stop
 
 if TYPE_CHECKING:
     from ...core import SimpleAgent
@@ -94,6 +103,25 @@ _CHUNK_STREAM_FLUSH_INTERVAL_SECONDS = 0.08
 _CHUNK_STREAM_FLUSH_CHARS = 128
 _GATEWAY_FOREGROUND_CLAIM_REASON = "gateway_foreground_turn"
 _MAX_PROMPT_OPERATION_EVIDENCE_EVENTS = 4
+_CONTEXT_USAGE_SCHEMA = "model_visible_context_usage.v1"
+_CONTEXT_USAGE_TOKEN_FIELDS = (
+    "context_window_tokens",
+    "compact_trigger_tokens",
+    "current_tokens",
+    "prompt_tokens",
+    "messages_tokens",
+    "runtime_guidance_tokens",
+    "tool_schema_tokens",
+)
+_CONTEXT_COMPACTION_SCHEMA = "model_visible_context_compaction.v1"
+_CONTEXT_COMPACTION_FIELDS = (
+    "generation",
+    "before_tokens",
+    "after_tokens",
+    "trigger_tokens",
+    "dropped_pairs",
+    "preserved_pairs",
+)
 logger = logging.getLogger(__name__)
 
 
@@ -130,6 +158,8 @@ def close_chunk_stream(chunk_path: Path) -> None:
     return
 
 
+# LLM: BufferedChunkStreamWriter 是 Gateway run 的公开事件出口；审批与富 transcript 必须分别来自显式客户端能力，普通客户端不得收到思考或大段工具展示数据。
+# 类用途: 缓冲模型/工具事件，并为支持的 TUI 投递逐轮说明、折叠思考、结构化结果和审批等待。
 @dataclass
 class BufferedChunkStreamWriter:
     """Buffer model deltas and persist typed user-visible stream events."""
@@ -145,10 +175,14 @@ class BufferedChunkStreamWriter:
     _commentary_emitted: bool = False
     _identifier_redactions: tuple[tuple[object, str], ...] = ()
     _observed_tool_rounds: int = 0
+    interactive_approvals: bool = False
+    rich_transcript: bool = False
 
     def __call__(self, text: str) -> None:
         self.write(text)
 
+    # LLM: rich transcript 逐模型轮暂存 commentary，普通客户端仍只保留首段；任何暂存段都只能在真实工具边界公开。
+    # 函数用途: 接收供应商可见文本增量，等待工具边界确认它是过程说明。
     def write_model(self, text: str) -> None:
         """Keep one tentative model segment until its lifecycle is known.
 
@@ -157,14 +191,16 @@ class BufferedChunkStreamWriter:
         the final structured response.  Only the sanitized commentary emitted
         at a real tool boundary and the terminal response file are public.
         """
-        if text and not self._commentary_emitted:
+        if text and (self.rich_transcript or not self._commentary_emitted):
             self._model_segment.append(text)
 
     def set_verbose_level(self, level: str) -> None:
         normalized = str(level or "off").strip().lower()
         self._verbose_level = normalized if normalized in {"off", "on", "full"} else "off"
 
-    def begin_active_turn_input(self) -> None:
+    # LLM: steering 只清空未确认段并重开普通客户端首段额度；rich transcript 的逐轮语义保持不变。
+    # 函数用途: 用户在活动回合补充输入后，为下一次模型说明建立新分段。
+    def begin_active_turn_input(self, client_message_ids: tuple[str, ...]) -> None:
         """Allow one new model-authored commentary after live user steering.
 
         Ordinary tool rounds remain suppressed after the first commentary.  A
@@ -173,6 +209,26 @@ class BufferedChunkStreamWriter:
         """
         self._model_segment.clear()
         self._commentary_emitted = False
+        del client_message_ids
+
+    # LLM: This event is emitted only after ConversationStore committed consumed at the
+    # provider-accepted prompt boundary; prompt assembly alone must not clear a TUI receipt.
+    # 函数用途: 在模型确认收到补充消息后，向富客户端发布精确消息 ID 的已消费事件。
+    def complete_active_turn_input(self, client_message_ids: tuple[str, ...]) -> None:
+        message_ids = tuple(
+            item
+            for item in (str(value or "").strip() for value in client_message_ids)
+            if item
+        )
+        if self.rich_transcript and message_ids:
+            self.flush()
+            write_chunk_event(
+                self.chunk_path,
+                {
+                    "kind": "active_turn_input_consumed",
+                    "client_message_ids": list(message_ids),
+                },
+            )
 
     def set_identifier_redactions(
         self,
@@ -205,6 +261,8 @@ class BufferedChunkStreamWriter:
             },
         )
 
+    # LLM: rich transcript 可保留已脱敏的 output/display；普通客户端继续按 verbose 合同裁剪，display 一律不外发。
+    # 函数用途: 在工具边界冻结模型说明，并写入一条结构化工具进度事件。
     def write_progress(self, event: dict[str, object], legacy_text: str) -> None:
         try:
             observed_round = int(event.get("round") or 0)
@@ -213,9 +271,11 @@ class BufferedChunkStreamWriter:
         self._observed_tool_rounds = max(self._observed_tool_rounds, observed_round)
         self.flush()
         if event.get("phase") == "started":
-            self._write_first_model_commentary()
+            self._write_model_commentary_at_boundary()
         progress = dict(event)
-        if self._verbose_level != "full":
+        if not self.rich_transcript:
+            progress.pop("display", None)
+        if not self.rich_transcript and self._verbose_level != "full":
             progress.pop("output", None)
         write_chunk_event(
             self.chunk_path,
@@ -224,6 +284,151 @@ class BufferedChunkStreamWriter:
                 "text": legacy_text,
                 "verbose_level": self._verbose_level,
                 "progress": progress,
+            },
+        )
+
+    # LLM: 只允许 provider 明确返回的 thinking 文本进入 rich TUI；签名、redacted_thinking 和普通客户端均不得经过此出口。
+    # 函数用途: 将一次模型调用的可展示思考写成独立、默认折叠的 Gateway 事件。
+    def write_thinking(self, text: str, *, duration_seconds: float = 0.0) -> None:
+        if not self.rich_transcript:
+            return
+        content = self._public_model_text(text, max_chars=12_000)
+        if not content:
+            return
+        self.flush()
+        write_chunk_event(
+            self.chunk_path,
+            {
+                "kind": "assistant_thinking",
+                "text": content,
+                "duration_seconds": max(0.0, round(float(duration_seconds or 0.0), 3)),
+            },
+        )
+
+    # LLM: provider retry 只向显式 rich 客户端公开有界结构化进度；原始异常和 endpoint 不得进入公开 chunk。
+    # 函数用途: 在传输层或模型回合退避期间立即显示重连次数和等待秒数。
+    def write_provider_retry(
+        self,
+        *,
+        scope: str,
+        attempt: int,
+        total: int,
+        delay_seconds: float,
+        error_type: str,
+    ) -> bool:
+        if not self.rich_transcript:
+            return False
+        retry_scope = "transport" if scope == "transport" else "model_turn"
+        retry_attempt = max(1, int(attempt or 1))
+        retry_total = max(retry_attempt, int(total or retry_attempt))
+        wait_seconds = max(0.0, round(float(delay_seconds or 0.0), 1))
+        layer = "连接" if retry_scope == "transport" else "模型回合"
+        self.flush()
+        write_chunk_event(
+            self.chunk_path,
+            {
+                "kind": "runtime_progress",
+                "text": (
+                    f"模型服务暂时不可用，{wait_seconds:g} 秒后自动重连"
+                    f"（{layer} {retry_attempt}/{retry_total}）"
+                ),
+                "verbose_level": "full",
+                "retry": {
+                    "scope": retry_scope,
+                    "attempt": retry_attempt,
+                    "total": retry_total,
+                    "wait_seconds": wait_seconds,
+                    "error_type": str(error_type or ""),
+                },
+            },
+        )
+        return True
+
+    # LLM: Context usage is a rich-client-only numeric projection. The writer must whitelist
+    # fields and must never serialize prompt, message, guidance, or tool-schema content.
+    # 函数用途: 把每次模型调用前的上下文总量和分类估算实时写入 TUI 事件流。
+    def write_context_usage(self, usage: dict[str, object]) -> bool:
+        if not self.rich_transcript:
+            return False
+        public = _public_context_usage_payload(usage)
+        if not public:
+            return False
+        self.flush()
+        write_chunk_event(
+            self.chunk_path,
+            {
+                "kind": "context_usage_updated",
+                "context_usage": public,
+            },
+        )
+        return True
+
+    # LLM: Native IR compaction is distinct from durable conversation compact. Only its bounded
+    # counters may enter rich chunks; summary text, archived calls, and prompts remain private.
+    # 函数用途: 公布活动回合内一次真实工具历史裁剪，供 TUI 留下可审计提示。
+    def write_context_compaction(self, value: dict[str, object]) -> bool:
+        if not self.rich_transcript:
+            return False
+        public = _public_context_compaction_payload(value)
+        if not public:
+            return False
+        self.flush()
+        write_chunk_event(
+            self.chunk_path,
+            {
+                "kind": "context_window_compacted",
+                "context_compaction": public,
+            },
+        )
+        return True
+
+    # LLM: 请求必须先发布再等待精确 decision 文件；未声明能力不等待，取消令牌使同一阻塞调用立即返回 cancelled。
+    # 函数用途: 将工具审批发给 Gateway 客户端并等待结构化答复。
+    def request_permission(
+        self,
+        request_value: dict[str, object],
+        *,
+        cancellation_token: object | None = None,
+    ) -> dict[str, object]:
+        request = ToolApprovalRequest.from_mapping(request_value)
+        if not self.interactive_approvals:
+            return unavailable_gateway_permission_decision(request).to_dict()
+        self.flush()
+        self._write_model_commentary_at_boundary()
+        write_chunk_event(
+            self.chunk_path,
+            {
+                "kind": "permission_requested",
+                "permission": request.to_dict(),
+            },
+        )
+        decision = wait_for_gateway_permission_decision(
+            self.chunk_path,
+            request,
+            cancellation_token=cancellation_token,
+        )
+        write_chunk_event(
+            self.chunk_path,
+            {
+                "kind": "permission_resolved",
+                **decision.to_dict(),
+            },
+        )
+        return decision.to_dict()
+
+    # LLM: compact boundary 只能由 canonical conversation generation 前进触发；它是显示事件，不复制摘要正文或建立第二会话状态。
+    # 函数用途: 在同一 Gateway chunk 流中公布一次上下文压缩代际边界。
+    def write_compact_boundary(self, generation: int) -> None:
+        normalized_generation = max(0, int(generation or 0))
+        if normalized_generation <= 0:
+            return
+        self.flush()
+        self._write_model_commentary_at_boundary()
+        write_chunk_event(
+            self.chunk_path,
+            {
+                "kind": "conversation_compacted",
+                "compact_generation": normalized_generation,
             },
         )
 
@@ -236,16 +441,14 @@ class BufferedChunkStreamWriter:
         self.flush()
         close_chunk_stream(self.chunk_path)
 
-    def _write_first_model_commentary(self) -> None:
-        if self._commentary_emitted or not self._model_segment:
+    # LLM: rich transcript 每个真实工具边界都可发布一段；普通客户端仍严格限制为首段，末轮正文留给 canonical final response。
+    # 函数用途: 脱敏并发布当前已经由工具边界确认的模型过程说明。
+    def _write_model_commentary_at_boundary(self) -> None:
+        if (self._commentary_emitted and not self.rich_transcript) or not self._model_segment:
             return
         raw = "".join(self._model_segment)
         self._model_segment.clear()
-        projection = project_user_reply(raw)
-        content = redact_structured_identifiers(
-            redact_host_absolute_paths(projection.content),
-            self._identifier_redactions,
-        ).strip()
+        content = self._public_model_text(raw, max_chars=12_000)
         if not content:
             return
         self._commentary_emitted = True
@@ -257,6 +460,20 @@ class BufferedChunkStreamWriter:
             },
         )
 
+    # LLM: 所有模型过程文本共用这一脱敏和长度边界；不能让 thinking 绕过 commentary 的路径/结构化标识保护。
+    # 函数用途: 生成适合写入公开 chunk 的有界模型文本。
+    def _public_model_text(self, text: object, *, max_chars: int) -> str:
+        projection = project_user_reply(str(text or ""))
+        content = redact_structured_identifiers(
+            redact_host_absolute_paths(projection.content),
+            self._identifier_redactions,
+        ).strip()
+        if len(content) <= max_chars:
+            return content
+        head = max_chars * 2 // 3
+        tail = max_chars - head
+        return f"{content[:head]}\n…（内容过长，已省略）…\n{content[-tail:]}"
+
     def _should_flush(self, latest_text: str) -> bool:
         if self._buffer_chars >= max(1, int(self.flush_chars)):
             return True
@@ -264,6 +481,39 @@ class BufferedChunkStreamWriter:
             return True
         elapsed = time.monotonic() - self._last_flush_at
         return elapsed >= max(0.0, float(self.flush_interval_seconds))
+
+
+# LLM: Gateway stream sanitization accepts only the frozen schema and known numeric fields;
+# unknown keys and all content-bearing values are dropped before the public event is written.
+# 函数用途: 清洗上下文用量快照，防止模型正文或工具定义意外进入 Gateway chunk。
+def _public_context_usage_payload(value: object) -> dict[str, object]:
+    if not isinstance(value, dict) or value.get("schema") != _CONTEXT_USAGE_SCHEMA:
+        return {}
+    protocol = str(value.get("protocol") or "")
+    return {
+        "schema": _CONTEXT_USAGE_SCHEMA,
+        "estimated": value.get("estimated") is True,
+        **{
+            key: _safe_nonnegative_int(value.get(key))
+            for key in _CONTEXT_USAGE_TOKEN_FIELDS
+        },
+        "protocol": protocol if protocol in {"native", "text"} else "unknown",
+    }
+
+
+# LLM: Gateway projection validates the frozen compaction schema and copies only nonnegative
+# counters; no model-generated summary or tool record can cross this boundary.
+# 函数用途: 清洗活动回合上下文裁剪事件，拒绝未知 schema 和正文载荷。
+def _public_context_compaction_payload(value: object) -> dict[str, object]:
+    if not isinstance(value, dict) or value.get("schema") != _CONTEXT_COMPACTION_SCHEMA:
+        return {}
+    return {
+        "schema": _CONTEXT_COMPACTION_SCHEMA,
+        **{
+            key: _safe_nonnegative_int(value.get(key))
+            for key in _CONTEXT_COMPACTION_FIELDS
+        },
+    }
 
 
 @dataclass(frozen=True)
@@ -356,6 +606,46 @@ class _GatewayTaskBindingWriter:
             task_id=str(getattr(link, "task_id", "") or ""),
             task_path=str(getattr(link, "task_path", "") or ""),
         )
+
+
+# LLM: This callback is the Gateway adaptation of 会话运行时's active_turn mutex. It validates the
+# immutable execution attempt under T before runtime may reserve input or cross the provider edge.
+# 类用途: 将补充消息认领和模型提交与同一精确 Gateway 回合的结束、停止串行化。
+@dataclass(frozen=True)
+class _GatewayActiveTurnTransition:
+    request_path: Path
+    request_id: str
+    execution_attempt_id: str
+
+    # LLM: Caller supplies only an in-memory mailbox operation. This method owns T, re-reads the
+    # exact hot request, and applies phase-specific admission: reserve/submit require open, while
+    # provider ACK/explicit rejection cleanup may finish the same attempt after stop marked closing.
+    # 函数用途: 按补充消息阶段校验精确执行代次，并与停止、终态收口串行。
+    def __call__(self, phase: str, operation):
+        phase_name = str(phase or "").strip().lower()
+        allow_closing = phase_name in {"acknowledge", "restore", "release"}
+        root = self.request_path.parent.parent.parent
+        paths = gateway_paths_from_root(root)
+        with gateway_turn_transition(paths, self.request_id):
+            report = read_json_file_report(
+                self.request_path,
+                context="gateway.active_turn_transition.read",
+            )
+            payload = report.payload
+            turn_phase = str(payload.get("turn_phase") or "open").strip().lower()
+            if (
+                report.load_error is not None
+                or not payload
+                or str(payload.get("id") or self.request_path.stem) != self.request_id
+                or str(payload.get("status") or "") != "processing"
+                or turn_phase not in ({"open", "closing"} if allow_closing else {"open"})
+                or (payload.get("cancel_requested") is True and not allow_closing)
+                or str(payload.get("execution_attempt_id") or "")
+                != self.execution_attempt_id
+                or (paths.terminal / f"{self.request_id}.json").exists()
+            ):
+                raise InterruptedError("Gateway active turn closed before provider admission")
+            return operation()
 
 
 @dataclass(frozen=True)
@@ -484,11 +774,27 @@ def _start_gateway_request_lease(
     if not should_refresh:
         return None, None
     lease_worker = context.worker_id or str(context.request.get("lease_owner") or "")
+    execution_attempt_id = str(
+        context.request.get("execution_attempt_id") or ""
+    ).strip()
+    try:
+        lease_epoch = max(0, int(context.request.get("lease_epoch") or 0))
+    except (TypeError, ValueError):
+        lease_epoch = 0
     refresh_processing_lease(
-        context.request_path, request_id=context.request_id, worker_id=lease_worker
+        context.request_path,
+        request_id=context.request_id,
+        worker_id=lease_worker,
+        execution_attempt_id=execution_attempt_id,
+        lease_epoch=lease_epoch,
     )
     return start_lease_heartbeat(
-        context.agent, context.request_path, request_id=context.request_id, worker_id=lease_worker
+        context.agent,
+        context.request_path,
+        request_id=context.request_id,
+        worker_id=lease_worker,
+        execution_attempt_id=execution_attempt_id,
+        lease_epoch=lease_epoch,
     )
 
 
@@ -517,6 +823,11 @@ def _run_gateway_ask(context: _GatewayAskRunContext):
         # not the stale snapshot from the time it entered the Gateway.
         conversation = _gateway_conversation_context(load_request)
         _require_gateway_conversation_ready(request, conversation)
+        if conversation.compact_generation > preflight.compact_generation:
+            _publish_gateway_compact_boundary(
+                context.on_chunk,
+                conversation.compact_generation,
+            )
         return _execute_gateway_conversation_turn(context, prompt, conversation)
 
 
@@ -616,6 +927,10 @@ def _run_gateway_turn_with_conversation_compact(
         )
         if str(getattr(result, "runtime_status", "") or "").strip().lower() != "context_overflow":
             return result, current
+        released_input_ids = release_active_turn_inputs_for_compact(
+            context.agent,
+            run_params,
+        )
         # The same durable turn continues after transcript compaction.  Carry
         # its typed tool archive and injected user steering into the fresh
         # provider request so completed reads/writes, one-shot orchestration,
@@ -635,9 +950,12 @@ def _run_gateway_turn_with_conversation_compact(
         if result_archive:
             carried_archive_tool_calls = result_archive
         prior_active_turn_user_inputs = list(carried_active_turn_user_inputs)
-        carried_active_turn_user_inputs = merge_active_turn_user_inputs(
-            carried_active_turn_user_inputs,
-            getattr(result, "active_turn_user_inputs", None),
+        carried_active_turn_user_inputs = exclude_active_turn_user_input_ids(
+            merge_active_turn_user_inputs(
+                carried_active_turn_user_inputs,
+                getattr(result, "active_turn_user_inputs", None),
+            ),
+            released_input_ids,
         )
         made_guidance_progress = carried_active_turn_user_inputs != prior_active_turn_user_inputs
         refreshed = _gateway_conversation_context(
@@ -657,6 +975,11 @@ def _run_gateway_turn_with_conversation_compact(
             # would merely replay the same overflowing request.
             if not (made_tool_progress or made_guidance_progress):
                 raise ConversationPersistenceError("当前会话无法继续压缩，请稍后重试")
+        elif refreshed.compact_generation > current.compact_generation:
+            _publish_gateway_compact_boundary(
+                context.on_chunk,
+                refreshed.compact_generation,
+            )
         current = refreshed
     raise ConversationPersistenceError("当前会话压缩后仍超过模型上下文上限")
 
@@ -892,6 +1215,14 @@ def _set_gateway_verbose_level(on_chunk: object, level: str) -> None:
         setter(level)
 
 
+# LLM: Gateway execution 只调用 writer 的显式 typed 接口；普通 callable/IM sink 没有该能力时保持静默而不写自然语言 fallback。
+# 函数用途: 将 canonical compact generation 前进投影到支持该事件的客户端流。
+def _publish_gateway_compact_boundary(on_chunk: object, generation: int) -> None:
+    writer = getattr(on_chunk, "write_compact_boundary", None)
+    if callable(writer):
+        writer(generation)
+
+
 def _require_gateway_conversation_ready(
     request: dict,
     conversation: _GatewayConversationContext,
@@ -911,6 +1242,8 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
         prompt_files=[str(item) for item in request.get("prompt_files", [])],
         save=bool(request.get("save", True)),
         request_id=context.request_id,
+        attempt_id=str(request.get("execution_attempt_id") or "").strip()
+        or context.request_id,
         source="gateway",
         resume_context=_gateway_resume_context(request, conversation),
         recovery_next_actions=[
@@ -929,6 +1262,11 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
         carried_active_turn_user_inputs=[
             dict(item) for item in inputs.carried_active_turn_user_inputs
         ],
+        active_turn_transition_callback=_GatewayActiveTurnTransition(
+            context.request_path,
+            context.request_id,
+            str(request.get("execution_attempt_id") or "").strip() or context.request_id,
+        ),
         conversation_task_binding_callback=_GatewayTaskBindingWriter(
             context.request_path,
             context.request_id,
@@ -1219,7 +1557,10 @@ def _preflight_gateway_conversation(
         return _GatewayConversationContext(
             load_errors=(error or {"error_code": "thread_unavailable"},)
         )
-    return _GatewayConversationContext(thread_id=str(thread.thread_id or ""))
+    return _GatewayConversationContext(
+        thread_id=str(thread.thread_id or ""),
+        compact_generation=max(0, int(getattr(thread, "compact_generation", 0) or 0)),
+    )
 
 
 # LLM: 同一 thread 的历史与近期产物分别加载；内部 run 索引不进入模型上下文。
@@ -1607,8 +1948,7 @@ def _gateway_workspace_has_artifacts(path: str) -> bool:
         return False
     try:
         return any(
-            os.path.isfile(os.path.join(output_dir, name))
-            for name in os.listdir(output_dir)
+            os.path.isfile(os.path.join(output_dir, name)) for name in os.listdir(output_dir)
         )
     except OSError:
         return False
@@ -2312,13 +2652,6 @@ def _prepare_gateway_request_context(agent: SimpleAgent, request_path: Path) -> 
     request_id = str(request.get("id") or request_path.stem)
     kind = str(request.get("kind") or "").strip() or ("ask" if request_id else "")
     response_path = gateway_response_path(gateway_paths(agent), request_id)
-    existing_response = read_gateway_response_file(
-        response_path,
-        request_id=request_id,
-        context="gateway.request_execution.response.read",
-    )
-    if existing_response:
-        return {"existing_response": existing_response}
     started_at = time.time()
     response = _build_gateway_response_base(
         _GatewayResponseBaseContext(request, request_path, request_id, kind, started_at)
@@ -2368,6 +2701,8 @@ def _complete_gateway_request_audit(
     )
 
 
+# LLM: 每个 claimed request 只创建一个 chunk writer；审批能力只读 client_capabilities.tool_approval，不能按 source 或活跃终端猜测。
+# 函数用途: 执行一条 Gateway 请求、维护 lease/chunk，并写入最终响应。
 def _handle_gateway_request(
     agent: SimpleAgent,
     request_path: Path,
@@ -2376,8 +2711,6 @@ def _handle_gateway_request(
     worker_id: str = "",
 ) -> dict:
     context = _prepare_gateway_request_context(agent, request_path)
-    if context.get("existing_response"):
-        return context["existing_response"]
     response = context["response"]
     if context.get("skip_execution"):
         _finalize_gateway_response(context, response)
@@ -2400,18 +2733,27 @@ def _handle_gateway_request(
     )
     chunk_path = claimed_request_chunk_path(request_path, context["request_id"])
     chunk_path_abs, _ = open_chunk_stream(chunk_path)
-    chunk_writer = BufferedChunkStreamWriter(chunk_path_abs)
+    chunk_writer = BufferedChunkStreamWriter(
+        chunk_path_abs,
+        interactive_approvals=_gateway_client_supports_tool_approval(context["request"]),
+        rich_transcript=_gateway_client_supports_rich_transcript(context["request"]),
+    )
 
     try:
         _execute_gateway_request_body({**context, "agent": agent}, chunk_writer)
     except Exception as exc:
+        from .request_errors import gateway_client_error_message
+
+        error_code = response.get("error_code") or str(
+            getattr(exc, "error_code", "") or type(exc).__name__.upper()
+        )
         response.update(
             {
                 "ok": False,
                 "status": "failed",
-                "error_code": response.get("error_code")
-                or str(getattr(exc, "error_code", "") or type(exc).__name__.upper()),
+                "error_code": error_code,
                 "error": f"{type(exc).__name__}: {exc}",
+                "user_error": gateway_client_error_message(error_code),
             }
         )
     finally:
@@ -2423,6 +2765,24 @@ def _handle_gateway_request(
     _finalize_gateway_response(context, response)
     _complete_gateway_request_audit(agent, context, request_path, response)
     return response
+
+
+# LLM: capability 缺失或非布尔真值一律视为不支持，避免普通 Gateway/IM 请求在无人确认时永久挂起。
+# 函数用途: 判断请求客户端是否显式支持交互工具审批。
+def _gateway_client_supports_tool_approval(request: object) -> bool:
+    if not isinstance(request, dict):
+        return False
+    capabilities = request.get("client_capabilities")
+    return bool(isinstance(capabilities, dict) and capabilities.get("tool_approval") is True)
+
+
+# LLM: 富 transcript 只能由 client_capabilities.rich_transcript 精确布尔真值开启，source/TTY/verbose 都不能隐式扩大输出面。
+# 函数用途: 判断请求客户端是否显式支持思考、逐轮说明和结构化工具结果。
+def _gateway_client_supports_rich_transcript(request: object) -> bool:
+    if not isinstance(request, dict):
+        return False
+    capabilities = request.get("client_capabilities")
+    return bool(isinstance(capabilities, dict) and capabilities.get("rich_transcript") is True)
 
 
 # LLM: A durable stop marker wins over model/tool completion, including restart recovery races.

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from agent_py_agent.agent.agent_core.runtime.guidance import (
     acknowledge_injected_turn_input,
     inject_pending_guidance,
+    mark_injected_turn_input_submitted,
 )
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.auth.manager import AuthManager
@@ -51,6 +52,7 @@ from agent_py_agent.agent.gateway_parts.http_service import (
 from agent_py_agent.agent.gateway_parts.io import write_json_file
 from agent_py_agent.agent.gateway_parts.paths import gateway_chunk_path, gateway_paths
 from agent_py_agent.agent.gateway_parts.request_execution import (
+    _GatewayActiveTurnTransition,
     _GatewayAskRunContext,
     _GatewayConversationContext,
     _GatewayTaskBindingWriter,
@@ -160,6 +162,229 @@ def test_btw_targets_only_current_request(tmp_path) -> None:
     assert result.request_id == "req-1"
     assert agent.conversation_store.pending_guidance("request", "req-1")[0].message == "先核对来源"
     assert agent.conversation_store.pending_guidance("request", "req-2") == []
+
+
+def test_active_turn_guidance_replay_is_persistent_and_exactly_once(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    request_path = paths.processing / "req-idempotent.json"
+    write_json_file(request_path, _request("req-idempotent"))
+    scope = GatewayControlScope(
+        "u-1",
+        "feishu",
+        "c-1",
+        metadata={
+            "message_id": "channel-steer-idempotent",
+            "expected_turn_id": "req-idempotent",
+        },
+    )
+
+    first = execute_gateway_conversation_control(
+        agent,
+        paths,
+        _command("/btw 保持同一回合并只保存一次"),
+        scope,
+    )
+    request_path.unlink()
+    paths.terminal.mkdir(parents=True, exist_ok=True)
+    write_json_file(
+        paths.terminal / "req-idempotent.json",
+        {**_request("req-idempotent"), "status": "done", "turn_phase": "closed"},
+    )
+    replay_after_turn_disappeared = execute_gateway_conversation_control(
+        agent,
+        paths,
+        _command("/btw 保持同一回合并只保存一次"),
+        scope,
+    )
+
+    thread = agent.conversation_store.resolve_thread(
+        channel="feishu",
+        channel_conversation_id="c-1",
+        channel_user_id="u-1",
+    )
+    assert thread is not None
+    rows = agent.conversation_store.recent_guidance("request", "req-idempotent", limit=0)
+    assert first.delivery_status == "unknown"
+    assert replay_after_turn_disappeared.delivery_status == "rejected"
+    assert [row.message for row in rows] == ["保持同一回合并只保存一次"]
+    assert len({row.guidance_id for row in rows}) == 1
+
+
+def test_active_turn_guidance_rejects_reused_message_id_with_different_input(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    write_json_file(paths.processing / "req-conflict.json", _request("req-conflict"))
+    scope = GatewayControlScope(
+        "u-1",
+        "feishu",
+        "c-1",
+        metadata={
+            "message_id": "channel-steer-conflict",
+            "expected_turn_id": "req-conflict",
+        },
+    )
+
+    accepted = execute_gateway_conversation_control(
+        agent,
+        paths,
+        _command("/btw 第一条内容"),
+        scope,
+    )
+    conflict = execute_gateway_conversation_control(
+        agent,
+        paths,
+        _command("/btw 被错误复用 ID 的另一条内容"),
+        scope,
+    )
+
+    rows = agent.conversation_store.recent_guidance("request", "req-conflict", limit=0)
+    assert accepted.delivery_status == "unknown"
+    assert conflict.ok is False
+    assert conflict.delivery_status == "rejected"
+    assert [row.message for row in rows] == ["第一条内容"]
+
+
+def test_active_turn_pending_receipt_is_unknown_until_exact_turn_ends(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    request_path = paths.processing / "req-pending.json"
+    write_json_file(request_path, _request("req-pending"))
+    thread = agent.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "u-1",
+            "channel": "feishu",
+            "channel_conversation_id": "c-1",
+            "channel_user_id": "u-1",
+        }
+    )
+    message_id = "channel-steer-pending"
+    scope = GatewayControlScope(
+        "u-1",
+        "feishu",
+        "c-1",
+        metadata={
+            "message_id": message_id,
+            "expected_turn_id": "req-pending",
+        },
+    )
+    dedupe_key = control_service.active_turn_guidance_dedupe_key(scope)
+    entry = agent.conversation_store.append_guidance_once(
+        {
+            "target_type": "request",
+            "target_id": "req-pending",
+            "message": "等待原请求写完回执",
+            "sender": "u-1",
+            "priority": "high",
+            "delivery": "current_request",
+            "metadata": {
+                "kind": "active_turn_user_input",
+                "record_in_transcript": True,
+                "thread_id": thread.thread_id,
+                "channel": "feishu",
+                "conversation_id": "c-1",
+                "channel_message_id": message_id,
+                "expected_turn_id": "req-pending",
+            },
+        },
+        dedupe_key=dedupe_key,
+    )
+    while_active = execute_gateway_conversation_control(
+        agent,
+        paths,
+        _command("/btw 等待原请求写完回执"),
+        scope,
+    )
+    request_path.unlink()
+    paths.terminal.mkdir(parents=True, exist_ok=True)
+    write_json_file(
+        paths.terminal / "req-pending.json",
+        {**_request("req-pending"), "status": "done", "turn_phase": "closed"},
+    )
+    after_turn = execute_gateway_conversation_control(
+        agent,
+        paths,
+        _command("/btw 等待原请求写完回执"),
+        scope,
+    )
+
+    assert while_active.delivery_status == "unknown"
+    assert after_turn.delivery_status == "rejected"
+    receipt = agent.conversation_store.guidance_once_receipt(dedupe_key)
+    assert receipt is not None and receipt.status == "rejected"
+    assert agent.conversation_store.pending_guidance("request", "req-pending") == []
+    assert entry.guidance_id == receipt.entry.guidance_id
+
+
+def test_pending_receipt_uses_its_exact_live_turn_when_global_projection_is_ambiguous(
+    tmp_path,
+) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    write_json_file(paths.processing / "req-exact-a.json", _request("req-exact-a"))
+    thread = agent.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "u-1",
+            "channel": "feishu",
+            "channel_conversation_id": "c-1",
+            "channel_user_id": "u-1",
+        }
+    )
+    scope = GatewayControlScope(
+        "u-1",
+        "feishu",
+        "c-1",
+        metadata={"message_id": "msg-exact-a", "expected_turn_id": "req-exact-a"},
+    )
+    dedupe_key = control_service.active_turn_guidance_dedupe_key(scope)
+    agent.conversation_store.append_guidance_once(
+        {
+            "target_type": "request",
+            "target_id": "req-exact-a",
+            "message": "只能留在 A",
+            "sender": "u-1",
+            "metadata": {
+                "kind": "active_turn_user_input",
+                "thread_id": thread.thread_id,
+                "channel": "feishu",
+                "conversation_id": "c-1",
+                "channel_message_id": "msg-exact-a",
+                "expected_turn_id": "req-exact-a",
+            },
+        },
+        dedupe_key=dedupe_key,
+    )
+    # A recovery conflict makes the global active projection ambiguous, but the receipt already
+    # owns exact turn A and must not be rejected or rebound to B.
+    write_json_file(paths.processing / "req-exact-b.json", _request("req-exact-b"))
+
+    replay = execute_gateway_conversation_control(
+        agent,
+        paths,
+        _command("/btw 只能留在 A"),
+        scope,
+    )
+
+    receipt = agent.conversation_store.guidance_once_receipt(dedupe_key)
+    assert replay.delivery_status == "unknown"
+    assert replay.request_id == "req-exact-a"
+    assert receipt is not None and receipt.status == "pending"
 
 
 def test_ordinary_input_steers_only_the_matching_active_conversation(tmp_path) -> None:
@@ -405,6 +630,11 @@ def test_btw_becomes_one_thread_user_message_after_model_accepts_it(tmp_path) ->
 
     assert result.ok is True
     assert inject_pending_guidance(agent, params) is True
+    assert mark_injected_turn_input_submitted(
+        agent,
+        params,
+        provider_call_id="provider-call-btw",
+    ) == 1
     assert acknowledge_injected_turn_input(agent, params) == 1
     assert acknowledge_injected_turn_input(agent, params) == 0
 
@@ -416,6 +646,66 @@ def test_btw_becomes_one_thread_user_message_after_model_accepts_it(tmp_path) ->
     rows = agent.conversation_store.recent_messages(thread.thread_id, limit=0)
     assert [(row.role, row.content) for row in rows] == [("user", "改为先验证数据库迁移")]
     assert rows[0].channel_message_id == "om-btw-accepted"
+
+
+def test_provider_ack_consumes_btw_after_exact_turn_enters_closing(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    request_id = "req-stop-after-provider"
+    attempt_id = "attempt-stop-after-provider"
+    request_path = paths.processing / f"{request_id}.json"
+    request = _request(request_id)
+    request["execution_attempt_id"] = attempt_id
+    request["turn_phase"] = "open"
+    write_json_file(request_path, request)
+    result = execute_gateway_conversation_control(
+        agent,
+        paths,
+        _command("/btw 先核对已进入模型的这句"),
+        GatewayControlScope(
+            "u-1",
+            "feishu",
+            "c-1",
+            metadata={"message_id": "om-btw-stop-race"},
+        ),
+    )
+    params = RunParams(
+        request_id=request_id,
+        run_id=request_id,
+        task_id=request_id,
+        attempt_id=attempt_id,
+    )
+    params.tool_protocol_snapshot = make_test_protocol_snapshot(
+        run_id=request_id,
+        source_protocol="native",
+    )
+    params.live_archive_state = {}
+    params.tool_context = []
+    params.runtime_injections = []
+    params.active_turn_user_inputs = []
+    params.active_turn_transition_callback = _GatewayActiveTurnTransition(
+        request_path,
+        request_id,
+        attempt_id,
+    )
+
+    assert result.ok is True
+    assert inject_pending_guidance(agent, params) is True
+    assert mark_injected_turn_input_submitted(
+        agent,
+        params,
+        provider_call_id="provider-call-before-stop",
+    ) == 1
+    closing = dict(request)
+    closing.update({"turn_phase": "closing", "cancel_requested": True})
+    write_json_file(request_path, closing)
+
+    assert acknowledge_injected_turn_input(agent, params) == 1
+    assert agent.conversation_store.pending_guidance("request", request_id) == []
 
 
 def test_goal_lifecycle_is_persistent_and_conversation_scoped(tmp_path) -> None:
@@ -1956,7 +2246,7 @@ def test_linked_live_request_controls_exact_task_and_status_turn(tmp_path) -> No
     )
     result = execute_gateway_conversation_control(agent, paths, _command("/status"), _scope())
 
-    assert steered.ok is True and steered.request_id == "task-selected"
+    assert steered.ok is True and steered.request_id == "req-current-turn"
     assert [
         item.message for item in agent.conversation_store.pending_guidance("task", "task-selected")
     ] == ["先把当前第五步的兼容性补齐"]
@@ -2105,7 +2395,7 @@ def test_btw_expected_task_check_rejects_task_switch_race(tmp_path, monkeypatch)
 
     assert result.ok is False
     assert result.request_id == "task-old"
-    assert "已切换" in result.message
+    assert "结束或切换" in result.message
     assert agent.conversation_store.pending_guidance("task", "task-old") == []
     assert agent.conversation_store.pending_guidance("task", "task-new") == []
     assert not any(
@@ -2413,6 +2703,140 @@ def test_status_reports_the_single_thread_compact_generation(tmp_path) -> None:
     assert "任务上下文" not in result.message
 
 
+def test_context_control_reads_the_same_thread_and_auto_compact_policy(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            model_name="test-model",
+            model_context_window_tokens=20_000,
+            memory_compact_auto_trigger_percent=90,
+            gateway_per_user_owner_scoping=False,
+        ),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    thread = agent.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "u-1",
+            "channel": "feishu",
+            "channel_conversation_id": "c-1",
+            "channel_user_id": "u-1",
+        }
+    )
+    agent.conversation_store.append_message(
+        {
+            "thread_id": thread.thread_id,
+            "role": "user",
+            "content": "查看真实上下文占用",
+            "channel": "feishu",
+        }
+    )
+
+    result = execute_gateway_conversation_control(
+        agent,
+        paths,
+        _command("/context"),
+        _scope(),
+    )
+    unchanged = agent.conversation_store.load_thread(thread.thread_id)
+
+    assert result.ok is True
+    assert "模型：test-model" in result.message
+    assert "20,000 tokens" in result.message
+    assert "90%" in result.message
+    assert "未压缩消息 1 条" in result.message
+    assert unchanged is not None and unchanged.compact_generation == 0
+
+
+def test_manual_compact_uses_canonical_checkpoint_lane_and_custom_instructions(tmp_path) -> None:
+    prompts: list[str] = []
+
+    class SummaryBackend:
+        name = "summary-test"
+
+        def generate(self, prompt: str, **_kwargs) -> ModelResponse:
+            prompts.append(prompt)
+            return ModelResponse(text="已保留的会话摘要", backend=self.name)
+
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            model_context_window_tokens=20_000,
+            gateway_per_user_owner_scoping=False,
+        ),
+        tmp_path,
+    )
+    agent.backend = SummaryBackend()
+    paths = gateway_paths(agent)
+    thread = agent.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "u-1",
+            "channel": "feishu",
+            "channel_conversation_id": "c-1",
+            "channel_user_id": "u-1",
+        }
+    )
+    for role in ("user", "assistant"):
+        agent.conversation_store.append_message(
+            {
+                "thread_id": thread.thread_id,
+                "role": role,
+                "content": f"需要压缩的 {role} 消息",
+                "channel": "feishu",
+            }
+        )
+
+    result = execute_gateway_conversation_control(
+        agent,
+        paths,
+        _command("/compact 优先保留未完成事项"),
+        _scope(),
+    )
+    compacted = agent.conversation_store.load_thread(thread.thread_id)
+
+    assert result.ok is True
+    assert "Context compacted · generation 1" in result.message
+    assert compacted is not None and compacted.compact_generation == 1
+    assert compacted.compact_checkpoint_id
+    assert "优先保留未完成事项" in prompts[0]
+
+
+def test_manual_compact_rejects_a_live_turn_and_effort_never_fakes_a_setting(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    write_json_file(paths.processing / "req-live.json", _request("req-live"))
+
+    compact = execute_gateway_conversation_control(
+        agent,
+        paths,
+        _command("/compact"),
+        _scope(),
+    )
+    effort = execute_gateway_conversation_control(
+        agent,
+        paths,
+        _command("/effort high"),
+        _scope(),
+    )
+    effort_status = execute_gateway_conversation_control(
+        agent,
+        paths,
+        _command("/effort"),
+        _scope(),
+    )
+
+    assert compact.ok is False
+    assert "仍在运行" in compact.message
+    assert effort.ok is False
+    assert "未改变任何模型参数" in effort.message
+    assert effort_status.ok is True
+    assert "供应商管理推理强度" in effort_status.message
+
+
 def test_stop_persists_and_signals_only_matching_request(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
@@ -2444,6 +2868,40 @@ def test_stop_persists_and_signals_only_matching_request(tmp_path) -> None:
     payload = request_path.read_text(encoding="utf-8")
     assert '"cancel_requested": true' in payload
     assert '"control_status": "stopping"' in payload
+
+
+def test_stop_expected_turn_never_switches_to_newer_live_request(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    request_path = paths.processing / "req-new.json"
+    write_json_file(request_path, _request("req-new"))
+    scope = GatewayControlScope(
+        "u-1",
+        "feishu",
+        "c-1",
+        metadata={
+            "message_id": "stop-old-window",
+            "expected_turn_id": "req-old",
+        },
+    )
+
+    result = execute_gateway_conversation_control(
+        agent,
+        paths,
+        _command("/stop"),
+        scope,
+    )
+
+    assert result.ok is False
+    assert result.delivery_status == "rejected"
+    assert result.request_id == "req-old"
+    payload = json.loads(request_path.read_text(encoding="utf-8"))
+    assert payload.get("cancel_requested") is not True
+    assert payload.get("turn_phase", "open") == "open"
 
 
 def test_stop_ack_is_bounded_when_provider_transport_close_blocks(tmp_path) -> None:
@@ -2705,6 +3163,7 @@ def test_http_control_endpoint_returns_immediate_conversation_status(tmp_path) -
                 "user_id": "u-1",
                 "channel": "feishu",
                 "conversation_id": "c-1",
+                "metadata": {"message_id": "control-status-1"},
             }
         ).encode("utf-8")
         request = urllib.request.Request(
@@ -2745,6 +3204,7 @@ def test_http_ask_routes_verbose_before_active_turn_guidance(tmp_path) -> None:
                 "kind": "ask",
                 "goal": "/verbose on",
                 "conversation_id": "c-1",
+                "metadata": {"message_id": "control-verbose-1"},
             }
         ).encode("utf-8")
         request = urllib.request.Request(
@@ -2820,6 +3280,10 @@ def test_http_ask_routes_stop_to_live_window_interrupt(tmp_path) -> None:
                 "kind": "ask",
                 "goal": "/stop",
                 "conversation_id": "c-1",
+                "metadata": {
+                    "message_id": "control-stop-1",
+                    "expected_turn_id": "req-1",
+                },
             }
         ).encode("utf-8")
         request = urllib.request.Request(
@@ -2914,6 +3378,7 @@ def test_http_audit_start_executes_control_instead_of_queueing_or_steering(tmp_p
                 "kind": "ask",
                 "goal": "/audit 30d 安全巡检 逐条核对这些来源",
                 "conversation_id": "c-1",
+                "metadata": {"message_id": "control-audit-1"},
             }
         ).encode("utf-8")
         request = urllib.request.Request(
@@ -2978,11 +3443,12 @@ def test_http_ask_steers_active_turn_without_creating_a_second_request(tmp_path)
     finally:
         server.stop()
 
-    assert payload == {
-        "request_id": "req-1",
-        "status": "steered",
-        "disposition": "active_turn_input",
-    }
+    assert str(payload["request_id"]).startswith("gwreq-msg-")
+    assert payload["target_turn_id"] == "req-1"
+    assert payload["status"] == "delivery_unknown"
+    assert payload["disposition"] == "active_turn_input"
+    assert payload["delivery_status"] == "unknown"
+    assert payload["input_state"] == "active_pending"
     assert list(paths.inbox.glob("*.json")) == []
     pending = agent.conversation_store.pending_guidance("request", "req-1")
     assert [item.message for item in pending] == ["先简单回答我这句，原任务继续"]
@@ -3167,3 +3633,142 @@ def test_promote_blocked_by_running_policy_does_not_create_shadow_link(tmp_path)
     assert promoted is None
     links = agent.conversation_store.task_links(thread.thread_id)
     assert [item.task_id for item in links] == ["req-first"]  # 无影子 link
+
+
+def test_http_ask_prepared_fallback_preserves_all_execution_options() -> None:
+    from agent_py_agent.agent.gateway_parts.http_handlers import (
+        _AskRequestContext,
+        _build_ask_request,
+        _http_idempotent_request_identity,
+    )
+
+    body = {
+        "metadata": {"message_id": "msg-options"},
+        "conversation_id": "session-options",
+        "inject": ["遵守规范"],
+        "prompt_files": ["spec.md"],
+        "save": False,
+        "include_prompt": True,
+        "resume_context": True,
+        "client_capabilities": {
+            "tool_approval": True,
+            "rich_transcript": True,
+        },
+    }
+    request_id, digest = _http_idempotent_request_identity(
+        body,
+        goal="继续完成",
+        user_id="local-agent",
+        channel="chat",
+    )
+    routed = dict(body)
+    routed["metadata"] = {
+        **body["metadata"],
+        "client_input_digest": digest,
+        "gateway_input_request_id": request_id,
+    }
+
+    prepared = _build_ask_request(
+        _AskRequestContext(routed, "继续完成", request_id, "local-agent", "chat")
+    )
+
+    assert prepared["inject"] == ["遵守规范"]
+    assert prepared["prompt_files"] == ["spec.md"]
+    assert prepared["save"] is False
+    assert prepared["include_prompt"] is True
+    assert prepared["resume_context"] is True
+    assert prepared["client_capabilities"] == {
+        "tool_approval": True,
+        "rich_transcript": True,
+    }
+    changed = dict(body)
+    changed["save"] = True
+    _same_request_id, changed_digest = _http_idempotent_request_identity(
+        changed,
+        goal="继续完成",
+        user_id="local-agent",
+        channel="chat",
+    )
+    assert changed_digest != digest
+
+
+def test_input_lifecycle_ignores_orphan_terminal_projections(tmp_path) -> None:
+    from agent_py_agent.agent.gateway_parts.input_delivery_service import (
+        _gateway_turn_lifecycle,
+    )
+
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    request_id = "gw-orphan-projection"
+    for path in (paths.responses, paths.done, paths.failed):
+        path.mkdir(parents=True, exist_ok=True)
+    (paths.responses / f"{request_id}.json").write_text(
+        json.dumps({"id": request_id, "ok": True, "response": "orphan"}),
+        encoding="utf-8",
+    )
+    (paths.done / f"{request_id}.json").write_text(
+        json.dumps({"id": request_id, "status": "done"}),
+        encoding="utf-8",
+    )
+
+    assert _gateway_turn_lifecycle(paths, request_id) == "unknown"
+
+    paths.terminal.mkdir(parents=True, exist_ok=True)
+    (paths.terminal / f"{request_id}.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "gateway_terminal_request.v1",
+                "id": request_id,
+                "terminal_response": {"id": request_id, "ok": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert _gateway_turn_lifecycle(paths, request_id) == "terminal"
+
+
+def test_input_queue_refuses_orphan_projection_without_canonical(tmp_path) -> None:
+    import pytest
+
+    from agent_py_agent.agent.gateway_parts.input_delivery_service import (
+        gateway_input_transition,
+        load_or_prepare_gateway_input_locked,
+        queue_gateway_input_locked,
+    )
+    from agent_py_agent.agent.runtime_errors import DataCorruptionError
+
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    request_id = "gw-orphan-queue"
+    digest = "stable-input-digest"
+    prepared = {
+        "id": request_id,
+        "kind": "ask",
+        "goal": "must not overwrite orphan result",
+        "metadata": {"client_input_digest": digest},
+    }
+    with gateway_input_transition(paths, request_id):
+        receipt, created = load_or_prepare_gateway_input_locked(
+            paths,
+            request_id=request_id,
+            client_input_digest=digest,
+            client_message_id="msg-orphan",
+            guidance_dedupe_key="guidance/orphan",
+            prepared_request=prepared,
+        )
+        assert created is True
+        paths.responses.mkdir(parents=True, exist_ok=True)
+        (paths.responses / f"{request_id}.json").write_text(
+            json.dumps({"id": request_id, "ok": True}),
+            encoding="utf-8",
+        )
+        with pytest.raises(DataCorruptionError):
+            queue_gateway_input_locked(paths, receipt)
+
+    assert not (paths.inbox / f"{request_id}.json").exists()

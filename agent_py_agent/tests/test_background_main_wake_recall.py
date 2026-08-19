@@ -286,15 +286,14 @@ def test_supervisor_ticks_scoped_owner_wake_and_delivers(tmp_path) -> None:
     )
 
     assert scoped.conversation_store.pending_wake_signals()  # 修前:这条唤醒 base 调度器看不到
-    with patch("agent_py_agent.cli.gateway_loops.make_agent", return_value=base_agent):
-        supervisor = _BackgroundMainSupervisor(context)
-        adapter = _RecordingFeishuAdapter()
-        _register_recording_adapter(supervisor._channels, adapter)  # 替身,免真发飞书
-        supervisor.tick()  # 提交 owner tick(整合已并行化:每 owner 的 tick 丢线程池异步跑,不阻塞)
-        import concurrent.futures as _cf
+    supervisor = _BackgroundMainSupervisor(context)
+    adapter = _RecordingFeishuAdapter()
+    _register_recording_adapter(supervisor._channels, adapter)  # 替身,免真发飞书
+    supervisor.tick()  # 提交 owner tick(整合已并行化:每 owner 的 tick 丢线程池异步跑,不阻塞)
+    import concurrent.futures as _cf
 
-        _cf.wait(list(supervisor._inflight.values()), timeout=15)  # 等后台 owner tick 真跑完(生产靠多轮 tick 异步收割)
-        ran = supervisor.tick()  # 下一轮 tick 收割完成的 owner 整合报告
+    _cf.wait(list(supervisor._inflight.values()), timeout=15)  # 等后台 owner tick 真跑完(生产靠多轮 tick 异步收割)
+    ran = supervisor.tick()  # 下一轮 tick 收割完成的 owner 整合报告
 
     assert ran is True  # 收割到 owner 整合报告
     assert not scoped.conversation_store.pending_wake_signals()  # 断裂A:scoped owner 唤醒被消费
@@ -316,9 +315,8 @@ def test_supervisor_single_owner_only_ticks_base(tmp_path) -> None:
         paths=SimpleNamespace(),
         config_path=tmp_path / "config.yaml",
     )
-    with patch("agent_py_agent.cli.gateway_loops.make_agent", return_value=base_agent):
-        supervisor = _BackgroundMainSupervisor(context)
-        assert supervisor.tick() is False  # base 无 due 事件 → 无报告
+    supervisor = _BackgroundMainSupervisor(context)
+    assert supervisor.tick() is False  # base 无 due 事件 → 无报告
     assert supervisor._owner_pool is None  # 从未触碰 owner 池
     assert supervisor._owner_schedulers == {}
 

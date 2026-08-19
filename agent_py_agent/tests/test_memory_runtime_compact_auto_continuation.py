@@ -3,10 +3,10 @@
 
 from __future__ import annotations
 
-import pytest
-
 import json
 from dataclasses import replace
+
+import pytest
 
 from agent_py_agent.agent.agent_core._runtime_params import FinalizeContext
 from agent_py_agent.agent.agent_core.compact_auto_continuation import (
@@ -40,8 +40,7 @@ class CaptureBackend:
     name = "capture"
 
     def probe_tool_capability(self):
-        from agent_py_agent.agent.backends.base import ProviderToolCapability
-        from agent_py_agent.agent.backends.base import _utc_now_iso
+        from agent_py_agent.agent.backends.base import ProviderToolCapability, _utc_now_iso
 
         return ProviderToolCapability(
             provider=self.name, endpoint="local://capture", model="",
@@ -72,8 +71,7 @@ class ContextOverflowThenCaptureBackend:
         self.prompts: list[str] = []
 
     def probe_tool_capability(self):
-        from agent_py_agent.agent.backends.base import ProviderToolCapability
-        from agent_py_agent.agent.backends.base import _utc_now_iso
+        from agent_py_agent.agent.backends.base import ProviderToolCapability, _utc_now_iso
 
         return ProviderToolCapability(
             provider=self.name, endpoint="local://overflow", model="",
@@ -109,8 +107,7 @@ class RepeatingContextOverflowBackend:
         self.prompts: list[str] = []
 
     def probe_tool_capability(self):
-        from agent_py_agent.agent.backends.base import ProviderToolCapability
-        from agent_py_agent.agent.backends.base import _utc_now_iso
+        from agent_py_agent.agent.backends.base import ProviderToolCapability, _utc_now_iso
 
         return ProviderToolCapability(
             provider=self.name, endpoint="local://repeating-overflow", model="",
@@ -1773,6 +1770,33 @@ def test_compact_continuation_carries_active_turn_user_input_as_real_native_turn
     assert loop_params.active_turn_user_inputs == [packet]
     assert loop_params.tool_ir_history == [UserTurn(packet["text"])]
     assert loop_params.tool_context == [f"[ACTIVE_TURN_USER_INPUT]\n{packet['text']}"]
+
+
+def test_compact_continuation_drops_released_unsubmitted_active_input_packet() -> None:
+    packet = {
+        "schema_version": "active-turn-user-input.v1",
+        "input_ids": ["guidance-unsubmitted"],
+        "text": "这条尚未触网，下一尝试必须从持久邮箱重新认领。",
+    }
+    params = RunParams(carried_active_turn_user_inputs=[])
+    source_result = type(
+        "Result",
+        (),
+        {
+            "tool_rounds": 0,
+            "executed_tools": [],
+            "active_turn_user_inputs": [packet],
+        },
+    )()
+
+    continued = _compact_auto_continue_params(
+        params,
+        "# Compact Auto Continuation\ncontinue",
+        source_result,
+        released_active_turn_input_ids=("guidance-unsubmitted",),
+    )
+
+    assert continued.carried_active_turn_user_inputs == []
 
 
 def test_compact_continuation_carries_active_turn_user_input_on_text_protocol():

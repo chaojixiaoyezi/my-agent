@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import replace
 from io import BytesIO
 from unittest.mock import MagicMock, patch
@@ -665,6 +666,24 @@ def test_probe_reraises_provider_quota_error(tmp_path):
             backend.probe_tool_capability()
 
 
+def test_probe_reraises_provider_request_rejection_without_capability_mislabel(tmp_path):
+    """服务端永久拒绝属于配置事实，探针不能吞成 native 工具能力不足。"""
+    from agent_py_agent.agent.backends.errors import ProviderRequestRejectedError
+
+    backend = HttpBackend(_DEFAULT_OPTIONS)
+    rejected = ProviderRequestRejectedError(
+        "HTTP 401: model is not supported",
+        status_code=401,
+        details={"error": {"type": "ModelError"}},
+    )
+    with patch.object(backend, "generate", side_effect=rejected) as generate:
+        with pytest.raises(ProviderRequestRejectedError) as exc_info:
+            backend.probe_tool_capability()
+
+    assert exc_info.value.status_code == 401
+    assert generate.call_count == 1
+
+
 def test_probe_records_non_provider_failure_as_unsupported(tmp_path):
     """非 provider 异常(如本地解析/配置错)仍按旧语义落 evidence, 不抛。"""
     backend = HttpBackend(_DEFAULT_OPTIONS)
@@ -727,6 +746,41 @@ def test_probe_flake_failure_is_not_cached(tmp_path):
     with patch.object(backend, "generate", side_effect=_echoing_probe_generate) as gen2:
         assert backend.probe_tool_capability().native_supported is True
         assert gen2.call_count == 1
+
+
+def test_probe_is_single_flight_for_shared_gateway_backend(tmp_path):
+    """同一 Gateway Agent 的并发首轮只发送一次能力探针，其他线程复用成功事实。"""
+    backend = HttpBackend(_DEFAULT_OPTIONS)
+    entered = threading.Event()
+    release = threading.Event()
+    results: list[object] = []
+    calls = 0
+
+    def _blocking_probe(prompt, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        entered.set()
+        assert release.wait(timeout=2)
+        return _echoing_probe_generate(prompt, *args, **kwargs)
+
+    def _run() -> None:
+        results.append(backend.probe_tool_capability())
+
+    with patch.object(backend, "generate", side_effect=_blocking_probe):
+        first = threading.Thread(target=_run)
+        second = threading.Thread(target=_run)
+        first.start()
+        assert entered.wait(timeout=1)
+        second.start()
+        release.set()
+        first.join(timeout=2)
+        second.join(timeout=2)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert calls == 1
+    assert len(results) == 2
+    assert results[0] is results[1]
 
 
 def test_probe_non_provider_exception_not_retried(tmp_path):

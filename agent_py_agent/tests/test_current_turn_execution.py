@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 from agent_py_agent.agent.backends.base import ModelResponse
@@ -11,6 +12,8 @@ from agent_py_agent.agent.tooling import BaseTool, ToolHandlerOutcome
 from agent_py_agent.agent.tooling.operation_verification import (
     build_operation_verification,
     incomplete_final_mutation_facts,
+    post_failure_workspace_mutation_followup_facts,
+    post_failure_workspace_mutation_followup_signature,
     public_operation_verification,
     redact_executed_operation_labels,
     render_current_turn_execution_facts,
@@ -23,7 +26,13 @@ from agent_py_agent.tests._tool_runtime_harness import (
 
 
 class _ProjectionTool(BaseTool):
-    def __init__(self, *, name: str, mutating: bool) -> None:
+    def __init__(
+        self,
+        *,
+        name: str,
+        mutating: bool,
+        mutates_workspace: bool = False,
+    ) -> None:
         properties = {}
         required = []
         effect_by_parameter = ()
@@ -45,9 +54,12 @@ class _ProjectionTool(BaseTool):
                 "additionalProperties": False,
             },
         )
-        self.runtime_policy = make_test_runtime_policy(
-            "mutating" if mutating else "read_only",
-            effect_by_parameter=effect_by_parameter,
+        self.runtime_policy = replace(
+            make_test_runtime_policy(
+                "mutating" if mutating else "read_only",
+                effect_by_parameter=effect_by_parameter,
+            ),
+            mutates_workspace=mutates_workspace,
         )
 
     def execute(self, params):
@@ -58,6 +70,11 @@ def _agent() -> SimpleNamespace:
     tools = {
         "remember": _ProjectionTool(name="remember", mutating=True),
         "read_file": _ProjectionTool(name="read_file", mutating=False),
+        "write_file": _ProjectionTool(
+            name="write_file",
+            mutating=True,
+            mutates_workspace=True,
+        ),
     }
     snapshot = runtime_snapshot_for_tools(tools)
     return SimpleNamespace(
@@ -393,6 +410,226 @@ def test_only_an_unsuccessful_terminal_mutation_requires_reply_rewrite() -> None
     assert incomplete_final_mutation_facts(_agent(), [failed, succeeded]) == {}
 
 
+def test_not_started_tail_keeps_prior_succeeded_effect_authoritative() -> None:
+    succeeded = {
+        "tool": "remember",
+        "call_id": "call-succeeded",
+        "operation_id": "operation-succeeded",
+        "ok": True,
+        "handler_executed": True,
+        "tool_operation_status": "succeeded",
+        "effect_outcome": "succeeded",
+        "parameters": {"action": "add"},
+    }
+    blocked = {
+        "tool": "remember",
+        "call_id": "call-blocked",
+        "operation_id": "operation-blocked",
+        "ok": False,
+        "handler_executed": False,
+        "failure_stage": "authorization",
+        "error_code": "ACTION_BLOCKED",
+        "effect_outcome": "not_started",
+        "parameters": {"action": "add"},
+    }
+
+    verification = build_operation_verification(_agent(), [succeeded, blocked])
+
+    assert verification["status"] == "partial"
+    assert verification["counts"]["succeeded"] == 1
+    assert verification["counts"]["not_started"] == 1
+    assert incomplete_final_mutation_facts(_agent(), [succeeded, blocked]) == {}
+    assert incomplete_final_mutation_facts(_agent(), [blocked])[
+        "latest_mutating_operation"
+    ]["status"] == "not_started"
+
+
+def test_unknown_tail_still_overrides_prior_succeeded_effect() -> None:
+    succeeded = {
+        "tool": "remember",
+        "call_id": "call-succeeded",
+        "operation_id": "operation-succeeded",
+        "ok": True,
+        "handler_executed": True,
+        "tool_operation_status": "succeeded",
+        "effect_outcome": "succeeded",
+        "parameters": {"action": "add"},
+    }
+    unknown = {
+        "tool": "remember",
+        "call_id": "call-unknown",
+        "operation_id": "operation-unknown",
+        "ok": False,
+        "handler_executed": True,
+        "tool_operation_status": "unknown",
+        "effect_outcome": "unknown",
+        "parameters": {"action": "add"},
+    }
+
+    facts = incomplete_final_mutation_facts(_agent(), [succeeded, unknown])
+
+    assert facts["latest_mutating_operation"]["status"] == "unknown"
+
+
+def test_failed_call_then_final_workspace_write_requests_one_soft_followup() -> None:
+    records = [
+        {
+            "tool": "read_file",
+            "call_id": "call-failed-check",
+            "ok": False,
+            "handler_executed": True,
+            "error_code": "CHECK_FAILED",
+            "parameters": {},
+        },
+        {
+            "tool": "write_file",
+            "call_id": "call-fix",
+            "operation_id": "operation-fix",
+            "ok": True,
+            "handler_executed": True,
+            "tool_operation_status": "succeeded",
+            "parameters": {},
+        },
+    ]
+
+    facts = post_failure_workspace_mutation_followup_facts(_agent(), records)
+
+    assert facts == {
+        "schema": "post_failure_workspace_mutation_followup.v1",
+        "latest_workspace_mutation": {"tool": "write_file", "status": "succeeded"},
+        "prior_failed_call_count": 1,
+        "latest_prior_failure": {
+            "tool": "read_file",
+            "status": "failed",
+            "error_code": "CHECK_FAILED",
+        },
+        "tool_record_after_latest_mutation": False,
+    }
+
+
+def test_simple_workspace_write_and_post_write_check_do_not_request_followup() -> None:
+    simple_write = {
+        "tool": "write_file",
+        "call_id": "call-write",
+        "operation_id": "operation-write",
+        "ok": True,
+        "handler_executed": True,
+        "tool_operation_status": "succeeded",
+        "parameters": {},
+    }
+    failed = {
+        "tool": "read_file",
+        "call_id": "call-failed",
+        "ok": False,
+        "handler_executed": True,
+        "parameters": {},
+    }
+    check = {
+        "tool": "read_file",
+        "call_id": "call-check",
+        "ok": True,
+        "handler_executed": True,
+        "parameters": {},
+    }
+
+    assert post_failure_workspace_mutation_followup_facts(_agent(), [simple_write]) == {}
+    assert (
+        post_failure_workspace_mutation_followup_facts(
+            _agent(),
+            [failed, simple_write, check],
+        )
+        == {}
+    )
+
+
+def test_stale_verification_survives_reads_until_a_later_real_check() -> None:
+    root = "/tmp/project"
+    failed_check = {
+        "tool": "run_command",
+        "call_id": "call-test-failed",
+        "ok": False,
+        "handler_executed": True,
+        "error_code": "COMMAND_FAILED",
+        "parameters": {"command": "go test -v ."},
+        "tool_result_envelope": {
+            "verification_evidence": {
+                "id": 41,
+                "root": root,
+                "status": "failed",
+            }
+        },
+    }
+    fixed = {
+        "tool": "write_file",
+        "call_id": "call-fix",
+        "operation_id": "operation-fix",
+        "ok": True,
+        "handler_executed": True,
+        "tool_operation_status": "succeeded",
+        "parameters": {"path": f"{root}/example.go"},
+        "tool_result_envelope": {
+            "verification_state": [
+                {
+                    "root": root,
+                    "status": "stale",
+                    "last_verification_id": 41,
+                    "last_verification_status": "failed",
+                    "changed_paths": [f"{root}/example.go"],
+                }
+            ]
+        },
+    }
+    read_after_fix = {
+        "tool": "search_text",
+        "call_id": "call-read",
+        "ok": True,
+        "handler_executed": True,
+        "parameters": {"query": "func"},
+    }
+
+    facts = post_failure_workspace_mutation_followup_facts(
+        _agent(),
+        [failed_check, fixed, read_after_fix],
+    )
+
+    assert facts["schema"] == "post_failure_workspace_mutation_followup.v2"
+    assert facts["tool_record_count_after_latest_mutation"] == 1
+    assert facts["stale_workspace_verification"] == [
+        {
+            "root": root,
+            "status": "stale",
+            "last_verification_id": 41,
+            "last_verification_status": "failed",
+            "changed_path_count": 1,
+        }
+    ]
+    assert post_failure_workspace_mutation_followup_signature(facts).startswith(
+        "verification-cycle:"
+    )
+
+    passed_check = {
+        "tool": "run_command",
+        "call_id": "call-test-passed",
+        "ok": True,
+        "handler_executed": True,
+        "parameters": {"command": "go test -v ."},
+        "tool_result_envelope": {
+            "verification_evidence": {
+                "id": 42,
+                "root": root,
+                "status": "passed",
+            }
+        },
+    }
+    assert (
+        post_failure_workspace_mutation_followup_facts(
+            _agent(),
+            [failed_check, fixed, read_after_fix, passed_check],
+        )
+        == {}
+    )
+
+
 class _AlwaysFailMutationTool(BaseTool):
     model_spec = make_test_model_spec(
         "always_fail_mutation",
@@ -406,9 +643,32 @@ class _AlwaysFailMutationTool(BaseTool):
             self.model_spec.name,
             False,
             '{"ok":false}',
-            error_code="TOOL_INVALID_ARGUMENTS",
-            effect_outcome="not_started",
+            error_code="COMMAND_FAILED",
+            effect_outcome="failed",
         )
+
+
+# LLM: This fake mutating tool proves that a completion-conflict continuation
+# still exposes the original tool surface and can establish a new succeeded
+# terminal effect in the same active turn.
+# 函数用途: 测试模型收到收口冲突后能继续调用工具，并用新的成功终态完成返工。
+class _RepairMutationTool(BaseTool):
+    model_spec = make_test_model_spec(
+        "repair_mutation",
+        description="Repair one failed mutation for completion-conflict testing.",
+    )
+    runtime_policy = make_test_runtime_policy("mutating")
+
+    def execute(self, params):
+        assert params == {}
+        return ToolHandlerOutcome(self.model_spec.name, True, '{"ok":true}')
+
+
+# LLM: Provider-facing assertions must inspect both the prompt and native
+# message projection because runtime guidance follows the active protocol.
+# 函数用途: 汇总 fake backend 本轮真正可见的提示，兼容文本和原生工具协议测试。
+def _model_visible_text(prompt: str, messages: object) -> str:
+    return prompt + "\n" + json.dumps(messages or [], ensure_ascii=False, sort_keys=True)
 
 
 class _FailedMutationFalseClaimBackend:
@@ -416,8 +676,7 @@ class _FailedMutationFalseClaimBackend:
     context_window_tokens = 200_000
 
     def probe_tool_capability(self):
-        from agent_py_agent.agent.backends.base import ProviderToolCapability
-        from agent_py_agent.agent.backends.base import _utc_now_iso
+        from agent_py_agent.agent.backends.base import ProviderToolCapability, _utc_now_iso
 
         return ProviderToolCapability(
             provider=str(self.name or "test"), endpoint="local://test-backend",
@@ -428,9 +687,10 @@ class _FailedMutationFalseClaimBackend:
 
     def __init__(self) -> None:
         self.calls = 0
+        self.repair_turn_tool_counts: list[int] = []
 
     def generate(self, prompt: str, on_chunk=None, tools=None, messages=None, **kwargs) -> ModelResponse:
-        del on_chunk, tools, messages
+        del on_chunk
         self.calls += 1
         if self.calls == 1:
             return ModelResponse(
@@ -442,14 +702,20 @@ class _FailedMutationFalseClaimBackend:
                     "input": {},
                 }],
             )
-        if self.calls == 2:
+        if self.calls in {2, 3, 4}:
+            if self.calls >= 3:
+                visible = _model_visible_text(prompt, messages)
+                assert "completion_conflict.v1" in visible
+                assert f'\\"repair_attempt\\":{self.calls - 2}' in visible
+                assert "已经成功完成修改" in visible
+                self.repair_turn_tool_counts.append(len(list(tools or [])))
             return ModelResponse(text="已经成功完成修改。", backend=self.name)
         assert "[natural-user-reply]" in prompt
         assert "operation_incomplete" in prompt
         return ModelResponse(text="这次修改实际没有成功，当前请求尚未完成。", backend=self.name)
 
 
-def test_failed_final_mutation_discards_false_success_draft(tmp_path) -> None:
+def test_failed_final_mutation_gets_bounded_repair_before_fallback(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(
             model_backend="echo",
@@ -470,7 +736,8 @@ def test_failed_final_mutation_discards_false_success_draft(tmp_path) -> None:
         task_id="task-failed-mutation",
     )
 
-    assert backend.calls == 3
+    assert backend.calls == 5
+    assert all(count > 0 for count in backend.repair_turn_tool_counts)
     assert "已经成功完成修改" not in result.response
     assert "实际没有成功" in result.response
     assert result.runtime_status == "unfinished"
@@ -478,13 +745,84 @@ def test_failed_final_mutation_discards_false_success_draft(tmp_path) -> None:
     assert result.operation_verification["status"] == "failed"
 
 
+class _FailedMutationRepairBackend(_FailedMutationFalseClaimBackend):
+    name = "failed-mutation-repair"
+
+    def generate(self, prompt: str, on_chunk=None, tools=None, messages=None, **kwargs) -> ModelResponse:
+        del on_chunk
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text="",
+                backend=self.name,
+                tool_use_blocks=[{
+                    "id": "call-mutation-failed",
+                    "name": "always_fail_mutation",
+                    "input": {},
+                }],
+            )
+        if self.calls == 2:
+            return ModelResponse(text="已经成功完成修改。", backend=self.name)
+        if self.calls == 3:
+            visible = _model_visible_text(prompt, messages)
+            assert "completion_conflict.v1" in visible
+            assert '\\"repair_attempt\\":1' in visible
+            assert "已经成功完成修改" in visible
+            available = {
+                str(item.get("name") or item.get("function", {}).get("name") or "")
+                for item in list(tools or [])
+                if isinstance(item, dict)
+            }
+            assert "repair_mutation" in available
+            return ModelResponse(
+                text="",
+                backend=self.name,
+                tool_use_blocks=[{
+                    "id": "call-mutation-repair",
+                    "name": "repair_mutation",
+                    "input": {},
+                }],
+            )
+        assert self.calls == 4
+        return ModelResponse(text="修复和复验已经完成。", backend=self.name)
+
+
+def test_failed_final_mutation_can_repair_with_tools_in_same_active_turn(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            prompt_files=[],
+            my_agent_home=str(tmp_path / "home"),
+        ),
+        tmp_path / "workspace",
+    )
+    agent.tools.register(_AlwaysFailMutationTool())
+    agent.tools.register(_RepairMutationTool())
+    backend = _FailedMutationRepairBackend()
+    agent.backend = backend
+
+    result = agent.run(
+        "执行一次测试修改，失败后自行修复。",
+        save=False,
+        request_id="request-failed-mutation-repair",
+        run_id="run-failed-mutation-repair",
+        task_id="task-failed-mutation-repair",
+    )
+
+    assert backend.calls == 4
+    assert result.response == "修复和复验已经完成。"
+    assert result.runtime_status == "ok"
+    assert result.operation_verification["status"] == "partial"
+    assert result.operation_verification["counts"]["succeeded"] == 1
+    assert result.operation_verification["counts"]["failed"] == 1
+
+
 class _RememberListThenFalseClaimBackend:
     name = "remember-list-then-false-claim"
     context_window_tokens = 200_000
 
     def probe_tool_capability(self):
-        from agent_py_agent.agent.backends.base import ProviderToolCapability
-        from agent_py_agent.agent.backends.base import _utc_now_iso
+        from agent_py_agent.agent.backends.base import ProviderToolCapability, _utc_now_iso
 
         return ProviderToolCapability(
             provider=str(self.name or "test"), endpoint="local://test-backend",

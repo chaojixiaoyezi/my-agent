@@ -137,15 +137,16 @@ from .memory_store.promotion import (
     MemoryPromotionService,
 )
 from .prompting_parts import PromptBuilder
+from .runtime_db.operation_store_selector import select_operation_store
 from .scheduler import SchedulerDueIndex, SchedulerRepository, SchedulerService, ScheduleTool
 from .settings import AgentConfig
 from .settings.runtime_guard_config import runtime_guard_policy
-from .runtime_db.operation_store_selector import select_operation_store
 from .subagents.manager import SubAgentManager
 from .tooling.registry import ToolRegistry, ToolRegistryParams
 from .tooling.vision_tools import vision_config_from_agent_config
 from .user_space.home_indexes import register_owner_ref
-from .user_space.home_layout import ensure_my_agent_home, home_paths
+from .user_space.home_layout import ensure_my_agent_home
+from .user_space.home_root import configured_home_root
 from .user_space.owner_policy import resolve_effective_owner_policy
 from .user_space.owner_quota import OwnerQuotaEnforcer
 from .user_space.owner_resolver import (
@@ -672,39 +673,17 @@ def _build_tool_embedder(config: AgentConfig):
 
 
 def _resolve_home_paths(config: AgentConfig):
-    root = _configured_home_root(config)
+    root = configured_home_root(config)
     paths = ensure_my_agent_home(root)
     owner = ensure_owner_home(paths.root, owner_identity_from_config(config))
     _register_owner_ref_if_possible(paths, owner)
     return home_paths_with_owner(paths, owner)
 
 
+# LLM: Compatibility shim only; home_root.configured_home_root remains the sole implementation.
+# 函数用途: 保留旧测试和内部调用名，并把解析统一转交轻量 home 根模块。
 def _configured_home_root(config: AgentConfig) -> str | None:
-    # LLM: home 根解析的单一权威。优先级:
-    #   1) 显式配置的非默认 home(用户固定 profile) > 环境变量;
-    #   2) 配置为空或恰等于内置默认(~/.my-agent) = "未固定", 环境变量注入
-    #      优先(12-factor, 参照 长期助手 env_loader);
-    #   3) 都空 → None(调用方走 ~/.my-agent 兜底)。
-    # "恰等于默认"的判定解决三向冲突: 2026-08-15 真机(YAML 默认值挡住 env)、
-    # 测试隔离(conftest 注入 env + 显式 tmp home, 显式值必须赢)、用户显式
-    # 固定 profile(固定值必须赢)——配置 yaml 默认已留空, 但仍兼容旧部署里
-    # 写着 ~/.my-agent 的存量配置。
-    # 函数用途: 解析 my-agent home 根目录。
-    raw = str(getattr(config, "my_agent_home", "") or "").strip()
-    env_home = str(os.environ.get("MY_AGENT_HOME", "") or "").strip()
-    if raw:
-        try:
-            # 内置默认是字面 ~/.my-agent(不经 env——resolve_my_agent_home(None)
-            # 会把 env 卷进来当默认, 判断就错了)。
-            default_home = Path("~/.my-agent").expanduser().resolve()
-            configured = Path(raw).expanduser().resolve()
-        except OSError:
-            configured = None
-        if configured is None or configured != default_home:
-            return raw
-        # 配置值就是内置默认 → 视为未固定, env 优先
-        return env_home or raw
-    return env_home or None
+    return configured_home_root(config)
 
 
 def _register_owner_ref_if_possible(paths, owner) -> None:

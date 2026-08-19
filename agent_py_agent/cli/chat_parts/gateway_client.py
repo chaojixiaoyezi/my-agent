@@ -1,5 +1,8 @@
 
 
+# LLM: 本模块是 chat 客户端与 Gateway 文件协议的边界；typed row 可旁路 legacy 文本投影，但不能改变 Gateway 业务事实或授权。
+# 模块用途: 提交聊天请求、增量读取 Gateway chunk/response 文件，并把结构化事件或兼容文本交给调用方。
+
 from __future__ import annotations
 
 import json
@@ -8,24 +11,19 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ...agent.gateway_parts import (
-    GatewayAskParams,
-    gateway_chunk_path,
-    gateway_chunk_path_candidates,
-    gateway_paths,
-    gateway_running,
-    render_gateway_status,
-    submit_gateway_ask,
-)
+from ...agent.gateway_parts.io import read_complete_utf8_rows
+from ...agent.gateway_parts.paths import gateway_chunk_path, gateway_chunk_path_candidates
+from ...agent.gateway_parts.request_client import GatewayAskParams, submit_gateway_ask
 from ...agent.gateway_parts.response_renderer import (
     GatewayResponsePollState,
     current_context_token_estimate,
     project_gateway_stream_chunk,
-    read_gateway_response_file,
-    read_gateway_response_file_when_ready,
+    read_gateway_terminal_response_file_when_ready,
 )
 
 
+# LLM: ChatRequestContent 声明当前 CLI 表面真实可消费的交互能力；只有 TUI 主链开启审批和富 transcript，plain/其它调用保持最小输出。
+# 类用途: 汇总一次聊天请求正文、上下文、会话和交互能力。
 @dataclass
 class ChatRequestContent:
     prompt: str
@@ -36,12 +34,17 @@ class ChatRequestContent:
     resume_context: object
     chat_session_id: str = ""
     system_task: dict[str, object] | None = None
+    interactive_approvals: bool = False
+    rich_transcript: bool = False
 
 
+# LLM: GatewayChunkPollRequest carries the canonical terminal path as the only completion fact;
+# on_event consumes typed chunks while on_chunk remains the plain-UI compatibility projection.
+# 类用途: 描述一次 Gateway 流式轮询所需的终态路径、游标、回调和活跃租约。
 @dataclass(frozen=True)
 class GatewayChunkPollRequest:
     chunk_path: Path
-    response_path: Path
+    terminal_path: Path
     deadline: float
     on_chunk: object
     chunks_printed_ref: list[int]
@@ -49,6 +52,7 @@ class GatewayChunkPollRequest:
     chunk_offset_ref: list[int] | None = None
     activity_paths: tuple[Path, ...] = ()
     inactivity_timeout_seconds: float = 0.0
+    on_event: object | None = None
 
 
 @dataclass(frozen=True)
@@ -60,14 +64,19 @@ class GatewayTimingContext:
 
 
 @dataclass(frozen=True)
+# LLM: ChunkFilePollRequest 只携带单次尾读状态；on_event 消费成功时禁止再投影为 legacy text。
+# 类用途: 描述一次 chunk 文件增量读取及累计计数。
 class ChunkFilePollRequest:
     chunk_path: Path
     on_chunk: object
     chunks_printed: int
     visible_chunks: int
     chunk_offset: int
+    on_event: object | None = None
 
 
+# LLM: submit 只把显式 ChatRequestContent 映射到 GatewayAskParams；不得按 TTY 或回调类型隐式开启审批等待。
+# 函数用途: 提交聊天请求并返回 request、chunk 和 response 路径。
 def submit_chat_request(
     paths,
     content: ChatRequestContent,
@@ -85,12 +94,17 @@ def submit_chat_request(
             chat_session_id=content.chat_session_id,
             agent=agent,
             system_task=content.system_task,
+            interactive_approvals=content.interactive_approvals,
+            rich_transcript=content.rich_transcript,
         ),
     )
     chunk_path = gateway_chunk_path(paths, request_id)
     return request_id, chunk_path, response_path
 
 
+# LLM: Polling ends only after a validated canonical terminal envelope appears. Chunk and response
+# projections may update the UI but can never complete a request.
+# 函数用途: 持续读取新增 chunk，等待响应文件就绪，并写回调用方计数和游标。
 def poll_gateway_chunks(request: GatewayChunkPollRequest) -> dict:
     chunks_printed = request.chunks_printed_ref[0]
     visible_chunks = request.visible_chunks_ref[0] if request.visible_chunks_ref else 0
@@ -110,16 +124,31 @@ def poll_gateway_chunks(request: GatewayChunkPollRequest) -> dict:
         if time.time() > deadline:
             break
         chunks_printed, visible_chunks, chunk_offset = _poll_chunk_file(
-            ChunkFilePollRequest(request.chunk_path, request.on_chunk, chunks_printed, visible_chunks, chunk_offset)
+            ChunkFilePollRequest(
+                request.chunk_path,
+                request.on_chunk,
+                chunks_printed,
+                visible_chunks,
+                chunk_offset,
+                request.on_event,
+            )
         )
-        response = read_gateway_response_file_when_ready(
-            request.response_path,
+        response = read_gateway_terminal_response_file_when_ready(
+            request.terminal_path,
             state=response_poll_state,
-            context="gateway.chat.response.read",
+            request_id=request.terminal_path.stem,
+            context="gateway.chat.terminal.read",
         )
         if response:
             chunks_printed, visible_chunks, chunk_offset = _poll_chunk_file(
-                ChunkFilePollRequest(request.chunk_path, request.on_chunk, chunks_printed, visible_chunks, chunk_offset)
+                ChunkFilePollRequest(
+                    request.chunk_path,
+                    request.on_chunk,
+                    chunks_printed,
+                    visible_chunks,
+                    chunk_offset,
+                    request.on_event,
+                )
             )
             break
         time.sleep(0.1)
@@ -177,6 +206,8 @@ def gateway_request_activity_paths(paths: object, request_id: str, chunk_path: P
 _MAX_CHUNK_READ_BYTES = 8 * 1024 * 1024
 
 
+# LLM: 单次尾读只按 byte offset 推进；每个完整 JSONL row 先交 typed consumer，再按需走 legacy projector。
+# 函数用途: 读取 chunk 文件新增部分并返回累计行数、终态可见数和新游标。
 def _poll_chunk_file(request: ChunkFilePollRequest) -> tuple[int, int, int]:
     chunks_printed = request.chunks_printed
     visible_chunks = request.visible_chunks
@@ -185,17 +216,19 @@ def _poll_chunk_file(request: ChunkFilePollRequest) -> tuple[int, int, int]:
     if readable_chunk_path is None:
         return chunks_printed, visible_chunks, chunk_offset
     try:
-        with open(readable_chunk_path, encoding="utf-8") as f:
-            f.seek(max(0, chunk_offset))
-            # 单次读取上限,防止超大 chunk 文件整体读入触发 MemoryError;
-            # 剩余部分下一拍轮询继续(chunk_offset 已推进)。
-            data = f.read(_MAX_CHUNK_READ_BYTES)
-            chunk_offset = f.tell()
+        rows, next_offset, decode_error = read_complete_utf8_rows(
+            readable_chunk_path,
+            chunk_offset,
+            max_bytes=_MAX_CHUNK_READ_BYTES,
+        )
     except OSError as exc:
         print(f"gateway chat chunk load_error path={readable_chunk_path} message={exc}", file=sys.stderr)
-        return chunks_printed, visible_chunks, 0
-    for cline in data.splitlines():
-        consumed, visible = _emit_chunk_line(cline, request.on_chunk)
+        return chunks_printed, visible_chunks, chunk_offset
+    if decode_error:
+        print("gateway chat chunk load_error category=utf8_decode", file=sys.stderr)
+    chunk_offset = next_offset
+    for cline in rows:
+        consumed, visible = _emit_chunk_line(cline, request.on_chunk, request.on_event)
         chunks_printed += consumed
         visible_chunks += visible
     return chunks_printed, visible_chunks, chunk_offset
@@ -208,7 +241,13 @@ def _readable_chunk_path(chunk_path: Path) -> Path | None:
     return None
 
 
-def _emit_chunk_line(cline: str, on_chunk: callable) -> tuple[int, int]:
+# LLM: typed consumer 返回 True 表示已接管该 object；回调异常仅记录诊断并继续 legacy 投影，不能打断业务请求。
+# 函数用途: 解码一行 Gateway JSON，优先分发结构化事件，否则投影为兼容文本。
+def _emit_chunk_line(
+    cline: str,
+    on_chunk: callable,
+    on_event: object | None = None,
+) -> tuple[int, int]:
     if not cline.strip():
         return 1, 0
     try:
@@ -219,6 +258,17 @@ def _emit_chunk_line(cline: str, on_chunk: callable) -> tuple[int, int]:
     if not isinstance(cobj, dict):
         print("gateway chat chunk load_error category=non_object_root", file=sys.stderr)
         return 1, 0
+    if callable(on_event):
+        try:
+            if on_event(cobj) is True:
+                terminal = str(cobj.get("kind") or "") == "assistant_final"
+                return 1, 1 if terminal else 0
+        except Exception as exc:  # noqa: BLE001 UI consumer 失败不能中断 Gateway 主链
+            print(
+                "gateway chat chunk event_error "
+                f"category=consumer_exception message={exc}",
+                file=sys.stderr,
+            )
     chunk_text, terminal_response_streamed = project_gateway_stream_chunk(cobj)
     if chunk_text:
         visible = on_chunk(chunk_text)
@@ -227,6 +277,8 @@ def _emit_chunk_line(cline: str, on_chunk: callable) -> tuple[int, int]:
 
 
 def check_gateway_alive(paths) -> bool:
+    from ...agent.gateway_parts.status_rendering import gateway_running
+
     _, alive = gateway_running(paths)
     return alive
 

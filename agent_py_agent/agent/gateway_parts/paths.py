@@ -32,6 +32,13 @@ class GatewayPaths:
     responses: Path
     history: Path
 
+    # LLM: Terminal request authority is derived from the Gateway root so existing constructors
+    # remain compatible; done/failed directories are only outcome projections.
+    # 函数用途: 返回按请求 ID 唯一保存完整最终答复的终态目录。
+    @property
+    def terminal(self) -> Path:
+        return self.root / "requests" / "terminal"
+
 
 @dataclass
 class AdapterPaths:
@@ -45,8 +52,14 @@ class AdapterPaths:
 
 
 def gateway_paths(agent: SimpleAgent) -> GatewayPaths:
+    return gateway_paths_from_root(agent.root / agent.config.gateway_workspace)
 
-    root = agent.root / agent.config.gateway_workspace
+
+# LLM: Owner-scoped agents may execute a request claimed from the base Gateway. Callers holding an
+# authoritative queue path must rebuild paths from that queue root instead of the agent home.
+# 函数用途: 根据已经确认的 Gateway 根目录构造完整路径合同。
+def gateway_paths_from_root(root: Path) -> GatewayPaths:
+    root = Path(root)
     return GatewayPaths(
         root=root,
         pid=root / "gateway.pid",

@@ -5,15 +5,34 @@
 ```text
 .dockerignore                           # Docker 生产源码允许列表，排除本地运行状态和测试产物
 install.sh                              # 默认一键容器安装；生成透明 my-agent CLI，--host 为开发模式
+TUI_EXTREME_TEST_MATRIX.md              # 五路 TUI 持续轮转、边界/组合/fuzz/soak 用例与客观证据权威账本
 agent_py_agent/
 |-- __main__.py                         # python -m agent_py_agent CLI 入口
 |-- config/                             # 默认 YAML 配置
 |-- cli/                                # 命令行、chat/TUI、gateway 管理、诊断维护命令
 |   |-- chat.py                         # 本地 chat 入口
+|   |-- chat_client_context.py          # 轻量 Gateway TUI 客户端、活动输入三态与 input-status 查询
 |   |-- memory_admin_parser.py          # Memory v2 唯一管理员命令树与中文参数帮助
 |   |-- memory_admin_commands.py        # Candidate/Curator/Retention/Doctor/Migration 共用正式 Service 的 CLI 适配
 |   |-- chat_parts/                     # TUI、gateway client、stream/render worker
-|   |   |-- tui_lexer.py                # 会话运行时 风格对话流行前缀 Lexer(> 用户行/⏺ 助手 marker/⟿ 统计行)
+|   |   |-- chat_prompt_queue.py        # 可按 request identity 原子回取且保持 FIFO/task_done 账的聊天任务队列
+|   |   |-- tui.py                      # chat TUI 生命周期、唯一 runtime/worker/preflight 接线与返回码
+|   |   |-- tui_block_renderer.py       # typed snapshot 到欢迎/消息/思考/工具/权限/队列/footer formatted lines
+|   |   |-- tui_input.py                # 真实 slash/path 补全、菜单、history suggest 与排队占位投影
+|   |   |-- tui_input_delivery.py       # 活动回合输入的持久 outbox、同 ID 对账与排队接管
+|   |   |-- tui_control_delivery.py     # slash 控制命令的持久 outbox、稳定操作 ID 与只读状态对账
+|   |   |-- tui_interaction.py          # stash、Ctrl-R、paste 与 `?` help 的线程安全输入状态机
+|   |   |-- tui_markdown.py             # CommonMark/table token 到 Unicode 宽度换行、语法色和 prompt_toolkit fragments
+|   |   |-- tui_paste.py                # 大文本粘贴显示引用与提交时精确展开合同
+|   |   |-- tui_preflight.py            # alternate screen 内真实 Gateway readiness 等待、typed 连接事件与 worker 启动门
+|   |   |-- tui_runtime.py              # session/queue/turn/model/tool/Gateway typed rows 到稳定 TuiEvent 的唯一 adapter
+|   |   |-- tui_terminal.py             # OSC 终端标题、活动帧与退出清理
+|   |   |-- tui_transcript.py           # 详细 transcript 冻结视图、全文搜索与命中导航状态
+|   |   |-- tui_view.py                 # prompt_toolkit typed transcript control、frame/block cache、scroll anchor 与 overlay/footer
+|   |   |-- tui_events.py               # TUI 唯一 versioned event 信封、单调 sequencer 与幂等有界 journal
+|   |   |-- tui_view_model.py           # typed event reducer：稳定/活动 block、权限 overlay、输入队列与状态快照
+|   |   |-- tui_ui_setup.py             # alternate-screen prompt_toolkit 布局、控件、style 与 focus 接线
+|   |   |-- tui_keybindings.py          # 输入、帮助、权限、队列、滚动、transcript、中断与退出 typed key intents
 |   |   `-- control_runtime.py          # CLI 对共享会话控制协议及窗口级精确中断的运行适配
 |   |-- home_runtime_commands.py        # owner home 状态、daily/task workspace/index 维护命令
 |   |-- gateway_process.py              # gateway 进程入口
@@ -90,7 +109,11 @@ agent_py_agent/
 |   |-- runtime_db/                     # SQLite 运行事实源：wake_queue 闹钟字条账本(schema.py 建表+repository.py 读写)
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
 |   |   |-- control_service.py         # owner/thread 持久根任务的即时状态、纠偏和中断
+|   |   |-- control_operation_service.py # slash 控制副作用前置回执、幂等重放与 unknown 对账
+|   |   |-- input_delivery_service.py  # 普通消息 active/queued 去向的唯一持久回执与后台对账
+|   |   |-- request_client.py          # 薄客户端 ask 载荷和不可变执行选项合同
 |   |   |-- channel_health.py          # adapter PID/heartbeat/逐通道状态的 fail-closed 健康投影
+|   |   |-- permission_bridge.py       # TUI/Gateway 工具审批 request binding 的原子决定文件桥
 |   |   `-- goal_control_service.py    # 同 thread 持续目标的创建/修改/暂停/恢复/清除
 |   |-- conversation/                  # 通道会话账本、权威 transcript、结构化任务关联/续接
 |   |   |-- closeout.py                # 收口状态机 decide_closeout(四改之 2): 终态 done/cancelled/wait_human/wait_handoff/resume_round
@@ -109,7 +132,8 @@ agent_py_agent/
 |   |   |-- registry.py                # adapter/配置/健康/绑定/capabilities/target validator 唯一注册表
 |   |   `-- service.py                 # 普通回复、主动消息、原生附件的统一发送出口
 |   |-- adapter/
-|   |   `-- delivery.py                # 通道长任务结果的持久化异步回送与重启去重
+|   |   |-- delivery.py                # 通道 input_receipt/request_result 三态回送、CAS 与重启去重
+|   |   `-- ingress.py                 # POST 前 durable ingress、冲突隔离与单线程全链恢复
 |   |-- settings/                      # AgentConfig、加载、来源账本、runtime scope config
 |   |-- common/                        # 跨域小权威：safe_id、path_normalize、json_io、日志脱敏、结构化输出批处理
 |   |   `-- audit_activation.py        # 显式 `/audit` 前缀 -> guarantee/window 结构化激活
@@ -118,6 +142,7 @@ agent_py_agent/
 |   |-- scale_runtime.py               # scale role/release channel/S3 配置 fail-closed
 |   |-- continuous_monitor_entry.py    # 真实 wall-clock 异构来源 proof 长守入口
 |   |-- contracts/                     # 稳定协议、错误分类（taxonomy+provider 九类分类器）、验收合同
+|   |   |-- tool_approval.py           # 工具审批 request/decision/binding 与跨层调用身份协议
 |   |   `-- tool_input_schema.py       # 工具参数有限 JSON Schema 纠正/完整校验与脱敏问题路径
 |   |-- tooling/                       # 唯一 ToolRuntime/ActionPolicy/ToolExecutor、写入边界与结果投影
 |   |   |-- models.py                 # ToolModelSpec、ToolRuntimePolicy、ToolRuntime/Snapshot 与 handler outcome
@@ -127,6 +152,7 @@ agent_py_agent/
 |   |   |-- executor.py               # approval、sandbox、handler、账本、核对、持久化与投影状态机
 |   |   |-- runtime_boundary.py       # task 相对路径归一与精确读边界检查
 |   |   |-- capabilities_tool.py      # 从真实工具目录与唯一 channel registry 投影模型能力
+|   |   |-- _filesystem_display.py   # 文件工具共用的有界 diff/write 富终端展示事实构造器
 |   |   |-- _persona_write_guard.py   # SOUL/USER/AGENTS 统一强制走 update_persona
 |   |   |-- process_registry.py       # 前后台命令完整后代树终止的唯一进程入口
 |   |   |-- shell.py                  # run_command、超时/中断与有界 pipe drain
@@ -143,6 +169,24 @@ agent_py_agent/
 |   `-- backends/                      # 模型后端适配、run 固定协议/tool_choice、原生工具历史与结构化生成
 |       `-- tool_protocol_adapter.py   # native 事件或显式完整 text 帧到 canonical ToolCall 的唯一适配口
 |-- tests/                             # 单元、集成、真实链路回归
+|   |-- fixtures/tui/                   # 固定尺寸/时间线的非敏感 TUI PTY 动作 fixture
+|   |-- test_adapter_ingress.py         # adapter POST 前落盘、幂等/隔离、响应丢失与崩溃恢复回归
+|   |-- test_chat_prompt_queue.py       # canonical chat Queue 精确回取、FIFO 与 unfinished-task 对账
+|   |-- test_tui_ansi_snapshot.py       # ANSI offset 重放、样式/背景、Unicode、resize 和坏账 fail-closed 回归
+|   |-- test_tui_events.py              # TUI event 信封、sequencer、cursor、重复/冲突/乱序与有界重放
+|   |-- test_tui_markdown.py            # CommonMark 标题/列表/引用/代码/表格、样式角色与 Unicode 宽度换行
+|   |-- test_tui_runtime.py             # 本地/Gateway 流式、工具、queue、终态和全局事件顺序 adapter 回归
+|   |-- test_tui_view.py                # UIContent formatted lines、frame/block cache、follow anchor 和 resize 重排
+|   |-- test_tui_input.py               # slash/path 补全、菜单选择、queue 回取与 bracketed paste 输入回归
+|   |-- test_tui_interaction.py         # stash、Ctrl-R、help 与 paste refs 状态机回归
+|   |-- test_tui_paste.py               # 大小 paste 的折叠/展开和占位符安全回归
+|   |-- test_tui_preflight.py           # Gateway readiness 瞬态成功、typed 失败与 worker 只启动一次回归
+|   |-- test_tui_terminal.py            # OSC 标题、活动动画、去重与清理回归
+|   |-- test_tui_transcript.py          # 详细 transcript、全文搜索、命中导航和 resize 回归
+|   |-- test_tui_renderer.py            # 欢迎/消息/spinner/tool/permission/queue/help 的固定时钟 golden
+|   |-- test_tui_pty.py                 # PTY 动作时间线、ANSI 录制、resize、超时回收和 manifest 脱敏回归
+|   |-- test_tui_reference_fixture_server.py # loopback Anthropic 参考场景协议与审计脱敏回归
+|   |-- test_tui_view_model.py          # active→stable、工具权限、队列、状态和未知事件 fail-closed reducer 回归
 |   |-- test_current_turn_execution.py # 当前轮成功/失败副作用事实投影回归
 |   |-- test_cli_run_conversation.py   # CLI transcript、Memory 消息证据、任务链接与 workspace 收口回归
 |   |-- test_closeout_machine.py      # 收口状态机 truth table 穷举测试(全组合+场景)
@@ -164,6 +208,9 @@ agent_py_agent/
 |   `-- test_check_clean_package.py    # untracked、运行目录和 tar/wheel 制品门
 scripts/
 |-- live_lab/                          # 真实链路 harness；真实 preflight、main-artifact、tool-recovery
+|-- tui_ansi_snapshot.py               # pyte 开发工具：从 raw ANSI/offset 账还原文本、样式、光标和标题快照
+|-- tui_reference_fixture_server.py    # loopback 确定性 Anthropic 服务：驱动 TUI Markdown/思考/权限/错误黑盒场景
+|-- tui_pty_recorder.py                # argv-only PTY 黑盒录制器：按键/粘贴/resize、原始 ANSI、事件索引与脱敏 manifest
 `-- check_clean_package.py             # 工作树与真实发布制品的结构化干净度检查
 deploy/
 |-- Dockerfile                         # 内置系统 bubblewrap+tini，构建期 binary probe
@@ -172,6 +219,9 @@ deploy/
 `-- k8s/                              # stable/canary、Gateway route、migration、monitor 与 DR 清单
 docs/
 |-- PRODUCT_FACTS.md                    # 当前能力状态唯一权威：稳定/部分可用/实验性/仅设计
+|-- design/FEATURE-20260818-终端交互-tui-parity.md # 终端交互 TUI Python 原生复刻的用户行为、事件架构与验收规格
+|-- design/TUI_终端交互_PARITY_MATRIX.md # 启动、消息、输入、权限、生命周期和命令映射逐项证据账
+|-- tasks/completed/TASK-20260818-终端交互-tui-parity.md # 已完成 TUI 复刻实施、测试机边界和验收记录
 |-- design/FEATURE-20260804-tool-runtime-unification.md # 工具唯一主链的用户行为、需求与验收规格
 |-- design/tool-runtime-unification.md  # 工具参考证据、架构、迁移删除表与并行边界
 |-- tasks/completed/TASK-20260804-1913-tool-runtime-unification.md # 工具唯一主链实施与验收记录

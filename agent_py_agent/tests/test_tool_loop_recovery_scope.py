@@ -96,6 +96,10 @@ def test_background_root_scope_projects_trusted_delivery_evidence_refs() -> None
         "audit://watch-1/candidate/1:0",
         "audit://watch-1/candidate/2:0",
     )
+    assert scope.to_dict()["delivery_evidence_refs"] == [
+        "audit://watch-1/candidate/1:0",
+        "audit://watch-1/candidate/2:0",
+    ]
 
 
 def test_subagent_scope_uses_loaded_lineage() -> None:

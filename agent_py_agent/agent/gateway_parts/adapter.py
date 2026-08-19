@@ -184,6 +184,7 @@ def _build_adapter_outbox_response(context: dict) -> dict:
         "error_code": response.get("error_code", ""),
         "response": response.get("response", ""),
         "error": response.get("error", ""),
+        "user_error": response.get("user_error", ""),
         "payload": response,
         "created_at": payload.get("created_at", 0),
         "started_at": context["started_at"],

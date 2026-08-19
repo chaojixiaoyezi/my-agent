@@ -389,12 +389,13 @@ def test_is_supervisor_running_no_pid_file():
 
 @patch.object(sv, "read_pid_file", return_value=12345)
 @patch.object(sv, "is_pid_alive", return_value=True)
-def test_is_supervisor_running_alive(mock_alive, mock_read):
+def test_is_supervisor_running_alive(mock_alive, mock_read, tmp_path):
     """测试 supervisor 进程存活时返回运行中。"""
+    (tmp_path / "supervisor.pid").write_text("12345", encoding="utf-8")
     with patch("agent_py_agent.agent.core.SimpleAgent"), \
          patch("agent_py_agent.agent.settings.load_config"), \
-         patch("agent_py_agent.agent.gateway_parts.gateway_paths") as mock_gp:
-        mock_gp.return_value = MagicMock(root=Path("/tmp"))
+         patch.object(sv, "gateway_paths") as mock_gp:
+        mock_gp.return_value = MagicMock(root=tmp_path)
         result = sv.is_supervisor_running("dummy.yaml")
     assert result is True
 

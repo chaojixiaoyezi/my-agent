@@ -7,22 +7,30 @@ from __future__ import annotations
 
 import json
 import threading
+import time
+import uuid
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from ..runtime_errors import runtime_error_report
+from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .io import (
+    GATEWAY_REQUEST_FINGERPRINT_SCHEMA,
     GatewayJsonReadReport,
-    append_gateway_history,
+    gateway_request_fingerprint,
     gateway_response_path,
+    gateway_turn_transition,
     read_json_file_report,
     write_json_file_atomic,
 )
 from .lease_service import is_heartbeat_alive_for_request
 from .logging import GatewayIndexPayloadOptions, _index_gateway_payload
 from .paths import GatewayPaths, gateway_paths
-from .recovery import _archive_gateway_request, _gateway_request_attempts
+from .recovery import (
+    _gateway_request_attempts,
+    terminalize_gateway_request_file,
+)
 from .status_rendering import (
     GatewayRunningReport,
     gateway_running,
@@ -38,6 +46,54 @@ _CLAIM_LOCK = threading.Lock()
 class GatewayIndexRebuildReport:
     indexed_count: int
     load_errors: list[dict[str, Any]]
+
+
+# LLM: A claimed path is insufficient because request ids are reused after recovery. This value
+# carries the immutable execution fence from the T-locked claim into worker and error closeout.
+# 类用途: 保存一次 Gateway 认领的文件、执行 ID、租约代次和所有者，防止旧 worker 误收口。
+@dataclass(frozen=True)
+class GatewayClaim:
+    path: Path
+    request_id: str
+    execution_attempt_id: str
+    lease_epoch: int
+    lease_owner: str
+
+    @property
+    def stem(self) -> str:
+        return self.path.stem
+
+    @property
+    def name(self) -> str:
+        return self.path.name
+
+
+# LLM: Worker closeout must distinguish a stale execution fence from a committed terminal fact,
+# corruption, and retryable IO. Callers may publish projections only for committed dispositions.
+# 类用途: 表示一次请求归档的结构化结果，避免旧 worker 把失败原因混成一个 False。
+class GatewayArchiveDisposition(str, Enum):
+    COMMITTED = "committed"
+    ALREADY_COMMITTED = "already_committed"
+    STALE_CLAIM = "stale_claim"
+    CONFLICT = "conflict"
+    RETRYABLE_IO = "retryable_io"
+
+
+# LLM: The terminal path is present only when canonical authority is known to exist. Error text is
+# operator evidence and never changes state-machine routing by prose parsing.
+# 类用途: 携带归档状态、唯一终态路径和诊断信息，供 worker 决定是否发布结果投影。
+@dataclass(frozen=True)
+class GatewayArchiveResult:
+    disposition: GatewayArchiveDisposition
+    terminal_path: Path | None = None
+    error: str = ""
+
+    @property
+    def terminal_committed(self) -> bool:
+        return self.disposition in {
+            GatewayArchiveDisposition.COMMITTED,
+            GatewayArchiveDisposition.ALREADY_COMMITTED,
+        }
 
 
 def rebuild_gateway_index(agent: SimpleAgent) -> int:
@@ -207,53 +263,219 @@ def ensure_gateway_folders(paths: GatewayPaths) -> None:
     paths.processing.mkdir(parents=True, exist_ok=True)
     paths.done.mkdir(parents=True, exist_ok=True)
     paths.failed.mkdir(parents=True, exist_ok=True)
+    paths.terminal.mkdir(parents=True, exist_ok=True)
     paths.responses.mkdir(parents=True, exist_ok=True)
 
 
-def claim_request(paths: GatewayPaths, request_path: Path) -> Path | None:
+def claim_request(paths: GatewayPaths, request_path: Path) -> GatewayClaim | None:
     from .logging import _report_gateway_side_effect_error
 
     processing_path = paths.processing / request_path.name
+    claim: GatewayClaim | None = None
     with _CLAIM_LOCK:
-        if not request_path.exists() or processing_path.exists():
-            return None
-        try:
-            request_path.replace(processing_path)
-        except OSError as exc:
-            _report_gateway_side_effect_error("claim_gateway_request", request_path.stem, exc)
-            return None
+        with gateway_turn_transition(paths, request_path.stem):
+            canonical = paths.terminal / request_path.name
+            if not request_path.exists() or processing_path.exists() or canonical.exists():
+                return None
+            try:
+                request_path.replace(processing_path)
+            except OSError as exc:
+                _report_gateway_side_effect_error("claim_gateway_request", request_path.stem, exc)
+                return None
+            report = read_json_file_report(
+                processing_path,
+                context="gateway.claim.request.read",
+            )
+            if report.load_error is not None or not report.payload:
+                _report_gateway_side_effect_error(
+                    "claim_gateway_request",
+                    request_path.stem,
+                    OSError(f"gateway claim payload is unreadable: {request_path.stem}"),
+                )
+                claim = GatewayClaim(processing_path, processing_path.stem, "", 0, "")
+            else:
+                try:
+                    claimed_payload = _gateway_claim_payload(
+                        report.payload,
+                        processing_path,
+                    )
+                    write_json_file_atomic(processing_path, claimed_payload)
+                except OSError as exc:
+                    _report_gateway_side_effect_error(
+                        "claim_gateway_request",
+                        request_path.stem,
+                        exc,
+                    )
+                    try:
+                        if processing_path.exists() and not request_path.exists():
+                            processing_path.replace(request_path)
+                    except OSError as rollback_exc:
+                        _report_gateway_side_effect_error(
+                            "rollback_gateway_request_claim",
+                            request_path.stem,
+                            rollback_exc,
+                        )
+                    return None
+                claim = GatewayClaim(
+                    path=processing_path,
+                    request_id=str(claimed_payload.get("id") or processing_path.stem),
+                    execution_attempt_id=str(
+                        claimed_payload.get("execution_attempt_id") or ""
+                    ).strip(),
+                    lease_epoch=_gateway_claim_epoch(claimed_payload),
+                    lease_owner=str(claimed_payload.get("lease_owner") or "").strip(),
+                )
     from ..observability.concurrency_metrics import gateway_request_claimed
 
     gateway_request_claimed()  # §6-A 认领计数(enqueued 涨而这个不跟=worker 槽饿死排队)
-    return processing_path
+    return claim
 
 
-def archive_request(processing_path: Path, target_folder: Path, request_id: str) -> bool:
+# LLM: Inbox-to-processing and the immutable execution fence are one T-locked transition. The
+# provider worker never observes an unfenced processing row that recovery could reclaim first.
+# 函数用途: 为刚认领的请求写入唯一执行 ID、递增租约代次并开始首个心跳时间。
+def _gateway_claim_payload(payload: dict, processing_path: Path) -> dict:
+    from .daemon_metadata import build_process_identity
+
+    claimed = dict(payload)
+    identity_error = _gateway_request_identity_error(payload, processing_path)
+    now = time.time()
+    try:
+        previous_epoch = max(0, int(claimed.get("lease_epoch") or 0))
+    except (TypeError, ValueError):
+        previous_epoch = 0
+    try:
+        created_at = float(claimed.get("created_at") or claimed.get("submitted_at") or 0)
+    except (TypeError, ValueError):
+        created_at = 0.0
+    if created_at > 0:
+        from ..observability.concurrency_metrics import record_gateway_queue_wait
+
+        record_gateway_queue_wait(now - created_at)
+    claim_id = f"gateway-attempt-{uuid.uuid4().hex}"
+    claimed.update(
+        {
+            # 文件名是队列、锁和终态归档共同使用的唯一请求标识。发现冲突时保留
+            # 诊断事实，但绝不能把 payload 内的另一个 ID 带进 worker。
+            "id": processing_path.stem,
+            "status": "processing",
+            "turn_phase": "open",
+            "attempts": _gateway_request_attempts(claimed) + 1,
+            "lease_owner": claim_id,
+            "lease_started_at": now,
+            "lease_heartbeat_at": now,
+            "lease_epoch": previous_epoch + 1,
+            "execution_attempt_id": claim_id,
+            "lease_process_identity": build_process_identity(),
+            "updated_at": now,
+        }
+    )
+    if "request_id" in claimed:
+        claimed["request_id"] = processing_path.stem
+    if identity_error is not None:
+        claimed["request_identity_error"] = identity_error
+    claimed["request_fingerprint_schema"] = GATEWAY_REQUEST_FINGERPRINT_SCHEMA
+    claimed["request_fingerprint"] = gateway_request_fingerprint(
+        claimed,
+        processing_path.stem,
+    )
+    return claimed
+
+
+# LLM: Queue filename is the request/turn authority used by T locks and terminal archives. A
+# payload may never redirect an already claimed file to another id; missing/conflicting ids are
+# persisted as a structured fail-closed marker for the worker to terminalize without provider IO.
+# 函数用途: 校验队列文件名与请求正文中的 ID 是否完全一致，并生成可审计的损坏报告。
+def _gateway_request_identity_error(payload: dict, processing_path: Path) -> dict | None:
+    path_request_id = processing_path.stem
+    payload_id = payload.get("id")
+    payload_request_id = payload.get("request_id")
+    declared_id = payload_id.strip() if isinstance(payload_id, str) else ""
+    declared_request_id = (
+        payload_request_id.strip() if isinstance(payload_request_id, str) else ""
+    )
+    invalid_id = declared_id != path_request_id
+    invalid_alias = payload_request_id is not None and declared_request_id != path_request_id
+    if not invalid_id and not invalid_alias:
+        return None
+    return {
+        "schema_version": "gateway_request_identity_error.v1",
+        "context": "gateway.claim.request.identity",
+        "message": "gateway request filename and payload identity conflict",
+        "path_request_id": path_request_id,
+        "payload_id": payload_id,
+        "payload_request_id": payload_request_id,
+    }
+
+
+# LLM: The fenced claim result never trusts Python truthiness for persisted numeric state.
+# 函数用途: 从认领后的请求中读取非负租约代次，坏值按零处理。
+def _gateway_claim_epoch(payload: dict) -> int:
+    try:
+        return max(0, int(payload.get("lease_epoch") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def archive_request(
+    paths: GatewayPaths,
+    processing_path: Path,
+    target_folder: Path,
+    request_id: str,
+    *,
+    conversation_store: object | None = None,
+    terminal_response: dict | None = None,
+    expected_execution_attempt_id: str = "",
+    expected_lease_epoch: int = 0,
+    expected_lease_heartbeat_at: float | None = None,
+) -> GatewayArchiveResult:
     from .logging import _report_gateway_side_effect_error
 
+    canonical = paths.terminal / f"{request_id}.json"
+    already_committed = canonical.is_file()
     try:
-        _archive_gateway_request(processing_path, target_folder)
-        return True
+        terminal_path = terminalize_gateway_request_file(
+            paths,
+            processing_path,
+            target_folder,
+            request_id,
+            conversation_store=conversation_store,
+            terminal_response=terminal_response,
+            expected_execution_attempt_id=expected_execution_attempt_id,
+            expected_lease_epoch=expected_lease_epoch,
+            expected_lease_heartbeat_at=expected_lease_heartbeat_at,
+        )
+        return GatewayArchiveResult(
+            (
+                GatewayArchiveDisposition.ALREADY_COMMITTED
+                if already_committed
+                else GatewayArchiveDisposition.COMMITTED
+            ),
+            terminal_path=terminal_path,
+        )
+    except InterruptedError as exc:
+        return GatewayArchiveResult(
+            GatewayArchiveDisposition.STALE_CLAIM,
+            error=str(exc),
+        )
+    except FileNotFoundError as exc:
+        disposition = (
+            GatewayArchiveDisposition.STALE_CLAIM
+            if expected_execution_attempt_id or expected_lease_epoch
+            else GatewayArchiveDisposition.RETRYABLE_IO
+        )
+        if disposition is GatewayArchiveDisposition.RETRYABLE_IO:
+            _report_gateway_side_effect_error("archive_gateway_request", request_id, exc)
+        return GatewayArchiveResult(disposition, error=str(exc))
+    except (DataCorruptionError, RuntimeError) as exc:
+        _report_gateway_side_effect_error("archive_gateway_request_conflict", request_id, exc)
+        return GatewayArchiveResult(
+            GatewayArchiveDisposition.CONFLICT,
+            error=str(exc),
+        )
     except OSError as exc:
         _report_gateway_side_effect_error("archive_gateway_request", request_id, exc)
-        return False
-
-
-def materialize_missing_archive(target_folder: Path, request_id: str, response: dict) -> Path:
-    target_folder.mkdir(parents=True, exist_ok=True)
-    target = target_folder / f"{request_id}.json"
-    if target.exists():
-        return target
-    payload = {
-        "id": request_id,
-        "status": response.get("status", "done" if response.get("ok") else "failed"),
-        "ok": bool(response.get("ok")),
-        "attempts": response.get("attempts", 0),
-        "lease_owner": response.get("lease_owner", ""),
-        "lease_started_at": response.get("lease_started_at", 0),
-        "lease_heartbeat_at": response.get("lease_heartbeat_at", 0),
-        "completed_at": response.get("ended_at", time.time()),
-        "archive_note": "request file was already moved or removed before final archive",
-    }
-    write_json_file_atomic(target, payload)
-    return target
+        return GatewayArchiveResult(
+            GatewayArchiveDisposition.RETRYABLE_IO,
+            error=str(exc),
+        )

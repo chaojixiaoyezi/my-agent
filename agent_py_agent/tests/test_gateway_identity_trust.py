@@ -111,10 +111,18 @@ class _Paths:
         self.processing = self.root / "requests" / "processing"
         self.done = self.root / "requests" / "done"
         self.failed = self.root / "requests" / "failed"
+        self.terminal = self.root / "requests" / "terminal"
         self.responses = self.root / "responses"
         self.stop_request = self.root / "stop"
         self.state = self.root / "state.json"
-        for p in (self.inbox, self.processing, self.done, self.failed, self.responses):
+        for p in (
+            self.inbox,
+            self.processing,
+            self.done,
+            self.failed,
+            self.terminal,
+            self.responses,
+        ):
             p.mkdir(parents=True, exist_ok=True)
 
 
@@ -170,13 +178,10 @@ def test_adapter_submit_propagates_identity(tmp_path) -> None:
 def test_finished_result_uses_archived_request_owner(tmp_path) -> None:
     server = _server(tmp_path)
     request_id = "req-finished-alice"
-    (server.paths.done / f"{request_id}.json").write_text(
-        json.dumps({"id": request_id, "user_id": "alice", "metadata": {"channel": "feishu"}}),
-        encoding="utf-8",
-    )
-    (server.paths.responses / f"{request_id}.json").write_text(
-        json.dumps({"id": request_id, "status": "done", "ok": True, "response": "完成"}),
-        encoding="utf-8",
+    _write_canonical_result(
+        server,
+        request_id,
+        {"id": request_id, "status": "done", "ok": True, "response": "完成"},
     )
     server.start()
     try:
@@ -199,11 +204,21 @@ def test_finished_result_uses_archived_request_owner(tmp_path) -> None:
         server.stop()
 
 
-def _write_finished_result_with_private_fields(server, request_id: str) -> dict:
-    (server.paths.done / f"{request_id}.json").write_text(
-        json.dumps({"id": request_id, "user_id": "alice", "metadata": {"channel": "feishu"}}),
+def _write_canonical_result(server, request_id: str, response: dict) -> None:
+    canonical = {
+        "schema_version": "gateway_terminal_request.v1",
+        "id": request_id,
+        "user_id": "alice",
+        "metadata": {"channel": "feishu"},
+        "terminal_response": response,
+    }
+    (server.paths.terminal / f"{request_id}.json").write_text(
+        json.dumps(canonical),
         encoding="utf-8",
     )
+
+
+def _write_finished_result_with_private_fields(server, request_id: str) -> dict:
     stored = {
         "id": request_id,
         "status": "done",
@@ -222,10 +237,7 @@ def _write_finished_result_with_private_fields(server, request_id: str) -> dict:
             "path": "/root/.my-agent/private/report.md",
         },
     }
-    (server.paths.responses / f"{request_id}.json").write_text(
-        json.dumps(stored),
-        encoding="utf-8",
-    )
+    _write_canonical_result(server, request_id, stored)
     return stored
 
 
@@ -303,6 +315,6 @@ def test_user_cannot_read_finished_result_without_request_record(tmp_path) -> No
         )
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             urllib.request.urlopen(request, timeout=5)
-        assert exc_info.value.code == 403
+        assert exc_info.value.code == 404
     finally:
         server.stop()

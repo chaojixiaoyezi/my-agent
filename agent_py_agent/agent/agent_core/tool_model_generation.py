@@ -10,7 +10,6 @@ from threading import Thread
 from ..backends import ModelResponse
 from ..backends.errors import ProviderTimeoutError
 from ..backends.tool_ir import AssistantTurn, ToolResult
-from .tool_ir_history import native_tool_ir_history
 from ..concurrency.interrupt import (
     is_interrupted,
     register_interrupt_callback,
@@ -43,6 +42,7 @@ from .runner.stage_trace import (
     trace_runner_model_response_received,
 )
 from .tool_ir_guidance import append_runtime_guidance_user_message
+from .tool_ir_history import native_tool_ir_history
 from .tool_stream import (
     LongToolContentStreamAbort,
     MalformedToolProtocolStreamAbort,
@@ -79,18 +79,25 @@ class _ProviderTimeoutRecord:
     exc: ProviderTimeoutError
 
 
+# LLM: 一次物理模型调用的状态同时持有 filtered model delta 与原始 typed retry sink；两者不可互相冒充。
+# 类用途: 保存单次模型调用的账本、流输出、重连显示出口和 native 工具参数。
 @dataclass(frozen=True)
 class _ModelGenerationState:
+    agent: object
+    params: ToolLoopExecuteParams
     chunk_filter: ToolBoundaryChunkFilter
     ledger: object
     call_id: str
     first_token_timeout_seconds: float
     on_chunk: object
+    retry_sink: object
     # 原生 tool_use 协议下传给 backend.generate 的 tools schema；text 协议为 None。
     tools: list[dict] | None = None
     tool_choice: ToolChoice | None = None
     # native 下由 IR 历史翻出的厂商原生 messages；text 协议为 None（走单条 user prompt）。
     messages: list[dict] | None = None
+    # 仅用于富 TUI 的人类可读耗时；不参与模型 timeout、重试或工具状态判断。
+    started_at: float = 0.0
 
 
 # LLM: 这是工具模型轮的统一生成入口；preflight compact、成本和完成追踪必须保持同一路径，变更要同步生成测试。
@@ -190,6 +197,8 @@ def _retry_once_after_timeout(request: ModelGenerateParams):
     由外层统一 finish(seq1545 补证——attempt-2 的 call_id 必须落 finished,
     不能停留在 started/first_token)。
     """
+    if _has_ambiguous_active_turn_input(request):
+        return None
     if not _ir_last_tool_use_confirmed(request):
         return None
     if _logical_physical_attempt_count(request) > 1:
@@ -205,6 +214,20 @@ def _retry_once_after_timeout(request: ModelGenerateParams):
     except ProviderTimeoutError as exc:
         _record_provider_timeout(_provider_timeout_record(request, retry_state, exc))
         return None  # 无第三次
+
+
+# LLM: A timeout after provider admission has no reliable execution answer. When the same prompt
+# carries active-turn input, a second physical call could deliver that user message twice.
+# 函数用途: 判断当前模型请求是否带有已经越过或可能越过模型边界的补充消息。
+def _has_ambiguous_active_turn_input(request: ModelGenerateParams) -> bool:
+    state = getattr(request.params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return False
+    pending = state.get("_guidance_ack_ids")
+    return bool(
+        str(state.get("_guidance_submission_id") or "").strip()
+        or (isinstance(pending, set) and pending)
+    )
 
 
 def _ir_last_tool_use_confirmed(request: ModelGenerateParams) -> bool:
@@ -277,6 +300,8 @@ def _trace_model_start(request: ModelGenerateParams) -> None:
     )
 
 
+# LLM: 初始化必须让模型 token 经过 observed filter，同时把宿主原始 sink 单独保留给结构化运行事件。
+# 函数用途: 为一次模型请求建立调用账本、流处理器、重连显示出口和 native 参数。
 def _start_model_generation(request: ModelGenerateParams) -> _ModelGenerationState:
     _begin_model_turn_identity(request.params, request.tool_rounds)
     chunk_filter = _build_tool_boundary_chunk_filter(request)
@@ -291,14 +316,18 @@ def _start_model_generation(request: ModelGenerateParams) -> _ModelGenerationSta
     tool_choice = _model_turn_tool_choice(request.params, tools)
     _remember_model_turn_tool_choice(request.params, tool_choice)
     return _ModelGenerationState(
+        agent=request.agent,
+        params=request.params,
         chunk_filter=chunk_filter,
         ledger=ledger,
         call_id=call_id,
         first_token_timeout_seconds=first_token_estimate.timeout_seconds,
         on_chunk=on_chunk,
+        retry_sink=request.params.effective_on_chunk,
         tools=tools,
         tool_choice=tool_choice,
         messages=_native_provider_messages(request.agent, request.params),
+        started_at=time.monotonic(),
     )
 
 
@@ -405,12 +434,13 @@ def _forwarded_guidance_seen(params: object) -> set:
     return seen
 
 
-# LLM: 该收尾只完成 chunk/filter、模型账本和 trace；不得裁掉正文后把内嵌文本提升为工具调用。
-# 函数用途: 统一收尾一次模型调用，并把最终可用响应交回工具循环。
+# LLM: 该收尾完成 chunk/filter、模型账本和 trace；仅把 provider 明确标注的 thinking 块交给可选 rich sink，绝不公开签名/redacted 块或从正文推断思考。
+# 函数用途: 统一收尾一次模型调用，把可折叠思考投给支持的 TUI，再将响应交回工具循环。
 def _finish_model_generation(request: ModelGenerateParams, state: _ModelGenerationState, response):
     state.chunk_filter.finish()
     response = _recover_unclosed_long_write_response(request, response)
     record_model_call_finished(state.ledger, state.call_id, response)
+    _publish_provider_thinking(request, state, response)
     trace_runner_model_response_received(
         RunnerModelStageTraceRequest(
             agent=request.agent,
@@ -420,6 +450,33 @@ def _finish_model_generation(request: ModelGenerateParams, state: _ModelGenerati
         )
     )
     return response
+
+
+# LLM: 可见思考只接受 assistant_content_blocks 中 type=thinking 的 thinking 字段；signature、redacted_thinking、tool_use 与普通 text 均禁止进入此投影。
+# 函数用途: 向声明支持的流式接收器发布一次完整、默认折叠的模型思考。
+def _publish_provider_thinking(
+    request: ModelGenerateParams,
+    state: _ModelGenerationState,
+    response: object,
+) -> None:
+    sink = getattr(request.params.effective_on_chunk, "write_thinking", None)
+    if not callable(sink):
+        return
+    blocks = getattr(response, "assistant_content_blocks", None)
+    if not isinstance(blocks, (list, tuple)):
+        return
+    parts = [
+        str(block.get("thinking") or "").strip()
+        for block in blocks
+        if isinstance(block, dict) and block.get("type") == "thinking"
+    ]
+    text = "\n\n".join(part for part in parts if part)
+    if not text:
+        return
+    sink(
+        text,
+        duration_seconds=max(0.0, time.monotonic() - state.started_at),
+    )
 
 
 def _recover_unclosed_long_write_response(request: ModelGenerateParams, response):
@@ -469,9 +526,7 @@ def _record_provider_timeout(record: _ProviderTimeoutRecord) -> None:
         # getattr 兜底 provider_wall 兼容历史异常对象（门槛2 前无 stage 字段）。
         timeout_stage=str(getattr(record.exc, "stage", "") or "provider_wall"),
         elapsed_seconds=_provider_timeout_elapsed(record.ledger, record.call_id),
-        idle_silence_seconds=_provider_timeout_idle_silence(
-            record.ledger, record.call_id
-        ),
+        idle_silence_seconds=_provider_timeout_idle_silence(record.ledger, record.call_id),
     )
     _trace_model_failure(record.request, record.exc)
 
@@ -521,6 +576,9 @@ def _trace_model_failure(request: ModelGenerateParams, exc: BaseException) -> No
 
 # LLM: The caller owns the typed task identity while the provider runs in a guard thread; relay interruption to that child before returning.
 # 函数用途: 用超时保护线程调模型，并把外层任务的停止信号转发给真正读模型响应的线程。
+# LLM: This wrapper chooses direct or timeout-guard execution; the deeper shared backend boundary
+# owns the durable pre-provider submission hook for every physical attempt.
+# 函数用途: 按配置直接调用模型或启动超时守护线程，并统一等待结果。
 def _generate_with_wall_timeout(
     request: ModelGenerateParams,
     state: _ModelGenerationState,
@@ -623,6 +681,8 @@ def _generate_backend_response(
         backend.request_timeout = original
 
 
+# LLM: backend 调用必须在 provider attempt observer 和全局并发槽内；observer 先落 canonical ledger 再投影 retry UI。
+# 函数用途: 调用真实模型后端，并记录物理请求尝试、耗时、并发和费用。
 def _invoke_backend_generate(backend, prompt: str, state: _ModelGenerationState):
     # LLM 热路径 RED + token + USD 成本埋点(审计 #19):计时 + 成败 + token + cost 发到默认
     # registry,/metrics 暴露。record_llm_call/record_llm_cost 内部异常隔离,绝不影响下面真实调用。
@@ -638,6 +698,7 @@ def _invoke_backend_generate(backend, prompt: str, state: _ModelGenerationState)
 
     def _observe_provider_attempt(event: dict[str, object]) -> None:
         record_model_provider_attempt(state.ledger, state.call_id, event)
+        _publish_transport_retry(state.retry_sink, event)
 
     # 全局在飞 LLM 并发闸(T4 层4):默认关=nullcontext 零变化;配了 LLM_MAX_INFLIGHT 才封顶,
     # 拿槽在 llm_inflight 计数【之前】(槽满时等待期不算在飞,gauge 只反映真在飞)。
@@ -645,6 +706,15 @@ def _invoke_backend_generate(backend, prompt: str, state: _ModelGenerationState)
         with global_llm_admission_slot():
             llm_inflight(1)
             try:
+                from .runtime.guidance import mark_injected_turn_input_submitted
+
+                # This is the last local statement before backend.generate may
+                # touch the network. Failure leaves provider I/O unstarted.
+                mark_injected_turn_input_submitted(
+                    state.agent,
+                    state.params,
+                    provider_call_id=state.call_id,
+                )
                 response = _do_backend_generate(backend, prompt, state)
             except Exception:
                 record_llm_call(label, time.monotonic() - start, None, ok=False)
@@ -654,6 +724,26 @@ def _invoke_backend_generate(backend, prompt: str, state: _ModelGenerationState)
     record_llm_call(label, time.monotonic() - start, response, ok=True)
     record_llm_cost(model, response)  # 真实 USD 成本按 model 累计(审计 #19 残余)
     return response
+
+
+# LLM: transport observer 只按 retry_scheduled 等结构化字段投递显示事件；显示 sink 失败不得改变模型调用结果。
+# 函数用途: 把 HTTP 层即将执行的退避同步给支持富记录的客户端。
+def _publish_transport_retry(sink_owner: object, event: dict[str, object]) -> None:
+    if event.get("status") != "failed" or event.get("retry_scheduled") is not True:
+        return
+    sink = getattr(sink_owner, "write_provider_retry", None)
+    if not callable(sink):
+        return
+    try:
+        sink(
+            scope="transport",
+            attempt=int(event.get("retry_attempt") or 1),
+            total=int(event.get("retry_total") or 1),
+            delay_seconds=float(event.get("retry_wait_seconds") or 0.0),
+            error_type=str(event.get("error_type") or ""),
+        )
+    except Exception:
+        return
 
 
 def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):

@@ -1033,6 +1033,28 @@ def _runtime_gate_call(*, run_id: str = "run-1") -> ToolCall:
     )
 
 
+def test_runtime_approval_binding_is_merged_once_into_write_boundary() -> None:
+    binding = {
+        "approval_id": "approval-1",
+        "tool_name": "run_command",
+        "run_id": "run-1",
+        "operation_id": "operation-1",
+        "idempotency_key": "idempotency-1",
+        "args_hash": "sha256:args",
+        "status": "APPROVED",
+    }
+    params = SimpleNamespace(
+        write_boundary={"approved_actions": [dict(binding)]},
+        runtime_approved_actions=[dict(binding), {"tool_name": "incomplete"}],
+        run_id="",
+    )
+
+    merged = write_boundary_with_runtime_ledger(SimpleNamespace(), params)
+
+    assert merged is not None
+    assert merged["approved_actions"] == [binding]
+
+
 def _runtime_gate_result(call: ToolCall) -> ToolResult:
     return ToolResult.succeeded(
         call,

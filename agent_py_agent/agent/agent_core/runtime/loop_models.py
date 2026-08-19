@@ -35,6 +35,9 @@ class RunParams:
     root_user_prompt: str = ""
     carried_archive_tool_calls: list[dict[str, object]] | None = None
     carried_active_turn_user_inputs: list[dict[str, object]] | None = None
+    # Gateway injects one exact-turn transition callback. Runtime invokes it at
+    # reservation and provider-submission edges; generic/local runs leave it empty.
+    active_turn_transition_callback: object = None
     # Gateway-only typed callback used to publish the exact durable task selected
     # by this live request.  It is runtime state, never prompt text or persisted
     # task metadata, and survives ``dataclasses.replace`` continuations.
@@ -98,6 +101,7 @@ class RuntimeLoopParams:
     save: bool | None = None
     carried_archive_tool_calls: list[dict[str, object]] | None = None
     carried_active_turn_user_inputs: list[dict[str, object]] | None = None
+    active_turn_transition_callback: object = None
     tool_runtime_snapshot: object = None
     tool_protocol_snapshot: object = None
 

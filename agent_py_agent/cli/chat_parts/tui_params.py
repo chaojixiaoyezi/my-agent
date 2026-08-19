@@ -49,13 +49,10 @@ class WorkerConfigParams:
     history_lock: threading.Lock
     build_history_context: object
     assistant_outputs: list[str]
-    thinking_line_ref: list
-    stream_buf_ref: list
-    stream_visible_text_ref: list
-    app_ref: list
     last_token_estimate_ref: list
     stop_event: threading.Event
     current_session_id: str = ""
+    tui_runtime: object | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -77,12 +74,10 @@ class StartWorkerParams:
     history_lock: threading.Lock
     build_history_context: object
     assistant_outputs: list[str]
-    thinking_line_ref: list
-    stream_buf_ref: list
-    stream_visible_text_ref: list
     last_token_estimate_ref: list
     stop_event: threading.Event
     current_session_id: str = ""
+    tui_runtime: object | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -95,7 +90,6 @@ class MakeTuiAppParams:
     last_token_estimate_ref: list
     jobs: object
     pending_jobs_ref_for_enqueue: list
-    thinking_line_ref: list
     runtime_inject: list[str]
     prompt_files: list[str]
     args: object
@@ -107,6 +101,7 @@ class MakeTuiAppParams:
     running_request_id_ref: list
     stop_event: threading.Event
     current_session_id: str = ""
+    tui_runtime: object | None = None
 
 
 @dataclasses.dataclass(frozen=True)

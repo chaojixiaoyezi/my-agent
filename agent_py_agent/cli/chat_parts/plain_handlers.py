@@ -1,4 +1,7 @@
 
+# LLM: 本模块执行 plain chat 的 Gateway/direct 路径；Gateway 历史只能由服务端 ConversationStore 注入，避免上下文重复。
+# 模块用途: 处理普通终端中的单轮聊天、流式输出、计时和会话历史更新。
+
 from __future__ import annotations
 
 import time
@@ -40,6 +43,8 @@ class PlainJobContext:
     current_session_id: str = ""
 
 
+# LLM: Gateway handler 只发送当前 prompt、style 和显式附件；服务端负责 canonical thread 历史与持久化。
+# 函数用途: 通过运行中的 Gateway 执行一轮普通终端聊天并显示结果。
 def _plain_gateway_handle(ctx: PlainJobContext) -> tuple[str, bool]:
     if not check_gateway_alive(ctx.paths):
         raise RuntimeError("gateway 已停止。请先执行 my-agent gateway start")
@@ -49,11 +54,11 @@ def _plain_gateway_handle(ctx: PlainJobContext) -> tuple[str, bool]:
         _next_message_id(ctx),
         preview_chars=_chat_preview_chars(ctx),
     )
-    request_id, chunk_path, response_path = submit_chat_request(
+    request_id, chunk_path, _response_path = submit_chat_request(
         ctx.paths,
         content=ChatRequestContent(
             prompt=ctx.job.user,
-            inject=_turn_inject(ctx),
+            inject=_turn_inject(ctx, include_history=False),
             prompt_files=ctx.job.prompt_files,
             save=not ctx.args.no_save,
             show_prompt=ctx.job.show_prompt,
@@ -68,7 +73,7 @@ def _plain_gateway_handle(ctx: PlainJobContext) -> tuple[str, bool]:
     response = poll_gateway_chunks(
         GatewayChunkPollRequest(
             chunk_path,
-            response_path,
+            ctx.paths.terminal / f"{request_id}.json",
             time.time() + inactivity_timeout,
             on_chunk,
             [0],
@@ -92,6 +97,8 @@ def _plain_gateway_handle(ctx: PlainJobContext) -> tuple[str, bool]:
     return response_text, terminal_response_streamed
 
 
+# LLM: direct handler 没有 Gateway thread 注入，因此保留当前进程内历史上下文且只追加一次。
+# 函数用途: 不经过 Gateway 直接执行一轮普通终端聊天并显示结果。
 def _plain_local_handle(ctx: PlainJobContext) -> tuple[str, bool]:
     started_at = time.perf_counter()
     on_chunk, stream_started_ref = _make_chunk_handler(
@@ -102,7 +109,7 @@ def _plain_local_handle(ctx: PlainJobContext) -> tuple[str, bool]:
     with register_interruptible(conversation_request_interrupt_name(ctx.job.request_id)):
         result = ctx.agent.run(
             ctx.job.user,
-            inject=_turn_inject(ctx),
+            inject=_turn_inject(ctx, include_history=True),
             prompt_files=ctx.job.prompt_files,
             save=not ctx.args.no_save,
             request_id=ctx.job.request_id,
@@ -124,8 +131,14 @@ def _next_message_id(ctx: PlainJobContext) -> int:
     return len(ctx.assistant_outputs) + 1
 
 
-def _turn_inject(ctx: PlainJobContext) -> list[str]:
-    history_ctx = ctx.build_history_context()
+# LLM: Gateway 路径的历史由 ConversationStore 唯一注入，只有 direct 路径可以附加本进程内存历史；style inject 两者共用。
+# 函数用途: 为 plain chat 构造不重复会话历史的当前轮附加上下文。
+def _turn_inject(
+    ctx: PlainJobContext,
+    *,
+    include_history: bool,
+) -> list[str]:
+    history_ctx = ctx.build_history_context() if include_history else ""
     turn_inject = list(ctx.job.inject) + [_CHAT_RESPONSE_STYLE_INJECT]
     if history_ctx:
         turn_inject.append(history_ctx)

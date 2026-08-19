@@ -1,8 +1,8 @@
-
 # LLM: Provider HTTP transport normalizes retries, timeouts, response decoding, and typed user interrupts; keep it independent from backend/runtime initialization cycles.
 # 模块用途: 统一发送模型 HTTP 请求，并在超时、网络异常或用户停止时及时收回连接。
 from __future__ import annotations
 
+import errno
 import http.client
 import ipaddress
 import json
@@ -23,6 +23,7 @@ from .errors import (
     ProviderConnectionError,
     ProviderContextWindowError,
     ProviderQuotaExhaustedError,
+    ProviderRequestRejectedError,
     ProviderResponseError,
     ProviderTimeoutError,
     ProviderTransientError,
@@ -333,8 +334,7 @@ class _StreamIdleWatchdog:
 
 def _stream_idle_timeout_error(request: GatewayRequest) -> ProviderTimeoutError:
     return ProviderTimeoutError(
-        "模型接口流式响应空闲超时: "
-        f"request_timeout={request.timeout}s url={request.url}",
+        f"模型接口流式响应空闲超时: request_timeout={request.timeout}s url={request.url}",
         stage="stream_idle",
     )
 
@@ -443,6 +443,8 @@ def _open_gateway_request(request: GatewayRequest):
     raise RuntimeError("unreachable gateway retry state")
 
 
+# LLM: 每次物理 HTTP attempt 都必须向 observer 发布结构化 retry 序号和真实等待值；错误正文不得承担重试裁决。
+# 函数用途: 执行一次模型 HTTP 请求，遇到已分类的瞬时故障时登记本层退避并返回给循环重试。
 def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt: int):
     req = _urllib_request(request)
     attempt_id = f"provider-http:{time.time_ns()}:{attempt + 1}"
@@ -454,8 +456,11 @@ def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt
     _emit_provider_attempt({**base_event, "status": "started"})
     try:
         response = _gateway_urlopen(req, request)
+    except InterruptedError:
+        raise
     except urllib.error.HTTPError as exc:
         retry_scheduled = _should_retry_http_error(exc, attempt, last_attempt)
+        retry_wait_seconds = _retry_delay_seconds(exc, attempt) if retry_scheduled else 0.0
         _emit_provider_attempt(
             {
                 **base_event,
@@ -463,25 +468,32 @@ def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt
                 "http_status": int(getattr(exc, "code", 0) or 0),
                 "error_type": type(exc).__name__,
                 "retry_scheduled": retry_scheduled,
+                "retry_attempt": attempt + 1 if retry_scheduled else 0,
+                "retry_total": last_attempt,
+                "retry_wait_seconds": retry_wait_seconds,
             }
         )
         if not retry_scheduled:
             raise
-        _provider_retry_wait(_retry_delay_seconds(exc, attempt))
+        _provider_retry_wait(retry_wait_seconds)
         return None
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         retry_scheduled = _should_retry_network_error(exc, attempt, last_attempt)
+        retry_wait_seconds = _network_retry_delay_seconds(attempt) if retry_scheduled else 0.0
         _emit_provider_attempt(
             {
                 **base_event,
                 "status": "failed",
                 "error_type": type(exc).__name__,
                 "retry_scheduled": retry_scheduled,
+                "retry_attempt": attempt + 1 if retry_scheduled else 0,
+                "retry_total": last_attempt,
+                "retry_wait_seconds": retry_wait_seconds,
             }
         )
         if not retry_scheduled:
             raise
-        _provider_retry_wait(_network_retry_delay_seconds(attempt))
+        _provider_retry_wait(retry_wait_seconds)
         return None
     _emit_provider_attempt(
         {
@@ -493,6 +505,8 @@ def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt
     return response
 
 
+# LLM: 连接建立和响应头等待也属于同一个可中断 provider attempt；open guard 必须在 `opener.open` 前注册并在响应移交后解除引用。
+# 函数用途: 用独立连接/读取超时打开模型请求，并让用户停止能关闭尚未返回 HTTPResponse 的底层连接。
 def _gateway_urlopen(req: urllib.request.Request, request: GatewayRequest):
     """Open one provider request with distinct connect and read timeouts.
 
@@ -506,12 +520,28 @@ def _gateway_urlopen(req: urllib.request.Request, request: GatewayRequest):
 
     connect_timeout = _bounded_connect_timeout(request)
     read_timeout = max(1.0, float(request.timeout or 0))
+    open_guard = _GatewayOpenGuard()
+    transport_options = _SplitTimeoutOptions(connect_timeout, read_timeout, open_guard)
     opener = urllib.request.build_opener(
         _provider_proxy_handler(req.full_url),
-        _SplitTimeoutHTTPHandler(connect_timeout, read_timeout),
-        _SplitTimeoutHTTPSHandler(connect_timeout, read_timeout),
+        _SplitTimeoutHTTPHandler(transport_options),
+        _SplitTimeoutHTTPSHandler(transport_options),
     )
-    return opener.open(req, timeout=read_timeout)
+    try:
+        with _provider_interrupt_callback(open_guard.abort):
+            if _provider_is_interrupted():
+                raise InterruptedError("模型接口请求已被用户停止")
+            response = opener.open(req, timeout=read_timeout)
+            if _provider_is_interrupted():
+                open_guard.abort()
+                try:
+                    response.close()
+                except Exception:
+                    pass
+                raise InterruptedError("模型接口请求已被用户停止")
+            return response
+    finally:
+        open_guard.release()
 
 
 def _provider_proxy_handler(url: str) -> urllib.request.ProxyHandler:
@@ -545,7 +575,83 @@ def _bounded_connect_timeout(request: GatewayRequest) -> float:
     return min(configured, read_timeout)
 
 
+# LLM: open guard 只保存当前 attempt 的连接引用并串行化 abort/release；它不能跨 attempt 复用或替代 response guard。
+# 类用途: 在 HTTPResponse 尚未创建时，也能从中断线程关闭当前连接和 socket。
+class _GatewayOpenGuard:
+    # LLM: 新 guard 初始未中断且未移交；锁保护连接构造、停止回调和响应移交之间的竞态。
+    # 函数用途: 创建一次 provider open 阶段的连接守卫。
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._connection: Any | None = None
+        self._aborted = False
+        self._released = False
+
+    # LLM: attach 只接受当前 attempt 创建的连接；若停止已先到达，连接必须在锁外立即关闭。
+    # 函数用途: 登记 urllib 刚创建、可能正等待连接或响应头的 HTTP 连接。
+    def attach(self, connection: Any) -> None:
+        abort_now = False
+        with self._lock:
+            if self._released:
+                return
+            self._connection = connection
+            abort_now = self._aborted
+        if abort_now:
+            _abort_http_connection(connection)
+
+    # LLM: abort 是幂等中断回调；它只关闭已绑定的本 attempt 连接，且不能持锁调用第三方 close。
+    # 函数用途: 关闭尚在 connect/TLS/响应头阶段的 provider 连接以唤醒模型线程。
+    def abort(self) -> None:
+        connection: Any | None
+        with self._lock:
+            self._aborted = True
+            connection = self._connection
+        if connection is not None:
+            _abort_http_connection(connection)
+
+    # LLM: release 表示 HTTPResponse 已移交给 response guard 或 open 已失败；后续 callback 不得再碰该连接。
+    # 函数用途: 清除 open 阶段连接引用并结束守卫生命周期。
+    def release(self) -> None:
+        with self._lock:
+            self._released = True
+            self._connection = None
+
+    # LLM: aborted 是只读 typed flag，连接线程用它拒绝在停止后继续建立或移交传输。
+    # 函数用途: 判断当前 provider open attempt 是否已收到中断。
+    @property
+    def aborted(self) -> bool:
+        with self._lock:
+            return self._aborted
+
+
+# LLM: 连接关闭必须先 shutdown socket 再调用 HTTPConnection.close，确保另一个线程阻塞在 getresponse/read 时被唤醒。
+# 函数用途: 尽力终止一个 urllib/http.client 连接且吞掉清理噪声。
+def _abort_http_connection(connection: Any) -> None:
+    transport = getattr(connection, "sock", None)
+    if isinstance(transport, socket.socket):
+        try:
+            transport.shutdown(socket.SHUT_RDWR)
+        except (OSError, ValueError):
+            pass
+    try:
+        connection.close()
+    except Exception:
+        pass
+
+
+# LLM: 双超时和 attempt-local open guard 必须作为一个不可分运输配置向 urllib handler/connection 传递，避免构造参数漂移。
+# 类用途: 汇总一次 provider open 的连接超时、读取超时和可中断连接句柄。
+@dataclass(frozen=True)
+class _SplitTimeoutOptions:
+    connect_timeout: float
+    read_timeout: float
+    open_guard: _GatewayOpenGuard | None
+
+
+# LLM: HTTP 连接必须在构造时绑定本 attempt open guard，并在停止已到达时拒绝继续连接。
+# 类用途: 为普通 HTTP provider 分离连接超时和读取超时，同时暴露可中断连接句柄。
 class _SplitTimeoutHTTPConnection(http.client.HTTPConnection):
+    # LLM: open_guard 是 attempt-local 可选依赖；None 仅保留给独立构造测试，不形成运行时旁路。
+    # 函数用途: 初始化带连接/读取双超时的 HTTPConnection。
     def __init__(
         self,
         host: str,
@@ -554,26 +660,39 @@ class _SplitTimeoutHTTPConnection(http.client.HTTPConnection):
         source_address: tuple[str, int] | None = None,
         blocksize: int = 8192,
         *,
-        connect_timeout: float,
-        read_timeout: float,
+        transport_options: _SplitTimeoutOptions,
     ):
         del timeout
-        self._provider_read_timeout = read_timeout
+        self._provider_read_timeout = transport_options.read_timeout
         super().__init__(
             host,
             port=port,
-            timeout=connect_timeout,
+            timeout=transport_options.connect_timeout,
             source_address=source_address,
             blocksize=blocksize,
         )
+        self._provider_open_guard = transport_options.open_guard
+        if transport_options.open_guard is not None:
+            transport_options.open_guard.attach(self)
 
+    # LLM: connect 前后都检查 typed abort，覆盖停止早于 socket 创建和停止发生在 connect/TLS 内两种竞态。
+    # 函数用途: 建立 HTTP 连接，成功后切换为长读取超时或按用户中断退出。
     def connect(self) -> None:
+        if self._provider_open_guard is not None and self._provider_open_guard.aborted:
+            raise InterruptedError("模型接口请求已被用户停止")
         super().connect()
+        if self._provider_open_guard is not None and self._provider_open_guard.aborted:
+            _abort_http_connection(self)
+            raise InterruptedError("模型接口请求已被用户停止")
         if self.sock is not None:
             self.sock.settimeout(self._provider_read_timeout)
 
 
+# LLM: HTTPS 与 HTTP 共用同一 open guard 合同；TLS handshake 和响应头等待也必须可由 typed interrupt 关闭。
+# 类用途: 为 HTTPS provider 分离连接/读取超时并暴露可中断 TLS 连接句柄。
 class _SplitTimeoutHTTPSConnection(http.client.HTTPSConnection):
+    # LLM: open_guard 只绑定本连接所属 attempt；context 和代理隧道行为继续由 urllib 标准 handler 控制。
+    # 函数用途: 初始化带 TLS context、双超时和 open guard 的 HTTPSConnection。
     def __init__(
         self,
         host: str,
@@ -583,55 +702,80 @@ class _SplitTimeoutHTTPSConnection(http.client.HTTPSConnection):
         source_address: tuple[str, int] | None = None,
         context: ssl.SSLContext | None = None,
         blocksize: int = 8192,
-        connect_timeout: float,
-        read_timeout: float,
+        transport_options: _SplitTimeoutOptions,
     ):
         del timeout
-        self._provider_read_timeout = read_timeout
+        self._provider_read_timeout = transport_options.read_timeout
         super().__init__(
             host,
             port=port,
-            timeout=connect_timeout,
+            timeout=transport_options.connect_timeout,
             source_address=source_address,
             context=context,
             blocksize=blocksize,
         )
+        self._provider_open_guard = transport_options.open_guard
+        if transport_options.open_guard is not None:
+            transport_options.open_guard.attach(self)
 
+    # LLM: TLS connect 完成后仍须复核 abort，不能把停止期间才建成的连接移交给响应读取层。
+    # 函数用途: 建立 HTTPS/TLS 连接并在成功后设置读取超时。
     def connect(self) -> None:
+        if self._provider_open_guard is not None and self._provider_open_guard.aborted:
+            raise InterruptedError("模型接口请求已被用户停止")
         super().connect()
+        if self._provider_open_guard is not None and self._provider_open_guard.aborted:
+            _abort_http_connection(self)
+            raise InterruptedError("模型接口请求已被用户停止")
         if self.sock is not None:
             self.sock.settimeout(self._provider_read_timeout)
 
 
+# LLM: handler 只把双超时和同一 open guard 注入 urllib 创建的 HTTPConnection；不持有第二取消状态。
+# 类用途: 为 urllib 普通 HTTP 请求选择可中断的连接实现。
 class _SplitTimeoutHTTPHandler(urllib.request.HTTPHandler):
-    def __init__(self, connect_timeout: float, read_timeout: float):
+    # LLM: guard 必须来自 `_gateway_urlopen` 当前 attempt，不能使用模块级共享对象。
+    # 函数用途: 保存本次 HTTP open 的连接参数。
+    def __init__(
+        self,
+        transport_options: _SplitTimeoutOptions,
+    ):
         super().__init__()
-        self.connect_timeout = connect_timeout
-        self.read_timeout = read_timeout
+        self.transport_options = transport_options
 
+    # LLM: do_open 参数必须携带 open_guard，确保连接构造一发生就可被外层 typed interrupt 访问。
+    # 函数用途: 用自定义普通 HTTPConnection 打开请求。
     def http_open(self, req):
         return self.do_open(
             _SplitTimeoutHTTPConnection,
             req,
-            connect_timeout=self.connect_timeout,
-            read_timeout=self.read_timeout,
+            transport_options=self.transport_options,
         )
 
 
+# LLM: HTTPS handler 与 HTTP handler 共用 open guard 协议，并继续传递 urllib 管理的 SSL context。
+# 类用途: 为 urllib HTTPS 请求选择可中断的双超时连接实现。
 class _SplitTimeoutHTTPSHandler(urllib.request.HTTPSHandler):
-    def __init__(self, connect_timeout: float, read_timeout: float):
+    # LLM: guard 生命周期归 `_gateway_urlopen`；handler 只保存引用到一次 opener.open 结束。
+    # 函数用途: 保存本次 HTTPS open 的连接参数。
+    def __init__(
+        self,
+        transport_options: _SplitTimeoutOptions,
+    ):
         super().__init__()
-        self.connect_timeout = connect_timeout
-        self.read_timeout = read_timeout
+        self.transport_options = transport_options
 
+    # LLM: do_open 必须把同一 guard 和 SSL context 一起传给连接，不得在 handler 内另建取消 token。
+    # 函数用途: 用自定义 HTTPSConnection 打开请求。
     def https_open(self, req):
         return self.do_open(
             _SplitTimeoutHTTPSConnection,
             req,
             context=self._context,
-            connect_timeout=self.connect_timeout,
-            read_timeout=self.read_timeout,
+            transport_options=self.transport_options,
         )
+
+
 def _should_retry_http_error(exc: urllib.error.HTTPError, attempt: int, last_attempt: int) -> bool:
     code = int(getattr(exc, "code", 0) or 0)
     if code == 429 and _provider_error_indicates_quota_exhausted(_http_error_detail(exc)):
@@ -687,7 +831,9 @@ def _runtime_http_error(exc: urllib.error.HTTPError) -> RuntimeError:
     """Classify provider HTTP errors at the backend boundary."""
     detail = _http_error_detail(exc)
     code = int(getattr(exc, "code", 0) or 0)
-    if code in _CONTEXT_WINDOW_HTTP_STATUS_CODES and _provider_error_indicates_context_window(detail):
+    if code in _CONTEXT_WINDOW_HTTP_STATUS_CODES and _provider_error_indicates_context_window(
+        detail
+    ):
         return ProviderContextWindowError(
             f"HTTP {exc.code}: {detail}",
             details={"status_code": code, "provider_error": _provider_error_payload(detail)},
@@ -704,7 +850,11 @@ def _runtime_http_error(exc: urllib.error.HTTPError) -> RuntimeError:
         return ProviderTransientError(f"HTTP {exc.code}: {detail}")
     if _is_silent_bad_request(exc):
         return ProviderTransientError(f"HTTP {exc.code}: {detail}")
-    return RuntimeError(f"HTTP {exc.code}: {detail}")
+    return ProviderRequestRejectedError(
+        f"HTTP {exc.code}: {detail}",
+        status_code=code,
+        details={"status_code": code, "provider_error": _provider_error_payload(detail)},
+    )
 
 
 def _runtime_decode_error(exc: BaseException, request: GatewayRequest) -> ProviderResponseError:
@@ -720,6 +870,8 @@ def _runtime_decode_error(exc: BaseException, request: GatewayRequest) -> Provid
     )
 
 
+# LLM: 网络错误分类只信异常类型/errno 和受控 marker；ECONNREFUSED 必须保持 provider-transient typed 语义供上层退避和恢复。
+# 函数用途: 把底层网络异常归一为超时、瞬时供应故障或需要检查配置的连接错误。
 def _runtime_network_error(exc: BaseException, request: GatewayRequest) -> RuntimeError:
     """Classify network exceptions into timeout, transient provider flake, or config failure."""
     parsed = urllib.parse.urlparse(request.url)
@@ -736,7 +888,7 @@ def _runtime_network_error(exc: BaseException, request: GatewayRequest) -> Runti
     if _is_transient_network_error(exc):
         return ProviderTransientError(
             "网络请求失败: "
-            f"模型接口 {host} 临时断开或连接被重置（{request.url}）。"
+            f"模型接口 {host} 临时断开、拒绝连接或连接被重置（{request.url}）。"
             "本次请求可由重试/恢复/接管继续处理；"
             f"底层错误: {reason}"
         )
@@ -755,11 +907,44 @@ def _is_timeout_exception(exc: BaseException) -> bool:
     return isinstance(reason, (TimeoutError, socket.timeout))
 
 
+# LLM: 瞬时网络判定优先读取 typed ECONNREFUSED；受控文本 marker 仅兼容没有 errno 的既有断流库异常。
+# 函数用途: 判断网络异常是否值得进入当前请求的有界重试。
 def _is_transient_network_error(exc: BaseException) -> bool:
     if _is_timeout_exception(exc):
         return False
+    if _is_connection_refused_exception(exc):
+        return True
     text = _network_error_text(exc).lower()
     return any(marker in text for marker in _RETRYABLE_NETWORK_ERROR_MARKERS)
+
+
+# LLM: 连接拒绝必须遍历 urllib reason 与 Python exception chaining，但只接受系统异常类型或 ECONNREFUSED 数值。
+# 函数用途: 识别被 urllib 等包装过的“端点主动拒绝连接”，避免依赖中英文错误字符串。
+def _is_connection_refused_exception(exc: BaseException) -> bool:
+    return any(
+        isinstance(item, ConnectionRefusedError)
+        or getattr(item, "errno", None) == errno.ECONNREFUSED
+        for item in _network_exception_chain(exc)
+    )
+
+
+# LLM: 异常链遍历必须有 identity 去重和固定字段集合，不能递归读取任意用户对象属性。
+# 函数用途: 展开网络异常本身、reason、cause 和 context，供结构化 errno 分类复用。
+def _network_exception_chain(exc: BaseException) -> tuple[BaseException, ...]:
+    pending = [exc]
+    seen: set[int] = set()
+    result: list[BaseException] = []
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        result.append(current)
+        for name in ("reason", "__cause__", "__context__"):
+            nested = getattr(current, name, None)
+            if isinstance(nested, BaseException):
+                pending.append(nested)
+    return tuple(result)
 
 
 def _network_error_text(exc: BaseException) -> str:
@@ -893,14 +1078,12 @@ def _iter_sse_data_lines(
         # 「data 持续续命超总预算」——同刻到期时 idle 赢, 不回归既有锁定。
         if time.monotonic() > idle_deadline:
             raise ProviderTimeoutError(
-                "模型接口流式响应空闲超时: "
-                f"request_timeout={timeout}s url={url}",
+                f"模型接口流式响应空闲超时: request_timeout={timeout}s url={url}",
                 stage="stream_idle",
             )
         if time.monotonic() > wall_deadline:
             raise ProviderTimeoutError(
-                "模型接口流式响应总墙钟超时: "
-                f"request_timeout={timeout}s url={url}",
+                f"模型接口流式响应总墙钟超时: request_timeout={timeout}s url={url}",
                 # 门槛3: transport 总墙钟预算耗尽与墙钟守卫线程同族(总时长
                 # 超预算), 均为真实抛出路径, 按 wall_clock 落账。
                 stage="wall_clock",

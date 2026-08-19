@@ -1,3 +1,6 @@
+# LLM: 本模块把已验证运行账本、scope、rate/guardrail 与临时审批 binding 合并进每次 ToolExecutor 请求；不得从模型正文恢复控制字段。
+# 模块用途: 维护工具运行门的持久证据，并生成当前调用使用的权威 write boundary。
+
 from __future__ import annotations
 
 import sqlite3
@@ -85,9 +88,12 @@ def _nonnegative_int(value: object) -> int:
         return 0
 
 
+# LLM: 合并顺序必须保留调用方已有 boundary，再追加宿主账本和当前 run 的精确审批；任何临时批准都不能覆盖原安全范围。
+# 函数用途: 生成一次工具执行使用的完整结构化边界。
 def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[str, object] | None:
     boundary = getattr(params, "write_boundary", None)
     merged = dict(boundary) if isinstance(boundary, dict) else {}
+    _attach_runtime_approved_actions(merged, params)
     _attach_task_workspace_roots(merged, params)
     _attach_remote_owner_task_write_scope(merged, agent, params)
     _attach_transient_named_work_write_scope(merged, agent, params)
@@ -112,6 +118,48 @@ def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[st
             merged.get("tool_rate_limit_records"), rate_rows
         )
     return merged or boundary
+
+
+# LLM: runtime_approved_actions 只接受当前 ToolLoopExecuteParams 中已校验 dict，并与调用方批准列表按完整字段去重。
+# 函数用途: 将本 run 已确认的一次性工具批准加入 ActionPolicy 输入。
+def _attach_runtime_approved_actions(
+    boundary: dict[str, object],
+    params: object,
+) -> None:
+    runtime_items = getattr(params, "runtime_approved_actions", None)
+    if not isinstance(runtime_items, list) or not runtime_items:
+        return
+    existing = boundary.get("approved_actions")
+    combined = [dict(item) for item in existing if isinstance(item, Mapping)] if isinstance(existing, (list, tuple)) else []
+    seen = {_approval_binding_key(item) for item in combined}
+    for item in runtime_items:
+        if not isinstance(item, Mapping):
+            continue
+        normalized = {str(key): str(value or "").strip() for key, value in item.items()}
+        key = _approval_binding_key(normalized)
+        if not all(key) or key in seen:
+            continue
+        combined.append(normalized)
+        seen.add(key)
+    if combined:
+        boundary["approved_actions"] = combined
+
+
+# LLM: 去重 key 覆盖批准身份全部安全字段；仅 tool/idempotency 相同不能合并不同参数或 operation。
+# 函数用途: 返回批准记录的精确身份元组。
+def _approval_binding_key(value: Mapping[object, object]) -> tuple[str, ...]:
+    return tuple(
+        _text(value.get(key))
+        for key in (
+            "approval_id",
+            "tool_name",
+            "run_id",
+            "operation_id",
+            "idempotency_key",
+            "args_hash",
+            "status",
+        )
+    )
 
 
 def _attach_transient_named_work_write_scope(

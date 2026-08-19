@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from agent_py_agent.agent.action_protocol import RunScope
 from agent_py_agent.agent.agent_core._finalization_service import _message_tool_deliveries
 from agent_py_agent.agent.agent_core.tool_call_archive_record import _compact_result_envelope
 from agent_py_agent.agent.artifacts.registry import ArtifactRegistration, register_artifact
@@ -421,6 +422,37 @@ def test_send_message_business_key_blocks_new_call_id_in_same_request(tmp_path: 
     assert new_request.operation.replayed is False
 
 
+def test_send_message_accepts_run_scope_json_projection_for_empty_evidence_refs(
+    tmp_path: Path,
+) -> None:
+    owner_root = tmp_path / "owner"
+    owner_root.mkdir()
+    tool, adapter = _tool(owner_root)
+    store = LocalStore(owner_root / "data" / "local.db", enable_fts=False)
+    registry = _message_registry(tmp_path, store, tool)
+    trusted_scope = RunScope(
+        request_id="gw-cli-1",
+        task_id="run-cli-1",
+        run_id="run-cli-1",
+        owner_type="user",
+        owner_id="providers/feishu/users/ou_current_user",
+        delivery_evidence_refs=(),
+    ).to_dict()
+
+    result = execute_registry_test_call(
+        registry,
+        "send_message",
+        {"message": "普通 CLI 回复"},
+        run_id="run-cli-1",
+        call_id="call-cli-1",
+        trusted_run_context={"run_scope": trusted_scope},
+    )
+
+    assert trusted_scope["delivery_evidence_refs"] == []
+    assert result.ok is True
+    assert adapter.messages == [("ou_current_user", "普通 CLI 回复")]
+
+
 def test_ambiguous_send_failure_is_not_executed_again(tmp_path: Path) -> None:
     owner_root = tmp_path / "owner"
     owner_root.mkdir()
@@ -615,7 +647,9 @@ def test_send_message_rejects_file_changed_after_registration(tmp_path: Path) ->
     assert adapter.files == []
 
 
-def test_send_message_is_registered_and_retrieved_for_plain_user_language(tmp_path: Path) -> None:
+def test_send_message_is_registered_but_hidden_without_proactive_owner_route(
+    tmp_path: Path,
+) -> None:
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
         tmp_path,
@@ -623,11 +657,34 @@ def test_send_message_is_registered_and_retrieved_for_plain_user_language(tmp_pa
 
     names = {spec.name for spec in agent.tools.specs(include_orchestration=True)}
     relevant = {spec.name for spec in agent.tools.find_relevant_specs("把刚才生成的文件发我")}
+    snapshot = agent.tools.runtime_snapshot(run_id="local-chat")
 
-    assert "send_message" in names
-    assert "send_message" in relevant
+    assert "send_message" in agent.tools.tools
+    assert "send_message" not in names
+    assert "send_message" not in relevant
+    assert (
+        "send_message",
+        "CHANNEL_ADAPTER_UNAVAILABLE",
+        "current owner has no proactive channel binding",
+    ) in snapshot.unavailable_tools
     assert agent.tools.tools["send_message"]._delivery is agent.delivery_service
     assert (
         agent.tools.tools["list_capabilities"].sources.channel_registry
         is agent.channel_registry
     )
+
+
+def test_send_message_is_visible_when_owner_has_a_proactive_route(tmp_path: Path) -> None:
+    owner_root = tmp_path / "owner"
+    owner_root.mkdir()
+    tool, _adapter = _tool(owner_root)
+    store = LocalStore(owner_root / "data" / "local.db", enable_fts=False)
+    registry = _message_registry(tmp_path, store, tool)
+
+    snapshot = registry.runtime_snapshot(run_id="feishu-turn")
+
+    assert tool.availability().available is True
+    assert "send_message" in snapshot.available_tool_names
+    assert "send_message" in {
+        spec.name for spec in registry.specs(include_orchestration=True, runtime_snapshot=snapshot)
+    }

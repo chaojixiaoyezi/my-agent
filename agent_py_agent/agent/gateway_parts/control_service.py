@@ -10,10 +10,15 @@ from __future__ import annotations
 import json
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from ..concurrency.interrupt import interrupt_by_name, is_interruptible_registered
+from ..conversation.compact import (
+    inspect_conversation_context,
+    prepare_conversation_context,
+    render_conversation_context_usage,
+)
 from ..conversation.control_commands import (
     ConversationControlCommand,
     ConversationControlResult,
@@ -25,16 +30,24 @@ from ..conversation.control_commands import (
 )
 from ..conversation.models import (
     THREAD_TASK_LINK_INACTIVE_STATUSES,
+    GuidanceEntry,
+    new_id,
     thread_task_run_started_at,
+)
+from ..conversation.run_claim import (
+    ConversationRunLaneRequest,
+    claim_heartbeat_interval_seconds,
+    conversation_run_lane,
 )
 from ..memory_store.lifecycle import (
     MemoryCuratorLifecycleRequest,
     request_memory_curator_for_session,
 )
+from ..user_space.owner_resolver import OwnerIdentity
 from .audit_control_service import AuditControlRequest, execute_audit_control_operation
 from .goal_control_service import GoalControlRequest, execute_goal_control_operation
-from .io import read_json_file_report, update_json_file_atomic
-from .paths import GatewayPaths, gateway_chunk_path
+from .io import gateway_turn_transition, read_json_file_report, update_json_file_atomic
+from .paths import GatewayPaths, gateway_chunk_path, gateway_paths_from_root
 
 _ACTIVE_SUBAGENT_STATUSES = {
     "PLANNING",
@@ -46,6 +59,9 @@ _ACTIVE_SUBAGENT_STATUSES = {
 _DONE_SUBAGENT_STATUSES = {"DONE", "CANCELLED"}
 
 
+# LLM: Authenticated issuer facts and a once-resolved owner are separate. Durable control receipts
+# persist both; callers must never derive owner authority from command text or a later config read.
+# 类用途: 保存一条控制命令的可信来源、会话定位和可选的固定 owner 身份。
 @dataclass(frozen=True)
 class GatewayControlScope:
     user_id: str
@@ -53,6 +69,7 @@ class GatewayControlScope:
     conversation_id: str
     metadata: dict[str, object] = field(default_factory=dict)
     all_user_access: bool = False
+    resolved_owner: OwnerIdentity | None = None
 
 
 @dataclass(frozen=True)
@@ -61,6 +78,224 @@ class _GatewayRequestRecord:
     payload: dict[str, object]
     target_kind: str = "request"
     linked_request: _GatewayRequestRecord | None = None
+
+
+# LLM: A receipt state comes only from the owner-scoped ConversationStore. It lets control
+# routing distinguish a terminal replay from an in-flight write before inspecting live requests.
+# 类用途: 保存一条活动回合补充消息的持久回执及其权威存储位置。
+@dataclass(frozen=True)
+class _SteerReceiptState:
+    store: object
+    dedupe_key: str
+    status: str
+    entry: GuidanceEntry
+    input_matches: bool = True
+
+
+# LLM: A channel message is unique inside one owner/thread. The receipt stores the exact turn id
+# as a validated fact, while this lookup identity remains discoverable after that turn disappears.
+# 函数用途: 生成跨重试可查询的活动回合补充消息幂等键。
+# LLM: New cross-process ingress keys use authenticated channel scope, which is available before
+# any active-turn side effect. The owner store remains the outer isolation boundary.
+# 函数用途: 为普通消息预先生成可持久化的 guidance 幂等键，Gateway 崩溃后无需猜 thread。
+def active_turn_guidance_dedupe_key(scope: GatewayControlScope) -> str:
+    return json.dumps(
+        {
+            "schema_version": "active_turn_guidance_key.v2",
+            "kind": "active_turn_user_input",
+            "user_id": str(scope.user_id or "").strip(),
+            "channel": str(scope.channel or "").strip(),
+            "conversation_id": str(scope.conversation_id or "").strip(),
+            "channel_message_id": _steer_channel_message_id(scope),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+# LLM: v1 lookup exists only for an explicit on-disk migration read; new writes never use it.
+# 函数用途: 生成旧版 thread 作用域幂等键，以便升级后仍能查询已有回执。
+def _legacy_active_turn_guidance_dedupe_key(thread_id: str, channel_message_id: str) -> str:
+    return json.dumps(
+        {
+            "kind": "active_turn_user_input",
+            "thread_id": str(thread_id or "").strip(),
+            "channel_message_id": str(channel_message_id or "").strip(),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+# LLM: Expected-turn authority is a typed ingress fact. Message text and current task labels can
+# never substitute for this exact id.
+# 函数用途: 读取客户端提交时看到的活动回合 ID。
+def _steer_expected_turn_id(scope: GatewayControlScope) -> str:
+    return str(scope.metadata.get("expected_turn_id") or "").strip()
+
+
+# LLM: Client correlation accepts only the explicit channel message id carried by the adapter.
+# 函数用途: 读取补充消息在客户端侧生成的稳定 ID。
+def _steer_channel_message_id(scope: GatewayControlScope) -> str:
+    return str(scope.metadata.get("message_id") or "").strip()
+
+
+# LLM: A durable task may own the guidance queue while its linked processing request remains the
+# active turn observed by the client. Exact-turn comparison therefore uses the linked request.
+# 函数用途: 返回当前控制目标对应的真实前台回合 ID。
+def _active_turn_request_id(active: _GatewayRequestRecord | None) -> str:
+    if active is None:
+        return ""
+    linked = active.linked_request
+    if linked is not None and linked.path is not None and linked.path.exists():
+        return _record_id(linked)
+    return _record_id(active)
+
+
+# LLM: Receipt lookup resolves the same owner/thread store as control routing and validates all
+# available ingress facts. It never scans another owner's files or infers identity from content.
+# 函数用途: 查询一条补充消息是否已经有持久化投递结果。
+def _active_turn_steer_receipt(
+    base_agent: object,
+    command: ConversationControlCommand,
+    scope: GatewayControlScope,
+) -> _SteerReceiptState | None:
+    message_id = _steer_channel_message_id(scope)
+    if not message_id:
+        return None
+    owner_agent = _request_agent_for_scope(base_agent, scope)
+    store = owner_agent.conversation_store
+    thread = store.resolve_thread(
+        channel=scope.channel,
+        channel_conversation_id=scope.conversation_id,
+        channel_user_id=scope.user_id,
+    )
+    if thread is None:
+        return None
+    key = active_turn_guidance_dedupe_key(scope)
+    receipt = store.guidance_once_receipt(key)
+    if receipt is None:
+        legacy_key = _legacy_active_turn_guidance_dedupe_key(thread.thread_id, message_id)
+        receipt = store.guidance_once_receipt(legacy_key)
+        if receipt is not None:
+            key = legacy_key
+    if receipt is None:
+        return None
+    metadata = receipt.entry.metadata if isinstance(receipt.entry.metadata, dict) else {}
+    expected_turn_id = _steer_expected_turn_id(scope)
+    input_matches = all(
+        (
+            receipt.entry.message == str(command.value or "").strip(),
+            str(metadata.get("thread_id") or "").strip() == thread.thread_id,
+            str(metadata.get("channel_message_id") or "").strip() == message_id,
+            not expected_turn_id
+            or str(metadata.get("expected_turn_id") or "").strip() == expected_turn_id,
+        )
+    )
+    return _SteerReceiptState(
+        store=store,
+        dedupe_key=key,
+        status=receipt.status,
+        entry=receipt.entry,
+        input_matches=input_matches,
+    )
+
+
+# LLM: Terminal receipt projection preserves the delivery tri-state separately from command
+# prose. Rejected receipts never become a successful queue acknowledgement.
+# 函数用途: 把持久回执转换成 Gateway 控制响应。
+def _control_result_from_steer_receipt(
+    receipt: _SteerReceiptState,
+) -> ConversationControlResult:
+    if not receipt.input_matches:
+        return ConversationControlResult(
+            "steer",
+            False,
+            "同一消息 ID 已用于另一条内容或另一回合，本次补充被拒绝。",
+            request_id=str(receipt.entry.metadata.get("expected_turn_id") or ""),
+            delivery_status="rejected",
+            guidance_dedupe_key=receipt.dedupe_key,
+        )
+    if receipt.status == "consumed":
+        return ConversationControlResult(
+            "steer",
+            True,
+            "该补充消息已由当前回合接收。",
+            request_id=str(receipt.entry.metadata.get("expected_turn_id") or "")
+            or receipt.entry.target_id,
+            delivery_status="accepted",
+            guidance_dedupe_key=receipt.dedupe_key,
+        )
+    if receipt.status == "rejected":
+        return ConversationControlResult(
+            "steer",
+            False,
+            "目标回合已结束或切换，补充消息未进入其他任务。",
+            request_id=str(receipt.entry.metadata.get("expected_turn_id") or ""),
+            delivery_status="rejected",
+            guidance_dedupe_key=receipt.dedupe_key,
+        )
+    return ConversationControlResult(
+        "steer",
+        True,
+        "补充消息仍在确认；请使用同一消息 ID 继续对账。",
+        request_id=str(receipt.entry.metadata.get("expected_turn_id") or ""),
+        delivery_status="unknown",
+        guidance_dedupe_key=receipt.dedupe_key,
+    )
+
+
+# LLM: Durable control-operation reconciliation may only inspect an existing guidance receipt;
+# it must never append guidance while servicing a GET/status retry after an ambiguous POST.
+# 函数用途: 只读查询同一条 `/btw` 是否已有权威投递回执，不存在时返回 None。
+def reconcile_gateway_steer_delivery(
+    agent: object,
+    paths: GatewayPaths,
+    command: ConversationControlCommand,
+    scope: GatewayControlScope,
+) -> ConversationControlResult | None:
+    if command.kind != "steer" or not command.valid:
+        return None
+    try:
+        receipt = _active_turn_steer_receipt(agent, command, scope)
+    except Exception:
+        return None
+    if receipt is not None:
+        if not receipt.input_matches or receipt.status in {"consumed", "rejected"}:
+            return _control_result_from_steer_receipt(receipt)
+        turn_id = str(
+            receipt.entry.metadata.get("expected_turn_id")
+            if isinstance(receipt.entry.metadata, dict)
+            else ""
+        ).strip() or _steer_expected_turn_id(scope)
+        return _reconcile_existing_steer_receipt(paths, scope, receipt, turn_id)
+    turn_id = _steer_expected_turn_id(scope)
+    if not turn_id:
+        return None
+    # A crash may leave the wrapper operation after executing but before append_guidance_once.
+    # Re-read the exact receipt while holding T so a concurrent append/terminal cannot be missed.
+    with gateway_turn_transition(paths, turn_id):
+        try:
+            receipt = _active_turn_steer_receipt(agent, command, scope)
+        except Exception:
+            return None
+        lifecycle = _exact_gateway_turn_lifecycle_locked(paths, scope, turn_id)
+        if receipt is None and lifecycle == "terminal":
+            return ConversationControlResult(
+                "steer",
+                False,
+                "目标回合已结束，且未发现该补充消息的投递记录。",
+                request_id=turn_id,
+                delivery_status="rejected",
+                guidance_dedupe_key=active_turn_guidance_dedupe_key(scope),
+            )
+    if receipt is None:
+        return None
+    if not receipt.input_matches or receipt.status in {"consumed", "rejected"}:
+        return _control_result_from_steer_receipt(receipt)
+    return _reconcile_existing_steer_receipt(paths, scope, receipt, turn_id)
 
 
 # LLM: Every adapter reaches the same typed control service; no IM-specific prompt branch is allowed.
@@ -79,10 +314,53 @@ def execute_gateway_conversation_control(
         return _execute_audit_control(agent, paths, command, scope)
     if command.kind == "verbose":
         return _execute_verbose_control(agent, command, scope)
+    if command.kind == "context":
+        return _execute_context_control(agent, command, scope)
+    if command.kind == "compact":
+        return _execute_compact_control(agent, paths, command, scope)
+    if command.kind == "effort":
+        return _execute_effort_control(agent, command, scope)
+    steer_receipt: _SteerReceiptState | None = None
+    if command.kind == "steer":
+        try:
+            steer_receipt = _active_turn_steer_receipt(agent, command, scope)
+        except Exception:
+            return ConversationControlResult(
+                "steer",
+                False,
+                "补充消息的持久回执暂时无法确认；系统会继续使用同一消息 ID 对账。",
+                delivery_status="unknown",
+            )
+        if steer_receipt is not None and (
+            not steer_receipt.input_matches
+            or steer_receipt.status in {"consumed", "rejected"}
+        ):
+            return _control_result_from_steer_receipt(steer_receipt)
     if command.kind == "stop":
-        live_request = _live_window_request(paths, scope)
-        if live_request is not None:
-            return _stop_live_window_request(agent, live_request, scope)
+        live_requests = _live_window_requests(paths, scope)
+        expected_turn_id = _steer_expected_turn_id(scope)
+        if expected_turn_id:
+            live_requests = [
+                record
+                for record in live_requests
+                if _active_turn_request_id(record) == expected_turn_id
+            ]
+            if len(live_requests) != 1:
+                return ConversationControlResult(
+                    "stop",
+                    False,
+                    "目标回合已结束或切换，未停止其他回合。",
+                    request_id=expected_turn_id,
+                    delivery_status="rejected",
+                )
+        if len(live_requests) > 1:
+            return ConversationControlResult(
+                "stop",
+                False,
+                "检测到多个冲突的活动回合，未猜测停止其中一个；请先让 Gateway 恢复器收口。",
+            )
+        if live_requests:
+            return _stop_live_window_request(agent, paths, live_requests[0], scope)
         live_task = _active_conversation_task(agent, scope, live_only=True)
         if live_task is not None:
             return _stop_active_task(agent, live_task, scope)
@@ -92,6 +370,30 @@ def execute_gateway_conversation_control(
             "当前没有运行中的内容，无需停止。",
         )
     active = _active_control_target(agent, paths, scope)
+    if command.kind == "steer":
+        expected_turn_id = _steer_expected_turn_id(scope)
+        receipt_turn_id = (
+            str(steer_receipt.entry.metadata.get("expected_turn_id") or "").strip()
+            if steer_receipt is not None
+            else ""
+        )
+        required_turn_id = expected_turn_id or receipt_turn_id
+        active_turn_id = _active_turn_request_id(active)
+        if steer_receipt is not None:
+            return _reconcile_existing_steer_receipt(
+                paths,
+                scope,
+                steer_receipt,
+                required_turn_id,
+            )
+        if expected_turn_id and expected_turn_id != active_turn_id:
+            return ConversationControlResult(
+                "steer",
+                False,
+                "目标回合已结束或切换，补充消息未进入其他任务。",
+                request_id=active_turn_id,
+                delivery_status="rejected",
+            )
     if command.kind == "status":
         status = _gateway_task_status(agent, paths, scope, active)
         return ConversationControlResult(
@@ -111,9 +413,10 @@ def execute_gateway_conversation_control(
             command.kind,
             False,
             message,
+            delivery_status="rejected" if command.kind == "steer" else "",
         )
     if command.kind == "steer":
-        return _steer_active_request(agent, active, command, scope)
+        return _steer_active_request(agent, paths, active, command, scope)
     return _stop_active_request(agent, active, scope)
 
 
@@ -125,7 +428,7 @@ def request_gateway_memory_curator_lifecycle(
     scope: GatewayControlScope,
     event: str,
 ) -> MemoryCuratorLifecycleRequest:
-    owner_agent = _request_agent(base_agent, _scope_request_payload(scope))
+    owner_agent = _request_agent_for_scope(base_agent, scope)
     return request_memory_curator_for_session(owner_agent, event=event)
 
 
@@ -137,7 +440,7 @@ def _execute_audit_control(
 ) -> ConversationControlResult:
     """Resolve owner/thread authority, then delegate exact Audit lifecycle semantics."""
     try:
-        owner_agent = _request_agent(base_agent, _scope_request_payload(scope))
+        owner_agent = _request_agent_for_scope(base_agent, scope)
         store = owner_agent.conversation_store
         pending = (
             _pending_exact_audit_requests(paths, scope, command.name)
@@ -152,7 +455,7 @@ def _execute_audit_control(
                 continue
             stopped_request_ids.append(request_id)
             interrupt_by_name(conversation_request_interrupt_name(request_id))
-            _cancel_request_subagents_async(base_agent, record.payload, request_id)
+            _cancel_request_subagents_async(owner_agent, request_id)
         thread = store.get_or_create_thread(
             {
                 "canonical_user_id": scope.user_id,
@@ -254,6 +557,7 @@ def steer_active_conversation_if_running(
     user_input = str(message or "").strip()
     result = _steer_active_request(
         agent,
+        paths,
         active,
         ConversationControlCommand("steer", value=user_input, valid=bool(user_input)),
         scope,
@@ -268,6 +572,8 @@ def steer_active_conversation_if_running(
             result.message,
             request_id=_record_id(processing),
             status=result.status,
+            delivery_status=result.delivery_status,
+            guidance_dedupe_key=result.guidance_dedupe_key,
         )
     return result
 
@@ -281,7 +587,7 @@ def _execute_goal_control(
 ) -> ConversationControlResult:
     """Execute an explicit `/goal` lifecycle operation on this exact conversation."""
     try:
-        owner_agent = _request_agent(base_agent, _scope_request_payload(scope))
+        owner_agent = _request_agent_for_scope(base_agent, scope)
         store = owner_agent.conversation_store
         thread = store.get_or_create_thread(
             {
@@ -319,7 +625,7 @@ def _execute_verbose_control(
     scope: GatewayControlScope,
 ) -> ConversationControlResult:
     try:
-        owner_agent = _request_agent(base_agent, _scope_request_payload(scope))
+        owner_agent = _request_agent_for_scope(base_agent, scope)
         store = owner_agent.conversation_store
         thread = store.get_or_create_thread(
             {
@@ -352,6 +658,197 @@ def _execute_verbose_control(
         )
 
 
+# LLM: `/context` is a read-only projection of the same owner/thread, prompt estimator, and
+# compact policy used by Gateway preflight; it must not create a thread or trigger compaction.
+# 函数用途: 查看当前会话的估算占用、模型窗口、自动压缩线和压缩代际。
+def _execute_context_control(
+    base_agent: object,
+    command: ConversationControlCommand,
+    scope: GatewayControlScope,
+) -> ConversationControlResult:
+    del command
+    try:
+        owner_agent = _request_agent_for_scope(base_agent, scope)
+        store = owner_agent.conversation_store
+        thread = _conversation_thread_for_scope(store, scope)
+        usage = inspect_conversation_context(owner_agent, store, thread)
+        model_name = str(
+            getattr(getattr(owner_agent, "config", None), "model_name", "") or ""
+        )
+        return ConversationControlResult(
+            "context",
+            True,
+            render_conversation_context_usage(usage, model_name=model_name),
+        )
+    except Exception:
+        return ConversationControlResult(
+            "context",
+            False,
+            "当前会话的上下文状态暂时不可用，请稍后重试。",
+        )
+
+
+# LLM: Manual compact may mutate only the exact idle owner/thread and must hold the same durable
+# execution lane as foreground/background turns before calling the canonical checkpoint/CAS path.
+# 函数用途: 强制压缩当前已完成的会话历史；活跃任务或并发执行时会明确拒绝。
+def _execute_compact_control(
+    base_agent: object,
+    paths: GatewayPaths,
+    command: ConversationControlCommand,
+    scope: GatewayControlScope,
+) -> ConversationControlResult:
+    if _live_window_request(paths, scope) is not None:
+        return ConversationControlResult(
+            "compact",
+            False,
+            "当前任务仍在运行；请等本轮完成或先使用 /stop，再执行 /compact。",
+        )
+    try:
+        owner_agent = _request_agent_for_scope(base_agent, scope)
+        store = owner_agent.conversation_store
+        thread = _conversation_thread_for_scope(store, scope)
+        if thread is None:
+            return ConversationControlResult(
+                "compact",
+                False,
+                "当前会话还没有可压缩的历史。",
+            )
+        before = inspect_conversation_context(owner_agent, store, thread)
+        if before.pending_messages <= 0:
+            return ConversationControlResult(
+                "compact",
+                False,
+                "当前会话没有新的已完成历史需要压缩。",
+            )
+        with _manual_compact_lane(owner_agent, store, thread.thread_id):
+            refreshed = store.load_thread(thread.thread_id)
+            if refreshed is None:
+                raise OSError("conversation thread disappeared before manual compact")
+            before = inspect_conversation_context(owner_agent, store, refreshed)
+            compacted = prepare_conversation_context(
+                owner_agent,
+                store,
+                refreshed,
+                current_prompt="",
+                force=True,
+                custom_instructions=command.value,
+            )
+        if not compacted.compacted:
+            return ConversationControlResult(
+                "compact",
+                False,
+                "当前会话没有新的已完成历史需要压缩。",
+            )
+        return ConversationControlResult(
+            "compact",
+            True,
+            (
+                f"Context compacted · generation {compacted.thread.compact_generation}\n"
+                f"上下文估算：{before.projected_tokens:,} → "
+                f"{compacted.projected_tokens:,} tokens；"
+                f"本次纳入摘要 {before.pending_messages} 条已完成消息。"
+            ),
+        )
+    except InterruptedError:
+        return ConversationControlResult(
+            "compact",
+            False,
+            "当前会话正被另一个执行轮占用，本次未压缩；请稍后重试。",
+        )
+    except Exception:
+        return ConversationControlResult(
+            "compact",
+            False,
+            "手动 compact 未完成，会话游标保持原状；请稍后重试。",
+        )
+
+
+# LLM: The lane has a short admission deadline because a slash control must never queue behind a
+# long model turn; once acquired, its heartbeat covers the complete summary-model call and commit.
+# 函数用途: 为手动 compact 快速申请与正常任务共用的单会话执行权。
+def _manual_compact_lane(owner_agent: object, store: object, thread_id: str):
+    config = getattr(owner_agent, "config", None)
+    ttl_seconds = max(
+        1,
+        int(getattr(config, "background_claim_ttl_seconds", 90) or 90),
+    )
+    deadline = time.monotonic() + 1.0
+    return conversation_run_lane(
+        ConversationRunLaneRequest(
+            store=store,
+            thread_id=thread_id,
+            claim_task_id=new_id("manual-compact"),
+            reason="manual_conversation_compact",
+            lease_seconds=ttl_seconds,
+            heartbeat_interval_seconds=claim_heartbeat_interval_seconds(
+                ttl_seconds=ttl_seconds,
+                configured_interval_seconds=getattr(
+                    config,
+                    "background_claim_heartbeat_interval_seconds",
+                    0,
+                ),
+            ),
+            interrupt_check=lambda: time.monotonic() >= deadline,
+            runtime_facts={"execution_source": "conversation_control"},
+        )
+    )
+
+
+# LLM: Effort is an inference parameter, not a prose style. Until a backend exposes a verified
+# structured setter, every requested level must fail explicitly without changing temperature/prompt.
+# 函数用途: 查看或设置 effort 时说明当前真实能力，防止显示已设置但实际没生效。
+def _execute_effort_control(
+    base_agent: object,
+    command: ConversationControlCommand,
+    scope: GatewayControlScope,
+) -> ConversationControlResult:
+    try:
+        owner_agent = _request_agent_for_scope(base_agent, scope)
+        backend = getattr(owner_agent, "backend", None)
+        levels = tuple(getattr(backend, "supported_effort_levels", ()) or ())
+    except Exception:
+        levels = ()
+    if not levels:
+        viewing = command.operation in {"view", "help"}
+        prefix = (
+            "用法：/effort [low|medium|high|max|auto]\n"
+            if command.operation == "help"
+            else ""
+        )
+        return ConversationControlResult(
+            "effort",
+            viewing,
+            prefix + "当前模型接口由供应商管理推理强度，未声明可调 effort 档位；未改变任何模型参数。",
+        )
+    if command.operation in {"view", "help"}:
+        prefix = (
+            "用法：/effort [low|medium|high|max|auto]\n"
+            if command.operation == "help"
+            else ""
+        )
+        return ConversationControlResult(
+            "effort",
+            True,
+            prefix + f"后端声明的 effort 档位：{', '.join(map(str, levels))}。",
+        )
+    return ConversationControlResult(
+        "effort",
+        False,
+        "后端声明了 effort 档位，但当前运行时尚无结构化设置入口；本次未应用。",
+    )
+
+
+# LLM: Context controls resolve only the exact authenticated channel binding; query/manual
+# compact must not create a new thread as a side effect or fall back to another conversation.
+# 函数用途: 按用户、通道和会话 id 读取当前唯一 thread，找不到就返回空。
+def _conversation_thread_for_scope(store: object, scope: GatewayControlScope):
+    return store.resolve_thread(
+        channel=scope.channel,
+        channel_conversation_id=scope.conversation_id,
+        channel_user_id=scope.user_id,
+    )
+
+
 # LLM: Pause/clear interrupts the current goal turn and descendants while preserving its durable task workspace.
 # 函数用途: 停止持续目标当前执行域与子代理，但不删除目标现场。
 def _interrupt_goal_task(owner_agent: object, goal: object) -> None:
@@ -360,8 +857,7 @@ def _interrupt_goal_task(owner_agent: object, goal: object) -> None:
     store.update_task_status({"task_id": task_id, "status": "interrupted"})
     _interrupt_task_registry_record(owner_agent, task_id)
     interrupt_by_name(conversation_request_interrupt_name(task_id))
-    payload = {"id": task_id, "request_id": task_id}
-    _cancel_request_subagents_async(owner_agent, payload, task_id)
+    _cancel_request_subagents_async(owner_agent, task_id)
 
 
 # LLM: Resume updates the existing task projection; it never registers a second task identity.
@@ -427,22 +923,51 @@ def _active_request(paths: GatewayPaths, scope: GatewayControlScope) -> _Gateway
     records = [
         record
         for record in _matching_requests(paths.processing, scope)
-        if not _request_is_detached(record)
+        if not _request_is_detached(record) and _request_accepts_active_input(record)
     ]
-    if not records:
+    if len(records) != 1:
+        # A scope has one active-turn authority. Multiple processing records
+        # are a recovery conflict, so ordinary input queues instead of guessing.
         return None
-    return max(records, key=lambda item: _request_timestamp(item.payload))
+    return records[0]
+
+
+# LLM: Presence in processing is not enough once terminalization has closed the turn. Admission
+# reads this structured phase while holding the same exact-turn lock that writes it.
+# 函数用途: 判断 processing 请求是否仍处于允许普通输入插入的开放阶段。
+def _request_accepts_active_input(record: _GatewayRequestRecord) -> bool:
+    phase = str(record.payload.get("turn_phase") or "open").strip().lower()
+    status = str(record.payload.get("status") or "processing").strip().lower()
+    control_status = str(record.payload.get("control_status") or "").strip().lower()
+    return (
+        phase == "open"
+        and not bool(record.payload.get("cancel_requested"))
+        and control_status != "stopping"
+        and status not in {"done", "failed", "cancelled", "stopped"}
+    )
 
 
 def _live_window_request(
     paths: GatewayPaths,
     scope: GatewayControlScope,
 ) -> _GatewayRequestRecord | None:
-    """Return the exact live model turn, including a detached task's ingress turn."""
-    records = list(_matching_requests(paths.processing, scope))
-    if not records:
-        return None
-    return max(records, key=lambda item: _request_timestamp(item.payload))
+    """Return the sole exact live turn, including a detached task's ingress turn."""
+    records = _live_window_requests(paths, scope)
+    return records[0] if len(records) == 1 else None
+
+
+# LLM: Stop/status selection exposes all matching open turns so callers can fail closed on a
+# recovery conflict instead of choosing the newest timestamp as an invented authority.
+# 函数用途: 列出本用户会话所有仍开放的精确前台回合，供唯一性检查。
+def _live_window_requests(
+    paths: GatewayPaths,
+    scope: GatewayControlScope,
+) -> list[_GatewayRequestRecord]:
+    return [
+        record
+        for record in _matching_requests(paths.processing, scope)
+        if _request_accepts_active_input(record)
+    ]
 
 
 def _request_is_detached(record: _GatewayRequestRecord) -> bool:
@@ -470,7 +995,7 @@ def _active_conversation_task(
     """Resolve the latest user-selectable active root task in this exact owner conversation."""
     scope_payload = _scope_request_payload(scope)
     try:
-        owner_agent = _request_agent(base_agent, scope_payload)
+        owner_agent = _request_agent_for_scope(base_agent, scope)
         store = owner_agent.conversation_store
         thread = store.resolve_thread(
             channel=scope.channel,
@@ -671,72 +1196,139 @@ def _request_matches_scope(payload: dict[str, object], scope: GatewayControlScop
 # 函数用途：把用户补充写入当前 owner 的当前任务引导收件箱。
 def _steer_active_request(
     base_agent: object,
+    paths: GatewayPaths,
     active: _GatewayRequestRecord,
     command: ConversationControlCommand,
     scope: GatewayControlScope,
 ) -> ConversationControlResult:
     request_id = _record_id(active)
     target_type = "task" if active.target_kind == "task" else "request"
+    turn_id = _active_turn_request_id(active)
     try:
-        owner_agent = _request_agent(base_agent, active.payload)
-        store = owner_agent.conversation_store
-        thread_id = _control_thread_id(store, active, scope)
-        if not thread_id:
-            raise ValueError("conversation thread is unavailable")
-        if target_type == "task":
-            with store.task_transition_guard(request_id):
-                if not _durable_task_is_current(owner_agent, active):
-                    return ConversationControlResult(
-                        "steer",
-                        False,
-                        "当前任务刚刚结束或已切换，补充要求未应用到下一任务。",
-                        request_id=request_id,
-                    )
-                entry = _append_control_guidance(
-                    store, target_type, request_id, command, scope, thread_id
+        with gateway_turn_transition(paths, turn_id):
+            expected_turn_id = _steer_expected_turn_id(scope)
+            if expected_turn_id and expected_turn_id != turn_id:
+                return ConversationControlResult(
+                    "steer",
+                    False,
+                    "目标回合已经结束或已切换，补充消息未进入其他任务。",
+                    request_id=turn_id,
+                    delivery_status="rejected",
                 )
-                # Binding a newer task does not take the old task's transition lock.
-                # Re-check after the durable append, matching 会话运行时's expected-turn
-                # guard: a steer that lost the current-turn race is retired and never
-                # becomes input for either the old or the new task.
-                if not _durable_task_is_current(owner_agent, active):
-                    store.mark_guidance_delivered([entry.guidance_id])
+            linked_state = (
+                _linked_request_target_state(active.linked_request, request_id)
+                if target_type == "task" and active.linked_request is not None
+                else ""
+            )
+            live_record = (
+                active.linked_request
+                if target_type == "task" and linked_state == "current"
+                else active
+                if target_type == "request"
+                else None
+            )
+            if live_record is not None:
+                fresh_payload = _load_open_exact_turn(paths, live_record, scope, turn_id)
+                if fresh_payload is None:
                     return ConversationControlResult(
                         "steer",
                         False,
-                        "当前任务刚刚结束或已切换，补充要求未应用到下一任务。",
-                        request_id=request_id,
+                        "当前任务刚刚结束或正在停止，补充要求未应用到下一任务。",
+                        request_id=turn_id,
+                        delivery_status="rejected",
                     )
-        else:
-            entry = _append_control_guidance(
-                store, target_type, request_id, command, scope, thread_id
-            )
+                if target_type == "request":
+                    active = _GatewayRequestRecord(
+                        live_record.path,
+                        fresh_payload,
+                        live_record.target_kind,
+                        live_record.linked_request,
+                    )
+            owner_agent = _request_agent_for_scope(base_agent, scope)
+            store = owner_agent.conversation_store
+            thread_id = _control_thread_id(store, active, scope)
+            if not thread_id:
+                raise ValueError("conversation thread is unavailable")
+            with store.guidance_turn_transition_guard(turn_id):
+                if target_type == "task":
+                    with store.task_transition_guard(request_id):
+                        if not _durable_task_is_current(owner_agent, active):
+                            return ConversationControlResult(
+                                "steer",
+                                False,
+                                "当前任务刚刚结束或已切换，补充要求未应用到下一任务。",
+                                request_id=request_id,
+                                delivery_status="rejected",
+                            )
+                        entry = _append_control_guidance(
+                            store,
+                            target_type,
+                            request_id,
+                            command,
+                            scope,
+                            thread_id,
+                            turn_id,
+                        )
+                        if not _durable_task_is_current(owner_agent, active):
+                            winner = _mark_control_guidance_result(store, entry, "rejected")
+                            return _control_result_for_guidance_winner(winner, request_id)
+                else:
+                    entry = _append_control_guidance(
+                        store,
+                        target_type,
+                        request_id,
+                        command,
+                        scope,
+                        thread_id,
+                        turn_id,
+                    )
     except Exception:
         return ConversationControlResult(
             "steer",
             False,
-            "当前任务的补充通道暂时不可用，补充要求未保存。",
-            request_id=request_id,
+            "当前任务的补充通道状态暂时无法确认；系统会继续使用同一消息 ID 对账。",
+            request_id=turn_id,
+            delivery_status="unknown",
         )
-    if target_type == "task":
-        if active.linked_request is None or _linked_request_target_state(
-            active.linked_request, request_id
-        ) == "retired":
-            _wake_for_task_guidance(owner_agent, active, entry.guidance_id, scope)
-    elif active.path is None or not active.path.exists():
-        owner_agent.conversation_store.mark_guidance_delivered([entry.guidance_id])
-        return ConversationControlResult(
-            "steer",
-            False,
-            "当前任务刚刚结束，补充要求未应用到下一任务。",
-            request_id=request_id,
-        )
+    if target_type == "task" and (
+        active.linked_request is None
+        or _linked_request_target_state(active.linked_request, request_id) == "retired"
+    ):
+        _wake_for_task_guidance(owner_agent, active, entry.guidance_id, scope)
     return ConversationControlResult(
         "steer",
         True,
-        "已补充到当前任务；代理会在下一个安全点按新要求调整。",
-        request_id=request_id,
+        "补充消息已进入精确回合的待认领队列，正在等待下一个模型安全点确认。",
+        request_id=turn_id,
+        delivery_status="unknown",
+        guidance_dedupe_key=str(entry.metadata.get("dedupe_key") or ""),
     )
+
+
+# LLM: Admission must re-read the selected processing record while holding its exact-turn lock.
+# Stale preselection, owner drift, stop, close, and expected-turn switches all fail before append.
+# 函数用途: 在插入补充消息前重新确认同一个请求仍开放且仍属于当前用户会话。
+def _load_open_exact_turn(
+    paths: GatewayPaths,
+    record: _GatewayRequestRecord,
+    scope: GatewayControlScope,
+    expected_turn_id: str,
+) -> dict[str, object] | None:
+    if (paths.terminal / f"{expected_turn_id}.json").exists():
+        return None
+    if record.path is None or not record.path.exists():
+        return None
+    report = read_json_file_report(record.path, context="gateway.control.exact_turn.read")
+    if report.load_error is not None or not report.payload:
+        return None
+    payload = dict(report.payload)
+    request_id = str(payload.get("id") or record.path.stem).strip()
+    if request_id != str(expected_turn_id or "").strip():
+        return None
+    fresh = _GatewayRequestRecord(record.path, payload)
+    if not _request_matches_scope(payload, scope) or not _request_accepts_active_input(fresh):
+        return None
+    return payload
 
 
 def _append_control_guidance(
@@ -746,25 +1338,183 @@ def _append_control_guidance(
     command: ConversationControlCommand,
     scope: GatewayControlScope,
     thread_id: str,
+    turn_id: str,
 ):
-    channel_message_id = str(scope.metadata.get("message_id") or "").strip()
-    return store.append_guidance(
-        {
-            "target_type": target_type,
-            "target_id": request_id,
-            "message": command.value,
-            "sender": scope.user_id,
-            "priority": "high",
-            "delivery": "current_task" if target_type == "task" else "current_request",
-            "metadata": {
-                "kind": "active_turn_user_input",
-                "record_in_transcript": True,
-                "thread_id": thread_id,
-                "channel": scope.channel,
-                "conversation_id": scope.conversation_id,
-                "channel_message_id": channel_message_id,
-            },
-        }
+    channel_message_id = _steer_channel_message_id(scope)
+    payload = {
+        "target_type": target_type,
+        "target_id": request_id,
+        "message": command.value,
+        "sender": scope.user_id,
+        "priority": "high",
+        "delivery": "current_task" if target_type == "task" else "current_request",
+        "metadata": {
+            "kind": "active_turn_user_input",
+            "record_in_transcript": True,
+            "thread_id": thread_id,
+            "channel": scope.channel,
+            "conversation_id": scope.conversation_id,
+            "channel_message_id": channel_message_id,
+            "expected_turn_id": str(turn_id or "").strip(),
+            "gateway_input_request_id": str(
+                scope.metadata.get("gateway_input_request_id") or ""
+            ).strip(),
+        },
+    }
+    if channel_message_id:
+        return store.append_guidance_once(
+            payload,
+            dedupe_key=active_turn_guidance_dedupe_key(scope),
+        )
+    return store.append_guidance(payload)
+
+
+# LLM: The Gateway writes a terminal receipt before returning or retiring the guidance row.
+# Missing dedupe metadata denotes an internal non-idempotent caller; rejection must still retire its
+# legacy queue row so a later task cannot consume input that lost the exact-task race.
+# 函数用途: 将已写入的补充消息回执确定为接收或拒绝。
+def _mark_control_guidance_result(store: object, entry: GuidanceEntry, status: str):
+    metadata = entry.metadata if isinstance(entry.metadata, dict) else {}
+    dedupe_key = str(metadata.get("dedupe_key") or "").strip()
+    if dedupe_key:
+        return store.mark_guidance_once_status(dedupe_key, status)
+    if status == "rejected":
+        store.mark_guidance_delivered([entry.guidance_id])
+    return None
+
+
+# LLM: A concurrent runtime claim may beat rejection. Callers project the returned durable winner
+# instead of assuming their requested transition succeeded.
+# 函数用途: 把补充消息状态竞争的真实结果转换成控制响应。
+def _control_result_for_guidance_winner(winner: object, request_id: str) -> ConversationControlResult:
+    status = str(getattr(winner, "status", "rejected") or "rejected")
+    dedupe_key = str(getattr(winner, "dedupe_key", "") or "")
+    if status == "consumed":
+        return ConversationControlResult(
+            "steer",
+            True,
+            "该补充消息已由当前回合接收。",
+            request_id=request_id,
+            delivery_status="accepted",
+            guidance_dedupe_key=dedupe_key,
+        )
+    if status in {"reserved", "submitted"}:
+        return ConversationControlResult(
+            "steer",
+            True,
+            "补充消息可能已经进入模型请求，当前只能继续按同一消息 ID 对账。",
+            request_id=request_id,
+            delivery_status="unknown",
+            guidance_dedupe_key=dedupe_key,
+        )
+    return ConversationControlResult(
+        "steer",
+        False,
+        "目标回合已结束或切换，补充消息未进入其他任务。",
+        request_id=request_id,
+        delivery_status="rejected",
+        guidance_dedupe_key=dedupe_key,
+    )
+
+
+# LLM: Existing guidance is bound to its receipt's exact turn, never the current active projection.
+# T and the store mailbox guard stay held through terminal rejection, matching provider admission's
+# T-to-M lock order; missing or corrupt lifecycle evidence remains UNKNOWN instead of losing input.
+# 函数用途: 按回执首次绑定的回合对账补充消息，只在锁内证明该回合终态时拒绝尚未认领的记录。
+def _reconcile_existing_steer_receipt(
+    paths: GatewayPaths,
+    scope: GatewayControlScope,
+    receipt: _SteerReceiptState,
+    expected_turn_id: str,
+) -> ConversationControlResult:
+    turn_id = str(expected_turn_id or "").strip()
+    if not turn_id:
+        return _unknown_existing_steer_result(receipt, "")
+    with gateway_turn_transition(paths, turn_id):
+        lifecycle = _exact_gateway_turn_lifecycle_locked(paths, scope, turn_id)
+        if lifecycle != "terminal":
+            return _unknown_existing_steer_result(receipt, turn_id)
+        with receipt.store.guidance_turn_transition_guard(turn_id):
+            winner = receipt.store.mark_guidance_once_status(
+                receipt.dedupe_key,
+                "rejected",
+            )
+    return _control_result_from_steer_receipt(
+        _SteerReceiptState(
+            store=receipt.store,
+            dedupe_key=receipt.dedupe_key,
+            status=winner.status,
+            entry=winner.entry,
+        )
+    )
+
+
+# LLM: This reader runs only while the exact Gateway turn transition lock is held. Canonical or
+# closed hot facts prove terminal; open processing and validated inbox facts remain live/recoverable;
+# absence, owner mismatch, and damaged JSON are UNKNOWN rather than guessed terminal.
+# 函数用途: 在精确回合锁内判定活动、待恢复、终态或证据不足。
+def _exact_gateway_turn_lifecycle_locked(
+    paths: GatewayPaths,
+    scope: GatewayControlScope,
+    turn_id: str,
+) -> str:
+    terminal_path = paths.terminal / f"{turn_id}.json"
+    if terminal_path.is_file():
+        return _validated_exact_turn_file_state(terminal_path, scope, turn_id, "terminal")
+    processing_path = paths.processing / f"{turn_id}.json"
+    if processing_path.is_file():
+        report = read_json_file_report(
+            processing_path,
+            context="gateway.control.receipt_processing.read",
+        )
+        if report.load_error is not None or not report.payload:
+            return "unknown"
+        record = _GatewayRequestRecord(processing_path, dict(report.payload))
+        if _record_id(record) != turn_id or not _request_matches_scope(record.payload, scope):
+            return "unknown"
+        return "active" if _request_accepts_active_input(record) else "terminal"
+    inbox_path = paths.inbox / f"{turn_id}.json"
+    if inbox_path.is_file():
+        return _validated_exact_turn_file_state(inbox_path, scope, turn_id, "recoverable")
+    for folder in (paths.done, paths.failed):
+        archive_path = folder / f"{turn_id}.json"
+        if archive_path.is_file():
+            return _validated_exact_turn_file_state(archive_path, scope, turn_id, "terminal")
+    return "unknown"
+
+
+# LLM: Exact lifecycle files must be readable, identify the requested turn, and retain the same
+# authenticated scope before they can drive receipt state.
+# 函数用途: 校验一个精确请求文件，并在身份一致时返回指定生命周期。
+def _validated_exact_turn_file_state(
+    path: Path,
+    scope: GatewayControlScope,
+    turn_id: str,
+    state: str,
+) -> str:
+    report = read_json_file_report(path, context="gateway.control.receipt_lifecycle.read")
+    if report.load_error is not None or not report.payload:
+        return "unknown"
+    record = _GatewayRequestRecord(path, dict(report.payload))
+    if _record_id(record) != turn_id or not _request_matches_scope(record.payload, scope):
+        return "unknown"
+    return state
+
+
+# LLM: UNKNOWN keeps the original exact target and dedupe key so HTTP/TUI reconciliation can retry
+# the same receipt without rerouting to a later active turn.
+# 函数用途: 构造已有补充消息仍待精确回合证据的统一响应。
+def _unknown_existing_steer_result(
+    receipt: _SteerReceiptState,
+    request_id: str,
+) -> ConversationControlResult:
+    return ConversationControlResult(
+        "steer",
+        False,
+        "补充消息仍在按首次绑定的精确回合确认；请使用同一消息 ID 继续对账。",
+        request_id=request_id,
+        delivery_status="unknown",
+        guidance_dedupe_key=receipt.dedupe_key,
     )
 
 
@@ -854,7 +1604,7 @@ def _linked_request_target_state(linked: _GatewayRequestRecord, task_id: str) ->
     matches = (
         _record_id(current) == _record_id(linked)
         and _linked_conversation_task_id(current) == task_id
-        and not bool(current.payload.get("cancel_requested"))
+        and _request_accepts_active_input(current)
     )
     return "current" if matches else "mismatch"
 
@@ -932,7 +1682,12 @@ def _stop_active_request(
             request_id=request_id,
         )
     interrupt_by_name(conversation_request_interrupt_name(request_id))
-    _cancel_request_subagents_async(base_agent, active.payload, request_id)
+    try:
+        owner_agent = _request_agent_for_scope(base_agent, scope)
+    except Exception:
+        owner_agent = None
+    if owner_agent is not None:
+        _cancel_request_subagents_async(owner_agent, request_id)
     return ConversationControlResult(
         "stop",
         True,
@@ -945,12 +1700,22 @@ def _stop_active_request(
 # 函数用途：像停止按钮一样先打断本会话当前执行轮，再清理它绑定的任务和子代理。
 def _stop_live_window_request(
     base_agent: object,
+    paths: GatewayPaths,
     live_request: _GatewayRequestRecord,
     scope: GatewayControlScope,
 ) -> ConversationControlResult:
     request_id = _record_id(live_request)
+    try:
+        owner_agent = _request_agent_for_scope(base_agent, scope)
+        store = owner_agent.conversation_store
+    except Exception:
+        owner_agent = None
+        store = None
+    with gateway_turn_transition(paths, request_id):
+        marked, failure_message = _mark_request_stopping_locked(live_request, scope)
+        if marked and store is not None:
+            store.reject_pending_guidance_for_turn(request_id)
     interrupted = interrupt_by_name(conversation_request_interrupt_name(request_id))
-    marked, failure_message = _mark_request_stopping(live_request, scope)
     if not interrupted and not marked:
         return ConversationControlResult(
             "stop",
@@ -960,12 +1725,6 @@ def _stop_live_window_request(
         )
 
     linked_task_id = _linked_conversation_task_id(live_request)
-    _retire_stopped_turn_guidance(
-        base_agent,
-        live_request,
-        request_id=request_id,
-        task_id="" if _request_is_detached(live_request) else linked_task_id,
-    )
     if _request_is_detached(live_request):
         return ConversationControlResult(
             "stop",
@@ -986,11 +1745,8 @@ def _stop_live_window_request(
             linked_request_already_stopped=True,
         )
     else:
-        _cancel_request_subagents_async(
-            base_agent,
-            live_request.payload,
-            request_id,
-        )
+        if owner_agent is not None:
+            _cancel_request_subagents_async(owner_agent, request_id)
     return ConversationControlResult(
         "stop",
         True,
@@ -999,36 +1755,39 @@ def _stop_live_window_request(
     )
 
 
-# LLM: Pending user steer belongs to the interrupted turn and must not leak into a later resume.
-# 函数用途：停止当前会话轮次时确认尚未消费的 request/task 引导，但保留已写入的 transcript。
-def _retire_stopped_turn_guidance(
-    base_agent: object,
-    live_request: _GatewayRequestRecord,
-    *,
-    request_id: str,
-    task_id: str,
-) -> None:
-    try:
-        store = _request_agent(base_agent, live_request.payload).conversation_store
-        entries = list(store.pending_guidance("request", request_id, limit=0))
-        if task_id:
-            entries.extend(store.pending_guidance("task", task_id, limit=0))
-        store.mark_guidance_delivered([entry.guidance_id for entry in entries])
-    except Exception:
-        return
-
-
+# LLM: Every stop mutation shares the exact Gateway T lock with steer, provider admission, ACK,
+# and terminal closeout. Callers already holding T must use the locked helper below.
+# 函数用途: 为任意精确热请求获取回合锁，再安全保存停止状态。
 def _mark_request_stopping(
     active: _GatewayRequestRecord,
     scope: GatewayControlScope,
 ) -> tuple[bool, str]:
-    """Persist cancellation on one exact live queue record."""
+    if active.path is None:
+        return False, "当前任务刚刚结束，无需停止。"
+    processing_dir = active.path.parent
+    request_root = processing_dir.parent
+    root = request_root.parent if request_root.name == "requests" else request_root
+    paths = gateway_paths_from_root(root)
+    with gateway_turn_transition(paths, _record_id(active)):
+        return _mark_request_stopping_locked(active, scope)
+
+
+# LLM: This helper mutates cancellation only while its caller owns the exact-turn T lock. It
+# re-reads owner/scope/open state from disk and never trusts a pre-lock active projection.
+# 函数用途: 在已持回合锁时二次校验并写入 closing/cancel 事实。
+def _mark_request_stopping_locked(
+    active: _GatewayRequestRecord,
+    scope: GatewayControlScope,
+) -> tuple[bool, str]:
     request_id = _record_id(active)
     updated_ref = [False]
 
     def mark_cancel(current: dict) -> dict:
         path_stem = active.path.stem if active.path is not None else ""
         if str(current.get("id") or path_stem) != request_id:
+            return current
+        fresh = _GatewayRequestRecord(active.path, dict(current))
+        if not _request_matches_scope(current, scope) or not _request_accepts_active_input(fresh):
             return current
         now = time.time()
         current.update(
@@ -1037,6 +1796,7 @@ def _mark_request_stopping(
                 "cancel_requested_at": now,
                 "cancel_requested_by": scope.user_id,
                 "control_status": "stopping",
+                "turn_phase": "closing",
                 "updated_at": now,
             }
         )
@@ -1056,6 +1816,9 @@ def _mark_request_stopping(
     return True, ""
 
 
+# LLM: Durable task stop uses the owner already frozen in the control scope for every task,
+# guidance, registry, and child-run mutation; active payload routing is never re-evaluated.
+# 函数用途: 停止一个持久会话任务及其精确绑定执行轮，并保留可恢复现场。
 def _stop_active_task(
     base_agent: object,
     active: _GatewayRequestRecord,
@@ -1071,7 +1834,12 @@ def _stop_active_task(
         linked_request_id, linked_marked = _stop_linked_live_request(active, scope)
     task_interrupted = interrupt_by_name(conversation_request_interrupt_name(task_id))
     try:
-        owner_agent, store, stopped = _interrupt_active_task_link(base_agent, active, task_id)
+        owner_agent, store, stopped = _interrupt_active_task_link(
+            base_agent,
+            active,
+            task_id,
+            scope,
+        )
     except Exception:
         if linked_marked:
             interrupt_by_name(conversation_request_interrupt_name(linked_request_id))
@@ -1102,8 +1870,7 @@ def _stop_active_task(
     if linked_request_id:
         interrupt_by_name(conversation_request_interrupt_name(linked_request_id))
     _cancel_request_subagents_async(
-        base_agent,
-        active.payload,
+        owner_agent,
         task_id,
         run_ids=run_ids,
     )
@@ -1115,13 +1882,17 @@ def _stop_active_task(
     )
 
 
+# LLM: The task-link CAS operates only in the persisted control owner selected before execution.
+# Active task payload remains target evidence, never a new owner-routing input.
+# 函数用途: 在任务事务锁下把精确任务链接改为 interrupted，并返回固定 owner 的存储。
 def _interrupt_active_task_link(
     base_agent: object,
     active: _GatewayRequestRecord,
     task_id: str,
+    scope: GatewayControlScope,
 ) -> tuple[object, object, object | None]:
     """CAS the exact projected status to interrupted under the task transition lock."""
-    owner_agent = _request_agent(base_agent, active.payload)
+    owner_agent = _request_agent_for_scope(base_agent, scope)
     store = owner_agent.conversation_store
     expected_status = str(
         active.payload.get("conversation_task_link_status") or "active"
@@ -1201,14 +1972,12 @@ def _interrupt_task_registry_record(owner_agent: object, task_id: str) -> None:
 # LLM: Child cancellation is best-effort and off the HTTP callback thread; the main stop ack stays immediate.
 # 函数用途：后台取消当前请求派生的活跃子代理和进程。
 def _cancel_request_subagents_async(
-    base_agent: object,
-    payload: dict[str, object],
+    owner_agent: object,
     request_id: str,
     *,
     run_ids: list[str] | None = None,
 ) -> None:
     try:
-        owner_agent = _request_agent(base_agent, payload)
         selected_run_ids = (
             list(run_ids)
             if run_ids is not None
@@ -1247,7 +2016,13 @@ def _gateway_task_status(
     live_request = active.linked_request if active is not None else None
     display_selected = live_request or selected
     payload = display_selected.payload if display_selected is not None else _scope_request_payload(scope)
-    owner_agent = _request_agent_or_base(base_agent, payload)
+    if display_selected is None and scope.resolved_owner is not None:
+        try:
+            owner_agent = _request_agent_for_scope(base_agent, scope)
+        except Exception:
+            owner_agent = base_agent
+    else:
+        owner_agent = _request_agent_or_base(base_agent, payload)
     compact_generation, verbose_level = _conversation_profile(owner_agent, payload)
     subagents = (
         _subagent_status(owner_agent, [_record_id(active), _record_id(live_request)])
@@ -1460,6 +2235,32 @@ def _request_agent(base_agent: object, payload: dict[str, object]):
     return _resolve_request_agent(base_agent, payload)
 
 
+# LLM: A bound control scope carries the owner identity chosen before the operation receipt was
+# prepared. Exact recovery must use that identity instead of rerunning mutable routing config.
+# 函数用途: 为首次控制请求冻结 owner；已有回执恢复时保留其中已经固定的 owner。
+def bind_gateway_control_scope_owner(
+    base_agent: object,
+    scope: GatewayControlScope,
+) -> GatewayControlScope:
+    if scope.resolved_owner is not None:
+        return scope
+    from .request_worker import _resolve_request_owner_identity
+
+    owner = _resolve_request_owner_identity(base_agent, _scope_request_payload(scope))
+    return replace(scope, resolved_owner=owner)
+
+
+# LLM: Scope-based controls prefer the persisted owner identity. Raw channel facts are consulted
+# only once, before a durable control receipt exists.
+# 函数用途: 按控制作用域取得唯一 Agent，确保配置变化后仍回到原 owner 对账。
+def _request_agent_for_scope(base_agent: object, scope: GatewayControlScope):
+    if scope.resolved_owner is None:
+        return _request_agent(base_agent, _scope_request_payload(scope))
+    from .request_worker import _resolve_request_agent_for_owner
+
+    return _resolve_request_agent_for_owner(base_agent, scope.resolved_owner)
+
+
 # LLM: Read-only status may degrade to base model facts when an idle owner cannot be materialized.
 # 函数用途：状态查询尽量解析 owner；失败时只返回基础 agent，不扩大写权限。
 def _request_agent_or_base(base_agent: object, payload: dict[str, object]):
@@ -1583,6 +2384,12 @@ def _scope_request_payload(scope: GatewayControlScope) -> dict[str, object]:
     }
 
 
+# LLM: 非会话控制的 Gateway 服务也必须复用同一 owner 裁决；调用方只能传入已认证的 GatewayControlScope。
+# 函数用途: 为记忆、历史等薄客户端服务解析与普通请求完全相同的 owner-scoped Agent。
+def resolve_gateway_scope_agent(base_agent: object, scope: GatewayControlScope):
+    return _request_agent_for_scope(base_agent, scope)
+
+
 # LLM: Request ids are taken only from the claimed record or its filename.
 # 函数用途：读取请求记录的稳定 id。
 def _record_id(record: _GatewayRequestRecord | None) -> str:
@@ -1622,6 +2429,8 @@ def _request_prompt(payload: dict[str, object]) -> str:
 __all__ = [
     "GatewayControlScope",
     "execute_gateway_conversation_control",
+    "reconcile_gateway_steer_delivery",
     "request_gateway_memory_curator_lifecycle",
+    "resolve_gateway_scope_agent",
     "steer_active_conversation_if_running",
 ]

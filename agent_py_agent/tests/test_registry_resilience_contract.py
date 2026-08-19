@@ -21,7 +21,7 @@ from agent_py_agent.agent.tooling._filesystem_read import (
 )
 from agent_py_agent.agent.tooling._filesystem_search import SearchTextTool
 from agent_py_agent.agent.tooling.executor import ToolOutputProjection
-from agent_py_agent.agent.tooling.models import BaseTool, ToolHandlerOutcome
+from agent_py_agent.agent.tooling.models import BaseTool, ToolHandlerOutcome, ToolInvocationContext
 from agent_py_agent.agent.tooling.registry_invoke import (
     AuthorizedToolDispatchRequest,
     RegistryToolInvokeRequest,
@@ -31,7 +31,6 @@ from agent_py_agent.agent.tooling.registry_invoke import (
     execute_authorized_tool,
     invoke_registry_tool,
 )
-from agent_py_agent.agent.tooling.models import ToolInvocationContext
 from agent_py_agent.agent.tooling.runtime_contracts import (
     ToolContentBlock,
     ToolResultRef,
@@ -415,12 +414,14 @@ def test_registry_result_may_tighten_but_not_loosen_projection_policy(
 def test_process_tools_receive_structured_sandbox_write_roots(tmp_path: Path) -> None:
     task_root = tmp_path / "task"
     allowed = task_root / "work"
+    output = task_root / "output"
     readable = tmp_path / "shared-source"
     boundary = {
-        "allowed_write_roots": [str(allowed)],
+        "allowed_write_roots": [str(output), str(allowed)],
         "allowed_read_roots": [str(readable)],
         "shell_access_mode": "workspace-write",
         "task_root": str(task_root),
+        "task_work_dir": str(allowed),
     }
     for tool_name in ("run_command", "terminal_session", "lsp"):
         tool_params = {"action": "start"} if tool_name == "terminal_session" else {"action": "status"}
@@ -434,7 +435,7 @@ def test_process_tools_receive_structured_sandbox_write_roots(tmp_path: Path) ->
                 sandbox_read_roots=(readable,),
             )
         )
-        assert params["__sandbox_write_roots"] == [str(allowed)]
+        assert params["__sandbox_write_roots"] == [str(allowed), str(output)]
         assert params["__sandbox_read_roots"] == [str(readable)]
         if tool_name in {"run_command", "terminal_session"}:
             assert params["__access_mode"] == "workspace-write"

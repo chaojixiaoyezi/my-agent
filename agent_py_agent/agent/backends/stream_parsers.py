@@ -29,7 +29,7 @@ class StreamEvent:
 _TRUNCATING_STOP_REASONS = frozenset({"max_tokens", "length"})
 
 
-# LLM: 这是流结束的结构化事实；assistant_content_blocks 只进入原生历史，绝不能作为可见 chunk 发给用户。
+# LLM: 这是流结束的结构化事实；assistant_content_blocks 不直接作为可见 chunk，显式 rich transcript 只能由上层收尾筛出 type=thinking 正文。
 # 类用途: 汇总一条流是否完整、停止原因，以及下一轮请求需要原样续接的有序 assistant 块。
 @dataclass(frozen=True)
 class StreamCompletion:

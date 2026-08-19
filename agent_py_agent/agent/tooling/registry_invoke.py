@@ -504,6 +504,9 @@ def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolHandl
     )
 
 
+# LLM: 内部运行参数只投影结构化 boundary；sandbox 写根的集合不变，但 task_work_dir 必须排在首位，
+# 供 Linux attempt 沙箱选择独立持久临时根，不能让 working_dir/项目目录承担临时缓存。
+# 函数用途: 给已授权工具补充模型不可见的写根、读根、临时根顺序和其它运行边界参数。
 def _tool_params_with_runtime_boundary(request: AuthorizedToolDispatchRequest) -> dict[str, Any]:
     if not isinstance(request.write_boundary, dict):
         return request.tool_params
@@ -519,9 +522,10 @@ def _tool_params_with_runtime_boundary(request: AuthorizedToolDispatchRequest) -
         if isinstance(raw_write_roots, (list, tuple)):
             # 文件工具已有 validate_write_boundary；shell 内部的重定向/open/cp 无法从
             # command 文本安全解析，交给 bwrap 按同一结构化根做只读/可写挂载。
-            params["__sandbox_write_roots"] = [
-                str(item).strip() for item in raw_write_roots if str(item).strip()
-            ]
+            params["__sandbox_write_roots"] = _ordered_sandbox_write_roots(
+                request.write_boundary,
+                raw_write_roots,
+            )
     if request.tool_name == "read_artifact":
         _copy_boundary_path(
             BoundaryPathCopyRequest(
@@ -546,6 +550,23 @@ def _tool_params_with_runtime_boundary(request: AuthorizedToolDispatchRequest) -
         if scope_mode:
             params["__artifact_read_scope_mode"] = scope_mode
     return params
+
+
+# LLM: 第一项只承担 /tmp 挂载根的选择，不扩大 allowed_write_roots 集合；只有 task_work_dir
+# 与现有允许根精确相同时才前置，畸形或越界 boundary 保持原顺序并交给后续门禁裁决。
+# 函数用途: 把任务 work 根排到沙箱写根首位，确保项目子目录不会生成 .sandbox-tmp。
+def _ordered_sandbox_write_roots(
+    boundary: dict[str, object],
+    raw_roots: list[object] | tuple[object, ...],
+) -> list[str]:
+    roots = list(
+        dict.fromkeys(str(item).strip() for item in raw_roots if str(item).strip())
+    )
+    task_work_dir = str(boundary.get("task_work_dir") or "").strip()
+    if task_work_dir in roots:
+        roots.remove(task_work_dir)
+        roots.insert(0, task_work_dir)
+    return roots
 
 
 def _copy_boundary_path(request: BoundaryPathCopyRequest) -> None:

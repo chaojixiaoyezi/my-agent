@@ -22,6 +22,7 @@ from ..tooling.models import (
     EffectResolverPolicy,
     IdempotencyPolicy,
     ResourceScopePolicy,
+    ToolAvailability,
     ToolHandlerOutcome,
     ToolInputPolicy,
     ToolModelHints,
@@ -116,6 +117,19 @@ class SendMessageTool(BaseTool):
             ),
         )
         self._delivery: DeliveryService = agent.delivery_service
+
+    # LLM: Model visibility and execution preflight must use the same owner identity and
+    # registry capability facts; an unbound local transcript must not advertise proactive send.
+    # 函数用途: 在每轮工具快照前判断当前 owner 是否真有可用外部消息目标，避免模型空烧发送调用。
+    def availability(self) -> ToolAvailability:
+        provider, target, owner_root = _owner_delivery_identity(self.agent)
+        capabilities = self._delivery.registry.capabilities_for(provider)
+        if not capabilities.proactive or not target or owner_root is None:
+            return ToolAvailability.unavailable(
+                "current owner has no proactive channel binding",
+                error_code="CHANNEL_ADAPTER_UNAVAILABLE",
+            )
+        return ToolAvailability.ready()
 
     # LLM: 同一 owner 请求里的同一外发内容是一个业务动作；call_id 不得进入键，否则超时后换调用 ID 可绕过去重。
     # 函数用途: 用可信 request/run scope、固定 owner 目标和结构化正文/附件引用生成稳定发送键。

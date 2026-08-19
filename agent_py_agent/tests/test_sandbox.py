@@ -265,6 +265,10 @@ def test_owner_scoped_shell_fails_closed_without_bwrap(tmp_path, monkeypatch) ->
     G6：macOS 用 Seatbelt（sandbox-exec）兜底，故强制 Linux+bwrap 缺失分支验证
     fail-closed；macOS 真实 Seatbelt 拦截在 test_attempt_sandbox.py 真机覆盖。
     """
+    monkeypatch.setattr(
+        "agent_py_agent.agent.attempt.sandbox.AttemptExecutionSandbox._READINESS_CACHE",
+        {},
+    )
     monkeypatch.setattr("agent_py_agent.agent.attempt.sandbox.platform.system", lambda: "Linux")
     monkeypatch.setattr("agent_py_agent.agent.tooling.sandbox.find_bwrap", lambda: None)
     with pytest.raises(SandboxUnavailable, match="BWRAP_NOT_FOUND"):
@@ -274,6 +278,10 @@ def test_owner_scoped_shell_fails_closed_without_bwrap(tmp_path, monkeypatch) ->
 def test_owner_scoped_shell_is_hidden_when_bwrap_is_unavailable(tmp_path, monkeypatch) -> None:
     from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
 
+    monkeypatch.setattr(
+        "agent_py_agent.agent.attempt.sandbox.AttemptExecutionSandbox._READINESS_CACHE",
+        {},
+    )
     monkeypatch.setattr("agent_py_agent.agent.attempt.sandbox.platform.system", lambda: "Linux")
     monkeypatch.setattr("agent_py_agent.agent.tooling.sandbox.find_bwrap", lambda: None)
     tool = ShellTool(

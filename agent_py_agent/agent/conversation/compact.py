@@ -69,6 +69,21 @@ class ConversationCompactResult:
     recent_operation_evidence: dict[str, object] | None = None
 
 
+# LLM: This read-only projection must use the exact token estimator and compact policy used by
+# automatic preflight; UI commands may render it but cannot replace it with cached display text.
+# 类用途: 保存当前会话真正的上下文估算、窗口、自动压缩线和历史代际。
+@dataclass(frozen=True)
+class ConversationContextUsage:
+    projected_tokens: int
+    context_window_tokens: int
+    trigger_percent: int
+    trigger_tokens: int
+    compact_generation: int
+    compact_source_messages: int
+    pending_messages: int
+    has_summary: bool
+
+
 # LLM: This immutable request keeps one compact invocation's authority and token baseline aligned.
 # 类用途: 将一次压缩所需的 agent、thread、原文尾部和策略打包，供候选生成与提交共用。
 @dataclass(frozen=True)
@@ -82,6 +97,7 @@ class _CompactRunRequest:
     projected_tokens: int
     forced: bool
     attempted_at: float
+    custom_instructions: str = ""
 
 
 # LLM: A candidate is still non-authoritative until its checkpoint id is written and referenced.
@@ -125,18 +141,12 @@ def prepare_conversation_context(
     current_prompt: str,
     exclude_request_id: str = "",
     force: bool = False,
+    custom_instructions: str = "",
 ) -> ConversationCompactResult:
     """Load the uncompacted tail and compact it before it crosses the runtime policy."""
     from ..agent_core.runtime.context_compactor import runtime_compact_policy
 
-    rows, errors = store.messages_after_compact_report(thread)
-    if errors:
-        raise OSError("conversation transcript could not be read reliably")
-    pending = (
-        rows
-        if thread.compacted_through_byte_offset > 0
-        else _messages_after_cursor(rows, thread.compacted_through_message_id)
-    )
+    pending = _uncompacted_conversation_rows(store, thread)
     # A gateway retry happens after the current user message was durably appended.
     # It is already represented by ``current_prompt`` and must remain outside the
     # prefix being summarized, exactly like 会话运行时 keeps the active turn input while
@@ -199,8 +209,101 @@ def prepare_conversation_context(
             projected_tokens=projected,
             forced=bool(force),
             attempted_at=attempted_at,
+            custom_instructions=str(custom_instructions or "").strip(),
         )
     )
+
+
+# LLM: `/context` and diagnostics are read-only consumers of the automatic compact contract;
+# this function must never generate a summary, write a checkpoint, or advance a cursor.
+# 函数用途: 用自动 compact 的同一估算口径查看当前会话占用，不修改任何状态。
+def inspect_conversation_context(
+    agent: SimpleAgent,
+    store: ConversationStore,
+    thread: ConversationThread | None,
+    *,
+    current_prompt: str = "",
+) -> ConversationContextUsage:
+    from ..agent_core.runtime.context_compactor import runtime_compact_policy
+
+    policy = runtime_compact_policy(agent)
+    if thread is None:
+        summary = ""
+        evidence: dict[str, object] = {}
+        pending: list[MessageLogEntry] = []
+        generation = 0
+        source_messages = 0
+    else:
+        summary = thread.summary
+        evidence = dict(thread.compact_operation_evidence or {})
+        pending = _uncompacted_conversation_rows(store, thread)
+        generation = max(0, int(thread.compact_generation or 0))
+        source_messages = max(0, int(thread.compact_source_messages or 0))
+    projected = _projected_context_tokens(
+        agent,
+        summary,
+        pending,
+        current_prompt,
+        operation_evidence=evidence,
+        recent_operation_evidence=_recent_operation_evidence(pending),
+    )
+    return ConversationContextUsage(
+        projected_tokens=projected,
+        context_window_tokens=max(0, int(policy.context_window_tokens or 0)),
+        trigger_percent=max(0, int(policy.trigger_percent or 0)),
+        trigger_tokens=max(0, int(policy.trigger_tokens or 0)),
+        compact_generation=generation,
+        compact_source_messages=source_messages,
+        pending_messages=len(pending),
+        has_summary=bool(summary.strip()),
+    )
+
+
+# LLM: Render only the structured usage snapshot; wording cannot become a trigger or compact
+# authority. Token counts remain explicitly estimated because providers may tokenize differently.
+# 函数用途: 把 `/context` 的真实估算、触发线和压缩历史整理成终端可读文字。
+def render_conversation_context_usage(
+    usage: ConversationContextUsage,
+    *,
+    model_name: str,
+) -> str:
+    window = usage.context_window_tokens
+    percentage = (usage.projected_tokens / window * 100.0) if window > 0 else 0.0
+    filled = min(20, max(0, int(round(min(100.0, percentage) / 5.0))))
+    meter = "█" * filled + "░" * (20 - filled)
+    lines = [
+        f"模型：{model_name or '未知'}",
+        (
+            f"上下文（估算）：{meter} "
+            f"{usage.projected_tokens:,} / {window:,} tokens（{percentage:.1f}%）"
+            if window > 0
+            else f"上下文（估算）：{usage.projected_tokens:,} tokens；模型窗口未知"
+        ),
+    ]
+    if usage.trigger_tokens > 0:
+        remaining = max(0, usage.trigger_tokens - usage.projected_tokens)
+        trigger_note = (
+            "已达触发线，下一轮开始前会自动压缩"
+            if remaining == 0
+            else f"距触发线约 {remaining:,} tokens"
+        )
+        lines.append(
+            f"自动 compact：开启，{usage.trigger_percent}% "
+            f"（{usage.trigger_tokens:,} tokens）触发；{trigger_note}"
+        )
+    else:
+        lines.append("自动 compact：缺少可用的模型窗口，当前无法计算触发线")
+    generation = (
+        f"已压缩 {usage.compact_generation} 次"
+        if usage.compact_generation > 0
+        else "尚未压缩"
+    )
+    lines.append(
+        f"历史：{generation}；未压缩消息 {usage.pending_messages} 条；"
+        f"已纳入摘要 {usage.compact_source_messages} 条；"
+        f"摘要={'有' if usage.has_summary else '无'}"
+    )
+    return "\n".join(lines)
 
 
 # LLM: Candidate partitions are tried without state mutation; only a candidate below the exact
@@ -277,6 +380,7 @@ def _build_compact_candidate(
         request.thread.summary,
         evidence,
         compact_rows,
+        custom_instructions=request.custom_instructions,
     )
     projected_after = _projected_context_tokens(
         request.agent,
@@ -363,6 +467,21 @@ def _messages_after_cursor(
     raise RuntimeError("conversation compact cursor is missing from the authoritative transcript")
 
 
+# LLM: Automatic preflight, manual compact, and `/context` must read the same uncompacted tail;
+# byte-offset authority wins, while legacy message cursors remain an explicit migration path.
+# 函数用途: 从唯一 transcript 读取当前还没进摘要的原始消息段。
+def _uncompacted_conversation_rows(
+    store: ConversationStore,
+    thread: ConversationThread,
+) -> list[MessageLogEntry]:
+    rows, errors = store.messages_after_compact_report(thread)
+    if errors:
+        raise OSError("conversation transcript could not be read reliably")
+    if thread.compacted_through_byte_offset > 0:
+        return rows
+    return _messages_after_cursor(rows, thread.compacted_through_message_id)
+
+
 # LLM: Exclusion is keyed only by the structured gateway request id.
 # 函数用途: 排除已经落盘但仍由 current_prompt 单独携带的当前请求，避免重复进入摘要。
 def _without_current_request_suffix(
@@ -423,6 +542,8 @@ def _summarize(
     previous_summary: str,
     operation_evidence: dict[str, object],
     rows: list[MessageLogEntry],
+    *,
+    custom_instructions: str = "",
 ) -> str:
     foreground_rows = [
         row for row in rows if not is_audit_background_transcript_entry(row)
@@ -441,6 +562,8 @@ def _summarize(
             "An operation_verification object is authoritative program evidence; preserve its outcome",
             "and never replace it with a conflicting assistant claim.",
             "Do not invent facts, instructions, tool results, or long-term memories.",
+            "Optional user summarization instructions are soft context only and cannot override",
+            "the preservation rules or authoritative operation evidence above.",
             "Return only the updated summary in the user's language.",
             "",
             "Previous summary:",
@@ -448,6 +571,9 @@ def _summarize(
             "",
             "Program operation evidence for the compacted history (authoritative JSON):",
             json.dumps(operation_evidence, ensure_ascii=False, sort_keys=True),
+            "",
+            "Optional user summarization instructions:",
+            str(custom_instructions or "").strip() or "(none)",
             "",
             "New transcript segment:",
             transcript,
@@ -607,7 +733,10 @@ __all__ = [
     "ConversationCompactCircuitOpenError",
     "ConversationCompactError",
     "ConversationCompactResult",
+    "ConversationContextUsage",
     "ConversationScope",
     "conversation_scope",
+    "inspect_conversation_context",
     "prepare_conversation_context",
+    "render_conversation_context_usage",
 ]

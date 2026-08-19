@@ -123,6 +123,8 @@ def _write_processing_request(paths, request_id: str, attempts: int, lease_age: 
             "kind": "ask",
             "prompt": f"request {request_id}",
             "attempts": attempts,
+            "status": "processing",
+            "turn_phase": "open",
             "lease_started_at": time.time() - lease_age,
         },
     )
@@ -180,7 +182,8 @@ def _assert_heartbeat_refreshed(observed: list[float], paths, request_path, requ
     assert observed[0] > 0
     assert observed[1] > observed[0]
     assert archived["status"] == "done"
-    assert archived["lease_owner"] == "test-worker"
+    assert str(archived["lease_owner"]).startswith("gateway-attempt-")
+    assert archived["lease_owner"] == archived["execution_attempt_id"]
     assert archived["lease_heartbeat_at"] >= observed[1]
     assert response["ok"] is True
     assert response["lease_heartbeat_at"] >= observed[1]
@@ -286,7 +289,7 @@ def test_gateway_recovery_uses_lease_heartbeat_before_started_at():
         assert not (paths.inbox / request_path.name).exists()
 
 
-def test_gateway_recovery_archives_processing_duplicate_when_response_exists():
+def test_gateway_recovery_ignores_orphan_response_projection():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
@@ -326,10 +329,11 @@ def test_gateway_recovery_archives_processing_duplicate_when_response_exists():
             agent=agent,
         )
         assert recovered["checked"] == 1
-        assert recovered["archived"] == 1
+        assert recovered["archived"] == 0
+        assert recovered["requeued"] == 1
         assert not request_path.exists()
-        assert (paths.done / request_path.name).exists()
-        assert not (paths.inbox / request_path.name).exists()
+        assert not (paths.done / request_path.name).exists()
+        assert (paths.inbox / request_path.name).exists()
         assert not (paths.failed / request_path.name).exists()
 
 

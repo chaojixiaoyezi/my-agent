@@ -117,6 +117,7 @@ def _runtime_loop_params(
         save=params.save,
         carried_archive_tool_calls=params.carried_archive_tool_calls,
         carried_active_turn_user_inputs=params.carried_active_turn_user_inputs,
+        active_turn_transition_callback=params.active_turn_transition_callback,
         tool_runtime_snapshot=prepared.tool_runtime_snapshot,
         tool_protocol_snapshot=prepared.tool_protocol_snapshot,
     )
@@ -827,6 +828,7 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         live_archive_state=live_archive_state,
         tool_ir_history=tool_ir_history,
         active_turn_user_inputs=active_turn_user_inputs,
+        active_turn_transition_callback=params.active_turn_transition_callback,
         context_scope=params.context_scope,
         loaded_tool_names={*reconstructed.loaded_tool_names, *required_tool_names},
         workspace_context_snapshot=_workspace_context_snapshot(agent, params),

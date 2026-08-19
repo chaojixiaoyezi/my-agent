@@ -1,3 +1,5 @@
+# LLM: 本模块只启动 TUI worker 与轻量动画刷新线程；业务事件仍由 worker/runtime 发布，刷新线程不得改 reducer 状态。
+# 模块用途: 组装后台任务参数，并以 终端交互 接近的帧率驱动 spinner/临时提示重绘。
 
 from __future__ import annotations
 
@@ -5,7 +7,11 @@ import threading
 
 from .tui_params import StartWorkerParams, WorkerConfigParams
 
+TUI_REFRESH_INTERVAL_SECONDS = 0.125
 
+
+# LLM: config factory 只能透传同一 queue/refs/runtime；不得在这里复制状态或创建第二个 TuiRuntime。
+# 函数用途: 将线程启动参数收窄成 worker 配置。
 def _make_worker_config(*, params: WorkerConfigParams):
     from .tui_worker import TuiWorkerConfig
 
@@ -25,16 +31,15 @@ def _make_worker_config(*, params: WorkerConfigParams):
         history_lock=params.history_lock,
         build_history_context=params.build_history_context,
         assistant_outputs=params.assistant_outputs,
-        thinking_line_ref=params.thinking_line_ref,
-        stream_buf_ref=params.stream_buf_ref,
-        stream_visible_text_ref=params.stream_visible_text_ref,
-        app_ref=params.app_ref,
         last_token_estimate_ref=params.last_token_estimate_ref,
         stop_event=params.stop_event,
         current_session_id=params.current_session_id,
+        tui_runtime=params.tui_runtime,
     )
 
 
+# LLM: 两个 daemon thread 分别执行 canonical prompt queue 与纯重绘 tick；应用退出由共享 stop events 收口。
+# 函数用途: 启动 TUI 后台 worker 和动画刷新线程。
 def _start_worker_threads(*, params: StartWorkerParams) -> None:
     from .tui_worker import _tui_worker_body
 
@@ -55,26 +60,36 @@ def _start_worker_threads(*, params: StartWorkerParams) -> None:
             history_lock=params.history_lock,
             build_history_context=params.build_history_context,
             assistant_outputs=params.assistant_outputs,
-            thinking_line_ref=params.thinking_line_ref,
-            stream_buf_ref=params.stream_buf_ref,
-            stream_visible_text_ref=params.stream_visible_text_ref,
-            app_ref=params.app_ref,
             last_token_estimate_ref=params.last_token_estimate_ref,
             stop_event=params.stop_event,
             current_session_id=params.current_session_id,
+            tui_runtime=params.tui_runtime,
         )
     )
     threading.Thread(target=_tui_worker_body, daemon=True, args=(worker_cfg,)).start()
     threading.Thread(
-        target=lambda: _refresh_loop(params.refresh_stop, params.app_ref),
+        target=lambda: _refresh_loop(
+            params.refresh_stop,
+            params.app_ref,
+            params.tui_runtime,
+        ),
         daemon=True,
     ).start()
 
 
-def _refresh_loop(refresh_stop: threading.Event, app_ref: list) -> None:
-    while not refresh_stop.wait(1.0):
-        if app_ref[0] is not None:
+# LLM: refresh loop 只在 runtime 报告存在可见动画/短提示时 invalidate；typed event 自带 redraw，空闲时必须零周期整屏重绘。
+# 函数用途: 在应用存活期间按需驱动 spinner 和短提示，不让长历史在空闲时持续占用 CPU。
+def _refresh_loop(
+    refresh_stop: threading.Event,
+    app_ref: list,
+    tui_runtime: object,
+) -> None:
+    while not refresh_stop.wait(TUI_REFRESH_INTERVAL_SECONDS):
+        if (
+            app_ref[0] is not None
+            and tui_runtime.needs_periodic_refresh()
+        ):
             app_ref[0].invalidate()
 
 
-__all__ = ["_start_worker_threads"]
+__all__ = ["_refresh_loop", "_start_worker_threads"]
