@@ -173,6 +173,7 @@ def _register_chat_bindings(
     kb.add("escape", "enter", filter=chat_active)(lambda e: _insert_newline(e, params))
     kb.add("escape", filter=chat_active)(lambda e: _handle_escape_keybinding(e, params))
     kb.add("c-c", filter=chat_active)(lambda e: _handle_ctrl_c_keybinding(e, params))
+    kb.add("c-v", filter=chat_active)(lambda e: _handle_clipboard_paste(e, params))
     kb.add("c-d", filter=chat_active)(lambda e: _handle_ctrl_d_keybinding(e, params))
     kb.add("c-s", filter=chat_active)(lambda e: _handle_stash_keybinding(e, params))
     kb.add("c-r", filter=chat_active)(lambda e: _start_history_search(e, params))
@@ -712,18 +713,41 @@ def _normalize_bracketed_paste(text: str) -> str:
     return normalized.replace("\r\n", "\n").replace("\r", "\n").replace("\t", "    ")
 
 
-# LLM: bracketed paste 由一个 key event 一次 insert；长/多行正文先登记 typed ref 再插占位符，Timer 仅关闭视觉提示。
-# 函数用途: 聚合插入一次终端粘贴、折叠过大正文并短暂显示 `Pasting text…`。
-def _handle_bracketed_paste(event, params: TuiCreateKeybindingsParams) -> None:
+# LLM: 所有粘贴入口先替换当前显式选区，再通过同一 interaction contract 插入；不得绕过大文本 ref 或直接改 Document。
+# 函数用途: 把一段剪贴板正文作为一次粘贴写入输入框，并短暂显示 `Pasting text…`。
+def _insert_pasted_text(event, params: TuiCreateKeybindingsParams, text: str) -> bool:
     interaction = _required_interaction(params)
+    normalized = _normalize_bracketed_paste(text)
+    if not normalized:
+        return False
     interaction.set_pasting(True)
-    normalized = _normalize_bracketed_paste(event.data)
-    params.input_area.buffer.insert_text(interaction.register_text_paste(normalized))
+    buffer = params.input_area.buffer
+    if getattr(buffer, "selection_state", None) is not None:
+        buffer.cut_selection()
+    buffer.insert_text(interaction.register_text_paste(normalized))
     timer = threading.Timer(PASTE_FEEDBACK_SECONDS, interaction.set_pasting, args=(False,))
     timer.daemon = True
     timer.start()
     _reset_exit_arms(params)
     event.app.invalidate()
+    return True
+
+
+# LLM: bracketed paste 是外部终端剪贴板的主路径；事件正文必须完整交给统一粘贴入口，不能逐字符重放。
+# 函数用途: 接收 Cmd-V、Ctrl-Shift-V 等终端生成的 bracketed-paste 文本块。
+def _handle_bracketed_paste(event, params: TuiCreateKeybindingsParams) -> None:
+    _insert_pasted_text(event, params, event.data)
+
+
+# LLM: Ctrl-V 只读取 prompt_toolkit 应用剪贴板；系统剪贴板仍由终端通过 bracketed paste 注入，不能在 TUI 内猜平台命令。
+# 函数用途: 把本 TUI 刚复制的文本粘贴到输入框，支持替换当前选区。
+def _handle_clipboard_paste(event, params: TuiCreateKeybindingsParams) -> None:
+    clipboard = getattr(event.app, "clipboard", None)
+    get_data = getattr(clipboard, "get_data", None)
+    if not callable(get_data):
+        return
+    data = get_data()
+    _insert_pasted_text(event, params, str(getattr(data, "text", "") or ""))
 
 
 def _handle_command_params(params: TuiCreateKeybindingsParams, text: str) -> TuiHandleCommandParams:
@@ -1225,9 +1249,11 @@ def _required_tui_runtime(params: TuiCreateKeybindingsParams):
     return params.tui_runtime
 
 
-# LLM: Ctrl-C 先复制 typed transcript viewport 的非空选区；没有选区才停止活动回合或进入双击退出状态。
-# 函数用途: 实现选区复制、活动中断和防误触双击退出的明确优先级。
+# LLM: Ctrl-C 先复制当前输入选区，再复制 typed transcript 选区；两者都为空时才停止回合或进入双击退出状态。
+# 函数用途: 实现输入/正文复制、活动中断和防误触双击退出的明确优先级。
 def _handle_ctrl_c_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
+    if _copy_input_selection(event, params):
+        return
     if _copy_transcript_selection(event, params):
         return
     with params.state_lock:
@@ -1249,6 +1275,27 @@ def _handle_ctrl_c_keybinding(event, params: TuiCreateKeybindingsParams) -> None
         event.app.exit()
         return
     _required_tui_runtime(params).set_notice("Press Ctrl-C again to exit")
+
+
+# LLM: 输入复制只读取 Buffer Document 的显式 selection，不调用会清空 selection_state 的 Buffer.copy_selection。
+# 函数用途: 返回输入框当前选中的正文，供 Ctrl-C 和鼠标松手自动复制共用。
+def _selected_input_text(buffer: Any) -> str:
+    if getattr(buffer, "selection_state", None) is None:
+        return ""
+    _remaining, clipboard_data = buffer.document.cut_selection()
+    return str(getattr(clipboard_data, "text", "") or "")
+
+
+# LLM: 输入选区优先于 transcript 和中断动作；复制后保留原选区高亮，便于用户确认或直接粘贴替换。
+# 函数用途: 把输入框选区复制到应用、tmux 和系统终端剪贴板投影。
+def _copy_input_selection(event, params: TuiCreateKeybindingsParams) -> bool:
+    selected_text = _selected_input_text(params.input_area.buffer)
+    if not selected_text:
+        return False
+    _write_selection_clipboard(event.app, selected_text)
+    _required_tui_runtime(params).set_notice(f"Copied {len(selected_text)} chars")
+    event.app.invalidate()
+    return True
 
 
 # LLM: transcript mode 的 Ctrl-C 与普通模式共用同一选区复制入口；只有空选区才退出 modal，不得中断后台回合。

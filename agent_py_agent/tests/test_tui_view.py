@@ -296,7 +296,7 @@ def test_no_button_motion_finishes_lost_release_and_copies_once() -> None:
     assert copied == ["abcd"]
 
 
-def test_selection_includes_wide_character_under_release_cell() -> None:
+def test_selection_uses_prompt_toolkit_source_indexes_for_wide_characters() -> None:
     store = TuiStateStore()
     seq = TuiEventSequencer("selection-wide", clock=lambda: 5.9)
     store.publish(
@@ -313,10 +313,15 @@ def test_selection_includes_wide_character_under_release_cell() -> None:
         MouseEvent(Point(x=2, y=0), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
     )
     control.mouse_handler(
-        MouseEvent(Point(x=8, y=0), MouseEventType.MOUSE_UP, MouseButton.LEFT, frozenset())
+        MouseEvent(Point(x=5, y=0), MouseEventType.MOUSE_UP, MouseButton.LEFT, frozenset())
+    )
+    selected_line = control.create_content(40, 5).get_line(0)
+    highlighted = "".join(
+        text for style, text, *_ in selected_line if "class:tui-selection" in style
     )
 
     assert control.selected_text() == "甲乙丙丁"
+    assert highlighted == "甲乙丙丁"
 
 
 def test_resize_clears_viewport_selection() -> None:

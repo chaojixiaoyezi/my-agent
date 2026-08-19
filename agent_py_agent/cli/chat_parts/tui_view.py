@@ -13,7 +13,6 @@ from prompt_toolkit.formatted_text import StyleAndTextTuples
 from prompt_toolkit.layout import Window
 from prompt_toolkit.layout.controls import FormattedTextControl, UIContent, UIControl
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
-from wcwidth import wcwidth
 
 from .tui_block_renderer import (
     TuiBlockRenderCache,
@@ -23,7 +22,7 @@ from .tui_block_renderer import (
     sanitize_tui_render_frame,
     tui_render_context_key,
 )
-from .tui_markdown import FormattedLine, display_width_text, fragments_text
+from .tui_markdown import FormattedLine, fragments_text
 from .tui_transcript import TuiTranscriptModeState
 from .tui_view_model import TuiStateStore, TuiViewSnapshot
 
@@ -601,7 +600,7 @@ def _prompt_toolkit_line(line: FormattedLine) -> StyleAndTextTuples:
     return list(line)
 
 
-# LLM: mouse 坐标只能落在当前渲染行集合内；负列归零，过大列由文本切片自然裁剪。
+# LLM: Window 已把屏幕列反解为 UIContent 源字符索引；这里只限制行和负索引，不能再按 wcwidth 二次换算。
 # 函数用途: 把鼠标位置规范为合法 transcript 选区端点。
 def _bounded_selection_point(point: Point, line_count: int) -> Point:
     return Point(
@@ -610,8 +609,7 @@ def _bounded_selection_point(point: Point, line_count: int) -> Point:
     )
 
 
-# LLM: selection range stores the terminal cells under anchor/focus. Extraction converts the
-# inclusive focus cell to a half-open display-column boundary so the glyph under the pointer is kept.
+# LLM: selection range 保存 prompt_toolkit 已换算好的源字符索引；focus 字符仍按包含式选中。
 # 函数用途: 返回从上到下、从左到右排列的选区端点。
 def _ordered_selection(selection: TuiTextSelection) -> tuple[Point, Point]:
     anchor_key = (selection.anchor.y, selection.anchor.x)
@@ -623,7 +621,7 @@ def _ordered_selection(selection: TuiTextSelection) -> tuple[Point, Point]:
     )
 
 
-# LLM: 复制从 formatted line 的可见文本投影生成，不读取 block metadata、隐藏 thinking 或模型原始 payload。
+# LLM: 复制从 formatted line 的可见文本投影生成，并直接按源字符索引切片；中文宽字符不可再次换算显示列。
 # 函数用途: 提取选区中的纯文本并保留跨行换行。
 def _selected_text(
     lines: tuple[FormattedLine, ...],
@@ -638,31 +636,13 @@ def _selected_text(
     last_line = min(end.y, len(lines) - 1)
     for line_index in range(max(0, start.y), last_line + 1):
         text = fragments_text(lines[line_index])
-        start_column = start.x if line_index == start.y else 0
-        end_column = end.x + 1 if line_index == end.y else display_width_text(text)
-        selected.append(_slice_display_columns(text, start_column, end_column))
+        start_index = start.x if line_index == start.y else 0
+        end_index = end.x + 1 if line_index == end.y else len(text)
+        selected.append(text[max(0, start_index) : max(0, end_index)])
     return "\n".join(selected)
 
 
-# LLM: 显示列切片使用 wcwidth，组合字符跟随其前一个 base 字符；不能用 Python 字符索引切坏中文或 emoji。
-# 函数用途: 取得字符串在指定终端列半开区间内的字符。
-def _slice_display_columns(text: str, start: int, end: int) -> str:
-    lower = max(0, int(start or 0))
-    upper = max(lower, int(end or 0))
-    column = 0
-    selected: list[str] = []
-    previous_selected = False
-    for char in str(text or ""):
-        width = max(0, wcwidth(char))
-        char_selected = previous_selected if width == 0 else column < upper and column + width > lower
-        if char_selected:
-            selected.append(char)
-        previous_selected = char_selected
-        column += width
-    return "".join(selected)
-
-
-# LLM: 高亮只叠加 style role，不把选区正文复制进 renderer cache；坐标仍按当前行显示列计算。
+# LLM: 高亮只叠加 style role，不把选区正文复制进 renderer cache；索引与 Window 传给 mouse handler 的源字符坐标一致。
 # 函数用途: 给选区覆盖到的字符附加选择背景样式。
 def _decorate_selection(
     line: FormattedLine,
@@ -674,25 +654,21 @@ def _decorate_selection(
     start, end = _ordered_selection(selection)
     if start == end or line_index < start.y or line_index > end.y:
         return line
-    text_width = display_width_text(fragments_text(line))
     lower = start.x if line_index == start.y else 0
-    upper = end.x + 1 if line_index == end.y else text_width
+    upper = end.x + 1 if line_index == end.y else len(fragments_text(line))
     if upper <= lower:
         return line
     decorated: list[tuple[str, str]] = []
-    column = 0
-    previous_selected = False
+    source_index = 0
     for style, text, *_handler in line:
         for char in text:
-            width = max(0, wcwidth(char))
-            selected = previous_selected if width == 0 else column < upper and column + width > lower
+            selected = lower <= source_index < upper
             selected_style = f"{style} class:tui-selection".strip() if selected else style
             if decorated and decorated[-1][0] == selected_style:
                 decorated[-1] = (selected_style, decorated[-1][1] + char)
             else:
                 decorated.append((selected_style, char))
-            previous_selected = selected
-            column += width
+            source_index += 1
     return tuple(decorated)
 
 

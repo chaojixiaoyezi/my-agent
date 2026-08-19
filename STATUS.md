@@ -3,12 +3,15 @@
 ## 2026-08-18 TUI 拖选、自动复制与下一轮输入追补
 
 - 用户真机复现了拖选松手后仍随 hover 扩展，以及鼠标已经到末字、高亮仍停在前方。根因是 transcript
-  control 只信落在自身区域内的 mouse-up，且内部半开 focus 列排除了鼠标所在 cell；窗口外 release 或中文
-  宽字符会放大该问题。
+  control 既曾丢失窗口外 mouse-up，又把 prompt_toolkit 已反解出的“源字符索引”再次按终端显示宽度换算；
+  中文每字占两格，因此真机恰好只能高亮、复制到一半。
 - 已按 终端交互 `App.tsx` lost-release 和 `useCopyOnSelect.ts` 行为适配：所有 release 结束拖动；无按键
-  motion 与下一次 fresh press 收口遗失 release；focus cell 改为包含语义；松手自动写应用剪贴板、OSC52
-  和 tmux buffer并保留高亮，Ctrl-C 仍可重复复制。
-- `test_tui_view.py`、`test_tui_input.py`、`test_runtime_guidance.py` 与
+  motion 与下一次 fresh press 收口遗失 release；源字符 focus 改为包含语义；松手自动写应用剪贴板、OSC52
+  和 tmux buffer并保留高亮，Ctrl-C 仍可重复复制。输入框也复用同一复制出口，鼠标松手或 Ctrl-C 都复制
+  当前选区，Ctrl-V 粘贴应用剪贴板，终端 Cmd-V/Ctrl-Shift-V 继续走 bracketed paste；粘贴会替换选区。
+- 输入提示符后的不换行空格会被 prompt_toolkit 默认 `nbsp` 样式渲染成黄色下划线，现改为普通空格，
+  不再把占位空白显示成 `_`。
+- `test_tui_view.py`、`test_tui_input.py`、`test_chat_parts.py`、`test_runtime_guidance.py` 与
   `test_gateway_conversation_control.py` focused 组合到 100%。运行中消息在下一真实模型调用注入；若回合
   已结束，只挂接 Gateway 已创建的 canonical 下一回合请求，不二次提交正文。
 

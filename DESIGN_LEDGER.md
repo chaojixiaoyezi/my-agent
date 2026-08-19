@@ -538,11 +538,15 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 空闲动画时钟不应让静态长历史失效。完整 frame key 由 renderer 统一决定；connection/thinking 活动时
   才加入可见动画字段，thinking 周期取 glyph 与稳定词长的最小公倍数，禁止经验魔数。20k block LRU
   和 20k stable display window 是性能边界，不是新的会话事实源。
-- transcript 鼠标选择只持有当前 viewport 显示列，resize 清除；anchor/focus 都表示鼠标所在终端 cell，
-  最终 focus cell 必须包含在高亮和复制文本中，不能把光标下的中文宽字符截掉。任何形式的 mouse-up 都结束
+- transcript 鼠标选择只持有当前 viewport 中经 prompt_toolkit `Window` 从屏幕列反解后的源字符索引，
+  resize 清除；产品层不得再按 `wcwidth` 二次换算，否则中文会只复制一半。最终 focus 字符必须包含在高亮
+  和复制文本中。任何形式的 mouse-up 都结束
   拖动；1003 无按键 motion 和下一次 fresh press 负责收口窗口外遗失的 release。松手自动写
   prompt_toolkit clipboard、OSC52 和 tmux buffer，Ctrl-C 仍可重复复制；无选择时才进入审批取消、turn
-  interrupt 或双击退出。审批 overlay 继续允许 Page/wheel/Ctrl-Home/End 查看上文，Up/Down 仍专属于选项导航。
+  interrupt 或双击退出。输入 Buffer 的显式选区具有更高 Ctrl-C 优先级，鼠标松手也自动复制且不清高亮；
+  Ctrl-V 只粘贴应用剪贴板，系统剪贴板继续由终端 bracketed paste 注入，两条路径都走同一大文本合同并
+  替换现有选区。输入 marker 使用普通空格，禁止用会触发 `nbsp` 下划线样式的不换行空格。审批 overlay
+  继续允许 Page/wheel/Ctrl-Home/End 查看上文，Up/Down 仍专属于选项导航。
 - 审批 y/n 只能匹配 option 的 structured `decision`，不匹配 Yes/No/中文 label。普通工具结果最多六行；
   用户显式进入 transcript 并 Ctrl-E 后才展开全部，避免大输出常驻主视图。
 - 终端交互 独有 model picker、permission mode carousel、team/buddy/voice/browser 等不造空壳；帮助和补全

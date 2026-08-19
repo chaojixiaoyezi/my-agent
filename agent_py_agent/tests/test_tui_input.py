@@ -228,6 +228,35 @@ def test_bracketed_paste_normalization_strips_terminal_controls() -> None:
     assert _normalize_bracketed_paste("a\r\nb\t\x1b[31mred\x1b[0m") == "a\nb    red"
 
 
+def test_ctrl_v_replaces_selected_input_from_application_clipboard() -> None:
+    from prompt_toolkit.clipboard import InMemoryClipboard
+
+    buffer = Buffer(complete_while_typing=False)
+    buffer.text = "旧正文"
+    buffer.cursor_position = 0
+    buffer.start_selection()
+    buffer.cursor_position = len(buffer.text)
+    input_area = SimpleNamespace(buffer=buffer)
+    clipboard = InMemoryClipboard()
+    clipboard.set_text("新\r\n正文")
+    invalidations: list[bool] = []
+    app = SimpleNamespace(clipboard=clipboard, invalidate=lambda: invalidations.append(True))
+    params = SimpleNamespace(
+        input_area=input_area,
+        interaction_state=TuiInteractionState(),
+        exit_armed_at_ref=[0.0],
+        eof_armed_at_ref=[0.0],
+        escape_armed_at_ref=[0.0],
+        escape_armed_text_ref=[""],
+    )
+
+    tui_keybindings._handle_clipboard_paste(SimpleNamespace(app=app), params)
+
+    assert buffer.text == "新\n正文"
+    assert buffer.selection_state is None
+    assert invalidations == [True]
+
+
 def test_submit_expands_hidden_paste_but_keeps_placeholder_for_display(monkeypatch) -> None:
     interaction = TuiInteractionState()
     visible = interaction.register_text_paste("one\ntwo\nthree\nfour")
@@ -547,6 +576,7 @@ def test_ctrl_c_with_transcript_selection_copies_before_interrupt(monkeypatch) -
     runtime = TuiRuntime("selection-copy")
     app = SimpleNamespace(invalidate=lambda: None)
     params = SimpleNamespace(
+        input_area=TextArea(multiline=True),
         transcript_area=SimpleNamespace(selected_text=lambda: "selected output"),
         tui_runtime=runtime,
     )
@@ -560,6 +590,80 @@ def test_ctrl_c_with_transcript_selection_copies_before_interrupt(monkeypatch) -
 
     assert copied == ["selected output"]
     assert runtime.notice() == "Copied 15 chars"
+
+
+def test_ctrl_c_copies_input_selection_without_clearing_highlight(monkeypatch) -> None:
+    copied: list[str] = []
+    runtime = TuiRuntime("input-selection-copy")
+    input_area = TextArea(multiline=True)
+    input_area.text = "复制中文正文"
+    input_area.buffer.cursor_position = 0
+    input_area.buffer.start_selection()
+    input_area.buffer.cursor_position = 4
+    app = SimpleNamespace(invalidate=lambda: None)
+    params = SimpleNamespace(
+        input_area=input_area,
+        transcript_area=SimpleNamespace(selected_text=lambda: "transcript"),
+        tui_runtime=runtime,
+    )
+    monkeypatch.setattr(
+        tui_keybindings,
+        "_write_selection_clipboard",
+        lambda _application, text: copied.append(text),
+    )
+
+    tui_keybindings._handle_ctrl_c_keybinding(SimpleNamespace(app=app), params)
+
+    assert copied == ["复制中文"]
+    assert input_area.buffer.selection_state is not None
+    assert runtime.notice() == "Copied 4 chars"
+
+
+def test_input_mouse_up_auto_copies_settled_selection() -> None:
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+
+    from agent_py_agent.cli.chat_parts.tui_ui_setup import _install_input_copy_on_select
+
+    buffer = Buffer()
+    buffer.text = "鼠标复制"
+    buffer.cursor_position = 0
+    buffer.start_selection()
+    buffer.cursor_position = len(buffer.text)
+    calls: list[object] = []
+    control = SimpleNamespace(mouse_handler=lambda event: calls.append(event) or None)
+    input_area = SimpleNamespace(control=control, buffer=buffer)
+    copied: list[str] = []
+    _install_input_copy_on_select(input_area, copied.append)
+    event = MouseEvent(
+        Point(x=3, y=0),
+        MouseEventType.MOUSE_UP,
+        MouseButton.LEFT,
+        frozenset(),
+    )
+
+    result = control.mouse_handler(event)
+
+    assert result is None
+    assert calls == [event]
+    assert copied == ["鼠标复制"]
+    assert buffer.selection_state is not None
+
+
+def test_input_mouse_selection_includes_release_character() -> None:
+    from agent_py_agent.cli.chat_parts.tui_ui_setup import (
+        _include_input_focus_character,
+    )
+
+    buffer = Buffer()
+    buffer.text = "输入复制甲乙丙丁"
+    buffer.cursor_position = 4
+    buffer.start_selection()
+    buffer.cursor_position = 7
+
+    _include_input_focus_character(buffer, 4)
+
+    assert tui_keybindings._selected_input_text(buffer) == "甲乙丙丁"
 
 
 def test_osc52_clipboard_sequence_wraps_for_tmux() -> None:

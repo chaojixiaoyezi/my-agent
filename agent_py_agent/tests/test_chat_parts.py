@@ -342,7 +342,7 @@ def test_tui_input_prompt_is_stable_separate_window(tmp_path) -> None:
 
     assert input_area.window.get_line_prefix is None
     assert prompt_window.width == 2
-    assert prompt_window.content.text == [("class:tui-input-marker", "❯\u00a0")]
+    assert prompt_window.content.text == [("class:tui-input-marker", "❯ ")]
 
 
 def test_tui_escape_timeouts_keep_meta_window_short() -> None:

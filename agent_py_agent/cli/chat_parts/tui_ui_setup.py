@@ -19,6 +19,7 @@ from .tui_input import (
 from .tui_interaction import TuiInteractionState
 from .tui_keybindings import (
     TuiCreateKeybindingsParams,
+    _selected_input_text,
     _tui_create_keybindings,
     _write_selection_clipboard,
 )
@@ -65,7 +66,7 @@ def _make_input_prompt_window() -> Any:
     from prompt_toolkit.layout import FormattedTextControl, Window
 
     return Window(
-        content=FormattedTextControl([("class:tui-input-marker", "❯\u00a0")]),
+        content=FormattedTextControl([("class:tui-input-marker", "❯ ")]),
         width=2,
         dont_extend_width=True,
     )
@@ -599,9 +600,73 @@ def _assemble_tui_application(
         app.invalidate()
 
     parts.transcript_view.set_copy_on_select(copy_settled_selection)
+    _install_input_copy_on_select(parts.input_area, copy_settled_selection)
     app._my_agent_title_controller = parts.title_controller
     set_tui_output_sink(parts.runtime.write_console)
     return app
+
+
+# LLM: BufferControl 仍负责源字符坐标、焦点和 selection_state；wrapper 只补齐包含式 focus 并在 MOUSE_UP 后复制。
+# 函数用途: 给输入框增加与正文一致的“拖选松手即复制”，并保留完整高亮供继续替换或再次复制。
+def _install_input_copy_on_select(input_area: Any, copy_callback: Any) -> None:
+    from prompt_toolkit.mouse_events import MouseButton, MouseEventType
+
+    control = input_area.control
+    original_mouse_handler = control.mouse_handler
+    selection_anchor: int | None = None
+    selection_moved = False
+
+    def mouse_handler(mouse_event: Any):
+        nonlocal selection_anchor, selection_moved
+        result = original_mouse_handler(mouse_event)
+        buffer = input_area.buffer
+        if (
+            mouse_event.event_type == MouseEventType.MOUSE_DOWN
+            and mouse_event.button == MouseButton.LEFT
+        ):
+            selection_anchor = int(buffer.cursor_position)
+            selection_moved = False
+        elif mouse_event.event_type == MouseEventType.MOUSE_MOVE:
+            selection_moved = bool(
+                selection_moved
+                or (
+                    selection_anchor is not None
+                    and int(buffer.cursor_position) != selection_anchor
+                )
+            )
+        if mouse_event.event_type == MouseEventType.MOUSE_UP:
+            if (
+                selection_anchor is not None
+                and getattr(buffer, "selection_state", None) is not None
+                and (
+                    selection_moved
+                    or int(buffer.cursor_position) != selection_anchor
+                )
+            ):
+                _include_input_focus_character(buffer, selection_anchor)
+            selected_text = _selected_input_text(buffer)
+            if selected_text:
+                copy_callback(selected_text)
+            selection_anchor = None
+            selection_moved = False
+        return result
+
+    control.mouse_handler = mouse_handler
+
+
+# LLM: prompt_toolkit 的字符选区默认排除 forward drag 的 cursor 端；这里只对真实拖动补一个源字符，不改双击单词选择。
+# 函数用途: 让输入拖选与 transcript 一样包含鼠标松手所在的最后一个字符。
+def _include_input_focus_character(buffer: Any, anchor: int) -> None:
+    selection = getattr(buffer, "selection_state", None)
+    if selection is None:
+        return
+    text_length = len(str(buffer.text or ""))
+    focus = int(buffer.cursor_position)
+    normalized_anchor = max(0, min(text_length, int(anchor)))
+    if focus >= normalized_anchor and focus < text_length:
+        buffer.cursor_position = focus + 1
+    elif focus < normalized_anchor and normalized_anchor < text_length:
+        selection.original_cursor_position = normalized_anchor + 1
 
 
 # LLM: make_tui_app 只组合一个 typed view/store；stdout 命令结果经 runtime.write_console 转成 system event，流式正文由 worker adapter 直发。
