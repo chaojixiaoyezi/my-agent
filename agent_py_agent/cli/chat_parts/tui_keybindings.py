@@ -238,6 +238,7 @@ def _register_transcript_bindings(
     navigation = filters.transcript_navigation
     search_active = filters.transcript_search_active
     kb.add("c-e", filter=navigation)(lambda e: _handle_transcript_show_all(e, params))
+    kb.add("c-a", filter=navigation)(lambda e: _handle_transcript_select_all(e, params))
     kb.add("q", filter=navigation)(lambda e: _exit_transcript_mode(e, params))
     kb.add("escape", filter=navigation, eager=True)(lambda e: _exit_transcript_mode(e, params))
     kb.add("c-c", filter=navigation)(lambda e: _handle_transcript_ctrl_c(e, params))
@@ -1325,6 +1326,15 @@ def _handle_transcript_ctrl_c(event, params: TuiCreateKeybindingsParams) -> None
     if _copy_transcript_selection(event, params):
         return
     _exit_transcript_mode(event, params)
+
+
+# LLM: 全选配合 Ctrl+C 复制（transcript 键盘复制；鼠标拖选松手复制已有）。
+# 函数用途: Ctrl+A 选中全部可见 transcript 行。
+def _handle_transcript_select_all(event, params: TuiCreateKeybindingsParams) -> None:
+    view = params.transcript_area
+    if view is not None and callable(getattr(view, "select_all", None)):
+        view.select_all()
+    event.app.invalidate()
 
 
 # LLM: copy 只读取 TuiTranscriptView 暴露的可见选区，并以 app clipboard + OSC 52 投影；空选区绝不吞掉 Ctrl-C。

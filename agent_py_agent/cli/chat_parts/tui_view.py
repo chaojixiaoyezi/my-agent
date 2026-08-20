@@ -255,6 +255,24 @@ class TuiTranscriptControl(UIControl):
             lines = self._last_lines
         return _selected_text(lines, selection) if selection is not None else ""
 
+    # LLM: 全选（Ctrl+A）——选中全部可见行，配合 Ctrl+C 复制（transcript 模式
+    # 键盘复制入口）。选择坐标基于最近一次 create_content 的行数。
+    # 函数用途: 把整个 transcript 视图设为选区，供键盘复制。
+    def select_all(self) -> None:
+        with self._lock:
+            lines = self._last_lines
+            if not lines:
+                return
+            last_line = len(lines) - 1
+            last_char = max(0, len(fragments_text(lines[last_line])) - 1)
+            self._selection = TuiTextSelection(
+                anchor=Point(0, 0),
+                focus=Point(last_char, last_line),
+            )
+            self._selection_dragging = False
+            self._selection_copied = False
+        self.provider.invalidate()
+
     # LLM: 清理只影响当前 viewport 选区，不清 transcript、滚动锚点或输入草稿。
     # 函数用途: 取消当前文本选区。
     def clear_selection(self) -> None:

@@ -43,6 +43,9 @@ USER_MESSAGE_HEAD_CHARS = 2_500
 # 只裁 UI 投影, canonical block.text 原文保留(与 _bounded_user_text 同思路)。
 _ASSISTANT_RENDER_MAX_LINES = 200
 _ASSISTANT_RENDER_DETAIL_MAX_LINES = 2_000
+# 活动思考内容的默认可见行数上限（终端交互 行为：灰色实时可见；
+# 超长折叠为提示行，Ctrl+O 看全部）。
+_THINKING_LIVE_MAX_LINES = 50
 _TOOL_RENDER_MAX_LINES = 200
 _TOOL_RENDER_DETAIL_MAX_LINES = 2_000
 USER_MESSAGE_TAIL_CHARS = 2_500
@@ -692,24 +695,38 @@ def _render_assistant(block: TuiBlock, context: TuiRenderContext) -> tuple[Forma
 # LLM: thinking 展开/折叠只由 context mode 与 typed phase 决定，正文内容不能触发展开。
 # 函数用途: 渲染活动 spinner 或已完成思考摘要/详细正文。
 def _render_thinking(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedLine, ...]:
+    # 对齐 终端交互：思考统一浅灰（tui-thinking），stalled 不换红；
+    # 活动态默认显示内容（实时可见），超长折叠提示展开。
     if block.phase not in {"completed", "failed", "interrupted"}:
         started_at = float(block.metadata.get("started_at") or 0.0)
         elapsed = max(0, int(context.now - started_at)) if started_at and context.now else 0
         title = f"Thinking {elapsed // 60}:{elapsed % 60:02d}"
         suffix = _spinner_status_suffix(block, context)
-        title_style = "class:tui-error" if _spinner_is_stalled(context) else "class:tui-thinking"
         activity_lines = wrap_fragments(
             (
-                (title_style, "∴ "),
-                (title_style, title),
-                ("class:tui-muted", suffix),
+                ("class:tui-thinking", "∴ "),
+                ("class:tui-thinking", title),
+                ("class:tui-thinking", suffix),
             ),
             width=context.width,
-            continuation_prefix=(("class:tui-muted", "  "),),
+            continuation_prefix=(("class:tui-thinking", "  "),),
         )
         lines: list[FormattedLine] = list(activity_lines)
-        if context.detailed_transcript and block.text:
-            lines.extend(_thinking_content_lines(block.text, context, closed=False))
+        if block.text:
+            # 活动思考内容默认显示（灰色，终端交互 行为）；超 50 行折叠
+            content_lines = _thinking_content_lines(block.text, context, closed=False)
+            if len(content_lines) > _THINKING_LIVE_MAX_LINES:
+                lines.extend(content_lines[:_THINKING_LIVE_MAX_LINES])
+                lines.append(
+                    (
+                        (
+                            "class:tui-thinking",
+                            f"  … 思考内容共 {len(content_lines)} 行，Ctrl+O 查看全部",
+                        ),
+                    )
+                )
+            else:
+                lines.extend(content_lines)
         return tuple(lines)
     detail = block.text or block.detail
     if not detail:

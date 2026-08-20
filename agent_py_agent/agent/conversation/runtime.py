@@ -3678,8 +3678,17 @@ def _consume_due_policies(
         # 同写 consumer/gateway_claim_at, 双向互斥), 领取失败=CLI 已持有
         # 或已被并发 gateway 领取 → 跳过本轮。
         if not _gateway_consume_policy_cas(scheduler.store, policy, now=current):
+            # BUGFIX(2026-08-20 真机): 这里曾 append ProgressPolicy 对象元组,
+            # _runtime_facts 序列化时 TypeError(ProgressPolicy not JSON serializable)
+            # 崩整个 background-main tick。与 _snooze_suppressed_policies 一致
+            # 只落标量 dict。
             scheduler.last_progress_policy_suppressed.append(
-                (policy, "cli_claim_held_before_execute")
+                {
+                    "policy_id": policy.policy_id,
+                    "thread_id": policy.thread_id,
+                    "task_id": policy.task_id,
+                    "reason": "cli_claim_held_before_execute",
+                }
             )
             continue
         report = _consume_with_supply_guard(

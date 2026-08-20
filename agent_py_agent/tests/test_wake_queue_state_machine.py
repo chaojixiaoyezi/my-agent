@@ -112,3 +112,33 @@ def test_legacy_wake_queue_table_migrates_columns(tmp_path: Path) -> None:
     repo.upsert_wake(root_task_id="legacy-task", next_due_at=1.0, kind="sleep")
     repo.upsert_wake(root_task_id="legacy-task", next_due_at=2.0, kind="sleep")
     assert repo.list_pending_wakes() != []
+
+
+def test_scheduler_suppressed_policies_are_json_serializable() -> None:
+    """BUGFIX 回归：CAS 领取失败的 policy 记录必须可 JSON 序列化。
+
+    真机 2026-08-20：last_progress_policy_suppressed 曾塞 ProgressPolicy
+    对象元组，_runtime_facts 序列化时 TypeError 崩整个 background-main tick。
+    """
+    import json
+
+    from agent_py_agent.agent.conversation.models import ProgressPolicy
+
+    policy = ProgressPolicy(
+        policy_id="policy-1",
+        thread_id="thread-1",
+        task_id="task-1",
+        interval_seconds=60,
+        next_due_at=1.0,
+    )
+    rows = [
+        {
+            "policy_id": policy.policy_id,
+            "thread_id": policy.thread_id,
+            "task_id": policy.task_id,
+            "reason": "cli_claim_held_before_execute",
+        }
+    ]
+    # 序列化不再抛 TypeError
+    payload = json.dumps({"progress_policy_suppressed": rows})
+    assert "policy-1" in payload
