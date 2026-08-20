@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .input_schema import validate_tool_input
+from .input_schema import normalize_tool_input, validate_tool_input
 from .models import (
     ToolRuntimeSnapshot,
     resource_scopes_for_runtime_policy,
@@ -75,7 +75,11 @@ def describe_tool_concurrency(
     internal = set(policy.input_policy.internal_parameters)
     if internal.intersection(call.arguments):
         return _barrier("internal_parameter_spoof")
-    validation = validate_tool_input(call.arguments, runtime.model_spec.input_schema)
+    # S-C1 同源修复：MiniMax 把数组/对象参数序列化成字符串，调度投影与
+    # ActionPolicy 必须用同一份 normalize+validate 语义，否则并发判定会
+    # 把合法调用误判为 invalid_arguments 而挡在调度外。
+    normalization = normalize_tool_input(call.arguments, runtime.model_spec.input_schema)
+    validation = validate_tool_input(normalization.value, runtime.model_spec.input_schema)
     if not validation.ok:
         return _barrier("invalid_arguments")
     # Completion can change effect- or resource-bearing arguments. Keep those

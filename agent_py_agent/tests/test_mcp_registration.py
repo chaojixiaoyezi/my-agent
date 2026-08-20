@@ -9,6 +9,7 @@ import json
 import sys
 import textwrap
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -210,13 +211,52 @@ def test_mcp_schema_gate_rejects_wrong_types_without_remote_call(tmp_path):
         tmp_path,
         tools={proxy.model_spec.name: proxy},
         tool_name=proxy.model_spec.name,
-        arguments={"a": "1", "b": "2"},
+        arguments={"a": "abc", "b": "2"},
     ).result
 
     assert result.ok is False
     assert result.error_code == "TOOL_PARAMETER_TYPE_INVALID"
     assert result.handler_executed is False
     assert client.calls == []
+
+
+def test_mcp_schema_gate_coerces_unambiguous_number_strings(tmp_path: Path) -> None:
+    """S-C1 语义：无歧义数字字符串（"1"→1）被 schema 门纠正后放行并执行远程调用。
+
+    旧行为把 string→integer 一律拒绝；修复后 normalize 先做确定性纠正，只有
+    无法纠正的类型错误才 fail-closed 拒绝（"abc"→integer 仍被拒，见上）。
+    """
+
+    client = _FakeClient(result={"content": "3", "isError": False})
+    proxy = build_proxy_tool(
+        client=client,  # type: ignore[arg-type]
+        server_name="calc",
+        info=MCPToolInfo(
+            name="add",
+            description="add",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "a": {"type": "integer"},
+                    "b": {"type": "integer"},
+                },
+                "required": ["a", "b"],
+                "additionalProperties": False,
+            },
+        ),
+        effect="read_only",
+    )
+
+    result = execute_canonical_test_call(
+        tmp_path,
+        tools={proxy.model_spec.name: proxy},
+        tool_name=proxy.model_spec.name,
+        arguments={"a": "1", "b": "2"},
+    ).result
+
+    assert result.ok is True
+    assert result.handler_executed is True
+    assert client.calls == [("add", {"a": 1, "b": 2})]
 
 
 # ---------------------------------------------------------------------------

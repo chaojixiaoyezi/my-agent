@@ -26,7 +26,7 @@ from ..contracts.gates.tool_rate_limit import (
     evaluate_tool_rate_limit_gate,
 )
 from ..settings.runtime_guard_config import runtime_guard_bool, runtime_guard_int
-from .input_schema import validate_tool_input
+from .input_schema import normalize_tool_input, validate_tool_input
 from .models import (
     ToolRuntime,
     ToolRuntimeSnapshot,
@@ -213,8 +213,21 @@ def _schema_decision(call: ToolCall, runtime: ToolRuntime) -> ActionDecision | N
     model_arguments = {
         key: value for key, value in call.arguments.items() if key not in internal
     }
-    validation = validate_tool_input(model_arguments, runtime.model_spec.input_schema)
+    # S-C1: MiniMax-M2.7 会把数组/对象参数序列化成 JSON 字符串（items/run_ids/
+    # target 等全部中招），validate 直接拒绝导致 task_progress/create_subagents
+    # 批量功能不可用。先做 schema 引导的类型纠正（normalize），无歧义字符串转
+    # 回原生类型后再校验；纠正结果写回 call.arguments，让后续 effect/path/
+    # 审批/幂等/执行统一使用同一份参数（args_hash 是动态 property，纠正是
+    # 确定性的，同一输入永远得到同一 hash）。
+    normalization = normalize_tool_input(model_arguments, runtime.model_spec.input_schema)
+    validation = validate_tool_input(normalization.value, runtime.model_spec.input_schema)
     if validation.ok:
+        if normalization.coercions:
+            # ToolCall 是 frozen dataclass；用 object.__setattr__（与 __post_init__
+            # 同款）在授权门内做参数纠正，后续 effect/path/审批/幂等/执行门
+            # 统一读取同一份参数。call 是单次执行的私有对象，无共享风险。
+            merged = {**call.arguments, **normalization.value}
+            object.__setattr__(call, "arguments", merged)
         return None
     return _deny(
         validation.primary_error_code or "TOOL_INVALID_ARGUMENTS",
