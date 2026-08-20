@@ -736,13 +736,7 @@ def _render_thinking(block: TuiBlock, context: TuiRenderContext) -> tuple[Format
     if not detail:
         return ()
     title = _thinking_title(block)
-    if not context.detailed_transcript:
-        return wrap_fragments(
-            (("class:tui-thinking", f"{title} (ctrl+o to expand)"),),
-            width=context.width,
-            first_prefix=(("class:tui-thinking", "∴ "),),
-            continuation_prefix=(("class:tui-thinking", "  "),),
-        )
+    # 终端交互 对齐：completed 思考内容默认展开（灰色常显），超长折叠提示。
     lines: list[FormattedLine] = list(
         wrap_fragments(
             (("class:tui-thinking", title),),
@@ -751,7 +745,19 @@ def _render_thinking(block: TuiBlock, context: TuiRenderContext) -> tuple[Format
             continuation_prefix=(("class:tui-thinking", "  "),),
         )
     )
-    lines.extend(_thinking_content_lines(detail, context, closed=True))
+    content_lines = _thinking_content_lines(detail, context, closed=True)
+    if len(content_lines) > _THINKING_LIVE_MAX_LINES and not context.detailed_transcript:
+        lines.extend(content_lines[:_THINKING_LIVE_MAX_LINES])
+        lines.append(
+            (
+                (
+                    "class:tui-thinking",
+                    f"  … 思考内容共 {len(content_lines)} 行，Ctrl+O 查看全部",
+                ),
+            )
+        )
+    else:
+        lines.extend(content_lines)
     return tuple(lines)
 
 
