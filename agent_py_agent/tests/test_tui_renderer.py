@@ -923,3 +923,60 @@ def test_transcript_select_all_marks_full_selection() -> None:
     frame = render_tui_snapshot(store.snapshot(), TuiRenderContext(width=80))
     # 通过 view 选择（store 无 view，直接验证 select_all 依赖的行数据已渲染）
     assert frame.transcript_lines
+
+
+def test_thinking_expanded_content_is_gray_in_transcript() -> None:
+    """Ctrl+O 展开后的 thinking 内容保持灰色（与正文区分，终端交互 对齐）。"""
+    from agent_py_agent.cli.chat_parts.tui_events import TuiEventSequencer
+
+    store = TuiStateStore()
+    seq = TuiEventSequencer("think-expand", clock=lambda: 100.0)
+    store.publish(seq.emit("turn_started", "started", "turn"))
+    store.publish(seq.emit("thinking_started", "started", "thinking"))
+    store.publish(
+        seq.emit(
+            "thinking_completed",
+            "completed",
+            "thinking",
+            {"text": "思考内容展开后应该还是灰色", "duration_seconds": 5.0},
+        )
+    )
+    frame = render_tui_snapshot(
+        store.snapshot(),
+        TuiRenderContext(width=100, detailed_transcript=True),
+    )
+    thinking_lines = [
+        line
+        for line in frame.transcript_lines
+        if any("思考内容展开后" in text for _style, text in line)
+    ]
+    assert thinking_lines
+    styles = {style for line in thinking_lines for style, _text in line}
+    assert "class:tui-thinking-detail" in styles
+
+
+def test_assistant_fold_hint_is_gray() -> None:
+    """assistant 折叠提示行（"… 中间 N 行已折叠"）渲染为浅灰，不与正文混。"""
+    from agent_py_agent.cli.chat_parts.tui_events import TuiEventSequencer
+
+    store = TuiStateStore()
+    seq = TuiEventSequencer("fold-hint", clock=lambda: 100.0)
+    store.publish(seq.emit("turn_started", "started", "turn"))
+    long_text = "\n".join(f"第 {i} 行正文内容" for i in range(1, 300))
+    store.publish(
+        seq.emit(
+            "assistant_completed",
+            "completed",
+            "assistant",
+            {"text": long_text},
+        )
+    )
+    frame = render_tui_snapshot(store.snapshot(), TuiRenderContext(width=80))
+    hint_lines = [
+        line
+        for line in frame.transcript_lines
+        if any("行已折叠" in text for _style, text in line)
+    ]
+    assert hint_lines, "折叠提示行应存在"
+    styles = {style for line in hint_lines for style, _text in line}
+    assert "class:tui-muted" in styles, styles

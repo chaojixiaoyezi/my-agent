@@ -676,6 +676,10 @@ def _render_assistant(block: TuiBlock, context: TuiRenderContext) -> tuple[Forma
         marker = "● " if first_content else "  "
         if first_content and block.metadata.get("process"):
             style = "class:tui-muted"
+        elif _is_fold_hint_line(line):
+            # 折叠提示行（"… 中间 N 行已折叠 (ctrl+o 展开更多) …"）统一浅灰，
+            # 与正文区分（终端交互 对齐）。
+            style = "class:tui-muted"
         else:
             style = "class:tui-assistant-marker" if first_content else ""
         lines.append(((style, marker), *line))
@@ -801,6 +805,12 @@ def _bounded_render_text(text: str, *, max_lines: int) -> str:
     tail = lines[-tail_count:]
     hidden = len(lines) - head_count - tail_count
     return "\n".join(head) + f"\n… 中间 {hidden} 行已折叠 (ctrl+o 展开更多) …\n" + "\n".join(tail)
+
+
+def _is_fold_hint_line(line: FormattedLine) -> bool:
+    """判断一行是否为折叠提示（"… 中间 N 行已折叠 (ctrl+o 展开更多) …"）。"""
+    text = fragments_text(line).strip()
+    return text.startswith("… 中间") and "行已折叠" in text
 
 
 def _bounded_user_text(text: str) -> str:
