@@ -1,5 +1,18 @@
 # STATUS
 
+## 2026-08-20 TUI 灰色层级与 tmux 左键拖选复制修正
+
+- 用户真机反馈思考正文和 `Ctrl+O` 展开提示仍与助手正文同色。根因不是主题色值，而是 renderer 只把
+  `tui-thinking-detail` / `tui-muted` 加在括号或行前缀上；真正的 Markdown 文本、粗体、代码和链接片段
+  继续使用正文前景色。既有测试只检查一行里“出现过”灰色 style，因此漏掉了这个视觉错误。
+- 现在按 终端交互 `AssistantThinkingMessage` 的容器级 `dimColor` 语义，把灰色 role 追加到思考内容和
+  折叠提示的每个可见 fragment 末尾；粗体、斜体和下划线属性保留，但前景色最终统一为浅灰。
+- 左键拖选仍采用“松手即复制”。此前 iTerm2 分支故意去掉 `tmux load-buffer -w`，只写 tmux 内部 buffer；
+  当外层终端禁用 OSC 52 / tmux DCS passthrough 时，用户系统剪贴板不会更新。现按 会话运行时
+  `clipboard_copy.rs` 统一使用 `tmux load-buffer -w -`，不再按终端品牌关闭外层剪贴板转发。
+- 本地 TUI renderer/view/input/ANSI/PTY/chat focused 105 项通过；`.13` 真机部署与外层剪贴板粘贴复验
+  仍待测试机网络恢复，未把本地自动化冒充为真机通过。
+
 ## 2026-08-18 流式活动块渲染节流（Ctrl+E 展开长正文卡死修复）
 
 - 用户复现：10000 字小说在 TUI 显示后 Ctrl+E（show_all 展开）卡住不结束。

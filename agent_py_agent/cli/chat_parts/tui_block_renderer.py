@@ -674,14 +674,15 @@ def _render_assistant(block: TuiBlock, context: TuiRenderContext) -> tuple[Forma
             lines.append(())
             continue
         marker = "● " if first_content else "  "
-        if first_content and block.metadata.get("process"):
-            style = "class:tui-muted"
-        elif _is_fold_hint_line(line):
-            # 折叠提示行（"… 中间 N 行已折叠 (ctrl+o 展开更多) …"）统一浅灰，
-            # 与正文区分（终端交互 对齐）。
+        fold_hint = _is_fold_hint_line(line)
+        if (first_content and block.metadata.get("process")) or fold_hint:
             style = "class:tui-muted"
         else:
             style = "class:tui-assistant-marker" if first_content else ""
+        if fold_hint:
+            # 终端交互 的快捷键提示是整行 dim；只给 marker 上色会让真正的提示文字
+            # 继续继承普通 Markdown 正文颜色。
+            line = _append_terminal_role(line, "class:tui-muted")
         lines.append(((style, marker), *line))
         first_content = False
     rendered = tuple(lines or [(("class:tui-assistant-marker", "●"),)])
@@ -777,6 +778,9 @@ def _thinking_content_lines(
         if not line:
             out.append(())
             continue
+        # 终端交互 给 Markdown 容器设置 dimColor；这里必须把灰色 role 追加到每个
+        # Markdown fragment 的末尾，才能覆盖粗体、代码和链接各自的前景色。
+        line = _append_terminal_role(line, "class:tui-thinking-detail")
         if idx == 0:
             out.append((("class:tui-thinking-detail", "（"), *line))
         else:
@@ -813,8 +817,21 @@ def _bounded_render_text(text: str, *, max_lines: int) -> str:
     return "\n".join(head) + f"\n… 中间 {hidden} 行已折叠 (ctrl+o 展开更多) …\n" + "\n".join(tail)
 
 
+# LLM: role 必须追加在 fragment 原样式之后，让容器级 muted/thinking 前景色覆盖 Markdown token 颜色，同时保留 bold/italic/underline 属性。
+# 函数用途: 给一整行所有可见片段追加最终视觉角色，避免只染灰行前缀而正文仍是白色或彩色。
+def _append_terminal_role(line: FormattedLine, role: str) -> FormattedLine:
+    normalized_role = str(role or "").strip()
+    if not normalized_role:
+        return line
+    return tuple(
+        (f"{style} {normalized_role}".strip(), text)
+        for style, text in line
+    )
+
+
+# LLM: 折叠提示识别只作用于 renderer 自己生成的固定投影，不得用于状态迁移或模型正文裁决。
+# 函数用途: 判断一行是否为 renderer 的中段折叠提示，以便整行使用浅灰提示色。
 def _is_fold_hint_line(line: FormattedLine) -> bool:
-    """判断一行是否为折叠提示（"… 中间 N 行已折叠 (ctrl+o 展开更多) …"）。"""
     text = fragments_text(line).strip()
     return text.startswith("… 中间") and "行已折叠" in text
 

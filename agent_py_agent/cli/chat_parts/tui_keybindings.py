@@ -1448,14 +1448,12 @@ def _run_clipboard_tool(args: list[str], text: str) -> bool:
     return result.returncode == 0
 
 
-# LLM: tmux may drop DCS passthrough when allow-passthrough is off. Its own paste buffer is the
-# reliable local authority; -w additionally asks tmux to forward the same text to the outer client.
-# 函数用途: 在后台把已选文本写入 tmux buffer；失败时保留 OSC 52 和应用内剪贴板兜底。
+# LLM: tmux paste buffer and outer-terminal clipboard must be updated by one `load-buffer -w` call;
+# terminal brand cannot disable `-w`, because DCS passthrough may be off and the plain buffer would
+# then never reach the user's local clipboard over SSH.
+# 函数用途: 把已选文本写入 tmux buffer并转发到外层终端剪贴板；失败时仍保留 OSC 52 和应用内剪贴板兜底。
 def _load_tmux_clipboard_buffer(text: str) -> bool:
-    args = ["tmux", "load-buffer"]
-    if os.environ.get("LC_TERMINAL") != "iTerm2":
-        args.append("-w")
-    args.append("-")
+    args = ["tmux", "load-buffer", "-w", "-"]
     try:
         result = subprocess.run(
             args,

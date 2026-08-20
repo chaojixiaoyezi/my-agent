@@ -30,7 +30,9 @@ queue preview 又位于可滚动 transcript，离开尾部后看不见。并行�
 当前进展：ordinary input 和控制操作均已使用稳定 message/operation ID、exact expected turn、持久 outbox、
 accepted/rejected/unknown 三态和 GET-only reconciler；Gateway terminal、attempt lease、guidance mailbox、
 Adapter ingress/reply 也已收进同一结构化事实链。response loss、同 ID 异正文、active/final/stop/provider ACK
-竞态和客户端重启已有定向测试；修复后的全量 pytest 到 100%、退出 0。
+竞态和客户端重启已有定向测试；修复后的全量 pytest 到 100%、退出 0。2026-08-20 又修正了思考/
+`Ctrl+O` 提示只染前缀未染正文，以及 iTerm2 下 tmux 未使用 `load-buffer -w` 导致外层剪贴板不更新；
+本地相关 focused 105 项通过，`.13` 因当前网络不可达尚未复验。
 
 待做：先在 `.13` 备份后部署并复验 response lost、明确拒绝、final race、客户端重启和多路 IM/TUI；随后由
 独立 agent 处理三类剩余底座：一是 ordinary/control 共用的最外层 message route binding，二是普通 ChatJob

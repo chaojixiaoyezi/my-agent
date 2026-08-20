@@ -81,14 +81,16 @@ history/search/paste/completion/queue/stash、follow/unseen、session-history、
 鼠标选择/OSC52、PTY recorder 和 ANSI replay。
 鼠标回归还必须覆盖：prompt_toolkit 传入的是源字符索引，中文宽字符不得再次按显示列换算或只复制一半；窗口外丢失 mouse-up 后，首个
 `MouseButton.NONE` motion 或下一次 fresh press 只结束旧拖动，后续 hover 不再扩展；一次 settled selection
-只自动复制一次，并同时保留 prompt_toolkit、OSC52 与 tmux buffer 路径。输入回归还要覆盖鼠标松手自动
+只自动复制一次，并同时保留 prompt_toolkit、OSC52 与 `tmux load-buffer -w` 外层剪贴板路径；iTerm2
+也不得退化成只写 tmux 内部 buffer。输入回归还要覆盖鼠标松手自动
 复制、Ctrl-C 复制且保留输入高亮、Ctrl-V/终端 bracketed paste 替换选区，以及 marker 普通空格不会触发
 `nbsp` 下划线。运行中普通输入还要证明下一次
 真实模型调用能看到该输入；若 exact turn 已结束，TUI 只能挂接 Gateway 返回的 canonical queued request，
 不得再次提交正文。
 富 transcript 追补还必须覆盖：未声明能力的 Gateway 不公开 thinking/display 且继续按 verbose 裁剪；TUI
 声明能力后逐轮 commentary、provider 明示 thinking、edit/overwrite/patch diff、write preview、命令
-stdout/stderr/exit code 均走结构化事件；失败后最后一次 workspace mutation 的软续跑只触发一次，简单写入
+stdout/stderr/exit code 均走结构化事件；思考 Markdown 与 `Ctrl+O` 折叠提示的每个可见 fragment 都必须
+以最终 muted/thinking role 覆盖正文前景色，不能只断言行前缀是灰色。失败后最后一次 workspace mutation 的软续跑只触发一次，简单写入
 和已有后续检查不触发。供应商网络回归还要用真实 `ConnectionRefusedError/ECONNREFUSED` 证明传输层
 `2/5/15` 秒三次退避、模型回合层 `10/25/45/100/180` 秒五次恢复和富 TUI typed retry 提示；普通
 `"connection refused"` 字符串、DNS 与无效地址不得取得重试权。常用定向命令为：

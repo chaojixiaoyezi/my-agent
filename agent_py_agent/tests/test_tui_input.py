@@ -691,7 +691,7 @@ def test_tmux_clipboard_buffer_uses_write_through(monkeypatch) -> None:
     assert calls == [(["tmux", "load-buffer", "-w", "-"], "甲乙")]
 
 
-def test_tmux_clipboard_buffer_avoids_iterm2_write_through(monkeypatch) -> None:
+def test_tmux_clipboard_buffer_keeps_iterm2_write_through(monkeypatch) -> None:
     calls: list[list[str]] = []
 
     class Result:
@@ -705,7 +705,7 @@ def test_tmux_clipboard_buffer_avoids_iterm2_write_through(monkeypatch) -> None:
     monkeypatch.setattr(tui_keybindings.subprocess, "run", fake_run)
 
     assert tui_keybindings._load_tmux_clipboard_buffer("copy")
-    assert calls == [["tmux", "load-buffer", "-"]]
+    assert calls == [["tmux", "load-buffer", "-w", "-"]]
 
 
 def test_permission_y_n_shortcuts_use_typed_decisions(monkeypatch) -> None:

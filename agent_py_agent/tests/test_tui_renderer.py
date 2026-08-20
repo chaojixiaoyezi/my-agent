@@ -854,8 +854,8 @@ def test_todo_panel_gateway_event_payload_keeps_task_progress_items() -> None:
     task_progress_items，TUI todo 面板才能拿到数据（真机实锤：白名单漏掉
     task_progress_items → 面板永远不渲染）。"""
     from agent_py_agent.cli.chat_parts.tui_runtime import (
-        TuiTurnEventAdapter,
         TuiRuntime,
+        TuiTurnEventAdapter,
     )
     from agent_py_agent.cli.chat_parts.tui_view_model import TuiStateStore
 
@@ -983,8 +983,48 @@ def test_thinking_expanded_content_is_gray_in_transcript() -> None:
         if any("思考内容展开后" in text for _style, text in line)
     ]
     assert thinking_lines
-    styles = {style for line in thinking_lines for style, _text in line}
-    assert "class:tui-thinking-detail" in styles
+    visible_fragments = [
+        (style, text)
+        for line in thinking_lines
+        for style, text in line
+        if text.strip()
+    ]
+    assert visible_fragments
+    assert all(style.endswith("class:tui-thinking-detail") for style, _text in visible_fragments)
+
+
+def test_thinking_markdown_token_colors_are_overridden_by_gray_role() -> None:
+    """思考里的粗体、代码和链接保留语义样式，但最终前景色必须统一由灰色 role 接管。"""
+    store = TuiStateStore()
+    seq = TuiEventSequencer("think-markdown-gray", clock=lambda: 100.0)
+    store.publish(seq.emit("thinking_started", "started", "thinking"))
+    store.publish(
+        seq.emit(
+            "thinking_completed",
+            "completed",
+            "thinking",
+            {
+                "text": "思考 **加粗**、`代码` 与 https://example.com",
+                "duration_seconds": 2.0,
+            },
+        )
+    )
+
+    frame = render_tui_snapshot(
+        store.snapshot(),
+        TuiRenderContext(width=100, detailed_transcript=True),
+    )
+    content_fragments = [
+        (style, text)
+        for line in frame.transcript_lines[1:]
+        for style, text in line
+        if text.strip() and text not in {"（", "）"}
+    ]
+
+    assert content_fragments
+    assert any("class:tui-strong" in style for style, _text in content_fragments)
+    assert any("class:tui-code-inline" in style for style, _text in content_fragments)
+    assert all(style.endswith("class:tui-thinking-detail") for style, _text in content_fragments)
 
 
 def test_assistant_fold_hint_is_gray() -> None:
@@ -1010,5 +1050,11 @@ def test_assistant_fold_hint_is_gray() -> None:
         if any("行已折叠" in text for _style, text in line)
     ]
     assert hint_lines, "折叠提示行应存在"
-    styles = {style for line in hint_lines for style, _text in line}
-    assert "class:tui-muted" in styles, styles
+    visible_fragments = [
+        (style, text)
+        for line in hint_lines
+        for style, text in line
+        if text.strip()
+    ]
+    assert visible_fragments
+    assert all(style.endswith("class:tui-muted") for style, _text in visible_fragments)
