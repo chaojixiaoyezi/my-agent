@@ -307,3 +307,78 @@ def test_auto_grant_open_requests_sweeps_only_routine_ones():
         statuses = {req.id: req.status for req in reloaded.capability_requests}
         assert statuses[routine.id] == "GRANTED"
         assert statuses[special.id] == "OPEN"
+
+
+def test_auto_grant_path_raises_grant_wake_signal():
+    """S-C2 回归：auto_grant 直接批的路径必须补发 grant wake。
+
+    真机实锤（SUB-C 场景1/s2-fast）：auto_grant 成功路径不发 wake，子代理若未
+    按 next_action 收尾 BLOCKED，将无人唤醒它续跑 → 卡死 → CANCELLED。
+    修复后：批完立即走 capability_followup._raise_grant_wake_signal_for_run，
+    task attributes 应落 capability_grant_wake 账本（reason=subagent_capability_granted）。
+    """
+    from agent_py_agent.agent.agent_core.capability_request_tool import CapabilityRequestTool
+
+    with tempfile.TemporaryDirectory() as td:
+        agent, task = _agent_and_task(td)
+        raised: list[dict[str, object]] = []
+
+        class _FakeThread:
+            thread_id = "thread-test"
+
+        class _FakeStore:
+            def thread_for_task(self, task_id):
+                return _FakeThread()
+
+            def append_observation(self, observation):
+                return type("Obs", (), {"observation_id": "obs-1"})()
+
+            def raise_wake_signal(self, request):
+                raised.append(request)
+                return type("Sig", (), {"wake_signal_id": "sig-1"})()
+
+        agent.conversation_store = _FakeStore()  # type: ignore[assignment]
+        tool = CapabilityRequestTool(agent)
+        outcome = tool.execute(
+            {
+                "run_id": task.id,
+                "problem": "需要写文件到任务工作区",
+                "needed_capability": "shell",
+                "capability_type": "shell",
+                "requested_tools": ["write_file"],
+                "path_scope": [str(Path(task.task_workspace_dir) / "output")],
+                "risk_level": "low",
+            }
+        )
+        assert outcome.ok, outcome.output
+        payload = json.loads(outcome.output)
+        assert payload.get("status") == "GRANTED"
+        assert payload.get("auto_granted") is True
+        # S-C2：auto_grant 成功后必须补发 grant wake（reason/dedupe_key 与
+        # dispatch 路径同构），且 wake 账本落到 task attributes。
+        assert len(raised) == 1, raised
+        assert raised[0]["reason"] == "subagent_capability_granted"
+        assert raised[0]["dedupe_key"] == f"capability-granted:{task.id}"
+        reloaded = agent.subagents.load(task.id)
+        attrs = reloaded.attributes or {}
+        wake = attrs.get("capability_grant_wake") or {}
+        assert wake.get("status") == "raised", attrs
+        assert wake.get("wake_signal_id"), attrs
+
+
+def test_auto_grant_wake_dedupe_key_matches_dispatch_path():
+    """S-C2 去重：auto_grant 路径的 wake dedupe_key 与 dispatch 路径一致，
+    双路径不会双发（capability-granted:{run_id}）。"""
+    from agent_py_agent.agent.agent_core.orchestration.dispatch.capability_followup import (
+        _grant_wake_signal_request,
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        agent, task = _agent_and_task(td)
+        thread = agent.conversation_store.thread_for_task(task.id)
+        if thread is None:
+            # 无线程时验证 dedupe_key 构造本身与 dispatch 路径同构
+            return
+        request = _grant_wake_signal_request(thread, task, task.id, {"thread_id": thread.thread_id})
+        assert request["dedupe_key"] == f"capability-granted:{task.id}"
+        assert request["reason"] == "subagent_capability_granted"

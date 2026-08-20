@@ -3125,6 +3125,38 @@ def _skip_pending_wake_signal(
     return False
 
 
+def _record_background_notice(store: object, report: BackgroundMainAgentReport) -> None:
+    """后台主代理轮完成 → 写一条 notices 记录（TUI 后台完成监视用）。
+
+    写入失败只记日志不抛（notices 是显示增强，绝不能影响后台轮主流程）。
+    """
+    import json as _json
+
+    root = getattr(store, "root", None)
+    if not root:
+        return
+    try:
+        notices_dir = Path(root) / "notices"
+        notices_dir.mkdir(parents=True, exist_ok=True)
+        line = _json.dumps(
+            {
+                "schema_version": "background_notice.v1",
+                "thread_id": report.thread_id,
+                "reason": str(report.reason or ""),
+                "summary": str(report.response or "")[:500],
+                "created_at": report.created_at,
+                "delivery_status": str(report.delivery_status or ""),
+            },
+            ensure_ascii=False,
+        )
+        with open(notices_dir / f"{report.thread_id}.notices.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "background notice write failed (thread=%s)", report.thread_id, exc_info=True
+        )
+
+
 def _consume_wake_signal_batch(
     scheduler: BackgroundMainAgentScheduler,
     signal: WakeSignal,
@@ -3148,6 +3180,11 @@ def _consume_wake_signal_batch(
         _defer_failed_wake_batch(scheduler, wake_batch, execution_signal, current)
         return
     reports.append(report)
+    # S-BG1：后台主代理轮（子代理完成唤醒/能力获批续跑等）完成后写一条
+    # notices 记录（conversations/notices/{thread_id}.notices.jsonl），TUI
+    # 监视线程据此把"后台已自动汇总"显示到屏幕（真机实测：后台轮在跑但
+    # TUI 无事件驱动不刷新，用户看不到子代理完成后的自动汇总）。
+    _record_background_notice(scheduler.store, report)
     if _is_scheduler_wake_signal(signal):
         return
     reported.add(report.thread_id)

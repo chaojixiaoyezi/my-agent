@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -71,6 +72,23 @@ class CapabilityRequestTool(BaseTool):
         from ..subagents.capability_auto_grant import auto_grant_routine_request
 
         auto_grant = auto_grant_routine_request(self.agent.subagents, request.run_id, record.id)
+        if auto_grant is not None:
+            # S-C2 修复：auto_grant 直接批的路径不走 dispatch/capability_route，
+            # 不会触发 capability_followup 的 grant wake；若子代理模型未按
+            # next_action 收尾 BLOCKED，将无人唤醒它续跑（真机实测卡死→CANCELLED）。
+            # 这里补发与 dispatch 路径同款 wake（reason=subagent_capability_granted，
+            # dedupe_key=capability-granted:{run_id} 天然去重，双路径不会双发）。
+            from .orchestration.dispatch.capability_followup import (
+                _raise_grant_wake_signal_for_run,
+            )
+
+            try:
+                _raise_grant_wake_signal_for_run(self.agent, self.agent.conversation_store, request.run_id)
+            except Exception:
+                # wake 失败只记日志：grant 账本已落盘，sweep/父级裁决仍能兜底续跑。
+                logging.getLogger(__name__).warning(
+                    "capability auto-grant wake failed (run_id=%s)", request.run_id, exc_info=True
+                )
         if auto_grant is None:
             # R4 子项②：提交即推送父级（observation + wake），主代理不再对未决请求失明。
             from ..subagents.runner_completion_wake import notify_parent_on_capability_request

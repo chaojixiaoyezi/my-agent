@@ -393,6 +393,22 @@ class TuiRuntime:
                     request_id=history_request_id,
                 )
 
+    # LLM: publish_background_notice 只做显示（system_message 块），不注入业务执行权。
+    # 函数用途: 把后台主代理轮完成（子代理自动汇总等）显示为一条可读通知。
+    def publish_background_notice(self, summary: str, *, thread_id: str = "") -> None:
+        text = str(summary or "").strip()
+        if not text:
+            return
+        request_id = f"bg-notice:{thread_id or self.session_id}"
+        with self._lock:
+            self._publish(
+                "system_message",
+                "completed",
+                f"bg-notice:{thread_id or self.session_id}",
+                {"text": text, "severity": "info"},
+                request_id=request_id,
+            )
+
     # LLM: enqueue_prompt 使用 request_id 作为用户块/队列身份；排队项只发 queue_added，开始执行时再原子提升为稳定用户块。
     # 函数用途: 立即显示空闲提交，或把运行中提交登记成可回取的用户队列预览。
     def enqueue_prompt(self, request_id: str, text: str, *, queued: bool) -> None:

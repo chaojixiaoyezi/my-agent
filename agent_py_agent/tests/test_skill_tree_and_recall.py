@@ -202,7 +202,8 @@ def test_builtin_skill_search_routes_representative_tasks_to_expected_method(
     snapshot = catalog.service.snapshot_for(catalog.workspace, force_reload=True)
     router = CapabilityRouter(skill_snapshot=snapshot)
 
-    assert len(snapshot.entries) == 26
+    # 27 = 26 原内置 + log-incident-triage（S2-14 噪声修复新增）
+    assert len(snapshot.entries) == 27
     assert snapshot.errors == ()
     hits = router.search(query, kinds={"skill"}, limit=5)
 
