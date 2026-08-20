@@ -82,3 +82,33 @@ def test_retry_after_frozen_skips_claim(tmp_path):
     repo.release_wake(popped[0]["wake_id"], retry_after=100.0, last_error="429")
     assert repo.pop_due_wakes(now=50.0, limit=10) == []
     assert repo.pop_due_wakes(now=100.0, limit=10) != []
+
+
+def test_legacy_wake_queue_table_migrates_columns(tmp_path: Path) -> None:
+    """WK-INT 迁移：旧结构(8 列) wake_queue 表在初始化时自动 ALTER 补齐新列。"""
+    import sqlite3
+
+    from agent_py_agent.agent.runtime_db.schema import RuntimeSchemaMixin
+
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE wake_queue ("
+        "wake_id TEXT PRIMARY KEY, root_task_id TEXT NOT NULL, "
+        "root_run_id TEXT NOT NULL DEFAULT '', root_thread_id TEXT NOT NULL DEFAULT '', "
+        "kind TEXT NOT NULL DEFAULT 'sleep', next_due_at REAL NOT NULL, "
+        "woke_at REAL NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'pending', "
+        "created_at REAL NOT NULL, updated_at REAL NOT NULL)"
+    )
+    conn.execute("CREATE INDEX idx_wake_queue_due ON wake_queue(status, next_due_at)")
+    conn.commit()
+    conn.close()
+
+    repo = RuntimeRepository(db_path)
+    columns = {row[1] for row in sqlite3.connect(db_path).execute("PRAGMA table_info(wake_queue)")}
+    for expected in ("lease_until", "retry_after", "attempt_count", "last_error"):
+        assert expected in columns, f"迁移缺失列: {expected}"
+    # 迁移后旧数据行可读写新列
+    repo.upsert_wake(root_task_id="legacy-task", next_due_at=1.0, kind="sleep")
+    repo.upsert_wake(root_task_id="legacy-task", next_due_at=2.0, kind="sleep")
+    assert repo.list_pending_wakes() != []

@@ -286,7 +286,7 @@ _BASE_RUNTIME_SQL = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_wake_queue_due ON wake_queue(status, next_due_at)",
     "CREATE INDEX IF NOT EXISTS idx_wake_queue_task ON wake_queue(root_task_id)",
-    "CREATE INDEX IF NOT EXISTS idx_wake_queue_lease ON wake_queue(status, lease_until)",
+    # idx_wake_queue_lease 在迁移末尾确保（新列可能由迁移 ALTER 补上，此处建会失败）
     # ---------------------------------------------------------------- R3（I 节）
     # AcceptanceContract（I.2/I.6）：dispatch 前由框架编译、校验、冻结，
     # 不可变；current_contract_id 在 task_runs 上 CAS 防分叉。模型只能
@@ -483,6 +483,12 @@ class RuntimeSchemaMixin:
                     if "duplicate column" not in str(exc).lower():
                         raise
                     # 并发连接已先完成本列迁移，目标态已达成。
+        # WK-INT: 状态机索引在迁移后统一确保（列可能由 ALTER 补上，基础
+        # schema 阶段建索引会因列缺失失败；CREATE IF NOT EXISTS 幂等）。
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_wake_queue_lease "
+            "ON wake_queue(status, lease_until)"
+        )
 
     @staticmethod
     def _execute_runtime_schema(conn: sqlite3.Connection, statements: tuple[str, ...]) -> None:
