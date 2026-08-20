@@ -39,6 +39,12 @@ TOOL_RICH_EXPANDED_MAX_LINES = 40
 WRITE_PREVIEW_MAX_LINES = 10
 USER_MESSAGE_MAX_CHARS = 10_000
 USER_MESSAGE_HEAD_CHARS = 2_500
+# R2-1: 模型/工具输出洪水(如 seq 5000)若全量渲染会拖垮 TUI——渲染层截断,
+# 只裁 UI 投影, canonical block.text 原文保留(与 _bounded_user_text 同思路)。
+_ASSISTANT_RENDER_MAX_LINES = 200
+_ASSISTANT_RENDER_DETAIL_MAX_LINES = 2_000
+_TOOL_RENDER_MAX_LINES = 200
+_TOOL_RENDER_DETAIL_MAX_LINES = 2_000
 USER_MESSAGE_TAIL_CHARS = 2_500
 SPINNER_METRICS_AFTER_SECONDS = 30.0
 SPINNER_STALL_AFTER_SECONDS = 3.0
@@ -651,7 +657,11 @@ def _render_user(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedL
 # 函数用途: 渲染带 ● marker 的助手 Markdown 块；工具边界前的过程段默认折叠为摘要。
 def _render_assistant(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedLine, ...]:
     content_width = max(1, context.width - 2)
-    markdown_lines = render_markdown(block.text, MarkdownRenderContext(width=content_width))
+    text = _bounded_render_text(
+        block.text,
+        max_lines=_ASSISTANT_RENDER_DETAIL_MAX_LINES if context.detailed_transcript else _ASSISTANT_RENDER_MAX_LINES,
+    )
+    markdown_lines = render_markdown(text, MarkdownRenderContext(width=content_width))
     lines: list[FormattedLine] = []
     first_content = True
     for line in markdown_lines:
@@ -759,6 +769,21 @@ def _thinking_title(block: TuiBlock) -> str:
 
 # LLM: 显示上限与 终端交互 的公开 UserPromptMessage 合同一致；只裁 UI 投影，完整 prompt 仍留在 canonical event/执行链。
 # 函数用途: 对超长用户消息保留头尾各 2500 字符，并标出中间隐藏行数。
+# LLM: 渲染投影截断(头尾保留 + 中间折叠提示); 只作用于渲染层, block.text 原文不变。
+# 函数用途: 超长文本渲染前裁剪, 防 TUI 被输出洪水拖垮。
+def _bounded_render_text(text: str, *, max_lines: int) -> str:
+    normalized = str(text or "")
+    lines = normalized.split("\n")
+    if len(lines) <= max_lines:
+        return normalized
+    head_count = max(1, max_lines * 2 // 3)
+    tail_count = max(5, max_lines // 10)
+    head = lines[:head_count]
+    tail = lines[-tail_count:]
+    hidden = len(lines) - head_count - tail_count
+    return "\n".join(head) + f"\n… 中间 {hidden} 行已折叠 (ctrl+o 展开更多) …\n" + "\n".join(tail)
+
+
 def _bounded_user_text(text: str) -> str:
     normalized = str(text or "")
     if len(normalized) <= USER_MESSAGE_MAX_CHARS:
@@ -850,6 +875,12 @@ def _render_tool(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedL
     status_text = _tool_status_text(block)
     child_style = "class:tui-error" if block.phase == "failed" else "class:tui-muted"
     detail_lines = status_text.splitlines()
+    # R2-1: show_all 也不能全量渲染(工具输出洪水时展开=崩溃); 超上限头尾保留+折叠提示。
+    if context.show_all:
+        detail_lines = _bounded_render_text(
+            "\n".join(detail_lines),
+            max_lines=_TOOL_RENDER_DETAIL_MAX_LINES,
+        ).splitlines()
     visible_lines = detail_lines if context.show_all else detail_lines[:TOOL_PREVIEW_MAX_LINES]
     for index, detail_line in enumerate(visible_lines):
         marker = "  ⎿ " if index == 0 else "    "

@@ -53,10 +53,17 @@ from agent_py_agent.agent.agent_core.model.call_runtime import (  # noqa: E402
 from agent_py_agent.agent.agent_core.model.context_pressure import (  # noqa: E402
     model_visible_context_tokens,
 )
-from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallRecordParams  # noqa: E402
-from agent_py_agent.agent.agent_core.tool_model_generation import _native_provider_messages  # noqa: E402
+from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
+    ToolCallRecordParams,  # noqa: E402
+)
+from agent_py_agent.agent.agent_core.tool_model_generation import (
+    _native_provider_messages,  # noqa: E402
+)
 from agent_py_agent.agent.backends.errors import ProviderTimeoutError  # noqa: E402
-from agent_py_agent.agent.backends.gateway_helpers import GatewayRequest, post_stream_iter  # noqa: E402
+from agent_py_agent.agent.backends.gateway_helpers import (  # noqa: E402
+    GatewayRequest,
+    post_stream_iter,
+)
 from agent_py_agent.agent.contracts.model_call_ledger import (  # noqa: E402
     ModelCallLedger,
     ModelCallStartedParams,
@@ -208,7 +215,7 @@ class _SSEHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
             for i in range(6):
-                self.wfile.write(f"data: {{\"n\":{i}}}\n\n".encode("utf-8"))
+                self.wfile.write(f"data: {{\"n\":{i}}}\n\n".encode())
                 self.wfile.flush()
                 time.sleep(0.5)  # 周期心跳, 重置 idle deadline
             return

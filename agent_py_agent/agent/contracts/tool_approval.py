@@ -171,10 +171,12 @@ class ToolApprovalDecision:
         object.__setattr__(self, "decided_at", max(0.0, float(self.decided_at or 0.0)))
 
     # LLM: approved 只认显式 approved 枚举；label、option id 和反馈文本不得产生授权。
+    # approved_session 是会话级批准（#5 引入），同样放行——否则选"会话级批准"会走
+    # 拒绝分支并抛 ValueError 导致整个请求失败（R2-7 实测）。
     # 函数用途: 判断该决定是否允许当前调用继续执行。
     @property
     def approved(self) -> bool:
-        return self.decision == "approved"
+        return self.decision in {"approved", "approved_session"}
 
     # LLM: 输出包含精确 binding id，但不复制工具参数或凭据。
     # 函数用途: 生成跨进程审批答复 payload。

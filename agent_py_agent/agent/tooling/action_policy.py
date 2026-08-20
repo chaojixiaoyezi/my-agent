@@ -384,6 +384,13 @@ def _approval_decision(
     effect: str,
 ) -> ActionDecision | None:
     mode = runtime.runtime_policy.approval_policy.mode
+    sandbox_mode = runtime.runtime_policy.sandbox_policy.mode
+    # 会话运行时 对齐(R2-8): sandbox required 工具的沙箱就是边界——dangerous 效果(命令执行)
+    # 在沙箱内自动执行不弹审批, 审批只保留给 always 显式要求与非沙箱工具。
+    # 沙箱(bwrap)限制命令影响范围, 危险操作无法越出沙箱, 因此无需逐次确认
+    # (与 会话运行时 on-request 模式"沙箱内命令自动跑不弹"一致)。
+    if mode != "always" and sandbox_mode == "required" and effect == "dangerous":
+        return None
     required = (
         mode == "always"
         or (mode == "mutating" and effect in {"mutating", "dangerous"})

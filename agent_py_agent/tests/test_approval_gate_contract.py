@@ -122,3 +122,67 @@ def test_approval_gate_rejects_denied_expired_unauthorized_and_replayed_records(
         payload = decision.to_dict()
         assert payload["recovery"]["status"] == "blocked"
         assert payload["recovery"]["terminal"] is True
+
+
+def test_approved_session_decision_is_treated_as_approved(runtime_snapshot_factory=None):
+    """R2-7 回归: approved_session(会话级批准)必须走批准分支, 不能抛 ValueError。
+
+    实测现场: 选"Yes always for this session"后 decision.approved 返回 False,
+    走 rejected_binding 抛 ValueError → 整个请求失败(TUI 显示"任务处理失败")。
+    """
+    import pytest
+
+    from agent_py_agent.agent.contracts.tool_approval import (
+        ToolApprovalDecision,
+        ToolApprovalRequest,
+    )
+
+    request = ToolApprovalRequest(
+        permission_id="approval:test-r2-7",
+        request_id="req-r2-7",
+        tool_name="run_command",
+        round=1,
+        call_index=0,
+        title="Tool use",
+        description="test",
+        binding={
+            "tool_name": "run_command",
+            "run_id": "run-r2-7",
+            "operation_id": "op-r2-7",
+            "idempotency_key": "ik-r2-7",
+            "args_hash": "ah-r2-7",
+        },
+        options=(
+            {
+                "id": "allow_once",
+                "label": "Yes",
+                "decision": "approved",
+                "feedback_type": "accept",
+                "feedback_placeholder": "",
+            },
+            {
+                "id": "allow_session",
+                "label": "Yes, always for this session",
+                "decision": "approved_session",
+                "feedback_type": "accept",
+                "feedback_placeholder": "",
+            },
+            {
+                "id": "deny",
+                "label": "No",
+                "decision": "denied",
+                "feedback_type": "reject",
+                "feedback_placeholder": "",
+            },
+        ),
+    )
+    session_decision = ToolApprovalDecision("approval:test-r2-7", "approved_session")
+
+    # approved_session 必须被 approved_binding 接受（修复前抛 ValueError）
+    binding = request.approved_binding(session_decision)
+    assert binding["status"] == "APPROVED"
+    assert binding["approval_id"] == "approval:test-r2-7"
+
+    # approved_session 不能被 rejected_binding 接受（它确实批准了）
+    with pytest.raises(ValueError):
+        request.rejected_binding(session_decision)

@@ -491,10 +491,11 @@ def execute_approved_registry_test_call(
         write_boundary=write_boundary,
         runtime_snapshot=snapshot,
     )
+    # R2-8 对齐 会话运行时: sandbox required 工具的 dangerous 效果在沙箱内自动执行不弹审批。
+    # 因此"approved 执行"兼容两种路径: 弹审批(非沙箱工具)就注入批准 binding;
+    # 沙箱内自动执行则第一次调用即为执行结果。
     if first.result.status != "approval_required" or not first.decision.approval_request:
-        raise AssertionError(
-            f"expected approval_required before approved test execution: {tool_name}"
-        )
+        return first.result
     binding: dict[str, object] = {
         **dict(first.decision.approval_request),
         "approval_id": f"approval-{call_id}",

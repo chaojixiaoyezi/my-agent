@@ -716,6 +716,23 @@ def _publish_gateway_failure_response(
     if not response_path.exists():
         write_json_file_atomic(response_path, response)
     append_gateway_history_once(paths, response)
+    # #4: recovery 失败也向 chunks 流写终态事件(对齐 会话运行时 TurnAborted)——纯 chunks
+    # 消费者(rich TUI 等)收到即复位, 不依赖 response 文件轮询。
+    try:
+        from .request_execution import claimed_request_chunk_path, write_chunk_event
+
+        chunk_path = claimed_request_chunk_path(request_path, request_id)
+        if chunk_path.exists() or chunk_path.parent.exists():
+            write_chunk_event(
+                chunk_path,
+                {
+                    "kind": "request_aborted",
+                    "error_code": str(context.get("error_code") or "GATEWAY_REQUEST_ABORTED"),
+                    "status": "failed",
+                },
+            )
+    except Exception:  # noqa: BLE001 - 终态事件是增强, 失败不影响 recovery 本身
+        pass
     agent = context.get("agent")
     if agent:
         log_gateway_payload(
