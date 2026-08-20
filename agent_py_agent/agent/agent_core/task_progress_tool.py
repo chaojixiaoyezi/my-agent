@@ -39,7 +39,9 @@ class TaskProgressTool(BaseTool):
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy(
             "read_only",
-            by_parameter=(("action", (("", "read_only"), ("read", "read_only"), ("update", "mutating"))),),
+            by_parameter=(
+                ("action", (("", "read_only"), ("read", "read_only"), ("update", "mutating"), ("create", "mutating"))),
+            ),
         ),
         idempotency_policy=IdempotencyPolicy("operation"),
         concurrency_policy=ConcurrencyPolicy("serial"),
@@ -117,6 +119,10 @@ def _invalid_status_result(params: dict[str, object]) -> ToolHandlerOutcome | No
 
 def _normalized_action(value: object) -> str:
     action = str(value or "read").strip()
+    # S-C1 延伸：MiniMax 用 create 建清单（账本不存在时 update 本就自动创建），
+    # 归一为 update，与 schema 枚举（read/update/create）一致。
+    if action == "create":
+        return "update"
     return action if action in {"read", "update"} else action or "read"
 
 

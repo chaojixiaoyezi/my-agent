@@ -657,10 +657,20 @@ class TestTaskProgressContinuationAndAliases:
         }
 
 
-def test_task_progress_rejects_old_action_aliases(tmp_path):
-    """工具入口不再把 create/init/begin 旧别名偷偷当成 update。"""
+def test_task_progress_accepts_create_as_update_alias(tmp_path):
+    """S-C1 延伸：create 归一为 update（账本不存在时自动创建），不再拒绝。
+
+    真机实测（todo-verify）：MiniMax-M2.7 反复用 action=create 建清单，拒绝
+    create 只会让 todo 面板永远无数据。create 语义 ⊂ update（首次建账本就是
+    update 的自动创建行为），归一化是无损的。
+    """
+    from agent_py_agent.agent.agent_core.task_progress_tool import _normalized_action
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
+
+    assert _normalized_action("create") == "update"
+    assert _normalized_action("update") == "update"
+    assert _normalized_action("read") == "read"
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), execution_mode="local_unmanaged"), tmp_path)
     agent._main_agent_run_id = "run-main"
@@ -670,14 +680,34 @@ def test_task_progress_rejects_old_action_aliases(tmp_path):
         {
             "action": "create",
             "summary": "开始覆盖五个项目。",
+            "items": [{"id": "p1", "title": "项目一", "status": "pending"}],
         }
     )
-    assert result.ok is False
-    assert result.error_code == "TOOL_INVALID_ARGUMENTS"
-    issue = _validation_issues(result)[0]
-    assert issue["keyword"] == "enum"
-    assert issue["path"] == "$.action"
-    assert issue["expected"] == ["read", "update"]
+    assert result.ok is True, result.output
+    assert '"items"' in str(result.output)
+
+
+def test_task_progress_create_without_ledger_writes_and_reads_back(tmp_path):
+    """create（归一为 update）首次写入后，read 能读回同一账本。"""
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), execution_mode="local_unmanaged"), tmp_path)
+    agent._main_agent_run_id = "run-main"
+
+    wrote = _execute_task_progress(
+        agent,
+        {
+            "action": "create",
+            "summary": "清单已建。",
+            "items": [{"id": "a", "title": "步骤A", "status": "pending"}],
+        },
+    )
+    assert wrote.ok is True, wrote.output
+
+    read = _execute_task_progress(agent, {"action": "read"})
+    assert read.ok is True
+    assert "步骤A" in str(read.output)
 
 
 class TestTaskProgressCoverageRejectedAliases:

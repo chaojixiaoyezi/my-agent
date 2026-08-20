@@ -147,7 +147,7 @@ def build_raise_event_model_spec() -> ToolModelSpec:
 
 def build_task_progress_model_spec() -> ToolModelSpec:
     parameters = {
-        "action": "只接受 read 或 update；不填默认 read。清单内容不会自动续跑普通任务，也不会阻止模型结束当前轮。",
+        "action": "read/update/create；不填默认 read。create 与 update 等效（账本不存在时自动创建，首次建清单也用 create 或 update），清单内容不会自动续跑普通任务，也不会阻止模型结束当前轮。",
         "run_id": "仅用于 read 时可选指定进度账本；update 始终写当前运行自己的账本。",
         "summary": "可选。当前整体进展一句话",
         "next_action": "可选。下一步最应该做什么",
@@ -155,7 +155,9 @@ def build_task_progress_model_spec() -> ToolModelSpec:
         "coverage": "可选。覆盖账本，含 goal/dimensions/targets；targets 每项使用 id/title/status/checks/evidence/notes/next。",
     }
     property_schemas = {
-        "action": {"type": "string", "enum": ["read", "update"]},
+        # S-C1 延伸：MiniMax 自然习惯用 action=create 建清单；create 在工具层
+        # 归一为 update（账本不存在时自动创建），这里显式列入枚举避免模型盲试。
+        "action": {"type": "string", "enum": ["read", "update", "create"]},
         "run_id": {"type": "string"},
         "summary": {"type": "string"},
         "next_action": {"type": "string"},
