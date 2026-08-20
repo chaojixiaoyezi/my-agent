@@ -1307,6 +1307,10 @@ def _tool_payload(progress: dict[str, Any]) -> dict[str, Any]:
         "duration_ms",
         "failure_stage",
         "error_code",
+        # S-TP1（真机实锤）：gateway 在 task_progress 工具 ok 时附的 items 快照，
+        # 白名单漏掉导致 TUI todo 面板永远收不到数据。必须与 reducer 的
+        # _update_todo_block 消费端对齐。
+        "task_progress_items",
     }
     payload = {key: progress[key] for key in allowed if key in progress}
     if str(progress.get("phase") or "").strip().lower() == "started" and progress.get("detail"):

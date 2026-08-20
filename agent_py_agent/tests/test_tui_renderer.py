@@ -816,6 +816,48 @@ def test_todo_panel_renders_items_with_checkmarks() -> None:
     assert "□ 写报告" in text
 
 
+def test_todo_panel_gateway_event_payload_keeps_task_progress_items() -> None:
+    """S-TP1 回归：gateway tool_progress 事件经 _tool_payload 白名单后仍带
+    task_progress_items，TUI todo 面板才能拿到数据（真机实锤：白名单漏掉
+    task_progress_items → 面板永远不渲染）。"""
+    from agent_py_agent.cli.chat_parts.tui_runtime import (
+        TuiTurnEventAdapter,
+        TuiRuntime,
+    )
+    from agent_py_agent.cli.chat_parts.tui_view_model import TuiStateStore
+
+    store = TuiStateStore()
+    runtime = TuiRuntime("session-todo", store=store)
+    adapter = TuiTurnEventAdapter(runtime, "req-todo-1")
+    consumed = adapter.on_gateway_event(
+        {
+            "kind": "tool_progress",
+            "progress": {
+                "tool": "task_progress",
+                "round": 1,
+                "call_index": 0,
+                "phase": "finished",
+                "status": "completed",
+                "ok": True,
+                "handler_executed": True,
+                "duration_ms": 5,
+                "task_progress_items": [
+                    {"id": "a", "title": "阅读项目A", "status": "done"},
+                    {"id": "b", "title": "分析模块", "status": "pending"},
+                ],
+            },
+        }
+    )
+    assert consumed is True
+    todo = store.reducer.active_blocks.get("todo:task_progress")
+    assert todo is not None, store.reducer.diagnostics
+    assert todo.role == "todo"
+    assert todo.metadata["items"] == [
+        {"id": "a", "title": "阅读项目A", "status": "done"},
+        {"id": "b", "title": "分析模块", "status": "pending"},
+    ]
+
+
 def test_todo_panel_empty_items_renders_nothing() -> None:
     from agent_py_agent.cli.chat_parts.tui_block_renderer import TuiBlockRenderCache
     from agent_py_agent.cli.chat_parts.tui_view_model import TuiBlock

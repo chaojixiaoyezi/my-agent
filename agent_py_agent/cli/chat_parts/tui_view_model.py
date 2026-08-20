@@ -459,6 +459,14 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             metadata={**block.metadata, **_public_metadata(event.payload)},
         )
         # task_progress 工具: 更新 todo 面板块(□/☑/● 自动打钩)
+        self._consume_task_progress_items(event)
+
+    # LLM: gateway 对同一工具调用会发 started→…→终态多条 tool_progress 事件，
+    # 终态（phase=finished/completed）被 TUI adapter 路由成 tool_completed（只走
+    # terminal，不走 progress）。task_progress 的 items 只挂在终态事件上
+    # （S-TP1 真机实锤），所以 terminal 也必须消费，否则 todo 面板永远无数据。
+    # 函数用途: 从任意工具事件里消费 task_progress items 并更新 todo 面板。
+    def _consume_task_progress_items(self, event: TuiEvent) -> None:
         items = event.payload.get("task_progress_items")
         if isinstance(items, list) and items:
             self._update_todo_block(items, event.seq)
@@ -494,8 +502,9 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
         )
 
     # LLM: tool terminal 按 ok/phase 冻结一次；permission_required 不是 terminal，必须留在 active。
-    # 函数用途: 完成或失败一个工具卡片。
+    # 函数用途: 完成或失败一个工具卡片（task_progress 终态同时更新 todo 面板）。
     def _handle_tool_terminal(self, event: TuiEvent) -> None:
+        self._consume_task_progress_items(event)
         self._freeze_block(event, role="tool")
 
     # LLM: Pending steer identity comes only from the client-generated opaque id. Duplicate ids
