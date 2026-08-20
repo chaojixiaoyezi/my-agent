@@ -45,6 +45,14 @@ _RESULT_SCHEMA = "tool_execution_result.v1"
 _MINIMUM_LEASE_SECONDS = 900
 _LEASE_GRACE_SECONDS = 300
 
+# S-D1（2026-08-20 SUB-D 真机）：workspace 锁冲突（另一执行者持有同一 scope
+# 的 claim）是瞬态并发语义——高频派工/并行创建子代理时，前一个操作通常
+# 几百毫秒到几秒内释放。直接返回 BUSY_CONFLICT 会让 create_subagents 整批
+# 失败且从不重试（b1_1 实锤）。这里做有界短重试：3 次 × 0.5s/1s/2s 递增，
+# 重试耗尽才报冲突。
+_BUSY_RETRY_ATTEMPTS = 3
+_BUSY_RETRY_DELAYS = (0.5, 1.0, 2.0)
+
 
 @dataclass(frozen=True)
 class ToolOperationExecutionRequest:
@@ -125,32 +133,68 @@ def _claim_operation(
         max(0, int(request.timeout_seconds or 0)) + _LEASE_GRACE_SECONDS,
     )
     lease_expires_at = time.time() + lease_seconds
-    try:
-        claim = request.store.claim_tool_operation(
-            ToolOperationClaimRequest(
-                owner_id=request.owner_id,
-                run_id=request.run_id,
-                task_id=request.task_id,
-                operation_id=request.operation_id,
-                tool=request.tool_name,
-                args_hash=request.args_hash,
-                idempotency_key=request.idempotency_key,
-                idempotency_scope=request.idempotency_scope,
-                idempotency_namespace=request.idempotency_namespace,
-                holder=holder,
-                lease_expires_at=lease_expires_at,
-                resource_scopes=request.resource_scopes,
-                attempt_id=request.attempt_id,
+    conflict_error: RuntimeConflictError | None = None
+    for attempt in range(_BUSY_RETRY_ATTEMPTS + 1):
+        try:
+            claim = request.store.claim_tool_operation(
+                ToolOperationClaimRequest(
+                    owner_id=request.owner_id,
+                    run_id=request.run_id,
+                    task_id=request.task_id,
+                    operation_id=request.operation_id,
+                    tool=request.tool_name,
+                    args_hash=request.args_hash,
+                    idempotency_key=request.idempotency_key,
+                    idempotency_scope=request.idempotency_scope,
+                    idempotency_namespace=request.idempotency_namespace,
+                    holder=holder,
+                    lease_expires_at=lease_expires_at,
+                    resource_scopes=request.resource_scopes,
+                    attempt_id=request.attempt_id,
+                )
             )
-        )
-    except RuntimeConflictError as exc:
+            conflict_error = None  # 重试成功：清除之前记录的冲突
+            break
+        except RuntimeConflictError as exc:
+            # S-D1: 锁冲突是瞬态并发语义——有界短重试（0.5s/1s/2s），
+            # 重试耗尽才映射为 BUSY_CONFLICT（高频派工不再整批失败）。
+            conflict_error = exc
+            if attempt >= _BUSY_RETRY_ATTEMPTS:
+                break
+            time.sleep(_BUSY_RETRY_DELAYS[attempt])
+        except Exception as exc:  # noqa: BLE001 - authoritative store failures fail closed
+            authority_missing = isinstance(exc, AuthorityContextMissing)
+            result = _operation_error(
+                request.tool_name,
+                "TOOL_AUTHORITY_CONTEXT_MISSING"
+                if authority_missing
+                else "TOOL_OPERATION_STORE_UNAVAILABLE",
+                "MANAGED 权威链缺失，无法建立执行占位，工具没有运行。"
+                if authority_missing
+                else "副作用操作账本无法建立执行占位，工具没有运行。",
+            )
+            _attach_operation_facts(
+                result,
+                request,
+                status="not_started",
+                action="authority_missing" if authority_missing else "store_unavailable",
+                diagnostic=type(exc).__name__,
+            )
+            return apply_tool_execution_facts(
+                result,
+                failure_stage=ToolFailureStage.PERSISTENCE,
+                handler_executed=False,
+            )
+    if conflict_error is not None:
         # WRITE-03(2026-08-15 真机): 执行权/资源锁冲突是可预期并发语义(另一执行者
         # 持有锁/attempt 已换代), 不是"账本不可用"——映射为可重试冲突码, 避免把
         # 并发冲突误报成存储故障(子代理场景真机 UNAVAILABLE 掩盖了真实语义)。
+        # S-D1 延伸：已做有界短重试仍冲突才到这里。
+        exc = conflict_error
         result = _operation_error(
             request.tool_name,
             "TOOL_OPERATION_BUSY_CONFLICT",
-            f"工具执行冲突（另一执行者正在处理同一操作）: {exc}",
+            f"工具执行冲突（另一执行者正在处理同一操作，已重试 {_BUSY_RETRY_ATTEMPTS} 次仍冲突）: {exc}",
             reported_error_code="TOOL_OPERATION_BUSY_CONFLICT",
         )
         _attach_operation_facts(
@@ -163,29 +207,6 @@ def _claim_operation(
         return apply_tool_execution_facts(
             result,
             failure_stage=ToolFailureStage.RUNTIME_GATE,
-            handler_executed=False,
-        )
-    except Exception as exc:  # noqa: BLE001 - authoritative store failures fail closed
-        authority_missing = isinstance(exc, AuthorityContextMissing)
-        result = _operation_error(
-            request.tool_name,
-            "TOOL_AUTHORITY_CONTEXT_MISSING"
-            if authority_missing
-            else "TOOL_OPERATION_STORE_UNAVAILABLE",
-            "MANAGED 权威链缺失，无法建立执行占位，工具没有运行。"
-            if authority_missing
-            else "副作用操作账本无法建立执行占位，工具没有运行。",
-        )
-        _attach_operation_facts(
-            result,
-            request,
-            status="not_started",
-            action="authority_missing" if authority_missing else "store_unavailable",
-            diagnostic=type(exc).__name__,
-        )
-        return apply_tool_execution_facts(
-            result,
-            failure_stage=ToolFailureStage.PERSISTENCE,
             handler_executed=False,
         )
     return _ToolOperationClaimAttempt(

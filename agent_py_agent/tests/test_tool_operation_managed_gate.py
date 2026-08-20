@@ -1544,3 +1544,118 @@ def test_claim_with_parent_child_scopes_succeeds(tmp_path):
         )
     )
     assert str(getattr(claim.record, "operation_id", "") or "") == "op-write04"
+
+
+# LLM: S-D1(2026-08-20 SUB-D 真机): workspace 锁冲突是瞬态并发语义——
+# 高频派工/并行创建子代理时, 前一个操作几秒内释放。claim 必须做有界短重试,
+# 不能一冲突就返回 BUSY_CONFLICT 让 create_subagents 整批失败(b1_1 实锤)。
+# 函数用途: 验证冲突一次后重试成功, handler 正常执行。
+def test_claim_conflict_retries_then_succeeds(tmp_path):
+    from agent_py_agent.agent.runtime_db.managed_operation_store import RuntimeConflictError
+    from agent_py_agent.agent.tooling.tool_operation_coordinator import (
+        ToolOperationExecutionRequest,
+        execute_tool_operation,
+    )
+
+    calls = {"claim": 0, "invoke": 0, "finish": 0}
+
+    class _FakeStore:
+        def claim_tool_operation(self, request):
+            calls["claim"] += 1
+            if calls["claim"] == 1:
+                raise RuntimeConflictError("执行权锁冲突: 另一执行者持有")
+            from agent_py_agent.agent.local_storage import ToolOperationClaim, ToolOperationRecord
+
+            return ToolOperationClaim(
+                action="execute",
+                record=ToolOperationRecord(
+                    owner_id=request.owner_id,
+                    run_id=request.run_id,
+                    task_id=request.task_id,
+                    operation_id=request.operation_id,
+                    tool=getattr(request, "tool_name", None) or getattr(request, "tool", ""),
+                    args_hash=request.args_hash,
+                    idempotency_key=request.idempotency_key,
+                    idempotency_scope=request.idempotency_scope,
+                    idempotency_namespace=request.idempotency_namespace,
+                    status="RUNNING",
+                    holder_id="h",
+                    holder_host="test",
+                    holder_pid=1,
+                    holder_process_start_token="tok",
+                    generation=1,
+                    lease_expires_at=2.0,
+                ),
+            )
+
+        def finish_tool_operation(self, request):
+            calls["finish"] += 1
+            return {}
+
+    outcome = execute_tool_operation(
+        ToolOperationExecutionRequest(
+            store=_FakeStore(),
+            store_required=True,
+            owner_id="local/main",
+            run_id="run-1",
+            task_id="",
+            operation_id="op-1",
+            tool_name="run_command",
+            args_hash="h",
+            idempotency_key="k",
+            idempotency_scope="operation",
+            idempotency_namespace="n",
+            timeout_seconds=10,
+            invoke=lambda: (calls.__setitem__("invoke", calls["invoke"] + 1)
+                            or ToolHandlerOutcome("run_command", True, "ok")),
+            attempt_id="att-1",
+            resource_scopes=(),
+        )
+    )
+    assert calls["claim"] == 2, calls
+    assert calls["invoke"] == 1, calls
+    assert outcome.ok is True
+    assert outcome.error_code == ""
+
+
+# LLM: S-D1 边界: 重试耗尽仍冲突才返回 BUSY_CONFLICT(有界重试不无限等待)。
+# 函数用途: 验证始终冲突时最终仍映射 BUSY_CONFLICT 且重试次数有界。
+def test_claim_conflict_retries_exhausted_returns_busy(tmp_path):
+    from agent_py_agent.agent.runtime_db.managed_operation_store import RuntimeConflictError
+    from agent_py_agent.agent.tooling.tool_operation_coordinator import (
+        ToolOperationExecutionRequest,
+        execute_tool_operation,
+    )
+
+    calls = {"claim": 0}
+
+    class _FakeStore:
+        def claim_tool_operation(self, request):
+            calls["claim"] += 1
+            raise RuntimeConflictError("持续冲突")
+
+        def finish_tool_operation(self, request):
+            raise AssertionError("不应走到 finish")
+
+    outcome = execute_tool_operation(
+        ToolOperationExecutionRequest(
+            store=_FakeStore(),
+            store_required=True,
+            owner_id="local/main",
+            run_id="run-1",
+            task_id="",
+            operation_id="op-1",
+            tool_name="run_command",
+            args_hash="h",
+            idempotency_key="k",
+            idempotency_scope="operation",
+            idempotency_namespace="n",
+            timeout_seconds=10,
+            invoke=lambda: (_ for _ in ()).throw(AssertionError("不应执行")),
+            attempt_id="att-1",
+            resource_scopes=(),
+        )
+    )
+    assert calls["claim"] == 4, calls  # 初始 1 次 + 3 次重试
+    assert outcome.error_code == "TOOL_OPERATION_BUSY_CONFLICT"
+    assert outcome.handler_executed is False
