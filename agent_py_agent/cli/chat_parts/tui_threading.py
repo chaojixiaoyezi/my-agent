@@ -118,13 +118,32 @@ def _consume_background_notices(
     app_ref: list,
     seen: set[float],
 ) -> None:
-    if tui_runtime is None:
+    if tui_runtime is None or not session_id:
+        return
+    store = getattr(agent, "conversation_store", None)
+    if store is None:
+        # Gateway 轻量客户端：走 HTTP /client/notices（S-BG1）
+        fetcher = getattr(agent, "request_background_notices", None)
+        if not callable(fetcher):
+            return
+        cursor = max(seen) if seen else 0.0
+        try:
+            payload = fetcher(session_id, after=cursor)
+        except Exception:
+            return
+        if not isinstance(payload, dict):
+            return
+        raw = payload.get("notices")
+        if not isinstance(raw, list):
+            return
+        fresh = [dict(row) for row in raw if isinstance(row, dict)]
+        for row in fresh:
+            _publish_background_notice_row(tui_runtime, row, seen)
+        if fresh and app_ref[0] is not None:
+            app_ref[0].invalidate()
         return
     from ...agent.conversation.channels import LOCAL_AGENT_USER_ID, LOCAL_CHAT_CHANNEL
 
-    store = getattr(agent, "conversation_store", None)
-    if store is None or not session_id:
-        return
     root = getattr(store, "root", None)
     if not root:
         return
@@ -157,18 +176,33 @@ def _consume_background_notices(
             key = 0.0
         if key in seen:
             continue
-        seen.add(key)
         fresh.append(row)
     if not fresh:
         return
     for row in fresh:
-        summary = str(row.get("summary") or "").strip()
-        if not summary:
-            continue
-        notice_text = f"⚙ 后台自动完成：{summary}"
-        tui_runtime.publish_background_notice(notice_text, thread_id=thread_id)
+        _publish_background_notice_row(tui_runtime, row, seen)
     if app_ref[0] is not None:
         app_ref[0].invalidate()
+
+
+def _publish_background_notice_row(
+    tui_runtime: object,
+    row: dict[str, object],
+    seen: set[float],
+) -> None:
+    summary = str(row.get("summary") or "").strip()
+    thread_id = str(row.get("thread_id") or "")
+    if not summary:
+        return
+    try:
+        key = float(row.get("created_at") or 0.0)
+    except (TypeError, ValueError):
+        key = 0.0
+    if key in seen:
+        return
+    seen.add(key)
+    notice_text = f"⚙ 后台自动完成：{summary}"
+    tui_runtime.publish_background_notice(notice_text, thread_id=thread_id)
 
 
 # LLM: refresh loop 只在 runtime 报告存在可见动画/短提示时 invalidate；typed event 自带 redraw，空闲时必须零周期整屏重绘。

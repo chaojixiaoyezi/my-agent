@@ -120,3 +120,42 @@ def test_tui_skips_when_no_thread_or_no_session(tmp_path: Path) -> None:
 
     _consume_background_notices(_Agent(), "", _Runtime(), [None], set())
     _consume_background_notices(_Agent(), "session-1", _Runtime(), [None], set())
+
+
+def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
+    """Gateway 轻量客户端（无 conversation_store）走 HTTP /client/notices 分支。"""
+    from agent_py_agent.cli.chat_parts.tui_threading import _consume_background_notices
+
+    published: list[str] = []
+    fetched: list[dict[str, object]] = []
+
+    class _Agent:
+        def request_background_notices(self, session_id, *, after):
+            fetched.append({"session_id": session_id, "after": after})
+            return {
+                "ok": True,
+                "cursor": 200.0,
+                "notices": [
+                    {
+                        "schema_version": "background_notice.v1",
+                        "thread_id": "thread-http-1",
+                        "reason": "subagent_runner_finished",
+                        "summary": "HTTP 后台完成通知测试。",
+                        "created_at": 150.0,
+                    }
+                ],
+            }
+
+    class _Runtime:
+        def publish_background_notice(self, text, *, thread_id=""):
+            published.append(text)
+
+    seen: set[float] = set()
+    _consume_background_notices(_Agent(), "session-http", _Runtime(), [None], seen)
+    assert len(fetched) == 1
+    assert fetched[0]["after"] == 0.0
+    assert len(published) == 1
+    assert "后台自动完成" in published[0]
+    # 游标推进后不重复
+    _consume_background_notices(_Agent(), "session-http", _Runtime(), [None], seen)
+    assert fetched[1]["after"] == 150.0

@@ -957,6 +957,103 @@ def handle_control_status(handler, server) -> None:
 
 # LLM: 记忆 API 复用 trusted-source、owner scope 和 Gateway 内部服务；前端不能直接指定 owner home 或记忆文件。
 # 函数用途: 接收薄客户端的 recent/search/remember 操作并返回安全记录投影。
+def handle_client_notices(handler, server) -> None:
+    """S-BG1: 返回当前会话的后台主代理轮完成通知（TUI 后台完成监视用）。
+
+    body: {"conversation_id": ..., "after": 游标(float created_at)}
+    响应: {"ok": true, "notices": [...], "cursor": 最新 created_at}
+    """
+    if require_trusted_source(handler):
+        return
+    if server is None or server.agent is None:
+        handler._send_json(500, {"error": "server client service not initialized"})
+        return
+    try:
+        body = handler._read_json()
+    except json.JSONDecodeError as exc:
+        handler._send_json(400, {"error": f"invalid JSON: {exc}"})
+        return
+    user_id, channel = _request_channel(handler)
+    if not _http_conversation_id(body):
+        handler._send_json(400, {"error": "conversation_id is required"})
+        return
+    after = 0.0
+    try:
+        after = float(body.get("after") or 0.0)
+    except (TypeError, ValueError):
+        after = 0.0
+    result = read_gateway_client_notices(
+        server.agent,
+        scope=_gateway_control_scope(
+            handler,
+            body,
+            user_id=user_id,
+            channel=channel,
+        ),
+        after=after,
+    )
+    handler._send_json(200, result)
+
+
+def read_gateway_client_notices(
+    agent: object,
+    *,
+    scope: object,
+    after: float,
+) -> dict[str, object]:
+    """解析当前会话 thread → 读取 notices 文件 → 返回 after 之后的新行。"""
+    from ..conversation.channels import LOCAL_AGENT_USER_ID, LOCAL_CHAT_CHANNEL
+    from ..conversation.store import ConversationStore
+
+    conversation_id = str(getattr(scope, "conversation_id", "") or "").strip()
+    if not conversation_id:
+        return {"ok": False, "error": "conversation_id required", "notices": [], "cursor": after}
+    store = getattr(agent, "conversation_store", None)
+    if not isinstance(store, ConversationStore):
+        return {"ok": False, "error": "conversation store unavailable", "notices": [], "cursor": after}
+    try:
+        thread, _error = store.resolve_thread_report(
+            channel=LOCAL_CHAT_CHANNEL,
+            channel_conversation_id=conversation_id,
+            channel_user_id=LOCAL_AGENT_USER_ID,
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"thread resolve failed: {exc}",
+            "notices": [],
+            "cursor": after,
+        }
+    if thread is None:
+        return {"ok": True, "notices": [], "cursor": after}
+    thread_id = str(getattr(thread, "thread_id", "") or "")
+    notices_path = Path(store.root) / "notices" / f"{thread_id}.notices.jsonl"
+    if not notices_path.exists():
+        return {"ok": True, "notices": [], "cursor": after}
+    notices: list[dict[str, object]] = []
+    cursor = after
+    try:
+        for line in notices_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            try:
+                created = float(row.get("created_at") or 0.0)
+            except (TypeError, ValueError):
+                created = 0.0
+            if created > after:
+                notices.append(row)
+                cursor = max(cursor, created)
+    except OSError:
+        return {"ok": False, "error": "notices read failed", "notices": [], "cursor": after}
+    return {"ok": True, "notices": notices, "cursor": cursor}
+
+
 def handle_client_memory(handler, server) -> None:
     if require_trusted_source(handler):
         return

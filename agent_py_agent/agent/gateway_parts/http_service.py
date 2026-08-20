@@ -23,6 +23,7 @@ from .http_handlers import (
     handle_admin_summary,
     handle_ask,
     handle_client_history,
+    handle_client_notices,
     handle_client_memory,
     handle_control,
     handle_control_status,
@@ -148,6 +149,9 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         if self.path == "/client/history":
             self._handle_client_history()
             return
+        if self.path == "/client/notices":
+            self._handle_client_notices()
+            return
         if self.path == "/stop":
             self._handle_stop()
             return
@@ -212,6 +216,9 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
     # 函数用途: 处理薄客户端的会话历史恢复请求。
     def _handle_client_history(self) -> None:
         handle_client_history(self, _server_instance)
+
+    def _handle_client_notices(self) -> None:
+        handle_client_notices(self, _server_instance)
 
     def _handle_stop(self) -> None:
         handle_stop(self, _server_instance)
