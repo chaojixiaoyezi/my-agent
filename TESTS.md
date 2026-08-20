@@ -11,6 +11,13 @@
 确认只有一个 Gateway 进程和一个配置端口；故障恢复用例顺序重启或中断这个实例。合同单测中的 fake
 Gateway 可以并行，但不能作为“单 Gateway 多客户端”验收的替代证据。
 
+2026-08-20 TUI 灰色层级与 tmux 复制修复在本地、`192.0.2.7` 各运行 renderer/view/input/ANSI/PTY/chat
+6 文件 focused 组合，均为 105 项通过。测试机仅有一个 Gateway（8420），10 个 TUI 共享；真实中文请求
+约 3.09 秒出现回答，ANSI capture 证明思考为 246 灰、助手正文为 231，`tmux load-buffer -w` 中文探针
+完整。外层系统剪贴板必须在用户 attach 的终端执行一次真实粘贴才可标最终通过。全仓 Ruff 20 项、strict
+code-size 29 项均为修复前基线已有且本提交未新增；用户在获知后明确授权推送和测试部署，因此不能把本轮
+记录写成“严格发布 gate 全绿”。
+
 2026-08-18 活动输入/控制回执提交候选先运行 12 个原失败文件的 focused 组合，再运行一次修复后的完整
 `pytest -q --tb=short`，两者均到 100% 且退出 0。changed-file Ruff、doc sync 和 diff check 通过；全仓
 Ruff 的 112 项属于当前 HEAD 存量扫描结果，本轮变更文件为 0。strict code-size 仍有 25 个 hard finding，

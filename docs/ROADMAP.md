@@ -21,7 +21,7 @@
 
 ### TUI 活动回合输入与四路极限轮转复验
 
-状态：代码主链已收口，待 `.13` 部署复验与结构拆分
+状态：灰色层级与 tmux 复制已部署 `.7`，待用户外层粘贴复验与结构拆分
 
 解决问题：旧 TUI 在长任务运行时把普通 Enter 当成下一轮队列，用户补充消息要等当前任务结束才执行；
 queue preview 又位于可滚动 transcript，离开尾部后看不见。并行实验室若完成后长期空闲，也会浪费四路
@@ -32,16 +32,19 @@ accepted/rejected/unknown 三态和 GET-only reconciler；Gateway terminal、att
 Adapter ingress/reply 也已收进同一结构化事实链。response loss、同 ID 异正文、active/final/stop/provider ACK
 竞态和客户端重启已有定向测试；修复后的全量 pytest 到 100%、退出 0。2026-08-20 又修正了思考/
 `Ctrl+O` 提示只染前缀未染正文，以及 iTerm2 下 tmux 未使用 `load-buffer -w` 导致外层剪贴板不更新；
-本地相关 focused 105 项通过，`.13` 因当前网络不可达尚未复验。
+本地相关 focused 105 项通过；修复提交 `167c98d5` 已推送并部署到用户更新后的测试机 `.7`。测试机
+focused 105 项、一个 Gateway/多 TUI 拓扑、MiniMax-M2.7 欢迎页、真实中文回复、ANSI 灰色层级与
+`tmux load-buffer -w` 中文写穿均已验证；外层 macOS 粘贴需要用户在 attach 后手动完成最后一步。
 
-待做：先在 `.13` 备份后部署并复验 response lost、明确拒绝、final race、客户端重启和多路 IM/TUI；随后由
+待做：先由用户在 `.7` 已 attach 的终端完成一次“左键拖选后直接粘贴”验收，再继续复验 response lost、
+明确拒绝、final race、客户端重启和多路 IM/TUI；随后由
 独立 agent 处理三类剩余底座：一是 ordinary/control 共用的最外层 message route binding，二是普通 ChatJob
 从 Enter 到 Gateway bind 的 durable SUBMITTING/stop-btw latch，三是 Gateway input receipt 冻结 canonical
 owner 与 result/input-status 的 exact issuer 鉴权。另按 strict report 拆掉 25 个超长/深嵌套/多参数 hard
 finding，禁止把它们加入 baseline。未执行项不能写成通过。
 
-边界：只部署 `192.0.2.13:/root/my-agent`，保持 tmux 观察会话和远端 key/config/runtime 数据；不触碰
-青禾项目或 PID 830976。本轮已经执行修复后的完整 pytest，不再为小改重复全仓测试。
+边界：当前测试机由用户更新为 `192.0.2.7:/root/my-agent`；保持单 Gateway、多 TUI、tmux 观察会话
+和远端 key/config/runtime 数据，不触碰其它项目。本轮小改只跑 focused tests，不重复全仓测试。
 
 ### npm 缓存全新 Node 任务真机复验
 

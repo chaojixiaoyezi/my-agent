@@ -7,7 +7,9 @@
 - TUI 灰色层级已按 终端交互 的容器级 `dimColor` 语义修正：思考 Markdown 的普通文字、粗体、代码和
   链接以及 `Ctrl+O` 折叠提示都由最终浅灰 role 接管，不再只染括号或行前缀。鼠标左键拖选松手继续
   自动复制；tmux 路径按 会话运行时 统一使用 `load-buffer -w`，iTerm2 不再退化成只写内部 buffer。
-  renderer/view/input/ANSI/PTY/chat focused 105 项通过；测试机真机状态以 `STATUS.md` 为准。
+  `167c98d5` 已推送并部署到用户更新后的 `.7` 测试机；本地/远端 focused 105 项、单 Gateway、多 TUI、
+  MiniMax-M2.7、真实回复、ANSI 灰色层级与 tmux 中文写穿已验。外层系统剪贴板粘贴仍以用户手动验收为准，
+  详细证据见 `STATUS.md`。
 - EXEC-44 写后验证新鲜度已由 aiohttp→Go 真机任务闭环：最后一次源码复制后，被测 Agent 自主重新
   build、运行 29 项行为测试并完成 HTTP 200 E2E，随后才输出 final。验证事实只来自 canonical
   `handler_details` 与 durable event；read/search 不清 stale，Go/Cargo manifest 分类不读项目名或 prompt。

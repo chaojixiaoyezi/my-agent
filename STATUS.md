@@ -10,8 +10,15 @@
 - 左键拖选仍采用“松手即复制”。此前 iTerm2 分支故意去掉 `tmux load-buffer -w`，只写 tmux 内部 buffer；
   当外层终端禁用 OSC 52 / tmux DCS passthrough 时，用户系统剪贴板不会更新。现按 会话运行时
   `clipboard_copy.rs` 统一使用 `tmux load-buffer -w -`，不再按终端品牌关闭外层剪贴板转发。
-- 本地 TUI renderer/view/input/ANSI/PTY/chat focused 105 项通过；`.13` 真机部署与外层剪贴板粘贴复验
-  仍待测试机网络恢复，未把本地自动化冒充为真机通过。
+- 修复提交 `167c98d5d81a1576ccbbc4172ccfe0df9f884885` 已推送远端 `main`，并按用户更新后的测试机地址
+  部署到 `192.0.2.7:/root/my-agent`。部署前 HEAD、tracked diff、进程、端口、tmux pane 与生效配置
+  证据保存在 `/root/tui-parity-evidence/deploy-20260820-235922-gray-copy/`；远端 `.background_jobs/`、
+  `owners/`、key 和运行时配置均未覆盖。
+- 本地和测试机 TUI renderer/view/input/ANSI/PTY/chat focused 105 项均通过。测试机保持一个 Gateway
+  （PID `506801`，`127.0.0.1:8420`），10 个 my-agent TUI 共享该实例；10 个欢迎页均显示
+  `MiniMax-M2.7 · API`。普通中文真实 TUI 请求约 3.09 秒出现回答，思考正文实机 ANSI 246、助手正文
+  ANSI 231；tmux `load-buffer -w` 中文写穿探针成功。外层 macOS 系统剪贴板最终粘贴仍需用户在已 attach
+  的本机终端手动确认，不能把无人 attach 的 SSH 自动化冒充为这一步通过。
 
 ## 2026-08-18 流式活动块渲染节流（Ctrl+E 展开长正文卡死修复）
 
