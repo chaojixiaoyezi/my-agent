@@ -786,3 +786,46 @@ def test_question_help_footer_maps_only_real_tui_shortcuts() -> None:
     assert "ctrl + s to stash prompt" in wide_text
     assert wide_text.count("\n") == 3
     assert narrow_text.count("\n") > wide_text.count("\n")
+
+
+def test_todo_panel_renders_items_with_checkmarks() -> None:
+    """todo 面板: task_progress items 渲染为 □/☑/● 清单(自动打钩)。"""
+    from agent_py_agent.cli.chat_parts.tui_block_renderer import TuiBlockRenderCache
+    from agent_py_agent.cli.chat_parts.tui_view_model import TuiBlock
+
+    cache = TuiBlockRenderCache(max_entries=10)
+    block = TuiBlock(
+        block_id="todo:task_progress",
+        kind="task_progress",
+        role="todo",
+        phase="active",
+        title="任务清单",
+        metadata={
+            "items": [
+                {"id": "a", "title": "阅读项目A", "status": "done"},
+                {"id": "b", "title": "分析模块", "status": "in_progress"},
+                {"id": "c", "title": "写报告", "status": "pending"},
+            ]
+        },
+    )
+    rendered = cache.render(block, TuiRenderContext(width=80))
+    text = "\n".join(fragments_text(line) for line in rendered)
+    assert "任务清单" in text
+    assert "☑ 阅读项目A" in text
+    assert "● 分析模块" in text
+    assert "□ 写报告" in text
+
+
+def test_todo_panel_empty_items_renders_nothing() -> None:
+    from agent_py_agent.cli.chat_parts.tui_block_renderer import TuiBlockRenderCache
+    from agent_py_agent.cli.chat_parts.tui_view_model import TuiBlock
+
+    cache = TuiBlockRenderCache(max_entries=10)
+    block = TuiBlock(
+        block_id="todo:task_progress",
+        kind="task_progress",
+        role="todo",
+        phase="active",
+        metadata={"items": []},
+    )
+    assert cache.render(block, TuiRenderContext(width=80)) == ()

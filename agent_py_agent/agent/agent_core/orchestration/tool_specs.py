@@ -168,7 +168,7 @@ def build_task_progress_model_spec() -> ToolModelSpec:
     }
     return ToolModelSpec(
         name="task_progress",
-        description="记录或读取当前运行的进度笔记。它只是可选的软账本，不选择会话、不切换工作区、不决定当前轮或后续轮是否继续。",
+        description="记录或读取当前运行的进度笔记。它只是可选的软账本，不选择会话、不切换工作区、不决定当前轮或后续轮是否继续。【复杂/长任务先建 plan】开工先把任务拆成 items 建清单，每完成一项立即 update 把该项 status 标为 done（界面会逐项打钩显示，模型跨轮也能靠它续接）；不要等最后一次性补钩。",
         input_schema=_input_schema(parameters, property_schemas, details=details),
         hints=_hints(
             use_cases=(

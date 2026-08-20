@@ -1667,3 +1667,29 @@ def test_subagent_progress_closeout_reports_dirty_latest_progress(tmp_path):
     assert "[SUBAGENT_PROGRESS_LOAD_ERROR]" in response.text
     assert "subagent_progress_closeout.latest_tool_progress" in response.text
     assert str(progress_ref) in response.text
+
+
+def test_task_progress_items_attached_to_structured_progress() -> None:
+    """task_progress 工具的 items 快照附加到 tool_progress 事件(TUI todo 面板数据源)。"""
+    import json
+
+    from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
+        _task_progress_items_from_output,
+    )
+
+    output = json.dumps(
+        {
+            "ok": True,
+            "items": [
+                {"id": "a", "title": "阅读项目A", "status": "done"},
+                {"id": "b", "title": "写报告", "status": "pending"},
+            ],
+        }
+    )
+    items = _task_progress_items_from_output(output)
+    assert items == [
+        {"id": "a", "title": "阅读项目A", "status": "done"},
+        {"id": "b", "title": "写报告", "status": "pending"},
+    ]
+    assert _task_progress_items_from_output("not json") is None
+    assert _task_progress_items_from_output("") is None

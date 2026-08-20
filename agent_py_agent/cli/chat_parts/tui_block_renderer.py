@@ -426,6 +426,8 @@ def _render_block(block: TuiBlock, context: TuiRenderContext) -> tuple[Formatted
         return _render_thinking(block, context)
     if block.role == "tool":
         return _render_tool(block, context)
+    if block.role == "todo":
+        return _render_todo(block, context)
     if block.kind == "interrupt_notice":
         return _render_interrupt_notice(block, context)
     return _render_system(block, context)
@@ -855,6 +857,43 @@ def _format_compact_number(value: int) -> str:
 
 # LLM: 工具标题/状态/输出只读 structured block/display；diff、write、command 走专用富渲染，未知类型保留通用回退且任何正文都不参与 phase 判断。
 # 函数用途: 渲染 终端交互 风格的工具标题、命令输出、写入预览和带行号增删高亮。
+# LLM: todo 面板 = task_progress 账本的持续投影; 状态图标: ☑ done / ● in_progress /
+# □ pending / ⬜ blocked / ➖ skipped。只读渲染, 不修改账本。
+# 函数用途: 渲染任务清单面板块(role=todo)。
+def _render_todo(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedLine, ...]:
+    items = block.metadata.get("items")
+    if not isinstance(items, list) or not items:
+        return ()
+    lines: list[FormattedLine] = [
+        (("class:tui-todo-title", "📋 任务清单"),)
+    ]
+    icon_map = {
+        "done": "☑ ",
+        "in_progress": "● ",
+        "pending": "□ ",
+        "blocked": "⬜ ",
+        "skipped": "➖ ",
+    }
+    style_map = {
+        "done": "class:tui-todo-done",
+        "in_progress": "class:tui-todo-active",
+        "pending": "class:tui-todo-pending",
+        "blocked": "class:tui-todo-blocked",
+        "skipped": "class:tui-todo-skipped",
+    }
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "pending").strip().lower()
+        title = str(item.get("title") or item.get("id") or "")
+        if not title:
+            continue
+        style = style_map.get(status, "class:tui-todo-pending")
+        icon = icon_map.get(status, "□ ")
+        lines.append(((style, f"  {icon}{title}"),))
+    return tuple(lines)
+
+
 def _render_tool(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedLine, ...]:
     display = block.metadata.get("display")
     public_display = display if isinstance(display, dict) else {}

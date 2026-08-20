@@ -458,6 +458,40 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             updated_seq=event.seq,
             metadata={**block.metadata, **_public_metadata(event.payload)},
         )
+        # task_progress 工具: 更新 todo 面板块(□/☑/● 自动打钩)
+        items = event.payload.get("task_progress_items")
+        if isinstance(items, list) and items:
+            self._update_todo_block(items, event.seq)
+
+    # LLM: todo 面板是 task_progress 账本的持续投影; 每次 items 更新替换整块
+    # (block 内容即快照, 不增量合并, 避免跨轮残留旧项)。
+    # 函数用途: 更新 todo 面板块(role=todo)。
+    def _update_todo_block(self, items: list[dict[str, Any]], seq: int) -> None:
+        clean = [
+            {
+                "id": str(item.get("id") or ""),
+                "title": str(item.get("title") or ""),
+                "status": str(item.get("status") or "pending"),
+            }
+            for item in items
+            if isinstance(item, dict)
+        ]
+        block_id = "todo:task_progress"
+        existing = self.active_blocks.get(block_id)
+        metadata = {**existing.metadata} if existing is not None else {}
+        metadata["items"] = clean
+        metadata["updated_at"] = seq
+        self.active_blocks[block_id] = TuiBlock(
+            block_id=block_id,
+            kind="task_progress",
+            role="todo",
+            phase="active",
+            text="",
+            title="任务清单",
+            created_seq=(existing.created_seq if existing is not None else seq),
+            updated_seq=seq,
+            metadata=metadata,
+        )
 
     # LLM: tool terminal 按 ok/phase 冻结一次；permission_required 不是 terminal，必须留在 active。
     # 函数用途: 完成或失败一个工具卡片。

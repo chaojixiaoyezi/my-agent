@@ -1223,6 +1223,32 @@ def _emit_tool_progress(event: ToolProgressEvent) -> None:
         return
 
 
+def _task_progress_items_from_output(output: object) -> list[dict[str, object]] | None:
+    """从 task_progress 工具 output JSON 提取 items 列表(供 TUI todo 面板渲染)。"""
+    text = str(output or "").strip()
+    if not text:
+        return None
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        return None
+    clean: list[dict[str, object]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        clean.append(
+            {
+                "id": str(item.get("id") or ""),
+                "title": str(item.get("title") or item.get("summary") or ""),
+                "status": str(item.get("status") or "pending"),
+            }
+        )
+    return clean if clean else None
+
+
 def _structured_tool_progress(
     event: ToolProgressEvent,
     tool_name: str,
@@ -1257,6 +1283,11 @@ def _structured_tool_progress(
         display = _public_progress_display(event, raw_display)
         if display:
             payload["display"] = display
+        # task_progress 工具: 附加 items 快照, TUI 渲染 todo 面板(□/☑/●)
+        if tool_name == "task_progress" and bool(event.result.ok):
+            items = _task_progress_items_from_output(event.result.output)
+            if items is not None:
+                payload["task_progress_items"] = items
     if event.started_at is not None:
         payload["elapsed_seconds"] = round(
             max(0.0, time.monotonic() - event.started_at),
