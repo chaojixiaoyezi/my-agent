@@ -385,6 +385,18 @@ _BASE_RUNTIME_SQL = (
 #: 每项为 (检查列, 表, ALTER SQL)；列已存在则跳过，多次启动安全。
 #: 并发安全见 _apply_runtime_migrations（duplicate column 视为已达成）。
 _RUNTIME_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    # WK-INT(2026-08-20): wake_queue 持久化状态机迁移——旧表(一次性闹钟)
+    # 无新列, 升级后必须 ALTER 补齐, 否则新代码读写崩溃。
+    (
+        "lease_until",
+        "wake_queue",
+        (
+            "ALTER TABLE wake_queue ADD COLUMN lease_until REAL NOT NULL DEFAULT 0",
+            "ALTER TABLE wake_queue ADD COLUMN retry_after REAL NOT NULL DEFAULT 0",
+            "ALTER TABLE wake_queue ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE wake_queue ADD COLUMN last_error TEXT NOT NULL DEFAULT ''",
+        ),
+    ),
     (
         "current_contract_id",
         "task_runs",
