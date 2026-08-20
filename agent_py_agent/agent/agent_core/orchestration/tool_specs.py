@@ -73,7 +73,7 @@ def _hints(
 def build_create_subagents_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="create_subagents",
-        description="把'宽形状'的活派给子代理并行干、只收结论:涉及多个独立目标、可并行模块、或需要独立验证时，由你按真实拆解自主决定需要几个；不要为了显得忙而派，也不要把同一任务重复派。工具参数 goal 是本批派工说明，与用户命令 /goal 无关；普通聊天中的实际任务也可以派工。goal 始终必填。单个具体目标直接创建 1 个；多个不同目标给总 goal 和 items，且每项必须有独立 goal、不得重复。运行时会按 owner、当前任务和单次调用容量整批校验，超限或重复都会整批拒绝，不会偷偷丢掉部分任务。【items 格式】items 必须是对象数组，每项含独立 goal（可带 input_refs/covers）：items:[{\"goal\":\"子任务1\"},{\"goal\":\"子任务2\",\"input_refs\":[\"data/a.txt\"]}]；不要把 items 传成字符串、逗号分隔文本或单个对象。已知单一改动点、一两步能完成的窄任务自己直接做。相对时间沿用当前日期/年份;只有 defer_start=true 才只建不跑。子代理的目标若是【内网/私网地址】(如 192.168.x.x 数据源),当前底座不提供白名单授权——直接说明访问缺口或换公网来源,不要派工到会被出站防护拦截(NETWORK_PRIVATE_HOST_BLOCKED)的目标。",
+        description="把'宽形状'的活派给子代理并行干、只收结论:涉及多个独立目标、可并行模块、或需要独立验证时，由你按真实拆解自主决定需要几个；不要为了显得忙而派，也不要把同一任务重复派。工具参数 goal 是本批派工说明，与用户命令 /goal 无关；普通聊天中的实际任务也可以派工。goal 始终必填。单个具体目标直接创建 1 个；多个不同目标给总 goal 和 items，且每项必须有独立 goal、不得重复。运行时会按 owner、当前任务和单次调用容量整批校验，超限或重复都会整批拒绝，不会偷偷丢掉部分任务。【items 格式】items 必须是对象数组，每项含独立 goal（可带 input_refs/covers）：items:[{\"goal\":\"子任务1\"},{\"goal\":\"子任务2\",\"input_refs\":[\"data/a.txt\"]}]；不要把 items 传成字符串、逗号分隔文本或单个对象。已知单一改动点、一两步能完成的窄任务自己直接做。相对时间沿用当前日期/年份;只有 defer_start=true 才只建不跑。子代理的目标若是【内网/私网地址】(如 192.168.x.x 数据源),当前底座不提供白名单授权——直接说明访问缺口或换公网来源,不要派工到会被出站防护拦截(NETWORK_PRIVATE_HOST_BLOCKED)的目标。【创建后行为】创建子代理后你可以继续做手头的事或结束回合，子代理完成时系统会自动唤醒你续跑汇总；**不要向用户承诺'我会自动汇总'**——要如实说'子代理在后台运行，完成时系统会通知'。若你选择在回合内等待子代理，用 dispatch_subagents 推进；不要创建后原地空等。",
         input_schema=_input_schema(
             _CREATE_PARAMETERS,
             _CREATE_PARAMETER_SCHEMA,

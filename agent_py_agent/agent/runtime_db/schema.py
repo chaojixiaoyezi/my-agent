@@ -274,11 +274,19 @@ _BASE_RUNTIME_SQL = (
         woke_at REAL NOT NULL DEFAULT 0,
         status TEXT NOT NULL DEFAULT 'pending',
         created_at REAL NOT NULL,
-        updated_at REAL NOT NULL
+        updated_at REAL NOT NULL,
+        -- WK-INT(2026-08-20): wake 持久化状态机升级——一次性闹钟 → 可恢复待办。
+        -- claimed 期间带 lease；失败回 pending 并按 retry_after 退避重试；
+        -- 429 限流把 retry_after 推到恢复点；进程崩溃后 lease 过期由 reclaim 回收。
+        lease_until REAL NOT NULL DEFAULT 0,
+        retry_after REAL NOT NULL DEFAULT 0,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT NOT NULL DEFAULT ''
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_wake_queue_due ON wake_queue(status, next_due_at)",
     "CREATE INDEX IF NOT EXISTS idx_wake_queue_task ON wake_queue(root_task_id)",
+    "CREATE INDEX IF NOT EXISTS idx_wake_queue_lease ON wake_queue(status, lease_until)",
     # ---------------------------------------------------------------- R3（I 节）
     # AcceptanceContract（I.2/I.6）：dispatch 前由框架编译、校验、冻结，
     # 不可变；current_contract_id 在 task_runs 上 CAS 防分叉。模型只能

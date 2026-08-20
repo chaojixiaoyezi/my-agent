@@ -3841,15 +3841,38 @@ class _BackgroundSchedulerTickMixin:
         低频兜底(每 _WAKE_RECONCILE_INTERVAL_SECONDS): unfinished_task_ids
         三源全量对账一次——未完成任务没字条 → upsert(冷却后到期); 字条在但
         任务已终结 → 清字条(僵尸不累积)。
+
+        WK-INT: 每 tick 先回收 lease 过期的 claimed 字条(崩溃/卡死恢复)。
         """
+        self._reclaim_expired_wake_leases(now=now)
         self._consume_due_wake_queue(now=now)
         last = getattr(self, "_wake_reconcile_last_at", 0.0)
         if now - last >= _WAKE_RECONCILE_INTERVAL_SECONDS:
             self._wake_reconcile_last_at = now
             self._reconcile_wake_queue(now=now)
 
+    def _reclaim_expired_wake_leases(self, *, now: float) -> None:
+        """WK-INT: 回收 lease 过期的 claimed 字条(崩溃/卡死恢复, 回 pending 重试)。"""
+        try:
+            agent = getattr(getattr(self, "runtime", None), "agent", None)
+            repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+            if repo is None or not callable(getattr(repo, "reclaim_expired_wakes", None)):
+                return
+            reclaimed = repo.reclaim_expired_wakes(now=now)
+            if reclaimed:
+                _HEARTBEAT_LOGGER.info("wake lease reclaim: %s", reclaimed)
+        except Exception:
+            _HEARTBEAT_LOGGER.warning("wake lease reclaim scan failed", exc_info=True)
+
     def _consume_due_wake_queue(self, *, now: float) -> None:
-        """热层: 到期字条 → 核档案 → 唤醒/清行。"""
+        """热层: 到期字条 → 核档案 → 唤醒/结算。
+
+        WK-INT(2026-08-20): 状态机化——claim(带 lease) → 执行 → 成功
+        complete / 失败 release(带退避重试)。wake 不再"pop 即没"：
+        - 执行抛异常 → release(5 秒退避)回 pending 重试(不丢)
+        - 进程崩溃 → lease 过期由 _reclaim_expired_wake_leases 回收重试
+        - 429 由调用方以更长 retry_after release(冻结不丢)
+        """
         try:
             agent = getattr(getattr(self, "runtime", None), "agent", None)
             repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
@@ -3883,11 +3906,17 @@ class _BackgroundSchedulerTickMixin:
                             "dedupe_key": f"wake-queue:{task_id}",
                         }
                     )
+                    repo.complete_wake(wake_id)
                 except Exception:
                     _HEARTBEAT_LOGGER.warning(
                         "wake queue consume failed task=%s", task_id, exc_info=True
                     )
-                repo.complete_wake(wake_id)
+                    # WK-INT: 失败不丢 wake——回 pending 5 秒后重试
+                    if callable(getattr(repo, "release_wake", None)):
+                        repo.release_wake(
+                            wake_id, retry_after=float(now) + 5.0,
+                            last_error="consume_failed",
+                        )
         except Exception:
             _HEARTBEAT_LOGGER.warning("wake queue consume scan failed", exc_info=True)
 

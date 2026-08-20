@@ -46,8 +46,8 @@ def test_pop_due_wakes_only_due_and_cas(tmp_path: Path) -> None:
     repo.upsert_wake(root_task_id="future-task", next_due_at=99999.0)
     popped = repo.pop_due_wakes(now=150.0, limit=16)
     assert [w["root_task_id"] for w in popped] == ["due-task"]
-    assert popped[0]["status"] == "woke"
-    # 再 pop: 已 woke 不再返回
+    assert popped[0]["status"] == "claimed"
+    # 再 pop: 已 claimed 不再返回
     assert repo.pop_due_wakes(now=150.0, limit=16) == []
     # 未来行不受影响
     future = repo.pop_due_wakes(now=200.0, limit=16)
@@ -84,10 +84,10 @@ def test_cancel_wakes_for_task_clears_all(tmp_path: Path) -> None:
 
 
 def test_stale_wakes_detect_uncompleted(tmp_path: Path) -> None:
-    """woke 超过超时未 complete = 僵尸候补; 正常完成的不会出现。"""
+    """claimed 超过超时未 complete = 僵尸候补; 正常完成的不会出现。"""
     repo = _repo(tmp_path)
     repo.upsert_wake(root_task_id="zombie", next_due_at=50.0)
-    repo.pop_due_wakes(now=60.0, limit=16)  # 标 woke
+    repo.pop_due_wakes(now=60.0, limit=16)  # 标 claimed
     stale = repo.stale_wakes(now=300.0, woke_timeout_seconds=120.0)
     assert [w["root_task_id"] for w in stale] == ["zombie"]
     # 未超时窗口内不判 stale

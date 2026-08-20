@@ -1595,42 +1595,91 @@ class RuntimeRepository(
             ).fetchone()
 
     def pop_due_wakes(self, *, now: float, limit: int = 64) -> list[dict[str, Any]]:
-        """取出到期的待醒字条(CAS 标 woke, 防双叫); 只索引查询不翻目录。
+        """取出到期的待醒字条(CAS 标 claimed, 防双叫); 只索引查询不翻目录。
 
-        选+标在同一事务内完成: 先用索引选出 pending 且到期的行, 再把这些
-        wake_id 置 woke——二次 pop 时 status 已非 pending 不会再选(不用
-        woke_at 时间戳判别, 同秒多次 pop 不会串)。"""
+        WK-INT(2026-08-20): 一次性闹钟 → 持久化状态机。到期行置 claimed 并
+        带 lease_until(消费方在 lease 内执行, 失败 release 回 pending 重试,
+        进程崩溃后 lease 过期由 reclaim_expired_wakes 回收)——wake 不再
+        "pop 即没", 失败可重试、崩溃可恢复。选+标在同一事务内完成。"""
         current = float(now)
+        lease_until = current + 300.0  # 5 分钟执行窗(与调度 tick 周期匹配)
         with self._runtime_connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM wake_queue WHERE status = 'pending' "
-                "AND next_due_at <= ? ORDER BY next_due_at LIMIT ?",
-                (current, int(limit)),
+                "AND next_due_at <= ? AND retry_after <= ? "
+                "ORDER BY next_due_at LIMIT ?",
+                (current, current, int(limit)),
             ).fetchall()
             if rows:
                 ids = [str(row["wake_id"]) for row in rows]
                 placeholders = ",".join("?" for _ in ids)
                 conn.execute(
-                    f"UPDATE wake_queue SET status = 'woke', woke_at = ? "
-                    f"WHERE wake_id IN ({placeholders})",
-                    (current, *ids),
+                    f"UPDATE wake_queue SET status = 'claimed', woke_at = ?, "
+                    f"lease_until = ? WHERE wake_id IN ({placeholders}) "
+                    f"AND status = 'pending'",
+                    (current, lease_until, *ids),
                 )
                 conn.commit()
-            # 返回行反映"已被领取"状态(本事务内刚置 woke)
             popped = [dict(row) for row in rows]
             for item in popped:
-                item["status"] = "woke"
+                item["status"] = "claimed"
                 item["woke_at"] = current
+                item["lease_until"] = lease_until
             return popped
 
     def complete_wake(self, wake_id: str) -> bool:
-        """字条处理完毕(任务已拉起/已确认终结)——删除该行。"""
+        """字条处理完毕(任务已拉起/已确认终结)——删除该行(终态无保留价值)。"""
         with self._runtime_connection() as conn:
             cursor = conn.execute(
                 "DELETE FROM wake_queue WHERE wake_id = ?", (str(wake_id),)
             )
             conn.commit()
             return cursor.rowcount > 0
+
+    def release_wake(
+        self,
+        wake_id: str,
+        *,
+        retry_after: float,
+        last_error: str = "",
+    ) -> bool:
+        """WK-INT: 执行失败/429 限流 → 回 pending 并设重试点(带退避)。
+
+        不丢 wake: 失败保留记录, retry_after 之后重新 due。attempt_count
+        累计供审计/退避升级。"""
+        current = time.time()
+        with self._runtime_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE wake_queue SET status = 'pending', retry_after = ?, "
+                "attempt_count = attempt_count + 1, last_error = ?, "
+                "updated_at = ? WHERE wake_id = ? AND status = 'claimed'",
+                (float(retry_after), str(last_error)[:500], current, str(wake_id)),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def reclaim_expired_wakes(self, *, now: float) -> int:
+        """WK-INT: 崩溃/卡死回收——claimed 但 lease 过期的行回 pending 重试。"""
+        current = float(now)
+        with self._runtime_connection() as conn:
+            rows = conn.execute(
+                "SELECT wake_id FROM wake_queue WHERE status = 'claimed' "
+                "AND lease_until < ?",
+                (current,),
+            ).fetchall()
+            if not rows:
+                return 0
+            ids = [str(row["wake_id"]) for row in rows]
+            placeholders = ",".join("?" for _ in ids)
+            conn.execute(
+                f"UPDATE wake_queue SET status = 'pending', retry_after = ?, "
+                f"attempt_count = attempt_count + 1, "
+                f"last_error = 'lease_expired_reclaim', updated_at = ? "
+                f"WHERE wake_id IN ({placeholders}) AND status = 'claimed'",
+                (current + 1.0, current, *ids),
+            )
+            conn.commit()
+            return len(ids)
 
     def cancel_wakes_for_task(self, root_task_id: str) -> int:
         """任务终止/接管时清掉它的全部字条, 返回删除行数。"""
@@ -1652,11 +1701,11 @@ class RuntimeRepository(
             return [dict(row) for row in rows]
 
     def stale_wakes(self, *, now: float, woke_timeout_seconds: float) -> list[dict[str, Any]]:
-        """woke 超过超时仍未 complete 的字条(叫了没人干完)——僵尸候补,
-        消费者逐条核任务档案后清行。"""
+        """claimed 超过超时仍未 complete 的字条(叫了没人干完)——僵尸候补,
+        消费者逐条核任务档案后清行。WK-INT: 状态机化后 claimed 取代 woke。"""
         with self._runtime_connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM wake_queue WHERE status = 'woke' AND woke_at > 0 "
+                "SELECT * FROM wake_queue WHERE status = 'claimed' AND woke_at > 0 "
                 "AND woke_at <= ?",
                 (float(now) - float(woke_timeout_seconds),),
             ).fetchall()
