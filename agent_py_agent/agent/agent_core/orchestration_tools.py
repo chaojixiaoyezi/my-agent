@@ -672,6 +672,7 @@ def _output_scope_conflict_result(
         False,
         json.dumps(payload, ensure_ascii=False, indent=2),
         error_code="SUBAGENT_OUTPUT_SCOPE_CONFLICT",
+        effect_outcome="not_started",
     )
 
 
@@ -713,6 +714,7 @@ def _active_lineage_creation_result(
         False,
         json.dumps(payload, ensure_ascii=False, indent=2),
         error_code="SUBAGENT_ACTIVE_LINEAGE_EXISTS",
+        effect_outcome="not_started",
     )
 
 
@@ -752,17 +754,20 @@ def _checked_creation_capacity(
             False,
             "当前无法读取权威子代理容量状态；本批没有创建任何子代理。",
             error_code="SUBAGENT_CAPACITY_UNAVAILABLE",
+            effect_outcome="not_started",
         )
 
 
-# LLM: Capacity is the strict intersection of configured, owner-policy, per-call, task, and live usage limits.
-# 函数用途: 在创建任何子代理前计算本批真正可用的严格容量。
+# LLM: ``max_subagents`` is root-session scoped like 会话运行时 AgentControl; unrelated
+# durable runs may stay resumable but cannot consume this tree's slots. Explicit
+# owner-policy caps remain owner-wide and count every non-terminal run.
+# 函数用途: 按当前根任务容量、全局管理员配额和单次上限计算真正可用的创建槽位。
 def _available_creation_slots(agent: object) -> tuple[int, dict[str, int]]:
-    """Return the strictest remaining owner/task/per-call capacity for this call."""
-    owner_cap = _configured_max_subagents(agent)
-    policy_cap = _positive_limit(getattr(getattr(agent, "owner_policy", None), "max_subagents", 0))
-    if policy_cap:
-        owner_cap = min(owner_cap, policy_cap) if owner_cap else policy_cap
+    """Return the strictest remaining session/owner/task/per-call capacity."""
+    session_cap = _configured_max_subagents(agent)
+    owner_policy_cap = _positive_limit(
+        getattr(getattr(agent, "owner_policy", None), "max_subagents", 0)
+    )
     per_call_cap = _positive_limit(
         getattr(
             getattr(agent, "config", None),
@@ -772,7 +777,11 @@ def _available_creation_slots(agent: object) -> tuple[int, dict[str, int]]:
     )
     task_cap = _positive_limit(getattr(getattr(agent, "config", None), "task_max_subagents", 0))
     owner_active, task_active = _active_subagent_counts(agent)
-    candidates = [owner_cap - owner_active] if owner_cap else []
+    has_root_scope = bool(_current_root_task_id(agent))
+    session_active = task_active if has_root_scope else owner_active
+    candidates = [session_cap - session_active] if session_cap else []
+    if owner_policy_cap:
+        candidates.append(owner_policy_cap - owner_active)
     active_agent_cap = _positive_limit(
         getattr(getattr(agent, "owner_policy", None), "max_active_agents", 0)
     )
@@ -784,7 +793,9 @@ def _available_creation_slots(agent: object) -> tuple[int, dict[str, int]]:
         candidates.append(task_cap - task_active)
     slots = max(0, min(candidates)) if candidates else _DEFAULT_MAX_SUBAGENTS
     return slots, {
-        "owner_cap": owner_cap,
+        "session_cap": session_cap,
+        "session_active": session_active,
+        "owner_cap": owner_policy_cap,
         "owner_active": owner_active,
         "active_agent_cap": active_agent_cap,
         "task_cap": task_cap,
@@ -869,6 +880,7 @@ def _subagent_quota_result(
         False,
         json.dumps(payload, ensure_ascii=False, indent=2),
         error_code="SUBAGENT_CAPACITY_EXCEEDED",
+        effect_outcome="not_started",
     )
 
 

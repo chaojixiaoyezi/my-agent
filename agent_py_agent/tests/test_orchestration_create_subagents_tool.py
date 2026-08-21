@@ -30,6 +30,37 @@ def _mock_created_task(index: int):
     return task
 
 
+def test_unrelated_open_runs_do_not_consume_current_root_session_slots():
+    """其它 TUI 的可恢复旧任务不能永久堵住当前根任务的 会话运行时 式会话槽。"""
+    from agent_py_agent.agent.agent_core.orchestration_tools import (
+        _available_creation_slots,
+    )
+
+    unrelated = [
+        SimpleNamespace(id=f"old-{index}", status="PENDING")
+        for index in range(12)
+    ]
+    agent = SimpleNamespace(
+        config=SimpleNamespace(
+            max_subagents=6,
+            subagent_hierarchy_max_children_per_tool_call=4,
+            task_max_subagents=0,
+        ),
+        owner_policy=SimpleNamespace(max_subagents=50, max_active_agents=1000),
+        _current_run_params=SimpleNamespace(
+            task_attributes={"conversation_task_id": "current-root"}
+        ),
+        subagents=SimpleNamespace(list_runs=lambda: unrelated),
+        subagent_run_ids_for_request=lambda _task_id: [],
+    )
+
+    slots, details = _available_creation_slots(agent)
+
+    assert slots == 4
+    assert details["session_active"] == 0
+    assert details["owner_active"] == 12
+
+
 class TestCreateSubagentsToolExecute:
     """测试 CreateSubagentsTool.execute() 方法。"""
 
@@ -193,6 +224,7 @@ class TestCreateSubagentsToolExecute:
 
         assert result.ok is False
         assert result.reported_error_code == "SUBAGENT_CAPACITY_EXCEEDED"
+        assert result.effect_outcome == "not_started"
         payload = json.loads(result.output)
         assert payload["available"] == 1
         assert payload["limits"]["task_active"] == 1
@@ -210,6 +242,7 @@ class TestCreateSubagentsToolExecute:
 
         assert result.ok is False
         assert result.reported_error_code == "SUBAGENT_CAPACITY_UNAVAILABLE"
+        assert result.effect_outcome == "not_started"
         assert mock_agent.subagents.create_run.call_count == 0
 
     def test_empty_items_with_top_level_goal_falls_through_to_single_goal(self):

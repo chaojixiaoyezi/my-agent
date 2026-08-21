@@ -231,10 +231,11 @@ enable_subagents: true
 # - strict: 后续用于外部用户/高风险环境。
 subagent_mode: "trusted_local_hardening"
 
-# 同一 owner 同时最多保留多少个未结束子代理。
-# 参考 会话运行时 的小并发槽设计：默认 6 是安全上限，实际同时启动仍由 runner_auto_concurrency=4 收紧。
-# 已结束 run 不占用容量，复杂任务可以分批继续创建，无需一次拆成十几个。
+# 同一根会话树同时最多保留多少个未结束子代理；不同 TUI/根任务互不占槽。
+# 对照 会话运行时 AgentControl：容量属于 root session，不由 owner 历史账本全局占用。
+# 默认 6 是单任务安全上限，实际同时启动仍由 runner_auto_concurrency=4 收紧。
 max_subagents: 6
+# 可选的更严格当前任务上限；0 表示不在 max_subagents 之外再收紧。
 task_max_subagents: 0
 task_max_grandchildren: 0
 

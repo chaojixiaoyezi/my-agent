@@ -298,6 +298,10 @@
   但不进入当前 TaskEnvelope、runner 模型摘要、父级 wake、树摘要或完成判定。
 - 默认资源护栏收紧为同 owner 最多 6 个未结束 child、每次递归创建最多 4 个、
   `runner_concurrency=auto` 时同时运行最多 4 个。这是资源边界，不是按任务文字硬编排子代理数量。
+- `.7` 首轮真机发现“owner 历史未终态 run”会永久吃光新 TUI 容量。对照 会话运行时 每棵 root session
+  独享 `AgentControl` 后，`max_subagents` 改为当前根会话树上限；owner policy 的管理员配额仍全局计算。
+  容量/冲突类整批拒绝同时显式标记 `effect_outcome=not_started`，不再被副作用账本误包装为
+  `TOOL_OPERATION_OUTCOME_UNKNOWN`。
 
 ## 2026-08-18 候选消息实时流式 + 每轮阶段计时【状态：本地 focused 通过，待真机部署复验】
 

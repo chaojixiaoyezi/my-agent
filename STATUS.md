@@ -20,6 +20,10 @@
   121 项、状态投影 36 项及本次递归资源边界 44 项均已通过。Ruff、doc sync、strict code-size、diff check
   和 compileall 已通过；strict 报告中的 4 个 hard 均来自纯净基线，本轮新增 hard 为 0。提交推送、`.7`
   单 Gateway 部署和真实 TUI 植物大战僵尸任务仍待执行，未提前标为通过。
+- `.7` 首轮真实 TUI 暴露 12 个其它历史 `PENDING` run 把新会话容量错误压成 0。当前补丁已按 会话运行时
+  root-scoped `AgentControl` 改为每棵根会话树独立计算 `max_subagents`，管理员 owner policy 仍保持全局
+  上限；确定性的容量拒绝明确记为“未开始”，不再伪装成副作用未知。待 focused 后重新部署并从同一 TUI
+  用普通中文要求主代理重试。
 
 ## 2026-08-20 TUI 灰色层级与 tmux/右键复制修正
 

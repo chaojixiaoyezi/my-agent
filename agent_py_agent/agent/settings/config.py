@@ -322,6 +322,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     additional_write_roots: list[str] = field(default_factory=list)
     enable_subagents: bool = True
     subagent_mode: str = "trusted_local_hardening"
+    # 当前根会话树可同时保留的未结束子代理数；不同 TUI/根任务互不占槽。
     max_subagents: int = 6
     subagent_board_limit: int = 5
     subagent_workspace: str = ""

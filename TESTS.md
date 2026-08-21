@@ -30,6 +30,12 @@ Gateway 可以并行，但不能作为“单 Gateway 多客户端”验收的替
 当前脏工作树，因此没有把本轮新增问题写成豁免。递归创建的同配置每次上限与新建后代空验收字段又以
 44 项 hierarchy/orchestration focused 复测通过。
 
+`.7` 真实 TUI 首轮按原样植物大战僵尸 prompt 请求 3 个 child 时，结构化回执显示
+`owner_active=12/available=0`，证明旧实现把其它会话的历史未终态 run 算进当前会话容量；同时该确定性
+整批拒绝被误包成 `TOOL_OPERATION_OUTCOME_UNKNOWN`。回归应锁定：当前 root 没有 child 时，即使 owner
+另有 12 个可恢复 run，仍可按单次上限获得 4 个槽；容量不可读/超限均返回
+`effect_outcome=not_started`，不进入副作用未知收口。
+
 2026-08-20 TUI 灰色层级与 tmux 复制修复在本地、`192.0.2.7` 各运行 renderer/view/input/ANSI/PTY/chat
 6 文件 focused 组合，均为 105 项通过。测试机仅有一个 Gateway（8420），10 个 TUI 共享；真实中文请求
 约 3.09 秒出现回答，ANSI capture 证明思考为 246 灰、助手正文为 231，`tmux load-buffer -w` 中文探针
