@@ -88,6 +88,8 @@ def build_create_subagents_model_spec() -> ToolModelSpec:
 # lifecycle events but must not imply a parent-side inspection requirement.
 # 函数用途: 构造当前代理记录/读取软进度清单的模型合同。
 def build_task_progress_model_spec() -> ToolModelSpec:
+    progress_item_schema = _task_progress_item_schema()
+    coverage_target_schema = _task_progress_coverage_target_schema()
     parameters = {
         "action": "read/update/create；不填默认 read。create 与 update 等效（账本不存在时自动创建，首次建清单也用 create 或 update），清单内容不会自动续跑普通任务，也不会阻止模型结束当前轮。",
         "run_id": "仅用于 read 时可选指定进度账本；update 始终写当前运行自己的账本。",
@@ -103,8 +105,18 @@ def build_task_progress_model_spec() -> ToolModelSpec:
         "run_id": {"type": "string"},
         "summary": {"type": "string"},
         "next_action": {"type": "string"},
-        "items": {"type": "array", "items": {"type": "object"}},
-        "coverage": {"type": "object"},
+        "items": {"type": "array", "items": progress_item_schema},
+        "coverage": {
+            "type": "object",
+            "properties": {
+                "goal": {"type": "string"},
+                "dimensions": {"type": "array", "items": {"type": "string"}},
+                "targets": {"type": "array", "items": coverage_target_schema},
+                "coverage_requirement": {"type": "string"},
+                "enforcement": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
     }
     details = {
         "items": "这是开放清单，不是业务模板。status 只用 pending/in_progress/done/skipped/blocked；completed/read/ok 这类说明写 notes/summary，不要写进 status。长文、长清单、逐章/逐项任务里，优先每个对象写一个 item；notes 写真实读到的短事实，evidence 写文件、offset/行号、artifact_ref 或来源说明。不要只写“章节001-012已覆盖”来代替逐项事实。",
@@ -114,23 +126,84 @@ def build_task_progress_model_spec() -> ToolModelSpec:
         name="task_progress",
         description="记录或读取当前运行的进度笔记。它只是可选的软账本，不选择会话、不切换工作区、不决定当前轮或后续轮是否继续。【复杂/长任务先建 plan】开工先把任务拆成 items 建清单，每完成一项立即 update 把该项 status 标为 done（界面会逐项打钩显示，模型跨轮也能靠它续接）；不要等最后一次性补钩。",
         input_schema=_input_schema(parameters, property_schemas, details=details),
-        hints=_hints(
-            use_cases=(
-                "任务很长，需要记下哪些小块已完成、正在做、下一步是什么",
-                "任务要求覆盖多个对象，例如每个项目、每篇论文、每周数据、每个 API 或每个文件",
-                "大体量构建任务（功能齐全的应用/多模块系统）：开工先把功能清单立成 items，每项实现→跑通→标 done 附证据，供模型跨轮续接和自查",
-                "compact 后要恢复当前代理自己的工作进度",
-                "希望生命周期事件给直接父级带回简短进度摘要",
-            ),
-            avoid_when=("只做一句普通回复、不需要跨轮保存进度时可以不用",),
-            keywords=("进度", "清单", "todo", "checkpoint", "继续做", "compact", "任务账本"),
-            examples=(
-                '{"tool":"task_progress","action":"update","summary":"已读完两个项目","next_action":"继续读第三个项目","items":[{"id":"project-a","title":"阅读项目A","status":"done","evidence":["project-a/README.md","project-a/src/core.py"]}]}',
-                '{"tool":"task_progress","action":"update","coverage":{"goal":"每个项目都要读 README、分析模块、写进报告","dimensions":["读 README","分析模块","写进报告"],"targets":[{"id":"project-a","checks":{"读 README":"done","分析模块":"pending"},"evidence":["project-a/README.md"]}]}}',
-                '{"tool":"task_progress","action":"read"}',
-            ),
+        hints=_task_progress_model_hints(),
+    )
+
+
+# LLM: Keep lengthy usage examples outside the schema builder so the model
+# contract remains easy to audit without changing any exposure semantics.
+# 函数用途: 构造 task_progress 的使用场景、关键词和示例。
+def _task_progress_model_hints() -> ToolModelHints:
+    return _hints(
+        use_cases=(
+            "任务很长，需要记下哪些小块已完成、正在做、下一步是什么",
+            "任务要求覆盖多个对象，例如每个项目、每篇论文、每周数据、每个 API 或每个文件",
+            "大体量构建任务（功能齐全的应用/多模块系统）：开工先把功能清单立成 items，每项实现→跑通→标 done 附证据，供模型跨轮续接和自查",
+            "compact 后要恢复当前代理自己的工作进度",
+            "希望生命周期事件给直接父级带回简短进度摘要",
+        ),
+        avoid_when=("只做一句普通回复、不需要跨轮保存进度时可以不用",),
+        keywords=("进度", "清单", "todo", "checkpoint", "继续做", "compact", "任务账本"),
+        examples=(
+            '{"tool":"task_progress","action":"update","summary":"已读完两个项目","next_action":"继续读第三个项目","items":[{"id":"project-a","title":"阅读项目A","status":"done","evidence":["project-a/README.md","project-a/src/core.py"]}]}',
+            '{"tool":"task_progress","action":"update","coverage":{"goal":"每个项目都要读 README、分析模块、写进报告","dimensions":["读 README","分析模块","写进报告"],"targets":[{"id":"project-a","checks":{"读 README":"done","分析模块":"pending"},"evidence":["project-a/README.md"]}]}}',
+            '{"tool":"task_progress","action":"read"}',
         ),
     )
+
+
+# LLM: Nested item schema advertises supported fields but deliberately leaves
+# required/status validation to the handler so partial updates get rich errors.
+# 函数用途: 构造进度项的模型 JSON 形状。
+def _task_progress_item_schema() -> dict[str, object]:
+    return {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string"},
+            "title": {"type": "string"},
+            "status": {"type": "string"},
+            "evidence": {"type": "array", "items": {"type": "string"}},
+            "notes": {"type": "string"},
+            "next": {"type": "string"},
+            "result": {"type": "string"},
+            "outcome": {"type": "string"},
+            "conclusion": {"type": "string"},
+            "decision": {"type": "string"},
+            "summary": {"type": "string"},
+            "owner": {"type": "string"},
+            "priority": {},
+            "updated_at": {},
+            "correction": {"type": "boolean"},
+            "overwrite": {"type": "boolean"},
+            "replace": {"type": "boolean"},
+        },
+    }
+
+
+# LLM: Coverage keys are open-world while values remain strings for handler
+# validation; provider-side enums would hide exact bad values from feedback.
+# 函数用途: 构造覆盖对象的模型 JSON 形状。
+def _task_progress_coverage_target_schema() -> dict[str, object]:
+    return {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string"},
+            "title": {"type": "string"},
+            "status": {"type": "string"},
+            "checks": {
+                "type": "object",
+                "additionalProperties": {"type": "string"},
+            },
+            "evidence": {"type": "array", "items": {"type": "string"}},
+            "notes": {"type": "string"},
+            "next": {"type": "string"},
+            "owner": {"type": "string"},
+            "priority": {},
+            "updated_at": {},
+            "coverage_kind": {"type": "string"},
+            "source_ref": {"type": "string"},
+        },
+    }
 
 
 # LLM: 模型取消合同只允许按 run_id 点名直接下级；子树扫描、

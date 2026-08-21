@@ -1,6 +1,11 @@
 
 from __future__ import annotations
 
+"""LLM: Expose task progress as an advisory ledger, never a lifecycle gate.
+
+模块用途: 让模型记录和读取软进度，同时用结构化状态同步已结束的子代理条目。
+"""
+
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -34,6 +39,9 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
+# LLM: This model tool owns only progress-ledger validation/projection. It must
+# never schedule another model turn or decide whether a task is complete.
+# 类用途: 提供软进度清单的读写入口，不负责催办、续跑或验收。
 class TaskProgressTool(BaseTool):
     model_spec = build_task_progress_model_spec()
     runtime_policy = ToolRuntimePolicy(
@@ -53,9 +61,14 @@ class TaskProgressTool(BaseTool):
         input_policy=ToolInputPolicy(internal_parameters=("__run_scope",)),
     )
 
+    # LLM: Keep the agent reference only for canonical owner/run scope lookup.
+    # 函数用途: 绑定当前代理，以便进度账本落到正确的 owner 和 run。
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
 
+    # LLM: Writes are validated, then canonical child state is projected back
+    # before returning so stale model input cannot hide an already DONE child.
+    # 函数用途: 读取或更新软进度，并把真实子代理终态同步到返回结果。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         action = _normalized_action(params.get("action"))
         if action_error := _invalid_action_result(action):
@@ -69,17 +82,86 @@ class TaskProgressTool(BaseTool):
         if action == "update":
             if status_error := _invalid_status_result(params):
                 return status_error
+            if identity_error := _invalid_new_item_identity_result(root, run_id, params):
+                return identity_error
             from ..conversation.task_promotion import promote_current_conversation_task
 
             promote_current_conversation_task(self.agent)
-            payload = write_task_progress(root, run_id, params)
+            written_payload = write_task_progress(root, run_id, params)
+            _reconcile_completed_child_covers_before_read(self.agent, root, run_id)
+            reconcile_completed_child_items(self.agent, root, run_id)
+            payload = read_task_progress(root, run_id)
+            payload = _with_immediate_quality_hints(payload, written_payload)
             payload = _with_write_feedback(payload)
             payload = _with_evidence_source_feedback(self.agent, payload)
         else:
             _reconcile_completed_child_covers_before_read(self.agent, root, run_id)
             reconcile_completed_child_items(self.agent, root, run_id)
             payload = read_task_progress(root, run_id)
-        return ToolHandlerOutcome("task_progress", True, json.dumps(payload, ensure_ascii=False, indent=2))
+        return ToolHandlerOutcome(
+            "task_progress",
+            True,
+            json.dumps(payload, ensure_ascii=False, indent=2),
+        )
+
+
+# LLM: Canonical rereads intentionally discard ephemeral incoming-write hints.
+# Reattach only that soft response metadata while keeping items/counts canonical.
+# 函数用途: 对账后仍把本次写入产生的即时软提醒返回给模型。
+def _with_immediate_quality_hints(
+    canonical: dict[str, object],
+    written: dict[str, object],
+) -> dict[str, object]:
+    hints = written.get("quality_hints")
+    if not isinstance(hints, dict) or not hints.get("messages"):
+        return canonical
+    return {**canonical, "quality_hints": hints}
+
+
+# LLM: New progress rows need stable machine identity and a human-readable label;
+# partial updates may omit title only when that exact id already exists.
+# 函数用途: 拒绝模型一次写入多条空白待办，同时保留已有项按 id 更新的能力。
+def _invalid_new_item_identity_result(
+    root: Path,
+    run_id: str,
+    params: dict[str, object],
+) -> ToolHandlerOutcome | None:
+    items = params.get("items")
+    if not isinstance(items, list | tuple):
+        return None
+    existing_ids = {
+        str(item.get("id") or "").strip()
+        for item in read_task_progress(root, run_id).get("items", [])
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    }
+    invalid: list[dict[str, object]] = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            invalid.append({"index": index, "reason": "item_must_be_object"})
+            continue
+        item_id = str(item.get("id") or "").strip()
+        if not item_id:
+            invalid.append({"index": index, "reason": "id_required"})
+            continue
+        if item_id not in existing_ids and not str(item.get("title") or "").strip():
+            invalid.append(
+                {"index": index, "id": item_id, "reason": "new_item_title_required"}
+            )
+    if not invalid:
+        return None
+    payload = {
+        "ok": False,
+        "error": "task_progress 新进度项必须同时有稳定 id 和可读 title。",
+        "invalid_items": invalid[:12],
+        "how_to_fix": "新建项传 id/title/status；更新已有项可传 id/status 和要更新的字段。",
+    }
+    return ToolHandlerOutcome(
+        "task_progress",
+        False,
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        error_code="TOOL_INVALID_ARGUMENTS",
+        effect_outcome="not_started",
+    )
 
 
 def _reconcile_completed_child_covers_before_read(

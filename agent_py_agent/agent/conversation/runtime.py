@@ -3626,20 +3626,49 @@ def _batched_audit_finding_signal(signals: tuple[WakeSignal, ...]) -> WakeSignal
     )
 
 
+# LLM: Successful root-child wakes are model-free while the exact tree still
+# has active runs, then use the existing short debounce to batch the settled tree.
+# 函数用途: 成功子代理不逐个叫醒主模型，等同树任务收齐后一次整合。
 def _successful_completion_waiting_for_batch(
     scheduler: BackgroundMainAgentScheduler,
     signal: WakeSignal,
     current: float,
 ) -> bool:
-    """Briefly debounce successful sibling completions; failures and blockers stay immediate."""
     if str(signal.reason or "").strip().lower() != "subagent_runner_finished":
         return False
     metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
     if str(metadata.get("status") or "").strip().upper() != "DONE":
         return False
+    if _successful_completion_tree_still_active(scheduler, signal):
+        return True
     delay = scheduler._config_limit("background_completion_coalesce_seconds")
     created_at = float(signal.created_at or 0.0)
     return delay > 0 and 0 < created_at <= current < created_at + delay
+
+
+# LLM: This tree check is status-only and excludes deterministic Audit source
+# lifecycle wakes, which must reach their non-model supervisor immediately.
+# 函数用途: 判断一条 DONE 通知所属的精确任务树是否还有孩子在跑。
+def _successful_completion_tree_still_active(
+    scheduler: BackgroundMainAgentScheduler,
+    signal: WakeSignal,
+) -> bool:
+    metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+    if metadata.get("audit_source_worker") is True:
+        return False
+    agent = getattr(getattr(scheduler, "runtime", None), "agent", None)
+    root_task_id = str(signal.root_task_id or "").strip()
+    if agent is None or not root_task_id:
+        return False
+    related, state_error = _related_subagent_runs(agent, root_task_id)
+    if state_error:
+        return False
+    from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
+
+    return any(
+        not task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES)
+        for task in related
+    )
 
 
 # LLM: 这里只比较事件身份和终态类型；能否随本轮一起确认还必须由调用方检查采样时间边界。

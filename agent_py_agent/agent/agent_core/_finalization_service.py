@@ -594,10 +594,9 @@ def _schedule_typed_unfinished_continuation(agent: object, ctx: FinalizeContext)
             due_now=foreground,
         )
         return
-    # 普通任务(无 /goal):轮限/失败软收口也在预算内自动续跑——收口提示词承诺
-    # 「运行时会保留同一任务并按持久进度继续」,这里兑现该承诺。后台唤醒轮除外:
-    # 唤醒轮是「读状态、给回执」语义,推进由 wait 定时器/wake 信号驱动,不占续跑预算
-    # (与 task_progress_continuation_decision 同一排除先例)。
+    # 普通任务(无 /goal):只有轮限/失败等宿主结构化 unfinished
+    # 状态才进入持久恢复链；task_progress 账本不参与。后台唤醒轮本身是
+    # 「读状态、给回执」语义，不能再排一个相同唤醒。
     if source == "background_main_agent":
         return
     from .runtime.task_identity import progress_ledger_id

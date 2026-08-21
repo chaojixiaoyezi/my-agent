@@ -47,12 +47,6 @@ from .runtime.run_params import (
     run_params_from_keywords,
     run_params_with_request_id,
 )
-from .task_progress_continuation import (
-    TaskProgressContinuationDecision,
-    mark_task_progress_continued,
-    mark_task_progress_limit_reached,
-    task_progress_continuation_decision,
-)
 
 
 @dataclass
@@ -553,30 +547,13 @@ def _run_with_params(agent, user_prompt: str, params: RunParams):
             )
             current_params = next_params
             continue
-        # task_progress 账本驱动续跑(2026-08-07 假 DONE 根修):普通任务模型开了
-        # 账本但一轮工具调用后回中间汇报("接下来会…继续推进")→ 按账本未完成项
-        # 请求内自动续跑,直到账本 closed 或达上限;达上限后如实收口 unfinished。
-        progress_decision = task_progress_continuation_decision(
-            agent,
-            current_params,
-            result,
-            depth=current_params.task_progress_continue_depth,
-        )
-        if not progress_decision.should_continue:
-            if progress_decision.reason == "limit_reached":
-                result = mark_task_progress_limit_reached(result)
-            finish_run_task_workspace_if_needed(agent, current_params, result)
-            _settle_main_agent_run(agent, current_params, result)
-            persist_cli_run_assistant(agent, current_params, result)
-            return result
-        next_params = _task_progress_continue_params(
-            current_params, progress_decision, result
-        )
-        continued = _run_once_with_params(agent, progress_decision.user_prompt, next_params)
-        result = mark_task_progress_continued(
-            continued, result, depth=next_params.task_progress_continue_depth
-        )
-        current_params = next_params
+        # 会话运行时 turn boundary: task_progress is advisory model state, not a
+        # host-owned continuation trigger. A plain model final closes this turn;
+        # only Compact continuation or a typed lifecycle event opens another slice.
+        finish_run_task_workspace_if_needed(agent, current_params, result)
+        _settle_main_agent_run(agent, current_params, result)
+        persist_cli_run_assistant(agent, current_params, result)
+        return result
 
 
 # LLM: 阶段诊断日志只在 MY_AGENT_STAGE_DEBUG=1 时输出，用于定位 run 内部耗时构成；
@@ -740,41 +717,6 @@ def _non_compact_auto_injections(injections: list[str] | None) -> list[str]:
         for item in list(injections or [])
         if not str(item).lstrip().startswith("# Compact Auto Continuation")
     ]
-
-
-def _non_task_progress_auto_injections(injections: list[str] | None) -> list[str]:
-    return [
-        item
-        for item in list(injections or [])
-        if not str(item).lstrip().startswith("# Task Progress Continuation")
-    ]
-
-
-def _task_progress_continue_params(
-    params: RunParams,
-    decision: TaskProgressContinuationDecision,
-    source_result,
-) -> RunParams:
-    """构造账本驱动续跑轮的参数:注入账本 nudge、累加轮数、透传工具归档。"""
-    from ..conversation.active_turn_input import merge_active_turn_user_inputs
-
-    incoming_archive_calls = _merged_archive_tool_calls(
-        getattr(source_result, "archive_tool_calls", None),
-        _pending_deferred_tool_calls_from_result(source_result),
-    )
-    return replace(
-        params,
-        inject=[*_non_task_progress_auto_injections(params.inject), decision.injection],
-        task_progress_continue_depth=params.task_progress_continue_depth + 1,
-        carried_archive_tool_calls=_merged_archive_tool_calls(
-            params.carried_archive_tool_calls,
-            incoming_archive_calls,
-        ),
-        carried_active_turn_user_inputs=merge_active_turn_user_inputs(
-            params.carried_active_turn_user_inputs,
-            getattr(source_result, "active_turn_user_inputs", None),
-        ),
-    )
 
 
 def _merged_archive_tool_calls(

@@ -51,12 +51,18 @@ runtime status 获取客观事实，归一为六种公开 reason：
 协作者消息原样归档；宿主另行记录 `turn_end.reason`，并以结构化 wake 通知父级。
 父级可以查看结果 refs、发补充消息或取消，不需要再调一个“推进”工具。
 
+后代调用 `create_subagents` 后，当前工作片按宿主
+`interrupted/SUBAGENTS_ACTIVE` 投影为 `PENDING`，并以精确直属 child ids 记录等待。
+这是主动让出，不是挂死。成功 child 收齐后宿主唤醒直属父级一次；失败或
+capability 阻塞立即唤醒。新工作片从 canonical child state 获得结果引用，不依赖轮询工具。
+
 历史 task 里的 `acceptance_checks` / `verification_status` 暂不物理删除，以便读取旧账本；
 它们不再进入 TaskEnvelope、runner 模型摘要、父级 wake、树摘要或完成算法。
 
 ## 5. 与 `/goal` 和返工的边界
 
 - 普通任务自然结束后不自动新开一轮。
+- 普通 `task_progress` 只是软账本；未关闭项不是续跑信号，也不是完成门。
 - 显式 `/goal` 是 thread 上的持久目标 overlay；只有它可以按 typed goal 状态与预算续跑。
 - 已明确的工具 `failed/not_started` 与最终回复冲突时，可在同一 active turn
   把结构化冲突交回模型有界返工；这是工具事实冲突修复，不是质量验收。

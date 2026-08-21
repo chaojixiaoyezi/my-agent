@@ -32,6 +32,13 @@
   `tool_search` 继续用于 /goal、外部协作、web、vision、meta 和 MCP 等延迟能力。
 - 子代理生命周期事件直接唤醒父级；不再为每批 child 登记周期性 LLM 巡场或 `wait` 推进。
   `send_guidance` 只接受一个直接下级 `target` 和一段 `message`，不支持广播、跨层催办或验收。
+- 子代理创建下一层后，宿主立即以 `interrupted/SUBAGENTS_ACTIVE` 结束当前工作片，
+  并用精确直属 run ids 的耐久等待记录排除孤儿误复活。成功兄弟收齐后只唤醒一次；
+  失败、缺状态或 capability 阻塞立即唤醒直属父级。父级新工作片直接获得有界
+  `direct_children` 状态、结果 refs 和待裁决请求，不需要查树或 shell `sleep`。
+- `task_progress` 只是当前模型的软计划/记事账本。普通模型最终回复会直接结束当前回合；
+  open 进度项不会让宿主再调用模型、不会卡住收口。只有显式 `/goal`、Compact 或 typed
+  子代理/控制事件能开新工作片。新账本项必须有稳定 `id + title + status`，避免空白行。
 - 模型侧旧 `raise_event` 已删除。进展、工具活动、阻塞、权限申请和终态都由宿主从真实 runner/thread
   事件写入；模型不能靠自报事件证明自己还活着。子代理 canonical state 会保存有界的“模型响应中 / 正在
   使用工具 / 工具成功或失败”短状态，不保存 prompt、response、工具输出或隐式推理正文。

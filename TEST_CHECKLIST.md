@@ -41,6 +41,11 @@
 - [ ] 子代理状态变化只通过生命周期事件唤醒直接父级；没有周期性 LLM 巡场/wait 推进。`send_guidance`
   只能用 `target + message` 给一个直接 child 插话，不能广播或越层代管孙代理；模型工具表也不含
   `inspect_agent_tree`，内部树只供 `/status`、TUI、恢复与诊断。
+- [ ] task-local 父级创建下一层后以 `interrupted/SUBAGENTS_ACTIVE` 让出；exact direct-child wait 在孩子
+  活跃时阻止孤儿误复活。同批成功只恢复一次，失败/缺状态/capability 阻塞立即恢复；嵌套 child 只叫醒
+  直属父级，恢复上下文包含有界 `direct_children` refs，Gateway 重启后也能从耐久标记补偿。
+- [ ] `task_progress` 仅为软账本：open 项不触发普通任务自动续跑、不阻止自然 final；新项要求稳定
+  `id/title/status`，模型旧 pending 不能覆盖 canonical child DONE。
 - [ ] OPEN capability request 不能被普通 completed 收尾覆盖为 DONE；直属父级 grant/deny 后必须续跑
   同一 run，取消/接管终态不得复活。根、子、孙只能 guidance/cancel/resolve 自己的直属 child；
   模型 cancel 回执不得夹带整树状态，schema 不暴露 dry_run/kill_process 运维参数。

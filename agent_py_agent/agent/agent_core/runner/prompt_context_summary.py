@@ -7,6 +7,9 @@ from ...model_visible_refs import current_model_ref, current_model_text
 from ...subagents import SubAgentExecutionContext
 
 
+# LLM: The runner prompt is a bounded projection of canonical context. Direct
+# child rows retain structured objects so the parent can integrate without a poll tool.
+# 函数用途: 生成子代理模型真正看到的精简上下文，包含直属孩子事件结果。
 def runner_context_summary_payload(context: SubAgentExecutionContext) -> dict[str, object]:
     bundle = context.context_bundle if isinstance(context.context_bundle, dict) else {}
     return {
@@ -24,6 +27,7 @@ def runner_context_summary_payload(context: SubAgentExecutionContext) -> dict[st
         },
         "write_boundary": dict(context.write_boundary or {}),
         "conversation": _conversation_prompt_payload(bundle),
+        "direct_children": _direct_children_prompt_payload(bundle.get("direct_children")),
         "collaboration": _collaboration_prompt_payload(bundle.get("collaboration")),
         "takeover": _bounded_object(bundle.get("takeover")),
         "context_packs": _context_packs_prompt_payload(context.context_packs),
@@ -48,6 +52,75 @@ def runner_context_summary_payload(context: SubAgentExecutionContext) -> dict[st
         "open_gaps": list(context.open_gaps or [])[:3],
         "instructions": list(context.instructions or [])[:8],
     }
+
+
+# LLM: Preserve child rows and capability requests as bounded dictionaries;
+# generic list bounding would stringify them and erase machine-readable fields.
+# 函数用途: 把直属孩子状态包缩小后保持为结构化 JSON。
+def _direct_children_prompt_payload(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    payload = _dict_prompt_subset(
+        value,
+        [
+            "schema_version",
+            "parent_run_id",
+            "total",
+            "counts",
+            "all_terminal",
+            "active_run_ids",
+            "attention_run_ids",
+        ],
+    )
+    rows: list[dict[str, object]] = []
+    raw_rows = value.get("items")
+    selected_rows = list(raw_rows or []) if isinstance(raw_rows, list | tuple) else []
+    for item in selected_rows[:12]:
+        if not isinstance(item, dict):
+            continue
+        rows.append(_direct_child_prompt_row(item))
+    payload["items"] = rows
+    return payload
+
+
+# LLM: One direct-child row keeps only bounded status/refs and at most three
+# structured capability requests; raw responses remain behind refs.
+# 函数用途: 将一个直属孩子裁成父级 prompt 可安全读取的小对象。
+def _direct_child_prompt_row(item: dict[str, object]) -> dict[str, object]:
+    row = _dict_prompt_subset(
+        item,
+        [
+            "run_id",
+            "status",
+            "turn_end_reason",
+            "failure_type",
+            "goal",
+            "latest_summary",
+            "artifact_refs",
+            "evidence_refs",
+            "runner_result_json",
+            "output_json",
+            "response_file",
+        ],
+    )
+    requests = item.get("open_capability_requests")
+    if isinstance(requests, list | tuple):
+        row["open_capability_requests"] = [
+            _dict_prompt_subset(
+                request,
+                [
+                    "request_id",
+                    "capability_type",
+                    "needed_capability",
+                    "tools",
+                    "skills",
+                    "path_scope",
+                ],
+            )
+            for request in requests[:3]
+            if isinstance(request, dict)
+        ]
+    return row
 
 
 def _read_refs_prompt_payload(context: SubAgentExecutionContext) -> dict[str, object]:

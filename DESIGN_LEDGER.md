@@ -369,6 +369,17 @@
   真实 ToolResult 字段是 `tool_name`，旧状态投影却读取 `tool`，所以 canonical state 长期只显示空
   `RUNNING/0%`。写边界现按 会话运行时 FileSystemSandboxPolicy 的最具体条目优先、deny 同层胜出；runner 的
   模型/工具边界写有界活动短状态，工具进度读取 `tool_name`，不公开模型正文或思考原文。
+- `bea6fed` 原样任务已能产出页面并让四名 child 全部 `DONE`，但 422.849 秒内发生 32 次模型调用，
+  累计输入估算约 19.47M tokens。结构化日志证明不是模型必须被“催”：task-local 父级创建下一层后进入
+  `PENDING`，通用孤儿续跑却马上再次采样它；嵌套 child 的完成事件又越级进入根会话，形成反复查询和
+  重读大上下文。当前权威规则是每层只订阅直属孩子：创建后耐久记录精确 child ids 并以
+  `interrupted/SUBAGENTS_ACTIVE` 让出；同批成功收齐才恢复一次，失败、缺记录或 capability 阻塞立即恢复；
+  新工作片从 `direct_children` 获得有界 status/result/artifact refs。崩溃恢复先调和这份等待记录，再运行
+  通用孤儿复活。任何层级使用同一规则，不为“孙代理”另造合同。
+- `task_progress` 正式降为软记事账本：已删除普通任务的自动 continuation 模块、配置项和递归深度字段。
+  open 清单不再开新模型工作片，也不再参与完成判断；只有 Compact、显式 `/goal`、用户插入或 typed
+  child/control event 可以续接。进度写入必须以稳定 id/status 表达，新建项还要可读 title；写后重新按
+  canonical child run id 对账，避免模型提交的旧状态遮住真实终态。
 
 ## 2026-08-18 候选消息实时流式 + 每轮阶段计时【状态：本地 focused 通过，待真机部署复验】
 

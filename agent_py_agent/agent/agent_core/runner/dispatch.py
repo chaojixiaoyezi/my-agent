@@ -290,6 +290,9 @@ def _limit_items(items: list, limit: int) -> list:
     return list(items)[:limit]
 
 
+# LLM: This is the single runner candidate gate. A typed direct-child wait is
+# an intentional suspension, not an orphan; prose and task-progress never enter.
+# 函数用途: 判断一个子代理 run 能否被启动或恢复，并排除正常等孩子的父级。
 def _is_dispatch_runner_candidate(
     task: SubAgentTask,
     *,
@@ -298,6 +301,10 @@ def _is_dispatch_runner_candidate(
 
     effective_policy = candidate_policy(policy)
     if not _source_worker_dispatch_allowed(task):
+        return False
+    from ...subagents.direct_parent_lifecycle import parent_wait_blocks_dispatch
+
+    if parent_wait_blocks_dispatch(task):
         return False
     if runner_launch_in_progress(task, effective_policy):
         return False

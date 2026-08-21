@@ -103,8 +103,9 @@ SimpleAgent orchestration tool
   -> services/persistence writes canonical state
   -> runner worker runs model/tool loop
   -> services/runner_result_service.py records result/artifacts/status
-  -> host emits one lifecycle event to the direct parent
-  -> parent optionally guides/cancels/resolves that child, then summarizes
+  -> nested parent stores an exact direct-child wait marker and yields its slice
+  -> child event resumes only the direct parent (root child wakes its conversation)
+  -> resumed parent receives bounded direct_children facts/refs and continues naturally
 ```
 
 ## 入口
@@ -119,9 +120,11 @@ SimpleAgent orchestration tool
 - `agent/subagents/service_window.py`：持续型委派语义的生命周期事实源；它按结构化
   `attributes.long_running + service_window_seconds + created_at` 计算剩余值守窗口，供父侧 wake 和
   恢复展示使用，不作为任务质量验收或模型结束的第二道硬门。
-- `agent/subagents/runner_completion_wake.py`：runner 终态只通过
-  `ConversationStore.append_observation_with_wake` 发布父级通知。该入口保证 wake-first 顺序、双向 ID
-  关联和 observation fallback；禁止恢复成两个彼此独立的 append/raise 调用。
+- `agent/subagents/direct_parent_lifecycle.py`：递归父子等待、同批成功合并、失败立即释放和
+  `direct_children` 上下文的唯一领域规则。它只读精确 id/status/refs，不解释 goal 或汇报正文。
+- `agent/subagents/runner_completion_wake.py`：直接根 child 通过
+  `ConversationStore.append_observation_with_wake` 发布会话通知；嵌套 child 不越级发根 wake，由 runner lease
+  退出后的直属父级恢复链处理。
 - 父级后台整合轮只在模型调用前冻结一次 child phase；prompt、最终化和公开投递共用该快照。同 root
   的 DONE 通知只有在该时刻已经创建才可同批确认，之后到达的通知保持 pending 并另开一轮。新鲜轮
   看到全部 child 终态后直接交付模型自然回复，不等根 task link 先完成第二次机器验收。

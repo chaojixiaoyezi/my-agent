@@ -26,6 +26,9 @@ class CreatedSubagentLifecycleResult:
     conversation_bind_errors: list[dict[str, object]]
 
 
+# LLM: Materialization, recursive parent wait registration, conversation binding,
+# and host start receipt form one lifecycle edge; no model-side dispatch step exists.
+# 函数用途: 子代理记录落盘后统一绑定会话、登记父级等待并自动启动。
 def publish_created_subagents(
     request: CreatedSubagentLifecycleRequest,
 ) -> CreatedSubagentLifecycleResult:
@@ -34,12 +37,36 @@ def publish_created_subagents(
     run_ids = [_task_id(task) for task in tasks]
     conversation_bind_errors = _bind_tasks_to_conversation(request.agent, tasks)
     remember_orchestration_run_ids(request.agent, run_ids)
+    _mark_recursive_parent_wait(request, run_ids)
     auto_start = auto_start_tasks(request.agent, tasks, request.request_params)
     return CreatedSubagentLifecycleResult(
         auto_start=auto_start,
         run_ids=run_ids,
         conversation_bind_errors=conversation_bind_errors,
     )
+
+
+# LLM: Only a real nested create owns a direct-parent wait marker. Top-level
+# parents are conversation turns, while deferred/dry-run records never start.
+# 函数用途: 在子代理真正创建下一层时记住它正在等哪些直属孩子。
+def _mark_recursive_parent_wait(
+    request: CreatedSubagentLifecycleRequest,
+    run_ids: list[str],
+) -> None:
+    if not run_ids or bool(request.request_params.get("defer_start")):
+        return
+    from ...subagents.direct_parent_lifecycle import (
+        mark_parent_waiting_for_direct_children,
+    )
+    from ..runner.context import current_subagent_run_id
+
+    parent_run_id = current_subagent_run_id(request.agent)
+    if parent_run_id:
+        mark_parent_waiting_for_direct_children(
+            request.agent.subagents,
+            parent_run_id,
+            run_ids,
+        )
 
 
 def _bind_tasks_to_conversation(agent: object, tasks: list[object]) -> list[dict[str, object]]:

@@ -2,6 +2,16 @@
 
 ## 2026-08-21 子代理自然收口、递归控制面与 TUI 可观察性（同 owner 分会话调度本地回归通过）
 
+- `bea6fed` 的最新真机样本已把“子代理都 DONE 但整单仍慢”定位到两条宿主断链：task-local 父级创建
+  孙代理后虽为 `PENDING`，却会被孤儿恢复器立即重新采样；根会话又会逐条消费后代成功事件。该轮虽然
+  最终 4 个 child 全部 `DONE`、8080 返回 200，仍用了 422.849 秒、32 次模型调用，累计输入估算约
+  19.47M tokens。当前本地候选新增精确直属 child wait：task-local 父级创建后立即
+  `interrupted/SUBAGENTS_ACTIVE` 让出，成功兄弟收齐后只恢复一次，失败或 capability 阻塞立即恢复，
+  孙代理只唤醒直属父级，父级新工作片直接得到有界 `direct_children` 状态与结果 refs。
+- 旧 `task_progress` 自动续跑链及其配置/深度字段已经删除。进度清单现在只作模型软记事；open 项不能再
+  触发额外模型调用或阻止自然 final。新进度项要求稳定 `id + title + status`，写入后会重新读取 canonical
+  child 状态，模型的旧 `pending` 不能覆盖已经 `DONE` 的孩子。当前仅为本地候选，严格 gate、推送、
+  `.7` 单 Gateway 部署和原样 TUI 复验尚未完成。
 - 对照 会话运行时 后，模型可见的子代理控制面只保留统一创建、向一个直属 child 补充 guidance、取消/中断
   直属 child 和处理其 capability 请求。`create_subagents` 在任意层级都代表创建并自动启动；旧
   `dispatch_subagents`、child scheduler、wait 和 `inspect_agent_tree` 模型工具已删除，宿主内部

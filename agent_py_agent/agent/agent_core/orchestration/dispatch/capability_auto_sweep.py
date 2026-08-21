@@ -229,6 +229,9 @@ def supervise_stalled_orphans(agent: Any) -> dict[str, object]:
         return _supervise_stalled_orphans_unlocked(agent)
 
 
+# LLM: This is the ordered crash-recovery pass under the owner lock. Typed
+# direct-parent waits are reconciled before generic orphan revival.
+# 函数用途: 在锁内修复失联 runner、释放已满足的父级等待，再复活真正的孤儿。
 def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
     summary: dict[str, object] = {
         "parent_closed_cancelled": 0,
@@ -275,6 +278,7 @@ def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
         )
     except Exception:
         _LOGGER.debug("supervision running reclaim failed", exc_info=True)
+    summary.update(_reconcile_direct_parent_waits(agent))
     try:
         # Crash/stall recovery is latency-sensitive: once a dead attempt has
         # been fenced and requeued, restart that exact durable run before the
@@ -312,6 +316,26 @@ def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
                     exc_info=True,
                 )
     return summary
+
+
+# LLM: Parent-wait crash compensation is isolated from the broader supervisor;
+# malformed state degrades to zero counters and leaves generic recovery running.
+# 函数用途: 调和耐久直属等待记录，并返回监督统计。
+def _reconcile_direct_parent_waits(agent: Any) -> dict[str, int]:
+    try:
+        from ....subagents.direct_parent_lifecycle import reconcile_all_parent_waits
+
+        wait_summary = reconcile_all_parent_waits(getattr(agent, "subagents", None))
+        return {
+            "direct_parent_waits_checked": int(wait_summary.get("checked") or 0),
+            "direct_parent_waits_released": int(wait_summary.get("released") or 0),
+        }
+    except Exception:
+        _LOGGER.debug("supervision direct parent wait reconcile failed", exc_info=True)
+        return {
+            "direct_parent_waits_checked": 0,
+            "direct_parent_waits_released": 0,
+        }
 
 
 # LLM: 宿主已死的 RUNNING 回收(重启/SIGKILL 韧性的最后一环):RUNNING 但 runner 会话

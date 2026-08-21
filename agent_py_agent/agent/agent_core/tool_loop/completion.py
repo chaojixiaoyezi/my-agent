@@ -51,11 +51,28 @@ class ToolRoundCompletionRequest:
     tool_rounds: int = 0
 
 
+# LLM: A successful recursive create ends the current execution slice. Root
+# turns enter one thin receipt round; task-local parents persist PENDING and wait
+# for exact child events instead of sampling again or polling.
+# 函数用途: 工具轮结束后处理 Compact 转换和创建子代理后的立即让出。
 def completion_response_after_tool_round(
     request: ToolRoundCompletionRequest,
 ) -> ModelResponse | None:
     if transition_response := _context_refresh_transition_response(request):
         return transition_response
+    successful_tools = list(request.params.executed_tools or [])[request.before_executed_count :]
+    if "create_subagents" in successful_tools:
+        if wait_response := task_local_wait_response_for_open_subagents(
+            request.agent,
+            request.params,
+            response=request.response,
+        ):
+            return wait_response
+        queue_interim_reply_for_open_subagents(
+            request.agent,
+            request.params,
+            tool_rounds=request.tool_rounds,
+        )
     # 工具轮后模型正文为空 ≠ 收口信号:长期助手/会话运行时/终端应用/通道运行时 四家参考产品
     # 都是"工具→结果→继续采样"直到模型主动输出无工具调用的终态正文(参考调研 2026-08-07)。
     # 真机铁证(2026-08-07, scrapy/celery 复刻):DeepSeek 经 工具运行时 网关工具轮后空正文
@@ -64,6 +81,45 @@ def completion_response_after_tool_round(
     # 由 response_decision 的 长期助手 式 bounded nudge 兜底(参考 长期助手 "empty response"
     # 塞用户消息要求继续),真正无产出时走诚实 USER_REPLY_UNAVAILABLE。
     return None
+
+
+# LLM: A task-local parent with active direct children cannot close as DONE.
+# The host stores an exact-id wait marker and returns an interrupted slice; the
+# next model turn is opened only by a child event or explicit user guidance.
+# 函数用途: 子代理还有直属孩子运行时，让它安全结束当前工作片并等事件。
+def task_local_wait_response_for_open_subagents(
+    agent: object,
+    params: ToolLoopExecuteParams,
+    *,
+    response: object | None = None,
+) -> ModelResponse | None:
+    if str(getattr(params, "context_scope", "") or "") != "task_local":
+        return None
+    from ...subagents.direct_parent_lifecycle import (
+        mark_parent_waiting_for_direct_children,
+    )
+    from ..runner.context import current_subagent_run_id
+
+    parent_run_id = current_subagent_run_id(agent) or str(getattr(params, "run_id", "") or "")
+    waiting = mark_parent_waiting_for_direct_children(
+        getattr(agent, "subagents", None),
+        parent_run_id,
+    )
+    if not waiting:
+        return None
+    backend = str(
+        getattr(response, "backend", "")
+        or getattr(getattr(agent, "backend", None), "name", "")
+        or "tool_loop"
+    )
+    return ModelResponse(
+        text="",
+        backend=backend,
+        runtime_status="unfinished",
+        runtime_reason="SUBAGENTS_ACTIVE",
+        runtime_source="subagent_lifecycle",
+        turn_end_reason="interrupted",
+    )
 
 
 def _context_refresh_transition_response(
@@ -841,4 +897,5 @@ __all__ = [
     "queue_interim_reply_for_tool_round_limit",
     "queue_reply_for_incomplete_final_mutation",
     "queue_reply_for_audit_prepare",
+    "task_local_wait_response_for_open_subagents",
 ]

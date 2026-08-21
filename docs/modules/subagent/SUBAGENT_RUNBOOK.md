@@ -16,9 +16,15 @@ orphan reconciler、observation/wake 和代理树 projection
 
 ## 状态与通知
 
-创建回执只给本批 run ids、结果读取 refs 和 `await_lifecycle_event`。父级可以继续自己的工作，也可以
-结束当前回合；child 的进展、阻塞、权限申请和完成会作为结构化生命周期事件直接唤醒它。不要用 shell
+创建回执只给本批 run ids、结果读取 refs 和 `await_lifecycle_event`。根主代理会先给用户一条短回执；
+任意 task-local 父代理则立即以 `interrupted/SUBAGENTS_ACTIVE` 结束当前工作片。宿主把正在等待的
+直属 run ids 写入 canonical state，孤儿恢复器不会把这种正常等待误当挂死重启。child 的进展、
+阻塞、权限申请和完成会作为结构化生命周期事件唤醒直属父级。不要用 shell
 `sleep`、新建“巡检代理”或反复调用其它工具猜状态。
+
+成功同批 child 会等到收齐后只唤醒一次，避免每个 child 都让父级重读整份上下文。失败、
+缺失 canonical state 或 capability 阻塞会立即唤醒。父级新工作片的 `direct_children` 包直接给出
+status、turn end、failure type、result/output/artifact refs 和待裁决请求；原始大回复仍留在引用文件中。
 
 宿主内部 `agent_tree_status_payload` 会展示 run/parent/root、状态、heartbeat、当前步骤、失败原因和
 artifact refs，但这是运维状态投影，不是模型工具。用户可以通过 `/status` 和 TUI 看，恢复器也可以读；
@@ -37,7 +43,9 @@ OPEN 或非法未闭合 capability request 是宿主掌握的结构化阻塞事�
 裁决事件触发 dispatcher 续跑；不得另建 replacement，也不需要父级调用推动工具。
 
 主代理很少出现同类“挂掉”，是因为它通常已经拥有当前工作区，而且没有跨 child runner 的能力申请/
-裁决边界。child 过去看似挂掉，实质是“申请已落账—本轮被误关—裁决没有重新排队”三段状态断链。
+裁决边界。child 过去看似挂掉主要有两条状态断链：一是“申请已落账—本轮被误关—裁决没有重新排队”；
+二是“创建孙代理后父级 PENDING—孤儿器立即误复活—只能反复轮询，孙代理结果又越级发给根会话”。
+当前两条都由结构化状态和直属事件链修复，不需要增加催办工具。
 
 ## 路径与写权限
 

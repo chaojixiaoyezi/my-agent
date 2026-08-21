@@ -802,6 +802,21 @@ class TestTaskProgressCoverageRejectedAliases:
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), execution_mode="local_unmanaged"), tmp_path)
         agent._main_agent_run_id = "run-main"
 
+        created = _execute_task_progress(
+            agent,
+            {
+                "action": "update",
+                "items": [
+                    {
+                        "id": "agentscope-main",
+                        "title": "分析 agentscope-main",
+                        "status": "in_progress",
+                    }
+                ],
+            },
+        )
+        assert created.ok is True
+
         result = _execute_task_progress(
             agent,
             {

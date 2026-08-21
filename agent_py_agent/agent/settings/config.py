@@ -283,10 +283,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 单次 run 内 compact→自动续跑的绝对深度硬顶（与 no-tool 软顶并存）。达到即强制 return，
     # 防止持续高于阈值且每轮都调工具的任务无限 compact/续跑（H2）。0 表示沿用内置默认。
     memory_compact_auto_continue_max_depth: int = 50
-    # 普通 standalone 任务 task_progress 账本驱动自动续跑上限（2026-08-07 假 DONE 根修）：
-    # 模型一轮工具调用后回中间汇报即被 terminal 收口的根修参数。0 表示沿用内置默认(3)；
-    # 显式 >0 时覆盖。task_attributes["task_progress_continue_limit"] 优先于此。
-    task_progress_auto_continue_limit: int = 0
     # compact 续跑时对卸掉的中段历史做一次 LLM 语义摘要（短板6，长期助手 trajectory_compressor
     # 蓝本）：默认开，保护首尾、只摘要中段；摘要失败/超时/无 backend 一律静默回退机械重建，
     # 不影响 compact/resume 正常路径与可恢复性。enabled=false 即完全关闭、走纯机械重建。

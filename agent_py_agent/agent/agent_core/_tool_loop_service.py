@@ -84,6 +84,7 @@ from .tool_loop.completion import (
     queue_interim_reply_for_tool_round_limit,
     queue_reply_for_audit_prepare,
     queue_reply_for_incomplete_final_mutation,
+    task_local_wait_response_for_open_subagents,
 )
 from .tool_loop.natural_user_reply import (
     discard_pending_natural_user_reply,
@@ -693,6 +694,9 @@ def _pending_turn_input_invalidates_response(agent, params: ToolLoopExecuteParam
     return True
 
 
+# LLM: This is the bounded model/tool slice. A task-local parent with active
+# direct children exits as typed interrupted instead of polling or closing DONE.
+# 函数用途: 执行当前工作片的模型与工具循环，并在等直属孩子时安全让出。
 def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecuteParams):
     final_prompt, final_response = "", None
     tool_rounds = params.tool_rounds
@@ -757,6 +761,13 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
         # 会话运行时 root/child lifecycle boundary: only a plain final response is
         # deferred.  Real tool calls remain executable while children run.
         if action.action == "break":
+            if wait_response := task_local_wait_response_for_open_subagents(
+                service._agent,
+                params,
+                response=final_response,
+            ):
+                final_response = wait_response
+                break
             if queue_interim_reply_for_open_subagents(
                 service._agent,
                 params,

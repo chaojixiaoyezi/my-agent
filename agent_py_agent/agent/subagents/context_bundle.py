@@ -48,6 +48,9 @@ REQUIRED_CONTEXT_BUNDLE_FIELDS = (
 _AUDIT_SOURCE_PROFILE_INLINE_MAX_CHARS = 12_000
 
 
+# LLM: This frozen bundle is the canonical bounded runner context snapshot;
+# direct_children contains refs/status only and must never inline hidden thought.
+# 类用途: 保存每个子代理工作片可见的任务、权限、工作区和直属孩子事实。
 @dataclass(frozen=True)
 class ContextBundleV1:
     schema_version: str
@@ -69,6 +72,10 @@ class ContextBundleV1:
     task_packet: dict[str, object] = field(default_factory=dict)
     task_envelope: dict[str, object] = field(default_factory=dict)
     tool_preflight: dict[str, object] = field(default_factory=dict)
+    # LLM: Runtime-built direct-child facts are bounded canonical projections;
+    # they are empty on the first slice and populated only for recursive parents.
+    # 字段用途: 父代理被孩子事件唤醒时读取直属孩子的状态和结果引用。
+    direct_children: dict[str, object] = field(default_factory=dict)
     collaboration: dict[str, object] = field(default_factory=dict)
     takeover: dict[str, object] = field(default_factory=dict)
     source_refs: dict[str, list[str]] = field(default_factory=dict)

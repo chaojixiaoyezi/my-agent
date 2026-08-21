@@ -56,6 +56,13 @@ ToolResult 字段，只有空 `RUNNING/0%`。当前候选按 会话运行时 最
 以 `(owner, thread)` 去重、同 thread 持久 claim 单飞、不同 thread 有界并发。真实 scheduler 阻塞对照回归已通过；
 待严格 gate、推送部署和全新 TUI 最终复验。
 
+`bea6fed` 的后续原样轮已拿到四名 child 全部 `DONE`、完整产物和 HTTP 200，但仍耗时 422.849 秒、
+32 次模型调用，累计输入估算约 19.47M tokens。新定位的主因是 task-local 父级在等孙代理时被孤儿器
+误复活，以及孙代理成功事件越级逐条唤醒根会话。当前本地候选改为精确直属等待和递归事件链：创建后
+typed 让出，同批成功只恢复一次，失败立即恢复，父级直接收到 `direct_children` refs；同时删除
+`task_progress` 普通任务自动续跑，使 open 软清单不再制造额外模型轮。待严格 gate、推送部署后，用
+同一原样 TUI prompt 比较模型调用数、耗时、子代理终态、产物与 8080。
+
 当前 focused 已通过，按用户约定未重跑全仓 pytest。待做：完成本轮严格 gate、提交推送并部署 `.7`；
 由全新真实 TUI 验证 child 完成后父会话不受其它 TUI 长回合阻塞，再继续验证 Working 动画、thinking 连续增量、页底自动跟随、
 离底不抢滚动、Compact 百分比、后续消息可见、右键复制和输入框粘贴。外层系统剪贴板仍须用户在已 attach

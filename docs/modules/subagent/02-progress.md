@@ -41,6 +41,14 @@
   未继续整合的根因不在 child，而是同 owner 的另一条旧后台会话占住了 owner 级唯一 tick。
   Gateway 现已按 durable thread 分后台车道，同 thread 单飞、不同 thread 有界并发；真机最终整合与
   `0.0.0.0:8080` 仍需新部署轮验证，未提前标记完成。
+- `bea6fed` 下一轮虽让 4 个 child 全部 `DONE` 并得到 HTTP 200，仍耗时 422.849 秒、32 次模型调用，
+  累计输入估算约 19.47M tokens。底层原因是 task-local 父级创建孙代理后被通用孤儿续跑立即复活，
+  而嵌套 child 又把成功事件越级投到根会话。现新增 exact direct-child wait：任意父级创建下一层后
+  `interrupted/SUBAGENTS_ACTIVE` 让出，同批成功收齐只恢复一次，失败或 capability 阻塞立即恢复；
+  孙代理事件只恢复直属父级，父级上下文直接带有界 `direct_children` status/result refs。
+- `task_progress` 现在只是软记事账本。普通任务的自动 continuation 模块、配置和深度状态已经删除；
+  open 项不会开新模型轮或阻止 final。新项必须有稳定 `id/title/status`，更新返回前以 canonical child
+  run id 重新对账，避免模型旧状态覆盖真实 DONE。
 
 ## 2026-08-12 子代理候选 scope 统一规范
 
@@ -600,8 +608,8 @@ docs/audits/R7-three-tasks-20260611.md 与 REFACTORING_BACKLOG 同日条目：
   `primary_artifact_refs` 和 `expected_outputs`。没有声明产物路径的子代理会获得
   task-local `work/child_outputs/...` 默认产物路径；`items` 里各 child 声明的
   `output_files` / `output_refs` 依然各自独立。`work/agents/<run_id>/`
-  继续作为内部状态、审计和恢复目录；父代理查状态走 `inspect_agent_tree`，等待走
-  `wait`，不把 shell sleep 或内部目录遍历当成正常控制面。
+  继续作为内部状态、审计和恢复目录。这里记录的是 2026-07-29 的旧控制面；2026-08-21 起公开
+  `inspect_agent_tree` / `wait` 已退休，父级由直属生命周期事件恢复并从上下文 refs 读取结果。
 
 ## 2026-06-06 状态精确化
 
@@ -685,7 +693,8 @@ docs/audits/R7-three-tasks-20260611.md 与 REFACTORING_BACKLOG 同日条目：
   durable wake，再追加带 wake ID 的 observation。这样调度器看见 observation 时，对应 wake 已存在，
   同一次 DONE 不会触发两轮后台主代理；wake 队列失败时仍保留 observation fallback。
 - `cancel_subagents` 是父代理处理卡住下级的控制面：可取消、废弃 attempt、记录审计，再由父代理接管或汇总；如果 canonical loader 读不到该 run，会返回结构化 load error，不用旧路径扫描假装取消成功。
-- `inspect_agent_tree` 重复查看只给紧凑提示和直接摘要；需要等待时用 `wait` 登记下次查看间隔，不把轮询做成硬门。
+- 当时的 `inspect_agent_tree` 重复查看只给紧凑提示，并用 `wait` 登记间隔；这条历史工具面已于
+  2026-08-21 退休，当前等待由宿主直属事件链完成，不再让模型轮询。
 - `create_subagents` 不再因为已经有活跃子代理就默认拒绝第二批；父代理可以先派一批，后面按需要继续派。
 - 子代理可以写 task workspace 里的协作产物；最终交付由主代理汇总到 `output/` 或用户指定目录。
 

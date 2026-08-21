@@ -126,6 +126,43 @@ def test_done_child_closes_only_its_exact_seeded_progress_item(tmp_path):
     assert by_id["subagent-bb22"]["status"] == "in_progress"
 
 
+def test_task_path_ledger_key_reconciles_exact_seeded_child_id(tmp_path):
+    """Ledger fingerprints and lineage ids are different namespaces; exact seeded ids still close."""
+    import json
+
+    from agent.agent_core.orchestration.dispatch_progress_seed import (
+        reconcile_completed_child_items,
+    )
+
+    ledger_id = "task-path:4f10fbc9"
+    agent = _agent(tmp_path, run_id=ledger_id)
+    seed_dispatch_task_progress(agent, [_task("subagent-exact-1", "实现页面")])
+    task_root = tmp_path / "tasks" / "2026-08-21" / "demo"
+    path = task_root / "work" / "agents" / "subagent-exact-1" / "canonical_state.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "id": "subagent-exact-1",
+                "parent_id": "gateway-request-77",
+                "root_id": "gateway-request-77",
+                "status": "DONE",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    changed = reconcile_completed_child_items(
+        agent,
+        tmp_path,
+        ledger_id,
+        task_root=task_root,
+    )
+
+    assert changed == ["subagent-exact-1"]
+    assert read_task_progress(tmp_path, ledger_id)["items"][0]["status"] == "done"
+
+
 def test_child_terminal_states_project_without_false_completion(tmp_path):
     import json
 

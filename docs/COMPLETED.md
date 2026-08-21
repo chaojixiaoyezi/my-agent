@@ -4,6 +4,12 @@
 
 最近收口重点：
 
+- 2026-08-21 本地实现已补上递归直属事件链：task-local 父代理创建下一层后以
+  `interrupted/SUBAGENTS_ACTIVE` 让出，精确 child ids 的耐久标记会阻止孤儿器误复活；同批成功收齐只
+  恢复一次，失败或 capability 阻塞立即恢复，孙代理不再越级唤醒根会话。父级新工作片获得有界
+  `direct_children` 状态和结果 refs，不需要 inspect/wait/shell sleep。旧 `task_progress` 自动 continuation
+  也已删除，软清单不再决定续跑或完成。这里只表示本地实现完成，发布和真机结论仍以 ROADMAP/STATUS
+  为准。
 - 2026-08-21 本地底座已把 Gateway 后台整合从 owner 级 single-flight 收细为
   `owner + durable thread_id` 车道。同会话仍共用既有持久 run claim 单飞，不同 TUI/会话按 owner
   公平、在全局池和 `background_threads_per_owner` 两层显式上限内并发。真实 scheduler

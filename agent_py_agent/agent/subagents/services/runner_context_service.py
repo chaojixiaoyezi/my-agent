@@ -179,10 +179,18 @@ class SubAgentRunnerContextService:
             )
         )
 
+    # LLM: Every new task-local slice rebuilds context from canonical state,
+    # including bounded direct-child lifecycle facts after an event wake.
+    # 函数用途: 为子代理新工作片组装权限、工作区、直属孩子结果和恢复信息。
     def _make_execution_context(self, request: ExecutionContextBuildRequest) -> SubAgentExecutionContext:
         task = request.task
         controlled_exec_grants = controlled_exec_grant_refs(list(task.capability_grants or []))
         context_bundle = execution_context_bundle(task)
+        from ..direct_parent_lifecycle import direct_children_context_payload
+
+        direct_children = direct_children_context_payload(self.manager, task.id)
+        if direct_children:
+            context_bundle["direct_children"] = direct_children
         collaboration = collaboration_context_payload(self.manager, task)
         if collaboration:
             context_bundle["collaboration"] = collaboration

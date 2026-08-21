@@ -35,6 +35,9 @@ class RunSubagentWorkerParams:
     backend_override: object | None = None
 
 
+# LLM: One worker owns one bounded model slice and then settles its runner lease.
+# After settlement, continuation is driven by typed source or direct-child facts.
+# 函数用途: 运行一个子代理工作片，落盘结果后继续来源岗位或唤醒直属父级。
 def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResult:
     from ...core import SimpleAgent
 
@@ -67,6 +70,7 @@ def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResul
         timeout_seconds=params.timeout_seconds,
     )
     _continue_source_worker_after_session(worker, params.run_id, result)
+    _resume_direct_parent_after_session(worker, params.run_id)
     return result
 
 
@@ -83,6 +87,14 @@ def _continue_source_worker_after_session(worker, run_id: str, result) -> None:
     if str(getattr(result, "status", "") or "").strip().upper() != "PENDING":
         return
     try:
+        from ...subagents.direct_parent_lifecycle import parent_wait_blocks_dispatch
+
+        manager = getattr(worker, "subagents", None)
+        if manager is not None:
+            task = manager.load(run_id)
+            if parent_wait_blocks_dispatch(task):
+                # This PENDING state is an intentional event wait, not an orphan.
+                return
         from ..orchestration.dispatch.capability_auto_sweep import (
             auto_start_orphan_run,
         )
@@ -98,6 +110,32 @@ def _continue_source_worker_after_session(worker, run_id: str, result) -> None:
             exc_info=True,
         )
         return
+
+
+# LLM: A child result may wake only the canonical direct parent. Successful
+# siblings are batched; failures release the parent immediately. The generic
+# orphan auto-start path supplies idempotency and session-liveness fencing.
+# 函数用途: 子代理工作片收口后，在等待条件满足时自动拉起它的直属父代理。
+def _resume_direct_parent_after_session(worker: object, child_run_id: str) -> None:
+    try:
+        from ...subagents.direct_parent_lifecycle import (
+            reconcile_parent_wait_for_child,
+        )
+        from ..orchestration.dispatch.capability_auto_sweep import (
+            auto_start_orphan_run,
+        )
+
+        decision = reconcile_parent_wait_for_child(worker.subagents, child_run_id)
+        if decision.should_resume:
+            auto_start_orphan_run(worker, decision.parent_run_id)
+    except Exception:
+        # The durable wait marker remains recoverable by periodic supervision;
+        # a parent wake failure must not rewrite the child's persisted result.
+        _LOGGER.warning(
+            "direct parent resume failed (child_run_id=%s)",
+            child_run_id,
+            exc_info=True,
+        )
 
 
 def _build_worker_agent(simple_agent_cls, params: RunSubagentWorkerParams):

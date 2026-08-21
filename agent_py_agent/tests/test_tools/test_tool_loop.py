@@ -1782,7 +1782,7 @@ def test_background_main_agent_no_ordinary_resume_policy(tmp_path):
     """LLM: 后台唤醒轮收口不占普通任务续跑预算。
 
     唤醒轮是「读状态、给回执」语义,推进由 wait 定时器/wake 信号驱动——同 source
-    排除先例(task_progress_continuation_decision)。若误建 policy,调度器每 interval
+    排除先例(后台唤醒轮不再派生相同唤醒)。若误建 policy,调度器每 interval
     都会拉起一个空转唤醒 run,白烧预算。前台 cli_gateway 走创建路径(上个测试),
     这里验证排除分支:同样收口,policy 必须为零。
     """

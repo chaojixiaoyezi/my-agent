@@ -13,6 +13,9 @@ from .models import (
 _LOGGER = logging.getLogger(__name__)
 
 
+# LLM: Root children publish a conversation wake; nested children never skip a
+# level and are resumed by the direct-parent runner lifecycle after lease exit.
+# 函数用途: 子代理结果落盘后更新会话投影，仅直接属于根会话的孩子发根唤醒。
 def notify_parent_on_runner_result(
     manager: Any,
     task: Any,
@@ -33,6 +36,8 @@ def notify_parent_on_runner_result(
         if thread is None:
             return
         store.update_task_status({"task_id": task_id, "status": status})
+        if _has_persisted_subagent_parent(manager, task):
+            return
         root_task_id = str(getattr(task, "root_id", "") or task_id)
         metadata = _metadata(task, result, output_payload)
         if _is_internal_audit_source_lifecycle(status, metadata):
@@ -201,6 +206,9 @@ def _is_internal_audit_source_lifecycle(
     return failure_type != FailureType.PROVIDER_QUOTA_EXHAUSTED.value
 
 
+# LLM: Service-window projection is advisory and fail-silent; it never changes
+# the recursive parent-child wake route.
+# 函数用途: 安全读取长期任务剩余值守时间，读取失败按零处理。
 def _service_window_remaining(task: Any) -> float:
     from .service_window import service_window_remaining_seconds
 
@@ -210,14 +218,15 @@ def _service_window_remaining(task: Any) -> float:
         return 0.0
 
 
-# LLM: R4 子项②的提交端推送：子代理记录 capability_request 后立刻向父级线程发
-#   observation + wake signal（requires_main_agent=True），主代理在 run 循环里会被
-#   推到这个决策点，再用 resolve_capability_requests 显式 grant/deny。失败只记账不抛，
-#   不能因为通知失败把子代理的申请也丢掉。
-# 函数用途: 子代理提交能力申请时通知主代理，修"主代理全程不知道有请求"的静默断链。
+# LLM: Capability requests are routed one level upward. Nested requests wait
+# for the child's BLOCKED result to resume that exact parent; notification
+# failure is recorded and must not erase the durable request.
+# 函数用途: 直接根孩子申请权限时唤醒根会话；孙代理申请交给直属父级处理。
 def notify_parent_on_capability_request(manager: Any, task: Any, request: Any) -> None:
     store = getattr(manager, "conversation_store", None)
     if store is None:
+        return
+    if _has_persisted_subagent_parent(manager, task):
         return
     run_id = str(getattr(task, "id", "") or "").strip()
     request_id = str(getattr(request, "id", "") or "").strip()
@@ -239,6 +248,20 @@ def notify_parent_on_capability_request(manager: Any, task: Any, request: Any) -
             manager.save(task)
         except Exception:
             _LOGGER.warning("capability request notify error could not be saved for %s", run_id)
+
+
+# LLM: A parent id is considered nested only when it resolves to a canonical
+# subagent task; gateway/root request ids deliberately do not resolve here.
+# 函数用途: 判断当前孩子的直属父级是不是另一个真实子代理。
+def _has_persisted_subagent_parent(manager: Any, task: Any) -> bool:
+    parent_id = str(getattr(task, "parent_id", "") or "").strip()
+    if not parent_id or not callable(getattr(manager, "load", None)):
+        return False
+    try:
+        parent = manager.load(parent_id)
+    except (FileNotFoundError, TypeError, ValueError):
+        return False
+    return str(getattr(parent, "id", "") or "").strip() == parent_id
 
 
 # 函数用途: 构造"能力申请待处理"的 observation payload（requires_main_agent=True）。

@@ -89,6 +89,33 @@ def test_read_reconciles_covers_bindings_midrun(tmp_path):
     assert {t["id"]: t["status"] for t in persisted}["req-01"] == "done"
 
 
+def test_update_returns_canonical_done_child_state_in_same_call(tmp_path):
+    """A stale model update cannot overwrite the exact child DONE projection in its own receipt."""
+    home, task_root = _setup(tmp_path)
+    write_task_progress(
+        home,
+        _RUN_ID,
+        {
+            "items": [
+                {
+                    "id": "sub-a",
+                    "title": "子代理 A",
+                    "status": "in_progress",
+                }
+            ]
+        },
+    )
+    _write_done_child(task_root, "sub-a", covers=[])
+
+    result = TaskProgressTool(_agent(home, task_root)).execute(
+        {"action": "update", "items": [{"id": "sub-a", "status": "in_progress"}]}
+    )
+
+    payload = json.loads(result.output)
+    assert result.ok is True
+    assert payload["items"][0]["status"] == "done"
+
+
 def test_read_in_subagent_context_does_not_touch_parent_ledger(tmp_path):
     """子代理线程读账(读的是自己的账)→ 不跑父账对账,父账一字不动。"""
     home, task_root = _setup(tmp_path)

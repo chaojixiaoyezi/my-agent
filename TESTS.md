@@ -79,6 +79,13 @@ inspect/dispatch/schedule/raise_event；`tool_search` 继续只加载 goal/web/v
 真机复验继续只用一个 Gateway，故意保留或创建一条其它 TUI 长后台回合，再确认当前
 植物大战僵尸会话能自动消费 child 完成 wake、整合、启动受管服务并从独立请求核验 8080。
 
+`bea6fed` 的四 child DONE/HTTP 200 样本还要锁住递归等待成本：task-local 父级创建孩子后必须返回
+`interrupted/SUBAGENTS_ACTIVE` 并留下 exact direct-child wait；dispatcher/orphan 恢复不能在孩子活跃时
+重新采样父级；嵌套 child 不发根会话 wake；同批成功收齐只释放一次，失败/缺状态/capability 阻塞立即
+释放；崩溃巡检能从耐久标记补偿丢失事件。恢复后的 runner context 必须含有界 `direct_children`
+status/result/artifact refs。`task_progress` 回归同时证明 open 项只作软账本、普通 final 零自动续跑，
+写后 canonical child DONE 不能被模型传入的 pending 覆盖。
+
 `db41bb0` 部署后的原样 TUI 复验已有四名 child 全部 `DONE` 和完整页面文件，但 8080 最终未监听。证据
 显示模型在前台 `run_command` 内使用 `nohup ... &`，同一条命令里的 curl 得到 200 后，foreground shell
 结束时未受管 child 被清理。新增回归覆盖：独立 `&` 在任何模式都以 `not_started` 拒绝；`2>&1` 和引号内

@@ -91,6 +91,9 @@ def dispatch_coverage_binding(agent: object, tasks: list) -> dict[str, Any] | No
         return None
 
 
+# LLM: This is a best-effort projection from exact DONE descendants and their
+# structured covers ids; it never accepts the task or controls continuation.
+# 函数用途: 将子代理明确声明并已完成的覆盖项同步到父级软进度。
 def reconcile_completed_child_covers(agent: object, root: Path, run_id: str) -> list[str]:
     """Credit exact ``covers`` ids from DONE descendants into the parent progress ledger.
 
@@ -105,6 +108,9 @@ def reconcile_completed_child_covers(agent: object, root: Path, run_id: str) -> 
         return []
 
 
+# LLM: Match dispatch-seeded item ids directly against canonical child run ids;
+# ledger ids and lineage ids are separate namespaces and must not be compared.
+# 函数用途: 按精确 run id 把子代理终态同步到派工时登记的进度项。
 def reconcile_completed_child_items(
     agent: object,
     root: Path,
@@ -118,8 +124,10 @@ def reconcile_completed_child_items(
     that same child reaches canonical ``DONE`` the bookkeeping item is done;
     an explicitly handled terminal child (cancelled/abandoned/taken over) is
     skipped; a failure terminal is blocked and remains open.  No goal, summary,
-    artifact text, or model prose participates.  This does not accept the
-    parent task or the separate integration-and-verification item.
+    artifact text, or model prose participates. The ledger key may be a
+    task-path fingerprint while canonical parent ids are run ids, so this
+    projection matches the exact ids seeded into the ledger instead of
+    comparing those unrelated namespaces. This does not accept the parent task.
     """
     try:
         return _reconcile_completed_child_items(
@@ -133,6 +141,9 @@ def reconcile_completed_child_items(
         return []
 
 
+# LLM: This internal writer consumes only canonical status and exact seeded ids;
+# summaries, artifacts, and model completion prose carry no authority here.
+# 函数用途: 计算并落盘子代理进度项的 done、skipped 或 blocked 投影。
 def _reconcile_completed_child_items(
     agent: object,
     root: Path,
@@ -154,11 +165,9 @@ def _reconcile_completed_child_items(
     if not open_items:
         return []
     children = _canonical_child_rows(selected_root)
-    descendants = _descendant_ids(children, run_id)
+    exact_seeded_children = set(open_items).intersection(children)
     updates: list[dict[str, object]] = []
-    for child_id in sorted(descendants):
-        if child_id not in open_items:
-            continue
+    for child_id in sorted(exact_seeded_children):
         child_status = str(children[child_id].get("status") or "").strip().upper()
         if task_status_in(child_status, {TaskStatus.DONE.value}):
             updates.append(
@@ -212,6 +221,9 @@ def _reconcile_completed_child_items(
     return [str(item["id"]) for item in updates]
 
 
+# LLM: A nested runner sees descendants of its exact run id; the root ledger is
+# already task-root scoped and may consider every canonical row under that root.
+# 函数用途: 核对子代理 covers 绑定并写回当前进度账本。
 def _reconcile_completed_child_covers(agent: object, root: Path, run_id: str) -> list[str]:
     task_root = _current_task_root(agent)
     if task_root is None:
@@ -228,7 +240,7 @@ def _reconcile_completed_child_covers(agent: object, root: Path, run_id: str) ->
     if not open_targets:
         return []
     children = _canonical_child_rows(task_root)
-    descendants = _descendant_ids(children, run_id)
+    descendants = _relevant_descendant_ids(agent, children)
     credited: list[dict[str, object]] = []
     for child_id in sorted(descendants):
         child = children[child_id]
@@ -293,6 +305,19 @@ def _descendant_ids(rows: dict[str, dict[str, object]], root_id: str) -> set[str
                 descendants.add(child_id)
                 changed = True
     return descendants
+
+
+# LLM: A task-path progress ledger id is not a subagent lineage id. Nested
+# runners use their exact run id; the root is already fenced to one task root.
+# 函数用途: 为 covers 对账选出当前代理的真实后代，避免拿账本路径指纹去和 parent_id 硬比。
+def _relevant_descendant_ids(
+    agent: object,
+    rows: dict[str, dict[str, object]],
+) -> set[str]:
+    current_run_id = current_subagent_run_id(agent)
+    if current_run_id:
+        return _descendant_ids(rows, current_run_id)
+    return set(rows)
 
 
 def _target_has_open_checks(target: dict[str, Any]) -> bool:
