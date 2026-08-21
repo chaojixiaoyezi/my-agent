@@ -302,6 +302,11 @@
   独享 `AgentControl` 后，`max_subagents` 改为当前根会话树上限；owner policy 的管理员配额仍全局计算。
   容量/冲突类整批拒绝同时显式标记 `effect_outcome=not_started`，不再被副作用账本误包装为
   `TOOL_OPERATION_OUTCOME_UNKNOWN`。
+- `.7` 第二轮真机发现最后一个 child 在后台模型采样期间结束时，旧回合只看见 `2/3`，最终化却读取
+  新状态 `3/3` 并提前关闭根任务，导致最终整合和启动丢失。对照 会话运行时
+  `core/src/agent/control.rs` 的完成状态订阅以及 `tools/handlers/multi_agents/wait.rs` 的明确采样边界后，
+  child lifecycle 后台轮会冻结采样前树阶段；从活跃树开始的旧回合不能关闭根任务，最后一条终态事件
+  必须获得新的模型回合。该门只保证事件新鲜度，不判断产物质量，也不恢复机器验收。
 
 ## 2026-08-18 候选消息实时流式 + 每轮阶段计时【状态：本地 focused 通过，待真机部署复验】
 

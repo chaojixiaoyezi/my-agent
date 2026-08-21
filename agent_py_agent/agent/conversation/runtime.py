@@ -17,6 +17,7 @@ from ..runtime_errors import compact_error_message
 from ..settings.runtime_guard_config import runtime_guard_int
 from .authority import (
     CONVERSATION_BACKGROUND_EVENT_REASON_ATTR,
+    CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR,
     CONVERSATION_REQUEST_ID_ATTR,
     CONVERSATION_TASK_TURN_ACTIVE_ATTR,
 )
@@ -1989,8 +1990,10 @@ def _background_run_allowed_tools(
     return background_allowed_tools(config, request=request)
 
 
-# LLM: Every durable wake keeps the original task identity and typed mode facts; a scheduler request id is not a new task.
-# 函数用途: 为后台续跑构造当前任务属性，让子代理、工作区和 Audit 账本跨唤醒继续同一条任务。
+# LLM: Every durable wake keeps the original task identity and typed mode facts;
+# child lifecycle turns also freeze the pre-sampling tree phase so a stale
+# partial-progress turn cannot close a tree that settled while sampling.
+# 函数用途: 为后台续跑构造任务身份和子代理阶段快照，让工作区、事件与 Audit 账本延续同一任务。
 def _background_task_attributes(
     thread_id: str,
     request: BackgroundRunRequest,
@@ -2001,6 +2004,7 @@ def _background_task_attributes(
     metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
     scheduler_run_id = str(metadata.get("scheduler_run_id") or "").strip()
     task_id = str(request.task_id or "").strip()
+    lifecycle_reason = str(request.reason or "").strip().lower()
     _apply_internal_background_tool_budget(attributes, request, agent)
     if _narrow_audit_event_reason(request.reason):
         attributes[CONVERSATION_BACKGROUND_EVENT_REASON_ATTR] = (
@@ -2033,6 +2037,9 @@ def _background_task_attributes(
                 CONVERSATION_TASK_TURN_ACTIVE_ATTR: True,
             }
         )
+        if agent is not None and lifecycle_reason in SUBAGENT_LIFECYCLE_WAKE_REASONS:
+            phase, _state_error = _goal_subagent_phase(agent, task_id)
+            attributes[CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR] = phase
         _apply_background_task_link_attributes(
             attributes,
             agent=agent,

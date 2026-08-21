@@ -36,6 +36,12 @@ Gateway 可以并行，但不能作为“单 Gateway 多客户端”验收的替
 另有 12 个可恢复 run，仍可按单次上限获得 4 个槽；容量不可读/超限均返回
 `effect_outcome=not_started`，不进入副作用未知收口。
 
+容量修复部署后，同一 TUI 成功自动启动 3 个 child，三者约 3 分钟内均为 `DONE`；但一个后台主代理
+回合从部分完成快照开始，模型只看到 `2/3`，其采样期间最后一个 child 结束，旧最终化读取新状态并把
+根任务错误标成 `completed`，8080 未启动。新增回归在模型采样回调里把最后一个 child 改成 `DONE`：
+首个旧快照回合必须保持根任务 `active` 且不投递完成；下一次从 `subagents_terminal` 快照开始的回合才
+允许自然收口。该回归与 background runtime、gateway conversation、active-turn guidance focused 同跑。
+
 2026-08-20 TUI 灰色层级与 tmux 复制修复在本地、`192.0.2.7` 各运行 renderer/view/input/ANSI/PTY/chat
 6 文件 focused 组合，均为 105 项通过。测试机仅有一个 Gateway（8420），10 个 TUI 共享；真实中文请求
 约 3.09 秒出现回答，ANSI capture 证明思考为 246 灰、助手正文为 231，`tmux load-buffer -w` 中文探针

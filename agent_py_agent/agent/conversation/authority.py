@@ -24,6 +24,10 @@ CONVERSATION_CANCELLATION_SCOPE_ATTR = "conversation_cancellation_scope"
 # Presentation helpers must not replace that event with a generic named-work
 # receipt; the value comes from the scheduler, never from user/model prose.
 CONVERSATION_BACKGROUND_EVENT_REASON_ATTR = "conversation_background_event_reason"
+# A child-lifecycle continuation records the tree phase seen before its first
+# model sample.  Finalization uses this snapshot only as an event freshness
+# fence; it never judges whether the user's objective is good enough.
+CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR = "conversation_background_subagent_phase_at_start"
 # A prepare turn is scoped to one exact durable Audit without activating its
 # long-running guarantee.  The stable id and workspace are injected by the
 # gateway after owner/thread-scoped resolution; user prose never supplies them.
@@ -76,6 +80,7 @@ __all__ = [
     "CONVERSATION_WORK_DURATION_ATTR",
     "CONVERSATION_CANCELLATION_SCOPE_ATTR",
     "CONVERSATION_BACKGROUND_EVENT_REASON_ATTR",
+    "CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR",
     "CONVERSATION_AUDIT_PREPARE_ATTR",
     "CONVERSATION_TRANSIENT_WORKSPACE_ATTR",
     "CONVERSATION_WORKSPACE_EXECUTION_RUNNING_ATTR",

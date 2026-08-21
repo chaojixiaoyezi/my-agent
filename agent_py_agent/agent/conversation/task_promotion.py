@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 from .authority import (
+    CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR,
     CONVERSATION_CANCELLATION_SCOPE_ATTR,
     CONVERSATION_TASK_TURN_ACTIVE_ATTR,
     CONVERSATION_TRANSIENT_WORKSPACE_ATTR,
@@ -833,8 +834,9 @@ def conversation_workspace_execution_blocker(agent: object) -> dict[str, object]
     return None
 
 
-# LLM: 仅由正常 runtime turn 终态调用；此函数自身不读取最终回复正文。
-# 函数用途: 在没有待处理引导、活跃目标或未终态子代理时关闭当前普通会话任务。
+# LLM: 仅由正常 runtime turn 终态调用；此函数自身不读取最终回复正文。后台
+# child lifecycle 回合还必须来自终态树快照，不能用采样期间才变化的新状态误关根任务。
+# 函数用途: 在没有待处理引导、活跃目标、未终态子代理或陈旧阶段快照时关闭普通会话任务。
 def complete_current_conversation_task(
     agent: object,
     task_attributes: object,
@@ -857,6 +859,8 @@ def complete_current_conversation_task(
     thread_id = str(attrs.get("conversation_thread_id") or "").strip()
     run_task_id = str(current_task_id or "").strip()
     if not run_source:
+        return False
+    if _background_child_phase_requires_fresh_turn(attrs, run_source):
         return False
     # 子代理继承父 conversation_task_id 时，不得关闭父任务；如果系统为子代理
     # 建了与其自身 task_id 完全相同的会话链接，则允许它关闭自己的链接，避免
@@ -936,6 +940,21 @@ def complete_current_conversation_task(
         )
     attrs["conversation_task_completed"] = True
     return True
+
+
+# LLM: This is an event-freshness fence, not an acceptance gate. A turn that
+# started from a partial child tree may report or integrate what it saw, but a
+# later child terminal edge must get its own model sampling boundary before the
+# durable root can close.
+# 函数用途: 防止后台模型只看见部分子代理完成，却因采样期间最后一个子代理结束而误关根任务。
+def _background_child_phase_requires_fresh_turn(
+    attrs: dict[str, object],
+    run_source: str,
+) -> bool:
+    if run_source != "background_main_agent":
+        return False
+    phase = str(attrs.get(CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR) or "").strip()
+    return phase in {"subagents_active", "subagent_state_unknown"}
 
 
 def _audit_owner_report_pending(store: object, task_id: str) -> bool:

@@ -15,6 +15,7 @@ from agent_py_agent.agent.conversation import (
     FakeDeliveryService,
 )
 from agent_py_agent.agent.conversation.authority import (
+    CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR,
     CONVERSATION_REQUEST_ID_ATTR,
     CONVERSATION_TASK_TURN_ACTIVE_ATTR,
 )
@@ -954,6 +955,19 @@ class _NaturalCompletionBackend:
     def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         self.prompts.append(prompt)
         return ModelResponse(text="任务全部完成。", backend=self.name)
+
+
+class _SettlesLastChildBackend:
+    name = "settles-last-child"
+
+    def __init__(self, agent: SimpleAgent, child_id: str) -> None:
+        self.agent = agent
+        self.child_id = child_id
+
+    def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
+        del prompt, on_chunk, kwargs
+        self.agent.subagents.lifecycle.set_status(self.child_id, "DONE")
+        return ModelResponse(text="当前仍在等待最后一个子代理。", backend=self.name)
 
 
 class _BlockedCollaborationBackend:
@@ -2068,6 +2082,89 @@ def test_partial_successful_subagent_wake_stays_out_of_ordinary_chat_until_batch
     assert final.delivery_reason == "root_subagents_terminal"
     assert len(channels.adapter("internal").sent_messages) == 1
     assert [row.content for row in store.recent_messages(thread.thread_id)] == [final.response]
+
+
+def test_child_settling_during_background_sampling_requires_fresh_terminal_turn(
+    tmp_path,
+) -> None:
+    """后台轮开始时仍有 child 运行，采样期间全结束也不能用旧快照关闭根任务。"""
+    from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run_params
+
+    agent, store, thread, runtime, first, second = _child_settlement_fixture(tmp_path)
+    agent.backend = _SettlesLastChildBackend(agent, second.id)
+    partial = _run_child_done_wake(runtime, thread.thread_id, first.id, now=20.0)
+
+    assert partial.delivery_status == "suppressed"
+    assert store.load_task_link("task-root").status == "active"
+    params = _run_params(
+        thread.thread_id,
+        BackgroundRunRequest(
+            thread_id=thread.thread_id,
+            task_id="task-root",
+            reason="subagent_runner_finished",
+        ),
+        agent,
+    )
+    assert params.task_attributes[CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR] == "subagents_terminal"
+
+    agent.backend = _NaturalCompletionBackend()
+    final = _run_child_done_wake(runtime, thread.thread_id, second.id, now=30.0)
+
+    assert final.delivery_reason == "root_subagents_terminal"
+    assert store.load_task_link("task-root").status == "completed"
+
+
+def _child_settlement_fixture(tmp_path):
+    agent = SimpleAgent(
+        AgentConfig(
+            enable_tools=False,
+            memory_path="memory.jsonl",
+            orphan_supervision_interval_seconds=0,
+        ),
+        tmp_path,
+    )
+    first = agent.subagents.create_run(
+        goal="完成第一部分", thought="", plan=["执行"], parent_id="task-root", root_id="task-root"
+    )
+    second = agent.subagents.create_run(
+        goal="完成第二部分", thought="", plan=["执行"], parent_id="task-root", root_id="task-root"
+    )
+    agent.subagents.lifecycle.set_status(first.id, "DONE")
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    store.bind_task(
+        {"thread_id": thread.thread_id, "task_id": "task-root", "goal": "分两部分完成", "now": 11.0}
+    )
+    runtime = BackgroundMainAgentRuntime(
+        agent=agent,
+        store=store,
+        channels=FakeDeliveryService(),
+    )
+    return agent, store, thread, runtime, first, second
+
+
+def _run_child_done_wake(runtime, thread_id: str, child_id: str, *, now: float):
+    return runtime.run_once(
+        {
+            "thread_id": thread_id,
+            "task_id": "task-root",
+            "reason": "subagent_runner_finished",
+            "wake_signal": {
+                "root_task_id": "task-root",
+                "source_agent_id": child_id,
+                "metadata": {"task_id": child_id, "status": "DONE"},
+            },
+            "now": now,
+        }
+    )
 
 
 def test_subagent_state_load_error_suppresses_until_exact_root_task_is_completed(tmp_path) -> None:
