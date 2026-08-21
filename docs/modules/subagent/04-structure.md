@@ -93,6 +93,8 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 前台模型快照不延迟 `orchestration`：`create_subagents`、`send_guidance`、`cancel_subagents`
 与 `resolve_capability_requests` 首轮直接可见。这只改变 Schema 披露，真正可调用集仍由同一
 `ToolRuntimeSnapshot.allowed_tools` 和 availability 决定，不扩大权限。
+旧 `raise_event` 不在模型快照；进展、阻塞、权限申请和结束由宿主 lifecycle service 写入同一
+observation/wake 事实源。runner 的离散模型/工具阶段只向 canonical state 投影有界活动摘要，不保存正文。
 
 ```text
 SimpleAgent orchestration tool
@@ -135,6 +137,8 @@ SimpleAgent orchestration tool
   投影发现未完成 run，再调用 orchestration 层现有的结构化孤儿监督。它与后台主代理的 LLM
   scheduler 分线程运行，但不建立第二套恢复状态机。
 - `agent/agent_core/runner/`：子代理 worker、prompt、session heartbeat、timeout policy。
+- `agent/agent_core/runner/stage_trace.py`：从模型请求与工具调用的 typed 边界刷新 heartbeat，并写入有界
+  `runtime_activity/current_step/current_tool`；该投影只供状态面观察，不包含 prompt、response 或工具输出。
 - `agent/subagents/runner_session_liveness.py` 与
   `agent/agent_core/orchestration/tools/cancel.py`：`runner_session.in_process` 区分 Gateway 内线程与
   独立子进程；前者只能协作中断，后者才可发送操作系统信号，禁止把宿主 PID 当 child PID。
@@ -172,6 +176,8 @@ SimpleAgent orchestration tool
   `memory_compact_auto_trigger_percent`、`runner_timeout_seconds`、runner 并发和工具预算。
   只有任务自己携带结构化 `config_overlay_ref` 时才形成 run/task layer 覆盖；不要为
   子代理 compact 或常规真实测试另建第二套参数。
+- 路径 allow/forbidden 冲突由 `tooling/write_boundary.py` 按最具体命中条目裁决；更窄 allow 可穿过祖先
+  forbidden，同层或更窄 forbidden 仍拒绝。这个规则只读结构化路径，不从 goal 或文件正文推导权限。
 - 自适应重试拆分父任务时不再写历史自定义状态 `SPLIT`；父任务进入当前协议
   `TAKEN_OVER`，拆分关系只记录在结构化 `attributes.split_into` 和 `child_ids`。
 - capability request 的打开/终态判断集中在 `model_capabilities.py`。`OPEN` 代表待处理，

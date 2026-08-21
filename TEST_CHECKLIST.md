@@ -1,6 +1,9 @@
 # TEST CHECKLIST
 
 - [x] 工具运行时改动相关 focused tests 通过（Schema/runtime/protocol/policy/executor/ledger/output/concurrency/cancel/compact 矩阵）；其他并行模块仍按各自条目验收。
+- [x] 子代理模型工具面只含 create/guidance/cancel/capability；inspect/dispatch/schedule/wait/raise_event
+  均不可注册或从历史 grant 复活。宽 forbidden 与窄 task output allow 按最具体路径裁决，同层 deny 胜出；
+  runner canonical state 记录无正文的模型/工具活动，真实 ToolResult 使用 `tool_name`。
 - [ ] Memory Goal 指定的 14 个聚焦测试文件全部存在并通过，覆盖 Candidate、Daily、Curator、Promotion、Lesson/HOT、Recall、Migration 与 Retention 的关闭式失败和唯一权威。
 - [ ] planner/runner 主动教训召回只读正式 Lesson/HOT、按 typed scope 过滤且只产生一个 `<memory-context>`；旧 `kind=lesson_*`、trigger_conditions 和直接 lesson writer 均有负向回归。
 - [ ] Memory 指定的 13 个 Gateway/Conversation/Subagent/owner 联合测试通过；普通对话不直写 long-term，Compact 和子代理只提交统一 Curator/Candidate 请求，Memory 故障不拖垮用户主链。

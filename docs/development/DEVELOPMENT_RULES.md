@@ -717,9 +717,10 @@ do_write()
   surface: `child_output_read_order`, `primary_artifact_refs`,
   `expected_outputs`, and artifact refs. Task-local `work/agents/<run_id>/`
   files are internal audit/recovery state, not the normal parent status or
-  aggregation surface. Use `inspect_agent_tree` for status and `wait` for
-  delayed checks; do not reintroduce shell sleeps or directory scraping as
-  control flow.
+  aggregation surface. Child state changes arrive through host lifecycle
+  events; `/status` and TUI may read the internal tree projection. Do not
+  reintroduce model-facing inspect/wait/raise-event tools, shell sleeps, or
+  directory scraping as control flow.
 - Background subagent dispatch must inherit the parent agent's current
   `workspace_root` as a structured runtime field. Do not let the background
   process cwd pick the subagent tree; cwd is only for loading code.

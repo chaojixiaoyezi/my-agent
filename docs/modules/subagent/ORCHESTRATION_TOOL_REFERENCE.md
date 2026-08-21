@@ -95,15 +95,11 @@ shell 不应该读取或遍历 `work/agents/<run_id>/canonical_state.json`、`fi
 OPEN 请求优先于普通 completed 收尾，child 保持 `BLOCKED`。grant/deny 完成后，宿主把同一个 run 自动
 排回 `PENDING` 并通过裁决 lifecycle event 触发续跑；工具不是“推动”按钮，也不会创建第二个 child。
 
-## raise_event
+## 宿主事件回传（不是模型工具）
 
-用途：记录普通进展、阻塞、观察或需要主代理处理的事件。
-
-关键原则：
-
-- `urgency: urgent` 会写 wake queue，让主代理尽快处理。
-- 非紧急事件只进账本，等后台 tick 或父级查看。
-- `event_type`、`severity` 都是开放字符串，不做业务专项枚举硬拒。
+旧 `raise_event` 已删除。普通 child 不需要调用工具证明自己仍在工作；runner 的模型/工具阶段、能力申请、
+阻塞和终态由宿主直接写 observation/wake 与 canonical state，再通知直接父级。Audit/长期监控也调用同一
+内部事件服务，不重新注册一个模型自报入口。
 
 ## task_progress
 

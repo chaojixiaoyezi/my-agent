@@ -40,21 +40,6 @@ _CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
         },
     },
 }
-_OBSERVATION_PARAMETER_SCHEMA: dict[str, Any] = {
-    "thread_id": {"type": "string"},
-    "task_id": {"type": "string"},
-    "event_type": {"type": "string"},
-    "summary": {"type": "string"},
-    "urgency": {"type": "string"},
-    "severity": {"type": "string"},
-    "source_agent_id": {"type": "string"},
-    "parent_agent_id": {"type": "string"},
-    "root_task_id": {"type": "string"},
-    "evidence_refs": {"type": "array", "items": {"type": "string"}},
-    "requires_main_agent": {"type": "boolean"},
-    "requires_llm_report": {"type": "boolean"},
-    "dedupe_key": {"type": "string"},
-}
 _RESOLVE_CAPABILITY_PARAMETER_SCHEMA: dict[str, Any] = {
     "run_id": {"type": "string"},
     "decision": {"type": "string", "enum": ["grant", "deny"]},

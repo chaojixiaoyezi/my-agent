@@ -8,6 +8,9 @@ prompt 里说'只能写这个目录'只是提醒，真正防止越界写文件�
 它会检查允许目录、禁止目录、锁定文件，确保子代理不能改不该改的地方。
 """
 
+# LLM: 本模块是文件写工具的结构化路径裁决层；路径规则按最具体条目优先，且不能从 prompt 推导权限。
+# 模块用途: 在真正写文件前统一核对允许目录、禁止目录和锁定文件，避免子代理越界或被矛盾祖先规则误伤。
+
 from pathlib import Path
 from typing import Any
 
@@ -208,10 +211,17 @@ def _forbidden_boundary_error(
     return ""
 
 
+# LLM: 路径优先级对齐 会话运行时 FileSystemSandboxPolicy：命中目标的最具体条目生效，
+# 同层冲突时 deny 胜出；宽泛家目录保护不能吞掉更窄的结构化交付授权。
+# 函数用途: 比较命中目标的允许/禁止目录层级；更窄的明确授权可穿过祖先保护，同层或更窄的禁止规则仍拦截。
 def _forbidden_root_blocks_target(target: Path, root: Path, allowed_roots: list[Path]) -> bool:
     if not _is_relative_to(target, root):
         return False
-    return any(_is_relative_to(root, aroot) for aroot in allowed_roots)
+    matching_allowed = [aroot for aroot in allowed_roots if _is_relative_to(target, aroot)]
+    if not matching_allowed:
+        return True
+    allowed_specificity = max(len(aroot.parts) for aroot in matching_allowed)
+    return len(root.parts) >= allowed_specificity
 
 
 def _locked_boundary_error(target: Path, write_boundary: dict[str, object], workspace_root: Path) -> str:

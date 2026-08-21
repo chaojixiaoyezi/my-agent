@@ -371,7 +371,6 @@ _BACKGROUND_WORK_TOOLS = (
 )
 
 DEFAULT_BACKGROUND_ALLOWED_TOOLS = (
-    "raise_event",
     "send_guidance",
     "create_subagents",
     *_BACKGROUND_WORK_TOOLS,
@@ -402,7 +401,6 @@ GOAL_SUBAGENTS_ACTIVE_ALLOWED_TOOLS = GOAL_BACKGROUND_ALLOWED_TOOLS
 GOAL_SUBAGENTS_TERMINAL_ALLOWED_TOOLS = GOAL_BACKGROUND_ALLOWED_TOOLS
 
 CONTROL_ACTION_DESCRIPTIONS = {
-    "raise_event": "记录普通进展、阻塞或需要主代理处理的事件。",
     "send_guidance": "给正在运行的代理追加软提示。",
     "create_subagents": "创建并启动新的下级代理。",
     "read_file": "读取子代理产出的文件/产物,用于整合与验收。",
@@ -571,7 +569,7 @@ def _is_urgent_wake(request: BackgroundToolPolicyRequest) -> bool:
     wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
     urgency = str(wake.get("urgency") or "").strip().lower()
     reason = str(request.reason or wake.get("reason") or "").strip().lower()
-    # observation_requires_main_agent = 子代理 raise_event(urgent) 的真事件被观察批叫回主代理。
+    # observation_requires_main_agent = 宿主写入的真实观察事件把主代理叫回。
     # 真机根 bug:它原来不在此集 → 落 default 分支拿到含 create_subagents 的工具集 → 主代理不上报、
     # 反去重派工(真事件永远不发用户)。它语义就是"紧急事件待上报",归入 urgent → 走上报提示词分支。
     return urgency == "urgent" or reason in {

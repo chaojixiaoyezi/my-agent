@@ -24,6 +24,11 @@
 - 同日 `e321483` 真机失败样本证明已注册工具不等于模型首轮看得到：默认延迟整个
   `orchestration` 造成 0 child 且主代理自写。本地配置已按 会话运行时 multi-agent v2 改为递归代理控制
   首轮直出，并以默认 `model_visible_specs()` 回归锁定；本项只表示本地修正完成，真机复验尚未通过。
+- 同日 `c2c0235` 真机让 4 个 child 真正自动启动，并定位出“进程活着但像挂死”的两层根因。本地已按
+  会话运行时 最具体路径规则修复宽 forbidden 误伤窄 task output allow，真实 ToolResult 活动改读
+  `tool_name`，runner 离散模型/工具阶段会写有界短状态；旧 `raise_event` 模型工具、Schema、注册、实现和
+  专用测试已删除，内部 observation/wake 生命周期服务保留。活跃内置 Skill 的过期调用说明也已清理，
+  并新增退休工具名扫描回归。这里只表示本地实现与严格 gate 已通过，发布与真机重跑见 ROADMAP。
 - TUI 灰色层级已按 终端交互 的容器级 `dimColor` 语义修正：思考 Markdown 的普通文字、粗体、代码和
   链接以及 `Ctrl+O` 折叠提示都由最终浅灰 role 接管，不再只染括号或行前缀。鼠标左键拖选松手继续
   自动复制；tmux 路径按 会话运行时 统一使用 `load-buffer -w`，iTerm2 不再退化成只写内部 buffer。

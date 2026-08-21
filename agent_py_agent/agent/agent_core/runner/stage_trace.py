@@ -154,6 +154,7 @@ def _trace_runner_stage(bundle: RunnerStageTraceBundle) -> None:
         _warn_runner_trace_error(exc, context="runner_stage_trace.subagents.load", run_id=run_id)
         return
     task = _touch_active_heartbeat_chain(bundle.agent.subagents, task)
+    task = _persist_runner_activity(bundle.agent.subagents, task, bundle)
     from ...subagents.debug_trace import SubAgentDebugTraceRequest, write_subagent_debug_trace
 
     write_subagent_debug_trace(
@@ -173,6 +174,75 @@ def _trace_runner_stage(bundle: RunnerStageTraceBundle) -> None:
             },
         )
     )
+
+
+# LLM: 这是一份宿主观测到的有界活动投影，不保存模型正文或隐式推理；
+# 每个离散模型/工具边界更新一次 canonical child state，供父级状态面和 TUI 判断是否仍在工作。
+# 函数用途: 把“正在请求模型/正在用哪个工具/工具刚成功或失败”写进子代理状态，避免只剩空 RUNNING 心跳。
+def _persist_runner_activity(manager: Any, task: Any, bundle: RunnerStageTraceBundle) -> Any:
+    import time
+
+    now = time.time()
+    summary, tool = _runner_activity_summary(bundle)
+    if not summary:
+        return task
+    task.current_step = summary
+    task.current_tool = tool
+    task.heartbeat_at = now
+    task.updated_at = now
+    attrs = dict(getattr(task, "attributes", {}) or {})
+    recent = attrs.get("recent_runtime_activity")
+    items = list(recent) if isinstance(recent, list) else []
+    entry = {
+        "kind": bundle.event_type,
+        "summary": summary,
+        "tool": tool,
+        "tool_round": int(bundle.tool_rounds or 0),
+        "at": now,
+    }
+    items.append(entry)
+    attrs["runtime_activity"] = entry
+    attrs["recent_runtime_activity"] = [
+        item for item in items if isinstance(item, dict)
+    ][-6:]
+    task.attributes = attrs
+    try:
+        manager.save(task)
+    except Exception as exc:
+        _warn_runner_trace_error(
+            exc,
+            context="runner_stage_trace.activity.save",
+            run_id=str(getattr(task, "id", "") or ""),
+        )
+    return task
+
+
+# LLM: 活动摘要只由 typed stage 与工具名生成；禁止摘抄 prompt、response、工具输出或模型思考正文。
+# 函数用途: 将 runner 的离散阶段翻译成短小、可安全展示的中文状态。
+def _runner_activity_summary(bundle: RunnerStageTraceBundle) -> tuple[str, str]:
+    payload = bundle.payload if isinstance(bundle.payload, dict) else {}
+    if bundle.event_type == "runner_model_request_started":
+        return "模型响应中", ""
+    if bundle.event_type == "runner_model_response_received":
+        tool_names = [
+            str(item or "").strip()
+            for item in payload.get("tool_use_names", [])
+            if str(item or "").strip()
+        ] if isinstance(payload.get("tool_use_names"), list) else []
+        if tool_names:
+            return f"模型已选择工具：{tool_names[0]}", tool_names[0]
+        return "模型已生成回复", ""
+    if bundle.event_type == "runner_model_request_failed":
+        error_type = str(payload.get("error_type") or "模型错误").strip()
+        return f"模型请求失败：{error_type}", ""
+    if bundle.event_type == "runner_tool_call_started":
+        tool = str(payload.get("tool") or "").strip()
+        return (f"正在使用工具：{tool}" if tool else "正在使用工具"), tool
+    if bundle.event_type == "runner_tool_call_finished":
+        tool = str(payload.get("tool") or "").strip()
+        outcome = "完成" if payload.get("ok") is True else "失败"
+        return (f"工具{outcome}：{tool}" if tool else f"工具{outcome}"), tool
+    return "", ""
 
 
 def _touch_active_heartbeat_chain(manager: Any, task: Any) -> Any:

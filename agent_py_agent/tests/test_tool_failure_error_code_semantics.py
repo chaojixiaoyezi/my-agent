@@ -241,35 +241,6 @@ def test_web_fetch_5xx_and_429_stay_retryable_network():
         assert r.retryable is True
 
 
-# ---- raise_event：运行时 lookup/load 异常→TOOL_EXECUTION_FAILED；缺参→TOOL_PARAMETER_REQUIRED ----
-
-
-def test_raise_event_runtime_lookup_failure_is_execution_failed(tmp_path: Path, monkeypatch):
-    from agent_py_agent.agent.agent_core.orchestration_tools import RaiseEventTool
-
-    agent = _agent(tmp_path)
-
-    def boom(_task_id):
-        raise ValueError("index broken")
-
-    monkeypatch.setattr(agent.conversation_store, "thread_for_task", boom)
-    r = RaiseEventTool(agent).execute({"task_id": "task-x", "summary": "s"})
-    assert r.ok is False
-    assert r.error_code == "TOOL_EXECUTION_FAILED", r.error_code
-    assert r.error_code != "TOOL_INVALID_ARGUMENTS"
-    assert r.retryable is True
-
-
-def test_raise_event_missing_thread_is_parameter_required(tmp_path: Path):
-    from agent_py_agent.agent.agent_core.orchestration_tools import RaiseEventTool
-
-    # 既无 thread_id 也无 task_id → 缺必填参数(不是参数无效，更不是 UNKNOWN_ERROR)。
-    r = RaiseEventTool(_agent(tmp_path)).execute({"summary": "s"})
-    assert r.ok is False
-    assert r.error_code == "TOOL_PARAMETER_REQUIRED", r.error_code
-    assert r.retryable is True
-
-
 # ---- cancel_subagents：缺选择器→TOOL_PARAMETER_REQUIRED；status 非法→TOOL_INVALID_ARGUMENTS ----
 
 

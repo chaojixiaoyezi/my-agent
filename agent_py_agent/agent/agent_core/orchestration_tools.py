@@ -79,7 +79,6 @@ from .orchestration.tools.cancel import (
 from .orchestration.tools.capability import (
     ResolveCapabilityRequestsTool as ResolveCapabilityRequestsTool,
 )
-from .orchestration.tools.event import RaiseEventTool as RaiseEventTool
 from .orchestration.work_scope import add_work_scope_key
 from .orchestration.write_guard import (
     ExternalWriteTargetRequest,

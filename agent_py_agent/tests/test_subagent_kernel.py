@@ -185,7 +185,8 @@ def test_runtime_tool_progress_updates_agent_status_fields(tmp_path) -> None:
     manager.save(task)
     agent = SimpleNamespace(subagents=manager)
     params = SimpleNamespace(context_scope="task_local", run_id=task.id)
-    result = SimpleNamespace(tool="write_file", output="ok", ok=True)
+    # 真实 ToolResult 使用 tool_name；这个钉子防止测试桩的旧 tool 字段掩盖线上空状态。
+    result = SimpleNamespace(tool_name="write_file", output="ok", ok=True)
     record = SimpleNamespace(
         params=params,
         result=result,

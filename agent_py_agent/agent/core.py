@@ -12,7 +12,6 @@ from .agent_core import (
     CancelSubagentsTool,
     CapabilityRequestTool,
     CreateSubagentsTool,
-    RaiseEventTool,
     ResolveCapabilityRequestsTool,
     SendGuidanceTool,
     SimpleAgentDispatchMixin,
@@ -925,7 +924,6 @@ def _add_skill_snapshot_hashes(target: dict[str, str], value: object) -> None:
 # 函数用途: 把编排、检索、记忆、消息和协作工具装入主代理 registry。
 def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(CapabilityRequestTool(agent))
-    agent.tools.register(RaiseEventTool(agent))
     agent.tools.register(TaskProgressTool(agent))
     agent.tools.register(GetGoalTool(agent))
     agent.tools.register(CreateGoalTool(agent))
@@ -969,7 +967,6 @@ __all__ = [
     "ResolveCapabilityRequestsTool",
     "CODING_SUBAGENT_TOOLS",
     "CreateSubagentsTool",
-    "RaiseEventTool",
     "ONE_SHOT_TOOL_NAMES",
     "PARENT_PLANNER_READ_TOOLS",
     "READ_ONLY_SUBAGENT_TOOLS",

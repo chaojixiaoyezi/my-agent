@@ -10,7 +10,8 @@
 - `resolve_capability_requests`：批准或拒绝直属 child 的结构化权限申请；它不是催办、推进或验收工具。
 
 模型没有 `inspect_agent_tree`、`wait`、`dispatch_subagents` 或
-`schedule_child_subagents`。代码里的 dispatcher、heartbeat、orphan reconciler 和代理树 projection
+`schedule_child_subagents`，也没有自报进展的 `raise_event`。代码里的 dispatcher、heartbeat、
+orphan reconciler、observation/wake 和代理树 projection
 都是宿主底座：负责启动、租约、恢复、通知、`/status`、TUI 和诊断，不由模型手工推动。
 
 ## 状态与通知
@@ -25,6 +26,8 @@ artifact refs，但这是运维状态投影，不是模型工具。用户可以�
 
 如果 child 是 `RUNNING`，说明 runner 已启动但尚未写回结果。provider/网络失败、进程崩溃、租约失活或
 明确超时由 heartbeat、typed retry 和 orphan reconciler 处理。它们只修执行可靠性，不判断工作质量。
+状态面还会显示宿主观测到的短活动，例如“模型响应中”“正在使用工具：write_file”或“工具失败”；这些
+内容来自 typed 阶段和工具名，不是模型自报，也不会公开 prompt、response、工具输出或隐式思考正文。
 
 ## capability 阻塞与续跑
 
@@ -44,6 +47,9 @@ OPEN 或非法未闭合 capability request 是宿主掌握的结构化阻塞事�
 `output_files` 仍应记录用户明确的目标文件/目录，批量创建时由负责写入的 item 分别声明；它负责交付
 身份、结果读取顺序和冲突锁，不是普通 child 唯一的写权限来源。goal 或 output_files 都不能把权限扩大到
 父级 workspace 外。命名 Audit/exact-scope worker 不继承普通产品写区，只使用其精确结构化授权。
+
+allow 与 forbidden 同时命中时按最具体路径条目决定，同层由 forbidden 胜出。例如 `/root` 仍可作为宽泛
+保护，但 `/root/.my-agent/.../output/abc` 的更窄明确授权必须可写；反过来，同一路径被禁止时不能绕过。
 
 没有用户指定目标时，child 使用系统分配的 task-local work/output 路径，父级从创建回执或生命周期事件
 里的 `child_output_read_order`、`primary_artifact_refs`、`expected_outputs` 读取结果。

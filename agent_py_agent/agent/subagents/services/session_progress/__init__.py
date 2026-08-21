@@ -132,7 +132,7 @@ def _should_record(request: SubagentToolProgressRequest) -> bool:
 
 def _persist_runtime_status(agent: object, task: SubAgentTask, result: object, progress: dict[str, Any]) -> None:
     now = time.time()
-    tool = str(getattr(result, "tool", "") or "")
+    tool = _result_tool_name(result)
     ok = bool(getattr(result, "ok", False))
     task.current_tool = tool
     task.heartbeat_at = now
@@ -156,6 +156,17 @@ def _persist_runtime_status(agent: object, task: SubAgentTask, result: object, p
             exc,
             context="subagent_tool_progress.subagents.save",
         )
+
+
+# LLM: ToolResult 的权威字段是 tool_name；tool 只兼容少量测试桩和旧调用方，
+# 不能因为读错字段让真实 runner 的 current_tool/recent_tool_trace 永远为空。
+# 函数用途: 从真实工具结果或旧测试对象中取得统一工具名，供子代理活动状态展示。
+def _result_tool_name(result: object) -> str:
+    return str(
+        getattr(result, "tool_name", "")
+        or getattr(result, "tool", "")
+        or ""
+    ).strip()
 
 
 def _progress_load_error(exc: Exception, run_id: str) -> dict[str, Any]:

@@ -5,6 +5,8 @@
 - 根/子/孙代理只保留一个模型可见创建入口 `create_subagents`；创建后宿主自动启动。
   `dispatch_subagents`、`schedule_child_subagents`、`wait` 与 `inspect_agent_tree` 的模型工具、schema、注册和
   专用测试已删除。代理树仍是 `/status`、TUI、恢复与诊断的内部 projection。
+- 重复宿主生命周期的 `raise_event` 模型工具、schema、注册、实现和专用测试也已删除；历史工具快照会
+  统一过滤它。内部 observation/wake 仍由 runner、capability、Audit 和 Gateway 宿主服务直接写入。
 - 内部 dispatcher 仍保留为 Gateway/runner 的自动启动、租约、恢复与有界重试引擎；
   父代理只接收 lifecycle event，必要时给直属 child 发补充消息或取消，不再手工查看/推进已创建 run。
 - 新增公共 `turn_end.reason` 六种轮结束原因，主代理、子代理、Gateway 和父级 wake 共用。
@@ -31,6 +33,10 @@
 - 首轮 `.7` 原样任务实锤 child“挂掉”是状态断链：OPEN capability request 被通用 completed 收尾覆盖为
   DONE，grant 后原 run 又没有重新排队。当前 runner 以 OPEN 结构化事实优先投影 BLOCKED；直属父级
   grant/deny 后同 run 回到 PENDING、恢复 task link，并由裁决 event 触发内部 dispatcher 续跑。
+- `c2c0235` 二次原样任务真实启动 4 个 child，其中 2 个自然完成，另 2 个超过 17 分钟仍运行。工具账
+  证明根因是 `/root` 宽 forbidden 误伤更窄 task output allow，导致连续 `WRITE_FORBIDDEN` 和重复申请
+  已 grant 权限；状态投影又把真实 `ToolResult.tool_name` 当成 `tool` 读取，长期只显示空 `RUNNING/0%`。
+  当前写边界按 会话运行时 最具体条目优先、同层 deny 胜出；runner 模型/工具边界保存不含正文的有界活动短状态。
 
 ## 2026-08-12 子代理候选 scope 统一规范
 

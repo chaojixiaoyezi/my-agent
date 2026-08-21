@@ -20,19 +20,23 @@ WORKER_WRITE_TOOLS = ["write_file", "apply_patch"]
 REPORT_WRITE_TOOLS = ["write_file", "apply_patch"]
 SHELL_TOOL = "run_command"
 CAPABILITY_REQUEST_TOOL = "capability_request"
-MAIN_EVENT_TOOLS = ["raise_event"]
 COLLABORATION_TOOLS: list[str] = []
 RETIRED_MODEL_SUBAGENT_CONTROL_TOOLS = frozenset(
-    {"inspect_agent_tree", "dispatch_subagents", "schedule_child_subagents"}
+    {
+        "inspect_agent_tree",
+        "dispatch_subagents",
+        "schedule_child_subagents",
+        "raise_event",
+    }
 )
 # LLM: Role snapshots expose the same recursive edge-local control at every
-# depth. Do not add polling, manual dispatch, or ancestor-wide controls here.
-# 配置用途: worker 保留通用执行能力；coordinator 额外获得创建、直属插话、取消和权限裁决。
+# depth. Host lifecycle owns activity reporting; do not add polling, manual
+# dispatch, model self-report events, or ancestor-wide controls here.
+# 配置用途: worker 保留通用执行能力；coordinator 额外获得创建、直属插话、取消和权限裁决，进展由宿主回传。
 ROLE_BASE_TOOLS = [
     *READ_ONLY_TOOLS,
     *REPORT_WRITE_TOOLS,
     SHELL_TOOL,
-    *MAIN_EVENT_TOOLS,
     *COLLABORATION_TOOLS,
     CAPABILITY_REQUEST_TOOL,
 ]

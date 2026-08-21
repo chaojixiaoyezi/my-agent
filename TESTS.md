@@ -60,8 +60,16 @@ attempt/工具权威链错挂；同 thread 后台 notice 复用稳定 block id�
 
 `e321483` 的真实前台运行还要求检查“首次模型调用的工具面”，不能只检查进程注册表。
 回归必须确认默认 `model_visible_specs()` 直接包含 create/guidance/cancel/resolve，仍不含已删除的
-inspect/dispatch/schedule；`tool_search` 继续只加载 goal/web/vision/MCP 等延迟能力。真机必须以
+inspect/dispatch/schedule/raise_event；`tool_search` 继续只加载 goal/web/vision/MCP 等延迟能力。真机必须以
 `create_subagents` 真实 tool call 和 2 个以上 child state 作为证据，不认模型文字里“我要派子代理”。
+
+`c2c0235` 真机路径失败新增两组回归。写边界必须证明“宽 allow + 宽 forbidden + 更窄 task output allow”
+允许写窄目录，而 allow/forbidden 同层仍由 deny 胜出；runner 活动必须用真实 `ToolResult.tool_name`，并在
+模型请求、工具开始/结束时把有界短状态写进 canonical child state，不能保存 prompt、response、工具输出
+或思考正文。发布前 focused 至少包含 `test_write_boundary.py`、`test_subagent_kernel.py`、
+`test_subagent_debug_trace.py`、编排工具常量/注册和文件工具边界测试。
+编排工具常量回归还会扫描所有活跃内置 `SKILL.md`，防止工具已退休后 Skill 仍教模型调用
+`inspect_agent_tree` / `dispatch_subagents` / `schedule_child_subagents` / `raise_event`。
 
 `db41bb0` 部署后的原样 TUI 复验已有四名 child 全部 `DONE` 和完整页面文件，但 8080 最终未监听。证据
 显示模型在前台 `run_command` 内使用 `nohup ... &`，同一条命令里的 curl 得到 200 后，foreground shell

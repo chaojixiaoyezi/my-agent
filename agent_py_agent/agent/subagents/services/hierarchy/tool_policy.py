@@ -22,7 +22,6 @@ _DEFAULT_LEAF_CODING_TOOLS = [
     "write_file",
     "apply_patch",
     "send_guidance",
-    "raise_event",
     "capability_request",
 ]
 

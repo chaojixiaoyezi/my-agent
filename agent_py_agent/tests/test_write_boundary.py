@@ -358,6 +358,35 @@ class TestValidateWriteBoundaryForbiddenRoots:
         )
         assert "落在 forbidden_write_roots 内" in result
 
+    def test_narrow_allowed_overrides_broad_forbidden_even_with_broad_allowed(self, tmp_path):
+        """最具体路径优先：窄交付授权不能被同批继承的宽写根重新误伤。"""
+        delivery = tmp_path / "task" / "output" / "abc"
+        target = delivery / "game.js"
+        result = validate_write_boundary(
+            "write_file",
+            {"path": str(target)},
+            workspace_root=tmp_path,
+            write_boundary={
+                "allowed_write_roots": [str(tmp_path), str(delivery)],
+                "forbidden_write_roots": [str(tmp_path)],
+            },
+        )
+        assert result == ""
+
+    def test_equal_allowed_and_forbidden_root_still_denies(self, tmp_path):
+        """允许和禁止同层冲突时保持拒绝，不能用重复授权绕过安全收口。"""
+        target = tmp_path / "file.txt"
+        result = validate_write_boundary(
+            "write_file",
+            {"path": str(target)},
+            workspace_root=tmp_path,
+            write_boundary={
+                "allowed_write_roots": [str(tmp_path)],
+                "forbidden_write_roots": [str(tmp_path)],
+            },
+        )
+        assert "落在 forbidden_write_roots 内" in result
+
 
 class TestValidateWriteBoundaryLockedFiles:
     def test_locked_file_blocked(self, tmp_path):

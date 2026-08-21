@@ -6,6 +6,9 @@
   直属 child 和处理其 capability 请求。`create_subagents` 在任意层级都代表创建并自动启动；旧
   `dispatch_subagents`、child scheduler、wait 和 `inspect_agent_tree` 模型工具已删除，宿主内部
   dispatcher 与代理树投影只承担启动、状态通知、并发、恢复和运维诊断。
+- 旧 `raise_event` 模型工具也已删除并加入历史 grant 退休过滤器；宿主内部 observation/wake 账本保留。
+  因此根、子、孙每层对直属下级都只有 create / guidance / cancel / capability 四个动作，普通进展和结束
+  只从真实 runner 生命周期回传。
 - 新增公共 `TurnEndReason` 六类原因：`completed`、`aborted`、`blocked`、`error`、`max-tokens`、
   `interrupted`。主代理、子代理、Gateway 和 TUI 读取同一个结构化结束事实；普通任务不再通过
   `acceptance_checks`、`VerificationStatus` 或模型正文里的完成词决定能否结束。历史账本字段只读兼容，
@@ -69,6 +72,13 @@
   `tool_catalog_deferred_categories` 包含 `orchestration`，前台第一轮根本没给模型 `create_subagents`
   Schema。当前本地修正已按 会话运行时 multi-agent v2 改为 orchestration 首轮直出，49 项相关回归通过；
   需再部署后用全新 TUI 复验。
+- `c2c0235` 随后已推送并部署，TUI 557ms 就绪；同一普通中文 prompt 第一次模型轮真实调用
+  `create_subagents` 并自动启动 4 个 child。2 个自然完成，另 2 个运行超过 17 分钟：结构化工具账证明
+  它们并非进程死亡，而是 task output 的窄 allow 被 `/root` 宽 forbidden 错误覆盖，连续
+  `WRITE_FORBIDDEN`、重复申请已经 grant 的同一路径；同时状态层误读 `result.tool` 而非真实
+  `result.tool_name`，用户只能看到空 `RUNNING/0%`。当前本地候选按 会话运行时 最具体路径规则修正优先级，
+  并从 runner 模型/工具阶段持久化不含正文的有界活动状态；相关 focused 与本地严格
+  gate 已通过，按用户约定未跑全仓 pytest，待推送、部署后用全新 TUI 重跑。
 
 ## 2026-08-20 TUI 灰色层级与 tmux/右键复制修正
 

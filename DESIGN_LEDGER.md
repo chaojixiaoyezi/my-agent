@@ -300,6 +300,9 @@
   TUI 投影的内部只读能力，但从普通模型工具箱移除；父级不靠查树、shell `sleep` 或周期调用推动 child。
   子代理、孙代理和根的差异只由 `run_id/parent_run_id/root_run_id`、工作区和递减权限表达，每一层只管理
   自己的直接下级。
+- 模型侧 `raise_event` 同步删除，不把“子代理自报进展”作为第五个递归控制工具。普通活动、权限申请、
+  阻塞和终态由宿主从 runner/thread 的 typed 生命周期直接写入父级事件账本；长期 Audit/监控也调用内部
+  observation/wake service，不再绕回模型工具。
 - 模型可见的 `cancel_subagents` 只接收直属 `run_id/run_ids + reason`；`root_id/status/dry_run/
   kill_process` 和整树回执都是宿主运维内部面。因此打断入口不能被模型当成隐蔽的查树/轮询工具。
 - `.7` 原样 TUI 在 `e321483` 上实锤另一个底层断层：前台默认把整个 `orchestration` category
@@ -357,6 +360,11 @@
   可直接交给 child。`create_subagents.items[].output_files` 仍用来登记用户明确交付位置、产物归属和冲突锁，
   但 goal 或 output_files 都不能把范围扩大到父级工作区之外。TUI 后台 notice 首次立即查询、之后每秒查询，
   并为同 thread 每条消息生成独立 block id，避免 reducer 丢掉第二条以后更新。
+- `c2c0235` 的 `.7` 原样 TUI 任务创建并自动启动 4 个 child，真实暴露两个底层缺口：宽泛 `/root`
+  forbidden 误压过更窄 task output allow，导致同一 child 连续 `WRITE_FORBIDDEN` 并重复申请已授予权限；
+  真实 ToolResult 字段是 `tool_name`，旧状态投影却读取 `tool`，所以 canonical state 长期只显示空
+  `RUNNING/0%`。写边界现按 会话运行时 FileSystemSandboxPolicy 的最具体条目优先、deny 同层胜出；runner 的
+  模型/工具边界写有界活动短状态，工具进度读取 `tool_name`，不公开模型正文或思考原文。
 
 ## 2026-08-18 候选消息实时流式 + 每轮阶段计时【状态：本地 focused 通过，待真机部署复验】
 

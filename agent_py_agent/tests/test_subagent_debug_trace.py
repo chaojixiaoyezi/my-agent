@@ -441,6 +441,59 @@ def test_runner_stage_trace_allows_main_task_parent_anchor(
     assert manager.load(task.id).heartbeat_at > 10.0
 
 
+def test_runner_stage_trace_persists_bounded_live_activity(tmp_path) -> None:
+    """离散模型/工具阶段写进 canonical state，且不落 prompt、response 或工具输出正文。"""
+    from agent_py_agent.agent.agent_core.runner.stage_trace import (
+        RunnerToolStageTraceRequest,
+        trace_runner_tool_call_finished,
+    )
+    from agent_py_agent.agent.tooling.runtime_contracts import ToolResult
+    from agent_py_agent.tests._tool_runtime_harness import canonical_history_call
+
+    manager = SubAgentManager(tmp_path / "subs", debug_trace_level=0)
+    task = manager.create_run(goal="child", thought="", plan=["work"])
+    task.status = "RUNNING"
+    task.runner_active_attempt_id = "attempt-child"
+    manager.save(task)
+    agent = SimpleNamespace(subagents=manager, _current_subagent_run_id=task.id)
+
+    trace_runner_model_request_started(
+        RunnerModelStageTraceRequest(
+            agent=agent,
+            params=SimpleNamespace(run_id=task.id),
+            tool_rounds=1,
+            prompt="secret prompt",
+        )
+    )
+    thinking = manager.load(task.id)
+    assert thinking.current_step == "模型响应中"
+    assert thinking.current_tool == ""
+
+    call = canonical_history_call("write_file", {"path": "secret-path"}, run_id=task.id)
+    trace_runner_tool_call_finished(
+        RunnerToolStageTraceRequest(
+            agent=agent,
+            params=SimpleNamespace(run_id=task.id),
+            tool_rounds=1,
+            idx=1,
+            call=call,
+            result=ToolResult(
+                call_id=call.call_id,
+                tool_name="write_file",
+                status="failed",
+                error_code="WRITE_FORBIDDEN",
+            ),
+        )
+    )
+    failed = manager.load(task.id)
+    assert failed.current_step == "工具失败：write_file"
+    assert failed.current_tool == "write_file"
+    activity = failed.attributes["runtime_activity"]
+    assert activity["kind"] == "runner_tool_call_finished"
+    assert "secret" not in json.dumps(activity, ensure_ascii=False)
+    assert len(failed.attributes["recent_runtime_activity"]) <= 6
+
+
 def _running_trace_hierarchy(manager: SubAgentManager, old: float):
     root = manager.create_run(goal="root", thought="root", plan=["root"], role="coordinator")
     parent = manager.create_run(

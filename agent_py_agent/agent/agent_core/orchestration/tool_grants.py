@@ -19,7 +19,6 @@ CODING_SUBAGENT_TOOLS = [
     "send_guidance",
     "cancel_subagents",
     "resolve_capability_requests",
-    "raise_event",
     "capability_request",
 ]
 READ_ONLY_SUBAGENT_TOOLS = [

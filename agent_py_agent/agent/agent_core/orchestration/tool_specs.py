@@ -11,11 +11,9 @@ from .tool_spec_data import (
     _CREATE_PARAMETER_DETAILS,
     _CREATE_PARAMETERS,
     _CREATE_USE_CASES,
-    _OBSERVATION_PARAMETERS,
 )
 from .tool_spec_schemas import (
     _CREATE_PARAMETER_SCHEMA,
-    _OBSERVATION_PARAMETER_SCHEMA,
     _RESOLVE_CAPABILITY_PARAMETER_SCHEMA,
 )
 
@@ -82,29 +80,6 @@ def build_create_subagents_model_spec() -> ToolModelSpec:
             ),
             keywords=_CREATE_KEYWORDS,
             examples=_CREATE_EXAMPLES,
-        ),
-    )
-
-
-def build_raise_event_model_spec() -> ToolModelSpec:
-    return ToolModelSpec(
-        name="raise_event",
-        description="记录普通进展、阻塞、观察或需要主代理处理的事件；urgent 会写 wake queue。",
-        input_schema=_input_schema(_OBSERVATION_PARAMETERS, _OBSERVATION_PARAMETER_SCHEMA),
-        hints=_hints(
-            use_cases=(
-                "子代理发现非紧急现象、阶段进展、阻塞原因或证据变化，需要主代理后续判断",
-                "子/孙代理发现紧急事件、阻塞、用户需要知道的结果，不能等普通定时汇报",
-                "长期监控任务把状态变化写入持久会话账本，但不需要立刻打断主代理",
-            ),
-            avoid_when=("只是给当前模型自己看的临时想法，不需要主代理或用户知道时不要调用",),
-            keywords=("观察", "事件", "进展", "阻塞", "上报", "observation", "event", "wake", "urgent"),
-            examples=(
-                '{"tool":"raise_event","task_id":"task-1","event_type":"progress",'
-                '"summary":"子代理完成一轮检查，发现一个待复核现象","requires_main_agent":true}',
-                '{"tool":"raise_event","task_id":"task-1","event_type":"runtime_alert",'
-                '"urgency":"urgent","summary":"发现需要主代理马上判断的事件","dedupe_key":"task-1:event"}',
-            ),
         ),
     )
 

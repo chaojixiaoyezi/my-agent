@@ -13,7 +13,6 @@ from .orchestration.dispatch.mixin import SimpleAgentDispatchMixin
 from .orchestration_tools import (
     CancelSubagentsTool,
     CreateSubagentsTool,
-    RaiseEventTool,
     ResolveCapabilityRequestsTool,
     execute_cancel_subagents,
 )
@@ -28,7 +27,6 @@ __all__ = [
     "CancelSubagentsTool",
     "ResolveCapabilityRequestsTool",
     "CreateSubagentsTool",
-    "RaiseEventTool",
     "SendGuidanceTool",
     "SimpleAgentDispatchMixin",
     "SimpleAgentRuntimeMixin",

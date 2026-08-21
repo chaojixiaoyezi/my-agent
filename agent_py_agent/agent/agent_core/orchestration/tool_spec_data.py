@@ -61,19 +61,3 @@ _CREATE_EXAMPLES = [
     '{"tool":"create_subagents","goal":"实现用户认证模块并写到 platform/auth/,要可运行","output_files":["platform/auth/"]}',
     '{"tool":"create_subagents","goal":"并行完成认证实现与资料核对","items":[{"goal":"实现注册登录模块","output_files":["platform/auth/"]},{"goal":"读资料B并写证据摘要","input_refs":["data/b.md"],"output_files":["reports/b.md"]}]}',
 ]
-
-_OBSERVATION_PARAMETERS = {
-    "thread_id": "会话线程 ID；不知道时可用 task_id 反查",
-    "task_id": "任务 ID",
-    "event_type": "事件类型，保留开放字符串",
-    "summary": "事实摘要",
-    "urgency": "urgent 会唤醒主代理，其他值只记录",
-    "severity": "严重程度，保留原始值",
-    "source_agent_id": "上报者 run_id",
-    "parent_agent_id": "上报者父级 run_id",
-    "root_task_id": "根任务 ID",
-    "evidence_refs": "证据引用列表",
-    "requires_main_agent": "是否需要主代理处理",
-    "requires_llm_report": "是否需要 LLM 写面向用户的报告",
-    "dedupe_key": "可选幂等键",
-}
