@@ -86,6 +86,11 @@ inspect/dispatch/schedule/raise_event；`tool_search` 继续只加载 goal/web/v
 status/result/artifact refs。`task_progress` 回归同时证明 open 项只作软账本、普通 final 零自动续跑，
 写后 canonical child DONE 不能被模型传入的 pending 覆盖。
 
+`e4cd58b` 部署后的原样 TUI 证明输出冲突还需区分两类：同批 item 重用一个路径时
+`existing_run_ids` 必须为空，回执要求 `revise_proposed_output_scopes_and_retry`；真实未结束
+sibling 占用时才返回 `await_existing_run_lifecycle_event` 和其 run id。两种失败都是整批
+`not_started`，必须带 `preserve_user_constraints=true`；前者不得诱导模型等待不存在的 run。
+
 `db41bb0` 部署后的原样 TUI 复验已有四名 child 全部 `DONE` 和完整页面文件，但 8080 最终未监听。证据
 显示模型在前台 `run_command` 内使用 `nohup ... &`，同一条命令里的 curl 得到 200 后，foreground shell
 结束时未受管 child 被清理。新增回归覆盖：独立 `&` 在任何模式都以 `not_started` 拒绝；`2>&1` 和引号内

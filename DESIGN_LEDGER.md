@@ -380,6 +380,10 @@
   open 清单不再开新模型工作片，也不再参与完成判断；只有 Compact、显式 `/goal`、用户插入或 typed
   child/control event 可以续接。进度写入必须以稳定 id/status 表达，新建项还要可读 title；写后重新按
   canonical child run id 对账，避免模型提交的旧状态遮住真实终态。
+- `create_subagents` 的输出锁拒绝必须保留 conflict 来源。`conflicting_proposed_index`
+  表示同一批 item 互相重叠，必须修改参数后重试；非空 `existing_run_id` 才表示真实运行中的
+  同级占用，由宿主生命周期事件唤醒。整批原子拒绝不会改变用户原始约束，更不是授权父代理
+  改用用户禁止的方式。这是通用工具结果合同，不从 prompt 词句推导状态。
 
 ## 2026-08-18 候选消息实时流式 + 每轮阶段计时【状态：本地 focused 通过，待真机部署复验】
 

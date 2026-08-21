@@ -143,6 +143,11 @@ def test_unfinished_sibling_with_same_declared_output_blocks_duplicate_creation(
     assert second_result.ok is False
     assert second_result.error_code == "SUBAGENT_OUTPUT_SCOPE_CONFLICT"
     assert second["existing_run_ids"] == first["created_run_ids"]
+    assert second["proposed_conflicts"] == []
+    assert second["existing_conflicts"] == second["conflicts"]
+    assert second["next_action"]["action"] == "await_existing_run_lifecycle_event"
+    assert second["next_action"]["run_ids"] == first["created_run_ids"]
+    assert second["next_action"]["preserve_user_constraints"] is True
     assert second["conflicts"][0]["output_ref"].endswith("/artifacts/params.py")
     assert len(agent.subagents.list_runs()) == 1
 
@@ -163,7 +168,46 @@ def test_overlapping_items_are_rejected_atomically_before_any_run_is_created(tmp
     assert result.ok is False
     assert result.error_code == "SUBAGENT_OUTPUT_SCOPE_CONFLICT"
     assert payload["conflicts"][0]["conflicting_proposed_index"] == 0
+    assert payload["existing_run_ids"] == []
+    assert payload["existing_conflicts"] == []
+    assert payload["proposed_conflicts"] == payload["conflicts"]
+    assert payload["next_action"]["action"] == "revise_proposed_output_scopes_and_retry"
+    assert payload["next_action"]["retry_tool"] == "create_subagents"
+    assert payload["next_action"]["preserve_user_constraints"] is True
+    assert payload["next_action"]["required_repairs"][0]["action"] == "revise_proposed_output_scopes"
     assert agent.subagents.list_runs() == []
+
+
+def test_mixed_output_conflicts_report_both_required_repairs(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _workspace_agent(tmp_path)
+    tool = CreateSubagentsTool(agent)
+    first = json.loads(tool.execute({
+        "goal": "实现已有模块。",
+        "output_files": ["artifacts/existing.py"],
+    }).output)
+
+    result = tool.execute({
+        "goal": "并行实现三个独立模块。",
+        "items": [
+            {"goal": "重写已有模块。", "output_files": ["artifacts/existing.py"]},
+            {"goal": "实现新模块 A。", "output_files": ["artifacts/shared.py"]},
+            {"goal": "实现新模块 B。", "output_files": ["artifacts/shared.py"]},
+        ],
+    })
+    payload = json.loads(result.output)
+
+    assert result.ok is False
+    assert payload["existing_run_ids"] == first["created_run_ids"]
+    assert payload["proposed_conflicts"]
+    assert payload["existing_conflicts"]
+    assert payload["next_action"]["action"] == "resolve_output_scope_conflicts_and_retry"
+    assert [item["action"] for item in payload["next_action"]["required_repairs"]] == [
+        "revise_proposed_output_scopes",
+        "await_existing_run_lifecycle_event",
+    ]
+    assert len(agent.subagents.list_runs()) == 1
 
 
 def test_explicit_replacement_may_take_over_same_declared_output(tmp_path):

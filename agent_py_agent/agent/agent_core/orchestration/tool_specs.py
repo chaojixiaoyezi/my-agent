@@ -62,7 +62,7 @@ def _hints(
 def build_create_subagents_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="create_subagents",
-        description="把可并行的独立工作交给下级代理。无论当前是主代理、子代理还是孙代理，都使用同一个 create_subagents；创建成功后下级立即运行，进展、阻塞或完成时系统自动唤醒直接父级，不需要也没有查询或推进工具。goal 始终必填；只传 goal 就只创建一个 child，需要多个时必须同时传总 goal 和 items，每项都要有独立 goal。不支持 operations、count 或 max_concurrency 参数。普通 child 自动继承父级工作区权限；用户指定交付路径时仍用 output_files 记录目标与冲突锁（批量时逐 item 填写）。不要为了显得忙而派，也不要重复创建同一任务。",
+        description="把可并行的独立工作交给下级代理。无论当前是主代理、子代理还是孙代理，都使用同一个 create_subagents；创建成功后下级立即运行，进展、阻塞或完成时系统自动唤醒直接父级，不需要也没有查询或推进工具。goal 始终必填；只传 goal 就只创建一个 child，需要多个时必须同时传总 goal 和 items，每项都要有独立 goal。不支持 operations、count 或 max_concurrency 参数。普通 child 自动继承父级工作区权限；用户指定交付路径时仍用 output_files 记录目标与冲突锁（批量时逐 item 填写），同批 item 不能共享同一写入目标；若因此被拒绝，重新划分互不重叠的输出后重试，不得把工具失败当成改变用户要求的授权。不要为了显得忙而派，也不要重复创建同一任务。",
         input_schema=_input_schema(
             _CREATE_PARAMETERS,
             _CREATE_PARAMETER_SCHEMA,

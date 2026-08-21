@@ -19,6 +19,11 @@
 - 旧 `raise_event` 模型工具也已删除并加入历史 grant 退休过滤器；宿主内部 observation/wake 账本保留。
   因此根、子、孙每层对直属下级都只有 create / guidance / cancel / capability 四个动作，普通进展和结束
   只从真实 runner 生命周期回传。
+- `e4cd58b` 已推送并部署到 `.7` 单 Gateway。首轮原样 TUI 发现同批 items 的交付路径
+  互相重叠时，旧回执却误报为“已有 run 占用，继续等待”，并在 `existing_run_ids=[]` 时仍给出
+  `await_existing_run_lifecycle_event`，误导模型改为亲自执行。当场已从 TUI 中断，未写入产品代码。
+  当前候选按结构化 conflict 来源分流：批内重叠要重分输出后重试，只有真实既有 run 才等直属
+  生命周期事件；回执显式保留用户原始约束，不解析用户任务文本。
 - 新增公共 `TurnEndReason` 六类原因：`completed`、`aborted`、`blocked`、`error`、`max-tokens`、
   `interrupted`。主代理、子代理、Gateway 和 TUI 读取同一个结构化结束事实；普通任务不再通过
   `acceptance_checks`、`VerificationStatus` 或模型正文里的完成词决定能否结束。历史账本字段只读兼容，

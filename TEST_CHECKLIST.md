@@ -51,6 +51,9 @@
   模型 cancel 回执不得夹带整树状态，schema 不暴露 dry_run/kill_process 运维参数。
 - [ ] 普通 child 逐层继承父级结构化 workspace 上界；`output_files` 记录明确交付目标与冲突锁，但不能
   扩大父级权限。后台续跑必须绑定 exact task，不能复用同 thread 旧任务的 main run/attempt。
+- [ ] 同批 child 的 `output_files/output_refs` 互相重叠时，整批拒绝且要求重分路径重试；
+  不得误报为等待既有 run。只有结构化 `existing_run_id` 非空时才等直属生命周期事件，
+  两种回执都不得改变用户原始约束。
 - [ ] child 完成事件在后台轮开始时只采样一次；采样后才创建的 DONE wake 保持 pending 并另开新轮。
   新鲜终态轮的自然回复不等待 root task status 充当第二验收器。
 - [ ] 单 Gateway 内后台车道按 `owner + durable thread_id` 隔离；同 thread 继续由 run claim
