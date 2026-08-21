@@ -49,7 +49,8 @@ class TestCreateSubagentsToolWorkspaceDefaults:
         assert payload["auto_start"]["status"] == "started"
         assert payload["auto_start"]["run_ids"] == ["run_0", "run_1"]
         assert payload["pending_start_run_ids"] == []
-        assert payload["next_action"]["tool"] == "inspect_agent_tree"
+        assert payload["next_action"]["action"] == "await_lifecycle_event"
+        assert payload["next_action"]["run_ids"] == ["run_0", "run_1"]
 
     def test_items_mode_does_not_infer_sibling_output_dependencies(self):
         """items 不再根据 sibling 输出自动制造等待；显式读线索原样保留。"""
@@ -233,7 +234,10 @@ class TestCreateSubagentsToolTaskWorkspaceGuards:
 
         expected = str((task_root / "output" / "codex-analysis.md").resolve(strict=False))
         assert params.attributes["output_refs"] == [expected]
-        assert params.extra_write_roots == [str((task_root / "output").resolve(strict=False))]
+        assert params.extra_write_roots == [
+            str((task_root / "output").resolve(strict=False)),
+            str(workspace.resolve(strict=False)),
+        ]
 
     def test_normalizes_workspace_relative_current_task_output_refs(self, tmp_path):
         from agent_py_agent.agent.agent_core.orchestration.create_policy import create_run_params
@@ -349,7 +353,10 @@ class TestCreateSubagentsToolTaskWorkspaceGuards:
 
         expected = str((task_root / "output" / "report_by_helper1.md").resolve(strict=False))
         assert params.attributes["output_refs"] == [expected]
-        assert params.extra_write_roots == [str((task_root / "output").resolve(strict=False))]
+        assert params.extra_write_roots == [
+            str((task_root / "output").resolve(strict=False)),
+            str(workspace.resolve(strict=False)),
+        ]
 
     def test_rebases_stale_owner_task_output_dir_to_current_task_output(self, tmp_path):
         from agent_py_agent.agent.agent_core.orchestration.create_policy import create_run_params
@@ -386,7 +393,10 @@ class TestCreateSubagentsToolTaskWorkspaceGuards:
 
         expected = str((current_task / "output" / stale_output.name).resolve(strict=False))
         assert params.attributes["output_refs"] == [expected]
-        assert params.extra_write_roots == [str((current_task / "output").resolve(strict=False))]
+        assert params.extra_write_roots == [
+            str((current_task / "output").resolve(strict=False)),
+            str(workspace.resolve(strict=False)),
+        ]
 
     def test_rebases_goal_only_stale_owner_task_project_dir(self, tmp_path):
         """Goal 里明确但未结构化的旧任务 output 路径也绑定到当前任务。"""
@@ -426,7 +436,10 @@ class TestCreateSubagentsToolTaskWorkspaceGuards:
         assert str(invented) not in params.goal
         assert expected in params.goal
         assert params.attributes["output_refs"] == [expected]
-        assert params.extra_write_roots == [str((current_task / "output").resolve(strict=False))]
+        assert params.extra_write_roots == [
+            str((current_task / "output").resolve(strict=False)),
+            str(workspace.resolve(strict=False)),
+        ]
 
     def test_goal_path_normalization_keeps_explicit_user_output_dir(self, tmp_path):
         """结构化 user_requested_output_dir 是管理员/用户显式选择，不得偷偷改写。"""

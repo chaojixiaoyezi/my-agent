@@ -1119,6 +1119,9 @@ def _tool_round_limit_reached(agent, params: ToolLoopExecuteParams, tool_rounds:
 # 函数用途: 轮数到顶时让模型只做总结不再用工具；续跑文案按预算如实切换——
 # 还有自动续跑预算说「系统会自动继续」，预算耗尽说「请回复『继续』」（真机铁证
 # 2026-08-07 celery 复刻:提示词承诺自动续跑但普通任务不续，模型如实转述了没兑现的承诺）。
+# LLM: 工具轮数耗尽后只允许模型基于真实已执行结果收口；若本轮创建了 child，
+# 提示它结束当前轮等待事件，不能重新引入 shell sleep 或状态轮询。
+# 函数用途: 在工具调用达到本轮上限时生成最后一次不带新工具执行的模型回复。
 def _final_response_after_tool_limit(agent, params: ToolLoopExecuteParams, tool_rounds: int):
     if _ordinary_task_resume_available(agent, params) is False:
         params.tool_context.append(
@@ -1137,7 +1140,10 @@ def _final_response_after_tool_limit(agent, params: ToolLoopExecuteParams, tool_
             "不要把尚未执行的动作写成正在执行或已经完成。运行时会保留同一任务并按持久进度继续。"
         )
     if _executed_subagent_orchestration(params):
-        params.tool_context.append("[tool-system]\n子代理状态请通过完成事件或 inspect_agent_tree 查看；系统不再替主代理生成最终结论。")
+        params.tool_context.append(
+            "[tool-system]\n结束本回合等子代理生命周期事件；"
+            "不要用 shell sleep 或查询工具轮询。系统不替主代理生成最终结论。"
+        )
     final_prompt = build_tool_loop_prompt(agent, params)
     final_response = generate_model_response(
         ModelGenerateParams(

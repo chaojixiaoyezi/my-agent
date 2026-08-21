@@ -121,6 +121,9 @@ def _append_recovery_recommendation(buckets: dict[str, object], snapshot: dict[s
     )
 
 
+# LLM: State receipts describe host-owned lifecycle actions without suggesting
+# model polling. Direct-parent wake events carry the next actionable facts.
+# 函数用途: 为当前子代理状态标记宿主下一步，不生成查树工具建议。
 def _attach_state_next_action(state: dict[str, object]) -> None:
     blocked = list(state.get("blocked_run_ids") or [])
     dispatchable = list(state.get("dispatchable_run_ids") or [])
@@ -130,44 +133,25 @@ def _attach_state_next_action(state: dict[str, object]) -> None:
     missing = list(state.get("missing_run_ids") or [])
     load_errors = list(state.get("task_load_errors") or [])
     if blocked:
-        state["next_action"] = "inspect_automatic_recovery_or_report_blocker"
-        state["suggested_tool_call"] = {
-            "tool": "inspect_agent_tree",
-            "params": {"run_id": blocked[0]},
-            "reason": "启动和可恢复重试由系统调度；父代理只查看事实、发消息或上报阻塞。",
-        }
+        state["next_action"] = "handle_direct_child_blocker_from_lifecycle_event"
         return
     if dispatchable:
         state["next_action"] = "wait_for_automatic_runner_start"
-        state["suggested_tool_call"] = {
-            "tool": "inspect_agent_tree",
-            "params": {"run_id": dispatchable[0]},
-            "reason": "创建后系统会自动启动 runner，不需要模型再推进。",
-        }
         return
     if running:
         state["next_action"] = "wait_for_subagent_completion_event"
-        state["suggested_tool_call"] = {"tool": "inspect_agent_tree", "params": {}, "reason": "先结束本回合,派工监督/完成事件会自动唤醒"}
         return
     if starting:
         state["next_action"] = "wait_for_subagent_runner_start"
-        state["suggested_tool_call"] = {
-            "tool": "inspect_agent_tree",
-            "params": {},
-            "reason": "后台调度已接收，先结束本回合,完成事件会自动唤醒",
-        }
         return
     if load_errors:
-        state["next_action"] = "refresh_agent_tree_or_rebuild_state_index"
-        state["suggested_tool_call"] = {"tool": "inspect_agent_tree"}
+        state["next_action"] = "host_rebuild_state_index_or_report_load_error"
         return
     if missing:
-        state["next_action"] = "refresh_agent_tree_for_missing_run_ids"
-        state["suggested_tool_call"] = {"tool": "inspect_agent_tree"}
+        state["next_action"] = "host_reconcile_missing_run_ids"
         return
     if unfinished:
-        state["next_action"] = "inspect_unfinished_or_unknown_run_ids"
-        state["suggested_tool_call"] = {"tool": "inspect_agent_tree"}
+        state["next_action"] = "await_unfinished_run_lifecycle_event"
         return
     state["next_action"] = "summarize_or_report_completed_runs"
 

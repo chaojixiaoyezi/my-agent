@@ -15,6 +15,7 @@ from ..backends.errors import (
 from ..concurrency.interrupt import register_interruptible
 from ..runtime_errors import compact_error_message
 from ..settings.runtime_guard_config import runtime_guard_int
+from ..subagents.role_templates import active_model_subagent_tools
 from .authority import (
     CONVERSATION_BACKGROUND_EVENT_REASON_ATTR,
     CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR,
@@ -52,8 +53,8 @@ def _scheduled_continuation_prompt(reason: str) -> str:
 
 # Child lifecycle facts wake the same Agent; they do not select a workflow.
 _SUBAGENT_INTEGRATION_WAKE_PROMPT = (
-    "A subagent lifecycle event resumed this same task. Inspect the typed wake "
-    "signal, agent tree, objective, persisted artifacts, tool records, and "
+    "A subagent lifecycle event resumed this same task. Read the typed wake "
+    "signal, objective, persisted artifacts, tool records, and "
     "evidence references. A child status or prose is evidence, not authority "
     "that the objective is complete. Decide the next action from current facts "
     "and available capabilities. The runtime does not require a particular "
@@ -61,8 +62,8 @@ _SUBAGENT_INTEGRATION_WAKE_PROMPT = (
     "Runtime State and current tool results are authoritative for task identity, "
     "source identity, counts, coverage, and terminal state; never substitute those "
     "facts from child prose, an earlier assistant message, or a derived artifact. "
-    "If the structured projection says rows were omitted, inspect the current "
-    "task-scoped tools before reporting them. Avoid duplicate work and polling. "
+    "If the structured projection says rows were omitted, use the supplied refs "
+    "or wait for another lifecycle event before reporting them. Avoid duplicate work and polling. "
     "Report completion only when the current objective and runtime facts support it, and describe "
     "unresolved limitations truthfully."
 )
@@ -71,7 +72,7 @@ _SUBAGENT_INTEGRATION_WAKE_PROMPT = (
 _GOAL_SUBAGENTS_ACTIVE_PROMPT = (
     "\n\nStructured runtime fact: one or more subagents related to this exact goal task are still "
     "nonterminal. Their lifecycle events will wake this same goal again. Treat this as current "
-    "state, not as a required workflow: decide whether to continue parent work, inspect, guide, "
+    "state, not as a required workflow: decide whether to continue parent work, guide, "
     "delegate, wait, or yield from the objective and available evidence. Nonterminal child state "
     "alone cannot prove the goal complete."
 )
@@ -247,6 +248,26 @@ def wake_signal_payload(signal: WakeSignal | dict[str, Any] | None) -> dict[str,
     return dict(signal) if isinstance(signal, dict) else None
 
 
+# LLM: 持久 wake 账本可以保留旧策略快照用于审计，但投给模型的副本必须删掉
+# 已退役控制工具，避免模型从 Active/Pending Wake Signal 里重新学会轮询或手工派工。
+# 函数用途: 生成不含退役子代理工具名的模型可见 wake signal 副本。
+def _model_visible_wake_signal(signal: object) -> dict[str, Any] | None:
+    if not isinstance(signal, dict):
+        return None
+    payload = dict(signal)
+    snapshot = payload.get("policy_snapshot")
+    if not isinstance(snapshot, dict):
+        return payload
+    visible_snapshot = dict(snapshot)
+    for key in ("allowed_tools", "disabled_tools"):
+        if key in visible_snapshot:
+            visible_snapshot[key] = active_model_subagent_tools(
+                tool_names(visible_snapshot.get(key))
+            )
+    payload["policy_snapshot"] = visible_snapshot
+    return payload
+
+
 # LLM: observation 批次身份必须同时包含 thread 与 root task；同线程旧任务的
 # unknown 恢复门不能吞并或阻塞新任务事件。
 # 函数用途: 按会话和根任务拆分待处理观察，保持原始到达顺序。
@@ -350,7 +371,6 @@ _BACKGROUND_WORK_TOOLS = (
 )
 
 DEFAULT_BACKGROUND_ALLOWED_TOOLS = (
-    "inspect_agent_tree",
     "raise_event",
     "send_guidance",
     "create_subagents",
@@ -382,7 +402,6 @@ GOAL_SUBAGENTS_ACTIVE_ALLOWED_TOOLS = GOAL_BACKGROUND_ALLOWED_TOOLS
 GOAL_SUBAGENTS_TERMINAL_ALLOWED_TOOLS = GOAL_BACKGROUND_ALLOWED_TOOLS
 
 CONTROL_ACTION_DESCRIPTIONS = {
-    "inspect_agent_tree": "只读查看主/子/孙代理状态树。",
     "raise_event": "记录普通进展、阻塞或需要主代理处理的事件。",
     "send_guidance": "给正在运行的代理追加软提示。",
     "create_subagents": "创建并启动新的下级代理。",
@@ -400,7 +419,6 @@ CONTROL_ACTION_DESCRIPTIONS = {
     "get_goal": "读取当前 /goal 持续目标及其权威状态。",
     "update_goal": "仅在持续目标真正完成或确实阻塞时写入 complete/blocked 终态。",
 }
-
 
 @dataclass(frozen=True)
 class BackgroundToolPolicyRequest:
@@ -447,6 +465,9 @@ def background_allowed_tools(
     return list(background_tool_policy_decision(config, request=request).allowed_tools)
 
 
+# LLM: 后台轮工具表必须先淘汰旧子代理控制面，再套 owner/task/delivery 减法；
+# 存量配置不能把已注销工具重新带回模型 prompt。
+# 函数用途: 根据唤醒类型和结构化策略计算后台主代理本轮可见工具。
 def background_tool_policy_decision(
     config: object | None = None,
     request: BackgroundToolPolicyRequest | None = None,
@@ -463,6 +484,7 @@ def background_tool_policy_decision(
         profile, default_tools = _default_profile_for_request(request)
         tools = list(default_tools)
         sources = [f"default_profile:{profile}"]
+    tools = active_model_subagent_tools(tools)
     tools, removed = _apply_policy_limits(tools, request)
     if removed:
         sources.append("owner_or_task_policy")
@@ -2299,6 +2321,9 @@ class _BackgroundContextLoad:
     load_errors: list[dict[str, Any]]
 
 
+# LLM: 后台上下文会投给模型，active/pending wake 必须先做模型可见净化；
+# 原始持久事件仍留在 ConversationStore，不能在这里改写权威账本。
+# 函数用途: 组装一次后台唤醒轮的有界 Markdown 上下文。
 def context_markdown(
     *,
     agent: object,
@@ -2313,7 +2338,7 @@ def context_markdown(
         proactive_delivery_available=proactive_delivery_available,
     )
     task_id = str(getattr(request, "task_id", "") or "").strip()
-    active_wake_signal = request.wake_signal if isinstance(request.wake_signal, dict) else None
+    active_wake_signal = _model_visible_wake_signal(getattr(request, "wake_signal", None))
     bounded = _bounded_context(
         agent,
         store,
@@ -2761,6 +2786,8 @@ def _task_context_ids(state: _BackgroundContextLoad) -> set[str]:
     return task_ids
 
 
+# LLM: pending wake 读取失败要留 load_error；成功行只净化模型视图，不改原事件。
+# 函数用途: 读取当前线程待处理唤醒，并剔除其它 task 和已退役工具提示。
 def _pending_wake_signals(state: _BackgroundContextLoad) -> list[dict[str, Any]]:
     try:
         if callable(getattr(state.store, "pending_wake_signals_report", None)):
@@ -2769,14 +2796,22 @@ def _pending_wake_signals(state: _BackgroundContextLoad) -> list[dict[str, Any]]
             )
             state.load_errors.extend(load_errors)
             payload = [
-                item.to_dict() for item in signals if item.thread_id == state.thread.thread_id
+                _model_visible_wake_signal(item.to_dict()) or {}
+                for item in signals
+                if item.thread_id == state.thread.thread_id
             ]
         else:
-            payload = pending_wake_payload(
-                state.store,
-                state.thread.thread_id,
-                limit=_config_int(state.config, "background_pending_wake_prompt_limit"),
-            )
+            payload = [
+                _model_visible_wake_signal(item) or {}
+                for item in pending_wake_payload(
+                    state.store,
+                    state.thread.thread_id,
+                    limit=_config_int(
+                        state.config,
+                        "background_pending_wake_prompt_limit",
+                    ),
+                )
+            ]
         if not state.task_id:
             return payload
         task_ids = _task_context_ids(state)

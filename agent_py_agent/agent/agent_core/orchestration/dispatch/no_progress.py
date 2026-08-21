@@ -1,14 +1,21 @@
-
+# LLM: Host dispatch-loop progress detection only. This module must not emit
+# model-callable recovery or polling instructions.
+# 模块用途: 判断内部 dispatcher 是否连续无进展，供宿主有界停止循环。
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 
+# LLM: Tracker compares typed dispatch records and owns no recovery side effects.
+# 类用途: 连续两轮结构化签名不变时通知宿主停止空转。
 @dataclass
 class DispatchNoProgressTracker:
     previous_signature: tuple | None = None
     repeated_rounds: int = 0
 
+    # LLM: None means material progress and resets the streak; identical
+    # record-only signatures increment it without reading model prose.
+    # 函数用途: 更新无进展计数，并在连续两轮相同时返回停止信号。
     def should_stop(self, dispatch_report) -> bool:
         signature = _dispatch_no_progress_signature(dispatch_report)
         if signature is None:
@@ -23,34 +30,10 @@ class DispatchNoProgressTracker:
         return self.repeated_rounds >= 2
 
 
+# LLM: Progress is derived from typed record mutations and child creation only.
+# 函数用途: 判断本轮内部 dispatch 是否产生了结构化状态变化。
 def dispatch_made_progress(dispatch_report) -> bool:
     return _dispatch_no_progress_signature(dispatch_report) is None
-
-
-def dispatch_no_progress_payload(dispatch_report) -> dict[str, object]:
-    signature = _dispatch_no_progress_signature(dispatch_report)
-    if signature is None or not signature:
-        return {}
-    records = list(getattr(dispatch_report, "records", []) or [])
-    payload = {
-        "no_progress_actions_only": True,
-        "recommended_next_action": "summarize_blockers_or_change_strategy",
-        "reason": (
-            "本轮 dispatch 只有 due-check、inspect 或 classify 等记录类动作；"
-            "没有创建子代理、状态变化或验收执行。请不要原样重复 dispatch，改为查看 refs、换策略或汇报 blockers。"
-        ),
-        "record_count": len(records),
-        "blocked_run_ids": _record_run_ids(records),
-    }
-    if tool_call := _dry_run_recovery_tool_call(records):
-        payload["recommended_next_action"] = "rerun_dispatch_with_apply_for_recovery"
-        payload["reason"] = (
-            "本轮只做了 dry-run，已经发现可写回的恢复动作。"
-            "如果当前父级确实要接管/重分配，请按 suggested_tool_call 重新调用；"
-            "runner 内部会默认用当前父级 run_id 作为 take_over_by。"
-        )
-        payload["suggested_tool_call"] = tool_call
-    return payload
 
 
 def _dispatch_no_progress_signature(dispatch_report) -> tuple | None:
@@ -153,33 +136,4 @@ def _safe_list(record, field_name: str) -> list:
     return value if isinstance(value, list) else []
 
 
-def _record_run_ids(records: list[object]) -> list[str]:
-    run_ids: list[str] = []
-    for record in records:
-        run_id = _safe_str(record, "run_id") or ""
-        if run_id and run_id not in run_ids:
-            run_ids.append(run_id)
-    return run_ids[:20]
-
-
-def _dry_run_recovery_tool_call(records: list[object]) -> dict[str, object]:
-    if not any(_is_dry_run_recovery_apply(record) for record in records):
-        return {}
-    return {
-        "tool": "dispatch_subagents",
-        "dry_run": False,
-        "max_runners": 0,
-        "limit": max(len(records), 1),
-    }
-
-
-def _is_dry_run_recovery_apply(record: object) -> bool:
-    return (
-        _safe_str(record, "step") == "action_apply"
-        and _safe_str(record, "action") in {"takeover_or_reassign", "recover_coordinator_leadership"}
-        and _safe_bool(record, "dry_run")
-        and not _safe_bool(record, "applied")
-    )
-
-
-__all__ = ["DispatchNoProgressTracker", "dispatch_made_progress", "dispatch_no_progress_payload"]
+__all__ = ["DispatchNoProgressTracker", "dispatch_made_progress"]

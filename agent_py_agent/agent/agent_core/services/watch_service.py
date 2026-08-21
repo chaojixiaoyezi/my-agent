@@ -439,6 +439,9 @@ def _run_single_watch_cycle(
     return _run_advancing_watch_cycle(agent, params, started_at=started_at)
 
 
+# LLM: This host-only watch samples the internal tree projection and records a
+# metric; it must never imply that inspect_agent_tree remains model-callable.
+# 函数用途: 运维只读采样一次代理树并写 watch 记录，不启动或推动任何 runner。
 def _run_readonly_watch_cycle(
     agent: SimpleAgent,
     params: RunSingleWatchCycleParams,
@@ -460,7 +463,7 @@ def _run_readonly_watch_cycle(
         message=message,
         record_count=0,
         dispatch_summary={
-            "inspect_agent_tree": 1,
+            "agent_tree_projection": 1,
             "agent_tree_nodes": node_count,
             "read_only": 1,
         },

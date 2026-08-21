@@ -267,6 +267,9 @@ def _with_task_workspace_relative_path(
     )
 
 
+# LLM: 活跃 child 的声明产物尚未就绪时只允许等待生命周期事件；不得轮询内部
+# 文件或返回模型可执行的查询工具调用。
+# 函数用途: 为尚在生成中的子代理产物返回可恢复、无副作用的读取失败。
 def _active_child_output_not_ready_result(
     request: RegistryToolInvokeRequest,
     params: dict[str, Any],
@@ -283,8 +286,7 @@ def _active_child_output_not_ready_result(
         "error": "active_child_output_not_ready",
         "message": "Requested path is a declared output for a currently active child agent and is not ready yet.",
         "path": str(target),
-        "suggested_tool_call": {"tool": "inspect_agent_tree", "params": {}, "reason": "check active child status"},
-        "status_tool_call": {"tool": "inspect_agent_tree", "params": {}},
+        "next_action": "await_direct_child_lifecycle_event",
         "result_fields_to_read": ["child_result_index.read_order", "child_result_index.primary_artifact_refs"],
     }
     return ToolHandlerOutcome(

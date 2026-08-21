@@ -26,6 +26,25 @@ def test_coding_subagent_tools_contains_file_tools():
     assert "read_file" in CODING_SUBAGENT_TOOLS
     assert "list_files" in CODING_SUBAGENT_TOOLS
     assert "create_subagents" in CODING_SUBAGENT_TOOLS
+    assert "send_guidance" in CODING_SUBAGENT_TOOLS
+    assert "cancel_subagents" in CODING_SUBAGENT_TOOLS
+    assert "resolve_capability_requests" in CODING_SUBAGENT_TOOLS
     assert "schedule_child_subagents" not in CODING_SUBAGENT_TOOLS
     assert "dispatch_subagents" not in CODING_SUBAGENT_TOOLS
-    assert "inspect_agent_tree" in CODING_SUBAGENT_TOOLS
+    assert "inspect_agent_tree" not in CODING_SUBAGENT_TOOLS
+
+
+def test_retired_subagent_controls_are_removed_from_legacy_snapshots():
+    from agent_py_agent.agent.subagents.role_templates import (
+        active_model_subagent_tools,
+    )
+
+    assert active_model_subagent_tools(
+        [
+            "read_file",
+            "inspect_agent_tree",
+            "dispatch_subagents",
+            "schedule_child_subagents",
+            "send_guidance",
+        ]
+    ) == ["read_file", "send_guidance"]

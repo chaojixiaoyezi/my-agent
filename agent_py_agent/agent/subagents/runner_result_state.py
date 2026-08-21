@@ -56,6 +56,9 @@ class RunnerAttemptParams:
     now: float
 
 
+# LLM: Runner state projection must prefer host-owned capability request/grant
+# facts over a generic provider "ok" turn end; model prose is never inspected.
+# 函数用途: 把本轮 runner 结果写回任务，并保证待授权子代理不会被误关成完成。
 def apply_runner_result_fields(params: RunnerResultFieldParams) -> None:
     """Apply parsed runner status and raw status text to a task in place."""
     task = params.task
@@ -122,6 +125,10 @@ def _consume_source_binding_transition_response(task: object) -> bool:
     return bool(current_attempt and current_attempt == expected_attempt)
 
 
+# LLM: Outcome truth comes from the already-projected structured task state;
+# an OPEN request is a blocker, while a just-granted final request means the
+# same run should continue rather than fail or close.
+# 函数用途: 给这次 runner 收口生成真实成功标志和说明。
 def _runner_result_outcome(task, parsed, result_meta: dict, status_context: dict) -> tuple[bool, str]:
     ok = result_meta["ok"]
     message = result_meta["message"]
@@ -134,6 +141,14 @@ def _runner_result_outcome(task, parsed, result_meta: dict, status_context: dict
         # 中文说明：来源窗口结束且欠账清零后，持久账本就是完成事实；模型误申请写报告
         # 或结果块格式有瑕疵，都不能把已经清账的来源岗位伪装成 BLOCKED。
         return True, "Audit source window complete and backlog settled"
+    if _has_open_capability_requests(task) and not _structured_capability_recovery_result(
+        task,
+        parsed,
+        status_context,
+    ):
+        return False, "runner 已提交 capability_request，等待直接父级裁决"
+    if _awaiting_granted_capability_continuation(task, status_context):
+        return True, "capability_request 已授权，同一 run 等待自动续跑"
     if parsed.found and not parsed.ok:
         message = f"{message} / structured output parse failed: {parsed.parse_error}"
         task.result = response or message
@@ -146,6 +161,10 @@ def _runner_result_outcome(task, parsed, result_meta: dict, status_context: dict
     return ok, message
 
 
+# LLM: OPEN requests and same-attempt grants are typed lifecycle facts and
+# therefore outrank parsed/unparsed completion. Audit source ledgers remain the
+# more specific authority and are handled first.
+# 函数用途: 按宿主事实把子代理轮次投影成可恢复的任务状态。
 def _apply_status_fields(task, status_context, parsed) -> None:
     status = status_context["status"]
     verification_status = status_context["verification_status"]
@@ -181,6 +200,23 @@ def _apply_status_fields(task, status_context, parsed) -> None:
         task.failure_type = ""
         task.blockers = []
         _resolve_stale_capability_requests(task)
+        return
+    if _has_open_capability_requests(task) and not _structured_capability_recovery_result(
+        task,
+        parsed,
+        status_context,
+    ):
+        task.status = TaskStatus.BLOCKED.value
+        task.verification_status = VerificationStatus.UNVERIFIED.value
+        task.failure_type = FailureType.CAPABILITY_REQUEST.value
+        _append_open_request_blocker(task)
+        return
+    if _awaiting_granted_capability_continuation(task, status_context):
+        task.status = TaskStatus.PENDING.value
+        task.verification_status = VerificationStatus.UNVERIFIED.value
+        task.failure_type = FailureType.CAPABILITY_REQUEST.value
+        task.blockers = []
+        task.ended_at = 0.0
         return
     # Explicit runner statuses fail closed instead of translating unknown raw text.
     if parsed.found and parsed.ok:
@@ -442,6 +478,14 @@ def _should_resolve_stale_capability_requests(task) -> bool:
 def _blocked_with_attempt_fresh_grant(task) -> bool:
     if not task_has_status(task, TaskStatus.BLOCKED):
         return False
+    return _attempt_has_fresh_capability_grant(task)
+
+
+# LLM: A grant newer than the current attempt start is a structured same-turn
+# fact. It does not prove task completion; it only makes the same run eligible
+# to continue after the requesting turn returns.
+# 函数用途: 判断当前 runner 这一轮内是否刚获得了新授权。
+def _attempt_has_fresh_capability_grant(task) -> bool:
     started = _timestamp(getattr(task, "runner_last_attempt_at", 0.0))
     if started <= 0:
         return False
@@ -449,6 +493,38 @@ def _blocked_with_attempt_fresh_grant(task) -> bool:
         _timestamp(getattr(grant, "created_at", 0.0)) > started
         for grant in getattr(task, "capability_grants", []) or []
     )
+
+
+# LLM: The last executed tool is structured call-order evidence. Only when it
+# is capability_request and a fresh grant exists do we requeue; a child that
+# used later tools may still legitimately complete in the same turn.
+# 函数用途: 判断子代理是否在申请工具后立即收口，需用新授权续跑。
+def _awaiting_granted_capability_continuation(task, status_context: dict) -> bool:
+    tools = status_context.get("actual_tools")
+    if not isinstance(tools, list | tuple) or not tools:
+        return False
+    return str(tools[-1] or "").strip() == "capability_request" and _attempt_has_fresh_capability_grant(task)
+
+
+# LLM: A later structured DONE from a task already blocked on capability is
+# explicit recovery evidence; only that case may close stale OPEN requests.
+# 函数用途: 区分“本轮刚申请就退出”与“授权后续跑已真正完成”。
+def _structured_capability_recovery_result(task, parsed, status_context: dict) -> bool:
+    if not _should_resolve_stale_capability_requests(task):
+        return False
+    if not bool(getattr(parsed, "found", False)) or not bool(getattr(parsed, "ok", False)):
+        return False
+    tools = status_context.get("actual_tools")
+    if isinstance(tools, list | tuple) and tools:
+        if str(tools[-1] or "").strip() == "capability_request":
+            return False
+    try:
+        status = normalize_task_status(
+            status_context.get("status") or _status_from_structured_output(parsed)
+        )
+    except ValueError:
+        return False
+    return status == TaskStatus.DONE.value
 
 
 def _timestamp(value: object) -> float:

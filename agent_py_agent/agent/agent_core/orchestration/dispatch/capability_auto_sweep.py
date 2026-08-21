@@ -30,6 +30,8 @@ _LOGGER = logging.getLogger(__name__)
 CAPABILITY_SWEEP_REASONS = frozenset(
     {
         "subagent_capability_request_open",
+        "subagent_capability_granted",
+        "subagent_capability_denied",
         "subagent_runner_finished",
     }
 )

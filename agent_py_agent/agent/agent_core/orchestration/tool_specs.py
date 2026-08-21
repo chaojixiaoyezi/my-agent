@@ -11,12 +11,10 @@ from .tool_spec_data import (
     _CREATE_PARAMETER_DETAILS,
     _CREATE_PARAMETERS,
     _CREATE_USE_CASES,
-    _INSPECT_TREE_PARAMETERS,
     _OBSERVATION_PARAMETERS,
 )
 from .tool_spec_schemas import (
     _CREATE_PARAMETER_SCHEMA,
-    _INSPECT_TREE_PARAMETER_SCHEMA,
     _OBSERVATION_PARAMETER_SCHEMA,
     _RESOLVE_CAPABILITY_PARAMETER_SCHEMA,
 )
@@ -60,10 +58,13 @@ def _hints(
     )
 
 
+# LLM: 这是递归创建唯一模型合同；保持 goal 必填、items 显式批量、自动启动和
+# 事件回传语义，不重新加入 count/operations/dispatch/inspect 参数。
+# 函数用途: 构造 create_subagents 给模型看的说明和 JSON Schema。
 def build_create_subagents_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="create_subagents",
-        description="把可并行的独立工作交给下级代理。无论当前是主代理、子代理还是孙代理，都使用同一个 create_subagents；创建成功后下级立即运行，完成时系统自动把结果送回直接父级，不需要也没有额外的推进工具。goal 始终必填；单个目标直接传 goal，多个不同目标同时传总 goal 和 items，且每项必须有独立 goal。用户指定保存路径时必须同时用 output_files 传递结构化目标（批量时逐 item 填写），goal 里的路径只供理解、不授权写入。不要为了显得忙而派，也不要重复创建同一任务。",
+        description="把可并行的独立工作交给下级代理。无论当前是主代理、子代理还是孙代理，都使用同一个 create_subagents；创建成功后下级立即运行，进展、阻塞或完成时系统自动唤醒直接父级，不需要也没有查询或推进工具。goal 始终必填；只传 goal 就只创建一个 child，需要多个时必须同时传总 goal 和 items，每项都要有独立 goal。不支持 operations、count 或 max_concurrency 参数。普通 child 自动继承父级工作区权限；用户指定交付路径时仍用 output_files 记录目标与冲突锁（批量时逐 item 填写）。不要为了显得忙而派，也不要重复创建同一任务。",
         input_schema=_input_schema(
             _CREATE_PARAMETERS,
             _CREATE_PARAMETER_SCHEMA,
@@ -76,35 +77,11 @@ def build_create_subagents_model_spec() -> ToolModelSpec:
                 "只是解释思路、不需要真正创建任务时，不要调用；先直接回答即可",
                 "单步机械活或一两次工具调用就能完成的简单任务,自己直接做、别拆",
                 "别把整个目标原样转给单个子代理(无谓套娃,没真正切分就没价值)",
-                "**查看你已派出的子代理进度/状态/结果时,别派新子代理去查——用 inspect_agent_tree 自己查。新派的子代理只能看它自己底下的、看不到它的兄弟,根本查不到你要查的那些。**",
+                "查看已派下级时不要再创建查询代理；宿主会把生命周期事件送回直接父级",
                 "查看、发消息或打断已有下级时不要再创建一个新代理",
             ),
             keywords=_CREATE_KEYWORDS,
             examples=_CREATE_EXAMPLES,
-        ),
-    )
-
-
-def build_inspect_agent_tree_model_spec() -> ToolModelSpec:
-    return ToolModelSpec(
-        name="inspect_agent_tree",
-        description="按需只读查看你派出的子代理/孙代理的状态、进度、产物、阻塞原因(以你自己为根,看得见你派的所有下级)。"
-                    "**用户问'进度咋样/子代理做到哪了/看看情况'时,就用这个自己查——绝不要为了查进度去派新子代理:"
-                    "新派的子代理只能看它自己底下的(空的)、看不到它的兄弟,根本查不到你要查的那些子代理。**"
-                    "只读,不创建/调度/验收。",
-        input_schema=_input_schema(_INSPECT_TREE_PARAMETERS, _INSPECT_TREE_PARAMETER_SCHEMA),
-        hints=_hints(
-            use_cases=("用户问进度/子代理做到哪了/当前有哪些代理在做什么", "想看子代理/孙代理状态、心跳、当前工具、产物和阻塞原因"),
-            avoid_when=(
-                "子代理只是正在运行、没有新事实时不要循环查看；结束本回合(或继续做自己手头的事、回复用户)，子代理有进展时系统会用事件把你唤醒",
-                "下级仍在正常运行时不要循环查看；完成事件会自动送回父级",
-            ),
-            keywords=("进度", "进展", "做到哪了", "咋样了", "看看情况", "代理树", "状态树", "看一眼", "子代理状态", "孙代理", "inspect", "agent tree"),
-            examples=(
-                '{"tool":"inspect_agent_tree"}',
-                '{"tool":"inspect_agent_tree","root_id":"subagent-123"}',
-                '{"tool":"inspect_agent_tree","run_id":"subagent-456","scope":"own_subtree"}',
-            ),
         ),
     )
 
@@ -132,6 +109,9 @@ def build_raise_event_model_spec() -> ToolModelSpec:
     )
 
 
+# LLM: Task progress is a soft self-check ledger; child summaries may enrich
+# lifecycle events but must not imply a parent-side inspection requirement.
+# 函数用途: 构造当前代理记录/读取软进度清单的模型合同。
 def build_task_progress_model_spec() -> ToolModelSpec:
     parameters = {
         "action": "read/update/create；不填默认 read。create 与 update 等效（账本不存在时自动创建，首次建清单也用 create 或 update），清单内容不会自动续跑普通任务，也不会阻止模型结束当前轮。",
@@ -165,7 +145,7 @@ def build_task_progress_model_spec() -> ToolModelSpec:
                 "任务要求覆盖多个对象，例如每个项目、每篇论文、每周数据、每个 API 或每个文件",
                 "大体量构建任务（功能齐全的应用/多模块系统）：开工先把功能清单立成 items，每项实现→跑通→标 done 附证据，供模型跨轮续接和自查",
                 "compact 后要恢复当前代理自己的工作进度",
-                "父代理查看 tree 前，希望子代理有简短进度摘要",
+                "希望生命周期事件给直接父级带回简短进度摘要",
             ),
             avoid_when=("只做一句普通回复、不需要跨轮保存进度时可以不用",),
             keywords=("进度", "清单", "todo", "checkpoint", "继续做", "compact", "任务账本"),
@@ -178,57 +158,49 @@ def build_task_progress_model_spec() -> ToolModelSpec:
     )
 
 
+# LLM: 模型取消合同只允许按 run_id 点名直接下级；子树扫描、
+# dry-run 查看与进程细节都属于宿主运维私有能力。
+# 函数用途: 构造 cancel_subagents 的最小模型参数合同。
 def build_cancel_subagents_model_spec() -> ToolModelSpec:
     parameters = {
         "run_id": "可选。单个子代理 run_id。",
-        "run_ids": "可选。多个子代理 run_id。和 root_id/status 组合时会取并集后去重。",
-        "root_id": "root_id 会匹配 root 自己以及 child_ids 递归子树；如果没有 run_id/run_ids/root_id/status，工具会返回错误，避免误取消全部。",
-        "status": "status 只作为过滤条件；可写字符串或列表；传 status 但不传 run_id/root_id 时，会匹配当前子代理账本里所有该状态任务。",
+        "run_ids": "可选。多个直接子代理 run_id；只停止点名目标，不递归代管孙代理。",
         "reason": "可选。取消原因，会写入子代理 work log 和审计字段。",
-        "kill_process": "可选。默认 true；如果任务记录里有关联 pid，会尝试 terminate。",
-        "dry_run": "可选。默认 false；true 时只返回会取消哪些 run_id，不改状态。",
     }
     property_schemas = {
         "run_id": {"type": "string"},
         "run_ids": {"type": "array", "items": {"type": "string"}},
-        "root_id": {"type": "string"},
-        "status": {
-            "anyOf": [
-                {"type": "string"},
-                {"type": "array", "items": {"type": "string"}},
-            ]
-        },
         "reason": {"type": "string"},
-        "kill_process": {"type": "boolean"},
-        "dry_run": {"type": "boolean"},
     }
     return ToolModelSpec(
         name="cancel_subagents",
         description=(
-            "取消已有子代理运行；会废弃 active attempt、记录取消审计，有关联 pid 时会尝试终止。"
+            "取消当前代理直接创建的一个或多个下级；会废弃 active attempt、记录取消审计，有关联 pid 时会尝试终止。"
             "仍满足同一 run 重试条件的结构化失败必须先续派，不能由模型直接取消。"
         ),
         input_schema=_input_schema(parameters, property_schemas),
         hints=_hints(
             use_cases=(
-                "用户要求停止某些子代理或整棵子代理树",
+                "用户要求停止当前代理的某些直接子代理",
                 "主代理发现子代理卡死、跑偏或不应继续消耗预算，需要显式收回",
                 "后台 runner/channel 已损坏，需要把 agent tree 标成可见的取消/废弃状态",
             ),
             avoid_when=(
-                "只是查看状态时用 inspect_agent_tree；只是补充说明时用 send_guidance",
+                "只是补充说明时用 send_guidance；正常运行时等宿主生命周期事件",
                 "系统正在自动恢复可恢复故障时不要重复创建替代代理",
             ),
             keywords=("取消", "停止", "kill", "cancel", "subagent", "runner", "ABANDONED", "CANCELLED"),
             examples=(
                 '{"tool":"cancel_subagents","run_ids":["subagent-1","subagent-2"],"reason":"用户要求停止"}',
-                '{"tool":"cancel_subagents","root_id":"subagent-root","status":["RUNNING","PLANNING"],"reason":"重派前清理"}',
-                '{"tool":"cancel_subagents","status":"CHANNEL_ERROR","dry_run":true}',
+                '{"tool":"cancel_subagents","run_id":"subagent-1","reason":"用户要求停止"}',
             ),
         ),
     )
 
 
+# LLM: capability 裁决是直接父子之间的结构化授权控制，不承担推进、轮询或
+# 质量验收；run_id 在 handler 还要经过直接下级授权门。
+# 函数用途: 构造批准或拒绝直属子代理权限申请的模型合同。
 def build_resolve_capability_requests_model_spec() -> ToolModelSpec:
     parameters = {
         "run_id": "必填。子代理 run_id。",
@@ -250,7 +222,7 @@ def build_resolve_capability_requests_model_spec() -> ToolModelSpec:
                 "子代理报告 PENDING_CAPABILITY_REQUEST / capability_request 未决，需要父级解锁目录或授权工具",
                 "网络类申请(capability_type=network,子代理撞 NETWORK_PRIVATE_HOST_BLOCKED):底座不提供内网白名单授权,授权侧只能说明访问缺口或换公网来源",
             ),
-            avoid_when=("没有未决请求时不要调用；查看子代理详情用 inspect_agent_tree",),
+            avoid_when=("没有直接下级发来的未决请求时不要调用",),
             keywords=("capability", "授权", "解锁", "拒绝", "grant", "deny", "capreq", "权限"),
             examples=(
                 '{"tool":"resolve_capability_requests","run_id":"subagent-1","decision":"grant","reason":"解锁产物目录"}',

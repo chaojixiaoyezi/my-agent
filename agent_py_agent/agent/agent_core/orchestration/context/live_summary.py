@@ -6,7 +6,6 @@ from typing import Any
 
 _ORCHESTRATION_TOOLS = {
     "create_subagents",
-    "inspect_agent_tree",
 }
 _MAX_INLINE_JSON = 900
 _MAX_INLINE_TEXT = 500

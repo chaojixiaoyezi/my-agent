@@ -6,7 +6,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
-from ...role_templates import COORDINATOR_TOOLS, role_template_snapshot_for_role
+from ...role_templates import (
+    COORDINATOR_TOOLS,
+    active_model_subagent_tools,
+    role_template_snapshot_for_role,
+)
 
 _DEFAULT_LEAF_CODING_TOOLS = [
     "list_files",
@@ -17,7 +21,6 @@ _DEFAULT_LEAF_CODING_TOOLS = [
     "web_fetch",
     "write_file",
     "apply_patch",
-    "inspect_agent_tree",
     "send_guidance",
     "raise_event",
     "capability_request",
@@ -54,8 +57,10 @@ class ToolPolicyRequest:
     role: str = ""
 
 
+# LLM: Hierarchy scheduling may only narrow an already filtered parent snapshot;
+# explicit legacy tool names are removed before leaf/coordinator role logic.
+# 函数用途: 为孙代理计算不超过父级且不含退休控制入口的工具集合。
 def scheduled_child_tools(request: ToolPolicyRequest) -> list[str]:
-    """Return a child capability set that can only narrow its parent's tools."""
 
     parent_tools = _clean_tools(request.parent_tools)
     explicit_tools = _clean_tools(getattr(request.spec, "allowed_tools", None))
@@ -102,13 +107,7 @@ def _inherited_tools(tools: list[str], parent_tools: list[str]) -> list[str]:
     return [tool for tool in _clean_tools(tools) if tool in parent_scope]
 
 
+# LLM: This seam delegates retirement and normalization to the single domain helper.
+# 函数用途: 清理层级调度输入中的工具名并剔除旧控制入口。
 def _clean_tools(value: object) -> list[str]:
-    if not isinstance(value, list | tuple | set):
-        return []
-    return list(
-        dict.fromkeys(
-            str(item or "").strip()
-            for item in value
-            if str(item or "").strip()
-        )
-    )
+    return active_model_subagent_tools(value)

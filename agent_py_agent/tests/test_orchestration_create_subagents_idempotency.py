@@ -38,7 +38,7 @@ def test_items_mode_reuses_existing_contract_children_and_returns_dispatch_contr
     assert second["reused_run_ids"] == first["created_run_ids"]
     assert second["pending_start_run_ids"] == []
     assert second["auto_start"]["run_ids"] == first["created_run_ids"]
-    assert second["next_action"]["tool"] == "inspect_agent_tree"
+    assert second["next_action"]["action"] == "await_lifecycle_event"
     assert len(agent.subagents.list_runs()) == 3
 
 
@@ -61,7 +61,7 @@ def test_reused_done_children_are_excluded_from_dispatch_contract(tmp_path):
     assert second["reused_run_ids"] == first["created_run_ids"]
     assert second["pending_start_run_ids"] == []
     assert second["auto_start"]["run_ids"] == first["created_run_ids"][1:]
-    assert second["next_action"]["tool"] == "inspect_agent_tree"
+    assert second["next_action"]["action"] == "await_lifecycle_event"
 
 
 def test_generic_single_worker_reuses_explicit_idempotency_contract(tmp_path):
@@ -211,7 +211,7 @@ def test_background_main_must_continue_active_lineage_instead_of_expanding_it(tm
     assert result.ok is False
     assert result.error_code == "SUBAGENT_ACTIVE_LINEAGE_EXISTS"
     assert payload["existing_run_ids"] == first["created_run_ids"]
-    assert payload["next_action"]["tool"] == "inspect_agent_tree"
+    assert payload["next_action"]["action"] == "await_existing_run_lifecycle_event"
     assert len(agent.subagents.list_runs()) == 1
 
 
@@ -285,7 +285,7 @@ def test_all_reused_done_children_return_non_dispatch_next_action(tmp_path):
     )
 
     assert second["pending_start_run_ids"] == []
-    assert second["next_action"]["tool"] == "inspect_agent_tree"
+    assert second["next_action"]["action"] == "report_creation_state"
     assert second["next_action"]["reason"].startswith("create_subagents 没有可启动")
 
 

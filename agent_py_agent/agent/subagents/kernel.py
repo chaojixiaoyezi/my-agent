@@ -284,9 +284,8 @@ def _tool_contract(task: SubAgentTask) -> dict[str, object]:
             grant.id for grant in task.capability_grants if "controlled_exec" in list(getattr(grant, "tools", []) or [])
         ],
     }
-    # P4-1 引导前移(R5 三案实锤:A3 引导只挂 closeout finding,不提交 closeout 就
-    # 永远看不到)。运行中树快照存在 OPEN capreq 时直接带结构化引导,主代理在
-    # inspect_agent_tree/watch 里即可照着调用,不必等 closeout。软引导,不拦路。
+    # P4-1 引导前移：运行中快照存在 OPEN capreq 时直接带结构化引导，
+    # 直接父级在生命周期事件里即可裁决，不必等 closeout。软引导，不拦路。
     if open_requests:
         contract["recommended_tool"] = "resolve_capability_requests"
         contract["open_capability_request_ids"] = [

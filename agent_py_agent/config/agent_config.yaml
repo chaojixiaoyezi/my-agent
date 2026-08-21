@@ -322,8 +322,8 @@ runner_failure_policy: "auto"
 scheduler_mode: "auto"
 runner_concurrency: "auto"
 runner_start_rate: "auto"
-# create_subagents 自动启动时会用 watch/advance 推进本批 runner。
-# runner_start_rate 只限制每个调度切片启动多少个，后台会继续扫本批剩余项，不应让主代理立刻退出等人。
+# create_subagents 会由宿主自动启动并恢复 runner，模型不轮询或手动推进。
+# runner_start_rate 只限制每个调度切片启动多少个，剩余项由后台继续启动并以生命周期事件通知直接父级。
 
 # runner_timeout_seconds 控制单个 runner 的外层总时长保护：
 # - "off": 默认，不套外层总时长闹钟；长任务靠心跳、状态、取消/接管工具治理。

@@ -47,7 +47,8 @@ agent_py_agent/
 |   |   |   |-- sleep_tool.py           # clock.sleep 工具：模型主动定时等待，写 wake_queue 字条、事件提前醒取消
 |   |   |-- tool_loop/                  # 工具轮次执行、恢复与自然结束
 |   |   |-- tool_context/               # 工具结果上下文：reducer、窗口、microcompact、PTL 单轮重试
-|   |   |-- orchestration/              # 统一 create、cancel、inspect 模型工具与内部自动启动/恢复引擎
+|   |   |-- orchestration/              # 递归 create、直属 guidance/cancel/capability 工具与内部自动启动/恢复引擎
+|   |   |-- agent_tree/status.py        # `/status`、TUI、恢复与诊断共用的内部代理树投影（不是模型工具）
 |   |   |-- _finalization_service.py   # 保留模型最终正文并记录 turn_end.reason
 |   |   |-- tool_loop/natural_user_reply.py # 派工/续跑/完成共用的无工具 LLM 用户回复出口
 |   |   |-- tool_loop/completion.py     # 工具上限、截断等宿主轮结束事实

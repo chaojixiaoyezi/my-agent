@@ -330,7 +330,7 @@ class TestCreateSubagentsToolExecute:
         assert payload["auto_start"]["status"] == "started"
         assert payload["auto_start"]["dispatch_mode"] == "background"
         assert "agent_tree" not in payload["auto_start"]
-        assert payload["next_action"]["tool"] == "inspect_agent_tree"
+        assert payload["next_action"]["action"] == "await_lifecycle_event"
 
     def test_auto_start_process_command_runs_direct_dispatch_for_created_run_ids(self):
         """真实后台进程只跑精确 run_id 的一轮 dispatch，不再抢父进程 watch lock。"""
@@ -423,7 +423,7 @@ class TestCreateSubagentsToolStartControls:
         assert result.ok is True
         mock_agent.dispatch_subagents.assert_not_called()
         assert payload["auto_start"]["status"] == "deferred"
-        assert payload["next_action"]["tool"] == "inspect_agent_tree"
+        assert payload["next_action"]["action"] == "await_dependency_event"
 
     def test_item_defer_start_only_holds_that_child(self, monkeypatch):
         """单个 item.defer_start=true 只挂起该 child，不拖住同批生产 worker。"""

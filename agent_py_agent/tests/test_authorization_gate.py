@@ -16,7 +16,6 @@ from agent_py_agent.agent.subagents.authorization_gate import (
     AuthorizationError,
     OperationRequest,
     authorize_operation,
-    authorize_tree_scope,
 )
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 
@@ -140,27 +139,14 @@ def test_tree_root_operates_orphan_allowed(tree):
     assert task.id == tree.orphan.id
 
 
-def test_tree_scope_same_tree_allowed(tree):
-    authorize_tree_scope(
-        tree.manager, _req("inspect", tree.run_a.id, requester_run_id=tree.run_a.id), "run-main"
-    )
-
-
-def test_tree_scope_foreign_tree_rejected(tree):
-    with pytest.raises(AuthorizationError, match="不在请求方子树内"):
-        authorize_tree_scope(
-            tree.manager,
-            _req("inspect", tree.run_a.id, requester_run_id=tree.run_a.id),
-            "run-x",
-        )
-
-
-def test_tree_scope_system_driver_allowed(tree):
-    # 主代理/系统驱动（无 requester run_id）→ 放行任意树。
-    authorize_tree_scope(tree.manager, _req("inspect", tree.run_x.id), "run-x")
-
-
-def test_all_six_operations_pass_gate(tree):
-    for operation in ("cancel", "dispatch", "inspect", "resume", "takeover", "resolve_capability"):
+def test_all_registered_operations_pass_gate(tree):
+    for operation in (
+        "cancel",
+        "dispatch",
+        "resume",
+        "takeover",
+        "resolve_capability",
+        "send_guidance",
+    ):
         task = authorize_operation(tree.manager, _req(operation, tree.run_a.id))
         assert task.id == tree.run_a.id

@@ -40,14 +40,6 @@ _CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
         },
     },
 }
-_INSPECT_TREE_PARAMETER_SCHEMA: dict[str, Any] = {
-    "root_id": {"type": "string"},
-    "run_id": {"type": "string"},
-    # Owner-wide historical enumeration is an internal diagnostic surface,
-    # not a model-facing task operation.  A normal agent names a root/run or
-    # omits scope to use the current typed task workspace.
-    "scope": {"type": "string", "enum": ["root_tree", "own_subtree", "subtree"]},
-}
 _OBSERVATION_PARAMETER_SCHEMA: dict[str, Any] = {
     "thread_id": {"type": "string"},
     "task_id": {"type": "string"},

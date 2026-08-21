@@ -33,6 +33,9 @@ class CreateSubagentsPayloadInput:
     conversation_bind_errors: list[dict[str, object]] | None = None
 
 
+# LLM: 创建回执只能陈述已记录、已启动和待事件的结构化事实；不得附带模型
+# 查询/推进工具调用，否则 provider 会把回执当下一条操作指令反复轮询。
+# 函数用途: 汇总一批创建或复用的子代理，并生成父级可读的启动回执。
 def create_subagents_payload(request: CreateSubagentsPayloadInput) -> dict[str, object]:
     agent = request.agent
     resolutions = request.resolutions
@@ -51,7 +54,6 @@ def create_subagents_payload(request: CreateSubagentsPayloadInput) -> dict[str, 
         "pending_start_run_ids": [task.id for task in pending_start],
         "auto_start": _auto_start_payload(auto_start),
         "next_action": _next_action(dispatchable, request_params, auto_start),
-        "status_tool_call": _status_tool_call(auto_start),
         "allowed_tools": request.allowed_tools or "automatic",
         "operation_contract": _operation_contract(request_params, created, reused, pending_start),
         "replacement_records": request.replacement_records or [],
@@ -153,10 +155,6 @@ def _schedule_lifecycle_payload(
     }
 
 
-def _status_tool_call(auto_start: dict[str, object] | None) -> dict[str, object]:
-    return {"tool": "inspect_agent_tree", "params": {}}
-
-
 def _pending_start_tasks(
     tasks: list,
     request_params: dict[str, object],
@@ -190,6 +188,9 @@ def _operation_contract(
     }
 
 
+# LLM: Create receipts never recommend a polling tool. The host owns runner
+# start/recovery and wakes only the direct parent with a typed lifecycle event.
+# 函数用途: 告诉父代理接下来等哪个宿主事件，不产生查询工具调用。
 def _next_action(
     tasks,
     request_params: dict[str, object],
@@ -198,33 +199,33 @@ def _next_action(
     run_ids = [task.id for task in tasks]
     if not run_ids:
         return {
-            "tool": "inspect_agent_tree",
-            "reason": "create_subagents 没有可启动的新 run；请读取代理树状态后决定是否汇报。",
-            "params": {},
+            "action": "report_creation_state",
+            "run_ids": [],
+            "reason": "create_subagents 没有可启动的新 run；按本回执事实处理即可。",
         }
     if bool(request_params.get("defer_start")):
         return {
-            "tool": "inspect_agent_tree",
+            "action": "await_dependency_event",
+            "run_ids": run_ids,
             "reason": "这是底层显式延迟创建；运行时会在依赖满足后自动恢复，不需要模型推进。",
-            "params": {},
         }
     deferred = _string_items((auto_start or {}).get("deferred_run_ids"))
     if deferred:
         return {
-            "tool": "inspect_agent_tree",
+            "action": "await_lifecycle_event",
+            "run_ids": run_ids,
             "reason": "部分子代理已自动启动；底层显式延迟的 run 会留在 pending_start_run_ids，等依赖满足后由系统启动。",
-            "params": {},
         }
     if (auto_start or {}).get("status") == "started":
         return {
-            "tool": "inspect_agent_tree",
-            "reason": "create_subagents 已把本批 run 交给后台调度；结束本回合等派工监督/完成事件唤醒，确需查看时用 inspect_agent_tree（自带冷却，避免高频轮询）。",
-            "params": {},
+            "action": "await_lifecycle_event",
+            "run_ids": run_ids,
+            "reason": "create_subagents 已把本批 run 交给后台调度；结束本回合，进展、阻塞或完成时宿主会唤醒直接父级。",
         }
     return {
-        "tool": "inspect_agent_tree",
-        "reason": "自动启动未完成；底层恢复器会处理可恢复故障，模型只需查看状态或向用户说明真实阻塞。",
-        "params": {},
+        "action": "await_lifecycle_event",
+        "run_ids": run_ids,
+        "reason": "自动启动未完成；底层恢复器会处理可恢复故障，模型只需等生命周期事件或向用户说明真实阻塞。",
     }
 
 

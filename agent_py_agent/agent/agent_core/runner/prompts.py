@@ -435,6 +435,9 @@ def _coordinator_execution_contract_lines() -> list[str]:
     return lines
 
 
+# LLM: coordinator 的提示只描述统一 create 和事件驱动父子关系；不要恢复旧
+# schedule/dispatch/inspect 轮询词汇或让协调者代替 worker 自写全部产物。
+# 函数用途: 生成协调角色每轮都会看到的执行边界说明。
 def coordinator_execution_policy_lines() -> list[str]:
     return [
         "- coordinator/lead 节点拥有完整基础读写能力：可以写自己的计划、证据、协调报告，也可以在授权产物根里检查、修复或接管。",
@@ -458,7 +461,7 @@ def coordinator_execution_policy_lines() -> list[str]:
         "长目标可分多次创建，每个 child 的 goal 必须自包含。",
         "- 不要让 worker/writer 代写 coordinator 自己的协调证据；需要共享时引用 artifact_refs/evidence_refs。",
         "- 创建 child/leaf 时必须原样传递父级指定的文件名、目录和质量要求，不要把 solution.py 改成别的模块名。",
-        "- 同一次 create_subagents 可以混建 coordinator、worker 或 tester；创建回执只说明是否已记录并交给运行时，真实状态继续看 tree/完成事件。",
+        "- 同一次 create_subagents 可以混建 coordinator、worker 或 tester；创建回执只说明是否已记录并交给运行时，进展、阻塞或完成由宿主事件送回直接父级。",
         "- 下级失败或阻塞时先读取真实 refs 和原因；不要自动创建整批 repair/QA 子代理。",
         "- 少数下属需要不同纠偏、路径修正或需求变更时，优先用 send_guidance 点名具体 run_id；"
         "平级讨论要走允许的定向通道，不能广播到兄弟分支的子孙。",

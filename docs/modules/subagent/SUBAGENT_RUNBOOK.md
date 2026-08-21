@@ -2,82 +2,80 @@
 
 ## 模型可见控制面
 
-父代理、子代理和孙代理共用递归语义：
+父代理、子代理和孙代理共用同一递归关系，每一层只管理自己直接创建的下级：
 
-- `create_subagents`：创建下一层协作者，成功后由宿主立即自动启动。
-- `inspect_agent_tree`：只读查看状态、进展、阻塞和结果 refs。
-- `send_guidance`：像用户给主代理补充消息一样，只向一个直接下级追加普通上下文；参数只有
-  `target + message`，不广播、不越层管理孙代理。
-- `cancel_subagents`：打断或取消指定后代。
-- `resolve_capability_requests`：只处理结构化权限缺口，它不是催办/推进工具。
+- `create_subagents`：创建一个或多个直接下级，成功后由宿主立即自动启动。
+- `send_guidance`：像用户给主代理插入补充消息一样，只向一个正在运行的直属 child 追加普通上下文。
+- `cancel_subagents`：按精确 `run_id/run_ids` 打断或取消直属 child，不提供整树、状态筛选或越层操作。
+- `resolve_capability_requests`：批准或拒绝直属 child 的结构化权限申请；它不是催办、推进或验收工具。
 
-不再存在模型可见的 `dispatch_subagents` 或 `schedule_child_subagents`。代码中保留的
-internal dispatcher 是 Gateway 内的 runner 启动、租约、恢复和有界重试引擎，不由模型手工推动。
+模型没有 `inspect_agent_tree`、`wait`、`dispatch_subagents` 或
+`schedule_child_subagents`。代码里的 dispatcher、heartbeat、orphan reconciler 和代理树 projection
+都是宿主底座：负责启动、租约、恢复、通知、`/status`、TUI 和诊断，不由模型手工推动。
 
-## 看树
+## 状态与通知
 
-优先使用 `inspect_agent_tree`。它应该展示 run_id、root_id、parent_id、status、channel_status、当前步骤、未完成原因、失败原因、running_seconds、seconds_since_progress、artifact refs 和 work refs。
+创建回执只给本批 run ids、结果读取 refs 和 `await_lifecycle_event`。父级可以继续自己的工作，也可以
+结束当前回合；child 的进展、阻塞、权限申请和完成会作为结构化生命周期事件直接唤醒它。不要用 shell
+`sleep`、新建“巡检代理”或反复调用其它工具猜状态。
 
-## 等待与唤醒
+宿主内部 `agent_tree_status_payload` 会展示 run/parent/root、状态、heartbeat、当前步骤、失败原因和
+artifact refs，但这是运维状态投影，不是模型工具。用户可以通过 `/status` 和 TUI 看，恢复器也可以读；
+普通模型只消费创建回执和送到本层的 lifecycle event。
 
-不要高频反复 inspect，也不要用 shell `sleep`、`timeout /t` 或 `Start-Sleep` 模拟等待。
-模型侧没有“推动子代理”或周期巡场工具：父代理结束当前回合，child 的进展、完成、阻塞和权限申请会用
-真实生命周期事件直接唤醒它。显式 `/goal` 和普通主任务自己的有界 continuation 是主任务续跑，不是
-对子代理轮询。
+如果 child 是 `RUNNING`，说明 runner 已启动但尚未写回结果。provider/网络失败、进程崩溃、租约失活或
+明确超时由 heartbeat、typed retry 和 orphan reconciler 处理。它们只修执行可靠性，不判断工作质量。
 
-`create_subagents` 开了自动启动时，后台会对本批 run_id 跑一轮精确 dispatch，并启动对应 runner；它不走
-LLM watch 循环，避免无变化时反复耗费模型。主代理下一步应该继续自己能做的部分、按需 inspect，或结束
-本回合等待真实事件唤醒。
-这里的 dispatch 只是宿主内部自动启动引擎，不是模型可见工具；创建成功即自动启动，
-父代理不需要再做一次人工“推进”。
-后台自动启动必须继承父代理当前 `workspace_root`，不能用后台进程的 cwd 重新推导任务树；
-否则会出现父侧创建在一棵树、后台 dispatch 到另一棵树，run_id 全部查不到的假 `PLANNING`。
+## capability 阻塞与续跑
 
-如果树里看到子代理处于 `RUNNING/channel_OK`，这代表 runner 已启动但还没写回结果；不要把短时间
-`RUNNING` 当失败，也不要反复抢占式重派同一个 run_id。provider/网络、进程崩溃、租约失活或明确超时
-由 heartbeat、retry 和 orphan reconciler 处理；这些底座只恢复执行，不替模型判断质量。
+OPEN 或非法未闭合 capability request 是宿主掌握的结构化阻塞事实，优先于 provider 的普通
+`turn_end=completed`：本轮 child 必须保持 `BLOCKED/UNVERIFIED`，不能因为模型结束了这一轮就变成
+`DONE`。直属父级 grant 或 deny 后，宿主把同一个 run 重排为 `PENDING`、恢复 conversation link，并由
+裁决事件触发 dispatcher 续跑；不得另建 replacement，也不需要父级调用推动工具。
+
+主代理很少出现同类“挂掉”，是因为它通常已经拥有当前工作区，而且没有跨 child runner 的能力申请/
+裁决边界。child 过去看似挂掉，实质是“申请已落账—本轮被误关—裁决没有重新排队”三段状态断链。
 
 ## 路径与写权限
 
-用户明确保存目录或文件时，父代理必须在 `create_subagents.output_files` 中传递；批量创建时由每个负责
-写入的 item 分别声明 `item.output_files`。goal 中提到路径只作为普通上下文，不产生写权限。没有指定
-路径时使用系统分配的 task-local child output，父代理按返回的 refs 汇总。
+普通 child 自动继承直接父级的结构化产品写区；孙代理继续逐层继承同一上界，不能扩大到父级之外。
+因此项目目录本来就在父级 workspace 内时，父级无需为 child 重复申请或声明权限。
 
-## 取消
+`output_files` 仍应记录用户明确的目标文件/目录，批量创建时由负责写入的 item 分别声明；它负责交付
+身份、结果读取顺序和冲突锁，不是普通 child 唯一的写权限来源。goal 或 output_files 都不能把权限扩大到
+父级 workspace 外。命名 Audit/exact-scope worker 不继承普通产品写区，只使用其精确结构化授权。
 
-子代理卡住时，父代理使用 `cancel_subagents`：
+没有用户指定目标时，child 使用系统分配的 task-local work/output 路径，父级从创建回执或生命周期事件
+里的 `child_output_read_order`、`primary_artifact_refs`、`expected_outputs` 读取结果。
 
-1. 按 run_id/root/status 选择目标。
-2. 写 CANCELLED/ABANDONED 和审计。
-3. 废弃 active attempt。
-4. 尽量 interrupt/terminate 已知 pid/session。
-5. 父代理说明原因后自己接管、通过 `create_subagents` 创建替代者，或汇总已有结果。
+## 插话、取消与替代
+
+- 补充要求：`send_guidance(target, message)`，target 必须是当前代理的直属 child。
+- 停止：`cancel_subagents(run_id|run_ids, reason)`，只停止点名的直属 child。
+- 权限：`resolve_capability_requests(run_id, decision, reason, ...)`，只裁决直属 child。
+- child 的 child 由 child 自己管理；根代理不能越过中间层直接控制孙代理。
+- 已结束且目标仍有缺口时，可以创建职责明确的新 child，并用
+  `replacement_for_run_ids` 记录接管关系；不能把“再派一个”当状态查询。
+
+宿主恢复和运维代码可使用内部整树取消/恢复 primitive，但这些参数和入口不得重新进入模型 Schema。
 
 ## 汇总
 
-子代理内部 `final_report.md` 是诊断引用，不是用户最终交付。父代理读 refs 和必要正文后，
-根据真实工具结果自然汇总；如用户要求文件，写入当前 task `output/` 或用户指定目录并记录索引。
+child 的自然最终回复、typed lifecycle event 与真实 artifact refs 是父级汇总输入。推荐顺序：
 
-父代理汇总优先顺序：
+1. 创建回执或完成事件里的 `child_output_read_order`。
+2. 结构化结果里的 `primary_artifact_refs`、`expected_outputs` 和 artifact refs。
+3. 只有结构化 refs 缺失或损坏时，才把 run 内部报告当恢复证据。
 
-1. `create_subagents` / `inspect_agent_tree` 暴露的 `child_output_read_order`。
-2. 子代理结构化结果里的 `primary_artifact_refs`、`expected_outputs`、artifact refs；
-   `primary_artifact_stats` 只用于判断结果规模和补读优先级，不是硬性验收门。
-3. 只有这些 refs 缺失或损坏时，才读取内部 `work/agents/<run_id>/final_report.md`
-   这类审计文件做损坏修复证据；正常主链路不能依赖它。
+`work/agents/<run_id>/canonical_state.json`、`checkpoint.json`、`summary.md` 和内部
+`final_report.md` 是审计/恢复资料，不是正常状态面或默认汇总入口。普通文件/shell 工具若碰到这些路径，
+会返回结构化 child result index，模型应转读其中给出的产物 refs。
 
-运行中的子代理可以在树上展示 `summary_ref`、`checkpoint_ref`、`agent_work_dir` 这类进度 refs，
-但这些内部 refs 不会进入父代理的 `read_order`。父代理等待或查看状态时继续用
-`inspect_agent_tree`，不要把内部占位 `final_report.md` 当成可汇总结果。
-
-普通读文件、列目录和 shell 不应把 `work/agents/<run_id>/` 当状态看板；看状态用
-`inspect_agent_tree`。
-如果误读了内部状态路径，文件工具会给出结构化 `child_result_index_row`，父代理按其中
-`read_order` / `primary_artifact_refs` 改读结果产物即可。
+父级基于这些事实自然向用户汇报；普通任务没有机器质量验收器，也不要求 `VERIFIED` 才能结束。路径
+不存在、工具失败、越权或取消仍按客观事实如实暴露。
 
 ## Compact 后
 
-子代理从自己 agent run workspace 的通用 Compact continue packet、`checkpoint.json`、`state.json`
-和 canonical state 续接。父代理恢复任务时读 `work/state.json`、task progress 和
-`inspect_agent_tree` 返回的结构化状态；没有根任务级或子代理专用 Compact 包。只有缺证据或 refs
-损坏时，才深入读取具体子代理目录。
+每个代理都在自己的 workspace 使用同一通用 Compact。主代理恢复时读取 thread summary/raw tail、当前
+task 状态、未消费 lifecycle event 和 artifact refs；child 从自己的 canonical state/checkpoint 续接。
+不存在根任务专用、子代理专用或“查树后再推动”的第二套 Compact/恢复包。

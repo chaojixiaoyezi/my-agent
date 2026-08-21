@@ -71,6 +71,101 @@ def test_structured_output_worker_defaults_to_workspace_root():
     assert params.extra_write_roots == [str(Path("/tmp/project").resolve(strict=False))]
 
 
+def test_ordinary_child_inherits_workspace_without_output_files():
+    """普通 child 不需重复声明 output_files 才能写父工作区。"""
+    from agent_py_agent.agent.agent_core.orchestration.create_constraints import (
+        resolved_extra_write_roots,
+    )
+
+    agent = MagicMock()
+    agent._current_run_params = None
+    agent.subagents.workspace_root = Path("/tmp/project")
+    agent.subagents.workspace_roots = [Path("/tmp/project")]
+
+    roots = resolved_extra_write_roots(agent, {"goal": "实现页面"}, "实现页面")
+
+    assert roots == [str(Path("/tmp/project").resolve(strict=False))]
+
+
+def test_descendant_inherits_only_direct_parent_product_roots():
+    """孙代理从直接父级继承窄写区，不回退到 owner 大根。"""
+    from agent_py_agent.agent.agent_core.orchestration.create_constraints import (
+        resolved_extra_write_roots,
+    )
+
+    parent_dir = Path("/tmp/task-parent")
+    parent = SimpleNamespace(
+        id="subagent-parent",
+        task_dir=str(parent_dir),
+        agent_run_workspace_dir=str(parent_dir / "run"),
+        task_workspace_dir=str(parent_dir.parent),
+        allowed_write_roots=[str(parent_dir), "/tmp/project/narrow"],
+    )
+    agent = MagicMock()
+    agent._current_run_params = SimpleNamespace(run_id=parent.id)
+    agent.subagents.load.side_effect = lambda run_id: parent if run_id == parent.id else None
+    agent.subagents.workspace_root = Path("/tmp/project")
+    agent.subagents.workspace_roots = [Path("/tmp/project")]
+
+    roots = resolved_extra_write_roots(agent, {"goal": "继续实现"}, "继续实现")
+
+    assert roots == [str(Path("/tmp/project/narrow").resolve(strict=False))]
+
+
+def test_descendant_workspace_inheritance_prefers_runner_identity():
+    """并发 runner 的线程身份优先，不能被外层 Gateway 请求身份带偏。"""
+    from agent_py_agent.agent.agent_core.orchestration.create_constraints import (
+        resolved_extra_write_roots,
+    )
+    from agent_py_agent.agent.agent_core.runner.context import (
+        restore_current_subagent_context,
+        set_current_subagent_context,
+    )
+
+    parent_dir = Path("/tmp/task-parent")
+    parent = SimpleNamespace(
+        id="subagent-parent",
+        task_dir=str(parent_dir),
+        agent_run_workspace_dir=str(parent_dir / "run"),
+        task_workspace_dir=str(parent_dir.parent),
+        allowed_write_roots=["/tmp/project/narrow"],
+    )
+    agent = MagicMock()
+    agent._current_run_params = SimpleNamespace(run_id="gateway-root-request")
+    agent.subagents.load.side_effect = (
+        lambda run_id: parent if run_id == parent.id else (_ for _ in ()).throw(FileNotFoundError(run_id))
+    )
+    agent.subagents.workspace_root = Path("/tmp/project")
+    agent.subagents.workspace_roots = [Path("/tmp/project")]
+    previous = set_current_subagent_context(agent, run_id=parent.id)
+    try:
+        roots = resolved_extra_write_roots(agent, {"goal": "继续实现"}, "继续实现")
+    finally:
+        restore_current_subagent_context(agent, previous)
+
+    assert roots == [str(Path("/tmp/project/narrow").resolve(strict=False))]
+
+
+def test_exact_scope_child_does_not_inherit_parent_workspace():
+    """Audit/exact worker 仍保持精确空写根。"""
+    from agent_py_agent.agent.agent_core.orchestration.create_constraints import (
+        resolved_extra_write_roots,
+    )
+
+    agent = MagicMock()
+    agent._current_run_params = None
+    agent.subagents.workspace_root = Path("/tmp/project")
+    agent.subagents.workspace_roots = [Path("/tmp/project")]
+
+    roots = resolved_extra_write_roots(
+        agent,
+        {"goal": "只读来源", "_exact_allowed_tools": True, "extra_write_roots": []},
+        "只读来源",
+    )
+
+    assert roots == []
+
+
 def test_repair_file_task_with_output_ref_defaults_to_workspace_root():
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
@@ -137,6 +232,7 @@ def test_repair_task_uses_required_read_target_as_product_root(tmp_path):
     assert task.allowed_write_roots == [
         str(task.task_dir),
         str(target.parent.resolve(strict=False)),
+        str(tmp_path.resolve(strict=False)),
     ]
 
 
@@ -159,6 +255,7 @@ def test_goal_absolute_target_file_normalizes_write_root_to_parent(tmp_path):
     assert task.allowed_write_roots == [
         str(task.task_dir),
         str(target.parent.resolve(strict=False)),
+        str(tmp_path.resolve(strict=False)),
     ]
 
 
@@ -350,7 +447,8 @@ def test_items_without_output_files_get_task_local_child_output_ref(tmp_path):
     assert payload["child_result_index"][0]["read_order"] == []
     assert payload["child_output_read_order"][0]["expected_outputs"] == [first]
     assert payload["child_output_read_order"][0]["read_order"] == payload["child_result_index"][0]["read_order"]
-    assert payload["status_tool_call"]["tool"] == "inspect_agent_tree"
+    assert payload["next_action"]["action"] == "await_lifecycle_event"
+    assert "status_tool_call" not in payload
     assert "wait_tool_call" not in payload
     assert "subagent_workspace" not in payload
     assert "agent_work_dir" not in payload["tasks"][0]

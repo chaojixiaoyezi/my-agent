@@ -53,6 +53,9 @@ def render_dispatch_markdown(report: DispatchReport) -> str:
     return "\n".join(lines) + "\n"
 
 
+# LLM: This rendering is soft parent guidance only; it may name direct-child
+# controls but never a polling/inspection tool or a machine quality verdict.
+# 函数用途: 把未解决的 dispatch 记录渲染成父级可读的下一步提示。
 def _dispatch_completion_gate_lines(records: list[object]) -> list[str]:
     blockers = _dispatch_blocking_run_ids(records)
     lines = ["", "## Completion Gate", ""]
@@ -67,7 +70,7 @@ def _dispatch_completion_gate_lines(records: list[object]) -> list[str]:
         "- status: not_complete",
         "- completion_risk: true",
         f"- blocking_run_ids: {', '.join(blockers)}",
-        "- next_action: inspect, continue, cancel, takeover, or explain unresolved child runs before final user-facing completion.",
+        "- next_action: continue parent work, guide/cancel a direct child, create an explicit replacement, or explain unresolved runs before final user-facing completion.",
     ])
     return lines
 

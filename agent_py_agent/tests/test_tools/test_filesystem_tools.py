@@ -339,8 +339,7 @@ def test_read_file_routes_internal_agent_status_refs_to_agent_tree(tmp_path: Pat
     assert internal_result.ok is False
     assert internal_result.error_code == "WRONG_STATUS_SURFACE"
     assert payload["error"] == "internal_agent_status_ref"
-    assert payload["suggested_tool_call"]["tool"] == "inspect_agent_tree"
-    assert payload["suggested_tool_call"]["run_id"] == "subagent-123"
+    assert payload["next_action"] == "await_direct_child_lifecycle_event"
     assert payload["child_result_index_row"]["status"] == "DONE"
     assert payload["child_result_index_row"]["read_order"] == [str(child_output)]
     assert payload["child_result_index_row"]["primary_artifact_refs"] == [str(child_output)]
@@ -382,8 +381,7 @@ def test_list_files_routes_internal_agent_status_dirs_to_agent_tree(tmp_path: Pa
 
     assert result.ok is False
     assert result.error_code == "WRONG_STATUS_SURFACE"
-    assert payload["suggested_tool_call"]["tool"] == "inspect_agent_tree"
-    assert payload["suggested_tool_call"]["run_id"] == "subagent-123"
+    assert payload["next_action"] == "await_direct_child_lifecycle_event"
     assert payload["child_result_index_row"]["read_order"] == [str(child_output)]
 
 
@@ -430,8 +428,8 @@ def test_read_file_reports_active_child_declared_output_not_ready(tmp_path: Path
     assert result.ok is False
     assert result.error_code == "PATH_NOT_FOUND"
     assert payload["error"] == "active_child_output_not_ready"
-    assert payload["suggested_tool_call"]["tool"] == "inspect_agent_tree"
-    assert payload["status_tool_call"]["tool"] == "inspect_agent_tree"
+    assert payload["next_action"] == "await_direct_child_lifecycle_event"
+    assert "suggested_tool_call" not in payload
 
 
 def test_filesystem_tool_reports_missing_external_path_without_permission_claim():

@@ -41,7 +41,7 @@ def test_background_main_agent_tick_runs_due_policy(tmp_path, capsys) -> None:
     messages = agent.conversation_store.recent_messages(thread.thread_id)
     assert "background-main-agent tick reports=1" in output
     assert messages[-1].content == "后台主代理 CLI 汇报。"
-    assert "inspect_agent_tree" in backend.prompts[0]
+    assert "inspect_agent_tree" not in backend.prompts[0]
 
 
 def test_gateway_background_loop_runs_due_progress_policy(tmp_path) -> None:

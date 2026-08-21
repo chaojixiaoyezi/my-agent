@@ -140,6 +140,8 @@ def _step_for_strategy(
     return _manual_step(strategy)
 
 
+# LLM: 可恢复原 run 由系统 dispatcher 接续；恢复步骤不得附带模型 inspect 调用。
+# 函数用途: 为能复用 checkpoint 的失败 run 生成宿主自动续派步骤。
 def _dispatch_step(strategy: SubagentRecoveryStrategy) -> RecoveryOrchestrationStep:
     return RecoveryOrchestrationStep(
         run_id=strategy.run_id,
@@ -150,10 +152,6 @@ def _dispatch_step(strategy: SubagentRecoveryStrategy) -> RecoveryOrchestrationS
         next_actor="system_dispatcher",
         requires_dispatch=True,
         message="原 run 可续跑；系统调度器会复用原 checkpoint 和工作区继续，父代理无需手工推进。",
-        suggested_tool_call={
-            "tool": "inspect_agent_tree",
-            "run_id": strategy.run_id,
-        },
         result_refs=list(strategy.recovery_refs),
         blocked_by=list(strategy.blocked_by),
         strategy_snapshot=_strategy_snapshot(strategy),
@@ -198,6 +196,8 @@ def _takeover_step(
     )
 
 
+# LLM: leadership 恢复仍需人类/父级明确选择，但不能用已退役查树工具充当下一动作。
+# 函数用途: 为失联协调者生成需要明确新 leader 的恢复计划步骤。
 def _leadership_step(strategy: SubagentRecoveryStrategy) -> RecoveryOrchestrationStep:
     return RecoveryOrchestrationStep(
         run_id=strategy.run_id,
@@ -208,11 +208,6 @@ def _leadership_step(strategy: SubagentRecoveryStrategy) -> RecoveryOrchestratio
         next_actor="parent_agent",
         requires_human=True,
         message="coordinator/lead 失联需要明确新 leader；先生成 leadership recovery plan，再按子集 apply。",
-        suggested_tool_call={
-            "tool": "inspect_agent_tree",
-            "root_id": strategy.run_id,
-            "include_recovery": True,
-        },
         result_refs=list(strategy.recovery_refs),
         blocked_by=list(strategy.blocked_by),
         strategy_snapshot=_strategy_snapshot(strategy),

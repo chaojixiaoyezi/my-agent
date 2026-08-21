@@ -58,6 +58,7 @@ def test_grant_resolves_request_and_extends_write_boundary():
         assert payload["resolved"][0]["status"] == "GRANTED"
 
         reloaded = agent.subagents.load(task.id)
+        assert reloaded.status == "PENDING"
         assert reloaded.capability_requests[0].status == "GRANTED"
         assert reloaded.capability_grants, "grant 必须落进任务"
         # grant 即时生效:runner 写边界包含解锁目录(filesystem grant 自动并写工具)
@@ -79,9 +80,34 @@ def test_deny_closes_request_with_auditable_reason_and_wakes():
         assert payload["resolved"][0]["status"] == "CLOSED"
 
         reloaded = agent.subagents.load(task.id)
+        assert reloaded.status == "PENDING"
         assert reloaded.capability_requests[0].status == "CLOSED"
         assert reloaded.capability_requests[0].constraints["denial_reason"] == "写自己的 output 目录即可"
         assert reloaded.attributes["capability_resolution_wake"]["decision"] == "deny"
+
+
+def test_resolution_requeues_legacy_done_child_with_open_request():
+    """OPEN 请求是结构化阻塞事实，能纠正旧版误写的 DONE。"""
+    with tempfile.TemporaryDirectory() as td:
+        agent, task, _request = _agent_and_blocked_task(td)
+        task = agent.subagents.load(task.id)
+        task.status = "DONE"
+        task.verification_status = "VERIFIED"
+        task.failure_type = "capability_request"
+        agent.subagents.save(task)
+
+        result = _tool(agent).execute(
+            {"run_id": task.id, "decision": "grant", "reason": "继续同一任务"}
+        )
+        payload = json.loads(result.output)
+        reloaded = agent.subagents.load(task.id)
+
+        assert result.ok is True
+        assert payload["continuation"]["previous_status"] == "DONE"
+        assert payload["continuation"]["next_status"] == "PENDING"
+        assert reloaded.status == "PENDING"
+        assert reloaded.verification_status == "UNVERIFIED"
+        assert reloaded.failure_type == ""
 
 
 def test_grant_rejects_out_of_workspace_roots_structurally():
@@ -131,6 +157,58 @@ def test_request_id_mismatch_lists_actual_pending_ids():
         )
         # 有未决申请但 request_id 对不上 → 报错并列出真实 request_id 供自纠(不是笼统失败)
         assert not wrong.ok and request.id in wrong.output
+
+
+def test_parent_cannot_resolve_grandchild_capability_request():
+    from agent_py_agent.agent.agent_core.runner.context import (
+        restore_current_subagent_context,
+        set_current_subagent_context,
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        agent = SimpleAgent(
+            AgentConfig(enable_tools=True, memory_path="memory.jsonl", subagent_workspace="subs"),
+            Path(td),
+        )
+        parent = agent.subagents.create_run(goal="父", thought="", plan=["分工"])
+        child = agent.subagents.create_run(
+            goal="子",
+            thought="",
+            plan=["继续分工"],
+            parent_id=parent.id,
+            root_id=parent.id,
+        )
+        grandchild = agent.subagents.create_run(
+            goal="孙",
+            thought="",
+            plan=["申请权限"],
+            parent_id=child.id,
+            root_id=parent.id,
+        )
+        request = agent.subagents.lifecycle.record_capability_request(
+            grandchild.id,
+            RecordCapabilityRequestParams(
+                problem="目标目录不可写",
+                needed_capability="unlock_output_directory",
+                capability_type="filesystem",
+                path_scope=[str(Path(grandchild.task_workspace_dir) / "output")],
+            ),
+        )
+        previous = set_current_subagent_context(agent, run_id=parent.id)
+        try:
+            result = _tool(agent).execute(
+                {
+                    "run_id": grandchild.id,
+                    "decision": "deny",
+                    "reason": "越级裁决",
+                }
+            )
+        finally:
+            restore_current_subagent_context(agent, previous)
+
+        assert result.ok is False
+        reloaded = agent.subagents.load(grandchild.id)
+        assert next(item for item in reloaded.capability_requests if item.id == request.id).status == "OPEN"
 
 
 def test_cancelled_child_closes_leftover_open_request():

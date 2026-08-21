@@ -37,7 +37,6 @@ _STATEFUL_ORCHESTRATION_TOOLS = {
 }
 _DEPENDENT_ORCHESTRATION_TOOLS = {
     "create_subagents",
-    "inspect_agent_tree",
     "send_guidance",
 }
 _CONTENT_OUTPUT_TOOLS = {

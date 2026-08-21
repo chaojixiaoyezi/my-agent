@@ -172,17 +172,17 @@ def _internal_agent_status_ref(
     return None
 
 
+# LLM: 内部 agent 文件不是模型状态 API；拒绝结果只给事件等待和真实产物读取顺序，
+# 不能建议已从模型 surface 删除的 inspect 工具。
+# 函数用途: 把误读子代理内部状态文件转换成安全的结构化指引。
 def _internal_agent_status_payload(path: Path, run_id: str) -> dict[str, object]:
-    suggestion: dict[str, object] = {"tool": "inspect_agent_tree"}
-    if run_id:
-        suggestion["run_id"] = run_id
     payload: dict[str, object] = {
         "ok": False,
         "error": "internal_agent_status_ref",
-        "message": "This path is an internal agent status surface; do not list_files/copy it directly. The child's real output files are listed in child_result_index_row.read_order below — read_file those paths directly. Use inspect_agent_tree only for run status.",
+        "message": "This path is an internal agent status surface; do not list_files/copy it directly. Wait for the direct-child lifecycle event; the child's real output files are listed in child_result_index_row.read_order below.",
         "run_id": run_id,
         "path": str(path),
-        "suggested_tool_call": suggestion,
+        "next_action": "await_direct_child_lifecycle_event",
         "result_fields_to_read": ["child_result_index.read_order", "child_result_index.expected_outputs"],
     }
     result_surface = _internal_agent_result_surface(path, run_id)

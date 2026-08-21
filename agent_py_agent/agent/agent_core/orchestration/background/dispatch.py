@@ -150,6 +150,9 @@ def _background_process_startup_failure(request: _ProcessStartupFailureRequest) 
     return payload
 
 
+# LLM: Startup receipts notify the direct parent through lifecycle events and
+# must not advertise an agent-tree polling surface.
+# 函数用途: 生成持久子进程已接收本批 child 的结构化启动回执。
 def _background_process_started_payload(
     agent,
     request: _BackgroundDispatchRequest,
@@ -164,7 +167,7 @@ def _background_process_started_payload(
         "pid": process.pid,
         "log_path": _background_log_path(agent, request.launch_id),
         "acceptance_status": "accepted",
-        "summary": "subagent dispatch accepted by a durable process; runner state must be read from the agent tree",
+        "summary": "subagent dispatch accepted by a durable process; lifecycle changes will notify the direct parent",
     }
 
 
@@ -193,6 +196,9 @@ def _captured_backend_override(agent) -> object | None:
     return None
 
 
+# LLM: In-process startup uses the same event-driven receipt as subprocess
+# startup; thread creation must not restore model polling instructions.
+# 函数用途: 在线程内启动本批 runner，并返回等待生命周期事件的回执。
 def _start_inprocess_dispatch(
     agent,
     request: _BackgroundDispatchRequest,
@@ -214,7 +220,7 @@ def _start_inprocess_dispatch(
         "run_ids": request.run_ids,
         "launch_id": request.launch_id,
         "thread_name": thread.name,
-        "summary": "subagent dispatch accepted in-process; runner state must be read from the agent tree",
+        "summary": "subagent dispatch accepted in-process; lifecycle changes will notify the direct parent",
     }
     attach_mark_errors(payload, mark_errors or [])
     return payload

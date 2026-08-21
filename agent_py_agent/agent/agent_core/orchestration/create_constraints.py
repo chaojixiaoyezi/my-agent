@@ -18,6 +18,7 @@ from ...subagents.services.contract_identity import (
     idempotency_contract_identity_from_context_packs,
     repair_contract_identity_from_context_packs,
 )
+from ..runner.context import current_subagent_run_id
 from ..runner.ref_fields import params_output_refs
 from .create_context import (
     agent_workspace_roots,
@@ -43,6 +44,9 @@ def role_allows_direct_product_work(role: str, role_template_dirs: object = None
     return bool(snapshot.get("can_write"))
 
 
+# LLM: Explicit extra roots come only from structured parameters; goal prose
+# never widens authority, while ordinary inherited workspace is added later.
+# 函数用途: 读取调用方明确传入的额外写目录并去重，不解析自然语言目标。
 def merged_extra_write_roots(params: dict[str, object], goal: str) -> list[str]:
     roots: list[str] = []
     del goal
@@ -53,21 +57,92 @@ def merged_extra_write_roots(params: dict[str, object], goal: str) -> list[str]:
     return roots
 
 
+# LLM: Ordinary children inherit their direct parent's structured writable
+# workspace upper bound. Exact-scope workers opt out before any fallback, and
+# output refs remain delivery/locking facts rather than duplicate permission.
+# 函数用途: 计算新子代理真正可写的父级工作区与明确交付目录。
 def resolved_extra_write_roots(agent: object, params: dict[str, object], goal: str) -> list[str]:
     explicit = merged_extra_write_roots(params, goal)
-    if explicit:
+    if params.get("_exact_allowed_tools") is True:
         return explicit
-    target_roots = []
+    target_roots: list[str] = []
     if _has_structured_write_intent(params, goal):
         target_roots.extend(structured_output_write_roots(agent, params))
         target_roots.extend(_current_task_output_write_roots(agent, params))
         if _has_repair_write_intent(params):
             target_roots.extend(context_target_write_roots(agent, params))
         target_roots.extend(structured_task_output_write_roots(agent, params))
-    if target_roots:
-        return _unique_roots(target_roots)
+    inherited = _direct_parent_product_write_roots(agent)
     default_root = _default_workspace_product_root(agent, params, goal)
-    return [default_root] if default_root else []
+    return _unique_roots(
+        [*explicit, *target_roots, *inherited, *([default_root] if default_root else [])]
+    )
+
+
+# LLM: A descendant must inherit from its actual parent task, never widen back
+# to the owner's full workspace. Root agents have no parent task and therefore
+# use the manager's host-resolved workspace roots.
+# 函数用途: 取直接父级的产品写区；根代理则取当前 owner 工作区。
+def _direct_parent_product_write_roots(agent: object) -> list[str]:
+    manager = getattr(agent, "subagents", None)
+    current = getattr(agent, "_current_run_params", None)
+    run_id = current_subagent_run_id(agent) or str(
+        getattr(current, "run_id", "") or ""
+    ).strip()
+    if manager is not None and run_id:
+        try:
+            parent = manager.load(run_id)
+        except (FileNotFoundError, OSError, ValueError):
+            parent = None
+        if parent is not None and str(getattr(parent, "id", "") or "").strip() == run_id:
+            return _task_product_write_roots(parent)
+    raw_roots = getattr(manager, "workspace_roots", None)
+    roots = list(raw_roots) if isinstance(raw_roots, (list, tuple)) else []
+    primary = getattr(manager, "workspace_root", None)
+    if isinstance(primary, str | Path):
+        roots.insert(0, primary)
+    return _unique_roots(
+        str(Path(item).expanduser().resolve(strict=False))
+        for item in roots
+        if isinstance(item, str | Path)
+    )
+
+
+# LLM: Parent task internals (agent run/report directories) are control-plane
+# state, not inheritable product roots. If no external product root exists,
+# descendants stay inside the parent's canonical work/output directories.
+# 函数用途: 从父任务写根中剔除代理内部目录，保留可继承产品区。
+def _task_product_write_roots(task: object) -> list[str]:
+    internal_roots = [
+        _resolved_path(getattr(task, "task_dir", "")),
+        _resolved_path(getattr(task, "agent_run_workspace_dir", "")),
+    ]
+    roots: list[str] = []
+    for raw in getattr(task, "allowed_write_roots", None) or []:
+        path = _resolved_path(raw)
+        if path is None or any(
+            internal is not None and is_relative_to(path, internal)
+            for internal in internal_roots
+        ):
+            continue
+        roots.append(str(path))
+    if roots:
+        return _unique_roots(roots)
+    workspace = _resolved_path(getattr(task, "task_workspace_dir", ""))
+    if workspace is None:
+        return []
+    return [str(workspace / "work"), str(workspace / "output")]
+
+
+# LLM: Path parsing failures are absence of authority, never permission.
+# 函数用途: 将一个结构化路径安全解析为绝对路径。
+def _resolved_path(value: object) -> Path | None:
+    if not isinstance(value, str | Path) or not str(value).strip():
+        return None
+    try:
+        return Path(value).expanduser().resolve(strict=False)
+    except OSError:
+        return None
 
 
 def explicit_root_missing_write_root_error(agent: object, params: dict[str, object], goal: str) -> str:
@@ -171,7 +246,9 @@ def _manager_has_real_workspace(agent: object) -> bool:
     return isinstance(raw, str | Path)
 
 
-def _unique_roots(values: list[str]) -> list[str]:
+# LLM: 写根去重保持首次出现顺序，不能做路径父子折叠而意外扩大或缩小权限。
+# 函数用途: 清理并按原顺序去重一组路径文字。
+def _unique_roots(values) -> list[str]:
     result: list[str] = []
     for value in values:
         text = str(value or "").strip()

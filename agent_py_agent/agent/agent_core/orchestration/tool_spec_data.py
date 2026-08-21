@@ -20,7 +20,7 @@ _CREATE_PARAMETERS = {
     "covers": '该子代理负责的 coverage 清单项 id 列表(如 ["req-03"]):派工时绑定,子代理完成后系统按 id 自动把对应清单项标 done,不用你回头逐项标',
     "plan": "子代理初始步骤",
     "input_refs": "交给子代理读取的文件、URL 或 artifact refs",
-    "output_files": "用户明确指定的目标产物路径；没明确指定时不要从输入目录推断",
+    "output_files": "用户明确指定的目标产物路径，用于交付归属和冲突锁；没明确指定时不要从输入目录推断",
     "artifact_refs": "已有交付物或参考产物引用",
     "replacement_for_run_ids": "新子代理要接管的旧 run_id",
     "related_finding_id": "可选；把本次委派关联到当前会话中已经持久化的一个 Audit finding。程序只校验关系，是否调查和怎样调查仍由你决定",
@@ -38,7 +38,8 @@ _CREATE_PARAMETER_DETAILS = {
     "allowed_skills": "可选 Skill 名称或 stable_id 列表；创建时会解析为不可变快照引用，未知或禁用项整批拒绝。",
     "input_refs": "这是交给子代理的资料线索；单个子代理自己的输入放在对应 item.input_refs。",
     "output_files": (
-        "用户明确保存路径时必须填写，且批量派工要在每个写入 item 里分别填写；goal 文本里的路径不产生写权限。"
+        "用户明确保存路径时必须填写，且批量派工要在每个写入 item 里分别填写；"
+        "它记录交付身份与冲突范围，普通 child 的父级工作区写权由宿主继承。"
         "没有明确路径时可省略。阅读/分析目录是 input_refs，不是 output_files。"
         "协作阶段的中间产物优先放当前任务 work/child_outputs 或工具返回的默认路径；"
         "output_dir 更适合最终交付，或用户明确要求放到某个普通输出目录时使用。"
@@ -58,14 +59,8 @@ _CREATE_PARAMETER_DETAILS = {
 }
 _CREATE_EXAMPLES = [
     '{"tool":"create_subagents","goal":"实现用户认证模块并写到 platform/auth/,要可运行","output_files":["platform/auth/"]}',
-    '{"tool":"create_subagents","goal":"并行完成认证实现与资料核对","items":[{"goal":"实现注册登录模块","covers":["req-01"]},{"goal":"读资料B并写证据摘要","input_refs":["data/b.md"]}]}',
+    '{"tool":"create_subagents","goal":"并行完成认证实现与资料核对","items":[{"goal":"实现注册登录模块","output_files":["platform/auth/"]},{"goal":"读资料B并写证据摘要","input_refs":["data/b.md"],"output_files":["reports/b.md"]}]}',
 ]
-
-_INSPECT_TREE_PARAMETERS = {
-    "root_id": "可选：只查看某棵根代理树",
-    "run_id": "可选：查看某个 run 或它的子树",
-    "scope": "root_tree/own_subtree/subtree；省略时自动选择当前任务",
-}
 
 _OBSERVATION_PARAMETERS = {
     "thread_id": "会话线程 ID；不知道时可用 task_id 反查",

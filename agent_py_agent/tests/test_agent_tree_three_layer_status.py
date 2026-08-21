@@ -320,36 +320,6 @@ def test_main_agent_explicit_own_subtree_stays_in_current_task_workspace():
     assert payload["scope"] == "task_workspace"
 
 
-def test_inspect_agent_tree_projects_structured_live_summary_before_truncation():
-    from agent_py_agent.agent.agent_core.orchestration.tools.status import (
-        InspectAgentTreeTool,
-    )
-
-    class _Manager:
-        def kernel_snapshot(self, query):
-            return SubagentKernelSnapshot(
-                schema_version="subagent_kernel_snapshot.v1",
-                root_id="current-root",
-                scope=query.scope,
-                runs=[
-                    SubagentKernelRun(
-                        run_id="child-retry",
-                        parent_run_id="current-root",
-                        status="BLOCKED",
-                    )
-                ],
-            )
-
-    class _Agent:
-        _current_run_task_workspace = "/tmp/home/tasks/current-task"
-        subagents = _Manager()
-
-    result = InspectAgentTreeTool(_Agent()).execute({"scope": "own_subtree"})
-    policy = result.result_envelope["tool_output_policy"]
-
-    assert "child-retry" in policy["live_prompt_output"]
-    assert "takeover_candidates" in policy["live_prompt_output"]
-    assert "task_workspace" in policy["live_prompt_output"]
 
 
 def test_subagent_runner_can_only_inspect_own_subtree_even_with_root_params():

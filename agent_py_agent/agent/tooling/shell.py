@@ -140,21 +140,21 @@ def _parsed_command_or_error(tool_name: str, raw_command: object) -> str | ToolH
         return ToolHandlerOutcome(tool_name, False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
 
 
+# LLM: shell 不能成为读取子代理内部状态的旁路；命中时只返回事件等待与交付
+# refs 提示，不暴露模型轮询工具。
+# 函数用途: 识别并拒绝通过命令行窥探 work/agents 内部状态文件的操作。
 def _internal_agent_status_command(command: str) -> dict[str, object] | None:
     normalized = command.replace("\\", "/")
     if not _INTERNAL_AGENT_PATH_RE.search(normalized):
         return None
     run_match = _INTERNAL_AGENT_RUN_RE.search(normalized)
     run_id = run_match.group("run_id") if run_match else ""
-    suggestion: dict[str, object] = {"tool": "inspect_agent_tree"}
-    if run_id:
-        suggestion["run_id"] = run_id
     return {
         "ok": False,
         "error": "internal_agent_status_ref",
-        "message": "Shell commands must not inspect internal work/agents status files. Use inspect_agent_tree for run status, then read child_result_index.read_order or declared output files for child results.",
+        "message": "Shell commands must not inspect internal work/agents status files. Wait for the direct-child lifecycle event, then read child_result_index.read_order or declared output files for child results.",
         "run_id": run_id,
-        "suggested_tool_call": suggestion,
+        "next_action": "await_direct_child_lifecycle_event",
         "result_fields_to_read": [
             "child_result_index.read_order",
             "child_result_index.expected_outputs",
@@ -744,7 +744,7 @@ def _build_shell_tool_model_spec(
                 "Prefer write_file for file changes instead of shell redirection.",
                 "Do not use rm/rmdir/unlink. Delete one text file with apply_patch; route directory or bulk deletion through task_trash.",
                 "Files written under /tmp inside the owner-scoped sandbox are kept in the task workspace .sandbox-tmp directory and survive across tool calls and requests; still keep final deliverables in the selected workspace, not in /tmp.",
-                "Use wait for pure delays such as sleep 120 while waiting for subagent progress.",
+                "Do not run sleep or polling commands for subagent progress; end the turn and let the host lifecycle event resume the direct parent.",
                 "盯守/轮询数据流→用 watch_stream,禁自写轮询脚本(无游标持久/覆盖账目,实测误报泛滥)。",
             ),
             keywords=("shell", "command", "terminal", "bash", "cmd", "script"),

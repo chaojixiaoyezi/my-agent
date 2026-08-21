@@ -17,6 +17,7 @@ from agent_py_agent.agent.subagents.model_capabilities import (
     is_pending_capability_status,
 )
 from agent_py_agent.agent.subagents.models import (
+    CapabilityGrant,
     CapabilityRequest,
     SubAgentParsedOutput,
     SubAgentTask,
@@ -276,6 +277,90 @@ def test_record_runner_result_keeps_tool_created_open_request_blocked(capability
     assert capability_task.failure_type == "capability_request"
     assert capability_task.capability_requests[0].status == "OPEN"
     assert any("route_capability_request" in item for item in capability_task.blockers)
+
+
+def test_unstructured_completed_turn_cannot_close_tool_created_open_request(
+    capability_manager,
+    capability_task,
+):
+    """宿主 completed 不能覆盖工具已落盘的 OPEN 申请。"""
+    capability_task.capability_requests.append(
+        CapabilityRequest(
+            id="capreq-unstructured",
+            from_run_id=capability_task.id,
+            problem="需要写入父级工作区。",
+            needed_capability="filesystem",
+            requested_tools=["write_file"],
+            status="OPEN",
+        )
+    )
+    capability_manager._tasks[capability_task.id] = capability_task
+
+    result = capability_manager.runner_result.record_runner_result(
+        _rrr(
+            run_id="run-123",
+            dry_run=False,
+            ok=True,
+            message="runner 本轮结束: completed",
+            turn_end_reason="completed",
+            structured_output=None,
+            actual_tools=["capability_request"],
+        )
+    )
+
+    assert result.status == "BLOCKED"
+    assert capability_task.failure_type == "capability_request"
+    assert result.turn_end_reason == "blocked"
+    assert capability_task.progress < 1.0
+    output = json.loads(Path(capability_task.output_json).read_text(encoding="utf-8"))
+    assert output["status"] == "BLOCKED"
+    assert output["turn_end_reason"] == "blocked"
+
+
+def test_fresh_grant_after_final_capability_tool_requeues_same_run(
+    capability_manager,
+    capability_task,
+):
+    """这一轮申请并获授权后立即收口，应续跑同一 run。"""
+    capability_task.runner_last_attempt_at = 100.0
+    capability_task.capability_requests.append(
+        CapabilityRequest(
+            id="capreq-granted",
+            from_run_id=capability_task.id,
+            problem="需要写入父级工作区。",
+            needed_capability="filesystem",
+            requested_tools=["write_file"],
+            status="GRANTED",
+        )
+    )
+    capability_task.capability_grants.append(
+        CapabilityGrant(
+            id="capgrant-fresh",
+            request_id="capreq-granted",
+            grant_to_run_id=capability_task.id,
+            tools=["write_file"],
+            created_at=101.0,
+        )
+    )
+    capability_manager._tasks[capability_task.id] = capability_task
+
+    result = capability_manager.runner_result.record_runner_result(
+        _rrr(
+            run_id="run-123",
+            dry_run=False,
+            ok=True,
+            message="runner 本轮结束: completed",
+            turn_end_reason="completed",
+            structured_output=None,
+            actual_tools=["capability_request"],
+        )
+    )
+
+    assert result.status == "PENDING"
+    assert capability_task.failure_type == "capability_request"
+    assert result.turn_end_reason == "completed"
+    assert capability_task.ended_at == 0.0
+    assert capability_task.progress < 1.0
 
 
 def test_legacy_request_status_does_not_silently_close(capability_manager, capability_task):

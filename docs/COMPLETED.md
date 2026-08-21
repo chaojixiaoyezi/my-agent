@@ -14,8 +14,13 @@
 - 同日递归控制面继续按 会话运行时 收口：删除 create 后周期性 LLM 巡场和 wait helper；`send_guidance` 只允许
   当前代理给一个直接 child 发送 `target + message`，用户插入主代理仍走 active turn。后台续跑身份改为
   task-bound，TUI 后台 notice 改为立即/每秒独立块，批量 child 的 `output_files` 获得完整嵌套 schema。
-  这解决了同 thread 旧任务串权、后台更新丢失和“goal 写了路径却没有写权限”；真实 8080 交付仍在
-  ROADMAP，未提前标记通过。
+  这解决了同 thread 旧任务串权和后台更新丢失；随后普通 child 工作区继承又消除了“父级能写、child
+  却必须重复声明权限”的断层。真实 8080 交付仍在 ROADMAP，未提前标记通过。
+- 同日首轮 `.7` 原样任务定位并修复 capability 断链：OPEN 请求现在优先于 provider 的普通 completed
+  收尾，child 会保持 `BLOCKED`；直属父级 grant/deny 后原 run 自动回到 `PENDING`，由同一生命周期链
+  续跑，不再需要模型巡检或推动。普通 child 逐层继承父级结构化工作区上界，`output_files` 回归交付身份
+  与冲突锁职责。未注册的 `InspectAgentTreeTool`、Schema、公开导出和专用测试已删除；内部状态投影继续
+  服务 `/status`、TUI 与恢复。当前只代表本地实现和定向回归完成，真机结论仍以 ROADMAP 为准。
 - TUI 灰色层级已按 终端交互 的容器级 `dimColor` 语义修正：思考 Markdown 的普通文字、粗体、代码和
   链接以及 `Ctrl+O` 折叠提示都由最终浅灰 role 接管，不再只染括号或行前缀。鼠标左键拖选松手继续
   自动复制；tmux 路径按 会话运行时 统一使用 `load-buffer -w`，iTerm2 不再退化成只写内部 buffer。

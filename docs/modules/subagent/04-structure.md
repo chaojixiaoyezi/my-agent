@@ -55,6 +55,9 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   `services/hierarchy/tool_policy.py`。
 - `tool_policy.scheduled_child_tools` 先整理显式请求与角色候选，再统一与父工具集合求交集。
   worker 随后移除 child-creation 工具；coordinator 不做额外扩权。所有后代因此只能沿树继续减法。
+- 角色默认、显式 grant、历史快照与递归继承在进入模型工具面前共用
+  `active_model_subagent_tools`；它删除已退休的查树/手动调度工具并保持顺序去重。显式
+  `allowed_tools=[]` 保持为空，只有缺省值 `None` 才从角色模板派生候选工具。
 - task-local child 虽保存父 conversation/task id 作为结构化 lineage，但工具准入读取其既有
   `context_scope=task_local`，不进入主 conversation execution lane 的防双执行判断。
 - 这条链复用现有 role/template/scheduler，没有新增研究型、编码型、测试型等底层 Agent 分类，
@@ -94,7 +97,8 @@ SimpleAgent orchestration tool
   -> services/persistence writes canonical state
   -> runner worker runs model/tool loop
   -> services/runner_result_service.py records result/artifacts/status
-  -> parent inspects tree / cancels / takes over / summarizes
+  -> host emits one lifecycle event to the direct parent
+  -> parent optionally guides/cancels/resolves that child, then summarizes
 ```
 
 ## 入口
@@ -118,9 +122,11 @@ SimpleAgent orchestration tool
 - 父级自身的权威 run/current attempt 若为 `unknown`，child lifecycle 通知继续留在 durable queue，但宿主
   不反复挂载父代理，也不创建替代父代理。人工核对并显式恢复后，原通知再唤醒同一父级；这与根代理、
   子代理管理孙代理完全同构。模型工具面没有“催促/推动”工具，只有事件通知、单 child 插话和取消。
-- `agent/agent_core/orchestration/`：主代理模型可见的统一 `create_subagents`、`inspect_agent_tree`、
-  `send_guidance`、`cancel_subagents` 与 capability 处理入口。创建即由宿主自动启动；
+- `agent/agent_core/orchestration/`：模型可见的统一 `create_subagents`、`send_guidance`、
+  `cancel_subagents` 与直属 capability 处理入口。创建即由宿主自动启动；
   `dispatch/scheduler` 只保留为内部执行引擎，不再注册成模型工具。
+- `agent/agent_core/agent_tree/status.py`：`/status`、TUI、恢复和诊断共用的内部树投影；旧
+  `orchestration/tools/status.py` 与 `InspectAgentTreeTool` 已删除，不能从内部 projection 反向恢复模型工具。
 - `cli/gateway_loops.py::_GatewayOrphanReconciler`：不执行模型的独立周期控制器；从 owner
   投影发现未完成 run，再调用 orchestration 层现有的结构化孤儿监督。它与后台主代理的 LLM
   scheduler 分线程运行，但不建立第二套恢复状态机。
@@ -168,6 +174,9 @@ SimpleAgent orchestration tool
   `GRANTED` 代表已授权且可避免重复申请，`GAP` 和 `CLOSED` 是当前终态；旧
   `RESOLVED`、`APPROVED`、`REJECTED` 不再被 kernel、protocol、runner、board 或
   runner context 静默当成当前终态。
+- OPEN capability request 优先于 provider 的普通 completed 收尾并把 child 投影为 BLOCKED。直属父级
+  grant/deny 后，裁决入口把同一 run 重排为 PENDING、恢复 conversation task link，再由 lifecycle event
+  触发内部 dispatcher；禁止另建 replacement 或要求模型调用推进工具。
 - capability route 自动匹配只读结构化能力字段：`needed_capability`、requested tool/skill/mcp/
   command、constraints 和 scope。任务目标、问题描述、期望输出、证据摘要这类自然语言
   只用于人类审计和模型理解，不能参与自动 grant query。
@@ -176,6 +185,8 @@ SimpleAgent orchestration tool
 - 当前 run 没有用户显式指定输出目录时，`output_files` / `output_refs` / `artifact_refs`
   里的相对路径默认归一到当前 task `output/`；项目文件写入必须来自明确项目路径、
   修复合同、目标 refs 或 `extra_write_roots` 等结构化授权。
+- 普通 child 逐层继承直接父级的结构化产品写区，后代不得扩大上界；`output_files` 负责交付身份、读取顺序
+  和冲突锁，不再是父级 workspace 内写入的唯一授权来源。命名 Audit/exact-scope worker 不走该继承。
 - owner projection：`owner_home/agents/<run_id>/state.json` 保存可重建索引和当前状态投影，用于
   tree、恢复、跨 session 查找以及 Gateway 冷启动后的 owner 发现；canonical state 仍在
   task workspace，投影不能取代它成为状态权威。
@@ -226,7 +237,11 @@ SimpleAgent orchestration tool
 
 ## Cancel And Takeover
 
-主代理可以用 `cancel_subagents` 按 run_id/root/status 取消下级。取消会写 CANCELLED/ABANDONED、废弃 active attempt、尽量 interrupt/terminate 已知 pid/session，并写审计记录。该工具只处理能被当前 canonical loader 正常读取的 run；账本损坏时返回结构化 load error，不私自扫描旧 locator 或其他目录兜底。主代理说明取消/接管原因后，可以继续汇总，或用 `create_subagents` 创建替代执行者。
+当前代理可以用 `cancel_subagents` 按精确 `run_id/run_ids` 取消自己的直属下级。模型 Schema 不提供
+root/status/整树筛选，也不能越过 child 代管孙代理。取消会写 CANCELLED/ABANDONED、废弃 active attempt、
+尽量 interrupt/terminate 已知 pid/session，并写审计记录。宿主恢复与运维仍保留内部批量 primitive；模型
+工具只处理 canonical loader 能读取且直接父子授权通过的 run。父级说明取消/接管原因后，可以继续汇总，
+或用 `create_subagents` 创建替代执行者。
 
 takeover replacement 的来源权威入口是 `context_bundle.takeover`：创建时由
 `services/takeover/refs.py::source_handoff` 生成有界结构化快照，包含 source run id、状态、
@@ -239,7 +254,8 @@ handoff 的 run 保持可读，但新创建/重新合并的 takeover 必须补�
 `create_subagents` 是所有层级唯一的创建入口，负责结构化目标、路径、写入安全和 lineage，并在创建后由
 宿主自动启动 child。业务质量要求可以随自然语言目标传递，但不能变成启动或结束硬门；父代理读取真实
 结果和 refs 后，自然决定汇总、补充 guidance、取消或再创建一个明确分工的 child。
-用户明确的保存路径必须通过顶层或逐 item 的 `output_files` 进入结构化写边界；goal 里的路径不授权写入。
+用户明确的保存路径应通过顶层或逐 item 的 `output_files` 记录交付和锁；普通 child 的权限上界来自父级
+workspace，goal 或 output_files 都不能扩大到该上界之外。
 
 ## Collaboration Capabilities
 

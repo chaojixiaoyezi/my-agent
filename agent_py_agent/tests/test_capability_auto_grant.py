@@ -174,6 +174,8 @@ def test_wake_sweep_auto_grants_and_redispatches():
         )
 
         assert sweep_applies_to_reason("subagent_capability_request_open")
+        assert sweep_applies_to_reason("subagent_capability_granted")
+        assert sweep_applies_to_reason("subagent_capability_denied")
         assert sweep_applies_to_reason("subagent_runner_finished")
         assert not sweep_applies_to_reason("incoming_channel_message")
 

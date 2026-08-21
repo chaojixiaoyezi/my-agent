@@ -1,6 +1,6 @@
 """统一授权查询门（3.txt B.4/B.5）。
 
-cancel、dispatch、inspect、resume、takeover、resolve capability、send guidance 共用
+cancel、dispatch、resume、takeover、resolve capability、send guidance 共用
 这一个门：操作名合法 → run_id 是 opaque identifier → 目标任务存在 →
 owner 一致性 → parent/delegation 可见性。每次操作过同一序列，杜绝
 "有的入口校验、有的入口裸奔"的缺口。
@@ -23,14 +23,13 @@ from ..common.opaque_id import OpaqueIdError, validate_opaque_id
 from ..runtime_db.repository import BINDING_ACTIVE
 from .models import SubAgentTask
 
-# LLM: send_guidance 与 cancel/inspect 共用同一 owner、parent chain 和 runtime authority 门；
+# LLM: send_guidance 与 cancel 共用同一 owner、parent chain 和 runtime authority 门；
 # 不能因为消息是软上下文就允许跨 owner、跨树或向不存在的 run 投递。
 # 常量用途: 列出允许进入统一子代理授权查询门的结构化操作名。
 OPERATIONS = frozenset(
     {
         "cancel",
         "dispatch",
-        "inspect",
         "resume",
         "takeover",
         "resolve_capability",
@@ -92,40 +91,41 @@ def authorize_operation(
     return target
 
 
-def authorize_tree_scope(
+# LLM: Model-facing recursive controls mirror one user/agent edge at a time.
+# The broader subtree authorization remains for host recovery and diagnostics;
+# callers using this seam may act only on their immediate child.
+# 函数用途: 在统一 owner/权威门之上，再限制模型只能操作直接下级。
+def authorize_direct_child_operation(
     manager: Any,
     request: OperationRequest,
-    root_id: str,
-) -> None:
-    """批量投影操作（inspect 的 root_id/status 扫描）的树级可见性门。
-
-    请求方 run_id 非空时，目标树根必须与请求方同树（root_id 相等）——
-    子代理只能看自己的树，不能扫兄弟树/父任务树。请求方无 run_id（主代理/
-    系统）→ 放行。owner 一致性同样强制。
-    """
-    operation = str(request.operation or "").strip()
-    if operation not in OPERATIONS:
-        raise AuthorizationError(f"未知操作: {operation!r}")
+    *,
+    target: SubAgentTask | None = None,
+) -> SubAgentTask:
+    task = authorize_operation(manager, request, target=target)
     requester_run_id = str(request.requester_run_id or "").strip()
     if not requester_run_id:
-        # 主代理/系统驱动，owner 由调用方保证（manager 边界即 owner 边界）。
-        return
-    if requester_run_id == str(root_id or "").strip():
-        # 树根（主代理域，无 subagent 记录）看自己的树 → 放行。
-        return
+        return task
+    parent_id = str(getattr(task, "parent_id", "") or "").strip()
+    if parent_id == requester_run_id:
+        return task
+    if not parent_id and _requester_is_root_control_plane(manager, requester_run_id):
+        return task
+    raise AuthorizationError(
+        f"{request.operation}: 只能操作当前代理直接创建的下级"
+    )
+
+
+# LLM: A requester absent from the subagent ledger is the root/main control
+# plane. This also keeps structurally parentless root-owned tasks operable.
+# 函数用途: 区分根主控与已登记的子代理请求方。
+def _requester_is_root_control_plane(manager: Any, requester_run_id: str) -> bool:
     try:
-        requester = manager.load(requester_run_id)
-    except FileNotFoundError as exc:
-        raise AuthorizationError(
-            f"{operation}: 请求方 run 不存在: {requester_run_id}"
-        ) from exc
-    requester_root = str(getattr(requester, "root_id", "") or requester_run_id)
-    if requester_root != str(root_id or "").strip():
-        raise AuthorizationError(
-            f"{operation}: 目标树根 {root_id!r} 不在请求方子树内"
-        )
-    _authorize_owner(requester, request)
-    _authorize_runtime_authority(manager, requester, request)
+        manager.load(requester_run_id)
+    except FileNotFoundError:
+        return True
+    except (OSError, ValueError):
+        return False
+    return False
 
 
 def _authorize_owner(task: SubAgentTask, request: OperationRequest) -> None:

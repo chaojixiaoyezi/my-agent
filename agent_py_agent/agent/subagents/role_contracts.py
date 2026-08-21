@@ -15,6 +15,7 @@ from .role_templates import (
     ROLE_BASE_TOOLS,
     ROLE_TEMPLATE_ATTRIBUTE_KEY,
     RoleTemplate,
+    active_model_subagent_tools,
     role_template_id_for_role,
     role_template_snapshot,
     template_for_role,
@@ -71,14 +72,17 @@ def _stored_role(original_role: str, contract_role: str, template_role: str, nor
     return contract_role
 
 
+# LLM: None means "derive role defaults" while an explicit empty list means
+# "no tools". Every non-None snapshot passes the canonical retirement filter.
+# 函数用途: 合并角色工具默认值，并保留显式空权限与已退休工具过滤语义。
 def _allowed_tools_for_role(
     role: str,
     tools: object,
     template: RoleTemplate | None,
 ) -> list[str] | None:
-    if tools not in (None, []):
+    if tools is not None:
         explicit = [str(item) for item in _list_value(tools) if item not in (None, "")]
-        return _stable_tools(explicit)
+        return active_model_subagent_tools(explicit)
     if template:
         return _stable_tools([*template.default_tools, *ROLE_BASE_TOOLS])
     if role in {REPORTER_ROLE, CHECKER_ROLE}:
@@ -114,5 +118,7 @@ def _list_value(value: object) -> list[object]:
     return [value]
 
 
+# LLM: Stable role defaults share the same retired-control filter as explicit grants.
+# 函数用途: 对角色默认工具做有序去重和退休入口清理。
 def _stable_tools(values: list[str]) -> list[str]:
-    return list(dict.fromkeys(item for item in values if item))
+    return active_model_subagent_tools(values)

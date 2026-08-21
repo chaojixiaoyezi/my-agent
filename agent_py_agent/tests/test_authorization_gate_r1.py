@@ -17,7 +17,6 @@ from agent_py_agent.agent.subagents.authorization_gate import (
     AuthorizationError,
     OperationRequest,
     authorize_operation,
-    authorize_tree_scope,
 )
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 
@@ -52,7 +51,7 @@ def _req(operation, run_id, requester_owner=OWNER):
 def test_authority_chain_clean_allows(ctx):
     task = authorize_operation(ctx.manager, _req("cancel", ctx.root.id))
     assert task.id == ctx.root.id
-    task = authorize_operation(ctx.manager, _req("inspect", ctx.child.id))
+    task = authorize_operation(ctx.manager, _req("dispatch", ctx.child.id))
     assert task.id == ctx.child.id
 
 
@@ -111,7 +110,7 @@ def test_missing_delegation_rejected_for_child(ctx):
         )
         conn.commit()
     with pytest.raises(AuthorizationError, match="权威 delegation 缺失/失配"):
-        authorize_operation(ctx.manager, _req("inspect", ctx.child.id))
+        authorize_operation(ctx.manager, _req("dispatch", ctx.child.id))
 
 
 def test_superseded_binding_rejected(ctx):
@@ -144,7 +143,7 @@ def test_run_without_authority_record_fails_closed(tmp_path):
         workspace, owner_id=OWNER, owner_home_dir=str(tmp_path / "home")
     )
     with pytest.raises(AuthorizationError, match="权威记录缺失"):
-        authorize_operation(modern, _req("inspect", run.id))
+        authorize_operation(modern, _req("dispatch", run.id))
 
 
 def test_missing_repo_with_home_fails_closed(ctx):
@@ -152,19 +151,3 @@ def test_missing_repo_with_home_fails_closed(ctx):
     ctx.manager.runtime_db = None
     with pytest.raises(AuthorizationError, match="权威库不可用"):
         authorize_operation(ctx.manager, _req("cancel", ctx.root.id))
-
-
-def test_tree_scope_validates_requester_authority(ctx):
-    # 请求方自身 run 权威损坏 → 树级扫描拒绝。
-    with ctx.repo._runtime_connection() as conn:
-        conn.execute(
-            "UPDATE agent_runs SET current_attempt_id = '' WHERE run_id = ?",
-            (ctx.child.id,),
-        )
-        conn.commit()
-    with pytest.raises(AuthorizationError, match="权威 current attempt 缺失"):
-        authorize_tree_scope(
-            ctx.manager,
-            OperationRequest(operation="inspect", run_id=ctx.child.id, requester_run_id=ctx.child.id),
-            "run-main",
-        )

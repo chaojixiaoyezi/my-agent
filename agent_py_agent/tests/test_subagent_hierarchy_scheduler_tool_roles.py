@@ -252,7 +252,7 @@ def test_hierarchy_schedule_worker_tools_are_a_strict_parent_subset(tmp_path):
     assert "create_subagents" not in worker.allowed_tools
     assert "schedule_child_subagents" not in worker.allowed_tools
     assert "dispatch_subagents" not in worker.allowed_tools
-    assert "inspect_agent_tree" in worker.allowed_tools
+    assert "inspect_agent_tree" not in worker.allowed_tools
     assert "web_fetch" not in worker.allowed_tools
 
 

@@ -12,7 +12,6 @@ from .agent_core import (
     CancelSubagentsTool,
     CapabilityRequestTool,
     CreateSubagentsTool,
-    InspectAgentTreeTool,
     RaiseEventTool,
     ResolveCapabilityRequestsTool,
     SendGuidanceTool,
@@ -959,7 +958,6 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
         return
     agent.tools.register(CreateSubagentsTool(agent))
     agent.tools.register(CancelSubagentsTool(agent))
-    agent.tools.register(InspectAgentTreeTool(agent))
     agent.tools.register(SendGuidanceTool(agent))
     agent.tools.register(ResolveCapabilityRequestsTool(agent))
 
@@ -971,7 +969,6 @@ __all__ = [
     "ResolveCapabilityRequestsTool",
     "CODING_SUBAGENT_TOOLS",
     "CreateSubagentsTool",
-    "InspectAgentTreeTool",
     "RaiseEventTool",
     "ONE_SHOT_TOOL_NAMES",
     "PARENT_PLANNER_READ_TOOLS",

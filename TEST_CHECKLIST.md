@@ -34,9 +34,13 @@
 - [ ] 真实主代理只用 `create_subagents` 创建并自动启动多个子代理；模型工具表不含手动 dispatch/schedule，
   父代理依据自然结果、真实工具事实和 refs 汇总交付。
 - [ ] 子代理状态变化只通过生命周期事件唤醒直接父级；没有周期性 LLM 巡场/wait 推进。`send_guidance`
-  只能用 `target + message` 给一个直接 child 插话，不能广播或越层代管孙代理。
-- [ ] 用户指定交付目录时，单项或每个写入 item 都通过结构化 `output_files` 获得写边界；只把路径写进
-  goal 不得提升权限。后台续跑必须绑定 exact task，不能复用同 thread 旧任务的 main run/attempt。
+  只能用 `target + message` 给一个直接 child 插话，不能广播或越层代管孙代理；模型工具表也不含
+  `inspect_agent_tree`，内部树只供 `/status`、TUI、恢复与诊断。
+- [ ] OPEN capability request 不能被普通 completed 收尾覆盖为 DONE；直属父级 grant/deny 后必须续跑
+  同一 run，取消/接管终态不得复活。根、子、孙只能 guidance/cancel/resolve 自己的直属 child；
+  模型 cancel 回执不得夹带整树状态，schema 不暴露 dry_run/kill_process 运维参数。
+- [ ] 普通 child 逐层继承父级结构化 workspace 上界；`output_files` 记录明确交付目标与冲突锁，但不能
+  扩大父级权限。后台续跑必须绑定 exact task，不能复用同 thread 旧任务的 main run/attempt。
 - [ ] child 完成事件在后台轮开始时只采样一次；采样后才创建的 DONE wake 保持 pending 并另开新轮。
   新鲜终态轮的自然回复不等待 root task status 充当第二验收器。
 - [ ] 主 run/current attempt 为 `unknown` 时 wake、observation、policy 原样保留且零模型调用、零自动重挂；

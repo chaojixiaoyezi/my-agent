@@ -1237,7 +1237,7 @@ def test_due_progress_policy_wakes_background_main_agent_and_sends_message(tmp_p
     assert len(reports) == 1
     assert len(backend.prompts) == 1
     assert "每小时帮我看一次进展" in backend.prompts[0]
-    assert "inspect_agent_tree" in backend.prompts[0]
+    assert "inspect_agent_tree" not in backend.prompts[0]
     assert "create_subagents" in backend.prompts[0]
     assert "dispatch_subagents" not in backend.prompts[0]
     sent = channels.adapter("internal").sent_messages
@@ -1402,7 +1402,7 @@ def test_thread_goal_waits_for_child_events_without_polling_or_chat_noise(tmp_pa
     )
     reports = scheduler.tick()
 
-    assert "inspect_agent_tree" in params.allowed_tools
+    assert "inspect_agent_tree" not in params.allowed_tools
     assert "create_subagents" in params.allowed_tools
     assert reports == []
     assert backend.prompts == []
@@ -5512,7 +5512,7 @@ def test_background_runtime_uses_configured_allowed_tools(tmp_path) -> None:
     scheduler.tick(now=73.0)
     prompt = backend.prompts[0]
 
-    assert "inspect_agent_tree" in prompt
+    assert "inspect_agent_tree" not in prompt
     assert "send_guidance" in prompt
     assert "dispatch_subagents" not in prompt
     assert "create_subagents" not in prompt
@@ -5589,7 +5589,7 @@ def test_background_runtime_applies_wake_policy_snapshot(tmp_path) -> None:
     )
     prompt = backend.prompts[0]
 
-    assert "inspect_agent_tree" in prompt
+    assert "inspect_agent_tree" not in prompt
     assert "dispatch_subagents: 只有需要推进" not in prompt
     assert "create_subagents: 创建" not in prompt
 

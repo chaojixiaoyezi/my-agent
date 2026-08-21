@@ -10,7 +10,11 @@ from typing import TYPE_CHECKING
 from ....common.audit_activation import structured_audit_source_worker_attributes
 from ....concurrency.interrupt import interrupt_by_name
 from ....runtime_errors import runtime_error_report
-from ....subagents.authorization_gate import OperationRequest, authorize_operation
+from ....subagents.authorization_gate import (
+    OperationRequest,
+    authorize_direct_child_operation,
+    authorize_operation,
+)
 from ....subagents.model_capabilities import capability_request_requires_parent_resolution
 from ....subagents.models import FailureType, normalize_task_status, task_status_in
 from ....subagents.process_control import terminate_pid_with_escalation
@@ -23,7 +27,7 @@ from ....tooling.models import (
     ToolHandlerOutcome,
     ToolRuntimePolicy,
 )
-from ...agent_tree.status import agent_tree_status_payload
+from ...runner.context import current_subagent_run_id
 from ..create_policy import _current_run_id
 from ..tool_specs import build_cancel_subagents_model_spec
 
@@ -35,7 +39,6 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class _CancelPayloadRequest:
     ok: bool
-    params: dict[str, object]
     cancelled: list[dict[str, object]]
     failed: list[dict[str, object]]
     skipped: list[dict[str, object]]
@@ -89,29 +92,29 @@ class _StatusFilterResult:
     error_payload: dict[str, object]
 
 
+# LLM: 模型侧 cancel 只接受 run_id/run_ids，并通过直接父子授权门；子树和状态
+# 批量取消仍由下面的宿主级 canonical primitive 保留，不能重新暴露进模型 schema。
+# 类用途: 让当前代理按名字停止自己的一个或多个直接子代理。
 class CancelSubagentsTool(BaseTool):
     model_spec = build_cancel_subagents_model_spec()
     runtime_policy = ToolRuntimePolicy(
-        effect_resolver=EffectResolverPolicy(
-            "dangerous",
-            by_parameter=(("dry_run", (("true", "read_only"), ("false", "dangerous"))),),
-        ),
+        # LLM: Model calls always perform a real direct-child interruption;
+        # host-only dry runs bypass this model ToolRuntime entirely.
+        # 配置用途: 模型的取消调用统一按真实副作用审批。
+        effect_resolver=EffectResolverPolicy("dangerous"),
         idempotency_policy=IdempotencyPolicy("operation"),
-        # seq 253 闭合：run_id/run_ids/root_id 是逻辑 ID（任务标识），不是物理
+        # seq 253 闭合：run_id/run_ids 是逻辑 ID（任务标识），不是物理
         # 路径——不标 logical 会被 scope 投影 resolve 成 workspace 假写根，与
         # workspace_root 物理重叠 → RuntimeConflictError → store_unavailable。
         resource_scopes=ResourceScopePolicy(
-            parameter_names=("run_id", "run_ids", "root_id"),
-            parameter_kinds={"run_id": "logical", "run_ids": "logical", "root_id": "logical"},
+            parameter_names=("run_id", "run_ids"),
+            parameter_kinds={"run_id": "logical", "run_ids": "logical"},
             # seq 266 #1：run_id/run_ids 是同一 agent_run 资源的两个参数入口
             # （handler 的 _explicit_run_ids 归一），必须锁同一 scope——
             # 否则 cancel(run_id=r-1) 与 cancel(run_ids=[r-1]) 可同时过锁。
             resource_domains={
                 "run_id": "agent_run",
                 "run_ids": "agent_run",
-                # root_id 是子树根（run_tree 域）；子树展开的具体 run 由
-                # effective_resource_scopes 在 claim 前锁到 agent_run 域。
-                "root_id": "run_tree",
             },
         ),
     )
@@ -119,49 +122,36 @@ class CancelSubagentsTool(BaseTool):
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
 
-    def effective_resource_scopes(
-        self,
-        arguments: dict[str, object],
-        write_boundary: dict | None,
-        workspace_root: object,
-    ) -> tuple[str, ...]:
-        """seq 266 #3：claim 前展开运行期目标（root 子树 / status 过滤），
-        锁到具体 agent_run 域——否则 cancel(root_id=X) 可与直接点名
-        cancel(run_id=child-1) 并发改同一 run。展开失败保守锁稳定域
-        （run_tree:{root_id} / cancel:pool），绝不空锁。
-        """
-        root_id = str(arguments.get("root_id") or "").strip()
-        statuses: set[str] = set()
-        try:
-            status_result = _status_filter(arguments.get("status"))
-            if status_result.ok:
-                statuses = status_result.statuses
-        except Exception:
-            statuses = set()
-        # 显式 run_id/run_ids 已由参数投影锁 agent_run 域；无 root 无 status
-        # 时目标集为空——均无需 hook 补充。
-        if not root_id and not statuses:
-            return ()
-        try:
-            tasks = _list_runs_for_cancel(self.agent)
-        except Exception:
-            return (f"logical:run_tree:{root_id}",) if root_id else ("logical:cancel:pool",)
-        if not tasks.ok:
-            return (f"logical:run_tree:{root_id}",) if root_id else ("logical:cancel:pool",)
-        ids: list[str] = []
-        if root_id:
-            ids.extend(_subtree_ids(tasks.tasks, root_id))
-        if statuses and not root_id:
-            ids.extend(
-                str(task.id)
-                for task in tasks.tasks
-                if task_status_in(task.status, statuses)
-            )
-        if not ids:
-            return ()
-        return tuple(dict.fromkeys(f"logical:agent_run:{item}" for item in ids))
-
+    # LLM: 拒绝宿主私有的扫描/进程参数，并在执行任何取消副作用前一次性
+    # 校验全部显式目标都是当前请求方的直接下级。
+    # 函数用途: 校验模型点名的直接子代理，再调用统一取消实现落状态和审计。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
+        private_parameters = [
+            name
+            for name in ("root_id", "status", "kill_process", "dry_run")
+            if name in params
+        ]
+        if private_parameters:
+            return _cancel_failure(
+                "模型只能用 run_id/run_ids 点名停止自己的直接下级；"
+                f"宿主私有参数不可用：{', '.join(private_parameters)}。",
+                "TOOL_INVALID_ARGUMENTS",
+            )
+        for run_id in _explicit_run_ids(params):
+            try:
+                authorize_direct_child_operation(
+                    self.agent.subagents,
+                    OperationRequest(
+                        operation="cancel",
+                        run_id=run_id,
+                        requester_owner=_requester_owner(self.agent),
+                        requester_run_id=_model_requester_run_id(self.agent),
+                    ),
+                )
+            except FileNotFoundError:
+                continue
+            except PermissionError as exc:
+                return _cancel_failure(str(exc), "TOOL_PERMISSION_DENIED")
         return execute_cancel_subagents(self.agent, params)
 
 
@@ -227,7 +217,7 @@ def execute_cancel_subagents(
             "next_action": {
                 "control": "system_auto_retry",
                 "run_ids": [item["run_id"] for item in retry_required],
-                "reason": "系统会复用原 run、checkpoint 和工作区继续执行；父代理可用 inspect_agent_tree 观察。",
+                "reason": "系统会复用原 run、checkpoint 和工作区继续执行；结果会通过生命周期事件送回直接父级。",
             },
         }
         return _cancel_failure(
@@ -236,10 +226,8 @@ def execute_cancel_subagents(
         )
     if bool(params.get("dry_run")):
         return _cancel_payload_result(
-            agent,
             _CancelPayloadRequest(
                 True,
-                params,
                 _dry_run_targets(targets),
                 [],
                 [],
@@ -288,10 +276,8 @@ def _execute_cancel_targets(
         if run_id not in target_ids
     ]
     return _cancel_payload_result(
-        agent,
         _CancelPayloadRequest(
             not failed,
-            params,
             cancelled,
             failed,
             skipped,
@@ -300,22 +286,16 @@ def _execute_cancel_targets(
     )
 
 
-def _cancel_payload_result(
-    agent: SimpleAgent,
-    request: _CancelPayloadRequest,
-) -> ToolHandlerOutcome:
+# LLM: Cancel receipts report only named outcomes. Returning the whole tree
+# would recreate inspect-by-dry-run through a mutating control tool.
+# 函数用途: 生成取消结果，不夹带兄弟、孙代理或整树状态。
+def _cancel_payload_result(request: _CancelPayloadRequest) -> ToolHandlerOutcome:
     payload = {
         "ok": request.ok,
         "dry_run": request.dry_run,
         "cancelled": request.cancelled,
         "failed": request.failed,
         "skipped": request.skipped,
-        "agent_tree": _compact_agent_tree(
-            agent_tree_status_payload(
-                agent,
-                {"root_id": request.params.get("root_id", "")},
-            )
-        ),
     }
     return ToolHandlerOutcome(
         "cancel_subagents",
@@ -482,6 +462,13 @@ def _load_cancel_target(agent: SimpleAgent, run_id: str) -> dict[str, object]:
 
 def _requester_owner(agent: SimpleAgent) -> str:
     return str(getattr(getattr(agent, "home_paths", None), "owner_id", "") or "")
+
+
+# LLM: 子代理线程身份优先于外层 gateway request；主代理没有 runner 身份时才
+# 使用当前请求 run/task/request id，避免孙代理把自己误认成根主控。
+# 函数用途: 返回模型侧递归控制动作的当前代理身份。
+def _model_requester_run_id(agent: SimpleAgent) -> str:
+    return current_subagent_run_id(agent) or _current_run_id(agent)
 
 
 def _retry_required_targets(
@@ -872,29 +859,3 @@ __all__ = [
     "cancel_subagent_task",
     "execute_cancel_subagents",
 ]
-
-
-def _compact_agent_tree(payload: dict[str, object]) -> dict[str, object]:
-    nodes = payload.get("nodes", [])
-    if isinstance(nodes, list):
-        return {
-            "nodes": [_compact_tree_node(node) for node in nodes if isinstance(node, dict)],
-            "counts": payload.get("counts", {}),
-        }
-    root = payload.get("tree")
-    if isinstance(root, dict):
-        return {"tree": _compact_tree_node(root), "counts": payload.get("counts", {})}
-    return {"counts": payload.get("counts", {})}
-
-
-def _compact_tree_node(node: dict[str, object]) -> dict[str, object]:
-    compact = {
-        "run_id": node.get("run_id") or node.get("id", ""),
-        "status": node.get("status", ""),
-        "channel_status": node.get("channel_status", ""),
-        "failure_type": node.get("failure_type", ""),
-    }
-    children = node.get("children", [])
-    if isinstance(children, list) and children:
-        compact["children"] = [_compact_tree_node(child) for child in children if isinstance(child, dict)]
-    return compact

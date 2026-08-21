@@ -399,9 +399,12 @@ def _runtime_handoff_section(payload: Any) -> str | None:
     return "\n".join(lines)
 
 
+# LLM: Compact continuation points to lifecycle events and refs, never a
+# retired tree-inspection or manual-dispatch tool.
+# 函数用途: 为 Compact 后的主代理生成避免重复派工的 child 提示。
 def _child_agent_instruction(active: list[dict[str, Any]]) -> str:
     if active:
-        return "- 已有子代理在当前任务树里；不要重复 create_subagents。先查看/等待/收集这些子代理结果，只有确实新增工作时才再派新的。"
+        return "- 已有子代理在当前任务树里；不要重复 create_subagents。先等待/收集生命周期事件和结果 refs，只有确实新增工作时才再派新的。"
     return "- 当前任务树已有子代理记录且没有活跃子代理；优先汇总 recent_agents 的结果，别被旧 artifact 带回重复等待。"
 
 

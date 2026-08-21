@@ -28,10 +28,7 @@ def test_recovery_orchestrator_records_dispatch_step_for_checkpoint(tmp_path: Pa
     assert step.orchestration_action == "dispatch_original_run"
     assert step.next_actor == "system_dispatcher"
     assert step.strategy_snapshot["recovery_refs"]
-    assert step.suggested_tool_call == {
-        "tool": "inspect_agent_tree",
-        "run_id": task.id,
-    }
+    assert step.suggested_tool_call == {}
     ledger = _ledger_rows(tmp_path)
     assert ledger[-1]["schema_version"] == "subagent_recovery_orchestration.v1"
     assert ledger[-1]["step_index"] == 1

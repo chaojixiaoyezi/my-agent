@@ -52,23 +52,7 @@ def test_create_subagents_model_spec_uses_template_index_not_full_prompt():
     item_schema = spec.input_schema["properties"]["items"]["items"]
     assert item_schema["required"] == ["goal"]
     assert item_schema["properties"]["output_files"]["type"] == "array"
-    assert "goal 文本里的路径不产生写权限" in spec.parameter_descriptions["output_files"]
-
-
-def test_inspect_agent_tree_model_schema_excludes_owner_wide_history():
-    from agent_py_agent.agent.agent_core.orchestration.tool_specs import (
-        build_inspect_agent_tree_model_spec,
-    )
-
-    model_spec = build_inspect_agent_tree_model_spec()
-    schema = model_spec.input_schema
-
-    assert schema["properties"]["scope"]["enum"] == [
-        "root_tree",
-        "own_subtree",
-        "subtree",
-    ]
-    assert "all" not in model_spec.parameter_descriptions["scope"]
+    assert "交付身份与冲突范围" in spec.parameter_descriptions["output_files"]
 
 
 def test_create_subagents_inherits_current_task_workspace(tmp_path):
@@ -115,7 +99,7 @@ def test_subagent_tools_are_not_registered_when_subagents_disabled(tmp_path):
 
 
 def test_model_surface_has_no_manual_subagent_dispatch_tools(tmp_path):
-    """创建会自动开跑；模型只看统一创建、查看、消息和打断入口。"""
+    """创建会自动开跑；模型只保留创建、消息和打断入口。"""
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
 
@@ -125,7 +109,13 @@ def test_model_surface_has_no_manual_subagent_dispatch_tools(tmp_path):
     )
 
     names = set(agent.tools.tools)
-    assert {"create_subagents", "inspect_agent_tree", "send_guidance", "cancel_subagents"} <= names
+    assert {
+        "create_subagents",
+        "send_guidance",
+        "cancel_subagents",
+        "resolve_capability_requests",
+    } <= names
+    assert "inspect_agent_tree" not in names
     assert "dispatch_subagents" not in names
     assert "schedule_child_subagents" not in names
 
@@ -395,280 +385,6 @@ class TestTaskProgressRegistryTool:
         assert payload["soft_feedback"]["blocking"] is False
         assert payload["soft_feedback"]["missing_evidence_item_ids"] == ["project-a"]
         assert "补证据" in payload["soft_feedback"]["message"]
-
-
-class TestInspectAgentTreeTool:
-    """测试只读代理树查看工具。"""
-
-    def test_returns_main_and_descendant_tree_without_dispatching(self, tmp_path):
-        """查看状态不能触发 dispatch，也不能清掉 pending_work。"""
-        import json
-
-        from agent_py_agent.agent.agent_core.orchestration_tools import InspectAgentTreeTool
-        from agent_py_agent.agent.subagents.manager import SubAgentManager
-
-        manager = SubAgentManager(tmp_path)
-        root = manager.create_run(goal="root", thought="", plan=["split"], role="coordinator")
-        child = manager.create_run(
-            goal="child",
-            thought="",
-            plan=["write"],
-            parent_id=root.id,
-            root_id=root.id,
-            depth=1,
-            role="worker",
-        )
-        child.current_tool = "write_file"
-        child.last_progress_summary = "写出阶段报告"
-        child.artifact_refs = ["artifact:report.md"]
-        child.blockers = ["等待收口"]
-        manager.save(child)
-        root.child_ids = [child.id]
-        manager.save(root)
-
-        mock_agent = MagicMock()
-
-        mock_agent.capability_router = CapabilityRouter()
-        mock_agent.subagents = manager
-        mock_agent._has_pending_work = True
-        mock_agent.dispatch_subagents = MagicMock()
-
-        result = InspectAgentTreeTool(mock_agent).execute({"root_id": root.id})
-        payload = json.loads(result.output)
-
-        assert result.ok is True
-        assert payload["effect"] == "read_only"
-        assert payload["main"]["agent_kind"] == "main_agent"
-        assert payload["nodes"][1]["task_id"] == child.id
-        assert payload["nodes"][1]["parent_run_id"] == root.id
-        assert payload["nodes"][1]["current_tool"] == "write_file"
-        assert payload["nodes"][1]["last_progress_summary"] == "写出阶段报告"
-        assert payload["nodes"][1]["artifact_refs"] == ["artifact:report.md"]
-        assert payload["nodes"][1]["blockers"] == ["等待收口"]
-        assert mock_agent.dispatch_subagents.call_count == 0
-        assert mock_agent._has_pending_work is True
-
-    def test_tree_includes_child_progress_ledger_summary(self, tmp_path):
-        """父代理查看 tree 时，应能看到子代理自己的进度摘要。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import InspectAgentTreeTool
-        from agent_py_agent.agent.subagents.manager import SubAgentManager
-        from agent_py_agent.agent.task_progress import write_task_progress
-
-        manager = SubAgentManager(tmp_path)
-        child = manager.create_run(goal="child", thought="", plan=["compare"], role="worker")
-        write_task_progress(
-            tmp_path,
-            child.id,
-            {
-                "summary": "已检查 3 个来源，剩 2 个。",
-                "next_action": "继续检查剩余来源。",
-                "items": [
-                    {"id": "source-1", "title": "来源 1", "status": "done"},
-                    {"id": "source-2", "title": "来源 2", "status": "in_progress"},
-                ],
-            },
-        )
-
-        mock_agent = MagicMock()
-
-        mock_agent.capability_router = CapabilityRouter()
-        mock_agent.subagents = manager
-        mock_agent.root = tmp_path
-        mock_agent._main_agent_run_id = "main"
-
-        payload = json.loads(InspectAgentTreeTool(mock_agent).execute({"root_id": child.id}).output)
-        progress = payload["nodes"][0]["progress_layer"]["task_progress"]
-
-        assert progress["summary"] == "已检查 3 个来源，剩 2 个。"
-        assert progress["counts"]["done"] == 1
-        assert progress["counts"]["in_progress"] == 1
-        assert progress["next_action"] == "继续检查剩余来源。"
-
-    def test_tree_includes_child_coverage_summary(self, tmp_path):
-        """父代理查看 tree 时，应能看到子代理覆盖了哪些对象。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import InspectAgentTreeTool
-        from agent_py_agent.agent.subagents.manager import SubAgentManager
-        from agent_py_agent.agent.task_progress import write_task_progress
-
-        manager = SubAgentManager(tmp_path)
-        child = manager.create_run(goal="child", thought="", plan=["compare"], role="worker")
-        write_task_progress(
-            tmp_path,
-            child.id,
-            {
-                "summary": "正在对比多个来源。",
-                "coverage": {
-                    "dimensions": ["查询", "写证据"],
-                    "targets": [
-                        {"id": "source-a", "checks": {"查询": "done", "写证据": "done"}},
-                        {"id": "source-b", "checks": {"查询": "done", "写证据": "pending"}},
-                    ],
-                },
-            },
-        )
-
-        mock_agent = MagicMock()
-
-        mock_agent.capability_router = CapabilityRouter()
-        mock_agent.subagents = manager
-        mock_agent.root = tmp_path
-        mock_agent._main_agent_run_id = "main"
-
-        payload = json.loads(InspectAgentTreeTool(mock_agent).execute({"root_id": child.id}).output)
-        coverage = payload["nodes"][0]["progress_layer"]["task_progress"]["coverage"]
-
-        assert coverage["counts"]["targets_total"] == 2
-        assert coverage["active_targets"][0]["id"] == "source-b"
-        assert coverage["active_targets"][0]["checks"]["写证据"] == "pending"
-
-    def test_repeated_tree_inspection_returns_cooldown_snapshot(self, tmp_path):
-        """短时间重复看同一棵树时，应返回缓存提示，避免主代理高频轮询。"""
-        import json
-
-        from agent_py_agent.agent.agent_core.orchestration_tools import InspectAgentTreeTool
-        from agent_py_agent.agent.subagents.manager import SubAgentManager
-
-        manager = SubAgentManager(tmp_path)
-        child = manager.create_run(goal="child", thought="", plan=["compare"], role="worker")
-        mock_agent = MagicMock()
-        mock_agent.capability_router = CapabilityRouter()
-        mock_agent.subagents = manager
-
-        tool = InspectAgentTreeTool(mock_agent)
-        first = json.loads(tool.execute({"root_id": child.id}).output)
-        second = json.loads(tool.execute({"root_id": child.id}).output)
-
-        assert "cooldown_active" not in first
-        assert second["cooldown_active"] is True
-        assert second["status"] == "POLL_COOLDOWN"
-        assert "inspect_agent_tree_recent_duplicate" in second["warnings"]
-        assert "不要高频轮询" in second["policy"]["next_step"]
-        assert second["policy"]["suggested_tool_call"] is None
-        assert second["direct_children"]["suggested_tool_call"] is None
-        assert "tasks" not in second
-
-    def test_repeated_tree_inspection_skips_full_kernel_render_when_state_unchanged(self, tmp_path):
-        """cooldown 内 task 状态没变时，不再完整读取和渲染代理树。"""
-        import json
-
-        from agent_py_agent.agent.agent_core.orchestration_tools import InspectAgentTreeTool
-        from agent_py_agent.agent.subagents.manager import SubAgentManager
-
-        manager = SubAgentManager(tmp_path)
-        child = manager.create_run(goal="child", thought="", plan=["compare"], role="worker")
-        original_snapshot = manager.kernel_snapshot
-        calls = []
-
-        def counted_snapshot(query=None):
-            calls.append(query)
-            return original_snapshot(query)
-
-        manager.kernel_snapshot = counted_snapshot
-        mock_agent = MagicMock()
-        mock_agent.capability_router = CapabilityRouter()
-        mock_agent.subagents = manager
-
-        tool = InspectAgentTreeTool(mock_agent)
-        first = json.loads(tool.execute({"root_id": child.id}).output)
-        second = json.loads(tool.execute({"root_id": child.id}).output)
-
-        assert "cooldown_active" not in first
-        assert second["cooldown_active"] is True
-        assert second["cooldown_source"] == "cached_tree_state_fingerprint"
-        assert len(calls) == 1
-
-    def test_repeated_tree_inspection_uses_configured_watch_interval(self, tmp_path):
-        """代理树重复查看 cooldown 应跟随 subagent_watch_interval_seconds。"""
-        import json
-        from types import SimpleNamespace
-
-        from agent_py_agent.agent.agent_core.orchestration_tools import InspectAgentTreeTool
-        from agent_py_agent.agent.subagents.manager import SubAgentManager
-
-        manager = SubAgentManager(tmp_path)
-        child = manager.create_run(goal="child", thought="", plan=["compare"], role="worker")
-        mock_agent = MagicMock()
-        mock_agent.capability_router = CapabilityRouter()
-        mock_agent.config = SimpleNamespace(subagent_watch_interval_seconds=240)
-        mock_agent.subagents = manager
-
-        tool = InspectAgentTreeTool(mock_agent)
-        tool.execute({"root_id": child.id})
-        second = json.loads(tool.execute({"root_id": child.id}).output)
-
-        assert second["cooldown_seconds"] == 240
-        assert second["policy"]["suggested_tool_call"] is None
-        assert second["direct_children"]["suggested_tool_call"] is None
-
-    def test_tree_inspection_cooldown_does_not_hide_status_changes(self, tmp_path):
-        """cooldown 只能压缩没变化的树，不能把已完成子代理继续显示成运行中。"""
-        import json
-
-        from agent_py_agent.agent.agent_core.orchestration_tools import InspectAgentTreeTool
-        from agent_py_agent.agent.subagents.manager import SubAgentManager
-
-        manager = SubAgentManager(tmp_path)
-        child = manager.create_run(goal="child", thought="", plan=["compare"], role="worker")
-        child.status = "RUNNING"
-        manager.save(child)
-        mock_agent = MagicMock()
-        mock_agent.capability_router = CapabilityRouter()
-        mock_agent.subagents = manager
-
-        tool = InspectAgentTreeTool(mock_agent)
-        first = json.loads(tool.execute({"root_id": child.id}).output)
-        child.status = "DONE"
-        child.progress = 1.0
-        child.artifact_refs = ["/tmp/report.md"]
-        manager.save(child)
-        second = json.loads(tool.execute({"root_id": child.id}).output)
-
-        assert "cooldown_active" not in first
-        assert "cooldown_active" not in second
-        assert second["nodes"][0]["status"] == "DONE"
-        assert second["child_result_index"][0]["primary_artifact_refs"] == ["/tmp/report.md"]
-
-    def test_tree_inspection_suggests_wait_for_pending_children(self, tmp_path):
-        """普通查看代理树时，运行中的子代理应引导到 wait，而不是继续轮询。"""
-        import json
-
-        from agent_py_agent.agent.agent_core.orchestration_tools import InspectAgentTreeTool
-        from agent_py_agent.agent.subagents.manager import SubAgentManager
-
-        manager = SubAgentManager(tmp_path)
-        child = manager.create_run(goal="child", thought="", plan=["compare"], role="worker")
-        child.status = "RUNNING"
-        manager.save(child)
-        mock_agent = MagicMock()
-        mock_agent.capability_router = CapabilityRouter()
-        mock_agent.subagents = manager
-        mock_agent._main_agent_run_id = "main"
-
-        payload = json.loads(
-            InspectAgentTreeTool(mock_agent).execute({"scope": "root_tree"}).output
-        )
-
-        assert payload["coordination_advice"]["suggested_tool_call"] is None
-        assert payload["policy"]["suggested_tool_call"] is None
-        assert "派工监督提醒/完成事件会自动唤醒" in payload["policy"]["next_step"]
-
-    def test_tree_inspection_cooldown_can_be_disabled(self, tmp_path):
-        import json
-
-        from agent_py_agent.agent.agent_core.orchestration_tools import InspectAgentTreeTool
-        from agent_py_agent.agent.subagents.manager import SubAgentManager
-
-        manager = SubAgentManager(tmp_path)
-        child = manager.create_run(goal="child", thought="", plan=["compare"], role="worker")
-        mock_agent = MagicMock()
-        mock_agent.capability_router = CapabilityRouter()
-        mock_agent.subagents = manager
-
-        tool = InspectAgentTreeTool(mock_agent)
-        tool.execute({"root_id": child.id, "cooldown_seconds": 0})
-        second = json.loads(tool.execute({"root_id": child.id, "cooldown_seconds": 0}).output)
-
-        assert "cooldown_active" not in second
 
 
 class TestRaiseEventTool:

@@ -21,23 +21,47 @@ REPORT_WRITE_TOOLS = ["write_file", "apply_patch"]
 SHELL_TOOL = "run_command"
 CAPABILITY_REQUEST_TOOL = "capability_request"
 MAIN_EVENT_TOOLS = ["raise_event"]
-COLLABORATION_TOOLS = [
-]
+COLLABORATION_TOOLS: list[str] = []
+RETIRED_MODEL_SUBAGENT_CONTROL_TOOLS = frozenset(
+    {"inspect_agent_tree", "dispatch_subagents", "schedule_child_subagents"}
+)
+# LLM: Role snapshots expose the same recursive edge-local control at every
+# depth. Do not add polling, manual dispatch, or ancestor-wide controls here.
+# 配置用途: worker 保留通用执行能力；coordinator 额外获得创建、直属插话、取消和权限裁决。
 ROLE_BASE_TOOLS = [
     *READ_ONLY_TOOLS,
     *REPORT_WRITE_TOOLS,
     SHELL_TOOL,
-    "inspect_agent_tree",
     *MAIN_EVENT_TOOLS,
     *COLLABORATION_TOOLS,
     CAPABILITY_REQUEST_TOOL,
 ]
 COORDINATOR_TOOLS = [
     "create_subagents",
-    "inspect_agent_tree",
     "send_guidance",
+    "cancel_subagents",
+    "resolve_capability_requests",
     *ROLE_BASE_TOOLS,
 ]
+
+
+# LLM: Every model-facing tool snapshot, including persisted legacy grants,
+# must pass this single retirement filter before prompt or execution exposure.
+# 函数用途: 从工具名列表中剔除已删除的子代理巡检和手动推动入口，并保持原顺序去重。
+def active_model_subagent_tools(value: object) -> list[str]:
+    if not isinstance(value, list | tuple | set):
+        return []
+    return [
+        tool
+        for tool in dict.fromkeys(
+            str(item or "").strip()
+            for item in value
+            if str(item or "").strip()
+        )
+        if tool not in RETIRED_MODEL_SUBAGENT_CONTROL_TOOLS
+    ]
+
+
 @dataclass(frozen=True)
 class RoleTemplate:
     id: str

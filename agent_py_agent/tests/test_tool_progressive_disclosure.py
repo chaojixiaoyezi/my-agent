@@ -148,7 +148,7 @@ def test_explicit_allowed_tools_are_structured_direct_exposure(tmp_path) -> None
             allowed_tools=["inspect_agent_tree", "get_goal"]
         )
     }
-    assert names == {"inspect_agent_tree", "get_goal"}
+    assert names == {"get_goal"}
 
 
 def test_core_tools_stay_in_main_catalog(tmp_path) -> None:

@@ -3,9 +3,10 @@
 ## 2026-08-21 递归创建、自动启动与自然收口
 
 - 根/子/孙代理只保留一个模型可见创建入口 `create_subagents`；创建后宿主自动启动。
-  `dispatch_subagents` 与 `schedule_child_subagents` 的模型工具、schema、注册和专用测试已删除。
+  `dispatch_subagents`、`schedule_child_subagents`、`wait` 与 `inspect_agent_tree` 的模型工具、schema、注册和
+  专用测试已删除。代理树仍是 `/status`、TUI、恢复与诊断的内部 projection。
 - 内部 dispatcher 仍保留为 Gateway/runner 的自动启动、租约、恢复与有界重试引擎；
-  父代理只需查看、发补充消息或取消，不再手工推进已创建 run。
+  父代理只接收 lifecycle event，必要时给直属 child 发补充消息或取消，不再手工查看/推进已创建 run。
 - 新增公共 `turn_end.reason` 六种轮结束原因，主代理、子代理、Gateway 和父级 wake 共用。
   模型自然最终回复不再被交付扫描、完成 marker、产物数或机器验收改写。
 - 删除普通子代理 acceptance ledger/verifier 与交付收口旁路。历史
@@ -20,9 +21,14 @@
   active-turn 输入链。
 - 删除创建后每 180 秒调用模型“巡场”的 `dispatch_supervision_auto` 与 `wait_tool.py`；child 的真实
   生命周期事件直接唤醒父级，底层 heartbeat/orphan/retry 继续只守进程可靠性。旧 policy 会被自动退休。
+- 历史配置、grant、角色模板和后代继承的工具快照共用一个退休过滤器，旧账本不能复活已删除的
+  查树/手动推进工具。显式空 `allowed_tools` 仍是零权限，不会被角色默认值悄悄扩权。
 - 修复同一 thread 多任务的后台权威串线：后台 run_id 优先使用 exact task id；历史线程级 run 属于旧任务
-  时不再创建跨任务 attempt。真实任务指定外部目录时，嵌套 `items[].output_files` schema 现会把路径作为
-  权限事实传入每个写入 child，goal 正文不承担授权。
+  时不再创建跨任务 attempt。普通 child 现在逐层继承父级结构化工作区上界；嵌套
+  `items[].output_files` 继续记录交付身份和冲突锁，不再承担父级已有目录的重复授权。
+- 首轮 `.7` 原样任务实锤 child“挂掉”是状态断链：OPEN capability request 被通用 completed 收尾覆盖为
+  DONE，grant 后原 run 又没有重新排队。当前 runner 以 OPEN 结构化事实优先投影 BLOCKED；直属父级
+  grant/deny 后同 run 回到 PENDING、恢复 task link，并由裁决 event 触发内部 dispatcher 续跑。
 
 ## 2026-08-12 子代理候选 scope 统一规范
 

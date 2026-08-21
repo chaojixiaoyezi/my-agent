@@ -16,8 +16,9 @@
   `items` 逐项声明不同目标和交付边界。重复 item 会整批拒绝，不会部分创建。
 - `allowed_tools` 只是工具偏好提示，不是安全边界；基础读写工具由系统按角色和目标补齐。
 - 子代理自己的资料线索写到对应 item 的 `input_refs`，公共资料才放顶层。
-- 用户明确了产物路径时必须写 `output_files`；批量派工由每个负责写入的 item 分别声明。
-  goal 中的路径只帮助理解，不授予写权限；没有明确路径时不要强造。
+- 普通 child 自动继承直接父级的结构化工作区上界。用户明确了产物路径时仍应写 `output_files`；批量派工
+  由每个负责写入的 item 分别声明。它负责交付身份、读取顺序和冲突锁，不是普通 child 唯一的权限来源；
+  goal 或 output_files 都不能把写权扩大到父级 workspace 外。没有明确路径时不要强造。
 - 子代理没有声明产物路径时，运行时会给它分配 task-local `work/child_outputs/...`
   默认产物路径，并在返回值里暴露 `child_output_read_order`。父代理汇总时优先读
   `child_output_read_order` / `primary_artifact_refs` / `expected_outputs`，同时可参考
@@ -35,14 +36,15 @@
 `items` 式的明确批量派工，不保留复制同一份可写任务的模型入口，也不保留
 “goal 或 items 二选一、因此两者都可空”的漏洞。
 
-## inspect_agent_tree
+## 宿主内部代理树投影（不是模型工具）
 
-用途：只读查看主代理、子代理、孙代理状态树。
+用途：给 `/status`、TUI、恢复器和运维诊断只读投影主代理、子代理、孙代理状态树。
 
-它不会创建、恢复或验收任务。正常运行的 child 会自主继续并在结束时自动通知直接父级；只是给运行中的
-代理补一句话时用 `send_guidance`，需要停止时用 `cancel_subagents`。
+旧 `InspectAgentTreeTool`、模型 Schema 和公开导出已删除。内部代码直接调用
+`agent_tree_status_payload`；它不会创建、推动或验收任务，也不能重新包装成模型工具。正常运行的 child
+自主继续，并用 lifecycle event 把进展、阻塞和结束通知直接父级。
 
-子代理状态、进度、channel 状态和内部 refs 都以这个工具为模型可见状态面。普通文件工具和
+子代理状态、进度、channel 状态和内部 refs 以这个内部 projection 为运维状态面。普通文件工具和
 shell 不应该读取或遍历 `work/agents/<run_id>/canonical_state.json`、`final_report.md`、
 `summary.md`、`checkpoint.json`、`memory_archive/` 等内部文件；这些文件是审计/恢复资料，不是父代理的正常汇总入口。
 如果父代理误读这些内部路径，文件工具会返回 `WRONG_STATUS_SURFACE` / `internal_agent_status_ref`
@@ -50,16 +52,16 @@ shell 不应该读取或遍历 `work/agents/<run_id>/canonical_state.json`、`fi
 `primary_artifact_refs` 或声明产物，不要继续猜内部目录。
 运行中或规划中的子代理不会把内部 `final_report.md` 放入父代理的 `read_order`；只有完成后
 缺少更好的结构化产物时，它才会作为兜底审计 refs 出现在读取顺序里。
-没有新事实时结束当前回合，不要循环 inspect，也不要用 shell 的 `sleep`。child 的生命周期事件会直接
-唤醒父级；模型侧没有额外的 wait/推进工具。
+模型没有查询入口，也不要用 shell 的 `sleep` 或另建巡检代理。child 的生命周期事件会直接唤醒父级；
+用户需要了解情况时由 `/status` 读取同一内部 projection。
 
 ## inspect_collaboration
 
 用途：只读查看协作 case，或列出当前/指定代理的待处理协作请求。
 
 它不是子代理运行状态面。没有待处理协作请求时返回正常空结果，不把“没有请求”当工具失败；
-如果参数里有结构化 `run_id` / `task_id` / `root_id`，或指定了真实存在的子代理 run id，
-返回值会附带 `suggested_tool_call: inspect_agent_tree`，让模型直接切到代理树状态面。
+它不能代替子代理状态面；如果目标实际是 child，模型应使用创建回执/生命周期事件中的 refs，或等待宿主
+继续通知，不能跳转到已经删除的巡检工具。
 
 ## 内部自动启动（不是模型工具）
 
@@ -75,9 +77,23 @@ shell 不应该读取或遍历 `work/agents/<run_id>/canonical_state.json`、`fi
 或 delivery 控制，也不会启动、推进或验收目标。孙代理由它的直接父代理管理；要停止 child 使用
 `cancel_subagents`。用户对主代理的插入走 active-turn 输入链，不通过这个模型工具。
 
-所有层级继续拆分时仍调用 `create_subagents`。运行中要补充上下文用 `send_guidance`，要查看用
-`inspect_agent_tree`，要停止用 `cancel_subagents`；已经结束而目标仍有缺口时，创建一个分工明确的新 child，
+所有层级继续拆分时仍调用 `create_subagents`。运行中要补充上下文用 `send_guidance`，要停止用
+`cancel_subagents`；状态变化由宿主事件送达。已经结束而目标仍有缺口时，创建一个分工明确的新 child，
 并通过 `replacement_for_run_ids` 保留接管关系。
+
+## cancel_subagents
+
+用途：当前代理按精确 `run_id/run_ids` 打断或取消自己直接创建的 child。
+
+模型 Schema 不提供 `root_id`、`status` 或整棵子树操作；child 的 child 由 child 自己管理。宿主恢复/运维
+仍可调用内部批量 primitive，但不得把它重新暴露给模型。
+
+## resolve_capability_requests
+
+用途：直属父级批准或拒绝直属 child 的结构化 capability request。
+
+OPEN 请求优先于普通 completed 收尾，child 保持 `BLOCKED`。grant/deny 完成后，宿主把同一个 run 自动
+排回 `PENDING` 并通过裁决 lifecycle event 触发续跑；工具不是“推动”按钮，也不会创建第二个 child。
 
 ## raise_event
 

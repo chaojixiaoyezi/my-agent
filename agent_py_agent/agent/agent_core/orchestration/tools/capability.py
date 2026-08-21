@@ -11,14 +11,24 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ....runtime_errors import runtime_error_report
-from ....subagents.authorization_gate import OperationRequest, authorize_operation
+from ....subagents.authorization_gate import (
+    OperationRequest,
+    authorize_direct_child_operation,
+)
 from ....subagents.model_capabilities import capability_request_requires_parent_resolution
-from ....subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
+from ....subagents.models import (
+    SUBAGENT_ENDED_STATUSES,
+    TaskStatus,
+    VerificationStatus,
+    task_status_in,
+)
+from ....subagents.runner_session_liveness import has_fresh_runner_session
 from ....subagents.services.lifecycle import RecordCapabilityGrantParams
 from ....tooling.models import (
     BaseTool,
@@ -28,6 +38,7 @@ from ....tooling.models import (
     ToolHandlerOutcome,
     ToolRuntimePolicy,
 )
+from ...runner.context import current_subagent_run_id
 from ..create_policy import _current_run_id
 from ..tool_specs import build_resolve_capability_requests_model_spec
 
@@ -67,8 +78,11 @@ def _resolve_param_error(run_id: str, decision: str, reason: str) -> ToolHandler
     return None
 
 
+# LLM: This model tool is recursive but edge-local: only the direct parent may
+# resolve a child request. Resolution persists audit facts and queues the same
+# run for continuation; it never grades output or acts as a generic push tool.
+# 类用途: 当前代理处理直属子代理能力申请的唯一显式入口；grant/deny 都让同一 run 自动续跑。
 class ResolveCapabilityRequestsTool(BaseTool):
-    # 类用途: 主代理模型处理子代理能力申请的唯一显式入口；grant/deny 都唤醒子代理。
     model_spec = build_resolve_capability_requests_model_spec()
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy(
@@ -100,7 +114,7 @@ class ResolveCapabilityRequestsTool(BaseTool):
             return invalid
         try:
             # 3.txt B.4：resolve capability 走统一授权查询门（owner + 子树）。
-            task = authorize_operation(
+            task = authorize_direct_child_operation(
                 self.agent.subagents,
                 OperationRequest(
                     operation="resolve_capability",
@@ -108,7 +122,7 @@ class ResolveCapabilityRequestsTool(BaseTool):
                     requester_owner=str(
                         getattr(getattr(self.agent, "home_paths", None), "owner_id", "") or ""
                     ),
-                    requester_run_id=_current_run_id(self.agent),
+                    requester_run_id=_model_requester_run_id(self.agent),
                 ),
             )
         except FileNotFoundError:
@@ -131,6 +145,14 @@ class ResolveCapabilityRequestsTool(BaseTool):
         self.agent.subagents.save(task)
         self._persist_grants(ctx, pending_grants)
         task = self.agent.subagents.load(run_id)
+        continuation = _queue_resolved_child_continuation(
+            self.agent,
+            task,
+            decision=decision,
+            resolved=resolved,
+            errors=errors,
+        )
+        task = self.agent.subagents.load(run_id)
         _wake_subagent(self.agent, _ResolveContext(task=task, decision=decision, params=params, reason=reason))
         payload = {
             "ok": bool(resolved) and not errors,
@@ -138,6 +160,7 @@ class ResolveCapabilityRequestsTool(BaseTool):
             "decision": decision,
             "resolved": resolved,
             "errors": errors,
+            "continuation": continuation,
         }
         return ToolHandlerOutcome(
             "resolve_capability_requests",
@@ -326,7 +349,7 @@ def _no_pending_result(task: Any, run_id: str, decision: str) -> ToolHandlerOutc
         "note": (
             "该子代理没有待裁决的能力申请(常规申请由机制层自动批准,GRANTED/CLOSED 的无需重复裁决),"
             "不必再调本工具。若它仍在运行，用 send_guidance 补充消息；"
-            "若已失败，先用 inspect_agent_tree 看系统自动恢复事实，只在用户要求或确认不应继续时 cancel_subagents。"
+            "系统会自动恢复可续跑故障并发生命周期事件；只在用户要求或确认不应继续时 cancel_subagents。"
         ),
     }
     return ToolHandlerOutcome(
@@ -334,14 +357,18 @@ def _no_pending_result(task: Any, run_id: str, decision: str) -> ToolHandlerOutc
     )
 
 
-# 函数用途: run_id 打错时给出真实子代理名册(有未决申请的排前、未终态次之),供模型自纠。
+# LLM: 名册只展示当前请求方的直接下级，不能因报错把兄弟树或孙代理 ID 泄露给模型。
+# 函数用途: run_id 打错时给出真实直属子代理名册，供模型自纠。
 def _known_children_hint(agent: Any) -> str:
     try:
         tasks = agent.subagents.list_runs()
     except Exception:
         return ""
+    requester_run_id = _model_requester_run_id(agent)
     rows: list[tuple[int, int, str, str]] = []
     for task in tasks:
+        if requester_run_id and str(getattr(task, "parent_id", "") or "") != requester_run_id:
+            continue
         open_requests = sum(
             1
             for request in (getattr(task, "capability_requests", None) or [])
@@ -357,6 +384,96 @@ def _known_children_hint(agent: Any) -> str:
         if run_id
     )
     return f"当前子代理: {listing}。用列表里的真实 run_id 重试。" if listing else ""
+
+
+# LLM: 子代理 runner 身份是递归父子关系的权威值；外层 gateway request 只在
+# 根主代理没有 runner 身份时兜底，不能让子代理借根请求越级裁决孙代理。
+# 函数用途: 返回当前模型可代表的代理 run id。
+def _model_requester_run_id(agent: Any) -> str:
+    return current_subagent_run_id(agent) or _current_run_id(agent)
+
+
+# LLM: capability 裁决是继续同一 child turn 的结构化控制事实。只要所有未决
+# 请求已闭合且没有活 runner，就把原 run 重排为 PENDING；绝不复活用户已经
+# cancel/abandon/takeover 的 run，也不根据模型回复文字猜测是否应该继续。
+# 函数用途: 把已完成的授权裁决转换成同一子代理的自动续跑状态。
+def _queue_resolved_child_continuation(
+    agent: Any,
+    task: Any,
+    *,
+    decision: str,
+    resolved: list[dict[str, object]],
+    errors: list[dict[str, object]],
+) -> dict[str, object]:
+    run_id = str(getattr(task, "id", "") or "").strip()
+    if not resolved or errors:
+        return {"status": "not_queued", "run_id": run_id, "reason": "resolution_incomplete"}
+    if any(
+        capability_request_requires_parent_resolution(getattr(item, "status", "OPEN"))
+        for item in (getattr(task, "capability_requests", None) or [])
+    ):
+        return {"status": "not_queued", "run_id": run_id, "reason": "requests_still_open"}
+    if task_status_in(
+        getattr(task, "status", ""),
+        {
+            TaskStatus.CANCELLED.value,
+            TaskStatus.ABANDONED.value,
+            TaskStatus.TAKEN_OVER.value,
+        },
+    ):
+        return {"status": "not_queued", "run_id": run_id, "reason": "run_closed_by_control"}
+    if has_fresh_runner_session(task):
+        return {"status": "already_running", "run_id": run_id, "reason": "fresh_runner_session"}
+    previous_status = str(getattr(task, "status", "") or "")
+    task.status = TaskStatus.PENDING.value
+    task.verification_status = VerificationStatus.UNVERIFIED.value
+    if str(getattr(task, "failure_type", "") or "") in {
+        "capability_request",
+        "permission_blocked",
+        "write_permission_blocked",
+    }:
+        task.failure_type = ""
+    attrs = dict(getattr(task, "attributes", {}) or {})
+    attrs["capability_resolution_continuation"] = {
+        "schema_version": "capability_resolution_continuation.v1",
+        "decision": decision,
+        "previous_status": previous_status,
+        "status": "queued",
+        "queued_at": time.time(),
+        "request_ids": [
+            str(item.get("request_id") or "")
+            for item in resolved
+            if str(item.get("request_id") or "").strip()
+        ],
+    }
+    task.attributes = attrs
+    agent.subagents.save(task)
+    _reactivate_child_conversation_link(agent, run_id)
+    return {
+        "status": "queued",
+        "run_id": run_id,
+        "previous_status": previous_status,
+        "next_status": TaskStatus.PENDING.value,
+    }
+
+
+# LLM: 旧版错误可能已把含 OPEN request 的 child link 写成 completed；裁决后的
+# PENDING run 必须回到 active 索引，但已被 control 关闭的 run 在上游已被排除。
+# 函数用途: 让授权后续跑重新出现在对应会话的活动任务索引中。
+def _reactivate_child_conversation_link(agent: Any, run_id: str) -> None:
+    store = getattr(agent, "conversation_store", None)
+    update = getattr(store, "update_task_status", None)
+    if not callable(update):
+        return
+    try:
+        update({"task_id": run_id, "status": "active"})
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "capability continuation task-link reopen failed (run_id=%s): %s",
+            run_id,
+            exc,
+            exc_info=True,
+        )
 
 
 # 函数用途: 找出该 run 需要父级裁决的请求（OPEN 或 fail-closed 的非法状态）。

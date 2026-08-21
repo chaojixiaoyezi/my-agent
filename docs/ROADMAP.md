@@ -36,6 +36,10 @@ tmux 左键复制已部署 `.7`；右键直接复制仍是本地候选。2026-08
 用户目录只写在 child goal 而未进入结构化权限，以及创建后周期性 LLM 巡场。当前已改为 task-bound
 后台 run、notice 立即/每秒独立块、`items[].output_files` 完整 schema，并删除自动巡场与 wait 工具；
 `send_guidance` 也收为只能向一个直接 child 插入消息。
+首轮原样任务还证明 OPEN capability request 会被通用 completed 收尾误写为 DONE，grant 后原 run 没有
+重新排队；模型因此误以为 child 已结束并自己接管。当前已改为结构化 OPEN 优先、grant/deny 后同 run
+自动续跑，普通 child 逐层继承父级工作区；旧 `inspect_agent_tree` 工具类与 Schema 也已彻底删除，内部
+代理树只服务 `/status`、TUI 和恢复诊断。
 
 待做：提交推送并部署 `.7`；由真实 TUI 验证 Working 动画、thinking 连续增量、页底自动跟随、
 离底不抢滚动、Compact 百分比、后续消息可见、右键复制和输入框粘贴。外层系统剪贴板仍须用户在已 attach
@@ -139,7 +143,7 @@ Gateway/Feishu，并完成本地 8899、MiniMax-M2.7 和两个既有真实飞书
 
 解决问题：旧链同时存在创建、手动派工、层级调度和机器验收，多套控制面让模型重复创建、等待或被宿主
 粗暴打断。当前已收敛为递归一致的父子关系：所有层级只用 `create_subagents` 创建并自动启动；父级只需
-查看、补充 guidance、取消/中断和自然汇总。主代理、子代理、Gateway 共用六类 `turn_end`，普通完成不再
+接收生命周期事件、补充 guidance、取消/中断和自然汇总。主代理、子代理、Gateway 共用六类 `turn_end`，普通完成不再
 依赖 `acceptance_checks`、`VERIFIED` 或模型生成的专用结果壳。
 
 待做：部署 `.7` 后只从真实 TUI 输入一次植物大战僵尸任务，观察 child 数量、自动启动、父级汇总、失败

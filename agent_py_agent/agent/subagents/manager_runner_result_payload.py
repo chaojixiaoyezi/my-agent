@@ -287,6 +287,9 @@ def _build_context_params(request: _ContextBuildRequest) -> _BuildContextParams:
     )
 
 
+# LLM: Build the payload only after structured runner state has been applied;
+# capability blockers may replace the provider's generic completed turn reason.
+# 函数用途: 先落任务状态，再用最终宿主事实组装 runner 结果。
 def apply_status_and_build_payload(
     params: RecordRunnerResultParams,
     extracted: _ApplyStatusParams,
@@ -309,17 +312,19 @@ def apply_status_and_build_payload(
         "status": params.status,
         "verification_status": params.verification_status,
         "failure_type": params.failure_type,
+        "actual_tools": list(params.actual_tools or []),
     }
     turn_end_reason = infer_turn_end_reason(
         explicit=params.turn_end_reason,
         runtime_status=_runtime_status_from_runner_result(params),
     )
-    extracted.task.turn_end_reason = turn_end_reason
-    extracted.turn_end_reason = turn_end_reason
-    params.turn_end_reason = turn_end_reason
     apply_runner_result_fields(
         RunnerResultFieldParams(extracted.task, result_meta, status_context, extracted.parsed, now)
     )
+    turn_end_reason = _effective_turn_end_reason(extracted.task, turn_end_reason)
+    extracted.task.turn_end_reason = turn_end_reason
+    extracted.turn_end_reason = turn_end_reason
+    params.turn_end_reason = turn_end_reason
     final_ok = result_meta["ok"]
     final_message = result_meta["message"]
     blockers = _runner_compute_blockers(final_ok, extracted.task.status, extracted.parsed, final_message)
@@ -352,3 +357,15 @@ def _runtime_status_from_runner_result(params: RecordRunnerResultParams) -> str:
     }:
         return "error"
     return "ok" if params.ok else "interrupted"
+
+
+# LLM: An OPEN capability request is host-owned lifecycle state. Projecting it
+# as blocked corrects only the turn reason; it does not inspect or grade output.
+# 函数用途: 防止通用 provider completed 覆盖已落盘的待授权阻塞。
+def _effective_turn_end_reason(task: object, inferred: str) -> str:
+    if (
+        str(getattr(task, "status", "") or "").strip() == TaskStatus.BLOCKED.value
+        and str(getattr(task, "failure_type", "") or "").strip() == "capability_request"
+    ):
+        return "blocked"
+    return inferred

@@ -28,8 +28,11 @@ def child_result_index(agent: object, tasks: list[object]) -> list[dict[str, obj
     return [_child_result_row(task) for task in tasks if _task_text(task, "id")]
 
 
+# LLM: Internal tree projections and lifecycle payloads share the same refs-first
+# delivery row; this helper is not a model-facing status tool.
+# 函数用途: 把内部代理树节点转换成父级可读取的紧凑产物索引。
 def child_result_index_from_nodes(nodes: list[dict[str, object]]) -> list[dict[str, object]]:
-    """Return the same compact index from inspect_agent_tree node rows."""
+    """Return the same compact index from internal agent-tree projection rows."""
     return [_child_result_node_row(node) for node in nodes if str(node.get("run_id") or "").strip()]
 
 

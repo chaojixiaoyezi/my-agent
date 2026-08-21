@@ -295,9 +295,18 @@
   只负责 runner 启动、租约、恢复和有界重试。
 - 已删除无人使用的 `SubagentDispatchEnvelope` 与 decoder 分支。宿主为自动启动子进程保留内部
   `subagents-dispatch` 入口，但普通状态页、doctor 和模型 prompt 都不再要求用户或模型手动催跑。
-- 父级日常动作只保留查看树、发补充消息与打断/取消。结构化 capability 决策仍是安全
-  授权入口，不属于调度推动工具。子代理、孙代理和根的差异只由
-  `run_id/parent_run_id/root_run_id`、工作区和递减权限表达。
+- 父级日常模型动作只保留创建直接下级、给一个直接下级插入补充消息、打断/取消一个直接下级，
+  以及裁决该直接下级的结构化 capability 请求。`inspect_agent_tree` 继续作为 `/status`、诊断、恢复和
+  TUI 投影的内部只读能力，但从普通模型工具箱移除；父级不靠查树、shell `sleep` 或周期调用推动 child。
+  子代理、孙代理和根的差异只由 `run_id/parent_run_id/root_run_id`、工作区和递减权限表达，每一层只管理
+  自己的直接下级。
+- 模型可见的 `cancel_subagents` 只接收直属 `run_id/run_ids + reason`；`root_id/status/dry_run/
+  kill_process` 和整树回执都是宿主运维内部面。因此打断入口不能被模型当成隐蔽的查树/轮询工具。
+- 旧 `InspectAgentTreeTool`、模型 Schema、公开导出和专用工具测试已删除，不保留“虽未注册但仍像工具”
+  的影子入口。内部代码直接读取 `agent_tree_status_payload`，它只是 `/status`、TUI、恢复和诊断的状态投影。
+- 所有模型可见的子代理工具快照（含历史配置、持久化 grant、角色模板和递归继承）统一经过
+  单一退休工具过滤器，防止旧账本把已删除的查树/手动推进入口重新带回模型工具箱。
+  显式 `allowed_tools=[]` 表示零工具，只有 `None` 才按角色默认值派生；权限链始终只能逐层减少。
 - 历史兼容：旧 task 中的 `acceptance_checks` / `verification_status` 字段暂保留以读取已有账本，
   但不进入当前 TaskEnvelope、runner 模型摘要、父级 wake、树摘要或完成判定。
 - 默认资源护栏收紧为同 owner 最多 6 个未结束 child、每次递归创建最多 4 个、
@@ -321,6 +330,16 @@
 - 删除 `create_subagents` 自动登记的周期性 LLM 巡场和对应 `wait_tool.py`。child 进展、完成、阻塞和
   capability request 只通过真实生命周期事件唤醒直接父级；进程心跳、孤儿回收、失败重试仍是宿主
   liveness 底座，不是模型推动工具。旧 `dispatch_supervision_auto` policy 升级后按结构化 tool 标记退休。
+- `.7` 真机随后证明，仅删 `wait` 还不够：`create_subagents` 回执仍把 `inspect_agent_tree` 写成
+  `next_action/status_tool_call`，MiniMax 因而连续执行 `inspect_agent_tree + shell sleep`；同时 child 已写入
+  OPEN capability request，普通模型回合却被 `turn_end=completed` 直接投影为 `DONE`。当前约定改为：
+  create 回执只返回 `await_lifecycle_event` 和本批 run ids，不返回下一工具；OPEN/非法待裁决 capability
+  request 是宿主掌握的结构化阻塞事实，优先把该 child 落为 `BLOCKED`，grant/deny 后由事件恢复同一个 run。
+  这不是产物质量验收，也不读取模型正文。
+- 对齐 会话运行时 child 继承父线程 `cwd` 与 sandbox 上界：普通 child 自动继承当前 Agent 的结构化 workspace
+  write roots，后代只继承同一权限上界；`output_files` 继续负责交付目标、冲突锁和 workspace 外显式授权，
+  不再要求模型为了写父级本来就有权写的项目目录重复声明权限。命名 Audit/exact-scope worker 不继承该
+  普通写根，继续使用其精确结构化权限。
 - 后台主代理权威身份以精确 `task_id` 为先，不能复用同 thread 旧任务的 `bg-main-*` run。run 命中其它
   task 时必须回退当前 task 的主链再建 attempt，避免整轮工具因权威链错挂而被拒绝并要求用户发“继续”。
 - 主代理 run 或 current attempt 为结构化 `unknown` 时，wake、observation 与 progress policy 必须保留原账
@@ -329,9 +348,10 @@
   `recover_attempt_unknown` 在人工核对副作用后同时恢复 current attempt、崩溃调和写入的 run 状态并释放
   精确 attempt 锁，原事件才自然续跑。该边界对照 会话运行时 的 typed `AgentStatus` 终态通知：宿主订阅状态并
   向直接父线程注入一次事件，不靠周期 LLM 催促或反复重挂异常会话。
-- 用户指定的产物目录属于结构化权限事实：`create_subagents.items[]` 现有完整嵌套 schema，写入者必须在
-  自己的 `output_files` 声明目标；goal 中出现 `/root/abc` 不自动授权。TUI 后台 notice 首次立即查询、
-  之后每秒查询，并为同 thread 每条消息生成独立 block id，避免 reducer 丢掉第二条以后更新。
+- 普通 child 的可写上界来自直接父级工作区，不再靠 `output_files` 重复授权；因此父级本来能写的项目目录
+  可直接交给 child。`create_subagents.items[].output_files` 仍用来登记用户明确交付位置、产物归属和冲突锁，
+  但 goal 或 output_files 都不能把范围扩大到父级工作区之外。TUI 后台 notice 首次立即查询、之后每秒查询，
+  并为同 thread 每条消息生成独立 block id，避免 reducer 丢掉第二条以后更新。
 
 ## 2026-08-18 候选消息实时流式 + 每轮阶段计时【状态：本地 focused 通过，待真机部署复验】
 

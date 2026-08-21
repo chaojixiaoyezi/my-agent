@@ -115,8 +115,8 @@ def _failed_children_payload(run_ids: list[str]) -> dict[str, object]:
 # 函数用途: 遇到旧状态或未知状态时要求查看原始事实。
 def _unknown_status_payload(run_ids: list[str]) -> dict[str, object]:
     return {
-        "next_action": "inspect_unknown_direct_children",
-        "status_review_hint": "存在未知或旧协议状态；请查看 agent tree，不要猜成完成或失败。",
+        "next_action": "await_host_reconciliation_for_unknown_direct_children",
+        "status_review_hint": "存在未知或旧协议状态；等待宿主恢复/诊断事实，不要猜成完成或失败，也不要轮询。",
         "unknown_run_ids": [str(item) for item in run_ids if str(item)],
     }
 

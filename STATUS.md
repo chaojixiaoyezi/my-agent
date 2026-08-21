@@ -1,10 +1,11 @@
 # STATUS
 
-## 2026-08-21 子代理自然收口、递归控制面与 TUI 可观察性（本地严格 gate 已通过，待发布）
+## 2026-08-21 子代理自然收口、递归控制面与 TUI 可观察性（本地严格 gate 通过，待真机复验）
 
-- 对照 会话运行时 后，模型可见的子代理控制面只保留统一创建、查看、补充 guidance、取消/中断和 capability
-  处理。`create_subagents` 在任意层级都代表创建并自动启动；旧 `dispatch_subagents`、child scheduler 等
-  “再推一下才开工”的工具已删除，宿主内部 dispatcher 只承担进程选择、并发和恢复。
+- 对照 会话运行时 后，模型可见的子代理控制面只保留统一创建、向一个直属 child 补充 guidance、取消/中断
+  直属 child 和处理其 capability 请求。`create_subagents` 在任意层级都代表创建并自动启动；旧
+  `dispatch_subagents`、child scheduler、wait 和 `inspect_agent_tree` 模型工具已删除，宿主内部
+  dispatcher 与代理树投影只承担启动、状态通知、并发、恢复和运维诊断。
 - 新增公共 `TurnEndReason` 六类原因：`completed`、`aborted`、`blocked`、`error`、`max-tokens`、
   `interrupted`。主代理、子代理、Gateway 和 TUI 读取同一个结构化结束事实；普通任务不再通过
   `acceptance_checks`、`VerificationStatus` 或模型正文里的完成词决定能否结束。历史账本字段只读兼容，
@@ -52,6 +53,16 @@
   `recover_attempt_unknown` 现在也会把崩溃调和产生的 run `unknown` 恢复为 `created`，并只释放 current
   attempt 的锁。定向 runtime/repository 回归已通过，待严格 gate、推送部署后确认 `.7` 日志静默，再跑
   同一 TUI prompt。
+- `596118f` 部署后的首轮原样 TUI 任务进一步定位到 child“挂掉”的真实原因：child 已通过工具写入 OPEN
+  capability request，但 runner 的通用 `completed` 收尾把它覆盖成 `DONE`；随后父级 grant 只发通知，
+  没有把原 run 重排回执行队列。模型因此继续轮询并最终越界替 child 写产品。当前底层改为 OPEN 请求
+  强制投影 `BLOCKED`，grant/deny 后同一 run 自动回到 `PENDING` 并由生命周期事件续跑；普通 child 同时
+  继承直接父级工作区上界，减少本来不该发生的目录申请。对应 capability、runner、递归授权、创建与
+  背景调度定向回归已通过；第二轮真实 TUI 待部署后验证。
+- 当前候选又删除 cancel 的 `dry_run/kill_process` 模型参数和整树回执，防止把打断工具变成隐蔽
+  巡检入口。相关 focused 回归已跑到 100%；`ruff`、compileall、doc sync、strict code-size、
+  `git diff --check` 和 clean-package 全部通过。本轮增删约 2,500 行，按用户约定没有再跑全仓 pytest；
+  推送、`.7` 单 Gateway 部署和原样 TUI 复验仍待执行。
 
 ## 2026-08-20 TUI 灰色层级与 tmux/右键复制修正
 

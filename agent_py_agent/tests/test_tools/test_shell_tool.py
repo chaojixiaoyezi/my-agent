@@ -111,8 +111,7 @@ def test_shell_tool_routes_internal_agent_status_paths_to_agent_tree(tmp_path: P
     assert result.ok is False
     assert result.error_code == "WRONG_STATUS_SURFACE"
     assert payload["error"] == "internal_agent_status_ref"
-    assert payload["suggested_tool_call"]["tool"] == "inspect_agent_tree"
-    assert payload["suggested_tool_call"]["run_id"] == "subagent-123"
+    assert payload["next_action"] == "await_direct_child_lifecycle_event"
 
 
 def test_shell_tool_dangerous_rm_rf_rejected(shell_tool: ShellTool) -> None:

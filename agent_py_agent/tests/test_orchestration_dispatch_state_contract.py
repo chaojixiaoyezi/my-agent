@@ -47,9 +47,8 @@ def test_state_contract_includes_current_turn_run_state():
     assert state["running_run_ids"] == ["running"]
     assert state["blocked_run_ids"] == ["blocked"]
     assert state["completed_run_ids"] == ["done"]
-    assert state["next_action"] == "inspect_automatic_recovery_or_report_blocker"
-    assert state["suggested_tool_call"]["tool"] == "inspect_agent_tree"
-    assert state["suggested_tool_call"]["params"]["run_id"] == "blocked"
+    assert state["next_action"] == "handle_direct_child_blocker_from_lifecycle_event"
+    assert "suggested_tool_call" not in state
     assert state["state_machine_contract"] == "state_machine.v1"
     assert state["recovery_recommendations"] == [{
         "run_id": "blocked",
@@ -72,7 +71,7 @@ def test_dispatch_state_reports_load_errors_instead_of_empty_state():
     assert state["task_load_errors"][0]["run_id"] == "broken-run"
     assert state["task_load_errors"][0]["category"] == "data_parse"
     assert "不要把它当成子代理没产物" in state["task_load_errors"][0]["model_message"]
-    assert state["next_action"] == "refresh_agent_tree_or_rebuild_state_index"
+    assert state["next_action"] == "host_rebuild_state_index_or_report_load_error"
 
 
 def test_create_payload_includes_current_turn_run_state(tmp_path):
@@ -111,7 +110,7 @@ def test_dispatch_state_running_subagent_suggests_wait_not_polling():
     }
     state = _state_for_tasks(tasks)
     assert state["next_action"] == "wait_for_subagent_completion_event"
-    assert state["suggested_tool_call"]["tool"] == "inspect_agent_tree"
+    assert "suggested_tool_call" not in state
 
 
 def test_dispatch_state_completed_alias_does_not_suggest_closeout():
@@ -123,9 +122,8 @@ def test_dispatch_state_completed_alias_does_not_suggest_closeout():
     assert state["blocked_run_ids"] == ["alias"]
     assert state["completed_run_ids"] == []
     assert state["unfinished_run_ids"] == ["alias"]
-    assert state["next_action"] == "inspect_automatic_recovery_or_report_blocker"
-    assert state["suggested_tool_call"]["tool"] == "inspect_agent_tree"
-    assert state["suggested_tool_call"]["params"]["run_id"] == "alias"
+    assert state["next_action"] == "handle_direct_child_blocker_from_lifecycle_event"
+    assert "suggested_tool_call" not in state
     assert state["recovery_recommendations"][0]["failure_type"] == "STATE_STATUS_INVALID"
     assert state["recovery_recommendations"][0]["recommended_action"] == "manual_review"
 

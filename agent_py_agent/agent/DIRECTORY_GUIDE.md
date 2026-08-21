@@ -17,7 +17,7 @@
 
 ### `agent_core/`
 
-主代理应用服务层。放 `SimpleAgent` 的主循环、子代理 runner、父代理 planner、宿主内部自动 dispatch/watch、编排工具和 runner 重试规则。模型侧只有统一创建工具，不暴露手动 dispatch/schedule。
+主代理应用服务层。放 `SimpleAgent` 的主循环、子代理 runner、父代理 planner、宿主内部自动 dispatch/watch、编排工具和 runner 重试规则。模型侧只保留统一创建和直属下级的插话、打断、权限裁决，不暴露查树、等待或手动 dispatch/schedule。
 
 允许：业务流程编排、调用下层服务、把多个模块串成一轮完整行为。
 

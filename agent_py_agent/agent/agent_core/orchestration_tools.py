@@ -4,7 +4,7 @@ from __future__ import annotations
 """exposes model-callable orchestration tools backed by SimpleAgent subagent workflows.
 
 这些不是普通文件工具，而是'主代理让模型触发子代理流程'的工具。
-创建子代理、查看状态和发送消息都在这里，真实启动由系统后台调度器负责。
+创建子代理、发送消息和直属子代理控制都在这里，真实启动由系统后台调度器负责。
 """
 
 import json
@@ -80,7 +80,6 @@ from .orchestration.tools.capability import (
     ResolveCapabilityRequestsTool as ResolveCapabilityRequestsTool,
 )
 from .orchestration.tools.event import RaiseEventTool as RaiseEventTool
-from .orchestration.tools.status import InspectAgentTreeTool as InspectAgentTreeTool
 from .orchestration.work_scope import add_work_scope_key
 from .orchestration.write_guard import (
     ExternalWriteTargetRequest,
@@ -630,6 +629,8 @@ def _resolve_task_params(agent: SimpleAgent, task_params: list[CreateRunParams])
     return [resolve_create_run(agent.subagents, item) for item in task_params]
 
 
+# LLM: 输出冲突只报告既有 run 和事件等待动作；不得建议模型查询或手工 dispatch。
+# 函数用途: 把共享输出锁冲突包装成无副作用的创建失败回执。
 def _output_scope_conflict_result(
     agent: SimpleAgent,
     task_params: list[CreateRunParams],
@@ -649,10 +650,10 @@ def _output_scope_conflict_result(
         "conflicts": conflicts,
         "existing_run_ids": run_ids,
         "next_action": {
-            "tool": "inspect_agent_tree",
-            "params": {},
+            "action": "await_existing_run_lifecycle_event",
+            "run_ids": run_ids,
             "reason": (
-                "先读取现有 run 的结构化状态；需要推进时调度原 run，"
+                "现有 run 仍持有该交付目标；等它的生命周期事件，"
                 "确需接管时再用 replacement_for_run_ids 显式创建替补。"
             ),
         },
@@ -666,6 +667,8 @@ def _output_scope_conflict_result(
     )
 
 
+# LLM: 后台轮遇到活跃同 lineage 时复用原树并等待事件，不能创建第二批影子 run。
+# 函数用途: 返回“已有活跃子代理”的结构化拒绝与后续等待说明。
 def _active_lineage_creation_result(
     agent: SimpleAgent,
     task_params: list[CreateRunParams],
@@ -691,10 +694,10 @@ def _active_lineage_creation_result(
         "conflicts": conflicts,
         "existing_run_ids": run_ids,
         "next_action": {
-            "tool": "inspect_agent_tree",
-            "params": {},
+            "action": "await_existing_run_lifecycle_event",
+            "run_ids": run_ids,
             "reason": (
-                "读取现有 run 的结构化状态后，必要时使用 send_guidance 补充消息；"
+                "宿主会把现有 run 的进展送回直接父级；必要时使用 send_guidance 补充消息；"
                 "只有明确接管旧 run 时才使用 replacement_for_run_ids。"
             ),
         },

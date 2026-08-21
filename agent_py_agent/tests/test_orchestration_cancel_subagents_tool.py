@@ -41,6 +41,68 @@ def _execute_cancel_subagents(agent: object, arguments: dict[str, object]):
     )
 
 
+def _execute_host_cancel_subagents(agent: object, arguments: dict[str, object]):
+    """Exercise the host-only canonical cancellation primitive directly."""
+
+    from agent_py_agent.agent.agent_core.orchestration.tools.cancel import (
+        execute_cancel_subagents,
+    )
+
+    return execute_cancel_subagents(agent, arguments)
+
+
+def test_cancel_model_schema_only_names_direct_runs():
+    from agent_py_agent.agent.agent_core.orchestration.tool_specs import (
+        build_cancel_subagents_model_spec,
+    )
+
+    properties = build_cancel_subagents_model_spec().input_schema["properties"]
+
+    assert {"run_id", "run_ids", "reason"} == set(properties)
+    assert "root_id" not in properties
+    assert "status" not in properties
+    assert "kill_process" not in properties
+    assert "dry_run" not in properties
+
+
+def test_cancel_model_cannot_skip_child_and_cancel_grandchild(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration.tools.cancel import (
+        CancelSubagentsTool,
+    )
+    from agent_py_agent.agent.agent_core.runner.context import (
+        restore_current_subagent_context,
+        set_current_subagent_context,
+    )
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    parent, child, _done_child = _create_cancel_tree(agent)
+    grandchild = agent.subagents.create_run(
+        goal="孙任务",
+        thought="取消边界测试",
+        plan=["运行"],
+        parent_id=child.id,
+        root_id=parent.id,
+    )
+    grandchild.status = "RUNNING"
+    agent.subagents.save(grandchild)
+    previous = set_current_subagent_context(agent, run_id=parent.id)
+    try:
+        result = CancelSubagentsTool(agent).execute(
+            {"run_id": grandchild.id, "reason": "越级停止"}
+        )
+    finally:
+        restore_current_subagent_context(agent, previous)
+
+    assert result.ok is False
+    assert result.error_code == "TOOL_PERMISSION_DENIED"
+    assert agent.subagents.load(grandchild.id).status == "RUNNING"
+
+
 def test_cancel_subagents_tool_abandons_active_attempt_and_audits(tmp_path):
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
@@ -66,6 +128,7 @@ def test_cancel_subagents_tool_abandons_active_attempt_and_audits(tmp_path):
 
     assert result.ok is True
     assert payload["cancelled"][0]["run_id"] == task.id
+    assert "agent_tree" not in payload
     assert loaded.status == "CANCELLED"  # 主代理主动取消 = CANCELLED(不再误标 ABANDONED 烂尾)
     assert loaded.failure_type == "cancelled"
     assert loaded.runner_active_attempt_id == ""
@@ -272,7 +335,7 @@ def test_cancel_subagents_tool_filters_by_root_and_status(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
     parent, child, done_child = _create_cancel_tree(agent)
 
-    result = _execute_cancel_subagents(
+    result = _execute_host_cancel_subagents(
         agent,
         {
             "root_id": parent.id,
@@ -341,7 +404,7 @@ def test_cancel_subagents_tool_rejects_old_status_filter_alias(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
     parent, child, _done_child = _create_cancel_tree(agent)
 
-    result = _execute_cancel_subagents(
+    result = _execute_host_cancel_subagents(
         agent,
         {
             "root_id": parent.id,
@@ -369,7 +432,7 @@ def test_cancel_subagents_tool_reports_list_runs_failure_for_tree_filters(tmp_pa
 
     monkeypatch.setattr(agent.subagents, "list_runs", broken_list_runs)
 
-    result = _execute_cancel_subagents(
+    result = _execute_host_cancel_subagents(
         agent,
         {
             "root_id": "run-missing",
@@ -400,7 +463,7 @@ def test_cancel_subagents_tool_reports_corrupt_locator_without_private_recovery(
     task_json.write_text(task_json.read_text(encoding="utf-8") + "}", encoding="utf-8")
     run_json.write_text(run_json.read_text(encoding="utf-8") + "}", encoding="utf-8")
 
-    result = _execute_cancel_subagents(
+    result = _execute_host_cancel_subagents(
         agent,
         {
             "run_id": task.id,

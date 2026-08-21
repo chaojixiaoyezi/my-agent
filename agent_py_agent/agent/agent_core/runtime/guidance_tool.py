@@ -9,7 +9,10 @@ import json
 from typing import TYPE_CHECKING
 
 from ...runtime_errors import runtime_error_report
-from ...subagents.authorization_gate import OperationRequest, authorize_operation
+from ...subagents.authorization_gate import (
+    OperationRequest,
+    authorize_direct_child_operation,
+)
 from ...tooling.models import (
     BaseTool,
     EffectResolverPolicy,
@@ -67,9 +70,11 @@ class SendGuidanceTool(BaseTool):
                 "缺少 message（要补充给子代理的具体要求）。",
                 error_code="TOOL_PARAMETER_REQUIRED",
             )
-        requester_run_id = _current_run_id(self.agent)
+        requester_run_id = (
+            current_subagent_run_id(self.agent) or _current_run_id(self.agent)
+        )
         try:
-            task = authorize_operation(
+            task = authorize_direct_child_operation(
                 self.agent.subagents,
                 OperationRequest(
                     operation="send_guidance",
@@ -83,7 +88,7 @@ class SendGuidanceTool(BaseTool):
             )
         except FileNotFoundError:
             return _guidance_error(
-                f"目标子代理不存在：{target}。请先用 inspect_agent_tree 查看当前下级。",
+                f"目标子代理不存在：{target}。请使用 create_subagents 回执或生命周期事件里的真实 run_id。",
                 error_code="TOOL_INVALID_ARGUMENTS",
             )
         except PermissionError as exc:
@@ -97,12 +102,6 @@ class SendGuidanceTool(BaseTool):
                 error_code="TOOL_EXECUTION_FAILED",
                 details=runtime_error_report(exc, context="send_guidance.target"),
             )
-        if requester_run_id and str(getattr(task, "parent_id", "") or "").strip() != requester_run_id:
-            return _guidance_error(
-                "只能给自己直接创建的下级发送消息；请让直接下级继续管理它的子代理。",
-                error_code="TOOL_PERMISSION_DENIED",
-            )
-
         sender = str(
             params.get("sender")
             or current_subagent_run_id(self.agent)
@@ -157,7 +156,7 @@ def build_send_guidance_model_spec() -> ToolModelSpec:
             "properties": {
                 "target": {
                     "type": "string",
-                    "description": "接收消息的子代理 run_id（来自 create_subagents 或 inspect_agent_tree）。",
+                    "description": "接收消息的直接子代理 run_id（来自 create_subagents 回执或生命周期事件）。",
                 },
                 "message": {
                     "type": "string",
@@ -171,7 +170,7 @@ def build_send_guidance_model_spec() -> ToolModelSpec:
             category="orchestration",
             use_cases=("用户补充了会影响某个下级的要求", "某个下级需要路径或目标纠偏"),
             avoid_when=(
-                "第一次派工使用 create_subagents；只想看状态使用 inspect_agent_tree；"
+                "第一次派工使用 create_subagents；只是等待状态变化时结束本回合等宿主事件；"
                 "要停止运行中的下级使用 cancel_subagents",
             ),
             keywords=("补充", "纠偏", "插入消息", "steer", "message"),
