@@ -121,8 +121,9 @@ class TestSubagentMixinSpawn:
         assert create_params.agent_name == "root-coordinator"
         assert create_params.parent_id == ""
         assert create_params.root_id == ""
-        assert "schedule_child_subagents" in create_params.allowed_tools
-        assert "dispatch_subagents" in create_params.allowed_tools
+        assert "create_subagents" in create_params.allowed_tools
+        assert "schedule_child_subagents" not in create_params.allowed_tools
+        assert "dispatch_subagents" not in create_params.allowed_tools
         assert "write_file" in create_params.allowed_tools
 
     def test_configured_subagent_allowed_tools_empty_means_automatic(self) -> None:

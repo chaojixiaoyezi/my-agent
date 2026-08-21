@@ -1,5 +1,17 @@
 # Gateway Structure
 
+## 回合终态与 Compact 进度投影
+
+- `gateway_parts/request_execution.py::_update_response_from_result` 只把运行时已经确定的
+  `turn_end_reason` 写入最终 response；Gateway 不拥有第二套完成判定器。
+- `BufferedChunkStreamWriter.write_conversation_compact_progress` 是 rich 客户端唯一的持久会话 Compact
+  进度出口。`_public_conversation_compact_progress_payload` 对 schema、phase、stage 和数值字段做白名单投影，
+  再写入 `conversation_compaction_progress` chunk。
+- `_gateway_compact_progress_callback` 只在当前 chunk writer 明确实现上述 typed 方法时向
+  `conversation/compact.py` 传回调；普通 callable、CLI 和 IM 客户端不会收到展示事件。
+- ConversationStore 的 summary/checkpoint/generation 仍是权威事实，百分比只是同一操作的展示投影，
+  不参与完成、恢复或 CAS 裁决。
+
 ## TUI 活动回合输入确认与 rich context 事件
 
 - `cli/chat_client_context.py::GatewayChatClientAgent.request_active_turn_input` 是薄 TUI 的活动输入 HTTP

@@ -75,6 +75,39 @@ def test_manual_scroll_anchor_does_not_jump_when_new_event_arrives() -> None:
     assert control.scroll_indicator() is None
 
 
+def test_scrolling_down_to_last_line_restores_sticky_follow() -> None:
+    store = TuiStateStore()
+    seq = TuiEventSequencer("sticky-return", clock=lambda: 2.25)
+    for index in range(8):
+        store.publish(
+            seq.emit(
+                "system_message",
+                "completed",
+                f"system-{index}",
+                {"text": f"line-{index}"},
+            )
+        )
+    control = TuiTranscriptControl(_provider(store))
+    content = control.create_content(40, 5)
+    control.move(-4)
+    assert control.follow is False
+
+    control.move(content.line_count)
+
+    assert control.follow is True
+    assert control.scroll_indicator() is None
+    store.publish(
+        seq.emit(
+            "assistant_completed",
+            "completed",
+            "assistant-new",
+            {"text": "new answer"},
+        )
+    )
+    updated = control.create_content(40, 5)
+    assert updated.cursor_position.y == updated.line_count - 1
+
+
 def test_manual_scroll_counts_new_typed_messages_without_counting_tool_blocks() -> None:
     store = TuiStateStore()
     seq = TuiEventSequencer("unseen", clock=lambda: 2.5)

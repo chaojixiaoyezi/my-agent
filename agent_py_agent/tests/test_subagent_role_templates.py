@@ -86,7 +86,7 @@ def test_user_role_template_can_extend_catalog(tmp_path):
     assert "read_file" in task.allowed_tools
     assert "write_file" in task.allowed_tools
     assert "apply_patch" not in task.allowed_tools
-    assert any("PPT润色子代理" in check for check in task.acceptance_checks)
+    assert task.acceptance_checks == []
 
 
 def test_user_template_role_can_be_selected_by_explicit_id(tmp_path):
@@ -127,7 +127,7 @@ def test_user_template_role_can_be_selected_by_explicit_id(tmp_path):
     assert "read_file" in task.allowed_tools
     assert "write_file" in task.allowed_tools
     assert "apply_patch" in task.allowed_tools
-    assert any("PPT润色子代理" in check for check in task.acceptance_checks)
+    assert task.acceptance_checks == []
 
 
 def test_tiny_action_template_is_rejected(tmp_path):
@@ -187,8 +187,8 @@ def test_quality_role_contracts_use_template_defaults(tmp_path):
     ]
     assert bug_finder.allowed_tools[:len(expected_bug_finder_tools)] == expected_bug_finder_tools
     assert "write_file" in tester.allowed_tools
-    assert any("找茬" in check for check in bug_finder.acceptance_checks)
-    assert any("测试" in check for check in tester.acceptance_checks)
+    assert bug_finder.acceptance_checks == []
+    assert tester.acceptance_checks == []
 
 
 def test_worker_template_supplies_default_write_tools(tmp_path):
@@ -244,7 +244,7 @@ def test_coordinator_template_says_parent_authority_covers_children_without_disa
     assert "可以直接完成" in detail
     assert "需要多人视角" in detail
     assert "coordinator" in detail
-    assert "worker/writer" in detail
+    assert "worker 或 writer" in detail
     assert "child_coordinator" not in detail
     assert "leaf_worker" not in detail
     assert "send_guidance" in detail
@@ -304,10 +304,10 @@ def test_all_builtin_role_contracts_are_applied_on_create_run(tmp_path):
 
         assert task.role == template_id
         assert task.allowed_tools[:len(template.default_tools)] == list(template.default_tools)
-        assert any(template.output_contract_zh in check for check in task.acceptance_checks)
+        assert task.acceptance_checks == []
         for tool_name in ["write_file", "apply_patch", "apply_patch"]:
             assert tool_name in task.allowed_tools
-        assert ("schedule_child_subagents" in task.allowed_tools) is template.can_spawn_children
+        assert ("create_subagents" in task.allowed_tools) is template.can_spawn_children
 
 
 def test_coordinator_runner_prompt_loads_role_catalog_without_current_worker_details():

@@ -70,7 +70,6 @@ def _child_result_node_row(node: dict[str, object]) -> dict[str, object]:
         "agent_name": str(node.get("agent_name") or "").strip(),
         "role": str(node.get("role") or "").strip(),
         "status": status,
-        "verification_status": str(node.get("verification_status") or "").strip(),
         "work_scope_key": str(node.get("work_scope_key") or "").strip(),
         "expected_outputs": refs.expected_outputs,
         "primary_artifact_refs": refs.primary_refs,

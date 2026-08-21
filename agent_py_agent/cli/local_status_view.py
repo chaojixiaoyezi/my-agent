@@ -114,6 +114,8 @@ def _format_active_work_block(active_work_summary) -> None:
     print("- 暂无")
 
 
+# LLM: Active-work rendering reports automatic progress and must not advertise manual dispatch.
+# 函数用途: 展示进行中任务，并告诉用户可以补充要求或中断而无需手动推进。
 def _format_active_work(active_work_summary) -> None:
     from ..agent.startup_recovery import format_active_work_summary
 
@@ -121,7 +123,7 @@ def _format_active_work(active_work_summary) -> None:
     for line in format_active_work_summary(active_work_summary).splitlines():
         print(f"- {line}")
     if active_work_summary.active_task_count > 0:
-        print("- 运行 my-agent subagents-dispatch 可继续调度")
+        print("- 系统会自动推进；你可以在 TUI 继续发补充要求，或中断不再需要的任务")
 
 
 def _format_subagents_section(board, limit: int) -> None:

@@ -31,21 +31,13 @@ from ..tool_context.call_reducer import (
     AssistantToolRoundContextRequest,
     render_assistant_tool_round_context,
 )
-from .round_subagent_output import (
-    SubagentOutputWriteCheck,
-    is_subagent_output_json_write,
-    subagent_output_json_response,
-)
 
 _STATEFUL_ORCHESTRATION_TOOLS = {
     "create_subagents",
-    "schedule_child_subagents",
 }
 _DEPENDENT_ORCHESTRATION_TOOLS = {
     "create_subagents",
-    "dispatch_subagents",
     "inspect_agent_tree",
-    "schedule_child_subagents",
     "send_guidance",
 }
 _CONTENT_OUTPUT_TOOLS = {
@@ -785,15 +777,9 @@ def _record_execution(
             execution.states,
         )
     )
-    wrote_output = is_subagent_output_json_write(
-        SubagentOutputWriteCheck(
-            request.agent,
-            request.params,
-            _tool_call_payload(call),
-            result,
-        )
-    )
-    return wrote_output, _runtime_transition_after_tool(result)
+    # 会话运行时 式循环中，写任何文件（包括历史 output.json）都只是工具结果；
+    # 不能跳过下一次模型采样或由宿主据产物内容强制收口。
+    return False, _runtime_transition_after_tool(result)
 
 
 def _remember_runtime_transition(
@@ -1462,7 +1448,7 @@ def _deferred_orchestration_result(call: ToolCall) -> ToolResult:
         call,
         "同一轮已经执行过会创建或改变子代理树的工具调用，"
         "后续编排工具已延后。请先读取上一条工具的真实输出，"
-        "下一轮再使用返回的 created_run_ids/actionable_run_ids 调用 dispatch_subagents。",
+        "下一轮先读取上一条创建回执；已创建的下级会自动运行，不要重复创建或催跑。",
         error_code="ORCHESTRATION_CALL_DEFERRED",
         failure_stage="runtime_gate",
     )

@@ -122,8 +122,6 @@ _DEFAULT_MAX_TOOL_ROUNDS = 5000
 
 _ORCHESTRATION_TOOLS = {
     "create_subagents",
-    "dispatch_subagents",
-    "schedule_child_subagents",
 }
 
 
@@ -1139,7 +1137,7 @@ def _final_response_after_tool_limit(agent, params: ToolLoopExecuteParams, tool_
             "不要把尚未执行的动作写成正在执行或已经完成。运行时会保留同一任务并按持久进度继续。"
         )
     if _executed_subagent_orchestration(params):
-        params.tool_context.append("[tool-system]\n子代理调度状态请通过 dispatch_subagents/tree 状态结果继续查看；系统不再替主代理生成最终结论。")
+        params.tool_context.append("[tool-system]\n子代理状态请通过完成事件或 inspect_agent_tree 查看；系统不再替主代理生成最终结论。")
     final_prompt = build_tool_loop_prompt(agent, params)
     final_response = generate_model_response(
         ModelGenerateParams(

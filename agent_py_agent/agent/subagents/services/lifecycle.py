@@ -124,7 +124,6 @@ class SetStatusParams:
     status: str
     result: str = ""
     failure_type: str = ""
-    require_evidence: bool = False
 
 
 class SubAgentLifecycleService:
@@ -216,7 +215,6 @@ class SubAgentLifecycleService:
         *,
         result: str = "",
         failure_type: str = "",
-        require_evidence: bool = False,
     ) -> SubAgentTask:
         if isinstance(params, SetStatusParams):
             status_params = params
@@ -226,13 +224,10 @@ class SubAgentLifecycleService:
                 status=status,
                 result=result,
                 failure_type=failure_type,
-                require_evidence=require_evidence,
             )
 
         task = self.manager.load(status_params.run_id)
         normalized = normalize_task_status(status_params.status)
-        if status_params.require_evidence and normalized == "DONE" and not task.evidence:
-            raise ValueError("缺少验收证据，不能标记为 DONE。")
         task.status = normalized
         if status_params.result:
             task.result = status_params.result

@@ -11,24 +11,14 @@ from .tool_spec_data import (
     _CREATE_PARAMETER_DETAILS,
     _CREATE_PARAMETERS,
     _CREATE_USE_CASES,
-    _DISPATCH_PARAMETER_DETAILS,
-    _DISPATCH_PARAMETERS,
     _INSPECT_TREE_PARAMETERS,
     _OBSERVATION_PARAMETERS,
-    _SCHEDULE_CHILD_COORDINATOR_RULES,
-    _SCHEDULE_CHILD_EXAMPLES,
-    _SCHEDULE_CHILD_KEYWORDS,
-    _SCHEDULE_CHILD_PARAMETER_DETAILS,
-    _SCHEDULE_CHILD_PARAMETERS,
-    _SCHEDULE_CHILD_USE_CASES,
 )
 from .tool_spec_schemas import (
     _CREATE_PARAMETER_SCHEMA,
-    _DISPATCH_PARAMETER_SCHEMA,
     _INSPECT_TREE_PARAMETER_SCHEMA,
     _OBSERVATION_PARAMETER_SCHEMA,
     _RESOLVE_CAPABILITY_PARAMETER_SCHEMA,
-    _SCHEDULE_CHILD_PARAMETER_SCHEMA,
 )
 
 
@@ -73,7 +63,7 @@ def _hints(
 def build_create_subagents_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="create_subagents",
-        description="把'宽形状'的活派给子代理并行干、只收结论:涉及多个独立目标、可并行模块、或需要独立验证时，由你按真实拆解自主决定需要几个；不要为了显得忙而派，也不要把同一任务重复派。工具参数 goal 是本批派工说明，与用户命令 /goal 无关；普通聊天中的实际任务也可以派工。goal 始终必填。单个具体目标直接创建 1 个；多个不同目标给总 goal 和 items，且每项必须有独立 goal、不得重复。运行时会按 owner、当前任务和单次调用容量整批校验，超限或重复都会整批拒绝，不会偷偷丢掉部分任务。【items 格式】items 必须是对象数组，每项含独立 goal（可带 input_refs/covers）：items:[{\"goal\":\"子任务1\"},{\"goal\":\"子任务2\",\"input_refs\":[\"data/a.txt\"]}]；不要把 items 传成字符串、逗号分隔文本或单个对象。已知单一改动点、一两步能完成的窄任务自己直接做。相对时间沿用当前日期/年份;只有 defer_start=true 才只建不跑。子代理的目标若是【内网/私网地址】(如 192.168.x.x 数据源),当前底座不提供白名单授权——直接说明访问缺口或换公网来源,不要派工到会被出站防护拦截(NETWORK_PRIVATE_HOST_BLOCKED)的目标。【创建后行为】创建子代理后你可以继续做手头的事或结束回合，子代理完成时系统会自动唤醒你续跑汇总；**不要向用户承诺'我会自动汇总'**——要如实说'子代理在后台运行，完成时系统会通知'。若你选择在回合内等待子代理，用 dispatch_subagents 推进；不要创建后原地空等。",
+        description="把可并行的独立工作交给下级代理。无论当前是主代理、子代理还是孙代理，都使用同一个 create_subagents；创建成功后下级立即运行，完成时系统自动把结果送回直接父级，不需要也没有额外的推进工具。goal 始终必填；单个目标直接传 goal，多个不同目标同时传总 goal 和 items，且每项必须有独立 goal。不要为了显得忙而派，也不要重复创建同一任务。",
         input_schema=_input_schema(
             _CREATE_PARAMETERS,
             _CREATE_PARAMETER_SCHEMA,
@@ -87,10 +77,7 @@ def build_create_subagents_model_spec() -> ToolModelSpec:
                 "单步机械活或一两次工具调用就能完成的简单任务,自己直接做、别拆",
                 "别把整个目标原样转给单个子代理(无谓套娃,没真正切分就没价值)",
                 "**查看你已派出的子代理进度/状态/结果时,别派新子代理去查——用 inspect_agent_tree 自己查。新派的子代理只能看它自己底下的、看不到它的兄弟,根本查不到你要查的那些。**",
-                "**这些【主代理专属】的活一律你自己做、绝不派子代理(派了也没用/会卡住):"
-                "批准子代理的能力申请(自己调 resolve_capability_requests)、把各子代理的产物整合拼成一个能跑的成品、"
-                "跑验收/提交交付、检查子代理进度状态。派子代理【只用于从头建一块独立的功能模块】,"
-                "别派'能力处理/整合/验收/检查/恢复'这类子代理——那是你自己的活,派出去只会空转。**",
+                "查看、发消息或打断已有下级时不要再创建一个新代理",
             ),
             keywords=_CREATE_KEYWORDS,
             examples=_CREATE_EXAMPLES,
@@ -110,7 +97,7 @@ def build_inspect_agent_tree_model_spec() -> ToolModelSpec:
             use_cases=("用户问进度/子代理做到哪了/当前有哪些代理在做什么", "想看子代理/孙代理状态、心跳、当前工具、产物和阻塞原因"),
             avoid_when=(
                 "子代理只是正在运行、没有新事实时不要循环查看；登记 wait 提醒后结束本回合(或继续做自己手头的事、回复用户)，子代理有进展时系统会用事件把你唤醒——不要原地轮询等待",
-                "用户明确要求继续推进、恢复、重派或执行验收时，应使用 dispatch_subagents",
+                "下级仍在正常运行时不要循环查看；完成事件会自动送回父级",
             ),
             keywords=("进度", "进展", "做到哪了", "咋样了", "看看情况", "代理树", "状态树", "看一眼", "子代理状态", "孙代理", "inspect", "agent tree"),
             examples=(
@@ -191,24 +178,6 @@ def build_task_progress_model_spec() -> ToolModelSpec:
     )
 
 
-def build_dispatch_subagents_model_spec() -> ToolModelSpec:
-    return ToolModelSpec(
-        name="dispatch_subagents",
-        description="推进、恢复或重跑已有子代理；普通查看状态用 inspect_agent_tree，普通创建开跑用 create_subagents。",
-        input_schema=_input_schema(_DISPATCH_PARAMETERS, _DISPATCH_PARAMETER_SCHEMA, details=_DISPATCH_PARAMETER_DETAILS),
-        hints=_hints(
-            use_cases=("用户要求继续推进、恢复、重跑或处理卡住项", "需要给某个子代理补充提示并立刻推进它继续执行"),
-            avoid_when=("只是看状态时用 inspect_agent_tree；第一次派新子代理优先用 create_subagents；只补一句话优先用 send_guidance",),
-            keywords=("调度", "推进", "运行", "验收", "派工", "dispatch", "subagent", "acceptance"),
-            examples=(
-                '{"tool":"dispatch_subagents","dry_run":true,"max_runners":1}',
-                '{"tool":"dispatch_subagents","dry_run":false,"run_ids":["child-phase-a","child-phase-b"],"max_runners":2}',
-                '{"tool":"dispatch_subagents","dry_run":false,"run_ids":["child-phase-a"],"max_runners":1}',
-            ),
-        ),
-    )
-
-
 def build_cancel_subagents_model_spec() -> ToolModelSpec:
     parameters = {
         "run_id": "可选。单个子代理 run_id。",
@@ -247,8 +216,8 @@ def build_cancel_subagents_model_spec() -> ToolModelSpec:
                 "后台 runner/channel 已损坏，需要把 agent tree 标成可见的取消/废弃状态",
             ),
             avoid_when=(
-                "只是查看状态时用 inspect_agent_tree；只是补充说明让它继续时用 send_guidance 或 dispatch_subagents",
-                "子代理处于可恢复失败且重试预算仍可用时，必须用 dispatch_subagents 续接原 run",
+                "只是查看状态时用 inspect_agent_tree；只是补充说明时用 send_guidance",
+                "系统正在自动恢复可恢复故障时不要重复创建替代代理",
             ),
             keywords=("取消", "停止", "kill", "cancel", "subagent", "runner", "ABANDONED", "CANCELLED"),
             examples=(
@@ -287,25 +256,6 @@ def build_resolve_capability_requests_model_spec() -> ToolModelSpec:
                 '{"tool":"resolve_capability_requests","run_id":"subagent-1","decision":"grant","reason":"解锁产物目录"}',
                 '{"tool":"resolve_capability_requests","run_id":"subagent-1","request_id":"capreq-2","decision":"deny","reason":"按现有权限写自己的 output 目录即可"}',
             ),
-        ),
-    )
-
-
-def build_schedule_child_subagents_model_spec() -> ToolModelSpec:
-    return ToolModelSpec(
-        name="schedule_child_subagents",
-        description="在当前子代理名下创建下一层子代理，保持层级树可恢复。"
-        + _SCHEDULE_CHILD_COORDINATOR_RULES,
-        input_schema=_input_schema(
-            _SCHEDULE_CHILD_PARAMETERS,
-            _SCHEDULE_CHILD_PARAMETER_SCHEMA,
-            details=_with_role_template_index(_SCHEDULE_CHILD_PARAMETER_DETAILS),
-        ),
-        hints=_hints(
-            use_cases=_SCHEDULE_CHILD_USE_CASES,
-            avoid_when=("顶层主代理第一次派工时继续用 create_subagents；没有当前子代理上下文时不要调用",),
-            keywords=_SCHEDULE_CHILD_KEYWORDS,
-            examples=_SCHEDULE_CHILD_EXAMPLES,
         ),
     )
 

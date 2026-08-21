@@ -58,7 +58,7 @@ def test_context_bundle_embeds_task_envelope_and_tool_preflight(tmp_path) -> Non
 
     assert bundle.task_envelope["schema_version"] == "subagent_task_envelope.v1"
     assert bundle.task_envelope["address"]["run_id"] == task.id
-    assert bundle.task_envelope["acceptance"]["checks"] == ["build/index.html 存在"]
+    assert "acceptance" not in bundle.task_envelope
     preflight = bundle.tool_preflight
     assert preflight["ok"] is False
     # 子代理有可写工作区,修复后不再误报 missing_allowed_write_roots(详见 protocol_preflight)。
@@ -127,7 +127,6 @@ def _assert_core_context_bundle(bundle, task) -> None:
     assert bundle.role == "worker"
     assert bundle.goal == "实现流程状态结算页"
     assert bundle.plan == ["读取现有项目", "实现结算页", "写测试"]
-    assert bundle.acceptance_checks == ["能从流程状态进入结算", "测试覆盖流程总计"]
     assert bundle.constraints["forbidden_write_roots"] == ["/System"]
     assert bundle.permissions["allowed_tools"] == ["read_file", "write_file"]
 
@@ -149,7 +148,7 @@ def _assert_workspace_context_bundle(bundle, task, tmp_path: Path) -> None:
     assert write_roots[:2] == [bundle.workspace_refs["task_root"], bundle.workspace_refs["agent_work_dir"]]
     assert str(tmp_path / task.id / "artifacts") not in write_roots
     assert "task.goal" in bundle.source_refs["goal"]
-    assert "task.acceptance_checks" in bundle.source_refs["acceptance_checks"]
+    assert "acceptance_checks" not in bundle.source_refs
 
 
 def test_context_bundle_maps_required_file_to_product_root(tmp_path) -> None:

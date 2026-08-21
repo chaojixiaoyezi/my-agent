@@ -73,6 +73,9 @@ class AgentRunResult:
     runtime_status: str = "ok"
     runtime_reason: str = ""
     runtime_source: str = ""
+    # LLM: 该字段是宿主归一化的 turn/end.reason，不代表任务质量已经验收。
+    # 字段用途: 告诉 CLI、Gateway 和子代理父级本轮为何停止。
+    turn_end_reason: str = ""
     conversation_task_completed: bool = False
     delivery_artifacts: list[dict[str, object]] | None = None
     # Successful current-owner sends committed by send_message in this exact run.

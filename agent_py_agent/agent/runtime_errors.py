@@ -20,7 +20,7 @@ _SUBAGENT_LEDGER_CONTEXTS = {
     "cancel_subagents.load",
     "subagents.load",
     "subagents.list_runs",
-    "schedule_child_subagents.load",
+    "create_subagents.nested_load",
 }
 _SUBAGENT_LEDGER_CONTEXT_SUFFIXES = (
     ".subagents.load",

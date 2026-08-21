@@ -568,11 +568,6 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
             effective_contract_snapshot=effective_contract_snapshot,
         ),
     )
-    from ...contracts.required_actions import render_required_action_guidance
-
-    required_guidance = render_required_action_guidance(effective_contract_snapshot)
-    if required_guidance:
-        loop_params.tool_context.append(required_guidance)
     _queue_audit_source_provision_reply(loop_params, audit_source_provision)
     # 每个 run 都有自己的工具循环状态；同一 owner 的并发聊天/后台轮
     # 不能共享一个 ToolLoopService 实例。
@@ -767,7 +762,7 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
     archive_tool_calls: list[dict[str, object]] = list(params.carried_archive_tool_calls or [])
     # H1：compact 自动续跑会重建一个全新的 ToolLoopExecuteParams。除了已重建的 pending_deferred，
     # 还必须从 carried 的 archive 记录里重建这四项运行时状态，否则续跑相当于「失忆重来」：
-    #   - one_shot_tool_calls：一次性编排工具（create_subagents/schedule_child_subagents）的去重集合
+    #   - one_shot_tool_calls：一次性编排工具（create_subagents）的去重集合
     #     丢失 → tool_call_runtime 的去重 gate 失效 → 同 payload 续跑会**重复创建子代理**（真副作用）。
     #   - tool_rounds：归零 → max_tool_rounds 预算每次续跑重置 → 长任务可借续跑无限放大工具预算。
     #   - executed_tools：归零 → 重试守卫/完成软提醒看不到历史，会重复劝退或重复读。
@@ -842,39 +837,16 @@ def _required_action_contract_snapshot(
     tool_runtime_snapshot: object,
 ):
     from ...contracts.effective_contract_snapshot import build_effective_contract_snapshot
-    from ...contracts.required_actions import (
-        RequiredActionAssessment,
-        restore_required_actions_from_records,
-        structured_required_action_assessment,
-    )
-
-    # 按 会话运行时 语义：不做每次 turn 的模型预评估（对照组 会话运行时/轻量运行时/harness 均无此机制；
-    # 真机铁证 2026-08-08：评估误判 requires_action=false 会把正常任务整轮工具硬拦成
-    # 假失败，且评估从不硬禁工具、失败也不禁——预评估只有延迟成本）。显式结构化合同
-    # （协作/派工/delivery contract）路径不变，见 structured_required_action_assessment。
-    assessment = structured_required_action_assessment(
-        (params.task_attributes, params.delivery_contract),
-        runtime_snapshot=tool_runtime_snapshot,
-        run_id=params.run_id,
-        source_turn_id=params.request_id or params.attempt_id or params.run_id,
-    )
-    metadata = {
-        "source": assessment.source,
-        "error": assessment.error,
-        "raw": assessment.raw,
-        "requires_action": assessment.requires_action,
-    }
-    snapshot = build_effective_contract_snapshot(
+    # LLM: 会话运行时 式工具循环不在 turn 前后生成或追踪“必做动作”；
+    # 安全仍由工具 schema/权限/未知副作用闸保护，这个空快照只保持现有调用接口。
+    # 函数用途: 为工具运行时创建不携带机器完成义务的请求快照。
+    del agent, tool_runtime_snapshot
+    return build_effective_contract_snapshot(
         run_id=params.run_id,
         layers=(),
-        required_actions=assessment.actions,
-        required_action_assessment=metadata,
+        required_actions=(),
+        required_action_assessment={"source": "disabled", "requires_action": None},
     )
-    restore_required_actions_from_records(
-        snapshot,
-        params.carried_archive_tool_calls or (),
-    )
-    return snapshot
 
 
 def _workspace_context_snapshot(agent, params: RuntimeLoopParams) -> str:

@@ -68,7 +68,6 @@ def _node_identity(payload: dict[str, object]) -> dict[str, object]:
         # 派工时的 goal 摘要:整合轮据此逐子代理核对"计划 vs 实交",缺的补建或如实标注。
         "goal_digest": current_model_text(payload.get("goal_digest", "")),
         "status": payload.get("status", ""),
-        "verification_status": payload.get("verification_status", ""),
         "failure_type": payload.get("failure_type", ""),
         "progress": payload.get("progress", 0.0),
         "current_step": current_model_text(payload.get("current_step", "")),

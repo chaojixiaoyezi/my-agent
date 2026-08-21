@@ -7,43 +7,47 @@ from agent_py_agent.agent.agent_core.subagent.finalize_helpers import (
     record_finalized_runner_result,
 )
 from agent_py_agent.agent.agent_core.subagent.params import SubagentFinalizeParams
-from agent_py_agent.agent.subagents import SubAgentParsedOutput
 
 
-def _params(run_id: str = "parent"):
+def _params(
+    *,
+    response: str = "普通自然语言结果",
+    runtime_status: str = "ok",
+    runtime_reason: str = "",
+    turn_end_reason: str = "",
+):
     return SubagentFinalizeParams(
-        run_id=run_id,
+        run_id="worker-1",
         active_attempt_id="attempt-1",
         result=SimpleNamespace(
+            prompt="final prompt",
+            response=response,
+            backend="test",
+            runtime_status=runtime_status,
+            runtime_reason=runtime_reason,
+            turn_end_reason=turn_end_reason,
             tool_rounds=3,
-            executed_tools=["dispatch_subagents"],
+            executed_tools=["write_file"],
+            archive_tool_calls=[],
         ),
         context=SimpleNamespace(goal="协调任务"),
-        prompt="",
+        prompt="runner prompt",
     )
 
 
-def _agent(*, child_ids: list[str] | None = None):
+def _agent():
     captured = SimpleNamespace(params=None)
 
     def record_runner_result(params):
         captured.params = params
         return SimpleNamespace(
-            status=params.structured_output.status if params.structured_output.found else params.status,
-            verification_status=(
-                params.structured_output.status if params.structured_output.found else params.verification_status
-            ),
+            status=params.status,
+            turn_end_reason=params.turn_end_reason,
         )
-
-    def load(run_id: str):
-        if run_id == "parent":
-            return SimpleNamespace(id="parent", child_ids=list(child_ids or []))
-        return SimpleNamespace(id=run_id, status="BLOCKED", verification_status="FAILED")
 
     return (
         SimpleNamespace(
             subagents=SimpleNamespace(
-                load=load,
                 runner_result=SimpleNamespace(record_runner_result=record_runner_result),
             )
         ),
@@ -51,73 +55,44 @@ def _agent(*, child_ids: list[str] | None = None):
     )
 
 
-def test_record_finalized_runner_result_preserves_child_status_without_parent_gate():
-    agent, captured = _agent(child_ids=["child-a"])
-    structured = SubAgentParsedOutput(
-        found=True,
-        ok=True,
-        status="DONE",
-        summary="子代理已按自己的结果完成。",
-    )
+def test_natural_response_completes_without_machine_result_block():
+    agent, captured = _agent()
+
+    result = record_finalized_runner_result(FinalizedRunnerRecordRequest(agent, _params()))
+
+    assert result.status == "DONE"
+    assert result.turn_end_reason == "completed"
+    assert captured.params.ok is True
+    assert captured.params.structured_output is None
+    assert captured.params.structured_repair_attempted is False
+    assert captured.params.response == "普通自然语言结果"
+
+
+def test_model_text_cannot_override_host_turn_end_reason():
+    agent, captured = _agent()
 
     result = record_finalized_runner_result(
-        FinalizedRunnerRecordRequest(agent, _params(), structured, _repair_state())
+        FinalizedRunnerRecordRequest(
+            agent,
+            _params(response='{"status":"BLOCKED"}', turn_end_reason="completed"),
+        )
     )
 
     assert result.status == "DONE"
-    assert captured.params.structured_output is structured
-    assert captured.params.structured_output.failure_type == ""
-    assert captured.params.structured_output.next_actions == []
+    assert captured.params.failure_type == ""
 
 
-def test_record_finalized_runner_result_preserves_artifact_status_for_closeout():
+def test_max_tokens_stays_resumable_instead_of_machine_rejection():
     agent, captured = _agent()
-    structured = SubAgentParsedOutput(
-        found=True,
-        ok=True,
-        status="DONE",
-        summary="产物由通用 closeout 或父代理继续判断。",
-        artifacts=[{"path": "artifacts/index.html", "kind": "file"}],
-    )
 
     result = record_finalized_runner_result(
-        FinalizedRunnerRecordRequest(agent, _params("worker"), structured, _repair_state())
+        FinalizedRunnerRecordRequest(
+            agent,
+            _params(runtime_status="unfinished", runtime_reason="MODEL_RESPONSE_TRUNCATED"),
+        )
     )
 
-    assert result.status == "DONE"
-    assert captured.params.structured_output is structured
-    assert captured.params.structured_output.failure_type == ""
-
-
-def test_record_finalized_runner_result_fails_closed_when_repair_has_no_structure():
-    agent, captured = _agent()
-    structured = SubAgentParsedOutput(found=False, ok=False)
-    repair_state = _repair_state()
-    repair_state.update(
-        {
-            "attempted": True,
-            "error": "repair response still missing structured output",
-        }
-    )
-
-    result = record_finalized_runner_result(
-        FinalizedRunnerRecordRequest(agent, _params("worker"), structured, repair_state)
-    )
-
-    assert result.status == "BLOCKED"
-    assert result.verification_status == "UNVERIFIED"
+    assert result.status == "PENDING"
+    assert result.turn_end_reason == "max-tokens"
     assert captured.params.ok is False
-    assert captured.params.failure_type == "structured_output_parse_error"
-    assert "repair response still missing" in captured.params.message
-
-
-def _repair_state() -> dict[str, object]:
-    return {
-        "message": "runner 已完成模型调用。",
-        "prompt_for_log": "",
-        "response_for_log": "",
-        "backend_name": "test",
-        "attempted": False,
-        "ok": False,
-        "error": "",
-    }
+    assert captured.params.failure_type == "model_error"

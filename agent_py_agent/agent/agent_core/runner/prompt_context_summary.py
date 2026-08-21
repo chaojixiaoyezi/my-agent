@@ -16,7 +16,6 @@ def runner_context_summary_payload(context: SubAgentExecutionContext) -> dict[st
             "goal": current_model_text(context.goal),
             "thought": current_model_text(context.thought),
             "plan": [current_model_text(item) for item in list(context.plan or [])],
-            "acceptance_checks": [current_model_text(item) for item in list(context.acceptance_checks or [])],
         },
         "permissions": {
             "allowed_tools": list(context.allowed_tools or []),
@@ -74,7 +73,6 @@ def _runner_identity_payload(context: SubAgentExecutionContext) -> dict[str, obj
         "agent_name": context.agent_name,
         "role": context.role,
         "status": context.status,
-        "verification_status": context.verification_status,
         "runner_attempts": context.runner_attempts,
         "runner_last_error": context.runner_last_error,
         "parent_id": context.parent_id,
@@ -191,7 +189,6 @@ def _task_envelope_prompt_payload(envelope: object) -> dict[str, object]:
             envelope.get("write_contract"),
             ["output_files", "output_refs", "forbidden_write_roots", "locked_files"],
         ),
-        "acceptance": _dict_prompt_subset(envelope.get("acceptance"), ["checks"]),
         "context_refs": _dict_prompt_subset(envelope.get("context_refs"), ["context_bundle", "execution_context"]),
     }
 

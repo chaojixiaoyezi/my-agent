@@ -37,6 +37,7 @@ class OutputPayloadContext:
     lessons: list[str]
     blockers: list[str]
     next_actions: list[str]
+    turn_end_reason: str
     structured_repair_attempted: bool
     structured_repair_ok: bool
     structured_repair_error: str
@@ -55,6 +56,7 @@ class RunnerResultContext:
     tool_rounds: int
     prompt: str
     response: str
+    turn_end_reason: str
     parsed: SubAgentParsedOutput
     structured_repair_attempted: bool
     structured_repair_ok: bool

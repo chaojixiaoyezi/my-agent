@@ -19,36 +19,27 @@
 
 来自 STATUS.md，当前最急迫的任务已清空，下面保留中长期项。
 
-### TUI 活动回合输入与四路极限轮转复验
+### TUI 活动状态、跟随滚动与 Compact 真机复验
 
-状态：灰色层级与 tmux 左键复制已部署 `.7`；右键直接复制本地通过，待部署和外层粘贴复验
+状态：本地严格门禁通过，待部署 `.7` 和真实 TUI 复验
 
 解决问题：旧 TUI 在长任务运行时把普通 Enter 当成下一轮队列，用户补充消息要等当前任务结束才执行；
 queue preview 又位于可滚动 transcript，离开尾部后看不见。并行实验室若完成后长期空闲，也会浪费四路
 换时间的测试目标。
 
-当前进展：ordinary input 和控制操作均已使用稳定 message/operation ID、exact expected turn、持久 outbox、
-accepted/rejected/unknown 三态和 GET-only reconciler；Gateway terminal、attempt lease、guidance mailbox、
-Adapter ingress/reply 也已收进同一结构化事实链。response loss、同 ID 异正文、active/final/stop/provider ACK
-竞态和客户端重启已有定向测试；修复后的全量 pytest 到 100%、退出 0。2026-08-20 又修正了思考/
-`Ctrl+O` 提示只染前缀未染正文，以及 iTerm2 下 tmux 未使用 `load-buffer -w` 导致外层剪贴板不更新；
-本地相关 focused 105 项通过；修复提交 `167c98d5` 已推送并部署到用户更新后的测试机 `.7`。测试机
-focused 105 项、一个 Gateway/多 TUI 拓扑、MiniMax-M2.7 欢迎页、真实中文回复、ANSI 灰色层级与
-`tmux load-buffer -w` 中文写穿均已验证；外层 macOS 粘贴需要用户在 attach 后手动完成最后一步。
-用户复验又确认右键路径没有交互入口；本地现已在正文与输入框原 handler 前拦截右键，对已有中文选区
-直接复制一次并保留高亮，六文件 focused 107 项通过。宿主终端的原生菜单无法由 SSH 应用强制弹出，
-因此采用用户允许的“右键直接复制”，其外层系统剪贴板结果仍须部署后人工粘贴证明。
+当前进展：ordinary input 和控制操作已使用稳定 message/operation ID、exact expected turn、持久 outbox、
+accepted/rejected/unknown 三态和 GET-only reconciler。2026-08-20 的灰色思考、灰色 `Ctrl+O` 提示、
+tmux 左键复制已部署 `.7`；右键直接复制仍是本地候选。2026-08-21 本地又补齐 Working 动画、仅在用户
+原本位于页底时自动跟随、后续 thinking 增量持续显示，以及 typed Compact 活动块和 5/15/52/78/92/100
+阶段进度。输入后续消息时也会保留可见回执；离开页底浏览历史时不会被强拉回去。
 
-待做：先部署右键直接复制补丁，再由用户在 `.7` 已 attach 的终端分别完成“左键拖选后直接粘贴”和
-“保留选区后右键再粘贴”验收；然后继续复验 response lost、
-明确拒绝、final race、客户端重启和多路 IM/TUI；随后由
-独立 agent 处理三类剩余底座：一是 ordinary/control 共用的最外层 message route binding，二是普通 ChatJob
-从 Enter 到 Gateway bind 的 durable SUBMITTING/stop-btw latch，三是 Gateway input receipt 冻结 canonical
-owner 与 result/input-status 的 exact issuer 鉴权。另按 strict report 拆掉 25 个超长/深嵌套/多参数 hard
-finding，禁止把它们加入 baseline。未执行项不能写成通过。
+待做：提交推送并部署 `.7`；由真实 TUI 验证 Working 动画、thinking 连续增量、页底自动跟随、
+离底不抢滚动、Compact 百分比、后续消息可见、右键复制和输入框粘贴。外层系统剪贴板仍须用户在已 attach
+的本机终端亲自粘贴确认，自动化不能冒充这一步通过。
 
-边界：当前测试机由用户更新为 `192.0.2.7:/root/my-agent`；保持单 Gateway、多 TUI、tmux 观察会话
-和远端 key/config/runtime 数据，不触碰其它项目。本轮小改只跑 focused tests，不重复全仓测试。
+边界：当前测试机为 `192.0.2.7:/root/my-agent`；保持单 Gateway、多 TUI、tmux 观察会话和远端
+key/config/runtime 数据，不触碰其它项目。本轮累计改动超过 10,000 行，按约定只追加一次全仓 pytest，
+后续修复只跑失败项和相关 focused tests。
 
 ### npm 缓存全新 Node 任务真机复验
 
@@ -137,15 +128,19 @@ Gateway/Feishu，并完成本地 8899、MiniMax-M2.7 和两个既有真实飞书
 
 ## 设计中（未开工）
 
-### 用户真实痛点：Subagent 假完成与失控
+### Subagent 自然收口与递归控制面
 
-状态：设计中
+状态：本地已落地，待 `.7` 真实 TUI 验证
 
-解决问题：Fake Done、父会话放养、子代理静默/卡死、输出不落盘、缺独立验收层等系统性问题。
+解决问题：旧链同时存在创建、手动派工、层级调度和机器验收，多套控制面让模型重复创建、等待或被宿主
+粗暴打断。当前已收敛为递归一致的父子关系：所有层级只用 `create_subagents` 创建并自动启动；父级只需
+查看、补充 guidance、取消/中断和自然汇总。主代理、子代理、Gateway 共用六类 `turn_end`，普通完成不再
+依赖 `acceptance_checks`、`VERIFIED` 或模型生成的专用结果壳。
 
-待做：自动周期 due-check、自动心跳、真实入口验收、URL 来源核查、截图/日志证据自动执行器。
+待做：部署 `.7` 后只从真实 TUI 输入一次植物大战僵尸任务，观察 child 数量、自动启动、父级汇总、失败
+恢复、Compact 和最终 0.0.0.0:8080 可访问事实；测试者不得旁路修改任务产物。
 
-设计台账：DESIGN_LEDGER.md "用户真实痛点：Subagent 假完成与失控"
+设计台账：`DESIGN_LEDGER.md` “2026-08-21 子代理递归控制面与自然收口”
 
 ### 注释重构规范
 

@@ -117,7 +117,6 @@ def test_lifecycle_set_status_accepts_params_bundle():
             run_id="run-status",
             status="DONE",
             result="complete",
-            require_evidence=True,
         )
     )
 

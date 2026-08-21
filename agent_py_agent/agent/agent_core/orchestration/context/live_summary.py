@@ -6,9 +6,7 @@ from typing import Any
 
 _ORCHESTRATION_TOOLS = {
     "create_subagents",
-    "dispatch_subagents",
     "inspect_agent_tree",
-    "schedule_child_subagents",
 }
 _MAX_INLINE_JSON = 900
 _MAX_INLINE_TEXT = 500
@@ -142,7 +140,6 @@ def _direct_children_lines(value: object) -> list[str]:
     for key in (
         "unfinished_run_ids",
         "recovery_run_ids",
-        "rejected_acceptance_run_ids",
         "running_run_ids",
         "planning_run_ids",
     ):
@@ -214,7 +211,7 @@ def _result_refs_by_run_lines(value: object) -> list[str]:
         if not isinstance(item, dict):
             continue
         run_id = item.get("run_id", "")
-        status = f"{item.get('status', '')}/{item.get('verification_status', '')}"
+        status = str(item.get("status") or "")
         artifact_ids = _json_inline(item.get("primary_artifact_ids") or [])
         artifacts = _json_inline(item.get("primary_artifact_refs") or [])
         expected_outputs = _json_inline(item.get("expected_outputs") or [])

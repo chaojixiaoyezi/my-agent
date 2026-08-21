@@ -11,6 +11,25 @@
 确认只有一个 Gateway 进程和一个配置端口；故障恢复用例顺序重启或中断这个实例。合同单测中的 fake
 Gateway 可以并行，但不能作为“单 Gateway 多客户端”验收的替代证据。
 
+2026-08-21 子代理自然收口与 TUI 可观察性回归分三层执行：第一层覆盖 `turn_end`、普通自然完成、
+递归 `create_subagents` 自动启动、模型工具表不含 dispatch/schedule、父级 guidance/cancel 和资源上限；
+第二层覆盖 TUI Working 动画、thinking 灰色增量、条件式 follow-tail 与 Compact typed progress；第三层只在
+`192.0.2.7` 的单 Gateway/真实 TUI 输入一次目标 prompt，测试者只观察产物、日志、child 树和 8080
+监听，不旁路补代码。当前 backend focused 144 项、context/protocol focused 75 项已通过。由于本轮累计
+增删超过 10,000 行，发布前追加一次且仅一次全仓 pytest；若发现失败，修复后只重跑失败项和相关 focused。
+
+本轮唯一一次有效全仓测试使用仓库 `.venv` 运行到 100%，暴露 39 个失败：真实缺陷是窄终端闭合思考行
+全角括号宽度漏算和 finalize 轻量参数缺少 `prompt` 时的防御读取，其余主要是测试仍断言已删除的
+`SUBAGENT_RESULT`、手动 dispatch/schedule 与机器验收。修复后，对这些失败来源收集到的 468 项 focused
+组合只剩 2 个测试期望/导入问题，二者精确复测 2/2 通过；动作协议/CLI 121 项、状态投影 36 项另行通过。
+按用户约定不再重复全仓 pytest。
+
+严格 code-size 初次被当前提交 `31f30fe` 自身的 25 个未登记 hard finding 阻断。为避免把存量债务冒充本轮
+回归，先从 `git archive HEAD` 纯净快照生成 baseline，再修掉本轮唯一新增的 `_progress_payload` 深嵌套；
+当前 strict gate 通过，原始报告中的 4 个 hard 均能在纯净基线复现，本轮新增 hard 为 0。baseline 不取
+当前脏工作树，因此没有把本轮新增问题写成豁免。递归创建的同配置每次上限与新建后代空验收字段又以
+44 项 hierarchy/orchestration focused 复测通过。
+
 2026-08-20 TUI 灰色层级与 tmux 复制修复在本地、`192.0.2.7` 各运行 renderer/view/input/ANSI/PTY/chat
 6 文件 focused 组合，均为 105 项通过。测试机仅有一个 Gateway（8420），10 个 TUI 共享；真实中文请求
 约 3.09 秒出现回答，ANSI capture 证明思考为 246 灰、助手正文为 231，`tmux load-buffer -w` 中文探针
@@ -189,15 +208,16 @@ RC=0、ConversationStore user/assistant=2、Candidate/formal=1/1、唯一 user m
 第二模型、重启恢复与长文本验收。
 
 `test_tools/test_tool_loop.py` 覆盖普通任务不会被旧进度清单劫持、显式 goal 的 open-plan 生命周期、工具轮数上限和
-后台 continuation；`test_tools/test_tool_loop_subagent_closeout.py` 覆盖子代理结构化收口与验收结果
-表达；`test_conversation_goal_tools.py` 覆盖一会话一个未完成 goal、精确创建/更新/完成边界。
+后台 continuation；`test_turn_end.py`、`test_subagent_finalize_helpers.py`、`test_subagent_protocol_contracts.py`
+覆盖六类结束原因、自然结果保存与递归控制面；`test_conversation_goal_tools.py` 覆盖一会话一个未完成 goal、
+精确创建/更新/完成边界。
 
 主代理完成表达回归必须覆盖：普通 `task_progress` 即使仍有 open item，也只是一份可恢复的进度笔记，
 不能拦截模型本轮回复、追加隐藏提醒、自动唤醒后台执行或要求下一轮先选择/关闭旧任务。只有显式持久
 `/goal` 的 open plan 才保持 `unfinished` 并由既有 continuation 续跑。该行为不得解析“完成”等自然语言、
 扫描任务目录、执行验证命令或给普通 task 增加完成硬门。终态普通 task 续作必须保留旧终态和 cwd、
-创建新执行 task id；只有精确持久 `/goal` 可以原 id 恢复。子代理工具必须
-是父 run 快照的严格子集，worker 不得获得 child-creation 工具。模型调用账本必须区分 logical turn、
+创建新执行 task id；只有精确持久 `/goal` 可以原 id 恢复。子代理普通工具必须是父 run 快照的严格子集；
+coordinator 可通过统一 `create_subagents` 继续递归创建，worker 不得获得 child-creation 工具。模型调用账本必须区分 logical turn、
 物理 model attempt 和 provider HTTP attempt，并覆盖并发首次请求、重试、失败、超时和迟到 finish。
 task-local child 即使携带父 conversation id，也必须证明可在自己的 runner lane 正常写入授权产物。
 sticky workspace 回归还必须覆盖：新 execution 复用旧 task path 时，四份当前执行投影同步换成新

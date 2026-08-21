@@ -15,7 +15,11 @@ import json
 from pathlib import Path
 
 from agent_py_agent.agent.tooling import BaseTool, ToolHandlerOutcome
-from agent_py_agent.agent.tooling.action_policy import ActionDecision, ActionPolicy, ActionPolicyRequest
+from agent_py_agent.agent.tooling.action_policy import (
+    ActionDecision,
+    ActionPolicy,
+    ActionPolicyRequest,
+)
 from agent_py_agent.agent.tooling.concurrency import describe_tool_concurrency
 from agent_py_agent.agent.tooling.runtime_contracts import ToolCall
 from agent_py_agent.tests._tool_runtime_harness import (

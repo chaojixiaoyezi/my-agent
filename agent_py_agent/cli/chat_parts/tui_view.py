@@ -208,16 +208,27 @@ class TuiTranscriptControl(UIControl):
         line_count = len(self.provider.frame(width).transcript_lines) or 1
         return min(line_count, max(1, int(max_available_height or 1)))
 
-    # LLM: move 只更新 anchor 并关闭 follow，正负 delta 均限制在已知 line_count 内。
-    # 函数用途: 上下移动 transcript 滚动锚点。
+    # LLM: Upward/manual movement breaks sticky-tail, while a downward move that reaches the
+    # current last rendered line restores it. This mirrors 终端交互's isSticky contract and
+    # must clear unseen state without relying on footer text.
+    # 函数用途: 上下移动 transcript；向下回到底部时自动恢复跟随新消息。
     def move(self, delta: int) -> None:
         visible_block_ids = _counted_message_block_ids(
             self.provider.state_store.snapshot()
         )
         with self._lock:
             self._begin_manual_scroll_locked(visible_block_ids)
-            self.follow = False
-            self.cursor_line = max(0, min(self._line_count - 1, self.cursor_line + int(delta)))
+            target = max(
+                0,
+                min(self._line_count - 1, self.cursor_line + int(delta)),
+            )
+            self.cursor_line = target
+            if int(delta) > 0 and target >= self._line_count - 1:
+                self.follow = True
+                self._unseen_baseline = None
+                self._unseen_block_ids = frozenset()
+            else:
+                self.follow = False
 
     # LLM: home 显式离开 follow-tail 并把 anchor 设为首行。
     # 函数用途: 跳到 transcript 顶部。

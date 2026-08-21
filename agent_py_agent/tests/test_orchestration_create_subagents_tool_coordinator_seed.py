@@ -93,7 +93,7 @@ class TestCreateSubagentsToolCoordinatorSeed:
         tool = CreateSubagentsTool(mock_agent)
         result = tool.execute({
             "goal": (
-                "创建 小傻妞-root-coordinator，并让它使用 schedule_child_subagents "
+                "创建 小傻妞-root-coordinator，并让它使用 create_subagents "
                 "继续创建 小小傻妞-child-coordinator；本节点不要写最终产物。"
             ),
             "role": "worker",
@@ -103,8 +103,8 @@ class TestCreateSubagentsToolCoordinatorSeed:
         assert result.ok is True
         assert params.role == "worker"
 
-    def test_child_dispatch_tool_grant_repairs_worker_to_coordinator(self):
-        """显式给 schedule/dispatch 工具时，工具层按结构化能力纠偏为 coordinator。"""
+    def test_child_creation_tool_grant_repairs_worker_to_coordinator(self):
+        """显式给统一 child 创建工具时，工具层按结构化能力纠偏为 coordinator。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = MagicMock()
@@ -123,7 +123,7 @@ class TestCreateSubagentsToolCoordinatorSeed:
         result = tool.execute({
             "goal": "创建第一层 root coordinator。",
             "role": "worker",
-            "allowed_tools": ["read_file", "write_file", "schedule_child_subagents", "dispatch_subagents"],
+            "allowed_tools": ["read_file", "write_file", "create_subagents"],
         })
 
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
@@ -230,8 +230,8 @@ class TestCreateSubagentsToolCoordinatorPlan:
         assert any("分析印尼市场" in item for item in params.plan)
         assert any("泰越研究员" in item for item in params.plan)
 
-    def test_explicit_child_dispatch_tools_repair_worker_to_coordinator(self):
-        """显式给子调度工具时，role=worker 按带队节点创建。"""
+    def test_explicit_child_creation_tool_repairs_worker_to_coordinator(self):
+        """显式给统一 child 创建工具时，role=worker 按带队节点创建。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = MagicMock()
@@ -254,12 +254,12 @@ class TestCreateSubagentsToolCoordinatorPlan:
             "goal": "组织代理研究市场环境并交付报告",
             "items": [{
                 "goal": (
-                    "研究市场环境。每个子代理需要创建并调度至少2个孙代理负责细分研究，"
+                    "研究市场环境。每个子代理需要用统一创建入口建立至少2个孙代理负责细分研究，"
                     "最终产出写到 /tmp/project/deliverables/market_env_report.md"
                 ),
                 "role": "worker",
                 "agent_name": "小傻妞-市场环境",
-                "allowed_tools": ["read_file", "write_file", "schedule_child_subagents", "dispatch_subagents"],
+                "allowed_tools": ["read_file", "write_file", "create_subagents"],
             }],
             "extra_write_roots": ["/tmp/project/deliverables"],
         })
@@ -286,7 +286,7 @@ class TestCreateSubagentsToolCoordinatorPlan:
 
         tool = CreateSubagentsTool(mock_agent)
         result = tool.execute({
-            "goal": "创建第一层 root coordinator，并使用 schedule_child_subagents 创建下一层。",
+            "goal": "创建第一层 root coordinator，并使用 create_subagents 创建下一层。",
             "role": "小傻妞-root-coordinator",
         })
 
@@ -312,7 +312,7 @@ class TestCreateSubagentsToolCoordinatorPlan:
 
         tool = CreateSubagentsTool(mock_agent)
         result = tool.execute({
-            "goal": "创建第一层 root coordinator，并使用 schedule_child_subagents 创建下一层。",
+            "goal": "创建第一层 root coordinator，并使用 create_subagents 创建下一层。",
             "role": "coordinator",
             "agent_name": "小傻妞-root-coordinator",
         })
@@ -661,42 +661,6 @@ class TestResourceDomainAliasingPerSeq266:
         )
         assert set(hook_scopes) & set(direct), (
             "root 展开出的 child run 必须与直接 run_id 锁互斥"
-        )
-
-    def test_dispatch_auto_select_locks_pool(self):
-        # 反例 3（#3 补充，seq 269 #1 强化）：dispatch 未传 run_ids（自动选）
-        # 必须保守锁调度池，不能空锁；且 auto 与 explicit 必须共享 pool——
-        # auto 只锁 pool、explicit 只锁 agent_run 时零交集（UNIQUE 精确串互斥
-        # 拦不住同时命中同一 run 的双派发），单派发者语义 = 所有派发都锁 pool。
-        from agent_py_agent.agent.agent_core.orchestration.dispatch.tool import (
-            DispatchSubagentsTool,
-        )
-        from agent_py_agent.agent.tooling.workspace_scopes import (
-            authoritative_workspace_scopes,
-        )
-
-        tool = DispatchSubagentsTool(MagicMock())
-        hook = getattr(tool, "effective_resource_scopes", None)
-        assert hook is not None, "dispatch 必须提供 effective_resource_scopes hook（seq 266 #3）"
-        root = Path("/tmp/dispatch-pool")
-        auto = hook({}, None, root)
-        assert "logical:dispatch:pool" in auto, (
-            "自动派发必须锁调度池（保守锁稳定域）"
-        )
-        explicit_hook = hook({"run_ids": ["r-1"]}, None, root)
-        assert set(auto) & set(explicit_hook), (
-            "auto 与 explicit 派发必须共享 pool 锁（可同时命中同一 run）"
-        )
-        explicit = authoritative_workspace_scopes(
-            workspace_root=root,
-            write_boundary=None,
-            policy=tool.runtime_policy,
-            arguments={"run_ids": ["r-1"]},
-        )
-        merged_explicit = explicit + explicit_hook  # executor 合并语义：
-        # 参数投影(agent_run) + hook(pool) 一起入锁，与 auto(pool) 必冲突。
-        assert set(auto) & set(merged_explicit), (
-            "hook(pool) 与参数投影(agent_run) 合并后必须与 auto 互斥"
         )
 
     def test_logical_value_stripped_before_scope(self):

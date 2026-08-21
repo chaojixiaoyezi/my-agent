@@ -56,7 +56,7 @@ def scheduled_child_role(
     ):
         return "worker"
     tools = set(getattr(spec, "allowed_tools", []) or [])
-    if "schedule_child_subagents" not in tools and "dispatch_subagents" not in tools:
+    if "create_subagents" not in tools:
         return role
     return _coordinator_role_for_depth(parent)
 

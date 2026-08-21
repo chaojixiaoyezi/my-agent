@@ -1,5 +1,26 @@
 # STATUS
 
+## 2026-08-21 子代理自然收口、递归控制面与 TUI 可观察性（本地严格 gate 已通过，待发布）
+
+- 对照 会话运行时 后，模型可见的子代理控制面只保留统一创建、查看、补充 guidance、取消/中断和 capability
+  处理。`create_subagents` 在任意层级都代表创建并自动启动；旧 `dispatch_subagents`、child scheduler 等
+  “再推一下才开工”的工具已删除，宿主内部 dispatcher 只承担进程选择、并发和恢复。
+- 新增公共 `TurnEndReason` 六类原因：`completed`、`aborted`、`blocked`、`error`、`max-tokens`、
+  `interrupted`。主代理、子代理、Gateway 和 TUI 读取同一个结构化结束事实；普通任务不再通过
+  `acceptance_checks`、`VerificationStatus` 或模型正文里的完成词决定能否结束。历史账本字段只读兼容，
+  不再进入当前 prompt、context bundle、父级摘要或启动前检查。
+- 仍保留底层客观事实和安全收口：工具真实成功/失败、路径边界、权限、取消、中断及同轮“模型口头完成但
+  最后一次写操作明确失败”的冲突会返回给同一模型返工；它们不是另一套任务质量验收。
+- 默认资源上限已收紧为同 owner 最多 6 个未结束 child、根与后代每次最多创建 4 个、runner 并发 4，避免
+  同一普通任务无意义地产生十几个 child；新建后代的历史 `acceptance_checks` 固定为空。TUI 本地补齐
+  Working 动画、仅在原本位于底部时跟随、离底不抢滚动、后续 thinking 增量和 Compact
+  5/15/52/78/92/100 阶段进度。
+- 本轮唯一一次全仓 pytest 跑到 100% 后暴露 39 项旧合同断言与两个真实缺陷；修复后只按约定复测失败来源
+  和相关 focused，其中 backend 144 项、context/protocol 75 项、失败来源组合 468 项、动作协议/CLI
+  121 项、状态投影 36 项及本次递归资源边界 44 项均已通过。Ruff、doc sync、strict code-size、diff check
+  和 compileall 已通过；strict 报告中的 4 个 hard 均来自纯净基线，本轮新增 hard 为 0。提交推送、`.7`
+  单 Gateway 部署和真实 TUI 植物大战僵尸任务仍待执行，未提前标为通过。
+
 ## 2026-08-20 TUI 灰色层级与 tmux/右键复制修正
 
 - 用户真机反馈思考正文和 `Ctrl+O` 展开提示仍与助手正文同色。根因不是主题色值，而是 renderer 只把

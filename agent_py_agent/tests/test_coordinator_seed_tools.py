@@ -14,4 +14,6 @@ def test_explicit_root_allowed_tools_merges_parent_grants():
     assert result is not None
     assert "read_file" in result
     assert "run_command" in result
-    assert "dispatch_subagents" in result
+    assert "create_subagents" in result
+    assert "dispatch_subagents" not in result
+    assert "schedule_child_subagents" not in result

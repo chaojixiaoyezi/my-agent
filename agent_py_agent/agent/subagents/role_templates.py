@@ -33,8 +33,7 @@ ROLE_BASE_TOOLS = [
     CAPABILITY_REQUEST_TOOL,
 ]
 COORDINATOR_TOOLS = [
-    "schedule_child_subagents",
-    "dispatch_subagents",
+    "create_subagents",
     "inspect_agent_tree",
     "send_guidance",
     *ROLE_BASE_TOOLS,

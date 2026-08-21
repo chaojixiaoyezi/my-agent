@@ -158,7 +158,6 @@ def _task_result_ref_row(task: object, *, per_run_artifact_limit: int) -> dict[s
         "agent_name": str(getattr(task, "agent_name", "") or ""),
         "role": str(getattr(task, "role", "") or ""),
         "status": str(getattr(task, "status", "") or ""),
-        "verification_status": str(getattr(task, "verification_status", "") or ""),
         "summary": current_model_text(summary),
         "primary_artifact_ids": _registry_ids(registry_records, limit=per_run_artifact_limit),
         "primary_artifact_refs": artifacts,

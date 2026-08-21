@@ -8,13 +8,11 @@ SimpleAgent 的主循环、子代理、dispatch、prompt 模板、工具类和�
 """
 
 from .capability_request_tool import CapabilityRequestTool
-from .hierarchy_tools import ScheduleChildSubagentsTool
 from .models import AgentRunResult
 from .orchestration.dispatch.mixin import SimpleAgentDispatchMixin
 from .orchestration_tools import (
     CancelSubagentsTool,
     CreateSubagentsTool,
-    DispatchSubagentsTool,
     InspectAgentTreeTool,
     RaiseEventTool,
     ResolveCapabilityRequestsTool,
@@ -31,10 +29,8 @@ __all__ = [
     "CancelSubagentsTool",
     "ResolveCapabilityRequestsTool",
     "CreateSubagentsTool",
-    "DispatchSubagentsTool",
     "InspectAgentTreeTool",
     "RaiseEventTool",
-    "ScheduleChildSubagentsTool",
     "SendGuidanceTool",
     "SimpleAgentDispatchMixin",
     "SimpleAgentRuntimeMixin",

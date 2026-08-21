@@ -255,6 +255,7 @@ def _execution_context_task_fields(task: SubAgentTask) -> dict[str, object]:
         "agent_name": task.agent_name,
         "role": task.role,
         "status": task.status,
+        "turn_end_reason": str(getattr(task, "turn_end_reason", "") or ""),
         "verification_status": task.verification_status,
         "channel_status": task.channel_status,
         "runner_attempts": task.runner_attempts,

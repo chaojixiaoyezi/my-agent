@@ -355,18 +355,18 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=True,
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint=(
-            "后台监督轮所属任务已有未结束子代理；读取现有 run 状态并通过 "
-            "dispatch_subagents 或 send_guidance 续接，只有明确接管时才新建 replacement run。"
+            "后台监督轮所属任务已有未结束子代理；用 inspect_agent_tree 读取现有 run 状态，"
+            "需要纠偏时用 send_guidance 发消息。启动和可恢复重试由系统调度，只有明确接管时才新建 replacement run。"
         ),
     ),
     "SUBAGENT_RETRY_REQUIRED": ErrorContract(
         code="SUBAGENT_RETRY_REQUIRED",
         category="orchestration",
         retryable=True,
-        recommended_action=RecoveryAction.DISPATCH.value,
+        recommended_action=RecoveryAction.WAIT.value,
         recovery_hint=(
-            "目标仍满足同一 run 的结构化重试条件；用返回的 run_id 调用 "
-            "dispatch_subagents，复用原 checkpoint 和工作区继续，不能取消后重做。"
+            "目标仍满足同一 run 的结构化重试条件；系统调度器会复用原 checkpoint 和工作区自动继续。"
+            "父代理可用 inspect_agent_tree 查状态或 send_guidance 补充消息，不能取消后重做。"
         ),
     ),
     "AUDIT_SOURCE_WORKER_SYSTEM_MANAGED": ErrorContract(

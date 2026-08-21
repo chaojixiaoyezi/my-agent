@@ -1,5 +1,21 @@
 # Subagent Progress
 
+## 2026-08-21 递归创建、自动启动与自然收口
+
+- 根/子/孙代理只保留一个模型可见创建入口 `create_subagents`；创建后宿主自动启动。
+  `dispatch_subagents` 与 `schedule_child_subagents` 的模型工具、schema、注册和专用测试已删除。
+- 内部 dispatcher 仍保留为 Gateway/runner 的自动启动、租约、恢复与有界重试引擎；
+  父代理只需查看、发补充消息或取消，不再手工推进已创建 run。
+- 新增公共 `turn_end.reason` 六种轮结束原因，主代理、子代理、Gateway 和父级 wake 共用。
+  模型自然最终回复不再被交付扫描、完成 marker、产物数或机器验收改写。
+- 删除普通子代理 acceptance ledger/verifier 与交付收口旁路。历史
+  `acceptance_checks` / `verification_status` 只保留持久化可读兼容，已从 TaskEnvelope、
+  runner 模型摘要、父级 wake、树摘要和完成计算中移除。
+- 默认资源上限收紧为同 owner 最多 6 个未结束 child、每次创建最多 4 个、
+  auto runner 并发最多 4 个，用资源护栏抑制一次创建十几个 child 的慢与不稳定。
+- 本地已通过 turn-end、统一创建、生命周期、工具规格、树投影和 TUI/Compact 定向回归；
+  真机单 Gateway + 真实 TUI 任务证据在发布后补入。
+
 ## 2026-08-12 子代理候选 scope 统一规范
 
 - `services/memory_candidates.py::_task_scope` 是子代理候选的唯一 scope 构造点：`scope_type=project`、

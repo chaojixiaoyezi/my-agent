@@ -33,7 +33,7 @@ risk_level: low
 
 **2. 派评审子代理**
 
-用 `create_subagents` / `dispatch_subagents`(或 `schedule_child_subagents` 排期)派一个专职评审子代理。给它的任务描述里**只放这四样**,不放别的:
+用 `create_subagents` 创建并自动启动一个专职评审子代理。给它的任务描述里**只放这四样**,不放别的:
 
 | 给评审者 | 内容 |
 |---|---|

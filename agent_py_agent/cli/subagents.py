@@ -205,8 +205,10 @@ def _add_agents_patch_subcommand(sub):
     patches.set_defaults(func=cmd_subagents_patches, patch_action="review_dry_run")
 
 
+# LLM: This command is the process entrypoint used by host auto-start, not a model/user workflow step.
+# 函数用途: 注册底层 runner 调度进程入口；普通用户不需要靠它推动任务。
 def _add_agents_dispatch_subcommands(sub):
-    dispatch = sub.add_parser("subagents-dispatch", help="执行一轮父代理调度，默认 dry-run")
+    dispatch = sub.add_parser("subagents-dispatch", help="内部运行时调度入口；普通用户无需手动调用")
     _add_capability_config_arg(dispatch)
     dispatch.add_argument("--dry-run", action="store_false", dest="apply", help="只生成调度报告，不修改记录")
     dispatch.add_argument("--apply", action="store_true", help="执行低风险调度动作并写审计日志")

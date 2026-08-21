@@ -440,21 +440,12 @@ def test_status_transitions_persist_and_cancel_is_terminal(tmp_path: Path) -> No
     manager.lifecycle.set_status(SetStatusParams(run_id=task.id, status="RUNNING"))
     assert manager.load(task.id).status == "RUNNING"
 
-    # 无证据时不允许 DONE，且失败的变更不落盘
-    with pytest.raises(ValueError):
-        manager.lifecycle.set_status(
-            SetStatusParams(run_id=task.id, status="DONE", require_evidence=True)
-        )
-    assert manager.load(task.id).status == "RUNNING"
-
-    # 补真实证据后 DONE 成功，终态字段落盘
+    # 证据可以独立记录，但不再是 DONE 的机器前置门。
     manager.lifecycle.record_evidence(
         task.id,
         RecordEvidenceParams(kind="test", summary="pytest 通过", command="pytest -q", ok=True),
     )
-    manager.lifecycle.set_status(
-        SetStatusParams(run_id=task.id, status="DONE", require_evidence=True)
-    )
+    manager.lifecycle.set_status(SetStatusParams(run_id=task.id, status="DONE"))
     done = manager.load(task.id)
     assert done.status == "DONE"
     assert done.verification_status == "VERIFIED"

@@ -9,7 +9,7 @@
 当前根目录入口只包括：
 - `core.py`：`SimpleAgent` 主入口。
 - `action_protocol*.py`：模型动作协议入口。
-- `memory_push.py`、`model_visible_refs.py`、`path_access_policy.py`、`path_recovery_hints.py`、`run_intent.py`、`runtime_errors.py`、`startup_recovery.py`、`task_progress*.py`：跨模块轻量入口。
+- `memory_push.py`、`model_visible_refs.py`、`path_access_policy.py`、`path_recovery_hints.py`、`run_intent.py`、`runtime_errors.py`、`startup_recovery.py`、`task_progress*.py`、`turn_end.py`：跨模块轻量入口。
 
 不再新增根目录门面文件；新能力必须放到明确职责目录。
 
@@ -17,7 +17,7 @@
 
 ### `agent_core/`
 
-主代理应用服务层。放 `SimpleAgent` 的主循环、子代理 runner、父代理 planner、dispatch/watch、编排工具和 runner 重试规则。
+主代理应用服务层。放 `SimpleAgent` 的主循环、子代理 runner、父代理 planner、宿主内部自动 dispatch/watch、编排工具和 runner 重试规则。模型侧只有统一创建工具，不暴露手动 dispatch/schedule。
 
 允许：业务流程编排、调用下层服务、把多个模块串成一轮完整行为。
 
@@ -114,9 +114,9 @@ Prompt 构造层。放系统 prompt、记忆、工具目录、推荐工具、工
 
 ### `subagents/`
 
-子代理领域层。放 subagent 模型、报告、工作区文件、看板、due-check、动作、能力路由、验收、patch、runner 结果、索引。
+子代理领域层。放 subagent 模型、报告、工作区文件、看板、due-check、动作、能力路由、patch、runner 结果、索引与恢复。
 
-允许：子代理状态机、工单文件、父子关系、验收规则、子代理报告渲染。
+允许：子代理状态机、工单文件、父子关系、结构化生命周期、子代理报告渲染。历史验收字段只能做旧账本兼容，不得恢复为完成门。
 
 不允许：CLI 参数解析、模型后端 HTTP 协议、全局配置解析。
 
@@ -126,7 +126,7 @@ Prompt 构造层。放系统 prompt、记忆、工具目录、推荐工具、工
 
 允许：工具执行、工具参数校验、工具 allowlist、工具输出格式、写入边界硬拦截。
 
-不允许：父代理 dispatch 决策、subagent 验收规则、CLI 交互。
+不允许：父代理 dispatch 决策、subagent 生命周期裁决、CLI 交互。
 
 ## 新模块放置决策
 

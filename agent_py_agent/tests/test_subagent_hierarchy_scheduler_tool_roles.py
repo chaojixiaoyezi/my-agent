@@ -32,7 +32,7 @@ def test_hierarchy_schedule_infers_coordinator_role_from_tools(tmp_path):
                     goal="创建三个 worker 并调度执行。",
                     agent_name="child-01-grandchild-01",
                     role="worker",
-                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
+                    allowed_tools=["create_subagents", "inspect_agent_tree"],
                 )
             ],
             apply=True,
@@ -41,6 +41,7 @@ def test_hierarchy_schedule_infers_coordinator_role_from_tools(tmp_path):
     grandchild = manager.load(result.created_run_ids[0])
 
     assert grandchild.role == "coordinator"
+    assert grandchild.acceptance_checks == []
 
 
 def test_hierarchy_schedule_preserves_explicit_display_names(tmp_path):
@@ -149,8 +150,7 @@ def test_hierarchy_schedule_infers_coordinator_even_with_report_write_tools(tmp_
                     agent_name="child-01-grandchild-01",
                     role="worker",
                     allowed_tools=[
-                        "schedule_child_subagents",
-                        "dispatch_subagents",
+                        "create_subagents",
                         "inspect_agent_tree",
                         "read_file",
                         "write_file",
@@ -178,8 +178,7 @@ def test_hierarchy_schedule_keeps_write_intent_but_removes_child_creation_tools(
         root_id=root.id,
         depth=1,
         allowed_tools=[
-            "schedule_child_subagents",
-            "dispatch_subagents",
+            "create_subagents",
             "inspect_agent_tree",
             "read_file",
             "write_file",
@@ -196,7 +195,7 @@ def test_hierarchy_schedule_keeps_write_intent_but_removes_child_creation_tools(
                     goal=f"实现 normalize_text 并写入 {deliverables}/worker_outputs/normalize/solution.py。",
                     agent_name="leaf-normalize",
                     role="worker",
-                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree"],
+                    allowed_tools=["create_subagents", "inspect_agent_tree"],
                 )
             ],
             apply=True,
@@ -206,6 +205,7 @@ def test_hierarchy_schedule_keeps_write_intent_but_removes_child_creation_tools(
 
     assert worker.role == "worker"
     assert "write_file" in worker.allowed_tools
+    assert "create_subagents" not in worker.allowed_tools
     assert "schedule_child_subagents" not in worker.allowed_tools
     assert "dispatch_subagents" not in worker.allowed_tools
 
@@ -218,8 +218,7 @@ def test_hierarchy_schedule_worker_tools_are_a_strict_parent_subset(tmp_path):
         thought="coordinate",
         plan=["plan"],
         allowed_tools=[
-            "schedule_child_subagents",
-            "dispatch_subagents",
+            "create_subagents",
             "inspect_agent_tree",
             "read_file",
             "write_file",
@@ -236,8 +235,7 @@ def test_hierarchy_schedule_worker_tools_are_a_strict_parent_subset(tmp_path):
                     agent_name="leaf-text",
                     role="worker",
                     allowed_tools=[
-                        "schedule_child_subagents",
-                        "dispatch_subagents",
+                        "create_subagents",
                         "inspect_agent_tree",
                         "write_file",
                         "web_fetch",
@@ -251,6 +249,7 @@ def test_hierarchy_schedule_worker_tools_are_a_strict_parent_subset(tmp_path):
 
     assert worker.role == "worker"
     assert "write_file" in worker.allowed_tools
+    assert "create_subagents" not in worker.allowed_tools
     assert "schedule_child_subagents" not in worker.allowed_tools
     assert "dispatch_subagents" not in worker.allowed_tools
     assert "inspect_agent_tree" in worker.allowed_tools
@@ -265,8 +264,7 @@ def test_hierarchy_schedule_preserves_report_write_tools_for_coordinators(tmp_pa
         thought="split",
         plan=["plan"],
         allowed_tools=[
-            "schedule_child_subagents",
-            "dispatch_subagents",
+            "create_subagents",
             "inspect_agent_tree",
             "read_file",
             "write_file",
@@ -283,8 +281,7 @@ def test_hierarchy_schedule_preserves_report_write_tools_for_coordinators(tmp_pa
                     agent_name="arithmetic-lead",
                     role="coordinator",
                     allowed_tools=[
-                        "schedule_child_subagents",
-                        "dispatch_subagents",
+                        "create_subagents",
                         "inspect_agent_tree",
                         "read_file",
                         "write_file",
@@ -297,8 +294,9 @@ def test_hierarchy_schedule_preserves_report_write_tools_for_coordinators(tmp_pa
     coordinator = manager.load(result.created_run_ids[0])
 
     assert coordinator.role == "coordinator"
-    assert "schedule_child_subagents" in coordinator.allowed_tools
-    assert "dispatch_subagents" in coordinator.allowed_tools
+    assert "create_subagents" in coordinator.allowed_tools
+    assert "schedule_child_subagents" not in coordinator.allowed_tools
+    assert "dispatch_subagents" not in coordinator.allowed_tools
     assert "write_file" in coordinator.allowed_tools
     assert coordinator.allowed_write_roots == [coordinator.task_dir, str(deliverables)]
     assert str(deliverables) in coordinator.goal

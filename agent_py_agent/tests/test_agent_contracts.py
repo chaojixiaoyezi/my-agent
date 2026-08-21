@@ -109,6 +109,7 @@ def test_run_state_machine_dispatch_closeout_and_recovery_decisions() -> None:
     assert can_dispatch(RunStateFacts(status="FAILED"), force=True) is True
     assert can_dispatch(RunStateFacts(status="DONE", verification_status="VERIFIED"), force=True) is False
     assert can_closeout(RunStateFacts(status="DONE", verification_status="VERIFIED")) is True
+    assert can_closeout(RunStateFacts(status="DONE", verification_status="UNVERIFIED")) is True
 
     blocked = recovery_decision(RunStateFacts(status="BLOCKED", failure_type="TOOL_UNAVAILABLE"))
     assert blocked.action == "request_capability"
@@ -169,8 +170,8 @@ def test_run_state_machine_handles_normal_terminal_and_verification_states_witho
 
     assert cancelled.action == "stop" and cancelled.allow_new_run is True
     assert abandoned.action == "stop" and abandoned.allow_new_run is True
-    assert verifying.action == "wait_for_acceptance"
-    assert done.action == "wait_for_acceptance"
+    assert verifying.action == "manual_review"
+    assert done.action == "closeout"
     assert "unhandled recovery state" not in caplog.text
 
 

@@ -44,7 +44,7 @@ def test_scheduled_child_role_uses_tool_grants_not_goal_keywords():
         goal="安排下一层。",
         role="worker",
         agent_name="小傻妞-worker-2",
-        allowed_tools=["schedule_child_subagents"],
+        allowed_tools=["create_subagents"],
     )
 
     assert scheduled_child_role(parent, natural_spec, goal=natural_spec.goal) == "worker"

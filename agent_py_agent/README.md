@@ -407,7 +407,7 @@ python3 -m agent_py_agent daemon
 
 `daemon` 默认读取 `agent_config.yaml` 里的 `daemon_*` 配置。模型根据可独立的工作项自主决定本批子代理数量；每批、每任务、每 owner 和全局并发上限依次取严格最小值。请求超限时整批拒绝，不静默截断或创建一半。`task_max_subagents=0` / `task_max_grandchildren=0` 只表示该两项不额外收紧，不取消 owner/并发安全上限。runner 并发、超时和启动速率默认走 `auto`；`daemon_max_cycles=0` 表示持续运行，`daemon_limit=0` 表示不限制记录条数。
 
-父代理 LLM planner 常驻循环：
+宿主内部恢复/观察循环（不是模型工具）：
 
 ```bash
 python3 -m agent_py_agent subagents-dispatch --watch --planner --interval 30
@@ -437,36 +437,16 @@ runner 真执行：
 python3 -m agent_py_agent subagent-run <run_id> --execute
 ```
 
-## Subagent Runner 输出协议
+## Subagent Runner 结束协议
 
-runner prompt 会要求模型最后输出：
+子代理像主代理一样自然输出最终回复，不需要生成 `[SUBAGENT_RESULT]` 包装或自行声明
+`DONE/VERIFIED`。宿主根据真实模型流、工具结果和控制事件写入统一 `turn_end`：
+`completed`、`aborted`、`blocked`、`error`、`max_tokens`、`interrupted`。
 
-```text
-[SUBAGENT_RESULT]
-{
-  "status": "DONE",
-  "summary": "本轮完成或卡住的摘要",
-  "used_tools": [],
-  "used_skills": [],
-  "evidence": [],
-  "capability_requests": [],
-  "artifacts": [],
-  "tests": [],
-  "patches": [],
-  "lessons": [],
-  "next_actions": [],
-  "blocked_reason": "",
-  "failure_type": ""
-}
-[/SUBAGENT_RESULT]
-```
-
-系统会自动解析这个 JSON 块：
-- `evidence` 写入验收证据。
-- `capability_requests` 写成 open `CapabilityRequest`。
-- `artifacts`、`tests`、`patches`、`lessons`、`next_actions` 写入 `output.json`。
-- `lessons` 和 `next_actions` 也会追加到 `DEBRIEF.md`。
-- 未授权 `used_tools` / `used_skills` 会被忽略并审计。
+模型可见控制面只有统一 `create_subagents`（任意层级创建后自动启动）、`inspect_agent_tree`、
+`send_guidance`、`cancel_subagents` 和 capability 处理。内部 dispatcher/worker pool 继续负责并发、恢复和
+完成通知，但不再暴露“手动推进”工具。真实产物、工具记录、blockers、capability requests 和 refs 仍由
+宿主持久化；父代理读这些事实后自然汇总或继续安排工作。
 
 详细说明见仓库根目录的 [SUBAGENT_RUNBOOK.md](../SUBAGENT_RUNBOOK.md)。
 

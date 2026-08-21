@@ -1,10 +1,10 @@
 
 from __future__ import annotations
 
-"""builds subagent runner execution prompts and structured-output repair audit text.
+"""builds subagent runner execution prompts from canonical task context.
 
-runner 真正调用模型前，需要把执行上下文压成明确任务；模型输出不合格式时，还要生成一次'只修格式'的补救 prompt。
-这些 prompt 模板都放这里，避免主流程函数越来越长。
+runner 真正调用模型前，把执行上下文压成明确任务；模型按普通 assistant 回合自然结束，
+宿主不再要求或修复额外的机器结果块。
 """
 
 import json
@@ -19,97 +19,9 @@ from ...subagents.role_templates import (
 from ...tooling.content_transport_policy import filesystem_text_mutation_rule
 from .prompt_context_summary import runner_context_summary_payload
 
-SUBAGENT_RESULT_TEMPLATE = (
-    "[SUBAGENT_RESULT]\n"
-    "{\n"
-    '  "status": "DONE",\n'
-    '  "summary": "本轮完成或卡住的摘要",\n'
-    '  "used_tools": [],\n'
-    '  "used_skills": [],\n'
-    '  "evidence": [\n'
-    '    {"kind": "artifact", "summary": "验证摘要", "path": "产物路径或报告路径", "url": "", "ok": true}\n'
-    "  ],\n"
-    '  "evidence_packets": [\n'
-    '    {"id": "evpkt-run-id-short", "claim": "可验收声明", "checked_scope": "检查范围", "evidence_refs": ["runner_result.json"], "artifact_refs": ["产物路径或output.json"], "confidence": 0.9}\n'
-    "  ],\n"
-    '  "coverage_records": [\n'
-    '    {"covered_run_id": "失败或损坏的run_id", "covered_by_run_id": "已DONE/VERIFIED的覆盖run_id", "reason": "为什么覆盖同一范围", "artifact_refs": ["覆盖者产物路径"], "evidence_refs": ["覆盖者证据路径"]}\n'
-    "  ],\n"
-    '  "capability_requests": [\n'
-    '    {"problem": "缺少什么", "needed_capability": "能力名", "capability_type": "shell|tool|skill|mcp|network|generic", "expected_output": "希望得到什么", "requested_tools": [], "requested_skills": [], "requested_mcp_tools": [], "requested_commands": ["python3"], "cwd_scope": [], "path_scope": ["任务内需要访问的目录"], "network_scope": [], "output_budget": {"stdout_bytes": 65536, "stderr_bytes": 32768}, "risk_level": "low|medium|high", "tried": [], "evidence": [], "constraints": {}, "alternatives_attempted": [], "escalation_target": "parent"}\n'
-    "  ],\n"
-    '  "artifacts": [\n'
-    '    {"path": "产物路径", "kind": "file|report|log", "summary": "产物说明"}\n'
-    "  ],\n"
-    '  "tests": [\n'
-    '    {"name": "测试名称", "validation_method": "file_check", "file_path": "待检查文件路径", "ok": true, "summary": "测试结果摘要"}\n'
-    "  ],\n"
-    '  "patches": [\n'
-    '    {"path": "改动文件", "status": "applied|planned|blocked", "summary": "改了什么或准备改什么"}\n'
-    "  ],\n"
-    '  "lessons": ["<把你这次任务真正踩到的坑/学到的可复用经验写成一句话；没有就给空数组 []，不要照抄本提示>"],\n'
-    '  "next_actions": ["建议父代理下一步动作"],\n'
-    '  "blocked_reason": "",\n'
-    '  "failure_type": ""\n'
-    "}\n"
-    "[/SUBAGENT_RESULT]\n"
-)
-
-SUBAGENT_REPAIR_RESULT_TEMPLATE = (
-    "[SUBAGENT_RESULT]\n"
-    "{\n"
-    '  "status": "DONE",\n'
-    '  "summary": "本轮完成或卡住的摘要",\n'
-    '  "used_tools": [],\n'
-    '  "used_skills": [],\n'
-    '  "evidence": [\n'
-    '    {"kind": "artifact", "summary": "已检查的产物或报告", "path": "产物路径或报告路径", "ok": true}\n'
-    "  ],\n"
-    '  "evidence_packets": [\n'
-    '    {"id": "evpkt-repair-run-id-short", "claim": "可验收声明", "checked_scope": "修复整理范围", "evidence_refs": ["报告或output.json路径"], "artifact_refs": ["产物路径"], "confidence": 0.8}\n'
-    "  ],\n"
-    '  "coverage_records": [],\n'
-    '  "capability_requests": [],\n'
-    '  "artifacts": [],\n'
-    '  "tests": [],\n'
-    '  "patches": [],\n'
-    '  "lessons": [],\n'
-    '  "next_actions": [],\n'
-    '  "blocked_reason": "",\n'
-    '  "failure_type": ""\n'
-    "}\n"
-    "[/SUBAGENT_RESULT]"
-)
-
-_REQUIRED_OUTPUT_GUIDE = (
-    "- 说明完成了什么或卡在哪里。\n"
-    "- 列出使用过的授权工具或 skill。\n"
-    "- 给出可验收证据；成功时 evidence_packets 必须有 artifact_refs 或 evidence_refs，不能只写普通 evidence。\n"
-    "- 如果你认为某个失败、损坏或超时的 child run 已由另一个已完成 run 覆盖，必须写 coverage_records；"
-    "只在 summary 里说“已覆盖”不会被最终收口认可。\n"
-    "- tests 数组里的可机验条目（validation_method=\"file_check\"/\"content_check\"/"
-    "\"static_site_check\"/\"artifact_integrity\"）会在收口时由机器在进程内真实检查："
-    "文件存在、内容命中、产物完整才记为 VERIFIED，任何一条失败或缺失都会把任务打回返工。"
-    "command/working_dir 不会被机器执行，只作审计留档，不能当验收证据；"
-    "不要只写一句“已人工验收”当测试。\n"
-    "- 只填你这次真用到的字段，用不到的留空数组 [] 或省略；不要为了填满模板而编造内容，长报告写文件后引用路径。\n"
-    "- 最后必须输出一个机器可解析结果块（裸 JSON，不要 ```json 或 Markdown 围栏），**绝对不能交空块**。\n"
-    "  最小必填：大多数任务只要 status、summary、artifacts（你真写出来的产物文件路径）这三项就够。完成时照这个最小示例填即可：\n\n"
-    "[SUBAGENT_RESULT]\n"
-    '{"status": "DONE", "summary": "一句话说清你完成了什么", "artifacts": [{"path": "你写出的文件绝对路径", "kind": "file", "summary": "结果文件"}]}\n'
-    "[/SUBAGENT_RESULT]\n\n"
-    "  还没做完、但现有权限和现场足以继续时，填 status=PENDING、"
-    "failure_type=incomplete_deliverables，并在 next_actions 写下一步；这会续跑同一个 run，不能另建替代任务。\n"
-    "  只有确实需要外部权限、输入、通道或环境变化才能继续时才填 status=BLOCKED，"
-    "blocked_reason 一句话说清硬阻塞是什么。\n"
-    "  在最终结果块之前，不要把 [SUBAGENT_RESULT] 或 [/SUBAGENT_RESULT] 当普通说明文字引用。\n"
-    "- 下面是【全字段参考】，需要某个字段时才照它填；简单任务别被这个大模板吓到，按上面“最小必填”填就对了：\n\n"
-)
-
-
 # 子代理默认 thought / plan 模板的权威位置；create_policy 派工链路只引用不复制。
-SUBAGENT_DEFAULT_THOUGHT = "根据父代理派工执行，并保留可验收证据。"
-SUBAGENT_DEFAULT_PLAN: tuple[str, ...] = ("理解目标", "执行任务", "产出证据", "交回真实结果和证据")
+SUBAGENT_DEFAULT_THOUGHT = "根据父代理派工执行，并保留真实结果与引用。"
+SUBAGENT_DEFAULT_PLAN: tuple[str, ...] = ("理解目标", "执行任务", "核对真实结果", "交回结果和引用")
 
 
 def subagent_runner_system_prompt(context: SubAgentExecutionContext) -> str:
@@ -136,33 +48,6 @@ def subagent_runner_system_prompt(context: SubAgentExecutionContext) -> str:
         "数据纪律（分析/统计/排名类交付）：聚合前先识别明显异常记录（缺字段/重复/数量级"
         "离谱的极端值），剔除或单列后再算汇总排名，报告注明剔除口径与条数；"
         "对脏数据直接求和排序会把结论带偏。"
-    )
-
-
-def _append_runner_repair_prompt(original_prompt: str, repair_prompt: str) -> str:
-    return (
-        f"{original_prompt}\n\n"
-        "---\n\n"
-        "# Structured Output Repair Prompt\n\n"
-        f"{repair_prompt}"
-    )
-
-
-def _append_runner_repair_response(original_response: str, repair_response: str) -> str:
-    return (
-        f"{original_response}\n\n"
-        "---\n\n"
-        "# Structured Output Repair Response\n\n"
-        f"{repair_response}"
-    )
-
-
-def _append_runner_repair_failure(original_response: str, exc: Exception) -> str:
-    return (
-        f"{original_response}\n\n"
-        "---\n\n"
-        "# Structured Output Repair Failure\n\n"
-        f"{type(exc).__name__}: {exc}"
     )
 
 
@@ -202,14 +87,14 @@ def _build_subagent_runner_prompt(
         return _build_audit_source_runner_prompt(context, instruction)
 
     payload = json.dumps(runner_context_summary_payload(context), ensure_ascii=False, indent=2)
-    extra = instruction.strip() or "按执行上下文完成任务；如果能力不足，说明需要上抛的 capability_request。"
+    extra = instruction.strip() or "按执行上下文完成任务；如果能力不足，如实说明缺少什么。"
     execution_contract = "\n".join(_runner_execution_contract_lines(context))
     context_gate = "\n".join(context_gate_prompt_lines(context.context_bundle))
     guidance_block = runtime_guidance_prompt_block(context)
     return (
         "# SubAgent Runner Task\n\n"
         "你是一个被父代理授权的子代理，只能依据下面的执行上下文工作。\n"
-        "不要使用上下文之外的 skill/tool，不要假完成；没有验收证据时只能标记等待收口或上抛能力请求。\n\n"
+        "不要使用上下文之外的 skill/tool，也不要编造已经完成的动作。\n\n"
         "## Extra Instruction\n\n"
         f"{extra}\n\n"
         "## Runner Contract\n\n"
@@ -223,8 +108,9 @@ def _build_subagent_runner_prompt(
         f"{payload}\n"
         "```\n\n"
         "## Required Output\n\n"
-        f"{_REQUIRED_OUTPUT_GUIDE}"
-        f"{SUBAGENT_RESULT_TEMPLATE}"
+        "像普通协作者一样给出简洁最终回复：说明完成了什么、重要文件或结果在哪里、"
+        "实际运行了哪些检查，以及是否存在真实阻塞。不要输出 SUBAGENT_RESULT、"
+        "状态 JSON、验收模板或为了填格式而重复上下文；本轮是否结束由宿主根据工具循环决定。\n"
     )
 
 
@@ -358,11 +244,8 @@ def _build_audit_source_runner_prompt(
         + json.dumps(payload, ensure_ascii=False, indent=2)
         + "\n```\n\n"
         "## Bounded Turn Result\n\n"
-        "当本工作片暂时没有更多可安全处理的记录，输出下面这个最小结果块；"
-        "它只结束本轮模型调用，不会关闭来源工作者：\n\n"
-        "[SUBAGENT_RESULT]\n"
-        '{"status":"PENDING","summary":"本轮来源记录已按持久账本处理"}\n'
-        "[/SUBAGENT_RESULT]\n"
+        "当本工作片暂时没有更多可安全处理的记录，像普通协作者一样简洁说明"
+        "本轮处理了什么和仍在等待什么，然后结束本轮；来源工作者的持续状态由宿主管理。\n"
     )
 
 
@@ -373,11 +256,8 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
         "- 只把真正阻止你产出文件、报告或证据的缺口写成 capability_request。",
         "- 如果你没有 shell/command/terminal 工具，不要因为不能自己运行 pytest 就提交 capability_request。",
         "- 没有命令执行工具时，应写出产物和测试建议；不要假装你已经执行过命令。",
-        "- 收口时机器只执行进程内安全验证（file_check/content_check/static_site_check/artifact_integrity）；"
-        "写 tests 用 validation_method 指明方式并给出 file_path，不要依赖 command/working_dir——它们不会被机器执行。",
-        "- 验证文件存在用 validation_method=\"file_check\" + file_path；验证文件内容用 "
-        "validation_method=\"content_check\"、file_path、content_pattern 或 content_equals、match_mode=\"exact\"。",
-        "- 写代码和测试后，必须逐条对照验收条件做静态自检，确保实现、测试、README 三者互相一致。",
+        "- 写代码和测试后，按任务风险运行必要检查并如实报告结果；检查失败就继续修复，"
+        "但宿主不会替你执行或裁定一套额外的机器验收。",
         "- 如果用户要求按钮、链接或图片不能失效，不要用 href=\"#\"、空锚点或不存在的 #id 假装可点击；"
         "页面内跳转必须指向真实存在的元素 id，按钮必须有真实交互或真实本地目标。",
         "- 生成普通报告或中等长度文本时，优先用 write_file 的 content 字段完整写入。"
@@ -388,16 +268,12 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
         "普通输出路径按 workspace_root/path_access_mode 解析，只有危险目录或显式禁止路径才会被拒绝。",
         *read_ref_context_lines(context),
         *required_product_contract_lines(context),
-        "- 如果最终结果需要列很多 artifacts 或证据，优先用 write_file 写 execution_context.output_json 的短 JSON；"
-        "系统会自动把它包成 SUBAGENT_RESULT 收口，避免对话里的长结果块被截断。",
-        "- output.json 是内部收口文件名；只能写 execution_context.output_json，"
-        "不要在 product_write_roots、deliverables 或用户产物目录里创建 output.json。",
         "- 需要当前工具目录之外的新工具、skill、MCP、网络或运行权限时，写 capability_request；"
         "说清楚 problem、needed_capability、capability_type、requested_tools/requested_skills/requested_mcp_tools 和 expected_output 即可，"
         "不要把父级授权细节、grant、path_scope、output_budget 当成普通任务步骤。",
         "- 如果 Tool Catalog 里有 capability_request 工具，缺能力时必须先调用该工具记录正式申请；"
         "不要在产物目录写 capability_request.json，也不要改 execution_context.json 伪造 pending_requests。",
-        "- capability_request 工具返回 OPEN 后，最终结果块写 status=PENDING_CAPABILITY_REQUEST 或 BLOCKED，"
+        "- capability_request 工具返回 OPEN 后，停止猜测并在最终回复里如实说明等待哪项能力，"
         "不要继续假装能力已经授权或命令已经执行。",
     ]
     lines.extend(_targeted_request_lines(context))
@@ -465,7 +341,7 @@ def required_product_contract_lines(context: SubAgentExecutionContext) -> list[s
         return []
     return [
         "- 用户要求的业务产物必须写到 output_contract.required_file_refs 中的精确路径；"
-        "最终 SUBAGENT_RESULT 的 artifacts/evidence_packets.artifact_refs 也必须引用这些业务产物路径。",
+        "最终回复也要明确列出这些业务产物路径。",
         "- agent_run_final_report_ref 是系统内部交接报告，不是用户要求的业务产物；"
         "除非它同时出现在 required_file_refs 里，否则不能把它当作交付文件。",
         f"- required_file_refs: {', '.join(refs[:8])}",
@@ -477,7 +353,7 @@ def _targeted_request_lines(context: SubAgentExecutionContext) -> list[str]:
     if not requests:
         return []
     lines = [
-        "- 点名给你的协作请求：在最终 SUBAGENT_RESULT 的证据/结论里原样引用 case_ref/request_ref 回应；"
+        "- 点名给你的协作请求：在最终回复的证据/结论里原样引用 case_ref/request_ref 回应；"
         "不要把请求内容重述成新问题或另开重复 case。"
     ]
     for request in requests[:3]:
@@ -563,36 +439,28 @@ def coordinator_execution_policy_lines() -> list[str]:
     return [
         "- coordinator/lead 节点拥有完整基础读写能力：可以写自己的计划、证据、协调报告，也可以在授权产物根里检查、修复或接管。",
         "- coordinator/lead 的第一目标是让团队动起来：先读取最小必要材料来理解目标、目录、评分和质量边界，"
-        "不要在派工前把所有正文、数据表、长报告都自己读完。能拆给 child 的研究、实现、测试和汇总，先创建并 dispatch child。",
+        "不要在派工前把所有正文、数据表、长报告都自己读完。能拆给 child 的研究、实现和测试，先创建 child；创建后它会自动运行。",
         "- child 完成前，coordinator/lead 只跟踪状态、refs、summary、blockers 和必要的路径纠偏；"
         "child 完成后，再按 artifact_refs/evidence_refs 读取必要证据做汇总。不要把所有 child 正文一次性吞回自己的上下文。",
         "- 派工是为了把活做好，不是硬流程。任务小、用户要求你亲自检查/修复、或下级卡住时，你可以直接完成；"
         "任务大、可并行或需要多人视角时，优先创建 worker/tester 等 child。",
-        "- 创建 child 时，把目标路径、文件名、质量要求原样传给下一层，然后用 dispatch_subagents 推进直接 child。",
+        "- 创建 child 时，把目标路径、文件名和质量要求原样传给下一层；不需要额外推进。",
         "- 如果缺口只属于未来 child/leaf 的执行能力，例如 leaf 才需要 controlled_exec、shell、网络或某个 skill，"
-        "coordinator/lead 不要替后代提前提交 capability_request 后停止；先创建并 dispatch 对应 child，"
+        "coordinator/lead 不要替后代提前提交 capability_request 后停止；先创建对应 child，"
         "由真正需要该能力的 runner 正式申请，父级再 route grant 并继续推进。",
         "- 给 child 写 goal 时，不要要求它在产物目录写 output.json；"
         "如需结构化汇报，只能要求它写自己的 execution_context.output_json。",
         "- coordinator 可以继续创建 coordinator 作为下一层领导节点；"
         "需要多层协作时不要误以为只能创建 worker；父级要求多层链路时，深度未到目标层前先创建下一层 coordinator。",
-        "- 如果父级目标或质量要求点名需要 tester、bug_finder、reviewer、找错或测试角色，"
-        "必须创建真实 child run，并把 role/agent_name 写成对应角色；只在 goal、summary 或 evidence 里提到这些词不算角色覆盖。",
-        "- 当生产 child 已完成，但父级合同仍缺 tester/bug_finder 时，"
-        "不要直接输出最终 SUBAGENT_RESULT；先调用 schedule_child_subagents 获取或执行 quality_advice，"
-        "再由你按 ready refs、风险和 scope 选择 QA 数量、顺序和是否需要 repair。",
-        '- schedule_child_subagents 的参数必须放在顶层，例如 {"tool":"schedule_child_subagents","dry_run":false,"children":[...]}；'
-        "不要包二级参数对象，长目标请分多次调用，每次 1-2 个 child。",
+        "- 只创建父级任务确实需要的 child；父级明确点名 tester、reviewer 等角色时才创建对应 run，"
+        "不要为了凑角色或验收格式自动扩容。",
+        '- 下一层仍使用统一的 create_subagents，例如 {"tool":"create_subagents","goal":"整批目标","items":[{"goal":"子任务"}]}；'
+        "长目标可分多次创建，每个 child 的 goal 必须自包含。",
         "- 不要让 worker/writer 代写 coordinator 自己的协调证据；需要共享时引用 artifact_refs/evidence_refs。",
         "- 创建 child/leaf 时必须原样传递父级指定的文件名、目录和质量要求，不要把 solution.py 改成别的模块名。",
-        "- 同一次 schedule_child_subagents 可以混建 coordinator、worker 或 tester；调度层只返回创建、复用和待 dispatch 的状态，是否继续拆分或修正由你根据 tree/refs 判断。",
-        "- 创建 worker 后使用 dispatch_subagents(dry_run=false, run_ids=[...]) 推进直接 child，并汇总 worker 的产物 refs。",
-        "- 多个 child 同轮 dispatch 时不要写子任务专属 runner_instruction；需要专属补充就按单个 run_id 分多次 dispatch。",
-        "- dispatch_subagents 返回 child test_failed 或 followup_action=plan_rescue 时，不要宣称完成；先汇报失败 refs 或安排修复。",
-        "- dispatch_subagents 返回 direct_children.qa_repair_advice 或 needs_repair_wave 时，不要直接报完成；"
-        "先按失败 QA refs 创建 scoped repair worker，修复后再让 tester 复测。",
+        "- 同一次 create_subagents 可以混建 coordinator、worker 或 tester；创建回执只说明是否已记录并交给运行时，真实状态继续看 tree/完成事件。",
+        "- 下级失败或阻塞时先读取真实 refs 和原因；不要自动创建整批 repair/QA 子代理。",
         "- 少数下属需要不同纠偏、路径修正或需求变更时，优先用 send_guidance 点名具体 run_id；"
-        "dispatch_subagents 只在需要立刻推进、恢复或重跑时使用。"
         "平级讨论要走允许的定向通道，不能广播到兄弟分支的子孙。",
     ]
 
@@ -605,90 +473,4 @@ def _current_role_template_lines(context: SubAgentExecutionContext) -> list[str]
 def _is_coordinator_context(context: SubAgentExecutionContext) -> bool:
     tools = set(context.allowed_tools or [])
     snapshot = context.role_template or role_template_snapshot_for_role(str(context.role or ""))
-    return bool(snapshot.get("can_spawn_children")) and "schedule_child_subagents" in tools
-
-
-def _build_subagent_runner_repair_prompt(
-    context: SubAgentExecutionContext,
-    *,
-    original_prompt: str,
-    original_response: str,
-    parse_error: str = "",
-    compact: bool = False,
-) -> str:
-
-    context_payload = runner_context_summary_payload(context)
-    if compact:
-        context_payload = _compact_repair_context_payload(context_payload)
-    payload = json.dumps(context_payload, ensure_ascii=False, indent=2)
-    problem = parse_error.strip() or "上一轮回复缺少 [SUBAGENT_RESULT] 结果块。"
-    prompt_tail = _clip_repair_text(original_prompt, 3500 if compact else 6000)
-    response_tail = _clip_repair_text(original_response, 2500 if compact else 12000)
-    retry_constraint = (
-        "这是空响应或截断后的最后一次极简格式修复。不要继续执行任务；"
-        "如果现有事实不足以证明全部完成，必须返回 status=PENDING、"
-        "failure_type=incomplete_deliverables，让同一个 run 续接，不能猜测 DONE。\n\n"
-        if compact
-        else ""
-    )
-    return (
-        "# SubAgent Runner Output Repair\n\n"
-        f"{retry_constraint}"
-        "上一轮子代理已经完成了一次执行，但父代理没有拿到可解析的机器结果块。\n"
-        "你现在只做格式修复：不要调用工具，不要新增事实，不要虚构证据；"
-        "只能根据执行上下文、上一轮最终 prompt 里的工具结果、以及上一轮回复来整理结果。\n"
-        "如果上一轮只是尚未完成、但现有权限和现场足以继续，写 status=PENDING、"
-        "failure_type=incomplete_deliverables，并保留真实 next_actions；"
-        "只有需要外部权限、输入、通道或环境变化时才写 BLOCKED 和 blocked_reason。\n\n"
-        "输出必须很短：summary 不超过 300 字；evidence/artifacts/tests/lessons 各不超过 5 条；"
-        "不要复述长报告、表格或源码。成功时必须给 evidence_packets，且每个 packet 至少包含 "
-        "artifact_refs 或 evidence_refs 之一。\n\n"
-        "必须只输出下面这种结果块，不要输出解释文字、Markdown 代码围栏或额外前后缀：\n\n"
-        f"{SUBAGENT_REPAIR_RESULT_TEMPLATE}\n\n"
-        "## Parse Problem\n\n"
-        f"{problem}\n\n"
-        "## Execution Context JSON\n\n"
-        f"{payload}\n\n"
-        "## Previous Final Prompt Tail\n\n"
-        f"{prompt_tail}\n\n"
-        "## Previous Model Response Tail\n\n"
-        f"{response_tail}\n"
-    )
-
-
-def _compact_repair_context_payload(payload: dict) -> dict:
-    """Keep only durable identity/task/output refs for the final bounded repair."""
-
-    identity = payload.get("identity") if isinstance(payload.get("identity"), dict) else {}
-    task = payload.get("task") if isinstance(payload.get("task"), dict) else {}
-    refs = payload.get("refs") if isinstance(payload.get("refs"), dict) else {}
-    return {
-        "identity": {
-            key: identity.get(key)
-            for key in (
-                "run_id",
-                "status",
-                "verification_status",
-                "runner_attempts",
-                "parent_id",
-                "root_id",
-            )
-            if key in identity
-        },
-        "task": {
-            key: task.get(key)
-            for key in ("goal", "plan", "acceptance_checks")
-            if key in task
-        },
-        "refs": {
-            key: refs.get(key)
-            for key in ("task_root", "workspace_refs")
-            if key in refs
-        },
-    }
-
-
-def _clip_repair_text(text: str, limit: int) -> str:
-    if len(text) <= limit:
-        return text
-    return f"[... clipped {len(text) - limit} chars ...]\n{text[-limit:]}"
+    return bool(snapshot.get("can_spawn_children")) and "create_subagents" in tools

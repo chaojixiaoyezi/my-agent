@@ -25,8 +25,7 @@ _DEFAULT_LEAF_CODING_TOOLS = [
 
 _CHILD_CREATION_TOOLS = frozenset(
     {
-        "schedule_child_subagents",
-        "dispatch_subagents",
+        "create_subagents",
     }
 )
 

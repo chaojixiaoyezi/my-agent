@@ -4,6 +4,13 @@
 
 最近收口重点：
 
+- 2026-08-21 本地实现已把主代理与任意层级子代理收敛为同一递归关系：模型只有统一
+  `create_subagents` 创建入口，创建后由宿主自动启动；手动 `dispatch_subagents` / child scheduler 工具已从
+  模型控制面删除，废弃 dispatch action envelope 也已移除；命令行 dispatch 仅作为宿主后台进程入口，
+  普通用户无需调用。主代理、子代理与 Gateway 共用六类 `turn_end`，普通完成不再依赖机器质量验收、
+  `acceptance_checks`、`VERIFIED` 或专用结果包装。TUI 同批补齐 Working 动画、条件式页底跟随、持续 thinking
+  增量和 Compact 百分比。当前只代表本地实现完成，发布与 `.7` 真机状态以 `docs/ROADMAP.md`、`STATUS.md`
+  为准。
 - TUI 灰色层级已按 终端交互 的容器级 `dimColor` 语义修正：思考 Markdown 的普通文字、粗体、代码和
   链接以及 `Ctrl+O` 折叠提示都由最终浅灰 role 接管，不再只染括号或行前缀。鼠标左键拖选松手继续
   自动复制；tmux 路径按 会话运行时 统一使用 `load-buffer -w`，iTerm2 不再退化成只写内部 buffer。

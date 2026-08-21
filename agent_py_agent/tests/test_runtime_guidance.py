@@ -16,7 +16,6 @@ from agent_py_agent.agent.agent_core._tool_loop_service import (
     build_tool_loop_prompt,
     execute_tool_loop,
 )
-from agent_py_agent.agent.agent_core.orchestration.dispatch.tool import DispatchSubagentsTool
 from agent_py_agent.agent.agent_core.runner.context import ThreadLocalAgentAttribute
 from agent_py_agent.agent.agent_core.runtime.guidance import (
     acknowledge_injected_turn_input,
@@ -2504,50 +2503,3 @@ def test_real_subagent_runner_prompt_includes_guidance(tmp_path) -> None:
     assert "只作为普通补充消息进入上下文" in prompt
     assert "不会把这些文字解释成新的硬门" in prompt
     assert agent.conversation_store.pending_guidance("agent_run", child.id) == []
-
-
-def test_dispatch_runner_instruction_writes_guidance_for_explicit_run(tmp_path) -> None:
-    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
-    child = agent.subagents.create_run(goal="child", thought="", plan=["child"])
-    agent.dispatch_subagents = MagicMock(
-        return_value=SimpleNamespace(dry_run=False, summary={"ok": True}, records=[])
-    )
-
-    result = DispatchSubagentsTool(agent).execute(
-        {
-            "run_ids": [child.id],
-            "dry_run": False,
-            "runner_instruction": "先汇总已有文件，再继续补缺口。",
-        }
-    )
-
-    assert result.ok is True
-    pending = agent.conversation_store.pending_guidance("agent_run", child.id)
-    assert pending[0].message == "先汇总已有文件，再继续补缺口。"
-    assert pending[0].metadata["tool_name"] == "dispatch_subagents"
-
-
-def test_dispatch_runner_instruction_reports_guidance_persist_error(tmp_path, monkeypatch) -> None:
-    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
-    child = agent.subagents.create_run(goal="child", thought="", plan=["child"])
-    agent.dispatch_subagents = MagicMock(
-        return_value=SimpleNamespace(dry_run=False, summary={"ok": True}, records=[])
-    )
-
-    def fail_append_guidance(_payload):
-        raise RuntimeError("guidance store unavailable")
-
-    monkeypatch.setattr(agent.conversation_store, "append_guidance", fail_append_guidance)
-
-    result = DispatchSubagentsTool(agent).execute(
-        {
-            "run_ids": [child.id],
-            "dry_run": False,
-            "runner_instruction": "先汇总已有文件，再继续补缺口。",
-        }
-    )
-
-    payload = json.loads(result.output)
-    assert result.ok is True
-    assert payload["guidance_persist_errors"][0]["run_id"] == child.id
-    assert payload["guidance_persist_errors"][0]["context"] == "dispatch.guidance.persist"

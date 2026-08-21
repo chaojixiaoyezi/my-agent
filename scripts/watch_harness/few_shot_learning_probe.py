@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 from __future__ import annotations
+
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_env_loader import ensure_model_key
+
 """判读误报根因探针:裸判 vs 喂样品学习 vs 产品级判读纪律(判读全真调 MiniMax-M2.7)。
 
 前一个探针(batch_vs_single)证了:批判读 11% / 逐条判 13%,精度都低——【不是批判读 artifact】。

@@ -74,7 +74,7 @@ class _Log:
 def _relay_tunnel(client: socket.socket, upstream: socket.socket,
                   log: _Log, args: argparse.Namespace, conn_id: str,
                   target: str, initial: bytes = b"",
-                  server: "_Server | None" = None) -> None:
+                  server: _Server | None = None) -> None:
     """双向转发; 上游->客户端方向计数, 达标后按 mode 断客户端连接。
 
     实现为每方向一个独立泵线程 + 阻塞 sendall。旧单线程 select 实现在
@@ -115,7 +115,7 @@ def _relay_tunnel(client: socket.socket, upstream: socket.socket,
         while not state["stop"].is_set():
             try:
                 data = src.recv(65536)
-            except socket.timeout:
+            except TimeoutError:
                 # 1s 读超时仅用于空闲检测; 双向都空闲超 _IDLE_EXIT_SECONDS 则退出
                 if time.monotonic() - state["last_activity"] > _IDLE_EXIT_SECONDS:
                     log.write({"type": "idle_exit", "conn": conn_id, "target": target})
@@ -214,7 +214,7 @@ def _drain(sock: socket.socket) -> None:
                 return
         except OSError:
             return
-        except socket.timeout:
+        except TimeoutError:
             return
 
 

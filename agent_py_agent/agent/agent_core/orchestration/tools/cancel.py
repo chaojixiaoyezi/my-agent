@@ -225,12 +225,9 @@ def execute_cancel_subagents(
             ),
             "protected_runs": retry_required,
             "next_action": {
-                "tool": "dispatch_subagents",
-                "params": {
-                    "run_ids": [item["run_id"] for item in retry_required],
-                    "dry_run": False,
-                },
-                "reason": "复用原 run、checkpoint 和工作区继续执行，避免重做。",
+                "control": "system_auto_retry",
+                "run_ids": [item["run_id"] for item in retry_required],
+                "reason": "系统会复用原 run、checkpoint 和工作区继续执行；父代理可用 inspect_agent_tree 观察。",
             },
         }
         return _cancel_failure(

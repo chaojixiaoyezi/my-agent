@@ -7,8 +7,8 @@ from agent_py_agent.agent.agent_core.runner.prompts import _build_subagent_runne
 from agent_py_agent.agent.subagents.models import SubAgentExecutionContext
 
 
-def test_runner_prompt_tells_leaf_to_defer_command_execution_to_parent():
-    """叶子没有命令工具时，应写测试文件并交给最终收口器执行。"""
+def test_runner_prompt_reports_checks_naturally_without_machine_acceptance():
+    """叶子没有命令工具时，不应伪造执行或被绑到机器验收模板。"""
     context = SubAgentExecutionContext(
         run_id="leaf-1",
         generated_at=1.0,
@@ -24,11 +24,10 @@ def test_runner_prompt_tells_leaf_to_defer_command_execution_to_parent():
 
     assert "没有 shell/command/terminal 工具" in prompt
     assert "不要因为不能自己运行 pytest 就提交 capability_request" in prompt
-    assert "最终收口认可" in prompt
-    # 审计 R0:提示词不再指导写命令,明确 command/working_dir 不会被机器执行。
-    assert "command/working_dir 不会被机器执行" in prompt
-    assert "validation_method" in prompt
-    assert "逐条对照验收条件" in prompt
+    assert "宿主不会替你执行或裁定一套额外的机器验收" in prompt
+    assert "不要输出 SUBAGENT_RESULT" in prompt
+    assert "validation_method" not in prompt
+    assert "command/working_dir" not in prompt
 
 
 def test_runner_prompt_tells_leaf_to_chunk_long_file_writes():
@@ -124,7 +123,7 @@ def test_runner_prompt_tells_coordinator_to_stay_capable_and_delegate_when_usefu
         thought="",
         plan=[],
         role="coordinator",
-        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "inspect_agent_tree", "read_file"],
+        allowed_tools=["create_subagents", "inspect_agent_tree", "read_file"],
         acceptance_checks=["leaf 必须写出三个文件"],
     )
 
@@ -134,12 +133,12 @@ def test_runner_prompt_tells_coordinator_to_stay_capable_and_delegate_when_usefu
     assert "拥有完整基础读写能力" in prompt
     assert "先读取最小必要材料" in prompt
     assert "不要在派工前把所有正文" in prompt
-    assert "先创建并 dispatch child" in prompt
+    assert "先创建 child；创建后它会自动运行" in prompt
     assert "不要把所有 child 正文一次性吞回自己的上下文" in prompt
     assert "派工是为了把活做好，不是硬流程" in prompt
     assert "你可以直接完成" in prompt
     assert "不要误以为只能创建 worker" in prompt
-    assert "不要包二级参数对象" in prompt
+    assert "下一层仍使用统一的 create_subagents" in prompt
     assert "创建 child 时" in prompt
     assert "不要替后代提前提交 capability_request" in prompt
     assert "由真正需要该能力的 runner 正式申请" in prompt
@@ -152,11 +151,10 @@ def test_runner_prompt_tells_coordinator_to_stay_capable_and_delegate_when_usefu
     assert "可用角色模板" in prompt
     assert "bug_finder" in prompt
     assert "找茬子代理" in prompt
-    assert "不要直接输出最终 SUBAGENT_RESULT" in prompt
-    assert "quality_advice" in prompt
-    assert "ready refs" in prompt
-    assert "qa_repair_advice" in prompt
-    assert "失败 QA refs" in prompt
+    assert "不要为了凑角色或验收格式自动扩容" in prompt
+    assert "不要自动创建整批 repair/QA 子代理" in prompt
+    assert "quality_advice" not in prompt
+    assert "qa_repair_advice" not in prompt
     assert "模板详情" in prompt
     assert "你是找茬子代理" in prompt
     assert "send_guidance" in prompt

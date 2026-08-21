@@ -70,6 +70,7 @@ class SubAgentRunnerResultService:
                 tool_rounds=ctx.params.tool_rounds,
                 prompt=ctx.params.prompt,
                 response=ctx.params.response,
+                turn_end_reason=ctx.params.turn_end_reason,
                 parsed=ctx.parsed,
                 structured_repair_attempted=ctx.params.structured_repair_attempted,
                 structured_repair_ok=ctx.params.structured_repair_ok,
@@ -123,19 +124,7 @@ class SubAgentRunnerResultService:
         now: float,
     ) -> tuple[dict, BuildAndPersistContext]:
         """Apply status to task and build output payload."""
-        return apply_status_and_build_payload(
-            params,
-            extracted,
-            now,
-            # 验收机器执行的沙箱门与工具循环同一把:ShellTool 的 owner_scope_root。
-            # effective_permissions.owner_home 是快照默认值(无沙箱环境也非空),
-            # 以它做门会把合法普通执行误判成必须 bwrap → 假 SANDBOX_UNAVAILABLE。
-            owner_home=self.manager.owner_scope_root,
-            # R3 验收账本落账（R6 gate）：机器裁决持久化；LOCAL_UNMANAGED
-            # 时 manager.runtime_db 为 None，落账静默跳过。getattr 兼容
-            # 测试桩 Manager（无 runtime_db 属性 = 无权威库 = 跳过落账）。
-            repo=getattr(self.manager, "runtime_db", None),
-        )
+        return apply_status_and_build_payload(params, extracted, now)
 
     def _post_result_side_effects(
         self,
@@ -233,6 +222,7 @@ class SubAgentRunnerResultService:
                 patches=extracted.patches,
                 lessons=extracted.lessons,
                 next_actions=extracted.next_actions,
+                turn_end_reason=params.turn_end_reason,
             ),
             build_params.now,
         )
@@ -256,6 +246,7 @@ class SubAgentRunnerResultService:
         return SubAgentRunnerResult(
             run_id=task.id, dry_run=dry_run, ok=ok, status=task.status,
             verification_status=task.verification_status, message=message,
+            turn_end_reason=str(getattr(task, "turn_end_reason", "") or ""),
             runner_attempts=task.runner_attempts, runner_last_error=task.runner_last_error,
             execution_context_json=task.execution_context_json, execution_context_file=task.execution_context_file,
             prompt_file=task.runner_prompt_file, response_file=task.runner_response_file,

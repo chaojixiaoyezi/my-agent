@@ -159,7 +159,8 @@ def test_task_local_context_refresh_ends_slice_without_another_model_round() -> 
     )
 
     assert response is not None
-    assert '"status": "PENDING"' in response.text
+    assert response.text == "工具已提交耐久状态更新；当前工作片已结束，下一工作片从最新状态继续。"
+    assert "SUBAGENT_RESULT" not in response.text
     assert "旧上下文中的草稿" not in response.text
     assert "pending_runtime_transition" not in params.live_archive_state
 

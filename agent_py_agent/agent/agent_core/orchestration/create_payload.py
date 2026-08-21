@@ -42,18 +42,18 @@ def create_subagents_payload(request: CreateSubagentsPayloadInput) -> dict[str, 
     created = created_tasks(resolutions)
     reused = reused_tasks(resolutions)
     dispatchable = dispatchable_tasks(tasks)
-    pending_dispatch = _pending_dispatch_tasks(dispatchable, request_params, auto_start)
+    pending_start = _pending_start_tasks(dispatchable, request_params, auto_start)
     result_index = child_result_index(agent, tasks)
     payload: dict[str, object] = {
         "created": len(created),
         "created_run_ids": [task.id for task in created],
         "reused_run_ids": [task.id for task in reused],
-        "dispatch_run_ids": [task.id for task in pending_dispatch],
+        "pending_start_run_ids": [task.id for task in pending_start],
         "auto_start": _auto_start_payload(auto_start),
-        "next_action": _dispatch_next_action(dispatchable, request_params, auto_start),
+        "next_action": _next_action(dispatchable, request_params, auto_start),
         "status_tool_call": _status_tool_call(auto_start),
         "allowed_tools": request.allowed_tools or "automatic",
-        "operation_contract": _operation_contract(request_params, created, reused, pending_dispatch),
+        "operation_contract": _operation_contract(request_params, created, reused, pending_start),
         "replacement_records": request.replacement_records or [],
         "conversation_bind_errors": request.conversation_bind_errors or [],
         "scheduling_advice": _scheduling_advice(tasks, request_params, auto_start),
@@ -91,7 +91,7 @@ def _auto_start_payload(auto_start: dict[str, object] | None) -> dict[str, objec
     }
     payload = {key: auto_start[key] for key in allowed if key in auto_start}
     if str(payload.get("status") or "") == "started":
-        payload["acceptance_status"] = "accepted"
+        payload["start_status"] = "accepted"
     return payload or {"status": str(auto_start.get("status") or "unknown")}
 
 
@@ -123,31 +123,31 @@ def _schedule_lifecycle_payload(
         )
     )
     if failed and accepted:
-        acceptance_status = "partially_accepted"
+        start_status = "partially_started"
     elif failed:
-        acceptance_status = "rejected"
+        start_status = "failed"
     elif accepted:
-        acceptance_status = "accepted"
+        start_status = "accepted"
     elif raw_status == "deferred":
-        acceptance_status = "deferred"
+        start_status = "deferred"
     else:
-        acceptance_status = "not_accepted"
+        start_status = "not_started"
     return {
         "requested_count": len(task_ids),
         "recorded_run_ids": task_ids,
-        "accepted_run_ids": accepted,
+        "start_accepted_run_ids": accepted,
         "running_run_ids": running,
         "failed_run_ids": failed,
-        "acceptance_status": acceptance_status,
+        "start_status": start_status,
         "counts": {
             "recorded": len(task_ids),
-            "accepted": len(accepted),
+            "start_accepted": len(accepted),
             "running": len(running),
             "failed": len(failed),
         },
         "authority": {
             "recorded": "subagent_store",
-            "accepted": "background_dispatch_receipt",
+            "start_accepted": "background_start_receipt",
             "running": "task_state_machine",
         },
     }
@@ -157,7 +157,11 @@ def _status_tool_call(auto_start: dict[str, object] | None) -> dict[str, object]
     return {"tool": "inspect_agent_tree", "params": {}}
 
 
-def _pending_dispatch_tasks(tasks: list, request_params: dict[str, object], auto_start: dict[str, object] | None) -> list:
+def _pending_start_tasks(
+    tasks: list,
+    request_params: dict[str, object],
+    auto_start: dict[str, object] | None,
+) -> list:
     if bool(request_params.get("defer_start")):
         return tasks
     deferred = set(_string_items((auto_start or {}).get("deferred_run_ids")))
@@ -168,7 +172,12 @@ def _pending_dispatch_tasks(tasks: list, request_params: dict[str, object], auto
     return tasks
 
 
-def _operation_contract(request_params: dict[str, object], created: list, reused: list, dispatch: list) -> dict[str, object]:
+def _operation_contract(
+    request_params: dict[str, object],
+    created: list,
+    reused: list,
+    pending_start: list,
+) -> dict[str, object]:
     payload = {"params": request_params}
     return {
         "contract": "idempotency.v1",
@@ -177,11 +186,11 @@ def _operation_contract(request_params: dict[str, object], created: list, reused
         "operation_id": operation_id("create_subagents", payload),
         "created_run_ids": [task.id for task in created],
         "reused_run_ids": [task.id for task in reused],
-        "dispatch_run_ids": [task.id for task in dispatch],
+        "pending_start_run_ids": [task.id for task in pending_start],
     }
 
 
-def _dispatch_next_action(
+def _next_action(
     tasks,
     request_params: dict[str, object],
     auto_start: dict[str, object] | None = None,
@@ -190,20 +199,20 @@ def _dispatch_next_action(
     if not run_ids:
         return {
             "tool": "inspect_agent_tree",
-            "reason": "create_subagents 没有可调度的新 run；请读取代理树状态后决定是否汇报或进入验收。",
+            "reason": "create_subagents 没有可启动的新 run；请读取代理树状态后决定是否汇报。",
             "params": {},
         }
     if bool(request_params.get("defer_start")):
         return {
-            "tool": "dispatch_subagents",
-            "reason": "defer_start=true，本次只建任务记录；需要开跑时再显式推进这些 run_id。",
-            "params": {"dry_run": False, "run_ids": run_ids, "max_runners": len(run_ids)},
+            "tool": "inspect_agent_tree",
+            "reason": "这是底层显式延迟创建；运行时会在依赖满足后自动恢复，不需要模型推进。",
+            "params": {},
         }
     deferred = _string_items((auto_start or {}).get("deferred_run_ids"))
     if deferred:
         return {
             "tool": "inspect_agent_tree",
-            "reason": "部分子代理已自动启动；defer_start=true 的子代理会留在 dispatch_run_ids，等前置产物出现后再显式启动。",
+            "reason": "部分子代理已自动启动；底层显式延迟的 run 会留在 pending_start_run_ids，等依赖满足后由系统启动。",
             "params": {},
         }
     if (auto_start or {}).get("status") == "started":
@@ -213,9 +222,9 @@ def _dispatch_next_action(
             "params": {},
         }
     return {
-        "tool": "dispatch_subagents",
-        "reason": "create_subagents 自动启动未完成；如需继续推进、恢复或重跑，请调度这些 run_id。",
-        "params": {"dry_run": False, "run_ids": run_ids, "max_runners": len(run_ids)},
+        "tool": "inspect_agent_tree",
+        "reason": "自动启动未完成；底层恢复器会处理可恢复故障，模型只需查看状态或向用户说明真实阻塞。",
+        "params": {},
     }
 
 
@@ -224,7 +233,6 @@ def _task_payload(task: object) -> dict[str, object]:
         "id": _task_text(task, "id"),
         "goal": current_model_text(_task_text(task, "goal")),
         "status": _task_text(task, "status"),
-        "verification_status": _task_text(task, "verification_status"),
         "task_root": current_model_ref(_task_text(task, "task_workspace_dir")),
         "attributes": _task_attributes(task),
     }
@@ -271,6 +279,8 @@ def _task_attribute_value(key: str, value: object) -> object:
     return value
 
 
+# LLM: Quality-role ordering is advisory only; never expose hidden defer controls to the model.
+# 函数用途: 提醒父代理等前置产物出现后再创建依赖型下级，不替模型设置启动门。
 def _scheduling_advice(tasks: list, request_params: dict[str, object], auto_start: dict[str, object] | None) -> list[dict[str, object]]:
     del request_params
     advice: list[dict[str, object]] = []
@@ -282,7 +292,7 @@ def _scheduling_advice(tasks: list, request_params: dict[str, object], auto_star
             {
                 "code": "dependent_quality_task_started_early",
                 "run_ids": [_task_text(task, "id") for task in early],
-                "message": "测试、找错、验收、汇总这类任务通常依赖前置产物；如果产物还没出来，建议下次创建时给这些 item 设置 defer_start=true，等产物 refs 出现后再启动。",
+                "message": "测试、找错、验收、汇总这类任务通常依赖前置产物；如果产物还没出来，应等前置产物 refs 出现后再创建这些 child。",
             }
         )
     return advice

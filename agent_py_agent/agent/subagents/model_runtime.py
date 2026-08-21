@@ -20,6 +20,9 @@ class SubAgentExecutionContext:
     agent_name: str = "general"
     role: str = "general"
     status: str = "PLANNING"
+    # LLM: 这是最近一轮宿主 turn/end.reason，不是模型自报或验收状态。
+    # 字段用途: 让续跑的子代知道上一轮为何停止。
+    turn_end_reason: str = ""
     verification_status: str = "UNVERIFIED"
     channel_status: str = "UNKNOWN"
     runner_attempts: int = 0
@@ -68,6 +71,9 @@ class SubAgentRunnerResult:
     status: str
     verification_status: str
     message: str
+    # LLM: 该值由宿主运行事实生成，不得从 SUBAGENT_RESULT 正文解析。
+    # 字段用途: 向父代和 TUI 暴露本次 runner 的真实停止原因。
+    turn_end_reason: str = ""
     backend: str = ""
     tool_rounds: int = 0
     runner_attempts: int = 0

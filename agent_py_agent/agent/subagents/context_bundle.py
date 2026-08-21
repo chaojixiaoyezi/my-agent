@@ -60,7 +60,6 @@ class ContextBundleV1:
     goal: str
     thought: str
     plan: list[str] = field(default_factory=list)
-    acceptance_checks: list[str] = field(default_factory=list)
     permissions: dict[str, object] = field(default_factory=dict)
     constraints: dict[str, object] = field(default_factory=dict)
     workspace_refs: dict[str, str] = field(default_factory=dict)
@@ -100,7 +99,6 @@ def build_context_bundle(task: SubAgentTask) -> ContextBundleV1:
         goal=current_model_text(task.goal),
         thought=current_model_text(task.thought),
         plan=[current_model_text(item) for item in list(task.plan or [])],
-        acceptance_checks=list(task.acceptance_checks or []),
         permissions=_permissions(task),
         constraints=_constraints(task),
         workspace_refs=workspace_refs(task),
@@ -174,7 +172,6 @@ def _source_refs() -> dict[str, list[str]]:
         "goal": ["task.goal"],
         "thought": ["task.thought"],
         "plan": ["task.plan"],
-        "acceptance_checks": ["task.acceptance_checks"],
         "permissions": ["task.allowed_tools", "task.allowed_skills", "task.capability_grants"],
         "constraints": ["task.allowed_write_roots", "task.forbidden_write_roots", "task.locked_files"],
         "workspace_refs": [
@@ -189,7 +186,6 @@ def _source_refs() -> dict[str, list[str]]:
             "task.agent_run_final_report_md",
             "task.goal",
             "task.thought",
-            "task.acceptance_checks",
         ],
         "lineage": ["task.root_id", "task.parent_id", "task.depth", "task.inheritance_manifest_json"],
         "context_packs": ["task.context_packs"],
@@ -226,8 +222,6 @@ def render_context_bundle_markdown(bundle: ContextBundleV1, gate: ContextGateRep
         "",
     ]
     lines.extend(f"- {item}" for item in bundle.plan or ["未设置"])
-    lines.extend(["", "## Acceptance Checks", ""])
-    lines.extend(f"- [ ] {item}" for item in bundle.acceptance_checks or ["未设置"])
     lines.extend(["", "## Workspace Refs", ""])
     lines.extend(f"- {key}: {value or 'none'}" for key, value in bundle.workspace_refs.items())
     lines.extend(["", "## Output Contract", ""])
@@ -276,13 +270,11 @@ def context_gate_prompt_lines(context_bundle: dict[str, object]) -> list[str]:
 
 def render_task_envelope_lines(envelope: dict[str, object]) -> list[str]:
     address = envelope.get("address") if isinstance(envelope.get("address"), dict) else {}
-    acceptance = envelope.get("acceptance") if isinstance(envelope.get("acceptance"), dict) else {}
     return [
         f"- schema_version: {envelope.get('schema_version') or 'none'}",
         f"- run_id: {address.get('run_id') or 'none'}",
         f"- lineage: {_compact_prompt_list(address.get('lineage'))}",
         f"- workspace_ref: {address.get('workspace_ref') or 'none'}",
-        f"- acceptance_checks: {_compact_prompt_list(acceptance.get('checks'))}",
     ]
 
 

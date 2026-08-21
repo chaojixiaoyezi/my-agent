@@ -95,12 +95,13 @@ def test_subagent_runner_dry_run_and_execute():
         response = Path(loaded.runner_response_file).read_text(encoding="utf-8")
 
         assert not executed.dry_run
-        assert not executed.ok
-        assert loaded.status == "BLOCKED"
+        assert executed.ok
+        assert loaded.status == "DONE"
+        assert executed.turn_end_reason == "completed"
         assert loaded.verification_status == "UNVERIFIED"
-        assert loaded.failure_type == "structured_output_parse_error"
+        assert loaded.failure_type == ""
         assert output["dry_run"] is False
-        assert output["next_action"] == "inspect_runner_failure"
+        assert output["turn_end_reason"] == "completed"
         # EXEC-31b: native 下工具面在 execution-context JSON 的
         # permissions.allowed_tools 里渲染, 不再有「name [category」文本;
         # 工具面收窄断言改为结构化解析 permissions(读有/写无)。
@@ -159,8 +160,8 @@ def _assert_subagent_recovery_snapshot(root: Path, run_id: str, status_file: str
     assert status_file in snapshots[-1]["content_paths"]
 
 
-def test_subagent_runner_parses_structured_output():
-    """LLM: Verifies structured output parsing populates evidence, capability_requests, artifacts, etc."""
+def test_subagent_runner_does_not_use_model_result_json_as_machine_authority():
+    """LLM: Generic lifecycle ignores model-authored status/evidence JSON and trusts host turn facts."""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig( model_backend="echo", subagent_workspace="subs")
@@ -178,37 +179,28 @@ def test_subagent_runner_parses_structured_output():
         output = json.loads(Path(loaded.output_json).read_text(encoding="utf-8"))
         runner_json = json.loads(Path(loaded.runner_result_json).read_text(encoding="utf-8"))
 
-        assert result.structured_output_found
-        assert result.structured_output_ok
-        assert result.evidence_count == 1
-        assert result.capability_request_count == 1
-        assert result.artifact_count == 1
-        assert result.test_count == 1
-        assert result.patch_count == 1
-        assert result.lesson_count == 1
-        assert loaded.status == "BLOCKED"
+        assert not result.structured_output_found
+        assert not result.structured_output_ok
+        assert result.evidence_count == 0
+        assert result.capability_request_count == 0
+        assert result.artifact_count == 0
+        assert result.test_count == 0
+        assert result.patch_count == 0
+        assert result.lesson_count == 0
+        assert loaded.status == "DONE"
+        assert result.turn_end_reason == "completed"
         assert loaded.verification_status == "UNVERIFIED"
-        assert loaded.failure_type == "capability_request"
-        assert loaded.evidence[0].summary == "已确认需要接口健康检查"
-        assert loaded.capability_requests[0].needed_capability == "web_fetch"
-        assert loaded.capability_requests[0].status == "OPEN"
+        assert loaded.failure_type == ""
+        assert loaded.evidence == []
+        assert loaded.capability_requests == []
         assert loaded.used_tools == []
         assert "write_file" not in loaded.used_tools
-        assert output["next_action"] == "route_capability_request"
-        assert sorted(output["structured_output"]["ignored_unauthorized_tools"]) == [
-            "read_file",
-            "write_file",
-        ]
-        assert output["structured_output"]["capability_request_count"] == 1
-        assert output["artifacts"][0]["path"] == "reports/api_notes.md"
-        assert output["tests"][0]["name"] == "static-read"
-        assert output["patches"][0]["status"] == "planned"
-        assert output["lessons"] == ["缺少线上检查工具时，不要把静态阅读当成接口可用证据"]
-        assert output["next_actions"] == ["route_capability_request", "rerun_subagent_after_grant"]
-        assert runner_json["blocked_reason"] == "当前上下文没有授权 HTTP 请求工具"
-        debrief = Path(loaded.debrief_file).read_text(encoding="utf-8")
-        assert "Runner Artifacts" in debrief
-        assert "Runner Lessons" in debrief
+        assert output["turn_end_reason"] == "completed"
+        assert output["structured_output"]["found"] is False
+        assert output["artifacts"] == []
+        assert runner_json["turn_end_reason"] == "completed"
+        response = Path(loaded.runner_response_file).read_text(encoding="utf-8")
+        assert '"status": "BLOCKED"' in response
 
 
 def test_subagent_runner_parse_requires_explicit_pending_capability_request():
@@ -271,8 +263,8 @@ def test_subagent_runner_enforces_write_boundary_at_tool_layer():
 
         result = agent.run_subagent(task.id, dry_run=False, probe=False)
 
-        assert result.structured_output_found
-        assert result.structured_output_ok
+        assert not result.structured_output_found
+        assert result.turn_end_reason == "completed"
         assert len(backend.prompts) == 2
         assert not Path(target_path).exists()
         assert "PATH_DANGEROUS_ROOT_BLOCKED" in backend.prompts[1]
@@ -336,8 +328,8 @@ def _wait_for_background_dispatches(agent: SimpleAgent, *, timeout: float = 2.0)
         time.sleep(0.05)
 
 
-def test_subagent_runner_repairs_missing_structured_output():
-    """LLM: Verifies the repair round-trip when the first model response lacks a structured block."""
+def test_subagent_runner_accepts_natural_response_without_repair_round():
+    """LLM: A natural final response completes in one model turn without format repair."""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig( model_backend="echo", subagent_workspace="subs")
@@ -356,22 +348,23 @@ def test_subagent_runner_repairs_missing_structured_output():
         loaded = agent.subagents.load(task.id)
         response = Path(loaded.runner_response_file).read_text(encoding="utf-8")
 
-        assert len(backend.prompts) == 2
-        assert result.structured_output_found
-        assert result.structured_output_ok
-        assert result.structured_repair_attempted
-        assert result.structured_repair_ok
-        assert result.evidence_count == 1
-        assert result.test_count == 1
+        assert len(backend.prompts) == 1
+        assert not result.structured_output_found
+        assert not result.structured_output_ok
+        assert not result.structured_repair_attempted
+        assert not result.structured_repair_ok
+        assert result.evidence_count == 0
+        assert result.test_count == 0
         assert loaded.status == "DONE"
-        assert loaded.verification_status == "VERIFIED"
-        assert "Structured Output Repair Response" in response
+        assert loaded.verification_status == "UNVERIFIED"
+        assert "我已经完成检查" in response
+        assert "Structured Output Repair Response" not in response
         runner_json = json.loads(Path(loaded.runner_result_json).read_text(encoding="utf-8"))
         output_json = json.loads(Path(loaded.output_json).read_text(encoding="utf-8"))
-        assert runner_json["structured_repair_attempted"] is True
-        assert runner_json["structured_repair_ok"] is True
-        assert output_json["structured_output"]["repair_attempted"] is True
-        assert output_json["structured_output"]["repair_ok"] is True
+        assert runner_json["structured_repair_attempted"] is False
+        assert runner_json["structured_repair_ok"] is False
+        assert output_json["structured_output"]["repair_attempted"] is False
+        assert output_json["structured_output"]["repair_ok"] is False
 
 
 @pytest.mark.xfail(

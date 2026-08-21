@@ -108,22 +108,6 @@ def apply_repair_work_order(service, action, task, ctx: ActionHandlerContext):
     )
 
 
-def apply_reopen_for_evidence(service, action, task, ctx: ActionHandlerContext):
-    task.status = "BLOCKED"
-    task.failure_type = FailureType.MISSING_EVIDENCE.value
-    task.verification_status = "UNVERIFIED"
-    task.updated_at = ctx.now
-    task.result = task.result or "缺少验收证据，等待补充 evidence 后再完成。"
-    service.manager.save(task)
-    service._append_task_work_log(task, "action_apply reopen_for_evidence: 已重开任务并等待收口证据。")
-    return service._record_after_task_action(
-        RecordAfterTaskActionParams(
-            action, task, ctx.before_status, ctx.before_channel_status, "已把缺证据的 DONE 任务改为 BLOCKED。"
-        )
-    )
-
-
-
 def apply_stop_no_progress_and_escalate(service, action, task, ctx: ActionHandlerContext):
     task.failure_type = FailureType.NO_PROGRESS_FUSE.value
     blocker = "no_progress_fuse: 连续恢复没有进展，已停止自动重试和扩容。"

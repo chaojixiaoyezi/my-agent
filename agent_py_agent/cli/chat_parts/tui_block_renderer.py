@@ -54,7 +54,15 @@ SPINNER_STALL_AFTER_SECONDS = 3.0
 PENDING_INPUT_PREVIEW_LINE_LIMIT = 3
 TERMINAL_RENDER_PHASES = frozenset({"completed", "failed", "interrupted"})
 SPINNER_GLYPHS = ("✻", "✢", "✶")
-SPINNER_WORDS = ("Wrangling", "Vibing", "Sprouting", "Sautéing", "Brewing", "Thinking")
+SPINNER_WORDS = (
+    "Working",
+    "Wrangling",
+    "Vibing",
+    "Sprouting",
+    "Sautéing",
+    "Brewing",
+    "Thinking",
+)
 SPINNER_TIPS = (
     "Start with a small task, ask my-agent for a plan, then verify its edits",
     "Use /status to inspect the current session before a long-running task",
@@ -204,7 +212,7 @@ class TuiRenderContext:
         object.__setattr__(self, "help_open", bool(self.help_open))
 
 
-# LLM: frame provider 必须复用 renderer 的可见上下文规则；wall clock 仅在活动 connection/thinking 真正改变画面时进入 key。
+# LLM: frame provider 必须复用 renderer 的可见上下文规则；wall clock 仅在活动 connection/thinking/compact 真正改变画面时进入 key。
 # 函数用途: 生成一次完整 TUI 画面所需的上下文缓存键，避免空闲长会话被动画时钟反复重绘。
 def tui_render_context_key(
     snapshot: TuiViewSnapshot,
@@ -225,6 +233,15 @@ def tui_render_context_key(
         (block.block_id, _thinking_animation_key(block, context))
         for block in visible_activity
     )
+    compact_animation = tuple(
+        (
+            block.block_id,
+            context.spinner_index % len(SPINNER_GLYPHS),
+            block.updated_seq,
+        )
+        for block in snapshot.active_blocks
+        if block.role == "compact"
+    )
     return (
         context.width,
         context.agent_name,
@@ -243,6 +260,7 @@ def tui_render_context_key(
         context.help_open,
         connection_animation,
         thinking_animation,
+        compact_animation,
     )
 
 
@@ -275,7 +293,7 @@ _LIVE_BLOCK_RENDER_THROTTLE_SECONDS = 0.15
 def _is_live_stream_block(block: TuiBlock) -> bool:
     if block.phase == "delta":
         return True
-    return block.role == "thinking" and block.phase not in TERMINAL_RENDER_PHASES
+    return block.role in {"thinking", "compact"} and block.phase not in TERMINAL_RENDER_PHASES
 
 
 # LLM: TuiBlockRenderCache 只缓存 immutable block 输出；key 含 updated_seq/宽度/显示模式，绝不跨语义版本复用。
@@ -403,6 +421,8 @@ def _visible_activity_blocks(
 ) -> tuple[TuiBlock, ...]:
     if snapshot.permission is not None:
         return ()
+    if any(block.role == "compact" for block in snapshot.active_blocks):
+        return ()
     has_visible_assistant_stream = any(
         block.role == "assistant"
         and block.phase not in TERMINAL_RENDER_PHASES
@@ -427,6 +447,8 @@ def _render_block(block: TuiBlock, context: TuiRenderContext) -> tuple[Formatted
         return _render_assistant(block, context)
     if block.role == "thinking":
         return _render_thinking(block, context)
+    if block.role == "compact":
+        return _render_compact_progress(block, context)
     if block.role == "tool":
         return _render_tool(block, context)
     if block.role == "todo":
@@ -479,6 +501,8 @@ def _block_cache_key(block: TuiBlock, context: TuiRenderContext) -> tuple[Any, .
         key += (context.spinner_index % len(SPINNER_GLYPHS),)
     if block.role == "thinking" and block.phase not in {"completed", "failed", "interrupted"}:
         key += _thinking_animation_key(block, context)
+    if block.role == "compact" and block.phase not in {"completed", "failed", "interrupted"}:
+        key += (context.spinner_index % len(SPINNER_GLYPHS),)
     return key
 
 
@@ -705,11 +729,14 @@ def _render_thinking(block: TuiBlock, context: TuiRenderContext) -> tuple[Format
     if block.phase not in {"completed", "failed", "interrupted"}:
         started_at = float(block.metadata.get("started_at") or 0.0)
         elapsed = max(0, int(context.now - started_at)) if started_at and context.now else 0
-        title = f"Thinking {elapsed // 60}:{elapsed % 60:02d}"
+        word = _stable_spinner_choice(block.block_id, SPINNER_WORDS)
+        glyph = SPINNER_GLYPHS[context.spinner_index % len(SPINNER_GLYPHS)]
+        title = f"… {elapsed // 60}:{elapsed % 60:02d}"
         suffix = _spinner_status_suffix(block, context)
         activity_lines = wrap_fragments(
             (
-                ("class:tui-thinking", "∴ "),
+                ("class:tui-spinner-highlight", glyph + " "),
+                *_animated_spinner_word(word, context.spinner_index),
                 ("class:tui-thinking", title),
                 ("class:tui-thinking", suffix),
             ),
@@ -762,16 +789,55 @@ def _render_thinking(block: TuiBlock, context: TuiRenderContext) -> tuple[Format
     return tuple(lines)
 
 
-# LLM: 思考正文统一浅灰 + 括号包裹（与正文区分）；closed 时首行（ 尾行 ），
-# 活动态只加首括号（内容仍在增长）。
-# 函数用途: 生成括号包裹的浅灰思考内容行。
+# LLM: durable compact 进度只展示底层回调的结构化阶段/百分比；进度条不得根据墙钟虚构。
+# 函数用途: 在 Compact 运行时显示闪动图标、真实阶段和百分比。
+def _render_compact_progress(
+    block: TuiBlock,
+    context: TuiRenderContext,
+) -> tuple[FormattedLine, ...]:
+    if block.phase in {"failed", "interrupted"}:
+        label = (
+            "Context compaction interrupted"
+            if block.phase == "interrupted"
+            else "Context compaction failed"
+        )
+        return wrap_fragments(
+            (("class:tui-error", label),),
+            width=context.width,
+            first_prefix=(("class:tui-error", "! "),),
+            continuation_prefix=(("class:tui-error", "  "),),
+        )
+    percent = min(100, max(0, int(block.metadata.get("percent") or 0)))
+    stage = str(block.metadata.get("stage") or "preparing").replace("_", " ")
+    bar_width = min(24, max(8, context.width - 48))
+    filled = min(bar_width, max(0, int(round(percent * bar_width / 100))))
+    meter = "━" * filled + "─" * (bar_width - filled)
+    glyph = SPINNER_GLYPHS[context.spinner_index % len(SPINNER_GLYPHS)]
+    return wrap_fragments(
+        (
+            ("class:tui-spinner-highlight", glyph + " "),
+            ("class:tui-thinking", "Compacting context "),
+            ("class:tui-thinking", f"[{meter}] {percent}% · {stage}"),
+        ),
+        width=context.width,
+        continuation_prefix=(("class:tui-thinking", "  "),),
+    )
+
+
+# LLM: 思考正文统一浅灰 + 全角括号包裹；closed 时必须同时为左右两个双列括号预留宽度，
+# 否则极窄终端会越过 viewport。活动态只为左括号预留两列。
+# 函数用途: 生成不会超过终端显示宽度的括号包裹浅灰思考内容行。
 def _thinking_content_lines(
     detail: str,
     context: TuiRenderContext,
     *,
     closed: bool,
 ) -> list[FormattedLine]:
-    rendered = render_markdown(detail, MarkdownRenderContext(width=max(1, context.width - 2)))
+    wrapper_width = 4 if closed else 2
+    rendered = render_markdown(
+        detail,
+        MarkdownRenderContext(width=max(1, context.width - wrapper_width)),
+    )
     last_visible = max((i for i, line in enumerate(rendered) if line), default=-1)
     out: list[FormattedLine] = []
     for idx, line in enumerate(rendered):
@@ -1267,7 +1333,7 @@ def _render_system(block: TuiBlock, context: TuiRenderContext) -> tuple[Formatte
         dropped = max(0, int(block.metadata.get("dropped_pairs") or 0))
         generation = max(0, int(block.metadata.get("generation") or 0))
         text = (
-            f"Turn context compacted · {before} → {after}"
+            f"Tool history compacted · {before} → {after}"
             f" · removed {dropped} tool pairs · pass {generation}"
         )
     else:
@@ -1604,6 +1670,20 @@ def _append_block(lines: list[FormattedLine], block_lines: tuple[FormattedLine, 
 def _stable_spinner_choice(key: str, choices: tuple[str, ...]) -> str:
     digest = hashlib.sha256(str(key).encode("utf-8")).digest()
     return choices[int.from_bytes(digest[:4], "big") % len(choices)]
+
+
+# LLM: glimmer 仅改变一个可见字符的样式，不修改稳定活动文案或任务状态。
+# 函数用途: 让工作动词上的高亮逐字移动，使用户能看出界面仍在工作。
+def _animated_spinner_word(word: str, spinner_index: int) -> tuple[Fragment, ...]:
+    normalized = str(word or "Working")
+    highlighted = max(0, int(spinner_index or 0)) % max(1, len(normalized))
+    fragments: list[Fragment] = []
+    if normalized[:highlighted]:
+        fragments.append(("class:tui-thinking", normalized[:highlighted]))
+    fragments.append(("class:tui-spinner-highlight", normalized[highlighted : highlighted + 1]))
+    if normalized[highlighted + 1 :]:
+        fragments.append(("class:tui-thinking", normalized[highlighted + 1 :]))
+    return tuple(fragments)
 
 
 # LLM: background fill 按 terminal display width 补齐，不按 Python len 破坏中文列数。

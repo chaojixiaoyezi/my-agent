@@ -49,7 +49,7 @@ def test_hierarchy_schedule_does_not_grant_parent_task_dir_to_children(tmp_path)
         thought="coordinate",
         plan=["plan"],
         role="coordinator",
-        allowed_tools=["schedule_child_subagents", "dispatch_subagents"],
+        allowed_tools=["create_subagents", "read_file", "write_file"],
     )
 
     result = manager.hierarchy.schedule_child_runs(
@@ -146,7 +146,7 @@ def test_hierarchy_schedule_grants_worker_path_written_by_child_spec(tmp_path):
         plan=["plan"],
         agent_name="cart-checkout-lead",
         role="coordinator",
-        allowed_tools=["schedule_child_subagents", "dispatch_subagents"],
+        allowed_tools=["create_subagents", "read_file", "write_file"],
     )
 
     result = manager.hierarchy.schedule_child_runs(
@@ -179,7 +179,7 @@ def test_hierarchy_schedule_blocks_sibling_path_drift(tmp_path):
         plan=["plan"],
         agent_name="cart-coordinator",
         role="coordinator",
-        allowed_tools=["schedule_child_subagents", "dispatch_subagents"],
+        allowed_tools=["create_subagents", "read_file", "write_file"],
         extra_write_roots=[str(deliverables / "build")],
     )
 
@@ -211,7 +211,7 @@ def test_hierarchy_schedule_allows_child_path_under_parent_root(tmp_path):
         plan=["plan"],
         agent_name="cart-coordinator",
         role="coordinator",
-        allowed_tools=["schedule_child_subagents", "dispatch_subagents"],
+        allowed_tools=["create_subagents", "read_file", "write_file"],
         extra_write_roots=[str(deliverables / "build")],
     )
 
@@ -244,7 +244,7 @@ def test_hierarchy_schedule_ignores_url_image_sources_in_write_roots(tmp_path):
         plan=["plan"],
         agent_name="catalog-lead",
         role="coordinator",
-        allowed_tools=["schedule_child_subagents", "dispatch_subagents"],
+        allowed_tools=["create_subagents", "read_file", "write_file"],
     )
 
     result = manager.hierarchy.schedule_child_runs(
@@ -280,8 +280,7 @@ def test_hierarchy_schedule_preserves_coordinator_orchestration_tools(tmp_path):
         plan=["plan"],
         role="coordinator",
         allowed_tools=[
-            "schedule_child_subagents",
-            "dispatch_subagents",
+            "create_subagents",
             "inspect_agent_tree",
             "list_files",
             "read_file",
@@ -306,6 +305,7 @@ def test_hierarchy_schedule_preserves_coordinator_orchestration_tools(tmp_path):
     coordinator = manager.load(result.created_run_ids[0])
 
     assert coordinator.role == "coordinator"
-    assert "schedule_child_subagents" in coordinator.allowed_tools
-    assert "dispatch_subagents" in coordinator.allowed_tools
+    assert "create_subagents" in coordinator.allowed_tools
+    assert "schedule_child_subagents" not in coordinator.allowed_tools
+    assert "dispatch_subagents" not in coordinator.allowed_tools
     assert "write_file" in coordinator.allowed_tools

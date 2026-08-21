@@ -12,11 +12,9 @@ from .agent_core import (
     CancelSubagentsTool,
     CapabilityRequestTool,
     CreateSubagentsTool,
-    DispatchSubagentsTool,
     InspectAgentTreeTool,
     RaiseEventTool,
     ResolveCapabilityRequestsTool,
-    ScheduleChildSubagentsTool,
     SendGuidanceTool,
     SimpleAgentDispatchMixin,
     SimpleAgentRuntimeMixin,
@@ -63,13 +61,7 @@ from .agent_core.runner.dispatch import (
     _runner_retry_reason,
     _task_has_runner_patches,
 )
-from .agent_core.runner.prompts import (
-    _append_runner_repair_failure,
-    _append_runner_repair_prompt,
-    _append_runner_repair_response,
-    _build_subagent_runner_prompt,
-    _build_subagent_runner_repair_prompt,
-)
+from .agent_core.runner.prompts import _build_subagent_runner_prompt
 from .agent_core.runtime.owner_roots import runtime_owner_root
 from .backends import get_backend
 from .capability import CapabilityRouter, from_tool_model_spec
@@ -336,7 +328,7 @@ class SimpleAgent(
     """wires config, memory, prompts, backend, tools, and subagent manager into one agent runtime.
 
     这是用户和 CLI 看到的主代理对象。
-    它自己只做依赖组装；具体怎么聊天、怎么跑子代理、怎么 dispatch，已经分别交给 mixin 文件。
+    它自己只做依赖组装；具体怎么聊天、怎么跑子代理和怎么由系统调度，已经分别交给 mixin 文件。
     """
 
     # 同一 owner 的 agent 会被多个 Gateway/后台 worker 复用；这些运行中字段必须按线程隔离，
@@ -358,7 +350,7 @@ class SimpleAgent(
         """initialize all SimpleAgent collaborators and register orchestration tools.
 
         创建主代理时会准备本地账本、记忆、prompt 构造器、模型后端、子代理管理器和工具注册表。
-        最后把"创建子代理、看板、dispatch"这三个编排工具也注册进去。
+        最后只注册创建、查看、发消息/纠偏、中断取消和能力裁决等用户级子代理操作。
         """
         self.config = config
         _export_model_endpoint_env(config)
@@ -969,9 +961,7 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(CancelSubagentsTool(agent))
     agent.tools.register(InspectAgentTreeTool(agent))
     agent.tools.register(SendGuidanceTool(agent))
-    agent.tools.register(DispatchSubagentsTool(agent))
     agent.tools.register(ResolveCapabilityRequestsTool(agent))
-    agent.tools.register(ScheduleChildSubagentsTool(agent))
 
 
 __all__ = [
@@ -981,13 +971,11 @@ __all__ = [
     "ResolveCapabilityRequestsTool",
     "CODING_SUBAGENT_TOOLS",
     "CreateSubagentsTool",
-    "DispatchSubagentsTool",
     "InspectAgentTreeTool",
     "RaiseEventTool",
     "ONE_SHOT_TOOL_NAMES",
     "PARENT_PLANNER_READ_TOOLS",
     "READ_ONLY_SUBAGENT_TOOLS",
-    "ScheduleChildSubagentsTool",
     "SendGuidanceTool",
     "SimpleAgent",
     "TaskProgressTool",

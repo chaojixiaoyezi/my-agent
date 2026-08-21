@@ -138,5 +138,5 @@ def invalid_include_run_ids_message(
     ]
     if suggestions:
         parts.append(f"possible_corrections={suggestions}")
-    parts.append("请使用 schedule_child_subagents 返回的 created_run_ids 原样重试。")
+    parts.append("请使用 create_subagents 返回的 created_run_ids 原样重试。")
     return " ".join(parts)

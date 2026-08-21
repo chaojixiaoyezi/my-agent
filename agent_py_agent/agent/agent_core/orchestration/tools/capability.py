@@ -325,8 +325,8 @@ def _no_pending_result(task: Any, run_id: str, decision: str) -> ToolHandlerOutc
         "capability_request_status_counts": counts,
         "note": (
             "该子代理没有待裁决的能力申请(常规申请由机制层自动批准,GRANTED/CLOSED 的无需重复裁决),"
-            "不必再调本工具。若它仍未推进:dispatch_subagents 重派、send_guidance 补提示、"
-            "救不回来就 cancel_subagents 了结,别晾着拖收尾。"
+            "不必再调本工具。若它仍在运行，用 send_guidance 补充消息；"
+            "若已失败，先用 inspect_agent_tree 看系统自动恢复事实，只在用户要求或确认不应继续时 cancel_subagents。"
         ),
     }
     return ToolHandlerOutcome(

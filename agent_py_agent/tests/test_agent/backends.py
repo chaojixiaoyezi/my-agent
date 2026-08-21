@@ -37,7 +37,7 @@ class StructuredSubagentBackend(_TestNativeBackend):
     name = "structured_subagent_backend"
 
     def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
-        assert "[SUBAGENT_RESULT]" in prompt
+        assert "不要输出 SUBAGENT_RESULT" in prompt
         return ModelResponse(
             text=(
                 "我读取了当前上下文，但缺少 HTTP 检查能力。\n"
@@ -79,7 +79,7 @@ class AcceptedSubagentBackend(_TestNativeBackend):
     name = "accepted_subagent_backend"
 
     def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
-        assert "[SUBAGENT_RESULT]" in prompt
+        assert "不要输出 SUBAGENT_RESULT" in prompt
         return ModelResponse(
             text=(
                 "[SUBAGENT_RESULT]\n"
@@ -120,7 +120,7 @@ class CapabilityThenAcceptedBackend(_TestNativeBackend):
         self.calls = 0
 
     def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
-        assert "[SUBAGENT_RESULT]" in prompt
+        assert "不要输出 SUBAGENT_RESULT" in prompt
         self.calls += 1
         if self.calls == 1:
             return ModelResponse(text=_controlled_exec_request_result(), backend=self.name)
@@ -138,7 +138,7 @@ class IncompleteOutputThenAcceptedBackend(_TestNativeBackend):
         self.prompts: list[str] = []
 
     def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
-        assert "[SUBAGENT_RESULT]" in prompt
+        assert "不要输出 SUBAGENT_RESULT" in prompt
         self.prompts.append(prompt)
         self.calls += 1
         if self.calls == 1:
@@ -413,7 +413,7 @@ class FlakyThenAcceptedSubagentBackend(_TestNativeBackend):
         self.calls += 1
         if self.calls == 1:
             raise RuntimeError("temporary runner backend outage")
-        assert "[SUBAGENT_RESULT]" in prompt
+        assert "不要输出 SUBAGENT_RESULT" in prompt
         assert "runner_attempts" in prompt
         return ModelResponse(
             text=(
@@ -457,7 +457,7 @@ class RepairingSubagentBackend(_TestNativeBackend):
     def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         self.prompts.append(prompt)
         if len(self.prompts) == 1:
-            assert "[SUBAGENT_RESULT]" in prompt
+            assert "不要输出 SUBAGENT_RESULT" in prompt
             return ModelResponse(text="我已经完成检查，但这次忘记输出机器结果块。", backend=self.name)
 
         assert "# SubAgent Runner Output Repair" in prompt

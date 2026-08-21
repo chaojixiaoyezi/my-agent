@@ -32,7 +32,7 @@ def collaboration_context_payload(manager: object, task: object) -> dict[str, ob
         "targeted_request_count": len(requests),
         "targeted_requests": _bounded_targeted_requests(requests),
         "responder_policy": (
-            "已有待响应协作请求时，在 SUBAGENT_RESULT 的证据/结论里原样引用 case_ref/request_ref 回应；"
+            "已有待响应协作请求时，在普通最终回复里原样引用 case_ref/request_ref 回应；"
             "不要把请求内容重述成新问题或另开重复 case。"
         ),
     }

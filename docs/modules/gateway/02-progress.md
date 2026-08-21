@@ -1,5 +1,16 @@
 # Gateway Progress
 
+## 2026-08-21 统一回合结束原因与 Compact 流式进度
+
+- Gateway 最终 response 现在透传主代理与子代理共用的 `turn_end_reason`，值只来自六类结构化回合终态；
+  不再从模型正文、验收清单或产物数量反推“完成”。
+- 持久会话 Compact 在 rich TUI 路径发布 typed `conversation_compaction_progress`。开始、摘要、计量、
+  checkpoint、提交、完成或失败阶段均携带 0-100 百分比；普通客户端保持原行为。
+- 进度出口只允许 schema、阶段、百分比、generation 和非负计数，摘要正文、prompt 与原始消息不会穿过
+  Gateway chunk。TUI 因此能显示真实压缩进度，又不形成第二份 Compact 事实源。
+- Gateway conversation/streaming 与 TUI focused 回归已通过；真实测试机仍以单 Gateway、多独立 TUI
+  方式验收，不为每个会话启动额外 Gateway。
+
 ## 2026-08-18 TUI 活动回合普通输入与上下文可观察性候选
 
 - 四路真机观察证明旧 TUI 在 Gateway 回合运行时仍把普通 Enter 建成下一条 `ChatJob`；两条补充消息虽然

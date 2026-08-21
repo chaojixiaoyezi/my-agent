@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 from __future__ import annotations
+
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_env_loader import ensure_model_key
+
 """真模型判读探针:把【修复后】vs【修复前】管道产出的真实 pull 载荷,喂给【真 MiniMax-M2.7】判,
 数误报/召回——回答"批量从 500 压到 48 + overload 提示,真模型到底还乱不乱报"这个命门。
 

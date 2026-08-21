@@ -1,4 +1,10 @@
 
+"""模块用途: 在创建子代理时应用角色模板中的工具和展示元数据。
+
+LLM: 角色模板可以缩小工具能力并提供模型提示，但不得再生成 acceptance_checks 或
+第二套完成门；普通结束统一由 turn_end 和真实运行事实表达。
+"""
+
 from __future__ import annotations
 
 from dataclasses import replace
@@ -17,10 +23,8 @@ from .role_templates import (
 REPORTER_ROLE = "reporter"
 CHECKER_ROLE = "checker"
 
-REPORTER_ACCEPTANCE_CHECK = "Reporter output must cite evidence_refs or artifact_refs for each user-visible claim."
-CHECKER_ACCEPTANCE_CHECK = "Checker must verify reporter evidence refs and write concrete findings."
-
-
+# LLM: 角色名只用于选择模板；不要从普通目标文字反推角色。
+# 函数用途: 把空角色归一为通用角色名，供模板查找和持久化。
 def normalize_subagent_role(role: str) -> str:
     cleaned = str(role or "").strip().lower()
     if not cleaned:
@@ -28,6 +32,8 @@ def normalize_subagent_role(role: str) -> str:
     return cleaned
 
 
+# LLM: 当前创建链必须把 acceptance_checks 清空；历史字段仅由持久层兼容读取。
+# 函数用途: 合并角色模板的工具、质量说明和展示属性，不建立机器验收清单。
 def apply_role_contract_to_create_params(params: Any, role_template_dirs: object = None):
     original_role = str(getattr(params, "role", "") or "general")
     contract_role = normalize_subagent_role(original_role)
@@ -39,14 +45,13 @@ def apply_role_contract_to_create_params(params: Any, role_template_dirs: object
     stored_role = _stored_role(original_role, contract_role, template_role, getattr(params, "normalize_role", True))
     effective_role = template_role or contract_role
     template = template_for_role(template_role, role_template_dirs) if template_role else None
-    checks = _acceptance_checks_for_role(effective_role, getattr(params, "acceptance_checks", None), template)
     tools = _allowed_tools_for_role(effective_role, getattr(params, "allowed_tools", None), template)
     quality_contract = _quality_contract_for_role(effective_role, getattr(params, "quality_contract", None), template)
     attributes = _attributes_with_role_template(getattr(params, "attributes", None), template)
     return replace(
         params,
         role=stored_role,
-        acceptance_checks=checks,
+        acceptance_checks=[],
         allowed_tools=tools,
         quality_contract=quality_contract,
         attributes=attributes,
@@ -64,20 +69,6 @@ def _stored_role(original_role: str, contract_role: str, template_role: str, nor
     if template_role and contract_role != template_role:
         return contract_role
     return contract_role
-
-
-def _acceptance_checks_for_role(role: str, checks: object, template: RoleTemplate | None) -> list[str]:
-    normalized = [str(item) for item in _list_value(checks) if item not in (None, "")]
-    if role == REPORTER_ROLE:
-        normalized = _append_once(normalized, REPORTER_ACCEPTANCE_CHECK)
-    if role == CHECKER_ROLE:
-        normalized = _append_once(normalized, CHECKER_ACCEPTANCE_CHECK)
-    if template and template.output_contract_zh:
-        normalized = _append_once(
-            normalized,
-            f"{template.name_zh} output contract: {template.output_contract_zh}",
-        )
-    return normalized
 
 
 def _allowed_tools_for_role(
@@ -121,12 +112,6 @@ def _list_value(value: object) -> list[object]:
     if isinstance(value, tuple):
         return list(value)
     return [value]
-
-
-def _append_once(values: list[str], item: str) -> list[str]:
-    if item not in values:
-        values.append(item)
-    return values
 
 
 def _stable_tools(values: list[str]) -> list[str]:

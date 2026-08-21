@@ -253,6 +253,50 @@ def test_context_window_compaction_is_typed_rich_only_and_content_free(tmp_path)
     assert "summary" not in row["context_compaction"]
 
 
+def test_conversation_compact_progress_is_rich_only_and_content_free(tmp_path):
+    paths = _make_paths(tmp_path)
+    value = {
+        "schema": "conversation_compaction_progress.v1",
+        "phase": "progress",
+        "stage": "summarizing",
+        "percent": 35,
+        "generation": 4,
+        "before_tokens": 118_400,
+        "after_tokens": 0,
+        "trigger_tokens": 115_200,
+        "source_messages": 80,
+        "summary": "must not escape",
+        "prompt": "must not escape",
+    }
+    disabled_path = gateway_chunk_path(paths, "compact-progress-disabled")
+    disabled = BufferedChunkStreamWriter(disabled_path, rich_transcript=False)
+    assert disabled.write_conversation_compact_progress(value) is False
+    assert not disabled_path.exists()
+
+    enabled_path = gateway_chunk_path(paths, "compact-progress-enabled")
+    enabled = BufferedChunkStreamWriter(enabled_path, rich_transcript=True)
+    assert enabled.write_conversation_compact_progress(value) is True
+    row = json.loads(enabled_path.read_text(encoding="utf-8").strip())
+
+    assert row["kind"] == "conversation_compaction_progress"
+    assert row["compact_progress"] == {
+        key: value[key]
+        for key in (
+            "schema",
+            "phase",
+            "stage",
+            "percent",
+            "generation",
+            "before_tokens",
+            "after_tokens",
+            "trigger_tokens",
+            "source_messages",
+        )
+    }
+    assert "summary" not in row["compact_progress"]
+    assert "prompt" not in row["compact_progress"]
+
+
 def test_noninteractive_gateway_permission_fails_closed_without_waiting(tmp_path):
     paths = _make_paths(tmp_path)
     chunk_path = gateway_chunk_path(paths, "permission-disabled")

@@ -6,8 +6,6 @@ from __future__ import annotations
 这个测试确保能力请求、授权、证据和状态更新 service 化后仍保持旧 API 行为。
 """
 
-import pytest
-
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.services.lifecycle import (
     RecordCapabilityGapParams,
@@ -48,7 +46,7 @@ def test_subagent_lifecycle_service_records_capabilities_and_status(tmp_path) ->
         ),
     )
     evidence = manager.lifecycle.record_evidence(task.id, RecordEvidenceParams(kind="test", summary="passed"))
-    updated = manager.lifecycle.set_status(task.id, "DONE", require_evidence=True)
+    updated = manager.lifecycle.set_status(task.id, "DONE")
 
     loaded = manager.load(task.id)
     assert manager.lifecycle is not None
@@ -117,12 +115,14 @@ def test_subagent_lifecycle_service_dedupes_equivalent_capability_requests(tmp_p
     assert len(loaded.capability_requests) == 1
 
 
-def test_subagent_lifecycle_service_blocks_done_without_evidence(tmp_path) -> None:
+def test_subagent_lifecycle_service_allows_done_without_evidence(tmp_path) -> None:
     manager = SubAgentManager(tmp_path)
     task = manager.create_run(goal="service lifecycle", thought="keep API", plan=["record"])
 
-    with pytest.raises(ValueError):
-        manager.lifecycle.set_status(task.id, "DONE", require_evidence=True)
+    updated = manager.lifecycle.set_status(task.id, "DONE")
+
+    assert updated.status == "DONE"
+    assert updated.evidence == []
 
 
 def test_subagent_lifecycle_service_records_memory_route_load_error(tmp_path, monkeypatch) -> None:

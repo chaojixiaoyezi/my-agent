@@ -114,8 +114,8 @@ def test_cancel_subagents_tool_requires_same_run_retry_before_cancellation(tmp_p
             "runner_attempts": 1,
         }
     ]
-    assert payload["next_action"]["tool"] == "dispatch_subagents"
-    assert payload["next_action"]["params"]["run_ids"] == [task.id]
+    assert payload["next_action"]["control"] == "system_auto_retry"
+    assert payload["next_action"]["run_ids"] == [task.id]
     assert loaded.status == "BLOCKED"
     assert loaded.failure_type == "structured_output_parse_error"
 

@@ -571,7 +571,7 @@ class TuiRuntime:
             return self._notice_text
 
     # LLM: 周期刷新只由仍会随时间改变的可见 typed 状态保活；空闲 transcript 必须停表，避免历史长度放大空转 CPU。
-    # 函数用途: 告诉动画线程当前是否还有连接/思考动画或未过期短提示需要定时重绘。
+    # 函数用途: 告诉动画线程当前是否还有连接/思考/Compact 动画或未过期短提示需要定时重绘。
     def needs_periodic_refresh(self) -> bool:
         now = time.monotonic()
         with self._lock:
@@ -584,7 +584,7 @@ class TuiRuntime:
             return True
         snapshot = self.store.snapshot()
         return any(
-            block.role in {"connection", "thinking"}
+            block.role in {"connection", "thinking", "compact"}
             for block in snapshot.active_blocks
         )
 
@@ -717,6 +717,9 @@ class TuiTurnEventAdapter:
         self._thinking_index = 0
         self._thinking_text = ""
         self._thinking_started_at = 0.0
+        self._compact_active = False
+        self._compact_block_id = ""
+        self._compact_payload: dict[str, object] = {}
         self._assistant_index = 0
         self._assistant_block_id = ""
         self._assistant_text = ""
@@ -946,6 +949,55 @@ class TuiTurnEventAdapter:
             )
         return True
 
+    # LLM: 会话 Compact 块只消费冻结 schema 的顺序事件，不根据显示文案推断开始、完成或失败。
+    # 函数用途: 将 Gateway 传来的持久会话 Compact 阶段更新为一个原位进度块。
+    def write_conversation_compact_progress(
+        self,
+        value: Mapping[str, object],
+    ) -> bool:
+        payload = _tui_conversation_compact_progress_payload(value)
+        if not payload:
+            return False
+        phase = str(payload["phase"])
+        generation = int(payload["generation"])
+        block_id = f"conversation-compact:{self.request_id}:{generation}"
+        with self._lock:
+            if phase == "started":
+                if self._compact_active:
+                    return False
+                self._compact_active = True
+                self._compact_block_id = block_id
+                self._compact_payload = dict(payload)
+                self.runtime._publish(
+                    "conversation_compaction_started",
+                    "started",
+                    block_id,
+                    payload,
+                    request_id=self.request_id,
+                )
+                return True
+            if not self._compact_active or self._compact_block_id != block_id:
+                return False
+            self._compact_payload = dict(payload)
+            if phase == "progress":
+                kind, event_phase = "conversation_compaction_progress", "updated"
+            elif phase == "completed":
+                kind, event_phase = "conversation_compaction_completed", "completed"
+            else:
+                kind, event_phase = "conversation_compaction_failed", "failed"
+            self.runtime._publish(
+                kind,
+                event_phase,
+                block_id,
+                payload,
+                request_id=self.request_id,
+            )
+            if phase in {"completed", "failed"}:
+                self._compact_active = False
+                self._compact_block_id = ""
+                self._compact_payload = {}
+            return True
+
     # LLM: progress 只读取结构化 event；legacy_text 参数为旧调用兼容但不得参与 phase/tool/id 决策。
     # 函数用途: 发布工具开始、进度和终态，并在工具前冻结助手 commentary、保留全局活动 spinner。
     def write_progress(self, event: dict[str, object], legacy_text: str = "") -> None:
@@ -967,6 +1019,9 @@ class TuiTurnEventAdapter:
             if self._finished:
                 return
             self._permissions.cancel_pending()
+            self._close_compact_if_active(
+                phase="interrupted" if summary.interrupted else "failed"
+            )
             self._complete_thinking()
             if summary.ok and summary.response_text:
                 self._finalize_assistant_text(summary.response_text)
@@ -985,6 +1040,27 @@ class TuiTurnEventAdapter:
             )
             self._publish_turn_terminal(summary)
             self._finished = True
+
+    # LLM: 回合终态不得遗留活动 Compact 块；这里只收口展示状态，不修改会话摘要或代际。
+    # 函数用途: 在回合异常结束时把未收到终态的 Compact 进度块标记为失败/中断。
+    def _close_compact_if_active(self, *, phase: str) -> None:
+        if not self._compact_active or not self._compact_block_id:
+            return
+        payload = {
+            **self._compact_payload,
+            "phase": "failed",
+            "stage": "failed",
+        }
+        self.runtime._publish(
+            "conversation_compaction_failed",
+            "interrupted" if phase == "interrupted" else "failed",
+            self._compact_block_id,
+            payload,
+            request_id=self.request_id,
+        )
+        self._compact_active = False
+        self._compact_block_id = ""
+        self._compact_payload = {}
 
     # LLM: thinking terminal 携带完整思考文本与真实耗时，renderer 折叠显示
     # “Thought for Xs”并允许 Ctrl+O 展开；无思考内容时与旧行为一致（不留下空历史块）。
@@ -1223,6 +1299,11 @@ def _consume_gateway_turn_event(
         Mapping,
     ):
         return adapter.write_context_compaction(payload["context_compaction"])
+    if kind == "conversation_compaction_progress" and isinstance(
+        payload.get("compact_progress"),
+        Mapping,
+    ):
+        return adapter.write_conversation_compact_progress(payload["compact_progress"])
     if kind == "conversation_compacted":
         generation = _nonnegative_int(payload.get("compact_generation"))
         if generation <= 0:
@@ -1401,6 +1482,45 @@ def _tui_context_compaction_payload(value: object) -> dict[str, object]:
         **{field: _nonnegative_int(value.get(field)) for field in fields},
     }
     return payload if payload["generation"] > 0 else {}
+
+
+# LLM: TUI 在 Gateway 清洗后仍重新验证 Compact phase/stage/计数，直连和 replay 不能绕过展示边界。
+# 函数用途: 将合法会话 Compact 进度转成 reducer 可用的有界数字快照。
+def _tui_conversation_compact_progress_payload(
+    value: object,
+) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        return {}
+    if value.get("schema") != "conversation_compaction_progress.v1":
+        return {}
+    phase = str(value.get("phase") or "")
+    stage = str(value.get("stage") or "")
+    if phase not in {"started", "progress", "completed", "failed"}:
+        return {}
+    if stage not in {
+        "preparing",
+        "summarizing",
+        "measuring",
+        "checkpointing",
+        "committing",
+        "completed",
+        "failed",
+    }:
+        return {}
+    generation = _nonnegative_int(value.get("generation"))
+    if generation <= 0:
+        return {}
+    return {
+        "schema": "conversation_compaction_progress.v1",
+        "phase": phase,
+        "stage": stage,
+        "percent": min(100, _nonnegative_int(value.get("percent"))),
+        "generation": generation,
+        "before_tokens": _nonnegative_int(value.get("before_tokens")),
+        "after_tokens": _nonnegative_int(value.get("after_tokens")),
+        "trigger_tokens": _nonnegative_int(value.get("trigger_tokens")),
+        "source_messages": _nonnegative_int(value.get("source_messages")),
+    }
 
 
 # LLM: 本地审批等待只读 cancellation_token 的结构化状态；取消原因文案不参与控制判断。

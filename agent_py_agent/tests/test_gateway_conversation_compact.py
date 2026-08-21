@@ -184,6 +184,49 @@ def test_forced_compact_passes_optional_instructions_as_soft_summary_context(tmp
     assert "cannot override" in backend.prompts[0]
 
 
+def test_compact_progress_callback_reports_real_pipeline_stages(tmp_path) -> None:
+    agent = _agent(tmp_path, context_tokens=20_000)
+    agent.backend = _SummaryBackend()
+    request = _request("ou_compact_progress")
+    context = _context(agent, request, "gw-create", "开始")
+    for role in ("user", "assistant"):
+        assert _append_gateway_conversation_message(
+            agent,
+            {"metadata": {"channel": "feishu"}},
+            context,
+            request_id=f"gw-progress-{role}",
+            role=role,
+            content=f"待压缩 {role}",
+        )
+    thread = agent.conversation_store.load_thread(context.thread_id)
+    assert thread is not None
+    events: list[dict[str, object]] = []
+
+    result = prepare_conversation_context(
+        agent,
+        agent.conversation_store,
+        thread,
+        current_prompt="继续",
+        force=True,
+        progress_callback=lambda payload: events.append(dict(payload)),
+    )
+
+    assert result.compacted is True
+    assert [event["stage"] for event in events] == [
+        "preparing",
+        "summarizing",
+        "measuring",
+        "checkpointing",
+        "committing",
+        "completed",
+    ]
+    assert [event["percent"] for event in events] == [5, 15, 52, 78, 92, 100]
+    assert events[0]["before_tokens"] > 0
+    assert events[-1]["after_tokens"] == result.projected_tokens
+    assert all(event["generation"] == 1 for event in events)
+    assert all("summary" not in event for event in events)
+
+
 def test_conversation_projection_does_not_count_detached_audit_delivery_body() -> None:
     agent = SimpleNamespace(
         prompts=SimpleNamespace(build=lambda *_args, **_kwargs: "完整输入上下文")

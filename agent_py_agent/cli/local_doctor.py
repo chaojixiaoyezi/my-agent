@@ -284,6 +284,8 @@ def rebuild_local_store(agent: SimpleAgent, *, sources: set[str], reset: bool = 
     return result
 
 
+# LLM: Suggestions may expose observation and repair commands, but child execution stays host-owned.
+# 函数用途: 根据本地健康事实给普通用户可执行建议，不要求用户手动催跑子代理。
 def build_status_suggestions(agent: SimpleAgent, payload: dict) -> list[str]:
 
     suggestions: list[str] = []
@@ -303,7 +305,7 @@ def build_status_suggestions(agent: SimpleAgent, payload: dict) -> list[str]:
     if local_store["record_count"] == 0 and (_memory_record_count(agent) or agent.subagents.list_runs() or any(counts.values()) or any(archive_counts.values())):
         suggestions.append("LocalStore 为空但已有文件事实源：运行 `my-agent local-rebuild`。")
     if hot_count:
-        suggestions.append("存在红灯 subagent：运行 `my-agent subagents-due-check`，必要时再 `my-agent subagents-dispatch --apply`。")
+        suggestions.append("存在红灯 subagent：运行 `my-agent subagents-due-check` 查看事实；启动和可恢复重试由系统自动处理。")
     if not payload["timeline"] and local_store["record_count"]:
         suggestions.append("LocalStore 有记录但 timeline 为空：运行 `my-agent local-rebuild --reset` 从文件事实源重建事件索引。")
     return suggestions

@@ -575,9 +575,6 @@ def _tool_call_payload(call: ToolCall) -> dict[str, object]:
 def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDecision:
     if _is_runtime_status_response(request.response):
         return ToolLoopResponseDecision("break", request.response, [], request.counters)
-    required_decision = _required_action_no_tool_call_decision(request)
-    if required_decision is not None:
-        return required_decision
     unresolved_issue_decision = unresolved_runtime_issue_no_tool_call_decision(
         _unresolved_runtime_issue_request(request)
     )
@@ -597,15 +594,6 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
             return ToolLoopResponseDecision(
                 "continue", None, [], _inc_empty_text(request.counters)
             )
-        # 第 4 层假完成 gate(2026-08-15 3×3 真机): 模型无工具调用轮主动收口
-        # 时,若 delivery contract 声明 verify_commands → 机器验证产物。
-        # 全过才保持收口;任一失败 → unfinished(DELIVERY_VERIFY_FAILED),
-        # 失败输出注入 tool_context, resume_loop 自动续跑让模型看到真实
-        # 编译/测试输出继续修——绝不把中间态文本当完成(cell1 52 轮/cell2
-        # 三次「继续推进」假完成实锤, 产物编译全不过)。
-        verified = _delivery_verify_no_tool_call_decision(request)
-        if verified is not None:
-            return verified
         final_response = request.response
         # EXEC-38(owner 拍板 2026-08-16): 程序验证收窄为只做"未知副作用"
         # ——产物/交付目录验证删除(EXEC-06b/34/37 撤销)。理由: 任务千奇百怪,
@@ -628,145 +616,6 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
         )
     final = protected_tool_marker_block_response(request.response.backend)
     return ToolLoopResponseDecision("break", final, [], request.counters)
-
-
-def _delivery_verify_no_tool_call_decision(
-    request: _NoToolCallsRequest,
-) -> ToolLoopResponseDecision | None:
-    """delivery contract 声明 verify_commands 时的收口机器验证 gate。
-
-    无 verify_commands → None（不干预，普通任务行为不变）。
-    验证全过 → None（保持自然收口）。任一失败 → unfinished 收口，
-    失败输出注入 tool_context（模型续跑轮直接可见），绝不标 ok。
-    """
-    contract = getattr(request.params, "delivery_contract", None)
-    if not isinstance(contract, dict):
-        return None
-    from .delivery_verify import (
-        VERIFY_FAILED,
-        VERIFY_PASSED,
-        VERIFY_SKIPPED,
-        _contract_hash,
-        build_verification_id,
-        delivery_verify_failure_context,
-        persist_delivery_verify_event,
-        run_delivery_verification,
-    )
-
-    try:
-        from ..runner.context import current_run_task_workspace_root
-
-        workspace_root = current_run_task_workspace_root(request.agent, request.params)
-    except Exception:  # noqa: BLE001 workspace 拿不到 → 根缺失 fail-closed（run 内拒绝执行）
-        workspace_root = None
-    try:
-        state, results = run_delivery_verification(request.params, workspace_root)
-    except Exception:  # noqa: BLE001 验证执行异常保守判失败（fail-closed）
-        state, results = VERIFY_FAILED, []
-    contract_hash = _contract_hash(contract)
-    verification_id = build_verification_id(request.params, contract)
-    persist_delivery_verify_event(
-        request.agent,
-        request.params,
-        state,
-        results,
-        contract_hash,
-        verification_id,
-    )
-    if state == VERIFY_SKIPPED:
-        return None
-    if state == VERIFY_PASSED:
-        return None
-    # VERIFY_FAILED / VERIFY_CONTRACT_INVALID / cwd 越界 → 一律 unfinished
-    # fail-closed（双席 seq2004 硬缺口2: 坏合同不得伪装成自然收口）。
-    failure_text = (
-        delivery_verify_failure_context(results)
-        if state == VERIFY_FAILED
-        else (
-            "[tool-system delivery-verify-failed]\n"
-            "delivery contract 声明的 verify_commands 结构非法或 cwd 越界，"
-            "产物无法机器验证，任务未完成。"
-        )
-    )
-    request.params.tool_context.append(failure_text)
-    from dataclasses import replace as _replace
-
-    text = str(getattr(request.response, "text", "") or "")
-    return ToolLoopResponseDecision(
-        "break",
-        _replace(
-            request.response,
-            text=(
-                text + "\n\n[delivery-verify]\n产物未通过机器验证，任务未完成；"
-                "请根据上方验证失败输出继续修复，不要宣告完成。"
-            ),
-            runtime_status="unfinished",
-            runtime_reason="DELIVERY_VERIFY_FAILED",
-            runtime_source="delivery_verify",
-        ),
-        [],
-        request.counters,
-    )
-
-
-def _required_action_no_tool_call_decision(
-    request: _NoToolCallsRequest,
-) -> ToolLoopResponseDecision | None:
-    from ...contracts.required_actions import (
-        render_required_action_guidance,
-        required_action_no_tool_decision,
-    )
-
-    snapshot = getattr(request.params, "effective_contract_snapshot", None)
-    if not tuple(
-        getattr(snapshot, "required_actions", ()) or ()
-    ):
-        # 无显式义务(actions 为空)时 gate 唯一可能产出就是"评估失败→blocked";
-        # 评估失败(弱模型/供应商不支持结构化输出)不能一票否决每个无工具
-        # 回合——真机 2026-08-17 MiniMax: 纯聊天消息被 REQUIRED_ACTION_
-        # ASSESSMENT_FAILED 拦成 blocked, TUI 每条消息都显示"任务未完成"。
-        # 显式合同任务走 structured_contract 路径(actions 非空)不受影响;
-        # 评估成功且 requires_action=False 的 informational 轮由
-        # _no_action_gate_active 单独管理(拦截错误工具调用, 见 round_execution)。
-        return None
-    # 本 run 真实成功执行证据(executed_tools 非空) → 义务已有动作证据,
-    # 收口不再拿评估拆解粒度卡死已完成任务(G4-001 真机铁证: 评估拆 3 个
-    # action、模型 2 次调用合并完成 → 第 3 个 action 无独立调用被误杀)。
-    outcome = required_action_no_tool_decision(
-        snapshot,
-        has_succeeded_evidence=bool(getattr(request.params, "executed_tools", ())),
-    )
-    if outcome == "complete":
-        return None
-    if outcome == "repair":
-        guidance = render_required_action_guidance(snapshot)
-        request.params.tool_context.append(
-            guidance + "\n上一轮没有产生任何 canonical ToolCall，因此没有动作证据。"
-            "请发起所需的真实工具调用；若权限、审批、能力或用户输入不足，"
-            "请保持结构化阻塞，不要用自然语言宣称完成。"
-        )
-        return ToolLoopResponseDecision("continue", None, [], request.counters)
-    actions = tuple(getattr(snapshot, "required_actions", ()) or ())
-    # 到达此处必有 actions(空 actions 已在入口 return None)。
-    reason = next(
-        (
-            str(item.blocked_reason or "").strip()
-            for item in actions
-            if item.status == outcome and str(item.blocked_reason or "").strip()
-        ),
-        f"REQUIRED_ACTION_{outcome.upper()}",
-    )
-    return ToolLoopResponseDecision(
-        "break",
-        replace(
-            request.response,
-            runtime_status=outcome,
-            runtime_reason=reason,
-            runtime_source="required_action_completion_gate",
-        ),
-        [],
-        request.counters,
-    )
 
 
 def _is_runtime_status_response(response: object) -> bool:
@@ -815,5 +664,4 @@ def _unresolved_runtime_issue_request(
     return UnresolvedRuntimeIssueDecisionRequest(
         request.agent, request.params, request.response, request.counters
     )
-
 

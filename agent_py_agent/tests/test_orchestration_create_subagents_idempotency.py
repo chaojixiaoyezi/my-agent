@@ -36,7 +36,7 @@ def test_items_mode_reuses_existing_contract_children_and_returns_dispatch_contr
     assert first["created_run_ids"] == first["created_run_ids"]
     assert second["created_run_ids"] == []
     assert second["reused_run_ids"] == first["created_run_ids"]
-    assert second["dispatch_run_ids"] == []
+    assert second["pending_start_run_ids"] == []
     assert second["auto_start"]["run_ids"] == first["created_run_ids"]
     assert second["next_action"]["tool"] == "inspect_agent_tree"
     assert len(agent.subagents.list_runs()) == 3
@@ -59,7 +59,7 @@ def test_reused_done_children_are_excluded_from_dispatch_contract(tmp_path):
     )
 
     assert second["reused_run_ids"] == first["created_run_ids"]
-    assert second["dispatch_run_ids"] == []
+    assert second["pending_start_run_ids"] == []
     assert second["auto_start"]["run_ids"] == first["created_run_ids"][1:]
     assert second["next_action"]["tool"] == "inspect_agent_tree"
 
@@ -79,7 +79,7 @@ def test_generic_single_worker_reuses_explicit_idempotency_contract(tmp_path):
 
     assert second["created_run_ids"] == []
     assert second["reused_run_ids"] == first["created_run_ids"]
-    assert second["dispatch_run_ids"] == []
+    assert second["pending_start_run_ids"] == []
     assert second["auto_start"]["run_ids"] == first["created_run_ids"]
     assert len(agent.subagents.list_runs()) == 1
 
@@ -284,9 +284,9 @@ def test_all_reused_done_children_return_non_dispatch_next_action(tmp_path):
         tool.execute({"goal": "并行生成周度项目报告", "items": _pipeline_items("weekly_data.md")}).output
     )
 
-    assert second["dispatch_run_ids"] == []
+    assert second["pending_start_run_ids"] == []
     assert second["next_action"]["tool"] == "inspect_agent_tree"
-    assert second["next_action"]["reason"].startswith("create_subagents 没有可调度")
+    assert second["next_action"]["reason"].startswith("create_subagents 没有可启动")
 
 
 def _pipeline_items(output_name: str) -> list[dict[str, object]]:

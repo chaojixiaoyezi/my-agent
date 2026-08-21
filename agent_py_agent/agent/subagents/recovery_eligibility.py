@@ -6,8 +6,6 @@ from .model_capabilities import capability_request_requires_parent_resolution
 from .models import (
     FailureType,
     TaskStatus,
-    VerificationStatus,
-    normalize_verification_status,
     task_status_in,
 )
 
@@ -39,8 +37,6 @@ def user_stopped_resume_eligibility(task: object) -> dict[str, object]:
         blockers.append("not_conversation_user_stop")
     if previous_status not in _RECOVERABLE_PREVIOUS_STATUSES:
         blockers.append("previous_status_not_recoverable")
-    if _verified(task):
-        blockers.append("already_verified")
     if str(getattr(task, "channel_status", "") or "").strip() == "BROKEN":
         blockers.append("channel_broken")
     if _has_open_capability_request(task):
@@ -70,14 +66,6 @@ def _cancel_record(task: object) -> dict[str, object]:
         return {}
     value = attrs.get("cancel_subagents")
     return dict(value) if isinstance(value, dict) else {}
-
-
-def _verified(task: object) -> bool:
-    try:
-        status = normalize_verification_status(getattr(task, "verification_status", ""))
-    except ValueError:
-        return False
-    return status == VerificationStatus.VERIFIED.value
 
 
 def _has_open_capability_request(task: object) -> bool:

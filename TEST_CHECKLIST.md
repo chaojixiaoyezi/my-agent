@@ -31,7 +31,12 @@
 - [x] `python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` 通过并刷新报告（`blocked=False`）。
 - [x] `python3 -m pytest -q --tb=short --cache-clear` 全量运行到 100% 且退出码为 0。
 - [ ] 真实主代理自己完成任务。
-- [ ] 真实主代理派子代理完成任务，并由主代理验收交付。
+- [ ] 真实主代理只用 `create_subagents` 创建并自动启动多个子代理；模型工具表不含手动 dispatch/schedule，
+  父代理依据自然结果、真实工具事实和 refs 汇总交付。
+- [ ] 主代理、子代理、Gateway 与 TUI 对六类 `turn_end` 映射一致；普通完成不读取 acceptance/verification，
+  历史兼容字段不进入当前 prompt、context bundle、父级摘要或启动前检查。
+- [ ] TUI 在活动轮显示 Working 动画和持续 thinking 增量；用户位于页底时自动跟随，主动上翻后不抢滚动，
+  回到底部后恢复跟随；Compact 显示 typed 百分比并在完成/失败后正确收口。
 - [ ] 真实测试中主代理和独立子代理 compact 后能继续工作；至少一条链连续发生多代 compact，近期完整回合、工具事实、任务状态和产物引用不丢，且没有重做已经成功的副作用。
 - [ ] 真实 IM 双用户验证 compact/memory/旧聊天检索不串 owner 或 chat，结束后恢复生产 compact 阈值。
 - [ ] `/verbose on/full/off` 只改变当前 thread，不进入 transcript/guidance/模型；进度发送不触发任务重做，最终回复仍能送达。
@@ -43,7 +48,8 @@
 - [ ] 同一 Agent 的前台聊天和后台续跑并发时，prompt、request id、task workspace 和 tool-loop params 不串；已销毁 Agent 不留下可被 object-id 复用的旧状态。
 - [ ] 远程 user/group owner 只能访问自己 home 与 `~/.my-agent/shared/`；其他 owner、根模板和旧顶层私有目录在 full mode 下也拒绝。
 - [ ] 模型可自主决定子代理数量；本批/任务/owner/全局任一上限不足时整批拒绝，不静默截断或部分创建。
-- [ ] 无 artifact contract 的纯分析可 message 收口；有显式 artifact/expected output 时缺文件仍必须返工，open 子代理/进度仍不得提前完成。
+- [ ] 普通任务由模型自然收口；显式产物不存在时工具和 artifact refs 必须如实报告缺失，但宿主不得另建
+  机器质量验收状态或用旧 verification 阻断模型结束。
 - [ ] 输出目录符合当前 task workspace / 用户指定目录规则。
 - [ ] 最终 Linux 容器运行 sandbox probe 退出 0；没有用 `privileged` 或宿主级 `SYS_ADMIN` 绕过。
 - [x] `check_clean_package.py --mode worktree .` 已如实阻断 2171 项保留的未跟踪协作/运行文件；新建 wheel 和 sdist 均通过 artifact 模式。

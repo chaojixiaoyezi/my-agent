@@ -65,7 +65,7 @@
 
 1. 先把上表作为角色选择策略文档和主 prompt 短规则。
 2. 增加 `role_selection` 小型决策包：输入任务目标、阶段、已有 child 状态和证据 refs，输出推荐角色、理由、是否需要 QA wave。
-3. 在 `create_subagents` / `schedule_child_subagents` 工具说明里引用短规则，但不展开完整模板。
+3. 在统一 `create_subagents` 工具说明里引用短规则，但不展开完整模板；所有层级创建后自动启动。
 4. coordinator/lead 派工时，如果要创建多个下级，先生成 refs-only role plan，再分批创建。
 5. 真实 E2E 覆盖每个内置角色：至少验证能正确选择、正确创建、正确使用工具、正确写报告、正确被最终收口。
 6. Skill 可以建议角色组合，但模型必须通过原生子代理工具显式创建；任何建议都不能绕过角色权限和最终收口 gate。

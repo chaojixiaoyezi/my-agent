@@ -141,24 +141,19 @@ def _step_for_strategy(
 
 
 def _dispatch_step(strategy: SubagentRecoveryStrategy) -> RecoveryOrchestrationStep:
-    call: dict[str, object] = {
-        "tool": "dispatch_subagents",
-        "dry_run": False,
-        "run_ids": [strategy.run_id],
-        "recovery_mode": strategy.recovery_mode,
-    }
-    if strategy.runner_instruction:
-        call["runner_instruction"] = strategy.runner_instruction
     return RecoveryOrchestrationStep(
         run_id=strategy.run_id,
         recommended_action=strategy.recommended_action,
         orchestration_action="dispatch_original_run",
         applied=False,
         ok=True,
-        next_actor="dispatcher",
+        next_actor="system_dispatcher",
         requires_dispatch=True,
-        message="原 run 可续跑；已生成统一 dispatch 建议，等待父代理或调度器执行。",
-        suggested_tool_call=call,
+        message="原 run 可续跑；系统调度器会复用原 checkpoint 和工作区继续，父代理无需手工推进。",
+        suggested_tool_call={
+            "tool": "inspect_agent_tree",
+            "run_id": strategy.run_id,
+        },
         result_refs=list(strategy.recovery_refs),
         blocked_by=list(strategy.blocked_by),
         strategy_snapshot=_strategy_snapshot(strategy),

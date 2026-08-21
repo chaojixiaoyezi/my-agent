@@ -1222,8 +1222,8 @@ def test_due_progress_policy_wakes_background_main_agent_and_sends_message(tmp_p
     assert len(backend.prompts) == 1
     assert "每小时帮我看一次进展" in backend.prompts[0]
     assert "inspect_agent_tree" in backend.prompts[0]
-    assert "dispatch_subagents" in backend.prompts[0]
     assert "create_subagents" in backend.prompts[0]
+    assert "dispatch_subagents" not in backend.prompts[0]
     sent = channels.adapter("internal").sent_messages
     assert sent[0].target == "thread-1"
     assert "后台主代理已检查任务树" in sent[0].content
@@ -5170,7 +5170,7 @@ def test_urgent_wake_uses_full_background_tool_profile(tmp_path) -> None:
     prompt = backend.prompts[0]
 
     assert "create_subagents" in prompt
-    assert "dispatch_subagents" in prompt
+    assert "dispatch_subagents" not in prompt
 
 
 def test_background_runtime_uses_configured_allowed_tools(tmp_path) -> None:

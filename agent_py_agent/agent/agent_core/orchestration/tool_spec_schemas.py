@@ -18,7 +18,6 @@ _CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     "tool_preset": {"type": "string", "enum": ["coding", "read_only", "none"]},
     "allowed_tools": {"type": "array", "items": {"type": "string"}},
     "allowed_skills": {"type": "array", "items": {"type": "string"}},
-    "acceptance_checks": {"type": "array", "items": {"type": "string"}},
     "covers": {"type": "array", "items": {"type": "string"}},
     "plan": {"type": "array", "items": {"type": "string"}},
     "input_refs": {"type": "array", "items": {"type": "string"}},
@@ -26,7 +25,6 @@ _CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     "artifact_refs": {"type": "array", "items": {"type": "string"}},
     "replacement_for_run_ids": {"type": "array", "items": {"type": "string"}},
     "related_finding_id": {"type": "string", "minLength": 1, "maxLength": 128},
-    "defer_start": {"type": "boolean"},
     "long_running": {"type": "boolean"},
     "service_window_seconds": {"type": "integer", "minimum": 1},
     "audit_source_id": {"type": "string", "minLength": 1, "maxLength": 128},
@@ -53,18 +51,6 @@ _OBSERVATION_PARAMETER_SCHEMA: dict[str, Any] = {
     "requires_main_agent": {"type": "boolean"},
     "requires_llm_report": {"type": "boolean"},
     "dedupe_key": {"type": "string"},
-}
-_DISPATCH_PARAMETER_SCHEMA: dict[str, Any] = {
-    "dry_run": {"type": "boolean"},
-    "max_runners": {"type": "integer", "minimum": 0},
-    "run_ids": {"type": "array", "items": {"type": "string"}},
-    "recovery_mode": {"type": "string"},
-}
-_SCHEDULE_CHILD_PARAMETER_SCHEMA: dict[str, Any] = {
-    "children": {"type": "array", "items": {"type": "object"}},
-    "dry_run": {"type": "boolean"},
-    "max_depth": {"type": "integer", "minimum": 0},
-    "max_children": {"type": "integer", "minimum": 0},
 }
 _RESOLVE_CAPABILITY_PARAMETER_SCHEMA: dict[str, Any] = {
     "run_id": {"type": "string"},

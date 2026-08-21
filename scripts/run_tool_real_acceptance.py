@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 from __future__ import annotations
+
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_env_loader import ensure_model_key
-
 
 """Run ordinary-Chinese tool acceptance against the configured real provider.
 

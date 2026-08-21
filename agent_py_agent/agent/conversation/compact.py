@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -98,6 +99,7 @@ class _CompactRunRequest:
     forced: bool
     attempted_at: float
     custom_instructions: str = ""
+    progress_callback: Callable[[dict[str, object]], object] | None = None
 
 
 # LLM: A candidate is still non-authoritative until its checkpoint id is written and referenced.
@@ -142,6 +144,7 @@ def prepare_conversation_context(
     exclude_request_id: str = "",
     force: bool = False,
     custom_instructions: str = "",
+    progress_callback: Callable[[dict[str, object]], object] | None = None,
 ) -> ConversationCompactResult:
     """Load the uncompacted tail and compact it before it crosses the runtime policy."""
     from ..agent_core.runtime.context_compactor import runtime_compact_policy
@@ -198,20 +201,33 @@ def prepare_conversation_context(
             code="COMPACT_CIRCUIT_OPEN",
         )
 
-    return _compact_pending(
-        _CompactRunRequest(
-            agent=agent,
-            store=store,
-            thread=current,
-            current_prompt=current_prompt,
-            pending=tuple(pending),
-            policy=policy,
-            projected_tokens=projected,
-            forced=bool(force),
-            attempted_at=attempted_at,
-            custom_instructions=str(custom_instructions or "").strip(),
-        )
+    request = _CompactRunRequest(
+        agent=agent,
+        store=store,
+        thread=current,
+        current_prompt=current_prompt,
+        pending=tuple(pending),
+        policy=policy,
+        projected_tokens=projected,
+        forced=bool(force),
+        attempted_at=attempted_at,
+        custom_instructions=str(custom_instructions or "").strip(),
+        progress_callback=progress_callback,
     )
+    _emit_compact_progress(request, phase="started", stage="preparing", percent=5)
+    try:
+        result = _compact_pending(request)
+    except Exception:
+        _emit_compact_progress(request, phase="failed", stage="failed", percent=0)
+        raise
+    _emit_compact_progress(
+        request,
+        phase="completed",
+        stage="completed",
+        percent=100,
+        after_tokens=result.projected_tokens,
+    )
+    return result
 
 
 # LLM: `/context` and diagnostics are read-only consumers of the automatic compact contract;
@@ -323,7 +339,16 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
             max_tail_tokens=request.policy.recent_tail_tokens,
         )
     )
-    for compact_rows, retained_tail in partitions:
+    partition_count = max(1, len(partitions))
+    for partition_index, (compact_rows, retained_tail) in enumerate(partitions):
+        summarize_percent = 15 + int(partition_index * 50 / partition_count)
+        measure_percent = 15 + int((partition_index + 0.75) * 50 / partition_count)
+        _emit_compact_progress(
+            request,
+            phase="progress",
+            stage="summarizing",
+            percent=summarize_percent,
+        )
         try:
             candidate = _build_compact_candidate(
                 request,
@@ -338,6 +363,13 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
                 now=request.attempted_at,
             )
             raise
+        _emit_compact_progress(
+            request,
+            phase="progress",
+            stage="measuring",
+            percent=measure_percent,
+            after_tokens=candidate.projected_tokens_after,
+        )
         if candidate.projected_tokens_after >= request.policy.trigger_tokens:
             continue
         try:
@@ -411,6 +443,13 @@ def _commit_compact_candidate(
         request.thread.thread_id,
         last_row.message_id,
     )
+    _emit_compact_progress(
+        request,
+        phase="progress",
+        stage="checkpointing",
+        percent=78,
+        after_tokens=candidate.projected_tokens_after,
+    )
     checkpoint_id = write_compact_checkpoint(
         request.agent,
         CompactCheckpointRequest(
@@ -425,6 +464,13 @@ def _commit_compact_candidate(
             policy=request.policy,
             forced=request.forced,
         ),
+    )
+    _emit_compact_progress(
+        request,
+        phase="progress",
+        stage="committing",
+        percent=92,
+        after_tokens=candidate.projected_tokens_after,
     )
     updated = request.store.update_compact_state(
         request.thread.thread_id,
@@ -451,6 +497,36 @@ def _commit_compact_candidate(
             list(candidate.retained_tail)
         ),
     )
+
+
+# LLM: progress callback 是只读展示投影，其失败不得阻断或改写 compact 权威状态。
+# 函数用途: 将真实 Compact 流水线阶段以有界结构发给 TUI。
+def _emit_compact_progress(
+    request: _CompactRunRequest,
+    *,
+    phase: str,
+    stage: str,
+    percent: int,
+    after_tokens: int = 0,
+) -> None:
+    callback = request.progress_callback
+    if callback is None:
+        return
+    payload: dict[str, object] = {
+        "schema": "conversation_compaction_progress.v1",
+        "phase": str(phase),
+        "stage": str(stage),
+        "percent": min(100, max(0, int(percent or 0))),
+        "generation": max(0, int(request.thread.compact_generation or 0)) + 1,
+        "before_tokens": max(0, int(request.projected_tokens or 0)),
+        "after_tokens": max(0, int(after_tokens or 0)),
+        "trigger_tokens": max(0, int(request.policy.trigger_tokens or 0)),
+        "source_messages": len(request.pending),
+    }
+    try:
+        callback(payload)
+    except Exception:
+        return
 
 
 # LLM: The cursor must match an exact raw message id; missing authority fails closed.

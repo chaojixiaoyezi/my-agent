@@ -41,7 +41,7 @@ def notify_parent_on_runner_result(
             # Still publish a machine-only wake *after* the terminal task row is
             # durable.  The background scheduler consumes this without a model
             # turn and reruns the canonical root terminal gate.  Without this
-            # edge, the last source worker can become DONE/VERIFIED after the
+            # edge, the last source worker can reach its durable terminal state after the
             # collector's earlier settle check and leave the root Audit stuck in
             # "waiting for closeout" until an unrelated later request happens.
             _raise_internal_audit_source_wake(
@@ -118,8 +118,12 @@ def _raise_internal_audit_source_wake(
 def _summary(task: Any, result: Any, status: str) -> str:
     name = str(getattr(task, "agent_name", "") or getattr(task, "role", "") or "子代理")
     run_id = str(getattr(task, "id", "") or getattr(result, "run_id", "") or "")
-    verification = str(getattr(result, "verification_status", "") or getattr(task, "verification_status", "") or "")
-    base = f"{name} {run_id} 已结束：status={status}, verification={verification}。请父代理查看结果并决定下一步。"
+    reason = str(
+        getattr(result, "turn_end_reason", "")
+        or getattr(task, "turn_end_reason", "")
+        or "interrupted"
+    )
+    base = f"{name} {run_id} 本轮已结束：status={status}, reason={reason}。请父代理查看结果。"
     remaining = _service_window_remaining(task)
     if remaining <= 0:
         return base
@@ -133,8 +137,12 @@ def _metadata(task: Any, result: Any, output_payload: dict[str, object]) -> dict
     payload = {
         "task_id": str(getattr(task, "id", "") or getattr(result, "run_id", "") or ""),
         "status": str(getattr(result, "status", "") or getattr(task, "status", "") or ""),
+        "turn_end_reason": str(
+            getattr(result, "turn_end_reason", "")
+            or getattr(task, "turn_end_reason", "")
+            or ""
+        ),
         "failure_type": str(getattr(task, "failure_type", "") or ""),
-        "verification_status": str(getattr(result, "verification_status", "") or getattr(task, "verification_status", "") or ""),
         "runner_result_json": str(getattr(result, "result_json", "") or getattr(task, "runner_result_json", "") or ""),
         "output_json": str(getattr(task, "output_json", "") or ""),
         "artifact_refs": list(output_payload.get("artifacts") or []) if isinstance(output_payload.get("artifacts"), list) else [],

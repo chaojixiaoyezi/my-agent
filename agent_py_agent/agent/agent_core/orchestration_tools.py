@@ -4,7 +4,7 @@ from __future__ import annotations
 """exposes model-callable orchestration tools backed by SimpleAgent subagent workflows.
 
 这些不是普通文件工具，而是'主代理让模型触发子代理流程'的工具。
-创建子代理、查看看板、执行 dispatch 都在这里，真实业务再转给 SimpleAgent 和 SubAgentManager。
+创建子代理、查看状态和发送消息都在这里，真实启动由系统后台调度器负责。
 """
 
 import json
@@ -29,7 +29,7 @@ from ..tooling.models import (
     ToolInputPolicy,
     ToolRuntimePolicy,
 )
-from .hierarchy_tools import ScheduleChildSubagentsTool as ScheduleChildSubagentsTool
+from .hierarchy_tools import execute_child_creation
 from .orchestration.create_constraints import (
     CreateTaskResolution,
     creation_active_lineage_conflicts,
@@ -47,7 +47,6 @@ from .orchestration.create_policy import (
     create_run_params,
     prepare_audit_child_creation_scope,
 )
-from .orchestration.dispatch.tool import DispatchSubagentsTool
 from .orchestration.dispatch_progress_seed import (
     DISPATCH_SEED_NOTE,
     autobind_covers_from_goal_ids,
@@ -88,6 +87,7 @@ from .orchestration.write_guard import (
     external_write_target_error,
 )
 from .parameters import subagent_intent_identity
+from .runner.context import current_subagent_run_id
 from .runtime.guidance_tool import SendGuidanceTool as SendGuidanceTool
 from .runtime.wait_tool import register_dispatch_supervision_policy
 from .task_progress_tool import TaskProgressTool as TaskProgressTool
@@ -174,7 +174,49 @@ class CreateSubagentsTool(BaseTool):
         self.agent = agent
 
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
+        if current_subagent_run_id(self.agent):
+            nested_params = _nested_create_params(params)
+            if isinstance(nested_params, ToolHandlerOutcome):
+                return nested_params
+            return execute_child_creation(
+                self.agent,
+                nested_params,
+                tool_name="create_subagents",
+            )
         return execute_create_subagents_service(self.agent, params)
+
+
+# LLM: A descendant uses the same create_subagents schema as the root; this adapter only
+# converts the public batch shape into the hierarchy service's structured children list.
+# 函数用途: 把子代理发来的统一 create_subagents 参数转换为下一层创建参数。
+def _nested_create_params(
+    params: dict[str, object],
+) -> dict[str, object] | ToolHandlerOutcome:
+    goal = str(params.get("goal") or "").strip()
+    if not goal:
+        return ToolHandlerOutcome(
+            "create_subagents",
+            False,
+            "create_subagents 缺少始终必填的 goal。",
+            error_code="TOOL_INVALID_ARGUMENTS",
+        )
+    items = create_items_from_params(params)
+    if isinstance(items, str):
+        return ToolHandlerOutcome(
+            "create_subagents",
+            False,
+            items,
+            error_code="TOOL_INVALID_ARGUMENTS",
+        )
+    children = [dict(item.params) for item in items] if items else [dict(params)]
+    for child in children:
+        child.pop("items", None)
+    return {
+        "children": children,
+        "dry_run": bool(params.get("dry_run", False)),
+        "max_depth": params.get("max_depth", 0),
+        "max_children": params.get("max_children", 0),
+    }
 
 
 def execute_create_subagents_service(
@@ -203,7 +245,7 @@ def execute_create_subagents_service(
             "create_subagents",
             False,
             f"create_subagents 执行时内部出错({type(exc).__name__}: {exc})。多半是某个参数触发的内部问题——"
-            "换最简单的写法重试:只传一个 goal、先别带 output_files/acceptance_checks 等附加字段。别因此就改回自己写。",
+            "换最简单的写法重试:只传一个 goal、先别带 output_files 等附加字段。别因此就改回自己写。",
             error_code="TOOL_INVALID_ARGUMENTS",
         )
 
@@ -653,7 +695,7 @@ def _active_lineage_creation_result(
         "error_code": "SUBAGENT_ACTIVE_LINEAGE_EXISTS",
         "error": (
             "当前后台监督轮所属任务已有未结束子代理；本批没有创建任何子代理。"
-            "请续接、引导或调度现有 run，而不是另起一批。"
+            "请查看或引导现有 run，而不是另起一批。"
         ),
         "conflicts": conflicts,
         "existing_run_ids": run_ids,
@@ -661,7 +703,7 @@ def _active_lineage_creation_result(
             "tool": "inspect_agent_tree",
             "params": {},
             "reason": (
-                "读取现有 run 的结构化状态后，使用 dispatch_subagents 或 send_guidance 继续原 run；"
+                "读取现有 run 的结构化状态后，必要时使用 send_guidance 补充消息；"
                 "只有明确接管旧 run 时才使用 replacement_for_run_ids。"
             ),
         },

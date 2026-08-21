@@ -564,7 +564,7 @@ helper1、helper2、step3、pattern4
 
 **收尾/交付:**
 - [ ] skill 落到正确目录,文件确实写出。
-- [ ] 涉及任务的,按需 `task_progress` 上报、完成针对性验证并给出最终回复;有阻塞用 `raise_event` 上抛;需要并行验证或扩大测试覆盖时,派子代理(`create_subagents` / `dispatch_subagents` / `schedule_child_subagents`)。
+- [ ] 涉及任务的,按需 `task_progress` 上报、完成针对性验证并给出最终回复;有阻塞用 `raise_event` 上抛;需要并行验证或扩大测试覆盖时,用 `create_subagents` 创建不同分工并自动启动。
 - [ ] 声称"完成"之前,先跑通验证/测试 gate(`run_command`),别在没验证时标记任务完成。
 
 ## 发现路径

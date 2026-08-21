@@ -62,7 +62,7 @@ _SUBAGENT_INTEGRATION_WAKE_PROMPT = (
     "facts from child prose, an earlier assistant message, or a derived artifact. "
     "If the structured projection says rows were omitted, inspect the current "
     "task-scoped tools before reporting them. Avoid duplicate work and polling. "
-    "Report completion only when acceptance evidence supports it, and describe "
+    "Report completion only when the current objective and runtime facts support it, and describe "
     "unresolved limitations truthfully."
 )
 
@@ -347,7 +347,6 @@ _BACKGROUND_WORK_TOOLS = (
 DEFAULT_BACKGROUND_ALLOWED_TOOLS = (
     "inspect_agent_tree",
     "raise_event",
-    "dispatch_subagents",
     "send_guidance",
     "create_subagents",
     *_BACKGROUND_WORK_TOOLS,
@@ -380,7 +379,6 @@ GOAL_SUBAGENTS_TERMINAL_ALLOWED_TOOLS = GOAL_BACKGROUND_ALLOWED_TOOLS
 CONTROL_ACTION_DESCRIPTIONS = {
     "inspect_agent_tree": "只读查看主/子/孙代理状态树。",
     "raise_event": "记录普通进展、阻塞或需要主代理处理的事件。",
-    "dispatch_subagents": "只有需要推进、恢复或调度时才调用。",
     "send_guidance": "给正在运行的代理追加软提示。",
     "create_subagents": "创建并启动新的下级代理。",
     "read_file": "读取子代理产出的文件/产物,用于整合与验收。",
@@ -4552,7 +4550,7 @@ class _BackgroundSchedulerGoalMixin:
 
     # LLM: 子代理生命周期唤醒进 LLM 整合轮之前的机制层预处理(§5.1 头号靶的 wake 端半边):
     #   常规能力申请自动批 + BLOCKED/孤儿候选全量续派,全部确定性动作,不依赖模型调
-    #   resolve_capability_requests / dispatch_subagents。失败静默记日志,唤醒轮照常进行。
+    #   resolve_capability_requests / 系统自动恢复。失败静默记日志,唤醒轮照常进行。
     def _pre_wake_capability_sweep(self, lifecycle_reason: str, signal: WakeSignal) -> None:
         from ..agent_core.orchestration.dispatch.capability_auto_sweep import (
             auto_capability_sweep,
@@ -5692,11 +5690,6 @@ CONTINUABLE_REASONS = frozenset(
         # 仅 response_decision 对全 TOOL_CALL_UNCLOSED violations 产生此
         # reason, 其他协议违规仍 blocked fail-closed。
         "TOOL_CALL_UNCLOSED",
-        # 2026-08-15 3×3 双席 seq2004 硬缺口1: 第 4 层收口机器验证 gate
-        # 产物未通过时标 DELIVERY_VERIFY_FAILED——必须进可续跑族, 否则
-        # resume_loop 判 unresumable 直接退出, 模型永远看不到验证输出。
-        # 结构门见下: 只接受 source=delivery_verify + status=unfinished。
-        "DELIVERY_VERIFY_FAILED",
         # EXEC-26 长任务复刻真机(2026-08-16): ma-a 写 4 个 .go(813 行)后收口,
         # 最后一步写操作未验证成功 → OPERATION_INCOMPLETE RC=2, 但不在续跑
         # 白名单 → CLI 直接退出, 已写代码白费。对照 会话运行时/轻量运行时 任务循环持续到
@@ -5727,23 +5720,12 @@ def should_continue_task(final_response: object) -> tuple[bool, str]:
     reason = str(getattr(final_response, "runtime_reason", "") or "").strip().upper()
     source = str(getattr(final_response, "runtime_source", "") or "").strip()
     status = str(getattr(final_response, "runtime_status", "") or "").strip().lower()
-    gate_unfinished = (
-        source == "required_action_completion_gate"
-        and status == "unfinished"
-    )
     if reason in CONTINUABLE_REASONS:
         # 双席 seq1989 结构门: TOOL_CALL_UNCLOSED 只由协议适配器在
         # unfinished 收口产生——补 source/status 精确约束, 防其他路径误标
         # 同一 reason 被放行续跑(生产路径由 host 结构化赋值, 此处防御性)。
         if reason == "TOOL_CALL_UNCLOSED" and not (
             source == "tool_protocol_adapter" and status == "unfinished"
-        ):
-            return False, reason or "not_continuable"
-        # 双席 seq2004 硬缺口1 结构门: DELIVERY_VERIFY_FAILED 只由收口验证
-        # gate 在 unfinished 收口产生——补 source/status 精确约束, 防其他
-        # 路径误标同一 reason 被放行续跑(生产路径由 host 结构化赋值)。
-        if reason == "DELIVERY_VERIFY_FAILED" and not (
-            source == "delivery_verify" and status == "unfinished"
         ):
             return False, reason or "not_continuable"
         # EXEC-26 结构门: 三个新增 reason 只由各自的工具/收口 gate 在
@@ -5761,6 +5743,4 @@ def should_continue_task(final_response: object) -> tuple[bool, str]:
         ):
             return False, reason or "not_continuable"
         return True, reason
-    if gate_unfinished:
-        return True, "REQUIRED_ACTION_HAS_NO_EVIDENCE"
     return False, reason or "not_continuable"

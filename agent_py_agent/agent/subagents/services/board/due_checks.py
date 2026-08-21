@@ -17,7 +17,6 @@ from ...models import (
     TaskStatus,
     normalize_task_status,
     task_has_status,
-    task_is_done_verified,
     task_is_handled_after_parent_timeout,
     task_status_in,
     task_status_reason_code,
@@ -36,7 +35,6 @@ from ...policies import (
     ISSUE_CHANNEL_PROBE_MISSING,
     ISSUE_COORDINATOR_HEARTBEAT_STALE,
     ISSUE_COORDINATOR_NEEDS_LEADERSHIP_RECOVERY,
-    ISSUE_FAKE_DONE_RISK,
     ISSUE_HEARTBEAT_STALE,
     ISSUE_MISSING_WORK_ORDER_FILES,
     ISSUE_NO_PROGRESS_FUSE,
@@ -44,7 +42,6 @@ from ...policies import (
     ISSUE_OPEN_CAPABILITY_REQUEST,
     ISSUE_PARENT_TIMEOUT_WITH_UNFINISHED_CHILDREN,
     ISSUE_RUN_TIMEOUT,
-    ISSUE_UNVERIFIED_DONE,
     MakeDueIssueParams,
     _is_active,
     _make_due_issue,
@@ -272,41 +269,6 @@ def _check_probe_missing_issues(ctx: DueInspectionContext):
     ]
 
 
-def _check_done_evidence_issues(ctx: DueInspectionContext, min_evidence):
-    """Check for DONE task with insufficient evidence."""
-    task = ctx.task
-    if not task_has_status(task, TaskStatus.DONE) or min_evidence <= 0 or len(task.evidence) >= min_evidence:
-        return []
-    return [
-        _single_issue(
-            ctx,
-            DueIssueSpec(
-                "P0",
-                ISSUE_FAKE_DONE_RISK,
-                f"DONE 任务只有 {len(task.evidence)} 条证据，少于配置要求的 {min_evidence} 条。",
-                "require_evidence_or_reopen",
-            ),
-        )
-    ]
-
-
-def _check_done_verification_issues(ctx: DueInspectionContext):
-    """Check for DONE task without verification."""
-    if not task_has_status(ctx.task, TaskStatus.DONE) or task_is_done_verified(ctx.task):
-        return []
-    return [
-        _single_issue(
-            ctx,
-            DueIssueSpec(
-                "P1",
-                ISSUE_UNVERIFIED_DONE,
-                "任务已标记 DONE，但 verification_status 还不是 VERIFIED。",
-                "reopen_for_evidence_or_assign_reviewer",
-            ),
-        )
-    ]
-
-
 def _check_capability_request_issues(ctx: DueInspectionContext):
     """Check for open capability request issues."""
     if not ctx.open_request_count:
@@ -493,8 +455,6 @@ def inspect_single_task_due(request: InspectTaskDueRequest):
     issues.extend(_check_channel_broken_issues(ctx))
     issues.extend(_check_channel_degraded_issues(ctx))
     issues.extend(_check_probe_missing_issues(ctx))
-    issues.extend(_check_done_evidence_issues(ctx, request.settings.min_evidence))
-    issues.extend(_check_done_verification_issues(ctx))
     issues.extend(_check_capability_request_issues(ctx))
     issues.extend(_check_capability_gap_issues(ctx))
     issues.extend(check_coordinator_heartbeat_issues(ctx, request.settings.heartbeat_timeout))

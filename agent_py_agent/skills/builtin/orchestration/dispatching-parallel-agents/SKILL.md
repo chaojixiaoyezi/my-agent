@@ -69,7 +69,7 @@ digraph when_to_use {
 
 ### 3. 并行派工
 
-用 my-agent 的派工工具一次性把多个子代理建出来并行跑(`create_subagents` 建批量子代理,`dispatch_subagents` 下发,`schedule_child_subagents` 在已有任务树下挂子节点):
+用 `create_subagents` 一次性创建多个分工不同的子代理;创建后宿主会自动并行启动。任何层级要继续拆分仍使用同一个工具:
 
 ```
 create_subagents:

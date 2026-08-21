@@ -25,9 +25,7 @@ from ...tooling.operation_verification import (
 )
 from .._runtime_params import ToolLoopExecuteParams
 from ..runtime.task_identity import durable_task_id
-from ..subagent.progress_closeout import subagent_progress_closeout_response
 from .natural_user_reply import queue_natural_user_reply
-from .round_execution import subagent_output_json_response
 
 _MAX_WAIT_REPLY_REQUEST_CHARS = 4000
 _MAX_WAIT_REPLY_GUIDANCE_CHARS = 1200
@@ -58,13 +56,6 @@ def completion_response_after_tool_round(
 ) -> ModelResponse | None:
     if transition_response := _context_refresh_transition_response(request):
         return transition_response
-    if request.subagent_output_written:
-        return subagent_output_json_response(request.agent, request.response, request.params)
-    if _is_task_local_round(request):
-        if progress_response := subagent_progress_closeout_response(
-            request.agent, request.response
-        ):
-            return progress_response
     # 工具轮后模型正文为空 ≠ 收口信号:长期助手/会话运行时/终端应用/通道运行时 四家参考产品
     # 都是"工具→结果→继续采样"直到模型主动输出无工具调用的终态正文(参考调研 2026-08-07)。
     # 真机铁证(2026-08-07, scrapy/celery 复刻):DeepSeek 经 工具运行时 网关工具轮后空正文
@@ -92,13 +83,13 @@ def _context_refresh_transition_response(
         or not str(transition.get("reason") or "").strip()
     ):
         return None
-    payload = {
-        "status": "PENDING",
-        "summary": ("工具已提交耐久状态更新；当前工作片已结束，下一工作片从最新规范状态继续。"),
-    }
     return ModelResponse(
-        text=(f"[SUBAGENT_RESULT]\n{json.dumps(payload, ensure_ascii=False)}\n[/SUBAGENT_RESULT]"),
+        text="工具已提交耐久状态更新；当前工作片已结束，下一工作片从最新状态继续。",
         backend=request.response.backend,
+        runtime_status="unfinished",
+        runtime_reason="CONTEXT_REFRESH",
+        runtime_source="tool_loop",
+        turn_end_reason="max-tokens",
     )
 
 

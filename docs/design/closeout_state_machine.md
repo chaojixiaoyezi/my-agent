@@ -1,154 +1,71 @@
-# 收口状态机设计（owner 四改之 2，状态：设计中未实施）
+# 轮结束与自然收口设计（状态：2026-08-21 已落地）
 
-> 配套决策背景：`docs/stability/ISSUES.md` EXEC-30/33/35/36/38/39。
-> 参考实现：会话运行时（模型自然停即收口，无系统侧收口机；goal 扩展只在目标层
-> 驱动轮次）、deepseek-harness `/goal`（goal-round-driver idle 驱动 +
-> 轮数预算）、长期助手（batch-runner resume）、通道运行时（cron tick 续跑）。
+> 参考：会话运行时 的模型/工具 active turn 和 DSH `turn/end.reason`。
+> 本文只定义“一轮为什么停”，不定义通用业务质量验收。
 
-## 1. 问题
+## 1. 解决的问题
 
-当前工具循环停下后，"下一步怎么办"散落在多处，各写各的判断：
+历史实现在模型自然最终回复之后，还会经过交付扫描、产物清单、
+`acceptance_checks`、`verification_status` 和子代理结果格式二次裁决。同一任务
+因此同时存在“模型已结束”和“机器还没验收”两套结论，导致：
 
-- `_tool_loop_service.py`：`_final_response_after_tool_limit` /
-  `_final_response_after_repeated_failure` / `_final_response_after_unknown_
-  outcome_halt` / `_final_response_after_no_action_gate` 各自拼提示词 + 各自
-  读续跑预算；
-- `response_decision.py`：break 时分散定 runtime_status（ok/unfinished/
-  blocked/TOOL_CALL_UNCLOSED 降级分支）；
-- `conversation/runtime.py`：`should_continue_task`（可续跑白名单 gate）；
-- `resume_loop.py`：`run_with_resume` / `run_manual_resume` 各自重复
-  budget/收敛/收口判定；gateway 侧 `_run_handoff_continuation` 又一套。
+- 模型已完成但系统又挂起或打断；
+- 子代理比主代理更容易因结果格式和验收字段失败；
+- 模型正文被二次生成的短回复覆盖；
+- Gateway、TUI、父级 wake 与子代理账本对“完成”的理解不一致。
 
-后果：同一事实（还能不能续、续了会不会兑现）在 4+ 处重复推理，历史上出过
-"提示词承诺自动续跑但普通任务不续"（2026-08-07）与"EXEC-39 前无 goal 也
-自动续跑"两类不一致。owner 拍板四改之 2 就是把这部分收拢成一个小状态机。
+## 2. 唯一轮结束协议
 
-## 2. 目标
+`agent/turn_end.py` 是唯一归一入口。宿主从 provider stop reason、用户控制事件和
+runtime status 获取客观事实，归一为六种公开 reason：
 
-一个权威决策点 `decide_closeout(...)`，回答：本轮停下后，下一步是哪一种。
-CLI resume_loop 与 gateway 调度器共用它，停止原因采集方（`_final_response_
-after_*`）只负责报原因，不再各自决定命运、不再各自拼"会不会继续"的承诺文案。
+| `turn_end.reason` | 大白话 | 子代理生命周期投影 |
+|---|---|---|
+| `completed` | 模型不再请求工具，本轮自然结束 | `DONE` |
+| `blocked` | 缺少用户输入或结构化授权 | `BLOCKED` |
+| `max-tokens` | provider 明确因长度/上下文截断 | `PENDING` |
+| `aborted` | 用户停止或取消 | `CANCELLED` |
+| `error` | provider/runner 明确失败 | `FAILED` |
+| `interrupted` | 轮被中断，尚无完成事实 | `PENDING` |
 
-不改变的三件事（owner 已拍板）：
-1. 正常不自动续跑：无 active goal 时收口即停（EXEC-39，会话运行时/轻量运行时 语义）。
-2. resume 能力保留：goal 模式与 cron 模式要用（owner 原话）。
-3. 自然收口是主路径：模型无工具停 = done，系统不搞产出门/质量门拦它
-   （EXEC-38，对齐 会话运行时）。
+优先级是：宿主明示 reason → provider stop reason → runtime status/reason。
+未知字符串不得猜成 `completed`。
 
-## 3. 状态与迁移
+## 3. 明确禁止的完成信号
 
-一轮 run 代数（generation）的终态：
+以下内容可以给模型和人类理解，但不得改写 `turn_end.reason`：
 
-```text
-                 ┌─────────────────────────────────────────────┐
-  工具循环停止 ──►│ 停止原因采集（各 _final_response_after_* 只报因） │
-                 └──────────────┬──────────────────────────────┘
-                                ▼
-                      should_continue_task（白名单 gate，保持不变）
-                    ┌───────────┴───────────┐
-                不可续跑族               可续跑族
-                    │                       │
-                    ▼                       ▼
-             ┌──────────────┐      _auto_resume_authorized（EXEC-39: 仅 active goal）
-             │ blocked/违规 │      ┌─────────┴─────────┐
-             │ unknown 副作用│    无 goal               有 goal + 预算内
-             │ user_stop    │      │                    │
-             └──────┬───────┘      ▼                    ▼
-                    │        wait_handoff         resume_round（下一代数）
-                    │        （写移交单；          （同因≥3 → EXEC-30 收敛
-                    │         用户 run --resume      → 降级 wait_handoff）
-                    │         或 gateway/cron 接管）
-                    ▼
-              wait_human（等用户显式继续；不自动跑）
-```
+- 模型正文中的“已完成”、“正在推进”或任何多语言变体；
+- `acceptance_checks`、`verification_status`、报告分数、测试数量或产物数量；
+- 某个目录、`final_report.md` 或其他历史收口文件是否存在；
+- 旧 `SUBAGENT_RESULT`、完成 marker 或状态别名；
+- 语义摘要对工具成功/失败的描述。
 
-终态集合（结构化，一字不多）：
+工具的真实 succeeded/failed/unknown、路径权限、附件 owner/hash 和危险效果仍是不可
+绕过的客观事实。它们告诉模型“实际发生了什么”，但不在最终回复后再建一个
+通用质量裁判庭。
 
-| 终态 | runtime 记录 | 下一步 | 谁触发下一步 |
-|---|---|---|---|
-| `done` | ok | 无 | — |
-| `cancelled` | cancelled/user_stop | 无 | — |
-| `sleep_wait` | unfinished / CLOCK_SLEEP_WAITING（clock_sleep_tool） | 任务保持非终态等闹钟（调度改造 2b） | wake_queue 字条到期 → 调度器热层弹出并唤醒；期间有新输入（用户消息/子代理完成）提前醒、闹钟作废 |
-| `wait_human` | blocked / PROTOCOL_VIOLATION / UNKNOWN 副作用 | 无（人工闸） | 用户 `run --resume`（结构化重激活 link） |
-| `wait_handoff` | unfinished（可续跑族 reason） | 停止等待（2026-08-17 起不再写移交单） | 用户 `run --resume`（后续 goal/cron 模式按持久事实新建驱动） |
-| `resume_round` | unfinished（可续跑族 reason） | 进程内自动续下一轮 | goal-round-driver（EXEC-39 授权） |
+## 4. 主代理与后代的一致语义
 
-2026-08-17 owner 拍板：删除 gateway 移交线（continuation_handoffs 表 +
-_consume_pending_handoffs/_run_handoff_continuation）。理由：任务不丢靠
-task.yaml/run_workspace.json/runtime.db 三处落盘而非移交单；移交单只是
-"谁自动接力"的中间传话筒，与 progress policy / goal 续跑通道重叠；EXEC-39
-已定"正常不自动续跑"。删除后 `wait_handoff` 语义 = "停止，等用户显式
-run --resume"；no_active_goal 也归此态（调用方按其 reason 区分）。
+主代理、子代理和孙代理共用同一模型/工具循环。子代理最终回复作为普通
+协作者消息原样归档；宿主另行记录 `turn_end.reason`，并以结构化 wake 通知父级。
+父级可以查看结果 refs、发补充消息或取消，不需要再调一个“推进”工具。
 
-收敛护栏全部保留并收进机器输入：resume_limit 预算（policy 单一权威）、
-max_rounds（进程内护栏）、EXEC-30 同因 3 次收敛。`resume_round` 只在
-预算内才发，预算耗尽即降级 `wait_handoff`。
+历史 task 里的 `acceptance_checks` / `verification_status` 暂不物理删除，以便读取旧账本；
+它们不再进入 TaskEnvelope、runner 模型摘要、父级 wake、树摘要或完成算法。
 
-## 4. 接口草案
+## 5. 与 `/goal` 和返工的边界
 
-```python
-@dataclass(frozen=True)
-class CloseoutFacts:
-    runtime_status: str        # ok/unfinished/blocked/cancelled
-    runtime_reason: str
-    runtime_source: str
-    continuable: bool          # should_continue_task 白名单 gate 的判定
-    active_goal: bool          # EXEC-39 授权事实（load_goal 结果/用户显式 resume）
-    resume_budget_left: int    # >0=剩余次数; 0=耗尽; <0=无预算概念(不限)
-    same_reason_streak: int    # EXEC-30 连续同因计数
-    rounds: int                # 已跑代数（含首轮）
-    max_rounds: int            # 总代数上限（含首轮）
-    sleeping: bool = False     # 调度改造 2b: 工具循环判定本轮最后动作是 clock.sleep
+- 普通任务自然结束后不自动新开一轮。
+- 显式 `/goal` 是 thread 上的持久目标 overlay；只有它可以按 typed goal 状态与预算续跑。
+- 已明确的工具 `failed/not_started` 与最终回复冲突时，可在同一 active turn
+  把结构化冲突交回模型有界返工；这是工具事实冲突修复，不是质量验收。
+- `unknown/cancelled/incomplete` 继续按安全边界 fail-closed，不盲目重放可能已发生的副作用。
 
-@dataclass(frozen=True)
-class CloseoutOutcome:
-    state: str                 # done/cancelled/sleep_wait/wait_human/wait_handoff/resume_round
-    reason: str
-    guidance_key: str          # 唯一文案选择键（见 §5）
-    # (2026-08-17 移交线删除后不再有 handoff 字段)
-```
+## 6. 验证要求
 
-`decide_closeout(facts) -> CloseoutOutcome` 纯函数（可穷举单测）。
-CLI `run_with_resume`/`run_manual_resume` 都调它；`sleeping` 事实由工具循环
-`_sleep_wait_closeout_if_asleep` 结构化产出（本轮最后工具是 sleep 且自然停
-→ CLOCK_SLEEP_WAITING/clock_sleep_tool），调用方原样传入，机器只认字段不
-认文案。优先级：done > cancelled > sleep_wait > 不可续跑族 > goal/预算/轮数。
-`sleep_wait` 不进可续跑族（否则 CLI 立刻再开一轮，睡觉作废），字条保留由
-wake_queue 到期唤醒。
-
-## 5. 承诺文案单一权威
-
-`_final_response_after_tool_limit` 现按 `_ordinary_task_resume_available`
-读 policy 自行决定"会自动继续"还是"请回复继续"——这必须改成读
-`CloseoutOutcome.state`：只有 `resume_round` 才写"会自动继续"；
-`wait_handoff`/`wait_human` 一律写"已暂停，回复『继续』（run --resume）
-我会接着做"。`sleep_wait` 的承诺由 SleepTool 回执给出（"已安排 N 秒后
-唤醒，等待期间有新输入会提前唤醒"），机器只保证任务非终态 + 字条在册。
-承诺与机器行为一一对应，不允许文案先行于状态。
-
-## 6. 实施切法（建议，每步可独立提交）
-
-1. ✅ 纯函数 `decide_closeout` + 穷举单测（fake facts 全组合 truth table）。
-   （已提交：agent/conversation/closeout.py + test_closeout_machine.py）
-2. ✅ `run_with_resume` 换用机器（行为等价：EXEC-30/35/39 语义不变）。
-3. ✅ `run_manual_resume` 换用机器（用户显式 resume=授权, 预算-1=不限）。
-4. ✅ `_final_response_after_tool_limit` 承诺文案换用同源判定（EXEC-39 goal
-   门 + policy 预算），"会自动继续"仅当机器真的会续。
-5. ✅ 收尾定案(2026-08-17 owner 拍板升级)：gateway 移交线**整体删除**——
-   移交单/扫描消费/段数预算全部移除(任务不丢靠落盘三事实源, 移交单只是
-   "谁自动接力"的中间层, 与 policy/goal 通道重叠, 且 EXEC-39 已定正常不
-   自动续跑)。机器只管辖 CLI 自动续跑与手动续跑两条线; 后续 goal/cron
-   模式需要自动接力时, 按持久事实(task link/state.json/runtime.db)新建
-   单一权威驱动, 不再恢复移交单机制。白名单 CONTINUABLE_REASONS 仍是
-   机器唯一原因源(经 should_continue_task 以 continuable 事实输入)。
-
-## 7. 验收
-
-- 穷举测试：facts 组合 → state 映射 truth table 全覆盖（含 sleeping 维度）；
-- 行为回归：resume 合同 45 项 + manual resume 22 项 + gateway resume 场景
-  测试全过；
-- 睡眠链路（调度改造 2b）：sleep 字条落库 → 自然停降级 CLOCK_SLEEP_WAITING
-  → sleep_wait 不清字条 → 到期热层弹字条发 wake_queue_due；终态(done/
-  wait_handoff/wait_human/cancelled)清字条；
-- 真机：goal 模式下自动续跑轮在预算内推进、预算尽后停且不再自跑；
-  普通 run 收口即停（EXEC-39 语义不变）。
+- 六种 reason 的归一和主/子/Gateway 投影有定向测试；
+- 模型最终正文不被交付层改写；
+- 无 acceptance/evidence 的普通 child 可启动并自然 `DONE`；
+- `max-tokens` / `interrupted` 不得误标 `DONE`；
+- 真机只用一个 Gateway，通过 TUI 发送普通用户 prompt，测试者不旁路补产物。

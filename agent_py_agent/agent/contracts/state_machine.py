@@ -54,7 +54,6 @@ _STATUS_REASON_BY_STATE = {
 }
 _STATE_PROTOCOL_ERROR_CODES = {
     "STATE_STATUS_INVALID",
-    "STATE_VERIFICATION_STATUS_INVALID",
     "STATE_CHANNEL_STATUS_INVALID",
 }
 
@@ -131,7 +130,6 @@ def can_closeout(facts: RunStateFacts) -> bool:
         return False
     return (
         normalize_status(facts.status) == "DONE"
-        and normalize_verification(facts.verification_status) in VERIFIED_STATES
         and normalize_channel(facts.channel_status) in HEALTHY_CHANNEL_STATES
     )
 
@@ -153,7 +151,6 @@ def can_repair(facts: RunStateFacts) -> bool:
 
 def waiting_reason(facts: RunStateFacts) -> str:
     status = normalize_status(facts.status)
-    verification = normalize_verification(facts.verification_status)
     failure = _failure_contract_code(facts.failure_type)
     if failure == "APPROVAL_REQUIRED":
         return "approval"
@@ -164,8 +161,6 @@ def waiting_reason(facts: RunStateFacts) -> str:
     if status == "WAITING_FOR_CHILD":
         return "child"
     if status == "VERIFYING":
-        return "verification"
-    if status == "DONE" and verification not in VERIFIED_STATES:
         return "verification"
     if status == "RUNNING" and not facts.has_progress:
         return "local_progress"
@@ -180,7 +175,7 @@ def terminal_outcome(facts: RunStateFacts) -> str:
         return "timed_out"
     if status in {"CANCELLED", "ABANDONED"}:
         return "cancelled"
-    if status in {"BLOCKED", "DONE"}:
+    if status == "BLOCKED":
         return "blocked"
     if status in {"FAILED", "CHANNEL_ERROR"} or normalize_channel(facts.channel_status) == "BROKEN":
         return "failed"
@@ -215,8 +210,6 @@ def lifecycle_phase(facts: RunStateFacts) -> str:
 def _protocol_recovery_decision(facts: RunStateFacts, failure: str) -> RecoveryDecision | None:
     if _status_protocol_error(facts.status):
         return RecoveryDecision(RecoveryAction.MANUAL_REVIEW, False, "invalid_state_status_protocol")
-    if _verification_protocol_error(facts.verification_status):
-        return RecoveryDecision(RecoveryAction.MANUAL_REVIEW, False, "invalid_verification_status_protocol")
     if _channel_protocol_error(facts.channel_status):
         return RecoveryDecision(RecoveryAction.MANUAL_REVIEW, False, "invalid_channel_status_protocol")
     if failure in _STATE_PROTOCOL_ERROR_CODES:
@@ -249,13 +242,11 @@ def recovery_decision(facts: RunStateFacts) -> RecoveryDecision:
     channel = normalize_channel(facts.channel_status)
     reason = waiting_reason(facts)
     if can_closeout(facts):
-        return RecoveryDecision(RecoveryAction.CLOSEOUT, False, "done_verified")
+        return RecoveryDecision(RecoveryAction.CLOSEOUT, False, "done")
     if channel == "BROKEN":
         return RecoveryDecision(RecoveryAction.REPAIR_CHANNEL, False, "channel_broken")
     if status in {"TIMEOUT", "CHANNEL_ERROR"} and can_repair(facts):
         return RecoveryDecision(RecoveryAction.REPAIR, False, "repairable_failure")
-    if reason == "verification":
-        return RecoveryDecision(RecoveryAction.WAIT_FOR_ACCEPTANCE, False, "done_unverified")
     if failure in {"NO_PROGRESS", "NO_PROGRESS_FUSE"}:
         return RecoveryDecision(RecoveryAction.CHANGE_STRATEGY, False, "no_progress", RecoveryAction.STOP)
     if failure == "APPROVAL_REQUIRED":
@@ -346,7 +337,8 @@ def _failure_type_for_protocol_errors(
     verification_error: str,
     channel_error: str,
 ) -> str:
-    return status_error or verification_error or channel_error or _failure_type_from_task(task)
+    del verification_error
+    return status_error or channel_error or _failure_type_from_task(task)
 
 
 def _failure_type_from_task(task: object) -> str:

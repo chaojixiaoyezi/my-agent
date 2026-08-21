@@ -2755,7 +2755,7 @@ def test_source_worker_batch_end_stays_pending_while_watch_is_open(
 
     assert task.status == TaskStatus.PENDING.value
     assert task.verification_status == VerificationStatus.UNVERIFIED.value
-    assert task.failure_type == FailureType.INCOMPLETE_DELIVERABLES.value
+    assert task.failure_type == ""
     assert task.ended_at == 0.0
     assert task.attributes["background_start"]["status"] == "reclaimed"
     assert task.attributes["audit_source_recovery"]["consecutive_stalls"] == 0
@@ -2879,7 +2879,7 @@ def test_closed_source_watch_fences_stale_runner_start_at_canonical_save(
         agent.subagents.lifecycle.prepare_runner_attempt(task.id)
 
 
-def test_source_worker_batch_end_closes_irrelevant_capability_request(
+def test_source_worker_batch_end_preserves_explicit_capability_request(
     tmp_path: Path,
 ) -> None:
     audit_id = "audit-result-capability"
@@ -2938,7 +2938,7 @@ def test_source_worker_batch_end_closes_irrelevant_capability_request(
     )
 
     assert task.status == TaskStatus.PENDING.value
-    assert task.capability_requests[0].status == "CLOSED"
+    assert task.capability_requests[0].status == "OPEN"
     assert task.blockers == []
 
 
@@ -2995,7 +2995,7 @@ def test_source_worker_malformed_batch_closeout_stays_pending_with_error_visible
 
     assert task.status == TaskStatus.PENDING.value
     assert task.verification_status == VerificationStatus.UNVERIFIED.value
-    assert task.failure_type == FailureType.STRUCTURED_OUTPUT_PARSE_ERROR.value
+    assert task.failure_type == ""
     assert task.ended_at == 0.0
     assert task.runner_last_error.endswith(
         "structured output parse failed: missing required status"

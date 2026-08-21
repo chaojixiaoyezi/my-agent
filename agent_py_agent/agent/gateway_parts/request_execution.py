@@ -11,6 +11,7 @@ import logging
 import os
 import threading
 import time
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -121,6 +122,21 @@ _CONTEXT_COMPACTION_FIELDS = (
     "trigger_tokens",
     "dropped_pairs",
     "preserved_pairs",
+)
+_CONVERSATION_COMPACT_PROGRESS_SCHEMA = "conversation_compaction_progress.v1"
+_CONVERSATION_COMPACT_PROGRESS_PHASES = frozenset(
+    {"started", "progress", "completed", "failed"}
+)
+_CONVERSATION_COMPACT_PROGRESS_STAGES = frozenset(
+    {
+        "preparing",
+        "summarizing",
+        "measuring",
+        "checkpointing",
+        "committing",
+        "completed",
+        "failed",
+    }
 )
 logger = logging.getLogger(__name__)
 
@@ -427,6 +443,24 @@ class BufferedChunkStreamWriter:
         )
         return True
 
+    # LLM: durable conversation compact 进度只允许冻结 schema 中的阶段/计数进入 rich chunk，摘要与原始消息永不外发。
+    # 函数用途: 把持久会话 Compact 的真实处理阶段流式发给 TUI。
+    def write_conversation_compact_progress(self, value: dict[str, object]) -> bool:
+        if not self.rich_transcript:
+            return False
+        public = _public_conversation_compact_progress_payload(value)
+        if not public:
+            return False
+        self.flush()
+        write_chunk_event(
+            self.chunk_path,
+            {
+                "kind": "conversation_compaction_progress",
+                "compact_progress": public,
+            },
+        )
+        return True
+
     # LLM: 请求必须先发布再等待精确 decision 文件；未声明能力不等待，取消令牌使同一阻塞调用立即返回 cancelled。
     # 函数用途: 将工具审批发给 Gateway 客户端并等待结构化答复。
     def request_permission(
@@ -620,6 +654,34 @@ def _public_context_compaction_payload(value: object) -> dict[str, object]:
     }
 
 
+# LLM: Compact 进度投影仅接受已知 phase/stage 和非负计数，未知字段不得进入跨进程 TUI 事件。
+# 函数用途: 清洗持久会话 Compact 进度，防止摘要或 prompt 混入展示。
+def _public_conversation_compact_progress_payload(value: object) -> dict[str, object]:
+    if (
+        not isinstance(value, dict)
+        or value.get("schema") != _CONVERSATION_COMPACT_PROGRESS_SCHEMA
+    ):
+        return {}
+    phase = str(value.get("phase") or "")
+    stage = str(value.get("stage") or "")
+    if (
+        phase not in _CONVERSATION_COMPACT_PROGRESS_PHASES
+        or stage not in _CONVERSATION_COMPACT_PROGRESS_STAGES
+    ):
+        return {}
+    return {
+        "schema": _CONVERSATION_COMPACT_PROGRESS_SCHEMA,
+        "phase": phase,
+        "stage": stage,
+        "percent": min(100, _safe_nonnegative_int(value.get("percent"))),
+        "generation": _safe_nonnegative_int(value.get("generation")),
+        "before_tokens": _safe_nonnegative_int(value.get("before_tokens")),
+        "after_tokens": _safe_nonnegative_int(value.get("after_tokens")),
+        "trigger_tokens": _safe_nonnegative_int(value.get("trigger_tokens")),
+        "source_messages": _safe_nonnegative_int(value.get("source_messages")),
+    }
+
+
 @dataclass(frozen=True)
 class _GatewayResponseBaseContext:
     request: dict
@@ -697,6 +759,7 @@ class _GatewayConversationLoadRequest:
     request: dict
     request_id: str
     prompt: str
+    on_chunk: object | None = None
 
 
 @dataclass(frozen=True)
@@ -849,6 +912,7 @@ def _update_response_from_result(response: dict, result, request: dict) -> None:
             "runtime_status": str(getattr(result, "runtime_status", "ok") or "ok"),
             "runtime_reason": str(getattr(result, "runtime_reason", "") or ""),
             "runtime_source": str(getattr(result, "runtime_source", "") or ""),
+            "turn_end_reason": str(getattr(result, "turn_end_reason", "") or ""),
             "conversation_persist_degraded": bool(
                 getattr(result, "conversation_persist_degraded", False)
             ),
@@ -928,6 +992,7 @@ def _run_gateway_ask(context: _GatewayAskRunContext):
         request,
         context.request_id,
         prompt,
+        context.on_chunk,
     )
     preflight = _preflight_gateway_conversation(load_request)
     _require_gateway_conversation_ready(request, preflight)
@@ -1086,6 +1151,7 @@ def _run_gateway_turn_with_conversation_compact(
                 request,
                 context.request_id,
                 prompt,
+                context.on_chunk,
             ),
             force_compact=True,
         )
@@ -1343,6 +1409,15 @@ def _publish_gateway_compact_boundary(on_chunk: object, generation: int) -> None
     writer = getattr(on_chunk, "write_compact_boundary", None)
     if callable(writer):
         writer(generation)
+
+
+# LLM: Compact 回调只从 Gateway writer 的显式 typed 方法取得，普通 callable 不接收显示事件。
+# 函数用途: 在 rich TUI 支持时返回会话 Compact 进度出口，其他客户端保持静默。
+def _gateway_compact_progress_callback(
+    on_chunk: object,
+) -> Callable[[dict[str, object]], object] | None:
+    writer = getattr(on_chunk, "write_conversation_compact_progress", None)
+    return writer if callable(writer) else None
 
 
 def _require_gateway_conversation_ready(
@@ -1801,6 +1876,7 @@ def _load_gateway_compact_context(
             current_prompt=inputs.prompt,
             exclude_request_id=inputs.request_id,
             force=force,
+            progress_callback=_gateway_compact_progress_callback(inputs.on_chunk),
         )
     except Exception as exc:
         load_errors.append(_conversation_error(exc, "gateway.conversation.compact"))

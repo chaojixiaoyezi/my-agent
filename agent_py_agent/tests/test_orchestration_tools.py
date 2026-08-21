@@ -110,6 +110,83 @@ def test_subagent_tools_are_not_registered_when_subagents_disabled(tmp_path):
     assert hidden.isdisjoint({spec.name for spec in agent.tools.specs(include_orchestration=True)})
 
 
+def test_model_surface_has_no_manual_subagent_dispatch_tools(tmp_path):
+    """创建会自动开跑；模型只看统一创建、查看、消息和打断入口。"""
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+
+    names = set(agent.tools.tools)
+    assert {"create_subagents", "inspect_agent_tree", "send_guidance", "cancel_subagents"} <= names
+    assert "dispatch_subagents" not in names
+    assert "schedule_child_subagents" not in names
+
+
+def test_descendant_create_uses_same_public_tool_and_hierarchy_service():
+    """孙代理继续调用 create_subagents，不需要知道内部 schedule 名称。"""
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+    from agent_py_agent.agent.tooling.models import ToolHandlerOutcome
+
+    agent = SimpleNamespace(
+        _current_subagent_run_id="parent-child",
+        config=SimpleNamespace(enable_subagents=True),
+    )
+    with patch(
+        "agent_py_agent.agent.agent_core.orchestration_tools.execute_child_creation",
+        return_value=ToolHandlerOutcome("create_subagents", True, "ok"),
+    ) as nested:
+        result = CreateSubagentsTool(agent).execute(
+            {
+                "goal": "继续拆分",
+                "items": [{"goal": "写模块 A"}, {"goal": "写模块 B"}],
+            }
+        )
+
+    assert result.tool == "create_subagents"
+    assert result.ok is True
+    nested.assert_called_once()
+    call_params = nested.call_args.args[1]
+    assert [item["goal"] for item in call_params["children"]] == ["写模块 A", "写模块 B"]
+    assert nested.call_args.kwargs["tool_name"] == "create_subagents"
+
+
+def test_descendant_create_enforces_same_per_call_limit(tmp_path):
+    """递归创建不能用旧的不限量路径绕过每次最多 child 数。"""
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
+            subagent_hierarchy_max_children_per_tool_call=2,
+        ),
+        tmp_path,
+    )
+    parent = agent.subagents.create_run(goal="父任务", thought="拆分", plan=["执行"])
+    agent._current_subagent_run_id = parent.id
+
+    result = CreateSubagentsTool(agent).execute(
+        {
+            "goal": "并行处理三个目标",
+            "items": [
+                {"goal": "目标一"},
+                {"goal": "目标二"},
+                {"goal": "目标三"},
+            ],
+        }
+    )
+
+    assert result.ok is False
+    assert "单次最多创建 2 个" in result.output
+    assert agent.subagents.load(parent.id).child_ids == []
+
+
 class TestTaskProgressTool:
     """测试通用任务进度账本。"""
 
@@ -646,244 +723,3 @@ class TestRaiseEventTool:
         assert observation.source_agent_id == grandchild.id
         assert observation.parent_agent_id == child.id
         assert observation.root_task_id == root.id
-
-
-class TestDispatchSubagentsTool:
-    """测试 dispatch_subagents 的模型参数入口。"""
-
-    def test_top_level_run_ids_runs_and_executes(self, tmp_path):
-        """顶层显式目标应按 run_ids 推进真实 runner。"""
-        from agent_py_agent.agent.agent_core.orchestration.dispatch.tool import (
-            DispatchSubagentsTool,
-        )
-        from agent_py_agent.agent.core import SimpleAgent
-        from agent_py_agent.agent.settings import AgentConfig
-
-        agent = SimpleAgent(
-            AgentConfig(
-                model_backend="echo",
-                my_agent_home=str(tmp_path / "home"),
-                subagent_workspace="subs",
-            ),
-            tmp_path,
-        )
-        task = agent.subagents.create_run(goal="child", thought="", plan=["do"], role="worker")
-        report = SimpleNamespace(dry_run=False, summary={"ok": True}, records=[])
-        agent.dispatch_subagents = MagicMock(return_value=report)
-
-        result = DispatchSubagentsTool(agent).execute({"run_ids": [task.id]})
-        params = agent.dispatch_subagents.call_args.kwargs["params"]
-
-        assert result.ok is True
-        assert params.include_run_ids == [task.id]
-        assert params.apply is True
-        assert params.start_runners is True
-        assert params.max_runners == 1
-        assert params.execution_plan.preview_only is False
-        assert params.execution_plan.mutate_state is True
-        assert params.execution_plan.start_runners is True
-        assert params.execution_plan.max_runners == 1
-
-    def test_model_facing_summary_hides_internal_dry_run_record_count(self, tmp_path):
-        """模型只看顶层 dry_run；内部记录预检计数不再暴露。"""
-        from agent_py_agent.agent.agent_core.orchestration.dispatch.tool import (
-            DispatchSubagentsTool,
-        )
-        from agent_py_agent.agent.core import SimpleAgent
-        from agent_py_agent.agent.settings import AgentConfig
-
-        agent = SimpleAgent(
-            AgentConfig(
-                model_backend="echo",
-                my_agent_home=str(tmp_path / "home"),
-                subagent_workspace="subs",
-            ),
-            tmp_path,
-        )
-        report = SimpleNamespace(
-            dry_run=False,
-            summary={"total": 1, "ok": 1, "dry_run": 1, "applied": 0},
-            records=[],
-        )
-        agent.dispatch_subagents = MagicMock(return_value=report)
-
-        result = DispatchSubagentsTool(agent).execute({"run_ids": ["missing-run"]})
-        payload = json.loads(result.output)
-
-        assert payload["dry_run"] is False
-        assert "dry_run" not in payload["summary"]
-        assert "record_dry_run_count" not in payload["summary"]
-
-    def test_model_facing_records_hide_internal_preview_flag(self, tmp_path):
-        """逐条内部预检位不进入模型结果，避免覆盖顶层执行事实。"""
-        from agent_py_agent.agent.agent_core.orchestration.dispatch.tool import (
-            DispatchSubagentsTool,
-        )
-        from agent_py_agent.agent.core import SimpleAgent
-        from agent_py_agent.agent.settings import AgentConfig
-
-        agent = SimpleAgent(
-            AgentConfig(
-                model_backend="echo",
-                my_agent_home=str(tmp_path / "home"),
-                subagent_workspace="subs",
-            ),
-            tmp_path,
-        )
-        record = SimpleNamespace(
-            step="runner",
-            action="execute",
-            run_id="child-1",
-            ok=True,
-            dry_run=True,
-            applied=False,
-            message="preview only",
-            before_status="PENDING",
-            after_status="PENDING",
-            evidence_paths=[],
-        )
-        agent.dispatch_subagents = MagicMock(
-            return_value=SimpleNamespace(
-                dry_run=False,
-                summary={"total": 1},
-                records=[record],
-            )
-        )
-
-        payload = json.loads(DispatchSubagentsTool(agent).execute({"dry_run": False}).output)
-
-        assert payload["dry_run"] is False
-        assert "dry_run" not in payload["records"][0]
-        assert "record_dry_run" not in payload["records"][0]
-
-
-class TestScheduleChildSubagentsTool:
-    """测试当前 runner 创建下一层子节点的安全边界。"""
-
-    def test_rejects_without_current_runner_context(self):
-        """没有当前 runner id 时，不能绕过主节点直接挂 child。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import ScheduleChildSubagentsTool
-
-        mock_agent = MagicMock()
-
-        mock_agent.capability_router = CapabilityRouter()
-        mock_agent._current_subagent_run_id = ""
-        tool = ScheduleChildSubagentsTool(mock_agent)
-
-        result = tool.execute({"children": [{"goal": "leaf"}], "dry_run": False})
-
-        assert not result.ok
-        assert "顶层派工请使用 create_subagents" in result.output
-
-    def test_runner_context_max_depth_uses_absolute_depth_limit(self, tmp_path):
-        """显式 max_depth 是绝对深度限制，不按“再开一层”兼容处理。"""
-        import json
-
-        from agent_py_agent.agent.agent_core.orchestration_tools import ScheduleChildSubagentsTool
-        from agent_py_agent.agent.core import SimpleAgent
-        from agent_py_agent.agent.settings import AgentConfig
-
-        agent = SimpleAgent(
-            AgentConfig(
-                model_backend="echo",
-                my_agent_home=str(tmp_path / "home"),
-                subagent_workspace="subs",
-            ),
-            tmp_path,
-        )
-        root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])
-        child = agent.subagents.create_run(
-            goal="child",
-            thought="child",
-            plan=["child"],
-            parent_id=root.id,
-            root_id=root.id,
-            depth=1,
-        )
-        agent._current_subagent_run_id = child.id
-        tool = ScheduleChildSubagentsTool(agent)
-
-        result = tool.execute(
-            {
-                "dry_run": False,
-                "max_depth": 1,
-                "children": [{"goal": "leaf", "role": "leaf", "agent_name": "leaf"}],
-            }
-        )
-        payload = json.loads(result.output)
-
-        assert result.ok
-        assert payload["blocked"] is True
-        assert payload["reason"] == "max_depth_exceeded:1"
-        assert payload["created_run_ids"] == []
-
-    def test_runner_context_schedule_defaults_to_apply_direct_child(self, tmp_path):
-        """runner 内部省略 dry_run 时，应真实创建当前节点的直接 child。"""
-        import json
-
-        from agent_py_agent.agent.agent_core.orchestration_tools import ScheduleChildSubagentsTool
-        from agent_py_agent.agent.core import SimpleAgent
-        from agent_py_agent.agent.settings import AgentConfig
-
-        agent = SimpleAgent(
-            AgentConfig(
-                model_backend="echo",
-                my_agent_home=str(tmp_path / "home"),
-                subagent_workspace="subs",
-            ),
-            tmp_path,
-        )
-        root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])
-        agent._current_subagent_run_id = root.id
-        tool = ScheduleChildSubagentsTool(agent)
-
-        result = tool.execute(
-            {"children": [{"goal": "leaf", "role": "worker", "agent_name": "leaf"}]}
-        )
-        payload = json.loads(result.output)
-
-        assert result.ok
-        assert payload["dry_run"] is False
-        assert len(payload["created_run_ids"]) == 1
-        assert agent.subagents.load(root.id).child_ids == payload["created_run_ids"]
-
-    def test_runner_context_schedule_accepts_flat_params(self, tmp_path):
-        """schedule_child_subagents 只接受顶层 children/dry_run 参数。"""
-        import json
-
-        from agent_py_agent.agent.agent_core.orchestration_tools import ScheduleChildSubagentsTool
-        from agent_py_agent.agent.core import SimpleAgent
-        from agent_py_agent.agent.settings import AgentConfig
-
-        agent = SimpleAgent(
-            AgentConfig(
-                model_backend="echo",
-                my_agent_home=str(tmp_path / "home"),
-                subagent_workspace="subs",
-            ),
-            tmp_path,
-        )
-        root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])
-        agent._current_subagent_run_id = root.id
-        tool = ScheduleChildSubagentsTool(agent)
-
-        result = tool.execute(
-            {
-                "tool": "schedule_child_subagents",
-                "dry_run": False,
-                "children": [
-                    {
-                        "goal": "grandchild coordinator",
-                        "role": "coordinator",
-                        "agent_name": "页面组",
-                    }
-                ],
-            }
-        )
-        payload = json.loads(result.output)
-        child = agent.subagents.load(payload["created_run_ids"][0])
-
-        assert result.ok
-        assert payload["dry_run"] is False
-        assert child.parent_id == root.id
-        assert child.agent_name == "页面组"

@@ -389,6 +389,7 @@ def _lessons_payload_context(mock_task, parsed: SubAgentParsedOutput) -> OutputP
         lessons=lessons,
         blockers=[],
         next_actions=next_actions,
+        turn_end_reason="completed",
         structured_repair_attempted=False,
         structured_repair_ok=False,
         structured_repair_error="",

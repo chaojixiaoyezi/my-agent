@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 from __future__ import annotations
+
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_env_loader import ensure_model_key
+
 """批判读 vs 逐条判读 精度对照探针(判读全真调 MiniMax-M2.7)。
 
 回答一个命门:延迟/过载自测台里修复臂那 ~37% 的绝对精度、几十条误报,到底是

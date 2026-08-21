@@ -127,7 +127,7 @@ def finding_investigation_payload(
     schedule_lifecycle: object,
 ) -> list[dict[str, object]]:
     lifecycle = schedule_lifecycle if isinstance(schedule_lifecycle, dict) else {}
-    accepted = _text_set(lifecycle.get("accepted_run_ids"))
+    accepted = _text_set(lifecycle.get("start_accepted_run_ids"))
     running = _text_set(lifecycle.get("running_run_ids"))
     failed = _text_set(lifecycle.get("failed_run_ids"))
     rows: list[dict[str, object]] = []

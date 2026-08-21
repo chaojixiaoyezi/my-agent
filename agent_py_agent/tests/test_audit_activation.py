@@ -17,8 +17,8 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from agent.agent_core.orchestration.create_policy import (
-    _create_attributes,
     _role_policy,
+    create_task_attributes,
 )
 from agent.agent_core.orchestration.tool_grants import CODING_SUBAGENT_TOOLS
 from agent.agent_core.runner.context import (
@@ -254,7 +254,7 @@ def test_create_subagents_inherits_audit_from_parent(owner_home):
             }
         )
     )
-    attrs = _create_attributes({"goal": "盯API-1"}, parent)  # item 里没写 /audit
+    attrs = create_task_attributes({"goal": "盯API-1"}, parent)  # item 里没写 /audit
     assert attrs.get(AUDIT_ATTR) is True
     assert attrs[AUDIT_OBJECTIVE_ATTR] == "逐条检查五路日志"
     assert attrs[AUDIT_RUN_EPOCH_ATTR] == 7
@@ -268,8 +268,8 @@ def test_create_subagents_inherits_audit_window_without_overriding_child_value(o
         )
     )
 
-    inherited = _create_attributes({"goal": "盯API-1", "attributes": {AUDIT_ATTR: True}}, parent)
-    explicit = _create_attributes(
+    inherited = create_task_attributes({"goal": "盯API-1", "attributes": {AUDIT_ATTR: True}}, parent)
+    explicit = create_task_attributes(
         {
             "goal": "盯API-2",
             "attributes": {AUDIT_ATTR: True, AUDIT_WINDOW_ATTR: 7 * 86400},
@@ -292,7 +292,7 @@ def test_create_subagents_inherits_audit_deadline_without_replacing_parent_scope
         subagents=None,
     )
 
-    attrs = _create_attributes({"goal": "盯API-1"}, parent)
+    attrs = create_task_attributes({"goal": "盯API-1"}, parent)
     policy = _role_policy(
         parent,
         {"goal": "盯API-1"},
@@ -321,7 +321,7 @@ def test_create_subagents_no_audit_when_parent_plain(owner_home):
     parent = SimpleNamespace(
         _current_run_params=SimpleNamespace(task_attributes={"conversation_task_id": "t"})
     )
-    attrs = _create_attributes({"goal": "盯API-1"}, parent)
+    attrs = create_task_attributes({"goal": "盯API-1"}, parent)
     assert AUDIT_ATTR not in attrs
 
 
@@ -396,7 +396,7 @@ def test_exact_audit_task_drives_background_inheritance_without_owner_pollution(
         {"source_id": "source-a", "url": "https://example.invalid/a"}
     ]
     assert AUDIT_ATTR not in (plain_attrs or {})
-    inherited = _create_attributes(
+    inherited = create_task_attributes(
         {"goal": "盯新增分片"},
         SimpleNamespace(_current_run_params=SimpleNamespace(task_attributes=audit_attrs)),
     )

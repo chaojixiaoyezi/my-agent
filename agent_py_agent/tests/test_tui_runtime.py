@@ -176,6 +176,71 @@ def test_gateway_context_compaction_creates_one_content_free_history_event() -> 
     assert "summary" not in compact.metadata
 
 
+def test_gateway_conversation_compact_progress_updates_one_active_block_then_boundary() -> None:
+    runtime = TuiRuntime("conversation-compact-runtime")
+    runtime.enqueue_prompt("compact-request", "go", queued=False)
+    turn = runtime.begin_turn("compact-request")
+
+    base = {
+        "schema": "conversation_compaction_progress.v1",
+        "generation": 3,
+        "before_tokens": 118_400,
+        "after_tokens": 0,
+        "trigger_tokens": 115_200,
+        "source_messages": 80,
+    }
+    assert turn.on_gateway_event(
+        {
+            "kind": "conversation_compaction_progress",
+            "compact_progress": {
+                **base,
+                "phase": "started",
+                "stage": "preparing",
+                "percent": 5,
+                "summary": "ignore",
+            },
+        }
+    ) is True
+    assert runtime.needs_periodic_refresh() is True
+    assert turn.on_gateway_event(
+        {
+            "kind": "conversation_compaction_progress",
+            "compact_progress": {
+                **base,
+                "phase": "progress",
+                "stage": "summarizing",
+                "percent": 35,
+            },
+        }
+    ) is True
+
+    active = [block for block in runtime.store.snapshot().active_blocks if block.role == "compact"]
+    assert len(active) == 1
+    assert active[0].metadata["percent"] == 35
+    assert active[0].metadata["stage"] == "summarizing"
+    assert "summary" not in active[0].metadata
+
+    assert turn.on_gateway_event(
+        {
+            "kind": "conversation_compaction_progress",
+            "compact_progress": {
+                **base,
+                "phase": "completed",
+                "stage": "completed",
+                "percent": 100,
+                "after_tokens": 31_200,
+            },
+        }
+    ) is True
+    assert not any(
+        block.role == "compact" for block in runtime.store.snapshot().active_blocks
+    )
+    assert turn.on_gateway_event(
+        {"kind": "conversation_compacted", "compact_generation": 3}
+    ) is True
+    assert runtime.store.snapshot().stable_blocks[-1].kind == "compact_boundary"
+
+
 def test_turn_activity_survives_stream_and_tools_until_structured_terminal() -> None:
     runtime = TuiRuntime("session-activity")
     runtime.enqueue_prompt("request-activity", "go", queued=False)

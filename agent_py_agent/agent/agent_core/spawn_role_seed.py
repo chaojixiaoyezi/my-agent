@@ -66,8 +66,8 @@ def _create_explicit_role_run(request: ExplicitRoleRunRequest) -> SubAgentTask:
     return seed.agent.subagents.create_run(
         params=CreateRunParams(
             goal=_spawn_goal_text(seed.options.goal, request.index, seed.count),
-            thought="负责拆分、调度、检查、接管和救援；权限覆盖下级，可按任务大小选择亲自完成或派工协作。",
-            plan=["创建直接子代理", "调度直接子代理", "观察子代理状态", "汇报证据和阻塞"],
+            thought="负责拆分、观察和整合；下级创建后自动运行，可按任务大小选择亲自完成或继续派工协作。",
+            plan=["创建直接子代理", "继续自己的工作", "接收下级结果", "汇报结果和阻塞"],
             agent_name=_spawn_agent_name(seed.options.agent_name, request.role, request.index, seed.count),
             role=request.role,
             allowed_tools=request.allowed_tools,

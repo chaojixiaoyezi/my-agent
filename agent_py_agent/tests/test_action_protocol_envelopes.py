@@ -68,7 +68,7 @@ def test_subagent_result_path_refs_are_structured_not_summary_inferred():
     assert [item.path for item in decoded.path_refs] == ["out.txt", "reports/check.json"]
 
 
-def test_subagent_schedule_envelope_unifies_create_and_child_schedule_payloads():
+def test_subagent_schedule_envelope_uses_unified_recursive_create_tool():
     envelope = subagent_schedule_envelope_from_payload(
         {
             "parent_run_id": "parent-1",
@@ -87,41 +87,41 @@ def test_subagent_schedule_envelope_unifies_create_and_child_schedule_payloads()
                 }
             ],
         },
-        tool="schedule_child_subagents",
+        tool="create_subagents",
     )
 
     decoded = decode_action_envelope(envelope.to_dict())
 
     assert isinstance(decoded, SubagentScheduleEnvelope)
     assert decoded.kind == "subagent_schedule"
-    assert decoded.operation_id == "subagent_schedule:schedule_child_subagents:child-1"
-    assert decoded.tool == "schedule_child_subagents"
+    assert decoded.operation_id == "subagent_schedule:create_subagents:child-1"
+    assert decoded.tool == "create_subagents"
     assert decoded.created_run_ids == ["child-1"]
     assert decoded.items[0]["agent_name"] == "小小傻妞-leaf"
 
 
-def test_subagent_schedule_envelope_carries_reuse_dispatch_and_state_contract():
+def test_subagent_schedule_envelope_carries_reuse_start_and_state_contract():
     envelope = subagent_schedule_envelope_from_payload(
         {
             "parent_run_id": "parent-1",
             "root_id": "root-1",
             "created_run_ids": ["child-new"],
             "reused_run_ids": ["child-old"],
-            "dispatch_run_ids": ["child-new"],
-            "next_action": {"tool": "dispatch_subagents", "params": {"run_ids": ["child-new"]}},
+            "pending_start_run_ids": ["child-new"],
+            "next_action": {"tool": "inspect_agent_tree", "params": {}},
             "current_turn_run_state": {
                 "dispatchable_run_ids": ["child-new"],
-                "verified_run_ids": ["child-old"],
-                "next_action": "continue_dispatch_unfinished_run_ids",
+                "completed_run_ids": ["child-old"],
+                "next_action": "wait_for_automatic_runner_start",
             },
             "planned_count": 2,
             "schedule_lifecycle": {
                 "requested_count": 2,
-                "accepted_run_ids": ["child-new"],
+                "start_accepted_run_ids": ["child-new"],
                 "running_run_ids": [],
                 "failed_run_ids": [],
-                "acceptance_status": "accepted",
-                "counts": {"recorded": 2, "accepted": 1, "running": 0, "failed": 0},
+                "start_status": "accepted",
+                "counts": {"recorded": 2, "start_accepted": 1, "running": 0, "failed": 0},
             },
         },
         tool="create_subagents",
@@ -132,11 +132,11 @@ def test_subagent_schedule_envelope_carries_reuse_dispatch_and_state_contract():
     assert isinstance(decoded, SubagentScheduleEnvelope)
     assert decoded.created_run_ids == ["child-new"]
     assert decoded.reused_run_ids == ["child-old"]
-    assert decoded.dispatch_run_ids == ["child-new"]
-    assert decoded.next_action["tool"] == "dispatch_subagents"
+    assert decoded.pending_start_run_ids == ["child-new"]
+    assert decoded.next_action["tool"] == "inspect_agent_tree"
     assert decoded.current_turn_run_state["dispatchable_run_ids"] == ["child-new"]
-    assert decoded.current_turn_run_state["verified_run_ids"] == ["child-old"]
-    assert decoded.accepted_run_ids == ["child-new"]
+    assert decoded.current_turn_run_state["completed_run_ids"] == ["child-old"]
+    assert decoded.start_accepted_run_ids == ["child-new"]
     assert decoded.running_run_ids == []
-    assert decoded.acceptance_status == "accepted"
-    assert decoded.lifecycle_counts["accepted"] == 1
+    assert decoded.start_status == "accepted"
+    assert decoded.lifecycle_counts["start_accepted"] == 1

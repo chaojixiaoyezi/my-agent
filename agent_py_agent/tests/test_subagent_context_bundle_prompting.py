@@ -399,8 +399,8 @@ def test_runner_prompt_describes_scoped_capability_request_loop(tmp_path) -> Non
 
     prompt = _build_subagent_runner_prompt(context)
 
-    assert '"capability_type": "shell|tool|skill|mcp|network|generic"' in prompt
-    assert '"requested_mcp_tools": []' in prompt
+    assert "capability_type" in prompt
+    assert "requested_mcp_tools" in prompt
     assert "expected_output" in prompt
     assert "不要把父级授权细节、grant、path_scope、output_budget 当成普通任务步骤" in prompt
     assert "controlled_exec 只能使用 controlled_exec_grants 里的父级 grant" in prompt

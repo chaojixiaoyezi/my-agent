@@ -11,7 +11,7 @@ from ....capability.runtime_config_reload import (
     load_capability_config_snapshot,
 )
 from ....runtime_errors import runtime_error_report
-from ....subagents.models import task_is_done_verified
+from ....subagents.models import task_is_completed
 from ..run_scope import remembered_orchestration_run_ids
 from .refs import related_task_refs
 from .scope import dispatch_include_run_ids_param
@@ -179,7 +179,7 @@ def _unfinished_remembered_run_ids(agent: object) -> tuple[list[str], list[dict[
         except Exception as exc:
             load_errors.append(_run_load_error(run_id, exc))
             continue
-        if not task_is_done_verified(task):
+        if not task_is_completed(task):
             unfinished.append(run_id)
     return unfinished[:20], load_errors[:20]
 

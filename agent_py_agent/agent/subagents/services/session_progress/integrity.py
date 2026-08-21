@@ -40,8 +40,8 @@ def artifact_next_action(integrity: dict[str, Any]) -> str:
         detail_text = f"；具体位置：{details}" if details else ""
         strategy = _integrity_repair_strategy(integrity)
         strategy_text = f"；{strategy}" if strategy else ""
-        return f"产物已写出但自检发现 codes={joined}{detail_text}{strategy_text}；先修复这些问题，再写 execution_context.output_json 交最终收口。"
-    return "产物已形成完整 HTML；停止继续写正文，按验收条件自检后写 execution_context.output_json（output.json）或 SUBAGENT_RESULT，交最终收口。"
+        return f"产物已写出但自检发现 codes={joined}{detail_text}{strategy_text}；请结合任务要求判断是否需要修复，再继续工作或自然汇报结果。"
+    return "产物已形成完整 HTML；请结合任务要求做必要自检，然后用普通最终回复汇报完成内容、路径和实际检查结果。"
 
 
 def artifact_integrity_summary(integrity: dict[str, Any]) -> str:
@@ -52,7 +52,7 @@ def artifact_integrity_summary(integrity: dict[str, Any]) -> str:
         return "HTML 尚未完整闭合"
     if codes:
         return f"HTML 待修复 codes={', '.join(codes[:4])}"
-    return "HTML 已完整闭合，等待结构化收口"
+    return "HTML 已完整闭合"
 
 
 def _artifact_issue_payload(issue: object) -> dict[str, Any]:

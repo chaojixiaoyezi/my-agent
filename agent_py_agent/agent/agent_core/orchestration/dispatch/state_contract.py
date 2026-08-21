@@ -52,10 +52,10 @@ def _state_payload(
         "total": len(tasks),
         "by_status": buckets["by_status"],
         "dispatchable_run_ids": _clean_ids(buckets["dispatchable"]),
-        "accepted_run_ids": _clean_ids(buckets["accepted"]),
+        "starting_run_ids": _clean_ids(buckets["starting"]),
         "running_run_ids": _clean_ids(buckets["running"]),
         "blocked_run_ids": _clean_ids(buckets["blocked"]),
-        "verified_run_ids": _clean_ids(buckets["verified"]),
+        "completed_run_ids": _clean_ids(buckets["completed"]),
         "unfinished_run_ids": _clean_ids(buckets["unfinished"]),
         "missing_run_ids": _clean_ids(missing_run_ids),
         "task_load_errors": load_errors,
@@ -67,10 +67,10 @@ def _empty_state_buckets() -> dict[str, object]:
     return {
         "by_status": {},
         "dispatchable": [],
-        "accepted": [],
+        "starting": [],
         "running": [],
         "blocked": [],
-        "verified": [],
+        "completed": [],
         "unfinished": [],
         "recovery_recommendations": [],
     }
@@ -80,18 +80,18 @@ def _append_task_state(buckets: dict[str, object], task: object) -> None:
     run_id = _run_id(task)
     snapshot = run_state_snapshot_from_task(task)
     status = str(snapshot["status"])
-    background_accepted = _background_start_accepted(task, status)
+    background_starting = _background_start_in_progress(task, status)
     by_status = buckets["by_status"]
     by_status[status] = by_status.get(status, 0) + 1
-    _append_if(buckets["dispatchable"], run_id, bool(snapshot["can_dispatch"]) and not background_accepted)
+    _append_if(buckets["dispatchable"], run_id, bool(snapshot["can_dispatch"]) and not background_starting)
     # 后台 dispatcher 已接收不等于 runner 已进入 RUNNING；两种事实分开，避免主代理提前
     # 向用户声称“N 个子代理正在运行”。
-    _append_if(buckets["accepted"], run_id, background_accepted)
+    _append_if(buckets["starting"], run_id, background_starting)
     _append_if(buckets["running"], run_id, task_status_in(status, {TaskStatus.RUNNING.value}))
     _append_if(buckets["blocked"], run_id, task_status_in(status, SUBAGENT_FAILURE_STATUSES))
-    verified = bool(snapshot["can_closeout"])
-    _append_if(buckets["verified"], run_id, verified)
-    _append_if(buckets["unfinished"], run_id, not verified)
+    completed = bool(snapshot["can_closeout"])
+    _append_if(buckets["completed"], run_id, completed)
+    _append_if(buckets["unfinished"], run_id, not completed)
     if task_status_in(status, SUBAGENT_FAILURE_STATUSES):
         _append_recovery_recommendation(buckets, snapshot)
 
@@ -125,24 +125,32 @@ def _attach_state_next_action(state: dict[str, object]) -> None:
     blocked = list(state.get("blocked_run_ids") or [])
     dispatchable = list(state.get("dispatchable_run_ids") or [])
     running = list(state.get("running_run_ids") or [])
-    accepted = list(state.get("accepted_run_ids") or [])
+    starting = list(state.get("starting_run_ids") or [])
     unfinished = list(state.get("unfinished_run_ids") or [])
     missing = list(state.get("missing_run_ids") or [])
     load_errors = list(state.get("task_load_errors") or [])
     if blocked:
-        state["next_action"] = "inspect_or_rescue_blocked_run_ids"
-        state["suggested_tool_call"] = _dispatch_tool_call(blocked, start_runners=False)
+        state["next_action"] = "inspect_automatic_recovery_or_report_blocker"
+        state["suggested_tool_call"] = {
+            "tool": "inspect_agent_tree",
+            "params": {"run_id": blocked[0]},
+            "reason": "启动和可恢复重试由系统调度；父代理只查看事实、发消息或上报阻塞。",
+        }
         return
     if dispatchable:
-        state["next_action"] = "continue_dispatch_unfinished_run_ids"
-        state["suggested_tool_call"] = _dispatch_tool_call(dispatchable, start_runners=True)
+        state["next_action"] = "wait_for_automatic_runner_start"
+        state["suggested_tool_call"] = {
+            "tool": "inspect_agent_tree",
+            "params": {"run_id": dispatchable[0]},
+            "reason": "创建后系统会自动启动 runner，不需要模型再推进。",
+        }
         return
     if running:
         state["next_action"] = "wait_for_subagent_completion_event"
         state["suggested_tool_call"] = {"tool": "inspect_agent_tree", "params": {}, "reason": "先结束本回合,派工监督/完成事件会自动唤醒"}
         return
-    if accepted:
-        state["next_action"] = "wait_for_subagent_runner_acceptance"
+    if starting:
+        state["next_action"] = "wait_for_subagent_runner_start"
         state["suggested_tool_call"] = {
             "tool": "inspect_agent_tree",
             "params": {},
@@ -158,18 +166,10 @@ def _attach_state_next_action(state: dict[str, object]) -> None:
         state["suggested_tool_call"] = {"tool": "inspect_agent_tree"}
         return
     if unfinished:
-        state["next_action"] = "inspect_unverified_or_unknown_run_ids"
+        state["next_action"] = "inspect_unfinished_or_unknown_run_ids"
         state["suggested_tool_call"] = {"tool": "inspect_agent_tree"}
         return
-    state["next_action"] = "summarize_or_report_verified_runs"
-
-
-def _dispatch_tool_call(run_ids: list[str], *, start_runners: bool) -> dict[str, object]:
-    return {
-        "tool": "dispatch_subagents",
-        "dry_run": not start_runners,
-        "run_ids": _clean_ids(run_ids),
-    }
+    state["next_action"] = "summarize_or_report_completed_runs"
 
 
 def _clean_ids(values: list[object]) -> list[str]:
@@ -185,7 +185,7 @@ def _run_id(task: object) -> str:
     return str(getattr(task, "id", "") or "").strip()
 
 
-def _background_start_accepted(task: object, status: str) -> bool:
+def _background_start_in_progress(task: object, status: str) -> bool:
     attrs = getattr(task, "attributes", {}) or {}
     if not isinstance(attrs, dict) or not task_status_in(status, SUBAGENT_DISPATCH_READY_STATUSES):
         return False

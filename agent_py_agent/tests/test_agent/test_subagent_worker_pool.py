@@ -48,7 +48,7 @@ class CountingAcceptedBackend(_TestNativeBackend):
         self.calls = 0
 
     def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
-        assert "[SUBAGENT_RESULT]" in prompt
+        assert "不要输出 SUBAGENT_RESULT" in prompt
         with self.lock:
             self.calls += 1
             call_no = self.calls
@@ -62,7 +62,7 @@ class OneSlowOneFastBackend(_TestNativeBackend):
         self.calls = 0
 
     def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
-        assert "[SUBAGENT_RESULT]" in prompt
+        assert "不要输出 SUBAGENT_RESULT" in prompt
         with self.lock:
             self.calls += 1
             call_no = self.calls

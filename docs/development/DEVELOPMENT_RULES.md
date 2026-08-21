@@ -662,14 +662,15 @@ do_write()
   remaining risk.
 - Keep the ledger append-only. Do not rewrite old findings except for narrow
   typo/path corrections.
-- When changing runner-context dispatch or acceptance behavior, document the
-  difference between top-level manual apply and runner-context auto-closure.
-  Tests must prove top-level dispatch remains non-mutating while an active
-  parent runner can close only its own direct children after explicit tests pass.
-- Coordinator/root acceptance must be tied to machine facts. If a coordinator
-  has direct children and no executable tests, use a deterministic
-  child-acceptance check against direct child `DONE/VERIFIED` state instead of
-  trusting model-written completion text.
+- When changing child startup or completion behavior, document the boundary
+  between the model-visible recursive control surface and the internal host
+  dispatcher. Tests must prove that `create_subagents` auto-starts children at
+  every supported level and that no model-visible dispatch/schedule tool is
+  required for progress.
+- Ordinary coordinator/root completion follows the shared structured
+  `turn_end` reason and natural model result. Machine facts remain authoritative
+  for tool success, permissions, paths, cancellation and interruption, but must
+  not be turned into a second `DONE/VERIFIED` quality-acceptance state.
 - Subagent role templates must stay external and broad. Built-ins live under
   `agent_py_agent/agent/subagents/role_template_catalog/builtin/*.json`; user
   templates live under `.agent/subagents/roles/*.json` by default. A template

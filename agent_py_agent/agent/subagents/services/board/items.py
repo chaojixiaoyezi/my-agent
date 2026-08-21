@@ -22,14 +22,11 @@ from ...models import (
     TaskStatus,
     task_has_failure_status,
     task_has_status,
-    task_is_done_verified,
     task_status_reason_code,
 )
 from ...policies import (
     RISK_FLAG_CHANNEL_BROKEN,
     RISK_FLAG_CHANNEL_DEGRADED,
-    RISK_FLAG_DONE_WITHOUT_EVIDENCE,
-    RISK_FLAG_DONE_WITHOUT_VERIFICATION,
     RISK_FLAG_OPEN_CAPABILITY_GAP,
     RISK_FLAG_OPEN_CAPABILITY_REQUEST,
     RISK_FLAG_TAKEN_OVER,
@@ -46,10 +43,6 @@ def build_risk_flags(
     flags: list[str] = []
     if task_has_failure_status(task):
         flags.append(task_status_reason_code(task.status))
-    if task_has_status(task, TaskStatus.DONE) and not task.evidence:
-        flags.append(RISK_FLAG_DONE_WITHOUT_EVIDENCE)
-    if task_has_status(task, TaskStatus.DONE) and not task_is_done_verified(task):
-        flags.append(RISK_FLAG_DONE_WITHOUT_VERIFICATION)
     if open_request_count:
         flags.append(RISK_FLAG_OPEN_CAPABILITY_REQUEST)
     if open_gap_count:
@@ -325,7 +318,7 @@ def task_actual_target_tokens(item: Any) -> set[str]:
     output_targets = _target_tokens_from_output_json(getattr(item, "output_json", "") or "")
     if output_targets:
         return output_targets
-    result_targets = _target_tokens_from_result_json(_task_result_text(item))
+    result_targets = _target_tokens_from_output_values(_task_result_text(item))
     if result_targets:
         return result_targets
     return _target_tokens_from_output_values(getattr(item, "extra_write_roots", []) or [])
@@ -347,22 +340,6 @@ def _target_tokens_from_output_json(output_json: str) -> set[str]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, TypeError):
-        return set()
-    targets: set[str] = set()
-    targets.update(_target_tokens_from_output_values(payload.get("artifact_path")))
-    targets.update(_target_tokens_from_output_values(payload.get("artifacts")))
-    targets.update(_target_tokens_from_output_values(payload.get("patches")))
-    return targets
-
-
-def _target_tokens_from_result_json(result_text: str) -> set[str]:
-    text = str(result_text or "")
-    match = re.search(r"\[SUBAGENT_RESULT\]\s*(\{.*\})\s*\[/SUBAGENT_RESULT\]", text, re.DOTALL)
-    if not match:
-        return set()
-    try:
-        payload = json.loads(match.group(1))
-    except (json.JSONDecodeError, TypeError):
         return set()
     targets: set[str] = set()
     targets.update(_target_tokens_from_output_values(payload.get("artifact_path")))

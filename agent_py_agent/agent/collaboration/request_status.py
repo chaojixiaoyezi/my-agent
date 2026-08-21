@@ -262,7 +262,7 @@ def pending_request_row(case: CollaborationCase, request: CollaborationRequest) 
         "created_at": request.created_at,
         "updated_at": request.updated_at,
         "recommended_tools": [],
-        "next_action_zh": "在 SUBAGENT_RESULT 的证据/结论里原样引用 case_ref/request_ref 回应；有命中就提交证据，没有命中也提交未命中说明。",
+        "next_action_zh": "在普通最终回复中原样引用 case_ref/request_ref；有命中就说明证据，没有命中也说明未命中。",
     }
 
 

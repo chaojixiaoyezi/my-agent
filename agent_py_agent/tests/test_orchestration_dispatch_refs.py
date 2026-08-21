@@ -244,7 +244,6 @@ def _expected_child_row() -> dict[str, object]:
         "agent_name": "小傻妞-市场",
         "role": "coordinator",
         "status": "DONE",
-        "verification_status": "VERIFIED",
         "summary": "市场报告完成",
         "primary_artifact_ids": [],
         "primary_artifact_refs": ["/tmp/market/final.md"],

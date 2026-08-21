@@ -9,6 +9,9 @@ GET /result/<id>、GET /progress/<id>、GET /status、POST /stop。
 支持多租户鉴权：外部通道请求需要 X-User-Id / X-Channel header。
 """
 
+# 路由导入按对外 HTTP 分组顺序排列，保持和下方分派表一致。
+# ruff: noqa: I001
+
 import itertools
 import json
 import os

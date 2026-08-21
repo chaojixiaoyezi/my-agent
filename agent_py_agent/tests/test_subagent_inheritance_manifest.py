@@ -10,7 +10,7 @@ def test_subagent_create_run_records_inheritance_manifest(tmp_path) -> None:
     manager = SubAgentManager(tmp_path)
     parent = manager.create_run(
         goal="上级代理任务",
-        thought="提供能力、上下文和验收约束。",
+        thought="提供能力和上下文约束。",
         plan=["准备上下文"],
         role="coordinator",
         allowed_skills=["review", "debug"],
@@ -46,9 +46,8 @@ def test_subagent_create_run_records_inheritance_manifest(tmp_path) -> None:
     assert manifest.dropped["allowed_tools"] == ["shell"]
     assert manifest.dropped["context_packs"][0]["id"] == "parent-pack"
     assert manifest.overridden["allowed_skills"]["added"] == ["child-only"]
-    assert manifest.overridden["acceptance_checks"]["parent"][0] == "必须经过上级检查"
-    assert any("协调子代理" in item for item in manifest.overridden["acceptance_checks"]["parent"])
-    assert manifest.overridden["acceptance_checks"]["child"][0] == "子任务需要附 evidence"
-    assert any("执行子代理" in item for item in manifest.overridden["acceptance_checks"]["child"])
+    assert parent.acceptance_checks == []
+    assert child.acceptance_checks == []
+    assert "acceptance_checks" not in manifest.overridden
     assert manifest_json["target_run_id"] == child.id
     assert manifest_json["policy"]["auto_expand_parent_context"] is False

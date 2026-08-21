@@ -4,9 +4,7 @@ from __future__ import annotations
 from ....subagents.models import (
     FailureType,
     TaskStatus,
-    VerificationStatus,
     known_failure_type,
-    normalize_verification_status,
     task_status_in,
 )
 from ....subagents.recovery_eligibility import user_stopped_run_is_resumable
@@ -96,10 +94,7 @@ def _can_rerun_from_recovery_instruction(task: object) -> bool:
     if user_stopped_run_is_resumable(task):
         return True
     recoverable_statuses = frozenset({TaskStatus.BLOCKED.value, TaskStatus.FAILED.value})
-    if (
-        not task_status_in(getattr(task, "status", ""), recoverable_statuses)
-        or _verification_status(task) == VerificationStatus.VERIFIED.value
-    ):
+    if not task_status_in(getattr(task, "status", ""), recoverable_statuses):
         return False
     if _terminal_recovery_code_present(task):
         return False
@@ -110,13 +105,6 @@ def _can_rerun_from_recovery_instruction(task: object) -> bool:
     if any(getattr(item, "status", "") == "OPEN" for item in getattr(task, "capability_gaps", []) or []):
         return False
     return True
-
-
-def _verification_status(task: object) -> str:
-    try:
-        return normalize_verification_status(getattr(task, "verification_status", ""))
-    except ValueError:
-        return ""
 
 
 def _terminal_recovery_code_present(task: object) -> bool:

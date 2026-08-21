@@ -242,6 +242,9 @@ class SubAgentTask:
     effective_permissions: dict[str, object] = field(default_factory=dict)
     child_ids: list[str] = field(default_factory=list)
     status: str = "PLANNING"
+    # LLM: 仅持久化最近一轮 host-owned turn/end.reason，不参与质量验收。
+    # 字段用途: 供恢复、父代通知和界面区分完成、阻塞、中断与错误。
+    turn_end_reason: str = ""
     description: str = ""
     paused_at: float = 0.0
     abandoned_at: float = 0.0

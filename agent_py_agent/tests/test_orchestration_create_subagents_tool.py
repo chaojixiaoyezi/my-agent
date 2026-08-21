@@ -373,8 +373,8 @@ class TestCreateSubagentsToolExecute:
 class TestCreateSubagentsToolStartControls:
     """测试 create_subagents 的启动和接管控制。"""
 
-    def test_defer_start_keeps_created_runs_unstarted(self):
-        """只有显式 defer_start=true 时，create_subagents 才只建记录不启动。"""
+    def test_internal_defer_never_tells_model_to_dispatch(self):
+        """底层依赖延迟只等待宿主恢复，模型结果里不能再出现手动推进工具。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _mock_create_items_agent(task_count=2)
@@ -390,7 +390,7 @@ class TestCreateSubagentsToolStartControls:
         assert result.ok is True
         mock_agent.dispatch_subagents.assert_not_called()
         assert payload["auto_start"]["status"] == "deferred"
-        assert payload["next_action"]["tool"] == "dispatch_subagents"
+        assert payload["next_action"]["tool"] == "inspect_agent_tree"
 
     def test_item_defer_start_only_holds_that_child(self, monkeypatch):
         """单个 item.defer_start=true 只挂起该 child，不拖住同批生产 worker。"""

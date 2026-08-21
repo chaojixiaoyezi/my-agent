@@ -195,6 +195,6 @@ def test_progress_payload_surfaces_blocked_children():
 
     payload = _progress_payload("parent", tasks)["direct_children"]
 
-    assert payload["needs_more_dispatch"] is False
-    assert payload["needs_recovery"] is True
-    assert payload["recovery_run_ids"] == ["blocked"]
+    assert payload["has_unfinished"] is False
+    assert payload["has_failures"] is True
+    assert payload["failed_run_ids"] == ["blocked"]

@@ -89,16 +89,13 @@ def _make_coordinator_handoff_fixture(agent):
 
 
 def test_subagent_action_plan_dry_run():
-    """LLM: Verifies action-plan produces takeover, reopen, route, and probe actions."""
+    """LLM: Verifies action-plan produces takeover, capability, and channel actions."""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(subagent_workspace="subs")
         agent = SimpleAgent(cfg, root)
 
         stale = _make_stale_task(agent)
-        fake_done = agent.subagents.create_run(goal="无证据完成任务", thought="模拟假完成。", plan=["标记完成"])
-        agent.subagents.lifecycle.set_status(fake_done.id, "DONE")
-
         request_task = agent.subagents.create_run(goal="等待能力路由任务", thought="模拟缺少工具。", plan=["请求能力"])
         agent.subagents.lifecycle.record_capability_request(request_task.id, RecordCapabilityRequestParams(problem="缺少真实入口验收工具。", needed_capability="browser_smoke_test"))
 
@@ -125,7 +122,6 @@ def test_subagent_action_plan_dry_run():
         assert takeover_packet["escalation"]["target"] == "parent"
         assert takeover_packet["manual_confirmation"]["required"] is True
         assert takeover_packet["auto_execute"] is False
-        assert (fake_done.id, "reopen_for_evidence") in actions
         assert (request_task.id, "route_capability_request") in actions
         assert (broken.id, "probe_or_repair_channel") in actions
         assert actions[(request_task.id, "route_capability_request")].escalation_target == "capability_router"
@@ -134,31 +130,15 @@ def test_subagent_action_plan_dry_run():
         assert (root / "subs" / "SUBAGENT_ACTION_PLAN.md").exists()
 
 
-def test_subagent_action_apply_dry_run_and_apply():
-    """LLM: Verifies dry-run does not mutate state, and apply reopens or takes over."""
+def test_subagent_action_apply_takeover():
+    """LLM: Verifies an objectively stale run can be taken over."""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(subagent_workspace="subs")
         agent = SimpleAgent(cfg, root)
-        cap = CapabilityConfig(subagent_heartbeat_timeout=1, subagent_run_timeout=1, subagent_min_evidence_for_done=1)
+        cap = CapabilityConfig(subagent_heartbeat_timeout=1, subagent_run_timeout=1)
 
-        # Test dry-run does not mutate
-        fake_done = agent.subagents.create_run(goal="需要补证据", thought="模拟缺证据完成。", plan=["标记完成"])
-        agent.subagents.lifecycle.set_status(fake_done.id, "DONE")
-        dry_report = agent.subagents.actions.write_action_apply_report(cap, action_filter="reopen_for_evidence", run_id=fake_done.id)
-        assert dry_report.dry_run and dry_report.records[0].applied is False
-        assert dry_report.records[0].rescue_strategy == "reopen_and_request_missing_evidence"
-        assert agent.subagents.load(fake_done.id).status == "DONE"
-
-        # Test apply reopens
-        apply_report = agent.subagents.actions.write_action_apply_report(cap, apply=True, action_filter="reopen_for_evidence", run_id=fake_done.id)
-        reopened = agent.subagents.load(fake_done.id)
-        assert not apply_report.dry_run and apply_report.records[0].applied
-        assert reopened.status == "BLOCKED" and reopened.failure_type == "missing_evidence"
-        assert (root / "subs" / "subagent_action_apply_log.jsonl").exists()
-        assert (root / "subs" / "ACTION_APPLY_LOG.md").exists()
-
-        # Test dead-run takeover creates a replacement run without asking for a manual owner
+        # A dead-run takeover creates a replacement run without asking for a manual owner.
         stale = _make_stale_task(agent)
         takeover = agent.subagents.actions.write_action_apply_report(cap, apply=True, action_filter="takeover_or_reassign", run_id=stale.id)
         taken = agent.subagents.load(stale.id)

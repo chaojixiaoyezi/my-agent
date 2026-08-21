@@ -16,7 +16,6 @@ from ..common.value_parsing import bool_value, non_negative_int, positive_int
 
 ONE_SHOT_TOOL_NAMES = {
     "create_subagents",
-    "schedule_child_subagents",
 }
 
 

@@ -194,7 +194,7 @@ class _RuntimeBudgetConfigFields:
     small_real_acceptance_max_runtime_seconds: int = 900
     real_run_review_max_report_bytes: int = 5_000_000
     real_run_review_max_log_bytes: int = 1_000_000
-    runner_auto_concurrency: int = 15
+    runner_auto_concurrency: int = 4
     conversation_thread_list_limit: int = 100
     conversation_pending_wake_limit: int = 100
     conversation_context_recent_limit: int = 20
@@ -322,7 +322,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     additional_write_roots: list[str] = field(default_factory=list)
     enable_subagents: bool = True
     subagent_mode: str = "trusted_local_hardening"
-    max_subagents: int = 50
+    max_subagents: int = 6
     subagent_board_limit: int = 5
     subagent_workspace: str = ""
     subagent_allowed_tools: list[str] = field(default_factory=list)
@@ -334,7 +334,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     subagent_probe_default_limit: int = 20
     subagent_hierarchy_default_max_depth: int = 0
     subagent_hierarchy_recovery_max_nodes: int = 200
-    subagent_hierarchy_max_children_per_tool_call: int = 0
+    subagent_hierarchy_max_children_per_tool_call: int = 4
     subagent_descendant_scan_limit: int = 128
     subagent_takeover_chain_max_depth: int = 0
     subagent_context_summary_inline_json_chars: int = 900

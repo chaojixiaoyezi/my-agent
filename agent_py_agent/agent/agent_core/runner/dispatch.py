@@ -21,9 +21,7 @@ from ...subagents.models import (
     PROVIDER_SUPPLY_FAILURE_TYPES,
     RETRYABLE_RUNNER_FAILURE_TYPES,
     TaskStatus,
-    VerificationStatus,
     known_failure_type,
-    normalize_verification_status,
     task_has_status,
     task_status_in,
 )
@@ -311,8 +309,6 @@ def _is_dispatch_runner_candidate(
         return False
     if task_status_in(task.status, {TaskStatus.DONE.value, TaskStatus.CHANNEL_ERROR.value, TaskStatus.TAKEN_OVER.value}):
         return False
-    if _task_verification_status(task) == VerificationStatus.VERIFIED.value:
-        return False
     if task.channel_status == "BROKEN":
         return False
     if any(
@@ -363,13 +359,6 @@ def _source_worker_dispatch_allowed(task: object) -> bool:
         return source_worker_lifecycle_state(task) == "active"
     except Exception:
         return False
-
-
-def _task_verification_status(task: SubAgentTask) -> str:
-    try:
-        return normalize_verification_status(getattr(task, "verification_status", ""))
-    except ValueError:
-        return ""
 
 
 def _can_retry_same_run(

@@ -1,7 +1,11 @@
 
 from __future__ import annotations
 
-"""Tool preflight for subagent task envelopes."""
+"""模块用途: 在子代理启动前检查工具和权限这些客观事实。
+
+LLM: 预检不评估交付质量，也不使用历史 acceptance_checks 决定是否
+可启动。写入目标的真实授权由工具网关在每次写入时裁决。
+"""
 
 from dataclasses import dataclass, field
 
@@ -32,7 +36,6 @@ def run_tool_preflight(
     allowed = _ordered_unique([str(item) for item in envelope.tool_contract.get("allowed_tools", [])])
     issues = [
         *_missing_tool_issues(allowed, set(available)),
-        *_write_contract_issues(envelope),
         *_controlled_exec_issues(envelope),
     ]
     return ToolPreflightResult(ok=not issues, issues=issues, effective_tools=_effective_tools(allowed, available))
@@ -49,25 +52,6 @@ def _missing_tool_issues(allowed: list[str], available: set[str]) -> list[Protoc
         for tool in allowed
         if tool not in available
     ]
-
-
-def _write_contract_issues(envelope: TaskEnvelope) -> list[ProtocolIssue]:
-    checks = list(envelope.acceptance.get("checks") or [])
-    allowed = list(envelope.write_contract.get("allowed_write_roots") or [])
-    # 学 会话运行时(sandbox_tags.rs:权限只看"有没有可写区",不区分内部工作区 vs 外部交付地址):
-    # 子代理把产物写进自己的工作区/output 目录是合法的,不该因为缺"外部交付根"
-    # (product_write_roots,task_root 之外的用户指定路径)就判它无处可写——那会误杀"其实能写
-    # 自己 output"的正常子代理、把它吓退成 BLOCKED(真机实测 24/39 子代理因此 ABANDONED)。
-    # 产物交付是上层收尾逻辑,不是 preflight 该卡的;只有连可写区都没有,才是真没法产出。
-    if checks and not allowed:
-        return [
-            _tool_issue(
-                "missing_allowed_write_roots",
-                "write_contract.allowed_write_roots",
-                "task has acceptance checks but no writable roots at all.",
-            )
-        ]
-    return []
 
 
 def _controlled_exec_issues(envelope: TaskEnvelope) -> list[ProtocolIssue]:

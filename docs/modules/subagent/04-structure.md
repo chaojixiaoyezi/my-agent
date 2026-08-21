@@ -25,9 +25,9 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 
 - `goal`、`output_contract`、`permissions`、`constraints` 和 `workspace_refs` 是子代理启动所需的
   执行与权限事实，缺失时继续 fail-closed。
-- `acceptance_checks` 是可选质量说明，不再作为每个 child 的启动硬门。持续值守、调查或仅回传
-  结构化 finding 的任务可以没有人工验收清单；调用方明确提供时仍原样进入同一 context bundle，
-  供 child 和父代理核对。
+- 历史 task 账本里的 `acceptance_checks` 只为兼容旧数据保留；当前 `TaskEnvelope`、启动前检查和
+  context bundle 不再把它暴露给模型，也不据此阻止 child 启动或结束。质量要求继续放在自然语言目标中，
+  由执行模型和父代理结合真实工具结果判断。
 - 这个边界适用于所有子代理，不根据 `/audit`、任务正文或角色名称分支，也不放宽工具权限。
 
 ## 2026-07-29 默认输出路径结构
@@ -106,16 +106,15 @@ SimpleAgent orchestration tool
 - `agent/agent_core/subagent_mixin.py`：子代理生命周期入口，包含 run/finalize、结构化修复、
   recovery snapshot 和 parent planner 记录；旧私有 repair/planner mixin 不再作为跳转层存在。
 - `agent/agent_core/subagent/params.py`：子代理生命周期和 parent planner 参数类的权威位置。
-- `agent/subagents/service_window.py`：持续型委派语义(A4)的唯一事实源——
-  `service_window_remaining_seconds(task)` 按 attributes.long_running +
-  service_window_seconds + created_at 算值守窗口剩余;消费方=子代理收口抑制
-  (`agent_core/subagent/progress_closeout.py`,窗口未走完不因落产物自动 DONE)与
-  父侧 wake 载荷(`subagents/runner_completion_wake.py`,`service_window_incomplete`
-  结构化事实)。
+- `agent/subagents/service_window.py`：持续型委派语义的生命周期事实源；它按结构化
+  `attributes.long_running + service_window_seconds + created_at` 计算剩余值守窗口，供父侧 wake 和
+  恢复展示使用，不作为任务质量验收或模型结束的第二道硬门。
 - `agent/subagents/runner_completion_wake.py`：runner 终态只通过
   `ConversationStore.append_observation_with_wake` 发布父级通知。该入口保证 wake-first 顺序、双向 ID
   关联和 observation fallback；禁止恢复成两个彼此独立的 append/raise 调用。
-- `agent/agent_core/orchestration/`：主代理模型可见的 `create_subagents`、`dispatch_subagents`、`inspect_agent_tree`、`cancel_subagents` 等工具实现。
+- `agent/agent_core/orchestration/`：主代理模型可见的统一 `create_subagents`、`inspect_agent_tree`、
+  `send_runtime_guidance`、`cancel_subagents` 与 capability 处理入口。创建即由宿主自动启动；
+  `dispatch/scheduler` 只保留为内部执行引擎，不再注册成模型工具。
 - `cli/gateway_loops.py::_GatewayOrphanReconciler`：不执行模型的独立周期控制器；从 owner
   投影发现未完成 run，再调用 orchestration 层现有的结构化孤儿监督。它与后台主代理的 LLM
   scheduler 分线程运行，但不建立第二套恢复状态机。
@@ -140,17 +139,19 @@ SimpleAgent orchestration tool
   重绑定 `run_workspace` 时，只改变当前 runner cwd，不得 reopen、supersede 或 select 全局会话任务。
   后续 task promotion 只验证父 link 仍有效，不得再以父 task path 覆盖 child cwd。该边界对照 会话运行时 的
   `parent_thread_id + config.cwd` 和 通道运行时 的 `parentSessionKey + childSessionKey` 分离关系实现。
-- 状态机：完成只写 `DONE`；失败/阻塞只写当前协议枚举，不把旧标签、大小写变体或自然语言别名提升为机器状态。
-  `failure_type` 也一样：runner/action 原始结果可以留作审计文本，但写入 `task.failure_type`、
-  重试、恢复和验收前必须是当前已知枚举；未知值不能靠小写化或旧标签兼容变成机器状态。
-- 状态判断走 canonical state 和 `subagents.models` 中的 `TaskStatus` /
-  `VerificationStatus` helper；旧 `subagents/state_machine.py` 私有转换表已删除，
-  避免 `WAIT_CHILD` 等历史状态绕过当前协议。
+- 运行回合结束先写公共 `TurnEndReason`：`completed`、`aborted`、`blocked`、`error`、
+  `max_tokens`、`interrupted`。主代理、子代理、Gateway 与 TUI 共用同一映射；模型口头说“完成”或旧状态
+  文本都不能改写该结构化原因。
+- 子代理持久状态仍使用当前 `TaskStatus` 枚举。`failure_type` 也一样：runner/action 原始结果可以留作
+  审计文本，但写入 `task.failure_type`、重试和恢复前必须是当前已知枚举；未知值不能靠小写化或旧标签
+  兼容变成机器状态。
+- `VerificationStatus` 只用于读取历史账本，不再进入当前模型上下文、父级摘要、启动前检查或普通完成判定；
+  旧 `subagents/state_machine.py` 私有转换表已删除，避免 `WAIT_CHILD` 等历史状态绕过当前协议。
 - 恢复候选、agent tree bucket、due-check、leadership recovery 和 runner 结果
   payload 不再各自维护失败/完成状态集合；这些机器判断从 `subagents.models`
   读取当前协议集合，未知旧标签只保留为审计文本。
 - 恢复模式和 capability 等待状态也只认当前结构化枚举。未知 `rerun_*` / `takeover_*`
-  前缀、`NEEDS_TOOL` 这类旧别名、工具错误正文，都不能触发自动重跑、接管、授权或验收状态变更。
+  前缀、`NEEDS_TOOL` 这类旧别名、工具错误正文，都不能触发自动重跑、接管、授权或生命周期变更。
 - 子代理 runner 默认复用主代理当前 `AgentConfig`，包括 `model_context_window_tokens`、
   `memory_compact_auto_trigger_percent`、`runner_timeout_seconds`、runner 并发和工具预算。
   只有任务自己携带结构化 `config_overlay_ref` 时才形成 run/task layer 覆盖；不要为
@@ -188,36 +189,35 @@ SimpleAgent orchestration tool
 |---|---|
 | `base.py` | create_run/split、owner 继承、runtime config scope |
 | `persistence/` | canonical state 读写、projection、global index、LocalStore 投影 |
-| `dispatch/` | dispatch/watch/parent planner 报告 |
+| `dispatch/` | 创建后的宿主自动启动、runner 选择、watch 和父级运行报告；不提供模型手动派工工具 |
 | `runner_context_service.py` | 执行上下文、写入边界、任务配置、runtime guidance、runner allowed tools |
 | `runner_result_service.py` | runner 输出解析、状态和 artifact refs 写回 |
 | `board/` | board、due-check、action-plan（直接导入 `board.service` 等实现模块） |
 | `actions/` | action-plan 应用、取消、接管动作记录 |
-| `hierarchy/` | 多层级 child scheduling、recovery packet、leadership recovery（直接导入 `hierarchy.service` 等实现模块，包 `__init__` 不再转发） |
+| `hierarchy/` | 多层级 child 自动启动、recovery packet、leadership recovery（直接导入 `hierarchy.service` 等实现模块，包 `__init__` 不再转发） |
 | `patch_apply/` | patch review/apply/report/rollback |
 | `capability_service.py` | capability request/grant/gap 路由 |
 | `memory_gate/` | 子代理 task-local 候选经验，不自动写长期记忆 |
 
 可复用执行方法来自同一 `SkillsService` snapshot；当前任务计划来自 `task_progress`；子代理执行只走上面的原生编排工具，不存在第二个 workflow service。
 
-## Recovery And QA Signals
+## Recovery And Result Signals
 
-恢复器只根据 `BLOCKED`、`FAILED`、`TIMEOUT`、`CHANNEL_ERROR` 等结构化状态和 refs 行动。
-dispatch、runner summary、parent-timeout recovery、通用 Compact work-state 和 board risk
-使用同一组状态 helper 判断 done/verified、failure、ended、dispatch-ineligible 和 handled terminal，
-不在各自模块维护额外的状态别名表。
-QA 失败只来自任务状态、结构化 `ok: false`、`passed: false`、blockers、测试记录或读取错误；
-`ERROR`、`FAILED` 这类写在 summary/旧 payload 里的普通词不会自动触发 repair wave。
-runner 成功也必须有机器事实：可解析 `SUBAGENT_RESULT`。原始和 repair 回复都缺结构化结果时，finalizer 必须写
-`BLOCKED/UNVERIFIED/structured_output_parse_error`，禁止用普通正文或空正文回填 DONE/VERIFIED。
+内部恢复器只根据 `BLOCKED`、`FAILED`、`TIMEOUT`、`CHANNEL_ERROR` 等结构化状态、`turn_end` 和 refs 行动。
+自动启动、runner summary、parent-timeout recovery、通用 Compact work-state 和 board risk 共用同一组
+状态 helper，不在各自模块维护额外的状态别名表。
+
+普通 runner 不再要求模型生成 `SUBAGENT_RESULT`、`VERIFIED` 或另一份机器验收结论。宿主保存模型的自然
+最终答复、真实工具结果、产物 refs 和六类 `turn_end`；父代理据此继续、补充提示、取消或自然汇总。
+`ERROR`、`FAILED` 这类写在 summary/旧 payload 里的普通词仍不能触发恢复动作。
 
 ## Guidance
 
-运行中补充提示统一落 conversation guidance 账本。目标可以是 agent run、thread、task 或 case。子代理下一轮执行上下文会读取点名给自己的 guidance，并在 runner prompt 中显示。它只是补充上下文，不是机器验收门，也不自动替模型完成任务；停止、取消、接管和验收要走对应结构化状态或控制入口，不能靠解析自然语言 guidance 来改写任务合同。
+运行中补充提示统一落 conversation guidance 账本。目标可以是 agent run、thread、task 或 case。子代理下一轮执行上下文会读取点名给自己的 guidance，并在 runner prompt 中显示。它只是补充上下文，不自动替模型完成任务；停止、取消、接管和授权要走对应结构化状态或控制入口，不能靠解析自然语言 guidance 来改写任务合同。
 
 ## Cancel And Takeover
 
-主代理可以用 `cancel_subagents` 按 run_id/root/status 取消下级。取消会写 CANCELLED/ABANDONED、废弃 active attempt、尽量 interrupt/terminate 已知 pid/session，并写审计记录。该工具只处理能被当前 canonical loader 正常读取的 run；账本损坏时返回结构化 load error，不私自扫描旧 locator 或其他目录兜底。主代理说明取消/接管原因后，可以继续汇总和验收。
+主代理可以用 `cancel_subagents` 按 run_id/root/status 取消下级。取消会写 CANCELLED/ABANDONED、废弃 active attempt、尽量 interrupt/terminate 已知 pid/session，并写审计记录。该工具只处理能被当前 canonical loader 正常读取的 run；账本损坏时返回结构化 load error，不私自扫描旧 locator 或其他目录兜底。主代理说明取消/接管原因后，可以继续汇总，或用 `create_subagents` 创建替代执行者。
 
 takeover replacement 的来源权威入口是 `context_bundle.takeover`：创建时由
 `services/takeover/refs.py::source_handoff` 生成有界结构化快照，包含 source run id、状态、
@@ -227,9 +227,9 @@ handoff 的 run 保持可读，但新创建/重新合并的 takeover 必须补�
 
 ## Create-Time Boundaries
 
-`create_subagents` 只负责结构化派工、目标路径、写入安全和 lineage 记录。业务质量约束
-（例如按钮是否可用、图片是否可验、注释是否允许）可以随任务上下文传递，但不能变成
-派工入口硬门；父代理应在读取子代理 refs 后验收或安排 QA。
+`create_subagents` 是所有层级唯一的创建入口，负责结构化目标、路径、写入安全和 lineage，并在创建后由
+宿主自动启动 child。业务质量要求可以随自然语言目标传递，但不能变成启动或结束硬门；父代理读取真实
+结果和 refs 后，自然决定汇总、补充 guidance、取消或再创建一个明确分工的 child。
 
 ## Collaboration Capabilities
 

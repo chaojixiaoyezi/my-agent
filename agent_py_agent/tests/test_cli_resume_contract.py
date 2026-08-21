@@ -169,7 +169,6 @@ def test_should_continue_task_truth_table():
         ("TOOL_ROUND_LIMIT_REACHED", "tool_loop", "unfinished"),
         ("TASK_PROGRESS_OPEN", "tool_loop", "unfinished"),
         ("REPEATED_TOOL_FAILURE", "tool_loop", "unfinished"),
-        ("REQUIRED_ACTION_HAS_NO_EVIDENCE", "required_action_completion_gate", "unfinished"),
         # 2026-08-15: 未闭合工具块纯格式错误(整轮零执行已保证安全)可续跑
         ("TOOL_CALL_UNCLOSED", "tool_protocol_adapter", "unfinished"),
         # EXEC-26/27: 工具/收口 gate 产生的"未完成"族同属返工门可续跑
@@ -183,6 +182,7 @@ def test_should_continue_task_truth_table():
         ("BLOCKED", "x", "blocked"),
         ("", "x", "ok"),
         ("REQUIRED_ACTION_HAS_NO_EVIDENCE", "other_source", "unfinished"),
+        ("REQUIRED_ACTION_HAS_NO_EVIDENCE", "required_action_completion_gate", "unfinished"),
     ]
     for reason, source, status in continuable:
         resp = SimpleNamespace(runtime_reason=reason, runtime_source=source, runtime_status=status)

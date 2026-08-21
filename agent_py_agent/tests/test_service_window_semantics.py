@@ -9,10 +9,7 @@ import pytest
 # "做完即退"提前 DONE,整任务停摆(真机 u-t1b:只 18 条,wake_queue 有 subagent-finished
 # DONE)。三把钉子:①声明端 service_window_seconds 随 attributes 透传;②子代理收口层
 # 窗口未走完不因"落一次产物"提前收口;③父代理 wake 载荷带"窗口未走完"结构化事实。
-from agent_py_agent.agent.agent_core.orchestration.create_policy import _create_attributes
-from agent_py_agent.agent.agent_core.subagent.progress_closeout import (
-    _progress_ready_for_closeout,
-)
+from agent_py_agent.agent.agent_core.orchestration.create_policy import create_task_attributes
 from agent_py_agent.agent.common.audit_activation import (
     AUDIT_ATTR,
     AUDIT_DEADLINE_ATTR,
@@ -54,19 +51,6 @@ def _task(*, long_running: bool = True, window: int = 600, created_ago: float = 
     )
 
 
-def _declare_ready(task: SimpleNamespace, *artifacts) -> None:
-    task.attributes["output_files"] = [str(artifact) for artifact in artifacts]
-    task.attributes["artifact_registry_refs"] = [
-        {
-            "run_id": task.id,
-            "path": str(artifact),
-            "status": "ready",
-            "size_bytes": artifact.stat().st_size,
-        }
-        for artifact in artifacts
-    ]
-
-
 def test_service_window_remaining_semantics():
     assert service_window_remaining_seconds(_task()) > 500
     assert service_window_remaining_seconds(_task(long_running=False)) == 0.0
@@ -77,108 +61,13 @@ def test_service_window_remaining_semantics():
     assert service_window_remaining_seconds(bad) == 0.0
 
 
-def test_progress_closeout_suppressed_while_window_open(tmp_path):
-    # 窗口未走完:哪怕产物已落盘,也不因"落了一次产物"被系统提前收口。
-    artifact = tmp_path / "out.md"
-    artifact.write_text("首批发现", encoding="utf-8")
-    progress = {"latest_written_path": str(artifact)}
-    task = _task()
-    _declare_ready(task, artifact)
-    assert _progress_ready_for_closeout(progress, task) is False
-    # 窗口走完:恢复正常收口判定(声明产物匹配 → 可收口)。
-    elapsed = _task(created_ago=700.0)
-    _declare_ready(elapsed, artifact)
-    assert _progress_ready_for_closeout(progress, elapsed) is True
-
-
-def test_progress_closeout_is_not_coupled_to_watch_lane_assignment(tmp_path):
-    artifact = tmp_path / "out.md"
-    artifact.write_text("首批发现", encoding="utf-8")
-    progress = {"latest_written_path": str(artifact)}
-    task = _task(created_ago=700.0)
-    _declare_ready(task, artifact)
-    unrelated_watch_state = SimpleNamespace(
-        home_paths=SimpleNamespace(owner_home_dir=str(tmp_path / "owner"))
-    )
-    assert (
-        _progress_ready_for_closeout(
-            progress,
-            task,
-            agent=unrelated_watch_state,
-        )
-        is True
-    )
-
-
-def test_progress_closeout_requires_every_declared_current_run_artifact(tmp_path):
-    report = tmp_path / "report.md"
-    evidence = tmp_path / "evidence.json"
-    report.write_text("report", encoding="utf-8")
-    evidence.write_text("[]", encoding="utf-8")
-    progress = {"latest_written_path": str(report)}
-    task = _task(created_ago=700.0)
-    task.attributes["output_files"] = [str(report), str(evidence)]
-    task.attributes["artifact_registry_refs"] = [
-        {
-            "run_id": task.id,
-            "path": str(report),
-            "status": "ready",
-            "size_bytes": report.stat().st_size,
-        }
-    ]
-
-    assert _progress_ready_for_closeout(progress, task) is False
-
-    task.attributes["artifact_registry_refs"].append(
-        {
-            "run_id": task.id,
-            "path": str(evidence),
-            "status": "ready",
-            "size_bytes": evidence.stat().st_size,
-        }
-    )
-    assert _progress_ready_for_closeout(progress, task) is True
-
-
-def test_progress_closeout_rejects_stale_or_unregistered_artifacts(tmp_path):
-    artifact = tmp_path / "index.html"
-    artifact.write_text("<html>ready</html>", encoding="utf-8")
-    progress = {
-        "latest_written_path": str(artifact),
-        "artifact_integrity": {
-            "kind": "html",
-            "ok": True,
-            "blocker_codes": [],
-            "warning_codes": [],
-        },
-    }
-    task = _task(created_ago=700.0)
-    task.attributes["output_files"] = [str(artifact)]
-    task.attributes["artifact_registry_refs"] = [
-        {
-            "run_id": "older-run",
-            "path": str(artifact),
-            "status": "ready",
-            "size_bytes": artifact.stat().st_size,
-        }
-    ]
-    assert _progress_ready_for_closeout(progress, task) is False
-
-    task.attributes["artifact_registry_refs"][0]["run_id"] = task.id
-    task.attributes["artifact_registry_refs"][0]["status"] = "pending"
-    assert _progress_ready_for_closeout(progress, task) is False
-
-    task.attributes = {"artifact_registry_refs": []}
-    assert _progress_ready_for_closeout(progress, task) is False
-
-
 def test_create_attributes_pass_service_window_through():
-    attrs = _create_attributes({"goal": "盯 2 小时", "long_running": True, "service_window_seconds": 7200})
+    attrs = create_task_attributes({"goal": "盯 2 小时", "long_running": True, "service_window_seconds": 7200})
     assert attrs["long_running"] is True
     assert attrs["service_window_seconds"] == 7200
     # 坏值/缺省不进 attributes(零声明零影响)。
-    assert "service_window_seconds" not in _create_attributes({"goal": "x", "service_window_seconds": "abc"})
-    assert "service_window_seconds" not in _create_attributes({"goal": "x"})
+    assert "service_window_seconds" not in create_task_attributes({"goal": "x", "service_window_seconds": "abc"})
+    assert "service_window_seconds" not in create_task_attributes({"goal": "x"})
 
 
 def test_audit_descendant_service_window_is_clamped_to_inherited_deadline():
@@ -192,7 +81,7 @@ def test_audit_descendant_service_window_is_clamped_to_inherited_deadline():
         )
     )
 
-    attrs = _create_attributes(
+    attrs = create_task_attributes(
         {
             "goal": "持续处理来源",
             "long_running": True,
@@ -215,7 +104,7 @@ def test_audit_descendant_shorter_declared_window_is_preserved():
         )
     )
 
-    attrs = _create_attributes(
+    attrs = create_task_attributes(
         {
             "goal": "短时复核",
             "long_running": True,

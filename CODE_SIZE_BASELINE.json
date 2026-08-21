@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-07-08T13:12:14.351715+00:00",
-  "total_findings": 240,
+  "generated_at": "2026-08-21T14:18:48.170Z",
+  "total_findings": 265,
   "findings": [
     {
       "identity": "params:agent_py_agent/tests/test_watch_wake_backstop.py:_lane",
@@ -1716,6 +1716,183 @@
       "path": "agent_py_agent/agent/agent_core/runtime_mixin.py",
       "name": "_settle_main_agent_run_status",
       "note": "既有遗留(2026-08-18 clean HEAD 复核): 非 TUI 切片引入，待独立 code_size 切片修复"
+    },
+    {
+      "identity": "class:agent_py_agent/agent/conversation/store.py:ConversationGuidanceStore",
+      "severity": "hard",
+      "kind": "class",
+      "path": "agent_py_agent/agent/conversation/store.py",
+      "name": "ConversationGuidanceStore"
+    },
+    {
+      "identity": "class:agent_py_agent/agent/gateway_parts/request_execution.py:BufferedChunkStreamWriter",
+      "severity": "hard",
+      "kind": "class",
+      "path": "agent_py_agent/agent/gateway_parts/request_execution.py",
+      "name": "BufferedChunkStreamWriter"
+    },
+    {
+      "identity": "class:agent_py_agent/cli/chat_parts/tui_runtime.py:TuiTurnEventAdapter",
+      "severity": "hard",
+      "kind": "class",
+      "path": "agent_py_agent/cli/chat_parts/tui_runtime.py",
+      "name": "TuiTurnEventAdapter"
+    },
+    {
+      "identity": "class:agent_py_agent/cli/chat_parts/tui_view_model.py:TuiViewModelReducer",
+      "severity": "hard",
+      "kind": "class",
+      "path": "agent_py_agent/cli/chat_parts/tui_view_model.py",
+      "name": "TuiViewModelReducer"
+    },
+    {
+      "identity": "function:agent_py_agent/agent/agent_core/_tool_loop_service.py:_execute_tool_loop_service",
+      "severity": "hard",
+      "kind": "function",
+      "path": "agent_py_agent/agent/agent_core/_tool_loop_service.py",
+      "name": "_execute_tool_loop_service"
+    },
+    {
+      "identity": "function:agent_py_agent/agent/gateway_parts/control_service.py:_steer_active_request",
+      "severity": "hard",
+      "kind": "function",
+      "path": "agent_py_agent/agent/gateway_parts/control_service.py",
+      "name": "_steer_active_request"
+    },
+    {
+      "identity": "function:agent_py_agent/agent/gateway_parts/control_service.py:execute_gateway_conversation_control",
+      "severity": "hard",
+      "kind": "function",
+      "path": "agent_py_agent/agent/gateway_parts/control_service.py",
+      "name": "execute_gateway_conversation_control"
+    },
+    {
+      "identity": "function:agent_py_agent/agent/gateway_parts/http_handlers.py:_handle_idempotent_ordinary_ask",
+      "severity": "hard",
+      "kind": "function",
+      "path": "agent_py_agent/agent/gateway_parts/http_handlers.py",
+      "name": "_handle_idempotent_ordinary_ask"
+    },
+    {
+      "identity": "function:agent_py_agent/agent/gateway_parts/http_handlers.py:handle_ask",
+      "severity": "hard",
+      "kind": "function",
+      "path": "agent_py_agent/agent/gateway_parts/http_handlers.py",
+      "name": "handle_ask"
+    },
+    {
+      "identity": "function:agent_py_agent/agent/gateway_parts/recovery.py:terminalize_gateway_request_file",
+      "severity": "hard",
+      "kind": "function",
+      "path": "agent_py_agent/agent/gateway_parts/recovery.py",
+      "name": "terminalize_gateway_request_file"
+    },
+    {
+      "identity": "function:agent_py_agent/agent/gateway_parts/request_worker.py:_process_claimed_gateway_request_path",
+      "severity": "hard",
+      "kind": "function",
+      "path": "agent_py_agent/agent/gateway_parts/request_worker.py",
+      "name": "_process_claimed_gateway_request_path"
+    },
+    {
+      "identity": "function:agent_py_agent/cli/chat_parts/tui_keybindings.py:_ensure_active_input_reconciler",
+      "severity": "hard",
+      "kind": "function",
+      "path": "agent_py_agent/cli/chat_parts/tui_keybindings.py",
+      "name": "_ensure_active_input_reconciler"
+    },
+    {
+      "identity": "function:agent_py_agent/cli/chat_parts/tui_keybindings.py:_ensure_control_operation_reconciler",
+      "severity": "hard",
+      "kind": "function",
+      "path": "agent_py_agent/cli/chat_parts/tui_keybindings.py",
+      "name": "_ensure_control_operation_reconciler"
+    },
+    {
+      "identity": "nesting:agent_py_agent/agent/conversation/store.py:release_reserved_guidance_for_turn",
+      "severity": "hard",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/conversation/store.py",
+      "name": "release_reserved_guidance_for_turn"
+    },
+    {
+      "identity": "nesting:agent_py_agent/agent/gateway_parts/control_service.py:_steer_active_request",
+      "severity": "hard",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/gateway_parts/control_service.py",
+      "name": "_steer_active_request"
+    },
+    {
+      "identity": "nesting:agent_py_agent/agent/gateway_parts/http_handlers.py:_handle_idempotent_ordinary_ask",
+      "severity": "hard",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/gateway_parts/http_handlers.py",
+      "name": "_handle_idempotent_ordinary_ask"
+    },
+    {
+      "identity": "nesting:agent_py_agent/agent/gateway_parts/queue_service.py:claim_request",
+      "severity": "hard",
+      "kind": "nesting",
+      "path": "agent_py_agent/agent/gateway_parts/queue_service.py",
+      "name": "claim_request"
+    },
+    {
+      "identity": "nesting:agent_py_agent/cli/chat_parts/tui_control_delivery.py:_reconcile_one",
+      "severity": "hard",
+      "kind": "nesting",
+      "path": "agent_py_agent/cli/chat_parts/tui_control_delivery.py",
+      "name": "_reconcile_one"
+    },
+    {
+      "identity": "nesting:agent_py_agent/cli/chat_parts/tui_input_delivery.py:_reconcile_one",
+      "severity": "hard",
+      "kind": "nesting",
+      "path": "agent_py_agent/cli/chat_parts/tui_input_delivery.py",
+      "name": "_reconcile_one"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/gateway_parts/http_handlers.py:_handle_idempotent_ordinary_ask",
+      "severity": "hard",
+      "kind": "params",
+      "path": "agent_py_agent/agent/gateway_parts/http_handlers.py",
+      "name": "_handle_idempotent_ordinary_ask"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/gateway_parts/queue_service.py:archive_request",
+      "severity": "hard",
+      "kind": "params",
+      "path": "agent_py_agent/agent/gateway_parts/queue_service.py",
+      "name": "archive_request"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/gateway_parts/recovery.py:terminalize_gateway_request_file",
+      "severity": "hard",
+      "kind": "params",
+      "path": "agent_py_agent/agent/gateway_parts/recovery.py",
+      "name": "terminalize_gateway_request_file"
+    },
+    {
+      "identity": "params:agent_py_agent/cli/chat_parts/plain_state.py:__init__",
+      "severity": "hard",
+      "kind": "params",
+      "path": "agent_py_agent/cli/chat_parts/plain_state.py",
+      "name": "__init__"
+    },
+    {
+      "identity": "params:agent_py_agent/cli/chat_parts/tui_control_delivery.py:__init__",
+      "severity": "hard",
+      "kind": "params",
+      "path": "agent_py_agent/cli/chat_parts/tui_control_delivery.py",
+      "name": "__init__"
+    },
+    {
+      "identity": "params:agent_py_agent/cli/chat_parts/tui_input_delivery.py:__init__",
+      "severity": "hard",
+      "kind": "params",
+      "path": "agent_py_agent/cli/chat_parts/tui_input_delivery.py",
+      "name": "__init__"
     }
-  ]
+  ],
+  "baseline_source_head": "31f30fea41723605e1dfe4315e7d8528c0b86e3a",
+  "baseline_scope": "previous baseline plus hard findings reproduced from a clean git archive of baseline_source_head"
 }

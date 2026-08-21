@@ -208,7 +208,7 @@ def test_repair_contract_idempotency_reuses_same_scope_with_reworded_goal(tmp_pa
     assert first["created_run_ids"]
     assert second["created_run_ids"] == []
     assert second["reused_run_ids"] == first["created_run_ids"]
-    assert second["dispatch_run_ids"] == []
+    assert second["pending_start_run_ids"] == []
     assert second["auto_start"]["run_ids"] == first["created_run_ids"]
 
 
@@ -538,8 +538,8 @@ def test_repair_goal_without_contract_keeps_different_targets_separate(tmp_path)
     assert first["created_run_ids"] != second["created_run_ids"]
 
 
-def test_schedule_child_repair_contract_fields_are_persisted_to_child_context(tmp_path):
-    from agent_py_agent.agent.agent_core.hierarchy_tools import ScheduleChildSubagentsTool
+def test_nested_create_repair_contract_fields_are_persisted_to_child_context(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
 
@@ -547,10 +547,7 @@ def test_schedule_child_repair_contract_fields_are_persisted_to_child_context(tm
     root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])
     parent = agent.subagents.create_run(goal="parent", thought="parent", plan=["parent"], parent_id=root.id, root_id=root.id)
     agent._current_subagent_run_id = parent.id
-    result = ScheduleChildSubagentsTool(agent).execute({
-        "dry_run": False,
-        "children": [_repair_create_params("child-a", "a.xlsx")],
-    })
+    result = CreateSubagentsTool(agent).execute(_repair_create_params("child-a", "a.xlsx"))
     payload = json.loads(result.output)
     task = agent.subagents.load(payload["created_run_ids"][0])
 
@@ -559,8 +556,8 @@ def test_schedule_child_repair_contract_fields_are_persisted_to_child_context(tm
     assert task.context_packs[0]["kind"] == "repair_contract"
 
 
-def test_schedule_child_repair_contract_reuses_same_scope_with_reworded_goal(tmp_path):
-    from agent_py_agent.agent.agent_core.hierarchy_tools import ScheduleChildSubagentsTool
+def test_nested_create_repair_contract_reuses_same_scope_with_reworded_goal(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
 
@@ -568,23 +565,22 @@ def test_schedule_child_repair_contract_reuses_same_scope_with_reworded_goal(tmp
     root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])
     parent = agent.subagents.create_run(goal="parent", thought="parent", plan=["parent"], parent_id=root.id, root_id=root.id)
     agent._current_subagent_run_id = parent.id
-    tool = ScheduleChildSubagentsTool(agent)
+    tool = CreateSubagentsTool(agent)
 
-    first = json.loads(tool.execute({"dry_run": False, "children": [_repair_create_params("child-a", "a.xlsx")]}).output)
-    second = json.loads(tool.execute({
-        "dry_run": False,
-        "children": [_repair_create_params("child-a", "a.xlsx", goal="继续修复并执行 xlsx 生成")],
-    }).output)
+    first = json.loads(tool.execute(_repair_create_params("child-a", "a.xlsx")).output)
+    second = json.loads(tool.execute(
+        _repair_create_params("child-a", "a.xlsx", goal="继续修复并执行 xlsx 生成")
+    ).output)
 
     assert first["created_run_ids"]
     assert second["created_run_ids"] == []
     assert second["reused_run_ids"] == first["created_run_ids"]
-    assert second["dispatch_run_ids"] == first["created_run_ids"]
+    assert second["pending_start_run_ids"] == []
 
 
-def test_schedule_child_without_idempotency_contract_does_not_reuse_by_goal_text(tmp_path):
-    """LLM: schedule_child_subagents cannot use matching goal prose as a reuse key."""
-    from agent_py_agent.agent.agent_core.hierarchy_tools import ScheduleChildSubagentsTool
+def test_nested_create_without_idempotency_contract_does_not_reuse_by_goal_text(tmp_path):
+    """LLM: Recursive create_subagents cannot use matching goal prose as a reuse key."""
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
 
@@ -592,15 +588,17 @@ def test_schedule_child_without_idempotency_contract_does_not_reuse_by_goal_text
     root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])
     parent = agent.subagents.create_run(goal="parent", thought="parent", plan=["parent"], parent_id=root.id, root_id=root.id)
     agent._current_subagent_run_id = parent.id
-    tool = ScheduleChildSubagentsTool(agent)
+    tool = CreateSubagentsTool(agent)
 
     first = json.loads(tool.execute({
-        "dry_run": False,
-        "children": [{"goal": "写一个家具品牌首页", "role": "worker", "agent_name": "小小傻妞-worker"}],
+        "goal": "写一个家具品牌首页",
+        "role": "worker",
+        "agent_name": "小小傻妞-worker",
     }).output)
     second = json.loads(tool.execute({
-        "dry_run": False,
-        "children": [{"goal": "写一个家具品牌首页", "role": "worker", "agent_name": "小小傻妞-worker"}],
+        "goal": "写一个家具品牌首页",
+        "role": "worker",
+        "agent_name": "小小傻妞-worker",
     }).output)
 
     assert first["created_run_ids"]

@@ -286,19 +286,6 @@ def test_issue_weight_open_capability_gap():
     assert weight < 200  # P2(100) + gap(20)
 
 
-def test_issue_weight_fake_done_risk():
-    """伪完成风险权重高。"""
-    issue = DueCheckIssue(
-        run_id="r1",
-        severity="P0",
-        kind="fake_done_risk",
-        message="",
-        suggested_action="",
-    )
-    weight = _issue_weight(issue)
-    assert weight >= 1085  # P0(1000) + fake_done(85)
-
-
 # ── _action_for_issue 测试 ─────────────────────────────────────────────────
 
 def test_action_for_issue_channel_broken():
@@ -314,33 +301,6 @@ def test_action_for_issue_channel_broken():
     assert action == "probe_or_repair_channel"
     assert priority == 980
     assert new_status == "CHANNEL_ERROR"
-
-
-def test_action_for_issue_fake_done_risk():
-    """伪完成风险动作为重新打开。"""
-    issue = DueCheckIssue(
-        run_id="r1",
-        severity="P0",
-        kind="fake_done_risk",
-        message="",
-        suggested_action="",
-    )
-    action, priority, new_status = _action_for_issue(issue)
-    assert action == "reopen_for_evidence"
-    assert new_status == "BLOCKED"
-
-
-def test_action_for_issue_unverified_done():
-    """未验证完成动作为运行验收。"""
-    issue = DueCheckIssue(
-        run_id="r1",
-        severity="P1",
-        kind="unverified_done",
-        message="",
-        suggested_action="",
-    )
-    action, priority, new_status = _action_for_issue(issue)
-    assert action == "reopen_for_evidence"
 
 
 def test_action_for_issue_missing_work_order():
@@ -450,12 +410,6 @@ def test_commands_for_action_takeover():
     commands = _commands_for_action("takeover_or_reassign", "run-99")
     assert len(commands) >= 2
     assert any("run-99" in cmd for cmd in commands)
-
-
-def test_commands_for_action_reopen():
-    """重新打开动作用 subagent 命令。"""
-    commands = _commands_for_action("reopen_for_evidence", "run-x")
-    assert "run-x" in commands[0]
 
 
 def test_commands_for_action_unknown():

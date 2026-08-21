@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 from ...subagents.services.recovery.modes import (
     RecoveryMode,
     is_rerun_mode,
@@ -35,7 +33,7 @@ def _batch_payload(mode: RecoveryMode, items: list[dict[str, object]]) -> dict[s
         "run_ids": run_ids,
         "count": len(run_ids),
         "execution_mode": _execution_mode(mode),
-        "suggested_tool_call": _suggested_tool_call(mode, run_ids, items),
+        "system_recovery": _system_recovery(mode, run_ids, items),
     }
     if mode is RecoveryMode.LEADERSHIP_RECOVERY:
         payload["requires_leader_selection"] = True
@@ -65,38 +63,37 @@ def _execution_mode(mode: RecoveryMode) -> str:
     return "manual_review"
 
 
-def _suggested_tool_call(mode: RecoveryMode, run_ids: list[str], items: list[dict[str, object]]) -> dict[str, object]:
+def _system_recovery(
+    mode: RecoveryMode,
+    run_ids: list[str],
+    items: list[dict[str, object]],
+) -> dict[str, object]:
     if is_rerun_mode(mode):
-        return _rerun_tool_call(run_ids, items)
+        return _rerun_recovery(run_ids, items)
     if is_takeover_mode(mode):
-        return _takeover_tool_call(run_ids)
+        return {
+            "action": "await_parent_takeover_decision",
+            "run_ids": list(run_ids),
+        }
     return {}
 
 
-def _rerun_tool_call(run_ids: list[str], items: list[dict[str, object]]) -> dict[str, object]:
-    call = _dispatch_tool_call(run_ids, start_runners=True)
+def _rerun_recovery(
+    run_ids: list[str],
+    items: list[dict[str, object]],
+) -> dict[str, object]:
+    recovery: dict[str, object] = {
+        "action": "auto_retry_original_run",
+        "run_ids": list(run_ids),
+    }
     mode = recovery_mode_from_protocol_value(items[0].get("recovery_mode")) if len(items) == 1 else None
     if mode is not None:
-        call["recovery_mode"] = mode.value
+        recovery["recovery_mode"] = mode.value
     if len(run_ids) == 1 and len(items) == 1:
         instruction = str(items[0].get("runner_instruction") or "").strip()
         if instruction:
-            call["runner_instruction"] = instruction
-    return call
-
-
-def _takeover_tool_call(run_ids: list[str]) -> dict[str, object]:
-    call = _dispatch_tool_call(run_ids, start_runners=False)
-    call["max_runners"] = 0
-    return call
-
-
-def _dispatch_tool_call(run_ids: list[str], *, start_runners: bool) -> dict[str, Any]:
-    return {
-        "tool": "dispatch_subagents",
-        "dry_run": not start_runners,
-        "run_ids": list(run_ids),
-    }
+            recovery["runner_instruction"] = instruction
+    return recovery
 
 
 def _run_ids(items: list[dict[str, object]]) -> list[str]:

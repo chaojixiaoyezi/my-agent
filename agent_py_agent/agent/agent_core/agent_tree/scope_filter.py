@@ -121,20 +121,13 @@ def _tool_allowed(allowed_tools: set[str] | None, tool: str) -> bool:
 
 def _coordination_next_step(has_pending: bool, allowed_tools: set[str] | None = None) -> str:
     if not has_pending:
-        if _tool_allowed(allowed_tools, "dispatch_subagents"):
-            return "如果只是查看状态，直接向用户汇报；只有用户要推进或恢复时才调用 dispatch_subagents。"
-        return "如果只是查看状态，直接向用户汇报；本轮没有调度工具时，不要声称已经推进下级代理。"
+        return "如果只是查看状态，直接向用户汇报；不要声称手动推进了下级代理。"
     guidance = "先结束本回合，派工监督提醒/完成事件会自动唤醒；期间可继续自己的工作或回复用户。"
     if _tool_allowed(allowed_tools, "send_guidance"):
         guidance += "只有要补充具体指令时，才给具体 run_id 发 send_guidance。"
-    dispatch = (
-        "只有下级 BLOCKED/FAILED/TIMEOUT、用户明确要求接手，或超过任务约定等待时间时，才考虑补派或接手。"
-        if _tool_allowed(allowed_tools, "dispatch_subagents")
-        else "本轮没有调度工具时，只做状态观察，不要安排补派或接手。"
-    )
     return (
         "还有下级代理在运行、规划或等待验收时，不要把目标目录暂时为空或占位报告当失败；"
-        f"{guidance}{dispatch}"
+        f"{guidance}只有下级明确失败、用户要求接手或超过约定等待时间时，才考虑新建替代代理或自己接手。"
     )
 
 

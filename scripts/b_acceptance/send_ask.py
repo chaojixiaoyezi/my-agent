@@ -6,8 +6,8 @@
 import json
 import sys
 import time
-import urllib.request
 import urllib.error
+import urllib.request
 
 args = [a for a in sys.argv[1:] if a != "--wait"]
 wait = "--wait" in sys.argv
@@ -15,7 +15,8 @@ prompt_file = args[0]
 user_id = args[1] if len(args) > 1 else ""
 channel = args[2] if len(args) > 2 else "chat"
 
-prompt = open(prompt_file, encoding="utf-8").read()
+with open(prompt_file, encoding="utf-8") as prompt_handle:
+    prompt = prompt_handle.read()
 payload = {"kind": "ask", "prompt": prompt, "metadata": {"channel": channel, "user_id": user_id or "admin"}}
 headers = {"Content-Type": "application/json"}
 if user_id:

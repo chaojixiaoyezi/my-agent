@@ -101,7 +101,7 @@ risk_level: low
 ❌ "测试过了,这阶段完成"
 ```
 
-**派子代理(create_subagents / dispatch_subagents / schedule_child_subagents):**
+**派子代理(`create_subagents` 创建后自动启动):**
 ```
 ✅ 子代理回报成功 → 查它的改动 diff → 核实改动 → 报告真实状态
 ❌ 直接信子代理的回报

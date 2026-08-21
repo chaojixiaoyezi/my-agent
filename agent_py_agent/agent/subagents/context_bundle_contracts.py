@@ -75,7 +75,6 @@ def task_packet(task: SubAgentTask) -> dict[str, object]:
         "agent_name": task.agent_name,
         "goal": current_model_text(task.goal),
         "plan": [current_model_text(item) for item in list(task.plan or [])],
-        "acceptance_checks": [current_model_text(item) for item in list(task.acceptance_checks or [])],
         "file_contract": {
             "required_files": components.required_files,
             "required_file_refs": anchored_required,

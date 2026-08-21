@@ -19,7 +19,7 @@ def _render_execution_context_header(context):
         f"- run_id: {context.run_id}",
         f"- generated_at: {context.generated_at}",
         f"- status: {context.status}",
-        f"- verification_status: {context.verification_status}",
+        f"- turn_end_reason: {context.turn_end_reason or 'none'}",
         f"- channel_status: {context.channel_status}",
         f"- runner_attempts: {context.runner_attempts}",
         f"- runner_last_error: {context.runner_last_error or 'none'}",
@@ -244,8 +244,6 @@ def render_execution_context_markdown(context: SubAgentExecutionContext) -> str:
     lines.extend(_render_capabilities_section(context))
     lines.extend(_render_write_boundary_section(context))
     lines.extend(_render_declared_outputs_section(context))
-    lines.extend(["", "## Acceptance Checks", ""])
-    lines.extend(f"- [ ] {item}" for item in context.acceptance_checks or ["未设置"])
     lines.extend(_render_quality_contract_section(context.quality_contract))
     lines.extend(_render_context_manifest_section(context.context_manifest))
     lines.extend(render_context_packs_section(context))

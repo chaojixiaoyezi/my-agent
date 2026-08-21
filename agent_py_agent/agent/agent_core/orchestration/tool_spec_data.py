@@ -17,7 +17,6 @@ _CREATE_PARAMETERS = {
     "tool_preset": "工具预设；通常省略。有效值：coding/read_only/none",
     "allowed_tools": "工具偏好提示；通常省略，基础读写工具会自动补齐",
     "allowed_skills": "可选；只把当前 owner Skill 快照中点名的技能授权给子代理",
-    "acceptance_checks": "父代理后续判断完成的标准",
     "covers": '该子代理负责的 coverage 清单项 id 列表(如 ["req-03"]):派工时绑定,子代理完成后系统按 id 自动把对应清单项标 done,不用你回头逐项标',
     "plan": "子代理初始步骤",
     "input_refs": "交给子代理读取的文件、URL 或 artifact refs",
@@ -25,14 +24,13 @@ _CREATE_PARAMETERS = {
     "artifact_refs": "已有交付物或参考产物引用",
     "replacement_for_run_ids": "新子代理要接管的旧 run_id",
     "related_finding_id": "可选；把本次委派关联到当前会话中已经持久化的一个 Audit finding。程序只校验关系，是否调查和怎样调查仍由你决定",
-    "defer_start": "true 表示只建不跑；默认创建后启动",
     "long_running": "true 声明这是故意长期运行的守望/常驻任务(持续监控数小时~数天)；系统放开其上下文压缩续跑深度上限(无进展仍会熔断)。只在任务本质是持续盯守/常驻服务时声明",
     "service_window_seconds": "可选,配合 long_running:持续型任务的最短值守窗口(秒)。窗口未走完时子代理不会因'已产出一次成果'被系统提前收口;若仍提前退出,父代理会收到'窗口未走完'的结构化事实以便重派或接管。派盯守/常驻任务时把用户要求的守候时长写进来",
     "audit_source_id": "仅当前命名 Audit 已发布结构化来源时使用；为这个叶子选择一个返回给你的精确 source_id。程序会把已验证的传输事实交给子代理，别把 URL 或 watch_id 重新写进任务步骤",
 }
 _CREATE_PARAMETER_DETAILS = {
     "goal": "工具内部的整批派工说明，与用户命令 /goal 无关；普通聊天任务也可派工。写清子代理要交付什么，保留用户原始硬约束；用户声明的产物格式要求（输出路径、最少字数、文件路径:行号引用、必含章节）要原样写进相关子代理 goal，汇总时保留这些格式要素。",
-    "items": "仅一次派多个不同任务时用；顶层 goal 写整批目的，每个元素必须含自己的独立 goal、别传空 items；资料线索放 item.input_refs；只有 defer_start=true 才只建不跑。",
+    "items": "仅一次派多个不同任务时用；顶层 goal 写整批目的，每个元素必须含自己的独立 goal、别传空 items；资料线索放 item.input_refs。创建成功后会立即运行。",
     "role": "优先用模板角色。可用角色模板索引：\n{role_template_index}",
     "agent_name": "展示名不是角色；需要职责差异时仍应使用 role 或 goal 表达。",
     "tool_preset": "省略时自动；coding 给基础读写工具；read_only 只给读取/搜索/查看工具；none 只表示不覆盖自动策略。",
@@ -55,7 +53,6 @@ _CREATE_PARAMETER_DETAILS = {
         "创建一个叶子 item；子代理只需调用 watch_stream(action=open)，URL、请求体、游标位置"
         "和文档引用由运行时从该绑定补入，禁止猜 watch_id。"
     ),
-    "defer_start": "普通生产任务默认不要传；依赖前置产物的测试/验收/汇总项可传 true。",
     "covers": "每个 item 只绑它自己负责的清单项(id 来自 task_progress coverage);别把全部 id 复制给每个子代理,绑不存在的 id 不生效。",
 }
 _CREATE_EXAMPLES = [
@@ -84,36 +81,3 @@ _OBSERVATION_PARAMETERS = {
     "requires_llm_report": "是否需要 LLM 写面向用户的报告",
     "dedupe_key": "可选幂等键",
 }
-
-_DISPATCH_PARAMETERS = {
-    "dry_run": "true 预览，false 真实推进",
-    "max_runners": "本轮最多推进几个子代理",
-    "run_ids": "精确指定要推进的 run_id 列表",
-    "recovery_mode": "可选。只有恢复策略明确给出时传，例如 rerun_from_checkpoint",
-}
-_DISPATCH_PARAMETER_DETAILS = {
-    "dry_run": "模型只需要填写这一套预览开关，不要再制造第二套执行字段。",
-    "max_runners": "不知道时省略；0 表示不执行。",
-    "run_ids": "适合按 create/schedule 返回的 run_id 精确推进。",
-    "recovery_mode": "这是机器字段，不从 runner_instruction 文本猜。普通推进不要填写；恢复建议 payload 给了才原样传入。",
-}
-
-_SCHEDULE_CHILD_USE_CASES = [
-    "当前子代理需要把任务继续拆给下一层",
-    "需要保持 main -> child -> grandchild 的层级边界",
-]
-_SCHEDULE_CHILD_KEYWORDS = ["下一层", "孙代理", "层级", "hierarchy", "child", "grandchild"]
-_SCHEDULE_CHILD_PARAMETERS = {
-    "children": "下一层子任务列表",
-    "dry_run": "true 预览，false 真实创建；子代理内默认 false",
-    "max_depth": "最大层级；0 或省略表示不限制",
-    "max_children": "直接孩子数量上限；0 或省略表示不限制",
-}
-_SCHEDULE_CHILD_PARAMETER_DETAILS = {
-    "children": "每项可含 goal/role/agent_name/input_refs/output_files/plan/allowed_skills；allowed_skills 只能取父代理已获授权的 stable_id 子集。优先从角色模板索引里选 role：\n{role_template_index}",
-    "dry_run": "显式 true 只预览；省略时真实创建。",
-    "max_depth": "显式正数才限制层级。",
-    "max_children": "显式正数才限制直接孩子数量。",
-}
-_SCHEDULE_CHILD_EXAMPLES = ['{"tool":"schedule_child_subagents","dry_run":false,"children":[{"role":"worker","goal":"继续完成当前子任务的一部分"}]}']
-_SCHEDULE_CHILD_COORDINATOR_RULES = "按当前层级创建自己的下级；平级补充提示用 send_guidance，推进已有下级用 dispatch_subagents。"

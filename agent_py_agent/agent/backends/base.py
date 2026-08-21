@@ -70,6 +70,9 @@ class ModelResponse:
     runtime_status: str = "ok"
     runtime_reason: str = ""
     runtime_source: str = ""
+    # LLM: 仅由宿主运行时写入 DSH 风格 turn/end.reason；模型正文和验收结果不得设置。
+    # 字段用途: 让主代理、子代理、Gateway 与 TUI 使用同一个本轮结束原因。
+    turn_end_reason: str = ""
     usage: dict[str, Any] = field(default_factory=dict)
     # 原生 tool_use 协议(tool_protocol=native)下，从结构化响应抽出的工具调用块，
     # 每块形如 {"id","name","input"}。文本协议下恒为空，不影响现有行为。

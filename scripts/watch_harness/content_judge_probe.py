@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 from __future__ import annotations
+
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_env_loader import ensure_model_key
+
 """洞2 报准·真 LLM 判读探针:引擎已把候选 surface 到模型眼前后,模型读正文语义判真假的准头。
 
 确定性引擎 harness 证明了"引擎 surface 满召回";这一层用【真模型】(MiniMax-M2.7,与产品同源)

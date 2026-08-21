@@ -6,6 +6,7 @@
 """
 
 import hashlib
+import json
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -251,7 +252,7 @@ class _GatewayNaturalDispatchReplyBackend(_NativeFakeBackend):
                 tool_use_blocks=[{"id": "call_auto", "name": "create_subagents",
                     "input": {"goal": "分别整理两部分",
                               "items": [{"goal": "整理第一部分"}, {"goal": "整理第二部分"}],
-                              "defer_start": True, "tool_preset": "read_only"}}],
+                              "tool_preset": "read_only"}}],
                 backend=self.name,
             )
         if self.calls == 2:
@@ -1169,8 +1170,16 @@ def test_gateway_wait_receipt_is_model_written_from_structured_facts():
         assert "任务已转到后台" not in result.response
 
 
-def test_create_subagents_accepts_explicit_external_write_target_without_starting():
-    """LLM: explicit user output dirs are allowed unless they hit the dangerous-root policy."""
+def test_create_subagents_accepts_explicit_external_write_target_and_auto_starts(monkeypatch):
+    """LLM: explicit user output dirs are allowed and creation uses host-owned auto-start."""
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.orchestration.lifecycle.auto_start_tasks",
+        lambda _agent, tasks, _params: {
+            "status": "started",
+            "run_ids": [task.id for task in tasks],
+            "started_run_ids": [task.id for task in tasks],
+        },
+    )
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         external_dir = workspace.parent / "external-target"
@@ -1192,13 +1201,13 @@ def test_create_subagents_accepts_explicit_external_write_target_without_startin
                 "goal": "创建一个 txt 文件",
                 "allowed_tools": ["read_file", "write_file"],
                 "output_files": [str(external_dir / "result.txt")],
-                "defer_start": True,
             },
             call_id="create-external-output-subagent",
         )
 
         assert result.ok
         assert "工作区外" not in result.output
+        assert json.loads(result.output)["auto_start"]["status"] == "started"
         assert len(agent.subagents.list_runs()) == 1
         assert agent.subagents.list_runs()[0].attributes["output_files"] == [
             str(external_dir / "result.txt")

@@ -10,8 +10,8 @@
 常用命令：
 
 ```bash
-python3 -m pytest agent_py_agent/tests/test_runtime_gate_integration.py agent_py_agent/tests/test_main_agent_delivery_closeout.py -q
-python3 -m pytest agent_py_agent/tests/test_orchestration_create_subagents_tool.py agent_py_agent/tests/test_orchestration_dispatch_subagents_tool.py -q
+python3 -m pytest agent_py_agent/tests/test_turn_end.py agent_py_agent/tests/test_main_agent_state_machine_contract.py -q
+python3 -m pytest agent_py_agent/tests/test_orchestration_create_subagents_tool.py agent_py_agent/tests/test_orchestration_tools.py agent_py_agent/tests/test_orchestration_tool_specs.py -q
 ```
 
 参考项目映射：

@@ -22,7 +22,7 @@ from agent_py_agent.agent.agent_core._tool_loop_service import _record_tool_call
 from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallRecordParams
 from agent_py_agent.agent.agent_core.tool_model_generation import _native_provider_messages
 from agent_py_agent.agent.backends.base import AnthropicCompatibleBackend, BackendOptions
-from agent_py_agent.agent.backends.tool_ir import AssistantTurn, ToolResult
+from agent_py_agent.agent.backends.tool_ir import ToolResult
 from agent_py_agent.agent.prompting_parts.builder import PromptBuilder, ToolSections
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.tests._tool_runtime_harness import (
@@ -373,46 +373,6 @@ def test_builder_native_drops_tool_record_text(tmp_path):
     assert "TASK" in native_prompt
     # text protocol: the transcript IS folded (unchanged behavior).
     assert "SECRET-BODY" in text_prompt
-
-
-# --- 6: subagent closeout migrates to IR --------------------------------------
-
-
-def test_subagent_closeout_appends_to_ir_history_when_native(tmp_path):
-    from agent_py_agent.agent.agent_core.tool_loop.round_subagent_output import (
-        _record_subagent_result_ir_if_native,
-    )
-
-    agent = _native_agent(tmp_path)
-    params = _params()
-    # simulate the write_file that wrote output.json already being in IR
-    _record(
-        agent, params, tool_rounds=1, idx=1,
-        tool_name="write_file", call_id="toolu_w", arguments={"path": "output.json"},
-        output="WROTE",
-    )
-
-    _record_subagent_result_ir_if_native(agent, params, "[SUBAGENT_RESULT]\n{...}\n[/SUBAGENT_RESULT]")
-
-    # the closeout becomes the trailing assistant turn in IR history.
-    assert isinstance(params.tool_ir_history[-1], AssistantTurn)
-    assert params.tool_ir_history[-1].text.startswith("[SUBAGENT_RESULT]")
-    # write_file call+result pair is still present and paired.
-    assert any(
-        isinstance(item, ToolResult) and item.call_id == "toolu_w"
-        for item in params.tool_ir_history
-    )
-
-
-def test_subagent_closeout_noop_for_text_protocol(tmp_path):
-    from agent_py_agent.agent.agent_core.tool_loop.round_subagent_output import (
-        _record_subagent_result_ir_if_native,
-    )
-
-    agent = _native_agent(tmp_path, protocol="text")
-    params = _params(protocol="text")
-    _record_subagent_result_ir_if_native(agent, params, "[SUBAGENT_RESULT]\n{}")
-    assert params.tool_ir_history == []
 
 
 # --- compact prep: integer-pair drop interface (Step 3/4 contract) ------------

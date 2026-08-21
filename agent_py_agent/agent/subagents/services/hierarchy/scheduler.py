@@ -39,7 +39,6 @@ from .tool_policy import (
 from .write_policy import (
     ChildWriteRootRequest,
     ScheduledWriteRootRequest,
-    inherited_extra_write_roots,
     requested_child_write_roots,
     scheduled_child_extra_write_roots,
 )
@@ -169,7 +168,7 @@ def _create_child_params(request: HierarchyCreateChildRequest) -> CreateRunParam
     return CreateRunParams(
         goal=request.goal,
         thought=spec.thought or hctx.inherited_hierarchy_thought(parent, child_goal=request.goal),
-        plan=spec.plan or ["读取父级 refs", "执行小切片", "写回状态和证据 refs", "等待最终收口"],
+        plan=spec.plan or ["读取父级 refs", "执行当前任务", "向直接父级返回结果"],
         agent_name=agent_name,
         role=request.role,
         parent_id=parent.id,
@@ -194,38 +193,11 @@ def _create_child_params(request: HierarchyCreateChildRequest) -> CreateRunParam
         owner=parent.owner,
         supervisor=parent.id,
         final_owner=parent.final_owner or parent.owner,
-        acceptance_checks=_scheduled_child_checks(
-            spec,
-            role=request.role,
-            goal=request.goal,
-            leaf_write_intent=should_infer_leaf_coding_tools(
-                LeafWriteIntentRequest(
-                    spec=spec,
-                    extra_write_roots=inherited_extra_write_roots(parent),
-                    goal=request.goal,
-                )
-            ),
-        ),
+        # 历史字段只为旧账本反序列化保留；新建后代不再生成第二套机器验收清单。
+        acceptance_checks=[],
         quality_contract=parent.quality_contract,
         context_manifest=child_context_manifest(parent, spec),
         context_packs=child_context_packs(parent, spec),
         extra_write_roots=request.extra_write_roots,
         attributes=hctx.inherited_hierarchy_attributes(parent, spec),
     )
-
-
-def _scheduled_child_checks(
-    spec: HierarchyChildSpec,
-    *,
-    role: str,
-    goal: str,
-    leaf_write_intent: bool,
-) -> list[str]:
-    checks = [str(item) for item in spec.acceptance_checks if str(item).strip()]
-    if checks:
-        return checks
-    if leaf_write_intent:
-        return ["按任务说明交回真实产物、证据 refs 和阻塞项。"]
-    if role or goal:
-        return ["按任务说明交回真实结果、证据 refs 和阻塞项。"]
-    return []

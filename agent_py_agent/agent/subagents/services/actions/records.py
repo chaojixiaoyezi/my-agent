@@ -15,7 +15,6 @@ from ...policies import (
     ACTION_PROBE_OR_REPAIR_CHANNEL,
     ACTION_RECOVER_CHILD_AFTER_PARENT_TIMEOUT,
     ACTION_RECOVER_COORDINATOR_LEADERSHIP,
-    ACTION_REOPEN_FOR_EVIDENCE,
     ACTION_REPAIR_WORK_ORDER,
     ACTION_ROUTE_CAPABILITY_REQUEST,
     ACTION_STOP_NO_PROGRESS_AND_ESCALATE,
@@ -28,7 +27,6 @@ from .handlers import (
     ActionHandlerContext,
     apply_probe_or_repair_channel,
     apply_record_only_action,
-    apply_reopen_for_evidence,
     apply_repair_work_order,
     apply_stop_no_progress_and_escalate,
 )
@@ -44,7 +42,6 @@ ACTION_DISPATCH = {
     ACTION_PROBE_OR_REPAIR_CHANNEL: apply_probe_or_repair_channel,
     ACTION_INSPECT_CHANNEL_PROBE: apply_probe_or_repair_channel,
     ACTION_REPAIR_WORK_ORDER: apply_repair_work_order,
-    ACTION_REOPEN_FOR_EVIDENCE: apply_reopen_for_evidence,
     ACTION_TAKEOVER_OR_REASSIGN: apply_takeover_or_reassign,
     ACTION_RECOVER_COORDINATOR_LEADERSHIP: apply_recover_coordinator_leadership,
     ACTION_RECOVER_CHILD_AFTER_PARENT_TIMEOUT: apply_record_only_action,

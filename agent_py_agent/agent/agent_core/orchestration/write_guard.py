@@ -97,7 +97,7 @@ def _workspace_typo_message(target: Path, roots: list[Path]) -> str:
             "suspected_path_typo=true;"
             f"target={target};"
             f"suggested_target={suggested};"
-            "请使用 suggested_target 重新调用 schedule_child_subagents 或 create_subagents，"
+            "请使用 suggested_target 重新调用 create_subagents，"
             "不要写 capability_request。"
         )
     return ""

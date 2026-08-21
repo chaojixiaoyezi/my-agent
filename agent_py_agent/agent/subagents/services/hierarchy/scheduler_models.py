@@ -63,8 +63,6 @@ class HierarchyScheduleResult:
     # reused_run_ids 是本次复用的已有 child；dispatch_run_ids 是下一步仍适合启动 runner 的 child。
     reused_run_ids: list[str] = field(default_factory=list)
     dispatch_run_ids: list[str] = field(default_factory=list)
-    manual_confirmation_required: bool = True
-    automatic_execution_allowed: bool = False
     quality_advice: QaOrchestrationAdvice | None = None
 
 

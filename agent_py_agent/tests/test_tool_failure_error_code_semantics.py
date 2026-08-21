@@ -346,18 +346,6 @@ def test_cancel_subagents_invalid_status_is_invalid_arguments(tmp_path: Path):
     assert r.error_code != "UNKNOWN_ERROR"
 
 
-# ---- dispatch_subagents：不支持的执行开关→TOOL_INVALID_ARGUMENTS（不是 UNKNOWN_ERROR） ----
-
-
-def test_dispatch_unsupported_exec_param_is_invalid_arguments(tmp_path: Path):
-    from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
-
-    r = DispatchSubagentsTool(_agent(tmp_path)).execute({"apply": True})
-    assert r.ok is False
-    assert r.error_code == "TOOL_INVALID_ARGUMENTS", r.error_code
-    assert r.error_code != "UNKNOWN_ERROR"
-
-
 # ---- resolve_capability_requests：缺参→TOOL_PARAMETER_REQUIRED；run_id 不存在→TOOL_INVALID_ARGUMENTS ----
 
 

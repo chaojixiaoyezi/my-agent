@@ -93,7 +93,7 @@ class SendGuidanceTool(BaseTool):
             "target": {"type": entry.target_type, "id": entry.target_id},
             "targets": [{"type": item.target_type, "id": item.target_id, "guidance_id": item.guidance_id} for item in entries],
             "delivery": entry.delivery,
-            "message": "已写入软提示；目标代理下一轮会读取，不会被强制停止或硬阻断。",
+            "message": "已写入补充消息；目标代理会在当前工具边界或下一轮读取，不会被强制停止。",
         }
         return ToolHandlerOutcome(_TOOL_NAME, True, json.dumps(payload, ensure_ascii=False, indent=2))
 
@@ -101,7 +101,7 @@ class SendGuidanceTool(BaseTool):
 def build_send_guidance_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name=_TOOL_NAME,
-        description="给正在运行的主代理、子代理、孙代理、会话或任务追加一条软提示；只影响下一轮判断，不推进、不验收、不硬卡。",
+        description="给正在运行的主代理、子代理、孙代理、会话或任务追加一条消息；目标会在当前工具边界或下一轮读取。它不负责启动、推进或验收代理。",
         input_schema={
             "type": "object",
             "properties": {
@@ -142,7 +142,7 @@ def build_send_guidance_model_spec() -> ToolModelSpec:
                 "父代理想提醒某个下级换来源、补证据、先写草稿或尽快汇报",
                 "需要给一个 thread/task/case 留下一条后续醒来可见的提示",
             ),
-            avoid_when=("需要真正推进、重跑或恢复子代理时继续用 dispatch_subagents；第一次派工继续用 create_subagents",),
+            avoid_when=("第一次派工使用 create_subagents；要停止运行中的代理使用 cancel_subagents",),
             keywords=("补充提示", "引导", "纠偏", "催一下", "steer", "guidance", "message"),
             examples=(
                 '{"tool":"send_guidance","target":{"type":"agent_run","id":"child-1"},"message":"换一个数据来源核对，不要重复查同一个页面。"}',

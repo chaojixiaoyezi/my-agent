@@ -278,6 +278,27 @@
 
 以后新增长期设计，只写摘要和链接，不再把完整方案塞回这个文件。
 
+## 2026-08-21 子代理递归控制面与自然收口【状态：本地已落地，待 `.7` 真机复验】
+
+- 问题根因：历史实现同时暴露“创建—调度—推进”多个模型工具，并用
+  `acceptance_checks` / `verification_status` / 交付扫描器二次裁决任务是否完成。这使模型
+  需要人工“推”已创建的 child，并会因缺验收字段、结果格式或第二状态而挂起。
+- 完成权威：普通主代理与子代理都只读宿主 `turn_end.reason`，枚举为
+  `completed/blocked/max-tokens/aborted/error/interrupted`。不解析回复文案，不扫描目录，
+  不读测试数、证据数或历史 verification 状态来改写完成。
+- 递归工具面：根与后代共用唯一 `create_subagents`，创建成功后由宿主自动启动。
+  模型侧 `dispatch_subagents` 与 `schedule_child_subagents` 已删除；内部 dispatcher 仍保留，
+  只负责 runner 启动、租约、恢复和有界重试。
+- 已删除无人使用的 `SubagentDispatchEnvelope` 与 decoder 分支。宿主为自动启动子进程保留内部
+  `subagents-dispatch` 入口，但普通状态页、doctor 和模型 prompt 都不再要求用户或模型手动催跑。
+- 父级日常动作只保留查看树、发补充消息与打断/取消。结构化 capability 决策仍是安全
+  授权入口，不属于调度推动工具。子代理、孙代理和根的差异只由
+  `run_id/parent_run_id/root_run_id`、工作区和递减权限表达。
+- 历史兼容：旧 task 中的 `acceptance_checks` / `verification_status` 字段暂保留以读取已有账本，
+  但不进入当前 TaskEnvelope、runner 模型摘要、父级 wake、树摘要或完成判定。
+- 默认资源护栏收紧为同 owner 最多 6 个未结束 child、每次递归创建最多 4 个、
+  `runner_concurrency=auto` 时同时运行最多 4 个。这是资源边界，不是按任务文字硬编排子代理数量。
+
 ## 2026-08-18 候选消息实时流式 + 每轮阶段计时【状态：本地 focused 通过，待真机部署复验】
 
 - 底座问题（真机实测 18.5s/简单回复）：模型→Gateway 已是流式，但 Gateway→TUI 把正文暂存

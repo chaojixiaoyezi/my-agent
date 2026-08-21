@@ -45,9 +45,9 @@ def test_create_run_uses_template_defaults_for_explicit_role(tmp_path):
     )
 
     assert task.role == "coordinator"
-    assert "schedule_child_subagents" in task.allowed_tools
+    assert "create_subagents" in task.allowed_tools
     assert "send_guidance" in task.allowed_tools
-    assert any("协调子代理" in check for check in task.acceptance_checks)
+    assert task.acceptance_checks == []
 
 
 def test_unknown_llm_role_keeps_base_tools_without_template_fallback(tmp_path):
@@ -63,7 +63,7 @@ def test_unknown_llm_role_keeps_base_tools_without_template_fallback(tmp_path):
     assert task.role == "frontend_footer_builder"
     assert "read_file" in task.allowed_tools
     assert "write_file" in task.allowed_tools
-    assert not any("执行子代理" in check for check in task.acceptance_checks)
+    assert task.acceptance_checks == []
 
 
 def test_create_run_applies_reporter_contract(tmp_path):
@@ -72,7 +72,7 @@ def test_create_run_applies_reporter_contract(tmp_path):
     task = manager.create_run(goal="collect evidence", thought="report only", plan=["read", "report"], role="reporter")
 
     assert task.role == REPORTER_ROLE
-    assert any("evidence_refs" in check for check in task.acceptance_checks)
+    assert task.acceptance_checks == []
 
 
 def test_create_run_applies_checker_contract(tmp_path):
@@ -84,7 +84,7 @@ def test_create_run_applies_checker_contract(tmp_path):
     assert "read_file" in task.allowed_tools
     assert "write_file" in task.allowed_tools
     assert "apply_patch" in task.allowed_tools
-    assert any("concrete findings" in check for check in task.acceptance_checks)
+    assert task.acceptance_checks == []
 
 
 def test_hierarchy_scheduler_applies_role_contracts_to_children(tmp_path):

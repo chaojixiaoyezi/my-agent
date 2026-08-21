@@ -126,3 +126,7 @@ ignore = [
   "F401",   # unused import — historical re-exports in __init__.py
   "F811",   # redefined name — historical test imports
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# 真实压力脚本故意保留 f-string 形态，便于同组 prompt 后续插入轮次变量。
+"scripts/live_lab/main_agent_limit_cases.py" = ["F541"]

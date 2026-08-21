@@ -7,8 +7,7 @@ from __future__ import annotations
 
 import json
 
-from agent_py_agent.agent.agent_core.orchestration.dispatch.tool import (
-    DispatchSubagentsTool,
+from agent_py_agent.agent.agent_core.orchestration.dispatch.tool_helpers import (
     _dispatch_capability_config,
 )
 from agent_py_agent.agent.capability import CapabilityRouter
@@ -221,22 +220,16 @@ def test_dispatch_tool_reads_runtime_capability_config(tmp_path):
     assert cfg.subagent_run_timeout == 1500
 
 
-def test_dispatch_tool_reports_capability_config_load_error(tmp_path):
+def test_automatic_dispatch_config_reports_capability_config_load_error(tmp_path):
     config_path = tmp_path / "capability_config.yaml"
     config_path.mkdir()
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     agent.capability_config_path = config_path
-    agent.dispatch_subagents = lambda *_args, **_kwargs: type(
-        "Report",
-        (),
-        {"dry_run": True, "summary": {}, "records": []},
-    )()
+    _dispatch_capability_config(agent)
 
-    result = DispatchSubagentsTool(agent).execute({"dry_run": True})
-
-    payload = json.loads(result.output)
-    assert payload["capability_config_load_error"]["context"] == "dispatch.capability_config.load"
-    assert payload["capability_config_load_error"]["path"] == str(config_path)
+    payload = agent._capability_config_load_error
+    assert payload["context"] == "dispatch.capability_config.load"
+    assert payload["path"] == str(config_path)
 
 
 def test_task_config_overlay_ref_loads_as_runtime_layer(tmp_path):

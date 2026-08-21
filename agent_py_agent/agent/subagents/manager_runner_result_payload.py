@@ -5,13 +5,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from ..turn_end import infer_turn_end_reason
 from .models import (
     SUBAGENT_FAILURE_STATUSES,
     SubAgentParsedOutput,
     SubAgentTask,
     TaskStatus,
-    VerificationStatus,
-    task_has_status,
     task_status_in,
 )
 from .result_contexts import OutputPayloadContext
@@ -33,6 +32,7 @@ class RecordRunnerResultParams:
     backend: str = ""
     tool_rounds: int = 0
     status: str = ""
+    turn_end_reason: str = ""
     verification_status: str = ""
     failure_type: str = ""
     structured_output: SubAgentParsedOutput | None = None
@@ -90,6 +90,7 @@ class _ApplyStatusParams:
     patches: list
     lessons: list
     next_actions: list
+    turn_end_reason: str
 
 
 @dataclass
@@ -149,7 +150,8 @@ class _CapDataParams:
 
 def _runner_compute_blockers(ok, status, parsed, message):
     """Compute blockers list based on task state."""
-    if not ok or task_status_in(status, SUBAGENT_FAILURE_STATUSES):
+    del ok
+    if task_status_in(status, SUBAGENT_FAILURE_STATUSES):
         return [parsed.blocked_reason or message]
     return []
 
@@ -251,6 +253,7 @@ def _output_payload_context(extracted: _ApplyStatusParams, runner_meta: dict, ca
         lessons=extracted.lessons,
         blockers=blockers,
         next_actions=extracted.next_actions,
+        turn_end_reason=extracted.turn_end_reason,
         structured_repair_attempted=cap_data.get("structured_repair_attempted", False),
         structured_repair_ok=cap_data.get("structured_repair_ok", False),
         structured_repair_error=cap_data.get("structured_repair_error", ""),
@@ -288,15 +291,8 @@ def apply_status_and_build_payload(
     params: RecordRunnerResultParams,
     extracted: _ApplyStatusParams,
     now: float,
-    *,
-    owner_home: str = "",
-    repo=None,
 ) -> tuple[dict, BuildAndPersistContext]:
-    """Apply status to task and build output payload.
-
-    repo：owner runtime.db 权威库（R3 验收账本落账用）；None =
-    LOCAL_UNMANAGED，跳过落账（兼容既有测试调用，行为不变）。
-    """
+    """Apply host-owned turn outcome to task state and build its payload."""
     result_meta = _runner_make_result_meta(params.ok, params.message, params.response, params.dry_run)
     cap_data = _runner_make_cap_data(
         _CapDataParams(
@@ -314,17 +310,20 @@ def apply_status_and_build_payload(
         "verification_status": params.verification_status,
         "failure_type": params.failure_type,
     }
+    turn_end_reason = infer_turn_end_reason(
+        explicit=params.turn_end_reason,
+        runtime_status=_runtime_status_from_runner_result(params),
+    )
+    extracted.task.turn_end_reason = turn_end_reason
+    extracted.turn_end_reason = turn_end_reason
+    params.turn_end_reason = turn_end_reason
     apply_runner_result_fields(
         RunnerResultFieldParams(extracted.task, result_meta, status_context, extracted.parsed, now)
-    )
-    _machine_verify_done_acceptance(
-        extracted.task, extracted.tests, owner_home=owner_home, repo=repo
     )
     final_ok = result_meta["ok"]
     final_message = result_meta["message"]
     blockers = _runner_compute_blockers(final_ok, extracted.task.status, extracted.parsed, final_message)
-    # 机器验收失败事实要随本轮 output_payload 出站,父代理/返工门立刻可见,
-    # 而不是只活在持久化后的 task.blockers 里。
+    # 仅传递已有运行阻塞（权限、通道、工具错误）；不在这里生成质量验收 blocker。
     for blocker in getattr(extracted.task, "blockers", []) or []:
         if blocker not in blockers:
             blockers.append(blocker)
@@ -338,69 +337,18 @@ def apply_status_and_build_payload(
     )
 
 
-def _machine_verify_done_acceptance(
-    task: SubAgentTask, tests: list, *, owner_home: str = "", repo=None
-) -> None:
-    """DONE 任务的验收证据绑定机器验证(问题3)。
+def _runtime_status_from_runner_result(params: RecordRunnerResultParams) -> str:
+    """Map the existing runner status to turn-end runtime facts without reading prose."""
 
-    模型自述的 DONE/VERIFIED 不再自动成立:对 tests[] 中可机验条目逐条做进程内
-    安全验证(file_check/content_check/static_site_check/artifact_integrity),
-    全部通过才保持 VERIFIED,任何失败/不可验都降回 UNVERIFIED 并打真实失败
-    事实——由现有 ISSUE_UNVERIFIED_DONE → BLOCKED 返工门(policies.py)要求模型
-    重做补齐证据。审计 R0:command/working_dir 不再被机器执行,只作 inert
-    evidence;未带可机验方式的 tests 一律按不可验处理。来源 worker(ledger
-    权威)由 verify_done_acceptance 内部跳过。
-
-    owner_home 来自 manager.owner_scope_root = 工具循环 ShellTool 的
-    path_access_policy.owner_scope_root(同一把沙箱门):非空时 file_check 的
-    路径边界放开到 owner home(注册表背书的产物路径可能在工作区外);空 =
-    无路径限制。绝不能读 task.effective_permissions.owner_home(快照默认值在
-    无沙箱环境也非空,会把合法普通执行误判成必须 bwrap → 假失败,子代理永远
-    收不了口)。
-    """
-    if not task_has_status(task, TaskStatus.DONE):
-        return
-    from ..tooling.sandbox import SandboxUnavailable
-    from .services.acceptance_verification import (
-        AcceptanceVerificationResult,
-        verify_done_acceptance,
-    )
-
-    try:
-        result = verify_done_acceptance(task, tests, owner_home=owner_home)
-    except SandboxUnavailable:
-        result = AcceptanceVerificationResult(
-            checked=False,
-            passed=False,
-            reason="SANDBOX_UNAVAILABLE",
-        )
-    # R3 权威验收账本落账（R6 gate：机器裁决持久化）。纯落账 fail-silent，
-    # 不改变下方 VERIFIED/UNVERIFIED 裁决与 blockers 路径。
-    from .services.acceptance_ledger import ledgerize_done_acceptance
-
-    ledgerize_done_acceptance(task, tests, result, owner_home=owner_home, repo=repo)
-    if result.checked and result.passed:
-        task.verification_status = VerificationStatus.VERIFIED.value
-        return
-    task.verification_status = VerificationStatus.UNVERIFIED.value
-    if not result.checked:
-        _append_acceptance_blocker(
-            task,
-            f"机器验收不可用: {result.reason}(DONE 未绑定机器执行,须补齐可执行的 tests)",
-        )
-        return
-    for failure in result.failures:
-        _append_acceptance_blocker(
-            task,
-            f"机器验收未通过: {failure['name']} - {failure['message'][:160]}",
-        )
-    if not result.failures:
-        _append_acceptance_blocker(task, "机器验收未通过: 存在未通过的验收测试")
-
-
-def _append_acceptance_blocker(task: SubAgentTask, blocker: str) -> None:
-    blockers = getattr(task, "blockers", None)
-    if blockers is None:
-        return
-    if blocker not in blockers:
-        blockers.append(blocker)
+    status = str(params.status or "").strip().upper()
+    if status == TaskStatus.BLOCKED.value:
+        return "blocked"
+    if status in {TaskStatus.CANCELLED.value, TaskStatus.ABANDONED.value}:
+        return "cancelled"
+    if status in {
+        TaskStatus.FAILED.value,
+        TaskStatus.TIMEOUT.value,
+        TaskStatus.CHANNEL_ERROR.value,
+    }:
+        return "error"
+    return "ok" if params.ok else "interrupted"

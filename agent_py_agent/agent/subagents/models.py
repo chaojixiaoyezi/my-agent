@@ -295,13 +295,14 @@ def task_has_status(task: object, status: TaskStatus) -> bool:
     return task_status_in(getattr(task, "status", ""), {status.value})
 
 
-def task_is_done_verified(task: object) -> bool:
+# LLM: 子代理完成权只读 host-owned TaskStatus.DONE，verification_status 仅作历史展示。
+# 函数用途: 判断子代理是否已正常结束且不再需要续派。
+def task_is_completed(task: object) -> bool:
     try:
         status = normalize_task_status(getattr(task, "status", ""))
-        verification = normalize_verification_status(getattr(task, "verification_status", ""))
     except ValueError:
         return False
-    return status == TaskStatus.DONE.value and verification == VerificationStatus.VERIFIED.value
+    return status == TaskStatus.DONE.value
 
 
 def task_has_failure_status(task: object) -> bool:
@@ -321,7 +322,7 @@ def task_is_dispatch_ineligible(task: object) -> bool:
 
 
 def task_is_handled_after_parent_timeout(task: object) -> bool:
-    if task_is_done_verified(task):
+    if task_is_completed(task):
         return True
     return task_status_in(getattr(task, "status", ""), SUBAGENT_HANDLED_TERMINAL_STATUSES)
 
@@ -329,7 +330,7 @@ def task_is_handled_after_parent_timeout(task: object) -> bool:
 def task_needs_continuation(task: object, *, closed_statuses: frozenset[str] | set[str]) -> bool:
     if task_status_in(getattr(task, "status", ""), closed_statuses):
         return False
-    return not task_is_done_verified(task)
+    return not task_is_completed(task)
 
 
 @dataclass
@@ -476,7 +477,7 @@ __all__ = [
     "task_has_failure_status",
     "task_has_status",
     "task_is_dispatch_ineligible",
-    "task_is_done_verified",
+    "task_is_completed",
     "task_is_handled_after_parent_timeout",
     "task_needs_continuation",
     "task_status_in",

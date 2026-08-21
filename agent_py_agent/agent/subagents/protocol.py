@@ -1,11 +1,11 @@
 
 from __future__ import annotations
 
-"""Subagent protocol contracts.
+"""模块用途: 定义父子 Agent 共用的地址、工具、写入和恢复协议。
 
-`CreateRunParams` 适合代码内部调用，但父子代理之间更需要稳定“线协议”。
-这里的 TaskAddress / TaskEnvelope 是第一版协议包：先把地址、工具、写入、验收和上下文 refs
-整理成机器字段，后续 dispatch、recovery、QA 都可以读同一种结构。
+LLM: TaskEnvelope 只承载执行与权限事实；不得恢复 acceptance
+或 verification 字段作为启动、完成或恢复门。历史 SubAgentTask 中的同名
+字段只是持久化兼容，不进入当前协议包。
 """
 
 from dataclasses import asdict, dataclass
@@ -73,7 +73,6 @@ class TaskEnvelope:
     plan: list[str] = dataclass_field(default_factory=list)
     tool_contract: dict[str, object] = dataclass_field(default_factory=dict)
     write_contract: dict[str, object] = dataclass_field(default_factory=dict)
-    acceptance: dict[str, object] = dataclass_field(default_factory=dict)
     context_refs: dict[str, object] = dataclass_field(default_factory=dict)
     audit: dict[str, object] = dataclass_field(default_factory=dict)
 
@@ -109,24 +108,17 @@ def build_task_envelope(task: SubAgentTask, *, all_tasks: list[SubAgentTask] | N
         plan=[current_model_text(item) for item in _task_list(task, "plan")],
         tool_contract=_tool_contract(task),
         write_contract=build_write_contract(task),
-        acceptance=_acceptance_contract(task),
         context_refs=_context_refs(task),
         audit={"created_at": _task_float(task, "created_at"), "updated_at": _task_float(task, "updated_at"), "contract_version": "v1"},
     )
 
 
+# LLM: 预检只守住能启动任务的客观字段，不得要求质量验收清单。
+# 函数用途: 检查线协议是否至少包含可执行的任务目标。
 def validate_task_envelope(envelope: TaskEnvelope) -> ProtocolValidationReport:
     issues: list[ProtocolIssue] = []
     if not envelope.goal.strip():
         issues.append(_protocol_issue("missing_goal", "goal", "TaskEnvelope.goal is required."))
-    if not list(envelope.acceptance.get("checks") or []):
-        issues.append(
-            _protocol_issue(
-                "missing_acceptance_checks",
-                "acceptance.checks",
-                "TaskEnvelope.acceptance.checks must include at least one caller-visible check.",
-            )
-        )
     return ProtocolValidationReport(ok=not issues, issues=issues)
 
 
@@ -198,13 +190,6 @@ def _tool_contract(task: SubAgentTask) -> dict[str, object]:
         "open_request_count": len([item for item in _task_list(task, "capability_requests") if _request_is_open(item)]),
         "grant_count": len(_task_list(task, "capability_grants")),
         "gap_count": len(_task_list(task, "capability_gaps")),
-    }
-
-
-def _acceptance_contract(task: SubAgentTask) -> dict[str, object]:
-    return {
-        "checks": [current_model_text(item) for item in _task_list(task, "acceptance_checks")],
-        "required_outputs": current_model_ref_list(_task_list(task, "artifact_refs")),
     }
 
 

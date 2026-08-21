@@ -26,15 +26,17 @@ def test_recovery_orchestrator_records_dispatch_step_for_checkpoint(tmp_path: Pa
     step = report.steps[0]
     assert step.run_id == task.id
     assert step.orchestration_action == "dispatch_original_run"
-    assert step.next_actor == "dispatcher"
+    assert step.next_actor == "system_dispatcher"
     assert step.strategy_snapshot["recovery_refs"]
-    assert step.suggested_tool_call["tool"] == "dispatch_subagents"
-    assert step.suggested_tool_call["run_ids"] == [task.id]
+    assert step.suggested_tool_call == {
+        "tool": "inspect_agent_tree",
+        "run_id": task.id,
+    }
     ledger = _ledger_rows(tmp_path)
     assert ledger[-1]["schema_version"] == "subagent_recovery_orchestration.v1"
     assert ledger[-1]["step_index"] == 1
     assert ledger[-1]["orchestration_action"] == "dispatch_original_run"
-    assert ledger[-1]["next_actor"] == "dispatcher"
+    assert ledger[-1]["next_actor"] == "system_dispatcher"
     assert ledger[-1]["strategy_snapshot"]["recovery_refs"]
     assert ledger[-1]["dry_run"] is True
 

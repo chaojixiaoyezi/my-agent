@@ -25,7 +25,7 @@ def test_task_address_v1_captures_lineage_and_workspace_refs(tmp_path: Path) -> 
     assert address.workspace_ref.endswith(leaf.id)
 
 
-def test_task_envelope_v1_contains_address_tool_write_and_acceptance(tmp_path: Path) -> None:
+def test_task_envelope_v1_contains_address_tool_and_write_contract(tmp_path: Path) -> None:
     from agent_py_agent.agent.subagents.protocol import build_task_envelope
 
     manager, root, _child, leaf = _make_protocol_tree(tmp_path)
@@ -60,7 +60,7 @@ def test_task_envelope_v1_contains_address_tool_write_and_acceptance(tmp_path: P
         str(tmp_path / "build"),
     ]
     assert payload["write_contract"]["forbidden_write_roots"] == ["/System"]
-    assert payload["acceptance"]["checks"] == ["index.html 存在", "页面没有空链接"]
+    assert "acceptance" not in payload
 
 
 def test_task_envelope_write_contract_includes_granted_filesystem_roots(tmp_path: Path) -> None:
@@ -107,10 +107,7 @@ def test_protocol_validation_reports_structured_errors(tmp_path: Path) -> None:
     report = validate_task_envelope(build_task_envelope(manager.load(task.id), all_tasks=manager.list_runs()))
 
     assert report.ok is False
-    assert [issue.code for issue in report.issues] == [
-        "missing_goal",
-        "missing_acceptance_checks",
-    ]
+    assert [issue.code for issue in report.issues] == ["missing_goal"]
     assert report.issues[0].kind == "ProtocolError"
 
 
@@ -140,28 +137,6 @@ def test_tool_preflight_reports_missing_tool_and_write_root_without_stripping_ba
     assert result.effective_tools == ["read_file", "write_file"]
 
 
-def test_write_contract_issues_workspace_writable_not_flagged() -> None:
-    """学 会话运行时(权限只看有没有可写区):子代理有可写工作区时,即使没"外部产物根"也不报
-    missing_allowed_write_roots——它写自己 output 合法。只有连可写区都没有才报。真机实测
-    这个误报曾把 24/39 子代理吓退成 BLOCKED/ABANDONED。"""
-    from types import SimpleNamespace
-
-    from agent_py_agent.agent.subagents.protocol_preflight import _write_contract_issues
-
-    # 有验收 + 无外部产物根 + 有工作区可写 → 不报(修复点)
-    has_workspace = SimpleNamespace(
-        acceptance={"checks": ["build/index.html 存在"]},
-        write_contract={"product_write_roots": [], "allowed_write_roots": ["/task/work/output"]},
-    )
-    assert _write_contract_issues(has_workspace) == []
-    # 有验收 + 连可写区都没有 → 仍报(必要检查保留)
-    no_writable = SimpleNamespace(
-        acceptance={"checks": ["build/index.html 存在"]},
-        write_contract={"product_write_roots": [], "allowed_write_roots": []},
-    )
-    assert [issue.code for issue in _write_contract_issues(no_writable)] == ["missing_allowed_write_roots"]
-
-
 def test_recovery_strategy_exports_address_and_envelope_refs(tmp_path: Path) -> None:
     from agent_py_agent.agent.subagents.services.recovery.strategy import (
         SubagentRecoveryStrategyRequest,
@@ -186,7 +161,7 @@ def test_recovery_strategy_exports_address_and_envelope_refs(tmp_path: Path) -> 
 
     assert strategy["address"]["run_id"] == task.id
     assert strategy["task_envelope"]["address"]["run_id"] == task.id
-    assert strategy["task_envelope"]["acceptance"]["checks"] == ["index.html 存在"]
+    assert "acceptance" not in strategy["task_envelope"]
     assert strategy["recommended_action"] == "takeover"
     assert strategy["recovery_mode"] == "takeover_from_checkpoint"
 

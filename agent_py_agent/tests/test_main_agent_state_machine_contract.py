@@ -21,13 +21,13 @@ def test_run_state_snapshot_projects_running_without_progress_to_waiting_for_loc
     assert snapshot["can_closeout"] is False
 
 
-def test_run_state_snapshot_projects_done_without_acceptance_to_verifying():
+def test_run_state_snapshot_projects_done_without_machine_acceptance_to_done():
     from agent_py_agent.agent.contracts.state_machine import run_state_snapshot_from_task
 
     task = SimpleNamespace(
         id="run-2",
         status="DONE",
-        verification_status="VERIFIED",
+        verification_status="UNVERIFIED",
         channel_status="OK",
         has_progress=True,
     )
@@ -65,6 +65,24 @@ def test_run_state_snapshot_projects_verified_done_to_done():
         id="run-4",
         status="DONE",
         verification_status="VERIFIED",
+        channel_status="OK",
+        has_progress=True,
+    )
+
+    snapshot = run_state_snapshot_from_task(task)
+
+    assert snapshot["lifecycle_phase"] == "DONE"
+    assert snapshot["recovery_decision"]["action"] == "closeout"
+    assert snapshot["can_closeout"] is True
+
+
+def test_run_state_snapshot_ignores_legacy_verification_value_for_done():
+    from agent_py_agent.agent.contracts.state_machine import run_state_snapshot_from_task
+
+    task = SimpleNamespace(
+        id="run-legacy-verification",
+        status="DONE",
+        verification_status="FAILED",
         channel_status="OK",
         has_progress=True,
     )

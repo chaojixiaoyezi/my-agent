@@ -4,7 +4,7 @@
 
 ## create_subagents
 
-用途：让主代理创建一个或多个子代理。默认创建后立即启动，只有显式 `defer_start: true` 才只建不跑。
+用途：让当前代理创建一个或多个直接下级。主代理、子代理和孙代理都使用这一个入口；创建后立即由宿主启动。
 
 关键原则：
 
@@ -38,7 +38,8 @@
 
 用途：只读查看主代理、子代理、孙代理状态树。
 
-它不会创建、调度、恢复或验收任务。要推进已有子代理时用 `dispatch_subagents`；只是给运行中的代理补一句话时用 `send_guidance`。
+它不会创建、恢复或验收任务。正常运行的 child 会自主继续并在结束时自动通知直接父级；只是给运行中的
+代理补一句话时用 `send_guidance`，需要停止时用 `cancel_subagents`。
 
 子代理状态、进度、channel 状态和内部 refs 都以这个工具为模型可见状态面。普通文件工具和
 shell 不应该读取或遍历 `work/agents/<run_id>/canonical_state.json`、`final_report.md`、
@@ -58,28 +59,14 @@ shell 不应该读取或遍历 `work/agents/<run_id>/canonical_state.json`、`fi
 如果参数里有结构化 `run_id` / `task_id` / `root_id`，或指定了真实存在的子代理 run id，
 返回值会附带 `suggested_tool_call: inspect_agent_tree`，让模型直接切到代理树状态面。
 
-## dispatch_subagents
+## 内部自动启动（不是模型工具）
 
-用途：推进、恢复或重跑已有子代理。
+代码里的 dispatcher、scheduler 和 worker pool 仍负责进程选择、并发额度、重启恢复和完成通知，但它们不是
+模型可见工具。模型不能也不需要“再推一下”已创建的 child；创建成功就表示已经进入自动启动链。
 
-关键原则：
-
-- 查看状态只用 `inspect_agent_tree`，不要为了看一眼触发调度。
-- 后台自动 dispatch 必须使用创建这些 run_id 的同一个 `workspace_root`；cwd 只服务
-  Python 模块加载，不能决定子代理树归属。
-- `dry_run` 是唯一预览开关，`true` 只预览，`false` 真实推进。
-- `run_ids` 用于精确指定要推进的子代理。
-- `max_runners` 控制本轮最多推进几个，不知道时省略。
-
-## schedule_child_subagents
-
-用途：当前子代理在自己的名下继续创建下一层子/孙代理，保持任务树层级可恢复。
-
-关键原则：
-
-- 顶层主代理第一次派工继续用 `create_subagents`。
-- 子代理创建自己的下级时用这个工具。
-- 平级补充提示用 `send_guidance`，推进已有下级用 `dispatch_subagents`。
+所有层级继续拆分时仍调用 `create_subagents`。运行中要补充上下文用 `send_guidance`，要查看用
+`inspect_agent_tree`，要停止用 `cancel_subagents`；已经结束而目标仍有缺口时，创建一个分工明确的新 child，
+并通过 `replacement_for_run_ids` 保留接管关系。
 
 ## raise_event
 

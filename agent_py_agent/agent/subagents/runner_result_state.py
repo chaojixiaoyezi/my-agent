@@ -162,6 +162,15 @@ def _apply_status_fields(task, status_context, parsed) -> None:
         task.blockers = []
         _resolve_stale_capability_requests(task)
         return
+    if _source_worker_still_has_work(task):
+        # LLM: 持久来源账本只决定“还要不要续派”，不是质量验收。
+        # 函数用途: 来源窗口仍开放时保持同一 run 可续派，不被单轮自然回复提前关闭。
+        task.status = TaskStatus.PENDING.value
+        task.verification_status = VerificationStatus.UNVERIFIED.value
+        task.failure_type = ""
+        task.blockers = []
+        task.ended_at = 0.0
+        return
     if _source_worker_completed_by_ledger(task):
         # LLM: Source workers deliver verdicts/findings into durable ledgers;
         # they never need a second report-file closeout path.

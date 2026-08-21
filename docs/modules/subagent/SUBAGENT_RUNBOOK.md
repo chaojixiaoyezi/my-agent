@@ -1,5 +1,18 @@
 # Subagent Runbook
 
+## 模型可见控制面
+
+父代理、子代理和孙代理共用递归语义：
+
+- `create_subagents`：创建下一层协作者，成功后由宿主立即自动启动。
+- `inspect_agent_tree`：只读查看状态、进展、阻塞和结果 refs。
+- `send_guidance`：像用户给主代理补充消息一样，向指定后代追加普通上下文。
+- `cancel_subagents`：打断或取消指定后代。
+- `resolve_capability_requests`：只处理结构化权限缺口，它不是催办/推进工具。
+
+不再存在模型可见的 `dispatch_subagents` 或 `schedule_child_subagents`。代码中保留的
+internal dispatcher 是 Gateway 内的 runner 启动、租约、恢复和有界重试引擎，不由模型手工推动。
+
 ## 看树
 
 优先使用 `inspect_agent_tree`。它应该展示 run_id、root_id、parent_id、status、channel_status、当前步骤、未完成原因、失败原因、running_seconds、seconds_since_progress、artifact refs 和 work refs。
@@ -11,6 +24,8 @@
 这样 compact、用户插话和后台唤醒都能看懂。
 
 `create_subagents` 开了自动启动时，后台会对本批 run_id 跑一轮精确 dispatch，并启动对应 runner；它不走 watch 循环，避免和 gateway/daemon 的观察锁互相抢占。主代理不需要立刻 `wait` 退出当前任务，下一步应该按工具返回的提示 inspect、继续自己能做的部分，或等后台唤醒再看树。
+这里的 dispatch 只是宿主内部自动启动引擎，不是模型可见工具；创建成功即自动启动，
+父代理不需要再做一次人工“推进”。
 后台自动启动必须继承父代理当前 `workspace_root`，不能用后台进程的 cwd 重新推导任务树；
 否则会出现父侧创建在一棵树、后台 dispatch 到另一棵树，run_id 全部查不到的假 `PLANNING`。
 
@@ -24,11 +39,12 @@
 2. 写 CANCELLED/ABANDONED 和审计。
 3. 废弃 active attempt。
 4. 尽量 interrupt/terminate 已知 pid/session。
-5. 父代理说明原因后接管、重派或汇总。
+5. 父代理说明原因后自己接管、通过 `create_subagents` 创建替代者，或汇总已有结果。
 
 ## 汇总
 
-子代理内部 `final_report.md` 是证据，不是用户最终交付。父代理读 refs 和必要正文后，把最终报告写当前 task `output/` 或用户指定目录，并在 task workspace 记录索引和验收。
+子代理内部 `final_report.md` 是诊断引用，不是用户最终交付。父代理读 refs 和必要正文后，
+根据真实工具结果自然汇总；如用户要求文件，写入当前 task `output/` 或用户指定目录并记录索引。
 
 父代理汇总优先顺序：
 

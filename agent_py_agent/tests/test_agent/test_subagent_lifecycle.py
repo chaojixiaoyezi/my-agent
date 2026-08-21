@@ -1,9 +1,9 @@
 """LLM: Tests for core subagent lifecycle: capability records, evidence
-requirements, work-order validation, takeover, board, due-check, and
+storage, work-order validation, takeover, board, due-check, and
 channel probe status recording.
 
 给人看的解释：
-测试子代理核心生命周期：能力记录、证据要求、工单校验、接管、
+测试子代理核心生命周期：能力记录、证据存储、工单校验、接管、
 看板、巡检、通道状态探测。
 """
 
@@ -65,8 +65,8 @@ def test_subagent_capability_records():
         assert "web_fetch" in loaded_child.allowed_tools
 
 
-def test_subagent_fake_done_requires_evidence():
-    """LLM: Verifies that setting DONE without evidence raises ValueError."""
+def test_subagent_done_status_does_not_require_machine_evidence():
+    """LLM: DONE is a lifecycle fact; optional evidence is not a completion gate."""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(subagent_workspace="subs")
@@ -78,31 +78,14 @@ def test_subagent_fake_done_requires_evidence():
             acceptance_checks=["按钮点击有响应", "刷新页面不 404"],
         )
 
-        try:
-            agent.subagents.lifecycle.set_status(task.id, "DONE", require_evidence=True)
-        except ValueError as exc:
-            assert "缺少验收证据" in str(exc)
-        else:
-            raise AssertionError("没有验收证据时不应该允许 DONE")
-
-        evidence = agent.subagents.lifecycle.record_evidence(
-            task.id,
-            RecordEvidenceParams(
-                kind="command",
-                summary="运行 smoke test 通过",
-                command="python3 smoke_test.py",
-            ),
-        )
         done = agent.subagents.lifecycle.set_status(
             task.id,
             "DONE",
-            result="按钮交互已完成并通过 smoke test。",
-            require_evidence=True,
+            result="按钮交互本轮已经自然结束。",
         )
 
-        assert evidence.ok
         assert done.status == "DONE"
-        assert done.verification_status == "VERIFIED"
+        assert done.verification_status == "UNVERIFIED"
         assert done.result
 
 
@@ -209,7 +192,6 @@ def test_subagent_board_scales_and_flags():
         assert board.summary["total"] == 25
         assert len(board.recent) == 10
         assert any("open_capability_request" in item.risk_flags for item in board.hot_list)
-        assert any("done_without_evidence" in item.risk_flags for item in board.hot_list)
         assert any("blocked" in item.risk_flags for item in board.hot_list)
         assert (root / "subs" / "subagent_board.json").exists()
         assert (root / "subs" / "SUBAGENT_BOARD.md").exists()
@@ -260,23 +242,13 @@ def _make_due_check_stale_active_run(agent):
     Path(loaded.acceptance_file).unlink()
 
 
-def _make_due_check_done_without_evidence(agent):
-    done = agent.subagents.create_run(
-        goal="假完成样本",
-        thought="没有证据就标记完成。",
-        plan=["标记完成"],
-    )
-    agent.subagents.lifecycle.set_status(done.id, "DONE")
-
-
 def test_subagent_due_check_report():
-    """LLM: Verifies due-check detects stale heartbeats, timeouts, fake-done, and gaps."""
+    """LLM: Verifies due-check detects objective runtime, channel, and capability faults."""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(subagent_workspace="subs")
         agent = SimpleAgent(cfg, root)
         _make_due_check_stale_active_run(agent)
-        _make_due_check_done_without_evidence(agent)
 
         report = agent.subagents.board.write_due_check(
             CapabilityConfig(
@@ -292,8 +264,6 @@ def test_subagent_due_check_report():
         assert "open_capability_gap" in kinds
         assert "heartbeat_stale" in kinds
         assert "run_timeout" in kinds
-        assert "fake_done_risk" in kinds
-        assert "unverified_done" in kinds
         assert report.summary["P0"] >= 1
         assert (root / "subs" / "subagent_due_check.json").exists()
         assert (root / "subs" / "SUBAGENT_DUE_CHECK.md").exists()

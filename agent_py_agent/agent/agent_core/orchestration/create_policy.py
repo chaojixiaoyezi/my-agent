@@ -289,11 +289,11 @@ def _create_run_params_from_build(request: CreateRunBuildRequest) -> CreateRunPa
         owner=str(raw_params.get("owner") or _default_owner_id(request.agent)).strip(),
         supervisor=str(raw_params.get("supervisor") or "parent").strip(),
         final_owner=str(raw_params.get("final_owner") or "").strip(),
-        acceptance_checks=string_list(raw_params.get("acceptance_checks"), TOOL_TEXT_LIST_OPTIONS),
+        acceptance_checks=[],
         extra_write_roots=resolved_extra_write_roots(request.agent, raw_params, request.goal),
         context_manifest=create_context_manifest(raw_params),
         context_packs=create_context_packs(raw_params),
-        attributes=_create_attributes(raw_params, request.agent),
+        attributes=create_task_attributes(raw_params, request.agent),
         **_lineage_fields(raw_params, request.agent),
         parent_access_mode=_config_access_mode(request.agent),
         memory_retention_policy=_config_string(
@@ -385,7 +385,7 @@ def _has_child_dispatch_tool(raw_params: dict[str, object]) -> bool:
         str(item or "").strip().lower()
         for item in string_list(raw_params.get("allowed_tools"), TOOL_TEXT_LIST_OPTIONS)
     }
-    return bool({"schedule_child_subagents", "dispatch_subagents"}.intersection(tools))
+    return "create_subagents" in tools
 
 
 def _role_depends_on_outputs(raw_params: dict[str, object], agent) -> bool:
@@ -426,7 +426,10 @@ def _config_bool(agent, key: str, default: bool) -> bool:
     return bool_value(value, default=default)
 
 
-def _create_attributes(raw_params: dict[str, object], agent=None) -> dict[str, object]:
+# LLM: Direct and nested create paths share this structured attribute builder so recursion
+# carries identical refs, lineage hints, long-running flags, and conversation authority.
+# 函数用途: 把创建参数归一成子代理任务属性，供顶层和孙代理创建共用。
+def create_task_attributes(raw_params: dict[str, object], agent=None) -> dict[str, object]:
     attrs = (
         dict(raw_params.get("attributes") or {})
         if isinstance(raw_params.get("attributes"), dict)

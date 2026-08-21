@@ -233,7 +233,7 @@ def _proxy_events(proxy_log: str, *, after_pos: int = 0) -> tuple[list[dict], in
     path = Path(proxy_log)
     if not path.is_file():
         return [], after_pos
-    with open(path, "r", encoding="utf-8") as fh:
+    with open(path, encoding="utf-8") as fh:
         fh.seek(after_pos)
         data = fh.read()
     events = []

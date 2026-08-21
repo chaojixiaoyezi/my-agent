@@ -19,7 +19,6 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.agent_core._finalization_service import (
-    _honest_unfinished_response_text,
     _schedule_typed_unfinished_continuation,
 )
 from agent_py_agent.agent.agent_core._runtime_params import FinalizeContext
@@ -333,71 +332,6 @@ def test_main_settle_unknown_run_noop(repo):
     _settle_main_agent_run(_agent(repo), _params(run_id="no-such-run", attempt_id="x"), result)
 
 
-# ------------------------------------------------------ 如实收口投影函数
-
-
-def test_honest_text_ok_passthrough():
-    assert _honest_unfinished_response_text("完成。", runtime_status="ok") == "完成。"
-
-
-def test_honest_text_unfinished_wraps_model_text():
-    text = _honest_unfinished_response_text(
-        "任务完成，文件已创建。",
-        runtime_status="unfinished",
-        runtime_reason="REQUIRED_ACTION_HAS_NO_EVIDENCE",
-        runtime_source="required_action_completion_gate",
-    )
-    assert "【任务未完成】" in text
-    assert "状态：unfinished" in text
-    assert "原因：REQUIRED_ACTION_HAS_NO_EVIDENCE" in text
-    assert "来源：required_action_completion_gate" in text
-    assert "任务完成，文件已创建。" in text
-    assert "不代表任务已完成" in text
-
-
-def test_honest_text_empty_model_text_only_marker():
-    text = _honest_unfinished_response_text(
-        "",
-        runtime_status="blocked",
-        runtime_reason="APPROVAL_REQUIRED",
-        runtime_source="required_action_completion_gate",
-    )
-    assert text == "【任务未完成】本次执行未达成完整交付（状态：blocked；原因：APPROVAL_REQUIRED；来源：required_action_completion_gate）。"
-
-
-def test_honest_text_blocked_also_wrapped():
-    text = _honest_unfinished_response_text(
-        "等待审批。",
-        runtime_status="blocked",
-        runtime_reason="",
-        runtime_source="required_action_completion_gate",
-    )
-    assert "【任务未完成】" in text
-    assert "等待审批。" in text
-
-
-def test_honest_text_task_progress_not_wrapped():
-    # TASK_PROGRESS_OPEN 是渐进式交付/续跑的常态：模型文本本身已如实，
-    # 叠加机器标注反而污染交付语义（回归：test_explicit_goal_cannot_close_with_open_progress）。
-    text = _honest_unfinished_response_text(
-        "文件已经读取，但验证项仍未完成。",
-        runtime_status="unfinished",
-        runtime_reason="TASK_PROGRESS_OPEN",
-        runtime_source="task_progress",
-    )
-    assert text == "文件已经读取，但验证项仍未完成。"
-
-
-def test_honest_text_tool_round_limit_not_wrapped():
-    # 轮限续跑同样不包裹：硬停时模型本轮无文本，保持空响应交给下一轮续跑接管。
-    assert _honest_unfinished_response_text(
-        "",
-        runtime_status="unfinished",
-        runtime_reason="TOOL_ROUND_LIMIT_REACHED",
-        runtime_source="tool_loop",
-    ) == ""
-
-
 # ------------------------------------------------------ ①b 会话内纠正分支
 
 
@@ -453,7 +387,7 @@ def _patch_resume(monkeypatch):
     return goal, ordinary
 
 
-def test_gate_unfinished_schedules_continuation(monkeypatch):
+def test_removed_required_action_gate_does_not_schedule_continuation(monkeypatch):
     goal, ordinary = _patch_resume(monkeypatch)
     ctx = _ctx(
         task_attributes={"thread_goal_id": "goal-1", "conversation_thread_id": "thread-1"},
@@ -466,10 +400,7 @@ def test_gate_unfinished_schedules_continuation(monkeypatch):
         ),
     )
     _schedule_typed_unfinished_continuation(SimpleNamespace(), ctx)
-    assert len(goal.calls) == 1
-    assert goal.calls[0]["task_id"] == "task-1"
-    assert goal.calls[0]["thread_id"] == "thread-1"
-    assert goal.calls[0]["due_now"] is True
+    assert goal.calls == []
     assert ordinary.calls == []
 
 
@@ -507,7 +438,7 @@ def test_non_gate_unknown_reason_does_not_schedule(monkeypatch):
     assert ordinary.calls == []
 
 
-def test_gate_unfinished_ordinary_task_resumes_with_budget(monkeypatch):
+def test_removed_required_action_gate_does_not_resume_ordinary_task(monkeypatch):
     goal, ordinary = _patch_resume(monkeypatch)
     ctx = _ctx(
         task_attributes={},
@@ -521,8 +452,7 @@ def test_gate_unfinished_ordinary_task_resumes_with_budget(monkeypatch):
     )
     _schedule_typed_unfinished_continuation(SimpleNamespace(), ctx)
     assert goal.calls == []
-    assert len(ordinary.calls) == 1
-    assert ordinary.calls[0]["due_now"] is True
+    assert ordinary.calls == []
 
 
 # ------------------------------------------------- 协议违规落账（2026-08-14 双CLI复刻实证）

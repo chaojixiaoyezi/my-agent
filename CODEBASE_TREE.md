@@ -40,22 +40,17 @@ agent_py_agent/
 |-- skills/builtin/<category>/<name>/   # 内置知识型 skill 树：目录即分类（research/documents/…），递归扫描，类目索引常驻 prompt，skill_search 工具按需检索（千级地基）
 |-- agent/
 |   |-- core.py                         # SimpleAgent 组合入口
+|   |-- turn_end.py                     # 主/子代理共用的六种宿主轮结束原因
 |   |-- agent_core/                     # 主代理运行时、工具循环、编排工具、closeout
 |   |   |-- cli_run_conversation.py     # 一次性 CLI 的权威 user/assistant transcript、幂等身份与失败分级
 |   |   |-- runtime/                    # guidance、active-turn compact carrier、wait policy、sleep 闹钟、loop support
 |   |   |   |-- sleep_tool.py           # clock.sleep 工具：模型主动定时等待，写 wake_queue 字条、事件提前醒取消
-|   |   |-- tool_loop/                  # 工具轮次执行、恢复、完成判断
+|   |   |-- tool_loop/                  # 工具轮次执行、恢复与自然结束
 |   |   |-- tool_context/               # 工具结果上下文：reducer、窗口、microcompact、PTL 单轮重试
-|   |   |-- orchestration/              # create/dispatch/cancel/inspect 子代理工具实现
-|   |   |-- delivery_closeout/          # 交付验收和收口
-|   |   |-- delivery_closeout/expected_outputs_gate.py # 产物类型/数量对账门：声明驱动核对交付区实存
-|   |   |-- delivery_closeout/source_volume.py # 来源比例观测：检索量 vs 交付量并排数字（纯观测零判定）
-|   |   |-- delivery_closeout/snapshot.py # 最终交付事实快照：文件名/字节数/hash/gate 状态与指纹
+|   |   |-- orchestration/              # 统一 create、cancel、inspect 模型工具与内部自动启动/恢复引擎
+|   |   |-- _finalization_service.py   # 保留模型最终正文并记录 turn_end.reason
 |   |   |-- tool_loop/natural_user_reply.py # 派工/wait/完成共用的无工具 LLM 用户回复出口
-|   |   |-- tool_loop/final_exit_contract.py # run 出口合同：未收口任务态必走 closeout+续航双闸
-|   |   |-- tool_loop/failure_only_exit.py # 当前 request 全工具终态阻断时丢弃无证据结论
-|   |   |-- current_turn_execution.py # 当前 request canonical 工具事实的有界 prompt-tail 投影
-|   |   |-- tool_loop/exit_orphan_recovery.py # 出口孤儿回收：未收口退出前终止后台子代理进程并 requeue
+|   |   |-- tool_loop/completion.py     # 工具上限、截断等宿主轮结束事实
 |   |   `-- runner/                     # 子代理 runner prompt/worker/session/timeout；context.py 也隔离共享 Agent 的 thread-local 运行态
 |   |-- subagents/
 |   |   |-- manager.py                  # 子代理 root manager：初始化、基础生命周期、服务组合

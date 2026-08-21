@@ -268,6 +268,10 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             "interrupt_notice": self._handle_system_message,
             "compact_boundary": self._handle_system_message,
             "context_window_compacted": self._handle_system_message,
+            "conversation_compaction_started": self._handle_compact_started,
+            "conversation_compaction_progress": self._handle_compact_progress,
+            "conversation_compaction_completed": self._handle_compact_terminal,
+            "conversation_compaction_failed": self._handle_compact_terminal,
             "assistant_started": self._handle_block_started,
             "assistant_delta": self._handle_block_delta,
             "assistant_completed": self._handle_block_completed,
@@ -396,6 +400,54 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             self._block_from_event(event, role=role, phase=event.phase),
             event,
         )
+
+    # LLM: Compact 开始事件必须创建独立 active block，不得复用 thinking 或修改会话 compact generation。
+    # 函数用途: 建立一个原位更新的会话 Compact 进度块。
+    def _handle_compact_started(self, event: TuiEvent) -> None:
+        if event.block_id in self._stable_ids or event.block_id in self.active_blocks:
+            self.record_diagnostic("COMPACT_RESTART_REJECTED", event)
+            return
+        self.active_blocks[event.block_id] = self._block_from_event(
+            event,
+            role="compact",
+            phase="started",
+        )
+
+    # LLM: Compact progress 只能更新同 id 活动块，百分比单调不退但 stage 仍保留底层当前事实。
+    # 函数用途: 刷新 Compact 阶段、百分比与压缩前后 token 计数。
+    def _handle_compact_progress(self, event: TuiEvent) -> None:
+        block = self.active_blocks.get(event.block_id)
+        if block is None:
+            self.record_diagnostic("COMPACT_PROGRESS_WITHOUT_START", event)
+            return
+        incoming = _public_metadata(event.payload)
+        incoming["percent"] = max(
+            int(block.metadata.get("percent") or 0),
+            int(incoming.get("percent") or 0),
+        )
+        self.active_blocks[event.block_id] = replace(
+            block,
+            phase="updated",
+            updated_seq=event.seq,
+            metadata={**block.metadata, **incoming},
+        )
+
+    # LLM: 完成的进度块由 canonical compact_boundary 代替为稳定历史；失败/中断则冻结一条显示证据。
+    # 函数用途: 收起已完成 Compact 进度条，或保留失败提示。
+    def _handle_compact_terminal(self, event: TuiEvent) -> None:
+        active = self.active_blocks.pop(event.block_id, None)
+        if active is None:
+            self.record_diagnostic("COMPACT_TERMINAL_WITHOUT_START", event)
+            return
+        if event.kind == "conversation_compaction_completed":
+            return
+        failed = replace(
+            active,
+            phase=event.phase if event.phase in TERMINAL_BLOCK_PHASES else "failed",
+            updated_seq=event.seq,
+            metadata={**active.metadata, **_public_metadata(event.payload)},
+        )
+        self._append_stable(failed, event)
 
     # LLM: started 对已经 stable/active 的 block 都视为非法重启，避免终态回退或双活动块。
     # 函数用途: 创建 assistant/thinking 活动块。
@@ -840,6 +892,9 @@ def _public_metadata(payload: dict[str, Any]) -> dict[str, Any]:
         "trigger_tokens",
         "dropped_pairs",
         "preserved_pairs",
+        "stage",
+        "percent",
+        "source_messages",
         "process",
     }
     return {key: payload[key] for key in allowed if key in payload}

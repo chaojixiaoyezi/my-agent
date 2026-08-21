@@ -349,7 +349,7 @@ def test_spinner_metrics_stall_color_and_bottom_order_match_reference() -> None:
     )
     texts = _frame_lines(frame)
     thinking_index = next(
-        index for index, text in enumerate(texts) if text.startswith("∴ Thinking")
+        index for index, text in enumerate(texts) if text.startswith(("✻ ", "✢ ", "✶ "))
     )
     thinking_line = frame.transcript_lines[thinking_index]
 
@@ -357,8 +357,9 @@ def test_spinner_metrics_stall_color_and_bottom_order_match_reference() -> None:
     assert texts.index("● Read") < thinking_index
     assert "31s" in texts[thinking_index]
     assert "↓ 1.2k tokens" in texts[thinking_index]
-    # 终端交互 对齐：思考统一浅灰（tui-thinking），stalled 不再换红
-    assert {style for style, _text in thinking_line} == {"class:tui-thinking"}
+    # 终端交互 对齐：思考文案保持浅灰，只有活动 glyph/单字 glimmer 使用高亮。
+    assert "class:tui-thinking" in {style for style, _text in thinking_line}
+    assert "class:tui-spinner-highlight" in {style for style, _text in thinking_line}
 
 
 def test_visible_assistant_stream_hides_global_activity_spinner() -> None:
@@ -401,6 +402,25 @@ def test_completed_thinking_collapses_and_detailed_mode_expands() -> None:
     assert _frame_lines(detailed)[0] == "∴ Thought for 10s"
     assert "（private reasoning）" in _frame_lines(detailed)
     assert fragments_text(detailed.footer).startswith("  Showing detailed transcript")
+
+
+def test_completed_thinking_fullwidth_parentheses_fit_narrow_terminal() -> None:
+    """全角左右括号各占两列，10 列终端也不能让 completed thinking 越界。"""
+    store = TuiStateStore()
+    seq = TuiEventSequencer("renderer-narrow-thinking", clock=lambda: 30.0)
+    store.publish(seq.emit("thinking_started", "started", "thinking"))
+    store.publish(
+        seq.emit(
+            "thinking_completed",
+            "completed",
+            "thinking",
+            {"text": "0000000", "duration_seconds": 0.0},
+        )
+    )
+
+    frame = render_tui_snapshot(store.snapshot(), TuiRenderContext(width=10))
+
+    assert all(display_width_fragments(line) <= 10 for line in frame.transcript_lines)
 
 
 def test_completed_thinking_long_content_folds_with_hint() -> None:
@@ -796,9 +816,53 @@ def test_mid_turn_context_compaction_renders_distinct_from_conversation_compact(
     frame = render_tui_snapshot(store.snapshot(), TuiRenderContext(width=100))
     rendered = "\n".join(_frame_lines(frame))
 
-    assert "Turn context compacted · 118.4k → 31.2k" in rendered
+    assert "Tool history compacted · 118.4k → 31.2k" in rendered
     assert "removed 84 tool pairs · pass 1" in rendered
     assert "generation" not in rendered
+
+
+def test_conversation_compaction_renders_real_stage_progress_and_hides_thinking_spinner() -> None:
+    store = TuiStateStore()
+    seq = TuiEventSequencer("compact-progress", clock=lambda: 12.0)
+    store.publish(seq.emit("turn_started", "started", "turn"))
+    store.publish(seq.emit("thinking_started", "started", "thinking"))
+    store.publish(
+        seq.emit(
+            "conversation_compaction_started",
+            "started",
+            "compact:req:2",
+            {
+                "generation": 2,
+                "percent": 5,
+                "stage": "preparing",
+                "before_tokens": 118_400,
+            },
+        )
+    )
+    store.publish(
+        seq.emit(
+            "conversation_compaction_progress",
+            "updated",
+            "compact:req:2",
+            {
+                "generation": 2,
+                "percent": 78,
+                "stage": "checkpointing",
+                "after_tokens": 31_200,
+            },
+        )
+    )
+
+    frame = render_tui_snapshot(
+        store.snapshot(),
+        TuiRenderContext(width=100, spinner_index=1),
+    )
+    rendered = "\n".join(_frame_lines(frame))
+
+    assert "Compacting context" in rendered
+    assert "78% · checkpointing" in rendered
+    assert not any("Working" in line or "Thinking" in line for line in _frame_lines(frame))
+    assert store.snapshot().active_blocks[-1].metadata["percent"] == 78
 
 
 def test_question_help_footer_maps_only_real_tui_shortcuts() -> None:
