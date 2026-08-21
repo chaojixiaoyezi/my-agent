@@ -1,6 +1,6 @@
 """统一授权查询门（3.txt B.4/B.5）。
 
-cancel、dispatch、inspect、resume、takeover、resolve capability 六个操作共用
+cancel、dispatch、inspect、resume、takeover、resolve capability、send guidance 共用
 这一个门：操作名合法 → run_id 是 opaque identifier → 目标任务存在 →
 owner 一致性 → parent/delegation 可见性。每次操作过同一序列，杜绝
 "有的入口校验、有的入口裸奔"的缺口。
@@ -23,8 +23,19 @@ from ..common.opaque_id import OpaqueIdError, validate_opaque_id
 from ..runtime_db.repository import BINDING_ACTIVE
 from .models import SubAgentTask
 
+# LLM: send_guidance 与 cancel/inspect 共用同一 owner、parent chain 和 runtime authority 门；
+# 不能因为消息是软上下文就允许跨 owner、跨树或向不存在的 run 投递。
+# 常量用途: 列出允许进入统一子代理授权查询门的结构化操作名。
 OPERATIONS = frozenset(
-    {"cancel", "dispatch", "inspect", "resume", "takeover", "resolve_capability"}
+    {
+        "cancel",
+        "dispatch",
+        "inspect",
+        "resume",
+        "takeover",
+        "resolve_capability",
+        "send_guidance",
+    }
 )
 #: parent 链查询上限：防数据损坏成环时死循环；环 = 越权拒绝（fail-closed）。
 PARENT_CHAIN_LIMIT = 8

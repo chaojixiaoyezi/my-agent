@@ -43,13 +43,13 @@ agent_py_agent/
 |   |-- turn_end.py                     # 主/子代理共用的六种宿主轮结束原因
 |   |-- agent_core/                     # 主代理运行时、工具循环、编排工具、closeout
 |   |   |-- cli_run_conversation.py     # 一次性 CLI 的权威 user/assistant transcript、幂等身份与失败分级
-|   |   |-- runtime/                    # guidance、active-turn compact carrier、wait policy、sleep 闹钟、loop support
+|   |   |-- runtime/                    # 单 child guidance、active-turn compact carrier、sleep 闹钟与 loop support
 |   |   |   |-- sleep_tool.py           # clock.sleep 工具：模型主动定时等待，写 wake_queue 字条、事件提前醒取消
 |   |   |-- tool_loop/                  # 工具轮次执行、恢复与自然结束
 |   |   |-- tool_context/               # 工具结果上下文：reducer、窗口、microcompact、PTL 单轮重试
 |   |   |-- orchestration/              # 统一 create、cancel、inspect 模型工具与内部自动启动/恢复引擎
 |   |   |-- _finalization_service.py   # 保留模型最终正文并记录 turn_end.reason
-|   |   |-- tool_loop/natural_user_reply.py # 派工/wait/完成共用的无工具 LLM 用户回复出口
+|   |   |-- tool_loop/natural_user_reply.py # 派工/续跑/完成共用的无工具 LLM 用户回复出口
 |   |   |-- tool_loop/completion.py     # 工具上限、截断等宿主轮结束事实
 |   |   `-- runner/                     # 子代理 runner prompt/worker/session/timeout；context.py 也隔离共享 Agent 的 thread-local 运行态
 |   |-- subagents/

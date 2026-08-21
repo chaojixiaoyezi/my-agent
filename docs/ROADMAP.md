@@ -32,10 +32,15 @@ accepted/rejected/unknown 三态和 GET-only reconciler。2026-08-20 的灰色�
 tmux 左键复制已部署 `.7`；右键直接复制仍是本地候选。2026-08-21 本地又补齐 Working 动画、仅在用户
 原本位于页底时自动跟随、后续 thinking 增量持续显示，以及 typed Compact 活动块和 5/15/52/78/92/100
 阶段进度。输入后续消息时也会保留可见回执；离开页底浏览历史时不会被强拉回去。
+真实植物大战僵尸复验又暴露同 thread 旧后台 run 错挂新任务权威链、后台 notice 复用 block id 被丢、
+用户目录只写在 child goal 而未进入结构化权限，以及创建后周期性 LLM 巡场。当前已改为 task-bound
+后台 run、notice 立即/每秒独立块、`items[].output_files` 完整 schema，并删除自动巡场与 wait 工具；
+`send_guidance` 也收为只能向一个直接 child 插入消息。
 
 待做：提交推送并部署 `.7`；由真实 TUI 验证 Working 动画、thinking 连续增量、页底自动跟随、
 离底不抢滚动、Compact 百分比、后续消息可见、右键复制和输入框粘贴。外层系统剪贴板仍须用户在已 attach
-的本机终端亲自粘贴确认，自动化不能冒充这一步通过。
+的本机终端亲自粘贴确认，自动化不能冒充这一步通过；同一普通中文游戏 prompt 还要证明 child 自动
+完成后父级无需用户发“继续”，能读到产物、整合到 `/root/abc` 并实际监听 `0.0.0.0:8080`。
 
 边界：当前测试机为 `192.0.2.7:/root/my-agent`；保持单 Gateway、多 TUI、tmux 观察会话和远端
 key/config/runtime 数据，不触碰其它项目。本轮累计改动超过 10,000 行，按约定只追加一次全仓 pytest，

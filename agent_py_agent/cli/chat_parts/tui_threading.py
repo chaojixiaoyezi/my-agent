@@ -10,8 +10,9 @@ from pathlib import Path
 from .tui_params import StartWorkerParams, WorkerConfigParams
 
 TUI_REFRESH_INTERVAL_SECONDS = 0.125
-# S-BG1: 后台主代理轮完成通知的监视间隔（gateway 写 conversations/notices/）。
-TUI_BACKGROUND_NOTICE_INTERVAL_SECONDS = 20.0
+# S-BG1: 后台主代理轮更新的监视间隔（gateway 写 conversations/notices/）。
+# 本地 HTTP 查询很轻；1 秒能让完成、阻塞和续跑结果及时出现在当前 TUI。
+TUI_BACKGROUND_NOTICE_INTERVAL_SECONDS = 1.0
 
 
 # LLM: config factory 只能透传同一 queue/refs/runtime；不得在这里复制状态或创建第二个 TuiRuntime。
@@ -93,8 +94,8 @@ def _start_worker_threads(*, params: StartWorkerParams) -> None:
     ).start()
 
 
-# LLM: 只读 notices 文件并发布 system_message 显示；失败静默跳过（显示增强不能打扰会话）。
-# 函数用途: 周期检查当前会话的后台完成通知并显示。
+# LLM: 首次查询必须立即执行，随后才等待；否则短后台轮可能在用户误判卡死后才显示。
+# 函数用途: 持续检查当前会话的后台更新通知并及时显示。
 def _background_notice_loop(
     stop_event: threading.Event,
     agent: object,
@@ -103,12 +104,14 @@ def _background_notice_loop(
     app_ref: list,
 ) -> None:
     seen: set[float] = set()
-    while not stop_event.wait(TUI_BACKGROUND_NOTICE_INTERVAL_SECONDS):
+    while not stop_event.is_set():
         try:
             _consume_background_notices(agent, session_id, tui_runtime, app_ref, seen)
         except Exception:
             # 监视失败绝不打扰会话；下一轮重试。
-            continue
+            pass
+        if stop_event.wait(TUI_BACKGROUND_NOTICE_INTERVAL_SECONDS):
+            break
 
 
 def _consume_background_notices(
@@ -201,7 +204,7 @@ def _publish_background_notice_row(
     if key in seen:
         return
     seen.add(key)
-    notice_text = f"⚙ 后台自动完成：{summary}"
+    notice_text = f"⚙ 后台更新：{summary}"
     tui_runtime.publish_background_notice(notice_text, thread_id=thread_id)
 
 

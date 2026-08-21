@@ -42,6 +42,13 @@ Gateway 可以并行，但不能作为“单 Gateway 多客户端”验收的替
 首个旧快照回合必须保持根任务 `active` 且不投递完成；下一次从 `subagents_terminal` 快照开始的回合才
 允许自然收口。该回归与 background runtime、gateway conversation、active-turn guidance focused 同跑。
 
+新鲜度补丁后的真实 TUI 继续暴露三项底座问题：后台主代理用 thread 级 run id 命中旧任务，导致新任务
+attempt/工具权威链错挂；同 thread 后台 notice 复用稳定 block id，reducer 丢掉后续消息；child goal 中的
+`/root/abc` 没有进入 `output_files`，所以安全边界正确拒绝外部写入。定向回归现覆盖 task-bound `_run_params`、
+旧 run 跨 task 复用拒绝、notice 首次消费/独立 block、`items[].output_files` 嵌套 schema，以及
+`send_guidance(target,message)` 的单 child/直接父子授权。创建后自动 `dispatch_supervision_auto` policy 和
+旧 wait helper 已删除，历史 policy 只按结构化 tool 标记退休；不再用周期模型调用换取子代理可靠性。
+
 2026-08-20 TUI 灰色层级与 tmux 复制修复在本地、`192.0.2.7` 各运行 renderer/view/input/ANSI/PTY/chat
 6 文件 focused 组合，均为 105 项通过。测试机仅有一个 Gateway（8420），10 个 TUI 共享；真实中文请求
 约 3.09 秒出现回答，ANSI capture 证明思考为 246 灰、助手正文为 231，`tmux load-buffer -w` 中文探针

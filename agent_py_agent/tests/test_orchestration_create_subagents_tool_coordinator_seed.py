@@ -374,16 +374,16 @@ class TestCreateSubagentsLogicalRefScopes:
 
 
 class TestLogicalIdToolsSelfConflictRegression:
-    """seq 258 复核反例：wait/guidance/record_finding 的逻辑 ID 参数被当 path 锁。
+    """seq 258 复核反例：编排、消息和 finding 的逻辑 ID 参数被当 path 锁。
 
-    修复前：run_id/task_id/thread_id、target_id/run_ids/root_id、finding_id/watch_id
-    无 parameter_kinds → 默认按 path 解析。传一个 ID（如 wait run_id=child-1）→
+    修复前：run_id/task_id/thread_id、target/root_id、finding_id/watch_id
+    无 parameter_kinds → 默认按 path 解析。传一个 run id →
     锁 workspace:{root}/child-1（子）；其余参数缺省 → None 兜底锁 workspace:{cwd}
     （父）→ 同一操作父子重叠 → claim 阶段自冲突（handler 前被拒）。
     修复=逐工具把逻辑 ID 标 logical，只让真实写路径进 workspace scope。
     """
 
-    def test_guidance_target_id_is_logical_not_path(self):
+    def test_guidance_target_is_logical_not_path(self):
         from agent_py_agent.agent.agent_core.runtime.guidance_tool import SendGuidanceTool
         from agent_py_agent.agent.tooling.workspace_scopes import authoritative_workspace_scopes
 
@@ -393,33 +393,21 @@ class TestLogicalIdToolsSelfConflictRegression:
             workspace_root=root,
             write_boundary=None,
             policy=tool.runtime_policy,
-            arguments={"target_id": "sub-1"},
+            arguments={"target": "sub-1"},
         )
         assert not any(s.startswith("workspace:") for s in scopes)
         assert "logical:agent_run:sub-1" in scopes
 
-    def test_guidance_run_ids_list_is_logical(self):
+    def test_guidance_schema_has_no_bulk_or_tree_targeting(self):
         from agent_py_agent.agent.agent_core.runtime.guidance_tool import SendGuidanceTool
-        from agent_py_agent.agent.tooling.workspace_scopes import authoritative_workspace_scopes
 
         tool = SendGuidanceTool(MagicMock())
-        root = Path("/tmp/guidance-logical-ids")
-        scopes = authoritative_workspace_scopes(
-            workspace_root=root,
-            write_boundary=None,
-            policy=tool.runtime_policy,
-            arguments={"run_ids": ["r-1", "r-2"]},
-        )
-        assert not any(s.startswith("workspace:") for s in scopes)
-        # seq 261 #2：list 逐元素投影去重，绝无整体 json.dumps 串——[r-1,r-2]
-        # 与 [r-2,r-3] 必须能在共同目标 r-2 上互斥（整体串交集为 0 是缺陷）。
-        assert "logical:agent_run:r-1" in scopes
-        assert "logical:agent_run:r-2" in scopes
-        assert len(scopes) == 2
-        assert not any("[" in s or "]" in s for s in scopes)
+        properties = tool.model_spec.input_schema["properties"]
+        assert set(properties) == {"target", "message"}
+        assert tool.model_spec.input_schema["required"] == ["target", "message"]
 
-    def test_overlapping_logical_lists_conflict_on_shared_element(self):
-        """重叠 logical list 必冲突：run_ids=[r-1,r-2] 与 [r-2,r-3] 在 r-2 互斥。"""
+    def test_same_guidance_target_conflicts_on_same_agent_run(self):
+        """发给同一个下级的两条消息必须在同一个 agent_run 资源上互斥。"""
         from agent_py_agent.agent.agent_core.runtime.guidance_tool import SendGuidanceTool
         from agent_py_agent.agent.tooling.workspace_scopes import authoritative_workspace_scopes
 
@@ -427,14 +415,14 @@ class TestLogicalIdToolsSelfConflictRegression:
         root = Path("/tmp/guidance-overlap")
         a = authoritative_workspace_scopes(
             workspace_root=root, write_boundary=None,
-            policy=tool.runtime_policy, arguments={"run_ids": ["r-1", "r-2"]},
+            policy=tool.runtime_policy, arguments={"target": "r-1"},
         )
         b = authoritative_workspace_scopes(
             workspace_root=root, write_boundary=None,
-            policy=tool.runtime_policy, arguments={"run_ids": ["r-2", "r-3"]},
+            policy=tool.runtime_policy, arguments={"target": "r-1"},
         )
         shared = set(a) & set(b)
-        assert shared == {"logical:agent_run:r-2"}
+        assert shared == {"logical:agent_run:r-1"}
 
     def test_audit_publish_source_refs_are_logical_not_paths(self):
         """audit publish：source_probe_refs/remove_source_ids 不再锁假写根。
@@ -678,13 +666,13 @@ class TestResourceDomainAliasingPerSeq266:
             workspace_root=root,
             write_boundary=None,
             policy=tool.runtime_policy,
-            arguments={"target_id": "r-1"},
+            arguments={"target": "r-1"},
         )
         padded = authoritative_workspace_scopes(
             workspace_root=root,
             write_boundary=None,
             policy=tool.runtime_policy,
-            arguments={"target_id": "  r-1  "},
+            arguments={"target": "  r-1  "},
         )
         assert set(clean) & set(padded), (
             "首尾空格是同一目标（handler strip），scope 必须相同"

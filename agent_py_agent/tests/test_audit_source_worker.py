@@ -109,7 +109,6 @@ def _agent(tmp_path: Path, *, audit_id: str = "audit-source-test", max_subagents
             task_max_subagents=max_subagents,
             subagent_hierarchy_max_children_per_tool_call=max_subagents,
             access_mode="workspace-write",
-            dispatch_supervision_reminder_seconds=0,
             lease_stale_without_heartbeat_seconds=300,
         ),
         home_paths=SimpleNamespace(

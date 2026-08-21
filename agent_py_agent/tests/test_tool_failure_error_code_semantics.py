@@ -183,61 +183,6 @@ def test_apply_patch_context_mismatch_is_invalid_arguments(tmp_path: Path):
     assert r.error_code == "TOOL_INVALID_ARGUMENTS", r.error_code
 
 
-# ---- wait 工具:store 缺失/缺 task_id 是可修复的，不能兜底成 UNKNOWN_ERROR ----
-
-
-class _StoreWithoutPolicy:
-    """有 conversation_store 但没有 set_progress_policy(不满足 wait 需要的能力)。"""
-
-
-class _StoreWithPolicy:
-    def set_progress_policy(self, *args, **kwargs):  # noqa: D401 - 仅供 callable 检测
-        return None
-
-    def thread_for_task(self, task_id):
-        return None
-
-
-class _AgentNoStore:
-    conversation_store = None
-    _current_run_params = None
-    _main_agent_run_id = ""
-
-
-class _AgentStoreNoPolicy:
-    conversation_store = _StoreWithoutPolicy()
-    _current_run_params = None
-    _main_agent_run_id = ""
-
-
-class _AgentNoTaskId:
-    conversation_store = _StoreWithPolicy()
-    _current_run_params = None
-    _main_agent_run_id = ""
-
-
-def test_wait_conversation_store_unavailable_is_tool_unavailable():
-    from agent_py_agent.agent.agent_core.runtime.wait_tool import _target
-
-    for agent in (_AgentNoStore(), _AgentStoreNoPolicy()):
-        result = _target(agent, {})
-        assert not isinstance(result, tuple)
-        assert result.ok is False
-        assert result.error_code == "TOOL_UNAVAILABLE", result.error_code
-        assert result.error_code != "UNKNOWN_ERROR"
-
-
-def test_wait_missing_task_id_is_parameter_required():
-    from agent_py_agent.agent.agent_core.runtime.wait_tool import _target
-
-    result = _target(_AgentNoTaskId(), {})
-    assert not isinstance(result, tuple)
-    assert result.ok is False
-    assert result.error_code == "TOOL_PARAMETER_REQUIRED", result.error_code
-    assert result.error_code != "UNKNOWN_ERROR"
-    assert result.retryable is True
-
-
 # ============================================================================
 # ntu-stage2 收口轮：编排工具族 / web HTTP / registry 畸形 payload 的错误码语义
 # （第二批"误导模型"剩余项；参照上面 read/edit/wait 同一修法）
@@ -369,23 +314,22 @@ def test_resolve_capability_missing_run_is_invalid_arguments(tmp_path: Path):
     assert r.error_code != "UNKNOWN_ERROR"
 
 
-# ---- send_guidance：缺 message/target→TOOL_PARAMETER_REQUIRED；scope 非法→TOOL_INVALID_ARGUMENTS ----
+# ---- send_guidance：缺 message/target→TOOL_PARAMETER_REQUIRED ----
 
 
 def test_send_guidance_missing_message_is_parameter_required(tmp_path: Path):
     from agent_py_agent.agent.agent_core.orchestration_tools import SendGuidanceTool
 
-    r = SendGuidanceTool(_agent(tmp_path)).execute({"target_type": "agent_run", "target_id": "r1"})
+    r = SendGuidanceTool(_agent(tmp_path)).execute({"target": "r1"})
     assert r.ok is False
     assert r.error_code == "TOOL_PARAMETER_REQUIRED", r.error_code
     assert r.error_code != "UNKNOWN_ERROR"
 
 
-def test_send_guidance_unknown_scope_is_invalid_arguments(tmp_path: Path):
+def test_send_guidance_missing_target_is_parameter_required(tmp_path: Path):
     from agent_py_agent.agent.agent_core.orchestration_tools import SendGuidanceTool
 
-    # target_scope 取值非法(不是 children/descendants)→改参数可修。
-    r = SendGuidanceTool(_agent(tmp_path)).execute({"message": "hi", "target_scope": "bogus_scope"})
+    r = SendGuidanceTool(_agent(tmp_path)).execute({"message": "hi"})
     assert r.ok is False
-    assert r.error_code == "TOOL_INVALID_ARGUMENTS", r.error_code
+    assert r.error_code == "TOOL_PARAMETER_REQUIRED", r.error_code
     assert r.error_code != "UNKNOWN_ERROR"

@@ -453,24 +453,23 @@ def test_conversation_guidance_idempotency_repairs_crash_between_receipt_and_que
 
 def test_send_guidance_tool_writes_run_guidance(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    child = agent.subagents.create_run(goal="核对数据", thought="", plan=["核对"])
     result = SendGuidanceTool(agent).execute(
         {
-            "target": {"type": "agent_run", "id": "child-1"},
+            "target": child.id,
             "message": "换一个数据来源核对，不要重复查同一个页面。",
-            "priority": "high",
         }
     )
     payload = json.loads(result.output)
 
     assert result.ok is True
-    assert payload["target"]["type"] == "agent_run"
-    assert payload["target"]["id"] == "child-1"
-    pending = agent.conversation_store.pending_guidance("agent_run", "child-1")
+    assert payload["target"] == child.id
+    pending = agent.conversation_store.pending_guidance("agent_run", child.id)
     assert pending[0].message == "换一个数据来源核对，不要重复查同一个页面。"
-    assert pending[0].priority == "high"
+    assert pending[0].priority == "normal"
 
 
-def test_send_guidance_tool_can_target_direct_child_scope(tmp_path) -> None:
+def test_send_guidance_tool_targets_only_one_named_child(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     root = agent.subagents.create_run(goal="root", thought="", plan=["root"])
     child_a = agent.subagents.create_run(
@@ -479,58 +478,63 @@ def test_send_guidance_tool_can_target_direct_child_scope(tmp_path) -> None:
     child_b = agent.subagents.create_run(
         goal="b", thought="", plan=["b"], parent_id=root.id, root_id=root.id, depth=1
     )
-    grandchild = agent.subagents.create_run(
-        goal="grandchild",
-        thought="",
-        plan=["grandchild"],
-        parent_id=child_a.id,
-        root_id=root.id,
-        depth=2,
-    )
-
     result = SendGuidanceTool(agent).execute(
         {
-            "target_scope": "children",
-            "root_id": root.id,
+            "target": child_a.id,
             "message": "先按新要求补证据，完成后继续原任务。",
         }
     )
     payload = json.loads(result.output)
 
     assert result.ok is True
-    assert payload["target"]["type"] == "agent_run"
-    assert sorted(item["id"] for item in payload["targets"]) == sorted([child_a.id, child_b.id])
+    assert payload["target"] == child_a.id
     assert agent.conversation_store.pending_guidance("agent_run", child_a.id)
-    assert agent.conversation_store.pending_guidance("agent_run", child_b.id)
+    assert agent.conversation_store.pending_guidance("agent_run", child_b.id) == []
     assert agent.conversation_store.pending_guidance("agent_run", root.id) == []
-    assert agent.conversation_store.pending_guidance("agent_run", grandchild.id) == []
 
 
-def test_send_guidance_scope_resolution_failure_does_not_target_parent(
-    tmp_path, monkeypatch
-) -> None:
+def test_send_guidance_missing_target_does_not_fall_back_to_parent(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     root = agent.subagents.create_run(goal="root", thought="", plan=["root"])
 
-    def broken_kernel_snapshot(query):
-        del query
-        raise ValueError("broken kernel")
-
-    monkeypatch.setattr(agent.subagents, "kernel_snapshot", broken_kernel_snapshot)
-
     result = SendGuidanceTool(agent).execute(
         {
-            "target_scope": "children",
-            "root_id": root.id,
             "message": "请所有孩子补充证据。",
         }
     )
     payload = json.loads(result.output)
 
     assert result.ok is False
-    assert payload["error"] == "target_scope_resolution_failed"
-    assert payload["load_error"]["context"] == "send_guidance.target_scope"
+    assert result.error_code == "TOOL_PARAMETER_REQUIRED"
+    assert payload["error"] == "guidance_not_delivered"
     assert agent.conversation_store.pending_guidance("agent_run", root.id) == []
+
+
+def test_send_guidance_keeps_recursive_parent_child_boundary(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    root = agent.subagents.create_run(goal="root", thought="", plan=["root"])
+    child = agent.subagents.create_run(
+        goal="child", thought="", plan=["child"], parent_id=root.id, root_id=root.id, depth=1
+    )
+    grandchild = agent.subagents.create_run(
+        goal="grandchild",
+        thought="",
+        plan=["grandchild"],
+        parent_id=child.id,
+        root_id=root.id,
+        depth=2,
+    )
+    agent._current_run_params = SimpleNamespace(run_id=root.id, task_id="")
+
+    result = SendGuidanceTool(agent).execute(
+        {"target": grandchild.id, "message": "越过直接下级发消息。"}
+    )
+
+    assert result.ok is False
+    assert result.error_code == "TOOL_PERMISSION_DENIED"
+    assert agent.conversation_store.pending_guidance("agent_run", grandchild.id) == []
 
 
 def test_cli_guidance_send_writes_same_guidance_inbox(tmp_path, capsys) -> None:

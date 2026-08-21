@@ -10,6 +10,10 @@
   Gateway chunk。TUI 因此能显示真实压缩进度，又不形成第二份 Compact 事实源。
 - Gateway conversation/streaming 与 TUI focused 回归已通过；真实测试机仍以单 Gateway、多独立 TUI
   方式验收，不为每个会话启动额外 Gateway。
+- 后台续跑的主 run 身份现优先绑定 exact `task_id`；同一 thread 的旧 `bg-main-*` run 若属于其它任务，
+  运行时会回退当前 task 主链再创建 attempt，避免后台整轮工具因权威链错挂而全部拒绝。
+- TUI 后台 notice 不再先空等 20 秒：启动后立即查询，随后每秒读取一次；同 thread 的每条 notice 使用
+  单调独立 block id，避免 typed reducer 把后续进展当成首条稳定块重放而丢弃。
 
 ## 2026-08-18 TUI 活动回合普通输入与上下文可观察性候选
 
@@ -1331,9 +1335,9 @@
   `/btw` 纠偏或 `/stop`，后台 TaskRun 独立继续。
 - 派工回执只从 lifecycle envelope 读取 recorded/accepted/running/failed，accepted 不再冒充 running；
   模型的 `[TOOL_CALL]` 文本和子代理命令日志不会进入普通 transcript，统一用户投影另有末端净化。
-- 自动 `dispatch_supervision_auto` policy 保存子任务 material signature。状态、进度、阻塞、能力申请、
-  产物和结果都不变时只顺延，不调用 LLM；发生结构化变化才叫回主代理。用户显式 wait 和数据监控
-  仍按原节奏执行，不被状态指纹误停。
+- 当时的 `dispatch_supervision_auto` policy 曾用 material signature 抑制无变化巡场；该历史方案已于
+  2026-08-21 删除并自动退休旧 policy。当前 child 状态变化直接发 lifecycle wake，不再周期调用 LLM；
+  数据监控和用户持久 schedule 继续走各自独立的结构化调度链。
 - Gateway 的 watch 返回现在有三种持久终态：计划 stop、有限 `max_cycles` 完成、无 stop 的意外返回。
   第三种写 `GATEWAY_WATCH_UNEXPECTED_RETURN` 并以非零码退出；cleanup 单独记录 heartbeat/request/
   background 三线程的 drain 结果，超时写 `GATEWAY_DRAIN_INCOMPLETE`，不再显示成正常 stopped。

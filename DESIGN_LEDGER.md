@@ -235,7 +235,7 @@
   `<memory-context>`。旧 `memory_push` 的 lesson 枚举、trigger_conditions、long-term
   `kind=lesson_*` 写读路径和 `[相关记忆提示]` 已删除；失败自省只能提交待审 Candidate。
 - Persona 当前正文只有 owner 的 SOUL/USER/AGENTS 三个权威文件，全部读取和变更必须经过同一个 `PersonaRepository`。版本 ledger/backups 只用于 CAS、审计和回滚；USER 只按当前用户原话自主维护，SOUL/AGENTS 仍需确认，确认期间 SHA 漂移必须拒绝覆盖。不得恢复直接文件写旁路或增加 IM 专用人格状态。
-- 用户级持久定时只有 owner `data/scheduler/` 中的 `SchedulerRepository` 一份 job/run 事实源。`schedule` 是唯一 action tool，at/every/cron 均为 typed schema；到期 run 使用 CAS、先推进 next-run、claim TTL 和 heartbeat，并返回原 owner/thread 的同一代理主链。`wait` 仍只是 active task 内让出，不得成为第二 scheduler。对照 通道运行时 `src/cron/types.ts`/`schedule.ts`/`service/timer.ts` 与 长期助手 `cron/jobs.py`/`scheduler.py`/`tools/cronjob_tools.py`，不从用户文本推断身份、任务或时间状态。
+- 用户级持久定时只有 owner `data/scheduler/` 中的 `SchedulerRepository` 一份 job/run 事实源。`schedule` 是唯一 action tool，at/every/cron 均为 typed schema；到期 run 使用 CAS、先推进 next-run、claim TTL 和 heartbeat，并返回原 owner/thread 的同一代理主链。`clock.sleep` 只服务模型明确需要的时间等待；子代理完成依赖生命周期事件，不再有 wait/巡场工具，也不能形成第二 scheduler。对照 通道运行时 `src/cron/types.ts`/`schedule.ts`/`service/timer.ts` 与 长期助手 `cron/jobs.py`/`scheduler.py`/`tools/cronjob_tools.py`，不从用户文本推断身份、任务或时间状态。
 - 可复用 Workflow 只有一种表达：Skill 提供方法，当前 thread 的 `task_progress` 保存计划，原生子代理工具显式创建和派发执行者。旧 `subagent_workflows` package、mode/config/CLI、extension hook 和 shared workflow index 已删除；不得恢复第二套 transcript、planner/router、自动批量扩张或模板执行 runtime。该边界对照 会话运行时 `turn_context.rs` 的逐轮 Skills snapshot、`plan.rs`/`plan_spec.rs` 的 typed plan 更新和 `multi_agents_spec.rs` 的显式 spawn，以及 模型助手 Code `plugins/feature-dev` 通过 command/agent prompt 调用原生 Todo/agent 能力的做法。
 - 普通代码任务只有一份 owner-local 被动验证证据：公共工具出口按 `ToolCallEnvelope.scope.root_task_id` 记录项目 manifest 中的精确规范命令、真实 exit 与 targeted/full；成功文件写使旧证据 stale。它参考 长期助手 `verification_evidence.py`/`verify_hooks.py` 的被动账本，但不移植 stop hook，不执行测试、不阻止完成、不恢复普通任务验收器；模型继续按 会话运行时 的真实 tool-result 事实自然收口。
 - 主代理普通正文不是机器事实：当本轮已有持久 `task_progress` 且仍有 open item 时，模型的第一版 plain final 只作为可丢弃草稿；运行时参考 终端交互 `TaskUpdateTool` 的 structural verification nudge，在同一个工具循环中追加结构化 `open_count` 软核对。下一轮仍持有原工具能力，可读/更新清单或继续工作。提醒按 `executed_tools` 的真实工具进展段去重：同一进展段只消费一次，提醒后若又产生真实工具动作，后续 plain final 可再获得一次核对；没有新增工具动作时不得循环提醒。普通任务仍由模型正常结束，不以可能过期的清单形成完成硬门；只有显式持久 `/goal` 保留 open-plan `unfinished` 生命周期和 continuation。全链不解析“完成”等自然语言、不扫描目录、不执行验收。
@@ -307,6 +307,17 @@
   `core/src/agent/control.rs` 的完成状态订阅以及 `tools/handlers/multi_agents/wait.rs` 的明确采样边界后，
   child lifecycle 后台轮会冻结采样前树阶段；从活跃树开始的旧回合不能关闭根任务，最后一条终态事件
   必须获得新的模型回合。该门只保证事件新鲜度，不判断产物质量，也不恢复机器验收。
+- 模型可见的父子消息按递归关系收成 `send_guidance(target, message)`：只允许给当前代理直接创建的
+  一个下级插入普通消息。删除 thread/task/case、批量 run、整棵子树、priority 和 delivery 控制面；
+  用户给主代理的插入继续走 active-turn 输入链，子代理管理孙代理，根代理不越层代管。
+- 删除 `create_subagents` 自动登记的周期性 LLM 巡场和对应 `wait_tool.py`。child 进展、完成、阻塞和
+  capability request 只通过真实生命周期事件唤醒直接父级；进程心跳、孤儿回收、失败重试仍是宿主
+  liveness 底座，不是模型推动工具。旧 `dispatch_supervision_auto` policy 升级后按结构化 tool 标记退休。
+- 后台主代理权威身份以精确 `task_id` 为先，不能复用同 thread 旧任务的 `bg-main-*` run。run 命中其它
+  task 时必须回退当前 task 的主链再建 attempt，避免整轮工具因权威链错挂而被拒绝并要求用户发“继续”。
+- 用户指定的产物目录属于结构化权限事实：`create_subagents.items[]` 现有完整嵌套 schema，写入者必须在
+  自己的 `output_files` 声明目标；goal 中出现 `/root/abc` 不自动授权。TUI 后台 notice 首次立即查询、
+  之后每秒查询，并为同 thread 每条消息生成独立 block id，避免 reducer 丢掉第二条以后更新。
 
 ## 2026-08-18 候选消息实时流式 + 每轮阶段计时【状态：本地 focused 通过，待真机部署复验】
 

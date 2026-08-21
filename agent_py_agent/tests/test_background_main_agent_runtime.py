@@ -36,6 +36,8 @@ def test_background_run_params_carry_structured_conversation_task_identity() -> 
     params = _run_params(request.thread_id, request)
 
     assert params.source == "background_main_agent"
+    assert params.run_id == "task-1"
+    assert params.task_id == "task-1"
     assert params.task_attributes == {
         "conversation_thread_id": "thread-1",
         "conversation_task_id": "task-1",
@@ -1848,11 +1850,9 @@ def test_detached_named_task_excludes_future_ordinary_turns_from_background_cont
     assert guidance_row.metadata["task_id"] == "audit-1"
 
 
-def test_automatic_supervision_skips_unchanged_llm_turn_and_runs_on_material_delta(
+def test_removed_automatic_supervision_policy_is_retired_without_model_turn(
     tmp_path,
 ) -> None:
-    from agent_py_agent.agent.conversation.progress_fingerprint import subagent_material_signature
-
     agent = SimpleAgent(
         AgentConfig(
             enable_tools=False,
@@ -1888,11 +1888,6 @@ def test_automatic_supervision_skips_unchanged_llm_turn_and_runs_on_material_del
             "now": 11.0,
         }
     )
-    signature = subagent_material_signature(
-        agent,
-        task_id="task-1",
-        watched_run_ids=[child.id],
-    )
     policy = store.set_progress_policy(
         {
             "thread_id": thread.thread_id,
@@ -1903,7 +1898,6 @@ def test_automatic_supervision_skips_unchanged_llm_turn_and_runs_on_material_del
                 "kind": "subagent_progress_watch",
                 "tool": "dispatch_supervision_auto",
                 "watched_run_ids": [child.id],
-                "material_signature": signature,
             },
         }
     )
@@ -1917,25 +1911,8 @@ def test_automatic_supervision_skips_unchanged_llm_turn_and_runs_on_material_del
     assert scheduler.tick(now=73.0) == []
     assert backend.prompts == []
     checked = store.get_progress_policy(policy.policy_id)
-    assert checked is not None
-    assert checked.last_report_at == 0.0
-    assert checked.metadata["last_material_check_at"] == 73.0
-
-    changed = agent.subagents.load(child.id)
-    changed.progress = 0.5
-    changed.last_progress_at = 80.0
-    changed.last_progress_summary = "完成一半"
-    agent.subagents.save(changed)
-
-    reports = scheduler.tick(now=checked.next_due_at + 1)
-
-    assert len(reports) == 1
-    assert len(backend.prompts) == 2
-    assert "[natural-user-reply]" not in backend.prompts[0]
-    assert "[natural-user-reply]" in backend.prompts[1]
-    updated = store.get_progress_policy(policy.policy_id)
-    assert updated is not None
-    assert updated.metadata["material_signature"] != signature
+    assert checked is not None and checked.enabled is False
+    assert checked.last_report_at == 73.0
 
 
 def test_periodic_policy_for_durable_audit_source_worker_is_retired(tmp_path) -> None:
@@ -1995,8 +1972,8 @@ def test_periodic_policy_for_durable_audit_source_worker_is_retired(tmp_path) ->
     )
 
     assert runnable == []
-    assert suppressed == [(policy, "durable_audit_source_worker_policy")]
-    assert rows[0]["reason"] == "durable_audit_source_worker_policy"
+    assert suppressed == [(policy, "removed_dispatch_supervision_policy")]
+    assert rows[0]["reason"] == "removed_dispatch_supervision_policy"
     retired = store.get_progress_policy(policy.policy_id)
     assert retired is not None and retired.enabled is False
 

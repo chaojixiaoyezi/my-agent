@@ -113,7 +113,7 @@ SimpleAgent orchestration tool
   `ConversationStore.append_observation_with_wake` 发布父级通知。该入口保证 wake-first 顺序、双向 ID
   关联和 observation fallback；禁止恢复成两个彼此独立的 append/raise 调用。
 - `agent/agent_core/orchestration/`：主代理模型可见的统一 `create_subagents`、`inspect_agent_tree`、
-  `send_runtime_guidance`、`cancel_subagents` 与 capability 处理入口。创建即由宿主自动启动；
+  `send_guidance`、`cancel_subagents` 与 capability 处理入口。创建即由宿主自动启动；
   `dispatch/scheduler` 只保留为内部执行引擎，不再注册成模型工具。
 - `cli/gateway_loops.py::_GatewayOrphanReconciler`：不执行模型的独立周期控制器；从 owner
   投影发现未完成 run，再调用 orchestration 层现有的结构化孤儿监督。它与后台主代理的 LLM
@@ -213,7 +213,10 @@ SimpleAgent orchestration tool
 
 ## Guidance
 
-运行中补充提示统一落 conversation guidance 账本。目标可以是 agent run、thread、task 或 case。子代理下一轮执行上下文会读取点名给自己的 guidance，并在 runner prompt 中显示。它只是补充上下文，不自动替模型完成任务；停止、取消、接管和授权要走对应结构化状态或控制入口，不能靠解析自然语言 guidance 来改写任务合同。
+底层 conversation guidance 账本继续承载用户/CLI 对 agent run、thread、task 或 case 的输入。模型可见的
+`send_guidance` 则只接受一个直接 child 的 run id 和 message；父代理不能广播、越层管理孙代理或用消息
+改变状态。child 下一轮执行上下文会读取点名给自己的 guidance。停止、取消、接管和授权继续走对应
+结构化控制入口，不能靠解析自然语言 guidance 改写任务合同。
 
 ## Cancel And Takeover
 
@@ -230,6 +233,7 @@ handoff 的 run 保持可读，但新创建/重新合并的 takeover 必须补�
 `create_subagents` 是所有层级唯一的创建入口，负责结构化目标、路径、写入安全和 lineage，并在创建后由
 宿主自动启动 child。业务质量要求可以随自然语言目标传递，但不能变成启动或结束硬门；父代理读取真实
 结果和 refs 后，自然决定汇总、补充 guidance、取消或再创建一个明确分工的 child。
+用户明确的保存路径必须通过顶层或逐 item 的 `output_files` 进入结构化写边界；goal 里的路径不授权写入。
 
 ## Collaboration Capabilities
 

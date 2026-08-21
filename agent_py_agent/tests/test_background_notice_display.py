@@ -94,7 +94,7 @@ def test_tui_consumes_background_notices_and_publishes(tmp_path: Path) -> None:
     seen: set[float] = set()
     _consume_background_notices(_Agent(), "session-1", _Runtime(), [None], seen)
     assert len(published) == 1
-    assert "后台自动完成" in published[0]
+    assert "后台更新" in published[0]
     assert "子代理已完成" in published[0]
     # 第二次消费同文件：已 seen，不重复发布
     _consume_background_notices(_Agent(), "session-1", _Runtime(), [None], seen)
@@ -155,7 +155,21 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
     assert len(fetched) == 1
     assert fetched[0]["after"] == 0.0
     assert len(published) == 1
-    assert "后台自动完成" in published[0]
+    assert "后台更新" in published[0]
     # 游标推进后不重复
     _consume_background_notices(_Agent(), "session-http", _Runtime(), [None], seen)
     assert fetched[1]["after"] == 150.0
+
+
+def test_runtime_keeps_multiple_background_notices_as_distinct_blocks() -> None:
+    """同一 thread 连续后台更新不能因复用稳定 block id 而丢掉后者。"""
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+
+    runtime = TuiRuntime("session-notices")
+    runtime.publish_background_notice("第一条", thread_id="thread-1")
+    runtime.publish_background_notice("第二条", thread_id="thread-1")
+
+    snapshot = runtime.store.snapshot()
+    notices = [block for block in snapshot.stable_blocks if block.role == "system"]
+    assert [block.text for block in notices] == ["第一条", "第二条"]
+    assert notices[0].block_id != notices[1].block_id

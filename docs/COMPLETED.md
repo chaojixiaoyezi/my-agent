@@ -11,6 +11,11 @@
   `acceptance_checks`、`VERIFIED` 或专用结果包装。TUI 同批补齐 Working 动画、条件式页底跟随、持续 thinking
   增量和 Compact 百分比。当前只代表本地实现完成，发布与 `.7` 真机状态以 `docs/ROADMAP.md`、`STATUS.md`
   为准。
+- 同日递归控制面继续按 会话运行时 收口：删除 create 后周期性 LLM 巡场和 wait helper；`send_guidance` 只允许
+  当前代理给一个直接 child 发送 `target + message`，用户插入主代理仍走 active turn。后台续跑身份改为
+  task-bound，TUI 后台 notice 改为立即/每秒独立块，批量 child 的 `output_files` 获得完整嵌套 schema。
+  这解决了同 thread 旧任务串权、后台更新丢失和“goal 写了路径却没有写权限”；真实 8080 交付仍在
+  ROADMAP，未提前标记通过。
 - TUI 灰色层级已按 终端交互 的容器级 `dimColor` 语义修正：思考 Markdown 的普通文字、粗体、代码和
   链接以及 `Ctrl+O` 折叠提示都由最终浅灰 role 接管，不再只染括号或行前缀。鼠标左键拖选松手继续
   自动复制；tmux 路径按 会话运行时 统一使用 `load-buffer -w`，iTerm2 不再退化成只写内部 buffer。

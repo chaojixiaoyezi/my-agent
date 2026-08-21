@@ -1,7 +1,7 @@
 """S-C1 回归测试：模型把数组/对象参数序列化成字符串时，normalize+validate 容错。
 
 真机实锤（SUB-C/SUB-D/todo-verify）：MiniMax-M2.7 对 create_subagents.items、
-dispatch_subagents.run_ids、send_guidance.target、task_progress.items 等数组/对象
+旧版编排数组参数、结构化 target、task_progress.items 等数组/对象
 参数全部序列化成 JSON 字符串，`_schema_decision` 只 validate 不 normalize，
 导致 TOOL_PARAMETER_TYPE_INVALID 整批拒绝（批量创建子代理不可用、todo 面板
 永远无数据渲染）。修复：schema 门先 normalize（无歧义字符串→原生类型纠正）

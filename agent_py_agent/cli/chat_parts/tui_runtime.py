@@ -322,6 +322,7 @@ class TuiRuntime:
         self._pending_steers: dict[str, str] = {}
         self._queued_prompts: dict[str, str] = {}
         self._console_index = 0
+        self._background_notice_index = 0
         self._notice_text = ""
         self._notice_until = 0.0
         self._lock = threading.RLock()
@@ -393,18 +394,21 @@ class TuiRuntime:
                     request_id=history_request_id,
                 )
 
-    # LLM: publish_background_notice 只做显示（system_message 块），不注入业务执行权。
-    # 函数用途: 把后台主代理轮完成（子代理自动汇总等）显示为一条可读通知。
+    # LLM: 每条后台 notice 必须拥有独立 block id；按 thread 复用 id 会被 reducer
+    # 当作稳定块重放而丢弃后续更新。这里只做显示，不注入业务执行权。
+    # 函数用途: 把后台主代理轮的进度、阻塞或完成结果显示为独立可读通知。
     def publish_background_notice(self, summary: str, *, thread_id: str = "") -> None:
         text = str(summary or "").strip()
         if not text:
             return
         request_id = f"bg-notice:{thread_id or self.session_id}"
         with self._lock:
+            self._background_notice_index += 1
+            block_id = f"{request_id}:{self._background_notice_index}"
             self._publish(
                 "system_message",
                 "completed",
-                f"bg-notice:{thread_id or self.session_id}",
+                block_id,
                 {"text": text, "severity": "info"},
                 request_id=request_id,
             )

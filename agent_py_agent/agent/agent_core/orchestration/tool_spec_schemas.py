@@ -10,9 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
-_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
+_CREATE_ITEM_PARAMETER_SCHEMA: dict[str, Any] = {
     "goal": {"type": "string"},
-    "items": {"type": "array", "items": {"type": "object"}},
     "role": {"type": "string"},
     "agent_name": {"type": "string"},
     "tool_preset": {"type": "string", "enum": ["coding", "read_only", "none"]},
@@ -28,6 +27,18 @@ _CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     "long_running": {"type": "boolean"},
     "service_window_seconds": {"type": "integer", "minimum": 1},
     "audit_source_id": {"type": "string", "minLength": 1, "maxLength": 128},
+}
+_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
+    **_CREATE_ITEM_PARAMETER_SCHEMA,
+    "items": {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": _CREATE_ITEM_PARAMETER_SCHEMA,
+            "required": ["goal"],
+            "additionalProperties": False,
+        },
+    },
 }
 _INSPECT_TREE_PARAMETER_SCHEMA: dict[str, Any] = {
     "root_id": {"type": "string"},

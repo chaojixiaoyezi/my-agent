@@ -6,7 +6,8 @@
 
 - `create_subagents`：创建下一层协作者，成功后由宿主立即自动启动。
 - `inspect_agent_tree`：只读查看状态、进展、阻塞和结果 refs。
-- `send_guidance`：像用户给主代理补充消息一样，向指定后代追加普通上下文。
+- `send_guidance`：像用户给主代理补充消息一样，只向一个直接下级追加普通上下文；参数只有
+  `target + message`，不广播、不越层管理孙代理。
 - `cancel_subagents`：打断或取消指定后代。
 - `resolve_capability_requests`：只处理结构化权限缺口，它不是催办/推进工具。
 
@@ -17,19 +18,30 @@ internal dispatcher 是 Gateway 内的 runner 启动、租约、恢复和有界�
 
 优先使用 `inspect_agent_tree`。它应该展示 run_id、root_id、parent_id、status、channel_status、当前步骤、未完成原因、失败原因、running_seconds、seconds_since_progress、artifact refs 和 work refs。
 
-## 等待
+## 等待与唤醒
 
-不要高频反复 inspect。使用 `wait` 登记稍后查看。配置下限 60 秒，上限 7200 秒；主代理忙或用户正在交互时顺延。
-不要用 shell `sleep`、`timeout /t` 或 `Start-Sleep` 模拟等待；等待是运行时工具语义，
-这样 compact、用户插话和后台唤醒都能看懂。
+不要高频反复 inspect，也不要用 shell `sleep`、`timeout /t` 或 `Start-Sleep` 模拟等待。
+模型侧没有“推动子代理”或周期巡场工具：父代理结束当前回合，child 的进展、完成、阻塞和权限申请会用
+真实生命周期事件直接唤醒它。显式 `/goal` 和普通主任务自己的有界 continuation 是主任务续跑，不是
+对子代理轮询。
 
-`create_subagents` 开了自动启动时，后台会对本批 run_id 跑一轮精确 dispatch，并启动对应 runner；它不走 watch 循环，避免和 gateway/daemon 的观察锁互相抢占。主代理不需要立刻 `wait` 退出当前任务，下一步应该按工具返回的提示 inspect、继续自己能做的部分，或等后台唤醒再看树。
+`create_subagents` 开了自动启动时，后台会对本批 run_id 跑一轮精确 dispatch，并启动对应 runner；它不走
+LLM watch 循环，避免无变化时反复耗费模型。主代理下一步应该继续自己能做的部分、按需 inspect，或结束
+本回合等待真实事件唤醒。
 这里的 dispatch 只是宿主内部自动启动引擎，不是模型可见工具；创建成功即自动启动，
 父代理不需要再做一次人工“推进”。
 后台自动启动必须继承父代理当前 `workspace_root`，不能用后台进程的 cwd 重新推导任务树；
 否则会出现父侧创建在一棵树、后台 dispatch 到另一棵树，run_id 全部查不到的假 `PLANNING`。
 
-如果树里看到子代理处于 `RUNNING/channel_OK`，这代表 runner 已启动但还没写回结果；按配置的等待间隔稍后再查。不要把短时间 `RUNNING` 当失败，也不要反复抢占式重派同一个 run_id。
+如果树里看到子代理处于 `RUNNING/channel_OK`，这代表 runner 已启动但还没写回结果；不要把短时间
+`RUNNING` 当失败，也不要反复抢占式重派同一个 run_id。provider/网络、进程崩溃、租约失活或明确超时
+由 heartbeat、retry 和 orphan reconciler 处理；这些底座只恢复执行，不替模型判断质量。
+
+## 路径与写权限
+
+用户明确保存目录或文件时，父代理必须在 `create_subagents.output_files` 中传递；批量创建时由每个负责
+写入的 item 分别声明 `item.output_files`。goal 中提到路径只作为普通上下文，不产生写权限。没有指定
+路径时使用系统分配的 task-local child output，父代理按返回的 refs 汇总。
 
 ## 取消
 
@@ -56,7 +68,7 @@ internal dispatcher 是 Gateway 内的 runner 启动、租约、恢复和有界�
 
 运行中的子代理可以在树上展示 `summary_ref`、`checkpoint_ref`、`agent_work_dir` 这类进度 refs，
 但这些内部 refs 不会进入父代理的 `read_order`。父代理等待或查看状态时继续用
-`inspect_agent_tree` / `wait`，不要把内部占位 `final_report.md` 当成可汇总结果。
+`inspect_agent_tree`，不要把内部占位 `final_report.md` 当成可汇总结果。
 
 普通读文件、列目录和 shell 不应把 `work/agents/<run_id>/` 当状态看板；看状态用
 `inspect_agent_tree`。

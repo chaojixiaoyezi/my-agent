@@ -30,7 +30,7 @@ _CREATE_PARAMETERS = {
 }
 _CREATE_PARAMETER_DETAILS = {
     "goal": "工具内部的整批派工说明，与用户命令 /goal 无关；普通聊天任务也可派工。写清子代理要交付什么，保留用户原始硬约束；用户声明的产物格式要求（输出路径、最少字数、文件路径:行号引用、必含章节）要原样写进相关子代理 goal，汇总时保留这些格式要素。",
-    "items": "仅一次派多个不同任务时用；顶层 goal 写整批目的，每个元素必须含自己的独立 goal、别传空 items；资料线索放 item.input_refs。创建成功后会立即运行。",
+    "items": "仅一次派多个不同任务时用；顶层 goal 写整批目的，每个元素必须含自己的独立 goal、别传空 items。资料线索放 item.input_refs；用户指定了保存目录或文件时，每个负责写入的 item 都必须把实际目标写进 item.output_files。创建成功后会立即运行。",
     "role": "优先用模板角色。可用角色模板索引：\n{role_template_index}",
     "agent_name": "展示名不是角色；需要职责差异时仍应使用 role 或 goal 表达。",
     "tool_preset": "省略时自动；coding 给基础读写工具；read_only 只给读取/搜索/查看工具；none 只表示不覆盖自动策略。",
@@ -38,7 +38,8 @@ _CREATE_PARAMETER_DETAILS = {
     "allowed_skills": "可选 Skill 名称或 stable_id 列表；创建时会解析为不可变快照引用，未知或禁用项整批拒绝。",
     "input_refs": "这是交给子代理的资料线索；单个子代理自己的输入放在对应 item.input_refs。",
     "output_files": (
-        "只在用户明确保存路径时填写；没有明确路径时可省略。阅读/分析目录是 input_refs，不是 output_files。"
+        "用户明确保存路径时必须填写，且批量派工要在每个写入 item 里分别填写；goal 文本里的路径不产生写权限。"
+        "没有明确路径时可省略。阅读/分析目录是 input_refs，不是 output_files。"
         "协作阶段的中间产物优先放当前任务 work/child_outputs 或工具返回的默认路径；"
         "output_dir 更适合最终交付，或用户明确要求放到某个普通输出目录时使用。"
     ),
@@ -56,7 +57,7 @@ _CREATE_PARAMETER_DETAILS = {
     "covers": "每个 item 只绑它自己负责的清单项(id 来自 task_progress coverage);别把全部 id 复制给每个子代理,绑不存在的 id 不生效。",
 }
 _CREATE_EXAMPLES = [
-    '{"tool":"create_subagents","goal":"实现用户认证模块并写到 platform/auth/,要可运行"}',
+    '{"tool":"create_subagents","goal":"实现用户认证模块并写到 platform/auth/,要可运行","output_files":["platform/auth/"]}',
     '{"tool":"create_subagents","goal":"并行完成认证实现与资料核对","items":[{"goal":"实现注册登录模块","covers":["req-01"]},{"goal":"读资料B并写证据摘要","input_refs":["data/b.md"]}]}',
 ]
 

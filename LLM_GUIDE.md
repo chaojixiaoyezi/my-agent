@@ -27,8 +27,12 @@
 - 递归协作只有一个创建入口 `create_subagents`，创建成功后宿主立即自动启动。
   模型不再看到 `dispatch_subagents` 或 `schedule_child_subagents`；内部 dispatcher
   只是启动、恢复与有界重试引擎，不是人工推动工具。
+- 子代理生命周期事件直接唤醒父级；不再为每批 child 登记周期性 LLM 巡场或 `wait` 推进。
+  `send_guidance` 只接受一个直接下级 `target` 和一段 `message`，不支持广播、跨层催办或验收。
 - 父代理对下级的日常控制面是查看、发补充消息和打断/取消。权限缺口仍走
   结构化 capability 决策；它是授权边界，不是“催子代理做事”。
+- 用户指定保存路径时，`create_subagents` 必须通过结构化 `output_files` 传递；批量创建时由
+  各 item 分别声明。goal 正文里的路径只供理解，不能提升写权限。
 - 历史 `acceptance_checks` / `verification_status` 字段仅为旧账本可读兼容，不进入当前
   TaskEnvelope、runner 模型摘要、父级 wake 或树摘要，也不参与启动/完成判定。
 

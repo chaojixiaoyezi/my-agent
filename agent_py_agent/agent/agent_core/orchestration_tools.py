@@ -89,7 +89,6 @@ from .orchestration.write_guard import (
 from .parameters import subagent_intent_identity
 from .runner.context import current_subagent_run_id
 from .runtime.guidance_tool import SendGuidanceTool as SendGuidanceTool
-from .runtime.wait_tool import register_dispatch_supervision_policy
 from .task_progress_tool import TaskProgressTool as TaskProgressTool
 
 if TYPE_CHECKING:
@@ -380,9 +379,6 @@ def _created_tasks_result(
     # P1 covers 绑定回执:回显绑定/警示绑错 id/没绑时提醒清单还有 open 项可绑。
     if binding := dispatch_coverage_binding(agent, tasks):
         payload["coverage_binding"] = binding
-    # 派工即挂监督提醒(机制层,不依赖模型自觉调 wait):窗口期有人定时巡场/上报中途进展。
-    if supervision := register_dispatch_supervision_policy(agent, run_ids=[task.id for task in tasks]):
-        payload["dispatch_supervision"] = supervision
     return _create_subagents_success(payload)
 
 
@@ -473,12 +469,6 @@ def _created_items_result(request: CreatedItemsResultRequest) -> ToolHandlerOutc
     # P1 covers 绑定回执。
     if binding := dispatch_coverage_binding(request.agent, tasks):
         payload["coverage_binding"] = binding
-    # 派工即挂机制层监督提醒。
-    if supervision := register_dispatch_supervision_policy(
-        request.agent,
-        run_ids=[task.id for task in tasks],
-    ):
-        payload["dispatch_supervision"] = supervision
     return _create_subagents_success(payload)
 
 

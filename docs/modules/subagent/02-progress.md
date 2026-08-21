@@ -15,6 +15,14 @@
   auto runner 并发最多 4 个，用资源护栏抑制一次创建十几个 child 的慢与不稳定。
 - 本地已通过 turn-end、统一创建、生命周期、工具规格、树投影和 TUI/Compact 定向回归；
   真机单 Gateway + 真实 TUI 任务证据在发布后补入。
+- 对照 会话运行时 `send_input` 后，模型消息工具收成单个 `target + message`，并增加递归授权：当前代理只能给
+  直接 child 插话，不能广播、越层代管孙代理或向 thread/task/case 写模型消息。用户对主代理的插入仍走
+  active-turn 输入链。
+- 删除创建后每 180 秒调用模型“巡场”的 `dispatch_supervision_auto` 与 `wait_tool.py`；child 的真实
+  生命周期事件直接唤醒父级，底层 heartbeat/orphan/retry 继续只守进程可靠性。旧 policy 会被自动退休。
+- 修复同一 thread 多任务的后台权威串线：后台 run_id 优先使用 exact task id；历史线程级 run 属于旧任务
+  时不再创建跨任务 attempt。真实任务指定外部目录时，嵌套 `items[].output_files` schema 现会把路径作为
+  权限事实传入每个写入 child，goal 正文不承担授权。
 
 ## 2026-08-12 子代理候选 scope 统一规范
 

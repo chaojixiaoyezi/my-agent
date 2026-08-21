@@ -63,7 +63,7 @@ def _hints(
 def build_create_subagents_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="create_subagents",
-        description="把可并行的独立工作交给下级代理。无论当前是主代理、子代理还是孙代理，都使用同一个 create_subagents；创建成功后下级立即运行，完成时系统自动把结果送回直接父级，不需要也没有额外的推进工具。goal 始终必填；单个目标直接传 goal，多个不同目标同时传总 goal 和 items，且每项必须有独立 goal。不要为了显得忙而派，也不要重复创建同一任务。",
+        description="把可并行的独立工作交给下级代理。无论当前是主代理、子代理还是孙代理，都使用同一个 create_subagents；创建成功后下级立即运行，完成时系统自动把结果送回直接父级，不需要也没有额外的推进工具。goal 始终必填；单个目标直接传 goal，多个不同目标同时传总 goal 和 items，且每项必须有独立 goal。用户指定保存路径时必须同时用 output_files 传递结构化目标（批量时逐 item 填写），goal 里的路径只供理解、不授权写入。不要为了显得忙而派，也不要重复创建同一任务。",
         input_schema=_input_schema(
             _CREATE_PARAMETERS,
             _CREATE_PARAMETER_SCHEMA,
@@ -96,7 +96,7 @@ def build_inspect_agent_tree_model_spec() -> ToolModelSpec:
         hints=_hints(
             use_cases=("用户问进度/子代理做到哪了/当前有哪些代理在做什么", "想看子代理/孙代理状态、心跳、当前工具、产物和阻塞原因"),
             avoid_when=(
-                "子代理只是正在运行、没有新事实时不要循环查看；登记 wait 提醒后结束本回合(或继续做自己手头的事、回复用户)，子代理有进展时系统会用事件把你唤醒——不要原地轮询等待",
+                "子代理只是正在运行、没有新事实时不要循环查看；结束本回合(或继续做自己手头的事、回复用户)，子代理有进展时系统会用事件把你唤醒",
                 "下级仍在正常运行时不要循环查看；完成事件会自动送回父级",
             ),
             keywords=("进度", "进展", "做到哪了", "咋样了", "看看情况", "代理树", "状态树", "看一眼", "子代理状态", "孙代理", "inspect", "agent tree"),

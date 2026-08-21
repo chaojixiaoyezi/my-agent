@@ -946,7 +946,7 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     # 人格文件写入:用户表达长期人设/画像/称呼/工作约定时,直接落 SOUL/USER/AGENTS.md(每轮注入,
     # 真正塑造每次交互)。区别于 remember——人设走这个,不进 memory(否则模型惯性把称呼/偏好塞进记忆)。
     agent.tools.register(UpdatePersonaTool(agent))
-    # owner 持久计划使用同一条会话唤醒链；wait 仍只负责当前运行任务的非阻塞等待。
+    # owner 持久计划使用会话唤醒链；它不是子代理轮询或推进工具。
     agent.tools.register(ScheduleTool(agent))
     # 内网主机出站授权:用户点名的内网监控目标(跨机数据源)经属主确认后进白名单,解除
     # NETWORK_PRIVATE_HOST_BLOCKED;不放松出站闸本身,只接通闸已内置的 allowed_private_hosts。

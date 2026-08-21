@@ -16,7 +16,8 @@
   `items` 逐项声明不同目标和交付边界。重复 item 会整批拒绝，不会部分创建。
 - `allowed_tools` 只是工具偏好提示，不是安全边界；基础读写工具由系统按角色和目标补齐。
 - 子代理自己的资料线索写到对应 item 的 `input_refs`，公共资料才放顶层。
-- 用户明确了产物路径时写 `output_files`；没有明确路径时不要强造。
+- 用户明确了产物路径时必须写 `output_files`；批量派工由每个负责写入的 item 分别声明。
+  goal 中的路径只帮助理解，不授予写权限；没有明确路径时不要强造。
 - 子代理没有声明产物路径时，运行时会给它分配 task-local `work/child_outputs/...`
   默认产物路径，并在返回值里暴露 `child_output_read_order`。父代理汇总时优先读
   `child_output_read_order` / `primary_artifact_refs` / `expected_outputs`，同时可参考
@@ -49,7 +50,8 @@ shell 不应该读取或遍历 `work/agents/<run_id>/canonical_state.json`、`fi
 `primary_artifact_refs` 或声明产物，不要继续猜内部目录。
 运行中或规划中的子代理不会把内部 `final_report.md` 放入父代理的 `read_order`；只有完成后
 缺少更好的结构化产物时，它才会作为兜底审计 refs 出现在读取顺序里。
-如果只是等一会再看进度，用 `wait`，不要用 shell 的 `sleep`。
+没有新事实时结束当前回合，不要循环 inspect，也不要用 shell 的 `sleep`。child 的生命周期事件会直接
+唤醒父级；模型侧没有额外的 wait/推进工具。
 
 ## inspect_collaboration
 
@@ -62,7 +64,16 @@ shell 不应该读取或遍历 `work/agents/<run_id>/canonical_state.json`、`fi
 ## 内部自动启动（不是模型工具）
 
 代码里的 dispatcher、scheduler 和 worker pool 仍负责进程选择、并发额度、重启恢复和完成通知，但它们不是
-模型可见工具。模型不能也不需要“再推一下”已创建的 child；创建成功就表示已经进入自动启动链。
+模型可见工具。模型不能也不需要“再推一下”已创建的 child；创建成功就表示已经进入自动启动链。系统也
+不为每批 child 周期性调用 LLM 巡场，真实状态变化会直接通知父级。
+
+## send_guidance
+
+用途：给当前代理直接创建的一个 child 插入一段普通自然语言要求。
+
+参数只有 `target` 与 `message`。它不支持 thread/task/case、多个 run、children/descendants 广播、priority
+或 delivery 控制，也不会启动、推进或验收目标。孙代理由它的直接父代理管理；要停止 child 使用
+`cancel_subagents`。用户对主代理的插入走 active-turn 输入链，不通过这个模型工具。
 
 所有层级继续拆分时仍调用 `create_subagents`。运行中要补充上下文用 `send_guidance`，要查看用
 `inspect_agent_tree`，要停止用 `cancel_subagents`；已经结束而目标仍有缺口时，创建一个分工明确的新 child，

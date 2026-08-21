@@ -33,6 +33,10 @@
 - [ ] 真实主代理自己完成任务。
 - [ ] 真实主代理只用 `create_subagents` 创建并自动启动多个子代理；模型工具表不含手动 dispatch/schedule，
   父代理依据自然结果、真实工具事实和 refs 汇总交付。
+- [ ] 子代理状态变化只通过生命周期事件唤醒直接父级；没有周期性 LLM 巡场/wait 推进。`send_guidance`
+  只能用 `target + message` 给一个直接 child 插话，不能广播或越层代管孙代理。
+- [ ] 用户指定交付目录时，单项或每个写入 item 都通过结构化 `output_files` 获得写边界；只把路径写进
+  goal 不得提升权限。后台续跑必须绑定 exact task，不能复用同 thread 旧任务的 main run/attempt。
 - [ ] 主代理、子代理、Gateway 与 TUI 对六类 `turn_end` 映射一致；普通完成不读取 acceptance/verification，
   历史兼容字段不进入当前 prompt、context bundle、父级摘要或启动前检查。
 - [ ] TUI 在活动轮显示 Working 动画和持续 thinking 增量；用户位于页底时自动跟随，主动上翻后不抢滚动，

@@ -1531,7 +1531,6 @@ def _internal_subagent_continuation(request: BackgroundRunRequest) -> bool:
     wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
     return str(wake.get("registered_by_tool") or "").strip() in {
         "goal_progress_continuation",
-        "dispatch_supervision_auto",
         # 历史数据兼容: wait 工具下架前登记的进度监督 policy 仍按内部续跑处理。
         "wait",
     }
@@ -1918,6 +1917,9 @@ def _run_request(kwargs: dict[str, Any]) -> BackgroundRunRequest:
     )
 
 
+# LLM: 后台轮的 run_id 必须优先绑定明确 task_id；线程级兜底身份只能用于无任务事件，
+# 否则同一 thread 的后续任务会误复用上一任务的 AgentRun 权威链。
+# 函数用途: 把一次后台唤醒转换成主代理运行参数，并保留任务、工具和投递边界。
 def _run_params(
     thread_id: str,
     request: BackgroundRunRequest,
@@ -1938,7 +1940,7 @@ def _run_params(
         save=False,
         source="background_main_agent",
         request_id=scheduler_run_id,
-        run_id=scheduler_run_id or f"bg-main-{thread_id}",
+        run_id=scheduler_run_id or request.task_id or f"bg-main-{thread_id}",
         # A conversation thread identifies where this turn runs; it is not a
         # durable task.  Internal events without an exact task must stay
         # taskless, otherwise a tool such as ``wait`` can bind the thread id as
@@ -4742,15 +4744,6 @@ class _BackgroundSchedulerExecutionMixin:
                     except Exception:
                         pass
                     return None
-        signature = _automatic_supervision_signature(self.runtime.agent, policy)
-        previous_signature = str((policy.metadata or {}).get("material_signature") or "")
-        if signature and previous_signature and signature == previous_signature:
-            self.store.mark_progress_checked(
-                policy.policy_id,
-                now=now,
-                metadata_updates={"material_signature": signature},
-            )
-            return None
         report = self._run_claimed(
             {
                 "thread_id": policy.thread_id,
@@ -4763,12 +4756,7 @@ class _BackgroundSchedulerExecutionMixin:
             }
         )
         if report is not None:
-            latest_signature = (
-                _automatic_supervision_signature(self.runtime.agent, policy) or signature
-            )
             metadata_updates = {}
-            if latest_signature:
-                metadata_updates["material_signature"] = latest_signature
             # 问题6:成功 run 清零失败账(failure_count=0),退避/退休账目复原——
             # 一旦恢复,policy 回正常 interval,绝不带着旧失败历史继续减速。
             metadata_updates["failure_count"] = 0
@@ -5041,20 +5029,6 @@ def _next_no_progress_streak(policy: ProgressPolicy, report: BackgroundMainAgent
     return max(0, previous) + 1
 
 
-def _automatic_supervision_signature(agent: object, policy: ProgressPolicy) -> str:
-    """Only automatic subagent supervision may skip an unchanged LLM turn."""
-    metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
-    if str(metadata.get("tool") or "") != "dispatch_supervision_auto":
-        return ""
-    from .progress_fingerprint import subagent_material_signature
-
-    return subagent_material_signature(
-        agent,
-        task_id=policy.task_id,
-        watched_run_ids=metadata.get("watched_run_ids"),
-    )
-
-
 def _progress_policy_wake_payload(policy: ProgressPolicy) -> dict[str, object]:
     metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
     return {
@@ -5189,7 +5163,7 @@ def ensure_goal_progress_continuation(
     interval = int(
         getattr(
             getattr(agent, "config", None),
-            "dispatch_supervision_reminder_seconds",
+            "continuation_reminder_seconds",
             0,
         )
         or 0
@@ -5292,7 +5266,7 @@ def ensure_ordinary_task_resume(
     interval = int(
         getattr(
             getattr(agent, "config", None),
-            "dispatch_supervision_reminder_seconds",
+            "continuation_reminder_seconds",
             0,
         )
         or 0
@@ -5402,14 +5376,14 @@ def _runnable_due_policies(
 def _progress_policy_suppression_reason(
     store, policy: ProgressPolicy, *, now: float, agent: object | None = None
 ) -> str:
+    if _is_removed_dispatch_supervision_policy(policy):
+        return "removed_dispatch_supervision_policy"
     if _is_legacy_child_watch_backstop_policy(policy):
         return "child_watch_backstop_policy"
     if _is_legacy_audit_root_poll_policy(policy):
         return "audit_root_poll_policy"
     if _is_running_durable_audit_root_policy(store, policy):
         return "durable_audit_root_policy"
-    if _is_durable_audit_source_worker_policy(agent, policy):
-        return "durable_audit_source_worker_policy"
     if _policy_task_link_is_terminal(store, policy):
         return "terminal_task_link"
     if _cli_claim_holds_policy(policy, now=now):
@@ -5449,6 +5423,14 @@ def _is_legacy_child_watch_backstop_policy(policy: ProgressPolicy) -> bool:
     )
 
 
+# LLM: 旧版 create_subagents 自动登记的模型巡场 policy 已从主链移除；
+# 只按结构化 tool 标记识别并退休，不能从说明文字猜测。
+# 函数用途: 找出部署升级前残留的自动子代理轮询任务，避免它继续消耗模型调用。
+def _is_removed_dispatch_supervision_policy(policy: ProgressPolicy) -> bool:
+    metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
+    return str(metadata.get("tool") or "") == "dispatch_supervision_auto"
+
+
 def _is_legacy_audit_root_poll_policy(policy: ProgressPolicy) -> bool:
     """Retire the removed periodic coordinator poll for durable Audit workers."""
     metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
@@ -5484,34 +5466,6 @@ def _is_running_durable_audit_root_policy(store: object, policy: ProgressPolicy)
         and int(getattr(link, "duration_seconds", 0) or 0) > 0
         and bool(getattr(link, "effective_source_bindings", ()) or ())
     )
-
-
-def _is_durable_audit_source_worker_policy(
-    agent: object | None,
-    policy: ProgressPolicy,
-) -> bool:
-    """Retire generic periodic LLM polling for lease-backed Audit workers."""
-
-    metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
-    if str(metadata.get("tool") or "") != "dispatch_supervision_auto":
-        return False
-    watched = metadata.get("watched_run_ids")
-    run_ids = [str(item) for item in watched] if isinstance(watched, list) else []
-    manager = getattr(agent, "subagents", None)
-    loader = getattr(manager, "load", None)
-    if not run_ids or not callable(loader):
-        return False
-    from ..common.audit_activation import AUDIT_SOURCE_WORKER_ATTR
-
-    for run_id in run_ids:
-        try:
-            task = loader(run_id)
-        except Exception:
-            return False
-        attrs = getattr(task, "attributes", None)
-        if not isinstance(attrs, dict) or attrs.get(AUDIT_SOURCE_WORKER_ATTR) is not True:
-            return False
-    return True
 
 
 def _policy_task_link_is_terminal(store, policy: ProgressPolicy) -> bool:
@@ -5583,7 +5537,7 @@ _RETIRE_SUPPRESSION_REASONS = frozenset(
         "child_watch_backstop_policy",
         "audit_root_poll_policy",
         "durable_audit_root_policy",
-        "durable_audit_source_worker_policy",
+        "removed_dispatch_supervision_policy",
     }
 )
 

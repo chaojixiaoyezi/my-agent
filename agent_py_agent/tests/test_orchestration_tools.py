@@ -49,6 +49,10 @@ def test_create_subagents_model_spec_uses_template_index_not_full_prompt():
     assert "count" not in spec.input_schema["properties"]
     assert spec.input_schema["required"] == ["goal"]
     assert all('"goal"' in example for example in spec.examples)
+    item_schema = spec.input_schema["properties"]["items"]["items"]
+    assert item_schema["required"] == ["goal"]
+    assert item_schema["properties"]["output_files"]["type"] == "array"
+    assert "goal 文本里的路径不产生写权限" in spec.parameter_descriptions["output_files"]
 
 
 def test_inspect_agent_tree_model_schema_excludes_owner_wide_history():

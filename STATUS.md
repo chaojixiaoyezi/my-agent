@@ -28,6 +28,15 @@
   从 `1/3` 开始、采样期间变成 `3/3`，模型只汇报 `2/3`，最终化却关闭根任务”的事件竞态。当前已加
   采样前 child phase 新鲜度门，相关 background/runtime/gateway focused 通过；待部署后复验主代理会被
   最后一条完成事件再次叫回，而不是要求用户发“继续”。
+- 新鲜度补丁部署后的复验确认三名 child 都能自然 `DONE`，但根任务仍未交付：后台 continuation 沿用
+  thread 级旧 run，attempt 被挂到上一任务，导致本轮读取/整合工具全部以 authority missing 被拒绝；
+  TUI 同 thread notice 又因稳定 block id 复用只显示首条。当前本地候选已把后台 run 绑定 exact task，
+  发现旧 task 冲突时回退当前主链；notice 首次立即读取、之后每秒读取并使用独立 block id。
+- 真机还证明 child 仅在 goal 里看到 `/root/abc` 并不等于获得写权限。`create_subagents.items` 现有完整
+  嵌套 schema，用户指定目录必须进入各写入 item 的 `output_files`。模型工具面进一步删除每批 child 的
+  周期 LLM 巡场与 wait helper；`send_guidance` 只剩一个直接 child 的 `target + message`，递归授权禁止
+  根代理越过 child 直接代管孙代理。相关 background/notice/schema/guidance focused 已通过，严格 gate、
+  推送、部署和最终 8080 TUI 复验仍待本轮完成。
 
 ## 2026-08-20 TUI 灰色层级与 tmux/右键复制修正
 

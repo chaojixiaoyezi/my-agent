@@ -36,6 +36,5 @@ __all__ = [
     "SimpleAgentRuntimeMixin",
     "SimpleAgentSubagentMixin",
     "TaskProgressTool",
-    "WaitTool",
     "execute_cancel_subagents",
 ]

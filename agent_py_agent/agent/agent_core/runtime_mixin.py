@@ -330,6 +330,9 @@ class SimpleAgentRuntimeMixin:
         return self.memory.search(query, top_k or self.config.memory_top_k)
 
 
+# LLM: 主代理每轮必须挂到 params.task_id 对应的权威根 run；run_id 命中旧任务时
+# 必须丢弃该行并按 task 回退，绝不能仅凭线程级旧身份跨任务创建 attempt。
+# 函数用途: 为前台或后台主代理轮次登记或续挂数据库权威链，并回填当前 attempt。
 def _bind_main_agent_authority(agent, params: RunParams) -> RunParams:
     """MANAGED 下主代理 run 登记权威链（seq 255 单一闭合：root/main AgentRun）。
 
@@ -362,6 +365,11 @@ def _bind_main_agent_authority(agent, params: RunParams) -> RunParams:
     # tasks.task_id 比对与调用者声明一致，无需再回存 runtime_authority attrs。
     task_id = str(params.task_id or run_id).strip()
     row = repo.agent_run_for_run_id(run_id)
+    if row is not None and repo.task_id_for_run_id(run_id) != task_id:
+        # 旧版本曾把同一 thread 的所有后台轮都登记成 bg-main-{thread_id}。
+        # 新任务再次命中该 legacy run 时只能视为未命中；否则下面 create_attempt
+        # 会把新任务的工具调用挂到旧任务，授权门随后必然拒绝整轮工具。
+        row = None
     if row is None:
         # R1-03 补漏：主代理续跑身份（bg-main-thread-{thread}）可能与请求身份
         # （req_{id}）不同，按 run_id 查不到对方登记。回退按 task 查主链
