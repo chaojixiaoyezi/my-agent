@@ -44,7 +44,14 @@
   为 active 时又会压住最终模型回复；主代理用前台 `run_command` 执行 `nohup ... &`，同一 shell 内 curl
   一次成功后 shell 退出并清理子进程，模型却据此宣称 8080 已持久启动。当前本地候选改为单次 child phase
   快照 + 晚到事件保留 + 终态回复不等 root status，并禁止 shell `&` 绕开受管后台 session；相关 focused
-  已通过，待严格 gate、推送、部署及同 prompt 最终复验。
+  已通过并以 `f1a7746a5d104a5299d7006430671e8fd2335e12` 推送、部署到 `.7`。
+- `f1a7746` 重启后又暴露一个旧任务恢复缺口：startup recovery 已把主 run/current attempt 置为
+  `unknown`，未处理 child observation 却每个 Gateway tick 都尝试重新挂载，安全闸正确拒绝但形成
+  `gateway-loop-error` 风暴。当前候选新增与 `create_attempt` 同源的结构化恢复投影：三类后台来源只保留
+  不消费，日志只在状态变化时打一条；同线程按 task 分批且阻塞项不占消费限额。人工
+  `recover_attempt_unknown` 现在也会把崩溃调和产生的 run `unknown` 恢复为 `created`，并只释放 current
+  attempt 的锁。定向 runtime/repository 回归已通过，待严格 gate、推送部署后确认 `.7` 日志静默，再跑
+  同一 TUI prompt。
 
 ## 2026-08-20 TUI 灰色层级与 tmux/右键复制修正
 

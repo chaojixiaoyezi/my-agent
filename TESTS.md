@@ -57,6 +57,12 @@ attempt/工具权威链错挂；同 thread 后台 notice 复用稳定 block id�
 以及全部 child 已终态时不依赖 active root task status 放行自然回复。定向 runtime/shell/error taxonomy
 组合通过；按用户约定不重跑全仓 pytest。
 
+`f1a7746` 部署重启后，旧任务的主 run/current attempt 已由崩溃调和置为 `unknown`，遗留 observation 每个
+Gateway tick 仍进入自动挂载并触发 `RuntimeConflictError`。新增 focused 回归把 observation 上限设为 1：
+旧任务事件必须保持未处理且零模型调用，同线程后到的新任务仍可运行；人工恢复后旧事件才被消费。仓储层
+另验证 run/attempt 两层恢复投影、run `unknown -> created`、精确锁释放和新 attempt 挂载。真机部署后需以
+Gateway 新日志偏移确认只出现一次结构化 recovery block、没有重复 `gateway-loop-error`。
+
 2026-08-20 TUI 灰色层级与 tmux 复制修复在本地、`192.0.2.7` 各运行 renderer/view/input/ANSI/PTY/chat
 6 文件 focused 组合，均为 105 项通过。测试机仅有一个 Gateway（8420），10 个 TUI 共享；真实中文请求
 约 3.09 秒出现回答，ANSI capture 证明思考为 246 灰、助手正文为 231，`tmux load-buffer -w` 中文探针

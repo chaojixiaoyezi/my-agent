@@ -389,6 +389,10 @@ before changing code.
   runtime 可以把缺项、未读范围和失败测试呈现给模型，但不得据此覆盖模型最终回复或自动启动返工循环。
 - 普通自然语言中的“全部”“完整”“不要漏”等要求由模型理解；产品代码不能把这些词升级成隐藏合同、
   权限、路由或完成状态。默认 chat/CLI/Gateway 也不得从路径或文件系统扫描自动物化验收合同。
+- 主代理 run 或 current attempt 的结构化 `unknown` 表示执行结果/副作用尚未核清。后台 scheduler 必须
+  保留对应 wake、observation、policy 并停止模型和工具挂载；不得捕获冲突后按异常文案重试，也不得新建
+  平行主 run。显式恢复必须核对 current attempt、复原崩溃调和写入的 run 状态并只释放该 attempt 的锁。
+  被阻塞的旧任务不得占满同线程其它 task 的事件消费窗口。
 - 外部调用方若显式提供结构化 `delivery_contract`，它只约束明确给出的路径、格式和权限事实，并随
   runtime/compact 保存；它不得恢复旧的普通任务验收器或要求模型调用提交工具。
 - compact work state 必须保存大文件读取游标和当前 task/run 的结构化事实，不能把“文件名出现过”当作

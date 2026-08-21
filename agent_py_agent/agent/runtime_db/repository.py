@@ -71,6 +71,19 @@ ROOT_CLAIM_CONFLICT = "ROOT_CLAIM_CONFLICT"
 # 勿重复定义同名类——会遮蔽 operations 抛出的异常类导致调用方捕获不到）。
 
 
+# LLM: 主代理自动挂载与后台调度必须共用这个纯结构化闸；新增状态时同步检查
+# create_attempt 与 main_agent_recovery_block_for_task，禁止调用方解析异常文案。
+# 函数用途: 根据 run/attempt 的权威状态返回是否必须先人工恢复。
+def _main_agent_recovery_reason(run_status: str, attempt_status: str) -> str:
+    normalized_run = str(run_status or "")
+    if normalized_run not in RUN_STATUS_LEGACY_CREATED and \
+            normalized_run not in AGENT_RUN_TERMINAL_STATUSES:
+        return "unknown_run_status"
+    if str(attempt_status or "") == ATTEMPT_STATUS_UNKNOWN:
+        return "attempt_unknown_terminal"
+    return ""
+
+
 # LLM: 崩溃调和（RUN-01）依赖 attempt 记录的 runner 身份；start_time 仅 Linux /proc 可读，
 # 其他平台为 None（判死时仅做 pid 探活，fail-closed 不猜）。
 # 函数用途: 构造当前进程身份元数据（pid + 启动时刻），随 attempt 落账供崩溃恢复使用。
@@ -473,7 +486,45 @@ class RuntimeRepository(
                 (task_id,),
             ).fetchone()
 
+    # LLM: 后台调度只能读取此结构化投影决定“保留事件但不自动挂载”；最终执行权
+    # 仍由 create_attempt 的同源事务闸裁决，不能把本方法当作执行许可。
+    # 函数用途: 查询某任务主代理是否因 unknown 状态必须等待显式人工恢复。
+    def main_agent_recovery_block_for_task(self, task_id: str) -> dict[str, str] | None:
+        with self._runtime_connection() as conn:
+            row = conn.execute(
+                "SELECT ar.agent_run_id, ar.status AS run_status, "
+                "ar.current_attempt_id, aa.status AS attempt_status "
+                "FROM agent_runs ar "
+                "JOIN task_runs tr ON tr.task_run_id = ar.task_run_id "
+                "JOIN tasks t ON t.task_id = tr.task_id "
+                "LEFT JOIN agent_attempts aa ON aa.attempt_id = ar.current_attempt_id "
+                "WHERE t.task_id = ? AND ar.role = 'main' "
+                "AND ar.parent_agent_run_id = '' "
+                "ORDER BY ar.created_at DESC LIMIT 1",
+                (str(task_id or ""),),
+            ).fetchone()
+        if row is None:
+            return None
+        reason = _main_agent_recovery_reason(
+            str(row["run_status"] or ""),
+            str(row["attempt_status"] or ""),
+        )
+        if not reason:
+            return None
+        return {
+            "schema_version": "main-agent-recovery-block.v1",
+            "reason": reason,
+            "task_id": str(task_id or ""),
+            "agent_run_id": str(row["agent_run_id"] or ""),
+            "attempt_id": str(row["current_attempt_id"] or ""),
+            "run_status": str(row["run_status"] or ""),
+            "attempt_status": str(row["attempt_status"] or ""),
+        }
+
     # ---------------------------------------------------------- AgentAttempt
+    # LLM: 创建 attempt 的事务闸与后台只读 recovery 投影必须共用
+    # _main_agent_recovery_reason；只读 preflight 不能替代这里的最终 CAS。
+    # 函数用途: 为现有 AgentRun 创建唯一新执行轮并原子取得执行权锁。
     def create_attempt(self, agent_run_id: str) -> sqlite3.Row:
         """单事务创建新 attempt + 原子取得执行权（R1-03 v5）。
 
@@ -515,12 +566,20 @@ class RuntimeRepository(
             if run is None:
                 raise KeyError(f"agent_run 不存在: {agent_run_id}")
             status = str(run["status"] or "")
+            latest_attempt = conn.execute(
+                "SELECT attempt_id, status FROM agent_attempts "
+                "WHERE agent_run_id = ? ORDER BY started_at DESC LIMIT 1",
+                (agent_run_id,),
+            ).fetchone()
+            latest_attempt_status = (
+                str(latest_attempt["status"] or "") if latest_attempt is not None else ""
+            )
+            recovery_reason = _main_agent_recovery_reason(status, latest_attempt_status)
             # 终态（done/failed/cancelled）挂载放行：见 docstring 防线分层——
             # 自喂防护在发现层过滤 + 执行权锁，任务级生命周期闸裁决「该不该重跑」。
             # 合法状态 = 现役（''/created）+ 全部终态；其余（历史 unfinished 等
             # 非法值）→ fail-closed。
-            if status not in RUN_STATUS_LEGACY_CREATED and \
-                    status not in AGENT_RUN_TERMINAL_STATUSES:
+            if recovery_reason == "unknown_run_status":
                 self._append_event_conn(
                     conn,
                     event_type="status_conflict",
@@ -541,13 +600,7 @@ class RuntimeRepository(
             # 自动续跑；recover_attempt_unknown 人工核对后（→ recovered）
             # 才放行。锁保留在 _mark_attempt_unknown 时没有释放，即使此处
             # 误过闸，takeover 也不应发生——本闸是结构化第一道。
-            latest_attempt = conn.execute(
-                "SELECT attempt_id, status FROM agent_attempts "
-                "WHERE agent_run_id = ? ORDER BY started_at DESC LIMIT 1",
-                (agent_run_id,),
-            ).fetchone()
-            if latest_attempt is not None and \
-                    str(latest_attempt["status"] or "") == ATTEMPT_STATUS_UNKNOWN:
+            if recovery_reason == "attempt_unknown_terminal":
                 self._append_event_conn(
                     conn,
                     event_type="attempt_unknown_blocked",
@@ -1488,6 +1541,9 @@ class RuntimeRepository(
             return {"reclaimed": False, "reason": result.get("reason", "settle_failed")}
         return {"reclaimed": True, "status": closeout, "attempt_id": attempt_id}
 
+    # LLM: 这是 unknown 执行权的唯一人工出口；恢复 current attempt 时必须同时
+    # 恢复 startup recovery 写入的 unknown run，并只释放该 attempt 自己的锁。
+    # 函数用途: 人工核对副作用处置后恢复同一主链，使保留的事件可以重新调度。
     def recover_attempt_unknown(
         self,
         attempt_id: str,
@@ -1511,22 +1567,39 @@ class RuntimeRepository(
         now = time.time()
         with self.transaction() as conn:
             row = conn.execute(
-                "SELECT agent_run_id FROM agent_attempts WHERE attempt_id = ?",
+                "SELECT aa.agent_run_id, ar.current_attempt_id, ar.status AS run_status "
+                "FROM agent_attempts aa "
+                "JOIN agent_runs ar ON ar.agent_run_id = aa.agent_run_id "
+                "WHERE aa.attempt_id = ?",
                 (attempt_id,),
             ).fetchone()
             if row is None:
                 return {"recovered": False, "reason": "no_such_attempt"}
+            if str(row["current_attempt_id"] or "") != str(attempt_id):
+                return {"recovered": False, "reason": "not_current_attempt"}
             cur = conn.execute(
                 "UPDATE agent_attempts SET status = ?, ended_at = ? "
-                "WHERE attempt_id = ? AND status = ?",
+                "WHERE attempt_id = ? AND status = ? "
+                "AND EXISTS (SELECT 1 FROM agent_runs ar "
+                "WHERE ar.agent_run_id = agent_attempts.agent_run_id "
+                "AND ar.current_attempt_id = agent_attempts.attempt_id)",
                 (ATTEMPT_STATUS_RECOVERED, now, attempt_id, ATTEMPT_STATUS_UNKNOWN),
             )
             if cur.rowcount != 1:
                 return {"recovered": False, "reason": "not_unknown"}
             agent_run_id = str(row["agent_run_id"] or "")
+            run_status_before = str(row["run_status"] or "")
+            run_status_after = run_status_before
+            if run_status_before == ATTEMPT_STATUS_UNKNOWN:
+                conn.execute(
+                    "UPDATE agent_runs SET status = 'created', updated_at = ? "
+                    "WHERE agent_run_id = ? AND status = 'unknown'",
+                    (now, agent_run_id),
+                )
+                run_status_after = "created"
             conn.execute(
-                "DELETE FROM resource_locks WHERE canonical_scope = ?",
-                (exec_lock_scope(agent_run_id),),
+                "DELETE FROM resource_locks WHERE canonical_scope = ? AND attempt_id = ?",
+                (exec_lock_scope(agent_run_id), attempt_id),
             )
             self._append_event_conn(
                 conn,
@@ -1538,9 +1611,16 @@ class RuntimeRepository(
                     "operator": str(operator or ""),
                     "effect_disposition": effect_disposition,
                     "reason": str(reason or ""),
+                    "run_status_before": run_status_before,
+                    "run_status_after": run_status_after,
                 },
             )
-        return {"recovered": True, "attempt_id": attempt_id, "agent_run_id": agent_run_id}
+        return {
+            "recovered": True,
+            "attempt_id": attempt_id,
+            "agent_run_id": agent_run_id,
+            "run_status": run_status_after,
+        }
 
     # -------------------------------------------------------- wake_queue
     # LLM: 调度唤醒字条(2026-08-17 扫描治理 owner 拍板)——"任务自己留的闹钟"。

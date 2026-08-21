@@ -247,12 +247,16 @@ def wake_signal_payload(signal: WakeSignal | dict[str, Any] | None) -> dict[str,
     return dict(signal) if isinstance(signal, dict) else None
 
 
-def observations_by_thread(
+# LLM: observation 批次身份必须同时包含 thread 与 root task；同线程旧任务的
+# unknown 恢复门不能吞并或阻塞新任务事件。
+# 函数用途: 按会话和根任务拆分待处理观察，保持原始到达顺序。
+def observations_by_thread_and_task(
     observations: list[ObservationEvent],
-) -> dict[str, list[ObservationEvent]]:
-    grouped: dict[str, list[ObservationEvent]] = {}
+) -> dict[tuple[str, str], list[ObservationEvent]]:
+    grouped: dict[tuple[str, str], list[ObservationEvent]] = {}
     for observation in observations:
-        grouped.setdefault(observation.thread_id, []).append(observation)
+        key = (observation.thread_id, str(observation.root_task_id or ""))
+        grouped.setdefault(key, []).append(observation)
     return grouped
 
 
@@ -3116,6 +3120,9 @@ def _is_scheduler_wake_signal(signal: WakeSignal) -> bool:
     return str(getattr(signal, "reason", "") or "").strip().lower() == "scheduled_job_due"
 
 
+# LLM: pending wake 的 runnable limit 必须在 recovery-block 过滤后计算，且被
+# unknown 挡住的信号不可标 handled 或 attempted。
+# 函数用途: 消费本轮可运行的 durable wake，并保留等待恢复的旧信号。
 def _consume_pending_wake_signals(
     scheduler: BackgroundMainAgentScheduler,
     reports: list[BackgroundMainAgentReport],
@@ -3124,10 +3131,13 @@ def _consume_pending_wake_signals(
     reported: set[str] = set()
     handled: set[str] = set()
     attempted: set[str] = set()
-    wake_signals = scheduler.store.pending_wake_signals(
-        limit=scheduler._config_limit("conversation_pending_wake_limit")
-    )
+    wake_limit = scheduler._config_limit("conversation_pending_wake_limit")
+    # Store 本来就会读取全部 pending 后再切片；这里保留完整队列，令前排被
+    # recovery block 保留的旧事件不占掉新任务的消费窗口。
+    wake_signals = scheduler.store.pending_wake_signals(limit=0)
     for signal in wake_signals:
+        if wake_limit > 0 and len(attempted) >= wake_limit:
+            break
         if _skip_pending_wake_signal(
             scheduler,
             signal,
@@ -3150,6 +3160,8 @@ def _consume_pending_wake_signals(
     return reported
 
 
+# LLM: 跳过只决定本 tick 不运行；除明确 stale/已投递分支外不得消费持久信号。
+# 函数用途: 在模型调用前筛掉冷却、重复、恢复阻塞或已失效的 wake。
 def _skip_pending_wake_signal(
     scheduler: BackgroundMainAgentScheduler,
     signal: WakeSignal,
@@ -3162,6 +3174,10 @@ def _skip_pending_wake_signal(
     if current < scheduler._wake_retry_after.get(signal.wake_signal_id, 0.0):
         return True
     if signal.wake_signal_id in handled or signal.wake_signal_id in attempted:
+        return True
+    if _background_authority_recovery_block(
+        scheduler, str(signal.root_task_id or "").strip()
+    ) is not None:
         return True
     if signal.thread_id in reported and not _is_scheduler_wake_signal(signal):
         # One model turn already owns this thread for the current tick.
@@ -3662,28 +3678,41 @@ def _wake_signal_root_is_inactive(store: object, signal: WakeSignal) -> bool:
     )
 
 
+# LLM: observation 必须先按 task 隔离再计算 runnable limit；unknown task 的
+# 事件原样保留，不能形成队头阻塞或被其它 task 的报告顺带确认。
+# 函数用途: 批量消费没有可用 wake 的主代理观察事件。
 def _consume_observation_batches(
     scheduler: BackgroundMainAgentScheduler,
     reports: list[BackgroundMainAgentReport],
     reported: set[str],
     current: float,
 ) -> None:
-    pending_observations = scheduler.store.unhandled_observations_requiring_main(
-        limit=scheduler._config_limit("conversation_unhandled_observation_limit")
-    )
+    observation_limit = scheduler._config_limit("conversation_unhandled_observation_limit")
+    pending_observations = scheduler.store.unhandled_observations_requiring_main(limit=0)
     pending_observations = [
         observation
         for observation in pending_observations
         if not _observation_waits_for_linked_wake(scheduler.store, observation)
     ]
-    for thread_id, thread_observations in observations_by_thread(pending_observations).items():
+    admitted = 0
+    for (thread_id, task_id), thread_observations in observations_by_thread_and_task(
+        pending_observations
+    ).items():
+        if observation_limit > 0 and admitted >= observation_limit:
+            break
         if thread_id in reported:
             continue
+        if _background_authority_recovery_block(scheduler, task_id) is not None:
+            continue
+        selected = thread_observations
+        if observation_limit > 0:
+            selected = selected[: observation_limit - admitted]
+        admitted += len(selected)
         report = _consume_with_supply_guard(
             scheduler._supply_backoff,
             thread_id,
             current,
-            partial(scheduler._run_observation_batch, thread_id, thread_observations, now=current),
+            partial(scheduler._run_observation_batch, thread_id, selected, now=current),
         )
         if report is not None:
             reports.append(report)
@@ -3716,6 +3745,9 @@ def _observation_waits_for_linked_wake(
         return True
 
 
+# LLM: policy 的 unknown 权威阻塞只暂停调度，不退休、不顺延；显式恢复后
+# 原排期自然重新获得准入。
+# 函数用途: 消费本轮到期且拥有执行权的进度策略。
 def _consume_due_policies(
     scheduler: BackgroundMainAgentScheduler,
     reports: list[BackgroundMainAgentReport],
@@ -3735,6 +3767,10 @@ def _consume_due_policies(
     )
     for policy in runnable:
         if policy.thread_id in reported:
+            continue
+        recovery_block = _background_authority_recovery_block(scheduler, policy.task_id)
+        if recovery_block is not None:
+            _record_recovery_blocked_policy(scheduler, policy, recovery_block)
             continue
         # 双席复核硬门1(seq1845): suppression 是读检查, gateway「读到未
         # claim」后、CLI 写入 claim 前选中 policy 的窗口内仍需同一把 CAS
@@ -4825,6 +4861,9 @@ class _BackgroundSchedulerExecutionMixin:
             )
         return report
 
+    # LLM: claim 后必须重查 terminal 与 recovery block，封住 preflight 到执行间竞态；
+    # recovery block 只关闭本 claim，不消费来源。
+    # 函数用途: 领取一个后台执行 lane，通过最终准入后运行带心跳的主代理回合。
     def _run_claimed(self, kwargs: dict) -> BackgroundMainAgentReport | None:
         claim_scope_id = _background_claim_scope_id(
             self.store,
@@ -4848,18 +4887,27 @@ class _BackgroundSchedulerExecutionMixin:
         # acquired.  Re-read the exact task link after claiming and before any
         # model/tool work; terminal state wins and the stale source is retired.
         if _claimed_background_task_is_terminal(self.runtime.agent, self.store, kwargs):
-            self.store.finish_background_run(
-                {
-                    "thread_id": kwargs.get("thread_id", ""),
-                    "claim_scope_id": claim_scope_id,
-                    "claim_id": str(claim.get("claim_id") or ""),
-                    "task_id": kwargs.get("task_id", ""),
-                    "status": "cancelled",
-                    "runtime_facts": {"admission": "terminal_task_link"},
-                    "now": now(),
-                }
+            _finish_nonexecuted_background_claim(
+                self.store,
+                kwargs,
+                claim_scope_id=claim_scope_id,
+                claim_id=str(claim.get("claim_id") or ""),
+                admission="terminal_task_link",
             )
             _retire_terminal_background_source(self.store, kwargs)
+            return None
+        recovery_block = _background_authority_recovery_block(
+            self, str(kwargs.get("task_id") or "").strip()
+        )
+        if recovery_block is not None:
+            _finish_nonexecuted_background_claim(
+                self.store,
+                kwargs,
+                claim_scope_id=claim_scope_id,
+                claim_id=str(claim.get("claim_id") or ""),
+                admission="authority_recovery_required",
+                recovery_block=recovery_block,
+            )
             return None
         return self._run_with_heartbeat(
             str(claim.get("claim_id") or ""),
@@ -5041,6 +5089,9 @@ class BackgroundMainAgentScheduler(
 ):
     """Single facade over background tick, goal routing, and claimed execution."""
 
+    # LLM: scheduler 的恢复阻塞缓存只负责同状态日志去重；真实暂停状态始终从
+    # RuntimeRepository 重读，进程重启不能改变准入结论。
+    # 函数用途: 组装单 Gateway 的后台事件消费者及其进程内退避/观测状态。
     def __init__(self, config: dict):
         self.runtime = config["runtime"]
         self.store = config["store"]
@@ -5074,6 +5125,7 @@ class BackgroundMainAgentScheduler(
         self._supply_backoff = _supply_backoff_from_agent(self.runtime.agent)
         self._wake_retry_after: dict[str, float] = {}
         self._quota_fallback_wakes: set[str] = set()
+        self._authority_recovery_blocks: dict[str, str] = {}
 
 
 # 函数用途: 把到点的 progress policy 摊开成 Active Wake Signal 载荷——被唤醒的模型要能看到
@@ -5568,6 +5620,96 @@ def _claimed_background_task_is_terminal(
         store=store,
     )
     return status.upper() in _TASK_LINK_TERMINAL_STATUSES
+
+
+# LLM: unknown 权威只暂停自动调度，不消费 wake/observation/policy；状态来自
+# RuntimeRepository 的结构化投影，禁止捕获 RuntimeConflictError 后解析中文文案。
+# 函数用途: 判断后台来源是否必须等人工恢复，并对同一阻塞状态只记一次日志。
+def _background_authority_recovery_block(
+    scheduler: object,
+    task_id: str,
+) -> dict[str, str] | None:
+    normalized_task_id = str(task_id or "").strip()
+    if not normalized_task_id:
+        return None
+    agent = getattr(getattr(scheduler, "runtime", None), "agent", None)
+    repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+    checker = getattr(repo, "main_agent_recovery_block_for_task", None)
+    if not callable(checker):
+        return None
+    try:
+        block = checker(normalized_task_id)
+    except Exception as exc:  # noqa: BLE001 权威不可读时也不能放行模型/副作用
+        block = {
+            "schema_version": "main-agent-recovery-block.v1",
+            "reason": "authority_state_unreadable",
+            "task_id": normalized_task_id,
+            "error_type": exc.__class__.__name__,
+        }
+    cache = getattr(scheduler, "_authority_recovery_blocks", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        scheduler._authority_recovery_blocks = cache
+    if block is None:
+        if normalized_task_id in cache:
+            cache.pop(normalized_task_id, None)
+            _HEARTBEAT_LOGGER.info(
+                "BACKGROUND_AUTHORITY_RECOVERY_RESUMED task=%s", normalized_task_id
+            )
+        return None
+    fingerprint = json.dumps(block, ensure_ascii=False, sort_keys=True)
+    if cache.get(normalized_task_id) != fingerprint:
+        cache[normalized_task_id] = fingerprint
+        _HEARTBEAT_LOGGER.warning(
+            "BACKGROUND_AUTHORITY_RECOVERY_BLOCK %s", fingerprint
+        )
+    return block
+
+
+# LLM: terminal 与 unknown 的最终准入失败都只能关闭本次 claim；是否消费触发源
+# 由调用方按原因决定，不能在这个账本 helper 里猜。
+# 函数用途: 关闭一次未执行模型/工具的后台 claim，并记录结构化准入原因。
+def _finish_nonexecuted_background_claim(
+    store: object,
+    kwargs: dict,
+    *,
+    claim_scope_id: str,
+    claim_id: str,
+    admission: str,
+    recovery_block: dict[str, str] | None = None,
+) -> None:
+    runtime_facts: dict[str, object] = {"admission": admission}
+    if recovery_block is not None:
+        runtime_facts["recovery_block"] = dict(recovery_block)
+    store.finish_background_run(
+        {
+            "thread_id": kwargs.get("thread_id", ""),
+            "claim_scope_id": claim_scope_id,
+            "claim_id": claim_id,
+            "task_id": kwargs.get("task_id", ""),
+            "status": "cancelled",
+            "runtime_facts": runtime_facts,
+            "now": now(),
+        }
+    )
+
+
+# LLM: recovery-blocked policy 只能进入本轮观测投影，不得 disable 或改写 next_due_at。
+# 函数用途: 记录一条因主代理 unknown 而暂停的到期策略。
+def _record_recovery_blocked_policy(
+    scheduler: object,
+    policy: ProgressPolicy,
+    recovery_block: dict[str, str],
+) -> None:
+    scheduler.last_progress_policy_suppressed.append(
+        {
+            "policy_id": policy.policy_id,
+            "thread_id": policy.thread_id,
+            "task_id": policy.task_id,
+            "reason": "authority_recovery_required",
+            "recovery_reason": str(recovery_block.get("reason") or ""),
+        }
+    )
 
 
 def _retire_terminal_background_source(store: object, kwargs: dict) -> None:

@@ -2977,6 +2977,121 @@ def test_linked_observation_does_not_fork_while_delivery_wake_is_pending(
     ] == [observation.observation_id]
 
 
+# LLM: 该 helper 只种结构化 runtime 状态，不创建 wake/observation；消费行为仍由测试正文验证。
+# 函数用途: 为恢复阻塞回归创建一个 run/current attempt 都为 unknown 的旧主代理。
+def _record_unknown_main_run(agent, *, task_id: str, thread_id: str):
+    repo = agent.subagents.runtime_db
+    run = repo.record_run_creation(
+        owner_id="local/main",
+        goal="旧任务",
+        conversation_task_id=task_id,
+        thread_id=thread_id,
+        run_id="request-old",
+        role="main",
+    )
+    with repo.transaction() as conn:
+        conn.execute(
+            "UPDATE agent_attempts SET status = 'unknown' WHERE attempt_id = ?",
+            (run["attempt_id"],),
+        )
+        conn.execute(
+            "UPDATE agent_runs SET status = 'unknown' WHERE agent_run_id = ?",
+            (run["agent_run_id"],),
+        )
+    return repo, run
+
+
+def test_unknown_old_task_preserves_event_without_blocking_new_task_on_same_thread(
+    tmp_path,
+) -> None:
+    agent = SimpleAgent(
+        AgentConfig(
+            enable_tools=False,
+            memory_path="memory.jsonl",
+            orphan_supervision_interval_seconds=0,
+            conversation_unhandled_observation_limit=1,
+        ),
+        tmp_path,
+    )
+    backend = _CapturingBackend()
+    agent.backend = backend
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "owner-a",
+            "channel": "internal",
+            "channel_conversation_id": "same-thread",
+            "channel_user_id": "owner-a",
+        }
+    )
+    old_task_id = "task-old-unknown"
+    new_task_id = "task-new-runnable"
+    store.bind_task(
+        {"thread_id": thread.thread_id, "task_id": old_task_id, "goal": "旧任务"}
+    )
+    store.bind_task(
+        {"thread_id": thread.thread_id, "task_id": new_task_id, "goal": "新任务"}
+    )
+    repo, old_run = _record_unknown_main_run(
+        agent,
+        task_id=old_task_id,
+        thread_id=thread.thread_id,
+    )
+    old_observation = store.append_observation(
+        {
+            "thread_id": thread.thread_id,
+            "event_type": "subagent_runner_finished",
+            "summary": "旧任务子代理已经结束。",
+            "root_task_id": old_task_id,
+            "requires_main_agent": True,
+            "now": 1.0,
+        }
+    )
+    new_observation = store.append_observation(
+        {
+            "thread_id": thread.thread_id,
+            "event_type": "subagent_runner_finished",
+            "summary": "新任务子代理已经结束。",
+            "root_task_id": new_task_id,
+            "requires_main_agent": True,
+            "now": 2.0,
+        }
+    )
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": BackgroundMainAgentRuntime(
+                agent=agent,
+                store=store,
+                channels=FakeDeliveryService(),
+            ),
+            "store": store,
+        }
+    )
+
+    first_reports = scheduler.tick(now=20.0)
+
+    assert len(first_reports) == 1
+    assert first_reports[0].task_id == new_task_id
+    assert len(backend.prompts) == 1
+    assert "新任务子代理已经结束" in backend.prompts[0]
+    assert [
+        item.observation_id for item in store.unhandled_observations_requiring_main(limit=0)
+    ] == [old_observation.observation_id]
+    assert new_observation.observation_id != old_observation.observation_id
+
+    recovered = repo.recover_attempt_unknown(
+        old_run["attempt_id"],
+        operator="human-checker",
+        effect_disposition="confirmed_noop",
+    )
+    assert recovered["recovered"] is True
+    second_reports = scheduler.tick(now=30.0)
+    assert len(second_reports) == 1
+    assert second_reports[0].task_id == old_task_id
+    assert len(backend.prompts) == 2
+    assert store.unhandled_observations_requiring_main(limit=0) == []
+
+
 def test_completion_observation_fallback_uses_same_partial_delivery_policy(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(

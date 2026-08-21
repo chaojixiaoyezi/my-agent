@@ -323,6 +323,12 @@
   liveness 底座，不是模型推动工具。旧 `dispatch_supervision_auto` policy 升级后按结构化 tool 标记退休。
 - 后台主代理权威身份以精确 `task_id` 为先，不能复用同 thread 旧任务的 `bg-main-*` run。run 命中其它
   task 时必须回退当前 task 的主链再建 attempt，避免整轮工具因权威链错挂而被拒绝并要求用户发“继续”。
+- 主代理 run 或 current attempt 为结构化 `unknown` 时，wake、observation 与 progress policy 必须保留原账
+  但停止自动挂载，不得通过重试风暴或创建第二棵主 run 绕过执行权闸。同线程观察按
+  `thread_id + root_task_id` 分批，阻塞旧任务不占新任务消费限额。只有
+  `recover_attempt_unknown` 在人工核对副作用后同时恢复 current attempt、崩溃调和写入的 run 状态并释放
+  精确 attempt 锁，原事件才自然续跑。该边界对照 会话运行时 的 typed `AgentStatus` 终态通知：宿主订阅状态并
+  向直接父线程注入一次事件，不靠周期 LLM 催促或反复重挂异常会话。
 - 用户指定的产物目录属于结构化权限事实：`create_subagents.items[]` 现有完整嵌套 schema，写入者必须在
   自己的 `output_files` 声明目标；goal 中出现 `/root/abc` 不自动授权。TUI 后台 notice 首次立即查询、
   之后每秒查询，并为同 thread 每条消息生成独立 block id，避免 reducer 丢掉第二条以后更新。

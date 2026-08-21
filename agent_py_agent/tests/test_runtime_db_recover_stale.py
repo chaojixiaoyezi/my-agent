@@ -78,6 +78,52 @@ def test_dead_pid_recovered_to_unknown(tmp_path):
         assert attempt["ended_at"] > 0
 
 
+def test_stale_main_run_blocks_auto_mount_until_explicit_recovery(tmp_path):
+    """崩溃归 unknown 后暴露结构化暂停；人工恢复同时复原 run 并允许新 attempt。"""
+    repo = _make_repo(tmp_path)
+    task_id = "task-stale-main"
+    rec = repo.record_run_creation(
+        owner_id="local/main",
+        goal="继续旧任务",
+        conversation_task_id=task_id,
+        thread_id="thread-stale-main",
+        run_id="run-stale-main",
+        role="main",
+    )
+    with repo.transaction() as conn:
+        conn.execute(
+            "UPDATE agent_attempts SET metadata_json = ? WHERE attempt_id = ?",
+            (
+                json.dumps({"runner_pid": 999999999, "runner_start_time": None}),
+                rec["attempt_id"],
+            ),
+        )
+
+    assert repo.recover_stale_attempts() == [rec["agent_run_id"]]
+    assert repo.main_agent_recovery_block_for_task(task_id) == {
+        "schema_version": "main-agent-recovery-block.v1",
+        "reason": "unknown_run_status",
+        "task_id": task_id,
+        "agent_run_id": rec["agent_run_id"],
+        "attempt_id": rec["attempt_id"],
+        "run_status": "unknown",
+        "attempt_status": "unknown",
+    }
+
+    recovered = repo.recover_attempt_unknown(
+        rec["attempt_id"],
+        operator="human-checker",
+        effect_disposition="confirmed_noop",
+        reason="已核对没有遗留副作用",
+    )
+
+    assert recovered["recovered"] is True
+    assert recovered["run_status"] == "created"
+    assert repo.main_agent_recovery_block_for_task(task_id) is None
+    next_attempt = repo.create_attempt(rec["agent_run_id"])
+    assert next_attempt["attempt_id"] != rec["attempt_id"]
+
+
 # LLM: 活 pid（本进程）且 start_time 匹配 = 同进程存活，fail-closed 保持原态。
 # 函数用途: 验证并发运行中的真实 attempt 不会被误调和。
 def test_alive_pid_with_matching_start_time_kept(tmp_path):

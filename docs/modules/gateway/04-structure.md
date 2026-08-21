@@ -514,6 +514,10 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
   回复，不能再等待 root task link 的 completed 状态作为机器验收。
 - observation + wake 的生产顺序必须由 store 统一封装为 wake-first 发布；消费者不得依赖两个独立文件
   “通常会挨着写完”。内部 continuation policy 只有在 root 不再存在运行中子任务时才允许进入公开结果面。
+- 后台主代理准入在 wake、observation、policy 和 claim 后最终边界都读取 RuntimeRepository 的同一份
+  `main-agent-recovery-block.v1`。run/current attempt 为 `unknown` 或权威不可读时，来源保持 pending、模型
+  与工具不启动，状态不变时不重复打日志；恢复后下一 tick 自然消费。observation 按
+  `thread_id + root_task_id` 分批，blocked 项不计入每轮 runnable limit，避免旧任务堵住同线程新任务。
 - 后台 task record 必须从 `ThreadTaskLink` 恢复权威 goal 与 workspace；任何 background prompt、wait reason
   或继承父 conversation task id 的子代理 prompt 都无权覆盖这两个持久字段。
 - `run_command` 启动长期服务时只认结构化 `run_in_background=true`，并返回 process registry 的

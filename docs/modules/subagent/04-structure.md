@@ -115,6 +115,9 @@ SimpleAgent orchestration tool
 - 父级后台整合轮只在模型调用前冻结一次 child phase；prompt、最终化和公开投递共用该快照。同 root
   的 DONE 通知只有在该时刻已经创建才可同批确认，之后到达的通知保持 pending 并另开一轮。新鲜轮
   看到全部 child 终态后直接交付模型自然回复，不等根 task link 先完成第二次机器验收。
+- 父级自身的权威 run/current attempt 若为 `unknown`，child lifecycle 通知继续留在 durable queue，但宿主
+  不反复挂载父代理，也不创建替代父代理。人工核对并显式恢复后，原通知再唤醒同一父级；这与根代理、
+  子代理管理孙代理完全同构。模型工具面没有“催促/推动”工具，只有事件通知、单 child 插话和取消。
 - `agent/agent_core/orchestration/`：主代理模型可见的统一 `create_subagents`、`inspect_agent_tree`、
   `send_guidance`、`cancel_subagents` 与 capability 处理入口。创建即由宿主自动启动；
   `dispatch/scheduler` 只保留为内部执行引擎，不再注册成模型工具。
