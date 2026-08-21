@@ -509,10 +509,17 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
   不再启动后台主代理或写普通会话。
 - 成功完成 wake 可短暂按 thread 合并，但失败/阻塞必须立即处理；后台主代理的内部整合回复和用户通知是
   两个不同结果面。部分成功只更新内部任务事实，全部结束/异常/需决策才写普通 transcript 和外呼 IM。
+- 每个后台整合轮在模型调用前只冻结一次子树阶段。只有采样时已存在的同 root DONE 通知可以随该轮合并
+  确认；采样后新建的通知必须保留并触发下一轮。新鲜轮看到全部直接/递归下级终态后可直接发送模型自然
+  回复，不能再等待 root task link 的 completed 状态作为机器验收。
 - observation + wake 的生产顺序必须由 store 统一封装为 wake-first 发布；消费者不得依赖两个独立文件
   “通常会挨着写完”。内部 continuation policy 只有在 root 不再存在运行中子任务时才允许进入公开结果面。
 - 后台 task record 必须从 `ThreadTaskLink` 恢复权威 goal 与 workspace；任何 background prompt、wait reason
   或继承父 conversation task id 的子代理 prompt 都无权覆盖这两个持久字段。
+- `run_command` 启动长期服务时只认结构化 `run_in_background=true`，并返回 process registry 的
+  `session_id/pid/output_file`。命令文本里的独立 shell `&` 在 spawn 前拒绝为
+  `BACKGROUND_PROCESS_MODE_REQUIRED/not_started`；这样 foreground shell 的退出或取消不会留下无账进程，
+  模型也不能用同一命令内的一次 curl 探活冒充持续监听。
 - `bind_task` 是 task identity 的唯一创建/补空入口：已有 goal/task_path/created_at 不可覆盖，跨 thread
   重绑 fail-closed；状态变化走显式 status/update 接口。调用者不再各自实现“记得保留旧字段”的软约定。
 - 开启 per-user owner（发布默认）后，远程 channel 的 owner 解析/创建失败不得回退基础 agent；

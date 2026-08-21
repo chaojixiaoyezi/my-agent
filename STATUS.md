@@ -37,6 +37,14 @@
   周期 LLM 巡场与 wait helper；`send_guidance` 只剩一个直接 child 的 `target + message`，递归授权禁止
   根代理越过 child 直接代管孙代理。相关 background/notice/schema/guidance focused 已通过，严格 gate、
   推送、部署和最终 8080 TUI 复验仍待本轮完成。
+- 上述候选已以 `db41bb08f4804224312865e1948d5836b60d2101` 推送并部署到 `.7` 单 Gateway。真实
+  TUI 原样任务能自动从 5 路容量拒绝调整为 4 路，四名 child 均自然 `DONE`，并生成 HTML/CSS/JS、
+  20 关数据和启动脚本；主代理在 `2/4` 与 `4/4` 事件上都能自动醒来，用户无需发“继续”。
+- 本轮真机同时抓到两个底座尾项：最后一条 DONE 可能在上一后台轮执行期间被同批结账，根 task link 仍
+  为 active 时又会压住最终模型回复；主代理用前台 `run_command` 执行 `nohup ... &`，同一 shell 内 curl
+  一次成功后 shell 退出并清理子进程，模型却据此宣称 8080 已持久启动。当前本地候选改为单次 child phase
+  快照 + 晚到事件保留 + 终态回复不等 root status，并禁止 shell `&` 绕开受管后台 session；相关 focused
+  已通过，待严格 gate、推送、部署及同 prompt 最终复验。
 
 ## 2026-08-20 TUI 灰色层级与 tmux/右键复制修正
 

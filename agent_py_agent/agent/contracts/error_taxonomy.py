@@ -918,6 +918,16 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint="run_command 命令字符串超出长度上限；命令本身合法，拆成多条 run_command 分别执行，或改用 write_file 写文件，不要改参数格式。",
     ),
+    "BACKGROUND_PROCESS_MODE_REQUIRED": ErrorContract(
+        code="BACKGROUND_PROCESS_MODE_REQUIRED",
+        category="tool",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint=(
+            "shell 的独立 & 不受后台会话管理；删除 &（通常也不需要 nohup），"
+            "把同一前台命令以 run_in_background=true 重新调用。"
+        ),
+    ),
     "COMMAND_EMPTY": ErrorContract(
         code="COMMAND_EMPTY",
         category="tool",

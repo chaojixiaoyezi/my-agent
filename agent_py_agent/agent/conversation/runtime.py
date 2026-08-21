@@ -645,26 +645,37 @@ def _material_tool_success_count(
     return count
 
 
+# LLM: 同一后台轮只能采样一次 child phase；prompt、finalization 与公开投递必须共用该快照，
+#   不能在模型运行前后各读一次状态并把两个时刻拼成一个错误结论。
+# 函数用途: 读取当前显式目标，并冻结本轮开始时的子代理树阶段。
 def _goal_runtime_context(
     agent: object,
     store: ConversationStore,
     request: BackgroundRunRequest,
 ) -> GoalRuntimeContext:
-    """Resolve one exact active goal and its child phase from durable state only."""
+    """Resolve one exact goal and freeze the child phase for this background turn."""
     task_id = str(request.task_id or "").strip()
     if not task_id:
         return GoalRuntimeContext()
+    phase = ""
+    state_error = ""
+    if str(request.reason or "").strip().lower() in SUBAGENT_LIFECYCLE_WAKE_REASONS:
+        phase, state_error = _goal_subagent_phase(agent, task_id)
     try:
         goal = store.load_goal(request.thread_id, task_id=task_id)
     except Exception:
-        return GoalRuntimeContext(state_error="goal_state_load_error")
+        return GoalRuntimeContext(
+            subagent_phase=phase,
+            state_error=state_error or "goal_state_load_error",
+        )
     if (
         goal is None
         or str(getattr(goal, "task_id", "") or "").strip() != task_id
         or str(getattr(goal, "status", "") or "").strip().lower() != "active"
     ):
-        return GoalRuntimeContext()
-    phase, state_error = _goal_subagent_phase(agent, task_id)
+        return GoalRuntimeContext(subagent_phase=phase, state_error=state_error)
+    if not phase and not state_error:
+        phase, state_error = _goal_subagent_phase(agent, task_id)
     return GoalRuntimeContext(goal=goal, subagent_phase=phase, state_error=state_error)
 
 
@@ -685,6 +696,8 @@ class BackgroundMainAgentRuntime:
             agent.conversation_store = store
         self.channels = channels or FakeDeliveryService()
 
+    # LLM: 后台轮在调用模型前冻结目标/子树阶段，随后把同一快照传给运行参数和投递裁决。
+    # 函数用途: 执行一次结构化后台唤醒，并按会话渠道记录或发送模型回复。
     def run_once(self, params: dict) -> BackgroundMainAgentReport:
         request = _run_request(params)
         if callable(getattr(self.store, "load_thread_report", None)):
@@ -702,6 +715,7 @@ class BackgroundMainAgentRuntime:
         )
         route_supports_proactive = bool(target and self.channels.supports_proactive(channel))
         route_supports_transcript = _route_supports_transcript(self.channels, channel)
+        goal_context = _goal_runtime_context(self.agent, self.store, request)
         (
             response,
             tool_call_count,
@@ -713,6 +727,7 @@ class BackgroundMainAgentRuntime:
         ) = self._run_agent(
             thread,
             request,
+            goal_context=goal_context,
             proactive_delivery_available=route_supports_proactive,
             transcript_delivery_available=route_supports_transcript,
         )
@@ -731,6 +746,7 @@ class BackgroundMainAgentRuntime:
             resolved_channel=channel,
             resolved_route_supports_proactive=route_supports_proactive,
             resolved_route_supports_transcript=route_supports_transcript,
+            sampled_subagent_phase=goal_context.subagent_phase,
         )
         if _message_tool_delivery_satisfied(request, message_tool_deliveries):
             # 通道运行时's cron runner treats committed message-tool delivery as the
@@ -843,11 +859,14 @@ class BackgroundMainAgentRuntime:
             wake_handled=wake_handled,
         )
 
+    # LLM: 调用方传入的 GoalRuntimeContext 是本轮唯一采样；禁止在模型调用前再次刷新 child phase。
+    # 函数用途: 用冻结的后台上下文调用主代理，并整理工具、产物与投递结果。
     def _run_agent(
         self,
         thread,
         request: BackgroundRunRequest,
         *,
+        goal_context: GoalRuntimeContext | None = None,
         proactive_delivery_available: bool | None = None,
         transcript_delivery_available: bool | None = None,
     ) -> tuple[
@@ -859,12 +878,16 @@ class BackgroundMainAgentRuntime:
         tuple[dict[str, object], ...],
         dict[str, object],
     ]:
-        goal_context = _goal_runtime_context(self.agent, self.store, request)
+        resolved_goal_context = goal_context or _goal_runtime_context(
+            self.agent,
+            self.store,
+            request,
+        )
         result = self.agent.run(
             background_prompt(
                 request.reason,
-                goal=goal_context.goal,
-                goal_subagent_phase=goal_context.subagent_phase,
+                goal=resolved_goal_context.goal,
+                goal_subagent_phase=resolved_goal_context.subagent_phase,
                 wake_signal=request.wake_signal,
                 proactive_delivery_available=proactive_delivery_available,
                 transcript_delivery_available=transcript_delivery_available,
@@ -873,7 +896,7 @@ class BackgroundMainAgentRuntime:
                 thread.thread_id,
                 request,
                 self.agent,
-                goal_context=goal_context,
+                goal_context=resolved_goal_context,
                 proactive_delivery_available=proactive_delivery_available,
             ),
             inject=[
@@ -1350,6 +1373,9 @@ def _channel_attachments(
     return tuple(attachments)
 
 
+# LLM: 子代理公开回复只服从本轮开始时冻结的树阶段与当前终态事实；根 task link 是恢复账，
+#   不能重新变成普通任务的完成验收器。采样后才结束的 child 必须由下一条 wake 开新轮。
+# 函数用途: 决定后台模型回复是否进入用户会话，屏蔽部分进度并放行新鲜的最终汇总。
 def _background_delivery_decision(
     agent: object,
     request: BackgroundRunRequest,
@@ -1358,8 +1384,9 @@ def _background_delivery_decision(
     resolved_channel: str | None = None,
     resolved_route_supports_proactive: bool | None = None,
     resolved_route_supports_transcript: bool | None = None,
+    sampled_subagent_phase: str = "",
 ) -> tuple[bool, str]:
-    """Keep partial child integration internal until durable state proves completion."""
+    """Keep partial child integration internal and publish one fresh terminal turn."""
     task_status = _background_task_link_status(agent, request, store=store)
     reason = str(request.reason or "").strip().lower()
     wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
@@ -1450,8 +1477,8 @@ def _background_delivery_decision(
         not task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES) for task in related
     ):
         return False, "partial_subagent_success"
-    if not task_completed:
-        return False, "root_task_still_active"
+    if str(sampled_subagent_phase or "").strip() == "subagents_active":
+        return False, "subagent_completion_requires_fresh_turn"
     return True, "root_subagents_terminal"
 
 
@@ -1955,7 +1982,12 @@ def _run_params(
         # 不知道该关闭哪条 active task link，完成
         # 的任务会被定时 policy 反复叫醒。只在 request 有明确 task_id 时绑定，
         # 普通无任务后台消息不会被误升格成任务。
-        task_attributes=_background_task_attributes(thread_id, request, agent),
+        task_attributes=_background_task_attributes(
+            thread_id,
+            request,
+            agent,
+            sampled_subagent_phase=resolved_goal_context.subagent_phase,
+        ),
         allowed_tools=_background_run_allowed_tools(
             config,
             BackgroundToolPolicyRequest(
@@ -2000,6 +2032,8 @@ def _background_task_attributes(
     thread_id: str,
     request: BackgroundRunRequest,
     agent: object | None,
+    *,
+    sampled_subagent_phase: str = "",
 ) -> dict[str, object] | None:
     attributes: dict[str, object] = {}
     wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
@@ -2040,8 +2074,9 @@ def _background_task_attributes(
             }
         )
         if agent is not None and lifecycle_reason in SUBAGENT_LIFECYCLE_WAKE_REASONS:
-            phase, _state_error = _goal_subagent_phase(agent, task_id)
-            attributes[CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR] = phase
+            attributes[CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR] = (
+                _sampled_or_current_subagent_phase(agent, task_id, sampled_subagent_phase)
+            )
         _apply_background_task_link_attributes(
             attributes,
             agent=agent,
@@ -2064,6 +2099,20 @@ def _background_task_attributes(
         if isinstance(skill_refs, list) and skill_refs:
             attributes["skill_snapshot_refs"] = skill_refs
     return attributes or None
+
+
+# LLM: sampled phase 存在时必须原样复用；只有没有上层快照的直接调用才允许读取当前树。
+# 函数用途: 为后台运行参数选择本轮冻结的子代理阶段，并兼容无快照调用方。
+def _sampled_or_current_subagent_phase(
+    agent: object,
+    task_id: str,
+    sampled_subagent_phase: str,
+) -> str:
+    phase = str(sampled_subagent_phase or "").strip()
+    if phase:
+        return phase
+    phase, _state_error = _goal_subagent_phase(agent, task_id)
+    return phase
 
 
 def _apply_background_task_link_attributes(
@@ -3195,7 +3244,13 @@ def _consume_wake_signal_batch(
     if _is_scheduler_wake_signal(signal):
         return
     reported.add(report.thread_id)
-    scheduler._mark_sibling_signals(wake_signals, signal, current, handled)
+    scheduler._mark_sibling_signals(
+        wake_signals,
+        signal,
+        current,
+        handled,
+        sampled_at=report.created_at,
+    )
     if len(wake_batch) <= 1:
         return
     for member in wake_batch:
@@ -3534,8 +3589,10 @@ def _successful_completion_waiting_for_batch(
     return delay > 0 and 0 < created_at <= current < created_at + delay
 
 
+# LLM: 这里只比较事件身份和终态类型；能否随本轮一起确认还必须由调用方检查采样时间边界。
+# 函数用途: 判断两条完成通知是否属于同一会话、同一根任务的成功完成批次。
 def _same_successful_completion_batch(primary: WakeSignal, sibling: WakeSignal) -> bool:
-    """Only coalesce DONE notices proved to describe the same settled task tree."""
+    """Match DONE notices from the same task tree without deciding freshness."""
 
     if primary.wake_signal_id == sibling.wake_signal_id:
         return False
@@ -4936,18 +4993,25 @@ class _BackgroundSchedulerExecutionMixin:
         self.store.mark_wake_signal_handled(signal.wake_signal_id, now=current)
         handled.add(signal.wake_signal_id)
 
+    # LLM: sampled_at 是本次模型轮开始的结构化时刻；晚于它创建的 sibling 是新事实，
+    #   必须留在 pending 队列触发下一轮，不能被当前回复顺带确认。
+    # 函数用途: 同批确认采样前已经存在的成功通知，并保留采样期间新到的完成通知。
     def _mark_sibling_signals(
         self,
         signals: list[WakeSignal],
         primary: WakeSignal,
         current: float,
         handled: set[str],
+        *,
+        sampled_at: float,
     ) -> None:
         for signal in signals:
+            created_at = float(getattr(signal, "created_at", 0.0) or 0.0)
             if (
                 signal.wake_signal_id not in handled
                 and not _is_scheduler_wake_signal(signal)
                 and _same_successful_completion_batch(primary, signal)
+                and 0 < created_at <= sampled_at
             ):
                 self._mark_signal(signal, current, handled)
 

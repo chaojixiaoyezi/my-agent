@@ -485,6 +485,47 @@ def _wants_background(params: dict[str, Any]) -> bool:
     return str(value or "").strip().lower() in {"true", "1", "yes"}
 
 
+# LLM: 持久进程只有 run_in_background 一条权威启动路径；这里识别 shell 语法 token，
+#   不能用正则匹配自然语言，也不能把引号内的 & 或 2>&1 重定向误判为后台操作符。
+# 函数用途: 判断命令是否试图用 shell 的独立 & 操作符绕开后台进程注册表。
+def _contains_unmanaged_background_operator(command: str) -> bool:
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        return "&" in tuple(lexer)
+    except ValueError:
+        return False
+
+
+# LLM: 错误正文只解释如何改成唯一受管形态，控制流仍由已注册 error_code 和
+#   effect_outcome=not_started 决定；不要在 ShellTool.execute 内复制这份合同。
+# 函数用途: 返回“未启动且应改用结构化后台参数”的标准工具结果。
+def _unmanaged_background_result(tool_name: str) -> ToolHandlerOutcome:
+    payload = {
+        "ok": False,
+        "error": "background_process_mode_required",
+        "message": (
+            "系统没有启动该命令。shell 的 '&' 会绕开后台会话管理；"
+            "请删除 '&'（通常也不需要 nohup），用原前台命令重新调用 "
+            "run_command，并设置 run_in_background=true。"
+        ),
+        "required_call_shape": {
+            "tool": "run_command",
+            "command": "不含 shell '&' 的前台命令",
+            "run_in_background": True,
+        },
+    }
+    return ToolHandlerOutcome(
+        tool_name,
+        False,
+        json.dumps(payload, ensure_ascii=False),
+        result_envelope=payload,
+        error_code="BACKGROUND_PROCESS_MODE_REQUIRED",
+        effect_outcome="not_started",
+    )
+
+
 def _sandbox_write_roots(params: dict[str, Any]) -> tuple[Path, ...] | None:
     """Return the per-invocation shell write roots carried by the structured boundary."""
     return _sandbox_roots(params, "__sandbox_write_roots")
@@ -650,12 +691,18 @@ def _record_background_job(jobs_dir: Path, pid: int, command: str, log_path: Pat
         pass
 
 
+# LLM: 模型说明必须把持久进程导向结构化 run_in_background，和 execute 的硬门保持一致。
+# 函数用途: 构造模型可见的 run_command 参数、适用场景和安全使用提示。
 def _build_shell_tool_model_spec(
     access_mode: str, default_timeout: int, max_output_chars: int
 ) -> ToolModelSpec:
     return ToolModelSpec(
         name="run_command",
-        description="Execute one shell command in the workspace.",
+        description=(
+            "Execute one shell command in the workspace. For a server or other persistent "
+            "process, pass run_in_background=true and keep the command itself in foreground "
+            "form; shell '&' backgrounding is rejected because it cannot return a managed session."
+        ),
         input_schema={
             "type": "object",
             "properties": {
@@ -693,6 +740,7 @@ def _build_shell_tool_model_spec(
             avoid_when=(
                 "Use read_file / write_file when only file IO is needed.",
                 "Avoid for interactive terminal workflows.",
+                "Never append shell '&' or use 'nohup ... &' for a service; remove those wrappers and set run_in_background=true so process_status and kill_process can manage it.",
                 "Prefer write_file for file changes instead of shell redirection.",
                 "Do not use rm/rmdir/unlink. Delete one text file with apply_patch; route directory or bulk deletion through task_trash.",
                 "Files written under /tmp inside the owner-scoped sandbox are kept in the task workspace .sandbox-tmp directory and survive across tool calls and requests; still keep final deliverables in the selected workspace, not in /tmp.",
@@ -817,6 +865,9 @@ class ShellTool(BaseTool):
             error_code="SANDBOX_UNAVAILABLE",
         )
 
+    # LLM: shell 自带 & 不得进入前台或结构化后台执行；否则 shell 很快退出，模型会把
+    #   一次临时探活误当成持久服务成功。拒绝结果必须声明 not_started，允许安全重试。
+    # 函数用途: 校验并执行一条命令，长期进程统一登记为可查询、可终止的后台会话。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         command_result = self._parse_command(params)
         if isinstance(command_result, ToolHandlerOutcome):
@@ -833,6 +884,8 @@ class ShellTool(BaseTool):
                 ),
                 error_code="COMMAND_POLICY_BLOCKED",
             )
+        if _contains_unmanaged_background_operator(command):
+            return _unmanaged_background_result(self.model_spec.name)
         internal_status_ref = _internal_agent_status_command(command)
         if internal_status_ref is not None:
             return ToolHandlerOutcome(

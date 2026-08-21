@@ -37,6 +37,10 @@
   只能用 `target + message` 给一个直接 child 插话，不能广播或越层代管孙代理。
 - [ ] 用户指定交付目录时，单项或每个写入 item 都通过结构化 `output_files` 获得写边界；只把路径写进
   goal 不得提升权限。后台续跑必须绑定 exact task，不能复用同 thread 旧任务的 main run/attempt。
+- [ ] child 完成事件在后台轮开始时只采样一次；采样后才创建的 DONE wake 保持 pending 并另开新轮。
+  新鲜终态轮的自然回复不等待 root task status 充当第二验收器。
+- [ ] Web 服务等长期命令只用 `run_command(run_in_background=true)` 启动并返回受管 session；shell `&` /
+  `nohup ... &` 在执行前明确拒绝且可修正重试，最终必须从另一条命令核验 0.0.0.0 监听与局域网访问。
 - [ ] 主代理、子代理、Gateway 与 TUI 对六类 `turn_end` 映射一致；普通完成不读取 acceptance/verification，
   历史兼容字段不进入当前 prompt、context bundle、父级摘要或启动前检查。
 - [ ] TUI 在活动轮显示 Working 动画和持续 thinking 增量；用户位于页底时自动跟随，主动上翻后不抢滚动，

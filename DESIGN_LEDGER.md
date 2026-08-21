@@ -167,6 +167,10 @@
 - 普通任务没有独立 closeout ledger 硬门。文件存在、路径权限、附件 owner/hash、危险 effect 等客观安全事实
   仍在各自不可绕过的工具或投递边界校验；“任务是否做完”由主模型结合这些结构化事实判断。显式 `/goal`
   另由 typed goal 状态和 `update_goal` 收口，但它仍使用同一 conversation history，不恢复普通任务验收器。
+- 长期命令只有一个受管入口：模型向 `run_command` 传 `run_in_background=true`，宿主返回可查询、可终止的
+  `session_id/pid/output_file`。shell 自带的独立 `&`（包括 `nohup ... &`）在启动前以
+  `BACKGROUND_PROCESS_MODE_REQUIRED + not_started` 拒绝；不能让前台 shell 退出后留下无账进程，也不能把
+  同一条命令内部的短暂探活当成服务已经持久运行。普通 `2>&1` 重定向和引号内的 `&` 不受影响。
 - 所有普通最终回复、后台主动消息和显式 `send_message` 共用 `DeliveryService`：可信 `DeliveryContext` 单独持有 channel/target/reply_to，`ReplyEnvelope` 永远不带收件人；adapter/capabilities/target validator 只能通过 `ChannelAdapterRegistry` 注册，新增 IM 不得在投递主流程增加平台分支。
 - 副作用超时不等于失败也不等于可重试：通用 Tool Gateway 必须把可能已经发生但没有终态的调用持久化为 `unknown`。`operation` 作用域只重放同一调用身份；`business` 作用域由工具从 typed owner/request/目标/规范参数生成跨调用稳定键。只有带 `source_ref` 的目标系统结构化核对能把 unknown 收口为 succeeded/failed，或在证明 not_started 后原子重开；没有核对能力就保持 fail-closed。provider 原生幂等键只由可信 DeliveryContext 下发，Feishu 的同一分片/附件重试必须复用同一个 UUID。
 - 多个外部写组成普通任务时不增加通用 Saga、第二份事务账本或自动补偿器。对照 会话运行时
@@ -307,6 +311,10 @@
   `core/src/agent/control.rs` 的完成状态订阅以及 `tools/handlers/multi_agents/wait.rs` 的明确采样边界后，
   child lifecycle 后台轮会冻结采样前树阶段；从活跃树开始的旧回合不能关闭根任务，最后一条终态事件
   必须获得新的模型回合。该门只保证事件新鲜度，不判断产物质量，也不恢复机器验收。
+- 后台轮现在只在开始时冻结一次 child phase，prompt、最终化和用户投递共用这份快照；同 root 的 DONE
+  通知只有 `created_at` 不晚于该采样时刻才可随本轮合并确认，晚到通知继续 pending 并触发下一轮。新鲜
+  回合看到全部 child 终态后，模型自然回复可直接投递，不再等待 root task link 先写成 `completed`；
+  task link 继续负责恢复和停止，不再充当普通任务的第二完成验收器。
 - 模型可见的父子消息按递归关系收成 `send_guidance(target, message)`：只允许给当前代理直接创建的
   一个下级插入普通消息。删除 thread/task/case、批量 run、整棵子树、priority 和 delivery 控制面；
   用户给主代理的插入继续走 active-turn 输入链，子代理管理孙代理，根代理不越层代管。

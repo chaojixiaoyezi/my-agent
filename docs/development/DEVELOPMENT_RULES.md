@@ -263,6 +263,10 @@ before changing code.
   Hidden/internal tools must also be blocked at execution time unless the caller
   supplies an explicit internal `allowed_tools` scope; hiding a tool from the
   catalog is not enough.
+- Persistent commands must use the same tool's structured `run_in_background=true`
+  parameter and the returned process session. Do not append shell `&`, combine
+  `nohup ... &`, or otherwise create an unregistered background child; readiness
+  checks must run in a later tool call against that managed session.
 - Shell policy must be controlled rather than name-banned: ordinary cleanup such
   as `rm file`, `rm -rf build`, `rmdir tmp`, or `chmod 777 scratch` may run when it
   stays inside the configured access boundary.  Catastrophic actions such as

@@ -112,6 +112,9 @@ SimpleAgent orchestration tool
 - `agent/subagents/runner_completion_wake.py`：runner 终态只通过
   `ConversationStore.append_observation_with_wake` 发布父级通知。该入口保证 wake-first 顺序、双向 ID
   关联和 observation fallback；禁止恢复成两个彼此独立的 append/raise 调用。
+- 父级后台整合轮只在模型调用前冻结一次 child phase；prompt、最终化和公开投递共用该快照。同 root
+  的 DONE 通知只有在该时刻已经创建才可同批确认，之后到达的通知保持 pending 并另开一轮。新鲜轮
+  看到全部 child 终态后直接交付模型自然回复，不等根 task link 先完成第二次机器验收。
 - `agent/agent_core/orchestration/`：主代理模型可见的统一 `create_subagents`、`inspect_agent_tree`、
   `send_guidance`、`cancel_subagents` 与 capability 处理入口。创建即由宿主自动启动；
   `dispatch/scheduler` 只保留为内部执行引擎，不再注册成模型工具。

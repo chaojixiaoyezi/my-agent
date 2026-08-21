@@ -10,7 +10,14 @@ import json
 import time
 from pathlib import Path
 
-from agent_py_agent.agent.tooling.shell import ShellTool, _wants_background
+import pytest
+
+from agent_py_agent.agent.tooling.process_registry import process_registry
+from agent_py_agent.agent.tooling.shell import (
+    ShellTool,
+    _contains_unmanaged_background_operator,
+    _wants_background,
+)
 
 
 def test_background_start_returns_pid_and_output_file(tmp_path):
@@ -58,3 +65,53 @@ def test_sync_mode_unaffected(tmp_path):
     res = ShellTool(tmp_path).execute({"command": "echo sync-result"})
     assert res.ok and "sync-result" in res.output
     assert not (tmp_path / ".background_jobs").exists(), "同步模式不创建后台目录"
+
+
+@pytest.mark.parametrize("run_in_background", [False, True])
+def test_shell_background_operator_requires_managed_mode(tmp_path, run_in_background):
+    res = ShellTool(tmp_path).execute(
+        {
+            "command": "nohup python3 -c 'import time; time.sleep(10)' >/tmp/job.log 2>&1 &",
+            "run_in_background": run_in_background,
+        }
+    )
+
+    assert res.ok is False
+    assert res.error_code == "BACKGROUND_PROCESS_MODE_REQUIRED"
+    assert res.effect_outcome == "not_started"
+    assert json.loads(res.output)["required_call_shape"]["run_in_background"] is True
+    assert not (tmp_path / ".background_jobs").exists()
+
+
+def test_background_operator_parser_ignores_quotes_and_fd_redirects():
+    assert _contains_unmanaged_background_operator("sleep 1&") is True
+    assert _contains_unmanaged_background_operator("(sleep 1)&") is True
+    assert _contains_unmanaged_background_operator('printf "a&b"') is False
+    assert _contains_unmanaged_background_operator("echo hi 2>&1") is False
+
+
+def test_fd_redirect_remains_valid_in_foreground(tmp_path):
+    res = ShellTool(tmp_path).execute({"command": "echo redirect-ok 2>&1"})
+
+    assert res.ok is True
+    assert "redirect-ok" in res.output
+
+
+def test_structured_background_process_remains_managed_after_execute_returns(tmp_path):
+    process_registry.clear()
+    res = ShellTool(tmp_path).execute(
+        {
+            "command": 'python3 -c "import time; time.sleep(10)"',
+            "run_in_background": True,
+        }
+    )
+    assert res.ok is True
+    session_id = json.loads(res.output)["session_id"]
+    try:
+        time.sleep(0.1)
+        status = process_registry.status(session_id)
+        assert status is not None
+        assert status["status"] == "running"
+    finally:
+        process_registry.kill(session_id)
+        process_registry.clear()

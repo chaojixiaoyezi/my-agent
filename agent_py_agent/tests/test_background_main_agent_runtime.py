@@ -2072,6 +2072,7 @@ def test_child_settling_during_background_sampling_requires_fresh_terminal_turn(
     partial = _run_child_done_wake(runtime, thread.thread_id, first.id, now=20.0)
 
     assert partial.delivery_status == "suppressed"
+    assert partial.delivery_reason == "subagent_completion_requires_fresh_turn"
     assert store.load_task_link("task-root").status == "active"
     params = _run_params(
         thread.thread_id,
@@ -2089,6 +2090,61 @@ def test_child_settling_during_background_sampling_requires_fresh_terminal_turn(
 
     assert final.delivery_reason == "root_subagents_terminal"
     assert store.load_task_link("task-root").status == "completed"
+
+
+def test_terminal_subagent_reply_does_not_wait_for_root_task_status(tmp_path) -> None:
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundRunRequest,
+        _background_delivery_decision,
+    )
+
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    child = agent.subagents.create_run(
+        goal="完成交付",
+        thought="",
+        plan=["执行"],
+        parent_id="task-root",
+        root_id="task-root",
+    )
+    agent.subagents.lifecycle.set_status(child.id, "DONE")
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-terminal-delivery",
+            "channel_user_id": "user-1",
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-root",
+            "goal": "完成全部工作",
+            "status": "active",
+        }
+    )
+    request = BackgroundRunRequest(
+        thread_id=thread.thread_id,
+        task_id="task-root",
+        reason="subagent_runner_finished",
+        wake_signal={
+            "root_task_id": "task-root",
+            "source_agent_id": child.id,
+            "metadata": {"task_id": child.id, "status": "DONE"},
+        },
+    )
+
+    assert store.load_task_link("task-root").status == "active"
+    assert _background_delivery_decision(
+        agent,
+        request,
+        store=store,
+        sampled_subagent_phase="subagents_terminal",
+    ) == (True, "root_subagents_terminal")
 
 
 def _child_settlement_fixture(tmp_path):
@@ -3357,6 +3413,58 @@ def test_successful_sibling_completion_wakes_are_coalesced_before_one_llm_turn(
     assert len(backend.prompts) == 1
     assert store.pending_wake_signals() == []
     assert reports[0].delivery_status == "sent"
+
+
+def test_completion_coalescing_keeps_events_created_after_turn_sample_pending(
+    tmp_path,
+) -> None:
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-fresh-completion",
+            "channel_user_id": "user-1",
+        }
+    )
+    signals = []
+    for index, created_at in enumerate((20.0, 21.0, 31.0), start=1):
+        signals.append(
+            store.raise_wake_signal(
+                {
+                    "thread_id": thread.thread_id,
+                    "reason": "subagent_runner_finished",
+                    "root_task_id": "task-root",
+                    "source_agent_id": f"child-{index}",
+                    "metadata": {"task_id": f"child-{index}", "status": "DONE"},
+                    "now": created_at,
+                }
+            )
+        )
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": BackgroundMainAgentRuntime(agent=agent, store=store),
+            "store": store,
+        }
+    )
+    handled: set[str] = set()
+
+    scheduler._mark_sibling_signals(
+        signals,
+        signals[0],
+        40.0,
+        handled,
+        sampled_at=30.0,
+    )
+
+    assert signals[1].wake_signal_id in handled
+    assert store.pending_wake_signal(signals[1].wake_signal_id) is None
+    assert signals[2].wake_signal_id not in handled
+    assert store.pending_wake_signal(signals[2].wake_signal_id) is not None
 
 
 def test_two_audit_findings_on_one_thread_share_one_receipted_model_turn(
