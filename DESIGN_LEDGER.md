@@ -384,6 +384,15 @@
   表示同一批 item 互相重叠，必须修改参数后重试；非空 `existing_run_id` 才表示真实运行中的
   同级占用，由宿主生命周期事件唤醒。整批原子拒绝不会改变用户原始约束，更不是授权父代理
   改用用户禁止的方式。这是通用工具结果合同，不从 prompt 词句推导状态。
+- 递归 child 的工作区权限对齐 会话运行时 `build_agent_spawn_config/apply_spawn_agent_runtime_overrides`：
+  从当前 turn 继承 cwd 和 permission profile，不再叠加一条与 inherited workspace 完全同路径的
+  默认 home deny。该调和只适用 local/unmanaged owner，且仅删精确同路径项；更窄的 `.ssh`、
+  `Desktop`、`Downloads` deny 和所有远程 owner 宿主 home 围栏仍硬拦。来源只读 task 的
+  `owner + attributes.workspace_root(s) + allowed_write_roots`，不从 goal 或模型声称授权。
+- TUI `/stop` 有两种同一控制合同下的定位方式：前台正在提交/执行时必须带
+  exact turn id；前台已让出但当前 conversation 仍有子代理/background claim 支撑的唯一 typed
+  live task 时，可以不带 turn id 交给 Gateway 按 owner/thread 停止该任务。多个冲突 live task 或只有
+  历史终态时继续 fail closed，不猜目标；`/btw` 始终要 exact active turn。
 
 ## 2026-08-18 候选消息实时流式 + 每轮阶段计时【状态：本地 focused 通过，待真机部署复验】
 

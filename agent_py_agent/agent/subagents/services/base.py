@@ -82,6 +82,41 @@ def _load_parent_task(manager: Any, parent_id: str):
         return None
 
 
+# LLM: 路径比对只用于结构化 workspace/allow/deny 的精确同路径调和，不解析 goal。
+# 函数用途: 把工作区路径归一化成可安全比较的绝对路径文本。
+def _scope_path_key(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        return str(Path(text).expanduser().resolve(strict=False))
+    except OSError:
+        return ""
+
+
+# LLM: 会话运行时 child 继承当前 turn 的 cwd 和完整 permission profile。本项目仅在
+# local/unmanaged owner 下移除与已允许且已结构化继承的 workspace root 完全同路径的默认 deny；
+# 远程 owner 的 home 围栏不受影响，`.ssh` 等更窄 deny 也始终保留。
+# 函数用途: 消除“父级明确允许工作区，子代理又被同路径默认禁止”的矛盾。
+def _reconciled_forbidden_write_roots(task: SubAgentTask) -> list[str]:
+    owner_id = str(task.owner or "").strip()
+    if owner_id and not owner_id.startswith("local/"):
+        return list(task.forbidden_write_roots)
+    attrs = task.attributes if isinstance(task.attributes, dict) else {}
+    workspace_values: list[object] = [attrs.get("workspace_root")]
+    raw_workspace_roots = attrs.get("workspace_roots")
+    if isinstance(raw_workspace_roots, (list, tuple)):
+        workspace_values.extend(raw_workspace_roots)
+    workspace_roots = {_scope_path_key(item) for item in workspace_values}
+    allowed_roots = {_scope_path_key(item) for item in task.allowed_write_roots}
+    inherited_allowed = (workspace_roots & allowed_roots) - {""}
+    return [
+        item
+        for item in task.forbidden_write_roots
+        if _scope_path_key(item) not in inherited_allowed
+    ]
+
+
 def _session_identity_fields(run_id: str, parent_task: Any | None) -> dict[str, str]:
     session_id = f"session-{run_id}"
     parent_session = str(getattr(parent_task, "subagent_session_id", "") or "")
@@ -492,6 +527,7 @@ class SubAgentBaseService:
             attributes=_task_attrs_for_create(self.manager, params),
             **prepared["paths"],
         )
+        task.forbidden_write_roots = _reconciled_forbidden_write_roots(task)
         _apply_runtime_identity_and_memory_scope(task, params, parent_task=parent_task)
         task.inheritance_manifest = build_inheritance_manifest(parent_task, task)
         rebind_task_output_refs_to_run(task)

@@ -24,6 +24,12 @@
   `await_existing_run_lifecycle_event`，误导模型改为亲自执行。当场已从 TUI 中断，未写入产品代码。
   当前候选按结构化 conflict 来源分流：批内重叠要重分输出后重试，只有真实既有 run 才等直属
   生命周期事件；回执显式保留用户原始约束，不解析用户任务文本。
+- `be531a8` 修复冲突回执并部署后，原样 TUI 一次真实创建了 4 个 child，主代理没有自写。
+  新样本随后暴露权限矛盾：child 同时获得结构化 `allowed=/root` 和默认 `forbidden=/root`，
+  因同层 deny 胜出而连续 `WRITE_FORBIDDEN` 并申请 capability；这是工作区继承断链，不是子代理崩溃。
+  当前候选只在 local/unmanaged owner 下移除与可写 inherited workspace 完全同路径的默认 deny；
+  `.ssh`/Downloads 等更窄保护及远程 owner 的 host-home 围栏不变。TUI `/stop` 同时允许前台回合已让出后
+  停止当前 conversation 唯一 typed live task；提交中的前台 turn 仍必须携带 exact id。
 - 新增公共 `TurnEndReason` 六类原因：`completed`、`aborted`、`blocked`、`error`、`max-tokens`、
   `interrupted`。主代理、子代理、Gateway 和 TUI 读取同一个结构化结束事实；普通任务不再通过
   `acceptance_checks`、`VerificationStatus` 或模型正文里的完成词决定能否结束。历史账本字段只读兼容，

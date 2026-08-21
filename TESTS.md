@@ -91,6 +91,12 @@ status/result/artifact refs。`task_progress` 回归同时证明 open 项只作�
 sibling 占用时才返回 `await_existing_run_lifecycle_event` 和其 run id。两种失败都是整批
 `not_started`，必须带 `preserve_user_constraints=true`；前者不得诱导模型等待不存在的 run。
 
+`be531a8` 真机的 4 child 样本要锁住工作区继承：local child 的结构化
+`workspace_root` 同时存在于 `allowed_write_roots` 时，只移除完全同路径的默认 home deny；
+`.ssh`/Downloads 等窄 deny 仍在。非 workspace 的同路径 allow/deny 仍 deny 胜出，远程 owner 也不做
+该调和。TUI 回归同时覆盖：foreground `running=true` 但 id 未绑定时 `/stop` 不发；foreground
+已让出时 `/stop` 以空 expected turn id 进持久 outbox，由 Gateway 只选当前 conversation 唯一 live task。
+
 `db41bb0` 部署后的原样 TUI 复验已有四名 child 全部 `DONE` 和完整页面文件，但 8080 最终未监听。证据
 显示模型在前台 `run_command` 内使用 `nohup ... &`，同一条命令里的 curl 得到 200 后，foreground shell
 结束时未受管 child 被清理。新增回归覆盖：独立 `&` 在任何模式都以 `not_started` 拒绝；`2>&1` 和引号内

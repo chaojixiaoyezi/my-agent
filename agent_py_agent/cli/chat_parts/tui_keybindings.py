@@ -903,10 +903,11 @@ def _tui_attach_gateway_job(
     params.jobs.put(job)
 
 
-# LLM: Valid Gateway slash controls enter a durable operation outbox before HTTP. `/btw` and
-# `/stop` require the exact canonical turn observed at Enter; an empty/submitting id never permits
-# the server to guess a later turn.
-# 函数用途: 把 TUI 控制命令持久排入统一对账器，无法精确定位当前回合时就地拒绝。
+# LLM: Valid Gateway slash controls enter a durable operation outbox before HTTP. `/btw` always
+# needs the exact live turn. `/stop` also pins a currently submitting/running turn, but after the
+# foreground turn has yielded it may carry an empty turn id so the server can stop the sole typed
+# live task in this conversation; ambiguous task sets still fail closed on the server.
+# 函数用途: 持久提交 TUI 控制命令；前台插话精确绑回合，后台任务也能被 `/stop` 安全停止。
 def _tui_submit_control_operation(
     params: TuiCreateKeybindingsParams,
     text: str,
@@ -923,7 +924,8 @@ def _tui_submit_control_operation(
         with params.state_lock:
             running = bool(params.is_running_ref[0])
             expected_turn_id = str(params.running_request_id_ref[0] or "").strip()
-        if not running or not expected_turn_id:
+        exact_turn_required = command.kind == "steer" or running
+        if exact_turn_required and (not running or not expected_turn_id):
             _required_tui_runtime(params).set_notice(
                 "No exact active turn yet · command not sent",
                 duration_seconds=2.5,

@@ -347,6 +347,29 @@ def test_gateway_stop_is_not_sent_before_exact_turn_is_bound() -> None:
     assert "No exact active turn" in runtime.notice()
 
 
+def test_gateway_stop_without_foreground_turn_targets_background_task() -> None:
+    runtime = TuiRuntime("control-background-task")
+    captured: list[object] = []
+
+    class Reconciler:
+        def enqueue(self, entry) -> None:
+            captured.append(entry)
+
+    params = SimpleNamespace(
+        use_gateway=True,
+        state_lock=threading.Lock(),
+        is_running_ref=[False],
+        running_request_id_ref=[""],
+        tui_runtime=runtime,
+        control_operation_reconciler=Reconciler(),
+    )
+
+    assert tui_keybindings._tui_submit_control_operation(params, "/stop")
+    assert len(captured) == 1
+    assert captured[0].command_kind == "stop"
+    assert captured[0].expected_turn_id == ""
+
+
 def test_running_gateway_submit_uses_active_turn_receipt_instead_of_job_queue() -> None:
     runtime = TuiRuntime("active-turn-submit")
     captured: dict[str, object] = {}

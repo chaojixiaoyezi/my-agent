@@ -269,6 +269,10 @@ handoff 的 run 保持可读，但新创建/重新合并的 takeover 必须补�
 结果和 refs 后，自然决定汇总、补充 guidance、取消或再创建一个明确分工的 child。
 用户明确的保存路径应通过顶层或逐 item 的 `output_files` 记录交付和锁；普通 child 的权限上界来自父级
 workspace，goal 或 output_files 都不能扩大到该上界之外。
+对 local/unmanaged owner，若该 inherited workspace 同时是结构化 allowed root，创建时会移除
+与它完全同路径的默认 home deny，避免子代理被父级已授权的 cwd 反向拦住。这不改变
+通用同层 deny 胜出规则：`.ssh`、`Desktop`、`Downloads` 等更窄 deny 继续生效，远程 owner
+的宿主 home 围栏也不移除。调和只读 `owner + workspace_root(s) + allowed_write_roots`，不解析 goal。
 
 ## Collaboration Capabilities
 

@@ -51,3 +51,91 @@ def test_manager_does_not_parse_write_roots_from_natural_language():
     import agent_py_agent.agent.subagents.manager as manager
 
     assert not hasattr(manager, "_extract_write_dirs")
+
+
+def test_inherited_workspace_root_removes_only_equal_default_deny(tmp_path: Path):
+    from agent_py_agent.agent.subagents.models import SubAgentTask
+    from agent_py_agent.agent.subagents.services.base import _reconciled_forbidden_write_roots
+
+    task = SubAgentTask(
+        id="run_workspace_inheritance",
+        goal="在继承工作区中写产品文件",
+        thought="按父级权限执行",
+        plan=["写入工作区"],
+        owner="local/main",
+        allowed_write_roots=[str(tmp_path)],
+        forbidden_write_roots=[
+            str(tmp_path),
+            str(tmp_path / ".ssh"),
+            str(tmp_path / "Downloads"),
+        ],
+        attributes={
+            "workspace_root": str(tmp_path),
+            "workspace_roots": [str(tmp_path)],
+        },
+    )
+
+    assert _reconciled_forbidden_write_roots(task) == [
+        str(tmp_path / ".ssh"),
+        str(tmp_path / "Downloads"),
+    ]
+
+
+def test_non_workspace_equal_allow_does_not_remove_default_deny(tmp_path: Path):
+    from agent_py_agent.agent.subagents.models import SubAgentTask
+    from agent_py_agent.agent.subagents.services.base import _reconciled_forbidden_write_roots
+
+    external = tmp_path / "external"
+    task = SubAgentTask(
+        id="run_external_scope",
+        goal="尝试写外部路径",
+        thought="守住工作区上界",
+        plan=["核对路径"],
+        allowed_write_roots=[str(external)],
+        forbidden_write_roots=[str(external)],
+        attributes={"workspace_root": str(tmp_path)},
+    )
+
+    assert _reconciled_forbidden_write_roots(task) == [str(external)]
+
+
+def test_remote_owner_keeps_equal_host_home_deny(tmp_path: Path):
+    from agent_py_agent.agent.subagents.models import SubAgentTask
+    from agent_py_agent.agent.subagents.services.base import _reconciled_forbidden_write_roots
+
+    task = SubAgentTask(
+        id="run_remote_owner",
+        goal="处理远程 owner 任务",
+        thought="保留宿主围栏",
+        plan=["核对权限"],
+        owner="users/remote-a",
+        allowed_write_roots=[str(tmp_path)],
+        forbidden_write_roots=[str(tmp_path)],
+        attributes={"workspace_root": str(tmp_path)},
+    )
+
+    assert _reconciled_forbidden_write_roots(task) == [str(tmp_path)]
+
+
+def test_create_run_applies_inherited_workspace_reconciliation(tmp_path: Path, monkeypatch) -> None:
+    from agent_py_agent.agent.subagents import manager_work_orders
+    from agent_py_agent.agent.subagents.manager import SubAgentManager
+
+    monkeypatch.setattr(
+        manager_work_orders,
+        "_default_forbidden_write_roots",
+        lambda: [str(tmp_path), str(tmp_path / ".ssh")],
+    )
+    manager = SubAgentManager(workspace=tmp_path, workspace_root=tmp_path)
+
+    task = manager.create_run(
+        goal="在父级工作区写一个文件",
+        thought="继承父级边界",
+        plan=["写入", "回报"],
+        owner="local/main",
+        extra_write_roots=[str(tmp_path)],
+    )
+
+    assert str(tmp_path) in task.allowed_write_roots
+    assert str(tmp_path) not in task.forbidden_write_roots
+    assert str(tmp_path / ".ssh") in task.forbidden_write_roots

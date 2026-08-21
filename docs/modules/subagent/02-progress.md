@@ -49,6 +49,10 @@
 - `task_progress` 现在只是软记事账本。普通任务的自动 continuation 模块、配置和深度状态已经删除；
   open 项不会开新模型轮或阻止 final。新项必须有稳定 `id/title/status`，更新返回前以 canonical child
   run id 重新对账，避免模型旧状态覆盖真实 DONE。
+- `be531a8` 后的原样 TUI 样本一次创建 4 个 child，但所有 child 继承的 `/root`
+  又被默认 home deny 同层拒绝，导致 `WRITE_FORBIDDEN -> capability_request`。候选修复不改
+  通用“同层 deny 胜出”规则，而是在创建 local/unmanaged task 时调和精确的 inherited workspace
+  冲突；远程 owner 和更窄禁止路径不放宽。
 
 ## 2026-08-12 子代理候选 scope 统一规范
 

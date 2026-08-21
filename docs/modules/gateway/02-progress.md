@@ -1,5 +1,14 @@
 # Gateway Progress
 
+## 2026-08-21 TUI 后台任务停止定位
+
+- 真机子代理权限失败后，前台 turn 已让出，TUI 本地 `is_running=false`，但当前 thread 仍有
+  4 个 typed live child。旧 keybinding 在 Gateway 收到命令前就拒绝 `/stop`，显示
+  `No exact active turn yet`，因而用户无法停止真实后台任务。
+- 当前候选保留前台精确性：正在提交/执行的 `/stop` 与所有 `/btw` 必须带 exact turn id。
+  前台已让出时，`/stop` 以空 turn id 进入同一持久 outbox，Gateway 既有 owner/thread 逻辑只选
+  唯一 live task；多目标或只有历史任务继续拒绝。
+
 ## 2026-08-21 同 owner 多会话后台车道
 
 - `.7` 单 Gateway 原样植物大战僵尸任务中，3 个 child 已全部 `DONE` 且写出 8 个产物，
