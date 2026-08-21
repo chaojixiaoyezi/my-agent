@@ -382,9 +382,10 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     gateway_global_inflight_limit: int = 500
     gateway_processing_timeout_seconds: int = 900
     gateway_request_max_attempts: int = 2
-    # 后台 owner 整合 tick 线程池上限(原 cli/gateway_loops.py 硬编码 8):每个活跃 scoped
-    # owner 的整合/唤醒 tick 独立线程,防一个卡死 turn 饿死其他 owner;超出排队下一轮。
+    # 后台会话全局线程池上限；超出留在持久队列，同 thread 仍由 run claim 单飞。
     background_owner_workers: int = 8
+    # 单 owner 同时可跑的独立后台会话数；调大会增加并发模型请求。
+    background_threads_per_owner: int = 4
     # per-owner 作用域 agent 实例池上限(原 owner_scoped_pool.py 硬编码 64):有界 LRU,
     # 超出逐出最久未用;千并发多用户时的驻留 agent 数调参入口。
     owner_agent_pool_max_agents: int = 64

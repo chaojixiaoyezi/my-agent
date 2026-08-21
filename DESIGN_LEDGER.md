@@ -8,6 +8,10 @@
   Gateway，以真实暴露队列、公平性、活动回合、恢复和资源争用问题；禁止用“每个用例一个 Gateway”
   规避共享底座问题。需要验证重启、崩溃或断连时，只能顺序操纵这一个实例；进程内 fake/合同单测不属于
   额外真实 Gateway。
+- 单 Gateway 的后台执行最小车道是 `owner + durable thread_id`，不是 owner。同 thread 的前台、
+  子代理唤醒、policy 和 scheduled continuation 继续共用唯一持久 run claim 单飞；不同 thread
+  必须能有界并发，不得因同一用户的另一个长后台回合而饿死。Gateway 只做无模型的
+  ready-thread 规划，全局池与 per-owner 上限均由显式配置约束，持久来源与 claim 仍是调度权威。
 - 自然语言负责沟通，结构化事实负责决策；prompt、summary、报告正文、guidance 和角色描述不能直接改变运行时状态、权限、验收或派工。
 - 安全门可以硬，业务质量门默认软；危险路径、危险命令、越权和客观产物错误可以硬拦，任务深度、覆盖充分性和报告质量进入 warning、返工提示或 closeout。
 - 修当前链路，不为历史目录、历史字段或历史工具形态加旁路。

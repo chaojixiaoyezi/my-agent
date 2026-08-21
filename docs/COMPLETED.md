@@ -4,6 +4,12 @@
 
 最近收口重点：
 
+- 2026-08-21 本地底座已把 Gateway 后台整合从 owner 级 single-flight 收细为
+  `owner + durable thread_id` 车道。同会话仍共用既有持久 run claim 单飞，不同 TUI/会话按 owner
+  公平、在全局池和 `background_threads_per_owner` 两层显式上限内并发。真实 scheduler
+  回归已证明同 `local/main` 的一条模型回合挂起时，另一条会话仍能入模。
+  这解决的是“旧窗口占住用户后台通道，新任务 child 全完成也叫不醒主代理”；
+  `.7` 真机交付结论仍以 ROADMAP/STATUS 为准。
 - 2026-08-21 本地实现已把主代理与任意层级子代理收敛为同一递归关系：模型只有统一
   `create_subagents` 创建入口，创建后由宿主自动启动；手动 `dispatch_subagents` / child scheduler 工具已从
   模型控制面删除，废弃 dispatch action envelope 也已移除；命令行 dispatch 仅作为宿主后台进程入口，

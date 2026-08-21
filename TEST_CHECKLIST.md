@@ -48,6 +48,9 @@
   扩大父级权限。后台续跑必须绑定 exact task，不能复用同 thread 旧任务的 main run/attempt。
 - [ ] child 完成事件在后台轮开始时只采样一次；采样后才创建的 DONE wake 保持 pending 并另开新轮。
   新鲜终态轮的自然回复不等待 root task status 充当第二验收器。
+- [ ] 单 Gateway 内后台车道按 `owner + durable thread_id` 隔离；同 thread 继续由 run claim
+  单飞，同 owner 的另一条长 TUI/policy 回合不得阻塞 child 完成 wake。全局和单 owner
+  并发上限必须可配置，超出保留持久队列而不丢失。
 - [ ] 主 run/current attempt 为 `unknown` 时 wake、observation、policy 原样保留且零模型调用、零自动重挂；
   同线程新任务不被旧阻塞项占满 limit。人工核对恢复后原事件继续，Gateway 不再刷 loop error。
 - [ ] Web 服务等长期命令只用 `run_command(run_in_background=true)` 启动并返回受管 session；shell `&` /

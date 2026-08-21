@@ -16,6 +16,10 @@ my-agent chat
 
 `gateway` 是本地常驻 runtime，`chat` / TUI 只是客户端。用户可以退出聊天界面、重启 gateway、刷新会话；任务树、runner 输出、验收、能力授权、失败原因和调度日志都要落盘，gateway 重启后从任务账本恢复，而不是依赖某个长聊天上下文活着。当前 `my-agent` 不带子命令时已经会自动启动 gateway 并进入 `chat --gateway`，这是默认用户体验。
 
+一个 Gateway 可以服务多个 TUI。后台续跑的串行边界是 durable conversation thread，不是整个 owner：
+同 thread 的前台和后台继续共用一条 run claim，不同 thread 在全局/单 owner 两层上限内并发。
+这与 会话运行时 每个 Thread/Session 自有 active turn 的边界一致，但仍保留本项目的跨进程持久队列和恢复。
+
 gateway 的本地后台控制面入口：
 
 ```text

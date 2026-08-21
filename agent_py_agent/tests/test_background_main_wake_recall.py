@@ -20,8 +20,17 @@ from agent_py_agent.agent.conversation import (
     BackgroundMainAgentRuntime,
     ConversationStore,
 )
-from agent_py_agent.agent.conversation.models import ChannelBinding, ConversationThread
-from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _resolve_delivery_route
+from agent_py_agent.agent.conversation.models import (
+    ChannelBinding,
+    ConversationThread,
+    ProgressPolicy,
+    WakeSignal,
+)
+from agent_py_agent.agent.conversation.runtime import (
+    BackgroundMainAgentScheduler,
+    BackgroundRunRequest,
+    _resolve_delivery_route,
+)
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.delivery import (
     ChannelCapabilities,
@@ -364,20 +373,32 @@ def test_blocked_base_tick_does_not_starve_scoped_owner_tick() -> None:
     owner_ran = threading.Event()
 
     class BlockingBaseScheduler:
-        def tick(self):
+        def prepare_tick(self, *, now=None):
+            return None
+
+        def ready_thread_ids(self, *, now=None, limit=0):
+            return ("thread-base",)
+
+        def tick_thread(self, thread_id, *, now=None):
             base_started.set()
             release_base.wait(5)
             return []
 
     class OwnerScheduler:
-        def tick(self):
+        def prepare_tick(self, *, now=None):
+            return None
+
+        def ready_thread_ids(self, *, now=None, limit=0):
+            return ("thread-owner",)
+
+        def tick_thread(self, thread_id, *, now=None):
             owner_ran.set()
             return []
 
     supervisor = object.__new__(_BackgroundMainSupervisor)
     supervisor._base_agent = SimpleNamespace(
         config=SimpleNamespace(
-            background_owner_workers=1,
+            background_owner_workers=2,
             owner_maintenance_scan_interval_seconds=60,
         ),
     )
@@ -398,10 +419,216 @@ def test_blocked_base_tick_does_not_starve_scoped_owner_tick() -> None:
         assert supervisor.tick() is False
         assert base_started.wait(1)
         assert owner_ran.wait(1)
-        assert "base" in supervisor._inflight
-        assert 1 in supervisor._inflight
+        assert ("base", "thread-base") in supervisor._inflight
+        assert (1, "thread-owner") in supervisor._inflight
     finally:
         release_base.set()
+        supervisor.shutdown()
+
+
+def test_blocked_thread_does_not_starve_sibling_thread_for_same_owner() -> None:
+    """One long TUI continuation cannot hold every local/main conversation."""
+    from agent_py_agent.cli.gateway_loops import _BackgroundMainSupervisor
+
+    long_started = threading.Event()
+    release_long = threading.Event()
+    sibling_ran = threading.Event()
+
+    class TwoThreadScheduler:
+        def prepare_tick(self, *, now=None):
+            return None
+
+        def ready_thread_ids(self, *, now=None, limit=0):
+            return ("thread-long", "thread-child-finished")
+
+        def tick_thread(self, thread_id, *, now=None):
+            if thread_id == "thread-long":
+                long_started.set()
+                release_long.wait(5)
+            else:
+                sibling_ran.set()
+            return []
+
+    supervisor = object.__new__(_BackgroundMainSupervisor)
+    supervisor._base_agent = SimpleNamespace(
+        config=SimpleNamespace(
+            background_owner_workers=2,
+            background_threads_per_owner=2,
+            owner_maintenance_scan_interval_seconds=60,
+        ),
+    )
+    supervisor._base_scheduler = TwoThreadScheduler()
+    supervisor._owner_schedulers = {}
+    supervisor._executor = None
+    supervisor._inflight = {}
+    supervisor._next_curator_run_at = 0.0
+    supervisor._curator_inflight = {}
+    supervisor._heartbeat_path = None
+    supervisor._next_heartbeat_at = 0.0
+    supervisor._maybe_seed_wake_pending_owners = lambda: None
+    supervisor._sync_owner_schedulers = lambda: None
+    supervisor._recover_active_watch_harvesters = lambda: None
+    supervisor._run_due_curators = lambda: None
+
+    try:
+        assert supervisor.tick() is False
+        assert long_started.wait(1)
+        assert sibling_ran.wait(1)
+        assert ("base", "thread-long") in supervisor._inflight
+        assert ("base", "thread-child-finished") in supervisor._inflight
+    finally:
+        release_long.set()
+        supervisor.shutdown()
+
+
+def test_scheduler_plans_each_pending_conversation_as_an_independent_lane() -> None:
+    """Durable wakes from one owner retain both thread identities before submission."""
+
+    class Store:
+        @staticmethod
+        def pending_wake_signals(limit=0):
+            return [
+                WakeSignal(wake_signal_id="wake-a", thread_id="thread-a", reason="manual"),
+                WakeSignal(wake_signal_id="wake-b", thread_id="thread-b", reason="manual"),
+            ]
+
+        @staticmethod
+        def unhandled_observations_requiring_main(limit=0):
+            return []
+
+        @staticmethod
+        def list_progress_policies_report(enabled_only=True):
+            return [], []
+
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": SimpleNamespace(agent=SimpleNamespace(config=AgentConfig())),
+            "store": Store(),
+        }
+    )
+
+    assert scheduler.ready_thread_ids(now=20.0) == ("thread-a", "thread-b")
+
+
+def test_scheduler_does_not_plan_removed_polling_policy_as_a_thread_lane() -> None:
+    """Retired model-poll policies cannot repeatedly occupy per-owner slots."""
+
+    class Store:
+        @staticmethod
+        def pending_wake_signals(limit=0):
+            return []
+
+        @staticmethod
+        def unhandled_observations_requiring_main(limit=0):
+            return []
+
+        @staticmethod
+        def list_progress_policies_report(enabled_only=True):
+            return [
+                ProgressPolicy(
+                    policy_id="removed-poll",
+                    thread_id="thread-stale",
+                    task_id="task-stale",
+                    interval_seconds=30,
+                    next_due_at=1.0,
+                    metadata={"tool": "dispatch_supervision_auto"},
+                )
+            ], []
+
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": SimpleNamespace(agent=SimpleNamespace(config=AgentConfig())),
+            "store": Store(),
+        }
+    )
+
+    assert scheduler.ready_thread_ids(now=20.0) == ()
+
+
+def test_real_scheduler_runs_two_background_threads_for_same_owner(tmp_path) -> None:
+    """The actual scheduler starts a sibling wake while the first model call is blocked."""
+    from agent_py_agent.cli.gateway_loops import _BackgroundMainSupervisor
+    from agent_py_agent.cli.models import GatewayRunContext
+
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+
+    class BlockingFirstBackend:
+        name = "blocking-first"
+
+        def __init__(self) -> None:
+            self._lock = threading.Lock()
+            self._calls = 0
+
+        def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+            with self._lock:
+                self._calls += 1
+                call = self._calls
+            if call == 1:
+                first_started.set()
+                release_first.wait(5)
+            else:
+                second_started.set()
+            return ModelResponse(text=f"background-{call}", backend=self.name)
+
+    agent = SimpleAgent(
+        AgentConfig(
+            enable_tools=False,
+            memory_path="memory.jsonl",
+            background_owner_workers=2,
+            background_threads_per_owner=2,
+        ),
+        tmp_path,
+    )
+    agent.backend = BlockingFirstBackend()
+    store = agent.conversation_store
+    for suffix in ("a", "b"):
+        thread = store.get_or_create_thread(
+            {
+                "canonical_user_id": "local",
+                "channel": "cli_chat",
+                "channel_conversation_id": f"room-{suffix}",
+                "channel_user_id": "local",
+                "now": 10.0,
+            }
+        )
+        observation = store.append_observation(
+            {
+                "thread_id": thread.thread_id,
+                "event_type": "manual_wake",
+                "summary": f"wake-{suffix}",
+                "requires_main_agent": True,
+                "now": 11.0,
+            }
+        )
+        store.raise_wake_signal(
+            {
+                "thread_id": thread.thread_id,
+                "observation": observation,
+                "reason": "manual_wake",
+                "now": 11.0,
+            }
+        )
+
+    supervisor = _BackgroundMainSupervisor(
+        GatewayRunContext(
+            agent=agent,
+            paths=SimpleNamespace(),
+            config_path=tmp_path / "config.yaml",
+        )
+    )
+    supervisor._maybe_seed_wake_pending_owners = lambda: None
+    supervisor._sync_owner_schedulers = lambda: None
+    supervisor._recover_active_watch_harvesters = lambda: None
+    supervisor._run_due_curators = lambda: None
+    try:
+        assert supervisor.tick() is False
+        assert first_started.wait(1)
+        assert second_started.wait(1)
+        assert len(supervisor._active_threads_for_owner("base")) == 2
+    finally:
+        release_first.set()
         supervisor.shutdown()
 
 

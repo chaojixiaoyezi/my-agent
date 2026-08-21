@@ -385,9 +385,12 @@ gateway_global_inflight_limit: 500
 gateway_request_workers: 10
 gateway_processing_timeout_seconds: 900
 gateway_request_max_attempts: 2
-# 后台 owner 整合 tick 线程池上限（每个活跃 scoped owner 的整合/唤醒 tick 独立线程；
-# 一个卡死 turn 不饿死其他 owner，超出的排队下一轮）。多用户高并发时按活跃大任务用户数调。
+# 后台会话全局线程池上限；不同 owner 和不同 thread 都可并发，同 thread
+# 仍由持久 run claim 保证单飞。超出的会话留在持久队列，不丢弃。
 background_owner_workers: 8
+# 同一 owner 最多同时跑几个不同会话的后台回合。默认 4 能覆盖多 TUI，
+# 同时防止一个用户用大量历史会话占满全局模型池；调大会增加并发模型请求。
+background_threads_per_owner: 4
 # per-owner 作用域 agent 实例池上限（有界 LRU，超出逐出最久未用）。多用户高并发时按
 # 常驻活跃用户数调；每个实例含独立 home/记忆/local_store 句柄。
 owner_agent_pool_max_agents: 64

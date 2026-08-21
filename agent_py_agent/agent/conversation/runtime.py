@@ -3160,6 +3160,8 @@ def _consume_pending_wake_signals(
     scheduler: BackgroundMainAgentScheduler,
     reports: list[BackgroundMainAgentReport],
     current: float,
+    *,
+    target_thread_id: str = "",
 ) -> set[str]:
     reported: set[str] = set()
     handled: set[str] = set()
@@ -3169,6 +3171,8 @@ def _consume_pending_wake_signals(
     # recovery block 保留的旧事件不占掉新任务的消费窗口。
     wake_signals = scheduler.store.pending_wake_signals(limit=0)
     for signal in wake_signals:
+        if target_thread_id and signal.thread_id != target_thread_id:
+            continue
         if wake_limit > 0 and len(attempted) >= wake_limit:
             break
         if _skip_pending_wake_signal(
@@ -3719,6 +3723,8 @@ def _consume_observation_batches(
     reports: list[BackgroundMainAgentReport],
     reported: set[str],
     current: float,
+    *,
+    target_thread_id: str = "",
 ) -> None:
     observation_limit = scheduler._config_limit("conversation_unhandled_observation_limit")
     pending_observations = scheduler.store.unhandled_observations_requiring_main(limit=0)
@@ -3731,6 +3737,8 @@ def _consume_observation_batches(
     for (thread_id, task_id), thread_observations in observations_by_thread_and_task(
         pending_observations
     ).items():
+        if target_thread_id and thread_id != target_thread_id:
+            continue
         if observation_limit > 0 and admitted >= observation_limit:
             break
         if thread_id in reported:
@@ -3786,11 +3794,18 @@ def _consume_due_policies(
     reports: list[BackgroundMainAgentReport],
     reported: set[str],
     current: float,
+    *,
+    target_thread_id: str = "",
 ) -> None:
     enabled, load_errors = scheduler.store.list_progress_policies_report(enabled_only=True)
     scheduler.last_progress_policy_load_errors = load_errors
     scheduler.last_progress_policy_suppressed = []
-    policies = [policy for policy in enabled if policy.next_due_at <= current]
+    policies = [
+        policy
+        for policy in enabled
+        if policy.next_due_at <= current
+        and (not target_thread_id or policy.thread_id == target_thread_id)
+    ]
     agent = getattr(scheduler.runtime, "agent", None)
     runnable, suppressed = _runnable_due_policies(
         scheduler.store, policies, now=current, agent=agent
@@ -3887,10 +3902,73 @@ def _gateway_consume_policy_cas(store: object, policy: ProgressPolicy, *, now: f
     return not aborted
 
 
-class _BackgroundSchedulerTickMixin:
-    """Tick orchestration and one durable wake-signal execution."""
+# LLM: Ready-thread discovery may inspect durable sources but must not claim, consume, or run them;
+# the per-thread execution lane remains authoritative for every state transition.
+# 函数用途: 按持久 wake、observation 和到期 policy 找出需要后台续跑的会话。
+def _ready_background_thread_ids(
+    scheduler: BackgroundMainAgentScheduler,
+    *,
+    current: float,
+    limit: int = 0,
+) -> tuple[str, ...]:
+    ready: list[str] = []
+    seen: set[str] = set()
 
+    def append(thread_id: object, task_id: object = "") -> None:
+        normalized = str(thread_id or "").strip()
+        if not normalized or normalized in seen:
+            return
+        if limit > 0 and len(ready) >= limit:
+            return
+        if not scheduler._supply_backoff.should_attempt(normalized, current):
+            return
+        if _background_authority_recovery_block(
+            scheduler,
+            str(task_id or "").strip(),
+        ) is not None:
+            return
+        seen.add(normalized)
+        ready.append(normalized)
+
+    for signal in scheduler.store.pending_wake_signals(limit=0):
+        if current < scheduler._wake_retry_after.get(signal.wake_signal_id, 0.0):
+            continue
+        if _successful_completion_waiting_for_batch(scheduler, signal, current):
+            continue
+        append(signal.thread_id, signal.root_task_id)
+    for observation in scheduler.store.unhandled_observations_requiring_main(limit=0):
+        if _observation_waits_for_linked_wake(scheduler.store, observation):
+            continue
+        append(observation.thread_id, observation.root_task_id)
+    enabled, _load_errors = scheduler.store.list_progress_policies_report(enabled_only=True)
+    due = [policy for policy in enabled if policy.next_due_at <= current]
+    runnable, _suppressed = _runnable_due_policies(
+        scheduler.store,
+        due,
+        now=current,
+        agent=getattr(scheduler.runtime, "agent", None),
+    )
+    for policy in runnable:
+        append(policy.thread_id, policy.task_id)
+    return tuple(ready)
+
+
+# LLM: This mixin owns the public synchronous tick and Gateway's per-thread
+# execution projection; maintenance implementation remains in the tick mixin below.
+# 类用途: 把 owner 级后台消费拆成可独立运行的会话车道。
+class _BackgroundSchedulerThreadLaneMixin:
+    # LLM: Direct/CLI ticks retain synchronous all-thread behavior; Gateway uses
+    # prepare_tick + ready_thread_ids + tick_thread to isolate independent sessions.
+    # 函数用途: 同步处理当前 owner 的全部就绪后台事件。
     def tick(self, *, now: float | None = None) -> list[BackgroundMainAgentReport]:
+        current = now if now is not None else __import__("time").time()
+        self.prepare_tick(now=current)
+        return self._consume_ready_sources(now=current)
+
+    # LLM: Preparation is model-free and is called only by the supervisor thread;
+    # it may enqueue durable work but cannot hold a conversation execution lane.
+    # 函数用途: 在分会话并发前完成低频维护、到期入队和孤儿恢复。
+    def prepare_tick(self, *, now: float | None = None) -> None:
         current = now if now is not None else __import__("time").time()
         self._maybe_gc_ledger(now=current)
         self._process_collaboration_cases(now=current)
@@ -3898,11 +3976,72 @@ class _BackgroundSchedulerTickMixin:
         self._enqueue_scheduler_runs(now=current)
         self._reclaim_orphaned_attempts(now=current)
         self._enqueue_unfinished_task_resume_wakes(now=current)
+
+    # LLM: This read-only plan exposes conversation identities, never model content
+    # or a second scheduling authority; durable claims still decide who executes.
+    # 函数用途: 给单 Gateway 列出可独立提交的会话车道。
+    def ready_thread_ids(
+        self,
+        *,
+        now: float | None = None,
+        limit: int = 0,
+    ) -> tuple[str, ...]:
+        current = now if now is not None else __import__("time").time()
+        return _ready_background_thread_ids(self, current=current, limit=max(0, int(limit)))
+
+    # LLM: One worker may consume only one durable thread; its existing run claim
+    # serializes foreground, wake, policy, and scheduled continuations for that thread.
+    # 函数用途: 处理一个会话的后台事件，不阻塞同 owner 的其它会话。
+    def tick_thread(
+        self,
+        thread_id: str,
+        *,
+        now: float | None = None,
+    ) -> list[BackgroundMainAgentReport]:
+        normalized = str(thread_id or "").strip()
+        if not normalized:
+            return []
+        current = now if now is not None else __import__("time").time()
+        return self._consume_ready_sources(now=current, target_thread_id=normalized)
+
+    # LLM: Consumption order stays wake -> observation -> policy, while an optional
+    # thread filter turns the former owner-wide loop into a 会话运行时 session lane.
+    # 函数用途: 按既有优先级消费全部来源，或只消费指定会话。
+    def _consume_ready_sources(
+        self,
+        *,
+        now: float,
+        target_thread_id: str = "",
+    ) -> list[BackgroundMainAgentReport]:
         reports: list[BackgroundMainAgentReport] = []
-        reported = _consume_pending_wake_signals(self, reports, current)
-        _consume_observation_batches(self, reports, reported, current)
-        _consume_due_policies(self, reports, reported, current)
+        reported = _consume_pending_wake_signals(
+            self,
+            reports,
+            now,
+            target_thread_id=target_thread_id,
+        )
+        _consume_observation_batches(
+            self,
+            reports,
+            reported,
+            now,
+            target_thread_id=target_thread_id,
+        )
+        _consume_due_policies(
+            self,
+            reports,
+            reported,
+            now,
+            target_thread_id=target_thread_id,
+        )
         return reports
+
+
+# LLM: Maintenance and recovery helpers stay model-free until a lane consumer
+# explicitly calls the wake, observation, or policy execution path.
+# 类用途: 管理后台调度的维护、恢复和持久入队。
+class _BackgroundSchedulerTickMixin:
+    """Tick maintenance and durable scheduling helpers."""
 
     def _maybe_gc_ledger(self, *, now: float) -> None:
         """低频归档陈旧账本(disabled policy / finished claim),治目录无限累积。
@@ -5115,6 +5254,7 @@ class _BackgroundSchedulerExecutionMixin:
 
 
 class BackgroundMainAgentScheduler(
+    _BackgroundSchedulerThreadLaneMixin,
     _BackgroundSchedulerTickMixin,
     _BackgroundSchedulerWakeMixin,
     _BackgroundSchedulerGoalMixin,
@@ -5122,12 +5262,42 @@ class BackgroundMainAgentScheduler(
 ):
     """Single facade over background tick, goal routing, and claimed execution."""
 
+    # LLM: Diagnostic rows belong to the current background worker thread so
+    # concurrent conversation lanes cannot leak policy facts into one another.
+    # 函数用途: 读取当前会话车道这一轮的 policy 加载错误。
+    @property
+    def last_progress_policy_load_errors(self) -> list[dict[str, object]]:
+        return list(getattr(self._diagnostics, "policy_load_errors", []))
+
+    # LLM: Assignment replaces only this worker's bounded diagnostic snapshot.
+    # 函数用途: 为当前后台车道保存 policy 加载错误。
+    @last_progress_policy_load_errors.setter
+    def last_progress_policy_load_errors(self, value: list[dict[str, object]]) -> None:
+        self._diagnostics.policy_load_errors = list(value or [])
+
+    # LLM: Suppression diagnostics are thread-local for the same reason as load errors.
+    # 函数用途: 读取当前会话车道本轮被暂停的 policy 事实。
+    @property
+    def last_progress_policy_suppressed(self) -> list[dict[str, object]]:
+        rows = getattr(self._diagnostics, "policy_suppressed", None)
+        if not isinstance(rows, list):
+            rows = []
+            self._diagnostics.policy_suppressed = rows
+        return rows
+
+    # LLM: Keep a mutable per-thread list because existing policy gates append rows in place.
+    # 函数用途: 替换当前后台车道的 policy 暂停诊断快照。
+    @last_progress_policy_suppressed.setter
+    def last_progress_policy_suppressed(self, value: list[dict[str, object]]) -> None:
+        self._diagnostics.policy_suppressed = list(value or [])
+
     # LLM: scheduler 的恢复阻塞缓存只负责同状态日志去重；真实暂停状态始终从
     # RuntimeRepository 重读，进程重启不能改变准入结论。
     # 函数用途: 组装单 Gateway 的后台事件消费者及其进程内退避/观测状态。
     def __init__(self, config: dict):
         self.runtime = config["runtime"]
         self.store = config["store"]
+        self._diagnostics = threading.local()
         self.collaboration_store = config.get("collaboration_store") or getattr(
             self.runtime.agent,
             "collaboration_store",

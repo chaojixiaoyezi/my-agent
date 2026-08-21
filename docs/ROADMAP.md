@@ -48,9 +48,16 @@ multi-agent v2 使递归代理控制首轮直出；待二次部署和全新 TUI 
 ToolResult 字段，只有空 `RUNNING/0%`。当前候选按 会话运行时 最具体路径优先修复，并记录不含正文的模型/工具
 活动；同时彻底删除重复宿主生命周期的 `raise_event` 模型工具，历史 grant 也不能复活它。
 
-当前 focused 与本地严格 gate 已通过，按用户约定未重跑全仓 pytest。待做：提交推送并部署 `.7`；
-由真实 TUI 验证 child 可一次写入 task output、
-不再重复申请、活动状态非空并自然结束，再继续验证 Working 动画、thinking 连续增量、页底自动跟随、
+`d257dfb` 已推送并部署 `.7`。新轮 3 个 child 全部自然 `DONE`，实际写出 8 个游戏文件，
+没有 `WRITE_FORBIDDEN` 或重复 capability request，活动状态也已显示模型/工具阶段。但最后 child wake
+排队超过 150 秒仍未唤醒主代理：同 `local/main` 的另一旧 TUI 正在跑长
+`ordinary_task_resume`，owner 级唯一 tick 把所有会话错当成一条车道，并且旧任务还抢走了一个 child 名额。
+当前本地候选已对照 会话运行时 的 per-thread active turn，拆成无模型准备、ready-thread 规划和单 thread 消费，
+以 `(owner, thread)` 去重、同 thread 持久 claim 单飞、不同 thread 有界并发。真实 scheduler 阻塞对照回归已通过；
+待严格 gate、推送部署和全新 TUI 最终复验。
+
+当前 focused 已通过，按用户约定未重跑全仓 pytest。待做：完成本轮严格 gate、提交推送并部署 `.7`；
+由全新真实 TUI 验证 child 完成后父会话不受其它 TUI 长回合阻塞，再继续验证 Working 动画、thinking 连续增量、页底自动跟随、
 离底不抢滚动、Compact 百分比、后续消息可见、右键复制和输入框粘贴。外层系统剪贴板仍须用户在已 attach
 的本机终端亲自粘贴确认，自动化不能冒充这一步通过；同一普通中文游戏 prompt 还要证明 child 自动
 完成后父级无需用户发“继续”，能读到产物、整合到 `/root/abc` 并实际监听 `0.0.0.0:8080`。

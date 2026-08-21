@@ -1,5 +1,16 @@
 # Gateway Progress
 
+## 2026-08-21 同 owner 多会话后台车道
+
+- `.7` 单 Gateway 原样植物大战僵尸任务中，3 个 child 已全部 `DONE` 且写出 8 个产物，
+  但最后子代理 wake 长时间 pending。另一个旧 TUI 的 `ordinary_task_resume` 正在同
+  `local/main` owner 内跑长模型回合，旧 supervisor 的 owner 级 single-flight 使当前会话无法唤醒，
+  还与新任务争用了一个 child 容量。
+- 当前底座已拆成 `prepare_tick -> ready_thread_ids -> tick_thread`；Gateway 以
+  `(owner, thread)` 去重、按 owner 轮询提交，同会话仍使用既有 durable claim 单飞。
+- 新增真实 scheduler 回归：同 `local/main` 下第一条会话的模型调用被故意挂起时，
+  第二条会话仍会在 1 秒内进入模型。本条目前为本地 focused 验证，真机结论在部署后补充。
+
 ## 2026-08-21 统一回合结束原因与 Compact 流式进度
 
 - Gateway 最终 response 现在透传主代理与子代理共用的 `turn_end_reason`，值只来自六类结构化回合终态；

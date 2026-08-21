@@ -1,5 +1,16 @@
 # Gateway Structure
 
+## 后台会话车道与公平调度
+
+- `conversation.runtime.BackgroundMainAgentScheduler.prepare_tick()` 只做无模型的维护、到期入队和恢复；
+  `ready_thread_ids()` 只投影持久 wake/observation/policy 中的 thread identity，不领取或消费来源。
+- `tick_thread(thread_id)` 只能消费一个 durable thread 的来源。同 thread 的前台、后台唤醒、
+  progress policy 和 scheduled continuation 继续由 `conversation/run_claim.py` 的唯一执行 lane 串行。
+- `cli/gateway_loops.py::_BackgroundMainSupervisor` 用 `(owner_key, thread_id)` 作进程内 in-flight 键，
+  按 owner 轮询提交。`background_owner_workers` 是全局后台会话池，
+  `background_threads_per_owner` 限制单 owner 并发；超出者保留在持久队列等后续 tick。
+- scheduler 的 policy 诊断是 worker thread-local，不同会话不会互相污染运行事实。
+
 ## 回合终态与 Compact 进度投影
 
 - `gateway_parts/request_execution.py::_update_response_from_result` 只把运行时已经确定的

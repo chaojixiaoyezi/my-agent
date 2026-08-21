@@ -357,10 +357,12 @@ def _build_background_scheduler(agent: SimpleAgent, channels: DeliveryService) -
     )
 
 
-# 后台 owner 整合并行度上限:每个活跃 owner 的整合 tick 在独立线程跑,防一个长/卡死 turn 饿死其他
-#   owner。够覆盖同时活跃的大任务用户数;超出的排队(下一轮 tick 再提交),不至于线程爆炸。
-#   可由 config background_owner_workers 覆盖(千并发调参入口),此常量是无配置时的兜底。
+# 后台会话的全局并发基数：owner 与 thread 都已分车道，超出的保留在持久队列。
+# 可由 config background_owner_workers 覆盖，此常量是无配置时的兜底。
 _BACKGROUND_OWNER_WORKERS = 8
+# 同 owner 后台会话并发上限：一条长会话不再占住整个 owner，但也不允许
+# 一个 owner 用大量待处理会话占满全局后台模型池。
+_BACKGROUND_THREADS_PER_OWNER = 4
 _BASE_SCHEDULER_KEY = "base"
 # 调度器存活心跳节流(秒):>5 分钟没更新即疑死,配合 systemd 快速定位。
 _HEARTBEAT_INTERVAL_SECONDS = 60
@@ -392,10 +394,158 @@ def _background_owner_workers(agent: object) -> int:
     return parsed if parsed > 0 else _BACKGROUND_OWNER_WORKERS
 
 
+# LLM: This configurable cap bounds simultaneous model turns for different
+# durable conversation threads owned by one identity; zero/invalid uses the safe default.
+# 函数用途: 读取单个用户后台会话的最大并发数。
+def _background_threads_per_owner(agent: object) -> int:
+    value = getattr(
+        getattr(agent, "config", None),
+        "background_threads_per_owner",
+        _BACKGROUND_THREADS_PER_OWNER,
+    )
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return _BACKGROUND_THREADS_PER_OWNER
+    return parsed if parsed > 0 else _BACKGROUND_THREADS_PER_OWNER
 
 
-class _BackgroundMainSupervisor:
-    """后台主代理值守:tick base owner + 每个活跃 scoped owner,各自消费自己 store 的唤醒并投真渠道。
+# LLM: This mixin owns only process-local planning/execution slots; durable
+# conversation sources and run claims remain in BackgroundMainAgentScheduler/Store.
+# 类用途: 为单 Gateway 按 owner 公平提交独立的 thread 后台车道。
+class _BackgroundThreadLaneSupervisorMixin:
+    # LLM: Planning is single-threaded and model-free; submission is round-robin
+    # across owners, bounded globally and per owner, and keyed by durable thread id.
+    # 函数用途: 公平提交就绪会话，避免一个长回合堵住同用户其它窗口。
+    def _submit_ready_thread_ticks(self) -> None:
+        global_limit = _background_owner_workers(self._base_agent)
+        available = max(0, global_limit - len(self._inflight))
+        if available <= 0:
+            return
+        per_owner_limit = _background_threads_per_owner(self._base_agent)
+        schedulers = [
+            (_BASE_SCHEDULER_KEY, self._base_scheduler),
+            *list(self._owner_schedulers.items()),
+        ]
+        candidates: list[tuple[object, BackgroundMainAgentScheduler, list[str]]] = []
+        planned_at = time.time()
+        for owner_key, scheduler in schedulers:
+            active_threads = self._active_threads_for_owner(owner_key)
+            owner_slots = max(0, per_owner_limit - len(active_threads))
+            if owner_slots <= 0:
+                continue
+            try:
+                scheduler.prepare_tick(now=planned_at)
+                ready = scheduler.ready_thread_ids(
+                    now=planned_at,
+                    limit=per_owner_limit + len(active_threads),
+                )
+            except Exception as exc:
+                _print_gateway_loop_error(
+                    "gateway_background_main.plan",
+                    f"background-main:{owner_key}",
+                    exc,
+                )
+                continue
+            pending = [thread_id for thread_id in ready if thread_id not in active_threads]
+            if pending:
+                candidates.append((owner_key, scheduler, pending[:owner_slots]))
+        self._submit_thread_candidates(candidates, available=available)
+
+    # LLM: Candidate submission uses the already-bounded executor and never
+    # changes durable source status before the worker acquires its run claim.
+    # 函数用途: 按 owner 轮询把候选会话填入剩余全局工位。
+    def _submit_thread_candidates(
+        self,
+        candidates: list[tuple[object, BackgroundMainAgentScheduler, list[str]]],
+        *,
+        available: int,
+    ) -> None:
+        executor = self._get_executor()
+        while available > 0 and any(rows for _key, _scheduler, rows in candidates):
+            for owner_key, scheduler, rows in candidates:
+                if available <= 0:
+                    break
+                if not rows:
+                    continue
+                thread_id = rows.pop(0)
+                lane_key = (owner_key, thread_id)
+                self._inflight[lane_key] = executor.submit(
+                    self._counted_thread_tick,
+                    scheduler,
+                    str(owner_key),
+                    thread_id,
+                )
+                available -= 1
+
+    # LLM: In-flight identity is owner + thread; checking only owner would restore
+    # the starvation bug by treating independent TUI sessions as one execution.
+    # 函数用途: 列出某 owner 正在跑的后台会话 ID。
+    def _active_threads_for_owner(self, owner_key: object) -> set[str]:
+        return {
+            str(key[1])
+            for key in self._inflight
+            if isinstance(key, tuple) and len(key) == 2 and key[0] == owner_key
+        }
+
+    # LLM: Metrics count real conversation model lanes; durable thread claims remain
+    # the final duplicate-execution fence across processes.
+    # 函数用途: 运行一条会话后台车道并更新并发指标。
+    def _counted_thread_tick(
+        self,
+        scheduler: BackgroundMainAgentScheduler,
+        label: str,
+        thread_id: str,
+    ) -> list[object]:
+        background_tick_inflight(1)
+        try:
+            return self._safe_thread_tick(scheduler, label, thread_id)
+        finally:
+            background_tick_inflight(-1)
+
+    # LLM: The daemon executor is bounded by the exact configured global limit.
+    # 函数用途: 惰性创建全局有界后台会话线程池。
+    def _get_executor(self) -> object:
+        if self._executor is None:
+            self._executor = DurableDaemonThreadPoolExecutor(
+                max_workers=_background_owner_workers(self._base_agent),
+                thread_name_prefix="bg-owner",
+            )
+        return self._executor
+
+    # LLM: Shutdown cancels only queued process-local submissions; durable sources
+    # remain pending and running claims retain their normal recovery semantics.
+    # 函数用途: 停止后台会话线程池，不删除持久任务。
+    def shutdown(self) -> None:
+        executor = self._executor
+        self._executor = None
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    # LLM: One failed conversation lane is logged and isolated; it cannot terminate
+    # the supervisor or consume another thread's durable source.
+    # 函数用途: 安全运行指定会话的后台消费。
+    def _safe_thread_tick(
+        self,
+        scheduler: BackgroundMainAgentScheduler,
+        label: str,
+        thread_id: str,
+    ) -> list[object]:
+        try:
+            return list(scheduler.tick_thread(thread_id) or [])
+        except Exception as exc:
+            _print_gateway_loop_error(
+                "gateway_background_main.iteration",
+                f"background-main:{label}:{thread_id}",
+                exc,
+            )
+            return []
+
+
+
+
+class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
+    """后台主代理值守:按 owner + thread 消费各自 store 的唤醒并投真渠道。
 
     修「叫回半环」两处断裂:
     - 多 owner 消费:scoped owner 的子代理把唤醒写进各自 owner 的 conversation_store,base 调度器看不到。
@@ -413,16 +563,10 @@ class _BackgroundMainSupervisor:
         self._registry = shared_active_owner_registry(context.agent)
         self._owner_pool: object | None = None
         self._owner_schedulers: dict[int, BackgroundMainAgentScheduler] = {}
-        # 多 owner 整合并行化:每个 owner 的 tick(可能跑一个数分钟的整合 turn,甚至因 run_command
-        #   挂起而卡死)丢进线程池独立跑,不再串行阻塞——否则一个 owner 的长/卡死 turn 会饿死其他
-        #   owner 的整合(真机实锤:3 并发用户,先派的把单后台线程占死,后两个整合永不触发→产出残缺)。
-        #   in-flight 去重:同 owner 上一轮 tick 没跑完就不重复提交(防同 owner 并发 + 防卡死 turn 被反复起)。
+        # 后台整合按 owner + thread 分车道。持久 run claim 保证同会话单飞，
+        # 进程内 in-flight 去重防止同一 thread 重复提交；不同 thread 可在有界池中并发。
         self._executor: object | None = None
-        # 会话运行时 starts an active goal on its own live thread when that thread is
-        # idle.  Keep the same isolation here: base/local and scoped owners are
-        # independent lanes.  Running the base scheduler synchronously used to
-        # block this supervisor before scoped owner ticks could even be
-        # submitted, so one long local goal starved every IM user.
+        # 会话运行时 的 active turn 是 thread-scoped；这里也以 durable thread_id 作最小运行车道。
         self._inflight: dict[object, object] = {}
         # 磁盘级唤醒发现(治「睡死叫不醒」§1):登记表是进程内易失结构,网关重启清零、
         # LRU 会逐出,且只有新入站请求才补记;长盯守非阻塞挂起期恰恰没有新请求 →
@@ -488,6 +632,9 @@ class _BackgroundMainSupervisor:
         except OSError:
             pass
 
+    # LLM: One supervisor pass collects finished thread lanes, performs model-free
+    # owner maintenance, then fairly submits ready conversation lanes.
+    # 函数用途: 推进单 Gateway 的后台会话调度并录制已完成报告。
     def tick(self) -> bool:
         self._maybe_write_heartbeat()
         self._maybe_seed_wake_pending_owners()
@@ -495,8 +642,7 @@ class _BackgroundMainSupervisor:
         self._sync_owner_schedulers()
         self._recover_active_watch_harvesters()
         self._run_due_curators()
-        self._submit_base_tick()
-        self._submit_owner_ticks()
+        self._submit_ready_thread_ticks()
         if not reports:
             return False
         _record_background_main_reports(self._base_agent, reports)
@@ -517,59 +663,6 @@ class _BackgroundMainSupervisor:
             return list(future.result() or [])
         except Exception as exc:
             _print_gateway_loop_error("gateway_background_main.owner_result", str(key), exc)
-            return []
-
-    def _submit_base_tick(self) -> None:
-        if _BASE_SCHEDULER_KEY in self._inflight:
-            return
-        self._inflight[_BASE_SCHEDULER_KEY] = self._get_executor().submit(
-            self._safe_tick,
-            self._base_scheduler,
-            _BASE_SCHEDULER_KEY,
-        )
-
-    def _submit_owner_ticks(self) -> None:
-        if not self._owner_schedulers:
-            return
-        executor = self._get_executor()
-        for key, scheduler in self._owner_schedulers.items():
-            if key in self._inflight:
-                continue  # 上一轮该 owner 的 tick 还在跑(或卡死)→ 不重复提交,让其他 owner 照常并行
-            self._inflight[key] = executor.submit(self._counted_tick, scheduler, str(key))
-
-    def _counted_tick(self, scheduler: BackgroundMainAgentScheduler, label: str) -> list[object]:
-        # §6-A 量化探针:后台整合 tick 在飞 gauge(池上限 _BACKGROUND_OWNER_WORKERS)。
-        # 贴上限跑=整合池饱和,新 owner 的唤醒只能等下一轮——多用户唤醒饿死的量化信号。
-        background_tick_inflight(1)
-        try:
-            return self._safe_tick(scheduler, label)
-        finally:
-            background_tick_inflight(-1)
-
-    def _get_executor(self) -> object:
-        if self._executor is None:
-            # One reserved slot keeps the base/local lane from consuming the
-            # configured scoped-owner capacity.  Both lane kinds stay
-            # single-flight through ``_inflight``.  Background runs also have
-            # durable claims and attempt fencing, so a wedged turn must not
-            # prevent the Gateway process from handing recovery to its successor.
-            self._executor = DurableDaemonThreadPoolExecutor(
-                max_workers=_background_owner_workers(self._base_agent) + 1,
-                thread_name_prefix="bg-owner",
-            )
-        return self._executor
-
-    def shutdown(self) -> None:
-        executor = self._executor
-        self._executor = None
-        if executor is not None:
-            executor.shutdown(wait=False, cancel_futures=True)
-
-    def _safe_tick(self, scheduler: BackgroundMainAgentScheduler, label: str) -> list[object]:
-        try:
-            return list(scheduler.tick() or [])
-        except Exception as exc:
-            _print_gateway_loop_error("gateway_background_main.iteration", f"background-main:{label}", exc)
             return []
 
     def _maybe_seed_wake_pending_owners(self) -> None:
@@ -617,7 +710,7 @@ class _BackgroundMainSupervisor:
                 _print_gateway_loop_error("gateway_background_main.owner_build", str(getattr(owner, "owner_id", "")), exc)
         active = {id(agent): agent for agent in pool.active_agents()}
         for key in list(self._owner_schedulers):
-            if key not in active and key not in self._inflight:
+            if key not in active and not self._active_threads_for_owner(key):
                 self._owner_schedulers.pop(key, None)  # scoped agent 被 LRU 逐出且没在跑 → 丢弃其调度器
         for key, scoped_agent in active.items():
             if key not in self._owner_schedulers:

@@ -71,6 +71,14 @@ inspect/dispatch/schedule/raise_event；`tool_search` 继续只加载 goal/web/v
 编排工具常量回归还会扫描所有活跃内置 `SKILL.md`，防止工具已退休后 Skill 仍教模型调用
 `inspect_agent_tree` / `dispatch_subagents` / `schedule_child_subagents` / `raise_event`。
 
+`d257dfb` 真机复验的 3 个 child 和 8 个文件已证明写边界/活动状态修复生效；最终 wake
+被同 owner 另一条长 policy 回合饿死，增加后台会话车道回归。必须同时覆盖：
+实际 `ready_thread_ids` 保留两条 durable thread identity；fake scheduler 的长 thread 不阻塞同 owner
+的 sibling；真实 `BackgroundMainAgentScheduler` 在第一个模型调用挂起时，第二个同 owner
+会话必须在 1 秒内进入模型。同 thread 仍由持久 run claim 单飞，不能为过测试放宽成双执行。
+真机复验继续只用一个 Gateway，故意保留或创建一条其它 TUI 长后台回合，再确认当前
+植物大战僵尸会话能自动消费 child 完成 wake、整合、启动受管服务并从独立请求核验 8080。
+
 `db41bb0` 部署后的原样 TUI 复验已有四名 child 全部 `DONE` 和完整页面文件，但 8080 最终未监听。证据
 显示模型在前台 `run_command` 内使用 `nohup ... &`，同一条命令里的 curl 得到 200 后，foreground shell
 结束时未受管 child 被清理。新增回归覆盖：独立 `&` 在任何模式都以 `not_started` 拒绝；`2>&1` 和引号内

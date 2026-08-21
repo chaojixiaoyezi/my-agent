@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-08-21 子代理自然收口、递归控制面与 TUI 可观察性（本地严格 gate 通过，待真机复验）
+## 2026-08-21 子代理自然收口、递归控制面与 TUI 可观察性（同 owner 分会话调度本地回归通过）
 
 - 对照 会话运行时 后，模型可见的子代理控制面只保留统一创建、向一个直属 child 补充 guidance、取消/中断
   直属 child 和处理其 capability 请求。`create_subagents` 在任意层级都代表创建并自动启动；旧
@@ -79,6 +79,17 @@
   `result.tool_name`，用户只能看到空 `RUNNING/0%`。当前本地候选按 会话运行时 最具体路径规则修正优先级，
   并从 runner 模型/工具阶段持久化不含正文的有界活动状态；相关 focused 与本地严格
   gate 已通过，按用户约定未跑全仓 pytest，待推送、部署后用全新 TUI 重跑。
+- `d257dfb` 已推送部署 `.7`，TUI 约 700ms 就绪。原样任务创建 3 个 child，三者都自然
+  `DONE`，`/root/abc` 实际由 child 写出 8 个文件，无 `WRITE_FORBIDDEN` 或权限重复申请；
+  canonical state 也能显示“模型响应中 / 工具完成”。本轮未最终交付的新根因是同 `local/main`
+  的一个旧 TUI 长后台回合占住 owner 级唯一 scheduler tick，最后 child wake pending 超过
+  150 秒，并且旧任务在竞态中抢走了一个 child 容量。证据保存在
+  `.7:/root/tui-parity-evidence/d257dfb-pvz/`。
+- 当前本地候选已按 会话运行时 的 thread-scoped active turn 改为 `(owner, thread)` 后台车道：
+  无模型 `prepare_tick` 单线程做维护，`ready_thread_ids` 只读持久事实，`tick_thread`
+  在既有 run claim 内执行一个会话。全局默认 8，单 owner 默认 4，超出保留队列。
+  fake 调度和真实 scheduler 两层回归均已证明同 owner 一条会话挂起时另一条仍可入模；
+  待严格 gate、推送部署和全新 TUI 最终复验，尚未宣称 8080 交付通过。
 
 ## 2026-08-20 TUI 灰色层级与 tmux/右键复制修正
 

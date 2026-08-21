@@ -37,6 +37,10 @@
   证明根因是 `/root` 宽 forbidden 误伤更窄 task output allow，导致连续 `WRITE_FORBIDDEN` 和重复申请
   已 grant 权限；状态投影又把真实 `ToolResult.tool_name` 当成 `tool` 读取，长期只显示空 `RUNNING/0%`。
   当前写边界按 会话运行时 最具体条目优先、同层 deny 胜出；runner 模型/工具边界保存不含正文的有界活动短状态。
+- `d257dfb` 真机复验后 3 个 child 都自然 `DONE`，`/root/abc` 的 8 个文件均由 child 写出；
+  未继续整合的根因不在 child，而是同 owner 的另一条旧后台会话占住了 owner 级唯一 tick。
+  Gateway 现已按 durable thread 分后台车道，同 thread 单飞、不同 thread 有界并发；真机最终整合与
+  `0.0.0.0:8080` 仍需新部署轮验证，未提前标记完成。
 
 ## 2026-08-12 子代理候选 scope 统一规范
 
