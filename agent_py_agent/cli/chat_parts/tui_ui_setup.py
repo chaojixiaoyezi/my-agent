@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from prompt_toolkit.mouse_events import MouseButton, MouseEventType
+
 from .rendering import set_tui_output_sink
 from .tui_block_renderer import TuiRenderContext
 from .tui_input import (
@@ -27,7 +29,11 @@ from .tui_params import MakeTuiAppParams
 from .tui_runtime import TuiRuntime
 from .tui_terminal import TuiTerminalTitleController
 from .tui_transcript import TuiTranscriptModeState
-from .tui_view import TuiTranscriptView, make_tui_transcript_view
+from .tui_view import (
+    TuiTranscriptView,
+    _right_copy_mouse_transition,
+    make_tui_transcript_view,
+)
 
 APP_REDRAW_INTERVAL_SECONDS = 1 / 60
 APP_RENDER_POSTPONE_SECONDS = 1 / 60
@@ -606,52 +612,107 @@ def _assemble_tui_application(
     return app
 
 
-# LLM: BufferControl 仍负责源字符坐标、焦点和 selection_state；wrapper 只补齐包含式 focus 并在 MOUSE_UP 后复制。
-# 函数用途: 给输入框增加与正文一致的“拖选松手即复制”，并保留完整高亮供继续替换或再次复制。
+# LLM: BufferControl 仍负责源字符坐标、焦点和 selection_state；wrapper 补齐包含式 focus，并在原 handler 之前拦截右键以保护选区。
+# 函数用途: 给输入框增加拖选松手自动复制和选中后右键直接复制，两者都保留高亮。
 def _install_input_copy_on_select(input_area: Any, copy_callback: Any) -> None:
-    from prompt_toolkit.mouse_events import MouseButton, MouseEventType
-
     control = input_area.control
-    original_mouse_handler = control.mouse_handler
-    selection_anchor: int | None = None
-    selection_moved = False
+    state = _InputMouseCopyState(original_mouse_handler=control.mouse_handler)
 
+    # LLM: wrapper 只把 prompt_toolkit 事件交给单一 state helper，不能自行复制第二套 gesture 状态机。
+    # 函数用途: 保留 BufferControl 原有回调签名，并将事件交给输入选区复制控制器。
     def mouse_handler(mouse_event: Any):
-        nonlocal selection_anchor, selection_moved
-        result = original_mouse_handler(mouse_event)
-        buffer = input_area.buffer
-        if (
-            mouse_event.event_type == MouseEventType.MOUSE_DOWN
-            and mouse_event.button == MouseButton.LEFT
-        ):
-            selection_anchor = int(buffer.cursor_position)
-            selection_moved = False
-        elif mouse_event.event_type == MouseEventType.MOUSE_MOVE:
-            selection_moved = bool(
-                selection_moved
-                or (
-                    selection_anchor is not None
-                    and int(buffer.cursor_position) != selection_anchor
-                )
-            )
-        if mouse_event.event_type == MouseEventType.MOUSE_UP:
-            if (
-                selection_anchor is not None
-                and getattr(buffer, "selection_state", None) is not None
-                and (
-                    selection_moved
-                    or int(buffer.cursor_position) != selection_anchor
-                )
-            ):
-                _include_input_focus_character(buffer, selection_anchor)
-            selected_text = _selected_input_text(buffer)
-            if selected_text:
-                copy_callback(selected_text)
-            selection_anchor = None
-            selection_moved = False
-        return result
+        return _handle_input_copy_mouse_event(
+            input_area,
+            copy_callback,
+            state,
+            mouse_event,
+        )
 
     control.mouse_handler = mouse_handler
+
+
+# LLM: 输入 gesture state 只活在当前 TextArea control 生命周期；不得写入 transcript、session 或业务状态。
+# 类用途: 保存一次左键拖选和右键复制的短暂坐标/latch，并保留原 prompt_toolkit handler。
+@dataclass
+class _InputMouseCopyState:
+    original_mouse_handler: Any
+    selection_anchor: int | None = None
+    selection_moved: bool = False
+    right_copy_armed: bool = False
+
+
+# LLM: 输入事件必须先处理右键 latch，再调用原 handler 更新 Buffer 源字符坐标；复制后不清 selection_state。
+# 函数用途: 推进一步输入鼠标 gesture，并返回原 BufferControl 的事件处理结果。
+def _handle_input_copy_mouse_event(
+    input_area: Any,
+    copy_callback: Any,
+    state: _InputMouseCopyState,
+    mouse_event: Any,
+) -> Any:
+    buffer = input_area.buffer
+    state.right_copy_armed, consume_event = _handle_input_right_copy(
+        mouse_event,
+        state.right_copy_armed,
+        buffer,
+        copy_callback,
+    )
+    if consume_event:
+        return None
+    result = state.original_mouse_handler(mouse_event)
+    if mouse_event.event_type == MouseEventType.MOUSE_DOWN and mouse_event.button == MouseButton.LEFT:
+        state.selection_anchor = int(buffer.cursor_position)
+        state.selection_moved = False
+    elif mouse_event.event_type == MouseEventType.MOUSE_MOVE:
+        state.selection_moved = bool(
+            state.selection_moved
+            or (
+                state.selection_anchor is not None
+                and int(buffer.cursor_position) != state.selection_anchor
+            )
+        )
+    if mouse_event.event_type == MouseEventType.MOUSE_UP:
+        _finish_input_mouse_selection(buffer, state, copy_callback)
+    return result
+
+
+# LLM: 左键 release 只按显式 anchor/selection 完成包含式 focus 与复制；不得处理右键或清除 Buffer 高亮。
+# 函数用途: 收口输入框左键拖选，复制最终正文并重置本轮拖动状态。
+def _finish_input_mouse_selection(
+    buffer: Any,
+    state: _InputMouseCopyState,
+    copy_callback: Any,
+) -> None:
+    anchor = state.selection_anchor
+    if (
+        anchor is not None
+        and getattr(buffer, "selection_state", None) is not None
+        and (state.selection_moved or int(buffer.cursor_position) != anchor)
+    ):
+        _include_input_focus_character(buffer, anchor)
+    selected_text = _selected_input_text(buffer)
+    if selected_text:
+        copy_callback(selected_text)
+    state.selection_anchor = None
+    state.selection_moved = False
+
+
+# LLM: 输入右键 helper 只复用显式 Buffer selection 和共享 gesture transition，不调用会修改光标的原 handler。
+# 函数用途: 在输入框已有选区时执行一次右键复制，并返回下一 latch 与是否吞掉事件。
+def _handle_input_right_copy(
+    mouse_event: Any,
+    armed: bool,
+    buffer: Any,
+    copy_callback: Any,
+) -> tuple[bool, bool]:
+    copy_requested, consume_event, next_armed = _right_copy_mouse_transition(
+        mouse_event,
+        armed,
+    )
+    if copy_requested:
+        selected_text = _selected_input_text(buffer)
+        if selected_text:
+            copy_callback(selected_text)
+    return next_armed, consume_event
 
 
 # LLM: prompt_toolkit 的字符选区默认排除 forward drag 的 cursor 端；这里只对真实拖动补一个源字符，不改双击单词选择。

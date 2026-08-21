@@ -21,7 +21,7 @@
 
 ### TUI 活动回合输入与四路极限轮转复验
 
-状态：灰色层级与 tmux 复制已部署 `.7`，待用户外层粘贴复验与结构拆分
+状态：灰色层级与 tmux 左键复制已部署 `.7`；右键直接复制本地通过，待部署和外层粘贴复验
 
 解决问题：旧 TUI 在长任务运行时把普通 Enter 当成下一轮队列，用户补充消息要等当前任务结束才执行；
 queue preview 又位于可滚动 transcript，离开尾部后看不见。并行实验室若完成后长期空闲，也会浪费四路
@@ -35,8 +35,12 @@ Adapter ingress/reply 也已收进同一结构化事实链。response loss、同
 本地相关 focused 105 项通过；修复提交 `167c98d5` 已推送并部署到用户更新后的测试机 `.7`。测试机
 focused 105 项、一个 Gateway/多 TUI 拓扑、MiniMax-M2.7 欢迎页、真实中文回复、ANSI 灰色层级与
 `tmux load-buffer -w` 中文写穿均已验证；外层 macOS 粘贴需要用户在 attach 后手动完成最后一步。
+用户复验又确认右键路径没有交互入口；本地现已在正文与输入框原 handler 前拦截右键，对已有中文选区
+直接复制一次并保留高亮，六文件 focused 107 项通过。宿主终端的原生菜单无法由 SSH 应用强制弹出，
+因此采用用户允许的“右键直接复制”，其外层系统剪贴板结果仍须部署后人工粘贴证明。
 
-待做：先由用户在 `.7` 已 attach 的终端完成一次“左键拖选后直接粘贴”验收，再继续复验 response lost、
+待做：先部署右键直接复制补丁，再由用户在 `.7` 已 attach 的终端分别完成“左键拖选后直接粘贴”和
+“保留选区后右键再粘贴”验收；然后继续复验 response lost、
 明确拒绝、final race、客户端重启和多路 IM/TUI；随后由
 独立 agent 处理三类剩余底座：一是 ordinary/control 共用的最外层 message route binding，二是普通 ChatJob
 从 Enter 到 Gateway bind 的 durable SUBMITTING/stop-btw latch，三是 Gateway input receipt 冻结 canonical

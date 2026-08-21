@@ -564,6 +564,10 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   拖动；1003 无按键 motion 和下一次 fresh press 负责收口窗口外遗失的 release。松手自动写
   prompt_toolkit clipboard、OSC52 和 tmux buffer，Ctrl-C 仍可重复复制；无选择时才进入审批取消、turn
   interrupt 或双击退出。输入 Buffer 的显式选区具有更高 Ctrl-C 优先级，鼠标松手也自动复制且不清高亮；
+  full-screen mouse tracking 已取得事件后，SSH 内应用无法强制宿主终端弹出原生右键菜单；已有非空选区
+  的右键按下因此复用同一 clipboard 投影直接复制，正文与输入框均须在原 handler 前拦截并保留高亮，
+  配对 release 只收口不重复复制。右键 release 丢失时由无按键 motion 或下一次其它 press 解锁，不能令
+  后续鼠标永久失效；`Copied` notice 只证明应用已发起投影，外层系统剪贴板仍需真实粘贴确认。
   Ctrl-V 只粘贴应用剪贴板，系统剪贴板继续由终端 bracketed paste 注入，两条路径都走同一大文本合同并
   替换现有选区。输入 marker 使用普通空格，禁止用会触发 `nbsp` 下划线样式的不换行空格。审批 overlay
   继续允许 Page/wheel/Ctrl-Home/End 查看上文，Up/Down 仍专属于选项导航。

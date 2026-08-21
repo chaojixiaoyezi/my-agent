@@ -37,6 +37,29 @@ class TuiTextSelection:
     focus: Point
 
 
+# LLM: 右键复制 latch 只描述 mouse gesture，不读取选区或剪贴板；调用方仍分别持有正文/输入 authority。
+# 函数用途: 把右键按下、松开、遗失松开和其它新点击归一成复制、吞事件及下一状态。
+def _right_copy_mouse_transition(
+    mouse_event: MouseEvent,
+    armed: bool,
+) -> tuple[bool, bool, bool]:
+    if (
+        mouse_event.event_type == MouseEventType.MOUSE_DOWN
+        and mouse_event.button == MouseButton.RIGHT
+    ):
+        return True, True, True
+    if not armed:
+        return False, False, False
+    if mouse_event.event_type == MouseEventType.MOUSE_UP or (
+        mouse_event.event_type == MouseEventType.MOUSE_MOVE
+        and mouse_event.button == MouseButton.NONE
+    ):
+        return False, True, False
+    if mouse_event.event_type == MouseEventType.MOUSE_DOWN:
+        return False, False, False
+    return False, True, True
+
+
 # LLM: TuiFrameProvider 是 snapshot/context 到 frame 的单帧 memoization 层；block LRU 仍负责跨帧稳定历史复用。
 # 类用途: 让 transcript、overlay 和 footer 在一次 prompt_toolkit render 中共享同一画面。
 class TuiFrameProvider:
@@ -127,6 +150,7 @@ class TuiTranscriptControl(UIControl):
         self._selection: TuiTextSelection | None = None
         self._selection_dragging = False
         self._selection_copied = False
+        self._right_copy_armed = False
         self._copy_on_select: Callable[[str], None] | None = None
         self._selection_width = 0
         self._last_lines: tuple[FormattedLine, ...] = ()
@@ -149,6 +173,7 @@ class TuiTranscriptControl(UIControl):
             if self._selection_width and self._selection_width != width:
                 self._selection = None
                 self._selection_dragging = False
+                self._right_copy_armed = False
             self._selection_width = width
             self._last_lines = tuple(lines)
             self._line_count = len(lines)
@@ -280,6 +305,7 @@ class TuiTranscriptControl(UIControl):
             self._selection = None
             self._selection_dragging = False
             self._selection_copied = False
+            self._right_copy_armed = False
 
     # LLM: Copy-on-select is a UI projection callback installed only after Application exists;
     # selection coordinates and clipboard transport remain separate authorities.
@@ -331,14 +357,16 @@ class TuiTranscriptControl(UIControl):
             return
         self._unseen_block_ids = visible_block_ids - baseline
 
-    # LLM: 选区只在明确 left-down 到对应 up 的拖动窗口内更新；松开后的 hover move 不得继续扩大既有选区。
-    # 函数用途: 支持滚轮浏览和有起止边界的鼠标拖选。
+    # LLM: 选区只在明确 left-down 到对应 up 的拖动窗口内更新；右键只重复投影已有选区到剪贴板，不能改坐标或清高亮。
+    # 函数用途: 支持滚轮浏览、有起止边界的鼠标拖选，以及选中后右键直接复制。
     def mouse_handler(self, mouse_event: MouseEvent):
         if mouse_event.event_type == MouseEventType.SCROLL_UP:
             self.move(-3)
             return None
         if mouse_event.event_type == MouseEventType.SCROLL_DOWN:
             self.move(3)
+            return None
+        if _handle_transcript_right_copy(self, mouse_event):
             return None
         if (
             mouse_event.event_type == MouseEventType.MOUSE_DOWN
@@ -372,6 +400,30 @@ class TuiTranscriptControl(UIControl):
             # 不筛 button：部分终端把 release 编成 NONE/UNKNOWN 或保留 motion bit。
             return None if self._finish_selection(mouse_event.position) else NotImplemented
         return NotImplemented
+
+
+# LLM: transcript 右键复制只读取当前 control 的可见选区并更新 gesture latch；clipboard callback 必须在锁外执行。
+# 函数用途: 处理正文右键复制及遗失 release，返回本次鼠标事件是否已被消费。
+def _handle_transcript_right_copy(
+    control: TuiTranscriptControl,
+    mouse_event: MouseEvent,
+) -> bool:
+    with control._lock:
+        armed = control._right_copy_armed
+    copy_requested, consume_event, next_armed = _right_copy_mouse_transition(
+        mouse_event,
+        armed,
+    )
+    callback: Callable[[str], None] | None = None
+    selected_text = ""
+    with control._lock:
+        control._right_copy_armed = next_armed
+        if copy_requested:
+            selected_text = _selected_text(control._last_lines, control._selection)
+            callback = control._copy_on_select
+    if callback is not None and selected_text.strip():
+        callback(selected_text)
+    return consume_event
 
 
 # LLM: TuiTranscriptView 是 setup 层的控件束，keybindings 通过 control 方法滚动而不是修改 TextArea buffer。

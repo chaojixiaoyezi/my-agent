@@ -650,6 +650,37 @@ def test_input_mouse_up_auto_copies_settled_selection() -> None:
     assert buffer.selection_state is not None
 
 
+def test_input_right_click_copies_once_without_delegating_or_clearing_selection() -> None:
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+
+    from agent_py_agent.cli.chat_parts.tui_ui_setup import _install_input_copy_on_select
+
+    buffer = Buffer()
+    buffer.text = "输入框中文复制"
+    buffer.cursor_position = 0
+    buffer.start_selection()
+    buffer.cursor_position = len(buffer.text)
+    delegated: list[object] = []
+    control = SimpleNamespace(mouse_handler=lambda event: delegated.append(event) or None)
+    input_area = SimpleNamespace(control=control, buffer=buffer)
+    copied: list[str] = []
+    _install_input_copy_on_select(input_area, copied.append)
+
+    down_result = control.mouse_handler(
+        MouseEvent(Point(x=6, y=0), MouseEventType.MOUSE_DOWN, MouseButton.RIGHT, frozenset())
+    )
+    up_result = control.mouse_handler(
+        MouseEvent(Point(x=6, y=0), MouseEventType.MOUSE_UP, MouseButton.RIGHT, frozenset())
+    )
+
+    assert down_result is None
+    assert up_result is None
+    assert delegated == []
+    assert copied == ["输入框中文复制"]
+    assert buffer.selection_state is not None
+
+
 def test_input_mouse_selection_includes_release_character() -> None:
     from agent_py_agent.cli.chat_parts.tui_ui_setup import (
         _include_input_focus_character,

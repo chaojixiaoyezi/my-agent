@@ -10,6 +10,9 @@
   `167c98d5` 已推送并部署到用户更新后的 `.7` 测试机；本地/远端 focused 105 项、单 Gateway、多 TUI、
   MiniMax-M2.7、真实回复、ANSI 灰色层级与 tmux 中文写穿已验。外层系统剪贴板粘贴仍以用户手动验收为准，
   详细证据见 `STATUS.md`。
+- 用户随后确认全屏 mouse tracking 下右键不会出现宿主菜单；正文和输入框已新增“已有选区时右键按下直接
+  复制”，配对 release 不重复复制且不清高亮。本地六文件 focused 107 项通过；部署和宿主系统剪贴板
+  粘贴仍在 ROADMAP，未提前写成完成。
 - EXEC-44 写后验证新鲜度已由 aiohttp→Go 真机任务闭环：最后一次源码复制后，被测 Agent 自主重新
   build、运行 29 项行为测试并完成 HTTP 200 E2E，随后才输出 final。验证事实只来自 canonical
   `handler_details` 与 durable event；read/search 不清 stale，Go/Cargo manifest 分类不读项目名或 prompt。

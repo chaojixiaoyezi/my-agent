@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-08-20 TUI 灰色层级与 tmux 左键拖选复制修正
+## 2026-08-20 TUI 灰色层级与 tmux/右键复制修正
 
 - 用户真机反馈思考正文和 `Ctrl+O` 展开提示仍与助手正文同色。根因不是主题色值，而是 renderer 只把
   `tui-thinking-detail` / `tui-muted` 加在括号或行前缀上；真正的 Markdown 文本、粗体、代码和链接片段
@@ -10,6 +10,10 @@
 - 左键拖选仍采用“松手即复制”。此前 iTerm2 分支故意去掉 `tmux load-buffer -w`，只写 tmux 内部 buffer；
   当外层终端禁用 OSC 52 / tmux DCS passthrough 时，用户系统剪贴板不会更新。现按 会话运行时
   `clipboard_copy.rs` 统一使用 `tmux load-buffer -w -`，不再按终端品牌关闭外层剪贴板转发。
+- 用户随后确认右键仍无法复制。根因是全屏 mouse tracking 已让 TUI 接管鼠标，远端应用不能弹出本机终端
+  原生菜单；正文没有右键分支，输入框还先把右键交给 prompt_toolkit，可能移动光标或清除选区。现改为
+  已有选区时右键按下直接复用 clipboard/tmux/OSC 52 出口，右键松开只收口且保留高亮。正文和输入框的
+  中文完整选区、单次复制及原 handler 不介入已有确定性回归，六文件 focused 从 105 增至 107 项通过。
 - 修复提交 `167c98d5d81a1576ccbbc4172ccfe0df9f884885` 已推送远端 `main`，并按用户更新后的测试机地址
   部署到 `192.0.2.7:/root/my-agent`。部署前 HEAD、tracked diff、进程、端口、tmux pane 与生效配置
   证据保存在 `/root/tui-parity-evidence/deploy-20260820-235922-gray-copy/`；远端 `.background_jobs/`、

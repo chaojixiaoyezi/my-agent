@@ -324,6 +324,43 @@ def test_selection_uses_prompt_toolkit_source_indexes_for_wide_characters() -> N
     assert highlighted == "甲乙丙丁"
 
 
+def test_right_click_copies_wide_selection_once_and_keeps_highlight() -> None:
+    store = TuiStateStore()
+    seq = TuiEventSequencer("selection-right-copy", clock=lambda: 5.95)
+    store.publish(
+        seq.emit(
+            "assistant_completed",
+            "completed",
+            "assistant-selection-right-copy",
+            {"text": "甲乙丙丁"},
+        )
+    )
+    control = TuiTranscriptControl(_provider(store))
+    control.create_content(40, 5)
+    control.mouse_handler(
+        MouseEvent(Point(x=2, y=0), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    )
+    control.mouse_handler(
+        MouseEvent(Point(x=5, y=0), MouseEventType.MOUSE_UP, MouseButton.LEFT, frozenset())
+    )
+    copied: list[str] = []
+    control.set_copy_on_select(copied.append)
+
+    down_result = control.mouse_handler(
+        MouseEvent(Point(x=4, y=0), MouseEventType.MOUSE_DOWN, MouseButton.RIGHT, frozenset())
+    )
+    up_result = control.mouse_handler(
+        MouseEvent(Point(x=4, y=0), MouseEventType.MOUSE_UP, MouseButton.RIGHT, frozenset())
+    )
+    selected_line = control.create_content(40, 5).get_line(0)
+
+    assert down_result is None
+    assert up_result is None
+    assert copied == ["甲乙丙丁"]
+    assert control.selected_text() == "甲乙丙丁"
+    assert any("class:tui-selection" in style for style, _text, *_ in selected_line)
+
+
 def test_resize_clears_viewport_selection() -> None:
     store = TuiStateStore()
     seq = TuiEventSequencer("selection-resize", clock=lambda: 6.0)

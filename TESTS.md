@@ -18,6 +18,11 @@ Gateway 可以并行，但不能作为“单 Gateway 多客户端”验收的替
 code-size 29 项均为修复前基线已有且本提交未新增；用户在获知后明确授权推送和测试部署，因此不能把本轮
 记录写成“严格发布 gate 全绿”。
 
+同日用户确认外层仍不能通过右键复制后，本地新增正文/输入框“已有选区时右键按下直接复制”回归：右键
+事件必须在原控件前被拦截，中文宽字符全文只复制一次，配对 release 不得重复写入或清除高亮；lost right
+release 仍可由无按键 motion/下一次其它 press 解锁。上述六文件 focused 组合现为 107 项通过；测试机部署
+和用户本机系统剪贴板粘贴在完成前仍不得标成通过。
+
 2026-08-18 活动输入/控制回执提交候选先运行 12 个原失败文件的 focused 组合，再运行一次修复后的完整
 `pytest -q --tb=short`，两者均到 100% 且退出 0。changed-file Ruff、doc sync 和 diff check 通过；全仓
 Ruff 的 112 项属于当前 HEAD 存量扫描结果，本轮变更文件为 0。strict code-size 仍有 25 个 hard finding，
@@ -90,7 +95,7 @@ history/search/paste/completion/queue/stash、follow/unseen、session-history、
 `MouseButton.NONE` motion 或下一次 fresh press 只结束旧拖动，后续 hover 不再扩展；一次 settled selection
 只自动复制一次，并同时保留 prompt_toolkit、OSC52 与 `tmux load-buffer -w` 外层剪贴板路径；iTerm2
 也不得退化成只写 tmux 内部 buffer。输入回归还要覆盖鼠标松手自动
-复制、Ctrl-C 复制且保留输入高亮、Ctrl-V/终端 bracketed paste 替换选区，以及 marker 普通空格不会触发
+复制、Ctrl-C/右键复制且保留输入高亮、右键 press/release 只复制一次、Ctrl-V/终端 bracketed paste 替换选区，以及 marker 普通空格不会触发
 `nbsp` 下划线。运行中普通输入还要证明下一次
 真实模型调用能看到该输入；若 exact turn 已结束，TUI 只能挂接 Gateway 返回的 canonical queued request，
 不得再次提交正文。
