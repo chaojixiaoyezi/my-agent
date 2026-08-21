@@ -206,7 +206,7 @@ class ToolSearchTool(BaseTool):
         description=(
             "按当前权限与实时可用性搜索尚未展开的工具。普通搜索只返回精简候选，不加载 Schema；"
             "选定后再次调用并传 load_names，只有这些精确名称会在下一次模型调用临时展开。"
-            "当任务需要子代理、/goal 生命周期或跨代理协作，而当前工具列表里没有对应工具时使用。"
+            "当任务需要 /goal 生命周期、外部协作、web、vision 或 MCP，而当前工具列表里没有对应工具时使用。"
         ),
         input_schema={
             "type": "object",

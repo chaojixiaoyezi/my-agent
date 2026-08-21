@@ -33,6 +33,8 @@
 - [ ] 真实主代理自己完成任务。
 - [ ] 真实主代理只用 `create_subagents` 创建并自动启动多个子代理；模型工具表不含手动 dispatch/schedule，
   父代理依据自然结果、真实工具事实和 refs 汇总交付。
+- [ ] 前台第一次模型调用就直接可见 create/guidance/cancel/resolve，不需要先调 `tool_search`；
+  真机必须出现 `create_subagents` 工具账和至少 2 个 child，模型口头说“派了”不算。
 - [ ] 子代理状态变化只通过生命周期事件唤醒直接父级；没有周期性 LLM 巡场/wait 推进。`send_guidance`
   只能用 `target + message` 给一个直接 child 插话，不能广播或越层代管孙代理；模型工具表也不含
   `inspect_agent_tree`，内部树只供 `/status`、TUI、恢复与诊断。

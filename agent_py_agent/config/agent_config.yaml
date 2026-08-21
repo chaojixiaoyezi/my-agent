@@ -776,9 +776,10 @@ tool_catalog_categories: []
 
 # 渐进式披露：这些 category 的工具仍注册、仍受相同权限控制，但不进初始模型 schema；
 # 模型通过 tool_search 搜索并加载命中工具，list_tools 可查看完整注册表。显式 allowed_tools
-# 的后台/runner 回合本身已是结构化工具选择，不再延迟。默认收起协作、编排和 /goal 工具；
-# 普通任务仍可自主派子代理，只是先发现再调用。设为 [] 即恢复全部工具直出。
-tool_catalog_deferred_categories: ["collaboration", "orchestration", "goal", "web", "vision", "meta", "mcp"]
+# 的后台/runner 回合本身已是结构化工具选择，不再延迟。默认收起协作、/goal、web、vision、meta 和 MCP；
+# orchestration 不收起，因为 `create_subagents` 与直属下级控制是递归 Agent 主链，首次模型调用就必须看得到。
+# 设为 [] 即恢复全部工具直出。
+tool_catalog_deferred_categories: ["collaboration", "goal", "web", "vision", "meta", "mcp"]
 
 # 工具目录条目是否带示例；默认关闭以控制每轮上下文，完整示例仍可通过 list_tools/tool_search 读取。
 tool_catalog_include_examples: false

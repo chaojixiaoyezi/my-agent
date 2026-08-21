@@ -657,8 +657,8 @@ def test_tool_round_streams_tool_progress_chunks():
     assert records[0].result.ok is True
 
 
-def test_plain_parallel_project_prompt_recommends_tool_search(tmp_path):
-    """大白话里的并行任务先命中按需搜索，不在首轮直接暴露编排工具。"""
+def test_plain_parallel_project_prompt_recommends_direct_create(tmp_path):
+    """大白话并行任务直接推荐首轮可见的创建工具。"""
     agent = SimpleAgent(_text_agent_config(enable_tools=True, memory_path="memory.jsonl"), tmp_path)
 
     _catalog, recommendations = (
@@ -666,8 +666,7 @@ def test_plain_parallel_project_prompt_recommends_tool_search(tmp_path):
         agent.tools.render_recommended_tools_section("请让子代理分别去看不同项目，最后你汇总。"),
     )
 
-    assert "tool_search" in recommendations
-    assert "create_subagents" not in recommendations
+    assert "create_subagents" in recommendations
 
 
 def test_runtime_tool_sections_use_user_prompt_for_orchestration_recommendations(tmp_path):
@@ -689,8 +688,7 @@ def test_runtime_tool_sections_use_user_prompt_for_orchestration_recommendations
         )
     )
 
-    assert "tool_search" in recommendations
-    assert "create_subagents" not in recommendations
+    assert "create_subagents" in recommendations
 
 
 @pytest.mark.xfail(reason="EXEC-31b: text 驱动 fake 待 native 适配")

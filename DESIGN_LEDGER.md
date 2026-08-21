@@ -302,6 +302,11 @@
   自己的直接下级。
 - 模型可见的 `cancel_subagents` 只接收直属 `run_id/run_ids + reason`；`root_id/status/dry_run/
   kill_process` 和整树回执都是宿主运维内部面。因此打断入口不能被模型当成隐蔽的查树/轮询工具。
+- `.7` 原样 TUI 在 `e321483` 上实锤另一个底层断层：前台默认把整个 `orchestration` category
+  收进 `tool_search`，MiniMax 首轮实际看不到 `create_subagents`，因而说要派 5 个 child 却只调
+  Bash/Write。对照 会话运行时 multi-agent v2 的 `ToolExposure::Direct` 后，当前默认不再延迟
+  `orchestration`；创建、直属插话、打断和权限裁决从第一次模型调用就可见。这是工具快照配置修复，
+  不解析“必须子代理”等用户文字做机器路由。
 - 旧 `InspectAgentTreeTool`、模型 Schema、公开导出和专用工具测试已删除，不保留“虽未注册但仍像工具”
   的影子入口。内部代码直接读取 `agent_tree_status_payload`，它只是 `/status`、TUI、恢复和诊断的状态投影。
 - 所有模型可见的子代理工具快照（含历史配置、持久化 grant、角色模板和递归继承）统一经过

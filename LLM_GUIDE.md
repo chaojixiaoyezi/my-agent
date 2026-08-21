@@ -27,6 +27,9 @@
 - 递归协作只有一个创建入口 `create_subagents`，创建成功后宿主立即自动启动。
   模型不再看到 `dispatch_subagents` 或 `schedule_child_subagents`；内部 dispatcher
   只是启动、恢复与有界重试引擎，不是人工推动工具。
+- `orchestration` 不进渐进披露折叠区；`create_subagents`、`send_guidance`、
+  `cancel_subagents` 和 `resolve_capability_requests` 必须从前台首次模型调用就直接可见。
+  `tool_search` 继续用于 /goal、外部协作、web、vision、meta 和 MCP 等延迟能力。
 - 子代理生命周期事件直接唤醒父级；不再为每批 child 登记周期性 LLM 巡场或 `wait` 推进。
   `send_guidance` 只接受一个直接下级 `target` 和一段 `message`，不支持广播、跨层催办或验收。
 - 父代理对下级的日常控制面只剩创建、给一个直属下级发补充消息、打断/取消直属下级，以及处理

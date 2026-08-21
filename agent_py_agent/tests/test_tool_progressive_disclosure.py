@@ -43,12 +43,16 @@ def test_deferred_collaboration_tools_collapsed_in_main_catalog(tmp_path) -> Non
     assert "create_goal" in fold
 
 
-def test_native_visible_surface_defers_goal_orchestration_and_collaboration(tmp_path) -> None:
+def test_native_visible_surface_keeps_recursive_agent_control_direct(tmp_path) -> None:
     agent = _agent(tmp_path)
     names = {spec.name for spec in agent.tools.model_visible_specs()}
 
     assert "tool_search" in names
     assert "remember" in names
+    assert "create_subagents" in names
+    assert "send_guidance" in names
+    assert "cancel_subagents" in names
+    assert "resolve_capability_requests" in names
     assert "get_goal" not in names
     assert "inspect_agent_tree" not in names
     assert "create_goal" not in names
@@ -57,14 +61,14 @@ def test_native_visible_surface_defers_goal_orchestration_and_collaboration(tmp_
 def test_tool_search_returns_compact_candidates_without_loading(tmp_path) -> None:
     agent = _agent(tmp_path)
     result = agent.tools.tools["tool_search"].execute(
-        {"query": "create_subagents 创建并管理子代理", "limit": 4}
+        {"query": "get_goal 查看持续目标", "limit": 4}
     )
 
     assert result.ok
     loaded = result.result_envelope["tool_search"]["loaded_tool_names"]
     assert loaded == []
     payload = json.loads(result.output)
-    assert "create_subagents" in {item["name"] for item in payload["tools"]}
+    assert "get_goal" in {item["name"] for item in payload["tools"]}
     assert all("parameters" not in item for item in payload["tools"])
 
 
@@ -72,37 +76,37 @@ def test_tool_search_loads_only_explicit_deferred_names_for_next_turn(tmp_path) 
     agent = _agent(tmp_path)
     result = agent.tools.tools["tool_search"].execute(
         {
-            "query": "create_subagents 创建并管理子代理",
-            "load_names": ["create_subagents"],
+            "query": "get_goal 查看持续目标",
+            "load_names": ["get_goal"],
         }
     )
 
     assert result.ok
     loaded = result.result_envelope["tool_search"]["loaded_tool_names"]
-    assert loaded == ["create_subagents"]
+    assert loaded == ["get_goal"]
     names = {
         spec.name
         for spec in agent.tools.model_visible_specs(loaded_tool_names=set(loaded))
     }
+    assert "get_goal" in names
     assert "create_subagents" in names
-    assert "get_goal" not in names
 
 
 def test_tool_search_exact_load_is_bounded_and_does_not_reveal_unavailable_names(tmp_path) -> None:
     agent = _agent(tmp_path)
     result = agent.tools.tools["tool_search"].execute(
         {
-            "query": "subagents",
-            "load_names": ["create_subagents", "not_a_real_tool"],
+            "query": "goal",
+            "load_names": ["create_goal", "not_a_real_tool"],
         }
     )
 
     assert result.ok
     payload = json.loads(result.output)
-    assert payload["loaded_for_next_model_call"] == ["create_subagents"]
+    assert payload["loaded_for_next_model_call"] == ["create_goal"]
     assert payload["not_loaded"] == ["not_a_real_tool"]
     assert result.result_envelope["tool_search"]["loaded_tool_names"] == [
-        "create_subagents"
+        "create_goal"
     ]
     loaded_tool = payload["tools"][0]
     assert loaded_tool["input_schema"]["properties"]
@@ -112,7 +116,7 @@ def test_tool_search_exact_load_is_bounded_and_does_not_reveal_unavailable_names
 
 
 def test_loaded_tool_schema_is_consumed_after_one_successful_model_call() -> None:
-    params = SimpleNamespace(loaded_tool_names={"create_subagents"})
+    params = SimpleNamespace(loaded_tool_names={"get_goal"})
 
     _consume_ephemeral_loaded_tools(
         params,
@@ -123,8 +127,8 @@ def test_loaded_tool_schema_is_consumed_after_one_successful_model_call() -> Non
 
 
 def test_loaded_tool_schema_survives_overflow_or_auxiliary_reply() -> None:
-    overflow = SimpleNamespace(loaded_tool_names={"create_subagents"})
-    auxiliary = SimpleNamespace(loaded_tool_names={"create_subagents"})
+    overflow = SimpleNamespace(loaded_tool_names={"get_goal"})
+    auxiliary = SimpleNamespace(loaded_tool_names={"get_goal"})
 
     _consume_ephemeral_loaded_tools(
         overflow,
@@ -136,8 +140,8 @@ def test_loaded_tool_schema_survives_overflow_or_auxiliary_reply() -> None:
         tool_surface_was_visible=False,
     )
 
-    assert overflow.loaded_tool_names == {"create_subagents"}
-    assert auxiliary.loaded_tool_names == {"create_subagents"}
+    assert overflow.loaded_tool_names == {"get_goal"}
+    assert auxiliary.loaded_tool_names == {"get_goal"}
 
 
 def test_explicit_allowed_tools_are_structured_direct_exposure(tmp_path) -> None:

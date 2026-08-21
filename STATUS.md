@@ -63,6 +63,12 @@
   巡检入口。相关 focused 回归已跑到 100%；`ruff`、compileall、doc sync、strict code-size、
   `git diff --check` 和 clean-package 全部通过。本轮增删约 2,500 行，按用户约定没有再跑全仓 pytest；
   推送、`.7` 单 Gateway 部署和原样 TUI 复验仍待执行。
+- `e321483` 已推送并部署到 `.7`，单 Gateway 启动后 536ms 内进入 TUI。原样 prompt 首轮用时
+  432.176s、21 次模型调用、17 个工具轮，只调用了 13 次 `run_command` 和 10 次
+  `write_file`，子代理数为 0；主代理越界自己写了 4 个文件。根因是默认
+  `tool_catalog_deferred_categories` 包含 `orchestration`，前台第一轮根本没给模型 `create_subagents`
+  Schema。当前本地修正已按 会话运行时 multi-agent v2 改为 orchestration 首轮直出，49 项相关回归通过；
+  需再部署后用全新 TUI 复验。
 
 ## 2026-08-20 TUI 灰色层级与 tmux/右键复制修正
 

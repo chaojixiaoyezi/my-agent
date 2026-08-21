@@ -40,6 +40,9 @@ tmux 左键复制已部署 `.7`；右键直接复制仍是本地候选。2026-08
 重新排队；模型因此误以为 child 已结束并自己接管。当前已改为结构化 OPEN 优先、grant/deny 后同 run
 自动续跑，普通 child 逐层继承父级工作区；旧 `inspect_agent_tree` 工具类与 Schema 也已彻底删除，内部
 代理树只服务 `/status`、TUI 和恢复诊断。
+`e321483` 原样 TUI 又确认模型首轮看不到 `create_subagents`：0 child、13 次 Bash、10 次 Write，
+导致“嘴上派 5 个，实际自己写”。本地已从默认渐进披露中移除 `orchestration`，按 会话运行时
+multi-agent v2 使递归代理控制首轮直出；待二次部署和全新 TUI 复验。
 
 待做：提交推送并部署 `.7`；由真实 TUI 验证 Working 动画、thinking 连续增量、页底自动跟随、
 离底不抢滚动、Compact 百分比、后续消息可见、右键复制和输入框粘贴。外层系统剪贴板仍须用户在已 attach

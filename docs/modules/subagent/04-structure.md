@@ -90,6 +90,10 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 
 ## 核心链路
 
+前台模型快照不延迟 `orchestration`：`create_subagents`、`send_guidance`、`cancel_subagents`
+与 `resolve_capability_requests` 首轮直接可见。这只改变 Schema 披露，真正可调用集仍由同一
+`ToolRuntimeSnapshot.allowed_tools` 和 availability 决定，不扩大权限。
+
 ```text
 SimpleAgent orchestration tool
   -> SubAgentManager

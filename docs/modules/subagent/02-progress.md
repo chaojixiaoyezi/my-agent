@@ -23,6 +23,8 @@
   生命周期事件直接唤醒父级，底层 heartbeat/orphan/retry 继续只守进程可靠性。旧 policy 会被自动退休。
 - 历史配置、grant、角色模板和后代继承的工具快照共用一个退休过滤器，旧账本不能复活已删除的
   查树/手动推进工具。显式空 `allowed_tools` 仍是零权限，不会被角色默认值悄悄扩权。
+- `e321483` 真机确认前台延迟 `orchestration` 会让首轮模型看不到创建工具；默认延迟类别已移除
+  `orchestration`，递归 Agent 创建与直属控制从第一次 provider 调用就作为 native Schema 直出。
 - 修复同一 thread 多任务的后台权威串线：后台 run_id 优先使用 exact task id；历史线程级 run 属于旧任务
   时不再创建跨任务 attempt。普通 child 现在逐层继承父级结构化工作区上界；嵌套
   `items[].output_files` 继续记录交付身份和冲突锁，不再承担父级已有目录的重复授权。

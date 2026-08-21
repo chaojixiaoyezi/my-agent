@@ -671,10 +671,10 @@ def test_tool_round_records_partial_write_outcomes_in_original_order():
     ]
 
 
-def test_deferred_orchestration_has_specific_retryable_error_code():
+def test_same_round_guidance_after_create_has_specific_retryable_error_code():
     calls = [
         {"tool": "create_subagents", "goal": "child"},
-        {"tool": "inspect_agent_tree"},
+        {"tool": "send_guidance", "target": "child-1", "message": "continue"},
     ]
     records: list[ToolResult] = []
 

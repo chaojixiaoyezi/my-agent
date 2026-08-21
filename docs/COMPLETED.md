@@ -21,6 +21,9 @@
   续跑，不再需要模型巡检或推动。普通 child 逐层继承父级结构化工作区上界，`output_files` 回归交付身份
   与冲突锁职责。未注册的 `InspectAgentTreeTool`、Schema、公开导出和专用测试已删除；内部状态投影继续
   服务 `/status`、TUI 与恢复。当前只代表本地实现和定向回归完成，真机结论仍以 ROADMAP 为准。
+- 同日 `e321483` 真机失败样本证明已注册工具不等于模型首轮看得到：默认延迟整个
+  `orchestration` 造成 0 child 且主代理自写。本地配置已按 会话运行时 multi-agent v2 改为递归代理控制
+  首轮直出，并以默认 `model_visible_specs()` 回归锁定；本项只表示本地修正完成，真机复验尚未通过。
 - TUI 灰色层级已按 终端交互 的容器级 `dimColor` 语义修正：思考 Markdown 的普通文字、粗体、代码和
   链接以及 `Ctrl+O` 折叠提示都由最终浅灰 role 接管，不再只染括号或行前缀。鼠标左键拖选松手继续
   自动复制；tmux 路径按 会话运行时 统一使用 `load-buffer -w`，iTerm2 不再退化成只写内部 buffer。

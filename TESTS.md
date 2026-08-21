@@ -58,6 +58,11 @@ attempt/工具权威链错挂；同 thread 后台 notice 复用稳定 block id�
 回归必须锁住四件事：OPEN 优先投影 BLOCKED；grant 与 deny 都重排同 run；取消/接管终态不能复活；根、
 子、孙只能操作直属下级。模型工具表和历史 wake policy 同时不得出现 inspect/dispatch/schedule。
 
+`e321483` 的真实前台运行还要求检查“首次模型调用的工具面”，不能只检查进程注册表。
+回归必须确认默认 `model_visible_specs()` 直接包含 create/guidance/cancel/resolve，仍不含已删除的
+inspect/dispatch/schedule；`tool_search` 继续只加载 goal/web/vision/MCP 等延迟能力。真机必须以
+`create_subagents` 真实 tool call 和 2 个以上 child state 作为证据，不认模型文字里“我要派子代理”。
+
 `db41bb0` 部署后的原样 TUI 复验已有四名 child 全部 `DONE` 和完整页面文件，但 8080 最终未监听。证据
 显示模型在前台 `run_command` 内使用 `nohup ... &`，同一条命令里的 curl 得到 200 后，foreground shell
 结束时未受管 child 被清理。新增回归覆盖：独立 `&` 在任何模式都以 `not_started` 拒绝；`2>&1` 和引号内
