@@ -14,6 +14,11 @@
   ready-thread 规划，全局池与 per-owner 上限均由显式配置约束，持久来源与 claim 仍是调度权威。
 - 自然语言负责沟通，结构化事实负责决策；prompt、summary、报告正文、guidance 和角色描述不能直接改变运行时状态、权限、验收或派工。
 - 安全门可以硬，业务质量门默认软；危险路径、危险命令、越权和客观产物错误可以硬拦，任务深度、覆盖充分性和报告质量进入 warning、返工提示或 closeout。
+- 普通可恢复工具错误按 会话运行时 的 `RespondToModel` 语义回到当前模型继续修正：同工具同类失败达到
+  提示阈值只能注入换参数、换工具或拆步骤的强返工提示，不能按次数结束 turn。精确同参机械重试可由
+  action guardrail 拒绝该次动作，但不得升级成任务终态；跨轮 streak/episode 机器裁判不进入默认主链。
+  只有取消、明确安全边界、副作用真实 unknown 或部署者显式启用的 typed hard policy 可以硬收口。
+  同一 provider batch 内后到的同工具成功是更新的结构化事实，必须撤销本批更早失败留下的 active halt。
 - 修当前链路，不为历史目录、历史字段或历史工具形态加旁路。
 - 一个概念只保留一个权威位置：task workspace、artifact registry、subagent canonical state、compact ledger 和 config 都不能多头并存。
 - 远程 owner 的 prompt 工作区、文件写边界与 shell 挂载必须来自同一结构化 workspace scope；公共读取区

@@ -35,6 +35,13 @@ readonly_no_progress_threshold: 3
 # 默认 false：只拦截重复动作，不带 terminal_block 诊断。
 terminal_block_enabled: false
 
+# 同工具同类失败累计到这里时，给模型一次更强的换路提示并清掉本段计数；
+# 默认不会结束当前 turn。只有部署者显式打开 hard_failure_halt_enabled，且
+# 同类失败达到 hard_failure_halt_threshold，才按未完成硬收口等待人工介入。
+repeated_failure_halt_threshold: 15
+hard_failure_halt_enabled: false
+hard_failure_halt_threshold: 15
+
 ###############################################################################
 # 工具工程限流与熔断
 ###############################################################################
@@ -116,17 +123,16 @@ tool_agent_budget_max_calls: 200
 #   一次主代理/runner 工具循环最多允许多少个工具轮。
 #   这里的“工具轮”是模型一次回复里请求的一批工具，不是单个工具调用。
 #   0 表示不限制(逃生)。默认 5000 = 极高级别保护: 正常深度任务几百轮远够,
-#   5000 等效不限制,但真失控死循环(失败类/工具不断变化,到不了
-#   repeated_failure_halt 的同类 15 次)有硬顶,不会无限烧时间/成本。
-#   防失控另有专项防线: repeated_failure_halt(同类失败连续 15 次收口)、
-#   unknown_command_budget(200 次/10 分钟)、compact 防抖。
+#   5000 等效不限制,但真失控死循环仍有最后硬顶,不会无限烧时间/成本。
+#   普通可恢复工具失败只返给模型换路；action 级重复调用门、
+#   unknown_command_budget(200 次/10 分钟)、compact 防抖共同兜底。
 max_tool_rounds: 5000
 
 # background_max_tool_rounds / background_max_tool_calls_per_round:
 #   内部后台唤醒只是同一任务的一次有界续跑切片，不应在一次 claim 内无限读取。
 #   2026-08-14 owner 决策: 产品定位无人值守长任务(复刻/大型项目), 后台切片轮数
 #   与前台对齐为等效不限制(5000), 不再让 32 轮卡死长任务后台续跑; 防失控仍由
-#   repeated_failure_halt/unknown_command_budget/compact 防抖兜底, 5000 只是真失控
+#   action 级重复调用门/unknown_command_budget/compact 防抖兜底, 5000 只是真失控
 #   死循环的最后硬顶。每轮执行前 4 个调用；未执行调用会留下明确回执，
 #   任务仍由同一持久会话和进度策略续接。真实用户新消息与到点计划任务不套此上限。
 background_max_tool_rounds: 5000

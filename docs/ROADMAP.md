@@ -141,7 +141,7 @@ key/config/runtime 数据，不触碰其它项目。较早大切片已按约定�
 
 ### 主/子/孙代理统一 Conversation Compact
 
-状态：统一账本已真机触发；正在修复 Compact 指令位于 history 最前导致 MiniMax 普通续写的问题
+状态：统一账本与摘要顺序已真机触发；正在修复同批成功后旧失败闸仍误杀 child
 
 解决问题：子代理也可能连续工作数小时。旧实现中主代理用 owner/thread 的 Conversation Compact，
 task-local 子代理用 run workspace 的旧 compact continuation，回合内工具 IR 又独立裁剪；这让次数、
@@ -172,12 +172,20 @@ grandchild 在 native IR 阈值或 provider overflow 时，先把上一代 summa
 第四轮全新 Prompt 4 已证明上述账本真实生效：worker-3 在 119,295 tokens 自动提交 generation 1，
 `source_kind=live_tool_ir`，44 对旧工具往返被 checkpoint、9 对保留，模型窗口降到 36,586 且仍运行。
 但 checkpoint summary 只有一句普通后续动作，证明摘要 prompt 被 backend 放在历史最前后被 MiniMax 忽略。
-现场已 `/stop`。当前候选改为真实任务 user 在前、native history 居中、synthetic Compact user 指令最后，
-与 会话运行时 `run_compact_task_inner_impl` 的 `history.record_items(compact prompt)` 顺序一致。
+现场已 `/stop`。`83faddb` 已改为真实任务 user 在前、native history 居中、synthetic Compact user 指令
+最后，与 会话运行时 `run_compact_task_inner_impl` 的 `history.record_items(compact prompt)` 顺序一致。
 
-待做：完成联合 gate 后提交并部署到 `.7` 唯一 Gateway；在新的干净项目目录与新 tmux 中再次只投递一次
+r4 全新 TUI 已证明该顺序修复：worker-2 generation 1 从 116,644 降到 37,483，2,150 字符 summary
+保留目标、路径、完成工作、错误和下一步，并在 checkpoint 后继续创建文件。该轮同时抓到独立底座问题：
+worker-3 前部因 sibling 项目根锁得到 13 次 `TOOL_OPERATION_BUSY_CONFLICT`，后部同一批 3 次写入已成功，
+旧 repeated-failure halt 仍强制结束 child 并留下 PENDING。当前本地候选对齐 会话运行时
+`RespondToModel`：默认可恢复失败只返给模型换路，不再按次数结束 turn；同批后到的同工具成功会撤销
+早到的 active halt，只有显式 typed hard policy 才能硬收口。43 项 focused tests 已通过。
+
+待做：完成联合 gate 后提交并部署到 `.7` 唯一 Gateway；在新的干净项目目录与新 tmux r5 中再次只投递一次
 “换语言完整复刻且 main 只能协调/测试”的原样 prompt，验收 child generation 实时从 0 变 1、checkpoint
-`source_kind=live_tool_ir`、摘要包含任务/进展/路径/待办、继续工具调用和最终产物。该真测不得由测试者旁路修改项目。
+`source_kind=live_tool_ir`、摘要包含任务/进展/路径/待办、继续工具调用和最终产物，同时证明暂时锁冲突
+只会让模型换路/等待，不会把已经恢复的 child 挂回 PENDING。该真测不得由测试者旁路修改项目。
 
 ### 用户直控子代理的共享控制面
 

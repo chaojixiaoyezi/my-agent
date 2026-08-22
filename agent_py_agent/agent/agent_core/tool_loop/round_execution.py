@@ -1174,7 +1174,9 @@ def _round_context_over_compact_budget(
 # durable Compact owner for both foreground and delegated agent threads.
 # 函数用途: 判断工具轮是否应把持久压缩交给 ConversationStore，避免重复归档续跑。
 def _conversation_owns_compaction(params: ToolLoopExecuteParams) -> bool:
-    return conversation_transcript_is_authoritative(params.task_attributes)
+    return conversation_transcript_is_authoritative(
+        getattr(params, "task_attributes", None)
+    )
 
 
 def _persistent_compact_enabled(agent: object, params: object) -> bool:

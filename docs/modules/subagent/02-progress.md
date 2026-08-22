@@ -1,5 +1,16 @@
 # Subagent Progress
 
+## 2026-08-22 可恢复工具失败不再由宿主按次数终止 child（本地候选）
+
+- lazygit 换语言复刻 r4 中，worker-3 与 sibling 争用项目根写锁，前部 13 次 `write_file` 得到
+  `TOOL_OPERATION_BUSY_CONFLICT`；锁释放后同一批已有 3 次成功，旧 repeated-failure halt 却仍在批末
+  强制收口，canonical run 回到 `PENDING`，直属父级因此一直等待。
+- 对照 会话运行时 把普通工具错误作为 `RespondToModel` 返回当前模型的主链后，默认同类失败阈值只清当前
+  失败段并注入强换路提示，不再设置 halt、结束 turn 或创建跨轮 streak/episode 裁判。精确同参机械重试
+  仍由 action guardrail 拒绝，取消、安全边界、真实 unknown 与显式 hard policy 保持结构化硬门。
+- 同一 provider batch 后到的同工具成功现在会撤销本批更早写下的 active hard halt；不同工具成功不误清。
+  43 项失败恢复与共享配置 focused tests 已通过，fresh MiniMax-M2.7 TUI r5 尚待部署后复验。
+
 ## 2026-08-22 运行中工具历史纳入唯一 Conversation Compact
 
 - >40k 功能行换语言复刻真机轮中，child 上下文从 113.1k 降到 35.5k，但它自己的

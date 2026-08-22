@@ -1,6 +1,12 @@
 # TEST CHECKLIST
 
 - [x] 工具运行时改动相关 focused tests 通过（Schema/runtime/protocol/policy/executor/ledger/output/concurrency/cancel/compact 矩阵）；其他并行模块仍按各自条目验收。
+- [x] 默认可恢复工具失败只返回当前模型返工，不按同类失败次数结束 turn；同一批后到的同工具成功会
+  撤销早到的 active halt，不同工具成功不误清。精确同参机械重试仍只拒绝动作，只有显式 typed hard
+  policy 可进入 repeated-failure 硬收口。43 项 focused 回归已通过；fresh TUI r5 真机证据仍按下方重型
+  任务条目验收，不能提前勾成端到端通过。
+- [x] Compact 权威探针兼容没有 `task_attributes` 的轻量/旧调用方；统一路径解析把 `None`/空白保留为
+  “没有路径”，不能变成 `<repo>/None` 并压过真实 ToolRegistry cwd。工具轮 28 项与 cwd 集成回归通过。
 - [x] 后台 Task Runtime State 与 `task_progress` 工具使用同一 task-path 账本编号；回归同时放置正确路径账本
   和错误 request-id 账本，只允许前者进入模型上下文。child 终态同步、Goal continuation 与 TUI 投影复用
   同一 helper，普通 open Todo 仍不构成机器验收或普通任务自动续跑门。

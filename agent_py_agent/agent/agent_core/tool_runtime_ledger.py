@@ -421,9 +421,15 @@ def _is_exact_subagent_workspace_rebase(params: object, task_root: Path) -> bool
     )
 
 
+# LLM: 缺失路径必须保持“没有事实”，不能经 str(None) 变成 cwd/None；所有
+# workspace/owner/task 边界调用方都依赖这个 fail-closed 归一化。
+# 函数用途: 把非空结构化路径解析为绝对路径，空值直接返回没有路径。
 def _resolved_path(raw: object) -> Path | None:
+    value = _text(raw)
+    if not value:
+        return None
     try:
-        return Path(str(raw)).expanduser().resolve(strict=False)
+        return Path(value).expanduser().resolve(strict=False)
     except (OSError, RuntimeError, ValueError):
         return None
 

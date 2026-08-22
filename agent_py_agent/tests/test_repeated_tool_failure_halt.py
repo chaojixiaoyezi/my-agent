@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-"""四级阶梯单测:软提示→收口自动续跑→收益递减→真硬门(默认关)。
+"""工具失败恢复单测:软提示→强返工提示→显式硬门(默认关)。
 
 真机实证(urllib3→Go 复刻,2026-08-06):send_message 工具 60+ 次连续失败
 (TOOL_PARAMETER_TYPE_INVALID),模型每次调用都改参数 → (tool_name, args_hash)
 身份从不累计,(tool, args_hash) guardrail 的 N/2N/3N 永不触发,死循环绕过去。
 
-四级阶梯:
+当前合同对齐 会话运行时 的模型可见错误路径:
   L1 软提示    :同工具同类失败 2 次即按失败类别注入恢复指引,不拦调用。
-  L2 收口续跑  :同类失败达阈值(默认 8)本轮收口,任务保持未完成并自动续跑,
-                 清掉失败段,下轮换策略后从 0 重新累计。
-  L3 收益递减  :连续 3 轮收口且每轮无任何成功工具结果 → 真收口,等用户。
-  L4 真硬门    :默认关;开启后同类失败达 15 次强制真收口等用户。
+  L2 强返工    :同类失败达阈值后清掉失败段并要求换策略,默认不结束 turn。
+  L3 真硬门    :默认关;部署者显式开启后同类失败达 15 次才强制收口。
+  成功优先     :同一工具在同一批后续成功时,撤销本批更早写下的失败 halt。
 """
 
 from types import SimpleNamespace
@@ -22,7 +21,6 @@ from agent_py_agent.agent.agent_core._finalization_service import (
 from agent_py_agent.agent.agent_core._tool_loop_service import (
     _mark_repeated_failure_halt,
     _recovery_hint_for_failure_class,
-    _repeated_failure_streak,
 )
 from agent_py_agent.agent.agent_core.tool_guard.call_guardrail import (
     clear_consecutive_failure_segment,
@@ -57,11 +55,8 @@ def _records_from(results):
     )
 
 
-def _agent_with_records(records, streak=0):
-    agent = SimpleNamespace(_tool_call_guardrail_records=records)
-    if streak:
-        agent._repeated_failure_halt_streak = streak
-    return agent
+def _agent_with_records(records):
+    return SimpleNamespace(_tool_call_guardrail_records=records)
 
 
 def _record(
@@ -233,19 +228,17 @@ class TestRecoveryHintForFailureClass:
 
 
 class TestMarkRepeatedFailureHalt:
-    def test_halt_after_threshold(self):
+    def test_threshold_requests_repair_without_halting(self):
         records = _records_from(
             [("send_message", _failed_result()) for _ in range(_HALT_THRESHOLD)]
         )
         record = _record("send_message", _failed_result())
         _mark_repeated_failure_halt(_agent_with_records(records), record)
-        assert record.params.repeated_failure_halt == (
-            "send_message",
-            "code:TOOL_PARAMETER_TYPE_INVALID",
-            _HALT_THRESHOLD,
-        )
-        assert not record.params.repeated_failure_halt_exhausted, "首轮软收口"
-        assert record.params.tool_context, "必须给模型留下收口提示"
+        assert record.params.repeated_failure_halt is None
+        assert not record.params.repeated_failure_halt_exhausted
+        joined = "\n".join(record.params.tool_context)
+        assert "系统不会因此结束当前任务" in joined
+        assert "不要总结或宣告完成" in joined
 
     def test_no_halt_below_threshold(self):
         records = _records_from(
@@ -286,10 +279,10 @@ class TestMarkRepeatedFailureHalt:
         )
         record = _record("send_message", _failed_result())
         _mark_repeated_failure_halt(_agent_with_records(mixed), record)
-        assert record.params.repeated_failure_halt is not None
+        assert record.params.repeated_failure_halt is None
 
-    def test_deny_then_more_failures_halt(self):
-        # DENY 之后模型继续同类失败 → 收口(真机 60+ 次循环的兜底路径)。
+    def test_deny_then_more_failures_still_returns_repair_hint(self):
+        # action 级 DENY 不污染同类段；默认路径仍只提示换路，不结束 turn。
         records = _records_from(
             [("send_message", _failed_result()) for _ in range(_HALT_THRESHOLD)]
         ) + (
@@ -302,11 +295,8 @@ class TestMarkRepeatedFailureHalt:
         ) + _records_from([("send_message", _failed_result())])
         record = _record("send_message", _failed_result())
         _mark_repeated_failure_halt(_agent_with_records(records), record)
-        assert record.params.repeated_failure_halt == (
-            "send_message",
-            "code:TOOL_PARAMETER_TYPE_INVALID",
-            _HALT_THRESHOLD + 1,
-        )
+        assert record.params.repeated_failure_halt is None
+        assert "系统不会因此结束当前任务" in "\n".join(record.params.tool_context)
 
     def test_no_halt_on_success(self):
         records = _records_from(
@@ -316,7 +306,7 @@ class TestMarkRepeatedFailureHalt:
         _mark_repeated_failure_halt(_agent_with_records(records), record)
         assert record.params.repeated_failure_halt is None
 
-    def test_halt_is_idempotent(self):
+    def test_existing_hard_halt_is_idempotent(self):
         records = _records_from(
             [("send_message", _failed_result()) for _ in range(_HALT_THRESHOLD)]
         )
@@ -334,8 +324,8 @@ class TestMarkRepeatedFailureHalt:
         assert record.params.repeated_failure_halt is not None
         assert len(record.params.tool_context) == context_len, "已收口后不得重复追加提示"
 
-    def test_soft_halt_clears_failure_segment(self):
-        # L2 软收口后清掉该失败段:下轮换策略重试同一工具从 0 累计,不会一碰再收口。
+    def test_repair_hint_clears_failure_segment(self):
+        # 强返工提示后清掉该失败段，后续新策略从 0 累计。
         records = _records_from(
             [("send_message", _failed_result()) for _ in range(_HALT_THRESHOLD)]
         )
@@ -354,8 +344,7 @@ class TestMarkRepeatedFailureHalt:
         _mark_repeated_failure_halt(agent, one_more)
         assert one_more.params.repeated_failure_halt is None
 
-    def test_soft_halt_nudge_context(self):
-        # L2 收口文案是 nudge(继续推进),不是"等用户介入"。
+    def test_repair_hint_keeps_current_turn_running(self):
         records = _records_from(
             [("send_message", _failed_result()) for _ in range(_HALT_THRESHOLD)]
         )
@@ -363,6 +352,7 @@ class TestMarkRepeatedFailureHalt:
         _mark_repeated_failure_halt(_agent_with_records(records), record)
         joined = "\n".join(record.params.tool_context)
         assert "继续推进" in joined
+        assert "系统不会因此结束当前任务" in joined
         assert "不要总结或宣告完成" in joined
 
     def test_hard_halt_when_enabled(self):
@@ -377,115 +367,51 @@ class TestMarkRepeatedFailureHalt:
         assert "等待用户提供新思路" in joined
 
     def test_hard_halt_disabled_by_default(self):
-        # L4 默认关:即使 20 次同类失败也只软收口(自动续跑)。
+        # 硬门默认关：即使 20 次同类失败也只返工，不替模型结束任务。
         records = _records_from(
             [("send_message", _failed_result()) for _ in range(20)]
         )
         record = _record("send_message", _failed_result(), hard_enabled=False)
         _mark_repeated_failure_halt(_agent_with_records(records), record)
+        assert record.params.repeated_failure_halt is None
         assert not record.params.repeated_failure_halt_exhausted
+
+    def test_later_same_tool_success_clears_earlier_hard_halt(self):
+        """r4 真机回归：同批前半段冲突、后半段成功，成功事实必须撤销旧闸。"""
+        records = _records_from(
+            [("write_file", _failed_result("TOOL_OPERATION_BUSY_CONFLICT"))]
+            * _HARD_THRESHOLD
+        )
+        agent = _agent_with_records(records)
+        failed = _record(
+            "write_file",
+            _failed_result("TOOL_OPERATION_BUSY_CONFLICT"),
+            hard_enabled=True,
+        )
+        _mark_repeated_failure_halt(agent, failed)
+        assert failed.params.repeated_failure_halt is not None
+        assert failed.params.repeated_failure_halt_exhausted
+
+        succeeded = SimpleNamespace(
+            params=failed.params,
+            call=SimpleNamespace(tool_name="write_file"),
+            result=_ok_result(),
+        )
+        _mark_repeated_failure_halt(agent, succeeded)
+        assert succeeded.params.repeated_failure_halt is None
+        assert not succeeded.params.repeated_failure_halt_exhausted
+
+    def test_other_tool_success_does_not_clear_hard_halt(self):
+        halt = ("write_file", "code:TOOL_OPERATION_BUSY_CONFLICT", _HARD_THRESHOLD)
+        record = _record("run_command", _ok_result(), repeated_failure_halt=halt)
+        record.params.repeated_failure_halt_exhausted = True
+        _mark_repeated_failure_halt(_agent_with_records(()), record)
+        assert record.params.repeated_failure_halt == halt
+        assert record.params.repeated_failure_halt_exhausted
 
 
 def _records_after(agent):
     return agent._tool_call_guardrail_records
-
-
-class TestRepeatedFailureExhausted:
-    """L3 收益递减:连续 3 轮收口且每轮无成功工具结果 → 真收口等用户。"""
-
-    def _run_halt_round(self, agent, executed_tools, failure_class=None):
-        code = failure_class or "TOOL_PARAMETER_TYPE_INVALID"
-        agent._tool_call_guardrail_records = _records_from(
-            [("send_message", _failed_result(code)) for _ in range(_HALT_THRESHOLD)]
-        )
-        record = _record(
-            "send_message",
-            _failed_result(code),
-            executed_tools=executed_tools,
-        )
-        _mark_repeated_failure_halt(agent, record)
-        return record
-
-    def test_exhausted_after_three_rounds_without_progress(self):
-        # EXEC-04 起同一失败类第二次收口即升级硬收口(episode 闸), 本测试用
-        # 每轮不同失败类隔离出纯 streak 耗尽路径(连续 3 轮无进展 → 硬收口)。
-        agent = _agent_with_records(())
-        r1 = self._run_halt_round(agent, [], "TOOL_PARAMETER_TYPE_INVALID")
-        assert not r1.params.repeated_failure_halt_exhausted
-        r2 = self._run_halt_round(agent, [], "TOOL_TIMEOUT")
-        assert not r2.params.repeated_failure_halt_exhausted
-        r3 = self._run_halt_round(agent, [], "TOOL_ERROR")
-        assert r3.params.repeated_failure_halt_exhausted
-        joined = "\n".join(r3.params.tool_context)
-        assert "无法自行脱困" in joined
-
-    def test_successful_tool_call_resets_streak(self):
-        # 轮内有成功工具结果即算有进展:streak 归 1,不叠加。
-        agent = _agent_with_records(())
-        self._run_halt_round(agent, [], "TOOL_PARAMETER_TYPE_INVALID")
-        self._run_halt_round(agent, [], "TOOL_TIMEOUT")
-        r3 = self._run_halt_round(agent, ["write_file"], "TOOL_ERROR")
-        assert not r3.params.repeated_failure_halt_exhausted
-        assert _repeated_failure_streak(agent) == 1
-
-    def test_exhausted_marks_streak(self):
-        agent = _agent_with_records(())
-        self._run_halt_round(agent, [], "TOOL_PARAMETER_TYPE_INVALID")
-        self._run_halt_round(agent, [], "TOOL_TIMEOUT")
-        self._run_halt_round(agent, [], "TOOL_ERROR")
-        assert _repeated_failure_streak(agent) == 3
-
-    def test_same_failure_class_second_episode_escalates_to_hard(self):
-        """EXEC-04(t4 对照真机): 同一工具+同一失败类第二次触发软收口即升级
-        硬收口。原机制只看「连续无成功轮数」, 模型穿插成功调用时 streak 恒为
-        1、永不耗尽 → 软收口清段+自动续跑无限循环(真机空转 34 轮 160 调用
-        15 分钟 RC=124)。第二次 episode 必须 exhausted, 不再自动续跑。"""
-        agent = _agent_with_records(())
-        # 第一次软收口: 达到阈值但未耗尽(软收口, 自动续跑)。
-        first = self._run_halt_round(agent, executed_tools=[])
-        assert first.params.repeated_failure_halt is not None
-        assert not first.params.repeated_failure_halt_exhausted
-        # 续跑轮: 模型穿插了成功调用(executed_tools 非空)但同一工具同类失败
-        # 再次达到阈值 → episode=2 → 升级硬收口。
-        second = self._run_halt_round(agent, executed_tools=["read_file"])
-        assert second.params.repeated_failure_halt_exhausted, (
-            "同一失败类第二次收口必须硬收口, 否则软收口+续跑无限循环"
-        )
-        joined = "\n".join(second.params.tool_context)
-        assert "同一工具同一失败类型已第 2 次触发收口" in joined
-
-    def test_tool_success_resets_episode_counter(self):
-        """EXEC-04: 该工具成功一次即清零 episode 计数——工具本身可用,
-        后续新错误重新给足两次机会, 不会被历史 episode 误升级硬收口。"""
-        from agent_py_agent.agent.agent_core._tool_loop_service import (
-            _clear_failure_episodes_for_tool,
-        )
-
-        agent = _agent_with_records(())
-        first = self._run_halt_round(agent, executed_tools=[])
-        assert not first.params.repeated_failure_halt_exhausted
-        # 同工具成功一次 → episode 清零。
-        _clear_failure_episodes_for_tool(agent, "send_message")
-        second = self._run_halt_round(agent, executed_tools=["read_file"])
-        assert not second.params.repeated_failure_halt_exhausted, (
-            "成功清零后第二次收口仍是软收口(工具可用, 新错误给足机会)"
-        )
-
-    def test_different_failure_class_does_not_escalate(self):
-        """EXEC-04: episode 按 (工具, 失败类) 键控——不同失败类互不累计。"""
-        agent = _agent_with_records(())
-        first = self._run_halt_round(agent, executed_tools=[])
-        assert not first.params.repeated_failure_halt_exhausted
-        # 第二次收口是不同失败类: 需要先构造不同失败码的记录。
-        agent._tool_call_guardrail_records = _records_from(
-            [
-                ("send_message", _failed_result("TOOL_TIMEOUT"))
-                for _ in range(_HALT_THRESHOLD)
-            ]
-        )
-        record = _record("send_message", _failed_result("TOOL_TIMEOUT"))
-        _mark_repeated_failure_halt(agent, record)
-        assert not record.params.repeated_failure_halt_exhausted
 
 
 class TestClearConsecutiveFailureSegment:

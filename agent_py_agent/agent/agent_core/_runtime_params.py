@@ -113,12 +113,11 @@ class ToolLoopExecuteParams:
     workspace_context_snapshot: str = ""
     # 协议违规修复机会次数：模型输出格式偶发抖动时先给几次结构化重试再 break。
     max_protocol_repairs: int = 2
-    # 同一工具同类失败(同 failure_class,参数可不同)连续达阈值的收口标记
-    # (tool_name, failure_class, count)。软收口后任务保持未完成并自动续跑,
-    # 模型需彻底换策略继续推进;exhausted 为 True 时是收益递减/硬门真收口,
-    # 等待用户介入。
+    # 部署者显式开启 hard_failure_halt 后，同一工具同类失败连续达硬阈值的
+    # 收口标记(tool_name, failure_class, count)。默认可恢复失败只返给模型
+    # 换策略，不写本字段；同一批后续成功还会撤销早到的旧标记。
     repeated_failure_halt: tuple[str, str, int] | None = None
-    # 真收口标记:True 时本轮不再自动续跑,等用户提供新思路。
+    # 显式硬门真收口标记:True 时本轮不再自动续跑,等用户提供新思路。
     repeated_failure_halt_exhausted: bool = False
     # 当前 run 内已由交互审批确认的精确 ActionPolicy binding；不持久化、不按工具名泛化。
     runtime_approved_actions: list[dict[str, str]] = field(default_factory=list)

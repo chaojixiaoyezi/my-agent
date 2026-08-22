@@ -3,8 +3,11 @@ from __future__ import annotations
 
 def test_runtime_guard_file_contains_tool_repeat_guard_defaults():
     from agent_py_agent.agent.agent_core.tool_guard.call_guardrail_config import (
+        hard_failure_halt_enabled,
+        hard_failure_halt_threshold,
         readonly_no_progress_threshold,
         repeat_fail_threshold,
+        repeated_failure_halt_threshold,
         terminal_block_enabled,
     )
 
@@ -14,6 +17,9 @@ def test_runtime_guard_file_contains_tool_repeat_guard_defaults():
     assert repeat_fail_threshold(Params()) == 10
     assert readonly_no_progress_threshold(Params()) == 3
     assert terminal_block_enabled(Params()) is False
+    assert repeated_failure_halt_threshold(Params()) == 15
+    assert hard_failure_halt_enabled(Params()) is False
+    assert hard_failure_halt_threshold(Params()) == 15
 
 
 def test_runtime_guard_file_contains_tool_rate_limit_defaults():
@@ -111,12 +117,9 @@ def test_runner_retry_limit_only_uses_off_or_zero_to_disable():
 
 def test_agent_config_blank_tool_rounds_defaults_to_extreme_guard():
     """LLM: 默认极高级别轮数保护(5000)——正常深度任务(如 5 万行项目复刻)几百轮
-    远够,5000 等效不截停主循环,但真失控死循环(失败类/工具不断变化,到不了
-    repeated_failure_halt 同类 15 次)有硬顶,不会无限烧时间/成本(问题4
-    「取消 60 轮限制没修真实失败」的补位兜底)。防失控另有专项防线:
-    repeated_failure_halt(同类失败连续 15 次收口)、unknown_command_budget
-    (200 次/10 分钟)、compact 防抖。显式正数仍可限制,显式 0 才是不限制;
-    任务属性可覆盖。"""
+    远够,5000 等效不截停主循环,但真失控死循环仍有最后硬顶。普通可恢复工具
+    失败只返给模型换路；action 级重复调用门、unknown_command_budget、compact
+    防抖共同兜底。显式正数仍可限制,显式 0 才是不限制;任务属性可覆盖。"""
     from types import SimpleNamespace
 
     from agent_py_agent.agent.agent_core._tool_loop_service import (

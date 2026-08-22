@@ -112,8 +112,7 @@ from .tool_runtime_ledger import persist_tool_runtime_ledger, write_boundary_wit
 _LOGGER = logging.getLogger(__name__)
 
 # 极高级别轮数保护(默认 5000):正常深度任务(整仓换语言复刻)几百轮远够,
-# 5000 等效"不限制",但真失控死循环(失败类/工具不断变化,永远到不了
-# repeated_failure_halt 的同类 15 次)有硬顶,不会无限烧时间/成本——这是
+# 5000 等效"不限制",但真失控死循环仍有最后硬顶,不会无限烧时间/成本——这是
 # 取消 60 轮截停(2026-08-07)后的补位兜底:轮数不再拦可救任务,失控仍有终点。
 # 显式配置 max_tool_rounds 或任务属性仍可覆盖(正数=限制,0=不限制)。
 _DEFAULT_MAX_TOOL_ROUNDS = 5000
@@ -172,8 +171,8 @@ def _effective_max_tool_rounds(agent, params: ToolLoopExecuteParams) -> int:
     if attrs_to_check and "max_tool_rounds" in attrs_to_check:
         effective = attrs_to_check["max_tool_rounds"]
     # LLM: 极高级别轮数保护(默认 5000)——正常深度任务几百轮远够,5000 只拦
-    # 真失控死循环;防失控另有专项防线:repeated_failure_halt(同类失败连续 15
-    # 次收口)、unknown_command_budget(200 次/10 分钟滚动窗口)、compact 防抖。
+    # 真失控死循环;普通可恢复工具失败只返给模型修正,不再由宿主结束 turn。
+    # 防失控另有 action 级重复调用门、unknown_command_budget 与 compact 防抖。
     # 显式正数仍可限制,显式 0 不限制,任务属性可单任务覆盖。
     if effective is None:
         return _DEFAULT_MAX_TOOL_ROUNDS
@@ -1314,6 +1313,9 @@ def _response_action(agent, loop_params: ToolLoopExecuteParams, response, repair
     return decision.counters, decision
 
 
+# LLM: 执行一批工具后只尊重 typed interrupt、预算和显式安全/硬门；普通可恢复
+# 工具失败必须留在当前模型循环内返工，不能由宿主按次数替模型结束 turn。
+# 函数用途: 推进一个工具轮，并在明确的中断或硬边界命中时返回收口响应。
 def _tool_step_or_limit(service: ToolLoopService, request: _ToolStepRequest):
     if is_interrupted():
         return (
@@ -1348,9 +1350,8 @@ def _tool_step_or_limit(service: ToolLoopService, request: _ToolStepRequest):
             request.current_prompt,
         ),
     )
-    # 同类失败强制收口优先于本轮自然结束：即使模型又产出了"继续推进"式
-    # 回复，也要按未完成交接收口，避免把原地打转标成完成(真机实证:
-    # urllib3 复刻 60+ 次同类 send_message 失败后仍可能产出完成态)。
+    # 这里只处理部署者显式开启的 hard_failure_halt。默认同类失败只会把
+    # 结构化错误和换路提示交还模型，不会设置 repeated_failure_halt。
     if request.params.repeated_failure_halt is not None:
         final_prompt, final_response = service._final_response_after_repeated_failure(
             request.params,
@@ -1527,8 +1528,21 @@ def _ordinary_task_resume_available(agent, params: ToolLoopExecuteParams) -> boo
         return None
 
 
+# LLM: 同类失败计数默认只生成模型返工提示；只有显式 hard gate 可写 halt，且
+# 同批后到的同工具成功必须撤销早到的 halt。修改时同步检查 action guardrail。
+# 函数用途: 记录连续工具失败并告诉模型换办法，不把普通失败次数当任务终态。
 def _mark_repeated_failure_halt(agent, record: ToolCallRecordParams) -> None:
-    if record.params.repeated_failure_halt is not None or record.result.ok:
+    """把连续失败变成模型可见返工提示；只有显式硬门才结束 turn。
+
+    会话运行时 会把普通工具错误作为工具结果交还模型，而不是按失败次数替模型终止
+    当前工作。本项目保留同类失败统计用于提示和显式 hard gate，但默认路径只
+    清理当前失败段并要求换策略。若同一批稍后的同工具调用已经成功，成功事实
+    会撤销这个批次里更早写下的 halt，避免并行完成顺序制造假失败。
+    """
+    if record.result.ok:
+        _clear_active_repeated_failure_halt(record.params, record.call.tool_name)
+        return
+    if record.params.repeated_failure_halt is not None:
         return
     failure_class = failure_class_of_result(record.result)
     # guardrail 自身拦截(TOOL_GUARDRAIL_*_BLOCKED)不是模型错误:不计入连续段,
@@ -1543,44 +1557,42 @@ def _mark_repeated_failure_halt(agent, record: ToolCallRecordParams) -> None:
     _soft_hint_after_failures(agent, record, count, failure_class)
     if count < _repeated_failure_halt_threshold(record.params):
         return
-    # EXEC-04: 同一 (工具, 失败类) 第二次触发软收口 → 升级硬收口。
-    # 原耗尽判定只看「连续无成功轮数」, 模型穿插成功调用会恒不耗尽 →
-    # 软收口清段+自动续跑无限循环(t4 真机: 空转 34 轮 160 调用 15 分钟)。
-    episode = _record_failure_episode(agent, record.call.tool_name, failure_class)
-    exhausted = _repeated_failure_exhausted(agent, record, count)
-    if episode >= _EPISODE_HARD_HALT_LIMIT:
-        exhausted = True
-    object.__setattr__(
-        record.params,
-        "repeated_failure_halt",
-        (record.call.tool_name, failure_class, count),
-    )
-    object.__setattr__(record.params, "repeated_failure_halt_exhausted", exhausted)
-    if exhausted:
-        episode_note = (
-            f"（同一工具同一失败类型已第 {episode} 次触发收口，判定无法自行脱困）"
-            if episode >= _EPISODE_HARD_HALT_LIMIT
-            else ""
+    if _hard_halt_hit(record, count):
+        object.__setattr__(
+            record.params,
+            "repeated_failure_halt",
+            (record.call.tool_name, failure_class, count),
         )
+        object.__setattr__(record.params, "repeated_failure_halt_exhausted", True)
         record.params.tool_context.append(
             "[tool-system]\n"
             f"工具 {record.call.tool_name} 已连续 {count} 次以同一失败类型({failure_class})失败，"
-            f"且已连续 {_repeated_failure_streak(agent)} 轮未取得任何成功工具结果"
-            f"{'(达到硬门阈值)' if _hard_halt_hit(agent, record, count) else ''}。"
-            f"{episode_note}"
-            "判定为无法自行脱困。本轮按未完成状态收口；请基于已有工具结果如实说明"
-            "已做与未做的工作，等待用户提供新思路后继续。"
+            "并达到部署者显式启用的硬门阈值。本轮按未完成状态收口；请基于"
+            "已有工具结果如实说明已做与未做的工作，等待用户提供新思路后继续。"
         )
         return
-    # 软收口:本轮停止该工具,任务保持未完成并自动续跑;清掉该失败段,
-    # 下轮换策略后重新尝试同一工具时从 0 重新累计,不会一碰就再收口。
+    # 默认路径只返工、不收口：清掉本段后继续同一工具循环，让模型读取真实错误
+    # 并换参数/工具/步骤。精确同参的机械重试仍由 action 级 guardrail 拦截，
+    # 极端失控仍受 max_tool_rounds 最后硬顶保护。
     clear_consecutive_failure_segment(agent, record.call.tool_name, failure_class)
     record.params.tool_context.append(
         "[tool-system]\n"
         f"工具 {record.call.tool_name} 已连续 {count} 次以同一失败类型({failure_class})失败，"
-        "本轮停止调用该工具。任务未完成：请彻底更换策略，从另一个角度继续推进任务；"
-        "不要总结或宣告完成。"
+        "这些失败结果已经返回给你，系统不会因此结束当前任务。请停止原样重试，"
+        "改参数、换工具、拆小步骤或等待冲突资源释放后继续推进；不要总结或宣告完成。"
     )
+
+
+# LLM: 成功 ToolResult 是更晚的结构化事实，只能清同工具 active halt，不能误清
+# 其它工具或 unknown/safety halt；此函数只改当前回合易失参数。
+# 函数用途: 同一批后面已经成功时，撤销该工具前面失败留下的过期硬闸。
+def _clear_active_repeated_failure_halt(params: object, tool_name: str) -> None:
+    """同一批后到的成功事实撤销该工具先前写下的失败 halt。"""
+    halt = getattr(params, "repeated_failure_halt", None)
+    if not isinstance(halt, tuple) or not halt or str(halt[0]) != tool_name:
+        return
+    object.__setattr__(params, "repeated_failure_halt", None)
+    object.__setattr__(params, "repeated_failure_halt_exhausted", False)
 
 
 # T-USER-001 真机铁证(2026-08-11):TOOL_OPERATION_OUTCOME_UNKNOWN 出现后
@@ -1667,78 +1679,13 @@ _NO_ACTION_GATE_STREAK_ATTR = "_no_action_gate_streak"
 _NO_ACTION_GATE_HALT_LIMIT = 2
 
 
-# LLM: 四级阶梯的 L3 收益递减判定:连续多轮收口且每轮都没有任何成功工具结果
-# → 判定模型自愈不了,本轮起不再自动续跑,等用户介入换思路。
-def _repeated_failure_exhausted(
-    agent, record: ToolCallRecordParams, count: int
-) -> bool:
-    if _hard_halt_hit(agent, record, count):
-        return True
-    streak = _repeated_failure_streak(agent)
-    progressed = len(record.params.executed_tools) > 0
-    next_streak = 1 if progressed else streak + 1
-    _set_repeated_failure_streak(agent, next_streak)
-    return next_streak >= _REPEATED_FAILURE_EXHAUST_STREAK
-
-
-def _hard_halt_hit(agent, record: ToolCallRecordParams, count: int) -> bool:
+# LLM: repeated failure 硬收口不是默认主链；必须由结构化配置显式启用并达到阈值。
+# 函数用途: 判断部署者是否明确要求把连续失败升级成人工介入硬门。
+def _hard_halt_hit(record: ToolCallRecordParams, count: int) -> bool:
     # L4 真硬门:默认关闭;开启后同类失败达硬阈值即强制收口等用户。
     if not configured_hard_failure_halt_enabled(record.params):
         return False
     return count >= configured_hard_failure_halt_threshold(record.params)
-
-
-# L3:连续软收口轮数上限,超过即判定自愈不了。
-_REPEATED_FAILURE_EXHAUST_STREAK = 3
-_STREAK_ATTR = "_repeated_failure_halt_streak"
-
-
-def _repeated_failure_streak(agent) -> int:
-    value = getattr(agent, _STREAK_ATTR, 0)
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _set_repeated_failure_streak(agent, value: int) -> None:
-    object.__setattr__(agent, _STREAK_ATTR, value)
-
-
-# EXEC-04(2026-08-15 t4 对照真机): 同一工具+同一失败类第二次触发软收口即升级
-# 硬收口。原机制只有「连续 N 轮无任何成功工具结果」的耗尽判定, 但模型在
-# 失败段之间穿插成功调用(读文件/写 README)会让 streak 恒为 1、永不耗尽 →
-# 软收口清段+自动续跑无限循环, 直到外部 timeout(真机: edit_file 连续
-# TOOL_INVALID_ARGUMENTS 空转 34 轮 160 调用 15 分钟 RC=124, 轻量运行时/harness
-# 同模型 1 分钟完成)。同工具成功一次即清零本工具的 episode 计数(工具本身
-# 可用, 后续新错误重新给足两次机会)。
-_EPISODE_ATTR = "_repeated_failure_halt_episodes"
-# 同一 (工具, 失败类) 触发软收口达到该次数 → 升级硬收口, 不再自动续跑。
-_EPISODE_HARD_HALT_LIMIT = 2
-
-
-def _failure_episode_key(tool_name: str, failure_class: str) -> str:
-    return f"{tool_name}\x00{failure_class}"
-
-
-def _clear_failure_episodes_for_tool(agent, tool_name: str) -> None:
-    episodes = getattr(agent, _EPISODE_ATTR, None)
-    if not isinstance(episodes, dict) or not episodes:
-        return
-    prefix = f"{tool_name}\x00"
-    remaining = {key: value for key, value in episodes.items() if not key.startswith(prefix)}
-    object.__setattr__(agent, _EPISODE_ATTR, remaining)
-
-
-def _record_failure_episode(agent, tool_name: str, failure_class: str) -> int:
-    episodes = getattr(agent, _EPISODE_ATTR, None)
-    if not isinstance(episodes, dict):
-        episodes = {}
-    key = _failure_episode_key(tool_name, failure_class)
-    count = int(episodes.get(key) or 0) + 1
-    episodes[key] = count
-    object.__setattr__(agent, _EPISODE_ATTR, episodes)
-    return count
 
 
 # L1 软提示:同工具同类失败第 2 次即注入按失败类别的恢复指引(只提示一次,
@@ -1789,8 +1736,9 @@ def _recovery_hint_for_failure_class(failure_class: str) -> str:
     )
 
 
-# LLM: 软收口(可自愈)时由模型基于真实工具记录给出 nudge 交接——保持未完成,
-# 换策略继续;硬收口(自愈不了/硬门)时给出诚实总结等用户。
+# LLM: 只有部署者显式开启的 repeated failure 硬门会进入这里；普通可恢复
+# 失败已在当前工具循环内返给模型修正，不能再借此入口替模型结束 turn。
+# 函数用途: 显式硬门命中后让模型基于真实工具记录给出未完成交接。
 def _final_response_after_repeated_failure(
     agent, params: ToolLoopExecuteParams, tool_rounds: int
 ):
@@ -1803,18 +1751,15 @@ def _final_response_after_repeated_failure(
             tool_rounds=tool_rounds,
         )
     )
-    exhausted = _is_exhausted_halt(params)
     final_response = without_tool_call_after_limit(
         params,
         final_response,
-        reason="repeated_failure" if not exhausted else "repeated_failure_exhausted",
+        reason="repeated_failure_exhausted",
     )
     final_response = replace(
         final_response,
         runtime_status="unfinished",
-        runtime_reason=(
-            "REPEATED_TOOL_FAILURE_EXHAUSTED" if exhausted else "REPEATED_TOOL_FAILURE"
-        ),
+        runtime_reason="REPEATED_TOOL_FAILURE_EXHAUSTED",
         runtime_source="tool_loop",
     )
     return final_prompt, final_response
@@ -1903,10 +1848,6 @@ def _final_response_after_no_action_gate(
     return final_prompt, final_response
 
 
-def _is_exhausted_halt(params: ToolLoopExecuteParams) -> bool:
-    return bool(getattr(params, "repeated_failure_halt_exhausted", False))
-
-
 def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
     from ..contracts.required_actions import settle_required_action
 
@@ -1926,9 +1867,6 @@ def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
     _mark_unknown_outcome_halt(agent, record)
     if record.result.ok:
         record.params.executed_tools.append(record.result.tool_name)
-        # EXEC-04: 该工具成功一次即清零其失败 episode 计数——工具本身可用,
-        # 后续新错误重新给足两次收口机会, 不会被历史 episode 误升级硬收口。
-        _clear_failure_episodes_for_tool(agent, record.result.tool_name)
     archive_record = archive_tool_call_record(agent, record)
     _load_discovered_tools(record.params, archive_record)
     archive_tool_call_if_enabled(

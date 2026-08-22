@@ -101,6 +101,12 @@ child 的自然最终回复、typed lifecycle event 与真实 artifact refs 是�
 父级基于这些事实自然向用户汇报；普通任务没有机器质量验收器，也不要求 `VERIFIED` 才能结束。路径
 不存在、工具失败、越权或取消仍按客观事实如实暴露。
 
+普通可恢复工具失败只作为 ToolResult 返回当前 child/grandchild 的模型继续修正，宿主不会按同类失败
+次数替它结束 turn。达到提示阈值时只要求换参数、换工具或拆小步骤；精确同参机械重试可拒绝该次动作。
+只有取消、明确安全边界、副作用真实 unknown 或部署者显式启用的 typed hard policy 才能硬收口。同一批
+后到的同工具成功必须覆盖更早失败留下的 active halt，不能让并行返回顺序把已经恢复的 child 挂回
+`PENDING`。
+
 父级给 child 的共享读取预览只来自创建发生时当前 tool loop 已完成的 read/search 记录。进程内不会缓存
 上一任务的阅读包给下一任务复用；需要跨轮保留的事实必须进入正式 transcript、Compact 或结构化 refs。
 

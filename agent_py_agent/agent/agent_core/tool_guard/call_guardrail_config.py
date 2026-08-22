@@ -5,10 +5,8 @@ from ...settings.runtime_guard_config import runtime_guard_bool, runtime_guard_i
 
 DEFAULT_REPEAT_FAIL_THRESHOLD = 10
 DEFAULT_READONLY_NO_PROGRESS_THRESHOLD = 3
-# L2 阶梯:同工具同类失败连续达该值即收口并自动续跑(不再跟随 guardrail 3N DENY)。
-# 8→15(2026-08-08,问题4「取消 60 轮限制没修真实失败」):真机长任务里 8 次同类
-# 失败往往是"换策略前的挣扎"(如复刻任务依赖未就绪连续构建失败),8 次收口会
-# 打断可救任务;放宽到 15 次仍能在确凿机械重试时收口,配合 L3 收益递减兜底。
+# 强返工提示阈值:同工具同类失败连续达该值时要求模型换策略，但默认不结束
+# 当前 turn。15 次既避免偶发构建失败过早触发，也能提醒明显的机械重试。
 DEFAULT_REPEATED_FAILURE_HALT_THRESHOLD = 15
 # L4 阶梯:真硬门默认关;开启后同类失败达该值强制收口等用户介入。
 DEFAULT_HARD_FAILURE_HALT_THRESHOLD = 15
@@ -59,7 +57,7 @@ def terminal_block_enabled(params: object) -> bool:
 
 
 def repeated_failure_halt_threshold(params: object) -> int:
-    """L2 收口阈值:同工具同类失败连续达该值,本轮收口并自动续跑。"""
+    """强返工提示阈值；只有另行启用 hard gate 才会结束本轮。"""
     attrs = getattr(params, "task_attributes", None)
     if isinstance(attrs, dict):
         parsed = _int_value(attrs.get("repeated_failure_halt_threshold"))

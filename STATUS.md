@@ -1,5 +1,27 @@
 # STATUS
 
+## 2026-08-22 Prompt 4 r4：Compact 已续跑，重复失败机器闸误杀 child（本地修复候选）
+
+- `83faddb` 已推送并部署到 `.7` 唯一 Gateway。全新 tmux
+  `dsh-p4-lazygit-r4-ea91639` 只输入一次原样 Prompt 4；worker-2 的 generation 1 从
+  116,644 降到 37,483 tokens，checkpoint summary 已包含目标、路径、完成工作、错误和下一步，随后继续
+  创建 `remote.py`、`sync.py`。这证明 Compact 指令顺序和同一 thread 续跑已经修复。
+- r4 继续暴露一个独立底座错误：另一 child 的项目根 `run_command` 临时占写锁，worker-3 前部
+  `write_file` 得到 13 次 `TOOL_OPERATION_BUSY_CONFLICT`；锁释放后同一工具批次已有 3 次成功，模型也已
+  准备改跑测试。旧 repeated-failure halt 仍拿前部失败强行结束 child，留下
+  `interrupted/REPEATED_TOOL_FAILURE` 与 canonical `PENDING`，父级因此永久等待。现场已通过 TUI `/stop`
+  结束，Gateway 未停止。
+- 对照 会话运行时 `FunctionCallError::RespondToModel` 后，当前本地候选删除默认跨轮 streak/episode 机器收口：
+  普通可恢复错误只向同一模型注入强返工提示并继续；精确同参重试仍由 action guardrail 拒绝；只有显式
+  `hard_failure_halt_enabled=true` 才可按 typed policy 硬收口。同批后到的同工具成功会撤销更早的 active
+  hard halt，避免并行完成顺序制造假失败。
+- 43 项失败恢复/共享配置 focused tests 已通过。扩大到工具轮/恢复/收口组合时又抓到上一轮遗留的两个
+  入口缺口：轻量工具轮缺 `task_attributes` 会崩，空路径会被 `str(None)` 解析成仓库下的字面 `None`
+  目录。现已在 Compact 权威判断和唯一 `_resolved_path` 归一化入口修复；原失败文件 28/28、cwd 集成
+  回归 1/1 及扩大组合均通过。提交前 Ruff、doc sync、strict code-size、diff、clean-package 严格 gate
+  也已通过；仍需提交部署，再用新的 r5 项目目录和 tmux 原样重跑；
+  在 fresh TUI 通过前不把这一项写成真机已修复。
+
 ## 2026-08-22 主/子/孙代理统一 Conversation Compact（摘要顺序修复候选）
 
 - `bcbd568` 已在 `.7` 唯一 Gateway 修复 child 工作区继承。随后全新 Prompt 4 使用 lazygit 固定提交
@@ -22,10 +44,11 @@
   已完成工作、路径和待办。根因已对照 会话运行时 `compact.rs`：会话运行时 把 Compact prompt 追加为完整 history 的
   最后一条 user 消息，本项目却经 backend 普通入口把 prompt 放在 history 最前。现场已用 `/stop` 停止，
   不把结构正确但语义丢失的轮次冒充通过。
-- 当前本地候选保留真实任务 prompt 作为 provider 首条 user，再把 native history 放中间、synthetic Compact
+- `83faddb` 已保留真实任务 prompt 作为 provider 首条 user，再把 native history 放中间、synthetic Compact
   指令放最后；不增加自然语言硬验收或专用兜底。位置敏感 fake backend 与 native 连续 generation 共 51 项
-  及完整相关组合共 201 项已通过，Ruff、doc sync、strict code-size、diff、clean-package 也通过；推送、部署及
-  r4 全新 TUI 尚待完成。
+  及完整相关组合共 201 项已通过，Ruff、doc sync、strict code-size、diff、clean-package 也通过并已推送、
+  部署。r4 worker-2 的 2,150 字符 summary 与 Compact 后继续写文件已证明语义顺序修复；同轮新增的
+  repeated-failure 误杀问题由上方独立条目跟踪。
 - `e59acad` 在唯一 Gateway 的全新 Prompt 3 TUI 中证明 6 个 child 均一次 attempt 自然
   DONE，实时 context 与终态行正常；该轮 child 最高约 89.4k，未达 115.2k 压缩点，
   因此 `compact 0` 是真实结果，不冒充压缩成功证据。

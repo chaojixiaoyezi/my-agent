@@ -257,6 +257,7 @@ python3 -m pytest agent_py_agent/tests/test_orchestration_create_subagents_tool.
 python3 -m pytest agent_py_agent/tests/test_ingestion_harvester.py agent_py_agent/tests/test_ingestion_puller_cursor.py agent_py_agent/tests/test_watch_spool_takeover.py -q
 python3 -m pytest agent_py_agent/tests/test_log_redaction.py agent_py_agent/tests/test_structured_output.py agent_py_agent/tests/test_live_lab_model_preflight.py -q
 python3 -m pytest agent_py_agent/tests/test_tool_operation_idempotency.py agent_py_agent/tests/test_tool_round_execution.py agent_py_agent/tests/test_tool_unresolved_runtime_issue_guard.py agent_py_agent/tests/test_compact_semantic_summary.py agent_py_agent/tests/test_memory_runtime_compact_auto_continuation.py agent_py_agent/tests/test_runtime_gate_ledger.py -q
+python3 -m pytest agent_py_agent/tests/test_repeated_tool_failure_halt.py agent_py_agent/tests/test_runtime_guard_config_shared.py agent_py_agent/tests/test_tool_round_execution.py agent_py_agent/tests/test_cli_resume_contract.py -q --tb=short
 python3 -m pytest agent_py_agent/tests/test_log_redaction.py agent_py_agent/tests/test_registry_resilience_contract.py agent_py_agent/tests/test_tool_context_reducer.py agent_py_agent/tests/test_tool_output_externalizer.py agent_py_agent/tests/test_compact_semantic_summary.py agent_py_agent/tests/test_memory_artifact_read.py agent_py_agent/tests/test_tooling_filesystem.py agent_py_agent/tests/test_mcp_client.py agent_py_agent/tests/test_mcp_registration.py -q
 python3 -m pytest agent_py_agent/tests/test_compact_semantic_summary.py agent_py_agent/tests/test_native_tool_ir_compact_and_orphan_sweep.py -q
 python3 -m pytest agent_py_agent/tests/test_model_call_ledger.py agent_py_agent/tests/test_tool_model_generation.py agent_py_agent/tests/test_gateway_helpers.py agent_py_agent/tests/test_runtime_guidance.py agent_py_agent/tests/test_subagent_hierarchy_scheduler.py agent_py_agent/tests/test_subagent_hierarchy_scheduler_tool_roles.py agent_py_agent/tests/test_subagent_hierarchy_write_policy.py agent_py_agent/tests/test_subagent_capability_request_tool.py agent_py_agent/tests/test_subagent_natural_language_e2e.py agent_py_agent/tests/test_local_collaboration_subagent_integration.py agent_py_agent/tests/test_gateway_chat_conversation_context.py agent_py_agent/tests/test_tools/test_tool_loop.py agent_py_agent/tests/test_background_main_agent_runtime.py agent_py_agent/tests/test_gateway_orphan_reconciler.py -q
@@ -267,6 +268,12 @@ python3 -m pytest -q --tb=short agent_py_agent/tests/test_verification_runtime.p
 终端交互 TUI parity 的 focused 命令覆盖 typed event/reducer、Markdown/diff、spinner、权限续跑、输入、
 history/search/paste/completion/queue/stash、follow/unseen、session-history、真实 Gateway readiness、title、
 鼠标选择/OSC52、PTY recorder 和 ANSI replay。
+
+可恢复工具失败回归必须复现“同一 provider batch 前部因资源锁冲突失败、后部同工具已经成功”的顺序：
+默认配置不得写 `repeated_failure_halt`、不得进入 final-response 机器收口，错误与强返工提示继续回到当前
+模型；显式 hard policy 仍可命中，而后到的同工具成功必须撤销早到的 active halt。不同工具成功不得误清，
+精确同参重复动作继续由 action guardrail 拒绝。真实验收必须用单 Gateway 的 fresh TUI 原样重型 Prompt 4，
+不能用测试者旁路修改项目来制造成功。
 鼠标回归还必须覆盖：prompt_toolkit 传入的是源字符索引，中文宽字符不得再次按显示列换算或只复制一半；窗口外丢失 mouse-up 后，首个
 `MouseButton.NONE` motion 或下一次 fresh press 只结束旧拖动，后续 hover 不再扩展；一次 settled selection
 只自动复制一次，并同时保留 prompt_toolkit、OSC52 与 `tmux load-buffer -w` 外层剪贴板路径；iTerm2
