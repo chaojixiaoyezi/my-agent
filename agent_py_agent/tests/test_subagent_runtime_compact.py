@@ -83,6 +83,32 @@ class _OverflowThenCompleteChildBackend:
         )
 
 
+class _WriteThenCompleteChildBackend(_OverflowThenCompleteChildBackend):
+    name = "write-then-complete-child"
+
+    def __init__(self) -> None:
+        super().__init__(overflow_once=False)
+
+    def generate(self, prompt: str, on_chunk=None, **kwargs):
+        self.model_prompts.append(prompt)
+        if len(self.model_prompts) == 1:
+            return ModelResponse(
+                text="",
+                backend=self.name,
+                tool_use_blocks=[
+                    {
+                        "id": "call-child-write-1",
+                        "name": "write_file",
+                        "input": {
+                            "path": "child-owned.txt",
+                            "content": "child output\n",
+                        },
+                    }
+                ],
+            )
+        return ModelResponse(text="子代理写入完成。", backend=self.name)
+
+
 def test_subagent_uses_own_conversation_thread_for_forced_compact_and_retry(
     tmp_path: Path,
 ) -> None:
@@ -148,6 +174,66 @@ def test_subagent_uses_own_conversation_thread_for_forced_compact_and_retry(
     assert _file_bytes(agent.memory.path) == owner_memory_before
     assert not (run_home / "compactions").exists()
     assert not (run_home / "recovery").exists()
+
+
+def test_child_transcript_thread_does_not_rebind_parent_conversation_task(
+    tmp_path: Path,
+) -> None:
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            enable_tools=True,
+            my_agent_home=str(tmp_path / "home"),
+        ),
+        tmp_path,
+    )
+    parent_thread = agent.conversation_store.get_or_create_thread(
+        {
+            "canonical_user_id": "local/main",
+            "channel": "tui",
+            "channel_conversation_id": "parent-chat",
+            "channel_user_id": "local-user",
+            "cwd": str(tmp_path),
+        }
+    )
+    parent_task_id = "root-conversation-task"
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": parent_thread.thread_id,
+            "task_id": parent_task_id,
+            "goal": "parent task",
+            "status": "active",
+            "task_path": str(tmp_path),
+        }
+    )
+    task = agent.subagents.create_run(
+        goal="write one child-owned file",
+        thought="use the child runner",
+        plan=["write", "finish"],
+        role="worker",
+        root_id=parent_task_id,
+        allowed_tools=["write_file"],
+        extra_write_roots=[str(tmp_path)],
+        attributes={
+            "conversation_thread_id": parent_thread.thread_id,
+            "conversation_task_id": parent_task_id,
+            "workspace_root": str(tmp_path),
+            "workspace_roots": [str(tmp_path)],
+        },
+    )
+    agent.backend = _WriteThenCompleteChildBackend()
+
+    result = agent.run_subagent(task.id, dry_run=False, probe=False)
+
+    parent_link = agent.conversation_store.load_task_link(parent_task_id)
+    child_thread = agent.conversation_store.load_thread(task.agent_thread_id)
+    child_rows = agent.conversation_store.recent_messages(task.agent_thread_id, limit=0)
+    assert result.ok
+    assert (tmp_path / "child-owned.txt").read_text(encoding="utf-8") == "child output\n"
+    assert parent_link is not None
+    assert parent_link.thread_id == parent_thread.thread_id
+    assert child_thread is not None
+    assert [row.role for row in child_rows] == ["user", "assistant"]
 
 
 def test_subagent_preflight_compacts_large_completed_history_before_sampling(

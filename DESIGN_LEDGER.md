@@ -961,7 +961,8 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 
 ## 2026-08-22 主/子/孙代理统一 Conversation Compact
 
-状态：本地实现与 fake/replay 定向验收完成；推送、部署和真实 TUI 长任务验收待执行。
+状态：统一 Compact 已推送并部署；首轮真实 TUI 抓到 child transcript 错绑父任务的回归，底层修复与
+定向回归已完成，待重新推送、部署和全新 TUI 复测。
 
 - 解决问题：长时间工作的 child/grandchild 与 main 一样会经历多轮工具调用、上下文压力、崩溃恢复和继续
   运行。旧实现中 main 使用 `ConversationThread summary/cursor/generation/checkpoint/CAS`，task-local child
@@ -976,6 +977,11 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   `run_id/parent_run_id/root_run_id` 管理；每条 thread 独立保存 transcript、summary、cursor、generation、
   checkpoint、operation evidence 和失败熔断。触发阈值、token estimator、候选校验、checkpoint-before-CAS、
   pre/mid-turn 续接和 TUI 计数全部复用 `conversation/compact.py`，但任何代理都不能读取兄弟或父级正文。
+- thread 身份分层必须与 会话运行时 一致：继承的 `conversation_thread_id/conversation_task_id` 继续表示父会话的
+  workspace/task lifecycle；新建的 `agent_thread_id` 只表示 delegated agent 自己的模型 transcript。二者不能
+  覆盖或互绑，父子关系由 `parent_agent_thread_id` 和 run lineage 表达。首轮 Prompt 4 真机测试曾把 child
+  thread 写回 `conversation_thread_id`，导致工作工具尝试把父 task 重新绑定到 child thread，并以
+  `already bound to another conversation thread` 失败；当前修复已用真实写工具回归锁定父 link 不变。
 - 实现边界：`ConversationThreadStore.ensure_agent_thread` 以 host 生成的 exact id 幂等建线程，不写 channel/
   latest-user 索引；child 每次尝试按 `conversation_request_id` 先落 user、轮前 Compact、注入 summary/raw
   tail、模型运行、终态落 assistant。provider overflow 在同一 attempt 内强制 Compact 并携带 typed tool/

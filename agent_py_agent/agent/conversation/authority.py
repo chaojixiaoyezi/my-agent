@@ -9,6 +9,10 @@ from collections.abc import Mapping
 
 CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR = "conversation_transcript_authoritative"
 CONVERSATION_REQUEST_ID_ATTR = "conversation_request_id"
+# delegated agent 的模型 transcript thread 与父 conversation thread 严格分离；后者仍拥有
+# workspace/task 生命周期。这对应 会话运行时 的 child_thread_id + parent_thread_id，避免 child
+# transcript 抢绑父 task link。
+AGENT_THREAD_ID_ATTR = "agent_thread_id"
 # The exact Gateway turn id is separate from the durable conversation task id.
 # A named Audit uses CONVERSATION_REQUEST_ID_ATTR for its stable root lineage,
 # while this value fences same-turn prepare publication and stale recovery.
@@ -97,6 +101,7 @@ def conversation_runtime_workspace_roots(attributes: object) -> tuple[str, ...]:
 
 
 __all__ = [
+    "AGENT_THREAD_ID_ATTR",
     "CONVERSATION_REQUEST_ID_ATTR",
     "CONVERSATION_TURN_REQUEST_ID_ATTR",
     "CONVERSATION_TASK_TURN_ACTIVE_ATTR",

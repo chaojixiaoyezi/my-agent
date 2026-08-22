@@ -14,6 +14,7 @@ from ...conversation.agent_thread import (
     prepare_subagent_thread_turn,
 )
 from ...conversation.authority import (
+    AGENT_THREAD_ID_ATTR,
     CONVERSATION_REQUEST_ID_ATTR,
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
 )
@@ -120,7 +121,10 @@ def _run_and_finalize_subagent(lifecycle, bundle: SubagentModelTurnBundle):
         )
     task_attributes.update(
         {
-            "conversation_thread_id": thread.thread_id,
+            # 会话运行时 会给每个 child 新建 thread，同时单独保留 parent_thread_id 谱系。
+            # 本项目继承的 conversation_thread_id 继续拥有父 workspace/task link，
+            # 只有 agent_thread_id 才拥有 child 自己的模型 transcript。
+            AGENT_THREAD_ID_ATTR: thread.thread_id,
             CONVERSATION_REQUEST_ID_ATTR: bundle.active_attempt_id,
             CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
         }

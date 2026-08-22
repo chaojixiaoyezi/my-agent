@@ -139,6 +139,11 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   精确 ID 落盘和身份/谱系冲突检查由 `conversation/agent_thread_store.py` 单独负责，避免通道会话 store 吸收 agent runtime 策略；
   每个 attempt 按 `conversation_request_id` 写入 user/assistant，轮前与 provider overflow 后调用
   `conversation/compact.py`。task-local 仍控制 Memory、工具权限和工作区，不再拥有第二条持久 Compact 链。
+- delegated runtime 同时携带两类不可互换的 thread 身份：继承的 `conversation_thread_id` 与
+  `conversation_task_id` 属于父会话的 workspace/task lifecycle；`agent_thread_id` 属于当前 child/grandchild
+  的模型 transcript 与 Compact。工具晋升和工作区重定位继续读取前者，模型历史只读取后者；任何 adapter
+  都不得用 child `agent_thread_id` 覆盖父 `conversation_thread_id`。这对应 会话运行时 的独立
+  `child_thread_id` 与单独 `parent_thread_id`，而不是兼容分支。
 - `conversation_transcript_authoritative=true` 是通用 structured owner 标记；finalization、tool window 和工具轮
   只据此把 durable Compact 交给 ConversationStore，不再要求 `context_scope=conversation`，所以 delegated
   task-local 不会生成旧 `compact_applies/continue`。没有 generation 或 typed tool/guidance 进展时，溢出

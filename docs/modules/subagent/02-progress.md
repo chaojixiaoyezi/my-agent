@@ -1,6 +1,6 @@
 # Subagent Progress
 
-## 2026-08-22 子代理/孙代理统一 Conversation Compact（本地完成）
+## 2026-08-22 子代理/孙代理统一 Conversation Compact（首轮真机回归已修复）
 
 - deepseek child 的 provider-visible context 已从触发线附近降到约 35.7k，证明回合内 native IR 真正完成
   裁剪；旧 TUI 只数 `memory_archive/compact_applies`，所以错误显示 `compact 0`。
@@ -13,7 +13,12 @@
   纯数字事件供当前回合观看，但不再写 run attribute，也不与旧 durable apply 相加。正式 child runner 的
   transcript-authoritative 标记会跳过旧 task-local compact continuation，不长期双写。
 - fake/replay 已覆盖轮前大历史、provider overflow 重试、child/grandchild 隔离、checkpoint/generation、
-  owner Memory 不污染和旧 apply 目录不生成。推送、`.7` 部署与指定大型项目的真实 TUI 长任务仍待执行。
+  owner Memory 不污染和旧 apply 目录不生成。首轮 `.7` Prompt 4 已证明独立 thread 能投影到 TUI，同时发现
+  child transcript id 覆盖父会话 thread id 后，工作工具会触发 conversation task 重绑定冲突。
+- 已对照 会话运行时 `spawn.rs` 的 `child_thread_id != parent_thread_id` 收口：父 `conversation_thread_id` 继续拥有
+  workspace/task link，child 独立 `agent_thread_id` 只拥有模型 transcript 与 Compact。新增真实 `write_file`
+  runner 回归，证明 child 可以写入授权工作区、父 task link 不变且 child 正文只落自己的 thread。修复后的
+  推送、部署与全新 TUI 长任务复测待执行。
 
 ## 2026-08-22 内部状态误读不再把 child 错挂起
 

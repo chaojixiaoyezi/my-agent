@@ -518,7 +518,10 @@ Todo 超过四项时，默认投影必须恰好保留四条任务行：最近完
 轻量 ToolCall/ToolResult 裁剪，不得持久写入 exact run 或累计到 `compact N`。child/grandchild 常驻次数
 必须只读各自 `agent_thread_id` 对应 ConversationThread 的 generation/checkpoint；即使旧 durable apply
 ledger 或遗留 native attribute 仍存在，投影也必须忽略。回归同时覆盖轮前阈值 Compact、provider overflow
-后同 attempt 强制 Compact、typed tool/guidance 进度携带、正文隔离和旧 continuation 不再生成。
+后同 attempt 强制 Compact、typed tool/guidance 进度携带、正文隔离和旧 continuation 不再生成。还必须用
+已经绑定父 conversation task 的真实工作工具回归证明：child `agent_thread_id` 不覆盖继承的
+`conversation_thread_id`，父 task link 不变，child 写入成功且消息只进入 child thread；禁止只用不调用工具
+的 fake backend 掩盖 task-thread 重绑定冲突。
 内部 child 状态路径的 shell 拒绝还必须覆盖两层：ShellTool 返回
 `WRONG_STATUS_SURFACE + effect_outcome=not_started`；经过 canonical authorized dispatch 后即使
 `handler_executed=true`，operation 仍归确定性 `failed` 而非 `unknown`。模型应收到原拒绝原因后换用
