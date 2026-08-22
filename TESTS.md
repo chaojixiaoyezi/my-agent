@@ -405,6 +405,9 @@ summary/窗口标记、遗失最新用户纠正、留下 tool-use/tool-result �
 配置压缩点（例如 128k 窗口的 115.2k），不得因当轮禁止持久 apply 而变成 128k/100%。
 同时要用超过 90% 但未达完整窗口的 no-save 输入证明它没有获得落盘 Compact 权限，
 避免为了修 UI 暗改执行边界。
+2026-08-22 真机证据：`192.0.2.7` 唯一 Gateway、MiniMax-M2.7、tmux
+`dsh-p3-774c7fe-compact`，只发送一次原样 Prompt 3。main 首轮 27.5k、终屏 61.5k 均显示
+`压缩点 90%`；8 个 child 全部 DONE，最高 98.6k，本轮不得写成真实 Compact 触发验证。
 
 Gateway/IM 投递回归还必须覆盖：同一进度批次重试使用稳定 provider 幂等键，不同 progress cursor 与
 最终回复使用不同键。身份只取可信 message ID、request ID、phase 和 cursor，不能从回复正文猜测；

@@ -152,6 +152,10 @@ checkpoint 和失败熔断表现不一致，并已经出现 child 实际裁剪�
 幂等事件累计进 canonical run 展示投影，并与既有 durable apply 行相加；main Context 同时显示
 `压缩点 90%`。真实 Prompt 3 又发现单次 no-save 回合把该点误投影为 100%；当前候选已将
 公开策略与当轮 apply 权限分层，不修改真实溢出保护。该切片不冒充架构统一。
+`774c7fe` 部署后，全新 tmux `dsh-p3-774c7fe-compact` 的原样 Prompt 3 已证明首轮和终屏都是
+`压缩点 90%`；8 个 child 全部 DONE，最高上下文 98.6k，未达 115.2k，所以真实 child
+Compact 触发仍需下一个更长任务复验。同轮 main 最终只整合 7/8 且 Todo 未勾选，
+作为结果批次覆盖与 typed covers 绑定的独立失败样本保留，不计入 Compact 通过。
 
 待做：child 创建时建立稳定 `agent_thread_id`，把每轮消息、摘要、checkpoint、generation/CAS 和 resume
 接到现有 `ConversationStore/compact.py`；随后让 TUI 只读每个 agent thread generation，并删除

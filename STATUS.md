@@ -14,9 +14,15 @@
 - `e59acad` 在唯一 Gateway 的全新 Prompt 3 TUI 中证明 6 个 child 均一次 attempt 自然
   DONE，实时 context 与终态行正常；该轮 child 最高约 89.4k，未达 115.2k 压缩点，
   因此 `compact 0` 是真实结果，不冒充压缩成功证据。
-- 同轮终屏暴露 presentation/no-save 模型调用把公开压缩点错投影成 100%。当前候选已
+- 同轮终屏暴露 presentation/no-save 模型调用把公开压缩点错投影成 100%。`774c7fe` 已
   保持配置压缩点 90% 稳定，同时保留 save=False 不落盘、未到完整窗口不返回
-  context-overflow 的执行边界；定向回归已通过，待部署后 TUI 复验。
+  context-overflow 的执行边界。新 tmux `dsh-p3-774c7fe-compact` 只输入一次原样 Prompt 3：
+  首轮 `27.5k/128k · 压缩点 90%`，最终 presentation 仍是 `61.5k/128k · 压缩点 90%`。
+  8 个 child 全部一次 attempt DONE，最高 工具运行时 约 98.6k，未达 115.2k，因此本轮只证明
+  触发点投影和长 child 稳定，不冒充“真发生了一次 Compact”。
+- 该 Prompt 3 另有非 Compact 失败：8 份 child final report 都存在，但 main 最终只整合 7 个并漏掉
+  通道运行时；Todo 仍是未勾选的 `4/9`。前者属结果批次/整合覆盖，后者属 typed `covers`
+  与进度账本绑定；都不得用机器验收或任务名硬编补漏。
 
 ## 2026-08-22 Prompt 3 子代理误挂起（本地候选）
 

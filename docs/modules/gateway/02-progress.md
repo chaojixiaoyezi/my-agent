@@ -11,6 +11,8 @@
 - 真实 Prompt 3 终屏又暴露 no-save presentation 把压缩点错显示为 100%。底层现只用
   `runtime_compact_policy.trigger_tokens` 投影公开压缩点；`allow_persistent_apply` 仍只决定当轮能否
   落盘与执行，不再篡改展示策略。
+- `774c7fe` 的唯一 Gateway 真机轮已验证首轮与最终 no-save presentation 均显示 90%。
+  该轮 8 个 child 都自然 DONE，最高 98.6k 未到触发线，因此未观察到真实 Compact 次数增加。
 
 ## 2026-08-22 执行前状态面拒绝的确定性结果
 
