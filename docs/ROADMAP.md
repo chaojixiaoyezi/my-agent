@@ -30,7 +30,9 @@ readiness，模型和工具仍可能在 daemon cwd 工作，造成项目写错�
 前台、后台、Tool Gateway、任务交付和 child 输出共用该值。`a091b72` 部署后原样提示词 2 已在一个
 Gateway 中创建 child，但首个 ask 因薄 TUI 的 audit Agent 为空而漏传 workspace，产物写到 `/root/bbb`。
 当前候选把 audit 与 workspace 分参，首个 inbox JSON 回归已证明携带 client cwd；同时 child 行改为职责
-短标题、实时上下文 token 和单行宽度预算。下一步严格 gate、部署后用全新 cwd/tmux 重跑同一原样提示词。
+短标题、实时上下文 token 和单行宽度预算。`0ffbfe4` 部署后的正式 TUI 已证明 workspace 与三条 child 行
+正确，但 Todo 仍重复完整 child goal；新补丁按 exact run id 只在视图隐藏重复 seed。下一步严格 gate、
+部署后继续观察同一原样任务，不向被测代理插话。
 
 ### TUI 活动状态、跟随滚动与 Compact 真机复验
 

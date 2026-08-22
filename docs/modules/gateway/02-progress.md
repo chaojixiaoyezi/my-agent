@@ -23,6 +23,9 @@
 - activity endpoint 同批升到 `conversation_agent_activity.v3`。child 的 `context_tokens` 是 exact run 每次
   provider preflight 的当前总上下文，`description` 是创建时职责短标题；TUI 只在一行内按剩余宽度截断，
   不再把 runner 的“模型响应中/模型已生成回复”显示成子代理职责。
+- 正式提示词 2 的首屏确认职责行生效，同时暴露 Todo 仍重复显示自动 seed 的完整 child goal。当前 renderer
+  用 exact `item.id == child.run_id` 去重；只隐藏视图，不删除账本、不解析标题，也不影响普通 Todo 与
+  `progress_item_ids` 的完成标记。部署后的同一正式 TUI 画面仍需复验。
 
 ## 2026-08-21 TUI 后台任务停止定位
 

@@ -11,6 +11,10 @@
 - 对照 终端交互 `AgentTool` 与 `CoordinatorTaskPanel`，职责由创建时短标题提供，省略才回退 goal 开头；
   renderer 先预留数值后缀再按终端列宽截断，保证每个 child 一行。当前直接相关 focused tests 已通过，
   严格 gate、推送、`.7` 单 Gateway 部署和原样提示词 2 的全新 TUI 复验仍待完成。
+- `0ffbfe4` 已部署后，tmux `dsh-p2-mario-0ffbfe4` 的原样提示词 2 首个请求真实携带
+  `/root/dsh-tui-p2-0ffbfe4`，三条 child 行已显示“游戏核心引擎/游戏角色和实体/关卡1、2、3设计”与
+  21.4k--22.1k `ctx`。同屏仍有三条自动 seed 的完整 child goal 重复占据 Todo；当前本地补丁按 exact
+  run id 仅隐藏重复视图，52 项 TUI/activity focused 已通过，待再部署取同屏证据。
 
 ## 2026-08-22 单 Gateway 多目录启动失败已定位（本地候选）
 

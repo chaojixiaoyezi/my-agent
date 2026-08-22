@@ -1730,8 +1730,10 @@ def _render_input_status(
 
 
 # LLM: Todo is selected from the one reducer-owned task_progress block and may
-# overlay exact direct-child statuses for display; it never writes or closes the ledger.
-# 函数用途: 生成输入框上方的固定任务清单，并在对应子代理结束时立即显示勾选、阻塞或跳过。
+# overlay exact direct-child statuses for display. Auto-seeded items whose id is
+# an exact visible child run id are omitted because the coordinator panel owns
+# those rows; the canonical ledger remains unchanged.
+# 函数用途: 生成输入框上方的用户任务清单，隐藏与下方子代理面板重复的自动派工项，并原位更新关联状态。
 def _render_fixed_todo(
     snapshot: TuiViewSnapshot,
     context: TuiRenderContext,
@@ -1753,17 +1755,34 @@ def _render_fixed_todo(
     )
     if background is None:
         return _render_todo(todo, context)
-    statuses = _todo_child_statuses(
-        _subagent_activity_rows(background.metadata.get("subagents"))
-    )
+    child_rows = _subagent_activity_rows(background.metadata.get("subagents"))
+    statuses = _todo_child_statuses(child_rows)
+    child_run_ids = {
+        str(row.get("run_id") or "").strip()
+        for row in child_rows
+        if str(row.get("run_id") or "").strip()
+    }
     items = todo.metadata.get("items")
-    if not isinstance(items, list) or not statuses:
+    if not isinstance(items, list):
         return _render_todo(todo, context)
+    visible_items = [
+        item
+        for item in items
+        if not (
+            isinstance(item, dict)
+            and str(item.get("id") or "").strip() in child_run_ids
+        )
+    ]
+    if not statuses:
+        return _render_todo(
+            replace(todo, metadata={**todo.metadata, "items": visible_items}),
+            context,
+        )
     projected = [
         _todo_item_with_child_status(item, statuses)
         if isinstance(item, dict)
         else item
-        for item in items
+        for item in visible_items
     ]
     return _render_todo(
         replace(todo, metadata={**todo.metadata, "items": projected}),

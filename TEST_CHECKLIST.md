@@ -13,6 +13,8 @@
   名称、typed status、一句职责短标题、耗时、实时总上下文 token、Compact 次数；每个 child 严格单行并
   按终端宽度截断。第一次执行不显示“尝试 1”，只有重试才显示重试次数，任何状态都不得用“模型响应中/
   模型已生成回复”代替职责。
+  Todo 不重复显示 `id == direct child run_id` 的自动派工长目标，但账本仍保存该项；普通 Todo 和显式
+  covers 继续可见并按 canonical child status 打标。
   main 等待 child 时按 typed status 显示“等待 N 个子代理”，最终答复进入普通 assistant transcript；
   `7c052f2` 第 1 条真机任务已暴露布局/Todo 问题，新候选 147 项定向回归已过，仍需 `.7`
   单 Gateway + 下一条原样长任务 TUI 验收后勾选。

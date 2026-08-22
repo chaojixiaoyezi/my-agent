@@ -447,6 +447,9 @@
   一句职责短标题并写入 canonical task，面板不再用 runner 当前阶段充当职责。token 列定义为最新一次
   provider preflight 的 `current_tokens`，不是跨轮累计；description、goal 和 token 都只作展示，不进入
   生命周期、权限、恢复、验收或完成判断。每行固定为一行，先保留耗时/ctx/Compact/重试，再截断短标题。
+- Todo 与 coordinator panel 是两个 view：派工自动 seed 仍是恢复/关联所需的 canonical 进度事实，但当
+  seed `item.id` 精确等于当前直属 `child.run_id` 时，TUI 只在 Todo 视图隐藏它，职责由下方 child 行承接。
+  普通 Todo 与 covers 不隐藏；不能解析标题、goal 或“子代理”字样做去重。
 
 ## 2026-08-18 候选消息实时流式 + 每轮阶段计时【状态：本地 focused 通过，待真机部署复验】
 

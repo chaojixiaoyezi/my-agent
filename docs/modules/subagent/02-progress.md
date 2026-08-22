@@ -16,6 +16,9 @@
   `task_progress_items`，且有界 seed 同时存入 `result_envelope`，大输出归档后也不会丢实时 Todo 事件。
   `task_progress` 先晋升 task 再选账本；有显式 `covers` 的 child 沿用已有项，并以
   `progress_item_ids` 与 typed child status 原位勾选；只有未绑定 child 才按 exact run id 新建项。
+- exact child run id 自动生成的 seed 项继续保留在 canonical 进度账本，供恢复和状态关联使用；TUI 发现
+  同一个直属 child 已在输入框下方面板展示时，只在 view 层隐藏这条重复 Todo。模型自己创建的普通任务项
+  和显式 `covers` 项仍留在上方并按 child status 打标，不解析“子代理”标题文字。
 - 参照 终端交互 `SpinnerWithVerb` 和 `CoordinatorTaskPanel`，main 的动态 `Working` 行在消息区末尾/
   Context 前，输入框下方只保留 child 行。当前候选相关 focused tests 147 项已通过；功能验收仍以
   `.7` 单 Gateway、MiniMax-M2.7 和四个原样真实 TUI 任务为准。

@@ -945,6 +945,11 @@ def test_todo_panel_gateway_event_payload_keeps_task_progress_items() -> None:
                 "task_progress_items": [
                     {"id": "a", "title": "阅读项目A", "status": "done"},
                     {"id": "b", "title": "分析模块", "status": "pending"},
+                    {
+                        "id": "child-analysis",
+                        "title": "子代理[analysis]:分析模块完整长任务",
+                        "status": "in_progress",
+                    },
                 ],
             },
         }
@@ -956,6 +961,11 @@ def test_todo_panel_gateway_event_payload_keeps_task_progress_items() -> None:
     assert todo.metadata["items"] == [
         {"id": "a", "title": "阅读项目A", "status": "done"},
         {"id": "b", "title": "分析模块", "status": "pending"},
+        {
+            "id": "child-analysis",
+            "title": "子代理[analysis]:分析模块完整长任务",
+            "status": "in_progress",
+        },
     ]
     runtime.update_background_activity(
         1,
@@ -974,6 +984,7 @@ def test_todo_panel_gateway_event_payload_keeps_task_progress_items() -> None:
     todo_text = "\n".join(fragments_text(line) for line in frame.todo_lines)
     assert "☑ 阅读项目A" in todo_text
     assert "☑ 分析模块" in todo_text
+    assert "子代理[analysis]" not in todo_text
     assert any("Working · main" in line for line in _frame_lines(frame))
     assert not any("main" in fragments_text(line) for line in frame.agent_lines)
     assert any("analysis" in fragments_text(line) for line in frame.agent_lines)

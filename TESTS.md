@@ -469,6 +469,9 @@ direct-child 行；只选当前 thread 活跃 root 的直属 child，不展开 g
 状态、职责短标题、耗时、当前模型可见上下文 token、Compact 和真实重试。短标题按剩余终端列截断，
 不得回退“模型响应中/模型已生成回复”或累计计费 token。相同快照不重复追加，数值变化原位更新，root
 归零整体删除；HTTP/解析失败不把上次真实活动误清零。
+Todo 与 child panel 必须按结构化身份去重：`item.id` 精确等于当前直属 `child.run_id` 的自动 seed 项只在
+TUI 隐藏，canonical task_progress 账本不删除；普通 Todo 和显式 `covers/progress_item_ids` 仍显示并打标。
+禁止匹配“子代理”标题或 goal 文本来决定隐藏。
 父级共享上下文还必须证明当前轮无 read archive 时不会复用 agent 上一次任务的缓存内容。
 
 本切片 focused 命令：
