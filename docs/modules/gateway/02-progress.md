@@ -1994,3 +1994,11 @@
 - 根任务等待 child 时可能已经没有前台请求、进程或 claim，但普通根 task link 仍是 active。`/stop` 现在从线程绑定的普通根任务中选目标、过滤 child 和具名 audit/goal 根，再递归中止其运行树。
 - `active_task_ids` 继续只承担可恢复索引；TUI notice 的 Working 数量改为只统计 task link 中 `status=active` 的真实任务。`interrupted` 可显式恢复，但不会继续显示为正在工作。
 - Gateway 给模型的运行信息不再把内部 `task_path` 称为 workspace；用户项目 cwd 与内部任务状态目录分离，普通相对路径始终从项目 cwd 解析。
+## 2026-08-21 主会话任务晋升后的 cwd 写权
+
+- `.7` 原样 TUI 证明主代理 foreground 能创建 `/root/abc`，但持久任务 background 轮只剩隐藏
+  `work/output` 写根；模型看到 `/root` cwd 却连续得到 `WRITE_FORBIDDEN`，最终绕到额外测试根并误报交付。
+- `write_boundary_with_runtime_ledger` 现在为本地/admin 主会话同时固定 `execution_cwd` 和项目写根，任务
+  `work/output` 只是附加运行区，不替代 cwd。远程 owner、task-local child 和 transient Audit 后续继续按
+  结构化身份收窄。
+- 聚焦回归覆盖 Gateway 任务晋升前后同一路径可写，以及既有远程/child/Audit 边界不放大；真机复验待部署。

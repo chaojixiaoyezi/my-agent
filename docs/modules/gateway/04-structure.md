@@ -606,3 +606,9 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
 - `ConversationThread` 的根 task link 是控制事实源；`/stop` 优先定位 `workspace_task_id` 对应的普通根任务，再由统一控制链递归取消其运行树，不把直属 child 当成新的用户任务。
 - Tool Registry 的 cwd 来自服务启动时的项目根，或宿主显式注入的 `execution_cwd`；隐藏 task state 只保存账本与恢复材料，不能替代用户 cwd。
 - `/client/notices` 的活动数量由 task link 的 `status=active` 投影，只负责展示，不参与调度、重试或恢复裁决。
+## 2026-08-21 主会话 cwd 与写边界同源
+
+- 本地/admin 普通会话进入持久任务后，`ToolRegistry.workspace_root` 同时写入可信 `execution_cwd` 并追加到
+  `allowed_write_roots`；隐藏 task `work/output` 仍用于账本、临时工作和显式内部交付。
+- 该扩展只发生在 default-scope 的主 conversation run。`cli_run`、task-local child 与 transient Audit
+  不继承；远程 provider 的 owner/task wall 在后续步骤覆盖项目写根，继续 fail-closed。

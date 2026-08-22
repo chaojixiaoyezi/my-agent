@@ -437,6 +437,41 @@ def test_write_boundary_carries_current_task_workspace_roots(tmp_path):
     assert boundary["allowed_write_roots"] == [str(task_root / "work"), str(task_root / "output")]
 
 
+# LLM: A promoted local Gateway task must retain the same project cwd used by
+# its foreground turn; task work/output directories cannot replace that grant.
+# 函数用途: 复现主代理后台整合时写项目文件被拒绝的问题，验证 cwd 和写权限保持一致。
+def test_local_main_conversation_keeps_project_cwd_writable_after_promotion(tmp_path):
+    project_cwd = tmp_path / "project"
+    task_root = tmp_path / "home" / "tasks" / "today" / "task"
+    agent = SimpleNamespace(
+        config=SimpleNamespace(my_agent_owner_provider="local"),
+        tools=SimpleNamespace(workspace_root=project_cwd, owner_scope_root=""),
+        local_store=None,
+    )
+    params = _loop_params(
+        source="gateway",
+        write_boundary={},
+        task_attributes={
+            "conversation_thread_id": "thread-local",
+            "conversation_task_id": "task-local",
+            "run_workspace": {
+                "task_root": str(task_root),
+                "output_dir": str(task_root / "output"),
+                "work_dir": str(task_root / "work"),
+            },
+        },
+    )
+
+    boundary = write_boundary_with_runtime_ledger(agent, params)
+
+    assert boundary["execution_cwd"] == str(project_cwd.resolve())
+    assert boundary["allowed_write_roots"] == [
+        str(task_root / "work"),
+        str(task_root / "output"),
+        str(project_cwd.resolve()),
+    ]
+
+
 def test_transient_audit_prepare_write_boundary_is_exact_work_and_output(tmp_path):
     owner_home = tmp_path / "home" / "owners" / "local" / "main"
     task_root = owner_home / "audits" / "audit-123"
@@ -982,6 +1017,7 @@ def _loop_params(
     task_attributes: dict | None = None,
     run_scope: RunScope | None = None,
     context_scope: str = "default",
+    source: str = "run",
 ):
     return ToolLoopExecuteParams(
         user_prompt="",
@@ -996,6 +1032,7 @@ def _loop_params(
         write_boundary=write_boundary,
         task_attributes=task_attributes,
         context_scope=context_scope,
+        source=source,
         request_id="request-1",
         run_id=run_id,
         task_id=task_id,

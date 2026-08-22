@@ -94,6 +94,7 @@ def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[st
     merged = dict(boundary) if isinstance(boundary, dict) else {}
     _attach_runtime_approved_actions(merged, params)
     _attach_task_workspace_roots(merged, params)
+    _attach_main_conversation_execution_cwd(merged, agent, params)
     # 配置级额外写根（additional_write_roots）：测试共享工作区等场景扩展沙箱写域。
     extra_roots = _string_list(getattr(getattr(agent, "config", None), "additional_write_roots", ()))
     if extra_roots:
@@ -227,6 +228,43 @@ def _attach_task_workspace_roots(boundary: dict[str, object], params: object) ->
         output_dir = _text(boundary.get("task_output_dir"))
         if work_dir and output_dir:
             boundary["allowed_write_roots"] = [work_dir, output_dir]
+
+
+# LLM: A local/admin conversation keeps one 会话运行时 project cwd before and
+# after task promotion. Hidden task work/output roots are additional runtime
+# storage, not a replacement permission boundary. Remote owner task walls and
+# transient Audit scopes run later and may deliberately narrow this grant.
+# 函数用途: 让本地主会话进入后台任务后仍能在启动时的项目目录继续读写，避免模型被迫绕到额外测试目录。
+def _attach_main_conversation_execution_cwd(
+    boundary: dict[str, object],
+    agent: object,
+    params: object,
+) -> None:
+    attrs = getattr(params, "task_attributes", None)
+    if (
+        not _is_main_conversation_task_run(params)
+        or str(getattr(params, "source", "") or "").strip().lower() == "cli_run"
+        or not isinstance(attrs, dict)
+        or attrs.get(CONVERSATION_TRANSIENT_WORKSPACE_ATTR) is True
+    ):
+        return
+    tools = getattr(agent, "tools", None)
+    project_cwd = _resolved_path(getattr(tools, "workspace_root", None))
+    if project_cwd is None:
+        project_cwd = _resolved_path(
+            getattr(agent, "effective_workspace_root", getattr(agent, "root", None))
+        )
+    if project_cwd is None:
+        return
+    cwd_text = str(project_cwd)
+    boundary["execution_cwd"] = cwd_text
+    provider = _text(getattr(getattr(agent, "config", None), "my_agent_owner_provider", "")).lower()
+    owner_scope = _text(getattr(tools, "owner_scope_root", ""))
+    if provider not in ("", "local") and owner_scope:
+        return
+    roots = _string_list(boundary.get("allowed_write_roots"))
+    if cwd_text not in roots:
+        boundary["allowed_write_roots"] = [*roots, cwd_text]
 
 
 def _attach_remote_owner_task_write_scope(

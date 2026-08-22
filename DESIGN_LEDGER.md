@@ -41,7 +41,8 @@
 - 会话运行时 式 cwd 与运行台账严格分离：Gateway/会话及其所有后代的普通相对路径统一从用户启动时的项目
   cwd 解析；隐藏 task root 只保存状态，只有显式 `work/...`、`output/...` 才进入内部任务命名空间。
   `allowed_write_roots` 只决定能否写，不能反向选择 cwd；只有宿主写入的 `execution_cwd` 可覆盖工具
-  Registry 的项目根。
+  Registry 的项目根。本地/admin 主会话晋升为持久任务后仍必须保留同一个项目 cwd 写权，不能只剩隐藏
+  work/output；远程 owner task wall、task-local child 和 transient Audit 仍可按结构化身份继续收窄。
 - interrupt 是父子边上的显式控制事实，自动重试资格不能否决父级的打断。会话的
   `active_task_ids` 是可恢复候选索引，不等于正在运行数量；TUI Working 只统计 task-link
   `status=active`，而 `/stop` 选择当前 thread 的 typed root 后递归停止运行域。

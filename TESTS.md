@@ -33,6 +33,12 @@ root 只接受显式 `work/...`/`output/...`；每个 child prompt 不含 `sibli
 retryable child 仍可被直属父级显式打断。`/stop` 在前台请求已让出且没有 live claim/process 时仍选择当前
 thread 的 ordinary root；TUI Working 只数 `status=active` link，interrupted sticky link 必须显示 0。
 
+`.7` 的 `26563ac` 原样 TUI 进一步要求覆盖“任务晋升后的主代理写权”：主代理在 foreground 创建
+`/root/abc` 后，background continuation 写同一目录不能因只剩 task `work/output` 而
+`WRITE_FORBIDDEN`，也不能绕到 `additional_write_roots` 后把旧目录冒充当前交付。合同测试固定验证本地
+Gateway 主会话的 `execution_cwd` 和 `allowed_write_roots` 同时包含 ToolRegistry 项目根；远程 owner、
+task-local child 与 transient Audit 的窄权限测试必须继续通过。
+
 严格 code-size 初次被当前提交 `31f30fe` 自身的 25 个未登记 hard finding 阻断。为避免把存量债务冒充本轮
 回归，先从 `git archive HEAD` 纯净快照生成 baseline，再修掉本轮唯一新增的 `_progress_payload` 深嵌套；
 当前 strict gate 通过，原始报告中的 4 个 hard 均能在纯净基线复现，本轮新增 hard 为 0。baseline 不取

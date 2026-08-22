@@ -455,6 +455,12 @@ Gateway/会话任务及其递归 child 的普通相对路径都从用户项目 c
 
 详细说明见仓库根目录的 [SUBAGENT_RUNBOOK.md](../SUBAGENT_RUNBOOK.md)。
 
+## Gateway 与工作目录
+
+本地 TUI/Gateway 会话进入后台任务后仍使用启动时的项目目录作为 cwd；隐藏任务目录只保存状态和显式
+`work/`、`output/` 内容，不会让同一条相对路径出现“前台可写、后台不可写”。远程用户和子代理仍服从各自
+更窄的 owner/task 写边界。
+
 ## 配置文件
 
 主配置：

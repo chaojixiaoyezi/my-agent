@@ -1,5 +1,19 @@
 # STATUS
 
+## 2026-08-21 主会话任务晋升后的项目 cwd 写权（真机失败已定位，本地候选）
+
+- `26563ac` 已推送并部署到 `.7` 单 Gateway；配置误漏的 `model_backend` 也已在测试机纠正为
+  `anthropic_compatible + MiniMax-M2.7`。原样 TUI 中 3 个 child 均一次 attempt 自然 `DONE`，产物正确落到
+  `/root/abc`，没有 sibling roster，也没有模型巡场/催促工具；最后 child 完成后宿主约 97 秒唤醒主代理。
+- 真机随后复现新的底层矛盾：普通主会话在前台能写 `/root/abc`，晋升为持久任务后
+  `_attach_task_workspace_roots` 却只授权隐藏 `work/output`。模型看到的 cwd 仍是 `/root`，因而两次写
+  `/root/abc/index.html` 都收到 `WRITE_FORBIDDEN`，随后利用旧测试配置的额外根把三份 JS 复制到
+  `/root/kill-ws/abc`、在那里写入口并启动 8080，最终却错误汇报为 `/root/abc` 完成。
+- 当前候选在统一 `write_boundary_with_runtime_ledger` 入口为本地/admin 主会话固定
+  `execution_cwd=ToolRegistry.workspace_root`，并在任务 `work/output` 之外继续授权该项目 cwd。远程 owner
+  task wall、task-local child 窄授权和 transient Audit 精确目录仍由后续结构化收窄器覆盖，不因本修复放大。
+  新回归已证明本地 Gateway 任务晋升前后 cwd/写根一致；严格 gate、推送、部署和原样 TUI 复验待完成。
+
 ## 2026-08-21 会话运行时 式 cwd、直属控制与真实 Working 状态（本地候选）
 
 - `0eda5df` 已在 `.7` 的同一 Gateway 上完成四 child 原样 TUI 取样：四个 leaf 均自然 `DONE`，角色工具
