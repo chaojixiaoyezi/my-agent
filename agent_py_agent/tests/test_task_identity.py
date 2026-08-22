@@ -10,7 +10,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from agent_py_agent.agent.agent_core.runtime.task_identity import progress_ledger_id
+from agent_py_agent.agent.agent_core.runtime.task_identity import (
+    conversation_task_progress_ledger_id,
+    progress_ledger_id,
+    task_path_progress_ledger_id,
+)
 
 
 def _link(task_path: str) -> SimpleNamespace:
@@ -68,6 +72,16 @@ def test_same_task_path_shared_across_requests() -> None:
     assert len(keys) == 1
     key = keys.pop()
     assert key.startswith("task-path:")
+
+
+def test_task_path_progress_ledger_id_is_the_shared_canonical_algorithm() -> None:
+    task_path = "/root/.my-agent/owners/test/tasks/demo"
+    store = _Store({"req_1": task_path})
+
+    assert conversation_task_progress_ledger_id(store, "req_1") == (
+        task_path_progress_ledger_id(task_path)
+    )
+    assert task_path_progress_ledger_id("") == ""
 
 
 def test_different_task_paths_get_different_keys() -> None:

@@ -4,6 +4,15 @@
 
 最近收口重点：
 
+- 2026-08-22 本地底座已修复后台主代理读取第二本空进度账的问题：task-path 指纹算法集中到
+  `runtime/task_identity.py`，工具写入、Task Runtime State、child seed 终态同步、Goal 续跑和 TUI 投影
+  使用同一 ledger id。负向回归证明 request-id 下的旧账不会覆盖真账。普通 Todo 仍只作模型可见工作笔记，
+  没有恢复机器验收或普通任务自动续跑；部署和正式 Prompt 3 真机结论仍以 STATUS/ROADMAP 为准。
+- 2026-08-22 本地 TUI 已把 Todo 默认摘要收为固定四条状态窗口：最近完成、当前运行和下一待办优先，
+  运行项复用 Working 动画，`Ctrl+T` 只展开/收起完整 canonical 清单。常驻 Context 只显示总量、窗口占比
+  与主 ConversationThread 已提交 Compact 次数；旧 compact 触发线百分比及协议相关
+  prompt/messages/tools 分类留给 `/context`。这里仅表示实现和 focused 回归完成，部署/真机状态仍以
+  `STATUS.md`、`docs/ROADMAP.md` 为准。
 - 2026-08-21 `714c0c8` 已把单一后台计数扩展为 终端交互/模型助手 Code 式的固定子代理
   活动区：Gateway 从 active task link 与 canonical run 账本生成有界直属 child 投影，输入框附近原位
   显示名称、状态、职责短标题、耗时和 attempts。它不进 transcript，不暴露工具输出/路径/权限，也不参与

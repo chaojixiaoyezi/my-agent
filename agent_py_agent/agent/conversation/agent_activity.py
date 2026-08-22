@@ -13,13 +13,13 @@ the display cache into another lifecycle authority.
 
 from __future__ import annotations
 
-import hashlib
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..agent_core.runtime.task_identity import task_path_progress_ledger_id
 from ..subagents.services.control_plane_projection import (
     runtime_compact_count,
     runtime_context_token_count,
@@ -27,7 +27,7 @@ from ..subagents.services.control_plane_projection import (
 from ..task_progress import read_task_progress_report
 from .models import THREAD_TASK_LINK_ACTIVE_STATUS
 
-_SCHEMA_VERSION = "conversation_agent_activity.v4"
+_SCHEMA_VERSION = "conversation_agent_activity.v5"
 _MAX_PROJECTED_SUBAGENTS = 64
 _MAX_PROJECTED_PROGRESS_ITEMS = 128
 _ACTIVITY_TEXT_LIMIT = 240
@@ -228,6 +228,7 @@ def background_main_activity(
 @dataclass(frozen=True)
 class ConversationAgentActivity:
     active_task_count: int = 0
+    compact_count: int = 0
     main_activity: dict[str, object] | None = None
     subagents: tuple[dict[str, object], ...] = ()
     task_progress_items: tuple[dict[str, object], ...] = ()
@@ -244,6 +245,7 @@ class ConversationAgentActivity:
         return {
             "schema_version": _SCHEMA_VERSION,
             "active_task_count": max(0, int(self.active_task_count or 0)),
+            "compact_count": max(0, int(self.compact_count or 0)),
             "main_activity": dict(self.main_activity or {}),
             "subagents": [dict(row) for row in self.subagents],
             "task_progress_items": [dict(row) for row in self.task_progress_items],
@@ -264,6 +266,7 @@ def conversation_agent_activity(
     store: object,
     thread_id: str,
 ) -> ConversationAgentActivity:
+    compact_count, compact_warnings = _conversation_compact_count(store, thread_id)
     active_links, link_warnings = _active_task_links(store, thread_id)
     active_task_ids = [
         str(getattr(link, "task_id", "") or "").strip() for link in active_links
@@ -271,8 +274,9 @@ def conversation_agent_activity(
     if not active_task_ids:
         return ConversationAgentActivity(
             active_task_count=0,
+            compact_count=compact_count,
             active_task_projection_ok=not link_warnings,
-            warnings=tuple(link_warnings),
+            warnings=tuple(dict.fromkeys((*link_warnings, *compact_warnings))),
         )
 
     rows, run_warnings = _direct_subagent_rows(agent, set(active_task_ids))
@@ -284,6 +288,7 @@ def conversation_agent_activity(
     visible = rows[:_MAX_PROJECTED_SUBAGENTS]
     return ConversationAgentActivity(
         active_task_count=len(active_task_ids),
+        compact_count=compact_count,
         main_activity=background_main_activity(agent, thread_id, set(active_task_ids)),
         subagents=tuple(visible),
         task_progress_items=progress_items,
@@ -292,9 +297,30 @@ def conversation_agent_activity(
         subagent_projection_ok=not run_warnings,
         task_progress_projection_ok=not progress_warnings,
         warnings=tuple(
-            dict.fromkeys((*link_warnings, *run_warnings, *progress_warnings))
+            dict.fromkeys(
+                (*link_warnings, *run_warnings, *progress_warnings, *compact_warnings)
+            )
         ),
     )
+
+
+# LLM: The durable ConversationThread generation is the only main-agent compact counter;
+# display consumers must not count compact progress events or infer completions from text.
+# 函数用途: 从当前会话权威 thread 读取已经成功提交的 Compact 次数，读取失败只产生展示告警。
+def _conversation_compact_count(
+    store: object,
+    thread_id: str,
+) -> tuple[int, list[str]]:
+    loader = getattr(store, "load_thread_report", None)
+    if not callable(loader):
+        return 0, []
+    try:
+        thread, load_error = loader(thread_id)
+    except Exception:
+        return 0, ["conversation_thread_unavailable"]
+    count = max(0, _safe_int(getattr(thread, "compact_generation", 0)))
+    warnings = ["conversation_thread_load_error"] if load_error else []
+    return count, warnings
 
 
 # LLM: active_task_ids is only a resumability index; every returned row is
@@ -364,7 +390,7 @@ def _task_progress_items_from_links(
     owner_root = _owner_runtime_root(agent)
     if not task_path or owner_root is None:
         return (), []
-    ledger_id = f"task-path:{hashlib.sha256(task_path.encode('utf-8')).hexdigest()[:16]}"
+    ledger_id = task_path_progress_ledger_id(task_path)
     progress, load_error = read_task_progress_report(owner_root, ledger_id)
     if load_error:
         return (), ["task_progress_load_error"]

@@ -140,6 +140,9 @@ def test_background_context_reports_corrupt_current_thread_file(tmp_path):
 
 
 def test_background_context_includes_exact_task_runtime_progress_without_second_compact(tmp_path):
+    from agent_py_agent.agent.agent_core.runtime.task_identity import (
+        task_path_progress_ledger_id,
+    )
     from agent_py_agent.agent.conversation.runtime import context_markdown
     from agent_py_agent.agent.task_progress import write_task_progress
 
@@ -161,13 +164,22 @@ def test_background_context_includes_exact_task_runtime_progress_without_second_
             "task_path": str(task_root),
         }
     )
+    ledger_id = task_path_progress_ledger_id(str(task_root))
     write_task_progress(
         owner_root,
-        "task-demo",
+        ledger_id,
         {
             "summary": "实现完成，正在补真实测试",
             "next_action": "运行真实测试并修复失败",
             "items": [{"id": "tests", "title": "真实测试", "status": "in_progress"}],
+        },
+    )
+    write_task_progress(
+        owner_root,
+        "task-demo",
+        {
+            "summary": "这是旧请求编号下的错误账本",
+            "next_action": "不应出现在后台上下文",
         },
     )
     agent = SimpleNamespace(
@@ -184,6 +196,8 @@ def test_background_context_includes_exact_task_runtime_progress_without_second_
     assert "完成演示任务" in prompt
     assert "实现完成，正在补真实测试" in prompt
     assert "运行真实测试并修复失败" in prompt
+    assert "这是旧请求编号下的错误账本" not in prompt
+    assert "不应出现在后台上下文" not in prompt
     assert "task_rollup.json" not in prompt
 
 

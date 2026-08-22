@@ -642,6 +642,32 @@ def test_ctrl_c_copies_input_selection_without_clearing_highlight(monkeypatch) -
     assert runtime.notice() == "Copied 4 chars"
 
 
+def test_ctrl_t_toggles_todo_view_without_editing_input() -> None:
+    redraws: list[bool] = []
+    interaction = TuiInteractionState()
+    input_area = TextArea(multiline=True)
+    input_area.text = "保留当前输入"
+    params = SimpleNamespace(
+        input_area=input_area,
+        interaction_state=interaction,
+        exit_armed_at_ref=[1.0],
+        eof_armed_at_ref=[1.0],
+        escape_armed_at_ref=[1.0],
+        escape_armed_text_ref=["保留当前输入"],
+    )
+    event = SimpleNamespace(app=SimpleNamespace(invalidate=lambda: redraws.append(True)))
+
+    tui_keybindings._handle_ctrl_t_keybinding(event, params)
+
+    assert interaction.snapshot().todos_expanded is True
+    assert input_area.text == "保留当前输入"
+    assert params.exit_armed_at_ref == [0.0]
+    assert params.eof_armed_at_ref == [0.0]
+    assert params.escape_armed_at_ref == [0.0]
+    assert params.escape_armed_text_ref == [""]
+    assert redraws == [True]
+
+
 def test_input_mouse_up_auto_copies_settled_selection() -> None:
     from prompt_toolkit.data_structures import Point
     from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType

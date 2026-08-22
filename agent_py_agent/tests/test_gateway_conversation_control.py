@@ -437,7 +437,11 @@ def test_ordinary_input_steers_only_the_matching_active_conversation(tmp_path) -
 
 def test_ordinary_input_follows_only_the_task_linked_to_the_live_turn(tmp_path) -> None:
     agent = SimpleAgent(
-        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        AgentConfig(
+            model_backend="echo",
+            gateway_per_user_owner_scoping=False,
+            my_agent_home=str(tmp_path / "linked-home"),
+        ),
         tmp_path / "linked",
     )
     paths = gateway_paths(agent)
@@ -466,7 +470,11 @@ def test_ordinary_input_follows_only_the_task_linked_to_the_live_turn(tmp_path) 
     assert agent.conversation_store.pending_guidance("request", "req-live") == []
 
     other_agent = SimpleAgent(
-        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        AgentConfig(
+            model_backend="echo",
+            gateway_per_user_owner_scoping=False,
+            my_agent_home=str(tmp_path / "unrelated-home"),
+        ),
         tmp_path / "unrelated",
     )
     other_paths = gateway_paths(other_agent)

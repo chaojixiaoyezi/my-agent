@@ -229,6 +229,7 @@ def _publish_background_activity(
         return False
     try:
         count = max(0, int(value.get("active_task_count") or 0))
+        compact_count = max(0, int(value.get("compact_count") or 0))
         hidden_count = max(0, int(value.get("hidden_subagent_count") or 0))
     except (TypeError, ValueError):
         return False
@@ -238,6 +239,7 @@ def _publish_background_activity(
     return bool(
         updater(
             count,
+            compact_count=compact_count,
             main_activity=value.get("main_activity"),
             subagents=subagents,
             task_progress_items=value.get("task_progress_items"),

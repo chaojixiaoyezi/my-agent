@@ -79,6 +79,18 @@ def test_help_toggle_is_explicit_and_idempotently_closes() -> None:
     assert len(redraws) == 2
 
 
+def test_todo_expansion_toggle_is_display_only_and_redraws() -> None:
+    redraws: list[bool] = []
+    state = TuiInteractionState(lambda: redraws.append(True))
+
+    assert state.snapshot().todos_expanded is False
+    assert state.toggle_todos() is True
+    assert state.snapshot().todos_expanded is True
+    assert state.toggle_todos() is False
+    assert state.snapshot().todos_expanded is False
+    assert len(redraws) == 2
+
+
 def test_long_paste_refs_survive_stash_and_expand_only_on_submit() -> None:
     state = TuiInteractionState()
     visible = state.register_text_paste("one\ntwo\nthree\nfour")

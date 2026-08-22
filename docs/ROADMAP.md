@@ -102,8 +102,21 @@ gate、部署和下一条原样 MiniMax-M2.7 TUI 复验。
 `931ee20` 已完成上述展示复验：四条短职责、实时 context、单行 main 和终态标记均正确。新阻塞转到底层
 完成交接：旧 wake 没带 child 最终回复和 `final_report.md`，main 因而猜错目录。当前候选按 会话运行时 标准
 completion message 补 `subagent-completion.v1`，同根 DONE 信封一次合批，并让 active wake 在上下文压力
-下优先保留 metadata/报告 refs。本地严格 gate 已通过；待部署后用全新 Prompt 3 会话确认 main 能直接读四份结果、
-继续派第二批并完成最终横向整合；不得用用户插话补救。
+下优先保留 metadata/报告 refs。`fd7d2b9` 部署后的全新 Prompt 3 已证明首批结果能被 main 读取并继续
+派第二批，但最终只创建 6/8 个 child，漏 轻量运行时/通道运行时，并误报已有 终端交互 结果缺失，正式任务仍失败。
+下一切片先从结构化批次覆盖、完成事件与 result refs 查清原因，不用用户插话或任务名专项提示补救。
+
+该 Prompt 3 的下一层事实已经查清：6 个 completion envelope 都完整且分别被 main 消费，遗漏不是 wake
+丢失；canonical `task_progress` 以 `task-path:<目录指纹>` 保存 8 项计划，后台上下文却按 durable request id
+读到了另一份空账。当前本地候选把路径指纹算法收口到 `runtime/task_identity.py`，后台 Task Runtime
+State、child 终态同步、Goal 续跑和 TUI 投影全部复用同一编号。普通清单依旧不充当机器验收或自动续跑门，
+只确保模型每个后台轮都看得到自己尚未完成的计划。待 focused/严格 gate 后部署，再用全新 tmux 原样重跑
+Prompt 3，重点验收 8 个目标全覆盖、最终横向汇总及 Todo 终态。
+
+当前本地 TUI 候选又按 终端交互 `TaskListV2`/全局 animation frame 收口默认任务摘要：固定四条，优先
+最近完成、当前运行和下一待办；`Ctrl+T` 展开全部。常驻 Context 去掉不直观的 compact 触发线比例和
+prompt/messages/tools 常驻分类，只保留总量、占比与 canonical Compact 次数。定向回归已通过，待严格
+gate、部署及正式任务中的动画/按键/次数真机复验。
 
 `714c0c8` 已推送并部署 `.7`，本地 117 项 focused、远端 11 项投影/渲染 focused 与提交前严格 gate
 均通过，按用户约定未重跑全仓 pytest。真实 TUI 已证明两个 child 一次 attempt 自然完成，固定活动区能

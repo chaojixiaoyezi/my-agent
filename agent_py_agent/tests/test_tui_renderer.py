@@ -746,28 +746,36 @@ def test_live_context_strip_uses_wide_and_narrow_density_and_keeps_stash() -> No
 
     wide = render_tui_snapshot(
         store.snapshot(),
-        TuiRenderContext(width=120, context_usage=usage, has_stash=True),
+        TuiRenderContext(
+            width=120,
+            context_usage=usage,
+            compact_count=2,
+            has_stash=True,
+        ),
     )
     narrow = render_tui_snapshot(
         store.snapshot(),
-        TuiRenderContext(width=52, context_usage=usage),
+        TuiRenderContext(width=52, context_usage=usage, compact_count=2),
     )
     tiny = render_tui_snapshot(
         store.snapshot(),
-        TuiRenderContext(width=24, context_usage=usage),
+        TuiRenderContext(width=24, context_usage=usage, compact_count=2),
     )
 
     wide_lines = [fragments_text(line) for line in wide.input_status_lines]
     assert wide_lines == [
-        "  ◉ Context ~31.4k/128.0k · 25% · compact 90% · prompt 8.0k · messages 6.0k · tools 17.0k",
+        "  ◉ Context ~31.4k/128.0k · 25% · compact 2",
         "  › Stashed (auto-restores after submit)",
     ]
     assert [fragments_text(line) for line in narrow.input_status_lines] == [
-        "  ◉ Ctx ~31.4k/128.0k · 25%"
+        "  ◉ Ctx ~31.4k/128.0k · 25% · compact 2"
     ]
     assert [fragments_text(line) for line in tiny.input_status_lines] == [
-        "  ◉ Ctx 25%"
+        "  ◉ Ctx 25% · c2"
     ]
+    assert not any(
+        label in wide_lines[0] for label in ("prompt", "messages", "tools")
+    )
     assert all(display_width_fragments(line) <= 52 for line in narrow.input_status_lines)
     assert all(display_width_fragments(line) <= 24 for line in tiny.input_status_lines)
 
@@ -884,13 +892,14 @@ def test_question_help_footer_maps_only_real_tui_shortcuts() -> None:
     narrow_text = fragments_text(narrow.footer)
     assert "/ for commands" in wide_text
     assert "ctrl + o for detailed transcript" in wide_text
+    assert "ctrl + t to expand tasks" in wide_text
     assert "ctrl + s to stash prompt" in wide_text
-    assert wide_text.count("\n") == 3
+    assert wide_text.count("\n") == 4
     assert narrow_text.count("\n") > wide_text.count("\n")
 
 
-def test_todo_panel_renders_items_with_checkmarks() -> None:
-    """todo 面板: task_progress items 渲染为 □/☑/● 清单(自动打钩)。"""
+def test_todo_panel_renders_items_with_checkmarks_and_shared_spinner() -> None:
+    """Todo 运行项共用一帧动画，待办和完成图标保持静态。"""
     from agent_py_agent.cli.chat_parts.tui_block_renderer import TuiBlockRenderCache
     from agent_py_agent.cli.chat_parts.tui_view_model import TuiBlock
 
@@ -909,12 +918,57 @@ def test_todo_panel_renders_items_with_checkmarks() -> None:
             ]
         },
     )
-    rendered = cache.render(block, TuiRenderContext(width=80))
-    text = "\n".join(fragments_text(line) for line in rendered)
+    first = cache.render(block, TuiRenderContext(width=80, spinner_index=0))
+    second = cache.render(block, TuiRenderContext(width=80, spinner_index=1))
+    text = "\n".join(fragments_text(line) for line in first)
+    second_text = "\n".join(fragments_text(line) for line in second)
     assert "任务清单" in text
     assert "☑ 阅读项目A" in text
-    assert "● 分析模块" in text
+    assert "✻ 分析模块" in text
+    assert "✢ 分析模块" in second_text
     assert "□ 写报告" in text
+
+
+def test_todo_panel_collapses_to_status_window_and_ctrl_t_expands() -> None:
+    from agent_py_agent.cli.chat_parts.tui_block_renderer import TuiBlockRenderCache
+    from agent_py_agent.cli.chat_parts.tui_view_model import TuiBlock
+
+    items = [
+        {"id": "done-old", "title": "更早完成", "status": "done"},
+        {"id": "done-prev", "title": "上一个完成", "status": "done"},
+        {"id": "run-a", "title": "并行任务甲", "status": "in_progress"},
+        {"id": "run-b", "title": "并行任务乙", "status": "in_progress"},
+        {"id": "next", "title": "下一个待办", "status": "pending"},
+        {"id": "later-1", "title": "稍后任务一", "status": "pending"},
+        {"id": "later-2", "title": "稍后任务二", "status": "pending"},
+    ]
+    block = TuiBlock(
+        block_id="todo:window",
+        kind="task_progress",
+        role="todo",
+        phase="active",
+        metadata={"items": items},
+    )
+    cache = TuiBlockRenderCache(max_entries=10)
+
+    collapsed = cache.render(block, TuiRenderContext(width=80, spinner_index=0))
+    expanded = cache.render(
+        block,
+        TuiRenderContext(width=80, spinner_index=0, todos_expanded=True),
+    )
+    collapsed_text = "\n".join(fragments_text(line) for line in collapsed)
+    expanded_text = "\n".join(fragments_text(line) for line in expanded)
+
+    assert len(collapsed) == 5  # 标题 + 4 条任务
+    assert "4/7（Ctrl+T 展开）" in collapsed_text
+    assert "上一个完成" in collapsed_text
+    assert "并行任务甲" in collapsed_text
+    assert "并行任务乙" in collapsed_text
+    assert "下一个待办" in collapsed_text
+    assert "更早完成" not in collapsed_text
+    assert len(expanded) == 8
+    assert "Ctrl+T 收起" in expanded_text
+    assert "更早完成" in expanded_text
 
 
 def test_todo_panel_gateway_event_payload_keeps_task_progress_items() -> None:

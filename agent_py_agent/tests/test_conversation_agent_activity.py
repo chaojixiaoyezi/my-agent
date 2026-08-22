@@ -79,7 +79,11 @@ def test_conversation_agent_activity_projects_only_active_roots_direct_children(
         active_task_links_report=lambda _thread_id: (
             [active_link, interrupted_link],
             [],
-        )
+        ),
+        load_thread_report=lambda _thread_id: (
+            SimpleNamespace(compact_generation=3),
+            None,
+        ),
     )
     manager = SimpleNamespace(
         list_runs_report=lambda: SimpleNamespace(
@@ -113,7 +117,8 @@ def test_conversation_agent_activity_projects_only_active_roots_direct_children(
     assert "activity" not in activity.subagents[0]
     assert "current_tool" not in activity.subagents[0]
     assert "goal" not in activity.subagents[0]
-    assert payload["schema_version"] == "conversation_agent_activity.v4"
+    assert payload["schema_version"] == "conversation_agent_activity.v5"
+    assert payload["compact_count"] == 3
     assert payload["active_task_projection_ok"] is True
     assert payload["subagent_projection_ok"] is True
 

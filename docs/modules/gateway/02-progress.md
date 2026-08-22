@@ -1,5 +1,15 @@
 # Gateway Progress
 
+## 2026-08-22 后台 Task Runtime State 统一进度账本身份
+
+- 正式 Prompt 3 的工具写侧按 task path 指纹保存 8 项计划，后台续轮却按 durable request id 读取，造成
+  main 看不到仍开放的 轻量运行时/通道运行时/横向汇总项并提前自然结束。六份 child completion wake 均已确认消费，
+  排除了完成事件丢失。
+- `agent_core/runtime/task_identity.py` 现在提供唯一 task-path ledger helper；后台上下文、dispatch seed
+  终态同步、Goal continuation 和 activity projector 不再各自复制 hash 或回落到另一账本。typed Task
+  Runtime State 因而在每轮模型调用前携带当前计划；该状态仍是软工作记忆，不参与普通任务机器验收或
+  自动启动。负向 focused 回归同时放置真/假账并锁定只读真账，部署后的 Prompt 3 仍待真机复验。
+
 ## 2026-08-21 TUI 后台 Working 的 canonical 主任务与直属子代理投影
 
 - `d928d77` 真机中前台 turn 让出后，child 仍在自动运行，但 TUI 没有持续活动提示。旧 notice 接口只返回
@@ -20,15 +30,18 @@
 - audit owner 与执行 cwd 现为两个显式输入。薄 TUI 即使没有本地 audit Agent，也始终从当前 client config
   提交绝对 cwd/roots；Gateway 仍负责校验并持久化 thread v6。focused 回归直接读取真实 inbox JSON，证明
   第一个请求已带正确 workspace，不靠后续 turn 或 prompt 补救。
-- activity endpoint 同批升到 `conversation_agent_activity.v4`。child 的 `context_tokens` 是 exact run 每次
+- activity endpoint 同批升到 `conversation_agent_activity.v5`。child 的 `context_tokens` 是 exact run 每次
   provider preflight 的当前总上下文，`description` 是创建时职责短标题；TUI 只在一行内按剩余宽度截断，
   不再把 runner 的“模型响应中/模型已生成回复”显示成子代理职责。main 同时透传同一 provider preflight
   的数字 context usage，不再停在启动时的 8.7k 快照。
 - 正式提示词 2 的首轮确认职责行生效，同时暴露 Todo 仍重复显示自动 seed 的完整 child goal、后台更新
   未进入 TUI、最终 canonical 5/5 已完成但画面仍停在初始状态。当前 renderer 用 exact
-  `item.id == child.run_id` 去重；activity v4 从当前 active task 的 canonical `task_progress.v1` 持续刷新
+  `item.id == child.run_id` 去重；activity v5 从当前 active task 的 canonical `task_progress.v1` 持续刷新
   普通 Todo，最终 assistant notice 再携带终态快照。只改展示，不删除账本、不解析标题，也不影响
   `progress_item_ids` 的完成标记。
+- `conversation_agent_activity.v5` 同时加入主 ConversationThread 的 canonical `compact_generation`。
+  常驻 Context 不再把 compact 触发线百分比写成 `compact 100%`，也不常驻展示文本协议中容易被折叠为 0 的
+  prompt/messages/tools；默认 Todo 固定四条状态窗口，运行项复用 Working 动画，`Ctrl+T` 可展开全部。
 
 ## 2026-08-21 TUI 后台任务停止定位
 

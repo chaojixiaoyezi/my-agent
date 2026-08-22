@@ -231,8 +231,9 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
                 "cursor": 200.0,
                 "active_task_count": 2,
                 "agent_activity": {
-                    "schema_version": "conversation_agent_activity.v4",
+                    "schema_version": "conversation_agent_activity.v5",
                     "active_task_count": 2,
+                    "compact_count": 3,
                     "active_task_projection_ok": True,
                     "subagents": [
                         {
@@ -268,6 +269,7 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
             self,
             count,
             *,
+            compact_count,
             main_activity,
             subagents,
             task_progress_items,
@@ -276,7 +278,7 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
             task_progress_projection_ok,
         ):
             published.append(
-                f"active:{count}:{subagents[0]['run_id']}:{task_progress_items[0]['id']}:"
+                f"active:{count}:{compact_count}:{subagents[0]['run_id']}:{task_progress_items[0]['id']}:"
                 f"{hidden_subagent_count}:{projection_ok}:{task_progress_projection_ok}:"
                 f"{bool(main_activity)}"
             )
@@ -293,7 +295,7 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
     assert len(fetched) == 1
     assert fetched[0]["after"] == 0.0
     assert len(published) == 2
-    assert published[0] == "active:2:child-1:qa:0:True:True:False"
+    assert published[0] == "active:2:3:child-1:qa:0:True:True:False"
     assert published[1] == "HTTP 后台完成通知测试。"
     # 游标推进后不重复
     _consume_background_notices(_Agent(), "session-http", _Runtime(), [None], seen)
@@ -428,6 +430,7 @@ def test_runtime_background_activity_is_one_removable_animated_block() -> None:
     ]
     assert runtime.update_background_activity(
         1,
+        compact_count=3,
         main_activity={"context_usage": context_usage},
         subagents=children,
         task_progress_items=progress_items,
@@ -441,6 +444,7 @@ def test_runtime_background_activity_is_one_removable_animated_block() -> None:
     assert snapshot.status.context_tokens == 42_100
     assert snapshot.status.context_usage is not None
     assert snapshot.status.context_usage.prompt_tokens == 8_700
+    assert snapshot.status.compact_count == 3
     todo = next(block for block in snapshot.active_blocks if block.role == "todo")
     assert todo.metadata["items"] == progress_items
     assert runtime.needs_periodic_refresh() is True

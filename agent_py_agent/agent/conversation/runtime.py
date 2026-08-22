@@ -7,6 +7,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from ..agent_core.runtime.task_identity import conversation_task_progress_ledger_id
 from ..backends.errors import (
     is_provider_quota_exhausted_error,
     is_provider_transient_error,
@@ -5574,6 +5575,9 @@ def _ensure_goal_progress_wake_chain(
         _HEARTBEAT_LOGGER.warning("goal-progress wake chain ensure failed", exc_info=True)
 
 
+# LLM: Goal continuation must use the shared conversation ledger resolver; the
+# durable goal id remains scheduling identity and must not duplicate path hashing.
+# 函数用途: 把持续目标编号转换成该任务实际使用的进度账本编号。
 def _goal_ledger_task_id(store: ConversationStore, task_id: str) -> str:
     """账本 key 与 task_progress_tool 写侧同一把。
 
@@ -5581,16 +5585,7 @@ def _goal_ledger_task_id(store: ConversationStore, task_id: str) -> str:
     progress_ledger_id 寻址——会话任务绑定任务目录后 = task-path:<目录指纹>。
     这里只做读侧映射,不让调用方各自传两个 key。
     """
-    try:
-        link = store.load_task_link(task_id)
-    except Exception:
-        return task_id
-    task_path = str(getattr(link, "task_path", "") or "").strip()
-    if not task_path:
-        return task_id
-    import hashlib
-
-    return f"task-path:{hashlib.sha256(task_path.encode('utf-8')).hexdigest()[:16]}"
+    return conversation_task_progress_ledger_id(store, task_id)
 
 
 def ensure_goal_progress_continuation(

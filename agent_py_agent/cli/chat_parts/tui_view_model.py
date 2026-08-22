@@ -91,6 +91,7 @@ class TuiStatus:
     context_tokens: int = 0
     output_tokens: int = 0
     tool_rounds: int = 0
+    compact_count: int = 0
     mode: str = "default"
     context_usage: TuiContextUsage | None = None
 
@@ -270,7 +271,7 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             "user_message": self._handle_user_message,
             "system_message": self._handle_system_message,
             "interrupt_notice": self._handle_system_message,
-            "compact_boundary": self._handle_system_message,
+            "compact_boundary": self._handle_compact_boundary,
             "context_window_compacted": self._handle_system_message,
             "conversation_compaction_started": self._handle_compact_started,
             "conversation_compaction_progress": self._handle_compact_progress,
@@ -449,6 +450,19 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             self._block_from_event(event, role=role, phase=event.phase),
             event,
         )
+
+    # LLM: Only a canonical compact boundary may advance the visible main-agent count;
+    # progress percentages and prose are temporary display details, never completion facts.
+    # 函数用途: 记录会话成功 Compact 的累计次数，并保留原有的稳定边界提示。
+    def _handle_compact_boundary(self, event: TuiEvent) -> None:
+        generation = _nonnegative_int(event.payload.get("compact_generation"), 0)
+        if generation <= 0:
+            raise ValueError("compact_generation must be positive")
+        self.status = replace(
+            self.status,
+            compact_count=max(self.status.compact_count, generation),
+        )
+        self._handle_system_message(event)
 
     # LLM: Compact 开始事件必须创建独立 active block，不得复用 thinking 或修改会话 compact generation。
     # 函数用途: 建立一个原位更新的会话 Compact 进度块。
@@ -883,6 +897,10 @@ def _status_with_update(status: TuiStatus, event: TuiEvent) -> TuiStatus:
         context_tokens=context_tokens,
         output_tokens=_nonnegative_int(event.payload.get("output_tokens"), status.output_tokens),
         tool_rounds=_nonnegative_int(event.payload.get("tool_rounds"), status.tool_rounds),
+        compact_count=_nonnegative_int(
+            event.payload.get("compact_count"),
+            status.compact_count,
+        ),
         mode=str(event.payload.get("mode") or status.mode),
         context_usage=context_usage,
     )

@@ -13,11 +13,12 @@
 
 ## TUI 后台活动投影
 
-2026-08-22 起，activity endpoint 公开 `conversation_agent_activity.v4`：Gateway 后台主代理把最近一次
+2026-08-22 起，activity endpoint 公开 `conversation_agent_activity.v5`：Gateway 后台主代理把最近一次
 thinking、tool、provider retry 或 finalizing 阶段和同一次 provider preflight 的数字 context usage 写入
 进程内有界 display sink；直属 child 的职责短标题、当前上下文 token 与 Compact 次数从 exact canonical run
 只读取得。当前 token 快照不是累计计费用量。当前 active task 的 Todo 则从 canonical `task_progress.v1`
-账本只读投影为 `id/title/status`；客户端按 250ms 节奏轮询并只接收白名单字段。main 快照可易失；child
+账本只读投影为 `id/title/status`；主代理累计 Compact 次数只读 ConversationThread 的
+`compact_generation`。客户端按 250ms 节奏轮询并只接收白名单字段。main 快照可易失；child
 数值与 Todo 仍由各自 canonical ledger 持有，全部展示字段都不参与任务结束、恢复或授权，真实 task
 link/run/turn_end 仍是唯一生命周期事实。
 
@@ -40,6 +41,9 @@ audit Agent 为空而回退 daemon cwd。
   root 计数归零时删除 Working/child。最终后台 notice 会先携带最后一份 Todo 快照再显示 assistant final，
   因而完成勾选不会随 active link 收口一起丢失。整个区域不进入 transcript，也没有调度、重试、停止或
   完成裁决权。
+- Todo 默认是四条状态窗口：最近完成、全部当前运行项和下一待办按优先级占位，超出部分由 `Ctrl+T`
+  展开。运行项复用 Working 的全局动画帧；该本地展开状态不写回账本。常驻 Context 只显示总量、窗口占比
+  和已提交 Compact 次数，prompt/messages/tools 的协议构成留在 `/context`。
 
 ## 回合终态与 Compact 进度投影
 
@@ -226,6 +230,8 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   进度账本、派工 seed、wait 和监督提醒提供唯一的结构化任务/账本键解析。Gateway 普通对话使用的
   `context_scope=conversation` 仍属于 main-agent turn，必须采用已经结构化选择的
   `conversation_task_id`；task-local child 和 control scope 继续只认自己的 run，不能继承父任务身份。
+  task-path 指纹算法只在这里定义，Task Runtime State、Goal continuation、dispatch child 终态同步和
+  TUI activity 必须复用同一 ledger id，不能按 durable request id 另读一本空账。
 - `agent/agent_core/parameters.py`、`tool_call_runtime.py`、`runtime/loop_support.py`：一次性编排工具同时使用
   exact payload key 和结构化 child intent key 去重；同一 assistant turn 的 batch + overlapping singles
   只执行首份副作用，compact continuation 重建相同 key 集合。

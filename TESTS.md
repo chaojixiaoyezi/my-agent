@@ -38,6 +38,13 @@ wake 在一次模型轮的 `metadata.events` 中全部可见；背景总上下�
 和四个报告 ref；只确认实际进入本轮的 wake，新到事件继续 pending；失败与 Audit worker 不参加成功批。
 修复后必须用全新 tmux/cwd 重跑同一 Prompt 3，仍只输入一次且不得给 main 发送“去哪个目录找”的提示。
 
+`fd7d2b9` 部署后的第二轮使用 tmux `dsh-p3-research-fd7d2b9-verify2`，首次 4 名 child 的完成信封全部被
+main 消费并触发第二批，第二批 代理运行时/长期助手 的两份信封也被消费；但最终只创建 6/8 名 child，漏掉
+轻量运行时/通道运行时，横向汇总仍结束。canonical 文件证明 8 项原计划保存在 task-path 账本且仍 open，而后台
+Task Runtime State 旧代码读取 request-id 账本。对应回归必须在相同 owner 下同时建立两份不同摘要的账本，
+断言后台只注入 task-path 真账并同步其 child seed，且普通 open item 不触发机器验收或普通任务自动续跑。
+部署后仍须使用全新 tmux/cwd 进行第三轮原样 Prompt 3，单测不能替代。
+
 单 Gateway 多目录回归必须另行覆盖：两个不同 cwd 的 lightweight client 得到同一 owner-level
 `gateway_workspace`，但请求分别携带自己的绝对 `workspace.cwd/roots`；thread 在后续未覆盖的请求中保留
 该范围；模型前 workspace gate 拒绝相对/不存在目录；Tool Registry 的 path gate、resource lock 与 handler
@@ -493,6 +500,11 @@ main 的后台 context 也必须来自同一次 `model_visible_context_usage.v1`
 Todo 与 child panel 必须按结构化身份去重：`item.id` 精确等于当前直属 `child.run_id` 的自动 seed 项只在
 TUI 隐藏，canonical task_progress 账本不删除；普通 Todo 和显式 `covers/progress_item_ids` 仍显示并打标。
 禁止匹配“子代理”标题或 goal 文本来决定隐藏。
+Todo 超过四项时，默认投影必须恰好保留四条任务行：最近完成、typed `in_progress` 和下一条
+`pending/blocked` 按状态优先；多个运行项优先占位，运行图标与 Working 共用动画时钟。`Ctrl+T` 展开后
+显示全部 canonical 顺序，再按一次收起；该按键不得编辑或提交输入、不得写 task_progress。常驻 Context
+只显示总量、窗口占比和 ConversationThread `compact_generation`；Compact 过程百分比只在临时活动块，
+prompt/messages/tools 的详细构成只由 `/context` 命令展示。
 父级共享上下文还必须证明当前轮无 read archive 时不会复用 agent 上一次任务的缓存内容。
 同一 exact parent 分多批创建默认命名 child 时，第二批编号必须从既有最高序号继续，不能重新出现
 `worker-1/worker-2`；显式 run id 仍是身份权威。用户明确“主代理只能协调/不准自己写”时，真实 TUI

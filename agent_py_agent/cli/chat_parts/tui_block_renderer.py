@@ -52,6 +52,7 @@ USER_MESSAGE_TAIL_CHARS = 2_500
 SPINNER_METRICS_AFTER_SECONDS = 30.0
 SPINNER_STALL_AFTER_SECONDS = 3.0
 PENDING_INPUT_PREVIEW_LINE_LIMIT = 3
+TODO_COLLAPSED_MAX_ITEMS = 4
 TERMINAL_RENDER_PHASES = frozenset({"completed", "failed", "interrupted"})
 SPINNER_GLYPHS = ("✻", "✢", "✶")
 SPINNER_WORDS = (
@@ -77,6 +78,7 @@ HELP_SHORTCUT_GROUPS = (
     (
         "double tap esc to clear input",
         "ctrl + o for detailed transcript",
+        "ctrl + t to expand tasks",
         "ctrl + r to search prompts",
         "meta + enter for newline",
     ),
@@ -174,12 +176,14 @@ class TuiRenderContext:
     status_last_event_at: float = 0.0
     context_tokens: int = 0
     context_usage: TuiContextUsage | None = None
+    compact_count: int = 0
     output_tokens: int = 0
     has_active_tools: bool = False
     notice: str = ""
     has_stash: bool = False
     is_pasting: bool = False
     help_open: bool = False
+    todos_expanded: bool = False
 
     # LLM: width 最小一列，名称字段只做展示字符串规范，不获得路径或配置控制权。
     # 函数用途: 规范渲染上下文，保证动画索引非负。
@@ -204,12 +208,14 @@ class TuiRenderContext:
         object.__setattr__(self, "context_tokens", max(0, int(self.context_tokens or 0)))
         if not isinstance(self.context_usage, TuiContextUsage):
             object.__setattr__(self, "context_usage", None)
+        object.__setattr__(self, "compact_count", max(0, int(self.compact_count or 0)))
         object.__setattr__(self, "output_tokens", max(0, int(self.output_tokens or 0)))
         object.__setattr__(self, "has_active_tools", bool(self.has_active_tools))
         object.__setattr__(self, "notice", str(self.notice or ""))
         object.__setattr__(self, "has_stash", bool(self.has_stash))
         object.__setattr__(self, "is_pasting", bool(self.is_pasting))
         object.__setattr__(self, "help_open", bool(self.help_open))
+        object.__setattr__(self, "todos_expanded", bool(self.todos_expanded))
 
 
 # LLM: frame provider 必须复用 renderer 的可见上下文规则；wall clock 仅在活动 connection/thinking/background/compact 真正改变画面时进入 key。
@@ -249,6 +255,15 @@ def tui_render_context_key(
         for block in snapshot.active_blocks
         if block.role == "compact"
     )
+    todo_animation = (
+        context.spinner_index % len(SPINNER_GLYPHS)
+        if any(
+            block.role == "todo"
+            and _todo_has_in_progress_items(block.metadata.get("items"))
+            for block in snapshot.active_blocks
+        )
+        else None
+    )
     return (
         context.width,
         context.agent_name,
@@ -259,16 +274,19 @@ def tui_render_context_key(
         context.show_all,
         context.context_tokens,
         context.context_usage,
+        context.compact_count,
         context.output_tokens,
         context.has_active_tools,
         context.notice,
         context.has_stash,
         context.is_pasting,
         context.help_open,
+        context.todos_expanded,
         connection_animation,
         thinking_animation,
         background_animation,
         compact_animation,
+        todo_animation,
     )
 
 
@@ -796,6 +814,10 @@ def _block_cache_key(block: TuiBlock, context: TuiRenderContext) -> tuple[Any, .
         key += _background_animation_key(block, context)
     if block.role == "compact" and block.phase not in {"completed", "failed", "interrupted"}:
         key += (context.spinner_index % len(SPINNER_GLYPHS),)
+    if block.role == "todo":
+        key += (context.todos_expanded,)
+        if _todo_has_in_progress_items(block.metadata.get("items")):
+            key += (context.spinner_index % len(SPINNER_GLYPHS),)
     return key
 
 
@@ -1280,21 +1302,28 @@ def _format_compact_number(value: int) -> str:
     return f"{number / 1_000_000_000:.1f}b"
 
 
-# LLM: 工具标题/状态/输出只读 structured block/display；diff、write、command 走专用富渲染，未知类型保留通用回退且任何正文都不参与 phase 判断。
-# 函数用途: 渲染 终端交互 风格的工具标题、命令输出、写入预览和带行号增删高亮。
-# LLM: todo 面板 = task_progress 账本的持续投影; 状态图标: ☑ done / ● in_progress /
-# □ pending / ⬜ blocked / ➖ skipped。只读渲染, 不修改账本。
-# 函数用途: 渲染任务清单面板块(role=todo)。
+# LLM: Todo is a read-only projection. The collapsed view is a four-item window
+# around typed running work; Ctrl-T changes display density only, never ledger order/status.
+# 函数用途: 渲染任务清单；运行项使用统一动画，默认只展示最有用的四条，Ctrl-T 可展开全部。
 def _render_todo(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedLine, ...]:
     items = block.metadata.get("items")
     if not isinstance(items, list) or not items:
         return ()
+    public_items = [item for item in items if isinstance(item, dict)]
+    visible_items, hidden_count = _todo_window_items(
+        public_items,
+        expanded=context.todos_expanded,
+    )
+    title = "📋 任务清单"
+    if hidden_count:
+        title += f" · {len(visible_items)}/{len(public_items)}（Ctrl+T 展开）"
+    elif context.todos_expanded and len(public_items) > TODO_COLLAPSED_MAX_ITEMS:
+        title += " · Ctrl+T 收起"
     lines: list[FormattedLine] = [
-        (("class:tui-todo-title", "📋 任务清单"),)
+        (("class:tui-todo-title", _truncate_text(title, context.width)),)
     ]
     icon_map = {
         "done": "☑ ",
-        "in_progress": "● ",
         "pending": "□ ",
         "blocked": "⬜ ",
         "skipped": "➖ ",
@@ -1306,19 +1335,94 @@ def _render_todo(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedL
         "blocked": "class:tui-todo-blocked",
         "skipped": "class:tui-todo-skipped",
     }
-    for item in items:
-        if not isinstance(item, dict):
-            continue
+    for item in visible_items:
         status = str(item.get("status") or "pending").strip().lower()
-        title = str(item.get("title") or item.get("id") or "")
-        if not title:
+        item_title = sanitize_terminal_text(
+            " ".join(str(item.get("title") or item.get("id") or "").split())
+        )
+        if not item_title:
             continue
         style = style_map.get(status, "class:tui-todo-pending")
-        icon = icon_map.get(status, "□ ")
-        lines.append(((style, f"  {icon}{title}"),))
+        icon = (
+            SPINNER_GLYPHS[context.spinner_index % len(SPINNER_GLYPHS)] + " "
+            if status == "in_progress"
+            else icon_map.get(status, "□ ")
+        )
+        prefix = f"  {icon}"
+        fitted_title = _truncate_text(
+            item_title,
+            max(0, context.width - display_width_text(prefix)),
+        )
+        lines.append(((style, prefix), (style, fitted_title)))
     return tuple(lines)
 
 
+# LLM: Selection uses typed statuses and original ledger positions only. It preserves one
+# recent completion, then running rows, then upcoming work; prose and child names are irrelevant.
+# 函数用途: 从完整 Todo 中挑出默认四条状态窗口，展开时原顺序返回全部。
+def _todo_window_items(
+    items: list[dict[str, object]],
+    *,
+    expanded: bool,
+) -> tuple[list[dict[str, object]], int]:
+    if expanded or len(items) <= TODO_COLLAPSED_MAX_ITEMS:
+        return list(items), 0
+    statuses = [str(item.get("status") or "pending").strip().lower() for item in items]
+    running = [index for index, status in enumerate(statuses) if status == "in_progress"]
+    open_items = [
+        index for index, status in enumerate(statuses) if status in {"blocked", "pending"}
+    ]
+    anchor_start = min(running) if running else (open_items[0] if open_items else len(items))
+    anchor_end = max(running) if running else anchor_start - 1
+    priority: list[int] = []
+
+    # LLM: This local deduplicator preserves priority order without mutating the source rows.
+    # 函数用途: 将一个合法下标按优先顺序加入候选，重复项自动跳过。
+    def add(index: int) -> None:
+        if 0 <= index < len(items) and index not in priority:
+            priority.append(index)
+
+    previous_done = next(
+        (
+            index
+            for index in range(anchor_start - 1, -1, -1)
+            if statuses[index] in {"done", "skipped"}
+        ),
+        None,
+    )
+    if previous_done is not None:
+        add(previous_done)
+    for index in running:
+        add(index)
+    for index in range(max(0, anchor_end + 1), len(items)):
+        if statuses[index] in {"blocked", "pending"}:
+            add(index)
+    for index in open_items:
+        add(index)
+    for index in range(anchor_start - 1, -1, -1):
+        if statuses[index] in {"done", "skipped"}:
+            add(index)
+    for index in range(len(items)):
+        add(index)
+    selected = sorted(priority[:TODO_COLLAPSED_MAX_ITEMS])
+    return [items[index] for index in selected], len(items) - len(selected)
+
+
+# LLM: Animation eligibility comes only from typed in_progress status so render caching and
+# periodic refresh never parse task titles or keep idle completed lists ticking.
+# 函数用途: 判断一份 Todo 快照里是否存在需要动画的运行项。
+def _todo_has_in_progress_items(value: object) -> bool:
+    if not isinstance(value, list | tuple):
+        return False
+    return any(
+        isinstance(item, dict)
+        and str(item.get("status") or "").strip().lower() == "in_progress"
+        for item in value
+    )
+
+
+# LLM: 工具标题/状态/输出只读 structured block/display；diff、write、command 走专用富渲染，未知类型保留通用回退且任何正文都不参与 phase 判断。
+# 函数用途: 渲染 终端交互 风格的工具标题、命令输出、写入预览和带行号增删高亮。
 def _render_tool(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedLine, ...]:
     display = block.metadata.get("display")
     public_display = display if isinstance(display, dict) else {}
@@ -1729,7 +1833,13 @@ def _render_input_status(
     if snapshot.queued_inputs:
         lines.extend(_render_queue(snapshot.queued_inputs, context))
     if context.context_usage is not None:
-        lines.extend(_render_context_usage(context.context_usage, context.width))
+        lines.extend(
+            _render_context_usage(
+                context.context_usage,
+                context.width,
+                compact_count=context.compact_count,
+            )
+        )
     if context.has_stash:
         lines.extend(
             wrap_fragments(
@@ -1876,42 +1986,37 @@ def _render_fixed_agent_panel(
     return _render_subagent_panel(background, context) if background is not None else ()
 
 
-# LLM: Width tiers alter display density only. Percent and warning style come from typed token
-# counts and the configured compact trigger, never from model text or a second UI threshold.
-# 函数用途: 将实时上下文快照压成一行，在宽屏显示构成、窄屏保留总量和占比。
+# LLM: The persistent strip shows only total usage plus the canonical committed compact count.
+# Protocol-specific prompt/messages/tools breakdown stays in /context because text mode folds
+# messages and tools into prompt and would otherwise render misleading zeroes.
+# 函数用途: 常驻行只显示用户能理解的上下文总量、占比和已完成压缩次数；详细构成留给 /context。
 def _render_context_usage(
     usage: TuiContextUsage,
     width: int,
+    *,
+    compact_count: int = 0,
 ) -> tuple[FormattedLine, ...]:
     available = max(1, int(width or 1))
     current = max(0, int(usage.current_tokens or 0))
     window = max(0, int(usage.context_window_tokens or 0))
     trigger = max(0, int(usage.compact_trigger_tokens or 0))
     percent = min(999, round(current * 100 / window)) if window > 0 else 0
-    trigger_percent = min(100, round(trigger * 100 / window)) if window > 0 else 0
     style = _context_usage_style(current, trigger, window)
     estimate = "~" if usage.estimated else ""
+    compact = max(0, int(compact_count or 0))
 
-    if available >= 110:
+    if available >= 72:
         text = (
             f"Context {estimate}{_format_compact_number(current)}/{_format_compact_number(window)}"
-            f" · {percent}% · compact {trigger_percent}%"
-            f" · prompt {_format_compact_number(usage.prompt_tokens)}"
-            f" · messages {_format_compact_number(usage.messages_tokens)}"
-            f" · tools {_format_compact_number(usage.tool_schema_tokens)}"
-        )
-    elif available >= 72:
-        text = (
-            f"Context {estimate}{_format_compact_number(current)}/{_format_compact_number(window)}"
-            f" · {percent}% · compact at {_format_compact_number(trigger)}"
+            f" · {percent}% · compact {compact}"
         )
     elif available >= 40:
         text = (
             f"Ctx {estimate}{_format_compact_number(current)}/{_format_compact_number(window)}"
-            f" · {percent}%"
+            f" · {percent}% · compact {compact}"
         )
     else:
-        text = f"Ctx {percent}%"
+        text = f"Ctx {percent}% · c{compact}"
     return wrap_fragments(
         ((style, text),),
         width=available,

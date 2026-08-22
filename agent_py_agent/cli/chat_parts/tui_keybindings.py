@@ -309,6 +309,10 @@ def _tui_create_keybindings(params: TuiCreateKeybindingsParams):
         "c-o",
         filter=~filters.history_search_active & ~filters.permission_active,
     )(lambda e: _handle_ctrl_o_keybinding(e, params))
+    kb.add(
+        "c-t",
+        filter=~filters.history_search_active & ~filters.permission_active,
+    )(lambda e: _handle_ctrl_t_keybinding(e, params))
     kb.add("c-e", filter=filters.chat_active)(
         lambda e: _handle_ctrl_e_keybinding(e, params)
     )
@@ -1690,6 +1694,15 @@ def _handle_ctrl_o_keybinding(event, params: TuiCreateKeybindingsParams) -> None
     state.enter(_required_tui_runtime(params).store.snapshot())
     params.transcript_area.modal_control.move_end()
     event.app.layout.focus(params.transcript_area.modal_window)
+    event.app.invalidate()
+
+
+# LLM: Ctrl-T mirrors 终端交互's dedicated task-list view toggle and changes only
+# process-local UI state; it must never edit or submit the input buffer.
+# 函数用途: 在默认四条 Todo 窗口与完整任务清单之间切换。
+def _handle_ctrl_t_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
+    _required_interaction(params).toggle_todos()
+    _reset_exit_arms(params)
     event.app.invalidate()
 
 

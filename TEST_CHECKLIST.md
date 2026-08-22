@@ -1,6 +1,9 @@
 # TEST CHECKLIST
 
 - [x] 工具运行时改动相关 focused tests 通过（Schema/runtime/protocol/policy/executor/ledger/output/concurrency/cancel/compact 矩阵）；其他并行模块仍按各自条目验收。
+- [x] 后台 Task Runtime State 与 `task_progress` 工具使用同一 task-path 账本编号；回归同时放置正确路径账本
+  和错误 request-id 账本，只允许前者进入模型上下文。child 终态同步、Goal continuation 与 TUI 投影复用
+  同一 helper，普通 open Todo 仍不构成机器验收或普通任务自动续跑门。
 - [x] 递归管理面只含 create/guidance/cancel/capability；inspect/dispatch/schedule/wait/raise_event
   均不可注册或从历史 grant 复活。只有根主代理与结构化 coordinator 持有四项，普通 leaf 全部移除。
   宽 forbidden 与窄 task output allow 按最具体路径裁决，同层 deny 胜出；
@@ -14,7 +17,10 @@
   按终端宽度截断。第一次执行不显示“尝试 1”，只有重试才显示重试次数，任何状态都不得用“模型响应中/
   模型已生成回复”代替职责。
   Todo 不重复显示 `id == direct child run_id` 的自动派工长目标，但账本仍保存该项；普通 Todo 和显式
-  covers 继续可见并按 canonical child status 打标。
+  covers 继续可见并按 canonical child status 打标。默认只显示 4 条状态窗口，至少保留最近完成、当前
+  运行和下一待办；多个运行项优先占位，运行图标逐帧变化，`Ctrl+T` 可展开/收起全部且不修改账本。
+  常驻 Context 只显示总量、占比和 canonical Compact 累计次数，详细 prompt/messages/tools 只在
+  `/context` 展示，不再把 compact 触发线比例误写成次数或进度。
   main 等待 child 时按 typed status 显示“等待 N 个子代理”，最终答复进入普通 assistant transcript；
   `7c052f2` 第 1 条真机任务已暴露布局/Todo 问题，新候选 147 项定向回归已过，仍需 `.7`
   单 Gateway + 下一条原样长任务 TUI 验收后勾选。

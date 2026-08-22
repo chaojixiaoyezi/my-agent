@@ -920,6 +920,13 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - main Working 与 child row 都采用 终端交互 式固定后缀宽度预算，任意 thinking/职责文本只能在剩余列
   单行截断。自动 child seed Todo 的 exact-id 去重先于 128 行投影上限，并同时适用于 live panel 和最终
   notice；账本不删，普通 Todo 不受影响。
+- Todo 默认折叠对照 终端交互 `TaskListV2` 的状态优先窗口，但固定为 4 条：最近完成、当前运行和下一待办
+  依次占位；多个运行项优先保留，运行图标复用全局 Working 动画。`Ctrl+T` 只是进程内展开开关，不能重排
+  或写回 `task_progress.v1`。
+- 常驻 Context 行只保留当前总量、窗口占比和主 ConversationThread 已成功 Compact 次数。activity schema
+  升为 `conversation_agent_activity.v5`，`compact_count` 只取 canonical `compact_generation`；压缩过程
+  百分比仍属于临时 Compact block。prompt/messages/tools 受 provider 协议形态影响，详细构成只在
+  `/context` 命令展示，不再常驻制造误导的零值。
 - 对照 会话运行时 `core/templates/agents/orchestrator.md` 后，默认递归 coordinator policy 固定为：实际工作一经
   委派，main 只协调、读取和整合已有产物、测试与汇报；缺口继续 guidance 或 replacement child。失败、
   容量不足和终态都不自动转移实现职责。该约束只写入模型执行上下文，不作为机器状态、权限或验收门。
@@ -937,7 +944,13 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   wake 的 `metadata.events` 保留每名孩子的独立信封；只确认实际选入本轮的成员，新到或预算外事件继续
   pending。失败事件和 Audit source worker 保持原即时专用路径。背景上下文压力可缩短每段字符串，但
   不能按字段顺序丢掉 active wake metadata、evidence refs 或批成员；这是当前 turn typed input 的优先级，
-  不新增目录扫描 fallback 或机器质量门。【状态：本地严格 gate 已通过，待部署/Prompt 3 复验】
+  不新增目录扫描 fallback 或机器质量门。`fd7d2b9` 已部署并证明首批结果能唤醒 main，但正式 Prompt 3
+  仍只覆盖 6/8 且误报 终端交互 缺失；后续只从结构化批次覆盖/结果 refs 修底层，不写任务名专项分支。
+- Prompt 3 的六份完成信封均已被消费，真正遗漏点是进度账本身份分叉：工具写侧使用
+  `task-path:<sha256(task_path)[:16]>`，后台 Task Runtime State 旧读侧使用 durable request id。路径指纹算法
+  现只允许由 `agent_core/runtime/task_identity.py` 生成；task_progress 写入、后台读取、dispatch child
+  终态同步、Goal continuation 和 TUI activity 都必须调用同一 helper，禁止调用方复制 hash。该统一只让
+  当前计划进入模型可见 typed state，不把普通 open Todo 升为机器完成门、产物验收或自动续跑授权。
 
 ## 2026-08-22 单 Gateway 服务身份与 thread cwd 分离【状态：`993ce4f` 真机通过】
 

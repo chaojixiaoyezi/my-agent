@@ -11,10 +11,14 @@ from typing import Any
 
 from ..agent_core.orchestration.dispatch_progress_seed import reconcile_completed_child_items
 from ..agent_core.runtime.owner_roots import runtime_owner_root
+from ..agent_core.runtime.task_identity import task_path_progress_ledger_id
 from ..runtime_errors import runtime_error_report
 from ..task_progress import read_task_progress_report, task_progress_summary
 
 
+# LLM: Background turns must read the same task-path progress ledger that main
+# tool calls write. The durable task id remains lineage identity only.
+# 函数用途: 汇总当前任务的目录、状态和真实进度清单，供后台主代理续跑时读取。
 def task_runtime_state(
     *,
     agent: object,
@@ -30,13 +34,16 @@ def task_runtime_state(
     link = _task_link(store, thread_id, selected_id, load_errors)
     task_root = _task_root(link)
     owner_root = runtime_owner_root(agent)
+    ledger_id = (
+        task_path_progress_ledger_id(getattr(link, "task_path", "")) or selected_id
+    )
     reconcile_completed_child_items(
         agent,
         owner_root,
-        selected_id,
+        ledger_id,
         task_root=task_root,
     )
-    progress, load_error = read_task_progress_report(owner_root, selected_id)
+    progress, load_error = read_task_progress_report(owner_root, ledger_id)
     if load_error is not None:
         load_errors.append(load_error)
     work_kind = str(getattr(link, "work_kind", "") or "")
@@ -67,6 +74,9 @@ def task_runtime_state(
     return state
 
 
+# LLM: Task-link corruption is surfaced through load_errors while other valid
+# links remain usable; do not silently manufacture a link from task prose.
+# 函数用途: 在当前会话中按精确任务编号查找任务链接，并记录读取错误。
 def _task_link(
     store: object,
     thread_id: str,
@@ -89,6 +99,9 @@ def _task_link(
     return None
 
 
+# LLM: A nonexistent task directory cannot be used for canonical child-state
+# reconciliation, though its raw linked path may still identify the ledger.
+# 函数用途: 把任务链接里的路径解析成当前确实存在的任务目录。
 def _task_root(link: object | None) -> Path | None:
     value = str(getattr(link, "task_path", "") or "").strip()
     if not value:

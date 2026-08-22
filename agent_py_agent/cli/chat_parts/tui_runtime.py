@@ -320,6 +320,7 @@ class _TuiBackgroundActivityController:
         self._subagents: tuple[dict[str, object], ...] = ()
         self._task_progress_items: tuple[dict[str, object], ...] = ()
         self._hidden_subagent_count = 0
+        self._compact_count = 0
 
     # LLM: Count and direct-child rows change the same display projection. A
     # failed child projection preserves the last valid rows; zero removes the
@@ -329,6 +330,7 @@ class _TuiBackgroundActivityController:
         self,
         active_task_count: int,
         *,
+        compact_count: int | None = None,
         main_activity: object | None = None,
         subagents: object | None = None,
         task_progress_items: object | None = None,
@@ -337,6 +339,11 @@ class _TuiBackgroundActivityController:
         task_progress_projection_ok: bool = True,
     ) -> bool:
         count = max(0, int(active_task_count or 0))
+        next_compact_count = (
+            self._compact_count
+            if compact_count is None
+            else max(0, int(compact_count or 0))
+        )
         owner = self._owner
         block_id = f"background-activity:{owner.session_id}"
         with owner._lock:
@@ -368,6 +375,7 @@ class _TuiBackgroundActivityController:
                 and next_subagents == self._subagents
                 and next_task_progress_items == self._task_progress_items
                 and next_hidden_count == self._hidden_subagent_count
+                and next_compact_count == self._compact_count
             ):
                 return False
             if self._count <= 0 and count > 0:
@@ -382,6 +390,7 @@ class _TuiBackgroundActivityController:
             self._subagents = next_subagents
             self._task_progress_items = next_task_progress_items
             self._hidden_subagent_count = next_hidden_count
+            self._compact_count = next_compact_count
             context_usage = next_main_activity.get("context_usage")
             owner._publish(
                 kind,
@@ -389,6 +398,7 @@ class _TuiBackgroundActivityController:
                 block_id,
                 {
                     "active_task_count": count,
+                    "compact_count": next_compact_count,
                     "started_at": self._started_at,
                     "main_activity": dict(next_main_activity),
                     "subagents": [dict(row) for row in next_subagents],
@@ -496,6 +506,19 @@ def _normalize_task_progress_items(value: object) -> tuple[dict[str, object], ..
     )
 
 
+# LLM: Periodic animation is enabled only by typed task_progress status; titles and
+# display prose must never keep the render clock alive.
+# 函数用途: 判断 Todo 快照是否含正在执行项，避免纯待办或已完成清单持续空转刷新。
+def _todo_items_need_animation(value: object) -> bool:
+    if not isinstance(value, list | tuple):
+        return False
+    return any(
+        isinstance(item, Mapping)
+        and str(item.get("status") or "").strip().lower() == "in_progress"
+        for item in value
+    )
+
+
 # LLM: This is the client-side metadata whitelist for the authenticated activity
 # snapshot. Only bounded progress ids may remain a list; all other nested values,
 # goals, paths, and tool output are discarded before TuiBlock metadata.
@@ -540,6 +563,7 @@ class _TuiBackgroundActivityRuntimeMixin:
         self,
         active_task_count: int,
         *,
+        compact_count: int | None = None,
         main_activity: object | None = None,
         subagents: object | None = None,
         task_progress_items: object | None = None,
@@ -549,6 +573,7 @@ class _TuiBackgroundActivityRuntimeMixin:
     ) -> bool:
         return self._background_activity.update(
             active_task_count,
+            compact_count=compact_count,
             main_activity=main_activity,
             subagents=subagents,
             task_progress_items=task_progress_items,
@@ -879,6 +904,10 @@ class TuiRuntime(_TuiBackgroundActivityRuntimeMixin):
         snapshot = self.store.snapshot()
         return any(
             block.role in {"connection", "thinking", "compact", "background"}
+            or (
+                block.role == "todo"
+                and _todo_items_need_animation(block.metadata.get("items"))
+            )
             for block in snapshot.active_blocks
         )
 

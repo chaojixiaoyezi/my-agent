@@ -112,6 +112,7 @@ def _make_render_context_factory(
             status_last_event_at=status.last_event_at,
             context_tokens=status.context_tokens,
             context_usage=status.context_usage,
+            compact_count=status.compact_count,
             output_tokens=status.output_tokens,
             has_active_tools=any(
                 block.role == "tool"
@@ -122,6 +123,7 @@ def _make_render_context_factory(
             has_stash=interaction_snapshot.has_stash,
             is_pasting=interaction_snapshot.is_pasting,
             help_open=interaction_snapshot.help_open,
+            todos_expanded=interaction_snapshot.todos_expanded,
         )
 
     return make_context

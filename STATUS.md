@@ -1,6 +1,32 @@
 # STATUS
 
-## 2026-08-22 会话运行时 式子代理完成交接（本地候选）
+## 2026-08-22 后台续轮读错进度账本（本地候选）
+
+- `fd7d2b9` 的正式 Prompt 3 失败已定位到唯一结构化断点：前台 `task_progress` 工具按稳定
+  `task-path:<目录指纹>` 写入 8 个项目清单，后台 `Task Runtime State` 却按每轮 durable request id 读取。
+  因此 canonical 账本仍有 轻量运行时、通道运行时、横向汇总等 open item，后台模型看到的却是空清单，最终遗漏
+  2/8 项并自然结束；不是 completion wake 丢失，也不是机器验收拦错。
+- `agent_core/runtime/task_identity.py` 现在独占 task-path 账本编号算法。工具写入、后台读取、child 终态投影、
+  `/goal` 续跑和 TUI 只读投影共用它；`task_runtime_state` 同时以该编号读取并更新 child seed 状态，不再在
+  request-id 下读写第二本账。普通 Todo 仍是模型工作笔记：它进入每个后台续轮的 typed 上下文，但不恢复
+  机器完成硬门、不自动验收产物、不因 open item 强制启动普通任务。
+- 回归同时写入一份 task-path 真账和一份 request-id 假账，已经证明后台只看到真账；task identity、后台
+  上下文及插话隔离 19 项精确复测通过。合并后的完整 focused 组合、严格 gate、推送部署与全新 Prompt 3
+  TUI 复验仍待完成。
+
+## 2026-08-22 固定四行 Todo 与可理解 Context（本地候选）
+
+- 默认 Todo 视图直接对照 终端交互 `TaskListV2` 的状态优先选择：固定显示 4 条任务，优先保留最近完成、
+  当前运行和紧接着的待办；同时运行项较多时优先显示最近完成与运行项。运行项复用全局 Working 动画帧，
+  待办和完成继续使用静态图标；`Ctrl+T` 只切换完整清单，不修改 canonical `task_progress.v1`。
+- 常驻 Context 行只显示当前总量、窗口占比和主代理已成功 Compact 次数，例如
+  `Context ~31.4k/128.0k · 25% · compact 2`。旧 `compact 100%` 实际是触发线比例，不是压缩进度，已经
+  移除；协议相关的 prompt/messages/tools 构成留给 `/context`，避免 MiniMax 文本协议折叠后显示误导的 0。
+- activity schema 升为 `conversation_agent_activity.v5`，只从 canonical ConversationThread 的
+  `compact_generation` 投影主代理累计次数。Compact 过程百分比仍只存在于正在压缩的临时活动块，不参与
+  次数、完成或恢复裁决。renderer/runtime/conversation focused 回归已通过，待严格 gate、部署和真实 TUI。
+
+## 2026-08-22 会话运行时 式子代理完成交接（`fd7d2b9` 已部署，Prompt 3 仍失败）
 
 - `931ee20` 已推送并部署 `.7`。唯一 Gateway、`MiniMax-M2.7`、全新 tmux
   `dsh-p3-research-931ee20-verify` 的原样 Prompt 3 只输入一次：4 个 child 分别显示“调研 轻量运行时 项目 / 调研
@@ -14,8 +40,11 @@
   `completion_message` 仅作整合证据，完整正文由 `final_report_ref` 读取，并同时携带 declared/artifact refs。
   同树成功通知按上下文预算合成一次 `metadata.events`；只确认本轮真正选入的信封，失败和 Audit worker
   不进入该批。上下文压缩可缩短正文，但必须保留 active wake 的 metadata、全部批成员和报告引用。
-- 相关 focused 回归已覆盖四路长完成消息、2200-token 压力投影和长消息截断；本地严格 gate 已通过，
-  推送部署和同一 Prompt 3 的全新 TUI 复验仍待完成。本轮远低于 10,000 行，不运行全仓 pytest。
+- `fd7d2b9` 已推送并部署；全新 tmux `dsh-p3-research-fd7d2b9-verify2` 只发送一次原样 Prompt 3。
+  第一批 4 个 child 完成后 main 能读取结果并继续创建第二批，证明 completion envelope/wake 已进入真实
+  主链；但第二批只创建 代理运行时/长期助手，整单共 6 个 child，漏掉 轻量运行时/通道运行时，最终又把已有
+  终端交互 结果误报为“未找到”。因此该正式任务仍判失败，下一步必须查 canonical 批次覆盖和结果消费，
+  不能用 prompt 关键词专项补丁或测试者插话掩盖。本轮远低于 10,000 行，不运行全仓 pytest。
 
 ## 2026-08-22 后台主代理、Todo 与子代理职责行（本地候选）
 

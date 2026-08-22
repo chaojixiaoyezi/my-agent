@@ -239,6 +239,7 @@ def test_gateway_conversation_compact_progress_updates_one_active_block_then_bou
         {"kind": "conversation_compacted", "compact_generation": 3}
     ) is True
     assert runtime.store.snapshot().stable_blocks[-1].kind == "compact_boundary"
+    assert runtime.store.snapshot().status.compact_count == 3
 
 
 def test_turn_activity_survives_stream_and_tools_until_structured_terminal() -> None:
@@ -313,6 +314,7 @@ def test_gateway_typed_rows_are_consumed_without_legacy_text_duplication() -> No
         if block.kind == "compact_boundary"
     )
     assert compact.metadata["compact_generation"] == 2
+    assert runtime.store.snapshot().status.compact_count == 2
     runtime.complete_turn(
         "request-2",
         TuiTurnSummary(response_text="Gateway final", ok=True, tool_rounds=2),

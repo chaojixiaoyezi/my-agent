@@ -43,6 +43,7 @@ class TuiInteractionSnapshot:
     history_failed_match: bool = False
     is_pasting: bool = False
     help_open: bool = False
+    todos_expanded: bool = False
 
 
 # LLM: _HistorySearchSession 是 Ctrl-R 的内部游标；entries 已按新到旧去重，query 匹配只影响编辑器投影，不执行历史 prompt。
@@ -68,6 +69,7 @@ class TuiInteractionState:
         self._history: _HistorySearchSession | None = None
         self._is_pasting = False
         self._help_open = False
+        self._todos_expanded = False
         self._current_pasted_text_refs: tuple[TuiPastedTextRef, ...] = ()
         self._next_paste_id = 1
         self._invalidate = invalidate
@@ -91,6 +93,7 @@ class TuiInteractionState:
                 history_failed_match=history.failed if history is not None else False,
                 is_pasting=self._is_pasting,
                 help_open=self._help_open,
+                todos_expanded=self._todos_expanded,
             )
 
     # LLM: 帮助面板只是一项显式 UI 状态；切换不能向输入 Buffer 写入 `?`、提交命令或改会话历史。
@@ -111,6 +114,16 @@ class TuiInteractionState:
             self._help_open = False
         self._notify()
         return True
+
+    # LLM: Todo expansion is a process-local display preference only; toggling it must not
+    # mutate task_progress, reorder canonical items, or enter the conversation transcript.
+    # 函数用途: 用 Ctrl-T 在四条任务窗口和完整任务清单之间切换，并请求界面重绘。
+    def toggle_todos(self) -> bool:
+        with self._lock:
+            self._todos_expanded = not self._todos_expanded
+            expanded = self._todos_expanded
+        self._notify()
+        return expanded
 
     # LLM: stash 是严格单槽：非空草稿覆盖当前槽，空编辑器只弹出已有槽；空白输入不会制造不可见 stash。
     # 函数用途: 按 Ctrl-S 语义保存当前草稿或恢复已保存草稿。

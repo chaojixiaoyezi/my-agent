@@ -8,7 +8,7 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 
 ## 2026-08-22 TUI/Web 共用活动投影
 
-- `conversation_agent_activity.v4` 是 owner/thread 认证后的只读展示 schema：main 只含 task id、phase、
+- `conversation_agent_activity.v5` 是 owner/thread 认证后的只读展示 schema：main 只含 task id、phase、
   activity、时间和数字 context usage；直属 child 只含 run lineage、名称/角色、typed status、职责短标题、
   attempt、当前上下文 token、Compact 和时间；child 另携带派工时显式声明的有界 `progress_item_ids`，仅用于
   Todo 展示关联。当前 active task 的 Todo 只含 canonical `id/title/status`。提示词、回复、工具
@@ -26,6 +26,9 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   main 位于正文末尾，Todo 位于输入框上，child panel 位于输入框下。Todo 的 exact
   `run_id/progress_item_ids` 标记、main/child 严格单行截断、首次 attempt 隐藏和重试文案都属于展示规则，
   不能成为完成、恢复或验收信号。
+- Todo 默认只显示四条状态窗口：最近完成、当前运行和下一待办优先，运行项使用共享动画帧；`Ctrl+T`
+  仅展开/收起完整投影，不改变顺序或状态。main 的 compact 数字来自 thread `compact_generation`，不是
+  进度百分比；常驻 Context 的协议构成详情留给 `/context`。
 - exact `item.id == direct child.run_id` 的自动 seed Todo 在展示上限计算前过滤，live panel 与最终 notice
   共用同一规则；canonical ledger 不删除，普通 Todo 不因前面的隐藏 seed 占满投影上限而消失。
 - 会话运行时 式协调边界只进入模型执行策略：一旦 main 把实际工作交给 child，main 只协调、整合已有产物、

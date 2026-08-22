@@ -4,6 +4,11 @@ from __future__ import annotations
 
 import hashlib
 
+# LLM: This module is the sole owner of progress-ledger identity derivation.
+# Callers may carry durable task ids or task paths, but must not reproduce the
+# task-path fingerprint algorithm elsewhere.
+# 模块用途: 统一把会话任务、运行实例和任务目录解析成唯一进度账本编号，避免读写两套账。
+
 # Gateway-backed ordinary conversations are still the main-agent turn.  The
 # ``conversation`` label describes where its transcript is persisted; it must
 # not make the runtime ignore an exact durable workspace binding.  Child and
@@ -19,11 +24,44 @@ def _structured_conversation_task_id(params: object) -> str:
     return str(attrs.get("conversation_task_id") or "").strip()
 
 
+# LLM: This is the canonical task-path fingerprint algorithm shared by tool
+# writes, background reads, goal continuation and display projections.
+# 函数用途: 把任务目录路径转换成稳定的进度账本编号；空路径不生成编号。
+def task_path_progress_ledger_id(task_path: object) -> str:
+    """Return the canonical progress-ledger key for one exact task path."""
+    text = str(task_path or "").strip()
+    if not text:
+        return ""
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    return f"task-path:{digest}"
+
+
+# LLM: Loading a conversation link may fail or predate task materialization;
+# preserve the durable task id as the only safe fallback in those cases.
+# 函数用途: 按会话任务链接解析进度账本编号，尚无任务目录时沿用原任务编号。
+def conversation_task_progress_ledger_id(store: object, task_id: object) -> str:
+    """Resolve one conversation task to its canonical progress-ledger key."""
+    selected = str(task_id or "").strip()
+    if not selected:
+        return ""
+    loader = getattr(store, "load_task_link", None) if store is not None else None
+    if not callable(loader):
+        return selected
+    try:
+        link = loader(selected)
+    except Exception:
+        return selected
+    return task_path_progress_ledger_id(getattr(link, "task_path", "")) or selected
+
+
+# LLM: Main conversation turns may use a stable task-path ledger, but only
+# when an explicit conversation-thread binding proves that this is that scope.
+# 函数用途: 为主会话工具调用解析稳定账本；缺少会话绑定时不抢占其他运行实例的编号。
 def _conversation_task_path_key(agent: object, params: object, task_id: str) -> str:
     """会话任务的稳定账本 key:任务目录路径指纹。
 
     只在「有 conversation_thread_id + store 能按 task_id 解析出 task_path」时生效;
-    任何一环缺失都返回空,调用方回落到 conversation_task_id(首轮 id 恰是账本所在)。
+    缺少 store 或 task_path 时返回原 task_id,调用方仍落到 conversation_task_id。
     子代理不受影响:其 scope 不在 main 集合,走 scoped 隔离分支。
     """
     attrs = getattr(params, "task_attributes", None)
@@ -33,20 +71,12 @@ def _conversation_task_path_key(agent: object, params: object, task_id: str) -> 
     if not thread_id or not task_id:
         return ""
     store = getattr(agent, "conversation_store", None)
-    loader = getattr(store, "load_task_link", None) if store is not None else None
-    if not callable(loader):
-        return ""
-    try:
-        link = loader(task_id)
-    except Exception:
-        return ""
-    task_path = str(getattr(link, "task_path", "") or "").strip()
-    if not task_path:
-        return ""
-    digest = hashlib.sha256(task_path.encode("utf-8")).hexdigest()[:16]
-    return f"task-path:{digest}"
+    return conversation_task_progress_ledger_id(store, task_id)
 
 
+# LLM: Durable task identity controls lineage and task ownership, not where a
+# task-path-backed progress ledger is stored; keep those two concepts separate.
+# 函数用途: 解析当前运行真正绑定的长期任务编号。
 def durable_task_id(params: object) -> str:
     """Use the bound durable task only for a main-agent context."""
     scope = str(getattr(params, "context_scope", "") or "default").strip().lower()
@@ -54,6 +84,9 @@ def durable_task_id(params: object) -> str:
     return bound or str(getattr(params, "task_id", "") or "").strip()
 
 
+# LLM: Tool run-scope fields are structured authority; never infer this value
+# from goals, summaries or display labels.
+# 函数用途: 从可信工具运行范围中读取长期任务编号。
 def run_scope_task_id(value: object) -> str:
     """Read the durable task identity from a trusted tool-call run scope."""
     if not isinstance(value, dict):
@@ -61,6 +94,9 @@ def run_scope_task_id(value: object) -> str:
     return str(value.get("root_task_id") or value.get("task_id") or "").strip()
 
 
+# LLM: Keep this routing order aligned with task_progress writes and every
+# background/display read; adding another caller-side hash recreates split ledgers.
+# 函数用途: 根据主会话、子代理或普通运行范围选择唯一进度账本编号。
 def progress_ledger_id(agent: object, params: object, *, scoped_id: str = "") -> str:
     """Return the shared ledger key for tool writes, seeds and closeout reads.
 
@@ -94,4 +130,10 @@ def progress_ledger_id(agent: object, params: object, *, scoped_id: str = "") ->
     return ""
 
 
-__all__ = ["durable_task_id", "progress_ledger_id", "run_scope_task_id"]
+__all__ = [
+    "conversation_task_progress_ledger_id",
+    "durable_task_id",
+    "progress_ledger_id",
+    "run_scope_task_id",
+    "task_path_progress_ledger_id",
+]
