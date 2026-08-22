@@ -20,11 +20,11 @@ from typing import Any
 
 from ..subagents.services.control_plane_projection import (
     runtime_compact_count,
-    runtime_token_count,
+    runtime_context_token_count,
 )
 from .models import THREAD_TASK_LINK_ACTIVE_STATUS
 
-_SCHEMA_VERSION = "conversation_agent_activity.v2"
+_SCHEMA_VERSION = "conversation_agent_activity.v3"
 _MAX_PROJECTED_SUBAGENTS = 64
 _ACTIVITY_TEXT_LIMIT = 240
 _MAIN_ACTIVITY_STATE_ATTR = "_conversation_main_activity_projection"
@@ -312,9 +312,10 @@ def _subagent_sort_key(task: object) -> tuple[int, float, str]:
     return priority, created_at, run_id
 
 
-# LLM: This row deliberately omits goal, response, tool output, paths, and
-# permissions. Explicit covers ids support display joins; activity is never a status source.
-# 函数用途: 把直属子代理压成界面需要的状态、活动、用量与 Todo 关联。
+# LLM: This row exposes one bounded human-facing task description and numeric
+# live context usage, but still omits response, tool output, paths, permissions,
+# and runtime activity prose. Explicit covers ids support display joins only.
+# 函数用途: 把直属子代理压成界面需要的职责短标题、状态、上下文用量与 Todo 关联。
 def _subagent_row(task: object) -> dict[str, object]:
     status = str(getattr(task, "status", "") or "").strip().upper()
     return {
@@ -328,10 +329,9 @@ def _subagent_row(task: object) -> dict[str, object]:
         ),
         "role": _bounded_text(getattr(task, "role", ""), limit=80),
         "status": status,
-        "activity": _activity_text(task, status=status),
-        "current_tool": _bounded_text(getattr(task, "current_tool", ""), limit=80),
+        "description": _subagent_description(task),
         "attempts": max(0, _safe_int(getattr(task, "runner_attempts", 0))),
-        "token_count": max(0, runtime_token_count(task)),
+        "context_tokens": max(0, runtime_context_token_count(task)),
         "compact_count": max(0, runtime_compact_count(task)),
         "progress_item_ids": _progress_item_ids(task),
         "created_at": max(0.0, _safe_float(getattr(task, "created_at", 0.0))),
@@ -358,24 +358,12 @@ def _progress_item_ids(task: object) -> list[str]:
     )
 
 
-# LLM: Activity chooses already-persisted display context in a fixed order. The
-# text may explain work to a human but must never drive status or recovery.
-# 函数用途: 选择子代理最近最有用的一句活动说明。
-# LLM: Terminal status suppresses stale current_tool/current_step text because
-# those fields describe the last action, not what an ended child is doing now.
-# 函数用途: 选择子代理最近最有用的一句活动说明；已结束时不再显示“模型已生成回复”等旧动作。
-def _activity_text(task: object, *, status: str = "") -> str:
-    if status not in {"PLANNING", "PENDING", "RUNNING", "BLOCKED", "PAUSED"}:
-        return ""
-    tool = _bounded_text(getattr(task, "current_tool", ""), limit=80)
-    if tool:
-        return f"正在使用 {tool}"
-    for field_name in (
-        "current_step",
-        "last_progress_summary",
-        "latest_summary",
-        "description",
-    ):
+# LLM: Description is display prose only. Prefer the explicit description when
+# present, otherwise expose a bounded one-line copy of the creation goal; neither
+# value may drive lifecycle, authorization, matching, or recovery.
+# 函数用途: 选择一句能说明“这个子代理干什么”的短标题，供面板按宽度截断。
+def _subagent_description(task: object) -> str:
+    for field_name in ("description", "goal", "role"):
         text = _bounded_text(getattr(task, field_name, ""), limit=_ACTIVITY_TEXT_LIMIT)
         if text:
             return text

@@ -44,9 +44,9 @@ class TestCreateSubagentsItemsMode:
         result = CreateSubagentsTool(mock_agent).execute({
             "goal": "并行研究市场并形成进入策略",
             "items": [
-                {"goal": "研究越南市场环境", "role": "worker", "agent_name": "小傻妞-市场"},
-                {"goal": "研究竞争格局", "role": "worker", "agent_name": "小傻妞-竞争"},
-                {"goal": "制定进入策略", "role": "coordinator", "agent_name": "小傻妞-策略"},
+                {"goal": "研究越南市场环境", "description": "调研越南市场", "role": "worker", "agent_name": "小傻妞-市场"},
+                {"goal": "研究竞争格局", "description": "分析竞争格局", "role": "worker", "agent_name": "小傻妞-竞争"},
+                {"goal": "制定进入策略", "description": "制定进入策略", "role": "coordinator", "agent_name": "小傻妞-策略"},
             ],
             "acceptance_checks": ["必须有证据", "必须标注未确认信息"],
         })
@@ -66,6 +66,11 @@ class TestCreateSubagentsItemsMode:
             "小傻妞-市场-1",
             "小傻妞-竞争-2",
             "小傻妞-策略-3",
+        ]
+        assert [params.description for params in created_params] == [
+            "调研越南市场",
+            "分析竞争格局",
+            "制定进入策略",
         ]
         assert payload["created"] == 3
         assert payload["auto_start"]["status"] == "started"

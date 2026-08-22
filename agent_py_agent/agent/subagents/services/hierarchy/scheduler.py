@@ -161,6 +161,10 @@ def _child_create_params(
     )
 
 
+# LLM: Recursive creation maps one already-authorized child spec into the same
+# CreateRunParams used at the root. Description remains display-only while all
+# capability and write bounds continue to come from structured parent facts.
+# 函数用途: 将递归下级规格转成统一创建参数，并保留职责短标题与既有权限边界。
 def _create_child_params(request: HierarchyCreateChildRequest) -> CreateRunParams:
     parent = request.parent
     spec = request.spec
@@ -169,6 +173,7 @@ def _create_child_params(request: HierarchyCreateChildRequest) -> CreateRunParam
         goal=request.goal,
         thought=spec.thought or hctx.inherited_hierarchy_thought(parent, child_goal=request.goal),
         plan=spec.plan or ["读取父级 refs", "执行当前任务", "向直接父级返回结果"],
+        description=str(spec.description or "").strip()[:240],
         agent_name=agent_name,
         role=request.role,
         parent_id=parent.id,

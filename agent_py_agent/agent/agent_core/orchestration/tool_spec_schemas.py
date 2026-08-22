@@ -12,6 +12,7 @@ from typing import Any
 
 _CREATE_ITEM_PARAMETER_SCHEMA: dict[str, Any] = {
     "goal": {"type": "string"},
+    "description": {"type": "string", "maxLength": 240},
     "role": {"type": "string"},
     "agent_name": {"type": "string"},
     "tool_preset": {"type": "string", "enum": ["coding", "read_only", "none"]},

@@ -21,14 +21,16 @@
 
 ### 单 Gateway 多 TUI 项目目录与正式提示词 2
 
-状态：本地候选与 focused 回归已完成，待严格 gate、部署和真实 TUI 复验
+状态：`a091b72` 已部署；首次原样 TUI 暴露薄客户端漏传 cwd，新候选 focused 已通过，待严格 gate 与复验
 
 解决问题：从非 Gateway 启动目录运行 TUI 时会误找另一套 cwd-hash 队列，等待一分钟后退出；即使只放宽
 readiness，模型和工具仍可能在 daemon cwd 工作，造成项目写错位置。
 
 当前进展：服务目录已固定为 owner 级唯一 Gateway，客户端 cwd/roots 改为 thread v6 的 typed 状态；
-前台、后台、Tool Gateway、任务交付和 child 输出共用该值。runner future 异常的二次 `NameError` 同批
-修复。下一步只在 `.7` 的一个 Gateway 上重启原 tmux，再输入第 2 条原样超级玛丽提示词。
+前台、后台、Tool Gateway、任务交付和 child 输出共用该值。`a091b72` 部署后原样提示词 2 已在一个
+Gateway 中创建 child，但首个 ask 因薄 TUI 的 audit Agent 为空而漏传 workspace，产物写到 `/root/bbb`。
+当前候选把 audit 与 workspace 分参，首个 inbox JSON 回归已证明携带 client cwd；同时 child 行改为职责
+短标题、实时上下文 token 和单行宽度预算。下一步严格 gate、部署后用全新 cwd/tmux 重跑同一原样提示词。
 
 ### TUI 活动状态、跟随滚动与 Compact 真机复验
 
@@ -82,8 +84,9 @@ typed 让出，同批成功只恢复一次，失败立即恢复，父级直接�
 内部目录，shared context 只取当前轮，Gateway/TUI 用 canonical active task count 显示一个可移除的
 Working 块，并按 `can_spawn_children` 裁剪 leaf/coordinator 工具面。
 当前轮继续对照 终端交互 `CoordinatorTaskPanel` 收口：Gateway 从 active task link 和
-canonical subagent run 生成有界直属 child 快照，TUI 在输入框附近固定显示每个 child 的
-名称、状态、当前动作、耗时和 attempts。该区域不进 transcript，不影响用户上翻，也不作完成或重试权威。
+canonical subagent run 生成有界直属 child 快照，TUI 在输入框下固定显示每个 child 的名称、状态、
+职责短标题、耗时、当前上下文 token 与 Compact。固定后缀先占宽度，短标题按剩余列截断且永不换行；
+该区域不进 transcript，不影响用户上翻，也不作完成或重试权威。
 
 `714c0c8` 已推送并部署 `.7`，本地 117 项 focused、远端 11 项投影/渲染 focused 与提交前严格 gate
 均通过，按用户约定未重跑全仓 pytest。真实 TUI 已证明两个 child 一次 attempt 自然完成，固定活动区能

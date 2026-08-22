@@ -13,10 +13,16 @@
 
 ## TUI 后台活动投影
 
-2026-08-22 起，activity endpoint 公开 `conversation_agent_activity.v2`：Gateway 后台主代理把最近一次
-thinking、tool、provider retry 或 finalizing 阶段写入进程内有界 display sink；直属 child 的 token/Compact
-数字从各自 canonical ledger 只读取得。客户端按 250ms 节奏轮询并只接收标量白名单。该快照不持久化、
-不参与任务结束或恢复，Gateway 重启后可为空；真实 task link/run/turn_end 仍是唯一生命周期事实。
+2026-08-22 起，activity endpoint 公开 `conversation_agent_activity.v3`：Gateway 后台主代理把最近一次
+thinking、tool、provider retry 或 finalizing 阶段写入进程内有界 display sink；直属 child 的职责短标题、
+当前上下文 token 与 Compact 次数从 exact canonical run 只读取得。当前 token 快照由统一 provider preflight
+在每次模型调用前写入 run attributes，不是累计计费用量。客户端按 250ms 节奏轮询并只接收标量白名单。
+main 快照可易失；child 数值落在 canonical run 的有界展示属性，但两者都不参与任务结束、恢复或授权，
+真实 task link/run/turn_end 仍是唯一生命周期事实。
+
+薄 TUI 的 audit hook 与 workspace 传递相互独立：客户端无需构造第二个完整 Agent，仍必须把当前绝对
+cwd/roots 放进首次 ask。服务路径继续固定到 owner 唯一 Gateway；workspace 只属于 thread v6，不能因
+audit Agent 为空而回退 daemon cwd。
 
 后台轮只有在 delivery contract 已形成可交付正文时才追加 `background_notice.v2`，TUI 将
 `display_kind=assistant_response` 投影为普通 assistant transcript；内部 suppressed 轮和空正文不生成消息。

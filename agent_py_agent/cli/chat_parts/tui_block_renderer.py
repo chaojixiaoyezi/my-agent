@@ -623,45 +623,70 @@ def _active_subagent_count(rows: list[dict[str, object]]) -> int:
     )
 
 
-# LLM: A child row renders only canonical status plus bounded display context.
-# Human-readable activity never drives the icon or status label.
-# 函数用途: 绘制一个直属子代理的名字、状态、当前动作、耗时和尝试次数。
+# LLM: A child row mirrors 终端交互's width budgeting: canonical status and
+# numeric suffixes are reserved first, then one bounded task description is
+# truncated into the remaining columns. Runtime stage prose never enters it.
+# 函数用途: 用单行显示直属子代理的名字、状态、职责短标题、耗时、上下文 token 和 Compact 次数。
 def _render_subagent_activity_row(
     row: dict[str, object],
     context: TuiRenderContext,
 ) -> tuple[FormattedLine, ...]:
     status = str(row.get("status") or "").strip().upper()
     icon, label, style = _subagent_status_display(status)
-    name = str(row.get("name") or row.get("role") or "subagent").strip() or "subagent"
-    activity = (
-        str(row.get("activity") or "").strip()
-        if status in {"PLANNING", "PENDING", "RUNNING", "BLOCKED", "PAUSED"}
-        else ""
+    raw_name = sanitize_terminal_text(
+        str(row.get("name") or row.get("role") or "subagent").strip() or "subagent"
+    )
+    description = sanitize_terminal_text(
+        " ".join(str(row.get("description") or "").split())
     )
     elapsed = _subagent_elapsed_seconds(row, context.now)
     attempts = max(0, _safe_render_int(row.get("attempts")))
-    token_count = max(0, _safe_render_int(row.get("token_count")))
+    context_tokens = max(0, _safe_render_int(row.get("context_tokens")))
     compact_count = max(0, _safe_render_int(row.get("compact_count")))
-    fragments: list[tuple[str, str]] = [
+    suffix: list[tuple[str, str]] = [
+        ("class:tui-muted", f" · {_format_activity_duration(elapsed)}"),
+        ("class:tui-muted", f" · ctx {_format_compact_number(context_tokens)}"),
+        ("class:tui-muted", f" · compact {compact_count}"),
+    ]
+    if attempts > 1:
+        suffix.append(("class:tui-muted", f" · 重试 {attempts - 1} 次"))
+    fixed_without_name: tuple[Fragment, ...] = (
+        ("class:tui-muted", "  "),
+        (style, f"{icon} "),
+        (style, f" · {label}"),
+        *suffix,
+    )
+    description_separator_width = 3 if description else 0
+    available_for_name_and_description = max(
+        1,
+        context.width - display_width_fragments(fixed_without_name) - description_separator_width,
+    )
+    preferred_name_width = min(28, max(1, display_width_text(raw_name)))
+    minimum_description_width = min(12, display_width_text(description)) if description else 0
+    name_width = max(
+        1,
+        min(preferred_name_width, available_for_name_and_description - minimum_description_width),
+    )
+    name = _truncate_text(raw_name, name_width)
+    available_for_description = max(
+        0,
+        context.width
+        - display_width_fragments(fixed_without_name)
+        - display_width_text(name)
+        - description_separator_width,
+    )
+    fragments: list[Fragment] = [
+        ("class:tui-muted", "  "),
         (style, f"{icon} "),
         ("class:tui-strong", name),
         (style, f" · {label}"),
     ]
-    if activity:
-        fragments.append(("class:tui-muted", f" · {activity}"))
-    fragments.append(("class:tui-muted", f" · {_format_activity_duration(elapsed)}"))
-    fragments.append(
-        ("class:tui-muted", f" · ↓ {_format_compact_number(token_count)} tokens")
-    )
-    fragments.append(("class:tui-muted", f" · compact {compact_count}"))
-    if attempts > 1:
-        fragments.append(("class:tui-muted", f" · 重试 {attempts - 1} 次"))
-    return wrap_fragments(
-        tuple(fragments),
-        width=context.width,
-        first_prefix=(("class:tui-muted", "  "),),
-        continuation_prefix=(("class:tui-muted", "    "),),
-    )
+    if description and available_for_description > 0:
+        fragments.append(
+            ("class:tui-muted", f" · {_truncate_text(description, available_for_description)}")
+        )
+    fragments.extend(suffix)
+    return (_truncate_formatted_line(tuple(fragments), context.width),)
 
 
 # LLM: Status-to-style mapping is a pure display projection of the canonical
@@ -2094,6 +2119,38 @@ def _fit_text(text: str, width: int, align: str) -> str:
     if align == "right":
         return " " * remaining + fitted
     return fitted + " " * remaining
+
+
+# LLM: Single-row panels must not wrap even when a name, localized status, or
+# numeric suffix exceeds the terminal. This helper preserves fragment styles and
+# handlers while clipping by display columns and adding one visible ellipsis.
+# 函数用途: 把已分样式的子代理行裁到终端宽度内，避免中文导致换行或对齐错位。
+def _truncate_formatted_line(line: FormattedLine, width: int) -> FormattedLine:
+    limit = max(0, int(width or 0))
+    if limit <= 0:
+        return ()
+    if display_width_fragments(line) <= limit:
+        return line
+    target = max(0, limit - 1)
+    used = 0
+    rendered: list[Fragment] = []
+    ellipsis_style = "class:tui-muted"
+    for fragment in line:
+        style, text, *tail = fragment
+        kept = ""
+        for char in str(text or ""):
+            char_width = max(0, wcswidth(char))
+            if used + char_width > target:
+                break
+            kept += char
+            used += char_width
+        if kept:
+            rendered.append((style, kept, *tail))
+            ellipsis_style = style
+        if kept != str(text or ""):
+            break
+    rendered.append((ellipsis_style, "…"))
+    return tuple(rendered)
 
 
 # LLM: truncate 使用 wcswidth 逐字符累积并为省略号预留一列，避免中日韩字符越过卡片边框。

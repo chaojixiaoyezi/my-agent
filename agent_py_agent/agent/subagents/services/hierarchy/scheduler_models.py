@@ -7,9 +7,13 @@ from ...models import SubAgentTask
 from .qa_scheduler import QaOrchestrationAdvice
 
 
+# LLM: HierarchyChildSpec carries the same explicit child description as the
+# root creation contract. It remains display prose and cannot expand scope.
+# 类用途: 描述父代理准备创建的一个直属下级及其职责短标题、角色和权限范围。
 @dataclass(frozen=True)
 class HierarchyChildSpec:
     goal: str
+    description: str = ""
     agent_name: str = "worker"
     role: str = "worker"
     thought: str = ""

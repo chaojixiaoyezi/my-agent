@@ -972,10 +972,9 @@ _PUBLIC_SUBAGENT_FIELDS = frozenset(
         "name",
         "role",
         "status",
-        "activity",
-        "current_tool",
+        "description",
         "attempts",
-        "token_count",
+        "context_tokens",
         "compact_count",
         "progress_item_ids",
         "created_at",
@@ -987,9 +986,10 @@ _PUBLIC_SUBAGENT_FIELDS = frozenset(
 
 
 # LLM: The reducer repeats the runtime whitelist so replayed or test-injected
-# events cannot smuggle goal text, paths, permissions, or nested tool output into
-# a render block. Only bounded progress ids are accepted as a public list.
-# 函数用途: 保留直属子代理面板的公开标量和 Todo 关联 ID。
+# events cannot smuggle paths, permissions, runtime activity, or nested tool
+# output into a render block. Description is bounded display prose and only
+# progress ids are accepted as a public list.
+# 函数用途: 保留直属子代理面板的职责短标题、公开标量和 Todo 关联 ID。
 def _public_subagent_rows(value: list[object] | tuple[object, ...]) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for item in value[:64]:

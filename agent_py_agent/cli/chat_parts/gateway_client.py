@@ -75,13 +75,24 @@ class ChunkFilePollRequest:
     on_event: object | None = None
 
 
-# LLM: submit 只把显式 ChatRequestContent 映射到 GatewayAskParams；不得按 TTY 或回调类型隐式开启审批等待。
-# 函数用途: 提交聊天请求并返回 request、chunk 和 response 路径。
+# LLM: submit maps explicit content plus an optional typed client workspace into
+# GatewayAskParams. Audit ownership and execution cwd are separate inputs: a thin
+# client has no local audit Agent but must still send its real cwd.
+# 函数用途: 提交聊天请求并返回 request、chunk 和 response 路径；轻客户端可单独传当前工作目录。
 def submit_chat_request(
     paths,
     content: ChatRequestContent,
     agent,
+    *,
+    workspace_root: object = "",
+    workspace_roots: object = None,
 ) -> tuple[str, Path, Path]:
+    effective_workspace_root = workspace_root or getattr(agent, "root", "")
+    effective_workspace_roots = (
+        workspace_roots
+        if workspace_roots is not None
+        else getattr(agent, "workspace_roots", None)
+    )
     request_id, _, response_path = submit_gateway_ask(
         paths,
         params=GatewayAskParams(
@@ -96,10 +107,10 @@ def submit_chat_request(
             system_task=content.system_task,
             interactive_approvals=content.interactive_approvals,
             rich_transcript=content.rich_transcript,
-            workspace_root=str(getattr(agent, "root", "") or ""),
+            workspace_root=str(effective_workspace_root or ""),
             workspace_roots=[
                 str(item)
-                for item in (getattr(agent, "workspace_roots", None) or [])
+                for item in (effective_workspace_roots or [])
                 if str(item or "").strip()
             ],
         ),

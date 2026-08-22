@@ -33,6 +33,10 @@ if TYPE_CHECKING:
     from ..models import ContextManifest, QualityContract, SubAgentCard
 
 
+# LLM: CreateRunParams is the sole normalized creation contract shared by root
+# and recursive subagent paths. Description is display-only and must never be
+# read as authorization, identity, lifecycle, or acceptance input.
+# 类用途: 汇总创建一个子代理所需的参数；职责短标题只供 TUI/Web 展示。
 @dataclass(frozen=True)
 class CreateRunParams:
     """Bundle of create_run parameters."""
@@ -40,6 +44,7 @@ class CreateRunParams:
     goal: str
     thought: str
     plan: list[str]
+    description: str = ""
     agent_name: str = "general"
     role: str = "general"
     parent_id: str = ""
@@ -494,6 +499,9 @@ class SubAgentBaseService:
             "now": time.time(),
         }
 
+    # LLM: The canonical task record receives normalized creation fields once;
+    # later display adapters may truncate description but cannot rewrite goal.
+    # 函数用途: 用准备好的路径、身份和职责短标题组装可持久化子代理任务。
     def _build_task(self, params: CreateRunParams, prepared: dict[str, object]) -> SubAgentTask:
         """Build SubAgentTask from params and prepared context."""
         run_id = prepared["run_id"]
@@ -505,6 +513,7 @@ class SubAgentBaseService:
             goal=params.goal,
             thought=params.thought,
             plan=params.plan,
+            description=str(params.description or "").strip()[:240],
             agent_name=params.agent_name,
             role=params.role,
             owner=str(params.owner or getattr(self.manager, "owner_id", "") or "").strip(),

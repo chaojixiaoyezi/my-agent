@@ -1,10 +1,14 @@
 # Subagent Progress
 
-## 2026-08-22 固定代理区与运行用量投影
+## 2026-08-22 固定代理区、职责短标题与实时上下文投影
 
-- `conversation/agent_activity.py` 的公开 schema 升为 v2：除直属 child 的 typed lifecycle 外，还读取每个
-  run 自己的 token ledger 与 Compact apply ledger，投影累计 token 和 Compact 次数。终态 child 不再显示
-  上一次模型/工具动作，第一次 attempt 不在 UI 展示，只有实际重试才显示次数。
+- `conversation/agent_activity.py` 的公开 schema 升为 v3：直属 child 只投影 typed lifecycle、创建时的
+  职责短标题、每次真实模型调用前的当前总上下文 token，以及 Compact apply 次数。它不再把累计计费
+  token 或“模型响应中/正在使用工具”等运行碎片当成这一行的主文案。终态 child 不残留旧动作，第一次
+  attempt 不展示，只有实际重试才显示次数。
+- `create_subagents.description` 对照 终端交互 `AgentTool` 的 3--5 word description，作为可选短标题进入
+  canonical `SubAgentTask.description`；主/子/孙创建链共用。省略时只读投影退回 goal 开头，renderer
+  仍按当前终端剩余列截断。每个 child 永远只占一行，固定后缀优先保留耗时、`ctx`、Compact 和真实重试。
 - 后台 main 通过同一 agent 进程内的易失 sink 投影最近 thinking/tool/provider-retry/waiting；它只回答
   “主代理现在在干什么”，不保存正文、不拥有生命周期。最终可交付正文仍由 transcript 与 delivery contract
   持有，并以普通 assistant 消息显示。一次模型轮结束只进入 `waiting`，不等于整个任务进入 finalizing。
@@ -20,7 +24,7 @@
 
 - 当前本地 TUI 已从单一 active-task 计数收细为固定直属 child 活动区：
   `conversation/agent_activity.py` 从 thread 的 active task link 和 canonical run 账本选取 depth=1
-  child，输出名称、status、当前活动、耗时和 attempts。它不进 transcript，不携带 goal/工具输出/
+  child，输出名称、status、职责短标题、耗时和实时上下文 token。它不进 transcript，不携带工具输出/
   路径/权限，也不驱动完成、重试或验收。只读投影与 renderer focused 已通过，`.7` 真机待部署复验。
 - `d928d77` 的 `.7` 单 Gateway 原样 TUI 轮已实现 4 个 child 各一次自然 DONE、直属事件自动唤醒和
   `0.0.0.0:8080` loopback/LAN HTTP 200，同时抓到三个新底层缺口：裸 `abc/...` 被误投到 task

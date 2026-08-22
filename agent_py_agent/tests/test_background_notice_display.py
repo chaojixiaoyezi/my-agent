@@ -12,6 +12,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from wcwidth import wcswidth
+
 
 def test_gateway_records_background_notice(tmp_path: Path) -> None:
     """后台轮 report 产生 → notices 文件按 thread_id 落一行 JSON。"""
@@ -161,7 +163,7 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
                 "cursor": 200.0,
                 "active_task_count": 2,
                 "agent_activity": {
-                    "schema_version": "conversation_agent_activity.v2",
+                    "schema_version": "conversation_agent_activity.v3",
                     "active_task_count": 2,
                     "active_task_projection_ok": True,
                     "subagents": [
@@ -169,7 +171,7 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
                             "run_id": "child-1",
                             "name": "level-design",
                             "status": "RUNNING",
-                            "activity": "正在生成关卡",
+                            "description": "设计游戏关卡",
                             "attempts": 1,
                         }
                     ],
@@ -309,9 +311,9 @@ def test_runtime_background_activity_is_one_removable_animated_block() -> None:
             "name": "game-engine",
             "role": "worker",
             "status": "RUNNING",
-            "activity": "正在使用 write_file",
+            "description": "实现超级玛丽核心玩法",
             "attempts": 2,
-            "token_count": 12345,
+            "context_tokens": 12345,
             "compact_count": 1,
             "created_at": 100.0,
             "ended_at": 0.0,
@@ -321,9 +323,9 @@ def test_runtime_background_activity_is_one_removable_animated_block() -> None:
             "name": "level-design",
             "role": "worker",
             "status": "DONE",
-            "activity": "模型已生成回复",
+            "description": "设计前三个关卡",
             "attempts": 1,
-            "token_count": 6789,
+            "context_tokens": 6789,
             "compact_count": 0,
             "created_at": 100.0,
             "ended_at": 145.0,
@@ -351,15 +353,22 @@ def test_runtime_background_activity_is_one_removable_animated_block() -> None:
     assert frame.input_status_lines == ()
     assert "Working · main · 等待 1 个子代理 · 0:00" in transcript
     assert "main" not in rendered
-    assert "game-engine · 运行中 · 正在使用 write_file · 0:50" in rendered
-    assert "↓ 12.3k tokens · compact 1 · 重试 1 次" in rendered
-    assert "level-design · 已完成 · 0:45 · ↓ 6.8k tokens · compact 0" in rendered
+    assert "game-engine · 运行中 · 实现超级玛丽核心玩法 · 0:50" in rendered
+    assert "ctx 12.3k · compact 1 · 重试 1 次" in rendered
+    assert "level-design · 已完成 · 设计前三个关卡 · 0:45 · ctx 6.8k · compact 0" in rendered
     assert "模型已生成回复" not in rendered
     assert "尝试 1" not in rendered
     assert "/stop to interrupt" in fragments_text(frame.footer)
 
-    changed_children = [dict(children[0], activity="正在使用 run_command"), children[1]]
+    changed_children = [dict(children[0], context_tokens=14000), children[1]]
     assert runtime.update_background_activity(1, subagents=changed_children) is True
+
+    narrow = render_tui_snapshot(
+        runtime.store.snapshot(),
+        TuiRenderContext(width=52, spinner_index=0, now=151.0),
+    )
+    assert len(narrow.agent_lines) == 2
+    assert all(max(0, wcswidth(fragments_text(line))) <= 52 for line in narrow.agent_lines)
 
     from agent_py_agent.cli.chat_parts.tui_threading import _publish_background_activity
 

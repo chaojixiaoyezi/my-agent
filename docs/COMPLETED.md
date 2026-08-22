@@ -6,7 +6,7 @@
 
 - 2026-08-21 `714c0c8` 已把单一后台计数扩展为 终端交互/模型助手 Code 式的固定子代理
   活动区：Gateway 从 active task link 与 canonical run 账本生成有界直属 child 投影，输入框附近原位
-  显示名称、状态、当前动作、耗时和 attempts。它不进 transcript，不暴露 goal/工具输出/路径/权限，也不参与
+  显示名称、状态、职责短标题、耗时和 attempts。它不进 transcript，不暴露工具输出/路径/权限，也不参与
   完成、重试或验收。代码已推送并部署 `.7` 单 Gateway；两个真实 child 分别在 46 秒、52 秒一次 attempt
   `DONE`，活动区完整显示状态变化并在主代理自动汇总后收起。父级 wake 在旧进程卡 process-local lane、
   优雅重启后立即恢复的尾项仍留在 ROADMAP，未冒充为全部生命周期验收通过。

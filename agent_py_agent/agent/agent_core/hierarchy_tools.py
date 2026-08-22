@@ -385,6 +385,7 @@ def _hierarchy_child_spec(
         return _schedule_error("children 每一项必须包含 goal。", tool_name=tool_name)
     return HierarchyChildSpec(
         goal=goal,
+        description=str(raw.get("description") or "").strip()[:240],
         agent_name=str(raw.get("agent_name") or raw.get("role") or "worker").strip(),
         role=str(raw.get("role") or "worker").strip(),
         thought=str(raw.get("thought") or "").strip(),

@@ -86,12 +86,36 @@ def _publish_model_context_usage(
     request: object,
     usage: dict[str, object],
 ) -> bool:
+    _publish_subagent_context_usage(request, usage)
     params = getattr(request, "params", None)
     sink = getattr(params, "effective_on_chunk", None)
     writer = getattr(sink, "write_context_usage", None)
     if not callable(writer):
         return False
     return writer(usage) is not False
+
+
+# LLM: A task-local runner has no foreground TUI sink, so its provider-visible
+# context snapshot must cross the process boundary through the canonical child
+# run record. The runner trace accepts numbers only and never receives prompt,
+# messages, tool schemas, or guidance text.
+# 函数用途: 每次子代理真正调用模型前，把当前上下文总 token 写入该 run 的只读展示快照。
+def _publish_subagent_context_usage(
+    request: object,
+    usage: dict[str, object],
+) -> None:
+    from ..runner.stage_trace import (
+        RunnerModelContextUsageTraceRequest,
+        trace_runner_model_context_usage,
+    )
+
+    trace_runner_model_context_usage(
+        RunnerModelContextUsageTraceRequest(
+            agent=getattr(request, "agent", None),
+            params=getattr(request, "params", None),
+            usage=usage,
+        )
+    )
 
 
 def observed_chunk_filter(

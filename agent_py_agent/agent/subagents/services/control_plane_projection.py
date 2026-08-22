@@ -92,26 +92,24 @@ def runtime_compact_count(task: SubAgentTask) -> int:
     return len(runtime_compact_rows(task))
 
 
-# LLM: Token totals come only from per-session token ledgers inside the exact
-# agent-run workspace; malformed or unreadable files contribute zero and are never repaired here.
-# 函数用途: 汇总一个子代理运行目录中所有真实模型轮次的累计 token 数，供状态界面展示。
-def runtime_token_count(task: SubAgentTask) -> int:
-    root = str(getattr(task, "agent_run_workspace_dir", "") or "").strip()
-    if not root:
+# LLM: The child-row token value is the latest canonical provider-visible
+# context snapshot, not cumulative billing usage. It is written before each real
+# model call and read only from the exact run's structured attributes.
+# 函数用途: 读取子代理当前上下文总 token，每次新的模型调用前都会刷新。
+def runtime_context_token_count(task: SubAgentTask) -> int:
+    attrs = getattr(task, "attributes", None)
+    usage = attrs.get("model_visible_context_usage") if isinstance(attrs, dict) else None
+    if not isinstance(usage, dict):
         return 0
-    total = 0
-    tokens_dir = Path(root) / "memory_archive" / "tokens"
+    if str(usage.get("schema") or "") != "model_visible_context_usage.v1":
+        return 0
+    value = usage.get("current_tokens")
+    if isinstance(value, bool):
+        return 0
     try:
-        paths = sorted(tokens_dir.glob("*.json"))
-    except OSError:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
         return 0
-    for path in paths:
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            total += max(0, int(payload.get("cumulative_tokens") or 0))
-        except (OSError, TypeError, ValueError, json.JSONDecodeError):
-            continue
-    return total
 
 
 def _agent_run_metadata(task: SubAgentTask) -> dict[str, object]:

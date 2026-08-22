@@ -155,6 +155,10 @@ class SubAgentManager(SubagentKernelMixin):
     def register_card(self, card: SubAgentCard) -> None:
         self.cards[card.name] = card
 
+    # LLM: This public creation facade preserves the full normalized contract,
+    # including display-only description, while delegating all persistence,
+    # authority, workspace, and lineage work to SubAgentBaseService.
+    # 函数用途: 创建子代理任务；职责短标题会随任务保存，但不影响权限或运行状态。
     def create_run(
         self,
         *,
@@ -162,6 +166,7 @@ class SubAgentManager(SubagentKernelMixin):
         goal: str = "",
         thought: str = "",
         plan: list[str] | None = None,
+        description: str = "",
         agent_name: str = "general",
         role: str = "general",
         parent_id: str = "",
@@ -285,6 +290,7 @@ def _create_run_params_from_kwargs(values: dict[str, object]) -> CreateRunParams
         goal=values.get("goal"),
         thought=values.get("thought"),
         plan=values.get("plan") or [],
+        description=values.get("description"),
         agent_name=values.get("agent_name"),
         role=values.get("role"),
         parent_id=values.get("parent_id"),

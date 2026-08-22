@@ -147,6 +147,30 @@ def test_start_record_native_accounting_matches_unified() -> None:
     assert recorded == unified
 
 
+def test_start_record_persists_live_context_total_for_subagent(tmp_path: Path) -> None:
+    """The same preflight total used by the provider is projected to the exact child run."""
+    from dataclasses import replace
+
+    from agent_py_agent.agent.subagents.manager import SubAgentManager
+
+    agent = _agent(protocol="native")
+    manager = SubAgentManager(tmp_path / "subagents", workspace_root=tmp_path)
+    task = manager.create_run(goal="实现核心玩法", thought="", plan=["执行"])
+    task.status = "RUNNING"
+    task.runner_active_attempt_id = "attempt-1"
+    manager.save(task)
+    agent.subagents = manager
+    agent._current_subagent_run_id = task.id
+    params = replace(_params(protocol="native", prompt=PROMPT), run_id=task.id)
+
+    recorded = _recorded_input_tokens(agent, params, PROMPT)
+    usage = manager.load(task.id).attributes["model_visible_context_usage"]
+
+    assert usage["schema"] == "model_visible_context_usage.v1"
+    assert usage["current_tokens"] == recorded
+    assert usage["updated_at"] > 0
+
+
 def test_start_record_native_accounting_scales_with_ir() -> None:
     """native 协议: IR 轮次累积计入记账(rounds 0 vs 20 显著差异)。"""
     agent = _agent(protocol="native")

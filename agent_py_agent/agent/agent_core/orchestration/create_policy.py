@@ -295,6 +295,7 @@ def _create_run_params_from_build(request: CreateRunBuildRequest) -> CreateRunPa
         goal=request.goal,
         thought=str(raw_params.get("thought") or SUBAGENT_DEFAULT_THOUGHT).strip(),
         plan=_create_plan(raw_params),
+        description=str(raw_params.get("description") or "").strip()[:240],
         agent_name=_root_agent_name(raw_params, role_policy.role),
         role=role_policy.role,
         allowed_skills=string_list(raw_params.get("allowed_skills"), TOOL_TEXT_LIST_OPTIONS),

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -107,12 +106,14 @@ def test_conversation_agent_activity_projects_only_active_roots_direct_children(
         "child-running",
         "child-done",
     ]
-    assert activity.subagents[0]["activity"] == "正在使用 write_file"
+    assert activity.subagents[0]["description"] == "不得进入展示投影"
     assert activity.subagents[0]["attempts"] == 2
     assert activity.subagents[0]["progress_item_ids"] == ["2", "3"]
-    assert activity.subagents[1]["activity"] == ""
+    assert activity.subagents[1]["description"] == "worker"
+    assert "activity" not in activity.subagents[0]
+    assert "current_tool" not in activity.subagents[0]
     assert "goal" not in activity.subagents[0]
-    assert payload["schema_version"] == "conversation_agent_activity.v2"
+    assert payload["schema_version"] == "conversation_agent_activity.v3"
     assert payload["active_task_projection_ok"] is True
     assert payload["subagent_projection_ok"] is True
 
@@ -162,7 +163,7 @@ def test_conversation_agent_activity_marks_active_roots_unknown_on_link_failure(
     assert activity.warnings == ("conversation_task_links_unavailable",)
 
 
-def test_conversation_agent_activity_reads_child_token_and_compact_ledgers(
+def test_conversation_agent_activity_reads_live_child_context_and_compact_ledgers(
     tmp_path: Path,
 ) -> None:
     from agent_py_agent.agent.conversation.agent_activity import (
@@ -170,16 +171,19 @@ def test_conversation_agent_activity_reads_child_token_and_compact_ledgers(
     )
 
     workspace = tmp_path / "child"
-    tokens = workspace / "memory_archive" / "tokens"
-    tokens.mkdir(parents=True)
-    (tokens / "myagent.json").write_text(
-        json.dumps({"cumulative_tokens": 12_345}),
-        encoding="utf-8",
-    )
     compact = workspace / "memory_archive" / "compact_applies" / "ledger.jsonl"
     compact.parent.mkdir(parents=True)
     compact.write_text('{"generation":1}\n{"generation":2}\n', encoding="utf-8")
-    task = _run("child-usage", agent_run_workspace_dir=str(workspace))
+    task = _run(
+        "child-usage",
+        agent_run_workspace_dir=str(workspace),
+        attributes={
+            "model_visible_context_usage": {
+                "schema": "model_visible_context_usage.v1",
+                "current_tokens": 12_345,
+            }
+        },
+    )
     store = SimpleNamespace(
         active_task_links_report=lambda _thread_id: (
             [SimpleNamespace(task_id="task-live", status="active")],
@@ -196,7 +200,7 @@ def test_conversation_agent_activity_reads_child_token_and_compact_ledgers(
         "thread-usage",
     )
 
-    assert activity.subagents[0]["token_count"] == 12_345
+    assert activity.subagents[0]["context_tokens"] == 12_345
     assert activity.subagents[0]["compact_count"] == 2
 
 

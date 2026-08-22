@@ -10,8 +10,9 @@
   `status=active`，interrupted 可恢复索引不再造成假忙。
 - [ ] Gateway/TUI 只读 active root 的 canonical 直属 child 状态；main 的动态 `Working` 行位于
   最新正文后、Context/Todo 前，Todo 固定在输入框上方，输入框下只显示直属 child。child 行显示
-  名称、typed status、当前动作、耗时、累计 token、
-  Compact 次数；第一次执行不显示“尝试 1”，只有重试才显示重试次数，终态不得残留“模型已生成回复”。
+  名称、typed status、一句职责短标题、耗时、实时总上下文 token、Compact 次数；每个 child 严格单行并
+  按终端宽度截断。第一次执行不显示“尝试 1”，只有重试才显示重试次数，任何状态都不得用“模型响应中/
+  模型已生成回复”代替职责。
   main 等待 child 时按 typed status 显示“等待 N 个子代理”，最终答复进入普通 assistant transcript；
   `7c052f2` 第 1 条真机任务已暴露布局/Todo 问题，新候选 147 项定向回归已过，仍需 `.7`
   单 Gateway + 下一条原样长任务 TUI 验收后勾选。
@@ -24,7 +25,8 @@
   transient Audit 的既有窄授权回归保持通过。
 - [x] 两个不同 cwd 的 TUI client 共用一个 owner-level Gateway 路径；ask/thread v6 持久保存各自 cwd/roots，
   工具 gate/handler、任务交付与 child 相对输出使用同一目录。非法 cwd 在模型前拒绝，runner future 异常
-  能落成结构化 BLOCKED；直接相关 focused tests 已通过。
+  能落成结构化 BLOCKED；薄 TUI 第一个 ask 即使没有本地 audit Agent 也携带 cwd/roots；直接相关 focused
+  tests 已通过。
 - [ ] `.7` 从非 daemon cwd 启动 TUI 能在 1--4 秒内连接唯一 Gateway，并用原样提示词 2 完成真实长任务；
   prompt 只能输入一次，测试者不得旁路补产物或技术推动。
 - [ ] Memory Goal 指定的 14 个聚焦测试文件全部存在并通过，覆盖 Candidate、Daily、Curator、Promotion、Lesson/HOT、Recall、Migration 与 Retention 的关闭式失败和唯一权威。
@@ -97,7 +99,7 @@
 - [ ] 主代理、子代理、Gateway 与 TUI 对六类 `turn_end` 映射一致；普通完成不读取 acceptance/verification，
   历史兼容字段不进入当前 prompt、context bundle、父级摘要或启动前检查。
 - [ ] TUI 在活动轮显示唯一的主代理工作状态和持续 thinking 增量；前台 turn 让出而 canonical active task
-  仍非零时，正文末尾的 main `Working` 与输入框下的直属 child 状态/动作/耗时/token/Compact 继续更新，成功查询
+  仍非零时，正文末尾的 main `Working` 与输入框下的直属 child 状态/职责/耗时/实时上下文 token/Compact 继续更新，成功查询
   归零才收起，查询失败不误清零。用户位于
   页底时自动跟随，主动上翻后不抢滚动，回到底部后恢复跟随；Compact 显示 typed 百分比并在完成/失败后
   正确收口。

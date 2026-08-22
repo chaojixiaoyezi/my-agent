@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import threading
@@ -95,6 +96,46 @@ def test_gateway_job_is_durably_submitted_before_running_snapshot(monkeypatch) -
     assert job.gateway_request_id == "gwreq-canonical"
     assert calls[0][0] == "chat-local"
     assert calls[0][1][0] == "runtime rule"
+
+
+def test_thin_tui_initial_gateway_job_carries_client_workspace(tmp_path) -> None:
+    """Initial TUI submission must not lose cwd when the audit Agent is intentionally absent."""
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+    from agent_py_agent.cli.chat_parts.tui_worker_paths import _submit_new_gateway_job
+
+    project = tmp_path / "project"
+    project.mkdir()
+    paths = gateway_paths_from_root(tmp_path / "gateway")
+    client = SimpleNamespace(
+        gateway_client_only=True,
+        root=project,
+        workspace_roots=[project],
+    )
+    cfg = SimpleNamespace(
+        agent=client,
+        paths=paths,
+        current_session_id="session-project",
+    )
+    job = SimpleNamespace(
+        user="创建项目",
+        prompt_files=[],
+        save=True,
+        show_prompt=False,
+        resume_context=None,
+        system_task=None,
+        tool_approval=True,
+        rich_transcript=True,
+        gateway_request_id="",
+    )
+
+    request_id, _chunk_path, _terminal_path = _submit_new_gateway_job(cfg, job, [])
+
+    payload = json.loads((paths.inbox / f"{request_id}.json").read_text(encoding="utf-8"))
+    assert payload["workspace"] == {
+        "cwd": str(project.resolve()),
+        "roots": [str(project.resolve())],
+    }
+    assert job.gateway_request_id == request_id
 
 
 def test_complete_queued_inject_does_not_append_chat_style_twice() -> None:

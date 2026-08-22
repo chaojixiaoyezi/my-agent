@@ -49,8 +49,10 @@ def test_create_subagents_model_spec_uses_template_index_not_full_prompt():
     assert "count" not in spec.input_schema["properties"]
     assert spec.input_schema["required"] == ["goal"]
     assert all('"goal"' in example for example in spec.examples)
+    assert "职责短标题" in spec.parameter_descriptions["description"]
     item_schema = spec.input_schema["properties"]["items"]["items"]
     assert item_schema["required"] == ["goal"]
+    assert item_schema["properties"]["description"]["maxLength"] == 240
     assert item_schema["properties"]["output_files"]["type"] == "array"
     assert "交付身份与冲突范围" in spec.parameter_descriptions["output_files"]
 
@@ -71,9 +73,15 @@ def test_create_subagents_inherits_current_task_workspace(tmp_path):
     )
     agent._current_run_task_workspace = str(task_root)
 
-    params = create_run_params(agent, {"role": "worker"}, "阅读项目 A 并写报告", ["read_file"])
+    params = create_run_params(
+        agent,
+        {"role": "worker", "description": "调研项目 A"},
+        "阅读项目 A 并写报告",
+        ["read_file"],
+    )
     task = agent.subagents.create_run(params=params)
 
+    assert task.description == "调研项目 A"
     assert task.attributes["run_workspace"]["task_root"] == str(task_root)
     assert task.task_workspace_dir == str(task_root)
     assert task.agent_run_workspace_dir == str(task_root / "work" / "agents" / task.id)

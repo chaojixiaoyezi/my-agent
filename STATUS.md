@@ -1,5 +1,17 @@
 # STATUS
 
+## 2026-08-22 薄 TUI 首次 cwd 与子代理职责行（本地候选）
+
+- `a091b72` 已推送并部署 `.7`，唯一 Gateway 为 MiniMax-M2.7。原样提示词 2 真 TUI 成功创建多个 child，
+  但首个 ask 没有 workspace：薄客户端故意不构造 audit Agent，提交函数却把 cwd 也错误绑定在该对象上，
+  因此 child 写到 `/root/bbb` 而不是 TUI 的项目目录。本轮样本已停止计作通过。
+- 当前候选把 audit 与 workspace 独立传递，focused test 直接验证第一个持久请求的 cwd/roots。子代理创建
+  合同同时接通现有 `description` 字段；活动 schema 升为 v3，child 行只显示一句职责、typed status、
+  耗时、实时总上下文 token、Compact 与真实重试，不再显示“模型响应中/模型已生成回复”。
+- 对照 终端交互 `AgentTool` 与 `CoordinatorTaskPanel`，职责由创建时短标题提供，省略才回退 goal 开头；
+  renderer 先预留数值后缀再按终端列宽截断，保证每个 child 一行。当前直接相关 focused tests 已通过，
+  严格 gate、推送、`.7` 单 Gateway 部署和原样提示词 2 的全新 TUI 复验仍待完成。
+
 ## 2026-08-22 单 Gateway 多目录启动失败已定位（本地候选）
 
 - `.7` 正式提示词 2 的 TUI 从 `/root/dsh-tui-p2-f5d28b8` 启动时在 `Connecting to Gateway` 退出，prompt
@@ -58,9 +70,9 @@
   Ruff、doc sync、strict code-size、diff check 和 clean-package 也全部通过。提交推送、`.7` 部署及同
   prompt 真机复验尚未完成；本切片低于 10,000 行，按约定未重复跑全仓 pytest。
 - 当前本地候选已继续把上述 Working 投影收细：`conversation/agent_activity.py` 只读 active
-  task link 与 canonical subagent run，输出主任务的直属 child 名称、结构化状态、当前活动、耗时和
+  task link 与 canonical subagent run，输出主任务的直属 child 名称、结构化状态、职责短标题、耗时和
   attempts。TUI 现在把这些行固定放在 composer 附近，不进可滚动 transcript；默认不展开孙代理，也不
-  泄露 goal、工具输出、路径或权限。只读面已落地，用户对任意后代的 message/interrupt/resume/
+  泄露工具输出、路径或权限。只读面已落地，用户对任意后代的 message/interrupt/resume/
   cancel 共享控制协议只完成设计，未冒充为已实现。
 - `714c0c8` 已推送并部署到 `192.0.2.7:/root/my-agent`，测试机保持一个真实 Gateway，配置仍为
   `anthropic_compatible + MiniMax-M2.7`。真实 TUI 一次普通中文要求两个 child 分别写 `a.txt`/`b.txt`：

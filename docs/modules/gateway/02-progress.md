@@ -5,11 +5,24 @@
 - `d928d77` 真机中前台 turn 让出后，child 仍在自动运行，但 TUI 没有持续活动提示。旧 notice 接口只返回
   偶发文本，不能回答“当前会话是否还有任务”。
 - `/client/notices` 现在在同一个已鉴权 owner/thread 快照中返回 active task link 数量和
-  canonical run 账本里的直属 child 行。每行只包含名称、status、最近活动、耗时与 attempts；goal、工具输出、
-  路径和权限不进入客户端 metadata。通知文件仍只负责新增用户可见消息，不承担活动权威。
+  canonical run 账本里的直属 child 行。当前 v3 每行只包含名称、status、职责短标题、耗时、当前上下文
+  token、Compact 与 attempts；回复、运行碎片、工具输出、路径和权限不进入客户端 metadata。通知文件仍只
+  负责新增用户可见消息，不承担活动权威。
 - TUI 成功读取后在 composer 附近原位更新一个可移除 Working 区；相同快照不重复追加，活跃 root 归零原位收起，
   HTTP/解析失败保留上一次有效投影。该入口只读，不启动、停止、重试或验收任何任务。定向回归已通过，`.7`
   原样长任务画面仍待当前切片部署后复验。
+
+## 2026-08-22 薄 TUI 首次提交 cwd 与 child 展示快照
+
+- 单 Gateway 的 thread cwd 主链第一次真机提示词 2 暴露了更窄的提交缺口：薄 TUI 为避免在客户端构造
+  第二个完整 Agent，会把 audit Agent 置空；旧 `submit_chat_request` 又只从该 Agent 读取 workspace，导致
+  首次 ask 没有 `workspace`，child 最终写到 Gateway daemon 的 `/root/bbb`。
+- audit owner 与执行 cwd 现为两个显式输入。薄 TUI 即使没有本地 audit Agent，也始终从当前 client config
+  提交绝对 cwd/roots；Gateway 仍负责校验并持久化 thread v6。focused 回归直接读取真实 inbox JSON，证明
+  第一个请求已带正确 workspace，不靠后续 turn 或 prompt 补救。
+- activity endpoint 同批升到 `conversation_agent_activity.v3`。child 的 `context_tokens` 是 exact run 每次
+  provider preflight 的当前总上下文，`description` 是创建时职责短标题；TUI 只在一行内按剩余宽度截断，
+  不再把 runner 的“模型响应中/模型已生成回复”显示成子代理职责。
 
 ## 2026-08-21 TUI 后台任务停止定位
 
