@@ -126,8 +126,10 @@ class GatewayChatClientAgent:
             "load_errors": [{"error_code": "GATEWAY_UNAVAILABLE"}],
         }
 
-    # LLM: S-BG1 后台完成通知走同一 HTTP 合同；失败返回空列表（显示增强不打扰会话）。
-    # 函数用途: 拉取当前会话 after 游标之后的后台主代理轮完成通知。
+    # LLM: S-BG1 notices and the typed active-task count share one lightweight
+    # HTTP snapshot; transport failure returns no activity claim so the caller
+    # preserves its last projection instead of guessing from prose.
+    # 函数用途: 拉取当前会话后台任务数量，以及 after 游标之后的后台完成通知。
     def request_background_notices(
         self,
         session_id: str,
@@ -144,7 +146,12 @@ class GatewayChatClientAgent:
             },
             timeout=10.0,
         )
-        return body or {"ok": False, "notices": [], "cursor": after}
+        return body or {
+            "ok": False,
+            "notices": [],
+            "cursor": after,
+            "active_task_count": 0,
+        }
 
     # LLM: Ordinary TUI input carries both 会话运行时 expected turn id and an opaque client id.
     # Only a typed rejected response permits queue fallback; transport failure remains UNKNOWN so

@@ -11,6 +11,17 @@
   `background_threads_per_owner` 限制单 owner 并发；超出者保留在持久队列等后续 tick。
 - scheduler 的 policy 诊断是 worker thread-local，不同会话不会互相污染运行事实。
 
+## TUI 后台活动投影
+
+- `gateway_parts/http_handlers.py::read_gateway_client_notices` 在可信 owner/session 解析出的同一
+  `ConversationThread` 上读取 `active_task_ids`，并与 after-cursor 之后的 notice rows 一次返回。客户端
+  不能指定 thread id，也不能从通知正文推断活跃状态。
+- `cli/chat_parts/tui_threading.py` 只有在 `ok=true` 时消费该数量；传输或解析失败保持当前投影，避免把
+  “暂时查不到”伪造成任务结束。直连本地模式读取同一个 ConversationStore 字段。
+- `TuiRuntime`、reducer 和 renderer 只维护一个 session-scoped `background` 活动块。前台 thinking 优先，
+  前台让出后显示灰色闪动 Working、数量和耗时；真实计数归零时删除而不进入 transcript。这个 projection
+  没有调度、重试、停止或完成裁决权。
+
 ## 回合终态与 Compact 进度投影
 
 - `gateway_parts/request_execution.py::_update_response_from_result` 只把运行时已经确定的

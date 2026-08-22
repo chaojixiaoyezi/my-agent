@@ -185,8 +185,9 @@
   重试。archive、control-plane event 与 compact 续跑必须携带同一结构化状态；语义摘要不能吞掉中段失败、
   运行中或 unknown 的副作用事实。业务是否需要回滚仍由具体工具或 workflow 明示实现，通用底座不得
   伪造跨系统原子性。
-- 工具参数中的显式绝对路径具有目标身份，不能为了“安全落位”静默换成另一个路径后返回成功。相对
-  `output/...`、`work/...` 可以按结构化任务边界解析；绝对路径必须保留原值，再由
+- 工具参数中的显式绝对路径具有目标身份，不能为了“安全落位”静默换成另一个路径后返回成功。普通
+  相对路径按当前可信 cwd/workspace 解析；只有显式 `output/...`、`work/...` 才进入结构化任务内部目录。
+  绝对路径必须保留原值，再由
   `allowed_write_roots`、owner 墙、危险目录、sandbox/approval 明确允许或拒绝。该规则对齐 会话运行时
   “解析真实目标后交给 sandbox/approval”和 长期助手“保留绝对路径并报告 resolved_path”的做法。
 - 除 `/status`、`/stop` 等显式控制命令外，普通聊天、派工回执、等待说明、进度与完成说明的用户正文必须来自 LLM。运行时只提供结构化事实、禁用回执轮工具并校验/净化输出；不得用“任务正在处理”等固定系统句子替换模型正文。没有合格模型正文时宁可记录结构化失败并抑制投递，也不能用模板冒充 Agent 回答。
@@ -247,7 +248,11 @@
 - 可复用 Workflow 只有一种表达：Skill 提供方法，当前 thread 的 `task_progress` 保存计划，原生子代理工具显式创建和派发执行者。旧 `subagent_workflows` package、mode/config/CLI、extension hook 和 shared workflow index 已删除；不得恢复第二套 transcript、planner/router、自动批量扩张或模板执行 runtime。该边界对照 会话运行时 `turn_context.rs` 的逐轮 Skills snapshot、`plan.rs`/`plan_spec.rs` 的 typed plan 更新和 `multi_agents_spec.rs` 的显式 spawn，以及 模型助手 Code `plugins/feature-dev` 通过 command/agent prompt 调用原生 Todo/agent 能力的做法。
 - 普通代码任务只有一份 owner-local 被动验证证据：公共工具出口按 `ToolCallEnvelope.scope.root_task_id` 记录项目 manifest 中的精确规范命令、真实 exit 与 targeted/full；成功文件写使旧证据 stale。它参考 长期助手 `verification_evidence.py`/`verify_hooks.py` 的被动账本，但不移植 stop hook，不执行测试、不阻止完成、不恢复普通任务验收器；模型继续按 会话运行时 的真实 tool-result 事实自然收口。
 - 主代理普通正文不是机器事实：当本轮已有持久 `task_progress` 且仍有 open item 时，模型的第一版 plain final 只作为可丢弃草稿；运行时参考 终端交互 `TaskUpdateTool` 的 structural verification nudge，在同一个工具循环中追加结构化 `open_count` 软核对。下一轮仍持有原工具能力，可读/更新清单或继续工作。提醒按 `executed_tools` 的真实工具进展段去重：同一进展段只消费一次，提醒后若又产生真实工具动作，后续 plain final 可再获得一次核对；没有新增工具动作时不得循环提醒。普通任务仍由模型正常结束，不以可能过期的清单形成完成硬门；只有显式持久 `/goal` 保留 open-plan `unfinished` 生命周期和 continuation。全链不解析“完成”等自然语言、不扫描目录、不执行验收。
-- 子代理工具能力只能继承父代理当前 run 的工具快照并继续做减法：普通 worker 永远移除 child-creation 工具；coordinator 只有父代理本来拥有对应能力时才能继续派工。显式 `allowed_tools` 只是收窄请求，不得凭角色模板或模型文本扩权。
+- 子代理工具能力只能继承父代理当前 run 的工具快照并继续做减法：所有普通 leaf 角色都移除
+  `create_subagents/send_guidance/cancel_subagents/resolve_capability_requests` 四个直属下级控制入口；
+  只有结构化角色模板明确 `can_spawn_children=true` 的 coordinator，且父级本来拥有对应能力时，才保留
+  这四项。leaf 自己仍可用 `capability_request` 请求本层能力。显式 `allowed_tools` 只是收窄请求，
+  不得凭 agent 名、goal 文本或模型声称扩权。
 - 模型调用观测区分 logical turn、物理 model attempt 与 provider HTTP attempt；每次 provider 重试、模型级重试、失败、超时和最终状态写入同一线程安全账本，并投影到 runtime facts 与内部 Gateway result。观测回调不得读取 key/body，也不得改变真实请求结果。
 - owner quota 的唯一应用层锁序是 `owner quota -> repository/file lock -> mutation`。文件工具、Memory、Persona、Scheduler 和 Skill draft 必须在同一 owner lock 内按完整 multi-file mutation 的最终字节准入；策略、用量或锁不可读时 fail-closed。应用门不能冒充 filesystem quota：Shell/PTY/LSP 任意进程写盘必须由正式部署的 filesystem/project/container quota 硬限制。
 - owner retention 只依据 typed policy、terminal authority 和 timestamp；task/scratch 执行前必须二次校验，先移入 owner trash 并写 tombstone，再按期限删除。owner/task legal hold、损坏 policy 或状态漂移均跳过并留审计。Gateway 只用 cursor 有界扫描 owner，不为清理实例化 Agent。
@@ -286,7 +291,7 @@
 
 以后新增长期设计，只写摘要和链接，不再把完整方案塞回这个文件。
 
-## 2026-08-21 子代理递归控制面与自然收口【状态：本地已落地，待 `.7` 真机复验】
+## 2026-08-21 子代理递归控制面与自然收口【状态：主链已真机验证，新收口切片待 `.7` 复验】
 
 - 问题根因：历史实现同时暴露“创建—调度—推进”多个模型工具，并用
   `acceptance_checks` / `verification_status` / 交付扫描器二次裁决任务是否完成。这使模型
@@ -304,6 +309,10 @@
   TUI 投影的内部只读能力，但从普通模型工具箱移除；父级不靠查树、shell `sleep` 或周期调用推动 child。
   子代理、孙代理和根的差异只由 `run_id/parent_run_id/root_run_id`、工作区和递减权限表达，每一层只管理
   自己的直接下级。
+- 这四个直属控制入口不是每个 child 的固定工具。根主代理和结构化
+  `can_spawn_children=true` 的 coordinator 才持有；worker/researcher/tester/writer/bug-finder 等 leaf
+  只执行自己的任务和必要的 `capability_request`。若某一层需要再拆分，父级应把它明确创建成
+  coordinator，而不是给普通 leaf 塞一组永远用不到的管理工具。
 - 模型侧 `raise_event` 同步删除，不把“子代理自报进展”作为第五个递归控制工具。普通活动、权限申请、
   阻塞和终态由宿主从 runner/thread 的 typed 生命周期直接写入父级事件账本；长期 Audit/监控也调用内部
   observation/wake service，不再绕回模型工具。
@@ -364,6 +373,9 @@
   可直接交给 child。`create_subagents.items[].output_files` 仍用来登记用户明确交付位置、产物归属和冲突锁，
   但 goal 或 output_files 都不能把范围扩大到父级工作区之外。TUI 后台 notice 首次立即查询、之后每秒查询，
   并为同 thread 每条消息生成独立 block id，避免 reducer 丢掉第二条以后更新。
+- child 启动时的父级共享阅读上下文只来自当前 tool loop 的 archive。旧的 agent-level
+  `_parent_shared_context_packs` 缓存已删除，不能把上一任务读过的文件预览自动塞进下一任务；跨轮长期事实
+  必须走正式 transcript/Compact/refs，而不是不可审计的进程内残留。
 - `c2c0235` 的 `.7` 原样 TUI 任务创建并自动启动 4 个 child，真实暴露两个底层缺口：宽泛 `/root`
   forbidden 误压过更窄 task output allow，导致同一 child 连续 `WRITE_FORBIDDEN` 并重复申请已授予权限；
   真实 ToolResult 字段是 `tool_name`，旧状态投影却读取 `tool`，所以 canonical state 长期只显示空
@@ -393,6 +405,13 @@
   exact turn id；前台已让出但当前 conversation 仍有子代理/background claim 支撑的唯一 typed
   live task 时，可以不带 turn id 交给 Gateway 按 owner/thread 停止该任务。多个冲突 live task 或只有
   历史终态时继续 fail closed，不猜目标；`/btw` 始终要 exact active turn。
+- `d928d77` 的 `.7` 单 Gateway 原样任务已证明四名 child 都能一次自然 `DONE`、最后一名会自动唤醒主代理，
+  服务也真实监听 `0.0.0.0:8080` 且 loopback/LAN HTTP 200；但产品文件被错误写到 task 内部
+  `output/abc`，`/root/abc` 为空，child 上下文还混入旧 `/root/kill-ws/...` 读取包，前台让出后 TUI
+  没有常驻 Working。当前切片统一修复三点：裸 `abc/...` 相对当前 `/root`，显式 `output/...`/`work/...`
+  才走 task 内部目录；共享阅读包只取当前轮；`/client/notices` 返回 canonical
+  `ConversationThread.active_task_ids` 数量，TUI 用一个可移除的灰色 Working 活动块持续显示，查询失败保留
+  上一次投影、真实计数归零才收起。该块只展示状态，不会推动、重试或验收任务。
 
 ## 2026-08-18 候选消息实时流式 + 每轮阶段计时【状态：本地 focused 通过，待真机部署复验】
 

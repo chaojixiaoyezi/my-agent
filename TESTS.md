@@ -298,7 +298,9 @@ RC=0、ConversationStore user/assistant=2、Candidate/formal=1/1、唯一 user m
 `/goal` 的 open plan 才保持 `unfinished` 并由既有 continuation 续跑。该行为不得解析“完成”等自然语言、
 扫描任务目录、执行验证命令或给普通 task 增加完成硬门。终态普通 task 续作必须保留旧终态和 cwd、
 创建新执行 task id；只有精确持久 `/goal` 可以原 id 恢复。子代理普通工具必须是父 run 快照的严格子集；
-coordinator 可通过统一 `create_subagents` 继续递归创建，worker 不得获得 child-creation 工具。模型调用账本必须区分 logical turn、
+coordinator 可通过统一 `create_subagents` 继续递归创建，所有 leaf 都不得获得
+create/guidance/cancel/resolve 四个直属下级控制工具，但仍可用 `capability_request` 为自己申请权限。
+直接创建和层级调度都要覆盖这条规则。模型调用账本必须区分 logical turn、
 物理 model attempt 和 provider HTTP attempt，并覆盖并发首次请求、重试、失败、超时和迟到 finish。
 task-local child 即使携带父 conversation id，也必须证明可在自己的 runner lane 正常写入授权产物。
 sticky workspace 回归还必须覆盖：新 execution 复用旧 task path 时，四份当前执行投影同步换成新
@@ -407,8 +409,13 @@ extras；不能依赖宿主机碰巧已有 cryptography/SQLAlchemy，也不能�
 都保留 operation/effect 事实。该回归不要求通用 Saga，也不能用自然语言猜依赖或补偿动作。
 
 路径极端回归还必须覆盖：显式未授权绝对路径保持原目标身份并返回 `WRITE_FORBIDDEN`，原目标与任务
-`output/` 下的替代路径都不得生成；失败前后的独立合法写仍能按顺序完成。相对 `output/...`、`work/...`
-的结构化任务落位继续生效，不能用绝对路径静默搬运兼容层冒充成功。
+`output/` 下的替代路径都不得生成；失败前后的独立合法写仍能按顺序完成。裸相对路径必须继承当前可信
+cwd/workspace；相对 `output/...`、`work/...` 的结构化任务落位继续生效，不能把裸项目路径误投到 task
+output，也不能用绝对路径静默搬运兼容层冒充成功。
+
+后台可观察性 focused 必须覆盖：Gateway 成功快照返回 canonical active-task count；TUI 以一个可移除
+Working 活动块显示 count 和耗时；相同 count 不重复追加，归零原位删除；HTTP/解析失败不把上次真实活动
+误清零。父级共享上下文还必须证明当前轮无 read archive 时不会复用 agent 上一次任务的缓存内容。
 
 真实本地模型回归示例：
 

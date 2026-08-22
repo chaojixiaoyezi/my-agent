@@ -1,8 +1,9 @@
 # TEST CHECKLIST
 
 - [x] 工具运行时改动相关 focused tests 通过（Schema/runtime/protocol/policy/executor/ledger/output/concurrency/cancel/compact 矩阵）；其他并行模块仍按各自条目验收。
-- [x] 子代理模型工具面只含 create/guidance/cancel/capability；inspect/dispatch/schedule/wait/raise_event
-  均不可注册或从历史 grant 复活。宽 forbidden 与窄 task output allow 按最具体路径裁决，同层 deny 胜出；
+- [x] 递归管理面只含 create/guidance/cancel/capability；inspect/dispatch/schedule/wait/raise_event
+  均不可注册或从历史 grant 复活。只有根主代理与结构化 coordinator 持有四项，普通 leaf 全部移除。
+  宽 forbidden 与窄 task output allow 按最具体路径裁决，同层 deny 胜出；
   runner canonical state 记录无正文的模型/工具活动，真实 ToolResult 使用 `tool_name`。
 - [ ] Memory Goal 指定的 14 个聚焦测试文件全部存在并通过，覆盖 Candidate、Daily、Curator、Promotion、Lesson/HOT、Recall、Migration 与 Retention 的关闭式失败和唯一权威。
 - [ ] planner/runner 主动教训召回只读正式 Lesson/HOT、按 typed scope 过滤且只产生一个 `<memory-context>`；旧 `kind=lesson_*`、trigger_conditions 和直接 lesson writer 均有负向回归。
@@ -50,7 +51,11 @@
   同一 run，取消/接管终态不得复活。根、子、孙只能 guidance/cancel/resolve 自己的直属 child；
   模型 cancel 回执不得夹带整树状态，schema 不暴露 dry_run/kill_process 运维参数。
 - [ ] 普通 child 逐层继承父级结构化 workspace 上界；`output_files` 记录明确交付目标与冲突锁，但不能
-  扩大父级权限。后台续跑必须绑定 exact task，不能复用同 thread 旧任务的 main run/attempt。
+  扩大父级权限。裸相对路径按可信 cwd 解析，只有显式 `output/...`、`work/...` 进入 task 内部目录；
+  `/root` 启动的真实任务必须把 `abc/` 交付到 `/root/abc`。后台续跑必须绑定 exact task，不能复用同
+  thread 旧任务的 main run/attempt。
+- [ ] child 的父级共享 read/search 预览只来自当前 tool loop archive；当前轮没有读取时不得复用上一任务
+  agent cache，真实 execution context 不得出现无关旧 task 路径。
 - [ ] local/unmanaged child 继承 workspace root 时不再被完全同路径的默认 home deny 误拦；
   更窄凭据/用户目录 deny 与远程 owner home 围栏必须保留。
 - [ ] TUI `/stop` 在前台 turn 运行/提交时精确绑定 turn id；前台让出但当前 conversation
@@ -69,8 +74,10 @@
   `nohup ... &` 在执行前明确拒绝且可修正重试，最终必须从另一条命令核验 0.0.0.0 监听与局域网访问。
 - [ ] 主代理、子代理、Gateway 与 TUI 对六类 `turn_end` 映射一致；普通完成不读取 acceptance/verification，
   历史兼容字段不进入当前 prompt、context bundle、父级摘要或启动前检查。
-- [ ] TUI 在活动轮显示 Working 动画和持续 thinking 增量；用户位于页底时自动跟随，主动上翻后不抢滚动，
-  回到底部后恢复跟随；Compact 显示 typed 百分比并在完成/失败后正确收口。
+- [ ] TUI 在活动轮显示 Working 动画和持续 thinking 增量；前台 turn 让出而 canonical active task 仍非零时，
+  一个可移除的后台 Working 块继续闪动并显示数量/耗时，成功查询归零才收起，查询失败不误清零。用户位于
+  页底时自动跟随，主动上翻后不抢滚动，回到底部后恢复跟随；Compact 显示 typed 百分比并在完成/失败后
+  正确收口。
 - [ ] 真实测试中主代理和独立子代理 compact 后能继续工作；至少一条链连续发生多代 compact，近期完整回合、工具事实、任务状态和产物引用不丢，且没有重做已经成功的副作用。
 - [ ] 真实 IM 双用户验证 compact/memory/旧聊天检索不串 owner 或 chat，结束后恢复生产 compact 阈值。
 - [ ] `/verbose on/full/off` 只改变当前 thread，不进入 transcript/guidance/模型；进度发送不触发任务重做，最终回复仍能送达。

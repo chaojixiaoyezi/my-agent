@@ -25,10 +25,6 @@ from ..tooling.registry_workspace import effective_registry_cwd
 from ._runtime_params import ToolLoopExecuteParams
 from .delivery_contract_prompting import render_delivery_contract_section
 from .native_tool_protocol import native_tool_use_active
-from .orchestration.shared_context import (
-    refresh_parent_shared_context_cache,
-    refresh_parent_shared_context_from_tool_record,
-)
 from .provider_transient_auto_resume import run_with_provider_transient_auto_resume
 from .runner.context import current_task_attributes
 from .runner.stage_trace import trace_runner_tool_call_started
@@ -1665,8 +1661,6 @@ def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
     persist_tool_runtime_ledger(agent, archive_record)
     record.params.archive_tool_calls.append(archive_record)
     update_runtime_fact_progress_if_enabled(agent, record.params, tool_round=record.tool_rounds)
-    refresh_parent_shared_context_cache(agent, record.params.archive_tool_calls)
-    refresh_parent_shared_context_from_tool_record(agent, record)
     result_rendered = render_tool_result_for_live_prompt(record.result, archive_record)
     record.params.tool_context.append(
         f"[tool-record round={record.tool_rounds} index={record.idx}]\n"

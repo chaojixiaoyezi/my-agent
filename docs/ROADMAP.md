@@ -21,7 +21,7 @@
 
 ### TUI 活动状态、跟随滚动与 Compact 真机复验
 
-状态：本地严格门禁通过，待部署 `.7` 和真实 TUI 复验
+状态：上一主链已部署，当前收口切片本地严格门禁通过，待推送、部署和真实 TUI 复验
 
 解决问题：旧 TUI 在长任务运行时把普通 Enter 当成下一轮队列，用户补充消息要等当前任务结束才执行；
 queue preview 又位于可滚动 transcript，离开尾部后看不见。并行实验室若完成后长期空闲，也会浪费四路
@@ -63,15 +63,23 @@ typed 让出，同批成功只恢复一次，失败立即恢复，父级直接�
 `task_progress` 普通任务自动续跑，使 open 软清单不再制造额外模型轮。待严格 gate、推送部署后，用
 同一原样 TUI prompt 比较模型调用数、耗时、子代理终态、产物与 8080。
 
-当前 focused 已通过，按用户约定未重跑全仓 pytest。待做：完成本轮严格 gate、提交推送并部署 `.7`；
+`d928d77` 后续原样轮已把递归事件链验证到位：四名 child 都只运行一次并自然 `DONE`，最后一个完成会
+自动唤醒主代理，无需用户发“继续”；受管服务真实监听 `0.0.0.0:8080`，loopback 与局域网 HTTP 都为
+200。仍未通过的是交付位置和可观察性：`/root/abc` 为空，页面实际落在 task 内部 `output/abc`；child
+上下文混入旧 `/root/kill-ws/...` read pack；前台让出后 TUI 没有持续 Working；普通 leaf 还收到四个
+无法使用的下级管理工具。当前本地切片已改为裸相对路径继承 cwd、只有显式 output/work 前缀进入 task
+内部目录，shared context 只取当前轮，Gateway/TUI 用 canonical active task count 显示一个可移除的
+Working 块，并按 `can_spawn_children` 裁剪 leaf/coordinator 工具面。
+
+当前新切片 188 项 focused 与远端提交前严格 gate 已通过，按用户约定未重跑全仓 pytest。待做：提交推送并部署 `.7`；
 由全新真实 TUI 验证 child 完成后父会话不受其它 TUI 长回合阻塞，再继续验证 Working 动画、thinking 连续增量、页底自动跟随、
 离底不抢滚动、Compact 百分比、后续消息可见、右键复制和输入框粘贴。外层系统剪贴板仍须用户在已 attach
 的本机终端亲自粘贴确认，自动化不能冒充这一步通过；同一普通中文游戏 prompt 还要证明 child 自动
 完成后父级无需用户发“继续”，能读到产物、整合到 `/root/abc` 并实际监听 `0.0.0.0:8080`。
 
 边界：当前测试机为 `192.0.2.7:/root/my-agent`；保持单 Gateway、多 TUI、tmux 观察会话和远端
-key/config/runtime 数据，不触碰其它项目。本轮累计改动超过 10,000 行，按约定只追加一次全仓 pytest，
-后续修复只跑失败项和相关 focused tests。
+key/config/runtime 数据，不触碰其它项目。较早大切片已按约定执行过一次全仓 pytest；当前切片远低于
+10,000 行，只跑相关 focused tests 与远端提交前严格 gate，不重复浪费时间跑全仓。
 
 ### npm 缓存全新 Node 任务真机复验
 

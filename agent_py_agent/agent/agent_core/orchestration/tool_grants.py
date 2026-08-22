@@ -15,10 +15,6 @@ CODING_SUBAGENT_TOOLS = [
     "write_file",
     "apply_patch",
     "run_command",
-    "create_subagents",
-    "send_guidance",
-    "cancel_subagents",
-    "resolve_capability_requests",
     "capability_request",
 ]
 READ_ONLY_SUBAGENT_TOOLS = [

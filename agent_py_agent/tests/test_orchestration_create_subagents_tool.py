@@ -542,6 +542,10 @@ class TestCreateSubagentsToolTemplatePolicy:
         assert "write_file" in call_kwargs["params"].allowed_tools
         assert "apply_patch" in call_kwargs["params"].allowed_tools
         assert "run_command" in call_kwargs["params"].allowed_tools
+        assert "create_subagents" not in call_kwargs["params"].allowed_tools
+        assert "send_guidance" not in call_kwargs["params"].allowed_tools
+        assert "cancel_subagents" not in call_kwargs["params"].allowed_tools
+        assert "resolve_capability_requests" not in call_kwargs["params"].allowed_tools
         assert call_kwargs["params"].parent_access_mode == "full-access"
         assert call_kwargs["params"].memory_retention_policy == "delete_after_days"
         assert call_kwargs["params"].memory_delete_after_days == 7

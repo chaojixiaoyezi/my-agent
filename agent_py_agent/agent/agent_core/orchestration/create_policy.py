@@ -14,7 +14,11 @@ from ...common.value_parsing import TOOL_TEXT_LIST_OPTIONS, bool_value, string_l
 from ...conversation.authority import CONVERSATION_REQUEST_ID_ATTR
 from ...runtime_errors import runtime_error_report
 from ...settings.defaults import DEFAULT_COMMAND_ACCESS_MODE
-from ...subagents.role_templates import COORDINATOR_TOOLS, role_template_snapshot_for_role
+from ...subagents.role_templates import (
+    COORDINATOR_TOOLS,
+    DIRECT_CHILD_CONTROL_TOOLS,
+    role_template_snapshot_for_role,
+)
 from ...subagents.services.base import CreateRunParams
 from ..parameters import _bool_param, _positive_int
 from ..runner.prompts import SUBAGENT_DEFAULT_PLAN, SUBAGENT_DEFAULT_THOUGHT
@@ -261,6 +265,9 @@ def _current_published_audit_bindings(
     return [dict(item) for item in normalized]
 
 
+# LLM: The structured role snapshot decides whether direct-child controls exist;
+# goal prose and display names never grant a recursive management surface.
+# 函数用途: 根据明确角色为 coordinator 补管理工具，并从普通执行角色删除无用的下级控制工具。
 def _role_policy(
     agent,
     raw_params: dict[str, object],
@@ -272,6 +279,8 @@ def _role_policy(
     is_explicit_root = is_explicit_root_role(role, role_template_dirs)
     if is_explicit_root:
         allowed_tools = explicit_root_allowed_tools(allowed_tools)
+    else:
+        allowed_tools = leaf_allowed_tools(allowed_tools)
     return RolePolicy(role=role, allowed_tools=allowed_tools)
 
 
@@ -354,6 +363,17 @@ def explicit_root_allowed_tools(allowed_tools: list[str] | None) -> list[str] | 
     if allowed_tools is None:
         return None
     return list(dict.fromkeys([*allowed_tools, *COORDINATOR_TOOLS]))
+
+
+# LLM: A leaf has no direct children, so parent-edge controls are both unusable and
+# misleading. Recursive control is exposed only after the structured role grants
+# can_spawn_children; capability_request remains available for the leaf itself.
+# 函数用途: 从普通执行子代理的工具快照里删除下级创建、插话、停止和权限答复入口。
+def leaf_allowed_tools(allowed_tools: list[str] | None) -> list[str] | None:
+    if allowed_tools is None:
+        return None
+    controls = set(DIRECT_CHILD_CONTROL_TOOLS)
+    return [tool for tool in allowed_tools if tool not in controls]
 
 
 def _lineage_depth(value: object, *, default: int) -> int:
@@ -582,6 +602,10 @@ def _clamp_service_window_to_audit_deadline(attrs: dict[str, object]) -> None:
     attrs["service_window_seconds"] = min(declared, remaining) if declared > 0 else remaining
 
 
+# LLM: Output refs have one resolution order: explicit task paths, current cwd
+# relative paths, then legacy workspace-output rebasing. Every rewrite must stay
+# inside a canonical root and remain visible in structured attributes.
+# 函数用途: 统一解析子代理交付路径，让普通相对路径继承当前目录并保留任务内部 output/work 语义。
 def _params_with_task_output_defaults(
     raw_params: dict[str, object], agent=None
 ) -> dict[str, object]:
@@ -608,7 +632,14 @@ def _params_with_task_output_defaults(
         changed = (
             _normalize_current_task_output_refs(updated, workspace_root, task_output_dir) or changed
         )
-    changed = _normalize_relative_task_output_refs(updated, task_output_dir) or changed
+    changed = (
+        _normalize_relative_output_refs(
+            updated,
+            workspace_root=workspace_root,
+            task_output_dir=task_output_dir,
+        )
+        or changed
+    )
     if not workspace_output_dir:
         return updated if changed else raw_params
     for key in _OUTPUT_REF_ATTRIBUTE_FIELDS:
@@ -898,14 +929,25 @@ def _normalize_current_task_output_refs(
     return changed
 
 
-def _normalize_relative_task_output_refs(
+# LLM: Apply relative output resolution to top-level and nested attributes with
+# the same mapper so identity, conflict locks, and execution permissions agree.
+# 函数用途: 批量规范 output_files/output_refs/artifact_refs 里的相对路径。
+def _normalize_relative_output_refs(
     updated: dict[str, object],
+    *,
+    workspace_root: Path | None,
     task_output_dir: Path,
 ) -> bool:
     changed = False
     for key in _OUTPUT_REF_ATTRIBUTE_FIELDS:
         changed = (
-            _normalize_relative_task_output_ref_field(updated, key, task_output_dir) or changed
+            _normalize_relative_output_ref_field(
+                updated,
+                key,
+                workspace_root=workspace_root,
+                task_output_dir=task_output_dir,
+            )
+            or changed
         )
     attrs = updated.get("attributes")
     if isinstance(attrs, dict):
@@ -913,7 +955,12 @@ def _normalize_relative_task_output_refs(
         attrs_changed = False
         for key in _OUTPUT_REF_ATTRIBUTE_FIELDS:
             attrs_changed = (
-                _normalize_relative_task_output_ref_field(next_attrs, key, task_output_dir)
+                _normalize_relative_output_ref_field(
+                    next_attrs,
+                    key,
+                    workspace_root=workspace_root,
+                    task_output_dir=task_output_dir,
+                )
                 or attrs_changed
             )
         if attrs_changed:
@@ -922,43 +969,100 @@ def _normalize_relative_task_output_refs(
     return changed
 
 
-def _normalize_relative_task_output_ref_field(
+# LLM: A field rewrite is atomic at the value boundary; unsupported value types
+# remain unchanged for the open-world output contract.
+# 函数用途: 规范一个结构化交付字段并报告是否发生变化。
+def _normalize_relative_output_ref_field(
     values: dict[str, object],
     key: str,
+    *,
+    workspace_root: Path | None,
     task_output_dir: Path,
 ) -> bool:
     if key not in values:
         return False
-    value, changed = _normalize_relative_task_output_ref_value(values.get(key), task_output_dir)
+    value, changed = _normalize_relative_output_ref_value(
+        values.get(key),
+        workspace_root=workspace_root,
+        task_output_dir=task_output_dir,
+    )
     if changed:
         values[key] = value
     return changed
 
 
-def _normalize_relative_task_output_ref_value(
-    value: object, task_output_dir: Path
+# LLM: Container recursion delegates every string leaf to the single canonical
+# relative resolver and preserves list/tuple/mapping shape.
+# 函数用途: 递归规范交付字段中的字符串路径值。
+def _normalize_relative_output_ref_value(
+    value: object,
+    *,
+    workspace_root: Path | None,
+    task_output_dir: Path,
 ) -> tuple[object, bool]:
     return _map_output_ref_value(
-        value, lambda text: _relative_task_output_ref(text, task_output_dir)
+        value,
+        lambda text: _relative_output_ref(
+            text,
+            workspace_root=workspace_root,
+            task_output_dir=task_output_dir,
+        ),
     )
 
 
-def _relative_task_output_ref(text: str, task_output_dir: Path) -> str | None:
+# LLM: Relative deliverables inherit the parent's current working directory just
+# like 会话运行时. Only explicit output/... and work/... refs select task-internal
+# staging directories; traversal outside any canonical root is rejected here.
+# 函数用途: 把普通相对交付路径落到当前项目目录，把显式 output/work 前缀落到任务内部目录。
+def _relative_output_ref(
+    text: str,
+    *,
+    workspace_root: Path | None,
+    task_output_dir: Path,
+) -> str | None:
     if not text or "://" in text:
         return None
     try:
-        path = _task_output_relative_path(text)
+        path = Path(text).expanduser()
     except OSError:
         return None
     if path.is_absolute():
         return None
+    normalized = text.strip().replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    explicit_task_output = normalized == "output" or normalized.startswith("output/")
+    explicit_task_work = normalized == "work" or normalized.startswith("work/")
+    if explicit_task_output:
+        base = task_output_dir
+        relative = _task_output_relative_path(normalized)
+    elif explicit_task_work:
+        base = task_output_dir.parent / "work"
+        relative = _task_work_relative_path(normalized)
+    else:
+        base = task_output_dir if workspace_root is None else workspace_root
+        relative = path
     try:
-        candidate = (task_output_dir / path).resolve(strict=False)
+        candidate = (base / relative).resolve(strict=False)
     except OSError:
         return None
-    if not _same_or_inside(candidate, task_output_dir):
+    if not _same_or_inside(candidate, base):
         return None
     return str(candidate)
+
+
+# LLM: work/ is the sibling staging namespace to task output/; keep prefix
+# removal centralized so relative path identity is consistent across callers.
+# 函数用途: 去掉显式 work 前缀，得到任务内部工作目录下的相对路径。
+def _task_work_relative_path(text: str) -> Path:
+    normalized = text.strip().replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    if normalized == "work":
+        return Path()
+    if normalized.startswith("work/"):
+        return Path(normalized[len("work/") :])
+    return Path(normalized).expanduser()
 
 
 def _task_output_relative_path(text: str) -> Path:

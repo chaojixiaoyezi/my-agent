@@ -114,6 +114,10 @@ def _background_notice_loop(
             break
 
 
+# LLM: Each poll reads one canonical thread snapshot. HTTP failures preserve
+# the previous activity projection, while successful zero counts remove it;
+# notice rows remain an independent append-only user-facing channel.
+# 函数用途: 消费一次当前会话的后台任务计数和新增通知，并在画面变化时触发重绘。
 def _consume_background_notices(
     agent: object,
     session_id: str,
@@ -136,13 +140,21 @@ def _consume_background_notices(
             return
         if not isinstance(payload, dict):
             return
+        activity_changed = (
+            _publish_background_activity(
+                tui_runtime,
+                payload.get("active_task_count"),
+            )
+            if payload.get("ok") is True
+            else False
+        )
         raw = payload.get("notices")
         if not isinstance(raw, list):
             return
         fresh = [dict(row) for row in raw if isinstance(row, dict)]
         for row in fresh:
             _publish_background_notice_row(tui_runtime, row, seen)
-        if fresh and app_ref[0] is not None:
+        if (fresh or activity_changed) and app_ref[0] is not None:
             app_ref[0].invalidate()
         return
     from ...agent.conversation.channels import LOCAL_AGENT_USER_ID, LOCAL_CHAT_CHANNEL
@@ -160,8 +172,14 @@ def _consume_background_notices(
     thread_id = str(getattr(thread, "thread_id", "") or "")
     if not thread_id:
         return
+    activity_changed = _publish_background_activity(
+        tui_runtime,
+        len(tuple(getattr(thread, "active_task_ids", ()) or ())),
+    )
     notices_path = Path(root) / "notices" / f"{thread_id}.notices.jsonl"
     if not notices_path.exists():
+        if activity_changed and app_ref[0] is not None:
+            app_ref[0].invalidate()
         return
     fresh: list[dict[str, object]] = []
     for line in notices_path.read_text(encoding="utf-8").splitlines():
@@ -181,11 +199,28 @@ def _consume_background_notices(
             continue
         fresh.append(row)
     if not fresh:
+        if activity_changed and app_ref[0] is not None:
+            app_ref[0].invalidate()
         return
     for row in fresh:
         _publish_background_notice_row(tui_runtime, row, seen)
     if app_ref[0] is not None:
         app_ref[0].invalidate()
+
+
+# LLM: The monitor may project only the typed active-task count returned by the
+# canonical conversation thread. Missing/invalid values leave the current UI
+# unchanged instead of guessing activity from notice prose.
+# 函数用途: 将会话中的真实进行中任务数量更新到常驻 Working 动画，并返回画面是否变化。
+def _publish_background_activity(tui_runtime: object, value: object) -> bool:
+    updater = getattr(tui_runtime, "update_background_activity", None)
+    if not callable(updater):
+        return False
+    try:
+        count = max(0, int(value))
+    except (TypeError, ValueError):
+        return False
+    return bool(updater(count))
 
 
 def _publish_background_notice_row(

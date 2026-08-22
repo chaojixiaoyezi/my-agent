@@ -956,13 +956,14 @@ def handle_control_status(handler, server) -> None:
     handler._send_json(200, gateway_control_operation_status_payload(receipt))
 
 
-# LLM: 记忆 API 复用 trusted-source、owner scope 和 Gateway 内部服务；前端不能直接指定 owner home 或记忆文件。
-# 函数用途: 接收薄客户端的 recent/search/remember 操作并返回安全记录投影。
+# LLM: Notice/activity reads reuse trusted source and the resolved owner/thread;
+# clients cannot select another thread id or derive activity from message text.
+# 函数用途: 接收薄客户端的会话后台状态查询并返回安全的计数和通知投影。
 def handle_client_notices(handler, server) -> None:
-    """S-BG1: 返回当前会话的后台主代理轮完成通知（TUI 后台完成监视用）。
+    """S-BG1: 返回当前会话的进行中任务数和后台主代理轮完成通知。
 
     body: {"conversation_id": ..., "after": 游标(float created_at)}
-    响应: {"ok": true, "notices": [...], "cursor": 最新 created_at}
+    响应: {"ok": true, "active_task_count": n, "notices": [...], "cursor": 最新 created_at}
     """
     if require_trusted_source(handler):
         return
@@ -996,22 +997,37 @@ def handle_client_notices(handler, server) -> None:
     handler._send_json(200, result)
 
 
+# LLM: The canonical thread owns active_task_ids while notices remain an
+# append-only display channel; this read combines them without creating state.
+# 函数用途: 读取一个已鉴权会话的进行中任务数量和新增后台通知。
 def read_gateway_client_notices(
     agent: object,
     *,
     scope: object,
     after: float,
 ) -> dict[str, object]:
-    """解析当前会话 thread → 读取 notices 文件 → 返回 after 之后的新行。"""
+    """解析当前会话 thread，并返回活跃任务计数与 after 之后的新通知。"""
     from ..conversation.channels import LOCAL_AGENT_USER_ID, LOCAL_CHAT_CHANNEL
     from ..conversation.store import ConversationStore
 
     conversation_id = str(getattr(scope, "conversation_id", "") or "").strip()
     if not conversation_id:
-        return {"ok": False, "error": "conversation_id required", "notices": [], "cursor": after}
+        return {
+            "ok": False,
+            "error": "conversation_id required",
+            "notices": [],
+            "cursor": after,
+            "active_task_count": 0,
+        }
     store = getattr(agent, "conversation_store", None)
     if not isinstance(store, ConversationStore):
-        return {"ok": False, "error": "conversation store unavailable", "notices": [], "cursor": after}
+        return {
+            "ok": False,
+            "error": "conversation store unavailable",
+            "notices": [],
+            "cursor": after,
+            "active_task_count": 0,
+        }
     try:
         thread, _error = store.resolve_thread_report(
             channel=LOCAL_CHAT_CHANNEL,
@@ -1024,13 +1040,25 @@ def read_gateway_client_notices(
             "error": f"thread resolve failed: {exc}",
             "notices": [],
             "cursor": after,
+            "active_task_count": 0,
         }
     if thread is None:
-        return {"ok": True, "notices": [], "cursor": after}
+        return {
+            "ok": True,
+            "notices": [],
+            "cursor": after,
+            "active_task_count": 0,
+        }
+    active_task_count = len(tuple(getattr(thread, "active_task_ids", ()) or ()))
     thread_id = str(getattr(thread, "thread_id", "") or "")
     notices_path = Path(store.root) / "notices" / f"{thread_id}.notices.jsonl"
     if not notices_path.exists():
-        return {"ok": True, "notices": [], "cursor": after}
+        return {
+            "ok": True,
+            "notices": [],
+            "cursor": after,
+            "active_task_count": active_task_count,
+        }
     notices: list[dict[str, object]] = []
     cursor = after
     try:
@@ -1051,8 +1079,19 @@ def read_gateway_client_notices(
                 notices.append(row)
                 cursor = max(cursor, created)
     except OSError:
-        return {"ok": False, "error": "notices read failed", "notices": [], "cursor": after}
-    return {"ok": True, "notices": notices, "cursor": cursor}
+        return {
+            "ok": False,
+            "error": "notices read failed",
+            "notices": [],
+            "cursor": after,
+            "active_task_count": active_task_count,
+        }
+    return {
+        "ok": True,
+        "notices": notices,
+        "cursor": cursor,
+        "active_task_count": active_task_count,
+    }
 
 
 def handle_client_memory(handler, server) -> None:

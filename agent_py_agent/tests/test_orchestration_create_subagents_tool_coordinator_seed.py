@@ -69,6 +69,12 @@ class TestCreateSubagentsToolCoordinatorSeed:
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
         assert params.role == "coordinator"
+        assert {
+            "create_subagents",
+            "send_guidance",
+            "cancel_subagents",
+            "resolve_capability_requests",
+        }.issubset(params.allowed_tools)
 
     def test_natural_coordinator_seed_intent_does_not_repair_model_worker_role(self):
         """模型把 root coordinator 误写成 worker 时，工具层不从自然语言目标纠偏。"""
@@ -620,36 +626,21 @@ class TestResourceDomainAliasingPerSeq266:
             f"run_id 与 run_ids 指向同一 run 必须互斥: {single} vs {many}"
         )
 
-    def test_cancel_root_expansion_locks_child_runs(self):
-        # 反例 2：cancel(root_id=X) 在 handler 内展开子树 → claim 前必须锁具体子 run。
-        from types import SimpleNamespace
-
+    def test_cancel_does_not_expose_root_expansion(self):
+        # 当前模型面只允许点名直属 run；root_id 整树操作属于宿主运维内部能力。
+        from agent_py_agent.agent.agent_core.orchestration.tool_specs import (
+            build_cancel_subagents_model_spec,
+        )
         from agent_py_agent.agent.agent_core.orchestration.tools.cancel import (
             CancelSubagentsTool,
         )
-        from agent_py_agent.agent.tooling.workspace_scopes import (
-            authoritative_workspace_scopes,
-        )
 
-        def _task(tid: str, parent: str = "") -> SimpleNamespace:
-            return SimpleNamespace(id=tid, parent_id=parent)
-
-        tasks = [_task("child-1", "root-X"), _task("root-X", "")]
-        agent = SimpleNamespace(subagents=SimpleNamespace(list_runs=lambda: list(tasks)))
-        tool = CancelSubagentsTool(agent)
+        tool = CancelSubagentsTool(MagicMock())
         hook = getattr(tool, "effective_resource_scopes", None)
-        assert hook is not None, "cancel 必须提供 effective_resource_scopes hook（seq 266 #3）"
+        assert hook is not None
         root = Path("/tmp/cancel-root")
-        hook_scopes = hook({"root_id": "root-X"}, None, root)
-        direct = authoritative_workspace_scopes(
-            workspace_root=root,
-            write_boundary=None,
-            policy=tool.runtime_policy,
-            arguments={"run_id": "child-1"},
-        )
-        assert set(hook_scopes) & set(direct), (
-            "root 展开出的 child run 必须与直接 run_id 锁互斥"
-        )
+        assert hook({"root_id": "root-X"}, None, root) == ()
+        assert "root_id" not in build_cancel_subagents_model_spec().input_schema["properties"]
 
     def test_logical_value_stripped_before_scope(self):
         # 反例 4：首尾空格别名必须锁同一 scope（handler 会 strip 成同一目标）。

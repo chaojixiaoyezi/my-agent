@@ -1,5 +1,15 @@
 # Gateway Progress
 
+## 2026-08-21 TUI 后台 Working 的 canonical 活跃计数
+
+- `d928d77` 真机中前台 turn 让出后，child 仍在自动运行，但 TUI 没有持续活动提示。旧 notice 接口只返回
+  偶发文本，不能回答“当前会话是否还有任务”。
+- `/client/notices` 现在在同一个已鉴权 owner/thread 快照中返回
+  `ConversationThread.active_task_ids` 的数量；通知文件仍只负责新增用户可见消息，不承担活动权威。
+- TUI 成功读取后更新一个可移除 Working 块；相同计数不重复追加，计数归零原位收起，HTTP/解析失败保留
+  上一次投影。该入口只读，不启动、停止、重试或验收任何任务。Gateway/ConversationStore/TUI 定向回归
+  已通过，`.7` 原样长任务画面仍待当前切片部署后复验。
+
 ## 2026-08-21 TUI 后台任务停止定位
 
 - 真机子代理权限失败后，前台 turn 已让出，TUI 本地 `is_running=false`，但当前 thread 仍有

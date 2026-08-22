@@ -2,12 +2,17 @@
 
 ## 模型可见控制面
 
-父代理、子代理和孙代理共用同一递归关系，每一层只管理自己直接创建的下级：
+主代理、子代理和孙代理共用同一递归关系，每一层只管理自己直接创建的下级。根主代理与结构化
+`can_spawn_children=true` 的 coordinator 可以看到下面四个入口：
 
 - `create_subagents`：创建一个或多个直接下级，成功后由宿主立即自动启动。
 - `send_guidance`：像用户给主代理插入补充消息一样，只向一个正在运行的直属 child 追加普通上下文。
 - `cancel_subagents`：按精确 `run_id/run_ids` 打断或取消直属 child，不提供整树、状态筛选或越层操作。
 - `resolve_capability_requests`：批准或拒绝直属 child 的结构化权限申请；它不是催办、推进或验收工具。
+
+worker、researcher、tester、writer、bug-finder 等普通 leaf 不创建下级，所以四个直属控制入口全部从其
+工具快照移除；leaf 只保留执行工具和给自己申请权限的 `capability_request`。某个 child 确实需要继续拆分
+时，应在创建时明确选择 coordinator，不能靠 goal、展示名或历史 grant 临时扩权。
 
 模型没有 `inspect_agent_tree`、`wait`、`dispatch_subagents` 或
 `schedule_child_subagents`，也没有自报进展的 `raise_event`。代码里的 dispatcher、heartbeat、
@@ -56,6 +61,10 @@ OPEN 或非法未闭合 capability request 是宿主掌握的结构化阻塞事�
 身份、结果读取顺序和冲突锁，不是普通 child 唯一的写权限来源。goal 或 output_files 都不能把权限扩大到
 父级 workspace 外。命名 Audit/exact-scope worker 不继承普通产品写区，只使用其精确结构化授权。
 
+路径解析与父级 cwd 一致：裸 `abc/index.html` 表示当前可信 workspace 下的 `abc/index.html`；只有显式
+`output/report.md` 和 `work/notes.md` 才分别表示当前 task 内部的 output/work。绝对路径保留原目标，继续
+由结构化写边界允许或拒绝，不能静默搬到内部 output 后冒充成功。
+
 allow 与 forbidden 同时命中时按最具体路径条目决定，同层由 forbidden 胜出。例如 `/root` 仍可作为宽泛
 保护，但 `/root/.my-agent/.../output/abc` 的更窄明确授权必须可写；反过来，同一路径被禁止时不能绕过。
 
@@ -87,6 +96,9 @@ child 的自然最终回复、typed lifecycle event 与真实 artifact refs 是�
 
 父级基于这些事实自然向用户汇报；普通任务没有机器质量验收器，也不要求 `VERIFIED` 才能结束。路径
 不存在、工具失败、越权或取消仍按客观事实如实暴露。
+
+父级给 child 的共享读取预览只来自创建发生时当前 tool loop 已完成的 read/search 记录。进程内不会缓存
+上一任务的阅读包给下一任务复用；需要跨轮保留的事实必须进入正式 transcript、Compact 或结构化 refs。
 
 ## Compact 后
 

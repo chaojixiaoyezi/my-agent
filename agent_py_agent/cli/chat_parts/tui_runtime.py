@@ -305,6 +305,48 @@ class _TuiPermissionController:
         )
 
 
+# LLM: This controller is runtime-owned and only factors the removable
+# background display state out of TuiRuntime; it shares the runtime lock,
+# sequencer, and store and must never become a second activity authority.
+# 类用途: 保存一个 TUI 会话的后台 Working 计数和起始时间，并发布对应 typed 事件。
+class _TuiBackgroundActivityController:
+    # LLM: The owner remains the only event publisher and lock owner.
+    # 函数用途: 绑定唯一 TuiRuntime，并初始化空闲显示状态。
+    def __init__(self, owner: TuiRuntime) -> None:
+        self._owner = owner
+        self._count = 0
+        self._started_at = 0.0
+
+    # LLM: Count transitions only change the one display projection. Equal
+    # values are idempotent; zero removes the block without transcript output.
+    # 函数用途: 根据 canonical 活跃任务数量开始、更新或收起后台 Working 块。
+    def update(self, active_task_count: int) -> bool:
+        count = max(0, int(active_task_count or 0))
+        owner = self._owner
+        block_id = f"background-activity:{owner.session_id}"
+        with owner._lock:
+            if count == self._count:
+                return False
+            if self._count <= 0 and count > 0:
+                self._started_at = time.time()
+                kind, phase = "background_activity_started", "started"
+            elif count > 0:
+                kind, phase = "background_activity_updated", "updated"
+            else:
+                kind, phase = "background_activity_completed", "completed"
+            self._count = count
+            owner._publish(
+                kind,
+                phase,
+                block_id,
+                {"active_task_count": count, "started_at": self._started_at},
+                request_id=f"background:{owner.session_id}",
+            )
+            if count <= 0:
+                self._started_at = 0.0
+        return True
+
+
 # LLM: TuiRuntime 统一拥有 session 事件序号与 turn adapter；emit+publish 在同一锁内避免并发 seq 到达倒序。
 # 类用途: 建立 TUI 状态容器、发布启动/输入事件，并为每个 request 创建唯一 adapter。
 class TuiRuntime:
@@ -326,6 +368,7 @@ class TuiRuntime:
         self._notice_text = ""
         self._notice_until = 0.0
         self._lock = threading.RLock()
+        self._background_activity = _TuiBackgroundActivityController(self)
 
     # LLM: publish_session 只携带公开品牌/模型/目录元数据，真实配置与 secret 不进入 UI event。
     # 函数用途: 发布一次欢迎卡事件。
@@ -412,6 +455,13 @@ class TuiRuntime:
                 {"text": text, "severity": "info"},
                 request_id=request_id,
             )
+
+    # LLM: This is a display projection of ConversationThread.active_task_ids.
+    # It never starts, stops, retries, or accepts work; repeated equal counts do
+    # not append events, and zero removes the one active block without history.
+    # 函数用途: 在前台回合让出后持续显示真实后台任务的 Working 动画，任务清零时原位收起。
+    def update_background_activity(self, active_task_count: int) -> bool:
+        return self._background_activity.update(active_task_count)
 
     # LLM: enqueue_prompt 使用 request_id 作为用户块/队列身份；排队项只发 queue_added，开始执行时再原子提升为稳定用户块。
     # 函数用途: 立即显示空闲提交，或把运行中提交登记成可回取的用户队列预览。
@@ -588,7 +638,7 @@ class TuiRuntime:
             return True
         snapshot = self.store.snapshot()
         return any(
-            block.role in {"connection", "thinking", "compact"}
+            block.role in {"connection", "thinking", "compact", "background"}
             for block in snapshot.active_blocks
         )
 

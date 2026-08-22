@@ -63,6 +63,16 @@ def test_items_worker_with_dispatch_tools_stays_worker():
     calls = mock_agent.subagents.create_run.call_args_list
     assert result.ok is True
     assert [call.kwargs["params"].role for call in calls] == ["worker", "worker", "worker"]
+    child_controls = {
+        "create_subagents",
+        "send_guidance",
+        "cancel_subagents",
+        "resolve_capability_requests",
+    }
+    assert all(
+        child_controls.isdisjoint(call.kwargs["params"].allowed_tools)
+        for call in calls
+    )
     assert all("用户原始层级" not in call.kwargs["params"].goal for call in calls)
 
 

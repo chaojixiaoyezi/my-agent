@@ -212,7 +212,7 @@ class TuiRenderContext:
         object.__setattr__(self, "help_open", bool(self.help_open))
 
 
-# LLM: frame provider 必须复用 renderer 的可见上下文规则；wall clock 仅在活动 connection/thinking/compact 真正改变画面时进入 key。
+# LLM: frame provider 必须复用 renderer 的可见上下文规则；wall clock 仅在活动 connection/thinking/background/compact 真正改变画面时进入 key。
 # 函数用途: 生成一次完整 TUI 画面所需的上下文缓存键，避免空闲长会话被动画时钟反复重绘。
 def tui_render_context_key(
     snapshot: TuiViewSnapshot,
@@ -226,11 +226,17 @@ def tui_render_context_key(
     active_activity = tuple(
         block
         for block in snapshot.active_blocks
-        if block.role == "thinking" and block.phase not in TERMINAL_RENDER_PHASES
+        if block.role in {"thinking", "background"}
+        and block.phase not in TERMINAL_RENDER_PHASES
     )
     visible_activity = _visible_activity_blocks(snapshot, active_activity)
     thinking_animation = tuple(
-        (block.block_id, _thinking_animation_key(block, context))
+        (
+            block.block_id,
+            _thinking_animation_key(block, context)
+            if block.role == "thinking"
+            else _background_animation_key(block, context),
+        )
         for block in visible_activity
     )
     compact_animation = tuple(
@@ -354,7 +360,8 @@ def render_tui_snapshot(
     active_activity = tuple(
         block
         for block in snapshot.active_blocks
-        if block.role == "thinking" and block.phase not in TERMINAL_RENDER_PHASES
+        if block.role in {"thinking", "background"}
+        and block.phase not in TERMINAL_RENDER_PHASES
     )
     active_activity_ids = {block.block_id for block in active_activity}
     visible_activity = _visible_activity_blocks(snapshot, active_activity)
@@ -431,7 +438,8 @@ def _visible_activity_blocks(
     )
     if has_visible_assistant_stream:
         return ()
-    return activity_blocks
+    foreground = tuple(block for block in activity_blocks if block.role == "thinking")
+    return foreground or tuple(block for block in activity_blocks if block.role == "background")
 
 
 # LLM: block dispatch 只读取 reducer role/kind/phase，未知角色显式降为 system 样式而不透传 payload。
@@ -441,6 +449,8 @@ def _render_block(block: TuiBlock, context: TuiRenderContext) -> tuple[Formatted
         return _render_welcome(block, context)
     if block.role == "connection":
         return _render_connection(block, context)
+    if block.role == "background":
+        return _render_background_activity(block, context)
     if block.role == "user":
         return _render_user(block, context)
     if block.role == "assistant":
@@ -472,6 +482,30 @@ def _render_connection(
     ),)
 
 
+# LLM: The count comes only from ConversationThread.active_task_ids. This row
+# is deliberately dim and removable, so it signals liveness without becoming
+# an assistant claim or permanent transcript entry.
+# 函数用途: 显示后台任务仍在运行的 终端交互 风格闪动图标、数量和耗时。
+def _render_background_activity(
+    block: TuiBlock,
+    context: TuiRenderContext,
+) -> tuple[FormattedLine, ...]:
+    glyph = SPINNER_GLYPHS[context.spinner_index % len(SPINNER_GLYPHS)]
+    count = max(0, int(block.metadata.get("active_task_count") or 0))
+    started_at = float(block.metadata.get("started_at") or 0.0)
+    elapsed = max(0, int(context.now - started_at)) if started_at and context.now else 0
+    detail = f" · 后台任务 {count} 个 · {elapsed // 60}:{elapsed % 60:02d}"
+    return wrap_fragments(
+        (
+            ("class:tui-spinner-highlight", glyph + " "),
+            *_animated_spinner_word("Working", context.spinner_index),
+            ("class:tui-thinking", detail),
+        ),
+        width=context.width,
+        continuation_prefix=(("class:tui-thinking", "  "),),
+    )
+
+
 # LLM: 中断提示是 终端交互 的专用 transcript 行，由 typed kind 选择；不能靠正文包含 Interrupted 来套样式。
 # 函数用途: 显示已确认的用户中断及下一步提示，不添加普通系统消息菱形前缀。
 def _render_interrupt_notice(
@@ -501,6 +535,8 @@ def _block_cache_key(block: TuiBlock, context: TuiRenderContext) -> tuple[Any, .
         key += (context.spinner_index % len(SPINNER_GLYPHS),)
     if block.role == "thinking" and block.phase not in {"completed", "failed", "interrupted"}:
         key += _thinking_animation_key(block, context)
+    if block.role == "background" and block.phase not in {"completed", "failed", "interrupted"}:
+        key += _background_animation_key(block, context)
     if block.role == "compact" and block.phase not in {"completed", "failed", "interrupted"}:
         key += (context.spinner_index % len(SPINNER_GLYPHS),)
     return key
@@ -519,6 +555,22 @@ def _thinking_animation_key(
         int(_spinner_elapsed_seconds(context)),
         context.output_tokens,
         _spinner_is_stalled(context),
+    )
+
+
+# LLM: Background animation uses its own typed start timestamp and count; it
+# must not borrow the completed foreground turn's token/stall metrics.
+# 函数用途: 生成后台 Working 块的动画与秒数缓存键。
+def _background_animation_key(
+    block: TuiBlock,
+    context: TuiRenderContext,
+) -> tuple[Any, ...]:
+    started_at = float(block.metadata.get("started_at") or 0.0)
+    elapsed = max(0, int(context.now - started_at)) if started_at and context.now else 0
+    return (
+        context.spinner_index % math.lcm(len(SPINNER_GLYPHS), len("Working")),
+        elapsed,
+        int(block.metadata.get("active_task_count") or 0),
     )
 
 
@@ -1590,6 +1642,9 @@ def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> Form
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
     if snapshot.status.phase in {"running", "interrupting"}:
         text = "  esc to interrupt"
+        return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
+    if any(block.role == "background" for block in snapshot.active_blocks):
+        text = "  Working in background · /stop to interrupt"
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
     if context.notice:
         return ((

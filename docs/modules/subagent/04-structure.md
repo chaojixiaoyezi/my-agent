@@ -54,7 +54,9 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 - `services/hierarchy/scheduler.py` 把已经解析的 child role 与父 task 的当前 `allowed_tools` 一并交给
   `services/hierarchy/tool_policy.py`。
 - `tool_policy.scheduled_child_tools` 先整理显式请求与角色候选，再统一与父工具集合求交集。
-  worker 随后移除 child-creation 工具；coordinator 不做额外扩权。所有后代因此只能沿树继续减法。
+  worker/researcher/tester/writer/bug-finder 等 leaf 随后移除 create/guidance/cancel/resolve 四个直属下级
+  控制入口；只有结构化模板 `can_spawn_children=true` 的 coordinator 才能保留父级已有的对应能力。
+  coordinator 不做额外扩权，所有后代因此只能沿树继续减法。
 - 角色默认、显式 grant、历史快照与递归继承在进入模型工具面前共用
   `active_model_subagent_tools`；它删除已退休的查树/手动调度工具并保持顺序去重。显式
   `allowed_tools=[]` 保持为空，只有缺省值 `None` 才从角色模板派生候选工具。
@@ -87,12 +89,16 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   补充事实。只有任务显式声明 `full_source_read` 时，未完成读取游标才可成为下一动作。
 - 子代理仍隔离在自己的 run home；它不拥有第二份长期 Memory，也不能读取父代理或其他 owner 的
   私有人格、Memory、Skill 或任务文件。
+- 父级共享给 child 的 read/search 预览只从创建发生时当前 tool loop archive 生成；不保留
+  agent-level 跨轮缓存。上一任务读过的内容不能自动出现在下一任务 child 上下文，跨轮信息只走正式
+  transcript、Compact 或 typed refs。
 
 ## 核心链路
 
-前台模型快照不延迟 `orchestration`：`create_subagents`、`send_guidance`、`cancel_subagents`
-与 `resolve_capability_requests` 首轮直接可见。这只改变 Schema 披露，真正可调用集仍由同一
-`ToolRuntimeSnapshot.allowed_tools` 和 availability 决定，不扩大权限。
+前台模型快照不延迟 `orchestration`：根主代理与 coordinator 的 `create_subagents`、`send_guidance`、
+`cancel_subagents`、`resolve_capability_requests` 首轮直接可见；普通 leaf 的角色快照根本不含这四项。
+这只改变 Schema 披露，真正可调用集仍由同一 `ToolRuntimeSnapshot.allowed_tools` 和 availability 决定，
+不扩大权限。
 旧 `raise_event` 不在模型快照；进展、阻塞、权限申请和结束由宿主 lifecycle service 写入同一
 observation/wake 事实源。runner 的离散模型/工具阶段只向 canonical state 投影有界活动摘要，不保存正文。
 
@@ -196,8 +202,8 @@ SimpleAgent orchestration tool
 - 子代理过程文件：`work/agents/<run_id>/...`。
 - 用户最终交付：主代理汇总后写当前 task `output/`，或用户显式指定的输出目录。
 - 当前 run 没有用户显式指定输出目录时，`output_files` / `output_refs` / `artifact_refs`
-  里的相对路径默认归一到当前 task `output/`；项目文件写入必须来自明确项目路径、
-  修复合同、目标 refs 或 `extra_write_roots` 等结构化授权。
+  里的普通相对路径按当前可信 cwd/workspace 解析；只有显式 `output/...`、`work/...` 分别归一到当前
+  task 内部 output/work。绝对路径保持原目标身份，再由写边界允许或拒绝，不能静默搬运。
 - 普通 child 逐层继承直接父级的结构化产品写区，后代不得扩大上界；`output_files` 负责交付身份、读取顺序
   和冲突锁，不再是父级 workspace 内写入的唯一授权来源。命名 Audit/exact-scope worker 不走该继承。
 - owner projection：`owner_home/agents/<run_id>/state.json` 保存可重建索引和当前状态投影，用于

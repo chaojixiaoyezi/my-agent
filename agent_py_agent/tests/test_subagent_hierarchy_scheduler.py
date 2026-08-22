@@ -254,6 +254,10 @@ def test_hierarchy_schedule_infers_leaf_write_tools_from_explicit_deliverables(t
     assert "write_file" in leaf.allowed_tools
     assert "read_artifact" in leaf.allowed_tools
     assert "apply_patch" in leaf.allowed_tools
+    assert "create_subagents" not in leaf.allowed_tools
+    assert "send_guidance" not in leaf.allowed_tools
+    assert "cancel_subagents" not in leaf.allowed_tools
+    assert "resolve_capability_requests" not in leaf.allowed_tools
     assert str(deliverables) in leaf.allowed_write_roots
 
 

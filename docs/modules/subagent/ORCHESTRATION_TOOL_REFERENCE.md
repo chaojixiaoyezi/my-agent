@@ -6,6 +6,10 @@
 
 用途：让当前代理创建一个或多个直接下级。主代理、子代理和孙代理都使用这一个入口；创建后立即由宿主启动。
 
+工具面按结构化角色决定：根主代理和 `can_spawn_children=true` 的 coordinator 才有
+create/guidance/cancel/resolve 四个直属下级控制入口；普通 leaf 不带这些入口，只执行自己的任务并可用
+`capability_request` 请求自身所需权限。需要下一层协作时，应把该 child 明确创建为 coordinator。
+
 关键原则：
 
 - 顶层 `goal` 始终是原生工具 schema 的必填字段。创建一个子代理时它就是该子代理的目标；使用
@@ -23,6 +27,9 @@
 - 普通 child 自动继承直接父级的结构化工作区上界。用户明确了产物路径时仍应写 `output_files`；批量派工
   由每个负责写入的 item 分别声明。它负责交付身份、读取顺序和冲突锁，不是普通 child 唯一的权限来源；
   goal 或 output_files 都不能把写权扩大到父级 workspace 外。没有明确路径时不要强造。
+- 裸相对路径按当前可信 cwd/workspace 解析，例如从 `/root` 启动时 `abc/index.html` 就是
+  `/root/abc/index.html`。只有显式 `output/report.md`、`work/notes.md` 才指向 task 内部 staging；绝对路径
+  原样交给写边界裁决，不能改写成 task output 后返回成功。
 - 子代理没有声明产物路径时，运行时会给它分配 task-local `work/child_outputs/...`
   默认产物路径，并在返回值里暴露 `child_output_read_order`。父代理汇总时优先读
   `child_output_read_order` / `primary_artifact_refs` / `expected_outputs`，同时可参考
@@ -72,6 +79,9 @@ shell 不应该读取或遍历 `work/agents/<run_id>/canonical_state.json`、`fi
 代码里的 dispatcher、scheduler 和 worker pool 仍负责进程选择、并发额度、重启恢复和完成通知，但它们不是
 模型可见工具。模型不能也不需要“再推一下”已创建的 child；创建成功就表示已经进入自动启动链。系统也
 不为每批 child 周期性调用 LLM 巡场，真实状态变化会直接通知父级。
+
+child 启动上下文中的父级 read/search 预览只取当前 tool loop archive，不使用跨任务进程缓存；正式的
+跨轮信息继续由 transcript、Compact 和 typed refs 承担。
 
 ## send_guidance
 

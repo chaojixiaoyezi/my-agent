@@ -1,6 +1,22 @@
 # STATUS
 
-## 2026-08-21 子代理自然收口、递归控制面与 TUI 可观察性（同 owner 分会话调度本地回归通过）
+## 2026-08-21 子代理自然收口、递归控制面与 TUI 可观察性（当前收口切片本地严格 gate 通过）
+
+- `d928d77` 已部署 `.7` 单 Gateway 并完成原样 TUI 轮：4 个 child 都是一次 attempt、自主 `DONE`，最后
+  child 会经直属 lifecycle event 自动唤醒主代理；受管服务监听 `0.0.0.0:8080`，loopback/LAN HTTP 均
+  200。该轮仍未交付成功：用户要求的 `/root/abc` 为空，实际文件在 task 内部 `output/abc`；child
+  execution context 混入旧 `/root/kill-ws/...` 阅读包；前台让出后 TUI 看起来空闲；普通 leaf 仍收到
+  create/guidance/cancel/resolve 四个无用下级控制工具。
+- 当前本地切片已按 会话运行时 的 cwd/role snapshot 边界修正：裸 `abc/...` 相对可信 workspace，只有显式
+  `output/...`、`work/...` 进入 task 内部目录；父级 shared read pack 只取当前 tool loop，不复用跨任务
+  agent cache；根主代理和 `can_spawn_children=true` coordinator 保留四个直属控制入口，所有 leaf
+  移除它们并只保留自身 `capability_request`。直接创建与内部层级调度采用同一减法规则。
+- Gateway `/client/notices` 现随通知返回 canonical `ConversationThread.active_task_ids` 数量；TUI 将其投影
+  为一个灰色、闪动、可移除的 `Working · 后台任务 n 个 · mm:ss` 活动块，前台 thinking 优先显示，前台
+  让出后 Working 自动接替。成功查询到 0 才收起，网络失败保留上一次状态；该展示不会推动、重试或验收
+  任务。相关路径、工具裁剪、跨轮上下文、Gateway 计数和 TUI reducer/renderer 共 188 项 focused 已通过；
+  Ruff、doc sync、strict code-size、diff check 和 clean-package 也全部通过。提交推送、`.7` 部署及同
+  prompt 真机复验尚未完成；本切片低于 10,000 行，按约定未重复跑全仓 pytest。
 
 - `bea6fed` 的最新真机样本已把“子代理都 DONE 但整单仍慢”定位到两条宿主断链：task-local 父级创建
   孙代理后虽为 `PENDING`，却会被孤儿恢复器立即重新采样；根会话又会逐条消费后代成功事件。该轮虽然

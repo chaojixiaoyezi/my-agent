@@ -40,11 +40,17 @@ ROLE_BASE_TOOLS = [
     *COLLABORATION_TOOLS,
     CAPABILITY_REQUEST_TOOL,
 ]
-COORDINATOR_TOOLS = [
+# LLM: This is the complete edge-local management surface. Leaf role snapshots
+# remove every item; only a typed can_spawn_children coordinator may inherit it.
+# 配置用途: 定义协调角色管理直属下级所需的创建、插话、取消和权限答复入口。
+DIRECT_CHILD_CONTROL_TOOLS = [
     "create_subagents",
     "send_guidance",
     "cancel_subagents",
     "resolve_capability_requests",
+]
+COORDINATOR_TOOLS = [
+    *DIRECT_CHILD_CONTROL_TOOLS,
     *ROLE_BASE_TOOLS,
 ]
 

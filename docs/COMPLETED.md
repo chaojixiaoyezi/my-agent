@@ -4,6 +4,11 @@
 
 最近收口重点：
 
+- 2026-08-21 当前本地切片按 `d928d77` 真机失败样本收口四处底层语义：普通相对交付路径继承当前可信
+  cwd，显式 output/work 才进入 task 内部目录；child 共享阅读包不再跨任务缓存；只有根主代理与结构化
+  coordinator 持有 create/guidance/cancel/resolve，普通 leaf 无下级管理工具；TUI 从 canonical active
+  task count 显示可移除的后台 Working。188 项定向回归和本地严格 gate 已通过；这里不代表已推送、部署
+  或真机交付通过，当前状态仍以 ROADMAP/STATUS 为准。
 - 2026-08-21 本地实现已补上递归直属事件链：task-local 父代理创建下一层后以
   `interrupted/SUBAGENTS_ACTIVE` 让出，精确 child ids 的耐久标记会阻止孤儿器误复活；同批成功收齐只
   恢复一次，失败或 capability 阻塞立即恢复，孙代理不再越级唤醒根会话。父级新工作片获得有界

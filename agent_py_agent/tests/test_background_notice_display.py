@@ -135,6 +135,7 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
             return {
                 "ok": True,
                 "cursor": 200.0,
+                "active_task_count": 2,
                 "notices": [
                     {
                         "schema_version": "background_notice.v1",
@@ -147,6 +148,10 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
             }
 
     class _Runtime:
+        def update_background_activity(self, count):
+            published.append(f"active:{count}")
+            return True
+
         def publish_background_notice(self, text, *, thread_id=""):
             published.append(text)
 
@@ -154,11 +159,54 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
     _consume_background_notices(_Agent(), "session-http", _Runtime(), [None], seen)
     assert len(fetched) == 1
     assert fetched[0]["after"] == 0.0
-    assert len(published) == 1
-    assert "后台更新" in published[0]
+    assert len(published) == 2
+    assert published[0] == "active:2"
+    assert "后台更新" in published[1]
     # 游标推进后不重复
     _consume_background_notices(_Agent(), "session-http", _Runtime(), [None], seen)
     assert fetched[1]["after"] == 150.0
+
+
+def test_gateway_notice_snapshot_reports_canonical_active_task_count(tmp_path: Path) -> None:
+    from agent_py_agent.agent.conversation.store import ConversationStore
+    from agent_py_agent.agent.gateway_parts.http_handlers import (
+        read_gateway_client_notices,
+    )
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "local-agent",
+            "channel": "chat",
+            "channel_conversation_id": "session-active",
+            "channel_user_id": "local-agent",
+            "now": 1.0,
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-active",
+            "goal": "等待直属子代理完成",
+            "now": 2.0,
+        }
+    )
+    agent = SimpleNamespace(conversation_store=store)
+    scope = SimpleNamespace(conversation_id="session-active")
+
+    active = read_gateway_client_notices(agent, scope=scope, after=0.0)
+    assert active["ok"] is True
+    assert active["active_task_count"] == 1
+
+    store.update_task_status(
+        {
+            "task_id": "task-active",
+            "status": "completed",
+            "expected_status": "active",
+        }
+    )
+    completed = read_gateway_client_notices(agent, scope=scope, after=0.0)
+    assert completed["active_task_count"] == 0
 
 
 def test_runtime_keeps_multiple_background_notices_as_distinct_blocks() -> None:
@@ -173,3 +221,40 @@ def test_runtime_keeps_multiple_background_notices_as_distinct_blocks() -> None:
     notices = [block for block in snapshot.stable_blocks if block.role == "system"]
     assert [block.text for block in notices] == ["第一条", "第二条"]
     assert notices[0].block_id != notices[1].block_id
+
+
+def test_runtime_background_activity_is_one_removable_animated_block() -> None:
+    from agent_py_agent.cli.chat_parts.tui_block_renderer import (
+        TuiRenderContext,
+        fragments_text,
+        render_tui_snapshot,
+    )
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+
+    runtime = TuiRuntime("session-working")
+    assert runtime.update_background_activity(3) is True
+    assert runtime.update_background_activity(3) is False
+    snapshot = runtime.store.snapshot()
+    active = [block for block in snapshot.active_blocks if block.role == "background"]
+    assert len(active) == 1
+    assert active[0].metadata["active_task_count"] == 3
+    assert runtime.needs_periodic_refresh() is True
+
+    frame = render_tui_snapshot(
+        snapshot,
+        TuiRenderContext(
+            width=100,
+            spinner_index=2,
+            now=active[0].metadata["started_at"] + 5,
+        ),
+    )
+    rendered = "\n".join(fragments_text(line) for line in frame.transcript_lines)
+    assert "Working" in rendered
+    assert "后台任务 3 个" in rendered
+    assert "/stop to interrupt" in fragments_text(frame.footer)
+
+    assert runtime.update_background_activity(0) is True
+    assert not any(
+        block.role == "background" for block in runtime.store.snapshot().active_blocks
+    )
+    assert runtime.needs_periodic_refresh() is False

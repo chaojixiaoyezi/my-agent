@@ -2,6 +2,16 @@
 
 ## 2026-08-21 递归创建、自动启动与自然收口
 
+- `d928d77` 的 `.7` 单 Gateway 原样 TUI 轮已实现 4 个 child 各一次自然 DONE、直属事件自动唤醒和
+  `0.0.0.0:8080` loopback/LAN HTTP 200，同时抓到三个新底层缺口：裸 `abc/...` 被误投到 task
+  `output/abc`，跨任务进程缓存把旧 `/root/kill-ws/...` 阅读包塞给新 child，前台让出后 TUI 看起来空闲。
+  当前本地切片把普通相对交付路径改为继承可信 cwd，仅显式 `output/...`/`work/...` 使用 task 内部目录；
+  删除跨轮 shared-context cache；Gateway notice 快照增加 canonical active-task count，TUI 投影为一个可移除
+  Working 活动块。188 项定向回归和本地严格 gate 已通过，推送、部署和同 prompt 真机复验仍待完成。
+- 子代理工具面进一步按结构化角色裁剪：根主代理和 `can_spawn_children=true` coordinator 才有
+  create/guidance/cancel/resolve 四个直属控制入口；worker/researcher/tester/writer/bug-finder 等 leaf
+  一个都不带，只保留执行工具和自身 `capability_request`。直接创建与内部层级调度共用同一减法规则，
+  goal、agent 名和历史 grant 都不能让 leaf 获得管理面。
 - 根/子/孙代理只保留一个模型可见创建入口 `create_subagents`；创建后宿主自动启动。
   `dispatch_subagents`、`schedule_child_subagents`、`wait` 与 `inspect_agent_tree` 的模型工具、schema、注册和
   专用测试已删除。代理树仍是 `/status`、TUI、恢复与诊断的内部 projection。
@@ -117,12 +127,12 @@
 
 - 层级 scheduler 继续使用现有 role template 和 `allowed_tools`，但二者都不再产生新权限：最终 child
   工具集必须落在父 run 当前工具快照内。显式 child allowlist 只是进一步收窄，不是扩权入口。
-- 普通 worker 固定移除 `schedule_child_subagents`、`dispatch_subagents`；coordinator 也只有父代理
+- 普通 leaf 固定移除 create/guidance/cancel/resolve 四个直属控制入口；coordinator 也只有父代理
   原本拥有对应工具时才能保留。角色只决定继承后留下什么，不会按任务正文、agent 名或工具说明猜权限。
 - child 的父 conversation id 只用于 lineage、wake 和归档；`context_scope=task_local` 继续使用独立
   runner lane，不参加主会话“当前是否已有执行器”的工作工具准入，因而不会把正常并行 child 当成
   第二个主代理执行器。
-- 旧默认 leaf 列表中无条件附带的 child-creation 两项已删除，没有增加第二套子代理类型或派工 runtime。
+- 旧默认 leaf 列表中无条件附带的直属下级控制项已删除，没有增加第二套子代理类型或派工 runtime。
   聚焦回归覆盖 worker、coordinator、显式 allowlist、未知工具别名和多层继承。
 
 ## 2026-07-28 子代理复用完整原生工具输入预算

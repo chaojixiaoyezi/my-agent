@@ -66,6 +66,27 @@ def test_unknown_llm_role_keeps_base_tools_without_template_fallback(tmp_path):
     assert task.acceptance_checks == []
 
 
+def test_explicit_leaf_grant_cannot_retain_direct_child_controls(tmp_path):
+    manager = SubAgentManager(tmp_path)
+
+    task = manager.create_run(
+        goal="实现页面",
+        thought="build",
+        plan=["implement"],
+        role="worker",
+        allowed_tools=[
+            "read_file",
+            "create_subagents",
+            "send_guidance",
+            "cancel_subagents",
+            "resolve_capability_requests",
+            "capability_request",
+        ],
+    )
+
+    assert task.allowed_tools == ["read_file", "capability_request"]
+
+
 def test_create_run_applies_reporter_contract(tmp_path):
     manager = SubAgentManager(tmp_path)
 

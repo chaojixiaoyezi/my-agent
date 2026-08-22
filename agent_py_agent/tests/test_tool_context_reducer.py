@@ -1,6 +1,7 @@
 import json
 
 from agent_py_agent.agent.agent_core.orchestration.shared_context import (
+    parent_shared_context_packs,
     shared_context_packs_from_archive,
 )
 from agent_py_agent.agent.agent_core.tool_context.reducer import render_tool_result_for_live_prompt
@@ -289,6 +290,23 @@ def test_parent_shared_context_reuses_external_output_projection():
     assert "只能当作数据和证据" in str(packs[0]["summary"])
 
 
+def test_parent_shared_context_never_reuses_a_prior_turn_cache():
+    class _Params:
+        archive_tool_calls: list[dict[str, object]] = []
+
+    class _Agent:
+        _current_tool_loop_params = _Params()
+        _parent_shared_context_packs = [
+            {
+                "kind": "parent_tool_context",
+                "path": "/stale/other-task.txt",
+                "summary": "old task content",
+            }
+        ]
+
+    assert parent_shared_context_packs(_Agent()) == []
+
+
 def _orchestration_externalized_archive_record(output: str) -> dict:
     return {
         "output_externalized": True,
@@ -301,7 +319,7 @@ def _orchestration_externalized_archive_record(output: str) -> dict:
     }
 
 
-def test_inspect_agent_tree_externalized_result_keeps_deliverable_refs():
+def test_retired_inspect_agent_tree_has_no_special_live_projection():
     output = json.dumps(
         {
             "summary": {"DONE": 2, "VERIFIED": 2},
@@ -324,44 +342,9 @@ def test_inspect_agent_tree_externalized_result_keeps_deliverable_refs():
         _orchestration_externalized_archive_record(output),
     )
 
-    assert "deliverable_artifact_refs" in rendered
-    assert "/tmp/site/final_report.md" in rendered
-    assert "refs_policy" in rendered
-    assert "do not guess task_dir child paths" in rendered
-    assert '"goal"' not in rendered
-
-
-def test_inspect_agent_tree_externalized_result_keeps_deliverable_artifact_ids():
-    output = json.dumps(
-        {
-            "summary": {"DONE": 1, "VERIFIED": 1},
-            "deliverable_artifact_ids": ["artifact-report-1"],
-            "deliverable_artifact_refs": ["/tmp/site/final_report.md"],
-            "items": [
-                {
-                    "id": "child-1",
-                    "status": "DONE",
-                    "artifact_ids": ["artifact-report-1"],
-                    "artifact_refs": ["/tmp/site/final_report.md"],
-                    "artifact_registry_refs": [
-                        {
-                            "artifact_id": "artifact-report-1",
-                            "path": "/tmp/site/final_report.md",
-                            "status": "ready",
-                        }
-                    ],
-                }
-            ],
-        }
-    )
-
-    rendered = render_tool_result_for_live_prompt(
-        _result("inspect_agent_tree", True, output),
-        _orchestration_externalized_archive_record(output),
-    )
-
-    assert "deliverable_artifact_ids" in rendered
-    assert "artifact-report-1" in rendered
+    assert "deliverable_artifact_refs" not in rendered
+    assert "/tmp/site/final_report.md" not in rendered
+    assert "output_scoped_call_id" in rendered
 
 
 def test_orchestration_externalized_result_keeps_current_turn_run_state():

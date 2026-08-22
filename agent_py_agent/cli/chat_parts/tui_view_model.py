@@ -263,6 +263,9 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             "session_started": self._handle_session_started,
             "connection_started": self._handle_connection_started,
             "connection_resolved": self._handle_connection_resolved,
+            "background_activity_started": self._handle_background_activity_started,
+            "background_activity_updated": self._handle_background_activity_updated,
+            "background_activity_completed": self._handle_background_activity_completed,
             "user_message": self._handle_user_message,
             "system_message": self._handle_system_message,
             "interrupt_notice": self._handle_system_message,
@@ -383,6 +386,41 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             metadata={**active.metadata, **_public_metadata(event.payload)},
         )
         self._append_stable(failed, event)
+
+    # LLM: Background activity is a removable display projection, not a turn or
+    # transcript message. Its lifecycle is keyed by one stable session block.
+    # 函数用途: 建立前台让出后仍有会话任务运行的常驻 Working 块。
+    def _handle_background_activity_started(self, event: TuiEvent) -> None:
+        if event.block_id in self._stable_ids or event.block_id in self.active_blocks:
+            self.record_diagnostic("BACKGROUND_ACTIVITY_RESTART_REJECTED", event)
+            return
+        self.active_blocks[event.block_id] = self._block_from_event(
+            event,
+            role="background",
+            phase="started",
+        )
+
+    # LLM: Count updates may change only the existing projection; they cannot
+    # synthesize activity after a missed start event.
+    # 函数用途: 更新后台 Working 块显示的真实进行中任务数量。
+    def _handle_background_activity_updated(self, event: TuiEvent) -> None:
+        block = self.active_blocks.get(event.block_id)
+        if block is None:
+            self.record_diagnostic("BACKGROUND_ACTIVITY_UPDATE_WITHOUT_START", event)
+            return
+        self.active_blocks[event.block_id] = replace(
+            block,
+            phase="updated",
+            updated_seq=event.seq,
+            metadata={**block.metadata, **_public_metadata(event.payload)},
+        )
+
+    # LLM: A zero canonical count removes the projection without freezing a
+    # fake chat message; completion reporting remains the notice channel's job.
+    # 函数用途: 会话没有进行中任务时原位收起后台 Working 块。
+    def _handle_background_activity_completed(self, event: TuiEvent) -> None:
+        if self.active_blocks.pop(event.block_id, None) is None:
+            self.record_diagnostic("BACKGROUND_ACTIVITY_COMPLETE_WITHOUT_START", event)
 
     # LLM: 用户消息始终直接进入稳定历史，不能留在 active 后被模型终态覆盖。
     # 函数用途: 追加一个用户输入块。
@@ -896,6 +934,7 @@ def _public_metadata(payload: dict[str, Any]) -> dict[str, Any]:
         "percent",
         "source_messages",
         "process",
+        "active_task_count",
     }
     return {key: payload[key] for key in allowed if key in payload}
 

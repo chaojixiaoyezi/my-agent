@@ -12,6 +12,7 @@ from typing import Any
 
 from .model_task import QualityContract
 from .role_templates import (
+    DIRECT_CHILD_CONTROL_TOOLS,
     ROLE_BASE_TOOLS,
     ROLE_TEMPLATE_ATTRIBUTE_KEY,
     RoleTemplate,
@@ -73,8 +74,9 @@ def _stored_role(original_role: str, contract_role: str, template_role: str, nor
 
 
 # LLM: None means "derive role defaults" while an explicit empty list means
-# "no tools". Every non-None snapshot passes the canonical retirement filter.
-# 函数用途: 合并角色工具默认值，并保留显式空权限与已退休工具过滤语义。
+# "no tools". Explicit grants are still narrowed by the typed role snapshot:
+# a leaf cannot retain any direct-child control through an internal caller.
+# 函数用途: 合并角色工具默认值，并按结构化角色裁掉普通 leaf 的下级管理入口。
 def _allowed_tools_for_role(
     role: str,
     tools: object,
@@ -82,7 +84,11 @@ def _allowed_tools_for_role(
 ) -> list[str] | None:
     if tools is not None:
         explicit = [str(item) for item in _list_value(tools) if item not in (None, "")]
-        return active_model_subagent_tools(explicit)
+        active = active_model_subagent_tools(explicit)
+        if template is not None and template.can_spawn_children:
+            return active
+        controls = set(DIRECT_CHILD_CONTROL_TOOLS)
+        return [tool for tool in active if tool not in controls]
     if template:
         return _stable_tools([*template.default_tools, *ROLE_BASE_TOOLS])
     if role in {REPORTER_ROLE, CHECKER_ROLE}:

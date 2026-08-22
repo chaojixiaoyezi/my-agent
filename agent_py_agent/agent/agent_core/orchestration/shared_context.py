@@ -5,7 +5,6 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from ...tooling.output_projection import project_tool_output_body
-from ...tooling.runtime_contracts import ToolCall, ToolResult
 from ..runner.ref_fields import _file_refs_from_value, _normalize_file_ref
 
 _DEFAULT_LIMIT = 3
@@ -87,6 +86,9 @@ def parent_task_directive_packs(
     }]
 
 
+# LLM: Parent read previews are turn-local. Only the current ToolLoop archive may
+# feed a child; agent-level caches would leak unrelated task content across turns.
+# 函数用途: 从父代理当前这一轮的已执行读取记录生成子代理共享上下文包。
 def parent_shared_context_packs(
     agent: object,
     *,
@@ -102,41 +104,6 @@ def parent_shared_context_packs(
         max_preview_chars=max_preview_chars,
         max_output_bytes=max_output_bytes,
     )
-    if packs:
-        return packs
-    cached = getattr(agent, "_parent_shared_context_packs", [])
-    if isinstance(cached, list):
-        return [dict(item) for item in cached if isinstance(item, dict)][: max(0, int(limit))]
-    return []
-
-
-def refresh_parent_shared_context_cache(agent: object, records: Iterable[object]) -> list[dict[str, object]]:
-    packs = shared_context_packs_from_archive(records)
-    if packs:
-        agent._parent_shared_context_packs = packs
-    return packs
-
-
-def refresh_parent_shared_context_from_tool_record(agent: object, record: object) -> list[dict[str, object]]:
-    result = getattr(record, "result", None)
-    call = getattr(record, "call", None)
-    if not isinstance(result, ToolResult) or not isinstance(call, ToolCall):
-        return []
-    pack = _shared_pack_from_tool_values(_SharedToolValues(
-        tool_name=result.tool_name,
-        ok=result.ok,
-        output=result.output,
-        payload=call.arguments,
-        ref=result.call_id,
-        output_trust=result.output_trust,
-        output_redaction=result.output_redaction,
-        bounds=_SharedPackBounds(_DEFAULT_MAX_PREVIEW_CHARS, _DEFAULT_MAX_OUTPUT_BYTES),
-    ))
-    if not pack:
-        return []
-    existing = getattr(agent, "_parent_shared_context_packs", [])
-    packs = _merge_packs(_context_pack_list(existing), [pack], limit=_DEFAULT_LIMIT)
-    agent._parent_shared_context_packs = packs
     return packs
 
 
@@ -306,23 +273,6 @@ def _pack_identity_set(packs: list[dict[str, object]]) -> set[tuple[str, str]]:
     return {_pack_identity(item) for item in packs}
 
 
-def _merge_packs(
-    existing: list[dict[str, object]],
-    incoming: list[dict[str, object]],
-    *,
-    limit: int,
-) -> list[dict[str, object]]:
-    merged = list(existing)
-    seen = _pack_identity_set(merged)
-    for pack in incoming:
-        key = _pack_identity(pack)
-        if key in seen:
-            continue
-        seen.add(key)
-        merged.append(pack)
-    return merged[-max(0, int(limit)):] if limit else merged
-
-
 def _pack_identity(pack: dict[str, object]) -> tuple[str, str]:
     return (
         str(pack.get("kind") or "").strip(),
@@ -341,7 +291,5 @@ __all__ = [
     "append_parent_shared_context",
     "parent_shared_context_packs",
     "parent_task_directive_packs",
-    "refresh_parent_shared_context_cache",
-    "refresh_parent_shared_context_from_tool_record",
     "shared_context_packs_from_archive",
 ]

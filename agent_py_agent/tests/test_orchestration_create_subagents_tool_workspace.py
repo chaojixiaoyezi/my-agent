@@ -326,7 +326,9 @@ class TestCreateSubagentsToolTaskWorkspaceGuards:
         ]
         assert not any("/output/.my_agent/" in ref for ref in params.attributes["output_refs"])
 
-    def test_normalizes_bare_relative_output_refs_to_current_task_output(self, tmp_path):
+
+class TestCreateSubagentsToolRelativeOutputResolution:
+    def test_normalizes_bare_relative_output_refs_to_current_workspace(self, tmp_path):
         from agent_py_agent.agent.agent_core.orchestration.create_policy import create_run_params
         from agent_py_agent.agent.core import SimpleAgent
         from agent_py_agent.agent.settings import AgentConfig
@@ -351,11 +353,56 @@ class TestCreateSubagentsToolTaskWorkspaceGuards:
             ["read_file", "write_file"],
         )
 
-        expected = str((task_root / "output" / "report_by_helper1.md").resolve(strict=False))
+        expected = str((workspace / "report_by_helper1.md").resolve(strict=False))
         assert params.attributes["output_refs"] == [expected]
-        assert params.extra_write_roots == [
-            str((task_root / "output").resolve(strict=False)),
-            str(workspace.resolve(strict=False)),
+        assert params.extra_write_roots == [str(workspace.resolve(strict=False))]
+
+    def test_explicit_output_prefix_keeps_task_internal_output(self, tmp_path):
+        from agent_py_agent.agent.agent_core.orchestration.create_policy import create_run_params
+        from agent_py_agent.agent.core import SimpleAgent
+        from agent_py_agent.agent.settings import AgentConfig
+
+        workspace = tmp_path / "fixture_project"
+        workspace.mkdir()
+        agent = SimpleAgent(
+            AgentConfig(
+                model_backend="echo",
+                my_agent_home=str(tmp_path / "home"),
+                subagent_workspace="subs",
+            ),
+            workspace,
+        )
+        task_root = (
+            tmp_path
+            / "home"
+            / "owners"
+            / "local"
+            / "main"
+            / "tasks"
+            / "2026-06-09"
+            / "gwreq-current"
+        )
+        agent._current_run_task_workspace = str(task_root)
+
+        params = create_run_params(
+            agent,
+            {"role": "worker", "output_files": ["output/report.md"]},
+            "写内部阶段报告",
+            ["read_file", "write_file"],
+        )
+
+        assert params.attributes["output_refs"] == [
+            str((task_root / "output" / "report.md").resolve(strict=False))
+        ]
+
+        work_params = create_run_params(
+            agent,
+            {"role": "worker", "output_files": ["work/notes.md"]},
+            "写内部工作笔记",
+            ["read_file", "write_file"],
+        )
+        assert work_params.attributes["output_refs"] == [
+            str((task_root / "work" / "notes.md").resolve(strict=False))
         ]
 
     def test_rebases_stale_owner_task_output_dir_to_current_task_output(self, tmp_path):
@@ -398,6 +445,8 @@ class TestCreateSubagentsToolTaskWorkspaceGuards:
             str(workspace.resolve(strict=False)),
         ]
 
+
+class TestCreateSubagentsToolTaskOutputRebasing:
     def test_rebases_goal_only_stale_owner_task_project_dir(self, tmp_path):
         """Goal 里明确但未结构化的旧任务 output 路径也绑定到当前任务。"""
         from agent_py_agent.agent.agent_core.orchestration.create_policy import create_run_params

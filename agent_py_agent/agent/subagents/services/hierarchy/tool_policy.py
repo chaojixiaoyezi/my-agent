@@ -8,6 +8,7 @@ from typing import Any, ClassVar
 
 from ...role_templates import (
     COORDINATOR_TOOLS,
+    DIRECT_CHILD_CONTROL_TOOLS,
     active_model_subagent_tools,
     role_template_snapshot_for_role,
 )
@@ -21,15 +22,10 @@ _DEFAULT_LEAF_CODING_TOOLS = [
     "web_fetch",
     "write_file",
     "apply_patch",
-    "send_guidance",
     "capability_request",
 ]
 
-_CHILD_CREATION_TOOLS = frozenset(
-    {
-        "create_subagents",
-    }
-)
+_DIRECT_CHILD_CONTROL_TOOLS = frozenset(DIRECT_CHILD_CONTROL_TOOLS)
 
 
 @dataclass(frozen=True)
@@ -89,11 +85,14 @@ def _can_spawn_children(role: str, spec: Any) -> bool:
     return bool(snapshot.get("can_spawn_children")) or is_coordinator_spec(spec)
 
 
+# LLM: Scheduled leaf creation follows the same role boundary as direct
+# create_subagents: every direct-child control is removed, not only spawn.
+# 函数用途: 将层级调度生成的普通执行代理收窄为纯执行工具集合。
 def _leaf_write_tools(tools: list[str], *, parent_tools: list[str]) -> list[str]:
     return [
         tool
         for tool in _inherited_tools(tools, parent_tools)
-        if tool not in _CHILD_CREATION_TOOLS
+        if tool not in _DIRECT_CHILD_CONTROL_TOOLS
     ]
 
 

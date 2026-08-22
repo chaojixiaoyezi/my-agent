@@ -19,7 +19,7 @@ def test_read_only_subagent_tools_contains_read_tools():
     assert "run_command" not in READ_ONLY_SUBAGENT_TOOLS
 
 
-def test_coding_subagent_tools_contains_file_tools():
+def test_coding_subagent_tools_defaults_to_leaf_execution_tools():
     from agent_py_agent.agent.agent_core.orchestration_tools import CODING_SUBAGENT_TOOLS
 
     assert "write_file" in CODING_SUBAGENT_TOOLS
@@ -27,10 +27,10 @@ def test_coding_subagent_tools_contains_file_tools():
     assert "apply_patch" in CODING_SUBAGENT_TOOLS
     assert "read_file" in CODING_SUBAGENT_TOOLS
     assert "list_files" in CODING_SUBAGENT_TOOLS
-    assert "create_subagents" in CODING_SUBAGENT_TOOLS
-    assert "send_guidance" in CODING_SUBAGENT_TOOLS
-    assert "cancel_subagents" in CODING_SUBAGENT_TOOLS
-    assert "resolve_capability_requests" in CODING_SUBAGENT_TOOLS
+    assert "create_subagents" not in CODING_SUBAGENT_TOOLS
+    assert "send_guidance" not in CODING_SUBAGENT_TOOLS
+    assert "cancel_subagents" not in CODING_SUBAGENT_TOOLS
+    assert "resolve_capability_requests" not in CODING_SUBAGENT_TOOLS
     assert "raise_event" not in CODING_SUBAGENT_TOOLS
     assert "schedule_child_subagents" not in CODING_SUBAGENT_TOOLS
     assert "dispatch_subagents" not in CODING_SUBAGENT_TOOLS
