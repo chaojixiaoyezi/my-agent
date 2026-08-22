@@ -29,6 +29,56 @@ def _validation_issues(result: object) -> list[dict[str, object]]:
     return result.metadata["action_decision"]["evidence"]["issues"]
 
 
+def test_task_progress_promotes_before_selecting_canonical_ledger(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from agent_py_agent.agent.agent_core import task_progress_tool as module
+    from agent_py_agent.agent.conversation import task_promotion
+    from agent_py_agent.agent.task_progress import read_task_progress
+
+    promoted = {"value": False}
+    agent = SimpleNamespace(
+        home_paths=None,
+        root=tmp_path,
+        _current_run_params=SimpleNamespace(
+            run_id="gateway-request",
+            task_attributes={},
+        ),
+    )
+
+    def promote(_agent: object) -> None:
+        promoted["value"] = True
+
+    monkeypatch.setattr(task_promotion, "promote_current_conversation_task", promote)
+    monkeypatch.setattr(
+        module,
+        "progress_ledger_id",
+        lambda *_args, **_kwargs: "stable-task" if promoted["value"] else "gateway-request",
+    )
+    monkeypatch.setattr(
+        module,
+        "_reconcile_completed_child_covers_before_read",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        module,
+        "reconcile_completed_child_items",
+        lambda *_args, **_kwargs: [],
+    )
+
+    result = module.TaskProgressTool(agent).execute(
+        {
+            "action": "update",
+            "items": [{"id": "1", "title": "创建目录", "status": "pending"}],
+        }
+    )
+
+    assert result.ok is True
+    assert read_task_progress(tmp_path, "stable-task")["items"][0]["id"] == "1"
+    assert read_task_progress(tmp_path, "gateway-request").get("items") == []
+
+
 class TestTaskProgressCoverageTool:
     """测试 task_progress 的通用覆盖账本。"""
 

@@ -348,9 +348,9 @@ def test_runtime_background_activity_is_one_removable_animated_block() -> None:
     )
     transcript = "\n".join(fragments_text(line) for line in frame.transcript_lines)
     rendered = "\n".join(fragments_text(line) for line in frame.agent_lines)
-    assert "Working" not in transcript
     assert frame.input_status_lines == ()
-    assert "main · 等待 1 个子代理 · 0:00" in rendered
+    assert "Working · main · 等待 1 个子代理 · 0:00" in transcript
+    assert "main" not in rendered
     assert "game-engine · 运行中 · 正在使用 write_file · 0:50" in rendered
     assert "↓ 12.3k tokens · compact 1 · 重试 1 次" in rendered
     assert "level-design · 已完成 · 0:45 · ↓ 6.8k tokens · compact 0" in rendered

@@ -190,6 +190,47 @@ def test_structured_tool_progress_projects_bounded_public_display() -> None:
     assert "private_extra" not in display["lines"][0]
 
 
+def test_structured_tool_progress_prefers_todo_snapshot_from_result_envelope() -> None:
+    call = _canonical_calls([{"tool": "create_subagents"}])[0]
+    request = _round_request(
+        agent=SimpleNamespace(),
+        params=SimpleNamespace(tool_context=[]),
+        tool_rounds=1,
+        response=ModelResponse(text="", backend="test"),
+        calls=[{"tool": "create_subagents"}],
+        execute_one=lambda _request: None,
+        record_one=lambda _record: None,
+    )
+    result = ToolResult.succeeded(
+        call,
+        "large output archived; preview only",
+        facts=ToolSuccessFacts(
+            effect_outcome="confirmed",
+            metadata={
+                "handler_details": {
+                    "task_progress_seed": {
+                        "run_id": "task-main",
+                        "seeded": 0,
+                        "items": [
+                            {"id": "2", "title": "游戏引擎", "status": "pending"}
+                        ],
+                    }
+                }
+            },
+        ),
+    )
+
+    payload = _structured_tool_progress(
+        ToolProgressEvent(request, 0, call, "finished", "完成", result=result),
+        "create_subagents",
+        "",
+    )
+
+    assert payload["task_progress_items"] == [
+        {"id": "2", "title": "游戏引擎", "status": "pending"}
+    ]
+
+
 def test_structured_tool_progress_projects_multi_file_patch_without_private_fields() -> None:
     call = _canonical_calls([{"tool": "apply_patch", "patch": "redacted"}])[0]
     request = _round_request(

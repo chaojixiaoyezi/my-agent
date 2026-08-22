@@ -10,11 +10,14 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 
 - `conversation_agent_activity.v2` 是 owner/thread 认证后的只读展示 schema：main 只含 task id、phase、
   activity 和时间；直属 child 只含 run lineage、名称/角色、typed status、活动、attempt、token/Compact 和
-  时间。goal、提示词、工具输出、路径、权限和 secret 均不进入该 schema。
+  时间；child 另携带派工时显式声明的有界 `progress_item_ids`，仅用于 Todo 展示关联。goal、
+  提示词、工具输出、路径、权限和 secret 均不进入该 schema。
 - token 与 Compact 计数复用 `subagents/services/control_plane_projection.py` 的公开 ledger reader，控制面、
   TUI 和后续 Web 不得各算一套。缺失/损坏账本按空展示处理，不改变 canonical run 状态。
-- fixed Todo 和 fixed agent panel 都是 reducer snapshot 的派生 view。Todo 的 exact child 标记、终态活动抑制、
-  首次 attempt 隐藏和重试文案都属于展示规则，不能成为完成、恢复或验收信号。
+- main `Working`、fixed Todo 和 fixed child panel 都是同一 reducer snapshot 的派生 view。
+  main 位于正文末尾，Todo 位于输入框上，child panel 位于输入框下。Todo 的 exact
+  `run_id/progress_item_ids` 标记、终态活动抑制、首次 attempt 隐藏和重试文案都属于展示规则，
+  不能成为完成、恢复或验收信号。
 
 ## Memory Candidate 接口
 

@@ -353,7 +353,8 @@ class TuiBlockRenderCache:
 
 
 # LLM: render_tui_snapshot 只组合 snapshot 中 typed block/order；active/stable 通过 created_seq 合流但不改写 reducer。
-# 函数用途: 渲染完整对话画面、权限覆盖层和状态提示。
+# 终端交互's SpinnerWithVerb 位于消息区末尾，因此 main 活动从 background block 单独放到 transcript 末尾。
+# 函数用途: 渲染完整对话画面、主代理实时工作行、权限覆盖层和状态提示。
 def render_tui_snapshot(
     snapshot: TuiViewSnapshot,
     context: TuiRenderContext,
@@ -399,6 +400,22 @@ def render_tui_snapshot(
     for block in visible_activity:
         rendered = cache.render(block, context) if cache is not None else _render_block(block, context)
         _append_block(lines, rendered)
+    background = next(
+        (
+            block
+            for block in snapshot.active_blocks
+            if block.role == "background"
+            and block.phase not in TERMINAL_RENDER_PHASES
+        ),
+        None,
+    )
+    if background is not None:
+        rendered = (
+            cache.render(background, context)
+            if cache is not None
+            else _render_block(background, context)
+        )
+        _append_block(lines, rendered)
     overlay = _render_permission(snapshot.permission, context) if snapshot.permission else ()
     return sanitize_tui_render_frame(
         TuiRenderFrame(
@@ -442,8 +459,8 @@ def _sanitize_formatted_line(line: FormattedLine) -> FormattedLine:
 
 
 # LLM: 终端交互 hides foreground thinking while permission or a visible
-# assistant stream is active. Background agent activity is independently fixed
-# beside the composer and is therefore never selected here.
+# assistant stream is active. Main background activity is appended separately
+# after this selection, matching SpinnerWithVerb at the transcript tail.
 # 函数用途: 选择本帧应显示在可滚动正文末尾的前台思考活动块。
 def _visible_activity_blocks(
     snapshot: TuiViewSnapshot,
@@ -504,9 +521,10 @@ def _render_connection(
     ),)
 
 
-# LLM: The main row and child rows come only from the canonical conversation
-# activity projection. The panel is removable display state, never a completion claim.
-# 函数用途: 在输入框下方显示 终端交互 风格的常驻 main 行和直属子代理状态行。
+# LLM: The main row comes only from the canonical conversation activity
+# projection and mirrors 终端交互's animated SpinnerWithVerb at transcript tail.
+# The block is removable display state, never a completion claim.
+# 函数用途: 在最新正文与 Context/Todo 之间显示带动画的 main 工作行。
 def _render_background_activity(
     block: TuiBlock,
     context: TuiRenderContext,
@@ -521,22 +539,36 @@ def _render_background_activity(
     )
     elapsed = max(0, int(context.now - started_at)) if started_at and context.now else 0
     rows = _subagent_activity_rows(block.metadata.get("subagents"))
-    hidden = max(0, int(block.metadata.get("hidden_subagent_count") or 0))
-    main_label = str(main_activity.get("activity") or "").strip() or _main_agent_activity_label(rows)
     main_phase = str(main_activity.get("phase") or "").strip().lower()
+    derived_label = _main_agent_activity_label(rows)
+    main_label = str(main_activity.get("activity") or "").strip() or derived_label
+    if main_phase in {"", "waiting", "finalizing"} and _active_subagent_count(rows):
+        main_label = derived_label
     main_style = "class:tui-error" if main_phase == "failed" else "class:tui-subagent-running"
-    lines = list(
-        wrap_fragments(
-            (
-                (main_style, "● "),
-                ("class:tui-strong", "main"),
-                ("class:tui-muted", f" · {main_label}"),
-                ("class:tui-muted", f" · {_format_activity_duration(elapsed)}"),
-            ),
-            width=context.width,
-            continuation_prefix=(("class:tui-thinking", "  "),),
-        )
+    glyph = SPINNER_GLYPHS[context.spinner_index % len(SPINNER_GLYPHS)]
+    return wrap_fragments(
+        (
+            (main_style, f"{glyph} "),
+            ("class:tui-strong", "Working"),
+            ("class:tui-muted", " · main"),
+            ("class:tui-muted", f" · {main_label}"),
+            ("class:tui-muted", f" · {_format_activity_duration(elapsed)}"),
+        ),
+        width=context.width,
+        continuation_prefix=(("class:tui-thinking", "  "),),
     )
+
+
+# LLM: Child rows share the same canonical background projection as main but
+# render in 终端交互's coordinator region below the composer, without a second main row.
+# 函数用途: 在输入框下方绘制直属子代理列表。
+def _render_subagent_panel(
+    block: TuiBlock,
+    context: TuiRenderContext,
+) -> tuple[FormattedLine, ...]:
+    rows = _subagent_activity_rows(block.metadata.get("subagents"))
+    hidden = max(0, int(block.metadata.get("hidden_subagent_count") or 0))
+    lines: list[FormattedLine] = []
     visible_rows = rows[:8]
     for row in visible_rows:
         lines.extend(_render_subagent_activity_row(row, context))
@@ -577,6 +609,18 @@ def _main_agent_activity_label(rows: list[dict[str, object]]) -> str:
     if running:
         return f"等待 {running} 个子代理"
     return "整理结果中"
+
+
+# LLM: Active child count reads canonical status only and exists solely to
+# avoid showing a completed model-turn label while descendants still run.
+# 函数用途: 统计代理面板里尚未结束的直属子代理数。
+def _active_subagent_count(rows: list[dict[str, object]]) -> int:
+    return sum(
+        1
+        for row in rows
+        if str(row.get("status") or "").upper()
+        in {"PLANNING", "PENDING", "RUNNING", "BLOCKED", "PAUSED"}
+    )
 
 
 # LLM: A child row renders only canonical status plus bounded display context.
@@ -1684,11 +1728,9 @@ def _render_fixed_todo(
     )
     if background is None:
         return _render_todo(todo, context)
-    statuses = {
-        str(row.get("run_id") or ""): str(row.get("status") or "").upper()
-        for row in _subagent_activity_rows(background.metadata.get("subagents"))
-        if str(row.get("run_id") or "")
-    }
+    statuses = _todo_child_statuses(
+        _subagent_activity_rows(background.metadata.get("subagents"))
+    )
     items = todo.metadata.get("items")
     if not isinstance(items, list) or not statuses:
         return _render_todo(todo, context)
@@ -1704,31 +1746,63 @@ def _render_fixed_todo(
     )
 
 
-# LLM: This mapping uses an exact task-progress item id to child run id join and
+# LLM: This mapping uses exact child run ids and explicit covers ids with
 # canonical child status only; titles, goals, summaries and output never affect it.
 # 函数用途: 把派工清单中的子代理项投影为完成、阻塞、跳过或进行中图标。
 def _todo_item_with_child_status(
     item: dict[str, object],
-    statuses: dict[str, str],
+    statuses: dict[str, tuple[str, ...]],
 ) -> dict[str, object]:
     run_id = str(item.get("id") or "")
-    status = statuses.get(run_id)
-    if not status:
+    linked_statuses = statuses.get(run_id, ())
+    if not linked_statuses:
         return dict(item)
-    if status == "DONE":
-        display_status = "done"
-    elif status in {"CANCELLED", "ABANDONED", "TAKEN_OVER"}:
-        display_status = "skipped"
-    elif status in {"FAILED", "TIMEOUT", "CHANNEL_ERROR", "BLOCKED", "PAUSED"}:
+    if any(
+        status in {"FAILED", "TIMEOUT", "CHANNEL_ERROR", "BLOCKED", "PAUSED"}
+        for status in linked_statuses
+    ):
         display_status = "blocked"
-    else:
+    elif any(
+        status in {"PLANNING", "PENDING", "RUNNING"}
+        for status in linked_statuses
+    ):
         display_status = "in_progress"
+    elif all(status == "DONE" for status in linked_statuses):
+        display_status = "done"
+    elif all(
+        status in {"DONE", "CANCELLED", "ABANDONED", "TAKEN_OVER"}
+        for status in linked_statuses
+    ):
+        display_status = "skipped"
+    else:
+        return dict(item)
     return {**item, "status": display_status}
 
 
-# LLM: The coordinator panel consumes only the removable background activity
-# block and stays outside transcript/history so its position is stable like 终端交互.
-# 函数用途: 生成输入框下方的 main/子代理固定面板；没有活跃会话任务时不占高度。
+# LLM: One child may explicitly cover multiple Todo ids and multiple children
+# may share one id. The join remains exact and status aggregation stays view-only.
+# 函数用途: 建立 Todo 项 ID 到直属子代理状态的结构化关联表。
+def _todo_child_statuses(
+    rows: list[dict[str, object]],
+) -> dict[str, tuple[str, ...]]:
+    collected: dict[str, list[str]] = {}
+    for row in rows:
+        status = str(row.get("status") or "").upper()
+        run_id = str(row.get("run_id") or "").strip()
+        raw_progress_ids = row.get("progress_item_ids")
+        progress_ids = (
+            [str(value).strip() for value in raw_progress_ids if str(value or "").strip()]
+            if isinstance(raw_progress_ids, list | tuple)
+            else []
+        )
+        for item_id in dict.fromkeys(([run_id] if run_id else []) + progress_ids):
+            collected.setdefault(item_id, []).append(status)
+    return {key: tuple(values) for key, values in collected.items()}
+
+
+# LLM: The coordinator panel consumes only child rows from the removable
+# background activity block and stays outside transcript/history like 终端交互.
+# 函数用途: 生成输入框下方的直属子代理固定面板；没有子代理时不占高度。
 def _render_fixed_agent_panel(
     snapshot: TuiViewSnapshot,
     context: TuiRenderContext,
@@ -1742,7 +1816,7 @@ def _render_fixed_agent_panel(
         ),
         None,
     )
-    return _render_background_activity(background, context) if background is not None else ()
+    return _render_subagent_panel(background, context) if background is not None else ()
 
 
 # LLM: Width tiers alter display density only. Percent and warning style come from typed token

@@ -467,10 +467,27 @@ def _created_items_result(request: CreatedItemsResultRequest) -> ToolHandlerOutc
     return _create_subagents_success(payload)
 
 
+# LLM: The compact result envelope preserves typed scheduling and bounded Todo
+# facts across large-output externalization; it must not copy goals or child output.
+# 函数用途: 生成成功派工结果，并保留 TUI 仍需读取的结构化小字段。
 def _create_subagents_success(payload: dict[str, object]) -> ToolHandlerOutcome:
-    """Preserve a compact scheduling receipt after full output archival."""
     lifecycle = payload.get("schedule_lifecycle")
     envelope = {"schedule_lifecycle": dict(lifecycle)} if isinstance(lifecycle, dict) else {}
+    progress_seed = payload.get("task_progress_seed")
+    if isinstance(progress_seed, dict):
+        envelope["task_progress_seed"] = {
+            "run_id": str(progress_seed.get("run_id") or ""),
+            "seeded": _positive_limit(progress_seed.get("seeded")),
+            "items": [
+                {
+                    "id": str(item.get("id") or ""),
+                    "title": str(item.get("title") or ""),
+                    "status": str(item.get("status") or "pending"),
+                }
+                for item in list(progress_seed.get("items") or [])[:64]
+                if isinstance(item, dict)
+            ],
+        }
     return ToolHandlerOutcome(
         "create_subagents",
         True,

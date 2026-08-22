@@ -960,7 +960,13 @@ def test_todo_panel_gateway_event_payload_keeps_task_progress_items() -> None:
     runtime.update_background_activity(
         1,
         subagents=[
-            {"run_id": "b", "name": "analysis", "status": "DONE", "attempts": 1}
+            {
+                "run_id": "child-analysis",
+                "name": "analysis",
+                "status": "DONE",
+                "attempts": 1,
+                "progress_item_ids": ["b"],
+            }
         ],
     )
     frame = render_tui_snapshot(store.snapshot(), TuiRenderContext(width=80))
@@ -968,7 +974,9 @@ def test_todo_panel_gateway_event_payload_keeps_task_progress_items() -> None:
     todo_text = "\n".join(fragments_text(line) for line in frame.todo_lines)
     assert "☑ 阅读项目A" in todo_text
     assert "☑ 分析模块" in todo_text
-    assert any("main" in fragments_text(line) for line in frame.agent_lines)
+    assert any("Working · main" in line for line in _frame_lines(frame))
+    assert not any("main" in fragments_text(line) for line in frame.agent_lines)
+    assert any("analysis" in fragments_text(line) for line in frame.agent_lines)
 
 
 def test_todo_panel_empty_items_renders_nothing() -> None:

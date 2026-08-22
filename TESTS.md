@@ -26,6 +26,16 @@ Gateway 可以并行，但不能作为“单 Gateway 多客户端”验收的替
 补代码、发技术推动指令或修改产物。单测、fake、renderer snapshot 和静态 gate 只作上线前护栏，不能替代
 上述真实 TUI 验收。
 
+`7c052f2` 在 `.7` 唯一 Gateway 上的第 1 条原样任务使用 tmux
+`dsh-p1-pvz-7c052f2`，测试者只输入一次 prompt，六个 child 全部自然 DONE。最终
+`/root/abc` 共 9 个文件，`0.0.0.0:8080` 监听，loopback HTTP 200；该轮同时抓到三个真实
+回归点：首条 Todo 在 task 晋升前写入 request-id 账本，派工后却使用 task-path 账本；显式
+`covers=[Todo id]` 未进入 child 展示投影，所以 8 项全未勾选；一次 main 模型轮返回被误显示为
+“整理最终回复”，且 main 被错放在输入框下方。当前候选已增加“先晋升再选账本”、
+`covers -> progress_item_ids`、大输出 result-envelope Todo 快照、`waiting` main 轮状态，并按 终端交互
+`SpinnerWithVerb` 把main `Working` 放到正文末尾/Context 前，输入框下只保留 child。相关 6 文件
+focused 组合 147 项已通过，但候选未部署前不计真机通过。
+
 2026-08-21 子代理自然收口与 TUI 可观察性回归分三层执行：第一层覆盖 `turn_end`、普通自然完成、
 递归 `create_subagents` 自动启动、模型工具表不含 dispatch/schedule/wait/inspect、父级直属
 guidance/cancel/capability、cancel schema/回执不含 dry-run 查树旁路、普通 child 工作区继承，以及

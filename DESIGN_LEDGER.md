@@ -867,12 +867,18 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   MiniMax-M2.7 输入框。监督首轮复活 4、按父会话取消 21、回收失联 RUNNING 5，随后 3 条 RUNNING
   自然完成；两次显式 status 返回同一近期计数且没有恢复提示。
 
-## 2026-08-22 固定 Todo/代理区与后台主代理可见性【状态：代码和定向回归完成；`.7` 原样 TUI 待验收】
+## 2026-08-22 固定 Todo/代理区与后台主代理可见性【状态：第一轮真机发现已修，新候选待 `.7` 复验】
 
-- 布局直接对照 终端交互 `REPL.tsx`、`TaskListV2.tsx`、`CoordinatorAgentStatus.tsx`：Todo 是输入框上方的
-  固定区域，main/直属 child 是输入框下方的固定区域，二者都不写入 transcript，也不随历史滚动消失。
-  `create_subagents` 的结构化 seed 立即成为当前 canonical Todo 快照；child 的 exact run id 只用于显示层
-  合并 DONE/失败/取消标记，不能反向修改任务账本。
+- 布局直接对照 终端交互 `REPL.tsx` 的 `SpinnerWithVerb`、`TaskListV2.tsx` 与
+  `CoordinatorAgentStatus.tsx`：main 的动态 `Working` 行位于最新正文后、Context/Todo 前；Todo 固定在
+  输入框上方；输入框下方只保留直属 child，不再重复 `main`。
+- `task_progress(action=update)` 必须先晋升 conversation task，再解析唯一稳定账本 key；否则首条
+  Todo 会写到 Gateway request id，派工却读 task-path 指纹，同一任务裂成两本清单。
+  `create_subagents` 对显式 `covers` 只沿用已有 Todo id，未绑定 child 才按 exact run id 新建条目。
+  child 的 `covers` 以有界 `progress_item_ids` 进入只读活动投影，renderer 仅用 typed status
+  原位显示 DONE/失败/取消，不从 goal/title 文字猜关联。
+- 大派工回执可被工具输出归档，因此有界 `task_progress_seed` 必须同时保留在
+  `result_envelope/handler_details`，Gateway 实时事件优先读该结构化快照，不依赖可裁剪的文本预览。
 - 生命周期直接对照 会话运行时 `agent/status.rs`、`agent/control.rs` 与 `multi_agents/wait.rs`：只读 typed
   status/notification，不解析“模型已生成回复”“已经完成”等自然语言。终态 child 清除旧 activity；首次
   attempt 隐藏，只有 `attempts > 1` 才显示 `重试 N 次`。
@@ -880,8 +886,13 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   不自行估算、不持久化副本。后台 main 的最近 thinking/tool/retry/finalizing 是 Gateway 进程内有界、易失、
   纯展示快照，不参与完成、派工、重试、权限或恢复。
 - 后台主代理的可交付最终正文以普通 `assistant_completed` 进入 transcript，不再伪装成灰色系统通知；被
-  delivery contract 抑制或没有正文的内部轮不写用户通知。代理区删除第二个 `Working` 标题，只保留一行
-  `main` 和 child 行，避免两个“工作中”状态源。
+  delivery contract 抑制或没有正文的内部轮不写用户通知。一次模型轮返回只将 main 活动设为
+  `waiting`，不得在 child 仍活跃时写“整理最终回复”；显示层按结构化 child 状态改显“等待 N 个子代理”。
+- `.7` 的 `7c052f2` 在 tmux `dsh-p1-pvz-7c052f2` 输入第 1 个原样重任务：第一批请求
+  5 个 child 被容量合同整批拒绝后，模型自然改为 4 个，随后又派 2 个整合/服务 child；6 个
+  child 全部 DONE，合计约 238.2k tokens、Compact 均为 0。最终 `/root/abc` 有 9 个文件，
+  `0.0.0.0:8080` 真实监听且 loopback HTTP 200；但 8 个 Todo 全未勾选，main 仍错放在输入框下方。
+  本候选修复已通过 147 项 focused tests，仍须部署后用下一条原样 TUI 任务验收新布局与勾选。
 - `.7` 正式验收必须使用唯一 Gateway 和 `MiniMax-M2.7`，依次执行 `TESTS.md` 的四个原样重型 prompt。
   每次启动、切换或输入 TUI 之前必须先向用户公开 tmux session 名称与完整 attach 命令；测试者只观察，
   不旁路补代码或向被测代理发送技术推动消息。

@@ -105,6 +105,38 @@ def test_create_subagents_seed_exposes_todo_snapshot_to_tui() -> None:
     ]
 
 
+def test_create_subagents_result_envelope_preserves_bounded_todo_snapshot() -> None:
+    from agent.agent_core.orchestration_tools import _create_subagents_success
+
+    outcome = _create_subagents_success(
+        {
+            "created": 1,
+            "task_progress_seed": {
+                "run_id": "run-main",
+                "seeded": 1,
+                "items": [
+                    {
+                        "id": "child-1",
+                        "title": "实现游戏引擎",
+                        "status": "in_progress",
+                        "private_note": "must-not-pass",
+                    }
+                ],
+            },
+        }
+    )
+
+    assert outcome.result_envelope == {
+        "task_progress_seed": {
+            "run_id": "run-main",
+            "seeded": 1,
+            "items": [
+                {"id": "child-1", "title": "实现游戏引擎", "status": "in_progress"}
+            ],
+        }
+    }
+
+
 def test_seed_idempotent_on_same_ids(tmp_path):
     agent = _agent(tmp_path)
     assert seed_dispatch_task_progress(agent, [_task("subagent-aa11", "建后端")])["seeded"] == 1
@@ -119,6 +151,41 @@ def test_seed_appends_new_dispatch_without_touching_existing(tmp_path):
     assert seed["seeded"] == 1  # 只补新子代理
     ids = {item["id"] for item in read_task_progress(tmp_path, "run-seed-1")["items"]}
     assert ids == {"subagent-aa11", "subagent-cc33"}
+
+
+def test_seed_reuses_existing_todo_items_for_explicit_covers(tmp_path):
+    from agent.task_progress import write_task_progress
+
+    write_task_progress(
+        tmp_path,
+        "run-seed-1",
+        {
+            "items": [
+                {"id": "2", "title": "游戏核心引擎", "status": "pending"},
+                {"id": "3", "title": "植物系统", "status": "pending"},
+            ]
+        },
+    )
+
+    seed = seed_dispatch_task_progress(
+        _agent(tmp_path),
+        [
+            _covered_task("subagent-engine", "实现引擎", ["2"]),
+            _covered_task("subagent-plants", "实现植物", ["3"]),
+        ],
+    )
+
+    assert seed == {
+        "run_id": "run-seed-1",
+        "seeded": 0,
+        "items": [
+            {"id": "2", "title": "游戏核心引擎", "status": "pending"},
+            {"id": "3", "title": "植物系统", "status": "pending"},
+        ],
+    }
+    assert [
+        item["id"] for item in read_task_progress(tmp_path, "run-seed-1")["items"]
+    ] == ["2", "3"]
 
 
 def test_done_child_closes_only_its_exact_seeded_progress_item(tmp_path):

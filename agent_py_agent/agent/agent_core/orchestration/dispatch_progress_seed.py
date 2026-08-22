@@ -1,6 +1,7 @@
-"""create_subagents 派工时把每个子代理自动登记成 task_progress 待办。
+"""create_subagents 派工时把子代理与 task_progress 结构化关联。
 
-派工是模型自己声明的计划——把每个真实子代理原样落成一条 in_progress 账本，
+派工是模型自己声明的计划——显式 covers 沿用已有清单项，未绑定的真实子代理才按 run id
+落成 in_progress 账本，
 不猜任务类型、不外加固定收口步骤或数量配额。是否还要整合、验证、调查或直接汇报，
 由主代理依据用户目标和当前事实自主决定。种子失败绝不影响派工本身。
 
@@ -33,8 +34,9 @@ _MAX_BINDING_OPEN_TARGETS = 24
 _GOAL_ID_MIN_LEN = 4
 
 DISPATCH_SEED_NOTE = (
-    "已把每个真实子代理登记为 task_progress 待办。"
-    "子代理终态会按精确 run_id 回写；后续如何整合、验证或汇报由当前代理依据目标决定。"
+    "已把派工与 task_progress 结构化关联；有 covers 的子代理沿用原清单项，"
+    "其余子代理按真实 run_id 登记为待办。"
+    "子代理终态会按精确 run_id/covers id 回写；后续如何整合、验证或汇报由当前代理依据目标决定。"
 )
 
 COVERS_BINDING_NOTE = (
@@ -55,7 +57,7 @@ COVERS_PARENT_LEDGER_UNKNOWN_NOTE = (
 
 
 def seed_dispatch_task_progress(agent: object, tasks: list) -> dict[str, Any] | None:
-    """把本次派出的子代理种进当前 run 的 task_progress 账本;返回 {run_id, seeded} 或 None。"""
+    """复用 covers 项并把未绑定子代理种进当前 task_progress 账本。"""
     try:
         return _seed(agent, tasks)
     except Exception:  # noqa: BLE001 - 账本种子是增强,失败绝不影响派工
@@ -71,30 +73,55 @@ def _seed(agent: object, tasks: list) -> dict[str, Any] | None:
     run_id = _current_run_id(agent)
     if root is None or not run_id or not tasks:
         return None
+    current = read_task_progress(root, run_id)
     existing_ids = {
         str(item.get("id") or "")
-        for item in read_task_progress(root, run_id).get("items", [])
+        for item in current.get("items", [])
         if isinstance(item, dict)
     }
-    items = [_task_item(task) for task in tasks]
+    covered_existing = any(
+        set(_task_covers(task)).intersection(existing_ids)
+        for task in tasks
+    )
+    items = [
+        _task_item(task)
+        for task in tasks
+        if not set(_task_covers(task)).intersection(existing_ids)
+    ]
     items = [item for item in items if item["id"] and item["id"] not in existing_ids]
     if not items:
+        if covered_existing:
+            return {
+                "run_id": run_id,
+                "seeded": 0,
+                "items": _visible_progress_items(current),
+            }
         return None
     written = write_task_progress(
         root,
         run_id,
         {"items": items, "summary": f"已派 {len(tasks)} 个子代理并登记为待办"},
     )
-    visible_items = [
+    return {
+        "run_id": run_id,
+        "seeded": len(items),
+        "items": _visible_progress_items(written),
+    }
+
+
+# LLM: Tool/TUI snapshots expose only stable progress identity, title and status
+# from the just-read canonical ledger; notes, evidence and coverage stay private.
+# 函数用途: 生成派工回执里有界的 Todo 清单快照。
+def _visible_progress_items(progress: dict[str, Any]) -> list[dict[str, str]]:
+    return [
         {
             "id": str(item.get("id") or ""),
             "title": str(item.get("title") or ""),
             "status": str(item.get("status") or "pending"),
         }
-        for item in written.get("items", [])[:64]
+        for item in progress.get("items", [])[:64]
         if isinstance(item, dict)
     ]
-    return {"run_id": run_id, "seeded": len(items), "items": visible_items}
 
 
 def dispatch_coverage_binding(agent: object, tasks: list) -> dict[str, Any] | None:

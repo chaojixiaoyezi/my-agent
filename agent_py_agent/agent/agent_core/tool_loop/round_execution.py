@@ -1219,10 +1219,19 @@ def _task_progress_items_from_output(output: object) -> list[dict[str, object]] 
         payload = json.loads(text)
     except (TypeError, ValueError):
         return None
-    items = payload.get("items") if isinstance(payload, dict) else None
-    if not isinstance(items, list) and isinstance(payload, dict):
+    return _task_progress_items_from_mapping(payload) if isinstance(payload, Mapping) else None
+
+
+# LLM: Handler envelopes survive output externalization, so this scalar/list
+# parser is the canonical way to recover an explicit Todo snapshot from them.
+# 函数用途: 从工具结果对象或 task_progress_seed 中提取有界 Todo 项。
+def _task_progress_items_from_mapping(
+    payload: Mapping[str, object],
+) -> list[dict[str, object]] | None:
+    items = payload.get("items")
+    if not isinstance(items, list):
         seed = payload.get("task_progress_seed")
-        items = seed.get("items") if isinstance(seed, dict) else None
+        items = seed.get("items") if isinstance(seed, Mapping) else None
     if not isinstance(items, list):
         return None
     clean: list[dict[str, object]] = []
@@ -1276,9 +1285,8 @@ def _structured_tool_progress(
         display = _public_progress_display(event, raw_display)
         if display:
             payload["display"] = display
-        # task_progress/create_subagents 都可显式附带同一本 canonical 清单快照。
         if bool(event.result.ok):
-            items = _task_progress_items_from_output(event.result.output)
+            items = _task_progress_items_from_result(event.result)
             if items is not None:
                 payload["task_progress_items"] = items
     if event.started_at is not None:
@@ -1287,6 +1295,21 @@ def _structured_tool_progress(
             3,
         )
     return payload
+
+
+# LLM: Result envelopes are the durable source for Todo snapshots after large
+# output externalization; body parsing exists only for small legacy results.
+# 函数用途: 从成功工具结果中读取实时 Todo 快照。
+def _task_progress_items_from_result(
+    result: ToolResult,
+) -> list[dict[str, object]] | None:
+    handler_details = result.metadata.get("handler_details")
+    items = (
+        _task_progress_items_from_mapping(handler_details)
+        if isinstance(handler_details, Mapping)
+        else None
+    )
+    return items if items is not None else _task_progress_items_from_output(result.output)
 
 
 def _public_progress_text(

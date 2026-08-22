@@ -407,6 +407,7 @@ _SUBAGENT_ACTIVITY_FIELDS = frozenset(
         "attempts",
         "token_count",
         "compact_count",
+        "progress_item_ids",
         "created_at",
         "updated_at",
         "heartbeat_at",
@@ -429,9 +430,9 @@ def _normalize_main_activity(value: object) -> dict[str, object]:
 
 
 # LLM: This is the client-side metadata whitelist for the authenticated activity
-# snapshot. Unknown fields, nested payloads, goals, paths, and tool output never
-# enter TuiBlock metadata.
-# 函数用途: 清洗并限制 Gateway 返回的直属子代理展示行。
+# snapshot. Only bounded progress ids may remain a list; all other nested values,
+# goals, paths, and tool output are discarded before TuiBlock metadata.
+# 函数用途: 清洗 Gateway 的直属子代理展示行，并限制 Todo 关联 ID 的数量与长度。
 def _normalize_subagent_activity_rows(
     value: object,
 ) -> tuple[dict[str, object], ...]:
@@ -446,6 +447,15 @@ def _normalize_subagent_activity_rows(
             for key in _SUBAGENT_ACTIVITY_FIELDS
             if key in item and not isinstance(item[key], dict | list | tuple | set)
         }
+        progress_ids = item.get("progress_item_ids")
+        if isinstance(progress_ids, list | tuple):
+            row["progress_item_ids"] = list(
+                dict.fromkeys(
+                    str(value).strip()[:128]
+                    for value in progress_ids[:24]
+                    if str(value or "").strip()
+                )
+            )
         rows.append(row)
     return tuple(rows)
 

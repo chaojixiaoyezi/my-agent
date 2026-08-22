@@ -977,6 +977,7 @@ _PUBLIC_SUBAGENT_FIELDS = frozenset(
         "attempts",
         "token_count",
         "compact_count",
+        "progress_item_ids",
         "created_at",
         "updated_at",
         "heartbeat_at",
@@ -987,21 +988,29 @@ _PUBLIC_SUBAGENT_FIELDS = frozenset(
 
 # LLM: The reducer repeats the runtime whitelist so replayed or test-injected
 # events cannot smuggle goal text, paths, permissions, or nested tool output into
-# a render block. These rows remain display-only.
-# 函数用途: 保留直属子代理底栏真正需要的公开标量字段。
+# a render block. Only bounded progress ids are accepted as a public list.
+# 函数用途: 保留直属子代理面板的公开标量和 Todo 关联 ID。
 def _public_subagent_rows(value: list[object] | tuple[object, ...]) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for item in value[:64]:
         if not isinstance(item, Mapping):
             continue
-        rows.append(
-            {
-                str(key): item[key]
-                for key in _PUBLIC_SUBAGENT_FIELDS
-                if key in item
-                and not isinstance(item[key], dict | list | tuple | set)
-            }
-        )
+        row = {
+            str(key): item[key]
+            for key in _PUBLIC_SUBAGENT_FIELDS
+            if key in item
+            and not isinstance(item[key], dict | list | tuple | set)
+        }
+        progress_ids = item.get("progress_item_ids")
+        if isinstance(progress_ids, list | tuple):
+            row["progress_item_ids"] = list(
+                dict.fromkeys(
+                    str(value).strip()[:128]
+                    for value in progress_ids[:24]
+                    if str(value or "").strip()
+                )
+            )
+        rows.append(row)
     return rows
 
 

@@ -66,15 +66,21 @@ class TaskProgressTool(BaseTool):
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
 
-    # LLM: Writes are validated, then canonical child state is projected back
-    # before returning so stale model input cannot hide an already DONE child.
-    # 函数用途: 读取或更新软进度，并把真实子代理终态同步到返回结果。
+    # LLM: Writes promote the conversation task before resolving its ledger,
+    # then project canonical child state so stale input cannot hide a DONE child.
+    # 函数用途: 在稳定任务账本中读写软进度，并把真实子代理终态同步到返回结果。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         action = _normalized_action(params.get("action"))
         if action_error := _invalid_action_result(action):
             return action_error
         if field_error := _invalid_action_fields_result(action, params):
             return field_error
+        if action == "update":
+            # 先晋升再选账本 key：否则首条 Todo 会写 request id，后续派工却写
+            # task-path 指纹，同一任务会分裂成两本清单。
+            from ..conversation.task_promotion import promote_current_conversation_task
+
+            promote_current_conversation_task(self.agent)
         run_id = _target_run_id(self.agent, params, allow_explicit=action == "read")
         if not run_id:
             run_id = "main"
@@ -84,9 +90,6 @@ class TaskProgressTool(BaseTool):
                 return status_error
             if identity_error := _invalid_new_item_identity_result(root, run_id, params):
                 return identity_error
-            from ..conversation.task_promotion import promote_current_conversation_task
-
-            promote_current_conversation_task(self.agent)
             written_payload = write_task_progress(root, run_id, params)
             _reconcile_completed_child_covers_before_read(self.agent, root, run_id)
             reconcile_completed_child_items(self.agent, root, run_id)

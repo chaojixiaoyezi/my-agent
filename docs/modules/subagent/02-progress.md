@@ -5,13 +5,16 @@
 - `conversation/agent_activity.py` 的公开 schema 升为 v2：除直属 child 的 typed lifecycle 外，还读取每个
   run 自己的 token ledger 与 Compact apply ledger，投影累计 token 和 Compact 次数。终态 child 不再显示
   上一次模型/工具动作，第一次 attempt 不在 UI 展示，只有实际重试才显示次数。
-- 后台 main 通过同一 agent 进程内的易失 sink 投影最近 thinking/tool/provider-retry/finalizing；它只回答
+- 后台 main 通过同一 agent 进程内的易失 sink 投影最近 thinking/tool/provider-retry/waiting；它只回答
   “主代理现在在干什么”，不保存正文、不拥有生命周期。最终可交付正文仍由 transcript 与 delivery contract
-  持有，并以普通 assistant 消息显示。
+  持有，并以普通 assistant 消息显示。一次模型轮结束只进入 `waiting`，不等于整个任务进入 finalizing。
 - `create_subagents` 成功回执携带结构化 `task_progress_seed.items`，通用工具进度 adapter 将它提升为
-  `task_progress_items`，因此 Todo 可在创建 child 后立即固定显示。renderer 只按 exact id 合并 child
-  终态标记，不写回清单。
-- 本地相关 focused tests 已通过；功能验收仍以 `.7` 单 Gateway、MiniMax-M2.7 和四个原样真实 TUI 任务为准。
+  `task_progress_items`，且有界 seed 同时存入 `result_envelope`，大输出归档后也不会丢实时 Todo 事件。
+  `task_progress` 先晋升 task 再选账本；有显式 `covers` 的 child 沿用已有项，并以
+  `progress_item_ids` 与 typed child status 原位勾选；只有未绑定 child 才按 exact run id 新建项。
+- 参照 终端交互 `SpinnerWithVerb` 和 `CoordinatorTaskPanel`，main 的动态 `Working` 行在消息区末尾/
+  Context 前，输入框下方只保留 child 行。当前候选相关 focused tests 147 项已通过；功能验收仍以
+  `.7` 单 Gateway、MiniMax-M2.7 和四个原样真实 TUI 任务为准。
 
 ## 2026-08-21 递归创建、自动启动与自然收口
 

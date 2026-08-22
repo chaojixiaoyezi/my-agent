@@ -8,11 +8,13 @@
 - [x] 直属 cancel/interrupt 不被自动重试资格否决；同批 child 不注入 `sibling_roster`。Gateway 与 child
   的裸相对路径使用项目 `execution_cwd`，内部 task root 仅供显式 work/output；TUI Working 只统计
   `status=active`，interrupted 可恢复索引不再造成假忙。
-- [ ] Gateway/TUI 只读 active root 的 canonical 直属 child 状态；Todo 固定在输入框上方，main 与直属 child
-  固定在输入框下方，不进 transcript。child 行显示名称、typed status、当前动作、耗时、累计 token、
+- [ ] Gateway/TUI 只读 active root 的 canonical 直属 child 状态；main 的动态 `Working` 行位于
+  最新正文后、Context/Todo 前，Todo 固定在输入框上方，输入框下只显示直属 child。child 行显示
+  名称、typed status、当前动作、耗时、累计 token、
   Compact 次数；第一次执行不显示“尝试 1”，只有重试才显示重试次数，终态不得残留“模型已生成回复”。
-  main 在 child 全部终态后仍显示真实整理/回复活动，最终答复进入普通 assistant transcript；定向回归已过，
-  仍需 `.7` 单 Gateway + 原样长任务 TUI 验收后勾选。
+  main 等待 child 时按 typed status 显示“等待 N 个子代理”，最终答复进入普通 assistant transcript；
+  `7c052f2` 第 1 条真机任务已暴露布局/Todo 问题，新候选 147 项定向回归已过，仍需 `.7`
+  单 Gateway + 下一条原样长任务 TUI 验收后勾选。
 - [x] `.7` 单 Gateway 真实 TUI 已观察两个 child 从等待启动推进到一次 attempt `DONE`，固定活动区展示
   状态、动作和耗时，真实文件内容正确；测试者未向主代理或 child 发送推动消息。
 - [ ] durable child wake 已 ready 但 process-local thread lane 不推进时，Gateway 必须自行检测并有界恢复；
@@ -90,7 +92,7 @@
 - [ ] 主代理、子代理、Gateway 与 TUI 对六类 `turn_end` 映射一致；普通完成不读取 acceptance/verification，
   历史兼容字段不进入当前 prompt、context bundle、父级摘要或启动前检查。
 - [ ] TUI 在活动轮显示唯一的主代理工作状态和持续 thinking 增量；前台 turn 让出而 canonical active task
-  仍非零时，一个可移除的固定代理区继续显示 main 与直属 child 状态/动作/耗时/token/Compact，成功查询
+  仍非零时，正文末尾的 main `Working` 与输入框下的直属 child 状态/动作/耗时/token/Compact 继续更新，成功查询
   归零才收起，查询失败不误清零。用户位于
   页底时自动跟随，主动上翻后不抢滚动，回到底部后恢复跟随；Compact 显示 typed 百分比并在完成/失败后
   正确收口。

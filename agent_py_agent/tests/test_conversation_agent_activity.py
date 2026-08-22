@@ -19,6 +19,7 @@ def _run(run_id: str, **overrides: object) -> SimpleNamespace:
         "last_progress_summary": "",
         "latest_summary": "",
         "description": "",
+        "attributes": {},
         "runner_attempts": 1,
         "agent_run_workspace_dir": "",
         "created_at": 10.0,
@@ -41,6 +42,7 @@ def test_conversation_agent_activity_projects_only_active_roots_direct_children(
         "child-running",
         agent_name="game-engine",
         goal="不得进入展示投影",
+        attributes={"covers": ["2", "3", "2"]},
         current_step="正在生成 game.js",
         current_tool="write_file",
         runner_attempts=2,
@@ -107,6 +109,7 @@ def test_conversation_agent_activity_projects_only_active_roots_direct_children(
     ]
     assert activity.subagents[0]["activity"] == "正在使用 write_file"
     assert activity.subagents[0]["attempts"] == 2
+    assert activity.subagents[0]["progress_item_ids"] == ["2", "3"]
     assert activity.subagents[1]["activity"] == ""
     assert "goal" not in activity.subagents[0]
     assert payload["schema_version"] == "conversation_agent_activity.v2"
@@ -228,3 +231,7 @@ def test_background_main_activity_sink_projects_real_stage_for_active_task() -> 
     sink.write_progress({"tool": "run_command", "phase": "started"})
     activity = conversation_agent_activity(agent, store, "thread-main")
     assert activity.main_activity["activity"] == "正在使用 run_command"
+    sink.finish()
+    activity = conversation_agent_activity(agent, store, "thread-main")
+    assert activity.main_activity["phase"] == "waiting"
+    assert activity.main_activity["activity"] == "等待后续事件"

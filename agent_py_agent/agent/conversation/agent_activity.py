@@ -100,10 +100,10 @@ class BackgroundMainActivitySink:
         return True
 
     # LLM: Finish marks only rendering phase while the durable task link remains
-    # active; the lifecycle owner will remove the panel after real closeout.
-    # 函数用途: 模型轮返回后提示主代理正在提交最终结果。
+    # active; one model turn ending does not prove the whole task is final.
+    # 函数用途: 模型轮返回后显示等待后续事件，避免有活跃 child 时误报“整理最终回复”。
     def finish(self) -> None:
-        self._publish("finalizing", "整理最终回复")
+        self._publish("waiting", "等待后续事件")
 
     # LLM: Fail is a liveness hint only. The real exception/retry/task state is
     # still owned by the background runtime and structured lifecycle stores.
@@ -313,8 +313,8 @@ def _subagent_sort_key(task: object) -> tuple[int, float, str]:
 
 
 # LLM: This row deliberately omits goal, response, tool output, paths, and
-# permissions. Human-readable activity is display context only, never a status source.
-# 函数用途: 把一个直属子代理压成底栏需要的名字、状态、活动、耗时和尝试次数。
+# permissions. Explicit covers ids support display joins; activity is never a status source.
+# 函数用途: 把直属子代理压成界面需要的状态、活动、用量与 Todo 关联。
 def _subagent_row(task: object) -> dict[str, object]:
     status = str(getattr(task, "status", "") or "").strip().upper()
     return {
@@ -333,11 +333,29 @@ def _subagent_row(task: object) -> dict[str, object]:
         "attempts": max(0, _safe_int(getattr(task, "runner_attempts", 0))),
         "token_count": max(0, runtime_token_count(task)),
         "compact_count": max(0, runtime_compact_count(task)),
+        "progress_item_ids": _progress_item_ids(task),
         "created_at": max(0.0, _safe_float(getattr(task, "created_at", 0.0))),
         "updated_at": max(0.0, _safe_float(getattr(task, "updated_at", 0.0))),
         "heartbeat_at": max(0.0, _safe_float(getattr(task, "heartbeat_at", 0.0))),
         "ended_at": max(0.0, _safe_float(getattr(task, "ended_at", 0.0))),
     }
+
+
+# LLM: Covers are explicit task-progress ids recorded at dispatch time. They
+# may drive display joins but never infer work from goal/title/summary text.
+# 函数用途: 取出子代理明确负责的 Todo 项 ID，供界面原位打标。
+def _progress_item_ids(task: object) -> list[str]:
+    attributes = getattr(task, "attributes", None)
+    covers = attributes.get("covers") if isinstance(attributes, dict) else None
+    if not isinstance(covers, list | tuple):
+        return []
+    return list(
+        dict.fromkeys(
+            _bounded_text(item, limit=128)
+            for item in covers[:24]
+            if _bounded_text(item, limit=128)
+        )
+    )
 
 
 # LLM: Activity chooses already-persisted display context in a fixed order. The

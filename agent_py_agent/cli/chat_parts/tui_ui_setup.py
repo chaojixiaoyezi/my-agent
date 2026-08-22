@@ -217,9 +217,10 @@ def _make_todo_window(view: TuiTranscriptView) -> Any:
     )
 
 
-# LLM: The coordinator panel is a separate fixed region below the prompt footer,
-# mirroring 终端交互's MainLine/AgentLine placement without becoming transcript.
-# 函数用途: 创建输入框下方的 main 与直属子代理状态区域，任务结束后原位收起。
+# LLM: The coordinator panel is a separate fixed region below the prompt footer
+# for child rows only. Main activity follows 终端交互's SpinnerWithVerb at the
+# transcript tail and must not be duplicated here.
+# 函数用途: 创建输入框下方的直属子代理状态区域，任务结束后原位收起。
 def _make_agent_window(view: TuiTranscriptView) -> Any:
     from prompt_toolkit.layout import Window
 
