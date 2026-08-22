@@ -285,6 +285,9 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
     return lines
 
 
+# LLM: Prompt wording mirrors the typed execution_cwd consumed by tools. Task
+# state refs remain visible for recovery but must never be described as cwd.
+# 函数用途: 用简短条款区分真实项目目录与宿主管理的任务状态目录。
 def _workspace_execution_contract_lines(
     context: SubAgentExecutionContext,
 ) -> list[str]:
@@ -292,15 +295,18 @@ def _workspace_execution_contract_lines(
     refs = bundle.get("workspace_refs")
     if not isinstance(refs, dict):
         return []
-    owner_workspace = str(refs.get("owner_workspace_dir") or "").strip()
+    boundary = context.write_boundary if isinstance(context.write_boundary, dict) else {}
+    execution_cwd = str(
+        boundary.get("execution_cwd") or refs.get("owner_workspace_dir") or ""
+    ).strip()
     task_root = str(refs.get("task_root") or context.task_dir or "").strip()
-    if not owner_workspace:
+    if not execution_cwd:
         return []
     return [
-        f"- Primary working directory（长期项目/输入资料）: {owner_workspace}",
-        f"- Current task root（本任务 work/output）: {task_root or 'none'}",
-        "- `workspace/...` 是 owner 工作区命名空间；`work/...` 和 `output/...` 是当前任务命名空间。"
-        "优先使用上面的绝对路径，不要把 owner workspace 拼到 task root 下面。",
+        f"- Current working directory (cwd): {execution_cwd}",
+        f"- Internal task state root（仅宿主管理的 work/output）: {task_root or 'none'}",
+        "- 普通相对目录和文件始终从 cwd 解析；不要把 cwd 拼到内部 task state root 下面。"
+        "只有父级明确给出 `work/...` 或 `output/...` 命名空间时，才使用内部任务区。",
     ]
 
 

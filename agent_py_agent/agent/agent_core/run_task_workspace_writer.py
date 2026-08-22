@@ -434,6 +434,7 @@ def attach_run_task_workspace_context(agent, params, user_prompt: str):
         # 无人应答——这个环境事实必须告知模型;gateway 有 guidance 补发渠道、chat
         # 可多轮,不注入。
         single_shot=str(getattr(params, "source", "") or "").strip() == "cli_run",
+        conversation_scoped=_conversation_workspace_uses_user_cwd(params),
     )
     next_inject = _append_once(list(getattr(params, "inject", None) or []), injection)
     next_attrs = _task_attributes_with_workspace(getattr(params, "task_attributes", None), result)
@@ -708,7 +709,28 @@ def _workspace_work_dir_from_mapping(value: object, key: str) -> str:
 #   收编进 lessons/workspace.md,按需召回而非每轮灌输。改动时同步检查
 #   home_memory_seeds 的 workspace lesson 与 tests/test_run_task_workspace_writer。
 # 函数用途: 告诉模型本轮任务的目录事实(在哪读、往哪交),一眼看完不啰嗦。
-def _workspace_prompt_section(paths, *, primary_workspace_root: Path, single_shot: bool = False) -> str:
+# LLM: Conversation turns mirror 会话运行时: the user/project cwd is model-visible,
+# while task_root/output/work remain host-private bookkeeping.  Standalone runs
+# retain their explicit delivery workspace because no interactive cwd contract
+# exists after the process returns.
+# 函数用途: 按运行形态展示真实工作目录；会话不再把隐藏任务台账目录说成项目目录。
+def _workspace_prompt_section(
+    paths,
+    *,
+    primary_workspace_root: Path,
+    single_shot: bool = False,
+    conversation_scoped: bool = False,
+) -> str:
+    if conversation_scoped:
+        return "\n".join(
+            [
+                "# Current Task Workspace",
+                f"- cwd: {primary_workspace_root}（用户给出的普通相对路径从这里解析）",
+                "- 用户点名的相对目录或文件属于 cwd；不要改写到运行时台账目录。",
+                "- output/... 与 work/... 只有在明确使用这两个前缀时才表示宿主管理的交付区和过程区。",
+                "- 内部任务状态目录由宿主管理，不是当前项目目录，也不需要写进派工目标。",
+            ]
+        )
     single_shot_line = (
         ["- 单次运行：提问或请示不会有任何回复；自行决策推进到底，结束前把交付物（或不可行说明）写进 output_dir。"]
         if single_shot
@@ -724,6 +746,23 @@ def _workspace_prompt_section(paths, *, primary_workspace_root: Path, single_sho
             *single_shot_line,
             *_relay_legacy_lines(paths),
         ]
+    )
+
+
+# LLM: A Gateway/IM conversation has a persistent user cwd even after its
+# internal task workspace is materialized.  cli_run owns a standalone delivery
+# workspace and deliberately keeps the legacy output/work presentation.
+# 函数用途: 判断本轮是否应隐藏内部任务目录，只向模型展示会话的用户工作目录。
+def _conversation_workspace_uses_user_cwd(params: object) -> bool:
+    source = str(getattr(params, "source", "") or "").strip().lower()
+    if source == "cli_run":
+        return False
+    if source == "gateway":
+        return True
+    attrs = getattr(params, "task_attributes", None)
+    return bool(
+        isinstance(attrs, dict)
+        and str(attrs.get("conversation_thread_id") or "").strip()
     )
 
 

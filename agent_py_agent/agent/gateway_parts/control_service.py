@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from ..concurrency.interrupt import interrupt_by_name, is_interruptible_registered
+from ..concurrency.interrupt import interrupt_by_name
 from ..conversation.compact import (
     inspect_conversation_context,
     prepare_conversation_context,
@@ -361,7 +361,11 @@ def execute_gateway_conversation_control(
             )
         if live_requests:
             return _stop_live_window_request(agent, paths, live_requests[0], scope)
-        live_task = _active_conversation_task(agent, scope, live_only=True)
+        # 会话运行时 interrupts the session's authoritative active turn.  Our
+        # foreground request may already have yielded while its durable root
+        # waits for children, so the ConversationThread active-task index—not
+        # an ephemeral process/claim probe—owns this fallback.
+        live_task = _active_conversation_task(agent, scope, ordinary_only=True)
         if live_task is not None:
             return _stop_active_task(agent, live_task, scope)
         return ConversationControlResult(
@@ -990,7 +994,7 @@ def _active_conversation_task(
     scope: GatewayControlScope,
     *,
     task_id: str = "",
-    live_only: bool = False,
+    ordinary_only: bool = False,
 ) -> _GatewayRequestRecord | None:
     """Resolve the latest user-selectable active root task in this exact owner conversation."""
     scope_payload = _scope_request_payload(scope)
@@ -1009,21 +1013,24 @@ def _active_conversation_task(
         return None
     if load_errors:
         return None
-    active = _control_active_conversation_links(store, thread.thread_id, links)
-    if live_only:
+    active = _root_control_links(
+        owner_agent,
+        _control_active_conversation_links(store, thread.thread_id, links),
+    )
+    if ordinary_only:
         active = [
             link
             for link in active
-            if _conversation_link_has_live_executor(
-                owner_agent,
-                store,
-                thread.thread_id,
-                link,
-            )
+            if str(getattr(link, "work_kind", "") or "").strip().lower()
+            not in {"audit", "goal"}
         ]
     if not active:
         return None
-    selected = _select_active_conversation_link(active, task_id)
+    selected = _select_active_conversation_link(
+        active,
+        task_id,
+        preferred_task_id=str(getattr(thread, "workspace_task_id", "") or ""),
+    )
     if selected is None:
         return None
     task_id = str(getattr(selected, "task_id", "") or "").strip()
@@ -1046,35 +1053,6 @@ def _active_conversation_task(
         ),
     }
     return _GatewayRequestRecord(None, payload, "task")
-
-
-def _conversation_link_has_live_executor(
-    owner_agent: object,
-    store: object,
-    thread_id: str,
-    link: object,
-) -> bool:
-    """Return true only for an executing turn, never for an open task or future reminder."""
-    task_id = str(getattr(link, "task_id", "") or "").strip()
-    if not task_id:
-        return False
-    if is_interruptible_registered(conversation_request_interrupt_name(task_id)):
-        return True
-    try:
-        claim, error = store.load_background_run_claim_report(thread_id)
-    except Exception:
-        return False
-    if error is not None or not isinstance(claim, dict):
-        return False
-    try:
-        expires_at = float(claim.get("expires_at") or 0.0)
-    except (TypeError, ValueError):
-        return False
-    return (
-        str(claim.get("status") or "").strip().lower() == "running"
-        and str(claim.get("task_id") or "").strip() == task_id
-        and expires_at > time.time()
-    )
 
 
 def _control_active_conversation_links(
@@ -1120,7 +1098,42 @@ def _control_active_conversation_links(
     return candidates
 
 
-def _select_active_conversation_link(active: list[object], task_id: str):
+# LLM: Conversation active_task_ids may contain root and child projections.
+# User controls target the root just as 会话运行时 user input targets the current
+# root session; child turns are interrupted recursively from that root.
+# 函数用途: 从会话活动任务中剔除子代理投影，避免普通 /stop 只停到某一个 child。
+def _root_control_links(owner_agent: object, active: list[object]) -> list[object]:
+    manager = getattr(owner_agent, "subagents", None)
+    loader = getattr(manager, "load", None)
+    if not callable(loader):
+        return active
+    roots: list[object] = []
+    for link in active:
+        task_id = str(getattr(link, "task_id", "") or "").strip()
+        if not task_id:
+            continue
+        try:
+            child = loader(task_id)
+        except FileNotFoundError:
+            roots.append(link)
+            continue
+        except (OSError, ValueError):
+            continue
+        if not str(getattr(child, "parent_id", "") or "").strip():
+            roots.append(link)
+    return roots
+
+
+# LLM: An explicit task id wins, then the thread's canonical sticky root.  The
+# timestamp fallback is only for pre-v3 records lacking workspace_task_id; no
+# natural-language goal or model summary participates.
+# 函数用途: 选择当前会话应被状态、插入或停止控制的唯一根任务。
+def _select_active_conversation_link(
+    active: list[object],
+    task_id: str,
+    *,
+    preferred_task_id: str = "",
+):
     selected_id = str(task_id or "").strip()
     if selected_id:
         return next(
@@ -1131,6 +1144,18 @@ def _select_active_conversation_link(active: list[object], task_id: str):
             ),
             None,
         )
+    preferred_id = str(preferred_task_id or "").strip()
+    if preferred_id:
+        preferred = next(
+            (
+                link
+                for link in active
+                if str(getattr(link, "task_id", "") or "").strip() == preferred_id
+            ),
+            None,
+        )
+        if preferred is not None:
+            return preferred
     return max(
         active,
         key=lambda link: (

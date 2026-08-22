@@ -192,7 +192,7 @@ def test_relative_file_and_shell_tools_share_workspace_cwd(tmp_path: Path):
     assert "same-cwd" in read_from_shell.output
 
 
-def test_task_scoped_file_alias_and_shell_share_task_cwd(tmp_path: Path):
+def test_explicit_execution_cwd_keeps_file_alias_and_shell_aligned(tmp_path: Path):
     workspace = tmp_path / "workspace"
     task_root = tmp_path / "tasks" / "task-a"
     task_output = task_root / "output"
@@ -200,6 +200,7 @@ def test_task_scoped_file_alias_and_shell_share_task_cwd(tmp_path: Path):
     task_output.mkdir(parents=True)
     registry = _registry(workspace)
     boundary = {
+        "execution_cwd": str(task_root),
         "task_root": str(task_root),
         "task_output_dir": str(task_output),
         "task_work_dir": str(task_root / "work"),

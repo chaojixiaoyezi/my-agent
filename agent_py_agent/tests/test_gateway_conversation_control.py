@@ -2941,6 +2941,30 @@ def test_stop_ack_is_bounded_when_provider_transport_close_blocks(tmp_path) -> N
     assert not thread.is_alive()
 
 
+def test_stop_interrupts_active_ordinary_task_after_foreground_yield(tmp_path) -> None:
+    """前台请求已结束、没有 claim/进程时，thread 的 active root 仍必须可被 /stop。"""
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
+        tmp_path,
+    )
+    paths = gateway_paths(agent)
+    thread, _link = _bind_durable_task(agent, "req-waiting-children")
+    agent.conversation_store.select_workspace_task(
+        {"thread_id": thread.thread_id, "task_id": "req-waiting-children"}
+    )
+
+    result = execute_gateway_conversation_control(
+        agent,
+        paths,
+        _command("/stop"),
+        _scope(),
+    )
+
+    stopped = agent.conversation_store.load_task_link("req-waiting-children")
+    assert result.ok is True and result.request_id == "req-waiting-children"
+    assert stopped is not None and stopped.status == "interrupted"
+
+
 def test_stop_interrupts_durable_task_and_cancels_only_current_children(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),

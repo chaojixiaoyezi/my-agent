@@ -601,3 +601,8 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
   entry 的跳过，以及 通道运行时 `src/security/installed-plugin-dirs.ts` 对 `ENOENT/ENOTDIR` 与其他读取错误
   的区分；没有按文件名、运行日志或自然语言猜“这是临时文件”。
 - 回归分别制造枚举后原子删除、单文件权限失败和 owner 根权限失败，证明只放过真正不存在的 entry。
+## 2026-08-21 cwd、控制根与 TUI 活动投影
+
+- `ConversationThread` 的根 task link 是控制事实源；`/stop` 优先定位 `workspace_task_id` 对应的普通根任务，再由统一控制链递归取消其运行树，不把直属 child 当成新的用户任务。
+- Tool Registry 的 cwd 来自服务启动时的项目根，或宿主显式注入的 `execution_cwd`；隐藏 task state 只保存账本与恢复材料，不能替代用户 cwd。
+- `/client/notices` 的活动数量由 task link 的 `status=active` 投影，只负责展示，不参与调度、重试或恢复裁决。

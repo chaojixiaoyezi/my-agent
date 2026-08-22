@@ -40,7 +40,16 @@ def workspace_refs(task: SubAgentTask) -> dict[str, str]:
     }
 
 
+# LLM: A child inherits the host-authored project cwd stored at creation. The
+# owner-home workspace is only a fallback for older/remote tasks lacking that
+# turn fact; internal task roots never participate in cwd selection.
+# 函数用途: 返回子代理实际项目工作目录，供提示和工具共同使用。
 def _owner_workspace_dir(task: SubAgentTask) -> str:
+    attrs = getattr(task, "attributes", {}) or {}
+    if isinstance(attrs, dict):
+        workspace_root = current_model_ref(attrs.get("workspace_root"))
+        if workspace_root:
+            return workspace_root
     permissions = getattr(task, "effective_permissions", {}) or {}
     if not isinstance(permissions, dict):
         return ""

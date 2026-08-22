@@ -1,5 +1,22 @@
 # STATUS
 
+## 2026-08-21 会话运行时 式 cwd、直属控制与真实 Working 状态（本地候选）
+
+- `0eda5df` 已在 `.7` 的同一 Gateway 上完成四 child 原样 TUI 取样：四个 leaf 均自然 `DONE`，角色工具
+  裁剪、跨任务旧上下文清除和后台 Working 展示生效；样本同时确认父级被旧提示带到隐藏 task root，且
+  前台让出后普通 `/stop` 因没有 live process/claim 而找不到仍 active 的根任务。
+- 当前候选把 会话运行时 的 turn `cwd` 与 rollout/state 目录分开：Gateway 主代理和递归 child 的
+  `execution_cwd` 都是用户项目目录，裸 `abc/...` 从该目录解析；内部 task root 不再冒充 cwd，只有显式
+  `work/...`、`output/...` 使用任务区。旧 `sibling_roster` 已删除并在渲染恢复层退休，避免每个 child
+  重复吞下所有兄弟长 goal 的 O(n²) 提示词。
+- 模型控制面仍只有 create / guidance / cancel / capability；没有恢复 inspect/wait/dispatch/push。
+  自动重试资格不再否决直属父级的 cancel/interrupt。`/stop` 现在从当前 thread 的 typed root 处理前台已
+  让出的任务；TUI Working 不再直接数可恢复索引，而只数 task-link `status=active`，所以 interrupted
+  任务不会留下假动画。
+- 相关 cwd、runner prompt、取消、会话控制、通知计数和兄弟上下文定向回归已通过；严格发布 gate、推送、
+  `.7` 单 Gateway 部署和同一条植物大战僵尸 TUI 复验仍待本轮完成。本切片远低于 10,000 行，不运行全仓
+  pytest。
+
 ## 2026-08-21 子代理自然收口、递归控制面与 TUI 可观察性（当前收口切片本地严格 gate 通过）
 
 - `d928d77` 已部署 `.7` 单 Gateway 并完成原样 TUI 轮：4 个 child 都是一次 attempt、自主 `DONE`，最后

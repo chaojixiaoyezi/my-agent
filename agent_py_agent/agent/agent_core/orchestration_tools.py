@@ -63,7 +63,6 @@ from .orchestration.lifecycle import (
 )
 from .orchestration.replacements import record_create_replacements
 from .orchestration.shared_context import append_parent_shared_context
-from .orchestration.sibling_roster import attach_sibling_roster
 from .orchestration.tool_grants import (
     CODING_SUBAGENT_TOOLS,
     READ_ONLY_SUBAGENT_TOOLS,
@@ -353,7 +352,6 @@ def _created_tasks_result(
     request_params: dict[str, object],
 ) -> ToolHandlerOutcome:
     tasks = [item.task for item in resolutions]
-    attach_sibling_roster(agent.subagents, tasks)
     replacement_records = record_create_replacements(agent, tasks)
     lifecycle = publish_created_subagents(CreatedSubagentLifecycleRequest(agent, tasks, request_params))
     relation_fence = fence_inactive_audit_investigations(agent, tasks)
@@ -440,7 +438,6 @@ def _execute_items(
 
 def _created_items_result(request: CreatedItemsResultRequest) -> ToolHandlerOutcome:
     tasks = [item.task for item in request.resolutions]
-    attach_sibling_roster(request.agent.subagents, tasks, save=False)
     for task in tasks:
         request.agent.subagents.save(task)
     replacement_records = record_create_replacements(request.agent, tasks)

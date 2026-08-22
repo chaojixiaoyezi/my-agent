@@ -249,6 +249,10 @@ def _render_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
     )
 
 
+# LLM: Workspace Context must mirror the same cwd used by ToolRegistry.  For
+# conversations, task_root/output/work are private runtime storage and are
+# intentionally omitted so the model cannot mistake them for the project cwd.
+# 函数用途: 向模型展示本轮真实工具目录；会话模式只展示用户目录和可见写根。
 def _runtime_workspace_context(agent: object, params: ToolLoopExecuteParams) -> str | None:
     """Expose the exact live Tool Gateway cwd without creating another cwd store."""
 
@@ -262,12 +266,21 @@ def _runtime_workspace_context(agent: object, params: ToolLoopExecuteParams) -> 
         if workspace_root is None:
             workspace_root = getattr(agent, "effective_workspace_root", getattr(agent, "root", "."))
         cwd = effective_registry_cwd(Path(workspace_root), boundary)
+        conversation_cwd = _conversation_uses_user_cwd(params)
         return project_runtime_workspace_context(
             snapshot,
             effective_cwd=str(cwd),
-            allowed_write_roots=_string_sequence(boundary.get("allowed_write_roots")),
-            task_output_dir=str(boundary.get("task_output_dir") or "").strip(),
-            task_work_dir=str(boundary.get("task_work_dir") or "").strip(),
+            allowed_write_roots=(
+                _conversation_visible_write_roots(boundary, task_root)
+                if conversation_cwd
+                else _string_sequence(boundary.get("allowed_write_roots"))
+            ),
+            task_output_dir=(
+                "" if conversation_cwd else str(boundary.get("task_output_dir") or "").strip()
+            ),
+            task_work_dir=(
+                "" if conversation_cwd else str(boundary.get("task_work_dir") or "").strip()
+            ),
         )
     attrs = params.task_attributes if isinstance(params.task_attributes, dict) else {}
     return project_runtime_workspace_context(
@@ -277,6 +290,49 @@ def _runtime_workspace_context(agent: object, params: ToolLoopExecuteParams) -> 
             and not isinstance(attrs.get("run_workspace"), dict)
         ),
     ) or None
+
+
+# LLM: cli_run has a transcript for evidence but remains a standalone delivery
+# run.  Every other thread-bound run inherits the user/project cwd across
+# foreground and background turns.
+# 函数用途: 区分会话 cwd 与一次性任务交付目录。
+def _conversation_uses_user_cwd(params: object) -> bool:
+    source = str(getattr(params, "source", "") or "").strip().lower()
+    if source == "cli_run":
+        return False
+    if source == "gateway":
+        return True
+    attrs = getattr(params, "task_attributes", None)
+    return bool(
+        isinstance(attrs, dict)
+        and str(attrs.get("conversation_thread_id") or "").strip()
+    )
+
+
+# LLM: Hidden task storage may remain writable for host bookkeeping but should
+# not be advertised as a user project root.  Keep external/user roots, including
+# an ancestor cwd such as /root, and remove only task_root and its descendants.
+# 函数用途: 从会话提示的写入目录中隐藏内部台账目录，保留真正的用户工作区授权。
+def _conversation_visible_write_roots(
+    boundary: dict[str, object],
+    task_root: str,
+) -> list[str]:
+    try:
+        internal = Path(task_root).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return []
+    visible: list[str] = []
+    for raw in _string_sequence(boundary.get("allowed_write_roots")):
+        try:
+            candidate = Path(raw).expanduser().resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if candidate == internal or candidate.is_relative_to(internal):
+            continue
+        text = str(candidate)
+        if text not in visible:
+            visible.append(text)
+    return visible
 
 
 def _string_sequence(value: object) -> list[str]:

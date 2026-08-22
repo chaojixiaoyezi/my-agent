@@ -558,6 +558,9 @@ def test_single_shot_environment_fact_only_for_cli_run(tmp_path):
     gateway = attach_run_task_workspace_context(agent, replace(base, source="gateway"), "做一个任务")
     gateway_section = next(item for item in gateway.inject if "# Current Task Workspace" in str(item))
     assert "单次运行" not in gateway_section, "gateway 有 guidance 补发渠道,不得注入单次事实"
+    assert f"- cwd: {tmp_path}" in gateway_section
+    assert "task_root:" not in gateway_section
+    assert str(gateway.task_attributes["run_workspace"]["task_root"]) not in gateway_section
 
 
 def test_same_prompt_relay_reuses_task_workspace(tmp_path):

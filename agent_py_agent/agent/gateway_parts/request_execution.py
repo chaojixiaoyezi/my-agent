@@ -2366,9 +2366,11 @@ def _safe_nonnegative_int(value: object) -> int:
         return 0
 
 
-# LLM: This prompt exposes one sticky cwd, not a menu of historical task records.  The newest user
-# message owns the next turn exactly as it does in 会话运行时.
-# 函数用途: 告诉模型会话和目录连续，当前用户消息直接决定本轮，不需要开关或选择旧任务。
+# LLM: The sticky task link carries lifecycle and internal-state continuity,
+# not cwd authority.  会话运行时 keeps cwd on the turn context, so never expose the
+# hidden task_path here as the project directory; Workspace Context already
+# publishes the real tool cwd.
+# 函数用途: 告诉模型同一会话的任务状态是否仍在运行，但不把内部台账目录冒充当前工作目录。
 def _append_current_workspace_prompt(
     lines: list[str],
     workspace: _GatewayWorkspaceSelection | None,
@@ -2378,23 +2380,22 @@ def _append_current_workspace_prompt(
     status = str(workspace.status or "").strip().lower()
     if status == "active" and workspace.execution_running:
         lifecycle_guidance = (
-            "- 当前目录已有结构化执行者；可以正常聊天或给当前运行补充引导，"
-            "但不得在同一目录另起一个并发写入者。"
+            "- 当前任务已有结构化执行者；可以正常聊天或给当前运行补充消息，"
+            "但不得为同一任务另起一个并发写入者。"
         )
     else:
         lifecycle_guidance = (
-            "- 当前没有占用该目录的执行者；若本轮需要工作，直接按当前 User Task 调用工具。"
+            "- 当前任务没有执行者；若本轮需要工作，直接按当前 User Task 调用工具。"
         )
     lines.extend(
         [
-            "## Current Workspace",
-            "- 这是该 thread 跨轮继承的工作目录，语义与 Codex thread 的持续 cwd 一致。",
+            "## Current Task Runtime",
+            "- 这是该 thread 跨轮继承的任务状态，不改变 Workspace Context 中的真实 cwd。",
             "- 普通聊天、代码修改和其他工作都在同一个会话历史里；当前 User Task 直接决定本轮做什么。",
             "- 不要要求用户选择、开始、完成或关闭历史任务。task_progress 只是可选进度笔记，不控制后续轮次。",
             lifecycle_guidance,
             (
-                f"- task_path={json.dumps(workspace.task_path, ensure_ascii=False)} "
-                f"execution_running={json.dumps(workspace.execution_running)} "
+                f"- execution_running={json.dumps(workspace.execution_running)} "
                 f"execution_state_available={json.dumps(workspace.execution_state_available)}"
             ),
         ]

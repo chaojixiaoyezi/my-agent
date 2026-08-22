@@ -34,6 +34,17 @@
 - 主代理长期记忆归 owner home；子代理只保留任务周期内可审计状态。
 - 子代理可以写协作产物，但最终交付由主代理汇总和验收。
 - 工具面要少，优先增强现有工具和运行时语义。
+- 递归代理只保留一条“用户—当前代理”关系：每层父级可创建直属 child、向其当前回合插入消息、打断
+  直属 child，并裁决直属 child 的能力申请。创建后由宿主自动启动，生命周期事件自动回到直属父级；
+  模型不拥有查询、等待、巡场、手动推进或机器验收下级的工具。同批 child 之间不互相广播完整 goal，
+  孙代理也只与自己的直接父级交换有界状态和 refs。
+- 会话运行时 式 cwd 与运行台账严格分离：Gateway/会话及其所有后代的普通相对路径统一从用户启动时的项目
+  cwd 解析；隐藏 task root 只保存状态，只有显式 `work/...`、`output/...` 才进入内部任务命名空间。
+  `allowed_write_roots` 只决定能否写，不能反向选择 cwd；只有宿主写入的 `execution_cwd` 可覆盖工具
+  Registry 的项目根。
+- interrupt 是父子边上的显式控制事实，自动重试资格不能否决父级的打断。会话的
+  `active_task_ids` 是可恢复候选索引，不等于正在运行数量；TUI Working 只统计 task-link
+  `status=active`，而 `/stop` 选择当前 thread 的 typed root 后递归停止运行域。
 - 当前请求的副作用事实只从 canonical tool archive 与 operation store 投影：
   `AgentRunResult.operation_verification` 保存内部逐操作终态，公开 Gateway/HTTP/transcript metadata
   只保存不含 call/operation ID、路径和参数值的有界分组。每条 assistant transcript 都保留该投影，

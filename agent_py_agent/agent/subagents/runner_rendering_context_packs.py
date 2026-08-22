@@ -1,11 +1,22 @@
 
 from __future__ import annotations
 
+_RETIRED_CONTEXT_PACK_KINDS = frozenset({"sibling_roster"})
 
+
+# LLM: Leaf agents receive only their own goal plus explicit parent context.
+# Old sibling_roster packs are retired at render time so resumed tasks do not
+# regain the O(n^2) peer-goal duplication removed from new creation.
+# 函数用途: 渲染子代理上下文，并跳过已经下线的同批兄弟名册。
 def render_context_packs_section(context) -> list[str]:
     lines = ["", "## Context Packs", ""]
-    if context.context_packs:
-        for item in context.context_packs:
+    active_packs = [
+        item
+        for item in context.context_packs
+        if str(item.get("kind") or "").strip() not in _RETIRED_CONTEXT_PACK_KINDS
+    ]
+    if active_packs:
+        for item in active_packs:
             name = item.get("name") or item.get("id") or item.get("kind") or "pack"
             lines.append(f"- {name}")
             lines.extend(_render_context_pack_item_lines(item))
@@ -56,10 +67,12 @@ def _render_context_pack_list(label: str, value: list | tuple) -> list[str]:
     return lines
 
 
+# LLM: Context-pack list rendering has one bounded policy after retiring the
+# sibling-specific roster. New pack kinds must not silently gain larger prompt
+# budgets merely from their natural-language label.
+# 函数用途: 返回上下文列表统一的最大展示条数，防止提示词随数据无限增长。
 def _context_pack_list_limit(label: str) -> int:
-    lowered = str(label or "").strip().lower()
-    if lowered in {"roster", "siblings", "sibling_roster", "peer_run_ids"}:
-        return 30
+    del label
     return 6
 
 

@@ -34,6 +34,7 @@ def test_subagent_effective_permission_snapshot_never_inherits_full_shell(tmp_pa
     assert loaded_child.effective_permissions["shell_access_mode"] == "workspace-write"
     assert context.effective_permissions["shell_access_mode"] == "workspace-write"
     assert context.write_boundary["shell_access_mode"] == "workspace-write"
+    assert context.write_boundary["execution_cwd"] == str(manager.workspace_root)
 
 
 def test_subagent_effective_permission_snapshot_keeps_restricted_shell(tmp_path) -> None:

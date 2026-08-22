@@ -303,6 +303,7 @@ def test_execution_context_uses_canonical_agent_workspace_for_model_boundary(tmp
     assert context.context_bundle_file == str(Path(canonical_agent_dir) / "CONTEXT_BUNDLE.md")
     assert context.context_bundle_json == str(Path(canonical_agent_dir) / "context_bundle.json")
     assert context.write_boundary["task_dir"] == canonical_agent_dir
+    assert context.write_boundary["execution_cwd"] == str(manager.workspace_root)
     assert old_locator not in context.write_boundary["allowed_write_roots"]
     assert all("[任务目录]" not in root for root in context.write_boundary["allowed_write_roots"])
     assert "[任务目录]" not in json.dumps(context.context_bundle, ensure_ascii=False)

@@ -555,10 +555,10 @@ class TestCreateSubagentsToolTaskOutputRebasing:
 
 
 class TestCreateSubagentsToolWorkspaceRefs:
-    """测试 siblings、显式依赖和读写 refs 的边界。"""
+    """测试同批隔离、显式依赖和读写 refs 的边界。"""
 
-    def test_items_mode_sibling_roster_does_not_publish_future_outputs(self):
-        """同批 peer 目录只暴露身份，不把未来产物路径注入每个子代理上下文。"""
+    def test_items_mode_does_not_inject_sibling_goals_or_outputs(self):
+        """同批 leaf 只收自己的任务；宿主向父级汇报生命周期，不把兄弟目标复制给每个 child。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _mock_create_items_agent(task_count=2)
@@ -583,10 +583,14 @@ class TestCreateSubagentsToolWorkspaceRefs:
 
         assert result.ok is True
         for task in mock_agent._created_tasks[:2]:
-            roster = next(pack for pack in task.context_packs if pack["kind"] == "sibling_roster")
-            assert "outputs/source_a.json" not in json.dumps(roster, ensure_ascii=False)
-            assert "outputs/source_b.json" not in json.dumps(roster, ensure_ascii=False)
-            assert {item["run_id"] for item in roster["siblings"]} == {"run_0", "run_1"}
+            serializable_packs = [
+                item for item in task.context_packs if isinstance(item, dict)
+            ]
+            serialized = json.dumps(serializable_packs, ensure_ascii=False)
+            assert "sibling_roster" not in serialized
+            assert "同一批创建" not in serialized
+            assert "run_0" not in serialized
+            assert "run_1" not in serialized
 
     def test_items_mode_dependency_does_not_implicitly_transfer_output_ownership(self):
         """依赖只表示等待，不代表结构化写权已经完成交接。"""

@@ -1989,3 +1989,8 @@
 - 两项正式服务保持 active、`NRestarts=0`，队列回到 0/0，没有新增服务、端口、owner、conversation
   或项目。这些是真实 owner 隔离和 Feishu 出站证据；请求入口是可信 localhost scope，macOS 锁屏使本轮
   没有新增桌面客户端入站证据，文档不把两者混写。
+## 2026-08-21 前台让出后的 `/stop` 与活动计数
+
+- 根任务等待 child 时可能已经没有前台请求、进程或 claim，但普通根 task link 仍是 active。`/stop` 现在从线程绑定的普通根任务中选目标、过滤 child 和具名 audit/goal 根，再递归中止其运行树。
+- `active_task_ids` 继续只承担可恢复索引；TUI notice 的 Working 数量改为只统计 task link 中 `status=active` 的真实任务。`interrupted` 可显式恢复，但不会继续显示为正在工作。
+- Gateway 给模型的运行信息不再把内部 `task_path` 称为 workspace；用户项目 cwd 与内部任务状态目录分离，普通相对路径始终从项目 cwd 解析。

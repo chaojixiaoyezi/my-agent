@@ -444,10 +444,14 @@ python3 -m agent_py_agent subagent-run <run_id> --execute
 `completed`、`aborted`、`blocked`、`error`、`max_tokens`、`interrupted`。
 
 模型可见的递归控制面只有 `create_subagents`（创建后自动启动）、`send_guidance`（给直属
-child 插入普通消息）、`cancel_subagents`（取消直属 child）和 `resolve_capability_requests`
+child 插入普通消息）、`cancel_subagents`（打断并结束直属 child）和 `resolve_capability_requests`
 （处理直属 child 的权限请求）。内部 dispatcher/worker pool 负责启动、并发、恢复、活动投影和
 终态通知，不暴露查询、等待、巡逻、手动推进或自报进度工具。真实产物、工具记录、blockers、
 capability requests 和 refs 由宿主持久化并自动递给直接父级；子代理创建孙代理时仍是同一套关系。
+自动重试资格不能否决直接父级的显式打断；同批 child 也不会互相注入完整 goal 名册。
+
+Gateway/会话任务及其递归 child 的普通相对路径都从用户项目 cwd 解析。内部 task root 是状态目录，
+不是项目目录；只有显式写成 `work/...` 或 `output/...` 时才进入宿主管理的任务命名空间。
 
 详细说明见仓库根目录的 [SUBAGENT_RUNBOOK.md](../SUBAGENT_RUNBOOK.md)。
 

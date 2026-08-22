@@ -177,11 +177,6 @@ _EXACT_CODE_POLICIES: dict[str, CodePolicy] = {
         "hard_stop",
         RecoveryAction.CHANGE_STRATEGY.value,
     ),
-    "SUBAGENT_RETRY_REQUIRED": CodePolicy(
-        "orchestration",
-        "repairable",
-        RecoveryAction.DISPATCH.value,
-    ),
     "AUDIT_SOURCE_WORKER_SYSTEM_MANAGED": CodePolicy(
         "orchestration",
         "repairable",

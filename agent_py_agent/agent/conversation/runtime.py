@@ -412,7 +412,7 @@ CONTROL_ACTION_DESCRIPTIONS = {
     "watch_stream": "读取有持久游标和覆盖账的数据源；Audit 模式按完整记录和 ack/source_ref 对账。",
     "task_progress": "更新任务清单进展。",
     "resolve_capability_requests": "批准或拒绝子代理的能力申请,让它能继续干。",
-    "cancel_subagents": "了结救不回来的子代理(重派/给提示都无效时),别让空壳拖住整个任务收尾。",
+    "cancel_subagents": "打断并结束一个不应继续运行的直属子代理；它不负责轮询、推动或验收。",
     "send_message": "向当前 owner 的已绑定通道发送一条模型撰写的消息；证据型后台事件必须原样携带其 evidence_refs。",
     "get_goal": "读取当前 /goal 持续目标及其权威状态。",
     "update_goal": "仅在持续目标真正完成或确实阻塞时写入 complete/blocked 终态。",

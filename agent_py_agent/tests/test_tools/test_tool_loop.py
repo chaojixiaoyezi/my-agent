@@ -551,10 +551,10 @@ def test_tool_loop_projects_live_promoted_workspace_from_same_write_boundary(tmp
     projected = _runtime_workspace_context(agent, params)
 
     assert projected is not None
-    assert f"当前工具工作目录（仅供执行定位）: {task_root}" in projected
-    assert f"task_output_dir: {output_dir}" in projected
-    assert f"task_work_dir: {work_dir}" in projected
-    assert f"当前工具工作目录（仅供执行定位）: {service_cwd.resolve()}" not in projected
+    assert f"当前工具工作目录（仅供执行定位）: {service_cwd.resolve()}" in projected
+    assert f"task_output_dir: {output_dir}" not in projected
+    assert f"task_work_dir: {work_dir}" not in projected
+    assert str(task_root) not in projected
 
 
 def test_audit_source_worker_uses_facts_only_workspace_snapshot(tmp_path):

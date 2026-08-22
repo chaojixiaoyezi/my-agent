@@ -27,6 +27,12 @@ PENDING 续跑；
 组合只剩 2 个测试期望/导入问题，二者精确复测 2/2 通过；动作协议/CLI 121 项、状态投影 36 项另行通过。
 按用户约定不再重复全仓 pytest。
 
+同日追加的 cwd/直属控制回归必须证明：`allowed_write_roots` 不选择工作目录，只有宿主
+`execution_cwd` 可覆盖项目 cwd；Gateway 根任务和递归 child 的裸 `abc/...` 都落用户 cwd，隐藏 task
+root 只接受显式 `work/...`/`output/...`；每个 child prompt 不含 `sibling_roster` 或兄弟完整 goal；
+retryable child 仍可被直属父级显式打断。`/stop` 在前台请求已让出且没有 live claim/process 时仍选择当前
+thread 的 ordinary root；TUI Working 只数 `status=active` link，interrupted sticky link 必须显示 0。
+
 严格 code-size 初次被当前提交 `31f30fe` 自身的 25 个未登记 hard finding 阻断。为避免把存量债务冒充本轮
 回归，先从 `git archive HEAD` 纯净快照生成 baseline，再修掉本轮唯一新增的 `_progress_payload` 深嵌套；
 当前 strict gate 通过，原始报告中的 4 个 hard 均能在纯净基线复现，本轮新增 hard 为 0。baseline 不取

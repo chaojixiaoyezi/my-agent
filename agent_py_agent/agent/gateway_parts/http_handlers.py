@@ -25,6 +25,7 @@ from ..conversation.control_commands import (
     parse_conversation_control,
     parse_conversation_task_command,
 )
+from ..conversation.models import THREAD_TASK_LINK_ACTIVE_STATUS
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .client_service import execute_gateway_client_memory, read_gateway_client_history
 from .control_operation_service import (
@@ -997,9 +998,11 @@ def handle_client_notices(handler, server) -> None:
     handler._send_json(200, result)
 
 
-# LLM: The canonical thread owns active_task_ids while notices remain an
-# append-only display channel; this read combines them without creating state.
-# 函数用途: 读取一个已鉴权会话的进行中任务数量和新增后台通知。
+# LLM: The canonical thread owns task candidates while each typed task link
+# owns its lifecycle. Interrupted links deliberately remain selectable for an
+# explicit resume, so the TUI Working indicator must count only status=active.
+# Notices remain an append-only display channel and never create task state.
+# 函数用途: 读取一个已鉴权会话真正还在工作的任务数量和新增后台通知。
 def read_gateway_client_notices(
     agent: object,
     *,
@@ -1049,8 +1052,8 @@ def read_gateway_client_notices(
             "cursor": after,
             "active_task_count": 0,
         }
-    active_task_count = len(tuple(getattr(thread, "active_task_ids", ()) or ()))
     thread_id = str(getattr(thread, "thread_id", "") or "")
+    active_task_count = _active_thread_task_count(store, thread_id)
     notices_path = Path(store.root) / "notices" / f"{thread_id}.notices.jsonl"
     if not notices_path.exists():
         return {
@@ -1092,6 +1095,23 @@ def read_gateway_client_notices(
         "cursor": cursor,
         "active_task_count": active_task_count,
     }
+
+
+# LLM: active_task_ids is a resumability index, not a running-work counter.
+# Read the authoritative task-link statuses so interrupted/cancelled sticky
+# roots cannot leave a false Working spinner after the turn has stopped.
+# 函数用途: 统计会话里状态仍为 active 的任务，供 TUI 判断是否显示工作动画。
+def _active_thread_task_count(store: object, thread_id: str) -> int:
+    try:
+        links, _load_errors = store.active_task_links_report(thread_id)
+    except (OSError, ValueError, DataCorruptionError):
+        return 0
+    return sum(
+        1
+        for link in links
+        if str(getattr(link, "status", "") or "").strip().lower()
+        == THREAD_TASK_LINK_ACTIVE_STATUS
+    )
 
 
 def handle_client_memory(handler, server) -> None:

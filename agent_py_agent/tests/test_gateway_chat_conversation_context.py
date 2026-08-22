@@ -3136,7 +3136,8 @@ def test_interrupted_workspace_is_reused_at_first_work_tool_without_selection(tm
     followup = _conversation_context(agent, request, "gw-followup", "继续")
     section = _gateway_injections({"inject": []}, followup)[0]
     assert "task-interrupted" not in section
-    assert "## Current Workspace" in section
+    assert "## Current Task Runtime" in section
+    assert str(workspace) not in section
     assert "不要要求用户选择、开始、完成或关闭历史任务" in section
     attrs = _gateway_task_attributes(followup)
     assert attrs is not None

@@ -137,7 +137,7 @@ def test_cancel_subagents_tool_abandons_active_attempt_and_audits(tmp_path):
     assert loaded.attributes["cancel_subagents"]["abandoned_attempt_id"] == "attempt-live"
 
 
-def test_cancel_subagents_tool_requires_same_run_retry_before_cancellation(tmp_path):
+def test_cancel_subagents_tool_can_interrupt_retryable_child(tmp_path):
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
     from agent_py_agent.agent.subagents.services.base import CreateRunParams
@@ -163,24 +163,11 @@ def test_cancel_subagents_tool_requires_same_run_retry_before_cancellation(tmp_p
             "reason": "模型认为永久阻塞",
         }
     )
-    payload = json.loads(result.output)
     loaded = agent.subagents.load(task.id)
 
-    assert result.ok is False
-    assert result.error_code == "SUBAGENT_RETRY_REQUIRED"
-    assert payload["error_code"] == "SUBAGENT_RETRY_REQUIRED"
-    assert payload["protected_runs"] == [
-        {
-            "run_id": task.id,
-            "status": "BLOCKED",
-            "failure_type": "structured_output_parse_error",
-            "runner_attempts": 1,
-        }
-    ]
-    assert payload["next_action"]["control"] == "system_auto_retry"
-    assert payload["next_action"]["run_ids"] == [task.id]
-    assert loaded.status == "BLOCKED"
-    assert loaded.failure_type == "structured_output_parse_error"
+    assert result.ok is True
+    assert loaded.status == "CANCELLED"
+    assert loaded.failure_type == "cancelled"
 
 
 def test_cancel_subagents_tool_allows_cancellation_after_same_run_retry_exhausted(tmp_path):
@@ -285,7 +272,7 @@ def test_cancel_subagents_tool_cannot_cancel_system_managed_audit_source_worker(
     assert agent.subagents.load(task.id).status == "CANCELLED"
 
 
-def test_cancel_subagents_retry_protection_is_atomic_for_mixed_targets(tmp_path):
+def test_cancel_subagents_can_interrupt_mixed_running_and_retryable_targets(tmp_path):
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
     from agent_py_agent.agent.subagents.services.base import CreateRunParams
@@ -322,10 +309,9 @@ def test_cancel_subagents_retry_protection_is_atomic_for_mixed_targets(tmp_path)
         }
     )
 
-    assert result.ok is False
-    assert result.error_code == "SUBAGENT_RETRY_REQUIRED"
-    assert agent.subagents.load(running.id).status == "RUNNING"
-    assert agent.subagents.load(retryable.id).status == "FAILED"
+    assert result.ok is True
+    assert agent.subagents.load(running.id).status == "CANCELLED"
+    assert agent.subagents.load(retryable.id).status == "CANCELLED"
 
 
 def test_cancel_subagents_tool_filters_by_root_and_status(tmp_path):

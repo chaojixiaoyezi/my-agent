@@ -77,9 +77,18 @@ class SubAgentRunnerContextService:
             )
         return granted_skills, granted_tools, grants
 
+    # LLM: Write authority and cwd are separate structured facts. Preserve all
+    # existing path fences while publishing exactly one execution_cwd inherited
+    # from the parent workspace for every relative-path tool.
+    # 函数用途: 组装子代理读写围栏，并明确它执行普通相对路径时所在的项目目录。
     def _build_write_boundary(self, task: SubAgentTask) -> dict[str, object]:
         """Build write boundary configuration dict."""
         task_workspace_refs = workspace_refs(task)
+        execution_cwd = str(
+            task_workspace_refs.get("owner_workspace_dir")
+            or getattr(self.manager, "workspace_root", "")
+            or ""
+        ).strip()
         report_roots = _task_report_write_roots(task)
         product_roots = task_product_write_roots(task, report_roots)
         controlled_exec_grants = controlled_exec_grant_refs(list(task.capability_grants or []))
@@ -113,6 +122,11 @@ class SubAgentRunnerContextService:
         allowed_write_roots = _model_allowed_write_roots(task, [*grant_write_roots, *delivery_grant_roots], report_roots)
         return {
             "task_dir": _model_task_dir(task),
+            # LLM: 会话运行时 keeps cwd separate from rollout/task storage. This is
+            # the one host-authored cwd consumed by every relative-path tool;
+            # task_dir and allowed roots remain state/permission facts only.
+            # 字段用途: 明确子代理普通相对路径的真实起点，避免把内部任务目录当项目目录。
+            "execution_cwd": execution_cwd,
             # 结构化 cwd 事实，不是授权：只读工具可把 workspace/... 稳定解析到
             # 当前 owner 的长期工作区；写权限仍完全由 allowed_write_roots 决定。
             "owner_workspace_dir": task_workspace_refs.get("owner_workspace_dir", ""),

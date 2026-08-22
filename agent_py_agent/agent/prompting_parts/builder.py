@@ -188,6 +188,10 @@ class PromptBuilder:
         return _workspace_context_text(self, facts_only=facts_only)
 
 
+# LLM: This projection must describe the exact ToolRegistry cwd.  Internal
+# task/output/work paths may be omitted by conversation callers and must never
+# be inferred back from prose or the frozen snapshot.
+# 函数用途: 把冻结的工作区提示更新为本轮真实 cwd 与模型可见写入范围。
 def project_runtime_workspace_context(
     snapshot: str,
     *,
@@ -224,7 +228,9 @@ def project_runtime_workspace_context(
                 if roots:
                     projected.append(f"- 当前允许写入目录: {', '.join(roots)}")
                 projected.append(relative_line)
-                projected.append("- 文件工具和 shell 使用同一个任务目录；交付写 output/，过程文件写 work/。")
+                projected.append(
+                    "- 文件工具和 shell 使用同一个 cwd；用户指定的普通相对路径直接按 cwd 解析。"
+                )
                 inserted = True
                 continue
             if line in {relative_line, generic_write_line}:

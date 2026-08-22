@@ -66,6 +66,7 @@ def test_runner_prompt_distinguishes_owner_workspace_from_task_output(
         role="worker",
         task_dir=str(task_root / "work" / "agents" / "leaf-workspace"),
         allowed_tools=["list_files", "read_file", "write_file"],
+        write_boundary={"execution_cwd": str(owner_workspace)},
         context_bundle={
             "workspace_refs": {
                 "owner_workspace_dir": str(owner_workspace),
@@ -78,9 +79,9 @@ def test_runner_prompt_distinguishes_owner_workspace_from_task_output(
 
     prompt = _build_subagent_runner_prompt(context)
 
-    assert f"Primary working directory（长期项目/输入资料）: {owner_workspace}" in prompt
-    assert f"Current task root（本任务 work/output）: {task_root}" in prompt
-    assert "不要把 owner workspace 拼到 task root 下面" in prompt
+    assert f"Current working directory (cwd): {owner_workspace}" in prompt
+    assert f"Internal task state root（仅宿主管理的 work/output）: {task_root}" in prompt
+    assert "普通相对目录和文件始终从 cwd 解析" in prompt
     assert f'"owner_workspace_dir": "{owner_workspace}"' in prompt
 
 

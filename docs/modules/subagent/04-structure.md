@@ -65,6 +65,18 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 - 这条链复用现有 role/template/scheduler，没有新增研究型、编码型、测试型等底层 Agent 分类，
   也没有保留旧的“默认工具表自动补权”兼容分支。
 
+## 2026-08-21 递归关系与工作目录
+
+- 每一层都把直接父级视为自己的用户边：父级只创建、插入消息、打断和处理权限申请；child 创建孙代理时
+  使用完全相同的四项边界。模型没有 inspect、wait、dispatch、push 或 acceptance 工具，内部 dispatcher
+  只负责自动启动、故障恢复和生命周期通知。
+- `cancel_subagents` 通过直属授权门后立即生效；“该 run 仍可自动重试”只是调度事实，不能驳回父级的
+  显式打断。同批 child 不再收到 `sibling_roster`，自己的 goal、父级指令和显式 refs 已足够；旧任务里的
+  roster 在 prompt 渲染时过滤，避免恢复后重新注入。
+- `write_boundary.execution_cwd` 是子代理相对路径的唯一结构化起点，继承父级项目 cwd；`task_dir`、
+  `task_workspace_dir`、内部 `work/output` 只负责状态、归档和显式命名空间。写入许可仍由
+  `allowed_write_roots/forbidden_write_roots` 独立裁决，不允许用权限根反推 cwd。
+
 ## 2026-07-27 共享工具历史窗口
 
 - 子代理没有独立的 live tool-context compactor。每次 provider 调用都与主代理共用

@@ -500,7 +500,7 @@ def test_registry_uses_workspace_as_effective_cwd_without_task_write_scope(
     ]
 
 
-def test_registry_uses_task_root_as_effective_cwd_for_task_scoped_writes(
+def test_registry_keeps_user_workspace_as_cwd_for_task_scoped_writes(
     tmp_path: Path,
 ) -> None:
     task_root = tmp_path / "task"
@@ -527,7 +527,7 @@ def test_registry_uses_task_root_as_effective_cwd_for_task_scoped_writes(
     ).result
 
     assert result.ok is True
-    assert tool.last_params["working_dir"] == str(task_root)
+    assert tool.last_params["working_dir"] == str(tmp_path)
     assert result.metadata["input_sources"][-1] == {
         "path": "$.working_dir",
         "source": "trusted_context",

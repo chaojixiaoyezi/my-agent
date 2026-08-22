@@ -208,6 +208,23 @@ def test_gateway_notice_snapshot_reports_canonical_active_task_count(tmp_path: P
     completed = read_gateway_client_notices(agent, scope=scope, after=0.0)
     assert completed["active_task_count"] == 0
 
+    store.update_task_status(
+        {
+            "task_id": "task-active",
+            "status": "active",
+            "expected_status": "completed",
+        }
+    )
+    store.update_task_status(
+        {
+            "task_id": "task-active",
+            "status": "interrupted",
+            "expected_status": "active",
+        }
+    )
+    interrupted = read_gateway_client_notices(agent, scope=scope, after=0.0)
+    assert interrupted["active_task_count"] == 0
+
 
 def test_runtime_keeps_multiple_background_notices_as_distinct_blocks() -> None:
     """同一 thread 连续后台更新不能因复用稳定 block id 而丢掉后者。"""

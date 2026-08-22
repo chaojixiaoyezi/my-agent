@@ -360,16 +360,6 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "需要纠偏时用 send_guidance 发消息。启动和可恢复重试由系统调度，只有明确接管时才新建 replacement run。"
         ),
     ),
-    "SUBAGENT_RETRY_REQUIRED": ErrorContract(
-        code="SUBAGENT_RETRY_REQUIRED",
-        category="orchestration",
-        retryable=True,
-        recommended_action=RecoveryAction.WAIT.value,
-        recovery_hint=(
-            "目标仍满足同一 run 的结构化重试条件；系统调度器会复用原 checkpoint 和工作区自动继续。"
-            "父代理等生命周期事件，或用 send_guidance 补充消息，不能取消后重做。"
-        ),
-    ),
     "AUDIT_SOURCE_WORKER_SYSTEM_MANAGED": ErrorContract(
         code="AUDIT_SOURCE_WORKER_SYSTEM_MANAGED",
         category="orchestration",

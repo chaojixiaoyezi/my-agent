@@ -810,6 +810,7 @@ def _task_scoped_filesystem_request(
         workspace_roots=[owner_root],
         allowed_tools=[tool.model_spec.name],
         write_boundary={
+            "execution_cwd": str(task_root),
             "task_root": str(task_root),
             "task_dir": str(task_root),
             "task_output_dir": str(task_root / "output"),

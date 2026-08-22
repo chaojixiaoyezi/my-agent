@@ -224,7 +224,7 @@ def build_cancel_subagents_model_spec() -> ToolModelSpec:
         name="cancel_subagents",
         description=(
             "取消当前代理直接创建的一个或多个下级；会废弃 active attempt、记录取消审计，有关联 pid 时会尝试终止。"
-            "仍满足同一 run 重试条件的结构化失败必须先续派，不能由模型直接取消。"
+            "这是父级对直属下级的打断动作，不承担轮询、推动或质量验收。"
         ),
         input_schema=_input_schema(parameters, property_schemas),
         hints=_hints(
@@ -235,7 +235,7 @@ def build_cancel_subagents_model_spec() -> ToolModelSpec:
             ),
             avoid_when=(
                 "只是补充说明时用 send_guidance；正常运行时等宿主生命周期事件",
-                "系统正在自动恢复可恢复故障时不要重复创建替代代理",
+                "只是想知道进度时不要调用；宿主会把生命周期事件送回直接父级",
             ),
             keywords=("取消", "停止", "kill", "cancel", "subagent", "runner", "ABANDONED", "CANCELLED"),
             examples=(

@@ -904,3 +904,8 @@ tasks/<日期>/<任务>/output，即用户拿走的东西），而非子代理�
 - A 的多次 typed `/btw` 按序进入同一 active task；任务已结束后的 `/btw` 返回没有运行中任务并拒绝保存，
   后续普通纠错仍由 task selection 选回原任务/项目。A/B 独立副本最终分别 59/59、51/51；用户出口新消息
   无 child 工具碎片或内部协议。该轮没有从模型摘要反推状态，child 数量和终态均来自 canonical ledger。
+## 2026-08-21 会话运行时 式直属控制与 cwd 收口
+
+- 模型侧不再存在查树、等待、巡场或手动推进工具；`create_subagents` 自动启动，运行状态由宿主事件送到直属父级。`cancel_subagents` 经结构化父子关系授权后即可打断，自动重试资格不能否决父级的显式中止。
+- 新 child 不再附加全量 `sibling_roster`，旧任务恢复渲染时也过滤这类历史上下文。每一级只持有自己的目标、父级指令、显式引用和直属孩子状态，避免代理树扩大后上下文按平方增长。
+- child 的 `write_boundary.execution_cwd` 固定继承父级项目 cwd；隐藏 task/run 状态目录与显式 work/output 目录继续各守职责，Tool Registry 只从可信 `execution_cwd` 选择相对路径基准，读写围栏仍独立裁决权限。
