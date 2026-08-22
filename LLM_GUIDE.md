@@ -66,7 +66,8 @@
 - Compact 的当前语义是每个 main/child/grandchild 各有独立 ConversationThread，并只认同一 owner/thread
   checkpoint + generation CAS。transcript 旧段由 `conversation/compact.py` 提交；运行中 native IR 由
   `conversation/live_tool_compact.py` 适配到同一账本，provider overflow 也不得账外删工具对。TUI/Web/SQLite
-  只读 generation；presentation/no-save 临时窗口事件不计数，旧 durable apply/attribute 不回读。
+  只读 generation；presentation/no-save 临时窗口事件不计数，旧 durable apply/attribute 不回读。live 摘要
+  请求必须保持“原任务 user 在前、native history 居中、synthetic Compact user 最后”的 会话运行时 顺序。
 
 ---
 

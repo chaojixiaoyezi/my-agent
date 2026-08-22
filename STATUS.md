@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-08-22 主/子/孙代理统一 Conversation Compact（运行中 IR 底层候选）
+## 2026-08-22 主/子/孙代理统一 Conversation Compact（摘要顺序修复候选）
 
 - `bcbd568` 已在 `.7` 唯一 Gateway 修复 child 工作区继承。随后全新 Prompt 4 使用 lazygit 固定提交
   `ea916395`（61,258 功能行）真实运行 7 个 child，全部自然 DONE；worker-6 的 provider-visible context
@@ -14,10 +14,18 @@
 - native provider overflow 已删除生产链中的账外 20% PTL，改为强制同一完整预算事务。摘要、checkpoint 或
   CAS 失败时恢复压缩前 IR/tool-context，只更新同一 thread failure circuit；presentation/no-save 辅助回合
   仍可临时整理窗口，但不得成为 `compact N`。
-- focused fake/replay 已覆盖 main/child thread、generation 1→2、上一代摘要合并、精确移除/保留 ToolCall ID、
-  provider forced checkpoint、摘要失败与 checkpoint-before-CAS 冲突回滚；Gateway conversation、subagent
-  runtime 与 TUI activity 共 201 项联合回归通过。Ruff、doc sync、strict code-size、diff 与 clean-package 中除
-  新文件尚未暂存这一预期提示外均已通过；待暂存后复核、推送、`.7` 部署和全新 Prompt 4 真机。
+- `680e209` 的 201 项 focused 回归及本地严格 gate 已通过并推送/部署 `.7` 唯一 Gateway。全新 tmux
+  `dsh-p4-lazygit-r3-ea91639` 只输入一次原样 Prompt 4：worker-3 在 119,295 tokens 越过 115,200 触发线后，
+  checkpoint generation 1、`source_kind=live_tool_ir`、移除 44 对/保留 9 对、降至 36,586；TUI 同步显示
+  `compact 1` 且 child 继续运行。这证明 canonical 计数、落账、窗口下降与不中断主链已修复。
+- 同一 checkpoint 暴露新的摘要质量失败：summary 只有普通续写“接下来创建 theme/constants”，没有任务、
+  已完成工作、路径和待办。根因已对照 会话运行时 `compact.rs`：会话运行时 把 Compact prompt 追加为完整 history 的
+  最后一条 user 消息，本项目却经 backend 普通入口把 prompt 放在 history 最前。现场已用 `/stop` 停止，
+  不把结构正确但语义丢失的轮次冒充通过。
+- 当前本地候选保留真实任务 prompt 作为 provider 首条 user，再把 native history 放中间、synthetic Compact
+  指令放最后；不增加自然语言硬验收或专用兜底。位置敏感 fake backend 与 native 连续 generation 共 51 项
+  及完整相关组合共 201 项已通过，Ruff、doc sync、strict code-size、diff、clean-package 也通过；推送、部署及
+  r4 全新 TUI 尚待完成。
 - `e59acad` 在唯一 Gateway 的全新 Prompt 3 TUI 中证明 6 个 child 均一次 attempt 自然
   DONE，实时 context 与终态行正常；该轮 child 最高约 89.4k，未达 115.2k 压缩点，
   因此 `compact 0` 是真实结果，不冒充压缩成功证据。

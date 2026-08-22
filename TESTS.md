@@ -521,7 +521,9 @@ presentation/no-save 辅助回合才允许只发 turn-local 事件。child/grand
 `agent_thread_id` 对应 ConversationThread 的 generation/checkpoint；即使旧 durable apply ledger 或遗留
 native attribute 仍存在，投影也必须忽略。回归同时覆盖轮前阈值 Compact、运行中阈值/连续 Compact、
 provider overflow 强制 Compact、上一代摘要合并、checkpoint-before-CAS 失败回滚、typed tool/guidance
-进度携带、正文隔离和旧 continuation 不再生成。还必须用
+进度携带、正文隔离和旧 continuation 不再生成。摘要回归必须用位置敏感 fake backend 锁定 provider 请求：
+真实任务 prompt 是首条 user，完整 native history 在中间，Compact 要求是最后一条 synthetic user；倒退为
+`prompt + messages` 的首指令顺序时，fake 必须像 MiniMax 真机一样返回普通续写并让测试失败。还必须用
 已经绑定父 conversation task 的真实工作工具回归证明：child `agent_thread_id` 不覆盖继承的
 `conversation_thread_id`，父 task link 不变，child 写入成功且消息只进入 child thread；禁止只用不调用工具
 的 fake backend 掩盖 task-thread 重绑定冲突。另用 `output_files` 为空的 Gateway 会话回归证明：直接 child

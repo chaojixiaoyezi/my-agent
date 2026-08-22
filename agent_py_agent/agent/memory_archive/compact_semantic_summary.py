@@ -190,7 +190,11 @@ def summarize_live_tool_history(request: LiveToolHistorySummaryRequest) -> str:
         messages = strip_orphaned_tool_blocks(
             AnthropicMessageAdapter().to_provider_messages(request.history)
         )
-        generate = _resolve_generate_with_messages(request.backend, messages)
+        generate = _resolve_generate_with_messages(
+            request.backend,
+            messages,
+            initial_user_prompt=(request.task_prompt or "继续当前任务。"),
+        )
         if generate is None or not messages:
             return ""
         # 会话运行时 mid-turn compact is part of the current turn: wait for the
@@ -479,16 +483,37 @@ def _resolve_generate(backend: Any) -> Callable[[str], str] | None:
     return _call
 
 
+# LLM: Live compaction is a distinct synthetic turn: preserve provider-native history first and
+# append exactly one non-tool user instruction last, matching 会话运行时 compaction request order.
+# 函数用途: 把摘要要求放到工具历史末尾再调用模型，防止模型把它当旧消息后继续普通工作。
 def _resolve_generate_with_messages(
     backend: Any,
     messages: list[dict[str, Any]],
+    *,
+    initial_user_prompt: str,
 ) -> Callable[[str], str] | None:
+    """把历史放在前面，并把 Compact 要求作为最后一条 synthetic user 消息。
+
+    会话运行时 的 compaction turn 会先克隆完整 history，再 ``record_items`` 追加摘要 prompt。
+    Anthropic/OpenAI-compatible backend 的普通 ``prompt + messages`` 入口则会把 prompt 放在
+    最前面；这里显式反转为 compaction 顺序，避免模型忽略旧指令并续写最后一个工具动作。
+    """
     generate = getattr(backend, "generate", None)
     if not callable(generate):
         return None
 
     def _call(prompt: str) -> str:
-        response = generate(prompt, messages=messages)
+        compact_messages = [
+            *messages,
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": prompt}],
+            },
+        ]
+        # tool_ir_history 从首个 assistant/tool call 开始，不含本 turn 的原始 user prompt。
+        # 继续用 backend 的 prompt 参数把真实任务放在最前，既满足 provider 角色顺序，也让
+        # Compact 指令仍然稳定位于整段历史最后。
+        response = generate(initial_user_prompt, messages=compact_messages)
         return str(getattr(response, "text", response) or "")
 
     return _call

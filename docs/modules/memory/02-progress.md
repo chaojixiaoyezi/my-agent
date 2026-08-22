@@ -10,6 +10,9 @@
   原 native IR，并累计同一 Compact 失败熔断事实。
 - raw archive、operation ledger、artifact registry 和真实文件仍是执行事实源；语义摘要
   只负责让下一模型轮知道已经做过什么、还缺什么，不能单独证明任务完成。
+- `.7` 原样 Prompt 4 真机已证明 worker-3 在 119,295 tokens 提交 generation 1 并降到 36,586；但摘要模型
+  普通续写最后工具动作。根因是 backend 将摘要 prompt 放在 history 最前。当前按 会话运行时 改为原任务 user
+  在前、native history 居中、synthetic Compact user 指令最后；位置敏感 fake 回归会在顺序倒退时直接失败。
 
 ## 2026-08-17 测试债清理：home 优先级修复恢复记忆链路测试
 

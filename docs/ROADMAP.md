@@ -141,7 +141,7 @@ key/config/runtime 数据，不触碰其它项目。较早大切片已按约定�
 
 ### 主/子/孙代理统一 Conversation Compact
 
-状态：运行中 native IR 已纳入统一账本，201 项 focused 回归及本地静态 gate 已过；待部署与全新 MiniMax-M2.7 TUI 长任务验收
+状态：统一账本已真机触发；正在修复 Compact 指令位于 history 最前导致 MiniMax 普通续写的问题
 
 解决问题：子代理也可能连续工作数小时。旧实现中主代理用 owner/thread 的 Conversation Compact，
 task-local 子代理用 run workspace 的旧 compact continuation，回合内工具 IR 又独立裁剪；这让次数、
@@ -169,9 +169,15 @@ grandchild 在 native IR 阈值或 provider overflow 时，先把上一代 summa
 单独累计。摘要/checkpoint/CAS 失败会恢复压缩前 IR/tool-context 并进入同一 failure circuit；no-save 辅助回合
 只保留不计数的临时事件。TUI/Web/SQLite 继续只读该 thread generation，不新增前端计数器。
 
-待做：提交并部署到 `.7` 唯一 Gateway；在新的干净项目目录与新 tmux 中再次只投递一次
+第四轮全新 Prompt 4 已证明上述账本真实生效：worker-3 在 119,295 tokens 自动提交 generation 1，
+`source_kind=live_tool_ir`，44 对旧工具往返被 checkpoint、9 对保留，模型窗口降到 36,586 且仍运行。
+但 checkpoint summary 只有一句普通后续动作，证明摘要 prompt 被 backend 放在历史最前后被 MiniMax 忽略。
+现场已 `/stop`。当前候选改为真实任务 user 在前、native history 居中、synthetic Compact user 指令最后，
+与 会话运行时 `run_compact_task_inner_impl` 的 `history.record_items(compact prompt)` 顺序一致。
+
+待做：完成联合 gate 后提交并部署到 `.7` 唯一 Gateway；在新的干净项目目录与新 tmux 中再次只投递一次
 “换语言完整复刻且 main 只能协调/测试”的原样 prompt，验收 child generation 实时从 0 变 1、checkpoint
-`source_kind=live_tool_ir`、继续工具调用和最终产物。该真测不得由测试者旁路修改项目。
+`source_kind=live_tool_ir`、摘要包含任务/进展/路径/待办、继续工具调用和最终产物。该真测不得由测试者旁路修改项目。
 
 ### 用户直控子代理的共享控制面
 

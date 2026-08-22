@@ -27,6 +27,8 @@
   native IR 摘要共用的语义摘要入口，但不拥有 Compact 状态、工具执行或完成判定。
 - 运行中真实 turn 的摘要输入由“上一代 ConversationThread 完整摘要 + 本次 native 工具
   历史 + 当前任务”组成，输出是可独立替代上一代的完整摘要，不是只描述本次增量的片段。
+- provider 消息顺序固定为“真实任务 user → native history → synthetic Compact user 指令”。这是 会话运行时
+  compaction turn 的适配；普通 backend 的 `prompt + messages` 会把 prompt 放最前，不能直接复用该顺序。
 - `agent/conversation/live_tool_compact.py` 才负责把这份摘要连同精确移除/保留的 tool-call
   ID 写入 checkpoint，并通过 ConversationStore 的同一 CAS 推进 generation；TUI 只投影
   已提交的代次和 token 前后值。

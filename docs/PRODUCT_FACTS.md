@@ -14,7 +14,7 @@
 
 ## 2026-08-22 Delegated Agent Conversation Compact
 
-- **状态：实验性（当前工作树定向测试通过，尚未部署本候选）**。main、child、grandchild 各自拥有独立
+- **状态：实验性（统一账本已部署并真机触发，摘要顺序修复候选尚待部署）**。main、child、grandchild 各自拥有独立
   ConversationThread；child 创建/恢复、逐 attempt transcript、轮前 transcript Compact，以及运行中 native IR
   阈值/provider overflow 都接入同一 owner/thread checkpoint/generation CAS。后两者由
   `conversation/live_tool_compact.py` 适配，不建立第二条状态机。
@@ -23,9 +23,10 @@
   exact `agent_thread_id` 的 generation。允许持久化的 native IR 裁剪先写 `source_kind=live_tool_ir` checkpoint
   并推进该 generation；presentation/no-save 临时事件不属于 durable Compact。
 - fake/replay 已覆盖阈值触发、连续 generation、provider forced、摘要/CAS 失败回滚、child/grandchild 隔离、
-  旧计数不回读和 owner Memory 不污染。上一版在 MiniMax-M2.7、单 Gateway、61,258 功能行项目真测中已
-  复现“113.1k→35.5k 但 generation 0”，本候选尚未重新部署验收，因此不能承诺数小时连续多代 Compact、
-  崩溃恢复或完整项目交付已经稳定。
+  旧计数不回读和 owner Memory 不污染。`680e209` 在 MiniMax-M2.7、单 Gateway、大型 lazygit 项目真测中已
+  证明 119,295→36,586、generation 1 与 44/9 tool pairs 落账；但摘要 prompt 位于 history 最前导致模型只
+  普通续写末尾动作。当前工作树对齐 会话运行时，把 Compact 指令追加为最后 user 消息；重新部署与多代真测前
+  仍不能承诺数小时连续 Compact、崩溃恢复或完整项目交付稳定。
 
 ## 2026-08-18 终端交互 风格 TUI
 

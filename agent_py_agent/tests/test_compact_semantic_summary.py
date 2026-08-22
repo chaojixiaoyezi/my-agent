@@ -113,7 +113,14 @@ class _LiveSummaryBackend:
         del on_chunk
         self.prompt = prompt
         self.messages = list(messages or [])
-        return ModelResponse(text=self._text, backend=self.name)
+        last_message = self.messages[-1] if self.messages else {}
+        last_text = str(last_message.get("content") or "")
+        text = (
+            self._text
+            if "完整替代摘要" in last_text
+            else "Now let me create the theme and constants modules"
+        )
+        return ModelResponse(text=text, backend=self.name)
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +293,11 @@ def test_live_tool_history_summary_reuses_native_messages_and_preserves_refs() -
     assert backend.messages is not None
     assert "toolu_exact_123" in str(backend.messages)
     assert "/srv/project/checkpoint.json" in str(backend.messages)
-    assert "不可信数据" in backend.prompt
+    assert backend.prompt == "继续 /srv/project，不要重新找路径。"
+    assert backend.messages[-1]["role"] == "user"
+    assert "完整替代摘要" in str(backend.messages[-1]["content"])
+    assert "不可信数据" in str(backend.messages[-1]["content"])
+    assert "完整替代摘要" not in str(backend.messages[:-1])
 
 
 def test_live_tool_history_summary_failure_returns_empty_for_mechanical_fallback() -> None:

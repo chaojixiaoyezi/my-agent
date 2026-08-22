@@ -41,6 +41,8 @@ compact summary、精确消息/字节 cursor、generation、live checkpoint poin
    对允许持久化的 main/child/grandchild，摘要器把上一代 thread summary 与当前工具历史合成一份完整替代
    summary；随后先写 `source_kind=live_tool_ir` checkpoint，再以同一 generation CAS 提交。该来源不推进
    transcript cursor，只累计 `compact_source_tool_pairs`，并在同一 turn 内用一个 `CompactionSummary` 继续。
+   摘要模型请求按 会话运行时 compaction turn 排序：历史全部在前，合成的 Compact 指令作为最后一条 synthetic
+   user 消息；不能把指令放在首条 prompt 后再追加历史，否则兼容模型可能忽略旧指令并普通续写末尾动作。
 8. live-tool 摘要、checkpoint 或 CAS 失败时，原生 IR 与 tool-context 恢复到压缩前，thread 只增加同一个失败
    熔断事实。presentation/no-save 辅助回合可做临时窗口整理，但不得推进 generation 或冒充 `compact N`。
 9. `/status`、TUI 和 Web 只显示 thread 的一个 compact generation；消息段压缩与 live-tool 压缩都推进它。

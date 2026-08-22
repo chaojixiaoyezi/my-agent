@@ -125,7 +125,9 @@
 - [ ] 真实测试中 main/child/grandchild 各自沿独立 `agent_thread_id` Compact 后能继续工作；至少一条 child
   链连续发生多代 generation，近期完整回合、工具事实、任务状态和产物引用不丢，且没有重做已经成功的
   副作用。持久 native IR 裁剪与 transcript 压缩都只推进该 thread generation；presentation/no-save 临时事件
-  和旧 apply ledger 不计入。child 使用工作工具时不得覆盖父 `conversation_thread_id` 或重绑父 conversation task。
+  和旧 apply ledger 不计入。Compact provider 请求必须由真实任务 user 开头、synthetic 摘要 user 结尾；真机
+  checkpoint summary 要包含任务、进展、路径和待办，不能只是最后工具动作的普通续写。child 使用工作工具时
+  不得覆盖父 `conversation_thread_id` 或重绑父 conversation task。
 - [ ] 真实 IM 双用户验证 compact/memory/旧聊天检索不串 owner 或 chat，结束后恢复生产 compact 阈值。
 - [ ] `/verbose on/full/off` 只改变当前 thread，不进入 transcript/guidance/模型；进度发送不触发任务重做，最终回复仍能送达。
 - [ ] CLI 与真实 IM 的 `/status`、`/btw <内容>`、`/stop`、`/goal ...`、`/verbose ...` 都由统一系统命令入口处理；任何未知 `/XXXX` fail-closed，不进入普通队列、transcript 或模型。

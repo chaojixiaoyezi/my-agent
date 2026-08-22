@@ -507,8 +507,11 @@ def test_shared_native_window_commits_main_or_child_conversation_compact(
     assert len(sink.rows) == 2
     assert sink.rows[-1]["generation"] == second.compact_generation == 2
     assert second.compact_source_tool_pairs > first.compact_source_tool_pairs
-    assert first.summary in agent.backend.calls[-1][0]
-    assert first.summary not in str(agent.backend.calls[-1][1])
+    assert agent.backend.calls[-1][0] == "x"
+    final_blocks = agent.backend.calls[-1][1][-1]["content"]
+    final_text = "".join(str(block.get("text") or "") for block in final_blocks)
+    assert first.summary in final_text
+    assert "摘要-1" not in str(agent.backend.calls[-1][1][:-1])
 
 
 def test_persistent_native_window_restores_ir_when_summary_fails(tmp_path):
