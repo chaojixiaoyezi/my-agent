@@ -316,6 +316,7 @@ class _TuiBackgroundActivityController:
         self._owner = owner
         self._count = 0
         self._started_at = 0.0
+        self._main_activity: dict[str, object] = {}
         self._subagents: tuple[dict[str, object], ...] = ()
         self._hidden_subagent_count = 0
 
@@ -327,6 +328,7 @@ class _TuiBackgroundActivityController:
         self,
         active_task_count: int,
         *,
+        main_activity: object | None = None,
         subagents: object | None = None,
         hidden_subagent_count: int = 0,
         projection_ok: bool = True,
@@ -336,16 +338,24 @@ class _TuiBackgroundActivityController:
         block_id = f"background-activity:{owner.session_id}"
         with owner._lock:
             if count <= 0:
+                next_main_activity: dict[str, object] = {}
                 next_subagents: tuple[dict[str, object], ...] = ()
                 next_hidden_count = 0
-            elif projection_ok and subagents is not None:
-                next_subagents = _normalize_subagent_activity_rows(subagents)
-                next_hidden_count = max(0, int(hidden_subagent_count or 0))
             else:
-                next_subagents = self._subagents
-                next_hidden_count = self._hidden_subagent_count
+                next_main_activity = (
+                    _normalize_main_activity(main_activity)
+                    if main_activity is not None
+                    else self._main_activity
+                )
+                if projection_ok and subagents is not None:
+                    next_subagents = _normalize_subagent_activity_rows(subagents)
+                    next_hidden_count = max(0, int(hidden_subagent_count or 0))
+                else:
+                    next_subagents = self._subagents
+                    next_hidden_count = self._hidden_subagent_count
             if (
                 count == self._count
+                and next_main_activity == self._main_activity
                 and next_subagents == self._subagents
                 and next_hidden_count == self._hidden_subagent_count
             ):
@@ -358,6 +368,7 @@ class _TuiBackgroundActivityController:
             else:
                 kind, phase = "background_activity_completed", "completed"
             self._count = count
+            self._main_activity = next_main_activity
             self._subagents = next_subagents
             self._hidden_subagent_count = next_hidden_count
             owner._publish(
@@ -367,6 +378,7 @@ class _TuiBackgroundActivityController:
                 {
                     "active_task_count": count,
                     "started_at": self._started_at,
+                    "main_activity": dict(next_main_activity),
                     "subagents": [dict(row) for row in next_subagents],
                     "hidden_subagent_count": next_hidden_count,
                 },
@@ -378,6 +390,9 @@ class _TuiBackgroundActivityController:
 
 
 _SUBAGENT_ACTIVITY_ROW_LIMIT = 64
+_MAIN_ACTIVITY_FIELDS = frozenset(
+    {"task_id", "phase", "activity", "started_at", "updated_at"}
+)
 _SUBAGENT_ACTIVITY_FIELDS = frozenset(
     {
         "run_id",
@@ -390,12 +405,27 @@ _SUBAGENT_ACTIVITY_FIELDS = frozenset(
         "activity",
         "current_tool",
         "attempts",
+        "token_count",
+        "compact_count",
         "created_at",
         "updated_at",
         "heartbeat_at",
         "ended_at",
     }
 )
+
+
+# LLM: Main activity is an authenticated scalar-only Gateway projection. Nested
+# values and unknown keys are discarded before entering the reducer metadata.
+# 函数用途: 清洗后台主代理的实时活动行，避免路径、输出或其它内部字段进入 TUI。
+def _normalize_main_activity(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        str(key): value[key]
+        for key in _MAIN_ACTIVITY_FIELDS
+        if key in value and not isinstance(value[key], dict | list | tuple | set)
+    }
 
 
 # LLM: This is the client-side metadata whitelist for the authenticated activity
@@ -433,16 +463,56 @@ class _TuiBackgroundActivityRuntimeMixin:
         self,
         active_task_count: int,
         *,
+        main_activity: object | None = None,
         subagents: object | None = None,
         hidden_subagent_count: int = 0,
         projection_ok: bool = True,
     ) -> bool:
         return self._background_activity.update(
             active_task_count,
+            main_activity=main_activity,
             subagents=subagents,
             hidden_subagent_count=hidden_subagent_count,
             projection_ok=projection_ok,
         )
+
+    # LLM: Every legacy background notice receives a fresh block id so repeated
+    # updates cannot collapse in the reducer. The method is display-only.
+    # 函数用途: 把后台进度或旧版通知显示为独立的灰色系统消息。
+    def publish_background_notice(self, summary: str, *, thread_id: str = "") -> None:
+        text = str(summary or "").strip()
+        if not text:
+            return
+        request_id = f"bg-notice:{thread_id or self.session_id}"
+        with self._lock:
+            self._background_notice_index += 1
+            block_id = f"{request_id}:{self._background_notice_index}"
+            self._publish(
+                "system_message",
+                "completed",
+                block_id,
+                {"text": text, "severity": "info"},
+                request_id=request_id,
+            )
+
+    # LLM: A committed background owner reply must enter transcript as the same
+    # assistant role as a foreground final; this method does not deliver or rerun it.
+    # 函数用途: 把 Gateway 已提交的后台主代理最终回复显示为普通助手消息，而不是灰色系统告警。
+    def publish_background_response(self, content: str, *, thread_id: str = "") -> None:
+        text = str(content or "").strip()
+        if not text:
+            return
+        request_id = f"bg-response:{thread_id or self.session_id}"
+        with self._lock:
+            self._background_notice_index += 1
+            block_id = f"{request_id}:{self._background_notice_index}"
+            self._publish(
+                "assistant_completed",
+                "completed",
+                block_id,
+                {"text": text},
+                request_id=request_id,
+            )
 
 
 # LLM: TuiRuntime 统一拥有 session 事件序号与 turn adapter；emit+publish 在同一锁内避免并发 seq 到达倒序。
@@ -534,25 +604,6 @@ class TuiRuntime(_TuiBackgroundActivityRuntimeMixin):
                     {"text": assistant_text},
                     request_id=history_request_id,
                 )
-
-    # LLM: 每条后台 notice 必须拥有独立 block id；按 thread 复用 id 会被 reducer
-    # 当作稳定块重放而丢弃后续更新。这里只做显示，不注入业务执行权。
-    # 函数用途: 把后台主代理轮的进度、阻塞或完成结果显示为独立可读通知。
-    def publish_background_notice(self, summary: str, *, thread_id: str = "") -> None:
-        text = str(summary or "").strip()
-        if not text:
-            return
-        request_id = f"bg-notice:{thread_id or self.session_id}"
-        with self._lock:
-            self._background_notice_index += 1
-            block_id = f"{request_id}:{self._background_notice_index}"
-            self._publish(
-                "system_message",
-                "completed",
-                block_id,
-                {"text": text, "severity": "info"},
-                request_id=request_id,
-            )
 
     # LLM: enqueue_prompt 使用 request_id 作为用户块/队列身份；排队项只发 queue_added，开始执行时再原子提升为稳定用户块。
     # 函数用途: 立即显示空闲提交，或把运行中提交登记成可回取的用户队列预览。

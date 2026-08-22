@@ -13,6 +13,15 @@
 
 ## TUI 后台活动投影
 
+2026-08-22 起，activity endpoint 公开 `conversation_agent_activity.v2`：Gateway 后台主代理把最近一次
+thinking、tool、provider retry 或 finalizing 阶段写入进程内有界 display sink；直属 child 的 token/Compact
+数字从各自 canonical ledger 只读取得。客户端按 250ms 节奏轮询并只接收标量白名单。该快照不持久化、
+不参与任务结束或恢复，Gateway 重启后可为空；真实 task link/run/turn_end 仍是唯一生命周期事实。
+
+后台轮只有在 delivery contract 已形成可交付正文时才追加 `background_notice.v2`，TUI 将
+`display_kind=assistant_response` 投影为普通 assistant transcript；内部 suppressed 轮和空正文不生成消息。
+旧 v1 notice 继续只作为灰色系统显示兼容，不取得新的语义。
+
 - `gateway_parts/http_handlers.py::read_gateway_client_notices` 在可信 owner/session 解析出的同一
   `ConversationThread` 上读取 active task link，再通过 `conversation/agent_activity.py` 从 canonical run
   账本投影这些 root 的 depth=1/parent 精确直属 child，与 after-cursor 之后的 notice rows 一次返回。

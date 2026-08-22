@@ -8,8 +8,11 @@
 - [x] 直属 cancel/interrupt 不被自动重试资格否决；同批 child 不注入 `sibling_roster`。Gateway 与 child
   的裸相对路径使用项目 `execution_cwd`，内部 task root 仅供显式 work/output；TUI Working 只统计
   `status=active`，interrupted 可恢复索引不再造成假忙。
-- [x] Gateway/TUI 只读 active root 的 canonical 直属 child 状态；输入框附近固定显示名称、status、
-  当前动作、耗时和 attempts，不进 transcript，不展开 grandchild/历史 root，不携带 goal、工具输出、路径或权限。
+- [ ] Gateway/TUI 只读 active root 的 canonical 直属 child 状态；Todo 固定在输入框上方，main 与直属 child
+  固定在输入框下方，不进 transcript。child 行显示名称、typed status、当前动作、耗时、累计 token、
+  Compact 次数；第一次执行不显示“尝试 1”，只有重试才显示重试次数，终态不得残留“模型已生成回复”。
+  main 在 child 全部终态后仍显示真实整理/回复活动，最终答复进入普通 assistant transcript；定向回归已过，
+  仍需 `.7` 单 Gateway + 原样长任务 TUI 验收后勾选。
 - [x] `.7` 单 Gateway 真实 TUI 已观察两个 child 从等待启动推进到一次 attempt `DONE`，固定活动区展示
   状态、动作和耗时，真实文件内容正确；测试者未向主代理或 child 发送推动消息。
 - [ ] durable child wake 已 ready 但 process-local thread lane 不推进时，Gateway 必须自行检测并有界恢复；
@@ -86,10 +89,13 @@
   `nohup ... &` 在执行前明确拒绝且可修正重试，最终必须从另一条命令核验 0.0.0.0 监听与局域网访问。
 - [ ] 主代理、子代理、Gateway 与 TUI 对六类 `turn_end` 映射一致；普通完成不读取 acceptance/verification，
   历史兼容字段不进入当前 prompt、context bundle、父级摘要或启动前检查。
-- [ ] TUI 在活动轮显示 Working 动画和持续 thinking 增量；前台 turn 让出而 canonical active task 仍非零时，
-  一个可移除的后台 Working 区继续闪动并显示直属 child 状态/动作/耗时，成功查询归零才收起，查询失败不误清零。用户位于
+- [ ] TUI 在活动轮显示唯一的主代理工作状态和持续 thinking 增量；前台 turn 让出而 canonical active task
+  仍非零时，一个可移除的固定代理区继续显示 main 与直属 child 状态/动作/耗时/token/Compact，成功查询
+  归零才收起，查询失败不误清零。用户位于
   页底时自动跟随，主动上翻后不抢滚动，回到底部后恢复跟随；Compact 显示 typed 百分比并在完成/失败后
   正确收口。
+- [ ] 四个 `TESTS.md` 原样重型任务全部通过真实 `MiniMax-M2.7` TUI 顺序验收；每次启动、切换或输入前已先
+  向用户报告测试对象、`192.0.2.7`、tmux session 名称和可直接 attach 的完整命令，且全程只有一个 Gateway。
 - [ ] 真实测试中主代理和独立子代理 compact 后能继续工作；至少一条链连续发生多代 compact，近期完整回合、工具事实、任务状态和产物引用不丢，且没有重做已经成功的副作用。
 - [ ] 真实 IM 双用户验证 compact/memory/旧聊天检索不串 owner 或 chat，结束后恢复生产 compact 阈值。
 - [ ] `/verbose on/full/off` 只改变当前 thread，不进入 transcript/guidance/模型；进度发送不触发任务重做，最终回复仍能送达。

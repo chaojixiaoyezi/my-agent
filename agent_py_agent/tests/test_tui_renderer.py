@@ -33,6 +33,8 @@ def _frame_text(frame: TuiRenderFrame) -> str:
         *frame.transcript_lines,
         *frame.overlay_lines,
         *frame.input_status_lines,
+        *frame.todo_lines,
+        *frame.agent_lines,
         frame.footer,
     )
     return "\n".join(fragments_text(line) for line in lines)
@@ -164,6 +166,8 @@ def test_frame_sanitizer_preserves_styles_and_mouse_handlers() -> None:
         transcript_lines=((('class:test', 'a\x1b[2Jb', handler),),),
         overlay_lines=(),
         input_status_lines=(),
+        todo_lines=(),
+        agent_lines=(),
         footer=(("class:footer", "ok\x07"),),
     )
 
@@ -953,6 +957,18 @@ def test_todo_panel_gateway_event_payload_keeps_task_progress_items() -> None:
         {"id": "a", "title": "阅读项目A", "status": "done"},
         {"id": "b", "title": "分析模块", "status": "pending"},
     ]
+    runtime.update_background_activity(
+        1,
+        subagents=[
+            {"run_id": "b", "name": "analysis", "status": "DONE", "attempts": 1}
+        ],
+    )
+    frame = render_tui_snapshot(store.snapshot(), TuiRenderContext(width=80))
+    assert not any("任务清单" in line for line in _frame_lines(frame))
+    todo_text = "\n".join(fragments_text(line) for line in frame.todo_lines)
+    assert "☑ 阅读项目A" in todo_text
+    assert "☑ 分析模块" in todo_text
+    assert any("main" in fragments_text(line) for line in frame.agent_lines)
 
 
 def test_todo_panel_empty_items_renders_nothing() -> None:

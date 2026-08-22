@@ -23,6 +23,9 @@ def sync_subagent_control_plane_projection(local_store: Any, task: SubAgentTask)
     local_store.rebuild_task_rollup(run_record.root_task_id)
 
 
+# LLM: The LocalStore row is a read-model projection of one canonical task and
+# must reuse shared runtime usage readers rather than recounting ledgers differently.
+# 函数用途: 把一个子代理任务转换成控制面查询所需的 AgentRun 记录。
 def _agent_run_record_from_task(task: SubAgentTask) -> AgentRunRecord:
     root_task_id = task.root_id or task.id
     return AgentRunRecord(
@@ -38,8 +41,8 @@ def _agent_run_record_from_task(task: SubAgentTask) -> AgentRunRecord:
         latest_summary=task.latest_summary,
         workspace_path=task.agent_run_workspace_dir or task.task_dir,
         checkpoint_ref=task.agent_run_checkpoint_json or task.checkpoint_ref or task.checkpoint_json,
-        latest_compact_ref=_latest_runtime_compact_ref(task),
-        compact_count=_runtime_compact_count(task),
+        latest_compact_ref=runtime_latest_compact_ref(task),
+        compact_count=runtime_compact_count(task),
         heartbeat_at=float(task.heartbeat_at or 0.0),
         created_at=float(task.created_at or task.updated_at or 0.0),
         updated_at=float(task.updated_at or task.heartbeat_at or task.created_at or 0.0),
@@ -47,8 +50,11 @@ def _agent_run_record_from_task(task: SubAgentTask) -> AgentRunRecord:
     )
 
 
-def _runtime_compact_rows(task: SubAgentTask) -> list[dict[str, object]]:
-    root = str(task.agent_run_workspace_dir or "").strip()
+# LLM: This reader is the shared, read-only projection of the canonical compact
+# apply ledger; callers may display/count rows but must not derive lifecycle state.
+# 函数用途: 读取一个子代理运行目录里的真实 Compact 应用记录，文件缺失或损坏行按空记录处理。
+def runtime_compact_rows(task: SubAgentTask) -> list[dict[str, object]]:
+    root = str(getattr(task, "agent_run_workspace_dir", "") or "").strip()
     if not root:
         return []
     path = Path(root) / "memory_archive" / "compact_applies" / "ledger.jsonl"
@@ -67,8 +73,11 @@ def _runtime_compact_rows(task: SubAgentTask) -> list[dict[str, object]]:
     return rows
 
 
-def _latest_runtime_compact_ref(task: SubAgentTask) -> str:
-    for row in reversed(_runtime_compact_rows(task)):
+# LLM: The latest ref is selected only from persisted compact ledger refs and
+# remains a display/index projection, never a completion or recovery decision.
+# 函数用途: 返回一个子代理最近一次 Compact 的元数据引用。
+def runtime_latest_compact_ref(task: SubAgentTask) -> str:
+    for row in reversed(runtime_compact_rows(task)):
         refs = row.get("refs") if isinstance(row.get("refs"), dict) else {}
         metadata = str(refs.get("metadata") or "").strip()
         if metadata:
@@ -76,8 +85,33 @@ def _latest_runtime_compact_ref(task: SubAgentTask) -> str:
     return ""
 
 
-def _runtime_compact_count(task: SubAgentTask) -> int:
-    return len(_runtime_compact_rows(task))
+# LLM: Count only successfully parsed canonical ledger rows; UI and LocalStore
+# share this helper so Compact totals cannot drift between surfaces.
+# 函数用途: 统计一个子代理真实完成过多少次 Compact。
+def runtime_compact_count(task: SubAgentTask) -> int:
+    return len(runtime_compact_rows(task))
+
+
+# LLM: Token totals come only from per-session token ledgers inside the exact
+# agent-run workspace; malformed or unreadable files contribute zero and are never repaired here.
+# 函数用途: 汇总一个子代理运行目录中所有真实模型轮次的累计 token 数，供状态界面展示。
+def runtime_token_count(task: SubAgentTask) -> int:
+    root = str(getattr(task, "agent_run_workspace_dir", "") or "").strip()
+    if not root:
+        return 0
+    total = 0
+    tokens_dir = Path(root) / "memory_archive" / "tokens"
+    try:
+        paths = sorted(tokens_dir.glob("*.json"))
+    except OSError:
+        return 0
+    for path in paths:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            total += max(0, int(payload.get("cumulative_tokens") or 0))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+    return total
 
 
 def _agent_run_metadata(task: SubAgentTask) -> dict[str, object]:
@@ -131,5 +165,3 @@ def _runtime_scope_metadata(task: SubAgentTask) -> dict[str, object]:
     if not any(runtime_identity.values()) and not memory_scope["namespace"] and not config_scope["overlay_ref"]:
         return {}
     return {"runtime_identity": runtime_identity, "memory_scope": memory_scope, "config_scope": config_scope}
-
-

@@ -11,9 +11,9 @@ from pathlib import Path
 from .tui_params import StartWorkerParams, WorkerConfigParams
 
 TUI_REFRESH_INTERVAL_SECONDS = 0.125
-# S-BG1: 后台主代理轮更新的监视间隔（gateway 写 conversations/notices/）。
-# 本地 HTTP 查询很轻；1 秒能让完成、阻塞和续跑结果及时出现在当前 TUI。
-TUI_BACKGROUND_NOTICE_INTERVAL_SECONDS = 1.0
+# S-BG1: 后台主代理轮和子代理面板走本地轻量快照；250ms 接近 终端交互
+# 的直接状态刷新，同时不触发模型调用或业务轮询。
+TUI_BACKGROUND_NOTICE_INTERVAL_SECONDS = 0.25
 
 
 # LLM: config factory 只能透传同一 queue/refs/runtime；不得在这里复制状态或创建第二个 TuiRuntime。
@@ -238,6 +238,7 @@ def _publish_background_activity(
     return bool(
         updater(
             count,
+            main_activity=value.get("main_activity"),
             subagents=subagents,
             hidden_subagent_count=hidden_count,
             projection_ok=value.get("subagent_projection_ok") is not False,
@@ -245,14 +246,18 @@ def _publish_background_activity(
     )
 
 
+# LLM: A v2 committed owner delivery becomes an assistant block; legacy v1
+# notices remain system hints. Schema fields, not prose, select the display role.
+# 函数用途: 去重并发布一条后台回复或旧版后台提示到当前 TUI。
 def _publish_background_notice_row(
     tui_runtime: object,
     row: dict[str, object],
     seen: set[float],
 ) -> None:
     summary = str(row.get("summary") or "").strip()
+    content = str(row.get("content") or summary).strip()
     thread_id = str(row.get("thread_id") or "")
-    if not summary:
+    if not content:
         return
     try:
         key = float(row.get("created_at") or 0.0)
@@ -261,6 +266,11 @@ def _publish_background_notice_row(
     if key in seen:
         return
     seen.add(key)
+    if str(row.get("display_kind") or "") == "assistant_response":
+        publisher = getattr(tui_runtime, "publish_background_response", None)
+        if callable(publisher):
+            publisher(content, thread_id=thread_id)
+        return
     notice_text = f"⚙ 后台更新：{summary}"
     tui_runtime.publish_background_notice(notice_text, thread_id=thread_id)
 

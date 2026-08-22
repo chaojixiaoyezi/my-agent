@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 
@@ -18,6 +20,7 @@ def _run(run_id: str, **overrides: object) -> SimpleNamespace:
         "latest_summary": "",
         "description": "",
         "runner_attempts": 1,
+        "agent_run_workspace_dir": "",
         "created_at": 10.0,
         "updated_at": 20.0,
         "heartbeat_at": 20.0,
@@ -104,8 +107,9 @@ def test_conversation_agent_activity_projects_only_active_roots_direct_children(
     ]
     assert activity.subagents[0]["activity"] == "正在使用 write_file"
     assert activity.subagents[0]["attempts"] == 2
+    assert activity.subagents[1]["activity"] == ""
     assert "goal" not in activity.subagents[0]
-    assert payload["schema_version"] == "conversation_agent_activity.v1"
+    assert payload["schema_version"] == "conversation_agent_activity.v2"
     assert payload["active_task_projection_ok"] is True
     assert payload["subagent_projection_ok"] is True
 
@@ -153,3 +157,74 @@ def test_conversation_agent_activity_marks_active_roots_unknown_on_link_failure(
     assert activity.active_task_projection_ok is False
     assert activity.subagent_projection_ok is True
     assert activity.warnings == ("conversation_task_links_unavailable",)
+
+
+def test_conversation_agent_activity_reads_child_token_and_compact_ledgers(
+    tmp_path: Path,
+) -> None:
+    from agent_py_agent.agent.conversation.agent_activity import (
+        conversation_agent_activity,
+    )
+
+    workspace = tmp_path / "child"
+    tokens = workspace / "memory_archive" / "tokens"
+    tokens.mkdir(parents=True)
+    (tokens / "myagent.json").write_text(
+        json.dumps({"cumulative_tokens": 12_345}),
+        encoding="utf-8",
+    )
+    compact = workspace / "memory_archive" / "compact_applies" / "ledger.jsonl"
+    compact.parent.mkdir(parents=True)
+    compact.write_text('{"generation":1}\n{"generation":2}\n', encoding="utf-8")
+    task = _run("child-usage", agent_run_workspace_dir=str(workspace))
+    store = SimpleNamespace(
+        active_task_links_report=lambda _thread_id: (
+            [SimpleNamespace(task_id="task-live", status="active")],
+            [],
+        )
+    )
+    manager = SimpleNamespace(
+        list_runs_report=lambda: SimpleNamespace(runs=[task], load_errors=[])
+    )
+
+    activity = conversation_agent_activity(
+        SimpleNamespace(subagents=manager),
+        store,
+        "thread-usage",
+    )
+
+    assert activity.subagents[0]["token_count"] == 12_345
+    assert activity.subagents[0]["compact_count"] == 2
+
+
+def test_background_main_activity_sink_projects_real_stage_for_active_task() -> None:
+    from agent_py_agent.agent.conversation.agent_activity import (
+        BackgroundMainActivitySink,
+        conversation_agent_activity,
+    )
+
+    agent = SimpleNamespace(
+        subagents=SimpleNamespace(
+            list_runs_report=lambda: SimpleNamespace(runs=[], load_errors=[])
+        )
+    )
+    store = SimpleNamespace(
+        active_task_links_report=lambda _thread_id: (
+            [SimpleNamespace(task_id="task-live", status="active")],
+            [],
+        )
+    )
+    sink = BackgroundMainActivitySink(
+        agent,
+        thread_id="thread-main",
+        task_id="task-live",
+    )
+    sink.write_thinking("先核对子代理结果，再整合最终页面。")
+
+    activity = conversation_agent_activity(agent, store, "thread-main")
+
+    assert activity.main_activity["phase"] == "thinking"
+    assert activity.main_activity["activity"] == "先核对子代理结果，再整合最终页面。"
+    sink.write_progress({"tool": "run_command", "phase": "started"})
+    activity = conversation_agent_activity(agent, store, "thread-main")
+    assert activity.main_activity["activity"] == "正在使用 run_command"

@@ -438,7 +438,7 @@ def _handle_transcript_right_copy(
 
 
 # LLM: TuiTranscriptView 是 setup 层的控件束，keybindings 通过 control 方法滚动而不是修改 TextArea buffer。
-# 类用途: 汇总共享 provider、transcript Window、overlay/footer controls 和滚动入口。
+# 类用途: 汇总共享 provider、transcript Window、固定 Todo/代理/状态区、overlay/footer controls 和滚动入口。
 @dataclass(frozen=True)
 class TuiTranscriptView:
     provider: TuiFrameProvider
@@ -449,6 +449,8 @@ class TuiTranscriptView:
     transcript_state: TuiTranscriptModeState
     overlay_control: FormattedTextControl
     input_status_control: FormattedTextControl
+    todo_control: FormattedTextControl
+    agent_control: FormattedTextControl
     footer_control: FormattedTextControl
 
     # LLM: scroll 委托 control 并由 setup/app invalidate，view 不持有 Application 反向引用。
@@ -511,7 +513,7 @@ class TuiTranscriptView:
         return self.modal_control if self.transcript_state.snapshot().active else self.control
 
 
-# LLM: view factory 创建共享 provider 后把三类控件绑定同一 frame；不创建第二状态 store。
+# LLM: view factory 创建共享 provider 后把所有固定控件绑定同一 frame；不创建第二状态 store。
 # 函数用途: 构造新的 typed transcript 视图。
 def make_tui_transcript_view(
     state_store: TuiStateStore,
@@ -547,6 +549,12 @@ def make_tui_transcript_view(
     input_status_control = FormattedTextControl(
         lambda: _flatten_lines(provider.frame(provider.last_width).input_status_lines)
     )
+    todo_control = FormattedTextControl(
+        lambda: _flatten_lines(provider.frame(provider.last_width).todo_lines)
+    )
+    agent_control = FormattedTextControl(
+        lambda: _flatten_lines(provider.frame(provider.last_width).agent_lines)
+    )
     def active_control() -> TuiTranscriptControl:
         return modal_control if mode_state.snapshot().active else control
 
@@ -562,6 +570,8 @@ def make_tui_transcript_view(
         mode_state,
         overlay_control,
         input_status_control,
+        todo_control,
+        agent_control,
         footer_control,
     )
 

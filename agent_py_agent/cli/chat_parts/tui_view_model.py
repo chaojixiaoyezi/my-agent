@@ -941,7 +941,26 @@ def _public_metadata(payload: dict[str, Any]) -> dict[str, Any]:
     raw_subagents = payload.get("subagents")
     if isinstance(raw_subagents, list | tuple):
         metadata["subagents"] = _public_subagent_rows(raw_subagents)
+    raw_main = payload.get("main_activity")
+    if isinstance(raw_main, Mapping):
+        metadata["main_activity"] = _public_main_activity(raw_main)
     return metadata
+
+
+_PUBLIC_MAIN_ACTIVITY_FIELDS = frozenset(
+    {"task_id", "phase", "activity", "started_at", "updated_at"}
+)
+
+
+# LLM: Replay/test-injected main activity receives the same scalar whitelist as
+# the live runtime so hidden output or nested payloads cannot enter rendering.
+# 函数用途: 保留固定 main 行真正需要的公开字段。
+def _public_main_activity(value: Mapping[str, object]) -> dict[str, object]:
+    return {
+        str(key): value[key]
+        for key in _PUBLIC_MAIN_ACTIVITY_FIELDS
+        if key in value and not isinstance(value[key], dict | list | tuple | set)
+    }
 
 
 _PUBLIC_SUBAGENT_FIELDS = frozenset(
@@ -956,6 +975,8 @@ _PUBLIC_SUBAGENT_FIELDS = frozenset(
         "activity",
         "current_tool",
         "attempts",
+        "token_count",
+        "compact_count",
         "created_at",
         "updated_at",
         "heartbeat_at",

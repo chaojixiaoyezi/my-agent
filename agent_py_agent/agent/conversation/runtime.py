@@ -16,6 +16,7 @@ from ..concurrency.interrupt import register_interruptible
 from ..runtime_errors import compact_error_message
 from ..settings.runtime_guard_config import runtime_guard_int
 from ..subagents.role_templates import active_model_subagent_tools
+from .agent_activity import BackgroundMainActivitySink
 from .authority import (
     CONVERSATION_BACKGROUND_EVENT_REASON_ATTR,
     CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR,
@@ -907,31 +908,12 @@ class BackgroundMainAgentRuntime:
             self.store,
             request,
         )
-        result = self.agent.run(
-            background_prompt(
-                request.reason,
-                goal=resolved_goal_context.goal,
-                goal_subagent_phase=resolved_goal_context.subagent_phase,
-                wake_signal=request.wake_signal,
-                proactive_delivery_available=proactive_delivery_available,
-                transcript_delivery_available=transcript_delivery_available,
-            ),
-            params=_run_params(
-                thread.thread_id,
-                request,
-                self.agent,
-                goal_context=resolved_goal_context,
-                proactive_delivery_available=proactive_delivery_available,
-            ),
-            inject=[
-                context_markdown(
-                    agent=self.agent,
-                    store=self.store,
-                    thread=thread,
-                    request=request,
-                    proactive_delivery_available=proactive_delivery_available,
-                )
-            ],
+        result = _invoke_background_main_agent(
+            self,
+            thread,
+            request,
+            resolved_goal_context,
+            (proactive_delivery_available, transcript_delivery_available),
         )
         calls = [
             item
@@ -1057,6 +1039,57 @@ class BackgroundMainAgentRuntime:
             message_metadata=message_metadata,
         )
         return committed_content, delivery_status
+
+
+# LLM: This helper owns the one background model invocation and its volatile
+# activity sink. It must not commit transcript, delivery, or lifecycle state.
+# 函数用途: 调用一次后台主代理，并同步更新 TUI/Web 所见的 main 活动阶段。
+def _invoke_background_main_agent(
+    runtime: BackgroundMainAgentRuntime,
+    thread: ConversationThread,
+    request: BackgroundRunRequest,
+    goal_context: GoalRuntimeContext,
+    delivery_availability: tuple[bool | None, bool | None],
+) -> object:
+    proactive_delivery_available, transcript_delivery_available = delivery_availability
+    activity_sink = BackgroundMainActivitySink(
+        runtime.agent,
+        thread_id=thread.thread_id,
+        task_id=request.task_id,
+    )
+    try:
+        result = runtime.agent.run(
+            background_prompt(
+                request.reason,
+                goal=goal_context.goal,
+                goal_subagent_phase=goal_context.subagent_phase,
+                wake_signal=request.wake_signal,
+                proactive_delivery_available=proactive_delivery_available,
+                transcript_delivery_available=transcript_delivery_available,
+            ),
+            params=_run_params(
+                thread.thread_id,
+                request,
+                runtime.agent,
+                goal_context=goal_context,
+                proactive_delivery_available=proactive_delivery_available,
+            ),
+            inject=[
+                context_markdown(
+                    agent=runtime.agent,
+                    store=runtime.store,
+                    thread=thread,
+                    request=request,
+                    proactive_delivery_available=proactive_delivery_available,
+                )
+            ],
+            on_chunk=activity_sink,
+        )
+    except Exception:
+        activity_sink.fail()
+        raise
+    activity_sink.finish()
+    return result
 
 
 def _commit_background_response(
@@ -3234,27 +3267,31 @@ def _skip_pending_wake_signal(
     return False
 
 
+# LLM: This projection records only user-deliverable background owner replies.
+# It carries the exact projected content but never becomes delivery or completion authority.
+# 函数用途: 把后台主代理已提交给用户边界的回复写成 TUI 可消费的普通助手消息事件。
 def _record_background_notice(store: object, report: BackgroundMainAgentReport) -> None:
-    """后台主代理轮完成 → 写一条 notices 记录（TUI 后台完成监视用）。
-
-    写入失败只记日志不抛（notices 是显示增强，绝不能影响后台轮主流程）。
-    """
+    """后台主代理轮完成 → 写一条 notices 记录（TUI 后台完成监视用）。"""
     import json as _json
 
     root = getattr(store, "root", None)
-    if not root:
+    delivery_status = str(report.delivery_status or "").strip().lower()
+    content = str(report.response or "").strip()
+    if not root or delivery_status not in {"sent", "not_applicable"} or not content:
         return
     try:
         notices_dir = Path(root) / "notices"
         notices_dir.mkdir(parents=True, exist_ok=True)
         line = _json.dumps(
             {
-                "schema_version": "background_notice.v1",
+                "schema_version": "background_notice.v2",
+                "display_kind": "assistant_response",
                 "thread_id": report.thread_id,
                 "reason": str(report.reason or ""),
-                "summary": str(report.response or "")[:500],
+                "content": content,
+                "summary": content[:500],
                 "created_at": report.created_at,
-                "delivery_status": str(report.delivery_status or ""),
+                "delivery_status": delivery_status,
             },
             ensure_ascii=False,
         )

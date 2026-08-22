@@ -189,9 +189,9 @@ def _wire_permission_feedback_area(area: Any, runtime: TuiRuntime) -> None:
     area.buffer.on_text_changed += on_feedback_changed
 
 
-# LLM: input status Window 只展示 typed pending steer、follow-up queue、context usage、interaction stash 和直属子代理活动投影。
+# LLM: input status Window 只展示 typed pending steer、follow-up queue、context usage 和 interaction stash。
 # LLM: 零行时不占高度，也不能改变 transcript anchor。
-# 函数用途: 创建输入框上方的待插入消息、上下文、草稿与直属子代理状态区域。
+# 函数用途: 创建输入框上方的待插入消息、上下文与草稿状态区域。
 def _make_input_status_window(view: TuiTranscriptView) -> Any:
     from prompt_toolkit.layout import Window
 
@@ -200,6 +200,32 @@ def _make_input_status_window(view: TuiTranscriptView) -> Any:
         height=lambda: len(
             view.provider.frame(view.provider.last_width).input_status_lines
         ),
+        dont_extend_height=True,
+    )
+
+
+# LLM: Todo has its own fixed region above the composer, matching 终端交互's
+# standalone TaskListV2 placement; it never enters scrollback or the input buffer.
+# 函数用途: 创建输入框上方的固定任务清单区域，空清单不占高度。
+def _make_todo_window(view: TuiTranscriptView) -> Any:
+    from prompt_toolkit.layout import Window
+
+    return Window(
+        content=view.todo_control,
+        height=lambda: len(view.provider.frame(view.provider.last_width).todo_lines),
+        dont_extend_height=True,
+    )
+
+
+# LLM: The coordinator panel is a separate fixed region below the prompt footer,
+# mirroring 终端交互's MainLine/AgentLine placement without becoming transcript.
+# 函数用途: 创建输入框下方的 main 与直属子代理状态区域，任务结束后原位收起。
+def _make_agent_window(view: TuiTranscriptView) -> Any:
+    from prompt_toolkit.layout import Window
+
+    return Window(
+        content=view.agent_control,
+        height=lambda: len(view.provider.frame(view.provider.last_width).agent_lines),
         dont_extend_height=True,
     )
 
@@ -481,6 +507,10 @@ def _make_normal_tui_body(parts: _TuiAppParts) -> Any:
                 filter=~permission_active,
             ),
             ConditionalContainer(
+                content=_make_todo_window(transcript_view),
+                filter=~permission_active,
+            ),
+            ConditionalContainer(
                 content=_make_input_spacer(),
                 filter=~permission_active,
             ),
@@ -514,6 +544,14 @@ def _make_normal_tui_body(parts: _TuiAppParts) -> Any:
             ),
             ConditionalContainer(
                 content=_make_footer_window(transcript_view),
+                filter=(
+                    ~permission_active
+                    & ~has_completions
+                    & ~parts.history_search_active
+                ),
+            ),
+            ConditionalContainer(
+                content=_make_agent_window(transcript_view),
                 filter=(
                     ~permission_active
                     & ~has_completions

@@ -3,7 +3,7 @@
 真机实锤（s2-fast）：子代理完成后父代理在后台自动续跑汇总，但 TUI 无事件
 驱动不刷新——用户看不到"后台已自动汇总"。修复：
 1. gateway 在后台轮 report 产生后写 conversations/notices/{thread_id}.notices.jsonl
-2. TUI 监视线程周期读取并 publish_background_notice（system_message 显示）
+2. TUI 监视线程周期读取并以普通 assistant 消息显示已提交的后台最终回复
 """
 
 from __future__ import annotations
@@ -35,7 +35,30 @@ def test_gateway_records_background_notice(tmp_path: Path) -> None:
     assert rows[0]["thread_id"] == "thread-bg-1"
     assert rows[0]["reason"] == "subagent_runner_finished"
     assert "子代理" in rows[0]["summary"]
-    assert rows[0]["schema_version"] == "background_notice.v1"
+    assert rows[0]["schema_version"] == "background_notice.v2"
+    assert rows[0]["display_kind"] == "assistant_response"
+    assert rows[0]["content"] == report.response
+
+
+def test_gateway_skips_internal_or_empty_background_notice(tmp_path: Path) -> None:
+    """被 delivery contract 抑制或没有正文的后台轮不进入用户 transcript。"""
+    from agent_py_agent.agent.conversation.runtime import _record_background_notice
+
+    store_root = tmp_path / "conversations"
+    store = SimpleNamespace(root=store_root)
+    for delivery_status, response in (("suppressed", "内部整合"), ("sent", "")):
+        _record_background_notice(
+            store,
+            SimpleNamespace(
+                thread_id="thread-bg-hidden",
+                reason="subagent_runner_finished",
+                response=response,
+                created_at=1787200000.0,
+                delivery_status=delivery_status,
+            ),
+        )
+
+    assert not (store_root / "notices").exists()
 
 
 def test_gateway_notice_write_failure_is_silent(tmp_path: Path) -> None:
@@ -54,7 +77,7 @@ def test_gateway_notice_write_failure_is_silent(tmp_path: Path) -> None:
 
 
 def test_tui_consumes_background_notices_and_publishes(tmp_path: Path) -> None:
-    """TUI 监视：notices 新行 → publish_background_notice 被调 + 去重。"""
+    """TUI 监视：v2 notices 新行 → 普通助手回复 + 去重。"""
     from agent_py_agent.cli.chat_parts.tui_threading import _consume_background_notices
 
     store_root = tmp_path / "conversations"
@@ -64,9 +87,11 @@ def test_tui_consumes_background_notices_and_publishes(tmp_path: Path) -> None:
     (notices_dir / f"{thread_id}.notices.jsonl").write_text(
         json.dumps(
             {
-                "schema_version": "background_notice.v1",
+                "schema_version": "background_notice.v2",
+                "display_kind": "assistant_response",
                 "thread_id": thread_id,
                 "reason": "subagent_runner_finished",
+                "content": "子代理已完成，后台自动汇总完成。",
                 "summary": "子代理已完成，后台自动汇总完成。",
                 "created_at": 100.0,
             },
@@ -85,7 +110,7 @@ def test_tui_consumes_background_notices_and_publishes(tmp_path: Path) -> None:
             return SimpleNamespace(thread_id=thread_id), None
 
     class _Runtime:
-        def publish_background_notice(self, text, *, thread_id=""):
+        def publish_background_response(self, text, *, thread_id=""):
             published.append(text)
 
     class _Agent:
@@ -94,8 +119,7 @@ def test_tui_consumes_background_notices_and_publishes(tmp_path: Path) -> None:
     seen: set[float] = set()
     _consume_background_notices(_Agent(), "session-1", _Runtime(), [None], seen)
     assert len(published) == 1
-    assert "后台更新" in published[0]
-    assert "子代理已完成" in published[0]
+    assert published[0] == "子代理已完成，后台自动汇总完成。"
     # 第二次消费同文件：已 seen，不重复发布
     _consume_background_notices(_Agent(), "session-1", _Runtime(), [None], seen)
     assert len(published) == 1
@@ -137,7 +161,7 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
                 "cursor": 200.0,
                 "active_task_count": 2,
                 "agent_activity": {
-                    "schema_version": "conversation_agent_activity.v1",
+                    "schema_version": "conversation_agent_activity.v2",
                     "active_task_count": 2,
                     "active_task_projection_ok": True,
                     "subagents": [
@@ -154,9 +178,11 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
                 },
                 "notices": [
                     {
-                        "schema_version": "background_notice.v1",
+                        "schema_version": "background_notice.v2",
+                        "display_kind": "assistant_response",
                         "thread_id": "thread-http-1",
                         "reason": "subagent_runner_finished",
+                        "content": "HTTP 后台完成通知测试。",
                         "summary": "HTTP 后台完成通知测试。",
                         "created_at": 150.0,
                     }
@@ -168,16 +194,17 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
             self,
             count,
             *,
+            main_activity,
             subagents,
             hidden_subagent_count,
             projection_ok,
         ):
             published.append(
-                f"active:{count}:{subagents[0]['run_id']}:{hidden_subagent_count}:{projection_ok}"
+                f"active:{count}:{subagents[0]['run_id']}:{hidden_subagent_count}:{projection_ok}:{bool(main_activity)}"
             )
             return True
 
-        def publish_background_notice(self, text, *, thread_id=""):
+        def publish_background_response(self, text, *, thread_id=""):
             published.append(text)
 
     seen: set[float] = set()
@@ -185,8 +212,8 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
     assert len(fetched) == 1
     assert fetched[0]["after"] == 0.0
     assert len(published) == 2
-    assert published[0] == "active:2:child-1:0:True"
-    assert "后台更新" in published[1]
+    assert published[0] == "active:2:child-1:0:True:False"
+    assert published[1] == "HTTP 后台完成通知测试。"
     # 游标推进后不重复
     _consume_background_notices(_Agent(), "session-http", _Runtime(), [None], seen)
     assert fetched[1]["after"] == 150.0
@@ -254,15 +281,15 @@ def test_gateway_notice_snapshot_reports_canonical_active_task_count(tmp_path: P
 
 
 def test_runtime_keeps_multiple_background_notices_as_distinct_blocks() -> None:
-    """同一 thread 连续后台更新不能因复用稳定 block id 而丢掉后者。"""
+    """同一 thread 连续后台回复不能因复用稳定 block id 而丢掉后者。"""
     from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
 
     runtime = TuiRuntime("session-notices")
-    runtime.publish_background_notice("第一条", thread_id="thread-1")
-    runtime.publish_background_notice("第二条", thread_id="thread-1")
+    runtime.publish_background_response("第一条", thread_id="thread-1")
+    runtime.publish_background_response("第二条", thread_id="thread-1")
 
     snapshot = runtime.store.snapshot()
-    notices = [block for block in snapshot.stable_blocks if block.role == "system"]
+    notices = [block for block in snapshot.stable_blocks if block.role == "assistant"]
     assert [block.text for block in notices] == ["第一条", "第二条"]
     assert notices[0].block_id != notices[1].block_id
 
@@ -283,7 +310,9 @@ def test_runtime_background_activity_is_one_removable_animated_block() -> None:
             "role": "worker",
             "status": "RUNNING",
             "activity": "正在使用 write_file",
-            "attempts": 1,
+            "attempts": 2,
+            "token_count": 12345,
+            "compact_count": 1,
             "created_at": 100.0,
             "ended_at": 0.0,
         },
@@ -294,6 +323,8 @@ def test_runtime_background_activity_is_one_removable_animated_block() -> None:
             "status": "DONE",
             "activity": "模型已生成回复",
             "attempts": 1,
+            "token_count": 6789,
+            "compact_count": 0,
             "created_at": 100.0,
             "ended_at": 145.0,
         },
@@ -316,12 +347,15 @@ def test_runtime_background_activity_is_one_removable_animated_block() -> None:
         ),
     )
     transcript = "\n".join(fragments_text(line) for line in frame.transcript_lines)
-    rendered = "\n".join(fragments_text(line) for line in frame.input_status_lines)
+    rendered = "\n".join(fragments_text(line) for line in frame.agent_lines)
     assert "Working" not in transcript
-    assert "Working" in rendered
-    assert "子代理 2 个" in rendered
-    assert "game-engine · 运行中 · 正在使用 write_file · 0:50 · 尝试 1" in rendered
-    assert "level-design · 已完成 · 模型已生成回复 · 0:45 · 尝试 1" in rendered
+    assert frame.input_status_lines == ()
+    assert "main · 等待 1 个子代理 · 0:00" in rendered
+    assert "game-engine · 运行中 · 正在使用 write_file · 0:50" in rendered
+    assert "↓ 12.3k tokens · compact 1 · 重试 1 次" in rendered
+    assert "level-design · 已完成 · 0:45 · ↓ 6.8k tokens · compact 0" in rendered
+    assert "模型已生成回复" not in rendered
+    assert "尝试 1" not in rendered
     assert "/stop to interrupt" in fragments_text(frame.footer)
 
     changed_children = [dict(children[0], activity="正在使用 run_command"), children[1]]

@@ -63,6 +63,9 @@ def seed_dispatch_task_progress(agent: object, tasks: list) -> dict[str, Any] | 
         return None
 
 
+# LLM: The seed writes one canonical progress ledger and returns a bounded
+# structured display snapshot; the returned items do not become a second ledger.
+# 函数用途: 将新建子代理登记为进度项，并把同一次写入结果回给工具/TUI 展示。
 def _seed(agent: object, tasks: list) -> dict[str, Any] | None:
     root = _progress_root(agent)
     run_id = _current_run_id(agent)
@@ -77,8 +80,21 @@ def _seed(agent: object, tasks: list) -> dict[str, Any] | None:
     items = [item for item in items if item["id"] and item["id"] not in existing_ids]
     if not items:
         return None
-    write_task_progress(root, run_id, {"items": items, "summary": f"已派 {len(tasks)} 个子代理并登记为待办"})
-    return {"run_id": run_id, "seeded": len(items)}
+    written = write_task_progress(
+        root,
+        run_id,
+        {"items": items, "summary": f"已派 {len(tasks)} 个子代理并登记为待办"},
+    )
+    visible_items = [
+        {
+            "id": str(item.get("id") or ""),
+            "title": str(item.get("title") or ""),
+            "status": str(item.get("status") or "pending"),
+        }
+        for item in written.get("items", [])[:64]
+        if isinstance(item, dict)
+    ]
+    return {"run_id": run_id, "seeded": len(items), "items": visible_items}
 
 
 def dispatch_coverage_binding(agent: object, tasks: list) -> dict[str, Any] | None:

@@ -59,12 +59,50 @@ def test_seed_creates_only_real_subagent_items(tmp_path):
     seed = seed_dispatch_task_progress(
         _agent(tmp_path), [_task("subagent-aa11", "建后端API"), _task("subagent-bb22", "建前端页面")]
     )
-    assert seed == {"run_id": "run-seed-1", "seeded": 2}
+    assert seed == {
+        "run_id": "run-seed-1",
+        "seeded": 2,
+        "items": [
+            {
+                "id": "subagent-aa11",
+                "title": "子代理[ent-aa11]:建后端API",
+                "status": "in_progress",
+            },
+            {
+                "id": "subagent-bb22",
+                "title": "子代理[ent-bb22]:建前端页面",
+                "status": "in_progress",
+            },
+        ],
+    }
     progress = read_task_progress(tmp_path, "run-seed-1")
     by_id = {item["id"]: item for item in progress["items"]}
     assert by_id["subagent-aa11"]["status"] == "in_progress"
     assert "建后端API" in by_id["subagent-aa11"]["title"]
     assert set(by_id) == {"subagent-aa11", "subagent-bb22"}
+
+
+def test_create_subagents_seed_exposes_todo_snapshot_to_tui() -> None:
+    import json
+
+    from agent.agent_core.tool_loop.round_execution import (
+        _task_progress_items_from_output,
+    )
+
+    output = {
+        "created": 1,
+        "task_progress_seed": {
+            "run_id": "run-main",
+            "seeded": 1,
+            "items": [
+                {"id": "child-1", "title": "实现游戏引擎", "status": "in_progress"}
+            ],
+        },
+    }
+
+    assert _task_progress_items_from_output(json.dumps(output, ensure_ascii=False)) == [
+        {"id": "child-1", "title": "实现游戏引擎", "status": "in_progress"}
+    ]
 
 
 def test_seed_idempotent_on_same_ids(tmp_path):

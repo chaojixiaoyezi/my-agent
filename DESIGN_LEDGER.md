@@ -866,3 +866,22 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 部署证据：唯一 Gateway PID `1918200` 同时持有 8420 与 v2 advisory lock；裸 TUI 在 1 秒采样点显示
   MiniMax-M2.7 输入框。监督首轮复活 4、按父会话取消 21、回收失联 RUNNING 5，随后 3 条 RUNNING
   自然完成；两次显式 status 返回同一近期计数且没有恢复提示。
+
+## 2026-08-22 固定 Todo/代理区与后台主代理可见性【状态：代码和定向回归完成；`.7` 原样 TUI 待验收】
+
+- 布局直接对照 终端交互 `REPL.tsx`、`TaskListV2.tsx`、`CoordinatorAgentStatus.tsx`：Todo 是输入框上方的
+  固定区域，main/直属 child 是输入框下方的固定区域，二者都不写入 transcript，也不随历史滚动消失。
+  `create_subagents` 的结构化 seed 立即成为当前 canonical Todo 快照；child 的 exact run id 只用于显示层
+  合并 DONE/失败/取消标记，不能反向修改任务账本。
+- 生命周期直接对照 会话运行时 `agent/status.rs`、`agent/control.rs` 与 `multi_agents/wait.rs`：只读 typed
+  status/notification，不解析“模型已生成回复”“已经完成”等自然语言。终态 child 清除旧 activity；首次
+  attempt 隐藏，只有 `attempts > 1` 才显示 `重试 N 次`。
+- child token 和 Compact 次数都从同一 run workspace 的 canonical token/compact ledger 只读投影；TUI
+  不自行估算、不持久化副本。后台 main 的最近 thinking/tool/retry/finalizing 是 Gateway 进程内有界、易失、
+  纯展示快照，不参与完成、派工、重试、权限或恢复。
+- 后台主代理的可交付最终正文以普通 `assistant_completed` 进入 transcript，不再伪装成灰色系统通知；被
+  delivery contract 抑制或没有正文的内部轮不写用户通知。代理区删除第二个 `Working` 标题，只保留一行
+  `main` 和 child 行，避免两个“工作中”状态源。
+- `.7` 正式验收必须使用唯一 Gateway 和 `MiniMax-M2.7`，依次执行 `TESTS.md` 的四个原样重型 prompt。
+  每次启动、切换或输入 TUI 之前必须先向用户公开 tmux session 名称与完整 attach 命令；测试者只观察，
+  不旁路补代码或向被测代理发送技术推动消息。

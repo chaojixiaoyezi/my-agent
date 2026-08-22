@@ -1208,8 +1208,10 @@ def _emit_tool_progress(event: ToolProgressEvent) -> None:
         return
 
 
+# LLM: A successful tool may explicitly return a canonical task-progress
+# snapshot either directly or under task_progress_seed; no prose is parsed.
+# 函数用途: 从 task_progress 或 create_subagents 的结构化输出提取清单，供 TUI 固定 Todo 区展示。
 def _task_progress_items_from_output(output: object) -> list[dict[str, object]] | None:
-    """从 task_progress 工具 output JSON 提取 items 列表(供 TUI todo 面板渲染)。"""
     text = str(output or "").strip()
     if not text:
         return None
@@ -1218,6 +1220,9 @@ def _task_progress_items_from_output(output: object) -> list[dict[str, object]] 
     except (TypeError, ValueError):
         return None
     items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(items, list) and isinstance(payload, dict):
+        seed = payload.get("task_progress_seed")
+        items = seed.get("items") if isinstance(seed, dict) else None
     if not isinstance(items, list):
         return None
     clean: list[dict[str, object]] = []
@@ -1234,6 +1239,9 @@ def _task_progress_items_from_output(output: object) -> list[dict[str, object]] 
     return clean if clean else None
 
 
+# LLM: The event projection contains typed public progress only; canonical Todo
+# rows may be copied from an explicit successful tool result, never from prose.
+# 函数用途: 把一条工具生命周期事件整理成 TUI 可消费的结构化进度。
 def _structured_tool_progress(
     event: ToolProgressEvent,
     tool_name: str,
@@ -1268,8 +1276,8 @@ def _structured_tool_progress(
         display = _public_progress_display(event, raw_display)
         if display:
             payload["display"] = display
-        # task_progress 工具: 附加 items 快照, TUI 渲染 todo 面板(□/☑/●)
-        if tool_name == "task_progress" and bool(event.result.ok):
+        # task_progress/create_subagents 都可显式附带同一本 canonical 清单快照。
+        if bool(event.result.ok):
             items = _task_progress_items_from_output(event.result.output)
             if items is not None:
                 payload["task_progress_items"] = items

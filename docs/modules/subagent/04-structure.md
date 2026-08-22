@@ -6,6 +6,16 @@
 `task_node_closeout` 副本。canonical task/result 是唯一结果事实源；父代理通过结构化 status、blockers、
 findings、artifact refs 和 result payload 阅读子代理工作，再由模型向用户汇总。
 
+## 2026-08-22 TUI/Web 共用活动投影
+
+- `conversation_agent_activity.v2` 是 owner/thread 认证后的只读展示 schema：main 只含 task id、phase、
+  activity 和时间；直属 child 只含 run lineage、名称/角色、typed status、活动、attempt、token/Compact 和
+  时间。goal、提示词、工具输出、路径、权限和 secret 均不进入该 schema。
+- token 与 Compact 计数复用 `subagents/services/control_plane_projection.py` 的公开 ledger reader，控制面、
+  TUI 和后续 Web 不得各算一套。缺失/损坏账本按空展示处理，不改变 canonical run 状态。
+- fixed Todo 和 fixed agent panel 都是 reducer snapshot 的派生 view。Todo 的 exact child 标记、终态活动抑制、
+  首次 attempt 隐藏和重试文案都属于展示规则，不能成为完成、恢复或验收信号。
+
 ## Memory Candidate 接口
 
 - `SubAgentManagerInitParams.candidate_service` 只接收当前 owner 已创建的 CandidateService，不在

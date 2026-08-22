@@ -6,7 +6,7 @@ from __future__ import annotations
 import hashlib
 import math
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -272,13 +272,15 @@ def tui_render_context_key(
     )
 
 
-# LLM: TuiRenderFrame 分离滚动 transcript、固定 permission overlay 和 footer，布局层不得从行文案反推区域。
+# LLM: TuiRenderFrame 分离滚动 transcript、permission、输入状态、Todo、代理面板和 footer，布局层不得从行文案反推区域。
 # 类用途: 返回一次可直接交给 prompt_toolkit controls 的不可变画面。
 @dataclass(frozen=True)
 class TuiRenderFrame:
     transcript_lines: tuple[FormattedLine, ...]
     overlay_lines: tuple[FormattedLine, ...]
     input_status_lines: tuple[FormattedLine, ...]
+    todo_lines: tuple[FormattedLine, ...]
+    agent_lines: tuple[FormattedLine, ...]
     footer: FormattedLine
 
 
@@ -371,9 +373,14 @@ def render_tui_snapshot(
         if block.role == "background"
         and block.phase not in TERMINAL_RENDER_PHASES
     }
+    fixed_todo_ids = {
+        block.block_id
+        for block in snapshot.active_blocks
+        if block.role == "todo"
+    }
     active_activity_ids = {
         block.block_id for block in active_activity
-    } | fixed_background_ids
+    } | fixed_background_ids | fixed_todo_ids
     visible_activity = _visible_activity_blocks(snapshot, active_activity)
     blocks = sorted(
         (
@@ -398,6 +405,8 @@ def render_tui_snapshot(
             tuple(lines),
             tuple(overlay),
             _render_input_status(snapshot, context),
+            _render_fixed_todo(snapshot, context),
+            _render_fixed_agent_panel(snapshot, context),
             _render_footer(snapshot, context),
         )
     )
@@ -406,7 +415,7 @@ def render_tui_snapshot(
 # LLM: This is the final TUI display-security chokepoint. It must preserve style and mouse
 # handlers byte-for-byte while removing terminal controls from every visible text fragment.
 # The operation is idempotent so transcript/search decorators can safely pass through it again.
-# 函数用途: 在画面交给 prompt_toolkit 前统一净化 transcript、覆盖层、输入状态和 footer，确保
+# 函数用途: 在画面交给 prompt_toolkit 前统一净化 transcript、覆盖层、输入状态、Todo、代理面板和 footer，确保
 # provider、工具、路径和搜索内容都不能向宿主终端注入控制序列。
 def sanitize_tui_render_frame(frame: TuiRenderFrame) -> TuiRenderFrame:
     return TuiRenderFrame(
@@ -415,6 +424,8 @@ def sanitize_tui_render_frame(frame: TuiRenderFrame) -> TuiRenderFrame:
         input_status_lines=tuple(
             _sanitize_formatted_line(line) for line in frame.input_status_lines
         ),
+        todo_lines=tuple(_sanitize_formatted_line(line) for line in frame.todo_lines),
+        agent_lines=tuple(_sanitize_formatted_line(line) for line in frame.agent_lines),
         footer=_sanitize_formatted_line(frame.footer),
     )
 
@@ -493,28 +504,34 @@ def _render_connection(
     ),)
 
 
-# LLM: The header count and child rows come only from the canonical
-# conversation-agent activity projection. This fixed, removable panel never
-# becomes an assistant claim or permanent transcript entry.
-# 函数用途: 在输入框附近显示 终端交互/模型助手 Code 风格的 Working 标题和直属子代理状态行。
+# LLM: The main row and child rows come only from the canonical conversation
+# activity projection. The panel is removable display state, never a completion claim.
+# 函数用途: 在输入框下方显示 终端交互 风格的常驻 main 行和直属子代理状态行。
 def _render_background_activity(
     block: TuiBlock,
     context: TuiRenderContext,
 ) -> tuple[FormattedLine, ...]:
-    glyph = SPINNER_GLYPHS[context.spinner_index % len(SPINNER_GLYPHS)]
-    count = max(0, int(block.metadata.get("active_task_count") or 0))
-    started_at = float(block.metadata.get("started_at") or 0.0)
+    main_activity = (
+        dict(block.metadata.get("main_activity"))
+        if isinstance(block.metadata.get("main_activity"), dict)
+        else {}
+    )
+    started_at = float(
+        main_activity.get("started_at") or block.metadata.get("started_at") or 0.0
+    )
     elapsed = max(0, int(context.now - started_at)) if started_at and context.now else 0
     rows = _subagent_activity_rows(block.metadata.get("subagents"))
     hidden = max(0, int(block.metadata.get("hidden_subagent_count") or 0))
-    total = len(rows) + hidden
-    header_detail = _background_header_detail(count, rows, total, elapsed)
+    main_label = str(main_activity.get("activity") or "").strip() or _main_agent_activity_label(rows)
+    main_phase = str(main_activity.get("phase") or "").strip().lower()
+    main_style = "class:tui-error" if main_phase == "failed" else "class:tui-subagent-running"
     lines = list(
         wrap_fragments(
             (
-                ("class:tui-spinner-highlight", glyph + " "),
-                *_animated_spinner_word("Working", context.spinner_index),
-                ("class:tui-thinking", header_detail),
+                (main_style, "● "),
+                ("class:tui-strong", "main"),
+                ("class:tui-muted", f" · {main_label}"),
+                ("class:tui-muted", f" · {_format_activity_duration(elapsed)}"),
             ),
             width=context.width,
             continuation_prefix=(("class:tui-thinking", "  "),),
@@ -545,35 +562,21 @@ def _subagent_activity_rows(value: object) -> list[dict[str, object]]:
     return [dict(item) for item in value[:64] if isinstance(item, dict)]
 
 
-# LLM: Header aggregates canonical statuses for display only. It cannot change
-# task completion, retry, or wake behavior.
-# 函数用途: 生成 Working 标题后的主任务、子代理数量和耗时摘要。
-def _background_header_detail(
-    active_task_count: int,
-    rows: list[dict[str, object]],
-    total: int,
-    elapsed: int,
-) -> str:
-    duration = _format_activity_duration(elapsed)
-    if not rows and total <= 0:
-        return f" · 后台任务 {active_task_count} 个 · {duration}"
+# LLM: This label is a view-only consequence of exact child statuses. It does
+# not decide whether the main turn may close or whether a child is acceptable.
+# 函数用途: 根据直属子代理状态说明主代理当前是在等待下级还是整理结果。
+def _main_agent_activity_label(rows: list[dict[str, object]]) -> str:
+    if not rows:
+        return "运行中"
     running = sum(
         1
         for row in rows
-        if str(row.get("status") or "").upper() in {"PLANNING", "PENDING", "RUNNING"}
+        if str(row.get("status") or "").upper()
+        in {"PLANNING", "PENDING", "RUNNING", "BLOCKED", "PAUSED"}
     )
-    done = sum(1 for row in rows if str(row.get("status") or "").upper() == "DONE")
-    blocked = sum(
-        1
-        for row in rows
-        if str(row.get("status") or "").upper() in {"BLOCKED", "PAUSED"}
-    )
-    parts = [f"子代理 {total} 个", f"{running} 进行中"]
-    if done:
-        parts.append(f"{done} 完成")
-    if blocked:
-        parts.append(f"{blocked} 待处理")
-    return " · " + " · ".join((*parts, duration))
+    if running:
+        return f"等待 {running} 个子代理"
+    return "整理结果中"
 
 
 # LLM: A child row renders only canonical status plus bounded display context.
@@ -586,9 +589,15 @@ def _render_subagent_activity_row(
     status = str(row.get("status") or "").strip().upper()
     icon, label, style = _subagent_status_display(status)
     name = str(row.get("name") or row.get("role") or "subagent").strip() or "subagent"
-    activity = str(row.get("activity") or "").strip()
+    activity = (
+        str(row.get("activity") or "").strip()
+        if status in {"PLANNING", "PENDING", "RUNNING", "BLOCKED", "PAUSED"}
+        else ""
+    )
     elapsed = _subagent_elapsed_seconds(row, context.now)
     attempts = max(0, _safe_render_int(row.get("attempts")))
+    token_count = max(0, _safe_render_int(row.get("token_count")))
+    compact_count = max(0, _safe_render_int(row.get("compact_count")))
     fragments: list[tuple[str, str]] = [
         (style, f"{icon} "),
         ("class:tui-strong", name),
@@ -597,8 +606,12 @@ def _render_subagent_activity_row(
     if activity:
         fragments.append(("class:tui-muted", f" · {activity}"))
     fragments.append(("class:tui-muted", f" · {_format_activity_duration(elapsed)}"))
-    if attempts:
-        fragments.append(("class:tui-muted", f" · 尝试 {attempts}"))
+    fragments.append(
+        ("class:tui-muted", f" · ↓ {_format_compact_number(token_count)} tokens")
+    )
+    fragments.append(("class:tui-muted", f" · compact {compact_count}"))
+    if attempts > 1:
+        fragments.append(("class:tui-muted", f" · 重试 {attempts - 1} 次"))
     return wrap_fragments(
         tuple(fragments),
         width=context.width,
@@ -1621,10 +1634,9 @@ def _render_permission(
     return tuple(lines)
 
 
-# LLM: Input status owns fixed pending/queue receipts, typed context metrics,
-# stash state, and the removable direct-subagent activity panel. None may enter
-# the input Document, scrollable transcript, history, or model prompt.
-# 函数用途: 在输入框上方固定显示待插入消息、上下文、草稿和直属子代理实时状态。
+# LLM: Input status owns only pending/queue receipts, typed context metrics and
+# stash state. Todo and agent panels have separate fixed layout regions.
+# 函数用途: 在输入框上方固定显示待插入消息、上下文和草稿状态。
 def _render_input_status(
     snapshot: TuiViewSnapshot,
     context: TuiRenderContext,
@@ -1645,6 +1657,22 @@ def _render_input_status(
                 continuation_prefix=(("class:tui-muted", "    "),),
             )
         )
+    return tuple(lines)
+
+
+# LLM: Todo is selected from the one reducer-owned task_progress block and may
+# overlay exact direct-child statuses for display; it never writes or closes the ledger.
+# 函数用途: 生成输入框上方的固定任务清单，并在对应子代理结束时立即显示勾选、阻塞或跳过。
+def _render_fixed_todo(
+    snapshot: TuiViewSnapshot,
+    context: TuiRenderContext,
+) -> tuple[FormattedLine, ...]:
+    todo = next(
+        (block for block in reversed(snapshot.active_blocks) if block.role == "todo"),
+        None,
+    )
+    if todo is None:
+        return ()
     background = next(
         (
             block
@@ -1654,9 +1682,67 @@ def _render_input_status(
         ),
         None,
     )
-    if background is not None:
-        lines.extend(_render_background_activity(background, context))
-    return tuple(lines)
+    if background is None:
+        return _render_todo(todo, context)
+    statuses = {
+        str(row.get("run_id") or ""): str(row.get("status") or "").upper()
+        for row in _subagent_activity_rows(background.metadata.get("subagents"))
+        if str(row.get("run_id") or "")
+    }
+    items = todo.metadata.get("items")
+    if not isinstance(items, list) or not statuses:
+        return _render_todo(todo, context)
+    projected = [
+        _todo_item_with_child_status(item, statuses)
+        if isinstance(item, dict)
+        else item
+        for item in items
+    ]
+    return _render_todo(
+        replace(todo, metadata={**todo.metadata, "items": projected}),
+        context,
+    )
+
+
+# LLM: This mapping uses an exact task-progress item id to child run id join and
+# canonical child status only; titles, goals, summaries and output never affect it.
+# 函数用途: 把派工清单中的子代理项投影为完成、阻塞、跳过或进行中图标。
+def _todo_item_with_child_status(
+    item: dict[str, object],
+    statuses: dict[str, str],
+) -> dict[str, object]:
+    run_id = str(item.get("id") or "")
+    status = statuses.get(run_id)
+    if not status:
+        return dict(item)
+    if status == "DONE":
+        display_status = "done"
+    elif status in {"CANCELLED", "ABANDONED", "TAKEN_OVER"}:
+        display_status = "skipped"
+    elif status in {"FAILED", "TIMEOUT", "CHANNEL_ERROR", "BLOCKED", "PAUSED"}:
+        display_status = "blocked"
+    else:
+        display_status = "in_progress"
+    return {**item, "status": display_status}
+
+
+# LLM: The coordinator panel consumes only the removable background activity
+# block and stays outside transcript/history so its position is stable like 终端交互.
+# 函数用途: 生成输入框下方的 main/子代理固定面板；没有活跃会话任务时不占高度。
+def _render_fixed_agent_panel(
+    snapshot: TuiViewSnapshot,
+    context: TuiRenderContext,
+) -> tuple[FormattedLine, ...]:
+    background = next(
+        (
+            block
+            for block in snapshot.active_blocks
+            if block.role == "background"
+            and block.phase not in TERMINAL_RENDER_PHASES
+        ),
+        None,
+    )
+    return _render_background_activity(background, context) if background is not None else ()
 
 
 # LLM: Width tiers alter display density only. Percent and warning style come from typed token
@@ -1818,7 +1904,7 @@ def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> Form
         text = "  esc to interrupt"
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
     if any(block.role == "background" for block in snapshot.active_blocks):
-        text = "  Working in background · /stop to interrupt"
+        text = "  /stop to interrupt background task"
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
     if context.notice:
         return ((
