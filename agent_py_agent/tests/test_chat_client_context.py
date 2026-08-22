@@ -49,6 +49,47 @@ def test_gateway_chat_client_resolves_owner_runtime_without_full_agent(
         _ = client.conversation_store
 
 
+def test_gateway_chat_clients_in_different_projects_share_one_owner_service(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Different TUI cwd values must share transport but retain project-scoped state."""
+    from agent_py_agent.cli.bootstrap import DEFAULT_CONFIG
+    from agent_py_agent.cli.chat_client_context import make_gateway_chat_client
+
+    home = tmp_path / "home"
+    first_workspace = tmp_path / "project-a"
+    second_workspace = tmp_path / "project-b"
+    first_workspace.mkdir()
+    second_workspace.mkdir()
+    monkeypatch.setenv("MY_AGENT_HOME", str(home))
+    monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG", raising=False)
+    monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG_LAYERS", raising=False)
+
+    first = make_gateway_chat_client(
+        SimpleNamespace(config=str(DEFAULT_CONFIG), workspace_root=str(first_workspace))
+    )
+    second = make_gateway_chat_client(
+        SimpleNamespace(config=str(DEFAULT_CONFIG), workspace_root=str(second_workspace))
+    )
+
+    expected_gateway = (
+        home
+        / "owners"
+        / "local"
+        / "main"
+        / "workspace"
+        / "runtime"
+        / "services"
+        / "gateway"
+    )
+    assert first.config.gateway_workspace == str(expected_gateway)
+    assert second.config.gateway_workspace == str(expected_gateway)
+    assert first.config.local_store_path != second.config.local_store_path
+    assert first.root == first_workspace.resolve()
+    assert second.root == second_workspace.resolve()
+
+
 def test_gateway_chat_client_posts_typed_session_lifecycle(monkeypatch, tmp_path) -> None:
     """Lightweight close should use Gateway's structured lifecycle endpoint."""
     from agent_py_agent.cli.chat_client_context import GatewayChatClientAgent
@@ -221,6 +262,10 @@ def test_gateway_chat_client_posts_correlated_active_turn_input(monkeypatch, tmp
             "metadata": {
                 "message_id": "steer-client-1",
                 "expected_turn_id": "gwreq-active-1",
+            },
+            "workspace": {
+                "cwd": str(tmp_path.resolve()),
+                "roots": [str(tmp_path.resolve())],
             },
             "inject": ["遵守项目规范"],
             "prompt_files": ["spec.md"],

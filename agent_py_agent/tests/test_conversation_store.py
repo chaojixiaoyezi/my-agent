@@ -346,7 +346,39 @@ def test_selected_workspace_task_survives_completion_and_restart(tmp_path) -> No
     assert reopened.workspace_task_id == "task-1"
     assert reopened.active_task_ids == ()
     payload = json.loads(reopened_store._thread_path(thread.thread_id).read_text(encoding="utf-8"))
-    assert payload["schema_version"] == "conversation_thread.v5"
+    assert payload["schema_version"] == "conversation_thread.v6"
+
+
+def test_thread_persists_client_cwd_across_requests_without_override(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    project = tmp_path / "project"
+    project.mkdir()
+    request = {
+        "canonical_user_id": "local-agent",
+        "channel": "chat",
+        "channel_conversation_id": "cwd-session",
+        "channel_user_id": "local-agent",
+        "cwd": str(project),
+        "runtime_workspace_roots": [str(project)],
+        "now": 1.0,
+    }
+
+    first = store.get_or_create_thread(request)
+    second = store.get_or_create_thread(
+        {
+            "canonical_user_id": "local-agent",
+            "channel": "chat",
+            "channel_conversation_id": "cwd-session",
+            "channel_user_id": "local-agent",
+            "now": 2.0,
+        }
+    )
+
+    assert first.cwd == str(project)
+    assert first.runtime_workspace_roots == (str(project),)
+    assert second.thread_id == first.thread_id
+    assert second.cwd == str(project)
+    assert second.runtime_workspace_roots == (str(project),)
 
 
 def test_stale_message_snapshot_cannot_revert_selected_workspace(tmp_path, monkeypatch) -> None:

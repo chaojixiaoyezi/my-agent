@@ -87,6 +87,50 @@ def test_runner_failure_reports_memory_injection_error(monkeypatch):
     assert "memory push unavailable" in instruction
 
 
+def test_runner_future_exception_records_structured_blocked_result() -> None:
+    from agent_py_agent.agent.agent_core.runner.gate import (
+        ConcurrentRunnerParams,
+        _collect_runner_future_result,
+    )
+
+    recorded: list[object] = []
+
+    class FailedFuture:
+        def result(self):
+            raise RuntimeError("worker process vanished")
+
+    expected = SimpleNamespace(
+        status="BLOCKED",
+        verification_status="UNVERIFIED",
+        failure_type="runner_worker_error",
+    )
+    recorder = SimpleNamespace(
+        record_runner_result=lambda params: recorded.append(params) or expected
+    )
+    params = ConcurrentRunnerParams(
+        agent=SimpleNamespace(
+            subagents=SimpleNamespace(runner_result=recorder),
+        ),
+        pending_jobs=[],
+        runner_concurrency=1,
+        runner_timeout_seconds=30,
+        instruction="继续",
+        start_runners=True,
+        max_cards=0,
+        probe=False,
+    )
+
+    result = _collect_runner_future_result(params, FailedFuture(), "subagent-crashed")
+
+    assert result is expected
+    assert len(recorded) == 1
+    assert recorded[0].run_id == "subagent-crashed"
+    assert recorded[0].status == "BLOCKED"
+    assert recorded[0].verification_status == "UNVERIFIED"
+    assert recorded[0].failure_type == "runner_worker_error"
+    assert "worker process vanished" in recorded[0].message
+
+
 class TestRunnerMaxAttempts:
     """测试 _runner_max_attempts() 函数。"""
 

@@ -35,7 +35,9 @@ from agent_py_agent.agent.conversation.audit_lifecycle import (
     start_named_audit,
 )
 from agent_py_agent.agent.conversation.authority import (
+    CONVERSATION_EXECUTION_CWD_ATTR,
     CONVERSATION_REQUEST_ID_ATTR,
+    CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR,
     CONVERSATION_TASK_TURN_ACTIVE_ATTR,
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
     CONVERSATION_TRANSIENT_WORKSPACE_ATTR,
@@ -60,6 +62,7 @@ from agent_py_agent.agent.gateway_parts.request_errors import (
 )
 from agent_py_agent.agent.gateway_parts.request_execution import (
     BufferedChunkStreamWriter,
+    GatewayWorkspaceScopeError,
     _append_gateway_conversation_message,
     _gateway_conversation_context,
     _gateway_injections,
@@ -142,6 +145,100 @@ def test_gateway_cli_request_payload_carries_default_local_conversation(tmp_path
     assert payload["conversation"]["channel"] == "gateway-cli"
     assert payload["conversation"]["channel_conversation_id"] == "default"
     assert payload["conversation"]["channel_user_id"] == "local-agent"
+
+
+def test_gateway_thread_uses_validated_client_cwd_and_keeps_it_on_next_turn(tmp_path):
+    service_root = tmp_path / "service"
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        service_root,
+    )
+    conversation = {
+        "channel": "chat",
+        "channel_conversation_id": "cwd-session",
+        "channel_user_id": "local-agent",
+        "canonical_user_id": "local-agent",
+    }
+
+    first = _conversation_context(
+        agent,
+        {
+            "conversation": conversation,
+            "workspace": {
+                "cwd": str(project_root),
+                "roots": [str(project_root)],
+            },
+        },
+        "gw-cwd-first",
+        "在当前目录开始",
+    )
+    second = _conversation_context(
+        agent,
+        {"conversation": conversation},
+        "gw-cwd-second",
+        "继续",
+    )
+    attrs = _gateway_task_attributes(second)
+
+    assert first.cwd == str(project_root.resolve())
+    assert second.cwd == str(project_root.resolve())
+    assert second.runtime_workspace_roots == (str(project_root.resolve()),)
+    assert attrs[CONVERSATION_EXECUTION_CWD_ATTR] == str(project_root.resolve())
+    assert attrs[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] == [
+        str(project_root.resolve())
+    ]
+
+
+def test_gateway_rejects_relative_client_cwd_before_conversation_turn(tmp_path):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path / "service",
+    )
+
+    with pytest.raises(GatewayWorkspaceScopeError, match="必须是绝对目录"):
+        _conversation_context(
+            agent,
+            {
+                "conversation": {
+                    "channel": "chat",
+                    "channel_conversation_id": "invalid-cwd",
+                    "channel_user_id": "local-agent",
+                    "canonical_user_id": "local-agent",
+                },
+                "workspace": {"cwd": "relative/project", "roots": []},
+            },
+            "gw-invalid-cwd",
+            "不要在错误目录执行",
+        )
+
+
+def test_gateway_rejects_client_cwd_outside_declared_runtime_roots(tmp_path):
+    project = tmp_path / "project"
+    other = tmp_path / "other"
+    project.mkdir()
+    other.mkdir()
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path / "service",
+    )
+
+    with pytest.raises(GatewayWorkspaceScopeError, match="不在声明的 roots 内"):
+        _conversation_context(
+            agent,
+            {
+                "conversation": {
+                    "channel": "chat",
+                    "channel_conversation_id": "cwd-outside-roots",
+                    "channel_user_id": "local-agent",
+                    "canonical_user_id": "local-agent",
+                },
+                "workspace": {"cwd": str(project), "roots": [str(other)]},
+            },
+            "gw-cwd-outside-roots",
+            "不要越过结构化 roots",
+        )
 
 
 def test_named_audit_projects_durable_task_deadline_into_current_run(tmp_path):
@@ -3676,6 +3773,53 @@ def test_gateway_followup_subagent_lineage_uses_active_task_root(tmp_path):
     assert create_params.parent_id == "gw-first"
     assert create_params.root_id == "gw-first"
     assert create_params.depth == 1
+
+
+def test_gateway_subagent_relative_outputs_use_validated_client_cwd(tmp_path):
+    service_root = tmp_path / "service"
+    client_root = tmp_path / "client-project"
+    task_root = tmp_path / "home" / "task"
+    client_root.mkdir()
+    (task_root / "output").mkdir(parents=True)
+    (task_root / "work").mkdir()
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        service_root,
+    )
+    agent._current_run_task_workspace = str(task_root)
+    agent._current_run_params = RunParams(
+        request_id="gw-cwd-child",
+        run_id="gw-cwd-child",
+        task_id="gw-cwd-child",
+        task_attributes={
+            "conversation_thread_id": "thread-cwd-child",
+            "conversation_task_id": "gw-cwd-child",
+            "conversation_execution_cwd": str(client_root),
+            "conversation_runtime_workspace_roots": [str(client_root)],
+            "run_workspace": {
+                "task_root": str(task_root),
+                "output_dir": str(task_root / "output"),
+                "work_dir": str(task_root / "work"),
+            },
+        },
+    )
+    try:
+        create_params = create_run_params(
+            agent,
+            {
+                "goal": "实现 bbb 的页面",
+                "output_files": ["bbb/index.html"],
+                "allowed_tools": ["write_file"],
+            },
+            "实现 bbb 的页面",
+            ["write_file"],
+        )
+    finally:
+        delattr(agent, "_current_run_params")
+
+    assert create_params.attributes["output_refs"] == [
+        str((client_root / "bbb" / "index.html").resolve())
+    ]
 
 
 def test_gateway_subagent_records_originating_conversation_request(tmp_path):

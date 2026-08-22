@@ -938,3 +938,12 @@ tasks/<日期>/<任务>/output，即用户拿走的东西），而非子代理�
   半写 JSON 或进程崩溃留下的元数据不再永久挡住 Gateway 孤儿调和。
 - `--force-lock` 只保留命令兼容和诊断语义，不能抢占仍被活进程持有的内核锁。Gateway 继续是唯一自动恢复
   执行者，TUI 和 `/status` 都不会因为看见旧任务而另启一套调度。
+
+## 2026-08-22 子代理继承客户端 cwd 与 runner 异常收口
+
+- `create_subagents` 的相对 `output_files/output_refs` 现在从当前 thread 的 Gateway-validated cwd 解析，
+  不再从单 Gateway 守护进程启动目录解析；任务交付提示中的 source/relative root 使用同一字段。
+- 并发 runner future 抛异常时，`RecordRunnerResultParams` 改为运行时导入，原异常会落成
+  `BLOCKED/UNVERIFIED/runner_worker_error`。旧代码只在 TYPE_CHECKING 导入，异常分支本身会再触发
+  `NameError`，从而留下看似永久 RUNNING 的失联记录。
+- focused 回归覆盖客户端 cwd 的 child 相对输出和 future exception 结构化落账；正式长任务复验待部署。

@@ -26,6 +26,12 @@ Gateway 可以并行，但不能作为“单 Gateway 多客户端”验收的替
 补代码、发技术推动指令或修改产物。单测、fake、renderer snapshot 和静态 gate 只作上线前护栏，不能替代
 上述真实 TUI 验收。
 
+单 Gateway 多目录回归必须另行覆盖：两个不同 cwd 的 lightweight client 得到同一 owner-level
+`gateway_workspace`，但请求分别携带自己的绝对 `workspace.cwd/roots`；thread 在后续未覆盖的请求中保留
+该范围；模型前 workspace gate 拒绝相对/不存在目录；Tool Registry 的 path gate、resource lock 与 handler
+使用同一 effective cwd；任务 workspace 提示和 child 相对 output ref 也落在该 cwd。runner future 抛异常
+必须保存 `BLOCKED/UNVERIFIED/runner_worker_error`，不得被异常处理分支的二次错误掩盖。
+
 `7c052f2` 在 `.7` 唯一 Gateway 上的第 1 条原样任务使用 tmux
 `dsh-p1-pvz-7c052f2`，测试者只输入一次 prompt，六个 child 全部自然 DONE。最终
 `/root/abc` 共 9 个文件，`0.0.0.0:8080` 监听，loopback HTTP 200；该轮同时抓到三个真实

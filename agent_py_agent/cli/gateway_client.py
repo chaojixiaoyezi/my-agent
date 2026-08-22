@@ -284,6 +284,9 @@ def _handle_gateway_timeout(ctx: GatewayAskContext) -> int:
     return 2
 
 
+# LLM: The standalone Gateway client submits its typed project cwd/roots with the request while
+# locating the daemon exclusively through the owner-level service paths supplied by `paths`.
+# 函数用途: 将命令行 ask、会话选项和当前项目目录一次写入唯一 Gateway 队列。
 def _submit_gateway_ask(args, agent, paths) -> GatewaySubmittedAsk:
     request_id, request_path, response_path = submit_gateway_ask(
         paths,
@@ -295,6 +298,12 @@ def _submit_gateway_ask(args, agent, paths) -> GatewaySubmittedAsk:
             include_prompt=bool(args.show_prompt),
             resume_context=resume_context_override(args),
             agent=agent,
+            workspace_root=str(getattr(agent, "root", "") or ""),
+            workspace_roots=[
+                str(item)
+                for item in (getattr(agent, "workspace_roots", None) or [])
+                if str(item or "").strip()
+            ],
         ),
     )
     return GatewaySubmittedAsk(request_id, request_path, response_path)

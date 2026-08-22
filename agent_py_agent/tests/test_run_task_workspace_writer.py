@@ -221,6 +221,43 @@ def test_attach_run_task_workspace_context_no_save_still_creates_task_workspace(
     assert "输入目录不是交付目录" in injection
 
 
+def test_gateway_task_workspace_prompt_uses_validated_client_cwd(tmp_path) -> None:
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
+        attach_run_task_workspace_context,
+    )
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+
+    service_root = tmp_path / "service"
+    client_root = tmp_path / "client-project"
+    client_root.mkdir()
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        service_root,
+    )
+    params = RunParams(
+        request_id="gw-client-cwd",
+        run_id="gw-client-cwd",
+        task_id="gw-client-cwd",
+        task_attributes={
+            "conversation_thread_id": "thread-client-cwd",
+            "conversation_task_id": "gw-client-cwd",
+            "conversation_execution_cwd": str(client_root),
+            "conversation_runtime_workspace_roots": [str(client_root)],
+        },
+        delivery_contract={"schema_version": "delivery_contract.v1", "artifacts": []},
+    )
+
+    updated = attach_run_task_workspace_context(agent, params, "在 bbb 目录创建游戏")
+
+    injection = "\n".join(updated.inject)
+    assert f"cwd: {client_root.resolve()}" in injection
+    assert updated.delivery_contract["task_workspace"]["source_workspace_root"] == str(
+        client_root.resolve()
+    )
+
+
 def test_finish_run_workspace_rejects_a_different_run_identity(tmp_path):
     import json
 

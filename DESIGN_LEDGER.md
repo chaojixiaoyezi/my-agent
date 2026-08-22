@@ -896,3 +896,15 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - `.7` 正式验收必须使用唯一 Gateway 和 `MiniMax-M2.7`，依次执行 `TESTS.md` 的四个原样重型 prompt。
   每次启动、切换或输入 TUI 之前必须先向用户公开 tmux session 名称与完整 attach 命令；测试者只观察，
   不旁路补代码或向被测代理发送技术推动消息。
+
+## 2026-08-22 单 Gateway 服务身份与 thread cwd 分离【状态：本地候选，待 `.7` 真 TUI】
+
+- 一个 local owner 只有一套 Gateway/adapter service identity：默认固定在
+  `owner_home/workspace/runtime/services/`。pid、heartbeat、queue、HTTP 端口不能再由 TUI cwd 选择；
+  显式相对服务路径也以 owner workspace 解析。
+- 项目目录是每个 durable thread 的 typed 配置。TUI/CLI ask 携带绝对 `workspace.cwd/roots`，Gateway
+  校验后写入 `conversation_thread.v6`；后续未覆盖的 turn、后台 main 和 child 继续继承。远程 owner
+  不能提交主机 cwd，非法目录在模型前 fail-closed，不得退回 daemon cwd。
+- Tool Registry 的授权、资源锁和实际 handler 只接收同一 effective cwd/root；任务交付与子代理相对
+  output ref 读取同一会话字段。该适配对照 会话运行时 thread/turn 的 `cwd/runtime_workspace_roots`，没有新增
+  prompt 关键词、第二 Gateway 或 TUI 专项路径分支。

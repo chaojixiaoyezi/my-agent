@@ -103,6 +103,8 @@ class GatewayAskParams:
     system_task: dict[str, object] | None = None
     interactive_approvals: bool = False
     rich_transcript: bool = False
+    workspace_root: str = ""
+    workspace_roots: list[str] | None = None
 
 
 _DEFAULT_GATEWAY_CLI_SESSION_ID = "default"
@@ -140,6 +142,12 @@ def submit_gateway_ask(
         payload["resume_context"] = bool(params.resume_context)
     if system_task:
         payload["system_task"] = system_task
+    workspace = gateway_request_workspace_payload(
+        params.workspace_root,
+        params.workspace_roots,
+    )
+    if workspace:
+        payload["workspace"] = workspace
     payload["conversation"] = _gateway_conversation_payload(params)
     request_path = write_gateway_request(paths, payload)
     response_path = gateway_response_path(paths, request_id)
@@ -191,8 +199,45 @@ def _gateway_conversation_payload(params: GatewayAskParams) -> dict[str, str]:
     }
 
 
+# LLM: Client cwd is a typed per-thread execution setting, separate from the owner-level Gateway
+# queue. Only absolute normalized paths are serialized; the Gateway validates existence, locality,
+# and owner scope again before persisting them on the conversation thread.
+# 函数用途: 把当前 TUI/CLI 的工作目录整理成可随请求发送的结构化 workspace 字段。
+def gateway_request_workspace_payload(
+    workspace_root: object,
+    workspace_roots: object = None,
+) -> dict[str, object]:
+    cwd = _absolute_workspace_path(workspace_root)
+    if not cwd:
+        return {}
+    raw_roots = workspace_roots if isinstance(workspace_roots, (list, tuple)) else []
+    roots: list[str] = []
+    for value in [cwd, *raw_roots]:
+        path = _absolute_workspace_path(value)
+        if path and path not in roots:
+            roots.append(path)
+    return {"cwd": cwd, "roots": roots or [cwd]}
+
+
+# LLM: This helper normalizes syntax only; server-side request execution remains the authority for
+# directory existence and permission scope so HTTP and file-queue callers share one hard gate.
+# 函数用途: 将一个可能的路径值规范化成绝对路径文本，非法或相对路径返回空。
+def _absolute_workspace_path(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        return ""
+    try:
+        return str(path.resolve(strict=False))
+    except (OSError, RuntimeError, ValueError):
+        return ""
+
+
 __all__ = [
     "GatewayAskExecutionOptions",
     "GatewayAskParams",
+    "gateway_request_workspace_payload",
     "submit_gateway_ask",
 ]

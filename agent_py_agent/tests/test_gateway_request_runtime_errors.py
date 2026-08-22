@@ -200,6 +200,48 @@ def test_handle_gateway_request_reports_bad_request_json(tmp_path: Path) -> None
     assert "unsupported" not in response["error"].lower()
 
 
+def test_invalid_client_workspace_fails_before_model_and_transcript(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    agent, paths = _make_agent(tmp_path)
+    request_path = paths.processing / "gw-invalid-workspace.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "id": "gw-invalid-workspace",
+                "kind": "ask",
+                "prompt": "不得在 daemon cwd 兜底执行",
+                "workspace": {
+                    "cwd": str(tmp_path / "missing-project"),
+                    "roots": [str(tmp_path)],
+                },
+                "conversation": {
+                    "channel": "chat",
+                    "channel_conversation_id": "invalid-workspace-session",
+                    "channel_user_id": "local-agent",
+                    "canonical_user_id": "local-agent",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        agent,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("invalid workspace must stop before model execution")
+        ),
+    )
+
+    response = _handle_gateway_request(agent, request_path)
+
+    assert response["ok"] is False
+    assert response["error_code"] == "GATEWAY_WORKSPACE_INVALID"
+    assert "当前工作目录不可用" in response["user_error"]
+    assert agent.conversation_store.list_threads() == []
+
+
 def test_handle_gateway_request_ignores_orphan_bad_response_projection(tmp_path: Path) -> None:
     agent, paths = _make_agent(tmp_path)
     request_id = "gw-bad-response"

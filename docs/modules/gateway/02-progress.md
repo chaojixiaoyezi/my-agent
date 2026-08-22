@@ -2018,3 +2018,15 @@
 - `.7` 已部署 `06b84e1`：单 Gateway PID `1918200`、单 8420 监听、MiniMax-M2.7；裸 TUI 在 1 秒采样点
   出现输入框并通过普通中文请求。v2 锁持有者与 Gateway 同 PID，首轮监督复活 4、按父会话取消 21、
   回收失联 runner 5，3 条 RUNNING 后续自然 DONE；连续两次 status 近期计数一致。
+
+## 2026-08-22 单 Gateway 多项目 cwd 主链候选
+
+- 真机第二条正式 TUI 在 `/root/dsh-tui-p2-f5d28b8` 启动时卡在 `Connecting to Gateway`，没有提交用户
+  prompt。根因是 pid/heartbeat/queue 跟客户端 cwd 一起落到 workspace hash；已运行 Gateway 位于
+  `/root` 的 hash，客户端却探测另一套空队列。
+- 对照 会话运行时 `ThreadStartParams.cwd/runtime_workspace_roots` 与 turn cwd override 后，Gateway/adapter
+  服务目录改为 owner 级固定路径；TUI/CLI 将 cwd/roots 放进 ask，Gateway 校验后写入 thread v6。
+  工具门、资源锁、handler、任务交付和 child 相对输出统一读取该 typed cwd。
+- 请求未携带 workspace 时保留 thread 原值；相对、不存在或远程 owner 伪造的 host cwd 在模型调用前以
+  `GATEWAY_WORKSPACE_INVALID` 失败，不回退 daemon cwd。当前 focused 回归已通过，部署与正式提示词 2
+  的真实 TUI 复验仍待完成。

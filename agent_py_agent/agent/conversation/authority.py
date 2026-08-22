@@ -42,6 +42,10 @@ CONVERSATION_WORKSPACE_EXECUTION_RUNNING_ATTR = "conversation_workspace_executio
 CONVERSATION_WORKSPACE_EXECUTION_STATE_AVAILABLE_ATTR = (
     "conversation_workspace_execution_state_available"
 )
+# The client project cwd is a trusted thread setting, not a model-selected task path. Gateway
+# validation persists it and projects it into each foreground/background turn.
+CONVERSATION_EXECUTION_CWD_ATTR = "conversation_execution_cwd"
+CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR = "conversation_runtime_workspace_roots"
 
 
 # LLM: True 时调用方必须排除 legacy dialogue memory，并禁止重复写 owner-global dialogue。
@@ -70,6 +74,28 @@ def current_conversation_task_attributes(agent: object) -> dict[str, object]:
     return delegated if isinstance(delegated, dict) else {}
 
 
+# LLM: The Gateway-validated client cwd is the only per-thread override for relative path
+# semantics. Callers must not fall back to prompt text, task titles, or hidden task_root fields.
+# 函数用途: 从当前会话属性读取 TUI/CLI 指定并由 Gateway 校验过的真实工作目录。
+def conversation_execution_cwd(attributes: object) -> str:
+    if not isinstance(attributes, Mapping):
+        return ""
+    return str(attributes.get(CONVERSATION_EXECUTION_CWD_ATTR) or "").strip()
+
+
+# LLM: Runtime roots are persisted with cwd and only narrow/extend the same validated local
+# client scope. Missing roots fall back to cwd so every invocation has one explicit root.
+# 函数用途: 读取本会话允许作为工具工作区的根目录列表。
+def conversation_runtime_workspace_roots(attributes: object) -> tuple[str, ...]:
+    if not isinstance(attributes, Mapping):
+        return ()
+    raw = attributes.get(CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR)
+    values = raw if isinstance(raw, (list, tuple)) else ()
+    roots = tuple(dict.fromkeys(str(item).strip() for item in values if str(item).strip()))
+    cwd = conversation_execution_cwd(attributes)
+    return roots or ((cwd,) if cwd else ())
+
+
 __all__ = [
     "CONVERSATION_REQUEST_ID_ATTR",
     "CONVERSATION_TURN_REQUEST_ID_ATTR",
@@ -87,6 +113,10 @@ __all__ = [
     "CONVERSATION_WORKSPACE_EXECUTION_STATE_AVAILABLE_ATTR",
     "CONVERSATION_WORKSPACE_TASK_ID_ATTR",
     "CONVERSATION_WORKSPACE_TASK_STATUS_ATTR",
+    "CONVERSATION_EXECUTION_CWD_ATTR",
+    "CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR",
     "current_conversation_task_attributes",
+    "conversation_execution_cwd",
+    "conversation_runtime_workspace_roots",
     "conversation_transcript_is_authoritative",
 ]

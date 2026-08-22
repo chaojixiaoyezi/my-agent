@@ -112,6 +112,32 @@ def test_submit_gateway_ask_records_explicit_rich_transcript_capability(tmp_path
     }
 
 
+def test_submit_gateway_ask_carries_typed_client_workspace(tmp_path) -> None:
+    service_root = tmp_path / "service"
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        service_root,
+    )
+
+    _request_id, request_path, _response_path = submit_gateway_ask(
+        gateway_paths(agent),
+        params=GatewayAskParams(
+            prompt="在当前目录工作",
+            save=False,
+            workspace_root=str(project_root),
+            workspace_roots=[str(project_root)],
+        ),
+    )
+
+    payload = read_json_file(request_path)
+    assert payload["workspace"] == {
+        "cwd": str(project_root.resolve()),
+        "roots": [str(project_root.resolve())],
+    }
+
+
 def test_gateway_json_polling_suppresses_stream_chunks(tmp_path, capsys):
     """`gateway ask --json` must keep stdout parseable JSON, without streamed text before it."""
 

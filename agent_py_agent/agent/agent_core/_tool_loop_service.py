@@ -261,11 +261,7 @@ def _runtime_workspace_context(agent: object, params: ToolLoopExecuteParams) -> 
     boundary = boundary if isinstance(boundary, dict) else {}
     task_root = str(boundary.get("task_root") or "").strip()
     if task_root:
-        registry = getattr(agent, "tools", None)
-        workspace_root = getattr(registry, "workspace_root", None)
-        if workspace_root is None:
-            workspace_root = getattr(agent, "effective_workspace_root", getattr(agent, "root", "."))
-        cwd = effective_registry_cwd(Path(workspace_root), boundary)
+        cwd = _runtime_effective_cwd(agent, boundary)
         conversation_cwd = _conversation_uses_user_cwd(params)
         return project_runtime_workspace_context(
             snapshot,
@@ -282,6 +278,14 @@ def _runtime_workspace_context(agent: object, params: ToolLoopExecuteParams) -> 
                 "" if conversation_cwd else str(boundary.get("task_work_dir") or "").strip()
             ),
         )
+    execution_cwd = str(boundary.get("execution_cwd") or "").strip()
+    if execution_cwd:
+        cwd = _runtime_effective_cwd(agent, boundary)
+        return project_runtime_workspace_context(
+            snapshot,
+            effective_cwd=str(cwd),
+            allowed_write_roots=_string_sequence(boundary.get("allowed_write_roots")),
+        )
     attrs = params.task_attributes if isinstance(params.task_attributes, dict) else {}
     return project_runtime_workspace_context(
         snapshot,
@@ -290,6 +294,17 @@ def _runtime_workspace_context(agent: object, params: ToolLoopExecuteParams) -> 
             and not isinstance(attrs.get("run_workspace"), dict)
         ),
     ) or None
+
+
+# LLM: Prompt projection and ToolRegistry share this exact cwd selector. The process root is only
+# a fallback when the host-authored turn boundary has no execution_cwd.
+# 函数用途: 按本轮写边界计算模型和工具共同使用的真实当前目录。
+def _runtime_effective_cwd(agent: object, boundary: dict[str, object]) -> Path:
+    registry = getattr(agent, "tools", None)
+    workspace_root = getattr(registry, "workspace_root", None)
+    if workspace_root is None:
+        workspace_root = getattr(agent, "effective_workspace_root", getattr(agent, "root", "."))
+    return effective_registry_cwd(Path(workspace_root), boundary)
 
 
 # LLM: cli_run has a transcript for evidence but remains a standalone delivery

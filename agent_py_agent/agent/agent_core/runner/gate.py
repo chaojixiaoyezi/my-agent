@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from ...concurrency import DurableDaemonThreadPoolExecutor
 from ...runtime_errors import runtime_error_report
+from ...subagents.manager_runner_result_payload import RecordRunnerResultParams
 from ...subagents.models import (
     FailureType,
     TaskStatus,
@@ -21,7 +22,6 @@ from .timeout_policy import get_task_timeout, resolve_runner_config
 
 if TYPE_CHECKING:
     from ...core import SimpleAgent
-    from ...subagents.manager_runner_result_payload import RecordRunnerResultParams
     from ...subagents.models import SubAgentRunnerResult, SubAgentTask
 
 

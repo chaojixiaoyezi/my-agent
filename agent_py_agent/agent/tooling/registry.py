@@ -41,6 +41,7 @@ from .models import (
 )
 from .registry_auth import allowed_tool_set
 from .registry_bootstrap import build_tool_retriever, register_base_tools
+from .registry_workspace import effective_registry_cwd
 from .runtime_contracts import ToolCall, ToolResult
 
 _allowed_tool_set = allowed_tool_set
@@ -725,6 +726,9 @@ class ToolRegistry:
             tool_protocol=tool_protocol,
         )
 
+    # LLM: Every gate and handler in one invocation must receive the same host-authored effective
+    # cwd/root set. Never let a model argument or one handler independently reinterpret cwd.
+    # 函数用途: 在本轮统一工作目录和授权根下执行工具，并返回可审计的标准执行结果。
     def execute_tool(
         self,
         call: ToolCall,
@@ -737,12 +741,18 @@ class ToolRegistry:
         pre_handler_gate: Callable[[ToolCall], ToolHandlerOutcome | None] | None = None,
         output_archiver: Callable[[ToolCall, object], ToolOutputProjection] | None = None,
     ) -> ToolExecution:
+        invocation_root = effective_registry_cwd(self.workspace_root, write_boundary)
+        invocation_roots = _execution_workspace_roots(
+            invocation_root,
+            self.workspace_roots,
+            write_boundary,
+        )
         return ToolExecutor().execute(
             ToolExecutorRequest(
                 call=call,
                 runtime_snapshot=runtime_snapshot,
-                workspace_root=self.workspace_root,
-                workspace_roots=tuple(self.workspace_roots),
+                workspace_root=invocation_root,
+                workspace_roots=invocation_roots,
                 path_access_mode=self.path_access_mode,
                 path_dangerous_roots=tuple(self.path_dangerous_roots),
                 owner_scope_root=self.owner_scope_root,
@@ -759,6 +769,30 @@ class ToolRegistry:
                 output_archiver=output_archiver,
             )
         )
+
+
+# LLM: Tool authorization, resource locks, filesystem aliases and shell handlers must receive the
+# same per-turn cwd/root set. The boundary values are host-authored by the Gateway thread scope;
+# model arguments cannot add roots here.
+# 函数用途: 合并本轮 TUI 工作目录与注册表原始目录，供所有工具门和执行器共同使用。
+def _execution_workspace_roots(
+    invocation_root: Path,
+    registry_roots: list[Path],
+    write_boundary: dict[str, object] | None,
+) -> tuple[Path, ...]:
+    boundary = write_boundary if isinstance(write_boundary, dict) else {}
+    raw = boundary.get("execution_workspace_roots")
+    requested = raw if isinstance(raw, list) else []
+    inherited = requested if requested else registry_roots
+    roots: list[Path] = []
+    for value in [invocation_root, *inherited]:
+        try:
+            path = Path(value).expanduser().resolve(strict=False)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            continue
+        if path not in roots:
+            roots.append(path)
+    return tuple(roots or (invocation_root,))
 
 
 def _close_registry_clients(registry: ToolRegistry) -> None:

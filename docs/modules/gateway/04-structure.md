@@ -260,7 +260,8 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   `task_progress` 只保留 `read/update`，不承担会话、目录或任务生命周期控制。若写工具携带同 thread
   既有目录中的精确结构化路径，统一执行入口可无歧义绑定该目录；正文不参与身份判断。根 task workspace 不再保存 recovery compact
   指针、continue packet 或第二份任务对话恢复包；主 thread 的 summary + raw tail 是唯一主会话 compact，
-  `conversation_thread.v5` 还在同一 compact CAS 中保存 `compact_operation_evidence`、checkpoint pointer
+  `conversation_thread.v6` 还在同一 compact CAS 中保存 `compact_operation_evidence`、checkpoint pointer、
+  经 Gateway 校验的客户端 `cwd/runtime_workspace_roots`
   和连续失败状态，只作为摘要旁边
   的程序事实 metadata，不形成第二份会话；独立子代理复用同一通用 Compact 引擎，数据写入各自
   agent run workspace。thread 创建与
@@ -458,10 +459,10 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 
 ## 路径
 
-gateway 运行态写当前 owner workspace runtime：
+gateway 服务运行态写当前 owner 的固定 service runtime，不再按 TUI cwd 哈希：
 
 ```text
-owner_home/workspace/runtime/workspaces/<workspace-scope>/gateway/
+owner_home/workspace/runtime/services/gateway/
 |-- requests/
 |-- responses/
 |-- history/
@@ -469,6 +470,11 @@ owner_home/workspace/runtime/workspaces/<workspace-scope>/gateway/
 |-- leases/
 `-- index/
 ```
+
+不同 TUI/CLI 的项目范围随每个 ask 的结构化 `workspace={cwd, roots}` 进入请求；Gateway 只允许本地 owner
+设置存在的绝对目录，并把结果持久化到 `conversation_thread.v6`。后续前台、后台 main、工具与子代理从
+同一 thread 字段恢复，不读取守护进程 cwd，也不从 prompt 猜目录。Gateway/adapter 的显式相对配置以
+owner workspace 解析，防止另一个项目目录派生出第二套 pid、队列或监听端口。
 
 流式响应 chunk 写入被认领请求所在的 `requests/processing/<request-id>.chunks.jsonl`；即使执行者是
 per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能改从 owner Agent root 推导。请求结束时

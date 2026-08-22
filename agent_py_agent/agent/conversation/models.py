@@ -5,7 +5,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-SCHEMA_VERSION = "conversation_thread.v5"
+SCHEMA_VERSION = "conversation_thread.v6"
 
 THREAD_TASK_LINK_ACTIVE_STATUS = "active"
 THREAD_TASK_LINK_INACTIVE_STATUSES = frozenset(
@@ -327,10 +327,14 @@ class ConversationThread:
     task_ids: tuple[str, ...] = ()
     active_task_ids: tuple[str, ...] = ()
     workspace_task_id: str = ""
+    # 会话运行时 project cwd is thread state, while workspace_task_id points to the hidden
+    # durable task workspace. Keeping them separate lets one Gateway serve many TUI directories.
+    cwd: str = ""
+    runtime_workspace_roots: tuple[str, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    # LLM: Persist the v5 compact guard fields and sticky workspace beside the task indexes.
-    # 函数用途: 将完整会话状态写成可跨进程读取的 JSON 字典，并让 checkpoint 指针成为提交凭据。
+    # LLM: Persist v6 compact guards, sticky task workspace and validated client cwd together.
+    # 函数用途: 将完整会话状态写成可跨进程读取的 JSON 字典，并保存压缩凭据与客户端工作目录。
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["schema_version"] = SCHEMA_VERSION
@@ -339,8 +343,8 @@ class ConversationThread:
         payload["active_task_ids"] = list(self.active_task_ids)
         return payload
 
-    # LLM: Older records load with empty v5 compact guard fields and no guessed workspace.
-    # 函数用途: 兼容读取旧会话记录；缺少 checkpoint、失败状态或 workspace 时使用安全空值。
+    # LLM: Older records load with empty v6 cwd/root fields and no guessed execution location.
+    # 函数用途: 兼容读取旧会话记录；缺少 checkpoint、失败状态或客户端目录时使用安全空值。
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ConversationThread:
         bindings = data.get("channel_bindings")
@@ -403,6 +407,10 @@ class ConversationThread:
                 str(item) for item in (active_task_ids if isinstance(active_task_ids, list) else [])
             ),
             workspace_task_id=str(data.get("workspace_task_id") or ""),
+            cwd=str(data.get("cwd") or ""),
+            runtime_workspace_roots=_runtime_workspace_roots(
+                data.get("runtime_workspace_roots")
+            ),
             metadata=metadata if isinstance(metadata, dict) else {},
         )
 
@@ -410,6 +418,14 @@ class ConversationThread:
 def _verbose_level(value: object) -> str:
     level = str(value or "off").strip().lower()
     return level if level in {"off", "on", "full"} else "off"
+
+
+# LLM: JSON reads produce lists while in-process atomic updates may return tuples before a reload;
+# both forms represent the same immutable thread root set and must round-trip identically.
+# 函数用途: 将会话工作区根字段规范化成去空的不可变字符串元组。
+def _runtime_workspace_roots(value: object) -> tuple[str, ...]:
+    items = value if isinstance(value, (list, tuple)) else ()
+    return tuple(str(item) for item in items if str(item or "").strip())
 
 
 @dataclass(frozen=True)

@@ -10,7 +10,11 @@ from typing import Any
 
 from ..common.value_parsing import text_value as _text
 from ..contracts.protocol_status import TOOL_STATUS_DONE, TOOL_STATUS_FAILED
-from ..conversation.authority import CONVERSATION_TRANSIENT_WORKSPACE_ATTR
+from ..conversation.authority import (
+    CONVERSATION_EXECUTION_CWD_ATTR,
+    CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR,
+    CONVERSATION_TRANSIENT_WORKSPACE_ATTR,
+)
 from ..local_storage import RuntimeGateLedgerRecord
 from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
 from ..tooling.runtime_contracts import tool_arguments_hash
@@ -241,15 +245,22 @@ def _attach_main_conversation_execution_cwd(
     params: object,
 ) -> None:
     attrs = getattr(params, "task_attributes", None)
+    has_typed_client_cwd = bool(
+        isinstance(attrs, dict)
+        and _text(attrs.get("conversation_thread_id"))
+        and _text(attrs.get(CONVERSATION_EXECUTION_CWD_ATTR))
+    )
     if (
-        not _is_main_conversation_task_run(params)
+        not (_is_main_conversation_task_run(params) or has_typed_client_cwd)
         or str(getattr(params, "source", "") or "").strip().lower() == "cli_run"
         or not isinstance(attrs, dict)
         or attrs.get(CONVERSATION_TRANSIENT_WORKSPACE_ATTR) is True
     ):
         return
     tools = getattr(agent, "tools", None)
-    project_cwd = _resolved_path(getattr(tools, "workspace_root", None))
+    project_cwd = _resolved_path(attrs.get(CONVERSATION_EXECUTION_CWD_ATTR))
+    if project_cwd is None:
+        project_cwd = _resolved_path(getattr(tools, "workspace_root", None))
     if project_cwd is None:
         project_cwd = _resolved_path(
             getattr(agent, "effective_workspace_root", getattr(agent, "root", None))
@@ -258,13 +269,19 @@ def _attach_main_conversation_execution_cwd(
         return
     cwd_text = str(project_cwd)
     boundary["execution_cwd"] = cwd_text
+    requested_roots = _string_list(attrs.get(CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR))
+    execution_roots: list[str] = []
+    for value in [cwd_text, *requested_roots]:
+        root = _resolved_path(value)
+        if root is not None and str(root) not in execution_roots:
+            execution_roots.append(str(root))
+    boundary["execution_workspace_roots"] = execution_roots
     provider = _text(getattr(getattr(agent, "config", None), "my_agent_owner_provider", "")).lower()
     owner_scope = _text(getattr(tools, "owner_scope_root", ""))
     if provider not in ("", "local") and owner_scope:
         return
     roots = _string_list(boundary.get("allowed_write_roots"))
-    if cwd_text not in roots:
-        boundary["allowed_write_roots"] = [*roots, cwd_text]
+    boundary["allowed_write_roots"] = list(dict.fromkeys([*roots, *execution_roots]))
 
 
 def _attach_remote_owner_task_write_scope(

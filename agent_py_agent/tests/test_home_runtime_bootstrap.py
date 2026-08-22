@@ -44,10 +44,32 @@ def test_simple_agent_rewrites_runtime_config_paths_to_owner_home(tmp_path: Path
         str(owner_home / "workspace" / "runtime" / "workspaces") in agent.config.subagent_workspace
     )
     assert (
-        str(owner_home / "workspace" / "runtime" / "workspaces") in agent.config.gateway_workspace
+        agent.config.gateway_workspace
+        == str(owner_home / "workspace" / "runtime" / "services" / "gateway")
+    )
+    assert agent.config.adapter_workspace == str(
+        owner_home / "workspace" / "runtime" / "services" / "adapters" / "file"
     )
     assert str(owner_home / "workspace" / "runtime" / "workspaces") in agent.config.local_store_path
     assert not (repo / "data").exists()
+
+
+def test_relative_gateway_service_overrides_are_owner_scoped(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    home = tmp_path / "home"
+    agent = SimpleAgent(
+        AgentConfig(
+            my_agent_home=str(home),
+            gateway_workspace="custom/gateway",
+            adapter_workspace="custom/adapter",
+            prompt_files=[],
+        ),
+        repo,
+    )
+    owner_workspace = home / "owners" / "local" / "main" / "workspace"
+
+    assert agent.config.gateway_workspace == str(owner_workspace / "custom" / "gateway")
+    assert agent.config.adapter_workspace == str(owner_workspace / "custom" / "adapter")
 
 
 def test_saved_run_creates_home_task_workspace(tmp_path: Path):

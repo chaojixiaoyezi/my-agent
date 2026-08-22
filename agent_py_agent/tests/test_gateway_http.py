@@ -131,6 +131,34 @@ class TestGatewayHTTPHandler:
             "canonical_user_id": "user-1",
         }
 
+    def test_build_ask_request_preserves_typed_workspace(self, tmp_path):
+        from agent_py_agent.agent.gateway_parts.http_handlers import (
+            _AskRequestContext,
+            _build_ask_request,
+        )
+
+        request = _build_ask_request(
+            _AskRequestContext(
+                body={
+                    "metadata": {},
+                    "conversation_id": "room-cwd",
+                    "workspace": {
+                        "cwd": str(tmp_path),
+                        "roots": [str(tmp_path)],
+                    },
+                },
+                goal="继续当前目录任务",
+                request_id="req-cwd",
+                user_id="local-agent",
+                channel="chat",
+            )
+        )
+
+        assert request["workspace"] == {
+            "cwd": str(tmp_path),
+            "roots": [str(tmp_path)],
+        }
+
 
 class TestGatewayHTTPIntegration:
     """Integration tests for HTTP service with actual server."""

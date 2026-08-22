@@ -20,6 +20,13 @@ my-agent chat
 同 thread 的前台和后台继续共用一条 run claim，不同 thread 在全局/单 owner 两层上限内并发。
 这与 会话运行时 每个 Thread/Session 自有 active turn 的边界一致，但仍保留本项目的跨进程持久队列和恢复。
 
+Gateway 的“服务地址”和 TUI 的“项目目录”是两种不同事实。前者固定在当前 owner 的
+`workspace/runtime/services/gateway`，决定 pid、heartbeat、请求队列和 HTTP 端口；后者由客户端在
+结构化 `workspace.cwd/workspace.roots` 中提交，经 Gateway 校验后保存为 `ConversationThread.cwd` 与
+`runtime_workspace_roots`。因此从 `/root/a` 和 `/root/b` 启动的两个 TUI 会连接同一个 Gateway，但各自
+相对路径、工具权限、子代理交付和后台续轮仍使用自己的目录。没有合法 cwd 时必须在模型调用前失败，
+不能静默退回 Gateway 守护进程的启动目录。
+
 gateway 的本地后台控制面入口：
 
 ```text
@@ -37,9 +44,9 @@ my-agent gateway result <request_id>
 第二步已经补上本地 inbox / response 通道：
 
 ```text
-client CLI -> data/gateway/requests/pending/<request_id>.json
-gateway worker -> data/gateway/responses/<request_id>.json
-gateway audit -> data/gateway/gateway_requests.jsonl
+client CLI -> owner workspace/runtime/services/gateway/requests/pending/<request_id>.json
+gateway worker -> owner workspace/runtime/services/gateway/responses/<request_id>.json
+gateway audit -> owner workspace/runtime/services/gateway/gateway_requests.jsonl
 ```
 
 `gateway ask` 是最小客户端协议。它还不是完整 TUI attach，也不是完整 HTTP/WebSocket gateway；当前代码已有可选本机 HTTP 控制面，但请求事实源仍是文件队列。它已经把“用户消息进入常驻 gateway 并触发完整 LLM turn”这件事从前台 chat 里拆了出来。`chat --gateway` 已经开始复用这条请求队列：chat 只做前台客户端，普通消息交给后台 gateway 处理。后续 TUI 可以继续复用同一条请求队列，或者把底层从文件队列替换成 SQLite / HTTP，而不改变用户命令面。

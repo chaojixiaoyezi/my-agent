@@ -26,8 +26,9 @@ class SystemCommandRoutingError(RuntimeError):
     error_code = "SYSTEM_COMMAND_ROUTING_ERROR"
 
 
-# LLM: Client-visible failure prose is selected only from structured error_code; raw exception text remains operator evidence and must not be parsed to decide UI behavior.
-# 函数用途: 把 Gateway 结构化错误码转换成 TUI、飞书和未来 Web 共用的安全中文提示。
+# LLM: Client-visible failure prose is selected only from structured error_code; provider and
+# client-workspace failures both stop before any raw exception text reaches the UI.
+# 函数用途: 把 Gateway 结构化错误码转换成 TUI、飞书和未来 Web 共用的安全中文提示，包括目录无效提示。
 def gateway_client_error_message(error_code: object) -> str:
     code = str(error_code or "").strip().upper()
     messages = {
@@ -45,6 +46,9 @@ def gateway_client_error_message(error_code: object) -> str:
         "PROVIDERTRANSIENTERROR": "模型服务暂时不可用，系统已停止本轮请求，请稍后重试。",
         "PROVIDERTIMEOUTERROR": "模型服务响应超时，系统已停止本轮请求，请稍后重试。",
         "PROVIDERCONNECTIONERROR": "无法连接模型服务，请检查网络、代理和接口地址后重试。",
+        "GATEWAY_WORKSPACE_INVALID": (
+            "当前工作目录不可用，任务没有开始。请确认目录存在且重新从该目录启动客户端。"
+        ),
     }
     return messages.get(code, "任务处理失败，请稍后重试；如持续失败，请查看运行诊断。")
 

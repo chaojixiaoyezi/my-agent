@@ -1204,6 +1204,9 @@ def _gateway_control_scope(
     )
 
 
+# LLM: HTTP ingress preserves typed conversation, workspace and execution options without
+# validating host paths here; the shared worker gate is the one filesystem authority.
+# 函数用途: 将 HTTP 请求整理成和文件队列客户端一致的 Gateway ask 载荷。
 def _build_ask_request(context: _AskRequestContext) -> dict:
     raw_metadata = context.body.get("metadata")
     metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
@@ -1227,6 +1230,13 @@ def _build_ask_request(context: _AskRequestContext) -> dict:
     system_task = context.body.get("system_task")
     if isinstance(system_task, dict):
         payload["system_task"] = dict(system_task)
+    if "workspace" in context.body:
+        raw_workspace = context.body.get("workspace")
+        payload["workspace"] = (
+            dict(raw_workspace)
+            if isinstance(raw_workspace, dict)
+            else {"invalid_payload_type": type(raw_workspace).__name__}
+        )
     if _ask_body_has_execution_options(context.body):
         payload.update(GatewayAskExecutionOptions.from_payload(context.body).to_payload())
     return payload
@@ -1289,6 +1299,7 @@ def _http_idempotent_request_identity(
         "goal": str(goal or ""),
         "metadata": canonical_metadata,
         "system_task": body.get("system_task") if isinstance(body.get("system_task"), dict) else {},
+        "workspace": body.get("workspace") if isinstance(body.get("workspace"), dict) else {},
         "execution_options": GatewayAskExecutionOptions.from_payload(body).to_payload(),
     }
     input_json = json.dumps(

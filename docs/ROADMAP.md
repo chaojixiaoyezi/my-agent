@@ -19,6 +19,17 @@
 
 来自 STATUS.md，当前最急迫的任务已清空，下面保留中长期项。
 
+### 单 Gateway 多 TUI 项目目录与正式提示词 2
+
+状态：本地候选与 focused 回归已完成，待严格 gate、部署和真实 TUI 复验
+
+解决问题：从非 Gateway 启动目录运行 TUI 时会误找另一套 cwd-hash 队列，等待一分钟后退出；即使只放宽
+readiness，模型和工具仍可能在 daemon cwd 工作，造成项目写错位置。
+
+当前进展：服务目录已固定为 owner 级唯一 Gateway，客户端 cwd/roots 改为 thread v6 的 typed 状态；
+前台、后台、Tool Gateway、任务交付和 child 输出共用该值。runner future 异常的二次 `NameError` 同批
+修复。下一步只在 `.7` 的一个 Gateway 上重启原 tmux，再输入第 2 条原样超级玛丽提示词。
+
 ### TUI 活动状态、跟随滚动与 Compact 真机复验
 
 状态：直属 child 活动区已部署并完成真实 TUI smoke；其余交互矩阵和 process-local lane 自愈待验证

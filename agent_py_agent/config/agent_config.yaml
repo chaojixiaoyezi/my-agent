@@ -14,7 +14,8 @@ system_prompt: "你是 my-agent，一个自主的 CLI 智能体，用工具、�
 # 工作区根目录：
 # - 留空时使用当前启动 my-agent 的目录，和 会话运行时/通道运行时 这类工具一样把“你在哪个任务目录启动”视为本轮工作区。
 # - 场景测试、外部聊天工具或未来多项目模式可以把它指向某个独立目录。
-# - memory_path、subagent_workspace、gateway_workspace、prompt_files 和文件工具都会以这个目录为基础。
+# - memory_path、subagent_workspace、prompt_files 和文件工具会以这个目录为基础；Gateway/adapter
+#   属于 owner 级固定服务，不随某个 TUI 的当前目录变化。
 # - 这就是“测试不能影响当前开发仓库”的关键开关。
 workspace_root: ""
 
@@ -347,6 +348,8 @@ auto_bench_model_on_first_use: true
 # - gateway 是后台常驻外壳，chat/TUI 后续会作为客户端 attach。
 # - 第一版先用本地文件管理状态：pid、heartbeat、state、stop request 和日志。
 # - 调整这些配置后，重启 gateway 即可生效；任务状态仍保存在 subagent/task 账本里。
+# - 留空时固定落在 owner workspace/runtime/services/gateway；多个不同 cwd 的 TUI 共用这一处。
+# - 显式绝对路径原样使用；显式相对路径以 owner workspace 解析，不以启动 TUI 的 cwd 解析。
 gateway_workspace: ""
 gateway_heartbeat_interval: 5
 gateway_stale_seconds: 120
@@ -421,6 +424,7 @@ gateway_auth_token: ""
 
 # 外部聊天工具 / TUI 文件适配器工作区。
 # 第一版 adapter file 会从 inbox 读 JSON 消息，把结果写到 outbox。
+# 留空时固定落在 owner workspace/runtime/services/adapters/file；相对覆盖同样以 owner workspace 解析。
 adapter_workspace: ""
 
 # 飞书（Lark）通道适配器配置

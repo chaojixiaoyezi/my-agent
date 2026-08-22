@@ -96,6 +96,12 @@ def submit_chat_request(
             system_task=content.system_task,
             interactive_approvals=content.interactive_approvals,
             rich_transcript=content.rich_transcript,
+            workspace_root=str(getattr(agent, "root", "") or ""),
+            workspace_roots=[
+                str(item)
+                for item in (getattr(agent, "workspace_roots", None) or [])
+                if str(item or "").strip()
+            ],
         ),
     )
     chunk_path = gateway_chunk_path(paths, request_id)

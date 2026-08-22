@@ -22,6 +22,11 @@
 - [x] 本地/admin 主会话晋升为持久任务后，项目 `execution_cwd` 仍在真实 `allowed_write_roots` 中；
   不会出现前台能写、后台整合同路径被拒的权限分叉。远程 owner task wall、task-local child 和
   transient Audit 的既有窄授权回归保持通过。
+- [x] 两个不同 cwd 的 TUI client 共用一个 owner-level Gateway 路径；ask/thread v6 持久保存各自 cwd/roots，
+  工具 gate/handler、任务交付与 child 相对输出使用同一目录。非法 cwd 在模型前拒绝，runner future 异常
+  能落成结构化 BLOCKED；直接相关 focused tests 已通过。
+- [ ] `.7` 从非 daemon cwd 启动 TUI 能在 1--4 秒内连接唯一 Gateway，并用原样提示词 2 完成真实长任务；
+  prompt 只能输入一次，测试者不得旁路补产物或技术推动。
 - [ ] Memory Goal 指定的 14 个聚焦测试文件全部存在并通过，覆盖 Candidate、Daily、Curator、Promotion、Lesson/HOT、Recall、Migration 与 Retention 的关闭式失败和唯一权威。
 - [ ] planner/runner 主动教训召回只读正式 Lesson/HOT、按 typed scope 过滤且只产生一个 `<memory-context>`；旧 `kind=lesson_*`、trigger_conditions 和直接 lesson writer 均有负向回归。
 - [ ] Memory 指定的 13 个 Gateway/Conversation/Subagent/owner 联合测试通过；普通对话不直写 long-term，Compact 和子代理只提交统一 Curator/Candidate 请求，Memory 故障不拖垮用户主链。

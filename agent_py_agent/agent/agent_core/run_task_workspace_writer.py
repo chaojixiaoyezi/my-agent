@@ -12,6 +12,7 @@ from ..common.json_io import append_jsonl_records
 from ..conversation.authority import (
     CONVERSATION_TASK_TURN_ACTIVE_ATTR,
     CONVERSATION_TRANSIENT_WORKSPACE_ATTR,
+    conversation_execution_cwd,
 )
 from ..user_space.home_indexes import RunIndexRef, TaskIndexRef, register_run_ref, register_task_ref
 from ..user_space.run_workspace import (
@@ -426,7 +427,7 @@ def attach_run_task_workspace_context(agent, params, user_prompt: str):
     if not _should_create_workspace(agent, params):
         return params
     result = _ensure_workspace_for_run(agent, params, user_prompt)
-    primary_workspace_root = _primary_workspace_root(agent)
+    primary_workspace_root = _primary_workspace_root(agent, params)
     injection = _workspace_prompt_section(
         result,
         primary_workspace_root=primary_workspace_root,
@@ -489,7 +490,7 @@ def materialize_promoted_task_workspace(agent: object, params: object, goal: str
     contract = _delivery_contract_with_workspace(
         getattr(params, "delivery_contract", None),
         result,
-        primary_workspace_root=_primary_workspace_root(agent),
+        primary_workspace_root=_primary_workspace_root(agent, params),
     )
     if contract is not None:
         params.delivery_contract = contract
@@ -806,8 +807,18 @@ def _task_attributes_with_workspace(attrs: object, paths) -> dict:
     return result
 
 
-def _primary_workspace_root(agent) -> Path:
-    root = getattr(getattr(agent, "tools", None), "workspace_root", None) or getattr(agent, "root", ".")
+# LLM: Relative user paths must resolve from the Gateway-validated thread cwd when present. The
+# process-level registry root is only the standalone/legacy fallback and must not leak into TUI tasks.
+# 函数用途: 返回本轮用户看到的项目根目录，供任务目录提示和交付路径换算共用。
+def _primary_workspace_root(agent, params: object | None = None) -> Path:
+    current = params if params is not None else getattr(agent, "_current_run_params", None)
+    root = conversation_execution_cwd(getattr(current, "task_attributes", None))
+    if not root:
+        root = getattr(getattr(agent, "tools", None), "workspace_root", None) or getattr(
+            agent,
+            "root",
+            ".",
+        )
     return Path(root).expanduser().resolve(strict=False)
 
 

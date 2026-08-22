@@ -35,6 +35,8 @@ from ..conversation.audit_lifecycle import (
 )
 from ..conversation.authority import (
     CONVERSATION_AUDIT_PREPARE_ATTR,
+    CONVERSATION_EXECUTION_CWD_ATTR,
+    CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR,
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
     CONVERSATION_WORK_KIND_ATTR,
     CONVERSATION_WORK_NAME_ATTR,
@@ -139,6 +141,14 @@ _CONVERSATION_COMPACT_PROGRESS_STAGES = frozenset(
     }
 )
 logger = logging.getLogger(__name__)
+
+
+# LLM: Invalid client workspace settings are objective path/scope failures. They stop before the
+# transcript or model turn and retain a stable error code; no fallback may silently run in the
+# Gateway daemon's own cwd.
+# 类用途: 表示 TUI/CLI 提交的工作目录不存在、格式错误或越过当前 owner 边界。
+class GatewayWorkspaceScopeError(ValueError):
+    error_code = "GATEWAY_WORKSPACE_INVALID"
 
 
 def open_chunk_stream(chunk_path: Path) -> tuple[Path, float]:
@@ -735,6 +745,8 @@ class _GatewayWorkspaceSelection:
 @dataclass(frozen=True)
 class _GatewayConversationContext:
     thread_id: str = ""
+    cwd: str = ""
+    runtime_workspace_roots: tuple[str, ...] = ()
     compact_summary: str = ""
     compact_operation_evidence: dict[str, object] = field(default_factory=dict)
     compact_operation_evidence_ref: str = ""
@@ -1669,6 +1681,11 @@ def _gateway_task_attributes(conversation: _GatewayConversationContext) -> dict 
     if conversation.thread_id:
         attrs["conversation_thread_id"] = conversation.thread_id
         attrs[CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR] = True
+    if conversation.cwd:
+        attrs[CONVERSATION_EXECUTION_CWD_ATTR] = conversation.cwd
+        attrs[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] = list(
+            conversation.runtime_workspace_roots or (conversation.cwd,)
+        )
     if conversation.workspace_task is not None:
         task = conversation.workspace_task
         attrs[CONVERSATION_WORKSPACE_TASK_ID_ATTR] = task.task_id
@@ -1756,6 +1773,12 @@ def _preflight_gateway_conversation(
         )
     return _GatewayConversationContext(
         thread_id=str(thread.thread_id or ""),
+        cwd=str(getattr(thread, "cwd", "") or ""),
+        runtime_workspace_roots=tuple(
+            str(item)
+            for item in (getattr(thread, "runtime_workspace_roots", ()) or ())
+            if str(item or "").strip()
+        ),
         compact_generation=max(0, int(getattr(thread, "compact_generation", 0) or 0)),
     )
 
@@ -1813,6 +1836,12 @@ def _gateway_conversation_context(
     )
     return _GatewayConversationContext(
         thread_id=thread.thread_id,
+        cwd=str(getattr(thread, "cwd", "") or ""),
+        runtime_workspace_roots=tuple(
+            str(item)
+            for item in (getattr(thread, "runtime_workspace_roots", ()) or ())
+            if str(item or "").strip()
+        ),
         compact_summary=thread.summary,
         compact_operation_evidence=dict(getattr(thread, "compact_operation_evidence", {}) or {}),
         compact_operation_evidence_ref=_compact_operation_evidence_ref(
@@ -1838,6 +1867,10 @@ def _load_gateway_thread(
     spec: dict,
 ) -> tuple[object | None, dict | None]:
     """Load the scoped thread without mixing persistence errors into prompt assembly."""
+    cwd, runtime_workspace_roots = _gateway_request_workspace_scope(
+        inputs.agent,
+        inputs.request,
+    )
     try:
         thread = store.get_or_create_thread(
             {
@@ -1852,11 +1885,78 @@ def _load_gateway_thread(
                 "channel_conversation_id": str(spec.get("channel_conversation_id") or ""),
                 "channel_user_id": str(spec.get("channel_user_id") or "local-cli"),
                 "title": inputs.prompt[:80] or inputs.request_id,
+                "cwd": cwd,
+                "runtime_workspace_roots": runtime_workspace_roots,
             }
         )
     except Exception as exc:
         return None, _conversation_error(exc, "gateway.conversation.thread")
     return thread, None
+
+
+# LLM: Only a local owner may replace its thread cwd. Paths come from the structured ingress
+# workspace field, must be absolute existing directories, and cwd must stay inside one declared
+# runtime root. Remote adapters continue in their owner-home workspace and cannot submit host cwd.
+# 函数用途: 校验客户端这轮希望使用的目录，并返回可安全持久化到会话的 cwd/roots。
+def _gateway_request_workspace_scope(
+    agent: object,
+    request: dict[str, object],
+) -> tuple[str, tuple[str, ...]]:
+    if "workspace" not in request:
+        return "", ()
+    raw = request.get("workspace")
+    if not isinstance(raw, dict):
+        raise GatewayWorkspaceScopeError("workspace 必须是对象")
+    provider = str(
+        getattr(getattr(agent, "config", None), "my_agent_owner_provider", "local") or "local"
+    ).strip().lower()
+    if provider not in {"", "local"}:
+        raise GatewayWorkspaceScopeError("远程 owner 不能覆盖主机工作目录")
+    cwd = _existing_absolute_workspace_dir(raw.get("cwd"), field_name="cwd")
+    raw_roots = raw.get("roots")
+    if raw_roots is None:
+        raw_roots = []
+    if not isinstance(raw_roots, list):
+        raise GatewayWorkspaceScopeError("workspace.roots 必须是数组")
+    roots: list[Path] = []
+    for value in raw_roots:
+        path = _existing_absolute_workspace_dir(value, field_name="roots")
+        if path not in roots:
+            roots.append(path)
+    if not roots:
+        roots.append(cwd)
+    if not any(_path_is_within(cwd, root) for root in roots):
+        raise GatewayWorkspaceScopeError("workspace.cwd 不在声明的 roots 内")
+    return str(cwd), tuple(str(path) for path in roots)
+
+
+# LLM: Workspace validation resolves symlinks exactly once and requires a live directory. A
+# missing or relative path is never replaced by the daemon cwd because that would execute elsewhere.
+# 函数用途: 将一个客户端目录字段校验为现存绝对目录。
+def _existing_absolute_workspace_dir(value: object, *, field_name: str) -> Path:
+    text = str(value or "").strip()
+    candidate = Path(text).expanduser()
+    if not text or not candidate.is_absolute():
+        raise GatewayWorkspaceScopeError(f"workspace.{field_name} 必须是绝对目录")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise GatewayWorkspaceScopeError(
+            f"workspace.{field_name} 目录不存在或不可访问"
+        ) from exc
+    if not resolved.is_dir():
+        raise GatewayWorkspaceScopeError(f"workspace.{field_name} 不是目录")
+    return resolved
+
+
+# LLM: This containment helper compares canonical paths only and has no string-prefix fallback.
+# 函数用途: 判断 cwd 是否位于某个声明的工作区根目录内。
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _load_gateway_compact_context(

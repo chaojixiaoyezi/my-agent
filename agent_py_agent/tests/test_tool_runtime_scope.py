@@ -116,6 +116,34 @@ def test_restricted_tool_search_cannot_load_ungranted_deferred_tools(tmp_path) -
     assert payload["not_loaded"] == ["create_subagents"]
 
 
+def test_registry_gates_and_handler_share_per_turn_client_cwd(tmp_path) -> None:
+    service_root = tmp_path / "service"
+    client_root = tmp_path / "client-project"
+    service_root.mkdir()
+    client_root.mkdir()
+    (service_root / "marker.txt").write_text("wrong-service-copy", encoding="utf-8")
+    (client_root / "marker.txt").write_text("right-client-copy", encoding="utf-8")
+    agent = _agent(service_root)
+    snapshot = agent.tools.runtime_snapshot(allowed_tools=["read_file"], run_id="cwd-run")
+    call = canonical_test_call(snapshot, "read_file", {"path": "marker.txt"})
+    attempt_id = _register_run(agent, call.run_id)
+    call = replace(call, attempt_id=attempt_id)
+
+    result = agent.tools.execute_tool(
+        call,
+        write_boundary={
+            "execution_cwd": str(client_root),
+            "execution_workspace_roots": [str(client_root)],
+            "allowed_write_roots": [str(client_root)],
+        },
+        runtime_snapshot=snapshot,
+    ).result
+
+    assert result.ok is True
+    assert "right-client-copy" in result.output
+    assert "wrong-service-copy" not in result.output
+
+
 class _SwitchTool(BaseTool):
     """LLM: controllable readiness proves snapshot and live recheck semantics without external services."""
 

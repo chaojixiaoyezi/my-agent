@@ -1,5 +1,14 @@
 # STATUS
 
+## 2026-08-22 单 Gateway 多目录启动失败已定位（本地候选）
+
+- `.7` 正式提示词 2 的 TUI 从 `/root/dsh-tui-p2-f5d28b8` 启动时在 `Connecting to Gateway` 退出，prompt
+  未发送、没有创建任务。不是 MiniMax 变慢，而是 Gateway 队列路径错误绑定了客户端 cwd hash。
+- 当前候选把 Gateway/adapter 固定到 owner service runtime，并将客户端 cwd/roots 作为 ask/thread v6
+  的结构化字段传到前台、后台、工具和 child；非法目录在模型调用前关闭式失败。
+- 同批修复 runner future 异常分支缺少运行时 `RecordRunnerResultParams` 导入导致的二次 `NameError`。
+  直接相关 focused tests 已通过；严格 gate、推送、`.7` 单 Gateway 部署和提示词 2 真 TUI 仍待完成。
+
 ## 2026-08-21 主会话任务晋升后的项目 cwd 写权（真机失败已定位，本地候选）
 
 - `26563ac` 已推送并部署到 `.7` 单 Gateway；配置误漏的 `model_backend` 也已在测试机纠正为

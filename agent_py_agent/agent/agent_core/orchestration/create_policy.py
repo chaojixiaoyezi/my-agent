@@ -11,7 +11,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ...common.value_parsing import TOOL_TEXT_LIST_OPTIONS, bool_value, string_list
-from ...conversation.authority import CONVERSATION_REQUEST_ID_ATTR
+from ...conversation.authority import (
+    CONVERSATION_REQUEST_ID_ATTR,
+    conversation_execution_cwd,
+    current_conversation_task_attributes,
+)
 from ...runtime_errors import runtime_error_report
 from ...settings.defaults import DEFAULT_COMMAND_ACCESS_MODE
 from ...subagents.role_templates import (
@@ -1264,10 +1268,17 @@ def _primary_workspace_output_dir(agent) -> Path | None:
     return (root / "output").resolve(strict=False)
 
 
+# LLM: Child output defaults inherit the current Gateway-validated project cwd. Falling back to
+# the daemon registry root is allowed only when no typed conversation cwd exists.
+# 函数用途: 返回当前主代理派子代理时使用的项目根目录，保证相对输入输出落在发起 TUI 的目录。
 def _primary_workspace_root(agent) -> Path | None:
-    root = getattr(getattr(agent, "tools", None), "workspace_root", None) or getattr(
-        agent, "root", ""
-    )
+    root = conversation_execution_cwd(current_conversation_task_attributes(agent))
+    if not root:
+        root = getattr(getattr(agent, "tools", None), "workspace_root", None) or getattr(
+            agent,
+            "root",
+            "",
+        )
     if not isinstance(root, (str, Path)) or not str(root).strip():
         return None
     try:

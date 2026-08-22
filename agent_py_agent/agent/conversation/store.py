@@ -588,6 +588,13 @@ class ConversationThreadStore(ConversationBaseStore):
         self._require_thread(thread_id)
         current = now(request.get("now"))
         binding = _channel_binding(thread_id, current, request)
+        requested_cwd = str(request.get("cwd") or "").strip()
+        raw_runtime_roots = request.get("runtime_workspace_roots")
+        requested_runtime_roots = tuple(
+            str(item)
+            for item in (raw_runtime_roots if isinstance(raw_runtime_roots, (list, tuple)) else [])
+            if str(item or "").strip()
+        )
         updated = self._update_thread_atomic(
             thread_id,
             lambda latest: replace(
@@ -596,6 +603,10 @@ class ConversationThreadStore(ConversationBaseStore):
                 owner_id=str(request.get("owner_id") or latest.owner_id or ""),
                 owner_home=str(request.get("owner_home") or latest.owner_home or ""),
                 channel_bindings=_replace_binding(latest, binding),
+                cwd=requested_cwd or latest.cwd,
+                runtime_workspace_roots=(
+                    requested_runtime_roots or latest.runtime_workspace_roots
+                ),
                 updated_at=max(latest.updated_at, current),
             ),
         )
@@ -790,6 +801,8 @@ class ConversationThreadStore(ConversationBaseStore):
                 "channel": kwargs.get("channel", ""),
                 "channel_conversation_id": kwargs.get("channel_conversation_id", ""),
                 "channel_user_id": kwargs.get("channel_user_id", ""),
+                "cwd": kwargs.get("cwd", ""),
+                "runtime_workspace_roots": kwargs.get("runtime_workspace_roots", ()),
                 "now": kwargs.get("now"),
             }
         )

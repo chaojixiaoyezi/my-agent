@@ -1,6 +1,11 @@
 
 from __future__ import annotations
 
+"""LLM: Resolve owner-scoped durable paths while separating stable services from project state.
+
+模块用途: 为一个 owner 计算 Gateway、会话、子代理和记忆等运行目录；固定服务不随客户端 cwd 漂移。
+"""
+
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,6 +51,9 @@ def apply_runtime_paths_to_config(config: Any, resolution: RuntimePathResolution
             setattr(config, field_name, str(path))
 
 
+# LLM: One resolution combines owner-level services with workspace-hashed state. New durable
+# concepts must be placed in exactly one of those scopes and must not be duplicated as fallback.
+# 函数用途: 汇总当前 owner 的固定服务目录和当前项目的隔离运行目录。
 def _owner_runtime_paths(config: Any, home: Any, *, root: Path) -> tuple[dict[str, Path], tuple[str, ...]]:
     owner_home = Path(home.owner_home_dir)
     owner_workspace = Path(getattr(home, "owner_workspace_dir", owner_home / "workspace"))
@@ -53,6 +61,7 @@ def _owner_runtime_paths(config: Any, home: Any, *, root: Path) -> tuple[dict[st
     inputs = _OwnerRuntimePathInputs(config=config, home=home, owner_home=owner_home, root=root, runtime_root=runtime_root)
     paths = {
         **_owner_memory_and_session_paths(inputs),
+        **_owner_service_runtime_paths(inputs, owner_workspace=owner_workspace),
         **_owner_workspace_runtime_paths(inputs),
     }
     overrides = tuple(field_name for field_name in paths if str(getattr(config, field_name, "") or ""))
@@ -104,8 +113,6 @@ def _owner_workspace_runtime_paths(inputs: _OwnerRuntimePathInputs) -> dict[str,
             local_store_dir / "events.jsonl",
         ),
         "subagent_workspace": _configured_or_default(config, root, "subagent_workspace", runtime_root / "subagents"),
-        "gateway_workspace": _configured_or_default(config, root, "gateway_workspace", runtime_root / "gateway"),
-        "adapter_workspace": _configured_or_default(config, root, "adapter_workspace", runtime_root / "adapters" / "file"),
         "conversation_workspace": _configured_or_default(
             config,
             root,
@@ -119,6 +126,48 @@ def _owner_workspace_runtime_paths(inputs: _OwnerRuntimePathInputs) -> dict[str,
             runtime_root / "collaboration",
         ),
     }
+
+
+# LLM: Gateway and adapter paths identify one owner-level service, not one project cwd. Relative
+# overrides therefore resolve from the stable owner workspace; request-specific cwd travels in the
+# ingress contract and must never select a second daemon queue.
+# 函数用途: 为同一用户的所有 TUI、Web 和消息入口返回唯一 Gateway/adapter 运行目录。
+def _owner_service_runtime_paths(
+    inputs: _OwnerRuntimePathInputs,
+    *,
+    owner_workspace: Path,
+) -> dict[str, Path]:
+    service_root = owner_workspace / "runtime" / "services"
+    return {
+        "gateway_workspace": _configured_owner_service_path(
+            inputs.config,
+            owner_workspace,
+            "gateway_workspace",
+            service_root / "gateway",
+        ),
+        "adapter_workspace": _configured_owner_service_path(
+            inputs.config,
+            owner_workspace,
+            "adapter_workspace",
+            service_root / "adapters" / "file",
+        ),
+    }
+
+
+# LLM: An explicit absolute service path remains authoritative. Relative values are owner-scoped
+# so launching a thin client from another cwd cannot silently derive another service identity.
+# 函数用途: 解析 Gateway/adapter 的稳定配置路径；相对值以 owner workspace 为基准。
+def _configured_owner_service_path(
+    config: Any,
+    owner_workspace: Path,
+    field_name: str,
+    owner_default: Path,
+) -> Path:
+    raw = str(getattr(config, field_name, "") or "")
+    if not raw:
+        return owner_default
+    path = Path(raw).expanduser()
+    return path if path.is_absolute() else owner_workspace / path
 
 
 def _configured_or_default(config: Any, root: Path, field_name: str, owner_default: Path) -> Path:

@@ -7,7 +7,10 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from ..agent.gateway_parts.request_client import GatewayAskExecutionOptions
+from ..agent.gateway_parts.request_client import (
+    GatewayAskExecutionOptions,
+    gateway_request_workspace_payload,
+)
 from ..agent.settings import load_config
 from ..agent.settings.services.runtime_config_env import apply_runtime_config_environment
 from ..agent.user_space.home_layout import home_paths
@@ -181,10 +184,19 @@ class GatewayChatClientAgent:
                 "expected_turn_id": turn_id,
             },
         }
+        workspace = self._workspace_payload()
+        if workspace:
+            payload["workspace"] = workspace
         if execution_options is not None:
             payload.update(execution_options.to_payload())
         status, body = self._post_gateway_json("/ask", payload, timeout=2.0)
         return _active_turn_input_result(status, body)
+
+    # LLM: The thin client reports its cwd on queued turns without using that cwd to locate the
+    # daemon. Gateway service identity stays owner-scoped while the server validates this setting.
+    # 函数用途: 返回当前 TUI 希望本会话使用的工作目录和可见根目录。
+    def _workspace_payload(self) -> dict[str, object]:
+        return gateway_request_workspace_payload(self.root, self.workspace_roots)
 
     # LLM: Once POST returns the stable ingress id, all later reconciliation is read-only. This
     # prevents a TUI session from resubmitting text merely because a consumed event was missed.
