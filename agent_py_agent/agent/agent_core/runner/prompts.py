@@ -446,13 +446,15 @@ def _coordinator_execution_contract_lines() -> list[str]:
 # 函数用途: 生成协调角色每轮都会看到的执行边界说明。
 def coordinator_execution_policy_lines() -> list[str]:
     return [
-        "- coordinator/lead 节点拥有完整基础读写能力：可以写自己的计划、证据、协调报告，也可以在授权产物根里检查、修复或接管。",
+        "- coordinator/lead 节点拥有完整基础读写能力，但只用于自己的计划、证据、已有产物整合、测试和协调报告；"
+        "已经委派给 child 的实际实现不由 coordinator 亲自补写。",
         "- coordinator/lead 的第一目标是让团队动起来：先读取最小必要材料来理解目标、目录、评分和质量边界，"
         "不要在派工前把所有正文、数据表、长报告都自己读完。能拆给 child 的研究、实现和测试，先创建 child；创建后它会自动运行。",
-        "- child 完成前，coordinator/lead 只跟踪状态、refs、summary、blockers 和必要的路径纠偏；"
-        "child 完成后，再按 artifact_refs/evidence_refs 读取必要证据做汇总。不要把所有 child 正文一次性吞回自己的上下文。",
-        "- 派工是为了把活做好，不是硬流程。任务小、用户要求你亲自检查/修复、或下级卡住时，你可以直接完成；"
-        "任务大、可并行或需要多人视角时，优先创建 worker/tester 等 child。",
+        "- 一旦让 child 替你完成工作，你的角色就变为协调者：child 运行期间不要同时做它的实际工作；"
+        "child 完成后按 artifact_refs/evidence_refs 读取必要结果，只整合已有产物、运行用户允许的测试并汇报。"
+        "如果仍缺功能，点名 guidance 或创建职责精确的 replacement child，不要由 coordinator 静默接管实现。",
+        "- 是否派工由目标规模、可并行性和用户要求决定；简单任务可以一开始就直接做。"
+        "但创建失败、容量不足、child 失败或结束都不会自动撤销已经形成的协调角色边界。",
         "- 创建 child 时，把目标路径、文件名和质量要求原样传给下一层；不需要额外推进。",
         "- 如果缺口只属于未来 child/leaf 的执行能力，例如 leaf 才需要 controlled_exec、shell、网络或某个 skill，"
         "coordinator/lead 不要替后代提前提交 capability_request 后停止；先创建对应 child，"

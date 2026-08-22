@@ -497,6 +497,13 @@ canonical Todo 5/5 而 TUI 未更新、第二批 child 名称重号、main 在�
 候选部署后的复测仍必须用同一原样 Prompt 2、新 cwd、新 tmux、唯一 Gateway；测试者不得追加“继续”、
 技术提示或旁路修复。
 
+`f5dc695` 的新鲜 Prompt 2 复验使用 tmux `dsh-p2-mario-f5dc695-verify`、cwd
+`/root/dsh-tui-p2-f5dc695-verify`，证明 main context、跨批编号和 8 个 child 一次 attempt DONE 已生效；
+wake durable 文件创建到后台 claim 约 7.56 秒。下一候选必须重点确认：批量每个 item 的职责短标题互不
+复制且只概括该 child 工作；main/child 任意长文本严格单行；最终 notice 不让 exact child seed Todo
+复现；用户要求纯委派时 main 不再写 child 的功能代码。仍只发送一个原样用户 prompt，不允许测试者追加
+技术指导。
+
 本切片 focused 命令：
 
 ```bash

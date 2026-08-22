@@ -38,6 +38,10 @@ class TestOrchestrationToolsSpec:
         assert "context_manifest" not in spec.parameter_descriptions
         assert "context_packs" not in spec.parameter_descriptions
         assert "output_refs" not in spec.parameter_descriptions
+        item_properties = spec.input_schema["properties"]["items"]["items"]["properties"]
+        assert "职责短标题" in item_properties["description"]["description"]
+        assert "不要复制顶层" in item_properties["description"]["description"]
+        assert "每个 item" in item_properties["goal"]["description"]
 
     def test_orchestration_specs_do_not_expose_role_template_paths(self):
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool

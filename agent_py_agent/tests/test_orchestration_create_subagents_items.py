@@ -77,6 +77,31 @@ class TestCreateSubagentsItemsMode:
         assert payload["auto_start"]["run_ids"] == ["run_1", "run_2", "run_3"]
         assert payload["next_action"]["action"] == "await_lifecycle_event"
 
+    def test_batch_description_does_not_replace_each_child_duty(self):
+        """顶层批次说明不能扇出成所有 child 相同的 TUI 职责短标题。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = _agent()
+        mock_agent.subagents.create_run.side_effect = _create_run_sequence()
+
+        result = CreateSubagentsTool(mock_agent).execute({
+            "goal": "并行完成游戏模块",
+            "description": "超级玛丽游戏并行开发",
+            "items": [
+                {"goal": "开发游戏核心引擎"},
+                {"goal": "设计前三个关卡", "description": "设计前三个关卡"},
+            ],
+        })
+
+        created_params = [
+            call.kwargs["params"] for call in mock_agent.subagents.create_run.call_args_list
+        ]
+        assert result.ok is True
+        assert [params.description for params in created_params] == [
+            "",
+            "设计前三个关卡",
+        ]
+
     def test_items_are_capped_by_max_subagents(self):
         """items[] 超过容量时整批拒绝，避免无声丢失一部分任务。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool

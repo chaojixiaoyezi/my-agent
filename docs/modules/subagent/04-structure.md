@@ -16,15 +16,20 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 - 当前上下文 token 来自统一 provider preflight 的 `model_visible_context_usage.v1.current_tokens`，在每次
   真实 child 模型调用前写入 exact run 的有界数字快照；不是累计账单 token。Compact 继续只读 exact run
   的 apply ledger。控制面、TUI 和后续 Web 不得各算一套，缺失/损坏事实按空展示处理且不改变 run 状态。
-- `SubAgentTask.description` 是创建时保存的非权威职责短标题。`create_subagents` 顶层和 `items[]` 均可带
-  description，递归层级使用同一字段；省略时展示层可退回有界 goal，但任何运行、权限、恢复和结束逻辑
+- `SubAgentTask.description` 是创建时保存的非权威职责短标题。单 child 可从 `create_subagents` 顶层写入；
+  批量 `items[]` 必须逐项写入，顶层 description 只代表整批派工，不能扇出成所有 child 的相同文案。
+  递归层级使用同一字段；省略时展示层只可退回该 child 的有界 goal，但任何运行、权限、恢复和结束逻辑
   都不得读取 description 或 goal 做机器判断。
 - 系统生成的 sibling display name 在同一 exact parent 的全部历史批次中连续编号；后批不能重新出现
   `worker-1/worker-2`。该编号只用于稳定展示与未来精确控制，不替代 canonical run id。
 - main `Working`、fixed Todo 和 fixed child panel 都是同一 reducer snapshot 的派生 view。
   main 位于正文末尾，Todo 位于输入框上，child panel 位于输入框下。Todo 的 exact
-  `run_id/progress_item_ids` 标记、单行职责截断、首次 attempt 隐藏和重试文案都属于展示规则，
+  `run_id/progress_item_ids` 标记、main/child 严格单行截断、首次 attempt 隐藏和重试文案都属于展示规则，
   不能成为完成、恢复或验收信号。
+- exact `item.id == direct child.run_id` 的自动 seed Todo 在展示上限计算前过滤，live panel 与最终 notice
+  共用同一规则；canonical ledger 不删除，普通 Todo 不因前面的隐藏 seed 占满投影上限而消失。
+- 会话运行时 式协调边界只进入模型执行策略：一旦 main 把实际工作交给 child，main 只协调、整合已有产物、
+  测试和汇报；剩余实现继续 guidance 或 replacement child。它不新增机器验收，也不把描述文字解析为权限。
 
 ## Memory Candidate 接口
 

@@ -513,3 +513,39 @@ def test_runtime_background_activity_is_one_removable_animated_block() -> None:
         "done",
     ]
     assert runtime.needs_periodic_refresh() is False
+
+
+def test_long_main_activity_stays_on_one_terminal_line() -> None:
+    """长 thinking 只能截断，不能把固定 Working 区撑成两行。"""
+    from agent_py_agent.cli.chat_parts.tui_block_renderer import (
+        TuiRenderContext,
+        fragments_text,
+        render_tui_snapshot,
+    )
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+
+    runtime = TuiRuntime("session-long-main-activity")
+    assert runtime.update_background_activity(
+        1,
+        main_activity={
+            "phase": "thinking",
+            "activity": (
+                "The user wants me to finalize the complete game and verify every file "
+                "before creating the final response"
+            ),
+            "started_at": 100.0,
+        },
+    ) is True
+
+    frame = render_tui_snapshot(
+        runtime.store.snapshot(),
+        TuiRenderContext(width=52, spinner_index=0, now=152.0),
+    )
+    working_lines = [
+        line
+        for line in frame.transcript_lines
+        if "Working · main" in fragments_text(line)
+    ]
+
+    assert len(working_lines) == 1
+    assert max(0, wcswidth(fragments_text(working_lines[0]))) <= 52

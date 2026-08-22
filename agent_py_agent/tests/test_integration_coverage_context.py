@@ -36,6 +36,19 @@ def test_integration_prompt_is_evidence_based_without_fixed_orchestration():
     assert "does not require" in prompt
     assert "goal_digest" not in prompt
     assert "findings_ledger" not in prompt
+    assert "main agent remains their coordinator" in prompt
+    assert "do not author the delegated implementation yourself" in prompt
+
+
+def test_coordinator_policy_does_not_silently_take_over_delegated_work():
+    from agent_py_agent.agent.agent_core.runner.prompts import (
+        coordinator_execution_policy_lines,
+    )
+
+    policy = "\n".join(coordinator_execution_policy_lines())
+    assert "角色就变为协调者" in policy
+    assert "replacement child" in policy
+    assert "下级卡住时，你可以直接完成" not in policy
 
 
 def test_scheduled_prompt_not_polluted():

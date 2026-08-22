@@ -913,6 +913,16 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   明确把“主代理只能协调/不准自己写”视为当轮执行分工，容量满时等待释放，参数错误时修正重试，不能把
   创建失败解释成静默接管授权。所有变化只作用于通用结构化身份/账本和指令优先级，不读取游戏名或任务
   关键词；138 项直接相关 focused tests 已通过，仍待严格 gate、部署和同一原样 TUI 复验。
+- `f5dc695` 真机复测进一步固定职责字段语义：单 child 的顶层 description 可作为职责；批量创建时顶层
+  description 仅描述整批，不能扇出到 `items[]`。每项优先显示自己的 description，缺失只退回自己的 goal；
+  这一行只回答“该 child 负责什么”，不承载路径、模型阶段或长目标。nested native schema 必须把逐项
+  goal/description 说明显式暴露给 provider，不能只在顶层参数说明里约定。
+- main Working 与 child row 都采用 终端交互 式固定后缀宽度预算，任意 thinking/职责文本只能在剩余列
+  单行截断。自动 child seed Todo 的 exact-id 去重先于 128 行投影上限，并同时适用于 live panel 和最终
+  notice；账本不删，普通 Todo 不受影响。
+- 对照 会话运行时 `core/templates/agents/orchestrator.md` 后，默认递归 coordinator policy 固定为：实际工作一经
+  委派，main 只协调、读取和整合已有产物、测试与汇报；缺口继续 guidance 或 replacement child。失败、
+  容量不足和终态都不自动转移实现职责。该约束只写入模型执行上下文，不作为机器状态、权限或验收门。
 - `.7` 正式验收必须使用唯一 Gateway 和 `MiniMax-M2.7`，依次执行 `TESTS.md` 的四个原样重型 prompt。
   每次启动、切换或输入 TUI 之前必须先向用户公开 tmux session 名称与完整 attach 命令；测试者只观察，
   不旁路补代码或向被测代理发送技术推动消息。

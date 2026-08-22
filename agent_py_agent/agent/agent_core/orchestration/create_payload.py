@@ -313,6 +313,10 @@ def _string_items(value: object) -> list[str]:
 _BASE_FIELDS_EXCLUDED_FROM_ITEM = {
     "items",
     "goal",
+    # 顶层 description 描述整批派工，不能扇出成每个 child 的同一句职责。
+    # 每个 item 自己的 description 才是该 child 的展示短标题；省略时只读
+    # 活动投影会退回该 item 的 goal 开头。
+    "description",
     "plan",
     "context_manifest",
     # covers 是"该子代理负责哪些清单项"的逐个绑定;顶层值若扇出到每个 item,任何一个

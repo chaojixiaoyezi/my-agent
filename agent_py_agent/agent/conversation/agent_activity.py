@@ -276,7 +276,11 @@ def conversation_agent_activity(
         )
 
     rows, run_warnings = _direct_subagent_rows(agent, set(active_task_ids))
-    progress_items, progress_warnings = _task_progress_items_from_links(agent, active_links)
+    progress_items, progress_warnings = _task_progress_items_from_links(
+        agent,
+        active_links,
+        hidden_item_ids=_row_run_ids(rows),
+    )
     visible = rows[:_MAX_PROJECTED_SUBAGENTS]
     return ConversationAgentActivity(
         active_task_count=len(active_task_ids),
@@ -331,7 +335,12 @@ def task_progress_items_for_task(
         link = loader(str(task_id).strip())
     except Exception:
         return ()
-    items, _warnings = _task_progress_items_from_links(agent, [link] if link else [])
+    rows, _run_warnings = _direct_subagent_rows(agent, {str(task_id).strip()})
+    items, _warnings = _task_progress_items_from_links(
+        agent,
+        [link] if link else [],
+        hidden_item_ids=_row_run_ids(rows),
+    )
     return items
 
 
@@ -341,6 +350,8 @@ def task_progress_items_for_task(
 def _task_progress_items_from_links(
     agent: object,
     links: list[object],
+    *,
+    hidden_item_ids: set[str] | None = None,
 ) -> tuple[tuple[dict[str, object], ...], list[str]]:
     candidates = [link for link in links if link is not None]
     if not candidates:
@@ -360,16 +371,35 @@ def _task_progress_items_from_links(
     raw_items = progress.get("items") if isinstance(progress, dict) else None
     if not isinstance(raw_items, list | tuple):
         return (), []
-    rows = tuple(
-        {
-            "id": _bounded_text(item.get("id"), limit=128),
-            "title": _bounded_text(item.get("title"), limit=_ACTIVITY_TEXT_LIMIT),
-            "status": _bounded_text(item.get("status"), limit=32) or "pending",
-        }
-        for item in raw_items[:_MAX_PROJECTED_PROGRESS_ITEMS]
-        if isinstance(item, dict) and _bounded_text(item.get("id"), limit=128)
-    )
-    return rows, []
+    hidden = hidden_item_ids or set()
+    rows: list[dict[str, object]] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        item_id = _bounded_text(item.get("id"), limit=128)
+        if not item_id or item_id in hidden:
+            continue
+        rows.append(
+            {
+                "id": item_id,
+                "title": _bounded_text(item.get("title"), limit=_ACTIVITY_TEXT_LIMIT),
+                "status": _bounded_text(item.get("status"), limit=32) or "pending",
+            }
+        )
+        if len(rows) >= _MAX_PROJECTED_PROGRESS_ITEMS:
+            break
+    return tuple(rows), []
+
+
+# LLM: Child identity joins are exact run-id joins. This helper must never use
+# descriptions, goals, titles, roles, or status prose to decide Todo visibility.
+# 函数用途: 从直属子代理展示行提取精确 run_id，供 Todo 视图去掉重复的自动派工项。
+def _row_run_ids(rows: list[dict[str, object]]) -> set[str]:
+    return {
+        str(row.get("run_id") or "").strip()
+        for row in rows
+        if str(row.get("run_id") or "").strip()
+    }
 
 
 # LLM: Owner root lookup follows the same structured home/root fallback as the

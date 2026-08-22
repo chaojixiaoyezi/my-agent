@@ -93,6 +93,12 @@ canonical subagent run 生成有界直属 child 快照，TUI 在输入框下固�
 职责短标题、耗时、当前上下文 token 与 Compact。固定后缀先占宽度，短标题按剩余列截断且永不换行；
 该区域不进 transcript，不影响用户上翻，也不作完成或重试权威。
 
+`f5dc695` 的新鲜 Prompt 2 轮证明 durable wake 创建到后台 claim 约 7.56 秒，长等待主要来自 main 被
+唤醒后又做了已委派实现。当前候选继续收口：批量顶层 description 不复制给每个 child，逐 item schema
+明示独立职责；main/child 都严格单行；final notice 与 live Todo 共用 exact run-id 去重；会话运行时 式
+coordinator 在委派后只整合、测试和汇报，缺口继续交给 child。8 个直接相关 focused 文件已通过，待严格
+gate、部署和下一条原样 MiniMax-M2.7 TUI 复验。
+
 `714c0c8` 已推送并部署 `.7`，本地 117 项 focused、远端 11 项投影/渲染 focused 与提交前严格 gate
 均通过，按用户约定未重跑全仓 pytest。真实 TUI 已证明两个 child 一次 attempt 自然完成，固定活动区能
 逐步显示状态、动作、耗时并在根任务收口后移除。该轮也抓到旧 Gateway 进程保留 process-local thread

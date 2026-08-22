@@ -59,6 +59,10 @@ _CREATE_PARAMETER_DETAILS = {
     ),
     "covers": "每个 item 只绑它自己负责的清单项(id 来自 task_progress coverage);别把全部 id 复制给每个子代理,绑不存在的 id 不生效。",
 }
+_CREATE_ITEM_PARAMETER_DETAILS = {
+    "goal": "每个 item 都必填；只写这一个子代理要完成和交付的具体工作，不要复制顶层整批 goal。",
+    "description": "每个 item 可选；职责短标题只用 3-12 字概括这一个子代理负责什么，不要复制顶层整批 description。",
+}
 _CREATE_EXAMPLES = [
     '{"tool":"create_subagents","goal":"实现用户认证模块并写到 platform/auth/,要可运行","description":"实现用户认证","output_files":["platform/auth/"]}',
     '{"tool":"create_subagents","goal":"并行完成认证实现与资料核对","items":[{"goal":"实现注册登录模块","description":"实现注册登录","output_files":["platform/auth/"]},{"goal":"读资料B并写证据摘要","description":"核对资料B","input_refs":["data/b.md"],"output_files":["reports/b.md"]}]}',

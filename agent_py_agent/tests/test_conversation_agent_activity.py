@@ -309,3 +309,130 @@ def test_conversation_agent_activity_projects_canonical_task_progress(tmp_path: 
         {"id": "core", "title": "游戏核心", "status": "done"},
         {"id": "qa", "title": "整合测试", "status": "in_progress"},
     )
+
+
+def test_task_progress_projection_hides_exact_direct_child_seed_after_finish(
+    tmp_path: Path,
+) -> None:
+    """active panel 与最终 notice 都按 exact run id 隐藏自动派工 Todo，账本不改。"""
+    import hashlib
+
+    from agent_py_agent.agent.conversation.agent_activity import (
+        conversation_agent_activity,
+        task_progress_items_for_task,
+    )
+    from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
+
+    owner_root = tmp_path / "owner"
+    task_path = str(tmp_path / "project" / "bbb")
+    ledger_id = f"task-path:{hashlib.sha256(task_path.encode('utf-8')).hexdigest()[:16]}"
+    child_id = "subagent-1787400000-deadbeef"
+    write_task_progress(
+        owner_root,
+        ledger_id,
+        {
+            "items": [
+                {
+                    "id": child_id,
+                    "title": "子代理负责开发核心引擎并写入很长的绝对路径",
+                    "status": "done",
+                },
+                {"id": "qa", "title": "整合测试", "status": "done"},
+            ]
+        },
+    )
+    link = SimpleNamespace(
+        task_id="task-live",
+        task_path=task_path,
+        status="active",
+        created_at=20.0,
+    )
+    store = SimpleNamespace(
+        active_task_links_report=lambda _thread_id: ([link], []),
+        load_task_link=lambda _task_id: link,
+    )
+    child = _run(
+        child_id,
+        status="DONE",
+        description="开发游戏核心引擎",
+        ended_at=19.0,
+    )
+    agent = SimpleNamespace(
+        home_paths=SimpleNamespace(owner_home_dir=owner_root),
+        subagents=SimpleNamespace(
+            list_runs_report=lambda: SimpleNamespace(runs=[child], load_errors=[])
+        ),
+    )
+
+    activity = conversation_agent_activity(agent, store, "thread-progress")
+
+    assert list(activity.task_progress_items) == [
+        {"id": "qa", "title": "整合测试", "status": "done"}
+    ]
+    assert task_progress_items_for_task(agent, store, "task-live") == (
+        {"id": "qa", "title": "整合测试", "status": "done"},
+    )
+    assert [item["id"] for item in read_task_progress(owner_root, ledger_id)["items"]] == [
+        child_id,
+        "qa",
+    ]
+
+
+def test_task_progress_projection_applies_limit_after_hiding_child_seeds(
+    tmp_path: Path,
+) -> None:
+    """大量 child seed 被隐藏后，后面的普通 Todo 仍能填满展示上限。"""
+    import hashlib
+
+    from agent_py_agent.agent.conversation.agent_activity import (
+        conversation_agent_activity,
+    )
+    from agent_py_agent.agent.task_progress import write_task_progress
+
+    owner_root = tmp_path / "owner"
+    task_path = str(tmp_path / "project" / "large")
+    ledger_id = f"task-path:{hashlib.sha256(task_path.encode('utf-8')).hexdigest()[:16]}"
+    child_ids = [f"child-{index}" for index in range(8)]
+    ordinary_items = [
+        {"id": f"todo-{index}", "title": f"普通事项 {index}", "status": "pending"}
+        for index in range(128)
+    ]
+    write_task_progress(
+        owner_root,
+        ledger_id,
+        {
+            "items": [
+                *(
+                    {"id": child_id, "title": "自动派工项", "status": "done"}
+                    for child_id in child_ids
+                ),
+                *ordinary_items,
+            ]
+        },
+    )
+    link = SimpleNamespace(
+        task_id="task-live",
+        task_path=task_path,
+        status="active",
+        created_at=20.0,
+    )
+    children = [
+        _run(child_id, status="DONE", ended_at=19.0) for child_id in child_ids
+    ]
+    activity = conversation_agent_activity(
+        SimpleNamespace(
+            home_paths=SimpleNamespace(owner_home_dir=owner_root),
+            subagents=SimpleNamespace(
+                list_runs_report=lambda: SimpleNamespace(
+                    runs=children,
+                    load_errors=[],
+                )
+            ),
+        ),
+        SimpleNamespace(active_task_links_report=lambda _thread_id: ([link], [])),
+        "thread-progress",
+    )
+
+    assert len(activity.task_progress_items) == 128
+    assert activity.task_progress_items[0]["id"] == "todo-0"
+    assert activity.task_progress_items[-1]["id"] == "todo-127"

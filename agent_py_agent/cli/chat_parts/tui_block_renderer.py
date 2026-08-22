@@ -523,8 +523,9 @@ def _render_connection(
 
 # LLM: The main row comes only from the canonical conversation activity
 # projection and mirrors 终端交互's animated SpinnerWithVerb at transcript tail.
-# The block is removable display state, never a completion claim.
-# 函数用途: 在最新正文与 Context/Todo 之间显示带动画的 main 工作行。
+# Fixed prefix/suffix reserve their columns before the activity is truncated, so
+# arbitrary thinking text can never wrap this removable display state.
+# 函数用途: 在最新正文与 Context/Todo 之间用严格单行显示 main 动画、短动作和耗时。
 def _render_background_activity(
     block: TuiBlock,
     context: TuiRenderContext,
@@ -546,17 +547,29 @@ def _render_background_activity(
         main_label = derived_label
     main_style = "class:tui-error" if main_phase == "failed" else "class:tui-subagent-running"
     glyph = SPINNER_GLYPHS[context.spinner_index % len(SPINNER_GLYPHS)]
-    return wrap_fragments(
-        (
-            (main_style, f"{glyph} "),
-            ("class:tui-strong", "Working"),
-            ("class:tui-muted", " · main"),
-            ("class:tui-muted", f" · {main_label}"),
-            ("class:tui-muted", f" · {_format_activity_duration(elapsed)}"),
-        ),
-        width=context.width,
-        continuation_prefix=(("class:tui-thinking", "  "),),
+    prefix: tuple[Fragment, ...] = (
+        (main_style, f"{glyph} "),
+        ("class:tui-strong", "Working"),
+        ("class:tui-muted", " · main"),
     )
+    suffix: tuple[Fragment, ...] = (
+        ("class:tui-muted", f" · {_format_activity_duration(elapsed)}"),
+    )
+    label = sanitize_terminal_text(" ".join(main_label.split()))
+    label_width = max(
+        0,
+        context.width
+        - display_width_fragments(prefix)
+        - display_width_fragments(suffix)
+        - (3 if label else 0),
+    )
+    fragments = list(prefix)
+    if label and label_width > 0:
+        fragments.append(
+            ("class:tui-muted", f" · {_truncate_text(label, label_width)}")
+        )
+    fragments.extend(suffix)
+    return (_truncate_formatted_line(tuple(fragments), context.width),)
 
 
 # LLM: Child rows share the same canonical background projection as main but

@@ -2,13 +2,15 @@
 
 ## 2026-08-22 固定代理区、职责短标题与实时上下文投影
 
-- `conversation/agent_activity.py` 的公开 schema 升为 v3：直属 child 只投影 typed lifecycle、创建时的
+- `conversation/agent_activity.py` 的公开 schema 升为 v4：直属 child 只投影 typed lifecycle、创建时的
   职责短标题、每次真实模型调用前的当前总上下文 token，以及 Compact apply 次数。它不再把累计计费
   token 或“模型响应中/正在使用工具”等运行碎片当成这一行的主文案。终态 child 不残留旧动作，第一次
   attempt 不展示，只有实际重试才显示次数。
 - `create_subagents.description` 对照 终端交互 `AgentTool` 的 3--5 word description，作为可选短标题进入
-  canonical `SubAgentTask.description`；主/子/孙创建链共用。省略时只读投影退回 goal 开头，renderer
-  仍按当前终端剩余列截断。每个 child 永远只占一行，固定后缀优先保留耗时、`ctx`、Compact 和真实重试。
+  canonical `SubAgentTask.description`；主/子/孙创建链共用。单 child 可使用顶层 description；批量
+  `items[]` 时，顶层 description 只描述整批派工，绝不能复制给每个 child，每项应写自己的职责短标题。
+  省略时只读投影只退回该 item 的 goal 开头。renderer 按当前终端剩余列截断；每个 child 永远只占一行，
+  固定后缀优先保留耗时、`ctx`、Compact 和真实重试。
 - 后台 main 通过同一 agent 进程内的易失 sink 投影最近 thinking/tool/provider-retry/waiting；它只回答
   “主代理现在在干什么”，不保存正文、不拥有生命周期。最终可交付正文仍由 transcript 与 delivery contract
   持有，并以普通 assistant 消息显示。一次模型轮结束只进入 `waiting`，不等于整个任务进入 finalizing。
@@ -18,10 +20,15 @@
   `progress_item_ids` 与 typed child status 原位勾选；只有未绑定 child 才按 exact run id 新建项。
 - exact child run id 自动生成的 seed 项继续保留在 canonical 进度账本，供恢复和状态关联使用；TUI 发现
   同一个直属 child 已在输入框下方面板展示时，只在 view 层隐藏这条重复 Todo。模型自己创建的普通任务项
-  和显式 `covers` 项仍留在上方并按 child status 打标，不解析“子代理”标题文字。
+  和显式 `covers` 项仍留在上方并按 child status 打标，不解析“子代理”标题文字；隐藏发生在展示上限
+  计算前，最终后台 notice 也使用同一个 exact-id 过滤，不能在 child panel 收起后让长 seed Todo 重新出现。
 - 参照 终端交互 `SpinnerWithVerb` 和 `CoordinatorTaskPanel`，main 的动态 `Working` 行在消息区末尾/
-  Context 前，输入框下方只保留 child 行。当前候选相关 focused tests 147 项已通过；功能验收仍以
-  `.7` 单 Gateway、MiniMax-M2.7 和四个原样真实 TUI 任务为准。
+  Context 前，输入框下方只保留 child 行。main 的动作摘要和 child 的职责短标题都必须严格单行，长文本
+  只截断、不折行。当前候选相关 focused tests 已通过；功能验收仍以 `.7` 单 Gateway、MiniMax-M2.7 和
+  四个原样真实 TUI 任务为准。
+- 对照 会话运行时 orchestrator：一旦实际实现已委派给 child，main 的角色就保持为协调者，只能读取/整合现有
+  产物、执行用户允许的测试并汇报；缺口要精确指导原 child 或另派 replacement child。容量不足、参数错误、
+  child 失败或终态都不构成 main 静默接管实现的授权。这是通用分工提示，不参与机器状态或质量验收。
 
 ## 2026-08-21 递归创建、自动启动与自然收口
 

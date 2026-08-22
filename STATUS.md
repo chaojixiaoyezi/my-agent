@@ -2,6 +2,11 @@
 
 ## 2026-08-22 后台主代理、Todo 与子代理职责行（本地候选）
 
+- `f5dc695` 已推送并部署 `.7`。tmux `dsh-p2-mario-f5dc695-verify` 的全新原样 Prompt 2 证明 main
+  context 已实时变化、跨批 child 名称从 1 连续到 8、8 个 child 均一次 attempt DONE；wake 文件从创建到
+  后台 claim 约 7.56 秒，并非事件丢失。该轮新暴露：第二批四行都复制顶层“超级玛丽游戏并行开发”、
+  main 的长 thinking 把 Working 撑成多行、最终 notice 让隐藏的 child seed Todo 重新出现，且 main 在
+  child 完成后又亲自修改功能文件，造成用户感知的额外约 7 分钟。
 - `993ce4f` 已推送并部署 `.7`，唯一 Gateway 为 MiniMax-M2.7。tmux
   `dsh-p2-mario-993ce4f` 的原样提示词 2 已证明首次 ask、后台 main、6 个 child 与全部工具都保持
   `/root/dsh-tui-p2-993ce4f`；产物正确落在 `bbb/`，服务监听 `0.0.0.0:8082` 且 HTTP 200。
@@ -13,8 +18,11 @@
   实时刷新 main context，从 canonical `task_progress.v1` 刷新 Todo，并由最终 notice 补终态快照；同一
   parent 的系统 child 名称跨批连续编号。默认 prompt 同时按 会话运行时 的 delegated-task 边界明确禁止模型把
   容量满或创建失败当作主代理接管授权。
-- 当前直接相关 138 项 focused tests 已通过；严格 gate、推送、`.7` 单 Gateway 部署与同一原样 Prompt 2
-  的全新 TUI 复验仍待完成。本轮远低于 10,000 行，不运行全仓 pytest。
+- 当前候选进一步保证批量顶层 description 不扇出，每个 child 只显示自己的职责或自己的 goal 摘要；
+  main/child 活动严格单行；live/final Todo 都在投影上限前按 exact child run id 去重。会话运行时 式递归
+  coordinator 提示也明确：实际工作一经委派，容量/参数/child 终态不会授权 main 静默接管实现。
+  8 个直接相关 focused 文件已通过；严格 gate、推送、`.7` 单 Gateway 部署与下一条原样 TUI 复验仍待
+  完成。本轮远低于 10,000 行，不运行全仓 pytest。
 
 ## 2026-08-22 单 Gateway 多目录启动失败已定位（本地候选）
 
