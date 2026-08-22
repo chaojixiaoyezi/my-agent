@@ -226,18 +226,19 @@ def tui_render_context_key(
     active_activity = tuple(
         block
         for block in snapshot.active_blocks
-        if block.role in {"thinking", "background"}
+        if block.role == "thinking"
         and block.phase not in TERMINAL_RENDER_PHASES
     )
     visible_activity = _visible_activity_blocks(snapshot, active_activity)
     thinking_animation = tuple(
-        (
-            block.block_id,
-            _thinking_animation_key(block, context)
-            if block.role == "thinking"
-            else _background_animation_key(block, context),
-        )
+        (block.block_id, _thinking_animation_key(block, context))
         for block in visible_activity
+    )
+    background_animation = tuple(
+        (block.block_id, _background_animation_key(block, context))
+        for block in snapshot.active_blocks
+        if block.role == "background"
+        and block.phase not in TERMINAL_RENDER_PHASES
     )
     compact_animation = tuple(
         (
@@ -266,6 +267,7 @@ def tui_render_context_key(
         context.help_open,
         connection_animation,
         thinking_animation,
+        background_animation,
         compact_animation,
     )
 
@@ -360,10 +362,18 @@ def render_tui_snapshot(
     active_activity = tuple(
         block
         for block in snapshot.active_blocks
-        if block.role in {"thinking", "background"}
+        if block.role == "thinking"
         and block.phase not in TERMINAL_RENDER_PHASES
     )
-    active_activity_ids = {block.block_id for block in active_activity}
+    fixed_background_ids = {
+        block.block_id
+        for block in snapshot.active_blocks
+        if block.role == "background"
+        and block.phase not in TERMINAL_RENDER_PHASES
+    }
+    active_activity_ids = {
+        block.block_id for block in active_activity
+    } | fixed_background_ids
     visible_activity = _visible_activity_blocks(snapshot, active_activity)
     blocks = sorted(
         (
@@ -420,8 +430,10 @@ def _sanitize_formatted_line(line: FormattedLine) -> FormattedLine:
     return tuple(sanitized)
 
 
-# LLM: 终端交互 在权限框和可见 assistant stream 期间隐藏全局 spinner，但不终止 turn activity；判断只看 typed overlay/block。
-# 函数用途: 选择本帧应显示在内容底部的活动 spinner 块。
+# LLM: 终端交互 hides foreground thinking while permission or a visible
+# assistant stream is active. Background agent activity is independently fixed
+# beside the composer and is therefore never selected here.
+# 函数用途: 选择本帧应显示在可滚动正文末尾的前台思考活动块。
 def _visible_activity_blocks(
     snapshot: TuiViewSnapshot,
     activity_blocks: tuple[TuiBlock, ...],
@@ -438,8 +450,7 @@ def _visible_activity_blocks(
     )
     if has_visible_assistant_stream:
         return ()
-    foreground = tuple(block for block in activity_blocks if block.role == "thinking")
-    return foreground or tuple(block for block in activity_blocks if block.role == "background")
+    return tuple(block for block in activity_blocks if block.role == "thinking")
 
 
 # LLM: block dispatch 只读取 reducer role/kind/phase，未知角色显式降为 system 样式而不透传 payload。
@@ -482,10 +493,10 @@ def _render_connection(
     ),)
 
 
-# LLM: The count comes only from ConversationThread.active_task_ids. This row
-# is deliberately dim and removable, so it signals liveness without becoming
-# an assistant claim or permanent transcript entry.
-# 函数用途: 显示后台任务仍在运行的 终端交互 风格闪动图标、数量和耗时。
+# LLM: The header count and child rows come only from the canonical
+# conversation-agent activity projection. This fixed, removable panel never
+# becomes an assistant claim or permanent transcript entry.
+# 函数用途: 在输入框附近显示 终端交互/模型助手 Code 风格的 Working 标题和直属子代理状态行。
 def _render_background_activity(
     block: TuiBlock,
     context: TuiRenderContext,
@@ -494,16 +505,167 @@ def _render_background_activity(
     count = max(0, int(block.metadata.get("active_task_count") or 0))
     started_at = float(block.metadata.get("started_at") or 0.0)
     elapsed = max(0, int(context.now - started_at)) if started_at and context.now else 0
-    detail = f" · 后台任务 {count} 个 · {elapsed // 60}:{elapsed % 60:02d}"
-    return wrap_fragments(
-        (
-            ("class:tui-spinner-highlight", glyph + " "),
-            *_animated_spinner_word("Working", context.spinner_index),
-            ("class:tui-thinking", detail),
-        ),
-        width=context.width,
-        continuation_prefix=(("class:tui-thinking", "  "),),
+    rows = _subagent_activity_rows(block.metadata.get("subagents"))
+    hidden = max(0, int(block.metadata.get("hidden_subagent_count") or 0))
+    total = len(rows) + hidden
+    header_detail = _background_header_detail(count, rows, total, elapsed)
+    lines = list(
+        wrap_fragments(
+            (
+                ("class:tui-spinner-highlight", glyph + " "),
+                *_animated_spinner_word("Working", context.spinner_index),
+                ("class:tui-thinking", header_detail),
+            ),
+            width=context.width,
+            continuation_prefix=(("class:tui-thinking", "  "),),
+        )
     )
+    visible_rows = rows[:8]
+    for row in visible_rows:
+        lines.extend(_render_subagent_activity_row(row, context))
+    hidden += max(0, len(rows) - len(visible_rows))
+    if hidden:
+        lines.extend(
+            wrap_fragments(
+                (("class:tui-muted", f"还有 {hidden} 个子代理未展开"),),
+                width=context.width,
+                first_prefix=(("class:tui-muted", "    … "),),
+                continuation_prefix=(("class:tui-muted", "      "),),
+            )
+        )
+    return tuple(lines)
+
+
+# LLM: Rows are already whitelisted by runtime/reducer; this final shape check
+# prevents malformed replay metadata from reaching the row renderer.
+# 函数用途: 从 Working block 中安全取出直属子代理展示行。
+def _subagent_activity_rows(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list | tuple):
+        return []
+    return [dict(item) for item in value[:64] if isinstance(item, dict)]
+
+
+# LLM: Header aggregates canonical statuses for display only. It cannot change
+# task completion, retry, or wake behavior.
+# 函数用途: 生成 Working 标题后的主任务、子代理数量和耗时摘要。
+def _background_header_detail(
+    active_task_count: int,
+    rows: list[dict[str, object]],
+    total: int,
+    elapsed: int,
+) -> str:
+    duration = _format_activity_duration(elapsed)
+    if not rows and total <= 0:
+        return f" · 后台任务 {active_task_count} 个 · {duration}"
+    running = sum(
+        1
+        for row in rows
+        if str(row.get("status") or "").upper() in {"PLANNING", "PENDING", "RUNNING"}
+    )
+    done = sum(1 for row in rows if str(row.get("status") or "").upper() == "DONE")
+    blocked = sum(
+        1
+        for row in rows
+        if str(row.get("status") or "").upper() in {"BLOCKED", "PAUSED"}
+    )
+    parts = [f"子代理 {total} 个", f"{running} 进行中"]
+    if done:
+        parts.append(f"{done} 完成")
+    if blocked:
+        parts.append(f"{blocked} 待处理")
+    return " · " + " · ".join((*parts, duration))
+
+
+# LLM: A child row renders only canonical status plus bounded display context.
+# Human-readable activity never drives the icon or status label.
+# 函数用途: 绘制一个直属子代理的名字、状态、当前动作、耗时和尝试次数。
+def _render_subagent_activity_row(
+    row: dict[str, object],
+    context: TuiRenderContext,
+) -> tuple[FormattedLine, ...]:
+    status = str(row.get("status") or "").strip().upper()
+    icon, label, style = _subagent_status_display(status)
+    name = str(row.get("name") or row.get("role") or "subagent").strip() or "subagent"
+    activity = str(row.get("activity") or "").strip()
+    elapsed = _subagent_elapsed_seconds(row, context.now)
+    attempts = max(0, _safe_render_int(row.get("attempts")))
+    fragments: list[tuple[str, str]] = [
+        (style, f"{icon} "),
+        ("class:tui-strong", name),
+        (style, f" · {label}"),
+    ]
+    if activity:
+        fragments.append(("class:tui-muted", f" · {activity}"))
+    fragments.append(("class:tui-muted", f" · {_format_activity_duration(elapsed)}"))
+    if attempts:
+        fragments.append(("class:tui-muted", f" · 尝试 {attempts}"))
+    return wrap_fragments(
+        tuple(fragments),
+        width=context.width,
+        first_prefix=(("class:tui-muted", "  "),),
+        continuation_prefix=(("class:tui-muted", "    "),),
+    )
+
+
+# LLM: Status-to-style mapping is a pure display projection of the canonical
+# enum. Unknown values stay neutral and visibly unknown.
+# 函数用途: 把子代理结构化状态映射为图标、中文标签和颜色。
+def _subagent_status_display(status: str) -> tuple[str, str, str]:
+    if status == "RUNNING":
+        return "●", "运行中", "class:tui-subagent-running"
+    if status in {"PLANNING", "PENDING"}:
+        return "○", "等待启动", "class:tui-subagent-pending"
+    if status == "DONE":
+        return "✓", "已完成", "class:tui-subagent-done"
+    if status in {"BLOCKED", "PAUSED"}:
+        return "!", "等待处理", "class:tui-subagent-blocked"
+    if status in {"FAILED", "TIMEOUT", "CHANNEL_ERROR"}:
+        return "×", "失败", "class:tui-error"
+    if status in {"CANCELLED", "ABANDONED", "TAKEN_OVER"}:
+        return "–", "已停止", "class:tui-muted"
+    return "?", status or "状态未知", "class:tui-muted"
+
+
+# LLM: Elapsed time uses child timestamps only; the UI clock never writes back
+# or decides whether a heartbeat is stale.
+# 函数用途: 计算子代理本次展示的运行时长秒数。
+def _subagent_elapsed_seconds(row: dict[str, object], now: float) -> int:
+    created_at = _safe_render_float(row.get("created_at"))
+    ended_at = _safe_render_float(row.get("ended_at"))
+    end = ended_at if ended_at > 0 else max(0.0, float(now or 0.0))
+    if created_at <= 0 or end <= 0:
+        return 0
+    return max(0, int(end - created_at))
+
+
+# LLM: Duration formatting affects text only and remains stable at minute/hour
+# boundaries for golden tests.
+# 函数用途: 将秒数格式化为 m:ss 或 h:mm:ss。
+def _format_activity_duration(seconds: int) -> str:
+    value = max(0, int(seconds or 0))
+    hours, remainder = divmod(value, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+# LLM: Invalid display numerics become zero and never affect canonical state.
+# 函数用途: 安全读取 renderer 使用的整数。
+def _safe_render_int(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+# LLM: Invalid display timestamps become zero and never affect canonical state.
+# 函数用途: 安全读取 renderer 使用的时间戳。
+def _safe_render_float(value: object) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 # LLM: 中断提示是 终端交互 的专用 transcript 行，由 typed kind 选择；不能靠正文包含 Interrupted 来套样式。
@@ -1459,9 +1621,10 @@ def _render_permission(
     return tuple(lines)
 
 
-# LLM: Input status owns fixed pending/queue receipts, typed context metrics, and stash state.
-# None may enter the input Document, scrollable transcript, history, or model prompt.
-# 函数用途: 在输入框上方固定显示待插入/排队消息、实时上下文占用和草稿提示。
+# LLM: Input status owns fixed pending/queue receipts, typed context metrics,
+# stash state, and the removable direct-subagent activity panel. None may enter
+# the input Document, scrollable transcript, history, or model prompt.
+# 函数用途: 在输入框上方固定显示待插入消息、上下文、草稿和直属子代理实时状态。
 def _render_input_status(
     snapshot: TuiViewSnapshot,
     context: TuiRenderContext,
@@ -1482,6 +1645,17 @@ def _render_input_status(
                 continuation_prefix=(("class:tui-muted", "    "),),
             )
         )
+    background = next(
+        (
+            block
+            for block in snapshot.active_blocks
+            if block.role == "background"
+            and block.phase not in TERMINAL_RENDER_PHASES
+        ),
+        None,
+    )
+    if background is not None:
+        lines.extend(_render_background_activity(background, context))
     return tuple(lines)
 
 

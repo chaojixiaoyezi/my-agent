@@ -1,14 +1,15 @@
 # Gateway Progress
 
-## 2026-08-21 TUI 后台 Working 的 canonical 活跃计数
+## 2026-08-21 TUI 后台 Working 的 canonical 主任务与直属子代理投影
 
 - `d928d77` 真机中前台 turn 让出后，child 仍在自动运行，但 TUI 没有持续活动提示。旧 notice 接口只返回
   偶发文本，不能回答“当前会话是否还有任务”。
-- `/client/notices` 现在在同一个已鉴权 owner/thread 快照中返回
-  `ConversationThread.active_task_ids` 的数量；通知文件仍只负责新增用户可见消息，不承担活动权威。
-- TUI 成功读取后更新一个可移除 Working 块；相同计数不重复追加，计数归零原位收起，HTTP/解析失败保留
-  上一次投影。该入口只读，不启动、停止、重试或验收任何任务。Gateway/ConversationStore/TUI 定向回归
-  已通过，`.7` 原样长任务画面仍待当前切片部署后复验。
+- `/client/notices` 现在在同一个已鉴权 owner/thread 快照中返回 active task link 数量和
+  canonical run 账本里的直属 child 行。每行只包含名称、status、最近活动、耗时与 attempts；goal、工具输出、
+  路径和权限不进入客户端 metadata。通知文件仍只负责新增用户可见消息，不承担活动权威。
+- TUI 成功读取后在 composer 附近原位更新一个可移除 Working 区；相同快照不重复追加，活跃 root 归零原位收起，
+  HTTP/解析失败保留上一次有效投影。该入口只读，不启动、停止、重试或验收任何任务。定向回归已通过，`.7`
+  原样长任务画面仍待当前切片部署后复验。
 
 ## 2026-08-21 TUI 后台任务停止定位
 

@@ -46,6 +46,10 @@
   直属下级的结构化 capability 请求。模型没有查树、等待、巡场或“再推动一次”工具；`/status`、TUI
   和恢复逻辑仍读取宿主内部代理树投影。模型的取消合同也不暴露 dry-run、进程参数或整树回执，
   防止把打断工具变成另一个巡检入口。
+- TUI 只读可观察面从 active task link 和 canonical child run 生成有界直属快照，在输入框附近固定显示
+  子代理名称、status、当前活动、耗时和 attempts。它不进 transcript，不暴露 goal/工具输出/路径/权限，也不参与
+  完成、重试或验收。未来用户直控必须先落一份 TUI/Web/IM 共用的 owner-scoped typed
+  protocol；不允许前端直改子代理账本。
 - 单 Gateway 内后台回合按 `owner + thread_id` 分车道：同会话仍由持久 run claim 串行，
   同 owner 的不同 TUI/会话在显式全局上限和 `background_threads_per_owner` 上限内并发。
   一个旧会话的长 policy 回合不能占住整个用户的子代理完成唤醒。

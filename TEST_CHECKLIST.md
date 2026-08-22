@@ -8,6 +8,8 @@
 - [x] 直属 cancel/interrupt 不被自动重试资格否决；同批 child 不注入 `sibling_roster`。Gateway 与 child
   的裸相对路径使用项目 `execution_cwd`，内部 task root 仅供显式 work/output；TUI Working 只统计
   `status=active`，interrupted 可恢复索引不再造成假忙。
+- [x] Gateway/TUI 只读 active root 的 canonical 直属 child 状态；输入框附近固定显示名称、status、
+  当前动作、耗时和 attempts，不进 transcript，不展开 grandchild/历史 root，不携带 goal、工具输出、路径或权限。
 - [x] 本地/admin 主会话晋升为持久任务后，项目 `execution_cwd` 仍在真实 `allowed_write_roots` 中；
   不会出现前台能写、后台整合同路径被拒的权限分叉。远程 owner task wall、task-local child 和
   transient Audit 的既有窄授权回归保持通过。
@@ -81,7 +83,7 @@
 - [ ] 主代理、子代理、Gateway 与 TUI 对六类 `turn_end` 映射一致；普通完成不读取 acceptance/verification，
   历史兼容字段不进入当前 prompt、context bundle、父级摘要或启动前检查。
 - [ ] TUI 在活动轮显示 Working 动画和持续 thinking 增量；前台 turn 让出而 canonical active task 仍非零时，
-  一个可移除的后台 Working 块继续闪动并显示数量/耗时，成功查询归零才收起，查询失败不误清零。用户位于
+  一个可移除的后台 Working 区继续闪动并显示直属 child 状态/动作/耗时，成功查询归零才收起，查询失败不误清零。用户位于
   页底时自动跟随，主动上翻后不抢滚动，回到底部后恢复跟随；Compact 显示 typed 百分比并在完成/失败后
   正确收口。
 - [ ] 真实测试中主代理和独立子代理 compact 后能继续工作；至少一条链连续发生多代 compact，近期完整回合、工具事实、任务状态和产物引用不丢，且没有重做已经成功的副作用。

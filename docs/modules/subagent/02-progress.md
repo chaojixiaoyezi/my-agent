@@ -2,6 +2,10 @@
 
 ## 2026-08-21 递归创建、自动启动与自然收口
 
+- 当前本地 TUI 已从单一 active-task 计数收细为固定直属 child 活动区：
+  `conversation/agent_activity.py` 从 thread 的 active task link 和 canonical run 账本选取 depth=1
+  child，输出名称、status、当前活动、耗时和 attempts。它不进 transcript，不携带 goal/工具输出/
+  路径/权限，也不驱动完成、重试或验收。只读投影与 renderer focused 已通过，`.7` 真机待部署复验。
 - `d928d77` 的 `.7` 单 Gateway 原样 TUI 轮已实现 4 个 child 各一次自然 DONE、直属事件自动唤醒和
   `0.0.0.0:8080` loopback/LAN HTTP 200，同时抓到三个新底层缺口：裸 `abc/...` 被误投到 task
   `output/abc`，跨任务进程缓存把旧 `/root/kill-ws/...` 阅读包塞给新 child，前台让出后 TUI 看起来空闲。
@@ -19,6 +23,8 @@
   统一过滤它。内部 observation/wake 仍由 runner、capability、Audit 和 Gateway 宿主服务直接写入。
 - 内部 dispatcher 仍保留为 Gateway/runner 的自动启动、租约、恢复与有界重试引擎；
   父代理只接收 lifecycle event，必要时给直属 child 发补充消息或取消，不再手工查看/推进已创建 run。
+  这等价于 会话运行时 `spawn_agent_internal` 内部的容量保留、thread 创建、首条输入和 status watcher；
+  旧 dispatcher 名称/入口可继续折叠，但这些 create 后必须动作不能删除。
 - 新增公共 `turn_end.reason` 六种轮结束原因，主代理、子代理、Gateway 和父级 wake 共用。
   模型自然最终回复不再被交付扫描、完成 marker、产物数或机器验收改写。
 - 删除普通子代理 acceptance ledger/verifier 与交付收口旁路。历史

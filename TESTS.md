@@ -16,7 +16,7 @@ Gateway 可以并行，但不能作为“单 Gateway 多客户端”验收的替
 guidance/cancel/capability、cancel schema/回执不含 dry-run 查树旁路、普通 child 工作区继承，以及
 OPEN request → BLOCKED → grant/deny 后同 run
 PENDING 续跑；
-第二层覆盖 TUI Working 动画、thinking 灰色增量、条件式 follow-tail 与 Compact typed progress；第三层只在
+第二层覆盖 TUI Working 动画、直属 child 固定状态行、thinking 灰色增量、条件式 follow-tail 与 Compact typed progress；第三层只在
 `192.0.2.7` 的单 Gateway/真实 TUI 输入一次目标 prompt，测试者只观察产物、日志、child 树和 8080
 监听，不旁路补代码。当前 backend focused 144 项、context/protocol focused 75 项已通过。由于本轮累计
 增删超过 10,000 行，发布前追加一次且仅一次全仓 pytest；若发现失败，修复后只重跑失败项和相关 focused。
@@ -425,9 +425,11 @@ extras；不能依赖宿主机碰巧已有 cryptography/SQLAlchemy，也不能�
 cwd/workspace；相对 `output/...`、`work/...` 的结构化任务落位继续生效，不能把裸项目路径误投到 task
 output，也不能用绝对路径静默搬运兼容层冒充成功。
 
-后台可观察性 focused 必须覆盖：Gateway 成功快照返回 canonical active-task count；TUI 以一个可移除
-Working 活动块显示 count 和耗时；相同 count 不重复追加，归零原位删除；HTTP/解析失败不把上次真实活动
-误清零。父级共享上下文还必须证明当前轮无 read archive 时不会复用 agent 上一次任务的缓存内容。
+后台可观察性 focused 必须覆盖：Gateway 成功快照返回 canonical active-root count 和有界
+direct-child 行；只选当前 thread 活跃 root 的直属 child，不展开 grandchild/历史 root，不泄露 goal、工具输出、
+路径或权限。TUI 用一个可移除的固定 Working 区域显示名称、状态、当前活动、耗时和 attempts；它不进
+transcript。相同快照不重复追加，活动变化原位更新，root 归零整体删除；HTTP/解析失败不把上次真实活动误清零。
+父级共享上下文还必须证明当前轮无 read archive 时不会复用 agent 上一次任务的缓存内容。
 
 真实本地模型回归示例：
 

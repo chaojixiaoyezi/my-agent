@@ -308,7 +308,7 @@ class _TuiPermissionController:
 # LLM: This controller is runtime-owned and only factors the removable
 # background display state out of TuiRuntime; it shares the runtime lock,
 # sequencer, and store and must never become a second activity authority.
-# 类用途: 保存一个 TUI 会话的后台 Working 计数和起始时间，并发布对应 typed 事件。
+# 类用途: 保存一个 TUI 会话的后台 Working 计数、直属子代理快照和起始时间，并发布对应 typed 事件。
 class _TuiBackgroundActivityController:
     # LLM: The owner remains the only event publisher and lock owner.
     # 函数用途: 绑定唯一 TuiRuntime，并初始化空闲显示状态。
@@ -316,16 +316,39 @@ class _TuiBackgroundActivityController:
         self._owner = owner
         self._count = 0
         self._started_at = 0.0
+        self._subagents: tuple[dict[str, object], ...] = ()
+        self._hidden_subagent_count = 0
 
-    # LLM: Count transitions only change the one display projection. Equal
-    # values are idempotent; zero removes the block without transcript output.
-    # 函数用途: 根据 canonical 活跃任务数量开始、更新或收起后台 Working 块。
-    def update(self, active_task_count: int) -> bool:
+    # LLM: Count and direct-child rows change the same display projection. A
+    # failed child projection preserves the last valid rows; zero removes the
+    # block without transcript output.
+    # 函数用途: 根据 canonical 主任务和直属子代理快照开始、更新或收起底部 Working 区。
+    def update(
+        self,
+        active_task_count: int,
+        *,
+        subagents: object | None = None,
+        hidden_subagent_count: int = 0,
+        projection_ok: bool = True,
+    ) -> bool:
         count = max(0, int(active_task_count or 0))
         owner = self._owner
         block_id = f"background-activity:{owner.session_id}"
         with owner._lock:
-            if count == self._count:
+            if count <= 0:
+                next_subagents: tuple[dict[str, object], ...] = ()
+                next_hidden_count = 0
+            elif projection_ok and subagents is not None:
+                next_subagents = _normalize_subagent_activity_rows(subagents)
+                next_hidden_count = max(0, int(hidden_subagent_count or 0))
+            else:
+                next_subagents = self._subagents
+                next_hidden_count = self._hidden_subagent_count
+            if (
+                count == self._count
+                and next_subagents == self._subagents
+                and next_hidden_count == self._hidden_subagent_count
+            ):
                 return False
             if self._count <= 0 and count > 0:
                 self._started_at = time.time()
@@ -335,11 +358,18 @@ class _TuiBackgroundActivityController:
             else:
                 kind, phase = "background_activity_completed", "completed"
             self._count = count
+            self._subagents = next_subagents
+            self._hidden_subagent_count = next_hidden_count
             owner._publish(
                 kind,
                 phase,
                 block_id,
-                {"active_task_count": count, "started_at": self._started_at},
+                {
+                    "active_task_count": count,
+                    "started_at": self._started_at,
+                    "subagents": [dict(row) for row in next_subagents],
+                    "hidden_subagent_count": next_hidden_count,
+                },
                 request_id=f"background:{owner.session_id}",
             )
             if count <= 0:
@@ -347,9 +377,77 @@ class _TuiBackgroundActivityController:
         return True
 
 
+_SUBAGENT_ACTIVITY_ROW_LIMIT = 64
+_SUBAGENT_ACTIVITY_FIELDS = frozenset(
+    {
+        "run_id",
+        "root_task_id",
+        "parent_run_id",
+        "depth",
+        "name",
+        "role",
+        "status",
+        "activity",
+        "current_tool",
+        "attempts",
+        "created_at",
+        "updated_at",
+        "heartbeat_at",
+        "ended_at",
+    }
+)
+
+
+# LLM: This is the client-side metadata whitelist for the authenticated activity
+# snapshot. Unknown fields, nested payloads, goals, paths, and tool output never
+# enter TuiBlock metadata.
+# 函数用途: 清洗并限制 Gateway 返回的直属子代理展示行。
+def _normalize_subagent_activity_rows(
+    value: object,
+) -> tuple[dict[str, object], ...]:
+    if not isinstance(value, list | tuple):
+        return ()
+    rows: list[dict[str, object]] = []
+    for item in value[:_SUBAGENT_ACTIVITY_ROW_LIMIT]:
+        if not isinstance(item, Mapping):
+            continue
+        row = {
+            str(key): item[key]
+            for key in _SUBAGENT_ACTIVITY_FIELDS
+            if key in item and not isinstance(item[key], dict | list | tuple | set)
+        }
+        rows.append(row)
+    return tuple(rows)
+
+
+# LLM: This narrow mixin keeps the public display adapter out of the central
+# runtime class size budget. It only delegates to the runtime-owned controller
+# and must not gain independent state or event sequencing.
+# 类用途: 为 TuiRuntime 提供后台主任务和直属子代理快照的唯一公开更新入口。
+class _TuiBackgroundActivityRuntimeMixin:
+    # LLM: This display projection accepts only the canonical conversation-agent
+    # snapshot. It never starts, stops, retries, or accepts work; equal snapshots
+    # are idempotent and zero removes the active block without history.
+    # 函数用途: 在输入框附近持续显示真实主任务和直属子代理，任务清零时原位收起。
+    def update_background_activity(
+        self,
+        active_task_count: int,
+        *,
+        subagents: object | None = None,
+        hidden_subagent_count: int = 0,
+        projection_ok: bool = True,
+    ) -> bool:
+        return self._background_activity.update(
+            active_task_count,
+            subagents=subagents,
+            hidden_subagent_count=hidden_subagent_count,
+            projection_ok=projection_ok,
+        )
+
+
 # LLM: TuiRuntime 统一拥有 session 事件序号与 turn adapter；emit+publish 在同一锁内避免并发 seq 到达倒序。
 # 类用途: 建立 TUI 状态容器、发布启动/输入事件，并为每个 request 创建唯一 adapter。
-class TuiRuntime:
+class TuiRuntime(_TuiBackgroundActivityRuntimeMixin):
     # LLM: session_id 固定一个 UI 生命周期；store 可注入用于 replay/tests，但不能在运行中替换。
     # 函数用途: 创建 TUI runtime 和全局单调 sequencer。
     def __init__(self, session_id: str, *, store: TuiStateStore | None = None) -> None:
@@ -455,13 +553,6 @@ class TuiRuntime:
                 {"text": text, "severity": "info"},
                 request_id=request_id,
             )
-
-    # LLM: This is a display projection of ConversationThread.active_task_ids.
-    # It never starts, stops, retries, or accepts work; repeated equal counts do
-    # not append events, and zero removes the one active block without history.
-    # 函数用途: 在前台回合让出后持续显示真实后台任务的 Working 动画，任务清零时原位收起。
-    def update_background_activity(self, active_task_count: int) -> bool:
-        return self._background_activity.update(active_task_count)
 
     # LLM: enqueue_prompt 使用 request_id 作为用户块/队列身份；排队项只发 queue_added，开始执行时再原子提升为稳定用户块。
     # 函数用途: 立即显示空闲提交，或把运行中提交登记成可回取的用户队列预览。

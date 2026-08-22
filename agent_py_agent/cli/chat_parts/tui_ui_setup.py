@@ -189,9 +189,9 @@ def _wire_permission_feedback_area(area: Any, runtime: TuiRuntime) -> None:
     area.buffer.on_text_changed += on_feedback_changed
 
 
-# LLM: input status Window 只展示 typed pending steer、follow-up queue、context usage 和 interaction stash。
+# LLM: input status Window 只展示 typed pending steer、follow-up queue、context usage、interaction stash 和直属子代理活动投影。
 # LLM: 零行时不占高度，也不能改变 transcript anchor。
-# 函数用途: 创建输入框上方的待插入消息、下一轮队列、实时上下文与草稿状态区域。
+# 函数用途: 创建输入框上方的待插入消息、上下文、草稿与直属子代理状态区域。
 def _make_input_status_window(view: TuiTranscriptView) -> Any:
     from prompt_toolkit.layout import Window
 
@@ -900,6 +900,10 @@ def _make_tui_style():
             "tui-spinner-highlight": "#ffaf87",
             "tui-thinking": "#949494",
             "tui-thinking-detail": "#949494",
+            "tui-subagent-running": "#87afff",
+            "tui-subagent-pending": "#949494",
+            "tui-subagent-done": "#87d787",
+            "tui-subagent-blocked": "#d7af5f",
             "tui-context-label": "#6c6c6c",
             "tui-context-safe": "#87afaf",
             "tui-context-warning": "#d7af5f",

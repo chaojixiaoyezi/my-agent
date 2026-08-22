@@ -422,8 +422,21 @@
   `output/abc`，`/root/abc` 为空，child 上下文还混入旧 `/root/kill-ws/...` 读取包，前台让出后 TUI
   没有常驻 Working。当前切片统一修复三点：裸 `abc/...` 相对当前 `/root`，显式 `output/...`/`work/...`
   才走 task 内部目录；共享阅读包只取当前轮；`/client/notices` 返回 canonical
-  `ConversationThread.active_task_ids` 数量，TUI 用一个可移除的灰色 Working 活动块持续显示，查询失败保留
-  上一次投影、真实计数归零才收起。该块只展示状态，不会推动、重试或验收任务。
+  active task link 与 canonical child run 的有界快照。TUI 在输入框附近用一个可移除的
+  灰色 Working 区域显示直属 child 名称、结构化状态、当前活动、耗时和 attempts；查询失败保留
+  上一次有效投影、真实 active root 归零才收起。该块只展示状态，不会推动、重试或验收任务。
+- `dispatch_subagents` 这个模型工具和手动步骤已删，但“获取容量、启动/恢复 runner、投递首条任务、
+  登记 heartbeat/status、有界重试及投递终态事件”是 create 之后必然存在的宿主生命周期。对照
+  会话运行时 `会话运行时-rs/core/src/agent/control/spawn.rs::spawn_agent_internal` 与 `control.rs` 的
+  `send_input/subscribe_status`，当前可继续把内部旧命名/入口折叠进 `create_subagents` 后的
+  `start_or_resume` 服务，但不能删掉这些生命周期动作本身，否则 create 只会造一张不运行的工单。
+- 用户与代理的控制权分开：代理模型继续只能管自己的直属 child；通过身份验证的 root owner 将可管理
+  自己主代理树内的任意后代。后续 Gateway/domain 只建一份 TUI/Web/IM 共用的 typed control
+  protocol：`list/read`、`message`、`interrupt`(只中断当前 turn，session 仍可恢复)、
+  `resume/start`、`cancel/close` 和 capability 裁决。写操作必须携带稳定 `operation_id`、
+  `owner/thread/root/target_run_id`、预期版本/状态与 accepted/rejected/unknown 回执；前端不直改
+  canonical 账本。当前 `cancel_subagents` 是终态取消，不得冒充 会话运行时 式可恢复 interrupt。本轮只落地只读
+  活动投影，写控制协议仍为待实现设计。
 
 ## 2026-08-18 候选消息实时流式 + 每轮阶段计时【状态：本地 focused 通过，待真机部署复验】
 

@@ -136,6 +136,22 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
                 "ok": True,
                 "cursor": 200.0,
                 "active_task_count": 2,
+                "agent_activity": {
+                    "schema_version": "conversation_agent_activity.v1",
+                    "active_task_count": 2,
+                    "active_task_projection_ok": True,
+                    "subagents": [
+                        {
+                            "run_id": "child-1",
+                            "name": "level-design",
+                            "status": "RUNNING",
+                            "activity": "正在生成关卡",
+                            "attempts": 1,
+                        }
+                    ],
+                    "hidden_subagent_count": 0,
+                    "subagent_projection_ok": True,
+                },
                 "notices": [
                     {
                         "schema_version": "background_notice.v1",
@@ -148,8 +164,17 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
             }
 
     class _Runtime:
-        def update_background_activity(self, count):
-            published.append(f"active:{count}")
+        def update_background_activity(
+            self,
+            count,
+            *,
+            subagents,
+            hidden_subagent_count,
+            projection_ok,
+        ):
+            published.append(
+                f"active:{count}:{subagents[0]['run_id']}:{hidden_subagent_count}:{projection_ok}"
+            )
             return True
 
         def publish_background_notice(self, text, *, thread_id=""):
@@ -160,7 +185,7 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
     assert len(fetched) == 1
     assert fetched[0]["after"] == 0.0
     assert len(published) == 2
-    assert published[0] == "active:2"
+    assert published[0] == "active:2:child-1:0:True"
     assert "后台更新" in published[1]
     # 游标推进后不重复
     _consume_background_notices(_Agent(), "session-http", _Runtime(), [None], seen)
@@ -197,6 +222,8 @@ def test_gateway_notice_snapshot_reports_canonical_active_task_count(tmp_path: P
     active = read_gateway_client_notices(agent, scope=scope, after=0.0)
     assert active["ok"] is True
     assert active["active_task_count"] == 1
+    assert active["agent_activity"]["active_task_count"] == 1
+    assert active["agent_activity"]["subagents"] == []
 
     store.update_task_status(
         {
@@ -249,12 +276,35 @@ def test_runtime_background_activity_is_one_removable_animated_block() -> None:
     from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
 
     runtime = TuiRuntime("session-working")
-    assert runtime.update_background_activity(3) is True
-    assert runtime.update_background_activity(3) is False
+    children = [
+        {
+            "run_id": "child-engine",
+            "name": "game-engine",
+            "role": "worker",
+            "status": "RUNNING",
+            "activity": "正在使用 write_file",
+            "attempts": 1,
+            "created_at": 100.0,
+            "ended_at": 0.0,
+        },
+        {
+            "run_id": "child-levels",
+            "name": "level-design",
+            "role": "worker",
+            "status": "DONE",
+            "activity": "模型已生成回复",
+            "attempts": 1,
+            "created_at": 100.0,
+            "ended_at": 145.0,
+        },
+    ]
+    assert runtime.update_background_activity(1, subagents=children) is True
+    assert runtime.update_background_activity(1, subagents=children) is False
     snapshot = runtime.store.snapshot()
     active = [block for block in snapshot.active_blocks if block.role == "background"]
     assert len(active) == 1
-    assert active[0].metadata["active_task_count"] == 3
+    assert active[0].metadata["active_task_count"] == 1
+    assert len(active[0].metadata["subagents"]) == 2
     assert runtime.needs_periodic_refresh() is True
 
     frame = render_tui_snapshot(
@@ -262,13 +312,38 @@ def test_runtime_background_activity_is_one_removable_animated_block() -> None:
         TuiRenderContext(
             width=100,
             spinner_index=2,
-            now=active[0].metadata["started_at"] + 5,
+            now=150.0,
         ),
     )
-    rendered = "\n".join(fragments_text(line) for line in frame.transcript_lines)
+    transcript = "\n".join(fragments_text(line) for line in frame.transcript_lines)
+    rendered = "\n".join(fragments_text(line) for line in frame.input_status_lines)
+    assert "Working" not in transcript
     assert "Working" in rendered
-    assert "后台任务 3 个" in rendered
+    assert "子代理 2 个" in rendered
+    assert "game-engine · 运行中 · 正在使用 write_file · 0:50 · 尝试 1" in rendered
+    assert "level-design · 已完成 · 模型已生成回复 · 0:45 · 尝试 1" in rendered
     assert "/stop to interrupt" in fragments_text(frame.footer)
+
+    changed_children = [dict(children[0], activity="正在使用 run_command"), children[1]]
+    assert runtime.update_background_activity(1, subagents=changed_children) is True
+
+    from agent_py_agent.cli.chat_parts.tui_threading import _publish_background_activity
+
+    assert (
+        _publish_background_activity(
+            runtime,
+            {
+                "active_task_count": 0,
+                "active_task_projection_ok": False,
+                "subagent_projection_ok": True,
+                "subagents": [],
+            },
+        )
+        is False
+    )
+    assert any(
+        block.role == "background" for block in runtime.store.snapshot().active_blocks
+    )
 
     assert runtime.update_background_activity(0) is True
     assert not any(

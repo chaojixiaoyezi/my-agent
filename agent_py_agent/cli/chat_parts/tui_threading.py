@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import threading
+from collections.abc import Mapping
 from pathlib import Path
 
 from .tui_params import StartWorkerParams, WorkerConfigParams
@@ -143,7 +144,9 @@ def _consume_background_notices(
         activity_changed = (
             _publish_background_activity(
                 tui_runtime,
-                payload.get("active_task_count"),
+                payload.get("agent_activity")
+                if isinstance(payload.get("agent_activity"), dict)
+                else {"active_task_count": payload.get("active_task_count")},
             )
             if payload.get("ok") is True
             else False
@@ -172,9 +175,12 @@ def _consume_background_notices(
     thread_id = str(getattr(thread, "thread_id", "") or "")
     if not thread_id:
         return
+    from ...agent.conversation.agent_activity import conversation_agent_activity
+
+    activity = conversation_agent_activity(agent, store, thread_id).to_dict()
     activity_changed = _publish_background_activity(
         tui_runtime,
-        len(tuple(getattr(thread, "active_task_ids", ()) or ())),
+        activity,
     )
     notices_path = Path(root) / "notices" / f"{thread_id}.notices.jsonl"
     if not notices_path.exists():
@@ -208,19 +214,35 @@ def _consume_background_notices(
         app_ref[0].invalidate()
 
 
-# LLM: The monitor may project only the typed active-task count returned by the
-# canonical conversation thread. Missing/invalid values leave the current UI
+# LLM: The monitor may project only the typed conversation-agent snapshot built
+# from canonical task links and run records. Invalid values leave the current UI
 # unchanged instead of guessing activity from notice prose.
-# 函数用途: 将会话中的真实进行中任务数量更新到常驻 Working 动画，并返回画面是否变化。
-def _publish_background_activity(tui_runtime: object, value: object) -> bool:
+# 函数用途: 将会话中的真实主任务与直属子代理状态更新到固定底部区域，并返回画面是否变化。
+def _publish_background_activity(
+    tui_runtime: object,
+    value: object,
+) -> bool:
     updater = getattr(tui_runtime, "update_background_activity", None)
-    if not callable(updater):
+    if not callable(updater) or not isinstance(value, Mapping):
+        return False
+    if value.get("active_task_projection_ok") is False:
         return False
     try:
-        count = max(0, int(value))
+        count = max(0, int(value.get("active_task_count") or 0))
+        hidden_count = max(0, int(value.get("hidden_subagent_count") or 0))
     except (TypeError, ValueError):
         return False
-    return bool(updater(count))
+    subagents = value.get("subagents")
+    if not isinstance(subagents, list | tuple):
+        subagents = None
+    return bool(
+        updater(
+            count,
+            subagents=subagents,
+            hidden_subagent_count=hidden_count,
+            projection_ok=value.get("subagent_projection_ok") is not False,
+        )
+    )
 
 
 def _publish_background_notice_row(

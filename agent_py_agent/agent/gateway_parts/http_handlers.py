@@ -18,6 +18,10 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from ..auth.middleware import _handler_peer_ip, require_admin_handler, require_trusted_source
+from ..conversation.agent_activity import (
+    ConversationAgentActivity,
+    conversation_agent_activity,
+)
 from ..conversation.channels import project_user_reply, redact_host_absolute_paths
 from ..conversation.control_commands import (
     ConversationControlCommand,
@@ -25,7 +29,6 @@ from ..conversation.control_commands import (
     parse_conversation_control,
     parse_conversation_task_command,
 )
-from ..conversation.models import THREAD_TASK_LINK_ACTIVE_STATUS
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .client_service import execute_gateway_client_memory, read_gateway_client_history
 from .control_operation_service import (
@@ -999,17 +1002,17 @@ def handle_client_notices(handler, server) -> None:
 
 
 # LLM: The canonical thread owns task candidates while each typed task link
-# owns its lifecycle. Interrupted links deliberately remain selectable for an
-# explicit resume, so the TUI Working indicator must count only status=active.
-# Notices remain an append-only display channel and never create task state.
-# 函数用途: 读取一个已鉴权会话真正还在工作的任务数量和新增后台通知。
+# owns its lifecycle. The response adds a bounded direct-child display
+# projection from canonical runs; neither notices nor that projection can
+# create task state, authorize work, retry, or decide completion.
+# 函数用途: 读取一个已鉴权会话真正还在工作的主任务、直属子代理状态和新增后台通知。
 def read_gateway_client_notices(
     agent: object,
     *,
     scope: object,
     after: float,
 ) -> dict[str, object]:
-    """解析当前会话 thread，并返回活跃任务计数与 after 之后的新通知。"""
+    """返回当前 thread 的活跃任务、直属子代理投影与 after 之后的通知。"""
     from ..conversation.channels import LOCAL_AGENT_USER_ID, LOCAL_CHAT_CHANNEL
     from ..conversation.store import ConversationStore
 
@@ -1046,14 +1049,18 @@ def read_gateway_client_notices(
             "active_task_count": 0,
         }
     if thread is None:
+        activity = ConversationAgentActivity().to_dict()
         return {
             "ok": True,
             "notices": [],
             "cursor": after,
             "active_task_count": 0,
+            "agent_activity": activity,
         }
     thread_id = str(getattr(thread, "thread_id", "") or "")
-    active_task_count = _active_thread_task_count(store, thread_id)
+    activity = conversation_agent_activity(agent, store, thread_id)
+    activity_payload = activity.to_dict()
+    active_task_count = activity.active_task_count
     notices_path = Path(store.root) / "notices" / f"{thread_id}.notices.jsonl"
     if not notices_path.exists():
         return {
@@ -1061,6 +1068,7 @@ def read_gateway_client_notices(
             "notices": [],
             "cursor": after,
             "active_task_count": active_task_count,
+            "agent_activity": activity_payload,
         }
     notices: list[dict[str, object]] = []
     cursor = after
@@ -1088,30 +1096,15 @@ def read_gateway_client_notices(
             "notices": [],
             "cursor": after,
             "active_task_count": active_task_count,
+            "agent_activity": activity_payload,
         }
     return {
         "ok": True,
         "notices": notices,
         "cursor": cursor,
         "active_task_count": active_task_count,
+        "agent_activity": activity_payload,
     }
-
-
-# LLM: active_task_ids is a resumability index, not a running-work counter.
-# Read the authoritative task-link statuses so interrupted/cancelled sticky
-# roots cannot leave a false Working spinner after the turn has stopped.
-# 函数用途: 统计会话里状态仍为 active 的任务，供 TUI 判断是否显示工作动画。
-def _active_thread_task_count(store: object, thread_id: str) -> int:
-    try:
-        links, _load_errors = store.active_task_links_report(thread_id)
-    except (OSError, ValueError, DataCorruptionError):
-        return 0
-    return sum(
-        1
-        for link in links
-        if str(getattr(link, "status", "") or "").strip().lower()
-        == THREAD_TASK_LINK_ACTIVE_STATUS
-    )
 
 
 def handle_client_memory(handler, server) -> None:

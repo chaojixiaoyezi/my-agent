@@ -70,6 +70,9 @@ typed 让出，同批成功只恢复一次，失败立即恢复，父级直接�
 无法使用的下级管理工具。当前本地切片已改为裸相对路径继承 cwd、只有显式 output/work 前缀进入 task
 内部目录，shared context 只取当前轮，Gateway/TUI 用 canonical active task count 显示一个可移除的
 Working 块，并按 `can_spawn_children` 裁剪 leaf/coordinator 工具面。
+当前轮继续对照 终端交互 `CoordinatorTaskPanel` 收口：Gateway 从 active task link 和
+canonical subagent run 生成有界直属 child 快照，TUI 在输入框附近固定显示每个 child 的
+名称、状态、当前动作、耗时和 attempts。该区域不进 transcript，不影响用户上翻，也不作完成或重试权威。
 
 当前新切片 188 项 focused 与远端提交前严格 gate 已通过，按用户约定未重跑全仓 pytest。待做：提交推送并部署 `.7`；
 由全新真实 TUI 验证 child 完成后父会话不受其它 TUI 长回合阻塞，再继续验证 Working 动画、thinking 连续增量、页底自动跟随、
@@ -80,6 +83,22 @@ Working 块，并按 `can_spawn_children` 裁剪 leaf/coordinator 工具面。
 边界：当前测试机为 `192.0.2.7:/root/my-agent`；保持单 Gateway、多 TUI、tmux 观察会话和远端
 key/config/runtime 数据，不触碰其它项目。较早大切片已按约定执行过一次全仓 pytest；当前切片远低于
 10,000 行，只跑相关 focused tests 与远端提交前严格 gate，不重复浪费时间跑全仓。
+
+### 用户直控子代理的共享控制面
+
+状态：设计中，只读状态投影已部分落地
+
+解决问题：当前用户只能给主代理插话或停整个任务，无法定位一个正在跑的 child；现有
+`cancel_subagents` 又是终态取消，不是“打断当前一轮后仍能继续”。如果 TUI 和未来 Web 各自直改账本，会导致状态、
+权限和恢复逻辑分裂。
+
+当前进展：已有 owner/thread 范围的 active root + direct-child 只读投影。待做是 Gateway/domain 唯一
+typed protocol，支持查看树、给选中 run 发消息、interrupt 当前 turn、resume/start 同一 session、
+cancel/close 和 capability 裁决。root owner 可操作自己树内任意后代，模型代理仍只能管直属下级。
+每个写操作必须带幂等 `operation_id`、exact target、expected version/state 和 accepted/rejected/unknown 回执，
+TUI/Web/IM 都只调用这一份服务。
+
+边界：本阶段不做 Web 页面，不开放任意数据库修改或越 owner 操作；不能用终态 cancel 伪装成可恢复 interrupt。
 
 ### npm 缓存全新 Node 任务真机复验
 

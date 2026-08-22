@@ -154,6 +154,8 @@ SimpleAgent orchestration tool
   `dispatch/scheduler` 只保留为内部执行引擎，不再注册成模型工具。
 - `agent/agent_core/agent_tree/status.py`：`/status`、TUI、恢复和诊断共用的内部树投影；旧
   `orchestration/tools/status.py` 与 `InspectAgentTreeTool` 已删除，不能从内部 projection 反向恢复模型工具。
+- `agent/conversation/agent_activity.py`：从 active conversation task link 与 canonical child run 生成
+  owner/thread-scoped 的有界直属活动行；只供 TUI 和后续 Web/IM 展示，不是另一份树、状态或生命周期账本。
 - `cli/gateway_loops.py::_GatewayOrphanReconciler`：不执行模型的独立周期控制器；从 owner
   投影发现未完成 run，再调用 orchestration 层现有的结构化孤儿监督。它与后台主代理的 LLM
   scheduler 分线程运行，但不建立第二套恢复状态机。
@@ -164,6 +166,17 @@ SimpleAgent orchestration tool
   `agent/agent_core/orchestration/tools/cancel.py`：`runner_session.in_process` 区分 Gateway 内线程与
   独立子进程；前者只能协作中断，后者才可发送操作系统信号，禁止把宿主 PID 当 child PID。
 - `cli/subagents.py`：子代理 CLI 命令和注册入口，包含基础、监控、层级和 leadership recovery 命令；不再通过单独 registration / hierarchy 注册文件跳转。
+
+## 用户观察与直控边界
+
+- 当前已落地的只有只读面：TUI 固定显示主任务的直属 child；默认不把全树压平，后续详情面才递归展开。
+- 用户控制面与模型控制面分权。设计为 root owner 可通过未来 Gateway/domain protocol 操作自己树中任意后代；
+  代理模型仍只能对直属 child 调用 create/guidance/cancel/capability，防止越级代管和身份伪造。
+- 待实现的共享 typed actions 是 `list/read`、`message`、可恢复 `interrupt`、`resume/start`、
+  终态 `cancel/close` 和 capability 裁决。每次写操作都要有幂等 operation id、exact target、expected
+  state/version 与三态回执；TUI、Web、IM 都只调用该服务，不直改 canonical 文件/数据库。
+- 当前 `cancel_subagents` 会让 run 进入终态，不等价于 会话运行时 `interrupt_agent` 的“只停当前 turn、保留线程可继续”。
+  未来要先在底层拆出可恢复 interrupt/resume，再接 TUI 按键和 Web 操作。
 
 ## 状态和路径
 

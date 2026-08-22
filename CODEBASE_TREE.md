@@ -113,6 +113,7 @@ agent_py_agent/
 |   |   |-- permission_bridge.py       # TUI/Gateway 工具审批 request binding 的原子决定文件桥
 |   |   `-- goal_control_service.py    # 同 thread 持续目标的创建/修改/暂停/恢复/清除
 |   |-- conversation/                  # 通道会话账本、权威 transcript、结构化任务关联/续接
+|   |   |-- agent_activity.py          # active task link + canonical child run 到 TUI/Web 共用有界活动投影
 |   |   |-- closeout.py                # 收口状态机 decide_closeout(四改之 2): 终态 done/cancelled/wait_human/wait_handoff/resume_round
 |   |   |-- compact.py                  # 唯一 thread compact：候选验证、一次 CAS 提交与近期 raw tail
 |   |   |-- compact_guard.py            # 结构化完整回合选择、连续失败冷却与 typed compact 错误

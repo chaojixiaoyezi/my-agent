@@ -48,6 +48,11 @@
   任务。相关路径、工具裁剪、跨轮上下文、Gateway 计数和 TUI reducer/renderer 共 188 项 focused 已通过；
   Ruff、doc sync、strict code-size、diff check 和 clean-package 也全部通过。提交推送、`.7` 部署及同
   prompt 真机复验尚未完成；本切片低于 10,000 行，按约定未重复跑全仓 pytest。
+- 当前本地候选已继续把上述 Working 投影收细：`conversation/agent_activity.py` 只读 active
+  task link 与 canonical subagent run，输出主任务的直属 child 名称、结构化状态、当前活动、耗时和
+  attempts。TUI 现在把这些行固定放在 composer 附近，不进可滚动 transcript；默认不展开孙代理，也不
+  泄露 goal、工具输出、路径或权限。只读面已落地，用户对任意后代的 message/interrupt/resume/
+  cancel 共享控制协议只完成设计，未冒充为已实现。
 
 - `bea6fed` 的最新真机样本已把“子代理都 DONE 但整单仍慢”定位到两条宿主断链：task-local 父级创建
   孙代理后虽为 `PENDING`，却会被孤儿恢复器立即重新采样；根会话又会逐条消费后代成功事件。该轮虽然

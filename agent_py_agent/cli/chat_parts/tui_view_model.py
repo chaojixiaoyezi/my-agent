@@ -935,8 +935,53 @@ def _public_metadata(payload: dict[str, Any]) -> dict[str, Any]:
         "source_messages",
         "process",
         "active_task_count",
+        "hidden_subagent_count",
     }
-    return {key: payload[key] for key in allowed if key in payload}
+    metadata = {key: payload[key] for key in allowed if key in payload}
+    raw_subagents = payload.get("subagents")
+    if isinstance(raw_subagents, list | tuple):
+        metadata["subagents"] = _public_subagent_rows(raw_subagents)
+    return metadata
+
+
+_PUBLIC_SUBAGENT_FIELDS = frozenset(
+    {
+        "run_id",
+        "root_task_id",
+        "parent_run_id",
+        "depth",
+        "name",
+        "role",
+        "status",
+        "activity",
+        "current_tool",
+        "attempts",
+        "created_at",
+        "updated_at",
+        "heartbeat_at",
+        "ended_at",
+    }
+)
+
+
+# LLM: The reducer repeats the runtime whitelist so replayed or test-injected
+# events cannot smuggle goal text, paths, permissions, or nested tool output into
+# a render block. These rows remain display-only.
+# 函数用途: 保留直属子代理底栏真正需要的公开标量字段。
+def _public_subagent_rows(value: list[object] | tuple[object, ...]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for item in value[:64]:
+        if not isinstance(item, Mapping):
+            continue
+        rows.append(
+            {
+                str(key): item[key]
+                for key in _PUBLIC_SUBAGENT_FIELDS
+                if key in item
+                and not isinstance(item[key], dict | list | tuple | set)
+            }
+        )
+    return rows
 
 
 # LLM: 工具终态文案只从 typed error_code/phase 和脱敏 output 选择；开始阶段的 command detail 不能掩盖拒绝或取消。
