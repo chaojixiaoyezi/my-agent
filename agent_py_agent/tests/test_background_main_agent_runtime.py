@@ -16,7 +16,9 @@ from agent_py_agent.agent.conversation import (
 )
 from agent_py_agent.agent.conversation.authority import (
     CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR,
+    CONVERSATION_EXECUTION_CWD_ATTR,
     CONVERSATION_REQUEST_ID_ATTR,
+    CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR,
     CONVERSATION_TASK_TURN_ACTIVE_ATTR,
 )
 from agent_py_agent.agent.core import SimpleAgent
@@ -44,6 +46,74 @@ def test_background_run_params_carry_structured_conversation_task_identity() -> 
         CONVERSATION_REQUEST_ID_ATTR: "task-1",
         CONVERSATION_TASK_TURN_ACTIVE_ATTR: True,
     }
+
+
+def test_background_auto_continuation_keeps_gateway_thread_project_cwd(tmp_path) -> None:
+    from agent_py_agent.agent.agent_core.orchestration.create_policy import (
+        _primary_workspace_root,
+    )
+    from agent_py_agent.agent.agent_core.tool_runtime_ledger import (
+        write_boundary_with_runtime_ledger,
+    )
+    from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run_params
+
+    service_root = tmp_path / "gateway-service"
+    project_root = tmp_path / "tui-project"
+    task_root = tmp_path / "home" / "tasks" / "task-1"
+    project_root.mkdir()
+    (task_root / "output").mkdir(parents=True)
+    (task_root / "work").mkdir()
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        service_root,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "local-agent",
+            "channel": "gateway-cli",
+            "channel_conversation_id": "cwd-background-session",
+            "channel_user_id": "local-agent",
+            "cwd": str(project_root.resolve()),
+            "runtime_workspace_roots": [str(project_root.resolve())],
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-1",
+            "goal": "继续 TUI 项目",
+            "status": "active",
+            "task_path": str(task_root),
+        }
+    )
+    persisted_thread = store.load_thread(thread.thread_id)
+    assert persisted_thread is not None
+
+    params = _run_params(
+        thread.thread_id,
+        BackgroundRunRequest(
+            thread_id=thread.thread_id,
+            task_id="task-1",
+            reason="subagent_runner_finished",
+        ),
+        agent,
+        thread=persisted_thread,
+    )
+
+    assert params.task_attributes[CONVERSATION_EXECUTION_CWD_ATTR] == str(
+        project_root.resolve()
+    )
+    assert params.task_attributes[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] == [
+        str(project_root.resolve())
+    ]
+    boundary = write_boundary_with_runtime_ledger(agent, params)
+    assert boundary["execution_cwd"] == str(project_root.resolve())
+    agent._current_run_params = params
+    try:
+        assert _primary_workspace_root(agent) == project_root.resolve()
+    finally:
+        delattr(agent, "_current_run_params")
 
 
 def test_claimed_background_turn_can_use_its_own_task_workspace(tmp_path) -> None:

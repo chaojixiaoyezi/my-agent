@@ -27,6 +27,12 @@ Gateway 的“服务地址”和 TUI 的“项目目录”是两种不同事实�
 相对路径、工具权限、子代理交付和后台续轮仍使用自己的目录。没有合法 cwd 时必须在模型调用前失败，
 不能静默退回 Gateway 守护进程的启动目录。
 
+子代理完成、定时事件或其它结构化 wake 启动后台 active turn 时，运行参数必须从本轮已经加载的
+`ConversationThread` 快照重新携带同一份 `cwd/runtime_workspace_roots`。隐藏 task `work/output` 只保存
+运行状态，不能替代项目 cwd；Gateway daemon 的 `--workspace-root` 也只能作为服务注册根，不能成为后台
+回合的相对路径根。该边界对应 会话运行时 `TurnContext` 每轮持有 cwd、`spawn_agent` 从当前 turn 复制 cwd 的
+做法，不能依赖前一轮进程内字段残留。
+
 gateway 的本地后台控制面入口：
 
 ```text

@@ -20,7 +20,9 @@ from .agent_activity import BackgroundMainActivitySink
 from .authority import (
     CONVERSATION_BACKGROUND_EVENT_REASON_ATTR,
     CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR,
+    CONVERSATION_EXECUTION_CWD_ATTR,
     CONVERSATION_REQUEST_ID_ATTR,
+    CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR,
     CONVERSATION_TASK_TURN_ACTIVE_ATTR,
 )
 from .control_commands import conversation_request_interrupt_name
@@ -1073,6 +1075,7 @@ def _invoke_background_main_agent(
                 runtime.agent,
                 goal_context=goal_context,
                 proactive_delivery_available=proactive_delivery_available,
+                thread=thread,
             ),
             inject=[
                 context_markdown(
@@ -2011,6 +2014,7 @@ def _run_params(
     *,
     goal_context: GoalRuntimeContext | None = None,
     proactive_delivery_available: bool | None = None,
+    thread: ConversationThread | None = None,
 ) -> RunParams:
     config = getattr(agent, "config", None)
     conversation_store = getattr(agent, "conversation_store", None)
@@ -2044,6 +2048,7 @@ def _run_params(
             request,
             agent,
             sampled_subagent_phase=resolved_goal_context.subagent_phase,
+            thread=thread,
         ),
         allowed_tools=_background_run_allowed_tools(
             config,
@@ -2091,6 +2096,7 @@ def _background_task_attributes(
     agent: object | None,
     *,
     sampled_subagent_phase: str = "",
+    thread: ConversationThread | None = None,
 ) -> dict[str, object] | None:
     attributes: dict[str, object] = {}
     wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
@@ -2155,7 +2161,31 @@ def _background_task_attributes(
         skill_refs = metadata.get("scheduler_skill_refs")
         if isinstance(skill_refs, list) and skill_refs:
             attributes["skill_snapshot_refs"] = skill_refs
+    _apply_background_thread_workspace_attributes(attributes, thread=thread)
     return attributes or None
+
+
+# LLM: A background wake is a new active turn of the same conversation. Copy the
+# exact Gateway-validated thread cwd/root snapshot into that turn, matching 会话运行时
+# TurnContext inheritance; hidden task storage and daemon cwd must never replace it.
+# 函数用途: 让子代理完成后的自动续跑仍在用户启动 TUI 时的项目目录工作，并让后续派工继承同一目录。
+def _apply_background_thread_workspace_attributes(
+    attributes: dict[str, object],
+    *,
+    thread: ConversationThread | None,
+) -> None:
+    if thread is None or not str(attributes.get("conversation_thread_id") or "").strip():
+        return
+    cwd = str(getattr(thread, "cwd", "") or "").strip()
+    if not cwd:
+        return
+    roots: list[str] = []
+    for value in (cwd, *(getattr(thread, "runtime_workspace_roots", ()) or ())):
+        text = str(value or "").strip()
+        if text and text not in roots:
+            roots.append(text)
+    attributes[CONVERSATION_EXECUTION_CWD_ATTR] = cwd
+    attributes[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] = roots
 
 
 # LLM: sampled phase 存在时必须原样复用；只有没有上层快照的直接调用才允许读取当前树。

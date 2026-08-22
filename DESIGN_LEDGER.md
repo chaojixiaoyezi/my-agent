@@ -904,7 +904,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   每次启动、切换或输入 TUI 之前必须先向用户公开 tmux session 名称与完整 attach 命令；测试者只观察，
   不旁路补代码或向被测代理发送技术推动消息。
 
-## 2026-08-22 单 Gateway 服务身份与 thread cwd 分离【状态：主链已部署，薄 TUI 首次提交补丁待真机】
+## 2026-08-22 单 Gateway 服务身份与 thread cwd 分离【状态：首轮主链已部署，后台 active turn 二次修复待真机】
 
 - 一个 local owner 只有一套 Gateway/adapter service identity：默认固定在
   `owner_home/workspace/runtime/services/`。pid、heartbeat、queue、HTTP 端口不能再由 TUI cwd 选择；
@@ -918,3 +918,8 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - `a091b72` 真机证明服务身份和 thread v6 主链生效，但薄 TUI 首次提交把 audit Agent 置空时也丢了 cwd。
   当前补丁将 audit 与 workspace 分参：客户端 config 是 cwd/roots 的唯一来源，Gateway 继续校验；不构造
   第二 Agent，也不回退 daemon cwd。真实提示词 2 复验必须使用全新项目目录和同一个 Gateway。
+- `0ffbfe4` 的真实提示词 2 已证明首次 `gwreq-*` 和三条 direct child 都使用正确 TUI cwd；随后
+  `subagent_runner_finished` 自动 wake 生成的 `run-*` 却只恢复 thread/task id，未恢复 thread v6 的 cwd，
+  使相对 child output 回落 `/root`。二次候选按 会话运行时 每轮 `TurnContext` 及 spawn runtime override 的同一
+  层级，在后台 `RunParams` 构造时复制本轮加载的 `ConversationThread.cwd/runtime_workspace_roots`；task
+  workspace 仍只是隐藏状态目录。该修复只读结构化 thread 字段，不匹配模型生成路径或任务文本。

@@ -77,6 +77,11 @@ thread 的 ordinary root；TUI Working 只数 `status=active` link，interrupted
 Gateway 主会话的 `execution_cwd` 和 `allowed_write_roots` 同时包含 ToolRegistry 项目根；远程 owner、
 task-local child 与 transient Audit 的窄权限测试必须继续通过。
 
+子代理完成触发的后台 `run-*` 回合也必须从已加载 thread 快照恢复同一
+`cwd/runtime_workspace_roots`：模型可见 Workspace Context、工具 `execution_cwd`、相对 `output_files`
+以及下一批 child 的项目根必须继续指向启动该 TUI 的目录，不能退回单 Gateway daemon 的 `/root`，也不能
+出现 `None` 拼接路径。focused 回归至少覆盖后台 `RunParams`、write boundary 和 child output 根三处。
+
 严格 code-size 初次被当前提交 `31f30fe` 自身的 25 个未登记 hard finding 阻断。为避免把存量债务冒充本轮
 回归，先从 `git archive HEAD` 纯净快照生成 baseline，再修掉本轮唯一新增的 `_progress_payload` 深嵌套；
 当前 strict gate 通过，原始报告中的 4 个 hard 均能在纯净基线复现，本轮新增 hard 为 0。baseline 不取
