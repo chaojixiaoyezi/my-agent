@@ -111,15 +111,12 @@ def tool_context_window_max_chars(agent: object) -> int:
 _tool_context_window_max_chars = tool_context_window_max_chars
 
 
+# LLM: An authoritative main/child thread already owns durable Compact. Live tool-window
+# reduction stays enabled, but it must never start the removed parallel archive continuation.
+# 函数用途: 判断当前轮是否仍需旧持久压缩；有独立会话线程时明确关闭重复链路。
 def _persistent_compact_enabled(agent: object, params: object) -> bool:
-    # Authoritative conversations already have one durable transcript compact
-    # chain. The live tool window still applies, but its successful reduction
-    # must not request a second memory-archive compact/resume cycle.
-    if (
-        str(getattr(params, "context_scope", "") or "") == "conversation"
-        and conversation_transcript_is_authoritative(
-            getattr(params, "task_attributes", None)
-        )
+    if conversation_transcript_is_authoritative(
+        getattr(params, "task_attributes", None)
     ):
         return False
     save = getattr(params, "save", None)

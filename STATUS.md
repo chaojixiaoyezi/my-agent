@@ -1,16 +1,21 @@
 # STATUS
 
-## 2026-08-22 子代理真实 Compact 次数与统一路线（`e59acad` 已部署）
+## 2026-08-22 主/子/孙代理统一 Conversation Compact（本地候选）
 
 - 正式 Prompt 3 的 deepseek child 当前上下文从触发线附近降到约 35.7k，但 run 内没有 durable
   `compact_applies` 行；实际发生的是 `_tool_loop_service` 的 native IR 成对裁剪。旧事件只活在回合内 sink，
   child 终态投影因此错误显示 `compact 0`。
-- 当前候选把每次真实 `model_visible_context_compaction.v1` 以 attempt/generation 幂等写入 exact child 的
-  纯数字属性；child 行临时显示“durable apply 次数 + native IR reduction 次数”。main Context 仍只读
-  ConversationThread generation，并新增 `压缩点 90%`，明确区分累计次数、触发点和临时操作进度。
-- 最终方向已按 会话运行时 确认为“每个 main/child/grandchild 各有独立 thread，共用同一 Conversation Compact
-  状态机”。当前仅完成真实展示候选；child 的 thread 建立、消息接入、resume/CAS 迁移和旧
-  `memory_archive` continuation 删除尚未开始，不能把本轮写成底座已经统一。
+- 当前本地候选已按 会话运行时 落地“每个 main/child/grandchild 各有独立 thread，共用同一 Conversation
+  Compact 状态机”：child 创建或旧任务恢复时按稳定 `agent_thread_id` 物化线程；每个 attempt 幂等落
+  user/assistant，轮前和 provider overflow 后都调用 `conversation/compact.py` 的摘要、checkpoint、CAS 与
+  失败熔断。父、子、兄弟正文不互相复制。
+- task-local 工具/工作区/Memory 隔离保留，但 durable Compact owner 只认结构化 transcript-authoritative
+  标记并交给 ConversationStore；正式 child runner 不再生成旧 `compact_applies/continue`。child 行、Web
+  和 SQLite 只读独立 thread generation/checkpoint。`model_visible_context_compaction.v1` 仍可实时显示当轮
+  native IR 裁剪，但不再持久写 run attribute，也不与正式次数相加。
+- 本地 fake/replay 已覆盖轮前大历史、provider overflow 后同 attempt 强制 Compact、child/grandchild 独立
+  transcript、checkpoint/generation、owner Memory 不污染、旧 apply 目录不生成及遗留计数不回读。相关
+  focused 组合已通过；严格 gate、推送、`.7` 单 Gateway 部署和用户指定大型项目真实 TUI 尚待执行。
 - `e59acad` 在唯一 Gateway 的全新 Prompt 3 TUI 中证明 6 个 child 均一次 attempt 自然
   DONE，实时 context 与终态行正常；该轮 child 最高约 89.4k，未达 115.2k 压缩点，
   因此 `compact 0` 是真实结果，不冒充压缩成功证据。

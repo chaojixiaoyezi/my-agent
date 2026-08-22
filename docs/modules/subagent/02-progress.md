@@ -1,13 +1,19 @@
 # Subagent Progress
 
-## 2026-08-22 子代理 Compact 真实次数与统一迁移目标
+## 2026-08-22 子代理/孙代理统一 Conversation Compact（本地完成）
 
 - deepseek child 的 provider-visible context 已从触发线附近降到约 35.7k，证明回合内 native IR 真正完成
   裁剪；旧 TUI 只数 `memory_archive/compact_applies`，所以错误显示 `compact 0`。
-- 当前候选在公共 tool-loop 裁剪缝隙写入 exact run 的纯数字、幂等投影；child 展示临时相加 durable apply
-  与 native reduction，不从 token 降幅或正文猜测。main 则继续只读 ConversationThread generation。
-- 长期方案对照 会话运行时：每个 child/grandchild 建立独立 agent thread，全部使用同一 Conversation Compact
-  状态机。完成 thread/transcript/resume/CAS 接线后删除旧 task-local continuation 和本过渡计数，不保留双轨。
+- 已按 会话运行时 每个 agent 一条 thread 的语义落地：创建 child/grandchild 时以稳定 `agent_thread_id` 建立无
+  channel binding 的独立 ConversationThread，父子 lineage 只存在结构化 metadata，正文互不复制。
+- child 每次 attempt 先幂等写 user，再做统一轮前 Compact；provider 报 context overflow 时在同一 attempt
+  强制 Compact，携带 typed tool/guidance 进度继续，终态再幂等写 assistant。阈值、token estimator、摘要
+  候选、checkpoint-before-CAS、失败熔断全部复用 `conversation/compact.py`。
+- TUI/Web/SQLite 的 child `compact N` 现在只读该 thread 的 `compact_generation`；live native IR 裁剪仍发
+  纯数字事件供当前回合观看，但不再写 run attribute，也不与旧 durable apply 相加。正式 child runner 的
+  transcript-authoritative 标记会跳过旧 task-local compact continuation，不长期双写。
+- fake/replay 已覆盖轮前大历史、provider overflow 重试、child/grandchild 隔离、checkpoint/generation、
+  owner Memory 不污染和旧 apply 目录不生成。推送、`.7` 部署与指定大型项目的真实 TUI 长任务仍待执行。
 
 ## 2026-08-22 内部状态误读不再把 child 错挂起
 

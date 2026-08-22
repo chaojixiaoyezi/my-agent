@@ -2700,8 +2700,9 @@ def _latest_conversation_messages(
     return tuple(selected)
 
 
-# LLM: assistant 正文、delivery_artifacts 与 operation verification 分栏落账；metadata 只接受公开投影。
-# 函数用途: 幂等追加一条 Gateway 会话消息，并保存可跨轮复用的产物和操作核验 metadata。
+# LLM: assistant正文、artifact与operation facts分栏落账；新行同时写跨 surface 的
+# conversation_request_id 和显式 Gateway 迁移键，Compact 排除当前输入不再依赖入口专名。
+# 函数用途: 幂等追加 Gateway 消息，并保存统一请求身份、可复用产物和操作核验 metadata。
 def _append_gateway_conversation_message(
     agent: SimpleAgent,
     request: dict,
@@ -2738,6 +2739,7 @@ def _append_gateway_conversation_message(
         ):
             return True
         entry_metadata: dict[str, object] = {
+            "conversation_request_id": request_id,
             "gateway_request_id": request_id,
             "delivery_artifacts": _metadata_artifact_refs(delivery_artifacts),
         }
@@ -2780,8 +2782,9 @@ def _append_gateway_conversation_message(
         return False
 
 
-# LLM: 延迟补账必须携带同一份净化正文、产物和操作核验 metadata，不能回退保存内部结果。
-# 函数用途: assistant transcript 暂时写失败时保存可幂等修复的记录。
+# LLM: Delayed repair preserves the same canonical conversation request identity, sanitized body,
+# artifacts and operation facts as the normal append; it must not downgrade to Gateway-only ids.
+# 函数用途: transcript 暂时写失败时保存与正常路径字段一致、可幂等恢复的消息记录。
 def _queue_gateway_conversation_repair(
     agent: SimpleAgent,
     request: dict,
@@ -2799,6 +2802,7 @@ def _queue_gateway_conversation_repair(
         return
     metadata = request.get("metadata") if isinstance(request.get("metadata"), dict) else {}
     repair_metadata: dict[str, object] = {
+        "conversation_request_id": request_id,
         "gateway_request_id": request_id,
         "repair": True,
         "delivery_artifacts": _metadata_artifact_refs(delivery_artifacts),

@@ -19,7 +19,9 @@ Gateway 可以并行，但不能作为“单 Gateway 多客户端”验收的替
 1. `你在底下创建一个abc目录，然后在abc目录里写一个web页面的植物大战僵尸游戏，不准自己写，必须多个子代理，要求游戏真实，带20个关卡，关卡设置合理，你只能盯着，并且要求最后是0.0.0.0局域网都能访问`
 2. `在自己的任务目录底下创建一个bbb的目录，在里面写一个超级玛丽的游戏，要求不准自己做，必须创建多个子代理，需要复刻原始超级玛丽的所有玩法和前三个关卡，直接网页版可玩`
 3. `深度调研轻量运行时,工具运行时,会话运行时,终端交互,deepseek-harness,代理运行时,通道运行时,长期助手架构和完整功能，做代码级别的学习和了解，不准自己去做，只能派子代理去做调研，完整列出每个功能目录如何做的，技术实现，架构方案，优缺点等等。最后你整合进行横向对比。`
-4. 先在该 TUI 对应目录下载一个 GitHub stars 超过 10,000、功能代码超过 20,000 行的项目，再输入：
+4. 先在该 TUI 对应目录下载一个 GitHub stars 超过 10,000、功能代码超过 40,000 行的项目；stars 必须从
+   GitHub 当前项目页/API 核验，功能代码行数必须在下载后的固定 commit 上排除依赖、构建产物、测试快照与
+   纯文档后本地统计并留证。然后再输入：
    `换一种编程语言，完整复刻这个项目，要求实现所有的功能，所有测试，最后保证你复刻的这个项目能够和原项目一样，毫无缺陷的运行，并且所有功能和原项目一样可用和完善。你自己不允许进行复刻，只能创建子代理进行复刻和代码编写工作，你只能负责最后的测试功能和整合工作，你不允许写功能代码。`
 
 这四轮都只把用户 prompt 输入一次；测试者只观察 TUI、typed 账本、日志、产物和真实服务，不替被测对象
@@ -512,9 +514,11 @@ Todo 超过四项时，默认投影必须恰好保留四条任务行：最近完
 显示全部 canonical 顺序，再按一次收起；该按键不得编辑或提交输入、不得写 task_progress。常驻 Context
 显示总量、窗口占比、ConversationThread `compact_generation` 与同一 usage 预算算出的明确“压缩点”；
 `compact N`、`压缩点 90%` 和临时 Compact 操作进度不能混为一类。prompt/messages/tools 的详细构成只由
-`/context` 命令展示。child 发生 `model_visible_context_compaction.v1` 时，exact run 必须按
-attempt+generation 幂等累计纯数字投影；TUI 过渡期只相加 durable apply 行与该真实 reduction，不从 token
-下降或正文猜测。未来统一 ConversationThread 后，回归必须改为只读 child thread generation 并删除过渡链。
+`/context` 命令展示。child 发生 `model_visible_context_compaction.v1` 时，该事件只属于当前活动回合的
+轻量 ToolCall/ToolResult 裁剪，不得持久写入 exact run 或累计到 `compact N`。child/grandchild 常驻次数
+必须只读各自 `agent_thread_id` 对应 ConversationThread 的 generation/checkpoint；即使旧 durable apply
+ledger 或遗留 native attribute 仍存在，投影也必须忽略。回归同时覆盖轮前阈值 Compact、provider overflow
+后同 attempt 强制 Compact、typed tool/guidance 进度携带、正文隔离和旧 continuation 不再生成。
 内部 child 状态路径的 shell 拒绝还必须覆盖两层：ShellTool 返回
 `WRONG_STATUS_SURFACE + effect_outcome=not_started`；经过 canonical authorized dispatch 后即使
 `handler_executed=true`，operation 仍归确定性 `failed` 而非 `unknown`。模型应收到原拒绝原因后换用

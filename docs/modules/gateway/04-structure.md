@@ -15,9 +15,10 @@
 
 2026-08-22 起，activity endpoint 公开 `conversation_agent_activity.v5`：Gateway 后台主代理把最近一次
 thinking、tool、provider retry 或 finalizing 阶段和同一次 provider preflight 的数字 context usage 写入
-进程内有界 display sink；直属 child 的职责短标题、当前上下文 token 与 Compact 次数从 exact canonical run
-只读取得。迁移期间 child 次数为 durable apply 行加 typed native IR reduction；当前 token 快照不是累计
-计费用量。当前 active task 的 Todo 则从 canonical `task_progress.v1` 账本只读投影为 `id/title/status`；
+进程内有界 display sink；直属 child 的职责短标题与当前上下文 token 从 exact canonical run 只读，
+Compact 次数则精确加载其 `agent_thread_id` 对应 ConversationThread generation。native IR reduction 只属
+当前活动回合，不与持久次数相加；当前 token 快照也不是累计计费用量。当前 active task 的 Todo 则从
+canonical `task_progress.v1` 账本只读投影为 `id/title/status`；
 主代理累计 Compact 次数只读 ConversationThread 的 `compact_generation`。客户端按 250ms 节奏轮询并只接收白名单字段。main 快照可易失；child
 数值与 Todo 仍由各自 canonical ledger 持有，全部展示字段都不参与任务结束、恢复或授权，真实 task
 link/run/turn_end 仍是唯一生命周期事实。
@@ -69,8 +70,12 @@ audit Agent 为空而回退 daemon cwd。
   精确 ID；未知外部 ID 被消费但不创建本地消息。`tui_view_model.py` 分开保存 `pending_steers` 与
   `queued_inputs`，`tui_block_renderer.py` 把两者固定在 composer 上方，不放进滚动 transcript。
 - `model_visible_context_usage.v1` 与 `model_visible_context_compaction.v1` 都只允许数字白名单穿过 rich
-  chunk。usage 是最新模型调用前的展示快照；compaction 是 active-turn native IR 的事实，child runner 会
-  额外持久一个有界计数投影，避免 sink 消失后归零；二者均不获得 ConversationStore compact 权威。
+  chunk。usage 是最新模型调用前的展示快照；compaction 是 active-turn native IR 的事实，只在当前 sink
+  存活期间展示，不再写 child run。child 常驻次数只来自 ConversationThread；两种 rich 事件均不获得
+  ConversationStore compact 权威。
+- Gateway transcript、message repair 与 delegated agent attempt 都写 canonical `conversation_request_id`；
+  Compact 用它排除当前未完成输入。`gateway_request_id` 只保留为旧 Gateway 行的显式迁移读取与请求账本
+  join，不是第二种 Compact identity。
 - usage 的 `compact_trigger_tokens` 是会话统一策略，不是单次请求的权限投影；no-save 仅让
   preflight 使用完整 context window 作当轮硬限，不把 TUI 的 90% 压缩点改成 100%。
 

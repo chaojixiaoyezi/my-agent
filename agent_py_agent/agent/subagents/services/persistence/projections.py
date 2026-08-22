@@ -144,10 +144,17 @@ def render_thought_markdown(task: SubAgentTask) -> str:
     )
 
 
+# LLM: Projection sync joins the manager's owner ConversationStore only for read-model fields;
+# task and thread files remain the two canonical authorities for their separate domains.
+# 函数用途: 保存子代理时刷新 SQLite 查询投影，并带上该代理正式 Compact 次数。
 def _sync_local_store_projection(manager: Any, task: SubAgentTask) -> None:
     if not manager.local_store:
         return
-    sync_subagent_control_plane_projection(manager.local_store, task)
+    sync_subagent_control_plane_projection(
+        manager.local_store,
+        task,
+        getattr(manager, "conversation_store", None),
+    )
     manager.local_store.task_registry.register_task(
         task_id=task.id,
         session_id=task.root_id,

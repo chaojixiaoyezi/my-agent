@@ -1,13 +1,23 @@
 # Gateway Progress
 
+## 2026-08-22 Gateway 与 delegated thread 共用请求身份
+
+- Gateway 新 transcript 行同时写 canonical `conversation_request_id` 与显式旧 `gateway_request_id`；
+  `conversation/compact.py` 优先按 canonical 字段排除已落盘但仍由 current prompt 单独携带的当前输入，
+  旧字段只作为已持久数据的 schema migration read。
+- child/grandchild 不经过 Gateway，但按同一个 canonical 字段记录 exact attempt，因此 main 与 delegated
+  agent 共用同一 Compact 当前输入排除合同；通道路由、owner binding 和 Gateway request lease 仍各自独立。
+- 正常 assistant 落账与 message repair 写完全相同的 canonical id、产物和 operation metadata，修复路径
+  不能退回入口专名或建立第二种 transcript。相关 Gateway Conversation focused 回归已通过。
+
 ## 2026-08-22 Compact 触发点与 child 真实次数投影
 
 - 常驻 main Context 现在把累计 `compact N` 与自动 `压缩点 90%` 分开显示；后者由同一
   `compact_trigger_tokens/context_window_tokens` 计算，不再冒充次数或操作进度。prompt/messages/tools
   仍只在 `/context` 展示。
-- active-turn native IR 裁剪会先形成闭合的数字事件，再写 rich sink 与 exact child canonical 属性；TUI
-  因而能在 sink 消失和 child 完成后继续显示真实累计。该投影没有生命周期、恢复或 Compact CAS 权威，
-  后续将随 child ConversationThread 统一迁移而删除。
+- active-turn native IR 裁剪仍形成闭合数字事件并写 rich sink，但不再写 exact child canonical 属性；
+  child 完成后的常驻累计只读其独立 ConversationThread generation。该事件没有生命周期、恢复或
+  Compact CAS 权威，也不再与 durable 次数相加。
 - 真实 Prompt 3 终屏又暴露 no-save presentation 把压缩点错显示为 100%。底层现只用
   `runtime_compact_policy.trigger_tokens` 投影公开压缩点；`allow_persistent_apply` 仍只决定当轮能否
   落盘与执行，不再篡改展示策略。

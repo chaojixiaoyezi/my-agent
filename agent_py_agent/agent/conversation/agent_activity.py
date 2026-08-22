@@ -279,7 +279,11 @@ def conversation_agent_activity(
             warnings=tuple(dict.fromkeys((*link_warnings, *compact_warnings))),
         )
 
-    rows, run_warnings = _direct_subagent_rows(agent, set(active_task_ids))
+    rows, run_warnings = _direct_subagent_rows(
+        agent,
+        set(active_task_ids),
+        conversation_store=store,
+    )
     progress_items, progress_warnings = _task_progress_items_from_links(
         agent,
         active_links,
@@ -361,7 +365,11 @@ def task_progress_items_for_task(
         link = loader(str(task_id).strip())
     except Exception:
         return ()
-    rows, _run_warnings = _direct_subagent_rows(agent, {str(task_id).strip()})
+    rows, _run_warnings = _direct_subagent_rows(
+        agent,
+        {str(task_id).strip()},
+        conversation_store=store,
+    )
     items, _warnings = _task_progress_items_from_links(
         agent,
         [link] if link else [],
@@ -459,6 +467,8 @@ def _public_context_usage(value: object) -> dict[str, object]:
 def _direct_subagent_rows(
     agent: object,
     root_task_ids: set[str],
+    *,
+    conversation_store: object | None = None,
 ) -> tuple[list[dict[str, object]], list[str]]:
     manager = getattr(agent, "subagents", None)
     if manager is None:
@@ -486,7 +496,10 @@ def _direct_subagent_rows(
             continue
         selected.append(task)
     selected.sort(key=_subagent_sort_key)
-    rows = [_subagent_row(task) for task in selected]
+    rows = [
+        _subagent_row(task, conversation_store=conversation_store)
+        for task in selected
+    ]
     warnings = ["subagent_run_load_error"] if load_errors else []
     return rows, warnings
 
@@ -512,7 +525,11 @@ def _subagent_sort_key(task: object) -> tuple[int, float, str]:
 # live context usage, but still omits response, tool output, paths, permissions,
 # and runtime activity prose. Explicit covers ids support display joins only.
 # 函数用途: 把直属子代理压成界面需要的职责短标题、状态、上下文用量与 Todo 关联。
-def _subagent_row(task: object) -> dict[str, object]:
+def _subagent_row(
+    task: object,
+    *,
+    conversation_store: object | None = None,
+) -> dict[str, object]:
     status = str(getattr(task, "status", "") or "").strip().upper()
     return {
         "run_id": str(getattr(task, "id", "") or ""),
@@ -528,7 +545,10 @@ def _subagent_row(task: object) -> dict[str, object]:
         "description": _subagent_description(task),
         "attempts": max(0, _safe_int(getattr(task, "runner_attempts", 0))),
         "context_tokens": max(0, runtime_context_token_count(task)),
-        "compact_count": max(0, runtime_compact_count(task)),
+        "compact_count": max(
+            0,
+            runtime_compact_count(task, conversation_store),
+        ),
         "progress_item_ids": _progress_item_ids(task),
         "created_at": max(0.0, _safe_float(getattr(task, "created_at", 0.0))),
         "updated_at": max(0.0, _safe_float(getattr(task, "updated_at", 0.0))),

@@ -424,6 +424,9 @@ class SubAgentBaseService:
         """Register a subagent role card."""
         self.manager.cards[card.name] = card
 
+    # LLM: Creation publishes one task, one exact delegated ConversationThread, runtime authority,
+    # and projections in that order; callers must not add a second thread or transcript path.
+    # 函数用途: 创建一条完整子代理任务，并在任务可运行前同步建立其独立会话线程。
     def create_run(
         self,
         *,
@@ -438,9 +441,18 @@ class SubAgentBaseService:
         )
         prepared = self._prepare_run(params)
         task = self._build_task(params, prepared)
+        self._materialize_agent_thread(task)
         self._write_authority_records(task, params)
         self._finalize_task(task, params.parent_id)
         return task
+
+    # LLM: A delegated run receives its exact ConversationThread before lifecycle publication.
+    # Standalone unmanaged managers without a ConversationStore remain valid test/index adapters.
+    # 函数用途: 创建子代理任务时同步建立它自己的会话线程，供后续 Compact 和恢复使用。
+    def _materialize_agent_thread(self, task: SubAgentTask) -> None:
+        from ...conversation.agent_thread import ensure_subagent_thread
+
+        ensure_subagent_thread(self.manager, task)
 
     def _write_authority_records(self, task: SubAgentTask, params: CreateRunParams) -> None:
         """R1：create_run 权威主链写入（A.4/A.5/A.6/A.7/A.9）。

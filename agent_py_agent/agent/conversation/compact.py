@@ -558,8 +558,9 @@ def _uncompacted_conversation_rows(
     return _messages_after_cursor(rows, thread.compacted_through_message_id)
 
 
-# LLM: Exclusion is keyed only by the structured gateway request id.
-# 函数用途: 排除已经落盘但仍由 current_prompt 单独携带的当前请求，避免重复进入摘要。
+# LLM: Every surface writes the canonical conversation_request_id. The Gateway key remains an
+# explicit schema-migration read for already persisted rows, never a prose or execution fallback.
+# 函数用途: 按结构化请求身份排除已落盘但仍由 current_prompt 单独携带的当前输入。
 def _without_current_request_suffix(
     rows: list[MessageLogEntry],
     request_id: str,
@@ -571,7 +572,15 @@ def _without_current_request_suffix(
     end = len(rows)
     while end > 0:
         metadata = rows[end - 1].metadata
-        current = str(metadata.get("gateway_request_id") or "") if isinstance(metadata, dict) else ""
+        current = (
+            str(
+                metadata.get("conversation_request_id")
+                or metadata.get("gateway_request_id")
+                or ""
+            )
+            if isinstance(metadata, dict)
+            else ""
+        )
         if current != expected:
             break
         end -= 1

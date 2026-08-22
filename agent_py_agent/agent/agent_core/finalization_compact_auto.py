@@ -76,18 +76,18 @@ def compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[st
     )
 
 
+# LLM: A structured authoritative transcript delegates durable Compact regardless of whether
+# the runtime scope is foreground conversation or isolated delegated task_local execution.
+# 函数用途: 判断本轮是否已有独立 ConversationThread 接管 Compact，避免再走旧归档续跑链。
 def _conversation_thread_owns_compaction(ctx: FinalizeContext) -> bool:
-    """Keep one authoritative compact chain for the whole conversation.
+    """Keep one authoritative compact chain for the exact agent thread.
 
     Tool calls are model-visible items inside the active turn, not a reason to
-    fork the same user conversation into ``memory_compact_auto``.  Their live
+    fork the same agent thread into ``memory_compact_auto``.  Their live
     prompt is reduced in the tool loop (the same turn), while completed turns
     are compacted by the durable conversation transcript.
     """
-    return bool(
-        str(getattr(ctx, "context_scope", "") or "") == "conversation"
-        and conversation_transcript_is_authoritative(ctx.task_attributes)
-    )
+    return conversation_transcript_is_authoritative(ctx.task_attributes)
 
 
 def _conversation_thread_compact_fields(ctx: FinalizeContext) -> dict:

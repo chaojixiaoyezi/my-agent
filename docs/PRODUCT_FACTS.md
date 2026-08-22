@@ -12,6 +12,18 @@
 
 状态只描述当前工作树。它不等同于已发布版本；未提交、未推送的能力不属于远程 `main`。
 
+## 2026-08-22 Delegated Agent Conversation Compact
+
+- **状态：实验性（当前工作树定向测试通过，尚未部署真机）**。main、child、grandchild 各自拥有独立
+  ConversationThread；child 创建/恢复、逐 attempt transcript、轮前 Compact、provider overflow 强制
+  Compact、checkpoint/generation CAS 均已接入与 main 相同的 `conversation/compact.py`。
+- task-local 继续隔离长期 Memory、工具权限与工作区；父子 lineage 只由 run/thread metadata 表达，正文
+  不共享。正式 child runner 不再生成旧 `compact_applies/continue`，TUI/Web/SQLite 的 child 次数只读取
+  exact `agent_thread_id` 的 generation。turn-local native IR 裁剪事件不属于 durable Compact。
+- fake/replay 已覆盖阈值触发、overflow 同 attempt 重试、child/grandchild 隔离、旧计数不回读和 owner
+  Memory 不污染。MiniMax-M2.7、单 Gateway、大型真实项目的长时间 TUI 验收未完成，因此不能承诺数小时
+  连续多代 Compact、崩溃恢复或完整项目交付已经稳定。
+
 ## 2026-08-18 终端交互 风格 TUI
 
 - **状态：稳定（当前工作树与 `.13` 测试部署）**。Python/prompt_toolkit 单一 typed TUI 已覆盖消息块、

@@ -28,8 +28,6 @@ from .native_tool_protocol import native_tool_use_active
 from .provider_transient_auto_resume import run_with_provider_transient_auto_resume
 from .runner.context import current_task_attributes
 from .runner.stage_trace import (
-    RunnerContextCompactionTraceRequest,
-    trace_runner_context_compaction,
     trace_runner_tool_call_started,
 )
 from .runtime.goal_accounting import account_goal_model_response, begin_goal_model_turn
@@ -491,12 +489,11 @@ def _settle_native_ir_window(
     return dropped
 
 
-# LLM: Mid-turn IR compaction emits one content-free typed fact through the existing chunk sink
-# and persists only a bounded count projection on an exact child run. The per-turn generation
-# remains in live_archive_state and neither projection is a ConversationThread compact generation.
-# 函数用途: 记录当前活动回合第几次裁剪，把纯数字事实投给客户端，并累计子代理界面次数。
+# LLM: Mid-turn IR compaction is a transient active-turn event only. Durable child Compact count
+# comes exclusively from its ConversationThread generation, so this event must not update task state.
+# 函数用途: 记录当前活动回合第几次轻量裁剪，并把纯数字进度投给正在观看的客户端。
 def _publish_native_ir_compaction(
-    agent: object,
+    _agent: object,
     params: ToolLoopExecuteParams,
     *,
     before_tokens: int,
@@ -519,13 +516,6 @@ def _publish_native_ir_compaction(
         "dropped_pairs": max(0, int(dropped_pairs or 0)),
         "preserved_pairs": max(0, int(preserved_pairs or 0)),
     }
-    trace_runner_context_compaction(
-        RunnerContextCompactionTraceRequest(
-            agent=agent,
-            params=params,
-            compaction=payload,
-        )
-    )
     sink = params.effective_on_chunk
     writer = getattr(sink, "write_context_compaction", None)
     if not callable(writer):

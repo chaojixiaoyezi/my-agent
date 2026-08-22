@@ -20,6 +20,7 @@ def _run(run_id: str, **overrides: object) -> SimpleNamespace:
         "description": "",
         "attributes": {},
         "runner_attempts": 1,
+        "agent_thread_id": f"thread-{run_id}",
         "agent_run_workspace_dir": "",
         "created_at": 10.0,
         "updated_at": 20.0,
@@ -168,7 +169,7 @@ def test_conversation_agent_activity_marks_active_roots_unknown_on_link_failure(
     assert activity.warnings == ("conversation_task_links_unavailable",)
 
 
-def test_conversation_agent_activity_reads_live_child_context_and_compact_ledgers(
+def test_conversation_agent_activity_reads_child_thread_generation_only(
     tmp_path: Path,
 ) -> None:
     from agent_py_agent.agent.conversation.agent_activity import (
@@ -197,7 +198,16 @@ def test_conversation_agent_activity_reads_live_child_context_and_compact_ledger
         active_task_links_report=lambda _thread_id: (
             [SimpleNamespace(task_id="task-live", status="active")],
             [],
-        )
+        ),
+        load_thread_report=lambda thread_id: (
+            SimpleNamespace(
+                compact_generation=(2 if thread_id == task.agent_thread_id else 0),
+                compact_checkpoint_id=(
+                    "compact-child-2" if thread_id == task.agent_thread_id else ""
+                ),
+            ),
+            None,
+        ),
     )
     manager = SimpleNamespace(
         list_runs_report=lambda: SimpleNamespace(runs=[task], load_errors=[])
@@ -210,7 +220,7 @@ def test_conversation_agent_activity_reads_live_child_context_and_compact_ledger
     )
 
     assert activity.subagents[0]["context_tokens"] == 12_345
-    assert activity.subagents[0]["compact_count"] == 3
+    assert activity.subagents[0]["compact_count"] == 2
 
 
 def test_background_main_activity_sink_projects_real_stage_for_active_task() -> None:

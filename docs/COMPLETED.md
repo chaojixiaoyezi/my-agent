@@ -4,6 +4,11 @@
 
 最近收口重点：
 
+- 2026-08-22 本地底座已完成 main/child/grandchild 统一 Conversation Compact：每个 delegated run 在创建
+  或旧任务首次恢复时物化独立 `agent_thread_id`，每个 attempt 幂等落 user/assistant，轮前阈值与 provider
+  overflow 都复用 `conversation/compact.py` 的 checkpoint-before-CAS 主链。task-local 权限与 Memory 隔离
+  保留，旧 apply/continue 不再由正式 child runner 生成；TUI/Web/SQLite 只读 child thread generation，
+  turn-local native IR 裁剪不再持久累计。fake/replay 定向验收已通过，部署和大型项目真实 TUI 仍待完成。
 - 2026-08-22 本地底座已把 Compact 的“配置压缩点”与“单次回合是否允许持久
   apply”分开：presentation/no-save 回合不再把 Context 行的 90% 错写成 100%；真实
   preflight 仍保持 save=False 不压缩落盘，并由完整模型窗口守最后硬限。回归同时锁定
@@ -15,9 +20,8 @@
 - 2026-08-22 本地 TUI 已把 Todo 默认摘要收为固定四条状态窗口：最近完成、当前运行和下一待办优先，
   运行项复用 Working 动画，`Ctrl+T` 只展开/收起完整 canonical 清单。常驻 Context 显示总量、窗口占比、
   主 ConversationThread 已提交 Compact 次数和明确命名的自动压缩点；协议相关 prompt/messages/tools
-  分类留给 `/context`。child 真实 native IR reduction 已用纯数字幂等投影补进过渡期次数，解决终态仍显示
-  0；这不代表 child ConversationThread 迁移已完成。实现、部署/真机状态仍以
-  `STATUS.md`、`docs/ROADMAP.md` 为准。
+  分类留给 `/context`。该轮曾用 exact-run 数字投影补过渡期次数；这条过渡现已被上方独立 child
+  ConversationThread generation 主链删除。部署/真机状态仍以 `STATUS.md`、`docs/ROADMAP.md` 为准。
 - 2026-08-21 `714c0c8` 已把单一后台计数扩展为 终端交互/模型助手 Code 式的固定子代理
   活动区：Gateway 从 active task link 与 canonical run 账本生成有界直属 child 投影，输入框附近原位
   显示名称、状态、职责短标题、耗时和 attempts。它不进 transcript，不暴露工具输出/路径/权限，也不参与

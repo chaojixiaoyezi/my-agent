@@ -106,7 +106,7 @@ child 的自然最终回复、typed lifecycle event 与真实 artifact refs 是�
 
 ## Compact 后
 
-当前 main 从 ConversationThread summary/raw tail 恢复，task-local child 仍从自己的 canonical
-state/checkpoint 与旧 compact apply 续接；阈值和 native 工具历史裁剪虽共用，持久状态机尚未统一。
-迁移目标是每个 main/child/grandchild 各有独立 agent thread，并全部走同一 Conversation Compact；完成后
-删除 child 旧 continuation，不保留根任务专用、子代理专用或“查树后再推动”的第二套恢复包。
+main/child/grandchild 现在各自从独立 ConversationThread 的 summary/raw tail 恢复，并全部走同一
+Conversation Compact。task-local 只保留子代理权限、Memory 隔离和运行工作区，不再生成旧 compact apply/
+continue。排障时以 `task.agent_thread_id -> ConversationThread.compact_generation/checkpoint_id` 为正式次数与
+恢复事实；活动回合的 native IR reduction 只看实时事件，不能累计成 durable Compact。

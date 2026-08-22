@@ -1170,11 +1170,11 @@ def _round_context_over_compact_budget(
     return prompt_tokens >= threshold
 
 
+# LLM: Structured transcript authority, not the presentation scope string, selects the one
+# durable Compact owner for both foreground and delegated agent threads.
+# 函数用途: 判断工具轮是否应把持久压缩交给 ConversationStore，避免重复归档续跑。
 def _conversation_owns_compaction(params: ToolLoopExecuteParams) -> bool:
-    return bool(
-        str(getattr(params, "context_scope", "") or "") == "conversation"
-        and conversation_transcript_is_authoritative(params.task_attributes)
-    )
+    return conversation_transcript_is_authoritative(params.task_attributes)
 
 
 def _persistent_compact_enabled(agent: object, params: object) -> bool:

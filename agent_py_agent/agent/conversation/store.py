@@ -259,6 +259,16 @@ def safe_file_stem(value: str) -> str:
     return "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in text) or "unknown"
 
 
+# LLM: Store commands may receive lists or tuples; normalize them before comparing exact
+# thread scope so serialization shape cannot create a false lineage change.
+# 函数用途: 将会话运行根目录整理成有序、去空、去重的不可变列表。
+def normalized_runtime_workspace_roots(value: object) -> tuple[str, ...]:
+    items = value if isinstance(value, (list, tuple)) else ()
+    return tuple(
+        dict.fromkeys(str(item).strip() for item in items if str(item or "").strip())
+    )
+
+
 def _named_work_name_matches(link: ThreadTaskLink, work_kind: str, work_name: str) -> bool:
     current = str(link.work_name or "")
     expected = str(work_name or "")
@@ -538,6 +548,14 @@ class ConversationThreadStore(ConversationBaseStore):
         if latest is not None:
             return self._bind_existing(latest.thread_id, request)
         return self._create_thread(request)
+
+    # LLM: Keep this adapter small; exact-id creation and collision checks live in
+    # agent_thread_store so the channel-bound store does not absorb agent runtime policy.
+    # 函数用途: 为一个确定的子代理运行创建或校验独立会话线程，不把它绑定成用户聊天会话。
+    def ensure_agent_thread(self, request: dict) -> ConversationThread:
+        from .agent_thread_store import ensure_agent_thread_record
+
+        return ensure_agent_thread_record(self, request)
 
     def resolve_thread(
         self, *, channel: str, channel_conversation_id: str, channel_user_id: str

@@ -132,17 +132,20 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 
 ## 2026-08-22 Compact 当前边界与统一目标
 
-- 当前阈值、token estimator 和 native ToolCall/ToolResult 成对裁剪已经由主代理、子代理共用
-  `agent_core._tool_loop_service`；但持久状态尚未统一：main 使用 ConversationThread 的
-  summary/cursor/generation/checkpoint/CAS，task-local child 仍保存 run workspace 下的
-  `memory_archive/compact_applies`、checkpoint/state/summary。
-- child 的 native IR 真裁剪时，`runner/stage_trace.py` 仅在 exact run attributes 保存有界纯数字次数，
-  `control_plane_projection.runtime_compact_count` 临时把它与 durable apply 行相加。该投影不承载摘要、正文、
-  生命周期或恢复权威，也不允许从 token 降幅反推。
-- 目标对照 会话运行时：创建 child/grandchild 时建立独立 `agent_thread_id`，每个代理只读自己的 transcript，
-  但全部调用 `conversation/compact.py` 的同一 pre/mid-turn、checkpoint-before-CAS、失败熔断和 resume 主链。
-  完成切换后删除 `finalization_compact_auto`、task-local apply/continue 与当前过渡计数，TUI 只显示该 agent
-  thread 的 canonical generation；不长期双写。
+- 当前阈值、token estimator 和 native ToolCall/ToolResult 成对裁剪由所有代理共用
+  `agent_core._tool_loop_service`；持久状态也已统一到每个 agent 自己的 ConversationThread。main、child、
+  grandchild 分别保存 summary/cursor/generation/checkpoint/CAS，不共享正文。
+- `conversation/agent_thread.py` 是 delegated adapter：创建/恢复时按稳定 `agent_thread_id` 幂等物化线程；
+  精确 ID 落盘和身份/谱系冲突检查由 `conversation/agent_thread_store.py` 单独负责，避免通道会话 store 吸收 agent runtime 策略；
+  每个 attempt 按 `conversation_request_id` 写入 user/assistant，轮前与 provider overflow 后调用
+  `conversation/compact.py`。task-local 仍控制 Memory、工具权限和工作区，不再拥有第二条持久 Compact 链。
+- `conversation_transcript_authoritative=true` 是通用 structured owner 标记；finalization、tool window 和工具轮
+  只据此把 durable Compact 交给 ConversationStore，不再要求 `context_scope=conversation`，所以 delegated
+  task-local 不会生成旧 `compact_applies/continue`。没有 generation 或 typed tool/guidance 进展时，溢出
+  重试明确失败，避免无效重放。
+- child native IR 真裁剪时只通过 rich sink 发 `model_visible_context_compaction.v1` 活动事件；它不写 exact
+  run attribute，不代表摘要代次。`control_plane_projection.runtime_compact_count`、TUI 与 SQLite 只精确加载
+  `task.agent_thread_id` 的 `compact_generation/checkpoint_id`，旧 ledger/attribute 即使存在也不回读。
 - 历史上已经删除的子代理专属 service、查树推动、session continue-packet 和多重索引不得因迁移复活；
   新 thread 只替换 Compact/会话持久层，不改变 `run_id/parent_run_id/root_run_id` 生命周期权威。
 - 当前 task 的结构化 goal 和 next actions 是恢复后的最高任务权威；旧摘要、归档包装和读取游标只能

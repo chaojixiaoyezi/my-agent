@@ -721,8 +721,9 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - pending steer 与 follow-up queue 按 会话运行时 `bottom_pane/pending_input_preview.rs` 固定在 composer 上方，
   每条最多三行预览；它们不再作为 transcript 尾块随滚动消失。模型可见上下文则只接收 runtime 的数字
   白名单快照，固定显示当前估算、窗口和唯一 compact 触发线。活动回合原生工具 IR 真发生裁剪时另发
-  `model_visible_context_compaction.v1` 计数事件；child runner 还会把有界纯数字累计投影写回 exact canonical
-  run，解决 rich sink 消失后界面错误归零。它仍不冒充 durable conversation compact generation。
+  `model_visible_context_compaction.v1` 临时事件；它只描述当前活动回合的 ToolCall/ToolResult 裁剪，不再写回
+  child canonical run。child 的常驻 `compact N` 只读独立 ConversationThread generation，避免把轻量窗口
+  整理冒充正式摘要代次。
 - 会话恢复只投影 `cmd_chat` 已从 canonical session 加载的 user/assistant history；TUI 不另读写正文。
   journal、diagnostic、block cache 和 stable display window 均有显式上限，迟到/重复事件仍由 seen identity
   拒绝，裁剪不产生第二会话账。
@@ -960,29 +961,32 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 
 ## 2026-08-22 主/子/孙代理统一 Conversation Compact
 
-状态：方向确认，迁移未开始；真实压缩次数展示切片为本地候选。
+状态：本地实现与 fake/replay 定向验收完成；推送、部署和真实 TUI 长任务验收待执行。
 
 - 解决问题：长时间工作的 child/grandchild 与 main 一样会经历多轮工具调用、上下文压力、崩溃恢复和继续
-  运行。当前 main 的持久历史由 `ConversationThread summary/cursor/generation/checkpoint/CAS` 管理，task-local
-  child 则仍使用 run workspace 的 `memory_archive compact_applies`，同时还有 active-turn native IR 裁剪。
-  三种事实的计数和恢复边界不同，已经产生“deepseek child 的上下文明显从高位降到 35.7k，界面仍显示
-  compact 0”的真实错误。
+  运行。旧实现中 main 使用 `ConversationThread summary/cursor/generation/checkpoint/CAS`，task-local child
+  使用 run workspace 的 `memory_archive compact_applies`，同时还有 active-turn native IR 裁剪；三种事实
+  的计数和恢复边界不同，曾产生“child 上下文明显下降、界面仍显示 compact 0”的真实错误。
 - 对照依据：会话运行时 `会话运行时-rs/core/src/session/turn.rs::run_turn` 对每个 Session 都执行
   `run_pre_sampling_compact`，并在同一 turn 的 token 状态触发 `run_auto_compact`；
   `tools/handlers/multi_agents_v2/spawn.rs` 通过 `spawn_agent_with_communication` 为 child 返回独立
   `new_thread_id`。因此成熟语义是“每个代理一条 thread、全部调用同一 Compact 状态机”，不是主子代理
   共用一份消息，也不是子代理另造一套压缩器。
-- 目标合同：main、child、grandchild 各有稳定 `agent_thread_id`，父子 lineage 继续由结构化
+- 已落地合同：main、child、grandchild 各有稳定 `agent_thread_id`，父子 lineage 继续由结构化
   `run_id/parent_run_id/root_run_id` 管理；每条 thread 独立保存 transcript、summary、cursor、generation、
   checkpoint、operation evidence 和失败熔断。触发阈值、token estimator、候选校验、checkpoint-before-CAS、
   pre/mid-turn 续接和 TUI 计数全部复用 `conversation/compact.py`，但任何代理都不能读取兄弟或父级正文。
-- 迁移顺序：先在创建 child 时建立并绑定独立 thread；再把 child 的每轮 user/assistant/tool 事实接入该
-  thread，并让 pre/mid-turn pressure 调同一 Compact；随后 TUI 只读各自 thread generation；最后删除
-  `finalization_compact_auto` 与 task-local `compact_applies/continue` 旧主链及双写。切换时先让旧 active run
-  收口或做一次显式 schema migration，不保留长期兼容分支。
-- 当前过渡：界面只把真实 durable apply 行与 exact child 上的 typed native IR reduction 相加，既不从
-  token 降幅猜测，也不把它伪称已完成统一迁移。统一 thread 落地后，这个过渡计数必须随旧链一起删除，
-  用户看到的 `compact N` 最终只对应该代理 thread 的一个 canonical generation。
+- 实现边界：`ConversationThreadStore.ensure_agent_thread` 以 host 生成的 exact id 幂等建线程，不写 channel/
+  latest-user 索引；child 每次尝试按 `conversation_request_id` 先落 user、轮前 Compact、注入 summary/raw
+  tail、模型运行、终态落 assistant。provider overflow 在同一 attempt 内强制 Compact 并携带 typed tool/
+  guidance 进度重试，最多八次；没有 generation 或真实进展时明确失败，不盲目重放。
+- 收口结果：task-local 权限/Memory 隔离保留，但结构化 transcript-authoritative 标记让 durable Compact 只由
+  ConversationStore 接管；旧 `compact_applies/continue` 不再由正式 child runner 生成。TUI、Web 和 SQLite
+  投影只读 child thread generation/checkpoint；native IR reduction 仍可作为活动回合临时事件展示，但不写
+  canonical run、不累计到 `compact N`。旧投影字段和旧 ledger 不设长期双读。
+- 本地验收：覆盖 child/grandchild 独立线程、父子正文隔离、轮前阈值 Compact、provider overflow 后强制
+  Compact 同 attempt 重试、checkpoint/generation、owner Memory 不污染、旧 apply 目录不生成，以及遗留
+  native reduction/ledger 即使存在也不能改变 TUI 次数。真实 MiniMax-M2.7 长任务仍需部署后通过新 TUI 验收。
 - 压缩策略与单次回合权限分层：`compact_trigger_tokens` 始终投影同一配置压缩点；
   presentation/no-save 回合不允许持久 apply 时，只把当轮强制压缩的有效硬限放到完整窗口，
   不得把公开策略改写成 100%。这与 会话运行时 分开 `auto_compact_scope_limit` 和

@@ -417,8 +417,8 @@ def test_shared_native_window_counts_large_tool_call_arguments(tmp_path):
     )
 
 
-def test_shared_native_window_persists_exact_child_compact_count(tmp_path):
-    """真实 native IR 裁剪必须累计到 exact child，重复无裁剪 preflight 不增数。"""
+def test_shared_native_window_emits_live_event_without_persisting_child_count(tmp_path):
+    """轻量 IR 裁剪只发当前回合事件，正式 child Compact 次数留给独立 thread。"""
     manager = SubAgentManager(tmp_path / "subagents", debug_trace_level=0)
     task = manager.create_run(goal="long child", thought="", plan=["work"])
     task.status = "RUNNING"
@@ -432,6 +432,7 @@ def test_shared_native_window_persists_exact_child_compact_count(tmp_path):
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
     agent.subagents = manager
     agent._current_subagent_run_id = task.id
+    sink = _ContextCompactionSink()
     params = replace(
         _params(),
         request_id="request-child",
@@ -439,22 +440,24 @@ def test_shared_native_window_persists_exact_child_compact_count(tmp_path):
         attempt_id="attempt-child",
         context_scope="task_local",
         save=True,
+        effective_on_chunk=sink,
     )
 
     _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
     build_tool_loop_prompt(agent, params)
-    first = manager.load(task.id).attributes["model_visible_context_compaction"]
-    assert first["count"] == 1
-    assert first["generation"] == 1
+    assert len(sink.rows) == 1
+    assert sink.rows[0]["generation"] == 1
+    assert "model_visible_context_compaction" not in manager.load(task.id).attributes
 
     build_tool_loop_prompt(agent, params)
-    assert manager.load(task.id).attributes["model_visible_context_compaction"]["count"] == 1
+    assert len(sink.rows) == 1
+    assert "model_visible_context_compaction" not in manager.load(task.id).attributes
 
     _record_large_write_calls(agent, params, start=7, stop=12, chars=12_000)
     build_tool_loop_prompt(agent, params)
-    second = manager.load(task.id).attributes["model_visible_context_compaction"]
-    assert second["count"] == 2
-    assert second["generation"] == 2
+    assert len(sink.rows) == 2
+    assert sink.rows[-1]["generation"] == 2
+    assert "model_visible_context_compaction" not in manager.load(task.id).attributes
 
 
 def test_shared_native_window_stays_stable_across_repeated_pressure(tmp_path):

@@ -141,26 +141,29 @@ key/config/runtime 数据，不触碰其它项目。较早大切片已按约定�
 
 ### 主/子/孙代理统一 Conversation Compact
 
-状态：设计中；当前先修真实次数展示，持久主链迁移尚未开始
+状态：底层迁移已在本地完成；待严格 gate、部署与真实 MiniMax-M2.7 TUI 长任务验收
 
-解决问题：子代理也可能连续工作数小时。当前主代理用 owner/thread 的 Conversation Compact，task-local
-子代理仍用 run workspace 的旧 compact continuation，回合内工具 IR 又会独立裁剪；这会让次数、恢复、
-checkpoint 和失败熔断表现不一致，并已经出现 child 实际裁剪后仍显示 `compact 0`。
+解决问题：子代理也可能连续工作数小时。旧实现中主代理用 owner/thread 的 Conversation Compact，
+task-local 子代理用 run workspace 的旧 compact continuation，回合内工具 IR 又独立裁剪；这让次数、
+恢复、checkpoint 和失败熔断表现不一致，并出现过 child 实际裁剪后仍显示 `compact 0`。
 
-当前进展：已对照 会话运行时 `session/turn.rs` 与 multi-agent spawn：每个 child 都是独立 thread，但所有 thread
-共用 pre-sampling/mid-turn Compact 状态机。`e59acad` 已把 exact child 的 native IR reduction 以纯数字、
-幂等事件累计进 canonical run 展示投影，并与既有 durable apply 行相加；main Context 同时显示
-`压缩点 90%`。真实 Prompt 3 又发现单次 no-save 回合把该点误投影为 100%；当前候选已将
-公开策略与当轮 apply 权限分层，不修改真实溢出保护。该切片不冒充架构统一。
+当前进展：已对照 会话运行时 `session/turn.rs` 与 multi-agent spawn，并完成每个 child/grandchild 独立
+ConversationThread 接线。创建时以 exact `agent_thread_id` 建立无通道绑定线程；每次 child 尝试按统一
+`conversation_request_id` 写 user/assistant，轮前和 provider overflow 后都调用同一个
+`conversation/compact.py`，checkpoint-before-CAS、失败熔断和 summary/raw tail 注入与 main 共用。
+task-local 工具/Memory/写边界保持不变，只有 durable Compact owner 改为 ConversationStore。
 `774c7fe` 部署后，全新 tmux `dsh-p3-774c7fe-compact` 的原样 Prompt 3 已证明首轮和终屏都是
 `压缩点 90%`；8 个 child 全部 DONE，最高上下文 98.6k，未达 115.2k，所以真实 child
 Compact 触发仍需下一个更长任务复验。同轮 main 最终只整合 7/8 且 Todo 未勾选，
 作为结果批次覆盖与 typed covers 绑定的独立失败样本保留，不计入 Compact 通过。
 
-待做：child 创建时建立稳定 `agent_thread_id`，把每轮消息、摘要、checkpoint、generation/CAS 和 resume
-接到现有 `ConversationStore/compact.py`；随后让 TUI 只读每个 agent thread generation，并删除
-`finalization_compact_auto`、task-local compact apply/continuation 与过渡计数。切换期间不得长期双写，
-也不得把父、子、兄弟正文合并到一个 thread。
+本地收口：正式 child runner 不再生成 task-local `compact_applies/continue`；TUI/Web/SQLite 只读该 child
+thread 的 `compact_generation` 与 checkpoint，临时 native IR 裁剪事件不再持久累计。定向测试已覆盖
+轮前阈值压缩、同 attempt 溢出压缩重试、child/grandchild 正文隔离和遗留计数不回读。
+
+待做：通过远端提交前严格 gate 后部署 `.7` 唯一 Gateway；再按用户指定的 >10k star、>40k 功能代码行
+项目启动全新 TUI，只投递一次“换语言完整复刻且 main 只能协调/测试”的原样 prompt，观察真实 child
+Compact、长任务恢复、子代理数量、产物和最终可运行性。该真测不得由测试者旁路修改项目。
 
 ### 用户直控子代理的共享控制面
 

@@ -7,18 +7,23 @@ from __future__ import annotations
 上级代理和接管代理可以靠这些行快速看 agent tree；真正恢复仍回到文件。
 """
 
-import json
-from pathlib import Path
 from typing import Any
 
 from ...local_storage.control_plane_models import AgentRunRecord
 from ..models import SubAgentTask, task_has_failure_status
 
 
-def sync_subagent_control_plane_projection(local_store: Any, task: SubAgentTask) -> None:
+# LLM: SQLite is a read projection only; compact fields must be joined from the exact canonical
+# agent ConversationThread supplied by the manager, never reconstructed from run-local files.
+# 函数用途: 将子代理任务及其正式 Compact 代次同步到本地控制面查询表。
+def sync_subagent_control_plane_projection(
+    local_store: Any,
+    task: SubAgentTask,
+    conversation_store: Any | None = None,
+) -> None:
     if local_store is None:
         return
-    run_record = _agent_run_record_from_task(task)
+    run_record = _agent_run_record_from_task(task, conversation_store)
     local_store.upsert_agent_run(run_record)
     local_store.rebuild_task_rollup(run_record.root_task_id)
 
@@ -26,7 +31,10 @@ def sync_subagent_control_plane_projection(local_store: Any, task: SubAgentTask)
 # LLM: The LocalStore row is a read-model projection of one canonical task and
 # must reuse shared runtime usage readers rather than recounting ledgers differently.
 # 函数用途: 把一个子代理任务转换成控制面查询所需的 AgentRun 记录。
-def _agent_run_record_from_task(task: SubAgentTask) -> AgentRunRecord:
+def _agent_run_record_from_task(
+    task: SubAgentTask,
+    conversation_store: Any | None = None,
+) -> AgentRunRecord:
     root_task_id = task.root_id or task.id
     return AgentRunRecord(
         run_id=task.id,
@@ -41,8 +49,8 @@ def _agent_run_record_from_task(task: SubAgentTask) -> AgentRunRecord:
         latest_summary=task.latest_summary,
         workspace_path=task.agent_run_workspace_dir or task.task_dir,
         checkpoint_ref=task.agent_run_checkpoint_json or task.checkpoint_ref or task.checkpoint_json,
-        latest_compact_ref=runtime_latest_compact_ref(task),
-        compact_count=runtime_compact_count(task),
+        latest_compact_ref=runtime_latest_compact_ref(task, conversation_store),
+        compact_count=runtime_compact_count(task, conversation_store),
         heartbeat_at=float(task.heartbeat_at or 0.0),
         created_at=float(task.created_at or task.updated_at or 0.0),
         updated_at=float(task.updated_at or task.heartbeat_at or task.created_at or 0.0),
@@ -50,66 +58,43 @@ def _agent_run_record_from_task(task: SubAgentTask) -> AgentRunRecord:
     )
 
 
-# LLM: This reader is the shared, read-only projection of the canonical compact
-# apply ledger; callers may display/count rows but must not derive lifecycle state.
-# 函数用途: 读取一个子代理运行目录里的真实 Compact 应用记录，文件缺失或损坏行按空记录处理。
-def runtime_compact_rows(task: SubAgentTask) -> list[dict[str, object]]:
-    root = str(getattr(task, "agent_run_workspace_dir", "") or "").strip()
-    if not root:
-        return []
-    path = Path(root) / "memory_archive" / "compact_applies" / "ledger.jsonl"
+# LLM: The latest Compact ref is the checkpoint id on the exact child ConversationThread.
+# Old memory-archive apply ledgers and transient native IR events are not compatibility sources.
+# 函数用途: 返回子代理独立会话线程最近一次正式 Compact checkpoint 标识。
+def runtime_latest_compact_ref(
+    task: SubAgentTask,
+    conversation_store: Any | None = None,
+) -> str:
+    thread = _agent_conversation_thread(task, conversation_store)
+    return str(getattr(thread, "compact_checkpoint_id", "") or "").strip()
+
+
+# LLM: Child Compact count has one authority: ConversationThread.compact_generation.
+# A missing/corrupt projection reports zero and cannot revive removed transition ledgers.
+# 函数用途: 读取子代理独立线程已经正式完成的 Compact 次数，供 TUI/Web/SQLite 展示。
+def runtime_compact_count(
+    task: SubAgentTask,
+    conversation_store: Any | None = None,
+) -> int:
+    thread = _agent_conversation_thread(task, conversation_store)
+    return max(0, int(getattr(thread, "compact_generation", 0) or 0))
+
+
+# LLM: This read-only join uses the stable agent_thread_id written at child creation. It never
+# searches titles, paths, task prose, or parent transcripts for an approximate match.
+# 函数用途: 从 owner 的唯一 ConversationStore 精确加载当前子代理线程。
+def _agent_conversation_thread(
+    task: SubAgentTask,
+    conversation_store: Any | None,
+) -> object | None:
+    thread_id = str(getattr(task, "agent_thread_id", "") or "").strip()
+    if conversation_store is None or not thread_id:
+        return None
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
-    rows: list[dict[str, object]] = []
-    for line in lines:
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            rows.append(payload)
-    return rows
-
-
-# LLM: The latest ref is selected only from persisted compact ledger refs and
-# remains a display/index projection, never a completion or recovery decision.
-# 函数用途: 返回一个子代理最近一次 Compact 的元数据引用。
-def runtime_latest_compact_ref(task: SubAgentTask) -> str:
-    for row in reversed(runtime_compact_rows(task)):
-        refs = row.get("refs") if isinstance(row.get("refs"), dict) else {}
-        metadata = str(refs.get("metadata") or "").strip()
-        if metadata:
-            return metadata
-    return ""
-
-
-# LLM: The user-visible total combines durable summary applies with typed native
-# IR reductions persisted on the exact child. Both are real context reductions;
-# neither may be inferred from token drops or display prose.
-# 函数用途: 统计子代理正式 Compact 与回合内工具历史压缩的累计次数。
-def runtime_compact_count(task: SubAgentTask) -> int:
-    return len(runtime_compact_rows(task)) + runtime_native_ir_compact_count(task)
-
-
-# LLM: Native compaction count is a bounded projection written by the tool-loop
-# event seam. Invalid or foreign attribute shapes fail to zero, never to prose inference.
-# 函数用途: 读取子代理已经实际发生的回合内工具历史压缩次数。
-def runtime_native_ir_compact_count(task: SubAgentTask) -> int:
-    attrs = getattr(task, "attributes", None)
-    row = attrs.get("model_visible_context_compaction") if isinstance(attrs, dict) else None
-    if not isinstance(row, dict):
-        return 0
-    if str(row.get("schema") or "") != "model_visible_context_compaction.v1":
-        return 0
-    value = row.get("count")
-    if isinstance(value, bool):
-        return 0
-    try:
-        return max(0, int(value or 0))
-    except (TypeError, ValueError):
-        return 0
+        thread, error = conversation_store.load_thread_report(thread_id)
+    except Exception:
+        return None
+    return thread if error is None else None
 
 
 # LLM: The child-row token value is the latest canonical provider-visible

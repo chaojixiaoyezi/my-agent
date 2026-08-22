@@ -494,51 +494,6 @@ def test_runner_stage_trace_persists_bounded_live_activity(tmp_path) -> None:
     assert len(failed.attributes["recent_runtime_activity"]) <= 6
 
 
-def test_runner_context_compaction_persists_idempotent_child_count(tmp_path) -> None:
-    """同一次轻量压缩重放不重复计数，不同结构化事件会累计到 child 状态。"""
-    from agent_py_agent.agent.agent_core.runner.stage_trace import (
-        RunnerContextCompactionTraceRequest,
-        trace_runner_context_compaction,
-    )
-
-    manager = SubAgentManager(tmp_path / "subs", debug_trace_level=0)
-    task = manager.create_run(goal="child", thought="", plan=["work"])
-    task.status = "RUNNING"
-    task.runner_active_attempt_id = "attempt-child"
-    manager.save(task)
-    agent = SimpleNamespace(subagents=manager, _current_subagent_run_id=task.id)
-
-    def trace(attempt_id: str, generation: int) -> None:
-        trace_runner_context_compaction(
-            RunnerContextCompactionTraceRequest(
-                agent=agent,
-                params=SimpleNamespace(
-                    attempt_id=attempt_id,
-                    request_id="request-child",
-                    run_id=task.id,
-                ),
-                compaction={
-                    "schema": "model_visible_context_compaction.v1",
-                    "generation": generation,
-                    "before_tokens": 115_300,
-                    "after_tokens": 35_000,
-                    "trigger_tokens": 115_200,
-                    "dropped_pairs": 8,
-                    "preserved_pairs": 3,
-                },
-            )
-        )
-
-    trace("attempt-a", 1)
-    trace("attempt-a", 1)
-    trace("attempt-b", 1)
-
-    compact = manager.load(task.id).attributes["model_visible_context_compaction"]
-    assert compact["count"] == 2
-    assert compact["after_tokens"] == 35_000
-    assert len(compact["recent_event_ids"]) == 2
-
-
 def _running_trace_hierarchy(manager: SubAgentManager, old: float):
     root = manager.create_run(goal="root", thought="root", plan=["root"], role="coordinator")
     parent = manager.create_run(

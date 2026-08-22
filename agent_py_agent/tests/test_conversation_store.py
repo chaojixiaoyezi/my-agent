@@ -38,6 +38,39 @@ def test_thread_messages_and_channel_bindings_survive_restart(tmp_path) -> None:
     assert bundle["channel_bindings"][1]["channel"] == "wechat"
 
 
+def test_exact_agent_thread_is_idempotent_unbound_and_rejects_run_collision(
+    tmp_path,
+) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    request = {
+        "thread_id": "thread-run-child-1",
+        "agent_run_id": "run-child-1",
+        "parent_agent_thread_id": "thread-main",
+        "root_agent_thread_id": "thread-main",
+        "agent_depth": 1,
+        "canonical_user_id": "local/main",
+        "owner_id": "local/main",
+        "owner_home": str(tmp_path / "owner"),
+        "cwd": str(tmp_path),
+        "runtime_workspace_roots": [str(tmp_path)],
+        "now": 10.0,
+    }
+
+    first = store.ensure_agent_thread(request)
+    reopened = ConversationStore(tmp_path / "conversations")
+    second = reopened.ensure_agent_thread({**request, "now": 20.0})
+
+    assert first.thread_id == second.thread_id == "thread-run-child-1"
+    assert second.channel_bindings == ()
+    assert second.metadata["thread_kind"] == "agent"
+    assert second.metadata["agent_run_id"] == "run-child-1"
+    assert reopened._read_bindings() == {}
+    with pytest.raises(DataCorruptionError, match="run identity conflicts"):
+        reopened.ensure_agent_thread(
+            {**request, "agent_run_id": "run-child-2", "now": 30.0}
+        )
+
+
 def test_detached_named_task_binds_exact_existing_message_anchor(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
     thread = store.get_or_create_thread(
