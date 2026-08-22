@@ -336,7 +336,7 @@ Feishu 长任务、连续 `/btw` 和独立产物验收。
 
 ### 裸 TUI 启动与单 Gateway 恢复权威
 
-状态：代码已落地，本地 focused tests 已通过，待 `.7` 部署复验
+状态：已完成；`06b84e1` 已部署 `.7` 并完成真实 TUI 复验
 
 解决问题：直接运行 `my-agent` 会扫描全机历史任务、阻塞在没有真实恢复动作的 `[Y/n]`；同时旧的
 0 字节派工锁会让 Gateway 的 runner supervision 永久跳过，真正失联任务反而得不到调和。
@@ -344,5 +344,6 @@ Feishu 长任务、连续 `/btw` 和独立产物验收。
 已有：裸启动走轻量 fresh chat；旧 session 只允许显式 resume；status 只读；普通 stale attempt 移到
 Gateway 启动恢复；subagent supervision 使用内核 advisory lock，空/坏元数据不再形成永久锁。
 
-待做：在 `.7` 保持单 Gateway 与 MiniMax-M2.7 配置，部署后验证 1–2 秒内出现 TUI 连接画面、没有全局
-恢复提问，并观察旧 0 字节锁被自然重写、符合结构化 lifecycle 的历史任务自动收口。
+结果：`.7` 保持单 Gateway 与 MiniMax-M2.7，裸 TUI 在 1 秒采样点已出现输入框且无全局恢复提问；旧
+0 字节锁被同一 Gateway 重写为 v2 内核锁元数据。首轮 supervision 结构化记录 4 条复活、21 条父会话
+关闭取消和 5 条失联 runner 回收，随后 3 条真实 RUNNING 自然完成，没有手工批量改账。

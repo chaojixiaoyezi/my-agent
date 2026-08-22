@@ -2014,4 +2014,7 @@
 - `subagent_orphan_supervision.lock` 已从 PID+JSON 文件存在性改成内核 advisory lock；空/坏元数据不会再
   永久阻断恢复，`force` 也不能绕过真实活锁。
 - 本地 focused tests 已覆盖默认入口不构造第二 Agent、旧配置不隐藏 status、失联 runner 只读分类、
-  空/坏锁接管、并发互斥及 Gateway stale-attempt owner；`.7` 部署、启动耗时和历史状态自然调和待本轮完成。
+  空/坏锁接管、并发互斥及 Gateway stale-attempt owner。
+- `.7` 已部署 `06b84e1`：单 Gateway PID `1918200`、单 8420 监听、MiniMax-M2.7；裸 TUI 在 1 秒采样点
+  出现输入框并通过普通中文请求。v2 锁持有者与 Gateway 同 PID，首轮监督复活 4、按父会话取消 21、
+  回收失联 runner 5，3 条 RUNNING 后续自然 DONE；连续两次 status 近期计数一致。

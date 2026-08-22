@@ -238,7 +238,7 @@
   结构化完成优先，并且 IM 回复信封只携带已投影的人话，不再把内部完成块、结论账标记或宿主路径交给
   adapter。这样既不恢复内部碎碎念，也不会在产物已验收后静默吞掉父代理最终回复。
 
-## 2026-08-22 裸启动与恢复控制面收口（本地完成，`.7` 待部署）
+## 2026-08-22 裸启动与恢复控制面收口（`.7` 已部署复验）
 
 - 解决了普通用户运行 `my-agent` 被全机历史任务扫描和虚假 `[Y/n]` 阻塞的问题：裸启动与 `chat` 共用
   轻量 fresh-session 路径，只有 `resume <session_id>` 能恢复明确会话。
@@ -246,3 +246,7 @@
   由 Gateway 启动调和，subagent 由单 Gateway 周期 supervision 调和。
 - 派工巡查锁已改为 POSIX `flock` / Windows `msvcrt` 内核锁。空文件、坏 JSON、旧 PID 和 PID 复用不再
   决定锁归属，进程死亡由内核自动释放；focused parser/startup/status/lock/recovery tests 通过。
+- `311b8db` 与配置统一补丁 `06b84e1` 已进入远端 `main` 和 `.7`。真实裸 TUI 1 秒内显示输入框与
+  `MiniMax-M2.7`，普通中文请求经同一 Gateway 返回；单监听 PID 为 `1918200`，锁元数据持有者同 PID。
+- 首轮 Gateway supervision 记录 `orphans_revived=4`、`parent_closed_cancelled=21`、
+  `running_reclaimed=5`；3 条恢复 RUNNING 随后自然 DONE。连续两次显式 status 均只读返回相同近期计数。

@@ -840,7 +840,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   `FAILED/COMMAND_FAILED/execution/effect_outcome=failed/return_code=143`。候选部署后的真实返工结果继续记入
   稳定性台账，未完成前不冒充 E2E。
 
-## 2026-08-22 默认 TUI 启动、显式会话恢复与 Gateway 崩溃调和【状态：代码完成，`.7` 待部署复验】
+## 2026-08-22 默认 TUI 启动、显式会话恢复与 Gateway 崩溃调和【状态：已部署 `.7` 并复验】
 
 - 普通 `my-agent` 与 `my-agent chat` 都表示新建会话，直接走轻量交互解析器；只有
   `my-agent resume <session_id>` 才能连接明确的旧会话，不存在或越权时 fail-closed。该边界直接对照
@@ -863,3 +863,6 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   当成活锁，导致每分钟 supervision 都静默 `skipped_locked`。同一现场 25 条旧 PID 告警实际为 5
   `RUNNING`、1 `PENDING`、19 `BLOCKED`；只有 5 条具有失联 RUNNING runner session，其中 3 条满足续跑，
   其余由已关闭 conversation link 的取消收口处理。新锁上线后由同一 Gateway 自然调和，不做批量删除。
+- 部署证据：唯一 Gateway PID `1918200` 同时持有 8420 与 v2 advisory lock；裸 TUI 在 1 秒采样点显示
+  MiniMax-M2.7 输入框。监督首轮复活 4、按父会话取消 21、回收失联 RUNNING 5，随后 3 条 RUNNING
+  自然完成；两次显式 status 返回同一近期计数且没有恢复提示。

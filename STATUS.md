@@ -1474,12 +1474,16 @@ my-agent scenario-test
 
 下一阶段应继续围绕“恢复、诊断、并发、外部接入”推进。
 
-## 2026-08-22 裸 TUI 启动与 Gateway 恢复候选
+## 2026-08-22 裸 TUI 启动与 Gateway 恢复已部署
 
 - 裸 `my-agent` 已不再进入完整管理命令加载和全局任务扫描，内部补成轻量 `chat`，默认连接单 Gateway
   并创建新 session；`resume <session_id>` 继续 fail-closed 精确恢复。
 - `status` 只读；普通 stale attempt recovery 已移到 Gateway 启动。失联子代理诊断只认 stale RUNNING
   runner session，不再把共享 dispatch PID 已退出的 `BLOCKED/PENDING` 误报为崩溃。
 - `.7` 读现场确认旧 `subagent_orphan_supervision.lock` 是 0 字节，两天来每轮都被旧逻辑当活锁跳过；
-  当前实现改用内核 advisory lock，focused tests 通过，尚未在本段记录部署验收。
+  部署后同一路径成为 `dispatch-watch-lock.v2`，诊断 PID 与唯一 Gateway PID `1918200` 一致。
+- `.7` 已快进到 `06b84e1`；模型保持 `anthropic_compatible + MiniMax-M2.7`，8420 只有一个监听。裸
+  `my-agent` 在 1 秒采样点已显示输入框，无历史扫描和 `[Y/n]`；普通中文 TUI 请求真实返回。
+- 首轮监督事件为 4 条复活、21 条父会话关闭取消、5 条失联 runner 回收；3 条 RUNNING 随后自然 DONE，
+  非终态总数从旧提示的 25 收敛到 11。连续两次 `status --json` 都返回 9 条近期未收口记录，未触发调度。
 - 本轮未跑全仓 pytest：生产与测试改动远低于 10,000 行，按项目约定只跑直接相关 focused tests。
