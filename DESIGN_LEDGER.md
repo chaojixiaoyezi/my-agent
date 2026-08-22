@@ -846,6 +846,8 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   `my-agent resume <session_id>` 才能连接明确的旧会话，不存在或越权时 fail-closed。该边界直接对照
   会话运行时 TUI 的 `SessionSelection::StartFresh` 与显式 `Resume(target_session)`，默认入口不得扫描全机
   subagent board、询问是否批量恢复，或把“按 Enter”伪装成实际派工动作。
+- 部署默认配置路径由 `MY_AGENT_CONFIG` 统一提供给裸 TUI、完整 CLI 与 Gateway service；显式
+  `--config` 仍是单次命令的最终覆盖，避免 Gateway 使用 MiniMax 而欢迎页读取随包 DeepSeek 默认值。
 - TUI 客户端不是恢复 owner。普通启动只确认单 Gateway readiness 并连接当前 session；`status` 是用户
   显式请求的只读投影，不调用 lifecycle setter、attempt recovery、dispatch 或进程终止。旧的
   `auto_detect_work_on_startup` 与 `startup_auto_reconcile_crashed_tasks` 已删除，避免配置、TUI 与 Gateway

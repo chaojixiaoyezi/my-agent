@@ -2007,6 +2007,8 @@
 
 - 裸命令 `my-agent` 已进入 chat/resume 轻量解析路径，默认只新建当前会话；全局任务扫描和无实际派工
   行为的 `[Y/n]` 提示已删除，旧会话只允许 `resume <session_id>` 精确恢复。
+- 裸 TUI 与服务安装统一读取 `MY_AGENT_CONFIG` 作为默认配置路径，显式 `--config` 仍优先；测试部署不再
+  出现 Gateway 使用 MiniMax、欢迎页却显示随包 DeepSeek 默认值的双配置现象。
 - `status` 改为无开关、无副作用的显式诊断；普通 stale attempt 由 Gateway 启动调和，subagent runner
   继续由周期 supervision 负责。
 - `subagent_orphan_supervision.lock` 已从 PID+JSON 文件存在性改成内核 advisory lock；空/坏元数据不会再

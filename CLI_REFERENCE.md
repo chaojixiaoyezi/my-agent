@@ -61,7 +61,7 @@ python -m agent_py_agent --help
 | 主代理基础 E2E | `my-agent real-e2e --workspace ./.e2e --json` | 否 | 否；真实模型用例会明确跳过，产物可用 `--artifact` 验收 |
 | 子代理单次执行 | `my-agent subagent-run <run_id> --execute` | 否 | 是 |
 
-当前 gateway 第一版已经实现为本地后台进程控制面：它管理 pid、state、heartbeat、stop request、日志和本地请求队列，并在内部复用 daemon/watch 调度。`my-agent` 不带子命令时会走轻量新会话入口，自动确保 gateway 存活，然后进入 `chat --gateway`；它不会扫描整台机器的历史任务，也不会询问是否批量恢复。恢复旧会话必须显式使用 `my-agent resume <session_id>`。常驻形态和外部方案对比见 [GATEWAY_DESIGN.md](GATEWAY_DESIGN.md)。
+当前 gateway 第一版已经实现为本地后台进程控制面：它管理 pid、state、heartbeat、stop request、日志和本地请求队列，并在内部复用 daemon/watch 调度。`my-agent` 不带子命令时会走轻量新会话入口，自动确保 gateway 存活，然后进入 `chat --gateway`；它不会扫描整台机器的历史任务，也不会询问是否批量恢复。恢复旧会话必须显式使用 `my-agent resume <session_id>`。默认配置路径先读取进程环境 `MY_AGENT_CONFIG`，未设置时才使用随包 `agent_config.yaml`；显式 `--config` 始终优先，因此常驻 Gateway、裸 TUI 与以后 IM/Web 入口可以共享同一部署配置。常驻形态和外部方案对比见 [GATEWAY_DESIGN.md](GATEWAY_DESIGN.md)。
 
 ## 聊天内控制命令
 

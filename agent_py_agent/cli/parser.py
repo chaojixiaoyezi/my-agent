@@ -18,7 +18,7 @@ import sys
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from .bootstrap import DEFAULT_CONFIG, configure_stdio
+from .bootstrap import configure_stdio, default_config_path
 from .chat_command_parser import add_chat_subcommands
 
 if TYPE_CHECKING:
@@ -103,8 +103,8 @@ def _build_root_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--config",
-        default=str(DEFAULT_CONFIG),
-        help="配置文件路径，默认使用 config/agent_config.yaml",
+        default=str(default_config_path()),
+        help="配置文件路径；默认读取 MY_AGENT_CONFIG，未设置时使用随包配置",
     )
     parser.add_argument(
         "--plain",
@@ -158,7 +158,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     from ..agent.settings import load_config
 
     bootstrap = argparse.ArgumentParser(add_help=False)
-    bootstrap.add_argument("--config", default=str(DEFAULT_CONFIG))
+    bootstrap.add_argument("--config", default=str(default_config_path()))
     bootstrap_args, _ = bootstrap.parse_known_args(effective_argv)
     config = load_config(bootstrap_args.config)
     extension_registry = load_extension_registry(config.extension_plugins)

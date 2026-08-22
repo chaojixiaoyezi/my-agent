@@ -40,6 +40,33 @@ class TestBuildParser:
         args = parser.parse_args(["--config", "/path/to/config.yaml"])
         assert args.config == "/path/to/config.yaml"
 
+    def test_default_config_honors_process_environment(self) -> None:
+        """裸 TUI 与 Gateway service 必须共享 MY_AGENT_CONFIG 默认路径。"""
+        from agent_py_agent.cli.parser import build_interactive_parser
+
+        with patch.dict("os.environ", {"MY_AGENT_CONFIG": "/tmp/testbox-agent.yaml"}):
+            args = build_interactive_parser().parse_args(["chat"])
+
+        assert args.config == "/tmp/testbox-agent.yaml"
+
+    def test_explicit_config_overrides_process_environment(self) -> None:
+        """用户显式 --config 始终高于进程环境默认值。"""
+        from agent_py_agent.cli.parser import build_interactive_parser
+
+        with patch.dict("os.environ", {"MY_AGENT_CONFIG": "/tmp/testbox-agent.yaml"}):
+            args = build_interactive_parser().parse_args(
+                ["--config", "/tmp/one-shot.yaml", "chat"]
+            )
+
+        assert args.config == "/tmp/one-shot.yaml"
+
+    def test_gateway_service_uses_same_environment_default(self) -> None:
+        """生成常驻服务时不得再实现另一套配置默认路径。"""
+        from agent_py_agent.cli.gateway_service import _get_config_path
+
+        with patch.dict("os.environ", {"MY_AGENT_CONFIG": "/tmp/testbox-agent.yaml"}):
+            assert _get_config_path() == "/tmp/testbox-agent.yaml"
+
     def test_parser_has_subparsers(self) -> None:
         """测试解析器包含子命令解析器。"""
         from agent_py_agent.cli.parser import build_parser

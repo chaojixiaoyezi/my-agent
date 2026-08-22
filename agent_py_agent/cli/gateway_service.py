@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 from ..agent.gateway_parts.daemon_control import GATEWAY_SERVICE_RESTART_EXIT_CODE
+from .bootstrap import default_config_path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _SERVICE_BASE = "my-agent-gateway"
@@ -120,8 +121,11 @@ def _build_systemd_path_entries(venv_bin: str) -> str:
     return ":".join(path_entries)
 
 
+# LLM: Service files and interactive parsers must use the same default-config resolver; do not
+# duplicate environment fallback logic here or deployments can split into two model configs.
+# 函数用途: 生成服务启动命令时取得默认配置路径，与裸 my-agent 的选择保持一致。
 def _get_config_path() -> str:
-    return os.environ.get("MY_AGENT_CONFIG", str(PROJECT_ROOT / "config" / "agent_config.yaml"))
+    return str(default_config_path())
 
 
 def _format_systemd_unit_section(exec_start: str, working_dir: str, sane_path: str) -> str:

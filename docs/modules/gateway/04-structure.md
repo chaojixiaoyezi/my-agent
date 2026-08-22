@@ -617,6 +617,8 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
 
 - `cli/parser.py` 把裸启动与显式 `chat` 都路由到轻量 fresh-session 入口；`resume` 必须携带唯一 session
   ID。`cli/gateway_client.py::cmd_default` 仅保留完整 parser 的兼容入口，不读取全局 task board。
+- `cli/bootstrap.py::default_config_path` 是 CLI 与 service 共用的进程级配置默认入口：优先
+  `MY_AGENT_CONFIG`，否则回到随包 YAML；显式 `--config` 做本次命令覆盖。
 - `agent/startup_recovery.py` 虽保留历史文件名，但职责已冻结为 `status` 的只读投影；它不能改任务、attempt
   或队列。普通 attempt 启动恢复位于 `cli/gateway_process.py::_cmd_gateway_run_setup`，subagent 失联恢复位于
   `cli/gateway_loops.py::_GatewayOrphanReconciler`，两者都由同一 Gateway 持有。
