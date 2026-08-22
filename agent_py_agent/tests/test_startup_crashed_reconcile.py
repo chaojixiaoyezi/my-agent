@@ -1,104 +1,133 @@
-"""审计 #18(B,medium/任务)真测:崩溃卡死任务检测 + opt-in 自动调和。
-
-无人值守 OOM/断电后,run 进程死了但任务永久卡 RUNNING,原本既不释放也不告警(孤儿检测只覆盖
-"终态任务+进程活着")。真起进程真 kill 拿到确死 pid,断言:非终态+死 pid 被检出、活进程/终态/无
-pid 不误检;默认关时不动任务状态(尊重现有策略),开 startup_auto_reconcile_crashed_tasks 后
-自动调和到 ABANDONED(只改状态不杀进程)。学 通道运行时 shouldMarkLost + grace。
-"""
+"""显式 status 对失联 runner 的只读诊断测试。"""
 
 from __future__ import annotations
 
 import os
 import subprocess
+import time
 from types import SimpleNamespace
 
 from agent_py_agent.agent.startup_recovery import (
     ActiveWorkSummary,
     _detect_crashed_running_tasks,
-    _maybe_reconcile_crashed_tasks,
     format_active_work_summary,
 )
 
 
 def _dead_pid() -> int:
-    proc = subprocess.Popen(["sleep", "30"])  # 真起一个进程
+    proc = subprocess.Popen(["sleep", "30"])
     proc.kill()
-    proc.wait()  # 真 kill 并回收 → 这个 pid 现在确实死了
+    proc.wait()
     return proc.pid
 
 
 class _FakeTask:
-    def __init__(self, run_id: str, status: str, pid: int) -> None:
+    def __init__(
+        self,
+        run_id: str,
+        status: str,
+        worker_pid: int,
+        *,
+        fresh: bool = False,
+        in_process: bool = False,
+        background_pid: int = 0,
+    ) -> None:
         self.id = run_id
         self.status = status
-        self.attributes = {"background_start": {"pid": pid}} if pid else {}
+        heartbeat_at = time.time() if fresh else time.time() - 120
+        self.attributes = {
+            "runner_session": {
+                "session_id": f"session-{run_id}",
+                "status": "running",
+                "worker_pid": worker_pid,
+                "heartbeat_at": heartbeat_at,
+                "interval_seconds": 5,
+                "in_process": in_process,
+            },
+            "background_start": {"pid": background_pid},
+        }
 
 
 class _FakeSubagents:
-    def __init__(self, tasks: list) -> None:
+    def __init__(self, tasks: list[object]) -> None:
         self._tasks = tasks
-        self.set_status_calls: list = []
-        self.lifecycle = SimpleNamespace(set_status=self._set_status)
 
-    def list_runs(self) -> list:
+    def list_runs(self) -> list[object]:
         return self._tasks
 
-    def _set_status(self, run_id: str, status: str, *, result: str = "", failure_type: str = "", **_kw):
-        self.set_status_calls.append((run_id, status))
-        for task in self._tasks:
-            if task.id == run_id:
-                task.status = status
-        return SimpleNamespace(id=run_id, status=status)
+
+def _agent(tasks: list[object]) -> SimpleNamespace:
+    return SimpleNamespace(subagents=_FakeSubagents(tasks))
 
 
-def _agent(tasks: list, *, reconcile: bool = False) -> SimpleNamespace:
-    return SimpleNamespace(
-        subagents=_FakeSubagents(tasks),
-        config=SimpleNamespace(startup_auto_reconcile_crashed_tasks=reconcile),
-    )
-
-
-def test_detect_only_real_crashed_tasks() -> None:
+def test_detects_only_stale_running_session_with_dead_host() -> None:
     dead = _dead_pid()
     tasks = [
-        _FakeTask("crashed-1", "RUNNING", dead),  # 非终态 + 死 pid → 崩溃
-        _FakeTask("alive-1", "RUNNING", os.getpid()),  # 非终态 + 活 pid(本进程)→ 不算
-        _FakeTask("done-1", "DONE", dead),  # 终态 → 不算
-        _FakeTask("nopid-1", "RUNNING", 0),  # 无记录 pid → 不算(无法确认崩溃)
+        _FakeTask("crashed-1", "RUNNING", dead),
+        _FakeTask("fresh-1", "RUNNING", os.getpid(), fresh=True),
+        _FakeTask("blocked-1", "BLOCKED", dead),
+        _FakeTask("done-1", "DONE", dead),
     ]
-    summary = ActiveWorkSummary()
+    summary = ActiveWorkSummary(gateway_pid=os.getpid())
+
     _detect_crashed_running_tasks(_agent(tasks), summary)
-    assert [c["run_id"] for c in summary.crashed_tasks] == ["crashed-1"]  # 只检出真崩溃
+
+    assert [item["run_id"] for item in summary.crashed_tasks] == ["crashed-1"]
+    assert tasks[0].status == "RUNNING"
 
 
-def test_reconcile_off_by_default_keeps_status() -> None:
-    agent = _agent([_FakeTask("crashed-1", "RUNNING", _dead_pid())], reconcile=False)
+def test_dead_background_dispatch_pid_does_not_override_live_runner_session() -> None:
+    task = _FakeTask(
+        "live-runner",
+        "RUNNING",
+        os.getpid(),
+        fresh=True,
+        background_pid=_dead_pid(),
+    )
+    summary = ActiveWorkSummary(gateway_pid=os.getpid())
+
+    _detect_crashed_running_tasks(_agent([task]), summary)
+
+    assert summary.crashed_tasks == []
+
+
+def test_old_in_process_gateway_generation_is_visible_even_if_pid_was_reused() -> None:
+    task = _FakeTask(
+        "old-generation",
+        "RUNNING",
+        os.getpid(),
+        in_process=True,
+    )
+    summary = ActiveWorkSummary(gateway_pid=os.getpid() + 1)
+
+    _detect_crashed_running_tasks(_agent([task]), summary)
+
+    assert summary.crashed_tasks[0]["reason"] == "gateway_generation_changed"
+
+
+def test_report_explains_gateway_owned_reconciliation() -> None:
     summary = ActiveWorkSummary()
-    _detect_crashed_running_tasks(agent, summary)
-    _maybe_reconcile_crashed_tasks(agent, summary)
-    assert agent.subagents.set_status_calls == []  # 默认关:不动任务状态(现有策略不变)
-    assert not summary.crashed_tasks[0].get("reconciled")
+    summary.crashed_tasks = [
+        {
+            "run_id": "r1",
+            "pid": 123,
+            "status": "RUNNING",
+            "reason": "runner_process_exited",
+        }
+    ]
 
-
-def test_reconcile_on_marks_abandoned() -> None:
-    agent = _agent([_FakeTask("crashed-1", "RUNNING", _dead_pid())], reconcile=True)
-    summary = ActiveWorkSummary()
-    _detect_crashed_running_tasks(agent, summary)
-    _maybe_reconcile_crashed_tasks(agent, summary)
-    assert agent.subagents.set_status_calls == [("crashed-1", "ABANDONED")]  # 自动调和
-    assert summary.crashed_tasks[0]["reconciled"] is True
-
-
-def test_report_surfaces_crashed_tasks() -> None:
-    summary = ActiveWorkSummary()
-    summary.crashed_tasks = [{"run_id": "r1", "pid": 123, "status": "RUNNING"}]
     text = format_active_work_summary(summary)
-    assert "崩溃卡死任务" in text and "r1" in text  # 原本不可见的崩溃任务现在被告警
-    assert "startup_auto_reconcile_crashed_tasks" in text  # 提示可开自动调和
+
+    assert "runner 会话已失联" in text
+    assert "单 Gateway" in text
+    assert "status 本身不会改任务状态" in text
 
 
 def test_detection_resilient_to_bad_subagents() -> None:
-    agent = SimpleNamespace(subagents=SimpleNamespace(), config=SimpleNamespace())  # 无 list_runs
+    agent = SimpleNamespace(subagents=SimpleNamespace())
     summary = ActiveWorkSummary()
-    _detect_crashed_running_tasks(agent, summary)  # 不抛
-    assert summary.crashed_tasks == [] and len(summary.detection_errors) == 1
+
+    _detect_crashed_running_tasks(agent, summary)
+
+    assert summary.crashed_tasks == []
+    assert len(summary.detection_errors) == 1

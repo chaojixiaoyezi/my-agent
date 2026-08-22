@@ -107,9 +107,6 @@ class _ToolConfigFields:
     # 显式 /goal 与普通任务软收口后的续跑间隔；它不轮询或推动子代理。
     # 子代理只通过真实生命周期事件唤醒直接父级。0 时仍使用内置 180 秒兜底。
     continuation_reminder_seconds: int = 180
-    # 启动恢复自动调和崩溃卡死任务(审计 #18,opt-in 默认关):true=把"非终态但进程已退出"的崩溃任务
-    # 自动转 ABANDONED(只改状态,进程已死不杀任何东西);默认 false=维持现有"检测+提示用户手动"策略不变。
-    startup_auto_reconcile_crashed_tasks: bool = False
     # 检索完备性软引导(R5b/R6c 实锤:单一渠道失败即下"不存在"绝对结论):同一工具
     # 系统失败累计达此阈值时注入"枚举未试渠道再下结论"软提示(每工具一次);0=关闭。
     tool_failure_channel_hint_threshold: int = 2
@@ -240,7 +237,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
         "改代码先看现有风格和约定、写出来要像周围的代码；只做被要求的，不多不少。"
     )
     workspace_root: str | list[str] = ""
-    auto_detect_work_on_startup: bool = True
     model_backend: str = "echo"
     memory_path: str = ""
     memory_top_k: int = 5

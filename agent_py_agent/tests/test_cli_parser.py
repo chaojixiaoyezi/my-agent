@@ -47,6 +47,35 @@ class TestBuildParser:
         parser = build_parser()
         assert parser._subparsers is not None
 
+    def test_bare_invocation_uses_fast_fresh_chat_route(self) -> None:
+        from agent_py_agent.cli.parser import _interactive_argv, _interactive_command
+
+        assert _interactive_command([]) == "chat"
+        assert _interactive_argv([], "chat") == ["chat"]
+        assert _interactive_argv(["--config", "/tmp/config.yaml"], "chat") == [
+            "--config",
+            "/tmp/config.yaml",
+            "chat",
+        ]
+
+    def test_unknown_command_still_uses_full_parser(self) -> None:
+        from agent_py_agent.cli.parser import _interactive_command
+
+        assert _interactive_command(["status"]) == ""
+
+    def test_main_bare_invocation_dispatches_lazy_chat_handler(self) -> None:
+        from agent_py_agent.cli.parser import main
+
+        with patch(
+            "agent_py_agent.cli.chat_command_parser._cmd_chat",
+            return_value=0,
+        ) as handler:
+            assert main([]) == 0
+
+        args = handler.call_args.args[0]
+        assert args.command == "chat"
+        assert args.gateway is True
+
 
 class TestSubcommandRegistration:
     """测试子命令注册。"""

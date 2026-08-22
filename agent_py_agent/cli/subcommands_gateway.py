@@ -61,7 +61,11 @@ def add_daemon_subcommand(sub: argparse._SubParsersAction) -> None:
     daemon.add_argument("--max-runners", help="覆盖配置：每轮最多推进多少个 runner；auto 表示保守自适应，0 表示不执行 runner")
     daemon.add_argument("--limit", type=int, help="覆盖配置：每个阶段最多处理多少条记录，0 表示不限制")
     daemon.add_argument("--max-cycles", type=int, help="覆盖配置：最多循环次数，0 表示持续运行")
-    daemon.add_argument("--force-lock", action="store_true", help="强制覆盖已有 watch lock")
+    daemon.add_argument(
+        "--force-lock",
+        action="store_true",
+        help="兼容参数；可重写旧元数据，但不能抢占内核确认仍在持有的 watch lock",
+    )
     daemon.add_argument("--reviewer", help="覆盖配置：patch/acceptance 审核者标识")
     daemon.add_argument("--note", help="写入调度关联审核记录的备注")
     daemon.add_argument("--instruction", help="覆盖配置：给 runner 的额外指令")

@@ -333,3 +333,16 @@ Feishu 长任务、连续 `/btw` 和独立产物验收。
 解决问题：`input()` 和后台线程同时输出时破坏输入行，中文删除有视觉残留。
 
 待做：确认 `prompt_toolkit` + `patch_stdout()` 在各终端下稳定。
+
+### 裸 TUI 启动与单 Gateway 恢复权威
+
+状态：代码已落地，本地 focused tests 已通过，待 `.7` 部署复验
+
+解决问题：直接运行 `my-agent` 会扫描全机历史任务、阻塞在没有真实恢复动作的 `[Y/n]`；同时旧的
+0 字节派工锁会让 Gateway 的 runner supervision 永久跳过，真正失联任务反而得不到调和。
+
+已有：裸启动走轻量 fresh chat；旧 session 只允许显式 resume；status 只读；普通 stale attempt 移到
+Gateway 启动恢复；subagent supervision 使用内核 advisory lock，空/坏元数据不再形成永久锁。
+
+待做：在 `.7` 保持单 Gateway 与 MiniMax-M2.7 配置，部署后验证 1–2 秒内出现 TUI 连接画面、没有全局
+恢复提问，并观察旧 0 字节锁被自然重写、符合结构化 lifecycle 的历史任务自动收口。

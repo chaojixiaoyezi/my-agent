@@ -13,6 +13,19 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _stub_active_work_projection(monkeypatch):
+    """工作流状态测试不重复覆盖 active-work 读取。"""
+    from agent_py_agent.agent.startup_recovery import ActiveWorkSummary
+    from agent_py_agent.cli import local_commands
+
+    monkeypatch.setattr(
+        local_commands,
+        "_detect_active_work_summary",
+        lambda _agent: ActiveWorkSummary(),
+    )
+
+
 # 由于没有独立的 workstream_commands.py，测试 local_commands 中的相关功能
 class TestLocalStoreCommandsForWorkstream:
     """测试本地状态相关的命令（workstream 依赖这些基础命令）。"""
@@ -73,7 +86,6 @@ class TestStatusCommandsForWorkstream:
         mock_agent.config.agent_name = "test_agent"
         mock_agent.root = tmp_path
         mock_agent.config.gateway_stale_seconds = 300
-        mock_agent.config.auto_detect_work_on_startup = False
         mock_agent.local_store.stats.return_value = {"record_count": 100, "event_count": 50, "fts5_enabled": True, "db_path": str(tmp_path / "store.db")}
         mock_agent.subagents.board.build_board.return_value = MagicMock(summary={"total": 0}, hot_list=[], recent=[])
         mock_agent.local_store.timeline.return_value = []
@@ -101,7 +113,6 @@ class TestStatusCommandsForWorkstream:
         mock_agent.config.agent_name = "test_agent"
         mock_agent.root = tmp_path
         mock_agent.config.gateway_stale_seconds = 300
-        mock_agent.config.auto_detect_work_on_startup = False
         mock_agent.local_store.stats.return_value = {"record_count": 100, "event_count": 50, "fts5_enabled": True, "db_path": str(tmp_path / "store.db")}
         mock_agent.subagents.board.build_board.return_value = MagicMock(summary={"total": 0}, hot_list=[], recent=[])
         mock_agent.local_store.timeline.return_value = []

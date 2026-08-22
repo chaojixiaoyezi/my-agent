@@ -839,3 +839,25 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   返工耗尽和 unknown 禁止自动续做的 focused tests 已通过；真实 Fiber 143 样本确认权威字段为
   `FAILED/COMMAND_FAILED/execution/effect_outcome=failed/return_code=143`。候选部署后的真实返工结果继续记入
   稳定性台账，未完成前不冒充 E2E。
+
+## 2026-08-22 默认 TUI 启动、显式会话恢复与 Gateway 崩溃调和【状态：代码完成，`.7` 待部署复验】
+
+- 普通 `my-agent` 与 `my-agent chat` 都表示新建会话，直接走轻量交互解析器；只有
+  `my-agent resume <session_id>` 才能连接明确的旧会话，不存在或越权时 fail-closed。该边界直接对照
+  会话运行时 TUI 的 `SessionSelection::StartFresh` 与显式 `Resume(target_session)`，默认入口不得扫描全机
+  subagent board、询问是否批量恢复，或把“按 Enter”伪装成实际派工动作。
+- TUI 客户端不是恢复 owner。普通启动只确认单 Gateway readiness 并连接当前 session；`status` 是用户
+  显式请求的只读投影，不调用 lifecycle setter、attempt recovery、dispatch 或进程终止。旧的
+  `auto_detect_work_on_startup` 与 `startup_auto_reconcile_crashed_tasks` 已删除，避免配置、TUI 与 Gateway
+  同时拥有恢复权。
+- 普通 run 的 `recover_stale_attempts()` 移到 Gateway 启动阶段，以进程死亡证明调和 attempt；subagent
+  后续恢复继续只走 Gateway 的 `supervise_stalled_orphans`，使用 canonical runner session、心跳、宿主
+  PID、conversation lifecycle decision 与 attempt fence。状态页只报告失联 RUNNING session，不再拿共享
+  `background_start.pid` 把 `BLOCKED/PENDING` 误称为崩溃卡死。
+- 派工巡查锁改为 会话运行时 同类的内核 advisory lock：POSIX `flock`，Windows `msvcrt` 第 0 字节非阻塞锁。
+  JSON 只作诊断元数据，不参与归属；空文件、半截 JSON、旧 PID 或 PID 复用都不能形成永久死锁。锁路径
+  在释放后保留，描述符关闭或进程崩溃由内核自动释放；`--force-lock` 不能抢占仍被内核确认在岗的持有者。
+- `.7` 现场旧 `subagent_orphan_supervision.lock` 为 0 字节且已残留两天，旧实现把“JSON 读不出 PID”保守
+  当成活锁，导致每分钟 supervision 都静默 `skipped_locked`。同一现场 25 条旧 PID 告警实际为 5
+  `RUNNING`、1 `PENDING`、19 `BLOCKED`；只有 5 条具有失联 RUNNING runner session，其中 3 条满足续跑，
+  其余由已关闭 conversation link 的取消收口处理。新锁上线后由同一 Gateway 自然调和，不做批量删除。

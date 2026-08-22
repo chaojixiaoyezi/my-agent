@@ -113,9 +113,10 @@ def _gateway_status_from_files(agent, paths, alive: bool) -> tuple[str, float, d
     return gateway_status, heartbeat_age, gateway_state_report.load_error, heartbeat_report.load_error
 
 
+# LLM: `status` is an explicit read-only diagnostic command. It always projects current durable
+# facts and must not share a toggle with TUI startup or perform recovery mutations.
+# 函数用途: 为 status 读取 Gateway、队列和子代理概况；是否查看由用户运行 status 本身决定。
 def _detect_active_work_summary(agent):
-    if not agent.config.auto_detect_work_on_startup:
-        return None
     from ..agent.startup_recovery import detect_active_work
 
     return detect_active_work(agent)

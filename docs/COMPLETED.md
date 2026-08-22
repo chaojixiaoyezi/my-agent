@@ -237,3 +237,12 @@
 - 真机复验继续暴露“结构化完成与 findings delta 同轮出现”时完成信号被 delta 遮住；当前工作树改为
   结构化完成优先，并且 IM 回复信封只携带已投影的人话，不再把内部完成块、结论账标记或宿主路径交给
   adapter。这样既不恢复内部碎碎念，也不会在产物已验收后静默吞掉父代理最终回复。
+
+## 2026-08-22 裸启动与恢复控制面收口（本地完成，`.7` 待部署）
+
+- 解决了普通用户运行 `my-agent` 被全机历史任务扫描和虚假 `[Y/n]` 阻塞的问题：裸启动与 `chat` 共用
+  轻量 fresh-session 路径，只有 `resume <session_id>` 能恢复明确会话。
+- `status` 已成为无开关、无副作用的显式投影；旧的两个启动恢复配置删除。普通 run 的 stale attempt
+  由 Gateway 启动调和，subagent 由单 Gateway 周期 supervision 调和。
+- 派工巡查锁已改为 POSIX `flock` / Windows `msvcrt` 内核锁。空文件、坏 JSON、旧 PID 和 PID 复用不再
+  决定锁归属，进程死亡由内核自动释放；focused parser/startup/status/lock/recovery tests 通过。

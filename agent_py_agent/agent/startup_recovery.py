@@ -1,7 +1,10 @@
 
-"""启动时恢复检测功能。
+# LLM: This legacy-named module is now a read-only runtime-status projection. TUI startup must
+# never call it, and recovery mutations belong to the single Gateway's structured controllers.
+# 模块用途: 为显式 status 命令汇总 Gateway、队列和子代理运行事实；只读，不负责恢复或改状态。
+"""运行状态检测功能。
 
-检测当前环境中的进行中任务，包括：
+检测当前环境中的未收口工作，包括：
 - gateway 是否存活
 - 未完成的子代理任务
 - 遗留的 processing 请求
@@ -24,9 +27,11 @@ _ACTIVE_WORK_RECENT_SECONDS = 72 * 60 * 60
 _RECENT_TASK_GOAL_PREVIEW_CHARS = 160
 
 
+# LLM: Keep this DTO presentation-only; no field may authorize lifecycle mutations.
+# 类用途: 承载一次 status 快照，供文本和 JSON 状态页复用。
 @dataclass
 class ActiveWorkSummary:
-    """进行中任务摘要。"""
+    """未收口工作摘要。"""
 
     gateway_alive: bool = False
     gateway_pid: int = 0
@@ -37,7 +42,7 @@ class ActiveWorkSummary:
     dispatch_pending: bool = False
     dispatch_rounds: int = 0
     orphan_processes: list[dict] = None
-    crashed_tasks: list[dict] = None  # 非终态但进程已退出的崩溃卡死任务(审计 #18)
+    crashed_tasks: list[dict] = None  # RUNNING 且结构化 runner 会话已失联的任务
     detection_errors: list[dict] = None
 
     def __post_init__(self) -> None:
@@ -179,27 +184,16 @@ def _detect_orphan_processes(agent, summary) -> None:
         )
 
 
-def _task_background_pid(task: object) -> int:
-    """取任务后台进程 pid(background_start.pid,权威事实源);无记录返回 0。"""
-    attrs = getattr(task, "attributes", {}) or {}
-    background = attrs.get("background_start") if isinstance(attrs, dict) else None
-    if not isinstance(background, dict):
-        return 0
-    try:
-        return int(background.get("pid") or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
+# LLM: Status may flag only a stale canonical runner session, never infer a task crash from the
+# shared background-dispatch PID. Lifecycle repair is deliberately left to Gateway supervision.
+# 函数用途: 找出状态仍为 RUNNING、心跳已过期且 runner 宿主已经退出或属于旧 Gateway 的任务。
 def _detect_crashed_running_tasks(agent, summary) -> None:
-    """检测崩溃卡死任务(审计 #18):非终态任务但其后台进程 pid 已不存活 = run 崩了、任务仍卡 RUNNING。
-
-    与孤儿检测(终态任务 + 进程活着)互补,补上原本完全不可见、不告警的"崩溃后永久卡 RUNNING"。
-    安全:pid 复用时 is_pid_alive=True 被跳过 → 不误伤(宁可漏报);无记录 pid 也跳过(无法确认崩溃)。
-    本函数只检测+上报,不动任务状态(尊重现有"提示用户、不自动回收"策略);自动调和见下面 opt-in。
-    """
-    from .contracts.state_machine import TERMINAL_STATES, normalize_status
+    from .contracts.state_machine import normalize_status
     from .subagents.process_control import is_pid_alive
+    from .subagents.runner_session_liveness import (
+        has_fresh_runner_session,
+        runner_session_of,
+    )
 
     try:
         tasks = list(agent.subagents.list_runs() or [])
@@ -207,39 +201,34 @@ def _detect_crashed_running_tasks(agent, summary) -> None:
         _append_detection_error(summary, exc, "startup_recovery.crashed_tasks")
         return
     for task in tasks:
-        pid = _task_background_pid(task)
-        if pid <= 0 or normalize_status(getattr(task, "status", "")) in TERMINAL_STATES or is_pid_alive(pid):
+        if normalize_status(getattr(task, "status", "")) != TaskStatus.RUNNING.value:
+            continue
+        session = runner_session_of(task)
+        session_status = str(session.get("status") or "").strip().lower()
+        if session_status not in {"starting", "running"} or has_fresh_runner_session(task):
+            continue
+        try:
+            worker_pid = int(session.get("worker_pid") or 0)
+        except (TypeError, ValueError):
+            worker_pid = 0
+        old_gateway_generation = bool(session.get("in_process")) and bool(
+            summary.gateway_pid and worker_pid != summary.gateway_pid
+        )
+        if not old_gateway_generation and (worker_pid <= 0 or is_pid_alive(worker_pid)):
             continue
         summary.crashed_tasks.append(
-            {"run_id": str(getattr(task, "id", "") or ""), "pid": pid, "status": str(getattr(task, "status", "") or "")}
+            {
+                "run_id": str(getattr(task, "id", "") or ""),
+                "pid": worker_pid,
+                "status": str(getattr(task, "status", "") or ""),
+                "session_id": str(session.get("session_id") or ""),
+                "reason": (
+                    "gateway_generation_changed"
+                    if old_gateway_generation
+                    else "runner_process_exited"
+                ),
+            }
         )
-
-
-def _maybe_reconcile_crashed_tasks(agent, summary) -> None:
-    """opt-in(默认关):配 startup_auto_reconcile_crashed_tasks=true 时把崩溃卡死任务自动调和到 ABANDONED。
-
-    只改任务状态(进程已死,不杀任何进程,不违背"绝不自动杀");默认关 = 现有"提示用户"行为完全不变。
-    """
-    if not bool(getattr(getattr(agent, "config", None), "startup_auto_reconcile_crashed_tasks", False)):
-        return
-    for crashed in summary.crashed_tasks:
-        _reconcile_one_crashed(agent, summary, crashed)
-
-
-def _reconcile_one_crashed(agent, summary, crashed: dict) -> None:
-    run_id = str(crashed.get("run_id") or "")
-    if not run_id:
-        return
-    try:
-        agent.subagents.lifecycle.set_status(
-            run_id,
-            TaskStatus.ABANDONED.value,
-            result="进程已退出(pid 不存活),启动恢复自动调和到 ABANDONED",
-            failure_type="background_dispatch_startup",
-        )
-        crashed["reconciled"] = True
-    except Exception as exc:
-        _append_detection_error(summary, exc, "startup_recovery.reconcile_crashed")
 
 
 # 函数用途: 读进程命令行(ps 跨 darwin/linux;读不到返回空串=身份验证不过,不报)。
@@ -288,15 +277,10 @@ def _goal_is_truncated(goal: object) -> bool:
     return len(str(goal or "").replace("\n", " ").strip()) > _RECENT_TASK_GOAL_PREVIEW_CHARS
 
 
+# LLM: This function is a pure observation boundary. Never call lifecycle setters, stale-attempt
+# recovery, dispatch, or process termination from status collection.
+# 函数用途: 读取当前运行事实并生成状态快照；调用它不会恢复任务、改账或启动进程。
 def detect_active_work(agent: SimpleAgent) -> ActiveWorkSummary:
-    """检测当前环境中的进行中任务。
-
-    Args:
-        agent: SimpleAgent 实例
-
-    Returns:
-        ActiveWorkSummary 包含 gateway 状态、活跃任务数、遗留请求数和最近任务列表
-    """
     from .gateway_parts import gateway_paths
 
     paths = gateway_paths(agent)
@@ -307,29 +291,9 @@ def detect_active_work(agent: SimpleAgent) -> ActiveWorkSummary:
     _detect_active_tasks(agent, summary)
     _detect_dispatch_status(agent, summary)
     _detect_orphan_processes(agent, summary)
-    _detect_crashed_running_tasks(agent, summary)  # 审计 #18:崩溃后卡 RUNNING 的任务(原本不可见)
-    _maybe_reconcile_crashed_tasks(agent, summary)  # opt-in(默认关):自动调和到 ABANDONED
-    _reconcile_stale_attempts(agent, summary)  # RUN-01:普通 CLI run 崩溃悬挂 attempt 归 unknown
+    _detect_crashed_running_tasks(agent, summary)
 
     return summary
-
-
-# LLM: 只调和"进程死亡已被证实"的悬挂 attempt（RUN-01），fail-closed 不猜；
-# 与 _detect_crashed_running_tasks（子代理后台任务）互补，覆盖普通 CLI run。
-# 函数用途: 调用 runtime_db 的 recover_stale_attempts，把崩溃悬挂账本收敛为 unknown。
-def _reconcile_stale_attempts(agent: SimpleAgent, summary: ActiveWorkSummary) -> None:
-    try:
-        repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
-        if repo is None:
-            return  # LOCAL_UNMANAGED 无权威账本
-        recovered = repo.recover_stale_attempts()
-    except Exception as exc:  # noqa: BLE001 恢复失败不阻断主链
-        _append_detection_error(summary, exc, "startup_recovery.recover_stale_attempts")
-        return
-    if recovered:
-        summary.crashed_tasks.extend(
-            {"run_id": run_id, "pid": -1, "status": "unknown"} for run_id in recovered
-        )
 
 
 def _render_orphan_processes(summary: ActiveWorkSummary) -> list[str]:
@@ -343,17 +307,19 @@ def _render_orphan_processes(summary: ActiveWorkSummary) -> list[str]:
     return lines
 
 
+# LLM: Render diagnostic facts and the owning recovery component only; never advertise a config
+# switch that mutates tasks from a status/TUI process.
+# 函数用途: 展示已失联 runner，并告诉用户这类恢复由 Gateway 后台负责。
 def _render_crashed_tasks(summary: ActiveWorkSummary) -> list[str]:
-    """渲染崩溃卡死任务段(审计 #18)。无则空。从 format 抽出以控行数。"""
     if not summary.crashed_tasks:
         return []
-    reconciled = sum(1 for crashed in summary.crashed_tasks if crashed.get("reconciled"))
-    lines = [f"⚠ 发现 {len(summary.crashed_tasks)} 个崩溃卡死任务（非终态但进程已退出，疑似 run 崩溃/OOM/断电）"]
+    lines = [f"⚠ 发现 {len(summary.crashed_tasks)} 个 RUNNING 任务的 runner 会话已失联"]
     for crashed in summary.crashed_tasks[:3]:
-        mark = " → 已自动调和 ABANDONED" if crashed.get("reconciled") else ""
-        lines.append(f"  - run={crashed['run_id']} status={crashed['status']} pid={crashed['pid']}（已退出）{mark}")
-    if reconciled < len(summary.crashed_tasks):
-        lines.append("  这些任务会永久卡 RUNNING；配 startup_auto_reconcile_crashed_tasks=true 可自动调和到 ABANDONED。")
+        lines.append(
+            f"  - run={crashed['run_id']} status={crashed['status']} "
+            f"worker_pid={crashed['pid']} reason={crashed.get('reason', '')}"
+        )
+    lines.append("  单 Gateway 会按 runner 会话、心跳和 attempt 围栏自动调和；status 本身不会改任务状态。")
     return lines
 
 
@@ -374,9 +340,9 @@ def format_active_work_summary(summary: ActiveWorkSummary) -> str:
         lines.append("✗ Gateway 未运行")
 
     if summary.active_task_count > 0:
-        lines.append(f"✓ 发现 {summary.active_task_count} 个进行中任务")
+        lines.append(f"✓ 发现 {summary.active_task_count} 个近期未收口任务（含运行、等待或阻塞）")
     else:
-        lines.append("✓ 没有进行中任务")
+        lines.append("✓ 没有近期未收口任务")
 
     if summary.stale_request_count > 0:
         lines.append(f"⚠ 发现 {summary.stale_request_count} 个遗留的 processing 请求")
@@ -391,7 +357,7 @@ def format_active_work_summary(summary: ActiveWorkSummary) -> str:
     lines.extend(_render_crashed_tasks(summary))
 
     if summary.detection_errors:
-        lines.append(f"⚠ 启动恢复检测有 {len(summary.detection_errors)} 个读取错误")
+        lines.append(f"⚠ 状态读取有 {len(summary.detection_errors)} 个错误")
         for error in summary.detection_errors[:3]:
             lines.append(
                 f"  - {error.get('context')}: {error.get('category')} "
@@ -404,7 +370,7 @@ def format_active_work_summary(summary: ActiveWorkSummary) -> str:
             flags = f"{task['status']}/{task['verification_status']}"
             lines.append(f"  - {task['id']} {flags} :: {task['goal'][:60]}...")
 
-    return "\n".join(lines) if lines else "当前没有进行中任务。"
+    return "\n".join(lines) if lines else "当前没有未收口任务。"
 
 
 def has_active_work(summary: ActiveWorkSummary) -> bool:

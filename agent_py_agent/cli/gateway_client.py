@@ -113,11 +113,12 @@ def ensure_gateway_started(args) -> int:
     return 2
 
 
+# LLM: A bare CLI invocation is a fresh chat entry, never a machine-wide task recovery action.
+# Exact session recovery remains owned by `my-agent resume <session_id>` and durable task recovery
+# remains owned by the single Gateway; do not add global board scans or stdin gates here.
+# 函数用途: 兼容完整命令解析器的裸启动入口；确认 Gateway 后直接进入一个新聊天会话。
 def cmd_default(args) -> int:
     code = ensure_gateway_started(args)
-    if code:
-        return code
-    code = _maybe_handle_active_work(args)
     if code:
         return code
     args.gateway = True
@@ -128,40 +129,6 @@ def cmd_default(args) -> int:
     args.no_save = False
     args.app_scrollback = not bool(getattr(args, "plain", False))
     return cmd_chat(args)
-
-
-def _maybe_handle_active_work(args) -> int | None:
-    agent = make_agent(args)
-    if not agent or not agent.config.auto_detect_work_on_startup:
-        return None
-    return _handle_active_work_prompt(agent)
-
-
-def _handle_active_work_prompt(agent) -> int | None:
-    from ..agent.startup_recovery import (
-        detect_active_work,
-        format_active_work_summary,
-        has_active_work,
-    )
-    summary = detect_active_work(agent)
-    if not has_active_work(summary):
-        return None
-    print("\n" + "=" * 60)
-    print("进行中任务检测")
-    print("=" * 60)
-    print(format_active_work_summary(summary))
-    print("=" * 60 + "\n")
-    if summary.active_task_count <= 0:
-        return None
-    try:
-        response = input("是否继续调度这些任务？[Y/n] ").strip().lower()
-        if response and response not in {"y", "yes", ""}:
-            print("已取消自动调度。")
-            return 0
-    except (EOFError, KeyboardInterrupt):
-        print("\n已取消。")
-        return 0
-    return None
 
 
 def _stream_chunk_lines(

@@ -56,9 +56,6 @@ def mock_agent():
     agent.config.gateway_stale_seconds = 120
     agent.root = Path("/tmp/test_agent")
     agent.subagents = Mock()
-    # RUN-01(_reconcile_stale_attempts) 会读 runtime_db.recover_stale_attempts——
-    # 预置空返回值, 否则 MagicMock 真值不可迭代 TypeError。
-    agent.subagents.runtime_db.recover_stale_attempts.return_value = []
     agent.local_store = Mock()
     return agent
 
@@ -237,7 +234,7 @@ class TestFormatActiveWorkSummary:
 
         formatted = format_active_work_summary(summary)
         assert "✗ Gateway 未运行" in formatted
-        assert "✓ 没有进行中任务" in formatted
+        assert "✓ 没有近期未收口任务" in formatted
 
     def test_format_with_active_tasks(self):
         """测试有活跃任务的摘要格式化。"""
@@ -261,7 +258,7 @@ class TestFormatActiveWorkSummary:
 
         formatted = format_active_work_summary(summary)
         assert "✓ Gateway 运行中" in formatted
-        assert "✓ 发现 2 个进行中任务" in formatted
+        assert "✓ 发现 2 个近期未收口任务" in formatted
         assert "sub-001" in formatted
         assert "RUNNING" in formatted
 
@@ -395,48 +392,6 @@ class TestActiveWorkSummaryModel:
         assert summary.processing_requests == ["req-001"]
 
 
-class TestConfigOption:
-    """测试配置项。"""
-
-    def test_auto_detect_work_on_startup_default(self):
-        """测试默认配置值。"""
-        from agent_py_agent.agent.settings.config import AgentConfig
-
-        # 使用默认配置
-        config = AgentConfig()
-        assert config.auto_detect_work_on_startup is True
-
-    def test_auto_detect_work_on_startup_from_yaml(self, tmp_path):
-        """测试从 YAML 读取配置。"""
-        # 创建临时配置文件
-        config_file = tmp_path / "test_config.yaml"
-        config_file.write_text("""
-agent_name: TestAgent
-auto_detect_work_on_startup: false
-system_prompt: test
-        """)
-
-        from agent_py_agent.agent.settings.config import load_config
-
-        config = load_config(config_file)
-        assert config.auto_detect_work_on_startup is False
-
-    def test_auto_detect_work_on_startup_missing_value(self, tmp_path):
-        """测试配置文件中缺少该字段时的回退。"""
-        # 创建临时配置文件，不包含该字段
-        config_file = tmp_path / "test_config.yaml"
-        config_file.write_text("""
-agent_name: TestAgent
-system_prompt: test
-        """)
-
-        from agent_py_agent.agent.settings.config import load_config
-
-        config = load_config(config_file)
-        # 应该使用默认值 True
-        assert config.auto_detect_work_on_startup is True
-
-
 class TestStatusCommand:
     """测试 status 命令显示。"""
 
@@ -482,18 +437,21 @@ class TestIntegrationScenarios:
             formatted = format_active_work_summary(summary)
             assert formatted
             assert "✓ Gateway 运行中" in formatted
-            assert "发现 2 个进行中任务" in formatted
+            assert "发现 2 个近期未收口任务" in formatted
             assert "发现 1 个遗留的 processing 请求" in formatted
 
             # 4. 判断
             assert has_active_work(summary) is True
 
-    def test_config_disables_detection(self, mock_agent, mock_paths):
-        """测试配置关闭检测时不执行检测。"""
+    def test_retired_startup_toggle_cannot_hide_explicit_status(
+        self,
+        mock_agent,
+        mock_paths,
+        sample_board,
+    ):
+        """旧配置残留不能关闭用户明确执行的 status。"""
         mock_agent.config.auto_detect_work_on_startup = False
-        mock_agent.subagents.board.build_board.return_value = Mock(
-            hot_list=[], recent=[], summary={}
-        )
+        mock_agent.subagents.board.build_board.return_value = sample_board
 
         with patch('agent_py_agent.agent.gateway_parts.gateway_paths', return_value=mock_paths), \
              patch('agent_py_agent.agent.gateway_parts.gateway_running', return_value=(0, False)), \
@@ -501,8 +459,7 @@ class TestIntegrationScenarios:
 
             summary = detect_active_work(mock_agent)
 
-            # 即使有任务，也应该返回 0
-            assert summary.active_task_count == 0
+            assert summary.active_task_count == 2
 
     def test_malformed_board_handling(self, mock_agent, mock_paths):
         """测试异常 board 处理。"""

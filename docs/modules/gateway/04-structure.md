@@ -613,3 +613,12 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
   `allowed_write_roots`；隐藏 task `work/output` 仍用于账本、临时工作和显式内部交付。
 - 该扩展只发生在 default-scope 的主 conversation run。`cli_run`、task-local child 与 transient Audit
   不继承；远程 provider 的 owner/task wall 在后续步骤覆盖项目写根，继续 fail-closed。
+## 2026-08-22 会话入口与恢复控制面
+
+- `cli/parser.py` 把裸启动与显式 `chat` 都路由到轻量 fresh-session 入口；`resume` 必须携带唯一 session
+  ID。`cli/gateway_client.py::cmd_default` 仅保留完整 parser 的兼容入口，不读取全局 task board。
+- `agent/startup_recovery.py` 虽保留历史文件名，但职责已冻结为 `status` 的只读投影；它不能改任务、attempt
+  或队列。普通 attempt 启动恢复位于 `cli/gateway_process.py::_cmd_gateway_run_setup`，subagent 失联恢复位于
+  `cli/gateway_loops.py::_GatewayOrphanReconciler`，两者都由同一 Gateway 持有。
+- `agent_core/orchestration/dispatch/lock.py` 的权威是打开文件描述符上的 OS advisory lock。持有者 JSON
+  只用于观测，不能授权抢占、拒绝恢复或判断进程生死；释放时禁止 unlink 共享 inode。

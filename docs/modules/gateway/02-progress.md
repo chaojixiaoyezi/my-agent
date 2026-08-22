@@ -2003,3 +2003,13 @@
   `work/output` 只是附加运行区，不替代 cwd。远程 owner、task-local child 和 transient Audit 后续继续按
   结构化身份收窄。
 - 聚焦回归覆盖 Gateway 任务晋升前后同一路径可写，以及既有远程/child/Audit 边界不放大；真机复验待部署。
+## 2026-08-22 裸启动与崩溃恢复权威收口
+
+- 裸命令 `my-agent` 已进入 chat/resume 轻量解析路径，默认只新建当前会话；全局任务扫描和无实际派工
+  行为的 `[Y/n]` 提示已删除，旧会话只允许 `resume <session_id>` 精确恢复。
+- `status` 改为无开关、无副作用的显式诊断；普通 stale attempt 由 Gateway 启动调和，subagent runner
+  继续由周期 supervision 负责。
+- `subagent_orphan_supervision.lock` 已从 PID+JSON 文件存在性改成内核 advisory lock；空/坏元数据不会再
+  永久阻断恢复，`force` 也不能绕过真实活锁。
+- 本地 focused tests 已覆盖默认入口不构造第二 Agent、旧配置不隐藏 status、失联 runner 只读分类、
+  空/坏锁接管、并发互斥及 Gateway stale-attempt owner；`.7` 部署、启动耗时和历史状态自然调和待本轮完成。

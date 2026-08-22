@@ -45,6 +45,24 @@ def test_default_gateway_entry_can_reach_chat_handler():
     assert callable(gateway_client.cmd_chat)
 
 
+def test_bare_gateway_entry_never_scans_or_prompts_for_global_tasks(monkeypatch) -> None:
+    args = SimpleNamespace(plain=False)
+    entered: list[object] = []
+
+    monkeypatch.setattr(gateway_client, "ensure_gateway_started", lambda _args: 0)
+    monkeypatch.setattr(
+        gateway_client,
+        "make_agent",
+        lambda _args: (_ for _ in ()).throw(AssertionError("不得构造本地 Agent 扫全局任务")),
+    )
+    monkeypatch.setattr(gateway_client, "cmd_chat", lambda current: entered.append(current) or 0)
+
+    assert gateway_client.cmd_default(args) == 0
+    assert entered == [args]
+    assert args.gateway is True
+    assert args.app_scrollback is True
+
+
 def test_submit_gateway_ask_uses_collision_safe_ids(tmp_path, monkeypatch):
     """Concurrent chat submits must not overwrite requests created in the same millisecond."""
 

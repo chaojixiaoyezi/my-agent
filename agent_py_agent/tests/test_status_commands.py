@@ -14,6 +14,19 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _stub_active_work_projection(monkeypatch):
+    """这些测试聚焦 status 其他区块；活跃工作投影由 startup_recovery 专测覆盖。"""
+    from agent_py_agent.agent.startup_recovery import ActiveWorkSummary
+    from agent_py_agent.cli import local_commands
+
+    monkeypatch.setattr(
+        local_commands,
+        "_detect_active_work_summary",
+        lambda _agent: ActiveWorkSummary(),
+    )
+
+
 def _status_args(tmp_path: Path, *, json_mode: bool = False) -> MagicMock:
     args = MagicMock()
     args.config = str(tmp_path / "config.yaml")
@@ -28,7 +41,6 @@ def _status_mock_agent(tmp_path: Path) -> MagicMock:
     mock_agent.config.agent_name = "test_agent"
     mock_agent.root = tmp_path
     mock_agent.config.gateway_stale_seconds = 300
-    mock_agent.config.auto_detect_work_on_startup = False
     mock_agent.config.subagent_board_limit = 5
     mock_agent.local_store.stats.return_value = {
         "record_count": 100,
@@ -58,7 +70,6 @@ class TestCmdStatus:
         mock_agent.config.agent_name = "test_agent"
         mock_agent.root = tmp_path
         mock_agent.config.gateway_stale_seconds = 300
-        mock_agent.config.auto_detect_work_on_startup = False
         mock_agent.local_store.stats.return_value = {"record_count": 100, "event_count": 50, "fts5_enabled": True, "db_path": str(tmp_path / "store.db")}
         mock_agent.subagents.board.build_board.return_value = MagicMock(summary={"total": 0}, hot_list=[], recent=[])
         mock_agent.local_store.timeline.return_value = []
@@ -85,7 +96,6 @@ class TestCmdStatus:
         mock_agent.config.agent_name = "test_agent"
         mock_agent.root = tmp_path
         mock_agent.config.gateway_stale_seconds = 300
-        mock_agent.config.auto_detect_work_on_startup = False
         mock_agent.config.subagent_board_limit = 5
         mock_agent.local_store.stats.return_value = {
             "record_count": 100,
@@ -206,7 +216,6 @@ class TestCmdStatus:
         mock_agent.config.agent_name = "test_agent"
         mock_agent.root = tmp_path
         mock_agent.config.gateway_stale_seconds = 300
-        mock_agent.config.auto_detect_work_on_startup = False
         mock_agent.local_store.stats.return_value = {"record_count": 100, "event_count": 50, "fts5_enabled": True, "db_path": str(tmp_path / "store.db")}
         mock_agent.subagents.board.build_board.return_value = MagicMock(summary={"total": 1}, hot_list=[], recent=[mock_item])
         mock_agent.local_store.timeline.return_value = []

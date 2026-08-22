@@ -149,8 +149,33 @@ def test_startup_recovery_preserves_active_task_detection_errors() -> None:
 
     assert summary.active_task_count == 0
     assert summary.detection_errors[0]["context"] == "startup_recovery.active_tasks"
-    assert "启动恢复检测有 1 个读取错误" in text
+    assert "状态读取有 1 个错误" in text
     assert "startup_recovery.active_tasks" in text
+
+
+def test_gateway_startup_owns_stale_attempt_recovery() -> None:
+    from agent_py_agent.cli.gateway_process import _recover_gateway_stale_attempts
+
+    recover = MagicMock(return_value=["run-1", "run-2"])
+    agent = MagicMock()
+    agent.subagents.runtime_db.recover_stale_attempts = recover
+
+    result = _recover_gateway_stale_attempts(agent)
+
+    assert result == {"run_ids": ["run-1", "run-2"], "count": 2, "error": None}
+    recover.assert_called_once_with()
+
+
+def test_gateway_stale_attempt_recovery_error_is_structured() -> None:
+    from agent_py_agent.cli.gateway_process import _recover_gateway_stale_attempts
+
+    agent = MagicMock()
+    agent.subagents.runtime_db.recover_stale_attempts.side_effect = RuntimeError("broken")
+
+    result = _recover_gateway_stale_attempts(agent)
+
+    assert result["count"] == 0
+    assert result["error"]["context"] == "gateway.startup.stale_attempts"
 
 
 class TestResolveDaemonMaxRunners:

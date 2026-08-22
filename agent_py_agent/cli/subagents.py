@@ -205,8 +205,9 @@ def _add_agents_patch_subcommand(sub):
     patches.set_defaults(func=cmd_subagents_patches, patch_action="review_dry_run")
 
 
-# LLM: This command is the process entrypoint used by host auto-start, not a model/user workflow step.
-# 函数用途: 注册底层 runner 调度进程入口；普通用户不需要靠它推动任务。
+# LLM: This command is the host auto-start process entrypoint; its watch lock is an OS-held
+# descriptor lock, so compatibility flags must never turn stale metadata into live ownership.
+# 函数用途: 注册底层 runner 调度进程入口；普通用户不需要靠它推动任务，锁文件文字也不能代替进程排他事实。
 def _add_agents_dispatch_subcommands(sub):
     dispatch = sub.add_parser("subagents-dispatch", help="内部运行时调度入口；普通用户无需手动调用")
     _add_capability_config_arg(dispatch)
@@ -220,7 +221,11 @@ def _add_agents_dispatch_subcommands(sub):
     dispatch.add_argument("--advance", action="store_true", help="watch 模式显式推进 dispatch；不传则只读观察代理树")
     dispatch.add_argument("--interval", type=float, default=None, help="watch 模式每轮间隔秒数，0 表示不等待；默认读配置")
     dispatch.add_argument("--max-cycles", type=int, default=0, help="watch 模式最多循环次数，0 表示持续运行")
-    dispatch.add_argument("--force-lock", action="store_true", help="强制覆盖已有 watch lock")
+    dispatch.add_argument(
+        "--force-lock",
+        action="store_true",
+        help="兼容参数；可重写旧元数据，但不能抢占内核确认仍在持有的 watch lock",
+    )
     dispatch.add_argument("--reviewer", default="parent-dispatch", help="patch/acceptance 审核者标识")
     dispatch.add_argument("--note", help="写入调度关联审核记录的备注")
     dispatch.add_argument("--instruction", help="给本轮 runner 的额外指令")

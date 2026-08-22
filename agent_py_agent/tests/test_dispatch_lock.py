@@ -1,199 +1,90 @@
-"""分布式锁测试 - orchestration.dispatch.lock 死锁检测、锁获取释放。"""
+"""派工巡查内核文件锁测试。"""
 from __future__ import annotations
 
 import json
 import os
-import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
-
-class TestDispatchWatchLock:
-    """测试 _DispatchWatchLock 分布式锁。"""
-
-    def test_lock_acquire_success(self, tmp_path: Path):
-        """成功获取锁。"""
-        from agent_py_agent.agent.agent_core.orchestration.dispatch.lock import _DispatchWatchLock
-
-        lock_path = tmp_path / "dispatch.lock"
-
-        lock = _DispatchWatchLock(lock_path)
-        with lock as l:
-            assert l.acquired is True
-            assert l.token is not None
-
-    def test_lock_release_on_context_exit(self, tmp_path: Path):
-        """上下文退出时释放锁。"""
-        from agent_py_agent.agent.agent_core.orchestration.dispatch.lock import _DispatchWatchLock
-
-        lock_path = tmp_path / "dispatch.lock"
-
-        lock = _DispatchWatchLock(lock_path)
-        with lock:
-            assert lock_path.exists()
-
-        # 退出后锁文件应该被删除
-        assert not lock_path.exists()
-
-    def test_lock_not_released_if_token_mismatch(self, tmp_path: Path):
-        """token 不匹配时不释放锁。"""
-        from agent_py_agent.agent.agent_core.orchestration.dispatch.lock import _DispatchWatchLock
-
-        lock_path = tmp_path / "dispatch.lock"
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # 先写入一个不同 token 的锁
-        other_payload = {
-            "token": "different_token",
-            "pid": 99999,
-            "created_at": time.time(),
-        }
-        lock_path.write_text(json.dumps(other_payload), encoding="utf-8")
-
-        lock = _DispatchWatchLock(lock_path)
-        lock.acquired = True  # 模拟已获取锁
-
-        # 退出时 token 不匹配，不删除锁文件
-        lock.__exit__(None, None, None)
-        assert lock_path.exists()
-
-    def test_lock_already_exists_raises(self, tmp_path: Path):
-        """锁已存在时抛出异常。"""
-        from agent_py_agent.agent.agent_core.orchestration.dispatch.lock import _DispatchWatchLock
-
-        lock_path = tmp_path / "dispatch.lock"
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # 先创建一个锁文件
-        existing_payload = {
-            "token": "existing_token",
-            "pid": os.getpid(),
-            "created_at": time.time(),
-        }
-        lock_path.write_text(json.dumps(existing_payload), encoding="utf-8")
-
-        lock = _DispatchWatchLock(lock_path)
-
-        with pytest.raises(RuntimeError, match="dispatch watch lock already exists"):
-            lock.__enter__()
-
-    def test_force_lock_removes_existing(self, tmp_path: Path):
-        """force=True 时移除已存在的锁。"""
-        from agent_py_agent.agent.agent_core.orchestration.dispatch.lock import _DispatchWatchLock
-
-        lock_path = tmp_path / "dispatch.lock"
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        lock_path.write_text("{}", encoding="utf-8")
-
-        lock = _DispatchWatchLock(lock_path, force=True)
-        with lock:
-            assert lock.acquired is True
-            assert lock_path.exists()
-
-    def test_lock_with_different_tokens(self, tmp_path: Path):
-        """两个锁实例使用不同的 token。"""
-        from agent_py_agent.agent.agent_core.orchestration.dispatch.lock import _DispatchWatchLock
-
-        lock_path = tmp_path / "dispatch.lock"
-
-        lock1 = _DispatchWatchLock(lock_path)
-        lock2 = _DispatchWatchLock(lock_path)
-
-        with lock1:
-            # 读取锁内容验证 token
-            payload = json.loads(lock_path.read_text(encoding="utf-8"))
-            assert payload["token"] == lock1.token
-            assert payload["token"] != lock2.token
-
-    def test_lock_token_is_hex_uuid(self, tmp_path: Path):
-        """token 是十六进制 UUID。"""
-        from agent_py_agent.agent.agent_core.orchestration.dispatch.lock import _DispatchWatchLock
-
-        lock_path = tmp_path / "dispatch.lock"
-        lock = _DispatchWatchLock(lock_path)
-
-        assert len(lock.token) == 32  # UUID hex is 32 chars
-        assert all(c in "0123456789abcdef" for c in lock.token)
-
-    def test_lock_pid_is_current_process(self, tmp_path: Path):
-        """锁中记录的是当前进程 PID。"""
-        from agent_py_agent.agent.agent_core.orchestration.dispatch.lock import _DispatchWatchLock
-
-        lock_path = tmp_path / "dispatch.lock"
-
-        lock = _DispatchWatchLock(lock_path)
-        with lock:
-            payload = json.loads(lock_path.read_text(encoding="utf-8"))
-            assert payload["pid"] == os.getpid()
+from agent_py_agent.agent.agent_core.orchestration.dispatch.lock import (
+    _DispatchWatchLock,
+)
 
 
-    def test_stale_lock_with_dead_pid_is_replaced(self, tmp_path: Path):
-        from agent_py_agent.agent.agent_core.orchestration.dispatch.lock import _DispatchWatchLock
+def test_lock_acquire_publishes_diagnostic_metadata(tmp_path: Path) -> None:
+    lock_path = tmp_path / "dispatch.lock"
 
-        lock_path = tmp_path / "dispatch.lock"
-        lock_path.write_text(
-            json.dumps({"token": "old", "pid": 987654, "created_at": time.time()}),
-            encoding="utf-8",
-        )
+    with _DispatchWatchLock(lock_path) as lock:
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
 
-        with patch("agent_py_agent.agent.agent_core.orchestration.dispatch.lock.is_pid_alive", return_value=False):
-            with _DispatchWatchLock(lock_path) as lock:
-                payload = json.loads(lock_path.read_text(encoding="utf-8"))
-
+        assert lock.acquired is True
+        assert payload["schema_version"] == "dispatch-watch-lock.v2"
         assert payload["token"] == lock.token
-        assert not lock_path.exists()
+        assert payload["pid"] == os.getpid()
 
-    def test_live_lock_is_still_rejected(self, tmp_path: Path):
-        from agent_py_agent.agent.agent_core.orchestration.dispatch.lock import _DispatchWatchLock
 
-        lock_path = tmp_path / "dispatch.lock"
-        lock_path.write_text(
-            json.dumps({"token": "live", "pid": 987654, "created_at": time.time()}),
-            encoding="utf-8",
-        )
+def test_release_keeps_stable_inode_and_allows_next_owner(tmp_path: Path) -> None:
+    lock_path = tmp_path / "dispatch.lock"
 
-        with patch("agent_py_agent.agent.agent_core.orchestration.dispatch.lock.is_pid_alive", return_value=True), \
-             pytest.raises(RuntimeError, match="dispatch watch lock"):
+    with _DispatchWatchLock(lock_path) as first:
+        first_token = first.token
+
+    assert lock_path.exists()
+    with _DispatchWatchLock(lock_path) as second:
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+
+    assert second.token != first_token
+    assert payload["token"] == second.token
+
+
+def test_competing_owner_is_rejected_without_deleting_lock(tmp_path: Path) -> None:
+    lock_path = tmp_path / "dispatch.lock"
+
+    with _DispatchWatchLock(lock_path) as owner:
+        with pytest.raises(RuntimeError, match="dispatch watch lock already held"):
             _DispatchWatchLock(lock_path).__enter__()
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        assert payload["token"] == owner.token
 
 
-class TestLockEdgeCases:
-    """锁的边界情况测试。"""
+def test_force_does_not_steal_live_kernel_lock(tmp_path: Path) -> None:
+    lock_path = tmp_path / "dispatch.lock"
 
-    def test_lock_exit_without_acquire(self, tmp_path: Path):
-        """未获取锁时调用 exit 不做任何事。"""
-        from agent_py_agent.agent.agent_core.orchestration.dispatch.lock import _DispatchWatchLock
+    with _DispatchWatchLock(lock_path):
+        with pytest.raises(RuntimeError, match="不能抢占"):
+            _DispatchWatchLock(lock_path, force=True).__enter__()
 
-        lock_path = tmp_path / "dispatch.lock"
-        lock = _DispatchWatchLock(lock_path)
 
-        # 不进入 context，直接 exit
-        lock.__exit__(None, None, None)
-        # 不应该抛出异常
+@pytest.mark.parametrize("contents", ["", "not valid json{{{"])
+def test_empty_or_malformed_metadata_never_creates_permanent_deadlock(
+    tmp_path: Path,
+    contents: str,
+) -> None:
+    lock_path = tmp_path / "dispatch.lock"
+    lock_path.write_text(contents, encoding="utf-8")
 
-    def test_lock_exit_with_corrupted_file(self, tmp_path: Path):
-        """锁文件损坏时的处理。"""
-        from agent_py_agent.agent.agent_core.orchestration.dispatch.lock import _DispatchWatchLock
+    with _DispatchWatchLock(lock_path) as lock:
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
 
-        lock_path = tmp_path / "dispatch.lock"
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        lock_path.write_text("not valid json{{{", encoding="utf-8")
+    assert payload["token"] == lock.token
 
-        lock = _DispatchWatchLock(lock_path)
-        lock.acquired = True
 
-        # 损坏的文件不应该导致崩溃
-        lock.__exit__(None, None, None)
+def test_metadata_corruption_does_not_control_release(tmp_path: Path) -> None:
+    lock_path = tmp_path / "dispatch.lock"
 
-    def test_lock_exit_when_file_deleted(self, tmp_path: Path):
-        """退出时锁文件已被删除的处理。"""
-        from agent_py_agent.agent.agent_core.orchestration.dispatch.lock import _DispatchWatchLock
+    with _DispatchWatchLock(lock_path):
+        lock_path.write_text("broken", encoding="utf-8")
 
-        lock_path = tmp_path / "dispatch.lock"
-        lock = _DispatchWatchLock(lock_path)
-        lock.acquired = True
+    with _DispatchWatchLock(lock_path) as replacement:
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
 
-        # 锁文件不存在时退出不应该崩溃
-        lock.__exit__(None, None, None)
+    assert payload["token"] == replacement.token
+
+
+def test_exit_without_acquire_is_noop(tmp_path: Path) -> None:
+    lock = _DispatchWatchLock(tmp_path / "dispatch.lock")
+
+    lock.__exit__(None, None, None)
+
+    assert lock.acquired is False

@@ -114,15 +114,31 @@ def _build_root_parser() -> argparse.ArgumentParser:
     return parser
 
 
-# LLM: This pre-parser only recognizes explicit built-in route structure. It must not inspect or
-# infer natural-language prompt content, and unknown commands must fall through to the full parser.
-# 函数用途: 在不加载完整命令体系的前提下识别 chat/resume，决定是否采用快速启动路径。
+# LLM: This pre-parser only recognizes the default fresh-chat route or explicit built-in
+# chat/resume structure. A bare invocation is the same fresh-session contract as `chat`; unknown
+# commands still fall through to the full parser without inspecting natural-language content.
+# 函数用途: 识别“直接运行 my-agent”以及显式 chat/resume，让普通 TUI 启动不加载全部管理命令。
 def _interactive_command(argv: Sequence[str]) -> str:
     bootstrap = argparse.ArgumentParser(add_help=False)
     bootstrap.add_argument("--config")
     bootstrap.add_argument("--plain", action="store_true")
     _, remaining = bootstrap.parse_known_args(list(argv))
-    return remaining[0] if remaining and remaining[0] in {"chat", "resume"} else ""
+    if not remaining:
+        return "chat"
+    return remaining[0] if remaining[0] in {"chat", "resume"} else ""
+
+
+# LLM: The interactive parser requires an explicit subcommand. Inject `chat` only when the
+# pre-parser proved that no command remains after root options; never rewrite an unknown route.
+# 函数用途: 给裸启动补上内部 chat 子命令，同时保留 --config/--plain 等顶层参数的位置和含义。
+def _interactive_argv(argv: Sequence[str], command: str) -> list[str]:
+    bootstrap = argparse.ArgumentParser(add_help=False)
+    bootstrap.add_argument("--config")
+    bootstrap.add_argument("--plain", action="store_true")
+    _, remaining = bootstrap.parse_known_args(list(argv))
+    if remaining or command != "chat":
+        return list(argv)
+    return [*argv, "chat"]
 
 
 # LLM: Dispatch interactive commands before extension/config bootstrap; all other routes preserve
@@ -131,9 +147,10 @@ def _interactive_command(argv: Sequence[str]) -> str:
 def main(argv: Sequence[str] | None = None) -> int:
     configure_stdio()
     effective_argv = list(sys.argv[1:] if argv is None else argv)
-    if _interactive_command(effective_argv):
+    interactive_command = _interactive_command(effective_argv)
+    if interactive_command:
         parser = build_interactive_parser()
-        args = parser.parse_args(effective_argv)
+        args = parser.parse_args(_interactive_argv(effective_argv, interactive_command))
         args.app_scrollback = not bool(getattr(args, "plain", False))
         return args.func(args)
 

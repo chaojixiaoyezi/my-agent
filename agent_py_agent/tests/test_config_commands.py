@@ -286,14 +286,13 @@ memory_rule_receipt_enabled: true
         config_file.write_text("""
 gateway_stop_timeout: 30
 gateway_request_timeout: 300
-auto_detect_work_on_startup: true
 """, encoding="utf-8")
 
         config = load_config(str(config_file))
 
         assert hasattr(config, "gateway_stop_timeout")
         assert hasattr(config, "gateway_request_timeout")
-        assert hasattr(config, "auto_detect_work_on_startup")
+        assert not hasattr(config, "auto_detect_work_on_startup")
 
 
 class TestConfigOverride:

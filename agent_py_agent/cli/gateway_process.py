@@ -49,6 +49,7 @@ from ..agent.gateway_parts.http_service import (
     start_http_server,
 )
 from ..agent.gateway_parts.io import read_json_file, read_json_file_report, write_json_file_atomic
+from ..agent.runtime_errors import runtime_error_report
 from .common import ROOT, make_agent
 from .gateway_loops import (
     _gateway_background_main_loop,
@@ -231,6 +232,28 @@ def _wait_for_gateway_start_ready(paths: GatewayPaths, process, *, timeout: floa
     return _gateway_ready_for_pid(paths, int(process.pid))
 
 
+# LLM: Ordinary CLI attempts are reconciled by the long-lived Gateway before workers start. This
+# preserves the process-death proof in RuntimeRepository while keeping status and TUI startup pure.
+# 函数用途: Gateway 启动时收敛已证实宿主死亡的普通 run attempt，返回结构化数量和错误。
+def _recover_gateway_stale_attempts(agent: object) -> dict[str, object]:
+    repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+    recover = getattr(repo, "recover_stale_attempts", None)
+    if not callable(recover):
+        return {"run_ids": [], "count": 0, "error": None}
+    try:
+        run_ids = [str(item) for item in (recover() or []) if str(item)]
+    except Exception as exc:  # noqa: BLE001 Gateway 仍需启动并暴露结构化恢复错误
+        return {
+            "run_ids": [],
+            "count": 0,
+            "error": runtime_error_report(exc, context="gateway.startup.stale_attempts"),
+        }
+    return {"run_ids": run_ids, "count": len(run_ids), "error": None}
+
+
+# LLM: Gateway setup is the single startup mutation boundary: recover durable queue claims and
+# stale runtime attempts, publish facts, then let controller threads own subsequent reconciliation.
+# 函数用途: 创建 Gateway 运行目录、调和上次崩溃遗留并写入本次 starting 状态。
 def _cmd_gateway_run_setup(agent, paths):
     for path in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
         path.mkdir(parents=True, exist_ok=True)
@@ -242,6 +265,7 @@ def _cmd_gateway_run_setup(agent, paths):
         agent=agent,
     )
     requeued = recovery["requeued"]
+    attempt_recovery = _recover_gateway_stale_attempts(agent)
     pid = os.getpid()
     write_pid_record(paths.pid)
     write_json_file(
@@ -253,9 +277,17 @@ def _cmd_gateway_run_setup(agent, paths):
             "subagent_workspace": str(agent.subagents.workspace),
             "requeued_requests": requeued,
             "failed_processing_requests": recovery["failed"],
+            "recovered_stale_attempts": attempt_recovery["count"],
+            "stale_attempt_recovery_error": attempt_recovery["error"],
             "started_at": time.time(),
         },
     )
+    if attempt_recovery["count"] or attempt_recovery["error"]:
+        log_gateway_event(
+            agent,
+            "gateway_stale_attempts_reconciled",
+            attempt_recovery,
+        )
     print(f"[gateway-run] status=starting pid={pid}", flush=True)
     log_gateway_event(
         agent,
@@ -267,6 +299,8 @@ def _cmd_gateway_run_setup(agent, paths):
             "subagent_workspace": str(agent.subagents.workspace),
             "requeued_requests": requeued,
             "failed_processing_requests": recovery["failed"],
+            "recovered_stale_attempts": attempt_recovery["count"],
+            "stale_attempt_recovery_error": attempt_recovery["error"],
         },
     )
     return requeued, pid

@@ -320,7 +320,7 @@ class UserFieldsService:
 # ---------------------------------------------------------------------------
 
 _RUNTIME_BOOL_FIELDS = (
-    "auto_detect_work_on_startup", "auto_save_memory", "local_store_fts_enabled",
+    "auto_save_memory", "local_store_fts_enabled",
     "enable_subagents",
     "concurrency_lock_enabled", "audit_enabled", "watchdog_enabled",
 )

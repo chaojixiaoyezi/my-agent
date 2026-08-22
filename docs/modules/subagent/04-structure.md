@@ -77,6 +77,13 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   `task_workspace_dir`、内部 `work/output` 只负责状态、归档和显式命名空间。写入许可仍由
   `allowed_write_roots/forbidden_write_roots` 独立裁决，不允许用权限根反推 cwd。
 
+## 2026-08-22 Dispatcher 互斥权威
+
+- `agent_core/orchestration/dispatch/lock.py` 使用操作系统 advisory lock 持有唯一 watch 所有权；锁文件里的
+  JSON 只用于诊断，不参与“谁正在运行”的机器判定。持有进程退出时由内核释放，文件可以稳定留在原 inode。
+- 空文件、损坏 JSON 和旧 pid 都不能阻塞下一任 Gateway；反过来，`--force-lock` 也不能绕过内核去抢占
+  仍然存活的持有者。这样恢复并发仍由单 Gateway 控制，不从展示文案或遗留文件内容猜状态。
+
 ## 2026-07-27 共享工具历史窗口
 
 - 子代理没有独立的 live tool-context compactor。每次 provider 调用都与主代理共用

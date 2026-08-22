@@ -915,3 +915,10 @@ tasks/<日期>/<任务>/output，即用户拿走的东西），而非子代理�
 - 模型侧不再存在查树、等待、巡场或手动推进工具；`create_subagents` 自动启动，运行状态由宿主事件送到直属父级。`cancel_subagents` 经结构化父子关系授权后即可打断，自动重试资格不能否决父级的显式中止。
 - 新 child 不再附加全量 `sibling_roster`，旧任务恢复渲染时也过滤这类历史上下文。每一级只持有自己的目标、父级指令、显式引用和直属孩子状态，避免代理树扩大后上下文按平方增长。
 - child 的 `write_boundary.execution_cwd` 固定继承父级项目 cwd；隐藏 task/run 状态目录与显式 work/output 目录继续各守职责，Tool Registry 只从可信 `execution_cwd` 选择相对路径基准，读写围栏仍独立裁决权限。
+
+## 2026-08-22 Gateway 调度锁失效恢复
+
+- 内部 dispatcher/watch 的互斥权威已从“锁文件 JSON 里的旧 pid”改为操作系统持有的文件描述符锁；空文件、
+  半写 JSON 或进程崩溃留下的元数据不再永久挡住 Gateway 孤儿调和。
+- `--force-lock` 只保留命令兼容和诊断语义，不能抢占仍被活进程持有的内核锁。Gateway 继续是唯一自动恢复
+  执行者，TUI 和 `/status` 都不会因为看见旧任务而另启一套调度。

@@ -61,7 +61,7 @@ python -m agent_py_agent --help
 | 主代理基础 E2E | `my-agent real-e2e --workspace ./.e2e --json` | 否 | 否；真实模型用例会明确跳过，产物可用 `--artifact` 验收 |
 | 子代理单次执行 | `my-agent subagent-run <run_id> --execute` | 否 | 是 |
 
-当前 gateway 第一版已经实现为本地后台进程控制面：它管理 pid、state、heartbeat、stop request、日志和本地请求队列，并在内部复用 daemon/watch 调度。`my-agent` 不带子命令时会自动确保 gateway 存活，然后进入 `chat --gateway`。常驻形态和外部方案对比见 [GATEWAY_DESIGN.md](GATEWAY_DESIGN.md)。
+当前 gateway 第一版已经实现为本地后台进程控制面：它管理 pid、state、heartbeat、stop request、日志和本地请求队列，并在内部复用 daemon/watch 调度。`my-agent` 不带子命令时会走轻量新会话入口，自动确保 gateway 存活，然后进入 `chat --gateway`；它不会扫描整台机器的历史任务，也不会询问是否批量恢复。恢复旧会话必须显式使用 `my-agent resume <session_id>`。常驻形态和外部方案对比见 [GATEWAY_DESIGN.md](GATEWAY_DESIGN.md)。
 
 ## 聊天内控制命令
 
@@ -267,7 +267,7 @@ my-agent status --json
 - 遗留的 processing 请求数
 - 最近 3 个任务的 ID、目标、状态
 
-此功能由配置项 `auto_detect_work_on_startup` 控制，默认为 true。
+`status` 是用户显式执行的只读诊断，始终显示这份摘要，不修改任务、attempt 或队列状态。崩溃调和由单 Gateway 的启动恢复和后台 runner supervision 负责。
 
 ## `timeline`
 
@@ -896,7 +896,7 @@ my-agent gateway start
 my-agent chat --gateway
 ```
 
-默认 `my-agent chat` 会在当前前台进程里调用模型。`my-agent chat --gateway` 则只把普通消息投递给已经启动的后台 gateway，当前 chat 变成客户端。这样退出 chat 后，gateway 仍可继续常驻；后续 TUI/聊天工具也会走同一条通道。
+默认 `my-agent chat` 与裸命令 `my-agent` 都使用后台 gateway，当前 chat 只是客户端。只有开发调试时显式传 `--direct`，才在当前前台进程调用模型。这样退出 chat 后，gateway 仍可继续常驻；后续 TUI/聊天工具也会走同一条通道。
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -904,7 +904,8 @@ my-agent chat --gateway
 | `--prompt-file <path>` | - | 启动时加载额外 prompt 文件，可多次传入。 |
 | `--memory-limit <n>` | `5` | 交互中 `/memory` 默认显示条数。 |
 | `--no-save` | `false` | 只关闭本次运行归档与持久化 Compact；Gateway 模式的 ConversationStore/audit 仍照常记录，不会直接写正式长期记忆。 |
-| `--gateway` | `false` | 普通聊天消息投递给后台 gateway；如果 gateway 没启动，会提示先执行 `my-agent gateway start`。 |
+| `--gateway` | `true` | 普通聊天消息投递给后台 gateway。 |
+| `--direct` | `false` | 开发调试时绕过 gateway，在当前前台进程调用模型。 |
 | `--gateway-timeout <seconds>` | `gateway_request_timeout` | gateway 模式连续无请求租约或流式活动后停止等待的秒数；仍在工作的长任务会继续等待。 |
 | `--resume-context` | 配置值 | 本次 chat 会话临时启用恢复上下文注入。 |
 | `--no-resume-context` | 配置值 | 本次 chat 会话临时关闭恢复上下文注入。 |
@@ -1266,7 +1267,7 @@ my-agent subagents-dispatch --watch --planner --interval 30
 | `--advance` | `false` | watch 模式显式推进 dispatch；不传时只读观察代理树，避免后台观察误触发调度。 |
 | `--interval <seconds>` | `30.0` | watch 模式每轮间隔秒数；`0` 表示不等待，通常只用于测试或单轮验证。 |
 | `--max-cycles <n>` | `0` | watch 模式最多循环次数，`0` 表示持续运行。 |
-| `--force-lock` | `false` | 强制覆盖已有 watch lock；只应在确认旧进程已退出后使用。 |
+| `--force-lock` | `false` | 兼容旧命令；空/坏元数据会自然重写，但内核确认仍被持有的锁不能强抢。 |
 | `--reviewer <name>` | `parent-dispatch` | patch/acceptance 审核者标识。 |
 | `--note <text>` | - | 写入调度关联审核记录的备注。 |
 | `--instruction <text>` | - | 给本轮 runner 的额外指令。 |
@@ -1338,7 +1339,7 @@ my-agent daemon --max-cycles 1 --interval 0 --no-planner
 | `--max-runners <n|auto>` | `daemon_max_runners` | 每轮最多推进多少个 runner；`auto` 当前映射为保守值 1，未来 gateway 会自适应；`0` 表示不执行 runner。 |
 | `--limit <n>` | `daemon_limit` | 每个阶段最多处理多少条记录；`0` 表示不限制。 |
 | `--max-cycles <n>` | `daemon_max_cycles` | 最多循环次数，`0` 表示持续运行。 |
-| `--force-lock` | - | 强制覆盖已有 watch lock。 |
+| `--force-lock` | - | 兼容旧命令；不能抢占内核确认仍被持有的 watch lock。 |
 | `--reviewer <name>` | `daemon_reviewer` | patch/acceptance 审核者标识。 |
 | `--note <text>` | - | 写入调度关联审核记录的备注。 |
 | `--instruction <text>` | `daemon_runner_instruction` | 给 runner 的额外指令。 |
@@ -1544,13 +1545,13 @@ my-agent gateway result gwreq-1777442684-0b7ac8cb
 | 子命令 | 参数 | 说明 |
 | --- | --- | --- |
 | `start` | `--force` | 如果已有 gateway 在跑，先尝试停止再启动。 |
-| `start` | `--force-lock` | 传给内部 daemon，强制覆盖已有 dispatch watch lock。 |
+| `start` | `--force-lock` | 兼容传给 daemon；不会抢占真实活锁。 |
 | `stop` | `--timeout <seconds>` | 等待正常停止的秒数，默认使用 `gateway_stop_timeout`。 |
 | `stop` | `--kill` | 超时后强制终止进程。 |
 | `stop` | `--reason <text>` | 写入 stop request 的原因。 |
 | `restart` | `--timeout <seconds>` | 等待正常停止的秒数。 |
 | `restart` | `--force` | 停止超时后强制终止旧进程。 |
-| `restart` | `--force-lock` | 重启后传给内部 daemon。 |
+| `restart` | `--force-lock` | 重启后兼容传给 daemon；不会抢占真实活锁。 |
 | `logs` | `--lines <n>` | 显示最后多少行日志，`0` 表示全部。 |
 | `run` | `--workspace-root <path>` | 内部字段：`start` 把父进程当前工作区传给后台 gateway，普通用户不需要手填。 |
 | `ask` | `--inject <text>` | 给本次 gateway 请求动态注入 prompt，可多次传入。 |
@@ -1956,4 +1957,4 @@ my-agent config-get feishu_app_id               # 读取当前值(敏感字段�
 - `subagents-dispatch --planner` 在 gate 发现有待处理事项时会调用父代理 LLM。
 - `--start-runners` 必须和 `--apply` 一起使用。
 - `--watch` 是前台常驻，终端关闭或 `Ctrl+C` 后进程停止。
-- `--force-lock` 只用于确认旧 watch 进程异常退出后的残留 lock。
+- 旧 `--force-lock` 参数仅保留命令兼容；当前锁由内核描述符判活，空/坏文件不会形成残留锁，真实活锁不能强抢。

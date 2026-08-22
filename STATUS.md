@@ -1473,3 +1473,13 @@ my-agent scenario-test
 - 能把关键过程落盘、搜索、审计和观察。
 
 下一阶段应继续围绕“恢复、诊断、并发、外部接入”推进。
+
+## 2026-08-22 裸 TUI 启动与 Gateway 恢复候选
+
+- 裸 `my-agent` 已不再进入完整管理命令加载和全局任务扫描，内部补成轻量 `chat`，默认连接单 Gateway
+  并创建新 session；`resume <session_id>` 继续 fail-closed 精确恢复。
+- `status` 只读；普通 stale attempt recovery 已移到 Gateway 启动。失联子代理诊断只认 stale RUNNING
+  runner session，不再把共享 dispatch PID 已退出的 `BLOCKED/PENDING` 误报为崩溃。
+- `.7` 读现场确认旧 `subagent_orphan_supervision.lock` 是 0 字节，两天来每轮都被旧逻辑当活锁跳过；
+  当前实现改用内核 advisory lock，focused tests 通过，尚未在本段记录部署验收。
+- 本轮未跑全仓 pytest：生产与测试改动远低于 10,000 行，按项目约定只跑直接相关 focused tests。
