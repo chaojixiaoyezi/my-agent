@@ -4,10 +4,12 @@
 
 最近收口重点：
 
-- 2026-08-21 本地 TUI 候选已把单一后台计数扩展为 终端交互/模型助手 Code 式的固定子代理
+- 2026-08-21 `714c0c8` 已把单一后台计数扩展为 终端交互/模型助手 Code 式的固定子代理
   活动区：Gateway 从 active task link 与 canonical run 账本生成有界直属 child 投影，输入框附近原位
   显示名称、状态、当前动作、耗时和 attempts。它不进 transcript，不暴露 goal/工具输出/路径/权限，也不参与
-  完成、重试或验收。只读投影和 renderer 定向回归已通过；这里不代表已推送、部署或完成真机验收。
+  完成、重试或验收。代码已推送并部署 `.7` 单 Gateway；两个真实 child 分别在 46 秒、52 秒一次 attempt
+  `DONE`，活动区完整显示状态变化并在主代理自动汇总后收起。父级 wake 在旧进程卡 process-local lane、
+  优雅重启后立即恢复的尾项仍留在 ROADMAP，未冒充为全部生命周期验收通过。
 - 2026-08-21 当前本地切片按 `d928d77` 真机失败样本收口四处底层语义：普通相对交付路径继承当前可信
   cwd，显式 output/work 才进入 task 内部目录；child 共享阅读包不再跨任务缓存；只有根主代理与结构化
   coordinator 持有 create/guidance/cancel/resolve，普通 leaf 无下级管理工具；TUI 从 canonical active

@@ -21,6 +21,13 @@ PENDING 续跑；
 监听，不旁路补代码。当前 backend focused 144 项、context/protocol focused 75 项已通过。由于本轮累计
 增删超过 10,000 行，发布前追加一次且仅一次全仓 pytest；若发现失败，修复后只重跑失败项和相关 focused。
 
+`714c0c8` 的直属活动区真机 smoke 使用 `.7` 唯一 Gateway 和 `my-agent-panel-smoke` TUI，会话一次创建
+两个 child，分别在 46 秒、52 秒一次 attempt `DONE`，`a.txt=苹果`、`b.txt=月亮`。活动区从等待启动、
+模型响应、工具活动推进到 `0 进行中 · 2 完成`，测试者没有插话推动。第二条完成 wake 的持久文件、ready
+发现和 root active 状态都正常，但旧进程未取得 claim；优雅重启后同一 wake 立即运行并约 30 秒汇总。
+后续回归必须把“durable source ready，但 process-local lane 长时间 queued/running 且无有效推进”作为独立
+故障注入，证明不靠人工消息或 Gateway 重启也能有界自愈。
+
 本轮唯一一次有效全仓测试使用仓库 `.venv` 运行到 100%，暴露 39 个失败：真实缺陷是窄终端闭合思考行
 全角括号宽度漏算和 finalize 轻量参数缺少 `prompt` 时的防御读取，其余主要是测试仍断言已删除的
 `SUBAGENT_RESULT`、手动 dispatch/schedule 与机器验收。修复后，对这些失败来源收集到的 468 项 focused

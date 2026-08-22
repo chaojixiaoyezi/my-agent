@@ -10,6 +10,10 @@
   `status=active`，interrupted 可恢复索引不再造成假忙。
 - [x] Gateway/TUI 只读 active root 的 canonical 直属 child 状态；输入框附近固定显示名称、status、
   当前动作、耗时和 attempts，不进 transcript，不展开 grandchild/历史 root，不携带 goal、工具输出、路径或权限。
+- [x] `.7` 单 Gateway 真实 TUI 已观察两个 child 从等待启动推进到一次 attempt `DONE`，固定活动区展示
+  状态、动作和耗时，真实文件内容正确；测试者未向主代理或 child 发送推动消息。
+- [ ] durable child wake 已 ready 但 process-local thread lane 不推进时，Gateway 必须自行检测并有界恢复；
+  不能依赖用户发“继续”或人工重启。本轮已保留可复现事实，但自愈尚未实现。
 - [x] 本地/admin 主会话晋升为持久任务后，项目 `execution_cwd` 仍在真实 `allowed_write_roots` 中；
   不会出现前台能写、后台整合同路径被拒的权限分叉。远程 owner task wall、task-local child 和
   transient Audit 的既有窄授权回归保持通过。

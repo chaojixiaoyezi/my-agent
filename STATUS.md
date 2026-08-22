@@ -31,7 +31,7 @@
   `.7` 单 Gateway 部署和同一条植物大战僵尸 TUI 复验仍待本轮完成。本切片远低于 10,000 行，不运行全仓
   pytest。
 
-## 2026-08-21 子代理自然收口、递归控制面与 TUI 可观察性（当前收口切片本地严格 gate 通过）
+## 2026-08-21 子代理自然收口、递归控制面与 TUI 可观察性（直属活动区已部署并完成真机 smoke）
 
 - `d928d77` 已部署 `.7` 单 Gateway 并完成原样 TUI 轮：4 个 child 都是一次 attempt、自主 `DONE`，最后
   child 会经直属 lifecycle event 自动唤醒主代理；受管服务监听 `0.0.0.0:8080`，loopback/LAN HTTP 均
@@ -53,6 +53,14 @@
   attempts。TUI 现在把这些行固定放在 composer 附近，不进可滚动 transcript；默认不展开孙代理，也不
   泄露 goal、工具输出、路径或权限。只读面已落地，用户对任意后代的 message/interrupt/resume/
   cancel 共享控制协议只完成设计，未冒充为已实现。
+- `714c0c8` 已推送并部署到 `192.0.2.7:/root/my-agent`，测试机保持一个真实 Gateway，配置仍为
+  `anthropic_compatible + MiniMax-M2.7`。真实 TUI 一次普通中文要求两个 child 分别写 `a.txt`/`b.txt`：
+  两个 child 均一次 attempt，在 46 秒和 52 秒自然 `DONE`；固定活动区依次显示等待启动、模型响应、
+  工具活动和 `0 进行中 · 2 完成`，两份 UTF-8 文件内容正确。测试者没有给主代理或 child 发“继续”。
+- 该 smoke 同时保留一个未闭环底座样本：第二条 child 完成 wake 已持久落盘且 ready，但旧 Gateway
+  进程十余分钟未领取；一次优雅重启后，同一条 wake 立即取得 background claim，约 30 秒完成模型汇总并
+  自动写回 TUI。由此能排除“child 挂掉”和“durable wake 丢失”，范围已收窄到旧进程的 process-local
+  thread lane/in-flight 占位；在补齐 lane 级 queued/running age 与自愈前，不能把父级自动收口标成完全通过。
 
 - `bea6fed` 的最新真机样本已把“子代理都 DONE 但整单仍慢”定位到两条宿主断链：task-local 父级创建
   孙代理后虽为 `PENDING`，却会被孤儿恢复器立即重新采样；根会话又会逐条消费后代成功事件。该轮虽然

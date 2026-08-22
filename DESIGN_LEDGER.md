@@ -303,7 +303,7 @@
 
 以后新增长期设计，只写摘要和链接，不再把完整方案塞回这个文件。
 
-## 2026-08-21 子代理递归控制面与自然收口【状态：主链已真机验证，新收口切片待 `.7` 复验】
+## 2026-08-21 子代理递归控制面与自然收口【状态：直属活动区已真机验证，lane 自愈待补】
 
 - 问题根因：历史实现同时暴露“创建—调度—推进”多个模型工具，并用
   `acceptance_checks` / `verification_status` / 交付扫描器二次裁决任务是否完成。这使模型
@@ -437,6 +437,12 @@
   `owner/thread/root/target_run_id`、预期版本/状态与 accepted/rejected/unknown 回执；前端不直改
   canonical 账本。当前 `cancel_subagents` 是终态取消，不得冒充 会话运行时 式可恢复 interrupt。本轮只落地只读
   活动投影，写控制协议仍为待实现设计。
+- `714c0c8` 在 `.7` 单 Gateway 的真实 TUI 已验证直属活动投影：两个 child 一次 attempt 自然完成，
+  固定区域按 canonical state 展示启动、模型、工具和终态，不需要模型巡场。该轮同时证明 durable wake
+  与 process-local lane 是两层事实：第二条 DONE wake 已落盘并被 read-only ready 发现，旧进程却没有
+  取得 claim；优雅重启后立即取得 claim 并完成汇总。后续自愈只能基于稳定 lane identity、future
+  queued/running age、durable claim/heartbeat 和 operation receipt，不得把自然语言“卡住了”当触发器，
+  也不得用自动重复模型调用掩盖丢失的进程内占位。
 
 ## 2026-08-18 候选消息实时流式 + 每轮阶段计时【状态：本地 focused 通过，待真机部署复验】
 

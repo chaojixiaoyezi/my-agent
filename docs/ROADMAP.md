@@ -21,7 +21,7 @@
 
 ### TUI 活动状态、跟随滚动与 Compact 真机复验
 
-状态：上一主链已部署，当前收口切片本地严格门禁通过，待推送、部署和真实 TUI 复验
+状态：直属 child 活动区已部署并完成真实 TUI smoke；其余交互矩阵和 process-local lane 自愈待验证
 
 解决问题：旧 TUI 在长任务运行时把普通 Enter 当成下一轮队列，用户补充消息要等当前任务结束才执行；
 queue preview 又位于可滚动 transcript，离开尾部后看不见。并行实验室若完成后长期空闲，也会浪费四路
@@ -74,8 +74,11 @@ Working 块，并按 `can_spawn_children` 裁剪 leaf/coordinator 工具面。
 canonical subagent run 生成有界直属 child 快照，TUI 在输入框附近固定显示每个 child 的
 名称、状态、当前动作、耗时和 attempts。该区域不进 transcript，不影响用户上翻，也不作完成或重试权威。
 
-当前新切片 188 项 focused 与远端提交前严格 gate 已通过，按用户约定未重跑全仓 pytest。待做：提交推送并部署 `.7`；
-由全新真实 TUI 验证 child 完成后父会话不受其它 TUI 长回合阻塞，再继续验证 Working 动画、thinking 连续增量、页底自动跟随、
+`714c0c8` 已推送并部署 `.7`，本地 117 项 focused、远端 11 项投影/渲染 focused 与提交前严格 gate
+均通过，按用户约定未重跑全仓 pytest。真实 TUI 已证明两个 child 一次 attempt 自然完成，固定活动区能
+逐步显示状态、动作、耗时并在根任务收口后移除。该轮也抓到旧 Gateway 进程保留 process-local thread
+lane 占位的样本：durable wake 与 ready 事实均正常，但重启前未领取，优雅重启后立即领取并约 30 秒自动汇总。
+待做：补齐 lane queued/running age 诊断与有界自愈，再验证 child 完成后父会话无需重启且不受其它 TUI 长回合阻塞；继续验证 Working 动画、thinking 连续增量、页底自动跟随、
 离底不抢滚动、Compact 百分比、后续消息可见、右键复制和输入框粘贴。外层系统剪贴板仍须用户在已 attach
 的本机终端亲自粘贴确认，自动化不能冒充这一步通过；同一普通中文游戏 prompt 还要证明 child 自动
 完成后父级无需用户发“继续”，能读到产物、整合到 `/root/abc` 并实际监听 `0.0.0.0:8080`。
@@ -86,7 +89,7 @@ key/config/runtime 数据，不触碰其它项目。较早大切片已按约定�
 
 ### 用户直控子代理的共享控制面
 
-状态：设计中，只读状态投影已部分落地
+状态：设计中，直属 child 只读状态投影已部署并完成真机 smoke
 
 解决问题：当前用户只能给主代理插话或停整个任务，无法定位一个正在跑的 child；现有
 `cancel_subagents` 又是终态取消，不是“打断当前一轮后仍能继续”。如果 TUI 和未来 Web 各自直改账本，会导致状态、
