@@ -474,10 +474,28 @@ direct-child 行；只选当前 thread 活跃 root 的直属 child，不展开 g
 状态、职责短标题、耗时、当前模型可见上下文 token、Compact 和真实重试。短标题按剩余终端列截断，
 不得回退“模型响应中/模型已生成回复”或累计计费 token。相同快照不重复追加，数值变化原位更新，root
 归零整体删除；HTTP/解析失败不把上次真实活动误清零。
+main 的后台 context 也必须来自同一次 `model_visible_context_usage.v1` provider preflight；每轮模型调用时
+实时更新，不能永远停在首次 8.7k。Todo 必须从当前 active task 的 canonical `task_progress.v1`
+投影；后台更新原位替换，active link 关闭前后的最终 notice 还要携带最后一份 `id/title/status` 快照，
+确保模型最终回复出现时已完成项仍打勾。以上两类字段只用于显示，不得成为结束、恢复或验收事实源。
 Todo 与 child panel 必须按结构化身份去重：`item.id` 精确等于当前直属 `child.run_id` 的自动 seed 项只在
 TUI 隐藏，canonical task_progress 账本不删除；普通 Todo 和显式 `covers/progress_item_ids` 仍显示并打标。
 禁止匹配“子代理”标题或 goal 文本来决定隐藏。
 父级共享上下文还必须证明当前轮无 read archive 时不会复用 agent 上一次任务的缓存内容。
+同一 exact parent 分多批创建默认命名 child 时，第二批编号必须从既有最高序号继续，不能重新出现
+`worker-1/worker-2`；显式 run id 仍是身份权威。用户明确“主代理只能协调/不准自己写”时，真实 TUI
+必须证明容量满、创建参数失败和 child 完成均不会让 main 自行编写被禁止的功能代码；main 只能按用户
+允许范围协调、读取、整合和测试。这项只检验用户指令优先级，产品代码禁止按具体游戏名或 prompt 关键词
+硬编码机器裁决。
+
+2026-08-22 的正式 Prompt 2 基线证据：机器 `192.0.2.7`、tmux
+`dsh-p2-mario-993ce4f`、cwd `/root/dsh-tui-p2-993ce4f`、模型 `MiniMax-M2.7`，只发送了本文件原样
+Prompt 2。首次 ask、后台 main、6 个 child 和全部命令 working_dir 均保持该 cwd；child 职责行分别为
+“玩家控制/物理引擎/敌人AI/道具系统/关卡设计/游戏HTML”，6 个 child 一次 attempt DONE，`bbb/`
+产物齐全，`0.0.0.0:8082` HTTP 200。该轮同时固定了四个待复测失败样本：main context 停在 8.7k、
+canonical Todo 5/5 而 TUI 未更新、第二批 child 名称重号、main 在纯委派失败后自行补写功能代码。
+候选部署后的复测仍必须用同一原样 Prompt 2、新 cwd、新 tmux、唯一 Gateway；测试者不得追加“继续”、
+技术提示或旁路修复。
 
 本切片 focused 命令：
 

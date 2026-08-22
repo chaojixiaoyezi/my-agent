@@ -20,12 +20,15 @@
 - audit owner 与执行 cwd 现为两个显式输入。薄 TUI 即使没有本地 audit Agent，也始终从当前 client config
   提交绝对 cwd/roots；Gateway 仍负责校验并持久化 thread v6。focused 回归直接读取真实 inbox JSON，证明
   第一个请求已带正确 workspace，不靠后续 turn 或 prompt 补救。
-- activity endpoint 同批升到 `conversation_agent_activity.v3`。child 的 `context_tokens` 是 exact run 每次
+- activity endpoint 同批升到 `conversation_agent_activity.v4`。child 的 `context_tokens` 是 exact run 每次
   provider preflight 的当前总上下文，`description` 是创建时职责短标题；TUI 只在一行内按剩余宽度截断，
-  不再把 runner 的“模型响应中/模型已生成回复”显示成子代理职责。
-- 正式提示词 2 的首屏确认职责行生效，同时暴露 Todo 仍重复显示自动 seed 的完整 child goal。当前 renderer
-  用 exact `item.id == child.run_id` 去重；只隐藏视图，不删除账本、不解析标题，也不影响普通 Todo 与
-  `progress_item_ids` 的完成标记。部署后的同一正式 TUI 画面仍需复验。
+  不再把 runner 的“模型响应中/模型已生成回复”显示成子代理职责。main 同时透传同一 provider preflight
+  的数字 context usage，不再停在启动时的 8.7k 快照。
+- 正式提示词 2 的首轮确认职责行生效，同时暴露 Todo 仍重复显示自动 seed 的完整 child goal、后台更新
+  未进入 TUI、最终 canonical 5/5 已完成但画面仍停在初始状态。当前 renderer 用 exact
+  `item.id == child.run_id` 去重；activity v4 从当前 active task 的 canonical `task_progress.v1` 持续刷新
+  普通 Todo，最终 assistant notice 再携带终态快照。只改展示，不删除账本、不解析标题，也不影响
+  `progress_item_ids` 的完成标记。
 
 ## 2026-08-21 TUI 后台任务停止定位
 

@@ -8,16 +8,19 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 
 ## 2026-08-22 TUI/Web 共用活动投影
 
-- `conversation_agent_activity.v3` 是 owner/thread 认证后的只读展示 schema：main 只含 task id、phase、
-  activity 和时间；直属 child 只含 run lineage、名称/角色、typed status、职责短标题、attempt、当前上下文
-  token、Compact 和时间；child 另携带派工时显式声明的有界 `progress_item_ids`，仅用于 Todo 展示关联。
-  提示词、回复、工具活动/输出、路径、权限和 secret 均不进入该 schema。
+- `conversation_agent_activity.v4` 是 owner/thread 认证后的只读展示 schema：main 只含 task id、phase、
+  activity、时间和数字 context usage；直属 child 只含 run lineage、名称/角色、typed status、职责短标题、
+  attempt、当前上下文 token、Compact 和时间；child 另携带派工时显式声明的有界 `progress_item_ids`，仅用于
+  Todo 展示关联。当前 active task 的 Todo 只含 canonical `id/title/status`。提示词、回复、工具
+  活动/输出、路径、权限和 secret 均不进入该 schema。
 - 当前上下文 token 来自统一 provider preflight 的 `model_visible_context_usage.v1.current_tokens`，在每次
   真实 child 模型调用前写入 exact run 的有界数字快照；不是累计账单 token。Compact 继续只读 exact run
   的 apply ledger。控制面、TUI 和后续 Web 不得各算一套，缺失/损坏事实按空展示处理且不改变 run 状态。
 - `SubAgentTask.description` 是创建时保存的非权威职责短标题。`create_subagents` 顶层和 `items[]` 均可带
   description，递归层级使用同一字段；省略时展示层可退回有界 goal，但任何运行、权限、恢复和结束逻辑
   都不得读取 description 或 goal 做机器判断。
+- 系统生成的 sibling display name 在同一 exact parent 的全部历史批次中连续编号；后批不能重新出现
+  `worker-1/worker-2`。该编号只用于稳定展示与未来精确控制，不替代 canonical run id。
 - main `Working`、fixed Todo 和 fixed child panel 都是同一 reducer snapshot 的派生 view。
   main 位于正文末尾，Todo 位于输入框上，child panel 位于输入框下。Todo 的 exact
   `run_id/progress_item_ids` 标记、单行职责截断、首次 attempt 隐藏和重试文案都属于展示规则，

@@ -16,7 +16,7 @@ from ..concurrency.interrupt import register_interruptible
 from ..runtime_errors import compact_error_message
 from ..settings.runtime_guard_config import runtime_guard_int
 from ..subagents.role_templates import active_model_subagent_tools
-from .agent_activity import BackgroundMainActivitySink
+from .agent_activity import BackgroundMainActivitySink, task_progress_items_for_task
 from .authority import (
     CONVERSATION_BACKGROUND_EVENT_REASON_ATTR,
     CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR,
@@ -3300,7 +3300,12 @@ def _skip_pending_wake_signal(
 # LLM: This projection records only user-deliverable background owner replies.
 # It carries the exact projected content but never becomes delivery or completion authority.
 # 函数用途: 把后台主代理已提交给用户边界的回复写成 TUI 可消费的普通助手消息事件。
-def _record_background_notice(store: object, report: BackgroundMainAgentReport) -> None:
+def _record_background_notice(
+    store: object,
+    report: BackgroundMainAgentReport,
+    *,
+    agent: object | None = None,
+) -> None:
     """后台主代理轮完成 → 写一条 notices 记录（TUI 后台完成监视用）。"""
     import json as _json
 
@@ -3310,6 +3315,11 @@ def _record_background_notice(store: object, report: BackgroundMainAgentReport) 
     if not root or delivery_status not in {"sent", "not_applicable"} or not content:
         return
     try:
+        progress_items = task_progress_items_for_task(
+            agent,
+            store,
+            str(getattr(report, "task_id", "") or ""),
+        ) if agent is not None else ()
         notices_dir = Path(root) / "notices"
         notices_dir.mkdir(parents=True, exist_ok=True)
         line = _json.dumps(
@@ -3322,6 +3332,7 @@ def _record_background_notice(store: object, report: BackgroundMainAgentReport) 
                 "summary": content[:500],
                 "created_at": report.created_at,
                 "delivery_status": delivery_status,
+                "task_progress_items": [dict(item) for item in progress_items],
             },
             ensure_ascii=False,
         )
@@ -3360,7 +3371,11 @@ def _consume_wake_signal_batch(
     # notices 记录（conversations/notices/{thread_id}.notices.jsonl），TUI
     # 监视线程据此把"后台已自动汇总"显示到屏幕（真机实测：后台轮在跑但
     # TUI 无事件驱动不刷新，用户看不到子代理完成后的自动汇总）。
-    _record_background_notice(scheduler.store, report)
+    _record_background_notice(
+        scheduler.store,
+        report,
+        agent=scheduler.runtime.agent,
+    )
     if _is_scheduler_wake_signal(signal):
         return
     reported.add(report.thread_id)

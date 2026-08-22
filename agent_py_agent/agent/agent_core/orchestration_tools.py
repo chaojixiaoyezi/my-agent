@@ -8,6 +8,7 @@ from __future__ import annotations
 """
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -610,12 +611,51 @@ def _validate_items(
 
 
 def _indexed_item_run_params(agent: SimpleAgent, items: list[CreateSubagentItem]) -> list[CreateRunParams]:
+    prepared = [
+        create_run_params(
+            agent,
+            item.params,
+            item.goal,
+            subagent_allowed_tools(item.params),
+        )
+        for item in items
+    ]
+    start_index = _next_system_lineage_index(agent, prepared)
     run_params_by_item: list[CreateRunParams] = []
-    for index, item in enumerate(items, start=1):
-        run_params = create_run_params(agent, item.params, item.goal, subagent_allowed_tools(item.params))
+    for offset, run_params in enumerate(prepared):
+        index = start_index + offset
         indexed = _indexed_item_params(run_params, index=index, total=len(items))
         run_params_by_item.append(_with_default_child_output_ref(agent, indexed, index=index))
     return run_params_by_item
+
+
+# LLM: Generated display names are stable sibling identities for TUI/Web control.
+# The ordinal is scoped to the exact parent and generated root-lineage prefix and
+# includes terminal history so a
+# later batch cannot reuse an earlier child's name.
+# 函数用途: 为同一父代理后续批次找到尚未使用的下一个系统编号。
+def _next_system_lineage_index(
+    agent: SimpleAgent,
+    prepared: list[CreateRunParams],
+) -> int:
+    if not prepared:
+        return 1
+    parent_id = str(prepared[0].parent_id or "").strip()
+    pattern = re.compile(
+        rf"^agent-d{_DEFAULT_DEPTH}-.+-(?P<index>[1-9][0-9]*)$"
+    )
+    try:
+        existing = list(agent.subagents.list_runs())
+    except (AttributeError, OSError, TypeError, ValueError):
+        return 1
+    highest = 0
+    for task in existing:
+        if str(getattr(task, "parent_id", "") or "").strip() != parent_id:
+            continue
+        match = pattern.fullmatch(str(getattr(task, "agent_name", "") or "").strip())
+        if match:
+            highest = max(highest, int(match.group("index")))
+    return highest + 1
 
 
 def _items_payload_request(request_params: dict[str, object], items: list[CreateSubagentItem]) -> dict[str, object]:

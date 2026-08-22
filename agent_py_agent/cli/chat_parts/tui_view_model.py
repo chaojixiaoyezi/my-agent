@@ -266,6 +266,7 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             "background_activity_started": self._handle_background_activity_started,
             "background_activity_updated": self._handle_background_activity_updated,
             "background_activity_completed": self._handle_background_activity_completed,
+            "task_progress_snapshot": self._handle_task_progress_snapshot,
             "user_message": self._handle_user_message,
             "system_message": self._handle_system_message,
             "interrupt_notice": self._handle_system_message,
@@ -399,6 +400,8 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             role="background",
             phase="started",
         )
+        self.status = _status_with_update(self.status, event)
+        self._consume_task_progress_items(event)
 
     # LLM: Count updates may change only the existing projection; they cannot
     # synthesize activity after a missed start event.
@@ -414,6 +417,8 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             updated_seq=event.seq,
             metadata={**block.metadata, **_public_metadata(event.payload)},
         )
+        self.status = _status_with_update(self.status, event)
+        self._consume_task_progress_items(event)
 
     # LLM: A zero canonical count removes the projection without freezing a
     # fake chat message; completion reporting remains the notice channel's job.
@@ -421,6 +426,12 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
     def _handle_background_activity_completed(self, event: TuiEvent) -> None:
         if self.active_blocks.pop(event.block_id, None) is None:
             self.record_diagnostic("BACKGROUND_ACTIVITY_COMPLETE_WITHOUT_START", event)
+
+    # LLM: A final canonical Todo snapshot may arrive after Working was removed.
+    # It updates only the existing display ledger and cannot reopen a task or turn.
+    # 函数用途: 用后台最终消息携带的结构化进度刷新清单勾选状态。
+    def _handle_task_progress_snapshot(self, event: TuiEvent) -> None:
+        self._consume_task_progress_items(event)
 
     # LLM: 用户消息始终直接进入稳定历史，不能留在 active 后被模型终态覆盖。
     # 函数用途: 追加一个用户输入块。

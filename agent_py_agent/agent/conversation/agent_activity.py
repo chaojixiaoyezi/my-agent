@@ -13,20 +13,34 @@ the display cache into another lifecycle authority.
 
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ..subagents.services.control_plane_projection import (
     runtime_compact_count,
     runtime_context_token_count,
 )
+from ..task_progress import read_task_progress_report
 from .models import THREAD_TASK_LINK_ACTIVE_STATUS
 
-_SCHEMA_VERSION = "conversation_agent_activity.v3"
+_SCHEMA_VERSION = "conversation_agent_activity.v4"
 _MAX_PROJECTED_SUBAGENTS = 64
+_MAX_PROJECTED_PROGRESS_ITEMS = 128
 _ACTIVITY_TEXT_LIMIT = 240
+_CONTEXT_USAGE_SCHEMA = "model_visible_context_usage.v1"
+_CONTEXT_USAGE_TOKEN_FIELDS = (
+    "context_window_tokens",
+    "compact_trigger_tokens",
+    "current_tokens",
+    "prompt_tokens",
+    "messages_tokens",
+    "runtime_guidance_tokens",
+    "tool_schema_tokens",
+)
 _MAIN_ACTIVITY_STATE_ATTR = "_conversation_main_activity_projection"
 _MAIN_ACTIVITY_LOCK_ATTR = "_conversation_main_activity_projection_lock"
 _MAIN_ACTIVITY_SETUP_LOCK = threading.Lock()
@@ -65,6 +79,29 @@ class BackgroundMainActivitySink:
         del duration_seconds
         activity = _bounded_text(text, limit=_ACTIVITY_TEXT_LIMIT)
         self._publish("thinking", activity or "思考中")
+
+    # LLM: Context usage is the same frozen numeric provider-preflight snapshot
+    # used by foreground turns. It is display-only and must preserve the current
+    # activity phase instead of creating a second context authority.
+    # 函数用途: 保存后台 main 最近一次模型调用前的实时上下文总量，供 TUI 状态条刷新。
+    def write_context_usage(self, usage: dict[str, object]) -> bool:
+        public = _public_context_usage(usage)
+        if not self.thread_id or not public:
+            return False
+        lock = _main_activity_lock(self.agent)
+        with lock:
+            rows = _main_activity_rows(self.agent)
+            current = dict(rows.get(self.thread_id, {}))
+            current.update(
+                {
+                    "task_id": self.task_id,
+                    "started_at": current.get("started_at") or self.started_at,
+                    "updated_at": time.time(),
+                    "context_usage": public,
+                }
+            )
+            rows[self.thread_id] = current
+        return True
 
     # LLM: Tool activity reads only typed progress fields. Output, command text,
     # paths and errors are intentionally excluded from this compact public row.
@@ -120,13 +157,17 @@ class BackgroundMainActivitySink:
         lock = _main_activity_lock(self.agent)
         with lock:
             rows = _main_activity_rows(self.agent)
-            rows[self.thread_id] = {
+            current = dict(rows.get(self.thread_id, {}))
+            row = {
                 "task_id": self.task_id,
                 "phase": str(phase or "running"),
                 "activity": _bounded_text(activity, limit=_ACTIVITY_TEXT_LIMIT),
                 "started_at": self.started_at,
                 "updated_at": time.time(),
             }
+            if usage := _public_context_usage(current.get("context_usage")):
+                row["context_usage"] = usage
+            rows[self.thread_id] = row
 
 
 # LLM: The lock is stored on the shared Gateway agent so all scheduler threads
@@ -169,13 +210,16 @@ def background_main_activity(
     task_id = str(row.get("task_id") or "").strip()
     if not row or (task_id and active_task_ids and task_id not in active_task_ids):
         return {}
-    return {
+    public = {
         "task_id": task_id,
         "phase": _bounded_text(row.get("phase"), limit=40),
         "activity": _bounded_text(row.get("activity"), limit=_ACTIVITY_TEXT_LIMIT),
         "started_at": max(0.0, _safe_float(row.get("started_at"))),
         "updated_at": max(0.0, _safe_float(row.get("updated_at"))),
     }
+    if usage := _public_context_usage(row.get("context_usage")):
+        public["context_usage"] = usage
+    return public
 
 
 # LLM: ConversationAgentActivity is an immutable, display-only projection. Lifecycle
@@ -186,9 +230,11 @@ class ConversationAgentActivity:
     active_task_count: int = 0
     main_activity: dict[str, object] | None = None
     subagents: tuple[dict[str, object], ...] = ()
+    task_progress_items: tuple[dict[str, object], ...] = ()
     hidden_subagent_count: int = 0
     active_task_projection_ok: bool = True
     subagent_projection_ok: bool = True
+    task_progress_projection_ok: bool = True
     warnings: tuple[str, ...] = ()
 
     # LLM: JSON output contains only bounded public fields; canonical task/run
@@ -200,9 +246,11 @@ class ConversationAgentActivity:
             "active_task_count": max(0, int(self.active_task_count or 0)),
             "main_activity": dict(self.main_activity or {}),
             "subagents": [dict(row) for row in self.subagents],
+            "task_progress_items": [dict(row) for row in self.task_progress_items],
             "hidden_subagent_count": max(0, int(self.hidden_subagent_count or 0)),
             "active_task_projection_ok": bool(self.active_task_projection_ok),
             "subagent_projection_ok": bool(self.subagent_projection_ok),
+            "task_progress_projection_ok": bool(self.task_progress_projection_ok),
             "subagent_projection_warnings": list(self.warnings),
         }
 
@@ -216,7 +264,10 @@ def conversation_agent_activity(
     store: object,
     thread_id: str,
 ) -> ConversationAgentActivity:
-    active_task_ids, link_warnings = _active_task_ids(store, thread_id)
+    active_links, link_warnings = _active_task_links(store, thread_id)
+    active_task_ids = [
+        str(getattr(link, "task_id", "") or "").strip() for link in active_links
+    ]
     if not active_task_ids:
         return ConversationAgentActivity(
             active_task_count=0,
@@ -225,35 +276,124 @@ def conversation_agent_activity(
         )
 
     rows, run_warnings = _direct_subagent_rows(agent, set(active_task_ids))
+    progress_items, progress_warnings = _task_progress_items_from_links(agent, active_links)
     visible = rows[:_MAX_PROJECTED_SUBAGENTS]
     return ConversationAgentActivity(
         active_task_count=len(active_task_ids),
         main_activity=background_main_activity(agent, thread_id, set(active_task_ids)),
         subagents=tuple(visible),
+        task_progress_items=progress_items,
         hidden_subagent_count=max(0, len(rows) - len(visible)),
         active_task_projection_ok=not link_warnings,
         subagent_projection_ok=not run_warnings,
-        warnings=tuple(dict.fromkeys((*link_warnings, *run_warnings))),
+        task_progress_projection_ok=not progress_warnings,
+        warnings=tuple(
+            dict.fromkeys((*link_warnings, *run_warnings, *progress_warnings))
+        ),
     )
 
 
-# LLM: active_task_ids is only a resumability index; count and roots must be
-# filtered through each authoritative ThreadTaskLink status.
-# 函数用途: 找出当前 thread 中状态仍为 active 的主任务 ID。
-def _active_task_ids(store: object, thread_id: str) -> tuple[list[str], list[str]]:
+# LLM: active_task_ids is only a resumability index; every returned row is
+# filtered through its authoritative ThreadTaskLink status before projection.
+# 函数用途: 找出当前 thread 中状态仍为 active 的主任务记录。
+def _active_task_links(store: object, thread_id: str) -> tuple[list[object], list[str]]:
     try:
         links, load_errors = store.active_task_links_report(thread_id)
     except Exception:
         return [], ["conversation_task_links_unavailable"]
-    ids = [
-        task_id
+    active = [
+        link
         for link in links
         if str(getattr(link, "status", "") or "").strip().lower()
         == THREAD_TASK_LINK_ACTIVE_STATUS
-        if (task_id := str(getattr(link, "task_id", "") or "").strip())
+        if str(getattr(link, "task_id", "") or "").strip()
     ]
     warnings = ["conversation_task_link_load_error"] if load_errors else []
-    return list(dict.fromkeys(ids)), warnings
+    deduplicated = {
+        str(getattr(link, "task_id", "") or "").strip(): link for link in active
+    }
+    return list(deduplicated.values()), warnings
+
+
+# LLM: Final notice and live activity must read the same canonical progress
+# ledger. This public helper accepts only an exact task link identity and never
+# mutates progress or decides task completion.
+# 函数用途: 读取某个会话任务当前的 Todo 快照，供后台最终消息补齐最后一次界面刷新。
+def task_progress_items_for_task(
+    agent: object,
+    store: object,
+    task_id: str,
+) -> tuple[dict[str, object], ...]:
+    loader = getattr(store, "load_task_link", None)
+    if not callable(loader) or not str(task_id or "").strip():
+        return ()
+    try:
+        link = loader(str(task_id).strip())
+    except Exception:
+        return ()
+    items, _warnings = _task_progress_items_from_links(agent, [link] if link else [])
+    return items
+
+
+# LLM: The newest active task owns the single Todo panel. Rows come only from
+# task_progress.v1 and are reduced to stable id/title/status display fields.
+# 函数用途: 把当前会话任务的权威进度账本压成 TUI 可展示的清单。
+def _task_progress_items_from_links(
+    agent: object,
+    links: list[object],
+) -> tuple[tuple[dict[str, object], ...], list[str]]:
+    candidates = [link for link in links if link is not None]
+    if not candidates:
+        return (), []
+    link = max(
+        candidates,
+        key=lambda item: _safe_float(getattr(item, "created_at", 0.0)),
+    )
+    task_path = str(getattr(link, "task_path", "") or "").strip()
+    owner_root = _owner_runtime_root(agent)
+    if not task_path or owner_root is None:
+        return (), []
+    ledger_id = f"task-path:{hashlib.sha256(task_path.encode('utf-8')).hexdigest()[:16]}"
+    progress, load_error = read_task_progress_report(owner_root, ledger_id)
+    if load_error:
+        return (), ["task_progress_load_error"]
+    raw_items = progress.get("items") if isinstance(progress, dict) else None
+    if not isinstance(raw_items, list | tuple):
+        return (), []
+    rows = tuple(
+        {
+            "id": _bounded_text(item.get("id"), limit=128),
+            "title": _bounded_text(item.get("title"), limit=_ACTIVITY_TEXT_LIMIT),
+            "status": _bounded_text(item.get("status"), limit=32) or "pending",
+        }
+        for item in raw_items[:_MAX_PROJECTED_PROGRESS_ITEMS]
+        if isinstance(item, dict) and _bounded_text(item.get("id"), limit=128)
+    )
+    return rows, []
+
+
+# LLM: Owner root lookup follows the same structured home/root fallback as the
+# progress tool but remains read-only and never creates directories.
+# 函数用途: 找到 task_progress 账本所在的 owner 根目录。
+def _owner_runtime_root(agent: object) -> Path | None:
+    owner_home = getattr(getattr(agent, "home_paths", None), "owner_home_dir", None)
+    root = owner_home or getattr(agent, "root", None)
+    return Path(root).expanduser().resolve(strict=False) if root else None
+
+
+# LLM: Numeric context sanitization mirrors the public Gateway contract. It
+# rejects the wrong schema and strips all content-bearing or unknown values.
+# 函数用途: 清洗后台 main 的实时上下文快照，只保留数字和协议标记。
+def _public_context_usage(value: object) -> dict[str, object]:
+    if not isinstance(value, dict) or value.get("schema") != _CONTEXT_USAGE_SCHEMA:
+        return {}
+    protocol = str(value.get("protocol") or "")
+    return {
+        "schema": _CONTEXT_USAGE_SCHEMA,
+        "estimated": value.get("estimated") is True,
+        **{key: max(0, _safe_int(value.get(key))) for key in _CONTEXT_USAGE_TOKEN_FIELDS},
+        "protocol": protocol if protocol in {"native", "text"} else "unknown",
+    }
 
 
 # LLM: Direct-child selection uses only root/parent/depth fields from canonical
@@ -405,4 +545,5 @@ __all__ = [
     "ConversationAgentActivity",
     "background_main_activity",
     "conversation_agent_activity",
+    "task_progress_items_for_task",
 ]

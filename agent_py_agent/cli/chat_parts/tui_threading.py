@@ -240,8 +240,12 @@ def _publish_background_activity(
             count,
             main_activity=value.get("main_activity"),
             subagents=subagents,
+            task_progress_items=value.get("task_progress_items"),
             hidden_subagent_count=hidden_count,
             projection_ok=value.get("subagent_projection_ok") is not False,
+            task_progress_projection_ok=(
+                value.get("task_progress_projection_ok") is not False
+            ),
         )
     )
 
@@ -266,6 +270,10 @@ def _publish_background_notice_row(
     if key in seen:
         return
     seen.add(key)
+    progress_items = row.get("task_progress_items")
+    progress_publisher = getattr(tui_runtime, "publish_task_progress_snapshot", None)
+    if isinstance(progress_items, list | tuple) and callable(progress_publisher):
+        progress_publisher(progress_items)
     if str(row.get("display_kind") or "") == "assistant_response":
         publisher = getattr(tui_runtime, "publish_background_response", None)
         if callable(publisher):

@@ -33,6 +33,44 @@ def test_top_level_items_get_fixed_lineage_names(tmp_path):
     assert names == ["agent-d1-worker-1", "agent-d1-tester-2"]
 
 
+def test_later_top_level_batch_continues_sibling_ordinals(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _create_agent(tmp_path)
+    tool = CreateSubagentsTool(agent)
+    first = json.loads(
+        tool.execute(
+            {
+                "goal": "先完成核心模块",
+                "items": [
+                    {"goal": "写核心", "role": "worker"},
+                    {"goal": "测核心", "role": "tester"},
+                ],
+            }
+        ).output
+    )
+    second = json.loads(
+        tool.execute(
+            {
+                "goal": "再完成界面模块",
+                "items": [
+                    {"goal": "写界面", "role": "worker"},
+                    {"goal": "测界面", "role": "tester"},
+                ],
+            }
+        ).output
+    )
+
+    run_ids = [*first["created_run_ids"], *second["created_run_ids"]]
+    names = [agent.subagents.load(run_id).agent_name for run_id in run_ids]
+    assert names == [
+        "agent-d1-worker-1",
+        "agent-d1-tester-2",
+        "agent-d1-worker-3",
+        "agent-d1-tester-4",
+    ]
+
+
 def test_scheduled_children_get_structured_depth_name_and_index(tmp_path):
     from agent_py_agent.agent.subagents.manager import SubAgentManager
     from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (

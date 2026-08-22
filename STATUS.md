@@ -1,20 +1,20 @@
 # STATUS
 
-## 2026-08-22 薄 TUI 首次 cwd 与子代理职责行（本地候选）
+## 2026-08-22 后台主代理、Todo 与子代理职责行（本地候选）
 
-- `a091b72` 已推送并部署 `.7`，唯一 Gateway 为 MiniMax-M2.7。原样提示词 2 真 TUI 成功创建多个 child，
-  但首个 ask 没有 workspace：薄客户端故意不构造 audit Agent，提交函数却把 cwd 也错误绑定在该对象上，
-  因此 child 写到 `/root/bbb` 而不是 TUI 的项目目录。本轮样本已停止计作通过。
-- 当前候选把 audit 与 workspace 独立传递，focused test 直接验证第一个持久请求的 cwd/roots。子代理创建
-  合同同时接通现有 `description` 字段；活动 schema 升为 v3，child 行只显示一句职责、typed status、
-  耗时、实时总上下文 token、Compact 与真实重试，不再显示“模型响应中/模型已生成回复”。
-- 对照 终端交互 `AgentTool` 与 `CoordinatorTaskPanel`，职责由创建时短标题提供，省略才回退 goal 开头；
-  renderer 先预留数值后缀再按终端列宽截断，保证每个 child 一行。当前直接相关 focused tests 已通过，
-  严格 gate、推送、`.7` 单 Gateway 部署和原样提示词 2 的全新 TUI 复验仍待完成。
-- `0ffbfe4` 已部署后，tmux `dsh-p2-mario-0ffbfe4` 的原样提示词 2 首个请求真实携带
-  `/root/dsh-tui-p2-0ffbfe4`，三条 child 行已显示“游戏核心引擎/游戏角色和实体/关卡1、2、3设计”与
-  21.4k--22.1k `ctx`。同屏仍有三条自动 seed 的完整 child goal 重复占据 Todo；当前本地补丁按 exact
-  run id 仅隐藏重复视图，52 项 TUI/activity focused 已通过，待再部署取同屏证据。
+- `993ce4f` 已推送并部署 `.7`，唯一 Gateway 为 MiniMax-M2.7。tmux
+  `dsh-p2-mario-993ce4f` 的原样提示词 2 已证明首次 ask、后台 main、6 个 child 与全部工具都保持
+  `/root/dsh-tui-p2-993ce4f`；产物正确落在 `bbb/`，服务监听 `0.0.0.0:8082` 且 HTTP 200。
+- child 行已经符合当前产品口径：短字只概括职责，如“玩家控制”“敌人AI”“关卡设计”；后半段显示
+  exact run 当前总 context token、Compact 和真实重试。它不显示路径、模型聊天状态或长 goal，每行按
+  终端宽度截断。6 个 child 均一次 attempt 自然 DONE，最后一个完成后约 16 秒唤醒 main。
+- 同一真机轮暴露 main context 固定在启动快照、Todo canonical 5/5 未刷新、跨批次 child 名称重号，
+  以及纯委派失败后 main 自行补写功能代码。当前候选将 activity schema 升为 v4：从 provider preflight
+  实时刷新 main context，从 canonical `task_progress.v1` 刷新 Todo，并由最终 notice 补终态快照；同一
+  parent 的系统 child 名称跨批连续编号。默认 prompt 同时按 会话运行时 的 delegated-task 边界明确禁止模型把
+  容量满或创建失败当作主代理接管授权。
+- 当前直接相关 138 项 focused tests 已通过；严格 gate、推送、`.7` 单 Gateway 部署与同一原样 Prompt 2
+  的全新 TUI 复验仍待完成。本轮远低于 10,000 行，不运行全仓 pytest。
 
 ## 2026-08-22 单 Gateway 多目录启动失败已定位（本地候选）
 

@@ -203,6 +203,8 @@ class TestReadPromptFiles:
         assert "operations" in result[0]
         assert "每一轮只能二选一" in result[0]
         assert "同一轮立即调用对应工具" in result[0]
+        assert "主代理只能协调 / 不准自己写 / 只能由子代理执行" in result[0]
+        assert "不能成为主代理静默接管功能实现的授权" in result[0]
 
     def test_legacy_default_prompt_alias_falls_back_to_builtin(self, tmp_path):
         builder = PromptBuilder(AgentConfig(prompt_files=["prompts/default.md"]), tmp_path)

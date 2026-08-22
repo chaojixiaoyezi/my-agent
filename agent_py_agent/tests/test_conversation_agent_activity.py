@@ -113,7 +113,7 @@ def test_conversation_agent_activity_projects_only_active_roots_direct_children(
     assert "activity" not in activity.subagents[0]
     assert "current_tool" not in activity.subagents[0]
     assert "goal" not in activity.subagents[0]
-    assert payload["schema_version"] == "conversation_agent_activity.v3"
+    assert payload["schema_version"] == "conversation_agent_activity.v4"
     assert payload["active_task_projection_ok"] is True
     assert payload["subagent_projection_ok"] is True
 
@@ -227,11 +227,28 @@ def test_background_main_activity_sink_projects_real_stage_for_active_task() -> 
         task_id="task-live",
     )
     sink.write_thinking("先核对子代理结果，再整合最终页面。")
+    assert sink.write_context_usage(
+        {
+            "schema": "model_visible_context_usage.v1",
+            "estimated": True,
+            "context_window_tokens": 128_000,
+            "compact_trigger_tokens": 115_200,
+            "current_tokens": 42_100,
+            "prompt_tokens": 8_700,
+            "messages_tokens": 20_000,
+            "runtime_guidance_tokens": 400,
+            "tool_schema_tokens": 13_000,
+            "protocol": "native",
+            "prompt": "must not cross the projection",
+        }
+    ) is True
 
     activity = conversation_agent_activity(agent, store, "thread-main")
 
     assert activity.main_activity["phase"] == "thinking"
     assert activity.main_activity["activity"] == "先核对子代理结果，再整合最终页面。"
+    assert activity.main_activity["context_usage"]["current_tokens"] == 42_100
+    assert "prompt" not in activity.main_activity["context_usage"]
     sink.write_progress({"tool": "run_command", "phase": "started"})
     activity = conversation_agent_activity(agent, store, "thread-main")
     assert activity.main_activity["activity"] == "正在使用 run_command"
@@ -239,3 +256,56 @@ def test_background_main_activity_sink_projects_real_stage_for_active_task() -> 
     activity = conversation_agent_activity(agent, store, "thread-main")
     assert activity.main_activity["phase"] == "waiting"
     assert activity.main_activity["activity"] == "等待后续事件"
+    assert activity.main_activity["context_usage"]["current_tokens"] == 42_100
+
+
+def test_conversation_agent_activity_projects_canonical_task_progress(tmp_path: Path) -> None:
+    import hashlib
+
+    from agent_py_agent.agent.conversation.agent_activity import (
+        conversation_agent_activity,
+        task_progress_items_for_task,
+    )
+    from agent_py_agent.agent.task_progress import write_task_progress
+
+    owner_root = tmp_path / "owner"
+    task_path = str(tmp_path / "project" / "bbb")
+    ledger_id = f"task-path:{hashlib.sha256(task_path.encode('utf-8')).hexdigest()[:16]}"
+    write_task_progress(
+        owner_root,
+        ledger_id,
+        {
+            "items": [
+                {"id": "core", "title": "游戏核心", "status": "done"},
+                {"id": "qa", "title": "整合测试", "status": "in_progress"},
+            ]
+        },
+    )
+    link = SimpleNamespace(
+        task_id="task-live",
+        task_path=task_path,
+        status="active",
+        created_at=20.0,
+    )
+    store = SimpleNamespace(
+        active_task_links_report=lambda _thread_id: ([link], []),
+        load_task_link=lambda _task_id: link,
+    )
+    agent = SimpleNamespace(
+        home_paths=SimpleNamespace(owner_home_dir=owner_root),
+        subagents=SimpleNamespace(
+            list_runs_report=lambda: SimpleNamespace(runs=[], load_errors=[])
+        ),
+    )
+
+    activity = conversation_agent_activity(agent, store, "thread-progress")
+
+    assert activity.task_progress_projection_ok is True
+    assert list(activity.task_progress_items) == [
+        {"id": "core", "title": "游戏核心", "status": "done"},
+        {"id": "qa", "title": "整合测试", "status": "in_progress"},
+    ]
+    assert task_progress_items_for_task(agent, store, "task-live") == (
+        {"id": "core", "title": "游戏核心", "status": "done"},
+        {"id": "qa", "title": "整合测试", "status": "in_progress"},
+    )

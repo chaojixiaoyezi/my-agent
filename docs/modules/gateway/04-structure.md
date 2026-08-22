@@ -13,12 +13,13 @@
 
 ## TUI 后台活动投影
 
-2026-08-22 起，activity endpoint 公开 `conversation_agent_activity.v3`：Gateway 后台主代理把最近一次
-thinking、tool、provider retry 或 finalizing 阶段写入进程内有界 display sink；直属 child 的职责短标题、
-当前上下文 token 与 Compact 次数从 exact canonical run 只读取得。当前 token 快照由统一 provider preflight
-在每次模型调用前写入 run attributes，不是累计计费用量。客户端按 250ms 节奏轮询并只接收标量白名单。
-main 快照可易失；child 数值落在 canonical run 的有界展示属性，但两者都不参与任务结束、恢复或授权，
-真实 task link/run/turn_end 仍是唯一生命周期事实。
+2026-08-22 起，activity endpoint 公开 `conversation_agent_activity.v4`：Gateway 后台主代理把最近一次
+thinking、tool、provider retry 或 finalizing 阶段和同一次 provider preflight 的数字 context usage 写入
+进程内有界 display sink；直属 child 的职责短标题、当前上下文 token 与 Compact 次数从 exact canonical run
+只读取得。当前 token 快照不是累计计费用量。当前 active task 的 Todo 则从 canonical `task_progress.v1`
+账本只读投影为 `id/title/status`；客户端按 250ms 节奏轮询并只接收白名单字段。main 快照可易失；child
+数值与 Todo 仍由各自 canonical ledger 持有，全部展示字段都不参与任务结束、恢复或授权，真实 task
+link/run/turn_end 仍是唯一生命周期事实。
 
 薄 TUI 的 audit hook 与 workspace 传递相互独立：客户端无需构造第二个完整 Agent，仍必须把当前绝对
 cwd/roots 放进首次 ask。服务路径继续固定到 owner 唯一 Gateway；workspace 只属于 thread v6，不能因
@@ -35,8 +36,10 @@ audit Agent 为空而回退 daemon cwd。
 - `cli/chat_parts/tui_threading.py` 只有在 `ok=true` 时消费该快照；传输或解析失败保持当前投影，避免把
   “暂时查不到”伪造成任务结束。直连本地模式调用同一个只读 activity projector。
 - `TuiRuntime`、reducer 和 renderer 只维护一个 session-scoped `background` 活动块。前台 thinking 优先，
-  前台让出后在 composer 附近显示灰色闪动 Working 标题与直属 child 行；真实 root 计数归零时删除，整个区域
-  不进入 transcript。这个 projection 没有调度、重试、停止或完成裁决权。
+  前台让出后在 composer 附近显示灰色闪动 Working 标题、实时 main context、Todo 与直属 child 行；真实
+  root 计数归零时删除 Working/child。最终后台 notice 会先携带最后一份 Todo 快照再显示 assistant final，
+  因而完成勾选不会随 active link 收口一起丢失。整个区域不进入 transcript，也没有调度、重试、停止或
+  完成裁决权。
 
 ## 回合终态与 Compact 进度投影
 

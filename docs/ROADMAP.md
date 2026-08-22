@@ -21,7 +21,7 @@
 
 ### 单 Gateway 多 TUI 项目目录与正式提示词 2
 
-状态：`a091b72` 已部署；首次原样 TUI 暴露薄客户端漏传 cwd，新候选 focused 已通过，待严格 gate 与复验
+状态：`993ce4f` 已部署并由原样提示词 2 真机证明前后台 cwd 一致；转入持续回归
 
 解决问题：从非 Gateway 启动目录运行 TUI 时会误找另一套 cwd-hash 队列，等待一分钟后退出；即使只放宽
 readiness，模型和工具仍可能在 daemon cwd 工作，造成项目写错位置。
@@ -29,11 +29,13 @@ readiness，模型和工具仍可能在 daemon cwd 工作，造成项目写错�
 当前进展：服务目录已固定为 owner 级唯一 Gateway，客户端 cwd/roots 改为 thread v6 的 typed 状态；
 前台、后台、Tool Gateway、任务交付和 child 输出必须共用该值。`a091b72` 部署后原样提示词 2 已在一个
 Gateway 中创建 child，但首个 ask 因薄 TUI 的 audit Agent 为空而漏传 workspace，产物写到 `/root/bbb`。
-当前候选把 audit 与 workspace 分参，首个 inbox JSON 回归已证明携带 client cwd；同时 child 行改为职责
+后续候选把 audit 与 workspace 分参，首个 inbox JSON 回归已证明携带 client cwd；同时 child 行改为职责
 短标题、实时上下文 token 和单行宽度预算。`0ffbfe4` 部署后的正式 TUI 已证明 workspace 与三条 child 行
 正确，但 Todo 仍重复完整 child goal；`669c228` 已按 exact run id 只在视图隐藏重复 seed。继续观察又证明
-自动 wake 的 `run-*` 丢失 thread cwd，relative child output 回落 `/root`；当前二次候选在后台 turn 构造处
-恢复同一 thread 快照。下一步 focused/严格 gate、部署后用全新原样 TUI 验证，不向被测代理插话。
+自动 wake 的 `run-*` 丢失 thread cwd，relative child output 回落 `/root`；`993ce4f` 在后台 turn 构造处
+恢复同一 thread 快照。全新 tmux `dsh-p2-mario-993ce4f` 已证明首次 ask、后台 main、6 个 child 与工具
+working_dir 全部保持 `/root/dsh-tui-p2-993ce4f`，最终 `bbb/` 产物齐全且 HTTP 200。该项不再等待专项
+补丁；后续四个正式任务仍持续对账，发现回归时只修 thread/turn workspace 主链，不增 cwd fallback。
 
 ### TUI 活动状态、跟随滚动与 Compact 真机复验
 

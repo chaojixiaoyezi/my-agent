@@ -318,6 +318,7 @@ class _TuiBackgroundActivityController:
         self._started_at = 0.0
         self._main_activity: dict[str, object] = {}
         self._subagents: tuple[dict[str, object], ...] = ()
+        self._task_progress_items: tuple[dict[str, object], ...] = ()
         self._hidden_subagent_count = 0
 
     # LLM: Count and direct-child rows change the same display projection. A
@@ -330,8 +331,10 @@ class _TuiBackgroundActivityController:
         *,
         main_activity: object | None = None,
         subagents: object | None = None,
+        task_progress_items: object | None = None,
         hidden_subagent_count: int = 0,
         projection_ok: bool = True,
+        task_progress_projection_ok: bool = True,
     ) -> bool:
         count = max(0, int(active_task_count or 0))
         owner = self._owner
@@ -340,6 +343,7 @@ class _TuiBackgroundActivityController:
             if count <= 0:
                 next_main_activity: dict[str, object] = {}
                 next_subagents: tuple[dict[str, object], ...] = ()
+                next_task_progress_items = self._task_progress_items
                 next_hidden_count = 0
             else:
                 next_main_activity = (
@@ -353,10 +357,16 @@ class _TuiBackgroundActivityController:
                 else:
                     next_subagents = self._subagents
                     next_hidden_count = self._hidden_subagent_count
+                next_task_progress_items = (
+                    _normalize_task_progress_items(task_progress_items)
+                    if task_progress_projection_ok and task_progress_items is not None
+                    else self._task_progress_items
+                )
             if (
                 count == self._count
                 and next_main_activity == self._main_activity
                 and next_subagents == self._subagents
+                and next_task_progress_items == self._task_progress_items
                 and next_hidden_count == self._hidden_subagent_count
             ):
                 return False
@@ -370,7 +380,9 @@ class _TuiBackgroundActivityController:
             self._count = count
             self._main_activity = next_main_activity
             self._subagents = next_subagents
+            self._task_progress_items = next_task_progress_items
             self._hidden_subagent_count = next_hidden_count
+            context_usage = next_main_activity.get("context_usage")
             owner._publish(
                 kind,
                 phase,
@@ -380,7 +392,15 @@ class _TuiBackgroundActivityController:
                     "started_at": self._started_at,
                     "main_activity": dict(next_main_activity),
                     "subagents": [dict(row) for row in next_subagents],
+                    "task_progress_items": [
+                        dict(row) for row in next_task_progress_items
+                    ],
                     "hidden_subagent_count": next_hidden_count,
+                    **(
+                        {"context_usage": dict(context_usage)}
+                        if isinstance(context_usage, dict)
+                        else {}
+                    ),
                 },
                 request_id=f"background:{owner.session_id}",
             )
@@ -392,6 +412,16 @@ class _TuiBackgroundActivityController:
 _SUBAGENT_ACTIVITY_ROW_LIMIT = 64
 _MAIN_ACTIVITY_FIELDS = frozenset(
     {"task_id", "phase", "activity", "started_at", "updated_at"}
+)
+_CONTEXT_USAGE_SCHEMA = "model_visible_context_usage.v1"
+_CONTEXT_USAGE_TOKEN_FIELDS = (
+    "context_window_tokens",
+    "compact_trigger_tokens",
+    "current_tokens",
+    "prompt_tokens",
+    "messages_tokens",
+    "runtime_guidance_tokens",
+    "tool_schema_tokens",
 )
 _SUBAGENT_ACTIVITY_FIELDS = frozenset(
     {
@@ -421,11 +451,49 @@ _SUBAGENT_ACTIVITY_FIELDS = frozenset(
 def _normalize_main_activity(value: object) -> dict[str, object]:
     if not isinstance(value, Mapping):
         return {}
-    return {
+    public = {
         str(key): value[key]
         for key in _MAIN_ACTIVITY_FIELDS
         if key in value and not isinstance(value[key], dict | list | tuple | set)
     }
+    if usage := _normalize_context_usage(value.get("context_usage")):
+        public["context_usage"] = usage
+    return public
+
+
+# LLM: Background context uses the same frozen schema as foreground status.
+# Unknown or content-bearing fields are removed before the event reaches the reducer.
+# 函数用途: 清洗后台 main 的上下文用量，只保留状态条需要的数字。
+def _normalize_context_usage(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping) or value.get("schema") != _CONTEXT_USAGE_SCHEMA:
+        return {}
+    protocol = str(value.get("protocol") or "")
+    return {
+        "schema": _CONTEXT_USAGE_SCHEMA,
+        "estimated": value.get("estimated") is True,
+        **{
+            key: _nonnegative_int(value.get(key))
+            for key in _CONTEXT_USAGE_TOKEN_FIELDS
+        },
+        "protocol": protocol if protocol in {"native", "text"} else "unknown",
+    }
+
+
+# LLM: Todo snapshots are canonical display rows, never free-form tool output.
+# Keep only bounded id/title/status scalars before publishing a TUI event.
+# 函数用途: 清洗后台 task_progress 快照，供输入框上方清单实时替换。
+def _normalize_task_progress_items(value: object) -> tuple[dict[str, object], ...]:
+    if not isinstance(value, list | tuple):
+        return ()
+    return tuple(
+        {
+            "id": str(item.get("id") or "").strip()[:128],
+            "title": " ".join(str(item.get("title") or "").split())[:240],
+            "status": str(item.get("status") or "pending").strip()[:32],
+        }
+        for item in value[:128]
+        if isinstance(item, Mapping) and str(item.get("id") or "").strip()
+    )
 
 
 # LLM: This is the client-side metadata whitelist for the authenticated activity
@@ -474,16 +542,37 @@ class _TuiBackgroundActivityRuntimeMixin:
         *,
         main_activity: object | None = None,
         subagents: object | None = None,
+        task_progress_items: object | None = None,
         hidden_subagent_count: int = 0,
         projection_ok: bool = True,
+        task_progress_projection_ok: bool = True,
     ) -> bool:
         return self._background_activity.update(
             active_task_count,
             main_activity=main_activity,
             subagents=subagents,
+            task_progress_items=task_progress_items,
             hidden_subagent_count=hidden_subagent_count,
             projection_ok=projection_ok,
+            task_progress_projection_ok=task_progress_projection_ok,
         )
+
+    # LLM: A final background notice may arrive after the active-task block was
+    # removed. This emits one typed Todo snapshot without recreating Working.
+    # 函数用途: 在后台最终回复显示前补上最后一次清单勾选状态。
+    def publish_task_progress_snapshot(self, items: object) -> bool:
+        normalized = _normalize_task_progress_items(items)
+        if not normalized:
+            return False
+        with self._lock:
+            self._publish(
+                "task_progress_snapshot",
+                "updated",
+                f"task-progress:{self.session_id}",
+                {"task_progress_items": [dict(row) for row in normalized]},
+                request_id=f"task-progress:{self.session_id}",
+            )
+        return True
 
     # LLM: Every legacy background notice receives a fresh block id so repeated
     # updates cannot collapse in the reducer. The method is display-only.

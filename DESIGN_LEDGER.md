@@ -900,11 +900,24 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   child 全部 DONE，合计约 238.2k tokens、Compact 均为 0。最终 `/root/abc` 有 9 个文件，
   `0.0.0.0:8080` 真实监听且 loopback HTTP 200；但 8 个 Todo 全未勾选，main 仍错放在输入框下方。
   本候选修复已通过 147 项 focused tests，仍须部署后用下一条原样 TUI 任务验收新布局与勾选。
+- `.7` 的 `993ce4f` 在 tmux `dsh-p2-mario-993ce4f` 完成第 2 个原样重任务：首次请求、后台 main、
+  6 个 child 与全部命令都保持 `/root/dsh-tui-p2-993ce4f`，产物落在 `bbb/`，`0.0.0.0:8082`
+  返回 HTTP 200。child 行已稳定显示“玩家控制/物理引擎/敌人AI/道具系统/关卡设计/游戏HTML”、实时
+  当前 context 和 Compact；6 个 child 全部一次 attempt 自然 DONE，最后一个完成后约 16 秒唤醒 main。
+  同轮也确认三个底层缺口：main context 停在启动快照、Todo 的 canonical 5/5 没投影回 TUI、第二批
+  系统生成的 child display name 重新从 1 编号；模型还在容量满/创建失败后自行补写了用户明确禁止主代理
+  编写的功能代码。
+- 当前候选对照 终端交互 固定状态区和 会话运行时 orchestrator 的 delegated-task 边界：activity schema 升到
+  v4，main context、当前 active task 的 canonical Todo 和 child 状态共用一份只读快照；最终后台 notice
+  先补终态 Todo 再显示 assistant final。同一 exact parent 的系统 child 名称跨批次连续编号。默认 prompt
+  明确把“主代理只能协调/不准自己写”视为当轮执行分工，容量满时等待释放，参数错误时修正重试，不能把
+  创建失败解释成静默接管授权。所有变化只作用于通用结构化身份/账本和指令优先级，不读取游戏名或任务
+  关键词；138 项直接相关 focused tests 已通过，仍待严格 gate、部署和同一原样 TUI 复验。
 - `.7` 正式验收必须使用唯一 Gateway 和 `MiniMax-M2.7`，依次执行 `TESTS.md` 的四个原样重型 prompt。
   每次启动、切换或输入 TUI 之前必须先向用户公开 tmux session 名称与完整 attach 命令；测试者只观察，
   不旁路补代码或向被测代理发送技术推动消息。
 
-## 2026-08-22 单 Gateway 服务身份与 thread cwd 分离【状态：首轮主链已部署，后台 active turn 二次修复待真机】
+## 2026-08-22 单 Gateway 服务身份与 thread cwd 分离【状态：`993ce4f` 真机通过】
 
 - 一个 local owner 只有一套 Gateway/adapter service identity：默认固定在
   `owner_home/workspace/runtime/services/`。pid、heartbeat、queue、HTTP 端口不能再由 TUI cwd 选择；
@@ -923,3 +936,6 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   使相对 child output 回落 `/root`。二次候选按 会话运行时 每轮 `TurnContext` 及 spawn runtime override 的同一
   层级，在后台 `RunParams` 构造时复制本轮加载的 `ConversationThread.cwd/runtime_workspace_roots`；task
   workspace 仍只是隐藏状态目录。该修复只读结构化 thread 字段，不匹配模型生成路径或任务文本。
+- `993ce4f` 部署后的全新提示词 2 已同时证明首次 ask、后台 `run-*`、6 个 child 和工具 working_dir
+  全部继承 TUI cwd；没有再写 `/root/bbb`、`None` 或其它隐藏回退目录。本条 cwd 主链因此完成，后续
+  继续在每个正式重任务中把路径对账作为回归证据，不再保留第三条兼容入口。
