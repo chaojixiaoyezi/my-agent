@@ -141,7 +141,7 @@ key/config/runtime 数据，不触碰其它项目。较早大切片已按约定�
 
 ### 主/子/孙代理统一 Conversation Compact
 
-状态：底层迁移已在本地完成；待严格 gate、部署与真实 MiniMax-M2.7 TUI 长任务验收
+状态：运行中 native IR 已纳入统一账本，201 项 focused 回归及本地静态 gate 已过；待部署与全新 MiniMax-M2.7 TUI 长任务验收
 
 解决问题：子代理也可能连续工作数小时。旧实现中主代理用 owner/thread 的 Conversation Compact，
 task-local 子代理用 run workspace 的旧 compact continuation，回合内工具 IR 又独立裁剪；这让次数、
@@ -149,21 +149,29 @@ task-local 子代理用 run workspace 的旧 compact continuation，回合内工
 
 当前进展：已对照 会话运行时 `session/turn.rs` 与 multi-agent spawn，并完成每个 child/grandchild 独立
 ConversationThread 接线。创建时以 exact `agent_thread_id` 建立无通道绑定线程；每次 child 尝试按统一
-`conversation_request_id` 写 user/assistant，轮前和 provider overflow 后都调用同一个
-`conversation/compact.py`，checkpoint-before-CAS、失败熔断和 summary/raw tail 注入与 main 共用。
+`conversation_request_id` 写 user/assistant；轮前 transcript 由 `conversation/compact.py` 提交，运行中 native
+IR 与 provider overflow 由 `conversation/live_tool_compact.py` 适配到同一个 checkpoint/CAS、失败熔断与
+summary 权威，注入和 raw tail 仍与 main 共用。
 task-local 工具/Memory/写边界保持不变，只有 durable Compact owner 改为 ConversationStore。
 `774c7fe` 部署后，全新 tmux `dsh-p3-774c7fe-compact` 的原样 Prompt 3 已证明首轮和终屏都是
 `压缩点 90%`；8 个 child 全部 DONE，最高上下文 98.6k，未达 115.2k，所以真实 child
 Compact 触发仍需下一个更长任务复验。同轮 main 最终只整合 7/8 且 Todo 未勾选，
 作为结果批次覆盖与 typed covers 绑定的独立失败样本保留，不计入 Compact 通过。
 
-本地收口：正式 child runner 不再生成 task-local `compact_applies/continue`；TUI/Web/SQLite 只读该 child
-thread 的 `compact_generation` 与 checkpoint，临时 native IR 裁剪事件不再持久累计。定向测试已覆盖
-轮前阈值压缩、同 attempt 溢出压缩重试、child/grandchild 正文隔离和遗留计数不回读。
+第三轮原样 Prompt 4 已在 `jesseduffield/lazygit` 固定提交（61,258 功能行）真实触发 child native IR
+裁剪：worker-6 从 113.1k 降至 35.5k，但 exact child thread 仍是 generation 0、checkpoint/summary 为空。
+测试已用结构化 `/stop` 保存现场，确认根因不是 TUI，而是 `_tool_loop_service` 将成对删除放在
+ConversationStore 账外。
 
-待做：通过远端提交前严格 gate 后部署 `.7` 唯一 Gateway；再按用户指定的 >10k star、>40k 功能代码行
-项目启动全新 TUI，只投递一次“换语言完整复刻且 main 只能协调/测试”的原样 prompt，观察真实 child
-Compact、长任务恢复、子代理数量、产物和最终可运行性。该真测不得由测试者旁路修改项目。
+本地收口：正式 child runner 不再生成 task-local `compact_applies/continue`；允许持久化的 main/child/
+grandchild 在 native IR 阈值或 provider overflow 时，先把上一代 summary 与当前工具历史合成完整替代摘要，
+写 `source_kind=live_tool_ir` checkpoint，再以同一 generation CAS 提交；transcript cursor 不动，工具往返数
+单独累计。摘要/checkpoint/CAS 失败会恢复压缩前 IR/tool-context 并进入同一 failure circuit；no-save 辅助回合
+只保留不计数的临时事件。TUI/Web/SQLite 继续只读该 thread generation，不新增前端计数器。
+
+待做：提交并部署到 `.7` 唯一 Gateway；在新的干净项目目录与新 tmux 中再次只投递一次
+“换语言完整复刻且 main 只能协调/测试”的原样 prompt，验收 child generation 实时从 0 变 1、checkpoint
+`source_kind=live_tool_ir`、继续工具调用和最终产物。该真测不得由测试者旁路修改项目。
 
 ### 用户直控子代理的共享控制面
 

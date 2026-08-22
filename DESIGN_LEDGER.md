@@ -109,7 +109,7 @@
 - 普通通道上下文必须在同一结构化 scope 内“累计 transcript → 自动 compact → 继续累计”：raw transcript 永不因 compact 改写或删除，thread JSON 的 summary+cursor+generation+checkpoint pointer 是唯一 live compact 状态；旧消息只进入该 owner 的 LocalStore 派生检索索引。每次先生成不改状态的候选，再按完整下一轮输入验证低于精确阈值，随后先写 owner-scoped 完整恢复 checkpoint，最后以一次 generation CAS 同时提交 summary/cursor/checkpoint；失败候选、checkpoint 写失败或 CAS 冲突都不得推进游标。正常达到配置阈值时允许在同一历史尾部保留有界的近期完整 user/assistant 回合，过大时退回压缩全部旧段；供应商已经返回上下文压力时则一次替换本轮之前的完整旧段，禁止把同一受保护尾部连续压成多代 checkpoint。这不是第二份 history，也不能让固定最近轮数重新成为遗忘边界。连续失败只更新同一 thread 的 typed failure circuit，三次后短暂冷却，成功提交清零，禁止每条新消息重复空烧摘要模型。
 - 同一 owner/thread 只有一份模型历史。聊天、文件工作、子代理协调、定时唤醒和普通小任务都继续使用同一 thread 的 summary + raw tail；task link、workspace、progress、wake 与子代理树只是结构化运行事实，不得过滤、替换或复制 transcript。普通 Gateway 请求按会话顺序执行，当前 turn 结束或耐久续轮启动后仍继续同一历史，不能创建平行“聊天上下文”。
 - 后台 scheduler 只有在该 thread/task 没有 linked live turn 时才能启动一个续接 turn；续接仍加载完整 thread compact 与消息尾部，并额外读取精确 task 的运行状态。任务已 completed/cancelled/interrupted/abandoned/superseded 时，排队的定时或生命周期 wake 直接作废，不能复活任务。
-- task workspace 下只保留 progress、canonical state 和证据 refs 等结构化运行事实，不生成 task compact、task rollup package 或第二份主代理上下文。主代理上下文压缩只认 thread JSON 的 summary + cursor + generation；active turn 因 context pressure 续跑时，typed compact carrier 继续同一 turn。当前 task-local child 仍由 run workspace 的旧 `memory_archive` continuation 维持长上下文；它与主 ConversationThread 尚未共用同一持久状态机，迁移目标见“主/子/孙代理统一 Conversation Compact”。
+- task workspace 下只保留 progress、canonical state 和证据 refs 等结构化运行事实，不生成 task compact、task rollup package 或第二份主代理上下文。main、child、grandchild 的持久上下文压缩都只认各自 thread JSON 的 summary + cursor + generation + checkpoint；active turn 因 context pressure 续跑时，原生 ToolCall/ToolResult 的成对回收必须先在同一 owner Compact ledger 写 checkpoint，再推进该 ConversationThread generation，随后继续同一 turn。task-local workspace、工具和 Memory 仍按 run 隔离，但不得恢复旧 `memory_archive` continuation 或第二套计数。
 - 所有位于消息开头的 `/XXXX` 都先进入统一 typed command dispatcher；支持的命令由程序执行，
   不支持的命令由程序确定性拒绝，命令词本身不得进入 transcript、active-turn guidance 或模型输入。
   `/btw` 与 `/audit` 只有去掉命令词后的用户正文可以进入既有 turn/task，权限和运行模式由 typed
@@ -223,7 +223,7 @@
   固定工作角色。常规批次只占模型窗口的小比例并设实际上限，结构化输出只做 request-local 限制，
   不能缩小主会话配置。
 - 模型能力自我描述必须按 installed/configured/healthy/current-bound 四层事实投影；adapter 存在、凭据齐全或代码中有工具都不能单独升级成当前可投递。四层状态全部从 composition root 的同一 `ChannelAdapterRegistry`、结构化 daemon health 和 owner conversation binding 投影；进程死亡、心跳过期、状态损坏或未绑定均 fail-closed。
-- Compact 百分比只允许一个权威阈值：`context_window_tokens × configured_percent`。候选是否可提交也必须按包含 system/persona、summary、近期 raw tail、原生工具 Schema、ToolCall 参数、ToolResult、运行引导、近期与已压缩工具事实及当前用户输入的完整下一轮投影低于这个阈值判断；不得再加未来输出预留、工具 digest 隐藏天花板或另一套 task compact。当前 turn 的原生工具历史只能按调用/结果整对回收，并复用既有语义摘要后端在同一 IR 中以最多一条 replacement item 承接被回收旧段；后续压缩原位替换，summary、handoff marker 与近期尾部都进入同一预算。摘要是非权威续接视图，raw archive、operation ledger、artifact、workspace、transcript 和真实 UserTurn 仍是事实源；不能另用漏算工具参数的字符口径。provider usage/tokenizer 缺失时的估算误差必须与阈值数学分开说明。
+- Compact 百分比只允许一个权威阈值：`context_window_tokens × configured_percent`。候选是否可提交也必须按包含 system/persona、summary、近期 raw tail、原生工具 Schema、ToolCall 参数、ToolResult、运行引导、近期与已压缩工具事实及当前用户输入的完整下一轮投影低于这个阈值判断；不得再加未来输出预留、工具 digest 隐藏天花板或另一套 task compact。当前 turn 的原生工具历史只能按调用/结果整对回收，并复用既有语义摘要后端在同一 IR 中以最多一条 replacement item 承接被回收旧段；后续压缩原位替换，summary、handoff marker 与近期尾部都进入同一预算。对于允许持久化且已绑定 ConversationThread 的真实 main/child/grandchild 回合，这次 mid-turn 回收本身就是一次 canonical Compact：先把旧 thread summary 与当前工具历史合成完整替代摘要，写 `source_kind=live_tool_ir` 的 owner-scoped checkpoint，再以 generation CAS 提交；transcript cursor 不前移，工具对累计数单独记录。checkpoint、CAS 或摘要失败必须恢复原 IR 并失败，不能静默丢历史。presentation/no-save 或没有持久 thread 的辅助回合才允许只做 turn-local 窗口整理，且不得冒充 `compact N`。摘要是非权威续接视图，raw archive、operation ledger、artifact、workspace、transcript 和真实 UserTurn 仍是事实源；不能另用漏算工具参数的字符口径。provider usage/tokenizer 缺失时的估算误差必须与阈值数学分开说明。
 - Skill 运行时只有 composition root 创建的一个 `SkillsService`：每轮 snapshot 固定 `workspace > owner > shared > builtin`，prompt、检索、正文读取、能力自述与子代理都消费同一实例。`shared/indexes/skills.jsonl` 只是派生管理员清单；不得恢复 `SkillRegistry`、resolver/index loader 或编排入口临时 router。子代理 Skill 引用必须保存 stable id + content hash，后代只能收窄不能扩张。
 - 记忆与 Skill 各有一份独立总闸：owner `memory_policy.json`(memory-policy.v1.enabled) 与 `skill_policy.json`(enabled) 只经 `resolve_effective_owner_policy` 投影成 `EffectiveOwnerPolicy.memory_enabled/skills_enabled` 两个 effective flag；文件缺失或损坏视为开启(老 owner 兼容，永不因解析失败误杀)，子代理用 and 继承父开关、只能收窄不能扩张。消费点只认该 flag：Memory 关闭时 curator 调度(`_run_due_curators`)、会话 close/reset 请求、发现层判活(`_has_pending_memory_curator_work`)、决策点召回(`push_relevant_memories_report`)全部短路，remember 工具 availability 不可用；Skill 关闭时 `snapshot_for` 返回空快照(短路而非扫描失败，无 load 错误)。两闸互不级联：关 Memory 不影响 Skill 快照，关 Skill 不影响 Memory 召回。禁止为单开关另建第二套 policy 状态或跳过 effective flag 直接读原始 JSON。
 - - 【长LLM测试 2026-08-13】两篇长文经真实 /ask 入口灌入 + 跨 run 召回 20/20 全命中：灌入=3605 字
@@ -721,9 +721,10 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - pending steer 与 follow-up queue 按 会话运行时 `bottom_pane/pending_input_preview.rs` 固定在 composer 上方，
   每条最多三行预览；它们不再作为 transcript 尾块随滚动消失。模型可见上下文则只接收 runtime 的数字
   白名单快照，固定显示当前估算、窗口和唯一 compact 触发线。活动回合原生工具 IR 真发生裁剪时另发
-  `model_visible_context_compaction.v1` 临时事件；它只描述当前活动回合的 ToolCall/ToolResult 裁剪，不再写回
-  child canonical run。child 的常驻 `compact N` 只读独立 ConversationThread generation，避免把轻量窗口
-  整理冒充正式摘要代次。
+  `model_visible_context_compaction.v1` 展示事件；持久 main/child/grandchild 必须先提交同一
+  ConversationThread checkpoint/generation，事件再投影该代次且不写 child canonical run。只有
+  presentation/no-save 的窗口整理使用 turn-local generation。child 的常驻 `compact N` 始终只读独立
+  ConversationThread generation。
 - 会话恢复只投影 `cmd_chat` 已从 canonical session 加载的 user/assistant history；TUI 不另读写正文。
   journal、diagnostic、block cache 和 stable display window 均有显式上限，迟到/重复事件仍由 seen identity
   拒绝，裁剪不产生第二会话账。
@@ -891,8 +892,9 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 生命周期直接对照 会话运行时 `agent/status.rs`、`agent/control.rs` 与 `multi_agents/wait.rs`：只读 typed
   status/notification，不解析“模型已生成回复”“已经完成”等自然语言。终态 child 清除旧 activity；首次
   attempt 隐藏，只有 `attempts > 1` 才显示 `重试 N 次`。
-- child token 和 Compact 次数都从 exact run 的结构化事实只读投影；迁移期次数为 durable apply 行与 typed
-  native IR reduction 的真实总数，TUI 不自行估算或从 token 降幅猜测。后台 main 的最近
+- child token 从 exact run 的结构化事实只读投影，Compact 次数只读 `agent_thread_id` 对应
+  ConversationThread generation；持久 native IR reduction 与 transcript 压缩都在该 generation 内提交，
+  旧 durable apply/attribute 不回读，TUI 不自行估算或从 token 降幅猜测。后台 main 的最近
   thinking/tool/retry/finalizing 是 Gateway 进程内有界、易失、纯展示快照，不参与完成、派工、重试、权限或恢复。
 - 后台主代理的可交付最终正文以普通 `assistant_completed` 进入 transcript，不再伪装成灰色系统通知；被
   delivery contract 抑制或没有正文的内部轮不写用户通知。一次模型轮返回只将 main 活动设为
@@ -961,8 +963,9 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 
 ## 2026-08-22 主/子/孙代理统一 Conversation Compact
 
-状态：统一 Compact 与 child thread 身份修复已推送、部署；第二轮真实 TUI 抓到 child 工作区退回
-Gateway 仓库的回归，底层修复与定向回归已完成，待推送、部署和全新 TUI 复测。
+状态：child thread 与工作区继承已推送、部署；>40k 功能行真实 TUI 又抓到 mid-turn 原生工具历史
+已从 113.1k 降到 35.5k、但 canonical generation 仍为 0。统一账本实现与 focused 回归已完成，待严格 gate、
+推送部署和全新 TUI 验收。
 
 - 解决问题：长时间工作的 child/grandchild 与 main 一样会经历多轮工具调用、上下文压力、崩溃恢复和继续
   运行。旧实现中 main 使用 `ConversationThread summary/cursor/generation/checkpoint/CAS`，task-local child
@@ -991,13 +994,15 @@ Gateway 仓库的回归，底层修复与定向回归已完成，待推送、部
   latest-user 索引；child 每次尝试按 `conversation_request_id` 先落 user、轮前 Compact、注入 summary/raw
   tail、模型运行、终态落 assistant。provider overflow 在同一 attempt 内强制 Compact 并携带 typed tool/
   guidance 进度重试，最多八次；没有 generation 或真实进展时明确失败，不盲目重放。
-- 收口结果：task-local 权限/Memory 隔离保留，但结构化 transcript-authoritative 标记让 durable Compact 只由
+- 收口边界：task-local 权限/Memory 隔离保留，但结构化 transcript-authoritative 标记让 durable Compact 只由
   ConversationStore 接管；旧 `compact_applies/continue` 不再由正式 child runner 生成。TUI、Web 和 SQLite
-  投影只读 child thread generation/checkpoint；native IR reduction 仍可作为活动回合临时事件展示，但不写
-  canonical run、不累计到 `compact N`。旧投影字段和旧 ledger 不设长期双读。
-- 本地验收：覆盖 child/grandchild 独立线程、父子正文隔离、轮前阈值 Compact、provider overflow 后强制
-  Compact 同 attempt 重试、checkpoint/generation、owner Memory 不污染、旧 apply 目录不生成，以及遗留
-  native reduction/ledger 即使存在也不能改变 TUI 次数。真实 MiniMax-M2.7 长任务仍需部署后通过新 TUI 验收。
+  投影只读 child thread generation/checkpoint；允许持久化的 native IR reduction 也必须先写同一 Compact ledger
+  checkpoint 并推进该 generation，而不是写 canonical run 或另加显示计数。只有 presentation/no-save 回合的
+  窗口整理保持临时事件。旧投影字段和旧 ledger 不设长期双读。
+- 本地验收：覆盖 child/grandchild 独立线程、父子正文隔离、轮前 transcript Compact、运行中 main/child
+  native IR generation 1→2、上一代摘要合并、精确 ToolCall ID checkpoint、provider overflow forced
+  checkpoint、摘要失败与 checkpoint-before-CAS 冲突回滚、owner Memory 不污染、旧 apply 目录不生成，
+  以及遗留 reduction/ledger 不能改变 TUI 次数。真实 MiniMax-M2.7 长任务仍需部署后通过新 TUI 验收。
 - 压缩策略与单次回合权限分层：`compact_trigger_tokens` 始终投影同一配置压缩点；
   presentation/no-save 回合不允许持久 apply 时，只把当轮强制压缩的有效硬限放到完整窗口，
   不得把公开策略改写成 100%。这与 会话运行时 分开 `auto_compact_scope_limit` 和
@@ -1009,7 +1014,7 @@ Gateway 仓库的回归，底层修复与定向回归已完成，待推送、部
   `owner_home/workspace/runtime/services/`。pid、heartbeat、queue、HTTP 端口不能再由 TUI cwd 选择；
   显式相对服务路径也以 owner workspace 解析。
 - 项目目录是每个 durable thread 的 typed 配置。TUI/CLI ask 携带绝对 `workspace.cwd/roots`，Gateway
-  校验后写入 `conversation_thread.v6`；后续未覆盖的 turn、后台 main 和 child 继续继承。远程 owner
+  校验后写入 `conversation_thread.v7`；后续未覆盖的 turn、后台 main 和 child 继续继承。远程 owner
   不能提交主机 cwd，非法目录在模型前 fail-closed，不得退回 daemon cwd。
 - Tool Registry 的授权、资源锁和实际 handler 只接收同一 effective cwd/root；任务交付与子代理相对
   output ref 读取同一会话字段。该适配对照 会话运行时 thread/turn 的 `cwd/runtime_workspace_roots`，没有新增

@@ -1,21 +1,23 @@
 # STATUS
 
-## 2026-08-22 主/子/孙代理统一 Conversation Compact（本地候选）
+## 2026-08-22 主/子/孙代理统一 Conversation Compact（运行中 IR 底层候选）
 
-- 正式 Prompt 3 的 deepseek child 当前上下文从触发线附近降到约 35.7k，但 run 内没有 durable
-  `compact_applies` 行；实际发生的是 `_tool_loop_service` 的 native IR 成对裁剪。旧事件只活在回合内 sink，
-  child 终态投影因此错误显示 `compact 0`。
-- 当前本地候选已按 会话运行时 落地“每个 main/child/grandchild 各有独立 thread，共用同一 Conversation
-  Compact 状态机”：child 创建或旧任务恢复时按稳定 `agent_thread_id` 物化线程；每个 attempt 幂等落
-  user/assistant，轮前和 provider overflow 后都调用 `conversation/compact.py` 的摘要、checkpoint、CAS 与
-  失败熔断。父、子、兄弟正文不互相复制。
-- task-local 工具/工作区/Memory 隔离保留，但 durable Compact owner 只认结构化 transcript-authoritative
-  标记并交给 ConversationStore；正式 child runner 不再生成旧 `compact_applies/continue`。child 行、Web
-  和 SQLite 只读独立 thread generation/checkpoint。`model_visible_context_compaction.v1` 仍可实时显示当轮
-  native IR 裁剪，但不再持久写 run attribute，也不与正式次数相加。
-- 本地 fake/replay 已覆盖轮前大历史、provider overflow 后同 attempt 强制 Compact、child/grandchild 独立
-  transcript、checkpoint/generation、owner Memory 不污染、旧 apply 目录不生成及遗留计数不回读。相关
-  focused 组合已通过；严格 gate、推送、`.7` 单 Gateway 部署和用户指定大型项目真实 TUI 尚待执行。
+- `bcbd568` 已在 `.7` 唯一 Gateway 修复 child 工作区继承。随后全新 Prompt 4 使用 lazygit 固定提交
+  `ea916395`（61,258 功能行）真实运行 7 个 child，全部自然 DONE；worker-6 的 provider-visible context
+  从 113.1k 降到 35.5k，但 exact `agent_thread_id` 对应 thread 仍为 generation 0、checkpoint/summary 为空。
+  现场已结构化 `/stop`，证明缺口是 native IR 在 ConversationStore 账外成对删除，不是 TUI 漏刷。
+- 当前本地候选按 会话运行时 `run_turn -> run_auto_compact -> replace_compacted_history` 收口：允许持久化的
+  main/child/grandchild 达阈值或 provider 实报 overflow 时，先将上一代 thread summary 与当前工具历史合成
+  完整替代摘要，写同一 owner ledger 的 `source_kind=live_tool_ir` checkpoint，再用 generation CAS 提交。
+  transcript cursor 不前移，新增 `compact_source_tool_pairs` 只记录累计来源；TUI/Web/SQLite 仍只读一个
+  generation/checkpoint，不加 native 旁路计数。
+- native provider overflow 已删除生产链中的账外 20% PTL，改为强制同一完整预算事务。摘要、checkpoint 或
+  CAS 失败时恢复压缩前 IR/tool-context，只更新同一 thread failure circuit；presentation/no-save 辅助回合
+  仍可临时整理窗口，但不得成为 `compact N`。
+- focused fake/replay 已覆盖 main/child thread、generation 1→2、上一代摘要合并、精确移除/保留 ToolCall ID、
+  provider forced checkpoint、摘要失败与 checkpoint-before-CAS 冲突回滚；Gateway conversation、subagent
+  runtime 与 TUI activity 共 201 项联合回归通过。Ruff、doc sync、strict code-size、diff 与 clean-package 中除
+  新文件尚未暂存这一预期提示外均已通过；待暂存后复核、推送、`.7` 部署和全新 Prompt 4 真机。
 - `e59acad` 在唯一 Gateway 的全新 Prompt 3 TUI 中证明 6 个 child 均一次 attempt 自然
   DONE，实时 context 与终态行正常；该轮 child 最高约 89.4k，未达 115.2k 压缩点，
   因此 `compact 0` 是真实结果，不冒充压缩成功证据。

@@ -36,6 +36,22 @@ class CompactCheckpointRequest:
     forced: bool
 
 
+# LLM: This request records a mid-turn native IR replacement in the same owner/thread ledger.
+# 类用途: 保存一次正在运行回合的工具往返压缩候选，以及被移除和保留的精确调用编号。
+@dataclass(frozen=True)
+class LiveToolCompactCheckpointRequest:
+    thread: ConversationThread
+    summary: str
+    source_tool_call_ids: tuple[str, ...]
+    retained_tool_call_ids: tuple[str, ...]
+    projected_tokens_before: int
+    projected_tokens_after: int
+    policy: RuntimeCompactPolicy
+    request_id: str
+    attempt_id: str
+    forced: bool = False
+
+
 # LLM: The returned id is content-addressed across one intended generation so retries cannot
 # create competing identities for the same candidate.
 # 函数用途: 根据 thread、目标代次、摘要和消息边界生成稳定 checkpoint 编号。
@@ -50,6 +66,29 @@ def compact_checkpoint_id(
             thread.thread_id,
             str(thread.compact_generation + 1),
             str(source_end_message_id),
+            str(summary),
+        ]
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
+    return f"compact-{thread.compact_generation + 1}-{digest}"
+
+
+# LLM: Live-tool checkpoint identity includes the exact dropped calls and intended generation.
+# 函数用途: 为同一回合的一次工具历史压缩生成稳定编号，重试不会造出竞争 checkpoint。
+def live_tool_compact_checkpoint_id(
+    thread: ConversationThread,
+    *,
+    summary: str,
+    source_tool_call_ids: tuple[str, ...],
+    attempt_id: str,
+) -> str:
+    payload = "\0".join(
+        [
+            thread.thread_id,
+            str(thread.compact_generation + 1),
+            "live_tool_ir",
+            str(attempt_id or ""),
+            *source_tool_call_ids,
             str(summary),
         ]
     )
@@ -99,6 +138,9 @@ def write_compact_checkpoint(
             "source_end_byte_offset": max(0, int(request.source_end_byte_offset)),
             "source_messages": len(compact_rows),
             "source_messages_total": thread.compact_source_messages + len(compact_rows),
+            "source_tool_pairs": 0,
+            "source_tool_pairs_total": thread.compact_source_tool_pairs,
+            "source_kind": "transcript",
             "retained_tail_start_message_id": (
                 retained_tail[0].message_id if retained_tail else ""
             ),
@@ -127,8 +169,103 @@ def write_compact_checkpoint(
     return checkpoint_id
 
 
+# LLM: Persist a complete live-tool candidate before the ConversationThread generation advances;
+# the unchanged transcript cursor and exact call ids make recovery source boundaries explicit.
+# 函数用途: 把当前回合被替换的工具往返先写入 owner Compact 账本，成功后才允许 thread 提交。
+def write_live_tool_compact_checkpoint(
+    agent: SimpleAgent,
+    request: LiveToolCompactCheckpointRequest,
+) -> str:
+    thread = request.thread
+    summary = str(request.summary or "").strip()
+    source_ids = tuple(
+        dict.fromkeys(
+            str(item).strip()
+            for item in request.source_tool_call_ids
+            if str(item or "").strip()
+        )
+    )
+    retained_ids = tuple(
+        dict.fromkeys(
+            str(item).strip()
+            for item in request.retained_tool_call_ids
+            if str(item or "").strip()
+        )
+    )
+    if not source_ids:
+        raise ValueError("live tool compact checkpoint requires source tool pairs")
+    if not summary:
+        raise ValueError("live tool compact checkpoint requires a summary")
+    home = getattr(agent, "home_paths", None)
+    raw_root = str(getattr(home, "owner_compact_dir", "") or "").strip()
+    if not raw_root:
+        raise OSError("owner compact directory is unavailable")
+    checkpoint_id = live_tool_compact_checkpoint_id(
+        thread,
+        summary=summary,
+        source_tool_call_ids=source_ids,
+        attempt_id=request.attempt_id,
+    )
+    backend = getattr(agent, "backend", None)
+    append_jsonl(
+        Path(raw_root) / "conversations" / f"{thread.thread_id}.jsonl",
+        {
+            "schema": "conversation_compact_checkpoint.v2",
+            "event": "conversation_compact_checkpoint",
+            "status": "validated_candidate",
+            "commit_authority": "conversation_thread.compact_checkpoint_id",
+            "checkpoint_id": checkpoint_id,
+            "previous_checkpoint_id": thread.compact_checkpoint_id,
+            "thread_id": thread.thread_id,
+            "previous_generation": thread.compact_generation,
+            "generation": thread.compact_generation + 1,
+            "source_kind": "live_tool_ir",
+            "source_start_message_id": "",
+            "source_start_byte_offset": thread.compacted_through_byte_offset,
+            "source_end_message_id": "",
+            "source_end_byte_offset": thread.compacted_through_byte_offset,
+            "source_messages": 0,
+            "source_messages_total": thread.compact_source_messages,
+            "source_tool_call_ids": list(source_ids),
+            "source_tool_pairs": len(source_ids),
+            "source_tool_pairs_total": (
+                thread.compact_source_tool_pairs + len(source_ids)
+            ),
+            "retained_tool_call_ids": list(retained_ids),
+            "retained_tool_pairs": len(retained_ids),
+            "projected_tokens_before": max(
+                0,
+                int(request.projected_tokens_before),
+            ),
+            "projected_tokens_after": max(
+                0,
+                int(request.projected_tokens_after),
+            ),
+            "context_window_tokens": request.policy.context_window_tokens,
+            "trigger_percent": request.policy.trigger_percent,
+            "trigger_tokens": request.policy.trigger_tokens,
+            "forced": bool(request.forced),
+            "request_id": str(request.request_id or ""),
+            "attempt_id": str(request.attempt_id or ""),
+            "summary": summary,
+            "summary_sha256": hashlib.sha256(summary.encode("utf-8")).hexdigest(),
+            "operation_evidence": json.loads(
+                json.dumps(thread.compact_operation_evidence, ensure_ascii=False)
+            ),
+            "backend": str(getattr(backend, "name", "") or ""),
+            "model": str(getattr(backend, "model_name", "") or ""),
+            "created_at": time.time(),
+        },
+        sort_keys=True,
+    )
+    return checkpoint_id
+
+
 __all__ = [
     "CompactCheckpointRequest",
+    "LiveToolCompactCheckpointRequest",
     "compact_checkpoint_id",
+    "live_tool_compact_checkpoint_id",
+    "write_live_tool_compact_checkpoint",
     "write_compact_checkpoint",
 ]

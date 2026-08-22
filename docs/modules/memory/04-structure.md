@@ -21,6 +21,20 @@
 - `memory_path` 等路径由 home 解析统一给出（显式配置 > MY_AGENT_HOME 环境变量 >
   ~/.my-agent 兜底），记忆模块不自行猜测 owner home。
 
+## 运行中 native 工具历史摘要
+
+- `agent/memory_archive/compact_semantic_summary.py` 是 carried archive 续跑摘要与运行中
+  native IR 摘要共用的语义摘要入口，但不拥有 Compact 状态、工具执行或完成判定。
+- 运行中真实 turn 的摘要输入由“上一代 ConversationThread 完整摘要 + 本次 native 工具
+  历史 + 当前任务”组成，输出是可独立替代上一代的完整摘要，不是只描述本次增量的片段。
+- `agent/conversation/live_tool_compact.py` 才负责把这份摘要连同精确移除/保留的 tool-call
+  ID 写入 checkpoint，并通过 ConversationStore 的同一 CAS 推进 generation；TUI 只投影
+  已提交的代次和 token 前后值。
+- 辅助、不保存的展示回合可以继续使用临时摘要并静默退回机械窗口；持久且正文权威的
+  main/child/grandchild 不能在摘要失败后先删除历史，必须整体失败并恢复原 native IR。
+- 摘要不是执行事实源。精确副作用和交付仍以 raw archive、operation ledger、artifact
+  registry、任务工作区和真实文件为准。
+
 ## 2026-08-17 测试适配记录
 
 - 记忆相关测试的 `tool_protocol="text"` 配置移除、假后端 native 化、协议快照默认

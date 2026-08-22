@@ -665,6 +665,8 @@ class ConversationThreadStore(ConversationBaseStore):
             ),
         )
 
+    # LLM: One CAS advances transcript and live-tool source totals with the same summary/checkpoint.
+    # 函数用途: 原子提交一次会话压缩，并同时保存累计消息数和工具往返数。
     def update_compact_state(
         self,
         thread_id: str,
@@ -693,6 +695,10 @@ class ConversationThreadStore(ConversationBaseStore):
                 compact_generation=thread.compact_generation + 1,
                 compact_updated_at=current,
                 compact_source_messages=max(0, int(commit.source_messages)),
+                compact_source_tool_pairs=max(
+                    0,
+                    int(commit.source_tool_pairs),
+                ),
                 compact_checkpoint_id=str(commit.checkpoint_id),
                 compact_consecutive_failures=0,
                 compact_failure_updated_at=0.0,

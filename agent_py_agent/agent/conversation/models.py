@@ -5,7 +5,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-SCHEMA_VERSION = "conversation_thread.v6"
+SCHEMA_VERSION = "conversation_thread.v7"
 
 THREAD_TASK_LINK_ACTIVE_STATUS = "active"
 THREAD_TASK_LINK_INACTIVE_STATUSES = frozenset(
@@ -291,6 +291,7 @@ class ConversationCompactCommit:
     compacted_through_message_id: str
     compacted_through_byte_offset: int
     source_messages: int
+    source_tool_pairs: int
 
 
 # LLM: ConversationThread is the sole durable authority for transcript, compact cursor/checkpoint,
@@ -310,6 +311,7 @@ class ConversationThread:
     compact_generation: int = 0
     compact_updated_at: float = 0.0
     compact_source_messages: int = 0
+    compact_source_tool_pairs: int = 0
     compact_checkpoint_id: str = ""
     compact_consecutive_failures: int = 0
     compact_failure_updated_at: float = 0.0
@@ -333,8 +335,8 @@ class ConversationThread:
     runtime_workspace_roots: tuple[str, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    # LLM: Persist v6 compact guards, sticky task workspace and validated client cwd together.
-    # 函数用途: 将完整会话状态写成可跨进程读取的 JSON 字典，并保存压缩凭据与客户端工作目录。
+    # LLM: Persist v7 transcript/tool compact sources, guards, sticky workspace and client cwd together.
+    # 函数用途: 将完整会话状态写成可跨进程读取的 JSON 字典，并保存两类压缩来源与客户端工作目录。
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["schema_version"] = SCHEMA_VERSION
@@ -343,8 +345,8 @@ class ConversationThread:
         payload["active_task_ids"] = list(self.active_task_ids)
         return payload
 
-    # LLM: Older records load with empty v6 cwd/root fields and no guessed execution location.
-    # 函数用途: 兼容读取旧会话记录；缺少 checkpoint、失败状态或客户端目录时使用安全空值。
+    # LLM: Older records load with zero live-tool compact sources and no guessed execution state.
+    # 函数用途: 兼容读取旧会话记录；缺少工具压缩数、checkpoint、失败状态或客户端目录时使用安全空值。
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ConversationThread:
         bindings = data.get("channel_bindings")
@@ -369,6 +371,10 @@ class ConversationThread:
             compact_generation=max(0, int(data.get("compact_generation") or 0)),
             compact_updated_at=float(data.get("compact_updated_at") or 0.0),
             compact_source_messages=max(0, int(data.get("compact_source_messages") or 0)),
+            compact_source_tool_pairs=max(
+                0,
+                int(data.get("compact_source_tool_pairs") or 0),
+            ),
             compact_checkpoint_id=str(data.get("compact_checkpoint_id") or ""),
             compact_consecutive_failures=max(
                 0,

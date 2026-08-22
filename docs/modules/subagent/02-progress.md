@@ -1,5 +1,22 @@
 # Subagent Progress
 
+## 2026-08-22 运行中工具历史纳入唯一 Conversation Compact
+
+- >40k 功能行换语言复刻真机轮中，child 上下文从 113.1k 降到 35.5k，但它自己的
+  `ConversationThread.compact_generation/checkpoint_id` 仍为 `0/空`。这证明旧
+  `model_visible_context_compaction.v1` 是 `_tool_loop_service` 的 turn-local 旁路，不是前端漏刷。
+- 对照 会话运行时 `session/turn.rs::run_turn/run_auto_compact` 与
+  `session/mod.rs::replace_compacted_history` 后，持久 main/child/grandchild 的 native IR 成对回收现也提交到
+  同一 ConversationStore：先把上一代 summary 与当前工具历史合成完整替代摘要，写 owner-scoped
+  `source_kind=live_tool_ir` checkpoint，再用 generation CAS 提交；transcript cursor 保持不动，单独累计
+  `compact_source_tool_pairs`。
+- provider 实报 overflow 不再走账外 20% native PTL；它强制复用同一完整预算压缩。摘要、checkpoint 或 CAS
+  失败会恢复原 IR/tool-context，并只更新同一 thread 的失败熔断。presentation/no-save 辅助回合仍可临时整理
+  窗口，但不会成为 `compact N`。
+- focused fake/replay 已覆盖 main/child 两类 thread、连续 generation 1→2、上一代摘要合并、精确 ToolCall ID
+  checkpoint、provider forced 标记、摘要失败与 checkpoint-before-CAS 冲突回滚。真实 MiniMax-M2.7 TUI
+  仍须随新部署重新从干净 tmux 验收。
+
 ## 2026-08-22 子代理/孙代理统一 Conversation Compact（首轮真机回归已修复）
 
 - deepseek child 的 provider-visible context 已从触发线附近降到约 35.7k，证明回合内 native IR 真正完成

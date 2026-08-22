@@ -109,4 +109,5 @@ child 的自然最终回复、typed lifecycle event 与真实 artifact refs 是�
 main/child/grandchild 现在各自从独立 ConversationThread 的 summary/raw tail 恢复，并全部走同一
 Conversation Compact。task-local 只保留子代理权限、Memory 隔离和运行工作区，不再生成旧 compact apply/
 continue。排障时以 `task.agent_thread_id -> ConversationThread.compact_generation/checkpoint_id` 为正式次数与
-恢复事实；活动回合的 native IR reduction 只看实时事件，不能累计成 durable Compact。
+恢复事实；允许持久化的活动回合 native IR reduction 必须以 `source_kind=live_tool_ir` 进入同一 checkpoint/
+generation，实时事件只投影提交结果。presentation/no-save 临时 reduction 不计数。

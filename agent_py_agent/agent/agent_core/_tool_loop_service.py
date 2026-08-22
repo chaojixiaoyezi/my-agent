@@ -70,7 +70,6 @@ from .tool_guard.loop_hints import (
 )
 from .tool_ir_compact import (
     compact_native_ir_to_token_budget,
-    reclaim_oldest_native_ir_pairs,
 )
 from .tool_ir_history import record_tool_call_ir, replace_compaction_summary_ir
 from .tool_loop.completion import (
@@ -136,6 +135,21 @@ class _ToolStepRequest:
 class _PendingDeferredToolDrainResult:
     tool_rounds: int
     final_response: ModelResponse | None = None
+
+
+# LLM: This is one immutable candidate for reducing native history; binding and generation are
+# point-in-time facts and the plan must be discarded after either commit or rollback.
+# 类用途: 固定一次运行中 Compact 的阈值、摘要、线程绑定和工具调用边界，供提交与回滚共用。
+@dataclass(frozen=True)
+class _NativeCompactPlan:
+    policy: object
+    binding: object | None
+    trigger_tokens: int
+    target_tokens: int
+    before_tokens: int
+    before_call_ids: tuple[str, ...]
+    semantic_summary: str
+    forced: bool
 
 
 # R2-2: 无进展兜底——模型连续多轮纯工具调用且无正文产出(陷入循环/工具卡住)时,
@@ -358,13 +372,15 @@ def _string_sequence(value: object) -> list[str]:
     return [str(item).strip() for item in value if str(item).strip()]
 
 
-# LLM: Native history is reduced only as complete ToolCall/ToolResult pairs, using the exact
-# provider-visible estimator and existing RuntimeCompactPolicy; this mutates only current-turn IR.
-# 函数用途: 原生工具历史达到统一阈值时，删除最旧完整往返并留下有界恢复提示，避免当前请求被重启。
+# LLM: Native history is reduced only as complete ToolCall/ToolResult pairs. A save-enabled
+# authoritative turn must checkpoint and CAS the same ConversationThread before the mutation lives.
+# 函数用途: 原生工具历史达到统一阈值时，压缩最旧完整往返并将真实回合提交到唯一 Compact 账本。
 def _fit_native_ir_to_shared_budget(
     agent: object,
     params: ToolLoopExecuteParams,
     prompt: str,
+    *,
+    force: bool = False,
 ) -> int:
     """用统一 compact 策略把 native 完整请求收敛到健康的近期尾部。
 
@@ -377,56 +393,145 @@ def _fit_native_ir_to_shared_budget(
     if not native_tool_use_active(params):
         return 0
     from .model.context_pressure import model_visible_context_tokens
+
+    def estimator() -> int:
+        return model_visible_context_tokens(agent, params, prompt)
+
+    plan = _prepare_native_compact_plan(
+        agent,
+        params,
+        prompt,
+        estimator=estimator,
+        force=force,
+    )
+    if plan is None:
+        return 0
+    return _apply_native_compact_plan(agent, params, estimator, plan)
+
+
+# LLM: Policy resolution stays identical for preflight and provider-overflow entrypoints.
+# 函数用途: 依据本回合 save/context scope 生成唯一运行中 Compact 策略。
+def _native_compact_policy(agent: object, params: ToolLoopExecuteParams) -> object:
     from .runtime.context_compactor import runtime_compact_policy
 
     save = params.save
     if save is None:
         save = bool(getattr(getattr(agent, "config", None), "auto_save_memory", True))
-    policy = runtime_compact_policy(
+    return runtime_compact_policy(
         agent,
         save=bool(save),
         context_scope=str(params.context_scope or "default"),
     )
+
+
+# LLM: Planning may call the summary backend but cannot mutate native IR or advance generation.
+# 函数用途: 在删减历史前算清触发线、健康尾部、线程绑定和完整替代摘要。
+def _prepare_native_compact_plan(
+    agent: object,
+    params: ToolLoopExecuteParams,
+    prompt: str,
+    *,
+    estimator: Callable[[], int],
+    force: bool,
+) -> _NativeCompactPlan | None:
+    from .model.context_pressure import model_visible_context_tokens
+
+    policy = _native_compact_policy(agent, params)
     limit = int(
         policy.trigger_tokens
         if policy.allow_persistent_apply
         else policy.context_window_tokens
     )
-    if limit <= 0:
-        return 0
-
-    def estimator() -> int:
-        return model_visible_context_tokens(agent, params, prompt)
-
     before_tokens = estimator()
-    if before_tokens < limit:
-        return 0
-
-    # 先算不可回收的 prompt/schema/当前用户输入基线，再在其上保留统一策略规定的
-    # recent tail。这样一次窗口化会获得真实余量，不会每增加一轮就在 90% 线附近抖动。
+    before_call_ids = _native_tool_call_ids(params)
+    if limit <= 0 or (before_tokens < limit and not force) or len(before_call_ids) <= 1:
+        return None
     base_params = replace(params, tool_ir_history=[])
     base_tokens = model_visible_context_tokens(agent, base_params, prompt)
     target = min(limit - 1, base_tokens + int(policy.recent_tail_tokens or 0))
-    semantic_summary = _native_tool_history_summary(agent, params)
-    dropped = compact_native_ir_to_token_budget(
-        params,
-        max_tokens=max(1, target),
-        token_estimator=estimator,
+    binding, summary = _live_compact_binding_and_summary(agent, params, policy)
+    return _NativeCompactPlan(
+        policy=policy,
+        binding=binding,
+        trigger_tokens=limit,
+        target_tokens=target,
+        before_tokens=before_tokens,
+        before_call_ids=before_call_ids,
+        semantic_summary=summary,
+        forced=force,
     )
-    if dropped:
-        if semantic_summary:
-            replace_compaction_summary_ir(params, semantic_summary)
-        dropped = _settle_native_ir_window(
-            agent=agent,
-            params=params,
-            estimator=estimator,
-            target=target,
-            dropped=dropped,
-            before_tokens=before_tokens,
-            trigger_tokens=limit,
-            semantic_summary=semantic_summary,
+
+
+# LLM: An authoritative turn binds its exact thread before summary generation; empty summaries
+# fail through the same circuit instead of allowing an untracked destructive reduction.
+# 函数用途: 找到本代理自己的会话线程并生成完整替代摘要，失败时记录统一熔断事实。
+def _live_compact_binding_and_summary(
+    agent: object,
+    params: ToolLoopExecuteParams,
+    policy: object,
+) -> tuple[object | None, str]:
+    from ..conversation.live_tool_compact import (
+        record_live_tool_compact_failure,
+        resolve_live_tool_compact_binding,
+    )
+
+    binding = resolve_live_tool_compact_binding(
+        agent,
+        task_attributes=params.task_attributes,
+        policy=policy,
+    )
+    summary = _native_tool_history_summary(
+        agent,
+        params,
+        previous_summary=(binding.thread.summary if binding is not None else ""),
+    )
+    if binding is None or summary:
+        return binding, summary
+    from ..conversation.compact_guard import ConversationCompactError
+
+    error = ConversationCompactError(
+        "live tool compact backend returned an empty summary",
+        code="COMPACT_EMPTY_SUMMARY",
+    )
+    record_live_tool_compact_failure(binding, error)
+    raise error
+
+
+# LLM: Mutation is transactional in memory: any summary/checkpoint/CAS failure restores both IR
+# and its human-readable window marker before sharing the failure circuit.
+# 函数用途: 按计划成对删减工具历史；提交失败时把模型上下文完整恢复到操作前。
+def _apply_native_compact_plan(
+    agent: object,
+    params: ToolLoopExecuteParams,
+    estimator: Callable[[], int],
+    plan: _NativeCompactPlan,
+) -> int:
+    from ..conversation.live_tool_compact import record_live_tool_compact_failure
+
+    original_ir = list(params.tool_ir_history)
+    original_tool_context = list(params.tool_context)
+    try:
+        dropped = compact_native_ir_to_token_budget(
+            params,
+            max_tokens=max(1, plan.target_tokens),
+            token_estimator=estimator,
         )
-    return dropped
+        if dropped:
+            if plan.semantic_summary:
+                replace_compaction_summary_ir(params, plan.semantic_summary)
+            dropped = _settle_native_ir_window(
+                agent=agent,
+                params=params,
+                estimator=estimator,
+                plan=plan,
+                dropped=dropped,
+            )
+        return dropped
+    except Exception as exc:
+        params.tool_ir_history[:] = original_ir
+        params.tool_context[:] = original_tool_context
+        record_live_tool_compact_failure(plan.binding, exc)
+        raise
 
 
 # LLM: Settling continues pairwise reduction until summary plus handoff also fit the exact
@@ -437,11 +542,56 @@ def _settle_native_ir_window(
     agent: object,
     params: ToolLoopExecuteParams,
     estimator: Callable[[], int],
+    plan: _NativeCompactPlan,
+    dropped: int,
+) -> int:
+    dropped = _reduce_native_ir_to_target(
+        params,
+        estimator=estimator,
+        target=plan.target_tokens,
+        dropped=dropped,
+    )
+    after_tokens = estimator()
+    preserved_pairs = _native_tool_result_count(params)
+    canonical_generation = _commit_native_ir_generation(
+        agent,
+        params,
+        plan,
+        after_tokens=after_tokens,
+    )
+    _publish_native_ir_compaction(
+        agent,
+        params,
+        before_tokens=plan.before_tokens,
+        after_tokens=after_tokens,
+        trigger_tokens=plan.trigger_tokens,
+        dropped_pairs=dropped,
+        preserved_pairs=preserved_pairs,
+        canonical_generation=canonical_generation,
+    )
+    _LOGGER.info(
+        "native tool history compacted: before_tokens=%d after_tokens=%d "
+        "trigger_tokens=%d dropped_pairs=%d preserved_pairs=%d "
+        "semantic_summary=%s summary_chars=%d",
+        plan.before_tokens,
+        after_tokens,
+        plan.trigger_tokens,
+        dropped,
+        preserved_pairs,
+        bool(plan.semantic_summary),
+        len(plan.semantic_summary),
+    )
+    return dropped
+
+
+# LLM: Re-estimation includes the replacement summary and marker, and still removes only pairs.
+# 函数用途: 把摘要也计入预算，若仍超目标就继续成对删最旧工具往返直到稳定。
+def _reduce_native_ir_to_target(
+    params: ToolLoopExecuteParams,
+    *,
+    estimator: Callable[[], int],
     target: int,
     dropped: int,
-    before_tokens: int,
-    trigger_tokens: int,
-    semantic_summary: str,
 ) -> int:
     record_native_ir_window(
         params,
@@ -463,35 +613,53 @@ def _settle_native_ir_window(
             omitted_count=dropped,
             preserved_count=_native_tool_result_count(params),
         )
-    after_tokens = estimator()
-    preserved_pairs = _native_tool_result_count(params)
-    _publish_native_ir_compaction(
-        agent,
-        params,
-        before_tokens=before_tokens,
-        after_tokens=after_tokens,
-        trigger_tokens=trigger_tokens,
-        dropped_pairs=dropped,
-        preserved_pairs=preserved_pairs,
-    )
-    _LOGGER.info(
-        "native tool history compacted: before_tokens=%d after_tokens=%d "
-        "trigger_tokens=%d dropped_pairs=%d preserved_pairs=%d "
-        "semantic_summary=%s summary_chars=%d",
-        before_tokens,
-        after_tokens,
-        trigger_tokens,
-        dropped,
-        preserved_pairs,
-        bool(semantic_summary),
-        len(semantic_summary),
-    )
     return dropped
 
 
-# LLM: Mid-turn IR compaction is a transient active-turn event only. Durable child Compact count
-# comes exclusively from its ConversationThread generation, so this event must not update task state.
-# 函数用途: 记录当前活动回合第几次轻量裁剪，并把纯数字进度投给正在观看的客户端。
+# LLM: This is the only bridge from a settled native window to the canonical thread commit.
+# 函数用途: 计算精确移除/保留的调用编号，并把已稳定的窗口提交为下一代 Compact。
+def _commit_native_ir_generation(
+    agent: object,
+    params: ToolLoopExecuteParams,
+    plan: _NativeCompactPlan,
+    *,
+    after_tokens: int,
+) -> int:
+    if plan.binding is None:
+        return 0
+    from ..conversation.live_tool_compact import (
+        LiveToolCompactCommitRequest,
+        commit_live_tool_compact,
+    )
+
+    retained_call_ids = _native_tool_call_ids(params)
+    retained_call_id_set = set(retained_call_ids)
+    source_call_ids = tuple(
+        call_id
+        for call_id in plan.before_call_ids
+        if call_id not in retained_call_id_set
+    )
+    updated_thread = commit_live_tool_compact(
+        agent,
+        plan.binding,
+        LiveToolCompactCommitRequest(
+            summary=plan.semantic_summary,
+            source_tool_call_ids=source_call_ids,
+            retained_tool_call_ids=retained_call_ids,
+            projected_tokens_before=plan.before_tokens,
+            projected_tokens_after=after_tokens,
+            policy=plan.policy,
+            request_id=params.request_id,
+            attempt_id=params.attempt_id,
+            forced=plan.forced,
+        ),
+    )
+    return max(0, int(updated_thread.compact_generation or 0))
+
+
+# LLM: The event projects a committed ConversationThread generation when available; auxiliary
+# no-save turns use only an ephemeral per-turn generation and never mutate task state.
+# 函数用途: 把真实压缩代次和 token 前后值投给客户端；辅助回合只展示临时次数。
 def _publish_native_ir_compaction(
     _agent: object,
     params: ToolLoopExecuteParams,
@@ -501,12 +669,15 @@ def _publish_native_ir_compaction(
     trigger_tokens: int,
     dropped_pairs: int,
     preserved_pairs: int,
+    canonical_generation: int = 0,
 ) -> bool:
     state = params.live_archive_state
-    generation = 1
-    if isinstance(state, dict):
+    generation = max(0, int(canonical_generation or 0))
+    if generation <= 0 and isinstance(state, dict):
         generation = max(0, int(state.get("_native_ir_compact_generation") or 0)) + 1
         state["_native_ir_compact_generation"] = generation
+    elif generation <= 0:
+        generation = 1
     payload = {
         "schema": "model_visible_context_compaction.v1",
         "generation": generation,
@@ -520,7 +691,11 @@ def _publish_native_ir_compaction(
     writer = getattr(sink, "write_context_compaction", None)
     if not callable(writer):
         return False
-    return writer(payload) is not False
+    try:
+        return writer(payload) is not False
+    except Exception:
+        _LOGGER.debug("context compaction projection failed", exc_info=True)
+        return False
 
 
 # LLM: Count only canonical ToolResult items after pairwise reduction; callers use this for
@@ -535,12 +710,26 @@ def _native_tool_result_count(params: ToolLoopExecuteParams) -> int:
     )
 
 
+# LLM: Exact ordered call ids are structural compact boundaries and must come from ToolResult IR.
+# 函数用途: 按真实执行顺序列出当前原生工具往返编号，供 checkpoint 精确记录移除与保留范围。
+def _native_tool_call_ids(params: ToolLoopExecuteParams) -> tuple[str, ...]:
+    from ..backends.tool_ir import ToolResult
+
+    return tuple(
+        item.call_id
+        for item in list(getattr(params, "tool_ir_history", None) or [])
+        if isinstance(item, ToolResult) and str(item.call_id or "").strip()
+    )
+
+
 # LLM: native 压缩摘要复用 memory_archive 的唯一通用语义摘要后端；它只生成同一 IR
 # 的 replacement item，不创建 task/session compact 或新的事实账本。
 # 函数用途: 在旧工具对尚未回收时生成可持续回放的当前 turn 续接摘要。
 def _native_tool_history_summary(
     agent: object,
     params: ToolLoopExecuteParams,
+    *,
+    previous_summary: str = "",
 ) -> str:
     from ..memory_archive.compact_semantic_summary import (
         LiveToolHistorySummaryRequest,
@@ -549,6 +738,12 @@ def _native_tool_history_summary(
     )
 
     history = list(getattr(params, "tool_ir_history", None) or [])
+    if previous_summary:
+        # 上一代完整摘要已经通过 typed ConversationThread.summary 单独送入；从当前 IR
+        # 去掉其 CompactionSummary 投影，避免同一摘要在一次压缩请求里出现两遍。
+        from ..backends.tool_ir import CompactionSummary
+
+        history = [item for item in history if not isinstance(item, CompactionSummary)]
     if _native_tool_result_count(params) <= 1:
         return ""
     config = semantic_summary_config(agent)
@@ -559,6 +754,7 @@ def _native_tool_history_summary(
             history=history,
             backend=getattr(agent, "backend", None),
             task_prompt=str(getattr(params, "user_prompt", "") or ""),
+            previous_summary=str(previous_summary or ""),
             max_output_chars=config.max_input_chars,
         )
     )
@@ -633,12 +829,9 @@ def _natural_user_reply_step(
     )
 
 
-# LLM: 单轮 PTL retry（compact 三件套之三，蓝本 终端交互 truncateHeadForPTLRetry）。
-#   只接 provider 实报的 context_overflow（runtime_source=provider_error）；preflight
-#   预测溢出仍走 compact，不抢跑。每次回收最老 20% 工具结果正文后重拼 prompt 重试，
-#   上限 tool_context_ptl_retry_max（0=关闭）；无可回收或仍溢出时返回最后的溢出响应，
-#   落回原有 compact/resume 路径，保证永不卡死。
-# 函数用途: 模型报"上下文超限"时先丢最老工具输出做轻量重试，省一次重量级 compact。
+# LLM: Provider-reported overflow reuses the same native full-request compact transaction;
+# text protocol retains its bounded PTL reduction. No native pair may disappear off-ledger.
+# 函数用途: 模型实报上下文超限时，原生协议强制走唯一 Compact，文字协议再做轻量重试。
 def _retry_after_provider_context_overflow(
     agent,
     params: ToolLoopExecuteParams,
@@ -655,7 +848,7 @@ def _retry_after_provider_context_overflow(
         # Provider explicitly rejected this physical call before executing the
         # prompt. Retire its atomic submission batch before any PTL/preflight retry.
         restore_injected_turn_input_for_provider_retry(agent, params)
-        if not _ptl_reclaim_oldest(agent, params):
+        if not _ptl_reclaim_oldest(agent, params, prompt=prompt):
             break
         retries += 1
         prompt = build_tool_loop_prompt(agent, params)
@@ -678,16 +871,24 @@ def _is_provider_context_overflow(response) -> bool:
     )
 
 
-# LLM: PTL 单步回收的协议分流。native 下 provider 看到的是 IR 翻出的 messages（不是
-#   文本 tool_context），所以必须丢 IR 整对（drop_tool_call_pairs，无孤儿）才真的瘦身；
-#   text 协议保持原样丢文本正文。两侧都返回「是否还有可回收」，无可回收即停止 PTL 重试、
-#   落回重量级 compact/resume。
-# 函数用途: PTL 重试前按协议给「真正发往 provider 的上下文」瘦身一步。
-def _ptl_reclaim_oldest(agent, params: ToolLoopExecuteParams) -> bool:
-    from .tool_context.ptl_retry import _PTL_DROP_FRACTION, reclaim_oldest_tool_results_for_ptl
+# LLM: Native overflow must enter the checkpoint/CAS path; only text protocol keeps the legacy
+# proportional body trim because it has no native call/result pairs to persist.
+# 函数用途: 按协议处理供应商超限；原生历史记入 canonical Compact，文字历史按原比例缩短。
+def _ptl_reclaim_oldest(
+    agent,
+    params: ToolLoopExecuteParams,
+    *,
+    prompt: str = "",
+) -> bool:
+    from .tool_context.ptl_retry import reclaim_oldest_tool_results_for_ptl
 
     if native_tool_use_active(params):
-        return reclaim_oldest_native_ir_pairs(params, fraction=_PTL_DROP_FRACTION) > 0
+        return _fit_native_ir_to_shared_budget(
+            agent,
+            params,
+            str(prompt or ""),
+            force=True,
+        ) > 0
     return reclaim_oldest_tool_results_for_ptl(params.tool_context) > 0
 
 

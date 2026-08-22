@@ -14,9 +14,10 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   Todo 展示关联。当前 active task 的 Todo 只含 canonical `id/title/status`。提示词、回复、工具
   活动/输出、路径、权限和 secret 均不进入该 schema。
 - 当前上下文 token 来自统一 provider preflight 的 `model_visible_context_usage.v1.current_tokens`，在每次
-  真实 child 模型调用前写入 exact run 的有界数字快照；不是累计账单 token。迁移期 Compact 次数只读
-  exact run 的 durable apply 行和 typed native IR reduction 总数。控制面、TUI 和后续 Web 不得各算一套，
-  缺失/损坏事实按空展示处理且不改变 run 状态。
+  真实 child 模型调用前写入 exact run 的有界数字快照；不是累计账单 token。Compact 次数只读该 child
+  `agent_thread_id` 的 `ConversationThread.compact_generation`；transcript 旧段和运行中 native IR 都先提交
+  同一 checkpoint/CAS 后才推进该数。控制面、TUI 和后续 Web 不得各算一套，缺失/损坏事实按空展示处理
+  且不改变 run 状态。
 - `SubAgentTask.description` 是创建时保存的非权威职责短标题。单 child 可从 `create_subagents` 顶层写入；
   批量 `items[]` 必须逐项写入，顶层 description 只代表整批派工，不能扇出成所有 child 的相同文案。
   递归层级使用同一字段；省略时展示层只可退回该 child 的有界 goal，但任何运行、权限、恢复和结束逻辑
@@ -152,9 +153,14 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   只据此把 durable Compact 交给 ConversationStore，不再要求 `context_scope=conversation`，所以 delegated
   task-local 不会生成旧 `compact_applies/continue`。没有 generation 或 typed tool/guidance 进展时，溢出
   重试明确失败，避免无效重放。
-- child native IR 真裁剪时只通过 rich sink 发 `model_visible_context_compaction.v1` 活动事件；它不写 exact
-  run attribute，不代表摘要代次。`control_plane_projection.runtime_compact_count`、TUI 与 SQLite 只精确加载
-  `task.agent_thread_id` 的 `compact_generation/checkpoint_id`，旧 ledger/attribute 即使存在也不回读。
+- `conversation/live_tool_compact.py` 把允许持久化的 child native IR 真裁剪适配到同一 owner/thread
+  checkpoint/CAS：摘要合并上一代 thread summary，checkpoint 用 `source_kind=live_tool_ir` 保存精确移除与
+  保留的 ToolCall ID，cursor 不前移，`compact_source_tool_pairs` 累加。rich sink 事件展示提交后的 canonical
+  generation；它仍不写 exact run attribute。`control_plane_projection.runtime_compact_count`、TUI 与 SQLite
+  只精确加载 `task.agent_thread_id` 的 `compact_generation/checkpoint_id`，旧 ledger/attribute 即使存在也不回读。
+- provider 实报 overflow 的 native PTL 也调用上述完整预算事务，不再按 20% 在账外删工具对。摘要、checkpoint
+  或 CAS 失败时 `_tool_loop_service` 恢复压缩前 IR/tool-context 并走同一 thread failure circuit；只有
+  presentation/no-save 回合保留不计数的临时窗口事件。
 - 历史上已经删除的子代理专属 service、查树推动、session continue-packet 和多重索引不得因迁移复活；
   新 thread 只替换 Compact/会话持久层，不改变 `run_id/parent_run_id/root_run_id` 生命周期权威。
 - 当前 task 的结构化 goal 和 next actions 是恢复后的最高任务权威；旧摘要、归档包装和读取游标只能

@@ -14,15 +14,18 @@
 
 ## 2026-08-22 Delegated Agent Conversation Compact
 
-- **状态：实验性（当前工作树定向测试通过，尚未部署真机）**。main、child、grandchild 各自拥有独立
-  ConversationThread；child 创建/恢复、逐 attempt transcript、轮前 Compact、provider overflow 强制
-  Compact、checkpoint/generation CAS 均已接入与 main 相同的 `conversation/compact.py`。
+- **状态：实验性（当前工作树定向测试通过，尚未部署本候选）**。main、child、grandchild 各自拥有独立
+  ConversationThread；child 创建/恢复、逐 attempt transcript、轮前 transcript Compact，以及运行中 native IR
+  阈值/provider overflow 都接入同一 owner/thread checkpoint/generation CAS。后两者由
+  `conversation/live_tool_compact.py` 适配，不建立第二条状态机。
 - task-local 继续隔离长期 Memory、工具权限与工作区；父子 lineage 只由 run/thread metadata 表达，正文
   不共享。正式 child runner 不再生成旧 `compact_applies/continue`，TUI/Web/SQLite 的 child 次数只读取
-  exact `agent_thread_id` 的 generation。turn-local native IR 裁剪事件不属于 durable Compact。
-- fake/replay 已覆盖阈值触发、overflow 同 attempt 重试、child/grandchild 隔离、旧计数不回读和 owner
-  Memory 不污染。MiniMax-M2.7、单 Gateway、大型真实项目的长时间 TUI 验收未完成，因此不能承诺数小时
-  连续多代 Compact、崩溃恢复或完整项目交付已经稳定。
+  exact `agent_thread_id` 的 generation。允许持久化的 native IR 裁剪先写 `source_kind=live_tool_ir` checkpoint
+  并推进该 generation；presentation/no-save 临时事件不属于 durable Compact。
+- fake/replay 已覆盖阈值触发、连续 generation、provider forced、摘要/CAS 失败回滚、child/grandchild 隔离、
+  旧计数不回读和 owner Memory 不污染。上一版在 MiniMax-M2.7、单 Gateway、61,258 功能行项目真测中已
+  复现“113.1k→35.5k 但 generation 0”，本候选尚未重新部署验收，因此不能承诺数小时连续多代 Compact、
+  崩溃恢复或完整项目交付已经稳定。
 
 ## 2026-08-18 终端交互 风格 TUI
 
@@ -234,10 +237,11 @@
   `CompactionSummary` 替换旧段。后续再次跨阈值时把前代摘要作为输入并原位替换；真实
   UserTurn、近期工具尾部、用户最新要求、精确路径/ID/端口/哈希/测试数字、未解决状态和下一步继续
   可见。摘要与原 handoff marker 都进入同一 recent-tail token 预算。
-- 该 item 不是第二份 chat/task compact、会话、Memory、cursor、generation 或事实账本。raw archive、
-  operation ledger、artifact、workspace 文件和 thread transcript 保持权威；摘要明确为非权威续接
-  视图，失败或空结果时回退既有机械 handoff。live 摘要同步等待 backend 已有界的 request timeout，
-  不另起无法取消的 20 秒后台线程，`/stop` 仍可从同一模型传输边界打断。
+- 该 item 不是第二份 chat/task compact、会话、Memory 或事实账本。raw archive、operation ledger、artifact、
+  workspace 文件和 thread transcript 保持权威；允许持久化的真实回合会把这份替代摘要与精确工具调用边界
+  写入同一 ConversationThread checkpoint/generation，cursor 保持不动。摘要失败必须恢复原 IR 并进入同一
+  失败熔断，不能账外继续丢历史。live 摘要同步等待 backend 已有界的 request timeout，不另起无法取消的
+  20 秒后台线程，`/stop` 仍可从同一模型传输边界打断。
 - 方案对照 会话运行时 `3418498f0142` 的同 history replacement summary、长期助手
   `0b32ff708808` 的会话压缩提交边界与 通道运行时 `05fb8e6e6190` 对 active task/status/精确引用的
   摘要约束；只适配到 my-agent 现有 IR、owner/thread/task 事实源，没有复制第二套状态机。

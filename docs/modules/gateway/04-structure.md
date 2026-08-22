@@ -16,8 +16,9 @@
 2026-08-22 起，activity endpoint 公开 `conversation_agent_activity.v5`：Gateway 后台主代理把最近一次
 thinking、tool、provider retry 或 finalizing 阶段和同一次 provider preflight 的数字 context usage 写入
 进程内有界 display sink；直属 child 的职责短标题与当前上下文 token 从 exact canonical run 只读，
-Compact 次数则精确加载其 `agent_thread_id` 对应 ConversationThread generation。native IR reduction 只属
-当前活动回合，不与持久次数相加；当前 token 快照也不是累计计费用量。当前 active task 的 Todo 则从
+Compact 次数则精确加载其 `agent_thread_id` 对应 ConversationThread generation。持久 native IR reduction
+先提交同一 thread generation，display sink 只投影结果；presentation/no-save 临时事件不计数。当前 token
+快照也不是累计计费用量。当前 active task 的 Todo 则从
 canonical `task_progress.v1` 账本只读投影为 `id/title/status`；
 主代理累计 Compact 次数只读 ConversationThread 的 `compact_generation`。客户端按 250ms 节奏轮询并只接收白名单字段。main 快照可易失；child
 数值与 Todo 仍由各自 canonical ledger 持有，全部展示字段都不参与任务结束、恢复或授权，真实 task
@@ -282,7 +283,7 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   `task_progress` 只保留 `read/update`，不承担会话、目录或任务生命周期控制。若写工具携带同 thread
   既有目录中的精确结构化路径，统一执行入口可无歧义绑定该目录；正文不参与身份判断。根 task workspace 不再保存 recovery compact
   指针、continue packet 或第二份任务对话恢复包；主 thread 的 summary + raw tail 是唯一主会话 compact，
-  `conversation_thread.v6` 还在同一 compact CAS 中保存 `compact_operation_evidence`、checkpoint pointer、
+  `conversation_thread.v7` 还在同一 compact CAS 中保存 `compact_operation_evidence`、checkpoint pointer、
   经 Gateway 校验的客户端 `cwd/runtime_workspace_roots`
   和连续失败状态，只作为摘要旁边
   的程序事实 metadata，不形成第二份会话。当前 task-local child 的旧持久 compact 数据仍写入各自
@@ -495,7 +496,7 @@ owner_home/workspace/runtime/services/gateway/
 ```
 
 不同 TUI/CLI 的项目范围随每个 ask 的结构化 `workspace={cwd, roots}` 进入请求；Gateway 只允许本地 owner
-设置存在的绝对目录，并把结果持久化到 `conversation_thread.v6`。后续前台、后台 main、工具与子代理从
+设置存在的绝对目录，并把结果持久化到 `conversation_thread.v7`。后续前台、后台 main、工具与子代理从
 同一 thread 字段恢复，不读取守护进程 cwd，也不从 prompt 猜目录。Gateway/adapter 的显式相对配置以
 owner workspace 解析，防止另一个项目目录派生出第二套 pid、队列或监听端口。
 

@@ -19,10 +19,11 @@ task 或 turn 语义；它们进入同一个 Gateway/runtime。
 ## Transcript and compact
 
 owner-scoped `ConversationStore` 中的 raw JSONL transcript 是唯一对话事实源。thread JSON 只保存同一历史的
-compact summary、精确消息/字节 cursor、generation、live checkpoint pointer、连续失败状态和 `/verbose`
-设置。compact 不删除或改写 raw 消息：旧段被摘要后，新的 user/assistant 消息继续追加在同一文件尾部。
-checkpoint JSONL 保存每代候选的完整 summary、hash、源消息/字节范围、近期尾部 ID、工具事实、前后 token
-和前代指针；只有 thread 指向它才表示该代已提交，孤立 checkpoint 不获得 live authority。
+compact summary、精确消息/字节 cursor、generation、live checkpoint pointer、累计来源消息/工具往返、
+连续失败状态和 `/verbose` 设置。compact 不删除或改写 raw 消息：旧段被摘要后，新的 user/assistant 消息
+继续追加在同一文件尾部。checkpoint JSONL 保存每代候选的完整 summary、hash、`source_kind`、源消息/字节
+范围或原生工具调用 ID、近期尾部、工具事实、前后 token 和前代指针；只有 thread 指向它才表示该代已提交，
+孤立 checkpoint 不获得 live authority。
 
 上下文生命周期是：
 
@@ -36,13 +37,18 @@ checkpoint JSONL 保存每代候选的完整 summary、hash、源消息/字节�
    再用一次 generation CAS 原子推进 summary/cursor/checkpoint pointer；任何失败都保留原 live 状态。
 6. 同一 thread 连续三次 compact 失败后冷却 300 秒，避免每条消息重复消耗模型；冷却后半开尝试，
    成功提交即清零。该状态不删除 transcript，也不改变 task、memory 或 persona。
-7. 当前 active turn 内因 context pressure 需要续跑时，通过 typed compact carrier 保留 UserTurn、工具事实和
-   当前状态；它仍是同一 turn，不创建 task history。
-8. `/status` 只显示 thread 的一个 compact generation。
+7. 当前 active turn 的原生 ToolCall/ToolResult 达到同一阈值，或 provider 实报 overflow 时，只能成对回收。
+   对允许持久化的 main/child/grandchild，摘要器把上一代 thread summary 与当前工具历史合成一份完整替代
+   summary；随后先写 `source_kind=live_tool_ir` checkpoint，再以同一 generation CAS 提交。该来源不推进
+   transcript cursor，只累计 `compact_source_tool_pairs`，并在同一 turn 内用一个 `CompactionSummary` 继续。
+8. live-tool 摘要、checkpoint 或 CAS 失败时，原生 IR 与 tool-context 恢复到压缩前，thread 只增加同一个失败
+   熔断事实。presentation/no-save 辅助回合可做临时窗口整理，但不得推进 generation 或冒充 `compact N`。
+9. `/status`、TUI 和 Web 只显示 thread 的一个 compact generation；消息段压缩与 live-tool 压缩都推进它。
 
 任务工作区不保存第二套 compact。`work/state.json`、任务进度和子代理 canonical state 只是结构化运行
-事实；主代理始终只压缩同一条 thread history。每个子代理本身是独立 agent，因此只压缩自己的 session
-history，不生成根任务级 compact 包，也不注入另一份主 thread。
+事实；主代理始终只压缩自己的 thread history。每个子代理本身是独立 agent，因此拥有独立
+`agent_thread_id` 和相同的 summary/generation/checkpoint 状态机；它不生成根任务级 compact 包，也不注入
+另一份主 thread。孙代理递归遵守同一规则。
 
 ## Turn scheduling boundary
 

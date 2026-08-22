@@ -63,9 +63,10 @@
 - 普通 shell 不允许绕过直属生命周期事件去读 `work/agents/*` 内部状态文件；该门发生在进程启动前，
   必须返回 `WRONG_STATUS_SURFACE + effect_outcome=not_started` 给模型改用正式结果引用，不能误判成
   `TOOL_OPERATION_OUTCOME_UNKNOWN` 后中断整轮。真正已经启动且副作用终态未知的命令仍保持 fail-closed。
-- Compact 的目标语义是每个 main/child/grandchild 各有独立 ConversationThread，但全部复用同一
-  `conversation/compact.py` 状态机；不能共用正文，也不能长期保留 child 的第二套 continuation。迁移完成前，
-  child 界面可从 typed native IR reduction 与旧 durable apply 投影真实次数，但不得把过渡展示说成已统一。
+- Compact 的当前语义是每个 main/child/grandchild 各有独立 ConversationThread，并只认同一 owner/thread
+  checkpoint + generation CAS。transcript 旧段由 `conversation/compact.py` 提交；运行中 native IR 由
+  `conversation/live_tool_compact.py` 适配到同一账本，provider overflow 也不得账外删工具对。TUI/Web/SQLite
+  只读 generation；presentation/no-save 临时窗口事件不计数，旧 durable apply/attribute 不回读。
 
 ---
 

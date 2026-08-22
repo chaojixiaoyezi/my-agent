@@ -17,9 +17,12 @@ Step 4（出站孤儿净化 sweep，最后防线）：
 全程不依赖真实模型/网络。text 协议路径在既有套件中验证不变，这里只测 native 红线。
 """
 
+import json
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core._tool_loop_service import (
@@ -51,10 +54,12 @@ from agent_py_agent.agent.backends.tool_ir import (
     UserTurn,
 )
 from agent_py_agent.agent.conversation.authority import (
+    AGENT_THREAD_ID_ATTR,
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
 )
+from agent_py_agent.agent.conversation.compact_guard import ConversationCompactError
+from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.memory_archive import estimate_tokens
-from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.tests._tool_runtime_harness import (
     canonical_history_call,
     canonical_history_result,
@@ -299,12 +304,26 @@ def test_conversation_prompt_at_200k_90_percent_uses_shared_native_ir_window(tmp
     agent.config.model_context_window_tokens = 200_000
     agent.config.memory_compact_auto_trigger_percent = 90
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "prompt")
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "local/main",
+            "channel": "test",
+            "channel_conversation_id": "conversation-window",
+            "channel_user_id": "local/main",
+        }
+    )
+    agent.conversation_store = store
+    agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
     params = replace(
         _params(),
         context_scope="conversation",
         consume_pending_turn_input=False,
         save=True,
-        task_attributes={CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True},
+        task_attributes={
+            CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
+            "conversation_thread_id": thread.thread_id,
+        },
     )
     for i in range(1, 9):
         _rec(agent, params, rnd=i, idx=1, cid=f"toolu_{i}", body="X" * 120_000)
@@ -355,7 +374,7 @@ def test_shared_native_window_counts_large_tool_call_arguments(tmp_path):
         context_scope="conversation",
         consume_pending_turn_input=False,
         save=True,
-        task_attributes={CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True},
+        task_attributes={},
         effective_on_chunk=sink,
     )
     _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
@@ -417,47 +436,172 @@ def test_shared_native_window_counts_large_tool_call_arguments(tmp_path):
     )
 
 
-def test_shared_native_window_emits_live_event_without_persisting_child_count(tmp_path):
-    """轻量 IR 裁剪只发当前回合事件，正式 child Compact 次数留给独立 thread。"""
-    manager = SubAgentManager(tmp_path / "subagents", debug_trace_level=0)
-    task = manager.create_run(goal="long child", thought="", plan=["work"])
-    task.status = "RUNNING"
-    task.runner_active_attempt_id = "attempt-child"
-    manager.save(task)
+@pytest.mark.parametrize("thread_attr", ["conversation_thread_id", AGENT_THREAD_ID_ATTR])
+def test_shared_native_window_commits_main_or_child_conversation_compact(
+    tmp_path,
+    thread_attr,
+):
+    """真实 main/child IR 回收写同一 checkpoint/CAS，事件展示 canonical generation。"""
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "local/main",
+            "channel": "test",
+            "channel_conversation_id": f"compact-{thread_attr}",
+            "channel_user_id": "local/main",
+        }
+    )
+    agent = _native_agent(tmp_path)
+    agent.backend = _SummaryBackend(10_000)
+    agent.config.model_context_window_tokens = 10_000
+    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
+    agent.conversation_store = store
+    agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
+    sink = _ContextCompactionSink()
+    params = replace(
+        _params(),
+        request_id="request-child",
+        run_id="run-child",
+        attempt_id="attempt-child",
+        context_scope="task_local",
+        save=True,
+        effective_on_chunk=sink,
+        task_attributes={
+            CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
+            thread_attr: thread.thread_id,
+        },
+    )
 
+    _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
+    build_tool_loop_prompt(agent, params)
+    first = store.load_thread(thread.thread_id)
+    assert first is not None
+    assert len(sink.rows) == 1
+    assert sink.rows[0]["generation"] == first.compact_generation == 1
+    assert first.compact_source_messages == 0
+    assert first.compact_source_tool_pairs > 0
+    assert first.compact_checkpoint_id
+    assert "真实 rg=/opt/reference/rg" in first.summary
+    checkpoint_path = (
+        tmp_path / "compact" / "conversations" / f"{thread.thread_id}.jsonl"
+    )
+    checkpoints = [
+        json.loads(line)
+        for line in checkpoint_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert checkpoints[-1]["source_kind"] == "live_tool_ir"
+    assert checkpoints[-1]["generation"] == 1
+    assert checkpoints[-1]["checkpoint_id"] == first.compact_checkpoint_id
+    assert checkpoints[-1]["source_tool_pairs"] == first.compact_source_tool_pairs
+
+    build_tool_loop_prompt(agent, params)
+    assert len(sink.rows) == 1
+    assert store.load_thread(thread.thread_id).compact_generation == 1
+
+    _record_large_write_calls(agent, params, start=7, stop=12, chars=12_000)
+    build_tool_loop_prompt(agent, params)
+    second = store.load_thread(thread.thread_id)
+    assert second is not None
+    assert len(sink.rows) == 2
+    assert sink.rows[-1]["generation"] == second.compact_generation == 2
+    assert second.compact_source_tool_pairs > first.compact_source_tool_pairs
+    assert first.summary in agent.backend.calls[-1][0]
+    assert first.summary not in str(agent.backend.calls[-1][1])
+
+
+def test_persistent_native_window_restores_ir_when_summary_fails(tmp_path):
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "local/main",
+            "channel": "test",
+            "channel_conversation_id": "compact-failure",
+            "channel_user_id": "local/main",
+        }
+    )
     agent = _native_agent(tmp_path)
     agent.backend.context_window_tokens = 10_000
     agent.config.model_context_window_tokens = 10_000
     agent.config.memory_compact_auto_trigger_percent = 90
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
-    agent.subagents = manager
-    agent._current_subagent_run_id = task.id
-    sink = _ContextCompactionSink()
+    agent.conversation_store = store
+    agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
     params = replace(
         _params(),
-        request_id="request-child",
-        run_id=task.id,
-        attempt_id="attempt-child",
-        context_scope="task_local",
         save=True,
-        effective_on_chunk=sink,
+        task_attributes={
+            CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
+            "conversation_thread_id": thread.thread_id,
+        },
     )
-
     _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
-    build_tool_loop_prompt(agent, params)
-    assert len(sink.rows) == 1
-    assert sink.rows[0]["generation"] == 1
-    assert "model_visible_context_compaction" not in manager.load(task.id).attributes
+    before_ir = list(params.tool_ir_history)
 
-    build_tool_loop_prompt(agent, params)
-    assert len(sink.rows) == 1
-    assert "model_visible_context_compaction" not in manager.load(task.id).attributes
+    with pytest.raises(ConversationCompactError, match="empty summary"):
+        build_tool_loop_prompt(agent, params)
 
-    _record_large_write_calls(agent, params, start=7, stop=12, chars=12_000)
-    build_tool_loop_prompt(agent, params)
-    assert len(sink.rows) == 2
-    assert sink.rows[-1]["generation"] == 2
-    assert "model_visible_context_compaction" not in manager.load(task.id).attributes
+    updated = store.load_thread(thread.thread_id)
+    assert updated is not None
+    assert params.tool_ir_history == before_ir
+    assert updated.compact_generation == 0
+    assert updated.compact_checkpoint_id == ""
+    assert updated.compact_consecutive_failures == 1
+
+
+def test_persistent_native_window_restores_ir_when_compact_cas_fails(
+    tmp_path,
+    monkeypatch,
+):
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "local/main",
+            "channel": "test",
+            "channel_conversation_id": "compact-cas-failure",
+            "channel_user_id": "local/main",
+        }
+    )
+    agent = _native_agent(tmp_path)
+    agent.backend = _SummaryBackend(10_000)
+    agent.config.model_context_window_tokens = 10_000
+    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
+    agent.conversation_store = store
+    agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
+    params = replace(
+        _params(),
+        save=True,
+        task_attributes={
+            CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
+            "conversation_thread_id": thread.thread_id,
+        },
+    )
+    _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
+    before_ir = list(params.tool_ir_history)
+
+    def fail_compact_cas(*_args, **_kwargs):
+        raise RuntimeError("synthetic compact CAS conflict")
+
+    monkeypatch.setattr(store, "update_compact_state", fail_compact_cas)
+    with pytest.raises(RuntimeError, match="synthetic compact CAS conflict"):
+        build_tool_loop_prompt(agent, params)
+
+    updated = store.load_thread(thread.thread_id)
+    assert updated is not None
+    assert params.tool_ir_history == before_ir
+    assert updated.compact_generation == 0
+    assert updated.compact_checkpoint_id == ""
+    assert updated.compact_consecutive_failures == 1
+    checkpoint_path = (
+        tmp_path / "compact" / "conversations" / f"{thread.thread_id}.jsonl"
+    )
+    orphan_candidate = json.loads(
+        checkpoint_path.read_text(encoding="utf-8").splitlines()[-1]
+    )
+    assert orphan_candidate["status"] == "validated_candidate"
+    assert orphan_candidate["checkpoint_id"] != updated.compact_checkpoint_id
 
 
 def test_shared_native_window_stays_stable_across_repeated_pressure(tmp_path):
@@ -471,7 +615,7 @@ def test_shared_native_window_stays_stable_across_repeated_pressure(tmp_path):
         context_scope="conversation",
         consume_pending_turn_input=False,
         save=True,
-        task_attributes={CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True},
+        task_attributes={},
     )
     _record_large_write_calls(agent, params, start=1, stop=10, chars=10_000)
     build_tool_loop_prompt(agent, params)
@@ -506,7 +650,7 @@ def test_shared_native_window_reuses_semantic_summary_across_repeated_pressure(t
         context_scope="conversation",
         consume_pending_turn_input=False,
         save=True,
-        task_attributes={CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True},
+        task_attributes={},
     )
     _record_large_write_calls(agent, params, start=1, stop=10, chars=10_000)
     params.tool_ir_history.append(UserTurn("恢复缺失用例后再扩展"))
@@ -575,13 +719,15 @@ def test_ptl_reclaim_empty_ir_returns_zero(tmp_path):
 
 
 def test_ptl_loop_helper_native_drops_ir_text_drops_text(tmp_path):
-    # native: _ptl_reclaim_oldest shrinks the IR (what the provider actually sees).
+    # native: provider overflow forces the same full-budget IR compact transaction.
     agent = _native_agent(tmp_path)
+    agent.backend = _SummaryBackend(10_000)
+    agent.config.model_context_window_tokens = 10_000
+    agent.config.memory_compact_auto_trigger_percent = 90
     params = _params()
-    for i in range(1, 4):
-        _rec(agent, params, rnd=i, idx=1, cid=f"n_{i}", body="X" * 400)
+    _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
     ir_pairs_before = sum(1 for it in params.tool_ir_history if isinstance(it, ToolResult))
-    assert _ptl_reclaim_oldest(agent, params) is True
+    assert _ptl_reclaim_oldest(agent, params, prompt="base-prompt") is True
     ir_pairs_after = sum(1 for it in params.tool_ir_history if isinstance(it, ToolResult))
     assert ir_pairs_after < ir_pairs_before
     _assert_no_orphans(_native_provider_messages(agent, params))
@@ -594,6 +740,48 @@ def test_ptl_loop_helper_native_drops_ir_text_drops_text(tmp_path):
     assert text_params.tool_ir_history == []  # text never builds IR
     # the text reclaim path returns True while there is reclaimable text body.
     assert _ptl_reclaim_oldest(text_agent, text_params) is True
+
+
+def test_native_provider_overflow_forces_same_conversation_compact_ledger(tmp_path):
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "local/main",
+            "channel": "test",
+            "channel_conversation_id": "provider-overflow",
+            "channel_user_id": "local/main",
+        }
+    )
+    agent = _native_agent(tmp_path)
+    agent.backend = _SummaryBackend(10_000)
+    agent.config.model_context_window_tokens = 10_000
+    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.conversation_store = store
+    agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
+    params = replace(
+        _params(),
+        save=True,
+        task_attributes={
+            CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
+            "conversation_thread_id": thread.thread_id,
+        },
+    )
+    _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
+
+    assert _ptl_reclaim_oldest(agent, params, prompt="base-prompt") is True
+
+    updated = store.load_thread(thread.thread_id)
+    assert updated is not None
+    assert updated.compact_generation == 1
+    checkpoint_path = (
+        tmp_path / "compact" / "conversations" / f"{thread.thread_id}.jsonl"
+    )
+    checkpoint = json.loads(
+        checkpoint_path.read_text(encoding="utf-8").splitlines()[-1]
+    )
+    assert checkpoint["source_kind"] == "live_tool_ir"
+    assert checkpoint["forced"] is True
+    assert checkpoint["checkpoint_id"] == updated.compact_checkpoint_id
 
 
 # === Step 3: text-entry → tool_use id mapping (round/index join) ==============

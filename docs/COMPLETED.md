@@ -5,10 +5,12 @@
 最近收口重点：
 
 - 2026-08-22 本地底座已完成 main/child/grandchild 统一 Conversation Compact：每个 delegated run 在创建
-  或旧任务首次恢复时物化独立 `agent_thread_id`，每个 attempt 幂等落 user/assistant，轮前阈值与 provider
-  overflow 都复用 `conversation/compact.py` 的 checkpoint-before-CAS 主链。task-local 权限与 Memory 隔离
-  保留，旧 apply/continue 不再由正式 child runner 生成；TUI/Web/SQLite 只读 child thread generation，
-  turn-local native IR 裁剪不再持久累计。fake/replay 定向验收已通过，部署和大型项目真实 TUI 仍待完成。
+  或旧任务首次恢复时物化独立 `agent_thread_id`，每个 attempt 幂等落 user/assistant；轮前 transcript 与
+  运行中 native IR 都复用同一 owner/thread checkpoint-before-CAS 主链。live-tool 来源保存精确 ToolCall ID，
+  不推进 transcript cursor，只累计 `compact_source_tool_pairs`；provider overflow 也不再账外丢 20%。
+  摘要/checkpoint/CAS 失败恢复原 IR 并进入同一失败熔断。task-local 权限与 Memory 隔离保留，旧
+  apply/continue 不再由正式 child runner 生成；TUI/Web/SQLite 只读 child thread generation。fake/replay
+  定向验收已通过，部署和大型项目真实 TUI 仍待完成。
 - 2026-08-22 本地底座已把 Compact 的“配置压缩点”与“单次回合是否允许持久
   apply”分开：presentation/no-save 回合不再把 Context 行的 90% 错写成 100%；真实
   preflight 仍保持 save=False 不压缩落盘，并由完整模型窗口守最后硬限。回归同时锁定

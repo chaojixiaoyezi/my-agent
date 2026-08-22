@@ -81,6 +81,7 @@ class ConversationContextUsage:
     trigger_tokens: int
     compact_generation: int
     compact_source_messages: int
+    compact_source_tool_pairs: int
     pending_messages: int
     has_summary: bool
 
@@ -249,12 +250,17 @@ def inspect_conversation_context(
         pending: list[MessageLogEntry] = []
         generation = 0
         source_messages = 0
+        source_tool_pairs = 0
     else:
         summary = thread.summary
         evidence = dict(thread.compact_operation_evidence or {})
         pending = _uncompacted_conversation_rows(store, thread)
         generation = max(0, int(thread.compact_generation or 0))
         source_messages = max(0, int(thread.compact_source_messages or 0))
+        source_tool_pairs = max(
+            0,
+            int(thread.compact_source_tool_pairs or 0),
+        )
     projected = _projected_context_tokens(
         agent,
         summary,
@@ -270,6 +276,7 @@ def inspect_conversation_context(
         trigger_tokens=max(0, int(policy.trigger_tokens or 0)),
         compact_generation=generation,
         compact_source_messages=source_messages,
+        compact_source_tool_pairs=source_tool_pairs,
         pending_messages=len(pending),
         has_summary=bool(summary.strip()),
     )
@@ -316,7 +323,8 @@ def render_conversation_context_usage(
     )
     lines.append(
         f"历史：{generation}；未压缩消息 {usage.pending_messages} 条；"
-        f"已纳入摘要 {usage.compact_source_messages} 条；"
+        f"已纳入摘要：消息 {usage.compact_source_messages} 条、"
+        f"工具往返 {usage.compact_source_tool_pairs} 对；"
         f"摘要={'有' if usage.has_summary else '无'}"
     )
     return "\n".join(lines)
@@ -484,6 +492,7 @@ def _commit_compact_candidate(
                 request.thread.compact_source_messages
                 + len(candidate.compact_rows)
             ),
+            source_tool_pairs=request.thread.compact_source_tool_pairs,
         ),
         expected_generation=request.thread.compact_generation,
     )

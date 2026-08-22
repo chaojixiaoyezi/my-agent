@@ -1,5 +1,16 @@
 # Memory Progress
 
+## 2026-08-22 运行中工具历史 Compact 统一账本
+
+- 主代理、子代理和孙代理在同一运行 turn 内缩减 native 工具历史时，语义摘要会把
+  ConversationThread 的上一代完整摘要与本次待回收工具往返合并成下一代替代摘要；
+  不再只生成一份脱离会话代次的临时摘要。
+- 持久、会话正文权威的真实 turn 必须在摘要成功后写 Compact checkpoint，并通过同一
+  ConversationThread CAS 推进 generation；摘要为空、checkpoint 失败或 CAS 冲突时恢复
+  原 native IR，并累计同一 Compact 失败熔断事实。
+- raw archive、operation ledger、artifact registry 和真实文件仍是执行事实源；语义摘要
+  只负责让下一模型轮知道已经做过什么、还缺什么，不能单独证明任务完成。
+
 ## 2026-08-17 测试债清理：home 优先级修复恢复记忆链路测试
 
 - 根因：`_configured_home_root` 曾改为"环境变量无条件优先"，但测试 conftest 的

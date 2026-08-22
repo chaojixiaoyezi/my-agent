@@ -26,8 +26,9 @@
   运行和下一待办；多个运行项优先占位，运行图标逐帧变化，`Ctrl+T` 可展开/收起全部且不修改账本。
   常驻 Context 只显示总量、占比、canonical Compact 累计次数与明确标注的压缩点，详细
   prompt/messages/tools 只在 `/context` 展示；`compact N`、`压缩点 90%` 和临时操作进度不得混淆。
-  迁移期 child 的 typed native IR reduction 必须按 exact attempt/generation 幂等持久投影，并与 durable
-  apply 行相加；不能因 rich sink 消失或 child 完成归零，也不能从 token 降幅推断。
+  持久 child 的 typed native IR reduction 必须先写同一 owner/thread checkpoint 并以 generation CAS 提交；
+  TUI 只读该 generation，不与旧 durable apply/attribute 相加，也不能因 rich sink 消失、child 完成或 token
+  降幅自行增减。
   main 等待 child 时按 typed status 显示“等待 N 个子代理”，最终答复进入普通 assistant transcript；
   `7c052f2` 第 1 条真机任务已暴露布局/Todo 问题，新候选 147 项定向回归已过，仍需 `.7`
   单 Gateway + 下一条原样长任务 TUI 验收后勾选。
@@ -123,8 +124,8 @@
   向用户报告测试对象、`192.0.2.7`、tmux session 名称和可直接 attach 的完整命令，且全程只有一个 Gateway。
 - [ ] 真实测试中 main/child/grandchild 各自沿独立 `agent_thread_id` Compact 后能继续工作；至少一条 child
   链连续发生多代 generation，近期完整回合、工具事实、任务状态和产物引用不丢，且没有重做已经成功的
-  副作用。TUI 次数只等于该 thread generation，native IR 临时裁剪和旧 apply ledger 都不计入；child 使用
-  工作工具时不得覆盖父 `conversation_thread_id` 或重绑父 conversation task。
+  副作用。持久 native IR 裁剪与 transcript 压缩都只推进该 thread generation；presentation/no-save 临时事件
+  和旧 apply ledger 不计入。child 使用工作工具时不得覆盖父 `conversation_thread_id` 或重绑父 conversation task。
 - [ ] 真实 IM 双用户验证 compact/memory/旧聊天检索不串 owner 或 chat，结束后恢复生产 compact 阈值。
 - [ ] `/verbose on/full/off` 只改变当前 thread，不进入 transcript/guidance/模型；进度发送不触发任务重做，最终回复仍能送达。
 - [ ] CLI 与真实 IM 的 `/status`、`/btw <内容>`、`/stop`、`/goal ...`、`/verbose ...` 都由统一系统命令入口处理；任何未知 `/XXXX` fail-closed，不进入普通队列、transcript 或模型。

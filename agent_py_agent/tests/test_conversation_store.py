@@ -160,7 +160,7 @@ def test_untyped_audit_child_workspace_status_sync_stays_under_audit_root(tmp_pa
     assert json.loads(state_path.read_text(encoding="utf-8"))["status"] == "DONE"
 
 
-def test_v4_thread_record_loads_with_safe_v5_compact_defaults(tmp_path) -> None:
+def test_v4_thread_record_loads_with_safe_current_compact_defaults(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
     thread = store.get_or_create_thread(
         {
@@ -176,6 +176,7 @@ def test_v4_thread_record_loads_with_safe_v5_compact_defaults(tmp_path) -> None:
     payload["schema_version"] = "conversation_thread.v4"
     for field_name in (
         "compact_checkpoint_id",
+        "compact_source_tool_pairs",
         "compact_consecutive_failures",
         "compact_failure_updated_at",
         "compact_failure_code",
@@ -191,6 +192,7 @@ def test_v4_thread_record_loads_with_safe_v5_compact_defaults(tmp_path) -> None:
 
     assert loaded is not None
     assert loaded.compact_checkpoint_id == ""
+    assert loaded.compact_source_tool_pairs == 0
     assert loaded.compact_consecutive_failures == 0
     assert loaded.compact_failure_updated_at == 0.0
     assert loaded.compact_failure_code == ""
@@ -219,6 +221,7 @@ def test_compact_generation_cas_is_atomic_across_store_instances(tmp_path) -> No
                 compacted_through_message_id=f"message-{label}",
                 compacted_through_byte_offset=100,
                 source_messages=2,
+                source_tool_pairs=3,
             ),
             expected_generation=0,
         )
@@ -239,6 +242,7 @@ def test_compact_generation_cas_is_atomic_across_store_instances(tmp_path) -> No
     assert "generation changed" in str(failures[0])
     assert stored is not None
     assert stored.compact_generation == 1
+    assert stored.compact_source_tool_pairs == 3
     assert stored.compact_checkpoint_id in {"checkpoint-a", "checkpoint-b"}
 
 
@@ -379,7 +383,7 @@ def test_selected_workspace_task_survives_completion_and_restart(tmp_path) -> No
     assert reopened.workspace_task_id == "task-1"
     assert reopened.active_task_ids == ()
     payload = json.loads(reopened_store._thread_path(thread.thread_id).read_text(encoding="utf-8"))
-    assert payload["schema_version"] == "conversation_thread.v6"
+    assert payload["schema_version"] == "conversation_thread.v7"
 
 
 def test_thread_persists_client_cwd_across_requests_without_override(tmp_path) -> None:
