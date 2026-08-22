@@ -4,6 +4,12 @@
 
 最近收口重点：
 
+- 2026-08-22 本地候选已把 Prompt 4 r5 的“明知未完成仍 final”收口为 会话运行时 式模型执行纪律，而不是恢复
+  吃过多次亏的宿主质量验收：发布 YAML 与 dataclass 共用同一个通用默认 prompt，删除 Go 专项骨架；
+  主代理、子代理和 lifecycle wake 共用“已知缺口且仍可推进就继续”的软提示。`task_progress` open 项只
+  返回非阻断 guidance，`covers` exact id 现在同时绑定普通 Todo 与 coverage，并在 canonical child DONE
+  后打钩；单个、批量和递归 child 共用连续显示编号。直接相关 focused 回归已通过，真机状态仍以
+  `STATUS.md` 和 `docs/ROADMAP.md` 为准。
 - 2026-08-22 `680e209` 已完成并部署 main/child/grandchild 统一 Conversation Compact 账本：每个 delegated run 在创建
   或旧任务首次恢复时物化独立 `agent_thread_id`，每个 attempt 幂等落 user/assistant；轮前 transcript 与
   运行中 native IR 都复用同一 owner/thread checkpoint-before-CAS 主链。live-tool 来源保存精确 ToolCall ID，

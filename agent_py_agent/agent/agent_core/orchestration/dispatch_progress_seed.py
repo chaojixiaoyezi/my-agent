@@ -40,13 +40,13 @@ DISPATCH_SEED_NOTE = (
 )
 
 COVERS_BINDING_NOTE = (
-    "coverage 清单还有 open 项(见 open_target_ids)。把清单里的活派给子代理时,在对应 item 带 "
+    "task_progress 清单还有 open 项(见 open_target_ids)。把清单里的活派给子代理时,在对应 item 带 "
     'covers=[该项 id](如 covers:["req-03"]);子代理完成后系统按 id 自动把该项标 done。'
     "每个子代理只绑它自己负责的项。"
 )
 
 COVERS_UNKNOWN_NOTE = (
-    "unknown_covers_ids 里的 id 在当前 coverage 清单里不存在,绑定不会生效;"
+    "unknown_covers_ids 里的 id 在当前 task_progress items/coverage.targets 清单里不存在,绑定不会生效;"
     "用 task_progress(action=read) 查正确的清单项 id 后重绑。"
 )
 
@@ -272,19 +272,13 @@ def _reconcile_completed_child_covers(agent: object, root: Path, run_id: str) ->
     if task_root is None:
         return []
     progress = read_task_progress(root, run_id)
-    targets = _coverage_targets(progress)
-    open_targets = {
-        str(item.get("id") or "").strip(): item
-        for item in targets
-        if str(item.get("id") or "").strip()
-        and not task_progress_status_is_closed(item.get("status"))
-        and not _target_has_open_checks(item)
-    }
-    if not open_targets:
+    open_items, open_coverage_targets = _open_covers_targets(progress)
+    if not open_items and not open_coverage_targets:
         return []
     children = _canonical_child_rows(task_root)
     descendants = _relevant_descendant_ids(agent, children)
-    credited: list[dict[str, object]] = []
+    credited_items: list[dict[str, object]] = []
+    credited_targets: list[dict[str, object]] = []
     for child_id in sorted(descendants):
         child = children[child_id]
         if not task_status_in(child.get("status"), {TaskStatus.DONE.value}):
@@ -296,21 +290,61 @@ def _reconcile_completed_child_covers(agent: object, root: Path, run_id: str) ->
             continue
         for raw in covers:
             target_id = str(raw or "").strip()
-            if target_id not in open_targets:
-                continue
-            credited.append(
-                {
-                    "id": target_id,
-                    "status": "done",
-                    "evidence": [f"subagent-done:{child_id}"],
-                    "source_ref": "auto:dispatch-covers-binding",
-                    "notes": "显式 covers 绑定的子代理已进入 DONE，按结构化 id 更新进度",
-                }
-            )
-            open_targets.pop(target_id, None)
-    if credited:
-        write_task_progress(root, run_id, {"coverage": {"targets": credited}})
-    return [str(item["id"]) for item in credited]
+            credited = _completed_covers_credit(child_id, target_id)
+            if target_id in open_items:
+                credited_items.append(credited)
+                open_items.pop(target_id, None)
+            if target_id in open_coverage_targets:
+                credited_targets.append(credited)
+                open_coverage_targets.pop(target_id, None)
+    update: dict[str, object] = {}
+    if credited_items:
+        update["items"] = credited_items
+    if credited_targets:
+        update["coverage"] = {"targets": credited_targets}
+    if update:
+        write_task_progress(root, run_id, update)
+    return list(
+        dict.fromkeys(
+            str(item["id"])
+            for item in [*credited_items, *credited_targets]
+        )
+    )
+
+
+# LLM: A covers reconciliation credit carries only typed lineage evidence and
+# the exact ledger id; callers must not add task titles or infer completion prose.
+# 函数用途: 生成一条子代理 DONE 后写回进度账本的标准结构化记录。
+def _completed_covers_credit(child_id: str, target_id: str) -> dict[str, object]:
+    return {
+        "id": target_id,
+        "status": "done",
+        "evidence": [f"subagent-done:{child_id}"],
+        "source_ref": "auto:dispatch-covers-binding",
+        "notes": "显式 covers 绑定的子代理已进入 DONE，按结构化 id 更新进度",
+    }
+
+
+# LLM: Plain Todo and coverage have distinct close conditions; keep that typed
+# distinction while presenting one exact-id namespace to covers reconciliation.
+# 函数用途: 分别找出可由已完成子代理关闭的普通 Todo 和 coverage 目标。
+def _open_covers_targets(
+    progress: dict[str, Any],
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    open_items = {
+        item_id: item
+        for item in _progress_items(progress)
+        if (item_id := str(item.get("id") or "").strip())
+        and not task_progress_status_is_closed(item.get("status"))
+    }
+    open_coverage = {
+        item_id: item
+        for item in _coverage_targets(progress)
+        if (item_id := str(item.get("id") or "").strip())
+        and not task_progress_status_is_closed(item.get("status"))
+        and not _target_has_open_checks(item)
+    }
+    return open_items, open_coverage
 
 
 def _current_task_root(agent: object) -> Path | None:
@@ -370,6 +404,9 @@ def _target_has_open_checks(target: dict[str, Any]) -> bool:
     )
 
 
+# LLM: This projection reconciles only explicit stable ids from the canonical
+# task_progress ledger; never infer bindings from titles or task prose here.
+# 函数用途: 汇总本次派工绑定、遗漏和未知的 Todo/coverage id，返回给父代理纠正。
 def _coverage_binding(agent: object, tasks: list) -> dict[str, Any] | None:
     root = _progress_root(agent)
     run_id = _current_run_id(agent)
@@ -383,6 +420,7 @@ def _coverage_binding(agent: object, tasks: list) -> dict[str, Any] | None:
         str(target.get("id") or "").strip()
         for target in targets
         if not task_progress_status_is_closed(target.get("status"))
+        and not _target_has_open_checks(target)
     ]
     bound: dict[str, list[str]] = {}
     auto_bound: dict[str, list[str]] = {}
@@ -416,22 +454,49 @@ def _coverage_binding(agent: object, tasks: list) -> dict[str, Any] | None:
     return payload
 
 
+# LLM: Resolve exactly one authoritative ledger for covers; nested runs may read
+# the root task ledger, but completion writes remain on the parent reconciliation path.
+# 函数用途: 选择当前派工应绑定的进度账本，并同时读取普通 Todo 与 coverage 项。
 def _binding_ledger_targets(agent: object, root: Path, run_id: str) -> tuple[str, list[dict[str, Any]]]:
-    """covers 绑定对账用的清单账本:本 run 的账优先;本 run 没立 coverage 且这是任务树里的
+    """covers 绑定对账用的清单账本:本 run 的账优先;本 run 没立 items/coverage 且这是任务树里的
     深层 run(params.task_id≠run_id,子代理/孙代理)时,回落读【任务主账本】(task_id 那本,
     A2 种需求清单的账)。为什么(P-bigbuild):大工程模型递归乱派、层层转包,主代理大现场
     绑不上 covers;树深处的派工小现场反而干净(一次派几个具体活)——把主清单 open 项带到
     每一层派工现场,孙代理绑的 covers 由收口树归并(own_done_children 后代闭包)收回父清单。
     只读不写:主账本的打勾仍只由主代理侧对账完成,单写者纪律不破。"""
-    targets = _coverage_targets(read_task_progress(root, run_id))
+    targets = _binding_targets(read_task_progress(root, run_id))
     if targets:
         return run_id, targets
     task_id = _run_task_id(agent)
     if task_id and task_id != run_id:
-        targets = _coverage_targets(read_task_progress(root, task_id))
+        targets = _binding_targets(read_task_progress(root, task_id))
         if targets:
             return task_id, targets
     return run_id, []
+
+
+# LLM: covers binds exact ids from both task_progress surfaces. Keep items first
+# and deduplicate by id so a malformed ledger cannot credit two logical rows from
+# one child completion.
+# 函数用途: 汇总普通 Todo 和 coverage 目标，供派工绑定提示与 exact-id 自动补参使用。
+def _binding_targets(progress: dict[str, Any]) -> list[dict[str, Any]]:
+    targets: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in [*_progress_items(progress), *_coverage_targets(progress)]:
+        item_id = str(item.get("id") or "").strip()
+        if not item_id or item_id in seen:
+            continue
+        targets.append(item)
+        seen.add(item_id)
+    return targets
+
+
+# LLM: Plain Todo rows and coverage targets are separate projections with one
+# shared stable-id namespace for covers; this reader never mutates the ledger.
+# 函数用途: 读取 task_progress 的普通 Todo items，过滤掉损坏的非对象条目。
+def _progress_items(progress: dict[str, Any]) -> list[dict[str, Any]]:
+    items = progress.get("items") if isinstance(progress, dict) else None
+    return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
 
 
 def _coverage_targets(progress: dict[str, Any]) -> list[dict[str, Any]]:

@@ -1262,6 +1262,7 @@ def test_natural_reply_prompt_treats_fact_carrier_as_invisible(tmp_path) -> None
     assert "核心实现已完成，正在补测试" in prompt
     assert "运行测试并修复失败" in prompt
     assert "不要告诉用户你收到了结构化信息" in prompt
+    assert "不要把 operation、verification、envelope" in prompt
     assert "请根据上面的结构化事实" not in prompt
 
 

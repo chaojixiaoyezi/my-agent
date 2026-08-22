@@ -101,6 +101,15 @@ child 的自然最终回复、typed lifecycle event 与真实 artifact refs 是�
 父级基于这些事实自然向用户汇报；普通任务没有机器质量验收器，也不要求 `VERIFIED` 才能结束。路径
 不存在、工具失败、越权或取消仍按客观事实如实暴露。
 
+复杂任务只维护一份稳定 `task_progress` 清单。创建 child 时优先把每项负责的普通 Todo 或 coverage
+exact id 放入 `covers`；child 进入 canonical `DONE` 后宿主只按该 id 原位打钩，不解析 title/goal 猜对应
+关系。后续补派仍沿用原 id，不重建 `p1/s1` 之类同义计划。open 项只会在工具回执里给模型一条软续做
+提示：已知缺口且仍有工具或 child 容量时继续协调；它不会让宿主自动再调用一次模型，也不会充当质量验收。
+
+系统生成的 child 显示名在同一 exact parent 下跨单个、批量和递归创建连续编号，方便 TUI 与未来 Web
+区分后续补派。显式自定义名称保持原样；控制、权限、状态和产物归属始终只认结构化 run_id/lineage，
+不能用显示名代替机器身份。
+
 普通可恢复工具失败只作为 ToolResult 返回当前 child/grandchild 的模型继续修正，宿主不会按同类失败
 次数替它结束 turn。达到提示阈值时只要求换参数、换工具或拆小步骤；精确同参机械重试可拒绝该次动作。
 只有取消、明确安全边界、副作用真实 unknown 或部署者显式启用的 typed hard policy 才能硬收口。同一批

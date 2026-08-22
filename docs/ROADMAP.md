@@ -182,10 +182,19 @@ worker-3 前部因 sibling 项目根锁得到 13 次 `TOOL_OPERATION_BUSY_CONFLI
 `RespondToModel`：默认可恢复失败只返给模型换路，不再按次数结束 turn；同批后到的同工具成功会撤销
 早到的 active halt，只有显式 typed hard policy 才能硬收口。43 项 focused tests 已通过。
 
-待做：完成联合 gate 后提交并部署到 `.7` 唯一 Gateway；在新的干净项目目录与新 tmux r5 中再次只投递一次
-“换语言完整复刻且 main 只能协调/测试”的原样 prompt，验收 child generation 实时从 0 变 1、checkpoint
-`source_kind=live_tool_ir`、摘要包含任务/进展/路径/待办、继续工具调用和最终产物，同时证明暂时锁冲突
-只会让模型换路/等待，不会把已经恢复的 child 挂回 PENDING。该真测不得由测试者旁路修改项目。
+r5 已在全新目录与 tmux 中只投递一次原样 Prompt 4：7 个 child 全部自然 `DONE`，没有重复失败误杀；
+至少一条 child Compact 账本与 r4 已有证据保持成立。但 main 在 Todo `4/18`、自己明确知道大量功能缺口时
+仍 final，产物只是 3,210 行 Pre-Alpha 子集。现场同时出现三套同义 Todo、两个单独补派 worker 同名。
+这证明下一层问题是模型执行上下文与 typed 计划绑定，而不是应该恢复机器质量验收。
+
+当前本地候选对照 会话运行时 `gpt_5_2_prompt.md` 的 Autonomy and Persistence、orchestrator policy，并适配现有
+唯一 task ledger：YAML/dataclass 默认提示完全一致且删除 Go 专项骨架；主/子/wake 共用“已知缺口且仍
+能推进就继续”的软纪律；`covers` exact id 同时绑定普通 Todo 与 coverage；单个、批量、递归 child 名称
+连续编号。宿主仍不解析自然语言、不根据 open Todo 自动重开模型、不做机器完成验收。
+
+待做：完成联合 gate 后提交并部署到 `.7` 唯一 Gateway；在新的干净项目目录与新 tmux r6 中再次只投递
+一次原样 Prompt 4，重点验收一份稳定 Todo、派工时 typed covers、child 完成原位打钩、后续单个补派编号
+连续，以及 main 在已知缺口且仍有工具/容量时继续派工而不是列清单收尾。该真测不得由测试者旁路修改项目。
 
 ### 用户直控子代理的共享控制面
 

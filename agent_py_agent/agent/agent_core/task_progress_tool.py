@@ -14,6 +14,7 @@ from ..task_progress import (
     invalid_coverage_statuses,
     invalid_item_statuses,
     read_task_progress,
+    task_progress_status_is_closed,
     write_task_progress,
 )
 from ..tooling.models import (
@@ -101,11 +102,49 @@ class TaskProgressTool(BaseTool):
             _reconcile_completed_child_covers_before_read(self.agent, root, run_id)
             reconcile_completed_child_items(self.agent, root, run_id)
             payload = read_task_progress(root, run_id)
+        payload = _with_execution_guidance(payload)
         return ToolHandlerOutcome(
             "task_progress",
             True,
             json.dumps(payload, ensure_ascii=False, indent=2),
         )
+
+
+# LLM: Open progress remains advisory, but the model needs the same 会话运行时
+# persistence reminder after a read that exposed unfinished work. This response
+# field cannot schedule turns, accept work, or infer task quality.
+# 函数用途: 在进度工具结果里附一条软续做提示和可供 covers 使用的 exact id，不改清单或任务终态。
+def _with_execution_guidance(payload: dict[str, object]) -> dict[str, object]:
+    open_ids: list[str] = []
+    for item in payload.get("items", []) if isinstance(payload.get("items"), list) else []:
+        if not isinstance(item, dict) or task_progress_status_is_closed(item.get("status")):
+            continue
+        item_id = str(item.get("id") or "").strip()
+        if item_id:
+            open_ids.append(item_id)
+    coverage = payload.get("coverage")
+    targets = coverage.get("targets") if isinstance(coverage, dict) else []
+    for target in targets if isinstance(targets, list) else []:
+        if not isinstance(target, dict) or task_progress_status_is_closed(target.get("status")):
+            continue
+        target_id = str(target.get("id") or "").strip()
+        if target_id:
+            open_ids.append(target_id)
+    open_ids = list(dict.fromkeys(open_ids))
+    if not open_ids:
+        return payload
+    guidance = {
+        "severity": "soft",
+        "blocking": False,
+        "open_count": len(open_ids),
+        "open_item_ids": open_ids[:24],
+        "message": (
+            "这些 exact id 仍是未完成计划，不是宿主完成判定。已有子代理负责时等待其 typed 生命周期事件；"
+            "否则继续使用工具或用 create_subagents.items[].covers 绑定对应 id。只要当前仍能推进，"
+            "不要用列出未完成项代替继续工作，也不要重复创建一套同义清单。"
+        ),
+    }
+    return {**payload, "execution_guidance": guidance}
 
 
 # LLM: Canonical rereads intentionally discard ephemeral incoming-write hints.

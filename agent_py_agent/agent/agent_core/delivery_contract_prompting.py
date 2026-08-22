@@ -91,6 +91,9 @@ def _preflight_finding(code: str, location: str, message: str) -> dict[str, obje
         "message": message,
     }
 
+# LLM: Delivery guidance is model discipline only; it may demand continued work
+# but must never become a host-side quality or completion decision.
+# 函数用途: 把交付合同转成模型可读的实现、验证和如实收尾提示。
 def _artifact_guidance_lines(contract: dict[str, object]) -> list[str]:
     artifacts = _artifact_items(contract)
     if not artifacts:
@@ -106,7 +109,11 @@ def _artifact_guidance_lines(contract: dict[str, object]) -> list[str]:
         "- 普通报告用 write_file.content 完整写入；超长文本用 mode=\"append\" 分成多个规范 write_file 调用。"
         "二进制产物用脚本生成后通过 write_file.data_base64 写入。"
     )
-    lines.append("- 交付前运行与任务相称的针对性检查；确认结果后直接给最终回复，并如实说明未完成项或限制。")
+    lines.append(
+        "- 交付前运行与任务相称的针对性检查；已知仍有缺口且现有工具或下级还能推进时继续工作，"
+        "不要用一份诚实的未完成项列表代替交付。只有目标完成、用户暂停/改向或存在当前无法消除的"
+        "真实阻塞时才给最终回复；真实阻塞和限制仍要如实说明。"
+    )
     return lines
 
 

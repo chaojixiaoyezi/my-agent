@@ -80,8 +80,12 @@ class HierarchyCreateChildRequest:
     sibling_index: int = 1
 
 
+# LLM: This immutable snapshot keeps one parent history and sibling start for
+# preview, limit, and apply paths; callers must not recompute ordinals later.
+# 类用途: 保存一次递归派工的父级、请求、质量提示和本批起始编号。
 @dataclass(frozen=True)
 class HierarchyResultBuildRequest:
     parent: SubAgentTask
     request: HierarchyScheduleRequest
     quality_advice: QaOrchestrationAdvice | None = None
+    sibling_start_index: int = 1

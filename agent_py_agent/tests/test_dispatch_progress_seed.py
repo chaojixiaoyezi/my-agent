@@ -399,6 +399,82 @@ def test_binding_reminds_usage_when_open_targets_unbound(tmp_path):
     assert "bound" not in binding
 
 
+def test_binding_accepts_plain_todo_item_ids(tmp_path):
+    from agent.agent_core.orchestration.dispatch_progress_seed import dispatch_coverage_binding
+    from agent.task_progress import write_task_progress
+
+    write_task_progress(
+        tmp_path,
+        "run-seed-1",
+        {
+            "items": [
+                {"id": "req-core", "title": "实现核心", "status": "pending"},
+                {"id": "req-test", "title": "补齐测试", "status": "pending"},
+            ]
+        },
+    )
+
+    binding = dispatch_coverage_binding(
+        _agent(tmp_path),
+        [_covered_task("sub-core", "实现核心", ["req-core"])],
+    )
+
+    assert binding["bound"] == {"sub-core": ["req-core"]}
+    assert binding["open_target_ids"] == ["req-core", "req-test"]
+
+
+def test_done_child_covers_closes_plain_todo_exact_id(tmp_path):
+    import json
+
+    from agent.agent_core.orchestration.dispatch_progress_seed import (
+        reconcile_completed_child_covers,
+    )
+    from agent.task_progress import write_task_progress
+
+    task_root = tmp_path / "tasks" / "demo"
+    agent = SimpleNamespace(
+        home_paths=None,
+        root=tmp_path,
+        _current_run_params=SimpleNamespace(
+            run_id="run-seed-1",
+            task_id="run-seed-1",
+            task_attributes={"run_workspace": {"task_root": str(task_root)}},
+        ),
+    )
+    write_task_progress(
+        tmp_path,
+        "run-seed-1",
+        {
+            "items": [
+                {"id": "req-core", "title": "实现核心", "status": "in_progress"},
+                {"id": "req-test", "title": "补齐测试", "status": "pending"},
+            ]
+        },
+    )
+    state = task_root / "work" / "agents" / "sub-core" / "canonical_state.json"
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(
+        json.dumps(
+            {
+                "run_id": "sub-core",
+                "parent_id": "run-seed-1",
+                "root_id": "run-seed-1",
+                "status": "DONE",
+                "attributes": {"covers": ["req-core"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    changed = reconcile_completed_child_covers(agent, tmp_path, "run-seed-1")
+    progress = read_task_progress(tmp_path, "run-seed-1")
+    by_id = {item["id"]: item for item in progress["items"]}
+
+    assert changed == ["req-core"]
+    assert by_id["req-core"]["status"] == "done"
+    assert by_id["req-test"]["status"] == "pending"
+
+
 def test_binding_none_when_no_coverage_ledger(tmp_path):
     from agent.agent_core.orchestration.dispatch_progress_seed import dispatch_coverage_binding
 

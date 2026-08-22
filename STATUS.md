@@ -1,5 +1,25 @@
 # STATUS
 
+## 2026-08-22 Prompt 4 r5：七个 child 稳定完成，但 main 在 `4/18` 时过早收尾（本地修复候选）
+
+- `.7` 唯一 Gateway、MiniMax-M2.7、tmux `dsh-p4-lazygit-r5-ea91639` 只输入一次原样 Prompt 4。
+  固定源码为 `jesseduffield/lazygit@ea916395`；按本轮口径排除测试后共 957 个 Go 文件、91,175 行
+  非空且非纯 `//` 的生产代码，满足 >40k 门槛。7 个 child 全部一次生命周期自然 `DONE`，没有 r4 的
+  PENDING/重复失败误杀，证明 `26e1034` 的可恢复工具失败链已进入真实运行。
+- 任务本身没有通过：产物只有 3,210 行产品代码和 448 行测试，虽然 39 项测试通过，但 README 明示
+  Pre-Alpha，GUI 仍有 5 个 `pass` 空桩，缺 rebase/sync/submodule、完整 TUI、diff/merge/search/filter 等。
+  main 自己已经列出这些缺口，却在 Todo `4/18`、另有 `s4=in_progress` 和 `s5=pending` 时给最终回复；
+  它还在多次 wake 中重建 `1..6`、`p1..p7`、`s1..s5` 三套同义计划。该轮属于“代理知道没做完但停了”，
+  不是机器验收漏判；按既定方向不恢复宿主质量闸。
+- 根因有四个：测试机配置未写 `system_prompt` 时使用 Python dataclass 默认，而它与发布 YAML 不一致且
+  含 Go 专项“1--2 轮先写骨架”；默认提示缺 会话运行时 的持续完成软纪律；`covers` 只认
+  `coverage.targets`、不认普通 Todo `items`；单个补派没有走批量连续编号器。
+- 当前候选让 YAML 与 dataclass 使用完全相同的通用默认提示，主/子/生命周期 wake 共用 会话运行时 式软续做
+  纪律；`task_progress` 对 open exact ids 返回非阻断续做提示，`covers` 可绑定普通 items 或 coverage
+  targets，并在 child canonical `DONE` 后按 id 打钩；单个、批量、递归补派共用稳定 sibling 序号。
+  宿主仍不解析 final、不按 Todo 自动续轮、不执行质量验收。直接相关 220 余项 focused 组合已通过，
+  严格 gate、推送部署和全新 r6 TUI 仍待完成。
+
 ## 2026-08-22 Prompt 4 r4：Compact 已续跑，重复失败机器闸误杀 child（本地修复候选）
 
 - `83faddb` 已推送并部署到 `.7` 唯一 Gateway。全新 tmux

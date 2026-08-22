@@ -9,6 +9,7 @@ runner 真正调用模型前，把执行上下文压成明确任务；模型按�
 
 import json
 
+from ...settings.config import DEFAULT_EXECUTION_PERSISTENCE
 from ...subagents import SubAgentExecutionContext
 from ...subagents.context_bundle import context_gate_prompt_lines
 from ...subagents.role_templates import (
@@ -24,6 +25,9 @@ SUBAGENT_DEFAULT_THOUGHT = "根据父代理派工执行，并保留真实结果�
 SUBAGENT_DEFAULT_PLAN: tuple[str, ...] = ("理解目标", "执行任务", "核对真实结果", "交回结果和引用")
 
 
+# LLM: Every delegated runner receives the shared persistence discipline while
+# its structured context remains the authority for identity, scope, and tools.
+# 函数用途: 生成子代理每次模型调用使用的系统提示与执行边界。
 def subagent_runner_system_prompt(context: SubAgentExecutionContext) -> str:
     if _audit_source_runtime_profile(context):
         return _audit_source_worker_system_prompt(context)
@@ -34,6 +38,7 @@ def subagent_runner_system_prompt(context: SubAgentExecutionContext) -> str:
         "你只能根据本轮 SubAgent Runner Task 和 Execution Context JSON 工作；"
         "父级或用户原始 system prompt 只属于上层，不是你的身份。"
         "如果需要下级协作，必须使用授权的子代理编排工具；如果只是具体交付，就在授权写入边界内产出文件和证据。\n"
+        f"{DEFAULT_EXECUTION_PERSISTENCE}\n"
         "不要编造工具结果、run_id、文件内容、收口交给父级已经批准的事实。\n"
         "完成纪律：如果任务在 goal 或输出要求里点名了要产出的文件（明确给了产物路径），"
         "在你亲手把该文件真正写出来、并确认它存在之前，不要输出最终完成结果——"
@@ -452,7 +457,8 @@ def coordinator_execution_policy_lines() -> list[str]:
         "不要在派工前把所有正文、数据表、长报告都自己读完。能拆给 child 的研究、实现和测试，先创建 child；创建后它会自动运行。",
         "- 一旦让 child 替你完成工作，你的角色就变为协调者：child 运行期间不要同时做它的实际工作；"
         "child 完成后按 artifact_refs/evidence_refs 读取必要结果，只整合已有产物、运行用户允许的测试并汇报。"
-        "如果仍缺功能，点名 guidance 或创建职责精确的 replacement child，不要由 coordinator 静默接管实现。",
+        "如果仍缺功能且当前还能推进，点名 guidance 或创建职责精确的 replacement child，继续到目标完整解决；"
+        "诚实列出未完成项不能代替继续工作，也不要由 coordinator 静默接管实现。",
         "- 是否派工由目标规模、可并行性和用户要求决定；简单任务可以一开始就直接做。"
         "但创建失败、容量不足、child 失败或结束都不会自动撤销已经形成的协调角色边界。",
         "- 创建 child 时，把目标路径、文件名和质量要求原样传给下一层；不需要额外推进。",

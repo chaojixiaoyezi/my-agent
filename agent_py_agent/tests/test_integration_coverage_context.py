@@ -41,6 +41,8 @@ def test_integration_prompt_is_evidence_based_without_fixed_orchestration():
     assert "findings_ledger" not in prompt
     assert "main agent remains their coordinator" in prompt
     assert "do not author the delegated implementation yourself" in prompt
+    assert "只要当前用户目标仍有你已知的未完成部分" in prompt
+    assert "continue coordinating instead of returning a partial final report" in prompt
 
 
 def test_coordinator_policy_does_not_silently_take_over_delegated_work():
@@ -51,7 +53,28 @@ def test_coordinator_policy_does_not_silently_take_over_delegated_work():
     policy = "\n".join(coordinator_execution_policy_lines())
     assert "角色就变为协调者" in policy
     assert "replacement child" in policy
+    assert "诚实列出未完成项不能代替继续工作" in policy
     assert "下级卡住时，你可以直接完成" not in policy
+
+
+def test_subagent_runner_uses_the_same_soft_persistence_discipline():
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.runner.prompts import (
+        subagent_runner_system_prompt,
+    )
+
+    prompt = subagent_runner_system_prompt(
+        SimpleNamespace(
+            context_bundle={},
+            run_id="subagent-1",
+            agent_name="worker-1",
+            role="worker",
+        )
+    )
+
+    assert "只要当前用户目标仍有你已知的未完成部分" in prompt
+    assert "一份诚实的未完成清单" in prompt
 
 
 def test_scheduled_prompt_not_polluted():

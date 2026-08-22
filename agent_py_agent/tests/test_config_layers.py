@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from agent_py_agent.agent.settings.config import AgentConfig, load_config
 from agent_py_agent.agent.settings.config_layers import ConfigLayer, merge_config_layers
@@ -10,6 +11,16 @@ from agent_py_agent.agent.settings.runtime_scope_config import (
     make_runtime_config_layer,
     merge_runtime_config_layers,
 )
+
+
+def test_shipped_system_prompt_matches_schema_default() -> None:
+    config_path = Path(__file__).resolve().parents[1] / "config" / "agent_config.yaml"
+    shipped = load_config(config_path).system_prompt
+    schema_default = AgentConfig().system_prompt
+
+    assert shipped == schema_default
+    assert "只要当前用户目标仍有你已知的未完成部分" in shipped
+    assert "go.mod" not in shipped
 
 
 def test_merge_config_layers_tracks_winning_source() -> None:

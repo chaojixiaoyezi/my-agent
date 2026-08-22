@@ -2,6 +2,8 @@ from __future__ import annotations
 
 """task_progress is a bounded advisory ledger, never a host continuation gate."""
 
+import json
+
 from agent_py_agent.agent.agent_core.orchestration.tool_specs import (
     build_task_progress_model_spec,
 )
@@ -115,3 +117,25 @@ def test_new_progress_item_requires_title_but_existing_item_can_update_by_id(tmp
     assert "new_item_title_required" in rejected.output
     assert created.ok is True
     assert updated.ok is True
+
+
+def test_open_progress_result_gives_soft_continue_and_covers_guidance(tmp_path) -> None:
+    agent = _agent(tmp_path)
+    agent._main_agent_run_id = "run-main"
+    tool = TaskProgressTool(agent)
+
+    result = tool.execute(
+        {
+            "action": "update",
+            "items": [
+                {"id": "req-core", "title": "实现核心", "status": "in_progress"},
+                {"id": "req-test", "title": "补齐测试", "status": "pending"},
+            ],
+        }
+    )
+    payload = json.loads(result.output)
+
+    assert payload["execution_guidance"]["blocking"] is False
+    assert payload["execution_guidance"]["open_item_ids"] == ["req-core", "req-test"]
+    assert "不要用列出未完成项代替继续工作" in payload["execution_guidance"]["message"]
+    assert "covers" in payload["execution_guidance"]["message"]

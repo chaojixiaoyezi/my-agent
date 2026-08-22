@@ -21,6 +21,9 @@ from .scheduler_models import (
 from .write_policy import ChildWriteRootRequest, requested_child_write_roots
 
 
+# LLM: A blocked result is observational and must preview the same sibling names
+# that apply would use without creating or mutating child records.
+# 函数用途: 构造被层级/权限限制拦下时的派工结果和一致的名称预览。
 def limit_schedule_result(build: HierarchyResultBuildRequest, reason: str) -> HierarchyScheduleResult:
     parent = build.parent
     request = build.request
@@ -34,11 +37,14 @@ def limit_schedule_result(build: HierarchyResultBuildRequest, reason: str) -> Hi
         requested_by=request.requested_by,
         planned_count=len(request.child_specs),
         created_run_ids=[],
-        items=planned_schedule_items(parent, request),
+        items=planned_schedule_items(build),
         quality_advice=build.quality_advice,
     )
 
 
+# LLM: Dry-run consumes the prepared build snapshot only and never advances the
+# persistent sibling history by itself.
+# 函数用途: 返回不落盘的递归派工预览，供调用方查看将创建的直属下级。
 def dry_schedule_result(build: HierarchyResultBuildRequest) -> HierarchyScheduleResult:
     parent = build.parent
     request = build.request
@@ -52,7 +58,7 @@ def dry_schedule_result(build: HierarchyResultBuildRequest) -> HierarchySchedule
         requested_by=request.requested_by,
         planned_count=len(request.child_specs),
         created_run_ids=[],
-        items=planned_schedule_items(parent, request),
+        items=planned_schedule_items(build),
         quality_advice=build.quality_advice,
     )
 
@@ -83,7 +89,13 @@ def applied_schedule_result(
     )
 
 
-def planned_schedule_items(parent: SubAgentTask, request: HierarchyScheduleRequest) -> list[HierarchyScheduledItem]:
+# LLM: Dry-run and blocked previews must use the same historical sibling ordinal
+# as apply, otherwise a preview can advertise names that the real create never
+# assigns. The build request carries the parent snapshot used by both paths.
+# 函数用途: 按同一父级历史编号预览即将创建的递归子代理名称与角色。
+def planned_schedule_items(build: HierarchyResultBuildRequest) -> list[HierarchyScheduledItem]:
+    parent = build.parent
+    request = build.request
     return [
         HierarchyScheduledItem(
             run_id="",
@@ -107,7 +119,10 @@ def planned_schedule_items(parent: SubAgentTask, request: HierarchyScheduleReque
             created=False,
             reason="planned",
         )
-        for index, spec in enumerate(request.child_specs, start=1)
+        for index, spec in enumerate(
+            request.child_specs,
+            start=build.sibling_start_index,
+        )
     ]
 
 

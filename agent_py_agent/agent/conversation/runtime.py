@@ -15,6 +15,7 @@ from ..backends.errors import (
 )
 from ..concurrency.interrupt import register_interruptible
 from ..runtime_errors import compact_error_message
+from ..settings.config import DEFAULT_EXECUTION_PERSISTENCE
 from ..settings.runtime_guard_config import runtime_guard_int
 from ..subagents.role_templates import active_model_subagent_tools
 from .agent_activity import BackgroundMainActivitySink, task_progress_items_for_task
@@ -64,6 +65,8 @@ _SUBAGENT_INTEGRATION_WAKE_PROMPT = (
     "and artifact_refs. Consume the current metadata envelope and, when "
     "metadata.events exists, every completion envelope inside that batch; "
     "read final_report_ref before guessing or searching for an output directory. "
+    + DEFAULT_EXECUTION_PERSISTENCE
+    + " "
     "A host-owned child status is lifecycle authority, while completion prose is "
     "integration evidence and cannot declare the root objective complete. Decide "
     "the next action from current facts "
@@ -82,8 +85,10 @@ _SUBAGENT_INTEGRATION_WAKE_PROMPT = (
     "or wait for another lifecycle event before reporting them. Do not ask the user "
     "how to find an already delivered child result when its completion message or "
     "readable report ref is present. Avoid duplicate work and polling. "
-    "Report completion only when the current objective and runtime facts support it, and describe "
-    "unresolved limitations truthfully."
+    "If known objective gaps remain and the available tools or child capacity can still address "
+    "them, continue coordinating instead of returning a partial final report. Report completion "
+    "only when the current objective and runtime facts support it. Describe unresolved limitations "
+    "only when they are genuine current blockers or the user has paused or redirected the task."
 )
 
 

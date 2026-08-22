@@ -889,7 +889,9 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   输入框上方；输入框下方只保留直属 child，不再重复 `main`。
 - `task_progress(action=update)` 必须先晋升 conversation task，再解析唯一稳定账本 key；否则首条
   Todo 会写到 Gateway request id，派工却读 task-path 指纹，同一任务裂成两本清单。
-  `create_subagents` 对显式 `covers` 只沿用已有 Todo id，未绑定 child 才按 exact run id 新建条目。
+  `create_subagents` 对显式 `covers` 只沿用已有 Todo id，未绑定 child 才按 exact run id 新建条目；
+  `covers` 的 exact id 同时适用于普通 `items` 和 `coverage.targets`，child 进入 canonical DONE 后只按
+  结构化 id 回写对应项，不能从标题、goal、路径或完成正文猜映射。
   child 的 `covers` 以有界 `progress_item_ids` 进入只读活动投影，renderer 仅用 typed status
   原位显示 DONE/失败/取消，不从 goal/title 文字猜关联。
 - 大派工回执可被工具输出归档，因此有界 `task_progress_seed` 必须同时保留在
@@ -965,6 +967,14 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   现只允许由 `agent_core/runtime/task_identity.py` 生成；task_progress 写入、后台读取、dispatch child
   终态同步、Goal continuation 和 TUI activity 都必须调用同一 helper，禁止调用方复制 hash。该统一只让
   当前计划进入模型可见 typed state，不把普通 open Todo 升为机器完成门、产物验收或自动续跑授权。
+- Prompt 4 r5 在 Todo `4/18`、模型自己明确列出大量缺口且仍有可用工具时自然 final，证明“如实列出
+  未完成项”不能代替 会话运行时 的持续完成纪律。当前默认主/子代理执行提示统一采用 会话运行时 的软语义：只要
+  已知目标仍有未完成部分且现有工具或下级还能推进，就继续实现、修复和验证；只有目标端到端完成、用户
+  明确暂停/改向，或存在当前无法消除的真实阻塞时才结束。`task_progress` 读取回执可重复这一软提醒，但
+  宿主仍不因 open Todo 自动重开模型、不解析 final 文案、不恢复机器质量验收。
+- 系统生成的 display name 是未来 TUI/Web 精确控制旁边的人类可读稳定标识：同一 exact parent 下，批量、
+  单个补派以及递归 child 都必须沿全部历史直属 sibling 连续编号；显式自定义名保持原样，run_id 仍是唯一
+  机器身份。Prompt 4 r5 两个单独补派 worker 都显示 `agent-d1-worker`，确认旧编号器只覆盖批量入口。
 
 ## 2026-08-22 主/子/孙代理统一 Conversation Compact
 

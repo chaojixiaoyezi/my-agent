@@ -50,6 +50,9 @@ class SubAgentHierarchyScheduler:
     def __init__(self, manager: Any) -> None:
         self.manager = manager
 
+    # LLM: Recursive creation uses the parent's canonical child history for the
+    # next sibling ordinal; dry-run, blocked, and apply must see one snapshot.
+    # 函数用途: 为指定父代理规划或创建下一层直属子代理，并返回结构化结果。
     def schedule_children(self, request: HierarchyScheduleRequest) -> HierarchyScheduleResult:
         parent = self.manager.load(request.parent_run_id)
         quality_advice = qa_orchestration_advice(manager=self.manager, parent=parent, specs=request.child_specs)
@@ -57,6 +60,7 @@ class SubAgentHierarchyScheduler:
             parent=parent,
             request=request,
             quality_advice=quality_advice,
+            sibling_start_index=max(1, len(parent.child_ids) + 1),
         )
         if reason := _explicit_limit_reason(parent, request):
             return trace_hierarchy_schedule(
@@ -93,6 +97,9 @@ def _explicit_limit_reason(parent: SubAgentTask, request: HierarchyScheduleReque
     return ""
 
 
+# LLM: Apply exactly the names and ordinals prepared in the build request so a
+# later nested batch cannot reset display identities to one.
+# 函数用途: 把层级调度计划逐项解析为真实 child，并汇总创建或复用结果。
 def _apply_result(
     manager: Any,
     build: HierarchyResultBuildRequest,
@@ -101,7 +108,10 @@ def _apply_result(
     request = build.request
     resolutions = [
         _resolve_child(manager, parent, spec, sibling_index=index)
-        for index, spec in enumerate(request.child_specs, start=1)
+        for index, spec in enumerate(
+            request.child_specs,
+            start=build.sibling_start_index,
+        )
     ]
     return applied_schedule_result(build, resolutions)
 

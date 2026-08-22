@@ -123,6 +123,21 @@ def _indexed_item_params(run_params: CreateRunParams, *, index: int, total: int)
     return CreateRunParams(**{**run_params.__dict__, "agent_name": task_name})
 
 
+# LLM: Single-child and batch creation share one sibling ordinal allocator.
+# Explicit custom names remain untouched; only system placeholder names receive
+# the stable suffix used by TUI/Web human-readable control surfaces.
+# 函数用途: 给单个补派的系统默认名称续上同一父级的历史编号，避免每批都显示同名 worker。
+def _indexed_single_run_params(agent: SimpleAgent, run_params: CreateRunParams) -> CreateRunParams:
+    index = _next_system_lineage_index(agent, [run_params])
+    task_name = _indexed_agent_name(
+        run_params.agent_name,
+        role=run_params.role,
+        index=index,
+        require_index=True,
+    )
+    return CreateRunParams(**{**run_params.__dict__, "agent_name": task_name})
+
+
 def _indexed_agent_name(agent_name: str, *, role: str, index: int, require_index: bool = False) -> str:
     name = str(agent_name or "").strip()
     if _needs_system_lineage_name(name):
@@ -246,6 +261,9 @@ def execute_create_subagents_service(
             error_code="TOOL_INVALID_ARGUMENTS",
         )
 
+# LLM: All root child creation modes converge here; single and batch paths must
+# share identity, scope, progress binding, and lifecycle publication semantics.
+# 函数用途: 校验并创建一个或一批直属子代理，成功后交给统一后台调度链启动。
 def _execute_create_subagents(agent: SimpleAgent, params: dict[str, object]) -> ToolHandlerOutcome:
     if not agent.config.enable_subagents:
         return ToolHandlerOutcome("create_subagents", False, "配置已禁用 subagent。", error_code="TOOL_UNAVAILABLE")
@@ -289,6 +307,7 @@ def _execute_create_subagents(agent: SimpleAgent, params: dict[str, object]) -> 
     if isinstance(prepared, ToolHandlerOutcome):
         return prepared
     allowed_tools, run_params = prepared
+    run_params = _indexed_single_run_params(agent, run_params)
     task_params = [run_params]
     if conflict := _output_scope_conflict_result(agent, task_params):
         return conflict

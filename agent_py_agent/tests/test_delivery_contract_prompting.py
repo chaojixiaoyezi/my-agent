@@ -41,6 +41,7 @@ def test_render_delivery_contract_section_includes_staging_refs():
     assert "数据清单" in text
     assert "记录名" in text
     assert "阶段构建工具:" not in text
+    assert "不要用一份诚实的未完成项列表代替交付" in text
 
 
 def test_render_delivery_contract_section_skips_bad_artifact_items():

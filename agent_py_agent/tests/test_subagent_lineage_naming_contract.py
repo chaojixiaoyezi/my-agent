@@ -71,6 +71,19 @@ def test_later_top_level_batch_continues_sibling_ordinals(tmp_path):
     ]
 
 
+def test_later_single_children_share_the_batch_sibling_ordinal(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _create_agent(tmp_path)
+    tool = CreateSubagentsTool(agent)
+    first = json.loads(tool.execute({"goal": "补齐第一个缺口"}).output)
+    second = json.loads(tool.execute({"goal": "补齐第二个缺口"}).output)
+
+    run_ids = [*first["created_run_ids"], *second["created_run_ids"]]
+    names = [agent.subagents.load(run_id).agent_name for run_id in run_ids]
+    assert names == ["agent-d1-worker-1", "agent-d1-worker-2"]
+
+
 def test_scheduled_children_get_structured_depth_name_and_index(tmp_path):
     from agent_py_agent.agent.subagents.manager import SubAgentManager
     from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
@@ -100,3 +113,39 @@ def test_scheduled_children_get_structured_depth_name_and_index(tmp_path):
 
     names = [manager.load(run_id).agent_name for run_id in result.created_run_ids]
     assert names == ["agent-d2-worker-1", "agent-d2-tester-2"]
+
+
+def test_later_nested_batch_continues_direct_sibling_ordinals(tmp_path):
+    from agent_py_agent.agent.subagents.manager import SubAgentManager
+    from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
+        HierarchyChildSpec,
+        HierarchyScheduleRequest,
+    )
+
+    manager = SubAgentManager(tmp_path / "subs")
+    parent = manager.create_run(
+        goal="父级任务",
+        thought="root",
+        plan=["plan"],
+        agent_name="coordinator-1",
+        role="coordinator",
+        depth=1,
+    )
+    first = manager.hierarchy.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=parent.id,
+            child_specs=[HierarchyChildSpec(goal="先修核心", role="worker")],
+            apply=True,
+        )
+    )
+    second = manager.hierarchy.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=parent.id,
+            child_specs=[HierarchyChildSpec(goal="再修界面", role="worker")],
+            apply=True,
+        )
+    )
+
+    run_ids = [*first.created_run_ids, *second.created_run_ids]
+    names = [manager.load(run_id).agent_name for run_id in run_ids]
+    assert names == ["agent-d2-worker-1", "agent-d2-worker-2"]

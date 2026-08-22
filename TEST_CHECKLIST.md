@@ -91,8 +91,13 @@
 - [ ] task-local 父级创建下一层后以 `interrupted/SUBAGENTS_ACTIVE` 让出；exact direct-child wait 在孩子
   活跃时阻止孤儿误复活。同批成功只恢复一次，失败/缺状态/capability 阻塞立即恢复；嵌套 child 只叫醒
   直属父级，恢复上下文包含有界 `direct_children` refs，Gateway 重启后也能从耐久标记补偿。
-- [ ] `task_progress` 仅为软账本：open 项不触发普通任务自动续跑、不阻止自然 final；新项要求稳定
-  `id/title/status`，模型旧 pending 不能覆盖 canonical child DONE。
+- [x] `task_progress` 仅为软账本：open 项不触发普通任务自动续跑、不阻止自然 final；新项要求稳定
+  `id/title/status`，模型旧 pending 不能覆盖 canonical child DONE。`covers` 可绑定普通 items 或
+  coverage.targets 的 exact id，canonical child DONE 后原位打钩；工具结果只给非阻断续做 guidance。
+- [x] 发布 YAML 与 dataclass 的默认 system prompt 文本完全一致，不再因测试机省略配置而回落到 Go 专项
+  骨架；主/子/wake 共用 会话运行时 式持续完成软纪律，且没有重新引入 final 解析、Todo 自动续轮或机器质量验收。
+- [x] 同一 exact parent 下，系统生成的单个补派、批量补派和递归 child 名称沿历史 sibling 连续编号；
+  显式自定义名称不改，机器身份仍只认 run_id。
 - [ ] OPEN capability request 不能被普通 completed 收尾覆盖为 DONE；直属父级 grant/deny 后必须续跑
   同一 run，取消/接管终态不得复活。根、子、孙只能 guidance/cancel/resolve 自己的直属 child；
   模型 cancel 回执不得夹带整树状态，schema 不暴露 dry_run/kill_process 运维参数。

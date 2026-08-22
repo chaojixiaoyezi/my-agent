@@ -22,8 +22,10 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   批量 `items[]` 必须逐项写入，顶层 description 只代表整批派工，不能扇出成所有 child 的相同文案。
   递归层级使用同一字段；省略时展示层只可退回该 child 的有界 goal，但任何运行、权限、恢复和结束逻辑
   都不得读取 description 或 goal 做机器判断。
-- 系统生成的 sibling display name 在同一 exact parent 的全部历史批次中连续编号；后批不能重新出现
-  `worker-1/worker-2`。该编号只用于稳定展示与未来精确控制，不替代 canonical run id。
+- 系统生成的 sibling display name 在同一 exact parent 的全部历史中连续编号；根级单个补派、根级批量
+  和递归 scheduler 的 apply/dry-run/blocked 预览共用同一历史起点，后批不能重新出现
+  `worker-1/worker-2`。显式自定义名保持原样；该编号只用于稳定展示与未来精确控制，不替代 canonical
+  run id。
 - main `Working`、fixed Todo 和 fixed child panel 都是同一 reducer snapshot 的派生 view。
   main 位于正文末尾，Todo 位于输入框上，child panel 位于输入框下。Todo 的 exact
   `run_id/progress_item_ids` 标记、main/child 严格单行截断、首次 attempt 隐藏和重试文案都属于展示规则，

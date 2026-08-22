@@ -18,7 +18,7 @@ _CREATE_PARAMETERS = {
     "tool_preset": "工具预设；通常省略。有效值：coding/read_only/none",
     "allowed_tools": "工具偏好提示；通常省略，基础读写工具会自动补齐",
     "allowed_skills": "可选；只把当前 owner Skill 快照中点名的技能授权给子代理",
-    "covers": '该子代理负责的 coverage 清单项 id 列表(如 ["req-03"]):派工时绑定,子代理完成后系统按 id 自动把对应清单项标 done,不用你回头逐项标',
+    "covers": '该子代理负责的 task_progress 清单项 id 列表（普通 items 或 coverage.targets，例如 ["req-03"]）：派工时绑定，子代理完成后系统按 exact id 自动把对应项标 done，不用你回头逐项标',
     "plan": "子代理初始步骤",
     "input_refs": "交给子代理读取的文件、URL 或 artifact refs",
     "output_files": "用户明确指定的目标产物路径，用于交付归属和冲突锁；没明确指定时不要从输入目录推断",
@@ -57,7 +57,7 @@ _CREATE_PARAMETER_DETAILS = {
         "创建一个叶子 item；子代理只需调用 watch_stream(action=open)，URL、请求体、游标位置"
         "和文档引用由运行时从该绑定补入，禁止猜 watch_id。"
     ),
-    "covers": "每个 item 只绑它自己负责的清单项(id 来自 task_progress coverage);别把全部 id 复制给每个子代理,绑不存在的 id 不生效。",
+    "covers": "每个 item 只绑它自己负责的清单项（id 来自 task_progress 的 items 或 coverage.targets）；别把全部 id 复制给每个子代理，绑不存在的 id 不生效。已先建 Todo 时，派工必须优先复用这些 exact id，避免再生成一套重复 Todo。",
 }
 _CREATE_ITEM_PARAMETER_DETAILS = {
     "goal": "每个 item 都必填；只写这一个子代理要完成和交付的具体工作，不要复制顶层整批 goal。",
@@ -66,4 +66,5 @@ _CREATE_ITEM_PARAMETER_DETAILS = {
 _CREATE_EXAMPLES = [
     '{"tool":"create_subagents","goal":"实现用户认证模块并写到 platform/auth/,要可运行","description":"实现用户认证","output_files":["platform/auth/"]}',
     '{"tool":"create_subagents","goal":"并行完成认证实现与资料核对","items":[{"goal":"实现注册登录模块","description":"实现注册登录","output_files":["platform/auth/"]},{"goal":"读资料B并写证据摘要","description":"核对资料B","input_refs":["data/b.md"],"output_files":["reports/b.md"]}]}',
+    '{"tool":"create_subagents","goal":"完成现有 Todo","items":[{"goal":"实现 req-03 用户模块","description":"实现用户模块","covers":["req-03"]},{"goal":"补齐 req-04 测试","description":"补齐模块测试","covers":["req-04"]}]}',
 ]

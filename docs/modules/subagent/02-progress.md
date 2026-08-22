@@ -79,7 +79,9 @@
 - `create_subagents` 成功回执携带结构化 `task_progress_seed.items`，通用工具进度 adapter 将它提升为
   `task_progress_items`，且有界 seed 同时存入 `result_envelope`，大输出归档后也不会丢实时 Todo 事件。
   `task_progress` 先晋升 task 再选账本；有显式 `covers` 的 child 沿用已有项，并以
-  `progress_item_ids` 与 typed child status 原位勾选；只有未绑定 child 才按 exact run id 新建项。
+  `progress_item_ids` 与 typed child status 原位勾选；`covers` 的 exact id 同时适用于普通 `items` 和
+  `coverage.targets`，只有未绑定 child 才按 exact run id 新建项。工具 read/update 回执会列出有界 open ids
+  并给模型非阻断续做提示，但不会替宿主启动新轮、判断质量或阻止自然 final。
 - exact child run id 自动生成的 seed 项继续保留在 canonical 进度账本，供恢复和状态关联使用；TUI 发现
   同一个直属 child 已在输入框下方面板展示时，只在 view 层隐藏这条重复 Todo。模型自己创建的普通任务项
   和显式 `covers` 项仍留在上方并按 child status 打标，不解析“子代理”标题文字；隐藏发生在展示上限
@@ -91,6 +93,10 @@
 - 对照 会话运行时 orchestrator：一旦实际实现已委派给 child，main 的角色就保持为协调者，只能读取/整合现有
   产物、执行用户允许的测试并汇报；缺口要精确指导原 child 或另派 replacement child。容量不足、参数错误、
   child 失败或终态都不构成 main 静默接管实现的授权。这是通用分工提示，不参与机器状态或质量验收。
+- Prompt 4 r5 证明“如实列出缺口”仍会被模型误当作任务终点。发布 YAML 与 dataclass 现在共用一个通用
+  默认 prompt，删除 Go 专项骨架；主/子/wake 复用 会话运行时 `Autonomy and Persistence` 的软语义：已知缺口
+  且仍可调用工具或下级时继续到端到端解决。单个、批量和递归 child 的系统显示名也沿同一父级历史连续
+  编号，避免后补两个 worker 都叫同一个名字。run_id 与 typed lifecycle 仍是机器权威。
 - `931ee20` 的真实 Prompt 3 证明四名 child 都完成但 main 仍猜错目录：旧 root wake 只有 status 和
   runner/output 索引，没有 child 最终回复和系统 `final_report.md`。当前候选按 会话运行时 inter-agent
   completion message 增加 `subagent-completion.v1`，把有界最终回复、完整报告 ref、declared/artifact refs
