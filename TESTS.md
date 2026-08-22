@@ -401,6 +401,10 @@ ToolResult、UserTurn 与尚未转发的运行引导都要进入同一 token 估
 非权威语义 summary 承接；下一次跨阈值要把前代 summary 作为输入再原位替换。摘要调用失败必须回退
 机械 handoff；摘要、handoff marker 与近期尾部都要纳入同一预算。连续两次再次跨阈值时不能堆叠
 summary/窗口标记、遗失最新用户纠正、留下 tool-use/tool-result 孤儿或退回 Gateway 同 turn 重启。
+展示回归还必须覆盖 presentation/no-save 回合：公开 `compact_trigger_tokens` 仍等于统一
+配置压缩点（例如 128k 窗口的 115.2k），不得因当轮禁止持久 apply 而变成 128k/100%。
+同时要用超过 90% 但未达完整窗口的 no-save 输入证明它没有获得落盘 Compact 权限，
+避免为了修 UI 暗改执行边界。
 
 Gateway/IM 投递回归还必须覆盖：同一进度批次重试使用稳定 provider 幂等键，不同 progress cursor 与
 最终回复使用不同键。身份只取可信 message ID、request ID、phase 和 cursor，不能从回复正文猜测；

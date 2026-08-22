@@ -55,7 +55,9 @@ class ModelVisibleContextSnapshot:
 
 # LLM: This is the only constructor for live context-display facts. It reuses the same
 # runtime_compact_policy and provider-visible estimator as preflight instead of adding a UI budget.
-# 函数用途: 计算一次即将发给模型的上下文构成，让状态条与自动 compact 使用同一口径。
+# The configured trigger remains stable even when one presentation/no-save call cannot apply it;
+# call-local persistence permission belongs to enforcement, not the public conversation policy.
+# 函数用途: 计算一次即将发给模型的上下文构成；状态条始终显示统一的自动压缩点，不受单次回合是否允许落盘影响。
 def model_visible_context_snapshot(
     agent: object,
     params: object | None,
@@ -73,7 +75,7 @@ def model_visible_context_snapshot(
     )
     window = max(0, int(policy.context_window_tokens or 0))
     trigger = max(0, int(policy.trigger_tokens or 0))
-    if not policy.allow_persistent_apply or trigger <= 0:
+    if trigger <= 0:
         trigger = window
     return ModelVisibleContextSnapshot(
         context_window_tokens=window,

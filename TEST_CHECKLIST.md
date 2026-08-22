@@ -7,6 +7,8 @@
 - [x] shell 对内部 child 状态路径的执行前拒绝声明 `WRONG_STATUS_SURFACE/not_started`；canonical dispatch
   即使记录 handler 已进入，也归确定性 failed 并把原因返回模型，不触发 unknown 硬停。真实副作用未知
   回归继续保持 unknown/fail-closed。
+- [x] Compact 公开压缩点不受单次 `save=False` 影响；128k/90% 始终投影 115.2k，
+  但 120k 的 no-save 回合仍不执行持久 Compact。压缩策略与完整窗口硬限不得在 TUI 层硬编。
 - [x] 递归管理面只含 create/guidance/cancel/capability；inspect/dispatch/schedule/wait/raise_event
   均不可注册或从历史 grant 复活。只有根主代理与结构化 coordinator 持有四项，普通 leaf 全部移除。
   宽 forbidden 与窄 task output allow 按最具体路径裁决，同层 deny 胜出；

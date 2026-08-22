@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-08-22 子代理真实 Compact 次数与统一路线（本地候选）
+## 2026-08-22 子代理真实 Compact 次数与统一路线（`e59acad` 已部署）
 
 - 正式 Prompt 3 的 deepseek child 当前上下文从触发线附近降到约 35.7k，但 run 内没有 durable
   `compact_applies` 行；实际发生的是 `_tool_loop_service` 的 native IR 成对裁剪。旧事件只活在回合内 sink，
@@ -11,6 +11,12 @@
 - 最终方向已按 会话运行时 确认为“每个 main/child/grandchild 各有独立 thread，共用同一 Conversation Compact
   状态机”。当前仅完成真实展示候选；child 的 thread 建立、消息接入、resume/CAS 迁移和旧
   `memory_archive` continuation 删除尚未开始，不能把本轮写成底座已经统一。
+- `e59acad` 在唯一 Gateway 的全新 Prompt 3 TUI 中证明 6 个 child 均一次 attempt 自然
+  DONE，实时 context 与终态行正常；该轮 child 最高约 89.4k，未达 115.2k 压缩点，
+  因此 `compact 0` 是真实结果，不冒充压缩成功证据。
+- 同轮终屏暴露 presentation/no-save 模型调用把公开压缩点错投影成 100%。当前候选已
+  保持配置压缩点 90% 稳定，同时保留 save=False 不落盘、未到完整窗口不返回
+  context-overflow 的执行边界；定向回归已通过，待部署后 TUI 复验。
 
 ## 2026-08-22 Prompt 3 子代理误挂起（本地候选）
 

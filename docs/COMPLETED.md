@@ -4,6 +4,10 @@
 
 最近收口重点：
 
+- 2026-08-22 本地底座已把 Compact 的“配置压缩点”与“单次回合是否允许持久
+  apply”分开：presentation/no-save 回合不再把 Context 行的 90% 错写成 100%；真实
+  preflight 仍保持 save=False 不压缩落盘，并由完整模型窗口守最后硬限。回归同时锁定
+  `115.2k/128k` 的展示及 `120k` no-save 不误触发。
 - 2026-08-22 本地底座已修复后台主代理读取第二本空进度账的问题：task-path 指纹算法集中到
   `runtime/task_identity.py`，工具写入、Task Runtime State、child seed 终态同步、Goal 续跑和 TUI 投影
   使用同一 ledger id。负向回归证明 request-id 下的旧账不会覆盖真账。普通 Todo 仍只作模型可见工作笔记，

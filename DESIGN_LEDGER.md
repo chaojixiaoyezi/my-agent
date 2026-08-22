@@ -983,6 +983,10 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 当前过渡：界面只把真实 durable apply 行与 exact child 上的 typed native IR reduction 相加，既不从
   token 降幅猜测，也不把它伪称已完成统一迁移。统一 thread 落地后，这个过渡计数必须随旧链一起删除，
   用户看到的 `compact N` 最终只对应该代理 thread 的一个 canonical generation。
+- 压缩策略与单次回合权限分层：`compact_trigger_tokens` 始终投影同一配置压缩点；
+  presentation/no-save 回合不允许持久 apply 时，只把当轮强制压缩的有效硬限放到完整窗口，
+  不得把公开策略改写成 100%。这与 会话运行时 分开 `auto_compact_scope_limit` 和
+  `full_context_window_limit` 的口径一致；前端不硬编 90。
 
 ## 2026-08-22 单 Gateway 服务身份与 thread cwd 分离【状态：`993ce4f` 真机通过】
 

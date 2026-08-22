@@ -8,6 +8,9 @@
 - active-turn native IR 裁剪会先形成闭合的数字事件，再写 rich sink 与 exact child canonical 属性；TUI
   因而能在 sink 消失和 child 完成后继续显示真实累计。该投影没有生命周期、恢复或 Compact CAS 权威，
   后续将随 child ConversationThread 统一迁移而删除。
+- 真实 Prompt 3 终屏又暴露 no-save presentation 把压缩点错显示为 100%。底层现只用
+  `runtime_compact_policy.trigger_tokens` 投影公开压缩点；`allow_persistent_apply` 仍只决定当轮能否
+  落盘与执行，不再篡改展示策略。
 
 ## 2026-08-22 执行前状态面拒绝的确定性结果
 

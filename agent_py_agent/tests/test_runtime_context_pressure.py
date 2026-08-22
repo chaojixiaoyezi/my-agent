@@ -258,6 +258,39 @@ def test_live_context_snapshot_reuses_exact_total_and_exposes_no_content(monkeyp
     assert "secret" not in repr(public)
 
 
+def test_unsaved_model_call_keeps_configured_trigger_without_enabling_compact(
+    monkeypatch,
+) -> None:
+    agent = SimpleNamespace(
+        config=AgentConfig(
+            auto_save_memory=True,
+            memory_compact_auto_trigger_percent=90,
+            model_context_window_tokens=128_000,
+        ),
+        backend=SimpleNamespace(context_window_tokens=128_000, name="fake"),
+    )
+    params = SimpleNamespace(
+        context_scope="conversation",
+        save=False,
+        tool_protocol_snapshot=make_test_protocol_snapshot(source_protocol="text"),
+        live_archive_state={},
+    )
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.model.context_pressure.estimate_tokens",
+        lambda _payload: 120_000,
+    )
+
+    snapshot = model_visible_context_snapshot(agent, params, "presentation prompt")
+    response = preflight_context_pressure_response(
+        SimpleNamespace(agent=agent, params=params, prompt="presentation prompt")
+    )
+
+    assert snapshot.context_window_tokens == 128_000
+    assert snapshot.compact_trigger_tokens == 115_200
+    assert snapshot.current_tokens == 120_000
+    assert response is None
+
+
 def test_inline_tool_result_budget_reuses_current_compact_headroom(monkeypatch) -> None:
     agent = SimpleNamespace(
         config=AgentConfig(

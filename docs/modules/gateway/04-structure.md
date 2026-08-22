@@ -71,6 +71,8 @@ audit Agent 为空而回退 daemon cwd。
 - `model_visible_context_usage.v1` 与 `model_visible_context_compaction.v1` 都只允许数字白名单穿过 rich
   chunk。usage 是最新模型调用前的展示快照；compaction 是 active-turn native IR 的事实，child runner 会
   额外持久一个有界计数投影，避免 sink 消失后归零；二者均不获得 ConversationStore compact 权威。
+- usage 的 `compact_trigger_tokens` 是会话统一策略，不是单次请求的权限投影；no-save 仅让
+  preflight 使用完整 context window 作当轮硬限，不把 TUI 的 90% 压缩点改成 100%。
 
 ## 最终效果裁决与 owner-scoped 命令环境
 

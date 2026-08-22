@@ -148,9 +148,10 @@ key/config/runtime 数据，不触碰其它项目。较早大切片已按约定�
 checkpoint 和失败熔断表现不一致，并已经出现 child 实际裁剪后仍显示 `compact 0`。
 
 当前进展：已对照 会话运行时 `session/turn.rs` 与 multi-agent spawn：每个 child 都是独立 thread，但所有 thread
-共用 pre-sampling/mid-turn Compact 状态机。本地过渡候选把 exact child 的 native IR reduction 以纯数字、
-幂等事件累计进 canonical run 展示投影，并与既有 durable apply 行相加；main Context 同时显示准确
-`压缩点 90%`。该切片不冒充架构统一。
+共用 pre-sampling/mid-turn Compact 状态机。`e59acad` 已把 exact child 的 native IR reduction 以纯数字、
+幂等事件累计进 canonical run 展示投影，并与既有 durable apply 行相加；main Context 同时显示
+`压缩点 90%`。真实 Prompt 3 又发现单次 no-save 回合把该点误投影为 100%；当前候选已将
+公开策略与当轮 apply 权限分层，不修改真实溢出保护。该切片不冒充架构统一。
 
 待做：child 创建时建立稳定 `agent_thread_id`，把每轮消息、摘要、checkpoint、generation/CAS 和 resume
 接到现有 `ConversationStore/compact.py`；随后让 TUI 只读每个 agent thread generation，并删除
