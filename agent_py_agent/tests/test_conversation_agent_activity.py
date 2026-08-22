@@ -186,7 +186,11 @@ def test_conversation_agent_activity_reads_live_child_context_and_compact_ledger
             "model_visible_context_usage": {
                 "schema": "model_visible_context_usage.v1",
                 "current_tokens": 12_345,
-            }
+            },
+            "model_visible_context_compaction": {
+                "schema": "model_visible_context_compaction.v1",
+                "count": 1,
+            },
         },
     )
     store = SimpleNamespace(
@@ -206,7 +210,7 @@ def test_conversation_agent_activity_reads_live_child_context_and_compact_ledger
     )
 
     assert activity.subagents[0]["context_tokens"] == 12_345
-    assert activity.subagents[0]["compact_count"] == 2
+    assert activity.subagents[0]["compact_count"] == 3
 
 
 def test_background_main_activity_sink_projects_real_stage_for_active_task() -> None:

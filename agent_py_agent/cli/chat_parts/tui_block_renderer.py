@@ -1986,10 +1986,11 @@ def _render_fixed_agent_panel(
     return _render_subagent_panel(background, context) if background is not None else ()
 
 
-# LLM: The persistent strip shows only total usage plus the canonical committed compact count.
+# LLM: The persistent strip shows total usage, the canonical committed compact count, and the
+# exact trigger derived from the same provider-visible token budget.
 # Protocol-specific prompt/messages/tools breakdown stays in /context because text mode folds
 # messages and tools into prompt and would otherwise render misleading zeroes.
-# 函数用途: 常驻行只显示用户能理解的上下文总量、占比和已完成压缩次数；详细构成留给 /context。
+# 函数用途: 常驻行显示上下文总量、占比、已压缩次数和自动压缩点；详细构成留给 /context。
 def _render_context_usage(
     usage: TuiContextUsage,
     width: int,
@@ -2001,6 +2002,11 @@ def _render_context_usage(
     window = max(0, int(usage.context_window_tokens or 0))
     trigger = max(0, int(usage.compact_trigger_tokens or 0))
     percent = min(999, round(current * 100 / window)) if window > 0 else 0
+    trigger_percent = (
+        min(100, max(0, round(trigger * 100 / window)))
+        if trigger > 0 and window > 0
+        else 0
+    )
     style = _context_usage_style(current, trigger, window)
     estimate = "~" if usage.estimated else ""
     compact = max(0, int(compact_count or 0))
@@ -2008,15 +2014,15 @@ def _render_context_usage(
     if available >= 72:
         text = (
             f"Context {estimate}{_format_compact_number(current)}/{_format_compact_number(window)}"
-            f" · {percent}% · compact {compact}"
+            f" · {percent}% · compact {compact} · 压缩点 {trigger_percent}%"
         )
     elif available >= 40:
         text = (
             f"Ctx {estimate}{_format_compact_number(current)}/{_format_compact_number(window)}"
-            f" · {percent}% · compact {compact}"
+            f" · {percent}% · c{compact} · 点{trigger_percent}%"
         )
     else:
-        text = f"Ctx {percent}% · c{compact}"
+        text = f"Ctx {percent}% · c{compact} · 点{trigger_percent}%"
     return wrap_fragments(
         ((style, text),),
         width=available,

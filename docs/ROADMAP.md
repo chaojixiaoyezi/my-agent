@@ -113,10 +113,18 @@ State、child 终态同步、Goal 续跑和 TUI 投影全部复用同一编号�
 只确保模型每个后台轮都看得到自己尚未完成的计划。待 focused/严格 gate 后部署，再用全新 tmux 原样重跑
 Prompt 3，重点验收 8 个目标全覆盖、最终横向汇总及 Todo 终态。
 
-当前本地 TUI 候选又按 终端交互 `TaskListV2`/全局 animation frame 收口默认任务摘要：固定四条，优先
-最近完成、当前运行和下一待办；`Ctrl+T` 展开全部。常驻 Context 去掉不直观的 compact 触发线比例和
-prompt/messages/tools 常驻分类，只保留总量、占比与 canonical Compact 次数。定向回归已通过，待严格
-gate、部署及正式任务中的动画/按键/次数真机复验。
+`ac1f4dc` 已按 终端交互 `TaskListV2`/全局 animation frame 收口默认任务摘要并部署 `.7`：固定四条，优先
+最近完成、当前运行和下一待办；`Ctrl+T` 展开全部。常驻 Context 去掉不直观的协议构成，只保留总量、
+占比、canonical Compact 次数和明确命名的自动压缩点；prompt/messages/tools 留给 `/context`。定向回归
+已通过，待严格 gate、部署及正式任务中的动画/按键/次数真机复验。全新 Prompt 3 已证明默认 `4/9`、展开/收起和
+`compact 0` 生效；原始 Todo 仍全是 pending，因为模型派工没有传 typed `covers`，后续应加强结构化绑定
+而不是按标题猜任务对应关系。
+
+同轮四名 child 中 代理运行时 在读取内部 child 状态文件时被 `WRONG_STATUS_SURFACE` 正确拒绝，但旧
+ShellTool 没声明“进程未启动”，operation coordinator 因 run_command 的潜在副作用把它保守升级为
+`TOOL_OPERATION_OUTCOME_UNKNOWN`，导致整个 child 回合 interrupted/PENDING。当前候选只在这一条
+执行前拒绝上补 `effect_outcome=not_started`，保持安全门不变，让错误回到模型换正式结果引用；真正未知
+副作用仍 fail-closed。待 focused gate、部署后用新的原样 TUI 任务复验 child 不再因此挂起。
 
 `714c0c8` 已推送并部署 `.7`，本地 117 项 focused、远端 11 项投影/渲染 focused 与提交前严格 gate
 均通过，按用户约定未重跑全仓 pytest。真实 TUI 已证明两个 child 一次 attempt 自然完成，固定活动区能
@@ -130,6 +138,24 @@ lane 占位的样本：durable wake 与 ready 事实均正常，但重启前未�
 边界：当前测试机为 `192.0.2.7:/root/my-agent`；保持单 Gateway、多 TUI、tmux 观察会话和远端
 key/config/runtime 数据，不触碰其它项目。较早大切片已按约定执行过一次全仓 pytest；当前切片远低于
 10,000 行，只跑相关 focused tests 与远端提交前严格 gate，不重复浪费时间跑全仓。
+
+### 主/子/孙代理统一 Conversation Compact
+
+状态：设计中；当前先修真实次数展示，持久主链迁移尚未开始
+
+解决问题：子代理也可能连续工作数小时。当前主代理用 owner/thread 的 Conversation Compact，task-local
+子代理仍用 run workspace 的旧 compact continuation，回合内工具 IR 又会独立裁剪；这会让次数、恢复、
+checkpoint 和失败熔断表现不一致，并已经出现 child 实际裁剪后仍显示 `compact 0`。
+
+当前进展：已对照 会话运行时 `session/turn.rs` 与 multi-agent spawn：每个 child 都是独立 thread，但所有 thread
+共用 pre-sampling/mid-turn Compact 状态机。本地过渡候选把 exact child 的 native IR reduction 以纯数字、
+幂等事件累计进 canonical run 展示投影，并与既有 durable apply 行相加；main Context 同时显示准确
+`压缩点 90%`。该切片不冒充架构统一。
+
+待做：child 创建时建立稳定 `agent_thread_id`，把每轮消息、摘要、checkpoint、generation/CAS 和 resume
+接到现有 `ConversationStore/compact.py`；随后让 TUI 只读每个 agent thread generation，并删除
+`finalization_compact_auto`、task-local compact apply/continuation 与过渡计数。切换期间不得长期双写，
+也不得把父、子、兄弟正文合并到一个 thread。
 
 ### 用户直控子代理的共享控制面
 

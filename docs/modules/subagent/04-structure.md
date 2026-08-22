@@ -14,8 +14,9 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   Todo 展示关联。当前 active task 的 Todo 只含 canonical `id/title/status`。提示词、回复、工具
   活动/输出、路径、权限和 secret 均不进入该 schema。
 - 当前上下文 token 来自统一 provider preflight 的 `model_visible_context_usage.v1.current_tokens`，在每次
-  真实 child 模型调用前写入 exact run 的有界数字快照；不是累计账单 token。Compact 继续只读 exact run
-  的 apply ledger。控制面、TUI 和后续 Web 不得各算一套，缺失/损坏事实按空展示处理且不改变 run 状态。
+  真实 child 模型调用前写入 exact run 的有界数字快照；不是累计账单 token。迁移期 Compact 次数只读
+  exact run 的 durable apply 行和 typed native IR reduction 总数。控制面、TUI 和后续 Web 不得各算一套，
+  缺失/损坏事实按空展示处理且不改变 run 状态。
 - `SubAgentTask.description` 是创建时保存的非权威职责短标题。单 child 可从 `create_subagents` 顶层写入；
   批量 `items[]` 必须逐项写入，顶层 description 只代表整批派工，不能扇出成所有 child 的相同文案。
   递归层级使用同一字段；省略时展示层只可退回该 child 的有界 goal，但任何运行、权限、恢复和结束逻辑
@@ -27,8 +28,8 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   `run_id/progress_item_ids` 标记、main/child 严格单行截断、首次 attempt 隐藏和重试文案都属于展示规则，
   不能成为完成、恢复或验收信号。
 - Todo 默认只显示四条状态窗口：最近完成、当前运行和下一待办优先，运行项使用共享动画帧；`Ctrl+T`
-  仅展开/收起完整投影，不改变顺序或状态。main 的 compact 数字来自 thread `compact_generation`，不是
-  进度百分比；常驻 Context 的协议构成详情留给 `/context`。
+  仅展开/收起完整投影，不改变顺序或状态。main 的 compact 数字来自 thread `compact_generation`；旁边
+  “压缩点 90%”是自动触发阈值，不是次数或操作进度。常驻 Context 的协议构成详情留给 `/context`。
 - exact `item.id == direct child.run_id` 的自动 seed Todo 在展示上限计算前过滤，live panel 与最终 notice
   共用同一规则；canonical ledger 不删除，普通 Todo 不因前面的隐藏 seed 占满投影上限而消失。
 - 会话运行时 式协调边界只进入模型执行策略：一旦 main 把实际工作交给 child，main 只协调、整合已有产物、
@@ -129,14 +130,21 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   通用 Compact 仍负责运行上下文压缩；结构化 task state、原始运行证据和持久 conversation
   transcript 各自维持原有职责，不新增兼容分支。
 
-## 2026-07-27 Compact 路线收敛
+## 2026-08-22 Compact 当前边界与统一目标
 
-- 主代理和子代理都调用 `memory_archive` 的同一套 Compact。区别只来自运行时注入的 workspace：
-  主代理使用当前 conversation workspace，子代理使用
-  `tasks/<date>/<task>/work/agents/<run_id>/`，不是两套算法或两套阈值。
-- 子代理专属 Compact service、session continuation、continue-packet 转接层、owner/run/agent
-  Compact 索引和独立恢复目录均已删除。子代理只保存通用
-  `compact_applies`、checkpoint/state/summary 与原始运行证据。
+- 当前阈值、token estimator 和 native ToolCall/ToolResult 成对裁剪已经由主代理、子代理共用
+  `agent_core._tool_loop_service`；但持久状态尚未统一：main 使用 ConversationThread 的
+  summary/cursor/generation/checkpoint/CAS，task-local child 仍保存 run workspace 下的
+  `memory_archive/compact_applies`、checkpoint/state/summary。
+- child 的 native IR 真裁剪时，`runner/stage_trace.py` 仅在 exact run attributes 保存有界纯数字次数，
+  `control_plane_projection.runtime_compact_count` 临时把它与 durable apply 行相加。该投影不承载摘要、正文、
+  生命周期或恢复权威，也不允许从 token 降幅反推。
+- 目标对照 会话运行时：创建 child/grandchild 时建立独立 `agent_thread_id`，每个代理只读自己的 transcript，
+  但全部调用 `conversation/compact.py` 的同一 pre/mid-turn、checkpoint-before-CAS、失败熔断和 resume 主链。
+  完成切换后删除 `finalization_compact_auto`、task-local apply/continue 与当前过渡计数，TUI 只显示该 agent
+  thread 的 canonical generation；不长期双写。
+- 历史上已经删除的子代理专属 service、查树推动、session continue-packet 和多重索引不得因迁移复活；
+  新 thread 只替换 Compact/会话持久层，不改变 `run_id/parent_run_id/root_run_id` 生命周期权威。
 - 当前 task 的结构化 goal 和 next actions 是恢复后的最高任务权威；旧摘要、归档包装和读取游标只能
   补充事实。只有任务显式声明 `full_source_read` 时，未完成读取游标才可成为下一动作。
 - 子代理仍隔离在自己的 run home；它不拥有第二份长期 Memory，也不能读取父代理或其他 owner 的

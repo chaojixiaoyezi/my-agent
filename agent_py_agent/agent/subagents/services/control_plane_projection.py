@@ -85,11 +85,31 @@ def runtime_latest_compact_ref(task: SubAgentTask) -> str:
     return ""
 
 
-# LLM: Count only successfully parsed canonical ledger rows; UI and LocalStore
-# share this helper so Compact totals cannot drift between surfaces.
-# 函数用途: 统计一个子代理真实完成过多少次 Compact。
+# LLM: The user-visible total combines durable summary applies with typed native
+# IR reductions persisted on the exact child. Both are real context reductions;
+# neither may be inferred from token drops or display prose.
+# 函数用途: 统计子代理正式 Compact 与回合内工具历史压缩的累计次数。
 def runtime_compact_count(task: SubAgentTask) -> int:
-    return len(runtime_compact_rows(task))
+    return len(runtime_compact_rows(task)) + runtime_native_ir_compact_count(task)
+
+
+# LLM: Native compaction count is a bounded projection written by the tool-loop
+# event seam. Invalid or foreign attribute shapes fail to zero, never to prose inference.
+# 函数用途: 读取子代理已经实际发生的回合内工具历史压缩次数。
+def runtime_native_ir_compact_count(task: SubAgentTask) -> int:
+    attrs = getattr(task, "attributes", None)
+    row = attrs.get("model_visible_context_compaction") if isinstance(attrs, dict) else None
+    if not isinstance(row, dict):
+        return 0
+    if str(row.get("schema") or "") != "model_visible_context_compaction.v1":
+        return 0
+    value = row.get("count")
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 # LLM: The child-row token value is the latest canonical provider-visible

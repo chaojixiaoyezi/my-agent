@@ -9,9 +9,10 @@
   使用同一 ledger id。负向回归证明 request-id 下的旧账不会覆盖真账。普通 Todo 仍只作模型可见工作笔记，
   没有恢复机器验收或普通任务自动续跑；部署和正式 Prompt 3 真机结论仍以 STATUS/ROADMAP 为准。
 - 2026-08-22 本地 TUI 已把 Todo 默认摘要收为固定四条状态窗口：最近完成、当前运行和下一待办优先，
-  运行项复用 Working 动画，`Ctrl+T` 只展开/收起完整 canonical 清单。常驻 Context 只显示总量、窗口占比
-  与主 ConversationThread 已提交 Compact 次数；旧 compact 触发线百分比及协议相关
-  prompt/messages/tools 分类留给 `/context`。这里仅表示实现和 focused 回归完成，部署/真机状态仍以
+  运行项复用 Working 动画，`Ctrl+T` 只展开/收起完整 canonical 清单。常驻 Context 显示总量、窗口占比、
+  主 ConversationThread 已提交 Compact 次数和明确命名的自动压缩点；协议相关 prompt/messages/tools
+  分类留给 `/context`。child 真实 native IR reduction 已用纯数字幂等投影补进过渡期次数，解决终态仍显示
+  0；这不代表 child ConversationThread 迁移已完成。实现、部署/真机状态仍以
   `STATUS.md`、`docs/ROADMAP.md` 为准。
 - 2026-08-21 `714c0c8` 已把单一后台计数扩展为 终端交互/模型助手 Code 式的固定子代理
   活动区：Gateway 从 active task link 与 canonical run 账本生成有界直属 child 投影，输入框附近原位
@@ -259,3 +260,12 @@
   `MiniMax-M2.7`，普通中文请求经同一 Gateway 返回；单监听 PID 为 `1918200`，锁元数据持有者同 PID。
 - 首轮 Gateway supervision 记录 `orphans_revived=4`、`parent_closed_cancelled=21`、
   `running_reclaimed=5`；3 条恢复 RUNNING 随后自然 DONE。连续两次显式 status 均只读返回相同近期计数。
+
+## 2026-08-22 内部状态面拒绝的副作用分类
+
+- 解决问题：shell 在执行前拒绝模型读取内部 child 状态文件时，旧结果被误当成“命令可能已经产生未知
+  副作用”，导致整个 child 回合被硬停并留在 PENDING。
+- 落地内容：保留 `WRONG_STATUS_SURFACE` 安全拒绝，增加 canonical `effect_outcome=not_started`；模型
+  可读取结构化原因后改用直属生命周期事件或结果引用，真正的 unknown 仍 fail-closed。
+- 验证方式：ShellTool 直接回归与 authorized dispatch/operation status 集成回归均通过；远端真实 TUI
+  复验留到候选部署后执行。

@@ -16,9 +16,9 @@
 2026-08-22 起，activity endpoint 公开 `conversation_agent_activity.v5`：Gateway 后台主代理把最近一次
 thinking、tool、provider retry 或 finalizing 阶段和同一次 provider preflight 的数字 context usage 写入
 进程内有界 display sink；直属 child 的职责短标题、当前上下文 token 与 Compact 次数从 exact canonical run
-只读取得。当前 token 快照不是累计计费用量。当前 active task 的 Todo 则从 canonical `task_progress.v1`
-账本只读投影为 `id/title/status`；主代理累计 Compact 次数只读 ConversationThread 的
-`compact_generation`。客户端按 250ms 节奏轮询并只接收白名单字段。main 快照可易失；child
+只读取得。迁移期间 child 次数为 durable apply 行加 typed native IR reduction；当前 token 快照不是累计
+计费用量。当前 active task 的 Todo 则从 canonical `task_progress.v1` 账本只读投影为 `id/title/status`；
+主代理累计 Compact 次数只读 ConversationThread 的 `compact_generation`。客户端按 250ms 节奏轮询并只接收白名单字段。main 快照可易失；child
 数值与 Todo 仍由各自 canonical ledger 持有，全部展示字段都不参与任务结束、恢复或授权，真实 task
 link/run/turn_end 仍是唯一生命周期事实。
 
@@ -42,8 +42,8 @@ audit Agent 为空而回退 daemon cwd。
   因而完成勾选不会随 active link 收口一起丢失。整个区域不进入 transcript，也没有调度、重试、停止或
   完成裁决权。
 - Todo 默认是四条状态窗口：最近完成、全部当前运行项和下一待办按优先级占位，超出部分由 `Ctrl+T`
-  展开。运行项复用 Working 的全局动画帧；该本地展开状态不写回账本。常驻 Context 只显示总量、窗口占比
-  和已提交 Compact 次数，prompt/messages/tools 的协议构成留在 `/context`。
+  展开。运行项复用 Working 的全局动画帧；该本地展开状态不写回账本。常驻 Context 只显示总量、窗口占比、
+  已提交 Compact 次数和明确命名的自动压缩点，prompt/messages/tools 的协议构成留在 `/context`。
 
 ## 回合终态与 Compact 进度投影
 
@@ -69,8 +69,8 @@ audit Agent 为空而回退 daemon cwd。
   精确 ID；未知外部 ID 被消费但不创建本地消息。`tui_view_model.py` 分开保存 `pending_steers` 与
   `queued_inputs`，`tui_block_renderer.py` 把两者固定在 composer 上方，不放进滚动 transcript。
 - `model_visible_context_usage.v1` 与 `model_visible_context_compaction.v1` 都只允许数字白名单穿过 rich
-  chunk。usage 是最新模型调用前的展示快照；compaction 是 active-turn native IR 的 turn-local 事实，均不
-  获得 ConversationStore compact 权威。
+  chunk。usage 是最新模型调用前的展示快照；compaction 是 active-turn native IR 的事实，child runner 会
+  额外持久一个有界计数投影，避免 sink 消失后归零；二者均不获得 ConversationStore compact 权威。
 
 ## 最终效果裁决与 owner-scoped 命令环境
 
@@ -166,9 +166,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   `CompactionSummary` 替换旧段；后续压缩原位替换旧摘要。`tool_context.window` 仍只写一条
   有界 archive handoff。summary、handoff marker 和近期尾部共同进入同一完整 token 预算，
   都不是第二个 Compact ledger。
-- Gateway 的 `conversation/compact.py` 仍只管理 owner/thread 持久 transcript 的
-  summary + raw tail + checkpoint。它与每轮工具历史窗口不是两套会话，也不维护
-  `live_context_compaction` 旁路状态。
+- Gateway 的 `conversation/compact.py` 当前只管理 owner/thread 持久 transcript 的
+  summary + raw tail + checkpoint。每轮工具历史窗口仍是同一模型请求的内部阶段；迁移期间 exact child
+  attributes 只保存其纯数字展示计数，不形成第二份摘要、transcript 或恢复状态。
 - provider overflow 的既有最终保险仍可成对回收最旧 native IR；任何路径都不得留下孤立
   tool-use 或 tool-result。
 
@@ -278,8 +278,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   `conversation_thread.v6` 还在同一 compact CAS 中保存 `compact_operation_evidence`、checkpoint pointer、
   经 Gateway 校验的客户端 `cwd/runtime_workspace_roots`
   和连续失败状态，只作为摘要旁边
-  的程序事实 metadata，不形成第二份会话；独立子代理复用同一通用 Compact 引擎，数据写入各自
-  agent run workspace。thread 创建与
+  的程序事实 metadata，不形成第二份会话。当前 task-local child 的旧持久 compact 数据仍写入各自
+  agent run workspace；目标是为每个 child 建独立 ConversationThread 并复用同一引擎，接线完成后删除旧
+  apply/continuation，而不是长期双写。thread 创建与
   compact 准备由独立 loader 报告各自错误，避免
   主组装函数吞掉边界。assistant 写回前将用户正文和近期产物 metadata 分栏；公开
   response 使用同一用户投影且不暴露服务器 path。typed tool progress、真实 model delta 与 runtime notice

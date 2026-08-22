@@ -54,6 +54,7 @@ from agent_py_agent.agent.conversation.authority import (
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
 )
 from agent_py_agent.agent.memory_archive import estimate_tokens
+from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.tests._tool_runtime_harness import (
     canonical_history_call,
     canonical_history_result,
@@ -414,6 +415,46 @@ def test_shared_native_window_counts_large_tool_call_arguments(tmp_path):
         )
         is None
     )
+
+
+def test_shared_native_window_persists_exact_child_compact_count(tmp_path):
+    """真实 native IR 裁剪必须累计到 exact child，重复无裁剪 preflight 不增数。"""
+    manager = SubAgentManager(tmp_path / "subagents", debug_trace_level=0)
+    task = manager.create_run(goal="long child", thought="", plan=["work"])
+    task.status = "RUNNING"
+    task.runner_active_attempt_id = "attempt-child"
+    manager.save(task)
+
+    agent = _native_agent(tmp_path)
+    agent.backend.context_window_tokens = 10_000
+    agent.config.model_context_window_tokens = 10_000
+    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
+    agent.subagents = manager
+    agent._current_subagent_run_id = task.id
+    params = replace(
+        _params(),
+        request_id="request-child",
+        run_id=task.id,
+        attempt_id="attempt-child",
+        context_scope="task_local",
+        save=True,
+    )
+
+    _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
+    build_tool_loop_prompt(agent, params)
+    first = manager.load(task.id).attributes["model_visible_context_compaction"]
+    assert first["count"] == 1
+    assert first["generation"] == 1
+
+    build_tool_loop_prompt(agent, params)
+    assert manager.load(task.id).attributes["model_visible_context_compaction"]["count"] == 1
+
+    _record_large_write_calls(agent, params, start=7, stop=12, chars=12_000)
+    build_tool_loop_prompt(agent, params)
+    second = manager.load(task.id).attributes["model_visible_context_compaction"]
+    assert second["count"] == 2
+    assert second["generation"] == 2
 
 
 def test_shared_native_window_stays_stable_across_repeated_pressure(tmp_path):

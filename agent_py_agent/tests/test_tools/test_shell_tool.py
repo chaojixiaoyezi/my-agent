@@ -110,6 +110,7 @@ def test_shell_tool_routes_internal_agent_status_paths_to_agent_tree(tmp_path: P
 
     assert result.ok is False
     assert result.error_code == "WRONG_STATUS_SURFACE"
+    assert result.effect_outcome == "not_started"
     assert payload["error"] == "internal_agent_status_ref"
     assert payload["next_action"] == "await_direct_child_lifecycle_event"
 

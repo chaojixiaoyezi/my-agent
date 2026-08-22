@@ -1,5 +1,30 @@
 # STATUS
 
+## 2026-08-22 子代理真实 Compact 次数与统一路线（本地候选）
+
+- 正式 Prompt 3 的 deepseek child 当前上下文从触发线附近降到约 35.7k，但 run 内没有 durable
+  `compact_applies` 行；实际发生的是 `_tool_loop_service` 的 native IR 成对裁剪。旧事件只活在回合内 sink，
+  child 终态投影因此错误显示 `compact 0`。
+- 当前候选把每次真实 `model_visible_context_compaction.v1` 以 attempt/generation 幂等写入 exact child 的
+  纯数字属性；child 行临时显示“durable apply 次数 + native IR reduction 次数”。main Context 仍只读
+  ConversationThread generation，并新增 `压缩点 90%`，明确区分累计次数、触发点和临时操作进度。
+- 最终方向已按 会话运行时 确认为“每个 main/child/grandchild 各有独立 thread，共用同一 Conversation Compact
+  状态机”。当前仅完成真实展示候选；child 的 thread 建立、消息接入、resume/CAS 迁移和旧
+  `memory_archive` continuation 删除尚未开始，不能把本轮写成底座已经统一。
+
+## 2026-08-22 Prompt 3 子代理误挂起（本地候选）
+
+- `ac1f4dc` 已推送并部署 `.7`；全新 tmux `dsh-p3-research-ac1f4dc-verify3` 使用唯一 Gateway 和
+  MiniMax-M2.7，只输入一次原样 Prompt 3。TUI 已真实证明默认 Todo `4/9`、`Ctrl+T` 展开/收起、main
+  固定 Working、child 实时 context token 与常驻 `compact 0` 生效。
+- 四名首批 child 中三名 DONE；代理运行时 的 shell 在进程启动前被内部状态面规则拒绝，旧结果却未声明
+  `not_started`，operation coordinator 将它误判为 `TOOL_OPERATION_OUTCOME_UNKNOWN`，runner 因而把 child
+  留在 PENDING。当前候选补齐这一条结构化副作用事实，不放开安全边界；handler 与 canonical dispatch
+  两层定向回归通过，部署与全新 TUI 复验待当前现场收集完后进行。
+- 该轮 Todo 的原始 9 项仍为 pending：模型创建 child 时没有传 typed `covers`，自动 run-id seed 与 child
+  panel 正确去重，但不能靠标题猜“哪个 child 对应哪一项”。这是下一项结构化派工绑定缺口，不是四行窗口
+  或动画 renderer 失效。
+
 ## 2026-08-22 后台续轮读错进度账本（本地候选）
 
 - `fd7d2b9` 的正式 Prompt 3 失败已定位到唯一结构化断点：前台 `task_progress` 工具按稳定
@@ -19,9 +44,9 @@
 - 默认 Todo 视图直接对照 终端交互 `TaskListV2` 的状态优先选择：固定显示 4 条任务，优先保留最近完成、
   当前运行和紧接着的待办；同时运行项较多时优先显示最近完成与运行项。运行项复用全局 Working 动画帧，
   待办和完成继续使用静态图标；`Ctrl+T` 只切换完整清单，不修改 canonical `task_progress.v1`。
-- 常驻 Context 行只显示当前总量、窗口占比和主代理已成功 Compact 次数，例如
-  `Context ~31.4k/128.0k · 25% · compact 2`。旧 `compact 100%` 实际是触发线比例，不是压缩进度，已经
-  移除；协议相关的 prompt/messages/tools 构成留给 `/context`，避免 MiniMax 文本协议折叠后显示误导的 0。
+- 常驻 Context 行只显示当前总量、窗口占比、主代理已成功 Compact 次数和明确命名的自动触发点，例如
+  `Context ~31.4k/128.0k · 25% · compact 2 · 压缩点 90%`。旧 `compact 100%` 的问题是把触发线冒充
+  次数/进度；现在保留该有用事实但改名。prompt/messages/tools 构成留给 `/context`，避免协议折叠后显示 0。
 - activity schema 升为 `conversation_agent_activity.v5`，只从 canonical ConversationThread 的
   `compact_generation` 投影主代理累计次数。Compact 过程百分比仍只存在于正在压缩的临时活动块，不参与
   次数、完成或恢复裁决。renderer/runtime/conversation focused 回归已通过，待严格 gate、部署和真实 TUI。

@@ -764,14 +764,14 @@ def test_live_context_strip_uses_wide_and_narrow_density_and_keeps_stash() -> No
 
     wide_lines = [fragments_text(line) for line in wide.input_status_lines]
     assert wide_lines == [
-        "  ◉ Context ~31.4k/128.0k · 25% · compact 2",
+        "  ◉ Context ~31.4k/128.0k · 25% · compact 2 · 压缩点 90%",
         "  › Stashed (auto-restores after submit)",
     ]
     assert [fragments_text(line) for line in narrow.input_status_lines] == [
-        "  ◉ Ctx ~31.4k/128.0k · 25% · compact 2"
+        "  ◉ Ctx ~31.4k/128.0k · 25% · c2 · 点90%"
     ]
     assert [fragments_text(line) for line in tiny.input_status_lines] == [
-        "  ◉ Ctx 25% · c2"
+        "  ◉ Ctx 25% · c2 · 点90%"
     ]
     assert not any(
         label in wide_lines[0] for label in ("prompt", "messages", "tools")

@@ -60,6 +60,12 @@
   task output 授权，但同路径或更窄的禁止规则仍然拒绝。
 - 历史 `acceptance_checks` / `verification_status` 字段仅为旧账本可读兼容，不进入当前
   TaskEnvelope、runner 模型摘要、父级 wake 或树摘要，也不参与启动/完成判定。
+- 普通 shell 不允许绕过直属生命周期事件去读 `work/agents/*` 内部状态文件；该门发生在进程启动前，
+  必须返回 `WRONG_STATUS_SURFACE + effect_outcome=not_started` 给模型改用正式结果引用，不能误判成
+  `TOOL_OPERATION_OUTCOME_UNKNOWN` 后中断整轮。真正已经启动且副作用终态未知的命令仍保持 fail-closed。
+- Compact 的目标语义是每个 main/child/grandchild 各有独立 ConversationThread，但全部复用同一
+  `conversation/compact.py` 状态机；不能共用正文，也不能长期保留 child 的第二套 continuation。迁移完成前，
+  child 界面可从 typed native IR reduction 与旧 durable apply 投影真实次数，但不得把过渡展示说成已统一。
 
 ---
 

@@ -94,6 +94,10 @@ child 的自然最终回复、typed lifecycle event 与真实 artifact refs 是�
 `final_report.md` 是审计/恢复资料，不是正常状态面或默认汇总入口。普通文件/shell 工具若碰到这些路径，
 会返回结构化 child result index，模型应转读其中给出的产物 refs。
 
+这类拒绝发生在 shell 进程启动前，运行时记录为 `WRONG_STATUS_SURFACE/not_started`，把可操作原因返回
+当前模型继续换正式读取入口；它不是副作用未知，也不能据此把 child 整轮挂起。该分类不允许模型绕过
+状态面，已启动命令的真实 unknown 仍保持禁止自动重做。
+
 父级基于这些事实自然向用户汇报；普通任务没有机器质量验收器，也不要求 `VERIFIED` 才能结束。路径
 不存在、工具失败、越权或取消仍按客观事实如实暴露。
 
@@ -102,6 +106,7 @@ child 的自然最终回复、typed lifecycle event 与真实 artifact refs 是�
 
 ## Compact 后
 
-每个代理都在自己的 workspace 使用同一通用 Compact。主代理恢复时读取 thread summary/raw tail、当前
-task 状态、未消费 lifecycle event 和 artifact refs；child 从自己的 canonical state/checkpoint 续接。
-不存在根任务专用、子代理专用或“查树后再推动”的第二套 Compact/恢复包。
+当前 main 从 ConversationThread summary/raw tail 恢复，task-local child 仍从自己的 canonical
+state/checkpoint 与旧 compact apply 续接；阈值和 native 工具历史裁剪虽共用，持久状态机尚未统一。
+迁移目标是每个 main/child/grandchild 各有独立 agent thread，并全部走同一 Conversation Compact；完成后
+删除 child 旧 continuation，不保留根任务专用、子代理专用或“查树后再推动”的第二套恢复包。

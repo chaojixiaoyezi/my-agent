@@ -1,5 +1,23 @@
 # Subagent Progress
 
+## 2026-08-22 子代理 Compact 真实次数与统一迁移目标
+
+- deepseek child 的 provider-visible context 已从触发线附近降到约 35.7k，证明回合内 native IR 真正完成
+  裁剪；旧 TUI 只数 `memory_archive/compact_applies`，所以错误显示 `compact 0`。
+- 当前候选在公共 tool-loop 裁剪缝隙写入 exact run 的纯数字、幂等投影；child 展示临时相加 durable apply
+  与 native reduction，不从 token 降幅或正文猜测。main 则继续只读 ConversationThread generation。
+- 长期方案对照 会话运行时：每个 child/grandchild 建立独立 agent thread，全部使用同一 Conversation Compact
+  状态机。完成 thread/transcript/resume/CAS 接线后删除旧 task-local continuation 和本过渡计数，不保留双轨。
+
+## 2026-08-22 内部状态误读不再把 child 错挂起
+
+- 正式 Prompt 3 中 代理运行时 child 的 shell 尝试读取内部 `work/agents/*` 状态文件，安全门正确返回
+  `WRONG_STATUS_SURFACE`，但未声明副作用状态；统一 operation 门因 `run_command` 已进入 handler 而保守
+  归为 unknown，runner 随后以 `TOOL_OPERATION_OUTCOME_UNKNOWN` 中断并把 child 留在 PENDING。
+- ShellTool 现在对这条进程启动前拒绝显式返回 `effect_outcome=not_started`。安全规则、内部路径和正式
+  result refs 均未放宽；模型能读取原拒绝原因并继续换方法。直接 handler 与 canonical dispatch 两层回归
+  均锁定确定性 failed，真实 unknown 仍由既有安全回归保护。
+
 ## 2026-08-22 固定代理区、职责短标题与实时上下文投影
 
 - `conversation/agent_activity.py` 的公开 schema 升为 v4：直属 child 只投影 typed lifecycle、创建时的

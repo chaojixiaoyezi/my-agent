@@ -503,8 +503,15 @@ TUI 隐藏，canonical task_progress 账本不删除；普通 Todo 和显式 `co
 Todo 超过四项时，默认投影必须恰好保留四条任务行：最近完成、typed `in_progress` 和下一条
 `pending/blocked` 按状态优先；多个运行项优先占位，运行图标与 Working 共用动画时钟。`Ctrl+T` 展开后
 显示全部 canonical 顺序，再按一次收起；该按键不得编辑或提交输入、不得写 task_progress。常驻 Context
-只显示总量、窗口占比和 ConversationThread `compact_generation`；Compact 过程百分比只在临时活动块，
-prompt/messages/tools 的详细构成只由 `/context` 命令展示。
+显示总量、窗口占比、ConversationThread `compact_generation` 与同一 usage 预算算出的明确“压缩点”；
+`compact N`、`压缩点 90%` 和临时 Compact 操作进度不能混为一类。prompt/messages/tools 的详细构成只由
+`/context` 命令展示。child 发生 `model_visible_context_compaction.v1` 时，exact run 必须按
+attempt+generation 幂等累计纯数字投影；TUI 过渡期只相加 durable apply 行与该真实 reduction，不从 token
+下降或正文猜测。未来统一 ConversationThread 后，回归必须改为只读 child thread generation 并删除过渡链。
+内部 child 状态路径的 shell 拒绝还必须覆盖两层：ShellTool 返回
+`WRONG_STATUS_SURFACE + effect_outcome=not_started`；经过 canonical authorized dispatch 后即使
+`handler_executed=true`，operation 仍归确定性 `failed` 而非 `unknown`。模型应收到原拒绝原因后换用
+直属生命周期事件或正式 result refs；测试不得为了通过而放开内部路径，真实未知副作用也不得降级。
 父级共享上下文还必须证明当前轮无 read archive 时不会复用 agent 上一次任务的缓存内容。
 同一 exact parent 分多批创建默认命名 child 时，第二批编号必须从既有最高序号继续，不能重新出现
 `worker-1/worker-2`；显式 run id 仍是身份权威。用户明确“主代理只能协调/不准自己写”时，真实 TUI

@@ -3,9 +3,9 @@ from __future__ import annotations
 
 """Refs-only runner stage tracing.
 
-这里不是普通业务日志。它只在当前 SimpleAgent 正处于 subagent runner 上下文，
-且 `subagent_debug_trace_level` 打开时写短事件。事件只包含阶段、工具名、
-响应长度、字段名等信息，不写 prompt、response 或工具输出正文。
+这里不是普通业务日志。普通阶段短事件只在当前 SimpleAgent 正处于 subagent runner
+上下文且 `subagent_debug_trace_level` 打开时写入；上下文用量与压缩次数则始终写入
+exact run 的纯数字展示投影。两类记录都不写 prompt、response 或工具输出正文。
 """
 
 import logging
@@ -39,6 +39,18 @@ class RunnerModelContextUsageTraceRequest:
     agent: Any
     params: Any
     usage: dict[str, object]
+
+
+# LLM: This request carries one content-free native IR compaction event. The
+# exact runner identity comes from context, while attempt/request plus generation
+# provide an idempotent display-event key across retries. This is a migration-time
+# display fact, not a ConversationThread compact generation.
+# 类用途: 把子代理一次真实工具历史压缩记入该 run 的累计展示次数。
+@dataclass(frozen=True)
+class RunnerContextCompactionTraceRequest:
+    agent: Any
+    params: Any
+    compaction: dict[str, object]
 
 
 @dataclass(frozen=True)
@@ -154,6 +166,82 @@ def trace_runner_model_context_usage(
         )
 
 
+# LLM: Native IR compaction is a real context reduction but not a durable
+# conversation-summary generation. Persist only a bounded numeric projection on
+# the exact child run so TUI/Web counts survive the live callback disappearing.
+# 函数用途: 累计子代理轻量上下文压缩次数，并保留最近一次压缩的纯数字事实。
+def trace_runner_context_compaction(
+    request: RunnerContextCompactionTraceRequest,
+) -> None:
+    run_id = current_subagent_run_id(request.agent)
+    if not run_id:
+        return
+    compaction = _public_runner_context_compaction(request.compaction)
+    if not compaction:
+        return
+    params = request.params
+    scope = str(
+        getattr(params, "attempt_id", "")
+        or getattr(params, "request_id", "")
+        or getattr(params, "run_id", "")
+        or run_id
+    ).strip()
+    event_id = f"{scope}:{compaction['generation']}"
+    manager = request.agent.subagents
+    try:
+        task = manager.load(run_id)
+    except Exception as exc:
+        _warn_runner_trace_error(
+            exc,
+            context="runner_stage_trace.context_compaction.load",
+            run_id=run_id,
+        )
+        return
+    task = _touch_active_heartbeat_chain(manager, task)
+    _persist_runner_context_compaction(manager, task, compaction, event_id)
+
+
+# LLM: Projection persistence updates only a bounded numeric child attribute and
+# heartbeat. It does not change lifecycle, transcript, summary, or compact CAS state.
+# 函数用途: 幂等累计一次子代理工具历史压缩，并保存最近一次纯数字详情。
+def _persist_runner_context_compaction(
+    manager: Any,
+    task: Any,
+    compaction: dict[str, object],
+    event_id: str,
+) -> None:
+    now = time.time()
+    attrs = dict(getattr(task, "attributes", {}) or {})
+    previous = attrs.get("model_visible_context_compaction")
+    previous = previous if isinstance(previous, dict) else {}
+    recent_ids = [
+        str(value)
+        for value in list(previous.get("recent_event_ids") or [])
+        if str(value).strip()
+    ][-15:]
+    count = max(0, _safe_trace_int(previous.get("count")))
+    if event_id not in recent_ids:
+        count += 1
+        recent_ids.append(event_id)
+    attrs["model_visible_context_compaction"] = {
+        **compaction,
+        "count": count,
+        "recent_event_ids": recent_ids[-16:],
+        "updated_at": now,
+    }
+    task.attributes = attrs
+    task.heartbeat_at = now
+    task.updated_at = now
+    try:
+        manager.save(task)
+    except Exception as exc:
+        _warn_runner_trace_error(
+            exc,
+            context="runner_stage_trace.context_compaction.save",
+            run_id=str(getattr(task, "id", "") or ""),
+        )
+
+
 # LLM: The public context schema is a closed numeric projection. Unknown keys,
 # booleans, negative values, and arbitrary nested data are dropped before save.
 # 函数用途: 清洗子代理上下文用量，确保状态账本不混入 prompt 或工具正文。
@@ -186,6 +274,45 @@ def _public_runner_context_usage(value: object) -> dict[str, object]:
         except (TypeError, ValueError):
             normalized[key] = 0
     return normalized
+
+
+# LLM: The compact projection is closed and numeric. It must never retain a
+# summary, prompt, tool result, or provider response in canonical child state.
+# 函数用途: 清洗一次工具历史压缩事件，只留下次数计算和界面展示需要的数字。
+def _public_runner_context_compaction(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    if str(value.get("schema") or "") != "model_visible_context_compaction.v1":
+        return {}
+    generation = _safe_trace_int(value.get("generation"))
+    if generation <= 0:
+        return {}
+    return {
+        "schema": "model_visible_context_compaction.v1",
+        "generation": generation,
+        **{
+            key: max(0, _safe_trace_int(value.get(key)))
+            for key in (
+                "before_tokens",
+                "after_tokens",
+                "trigger_tokens",
+                "dropped_pairs",
+                "preserved_pairs",
+            )
+        },
+    }
+
+
+# LLM: Trace projections fail malformed numbers to zero and never let booleans
+# masquerade as integer counters in canonical child state.
+# 函数用途: 安全读取展示事件里的整数，坏值统一按零处理。
+def _safe_trace_int(value: object) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def trace_runner_tool_call_started(request: RunnerToolStageTraceRequest) -> None:

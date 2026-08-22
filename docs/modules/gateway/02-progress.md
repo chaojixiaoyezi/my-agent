@@ -1,5 +1,22 @@
 # Gateway Progress
 
+## 2026-08-22 Compact 触发点与 child 真实次数投影
+
+- 常驻 main Context 现在把累计 `compact N` 与自动 `压缩点 90%` 分开显示；后者由同一
+  `compact_trigger_tokens/context_window_tokens` 计算，不再冒充次数或操作进度。prompt/messages/tools
+  仍只在 `/context` 展示。
+- active-turn native IR 裁剪会先形成闭合的数字事件，再写 rich sink 与 exact child canonical 属性；TUI
+  因而能在 sink 消失和 child 完成后继续显示真实累计。该投影没有生命周期、恢复或 Compact CAS 权威，
+  后续将随 child ConversationThread 统一迁移而删除。
+
+## 2026-08-22 执行前状态面拒绝的确定性结果
+
+- Prompt 3 真机中 `WRONG_STATUS_SURFACE` 本来是在 shell 进程启动前完成的安全拒绝，旧结果却缺少
+  `effect_outcome`，经统一 operation coordinator 被误判成副作用未知，child 因而 interrupted/PENDING。
+- 当前候选保留拒绝并补 `not_started` 结构化事实，统一门将其归为 failed 并把原因交回模型继续修正；
+  不修改 timeout、已启动命令或真正 unknown 的 fail-closed 语义。两层 focused 回归已通过，待部署后以
+  MiniMax-M2.7 原样 TUI 复验。
+
 ## 2026-08-22 后台 Task Runtime State 统一进度账本身份
 
 - 正式 Prompt 3 的工具写侧按 task path 指纹保存 8 项计划，后台续轮却按 durable request id 读取，造成
@@ -40,8 +57,9 @@
   普通 Todo，最终 assistant notice 再携带终态快照。只改展示，不删除账本、不解析标题，也不影响
   `progress_item_ids` 的完成标记。
 - `conversation_agent_activity.v5` 同时加入主 ConversationThread 的 canonical `compact_generation`。
-  常驻 Context 不再把 compact 触发线百分比写成 `compact 100%`，也不常驻展示文本协议中容易被折叠为 0 的
-  prompt/messages/tools；默认 Todo 固定四条状态窗口，运行项复用 Working 动画，`Ctrl+T` 可展开全部。
+  常驻 Context 不再把触发线百分比写成 `compact 100%`，而是分开显示 `compact N · 压缩点 90%`；文本协议
+  中容易被折叠为 0 的 prompt/messages/tools 不常驻。默认 Todo 固定四条状态窗口，运行项复用 Working
+  动画，`Ctrl+T` 可展开全部。
 
 ## 2026-08-21 TUI 后台任务停止定位
 

@@ -27,7 +27,11 @@ from .delivery_contract_prompting import render_delivery_contract_section
 from .native_tool_protocol import native_tool_use_active
 from .provider_transient_auto_resume import run_with_provider_transient_auto_resume
 from .runner.context import current_task_attributes
-from .runner.stage_trace import trace_runner_tool_call_started
+from .runner.stage_trace import (
+    RunnerContextCompactionTraceRequest,
+    trace_runner_context_compaction,
+    trace_runner_tool_call_started,
+)
 from .runtime.goal_accounting import account_goal_model_response, begin_goal_model_turn
 from .runtime.guidance import (
     acknowledge_injected_turn_input,
@@ -415,6 +419,7 @@ def _fit_native_ir_to_shared_budget(
         if semantic_summary:
             replace_compaction_summary_ir(params, semantic_summary)
         dropped = _settle_native_ir_window(
+            agent=agent,
             params=params,
             estimator=estimator,
             target=target,
@@ -426,8 +431,12 @@ def _fit_native_ir_to_shared_budget(
     return dropped
 
 
+# LLM: Settling continues pairwise reduction until summary plus handoff also fit the exact
+# provider-visible target, then emits one typed reduction fact for the same operation.
+# 函数用途: 把压缩后的摘要和保留工具往返一起重新计量，必要时继续成对裁剪并记录最终数字。
 def _settle_native_ir_window(
     *,
+    agent: object,
     params: ToolLoopExecuteParams,
     estimator: Callable[[], int],
     target: int,
@@ -459,6 +468,7 @@ def _settle_native_ir_window(
     after_tokens = estimator()
     preserved_pairs = _native_tool_result_count(params)
     _publish_native_ir_compaction(
+        agent,
         params,
         before_tokens=before_tokens,
         after_tokens=after_tokens,
@@ -481,10 +491,12 @@ def _settle_native_ir_window(
     return dropped
 
 
-# LLM: Mid-turn IR compaction emits a content-free typed fact through the existing chunk sink;
-# the per-run generation lives only in canonical live_archive_state and is not conversation compact.
-# 函数用途: 记录当前活动回合第几次裁剪，并把前后 token 与整对工具数量投给支持的客户端。
+# LLM: Mid-turn IR compaction emits one content-free typed fact through the existing chunk sink
+# and persists only a bounded count projection on an exact child run. The per-turn generation
+# remains in live_archive_state and neither projection is a ConversationThread compact generation.
+# 函数用途: 记录当前活动回合第几次裁剪，把纯数字事实投给客户端，并累计子代理界面次数。
 def _publish_native_ir_compaction(
+    agent: object,
     params: ToolLoopExecuteParams,
     *,
     before_tokens: int,
@@ -498,21 +510,27 @@ def _publish_native_ir_compaction(
     if isinstance(state, dict):
         generation = max(0, int(state.get("_native_ir_compact_generation") or 0)) + 1
         state["_native_ir_compact_generation"] = generation
+    payload = {
+        "schema": "model_visible_context_compaction.v1",
+        "generation": generation,
+        "before_tokens": max(0, int(before_tokens or 0)),
+        "after_tokens": max(0, int(after_tokens or 0)),
+        "trigger_tokens": max(0, int(trigger_tokens or 0)),
+        "dropped_pairs": max(0, int(dropped_pairs or 0)),
+        "preserved_pairs": max(0, int(preserved_pairs or 0)),
+    }
+    trace_runner_context_compaction(
+        RunnerContextCompactionTraceRequest(
+            agent=agent,
+            params=params,
+            compaction=payload,
+        )
+    )
     sink = params.effective_on_chunk
     writer = getattr(sink, "write_context_compaction", None)
     if not callable(writer):
         return False
-    return writer(
-        {
-            "schema": "model_visible_context_compaction.v1",
-            "generation": generation,
-            "before_tokens": max(0, int(before_tokens or 0)),
-            "after_tokens": max(0, int(after_tokens or 0)),
-            "trigger_tokens": max(0, int(trigger_tokens or 0)),
-            "dropped_pairs": max(0, int(dropped_pairs or 0)),
-            "preserved_pairs": max(0, int(preserved_pairs or 0)),
-        }
-    ) is not False
+    return writer(payload) is not False
 
 
 # LLM: Count only canonical ToolResult items after pairwise reduction; callers use this for

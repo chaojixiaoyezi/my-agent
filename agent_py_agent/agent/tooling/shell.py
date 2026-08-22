@@ -893,6 +893,7 @@ class ShellTool(BaseTool):
                 False,
                 json.dumps(internal_status_ref, ensure_ascii=False, indent=2),
                 error_code="WRONG_STATUS_SURFACE",
+                effect_outcome="not_started",
             )
         timeout = _timeout_from_params(params, self.default_timeout)
         if timeout <= 0:

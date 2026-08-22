@@ -35,6 +35,7 @@ from agent_py_agent.agent.tooling.runtime_contracts import (
     ToolContentBlock,
     ToolResultRef,
 )
+from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
 from agent_py_agent.tests._tool_runtime_harness import (
     execute_canonical_test_call,
     make_test_model_spec,
@@ -586,6 +587,50 @@ def test_deterministic_handler_failure_operation_status_failed(
     # execute_authorized_tool 按统一入口语义标 handler_executed=True(能走到
     # 派发=handler 被调用); 修复点=_operation_status_for_result 识别执行前
     # 确定性失败族(category=tool/path 且 retryable), 即使 True 也终态 FAILED。
+    assert _operation_status_for_result(result) == "failed"
+
+
+def test_wrong_status_surface_is_not_started_and_does_not_halt_turn(
+    tmp_path: Path,
+) -> None:
+    """内部状态路径在 shell 启动前被拒绝，必须把原因交回模型而非误报未知副作用。"""
+    from agent_py_agent.agent.tooling.tool_operation_coordinator import (
+        _operation_status_for_result,
+    )
+
+    workspace = tmp_path / "workspace"
+    state = (
+        workspace
+        / "tasks"
+        / "2026-08-22"
+        / "demo"
+        / "work"
+        / "agents"
+        / "subagent-123"
+        / "canonical_state.json"
+    )
+    state.parent.mkdir(parents=True)
+    state.write_text('{"status":"RUNNING"}', encoding="utf-8")
+    result = execute_authorized_tool(
+        AuthorizedToolDispatchRequest(
+            tool_name="run_command",
+            tool=ShellTool(
+                workspace,
+                options=ShellToolOptions(default_timeout=5),
+            ),
+            tool_params={"command": f"cat {state}"},
+            workspace_root=workspace,
+            write_boundary=None,
+            invocation_context=ToolInvocationContext(
+                runtime_snapshot=None,
+                cancellation_token=None,
+            ),
+        )
+    )
+
+    assert result.error_code == "WRONG_STATUS_SURFACE"
+    assert result.handler_executed is True
+    assert result.effect_outcome == "not_started"
     assert _operation_status_for_result(result) == "failed"
 
 
