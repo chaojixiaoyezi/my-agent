@@ -91,8 +91,9 @@
   模型 cancel 回执不得夹带整树状态，schema 不暴露 dry_run/kill_process 运维参数。
 - [ ] 普通 child 逐层继承父级结构化 workspace 上界；`output_files` 记录明确交付目标与冲突锁，但不能
   扩大父级权限。裸相对路径按可信 cwd 解析，只有显式 `output/...`、`work/...` 进入 task 内部目录；
-  `/root` 启动的真实任务必须把 `abc/` 交付到 `/root/abc`。后台续跑必须绑定 exact task，不能复用同
-  thread 旧任务的 main run/attempt。
+  直接 child 即使省略 `output_files`，也必须继承 active conversation 的 host-validated cwd/runtime roots，
+  不能退回 Gateway daemon 仓库。`/root` 启动的真实任务必须把 `abc/` 交付到 `/root/abc`。后台续跑必须
+  绑定 exact task，不能复用同 thread 旧任务的 main run/attempt。
 - [ ] child 的父级共享 read/search 预览只来自当前 tool loop archive；当前轮没有读取时不得复用上一任务
   agent cache，真实 execution context 不得出现无关旧 task 路径。
 - [ ] local/unmanaged child 继承 workspace root 时不再被完全同路径的默认 home deny 误拦；

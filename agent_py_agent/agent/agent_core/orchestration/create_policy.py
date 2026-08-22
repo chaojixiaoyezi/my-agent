@@ -12,8 +12,11 @@ from pathlib import Path
 
 from ...common.value_parsing import TOOL_TEXT_LIST_OPTIONS, bool_value, string_list
 from ...conversation.authority import (
+    CONVERSATION_EXECUTION_CWD_ATTR,
     CONVERSATION_REQUEST_ID_ATTR,
+    CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR,
     conversation_execution_cwd,
+    conversation_runtime_workspace_roots,
     current_conversation_task_attributes,
 )
 from ...runtime_errors import runtime_error_report
@@ -1476,10 +1479,13 @@ def _json_child_items(value: object) -> list[object]:
     return []
 
 
-# 后续子/孙代理可用自己的 run_id 反查会话，不要求模型手填 thread_id。
+# LLM: 新建 child 同时继承当前 host-validated conversation id、cwd 和 workspace
+# roots；这些字段来自 active turn，禁止从 goal 或模型 attributes 猜测。
+# 函数用途: 给新建子代理附上父会话身份和真实项目目录，供工作区、工具与恢复共用。
 def add_current_conversation_attrs(attrs: dict[str, object], agent) -> None:
     if agent is None:
         return
+    _inherit_current_conversation_workspace_attrs(attrs, agent)
     current = getattr(agent, "_current_run_params", None)
     raw_task_id = getattr(current, "task_id", "") if current is not None else ""
     if not isinstance(raw_task_id, str):
@@ -1508,6 +1514,23 @@ def add_current_conversation_attrs(attrs: dict[str, object], agent) -> None:
     if thread is None:
         _attach_conversation_errors(attrs, lookup_error, materialize_error)
     _attach_thread_attrs(attrs, thread, task_id)
+
+
+# LLM: 会话运行时 child keeps the parent turn cwd and permission roots even though it owns a
+# distinct model thread. Only structured current-turn facts may overwrite these keys.
+# 函数用途: 把父级当前 TUI/CLI 已验证的 cwd 与工作区根复制给直接 child，并自然沿子孙链传递。
+def _inherit_current_conversation_workspace_attrs(
+    attrs: dict[str, object],
+    agent: object,
+) -> None:
+    current_attrs = current_conversation_task_attributes(agent)
+    cwd = conversation_execution_cwd(current_attrs)
+    if not cwd:
+        return
+    attrs[CONVERSATION_EXECUTION_CWD_ATTR] = cwd
+    attrs[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] = list(
+        conversation_runtime_workspace_roots(current_attrs)
+    )
 
 
 def _materialize_internal_thread(

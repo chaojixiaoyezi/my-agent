@@ -17,8 +17,13 @@
   child transcript id 覆盖父会话 thread id 后，工作工具会触发 conversation task 重绑定冲突。
 - 已对照 会话运行时 `spawn.rs` 的 `child_thread_id != parent_thread_id` 收口：父 `conversation_thread_id` 继续拥有
   workspace/task link，child 独立 `agent_thread_id` 只拥有模型 transcript 与 Compact。新增真实 `write_file`
-  runner 回归，证明 child 可以写入授权工作区、父 task link 不变且 child 正文只落自己的 thread。修复后的
-  推送、部署与全新 TUI 长任务复测待执行。
+  runner 回归，证明 child 可以写入授权工作区、父 task link 不变且 child 正文只落自己的 thread。该修复
+  部署后的第二轮 Prompt 4 已不再重绑 thread，三名 child 均进入真实模型调用。
+- 第二轮同时暴露单 Gateway 工作区继承断点：main 未传 `output_files` 时，child 的
+  `owner_workspace_dir/execution_cwd` 退回 Gateway 仓库，而不是启动 TUI 的项目目录。已按 会话运行时 spawn
+  继承 active turn cwd/permission profile 的边界收口：当前会话由 Gateway 验证的 cwd/roots 先复制到 child
+  结构化属性，再同时成为普通相对路径起点和产品写权限上界；共享 manager 根只在没有会话事实时兜底。
+  新回归不依赖 `output_files`，直接证明 child 可读取并写入当前 client project；全新 Prompt 4 真机复测待执行。
 
 ## 2026-08-22 内部状态误读不再把 child 错挂起
 

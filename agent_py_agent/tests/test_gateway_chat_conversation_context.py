@@ -3822,6 +3822,54 @@ def test_gateway_subagent_relative_outputs_use_validated_client_cwd(tmp_path):
     ]
 
 
+def test_gateway_subagent_inherits_validated_client_workspace_without_output_files(
+    tmp_path,
+):
+    service_root = tmp_path / "service"
+    client_root = tmp_path / "client-project"
+    task_root = tmp_path / "home" / "task"
+    client_root.mkdir()
+    (client_root / "source.txt").write_text("original", encoding="utf-8")
+    (task_root / "output").mkdir(parents=True)
+    (task_root / "work").mkdir()
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        service_root,
+    )
+    agent._current_run_task_workspace = str(task_root)
+    agent._current_run_params = RunParams(
+        request_id="gw-cwd-inherit-child",
+        run_id="gw-cwd-inherit-child",
+        task_id="gw-cwd-inherit-child",
+        task_attributes={
+            "conversation_thread_id": "thread-cwd-inherit-child",
+            "conversation_task_id": "gw-cwd-inherit-child",
+            CONVERSATION_EXECUTION_CWD_ATTR: str(client_root),
+            CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR: [str(client_root)],
+        },
+    )
+    try:
+        create_params = create_run_params(
+            agent,
+            {"goal": "读取现有项目并在项目内实现功能", "allowed_tools": ["read_file", "write_file"]},
+            "读取现有项目并在项目内实现功能",
+            ["read_file", "write_file"],
+        )
+        task = agent.subagents.create_run(params=create_params)
+        context = agent.subagents.runner_context.write_execution_context(task.id)
+    finally:
+        delattr(agent, "_current_run_params")
+
+    client_root_text = str(client_root.resolve())
+    assert create_params.extra_write_roots == [client_root_text]
+    assert task.attributes["workspace_root"] == client_root_text
+    assert task.attributes["workspace_roots"] == [client_root_text]
+    assert client_root_text in task.allowed_write_roots
+    assert context.context_bundle["workspace_refs"]["owner_workspace_dir"] == client_root_text
+    assert context.write_boundary["execution_cwd"] == client_root_text
+    assert client_root_text in context.write_boundary["allowed_write_roots"]
+
+
 def test_gateway_subagent_records_originating_conversation_request(tmp_path):
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path

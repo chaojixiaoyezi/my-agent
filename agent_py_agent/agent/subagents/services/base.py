@@ -635,11 +635,30 @@ def _manager_workspace_attrs(manager: Any) -> dict[str, object]:
     return attrs
 
 
+# LLM: Per-turn conversation cwd/roots outrank the shared manager fallback, but only after
+# create_policy copied the host-validated structured fields. Never infer scope from goal text.
+# 函数用途: 生成子代理最终任务属性；单 Gateway 下让每个 TUI 的 child 留在各自项目目录。
 def _task_attrs_for_create(manager: Any, params: CreateRunParams) -> dict[str, object]:
-    return {
-        **dict(params.attributes or {}),
-        **_manager_workspace_attrs(manager),
-    }
+    from ...conversation.authority import (
+        conversation_execution_cwd,
+        conversation_runtime_workspace_roots,
+    )
+
+    attributes = dict(params.attributes or {})
+    workspace_attrs = _manager_workspace_attrs(manager)
+    cwd = conversation_execution_cwd(attributes)
+    if cwd:
+        try:
+            workspace_attrs["workspace_root"] = str(
+                Path(cwd).expanduser().resolve(strict=False)
+            )
+            workspace_attrs["workspace_roots"] = [
+                str(Path(item).expanduser().resolve(strict=False))
+                for item in conversation_runtime_workspace_roots(attributes)
+            ]
+        except OSError:
+            pass
+    return {**attributes, **workspace_attrs}
 
 
 def _task_permission_snapshot(manager: Any, params: CreateRunParams, parent_task: Any | None) -> dict[str, object]:

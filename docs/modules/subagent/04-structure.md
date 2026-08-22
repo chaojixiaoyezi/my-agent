@@ -110,6 +110,10 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 - `write_boundary.execution_cwd` 是子代理相对路径的唯一结构化起点，继承父级项目 cwd；`task_dir`、
   `task_workspace_dir`、内部 `work/output` 只负责状态、归档和显式命名空间。写入许可仍由
   `allowed_write_roots/forbidden_write_roots` 独立裁决，不允许用权限根反推 cwd。
+- 对根 main 创建的普通 child，`conversation_execution_cwd` 与
+  `conversation_runtime_workspace_roots` 必须先从当前 active turn 的 host-validated attributes 复制；它们
+  同时覆盖 shared manager 的 daemon/repository fallback。`output_files` 只声明交付目标与冲突锁，不能成为
+  child 获得当前项目工作区的必要条件。孙代理继续从直接父 task 的结构化产品根逐层继承，不解析 goal。
 
 ## 2026-08-22 Dispatcher 互斥权威
 

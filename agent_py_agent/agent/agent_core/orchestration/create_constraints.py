@@ -11,6 +11,10 @@ from ...common.json_io import locked_json_path
 from ...common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
 from ...common.value_parsing import text_value as _text
 from ...contracts.state_machine import RunStateFacts, can_dispatch
+from ...conversation.authority import (
+    conversation_runtime_workspace_roots,
+    current_conversation_task_attributes,
+)
 from ...subagents.models import SUBAGENT_REUSABLE_STATUSES, task_status_in
 from ...subagents.role_templates import role_template_snapshot_for_role
 from ...subagents.services.base import CreateRunParams
@@ -80,13 +84,14 @@ def resolved_extra_write_roots(agent: object, params: dict[str, object], goal: s
 
 
 # LLM: A descendant must inherit from its actual parent task, never widen back
-# to the owner's full workspace. Root agents have no parent task and therefore
-# use the manager's host-resolved workspace roots.
-# 函数用途: 取直接父级的产品写区；根代理则取当前 owner 工作区。
+# to the owner's full workspace. A root child first uses the active conversation's
+# host-validated roots; the shared manager roots are only a non-conversation fallback.
+# 函数用途: 取直接父级的产品写区；TUI/CLI 的直接 child 优先继承当前项目根。
 def _direct_parent_product_write_roots(agent: object) -> list[str]:
     manager = getattr(agent, "subagents", None)
     current = getattr(agent, "_current_run_params", None)
-    run_id = current_subagent_run_id(agent) or str(
+    delegated_run_id = current_subagent_run_id(agent)
+    run_id = delegated_run_id or str(
         getattr(current, "run_id", "") or ""
     ).strip()
     if manager is not None and run_id:
@@ -96,6 +101,10 @@ def _direct_parent_product_write_roots(agent: object) -> list[str]:
             parent = None
         if parent is not None and str(getattr(parent, "id", "") or "").strip() == run_id:
             return _task_product_write_roots(parent)
+    if not delegated_run_id:
+        conversation_roots = _current_conversation_product_write_roots(agent)
+        if conversation_roots:
+            return conversation_roots
     raw_roots = getattr(manager, "workspace_roots", None)
     roots = list(raw_roots) if isinstance(raw_roots, (list, tuple)) else []
     primary = getattr(manager, "workspace_root", None)
@@ -106,6 +115,20 @@ def _direct_parent_product_write_roots(agent: object) -> list[str]:
         for item in roots
         if isinstance(item, str | Path)
     )
+
+
+# LLM: A root child inherits only the Gateway-validated active conversation roots; the
+# shared Gateway repository root is a fallback when no client workspace fact exists.
+# 函数用途: 读取当前 TUI/CLI 的真实项目根，供普通直接 child 默认继承读写权限。
+def _current_conversation_product_write_roots(agent: object) -> list[str]:
+    roots: list[str] = []
+    for raw in conversation_runtime_workspace_roots(
+        current_conversation_task_attributes(agent)
+    ):
+        path = _resolved_path(raw)
+        if path is not None:
+            roots.append(str(path))
+    return _unique_roots(roots)
 
 
 # LLM: Parent task internals (agent run/report directories) are control-plane

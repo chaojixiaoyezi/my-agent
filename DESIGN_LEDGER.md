@@ -961,8 +961,8 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 
 ## 2026-08-22 主/子/孙代理统一 Conversation Compact
 
-状态：统一 Compact 已推送并部署；首轮真实 TUI 抓到 child transcript 错绑父任务的回归，底层修复与
-定向回归已完成，待重新推送、部署和全新 TUI 复测。
+状态：统一 Compact 与 child thread 身份修复已推送、部署；第二轮真实 TUI 抓到 child 工作区退回
+Gateway 仓库的回归，底层修复与定向回归已完成，待推送、部署和全新 TUI 复测。
 
 - 解决问题：长时间工作的 child/grandchild 与 main 一样会经历多轮工具调用、上下文压力、崩溃恢复和继续
   运行。旧实现中 main 使用 `ConversationThread summary/cursor/generation/checkpoint/CAS`，task-local child
@@ -982,6 +982,11 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   覆盖或互绑，父子关系由 `parent_agent_thread_id` 和 run lineage 表达。首轮 Prompt 4 真机测试曾把 child
   thread 写回 `conversation_thread_id`，导致工作工具尝试把父 task 重新绑定到 child thread，并以
   `already bound to another conversation thread` 失败；当前修复已用真实写工具回归锁定父 link 不变。
+- cwd/权限同样按 会话运行时 child spawn 继承 active turn config：根 main 创建 child 时，当前会话的
+  host-validated `conversation_execution_cwd/conversation_runtime_workspace_roots` 必须进入 child task
+  attributes、execution context 和产品写根；shared Gateway manager 的仓库根只是无会话任务的 fallback。
+  `output_files` 继续只表达交付目标/冲突锁，不负责授予普通 child 当前项目权限。第二轮 Prompt 4 正是因
+  main 省略该字段而暴露断点；回归现已覆盖“无 output_files 仍读写 client project”。
 - 实现边界：`ConversationThreadStore.ensure_agent_thread` 以 host 生成的 exact id 幂等建线程，不写 channel/
   latest-user 索引；child 每次尝试按 `conversation_request_id` 先落 user、轮前 Compact、注入 summary/raw
   tail、模型运行、终态落 assistant。provider overflow 在同一 attempt 内强制 Compact 并携带 typed tool/
