@@ -57,9 +57,15 @@ def _scheduled_continuation_prompt(reason: str) -> str:
 # Child lifecycle facts wake the same Agent; they do not select a workflow.
 _SUBAGENT_INTEGRATION_WAKE_PROMPT = (
     "A subagent lifecycle event resumed this same task. Read the typed wake "
-    "signal, objective, persisted artifacts, tool records, and "
-    "evidence references. A child status or prose is evidence, not authority "
-    "that the objective is complete. Decide the next action from current facts "
+    "signal, objective, persisted artifacts, tool records, and evidence "
+    "references. Each subagent-completion.v1 envelope carries that child's "
+    "bounded completion_message plus exact final_report_ref, declared_output_refs, "
+    "and artifact_refs. Consume the current metadata envelope and, when "
+    "metadata.events exists, every completion envelope inside that batch; "
+    "read final_report_ref before guessing or searching for an output directory. "
+    "A host-owned child status is lifecycle authority, while completion prose is "
+    "integration evidence and cannot declare the root objective complete. Decide "
+    "the next action from current facts "
     "and available capabilities. The runtime does not require a particular "
     "child count, role, review path, integration order, or tool. Current Task "
     "Runtime State and current tool results are authoritative for task identity, "
@@ -72,7 +78,9 @@ _SUBAGENT_INTEGRATION_WAKE_PROMPT = (
     "replacement child. A child failure, capacity limit, or terminal event does not "
     "silently transfer delegated implementation back to the main agent. "
     "If the structured projection says rows were omitted, use the supplied refs "
-    "or wait for another lifecycle event before reporting them. Avoid duplicate work and polling. "
+    "or wait for another lifecycle event before reporting them. Do not ask the user "
+    "how to find an already delivered child result when its completion message or "
+    "readable report ref is present. Avoid duplicate work and polling. "
     "Report completion only when the current objective and runtime facts support it, and describe "
     "unresolved limitations truthfully."
 )
@@ -3386,7 +3394,7 @@ def _consume_wake_signal_batch(
         return
     reported.add(report.thread_id)
     scheduler._mark_sibling_signals(
-        wake_signals,
+        list(wake_batch),
         signal,
         current,
         handled,
@@ -3558,7 +3566,43 @@ def _select_wake_batch(
 ) -> tuple[WakeSignal, ...]:
     if _typed_audit_finding_signal(primary):
         return _select_audit_finding_batch(scheduler, primary, signals)
+    if _successful_completion_signal(primary):
+        return _select_successful_completion_batch(scheduler, primary, signals)
     return _select_same_reason_wake_batch(scheduler, primary, signals)
+
+
+# LLM: This selector coalesces only typed DONE events from one exact root tree;
+# failures and Audit source-worker lifecycles retain their immediate dedicated paths.
+# 函数用途: 把同一批成功子代理的完成信封一起交给主代理，避免只看见最早一名孩子的结果。
+def _select_successful_completion_batch(
+    scheduler: BackgroundMainAgentScheduler,
+    primary: WakeSignal,
+    signals: list[WakeSignal],
+) -> tuple[WakeSignal, ...]:
+    config = getattr(getattr(scheduler.runtime, "agent", None), "config", None)
+    item_limit = _agent_config_int(config, "background_pending_wake_prompt_limit") or 20
+    context_tokens = _agent_config_int(config, "background_context_max_total_tokens") or 8000
+    batch_token_budget = max(1536, (context_tokens * 3) // 4)
+    from ..memory_archive.tokens import estimate_tokens
+
+    selected: list[WakeSignal] = [primary]
+    projected: list[dict[str, Any]] = [primary.to_dict()]
+    primary_seen = False
+    for candidate in signals:
+        if len(selected) >= max(1, item_limit):
+            break
+        if candidate.wake_signal_id == primary.wake_signal_id:
+            primary_seen = True
+            continue
+        if not primary_seen or not _same_successful_completion_batch(primary, candidate):
+            continue
+        candidate_payload = candidate.to_dict()
+        next_projected = [*projected, candidate_payload]
+        if estimate_tokens(next_projected) > batch_token_budget:
+            break
+        selected.append(candidate)
+        projected = next_projected
+    return tuple(selected)
 
 
 def _same_reason_wake_batch(primary: WakeSignal, sibling: WakeSignal) -> bool:
@@ -3722,16 +3766,26 @@ def _successful_completion_waiting_for_batch(
     signal: WakeSignal,
     current: float,
 ) -> bool:
-    if str(signal.reason or "").strip().lower() != "subagent_runner_finished":
-        return False
-    metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
-    if str(metadata.get("status") or "").strip().upper() != "DONE":
+    if not _successful_completion_signal(signal):
         return False
     if _successful_completion_tree_still_active(scheduler, signal):
         return True
     delay = scheduler._config_limit("background_completion_coalesce_seconds")
     created_at = float(signal.created_at or 0.0)
     return delay > 0 and 0 < created_at <= current < created_at + delay
+
+
+# LLM: Successful completion batching reads only reason, typed status and the
+# Audit worker marker; natural-language child output never enters this decision.
+# 函数用途: 判断一条 wake 是否是可与同树兄弟合并的普通成功完成事件。
+def _successful_completion_signal(signal: WakeSignal) -> bool:
+    if str(signal.reason or "").strip().lower() != "subagent_runner_finished":
+        return False
+    metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+    return (
+        str(metadata.get("status") or "").strip().upper() == "DONE"
+        and metadata.get("audit_source_worker") is not True
+    )
 
 
 # LLM: This tree check is status-only and excludes deterministic Audit source
@@ -3772,12 +3826,7 @@ def _same_successful_completion_batch(primary: WakeSignal, sibling: WakeSignal) 
         return False
     if str(sibling.reason or "").strip().lower() != "subagent_runner_finished":
         return False
-    primary_metadata = primary.metadata if isinstance(primary.metadata, dict) else {}
-    sibling_metadata = sibling.metadata if isinstance(sibling.metadata, dict) else {}
-    return (
-        str(primary_metadata.get("status") or "").strip().upper() == "DONE"
-        and str(sibling_metadata.get("status") or "").strip().upper() == "DONE"
-    )
+    return _successful_completion_signal(primary) and _successful_completion_signal(sibling)
 
 
 def _observation_batch_semantics(

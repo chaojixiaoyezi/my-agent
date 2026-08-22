@@ -278,6 +278,67 @@ def test_background_context_budget_caps_the_whole_projection_and_keeps_recent_ta
     assert active_wake["summary"] == "w" * 5000
 
 
+def test_background_context_budget_keeps_every_active_completion_envelope() -> None:
+    import json
+
+    from agent_py_agent.agent.conversation.context_budget import (
+        BackgroundContextBudget,
+        BackgroundContextPayloadRequest,
+        bounded_background_context_payload,
+    )
+    from agent_py_agent.agent.memory_archive.tokens import estimate_tokens
+
+    events = [
+        {
+            "wake_signal_id": f"wake-{index}",
+            "reason": "subagent_runner_finished",
+            "source_agent_id": f"child-{index}",
+            "root_task_id": "task-root",
+            "metadata": {
+                "task_id": f"child-{index}",
+                "status": "DONE",
+                "completion_schema_version": "subagent-completion.v1",
+                "completion_message": f"第{index}路结论：" + ("甲" * 500),
+                "final_report_ref": f"/tmp/child-{index}/final_report.md",
+            },
+        }
+        for index in range(1, 5)
+    ]
+    active_wake = {
+        **events[0],
+        "summary": "4 structured events share this task and reason.",
+        "evidence_refs": [
+            f"/tmp/child-{index}/final_report.md" for index in range(1, 5)
+        ],
+        "metadata": {
+            **events[0]["metadata"],
+            "event_count": 4,
+            "events": events,
+        },
+    }
+    payload = bounded_background_context_payload(
+        BackgroundContextPayloadRequest(
+            bundle={
+                "messages": [
+                    {"content": "旧消息" + ("x" * 5000)} for _ in range(12)
+                ]
+            },
+            active_wake_signal=active_wake,
+            pending_wake_signals=[],
+            agent_tree={"nodes": [{"result": "r" * 5000} for _ in range(12)]},
+            task_runtime_state={"details": "s" * 5000},
+            budget=BackgroundContextBudget(max_total_tokens=2200),
+        )
+    )
+
+    rendered = json.dumps(payload["active_wake_signal"], ensure_ascii=False)
+    assert estimate_tokens(payload) <= 2200
+    assert payload["active_wake_signal"]["metadata"]["event_count"] == 4
+    for index in range(1, 5):
+        assert f"child-{index}" in rendered
+        assert f"/tmp/child-{index}/final_report.md" in rendered
+
+
 def test_background_context_budget_keeps_current_audit_facts_before_old_prose() -> None:
     import json
 

@@ -926,6 +926,18 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - `.7` 正式验收必须使用唯一 Gateway 和 `MiniMax-M2.7`，依次执行 `TESTS.md` 的四个原样重型 prompt。
   每次启动、切换或输入 TUI 之前必须先向用户公开 tmux session 名称与完整 attach 命令；测试者只观察，
   不旁路补代码或向被测代理发送技术推动消息。
+- `931ee20` 的全新 Prompt 3 真机轮证明短职责和固定活动区正确，但同时证明旧完成 wake 只有“孩子结束”
+  通知，没有把 canonical `task.result` / `final_report.md` 交给 main。对照 会话运行时
+  `session_prefix.rs::format_inter_agent_completion_message` 与
+  `session/mod.rs::forward_child_completion_to_parent` 后，当前完成交接固定为
+  `subagent-completion.v1`：宿主 typed status 决定 child 生命周期；自然语言 `completion_message` 只作
+  整合证据并按 1000 估算 token 截断；系统生成的 `final_report_ref` 和结构化 declared/artifact refs 提供
+  完整读取路径。模型不得从完成正文反推 status、权限、验收或根任务完成。
+- 同一 exact root 的普通 `DONE` wake 在孩子收齐及短 debounce 后按当前上下文预算成批交给 main，active
+  wake 的 `metadata.events` 保留每名孩子的独立信封；只确认实际选入本轮的成员，新到或预算外事件继续
+  pending。失败事件和 Audit source worker 保持原即时专用路径。背景上下文压力可缩短每段字符串，但
+  不能按字段顺序丢掉 active wake metadata、evidence refs 或批成员；这是当前 turn typed input 的优先级，
+  不新增目录扫描 fallback 或机器质量门。【状态：本地严格 gate 已通过，待部署/Prompt 3 复验】
 
 ## 2026-08-22 单 Gateway 服务身份与 thread cwd 分离【状态：`993ce4f` 真机通过】
 

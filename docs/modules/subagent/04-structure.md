@@ -30,6 +30,11 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   共用同一规则；canonical ledger 不删除，普通 Todo 不因前面的隐藏 seed 占满投影上限而消失。
 - 会话运行时 式协调边界只进入模型执行策略：一旦 main 把实际工作交给 child，main 只协调、整合已有产物、
   测试和汇报；剩余实现继续 guidance 或 replacement child。它不新增机器验收，也不把描述文字解析为权限。
+- `runner_completion_wake.py` 是 child→直接父级完成交接的唯一 root 会话出口：事件包含 typed status 与
+  `subagent-completion.v1` 结果信封，`completion_message` 有界、`final_report_ref` 指向系统完整报告，
+  declared/artifact refs 继续来自 canonical 合同/结果。`conversation/runtime.py` 只把同 root 的普通 DONE
+  信封按预算合批，`context_budget.py` 保证 active wake 在压力下不丢 metadata 和批成员；这些投影不拥有
+  验收、权限或根任务完成权。
 
 ## Memory Candidate 接口
 

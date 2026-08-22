@@ -1,5 +1,22 @@
 # STATUS
 
+## 2026-08-22 会话运行时 式子代理完成交接（本地候选）
+
+- `931ee20` 已推送并部署 `.7`。唯一 Gateway、`MiniMax-M2.7`、全新 tmux
+  `dsh-p3-research-931ee20-verify` 的原样 Prompt 3 只输入一次：4 个 child 分别显示“调研 轻量运行时 项目 / 调研
+  工具运行时 项目 / 调研 会话运行时 项目 / 调研 终端交互 项目”，context 总 token 实时变化，4 个 child 都一次
+  attempt 自然 `DONE`。这证明短职责行、main 单行 Working、Todo/child 布局和终态打标已经进入真实链路。
+- 同轮没有通过最终交付：四份 canonical `task.result` 和 `work/agents/<run>/final_report.md` 都存在，但
+  `runner_completion_wake` 只通知“已结束”和 runner/output 索引，没有把最终回复或完整报告 ref 交给 main；
+  main 因而猜测不存在的 `research_reports/`，把 Todo 重置并反问用户如何继续。
+- 当前候选对照 会话运行时 `format_inter_agent_completion_message` / `forward_child_completion_to_parent`，为每个
+  lifecycle wake 增加 `subagent-completion.v1`：typed status 仍是生命周期权威，最多 1000 估算 token 的
+  `completion_message` 仅作整合证据，完整正文由 `final_report_ref` 读取，并同时携带 declared/artifact refs。
+  同树成功通知按上下文预算合成一次 `metadata.events`；只确认本轮真正选入的信封，失败和 Audit worker
+  不进入该批。上下文压缩可缩短正文，但必须保留 active wake 的 metadata、全部批成员和报告引用。
+- 相关 focused 回归已覆盖四路长完成消息、2200-token 压力投影和长消息截断；本地严格 gate 已通过，
+  推送部署和同一 Prompt 3 的全新 TUI 复验仍待完成。本轮远低于 10,000 行，不运行全仓 pytest。
+
 ## 2026-08-22 后台主代理、Todo 与子代理职责行（本地候选）
 
 - `f5dc695` 已推送并部署 `.7`。tmux `dsh-p2-mario-f5dc695-verify` 的全新原样 Prompt 2 证明 main
@@ -21,8 +38,8 @@
 - 当前候选进一步保证批量顶层 description 不扇出，每个 child 只显示自己的职责或自己的 goal 摘要；
   main/child 活动严格单行；live/final Todo 都在投影上限前按 exact child run id 去重。会话运行时 式递归
   coordinator 提示也明确：实际工作一经委派，容量/参数/child 终态不会授权 main 静默接管实现。
-  8 个直接相关 focused 文件已通过；严格 gate、推送、`.7` 单 Gateway 部署与下一条原样 TUI 复验仍待
-  完成。本轮远低于 10,000 行，不运行全仓 pytest。
+  8 个直接相关 focused 文件和本地严格 gate 已通过，`931ee20` 已推送部署；Prompt 3 真机验证了该展示
+  切片，后续结果交接失败归入上方独立底层修复。本轮远低于 10,000 行，未运行全仓 pytest。
 
 ## 2026-08-22 单 Gateway 多目录启动失败已定位（本地候选）
 

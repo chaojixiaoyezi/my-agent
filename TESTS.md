@@ -26,6 +26,18 @@ Gateway 可以并行，但不能作为“单 Gateway 多客户端”验收的替
 补代码、发技术推动指令或修改产物。单测、fake、renderer snapshot 和静态 gate 只作上线前护栏，不能替代
 上述真实 TUI 验收。
 
+`931ee20` 在 `.7` 唯一 Gateway 上以 tmux `dsh-p3-research-931ee20-verify` 执行第 3 条原样任务，prompt
+只输入一次。4 个 child 的短职责、实时 context 总 token、一次 attempt 自然 DONE 和 Todo 打标均正确；
+但 main 只收到不含最终正文/报告 ref 的生命周期通知，猜测 `research_reports/` 后反问用户，未继续第二批，
+因此该轮判定失败。canonical 证据显示四份 `task.result` 和每个
+`work/agents/<child>/final_report.md` 均已落盘，问题属于完成交接，不属于模型未产出。
+
+对应回归必须同时证明：每个 `subagent-completion.v1` 携带 typed status、最多 1000 估算 token 的最终回复
+预览、精确 `final_report_ref` 和 declared/artifact refs；完成正文不得改变 typed status；同根 4 路成功
+wake 在一次模型轮的 `metadata.events` 中全部可见；背景总上下文压到 2200 token 时仍保留四名 child 身份
+和四个报告 ref；只确认实际进入本轮的 wake，新到事件继续 pending；失败与 Audit worker 不参加成功批。
+修复后必须用全新 tmux/cwd 重跑同一 Prompt 3，仍只输入一次且不得给 main 发送“去哪个目录找”的提示。
+
 单 Gateway 多目录回归必须另行覆盖：两个不同 cwd 的 lightweight client 得到同一 owner-level
 `gateway_workspace`，但请求分别携带自己的绝对 `workspace.cwd/roots`；thread 在后续未覆盖的请求中保留
 该范围；模型前 workspace gate 拒绝相对/不存在目录；Tool Registry 的 path gate、resource lock 与 handler

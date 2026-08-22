@@ -3551,7 +3551,7 @@ def test_successful_sibling_completion_wakes_are_coalesced_before_one_llm_turn(
     )
     backend = _NaturalCompletionBackend()
     agent.backend = backend
-    for goal in ("第一部分", "第二部分"):
+    for goal in ("第一部分", "第二部分", "第三部分", "第四部分"):
         child = agent.subagents.create_run(
             goal=goal,
             thought="",
@@ -3573,14 +3573,20 @@ def test_successful_sibling_completion_wakes_are_coalesced_before_one_llm_turn(
     store.bind_task(
         {"thread_id": thread.thread_id, "task_id": "task-root", "goal": "两路并行", "now": 11.0}
     )
-    for index, created_at in enumerate((20.0, 21.0), start=1):
+    for index, created_at in enumerate((20.0, 21.0, 22.0, 23.0), start=1):
         store.raise_wake_signal(
             {
                 "thread_id": thread.thread_id,
                 "reason": "subagent_runner_finished",
                 "root_task_id": "task-root",
                 "source_agent_id": f"child-{index}",
-                "metadata": {"task_id": f"child-{index}", "status": "DONE"},
+                "metadata": {
+                    "task_id": f"child-{index}",
+                    "status": "DONE",
+                    "completion_schema_version": "subagent-completion.v1",
+                    "completion_message": f"第{index}个子代理的最终结论：" + ("甲" * 500),
+                    "final_report_ref": f"/tmp/child-{index}/final_report.md",
+                },
                 "now": created_at,
             }
         )
@@ -3590,17 +3596,22 @@ def test_successful_sibling_completion_wakes_are_coalesced_before_one_llm_turn(
 
     assert scheduler.tick(now=23.0) == []
     assert backend.prompts == []
-    assert len(store.pending_wake_signals()) == 2
+    assert len(store.pending_wake_signals()) == 4
 
     reports = scheduler.tick(now=26.0)
 
     assert len(reports) == 1
     assert len(backend.prompts) == 1
+    for index in range(1, 5):
+        assert f"第{index}个子代理的最终结论" in backend.prompts[0]
+        assert f"/tmp/child-{index}/final_report.md" in backend.prompts[0]
+    assert '"event_count": 4' in backend.prompts[0]
+    assert '"events": [' in backend.prompts[0]
     assert store.pending_wake_signals() == []
     assert reports[0].delivery_status == "sent"
 
 
-def test_completion_coalescing_keeps_events_created_after_turn_sample_pending(
+def test_completion_coalescing_acknowledges_only_the_selected_wake_snapshot(
     tmp_path,
 ) -> None:
     agent = SimpleAgent(
@@ -3639,7 +3650,7 @@ def test_completion_coalescing_keeps_events_created_after_turn_sample_pending(
     handled: set[str] = set()
 
     scheduler._mark_sibling_signals(
-        signals,
+        signals[:2],
         signals[0],
         40.0,
         handled,

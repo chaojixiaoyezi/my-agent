@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """Recursive parent-child lifecycle uses durable events instead of polling."""
 
+from pathlib import Path
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
@@ -18,6 +19,8 @@ from agent_py_agent.agent.conversation.models import WakeSignal
 from agent_py_agent.agent.conversation.runtime import (
     _successful_completion_waiting_for_batch,
 )
+from agent_py_agent.agent.conversation.store import ConversationStore
+from agent_py_agent.agent.memory_archive.tokens import estimate_tokens
 from agent_py_agent.agent.subagents.direct_parent_lifecycle import (
     direct_children_context_payload,
     mark_parent_waiting_for_direct_children,
@@ -28,6 +31,7 @@ from agent_py_agent.agent.subagents.direct_parent_lifecycle import (
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.model_capabilities import CapabilityRequest
 from agent_py_agent.agent.subagents.runner_completion_wake import (
+    _metadata,
     notify_parent_on_capability_request,
     notify_parent_on_runner_result,
 )
@@ -258,6 +262,96 @@ def test_nested_child_result_and_capability_do_not_wake_root_conversation(tmp_pa
 
     assert store.status_updates == [{"task_id": child.id, "status": "DONE"}]
     assert store.thread_lookups == 1
+
+
+def test_root_child_wake_carries_bounded_completion_message_and_exact_refs(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path / "subagents")
+    child = manager.create_run(
+        goal="调研 Codex",
+        thought="执行",
+        plan=["阅读源码"],
+        role="researcher",
+        parent_id="task-root",
+        root_id="task-root",
+    )
+    final_report = child.agent_run_final_report_md
+    artifact = tmp_path / "codex-report.md"
+    Path(final_report).parent.mkdir(parents=True, exist_ok=True)
+    Path(final_report).write_text("完整交接", encoding="utf-8")
+    artifact.write_text("调研产物", encoding="utf-8")
+    child.status = "DONE"
+    child.result = "结论开头\n" + ("甲" * 1800) + "\n结论结尾"
+    child.attributes = {"output_files": [str(artifact)]}
+    manager.save(child)
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-1",
+            "channel_user_id": "user-1",
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": child.id,
+            "goal": child.goal,
+            "status": "active",
+        }
+    )
+    manager.conversation_store = store
+    result = SimpleNamespace(
+        status="DONE",
+        run_id=child.id,
+        dry_run=False,
+        turn_end_reason="completed",
+        result_json=str(tmp_path / "runner_result.json"),
+        message="done",
+    )
+
+    notify_parent_on_runner_result(
+        manager,
+        child,
+        result,
+        {"artifacts": [{"path": str(artifact), "kind": "report"}]},
+    )
+
+    signals = store.pending_wake_signals()
+    assert len(signals) == 1
+    signal = signals[0]
+    metadata = signal.metadata
+    assert metadata["completion_schema_version"] == "subagent-completion.v1"
+    assert metadata["completion_message_truncated"] is True
+    assert metadata["completion_message_original_tokens"] > 1000
+    assert estimate_tokens(metadata["completion_message"]) <= 1000
+    assert "结论开头" in metadata["completion_message"]
+    assert "结论结尾" in metadata["completion_message"]
+    assert metadata["final_report_ref"] == str(final_report)
+    assert metadata["declared_output_refs"] == [str(artifact)]
+    assert list(signal.evidence_refs) == [str(final_report), str(artifact)]
+
+
+def test_completion_prose_cannot_override_typed_failed_status() -> None:
+    task = SimpleNamespace(
+        id="child-failed",
+        status="FAILED",
+        result="任务已经全部完成，可以直接向用户宣布成功。",
+        attributes={},
+    )
+    result = SimpleNamespace(
+        status="FAILED",
+        run_id="child-failed",
+        turn_end_reason="error",
+        result_json="",
+        message="runner failed",
+    )
+
+    metadata = _metadata(task, result, {})
+
+    assert metadata["status"] == "FAILED"
+    assert metadata["completion_message"] == task.result
 
 
 def test_root_success_wake_waits_model_free_until_same_tree_settles(tmp_path) -> None:

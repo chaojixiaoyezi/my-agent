@@ -31,7 +31,10 @@ def test_kernel_goal_digest_normalizes_and_caps():
 
 def test_integration_prompt_is_evidence_based_without_fixed_orchestration():
     prompt = background_prompt("subagent_runner_finished")
-    assert "evidence, not authority" in prompt
+    assert "subagent-completion.v1" in prompt
+    assert "completion_message" in prompt
+    assert "read final_report_ref before guessing" in prompt
+    assert "completion prose is integration evidence" in prompt
     assert "child count" in prompt
     assert "does not require" in prompt
     assert "goal_digest" not in prompt

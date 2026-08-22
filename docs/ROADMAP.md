@@ -99,6 +99,12 @@ canonical subagent run 生成有界直属 child 快照，TUI 在输入框下固�
 coordinator 在委派后只整合、测试和汇报，缺口继续交给 child。8 个直接相关 focused 文件已通过，待严格
 gate、部署和下一条原样 MiniMax-M2.7 TUI 复验。
 
+`931ee20` 已完成上述展示复验：四条短职责、实时 context、单行 main 和终态标记均正确。新阻塞转到底层
+完成交接：旧 wake 没带 child 最终回复和 `final_report.md`，main 因而猜错目录。当前候选按 会话运行时 标准
+completion message 补 `subagent-completion.v1`，同根 DONE 信封一次合批，并让 active wake 在上下文压力
+下优先保留 metadata/报告 refs。本地严格 gate 已通过；待部署后用全新 Prompt 3 会话确认 main 能直接读四份结果、
+继续派第二批并完成最终横向整合；不得用用户插话补救。
+
 `714c0c8` 已推送并部署 `.7`，本地 117 项 focused、远端 11 项投影/渲染 focused 与提交前严格 gate
 均通过，按用户约定未重跑全仓 pytest。真实 TUI 已证明两个 child 一次 attempt 自然完成，固定活动区能
 逐步显示状态、动作、耗时并在根任务收口后移除。该轮也抓到旧 Gateway 进程保留 process-local thread

@@ -29,6 +29,13 @@
 - 对照 会话运行时 orchestrator：一旦实际实现已委派给 child，main 的角色就保持为协调者，只能读取/整合现有
   产物、执行用户允许的测试并汇报；缺口要精确指导原 child 或另派 replacement child。容量不足、参数错误、
   child 失败或终态都不构成 main 静默接管实现的授权。这是通用分工提示，不参与机器状态或质量验收。
+- `931ee20` 的真实 Prompt 3 证明四名 child 都完成但 main 仍猜错目录：旧 root wake 只有 status 和
+  runner/output 索引，没有 child 最终回复和系统 `final_report.md`。当前候选按 会话运行时 inter-agent
+  completion message 增加 `subagent-completion.v1`，把有界最终回复、完整报告 ref、declared/artifact refs
+  作为每名 child 的独立交接信封；status 仍只读宿主字段，正文不参与机器判断。
+- 同根成功信封随孩子收齐后一次合批；背景上下文缩小时优先保留 active wake 的 metadata、全部选中成员
+  和报告 ref，只缩短正文。主代理先消费信封和精确 ref，不再猜目录或要求用户替它选择查找路线；批外和
+  新到 wake 保持 pending，失败/Audit worker 仍走原专用通道。
 
 ## 2026-08-21 递归创建、自动启动与自然收口
 

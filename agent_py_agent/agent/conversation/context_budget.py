@@ -67,7 +67,10 @@ def _bounded_payload(
 ) -> dict[str, Any]:
     return {
         "thread": _bounded_value(request.bundle.get("thread"), limits),
-        "active_wake_signal": _bounded_observation(request.active_wake_signal or {}, limits),
+        "active_wake_signal": _bounded_active_wake_signal(
+            request.active_wake_signal or {},
+            limits,
+        ),
         "messages": _bounded_top_level_list(
             request.bundle.get("messages"),
             limits,
@@ -257,6 +260,51 @@ def _bounded_observation(value: object, budget: BackgroundContextBudget) -> dict
     for key in ("summary", "reason", "content"):
         _clip_observation_field(row, key, budget.max_string_chars)
     return _bounded_value(row, budget)
+
+
+# LLM: The active wake is the current turn's typed input. Shape-pressure may
+# shorten strings but must not drop its metadata, evidence refs, or batch members
+# in favor of less authoritative bookkeeping fields.
+# 函数用途: 有界投影当前唤醒事件，完整保留本批事件结构并按预算缩短各段正文。
+def _bounded_active_wake_signal(
+    value: object,
+    budget: BackgroundContextBudget,
+) -> dict[str, Any]:
+    row = dict(value) if isinstance(value, dict) else {}
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    events = metadata.get("events") if isinstance(metadata.get("events"), list) else []
+    list_floor = max(
+        len(events),
+        len(row.get("evidence_refs")) if isinstance(row.get("evidence_refs"), list) else 0,
+        1,
+    )
+    active_budget = BackgroundContextBudget(
+        max_string_chars=max(1, int(budget.max_string_chars or 0)),
+        max_list_items=max(list_floor, int(budget.max_list_items or 0)),
+        max_dict_items=max(32, int(budget.max_dict_items or 0)),
+        max_depth=max(8, int(budget.max_depth or 0)),
+        max_total_tokens=budget.max_total_tokens,
+    )
+    ordered_keys = (
+        "wake_signal_id",
+        "thread_id",
+        "reason",
+        "root_task_id",
+        "source_agent_id",
+        "parent_agent_id",
+        "summary",
+        "evidence_refs",
+        "metadata",
+        "urgency",
+        "severity",
+        "created_at",
+        "handled_at",
+        "status",
+        "dedupe_key",
+    )
+    ordered = {key: row[key] for key in ordered_keys if key in row}
+    ordered.update({key: item for key, item in row.items() if key not in ordered})
+    return _bounded_observation(ordered, active_budget)
 
 
 def _bounded_task_runtime_state(
