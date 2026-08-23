@@ -413,8 +413,8 @@ def test_generic_worker_reuses_same_structured_io_scope_without_goal_text_key(tm
     assert second["tasks"][0]["attributes"]["work_scope_key"]
 
 
-def test_items_without_output_files_get_task_local_child_output_ref(tmp_path):
-    """模型没填 output_files 时，运行时给子代理一个任务内默认结果槽。"""
+def test_items_without_output_files_keep_business_output_contract_empty(tmp_path):
+    """模型没填 output_files 时，不得凭空生成业务交付文件。"""
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     agent = _mock_workspace_agent(tmp_path)
@@ -437,25 +437,22 @@ def test_items_without_output_files_get_task_local_child_output_ref(tmp_path):
         ],
     }).output)
 
-    first = payload["tasks"][0]["attributes"]["output_files"][0]
-    second = payload["tasks"][1]["attributes"]["output_files"][0]
-    first_id = payload["tasks"][0]["id"]
-    second_id = payload["tasks"][1]["id"]
-    assert first.endswith(f"/work/child_outputs/{first_id}/01-ecc-analyzer-1.md")
-    assert second.endswith(f"/work/child_outputs/{second_id}/02-pi-analyzer-2.md")
-    assert payload["child_result_index"][0]["expected_outputs"] == [first]
+    assert "output_files" not in payload["tasks"][0]["attributes"]
+    assert "output_files" not in payload["tasks"][1]["attributes"]
+    assert "system_default_output_ref" not in payload["tasks"][0]["attributes"]
+    assert "system_default_output_ref" not in payload["tasks"][1]["attributes"]
+    assert payload["child_result_index"][0]["expected_outputs"] == []
     assert payload["child_result_index"][0]["read_order"] == []
-    assert payload["child_output_read_order"][0]["expected_outputs"] == [first]
+    assert payload["child_output_read_order"][0]["expected_outputs"] == []
     assert payload["child_output_read_order"][0]["read_order"] == payload["child_result_index"][0]["read_order"]
     assert payload["next_action"]["action"] == "await_lifecycle_event"
     assert "status_tool_call" not in payload
     assert "wait_tool_call" not in payload
     assert "subagent_workspace" not in payload
     assert "agent_work_dir" not in payload["tasks"][0]
-    assert payload["tasks"][0]["attributes"]["system_default_output_ref"] is True
 
 
-def test_background_turn_uses_structured_run_workspace_for_default_child_outputs(tmp_path):
+def test_background_turn_without_declared_outputs_keeps_output_contract_empty(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     agent = _mock_workspace_agent(tmp_path)
@@ -483,13 +480,9 @@ def test_background_turn_uses_structured_run_workspace_for_default_child_outputs
         ).output
     )
 
-    outputs = [item["attributes"]["output_files"][0] for item in payload["tasks"]]
-    run_ids = [item["id"] for item in payload["tasks"]]
-    assert outputs == [
-        str(task_root / "work" / "child_outputs" / run_ids[0] / "01-first-1.md"),
-        str(task_root / "work" / "child_outputs" / run_ids[1] / "02-second-2.md"),
-    ]
-    assert all(item["attributes"]["system_default_output_ref"] for item in payload["tasks"])
+    assert all("output_files" not in item["attributes"] for item in payload["tasks"])
+    assert all("system_default_output_ref" not in item["attributes"] for item in payload["tasks"])
+    assert all(row["expected_outputs"] == [] for row in payload["child_result_index"])
 
 
 def test_system_default_output_templates_rebind_to_unique_run_directories(tmp_path):
@@ -519,6 +512,36 @@ def test_system_default_output_templates_rebind_to_unique_run_directories(tmp_pa
     assert first_ref != second_ref
     assert first_ref.endswith("/child_outputs/subagent-first/01-worker.md")
     assert second_ref.endswith("/child_outputs/subagent-second/01-worker.md")
+
+
+def test_legacy_system_default_output_stays_out_of_child_result_index(tmp_path):
+    """旧任务的内部默认报告槽不能再显示成父级应验收的产物。"""
+    from agent_py_agent.agent.agent_core.orchestration.child_result_index import (
+        child_result_index,
+    )
+
+    internal_report = tmp_path / "task" / "work" / "child_outputs" / "legacy.md"
+    task = SimpleNamespace(
+        id="subagent-legacy",
+        parent_id="root",
+        root_id="root",
+        agent_name="worker",
+        role="worker",
+        status="DONE",
+        attributes={
+            "output_files": [str(internal_report)],
+            "system_default_output_ref": True,
+        },
+        artifact_registry=[],
+        output_json="",
+        task_workspace_dir=str(tmp_path / "task"),
+    )
+
+    row = child_result_index(object(), [task])[0]
+
+    assert row["expected_outputs"] == []
+    assert row["primary_artifact_refs"] == []
+    assert row["read_order"] == []
 
 
 def test_output_prefixed_task_output_file_does_not_duplicate_output_dir(tmp_path):

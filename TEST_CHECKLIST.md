@@ -15,7 +15,13 @@
 - [ ] task-local child 只能由自己的 runner/agent thread 续跑：finalize 不登记 root
   `ordinary_task_resume`，任何绑定 canonical child task 的旧后台 policy/wake 在 root 模型调用前退役或
   无模型确认。runner 结果回到 `PENDING` 时只回收 exact run 的启动占位，共享批次 PID 仍活不能阻塞
-  即时续派。相关 focused 回归通过；仍待部署后 r9 真 TUI 证明没有混合 main/child 身份和双执行器。
+  即时续派。相关 focused 回归与 r9 的身份/单执行器真机证据已通过；r9 未自然触发 PENDING，故共享 PID
+  下即时续派仍待后续 fresh TUI 正向样本。
+- [ ] 未显式声明 `output_files/output_refs/artifact_refs` 的普通 child 不生成系统 Markdown 业务合同；父级
+  只从 typed status、最终回复、`final_report_ref` 与真实 artifact refs 接收结果。旧
+  `system_default_output_ref=true` 可恢复但不进入 runner contract、completion wake 或
+  `child_result_index.expected_outputs`；显式产物仍走现有锚定、写授权和冲突锁。focused tests 完成后还须
+  fresh r10 原样 Prompt 4 真机验证。
 - [x] Compact 权威探针兼容没有 `task_attributes` 的轻量/旧调用方；统一路径解析把 `None`/空白保留为
   “没有路径”，不能变成 `<repo>/None` 并压过真实 ToolRegistry cwd。工具轮 28 项与 cwd 集成回归通过。
 - [x] 后台 Task Runtime State 与 `task_progress` 工具使用同一 task-path 账本编号；回归同时放置正确路径账本

@@ -195,8 +195,9 @@
   1. 进程工具把结构化额外读取根映射为 Linux sandbox 只读挂载，写权限仍只来自显式写根；
   2. 单页成功落盘后，尚未完成的全站链接只作为过程 warning，最终
      `static_site_check` 仍执行完整硬验收；
-  3. 系统默认 child output ref 在真实 run id 创建后重绑定到 run 专属目录，第二批子代理不再复用
-     `01/02` 路径；用户显式输出路径和业务冲突锁保持原语义；
+  3. 当时的系统默认 child output ref 会在真实 run id 创建后重绑定到 run 专属目录，第二批子代理不再复用
+     `01/02` 路径；2026-08-22 r9 证明内部 Markdown 会被误当成业务交付，故新任务已删除该默认引用。
+     旧 durable task 只保留 rebind 迁移读取并从模型可见合同隐藏；用户显式输出路径和业务冲突锁保持原语义；
   4. provider 流式聚合只按结构化 delta/cumulative 前缀关系去重，兼容混合流且保留内容相同的两个
      合法增量，不做自然语言相似度判断；
   5. CLI 当前将 provider model delta 视为未提交草稿；工具进度仍走 typed progress，最终只打印经过

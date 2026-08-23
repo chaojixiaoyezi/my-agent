@@ -66,7 +66,10 @@
   一个旧会话的长 policy 回合不能占住整个用户的子代理完成唤醒。
 - 普通 child 自动继承直接父级的结构化工作区上界，孙代理逐层继承同一上界；不要求模型重复声明父级
   本来就能写的目录。`output_files` 记录用户明确交付目标和冲突锁，批量时由负责写入的 item 分别声明；
-  它不能把父级工作区外的自然语言路径变成权限。命名 Audit/exact-scope worker 继续只用精确授权。
+  它不能把父级工作区外的自然语言路径变成权限。模型没有声明产物时，编排器不得凭空生成 Markdown
+  业务交付合同；child 的 typed status、最终回复与系统 `final_report_ref` 已构成 会话运行时 式完成交接。
+  历史 `system_default_output_ref=true` 只作旧账恢复，不进入模型可见文件合同或父级 expected outputs。
+  命名 Audit/exact-scope worker 继续只用精确授权。
 - 写边界使用 会话运行时 同款“最具体路径条目优先、同层 deny 胜出”：宽泛的 `/root` 保护不能误伤其下更窄的
   task output 授权，但同路径或更窄的禁止规则仍然拒绝。
 - 历史 `acceptance_checks` / `verification_status` 字段仅为旧账本可读兼容，不进入当前

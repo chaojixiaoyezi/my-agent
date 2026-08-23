@@ -37,7 +37,7 @@ def output_contract(task: SubAgentTask) -> dict[str, object]:
     components = task_contract_components(task)
     # R4 修复：执行合同里的目标 refs 必须翻译成子代理可写落点（声明意图位置保留在
     # declared_output_refs / output_delivery_map，由主代理收尾时按 map 汇总搬运）。
-    anchoring = anchored_output_refs(task)
+    anchoring = _model_visible_output_anchoring(task)
     anchored_required = _merged_anchored_required(task, components.required_file_refs, anchoring)
     return {
         "product_write_roots": components.product_roots,
@@ -63,7 +63,7 @@ def task_packet(task: SubAgentTask) -> dict[str, object]:
     components = task_contract_components(task)
     # R4 修复：file/write contract 给子代理的目标 refs 用可写落点；
     # output_delivery_map 记录 落点→声明意图位置，收尾汇总按它搬运。
-    anchoring = anchored_output_refs(task)
+    anchoring = _model_visible_output_anchoring(task)
     anchored_required = _merged_anchored_required(task, components.required_file_refs, anchoring)
     return {
         "schema_version": "subagent_task_packet.v1",
@@ -202,21 +202,45 @@ def file_contract_source(task: SubAgentTask) -> str:
 
 def _structured_required_file_contract(task: SubAgentTask) -> list[str]:
     attrs = _task_attributes(task)
+    output_files = [] if _has_legacy_system_default_output_ref(task) else _path_like_output_contract_list(
+        attrs.get("output_files")
+    )
+    output_refs = [] if _has_legacy_system_default_output_ref(task) else _path_like_output_contract_list(
+        attrs.get("output_refs")
+    )
     return _dedupe_file_terms([
         *_file_contract_list(attrs.get("required_files")),
         *_file_contract_list(attrs.get("required_file_refs")),
-        *_path_like_output_contract_list(attrs.get("output_files")),
-        *_path_like_output_contract_list(attrs.get("output_refs")),
+        *output_files,
+        *output_refs,
     ])
 
 
 def declared_output_refs(task: SubAgentTask) -> list[str]:
     attrs = _task_attributes(task)
+    legacy_default = _has_legacy_system_default_output_ref(task)
     return _dedupe_file_terms([
-        *_file_contract_list(attrs.get("output_files")),
-        *_file_contract_list(attrs.get("output_refs")),
+        *([] if legacy_default else _file_contract_list(attrs.get("output_files"))),
+        *([] if legacy_default else _file_contract_list(attrs.get("output_refs"))),
         *_file_contract_list(attrs.get("artifact_refs")),
     ])
+
+
+# LLM: 本修复以前的 durable child 可能带 system_default_output_ref；该路径只是
+#   旧运行时内部报告槽，不是用户/父代理声明的业务产物。旧记录继续可恢复，但不得再
+#   进入 runner 的文件合同、交付映射或完成通知。新建任务不再生成这个字段。
+# 函数用途: 判断一个历史子任务的 output_files 是否只是旧版系统默认报告槽。
+def _has_legacy_system_default_output_ref(task: SubAgentTask) -> bool:
+    return _task_attributes(task).get("system_default_output_ref") is True
+
+
+# LLM: 模型可见的产物锚定必须排除旧版内部默认报告槽；真实显式 output_files 仍走
+#   output_alignment 的同一权威锚定。返回空投影，不修改 durable task。
+# 函数用途: 给 runner 合同计算真正由用户或父代理声明的产物落点。
+def _model_visible_output_anchoring(task: SubAgentTask) -> OutputAnchoring:
+    if _has_legacy_system_default_output_ref(task):
+        return OutputAnchoring()
+    return anchored_output_refs(task)
 
 
 def _path_like_output_contract_list(value: object) -> list[str]:

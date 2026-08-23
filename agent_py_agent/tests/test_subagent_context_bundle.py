@@ -198,6 +198,34 @@ def test_context_bundle_maps_declared_output_files_to_required_refs(tmp_path) ->
     assert bundle.task_packet["write_contract"]["declared_output_refs"] == [str(target)]
 
 
+def test_context_bundle_hides_legacy_system_default_output_ref_from_model(tmp_path) -> None:
+    """旧版内部报告槽可留在 durable state，但不能伪装成业务交付合同。"""
+    manager = SubAgentManager(tmp_path / ".my-agent" / "subagents")
+    internal_report = tmp_path / "task" / "work" / "child_outputs" / "01-worker.md"
+    task = manager.create_run(
+        goal="实现项目功能并在最终回复中汇报。",
+        thought="历史任务带旧版内部报告槽。",
+        plan=["实现功能", "运行测试"],
+        role="worker",
+        attributes={
+            "output_files": [str(internal_report)],
+            "system_default_output_ref": True,
+        },
+    )
+    manager.save(task)
+
+    bundle = build_context_bundle(manager.load(task.id))
+
+    assert bundle.output_contract["declared_output_refs"] == []
+    assert bundle.output_contract["required_file_refs"] == []
+    assert bundle.output_contract["output_delivery_map"] == []
+    assert bundle.output_contract["final_report_ref"].endswith("final_report.md")
+    assert bundle.task_packet["file_contract"]["declared_output_refs"] == []
+    assert bundle.task_packet["file_contract"]["required_file_refs"] == []
+    assert bundle.task_packet["write_contract"]["declared_output_refs"] == []
+    assert str(internal_report) not in json.dumps(asdict(bundle), ensure_ascii=False)
+
+
 def test_context_bundle_keeps_logical_output_refs_out_of_required_files(tmp_path) -> None:
     manager = SubAgentManager(tmp_path / ".my-agent" / "subagents")
     task = manager.create_run(

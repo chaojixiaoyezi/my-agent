@@ -6,6 +6,7 @@ from pathlib import Path
 
 from ...model_visible_refs import current_model_ref, current_model_ref_list
 from ...runtime_errors import runtime_error_report
+from ...subagents.context_bundle_contracts import declared_output_refs
 from ...subagents.models import TaskStatus, task_status_in
 
 
@@ -39,7 +40,7 @@ def child_result_index_from_nodes(nodes: list[dict[str, object]]) -> list[dict[s
 def _child_result_row(task: object) -> dict[str, object]:
     attrs = _task_attrs(task)
     artifacts = _artifact_registry_refs(task)
-    expected_outputs = _expected_outputs(attrs)
+    expected_outputs = declared_output_refs(task)
     output_payload, output_error = _output_payload(task)
     primary_artifact_refs = _primary_artifact_refs(output_payload, artifacts, expected_outputs)
     status = _task_text(task, "status")
@@ -142,15 +143,6 @@ def _readiness_label(status: str, primary_refs: list[str], summary_ref: str) -> 
     if task_status_in(status, {TaskStatus.RUNNING.value, TaskStatus.PLANNING.value}):
         return "running_no_result_yet"
     return "not_ready"
-
-
-def _expected_outputs(attrs: dict[str, object]) -> list[str]:
-    result: list[str] = []
-    for key in ("output_files", "output_refs", "artifact_refs"):
-        value = attrs.get(key)
-        if isinstance(value, list):
-            result.extend(current_model_ref_list(value))
-    return list(dict.fromkeys(result))
 
 
 def _node_expected_outputs(node: dict[str, object]) -> list[str]:

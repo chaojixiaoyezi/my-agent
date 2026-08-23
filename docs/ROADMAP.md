@@ -220,11 +220,17 @@ r7 的交付本身仍是 P0 失败：产物只有 29 个生产 Python 文件、6
 `ordinary_task_resume(task_id=child, thread_id=root)`，root 后台模型于是带着 child task 身份和主工具运行，
 覆盖 Todo 并越权创建孙代理，同时真实 child retry 又启动，形成双执行器。
 
-当前本地候选按 会话运行时 的 child 独立 session/thread 所有权收口：task-local finalize 不再租用 root 后台轮；
+`93e18f6` 已按 会话运行时 的 child 独立 session/thread 所有权收口并部署：task-local finalize 不再租用 root 后台轮；
 后台 policy/wake 精确解析为 canonical child 时在模型前退役或无模型确认；PENDING 只回收 exact run 的
-task-local launch record，不终止共享宿主，使既有 runner auto-start 可立即续派。待严格 gate、推送和单
-Gateway 部署后，以 fresh r9 重跑相同固定源码与原样 Prompt 4；验收先看 root/child 身份、单执行器与重试
-恢复，再继续看范围保真、真实测试和最终产物，不增加宿主机器质量门。
+task-local launch record，不终止共享宿主，使既有 runner auto-start 可立即续派。fresh r9 的 5 名 child
+没有再串入 root、也没有双执行器；该轮没有 PENDING 样本，所以即时重派真机证据仍待自然触发。
+
+r9 新抓到更底层的交付合同错误：模型没声明 `output_files` 时，编排器仍生成 task-local Markdown，runner
+把它说成“用户要求的业务产物”，两名编码 child 因而只交报告。main 后续把代码写成两套目录，在 Todo
+6/12 时自然误报完成；约 4,970 行产物的普通安装失败，隐藏 venv 的产品 TUI 又在启动时抛
+`Stylesheet.parse()` TypeError。当前候选按 会话运行时 的 child final message/status watcher 删除新任务假文件
+合同，历史 `system_default_output_ref` 只保留迁移读取并从模型合同/完成信封/expected outputs 隐藏。
+严格 gate、推送、单 Gateway 部署后以 fresh r10 原样 Prompt 4 验证；仍不增加宿主机器质量门。
 
 ### 用户直控子代理的共享控制面
 

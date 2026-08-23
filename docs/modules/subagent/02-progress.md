@@ -1,5 +1,18 @@
 # Subagent Progress
 
+## 2026-08-22 r9 默认 Markdown 假合同退出主链（本地候选）
+
+- `93e18f6` 部署后的 fresh r9 中，5 名 child 均保持 exact thread/parent，未出现 child
+  `ordinary_task_resume` 或双执行器，r8 身份问题通过真机。r9 未自然产生 PENDING，task-local launch
+  record 的即时回收仍只有 focused 回归证据。
+- 新 canonical 失败是编排器在 `items[]` 未声明产物时自动补
+  `system_default_output_ref + work/child_outputs/*.md`；context bundle 又把它渲染为“用户要求的业务产物”。
+  两名明确承担编码的 child 因而只读源码并写分析报告，main 后续形成两套未整合输出并提前结束。
+- 对照 会话运行时 `control/spawn.rs` 只把 initial input 交给 child、status watcher 回传最终消息的边界，新 child
+  不再生成默认业务文件。显式 `output_files/output_refs/artifact_refs` 仍走既有锚定、授权与冲突锁；旧
+  durable task 的系统默认 ref 继续支持唯一 rebind 读取，但从 runner contract、completion wake 和父级
+  expected outputs 隐藏。没有增加任务质量机器闸，fresh r10 待部署。
+
 ## 2026-08-22 r8 child 续跑权威与共享批次启动占位（本地候选）
 
 - r8 中一个 child 因模型响应截断回到 `PENDING`，但 task-local `background_start.pid` 是仍承载兄弟
@@ -12,7 +25,8 @@
   SubAgentManager 精确加载，就在 root 模型调用前退役或无模型确认，不按 id 前缀或正文猜测。
 - runner 结果重新投影到 PENDING 时统一回收 exact run 的 launch record；共享宿主仍继续承载兄弟，不被
   终止或改写。session lease 结束后的既有 `_continue_source_worker_after_session` 会立即调用 canonical
-  `auto_start_orphan_run`，周期 orphan sweep 只保留为崩溃恢复兜底。focused 回归通过，fresh r9 尚待部署。
+  `auto_start_orphan_run`，周期 orphan sweep 只保留为崩溃恢复兜底。focused 回归、发布和 fresh r9 身份
+  验证已完成；PENDING 即时重派仍待自然真机样本。
 
 ## 2026-08-22 r7 真 TUI 投影通过，范围与验证软纪律候选
 
@@ -244,7 +258,7 @@
 - 没有增加 Audit 特例、角色分支或 prompt 关键词。缺 goal、权限、约束、输出合同或 workspace
   引用仍 fail-closed；相关 context bundle、runner、编排与 Audit 回归已通过。
 
-## 2026-07-29 系统默认 child 输出引用按 run 隔离
+## 2026-07-29 系统默认 child 输出引用按 run 隔离（历史方案，2026-08-22 已退出新任务主链）
 
 - 同一长任务分两批创建 child 时，旧系统默认引用会重复使用
   `work/child_outputs/01-*.md`、`02-*.md`。预创建冲突账本把第二批当成业务输出冲突；绕过后又可能由
@@ -257,6 +271,8 @@
 - 回归覆盖两批默认 child、同一 run 幂等重绑定、显式路径冲突不放宽以及 canonical state/artifact
   ref 一致性。完整 pytest 已运行到 100% 并退出 0；最终 MiniMax 长任务和发布证据见
   `PRODUCT_FACTS` 与 Gateway progress。
+- 2026-08-22 r9 证明这类内部默认槽会误导执行模型只写报告，故新 child 已不再生成；上述 rebind 与
+  冲突跳过仅保留旧 durable task 的显式迁移语义，且旧 ref 不再进入模型可见交付合同。
 
 ## 2026-07-29 后台续跑轮持有自己的执行租约
 
@@ -769,8 +785,8 @@ docs/audits/R7-three-tasks-20260611.md 与 REFACTORING_BACKLOG 同日条目：
   两个私有跳转层已删除，跨模块参数类统一放在 `agent_core/subagent/params.py`。
 - 这轮清理不新增工具、不新增硬门，只减少跨文件跳转和旧入口。
 - 父代理汇总子代理结果时，优先读取创建/树快照返回的 `child_output_read_order`、
-  `primary_artifact_refs` 和 `expected_outputs`。没有声明产物路径的子代理会获得
-  task-local `work/child_outputs/...` 默认产物路径；`items` 里各 child 声明的
+  `primary_artifact_refs` 和 `expected_outputs`。这里历史上曾给未声明产物的 child 自动生成
+  task-local `work/child_outputs/...`；该方案已于 2026-08-22 退出新任务主链。`items` 里各 child 声明的
   `output_files` / `output_refs` 依然各自独立。`work/agents/<run_id>/`
   继续作为内部状态、审计和恢复目录。这里记录的是 2026-07-29 的旧控制面；2026-08-21 起公开
   `inspect_agent_tree` / `wait` 已退休，父级由直属生命周期事件恢复并从上下文 refs 读取结果。
@@ -1042,11 +1058,11 @@ tasks/<日期>/<任务>/output，即用户拿走的东西），而非子代理�
 - 当前 gate 对 `completed/done` parent 额外读取与 Gateway 控制同源的 per-thread execution snapshot；
   exact live claim/policy 存在时允许 active child，执行态结束后仍按原规则取消。`interrupted` 不走该例外；
   execution state 不可读时 HOLD，不做破坏性取消。多个 child 共用一次 thread snapshot。
-- background continuation 的默认 child output ref 现在先用现有线程局部 task workspace；该值为空时读取
-  `task_attributes.run_workspace.task_root`。每个 child 得到 task-local、按 index/slug 分离的默认输出，
-  不再因后台线程局部变量缺失而没有声明产物位置。
+- 本节当时让 background continuation 的默认 child output ref 优先读取线程局部 task workspace，空时读取
+  `task_attributes.run_workspace.task_root`；2026-08-22 后新 child 已不再生成此内部产物声明，该逻辑只作
+  历史记录，不能作为当前运行语义。
 - 聚焦回归覆盖 completed+live allow、completed+expired cancel、interrupted cancel、unreadable hold、双 child
-  单次快照，以及只存在结构化 run workspace 的默认 output refs；完整本地门禁与 wheel 制品门均通过。
+  单次快照，以及当时只存在结构化 run workspace 的默认 output refs；完整本地门禁与 wheel 制品门均通过。
 - 1.10 真实反证使用两个隔离 Feishu owner。A 保持 `thread-74479991be1c4144` 与 persistent root
   `req_1784447361003_69208_1`，B 保持 `thread-2cadb8bf610a41ff` 与 persistent root
   `req_1784447360982_69208_0`；两边各只创建两个新 child，四个 child 都以精确 parent/root 进入 `DONE`。

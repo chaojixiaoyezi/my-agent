@@ -30,11 +30,12 @@ create/guidance/cancel/resolve 四个直属下级控制入口；普通 leaf 不�
 - 裸相对路径按当前可信 cwd/workspace 解析，例如从 `/root` 启动时 `abc/index.html` 就是
   `/root/abc/index.html`。只有显式 `output/report.md`、`work/notes.md` 才指向 task 内部 staging；绝对路径
   原样交给写边界裁决，不能改写成 task output 后返回成功。
-- 子代理没有声明产物路径时，运行时会给它分配 task-local `work/child_outputs/...`
-  默认产物路径，并在返回值里暴露 `child_output_read_order`。父代理汇总时优先读
-  `child_output_read_order` / `primary_artifact_refs` / `expected_outputs`，同时可参考
-  `primary_artifact_stats` 里的大小、行数和字符数判断是否需要补读或重派；不要直接翻
-  `work/agents/<run_id>/` 里的内部状态文件。
+- 子代理没有声明产物路径时不生成假业务文件；父代理从直属 lifecycle event 的 typed status、最终回复、
+  `final_report_ref` 和真实 artifact refs 接收结果。显式声明产物时，创建/树快照才会在
+  `child_output_read_order` / `primary_artifact_refs` / `expected_outputs` 暴露对应引用；同时可参考
+  `primary_artifact_stats` 的大小、行数和字符数决定是否补读或重派。不要直接翻
+  `work/agents/<run_id>/` 里的内部状态文件。历史 `system_default_output_ref` 只作恢复迁移，不进入这些
+  模型可见结果字段。
 - 替换旧子代理时使用 `replacement_for_run_ids`，让系统记录结构化接管关系。
 - 模型侧角色索引只展示角色 id、中文说明和能力标签；模板文件路径只留给调试接口，不进入 prompt。
 - `role` 选择角色模板；`agent_name` 只用于人类显示和点名，不参与机器角色判断。

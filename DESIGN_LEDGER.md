@@ -47,6 +47,10 @@
   本 child 的断点，不得把它登记成 root `BackgroundMainAgentRuntime` 的普通任务；后台来源若精确解析到
   child task，必须在模型调用前关闭并交回 child runner。共享 batch 进程只承载多个 runner，不拥有各 run
   的启动租约；单个 run 返回 `PENDING` 后立即回收其 task-local launch record，再从同一 run 续派。
+- 子代理交付合同只来自用户/父代理显式 `output_files` / `output_refs` / artifact refs。没有声明时不生成
+  内部 Markdown 槽冒充业务产物；直属完成事件以 typed status、child 最终回复和系统 `final_report_ref`
+  回到父级。旧 durable task 的 `system_default_output_ref=true` 继续可迁移读取，但在所有模型可见合同与
+  expected outputs 投影中隐藏，不能影响新执行。
 - 会话运行时 式 cwd 与运行台账严格分离：Gateway/会话及其所有后代的普通相对路径统一从用户启动时的项目
   cwd 解析；隐藏 task root 只保存状态，只有显式 `work/...`、`output/...` 才进入内部任务命名空间。
   `allowed_write_roots` 只决定能否写，不能反向选择 cwd；只有宿主写入的 `execution_cwd` 可覆盖工具

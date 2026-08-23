@@ -4,11 +4,16 @@
 
 最近收口重点：
 
+- 2026-08-22 Prompt 4 r9 已在真实 TUI 证明 `93e18f6` 的 child 身份所有权：5 名 child 均使用 exact
+  thread/parent，未出现 child `ordinary_task_resume`、root/child 混合身份或双执行器。r9 同时暴露
+  系统默认 Markdown 被 runner 冒充“用户业务产物”，让编码 child 只写分析报告。当前本地候选已按 会话运行时
+  spawn/final-message watcher 删除新任务的假文件合同，并让历史标记只留在 durable 迁移层，不进入模型
+  可见 contract、完成通知或 expected outputs；真实显式输出规则不变。发布与 r10 见 STATUS/ROADMAP。
 - 2026-08-22 Prompt 4 r8 暴露 child 断点被 root 后台错误接管，以及共享批次 PID 阻塞单个 PENDING
   child 重试。当前本地候选已对照 会话运行时 的独立 child ThreadId/session 与精确父级 watcher：task-local
   finalize 不再登记 `ordinary_task_resume`；绑定 canonical child task 的后台来源在 root 模型前退役或
   无模型确认；每次 runner 结果回到 PENDING 都只释放 exact run 的启动占位，再沿既有 runner auto-start
-  续派。focused 回归已通过；推送、部署与 r9 结论仍以 `STATUS.md` / `docs/ROADMAP.md` 为准。
+  续派。focused 回归、推送与部署已完成；r9 结论以 `STATUS.md` / `docs/ROADMAP.md` 为准。
 - 2026-08-22 Prompt 4 r7 已在真实 TUI 证明 r6 的四项修复：isolated 用户回执不再泄露 thinking 或覆盖
   main context，单项补派连续编号为 worker-6/7，Todo 显示真实完成/运行数且四行只作视窗。该轮同时暴露
   新的通用候选：main 把完整任务降成欢迎页空壳，安装/启动失败后删除有效失败测试再误报完成。当前实现

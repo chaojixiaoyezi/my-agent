@@ -1,5 +1,25 @@
 # STATUS
 
+## 2026-08-22 Prompt 4 r9：身份收口通过，默认 Markdown 假合同诱导 child 只写报告（本地修复候选）
+
+- `93e18f6` 已通过本地严格 gate、推送并部署到 `.7` 唯一 Gateway。tmux
+  `dsh-p4-lazygit-r9-ea91639` 在 fresh cwd 对 `jesseduffield/lazygit@ea916395` 只输入一次原样 Prompt 4；
+  当前 GitHub API 为 81,554 stars，本轮本地口径为 957 个生产 Go 文件、91,015 行功能代码、118 个测试
+  文件、368 个测试函数。
+- 首批 4 个 child 与补派 worker-5 都保持 exact `agent_thread_id` / parent thread；没有 child
+  `ordinary_task_resume`、混合 root/child 身份或双执行器。r8 的 P0 身份问题通过真机；本轮没有 child
+  重新进入 PENDING，因此“共享 PID 下即时续派”仍只有合同回归、尚无 fresh TUI 正向触发证据。
+- r9 仍自然误报完成。首批模型未声明 `output_files` 时，编排器替每个 child 生成
+  `work/child_outputs/*.md` 并标为“用户要求的业务产物”；两名实现职责 child 因而只读 Go 后写分析报告，
+  没写功能代码。后续显式路径 child 又分别写入 `lazysync` 和 `python_lazygit` 两套目录，main 在 Todo
+  6/12 时宣称完成。
+- 只读产物审计：两套产物合计约 4,970 行生产 Python、16 个测试定义；正常 Python 环境因缺 `textual`
+  无法收集测试。隐藏 task venv 的 7 项小测试虽然通过，但按最终说明启动真实产品时在
+  `Stylesheet.parse()` 抛 `TypeError`，没有可用 TUI；进程还错误退出 0，不能把 exit code 当启动成功。
+- 对照 会话运行时 spawn/watcher 后，当前候选删除新 child 的系统默认业务输出引用；真实显式输出仍是唯一
+  文件合同和冲突锁。历史默认引用只保留 durable 迁移读取，从 runner contract、完成通知和父级
+  `child_result_index.expected_outputs` 隐藏。这里不新增 LOC/Todo/测试数量机器验收；fresh r10 待部署验证。
+
 ## 2026-08-22 Prompt 4 r8：child 身份串入主代理与共享 PID 阻塞重试（本地修复候选）
 
 - `b3c2daa` 已部署到 `.7` 唯一 Gateway；tmux `dsh-p4-lazygit-r8-ea91639` 在干净 cwd 对
@@ -13,7 +33,8 @@
   finalize 不再登记主代理后台续轮；后台 policy/wake 的 task id 若属于 canonical child，会在模型调用前
   退役或无模型确认；任何 runner 结果重新落为 PENDING 都只回收该 run 的启动占位，使既有即时 auto-start
   不再受共享宿主 PID 阻塞。这里没有恢复机器质量验收，也没有从任务文案或 id 前缀猜身份。
-- 直接相关 focused 回归已通过；文档、严格 gate、推送、单 Gateway 部署与 fresh r9 真 TUI 仍待完成。
+- 直接相关 focused 回归、本地严格 gate、推送和单 Gateway 部署已完成；fresh r9 已证明身份不再串线，
+  但本轮未自然触发 PENDING 重派，剩余证据和新问题见上节。
 
 ## 2026-08-22 Prompt 4 r7：TUI 投影通过，弱化测试后误报完整（本地验证纪律候选）
 

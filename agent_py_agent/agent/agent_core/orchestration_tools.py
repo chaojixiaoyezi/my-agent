@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..capability.skill_snapshot import SkillSnapshotError
@@ -79,7 +78,6 @@ from .orchestration.tools.cancel import (
 from .orchestration.tools.capability import (
     ResolveCapabilityRequestsTool as ResolveCapabilityRequestsTool,
 )
-from .orchestration.work_scope import add_work_scope_key
 from .orchestration.write_guard import (
     ExternalWriteTargetRequest,
     external_write_target_error,
@@ -661,7 +659,7 @@ def _indexed_item_run_params(agent: SimpleAgent, items: list[CreateSubagentItem]
     for offset, run_params in enumerate(prepared):
         index = start_index + offset
         indexed = _indexed_item_params(run_params, index=index, total=len(items))
-        run_params_by_item.append(_with_default_child_output_ref(agent, indexed, index=index))
+        run_params_by_item.append(indexed)
     return run_params_by_item
 
 
@@ -1058,55 +1056,3 @@ def _subagent_quota_result(
         error_code="SUBAGENT_CAPACITY_EXCEEDED",
         effect_outcome="not_started",
     )
-
-
-def _with_default_child_output_ref(agent: object, run_params: CreateRunParams, *, index: int) -> CreateRunParams:
-    attrs = dict(run_params.attributes or {})
-    if _has_structured_output_ref(attrs):
-        return run_params
-    task_root = _current_task_root(agent)
-    if not task_root:
-        return run_params
-    default_ref = str(Path(task_root) / "work" / "child_outputs" / f"{index:02d}-{_output_slug(run_params)}.md")
-    attrs["output_files"] = [default_ref]
-    attrs["system_default_output_ref"] = True
-    add_work_scope_key(attrs)
-    return CreateRunParams(**{**run_params.__dict__, "attributes": attrs})
-
-
-def _has_structured_output_ref(attrs: dict[str, object]) -> bool:
-    for key in ("output_files", "output_refs", "artifact_refs"):
-        value = attrs.get(key)
-        if isinstance(value, list) and any(str(item or "").strip() for item in value):
-            return True
-    return False
-
-
-def _current_task_root(agent: object) -> str:
-    raw = getattr(agent, "_current_run_task_workspace", "")
-    if isinstance(raw, str | Path) and str(raw).strip():
-        return str(raw).strip()
-    current = getattr(agent, "_current_run_params", None)
-    attrs = getattr(current, "task_attributes", None)
-    workspace = attrs.get("run_workspace") if isinstance(attrs, dict) else None
-    if not isinstance(workspace, dict):
-        return ""
-    return str(workspace.get("task_root") or "").strip()
-
-
-def _output_slug(run_params: CreateRunParams) -> str:
-    base = str(run_params.agent_name or run_params.role or "child").strip()
-    chars: list[str] = []
-    last_dash = False
-    for char in base:
-        replacement, last_dash = _slug_char(char, last_dash)
-        if replacement:
-            chars.append(replacement)
-    slug = "".join(chars).strip("-_").lower()
-    return (slug or "child")[:80]
-
-
-def _slug_char(char: str, last_dash: bool) -> tuple[str, bool]:
-    if char.isalnum() or char in {"_", "-"}:
-        return char, False
-    return ("", True) if last_dash else ("-", True)

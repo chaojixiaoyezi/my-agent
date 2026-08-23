@@ -79,15 +79,16 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   由执行模型和父代理结合真实工具结果判断。
 - 这个边界适用于所有子代理，不根据 `/audit`、任务正文或角色名称分支，也不放宽工具权限。
 
-## 2026-07-29 默认输出路径结构
+## 2026-08-22 显式产物与完成交接
 
 - 模型或用户显式给出的输出引用保持原值，继续参加 shared-output 冲突检查。
-- 编排器为了让 child 回传结果而生成的默认引用带
-  `system_default_output_ref=true`。run id 产生后，唯一的 output-ref rebind 入口把它改成
-  `work/child_outputs/<run_id>/<slot>-<slug>.md`；canonical state、runner context 和父级结果读取都使用
-  这个真实引用。
-- 批量创建前还没有 run id，因此预检查不把内部默认槽位当成跨 run 业务锁。真正的用户文件、
-  artifact 和显式共享引用不享受该例外。该规则只读结构化来源标记，不解析 goal、agent 名或文件内容。
+- 未显式声明输出的 child 不生成业务文件合同；typed status、最终回复、系统
+  `agent_run_final_report_ref` 与真实 artifact refs 通过直属 lifecycle wake 交给父级，和 会话运行时 child
+  final message watcher 同义。模型不需要为了“交差”另写一份 Markdown。
+- 旧 durable task 可能仍带 `system_default_output_ref=true` 和
+  `work/child_outputs/<run_id>/<slot>-<slug>.md`。唯一 rebind 读取入口继续保留，避免恢复时路径相撞；但
+  context bundle、完成信封和父级 `expected_outputs` 全部隐藏该内部 ref。真正的用户文件、artifact 和
+  显式共享引用不享受隐藏或冲突例外。
 
 ## 2026-07-29 后台 claim 与当前执行轮
 

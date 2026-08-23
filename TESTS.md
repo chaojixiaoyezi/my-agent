@@ -52,6 +52,15 @@ session 退出后既有 `auto_start_orphan_run` 应立即续派同一个 run。�
 也不能把 root 工具授给 child。fresh r9 仍只输入一次原样 Prompt 4，并核对不存在
 `ordinary_task_resume(task_id=child)`、不存在 main/child 双执行器，PENDING child 能自行续跑。
 
+Prompt 4 r9 使用 `93e18f6`、`.7` 唯一 Gateway、tmux `dsh-p4-lazygit-r9-ea91639` 和同一固定源码，
+仍只输入一次原样 prompt。5 名 child 的 thread/parent/runner 身份正确，未出现 child
+`ordinary_task_resume` 或双执行器；但没有自然 PENDING 样本。新失败是未声明 `output_files` 的 child 被
+运行时强塞 task-local Markdown，runner 文件合同又称其为“用户要求的业务产物”，两名编码 child 只交
+分析报告。产物最终分裂为两套约 4,970 行 Python/16 个测试，普通环境不能收集，隐藏 venv 启动真实 TUI
+在 `Stylesheet.parse()` 抛 `TypeError`。r10 必须证明：未声明输出的 create payload、context bundle、
+completion wake 和 child result index 都没有系统默认业务 ref；child 仍通过最终消息与
+`final_report_ref` 完成交接；显式输出路径继续锚定、授权和锁冲突；测试者仍不追加推动消息或修改产物。
+
 `931ee20` 在 `.7` 唯一 Gateway 上以 tmux `dsh-p3-research-931ee20-verify` 执行第 3 条原样任务，prompt
 只输入一次。4 个 child 的短职责、实时 context 总 token、一次 attempt 自然 DONE 和 Todo 打标均正确；
 但 main 只收到不含最终正文/报告 ref 的生命周期通知，猜测 `research_reports/` 后反问用户，未继续第二批，

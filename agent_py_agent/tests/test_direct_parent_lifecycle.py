@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """Recursive parent-child lifecycle uses durable events instead of polling."""
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -331,6 +332,60 @@ def test_root_child_wake_carries_bounded_completion_message_and_exact_refs(tmp_p
     assert metadata["final_report_ref"] == str(final_report)
     assert metadata["declared_output_refs"] == [str(artifact)]
     assert list(signal.evidence_refs) == [str(final_report), str(artifact)]
+
+
+def test_root_child_wake_hides_legacy_system_default_output_ref(tmp_path) -> None:
+    """旧版内部报告槽只留在 durable state，完成通知只给父级真实 final report。"""
+    manager = SubAgentManager(tmp_path / "subagents")
+    child = manager.create_run(
+        goal="实现项目功能",
+        thought="执行",
+        plan=["编码", "测试"],
+        role="worker",
+        parent_id="task-root",
+        root_id="task-root",
+    )
+    legacy_ref = tmp_path / "task" / "work" / "child_outputs" / "legacy.md"
+    child.status = "DONE"
+    child.result = "功能实现完成。"
+    child.attributes = {
+        "output_files": [str(legacy_ref)],
+        "system_default_output_ref": True,
+    }
+    manager.save(child)
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-legacy",
+            "channel": "internal",
+            "channel_conversation_id": "thread-legacy",
+            "channel_user_id": "user-legacy",
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": child.id,
+            "goal": child.goal,
+            "status": "active",
+        }
+    )
+    manager.conversation_store = store
+    result = SimpleNamespace(
+        status="DONE",
+        run_id=child.id,
+        dry_run=False,
+        turn_end_reason="completed",
+        result_json="",
+        message="done",
+    )
+
+    notify_parent_on_runner_result(manager, child, result, {})
+
+    signal = store.pending_wake_signals()[0]
+    assert signal.metadata["declared_output_refs"] == []
+    assert list(signal.evidence_refs) == [str(child.agent_run_final_report_md)]
+    assert str(legacy_ref) not in json.dumps(signal.metadata, ensure_ascii=False)
 
 
 def test_completion_prose_cannot_override_typed_failed_status() -> None:
