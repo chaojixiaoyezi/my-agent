@@ -312,6 +312,46 @@ def test_same_logical_model_turn_preserves_distinct_physical_attempts() -> None:
     }
 
 
+def test_isolated_presentation_call_keeps_accounting_but_not_context_projection() -> None:
+    class _ContextSink:
+        def __init__(self) -> None:
+            self.rows: list[dict[str, object]] = []
+
+        def write_context_usage(self, usage: dict[str, object]) -> bool:
+            self.rows.append(dict(usage))
+            return True
+
+    sink = _ContextSink()
+    agent = SimpleNamespace(
+        backend=SimpleNamespace(
+            name="test-backend",
+            model_name="test-model",
+            max_tokens=128,
+        ),
+        config=SimpleNamespace(request_timeout=10),
+    )
+    request = SimpleNamespace(
+        agent=agent,
+        prompt="只生成一句用户回执",
+        tool_rounds=0,
+        params=SimpleNamespace(
+            request_id="presentation-1",
+            run_id="run-1",
+            task_id="task-1",
+            context_scope="isolated",
+            tool_protocol_snapshot=make_test_protocol_snapshot(
+                run_id="run-1", source_protocol="text"
+            ),
+            effective_on_chunk=sink,
+        ),
+    )
+
+    ledger, call_id, _ = start_model_call_record(request)
+
+    assert any(record.call_id == call_id for record in ledger.records())
+    assert sink.rows == []
+
+
 def test_summary_counts_all_calls_after_detail_retention_limit() -> None:
     agent = SimpleNamespace()
     ledger = ModelCallLedger(options=ModelCallLedgerOptions(max_records=4))

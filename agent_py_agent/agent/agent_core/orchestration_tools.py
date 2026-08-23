@@ -113,7 +113,16 @@ class ValidateSingleGoalRequest:
     allowed_tools: list[str] | None
 
 
-def _indexed_item_params(run_params: CreateRunParams, *, index: int, total: int) -> CreateRunParams:
+# LLM: Every system-named item-shaped request, including a one-item batch,
+# consumes the same parent-scoped display ordinal. User-authored single-item
+# names remain unchanged, matching the existing explicit-name contract.
+# 函数用途: 给一条批量派工项补连续编号；单项返工只改系统默认名，不改用户亲自取的名字。
+def _indexed_item_params(
+    run_params: CreateRunParams,
+    *,
+    index: int,
+    total: int,
+) -> CreateRunParams:
     task_name = _indexed_agent_name(
         run_params.agent_name,
         role=run_params.role,
@@ -140,15 +149,23 @@ def _indexed_single_run_params(agent: SimpleAgent, run_params: CreateRunParams) 
 
 def _indexed_agent_name(agent_name: str, *, role: str, index: int, require_index: bool = False) -> str:
     name = str(agent_name or "").strip()
-    if _needs_system_lineage_name(name):
+    if _needs_system_lineage_name(name, role=role):
         return f"agent-d{_DEFAULT_DEPTH}-{_role_suffix(role)}-{index}"
     if require_index and not agent_name_has_trailing_identifier(name):
         return f"{name}-{index}"
     return name
 
 
-def _needs_system_lineage_name(agent_name: str) -> bool:
-    return is_placeholder_agent_name(agent_name)
+# LLM: create_run_params may already have expanded an omitted name into the
+# unnumbered top-level lineage stem; it is still system-owned, not an explicit
+# display name. Do not broaden this check to arbitrary agent-d* custom names.
+# 函数用途: 识别空白/占位名以及系统刚生成但尚未编号的第一层名称。
+def _needs_system_lineage_name(agent_name: str, *, role: str) -> bool:
+    name = str(agent_name or "").strip()
+    if is_placeholder_agent_name(name):
+        return True
+    expected = f"agent-d{_DEFAULT_DEPTH}-{_role_suffix(role)}"
+    return name.casefold() == expected.casefold()
 
 
 def _role_suffix(role: str) -> str:

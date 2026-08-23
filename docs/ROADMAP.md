@@ -187,14 +187,22 @@ r5 已在全新目录与 tmux 中只投递一次原样 Prompt 4：7 个 child �
 仍 final，产物只是 3,210 行 Pre-Alpha 子集。现场同时出现三套同义 Todo、两个单独补派 worker 同名。
 这证明下一层问题是模型执行上下文与 typed 计划绑定，而不是应该恢复机器质量验收。
 
-当前本地候选对照 会话运行时 `gpt_5_2_prompt.md` 的 Autonomy and Persistence、orchestrator policy，并适配现有
-唯一 task ledger：YAML/dataclass 默认提示完全一致且删除 Go 专项骨架；主/子/wake 共用“已知缺口且仍
-能推进就继续”的软纪律；`covers` exact id 同时绑定普通 Todo 与 coverage；单个、批量、递归 child 名称
-连续编号。宿主仍不解析自然语言、不根据 open Todo 自动重开模型、不做机器完成验收。
+`b7d513c` 已推送并部署后，r6 在 tmux `dsh-p4-lazygit-r6-ea91639` 对固定
+`jesseduffield/lazygit@ea916395` 只投递一次原样 Prompt 4。10 名 child 全部自然 `DONE`，其中 3 名真实
+Compact 一次；main 等首批结束后又自主补派修复/测试 child，Todo 最终全部打钩并自然 `DONE`，没有用户
+发送“继续”。这证明软持续纪律、事件唤醒与 Compact 主链有进步，但任务仍判失败：三套并列输出未整合，
+canonical Python 产物只有 9,543 行功能代码、55 个空桩，`App.run()` 仍是 `pass`，8 项所谓集成测试全部
+无条件 skip，打包配置还漏掉核心模块；远未复刻原项目的 91,175 行功能代码和 368 个测试函数。
 
-待做：完成联合 gate 后提交并部署到 `.7` 唯一 Gateway；在新的干净项目目录与新 tmux r6 中再次只投递
-一次原样 Prompt 4，重点验收一份稳定 Todo、派工时 typed covers、child 完成原位打钩、后续单个补派编号
-连续，以及 main 在已知缺口且仍有工具/容量时继续派工而不是列清单收尾。该真测不得由测试者旁路修改项目。
+r6 同时抓到四个与样例无关的展示/身份缺口：用户回执的 `isolated` 模型轮把私有 thinking 显示成主代理
+思考，并把真实 main context 从 74.4k 覆盖成约 9.7k；单项 `items` 返工 child 退回无编号系统名；Todo
+标题 `4/8` 只是四行视窗却像完成数。当前候选对照 会话运行时 active-turn reasoning 投影与 终端交互
+`TaskListV2`：isolated 调用仍记成本但不投影 thinking/context；系统单项批次沿 sibling 序号；Todo 标题改为
+`完成 X/Y · 进行中 Z`，四行窗口与完成率彻底分开。200 项 focused 回归通过。
+
+待做：完成发布严格 gate 后提交并部署到 `.7` 唯一 Gateway；在新的干净项目目录与新 tmux r7 中再次只
+投递一次原样 Prompt 4，真机核对上述四处投影，并继续按原项目代码/测试/可运行性审计产物。open Todo
+仍不升级成宿主机器质量验收；测试者不得旁路修改被测项目。
 
 ### 用户直控子代理的共享控制面
 

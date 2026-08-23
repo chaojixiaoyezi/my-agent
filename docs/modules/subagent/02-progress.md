@@ -1,5 +1,18 @@
 # Subagent Progress
 
+## 2026-08-22 r6 展示轮隔离、单项补派编号与 Todo 计数（本地候选）
+
+- r6 的 10 名 child 全部自然 DONE，3 名各 Compact 一次，main 也在首批完成后自主补派并收口；但只读
+  产物审计仍有 55 个空桩、`App.run()` 为 `pass`、8 项测试全 skip，因此生命周期完成不等于任务质量通过。
+- 用户可见回执使用 `context_scope=isolated` 的零工具短轮。它现在仍写 model-call/cost ledger，但不会再把
+  provider thinking 送进 TUI，也不会把自己的小上下文快照写进 main/child activity；真实 task turn 的
+  thinking/context/Compact 投影保持原路径。
+- `items=[一项]` 也会为系统生成的 `agent-d1-<role>` 分配 exact parent 下一个 sibling ordinal；显式
+  自定义名不改。显式幂等请求只忽略系统 ordinal 差异，不放宽 parent、role、写区或合同 identity。
+- Todo 仍默认选四条状态窗口，但标题改为 canonical `完成 X/Y · 进行中 Z`，不再把可见四行写成
+  `4/Y`。对照 会话运行时 reasoning active-item 投影和 终端交互 `TaskListV2` 后，200 项 focused 回归通过；
+  r7 仍须在 `.7` 唯一 Gateway 的 fresh TUI 原样 Prompt 4 中验证。
+
 ## 2026-08-22 可恢复工具失败不再由宿主按次数终止 child（本地候选）
 
 - lazygit 换语言复刻 r4 中，worker-3 与 sibling 争用项目根写锁，前部 13 次 `write_file` 得到

@@ -975,6 +975,17 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 系统生成的 display name 是未来 TUI/Web 精确控制旁边的人类可读稳定标识：同一 exact parent 下，批量、
   单个补派以及递归 child 都必须沿全部历史直属 sibling 连续编号；显式自定义名保持原样，run_id 仍是唯一
   机器身份。Prompt 4 r5 两个单独补派 worker 都显示 `agent-d1-worker`，确认旧编号器只覆盖批量入口。
+- Prompt 4 r6 进一步证明 `items` 长度为 1 也仍是批次语义：`create_run_params` 已把省略名展开成无编号
+  `agent-d1-<role>`，展示层必须把这个精确系统 stem 继续编号；不能把任意 `agent-d*` 自定义名都改写。
+  显式幂等合同比较结构化 parent/role/scope/identity，系统 ordinal 只作展示、不应让同一幂等请求失配；
+  用户自定义名仍要求完全相同。
+- `context_scope=isolated` 是表达层的 typed 边界，不是另一个可观察 task turn。对照 会话运行时 只把当前 active
+  reasoning item 交给 TUI 的做法，该调用仍进入 model-call/cost ledger，但其 provider thinking、context
+  usage 和 child activity 均不得覆盖 main/child 的 durable 投影。r6 的 74.4k→9.7k 且 `compact 0`
+  正是表达轮污染，不是一次真实 Compact。
+- Todo 标题只从 canonical typed status 计算 `完成 X/Y` 与可选 `进行中 Z`；四行 collapsed window 只在
+  有隐藏项时显示 `Ctrl+T 展开`，不得再用 `4/8` 表示可见行数。该选择对照 终端交互 `TaskListV2` 的
+  done/in-progress/pending 分组，同时保留本项目固定四行窗口，不写回账本。
 
 ## 2026-08-22 主/子/孙代理统一 Conversation Compact
 

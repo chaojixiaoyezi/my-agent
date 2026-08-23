@@ -915,6 +915,7 @@ def test_todo_panel_renders_items_with_checkmarks_and_shared_spinner() -> None:
                 {"id": "a", "title": "阅读项目A", "status": "done"},
                 {"id": "b", "title": "分析模块", "status": "in_progress"},
                 {"id": "c", "title": "写报告", "status": "pending"},
+                {"id": "d", "title": "取消旧方案", "status": "skipped"},
             ]
         },
     )
@@ -923,10 +924,12 @@ def test_todo_panel_renders_items_with_checkmarks_and_shared_spinner() -> None:
     text = "\n".join(fragments_text(line) for line in first)
     second_text = "\n".join(fragments_text(line) for line in second)
     assert "任务清单" in text
+    assert "完成 1/4 · 进行中 1" in text
     assert "☑ 阅读项目A" in text
     assert "✻ 分析模块" in text
     assert "✢ 分析模块" in second_text
     assert "□ 写报告" in text
+    assert "➖ 取消旧方案" in text
 
 
 def test_todo_panel_collapses_to_status_window_and_ctrl_t_expands() -> None:
@@ -960,14 +963,14 @@ def test_todo_panel_collapses_to_status_window_and_ctrl_t_expands() -> None:
     expanded_text = "\n".join(fragments_text(line) for line in expanded)
 
     assert len(collapsed) == 5  # 标题 + 4 条任务
-    assert "4/7（Ctrl+T 展开）" in collapsed_text
+    assert "完成 2/7 · 进行中 2（Ctrl+T 展开）" in collapsed_text
     assert "上一个完成" in collapsed_text
     assert "并行任务甲" in collapsed_text
     assert "并行任务乙" in collapsed_text
     assert "下一个待办" in collapsed_text
     assert "更早完成" not in collapsed_text
     assert len(expanded) == 8
-    assert "Ctrl+T 收起" in expanded_text
+    assert "完成 2/7 · 进行中 2（Ctrl+T 收起）" in expanded_text
     assert "更早完成" in expanded_text
 
 

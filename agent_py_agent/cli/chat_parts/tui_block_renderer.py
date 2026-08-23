@@ -1302,9 +1302,9 @@ def _format_compact_number(value: int) -> str:
     return f"{number / 1_000_000_000:.1f}b"
 
 
-# LLM: Todo is a read-only projection. The collapsed view is a four-item window
-# around typed running work; Ctrl-T changes display density only, never ledger order/status.
-# 函数用途: 渲染任务清单；运行项使用统一动画，默认只展示最有用的四条，Ctrl-T 可展开全部。
+# LLM: Todo is a read-only projection. The header counts typed completed/running
+# states while the collapsed view is only a four-item window; neither changes ledger state.
+# 函数用途: 渲染真实完成/运行数和四行任务窗口；Ctrl-T 只负责展开或收起全部任务。
 def _render_todo(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedLine, ...]:
     items = block.metadata.get("items")
     if not isinstance(items, list) or not items:
@@ -1314,11 +1314,23 @@ def _render_todo(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedL
         public_items,
         expanded=context.todos_expanded,
     )
-    title = "📋 任务清单"
+    completed_count = sum(
+        1
+        for item in public_items
+        if str(item.get("status") or "").strip().lower() == "done"
+    )
+    in_progress_count = sum(
+        1
+        for item in public_items
+        if str(item.get("status") or "").strip().lower() == "in_progress"
+    )
+    title = f"📋 任务清单 · 完成 {completed_count}/{len(public_items)}"
+    if in_progress_count:
+        title += f" · 进行中 {in_progress_count}"
     if hidden_count:
-        title += f" · {len(visible_items)}/{len(public_items)}（Ctrl+T 展开）"
+        title += "（Ctrl+T 展开）"
     elif context.todos_expanded and len(public_items) > TODO_COLLAPSED_MAX_ITEMS:
-        title += " · Ctrl+T 收起"
+        title += "（Ctrl+T 收起）"
     lines: list[FormattedLine] = [
         (("class:tui-todo-title", _truncate_text(title, context.width)),)
     ]

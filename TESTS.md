@@ -28,13 +28,13 @@ Gateway 可以并行，但不能作为“单 Gateway 多客户端”验收的替
 补代码、发技术推动指令或修改产物。单测、fake、renderer snapshot 和静态 gate 只作上线前护栏，不能替代
 上述真实 TUI 验收。
 
-Prompt 4 r5 使用 `.7` 唯一 Gateway、MiniMax-M2.7、tmux `dsh-p4-lazygit-r5-ea91639` 和固定
-`jesseduffield/lazygit@ea916395`，只输入一次原样 prompt。7 个 child 全部自然 DONE，证明可恢复工具失败
-不会再误杀；但 main 在一份重建为 18 项且只有 4 项完成的计划上过早 final，产物仅 3,210 行产品代码、
-448 行测试并明确缺少多项核心能力。因此 r5 判失败。部署候选后的 r6 除产物审计外，必须额外证明：
-YAML 与 dataclass 的有效默认 prompt 完全一致且不含语言专项骨架；一个任务只维护一组 stable Todo ids；
-派工用 `covers` 绑定普通 Todo/coverage exact ids，child DONE 后原位打钩；单个补派与批量/递归名称连续；
-已知仍有缺口且工具或 child 容量可用时，main 继续协调。open Todo 仍不得成为宿主自动续轮或质量验收门。
+Prompt 4 r6 使用 `.7` 唯一 Gateway、MiniMax-M2.7、tmux `dsh-p4-lazygit-r6-ea91639` 和固定
+`jesseduffield/lazygit@ea916395`，只输入一次原样 prompt。10 个 child 全部自然 DONE、3 个真实 Compact，
+main 自主补派并把 Todo 全部打钩；但 canonical 产物只有 9,543 行、55 个空桩、5 个测试定义，8 项集成
+测试全部 skip，另有两套未整合输出，因此 r6 仍判失败。部署候选后的 r7 除继续做原版代码/测试/运行审计，
+还必须证明：isolated 用户回执不出现 thinking、不改变 main/child context；真实任务 thinking 仍连续可见；
+一项 `items` 的系统 child 沿 sibling 历史编号；Todo 标题显示真实 `完成 X/Y · 进行中 Z`，四行折叠不冒充
+完成数。open Todo 仍不得成为宿主自动续轮或质量验收门。
 
 `931ee20` 在 `.7` 唯一 Gateway 上以 tmux `dsh-p3-research-931ee20-verify` 执行第 3 条原样任务，prompt
 只输入一次。4 个 child 的短职责、实时 context 总 token、一次 attempt 自然 DONE 和 Todo 打标均正确；

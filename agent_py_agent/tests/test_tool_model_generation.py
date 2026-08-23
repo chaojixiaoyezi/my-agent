@@ -801,3 +801,28 @@ def test_auto_tool_choice_turn_keeps_original_request_shape():
     backend = _KwargRecordingBackend()
     _do_generate_with_tool_choice(backend, ToolChoice.auto("ordinary_tool_turn"))
     assert "thinking_disabled" not in backend.seen[-1]
+
+
+def test_isolated_presentation_turn_does_not_stream_thinking_delta():
+    from agent_py_agent.agent.agent_core.tool_model_generation import _do_backend_generate
+    from agent_py_agent.agent.tooling.runtime_contracts import ToolChoice
+
+    class Sink:
+        def write_thinking_delta(self, _text: str) -> None:
+            raise AssertionError("presentation reasoning must stay private")
+
+    backend = _KwargRecordingBackend()
+    state = SimpleNamespace(
+        tools=[],
+        tool_choice=ToolChoice.auto("presentation"),
+        messages=None,
+        on_chunk=None,
+        params=SimpleNamespace(
+            context_scope="isolated",
+            effective_on_chunk=Sink(),
+        ),
+    )
+
+    _do_backend_generate(backend, "prompt", state)
+
+    assert "on_thinking_delta" not in backend.seen[-1]

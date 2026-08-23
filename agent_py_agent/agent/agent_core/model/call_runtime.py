@@ -79,20 +79,31 @@ def start_model_call_record(request: object) -> tuple[ModelCallLedger, str, obje
     return ledger, call_id, estimate
 
 
-# LLM: Live context display is an optional typed sink capability. Missing capabilities stay
-# silent; raw prompts, messages, guidance, and tool schemas must never be passed to the sink.
-# 函数用途: 在每次真实模型调用开始前，把无正文的 token 构成快照送给支持实时状态的客户端。
+# LLM: Live context display is an optional typed sink capability for durable
+# task turns only. Missing/isolated capabilities stay silent; raw prompts,
+# messages, guidance, and tool schemas must never be passed to the sink.
+# 函数用途: 在真实任务调用开始前投影无正文 token 快照；临时表达轮只计费、不覆盖任务界面。
 def _publish_model_context_usage(
     request: object,
     usage: dict[str, object],
 ) -> bool:
-    _publish_subagent_context_usage(request, usage)
     params = getattr(request, "params", None)
+    if not _context_usage_projection_enabled(params):
+        return False
+    _publish_subagent_context_usage(request, usage)
     sink = getattr(params, "effective_on_chunk", None)
     writer = getattr(sink, "write_context_usage", None)
     if not callable(writer):
         return False
     return writer(usage) is not False
+
+
+# LLM: Isolated no-save model calls produce user-facing wording only. Their
+# tiny prompt budget remains in cost/accounting ledgers but cannot replace the
+# active task's context-usage projection in TUI/Web or child state.
+# 函数用途: 阻止临时表达轮把真实主任务的上下文数字覆盖成一个很小的假读数。
+def _context_usage_projection_enabled(params: object) -> bool:
+    return str(getattr(params, "context_scope", "") or "").strip().lower() != "isolated"
 
 
 # LLM: A task-local runner has no foreground TUI sink, so its provider-visible

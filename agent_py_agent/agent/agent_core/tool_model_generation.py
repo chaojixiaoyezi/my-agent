@@ -460,6 +460,8 @@ def _publish_provider_thinking(
     state: _ModelGenerationState,
     response: object,
 ) -> None:
+    if not _provider_thinking_projection_enabled(request.params):
+        return
     sink = getattr(request.params.effective_on_chunk, "write_thinking", None)
     if not callable(sink):
         return
@@ -478,6 +480,14 @@ def _publish_provider_thinking(
         text,
         duration_seconds=max(0.0, time.monotonic() - state.started_at),
     )
+
+
+# LLM: Only an actual task turn may project provider reasoning. The structured
+# isolated scope marks a no-save presentation round whose private drafting must
+# never appear as main-agent thinking or alter task state.
+# 函数用途: 判断这次模型调用的思考是否属于用户正在观察的真实执行轮。
+def _provider_thinking_projection_enabled(params: object) -> bool:
+    return str(getattr(params, "context_scope", "") or "").strip().lower() != "isolated"
 
 
 def _recover_unclosed_long_write_response(request: ModelGenerateParams, response):
@@ -749,10 +759,15 @@ def _publish_transport_retry(sink_owner: object, event: dict[str, object]) -> No
 
 def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
     # text 协议(tools/messages 均为 None)保持原调用形态，不传新关键字，旁路/伪后端零改动。
-    thinking_sink = getattr(
-        getattr(getattr(state, "params", None), "effective_on_chunk", None),
-        "write_thinking_delta",
-        None,
+    params = getattr(state, "params", None)
+    thinking_sink = (
+        getattr(
+            getattr(params, "effective_on_chunk", None),
+            "write_thinking_delta",
+            None,
+        )
+        if _provider_thinking_projection_enabled(params)
+        else None
     )
     # 只在宿主 writer 提供 thinking 增量入口时透传；旧后端/测试 fake 不接收该参数。
     thinking_delta = thinking_sink if callable(thinking_sink) else None

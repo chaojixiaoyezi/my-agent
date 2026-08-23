@@ -19,7 +19,7 @@
 
 ---
 
-## 2026-08-21 当前运行基线
+## 2026-08-22 当前运行基线
 
 - 普通主代理和子代理共用 `turn_end.reason`：`completed` / `blocked` /
   `max-tokens` / `aborted` / `error` / `interrupted`。它只表示一轮为什么结束，
@@ -50,6 +50,9 @@
   子代理名称、status、当前活动、耗时和 attempts。它不进 transcript，不暴露 goal/工具输出/路径/权限，也不参与
   完成、重试或验收。未来用户直控必须先落一份 TUI/Web/IM 共用的 owner-scoped typed
   protocol；不允许前端直改子代理账本。
+- `context_scope=isolated` 只用于把结构化事实改写成一句用户可见回执：该物理模型调用继续进入成本与调用
+  账本，但不得把自己的 thinking 或小上下文数字投影成主任务状态。Todo 标题显示 typed 完成数/总数与
+  运行数，默认四行只是视窗；系统生成的单项 `items` 补派也必须沿同一父级 sibling 历史连续编号。
 - 单 Gateway 内后台回合按 `owner + thread_id` 分车道：同会话仍由持久 run claim 串行，
   同 owner 的不同 TUI/会话在显式全局上限和 `background_threads_per_owner` 上限内并发。
   一个旧会话的长 policy 回合不能占住整个用户的子代理完成唤醒。

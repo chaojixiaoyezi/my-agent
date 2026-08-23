@@ -569,7 +569,10 @@ def _same_idempotency_scope(task: Any, params: CreateRunParams, idempotency_iden
         return False
     if not _matching_role(getattr(task, "role", ""), params.role):
         return False
-    if _normalized_name(getattr(task, "agent_name", "")) != _normalized_name(params.agent_name):
+    if not _same_idempotency_display_identity(
+        getattr(task, "agent_name", ""),
+        params.agent_name,
+    ):
         return False
     if _external_write_roots(task) != _params_extra_write_roots(params):
         return False
@@ -694,6 +697,21 @@ def _safe_list_runs(manager: Any) -> list[Any]:
 
 def _normalized_name(value: object) -> str:
     return _text(value).casefold()
+
+
+# LLM: Display ordinals are presentation identities, not part of an explicit
+# idempotency contract. Generic system siblings may have different numeric
+# suffixes while the structured contract, parent, role and write scope remain
+# the same; custom names still require exact equality.
+# 函数用途: 比较幂等复用时的展示名；系统 worker 编号可不同，用户自定义名称必须完全一致。
+def _same_idempotency_display_identity(existing: object, requested: object) -> bool:
+    existing_name = _normalized_name(existing)
+    requested_name = _normalized_name(requested)
+    if existing_name == requested_name:
+        return True
+    return _is_indexed_generic_agent_name(existing_name) and _is_indexed_generic_agent_name(
+        requested_name
+    )
 
 
 def _is_generic_agent_name(value: object) -> bool:

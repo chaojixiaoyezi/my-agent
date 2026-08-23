@@ -1,5 +1,21 @@
 # STATUS
 
+## 2026-08-22 Prompt 4 r6：生命周期与 Compact 进步，产物仍远未复刻（本地展示修复候选）
+
+- `.7` 唯一 Gateway、MiniMax-M2.7、tmux `dsh-p4-lazygit-r6-ea91639` 只输入一次原样 Prompt 4；固定
+  `jesseduffield/lazygit@ea916395` 仍按 957 个生产 Go 文件、91,175 行功能代码、118 个测试文件和
+  368 个测试函数作为原版基线。10 名 child 全部自然 `DONE`，3 名各发生一次 canonical Compact；main
+  收齐首批后自主补派修复/测试、运行整合命令，Todo 全部打钩并自然结束，没有用户推动或测试者旁路写代码。
+- 任务本身仍明确失败。canonical `workspace/lazygit-python` 只有 9,543 行功能代码、5 个测试定义和
+  55 个空桩，`lazygit/app/app.py::App.run` 是 `pass`；8 项集成测试全部无条件 skip，`pyproject.toml`
+  未打包 GUI/git/os/i18n 等核心目录。另外还有 4,723 行和 1,731 行的两套并列输出，说明 main 没有真正
+  合并 child 产物。“模块可导入、pytest 可运行”不能等价于完整复刻或测试通过。
+- r6 还暴露四个底座问题：isolated 用户回执轮泄露私有 thinking；同一小调用把 main context 从 74.4k
+  覆盖成约 9.7k；后补的一项 `items` child 显示为无编号 `agent-d1-worker`；Todo `4/8` 实为四行窗口，
+  用户会误读成完成四项。对照 会话运行时 `session/turn.rs`/TUI streaming 与 终端交互 `TaskListV2` 后，当前候选
+  只允许真实 task turn 投影 thinking/context，单项系统批次复用 sibling ordinal，标题显示
+  `完成 X/Y · 进行中 Z`。200 项 focused 回归通过，严格 gate、推送、部署和全新 r7 仍待完成。
+
 ## 2026-08-22 Prompt 4 r5：七个 child 稳定完成，但 main 在 `4/18` 时过早收尾（本地修复候选）
 
 - `.7` 唯一 Gateway、MiniMax-M2.7、tmux `dsh-p4-lazygit-r5-ea91639` 只输入一次原样 Prompt 4。

@@ -4,6 +4,11 @@
 
 最近收口重点：
 
+- 2026-08-22 Prompt 4 r6 的真实 TUI 样本推动四个通用底层候选：`context_scope=isolated` 的用户回执轮
+  继续进入模型成本/调用账本，但不再公开私有 thinking 或覆盖主任务 context；系统生成的一项 `items`
+  返工也沿 exact parent 的历史 sibling 序号，显式自定义名保持不变；Todo 标题显示 typed
+  `完成 X/Y · 进行中 Z`，默认四行仅是可展开视窗。实现对照 会话运行时 active-turn reasoning 与 终端交互
+  `TaskListV2`，200 项直接相关 focused 回归已通过；推送、部署与 r7 真机结论仍以 ROADMAP/STATUS 为准。
 - 2026-08-22 本地候选已把 Prompt 4 r5 的“明知未完成仍 final”收口为 会话运行时 式模型执行纪律，而不是恢复
   吃过多次亏的宿主质量验收：发布 YAML 与 dataclass 共用同一个通用默认 prompt，删除 Go 专项骨架；
   主代理、子代理和 lifecycle wake 共用“已知缺口且仍可推进就继续”的软提示。`task_progress` open 项只

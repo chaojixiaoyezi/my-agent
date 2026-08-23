@@ -84,6 +84,63 @@ def test_later_single_children_share_the_batch_sibling_ordinal(tmp_path):
     assert names == ["agent-d1-worker-1", "agent-d1-worker-2"]
 
 
+def test_one_item_later_batch_keeps_the_shared_sibling_ordinal(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _create_agent(tmp_path)
+    tool = CreateSubagentsTool(agent)
+    first = json.loads(
+        tool.execute(
+            {
+                "goal": "先做两个模块",
+                "items": [
+                    {"goal": "写核心", "role": "worker"},
+                    {"goal": "写界面", "role": "worker"},
+                ],
+            }
+        ).output
+    )
+    second = json.loads(
+        tool.execute(
+            {
+                "goal": "返工一个模块",
+                "items": [{"goal": "补齐界面", "role": "worker"}],
+            }
+        ).output
+    )
+
+    run_ids = [*first["created_run_ids"], *second["created_run_ids"]]
+    names = [agent.subagents.load(run_id).agent_name for run_id in run_ids]
+    assert names == [
+        "agent-d1-worker-1",
+        "agent-d1-worker-2",
+        "agent-d1-worker-3",
+    ]
+
+
+def test_one_item_batch_preserves_an_explicit_display_name(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _create_agent(tmp_path)
+    payload = json.loads(
+        CreateSubagentsTool(agent).execute(
+            {
+                "goal": "补齐界面",
+                "items": [
+                    {
+                        "goal": "补齐界面",
+                        "role": "worker",
+                        "agent_name": "界面返工专员",
+                    }
+                ],
+            }
+        ).output
+    )
+
+    task = agent.subagents.load(payload["created_run_ids"][0])
+    assert task.agent_name == "界面返工专员"
+
+
 def test_scheduled_children_get_structured_depth_name_and_index(tmp_path):
     from agent_py_agent.agent.subagents.manager import SubAgentManager
     from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (

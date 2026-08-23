@@ -121,7 +121,7 @@ class TestCreateSubagentsToolRawPromptRepair:
 
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
-        assert params.agent_name == "agent-d1-coordinator"
+        assert params.agent_name == "agent-d1-coordinator-1"
 
     def test_explicit_coordinator_seed_inherits_raw_user_file_and_hierarchy_contract(self):
         """root/coordinator 机器合同必须来自工具参数 attributes，而不是原始用户 prompt。"""

@@ -227,6 +227,33 @@ def test_model_finish_projects_only_explicit_thinking_blocks() -> None:
     assert captured[0][1] >= 2.0
 
 
+def test_presentation_only_model_finish_never_projects_provider_thinking() -> None:
+    captured: list[str] = []
+
+    class Sink:
+        def write_thinking(self, text: str, *, duration_seconds: float = 0.0) -> None:
+            del duration_seconds
+            captured.append(text)
+
+    request = SimpleNamespace(
+        params=SimpleNamespace(
+            context_scope="isolated",
+            effective_on_chunk=Sink(),
+        ),
+    )
+    response = SimpleNamespace(
+        assistant_content_blocks=[{"type": "thinking", "thinking": "private draft"}]
+    )
+
+    _publish_provider_thinking(
+        request,
+        SimpleNamespace(started_at=time.monotonic()),
+        response,
+    )
+
+    assert captured == []
+
+
 def test_first_real_model_segment_becomes_sanitized_commentary_at_tool_boundary(
     tmp_path,
 ) -> None:

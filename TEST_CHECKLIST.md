@@ -5,6 +5,9 @@
   撤销早到的 active halt，不同工具成功不误清。精确同参机械重试仍只拒绝动作，只有显式 typed hard
   policy 可进入 repeated-failure 硬收口。43 项 focused 回归已通过；fresh TUI r5 真机证据仍按下方重型
   任务条目验收，不能提前勾成端到端通过。
+- [x] `context_scope=isolated` 的自然回执物理调用仍进入 model-call/cost ledger，但不投影 provider thinking、
+  main/child context 或 Compact；系统生成的一项 `items` 仍按 exact parent 连续编号；Todo 标题按 typed
+  status 显示 `完成 X/Y · 进行中 Z`，四行折叠只作视窗。200 项 focused 回归通过，r7 真机尚未通过。
 - [x] Compact 权威探针兼容没有 `task_attributes` 的轻量/旧调用方；统一路径解析把 `None`/空白保留为
   “没有路径”，不能变成 `<repo>/None` 并压过真实 ToolRegistry cwd。工具轮 28 项与 cwd 集成回归通过。
 - [x] 后台 Task Runtime State 与 `task_progress` 工具使用同一 task-path 账本编号；回归同时放置正确路径账本
