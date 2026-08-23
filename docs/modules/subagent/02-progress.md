@@ -1,5 +1,17 @@
 # Subagent Progress
 
+## 2026-08-23 r16 child 直接 goal 边界与可选 output hints（本地候选）
+
+- `b7005a8` 部署后的 fresh r16 已证明 root assumptions-first、exact covers 修参和 child DONE 后 lifecycle
+  wake 均正常：root 自主选 Rust、建立 7 项 Todo，首名完成后创建第二名。
+- 新的确定性失败是第一名骨架 child 只被交付 6 个基础文件，却额外写了 11 个文件；其中
+  `src/gui/views.rs`、`src/gui/state.rs` 随后又被第二名明确负责。原 child prompt 复用了 root 的“委派不
+  缩小用户原始目标”，会鼓励它越过直接 goal；强制 `output_files` 也没有阻止声明外写入。
+- 对照 会话运行时 spawn 的具体源码后，当前切片保留 TUI Todo 映射所需的 exact `covers`，不再要求编码 child
+  预报完整写集。`output_files` 只作可选交付/冲突提示，提供时仍须位于 workspace；delegated runner 改为
+  直接父级当前 goal 是完整工作边界，完整完成它但不替兄弟扩做。这是模型执行软纪律，不解析自然语言、
+  不扫描 diff 判完成。focused 回归已通过；待严格 gate、部署和 fresh r17 原样 Prompt 4。
+
 ## 2026-08-23 r15 根代理 assumptions-first 自主决策（本地候选）
 
 - `bdcc7d1` 部署后的 fresh r15 只输入一次原样 Prompt 4；root 在没有创建 Todo/child 前便要求用户从

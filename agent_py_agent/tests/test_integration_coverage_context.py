@@ -59,7 +59,7 @@ def test_coordinator_policy_does_not_silently_take_over_delegated_work():
     assert "下级卡住时，你可以直接完成" not in policy
 
 
-def test_subagent_runner_uses_the_same_soft_persistence_discipline():
+def test_subagent_runner_uses_task_scoped_soft_persistence_discipline():
     from types import SimpleNamespace
 
     from agent_py_agent.agent.agent_core.runner.prompts import (
@@ -75,9 +75,16 @@ def test_subagent_runner_uses_the_same_soft_persistence_discipline():
         )
     )
 
-    assert "只要当前用户目标仍有你已知的未完成部分" in prompt
+    assert "只要直接父级当前 goal 仍有你已知的未完成部分" in prompt
+    assert "只要当前用户目标仍有你已知的未完成部分" not in prompt
+    assert "直接父级给你的当前 goal 是本轮完整工作边界" in prompt
+    assert "不要因为根用户目标更大而实现未交给你的兄弟计划项" in prompt
+    assert "委派只是分工，不会缩小用户原始目标" not in prompt
     assert "一份诚实的未完成清单" in prompt
-    assert "只显示欢迎信息的 demo 只能算阶段成果" in prompt
+    assert "只显示欢迎信息的 demo 只能算该 goal 的阶段成果" in prompt
+    assert "不能替代该 goal 要求的完整功能" in prompt
+    assert "不能替代用户要求的完整功能" not in prompt
+    assert "验证必须覆盖当前 goal 实际要求" in prompt
     assert "安装、构建、启动或关键路径失败" in prompt
     assert "有效测试不得仅为变绿而删除、跳过、放宽断言" in prompt
 

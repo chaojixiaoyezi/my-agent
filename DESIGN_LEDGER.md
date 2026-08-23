@@ -1104,7 +1104,8 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 
 ## 2026-08-22 计划内派工的 exact-id 与写入集合原子合同
 
-状态：原子合同与错误分类已落地；r14 抓到并删除旧 goal 文本自动补绑，等待 fresh r15 真 TUI 复验。
+状态：exact-id 原子合同与错误分类已落地；r14 删除旧 goal 文本自动补绑。下述“完整写入集合必填”设计已被
+2026-08-23 的 会话运行时 式直接 goal 边界取代，保留本节只为说明 r12b-r14 的历史演进。
 
 - 解决问题：r12 已恢复同一 active turn 的原目标与工具历史，但模型先建了 Todo，随后派工仍省略
   `covers`，又把新项目兄弟目录只写进 child `goal`。旧入口先创建 child、事后只给绑定 warning；运行时
@@ -1131,7 +1132,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 
 ## 2026-08-23 根代理 assumptions-first 自主决策软纪律
 
-状态：默认提示已落地并通过配置聚焦回归；待发布后 fresh Prompt 4 r16 真 TUI 验收。
+状态：`b7005a8` 已发布部署；fresh Prompt 4 r16 已证明 root 会自主选择 Rust、建立 Todo 并创建 child。
 
 - 解决问题：`bdcc7d1` 部署后的 fresh r15 在固定 lazygit 源码上只读了项目便停止，要求用户在 Rust、
   Python 或其它语言中选择；没有 Todo、没有 child、没有功能写入。用户已经授权“换一种编程语言”，
@@ -1146,3 +1147,25 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   机器验收。
 - 配置权威：这不是第二套模式开关；既有 `system_prompt` 就是唯一用户配置入口。发布 YAML 与 dataclass
   默认文本继续逐字一致，显式自定义 prompt 仍有最高权威。
+
+## 2026-08-23 子代理直接 goal 边界与可选产物提示
+
+状态：通用底层修复已实现并通过聚焦回归，待严格 gate、发布和 fresh Prompt 4 r17 真 TUI 验收。
+
+- 解决问题：`b7005a8` 部署后的 r16 已通过 assumptions-first 与 exact `covers` 主链。第一名骨架 child
+  只被要求创建 6 个基础文件，却额外写了 11 个文件；其中 `src/gui/views.rs`、`src/gui/state.rs` 随后又
+  被 root 明确分给第二名 child，形成真实的兄弟写冲突。第一名的模型报告也主动列出了这些额外文件，
+  所以这不是观察误差或 TUI 文案问题。
+- 根因：child runner 复用了 root 的“委派不会缩小用户原始目标”提示，使 child 同时看到根目标和直接
+  `goal` 时容易替兄弟扩做。原先强制模型预报完整 `output_files` 也没有形成事实边界：该 child 只声明
+  6 个目标，却实际多写 11 个文件，说明模型自报写集既不完整也不能承担安全权威。
+- 会话运行时 对照：`会话运行时-rs/core/src/tools/handlers/multi_agents_spec.rs` 与 `multi_agents/spawn.rs` 的 spawn
+  参数只有具体任务输入、模型等执行字段；child 继承当前 cwd/runtime，没有“先报完整写集”合同。本项目
+  保留额外的 exact `covers`，因为它是 TUI Todo-child 映射的结构化事实；不再把 `output_files` 当完整写集
+  或编码 child 的创建前置条件。
+- 落地边界：root 继续对用户完整目标负责；child 的直接父级 `goal` 是其本轮完整工作边界，要求完整完成
+  该 goal，但不得因为根目标更大而实现未交给自己的兄弟计划项。`output_files` 改为可选交付/冲突提示；
+  一旦提供仍必须位于父级 workspace，也仍可参与已有的冲突提示，但它不是权限、完整写集或质量验收。
+- 这是 会话运行时 式软执行纪律，不是新的机器审查器：宿主不解析 goal 去判“是不是兄弟任务”，不扫描 diff
+  自动取消 child，也不恢复机器质量验收。真正的权限上界仍来自父级结构化 workspace；r17 必须用原样
+  Prompt 4 验证 child 会停在直接 goal 内、root 能自然醒来再派后续项。

@@ -36,10 +36,10 @@
   后台每工作片的新增工具额度在恢复历史后保持不变；现有 Todo 必须复用 exact id，派 child 时只通过
   `create_subagents.items[].covers` 绑定，不从标题或 goal 猜关系。
 - 当前 canonical `task_progress` 已有计划时，`create_subagents` 在任何 child 落盘前执行一份原子结构预检：
-  每个 item 必须用 `covers` 绑定仍 open 且未被同批其它 item 占用的 exact id；有写工具并直接产出产品
-  代码的 typed role 还必须用 `output_files` 声明父级 workspace 内互不重叠的写入集合。失败统一返回
-  `effect_outcome=not_started + required_repairs`，整批零创建。这个合同不读 goal/标题/代码量，不判断质量
-  或完成，也不能靠 capability grant 扩到兄弟目录；模型修正结构化参数后重试原任务。它的控制报码必须
+  每个 item 必须用 `covers` 绑定仍 open 且未被同批其它 item 占用的 exact id；`output_files` 只是一项
+  可选的交付目标和冲突线索，不是权限、完整写集或创建前置条件，一旦提供仍必须位于父级 workspace。
+  失败统一返回 `effect_outcome=not_started + required_repairs`，整批零创建。这个合同不读 goal/标题/代码量，
+  不判断质量或完成，也不能靠 capability grant 扩到兄弟目录；模型修正结构化参数后重试原任务。它的控制报码必须
   在唯一 `error_taxonomy` 登记为可修参数错误，不能让外层降成 `UNKNOWN_ERROR` 后误导模型报告阻塞。
   历史“goal 正文里恰好出现 Todo id 就自动补 covers”分支已经删除；`i18n`、`config` 这类既可能是目录名
   又可能是计划 id 的文本不能取得绑定权威，缺少显式 `covers` 时必须走上述可修错误。
@@ -79,16 +79,18 @@
 - `context_scope=isolated` 只用于把结构化事实改写成一句用户可见回执：该物理模型调用继续进入成本与调用
   账本，但不得把自己的 thinking 或小上下文数字投影成主任务状态。Todo 标题显示 typed 完成数/总数与
   运行数，默认四行只是视窗；系统生成的单项 `items` 补派也必须沿同一父级 sibling 历史连续编号。
-- 主代理、子代理和 child lifecycle wake 共用一份 会话运行时 式软交付纪律：委派不能缩小用户原始范围，
-  骨架/空壳/最小欢迎页只能算阶段；验证要覆盖用户可见入口，安装、构建、启动或关键路径失败后必须
-  修正并重跑。能重现当前缺陷的有效测试不得为了变绿而删除、skip、放宽断言或降成存在性检查。
-  这些仍然只是模型执行提示，不读取代码量、不解析完成文案，也不恢复宿主机器质量验收。
+- 主代理和 child lifecycle wake 对用户完整目标负责；子代理只把直接父级交给自己的当前 `goal` 当作完整
+  工作边界，不能因为 root 目标更大而实现未交给自己的兄弟计划项。两层共用 会话运行时 式持续完成与验证软纪律：
+  骨架/空壳/最小欢迎页只能算阶段；验证要覆盖实际入口，安装、构建、启动或关键路径失败后必须修正并重跑。
+  能重现当前缺陷的有效测试不得为了变绿而删除、skip、放宽断言或降成存在性检查。这些仍然只是模型执行
+  提示，不读取代码量、不解析完成文案，也不恢复宿主机器质量验收。
 - 单 Gateway 内后台回合按 `owner + thread_id` 分车道：同会话仍由持久 run claim 串行，
   同 owner 的不同 TUI/会话在显式全局上限和 `background_threads_per_owner` 上限内并发。
   一个旧会话的长 policy 回合不能占住整个用户的子代理完成唤醒。
 - 普通 child 自动继承直接父级的结构化工作区上界，孙代理逐层继承同一上界；不要求模型重复声明父级
-  本来就能写的目录。`output_files` 记录用户明确交付目标和冲突锁，批量时由负责写入的 item 分别声明；
-  它不能把父级工作区外的自然语言路径变成权限。模型没有声明产物时，编排器不得凭空生成 Markdown
+  本来就能写的目录。`output_files` 可记录用户明确交付目标和冲突线索，批量时可由负责写入的 item 分别
+  声明；它不是完整写集或写权限，也不能把父级工作区外的自然语言路径变成权限。模型没有声明产物时，
+  编排器不得凭空生成 Markdown
   业务交付合同；child 的 typed status、最终回复与系统 `final_report_ref` 已构成 会话运行时 式完成交接。
   历史 `system_default_output_ref=true` 只作旧账恢复，不进入模型可见文件合同或父级 expected outputs。
   命名 Audit/exact-scope worker 继续只用精确授权。

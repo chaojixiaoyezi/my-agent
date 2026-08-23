@@ -1,6 +1,6 @@
-"""LLM: Validate plan bindings and coding write sets before child persistence.
+"""LLM: Validate exact plan bindings and explicitly declared output scope.
 
-模块用途: 当当前代理已经建立结构化 Todo 时，在创建任何子代理前一次性核对 exact covers 与写入目录。
+模块用途: 当当前代理已经建立结构化 Todo 时，在创建任何子代理前核对 exact covers；可选产物声明不能越界。
 """
 
 from __future__ import annotations
@@ -8,13 +8,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from ...common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
-from .create_constraints import (
-    delegated_product_write_roots,
-    is_relative_to,
-    role_allows_direct_product_work,
-)
+from .create_constraints import delegated_product_write_roots, is_relative_to
 from .dispatch_progress_seed import planned_dispatch_contract
-from .write_guard import WRITE_SUBAGENT_TOOLS
 
 PLANNED_DELEGATION_ERROR_CODE = "SUBAGENT_PLANNED_DELEGATION_INVALID"
 
@@ -28,45 +23,37 @@ def planned_delegation_failure(
     items: list,
     allowed_tool_values: list[list[str] | None],
 ) -> dict[str, object] | None:
+    del allowed_tool_values
     contract = planned_dispatch_contract(agent, items)
     if contract is None:
         return None
     roots = delegated_product_write_roots(agent)
-    missing_output_files: list[int] = []
     invalid_output_files: list[dict[str, object]] = []
-    for index, (item, allowed_tools) in enumerate(
-        zip(items, allowed_tool_values, strict=True)
-    ):
+    for index, item in enumerate(items):
         params = getattr(item, "params", None)
         params = params if isinstance(params, dict) else {}
-        if not _item_requires_write_set(agent, params, allowed_tools):
-            continue
         outputs = string_list(params.get("output_files"), TOOL_TEXT_LIST_OPTIONS)
         if not outputs:
-            missing_output_files.append(index)
             continue
         issues = _output_scope_issues(outputs, roots)
         if issues:
             invalid_output_files.append({"index": index, "issues": issues})
     if (
         bool(contract.get("valid"))
-        and not missing_output_files
         and not invalid_output_files
     ):
         return None
     repairs = _required_repairs(
         contract,
         roots=roots,
-        missing_output_files=missing_output_files,
         invalid_output_files=invalid_output_files,
     )
     return {
         "ok": False,
         "error_code": PLANNED_DELEGATION_ERROR_CODE,
-        "error": "当前已有结构化任务清单，但本次派工没有完整绑定计划与写入集合；本批没有创建任何子代理。",
+        "error": "当前已有结构化任务清单，但本次派工没有完整绑定计划，或显式产物声明越出当前工作区；本批没有创建任何子代理。",
         "planned_dispatch": contract,
         "allowed_workspace_roots": list(roots),
-        "missing_output_files_indexes": missing_output_files,
         "invalid_output_files": invalid_output_files,
         "next_action": {
             "action": "repair_planned_delegation_and_retry",
@@ -77,31 +64,10 @@ def planned_delegation_failure(
     }
 
 
-# LLM: A write-set declaration is required only from a typed direct product
-# worker that actually has filesystem write tools. Read-only, test, dependent,
-# and coordinator roles retain their existing contracts.
-# 函数用途: 判断这条计划内派工是否需要用 output_files 声明互斥写入范围。
-def _item_requires_write_set(
-    agent: object,
-    params: dict[str, object],
-    allowed_tools: list[str] | None,
-) -> bool:
-    grants = {str(item or "").strip() for item in allowed_tools or []}
-    if not WRITE_SUBAGENT_TOOLS.intersection(grants):
-        return False
-    manager = getattr(agent, "subagents", None)
-    raw_dirs = getattr(manager, "role_template_dirs", None)
-    role_template_dirs = raw_dirs if isinstance(raw_dirs, (list, tuple)) else None
-    return role_allows_direct_product_work(
-        str(params.get("role") or "worker"),
-        role_template_dirs,
-    )
-
-
 # LLM: Proposed write paths are resolved only against inherited structured
-# roots. The special task-local output/work namespaces are resolved later by
-# the canonical create policy; neither case grants sibling-directory access.
-# 函数用途: 找出 output_files 中越出父级工作区、非本地或无法解析的路径。
+# roots. Optional output_files remain delivery/collision hints, never permission
+# grants or proof of a complete child write set.
+# 函数用途: 模型可选择声明产物；一旦声明，找出其中越出父级工作区、非本地或无法解析的路径。
 def _output_scope_issues(
     outputs: list[str],
     roots: tuple[str, ...],
@@ -169,7 +135,6 @@ def _required_repairs(
     contract: dict[str, object],
     *,
     roots: tuple[str, ...],
-    missing_output_files: list[int],
     invalid_output_files: list[dict[str, object]],
 ) -> list[dict[str, object]]:
     repairs: list[dict[str, object]] = []
@@ -188,12 +153,6 @@ def _required_repairs(
             "action": "bind_each_item_to_one_open_plan_id",
             "open_target_ids": list(contract.get("open_target_ids") or []),
             "reason": "给每个 item 填写它独占负责的 covers exact id；未知、已关闭或跨 item 重复 id 不可用。",
-        })
-    if missing_output_files:
-        repairs.append({
-            "action": "declare_disjoint_output_files",
-            "item_indexes": missing_output_files,
-            "reason": "这些 item 有写工具并直接产出产品代码；请逐项声明互不重叠的 output_files。",
         })
     if invalid_output_files:
         repairs.append({

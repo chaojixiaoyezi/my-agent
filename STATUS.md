@@ -1,5 +1,22 @@
 # STATUS
 
+## 2026-08-23 Prompt 4 r16：自主派工通过，child 越过直接 goal 写到兄弟任务（本地修复候选）
+
+- `b7005a8` 已推送并部署到 `.7` 唯一 Gateway。fresh tmux
+  `dsh-p4-lazygit-r16-ea91639` 在固定 `jesseduffield/lazygit@ea916395` 上只输入一次原样 Prompt 4；
+  MiniMax-M2.7 不再反问语言，而是自主选择 Rust、建立 7 项 Todo，并在一次漏 `covers` 的 typed 拒绝后
+  自行修参，创建了带 exact `covers` 的第一名 child。第一名 DONE 后 root 自然醒来并创建第二名 child，
+  证明 assumptions-first、显式计划绑定和 lifecycle wake 主链都已通过。
+- r16 同时抓到真实职责越界：第一名“项目骨架”child 的 goal 与声明只覆盖 6 个基础文件，但它额外创建
+  11 个文件；其中 `src/gui/views.rs`、`src/gui/state.rs` 随后又被 root 分给第二名 child。第一名 final
+  也明确列出这些额外文件，故这是一组确定性的兄弟写冲突，不是展示误差。现场已只通过 TUI `/stop`
+  收口：root `PAUSED`、首名 `DONE`、第二名 `CANCELLED`，没有测试者修改产物或残留 runner。
+- 会话运行时 spawn 源码没有要求 child 预报完整写集；r16 也证明模型声明的 6 个 `output_files` 无法约束实际
+  多写 11 个文件。当前候选因此保留 Todo 所需的 exact `covers`，把 `output_files` 降为可选交付/冲突
+  提示；同时把 child 持续执行纪律收窄为“直接父级当前 goal 是完整工作边界”，不能替兄弟扩做。权限仍
+  由 structured workspace 决定，不解析 goal、不扫描代码判完成、不恢复机器验收。focused 回归已通过，
+  待文档、严格 gate、发布部署后用 fresh r17 原样复验。
+
 ## 2026-08-23 Prompt 4 r15：默认模型把安全次要选择退回用户（本地修复候选）
 
 - `bdcc7d1` 已推送并部署到 `.7` 唯一 Gateway。fresh tmux

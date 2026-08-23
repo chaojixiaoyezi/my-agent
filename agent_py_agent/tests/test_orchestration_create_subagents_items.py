@@ -426,8 +426,8 @@ class TestCreateSubagentsItemsMode:
         assert payload["planned_dispatch"]["missing_covers_indexes"] == [0]
         assert mock_agent.subagents.create_run.call_count == 0
 
-    def test_existing_plan_rejects_coding_item_without_output_write_set(self, tmp_path):
-        """计划内直接编码 item 必须声明结构化 output_files，goal 里的目录不算。"""
+    def test_existing_plan_accepts_coding_item_without_optional_output_hints(self, tmp_path):
+        """会话运行时 式 child 只需具体 goal 和 exact covers；output_files 不是完整写集硬门。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _planned_agent(tmp_path)
@@ -438,13 +438,14 @@ class TestCreateSubagentsItemsMode:
 
         result = CreateSubagentsTool(mock_agent).execute({
             "goal": "完成核心",
-            "items": [{"goal": "在兄弟目录实现核心", "covers": ["impl-core"]}],
+            "items": [{"goal": "在当前工作区实现核心", "covers": ["impl-core"]}],
         })
-        payload = json.loads(result.output)
 
-        assert result.ok is False
-        assert payload["missing_output_files_indexes"] == [0]
-        assert mock_agent.subagents.create_run.call_count == 0
+        assert result.ok is True
+        assert mock_agent.subagents.create_run.call_count == 1
+        created = mock_agent.subagents.create_run.call_args.kwargs["params"]
+        assert created.attributes["covers"] == ["impl-core"]
+        assert created.attributes.get("output_files") in (None, [])
 
     def test_existing_plan_rejects_sibling_output_path_before_child_creation(self, tmp_path):
         """output_files 逃出当前 workspace 时整批拒绝，不能留给 child 再申请权限。"""
@@ -471,7 +472,7 @@ class TestCreateSubagentsItemsMode:
         assert mock_agent.subagents.create_run.call_count == 0
 
     def test_existing_plan_accepts_exact_covers_and_disjoint_workspace_outputs(self, tmp_path):
-        """exact covers 与 workspace 内互斥写入集合齐全时，保持原自动创建/启动主链。"""
+        """可选 output_files 位于 workspace 内时，保留交付提示并自动创建/启动。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _planned_agent(tmp_path)
@@ -527,7 +528,7 @@ class TestCreateSubagentsItemsMode:
         assert mock_agent.subagents.create_run.call_count == 0
 
     def test_existing_plan_accepts_bound_single_inside_workspace(self, tmp_path):
-        """单 child 带 exact covers 与 workspace 写入集合时保持自动启动。"""
+        """单 child 带 exact covers 与可选 workspace 产物提示时保持自动启动。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _planned_agent(tmp_path)

@@ -4,6 +4,11 @@
 
 最近收口重点：
 
+- 2026-08-23 `b7005a8` 部署后的 Prompt 4 r16 已证明 root 会安全自主选语言、创建 7 项 Todo、按 typed
+  repair 补 exact `covers`，并在首名 child DONE 后自然派第二名；但首名骨架 child 声明 6 个文件却额外
+  写 11 个文件，其中两个与第二名职责重叠。会话运行时 spawn 不要求预报完整写集，现场也证明模型自报不完整；
+  当前切片保留 exact covers，把 `output_files` 降为可选交付/冲突提示，并让 child 只把直接父级 `goal`
+  当完整工作边界。该改动不解析 goal、不恢复机器验收；发布和 fresh r17 见 STATUS/ROADMAP。
 - 2026-08-23 Prompt 4 r15 暴露根代理会把用户已授权的安全次要选择退回用户；相同 MiniMax-M2.7 的
   会话运行时 对照也在探索后输出了语言/范围/测试菜单，均违背 会话运行时 Default 源码。当前切片把源码中的
   assumptions-first 语义适配到根默认 `system_prompt` 前部：合理默认后继续，只有实质偏离、越权或不可逆

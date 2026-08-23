@@ -91,7 +91,7 @@ def _create_subagents_input_schema() -> dict[str, object]:
 def build_create_subagents_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="create_subagents",
-        description="把可并行的独立工作交给下级代理。无论当前是主代理、子代理还是孙代理，都使用同一个 create_subagents；创建成功后下级立即运行，进展、阻塞或完成时系统自动唤醒直接父级，不需要也没有查询或推进工具。goal 始终必填；只传 goal 就只创建一个 child，需要多个时必须同时传总 goal 和 items，每项都要有独立 goal。不支持 operations、count 或 max_concurrency 参数。已经用 task_progress 建过 Todo 时，每项必须用 covers 独占绑定它负责且仍 open 的 exact Todo id；有写工具并直接产出产品代码的 item 还必须用 output_files 声明当前 workspace 内互不重叠的写入集合。缺失、未知、已关闭、重复绑定或越界写入会在创建任何 run 前整批拒绝，按结构化 required_repairs 修正后重试。普通 child 自动继承父级工作区权限；goal、output_files 和 capability grant 都不能扩到兄弟目录。不要为了显得忙而派，也不要重复创建同一任务。",
+        description="把可并行的独立工作交给下级代理。无论当前是主代理、子代理还是孙代理，都使用同一个 create_subagents；创建成功后下级立即运行，进展、阻塞或完成时系统自动唤醒直接父级，不需要也没有查询或推进工具。goal 始终必填；只传 goal 就只创建一个 child，需要多个时必须同时传总 goal 和 items，每项都要有独立 goal。不支持 operations、count 或 max_concurrency 参数。已经用 task_progress 建过 Todo 时，每项必须用 covers 独占绑定它负责且仍 open 的 exact Todo id；缺失、未知、已关闭或重复绑定会在创建任何 run 前整批拒绝，按结构化 required_repairs 修正后重试。output_files 只是可选的交付目标和冲突线索，不是权限、完整写集或创建前置条件；一旦提供仍必须位于当前 workspace。普通 child 自动继承父级工作区权限；goal、output_files 和 capability grant 都不能扩到兄弟目录。不要为了显得忙而派，也不要重复创建同一任务。",
         input_schema=_create_subagents_input_schema(),
         hints=_hints(
             use_cases=_CREATE_USE_CASES,

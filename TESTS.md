@@ -617,10 +617,11 @@ ToolCall/ToolResult；真实 `/btw` UserTurn 排在 handoff 后；text 协议不
 携带 exact Todo ids、完整账本 read 参数和 `items[].covers` 精确绑定字段。真实验收必须用 fresh tmux 原样
 Prompt 4，观察第二批派工是否复用原 Todo、是否带 covers、是否仍保持同一目标；测试者不得补提示或改产物。
 
-r12b 后的 planned-delegation focused 回归：已有 canonical Todo 时，漏/错/关闭/重复 `covers`、直接编码
-item 缺 `output_files`、兄弟目录越界、同批父子路径覆盖都必须在任何 child 创建前整批
-`SUBAGENT_PLANNED_DELEGATION_INVALID` 或既有 `SUBAGENT_OUTPUT_SCOPE_CONFLICT`；合法 exact-id 与互斥
-workspace 写入集合继续自动创建/启动，递归 child 入口使用同一预检。
+r12b 后的 planned-delegation focused 回归：已有 canonical Todo 时，漏/错/关闭/重复 `covers` 必须在任何
+child 创建前整批 `SUBAGENT_PLANNED_DELEGATION_INVALID`；可选 `output_files` 一旦提供，兄弟目录越界或
+同批父子路径覆盖仍必须在创建前返回该错误或既有 `SUBAGENT_OUTPUT_SCOPE_CONFLICT`。合法 exact-id 在
+没有 output hint 时也能自动创建/启动；提供 workspace 内互斥提示时仍保留交付/冲突投影，递归 child
+入口使用同一预检。
 失败 outcome 还必须保留 `error_code=SUBAGENT_PLANNED_DELEGATION_INVALID`、`retryable=true`、
 `recommended_action=repair_tool_arguments`，不能只有正文有码而控制层降成 `UNKNOWN_ERROR`。
 无计划的测试 fixture 必须显式设置 `home_paths/root/current_run_params` 为空，不能让 MagicMock 动态属性或
@@ -644,6 +645,14 @@ fresh r15：固定 lazygit 源提交，只向真实 TUI 输入一次用户原样
 先锁定发布 YAML 与 dataclass 默认 prompt 逐字相同、自主决策纪律位于持续执行纪律之前、文本不含具体语言；
 发布后 fresh r16 仍只输入一次同一 Prompt 4，测试者不回答语言、不追加推动消息、不修改产物，观察 root
 是否采用合理默认、建立 Todo 并创建显式 `covers/output_files` 的 child。
+
+`b7005a8` 部署后的 fresh r16 已通过上述自主决策：root 选择 Rust、建立 7 项 Todo，漏 `covers` 的第一次
+创建被 typed repair 原子拒绝后自行修正；首名 child DONE 后 root 自然派出第二名。新失败发生在 child
+职责边界：首名只声明 6 个骨架文件，却额外写 11 个文件，其中 `src/gui/views.rs` 与 `src/gui/state.rs`
+又被第二名负责。当前 focused 回归改为锁定两件事：child prompt 必须包含“直接父级当前 goal 是完整工作
+边界”且不再出现 root 的“委派不缩小用户目标”；计划存在时 exact covers 仍必填，而编码 child 可以省略
+可选 `output_files`，提供时仍不得越出 workspace。发布后 fresh r17 继续只输入一次原样 Prompt 4，验证
+第一名不再替兄弟扩做、root lifecycle wake 与后续派工仍正常；测试者仍不写被测产物或追加技术指导。
 
 真实本地模型回归示例：
 

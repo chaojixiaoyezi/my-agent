@@ -1,4 +1,6 @@
-"""Compact model-facing metadata for orchestration tools."""
+# LLM: Keep model-facing orchestration metadata compact and aligned with the
+# exact-covers contract; optional output hints must never become write authority.
+# 模块用途: 集中保存子代理编排工具给模型看的参数说明和示例，修改运行语义时要同步工具规格测试。
 
 from __future__ import annotations
 
@@ -21,7 +23,7 @@ _CREATE_PARAMETERS = {
     "covers": '该子代理负责的 task_progress 清单项 id 列表（普通 items 或 coverage.targets，例如 ["req-03"]）：已有清单时每个 child 必填且不能跨 child 重复；完成后系统按 exact id 自动把对应项标 done',
     "plan": "子代理初始步骤",
     "input_refs": "交给子代理读取的文件、URL 或 artifact refs",
-    "output_files": "目标产物或写入集合，用于交付归属、权限预检和冲突锁；已有计划时，直接写产品代码的每个 child 必须逐项声明当前 workspace 内互不重叠的路径",
+    "output_files": "可选目标产物，用于交付归属和冲突提示；不是权限、完整写集或创建前置条件，提供时必须位于当前 workspace",
     "artifact_refs": "已有交付物或参考产物引用",
     "replacement_for_run_ids": "新子代理要接管的旧 run_id",
     "related_finding_id": "可选；把本次委派关联到当前会话中已经持久化的一个 Audit finding。程序只校验关系，是否调查和怎样调查仍由你决定",
@@ -30,8 +32,8 @@ _CREATE_PARAMETERS = {
     "audit_source_id": "仅当前命名 Audit 已发布结构化来源时使用；为这个叶子选择一个返回给你的精确 source_id。程序会把已验证的传输事实交给子代理，别把 URL 或 watch_id 重新写进任务步骤",
 }
 _CREATE_PARAMETER_DETAILS = {
-    "goal": "工具内部的整批派工说明，与用户命令 /goal 无关；普通聊天任务也可派工。写清子代理要交付什么，保留用户原始硬约束；用户声明的产物格式要求（输出路径、最少字数、文件路径:行号引用、必含章节）要原样写进相关子代理 goal，汇总时保留这些格式要素。",
-    "items": "仅一次派多个不同任务时用；顶层 goal 写整批目的，每个元素必须含自己的独立 goal、别传空 items。资料线索放 item.input_refs；已有 Todo 时每项必须带独占 covers，直接写产品代码的 item 还必须声明当前 workspace 内互不重叠的 output_files。创建成功后会立即运行。",
+    "goal": "工具内部的整批派工说明，与用户命令 /goal 无关；普通聊天任务也可派工。写清子代理要交付什么，保留分给它的全部硬约束；用户声明的产物格式要求（输出路径、最少字数、文件路径:行号引用、必含章节）要原样写进相关子代理 goal，汇总时保留这些格式要素。",
+    "items": "仅一次派多个不同任务时用；顶层 goal 写整批目的，每个元素必须含自己的独立 goal、别传空 items。资料线索放 item.input_refs；已有 Todo 时每项必须带独占 covers。output_files 是可选交付/冲突提示，没有明确路径时不要强造。创建成功后会立即运行。",
     "description": "只写一句职责短标题，例如“实现超级玛丽核心玩法”；不要写过程、状态、路径或完整任务要求。省略时界面会截取 goal 开头。",
     "role": "优先用模板角色。可用角色模板索引：\n{role_template_index}",
     "agent_name": "展示名不是角色；需要职责差异时仍应使用 role 或 goal 表达。",
@@ -40,9 +42,8 @@ _CREATE_PARAMETER_DETAILS = {
     "allowed_skills": "可选 Skill 名称或 stable_id 列表；创建时会解析为不可变快照引用，未知或禁用项整批拒绝。",
     "input_refs": "这是交给子代理的资料线索；单个子代理自己的输入放在对应 item.input_refs。",
     "output_files": (
-        "用户明确保存路径时必须填写；已有 task_progress 计划时，直接写产品代码的每个 item 即使没有"
-        "用户点名文件，也要声明当前 workspace 内互不重叠的写入集合。它记录交付身份与冲突范围，"
-        "普通 child 的父级工作区写权仍由宿主继承。没有计划的轻量派工可省略。阅读/分析目录是 input_refs。"
+        "可选；用户明确保存路径时用于保留交付身份与冲突范围。它不是权限、完整写集或创建前置条件，"
+        "普通 child 的父级工作区写权仍由宿主继承；提供时必须位于当前 workspace。阅读/分析目录是 input_refs。"
         "协作阶段的中间产物优先放当前任务 work/child_outputs 或工具返回的默认路径；"
         "output_dir 更适合最终交付，或用户明确要求放到某个普通输出目录时使用。"
     ),
@@ -60,7 +61,7 @@ _CREATE_PARAMETER_DETAILS = {
     "covers": "每个 item 只绑它自己负责且仍 open 的清单项（id 来自 task_progress 的 items 或 coverage.targets）；已有 Todo 时这是创建硬合同。未知、已关闭或跨 item 重复的 id 会使整批原子拒绝，不能复制全部 id 或另建同义清单。",
 }
 _CREATE_ITEM_PARAMETER_DETAILS = {
-    "goal": "每个 item 都必填；只写这一个子代理要完成和交付的具体工作，不要复制顶层整批 goal。",
+    "goal": "每个 item 都必填；只写这一个子代理要完成和交付的具体工作，不要复制顶层整批 goal。该 goal 是 child 的完整工作边界，不要把兄弟 item 也塞进来。",
     "description": "每个 item 可选；职责短标题只用 3-12 字概括这一个子代理负责什么，不要复制顶层整批 description。",
 }
 _CREATE_EXAMPLES = [

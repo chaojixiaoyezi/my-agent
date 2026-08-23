@@ -269,8 +269,12 @@ goal 中出现 `src/i18n/`、`src/config/` 时，历史正文自动补绑旁路�
 `covers`；新增同名目录回归已通过，`bdcc7d1` 已发布部署。fresh r15 没再走到 Todo/派工，而是在用户已
 授权自行换语言时停止并输出 Rust/Python/其它菜单；同模型 会话运行时 对照先探索、随后也输出语言/范围/测试
 菜单，均违背 会话运行时 Default 源码的 assumptions-first 规则。当前候选只把该源码语义适配到根默认
-`system_prompt` 前部，不解析问句、不造重试器或机器验收。严格 gate、部署后用 fresh r16 再只输入一次
-原样 Prompt 4，先证明 root 会自行选择语言、建计划和派 child，再继续观察显式 covers 与完整交付。
+`system_prompt` 前部，不解析问句、不造重试器或机器验收。`b7005a8` 发布后的 fresh r16 已证明 root 会
+自行选择 Rust、建 7 项计划、修正漏 covers 并派 child，首名 DONE 后也会自然创建第二名。r16 的新失败是
+首名骨架 child 声明 6 个基础文件却额外写 11 个文件，其中两个正是第二名的任务，形成真实兄弟冲突。
+会话运行时 spawn 不要求预报完整写集，现场也证明该模型声明不完整；下一切片保留 exact covers，把
+`output_files` 改为可选交付/冲突提示，并规定 child 的直接父级 goal 是完整工作边界。严格 gate、部署后
+用 fresh r17 再只输入一次原样 Prompt 4，验证 child 不替兄弟扩做、root 仍能按 lifecycle event 继续派工。
 
 ### 用户直控子代理的共享控制面
 

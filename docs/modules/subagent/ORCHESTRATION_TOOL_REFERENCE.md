@@ -18,15 +18,20 @@ create/guidance/cancel/resolve 四个直属下级控制入口；普通 leaf 不�
   空参数调用会作为无效原生工具调用处理，不能静默退回主代理独自完成。
 - 模型工具不提供 `count` 克隆模式。单个具体工作直接传 `goal`；多个可并行工作用
   `items` 逐项声明不同目标和交付边界。重复 item 会整批拒绝，不会部分创建。
-- 整批拒绝会区分“本批 item 互相重用交付路径”和“已有未结束 run 占用”。前者返回
+- 已有 canonical Todo 时，每个 item 必须显式用 `covers` 独占绑定仍 open 的 exact id；缺失、未知、已
+  关闭或同批重复会在创建任何 run 前整批拒绝。宿主不从 goal 或标题猜绑定。
+- 当调用方选择提供 `output_files` 时，整批拒绝会区分“本批 item 互相重用交付路径”和“已有未结束 run 占用”。前者返回
   `revise_proposed_output_scopes_and_retry`，应给每个 item 分配互不重叠的输出，或把共享文件
   收成一个 item 后重试；后者才由宿主等直属生命周期事件。工具失败不改变用户原始约束，
   不得因此改用用户明确禁止的执行方式。
 - `allowed_tools` 只是工具偏好提示，不是安全边界；基础读写工具由系统按角色和目标补齐。
 - 子代理自己的资料线索写到对应 item 的 `input_refs`，公共资料才放顶层。
-- 普通 child 自动继承直接父级的结构化工作区上界。用户明确了产物路径时仍应写 `output_files`；批量派工
-  由每个负责写入的 item 分别声明。它负责交付身份、读取顺序和冲突锁，不是普通 child 唯一的权限来源；
-  goal 或 output_files 都不能把写权扩大到父级 workspace 外。没有明确路径时不要强造。
+- 普通 child 自动继承直接父级的结构化工作区上界。用户明确了产物路径时可写 `output_files`；批量派工
+  可由每个负责写入的 item 分别声明。它负责交付身份、读取顺序和冲突提示，不是完整写集、创建前置条件
+  或普通 child 的权限来源；goal 或 output_files 都不能把写权扩大到父级 workspace 外。没有明确路径时
+  不要强造。
+- root 的执行纪律覆盖用户完整目标；child 的直接父级 `goal` 是该 child 的完整工作边界。child 应完整
+  完成这份具体任务，但不能因根目标更大而实现未分给自己的兄弟项；这是模型软纪律，不是 goal 文本硬门。
 - 裸相对路径按当前可信 cwd/workspace 解析，例如从 `/root` 启动时 `abc/index.html` 就是
   `/root/abc/index.html`。只有显式 `output/report.md`、`work/notes.md` 才指向 task 内部 staging；绝对路径
   原样交给写边界裁决，不能改写成 task output 后返回成功。

@@ -57,9 +57,12 @@ OPEN 或非法未闭合 capability request 是宿主掌握的结构化阻塞事�
 普通 child 自动继承直接父级的结构化产品写区；孙代理继续逐层继承同一上界，不能扩大到父级之外。
 因此项目目录本来就在父级 workspace 内时，父级无需为 child 重复申请或声明权限。
 
-`output_files` 仍应记录用户明确的目标文件/目录，批量创建时由负责写入的 item 分别声明；它负责交付
-身份、结果读取顺序和冲突锁，不是普通 child 唯一的写权限来源。goal 或 output_files 都不能把权限扩大到
-父级 workspace 外。命名 Audit/exact-scope worker 不继承普通产品写区，只使用其精确结构化授权。
+`output_files` 可记录用户明确的目标文件/目录，批量创建时可由负责写入的 item 分别声明；它负责交付
+身份、结果读取顺序和冲突提示，不是普通 child 的完整写集、创建前置条件或写权限来源。提供的路径不能
+扩大到父级 workspace 外。命名 Audit/exact-scope worker 不继承普通产品写区，只使用其精确结构化授权。
+
+root 继续对用户完整目标负责；普通 child 只把直接父级给自己的当前 `goal` 当作本轮完整工作边界，必须
+完整完成该 goal，但不得因为根目标更大而替兄弟计划项扩做。宿主不解析 goal 或扫描 diff 做机器验收。
 
 路径解析与父级 cwd 一致：裸 `abc/index.html` 表示当前可信 workspace 下的 `abc/index.html`；只有显式
 `output/report.md` 和 `work/notes.md` 才分别表示当前 task 内部的 output/work。绝对路径保留原目标，继续

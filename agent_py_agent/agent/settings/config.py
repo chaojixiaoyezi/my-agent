@@ -41,6 +41,7 @@ from .normalize import (
 __all__ = [
     "AgentConfig",
     "DEFAULT_DECISION_AUTONOMY",
+    "DEFAULT_DELEGATED_EXECUTION_PERSISTENCE",
     "DEFAULT_EXECUTION_PERSISTENCE",
     "DEFAULT_SYSTEM_PROMPT",
     "INTERNAL_RUNTIME_CONFIG_FIELDS",
@@ -81,23 +82,42 @@ DEFAULT_DECISION_AUTONOMY = (
 )
 
 
-# LLM: 会话运行时 keeps persistence and verification as model execution discipline,
-# not a host-side acceptance gate. Reuse this exact text for main, child, and
-# lifecycle-wake prompts so no surface can turn partial or weakened evidence into
-# task completion.
-# 配置用途: 定义主代理与子代理共用的持续完成、范围保真和验证软约束；它只指导模型，不读取 Todo 或改写终态。
-DEFAULT_EXECUTION_PERSISTENCE = (
-    "执行纪律：只要当前用户目标仍有你已知的未完成部分，而且现有工具、子代理或可用证据还能继续推进，"
+# LLM: Root and delegated runners share persistence and verification, but their
+# scope authority differs: root preserves the user objective, while a child
+# preserves only its direct parent's goal. Keep both as model guidance, never a
+# host-side completion gate.
+# 配置用途: 定义所有代理共用的持续完成主体，再分别拼接 root 与 child 的目标、阶段成果和验证口径。
+_EXECUTION_PERSISTENCE_BODY = (
+    "而且现有工具、子代理或可用证据还能继续推进，"
     "就持续工作，不要停在分析、骨架、局部修复或一份诚实的未完成清单上；把工作推进到实现、验证和清楚交付。"
     "工具调用失败时先读真实错误并修正方法，不能把一次可恢复失败当作结束理由。"
     "只有目标已经端到端解决、用户明确暂停或改向，或者存在当前确实无法消除的真实阻塞时，才结束本轮。"
-    "委派只是分工，不会缩小用户原始目标；骨架、空壳、最小示例或只显示欢迎信息的 demo 只能算阶段成果，"
-    "不能替代用户要求的完整功能、完整测试和可运行交付。"
-    "验证纪律：验证必须覆盖用户实际要求的可见行为和端到端入口；模块能导入、文件或类存在、"
+)
+_EXECUTION_VERIFICATION_SUFFIX = (
+    "的可见行为和端到端入口；模块能导入、文件或类存在、"
     "代码量或数量达标都只能算局部证据。安装、构建、启动或关键路径失败，说明目标仍未解决；"
     "修正后必须重跑同一入口，不能把 `|| true`、`|| echo` 等忽略失败包装后的外层成功当成内部成功。"
     "能暴露当前缺陷的有效测试不得仅为变绿而删除、跳过、放宽断言或改成只测存在；"
     "应该修实现，确实无法解决时保留真实失败并如实报告。"
+)
+DEFAULT_EXECUTION_PERSISTENCE = (
+    "执行纪律：只要当前用户目标仍有你已知的未完成部分，"
+    + _EXECUTION_PERSISTENCE_BODY
+    + "委派只是分工，不会缩小用户原始目标；"
+    + "骨架、空壳、最小示例或只显示欢迎信息的 demo 只能算阶段成果，"
+    + "不能替代用户要求的完整功能、完整测试和可运行交付。"
+    + "验证纪律：验证必须覆盖用户实际要求"
+    + _EXECUTION_VERIFICATION_SUFFIX
+)
+DEFAULT_DELEGATED_EXECUTION_PERSISTENCE = (
+    "执行纪律：只要直接父级当前 goal 仍有你已知的未完成部分，"
+    + _EXECUTION_PERSISTENCE_BODY
+    + "直接父级给你的当前 goal 是本轮完整工作边界；保留该 goal 的全部要求，"
+    "但不要因为根用户目标更大而实现未交给你的兄弟计划项；"
+    + "骨架、空壳、最小示例或只显示欢迎信息的 demo 只能算该 goal 的阶段成果，"
+    + "不能替代该 goal 要求的完整功能、完整测试和可运行交付。"
+    + "验证纪律：验证必须覆盖当前 goal 实际要求"
+    + _EXECUTION_VERIFICATION_SUFFIX
 )
 
 

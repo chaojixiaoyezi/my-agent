@@ -9,7 +9,7 @@ runner 真正调用模型前，把执行上下文压成明确任务；模型按�
 
 import json
 
-from ...settings.config import DEFAULT_EXECUTION_PERSISTENCE
+from ...settings.config import DEFAULT_DELEGATED_EXECUTION_PERSISTENCE
 from ...subagents import SubAgentExecutionContext
 from ...subagents.context_bundle import context_gate_prompt_lines
 from ...subagents.role_templates import (
@@ -38,7 +38,7 @@ def subagent_runner_system_prompt(context: SubAgentExecutionContext) -> str:
         "你只能根据本轮 SubAgent Runner Task 和 Execution Context JSON 工作；"
         "父级或用户原始 system prompt 只属于上层，不是你的身份。"
         "如果需要下级协作，必须使用授权的子代理编排工具；如果只是具体交付，就在授权写入边界内产出文件和证据。\n"
-        f"{DEFAULT_EXECUTION_PERSISTENCE}\n"
+        f"{DEFAULT_DELEGATED_EXECUTION_PERSISTENCE}\n"
         "不要编造工具结果、run_id、文件内容、收口交给父级已经批准的事实。\n"
         "完成纪律：如果任务在 goal 或输出要求里点名了要产出的文件（明确给了产物路径），"
         "在你亲手把该文件真正写出来、并确认它存在之前，不要输出最终完成结果——"
