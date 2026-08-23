@@ -6,6 +6,26 @@
 `task_node_closeout` 副本。canonical task/result 是唯一结果事实源；父代理通过结构化 status、blockers、
 findings、artifact refs 和 result payload 阅读子代理工作，再由模型向用户汇总。
 
+## 2026-08-23 Runner result commit fence
+
+- `runtime_db.repository.runner_result_commit_authority` 是 MANAGED runner 结果回写的 typed 查询口；
+  它同时返回 current attempt id/generation、run status 和 attempt status。文件投影中的 status 和模型正文
+  不能代替这个提交权。
+- `runner_result_service` 先校验 canonical `runner_active_attempt_id`，再校验 runtime.db。active run 只允许
+  exact running attempt；宿主正常 `done` 表示执行片段已干净返回，仍可投影 DONE/BLOCKED/FAILED 等
+  task 结果；宿主 `failed/cancelled` 只接受相同结果。迟到、重放、旧 generation 或与取消事实冲突的
+  回复只保留原始 runner archive，不覆盖 canonical task。
+- `ManagedOperationStore` 的只读权限门和 mutating claim 共用同一条规则：AgentRun 必须是
+  `created` 族且 exact AgentAttempt 必须是 `running`。终态记录保留 current pointer 仅供审计，
+  不代表还能调工具。
+- execution lock 的 lease 只是复核时钟；接管要求同时超过 grace 并由 PID/start token 证明
+  holder 已死。无法证明死亡时 fail-closed 保留原执行权。
+- 可续跑的 runtime status 不再让旧 AgentAttempt 永久 `running`：它用 `agent_attempt.completed`
+  关闭 exact attempt、撤销工具权限并保持 AgentRun `created`；下次 typed wake 必须显式创建新 attempt。
+- 已批准 capability 的当轮 BLOCKED 是可继续 attempt：`runner_result_state` 用 grant 时间和
+  request status 投影为 `PENDING`，当前 runner session 退出后复用 exact-run durable auto-start。真正仍 OPEN
+  的 request 才保持 `BLOCKED/等待父级授权`。
+
 ## 2026-08-23 普通计划停止核对入口
 
 - `agent_core/tool_loop/plan_closeout.py` 是普通 root/child 自然 final 前的唯一清单一致性入口；它使用

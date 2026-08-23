@@ -244,9 +244,9 @@ def test_audit_source_wake_uses_durable_background_autostart(monkeypatch):
 
 
 def test_blocked_closeout_after_in_run_auto_grant_marks_capability_request():
-    # 授权后续跑可达性钉子:运行中自动批的 grant,BLOCKED 收尾必须归为
-    # CAPABILITY_REQUEST(dispatch._blocked_after_capability_grant 才认),
-    # 续跑后没有新 grant 则不再触发(防无限续派)。
+    # 授权后续跑可达性钉子:运行中自动批的 grant 已解除外部阻塞，
+    # BLOCKED 收尾要投影为同 run PENDING，避免 conversation link 被关成
+    # blocked 后反过来卡住 dispatch；续跑后没有新 grant 则不再触发。
     with tempfile.TemporaryDirectory() as td:
         agent, task = _agent_and_task(td)
         request = _record_request(agent, task)
@@ -284,8 +284,10 @@ def test_blocked_closeout_after_in_run_auto_grant_marks_capability_request():
 
         reloaded = agent.subagents.load(task.id)
         _blocked_closeout(reloaded)
-        assert reloaded.status == "BLOCKED"
+        assert reloaded.status == "PENDING"
         assert reloaded.failure_type == "capability_request"
+        assert reloaded.blockers == []
+        assert reloaded.ended_at == 0.0
 
         # 续跑一轮后(attempt 开始时间已晚于 grant)再 BLOCKED → 不再归为能力等待。
         second = agent.subagents.load(task.id)

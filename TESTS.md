@@ -28,6 +28,17 @@ Gateway 可以并行，但不能作为“单 Gateway 多客户端”验收的替
 补代码、发技术推动指令或修改产物。单测、fake、renderer snapshot 和静态 gate 只作上线前护栏，不能替代
 上述真实 TUI 验收。
 
+Attempt 生命周期与授权续跑的 focused 回归：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_r103_closeout_gate.py agent_py_agent/tests/test_run_audit_terminal.py agent_py_agent/tests/test_operation_store_robustness.py agent_py_agent/tests/test_subagent_runtime_guards.py agent_py_agent/tests/test_subagent_runner_result_state.py agent_py_agent/tests/test_capability_auto_grant.py agent_py_agent/tests/test_manager_runner_capability_requests.py -q --tb=short
+```
+
+要同时证明：过期但活着的 holder 不可接管；只有超 grace+明确死亡可回收；终态
+run/attempt 不能调工具；可续跑结果关闭旧 attempt 且新 attempt 可重开；已取消的 exact attempt 不接受
+迟到 DONE；第一次结果收口后重放失败；当轮已获 grant 的 BLOCKED 转同 run PENDING 并保留可续派；
+终态 TUI 短句不得残留“模型已生成回复”。
+
 Prompt 4 r6 使用 `.7` 唯一 Gateway、MiniMax-M2.7、tmux `dsh-p4-lazygit-r6-ea91639` 和固定
 `jesseduffield/lazygit@ea916395`，只输入一次原样 prompt。10 个 child 全部自然 DONE、3 个真实 Compact，
 main 自主补派并把 Todo 全部打钩；但 canonical 产物只有 9,543 行、55 个空桩、5 个测试定义，8 项集成

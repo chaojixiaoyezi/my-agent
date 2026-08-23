@@ -1516,7 +1516,7 @@ def test_claim_with_parent_child_scopes_succeeds(tmp_path):
         conn.execute(
             "INSERT INTO agent_runs(agent_run_id, task_run_id, run_id, role, status, current_attempt_id, "
             "current_attempt_generation, workspace_epoch, created_at, updated_at) VALUES(?,?,?,?,?,?,1,1,?,?)",
-            (agent_run_id, task_run_id, run_id, "main", "running", attempt_id, now, now),
+            (agent_run_id, task_run_id, run_id, "main", "created", attempt_id, now, now),
         )
         conn.execute(
             "INSERT INTO agent_attempts(attempt_id, agent_run_id, attempt_generation, status, started_at) VALUES(?,?,1,'running',?)",

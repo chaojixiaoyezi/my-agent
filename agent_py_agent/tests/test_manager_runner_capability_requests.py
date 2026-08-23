@@ -179,7 +179,7 @@ def test_record_runner_result_pending_capability_stays_blocked(capability_manage
     assert capability_task.status == "BLOCKED"
     assert capability_task.failure_type == "capability_request"
     assert capability_task.status == "BLOCKED"
-    assert capability_task.current_step == "PENDING_CAPABILITY_REQUEST"
+    assert capability_task.current_step == "等待父级授权"
 
 
 def test_record_runner_result_does_not_treat_old_tool_wait_status_as_capability_request(

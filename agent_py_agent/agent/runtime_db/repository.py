@@ -94,6 +94,52 @@ def _runner_identity_metadata() -> dict[str, object]:
     }
 
 
+# LLM: A successful attempt close may leave the AgentRun resumable, but every
+# provably unstarted claim must still become a typed terminal operation in the
+# same transaction. Callers must pass either the run or exact attempt scope.
+# 函数用途: 将从未进入 handler 的工具占位安全取消，避免执行轮结束后残留 CLAIMED 记录。
+def _cancel_unstarted_tool_operations(
+    conn: sqlite3.Connection,
+    *,
+    agent_run_id: str,
+    now: float,
+    attempt_id: str = "",
+) -> None:
+    """Cancel CLAIMED operations whose handler provably never started."""
+    scope_sql = "attempt_id = ?" if attempt_id else "agent_run_id = ?"
+    scope_value = attempt_id or agent_run_id
+    rows = conn.execute(
+        "SELECT operation_id, operation_type FROM tool_operations "
+        f"WHERE {scope_sql} AND status = ? AND handler_started_at = 0",
+        (scope_value, OP_CLAIMED),
+    ).fetchall()
+    for row in rows:
+        result_json = json.dumps(
+            {
+                "schema": "managed_operation.v1",
+                "result": {
+                    "schema_version": "tool_execution_result.v1",
+                    "tool": str(row["operation_type"] or ""),
+                    "ok": False,
+                    "output": (
+                        "未启动(not_started): 执行轮已结束, 操作从未执行, "
+                        "无副作用(G.5 CANCELLED)"
+                    ),
+                    "error_code": "TOOL_OPERATION_CANCELLED_NOT_STARTED",
+                    "effect_outcome": "not_started",
+                    "handler_executed": False,
+                },
+                "error_code": "TOOL_OPERATION_CANCELLED_NOT_STARTED",
+            },
+            ensure_ascii=False,
+        )
+        conn.execute(
+            "UPDATE tool_operations SET status = ?, settled_at = ?, outcome_json = ? "
+            "WHERE operation_id = ? AND status = ? AND handler_started_at = 0",
+            (OP_CANCELLED, now, result_json, str(row["operation_id"]), OP_CLAIMED),
+        )
+
+
 class RuntimeRepository(
     RuntimeSchemaMixin,
     RuntimeOperationsMixin,
@@ -545,7 +591,7 @@ class RuntimeRepository(
           - 缺失 → INSERT 锁（归属新 attempt）；
           - 本实例持有 → 换代（compact/账本续跑轮 = 同一 worker 续跑）；
           - 他人持有且活跃 → RuntimeConflictError（并发双挂载恰一成功）；
-          - 过期或持主判死 → 接管（删旧锁建新锁）。
+          - 超过宽限期且持主确认死亡 → 接管（删旧锁建新锁）。
         锁释放四元组（scope+holder_instance+attempt_id+attempt_generation），
         settle 终态即释放；takeover/接管同事务删旧锁。
 
@@ -672,15 +718,28 @@ class RuntimeRepository(
             updated = conn.execute(
                 """
                 UPDATE agent_runs
-                SET current_attempt_id = ?, current_attempt_generation = ?, updated_at = ?
-                WHERE agent_run_id = ? AND current_attempt_generation = ?
+                SET current_attempt_id = ?, current_attempt_generation = ?,
+                    status = 'created', updated_at = ?
+                WHERE agent_run_id = ? AND current_attempt_generation = ? AND status = ?
                 """,
-                (attempt_id, generation, now, agent_run_id, generation - 1),
+                (attempt_id, generation, now, agent_run_id, generation - 1, status),
             ).rowcount
             if updated != 1:
                 raise RuntimeConflictError(
                     f"attempt CAS 失败: {agent_run_id} generation {generation - 1}->{generation}"
                 )
+            self._append_event_conn(
+                conn,
+                event_type="agent_run.started",
+                attempt_id=attempt_id,
+                agent_run_id=agent_run_id,
+                task_run_id=str(run["task_run_id"] or ""),
+                payload={
+                    "previous_status": status,
+                    "status": "created",
+                    "attempt_generation": generation,
+                },
+            )
             if old_attempt_id:
                 # outcome_json 保留 claim 元数据（holder/lease/resource_scopes/
                 # 幂等身份），takeover 原因并入 unknown_reason 键——整段覆盖会
@@ -743,16 +802,27 @@ class RuntimeRepository(
             return ""
 
     def _lock_is_takeoverable(self, lock: sqlite3.Row, now: float) -> bool:
-        """R1-03 锁接管判定：过期或持主判死 → 可接管；无法证明 → 保守拒。"""
-        if float(lock["lease_expires_at"] or 0) < now:
-            return True
-        return not holder_is_alive(int(lock["pid"] or 0),
-                                   str(lock["start_token"] or ""))
+        """R1-03 锁接管判定：超宽限期且持主已确认死亡才可接管。
+
+        lease 只是提示“应该再核对”，不是进程死亡证明。模型调用可能长于 lease，
+        活进程即使暂时没回到工具轮续租也必须继续持权；PID/start token 无法确认
+        死亡时一律保守拒绝。
+        """
+        lease_expired_beyond_grace = (
+            float(lock["lease_expires_at"] or 0)
+            < float(now) - EXEC_LOCK_GRACE_SECONDS
+        )
+        if not lease_expired_beyond_grace:
+            return False
+        return not holder_is_alive(
+            int(lock["pid"] or 0),
+            str(lock["start_token"] or ""),
+        )
 
     def has_active_exec_lock(self, agent_run_id: str, *, now: float | None = None) -> bool:
         """R1-03 驱动链 lease 感知：run 是否被活跃执行权锁持有。
 
-        活跃 = 锁存在且不可接管（lease 未过期且持主存活）→ worker 在跑，
+        活跃 = 锁存在且不可接管（尚未超宽限期，或持主仍存活）→ worker 在跑，
         发现层不得重复催。判定与 create_attempt 同一把尺（_lock_is_takeoverable）。
         """
         lock = self._runtime_connect().execute(
@@ -803,6 +873,52 @@ class RuntimeRepository(
                 (agent_run_id,),
             ).fetchone()
         return row
+
+    # LLM: Runner result projection must commit only against the exact current
+    # attempt and its typed run/attempt statuses; callers must not infer authority
+    # from the filesystem task projection or model-authored text.
+    # 函数用途: 查询某次子代理回写是否仍属于当前执行轮。
+    def runner_result_commit_authority(
+        self,
+        *,
+        run_id: str,
+        attempt_id: str,
+    ) -> dict[str, object] | None:
+        """Return typed commit authority for one exact runner attempt."""
+        normalized_run_id = str(run_id or "").strip()
+        normalized_attempt_id = str(attempt_id or "").strip()
+        if not normalized_run_id or not normalized_attempt_id:
+            return None
+        with self._runtime_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT ar.current_attempt_id, ar.current_attempt_generation,
+                       ar.status AS run_status,
+                       at.attempt_generation, at.status AS attempt_status
+                FROM agent_runs ar
+                JOIN agent_attempts at ON at.agent_run_id = ar.agent_run_id
+                WHERE ar.run_id = ? AND at.attempt_id = ?
+                """,
+                (normalized_run_id, normalized_attempt_id),
+            ).fetchone()
+        if row is None:
+            return None
+        current_attempt_id = str(row["current_attempt_id"] or "")
+        current_generation = int(row["current_attempt_generation"] or 0)
+        attempt_generation = int(row["attempt_generation"] or 0)
+        return {
+            "run_id": normalized_run_id,
+            "attempt_id": normalized_attempt_id,
+            "current_attempt_id": current_attempt_id,
+            "current_attempt_generation": current_generation,
+            "attempt_generation": attempt_generation,
+            "run_status": str(row["run_status"] or ""),
+            "attempt_status": str(row["attempt_status"] or ""),
+            "is_current": (
+                current_attempt_id == normalized_attempt_id
+                and current_generation == attempt_generation
+            ),
+        }
 
     def attempts_for_run(self, agent_run_id: str) -> list[sqlite3.Row]:
         with self._runtime_connection() as conn:
@@ -1085,6 +1201,92 @@ class RuntimeRepository(
         return list(rows)
 
     # -------------------------------------------------------- Run 级终态
+    # LLM: A model/tool execution slice can finish while its logical task remains
+    # resumable. Close only the exact current attempt and keep AgentRun created;
+    # a later typed wake must call create_attempt to regain tool authority.
+    # 函数用途: 结束一次可续跑的执行片段，释放本轮工具权限但不宣告整个任务完成。
+    def settle_agent_attempt(
+        self,
+        *,
+        agent_run_id: str,
+        attempt_id: str,
+        payload: dict[str, Any] | None = None,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Close one exact running attempt while leaving its AgentRun active."""
+        normalized_attempt_id = str(attempt_id or "").strip()
+        if not normalized_attempt_id:
+            return {"settled": False, "reason": "missing_attempt_id"}
+        now = time.time() if now is None else now
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT ar.task_run_id, ar.current_attempt_id, ar.status AS run_status, "
+                "aa.status AS attempt_status, aa.ended_at "
+                "FROM agent_runs ar JOIN agent_attempts aa "
+                "ON aa.attempt_id = ? AND aa.agent_run_id = ar.agent_run_id "
+                "WHERE ar.agent_run_id = ?",
+                (normalized_attempt_id, agent_run_id),
+            ).fetchone()
+            if row is None:
+                return {"settled": False, "reason": "no_such_attempt"}
+            if str(row["current_attempt_id"] or "") != normalized_attempt_id:
+                self._append_event_conn(
+                    conn,
+                    event_type="closeout_blocked",
+                    attempt_id=normalized_attempt_id,
+                    agent_run_id=agent_run_id,
+                    task_run_id=str(row["task_run_id"] or ""),
+                    payload={"reason": "stale_attempt", "scope": "attempt"},
+                )
+                return {"settled": False, "reason": "stale_attempt"}
+            run_status = str(row["run_status"] or "")
+            if run_status not in RUN_STATUS_LEGACY_CREATED:
+                return {"settled": False, "reason": "run_not_active"}
+            attempt_status = str(row["attempt_status"] or "")
+            if attempt_status != "running" or float(row["ended_at"] or 0) > 0:
+                return {"settled": False, "reason": "already_terminal"}
+            active_operations = conn.execute(
+                "SELECT COUNT(*) AS count FROM tool_operations "
+                "WHERE attempt_id = ? AND status IN (?, ?) AND handler_started_at > 0",
+                (normalized_attempt_id, OP_CLAIMED, OP_EXECUTING),
+            ).fetchone()
+            if int(active_operations["count"] or 0) > 0:
+                self._append_event_conn(
+                    conn,
+                    event_type="closeout_blocked",
+                    attempt_id=normalized_attempt_id,
+                    agent_run_id=agent_run_id,
+                    task_run_id=str(row["task_run_id"] or ""),
+                    payload={"reason": "active_tool_operations", "scope": "attempt"},
+                )
+                return {"settled": False, "reason": "active_tool_operations"}
+            _cancel_unstarted_tool_operations(
+                conn,
+                agent_run_id=agent_run_id,
+                attempt_id=normalized_attempt_id,
+                now=now,
+            )
+            updated = conn.execute(
+                "UPDATE agent_attempts SET status = 'done', ended_at = ? "
+                "WHERE attempt_id = ? AND status = 'running' AND ended_at = 0",
+                (now, normalized_attempt_id),
+            ).rowcount
+            if updated != 1:
+                return {"settled": False, "reason": "attempt_cas_conflict"}
+            conn.execute(
+                "DELETE FROM resource_locks WHERE canonical_scope = ? AND attempt_id = ?",
+                (exec_lock_scope(agent_run_id), normalized_attempt_id),
+            )
+            self._append_event_conn(
+                conn,
+                event_type="agent_attempt.completed",
+                attempt_id=normalized_attempt_id,
+                agent_run_id=agent_run_id,
+                task_run_id=str(row["task_run_id"] or ""),
+                payload={"status": "done", "run_status": run_status, **(payload or {})},
+            )
+        return {"settled": True, "attempt_id": normalized_attempt_id}
+
     def settle_agent_run(
         self,
         *,
@@ -1192,36 +1394,11 @@ class RuntimeRepository(
             # 降为 TOOL_OPERATION_OUTCOME_UNKNOWN; 写结构化取消结果
             # (schema_version/not_started/handler_executed=false/closeout 信息)
             # replay 才能如实读到「未启动已取消」而非降级 UNKNOWN。
-            _unstarted_ops = conn.execute(
-                "SELECT operation_id, operation_type FROM tool_operations "
-                "WHERE agent_run_id = ? AND status = ? AND handler_started_at = 0",
-                (agent_run_id, OP_CLAIMED),
-            ).fetchall()
-            for _op in _unstarted_ops:
-                _cancel_result = json.dumps(
-                    {
-                        "schema": "managed_operation.v1",
-                        "result": {
-                            "schema_version": "tool_execution_result.v1",
-                            "tool": str(_op["operation_type"] or ""),
-                            "ok": False,
-                            "output": (
-                                "未启动(not_started): 整轮零执行, 操作从未执行, "
-                                "无副作用(G.5 CANCELLED)"
-                            ),
-                            "error_code": "TOOL_OPERATION_CANCELLED_NOT_STARTED",
-                            "effect_outcome": "not_started",
-                            "handler_executed": False,
-                        },
-                        "error_code": "TOOL_OPERATION_CANCELLED_NOT_STARTED",
-                    },
-                    ensure_ascii=False,
-                )
-                conn.execute(
-                    "UPDATE tool_operations SET status = ?, settled_at = ?, "
-                    "outcome_json = ? WHERE operation_id = ?",
-                    (OP_CANCELLED, now, _cancel_result, str(_op["operation_id"])),
-                )
+            _cancel_unstarted_tool_operations(
+                conn,
+                agent_run_id=agent_run_id,
+                now=now,
+            )
             # R1-03：终态即释放执行权锁（不残留，同事务）
             conn.execute(
                 "DELETE FROM resource_locks WHERE canonical_scope = ?",
@@ -1373,8 +1550,9 @@ class RuntimeRepository(
         """R1-03 孤儿 attempt 兜底：执行权锁过期超出宽限期且 run 非终态。
 
         判据（v5 四件套之 1/3）：锁 lease_expires_at < now-grace（grace 默认
-        2×lease）且 run status ∈ {''/created}——run 已终态的锁本应由 settle
-        同事务释放，残留锁不构成孤儿（不重复收口已终态 run）。
+        2×lease）、PID/start token 明确证明持主已死，且 run status ∈
+        {''/created}。lease 过期但进程仍活不是孤儿；run 已终态的残留锁也不
+        重复收口。
         """
         now = time.time() if now is None else now
         grace = max(0, int(grace_seconds or EXEC_LOCK_GRACE_SECONDS))
@@ -1392,6 +1570,11 @@ class RuntimeRepository(
                 ).fetchone()
                 if run is None or str(run["status"] or "") not in RUN_STATUS_LEGACY_CREATED:
                     continue  # 终态/未知状态 run：不兜底（fail-closed）
+                if holder_is_alive(
+                    int(lock["pid"] or 0),
+                    str(lock["start_token"] or ""),
+                ):
+                    continue  # lease 过期不是死亡证明；活 worker 仍拥有本 attempt
                 orphans.append(lock)
         return orphans
 
@@ -1418,9 +1601,10 @@ class RuntimeRepository(
             ).fetchone()
             if lock is None:
                 return {"reclaimed": False, "reason": "no_exec_lock"}
-            if float(lock["lease_expires_at"] or 0) >= now and \
-                    holder_is_alive(int(lock["pid"] or 0),
-                                    str(lock["start_token"] or "")):
+            # LLM: 扫描与回收入口必须重复同一双条件，避免扫描后 holder 仍活
+            # 却因 lease 单独过期被收口。显式调用也不能绕过死亡证明。
+            # 函数用途: 只有超宽限期并确认进程死亡的锁才进入孤儿裁决。
+            if not self._lock_is_takeoverable(lock, now):
                 return {"reclaimed": False, "reason": "lock_active"}
             # 幂等闭环(2026-08-15): attempt 已标 unknown/recovered 终态 →
             # 不再重复扫描/重复标/重复写事件(孤儿回收每 ~5 分钟一趟)。

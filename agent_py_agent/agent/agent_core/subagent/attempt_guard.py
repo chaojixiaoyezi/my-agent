@@ -23,6 +23,10 @@ def stale_subagent_attempt_message(agent) -> str | None:
     )
 
 
+# LLM: The canonical active-attempt pointer is a positive execution grant. A
+# missing pointer after result projection means the scoped runner has ended;
+# never treat absence as permission to keep calling the model or tools.
+# 函数用途: 核对子代理当前执行轮是否仍有权继续，返回可直接用于拦截的结构化原因文本。
 def _stale_attempt_reason(agent) -> str | None:
     run_id = current_subagent_run_id(agent)
     attempt_id = current_subagent_attempt_id(agent)
@@ -39,6 +43,8 @@ def _stale_attempt_reason(agent) -> str | None:
     if attempt_id in set(getattr(task, "runner_abandoned_attempt_ids", []) or []):
         return f"runner attempt 已被废弃或超时: {attempt_id}"
     active_attempt_id = str(getattr(task, "runner_active_attempt_id", "") or "").strip()
+    if not active_attempt_id:
+        return f"runner attempt 已结束或不再活动: {attempt_id}"
     if active_attempt_id and active_attempt_id != attempt_id:
         return f"runner attempt 已不是当前活动 attempt: {attempt_id}"
     return None

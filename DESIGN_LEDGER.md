@@ -1265,3 +1265,25 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 权威边界不变：该接口仍是 owner/thread 鉴权后的只读投影，不产生任务、状态、完成、权限或恢复事实；
   本地可信 TUI 的 cwd 与远程用户 `owner_home` 隔离也不因传输优化改变。后续若升级为事件长连接，仍复用
   同一 canonical activity/notices，而不是建立第二份前端状态账。
+
+## 2026-08-23 会话运行时 式活轮权限与结果提交栅栏
+
+状态：本地实现与 focused 回归已通过；待与当前 Prompt 4 真机样本安全分隔后部署复验。
+
+- 会话运行时 对照结论：`TurnStarted/TurnComplete/TurnAborted/Error/Shutdown` 与活 thread watch 是执行生命周期
+  事实，不会因为一个时间计数器超期就单独宣告 agent 死亡。my-agent 适配为 lease 超 grace
+  且 PID/start-token 证明持主死亡才能接管；模型请求长于 lease 不再导致活 runner 被抢。
+- current pointer 只是审计引用，不是独立权限证明。工具执行同时要求 active AgentRun + running
+  exact AgentAttempt；终态 run/attempt 即使仍保留 pointer 也不得执行只读或写工具。合法后续 attempt 会显式
+  把 run 重开到 `created`，记录 `agent_run.started` 及 previous status/generation，之后可再次收口。
+- `unfinished/blocked` 等只代表任务仍可继续，不代表本次执行片段仍活着；它们现在用
+  `agent_attempt.completed` 关闭 exact attempt、释放工具权限，AgentRun 保持 `created`。下一次 typed wake
+  只能通过新 attempt 重获执行权，避免旧片段长期显示 running 或继续调工具。
+- runner result 与 runtime.db 建立双层 CAS：canonical active attempt 必须一致；MANAGED 还要求
+  exact current generation。宿主先收口的 `done/failed/cancelled` 只接受对应结果；旧 attempt 或已取消
+  后迟到的 `DONE` 不得复活 task。原始 provider 响应仍可留在 archive 供查错，但不获得 canonical 写权。
+- 能力申请已在当 attempt 获得 typed grant 后，原 `BLOCKED` 已没有待人处理的外部条件。它现投影为
+  同 run `PENDING`，退出 runner session 后由现有 durable auto-start 继续；这避免先把 conversation child link
+  写成 blocked，又被 conversation lifecycle gate 阻止续派的自相矛盾。
+- 展示层不再复用模型生成的 parsed status 作为终态活动短句。`current_step/current_tool` 由
+  typed task status/failure type 投影，生命周期和权限不读取这些中文展示文案。

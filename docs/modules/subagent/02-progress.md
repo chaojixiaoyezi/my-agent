@@ -1,5 +1,21 @@
 # Subagent Progress
 
+## 2026-08-23 会话运行时 式 attempt 存活与迟到结果收口（本地候选）
+
+- 当前 Prompt 4 并行真机暴露两类底层问题：长模型请求超过 60 秒锁租期时，活 runner
+  可能被旧逻辑误接管；已取消/失败的 exact attempt 还可能被迟到 `DONE` 重写。
+- 对照 会话运行时 typed `TurnStarted/TurnComplete/TurnAborted/Error/Shutdown` 后，执行锁改为“超宽限期
+  **且** PID/start-token 明确证明持主死亡”才能接管。lease 只触发复核，不单独充当死亡证明。
+- MANAGED 工具权限同时要求 AgentRun 仍 active、exact AgentAttempt 仍 running；current pointer 不再
+  足以证明权限。新 attempt 会把已终态 run 显式重开为 `created` 并记 `agent_run.started`。
+- unfinished/blocked 等可续跑结果只关闭本次 AgentAttempt 并记 `agent_attempt.completed`，不关闭任务；
+  下一轮由 typed wake 显式创建新 attempt，旧片段不会以 `running` 身份残留工具权限。
+- runner 结果写回增加 runtime.db 提交栅栏：只有 exact current generation 可写；已终态 run 只接受
+  与其 `done/failed/cancelled` 一致的结果。第一次结果清除 canonical active attempt 后，重放的结果和工具都被拒绝。
+- 运行中已落 typed grant 的 capability BLOCKED 不再关闭 conversation link；它投影为同 run
+  `PENDING`，在当前 session 退出后走 durable auto-start 继续。TUI 终态短句只来自 typed status/
+  failure type，显示“已完成/已停止/等待父级授权/额度不足”，不再残留“模型已生成回复”。
+
 ## 2026-08-23 r19 子代理/Compact 正样本与产物白屏反例
 
 - `e94f8ec` 已推送并部署到 `.7` 唯一 Gateway。fresh r19 只输入一次原样 Prompt 4，root 自主建立 8 项

@@ -104,6 +104,36 @@ def test_settle_idempotent_second_noop(repo):
     assert len(_completed_events(repo, rec["agent_run_id"])) == 1
 
 
+def test_new_attempt_reopens_terminal_run_and_can_settle_again(repo):
+    """显式新 attempt 是新一轮：原子重开 run，并由新 attempt 再次收口。"""
+    rec = _record(repo)
+    assert repo.settle_agent_run(
+        agent_run_id=rec["agent_run_id"], status="done"
+    )["settled"] is True
+
+    second = repo.create_attempt(rec["agent_run_id"])
+
+    reopened = _run_row(repo, rec["agent_run_id"])
+    assert reopened["status"] == "created"
+    started = repo._runtime_connect().execute(
+        "SELECT * FROM runtime_events WHERE agent_run_id = ? "
+        "AND event_type = 'agent_run.started' ORDER BY seq DESC LIMIT 1",
+        (rec["agent_run_id"],),
+    ).fetchone()
+    assert started is not None
+    assert started["attempt_id"] == second["attempt_id"]
+    assert '"previous_status": "done"' in started["payload_json"]
+
+    result = repo.settle_agent_run(
+        agent_run_id=rec["agent_run_id"],
+        status="done",
+        attempt_id=second["attempt_id"],
+    )
+    assert result["settled"] is True
+    assert _run_row(repo, rec["agent_run_id"])["status"] == "done"
+    assert len(_completed_events(repo, rec["agent_run_id"])) == 2
+
+
 def test_settle_first_write_wins_cas(repo):
     rec = _record(repo)
     repo.settle_agent_run(agent_run_id=rec["agent_run_id"], status="cancelled")
@@ -203,10 +233,10 @@ def test_main_settle_ok_maps_to_done(repo):
 
 
 def test_main_settle_unfinished_not_terminal(repo):
-    """R1-03：unfinished 是任务级可恢复语义（返工门会续跑），不落账。
+    """R1-03：unfinished 只关闭当前 attempt，不把任务 run 写成终态。
 
-    run 保持 created，发现层继续驱动；不写 completed 事件、不写
-    status_conflict 噪音（runtime_mixin 层直接过滤，不进 settle）。
+    run 保持 created，发现层下轮显式创建新 attempt；旧轮释放执行权，
+    不写 agent_run.completed 或 status_conflict。
     """
     rec = _record(repo)
     result = SimpleNamespace(
@@ -219,7 +249,36 @@ def test_main_settle_unfinished_not_terminal(repo):
     assert _run_row(repo, rec["agent_run_id"])["status"] == "created"
     assert _completed_events(repo, rec["agent_run_id"]) == []
     assert len(_attempts(repo, rec["agent_run_id"])) == 1
-    assert _attempts(repo, rec["agent_run_id"])[0]["status"] == "running"
+    assert _attempts(repo, rec["agent_run_id"])[0]["status"] == "done"
+    assert _attempts(repo, rec["agent_run_id"])[0]["ended_at"] > 0
+    event = repo._runtime_connect().execute(
+        "SELECT * FROM runtime_events WHERE agent_run_id = ? "
+        "AND event_type = 'agent_attempt.completed'",
+        (rec["agent_run_id"],),
+    ).fetchone()
+    assert event is not None
+    assert event["attempt_id"] == rec["attempt_id"]
+
+
+def test_resumable_attempt_close_allows_explicit_next_attempt(repo):
+    """可续跑 attempt 结束后必须先失权，再由新 attempt 原子重获执行权。"""
+    rec = _record(repo)
+    result = repo.settle_agent_attempt(
+        agent_run_id=rec["agent_run_id"],
+        attempt_id=rec["attempt_id"],
+        payload={"runtime_status": "unfinished"},
+    )
+    assert result["settled"] is True
+    assert repo.settle_agent_attempt(
+        agent_run_id=rec["agent_run_id"],
+        attempt_id=rec["attempt_id"],
+    ) == {"settled": False, "reason": "already_terminal"}
+
+    second = repo.create_attempt(rec["agent_run_id"])
+
+    assert second["status"] == "running"
+    assert second["attempt_id"] != rec["attempt_id"]
+    assert repo.current_attempt(rec["agent_run_id"])["attempt_id"] == second["attempt_id"]
 
 
 def test_main_settle_cli_oneshot_blocked_maps_failed(repo):

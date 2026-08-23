@@ -58,6 +58,7 @@ from .operations import (
     OP_FAILED,
     OP_SUCCEEDED,
     OP_UNKNOWN,
+    RUN_STATUS_LEGACY_CREATED,
     RuntimeConflictError,
 )
 
@@ -129,7 +130,8 @@ class ManagedOperationStore:
             row = conn.execute(
                 """
                 SELECT ar.current_attempt_id, ar.current_attempt_generation,
-                       tr.task_id
+                       ar.status AS agent_run_status,
+                       at.status AS attempt_status, tr.task_id
                 FROM agent_runs ar
                 JOIN agent_attempts at
                   ON at.attempt_id = ? AND at.agent_run_id = ar.agent_run_id
@@ -152,6 +154,7 @@ class ManagedOperationStore:
             raise AuthorityContextMissing(
                 f"调用者 attempt {attempt_id} 不是 current attempt {current}"
             )
+        _require_running_authority(row, request.run_id, attempt_id)
 
     # ------------------------------------------------------------- claim
     def claim_tool_operation(
@@ -177,7 +180,8 @@ class ManagedOperationStore:
                 """
                 SELECT ar.agent_run_id, ar.current_attempt_id,
                        ar.current_attempt_generation, ar.workspace_epoch,
-                       tr.task_id
+                       ar.status AS agent_run_status,
+                       at.status AS attempt_status, tr.task_id
                 FROM agent_runs ar
                 JOIN agent_attempts at
                   ON at.attempt_id = ? AND at.agent_run_id = ar.agent_run_id
@@ -200,6 +204,7 @@ class ManagedOperationStore:
                 raise AuthorityContextMissing(
                     f"调用者 attempt {attempt_id} 不是 current attempt {current}"
                 )
+            _require_running_authority(run, request.run_id, attempt_id)
             existing = conn.execute(
                 "SELECT * FROM tool_operations WHERE operation_id = ?",
                 (request.operation_id,),
@@ -589,6 +594,21 @@ class ManagedOperationStore:
 
 
 # ------------------------------------------------------------------ claim 内部
+
+# LLM: current pointer alone is insufficient authority because a terminal run
+# deliberately keeps that pointer for audit. Every handler-entry path must also
+# prove the exact attempt is running and the AgentRun remains active.
+# 函数用途: 在只读权威门和写工具 claim 的同一数据库快照中阻止终态继续执行。
+def _require_running_authority(row: sqlite3.Row, run_id: str, attempt_id: str) -> None:
+    run_status = str(row["agent_run_status"] or "")
+    attempt_status = str(row["attempt_status"] or "")
+    if run_status not in RUN_STATUS_LEGACY_CREATED or attempt_status != "running":
+        raise AuthorityContextMissing(
+            "MANAGED 工具调用已失去运行权: "
+            f"run={run_id} status={run_status or 'created'} "
+            f"attempt={attempt_id} attempt_status={attempt_status or 'unknown'}"
+        )
+
 
 def _validate_claim_request(request: ToolOperationClaimRequest) -> None:
     required = {

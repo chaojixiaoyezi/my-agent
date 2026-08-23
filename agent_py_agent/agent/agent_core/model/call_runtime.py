@@ -309,6 +309,15 @@ def model_call_summary(
     ]
     if not records:
         return _empty_model_call_summary()
+    return _retained_model_call_summary(records)
+
+
+# LLM: This path exists only for legacy/test ledgers without cumulative scope;
+# it must preserve the public summary schema while staying independent of the
+# bounded-record aggregate implementation.
+# 函数用途: 从仍保留的模型调用明细计算兼容汇总，供旧账本和测试注入使用。
+def _retained_model_call_summary(records: list[Any]) -> dict[str, object]:
+    """Build a compatibility summary from retained model-call records."""
     logical_ids = {
         str(record.metadata.get("logical_call_id") or record.call_id)
         for record in records
@@ -326,16 +335,14 @@ def model_call_summary(
         max(0, int(record.accounted_input_tokens)) for record in records
     )
     output_tokens = sum(max(0, int(record.output_tokens)) for record in records)
-    provider_records = [
-        record
+    provider_usage_call_count = sum(
+        record.status == "finished" and record.provider_usage_reported
         for record in records
-        if record.status == "finished" and record.provider_usage_reported
-    ]
-    estimated_records = [
-        record
+    )
+    estimated_usage_call_count = sum(
+        record.status == "finished" and not record.provider_usage_reported
         for record in records
-        if record.status == "finished" and not record.provider_usage_reported
-    ]
+    )
     return {
         "schema": "model_call_summary.v1",
         "logical_model_turn_count": len(logical_ids),
@@ -355,44 +362,55 @@ def model_call_summary(
         "cache_creation_input_tokens": sum(
             max(0, int(record.cache_creation_input_tokens)) for record in records
         ),
-        "provider_usage_call_count": sum(
-            record.status == "finished" and record.provider_usage_reported
-            for record in records
-        ),
-        "estimated_usage_call_count": sum(
-            record.status == "finished" and not record.provider_usage_reported
-            for record in records
-        ),
-        "usage_breakdown": {
-            "schema": "model_usage_breakdown.v1",
-            "provider": {
-                "input_tokens": sum(
-                    max(0, int(record.accounted_input_tokens))
-                    for record in provider_records
-                ),
-                "output_tokens": sum(
-                    max(0, int(record.output_tokens)) for record in provider_records
-                ),
-                "cache_read_input_tokens": sum(
-                    max(0, int(record.cached_input_tokens))
-                    for record in provider_records
-                ),
-                "cache_write_input_tokens": sum(
-                    max(0, int(record.cache_creation_input_tokens))
-                    for record in provider_records
-                ),
-                "call_count": len(provider_records),
-            },
-            "estimated": {
-                "input_tokens": sum(
-                    max(0, int(record.accounted_input_tokens))
-                    for record in estimated_records
-                ),
-                "output_tokens": sum(
-                    max(0, int(record.output_tokens)) for record in estimated_records
-                ),
-                "call_count": len(estimated_records),
-            },
+        "provider_usage_call_count": provider_usage_call_count,
+        "estimated_usage_call_count": estimated_usage_call_count,
+        "usage_breakdown": _retained_usage_breakdown(records),
+    }
+
+
+# LLM: Provider-reported usage and fallback estimates are disjoint accounting
+# partitions. Never fill a provider bucket from an estimate in this projection.
+# 函数用途: 将保留明细按供应商真值和本地估算拆账，供兼容汇总展示成本口径。
+def _retained_usage_breakdown(records: list[Any]) -> dict[str, object]:
+    """Partition retained records into provider and estimated usage."""
+    provider_records = [
+        record
+        for record in records
+        if record.status == "finished" and record.provider_usage_reported
+    ]
+    estimated_records = [
+        record
+        for record in records
+        if record.status == "finished" and not record.provider_usage_reported
+    ]
+    return {
+        "schema": "model_usage_breakdown.v1",
+        "provider": {
+            "input_tokens": sum(
+                max(0, int(record.accounted_input_tokens))
+                for record in provider_records
+            ),
+            "output_tokens": sum(
+                max(0, int(record.output_tokens)) for record in provider_records
+            ),
+            "cache_read_input_tokens": sum(
+                max(0, int(record.cached_input_tokens)) for record in provider_records
+            ),
+            "cache_write_input_tokens": sum(
+                max(0, int(record.cache_creation_input_tokens))
+                for record in provider_records
+            ),
+            "call_count": len(provider_records),
+        },
+        "estimated": {
+            "input_tokens": sum(
+                max(0, int(record.accounted_input_tokens))
+                for record in estimated_records
+            ),
+            "output_tokens": sum(
+                max(0, int(record.output_tokens)) for record in estimated_records
+            ),
+            "call_count": len(estimated_records),
         },
     }
 

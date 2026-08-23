@@ -220,17 +220,17 @@ def test_b_same_instance_rotation_allowed(repo):
     assert lock["holder_instance"] == repo.instance_id
 
 
-def test_b_create_attempt_takes_over_expired_lock(repo, tmp_path):  # RED
-    """过期执行权锁 → 接管（删旧锁建新锁），新 attempt 成为唯一持锁者。"""
+def test_b_create_attempt_rejects_expired_lock_while_holder_alive(repo, tmp_path):
+    """lease 过期但 holder 仍活 → 拒绝；长模型调用不能被计时器误杀。"""
     _, _, run = _make_task_with_run(repo)
     first = repo.create_attempt(run["agent_run_id"])
     _expire_lock(repo, run["agent_run_id"])
     other = _other_repo(tmp_path)
-    attempt = other.create_attempt(run["agent_run_id"])
-    assert attempt["attempt_generation"] == 2
+    with pytest.raises(RuntimeConflictError):
+        other.create_attempt(run["agent_run_id"])
     lock = repo.lock_for_scope(_exec_scope(run["agent_run_id"]))
-    assert lock["attempt_id"] == attempt["attempt_id"]
-    assert lock["holder_instance"] == other.instance_id
+    assert lock["attempt_id"] == first["attempt_id"]
+    assert lock["holder_instance"] == repo.instance_id
 
 
 def _expire_lock(repo, agent_run_id: str) -> None:
@@ -246,15 +246,15 @@ def _expire_lock(repo, agent_run_id: str) -> None:
         conn.close()
 
 
-def test_b_create_attempt_takes_over_dead_holder_lock(repo, tmp_path):  # RED
-    """持主进程已死（pid 不存在）→ 接管；僵尸锁不得阻塞恢复。"""
+def test_b_create_attempt_takes_over_expired_dead_holder_lock(repo, tmp_path):
+    """锁超宽限期且持主进程已死 → 接管；两个条件缺一不可。"""
     _, _, run = _make_task_with_run(repo)
     first = repo.create_attempt(run["agent_run_id"])
-    # 锁未过期但持主 pid 已死（进程不存在）→ 视为可接管
+    # 进程不存在且 lease 已远超宽限期 → 视为可接管。
     _insert_exec_lock(repo, agent_run_id=run["agent_run_id"],
                       holder_instance="dead-holder",
                       attempt_id=first["attempt_id"], generation=1,
-                      lease_expires_at=time.time() + 3600,
+                      lease_expires_at=time.time() - 3600,
                       pid=999999, start_token="stale-token")
     other = _other_repo(tmp_path)
     attempt = other.create_attempt(run["agent_run_id"])
@@ -283,8 +283,17 @@ def test_c_settle_rejected_for_stale_attempt(repo, tmp_path):  # RED
     """run 已被接管换代后，旧 attempt 的 settle 必须拒（stale_attempt）+ 诊断事件。"""
     _, _, run = _make_task_with_run(repo)
     first = repo.create_attempt(run["agent_run_id"])
-    # 锁过期 → 另一实例接管换代（活跃锁不会被接管——这正是 test_b 的拒）
-    _expire_lock(repo, run["agent_run_id"])
+    # 超宽限期且 holder 明确死亡 → 另一实例接管换代。
+    _insert_exec_lock(
+        repo,
+        agent_run_id=run["agent_run_id"],
+        holder_instance="dead-holder",
+        attempt_id=first["attempt_id"],
+        generation=1,
+        lease_expires_at=time.time() - 3600,
+        pid=999999,
+        start_token="dead-token",
+    )
     other = _other_repo(tmp_path)
     other.create_attempt(run["agent_run_id"])  # 接管换代（同库，第二实例）
     result = repo.settle_agent_run(
@@ -438,6 +447,27 @@ def test_g_active_lock_not_orphan(repo):
                       pid=os.getpid(), start_token="tok")
     orphans = repo.find_orphaned_attempts(grace_seconds=0)
     assert not any(o["attempt_id"] == attempt["attempt_id"] for o in orphans)
+
+
+def test_g_expired_live_lock_not_orphan(repo):
+    """lease 超宽限期但 holder 仍活 → 不是孤儿，也不能进入自动回收。"""
+    _, _, run = _make_task_with_run(repo)
+    attempt = repo.create_attempt(run["agent_run_id"])
+    _insert_exec_lock(
+        repo,
+        agent_run_id=run["agent_run_id"],
+        holder_instance="live-holder",
+        attempt_id=attempt["attempt_id"],
+        generation=1,
+        lease_expires_at=time.time() - 3600,
+        pid=os.getpid(),
+        start_token="",
+    )
+    orphans = repo.find_orphaned_attempts(grace_seconds=0)
+    assert not any(o["attempt_id"] == attempt["attempt_id"] for o in orphans)
+    assert repo.reclaim_orphaned_attempt(
+        attempt["attempt_id"], operator="startup"
+    ) == {"reclaimed": False, "reason": "lock_active"}
 
 
 def test_g_holder_liveness_start_token(repo):  # RED

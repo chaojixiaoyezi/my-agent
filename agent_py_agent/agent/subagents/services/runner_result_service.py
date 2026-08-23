@@ -13,7 +13,7 @@ from ..manager_runner_result_payload import (
     _ExtractedOutput,
     apply_status_and_build_payload,
 )
-from ..models import SubAgentParsedOutput, SubAgentRunnerResult, SubAgentTask
+from ..models import SubAgentParsedOutput, SubAgentRunnerResult, SubAgentTask, TaskStatus
 from ..result_processors import (
     RunnerResultContext,
     _append_runner_debrief_content,
@@ -137,7 +137,8 @@ class SubAgentRunnerResultService:
         parsed = params.parsed
         if parsed.found and parsed.ok:
             task.latest_summary = parsed.summary or task.latest_summary
-            task.current_step = parsed.status or task.status
+            if str(task.status or "").strip().upper() == TaskStatus.RUNNING.value:
+                task.current_step = parsed.status or task.status
         for blocker in output_payload.get("blockers", []) or []:
             text = str(blocker or "").strip()
             if text and text not in task.blockers:
@@ -165,7 +166,7 @@ class SubAgentRunnerResultService:
         params: RecordRunnerResultParams,
     ) -> SubAgentRunnerResult:
         task = self.manager.load(params.run_id)
-        stale_result = self._check_stale_runner_result(task, params.attempt_id, params.dry_run)
+        stale_result = self._check_stale_runner_result(task, params)
         if stale_result:
             return stale_result
 
@@ -230,7 +231,18 @@ class SubAgentRunnerResultService:
         build_ctx.params = params
         return output_payload, build_ctx
 
-    def _check_stale_runner_result(self, task, attempt_id, dry_run):
+    # LLM: Canonical task projection and runtime.db form one commit fence. In
+    # MANAGED mode an exact current attempt may project while active, after a
+    # successful completed attempt, or after a matching cancelled/failed
+    # settlement; a mismatched late result is archival evidence only.
+    # 函数用途: 在写入子代理最终状态前，拦住旧轮次和与已取消/失败事实冲突的迟到回复。
+    def _check_stale_runner_result(
+        self,
+        task: SubAgentTask,
+        params: RecordRunnerResultParams,
+    ) -> SubAgentRunnerResult | None:
+        attempt_id = params.attempt_id
+        dry_run = params.dry_run
         if not dry_run and (_task_text_attr(task, "status").upper() == "TAKEN_OVER" or _task_text_attr(task, "takeover_by")):
             return self._make_quick_result(task, dry_run, False, "ignored runner result for already taken-over run")
         normalized_attempt_id = str(attempt_id or "").strip()
@@ -238,9 +250,51 @@ class SubAgentRunnerResultService:
             if normalized_attempt_id in _task_list_attr(task, "runner_abandoned_attempt_ids"):
                 return self._make_quick_result(task, dry_run, False, f"ignored stale runner result for abandoned attempt {normalized_attempt_id}")
             active_attempt_id = _task_text_attr(task, "runner_active_attempt_id")
+            if not active_attempt_id:
+                return self._make_quick_result(task, dry_run, False, f"ignored duplicate runner result for inactive attempt {normalized_attempt_id}")
             if active_attempt_id and active_attempt_id != normalized_attempt_id:
                 return self._make_quick_result(task, dry_run, False, f"ignored stale runner result for non-active attempt {normalized_attempt_id}")
+            conflict = self._managed_runtime_result_conflict(task, params)
+            if conflict:
+                return self._make_quick_result(task, dry_run, False, conflict)
         return None
+
+    # LLM: Runtime terminal states are host-owned facts. A cleanly completed
+    # execution may still project any typed task outcome (DONE/BLOCKED/FAILED),
+    # while host cancellation/failure only accepts its matching task outcome.
+    # 函数用途: 核对 runtime.db 的当前 attempt 与本次回写是否同一事实。
+    def _managed_runtime_result_conflict(
+        self,
+        task: SubAgentTask,
+        params: RecordRunnerResultParams,
+    ) -> str:
+        repo = getattr(self.manager, "runtime_db", None)
+        if repo is None or params.dry_run:
+            return ""
+        authority = repo.runner_result_commit_authority(
+            run_id=str(task.id or ""),
+            attempt_id=str(params.attempt_id or ""),
+        )
+        if authority is None:
+            return f"ignored runner result without runtime authority for attempt {params.attempt_id}"
+        if not bool(authority.get("is_current")):
+            return f"ignored stale runner result for superseded attempt {params.attempt_id}"
+        run_status = str(authority.get("run_status") or "")
+        attempt_status = str(authority.get("attempt_status") or "")
+        if run_status in {"", "created"} and attempt_status == "running":
+            return ""
+        incoming_terminal = _runner_runtime_terminal_status(params)
+        if run_status == "done" and attempt_status == "done":
+            return ""
+        if run_status in {"failed", "cancelled"} and (
+            attempt_status == run_status and incoming_terminal == run_status
+        ):
+            return ""
+        return (
+            "ignored runner result conflicting with runtime terminal fact "
+            f"run={run_status or 'unknown'} attempt={attempt_status or 'unknown'} "
+            f"incoming={incoming_terminal or 'nonterminal'}"
+        )
 
     def _make_quick_result(self, task, dry_run, ok, message):
         return SubAgentRunnerResult(
@@ -265,3 +319,27 @@ def _task_list_attr(task, name: str) -> list[str]:
     if not isinstance(value, list | tuple | set):
         return []
     return [str(item) for item in value if str(item or "").strip()]
+
+
+# LLM: This mapping consumes only the structured runner status contract. It is
+# deliberately narrower than task display statuses and never reads response text.
+# 函数用途: 把子代理回写状态归一到 runtime.db 的三种终态，供冲突校验。
+def _runner_runtime_terminal_status(params: RecordRunnerResultParams) -> str:
+    raw_status = str(params.status or "").strip().upper()
+    if not raw_status and params.structured_output is not None:
+        raw_status = str(getattr(params.structured_output, "status", "") or "").strip().upper()
+    if raw_status == TaskStatus.DONE.value:
+        return "done"
+    if raw_status in {
+        TaskStatus.CANCELLED.value,
+        TaskStatus.ABANDONED.value,
+        TaskStatus.TAKEN_OVER.value,
+    }:
+        return "cancelled"
+    if raw_status in {
+        TaskStatus.FAILED.value,
+        TaskStatus.TIMEOUT.value,
+        TaskStatus.CHANNEL_ERROR.value,
+    }:
+        return "failed"
+    return ""

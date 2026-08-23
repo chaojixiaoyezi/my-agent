@@ -93,6 +93,7 @@ def apply_runner_result_fields(params: RunnerResultFieldParams) -> None:
         task.result = message
     _apply_runner_timestamps(task, params.now)
     _apply_runner_attempt_fields(RunnerAttemptParams(task, dry_run, ok, message, params.now))
+    apply_runner_display_status(task)
     _release_source_worker_lease_after_result(task, dry_run=dry_run)
     _reclaim_runner_launch_if_requeued(task)
     if ok and not dry_run:
@@ -101,6 +102,43 @@ def apply_runner_result_fields(params: RunnerResultFieldParams) -> None:
         record_source_worker_progress(task, now=params.now)
     result_meta["ok"] = ok
     result_meta["message"] = message
+
+
+# LLM: Display text is a projection of typed status/failure facts only. It may
+# never copy model prose into a terminal activity label or affect lifecycle.
+# 函数用途: 把子代理结束、等待或失败状态投影成 TUI 可读的当前步骤。
+def apply_runner_display_status(task: object) -> None:
+    """Project typed lifecycle facts into a short display-only activity label."""
+    status = str(getattr(task, "status", "") or "").strip().upper()
+    if status == TaskStatus.RUNNING.value:
+        return
+    failure_type = str(getattr(task, "failure_type", "") or "").strip()
+    detail_by_failure = {
+        FailureType.CAPABILITY_REQUEST.value: "等待父级授权",
+        FailureType.PERMISSION_BLOCKED.value: "等待授权",
+        FailureType.WRITE_PERMISSION_BLOCKED.value: "等待授权",
+        FailureType.PROVIDER_QUOTA_EXHAUSTED.value: "额度不足",
+        FailureType.STRUCTURED_OUTPUT_PARSE_ERROR.value: "结果格式异常",
+    }
+    label = detail_by_failure.get(failure_type, "")
+    if not label:
+        label = {
+            TaskStatus.DONE.value: "已完成",
+            TaskStatus.FAILED.value: "失败",
+            TaskStatus.TIMEOUT.value: "超时",
+            TaskStatus.CHANNEL_ERROR.value: "连接失败",
+            TaskStatus.CANCELLED.value: "已停止",
+            TaskStatus.ABANDONED.value: "已停止",
+            TaskStatus.TAKEN_OVER.value: "已接管",
+            TaskStatus.BLOCKED.value: "等待处理",
+            TaskStatus.PAUSED.value: "已暂停",
+            TaskStatus.PENDING.value: "等待继续",
+            TaskStatus.PLANNING.value: "等待继续",
+        }.get(status, status or "")
+    if not label:
+        return
+    task.current_step = label
+    task.current_tool = ""
 
 
 def _consume_source_binding_transition_response(task: object) -> bool:
@@ -315,7 +353,15 @@ def _apply_structured_failure_state(task, current_failure_type: str, parsed) -> 
         _append_open_request_blocker(task)
         return
     if _blocked_with_attempt_fresh_grant(task):
+        # The requested capability is already present as a typed grant, so this
+        # attempt has no unresolved external blocker.  Requeue the same run and
+        # let the post-session durable starter continue it; keeping BLOCKED would
+        # also close its conversation link and make the dispatch gate hold it.
+        task.status = TaskStatus.PENDING.value
+        task.verification_status = VerificationStatus.UNVERIFIED.value
         task.failure_type = FailureType.CAPABILITY_REQUEST.value
+        task.blockers = []
+        task.ended_at = 0.0
         return
     if task_has_failure_status(task):
         task.failure_type = task.failure_type or failure_type_from_task_status(task.status)

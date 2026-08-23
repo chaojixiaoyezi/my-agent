@@ -137,6 +137,83 @@ def test_p2_claim_rejected_for_stale_attempt(tmp_path):
     assert repo.operations_for_attempt("attempt-stale") == []
 
 
+# LLM: The current pointer is retained after terminalization for audit, so this
+# regression must prove both read-only authority and mutating claim check statuses.
+# 函数用途: 验证终态 run/attempt 不能在原指针下继续执行任何新工具。
+def test_p2_terminal_attempt_cannot_authorize_or_claim_tool(tmp_path):
+    repo = _repo(tmp_path)
+    agent_run_id, attempt_id = _direct_register_chain(
+        repo, "run-p2-terminal", task_id="task-p2-terminal"
+    )
+    agent = _agent(repo=repo, tools=None, store=_store(tmp_path), root=tmp_path)
+    store_obj = select_operation_store(agent)
+    settled = repo.settle_agent_run(
+        agent_run_id=agent_run_id,
+        status="done",
+        attempt_id=attempt_id,
+    )
+    assert settled["settled"] is True
+
+    with pytest.raises(AuthorityContextMissing):
+        store_obj.require_authority(
+            ToolOperationAuthorityRequest(
+                owner_id="owner-a",
+                run_id="run-p2-terminal",
+                task_id="task-p2-terminal",
+                operation_id="read-p2-terminal",
+                tool_name="read_file",
+                attempt_id=attempt_id,
+            )
+        )
+    with pytest.raises(AuthorityContextMissing):
+        store_obj.claim_tool_operation(
+            ToolOperationClaimRequest(
+                owner_id="owner-a",
+                run_id="run-p2-terminal",
+                task_id="task-p2-terminal",
+                operation_id="write-p2-terminal",
+                tool="write_file",
+                args_hash="sha256:terminal",
+                idempotency_key="key-p2-terminal",
+                idempotency_scope="operation",
+                idempotency_namespace="write_file",
+                holder=new_tool_operation_holder(),
+                lease_expires_at=9999999999.0,
+                attempt_id=attempt_id,
+            )
+        )
+    assert repo.operations_for_attempt(attempt_id) == []
+
+
+def test_p2_terminal_attempt_status_blocks_tool_even_if_run_is_active(tmp_path):
+    """attempt 终态本身也是 fence，不能只检查 AgentRun status。"""
+    repo = _repo(tmp_path)
+    _agent_run_id, attempt_id = _direct_register_chain(
+        repo, "run-p2-attempt-terminal", task_id="task-p2-attempt-terminal"
+    )
+    with repo._runtime_connection() as conn:
+        conn.execute(
+            "UPDATE agent_attempts SET status = 'cancelled', ended_at = 1 "
+            "WHERE attempt_id = ?",
+            (attempt_id,),
+        )
+        conn.commit()
+    agent = _agent(repo=repo, tools=None, store=_store(tmp_path), root=tmp_path)
+    store_obj = select_operation_store(agent)
+
+    with pytest.raises(AuthorityContextMissing):
+        store_obj.require_authority(
+            ToolOperationAuthorityRequest(
+                owner_id="owner-a",
+                run_id="run-p2-attempt-terminal",
+                task_id="task-p2-attempt-terminal",
+                operation_id="read-p2-attempt-terminal",
+                tool_name="read_file",
+                attempt_id=attempt_id,
+            )
+        )
+
+
 # ============================================================== P3：UNKNOWN 单事务
 # 期望（修后）：finish(UNKNOWN) 在 ManagedOperationStore 单连接单事务内联完成
 # （行 UNKNOWN + 锁删除 + mutation DIRTY + payload 保留），不调用 repo 独立方法

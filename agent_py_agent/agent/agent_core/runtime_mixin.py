@@ -415,8 +415,9 @@ def _settle_main_agent_run_status(
 
     R1-03（收口闸）：unfinished/blocked/needs_user_input/approval_required
     等是任务级可恢复 runtime_status（返工门/等待用户输入后还会续跑），
-    不是 agent_runs.status 合法终态——一律不 settle，run 保持 created，
-    发现层继续驱动。LOCAL_UNMANAGED（无 repo）/查无 run → noop。
+    不是 agent_runs.status 合法终态；它们只关闭本次 AgentAttempt、释放工具
+    权限，run 保持 created，发现层下轮显式 create_attempt 后再继续。
+    LOCAL_UNMANAGED（无 repo）/查无 run → noop。
     审计是附加保证，任何失败绝不反噬执行路径。
 
     CLI 一次性 run 例外（问题C同族, 2026-08-14 真机）：source=cli_run 的
@@ -455,9 +456,9 @@ def _settle_main_agent_run_status(
             if not should:
                 terminal = "failed"
             else:
-                return  # 可续跑族首轮不落账, resume_loop 续跑
+                terminal = ""  # 可续跑族只关闭 attempt，run 留给 resume_loop
         else:
-            return  # R1-03：非终态不落账（unfinished 等），避免 status_conflict 噪音
+            terminal = ""  # 非终态只关闭 attempt，避免 status_conflict 噪音
     if not run_id or not attempt_id:
         return
     repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
@@ -467,17 +468,26 @@ def _settle_main_agent_run_status(
         row = repo.agent_run_for_run_id(run_id)
         if row is None:
             return
-        repo.settle_agent_run(
-            agent_run_id=str(row["agent_run_id"]),
-            status=terminal,
-            payload={
-                "status": terminal,
-                "runtime_status": runtime_status,
-                "runtime_reason": runtime_reason,
-                "runtime_source": runtime_source,
-                "tool_rounds": int(tool_rounds or 0),
-            },
-        )
+        payload = {
+            "status": terminal or "attempt_done",
+            "runtime_status": runtime_status,
+            "runtime_reason": runtime_reason,
+            "runtime_source": runtime_source,
+            "tool_rounds": int(tool_rounds or 0),
+        }
+        if terminal:
+            repo.settle_agent_run(
+                agent_run_id=str(row["agent_run_id"]),
+                status=terminal,
+                attempt_id=attempt_id,
+                payload=payload,
+            )
+        else:
+            repo.settle_agent_attempt(
+                agent_run_id=str(row["agent_run_id"]),
+                attempt_id=attempt_id,
+                payload=payload,
+            )
     except Exception:  # noqa: BLE001 审计收口失败不回吐执行
         pass
 

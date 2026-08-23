@@ -18,6 +18,9 @@ from agent_py_agent.agent.agent_core.tool_loop.completion import (
 )
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.subagents.manager import SubAgentManager
+from agent_py_agent.agent.subagents.manager_runner_result_payload import (
+    RecordRunnerResultParams,
+)
 
 
 class _ExplodingBackend:
@@ -76,6 +79,26 @@ def test_attempt_guard_blocks_when_runner_state_unreadable() -> None:
     assert "attempt 状态读取失败" in message
 
 
+def test_attempt_guard_blocks_after_canonical_attempt_is_cleared(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    task = manager.create_run(goal="写一个文件", thought="模拟已收口轮次", plan=["write"])
+    prepared = manager.lifecycle.prepare_runner_attempt(task.id)
+    attempt_id = prepared.runner_active_attempt_id
+    prepared.runner_active_attempt_id = ""
+    manager.save(prepared)
+    agent = SimpleNamespace(
+        subagents=manager,
+        _current_subagent_run_id=task.id,
+        _current_subagent_attempt_id=attempt_id,
+    )
+
+    result = stale_subagent_attempt_result(agent, {"tool": "write_file", "path": "out.txt"})
+
+    assert result is not None
+    assert result.error_code == "RUNNER_ATTEMPT_STALE"
+    assert "已结束或不再活动" in result.output
+
+
 def test_stale_attempt_guard_stops_tool_loop_before_next_model_call(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     task = manager.create_run(
@@ -103,6 +126,125 @@ def test_stale_attempt_guard_stops_tool_loop_before_next_model_call(tmp_path):
     assert response is not None
     assert "旧 runner attempt 已停止" in response.text
     assert "父级接管" in response.text
+
+
+def test_duplicate_runner_result_is_rejected_after_first_projection(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    task = manager.create_run(goal="长任务", thought="模拟重复收口", plan=["执行"])
+    prepared = manager.lifecycle.prepare_runner_attempt(task.id)
+    params = RecordRunnerResultParams(
+        run_id=task.id,
+        attempt_id=prepared.runner_active_attempt_id,
+        dry_run=False,
+        ok=True,
+        message="done",
+        status="DONE",
+    )
+
+    first = manager.runner_result.record_runner_result(params)
+    second = manager.runner_result.record_runner_result(params)
+
+    assert first.ok is True
+    assert second.ok is False
+    assert "inactive attempt" in second.message
+    assert manager.load(task.id).status == "DONE"
+
+
+def test_late_done_result_cannot_overwrite_runtime_cancelled_attempt(tmp_path):
+    manager = SubAgentManager(
+        tmp_path / "subs",
+        owner_home_dir=str(tmp_path / "owner"),
+    )
+    task = manager.create_run(goal="长任务", thought="模拟取消后迟到回复", plan=["执行"])
+    prepared = manager.lifecycle.prepare_runner_attempt(task.id)
+    attempt_id = prepared.runner_active_attempt_id
+    run = manager.runtime_db.agent_run_for_run_id(task.id)
+    assert run is not None
+    manager.runtime_db.settle_agent_run(
+        agent_run_id=str(run["agent_run_id"]),
+        status="cancelled",
+        attempt_id=attempt_id,
+    )
+    prepared.status = "CANCELLED"
+    manager.save(prepared)
+
+    result = manager.runner_result.record_runner_result(
+        RecordRunnerResultParams(
+            run_id=task.id,
+            attempt_id=attempt_id,
+            dry_run=False,
+            ok=True,
+            message="late done",
+            status="DONE",
+        )
+    )
+
+    assert result.ok is False
+    assert "conflicting with runtime terminal fact" in result.message
+    assert manager.load(task.id).status == "CANCELLED"
+
+
+def test_matching_done_result_projects_after_runtime_settlement(tmp_path):
+    manager = SubAgentManager(
+        tmp_path / "subs",
+        owner_home_dir=str(tmp_path / "owner"),
+    )
+    task = manager.create_run(goal="长任务", thought="模拟正常完成", plan=["执行"])
+    prepared = manager.lifecycle.prepare_runner_attempt(task.id)
+    attempt_id = prepared.runner_active_attempt_id
+    run = manager.runtime_db.agent_run_for_run_id(task.id)
+    assert run is not None
+    manager.runtime_db.settle_agent_run(
+        agent_run_id=str(run["agent_run_id"]),
+        status="done",
+        attempt_id=attempt_id,
+    )
+
+    result = manager.runner_result.record_runner_result(
+        RecordRunnerResultParams(
+            run_id=task.id,
+            attempt_id=attempt_id,
+            dry_run=False,
+            ok=True,
+            message="done",
+            status="DONE",
+        )
+    )
+
+    assert result.ok is True
+    assert manager.load(task.id).status == "DONE"
+
+
+def test_clean_runtime_completion_can_project_blocked_task_outcome(tmp_path):
+    """执行轮正常结束不等于任务完成；exact 结果仍可投影为等待授权。"""
+    manager = SubAgentManager(
+        tmp_path / "subs",
+        owner_home_dir=str(tmp_path / "owner"),
+    )
+    task = manager.create_run(goal="等待授权", thought="申请能力", plan=["继续"])
+    prepared = manager.lifecycle.prepare_runner_attempt(task.id)
+    attempt_id = prepared.runner_active_attempt_id
+    run = manager.runtime_db.agent_run_for_run_id(task.id)
+    assert run is not None
+    manager.runtime_db.settle_agent_run(
+        agent_run_id=str(run["agent_run_id"]),
+        status="done",
+        attempt_id=attempt_id,
+    )
+
+    result = manager.runner_result.record_runner_result(
+        RecordRunnerResultParams(
+            run_id=task.id,
+            attempt_id=attempt_id,
+            dry_run=False,
+            ok=False,
+            message="等待授权",
+            status="BLOCKED",
+        )
+    )
+
+    assert result.ok is False
+    assert manager.load(task.id).status == "BLOCKED"
 
 
 def test_dispatch_round_returns_to_parent_when_child_report_exists(tmp_path):
