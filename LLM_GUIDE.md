@@ -24,8 +24,12 @@
 - 子代理完成、阻塞或能力申请唤醒不是一条新用户任务，而是原 root active turn 的后续工作片。必须从
   exact thread/task link 恢复原始 objective 和 task path：原始 objective 继续占据 `User Task` /
   `root_user_prompt`，结构化 wake 只作为 runtime continuation 注入。该 root 自己的 canonical tool-output
-  index 按 exact `run_id + task_id` 恢复已执行工具、一次性派工去重和有界执行轨迹；child 私有索引、其它
-  task 和 detached Audit 事件不得混入。后台每工作片的新增工具额度在恢复历史后保持不变。
+  index 按 exact `run_id + task_id` 恢复已执行工具、一次性派工去重和有界执行轨迹；嵌套 Todo/派工参数
+  必须以限深、限宽、凭据脱敏的 JSON 保留，不能退化成空数组。跨进程索引不能伪造原始 ToolCall/ToolResult
+  配对；native 续跑用唯一 `CompactionSummary` handoff 持续携带这批事实，精确副作用仍以 archive、operation
+  ledger、artifact refs 和当前文件为准。child 私有索引、其它 task 和 detached Audit 事件不得混入。
+  后台每工作片的新增工具额度在恢复历史后保持不变；现有 Todo 必须复用 exact id，派 child 时只通过
+  `create_subagents.items[].covers` 绑定，不从标题或 goal 猜关系。
 - 普通主代理和子代理共用 `turn_end.reason`：`completed` / `blocked` /
   `max-tokens` / `aborted` / `error` / `interrupted`。它只表示一轮为什么结束，
   不从模型正文、验收清单、产物数量或测试描述反推完成。

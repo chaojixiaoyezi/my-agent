@@ -772,14 +772,23 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
     tool_context: list[str] = reconstructed.tool_context
     active_turn_user_inputs = merge_active_turn_user_inputs(params.carried_active_turn_user_inputs)
     active_turn_user_input_texts_carried = active_turn_user_input_texts(active_turn_user_inputs)
+    tool_ir_history: list[object] = []
+    if getattr(seed.tool_protocol_snapshot, "source_protocol", "") == "native":
+        from ...backends.tool_ir import CompactionSummary, UserTurn
+        from ...memory_archive.compact_semantic_summary import semantic_summary_config
+        from ..tool_context.window import native_carried_tool_handoff
+
+        handoff = native_carried_tool_handoff(
+            tool_context,
+            archive_tool_calls,
+            max_chars=semantic_summary_config(agent).max_input_chars,
+        )
+        if handoff:
+            tool_ir_history.append(CompactionSummary(handoff))
+        tool_ir_history.extend(UserTurn(text) for text in active_turn_user_input_texts_carried)
     tool_context.extend(
         f"[ACTIVE_TURN_USER_INPUT]\n{text}" for text in active_turn_user_input_texts_carried
     )
-    tool_ir_history: list[object] = []
-    if getattr(seed.tool_protocol_snapshot, "source_protocol", "") == "native":
-        from ...backends.tool_ir import UserTurn
-
-        tool_ir_history.extend(UserTurn(text) for text in active_turn_user_input_texts_carried)
     tool_rounds = reconstructed.tool_rounds
     one_shot_tool_calls: set[str] = reconstructed.one_shot_tool_calls
     executed_tools: list[str] = reconstructed.executed_tools
@@ -884,16 +893,18 @@ def _reconstructed_runtime_state(
     - tool_rounds：archive 记录不存轮号，用记录数作保守代理（轮数 ≤ 调用数），保证续跑不把
       ``max_tool_rounds`` 预算清零（宁可略高估、绝不低估，预算只会更紧不会被放大）。
     - tool_context：按 ``_record_tool_call`` 的 ``[tool-record]/[tool-output-record]`` 文本格式
-      逐条重建。native 下这段文本**不发往 provider**（builder 旁路，IR messages 才发；这里也
-      刻意不重建 ``tool_ir_history``，避免与 IR 双轨冲突、避免把 compact 刚卸掉的历史又塞回原生
-      messages），但它仍喂给重试守卫/digest 守卫（``_has_previous_tool_context``）等。文本体量由
-      每轮 prompt 构建时既有的 ``window_tool_context_params`` 自动窗口化兜底，不会再撑爆上下文。
+      逐条重建，继续喂给重试守卫/digest 守卫（``_has_previous_tool_context``）等。native 不能从
+      跨进程索引伪造原始 AssistantTurn/ToolCall/ToolResult 配对，但会把同一批已脱敏记录投影为唯一
+      ``CompactionSummary`` handoff，随 IR 在后续 provider 请求持续可见；精确副作用仍由 archive、
+      operation ledger 和 artifact refs 掌权。这既避免双轨重放，也不再让 lifecycle wake 丢掉本轮
+      已执行历史。文本体量与 handoff 共同复用既有 Compact 配置和窗口化边界。
 
     语义摘要增强（短板6）：``tool_context`` 默认仍是逐条机械重建（上面这条契约不变），但当
     ``agent`` 带可用 backend 且配置开启时，会对**中段**记录调一次摘要模型，用一条
     ``[compact-semantic-summary]`` 折叠掉中段、保护首尾——把机械截断换成语义叙述，长任务续跑
-    少丢上下文。这是**纯增强**：只动 ``tool_context``（不碰事实源/IR 历史/可恢复性），且摘要
-    关闭、记录太少、无 backend、调用失败/超时任意一种都回退到逐条机械列表（行为与改动前一致）。
+    少丢上下文。这是**纯增强**：只动重建投影（不碰事实源/可恢复性），native 再把该投影作为
+    一条 CompactionSummary 放回同一 IR。摘要关闭、记录太少、无 backend、调用失败/超时任意一种
+    都回退到逐条机械列表（行为与改动前一致）。
     """
     valid_records = [record for record in records if isinstance(record, dict)]
     mechanical_entries = [_reconstructed_tool_context_entry(record) for record in valid_records]
@@ -1011,11 +1022,16 @@ def _carried_one_shot_keys(record: dict[str, object]) -> set[str]:
     return _one_shot_tool_call_keys(payload)
 
 
-# LLM: compact 续跑只能从 carried archive 的结构化字段重建，不能从 preview 猜副作用终态。
-# 函数用途: 把一条归档工具记录恢复为模型/守卫可读文本，并保留失败、未知与重放事实。
+# LLM: compact continuation may rebuild only typed archive fields; redact nested credentials and
+# never infer effect state from preview prose.
+# 函数用途: 把一条归档工具记录脱敏后恢复为模型/守卫可读文本，并保留失败、未知与重放事实。
 def _reconstructed_tool_context_entry(record: dict[str, object]) -> str:
     payload = record.get("parameters")
     payload = payload if isinstance(payload, dict) else {"tool": str(record.get("tool") or "")}
+    from ...common.log_redaction import redact_sensitive_value
+
+    projected_payload = redact_sensitive_value(payload)
+    payload = projected_payload if isinstance(projected_payload, dict) else {}
     status = "ok" if record.get("ok") else "error"
     tool_name = str(record.get("tool") or payload.get("tool") or "unknown")
     payload_lines = "\n".join(

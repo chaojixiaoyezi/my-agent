@@ -13,7 +13,13 @@ from ..agent_core.orchestration.dispatch_progress_seed import reconcile_complete
 from ..agent_core.runtime.owner_roots import runtime_owner_root
 from ..agent_core.runtime.task_identity import task_path_progress_ledger_id
 from ..runtime_errors import runtime_error_report
-from ..task_progress import read_task_progress_report, task_progress_summary
+from ..task_progress import (
+    read_task_progress_report,
+    task_progress_status_is_closed,
+    task_progress_summary,
+)
+
+_PLAN_CONTINUATION_ID_LIMIT = 64
 
 
 # LLM: Background turns must read the same task-path progress ledger that main
@@ -47,6 +53,7 @@ def task_runtime_state(
     if load_error is not None:
         load_errors.append(load_error)
     work_kind = str(getattr(link, "work_kind", "") or "")
+    progress_projection = task_progress_summary(progress)
     state: dict[str, Any] = {
         "schema_version": "task-runtime-state.v1",
         "task_id": selected_id,
@@ -61,8 +68,10 @@ def task_runtime_state(
         "cancellation_scope": str(
             getattr(link, "cancellation_scope", "") or "foreground"
         ),
-        "task_progress": task_progress_summary(progress),
+        "task_progress": progress_projection,
     }
+    if continuation := _plan_continuation_contract(progress, progress_projection):
+        state["plan_continuation"] = continuation
     if work_kind.strip().lower() == "audit":
         from ..ingestion.audit_state import (
             audit_task_source_facts,
@@ -72,6 +81,54 @@ def task_runtime_state(
         state["audit_sources"] = audit_task_source_facts(agent, selected_id)
         state["audit_summary"] = audit_task_summary_facts(agent, selected_id)
     return state
+
+
+# LLM: A lifecycle wake must continue the canonical plan by exact item id. This projection is
+# typed model context only; it neither infers title similarity nor mutates progress or child state.
+# 函数用途: 向后台续跑明确现有 Todo 的唯一编号和子代理 covers 绑定字段，避免重复建同义清单。
+def _plan_continuation_contract(
+    progress: dict[str, Any],
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    items = [item for item in progress.get("items", []) if isinstance(item, dict)]
+    all_ids = list(
+        dict.fromkeys(
+            str(item.get("id") or "").strip()
+            for item in items
+            if str(item.get("id") or "").strip()
+        )
+    )
+    if not all_ids:
+        return {}
+    open_ids = [
+        str(item.get("id") or "").strip()
+        for item in items
+        if str(item.get("id") or "").strip()
+        and not task_progress_status_is_closed(item.get("status"))
+    ]
+    limit = _PLAN_CONTINUATION_ID_LIMIT
+    return {
+        "schema_version": "plan-continuation.v1",
+        "ledger_run_id": str(summary.get("run_id") or ""),
+        "ledger_ref": str(summary.get("ref") or ""),
+        "identity_field": "task_progress.items[].id",
+        "existing_item_ids": all_ids[:limit],
+        "open_item_ids": open_ids[:limit],
+        "existing_item_count": len(all_ids),
+        "ids_truncated": len(all_ids) > limit or len(open_ids) > limit,
+        "reuse_policy": "reuse_existing_ids",
+        "full_ledger_read": {
+            "tool": "task_progress",
+            "action": "read",
+            "run_id": str(summary.get("run_id") or ""),
+        },
+        "subagent_binding": {
+            "tool": "create_subagents",
+            "field": "items[].covers",
+            "value_source": "open_item_ids",
+            "matching": "exact_id_only",
+        },
+    }
 
 
 # LLM: Task-link corruption is surfaced through load_errors while other valid

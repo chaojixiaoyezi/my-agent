@@ -4,6 +4,11 @@
 
 最近收口重点：
 
+- 2026-08-22 `a190378` 已完成并部署 root lifecycle wake 的 exact objective/task/path 与工具索引恢复；fresh
+  r11 证明语言和任务范围不再随 child 完成漂移。本地后续切片又收口了索引中嵌套 Todo/派工参数被清空、
+  native provider 看不到 carried 工具轨迹的问题：参数以有界递归且凭据脱敏的 JSON 持久化，跨进程续跑
+  使用同一 IR 的 `CompactionSummary` handoff，Task Runtime State 给出 exact Todo id 和 `items[].covers`
+  延续合同。focused 回归已通过；发布与 r12 真机结论以 STATUS/ROADMAP 为准。
 - 2026-08-22 `0c6c916` 已推送并部署，Prompt 4 r10 真 TUI 证明未声明产物的 child 不再收到 synthetic
   Markdown 业务合同，typed status、最终回复和系统报告可以独立完成交接。r10 同时形成新的底座失败样本：
   completion wake 把 synthetic 文案当成新 User Task，导致 root 从 Rust 漂移到 Go。原始任务未丢盘；当前

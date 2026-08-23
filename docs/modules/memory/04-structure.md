@@ -43,8 +43,12 @@
   `tool_output`。child lifecycle 后续工作片按 exact root run/task 读取，保留 append 顺序，并以
   `scoped_call_id` 去重；其它 task 和 child workspace 不扫描。
 - 恢复记录沿既有 `carried_archive_tool_calls` 进入工具循环，重建已执行工具、one-shot key、工具轮基线、
-  参数和 artifact refs。大输出正文仍留在 owner 私有 artifact，按需读取；索引损坏时 fail-soft 回到已有
-  task/transcript 上下文，但不得编造已执行事实。
+  参数和 artifact refs。工具参数使用限深、限宽、凭据脱敏的 JSON 投影，Todo items、批量派工 items 与
+  typed covers 不得因嵌套而变成空数组。大输出正文仍留在 owner 私有 artifact，按需读取；索引损坏时
+  fail-soft 回到已有 task/transcript 上下文，但不得编造已执行事实。
+- text 协议继续读取机械 tool-context；native 跨进程续跑不能伪造原 provider ToolCall/ToolResult 对，改为
+  把同一批 carried 记录压成唯一、有界的 `CompactionSummary` handoff 放回 IR。它随之后每次 provider
+  请求持续可见，但不推进 ConversationThread generation，不增加 TUI `compact N`，也不获得副作用权威。
 - 这条链只解决同一 active turn 跨后台工作片的连续性，不新建 Compact 账本，不推进 generation，也不让
   自然语言计划获得机器权威。
 

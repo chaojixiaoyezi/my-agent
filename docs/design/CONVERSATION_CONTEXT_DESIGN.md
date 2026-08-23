@@ -74,6 +74,12 @@ transcript 落账顺序。
  turn；后续仍读取完整 thread summary + raw tail，再叠加精确 task 的运行状态。已终态任务的排队 wake 会被
  直接作废，不能复活旧任务。
 
+child lifecycle wake 是原 root active turn 的跨进程工作片：exact task objective 继续占据原始 User Task，
+wake 只进入 runtime state。root 自己的工具索引按 exact run/task 恢复；嵌套参数以有界递归脱敏 JSON 保留。
+由于索引无法无损重造原 provider assistant/tool 配对，native 只安装一条 CompactionSummary handoff，不能
+伪造 tool_use 或重放副作用。当前 task_progress 的 exact item ids 与 `items[].covers` 绑定路径作为结构化
+plan continuation 投影；标题、goal 和模型总结不参与绑定或重复清单判定。
+
 `wait` 让出会话槽前的用户回执仍由模型撰写，不使用固定“处理中”模板。这个无工具表达轮只接收有界的
 结构化事实：当前用户请求、已执行动作数、工具轮次、当前 `/btw` 补充，以及精确 task lineage 下的子代理
 总数/活跃数/终态数/异常数。`task_continues_without_more_user_input=true` 时，表达规则明确禁止向用户索要

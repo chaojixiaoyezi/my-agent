@@ -240,6 +240,13 @@ turn/history 修复：exact task goal 保持根用户任务，wake 只作 runtim
 index 按 exact run/task 恢复，child/Audit 不混入。待严格 gate、推送、唯一 Gateway 部署后，以 fresh r11
 原样 Prompt 4 验证语言/范围/派工连续性；仍禁止测试者补代码、追加技术推动或恢复机器质量验收。
 
+`a190378` 部署后的 fresh r11 已证明原任务与 Python + Textual 方案跨两批 child 保持不变；但 root 又建立
+`p1/p2` 同义清单，第二批没有传 `covers`。索引实证显示 `task_progress.items`、
+`create_subagents.items` 在持久化时均变为 `[]`，且 native provider 不消费机械重建的 tool-context。当前
+候选改为保留有界递归脱敏参数，并把 carried 轨迹作为同一 IR 的单条 CompactionSummary handoff；
+Task Runtime State 额外投影 exact Todo ids 与 covers 字段合同。focused 回归已通过，待严格 gate、部署和
+fresh r12 原样 Prompt 4 验证“不重复计划、派工绑定、长任务继续”三项；仍不新增机器质量验收。
+
 ### 用户直控子代理的共享控制面
 
 状态：设计中，直属 child 只读状态投影已部署并完成真机 smoke

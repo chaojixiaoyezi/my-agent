@@ -115,6 +115,9 @@
 - [x] `task_progress` 仅为软账本：open 项不触发普通任务自动续跑、不阻止自然 final；新项要求稳定
   `id/title/status`，模型旧 pending 不能覆盖 canonical child DONE。`covers` 可绑定普通 items 或
   coverage.targets 的 exact id，canonical child DONE 后原位打钩；工具结果只给非阻断续做 guidance。
+- [x] lifecycle/Compact 续跑的 durable tool index 保留有界递归且凭据脱敏的 JSON 参数；native 不伪造旧
+  ToolCall/ToolResult，而是安装唯一有界 CompactionSummary handoff。真实 UserTurn 保持在 handoff 之后；
+  Task Runtime State 暴露 canonical Todo exact ids 与 `create_subagents.items[].covers` 字段，宿主不按标题猜。
 - [x] 发布 YAML 与 dataclass 的默认 system prompt 文本完全一致，不再因测试机省略配置而回落到 Go 专项
   骨架；主/子/wake 共用 会话运行时 式持续完成软纪律，且没有重新引入 final 解析、Todo 自动续轮或机器质量验收。
 - [x] 同一 exact parent 下，系统生成的单个补派、批量补派和递归 child 名称沿历史 sibling 连续编号；
@@ -154,6 +157,8 @@
   正确收口。
 - [ ] 四个 `TESTS.md` 原样重型任务全部通过真实 `MiniMax-M2.7` TUI 顺序验收；每次启动、切换或输入前已先
   向用户报告测试对象、`192.0.2.7`、tmux session 名称和可直接 attach 的完整命令，且全程只有一个 Gateway。
+- [ ] fresh Prompt 4 r12 的第二批及后续派工复用首批 canonical Todo ids、逐 item 带 exact covers，不创建
+  p1/p2 等同义清单；root 在 child wake 后保持原语言、完整范围和用户“主代理不得写功能代码”的边界。
 - [ ] 真实测试中 main/child/grandchild 各自沿独立 `agent_thread_id` Compact 后能继续工作；至少一条 child
   链连续发生多代 generation，近期完整回合、工具事实、任务状态和产物引用不丢，且没有重做已经成功的
   副作用。持久 native IR 裁剪与 transcript 压缩都只推进该 thread generation；presentation/no-save 临时事件

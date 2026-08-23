@@ -153,7 +153,55 @@ def test_tool_loop_externalizes_large_tool_output_for_archive(tmp_path: Path) ->
     assert record["fail_safe_checkpoint_path"] in params.tool_context[-1]
 
 
-def test_compact_carried_agent_tree_keeps_structured_child_recovery_facts(
+def test_tool_call_index_preserves_nested_plan_and_dispatch_parameters(tmp_path: Path) -> None:
+    from agent_py_agent.agent.memory_archive.compact_tool_output_refs import (
+        carried_tool_call_records,
+    )
+
+    record = externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=tmp_path,
+            tool="create_subagents",
+            call_id="plan-dispatch-1",
+            output="created",
+            ok=True,
+            run_id="root-run",
+            task_id="root-run",
+            min_chars=10_000,
+            parameters={
+                "goal": "完成现有 Todo",
+                "items": [
+                    {
+                        "goal": "实现命令层",
+                        "covers": ["commands"],
+                        "attributes": {"phase": "implementation"},
+                        "api_key": "must-not-survive",
+                    }
+                ],
+            },
+        )
+    )
+    index_path = tmp_path / "blobs" / "tool_outputs" / "index.jsonl"
+    index = [
+        json.loads(line)
+        for line in index_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    params = index[-1]["parameters"]
+    assert record["output_externalized"] is False
+    assert params["items"][0]["goal"] == "实现命令层"
+    assert params["items"][0]["covers"] == ["commands"]
+    assert params["items"][0]["attributes"] == {"phase": "implementation"}
+    assert params["items"][0]["api_key"] == "<redacted>"
+    carried = carried_tool_call_records(
+        tmp_path,
+        {"run_id": "root-run", "task_id": "root-run"},
+    )
+    assert carried[0]["parameters"] == params
+
+
+def test_compact_carried_create_subagents_keeps_structured_child_recovery_facts(
     tmp_path: Path,
 ) -> None:
     from agent_py_agent.agent.agent_core.runtime.loop_support import (
@@ -197,8 +245,8 @@ def test_compact_carried_agent_tree_keeps_structured_child_recovery_facts(
             params,
             tool_rounds=3,
             idx=1,
-            tool_name="inspect_agent_tree",
-            arguments={"scope": "own_subtree"},
+            tool_name="create_subagents",
+            arguments={"goal": "继续既有计划"},
             output=output,
         )
     )

@@ -33,6 +33,11 @@ Gateway 的“服务地址”和 TUI 的“项目目录”是两种不同事实�
 回合的相对路径根。该边界对应 会话运行时 `TurnContext` 每轮持有 cwd、`spawn_agent` 从当前 turn 复制 cwd 的
 做法，不能依赖前一轮进程内字段残留。
 
+同一 lifecycle wake 还必须按 exact root run/task 读取 owner 私有工具索引。索引参数保留有界递归结构并
+递归脱敏；native 模型通过一条持久 IR handoff 看到已经执行的调用顺序、状态、参数关系和 refs，但不会收到
+伪造的旧 tool_use/tool_result，也不能据此重放写入或派工。Task Runtime State 的 plan continuation 只携带
+canonical Todo ids 与 exact covers 字段，不从自然语言标题猜映射。
+
 gateway 的本地后台控制面入口：
 
 ```text

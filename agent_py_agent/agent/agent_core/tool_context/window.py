@@ -1,14 +1,17 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import ClassVar
 
+from ...common.log_redaction import redact_sensitive_value
 from ...conversation.authority import conversation_transcript_is_authoritative
 from ...tooling.output_projection import project_tool_output_body
 from ..runtime.context_compactor import runtime_compact_policy
 
 _DEFAULT_MAX_CHARS = 48_000
+_DEFAULT_ACTIVE_TURN_HANDOFF_MAX_CHARS = 12_000
 _CHARS_PER_TOKEN_WINDOW = 3
 _RECENT_REF_LIMIT = 8
 
@@ -91,6 +94,51 @@ def record_native_ir_window(params: object, *, omitted_count: int, preserved_cou
     ]
 
 
+# LLM: A cross-process continuation cannot replay fabricated ToolCall/ToolResult pairs. Preserve
+# one bounded, redacted projection as CompactionSummary input while canonical owner archives stay
+# authoritative for exact effects and full outputs.
+# 函数用途: 把已归档的本轮工具轨迹整理成原生模型可持续看到的有界续接摘要。
+def native_carried_tool_handoff(
+    tool_context: object,
+    archive_tool_calls: object,
+    *,
+    max_chars: int = _DEFAULT_ACTIVE_TURN_HANDOFF_MAX_CHARS,
+) -> str:
+    records = [item for item in list(archive_tool_calls or []) if isinstance(item, dict)]
+    entries = _non_window_entries(tool_context if isinstance(tool_context, list) else [])
+    if not records or not entries:
+        return ""
+    try:
+        configured_limit = int(max_chars)
+    except (TypeError, ValueError):
+        configured_limit = 0
+    limit = (
+        configured_limit
+        if configured_limit > 0
+        else _DEFAULT_ACTIVE_TURN_HANDOFF_MAX_CHARS
+    )
+    index_budget = min(max(2_000, limit // 2), 6_000)
+    index_lines = _bounded_carried_tool_index(records, index_budget)
+    header = [
+        "[active-turn-tool-handoff]",
+        "- schema_version: active-turn-tool-handoff.v1",
+        f"- archived_tool_call_count: {len(records)}",
+        "- authority: canonical owner tool archive, operation ledger, artifact refs, and current files",
+        "- replay_policy: continue from these completed effects; do not replay writes or dispatches merely because raw provider pairs are absent",
+        "- ordered_tool_index:",
+        *index_lines,
+        "- bounded_tool_context:",
+    ]
+    prefix = "\n".join(header)
+    detail_budget = max(1_000, limit - len(prefix) - 2)
+    details = _bounded_carried_tool_details(entries, records, detail_budget)
+    rendered = f"{prefix}\n{details}" if details else prefix
+    if len(rendered) <= limit:
+        return rendered
+    suffix = "\n[active-turn-tool-handoff truncated]"
+    return rendered[: max(0, limit - len(suffix))].rstrip() + suffix
+
+
 # LLM: Text-protocol windowing alone uses this character approximation; native protocol callers
 # must use the full token estimator instead of converting this value back into an IR budget.
 # 函数用途: 根据统一 Compact 配置计算文字工具记录的近似字符窗口，不负责原生工具消息计量。
@@ -169,6 +217,74 @@ def _recent_entries_within_budget(entries: list[str], max_chars: int) -> list[st
         if used >= budget:
             break
     return list(reversed(selected))
+
+
+# LLM: The index is chronology metadata only. Nested arguments are already width/depth bounded and
+# redacted by the durable tool index; include them only when they carry structural relationships.
+# 函数用途: 生成按执行顺序排列的紧凑工具索引，并为 Todo/covers 等嵌套参数保留有限细节。
+def _bounded_carried_tool_index(records: list[dict], max_chars: int) -> list[str]:
+    lines: list[str] = []
+    used = 0
+    omitted = 0
+    for index, record in enumerate(records, 1):
+        tool = str(record.get("tool") or "unknown").strip() or "unknown"
+        status = "ok" if record.get("ok") is True else "error"
+        ref = _archive_ref(record)
+        params = record.get("parameters")
+        params = params if isinstance(params, dict) else {}
+        redacted_params = redact_sensitive_value(params)
+        params = redacted_params if isinstance(redacted_params, dict) else {}
+        nested = any(isinstance(value, (dict, list, tuple)) for value in params.values())
+        detail = ""
+        if nested:
+            detail = " params=" + json.dumps(
+                params,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )[:800]
+        elif params:
+            detail = " parameter_keys=" + ",".join(str(key) for key in params)[:240]
+        line = f"  - {index}: tool={tool} status={status}"
+        if ref:
+            line += f" ref={ref[:240]}"
+        line += detail
+        if lines and used + len(line) + 1 > max_chars:
+            omitted = len(records) - index + 1
+            break
+        lines.append(line)
+        used += len(line) + 1
+    if omitted:
+        lines.append(f"  - omitted_later_tool_index_entries: {omitted}")
+    return lines
+
+
+# LLM: Prefer the existing semantic compact item, then retain the newest mechanical records. This
+# is a provider-facing projection only; omitted facts remain addressable through archive refs.
+# 函数用途: 在固定字符预算内保留语义摘要和最近工具明细，超出部分用统一窗口说明替代。
+def _bounded_carried_tool_details(
+    entries: list[str],
+    archive_tool_calls: list[dict],
+    max_chars: int,
+) -> str:
+    rendered = "\n\n".join(entries)
+    if len(rendered) <= max_chars:
+        return rendered
+    priority = [
+        entry
+        for entry in entries
+        if entry.startswith("[compact-semantic-summary]")
+        or entry.startswith("[compact-tool-operation-facts")
+    ]
+    priority_chars = sum(len(entry) + 2 for entry in priority)
+    recent = _recent_entries_within_budget(
+        [entry for entry in entries if entry not in priority],
+        max(1_000, max_chars - priority_chars - 1_200),
+    )
+    selected = [entry for entry in entries if entry in priority or entry in recent]
+    omitted = max(0, len(entries) - len(selected))
+    parts = [_window_summary(omitted, len(selected), archive_tool_calls), *selected]
+    return "\n\n".join(parts)[:max_chars]
 
 
 # LLM: This marker is a bounded model-facing projection only; omitted/preserved counts and refs

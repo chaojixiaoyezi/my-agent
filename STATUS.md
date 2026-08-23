@@ -1,5 +1,21 @@
 # STATUS
 
+## 2026-08-22 Prompt 4 r11：原任务保持，但 carried 工具参数与原生历史仍断档（本地修复候选）
+
+- `a190378` 已通过严格 gate、推送并部署到 `.7` 唯一 Gateway。fresh tmux
+  `dsh-p4-lazygit-r11-ea91639` 在固定 lazygit 提交上只输入一次原样 Prompt 4；首批 4 名 child 完成后，
+  root 保持 Python + Textual 和完整复刻目标，没有再退回 Go/基础骨架，证明 exact objective/task/path 修复生效。
+- r11 继续暴露同一 active turn 的第二层断点：root 工具索引虽然恢复了 47 条调用，但持久参数投影把
+  `task_progress.items` 与 `create_subagents.items` 这类嵌套对象裁成 `[]`；native builder 又不把重建的
+  tool-context 发给 provider。root 因此重复创建 `p1/p2` 同义 Todo，第二批派工漏掉 typed `covers`。
+- 当前本地候选把 canonical 工具参数改成有界、递归、凭据脱敏的 JSON 投影；lifecycle/Compact 续跑不伪造
+  旧 ToolCall/ToolResult，而是将该投影作为唯一 `CompactionSummary` handoff 持续放回 native IR。后台
+  Task Runtime State 同时携带现有 Todo exact ids、完整账本 read 参数和 `items[].covers` 精确绑定合同；
+  不按标题猜、不硬拦模型、不新增第二套计划或 Compact。4 个直接相关测试文件已通过，严格 gate、推送、
+  单 Gateway 部署及 fresh r12 原样 TUI 仍待完成。
+- r11 现场仍自然运行；最后一名 Utils child 在约 49 分钟时已发生 2 次 canonical Compact，主代理仍只显示
+  “等待 1 个子代理”。这证明 child 多代 Compact 可见且不中断，但单模块耗时过长仍需在 r12 对照观察。
+
 ## 2026-08-22 Prompt 4 r10：假产物合同已消失，child wake 把原任务换成新任务（本地修复候选）
 
 - `0c6c916` 已通过本地严格 gate、推送并部署到 `.7` 唯一 Gateway。fresh tmux

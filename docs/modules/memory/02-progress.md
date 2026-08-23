@@ -5,8 +5,15 @@
 - child lifecycle wake 现在复用 task `work/blobs/tool_outputs/index.jsonl` 的 typed 行，按 exact root
   `run_id + task_id` 还原同一 active turn 已经执行过的工具；小输出 `tool_call` 和大输出 `tool_output`
   共用 scoped call id 去重，后者只携带 artifact ref，不把正文整体塞回 prompt。
+- r11 证明只恢复调用行仍不够：旧参数投影把 list 内 dict 丢掉，使 Todo/批量派工 `items=[]`；native 又
+  不消费机械 tool-context。当前索引对 JSON 参数限深、限宽并递归脱敏，保留 items/covers 等结构关系；
+  未知对象不 stringify。native 跨进程续跑把 carried 轨迹作为唯一有界 `CompactionSummary` 放回 IR，
+  后续真实 UserTurn 保持在其后，不伪造 provider tool-use，也不重放副作用。
+- 当前 Task Runtime State 另投影唯一 task_progress ledger 的 existing/open exact ids、完整 read 参数和
+  `create_subagents.items[].covers` 精确绑定字段；代码不从标题或 goal 猜映射，也不自动合并同义清单。
 - 该恢复只用于 root 后台工作片的执行连续性与 one-shot 去重，不改变 Compact generation、长期 Memory、
-  child 私有 archive 或机器完成判断。两组 focused 回归通过，真实 r11 尚待部署验证。
+  child 私有 archive 或机器完成判断。r11 已证明原 objective/语言连续性；嵌套参数与 native handoff 的
+  fresh r12 真机验证仍待严格 gate 和部署。
 
 ## 2026-08-22 运行中工具历史 Compact 统一账本
 

@@ -607,8 +607,15 @@ wake durable 文件创建到后台 claim 约 7.56 秒。下一候选必须重点
 本切片 focused 命令：
 
 ```bash
+python3 -m pytest agent_py_agent/tests/test_tool_output_externalizer.py agent_py_agent/tests/test_memory_runtime_compact_auto_continuation.py agent_py_agent/tests/test_background_context_runtime_errors.py agent_py_agent/tests/test_native_runtime_guidance_forwarding.py -q --tb=short
 python3 -m pytest agent_py_agent/tests/test_orchestration_tools.py agent_py_agent/tests/test_orchestration_create_subagents_items.py agent_py_agent/tests/test_tui_worker_paths.py agent_py_agent/tests/test_conversation_agent_activity.py agent_py_agent/tests/test_background_notice_display.py agent_py_agent/tests/test_timeout_gate1_accounting.py -q --tb=short
 ```
+
+第一条锁定 lifecycle wake 的 active-turn 连续性：嵌套 Todo/派工参数进入 durable index 后保持 JSON 结构并
+递归脱敏；native carried 记录成为单条、≤既有 semantic-summary 预算的 `CompactionSummary`，不伪造
+ToolCall/ToolResult；真实 `/btw` UserTurn 排在 handoff 后；text 协议不生成 IR；后台 Task Runtime State
+携带 exact Todo ids、完整账本 read 参数和 `items[].covers` 精确绑定字段。真实验收必须用 fresh tmux 原样
+Prompt 4，观察第二批派工是否复用原 Todo、是否带 covers、是否仍保持同一目标；测试者不得补提示或改产物。
 
 真实本地模型回归示例：
 

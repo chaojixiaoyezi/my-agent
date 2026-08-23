@@ -1081,3 +1081,23 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - `993ce4f` 部署后的全新提示词 2 已同时证明首次 ask、后台 `run-*`、6 个 child 和工具 working_dir
   全部继承 TUI cwd；没有再写 `/root/bbb`、`None` 或其它隐藏回退目录。本条 cwd 主链因此完成，后续
   继续在每个正式重任务中把路径对账作为回归证据，不再保留第三条兼容入口。
+
+## 2026-08-22 lifecycle wake 的原生 active-turn 工具交接
+
+状态：本地已实现并通过 focused 回归；待严格 gate、唯一 Gateway 部署与 Prompt 4 r12 真 TUI 验收。
+
+- 解决问题：r11 证明 exact objective/cwd 已恢复，但 root 醒来后仍重复建 Todo、漏 `covers`。结构化证据
+  显示 durable tool index 将 `task_progress.items` / `create_subagents.items` 裁成空数组，且 native builder
+  刻意旁路机械 tool-context，模型只看到“当前状态”，看不到“自己已经如何走到这里”。
+- 对照决定：会话运行时 在同一 active turn 内持续保存历史；本项目跨进程 wake 无法无损恢复原 assistant 内容与
+  provider tool-use 签名，所以不能伪造 ToolCall/ToolResult。采用 会话运行时 Compact 同类 replacement item：
+  canonical 索引继续掌握执行事实，模型只得到一条有界 `CompactionSummary` handoff；后续真实 UserTurn
+  排在它之后，时间顺序不变。
+- 参数合同：工具调用参数允许 JSON 标量/list/dict 递归至固定深度和宽度，敏感字段与已知 secret 统一脱敏；
+  未知对象不 stringify。这样保留通用批处理、Todo、covers 和其它 schema 关系，不为某个测试 prompt 写专项。
+- 计划合同：后台 Task Runtime State 投影唯一 ledger 的 existing/open exact ids、完整 read 参数和
+  `create_subagents.items[].covers` 路径。该投影只指导模型复用现有计划；宿主不做标题相似度匹配、不自动
+  合并语义重复项、不把 Todo 变成完成门。
+- Compact 口径：handoff 复用现有 semantic-summary 字符预算，超限保留顺序索引、语义摘要、近期明细和
+  archive refs。它不提交 checkpoint、不推进 generation、不增加 TUI compact 次数；真正的上下文压缩仍只
+  走 ConversationThread 的 checkpoint-before-CAS 主链。

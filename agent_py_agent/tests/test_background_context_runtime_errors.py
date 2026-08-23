@@ -196,6 +196,11 @@ def test_background_context_includes_exact_task_runtime_progress_without_second_
     assert "完成演示任务" in prompt
     assert "实现完成，正在补真实测试" in prompt
     assert "运行真实测试并修复失败" in prompt
+    assert '"schema_version": "plan-continuation.v1"' in prompt
+    assert '"existing_item_ids": [\n      "tests"' in prompt
+    assert '"reuse_policy": "reuse_existing_ids"' in prompt
+    assert '"field": "items[].covers"' in prompt
+    assert '"matching": "exact_id_only"' in prompt
     assert "这是旧请求编号下的错误账本" not in prompt
     assert "不应出现在后台上下文" not in prompt
     assert "task_rollup.json" not in prompt

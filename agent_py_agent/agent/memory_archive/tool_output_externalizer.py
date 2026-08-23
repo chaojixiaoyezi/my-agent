@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..common.log_redaction import redact_sensitive_value
 from ..common.path_segments import safe_path_segment
 from ..settings.defaults import default_agent_config
 from ..tooling.models import ToolFailureStage
@@ -38,6 +39,8 @@ TOOL_OUTPUT_RECORD_SCHEMA = RuntimeMemorySchemaOptions("tool_output_archive_reco
 TOOL_OUTPUT_ARTIFACT_SCHEMA = RuntimeMemorySchemaOptions("tool_output_artifact")
 TOOL_OUTPUT_INDEX_SCHEMA = RuntimeMemorySchemaOptions("tool_output_index")
 _TOOL_FAILURE_STAGE_VALUES = frozenset(item.value for item in ToolFailureStage)
+_SAFE_PARAMETER_MAX_DEPTH = 4
+_SAFE_PARAMETER_MAX_ITEMS = 20
 
 
 @dataclass(frozen=True)
@@ -462,15 +465,19 @@ def _read_artifact_record_fields(output: str) -> dict[str, Any]:
     }
 
 
+# LLM: Canonical tool-call recovery needs bounded nested arguments (for example Todo items and
+# child covers), while credentials and arbitrary objects must never enter the durable index.
+# 函数用途: 将工具参数递归投影成可恢复、有限且脱敏的 JSON 结构，供同一 active turn 续跑。
 def _safe_parameters(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     result: dict[str, Any] = {}
-    for key, item in value.items():
+    for key, item in list(value.items())[:_SAFE_PARAMETER_MAX_ITEMS]:
         text_key = str(key).strip()
         if not text_key:
             continue
-        if (safe_item := _safe_parameter_item(item)) is not _UNSAFE_PARAMETER:
+        safe_item = _safe_parameter_item(item, field_name=text_key, depth=0)
+        if safe_item is not _UNSAFE_PARAMETER:
             result[text_key] = safe_item
     return result
 
@@ -571,17 +578,44 @@ def _single_line_text(value: Any, *, max_chars: int) -> str:
 _UNSAFE_PARAMETER = object()
 
 
-def _safe_parameter_item(item: Any) -> object:
+# LLM: Keep only JSON-like values to a fixed depth/width and redact every scalar under its real
+# field name. Do not stringify unknown objects because their repr may contain private runtime state.
+# 函数用途: 递归保留 Todo、批量派工等嵌套参数，同时限制体量并清除凭据字段。
+def _safe_parameter_item(
+    item: Any,
+    *,
+    field_name: str = "",
+    depth: int,
+) -> object:
+    if depth > _SAFE_PARAMETER_MAX_DEPTH:
+        return _UNSAFE_PARAMETER
     if isinstance(item, str | int | float | bool) or item is None:
-        return item
+        return redact_sensitive_value(item, field_name=field_name)
     if isinstance(item, list | tuple):
-        return [entry for entry in item if isinstance(entry, str | int | float | bool) or entry is None][:20]
+        values: list[object] = []
+        for entry in list(item)[:_SAFE_PARAMETER_MAX_ITEMS]:
+            safe_entry = _safe_parameter_item(
+                entry,
+                field_name=field_name,
+                depth=depth + 1,
+            )
+            if safe_entry is not _UNSAFE_PARAMETER:
+                values.append(safe_entry)
+        return values
     if isinstance(item, dict):
-        return {
-            str(child_key): child_value
-            for child_key, child_value in list(item.items())[:20]
-            if isinstance(child_value, str | int | float | bool) or child_value is None
-        }
+        values: dict[str, object] = {}
+        for child_key, child_value in list(item.items())[:_SAFE_PARAMETER_MAX_ITEMS]:
+            text_key = str(child_key).strip()
+            if not text_key:
+                continue
+            safe_value = _safe_parameter_item(
+                child_value,
+                field_name=text_key,
+                depth=depth + 1,
+            )
+            if safe_value is not _UNSAFE_PARAMETER:
+                values[text_key] = safe_value
+        return values
     return _UNSAFE_PARAMETER
 
 

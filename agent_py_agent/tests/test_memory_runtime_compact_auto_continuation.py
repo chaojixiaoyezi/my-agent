@@ -1699,12 +1699,14 @@ def test_compact_continuation_rebuilt_one_shot_blocks_duplicate_subagent_creatio
     assert "重复" in guarded.output
 
 
-def test_compact_continuation_does_not_rebuild_native_tool_history():
-    # native 双轨：续跑刻意不从 archive 重建 tool call/result IR（避免与 IR 双轨冲突、
-    # 避免把 compact 刚卸掉的工具历史又塞回原生 messages）。
+def test_compact_continuation_restores_native_handoff_without_fabricated_tool_pairs():
+    # 跨进程索引不能伪造原始 ToolCall/ToolResult 配对；但已执行轨迹必须作为唯一、
+    # 有界的 CompactionSummary 留在原生 IR，后续 provider 轮才能继续同一 active turn。
     from types import SimpleNamespace
 
     from agent_py_agent.agent.agent_core.runtime.loop_support import _tool_loop_execute_params
+    from agent_py_agent.agent.backends.message_adapter import AnthropicMessageAdapter
+    from agent_py_agent.agent.backends.tool_ir import CompactionSummary
 
     carried = [
         {
@@ -1715,10 +1717,20 @@ def test_compact_continuation_does_not_rebuild_native_tool_history():
         }
     ]
 
-    loop_params = _tool_loop_execute_params(SimpleNamespace(), _seed_for_carried(carried))
+    loop_params = _tool_loop_execute_params(
+        SimpleNamespace(),
+        _seed_for_carried(carried, source_protocol="native"),
+    )
 
-    assert loop_params.tool_ir_history == []
-    # 文本轨仍重建（喂守卫），但不发往 native provider（builder 旁路 tool_context）。
+    assert len(loop_params.tool_ir_history) == 1
+    assert isinstance(loop_params.tool_ir_history[0], CompactionSummary)
+    assert "active-turn-tool-handoff.v1" in loop_params.tool_ir_history[0].text
+    assert "tool=read_file status=ok" in loop_params.tool_ir_history[0].text
+    assert "/src/a.py" in loop_params.tool_ir_history[0].text
+    messages = AnthropicMessageAdapter().to_provider_messages(loop_params.tool_ir_history)
+    assert messages[0]["role"] == "user"
+    assert "active-turn-tool-handoff.v1" in messages[0]["content"][0]["text"]
+    # 守卫仍使用机械 tool_context；provider 只看摘要 IR，不回放伪造的 tool_use。
     assert loop_params.tool_context
 
 
@@ -1770,6 +1782,97 @@ def test_compact_continuation_carries_active_turn_user_input_as_real_native_turn
     assert loop_params.active_turn_user_inputs == [packet]
     assert loop_params.tool_ir_history == [UserTurn(packet["text"])]
     assert loop_params.tool_context == [f"[ACTIVE_TURN_USER_INPUT]\n{packet['text']}"]
+
+
+def test_native_carried_handoff_precedes_real_active_turn_user_input():
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.runtime.loop_support import _tool_loop_execute_params
+    from agent_py_agent.agent.backends.tool_ir import CompactionSummary, UserTurn
+
+    carried = [
+        {
+            "tool": "task_progress",
+            "ok": True,
+            "parameters": {
+                "action": "create",
+                "items": [
+                    {
+                        "id": "commands",
+                        "status": "in_progress",
+                        "api_key": "must-not-enter-handoff",
+                    }
+                ],
+            },
+            "scoped_call_id": "root:plan-1",
+        }
+    ]
+    packet = {
+        "schema_version": "active-turn-user-input.v1",
+        "input_ids": ["guidance-after-plan"],
+        "text": "命令层完成后先跑定向测试。",
+    }
+
+    loop_params = _tool_loop_execute_params(
+        SimpleNamespace(),
+        _seed_for_carried(
+            carried,
+            [packet],
+            source_protocol="native",
+        ),
+    )
+
+    assert [type(item) for item in loop_params.tool_ir_history] == [
+        CompactionSummary,
+        UserTurn,
+    ]
+    assert '"id":"commands"' in loop_params.tool_ir_history[0].text
+    assert "must-not-enter-handoff" not in loop_params.tool_ir_history[0].text
+    assert "<redacted>" in loop_params.tool_ir_history[0].text
+    assert loop_params.tool_ir_history[1].text == packet["text"]
+    assert packet["text"] not in loop_params.tool_ir_history[0].text
+
+
+def test_native_carried_handoff_is_bounded_by_existing_compact_summary_budget():
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.runtime.loop_support import _tool_loop_execute_params
+    from agent_py_agent.agent.backends.tool_ir import CompactionSummary
+
+    carried = [
+        {
+            "tool": "task_progress" if index == 25 else "read_file",
+            "ok": True,
+            "parameters": (
+                {
+                    "action": "create",
+                    "items": [
+                        {
+                            "id": f"item-{index}",
+                            "status": "pending",
+                            "detail": "x" * 8_000,
+                        }
+                    ],
+                }
+                if index == 25
+                else {"path": f"/src/{index}.py"}
+            ),
+            "scoped_call_id": f"root:call-{index}",
+        }
+        for index in range(80)
+    ]
+
+    loop_params = _tool_loop_execute_params(
+        SimpleNamespace(),
+        _seed_for_carried(carried, source_protocol="native"),
+    )
+
+    handoff = loop_params.tool_ir_history[0]
+    assert isinstance(handoff, CompactionSummary)
+    assert len(handoff.text) <= 12_000
+    assert "archived_tool_call_count: 80" in handoff.text
+    assert "tool=task_progress" in handoff.text
+    assert "active-turn-tool-handoff truncated" in handoff.text or "tool-context-window" in handoff.text
 
 
 def test_compact_continuation_drops_released_unsubmitted_active_input_packet() -> None:
