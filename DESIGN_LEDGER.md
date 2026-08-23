@@ -1230,3 +1230,21 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   写成直接真机通过。r19 同时证明 112 个自建测试可能与真实启动相悖：生成 App 没有挂载 Screen，进程
   存活但整屏空白。该反例不改变本条边界：宿主不按 LOC、测试数量或界面内容决定业务完成；后续改善必须
   让模型基于结构化工具事实维护计划和验证实际入口，而不是恢复第二套机器验收状态机。
+
+## 2026-08-23 单 Gateway 多 TUI 接入背压与断线退避
+
+状态：本地候选已通过 focused 回归，待部署 `.7` 和真实多 TUI 复验。
+
+- 解决问题：真实并行 TUI 对照中，历史窗口与当前窗口都以 250ms 周期请求
+  `/client/notices`；Python 标准 HTTP server 的等待连接队列只有 5。几十个窗口在 Gateway 忙时会形成
+  `SYN-SENT` 堆积，Gateway CPU 升高，新窗口看起来像“主代理停止响应”。这不是 workspace/owner 锁，
+  而是展示面反向压垮唯一运行入口。
+- 会话运行时 对照：`会话运行时-rs/app-server/src/thread_status.rs` 通过 `watch` 与 server notification 在状态变化时
+  推送；`app-server/src/transport.rs` 对每个连接使用有界发送队列，慢连接队列满后断开，不让展示客户端
+  无限反压运行时。本项目本轮不同时更换整个客户端协议，先在现有 HTTP 兼容面落同一背压原则。
+- 接入合同：单 Gateway 的 accept backlog 固定为 128；请求线程为 daemon，关闭时不等待失联 TUI。
+  TUI 首次仍立即取快照，成功后每秒刷新；HTTP、解析或 `ok=false` 按 0.5、1、2、4、8 秒指数退避，
+  下一次有效快照立刻恢复 1 秒周期。失败快照保留上一份真实活动，不得伪造“任务已结束”。
+- 权威边界不变：该接口仍是 owner/thread 鉴权后的只读投影，不产生任务、状态、完成、权限或恢复事实；
+  本地可信 TUI 的 cwd 与远程用户 `owner_home` 隔离也不因传输优化改变。后续若升级为事件长连接，仍复用
+  同一 canonical activity/notices，而不是建立第二份前端状态账。

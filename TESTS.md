@@ -551,6 +551,10 @@ direct-child 行；只选当前 thread 活跃 root 的直属 child，不展开 g
 状态、职责短标题、耗时、当前模型可见上下文 token、Compact 和真实重试。短标题按剩余终端列截断，
 不得回退“模型响应中/模型已生成回复”或累计计费 token。相同快照不重复追加，数值变化原位更新，root
 归零整体删除；HTTP/解析失败不把上次真实活动误清零。
+单 Gateway 多 TUI 还必须覆盖传输背压：HTTP server 的 accept backlog 不得退回标准库默认 5，客户端成功
+快照约每秒一次；连续传输/合同失败按 0.5、1、2、4、8 秒退避，成功后重置。部署复验需同时记录唯一
+Gateway PID/端口、监听 backlog、Gateway CPU/线程数、`SYN-SENT` 数量和至少四个独立 TUI 的活动刷新；
+不能用多个 Gateway 或杀掉正在计分的任务掩盖争用。
 main 的后台 context 也必须来自同一次 `model_visible_context_usage.v1` provider preflight；每轮模型调用时
 实时更新，不能永远停在首次 8.7k。Todo 必须从当前 active task 的 canonical `task_progress.v1`
 投影；后台更新原位替换，active link 关闭前后的最终 notice 还要携带最后一份 `id/title/status` 快照，

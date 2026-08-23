@@ -11,9 +11,11 @@ from pathlib import Path
 from .tui_params import StartWorkerParams, WorkerConfigParams
 
 TUI_REFRESH_INTERVAL_SECONDS = 0.125
-# S-BG1: 后台主代理轮和子代理面板走本地轻量快照；250ms 接近 终端交互
-# 的直接状态刷新，同时不触发模型调用或业务轮询。
-TUI_BACKGROUND_NOTICE_INTERVAL_SECONDS = 0.25
+# S-BG1: 后台主代理轮和子代理面板走 Gateway 轻量快照。会话运行时 用服务端事件推送；
+# 当前 HTTP 兼容协议按 1 秒刷新，既保留近实时体验，也不让多个 TUI 高频争抢单 Gateway。
+TUI_BACKGROUND_NOTICE_INTERVAL_SECONDS = 1.0
+TUI_BACKGROUND_NOTICE_FAILURE_INITIAL_SECONDS = 0.5
+TUI_BACKGROUND_NOTICE_FAILURE_MAX_SECONDS = 8.0
 
 
 # LLM: config factory 只能透传同一 queue/refs/runtime；不得在这里复制状态或创建第二个 TuiRuntime。
@@ -95,8 +97,10 @@ def _start_worker_threads(*, params: StartWorkerParams) -> None:
     ).start()
 
 
-# LLM: 首次查询必须立即执行，随后才等待；否则短后台轮可能在用户误判卡死后才显示。
-# 函数用途: 持续检查当前会话的后台更新通知并及时显示。
+# LLM: The first snapshot is immediate. Healthy polling stays near-real-time; transport or
+# contract failures exponentially back off and reset after the next valid snapshot so disconnected
+# TUIs cannot create a reconnect storm against the single Gateway.
+# 函数用途: 持续检查当前会话的后台更新；断线时逐步放慢，恢复后自动回到正常刷新速度。
 def _background_notice_loop(
     stop_event: threading.Event,
     agent: object,
@@ -105,42 +109,58 @@ def _background_notice_loop(
     app_ref: list,
 ) -> None:
     seen: set[float] = set()
+    failure_delay = TUI_BACKGROUND_NOTICE_FAILURE_INITIAL_SECONDS
     while not stop_event.is_set():
         try:
-            _consume_background_notices(agent, session_id, tui_runtime, app_ref, seen)
+            snapshot_ok = _consume_background_notices(
+                agent,
+                session_id,
+                tui_runtime,
+                app_ref,
+                seen,
+            )
         except Exception:
-            # 监视失败绝不打扰会话；下一轮重试。
-            pass
-        if stop_event.wait(TUI_BACKGROUND_NOTICE_INTERVAL_SECONDS):
+            # 监视失败绝不打扰会话；按同一退避合同等待下一轮。
+            snapshot_ok = False
+        if snapshot_ok:
+            delay = TUI_BACKGROUND_NOTICE_INTERVAL_SECONDS
+            failure_delay = TUI_BACKGROUND_NOTICE_FAILURE_INITIAL_SECONDS
+        else:
+            delay = failure_delay
+            failure_delay = min(
+                TUI_BACKGROUND_NOTICE_FAILURE_MAX_SECONDS,
+                failure_delay * 2.0,
+            )
+        if stop_event.wait(delay):
             break
 
 
-# LLM: Each poll reads one canonical thread snapshot. HTTP failures preserve
-# the previous activity projection, while successful zero counts remove it;
-# notice rows remain an independent append-only user-facing channel.
-# 函数用途: 消费一次当前会话的后台任务计数和新增通知，并在画面变化时触发重绘。
+# LLM: Each poll reads one canonical thread snapshot. The boolean result distinguishes a valid
+# snapshot from transport/contract failure for the caller's backoff; failures preserve the previous
+# activity projection, while a valid zero count removes it. Notice rows remain append-only display.
+# 函数用途: 消费一次后台状态并返回查询是否成功，供监视线程决定正常刷新还是断线退避。
 def _consume_background_notices(
     agent: object,
     session_id: str,
     tui_runtime: object,
     app_ref: list,
     seen: set[float],
-) -> None:
+) -> bool:
     if tui_runtime is None or not session_id:
-        return
+        return True
     store = getattr(agent, "conversation_store", None)
     if store is None:
         # Gateway 轻量客户端：走 HTTP /client/notices（S-BG1）
         fetcher = getattr(agent, "request_background_notices", None)
         if not callable(fetcher):
-            return
+            return True
         cursor = max(seen) if seen else 0.0
         try:
             payload = fetcher(session_id, after=cursor)
         except Exception:
-            return
-        if not isinstance(payload, dict):
-            return
+            return False
+        if not isinstance(payload, dict) or payload.get("ok") is not True:
+            return False
         activity_changed = (
             _publish_background_activity(
                 tui_runtime,
@@ -148,33 +168,36 @@ def _consume_background_notices(
                 if isinstance(payload.get("agent_activity"), dict)
                 else {"active_task_count": payload.get("active_task_count")},
             )
-            if payload.get("ok") is True
+            if isinstance(payload.get("agent_activity"), dict)
+            or "active_task_count" in payload
             else False
         )
         raw = payload.get("notices")
         if not isinstance(raw, list):
-            return
+            if activity_changed and app_ref[0] is not None:
+                app_ref[0].invalidate()
+            return False
         fresh = [dict(row) for row in raw if isinstance(row, dict)]
         for row in fresh:
             _publish_background_notice_row(tui_runtime, row, seen)
         if (fresh or activity_changed) and app_ref[0] is not None:
             app_ref[0].invalidate()
-        return
+        return True
     from ...agent.conversation.channels import LOCAL_AGENT_USER_ID, LOCAL_CHAT_CHANNEL
 
     root = getattr(store, "root", None)
     if not root:
-        return
+        return True
     thread, _thread_error = store.resolve_thread_report(
         channel=LOCAL_CHAT_CHANNEL,
         channel_conversation_id=session_id,
         channel_user_id=LOCAL_AGENT_USER_ID,
     )
     if thread is None:
-        return
+        return True
     thread_id = str(getattr(thread, "thread_id", "") or "")
     if not thread_id:
-        return
+        return True
     from ...agent.conversation.agent_activity import conversation_agent_activity
 
     activity = conversation_agent_activity(agent, store, thread_id).to_dict()
@@ -186,7 +209,7 @@ def _consume_background_notices(
     if not notices_path.exists():
         if activity_changed and app_ref[0] is not None:
             app_ref[0].invalidate()
-        return
+        return True
     fresh: list[dict[str, object]] = []
     for line in notices_path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
@@ -207,11 +230,12 @@ def _consume_background_notices(
     if not fresh:
         if activity_changed and app_ref[0] is not None:
             app_ref[0].invalidate()
-        return
+        return True
     for row in fresh:
         _publish_background_notice_row(tui_runtime, row, seen)
     if app_ref[0] is not None:
         app_ref[0].invalidate()
+    return True
 
 
 # LLM: The monitor may project only the typed conversation-agent snapshot built

@@ -20,9 +20,15 @@ Compact 次数则精确加载其 `agent_thread_id` 对应 ConversationThread gen
 先提交同一 thread generation，display sink 只投影结果；presentation/no-save 临时事件不计数。当前 token
 快照也不是累计计费用量。当前 active task 的 Todo 则从
 canonical `task_progress.v1` 账本只读投影为 `id/title/status`；
-主代理累计 Compact 次数只读 ConversationThread 的 `compact_generation`。客户端按 250ms 节奏轮询并只接收白名单字段。main 快照可易失；child
+主代理累计 Compact 次数只读 ConversationThread 的 `compact_generation`。客户端首次立即查询，正常时
+每秒轮询并只接收白名单字段；传输或合同失败按 0.5/1/2/4/8 秒退避，下一份有效快照会重置周期。main 快照可易失；child
 数值与 Todo 仍由各自 canonical ledger 持有，全部展示字段都不参与任务结束、恢复或授权，真实 task
 link/run/turn_end 仍是唯一生命周期事实。
+
+`gateway_parts/http_service.py::GatewayThreadingHTTPServer` 是这些客户端共享的唯一 HTTP 接入口；
+accept backlog 为 128，request thread 为 daemon 且关闭不等待失联连接。它只吸收短时重连突发，不能改变
+handler 内的 owner/thread 鉴权、turn 串行、operation 幂等或状态权威。后台 notice 请求 2 秒无响应即由
+客户端转入退避，避免一个失联窗口长期占住连接。
 
 累计成本另走 `ModelCallLedger`：按 request/run 记录 provider input、output、cache read、
 cache creation 和真实/估算调用数，再投影到 runtime fact、`AgentRunResult` 与 Gateway

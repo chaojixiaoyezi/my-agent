@@ -291,15 +291,77 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
             published.append(text)
 
     seen: set[float] = set()
-    _consume_background_notices(_Agent(), "session-http", _Runtime(), [None], seen)
+    assert _consume_background_notices(
+        _Agent(), "session-http", _Runtime(), [None], seen
+    )
     assert len(fetched) == 1
     assert fetched[0]["after"] == 0.0
     assert len(published) == 2
     assert published[0] == "active:2:3:child-1:qa:0:True:True:False"
     assert published[1] == "HTTP 后台完成通知测试。"
     # 游标推进后不重复
-    _consume_background_notices(_Agent(), "session-http", _Runtime(), [None], seen)
+    assert _consume_background_notices(
+        _Agent(), "session-http", _Runtime(), [None], seen
+    )
     assert fetched[1]["after"] == 150.0
+
+
+def test_tui_notice_transport_failure_preserves_projection_and_reports_failure() -> None:
+    """HTTP 断线不清空旧活动投影，并把失败交给监视线程退避。"""
+    from agent_py_agent.cli.chat_parts.tui_threading import _consume_background_notices
+
+    class _Agent:
+        def request_background_notices(self, session_id, *, after):
+            return {
+                "ok": False,
+                "notices": [],
+                "cursor": after,
+                "active_task_count": 0,
+            }
+
+    class _Runtime:
+        def update_background_activity(self, *_args, **_kwargs):
+            raise AssertionError("失败快照不得清空上一次真实活动")
+
+    assert not _consume_background_notices(
+        _Agent(),
+        "session-http-failed",
+        _Runtime(),
+        [None],
+        set(),
+    )
+
+
+def test_tui_notice_loop_backs_off_and_resets_after_success(monkeypatch) -> None:
+    """连续断线按 0.5/1/2 秒退避；成功后恢复 1 秒并重置退避。"""
+    from agent_py_agent.cli.chat_parts import tui_threading
+
+    outcomes = iter((False, False, False, True, False, False))
+    waits: list[float] = []
+
+    class _StopEvent:
+        def is_set(self):
+            return False
+
+        def wait(self, delay):
+            waits.append(delay)
+            return len(waits) >= 6
+
+    monkeypatch.setattr(
+        tui_threading,
+        "_consume_background_notices",
+        lambda *_args, **_kwargs: next(outcomes),
+    )
+
+    tui_threading._background_notice_loop(
+        _StopEvent(),
+        object(),
+        "session-backoff",
+        object(),
+        [None],
+    )
+
+    assert waits == [0.5, 1.0, 2.0, 1.0, 0.5, 1.0]
 
 
 def test_gateway_notice_snapshot_reports_canonical_active_task_count(tmp_path: Path) -> None:

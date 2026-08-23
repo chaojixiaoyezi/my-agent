@@ -1,5 +1,16 @@
 # Gateway Progress
 
+## 2026-08-23 单 Gateway 多 TUI 接入背压候选
+
+- 首轮 会话运行时/my-agent 配对真 TUI 暴露的卡顿不是工作区锁：`.7` 唯一 Gateway 的标准库等待队列只有 5，
+  历史和当前 TUI 又每 250ms 调一次 `/client/notices`。现场出现大量 `SYN-SENT`、Gateway CPU 约 75%，
+  新窗口的活动快照与后续输入均被连接风暴拖慢；这批任务保留为 diagnostic，不进入正式评分。
+- 对照 会话运行时 app-server 的 `watch`/server notification 和慢连接有界发送队列后，现有兼容协议先收紧为：
+  accept backlog 128、daemon request threads；首次立即查询，成功后 1 秒刷新，失败按
+  0.5/1/2/4/8 秒退避并在成功后重置。后台快照 HTTP 超时收为 2 秒，失败继续保留上一份真实投影。
+- 本地 HTTP、鉴权与后台活动 focused 39 项通过。待严格 gate、推送和 `.7` 单 Gateway 重启后，使用至少
+  四个真实 TUI 同时观察 backlog、CPU、线程、连接状态和活动刷新；通过后才重跑用户给定正式矩阵。
+
 ## 2026-08-23 每个 run 的模型 token 累计投影
 
 - 双 TUI 对照需要区分“当前上下文大小”和“任务累计消耗”。现有 `ModelCallLedger` 在同一

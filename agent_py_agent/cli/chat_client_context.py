@@ -139,6 +139,7 @@ class GatewayChatClientAgent:
         *,
         after: float,
     ) -> dict[str, object]:
+        # 后台状态只是易失展示；2 秒仍无响应就交给 TUI 退避，不能让每个窗口长期占住连接。
         _status, body = self._post_gateway_json(
             "/client/notices",
             {
@@ -147,7 +148,7 @@ class GatewayChatClientAgent:
                 "channel": "chat",
                 "conversation_id": str(session_id or "default"),
             },
-            timeout=10.0,
+            timeout=2.0,
         )
         return body or {
             "ok": False,

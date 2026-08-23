@@ -20,6 +20,7 @@ from agent_py_agent.agent.auth.middleware import AuthMiddleware
 from agent_py_agent.agent.gateway_parts.http_service import (
     GatewayHTTPServer,
     GatewayHTTPServerParams,
+    GatewayThreadingHTTPServer,
     _is_loopback_host,
 )
 
@@ -72,6 +73,13 @@ def test_default_bind_is_loopback(tmp_path) -> None:
         assert server.server.server_address[0] == "127.0.0.1"  # 默认只绑回环,不暴露
     finally:
         server.stop()
+
+
+def test_gateway_server_absorbs_multi_tui_reconnect_bursts() -> None:
+    """单 Gateway 不沿用标准库仅 5 个等待位，关闭也不等待闲置客户端线程。"""
+    assert GatewayThreadingHTTPServer.request_queue_size >= 128
+    assert GatewayThreadingHTTPServer.daemon_threads is True
+    assert GatewayThreadingHTTPServer.block_on_close is False
 
 
 def test_refuse_nonloopback_without_auth(tmp_path) -> None:

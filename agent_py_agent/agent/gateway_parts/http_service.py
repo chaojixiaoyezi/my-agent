@@ -236,8 +236,25 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         handle_admin_summary(self, _server_instance)
 
 
+# LLM: This server is the single local Gateway transport shared by every TUI. Keep the accept
+# backlog large enough for reconnect bursts, and never let idle client threads delay a controlled
+# Gateway restart; request ownership and serialization remain in the typed handlers/ledgers.
+# 类用途: 为单 Gateway 多 TUI 提供有界并发接入，避免短时重连把系统默认的 5 个等待位挤满。
+class GatewayThreadingHTTPServer(ThreadingHTTPServer):
+    request_queue_size = 128
+    daemon_threads = True
+    block_on_close = False
+
+
+# LLM: This wrapper owns the lifecycle of exactly one concurrent HTTP listener. Changes must keep
+# exposure checks before bind, preserve the module-global handler context, and stop cleanly without
+# changing request/owner serialization inside Gateway services.
+# 类用途: 启动、记录故障并关闭 Gateway 的唯一 HTTP 监听器。
 class GatewayHTTPServer:
 
+    # LLM: Construction stores dependencies only; it must not bind a socket or mutate the global
+    # server pointer before start() passes the network exposure guard.
+    # 函数用途: 保存端口、路径、鉴权和 Agent 依赖，等待显式 start 启动监听。
     def __init__(
         self,
         port: int,
@@ -256,7 +273,7 @@ class GatewayHTTPServer:
         self.auth_middleware = server_params.auth_middleware
         self.bind_host = server_params.bind_host
         self.agent = server_params.agent
-        self.server: ThreadingHTTPServer | None = None
+        self.server: GatewayThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self.last_error_report: dict[str, Any] | None = None
@@ -269,13 +286,19 @@ class GatewayHTTPServer:
                 "请置 auth_enabled=True,或把 gateway_bind_host 设回 127.0.0.1。"
             )
 
+    # LLM: start() is the only socket construction point and must instantiate the Gateway-specific
+    # concurrent server so every caller receives the same backlog and shutdown semantics.
+    # 函数用途: 通过网络暴露检查后启动唯一 Gateway HTTP 服务线程。
     def start(self) -> None:
         self._guard_network_exposure()  # fail-closed 必须先于任何全局副作用(拒绝时不污染 _server_instance)
         global _server_instance
         _server_instance = self
         self.last_error_report = None
 
-        self.server = ThreadingHTTPServer((self.bind_host, self.port), GatewayHTTPHandler)
+        self.server = GatewayThreadingHTTPServer(
+            (self.bind_host, self.port),
+            GatewayHTTPHandler,
+        )
         self.server.server_version = "MyAgentGateway/1.0"
         self.server.handler_class = GatewayHTTPHandler
 
