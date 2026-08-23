@@ -6,16 +6,15 @@
 由主代理依据用户目标和当前事实自主决定。种子失败绝不影响派工本身。
 
 covers 绑定侧(P1 + P-bigbuild)也在本模块:绑定回执(dispatch_coverage_binding)、清单账本
-的主账本回落(_binding_ledger_targets:子/孙代理派工现场也看得到任务主清单 open 项)、goal
-字面 id 的 covers 落难兜底(autobind_covers_from_goal_ids)。主代理读账时只用 canonical DONE、
-lineage 和显式 covers id 更新对应进度；不读取 goal/summary/artifact 正文，不承担任务完成判断。
+的主账本回落(_binding_ledger_targets:子/孙代理派工现场也看得到任务主清单 open 项)。
+主代理读账时只用 canonical DONE、lineage 和调用方显式提交的 covers id 更新对应进度；
+不读取 goal/summary/artifact 正文，不承担任务完成判断。
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Any
 
@@ -35,8 +34,6 @@ from ..runner.context import current_subagent_run_id
 from ..runtime.task_identity import durable_task_id, progress_ledger_id
 
 _MAX_BINDING_OPEN_TARGETS = 24
-# goal 字面 id 兜底的最短 id 长度:太短的 id(如"1""a")在任意文本里撞车概率高,不兜。
-_GOAL_ID_MIN_LEN = 4
 
 DISPATCH_SEED_NOTE = (
     "已把派工与 task_progress 结构化关联；有 covers 的子代理沿用原清单项，"
@@ -549,7 +546,6 @@ def _coverage_binding(agent: object, tasks: list) -> dict[str, Any] | None:
         and not _target_has_open_checks(target)
     ]
     bound: dict[str, list[str]] = {}
-    auto_bound: dict[str, list[str]] = {}
     unknown: list[str] = []
     for task in tasks:
         task_id = str(getattr(task, "id", "") or "").strip()
@@ -557,8 +553,6 @@ def _coverage_binding(agent: object, tasks: list) -> dict[str, Any] | None:
         if not task_id or not covers:
             continue
         bound[task_id] = covers
-        if goal_ids := _task_goal_auto_bound(task):
-            auto_bound[task_id] = goal_ids
         unknown.extend(target_id for target_id in covers if target_id not in known_ids)
     if not bound and not open_ids:
         return None
@@ -570,8 +564,6 @@ def _coverage_binding(agent: object, tasks: list) -> dict[str, Any] | None:
         payload["ledger_run_id"] = ledger_run_id
     if bound:
         payload["bound"] = bound
-    if auto_bound:
-        payload["auto_bound_from_goal"] = auto_bound
     if unknown:
         payload["unknown_covers_ids"] = list(dict.fromkeys(unknown))[:12]
         payload["note"] = COVERS_PARENT_LEDGER_UNKNOWN_NOTE if ledger_run_id != run_id else COVERS_UNKNOWN_NOTE
@@ -643,77 +635,11 @@ def _task_covers(task: object) -> list[str]:
     return [str(item).strip() for item in covers if str(item or "").strip()]
 
 
-def _task_goal_auto_bound(task: object) -> list[str]:
-    attrs = getattr(task, "attributes", None)
-    bound = attrs.get("covers_auto_bound") if isinstance(attrs, dict) else None
-    if not isinstance(bound, list | tuple):
-        return []
-    return [str(item).strip() for item in bound if str(item or "").strip()]
-
-
-def autobind_covers_from_goal_ids(agent: object, items: list) -> int:
-    """派工参数落难兜底(P-bigbuild):item 没带 covers、goal 文本却字面写了清单项 id
-    (如"实现 req-03 用户管理模块")→ 系统自动补绑 covers=[这些 id]。真机形态:模型知道
-    对应关系(把 id 写进了 goal)却丢了 covers 参数(create_subagents 格式驾驭弱是实锤)。
-    判据=字面 token 等值+词边界,id 是立账时造的结构化标识,非自然语言/关键词匹配——守铁律。
-    只补空缺:显式带 covers 的 item 一字不动;账本(含主账本回落)没有 open 项就整个不跑。
-    补绑同时在 item attributes 记 covers_auto_bound(审计+回执回显)。永不抛错。"""
-    try:
-        return _autobind(agent, items)
-    except Exception:  # noqa: BLE001 - 兜底是增强,失败绝不影响派工
-        logging.getLogger(__name__).warning("goal-id covers autobind failed", exc_info=True)
-        return 0
-
-
-def _autobind(agent: object, items: list) -> int:
-    root = _progress_root(agent)
-    run_id = _current_run_id(agent)
-    if root is None or not run_id or not items:
-        return 0
-    _ledger_run_id, targets = _binding_ledger_targets(agent, root, run_id)
-    open_ids = [
-        target_id
-        for target in targets
-        if not task_progress_status_is_closed(target.get("status"))
-        and len(target_id := str(target.get("id") or "").strip()) >= _GOAL_ID_MIN_LEN
-    ]
-    if not open_ids:
-        return 0
-    bound_items = 0
-    for item in items:
-        params = getattr(item, "params", None)
-        if not isinstance(params, dict) or _params_covers(params):
-            continue
-        matched = _goal_literal_ids(str(getattr(item, "goal", "") or ""), open_ids)
-        if not matched:
-            continue
-        params["covers"] = matched
-        attrs = params.get("attributes")
-        if isinstance(attrs, dict) or "attributes" not in params:
-            attrs = attrs if isinstance(attrs, dict) else {}
-            attrs["covers_auto_bound"] = matched
-            params["attributes"] = attrs
-        bound_items += 1
-    return bound_items
-
-
 def _params_covers(params: dict[str, Any]) -> list[str]:
     covers = params.get("covers")
     if not isinstance(covers, list | tuple):
         return []
     return [str(item).strip() for item in covers if str(item or "").strip()]
-
-
-def _goal_literal_ids(goal: str, open_ids: list[str]) -> list[str]:
-    """goal 文本里字面出现(词边界)的清单项 id。边界只认标识符字符——中文/标点/空白紧邻
-    都算边界("实现req-03模块"命中),req-03 不会误命中 req-030/xreq-03。"""
-    if not goal:
-        return []
-    return [
-        target_id
-        for target_id in open_ids
-        if re.search(r"(?<![A-Za-z0-9_-])" + re.escape(target_id) + r"(?![A-Za-z0-9_-])", goal)
-    ]
 
 
 def _task_item(task: object) -> dict[str, str]:
@@ -753,7 +679,6 @@ __all__ = [
     "COVERS_UNKNOWN_NOTE",
     "DISPATCH_SEED_NOTE",
     "PLANNED_DISPATCH_CONTRACT_VERSION",
-    "autobind_covers_from_goal_ids",
     "dispatch_coverage_binding",
     "planned_dispatch_contract",
     "reconcile_completed_child_covers",

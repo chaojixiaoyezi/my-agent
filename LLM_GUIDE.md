@@ -36,6 +36,8 @@
   `effect_outcome=not_started + required_repairs`，整批零创建。这个合同不读 goal/标题/代码量，不判断质量
   或完成，也不能靠 capability grant 扩到兄弟目录；模型修正结构化参数后重试原任务。它的控制报码必须
   在唯一 `error_taxonomy` 登记为可修参数错误，不能让外层降成 `UNKNOWN_ERROR` 后误导模型报告阻塞。
+  历史“goal 正文里恰好出现 Todo id 就自动补 covers”分支已经删除；`i18n`、`config` 这类既可能是目录名
+  又可能是计划 id 的文本不能取得绑定权威，缺少显式 `covers` 时必须走上述可修错误。
 - 普通主代理和子代理共用 `turn_end.reason`：`completed` / `blocked` /
   `max-tokens` / `aborted` / `error` / `interrupted`。它只表示一轮为什么结束，
   不从模型正文、验收清单、产物数量或测试描述反推完成。

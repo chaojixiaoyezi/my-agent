@@ -396,6 +396,8 @@ role 直接产出产品代码的 item，还必须声明本次 `output_files` 写
 越出直接父级 workspace 的批次在 create/save/publish 前整体返回 `not_started`，不留下半创建状态。
 预检不读 goal 或 Todo 标题，不判断交付质量、代码量和完成状态；没有 canonical 计划的普通轻量派工沿原
 入口运行。read-only、tester、coordinator 等不直接拥有产品写集合的角色继续使用各自既有合同。
+即使 goal 正文包含与 Todo id 完全相同的目录名或模块名，也不会自动生成 `covers`；历史
+`covers_auto_bound` 旁路已删除，调用参数中的显式 `covers` 是唯一绑定来源。
 用户明确的保存路径应通过顶层或逐 item 的 `output_files` 记录交付和锁；普通 child 的权限上界来自父级
 workspace，goal 或 output_files 都不能扩大到该上界之外。
 对 local/unmanaged owner，若该 inherited workspace 同时是结构化 allowed root，创建时会移除

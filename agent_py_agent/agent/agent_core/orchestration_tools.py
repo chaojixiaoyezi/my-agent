@@ -49,7 +49,6 @@ from .orchestration.create_policy import (
 )
 from .orchestration.dispatch_progress_seed import (
     DISPATCH_SEED_NOTE,
-    autobind_covers_from_goal_ids,
     dispatch_coverage_binding,
     seed_dispatch_task_progress,
 )
@@ -262,7 +261,6 @@ def _nested_create_params(
             error_code="TOOL_INVALID_ARGUMENTS",
         )
     delegated_items = items or [CreateSubagentItem(goal=goal, params=dict(params))]
-    autobind_covers_from_goal_ids(agent, delegated_items)
     allowed_tool_values = [subagent_allowed_tools(item.params) for item in delegated_items]
     if invalid := _planned_delegation_result(agent, delegated_items, allowed_tool_values):
         return invalid
@@ -355,7 +353,6 @@ def _execute_create_subagents(agent: SimpleAgent, params: dict[str, object]) -> 
             params=related_params,
         )
     ]
-    autobind_covers_from_goal_ids(agent, single_items)
     prepared = _prepare_single_mode(agent, related_params)
     if isinstance(prepared, ToolHandlerOutcome):
         return prepared
@@ -489,9 +486,6 @@ def _execute_items(
             audit_scope_error,
             error_code="TOOL_INVALID_ARGUMENTS",
         )
-    # P-bigbuild 参数落难兜底:goal 里字面写了清单项 id 却没带 covers 的 item,创建前自动补绑
-    # (纯 id token 对账;显式 covers 一字不动),covers 经属性白名单随任务落 canonical。
-    autobind_covers_from_goal_ids(agent, capped)
     allowed_tool_values = [subagent_allowed_tools(item.params) for item in capped]
     if invalid := _planned_delegation_result(agent, capped, allowed_tool_values):
         return invalid

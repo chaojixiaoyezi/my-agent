@@ -551,7 +551,7 @@ def test_binding_none_when_neither_ledger_has_coverage(tmp_path):
     )
 
 
-# --- P-bigbuild goal 字面 id 兜底:模型把 id 写进 goal 却丢了 covers 参数 → 系统补绑 -----
+# --- planned-delegation exact covers 合同 -------------------------------------------
 
 
 def _item(goal, params=None):
@@ -562,102 +562,6 @@ def _autobind_agent(tmp_path, run_id="run-seed-1"):
     return SimpleNamespace(
         home_paths=None, root=tmp_path, _current_run_params=SimpleNamespace(run_id=run_id, task_id=run_id)
     )
-
-
-def test_autobind_binds_goal_literal_ids(tmp_path):
-    from agent.agent_core.orchestration.dispatch_progress_seed import autobind_covers_from_goal_ids
-
-    _seed_coverage(tmp_path)
-    item = _item("实现 req-01 注册登录模块,含表单校验")
-    assert autobind_covers_from_goal_ids(_autobind_agent(tmp_path), [item]) == 1
-    assert item.params["covers"] == ["req-01"]
-    assert item.params["attributes"]["covers_auto_bound"] == ["req-01"]
-
-
-def test_autobind_cjk_adjacent_and_multiple_ids(tmp_path):
-    """中文紧邻(无空格)照样命中;一个 goal 点名多项就绑多项。"""
-    from agent.agent_core.orchestration.dispatch_progress_seed import autobind_covers_from_goal_ids
-
-    _seed_coverage(tmp_path)
-    item = _item("实现req-01与req-02两个模块")
-    autobind_covers_from_goal_ids(_autobind_agent(tmp_path), [item])
-    assert item.params["covers"] == ["req-01", "req-02"]
-
-
-def test_autobind_respects_explicit_covers(tmp_path):
-    """显式带了 covers 的 item 一字不动(哪怕 goal 里还写了别的 id)。"""
-    from agent.agent_core.orchestration.dispatch_progress_seed import autobind_covers_from_goal_ids
-
-    _seed_coverage(tmp_path)
-    item = _item("实现 req-02", {"covers": ["req-01"]})
-    assert autobind_covers_from_goal_ids(_autobind_agent(tmp_path), [item]) == 0
-    assert item.params["covers"] == ["req-01"]
-    assert "attributes" not in item.params
-
-
-def test_autobind_word_boundary_no_prefix_collision(tmp_path):
-    """词边界:goal 写的是 req-011 / xreq-01 → 不算 req-01 的字面出现,不误绑。"""
-    from agent.agent_core.orchestration.dispatch_progress_seed import autobind_covers_from_goal_ids
-
-    _seed_coverage(tmp_path)
-    item = _item("处理 req-011 与 xreq-01 相关事宜")
-    assert autobind_covers_from_goal_ids(_autobind_agent(tmp_path), [item]) == 0
-    assert "covers" not in item.params
-
-
-def test_autobind_skips_closed_targets(tmp_path):
-    """已 done/skipped 的项就算被 goal 点名也不绑(只对 open 项接推力)。"""
-    from agent.agent_core.orchestration.dispatch_progress_seed import autobind_covers_from_goal_ids
-    from agent.task_progress import write_task_progress
-
-    _seed_coverage(tmp_path)
-    write_task_progress(tmp_path, "run-seed-1", {"coverage": {"targets": [{"id": "req-01", "status": "done"}]}})
-    item = _item("复查 req-01 和 req-02")
-    autobind_covers_from_goal_ids(_autobind_agent(tmp_path), [item])
-    assert item.params["covers"] == ["req-02"]
-
-
-def test_autobind_falls_back_to_task_ledger(tmp_path):
-    """子代理递归派孙代理:goal 写了主清单 id → 按主账本(task_id 回落)补绑。"""
-    from agent.agent_core.orchestration.dispatch_progress_seed import autobind_covers_from_goal_ids
-
-    _seed_coverage(tmp_path, run_id="req_root_1")
-    item = _item("实现 req-02 全文搜索")
-    assert autobind_covers_from_goal_ids(_subagent_run_agent(tmp_path), [item]) == 1
-    assert item.params["covers"] == ["req-02"]
-
-
-def test_autobind_ignores_short_ids(tmp_path):
-    """太短的 id(<4 字符)撞车概率高 → 不参与字面兜底。"""
-    from agent.agent_core.orchestration.dispatch_progress_seed import autobind_covers_from_goal_ids
-    from agent.task_progress import write_task_progress
-
-    write_task_progress(
-        tmp_path, "run-seed-1", {"coverage": {"targets": [{"id": "a1", "title": "短id项", "status": "pending"}]}}
-    )
-    item = _item("处理 a1 相关")
-    assert autobind_covers_from_goal_ids(_autobind_agent(tmp_path), [item]) == 0
-    assert "covers" not in item.params
-
-
-def test_autobind_never_raises():
-    from agent.agent_core.orchestration.dispatch_progress_seed import autobind_covers_from_goal_ids
-
-    assert autobind_covers_from_goal_ids(SimpleNamespace(home_paths=None, root=None), [_item("x")]) == 0
-    assert autobind_covers_from_goal_ids(SimpleNamespace(home_paths=None, root="/nonexistent"), [object()]) == 0
-
-
-def test_autobind_echoed_in_binding_receipt(tmp_path):
-    """补绑痕迹随任务属性回到绑定回执:auto_bound_from_goal 让模型看到系统替它绑了什么。"""
-    from agent.agent_core.orchestration.dispatch_progress_seed import dispatch_coverage_binding
-
-    _seed_coverage(tmp_path)
-    task = SimpleNamespace(
-        id="sub-1", goal="实现 req-01", attributes={"covers": ["req-01"], "covers_auto_bound": ["req-01"]}
-    )
-    binding = dispatch_coverage_binding(_agent(tmp_path), [task])
-    assert binding["bound"] == {"sub-1": ["req-01"]}
-    assert binding["auto_bound_from_goal"] == {"sub-1": ["req-01"]}
 
 
 def test_planned_dispatch_requires_exact_open_covers_per_item(tmp_path):

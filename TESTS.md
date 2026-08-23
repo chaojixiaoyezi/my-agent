@@ -630,9 +630,13 @@ workspace 写入集合继续自动创建/启动，递归 child 入口使用同�
 python3 -m pytest agent_py_agent/tests/test_dispatch_progress_seed.py agent_py_agent/tests/test_orchestration_create_subagents_items.py agent_py_agent/tests/test_orchestration_create_subagents_tool_workspace.py agent_py_agent/tests/test_orchestration_create_subagents_tool.py agent_py_agent/tests/test_orchestration_create_subagents_guardrails.py agent_py_agent/tests/test_orchestration_create_subagents_output_refs.py agent_py_agent/tests/test_orchestration_create_subagents_protocol_cleanup.py agent_py_agent/tests/test_orchestration_create_subagents_items_policy.py agent_py_agent/tests/test_orchestration_create_subagents_idempotency.py agent_py_agent/tests/test_orchestration_tool_specs.py agent_py_agent/tests/test_task_progress_advisory.py agent_py_agent/tests/test_task_progress_coverage.py agent_py_agent/tests/test_task_progress_tool_dispatch_reconcile.py agent_py_agent/tests/test_tooling_base.py -q --tb=short
 ```
 
-部署后的唯一端到端验收是 fresh r14：固定 lazygit 源提交，只向真实 MiniMax-M2.7 TUI 输入一次用户原样
-Prompt 4，观察模型能否根据 typed repairs 自行补齐 covers/write sets，测试者不追加提示、不写功能代码。
-当前上述 focused 命令共 223 项通过。
+`c5cc7c2` 部署后的 fresh r14 只输入一次原样 Prompt 4，证明首名 child 完成会唤醒 root 并创建第二批；
+同时发现骨架 goal 中的 `src/i18n/`、`src/config/` 被旧正文自动补绑误当成 Todo 完成证据。新负向回归
+要求即使 goal 字面包含 open id，也必须报告 `missing_covers_indexes` 且零创建；不允许从正文写入
+`covers_auto_bound`。删除旁路后，3 个直接相关文件共 55 项、扩展派工集合共 221 项 focused 通过；Ruff、
+doc sync、strict code-size、diff 与 clean-package gate 全部通过。发布后的唯一端到端验收改为
+fresh r15：固定 lazygit 源提交，只向真实 TUI 输入一次用户原样 Prompt 4，观察模型按 typed repairs 自行
+补齐 covers/write sets；测试者不追加提示、不写功能代码。
 
 真实本地模型回归示例：
 

@@ -1,5 +1,21 @@
 # STATUS
 
+## 2026-08-23 Prompt 4 r14：主代理唤醒正常，旧 goal 自动绑定造成 Todo 假完成（本地修复候选）
+
+- `c5cc7c2` 已通过严格 gate、推送并部署到 `.7` 唯一 Gateway。fresh tmux
+  `dsh-p4-lazygit-r14-ea91639` 在固定 `jesseduffield/lazygit@ea916395` 上只输入一次原样 Prompt 4；root
+  建立 9 项 Todo，并创建“项目结构与基础框架”child。该 child 实际落下 Rust 项目文件并自然 DONE，root
+  随 lifecycle event 醒来创建第二名“Git命令核心实现”child，证明本轮主代理等待/唤醒和第二批派工正常。
+- r14 同时抓到一个确定性假进度：第一名 child 没有显式 `covers`，goal 只是列出 `src/i18n/`、
+  `src/config/` 目录，旧 `autobind_covers_from_goal_ids` 却把两个普通词当成 Todo id。TUI 因而从 0/9
+  直接显示 3/9，错误把“国际化支持、配置系统”与“项目规划”一并判 done；这不是模型完成判断，而是宿主
+  从自然语言正文制造了结构化绑定。
+- 本地候选已删除 root/items/nested 三条创建路径上的正文自动补绑，以及 `covers_auto_bound` 回执投影；
+  计划存在时仍由原子预检要求模型显式填写 `covers`，漏填继续返回可修
+  `SUBAGENT_PLANNED_DELEGATION_INVALID`，不创建 child。新增 `i18n/config` 同名目录回归，55 项直接与
+  221 项扩展 focused 均通过；严格静态/文档/发布包 gate 也已通过。推送和单 Gateway 部署后，用 fresh r15
+  重新输入同一原样 Prompt。
+
 ## 2026-08-22 Prompt 4 r13：创建前原子合同通过，错误分类表漏码（本地修复候选）
 
 - `611ee55` 已通过严格 gate、推送并部署到 `.7` 唯一 Gateway。fresh tmux

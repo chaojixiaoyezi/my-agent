@@ -4,6 +4,10 @@
 
 最近收口重点：
 
+- 2026-08-23 Prompt 4 r14 证明 `c5cc7c2` 下主代理能在 child DONE 后自然醒来并创建第二批，同时抓到旧
+  goal-id 自动补绑把目录名 `i18n/config` 当作 Todo id、造成 3 项假完成。当前本地切片删除这条自然语言
+  决策旁路和 `covers_auto_bound` 投影；计划内派工继续只认显式 `covers`，漏填由同一 typed repair 返回
+  模型。新增同名目录负向回归已通过，发布与 fresh r15 见 STATUS/ROADMAP。
 - 2026-08-22 `611ee55` 已部署，Prompt 4 r13 真 TUI 证明计划内派工原子合同生效：5 批重复 covers 均零
   child，模型自行细分计划后创建了 exact covers + cwd 内精确写入集合的 child；该 child 实际产出 1,296
   行 Rust、失败后继续并自然唤醒 root。r13 同时抓到新报码漏进 taxonomy、外层显示 `UNKNOWN_ERROR`；

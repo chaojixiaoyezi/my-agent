@@ -263,6 +263,11 @@ child，随后写边界拒绝，main 又反复尝试不能批准的越界 grant�
 `UNKNOWN_ERROR`。当前候选只补唯一错误分类为 retryable + repair arguments，不造第二个重试器；部署后
 fresh r14 原样验证工具状态、模型返工和后续多批派工。r13 已 `/stop` 为 PAUSED，无残留 runner。
 
+`c5cc7c2` 部署后的 fresh r14 已证明第一名 child 完成后 root 会自动醒来并派第二批；但首名“项目骨架”
+goal 中出现 `src/i18n/`、`src/config/` 时，历史正文自动补绑旁路把两项 Todo 一起误判完成，TUI 从 0/9
+跳到 3/9。当前候选已删除 root/items/nested 全部 goal-id 自动补绑与回执投影，计划绑定只认显式
+`covers`；新增同名目录回归已通过。严格 gate、部署后使用 fresh r15 原样复验，旧 r14 不计最终通过。
+
 ### 用户直控子代理的共享控制面
 
 状态：设计中，直属 child 只读状态投影已部署并完成真机 smoke

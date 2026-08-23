@@ -399,6 +399,33 @@ class TestCreateSubagentsItemsMode:
         assert payload["planned_dispatch"]["missing_covers_indexes"] == [0, 1]
         assert mock_agent.subagents.create_run.call_count == 0
 
+    def test_plan_ids_inside_goal_text_do_not_create_implicit_bindings(self, tmp_path):
+        """Todo id 恰好也是目录/模块名时仍只认显式 covers，不能从 goal 正文猜绑定。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = _planned_agent(tmp_path)
+        _seed_plan(
+            mock_agent,
+            [
+                {"id": "i18n", "title": "国际化支持", "status": "pending"},
+                {"id": "config", "title": "配置系统", "status": "pending"},
+            ],
+        )
+
+        result = CreateSubagentsTool(mock_agent).execute({
+            "goal": "创建项目骨架",
+            "items": [{
+                "goal": "创建 src/i18n/ 与 src/config/ 等目录结构",
+                "output_files": ["port/scaffold/"],
+            }],
+        })
+        payload = json.loads(result.output)
+
+        assert result.ok is False
+        assert result.error_code == "SUBAGENT_PLANNED_DELEGATION_INVALID"
+        assert payload["planned_dispatch"]["missing_covers_indexes"] == [0]
+        assert mock_agent.subagents.create_run.call_count == 0
+
     def test_existing_plan_rejects_coding_item_without_output_write_set(self, tmp_path):
         """计划内直接编码 item 必须声明结构化 output_files，goal 里的目录不算。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool

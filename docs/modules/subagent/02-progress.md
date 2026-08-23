@@ -1,5 +1,16 @@
 # Subagent Progress
 
+## 2026-08-23 r14 删除 goal 文本自动补 covers 旁路（本地候选）
+
+- `c5cc7c2` 部署后的 fresh r14 中，首名骨架 child 自然 DONE，root 正常 wake 并创建第二名 Git child；
+  生命周期主链没有再卡住。
+- 首名 child 参数没有 `covers`，但 goal 枚举了 `src/i18n/`、`src/config/`。旧
+  `autobind_covers_from_goal_ids` 把两个目录名碰巧命中的计划 id 写进 canonical attributes，child DONE
+  后 TUI 错误从 0/9 变为 3/9。这证明“字面 id”仍然是自然语言猜测，不能作为机器事实。
+- 当前切片删除 root 单项、items 批量、nested 递归三条入口的自动补绑及 `covers_auto_bound` 回执；已有
+  Todo 时，缺显式 `covers` 必须由 `planned_delegation` 原子拒绝并回送模型修参。新增 `i18n/config`
+  同名目录负向回归，55 项直接与 221 项扩展 focused、严格静态/文档/发布包 gate 均通过；待部署和 fresh r15。
+
 ## 2026-08-22 r12b 计划内派工创建前原子合同（本地候选）
 
 - `5f1f485` 部署后的 fresh r12b 已证明 root active turn、原任务、语言和嵌套工具参数跨 child wake 连续；

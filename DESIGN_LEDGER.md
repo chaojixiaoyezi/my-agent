@@ -1104,7 +1104,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 
 ## 2026-08-22 计划内派工的 exact-id 与写入集合原子合同
 
-状态：设计确认，正在实现并等待新鲜 Prompt 4 真 TUI 验收。
+状态：原子合同与错误分类已落地；r14 抓到并删除旧 goal 文本自动补绑，等待 fresh r15 真 TUI 复验。
 
 - 解决问题：r12 已恢复同一 active turn 的原目标与工具历史，但模型先建了 Todo，随后派工仍省略
   `covers`，又把新项目兄弟目录只写进 child `goal`。旧入口先创建 child、事后只给绑定 warning；运行时
@@ -1124,3 +1124,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - fresh r13 首次命中发现新报码虽保留在 `reported_error_code` 与 JSON 正文，控制码却因错误分类表漏登记
   降成 `UNKNOWN_ERROR`。该码必须进入唯一 `error_taxonomy`，语义为 orchestration、可重试、
   `repair_tool_arguments`；这保持 会话运行时 式“把可修工具错误回送同一 turn 返工”，不能另加专项重试器。
+- fresh r14 暴露了合同前残留的自然语言旁路：骨架 child 的 goal 只是列出 `src/i18n/` 与 `src/config/`
+  目录，旧代码便自动写入 `covers=["i18n","config"]`，完成后错误勾掉三项 Todo。该旁路与本节“不读
+  goal/标题”冲突，也不同于 会话运行时 的显式 spawn 参数，现已连同 `covers_auto_bound` 投影和测试一起删除；
+  Todo 绑定只认调用参数中的显式 `covers`。
