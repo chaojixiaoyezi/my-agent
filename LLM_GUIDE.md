@@ -19,7 +19,15 @@
 
 ---
 
-## 2026-08-22 当前运行基线
+## 2026-08-23 当前运行基线
+
+- 普通工具的 `workspace:*` 只是当前 turn 调度/审计事实，不进入跨 run 持久
+  `resource_locks`；父子代理可共享 cwd 和交付路径。operation 幂等/replay、精确
+  `logical:*` 互斥、active turn、owner 墙、write boundary 和沙箱仍保留。本地可信
+  CLI/TUI 使用启动 cwd；远程用户仍强制进入各自 `owner_home`，两者不得混同。
+- 模型成本统计复用唯一 `ModelCallLedger`，按 request/run 累计 provider input/output/
+  cache-read/cache-creation，明细裁剪不截断总账。无 provider usage 时按结构化估算
+  单独计数。TUI `ctx` 只表示当前上下文压力，不得当成任务累计消耗。
 
 - 根代理的默认 `system_prompt` 采用 会话运行时 Default 的 assumptions-first 软纪律：明确目标下先从 cwd、代码、
   用户约束和工具事实补信息；安全可逆的次要选择由模型采用合理默认并继续。只有无法从上下文取得、且任何

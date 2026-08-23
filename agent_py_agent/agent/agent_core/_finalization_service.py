@@ -285,19 +285,7 @@ class FinalizationService:
             compression_applied=ctx.compression_applied,
             turn_token_estimate=params.token_ledger["turn"],
             cumulative_token_estimate=params.token_ledger["cumulative"],
-            logical_model_turn_count=int(model_calls.get("logical_model_turn_count") or 0),
-            physical_model_attempt_count=int(model_calls.get("physical_model_attempt_count") or 0),
-            model_retry_count=int(model_calls.get("model_retry_count") or 0),
-            provider_http_attempt_count=int(model_calls.get("provider_http_attempt_count") or 0),
-            provider_http_retry_count=int(model_calls.get("provider_http_retry_count") or 0),
-            model_call_status_counts={
-                str(key): int(value or 0)
-                for key, value in dict(
-                    model_calls.get("status_counts")
-                    if isinstance(model_calls.get("status_counts"), dict)
-                    else {}
-                ).items()
-            },
+            **_model_call_result_fields(model_calls),
             main_context_bundle_path=ctx.main_context_bundle_path,
             main_context_bundle_markdown_path=ctx.main_context_bundle_markdown_path,
             runtime_status=runtime_status,
@@ -342,6 +330,52 @@ def _current_model_call_summary(
         request_id=str(ctx.request_id or run_request_id or ""),
         run_id=str(ctx.run_id or ctx.task_id or ""),
     )
+
+
+# LLM: AgentRunResult exposes the same additive counters as the canonical ledger;
+# this mapper must not recalculate usage from response text or context pressure.
+# 函数用途: 把模型调用总账整理成运行结果的稳定数字字段。
+def _model_call_result_fields(model_calls: dict[str, object]) -> dict[str, object]:
+    status_counts = (
+        model_calls.get("status_counts")
+        if isinstance(model_calls.get("status_counts"), dict)
+        else {}
+    )
+    return {
+        "logical_model_turn_count": int(
+            model_calls.get("logical_model_turn_count") or 0
+        ),
+        "physical_model_attempt_count": int(
+            model_calls.get("physical_model_attempt_count") or 0
+        ),
+        "model_retry_count": int(model_calls.get("model_retry_count") or 0),
+        "provider_http_attempt_count": int(
+            model_calls.get("provider_http_attempt_count") or 0
+        ),
+        "provider_http_retry_count": int(
+            model_calls.get("provider_http_retry_count") or 0
+        ),
+        "model_call_status_counts": {
+            str(key): int(value or 0) for key, value in status_counts.items()
+        },
+        "model_accounted_input_tokens": int(
+            model_calls.get("accounted_input_tokens") or 0
+        ),
+        "model_output_tokens": int(model_calls.get("output_tokens") or 0),
+        "model_total_tokens": int(model_calls.get("total_tokens") or 0),
+        "model_cached_input_tokens": int(
+            model_calls.get("cached_input_tokens") or 0
+        ),
+        "model_cache_creation_input_tokens": int(
+            model_calls.get("cache_creation_input_tokens") or 0
+        ),
+        "model_provider_usage_call_count": int(
+            model_calls.get("provider_usage_call_count") or 0
+        ),
+        "model_estimated_usage_call_count": int(
+            model_calls.get("estimated_usage_call_count") or 0
+        ),
+    }
 
 
 def _estimate_token_params(ctx: FinalizeContext, run_request_id: str) -> EstimateTokenParams:

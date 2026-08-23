@@ -877,7 +877,8 @@ def _build_gateway_response_base(context: _GatewayResponseBaseContext) -> dict:
     }
 
 
-# LLM: Gateway 对外 response 只放 user-facing projection；内部运行协议不进入用户正文。
+# LLM: Gateway 对外 response 只放 user-facing projection；模型 token 只转发
+# AgentRunResult 的结构化账本数字，不从正文或 TUI context 反推。
 # 函数用途: 将一次模型运行结果整理成可供客户端读取的最终响应。
 def _update_response_from_result(response: dict, result, request: dict) -> None:
     channel_delivery = dict(getattr(result, "channel_delivery", {}) or {})
@@ -915,6 +916,27 @@ def _update_response_from_result(response: dict, result, request: dict) -> None:
             "provider_http_retry_count": int(getattr(result, "provider_http_retry_count", 0) or 0),
             "model_call_status_counts": dict(
                 getattr(result, "model_call_status_counts", None) or {}
+            ),
+            "model_accounted_input_tokens": int(
+                getattr(result, "model_accounted_input_tokens", 0) or 0
+            ),
+            "model_output_tokens": int(
+                getattr(result, "model_output_tokens", 0) or 0
+            ),
+            "model_total_tokens": int(
+                getattr(result, "model_total_tokens", 0) or 0
+            ),
+            "model_cached_input_tokens": int(
+                getattr(result, "model_cached_input_tokens", 0) or 0
+            ),
+            "model_cache_creation_input_tokens": int(
+                getattr(result, "model_cache_creation_input_tokens", 0) or 0
+            ),
+            "model_provider_usage_call_count": int(
+                getattr(result, "model_provider_usage_call_count", 0) or 0
+            ),
+            "model_estimated_usage_call_count": int(
+                getattr(result, "model_estimated_usage_call_count", 0) or 0
             ),
             "memory_resume_context_injected": result.memory_resume_context_injected,
             "memory_resume_context_query": result.memory_resume_context_query,

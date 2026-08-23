@@ -826,7 +826,7 @@ def test_remote_owner_admin_bypass_does_not_add_task_scope(tmp_path):
     assert "allowed_write_roots" not in boundary
 
 
-def test_write_boundary_locks_active_child_declared_outputs() -> None:
+def test_write_boundary_does_not_turn_active_child_outputs_into_file_locks() -> None:
     child = SimpleNamespace(
         parent_id="run-1",
         root_id="run-1",
@@ -839,7 +839,7 @@ def test_write_boundary_locks_active_child_declared_outputs() -> None:
         agent, _loop_params(run_id="run-1", write_boundary={})
     )
 
-    assert boundary["locked_files"] == ["output/child-report.md"]
+    assert "locked_files" not in boundary
 
 
 def test_write_boundary_does_not_lock_finished_child_declared_outputs() -> None:
@@ -858,9 +858,8 @@ def test_write_boundary_does_not_lock_finished_child_declared_outputs() -> None:
     assert "locked_files" not in boundary
 
 
-def test_write_boundary_never_locks_run_out_of_its_own_declared_outputs() -> None:
-    """正主不锁自己(真机实锤:子代理被自己申报的 output/inventory.py 锁死,capability
-    已 GRANTED 也无济于事,3/4 子代理被迫由主代理接管代写)。锁只拦【别人】乱写。"""
+def test_write_boundary_does_not_lock_self_or_sibling_declared_outputs() -> None:
+    """会话运行时 式共享 cwd 不把 output_files 投影为父子或兄弟文件所有权。"""
     me = SimpleNamespace(
         id="subagent-1",
         parent_id="req-root",
@@ -879,16 +878,15 @@ def test_write_boundary_never_locks_run_out_of_its_own_declared_outputs() -> Non
         local_store=None, subagents=SimpleNamespace(list_runs=lambda: [me, sibling])
     )
 
-    # 子代理 runner 轮:run_id=自己,task_id=根任务 → 自己的申报不锁,兄弟的仍锁
     boundary = write_boundary_with_runtime_ledger(
         agent, _loop_params(run_id="subagent-1", task_id="req-root", write_boundary={})
     )
 
-    assert boundary["locked_files"] == ["output/kitchen.py"]
+    assert "locked_files" not in boundary
 
 
-def test_write_boundary_master_still_locked_from_active_child_outputs() -> None:
-    """主代理在孩子还活跃时写孩子的在建产物仍被拦(单向外溢保护语义不回退)。"""
+def test_write_boundary_master_shares_active_child_workspace() -> None:
+    """主代理与子代理共享 cwd，交付声明不自动收窄主代理写边界。"""
     child = SimpleNamespace(
         id="subagent-1",
         parent_id="req-root",
@@ -902,11 +900,11 @@ def test_write_boundary_master_still_locked_from_active_child_outputs() -> None:
         agent, _loop_params(run_id="req-root", task_id="req-root", write_boundary={})
     )
 
-    assert boundary["locked_files"] == ["output/inventory.py"]
+    assert "locked_files" not in boundary
 
 
-def test_write_boundary_descendant_does_not_lock_ancestor_delegated_output() -> None:
-    """A leaf may write a parent-delegated output while sibling outputs stay locked."""
+def test_write_boundary_descendant_shares_ancestor_and_sibling_outputs() -> None:
+    """A leaf inherits the workspace without deriving file ownership from sibling metadata."""
 
     parent = SimpleNamespace(
         id="coordinator-1",
@@ -939,7 +937,7 @@ def test_write_boundary_descendant_does_not_lock_ancestor_delegated_output() -> 
         _loop_params(run_id="leaf-1", task_id="req-root", write_boundary={}),
     )
 
-    assert boundary["locked_files"] == ["output/sibling.html"]
+    assert "locked_files" not in boundary
 
 
 def test_tool_rate_limit_records_reset_failures_on_done_status(tmp_path):

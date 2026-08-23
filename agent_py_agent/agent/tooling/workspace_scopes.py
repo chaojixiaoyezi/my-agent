@@ -2,12 +2,10 @@ from __future__ import annotations
 
 """单一权威 workspace 资源 scope resolver（seq 245 P5）。
 
-ActionPolicy（审计记录）、concurrency（调度投影）、operation-store（写锁）
-共用同一解析结果，绝不各算一套：只要调用方持有 workspace_root 上下文，
-scope 一律归一化到 canonical physical root（"workspace:{path}"）；
-无物理根上下文（纯 policy 层，无法归一化）时回落旧文本投影，保持既有
-调用面兼容。锁的排他语义只由 operation-store 在 executor 层执行——
-executor 层必有 workspace_root。
+ActionPolicy（审计记录）与 concurrency（当前轮调度投影）共用同一解析结果。
+物理路径归一化为 ``workspace:{path}``，用于描述实际 cwd/写根和审计行为；
+会话运行时 式执行链不再把这些路径变成跨任务持久租约。精确的 ``logical:*``
+资源仍可在 executor 进入 operation-store 前保留。
 """
 
 import json
@@ -25,16 +23,15 @@ def authoritative_workspace_scopes(
     arguments: dict,
     additional_scopes: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
-    """把运行期资源参数投影为权威锁 scope。
+    """把运行期资源参数投影为权威调度/审计 scope。
 
     - declared：static_scopes 原样透传（声明式 scope 字符串）。
     - from_arguments：parameter_names 命中的参数值 → canonical physical root
-      归一化锁 "workspace:{path}"。相对路径以 workspace_root 为基准 resolve
-      （别名 out/../out/x 与 symlink 最终归一化到同一物理根 → 同一 scope）；
-      绝对路径 canonicalize 后照锁（参数本身即真实写根，锁不能跳过）；
-      list 参数逐项锁；参数缺失 → 锁 effective_registry_cwd（handler 的缺省
-      写根——run_command 缺省 working_dir 补绝对路径是 0 锁实锤）。
-    - none / 未声明参数 / 非路径类型值（结构信号缺失）：不产生锁 scope。
+      归一化为 "workspace:{path}"。相对路径以 workspace_root 为基准 resolve；
+      别名和 symlink 最终投影到同一物理根，list 参数逐项投影；
+      参数缺失时记录 effective_registry_cwd（handler 的缺省写根）。
+      这些范围只供当前轮调度和审计，不进入跨 run 持久锁。
+    - none / 未声明参数 / 非路径类型值（结构信号缺失）：不产生 scope。
     - workspace_root 缺失（纯 policy 层无物理根上下文）：回落旧文本投影
       "name:value"（此时无锁可比，仅调度/审计投影）。
     """
@@ -64,7 +61,7 @@ def authoritative_workspace_scopes(
         value = arguments.get(name)
         # seq 248 #6：logical 型参数（session_id/artifact_ref 等）不是物理路径，
         # 投影 "logical:{name}:{value}" 文本 scope——绝不 resolve 成 workspace
-        # 假写根（把逻辑 ID 当路径锁会锁错根且互不冲突）。
+        # 假写根（把逻辑 ID 当路径会记错审计范围，也无法对同一资源互斥）。
         # seq 261 #1：缺省/空值不产 scope（共享 "logical:{name}:null" 会让无关
         # 调用互撞）；list 逐元素投影去重（整体 json.dumps 成一条 scope 时，
         # [r1,r2] 与 [r2,r3] 交集为 0，共同目标 r2 不互斥——语义错误）。

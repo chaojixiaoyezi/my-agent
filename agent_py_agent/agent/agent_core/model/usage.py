@@ -39,6 +39,48 @@ def cached_input_token_usage(response: object) -> int:
     return 0
 
 
+# LLM: Cost/accounting subtraction and observability are different contracts. This helper reports
+# every provider cache-read field without assuming whether it is already included in input_tokens.
+# 函数用途: 读取供应商实际返回的缓存命中 token，供任务消耗对比单独展示。
+def reported_cache_read_token_usage(response: object) -> int:
+    usage = response_usage(response)
+    for key in ("input_tokens_details", "prompt_tokens_details"):
+        details = usage.get(key)
+        if isinstance(details, Mapping):
+            value = _first_positive_int(
+                (details.get("cached_tokens"), details.get("cache_read_tokens"))
+            )
+            if value is not None:
+                return value
+    return _first_positive_int(
+        (usage.get("cache_read_input_tokens"), usage.get("cached_input_tokens"))
+    ) or 0
+
+
+# LLM: Cache creation is reported separately by Anthropic-style providers and must not be merged
+# into cache reads or guessed from latency.
+# 函数用途: 读取本次请求新写入供应商缓存的 token 数。
+def cache_creation_input_token_usage(response: object) -> int:
+    usage = response_usage(response)
+    for key in ("input_tokens_details", "prompt_tokens_details"):
+        details = usage.get(key)
+        if isinstance(details, Mapping):
+            value = _first_positive_int(
+                (
+                    details.get("cache_creation_tokens"),
+                    details.get("cache_write_tokens"),
+                )
+            )
+            if value is not None:
+                return value
+    return _first_positive_int(
+        (
+            usage.get("cache_creation_input_tokens"),
+            usage.get("cache_write_input_tokens"),
+        )
+    ) or 0
+
+
 def goal_token_usage(response: object) -> int:
     """Match 会话运行时 goal accounting: non-cached input plus output tokens."""
     input_tokens = input_token_usage(response) or 0
@@ -68,10 +110,12 @@ def response_cost_usd(model: str, response: object) -> float:
 
 
 __all__ = [
+    "cache_creation_input_token_usage",
     "cached_input_token_usage",
     "goal_token_usage",
     "input_token_usage",
     "output_token_usage",
+    "reported_cache_read_token_usage",
     "response_cost_usd",
     "response_usage",
 ]

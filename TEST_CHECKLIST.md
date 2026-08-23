@@ -142,7 +142,7 @@
 - [ ] OPEN capability request 不能被普通 completed 收尾覆盖为 DONE；直属父级 grant/deny 后必须续跑
   同一 run，取消/接管终态不得复活。根、子、孙只能 guidance/cancel/resolve 自己的直属 child；
   模型 cancel 回执不得夹带整树状态，schema 不暴露 dry_run/kill_process 运维参数。
-- [ ] 普通 child 逐层继承父级结构化 workspace 上界；`output_files` 记录明确交付目标与冲突锁，但不能
+- [ ] 普通 child 逐层继承父级结构化 workspace 上界；`output_files` 只记录明确交付目标与验证线索，不能
   扩大父级权限。裸相对路径按可信 cwd 解析，只有显式 `output/...`、`work/...` 进入 task 内部目录；
   直接 child 即使省略 `output_files`，也必须继承 active conversation 的 host-validated cwd/runtime roots，
   不能退回 Gateway daemon 仓库。`/root` 启动的真实任务必须把 `abc/` 交付到 `/root/abc`。后台续跑必须
@@ -153,9 +153,8 @@
   更窄凭据/用户目录 deny 与远程 owner home 围栏必须保留。
 - [ ] TUI `/stop` 在前台 turn 运行/提交时精确绑定 turn id；前台让出但当前 conversation
   仍有唯一 live background task 时也可停止，不得因 TUI 本地 `is_running=false` 拒绝发送。
-- [ ] 同批 child 的 `output_files/output_refs` 互相重叠时，整批拒绝且要求重分路径重试；
-  不得误报为等待既有 run。只有结构化 `existing_run_id` 非空时才等直属生命周期事件，
-  两种回执都不得改变用户原始约束。
+- [ ] 同批、同级或父子 child 的 `output_files/output_refs` 重叠时仍可创建；这些字段不产生
+  文件所有权、持久 workspace 租约或动态 `locked_files`。显式越出父级 workspace 仍须在创建前拒绝。
 - [ ] child 完成事件在后台轮开始时只采样一次；采样后才创建的 DONE wake 保持 pending 并另开新轮。
   新鲜终态轮的自然回复不等待 root task status 充当第二验收器。
 - [ ] 单 Gateway 内后台车道按 `owner + durable thread_id` 隔离；同 thread 继续由 run claim

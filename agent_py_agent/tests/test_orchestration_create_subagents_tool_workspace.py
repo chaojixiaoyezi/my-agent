@@ -126,8 +126,8 @@ class TestCreateSubagentsToolWorkspaceDefaults:
             "content_writeup.md",
         ]
 
-    def test_items_mode_rejects_shared_concrete_output_refs_atomically(self):
-        """同批子代理不能取得同一结构化写目标，冲突时整批不创建。"""
+    def test_items_mode_allows_shared_concrete_output_refs(self):
+        """同批子代理可共享工作区，output_files 只是交付元数据。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _mock_create_items_agent(task_count=2)
@@ -151,9 +151,9 @@ class TestCreateSubagentsToolWorkspaceDefaults:
         })
 
         payload = json.loads(result.output)
-        assert result.ok is False
-        assert payload["error_code"] == "SUBAGENT_OUTPUT_SCOPE_CONFLICT"
-        assert mock_agent.subagents.create_run.call_count == 0
+        assert result.ok is True
+        assert len(payload["created_run_ids"]) == 2
+        assert mock_agent.subagents.create_run.call_count == 2
 
 
 class TestCreateSubagentsToolTaskWorkspaceGuards:
@@ -592,8 +592,8 @@ class TestCreateSubagentsToolWorkspaceRefs:
             assert "run_0" not in serialized
             assert "run_1" not in serialized
 
-    def test_items_mode_dependency_does_not_implicitly_transfer_output_ownership(self):
-        """依赖只表示等待，不代表结构化写权已经完成交接。"""
+    def test_items_mode_dependency_and_shared_output_are_both_preserved(self):
+        """依赖表示顺序线索，共享输出不再触发机器所有权拒绝。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _mock_create_items_agent(task_count=2)
@@ -618,12 +618,12 @@ class TestCreateSubagentsToolWorkspaceRefs:
         })
 
         payload = json.loads(result.output)
-        assert result.ok is False
-        assert payload["error_code"] == "SUBAGENT_OUTPUT_SCOPE_CONFLICT"
-        assert mock_agent.subagents.create_run.call_count == 0
+        assert result.ok is True
+        assert len(payload["created_run_ids"]) == 2
+        assert mock_agent.subagents.create_run.call_count == 2
 
-    def test_items_mode_rejects_parent_child_output_scope_overlap(self):
-        """目录与其下文件属于同一写入集合，不能被两个并行 child 分别占用。"""
+    def test_items_mode_allows_parent_child_output_scope_overlap(self):
+        """目录和子文件可由共享 cwd 的 child 协作，冲突交给实际合并与测试。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _mock_create_items_agent(task_count=2)
@@ -645,10 +645,9 @@ class TestCreateSubagentsToolWorkspaceRefs:
         })
 
         payload = json.loads(result.output)
-        assert result.ok is False
-        assert payload["error_code"] == "SUBAGENT_OUTPUT_SCOPE_CONFLICT"
-        assert payload["proposed_conflicts"][0]["conflicting_output_ref"].endswith("/port/core")
-        assert mock_agent.subagents.create_run.call_count == 0
+        assert result.ok is True
+        assert len(payload["created_run_ids"]) == 2
+        assert mock_agent.subagents.create_run.call_count == 2
 
     def test_items_mode_preserves_long_sibling_output_refs_as_read_hints(self):
         """长路径 sibling 输出也只作为读线索，缺失时由 runner 继续处理。"""

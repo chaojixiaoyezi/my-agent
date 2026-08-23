@@ -19,6 +19,19 @@
 
 来自 STATUS.md，当前最急迫的任务已清空，下面保留中长期项。
 
+### 会话运行时 式工作区并发与双 TUI 对照
+
+状态：本地候选已完成 focused 回归；待严格 gate、部署 `.7` 和真实 TUI 矩阵
+
+解决问题：旧 `resource_locks` 把 `/root` 与所有子目录当成跨任务独占资源，死进程留下的
+过期行可以使 `run_command/create_subagents` 在 handler 前永久失败。当前候选按 会话运行时
+turn/cwd 语义过滤所有普通 `workspace:*` 持久锁，保留 operation ledger、精确逻辑锁、
+owner 墙、写边界与沙箱；`output_files` 降为交付/验证元数据，不再拒绝共享 cwd 的父子代理。
+现有 ModelCallLedger 同时累计每个 request/run 的 provider input/output/cache-read/cache-write；
+详细记录被裁剪后总账不截断，供应商没有 usage 时明确标记为估算，不拿 TUI 当前上下文冒充成本。
+部署后使用单 Gateway、MiniMax-M2.7 和用户给定的 3 条长任务 + 4 个跨语言复刻任务，
+与 会话运行时 同题对照耗时、子代理、Skill、Compact、token、LOC、可运行性和独立验收分。
+
 ### 普通计划的 会话运行时 式同轮停止核对
 
 状态：`e94f8ec` 已通过严格 gate、推送并部署；直接 open-Todo 真 TUI 分支待自然样本

@@ -165,7 +165,7 @@ task-local child 与 transient Audit 的窄权限测试必须继续通过。
 新鲜度补丁后的真实 TUI 继续暴露三项底座问题：后台主代理用 thread 级 run id 命中旧任务，导致新任务
 attempt/工具权威链错挂；同 thread 后台 notice 复用稳定 block id，reducer 丢掉后续消息；child goal 中的
 旧版 child 没继承父级 `/root` workspace，且 `/root/abc` 没进入 `output_files`，所以当时安全边界拒绝写入。
-当前修复改为普通 child 继承父级结构化上界，`output_files` 只补交付身份与锁。定向回归现覆盖 task-bound `_run_params`、
+当前修复改为普通 child 继承父级结构化上界，`output_files` 只补交付身份与验证线索。定向回归现覆盖 task-bound `_run_params`、
 旧 run 跨 task 复用拒绝、notice 首次消费/独立 block、`items[].output_files` 嵌套 schema，以及
 `send_guidance(target,message)` 的单 child/直接父子授权。创建后自动 `dispatch_supervision_auto` policy 和
 旧 wait helper 已删除，历史 policy 只按结构化 tool 标记退休；不再用周期模型调用换取子代理可靠性。
@@ -348,7 +348,8 @@ process sandbox 回归需证明 canonical `task_work_dir/.sandbox-tmp` 承载 `/
 写后验证新鲜度回归必须覆盖“verify 成功→workspace mutation→read/search→plain final”仍产生一次软核对；
 同一 verification event 不循环提醒，执行新的真实 verify 后才能形成新周期。验证 envelope 必须从
 `metadata.handler_details` 读回。模型调用账本还必须证明明细超过 `max_records` 后 request/run 的 logical、
-physical、provider attempt/retry 和 status 累计数不截断；旧任务 response 的 128 不能再当精确总数。
+physical、provider attempt/retry、status 与 input/output/cache-read/cache-write token 累计不截断；
+真实 provider usage 与估算调用必须分开计数，旧任务 response 的 128 不能再当精确总数。
 
 完成收口与 operation 审计要分层回归：`succeeded mutation -> not_started tail` 仍保留 partial 审计，
 但 no-effect 尾部不能触发整项 `OPERATION_INCOMPLETE`。末尾 `failed/not_started` 与 plain final 冲突时，
@@ -619,8 +620,8 @@ Prompt 4，观察第二批派工是否复用原 Todo、是否带 covers、是否
 
 r17 后的 planned-delegation focused 回归：`covers` 与 `output_files` 都是可选结构化提示。未绑定 child
 必须正常创建并以真实 run id 形成独立进度行，现有 Todo 保持原状；提供的未知/关闭/重复 covers 仍在任何
-child 创建前整批 `SUBAGENT_PLANNED_DELEGATION_INVALID`。可选 output 一旦提供，兄弟目录越界或同批父子
-路径覆盖仍必须在创建前返回该错误或既有 `SUBAGENT_OUTPUT_SCOPE_CONFLICT`。合法 exact-id 继续自动映射，
+child 创建前整批 `SUBAGENT_PLANNED_DELEGATION_INVALID`。可选 output 一旦提供，兄弟目录越界仍必须在
+创建前返回该错误；同批父子路径覆盖不再被视为文件所有权冲突。合法 exact-id 继续自动映射，
 递归 child 入口使用同一预检。
 失败 outcome 还必须保留 `error_code=SUBAGENT_PLANNED_DELEGATION_INVALID`、`retryable=true`、
 `recommended_action=repair_tool_arguments`，不能只有正文有码而控制层降成 `UNKNOWN_ERROR`。

@@ -24,7 +24,13 @@ from .call_monitor import (
     is_cache_suspected,
 )
 from .context_pressure import model_visible_context_snapshot
-from .usage import output_token_usage
+from .usage import (
+    cache_creation_input_token_usage,
+    input_token_usage,
+    output_token_usage,
+    reported_cache_read_token_usage,
+    response_usage,
+)
 
 # LLM: 本模块把 provider/model 生命周期写入唯一 ModelCallLedger，并只投影结构化计数与超时事实。
 # 模块用途: 连接一次真实模型调用与账本、动态超时、流式活动观测和最终统计。
@@ -179,10 +185,20 @@ def record_model_call_first_token(
 
 
 def record_model_call_finished(ledger: ModelCallLedger, call_id: str, response: object) -> None:
+    input_tokens = input_token_usage(response)
     output_tokens = output_token_usage(response)
     if output_tokens is None:
         output_tokens = estimate_tokens(getattr(response, "text", ""))
-    ledger.finished(ModelCallFinishParams(call_id=call_id, output_tokens=output_tokens))
+    ledger.finished(
+        ModelCallFinishParams(
+            call_id=call_id,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_input_tokens=reported_cache_read_token_usage(response),
+            cache_creation_input_tokens=cache_creation_input_token_usage(response),
+            provider_usage_reported=bool(response_usage(response)),
+        )
+    )
 
 
 def record_model_call_failed(
@@ -265,7 +281,7 @@ def model_call_ledger(agent: object) -> ModelCallLedger:
 
 
 # LLM: 优先读取不受明细裁剪影响的累计 scope；仅为旧账本或测试私有注入保留 retained-record 回退。
-# 函数用途: 汇总当前 request/run 的逻辑回合、物理调用、HTTP 尝试、重试和终态数量。
+# 函数用途: 汇总当前 request/run 的模型回合、重试、终态与供应商 token 消耗。
 def model_call_summary(
     agent: object,
     *,
@@ -306,6 +322,10 @@ def model_call_summary(
         max(0, record.provider_attempt_count - 1)
         for record in records
     )
+    accounted_input_tokens = sum(
+        max(0, int(record.accounted_input_tokens)) for record in records
+    )
+    output_tokens = sum(max(0, int(record.output_tokens)) for record in records)
     return {
         "schema": "model_call_summary.v1",
         "logical_model_turn_count": len(logical_ids),
@@ -316,6 +336,23 @@ def model_call_summary(
         "status_counts": statuses,
         "backends": sorted({record.backend for record in records if record.backend}),
         "models": sorted({record.model for record in records if record.model}),
+        "accounted_input_tokens": accounted_input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": accounted_input_tokens + output_tokens,
+        "cached_input_tokens": sum(
+            max(0, int(record.cached_input_tokens)) for record in records
+        ),
+        "cache_creation_input_tokens": sum(
+            max(0, int(record.cache_creation_input_tokens)) for record in records
+        ),
+        "provider_usage_call_count": sum(
+            record.status == "finished" and record.provider_usage_reported
+            for record in records
+        ),
+        "estimated_usage_call_count": sum(
+            record.status == "finished" and not record.provider_usage_reported
+            for record in records
+        ),
     }
 
 
@@ -330,6 +367,13 @@ def _empty_model_call_summary() -> dict[str, object]:
         "status_counts": {},
         "backends": [],
         "models": [],
+        "accounted_input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "cached_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "provider_usage_call_count": 0,
+        "estimated_usage_call_count": 0,
     }
 
 

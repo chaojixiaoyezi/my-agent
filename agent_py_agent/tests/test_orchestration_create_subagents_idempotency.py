@@ -123,7 +123,7 @@ def test_generic_default_name_does_not_reuse_different_goal(tmp_path):
     assert len(agent.subagents.list_runs()) == 2
 
 
-def test_unfinished_sibling_with_same_declared_output_blocks_duplicate_creation(tmp_path):
+def test_unfinished_sibling_with_same_declared_output_does_not_claim_file_ownership(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     agent = _workspace_agent(tmp_path)
@@ -140,19 +140,13 @@ def test_unfinished_sibling_with_same_declared_output_blocks_duplicate_creation(
     })
     second = json.loads(second_result.output)
 
-    assert second_result.ok is False
-    assert second_result.error_code == "SUBAGENT_OUTPUT_SCOPE_CONFLICT"
-    assert second["existing_run_ids"] == first["created_run_ids"]
-    assert second["proposed_conflicts"] == []
-    assert second["existing_conflicts"] == second["conflicts"]
-    assert second["next_action"]["action"] == "await_existing_run_lifecycle_event"
-    assert second["next_action"]["run_ids"] == first["created_run_ids"]
-    assert second["next_action"]["preserve_user_constraints"] is True
-    assert second["conflicts"][0]["output_ref"].endswith("/artifacts/params.py")
-    assert len(agent.subagents.list_runs()) == 1
+    assert second_result.ok is True
+    assert second["created_run_ids"]
+    assert second["created_run_ids"] != first["created_run_ids"]
+    assert len(agent.subagents.list_runs()) == 2
 
 
-def test_overlapping_items_are_rejected_atomically_before_any_run_is_created(tmp_path):
+def test_overlapping_items_are_created_as_codex_style_shared_workspace_workers(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     agent = _workspace_agent(tmp_path)
@@ -165,20 +159,12 @@ def test_overlapping_items_are_rejected_atomically_before_any_run_is_created(tmp
     })
     payload = json.loads(result.output)
 
-    assert result.ok is False
-    assert result.error_code == "SUBAGENT_OUTPUT_SCOPE_CONFLICT"
-    assert payload["conflicts"][0]["conflicting_proposed_index"] == 0
-    assert payload["existing_run_ids"] == []
-    assert payload["existing_conflicts"] == []
-    assert payload["proposed_conflicts"] == payload["conflicts"]
-    assert payload["next_action"]["action"] == "revise_proposed_output_scopes_and_retry"
-    assert payload["next_action"]["retry_tool"] == "create_subagents"
-    assert payload["next_action"]["preserve_user_constraints"] is True
-    assert payload["next_action"]["required_repairs"][0]["action"] == "revise_proposed_output_scopes"
-    assert agent.subagents.list_runs() == []
+    assert result.ok is True
+    assert len(payload["created_run_ids"]) == 2
+    assert len(agent.subagents.list_runs()) == 2
 
 
-def test_mixed_output_conflicts_report_both_required_repairs(tmp_path):
+def test_existing_and_batch_output_overlap_remains_coordination_metadata(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     agent = _workspace_agent(tmp_path)
@@ -198,16 +184,10 @@ def test_mixed_output_conflicts_report_both_required_repairs(tmp_path):
     })
     payload = json.loads(result.output)
 
-    assert result.ok is False
-    assert payload["existing_run_ids"] == first["created_run_ids"]
-    assert payload["proposed_conflicts"]
-    assert payload["existing_conflicts"]
-    assert payload["next_action"]["action"] == "resolve_output_scope_conflicts_and_retry"
-    assert [item["action"] for item in payload["next_action"]["required_repairs"]] == [
-        "revise_proposed_output_scopes",
-        "await_existing_run_lifecycle_event",
-    ]
-    assert len(agent.subagents.list_runs()) == 1
+    assert result.ok is True
+    assert first["created_run_ids"]
+    assert len(payload["created_run_ids"]) == 3
+    assert len(agent.subagents.list_runs()) == 4
 
 
 def test_explicit_replacement_may_take_over_same_declared_output(tmp_path):

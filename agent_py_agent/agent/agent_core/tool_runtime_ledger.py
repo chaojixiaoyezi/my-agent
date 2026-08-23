@@ -16,7 +16,6 @@ from ..conversation.authority import (
     CONVERSATION_TRANSIENT_WORKSPACE_ATTR,
 )
 from ..local_storage import RuntimeGateLedgerRecord
-from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
 from ..tooling.runtime_contracts import tool_arguments_hash
 from .tool_guard.call_guardrail import tool_guardrail_policy, tool_guardrail_records
 
@@ -106,7 +105,6 @@ def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[st
         merged["allowed_write_roots"] = list(dict.fromkeys([*existing, *extra_roots]))
     _attach_remote_owner_task_write_scope(merged, agent, params)
     _attach_transient_named_work_write_scope(merged, agent, params)
-    _attach_active_child_output_locks(merged, agent, params)
     guardrail_rows = tool_guardrail_records(agent)
     if guardrail_rows:
         merged["tool_guardrail_records"] = _merged_tool_guardrail_rows(
@@ -445,105 +443,6 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
-
-
-def _attach_active_child_output_locks(
-    boundary: dict[str, object], agent: object, params: object
-) -> None:
-    locks = _active_child_output_refs(agent, params)
-    if not locks:
-        return
-    existing = _string_list(boundary.get("locked_files"))
-    boundary["locked_files"] = [*existing, *(item for item in locks if item not in existing)]
-
-
-def _active_child_output_refs(agent: object, params: object) -> list[str]:
-    subagents = getattr(agent, "subagents", None)
-    if not hasattr(subagents, "list_runs"):
-        return []
-    try:
-        tasks = subagents.list_runs()
-    except (OSError, RuntimeError, ValueError):
-        return []
-    current_ids = _current_task_ids(params)
-    current_lineage = _current_lineage_ids(tasks, current_ids)
-    refs: list[str] = []
-    for task in tasks:
-        _append_active_child_output_refs(refs, task, current_ids, current_lineage)
-    return refs
-
-
-def _append_active_child_output_refs(
-    refs: list[str],
-    task: object,
-    current_ids: set[str],
-    current_lineage: set[str],
-) -> None:
-    if not _is_active_child_for_current_run(task, current_ids, current_lineage):
-        return
-    for ref in _declared_output_refs(task):
-        if ref not in refs:
-            refs.append(ref)
-
-
-def _current_task_ids(params: object) -> set[str]:
-    values = {
-        _text(getattr(params, "run_id", "")),
-        _text(getattr(params, "task_id", "")),
-    }
-    attrs = getattr(params, "task_attributes", None)
-    if isinstance(attrs, dict):
-        values.add(_text(attrs.get("conversation_task_id")))
-    return {value for value in values if value}
-
-
-def _is_active_child_for_current_run(
-    task: object,
-    current_ids: set[str],
-    current_lineage: set[str],
-) -> bool:
-    if not current_ids:
-        return False
-    # 正主不锁自己:子代理跑轮的 current_ids 含它自己的 run_id,而它声明的 output_files
-    # 正是派工点名要它写的活——把自己的申报单也塞进 locked_files 会把它锁在门外
-    # (真机实锤:子代理被"output/inventory.py 在 locked_files 中"拦死,capability 已
-    # GRANTED 也无济于事,3/4 子代理被迫由主代理接管代写)。锁的正当用途是拦
-    # 【别人】(兄弟/主代理中途)乱写在建产物,单向外溢保护,不拦正主。
-    if _text(getattr(task, "id", "")) in current_lineage:
-        return False
-    if task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES):
-        return False
-    return (
-        _text(getattr(task, "parent_id", "")) in current_ids
-        or _text(getattr(task, "root_id", "")) in current_ids
-    )
-
-
-def _current_lineage_ids(tasks: list[object], current_ids: set[str]) -> set[str]:
-    """Return current subagent plus ancestors so delegated outputs stay writable."""
-
-    by_id = {task_id: task for task in tasks if (task_id := _text(getattr(task, "id", "")))}
-    lineage = set(current_ids)
-    pending = [task_id for task_id in current_ids if task_id in by_id]
-    while pending:
-        task = by_id[pending.pop()]
-        parent_id = _text(getattr(task, "parent_id", ""))
-        if parent_id and parent_id not in lineage:
-            lineage.add(parent_id)
-            if parent_id in by_id:
-                pending.append(parent_id)
-    return lineage
-
-
-def _declared_output_refs(task: object) -> list[str]:
-    attrs = getattr(task, "attributes", None)
-    refs: list[str] = []
-    if isinstance(attrs, dict):
-        for key in ("output_files", "output_refs", "artifact_refs"):
-            refs.extend(_string_list(attrs.get(key)))
-    for key in ("output_files", "output_refs", "artifact_refs"):
-        refs.extend(_string_list(getattr(task, key, None)))
-    return list(dict.fromkeys(ref for ref in refs if ref))
 
 
 def _string_list(value: object) -> list[str]:

@@ -326,22 +326,14 @@ class TestCreateSubagentsToolCoordinatorPlan:
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
         assert params.role == "coordinator"
-        assert params.agent_name == "小傻妞-root-coordinator"
+        assert params.agent_name == "小傻妞-root-coordinator-1"
 
 
 class TestCreateSubagentsLogicalRefScopes:
-    """seq 253 锁层级自冲突回归：input_refs/replacement_for_run_ids 不是写根。
+    """会话运行时 式派工只锁精确控制面 ID，output_files 不表示物理写所有权。"""
 
-    修复前：这两个参数无 parameter_kinds → 未传时走 None 兜底锁
-    workspace:{cwd}（父锁）→ 与 output_files 声明的工作区内子路径锁
-    （子锁）同一事务父子重叠 → RuntimeConflictError →
-    TOOL_OPERATION_STORE_UNAVAILABLE → create_subagents 从未运行 →
-    子代理 0 创建（真机 natural-language e2e 实锤）。修复=标 logical
-    （seq 248 #6 既有机制），只有 output_files 锁 workspace。
-    """
-
-    def test_output_files_child_path_does_not_conflict_with_workspace_root(self):
-        """output_files 在工作区内（父/子关系）时，scope 只含子路径锁。"""
+    def test_output_files_do_not_create_workspace_resource_scopes(self):
+        """output_files 只用于交付展示和验证，不会引入目录租约。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
         from agent_py_agent.agent.tooling.workspace_scopes import authoritative_workspace_scopes
 
@@ -354,12 +346,10 @@ class TestCreateSubagentsLogicalRefScopes:
             policy=policy,
             arguments={"output_files": [str(root / "site" / "index.html")]},
         )
-        child = (root / "site" / "index.html").resolve()
-        assert f"workspace:{root.resolve()}" not in scopes  # 无父锁
-        assert f"workspace:{child}" in scopes  # 只有子路径锁
+        assert scopes == ()
 
     def test_logical_kinds_do_not_lock_workspace(self):
-        """input_refs/replacement_for_run_ids 缺省时不得投影 workspace 锁。"""
+        """input_refs/replacement_for_run_ids 只投影精确逻辑资源。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
         from agent_py_agent.agent.tooling.workspace_scopes import authoritative_workspace_scopes
 
@@ -370,13 +360,17 @@ class TestCreateSubagentsLogicalRefScopes:
             workspace_root=root,
             write_boundary=None,
             policy=policy,
-            arguments={"output_files": [str(root / "site" / "index.html")]},
+            arguments={
+                "output_files": [str(root / "site" / "index.html")],
+                "input_refs": ["artifact://brief/1"],
+                "replacement_for_run_ids": ["run-1"],
+            },
         )
-        child = (root / "site" / "index.html").resolve()
-        assert not any(
-            scope.startswith("workspace:") and scope != f"workspace:{child}"
-            for scope in scopes
-        )
+        assert not any(scope.startswith("workspace:") for scope in scopes)
+        assert set(scopes) == {
+            "logical:input_refs:artifact://brief/1",
+            "logical:replacement_for_run_ids:run-1",
+        }
 
 
 class TestLogicalIdToolsSelfConflictRegression:

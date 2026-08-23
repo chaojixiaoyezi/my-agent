@@ -33,7 +33,6 @@ from .hierarchy_tools import execute_child_creation
 from .orchestration.create_constraints import (
     CreateTaskResolution,
     creation_active_lineage_conflicts,
-    creation_output_scope_conflicts,
     explicit_root_missing_write_root_error,
     resolve_create_run,
 )
@@ -202,14 +201,11 @@ class CreateSubagentsTool(BaseTool):
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("mutating"),
         idempotency_policy=IdempotencyPolicy("operation"),
-        # seq 253 锁层级自冲突：input_refs（artifact 引用）与
-        # replacement_for_run_ids（run id 列表）不是物理写根——缺省参数走
-        # None 兜底会锁 workspace:{cwd}（父锁），与 output_files 声明的工作
-        # 区内子路径锁父子重叠 → 同一事务自冲突 → TOOL_OPERATION_STORE_UNAVAILABLE
-        # → 工具从未运行（真机 natural-language e2e 实锤：子代理 0 创建）。
-        # 标 logical（seq 248 #6 既有机制）只让 output_files 锁 workspace。
+        # output_files 是交付元数据和界面线索，不是文件所有权。与 会话运行时 一样，
+        # 父子代理可以共享 cwd 并通过实际 diff/测试合并；只对精确的控制面
+        # 身份保留持久逻辑互斥。
         resource_scopes=ResourceScopePolicy(
-            parameter_names=("output_files", "input_refs", "replacement_for_run_ids"),
+            parameter_names=("input_refs", "replacement_for_run_ids"),
             parameter_kinds={
                 "input_refs": "logical",
                 "replacement_for_run_ids": "logical",
@@ -361,8 +357,6 @@ def _execute_create_subagents(agent: SimpleAgent, params: dict[str, object]) -> 
         return invalid
     run_params = _indexed_single_run_params(agent, run_params)
     task_params = [run_params]
-    if conflict := _output_scope_conflict_result(agent, task_params):
-        return conflict
     if conflict := _active_lineage_creation_result(agent, task_params):
         return conflict
     return _created_tasks_result(
@@ -493,8 +487,6 @@ def _execute_items(
     if validation:
         return ToolHandlerOutcome("create_subagents", False, validation, error_code="TOOL_INVALID_ARGUMENTS")
     task_params = _indexed_item_run_params(agent, capped)
-    if conflict := _output_scope_conflict_result(agent, task_params):
-        return conflict
     if conflict := _active_lineage_creation_result(agent, task_params):
         return conflict
     resolutions = _resolve_task_params(agent, task_params)
@@ -750,138 +742,6 @@ def _validate_single_goal(request: ValidateSingleGoalRequest) -> str:
 
 def _resolve_task_params(agent: SimpleAgent, task_params: list[CreateRunParams]) -> list[CreateTaskResolution]:
     return [resolve_create_run(agent.subagents, item) for item in task_params]
-
-
-# LLM: conflict 来源只读结构化字段，不能从 goal 或错误文案猜测。
-# 函数用途: 把输出锁冲突分成本批内重叠、已有 run 占用和对应 run id。
-def _output_scope_conflict_groups(
-    conflicts: list[dict[str, object]],
-) -> tuple[list[dict[str, object]], list[dict[str, object]], list[str]]:
-    run_ids = list(dict.fromkeys(
-        str(item.get("existing_run_id") or "").strip()
-        for item in conflicts
-        if str(item.get("existing_run_id") or "").strip()
-    ))
-    proposed_conflicts = [
-        item for item in conflicts
-        if item.get("conflicting_proposed_index") is not None
-    ]
-    existing_conflicts = [
-        item for item in conflicts
-        if str(item.get("existing_run_id") or "").strip()
-    ]
-    return proposed_conflicts, existing_conflicts, run_ids
-
-
-# LLM: repair 动作与 conflict 类型一一对应；只有 existing run 才能产生等生命周期的动作。
-# 函数用途: 生成可供模型逐项修复的结构化动作列表。
-def _output_scope_required_repairs(
-    proposed_conflicts: list[dict[str, object]],
-    existing_conflicts: list[dict[str, object]],
-    run_ids: list[str],
-) -> list[dict[str, object]]:
-    required_repairs: list[dict[str, object]] = []
-    if proposed_conflicts:
-        required_repairs.append({
-            "action": "revise_proposed_output_scopes",
-            "reason": (
-                "同一次请求里的多个 item 声明了重叠的 output_files/output_refs；"
-                "请给每个 item 分配互不重叠的交付路径，或把共享文件合并为一个 item。"
-            ),
-        })
-    if existing_conflicts:
-        required_repairs.append({
-            "action": "await_existing_run_lifecycle_event",
-            "run_ids": run_ids,
-            "reason": (
-                "既有 run 仍持有该交付目标；宿主会在其生命周期变化时唤醒直接父级，"
-                "确需接管时再用 replacement_for_run_ids 显式创建替补。"
-            ),
-        })
-    return required_repairs
-
-
-# LLM: 批内冲突不得返回 await；所有拒绝都显式保留用户原始约束。
-# 函数用途: 根据冲突组合返回人类可读错误和唯一下一动作。
-def _output_scope_next_action(
-    proposed_conflicts: list[dict[str, object]],
-    existing_conflicts: list[dict[str, object]],
-    run_ids: list[str],
-    required_repairs: list[dict[str, object]],
-) -> tuple[str, dict[str, object]]:
-    if proposed_conflicts and existing_conflicts:
-        return (
-            "本次请求同时存在批内交付路径重叠和既有子代理输出占用；本批没有创建任何子代理。",
-            {
-                "action": "resolve_output_scope_conflicts_and_retry",
-                "required_repairs": required_repairs,
-                "retry_tool": "create_subagents",
-                "preserve_user_constraints": True,
-            },
-        )
-    if proposed_conflicts:
-        return (
-            "本次请求里的多个子代理声明了相同的 output_files/output_refs；本批没有创建任何子代理。",
-            {
-                "action": "revise_proposed_output_scopes_and_retry",
-                "required_repairs": required_repairs,
-                "retry_tool": "create_subagents",
-                "preserve_user_constraints": True,
-                "reason": (
-                    "修正本批 items 的交付边界后重试；"
-                    "工具失败不会变更用户的原始要求，也不会授权父代理改用被用户禁止的做法。"
-                ),
-            },
-        )
-    return (
-        "未结束的同级子代理已占用相同 output_files/output_refs；本批没有创建任何子代理。",
-        {
-            "action": "await_existing_run_lifecycle_event",
-            "run_ids": run_ids,
-            "required_repairs": required_repairs,
-            "preserve_user_constraints": True,
-            "reason": (
-                "现有 run 仍持有该交付目标；等它的生命周期事件，"
-                "确需接管时再用 replacement_for_run_ids 显式创建替补。"
-            ),
-        },
-    )
-
-
-# LLM: 输出冲突必须区分本批内重叠与既有 run 占用；前者要修正参数重试，后者才等直属生命周期事件。
-# 函数用途: 把共享输出锁冲突包装成无副作用且可直接修正的创建失败回执。
-def _output_scope_conflict_result(
-    agent: SimpleAgent,
-    task_params: list[CreateRunParams],
-) -> ToolHandlerOutcome | None:
-    conflicts = creation_output_scope_conflicts(agent.subagents, task_params)
-    if not conflicts:
-        return None
-    proposed_conflicts, existing_conflicts, run_ids = _output_scope_conflict_groups(conflicts)
-    required_repairs = _output_scope_required_repairs(proposed_conflicts, existing_conflicts, run_ids)
-    error, next_action = _output_scope_next_action(
-        proposed_conflicts,
-        existing_conflicts,
-        run_ids,
-        required_repairs,
-    )
-    payload = {
-        "ok": False,
-        "error_code": "SUBAGENT_OUTPUT_SCOPE_CONFLICT",
-        "error": error,
-        "conflicts": conflicts,
-        "proposed_conflicts": proposed_conflicts,
-        "existing_conflicts": existing_conflicts,
-        "existing_run_ids": run_ids,
-        "next_action": next_action,
-    }
-    return ToolHandlerOutcome(
-        "create_subagents",
-        False,
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        error_code="SUBAGENT_OUTPUT_SCOPE_CONFLICT",
-        effect_outcome="not_started",
-    )
 
 
 # LLM: 后台轮遇到活跃同 lineage 时复用原树并等待事件，不能创建第二批影子 run。

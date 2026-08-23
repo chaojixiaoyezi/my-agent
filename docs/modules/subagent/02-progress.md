@@ -111,7 +111,7 @@
   `system_default_output_ref + work/child_outputs/*.md`；context bundle 又把它渲染为“用户要求的业务产物”。
   两名明确承担编码的 child 因而只读源码并写分析报告，main 后续形成两套未整合输出并提前结束。
 - 对照 会话运行时 `control/spawn.rs` 只把 initial input 交给 child、status watcher 回传最终消息的边界，新 child
-  不再生成默认业务文件。显式 `output_files/output_refs/artifact_refs` 仍走既有锚定、授权与冲突锁；旧
+  不再生成默认业务文件。显式 `output_files/output_refs/artifact_refs` 仍走既有锚定、授权与交付验证；旧
   durable task 的系统默认 ref 继续支持唯一 rebind 读取，但从 runner contract、completion wake 和父级
   expected outputs 隐藏。没有增加任务质量机器闸，fresh r10 待部署。
 
@@ -305,7 +305,14 @@
   `orchestration`，递归 Agent 创建与直属控制从第一次 provider 调用就作为 native Schema 直出。
 - 修复同一 thread 多任务的后台权威串线：后台 run_id 优先使用 exact task id；历史线程级 run 属于旧任务
   时不再创建跨任务 attempt。普通 child 现在逐层继承父级结构化工作区上界；嵌套
-  `items[].output_files` 继续记录交付身份和冲突锁，不再承担父级已有目录的重复授权。
+  `items[].output_files` 继续记录交付身份和验证线索，不再承担父级已有目录的重复授权。
+
+## 2026-08-23 会话运行时 式共享 cwd 与持久锁分离
+
+- `workspace:*` 仍作为当前轮审计/调度事实，但在 ToolExecutor 进入 operation ledger 前统一过滤；
+  旧数据库的过期父目录锁因此不再拦截新任务。`logical:*` 控制面互斥仍保留。
+- `create_subagents` 不再因 output ref 重叠整批拒绝，运行时也不再从活跃 child 派生
+  `locked_files`。显式 output 越出父级 workspace 的权限门仍然 fail closed。
 - 首轮 `.7` 原样任务实锤 child“挂掉”是状态断链：OPEN capability request 被通用 completed 收尾覆盖为
   DONE，grant 后原 run 又没有重新排队。当前 runner 以 OPEN 结构化事实优先投影 BLOCKED；直属父级
   grant/deny 后同 run 回到 PENDING、恢复 task link，并由裁决 event 触发内部 dispatcher 续跑。

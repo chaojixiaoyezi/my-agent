@@ -63,7 +63,7 @@ def merged_extra_write_roots(params: dict[str, object], goal: str) -> list[str]:
 
 # LLM: Ordinary children inherit their direct parent's structured writable
 # workspace upper bound. Exact-scope workers opt out before any fallback, and
-# output refs remain delivery/locking facts rather than duplicate permission.
+# output refs remain delivery/verification facts rather than duplicate permission.
 # 函数用途: 计算新子代理真正可写的父级工作区与明确交付目录。
 def resolved_extra_write_roots(agent: object, params: dict[str, object], goal: str) -> list[str]:
     explicit = merged_extra_write_roots(params, goal)
@@ -329,97 +329,6 @@ _OUTPUT_SCOPE_OWNING_STATUSES = frozenset({
 })
 
 
-def creation_output_scope_conflicts(
-    manager: Any,
-    task_params: list[CreateRunParams],
-) -> list[dict[str, object]]:
-    """Return exact declared-write conflicts without creating any run.
-
-    ``output_files`` / ``output_refs`` are machine-owned write scopes.  Two
-    unfinished siblings must not own the same declared target unless the new
-    run explicitly replaces the old one.  This is intentionally path based;
-    goals and model prose never participate in the decision.
-    """
-
-    existing = _safe_list_runs(manager)
-    conflicts: list[dict[str, object]] = []
-    proposed_owners: list[tuple[str, int]] = []
-    for index, params in enumerate(task_params):
-        attrs = params.attributes if isinstance(params.attributes, dict) else {}
-        # 系统默认协作槽会在 run id 生成后重绑到该 run 的唯一目录，不是多个
-        # 子代理共同声明的业务交付路径，因此不参与创建前的共享输出锁。
-        if attrs.get("system_default_output_ref") is True:
-            continue
-        refs = _params_declared_write_refs(params)
-        if not refs:
-            continue
-        replacements = _replacement_run_ids(params)
-        reusable = find_reusable_named_child(manager, params)
-        reusable_id = _text(getattr(reusable, "id", "")) if reusable is not None else ""
-        for ref in refs:
-            previous = next(
-                (
-                    (existing_ref, existing_index)
-                    for existing_ref, existing_index in proposed_owners
-                    if _declared_write_refs_overlap(ref, existing_ref)
-                ),
-                None,
-            )
-            if previous is not None:
-                conflicts.append({
-                    "output_ref": ref,
-                    "proposed_index": index,
-                    "conflicting_output_ref": previous[0],
-                    "conflicting_proposed_index": previous[1],
-                    "existing_run_id": "",
-                    "existing_status": "",
-                })
-                continue
-            proposed_owners.append((ref, index))
-            for task in existing:
-                run_id = _text(getattr(task, "id", ""))
-                if not run_id or run_id == reusable_id or run_id in replacements:
-                    continue
-                if not _same_output_scope_lineage(task, params):
-                    continue
-                status = _status(task)
-                if not task_status_in(status, _OUTPUT_SCOPE_OWNING_STATUSES):
-                    continue
-                existing_ref = next(
-                    (
-                        candidate
-                        for candidate in _task_declared_write_refs(task)
-                        if _declared_write_refs_overlap(ref, candidate)
-                    ),
-                    "",
-                )
-                if not existing_ref:
-                    continue
-                conflicts.append({
-                    "output_ref": ref,
-                    "conflicting_output_ref": existing_ref,
-                    "proposed_index": index,
-                    "conflicting_proposed_index": None,
-                    "existing_run_id": run_id,
-                    "existing_status": status,
-                })
-    return conflicts
-
-
-# LLM: Parallel write ownership conflicts on either exact equality or path
-# containment. URI-like open-world refs stay exact-only because path hierarchy
-# cannot be inferred from an arbitrary external scheme.
-# 函数用途: 判断两个结构化交付范围是否相同或存在父子目录覆盖关系。
-def _declared_write_refs_overlap(left: str, right: str) -> bool:
-    if left == right:
-        return True
-    if "://" in left or "://" in right:
-        return False
-    left_path = Path(left)
-    right_path = Path(right)
-    return is_relative_to(left_path, right_path) or is_relative_to(right_path, left_path)
-
-
 def creation_active_lineage_conflicts(
     manager: Any,
     task_params: list[CreateRunParams],
@@ -638,45 +547,6 @@ def _same_output_scope_lineage(task: Any, params: CreateRunParams) -> bool:
         return False
     requested_root = _requested_root_id(params)
     return not requested_root or _text(getattr(task, "root_id", "")) == requested_root
-
-
-def _params_declared_write_refs(params: CreateRunParams) -> tuple[str, ...]:
-    attrs = params.attributes if isinstance(params.attributes, dict) else {}
-    return _normalized_write_refs(
-        params_output_refs({
-            "output_files": attrs.get("output_files"),
-            "output_refs": attrs.get("output_refs"),
-        })
-    )
-
-
-def _task_declared_write_refs(task: Any) -> tuple[str, ...]:
-    attrs = getattr(task, "attributes", {}) or {}
-    if not isinstance(attrs, dict):
-        return ()
-    return _normalized_write_refs(
-        params_output_refs({
-            "output_files": attrs.get("output_files"),
-            "output_refs": attrs.get("output_refs"),
-        })
-    )
-
-
-def _normalized_write_refs(values: list[str]) -> tuple[str, ...]:
-    refs: list[str] = []
-    for value in values:
-        text = _text(value)
-        if not text:
-            continue
-        if "://" not in text:
-            try:
-                text = str(Path(text).expanduser().resolve(strict=False))
-            except OSError:
-                pass
-        text = text.rstrip("/") if text != "/" else text
-        if text and text not in refs:
-            refs.append(text)
-    return tuple(sorted(refs))
 
 
 def _replacement_run_ids(params: CreateRunParams) -> set[str]:

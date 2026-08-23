@@ -339,17 +339,6 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.RETRY.value,
         recovery_hint="子代理账本或任务 lineage 暂时无法读取；恢复权威状态后再重试，不得按 0 占用量继续创建。",
     ),
-    "SUBAGENT_OUTPUT_SCOPE_CONFLICT": ErrorContract(
-        code="SUBAGENT_OUTPUT_SCOPE_CONFLICT",
-        category="orchestration",
-        retryable=True,
-        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
-        recovery_hint=(
-            "先按结构化 conflicts 区分本批 item 互相重叠和既有 run 占用："
-            "前者为每个 item 重新分配独立输出后重试，后者等直属生命周期事件，"
-            "确需接管时显式给 replacement_for_run_ids。工具失败不改变用户原始约束。"
-        ),
-    ),
     "SUBAGENT_PLANNED_DELEGATION_INVALID": ErrorContract(
         code="SUBAGENT_PLANNED_DELEGATION_INVALID",
         category="orchestration",

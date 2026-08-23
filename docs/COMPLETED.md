@@ -4,6 +4,11 @@
 
 最近收口重点：
 
+- 2026-08-23 本地候选已把普通 `workspace:*` 退出跨 run 持久 operation 锁，同时删除
+  `output_files/output_refs` 的创建前所有权拒绝和活跃 child 动态 `locked_files` 投影。
+  owner 分库/分目录、远程 owner home、write boundary、sandbox、operation 幂等/replay 与逻辑锁保留。
+  过期父目录锁不再拦截新 handler 的主链回归已通过；推送、`.7` 部署和真实 TUI 对照尚待完成。
+
 - 2026-08-23 `e94f8ec` 已完成普通计划 会话运行时 式同轮停止核对的严格 gate、推送和 `.7` 唯一 Gateway 部署；
   native 回归证明 exact open 清单会进入下一次 provider messages，耗尽只 typed blocked。fresh Prompt 4
   r19 的 5 名 child 全部自然 DONE，第五名在 113.8k 发生一次 canonical Compact 后继续，root 真实跑出
@@ -167,6 +172,8 @@
   特判。旧 Click→Go 的 137MB 污染证据继续保留，不改写历史。
 - 模型调用账本现把“最多 128 条明细”和“完整 request/run 累计数”分开：logical turn、物理 model
   attempt、provider HTTP attempt/retry 与终态分布在明细裁剪后仍准确，且不保存 prompt、response、key。
+  现同一累计容器还保存 provider input/output/cache-read/cache-write token，无 usage 时保存标记明确的估算；
+  `AgentRunResult`、Gateway result 和 runtime fact 可直接用于单任务成本对比，不依赖全局 metrics 差值。
   超限 focused 回归、本地/`.13` Ruff 与测试通过；旧任务 response 中的 128 已更正为 retained-detail 下限。
 - 终端交互 TUI 可观察行为复刻已在 `my-agent` 以 Python/prompt_toolkit 单一 typed 状态链完成：
   typed journal/reducer、stable/active blocks、Markdown/code/diff、spinner/tool/permission、输入/history/

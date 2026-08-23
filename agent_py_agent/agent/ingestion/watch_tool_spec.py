@@ -753,9 +753,8 @@ def build_watch_stream_runtime_policy(*, surface: str = "ordinary") -> ToolRunti
                 if name in names
             ),
             # seq 261 #3：url/watch_id/source_ref/source_id 是逻辑 ID/资源引用，
-            # 不是写根。不标 logical 会被当 path 锁 workspace:{cwd}/<id>（子）+
-            # 缺省 None 兜底锁 workspace:{cwd}（父）→ 父子自冲突，watch open/
-            # audit source 操作永远调不通（真机 audit 实测互撞）。
+            # 不是写根。标成 logical 才会对同一 watch 资源做精确持久互斥，
+            # 不会误投影成 cwd 下的假路径。
             parameter_kinds={
                 name: "logical"
                 for name in ("url", "watch_id", "source_ref", "source_id")

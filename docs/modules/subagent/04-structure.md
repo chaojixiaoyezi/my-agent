@@ -151,7 +151,7 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   `allowed_write_roots/forbidden_write_roots` 独立裁决，不允许用权限根反推 cwd。
 - 对根 main 创建的普通 child，`conversation_execution_cwd` 与
   `conversation_runtime_workspace_roots` 必须先从当前 active turn 的 host-validated attributes 复制；它们
-  同时覆盖 shared manager 的 daemon/repository fallback。`output_files` 只声明交付目标与冲突锁，不能成为
+  同时覆盖 shared manager 的 daemon/repository fallback。`output_files` 只声明交付目标与验证线索，不能成为
   child 获得当前项目工作区的必要条件。孙代理继续从直接父 task 的结构化产品根逐层继承，不解析 goal。
 
 ## 2026-08-22 Dispatcher 互斥权威
@@ -413,7 +413,7 @@ item 的 `covers` 是可选 exact-id 映射；一旦提供，必须引用仍 ope
 `covers_auto_bound` 旁路已删除，调用参数中的显式 `covers` 是唯一绑定来源。
 已关闭项需要返工时，先用 `task_progress` 对同一 id 传 `status=in_progress, correction=true` 显式重开，
 再决定是否绑定；也可省略 covers，但不能拿无关 open id 顶替。
-用户明确的保存路径应通过顶层或逐 item 的 `output_files` 记录交付和锁；普通 child 的权限上界来自父级
+用户明确的保存路径应通过顶层或逐 item 的 `output_files` 记录交付和验证线索；普通 child 的权限上界来自父级
 workspace，goal 或 output_files 都不能扩大到该上界之外。
 root 对用户完整目标负责；delegated runner 只把直接父级当前 `goal` 当作本轮完整工作边界，不能因根目标
 更大而实现未交给自己的兄弟计划项。这个边界是 会话运行时 式模型执行纪律，不由宿主解析 goal 或扫描文件硬判。

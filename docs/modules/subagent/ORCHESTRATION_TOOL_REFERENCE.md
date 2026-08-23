@@ -22,10 +22,9 @@ create/guidance/cancel/resolve 四个直属下级控制入口；普通 leaf 不�
   以真实 run id 形成独立进度行，不关闭现有 Todo。提供的未知、已关闭或同批重复 id 会在创建任何 run
   前整批拒绝，宿主不从 goal 或标题猜绑定。返工已关闭项先用 task_progress 对原 id 传
   `status=in_progress, correction=true` 重开，或省略 covers；不得拿无关 open id 顶替。
-- 当调用方选择提供 `output_files` 时，整批拒绝会区分“本批 item 互相重用交付路径”和“已有未结束 run 占用”。前者返回
-  `revise_proposed_output_scopes_and_retry`，应给每个 item 分配互不重叠的输出，或把共享文件
-  收成一个 item 后重试；后者才由宿主等直属生命周期事件。工具失败不改变用户原始约束，
-  不得因此改用用户明确禁止的执行方式。
+- `output_files/output_refs` 是可选交付元数据，不是文件所有权。同批、同级或父子路径
+  重叠不再拒绝创建，也不会自动加入持久 workspace 锁或其它代理的 `locked_files`。
+  这不改变路径授权：显式输出仍必须在父级 workspace 上界内。
 - `allowed_tools` 只是工具偏好提示，不是安全边界；基础读写工具由系统按角色和目标补齐。
 - 子代理自己的资料线索写到对应 item 的 `input_refs`，公共资料才放顶层。
 - 普通 child 自动继承直接父级的结构化工作区上界。用户明确了产物路径时可写 `output_files`；批量派工

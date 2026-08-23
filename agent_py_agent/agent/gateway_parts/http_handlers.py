@@ -395,6 +395,13 @@ _PUBLIC_RESULT_FIELDS = (
     "runtime_injection_token_estimate",
     "turn_token_estimate",
     "cumulative_token_estimate",
+    "model_accounted_input_tokens",
+    "model_output_tokens",
+    "model_total_tokens",
+    "model_cached_input_tokens",
+    "model_cache_creation_input_tokens",
+    "model_provider_usage_call_count",
+    "model_estimated_usage_call_count",
     "memory_resume_context_injected",
     "memory_resume_context_matches",
     "memory_resume_context_token_estimate",
@@ -402,7 +409,8 @@ _PUBLIC_RESULT_FIELDS = (
 )
 
 
-# LLM: USER 的 HTTP result 是对内部 response record 的白名单投影；新增运行字段默认不公开。
+# LLM: USER 的 HTTP result 是对内部 response record 的白名单投影；新增运行字段
+# 默认不公开，但无正文的模型 token/cache 计数可供当前 owner 成本观测。
 # 函数用途: 保留客户端需要的状态/正文/计数，同时移除路径、lease、prompt 和内部错误细节。
 def _public_result(result: dict) -> dict[str, object]:
     # 操作核验只转发已清洗的公开投影，不在 HTTP 层重建 call、路径或副作用引用。

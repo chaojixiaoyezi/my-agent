@@ -57,7 +57,7 @@ def describe_tool_concurrency(
     ``workspace_root`` / ``write_boundary`` are optional physical-root context
     (the executor layer always holds them). When present, resource scopes are
     resolved by the shared authoritative resolver (seq 245 P5) so concurrency
-    projection, ActionPolicy audit records and operation-store locks all agree;
+    projection and ActionPolicy audit records agree;
     without them the legacy text projection is used for pure-policy callers.
     """
 

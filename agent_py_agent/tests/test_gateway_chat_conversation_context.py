@@ -1309,6 +1309,13 @@ def test_gateway_response_does_not_fall_back_to_suppressed_internal_result() -> 
         runtime_injection_token_estimate=2,
         turn_token_estimate=12,
         cumulative_token_estimate=12,
+        model_accounted_input_tokens=1000,
+        model_output_tokens=100,
+        model_total_tokens=1100,
+        model_cached_input_tokens=700,
+        model_cache_creation_input_tokens=50,
+        model_provider_usage_call_count=1,
+        model_estimated_usage_call_count=0,
         memory_resume_context_injected=False,
         memory_resume_context_query="",
         memory_resume_context_matches=0,
@@ -1324,6 +1331,18 @@ def test_gateway_response_does_not_fall_back_to_suppressed_internal_result() -> 
     assert "RUN_TOOL_EVIDENCE_BLOCKED" not in json.dumps(response, ensure_ascii=False)
     assert response["channel_delivery"]["internal_signal"] is True
     assert "/private/runtime" not in json.dumps(response, ensure_ascii=False)
+    assert response["model_total_tokens"] == 1100
+
+    from agent_py_agent.agent.gateway_parts.http_handlers import _public_result
+
+    public = _public_result(response)
+    assert public["model_accounted_input_tokens"] == 1000
+    assert public["model_output_tokens"] == 100
+    assert public["model_total_tokens"] == 1100
+    assert public["model_cached_input_tokens"] == 700
+    assert public["model_cache_creation_input_tokens"] == 50
+    assert public["model_provider_usage_call_count"] == 1
+    assert public["model_estimated_usage_call_count"] == 0
 
 
 def test_gateway_public_path_sanitizer_preserves_completion_facts() -> None:

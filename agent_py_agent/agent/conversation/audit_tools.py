@@ -96,9 +96,8 @@ class PublishAuditUpdateTool(BaseTool):
         idempotency_policy=IdempotencyPolicy("operation"),
         resource_scopes=ResourceScopePolicy(
             parameter_names=("source_probe_refs", "remove_source_ids"),
-            # seq 261 #3：probe refs / source ids 是逻辑 ID 不是写根；不标 logical
-            # 会被当 path 锁 workspace:{cwd}/<id>（子）+ 缺省 None 兜底锁
-            # workspace:{cwd}（父）→ 父子自冲突，publish 永远调不通。
+            # seq 261 #3：probe refs / source ids 是逻辑 ID 不是写根；标成 logical
+            # 才能让同一控制面资源保持精确互斥，不会误投影成 cwd 下的假路径。
             parameter_kinds={
                 "source_probe_refs": "logical",
                 "remove_source_ids": "logical",

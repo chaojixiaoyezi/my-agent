@@ -59,6 +59,7 @@ from agent_py_agent.agent.runtime_db.operations import RuntimeConflictError
 from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 from agent_py_agent.agent.tooling.executor import (
     ToolExecutorRequest,
+    _durable_operation_scopes,
     _workspace_operation_scopes,
 )
 from agent_py_agent.agent.tooling.models import ToolHandlerOutcome
@@ -857,6 +858,79 @@ def test_s248_logical_parameter_projects_text_scope(tmp_path):
     runtime = request.runtime_snapshot.runtime("logical_tool")
     scopes = _workspace_operation_scopes(request, call, runtime)
     assert scopes == ("logical:session_id:bg-1-1718500000",)
+
+
+# LLM: Filesystem paths remain visible to policy/audit but must never enter the cross-run
+# operation lease after the 会话运行时 concurrency migration.
+# 函数用途: 验证普通目录锁被一次性过滤，精确控制面逻辑锁仍保留。
+def test_codex_style_durable_scopes_drop_workspace_and_keep_logical():
+    assert _durable_operation_scopes(
+        (
+            "workspace:/root",
+            "workspace:/root/project",
+            "logical:agent_run:run-1",
+            "logical:agent_run:run-1",
+        )
+    ) == ("logical:agent_run:run-1",)
+
+
+# LLM: This is the production ToolExecutor seam, not merely a resolver unit test. A legacy
+# workspace lease may remain in an upgraded database, but a new ordinary write must not consult
+# it as admission authority.
+# 函数用途: 模拟旧版留下的过期父目录锁，验证新任务在子目录仍能真正进入工具 handler。
+def test_tool_executor_ignores_legacy_workspace_lease(tmp_path):
+    repo = _repo(tmp_path)
+    _old_agent_run, old_attempt = _direct_register_chain(
+        repo, "run-old-lock", task_id="task-old-lock"
+    )
+    _new_agent_run, new_attempt = _direct_register_chain(
+        repo, "run-new-write", task_id="task-new-write"
+    )
+    store_obj = select_operation_store(
+        _agent(repo=repo, tools=None, store=_store(tmp_path), root=tmp_path)
+    )
+    store_obj.claim_tool_operation(
+        ToolOperationClaimRequest(
+            owner_id="owner-a",
+            run_id="run-old-lock",
+            task_id="task-old-lock",
+            operation_id="tool_call:old:call-1",
+            tool="legacy_write",
+            args_hash="sha256:old",
+            idempotency_key="legacy-workspace-lock",
+            idempotency_scope="operation",
+            idempotency_namespace="legacy_write",
+            holder=new_tool_operation_holder(),
+            lease_expires_at=9999999999.0,
+            resource_scopes=(f"workspace:{tmp_path.resolve()}",),
+            attempt_id=old_attempt,
+        )
+    )
+    with repo._runtime_connection() as conn:
+        conn.execute(
+            "UPDATE resource_locks SET lease_expires_at = 1 WHERE attempt_id = ?",
+            (old_attempt,),
+        )
+        conn.commit()
+
+    tool = _PathWriteTool("new_write")
+    snapshot = runtime_snapshot_for_tools({"new_write": tool}, run_id="run-new-write")
+    agent = _managed_chain(repo, _store(tmp_path), [tool], tmp_path)
+    execution = _traced_call(
+        agent,
+        _params(run_id="run-new-write", task_id="task-new-write", snapshot=snapshot),
+        _gate_call(
+            run_id="run-new-write",
+            tool_name="new_write",
+            operation_id="tool_call:new:call-1",
+            snapshot=snapshot,
+            attempt_id=new_attempt,
+            arguments={"path": "child/out.txt", "value": 1},
+        ),
+    )
+
+    assert execution.result.ok is True
+    assert tool.calls == 1
 
 
 class _SandboxWriteTool(_PathWriteTool):

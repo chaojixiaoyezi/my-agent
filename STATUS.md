@@ -1,5 +1,20 @@
 # STATUS
 
+## 2026-08-23 会话运行时 式目录并发与单 run token 账本（本地严格门通过）
+
+- 已对照 会话运行时 当前 turn `RwLock`、`exec_command` 并行入口、active-turn 注入和
+  `SpawnReservation` 源码。my-agent 普通 shell/写文件/patch/派工不再把 cwd 或父子目录写入
+  跨 run 持久锁；旧数据库遗留的 `workspace:*` 行不再阻断新 handler。工具幂等、
+  精确逻辑资源锁、active turn、owner 墙、写边界和沙箱未删。
+- `output_files/output_refs` 现为交付/验证元数据；同批、同级、父子重叠目标均可创建，
+  活跃 child 也不再向主代理写边界自动注入 `locked_files`。
+- `ModelCallLedger` 新增每 request/run 的 provider input/output/cache read/cache creation 累计，
+  并投影到 `AgentRunResult`、Gateway result 和 runtime fact。无 usage 调用与真实 usage 分开计数；
+  该累计不与 TUI 当前 context token 混用。
+- 本地已通过锁/子代理/owner 隔离/模型账本/Gateway 投影 focused 回归，以及 Ruff、
+  doc-sync、strict code-size、diff 和 clean-package。本轮生产+测试改动远低于 10,000 行，
+  按项目规则没有跑全仓 pytest。下一步是推送、部署 `.7` 唯一 Gateway，再用正式 TUI 对照矩阵验收。
+
 ## 2026-08-23 Prompt 4 r19：子代理/Compact 稳定，生成产物真实启动白屏
 
 - `e94f8ec` 已推送并部署到 `192.0.2.7` 的唯一 Gateway。fresh tmux

@@ -60,6 +60,10 @@ class ModelCallActivityParams:
 class ModelCallFinishParams:
     call_id: str
     output_tokens: int = 0
+    input_tokens: int | None = None
+    cached_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    provider_usage_reported: bool = False
     cache_suspected: bool = False
 
 
@@ -114,6 +118,10 @@ class ModelCallRecord:
     first_token_latency_seconds: float | None = None
     total_latency_seconds: float | None = None
     output_tokens: int = 0
+    accounted_input_tokens: int = 0
+    cached_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    provider_usage_reported: bool = False
     output_tokens_seen: int = 0
     timeout_seconds: float | None = None
     timeout_stage: str = ""
@@ -152,6 +160,10 @@ class ModelCallRecord:
             "first_token_latency_seconds": self.first_token_latency_seconds,
             "total_latency_seconds": self.total_latency_seconds,
             "output_tokens": self.output_tokens,
+            "accounted_input_tokens": self.accounted_input_tokens,
+            "cached_input_tokens": self.cached_input_tokens,
+            "cache_creation_input_tokens": self.cache_creation_input_tokens,
+            "provider_usage_reported": self.provider_usage_reported,
             "output_tokens_seen": self.output_tokens_seen,
             "timeout_seconds": self.timeout_seconds,
             "timeout_stage": self.timeout_stage,
@@ -179,6 +191,12 @@ class _ModelCallAggregate:
     status_counts: dict[str, int] = field(default_factory=dict)
     backends: set[str] = field(default_factory=set)
     models: set[str] = field(default_factory=set)
+    accounted_input_tokens: int = 0
+    output_tokens: int = 0
+    cached_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    provider_usage_call_count: int = 0
+    estimated_usage_call_count: int = 0
 
     # LLM: 每个新 call_id 恰好调用一次；同 call_id 的状态变化必须走 observe_update，避免重复累计。
     # 函数用途: 把一条新模型调用加入累计统计，并登记逻辑回合、后端、模型和初始状态。
@@ -195,6 +213,7 @@ class _ModelCallAggregate:
             self.backends.add(record.backend)
         if record.model:
             self.models.add(record.model)
+        self._observe_usage_delta(None, record)
 
     # LLM: replacement delta 维护当前终态分布和尝试数；身份字段变化也必须成对撤销旧值再登记新值。
     # 函数用途: 在同一调用收到首 token、完成、失败、超时或 HTTP 尝试事件时更新累计统计。
@@ -230,6 +249,55 @@ class _ModelCallAggregate:
             self.backends.add(current.backend)
         if current.model:
             self.models.add(current.model)
+        self._observe_usage_delta(previous, current)
+
+    # LLM: Aggregate token totals are maintained by replacement deltas so detail pruning never
+    # truncates long-task usage and repeated finish events remain idempotent.
+    # 函数用途: 按同一 call 的新旧快照增量更新 token 总账，避免重复收尾多计。
+    def _observe_usage_delta(
+        self,
+        previous: ModelCallRecord | None,
+        current: ModelCallRecord,
+    ) -> None:
+        old = previous or ModelCallRecord("", "", "", 0)
+        self.accounted_input_tokens = max(
+            0,
+            self.accounted_input_tokens
+            + current.accounted_input_tokens
+            - old.accounted_input_tokens,
+        )
+        self.output_tokens = max(
+            0,
+            self.output_tokens + current.output_tokens - old.output_tokens,
+        )
+        self.cached_input_tokens = max(
+            0,
+            self.cached_input_tokens
+            + current.cached_input_tokens
+            - old.cached_input_tokens,
+        )
+        self.cache_creation_input_tokens = max(
+            0,
+            self.cache_creation_input_tokens
+            + current.cache_creation_input_tokens
+            - old.cache_creation_input_tokens,
+        )
+        old_reported = int(old.provider_usage_reported and old.status == "finished")
+        new_reported = int(
+            current.provider_usage_reported and current.status == "finished"
+        )
+        old_estimated = int(
+            not old.provider_usage_reported and old.status == "finished"
+        )
+        new_estimated = int(
+            not current.provider_usage_reported and current.status == "finished"
+        )
+        self.provider_usage_call_count = max(
+            0, self.provider_usage_call_count + new_reported - old_reported
+        )
+        self.estimated_usage_call_count = max(
+            0, self.estimated_usage_call_count + new_estimated - old_estimated
+        )
 
     # LLM: 返回值只含公开统计，不泄露内部 logical id 集合或可变容器引用。
     # 函数用途: 生成最终结果和 runtime facts 可直接消费的累计统计快照。
@@ -249,6 +317,17 @@ class _ModelCallAggregate:
             "status_counts": statuses,
             "backends": sorted(self.backends),
             "models": sorted(self.models),
+            "accounted_input_tokens": max(0, self.accounted_input_tokens),
+            "output_tokens": max(0, self.output_tokens),
+            "total_tokens": max(
+                0, self.accounted_input_tokens + self.output_tokens
+            ),
+            "cached_input_tokens": max(0, self.cached_input_tokens),
+            "cache_creation_input_tokens": max(
+                0, self.cache_creation_input_tokens
+            ),
+            "provider_usage_call_count": max(0, self.provider_usage_call_count),
+            "estimated_usage_call_count": max(0, self.estimated_usage_call_count),
         }
 
 
@@ -339,6 +418,19 @@ class ModelCallLedger:
                 last_activity_at=now,
                 total_latency_seconds=max(0.0, now - record.started_at),
                 output_tokens=max(0, int(params.output_tokens)),
+                accounted_input_tokens=max(
+                    0,
+                    int(
+                        record.input_tokens
+                        if params.input_tokens is None
+                        else params.input_tokens
+                    ),
+                ),
+                cached_input_tokens=max(0, int(params.cached_input_tokens)),
+                cache_creation_input_tokens=max(
+                    0, int(params.cache_creation_input_tokens)
+                ),
+                provider_usage_reported=bool(params.provider_usage_reported),
                 cache_suspected=record.cache_suspected or params.cache_suspected,
                 events=_append_event(record.events, "finished"),
             )

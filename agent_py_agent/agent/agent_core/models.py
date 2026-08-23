@@ -50,6 +50,17 @@ class AgentRunResult:
     provider_http_attempt_count: int = 0
     provider_http_retry_count: int = 0
     model_call_status_counts: dict[str, int] | None = None
+    # LLM: These counters come from provider usage when present and otherwise
+    # retain an explicitly counted estimate; callers must not confuse them with
+    # the latest context-window pressure shown by current_context_token_estimate.
+    # 字段用途: 保存本次 run/attempt 的累计模型 token 账，供成本对比和运行记录使用。
+    model_accounted_input_tokens: int = 0
+    model_output_tokens: int = 0
+    model_total_tokens: int = 0
+    model_cached_input_tokens: int = 0
+    model_cache_creation_input_tokens: int = 0
+    model_provider_usage_call_count: int = 0
+    model_estimated_usage_call_count: int = 0
     memory_compact_suggested: bool = False
     memory_compact_status: str = "ok"
     memory_compact_ratio: float = 0.0

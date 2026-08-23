@@ -24,6 +24,10 @@ canonical `task_progress.v1` 账本只读投影为 `id/title/status`；
 数值与 Todo 仍由各自 canonical ledger 持有，全部展示字段都不参与任务结束、恢复或授权，真实 task
 link/run/turn_end 仍是唯一生命周期事实。
 
+累计成本另走 `ModelCallLedger`：按 request/run 记录 provider input、output、cache read、
+cache creation 和真实/估算调用数，再投影到 runtime fact、`AgentRunResult` 与 Gateway
+result。它不会反向改动 Context 行，也不会参与 Compact 触发。
+
 薄 TUI 的 audit hook 与 workspace 传递相互独立：客户端无需构造第二个完整 Agent，仍必须把当前绝对
 cwd/roots 放进首次 ask。服务路径继续固定到 owner 唯一 Gateway；workspace 只属于 thread v6，不能因
 audit Agent 为空而回退 daemon cwd。

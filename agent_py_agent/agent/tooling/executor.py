@@ -356,7 +356,9 @@ def _invoke_with_operation_policy(
     # （TOOL_RESOURCE_SCOPE_RESOLUTION_FAILED，handler 不执行），绝不静默
     # 降级成无保护执行；read_only 路径无副作用不取锁，不受影响。
     try:
-        resource_scopes = _workspace_operation_scopes(request, call, runtime)
+        resource_scopes = _durable_operation_scopes(
+            _workspace_operation_scopes(request, call, runtime)
+        )
     except ResourceScopeResolutionError as exc:
         return apply_tool_execution_facts(
             ToolHandlerOutcome(
@@ -452,11 +454,11 @@ def _workspace_operation_scopes(
     call: ToolCall,
     runtime: ToolRuntime,
 ) -> tuple[str, ...]:
-    """workspace 资源锁 scope 解析（seq 245 P5 单一权威 resolver 薄包装）。
+    """workspace/逻辑资源 scope 解析（seq 245 P5 单一权威 resolver 薄包装）。
 
     唯一权威实现在 tooling/workspace_scopes.py；ActionPolicy（审计记录）与
     concurrency（调度投影）共用同一解析结果，绝不各算一套。executor 层必有
-    workspace_root → 恒走 canonical 物理根归一化。
+    workspace_root → 恒走 canonical 物理根归一化；持久 operation 只在调用点保留非 workspace scope。
     """
     from .workspace_scopes import authoritative_workspace_scopes
 
@@ -467,7 +469,7 @@ def _workspace_operation_scopes(
         arguments=call.arguments,
     )
     # seq 253 #5：执行写根由工具结构化声明（BaseTool.effective_write_roots 协议），
-    # operation lock 与写边界共用同一提取器——替换按 internal_parameter 名字
+    # 审计/调度 scope 与写边界共用同一提取器——替换按 internal_parameter 名字
     # （__sandbox_write_roots）的特判：特判只能覆盖声明过该参数名的工具，
     # 覆盖不了 apply_patch（写根在 patch 文本里）与 controlled_exec（写根在
     # grant.path_scope）这类执行写根不在参数里的工具。
@@ -498,6 +500,21 @@ def _workspace_operation_scopes(
                 f"{type(handler).__name__}.effective_resource_scopes failed: {exc}"
             ) from exc
     return tuple(dict.fromkeys(scopes))
+
+
+# LLM: 会话运行时 tool concurrency keeps filesystem cwd/path scopes in the current turn's
+# scheduler and sandbox, not in cross-run durable leases. Preserve non-filesystem logical scopes
+# because they protect exact control-plane identities such as one agent run or watch subscription.
+# 函数用途: 把工具解析出的范围缩成真正需要跨回合持久互斥的逻辑资源，普通文件路径只留作审计与沙箱事实。
+def _durable_operation_scopes(scopes: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            str(scope).strip()
+            for scope in scopes
+            if str(scope or "").strip()
+            and not str(scope).strip().startswith("workspace:")
+        )
+    )
 
 
 def _invoke_request(

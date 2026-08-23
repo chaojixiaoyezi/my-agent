@@ -14,6 +14,7 @@ from agent_py_agent.agent.agent_core.model.call_monitor import (
 )
 from agent_py_agent.agent.agent_core.model.call_runtime import (
     model_call_summary,
+    record_model_call_finished,
     start_model_call_record,
 )
 from agent_py_agent.agent.contracts.model_call_ledger import (
@@ -75,7 +76,67 @@ def test_ledger_records_finished_model_call_timing() -> None:
     assert finished.first_token_latency_seconds == 2.5
     assert finished.total_latency_seconds == 10.0
     assert finished.output_tokens == 240
+    assert finished.accounted_input_tokens == 1200
+    assert finished.provider_usage_reported is False
     assert finished.to_dict()["first_token_at"] == 102.5
+
+
+def test_finished_model_call_records_provider_usage_and_cache_tokens() -> None:
+    ledger = ModelCallLedger()
+    ledger.started(
+        ModelCallStartedParams(
+            call_id="call-provider-usage",
+            backend="test-backend",
+            model="test-model",
+            input_tokens=900,
+            request_id="request-provider-usage",
+            run_id="run-provider-usage",
+        )
+    )
+
+    record_model_call_finished(
+        ledger,
+        "call-provider-usage",
+        SimpleNamespace(
+            text="done",
+            usage={
+                "prompt_tokens": 1000,
+                "completion_tokens": 100,
+                "prompt_tokens_details": {"cached_tokens": 700},
+                "cache_creation_input_tokens": 50,
+            },
+        ),
+    )
+
+    (finished,) = ledger.records()
+    assert finished.accounted_input_tokens == 1000
+    assert finished.output_tokens == 100
+    assert finished.cached_input_tokens == 700
+    assert finished.cache_creation_input_tokens == 50
+    assert finished.provider_usage_reported is True
+    assert ledger.cumulative_summary(run_id="run-provider-usage") == {
+        "logical_model_turn_count": 1,
+        "physical_model_attempt_count": 1,
+        "model_retry_count": 0,
+        "provider_http_attempt_count": 0,
+        "provider_http_retry_count": 0,
+        "status_counts": {
+            "started": 0,
+            "first_token": 0,
+            "finished": 1,
+            "failed": 0,
+            "timed_out": 0,
+        },
+        "backends": ["test-backend"],
+        "models": ["test-model"],
+        "accounted_input_tokens": 1000,
+        "output_tokens": 100,
+        "total_tokens": 1100,
+        "cached_input_tokens": 700,
+        "cache_creation_input_tokens": 50,
+        "provider_usage_call_count": 1,
+        "estimated_usage_call_count": 0,
+    }
 
 
 def test_ledger_stream_activity_refreshes_timestamp_without_growing_events() -> None:
@@ -309,6 +370,13 @@ def test_same_logical_model_turn_preserves_distinct_physical_attempts() -> None:
         },
         "backends": ["test-backend"],
         "models": ["test-model"],
+        "accounted_input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "cached_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "provider_usage_call_count": 0,
+        "estimated_usage_call_count": 0,
     }
 
 
@@ -405,6 +473,13 @@ def test_summary_counts_all_calls_after_detail_retention_limit() -> None:
         },
         "backends": ["test-backend"],
         "models": ["test-model"],
+        "accounted_input_tokens": 70,
+        "output_tokens": 7,
+        "total_tokens": 77,
+        "cached_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "provider_usage_call_count": 0,
+        "estimated_usage_call_count": 7,
     }
 
 

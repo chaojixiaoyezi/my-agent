@@ -312,7 +312,7 @@ artifact/source refs 都从此对象投影。
 | `approval_request` | `ask` 时要展示/绑定的精确审批请求。 |
 | `sandbox_plan` | handler 启动前要落实的 OS 隔离计划。 |
 | `resolved_effect` | 本次具体调用最终解析出的副作用等级。 |
-| `resource_scopes` | 本次读写的规范化资源身份，用于冲突和并发判断。 |
+| `resource_scopes` | 本次读写的规范化资源身份；`workspace:*` 用于当前轮调度/审计，`logical:*` 才可进入跨回合 operation 互斥。 |
 | `ToolHandlerOutcome` | handler 内部业务返回值，只在 Executor 内存在；不是 provider、历史、Memory 或销账权威。 |
 | `ToolHandlerOutcome.ok/output` | handler 自报业务成功与原始正文；`output` 一律按不可信数据处理。 |
 | `ToolHandlerOutcome.error_code/reported_error_code` | 前者必须是宿主已注册的控制错误码；后者仅保留工具/提供方原始报码。正文里的同名 JSON 无效。 |
@@ -508,7 +508,9 @@ Operation ledger 继续使用现有 store，确保字段覆盖：`operation_id`�
 第一阶段所有 runtime 默认 `serial`。串行主链和配对测试通过后启用：
 
 - `ConcurrencyPolicy(mode=serial|parallel_safe|barrier)`；未知、危险、审批、交互为 barrier。
-- resource scopes 是规范化 `(kind, access, identity)`；read/read 可并行，任一 write 且 identity 重叠即冲突。
+- resource scopes 是规范化 `(kind, access, identity)`，当前 turn 内 read/read 可并行，写调用作 barrier。
+  `workspace:*` 只表达真实 cwd/写根，不进入跨 run 持久锁；精确 `logical:*` 身份仍由 operation
+  ledger 互斥，并保留幂等、replay 和 unknown 收口。
 - `resource_domains` 只统一参数名所在的逻辑域；当 URL、引用和持久 ID 是同一资源的不同值入口时，
   handler 必须通过 `effective_resource_scopes` 在 trusted parameter completion 后、operation claim 前补入
   同一个 canonical identity。`watch_stream` 以 owner、规范化来源地址和 typed Audit scope 生成的

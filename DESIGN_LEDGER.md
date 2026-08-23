@@ -391,7 +391,7 @@
   request 是宿主掌握的结构化阻塞事实，优先把该 child 落为 `BLOCKED`，grant/deny 后由事件恢复同一个 run。
   这不是产物质量验收，也不读取模型正文。
 - 对齐 会话运行时 child 继承父线程 `cwd` 与 sandbox 上界：普通 child 自动继承当前 Agent 的结构化 workspace
-  write roots，后代只继承同一权限上界；`output_files` 继续负责交付目标、冲突锁和 workspace 外显式授权，
+  write roots，后代只继承同一权限上界；`output_files` 只负责交付目标、展示和验证线索，
   不再要求模型为了写父级本来就有权写的项目目录重复声明权限。命名 Audit/exact-scope worker 不继承该
   普通写根，继续使用其精确结构化权限。
 - 后台主代理权威身份以精确 `task_id` 为先，不能复用同 thread 旧任务的 `bg-main-*` run。run 命中其它
@@ -403,7 +403,7 @@
   精确 attempt 锁，原事件才自然续跑。该边界对照 会话运行时 的 typed `AgentStatus` 终态通知：宿主订阅状态并
   向直接父线程注入一次事件，不靠周期 LLM 催促或反复重挂异常会话。
 - 普通 child 的可写上界来自直接父级工作区，不再靠 `output_files` 重复授权；因此父级本来能写的项目目录
-  可直接交给 child。`create_subagents.items[].output_files` 仍用来登记用户明确交付位置、产物归属和冲突锁，
+  可直接交给 child。`create_subagents.items[].output_files` 仍用来登记用户明确交付位置、产物归属和验证线索，
   但 goal 或 output_files 都不能把范围扩大到父级工作区之外。TUI 后台 notice 首次立即查询、之后每秒查询，
   并为同 thread 每条消息生成独立 block id，避免 reducer 丢掉第二条以后更新。
 - child 启动时的父级共享阅读上下文只来自当前 tool loop 的 archive。旧的 agent-level
@@ -1039,7 +1039,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - cwd/权限同样按 会话运行时 child spawn 继承 active turn config：根 main 创建 child 时，当前会话的
   host-validated `conversation_execution_cwd/conversation_runtime_workspace_roots` 必须进入 child task
   attributes、execution context 和产品写根；shared Gateway manager 的仓库根只是无会话任务的 fallback。
-  `output_files` 继续只表达交付目标/冲突锁，不负责授予普通 child 当前项目权限。第二轮 Prompt 4 正是因
+  `output_files` 继续只表达交付目标/验证线索，不负责授予普通 child 当前项目权限。第二轮 Prompt 4 正是因
   main 省略该字段而暴露断点；回归现已覆盖“无 output_files 仍读写 client project”。
 - 实现边界：`ConversationThreadStore.ensure_agent_thread` 以 host 生成的 exact id 幂等建线程，不写 channel/
   latest-user 索引；child 每次尝试按 `conversation_request_id` 先落 user、轮前 Compact、注入 summary/raw
@@ -1067,9 +1067,25 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 项目目录是每个 durable thread 的 typed 配置。TUI/CLI ask 携带绝对 `workspace.cwd/roots`，Gateway
   校验后写入 `conversation_thread.v7`；后续未覆盖的 turn、后台 main 和 child 继续继承。远程 owner
   不能提交主机 cwd，非法目录在模型前 fail-closed，不得退回 daemon cwd。
-- Tool Registry 的授权、资源锁和实际 handler 只接收同一 effective cwd/root；任务交付与子代理相对
+- Tool Registry 的授权、审计 scope 和实际 handler 只接收同一 effective cwd/root；任务交付与子代理相对
   output ref 读取同一会话字段。该适配对照 会话运行时 thread/turn 的 `cwd/runtime_workspace_roots`，没有新增
   prompt 关键词、第二 Gateway 或 TUI 专项路径分支。
+
+## 2026-08-23 会话运行时 式工作区并发与 owner 隔离分层【状态：本地候选待真机】
+
+- 普通 shell、文件写入、patch 和子代理派工的 `workspace:*` 只是当前轮调度/审计事实，
+  不再进入跨 run 持久 `resource_locks`。当前 turn 内的 barrier、operation 幂等/replay、
+  sandbox 与 write boundary 继续生效；精确 `logical:*` 控制面资源仍可持久互斥。
+- `output_files/output_refs` 是可选交付元数据，不是文件所有权。创建入口不再因同批、同级或
+  父子路径重叠拒绝 child，runtime write boundary 也不会自动把活跃 child 的申报产物
+  追加到 `locked_files`。父子共享 cwd，真实冲突由 diff、测试和模型协作暴露。
+- 成本观测复用唯一 `ModelCallLedger`：供应商返回的 input/output/cache read/
+  cache creation 按 request/run 累计，并随 `AgentRunResult`、Gateway result 与 runtime fact
+  持久。无 usage 的调用使用调用前 input 和输出估算，并单独计数；TUI 的
+  `current_context_token_estimate` 仍只是当前上下文压力，不得冒充累计消耗。
+- 多用户隔离不依赖上述目录锁：远程 provider 用户仍强制进入各自 `owner_home`，数据库、
+  memory、task、run、artifact 与 audit 分开；owner path wall、结构化写根和进程沙箱仍是硬边界。
+  本地可信 CLI/TUI 则像 会话运行时 一样使用启动时项目 cwd，并由 thread 持久继承。
 - `a091b72` 真机证明服务身份和 thread v6 主链生效，但薄 TUI 首次提交把 audit Agent 置空时也丢了 cwd。
   当前补丁将 audit 与 workspace 分参：客户端 config 是 cwd/roots 的唯一来源，Gateway 继续校验；不构造
   第二 Agent，也不回退 daemon cwd。真实提示词 2 复验必须使用全新项目目录和同一个 Gateway。

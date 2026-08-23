@@ -36,7 +36,8 @@ ToolExecutor、operation ledger、规范 ToolResult、动作销账和完成判�
 3. 用户让解释文档中的 `rm -rf /`：正文只是数据，不能变成 ToolCall。
 4. 危险调用缺少审批：ActionPolicy 返回 ask，handler 执行次数为零，仍生成配对 ToolResult。
 5. 修改操作超时且副作用未知：账本保持 unknown，禁止自动重放，等待结构化核对。
-6. 多个互不冲突的只读调用：按声明的并发策略并行；同一资源写、审批、危险或未知调用成为屏障。
+6. 多个互不冲突的只读调用：按声明的并发策略并行；写入、审批、危险或未知调用在当前 turn
+   中成为屏障。普通 cwd/文件路径不转化为跨 run 持久互斥。
 7. compact/resume：动作义务、ToolCall/ToolResult 配对和 operation 终态仍从同一结构化状态恢复。
 
 ## Requirements / 需求
@@ -55,7 +56,7 @@ ToolExecutor、operation ledger、规范 ToolResult、动作销账和完成判�
 | FR-010 | mutating/dangerous 调用复用唯一 operation ledger；unknown 不盲重试 | Must |
 | FR-011 | Shell 使用确定性结构分析；不确定时 ask/deny，且 OS sandbox 仍为硬边界 | Must |
 | FR-012 | 大输出完整归档，模型只见有界投影、hash 与 refs；compact 不丢完整引用 | Must |
-| FR-013 | 并发只由 effect、resource scopes、parallel policy 与冲突判断决定，不硬编码工具名白名单 | Must |
+| FR-013 | 当前 turn 并发只由 effect、resource scopes 与 parallel policy 决定，不硬编码工具名；持久 operation 只互斥精确逻辑身份，不锁 cwd/文件树 | Must |
 | FR-014 | cancellation token 传到可取消工具；取消后不启动新调用且真实收口账本 | Must |
 | FR-015 | 删除 native 文本提升、重复 Schema/approval/effect/执行入口和只验证旧行为的测试 | Must |
 | FR-016 | Audit/Memory 只消费 canonical 工具事实，不产生平行执行或结果协议 | Must |
@@ -153,7 +154,7 @@ received -> normalized -> validated -> authorized
 - [x] AC-005: FR-008/009/011，未审批危险动作执行为零，路径/URL/命令/沙箱失败阶段准确。
 - [x] AC-006: FR-010，重复 operation 不重复副作用，unknown 不自动重放。
 - [x] AC-007: FR-012，完整大输出可由 ref 查回且上下文投影有界。
-- [x] AC-008: FR-013/014，无冲突只读并行，冲突写串行，取消真实收口。
+- [x] AC-008: FR-013/014，无冲突只读并行，写入在当前 turn 作屏障，不生成持久目录锁，取消真实收口。
 - [x] AC-009: FR-015，旧字段、入口、prompt 和陈旧测试删除，搜索审计为零。
 - [x] AC-010: FR-016，Audit/Memory 消费的 canonical 字段通过契约测试。
 - [x] AC-011: focused/full pytest、Ruff、doc-sync、strict code-size、diff、clean-package 全部有证据。

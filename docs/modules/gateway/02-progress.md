@@ -1,5 +1,16 @@
 # Gateway Progress
 
+## 2026-08-23 每个 run 的模型 token 累计投影
+
+- 双 TUI 对照需要区分“当前上下文大小”和“任务累计消耗”。现有 `ModelCallLedger` 在同一
+  request/run 聚合中新增 provider input/output/cache read/cache creation；明细超过保留上限时累计值
+  不丢，供应商不返回 usage 时按调用前 input 与响应估算并单独标记计数。
+- `AgentRunResult`、内部 Gateway response、owner-scoped HTTP result 与 runtime fact 都只转发该结构化
+  总账，不解析模型正文，也不拿 TUI `current_context_token_estimate` 反推成本。Compact 触发和常驻
+  Context 展示保持原合同。
+- focused 回归覆盖 OpenAI-compatible cached token、无 usage 估算、明细裁剪后的累计，以及 HTTP
+  白名单投影；严格 gate 与 `.7` 真机 provider usage 仍待本轮完成。
+
 ## 2026-08-22 Gateway 与 delegated thread 共用请求身份
 
 - Gateway 新 transcript 行同时写 canonical `conversation_request_id` 与显式旧 `gateway_request_id`；
