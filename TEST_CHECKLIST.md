@@ -12,6 +12,10 @@
   只算阶段，安装/构建/启动/关键路径失败后重跑，不把忽略错误包装当成功，不为绿灯删除、skip 或放宽
   能暴露当前缺陷的有效测试。配置 YAML 与 dataclass 已字面一致，253 项 focused 与本地严格 gate 通过；
   仍待 r8 真 TUI 验证。
+- [ ] task-local child 只能由自己的 runner/agent thread 续跑：finalize 不登记 root
+  `ordinary_task_resume`，任何绑定 canonical child task 的旧后台 policy/wake 在 root 模型调用前退役或
+  无模型确认。runner 结果回到 `PENDING` 时只回收 exact run 的启动占位，共享批次 PID 仍活不能阻塞
+  即时续派。相关 focused 回归通过；仍待部署后 r9 真 TUI 证明没有混合 main/child 身份和双执行器。
 - [x] Compact 权威探针兼容没有 `task_attributes` 的轻量/旧调用方；统一路径解析把 `None`/空白保留为
   “没有路径”，不能变成 `<repo>/None` 并压过真实 ToolRegistry cwd。工具轮 28 项与 cwd 集成回归通过。
 - [x] 后台 Task Runtime State 与 `task_progress` 工具使用同一 task-path 账本编号；回归同时放置正确路径账本

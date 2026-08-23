@@ -545,9 +545,15 @@ def _conversation_turn_is_terminal(ctx: FinalizeContext) -> bool:
     }
 
 
+# LLM: Root conversation turns may rent the owner scheduler, while task-local
+# child turns must remain on their own runner/thread lane. Never turn a child
+# checkpoint into a background-main turn with root tools.
+# 函数用途: 为未完成的主会话安排续跑；子代理只保存断点并交回自己的 runner 续派。
 def _schedule_typed_unfinished_continuation(agent: object, ctx: FinalizeContext) -> None:
-    """Resume explicit persistent work after a structured turn boundary."""
+    """Resume explicit persistent root work after a structured turn boundary."""
     if not ctx.do_save:
+        return
+    if str(ctx.context_scope or "").strip().lower() == "task_local":
         return
     attrs = ctx.task_attributes if isinstance(ctx.task_attributes, dict) else {}
     # A named Audit owns durable, lease-backed source workers.  Host-level

@@ -5148,6 +5148,43 @@ def _background_claim_scope_id(
     return detached_task_claim_scope_id(selected_thread, selected_task)
 
 
+# LLM: BackgroundMainAgentRuntime is the root conversation executor. Exact ids
+# that resolve in the canonical SubAgentManager belong to their child thread
+# and runner, even when a stale policy/wake incorrectly points at the root
+# conversation. Do not infer this boundary from id prefixes or prose.
+# 函数用途: 判断某个任务是否由子代理 runner 独占续跑，防止主代理权限串进 child 工作区。
+def _subagent_runner_owns_task(agent: object | None, task_id: object) -> bool:
+    selected = str(task_id or "").strip()
+    manager = getattr(agent, "subagents", None)
+    if not selected or manager is None or not callable(getattr(manager, "load", None)):
+        return False
+    try:
+        task = manager.load(selected)
+    except (FileNotFoundError, OSError, TypeError, ValueError):
+        return False
+    return str(getattr(task, "id", "") or "").strip() == selected
+
+
+# LLM: This model-free acknowledgement is the final fail-closed guard for any
+# child-bound source that bypassed source-specific filtering. It lets wake and
+# observation ledgers settle without invoking the root model or exposing root
+# tools; the child runner/supervisor remains the sole continuation authority.
+# 函数用途: 把误投给主代理的子代理后台来源标成已由 child runner 接管，不消耗模型调用。
+def _subagent_owned_background_report(kwargs: dict) -> BackgroundMainAgentReport:
+    return BackgroundMainAgentReport(
+        thread_id=str(kwargs.get("thread_id") or ""),
+        task_id=str(kwargs.get("task_id") or ""),
+        reason=str(kwargs.get("reason") or "subagent_runner_owned"),
+        response="",
+        route_channel=str(kwargs.get("route_channel") or "internal"),
+        route_target=str(kwargs.get("route_target") or ""),
+        created_at=now(kwargs.get("now")),
+        delivery_status="suppressed",
+        delivery_reason="subagent_runner_owns_continuation",
+        wake_handled=True,
+    )
+
+
 class _BackgroundSchedulerExecutionMixin:
     """Claimed progress-policy execution, heartbeats, and runtime facts."""
 
@@ -5209,6 +5246,11 @@ class _BackgroundSchedulerExecutionMixin:
     # recovery block 只关闭本 claim，不消费来源。
     # 函数用途: 领取一个后台执行 lane，通过最终准入后运行带心跳的主代理回合。
     def _run_claimed(self, kwargs: dict) -> BackgroundMainAgentReport | None:
+        if _subagent_runner_owns_task(
+            getattr(self.runtime, "agent", None),
+            kwargs.get("task_id"),
+        ):
+            return _subagent_owned_background_report(kwargs)
         claim_scope_id = _background_claim_scope_id(
             self.store,
             str(kwargs.get("thread_id") or ""),
@@ -5869,6 +5911,8 @@ def _progress_policy_suppression_reason(
         return "audit_root_poll_policy"
     if _is_running_durable_audit_root_policy(store, policy):
         return "durable_audit_root_policy"
+    if _subagent_runner_owns_task(agent, policy.task_id):
+        return "subagent_runner_owned_policy"
     if _policy_task_link_is_terminal(store, policy):
         return "terminal_task_link"
     if _cli_claim_holds_policy(policy, now=now):
@@ -6113,6 +6157,7 @@ _RETIRE_SUPPRESSION_REASONS = frozenset(
         "audit_root_poll_policy",
         "durable_audit_root_policy",
         "removed_dispatch_supervision_policy",
+        "subagent_runner_owned_policy",
     }
 )
 

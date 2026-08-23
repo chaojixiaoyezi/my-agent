@@ -36,6 +36,10 @@
   并用精确直属 run ids 的耐久等待记录排除孤儿误复活。成功兄弟收齐后只唤醒一次；
   失败、缺状态或 capability 阻塞立即唤醒直属父级。父级新工作片直接获得有界
   `direct_children` 状态、结果 refs 和待裁决请求，不需要查树或 shell `sleep`。
+- 每个 child 的断点与续跑只归自己的 runner/agent thread；`context_scope=task_local` 不得创建
+  `ordinary_task_resume` 或租用主代理后台回合。任何误指向 child task id 的旧后台 policy/wake 都在
+  调用模型前关闭并由 child runner 接管，主代理不能携带 child 身份或权限运行。一次 runner 结果重新
+  落为 `PENDING` 时只释放该 run 的启动占位；共享批次宿主 PID 仍活着不能阻止这个 child 立即续派。
 - `task_progress` 只是当前模型的软计划/记事账本。普通模型最终回复会直接结束当前回合；
   open 进度项不会让宿主再调用模型、不会卡住收口。只有显式 `/goal`、Compact 或 typed
   子代理/控制事件能开新工作片。新账本项必须有稳定 `id + title + status`，避免空白行。

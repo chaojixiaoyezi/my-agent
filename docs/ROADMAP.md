@@ -214,6 +214,18 @@ r7 的交付本身仍是 P0 失败：产物只有 29 个生产 Python 文件、6
 再只投递一次原样 Prompt 4，重点看
 模型能否保留完整范围、修真实失败而不是删测试，并按真实运行结果收尾。测试者仍不得旁路改被测产物。
 
+`b3c2daa` 部署后的 r8 在 tmux `dsh-p4-lazygit-r8-ea91639` 对同一固定源码仍只投递一次原样 Prompt 4。
+范围软纪律让产物早期增长到 793 个 Rust 文件、9,718 行，但运行链路被新的 P0 身份问题污染：一个 child
+因截断回到 PENDING 后，其启动记录仍指向承载兄弟的共享批次 PID，无法重试；child finalize 又建立
+`ordinary_task_resume(task_id=child, thread_id=root)`，root 后台模型于是带着 child task 身份和主工具运行，
+覆盖 Todo 并越权创建孙代理，同时真实 child retry 又启动，形成双执行器。
+
+当前本地候选按 会话运行时 的 child 独立 session/thread 所有权收口：task-local finalize 不再租用 root 后台轮；
+后台 policy/wake 精确解析为 canonical child 时在模型前退役或无模型确认；PENDING 只回收 exact run 的
+task-local launch record，不终止共享宿主，使既有 runner auto-start 可立即续派。待严格 gate、推送和单
+Gateway 部署后，以 fresh r9 重跑相同固定源码与原样 Prompt 4；验收先看 root/child 身份、单执行器与重试
+恢复，再继续看范围保真、真实测试和最终产物，不增加宿主机器质量门。
+
 ### 用户直控子代理的共享控制面
 
 状态：设计中，直属 child 只读状态投影已部署并完成真机 smoke

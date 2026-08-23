@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.orchestration.dispatch.runner_candidates import (
@@ -76,6 +77,72 @@ def test_recoverable_incomplete_result_stays_pending_on_same_run() -> None:
     assert task.runner_attempts == 1
     assert result_meta["ok"] is True
     assert _is_dispatch_runner_candidate(task) is True
+
+
+def test_requeued_result_releases_its_task_launch_while_batch_host_lives() -> None:
+    task = _task()
+    task.attributes = {
+        "background_start": {
+            "launch_id": "shared-batch",
+            "status": "running",
+            "pid": os.getpid(),
+        }
+    }
+    result_meta = {
+        "ok": True,
+        "message": "model turn completed",
+        "response": "structured result",
+        "dry_run": False,
+    }
+
+    apply_runner_result_fields(
+        RunnerResultFieldParams(
+            task=task,
+            result_meta=result_meta,
+            status_context={"status": "", "verification_status": "", "failure_type": ""},
+            parsed=_incomplete_result(),
+            now=123.0,
+        )
+    )
+
+    assert task.status == TaskStatus.PENDING.value
+    assert task.attributes["background_start"]["status"] == "reclaimed"
+    assert task.attributes["background_start"]["pid"] == os.getpid()
+    assert _is_dispatch_runner_candidate(task) is True
+
+
+def test_task_local_unfinished_turn_never_rents_root_background_scheduler(
+    monkeypatch,
+) -> None:
+    from agent_py_agent.agent.agent_core._finalization_service import (
+        _schedule_typed_unfinished_continuation,
+    )
+    from agent_py_agent.agent.conversation import runtime as conversation_runtime
+
+    scheduled: list[str] = []
+    monkeypatch.setattr(
+        conversation_runtime,
+        "ensure_ordinary_task_resume",
+        lambda *_args, **kwargs: scheduled.append(str(kwargs.get("task_id") or "")),
+    )
+    ctx = SimpleNamespace(
+        do_save=True,
+        context_scope="task_local",
+        task_attributes={
+            "conversation_thread_id": "thread-root",
+            "conversation_task_id": "child-a",
+        },
+        final_response=SimpleNamespace(
+            runtime_status="unfinished",
+            runtime_reason="MODEL_RESPONSE_TRUNCATED",
+        ),
+        source="subagent_run_model_turn",
+        task_id="child-a",
+    )
+
+    _schedule_typed_unfinished_continuation(SimpleNamespace(), ctx)
+
+    assert scheduled == []
 
 
 def test_incomplete_result_with_open_capability_request_remains_blocked() -> None:

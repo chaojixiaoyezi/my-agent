@@ -44,6 +44,14 @@ worker-6/7，Todo 从 0/11 到 11/11 均显示真实计数与四行视窗。任�
 Prompt 4，观察 root/child/lifecycle wake 共用软纪律是否让模型保留完整范围、重跑真实失败入口并拒绝为
 绿灯删/skip/放宽有效测试；测试者不向 TUI 追加修复指令，也不修改产物。
 
+Prompt 4 r8 的 canonical 失败样本要求新增两层回归。其一，任意 runner 的合法结果若把 exact run 投影回
+`PENDING`，必须回收该 run 自己的 `background_start`，即使记录中的 PID 仍是承载兄弟 runner 的共享活进程；
+session 退出后既有 `auto_start_orphan_run` 应立即续派同一个 run。其二，`context_scope=task_local` finalize
+不得创建 `ordinary_task_resume`；历史 policy 或 wake 若绑定 canonical child task，
+`BackgroundMainAgentRuntime` 必须在调用 root 模型前退役或无模型确认，不能改 root thread/task link、Todo，
+也不能把 root 工具授给 child。fresh r9 仍只输入一次原样 Prompt 4，并核对不存在
+`ordinary_task_resume(task_id=child)`、不存在 main/child 双执行器，PENDING child 能自行续跑。
+
 `931ee20` 在 `.7` 唯一 Gateway 上以 tmux `dsh-p3-research-931ee20-verify` 执行第 3 条原样任务，prompt
 只输入一次。4 个 child 的短职责、实时 context 总 token、一次 attempt 自然 DONE 和 Todo 打标均正确；
 但 main 只收到不含最终正文/报告 ref 的生命周期通知，猜测 `research_reports/` 后反问用户，未继续第二批，

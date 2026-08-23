@@ -1,5 +1,20 @@
 # STATUS
 
+## 2026-08-22 Prompt 4 r8：child 身份串入主代理与共享 PID 阻塞重试（本地修复候选）
+
+- `b3c2daa` 已部署到 `.7` 唯一 Gateway；tmux `dsh-p4-lazygit-r8-ea91639` 在干净 cwd 对
+  `jesseduffield/lazygit@ea916395` 只输入一次原样 Prompt 4。源码本地统计为 957 个生产 Go 文件、
+  91,175 行功能代码、118 个测试文件和 368 个 `Test` 函数。
+- 一名 child 因 `MODEL_RESPONSE_TRUNCATED` 回到 `PENDING`，但它的 task-local `background_start.pid`
+  指向仍承载兄弟 runner 的共享批次进程，因此长期被误判为“已经启动”。随后 child finalize 又错误登记
+  `ordinary_task_resume(task_id=child, thread_id=root)`；主代理后台执行器以 child task 身份和 root 工具运行，
+  改写 root Todo 并越权创建孙代理，形成两个执行器并发处理同一 child 的混合身份。
+- 当前候选对照 会话运行时 每个 child 独立 ThreadId/session、精确 status watcher 回传直属父级的实现：task-local
+  finalize 不再登记主代理后台续轮；后台 policy/wake 的 task id 若属于 canonical child，会在模型调用前
+  退役或无模型确认；任何 runner 结果重新落为 PENDING 都只回收该 run 的启动占位，使既有即时 auto-start
+  不再受共享宿主 PID 阻塞。这里没有恢复机器质量验收，也没有从任务文案或 id 前缀猜身份。
+- 直接相关 focused 回归已通过；文档、严格 gate、推送、单 Gateway 部署与 fresh r9 真 TUI 仍待完成。
+
 ## 2026-08-22 Prompt 4 r7：TUI 投影通过，弱化测试后误报完整（本地验证纪律候选）
 
 - `19d4cea` 已部署到 `.7` 唯一 Gateway；tmux `dsh-p4-lazygit-r7-ea91639` 在干净 cwd 对

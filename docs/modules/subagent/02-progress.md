@@ -1,5 +1,19 @@
 # Subagent Progress
 
+## 2026-08-22 r8 child 续跑权威与共享批次启动占位（本地候选）
+
+- r8 中一个 child 因模型响应截断回到 `PENDING`，但 task-local `background_start.pid` 是仍承载兄弟
+  runner 的共享 batch host，候选选择器因此长期认为该 child 已启动。child finalize 同时错误登记
+  `ordinary_task_resume(task_id=child, thread_id=root)`；BackgroundMain 以 root 工具和 child task id 运行，
+  改写 root Todo、创建不该存在的孙代理，并最终与真实 retry 并发执行同一个 child。
+- 对照 会话运行时 `control/spawn.rs`、`agent/status.rs` 与 `session/multi_agents.rs`：每个 child 有自己的
+  ThreadId/session，完成 watcher 只把 exact child 状态注入直属父级，不会让 root conversation 租用 child
+  task。当前候选让 `context_scope=task_local` finalize 只落断点；任何后台来源的 task id 若能从 canonical
+  SubAgentManager 精确加载，就在 root 模型调用前退役或无模型确认，不按 id 前缀或正文猜测。
+- runner 结果重新投影到 PENDING 时统一回收 exact run 的 launch record；共享宿主仍继续承载兄弟，不被
+  终止或改写。session lease 结束后的既有 `_continue_source_worker_after_session` 会立即调用 canonical
+  `auto_start_orphan_run`，周期 orphan sweep 只保留为崩溃恢复兜底。focused 回归通过，fresh r9 尚待部署。
+
 ## 2026-08-22 r7 真 TUI 投影通过，范围与验证软纪律候选
 
 - `19d4cea` 部署后的 r7 只输入一次原样 Prompt 4，7 名 child 全部自然 DONE；isolated thinking/context、

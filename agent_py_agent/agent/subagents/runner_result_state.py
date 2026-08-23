@@ -94,7 +94,7 @@ def apply_runner_result_fields(params: RunnerResultFieldParams) -> None:
     _apply_runner_timestamps(task, params.now)
     _apply_runner_attempt_fields(RunnerAttemptParams(task, dry_run, ok, message, params.now))
     _release_source_worker_lease_after_result(task, dry_run=dry_run)
-    _reclaim_source_worker_launch_if_requeued(task)
+    _reclaim_runner_launch_if_requeued(task)
     if ok and not dry_run:
         from ..ingestion.source_worker import record_source_worker_progress
 
@@ -358,18 +358,13 @@ def _source_worker_still_has_work(task: object) -> bool:
         return True
 
 
-# LLM: A background dispatch process may host several source workers.  One
-# worker can finish its bounded model turn while siblings keep that shared PID
-# alive.  Its task-level launch record is no longer active once the same
-# logical worker has been projected back to PENDING; reclaim that one record so
-# the canonical orphan dispatcher can resume it without waiting for every
-# sibling or for the generic stale-launch timeout.
-# 函数用途：来源工作者一轮结束但持久账本尚未完成时，立即释放本任务的启动占位，
-# 让同一 run 可续派；不终止共享宿主，也不影响同进程中的其他来源工作者。
-def _reclaim_source_worker_launch_if_requeued(task: object) -> None:
+# LLM: One background dispatch process may host several independent runners.
+# Once any accepted result projects its exact run back to PENDING, that run's
+# launch slot is over even if sibling threads keep the shared host PID alive.
+# Reclaim only the per-task record; never terminate or rewrite the shared host.
+# 函数用途：任一子代理本轮结束后若仍需续跑，立即释放它自己的启动占位，不再等同批兄弟结束。
+def _reclaim_runner_launch_if_requeued(task: object) -> None:
     if not task_has_status(task, TaskStatus.PENDING):
-        return
-    if not _source_worker_still_has_work(task):
         return
     from .process_control import reclaim_background_start
 

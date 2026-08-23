@@ -6,6 +6,18 @@
 `task_node_closeout` 副本。canonical task/result 是唯一结果事实源；父代理通过结构化 status、blockers、
 findings、artifact refs 和 result payload 阅读子代理工作，再由模型向用户汇总。
 
+## 2026-08-22 child runner 续跑所有权
+
+- canonical child task 与其独立 `agent_thread_id` 只由 child runner 续跑。task-local finalize 可以保存
+  transcript、Compact 和 runner 结果，但不得建立 root `ordinary_task_resume`；root BackgroundMain
+  收到 task id 能被 SubAgentManager 精确加载的历史 policy/wake 时，必须在模型调用前退役或无模型确认。
+- 一个后台 batch host 可以同时承载多个 runner，进程 PID 不是任一 child 的执行所有权。每个 runner
+  结果一旦把 exact run 投影回 `PENDING`，`runner_result_state.py` 只回收该 task 的
+  `background_start`；不终止共享进程、不碰兄弟记录。session lease 退出后由 canonical orphan auto-start
+  立即续派，周期监督只承担崩溃兜底。
+- 上述判断只读取 exact task id、canonical manager 与 typed context scope，不读 run id 前缀、模型正文、
+  Todo 或职责描述；因此它是身份/调度收口，不是任务质量验收或自然语言状态机。
+
 ## 2026-08-22 TUI/Web 共用活动投影
 
 - `conversation_agent_activity.v5` 是 owner/thread 认证后的只读展示 schema：main 只含 task id、phase、

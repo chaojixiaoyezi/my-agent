@@ -2048,6 +2048,136 @@ def test_periodic_policy_for_durable_audit_source_worker_is_retired(tmp_path) ->
     assert retired is not None and retired.enabled is False
 
 
+def test_subagent_owned_resume_policy_is_retired_without_root_model_turn(tmp_path) -> None:
+    from agent_py_agent.agent.conversation.runtime import (
+        _runnable_due_policies,
+        _snooze_suppressed_policies,
+    )
+
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    child = agent.subagents.create_run(
+        goal="继续完成子代理自己的模块",
+        thought="沿 child thread 续跑",
+        plan=["完成模块"],
+        parent_id="task-root",
+        root_id="task-root",
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-child-policy",
+            "channel_user_id": "user-1",
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": child.id,
+            "goal": child.goal,
+            "status": "active",
+        }
+    )
+    policy = store.set_progress_policy(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": child.id,
+            "interval_seconds": 60,
+            "now": 10.0,
+            "metadata": {
+                "kind": "ordinary_task_resume",
+                "tool": "task_round_resume",
+            },
+        }
+    )
+
+    runnable, suppressed = _runnable_due_policies(
+        store,
+        [policy],
+        now=71.0,
+        agent=agent,
+    )
+    rows = _snooze_suppressed_policies(
+        store,
+        suppressed,
+        now=71.0,
+        agent=agent,
+    )
+
+    assert runnable == []
+    assert suppressed == [(policy, "subagent_runner_owned_policy")]
+    assert rows[0]["reason"] == "subagent_runner_owned_policy"
+    retired = store.get_progress_policy(policy.policy_id)
+    assert retired is not None and retired.enabled is False
+
+
+def test_child_bound_wake_is_acknowledged_without_root_model_turn(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(
+            enable_tools=False,
+            memory_path="memory.jsonl",
+            orphan_supervision_interval_seconds=0,
+        ),
+        tmp_path,
+    )
+    backend = _CapturingBackend()
+    agent.backend = backend
+    child = agent.subagents.create_run(
+        goal="继续完成子代理自己的模块",
+        thought="沿 child thread 续跑",
+        plan=["完成模块"],
+        parent_id="task-root",
+        root_id="task-root",
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-child-wake",
+            "channel_user_id": "user-1",
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": child.id,
+            "goal": child.goal,
+            "status": "active",
+        }
+    )
+    store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "root_task_id": child.id,
+            "reason": "scheduled_progress_report",
+            "dedupe_key": f"legacy-child-resume:{child.id}",
+        }
+    )
+    scheduler = BackgroundMainAgentScheduler(
+        {
+            "runtime": BackgroundMainAgentRuntime(
+                agent=agent,
+                store=store,
+                channels=FakeDeliveryService(),
+            ),
+            "store": store,
+        }
+    )
+
+    reports = scheduler.tick(now=time.time())
+
+    assert len(reports) == 1
+    assert reports[0].delivery_reason == "subagent_runner_owns_continuation"
+    assert reports[0].wake_handled is True
+    assert backend.prompts == []
+    assert store.pending_wake_signals() == []
+
+
 def test_partial_successful_subagent_wake_stays_out_of_ordinary_chat_until_batch_finishes(
     tmp_path,
 ) -> None:

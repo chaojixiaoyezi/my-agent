@@ -43,6 +43,10 @@
   直属 child，并裁决直属 child 的能力申请。创建后由宿主自动启动，生命周期事件自动回到直属父级；
   模型不拥有查询、等待、巡场、手动推进或机器验收下级的工具。同批 child 之间不互相广播完整 goal，
   孙代理也只与自己的直接父级交换有界状态和 refs。
+- child 的 canonical task、独立 `agent_thread_id` 与 runner 是唯一续跑权威。task-local finalize 只保存
+  本 child 的断点，不得把它登记成 root `BackgroundMainAgentRuntime` 的普通任务；后台来源若精确解析到
+  child task，必须在模型调用前关闭并交回 child runner。共享 batch 进程只承载多个 runner，不拥有各 run
+  的启动租约；单个 run 返回 `PENDING` 后立即回收其 task-local launch record，再从同一 run 续派。
 - 会话运行时 式 cwd 与运行台账严格分离：Gateway/会话及其所有后代的普通相对路径统一从用户启动时的项目
   cwd 解析；隐藏 task root 只保存状态，只有显式 `work/...`、`output/...` 才进入内部任务命名空间。
   `allowed_write_roots` 只决定能否写，不能反向选择 cwd；只有宿主写入的 `execution_cwd` 可覆盖工具
