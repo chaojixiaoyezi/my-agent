@@ -524,6 +524,20 @@ def _settle_main_agent_run_exception(agent, params: RunParams, exc: BaseExceptio
     )
 
 
+# LLM: Authority binding replaces the transport attempt id with the RuntimeDB attempt id;
+# every caller must retain the returned params through execution, exception closeout,
+# Compact continuation, and final closeout.  Dropping the replacement recreates a stale-attempt
+# closeout and leaves the root active forever.
+# 函数用途: 为一次主代理模型回合选定任务工作区并绑定数据库权威 attempt，返回值必须贯穿整轮。
+def _bind_main_agent_turn_params(
+    agent,
+    user_prompt: str,
+    params: RunParams,
+) -> RunParams:
+    attached = attach_run_task_workspace_context(agent, params, user_prompt)
+    return _bind_main_agent_authority(agent, attached)
+
+
 # LLM: 顶层运行和所有自动 Compact 续接共用这一返回缝隙；只有最终不再续接时才能投影 standalone 终态。
 # 函数用途: 执行一次完整请求，必要时续接 Compact，并在真正结束时收尾任务工作区。
 def _run_with_params(agent, user_prompt: str, params: RunParams):
@@ -533,7 +547,7 @@ def _run_with_params(agent, user_prompt: str, params: RunParams):
     # Public ``my-agent run`` is single-shot, but its exact user input must already exist in
     # ConversationStore before remember or Curator can claim message evidence.
     current_params = bind_cli_run_conversation(agent, current_params, user_prompt)
-    current_params = attach_run_task_workspace_context(agent, current_params, user_prompt)
+    current_params = _bind_main_agent_turn_params(agent, user_prompt, current_params)
     result = _run_once_with_params(agent, user_prompt, current_params)
     while True:
         decision = compact_auto_continuation_decision(
@@ -550,6 +564,11 @@ def _run_with_params(agent, user_prompt: str, params: RunParams):
                 decision.injection,
                 result,
                 released_active_turn_input_ids=released_input_ids,
+            )
+            next_params = _bind_main_agent_turn_params(
+                agent,
+                decision.user_prompt,
+                next_params,
             )
             continued = _run_once_with_params(agent, decision.user_prompt, next_params)
             result = mark_compact_auto_continued(
@@ -598,8 +617,9 @@ def _log_run_stage(
 def _run_once_with_params(agent, user_prompt: str, params: RunParams):
     _run_stage_started = time.monotonic()
     _log_run_stage("run_started", params)
-    params = attach_run_task_workspace_context(agent, params, user_prompt)
-    params = _bind_main_agent_authority(agent, params)
+    # ``_run_with_params`` has already replaced any Gateway/CLI transport attempt
+    # with the exact RuntimeDB attempt.  Keep this function execution-only so the
+    # caller retains the same params object for final settlement.
     root_user_prompt = params.root_user_prompt or user_prompt
     with current_prompt_scope(agent, user_prompt, params):
         if agent.config.enable_tools:

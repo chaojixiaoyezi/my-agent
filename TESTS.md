@@ -719,3 +719,17 @@ harness 的离线结果冒充真实模型结果。
 ```bash
 python3 -m pytest agent_py_agent/tests/test_model_call_ledger.py agent_py_agent/tests/test_conversation_store.py agent_py_agent/tests/test_memory_runtime_basics.py::test_run_no_save_still_persists_thread_model_usage_without_runtime_archive agent_py_agent/tests/test_gateway_chat_conversation_context.py::test_gateway_response_does_not_fall_back_to_suppressed_internal_result -q --tb=short
 ```
+
+Gateway 主代理 attempt 贯穿回归必须覆盖两条真实失败同族：入口的 `gateway-attempt-*` 只能是 transport
+身份，执行和收口使用 `_bind_main_agent_authority` 返回的 exact RuntimeDB attempt；发生自动 Compact 时，
+最终收口必须使用最新 generation。两条路径都要求 root run/current attempt 真实终态、`ended_at>0`，且不得
+出现 `closeout_blocked(reason=stale_attempt)`：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_r103_run_reuse_no_split.py -q --tb=short
+```
+
+`.7` 真机复验继续只用唯一 Gateway、MiniMax-M2.7、全新 cwd/tmux，并只提交一次本文件原样 Prompt 4。
+验收不能靠 TUI 的“整理结果中”：必须同时证明首轮 root attempt 已结束，最后一名 child 的 durable wake
+从 pending 进入 handled，后台 main 创建下一代 attempt 并发生真实模型用量/typed transcript 前进；测试者
+不得追加“继续”、手工改状态或旁路消费 wake。

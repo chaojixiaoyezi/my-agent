@@ -16,10 +16,12 @@ generation）；未登记 → 新建。子代理路径（current_subagent_run_id
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.agent_core import runtime_mixin
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.agent_core.runtime_mixin import _bind_main_agent_authority
 from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
@@ -156,3 +158,160 @@ def test_resume_after_terminal_main_run_reuses_same_run(repo):
     assert len(runs) == 1, f"终态重跑必须复用原 run，实际分裂为 {len(runs)} 棵"
     assert bound.attempt_id != first["attempt_id"]
     assert len(repo.task_runs_for_task(task_id)) == 1
+
+
+def test_gateway_transport_attempt_is_replaced_before_root_closeout(repo, monkeypatch):
+    """Gateway 外层 attempt 不能覆盖 RuntimeDB 权威 attempt；正常返回必须关闭后者。"""
+    task_id = "gwreq-authority-closeout"
+    agent = _agent(repo)
+    observed: dict[str, str] = {}
+
+    monkeypatch.setattr(
+        runtime_mixin,
+        "bind_cli_run_conversation",
+        lambda _agent, params, _prompt: params,
+    )
+    monkeypatch.setattr(
+        runtime_mixin,
+        "attach_run_task_workspace_context",
+        lambda _agent, params, _prompt: params,
+    )
+
+    def fake_run_once(_agent, _prompt, params):
+        observed["attempt_id"] = params.attempt_id
+        return SimpleNamespace(
+            runtime_status="ok",
+            runtime_reason="",
+            runtime_source="gateway",
+            tool_rounds=1,
+            response="已启动子代理。",
+        )
+
+    monkeypatch.setattr(runtime_mixin, "_run_once_with_params", fake_run_once)
+    monkeypatch.setattr(
+        runtime_mixin,
+        "compact_auto_continuation_decision",
+        lambda _result, depth: SimpleNamespace(should_continue=False),
+    )
+    monkeypatch.setattr(runtime_mixin, "finish_run_task_workspace_if_needed", lambda *_: None)
+    monkeypatch.setattr(runtime_mixin, "persist_cli_run_assistant", lambda *_: None)
+
+    result = runtime_mixin._run_with_params(
+        agent,
+        "只负责盯着多个子代理完成任务。",
+        RunParams(
+            request_id=task_id,
+            run_id=task_id,
+            task_id=task_id,
+            attempt_id="gateway-attempt-transport-only",
+            root_user_prompt="只负责盯着多个子代理完成任务。",
+            source="gateway",
+        ),
+    )
+
+    run = repo.main_agent_run_for_task(task_id)
+    assert run is not None
+    authoritative_attempt_id = str(run["current_attempt_id"])
+    assert observed["attempt_id"] == authoritative_attempt_id
+    assert authoritative_attempt_id != "gateway-attempt-transport-only"
+    assert str(run["status"]) == "done"
+    attempt = repo.current_attempt(str(run["agent_run_id"]))
+    assert attempt is not None
+    assert str(attempt["status"]) == "done"
+    assert float(attempt["ended_at"] or 0) > 0
+    assert result.runtime_status == "ok"
+
+    with repo.transaction() as conn:
+        blocked = conn.execute(
+            "SELECT COUNT(*) AS count FROM runtime_events "
+            "WHERE agent_run_id = ? AND event_type = 'closeout_blocked'",
+            (str(run["agent_run_id"]),),
+        ).fetchone()
+    assert int(blocked["count"] or 0) == 0
+
+
+def test_compact_continuation_closeout_uses_latest_authoritative_attempt(repo, monkeypatch):
+    """Compact 续接换代后，最终收口必须使用新 generation，而非入口 transport id。"""
+    task_id = "gwreq-compact-authority-closeout"
+    agent = _agent(repo)
+    observed_attempts: list[str] = []
+
+    monkeypatch.setattr(
+        runtime_mixin,
+        "bind_cli_run_conversation",
+        lambda _agent, params, _prompt: params,
+    )
+    monkeypatch.setattr(
+        runtime_mixin,
+        "attach_run_task_workspace_context",
+        lambda _agent, params, _prompt: params,
+    )
+
+    def fake_run_once(_agent, _prompt, params):
+        observed_attempts.append(params.attempt_id)
+        status = "context_overflow" if len(observed_attempts) == 1 else "ok"
+        return SimpleNamespace(
+            runtime_status=status,
+            runtime_reason="",
+            runtime_source="gateway",
+            tool_rounds=len(observed_attempts),
+            response="继续" if status == "context_overflow" else "本轮结束。",
+        )
+
+    monkeypatch.setattr(runtime_mixin, "_run_once_with_params", fake_run_once)
+    monkeypatch.setattr(
+        runtime_mixin,
+        "compact_auto_continuation_decision",
+        lambda result, depth: SimpleNamespace(
+            should_continue=result.runtime_status == "context_overflow",
+            injection="compact checkpoint",
+            user_prompt="继续上一轮",
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_mixin,
+        "release_active_turn_inputs_for_compact",
+        lambda *_: (),
+    )
+    monkeypatch.setattr(
+        runtime_mixin,
+        "_compact_auto_continue_params",
+        lambda params, _injection, _result, released_active_turn_input_ids=(): replace(
+            params,
+            attempt_id="gateway-attempt-compact-transport",
+            continuation_seq=1,
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_mixin,
+        "mark_compact_auto_continued",
+        lambda continued, _previous, depth: continued,
+    )
+    monkeypatch.setattr(runtime_mixin, "finish_run_task_workspace_if_needed", lambda *_: None)
+    monkeypatch.setattr(runtime_mixin, "persist_cli_run_assistant", lambda *_: None)
+
+    result = runtime_mixin._run_with_params(
+        agent,
+        "执行长任务。",
+        RunParams(
+            request_id=task_id,
+            run_id=task_id,
+            task_id=task_id,
+            attempt_id="gateway-attempt-initial-transport",
+            root_user_prompt="执行长任务。",
+            source="gateway",
+        ),
+    )
+
+    run = repo.main_agent_run_for_task(task_id)
+    assert run is not None
+    attempts = repo.attempts_for_run(str(run["agent_run_id"]))
+    assert len(observed_attempts) == 2
+    assert len(attempts) == 2
+    assert observed_attempts[0] == str(attempts[0]["attempt_id"])
+    assert observed_attempts[1] == str(attempts[1]["attempt_id"])
+    assert observed_attempts[0] != observed_attempts[1]
+    assert str(run["current_attempt_id"]) == observed_attempts[1]
+    assert str(run["status"]) == "done"
+    assert str(attempts[1]["status"]) == "done"
+    assert result.runtime_status == "ok"

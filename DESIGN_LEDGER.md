@@ -1292,3 +1292,25 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   写成 blocked，又被 conversation lifecycle gate 阻止续派的自相矛盾。
 - 展示层不再复用模型生成的 parsed status 作为终态活动短句。`current_step/current_tool` 由
   typed task status/failure type 投影，生命周期和权限不读取这些中文展示文案。
+
+## 2026-08-24 Gateway 主代理权威 attempt 贯穿回合收口
+
+状态：根因已由 `.7` 原样 Prompt 4 真 TUI 与 RuntimeDB 事件共同确认；本地 focused 回归已通过，待发布后
+用全新 TUI 复验最后一名 child 完成会自然唤醒 main。
+
+- 真实失败链：Gateway transport attempt 与 RuntimeDB AgentAttempt 是两个不同身份。主代理入口已把
+  `gateway-attempt-*` 替换为 `attempt-*` 并用后者执行工具，但 `_run_with_params` 丢弃了替换后的
+  `RunParams`，正常返回仍拿 transport id 调用 closeout。RuntimeDB 因而正确记录
+  `closeout_blocked(reason=stale_attempt)`，root run/attempt 永久停在 `created/running`；三个 child 虽均有
+  typed completion，最终 wake 也已落盘，后台仍不能合法续挂。TUI 的“整理结果中”只是由 child 状态推导的
+  假活跃，不代表存在模型调用。
+- 生命周期合同：任务工作区选择与 `_bind_main_agent_authority` 必须在每个物理模型片段执行前完成，返回的
+  exact params 必须贯穿该片段的异常收口、Compact 换代、最终收口和后续持久化。`_run_once_with_params`
+  只执行已经绑定的片段，不得在局部变量里偷偷替换 attempt 后让调用方继续持有旧身份。
+- Compact 续接同样适用：每次 generation 换代先取得新的 RuntimeDB attempt，最终只关闭最新 exact
+  attempt；transport id、上一代 attempt 或 thread id 都不能冒充执行权。终态 main run 仍可由下一条 typed
+  wake 显式创建新 attempt。这与 会话运行时 `会话运行时-rs/core/src/session/turn.rs` 的同一 active turn 循环及
+  `会话运行时-rs/core/src/session/tests.rs::task_finish_emits_thread_idle_lifecycle_after_active_turn_clears` 的
+  typed TurnComplete→清除 active turn→thread idle 边界一致。
+- 安全边界不放宽：stale-attempt CAS、unknown recovery block、单 thread claim 与客观副作用锁继续
+  fail closed。本修复只让执行者携带正确身份收口，不允许调度器忽略冲突，也不消费或伪造历史 wake。

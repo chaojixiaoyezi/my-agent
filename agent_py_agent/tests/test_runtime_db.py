@@ -80,11 +80,16 @@ def test_runtime_events_append_only_never_rewritten(repo):
         agent_run_id=run["agent_run_id"],
         payload={"tool": "bash"},
     )
-    # A.8：事件必须追到 attempt；seq 单调；按追加顺序读出。
+    # A.8：事件必须追到 attempt；seq 单调；按追加顺序读出。create_attempt
+    # 会先留下 typed agent_run.started，后续工具事件只能追加在它之后。
     assert first["seq"] < second["seq"]
     events = repo.events_for_attempt(attempt["attempt_id"])
-    assert [item["event_type"] for item in events] == ["tool.open", "tool.close"]
-    assert events[0]["payload"] == {"tool": "bash"}
+    assert [item["event_type"] for item in events] == [
+        "agent_run.started",
+        "tool.open",
+        "tool.close",
+    ]
+    assert events[1]["payload"] == {"tool": "bash"}
 
 
 # ------------------------------------------------------------ A.4/A.5 主链
