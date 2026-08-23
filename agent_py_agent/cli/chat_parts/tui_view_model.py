@@ -576,15 +576,18 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
         # task_progress 工具: 更新 todo 面板块(□/☑/● 自动打钩)
         self._consume_task_progress_items(event)
 
-    # LLM: gateway 对同一工具调用会发 started→…→终态多条 tool_progress 事件，
-    # 终态（phase=finished/completed）被 TUI adapter 路由成 tool_completed（只走
-    # terminal，不走 progress）。task_progress 的 items 只挂在终态事件上
-    # （S-TP1 真机实锤），所以 terminal 也必须消费，否则 todo 面板永远无数据。
-    # 函数用途: 从任意工具事件里消费 task_progress items 并更新 todo 面板。
+    # LLM: task_progress_items is a replace-all snapshot. An absent/wrongly typed
+    # field preserves the prior projection, while an explicit empty list removes
+    # it; this distinction prevents completed background tasks leaving stale Todo.
+    # 函数用途: 用结构化快照替换 Todo；明确空列表会收起旧清单。
     def _consume_task_progress_items(self, event: TuiEvent) -> None:
         items = event.payload.get("task_progress_items")
-        if isinstance(items, list) and items:
-            self._update_todo_block(items, event.seq)
+        if not isinstance(items, list):
+            return
+        if not items:
+            self.active_blocks.pop("todo:task_progress", None)
+            return
+        self._update_todo_block(items, event.seq)
 
     # LLM: todo 面板是 task_progress 账本的持续投影; 每次 items 更新替换整块
     # (block 内容即快照, 不增量合并, 避免跨轮残留旧项)。

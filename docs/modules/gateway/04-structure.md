@@ -51,7 +51,8 @@ audit Agent 为空而回退 daemon cwd。
 - `TuiRuntime`、reducer 和 renderer 只维护一个 session-scoped `background` 活动块。前台 thinking 优先，
   前台让出后在 composer 附近显示灰色闪动 Working 标题、实时 main context、Todo 与直属 child 行；真实
   root 计数归零时删除 Working/child。最终后台 notice 会先携带最后一份 Todo 快照再显示 assistant final，
-  因而完成勾选不会随 active link 收口一起丢失。整个区域不进入 transcript，也没有调度、重试、停止或
+  因而完成勾选不会随 active link 收口一起丢失。Todo 快照采用 replace-all：字段缺失保留旧投影，明确
+  空列表收起旧清单；后者只清 UI，不删除账本。整个区域不进入 transcript，也没有调度、重试、停止或
   完成裁决权。
 - Todo 默认是四条状态窗口：最近完成、全部当前运行项和下一待办按优先级占位，超出部分由 `Ctrl+T`
   展开。运行项复用 Working 的全局动画帧；该本地展开状态不写回账本。常驻 Context 只显示总量、窗口占比、

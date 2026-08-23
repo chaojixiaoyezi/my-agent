@@ -319,6 +319,7 @@ class _TuiBackgroundActivityController:
         self._main_activity: dict[str, object] = {}
         self._subagents: tuple[dict[str, object], ...] = ()
         self._task_progress_items: tuple[dict[str, object], ...] = ()
+        self._task_progress_known = False
         self._hidden_subagent_count = 0
         self._compact_count = 0
 
@@ -351,6 +352,7 @@ class _TuiBackgroundActivityController:
                 next_main_activity: dict[str, object] = {}
                 next_subagents: tuple[dict[str, object], ...] = ()
                 next_task_progress_items = self._task_progress_items
+                next_task_progress_known = self._task_progress_known
                 next_hidden_count = 0
             else:
                 next_main_activity = (
@@ -364,16 +366,20 @@ class _TuiBackgroundActivityController:
                 else:
                     next_subagents = self._subagents
                     next_hidden_count = self._hidden_subagent_count
-                next_task_progress_items = (
-                    _normalize_task_progress_items(task_progress_items)
-                    if task_progress_projection_ok and task_progress_items is not None
-                    else self._task_progress_items
-                )
+                if task_progress_projection_ok and task_progress_items is not None:
+                    next_task_progress_items = _normalize_task_progress_items(
+                        task_progress_items
+                    )
+                    next_task_progress_known = True
+                else:
+                    next_task_progress_items = self._task_progress_items
+                    next_task_progress_known = self._task_progress_known
             if (
                 count == self._count
                 and next_main_activity == self._main_activity
                 and next_subagents == self._subagents
                 and next_task_progress_items == self._task_progress_items
+                and next_task_progress_known == self._task_progress_known
                 and next_hidden_count == self._hidden_subagent_count
                 and next_compact_count == self._compact_count
             ):
@@ -389,6 +395,7 @@ class _TuiBackgroundActivityController:
             self._main_activity = next_main_activity
             self._subagents = next_subagents
             self._task_progress_items = next_task_progress_items
+            self._task_progress_known = next_task_progress_known
             self._hidden_subagent_count = next_hidden_count
             self._compact_count = next_compact_count
             context_usage = next_main_activity.get("context_usage")
@@ -402,9 +409,10 @@ class _TuiBackgroundActivityController:
                     "started_at": self._started_at,
                     "main_activity": dict(next_main_activity),
                     "subagents": [dict(row) for row in next_subagents],
-                    "task_progress_items": [
-                        dict(row) for row in next_task_progress_items
-                    ],
+                    **_task_progress_payload(
+                        next_task_progress_items,
+                        known=next_task_progress_known,
+                    ),
                     "hidden_subagent_count": next_hidden_count,
                     **(
                         {"context_usage": dict(context_usage)}
@@ -506,6 +514,20 @@ def _normalize_task_progress_items(value: object) -> tuple[dict[str, object], ..
     )
 
 
+# LLM: Snapshot presence and snapshot contents are separate protocol facts. Keep
+# the field absent until a valid projection exists, but retain an explicit empty
+# list so the reducer can clear stale state.
+# 函数用途: 生成 Todo 快照事件字段，并保留“没数据”和“明确为空”的区别。
+def _task_progress_payload(
+    items: tuple[dict[str, object], ...],
+    *,
+    known: bool,
+) -> dict[str, object]:
+    if not known:
+        return {}
+    return {"task_progress_items": [dict(row) for row in items]}
+
+
 # LLM: Periodic animation is enabled only by typed task_progress status; titles and
 # display prose must never keep the render clock alive.
 # 函数用途: 判断 Todo 快照是否含正在执行项，避免纯待办或已完成清单持续空转刷新。
@@ -583,13 +605,16 @@ class _TuiBackgroundActivityRuntimeMixin:
         )
 
     # LLM: A final background notice may arrive after the active-task block was
-    # removed. This emits one typed Todo snapshot without recreating Working.
-    # 函数用途: 在后台最终回复显示前补上最后一次清单勾选状态。
+    # removed. A typed empty sequence is an authoritative clear, while a value
+    # of the wrong type is absent/invalid and must not disturb the last snapshot.
+    # 函数用途: 在后台最终回复显示前替换清单；明确空清单会清掉过期 Todo。
     def publish_task_progress_snapshot(self, items: object) -> bool:
-        normalized = _normalize_task_progress_items(items)
-        if not normalized:
+        if not isinstance(items, list | tuple):
             return False
+        normalized = _normalize_task_progress_items(items)
         with self._lock:
+            self._background_activity._task_progress_items = normalized
+            self._background_activity._task_progress_known = True
             self._publish(
                 "task_progress_snapshot",
                 "updated",

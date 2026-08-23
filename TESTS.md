@@ -562,6 +562,9 @@ main 的后台 context 也必须来自同一次 `model_visible_context_usage.v1`
 Todo 与 child panel 必须按结构化身份去重：`item.id` 精确等于当前直属 `child.run_id` 的自动 seed 项只在
 TUI 隐藏，canonical task_progress 账本不删除；普通 Todo 和显式 `covers/progress_item_ids` 仍显示并打标。
 禁止匹配“子代理”标题或 goal 文本来决定隐藏。
+Todo 快照还必须区分“未提供”和“明确为空”：前者保留上一份有效清单，后者删除
+`todo:task_progress` 活动块。最终后台 notice 只有 exact child seed、因此投影为空时，也必须在 assistant final
+出现前清掉旧 `0/N`；不能把空列表误当成网络失败，也不能因此改写 canonical `task_progress.v1`。
 Todo 超过四项时，默认投影必须恰好保留四条任务行：最近完成、typed `in_progress` 和下一条
 `pending/blocked` 按状态优先；多个运行项优先占位，运行图标与 Working 共用动画时钟。`Ctrl+T` 展开后
 显示全部 canonical 顺序，再按一次收起；该按键不得编辑或提交输入、不得写 task_progress。常驻 Context

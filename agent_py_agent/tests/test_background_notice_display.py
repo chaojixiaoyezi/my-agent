@@ -579,6 +579,11 @@ def test_runtime_background_activity_is_one_removable_animated_block() -> None:
         "done",
     ]
     assert runtime.needs_periodic_refresh() is False
+    assert runtime.publish_task_progress_snapshot(None) is False
+    assert runtime.publish_task_progress_snapshot([]) is True
+    assert not any(
+        block.role == "todo" for block in runtime.store.snapshot().active_blocks
+    )
 
 
 def test_long_main_activity_stays_on_one_terminal_line() -> None:

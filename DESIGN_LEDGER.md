@@ -950,6 +950,9 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - Todo 默认折叠对照 终端交互 `TaskListV2` 的状态优先窗口，但固定为 4 条：最近完成、当前运行和下一待办
   依次占位；多个运行项优先保留，运行图标复用全局 Working 动画。`Ctrl+T` 只是进程内展开开关，不能重排
   或写回 `task_progress.v1`。
+- Todo 更新是 replace-all 快照，不是增量补丁：字段缺失或投影失败时保留上一份有效画面；结构化空列表则
+  明确收起旧 Todo。该语义对照 终端交互 `TodoWriteTool` 在全部完成后把展示清单置空，解决最终 notice
+  已到达却残留旧 `0/N` child seed 清单的问题；空列表仍然只影响 TUI 投影，不删除 canonical 账本。
 - Prompt 3 真机还锁定一条工具结果边界：shell 识别到模型试图直接读取内部 child 状态路径时，安全规则在
   启动进程前返回 `WRONG_STATUS_SURFACE`；这一结果必须显式携带 `effect_outcome=not_started`。这与
   会话运行时 的执行前校验错误经 `FunctionCallError::RespondToModel` 返回当前模型继续改参一致。它只解除
