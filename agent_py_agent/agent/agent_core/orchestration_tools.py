@@ -61,6 +61,10 @@ from .orchestration.lifecycle import (
     CreatedSubagentLifecycleRequest,
     publish_created_subagents,
 )
+from .orchestration.planned_delegation import (
+    PLANNED_DELEGATION_ERROR_CODE,
+    planned_delegation_failure,
+)
 from .orchestration.replacements import record_create_replacements
 from .orchestration.shared_context import append_parent_shared_context
 from .orchestration.tool_grants import (
@@ -109,6 +113,27 @@ class ValidateSingleGoalRequest:
     params: dict[str, object]
     goal: str
     allowed_tools: list[str] | None
+
+
+# LLM: The plan/write-set preflight must finish before create_run/save/publish.
+# Its failure is an atomic, explicitly not-started tool result and never changes
+# task progress, child lifecycle, user constraints, or completion state.
+# 函数用途: 把计划内派工校验失败包装成模型可直接修正参数后重试的结构化回执。
+def _planned_delegation_result(
+    agent: SimpleAgent,
+    items: list[CreateSubagentItem],
+    allowed_tool_values: list[list[str] | None],
+) -> ToolHandlerOutcome | None:
+    failure = planned_delegation_failure(agent, items, allowed_tool_values)
+    if failure is None:
+        return None
+    return ToolHandlerOutcome(
+        "create_subagents",
+        False,
+        json.dumps(failure, ensure_ascii=False, indent=2),
+        error_code=PLANNED_DELEGATION_ERROR_CODE,
+        effect_outcome="not_started",
+    )
 
 
 # LLM: Every system-named item-shaped request, including a one-item batch,
@@ -202,7 +227,7 @@ class CreateSubagentsTool(BaseTool):
 
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         if current_subagent_run_id(self.agent):
-            nested_params = _nested_create_params(params)
+            nested_params = _nested_create_params(self.agent, params)
             if isinstance(nested_params, ToolHandlerOutcome):
                 return nested_params
             return execute_child_creation(
@@ -217,6 +242,7 @@ class CreateSubagentsTool(BaseTool):
 # converts the public batch shape into the hierarchy service's structured children list.
 # 函数用途: 把子代理发来的统一 create_subagents 参数转换为下一层创建参数。
 def _nested_create_params(
+    agent: SimpleAgent,
     params: dict[str, object],
 ) -> dict[str, object] | ToolHandlerOutcome:
     goal = str(params.get("goal") or "").strip()
@@ -235,7 +261,12 @@ def _nested_create_params(
             items,
             error_code="TOOL_INVALID_ARGUMENTS",
         )
-    children = [dict(item.params) for item in items] if items else [dict(params)]
+    delegated_items = items or [CreateSubagentItem(goal=goal, params=dict(params))]
+    autobind_covers_from_goal_ids(agent, delegated_items)
+    allowed_tool_values = [subagent_allowed_tools(item.params) for item in delegated_items]
+    if invalid := _planned_delegation_result(agent, delegated_items, allowed_tool_values):
+        return invalid
+    children = [dict(item.params) for item in delegated_items]
     for child in children:
         child.pop("items", None)
     return {
@@ -318,10 +349,19 @@ def _execute_create_subagents(agent: SimpleAgent, params: dict[str, object]) -> 
             relation_error,
             error_code="TOOL_INVALID_ARGUMENTS",
         )
+    single_items = [
+        CreateSubagentItem(
+            goal=str(related_params.get("goal") or "").strip(),
+            params=related_params,
+        )
+    ]
+    autobind_covers_from_goal_ids(agent, single_items)
     prepared = _prepare_single_mode(agent, related_params)
     if isinstance(prepared, ToolHandlerOutcome):
         return prepared
     allowed_tools, run_params = prepared
+    if invalid := _planned_delegation_result(agent, single_items, [allowed_tools]):
+        return invalid
     run_params = _indexed_single_run_params(agent, run_params)
     task_params = [run_params]
     if conflict := _output_scope_conflict_result(agent, task_params):
@@ -453,6 +493,8 @@ def _execute_items(
     # (纯 id token 对账;显式 covers 一字不动),covers 经属性白名单随任务落 canonical。
     autobind_covers_from_goal_ids(agent, capped)
     allowed_tool_values = [subagent_allowed_tools(item.params) for item in capped]
+    if invalid := _planned_delegation_result(agent, capped, allowed_tool_values):
+        return invalid
     validation = _validate_items(agent, capped, allowed_tool_values)
     if validation:
         return ToolHandlerOutcome("create_subagents", False, validation, error_code="TOOL_INVALID_ARGUMENTS")

@@ -1,5 +1,18 @@
 # Subagent Progress
 
+## 2026-08-22 r12b 计划内派工创建前原子合同（本地候选）
+
+- `5f1f485` 部署后的 fresh r12b 已证明 root active turn、原任务、语言和嵌套工具参数跨 child wake 连续；
+  新失败是 root 在已有 Todo 时创建 child 仍漏 `covers`，并把兄弟项目目录只写进 goal。旧入口先保存并
+  启动 child，写边界才拒绝，形成 capability 阻塞和 main 反复越界 grant。
+- 新 `orchestration/planned_delegation.py` 只读取 canonical plan、typed role/tool grant、逐 item
+  `covers/output_files` 和父级结构化 workspace。在 create/save/publish 前一次性拒绝漏绑、未知/关闭/
+  重复 id、直接编码 child 缺写入集合和越界目录，返回 `effect_outcome=not_started` 的结构化 repairs；
+  整批不留半个 run。批内与既有 active child 的目录相同或存在父子覆盖，也沿现有输出锁原子拒绝。
+- 这不是恢复机器验收：没有计划的轻量派工不受影响；read-only、tester、coordinator 等不直接拥有产品
+  写集合的 typed role 不被强制声明代码目录；宿主不读 goal/标题/LOC/测试数量，不推进 Todo、不决定完成。
+  205 项 focused 回归已通过，仍需严格 gate、部署和 fresh r13 原样 Prompt 4。
+
 ## 2026-08-22 r10 completion wake active-turn 断点（本地候选）
 
 - `0c6c916` 部署后的 fresh r10 已证明默认 Markdown 假合同消失；两名 Rust child 通过 typed completion

@@ -1,5 +1,22 @@
 # STATUS
 
+## 2026-08-22 Prompt 4 r12b：active-turn 连续性通过，漏绑计划与兄弟目录把 child 拖入权限死路（本地修复候选）
+
+- `5f1f485` 已通过严格 gate、推送并部署到 `.7` 唯一 Gateway。fresh tmux
+  `dsh-p4-lazygit-r12b-ea91639` 在固定 `jesseduffield/lazygit@ea916395` 上只输入一次原样 Prompt 4；本地
+  基线为 957 个非测试 Go 文件、91,073 行功能代码、118 个测试文件和 368 个测试函数。
+- native active-turn handoff 已实锤：child wake 后 root 仍保持原始完整复刻目标、用户禁止 main 写功能代码
+  的边界和既定语言，嵌套 Todo/派工参数也没有再变成空数组。该轮的新失败发生在 child 真正创建之前：
+  首批 5 项先被容量合同原子拒绝，root 改成 4 项后没有传 `covers`，旧运行时仍允许创建；它又把目标项目
+  写到当前源码目录的兄弟目录，只放进 goal，没有形成结构化写入授权。child 随后全部被写边界挡住，main
+  反复尝试不能批准的越界 grant，后来还改换语言和目录，现场已用 `/stop` 收口。
+- 当前本地候选对照 会话运行时 分离的 plan/spawn 合同，在任何 run 保存前统一校验：已有 Todo 时每项必须绑定
+  独占、仍 open 的 exact `covers`；有写工具且直接写产品代码的 item 必须声明父级 workspace 内互不重叠
+  的 `output_files`。未知/关闭/重复 id、漏写入集合和兄弟目录越界都整批返回
+  `SUBAGENT_PLANNED_DELEGATION_INVALID + effect_outcome=not_started + required_repairs`，零 child 落盘；
+  同批目录与其子路径也视为写冲突。该门不读自然语言、不做质量验收、不替 Todo 判完成。205 项 focused
+  回归已通过，仍待严格 gate、推送、单 Gateway 部署和 fresh r13 原样 Prompt 4。
+
 ## 2026-08-22 Prompt 4 r11：原任务保持，但 carried 工具参数与原生历史仍断档（本地修复候选）
 
 - `a190378` 已通过严格 gate、推送并部署到 `.7` 唯一 Gateway。fresh tmux

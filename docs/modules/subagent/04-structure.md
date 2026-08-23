@@ -390,6 +390,12 @@ handoff 的 run 保持可读，但新创建/重新合并的 takeover 必须补�
 `create_subagents` 是所有层级唯一的创建入口，负责结构化目标、路径、写入安全和 lineage，并在创建后由
 宿主自动启动 child。业务质量要求可以随自然语言目标传递，但不能变成启动或结束硬门；父代理读取真实
 结果和 refs 后，自然决定汇总、补充 guidance、取消或再创建一个明确分工的 child。
+当前代理已有 canonical `task_progress` 计划时，创建入口先运行同一份 `planned_delegation` 预检：每个
+item 的 `covers` 必须引用仍 open 的 exact id，且一个 id 不能被同批多个 child 占用；具备写工具并由 typed
+role 直接产出产品代码的 item，还必须声明本次 `output_files` 写入集合。未知、已关闭、重复、漏声明或
+越出直接父级 workspace 的批次在 create/save/publish 前整体返回 `not_started`，不留下半创建状态。
+预检不读 goal 或 Todo 标题，不判断交付质量、代码量和完成状态；没有 canonical 计划的普通轻量派工沿原
+入口运行。read-only、tester、coordinator 等不直接拥有产品写集合的角色继续使用各自既有合同。
 用户明确的保存路径应通过顶层或逐 item 的 `output_files` 记录交付和锁；普通 child 的权限上界来自父级
 workspace，goal 或 output_files 都不能扩大到该上界之外。
 对 local/unmanaged owner，若该 inherited workspace 同时是结构化 allowed root，创建时会移除
@@ -420,7 +426,8 @@ findings 渲染成占位文件。唯一允许的收尾复制是 `output_delivery
 
 `create_subagents` 的模型入口只有单 `goal` 和明确 `items` 两种形态，不克隆同一份任务。
 多个 child 必须在 `items` 里声明不同工作；需要精确写不同业务文件时，每个 item 显式声明
-自己的输出路径。顶层交付目标归父任务，不会暗中复制到所有 child。
+自己的输出路径。相同目录以及目录与其子路径属于同一个写入集合，不能分给并行 child。顶层交付目标归
+父任务，不会暗中复制到所有 child。
 
 ## 2026-06-10 Facade 清理
 

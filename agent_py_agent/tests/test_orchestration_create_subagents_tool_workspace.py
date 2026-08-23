@@ -622,6 +622,34 @@ class TestCreateSubagentsToolWorkspaceRefs:
         assert payload["error_code"] == "SUBAGENT_OUTPUT_SCOPE_CONFLICT"
         assert mock_agent.subagents.create_run.call_count == 0
 
+    def test_items_mode_rejects_parent_child_output_scope_overlap(self):
+        """目录与其下文件属于同一写入集合，不能被两个并行 child 分别占用。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = _mock_create_items_agent(task_count=2)
+
+        result = CreateSubagentsTool(mock_agent).execute({
+            "goal": "并行实现端口",
+            "items": [
+                {
+                    "goal": "实现整个核心目录。",
+                    "output_files": ["port/core/"],
+                    "agent_name": "core-owner",
+                },
+                {
+                    "goal": "实现核心配置。",
+                    "output_files": ["port/core/config.py"],
+                    "agent_name": "config-owner",
+                },
+            ],
+        })
+
+        payload = json.loads(result.output)
+        assert result.ok is False
+        assert payload["error_code"] == "SUBAGENT_OUTPUT_SCOPE_CONFLICT"
+        assert payload["proposed_conflicts"][0]["conflicting_output_ref"].endswith("/port/core")
+        assert mock_agent.subagents.create_run.call_count == 0
+
     def test_items_mode_preserves_long_sibling_output_refs_as_read_hints(self):
         """长路径 sibling 输出也只作为读线索，缺失时由 runner 继续处理。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool

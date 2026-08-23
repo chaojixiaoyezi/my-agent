@@ -658,3 +658,81 @@ def test_autobind_echoed_in_binding_receipt(tmp_path):
     binding = dispatch_coverage_binding(_agent(tmp_path), [task])
     assert binding["bound"] == {"sub-1": ["req-01"]}
     assert binding["auto_bound_from_goal"] == {"sub-1": ["req-01"]}
+
+
+def test_planned_dispatch_requires_exact_open_covers_per_item(tmp_path):
+    from agent.agent_core.orchestration.dispatch_progress_seed import planned_dispatch_contract
+    from agent.task_progress import write_task_progress
+
+    write_task_progress(
+        tmp_path,
+        "run-seed-1",
+        {
+            "items": [
+                {"id": "impl-core", "title": "实现核心", "status": "pending"},
+                {"id": "impl-ui", "title": "实现界面", "status": "done"},
+            ]
+        },
+    )
+    items = [
+        _item("实现核心", {"covers": ["impl-core"]}),
+        _item("补一项", {"covers": ["impl-ui", "missing-id"]}),
+        _item("未绑定"),
+    ]
+
+    contract = planned_dispatch_contract(_autobind_agent(tmp_path), items)
+
+    assert contract["valid"] is False
+    assert contract["open_target_ids"] == ["impl-core"]
+    assert contract["missing_covers_indexes"] == [2]
+    assert contract["unknown_covers_by_item"] == [{"index": 1, "ids": ["missing-id"]}]
+    assert contract["unavailable_covers_by_item"] == [{"index": 1, "ids": ["impl-ui"]}]
+
+
+def test_planned_dispatch_rejects_duplicate_child_bindings(tmp_path):
+    from agent.agent_core.orchestration.dispatch_progress_seed import planned_dispatch_contract
+    from agent.task_progress import write_task_progress
+
+    write_task_progress(
+        tmp_path,
+        "run-seed-1",
+        {"items": [{"id": "impl-core", "title": "实现核心", "status": "pending"}]},
+    )
+
+    contract = planned_dispatch_contract(
+        _autobind_agent(tmp_path),
+        [
+            _item("实现核心 A", {"covers": ["impl-core"]}),
+            _item("实现核心 B", {"covers": ["impl-core"]}),
+        ],
+    )
+
+    assert contract["valid"] is False
+    assert contract["duplicate_covers"] == [
+        {"id": "impl-core", "item_indexes": [0, 1]}
+    ]
+
+
+def test_planned_dispatch_excludes_exact_seeded_child_rows(tmp_path):
+    from agent.agent_core.orchestration.dispatch_progress_seed import planned_dispatch_contract
+    from agent.task_progress import write_task_progress
+
+    write_task_progress(
+        tmp_path,
+        "run-seed-1",
+        {
+            "items": [
+                {
+                    "id": "subagent-existing",
+                    "title": "子代理[existing]:实现核心",
+                    "status": "in_progress",
+                }
+            ]
+        },
+    )
+    agent = _autobind_agent(tmp_path)
+    agent.subagents = SimpleNamespace(
+        list_runs=lambda: [SimpleNamespace(id="subagent-existing")]
+    )
+
+    assert planned_dispatch_contract(agent, [_item("另一个任务")]) is None

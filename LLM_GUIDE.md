@@ -30,6 +30,11 @@
   ledger、artifact refs 和当前文件为准。child 私有索引、其它 task 和 detached Audit 事件不得混入。
   后台每工作片的新增工具额度在恢复历史后保持不变；现有 Todo 必须复用 exact id，派 child 时只通过
   `create_subagents.items[].covers` 绑定，不从标题或 goal 猜关系。
+- 当前 canonical `task_progress` 已有计划时，`create_subagents` 在任何 child 落盘前执行一份原子结构预检：
+  每个 item 必须用 `covers` 绑定仍 open 且未被同批其它 item 占用的 exact id；有写工具并直接产出产品
+  代码的 typed role 还必须用 `output_files` 声明父级 workspace 内互不重叠的写入集合。失败统一返回
+  `effect_outcome=not_started + required_repairs`，整批零创建。这个合同不读 goal/标题/代码量，不判断质量
+  或完成，也不能靠 capability grant 扩到兄弟目录；模型修正结构化参数后重试原任务。
 - 普通主代理和子代理共用 `turn_end.reason`：`completed` / `blocked` /
   `max-tokens` / `aborted` / `error` / `interrupted`。它只表示一轮为什么结束，
   不从模型正文、验收清单、产物数量或测试描述反推完成。

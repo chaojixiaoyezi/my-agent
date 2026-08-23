@@ -117,6 +117,14 @@ def _direct_parent_product_write_roots(agent: object) -> list[str]:
     )
 
 
+# LLM: Creation preflights may expose the same direct-parent product roots used
+# by permission inheritance, but callers must treat them as an upper bound and
+# must never widen them from goal prose or proposed output paths.
+# 函数用途: 给子代理创建校验返回当前直接父级真正授权的产品写目录。
+def delegated_product_write_roots(agent: object) -> tuple[str, ...]:
+    return tuple(_direct_parent_product_write_roots(agent))
+
+
 # LLM: A root child inherits only the Gateway-validated active conversation roots; the
 # shared Gateway repository root is a fallback when no client workspace fact exists.
 # 函数用途: 读取当前 TUI/CLI 的真实项目根，供普通直接 child 默认继承读写权限。
@@ -335,7 +343,7 @@ def creation_output_scope_conflicts(
 
     existing = _safe_list_runs(manager)
     conflicts: list[dict[str, object]] = []
-    proposed_owners: dict[str, int] = {}
+    proposed_owners: list[tuple[str, int]] = []
     for index, params in enumerate(task_params):
         attrs = params.attributes if isinstance(params.attributes, dict) else {}
         # 系统默认协作槽会在 run id 生成后重绑到该 run 的唯一目录，不是多个
@@ -349,17 +357,25 @@ def creation_output_scope_conflicts(
         reusable = find_reusable_named_child(manager, params)
         reusable_id = _text(getattr(reusable, "id", "")) if reusable is not None else ""
         for ref in refs:
-            previous_index = proposed_owners.get(ref)
-            if previous_index is not None:
+            previous = next(
+                (
+                    (existing_ref, existing_index)
+                    for existing_ref, existing_index in proposed_owners
+                    if _declared_write_refs_overlap(ref, existing_ref)
+                ),
+                None,
+            )
+            if previous is not None:
                 conflicts.append({
                     "output_ref": ref,
                     "proposed_index": index,
-                    "conflicting_proposed_index": previous_index,
+                    "conflicting_output_ref": previous[0],
+                    "conflicting_proposed_index": previous[1],
                     "existing_run_id": "",
                     "existing_status": "",
                 })
                 continue
-            proposed_owners[ref] = index
+            proposed_owners.append((ref, index))
             for task in existing:
                 run_id = _text(getattr(task, "id", ""))
                 if not run_id or run_id == reusable_id or run_id in replacements:
@@ -369,16 +385,39 @@ def creation_output_scope_conflicts(
                 status = _status(task)
                 if not task_status_in(status, _OUTPUT_SCOPE_OWNING_STATUSES):
                     continue
-                if ref not in _task_declared_write_refs(task):
+                existing_ref = next(
+                    (
+                        candidate
+                        for candidate in _task_declared_write_refs(task)
+                        if _declared_write_refs_overlap(ref, candidate)
+                    ),
+                    "",
+                )
+                if not existing_ref:
                     continue
                 conflicts.append({
                     "output_ref": ref,
+                    "conflicting_output_ref": existing_ref,
                     "proposed_index": index,
                     "conflicting_proposed_index": None,
                     "existing_run_id": run_id,
                     "existing_status": status,
                 })
     return conflicts
+
+
+# LLM: Parallel write ownership conflicts on either exact equality or path
+# containment. URI-like open-world refs stay exact-only because path hierarchy
+# cannot be inferred from an arbitrary external scheme.
+# 函数用途: 判断两个结构化交付范围是否相同或存在父子目录覆盖关系。
+def _declared_write_refs_overlap(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    if "://" in left or "://" in right:
+        return False
+    left_path = Path(left)
+    right_path = Path(right)
+    return is_relative_to(left_path, right_path) or is_relative_to(right_path, left_path)
 
 
 def creation_active_lineage_conflicts(

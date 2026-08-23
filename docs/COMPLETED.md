@@ -4,6 +4,11 @@
 
 最近收口重点：
 
+- 2026-08-22 Prompt 4 r12b 已证明 `5f1f485` 的 native active-turn handoff 保留原目标、语言和嵌套工具
+  参数；同时抓到计划内派工仍可漏 `covers`、把兄弟目录藏在 goal 后先创建再权限阻塞。当前本地实现把
+  exact Todo 绑定、直接编码 child 的结构化写入集合和父级 workspace 上界合并为创建前原子合同；失败整批
+  `not_started` 并返回 typed repairs，同批父子路径也算冲突。该合同不解析自然语言、不判断质量/完成，
+  capability 也不能扩到兄弟目录。发布与 fresh r13 结论以 STATUS/ROADMAP 为准。
 - 2026-08-22 `a190378` 已完成并部署 root lifecycle wake 的 exact objective/task/path 与工具索引恢复；fresh
   r11 证明语言和任务范围不再随 child 完成漂移。本地后续切片又收口了索引中嵌套 Todo/派工参数被清空、
   native provider 看不到 carried 工具轨迹的问题：参数以有界递归且凭据脱敏的 JSON 持久化，跨进程续跑

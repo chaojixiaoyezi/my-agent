@@ -91,7 +91,7 @@ def _create_subagents_input_schema() -> dict[str, object]:
 def build_create_subagents_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="create_subagents",
-        description="把可并行的独立工作交给下级代理。无论当前是主代理、子代理还是孙代理，都使用同一个 create_subagents；创建成功后下级立即运行，进展、阻塞或完成时系统自动唤醒直接父级，不需要也没有查询或推进工具。goal 始终必填；只传 goal 就只创建一个 child，需要多个时必须同时传总 goal 和 items，每项都要有独立 goal。不支持 operations、count 或 max_concurrency 参数。已经用 task_progress 建过 Todo 时，每项派工优先用 covers 绑定它负责的 exact Todo id，完成后系统按 id 打钩，不能另建一套同义清单。普通 child 自动继承父级工作区权限；用户指定交付路径时仍用 output_files 记录目标与冲突锁（批量时逐 item 填写），同批 item 不能共享同一写入目标；若因此被拒绝，重新划分互不重叠的输出后重试，不得把工具失败当成改变用户要求的授权。不要为了显得忙而派，也不要重复创建同一任务。",
+        description="把可并行的独立工作交给下级代理。无论当前是主代理、子代理还是孙代理，都使用同一个 create_subagents；创建成功后下级立即运行，进展、阻塞或完成时系统自动唤醒直接父级，不需要也没有查询或推进工具。goal 始终必填；只传 goal 就只创建一个 child，需要多个时必须同时传总 goal 和 items，每项都要有独立 goal。不支持 operations、count 或 max_concurrency 参数。已经用 task_progress 建过 Todo 时，每项必须用 covers 独占绑定它负责且仍 open 的 exact Todo id；有写工具并直接产出产品代码的 item 还必须用 output_files 声明当前 workspace 内互不重叠的写入集合。缺失、未知、已关闭、重复绑定或越界写入会在创建任何 run 前整批拒绝，按结构化 required_repairs 修正后重试。普通 child 自动继承父级工作区权限；goal、output_files 和 capability grant 都不能扩到兄弟目录。不要为了显得忙而派，也不要重复创建同一任务。",
         input_schema=_create_subagents_input_schema(),
         hints=_hints(
             use_cases=_CREATE_USE_CASES,
@@ -279,14 +279,15 @@ def build_resolve_capability_requests_model_spec() -> ToolModelSpec:
         "decision": "必填。grant=授权能力申请，deny=显式拒绝能力申请。deny 会把请求置为 CLOSED 并唤醒子代理按现有权限调整方案；不会终止子代理。",
         "reason": "必填。裁决原因，写入审计。",
         "request_id": "可选。grant/deny 时指定单个请求 id；缺省处理该 run 全部未决请求。",
-        "write_roots": "可选。grant 文件系统请求时授权的目录列表；缺省用请求自带 path_scope。目录必须落在当前任务工作区或主代理 workspace 内；越界条目会被结构化拒绝。",
+        "write_roots": "可选。grant 文件系统请求时授权的目录列表；缺省用请求自带 path_scope。目录必须落在当前任务工作区或主代理 workspace 内；若请求的是兄弟/越界目录，不要重试 grant，改用 deny 唤醒 child 回现有写区。",
         "tools": "可选。grant 时附加授权的工具名列表；缺省用请求自带 requested_tools。",
     }
     return ToolModelSpec(
         name="resolve_capability_requests",
         description=(
             "主代理对子代理能力申请的裁决入口：grant 授权（可附目录写权限），deny 显式拒绝。"
-            "两种处理都会唤醒子代理继续任务，并保留结构化审计记录。"
+            "两种处理都会唤醒子代理继续任务，并保留结构化审计记录。grant 不能扩出父级 workspace；"
+            "越界请求应 deny，让 child 使用现有目录，不能反复 grant。"
         ),
         input_schema=_input_schema(parameters, _RESOLVE_CAPABILITY_PARAMETER_SCHEMA, required=("run_id", "decision")),
         hints=_hints(
@@ -298,7 +299,7 @@ def build_resolve_capability_requests_model_spec() -> ToolModelSpec:
             keywords=("capability", "授权", "解锁", "拒绝", "grant", "deny", "capreq", "权限"),
             examples=(
                 '{"tool":"resolve_capability_requests","run_id":"subagent-1","decision":"grant","reason":"解锁产物目录"}',
-                '{"tool":"resolve_capability_requests","run_id":"subagent-1","request_id":"capreq-2","decision":"deny","reason":"按现有权限写自己的 output 目录即可"}',
+                '{"tool":"resolve_capability_requests","run_id":"subagent-1","request_id":"capreq-2","decision":"deny","reason":"请求目录在父级 workspace 之外，请改写当前 workspace 内的 output 目录"}',
             ),
         ),
     )

@@ -25,7 +25,7 @@
 - [ ] child lifecycle wake 沿同一 root active turn 续接：exact task link 的原始 objective 仍是
   `User Task/root_user_prompt`，wake 仅作 runtime continuation；root canonical tool index 按 exact
   `run_id + task_id` 恢复并排除 child/其它 task，one-shot 派工不重放，每工作片新增工具额度不缩水。
-  focused 回归已通过，仍待部署后的 fresh r11 原样 Prompt 4 证明语言、范围和派工计划不会在连续 wake 后重置。
+  focused 回归与 fresh r12b 已证明语言、范围和嵌套派工参数不会在连续 wake 后重置。
 - [x] Compact 权威探针兼容没有 `task_attributes` 的轻量/旧调用方；统一路径解析把 `None`/空白保留为
   “没有路径”，不能变成 `<repo>/None` 并压过真实 ToolRegistry cwd。工具轮 28 项与 cwd 集成回归通过。
 - [x] 后台 Task Runtime State 与 `task_progress` 工具使用同一 task-path 账本编号；回归同时放置正确路径账本
@@ -118,6 +118,11 @@
 - [x] lifecycle/Compact 续跑的 durable tool index 保留有界递归且凭据脱敏的 JSON 参数；native 不伪造旧
   ToolCall/ToolResult，而是安装唯一有界 CompactionSummary handoff。真实 UserTurn 保持在 handoff 之后；
   Task Runtime State 暴露 canonical Todo exact ids 与 `create_subagents.items[].covers` 字段，宿主不按标题猜。
+- [ ] 已有 canonical Todo 时，root/child 的单项和批量 `create_subagents` 在落任何 run 前执行同一原子
+  planned-delegation 预检：每项独占绑定 open exact `covers`；有写工具且直接写产品代码的 typed role 逐项
+  声明父 workspace 内互不重叠的 `output_files`。未知/关闭/重复 id、漏声明、兄弟目录越界以及同批父子
+  路径覆盖都必须零创建并返回 typed repairs；不解析自然语言、不做质量/完成验收。205 项 focused 已通过，
+  仍待 fresh r13 原样 Prompt 4。
 - [x] 发布 YAML 与 dataclass 的默认 system prompt 文本完全一致，不再因测试机省略配置而回落到 Go 专项
   骨架；主/子/wake 共用 会话运行时 式持续完成软纪律，且没有重新引入 final 解析、Todo 自动续轮或机器质量验收。
 - [x] 同一 exact parent 下，系统生成的单个补派、批量补派和递归 child 名称沿历史 sibling 连续编号；
@@ -157,8 +162,9 @@
   正确收口。
 - [ ] 四个 `TESTS.md` 原样重型任务全部通过真实 `MiniMax-M2.7` TUI 顺序验收；每次启动、切换或输入前已先
   向用户报告测试对象、`192.0.2.7`、tmux session 名称和可直接 attach 的完整命令，且全程只有一个 Gateway。
-- [ ] fresh Prompt 4 r12 的第二批及后续派工复用首批 canonical Todo ids、逐 item 带 exact covers，不创建
-  p1/p2 等同义清单；root 在 child wake 后保持原语言、完整范围和用户“主代理不得写功能代码”的边界。
+- [ ] fresh Prompt 4 r13 的第二批及后续派工复用 canonical Todo ids、逐 item 带 exact covers 与当前 cwd
+  内互斥写入集合，不创建 p1/p2 等同义清单、不尝试兄弟目录 grant；root 在 child wake 后保持原语言、
+  完整范围和用户“主代理不得写功能代码”的边界。
 - [ ] 真实测试中 main/child/grandchild 各自沿独立 `agent_thread_id` Compact 后能继续工作；至少一条 child
   链连续发生多代 generation，近期完整回合、工具事实、任务状态和产物引用不丢，且没有重做已经成功的
   副作用。持久 native IR 裁剪与 transcript 压缩都只推进该 thread generation；presentation/no-save 临时事件

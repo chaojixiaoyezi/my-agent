@@ -617,6 +617,19 @@ ToolCall/ToolResult；真实 `/btw` UserTurn 排在 handoff 后；text 协议不
 携带 exact Todo ids、完整账本 read 参数和 `items[].covers` 精确绑定字段。真实验收必须用 fresh tmux 原样
 Prompt 4，观察第二批派工是否复用原 Todo、是否带 covers、是否仍保持同一目标；测试者不得补提示或改产物。
 
+r12b 后的 planned-delegation focused 回归：已有 canonical Todo 时，漏/错/关闭/重复 `covers`、直接编码
+item 缺 `output_files`、兄弟目录越界、同批父子路径覆盖都必须在任何 child 创建前整批
+`SUBAGENT_PLANNED_DELEGATION_INVALID` 或既有 `SUBAGENT_OUTPUT_SCOPE_CONFLICT`；合法 exact-id 与互斥
+workspace 写入集合继续自动创建/启动，递归 child 入口使用同一预检。
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_dispatch_progress_seed.py agent_py_agent/tests/test_orchestration_create_subagents_items.py agent_py_agent/tests/test_orchestration_create_subagents_tool_workspace.py agent_py_agent/tests/test_orchestration_create_subagents_tool.py agent_py_agent/tests/test_orchestration_create_subagents_guardrails.py agent_py_agent/tests/test_orchestration_create_subagents_output_refs.py agent_py_agent/tests/test_orchestration_create_subagents_protocol_cleanup.py agent_py_agent/tests/test_orchestration_create_subagents_items_policy.py agent_py_agent/tests/test_orchestration_create_subagents_idempotency.py agent_py_agent/tests/test_orchestration_tool_specs.py agent_py_agent/tests/test_task_progress_advisory.py agent_py_agent/tests/test_task_progress_coverage.py agent_py_agent/tests/test_task_progress_tool_dispatch_reconcile.py -q --tb=short
+```
+
+部署后的唯一端到端验收是 fresh r13：固定 lazygit 源提交，只向真实 MiniMax-M2.7 TUI 输入一次用户原样
+Prompt 4，观察模型能否根据 typed repairs 自行补齐 covers/write sets，测试者不追加提示、不写功能代码。
+当前上述 focused 命令共 205 项通过。
+
 真实本地模型回归示例：
 
 ```bash

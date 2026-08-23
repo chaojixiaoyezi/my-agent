@@ -25,7 +25,12 @@ from ...subagents.models import (
     TaskStatus,
     task_status_in,
 )
-from ...task_progress import read_task_progress, task_progress_status_is_closed, write_task_progress
+from ...task_progress import (
+    progress_path,
+    read_task_progress,
+    task_progress_status_is_closed,
+    write_task_progress,
+)
 from ..runner.context import current_subagent_run_id
 from ..runtime.task_identity import durable_task_id, progress_ledger_id
 
@@ -54,6 +59,8 @@ COVERS_PARENT_LEDGER_UNKNOWN_NOTE = (
     "unknown_covers_ids 里的 id 在任务主清单(ledger_run_id 那本账)里不存在,绑定不会生效;"
     '用 task_progress(action=read, run_id=ledger_run_id 的值) 查正确的清单项 id 后重绑。'
 )
+
+PLANNED_DISPATCH_CONTRACT_VERSION = "planned_dispatch.v1"
 
 
 def seed_dispatch_task_progress(agent: object, tasks: list) -> dict[str, Any] | None:
@@ -132,6 +139,125 @@ def dispatch_coverage_binding(agent: object, tasks: list) -> dict[str, Any] | No
     except Exception:  # noqa: BLE001 - 回执反馈是增强,失败绝不影响派工
         logging.getLogger(__name__).warning("dispatch coverage binding feedback failed", exc_info=True)
         return None
+
+
+# LLM: Once a canonical plan exists, child creation must preserve its exact-id
+# relationship before any run is persisted. This reader never infers from titles
+# or goals and never changes task completion or continuation state.
+# 函数用途: 创建子代理前检查每个派工项是否绑定了当前计划中仍可工作的 exact Todo id。
+def planned_dispatch_contract(agent: object, items: list) -> dict[str, Any] | None:
+    root = _progress_root(agent)
+    run_id = _current_run_id(agent)
+    if root is None or not run_id or not items:
+        return None
+    ledger_run_id, targets = _binding_ledger_targets(agent, root, run_id)
+    child_run_ids = _known_child_run_ids(agent)
+    plan_targets = [
+        target
+        for target in targets
+        if str(target.get("id") or "").strip() not in child_run_ids
+    ]
+    if not plan_targets:
+        return None
+    known_id_list = list(dict.fromkeys(
+        target_id
+        for target in plan_targets
+        if (target_id := str(target.get("id") or "").strip())
+    ))
+    known_ids = set(known_id_list)
+    open_ids = [
+        target_id
+        for target in plan_targets
+        if (target_id := str(target.get("id") or "").strip())
+        and not task_progress_status_is_closed(target.get("status"))
+        and not _target_has_open_checks(target)
+    ]
+    open_id_set = set(open_ids)
+    (
+        missing_indexes,
+        unknown_by_item,
+        unavailable_by_item,
+        duplicate_bindings,
+    ) = _planned_binding_issues(items, known_ids=known_ids, open_ids=open_id_set)
+    valid = bool(open_ids) and not any(
+        (missing_indexes, unknown_by_item, unavailable_by_item, duplicate_bindings)
+    )
+    return {
+        "schema_version": PLANNED_DISPATCH_CONTRACT_VERSION,
+        "ledger_run_id": ledger_run_id,
+        "ledger_ref": str(progress_path(root, ledger_run_id)),
+        "plan_target_ids": known_id_list[:_MAX_BINDING_OPEN_TARGETS],
+        "plan_target_count": len(known_ids),
+        "open_target_ids": open_ids[:_MAX_BINDING_OPEN_TARGETS],
+        "open_count": len(open_ids),
+        "item_count": len(items),
+        "missing_covers_indexes": missing_indexes,
+        "unknown_covers_by_item": unknown_by_item,
+        "unavailable_covers_by_item": unavailable_by_item,
+        "duplicate_covers": duplicate_bindings,
+        "valid": valid,
+    }
+
+
+# LLM: Binding diagnostics use only caller-supplied covers and canonical plan
+# id sets. They are side-effect free and keep item indexes stable for retry.
+# 函数用途: 逐项找出漏绑、错绑、绑到关闭项和多个 child 抢同一 Todo 的问题。
+def _planned_binding_issues(
+    items: list,
+    *,
+    known_ids: set[str],
+    open_ids: set[str],
+) -> tuple[list[int], list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
+    missing: list[int] = []
+    unknown: list[dict[str, object]] = []
+    unavailable: list[dict[str, object]] = []
+    owners: dict[str, list[int]] = {}
+    for index, item in enumerate(items):
+        params = getattr(item, "params", None)
+        covers = _params_covers(params) if isinstance(params, dict) else []
+        if not covers:
+            missing.append(index)
+            continue
+        unknown_ids = [target_id for target_id in covers if target_id not in known_ids]
+        unavailable_ids = [
+            target_id
+            for target_id in covers
+            if target_id in known_ids and target_id not in open_ids
+        ]
+        if unknown_ids:
+            unknown.append({"index": index, "ids": list(dict.fromkeys(unknown_ids))})
+        if unavailable_ids:
+            unavailable.append({"index": index, "ids": list(dict.fromkeys(unavailable_ids))})
+        for target_id in dict.fromkeys(covers):
+            owners.setdefault(target_id, []).append(index)
+    duplicates = [
+        {"id": target_id, "item_indexes": indexes}
+        for target_id, indexes in owners.items()
+        if len(indexes) > 1
+    ]
+    return missing, unknown, unavailable, duplicates
+
+
+# LLM: Dispatch-seeded Todo rows are identified only by exact canonical child
+# run ids. Removing those ids from the plan view prevents old projection rows
+# from becoming a second plan without parsing their generated titles.
+# 函数用途: 收集当前任务树里已存在的真实子代理 id，供计划合同排除自动派工展示项。
+def _known_child_run_ids(agent: object) -> set[str]:
+    run_ids: set[str] = set()
+    manager = getattr(agent, "subagents", None)
+    try:
+        tasks = list(manager.list_runs()) if manager is not None else []
+    except (AttributeError, OSError, TypeError, ValueError):
+        tasks = []
+    run_ids.update(
+        run_id
+        for task in tasks
+        if (run_id := str(getattr(task, "id", "") or "").strip())
+    )
+    task_root = _current_task_root(agent)
+    if task_root is not None:
+        run_ids.update(_canonical_child_rows(task_root))
+    return run_ids
 
 
 # LLM: This is a best-effort projection from exact DONE descendants and their
@@ -626,8 +752,10 @@ __all__ = [
     "COVERS_PARENT_LEDGER_UNKNOWN_NOTE",
     "COVERS_UNKNOWN_NOTE",
     "DISPATCH_SEED_NOTE",
+    "PLANNED_DISPATCH_CONTRACT_VERSION",
     "autobind_covers_from_goal_ids",
     "dispatch_coverage_binding",
+    "planned_dispatch_contract",
     "reconcile_completed_child_covers",
     "seed_dispatch_task_progress",
 ]

@@ -1101,3 +1101,23 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - Compact 口径：handoff 复用现有 semantic-summary 字符预算，超限保留顺序索引、语义摘要、近期明细和
   archive refs。它不提交 checkpoint、不推进 generation、不增加 TUI compact 次数；真正的上下文压缩仍只
   走 ConversationThread 的 checkpoint-before-CAS 主链。
+
+## 2026-08-22 计划内派工的 exact-id 与写入集合原子合同
+
+状态：设计确认，正在实现并等待新鲜 Prompt 4 真 TUI 验收。
+
+- 解决问题：r12 已恢复同一 active turn 的原目标与工具历史，但模型先建了 Todo，随后派工仍省略
+  `covers`，又把新项目兄弟目录只写进 child `goal`。旧入口先创建 child、事后只给绑定 warning；运行时
+  才发现目录不在父级结构化 workspace，child 进入 capability 阻塞，main 又反复尝试无法批准的越界 grant。
+- 对照决定：会话运行时 的 `update_plan` 与 `spawn_agent` 是两项独立结构化动作，spawn 只接收具体、可独立完成
+  的任务，并要求并行编码者使用互不冲突的写入集合。本项目适配为：当前 canonical `task_progress` 已有
+  计划时，每个新 child 必须用 `covers` 绑定一个仍 open 的 exact id；有写工具且角色直接产出产品代码的
+  child 还必须用 `output_files` 声明本次写入集合。两项都在任何 run 落盘前整批校验。
+- 合同边界：未知、已关闭、重复绑定的 id，缺失写入集合，或解析后逃出直接父级 structured workspace 的
+  输出路径，都返回同一个 `effect_outcome=not_started` 结构化修复回执；整批一个 child 也不创建。模型应
+  修正 Todo/`covers`/`output_files` 后重试，不能把失败当作改写用户目标或父代理自行编码的授权。
+- 这不是机器质量验收：宿主不解析 goal、Todo 标题、代码量或完成文案，不判断任务是否做得好，也不因
+  open Todo 自动续轮。没有 canonical 计划的普通轻量派工继续沿既有宽松入口；read-only、tester 与
+  coordinator 等不直接拥有产品写集合的 typed 角色不被强迫声明代码输出。
+- capability 恢复继续服从现有安全围栏：请求目录在父级 workspace 之外时不能 grant，应 `deny` 并唤醒同
+  一 child 回到已有写区；创建前的新合同应使这种越界请求成为异常兜底，而不是常规派工路径。

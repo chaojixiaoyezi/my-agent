@@ -247,6 +247,15 @@ index 按 exact run/task 恢复，child/Audit 不混入。待严格 gate、推�
 Task Runtime State 额外投影 exact Todo ids 与 covers 字段合同。focused 回归已通过，待严格 gate、部署和
 fresh r12 原样 Prompt 4 验证“不重复计划、派工绑定、长任务继续”三项；仍不新增机器质量验收。
 
+`5f1f485` 部署后的 fresh r12b 已证明 native handoff 保留原目标、语言、Todo 和嵌套工具参数；但 root 在
+容量拒绝后重派 4 项时仍漏掉 `covers`，并把新实现只在 goal 中指向源码 cwd 的兄弟目录。旧运行时先落
+child，随后写边界拒绝，main 又反复尝试不能批准的越界 grant，最后改变语言和目录；现场已 `/stop`。
+当前候选新增 create-time 原子合同：已有 canonical 计划时，每个 item 必须绑定独占 open exact id；直接
+编码的写工具角色还必须声明父 workspace 内互不重叠的 `output_files`。错误批次零创建并返回结构化
+`required_repairs`，目录与其子路径也算冲突；不解析自然语言、不判断质量或完成。严格 gate 与唯一 Gateway
+部署后，用 fresh r13 原样 Prompt 4 验证模型能按回执自行修正参数、在当前 cwd 内创建新语言实现，并继续
+保持原目标。测试者仍只输入一次原 prompt，不补代码、不追加推动消息。
+
 ### 用户直控子代理的共享控制面
 
 状态：设计中，直属 child 只读状态投影已部署并完成真机 smoke
