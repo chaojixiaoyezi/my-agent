@@ -33,16 +33,20 @@
   必须以限深、限宽、凭据脱敏的 JSON 保留，不能退化成空数组。跨进程索引不能伪造原始 ToolCall/ToolResult
   配对；native 续跑用唯一 `CompactionSummary` handoff 持续携带这批事实，精确副作用仍以 archive、operation
   ledger、artifact refs 和当前文件为准。child 私有索引、其它 task 和 detached Audit 事件不得混入。
-  后台每工作片的新增工具额度在恢复历史后保持不变；现有 Todo 必须复用 exact id，派 child 时只通过
-  `create_subagents.items[].covers` 绑定，不从标题或 goal 猜关系。
+  后台每工作片的新增工具额度在恢复历史后保持不变；现有 Todo 更新必须复用 exact id。派 child 时只有
+  调用方显式提供的 `create_subagents.items[].covers` 才建立映射，不从标题或 goal 猜关系；未绑定 child
+  以真实 run id 形成独立进度行，不关闭现有 Todo。
 - 当前 canonical `task_progress` 已有计划时，`create_subagents` 在任何 child 落盘前执行一份原子结构预检：
-  每个 item 必须用 `covers` 绑定仍 open 且未被同批其它 item 占用的 exact id；`output_files` 只是一项
-  可选的交付目标和冲突线索，不是权限、完整写集或创建前置条件，一旦提供仍必须位于父级 workspace。
-  失败统一返回 `effect_outcome=not_started + required_repairs`，整批零创建。这个合同不读 goal/标题/代码量，
-  不判断质量或完成，也不能靠 capability grant 扩到兄弟目录；模型修正结构化参数后重试原任务。它的控制报码必须
+  `covers` 与 `output_files` 都是可选结构化提示。提供的 covers 必须绑定仍 open、且未被同批其它 item
+  占用的 exact id；提供的 output 必须位于父级 workspace。省略 covers 时 child 按真实 run id 记进度，
+  不会给现有 Todo 打勾。无效的显式值统一返回 `effect_outcome=not_started + required_repairs`，整批零创建。
+  这个合同不读 goal/标题/代码量，不判断质量或完成，也不能靠 capability grant 扩到兄弟目录；模型修正
+  结构化参数后重试原任务。它的控制报码必须
   在唯一 `error_taxonomy` 登记为可修参数错误，不能让外层降成 `UNKNOWN_ERROR` 后误导模型报告阻塞。
   历史“goal 正文里恰好出现 Todo id 就自动补 covers”分支已经删除；`i18n`、`config` 这类既可能是目录名
-  又可能是计划 id 的文本不能取得绑定权威，缺少显式 `covers` 时必须走上述可修错误。
+  又可能是计划 id 的文本不能取得绑定权威，缺少显式 `covers` 时保持未绑定并走真实 child 进度行。
+  已关闭项需要返工时，先用 `task_progress` 对原 id 传 `status=in_progress, correction=true`，再选择绑定；
+  也可省略 covers，但不能拿无关的下一个 open id 顶替。
 - 普通主代理和子代理共用 `turn_end.reason`：`completed` / `blocked` /
   `max-tokens` / `aborted` / `error` / `interrupted`。它只表示一轮为什么结束，
   不从模型正文、验收清单、产物数量或测试描述反推完成。

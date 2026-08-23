@@ -1104,8 +1104,8 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 
 ## 2026-08-22 计划内派工的 exact-id 与写入集合原子合同
 
-状态：exact-id 原子合同与错误分类已落地；r14 删除旧 goal 文本自动补绑。下述“完整写入集合必填”设计已被
-2026-08-23 的 会话运行时 式直接 goal 边界取代，保留本节只为说明 r12b-r14 的历史演进。
+状态：显式 exact-id 校验与错误分类仍保留；r14 删除旧 goal 文本自动补绑。下述“covers 与完整写入集合
+必填”设计均已被 2026-08-23 的 会话运行时 式可选映射取代，保留本节只为说明 r12b-r14 的历史演进。
 
 - 解决问题：r12 已恢复同一 active turn 的原目标与工具历史，但模型先建了 Todo，随后派工仍省略
   `covers`，又把新项目兄弟目录只写进 child `goal`。旧入口先创建 child、事后只给绑定 warning；运行时
@@ -1150,7 +1150,8 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 
 ## 2026-08-23 子代理直接 goal 边界与可选产物提示
 
-状态：通用底层修复已实现并通过聚焦回归，待严格 gate、发布和 fresh Prompt 4 r17 真 TUI 验收。
+状态：`4c3a59d` 已发布部署；fresh Prompt 4 r17 证明首名骨架 child 不再替兄弟扩做，但又暴露 mandatory
+`covers` 在返工场景会诱导错误 Todo 绑定，后续结论见下一节。
 
 - 解决问题：`b7005a8` 部署后的 r16 已通过 assumptions-first 与 exact `covers` 主链。第一名骨架 child
   只被要求创建 6 个基础文件，却额外写了 11 个文件；其中 `src/gui/views.rs`、`src/gui/state.rs` 随后又
@@ -1160,12 +1161,31 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   `goal` 时容易替兄弟扩做。原先强制模型预报完整 `output_files` 也没有形成事实边界：该 child 只声明
   6 个目标，却实际多写 11 个文件，说明模型自报写集既不完整也不能承担安全权威。
 - 会话运行时 对照：`会话运行时-rs/core/src/tools/handlers/multi_agents_spec.rs` 与 `multi_agents/spawn.rs` 的 spawn
-  参数只有具体任务输入、模型等执行字段；child 继承当前 cwd/runtime，没有“先报完整写集”合同。本项目
-  保留额外的 exact `covers`，因为它是 TUI Todo-child 映射的结构化事实；不再把 `output_files` 当完整写集
-  或编码 child 的创建前置条件。
+  参数只有具体任务输入、模型等执行字段；child 继承当前 cwd/runtime，没有“先报完整写集”合同。r17
+  进一步证明 Todo 映射也不能作为每次 spawn 的硬前置；当前设计只保留显式 exact `covers` 的校验和投影。
 - 落地边界：root 继续对用户完整目标负责；child 的直接父级 `goal` 是其本轮完整工作边界，要求完整完成
   该 goal，但不得因为根目标更大而实现未交给自己的兄弟计划项。`output_files` 改为可选交付/冲突提示；
   一旦提供仍必须位于父级 workspace，也仍可参与已有的冲突提示，但它不是权限、完整写集或质量验收。
 - 这是 会话运行时 式软执行纪律，不是新的机器审查器：宿主不解析 goal 去判“是不是兄弟任务”，不扫描 diff
   自动取消 child，也不恢复机器质量验收。真正的权限上界仍来自父级结构化 workspace；r17 必须用原样
   Prompt 4 验证 child 会停在直接 goal 内、root 能自然醒来再派后续项。
+
+## 2026-08-23 可选 exact covers 与返工重开
+
+状态：通用协议与聚焦回归已落地，待严格 gate、发布和 fresh Prompt 4 r18 真 TUI 验收。
+
+- 真实证据：`4c3a59d` 部署后的 r17 中，首名骨架 child 只创建骨架，TUI child 只实现 UI 范围，说明直接
+  goal 边界改善。第三名 Git child 却把 Rust 代码写到源码 cwd 根目录，而不是现有 `rust-port/`；root
+  正确决定返工。此时 Git Todo `3` 已因首名 Git child DONE 被关闭，下一 open Todo `4` 是 GUI。
+- 确定性失败：mandatory covers 门不允许返工 child 省略 covers，也不允许绑定已关闭的 `3`。root 为了
+  让创建调用通过，把新的“Git 命令封装实现”child 绑定到 `covers=["4"]`；TUI 因而把“GUI 控制器层”显示
+  为进行中。若继续，Git child DONE 会给 GUI 假打勾。现场已只用 TUI `/stop` 收口：root `PAUSED`，前三名
+  `DONE`，错误绑定的第四名 `CANCELLED`，无残留 runner。
+- 会话运行时 对照与决定：会话运行时 `spawn_agent` 不依赖 plan id。`covers` 改为可选 exact 映射：提供时继续原子
+  校验未知、已关闭和同批重复 id；省略时 child 正常创建，并由已有 seed 主链按真实 run id 形成独立进度
+  行，绝不关闭现有 Todo。`output_files` 继续保持可选提示。两者都不是权限、完整写集或机器验收。
+- 返工协议：确实需要把返工仍归入原计划项时，先调用 `task_progress` 对同一 id 传
+  `status=in_progress, correction=true` 明确重开，再绑定原 id；也可以省略 covers。模型规格、task_progress
+  软 guidance 与 typed repair 都明确禁止拿无关 open id 顶替。宿主仍不解析 goal/title 做语义匹配。
+- 协议版本：planned dispatch 投影升为 `planned_dispatch.v2`，使用 `binding_mode=optional_exact` 与
+  `unbound_item_indexes`；旧 `missing_covers_indexes` 删除，避免把“未映射”继续表达成错误。

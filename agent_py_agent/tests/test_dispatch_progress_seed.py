@@ -564,7 +564,7 @@ def _autobind_agent(tmp_path, run_id="run-seed-1"):
     )
 
 
-def test_planned_dispatch_requires_exact_open_covers_per_item(tmp_path):
+def test_planned_dispatch_validates_only_supplied_exact_open_covers(tmp_path):
     from agent.agent_core.orchestration.dispatch_progress_seed import planned_dispatch_contract
     from agent.task_progress import write_task_progress
 
@@ -587,10 +587,39 @@ def test_planned_dispatch_requires_exact_open_covers_per_item(tmp_path):
     contract = planned_dispatch_contract(_autobind_agent(tmp_path), items)
 
     assert contract["valid"] is False
+    assert contract["schema_version"] == "planned_dispatch.v2"
+    assert contract["binding_mode"] == "optional_exact"
     assert contract["open_target_ids"] == ["impl-core"]
-    assert contract["missing_covers_indexes"] == [2]
+    assert contract["unbound_item_indexes"] == [2]
     assert contract["unknown_covers_by_item"] == [{"index": 1, "ids": ["missing-id"]}]
     assert contract["unavailable_covers_by_item"] == [{"index": 1, "ids": ["impl-ui"]}]
+
+
+def test_planned_dispatch_allows_unbound_repair_without_claiming_next_open_id(tmp_path):
+    """返工已关闭项时可先不绑定；不能为了通过创建门把下一个兄弟 Todo 当 covers。"""
+    from agent.agent_core.orchestration.dispatch_progress_seed import planned_dispatch_contract
+    from agent.task_progress import write_task_progress
+
+    write_task_progress(
+        tmp_path,
+        "run-seed-1",
+        {
+            "items": [
+                {"id": "3", "title": "Git 命令封装", "status": "done"},
+                {"id": "4", "title": "GUI 控制器", "status": "pending"},
+            ]
+        },
+    )
+
+    contract = planned_dispatch_contract(
+        _autobind_agent(tmp_path),
+        [_item("返工 Git 输出路径")],
+    )
+
+    assert contract["valid"] is True
+    assert contract["open_target_ids"] == ["4"]
+    assert contract["unbound_item_indexes"] == [0]
+    assert contract["unavailable_covers_by_item"] == []
 
 
 def test_planned_dispatch_rejects_duplicate_child_bindings(tmp_path):

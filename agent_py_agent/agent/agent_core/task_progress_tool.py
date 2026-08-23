@@ -140,8 +140,9 @@ def _with_execution_guidance(payload: dict[str, object]) -> dict[str, object]:
         "open_item_ids": open_ids[:24],
         "message": (
             "这些 exact id 仍是未完成计划，不是宿主完成判定。已有子代理负责时等待其 typed 生命周期事件；"
-            "否则继续使用工具或用 create_subagents.items[].covers 绑定对应 id。只要当前仍能推进，"
-            "不要用列出未完成项代替继续工作，也不要重复创建一套同义清单。"
+            "否则继续使用工具；若下级确实原样承接某项，可用 create_subagents.items[].covers 映射对应 id。"
+            "covers 可省略，不能拿无关 open id 顶替；返工已关闭项时先对原 id 传 status=in_progress 和 "
+            "correction=true。只要当前仍能推进，不要用列出未完成项代替继续工作，也不要重复创建同义清单。"
         ),
     }
     return {**payload, "execution_guidance": guidance}

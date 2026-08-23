@@ -20,7 +20,7 @@ _CREATE_PARAMETERS = {
     "tool_preset": "工具预设；通常省略。有效值：coding/read_only/none",
     "allowed_tools": "工具偏好提示；通常省略，基础读写工具会自动补齐",
     "allowed_skills": "可选；只把当前 owner Skill 快照中点名的技能授权给子代理",
-    "covers": '该子代理负责的 task_progress 清单项 id 列表（普通 items 或 coverage.targets，例如 ["req-03"]）：已有清单时每个 child 必填且不能跨 child 重复；完成后系统按 exact id 自动把对应项标 done',
+    "covers": '可选的 task_progress exact-id 映射（普通 items 或 coverage.targets，例如 ["req-03"]）；只有 child 与仍 open 项确实是同一工作时才填，DONE 后系统按 id 打勾。省略时 child 用自己的 run_id 记进度，不关闭现有项',
     "plan": "子代理初始步骤",
     "input_refs": "交给子代理读取的文件、URL 或 artifact refs",
     "output_files": "可选目标产物，用于交付归属和冲突提示；不是权限、完整写集或创建前置条件，提供时必须位于当前 workspace",
@@ -33,7 +33,7 @@ _CREATE_PARAMETERS = {
 }
 _CREATE_PARAMETER_DETAILS = {
     "goal": "工具内部的整批派工说明，与用户命令 /goal 无关；普通聊天任务也可派工。写清子代理要交付什么，保留分给它的全部硬约束；用户声明的产物格式要求（输出路径、最少字数、文件路径:行号引用、必含章节）要原样写进相关子代理 goal，汇总时保留这些格式要素。",
-    "items": "仅一次派多个不同任务时用；顶层 goal 写整批目的，每个元素必须含自己的独立 goal、别传空 items。资料线索放 item.input_refs；已有 Todo 时每项必须带独占 covers。output_files 是可选交付/冲突提示，没有明确路径时不要强造。创建成功后会立即运行。",
+    "items": "仅一次派多个不同任务时用；顶层 goal 写整批目的，每个元素必须含自己的独立 goal、别传空 items。资料线索放 item.input_refs；covers/output_files 都是可选结构化提示，只有事实匹配时才填。创建成功后会立即运行。",
     "description": "只写一句职责短标题，例如“实现超级玛丽核心玩法”；不要写过程、状态、路径或完整任务要求。省略时界面会截取 goal 开头。",
     "role": "优先用模板角色。可用角色模板索引：\n{role_template_index}",
     "agent_name": "展示名不是角色；需要职责差异时仍应使用 role 或 goal 表达。",
@@ -58,7 +58,11 @@ _CREATE_PARAMETER_DETAILS = {
         "创建一个叶子 item；子代理只需调用 watch_stream(action=open)，URL、请求体、游标位置"
         "和文档引用由运行时从该绑定补入，禁止猜 watch_id。"
     ),
-    "covers": "每个 item 只绑它自己负责且仍 open 的清单项（id 来自 task_progress 的 items 或 coverage.targets）；已有 Todo 时这是创建硬合同。未知、已关闭或跨 item 重复的 id 会使整批原子拒绝，不能复制全部 id 或另建同义清单。",
+    "covers": (
+        "可选；只绑定 child 确实负责且仍 open 的清单项（id 来自 task_progress items 或 coverage.targets）。"
+        "未知、已关闭或跨 item 重复的 id 会使整批原子拒绝；省略时 child 按真实 run_id 单独登记，不会给现有 Todo 打勾。"
+        "返工已关闭项先用 task_progress 对原 id 传 status=in_progress, correction=true，再绑定原 id；绝不能拿无关 open id 顶替。"
+    ),
 }
 _CREATE_ITEM_PARAMETER_DETAILS = {
     "goal": "每个 item 都必填；只写这一个子代理要完成和交付的具体工作，不要复制顶层整批 goal。该 goal 是 child 的完整工作边界，不要把兄弟 item 也塞进来。",

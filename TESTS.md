@@ -617,11 +617,11 @@ ToolCall/ToolResult；真实 `/btw` UserTurn 排在 handoff 后；text 协议不
 携带 exact Todo ids、完整账本 read 参数和 `items[].covers` 精确绑定字段。真实验收必须用 fresh tmux 原样
 Prompt 4，观察第二批派工是否复用原 Todo、是否带 covers、是否仍保持同一目标；测试者不得补提示或改产物。
 
-r12b 后的 planned-delegation focused 回归：已有 canonical Todo 时，漏/错/关闭/重复 `covers` 必须在任何
-child 创建前整批 `SUBAGENT_PLANNED_DELEGATION_INVALID`；可选 `output_files` 一旦提供，兄弟目录越界或
-同批父子路径覆盖仍必须在创建前返回该错误或既有 `SUBAGENT_OUTPUT_SCOPE_CONFLICT`。合法 exact-id 在
-没有 output hint 时也能自动创建/启动；提供 workspace 内互斥提示时仍保留交付/冲突投影，递归 child
-入口使用同一预检。
+r17 后的 planned-delegation focused 回归：`covers` 与 `output_files` 都是可选结构化提示。未绑定 child
+必须正常创建并以真实 run id 形成独立进度行，现有 Todo 保持原状；提供的未知/关闭/重复 covers 仍在任何
+child 创建前整批 `SUBAGENT_PLANNED_DELEGATION_INVALID`。可选 output 一旦提供，兄弟目录越界或同批父子
+路径覆盖仍必须在创建前返回该错误或既有 `SUBAGENT_OUTPUT_SCOPE_CONFLICT`。合法 exact-id 继续自动映射，
+递归 child 入口使用同一预检。
 失败 outcome 还必须保留 `error_code=SUBAGENT_PLANNED_DELEGATION_INVALID`、`retryable=true`、
 `recommended_action=repair_tool_arguments`，不能只有正文有码而控制层降成 `UNKNOWN_ERROR`。
 无计划的测试 fixture 必须显式设置 `home_paths/root/current_run_params` 为空，不能让 MagicMock 动态属性或
@@ -633,8 +633,9 @@ python3 -m pytest agent_py_agent/tests/test_dispatch_progress_seed.py agent_py_a
 
 `c5cc7c2` 部署后的 fresh r14 只输入一次原样 Prompt 4，证明首名 child 完成会唤醒 root 并创建第二批；
 同时发现骨架 goal 中的 `src/i18n/`、`src/config/` 被旧正文自动补绑误当成 Todo 完成证据。新负向回归
-要求即使 goal 字面包含 open id，也必须报告 `missing_covers_indexes` 且零创建；不允许从正文写入
-`covers_auto_bound`。删除旁路后，3 个直接相关文件共 55 项、扩展派工集合共 221 项 focused 通过；Ruff、
+当时要求即使 goal 字面包含 open id 也零创建；r17 后现行合同改为允许创建但保持未绑定，仍不允许从正文
+写入 `covers_auto_bound` 或给同名 Todo 打勾。删除旁路后，3 个直接相关文件共 55 项、扩展派工集合共
+221 项 focused 通过；Ruff、
 doc sync、strict code-size、diff 与 clean-package gate 全部通过。发布后的唯一端到端验收改为
 fresh r15：固定 lazygit 源提交，只向真实 TUI 输入一次用户原样 Prompt 4，观察模型按 typed repairs 自行
 补齐 covers/write sets；测试者不追加提示、不写功能代码。
@@ -650,9 +651,17 @@ fresh r15：固定 lazygit 源提交，只向真实 TUI 输入一次用户原样
 创建被 typed repair 原子拒绝后自行修正；首名 child DONE 后 root 自然派出第二名。新失败发生在 child
 职责边界：首名只声明 6 个骨架文件，却额外写 11 个文件，其中 `src/gui/views.rs` 与 `src/gui/state.rs`
 又被第二名负责。当前 focused 回归改为锁定两件事：child prompt 必须包含“直接父级当前 goal 是完整工作
-边界”且不再出现 root 的“委派不缩小用户目标”；计划存在时 exact covers 仍必填，而编码 child 可以省略
-可选 `output_files`，提供时仍不得越出 workspace。发布后 fresh r17 继续只输入一次原样 Prompt 4，验证
+边界”且不再出现 root 的“委派不缩小用户目标”；当时计划存在时 exact covers 仍必填，而编码 child 可以
+省略可选 `output_files`，提供时仍不得越出 workspace。发布后 fresh r17 继续只输入一次原样 Prompt 4，验证
 第一名不再替兄弟扩做、root lifecycle wake 与后续派工仍正常；测试者仍不写被测产物或追加技术指导。
+
+`4c3a59d` 部署后的 fresh r17 证明首名骨架 child 与第二名 TUI child 基本停在直接 goal 内；第三名 Git
+child 却把 Rust 模块写到 cwd 根而非 `rust-port/`。root 决定返工时，原 Git Todo `3` 已关闭，mandatory
+covers 又不允许省略，于是它把新 Git child 绑定到下一个 open GUI Todo `4`，TUI 已显示 GUI 进行中。
+现场 `/stop` 后 root PAUSED、前三名 DONE、错绑 child CANCELLED。当前回归要求 planned dispatch v2：
+无 covers 合法并产生真实 child 进度行，不关闭原 Todo；提供的未知/关闭/重复 covers 仍原子拒绝；返工
+guidance 要求 `status=in_progress + correction=true` 重开原 id，或省略 covers，不能顶替无关 open id。
+fresh r18 仍只输入一次原样 Prompt 4，测试者不改产物、不补技术提示。
 
 真实本地模型回归示例：
 

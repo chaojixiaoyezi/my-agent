@@ -276,6 +276,14 @@ goal 中出现 `src/i18n/`、`src/config/` 时，历史正文自动补绑旁路�
 `output_files` 改为可选交付/冲突提示，并规定 child 的直接父级 goal 是完整工作边界。严格 gate、部署后
 用 fresh r17 再只输入一次原样 Prompt 4，验证 child 不替兄弟扩做、root 仍能按 lifecycle event 继续派工。
 
+`4c3a59d` 部署后的 fresh r17 已证明首名骨架 child 不再替 TUI/Git/GUI 扩做，第二名也基本停在 TUI
+范围；第三名 Git child 却把代码写成 cwd 根部第二棵 Rust 树。root 正确决定返工，但原 Git Todo `3` 已
+关闭，mandatory covers 又不允许省略，于是新 Git child 被绑定到下一 open GUI Todo `4`，TUI 当场把 GUI
+误显示为进行中。现场已 `/stop`，错绑 child CANCELLED。当前切片按 会话运行时 spawn 独立于 plan 的事实，把
+`covers` 改为可选 exact 映射：未绑定 child 用真实 run id 形成独立进度行；提供的错/关/重复 id 仍原子
+拒绝。返工若继续映射原项，先用 `task_progress(status=in_progress, correction=true)` 重开原 id。严格 gate、
+部署后用 fresh r18 原样 Prompt 4 验证返工不再顶替兄弟 Todo，同时继续观察输出路径与完整交付。
+
 ### 用户直控子代理的共享控制面
 
 状态：设计中，直属 child 只读状态投影已部署并完成真机 smoke

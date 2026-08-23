@@ -64,6 +64,11 @@ OPEN 或非法未闭合 capability request 是宿主掌握的结构化阻塞事�
 root 继续对用户完整目标负责；普通 child 只把直接父级给自己的当前 `goal` 当作本轮完整工作边界，必须
 完整完成该 goal，但不得因为根目标更大而替兄弟计划项扩做。宿主不解析 goal 或扫描 diff 做机器验收。
 
+`covers` 只在 child 确实原样承接一个 open Todo 时提供。省略时 child 用真实 run id 显示自己的进度，不
+关闭现有 Todo；提供的未知、关闭或重复 id 会在创建前拒绝。若已完成项因路径、测试等问题需要返工，先
+用 `task_progress` 对原 id 传 `status=in_progress, correction=true` 显式重开，再绑定原 id；不能为了通过
+创建门拿下一个无关 open id 顶替。
+
 路径解析与父级 cwd 一致：裸 `abc/index.html` 表示当前可信 workspace 下的 `abc/index.html`；只有显式
 `output/report.md` 和 `work/notes.md` 才分别表示当前 task 内部的 output/work。绝对路径保留原目标，继续
 由结构化写边界允许或拒绝，不能静默搬到内部 output 后冒充成功。

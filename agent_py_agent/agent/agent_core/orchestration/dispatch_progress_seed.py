@@ -37,14 +37,15 @@ _MAX_BINDING_OPEN_TARGETS = 24
 
 DISPATCH_SEED_NOTE = (
     "已把派工与 task_progress 结构化关联；有 covers 的子代理沿用原清单项，"
-    "其余子代理按真实 run_id 登记为待办。"
+    "其余子代理按真实 run_id 登记为独立待办，不会关闭现有计划项。"
     "子代理终态会按精确 run_id/covers id 回写；后续如何整合、验证或汇报由当前代理依据目标决定。"
 )
 
 COVERS_BINDING_NOTE = (
-    "task_progress 清单还有 open 项(见 open_target_ids)。把清单里的活派给子代理时,在对应 item 带 "
-    'covers=[该项 id](如 covers:["req-03"]);子代理完成后系统按 id 自动把该项标 done。'
-    "每个子代理只绑它自己负责的项。"
+    "covers 是可选的精确进度映射。只有 child 与一个仍 open 的清单项确实是同一工作时，才在对应 item "
+    '带 covers=[该项 id](如 covers:["req-03"]);DONE 后系统会按 exact id 打勾。返工已关闭项时，先用 '
+    "task_progress 将原 id 以 correction=true 重开为 in_progress，再绑定原 id；也可以省略 covers，让该 "
+    "child 按真实 run_id 成为独立进度项。绝不能拿无关的下一个 open id 顶替。"
 )
 
 COVERS_UNKNOWN_NOTE = (
@@ -57,7 +58,7 @@ COVERS_PARENT_LEDGER_UNKNOWN_NOTE = (
     '用 task_progress(action=read, run_id=ledger_run_id 的值) 查正确的清单项 id 后重绑。'
 )
 
-PLANNED_DISPATCH_CONTRACT_VERSION = "planned_dispatch.v1"
+PLANNED_DISPATCH_CONTRACT_VERSION = "planned_dispatch.v2"
 
 
 def seed_dispatch_task_progress(agent: object, tasks: list) -> dict[str, Any] | None:
@@ -138,10 +139,10 @@ def dispatch_coverage_binding(agent: object, tasks: list) -> dict[str, Any] | No
         return None
 
 
-# LLM: Once a canonical plan exists, child creation must preserve its exact-id
-# relationship before any run is persisted. This reader never infers from titles
-# or goals and never changes task completion or continuation state.
-# 函数用途: 创建子代理前检查每个派工项是否绑定了当前计划中仍可工作的 exact Todo id。
+# LLM: Optional covers are validated exactly before any run is persisted;
+# unbound children remain legal and receive their own run-id progress row. This
+# reader never infers a relationship from titles or goals.
+# 函数用途: 创建子代理前校验调用方主动提供的 covers；未绑定项只做记录，不冒充现有 Todo。
 def planned_dispatch_contract(agent: object, items: list) -> dict[str, Any] | None:
     root = _progress_root(agent)
     run_id = _current_run_id(agent)
@@ -171,13 +172,13 @@ def planned_dispatch_contract(agent: object, items: list) -> dict[str, Any] | No
     ]
     open_id_set = set(open_ids)
     (
-        missing_indexes,
+        unbound_indexes,
         unknown_by_item,
         unavailable_by_item,
         duplicate_bindings,
     ) = _planned_binding_issues(items, known_ids=known_ids, open_ids=open_id_set)
-    valid = bool(open_ids) and not any(
-        (missing_indexes, unknown_by_item, unavailable_by_item, duplicate_bindings)
+    valid = not any(
+        (unknown_by_item, unavailable_by_item, duplicate_bindings)
     )
     return {
         "schema_version": PLANNED_DISPATCH_CONTRACT_VERSION,
@@ -188,7 +189,8 @@ def planned_dispatch_contract(agent: object, items: list) -> dict[str, Any] | No
         "open_target_ids": open_ids[:_MAX_BINDING_OPEN_TARGETS],
         "open_count": len(open_ids),
         "item_count": len(items),
-        "missing_covers_indexes": missing_indexes,
+        "binding_mode": "optional_exact",
+        "unbound_item_indexes": unbound_indexes,
         "unknown_covers_by_item": unknown_by_item,
         "unavailable_covers_by_item": unavailable_by_item,
         "duplicate_covers": duplicate_bindings,
@@ -197,15 +199,16 @@ def planned_dispatch_contract(agent: object, items: list) -> dict[str, Any] | No
 
 
 # LLM: Binding diagnostics use only caller-supplied covers and canonical plan
-# id sets. They are side-effect free and keep item indexes stable for retry.
-# 函数用途: 逐项找出漏绑、错绑、绑到关闭项和多个 child 抢同一 Todo 的问题。
+# id sets. Missing bindings are observability, while invalid supplied bindings
+# remain an atomic error.
+# 函数用途: 逐项记录未绑定项，并找出错绑、绑到关闭项和多个 child 抢同一 Todo 的问题。
 def _planned_binding_issues(
     items: list,
     *,
     known_ids: set[str],
     open_ids: set[str],
 ) -> tuple[list[int], list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
-    missing: list[int] = []
+    unbound: list[int] = []
     unknown: list[dict[str, object]] = []
     unavailable: list[dict[str, object]] = []
     owners: dict[str, list[int]] = {}
@@ -213,7 +216,7 @@ def _planned_binding_issues(
         params = getattr(item, "params", None)
         covers = _params_covers(params) if isinstance(params, dict) else []
         if not covers:
-            missing.append(index)
+            unbound.append(index)
             continue
         unknown_ids = [target_id for target_id in covers if target_id not in known_ids]
         unavailable_ids = [
@@ -232,7 +235,7 @@ def _planned_binding_issues(
         for target_id, indexes in owners.items()
         if len(indexes) > 1
     ]
-    return missing, unknown, unavailable, duplicates
+    return unbound, unknown, unavailable, duplicates
 
 
 # LLM: Dispatch-seeded Todo rows are identified only by exact canonical child

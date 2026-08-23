@@ -4,10 +4,15 @@
 
 最近收口重点：
 
+- 2026-08-23 `4c3a59d` 部署后的 Prompt 4 r17 证明骨架/TUI child 的直接 goal 边界改善；但 Git child 写成
+  cwd 根部第二棵 Rust 树后，root 返工时被 mandatory covers 逼着把新 Git child 绑定到下一 open GUI
+  Todo `4`，造成确定性假进度。现场已 `/stop`；当前切片把 covers 改为可选 exact 映射：省略时用真实
+  child run id 记进度，提供的错/关/重复 id 仍原子拒绝；返工原项先以 `correction=true` 重开。发布和
+  fresh r18 见 STATUS/ROADMAP。
 - 2026-08-23 `b7005a8` 部署后的 Prompt 4 r16 已证明 root 会安全自主选语言、创建 7 项 Todo、按 typed
   repair 补 exact `covers`，并在首名 child DONE 后自然派第二名；但首名骨架 child 声明 6 个文件却额外
   写 11 个文件，其中两个与第二名职责重叠。会话运行时 spawn 不要求预报完整写集，现场也证明模型自报不完整；
-  当前切片保留 exact covers，把 `output_files` 降为可选交付/冲突提示，并让 child 只把直接父级 `goal`
+  当时切片保留 mandatory covers，把 `output_files` 降为可选交付/冲突提示，并让 child 只把直接父级 `goal`
   当完整工作边界。该改动不解析 goal、不恢复机器验收；发布和 fresh r17 见 STATUS/ROADMAP。
 - 2026-08-23 Prompt 4 r15 暴露根代理会把用户已授权的安全次要选择退回用户；相同 MiniMax-M2.7 的
   会话运行时 对照也在探索后输出了语言/范围/测试菜单，均违背 会话运行时 Default 源码。当前切片把源码中的
@@ -16,7 +21,7 @@
   STATUS/ROADMAP。
 - 2026-08-23 Prompt 4 r14 证明 `c5cc7c2` 下主代理能在 child DONE 后自然醒来并创建第二批，同时抓到旧
   goal-id 自动补绑把目录名 `i18n/config` 当作 Todo id、造成 3 项假完成。当前本地切片删除这条自然语言
-  决策旁路和 `covers_auto_bound` 投影；计划内派工继续只认显式 `covers`，漏填由同一 typed repair 返回
+  决策旁路和 `covers_auto_bound` 投影；当时计划内派工继续只认显式 `covers`，漏填由同一 typed repair 返回
   模型。新增同名目录负向回归已通过，发布与 fresh r15 见 STATUS/ROADMAP。
 - 2026-08-22 `611ee55` 已部署，Prompt 4 r13 真 TUI 证明计划内派工原子合同生效：5 批重复 covers 均零
   child，模型自行细分计划后创建了 exact covers + cwd 内精确写入集合的 child；该 child 实际产出 1,296

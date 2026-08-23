@@ -368,9 +368,10 @@ class TestCreateSubagentsItemsMode:
         assert result.ok is True
         assert params.agent_name == "小小傻妞-印尼市场"
 
-    def test_existing_plan_rejects_unbound_batch_before_any_child_is_created(self, tmp_path):
-        """已有 Todo 时漏 covers 必须整批 not_started，不能先落四个孤立 child。"""
+    def test_existing_plan_accepts_unbound_batch_as_independent_child_rows(self, tmp_path):
+        """covers 可省略；child 用真实 run id 记进度，不给现有 Todo 假打勾。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+        from agent_py_agent.agent.task_progress import read_task_progress
 
         mock_agent = _planned_agent(tmp_path)
         _seed_plan(
@@ -388,20 +389,21 @@ class TestCreateSubagentsItemsMode:
                 {"goal": "实现界面", "output_files": ["port/ui/"]},
             ],
         })
-        payload = json.loads(result.output)
+        assert result.ok is True
+        assert mock_agent.subagents.create_run.call_count == 2
+        created = [call.kwargs["params"] for call in mock_agent.subagents.create_run.call_args_list]
+        assert all(params.attributes.get("covers") in (None, []) for params in created)
+        progress = read_task_progress(mock_agent.root, "plan-root")
+        by_id = {item["id"]: item for item in progress["items"]}
+        assert by_id["impl-core"]["status"] == "pending"
+        assert by_id["impl-ui"]["status"] == "pending"
+        assert by_id["run_1"]["status"] == "in_progress"
+        assert by_id["run_2"]["status"] == "in_progress"
 
-        assert result.ok is False
-        assert result.error_code == "SUBAGENT_PLANNED_DELEGATION_INVALID"
-        assert result.reported_error_code == "SUBAGENT_PLANNED_DELEGATION_INVALID"
-        assert result.effect_outcome == "not_started"
-        assert result.retryable is True
-        assert result.recommended_action == "repair_tool_arguments"
-        assert payload["planned_dispatch"]["missing_covers_indexes"] == [0, 1]
-        assert mock_agent.subagents.create_run.call_count == 0
-
-    def test_plan_ids_inside_goal_text_do_not_create_implicit_bindings(self, tmp_path):
-        """Todo id 恰好也是目录/模块名时仍只认显式 covers，不能从 goal 正文猜绑定。"""
+    def test_plan_ids_inside_goal_text_remain_unbound_without_explicit_covers(self, tmp_path):
+        """Todo id 恰好也是目录名时仍不从 goal 猜绑定；child 独立运行且原 Todo 保持 open。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+        from agent_py_agent.agent.task_progress import read_task_progress
 
         mock_agent = _planned_agent(tmp_path)
         _seed_plan(
@@ -419,15 +421,16 @@ class TestCreateSubagentsItemsMode:
                 "output_files": ["port/scaffold/"],
             }],
         })
-        payload = json.loads(result.output)
-
-        assert result.ok is False
-        assert result.error_code == "SUBAGENT_PLANNED_DELEGATION_INVALID"
-        assert payload["planned_dispatch"]["missing_covers_indexes"] == [0]
-        assert mock_agent.subagents.create_run.call_count == 0
+        assert result.ok is True
+        created = mock_agent.subagents.create_run.call_args.kwargs["params"]
+        assert created.attributes.get("covers") in (None, [])
+        progress = read_task_progress(mock_agent.root, "plan-root")
+        by_id = {item["id"]: item for item in progress["items"]}
+        assert by_id["i18n"]["status"] == "pending"
+        assert by_id["config"]["status"] == "pending"
 
     def test_existing_plan_accepts_coding_item_without_optional_output_hints(self, tmp_path):
-        """会话运行时 式 child 只需具体 goal 和 exact covers；output_files 不是完整写集硬门。"""
+        """调用方可只提供具体 goal + exact covers；output_files 不是完整写集硬门。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _planned_agent(tmp_path)
@@ -446,6 +449,36 @@ class TestCreateSubagentsItemsMode:
         created = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert created.attributes["covers"] == ["impl-core"]
         assert created.attributes.get("output_files") in (None, [])
+
+    def test_existing_plan_rejects_supplied_closed_cover_with_reopen_repair(self, tmp_path):
+        """covers 可省略，但主动绑定已关闭项仍整批拒绝并教模型重开原 id。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = _planned_agent(tmp_path)
+        _seed_plan(
+            mock_agent,
+            [
+                {"id": "3", "title": "Git 命令封装", "status": "done"},
+                {"id": "4", "title": "GUI 控制器", "status": "pending"},
+            ],
+        )
+
+        result = CreateSubagentsTool(mock_agent).execute({
+            "goal": "返工 Git 输出路径",
+            "covers": ["3"],
+        })
+        payload = json.loads(result.output)
+
+        assert result.ok is False
+        assert result.reported_error_code == "SUBAGENT_PLANNED_DELEGATION_INVALID"
+        assert payload["planned_dispatch"]["unavailable_covers_by_item"] == [
+            {"index": 0, "ids": ["3"]}
+        ]
+        repairs = payload["next_action"]["required_repairs"]
+        assert repairs[0]["action"] == "repair_or_remove_invalid_covers"
+        assert "correction=true" in repairs[0]["reason"]
+        assert "无关 open id" in repairs[0]["reason"]
+        assert mock_agent.subagents.create_run.call_count == 0
 
     def test_existing_plan_rejects_sibling_output_path_before_child_creation(self, tmp_path):
         """output_files 逃出当前 workspace 时整批拒绝，不能留给 child 再申请权限。"""
@@ -506,8 +539,8 @@ class TestCreateSubagentsItemsMode:
         assert created[0].attributes["covers"] == ["impl-core"]
         assert created[1].attributes["covers"] == ["impl-ui"]
 
-    def test_existing_plan_rejects_unbound_single_before_child_creation(self, tmp_path):
-        """单 child 入口也不能绕过计划绑定合同。"""
+    def test_existing_plan_accepts_unbound_single_without_touching_open_item(self, tmp_path):
+        """单 child 也可省略 covers；现有 open 项不因子代理 DONE 关系被预先冒认。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = _planned_agent(tmp_path)
@@ -521,11 +554,10 @@ class TestCreateSubagentsItemsMode:
             "output_files": ["port/core/"],
         })
 
-        assert result.ok is False
-        assert result.error_code == "SUBAGENT_PLANNED_DELEGATION_INVALID"
-        assert result.reported_error_code == "SUBAGENT_PLANNED_DELEGATION_INVALID"
-        assert json.loads(result.output)["planned_dispatch"]["missing_covers_indexes"] == [0]
-        assert mock_agent.subagents.create_run.call_count == 0
+        assert result.ok is True
+        assert mock_agent.subagents.create_run.call_count == 1
+        created = mock_agent.subagents.create_run.call_args.kwargs["params"]
+        assert created.attributes.get("covers") in (None, [])
 
     def test_existing_plan_accepts_bound_single_inside_workspace(self, tmp_path):
         """单 child 带 exact covers 与可选 workspace 产物提示时保持自动启动。"""
@@ -548,9 +580,8 @@ class TestCreateSubagentsItemsMode:
         assert created.attributes["covers"] == ["impl-core"]
 
     def test_nested_create_uses_same_planned_delegation_preflight(self, tmp_path):
-        """子代理派孙代理也必须先绑定主计划，不能从递归入口绕过原子合同。"""
+        """孙代理也可不绑定主计划；只有主动提供的错误 covers 才走原子拒绝。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import _nested_create_params
-        from agent_py_agent.agent.tooling.models import ToolHandlerOutcome
 
         mock_agent = _planned_agent(tmp_path)
         mock_agent._current_subagent_run_id = "parent-child"
@@ -567,9 +598,9 @@ class TestCreateSubagentsItemsMode:
             },
         )
 
-        assert isinstance(result, ToolHandlerOutcome)
-        assert result.reported_error_code == "SUBAGENT_PLANNED_DELEGATION_INVALID"
-        assert json.loads(result.output)["planned_dispatch"]["ledger_run_id"] == "plan-root"
+        assert isinstance(result, dict)
+        assert len(result["children"]) == 1
+        assert result["children"][0].get("covers") in (None, [])
 
 
 class TestCreateSubagentsToolGrantProtocol:

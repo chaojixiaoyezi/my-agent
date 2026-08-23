@@ -391,14 +391,16 @@ handoff 的 run 保持可读，但新创建/重新合并的 takeover 必须补�
 宿主自动启动 child。业务质量要求可以随自然语言目标传递，但不能变成启动或结束硬门；父代理读取真实
 结果和 refs 后，自然决定汇总、补充 guidance、取消或再创建一个明确分工的 child。
 当前代理已有 canonical `task_progress` 计划时，创建入口先运行同一份 `planned_delegation` 预检：每个
-item 的 `covers` 必须引用仍 open 的 exact id，且一个 id 不能被同批多个 child 占用。`output_files` 是
-可选交付目标与冲突线索，不是权限、完整写集或创建前置条件；一旦提供仍不能越出直接父级 workspace。
-未知、已关闭、重复或漏 `covers`，以及显式 output 越界的批次，在 create/save/publish 前整体返回
-`not_started`，不留下半创建状态。
+item 的 `covers` 是可选 exact-id 映射；一旦提供，必须引用仍 open 的 id，且不能被同批多个 child 占用。
+未绑定 child 按真实 run id 形成独立进度行，不关闭现有 Todo。`output_files` 同样只是可选交付目标与冲突
+线索，不是权限、完整写集或创建前置条件；一旦提供仍不能越出直接父级 workspace。未知、已关闭或重复的
+显式 covers，以及显式 output 越界的批次，在 create/save/publish 前整体返回 `not_started`。
 预检不读 goal 或 Todo 标题，不判断交付质量、代码量和完成状态；没有 canonical 计划的普通轻量派工沿原
 入口运行。read-only、tester、coordinator 等不直接拥有产品写集合的角色继续使用各自既有合同。
 即使 goal 正文包含与 Todo id 完全相同的目录名或模块名，也不会自动生成 `covers`；历史
 `covers_auto_bound` 旁路已删除，调用参数中的显式 `covers` 是唯一绑定来源。
+已关闭项需要返工时，先用 `task_progress` 对同一 id 传 `status=in_progress, correction=true` 显式重开，
+再决定是否绑定；也可省略 covers，但不能拿无关 open id 顶替。
 用户明确的保存路径应通过顶层或逐 item 的 `output_files` 记录交付和锁；普通 child 的权限上界来自父级
 workspace，goal 或 output_files 都不能扩大到该上界之外。
 root 对用户完整目标负责；delegated runner 只把直接父级当前 `goal` 当作本轮完整工作边界，不能因根目标

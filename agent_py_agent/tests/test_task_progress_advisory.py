@@ -139,3 +139,34 @@ def test_open_progress_result_gives_soft_continue_and_covers_guidance(tmp_path) 
     assert payload["execution_guidance"]["open_item_ids"] == ["req-core", "req-test"]
     assert "不要用列出未完成项代替继续工作" in payload["execution_guidance"]["message"]
     assert "covers" in payload["execution_guidance"]["message"]
+    assert "correction=true" in payload["execution_guidance"]["message"]
+    assert "不能拿无关 open id 顶替" in payload["execution_guidance"]["message"]
+
+
+def test_closed_progress_item_requires_explicit_correction_to_reopen(tmp_path) -> None:
+    """返工必须显式 correction；普通更新不能无声冲掉已经记录的完成事实。"""
+    agent = _agent(tmp_path)
+    agent._main_agent_run_id = "run-main"
+    tool = TaskProgressTool(agent)
+
+    created = tool.execute(
+        {
+            "action": "update",
+            "items": [{"id": "git", "title": "Git 模块", "status": "done"}],
+        }
+    )
+    implicit = tool.execute(
+        {"action": "update", "items": [{"id": "git", "status": "in_progress"}]}
+    )
+    corrected = tool.execute(
+        {
+            "action": "update",
+            "items": [
+                {"id": "git", "status": "in_progress", "correction": True}
+            ],
+        }
+    )
+
+    assert created.ok is True
+    assert json.loads(implicit.output)["items"][0]["status"] == "done"
+    assert json.loads(corrected.output)["items"][0]["status"] == "in_progress"

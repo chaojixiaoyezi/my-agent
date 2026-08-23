@@ -119,15 +119,16 @@
   ToolCall/ToolResult，而是安装唯一有界 CompactionSummary handoff。真实 UserTurn 保持在 handoff 之后；
   Task Runtime State 暴露 canonical Todo exact ids 与 `create_subagents.items[].covers` 字段，宿主不按标题猜。
 - [ ] 已有 canonical Todo 时，root/child 的单项和批量 `create_subagents` 在落任何 run 前执行同一原子
-  planned-delegation 预检：每项独占绑定 open exact `covers`；`output_files` 是可选交付/冲突提示，不是
-  权限、完整写集或创建前置条件。未知/关闭/重复 covers，以及显式 output 越出 workspace，都必须零创建并
-  返回 typed repairs；可选输出的同批父子路径覆盖仍走现有冲突门。不解析自然语言、不做质量/完成验收。
+  planned-delegation 预检：`covers/output_files` 都是可选结构化提示，不是权限、完整写集或创建前置条件。
+  未绑定 child 正常创建并用真实 run id 记进度，不关闭现有 Todo；未知/关闭/重复的显式 covers，以及显式
+  output 越出 workspace，都必须零创建并返回 typed repairs；可选输出的同批父子路径覆盖仍走现有冲突门。
+  不解析自然语言、不做质量/完成验收。
   223 项历史 focused 已通过，
   fresh r13 已证明错误批次零 child、模型能自行细分计划并合法创建第一名 child；taxonomy 漏码已修。
   fresh r14 又证明 goal 中的 `i18n/config` 会触发旧自动补绑并造成 Todo 假完成；该自然语言旁路已删除，
-  fresh r15 因 root 先反问目标语言而未进入派工；fresh r16 已证明自主默认、显式 covers 和 lifecycle wake，
-  但抓到 child 越过直接 goal 写入兄弟任务。当前回归要求 delegated prompt 只以直接父级 goal 为完整边界，
-  fresh r17 再验证不扩做兄弟项，且 TUI/控制层不再显示 `UNKNOWN_ERROR`。
+  fresh r15 因 root 先反问目标语言而未进入派工；fresh r16 已证明自主默认和 lifecycle wake，但抓到 child
+  越过直接 goal；fresh r17 又抓到 mandatory covers 使 Git 返工 child 错绑 GUI Todo。当前回归要求 child
+  只以直接父级 goal 为边界，并支持可选 exact covers；fresh r18 再验证不扩做兄弟项、不拿无关 id 顶替。
 - [x] 根默认 `system_prompt` 在持续执行纪律前包含 会话运行时 assumptions-first 软边界：安全可逆的次要选择采用
   合理默认并继续；只有任何假设都会实质偏离、越权或产生不可逆风险时才问一个短问题。YAML 与 dataclass
   逐字一致，文本不含项目名/语言专项，也不解析问句或写机器状态。
@@ -170,10 +171,10 @@
   正确收口。
 - [ ] 四个 `TESTS.md` 原样重型任务全部通过真实 `MiniMax-M2.7` TUI 顺序验收；每次启动、切换或输入前已先
   向用户报告测试对象、`192.0.2.7`、tmux session 名称和可直接 attach 的完整命令，且全程只有一个 Gateway。
-- [ ] fresh Prompt 4 r17 的后续派工复用 canonical Todo ids、逐 item 带 exact covers；可选 output hint 若
-  提供则只落当前 cwd，不把模型预报当完整写集或权限。每名 child 只完成直接父级 goal，不替兄弟计划项
-  扩做；不创建 p1/p2 等同义清单、不尝试兄弟目录 grant。root 在 child wake 后保持原语言、完整范围和
-  用户“主代理不得写功能代码”的边界。
+- [ ] fresh Prompt 4 r18 的后续派工复用 canonical Todo；只有事实确实匹配时才带 exact covers，额外返工
+  可不绑定并显示真实 child 行。已关闭项返工若仍要映射，先以 `correction=true` 重开原 id，绝不拿下一个
+  open 兄弟 id 顶替。可选 output hint 若提供则只落当前 cwd，不把模型预报当完整写集或权限。每名 child
+  只完成直接父级 goal，不替兄弟扩做；root 保持原语言、完整范围和“主代理不得写功能代码”边界。
 - [ ] 真实测试中 main/child/grandchild 各自沿独立 `agent_thread_id` Compact 后能继续工作；至少一条 child
   链连续发生多代 generation，近期完整回合、工具事实、任务状态和产物引用不丢，且没有重做已经成功的
   副作用。持久 native IR 裁剪与 transcript 压缩都只推进该 thread generation；presentation/no-save 临时事件

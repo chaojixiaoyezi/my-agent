@@ -34,9 +34,9 @@ class TestOrchestrationToolsSpec:
         assert "bug_finder" in spec.parameter_descriptions["role"]
         assert "writer" in spec.parameter_descriptions["role"]
         assert "资料线索" in spec.parameter_descriptions["items"]
-        assert "独占 covers" in spec.parameter_descriptions["items"]
-        assert "可选交付/冲突提示" in spec.parameter_descriptions["items"]
-        assert "还必须声明" not in spec.parameter_descriptions["items"]
+        assert "可选结构化提示" in spec.parameter_descriptions["items"]
+        assert "已有 Todo 时每项必须" not in spec.parameter_descriptions["items"]
+        assert "绝不能拿无关 open id 顶替" in spec.parameter_descriptions["covers"]
         assert "不是权限、完整写集或创建前置条件" in spec.parameter_descriptions["output_files"]
         assert "root" not in spec.parameter_descriptions["items"]
         assert "context_manifest" not in spec.parameter_descriptions

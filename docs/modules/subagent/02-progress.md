@@ -1,5 +1,17 @@
 # Subagent Progress
 
+## 2026-08-23 r17 可选 exact covers 与返工重开（本地候选）
+
+- `4c3a59d` 部署后的 fresh r17 中，骨架/TUI child 基本停在各自直接 goal，生命周期 wake 也正常；Git
+  child 却把 Rust 模块写到 cwd 根而不是 `rust-port/`，root 因此创建返工 child。
+- 原 Git Todo `3` 已由首名 Git child DONE 关闭，下一 open Todo `4` 是 GUI。mandatory covers 使 root
+  不能省略映射或继续绑定关闭项，模型遂让“Git 命令封装实现”带 `covers=["4"]`，TUI 把 GUI 错显示为
+  进行中。现场 `/stop` 后 root PAUSED、前三名 DONE、错绑 child CANCELLED，无残留 runner。
+- 对照 会话运行时 spawn 不依赖 plan id 的源码，当前切片将 covers 改为可选 exact 映射。省略时已有 seed 主链
+  以真实 run id 建独立进度行，不关闭现有 Todo；提供的未知/关闭/重复 id 继续创建前原子拒绝。返工原项
+  先以 `task_progress(status=in_progress, correction=true)` 重开，或省略 covers；规格明确禁止拿无关
+  open id 顶替。协议升为 `planned_dispatch.v2`，直接 59 项 focused 已通过，待扩展 gate、部署和 r18。
+
 ## 2026-08-23 r16 child 直接 goal 边界与可选 output hints（本地候选）
 
 - `b7005a8` 部署后的 fresh r16 已证明 root assumptions-first、exact covers 修参和 child DONE 后 lifecycle
@@ -7,7 +19,7 @@
 - 新的确定性失败是第一名骨架 child 只被交付 6 个基础文件，却额外写了 11 个文件；其中
   `src/gui/views.rs`、`src/gui/state.rs` 随后又被第二名明确负责。原 child prompt 复用了 root 的“委派不
   缩小用户原始目标”，会鼓励它越过直接 goal；强制 `output_files` 也没有阻止声明外写入。
-- 对照 会话运行时 spawn 的具体源码后，当前切片保留 TUI Todo 映射所需的 exact `covers`，不再要求编码 child
+- 对照 会话运行时 spawn 的具体源码后，该切片当时保留 mandatory exact `covers`，不再要求编码 child
   预报完整写集。`output_files` 只作可选交付/冲突提示，提供时仍须位于 workspace；delegated runner 改为
   直接父级当前 goal 是完整工作边界，完整完成它但不替兄弟扩做。这是模型执行软纪律，不解析自然语言、
   不扫描 diff 判完成。focused 回归已通过；待严格 gate、部署和 fresh r17 原样 Prompt 4。

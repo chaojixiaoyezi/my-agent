@@ -91,7 +91,7 @@ def _create_subagents_input_schema() -> dict[str, object]:
 def build_create_subagents_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="create_subagents",
-        description="把可并行的独立工作交给下级代理。无论当前是主代理、子代理还是孙代理，都使用同一个 create_subagents；创建成功后下级立即运行，进展、阻塞或完成时系统自动唤醒直接父级，不需要也没有查询或推进工具。goal 始终必填；只传 goal 就只创建一个 child，需要多个时必须同时传总 goal 和 items，每项都要有独立 goal。不支持 operations、count 或 max_concurrency 参数。已经用 task_progress 建过 Todo 时，每项必须用 covers 独占绑定它负责且仍 open 的 exact Todo id；缺失、未知、已关闭或重复绑定会在创建任何 run 前整批拒绝，按结构化 required_repairs 修正后重试。output_files 只是可选的交付目标和冲突线索，不是权限、完整写集或创建前置条件；一旦提供仍必须位于当前 workspace。普通 child 自动继承父级工作区权限；goal、output_files 和 capability grant 都不能扩到兄弟目录。不要为了显得忙而派，也不要重复创建同一任务。",
+        description="把可并行的独立工作交给下级代理。无论当前是主代理、子代理还是孙代理，都使用同一个 create_subagents；创建成功后下级立即运行，进展、阻塞或完成时系统自动唤醒直接父级，不需要也没有查询或推进工具。goal 始终必填；只传 goal 就只创建一个 child，需要多个时必须同时传总 goal 和 items，每项都要有独立 goal。不支持 operations、count 或 max_concurrency 参数。covers 是可选的 task_progress exact-id 映射：只有 child 与仍 open 项确实是同一工作时才填，提供的未知、已关闭或跨 item 重复 id 会整批拒绝；省略时 child 按真实 run_id 单独显示，不会给现有 Todo 打勾。返工已关闭项先用 task_progress 对原 id 传 status=in_progress, correction=true，再绑定原 id；绝不能拿无关 open id 顶替。output_files 也是可选交付/冲突提示，不是权限、完整写集或创建前置条件；一旦提供仍必须位于当前 workspace。普通 child 自动继承父级工作区权限；goal、output_files 和 capability grant 都不能扩到兄弟目录。不要为了显得忙而派，也不要重复创建同一任务。",
         input_schema=_create_subagents_input_schema(),
         hints=_hints(
             use_cases=_CREATE_USE_CASES,
@@ -143,12 +143,12 @@ def build_task_progress_model_spec() -> ToolModelSpec:
         },
     }
     details = {
-        "items": "这是开放清单，不是业务模板。status 只用 pending/in_progress/done/skipped/blocked；completed/read/ok 这类说明写 notes/summary，不要写进 status。长文、长清单、逐章/逐项任务里，优先每个对象写一个 item；notes 写真实读到的短事实，evidence 写文件、offset/行号、artifact_ref 或来源说明。不要只写“章节001-012已覆盖”来代替逐项事实。",
+        "items": "这是开放清单，不是业务模板。status 只用 pending/in_progress/done/skipped/blocked；completed/read/ok 这类说明写 notes/summary，不要写进 status。长文、长清单、逐章/逐项任务里，优先每个对象写一个 item；notes 写真实读到的短事实，evidence 写文件、offset/行号、artifact_ref 或来源说明。不要只写“章节001-012已覆盖”来代替逐项事实。若已关闭项需要返工，对同一 id 传 status=in_progress 和 correction=true 明确重开；不能拿另一个 pending id 代替。",
         "coverage": "这是开放世界覆盖清单，不限定对象类型。targets 可以是项目、论文、API、日志源、文件、模块或任何当前任务对象；checks 必须是对象映射，键由当前任务自己定义，值只写 pending/in_progress/done/skipped/blocked。长任务里建议边读、边分析、边写报告时更新，不要最后一次性随便打钩；范围进度和逐项事实最好分开写。它只是模型维护的软计划，不是系统完成判定。",
     }
     return ToolModelSpec(
         name="task_progress",
-        description="记录或读取当前运行的进度笔记。它只是可选的软账本，不选择会话、不切换工作区、不决定当前轮或后续轮是否继续。【复杂/长任务先建 plan】开工先把任务拆成 items 建一份稳定清单；后续沿用原 id 更新，不能在每次唤醒时另建一套同义清单。每完成一项立即 update 把该项 status 标为 done（界面会逐项打钩显示，模型跨轮也能靠它续接）。若把某项交给下级，create_subagents 的对应 item 要用 covers 绑定这个 exact id。清单仍有 open 项且当前还能推进时继续调用工具；只有目标完成或存在真实阻塞时才 final。",
+        description="记录或读取当前运行的进度笔记。它只是可选的软账本，不选择会话、不切换工作区、不决定当前轮或后续轮是否继续。【复杂/长任务先建 plan】开工先把任务拆成 items 建一份稳定清单；后续沿用原 id 更新，不能在每次唤醒时另建一套同义清单。每完成一项立即 update 把该项 status 标为 done（界面会逐项打钩显示，模型跨轮也能靠它续接）。把某个仍 open 项原样交给下级时，可用 create_subagents.items[].covers 映射 exact id；不确定或属于额外返工时省略 covers。已关闭项要返工时，先对原 id 传 status=in_progress, correction=true 明确重开，不能拿无关 open id 顶替。清单仍有 open 项且当前还能推进时继续调用工具；只有目标完成或存在真实阻塞时才 final。",
         input_schema=_input_schema(parameters, property_schemas, details=details),
         hints=_task_progress_model_hints(),
     )
@@ -171,6 +171,7 @@ def _task_progress_model_hints() -> ToolModelHints:
         examples=(
             '{"tool":"task_progress","action":"update","summary":"已读完两个项目","next_action":"继续读第三个项目","items":[{"id":"project-a","title":"阅读项目A","status":"done","evidence":["project-a/README.md","project-a/src/core.py"]}]}',
             '{"tool":"task_progress","action":"update","coverage":{"goal":"每个项目都要读 README、分析模块、写进报告","dimensions":["读 README","分析模块","写进报告"],"targets":[{"id":"project-a","checks":{"读 README":"done","分析模块":"pending"},"evidence":["project-a/README.md"]}]}}',
+            '{"tool":"task_progress","action":"update","items":[{"id":"project-a","status":"in_progress","correction":true,"notes":"原实现路径错误，按同一项返工"}]}',
             '{"tool":"task_progress","action":"read"}',
         ),
     )

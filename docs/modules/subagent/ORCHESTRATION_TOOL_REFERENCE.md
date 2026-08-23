@@ -18,8 +18,10 @@ create/guidance/cancel/resolve 四个直属下级控制入口；普通 leaf 不�
   空参数调用会作为无效原生工具调用处理，不能静默退回主代理独自完成。
 - 模型工具不提供 `count` 克隆模式。单个具体工作直接传 `goal`；多个可并行工作用
   `items` 逐项声明不同目标和交付边界。重复 item 会整批拒绝，不会部分创建。
-- 已有 canonical Todo 时，每个 item 必须显式用 `covers` 独占绑定仍 open 的 exact id；缺失、未知、已
-  关闭或同批重复会在创建任何 run 前整批拒绝。宿主不从 goal 或标题猜绑定。
+- `covers` 是可选 exact-id 映射。只有 child 与一个仍 open Todo 确实是同一工作时才提供；省略时 child
+  以真实 run id 形成独立进度行，不关闭现有 Todo。提供的未知、已关闭或同批重复 id 会在创建任何 run
+  前整批拒绝，宿主不从 goal 或标题猜绑定。返工已关闭项先用 task_progress 对原 id 传
+  `status=in_progress, correction=true` 重开，或省略 covers；不得拿无关 open id 顶替。
 - 当调用方选择提供 `output_files` 时，整批拒绝会区分“本批 item 互相重用交付路径”和“已有未结束 run 占用”。前者返回
   `revise_proposed_output_scopes_and_retry`，应给每个 item 分配互不重叠的输出，或把共享文件
   收成一个 item 后重试；后者才由宿主等直属生命周期事件。工具失败不改变用户原始约束，

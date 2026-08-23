@@ -1,6 +1,6 @@
-"""LLM: Validate exact plan bindings and explicitly declared output scope.
+"""LLM: Validate supplied plan bindings and explicitly declared output scope.
 
-模块用途: 当当前代理已经建立结构化 Todo 时，在创建任何子代理前核对 exact covers；可选产物声明不能越界。
+模块用途: 创建子代理前校验可选 exact covers 与可选产物路径；未绑定 child 不冒充现有 Todo。
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ PLANNED_DELEGATION_ERROR_CODE = "SUBAGENT_PLANNED_DELEGATION_INVALID"
 # LLM: This is a structural creation gate, not a quality or completion gate. It
 # activates only when an authoritative plan exists and returns data for an
 # atomic not-started tool result; goals and titles never influence its verdict.
-# 函数用途: 汇总计划绑定和写入集合错误，全部正确或当前没有计划时返回空。
+# 函数用途: 汇总调用方主动提供的计划绑定与产物路径错误，未提供这些可选字段时允许创建。
 def planned_delegation_failure(
     agent: object,
     items: list,
@@ -51,7 +51,7 @@ def planned_delegation_failure(
     return {
         "ok": False,
         "error_code": PLANNED_DELEGATION_ERROR_CODE,
-        "error": "当前已有结构化任务清单，但本次派工没有完整绑定计划，或显式产物声明越出当前工作区；本批没有创建任何子代理。",
+        "error": "本次派工提供了无效的计划绑定，或显式产物声明越出当前工作区；本批没有创建任何子代理。",
         "planned_dispatch": contract,
         "allowed_workspace_roots": list(roots),
         "invalid_output_files": invalid_output_files,
@@ -138,21 +138,19 @@ def _required_repairs(
     invalid_output_files: list[dict[str, object]],
 ) -> list[dict[str, object]]:
     repairs: list[dict[str, object]] = []
-    if int(contract.get("open_count") or 0) <= 0:
-        repairs.append({
-            "action": "extend_task_progress_before_delegation",
-            "reason": "现有计划没有仍可绑定的 open 项；先用 task_progress 新增真实工作项。",
-        })
     if (
-        contract.get("missing_covers_indexes")
-        or contract.get("unknown_covers_by_item")
+        contract.get("unknown_covers_by_item")
         or contract.get("unavailable_covers_by_item")
         or contract.get("duplicate_covers")
     ):
         repairs.append({
-            "action": "bind_each_item_to_one_open_plan_id",
+            "action": "repair_or_remove_invalid_covers",
             "open_target_ids": list(contract.get("open_target_ids") or []),
-            "reason": "给每个 item 填写它独占负责的 covers exact id；未知、已关闭或跨 item 重复 id 不可用。",
+            "unbound_item_indexes": list(contract.get("unbound_item_indexes") or []),
+            "reason": (
+                "covers 可省略；只有确实对应同一工作时才绑定 open exact id。返工已关闭项应先用 "
+                "task_progress 以 correction=true 重开原 id，再绑定原 id；不能拿无关 open id 顶替。"
+            ),
         })
     if invalid_output_files:
         repairs.append({

@@ -1,5 +1,21 @@
 # STATUS
 
+## 2026-08-23 Prompt 4 r17：直接 goal 改善，mandatory covers 造成 Git 返工错绑 GUI（本地修复候选）
+
+- `4c3a59d` 已推送并部署到 `.7` 唯一 Gateway。fresh tmux
+  `dsh-p4-lazygit-r17-ea91639` 在固定 lazygit 提交上只输入一次原样 Prompt 4；MiniMax-M2.7 自主选 Rust、
+  建 7 项 Todo，并创建 3 名 child。首名只做骨架，第二名只做 TUI，均未再替 Git/GUI 兄弟扩做；前三名
+  DONE 后 root 也自然醒来，证明 child 直接 goal 边界和 lifecycle 主链改善。
+- 第三名 Git child 将完整 Rust Git 模块写到 cwd 根部的 `Cargo.toml + src/git/`，没有写入已有
+  `rust-port/`，形成两棵项目树。root 识别到需要重做；但 Git Todo `3` 已被 DONE 自动关闭，而下一 open
+  Todo `4` 是 GUI。mandatory covers 不允许它省略或绑定已关闭 `3`，结果新“Git 命令封装实现”child 明确
+  带 `covers=["4"]`，TUI 当场把“GUI 控制器层”错误显示为进行中。
+- 现场已只用 TUI `/stop` 收口：root `PAUSED`，前三名 `DONE`，错绑第四名 `CANCELLED`，无残留 runner；
+  被测产物没有由测试者修改。当前候选按 会话运行时 spawn 边界把 covers 改为可选 exact 映射：省略时 child
+  用真实 run id 形成独立进度行、不碰现有 Todo；提供的未知/关闭/重复 id 仍原子拒绝。返工原项需先
+  `task_progress(status=in_progress, correction=true)` 重开原 id，不能拿无关 open id 顶替。直接 59 项
+  回归已通过，待文档、扩展 focused、严格 gate、发布部署与 fresh r18。
+
 ## 2026-08-23 Prompt 4 r16：自主派工通过，child 越过直接 goal 写到兄弟任务（本地修复候选）
 
 - `b7005a8` 已推送并部署到 `.7` 唯一 Gateway。fresh tmux
