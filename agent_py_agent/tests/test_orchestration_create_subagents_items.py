@@ -11,7 +11,14 @@ def _agent(max_subagents: int = 10) -> MagicMock:
     mock_agent = MagicMock()
     mock_agent.config.enable_subagents = True
     mock_agent.config.max_subagents = max_subagents
+    # 普通 helper 明确表示“当前没有 canonical 计划”；不能让 MagicMock 的
+    # 动态 root/home_paths 偶然解析到工作区或 /tmp 中其它测试留下的账本。
+    mock_agent.home_paths = None
+    mock_agent.root = None
+    mock_agent._current_run_params = None
+    mock_agent._current_subagent_run_id = ""
     mock_agent.subagents.workspace = Path("/tmp/subs")
+    mock_agent.subagents.list_runs.return_value = []
     return mock_agent
 
 
@@ -384,8 +391,11 @@ class TestCreateSubagentsItemsMode:
         payload = json.loads(result.output)
 
         assert result.ok is False
+        assert result.error_code == "SUBAGENT_PLANNED_DELEGATION_INVALID"
         assert result.reported_error_code == "SUBAGENT_PLANNED_DELEGATION_INVALID"
         assert result.effect_outcome == "not_started"
+        assert result.retryable is True
+        assert result.recommended_action == "repair_tool_arguments"
         assert payload["planned_dispatch"]["missing_covers_indexes"] == [0, 1]
         assert mock_agent.subagents.create_run.call_count == 0
 
@@ -484,6 +494,7 @@ class TestCreateSubagentsItemsMode:
         })
 
         assert result.ok is False
+        assert result.error_code == "SUBAGENT_PLANNED_DELEGATION_INVALID"
         assert result.reported_error_code == "SUBAGENT_PLANNED_DELEGATION_INVALID"
         assert json.loads(result.output)["planned_dispatch"]["missing_covers_indexes"] == [0]
         assert mock_agent.subagents.create_run.call_count == 0

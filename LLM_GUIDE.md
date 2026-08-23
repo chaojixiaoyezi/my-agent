@@ -34,7 +34,8 @@
   每个 item 必须用 `covers` 绑定仍 open 且未被同批其它 item 占用的 exact id；有写工具并直接产出产品
   代码的 typed role 还必须用 `output_files` 声明父级 workspace 内互不重叠的写入集合。失败统一返回
   `effect_outcome=not_started + required_repairs`，整批零创建。这个合同不读 goal/标题/代码量，不判断质量
-  或完成，也不能靠 capability grant 扩到兄弟目录；模型修正结构化参数后重试原任务。
+  或完成，也不能靠 capability grant 扩到兄弟目录；模型修正结构化参数后重试原任务。它的控制报码必须
+  在唯一 `error_taxonomy` 登记为可修参数错误，不能让外层降成 `UNKNOWN_ERROR` 后误导模型报告阻塞。
 - 普通主代理和子代理共用 `turn_end.reason`：`completed` / `blocked` /
   `max-tokens` / `aborted` / `error` / `interrupted`。它只表示一轮为什么结束，
   不从模型正文、验收清单、产物数量或测试描述反推完成。

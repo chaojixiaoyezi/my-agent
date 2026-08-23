@@ -1,5 +1,24 @@
 # STATUS
 
+## 2026-08-22 Prompt 4 r13：创建前原子合同通过，错误分类表漏码（本地修复候选）
+
+- `611ee55` 已通过严格 gate、推送并部署到 `.7` 唯一 Gateway。fresh tmux
+  `dsh-p4-lazygit-r13-ea91639` 对固定 `jesseduffield/lazygit@ea916395` 只输入一次原样 Prompt 4；GitHub
+  当前约 8.1 万 stars，本地为 957 个生产 Go 文件、91,175 行功能代码、118 个测试文件、368 个测试函数。
+- root 先建立 8 项计划，同一模型轮分 5 批尝试把多个 child 绑定到同一个粗粒度 Todo。五批均在任何 run
+  落盘前返回 `SUBAGENT_PLANNED_DELEGATION_INVALID + effect_outcome=not_started`，现场 child 数始终为 0。
+  root 没被终止；它自行把计划细分为 18 项，经历 provider 的 2 秒/5 秒连接退避后，成功创建一名绑定
+  `core-git-commands-1` 的 child，输出严格落在当前 cwd 的两份 Rust 文件，没有兄弟目录或 capability grant。
+- child 实际写出 `branch.rs` 703 行、`branch_loader.rs` 593 行，在一次运行命令失败后继续修正，约 8 分钟
+  自然 DONE；TUI 的实时上下文从 30.3k 增至 108.1k、compact 0，root 收到 lifecycle wake 后继续整理。
+  child 最终说明当前机器没有 cargo，因此这只证明真实写入、失败后续做和 wake，不证明 Rust 项目可编译，
+  更不代表 Prompt 4 完成。现场随后用 `/stop` 收口，root 为 PAUSED、child 为 DONE，无残留 runner。
+- 新缺口是控制报码：JSON 正文和 `reported_error_code` 正确，但新码未登记到唯一 `error_taxonomy`，外层工具
+  进度显示 `UNKNOWN_ERROR`。本地候选将它登记为 orchestration、retryable、
+  `repair_tool_arguments`，对齐 会话运行时 的可修工具错误回送同一 turn；不加专项重试器。focused/严格 gate、
+  推送、单 Gateway 部署后用 fresh r14 验证 TUI/工具账不再降级，并继续观察后续多批派工。含工具结果
+  分类的 223 项 focused 回归已通过。
+
 ## 2026-08-22 Prompt 4 r12b：active-turn 连续性通过，漏绑计划与兄弟目录把 child 拖入权限死路（本地修复候选）
 
 - `5f1f485` 已通过严格 gate、推送并部署到 `.7` 唯一 Gateway。fresh tmux

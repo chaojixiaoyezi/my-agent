@@ -350,6 +350,16 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "确需接管时显式给 replacement_for_run_ids。工具失败不改变用户原始约束。"
         ),
     ),
+    "SUBAGENT_PLANNED_DELEGATION_INVALID": ErrorContract(
+        code="SUBAGENT_PLANNED_DELEGATION_INVALID",
+        category="orchestration",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint=(
+            "本批尚未创建任何子代理；按结果中的 required_repairs 修正 exact covers 与"
+            "父级 workspace 内互不重叠的 output_files 后，保持用户原始约束重新派工。"
+        ),
+    ),
     "SUBAGENT_ACTIVE_LINEAGE_EXISTS": ErrorContract(
         code="SUBAGENT_ACTIVE_LINEAGE_EXISTS",
         category="orchestration",

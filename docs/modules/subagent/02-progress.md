@@ -11,7 +11,12 @@
   整批不留半个 run。批内与既有 active child 的目录相同或存在父子覆盖，也沿现有输出锁原子拒绝。
 - 这不是恢复机器验收：没有计划的轻量派工不受影响；read-only、tester、coordinator 等不直接拥有产品
   写集合的 typed role 不被强制声明代码目录；宿主不读 goal/标题/LOC/测试数量，不推进 Todo、不决定完成。
-  205 项 focused 回归已通过，仍需严格 gate、部署和 fresh r13 原样 Prompt 4。
+  初始 205 项 focused 回归与 fresh r13 的原子拒绝/合法创建证据已通过。
+- fresh r13 首次真实拒绝证明零 child 原子性生效，也暴露新报码未进唯一 `error_taxonomy` 时外层显示
+  `UNKNOWN_ERROR`。当前小修将它登记为 orchestration + retryable + `repair_tool_arguments`，让同一模型
+  turn 按 typed repairs 返工；不新增宿主循环。r13 中模型已自行把 8 项粗计划拆成 18 项，并成功创建一名
+  带 exact covers 和 cwd 内 output files 的 child。加入分类与 fixture 隔离后 223 项 focused 通过，待部署
+  和 fresh r14。
 
 ## 2026-08-22 r10 completion wake active-turn 断点（本地候选）
 

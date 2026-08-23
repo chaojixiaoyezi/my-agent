@@ -1121,3 +1121,6 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   coordinator 等不直接拥有产品写集合的 typed 角色不被强迫声明代码输出。
 - capability 恢复继续服从现有安全围栏：请求目录在父级 workspace 之外时不能 grant，应 `deny` 并唤醒同
   一 child 回到已有写区；创建前的新合同应使这种越界请求成为异常兜底，而不是常规派工路径。
+- fresh r13 首次命中发现新报码虽保留在 `reported_error_code` 与 JSON 正文，控制码却因错误分类表漏登记
+  降成 `UNKNOWN_ERROR`。该码必须进入唯一 `error_taxonomy`，语义为 orchestration、可重试、
+  `repair_tool_arguments`；这保持 会话运行时 式“把可修工具错误回送同一 turn 返工”，不能另加专项重试器。

@@ -4,6 +4,10 @@
 
 最近收口重点：
 
+- 2026-08-22 `611ee55` 已部署，Prompt 4 r13 真 TUI 证明计划内派工原子合同生效：5 批重复 covers 均零
+  child，模型自行细分计划后创建了 exact covers + cwd 内精确写入集合的 child；该 child 实际产出 1,296
+  行 Rust、失败后继续并自然唤醒 root。r13 同时抓到新报码漏进 taxonomy、外层显示 `UNKNOWN_ERROR`；
+  当前本地小修把它归为可修参数的 orchestration 错误，不增加专项循环。发布与 r14 见 STATUS/ROADMAP。
 - 2026-08-22 Prompt 4 r12b 已证明 `5f1f485` 的 native active-turn handoff 保留原目标、语言和嵌套工具
   参数；同时抓到计划内派工仍可漏 `covers`、把兄弟目录藏在 goal 后先创建再权限阻塞。当前本地实现把
   exact Todo 绑定、直接编码 child 的结构化写入集合和父级 workspace 上界合并为创建前原子合同；失败整批

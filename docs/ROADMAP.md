@@ -256,6 +256,13 @@ child，随后写边界拒绝，main 又反复尝试不能批准的越界 grant�
 部署后，用 fresh r13 原样 Prompt 4 验证模型能按回执自行修正参数、在当前 cwd 内创建新语言实现，并继续
 保持原目标。测试者仍只输入一次原 prompt，不补代码、不追加推动消息。
 
+`611ee55` 部署后的 fresh r13 已证明上述 create-time 合同：5 批重复 covers 全部零 child 原子拒绝；模型
+随后把 8 项计划细分为 18 项，并成功创建一名带 exact covers、当前 cwd 内两个精确输出文件的 Rust child。
+该 child 写出 1,296 行代码，失败后继续修正并自然 DONE，root 收到 wake；因测试机无 cargo，本轮不声称
+编译通过。新发现是 `reported_error_code` 虽正确，新码未登记 taxonomy，控制层/TUI 显示
+`UNKNOWN_ERROR`。当前候选只补唯一错误分类为 retryable + repair arguments，不造第二个重试器；部署后
+fresh r14 原样验证工具状态、模型返工和后续多批派工。r13 已 `/stop` 为 PAUSED，无残留 runner。
+
 ### 用户直控子代理的共享控制面
 
 状态：设计中，直属 child 只读状态投影已部署并完成真机 smoke
