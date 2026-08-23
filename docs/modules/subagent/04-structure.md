@@ -15,6 +15,8 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   新 task 或 runner。
 - closeout 状态只存在当前 `live_archive_state`，配置次数有界；不存在这份状态时 fail-open，避免旧调用方
   形成无限提醒。原生协议通过 runtime-guidance user message 把核对包送给 provider。
+- 该入口已随 `e94f8ec` 发布并部署；focused 已证明核对包真实进入下一次 provider messages。fresh r19
+  在 final 前自行关闭全部 Todo，因此只证明正常关闭路径无回归，不算 open-Todo 分支的直接真机覆盖。
 
 ## 2026-08-22 lifecycle wake 的 root active-turn 续接
 

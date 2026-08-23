@@ -1,5 +1,26 @@
 # STATUS
 
+## 2026-08-23 Prompt 4 r19：子代理/Compact 稳定，生成产物真实启动白屏
+
+- `e94f8ec` 已推送并部署到 `192.0.2.7` 的唯一 Gateway。fresh tmux
+  `dsh-p4-lazygit-r19-ea91639` 在固定 `jesseduffield/lazygit@ea916395` 上只输入一次原样 Prompt 4；
+  MiniMax-M2.7 自主选择 Python + Textual、建立 8 项 Todo，并在首批 5 名超过容量被原子拒绝后自行改成
+  合法批次。最终 5 名 child 全部自然 `DONE`，没有失败、取消或重试；root 也随 lifecycle event 自然醒来，
+  没有测试者追加推动消息、安装工具链或修改产物。
+- 第五名测试 child 的当前上下文从 113.8k 触发统一 Conversation Compact，TUI 如实显示
+  `compact 0 -> 1`，压缩后回到 39.3k 并继续到完成。root 随后真实执行生成项目的测试，得到
+  `112 passed in 2.34s`；交互式入口被 30 秒命令超时终止时，工具账正确记录
+  `TOOL_OPERATION_OUTCOME_UNKNOWN / TOOL_TIMEOUT`，没有把超时伪装成成功。
+- 任务产物仍明确不合格。原项目有 957 个非测试 Go 文件、114,376 行物理生产代码；生成的 port 只有
+  30 个 Python 源文件、5,404 行生产代码和 5 个测试文件、1,842 行测试。112 个测试只覆盖它自己缩小后的
+  实现。独立真实产物 TUI `dsh-p4-product-r19-ea91639` 进程持续存活却整屏空白：入口创建
+  `LazyGitApp`，但该 App 从未 compose、注册或 push 已定义的 `LazyGitScreen`，所以 Textual 只挂载空默认
+  screen。该轮不能算“完整复刻”或可运行交付。
+- r19 的模型在 final 前主动把 8/8 Todo 全部关闭，因此现场没有产生
+  `task-progress-closeout-reconciliation` 事件，不能声称直接真机覆盖了 open-Todo 停止钩子。该钩子的
+  native provider-message、关清、耗尽 blocked 和主链状态回归已通过并随 `e94f8ec` 发布；下一条真实长任务
+  若自然留下 open Todo，仍需补一份直接 TUI 证据。宿主继续不按 LOC、测试数或产物内容做业务质量验收。
+
 ## 2026-08-23 Prompt 4 r18：5/8 Todo 未完成却被写成 DONE（本地修复候选）
 
 - `2d03803` 部署后的 fresh tmux `dsh-p4-lazygit-r18-ea91639` 在固定

@@ -673,6 +673,16 @@ lazygit commit 上只输入一次原样 Prompt 4，测试者不得安装工具�
 开放 Todo 触发同轮继续或诚实 blocked，durable root 不再假 DONE，并同时观察 main/child token、Compact
 与职责短句保持真实。
 
+`e94f8ec` 部署后的 fresh r19 使用 `.7` 唯一 Gateway、MiniMax-M2.7、tmux
+`dsh-p4-lazygit-r19-ea91639` 和 `jesseduffield/lazygit@ea916395`，仍只输入一次原样 Prompt 4。root 建立
+8 项 Todo，5 名 child 全部一次自然 DONE；第五名在 113.8k 触发 canonical Compact，TUI 从 `compact 0`
+更新为 `compact 1`，压缩后 39.3k 并继续完成。root 真实执行 port 的测试得到 112 passed；但独立产物
+smoke 的 tmux `dsh-p4-product-r19-ea91639` 只有背景色、零可见组件。源码证明 `LazyGitScreen.compose()`
+虽已定义，`LazyGitApp` 却从未 compose/register/push 它。原项目 957 个生产文件、114,376 行物理生产代码，
+port 只有 30 个生产文件、5,404 行生产代码；5 个测试文件不能证明完整功能等价。r19 在 final 前自行关闭
+8/8 Todo，故没有直接命中 open-Todo 核对分支；该分支仍以 native provider-message focused 回归为发布
+证据，下一次自然出现 open Todo 的原样重型任务再补直接 TUI 证据，不能人为改账或用玩具 prompt 诱发。
+
 真实本地模型回归示例：
 
 ```bash

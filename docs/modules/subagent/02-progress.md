@@ -1,5 +1,18 @@
 # Subagent Progress
 
+## 2026-08-23 r19 子代理/Compact 正样本与产物白屏反例
+
+- `e94f8ec` 已推送并部署到 `.7` 唯一 Gateway。fresh r19 只输入一次原样 Prompt 4，root 自主建立 8 项
+  Todo；5 名 child 全部一次自然 DONE，root 每批都由 lifecycle event 唤醒，没有巡场、失败、取消或测试者
+  推动。第五名在当前上下文 113.8k 时沿唯一 Conversation Compact 从 generation 0 推进到 1，压缩后
+  39.3k 继续完成，证明 child 实时 token 和 Compact 次数不是启动快照。
+- root 真实执行生成项目的 112 个测试并全部通过，但独立产物 TUI 进程活着、整屏零可见组件。源码直接
+  显示 `LazyGitScreen.compose()` 定义了 UI，`LazyGitApp` 却没有 compose/register/push 该 Screen；30 个
+  Python 生产文件、5,404 行代码也远小于原项目 957 个文件、114,376 行物理生产代码。该轮不算完整复刻。
+- root 在 final 前主动关闭 8/8 Todo，所以 r19 没有直接触发同轮停止核对。native provider-message 与
+  typed blocked focused 回归已随发布通过；后续等待真实重型任务自然留下 open 项，不能人工改账或用玩具
+  prompt 诱发，也不能把本次产品缺口变成宿主 LOC/测试/界面质量验收器。
+
 ## 2026-08-23 r18 普通计划同轮停止核对（本地候选）
 
 - `2d03803` 部署后的 fresh r18 中，root 已关闭 5/8 Todo；构建、自动测试、端到端验证仍 pending，机器也

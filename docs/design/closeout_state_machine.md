@@ -1,4 +1,4 @@
-# 轮结束与自然收口设计（状态：2026-08-23 同轮停止核对本地已实现，待真机）
+# 轮结束与自然收口设计（状态：2026-08-23 已发布；open-Todo 直接真机样本待补）
 
 > 参考：会话运行时 的模型/工具 active turn 和 DSH `turn/end.reason`。
 > 本文只定义“一轮为什么停”，不定义通用业务质量验收。
@@ -78,3 +78,7 @@ capability 阻塞立即唤醒。新工作片从 canonical child state 获得结�
 - 无 acceptance/evidence 的普通 child 可启动并自然 `DONE`；
 - `max-tokens` / `interrupted` 不得误标 `DONE`；
 - 真机只用一个 Gateway，通过 TUI 发送普通用户 prompt，测试者不旁路补产物。
+- `e94f8ec` 的 native 回归必须证明核对包进入下一次 provider messages，而不是只增加调用计数；fresh
+  Prompt 4 r19 因模型先关闭 8/8 Todo 未触发该分支，只算发布后无回归样本，不算直接分支验收。
+- 产品代码量、生成测试数量和真实界面质量继续留给模型/用户验收。r19 的“112 passed 但真实 TUI 白屏”
+  是明确反例，禁止因此把宿主目录扫描或业务质量判定重新塞回本状态机。

@@ -1192,7 +1192,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 
 ## 2026-08-23 普通计划的 会话运行时 式同轮停止核对
 
-状态：本地实现与定向回归已完成；待严格 gate、发布后用 fresh Prompt 4 r19 真 TUI 验收。
+状态：`e94f8ec` 已通过严格 gate、发布并部署；open-Todo 直接真 TUI 证据待自然样本。
 
 - 解决问题：fresh Prompt 4 r18 中，root 自己建立 8 项 canonical Todo，只完成 5 项且把测试三项保留为
   `pending`，最终回复仍声称“代码已完整生成”；会话任务和 task workspace 随后都被宿主写成完成。现场
@@ -1210,3 +1210,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 一次同轮核对后仍有可执行 open 项，或清单只剩显式 `blocked` 项时，本轮以 typed `blocked` 结束，保留
   模型撰写的诚实说明，不把 conversation task / standalone workspace 写成 `DONE`，也不偷偷创建第二个
   `ordinary_task_resume`。用户后续消息仍可在同一 thread/task/workspace 继续。
+- fresh Prompt 4 r19 在 final 前主动把 8/8 Todo 全部关闭，因此没有产生核对事件；不能把“钩子未触发”
+  写成直接真机通过。r19 同时证明 112 个自建测试可能与真实启动相悖：生成 App 没有挂载 Screen，进程
+  存活但整屏空白。该反例不改变本条边界：宿主不按 LOC、测试数量或界面内容决定业务完成；后续改善必须
+  让模型基于结构化工具事实维护计划和验证实际入口，而不是恢复第二套机器验收状态机。

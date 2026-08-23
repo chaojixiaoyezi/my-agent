@@ -116,7 +116,8 @@
   final 时，`pending/in_progress/unknown` exact 项会经 native runtime-guidance 在同一 active turn 有界核对
   一次。关清后自然完成，耗尽仍 open 或只剩显式 blocked 时 typed blocked，不把 durable task 写成 DONE，
   也不创建 `ordinary_task_resume`。新项要求稳定 `id/title/status`，模型旧 pending 不能覆盖 canonical child
-  DONE；`covers` 仍只绑定 exact id。focused 已通过，待 fresh r19 真 TUI 后勾选。
+  DONE；`covers` 仍只绑定 exact id。native provider-message 与主链 focused 已通过并随 `e94f8ec` 发布；
+  r19 在 final 前自行关闭 8/8，未直接命中 open 分支，仍待下一条自然留下 open Todo 的真实 TUI 证据后勾选。
 - [x] lifecycle/Compact 续跑的 durable tool index 保留有界递归且凭据脱敏的 JSON 参数；native 不伪造旧
   ToolCall/ToolResult，而是安装唯一有界 CompactionSummary handoff。真实 UserTurn 保持在 handoff 之后；
   Task Runtime State 暴露 canonical Todo exact ids 与 `create_subagents.items[].covers` 字段，宿主不按标题猜。
@@ -178,16 +179,20 @@
   open 兄弟 id 顶替。可选 output hint 若提供则只落当前 cwd，不把模型预报当完整写集或权限。每名 child
   只完成直接父级 goal，不替兄弟扩做；root 保持原语言、完整范围和“主代理不得写功能代码”边界。r18
   未再出现 r17 的强制错绑；新的 5/8 假收口单列为 r19 同轮停止核对验收。
-- [ ] fresh Prompt 4 r19 在固定 lazygit commit 和唯一 Gateway 上只输入一次原样用户 prompt；若 root 自己的
-  canonical Todo 尚有 open 项，TUI/日志应证明模型在同一 active turn 收到 exact 核对并继续，或将真实
-  阻塞写为 blocked 后如实汇报。任何情况下 durable root 都不能在 open Todo 下变成 DONE；测试者不装
-  Rust/Cargo、不改产物、不追加技术推动消息，并继续核对职责短句、失败工具状态、实时 token/Compact。
+- [x] fresh Prompt 4 r19 在固定 lazygit commit 和唯一 Gateway 上只输入一次原样用户 prompt；测试者未改
+  产物、未追加推动消息。5 名 child 全部自然 DONE，第五名上下文 113.8k 时真实 Compact 一次并继续；root
+  执行 112 个生成测试，但独立产物 TUI 白屏，不能算完整复刻。root 在 final 前已主动关闭 8/8 Todo，故这
+  一项只证明 r19 测试已完成，不冒充 open-Todo 停止钩子的直接真机证据。
+- [ ] 下一条原样重型任务若自然留下 canonical open Todo，TUI/日志应证明模型在同一 active turn 收到 exact
+  核对并继续，或将真实阻塞写为 blocked 后如实汇报；durable root 不能在 open Todo 下变成 DONE。不得
+  人工篡改账本、追加技术提示或用玩具 prompt 专门诱发。
 - [ ] 真实测试中 main/child/grandchild 各自沿独立 `agent_thread_id` Compact 后能继续工作；至少一条 child
   链连续发生多代 generation，近期完整回合、工具事实、任务状态和产物引用不丢，且没有重做已经成功的
   副作用。持久 native IR 裁剪与 transcript 压缩都只推进该 thread generation；presentation/no-save 临时事件
   和旧 apply ledger 不计入。Compact provider 请求必须由真实任务 user 开头、synthetic 摘要 user 结尾；真机
   checkpoint summary 要包含任务、进展、路径和待办，不能只是最后工具动作的普通续写。child 使用工作工具时
-  不得覆盖父 `conversation_thread_id` 或重绑父 conversation task。
+  不得覆盖父 `conversation_thread_id` 或重绑父 conversation task。r19 已补到 child 单代正样本：113.8k
+  触发后 `compact 0 -> 1`、39.3k 继续完成；main、孙代理和连续多代仍未因此提前勾选。
 - [ ] 真实 IM 双用户验证 compact/memory/旧聊天检索不串 owner 或 chat，结束后恢复生产 compact 阈值。
 - [ ] `/verbose on/full/off` 只改变当前 thread，不进入 transcript/guidance/模型；进度发送不触发任务重做，最终回复仍能送达。
 - [ ] CLI 与真实 IM 的 `/status`、`/btw <内容>`、`/stop`、`/goal ...`、`/verbose ...` 都由统一系统命令入口处理；任何未知 `/XXXX` fail-closed，不进入普通队列、transcript 或模型。

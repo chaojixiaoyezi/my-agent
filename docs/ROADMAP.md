@@ -21,11 +21,18 @@
 
 ### 普通计划的 会话运行时 式同轮停止核对
 
-状态：本地已实现，待严格 gate、单 Gateway 部署和 Prompt 4 r19 真 TUI
+状态：`e94f8ec` 已通过严格 gate、推送并部署；直接 open-Todo 真 TUI 分支待自然样本
 
 解决问题：模型自己留下未完成 Todo 时，旧底座仍把普通 final 写成整个任务完成，造成“5/8 已做却
 DONE”的假收口。当前按 会话运行时 stop hook 在同一 active turn 有界返工一次；不扫描业务产物、不恢复机器
 验收、不自动新开下一轮。核对后仍有 open 项则诚实保留为 blocked，供用户在原 task 继续。
+
+当前进展：native provider-message、关清后完成、一次耗尽 blocked、只有 blocked、跳过专用生命周期和
+状态保持的 focused 回归已通过。fresh Prompt 4 r19 的 5 名 child 全部自然 DONE，且一名 child 在 113.8k
+真实 Compact 后继续；但模型在 final 前主动关闭 8/8 Todo，因此没有直接触发本钩子。r19 生成项目虽然
+自测 112 passed，独立真实启动却因 App 没有挂载已定义 Screen 而白屏；这属于模型计划/测试覆盖失真，
+不能通过恢复宿主 LOC、测试数或产物扫描来冒充通用质量裁判。下一条真实长任务自然出现 open Todo 时再补
+直接分支证据，不用玩具 prompt 或人工改账诱发。
 
 ### 单 Gateway 多 TUI 项目目录与正式提示词 2
 

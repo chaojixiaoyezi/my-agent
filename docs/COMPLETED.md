@@ -4,6 +4,11 @@
 
 最近收口重点：
 
+- 2026-08-23 `e94f8ec` 已完成普通计划 会话运行时 式同轮停止核对的严格 gate、推送和 `.7` 唯一 Gateway 部署；
+  native 回归证明 exact open 清单会进入下一次 provider messages，耗尽只 typed blocked。fresh Prompt 4
+  r19 的 5 名 child 全部自然 DONE，第五名在 113.8k 发生一次 canonical Compact 后继续，root 真实跑出
+  112 passed；但模型在 final 前自行关闭 8/8，故未直接触发停止钩子。生成 port 只有原项目约二十分之一的
+  生产代码，独立产物 TUI 因 App 未挂载 Screen 而白屏，不能算完整复刻。完整证据边界见 STATUS/ROADMAP。
 - 2026-08-23 Prompt 4 r18 证明可选 covers 后 root 能继续多批真实编码，但在 canonical Todo 仅完成 5/8、
   构建/测试仍 pending 且机器无 Rust/Cargo 时，普通 final 仍把 durable task 写成 DONE。本地切片已按 会话运行时
   stop hook 增加同一 active turn 的一次结构化清单核对；耗尽后只会 typed blocked，不另起自动续轮，也不
