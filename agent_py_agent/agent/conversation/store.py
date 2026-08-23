@@ -49,6 +49,7 @@ from .models import (
     ObservationEvent,
     ProgressPolicy,
     ThreadGoal,
+    ThreadModelUsageEvent,
     ThreadTaskLink,
     WakeSignal,
     new_id,
@@ -347,6 +348,7 @@ class ConversationBaseStore:
         self.root = Path(root)
         self.threads_dir = self.root / "threads"
         self.messages_dir = self.root / "messages"
+        self.model_usage_dir = self.root / "model_usage"
         self.tasks_dir = self.root / "tasks"
         self.policies_dir = self.root / "progress_policies"
         self.observations_dir = self.root / "observations"
@@ -380,6 +382,7 @@ class ConversationBaseStore:
         return (
             self.threads_dir,
             self.messages_dir,
+            self.model_usage_dir,
             self.tasks_dir,
             self.policies_dir,
             self.observations_dir,
@@ -402,6 +405,12 @@ class ConversationBaseStore:
 
     def _message_path(self, thread_id: str) -> Path:
         return self.messages_dir / f"{thread_id}.jsonl"
+
+    # LLM: Model usage is one append-only ledger per exact owner-scoped thread;
+    # its path never derives from prompts, cwd text, or a model response.
+    # 函数用途: 返回指定会话的模型用量账本路径。
+    def _model_usage_path(self, thread_id: str) -> Path:
+        return self.model_usage_dir / f"{safe_file_stem(thread_id)}.jsonl"
 
     def _task_path(self, task_id: str) -> Path:
         return self.tasks_dir / f"{task_id}.json"
@@ -1435,7 +1444,137 @@ def _updated_task_link(
     )
 
 
-class ConversationTaskStore(ConversationMessageStore):
+class ConversationModelUsageStore(ConversationMessageStore):
+    # LLM: This is the one durable per-thread usage append. The event id is a
+    # host-generated idempotency key; conflicting reuse fails closed instead of
+    # silently changing historical cost facts.
+    # 函数用途: 将一次已结束模型轮的精确用量幂等追加到所属会话。
+    def append_model_usage_once(self, request: dict[str, Any]) -> ThreadModelUsageEvent:
+        event = _thread_model_usage_event(request)
+        self._require_thread(event.thread_id)
+        path = self._model_usage_path(event.thread_id)
+        transition = path.with_name(f".{path.name}.append-once")
+        with locked_file_transition(transition):
+            events, load_errors = self.model_usage_events_report(event.thread_id)
+            if load_errors:
+                raise DataCorruptionError(
+                    f"conversation model usage ledger is unreadable: {event.thread_id}"
+                )
+            existing = next(
+                (item for item in events if item.event_id == event.event_id),
+                None,
+            )
+            if existing is not None:
+                if _model_usage_identity_payload(existing) != _model_usage_identity_payload(
+                    event
+                ):
+                    raise DataCorruptionError(
+                        f"model usage event id reused with different input: {event.event_id}"
+                    )
+                return existing
+            append_jsonl(path, event.to_dict(), sort_keys=True)
+            return event
+
+    # LLM: A corrupt row remains an explicit load error; consumers must never
+    # convert missing or unreadable provider usage into a zero-cost turn.
+    # 函数用途: 读取指定会话的全部模型用量事件及损坏记录。
+    def model_usage_events_report(
+        self,
+        thread_id: str,
+    ) -> tuple[list[ThreadModelUsageEvent], list[dict[str, Any]]]:
+        normalized = str(thread_id or "").strip()
+        if not normalized:
+            raise ValueError("thread_id is required")
+        path = self._model_usage_path(normalized)
+        if not path.exists():
+            return [], []
+        report = read_jsonl_report(path, context="conversation.model_usage")
+        events: list[ThreadModelUsageEvent] = []
+        errors = list(report.load_errors)
+        for row in report.rows:
+            try:
+                event = ThreadModelUsageEvent.from_dict(row)
+                if event.thread_id != normalized:
+                    raise ValueError("thread model usage scope mismatch")
+                events.append(event)
+            except Exception as exc:
+                errors.append(
+                    _jsonl_error(exc, "conversation.model_usage", path=path)
+                )
+        return events, errors
+
+    # LLM: Thread totals add only the explicit provider/estimated partitions
+    # already frozen in each event; legacy mixed totals are not reverse-engineered.
+    # 函数用途: 汇总一个会话的供应商真值和本地估算，供状态面与对照测试读取。
+    def model_usage_summary(self, thread_id: str) -> dict[str, Any]:
+        events, load_errors = self.model_usage_events_report(thread_id)
+        if load_errors:
+            raise DataCorruptionError(
+                f"conversation model usage ledger is unreadable: {thread_id}"
+            )
+        provider = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "call_count": 0,
+        }
+        estimated = {"input_tokens": 0, "output_tokens": 0, "call_count": 0}
+        for event in events:
+            breakdown = event.model_calls.get("usage_breakdown")
+            breakdown = breakdown if isinstance(breakdown, dict) else {}
+            _sum_usage_partition(provider, breakdown.get("provider"))
+            _sum_usage_partition(estimated, breakdown.get("estimated"))
+        return {
+            "schema": "thread_model_usage_summary.v1",
+            "thread_id": str(thread_id or "").strip(),
+            "event_count": len(events),
+            "provider": provider,
+            "estimated": estimated,
+        }
+
+
+# LLM: Event construction accepts only explicit thread/request identities and a
+# frozen model-call summary; it never falls back to owner, cwd, prompt, or task prose.
+# 函数用途: 校验并构造一次线程模型用量事件。
+def _thread_model_usage_event(request: dict[str, Any]) -> ThreadModelUsageEvent:
+    model_calls = request.get("model_calls")
+    event = ThreadModelUsageEvent(
+        event_id=str(request.get("event_id") or "").strip(),
+        thread_id=str(request.get("thread_id") or "").strip(),
+        request_id=str(request.get("request_id") or "").strip(),
+        run_id=str(request.get("run_id") or "").strip(),
+        task_id=str(request.get("task_id") or "").strip(),
+        source=str(request.get("source") or "").strip(),
+        model_calls=dict(model_calls) if isinstance(model_calls, dict) else {},
+        created_at=now(request.get("now")),
+    )
+    return ThreadModelUsageEvent.from_dict(event.to_dict())
+
+
+# LLM: Replay equality excludes created_at because the first committed timestamp
+# is authoritative; every other field must remain byte-for-byte equivalent.
+# 函数用途: 生成模型用量事件用于幂等冲突检查的稳定载荷。
+def _model_usage_identity_payload(event: ThreadModelUsageEvent) -> dict[str, Any]:
+    payload = event.to_dict()
+    payload.pop("created_at", None)
+    return payload
+
+
+# LLM: Partition addition is open to future numeric keys only through the
+# destination schema; unknown source fields cannot silently enter totals.
+# 函数用途: 将一条事件中的非负 token/调用计数累加到指定汇总分区。
+def _sum_usage_partition(target: dict[str, int], source: object) -> None:
+    row = source if isinstance(source, dict) else {}
+    for key in target:
+        try:
+            value = max(0, int(row.get(key) or 0))
+        except (TypeError, ValueError):
+            value = 0
+        target[key] += value
+
+
+class ConversationTaskStore(ConversationModelUsageStore):
     def task_transition_guard(self, task_id: str):
         """Return the cross-process lock shared by steer, stop, and completion."""
         normalized = safe_file_stem(str(task_id or ""))

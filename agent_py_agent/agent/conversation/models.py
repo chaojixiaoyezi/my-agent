@@ -457,6 +457,64 @@ class BackgroundMainAgentReport:
     wake_handled: bool = True
 
 
+# LLM: One immutable event preserves the model-call summary produced by one
+# finalized turn under its exact owner-scoped thread. It contains counters only,
+# never prompts, responses, provider credentials, or lifecycle decisions.
+# 类用途: 把主代理、后台续作和子代理每一轮的真实模型用量追加到所属会话账本。
+@dataclass(frozen=True)
+class ThreadModelUsageEvent:
+    event_id: str
+    thread_id: str
+    request_id: str
+    run_id: str
+    task_id: str
+    source: str
+    model_calls: dict[str, Any]
+    created_at: float = 0.0
+
+    # LLM: Serialization keeps the schema marker beside every append-only row
+    # so future migrations never infer record shape from its directory name.
+    # 函数用途: 将一次会话模型用量事件转换成可持久化字典。
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": "thread_model_usage_event.v1",
+            "event_id": self.event_id,
+            "thread_id": self.thread_id,
+            "request_id": self.request_id,
+            "run_id": self.run_id,
+            "task_id": self.task_id,
+            "source": self.source,
+            "model_calls": dict(self.model_calls),
+            "created_at": self.created_at,
+        }
+
+    # LLM: Usage rows fail closed on unknown schema or missing identity; a
+    # corrupt row must never be treated as zero spend.
+    # 函数用途: 从持久化字典恢复一次模型用量事件并校验关键字段。
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ThreadModelUsageEvent:
+        model_calls = data.get("model_calls")
+        event = cls(
+            event_id=str(data.get("event_id") or "").strip(),
+            thread_id=str(data.get("thread_id") or "").strip(),
+            request_id=str(data.get("request_id") or "").strip(),
+            run_id=str(data.get("run_id") or "").strip(),
+            task_id=str(data.get("task_id") or "").strip(),
+            source=str(data.get("source") or "").strip(),
+            model_calls=dict(model_calls) if isinstance(model_calls, dict) else {},
+            created_at=float(data.get("created_at") or 0.0),
+        )
+        if (
+            str(data.get("schema_version") or "") != "thread_model_usage_event.v1"
+            or not event.event_id
+            or not event.thread_id
+            or not event.request_id
+            or event.model_calls.get("schema") != "model_call_summary.v1"
+        ):
+            raise ValueError("thread model usage event is invalid")
+        return event
+
+
 @dataclass(frozen=True)
 class ObservationEvent:
     observation_id: str
@@ -557,6 +615,7 @@ __all__ = [
     "BackgroundMainAgentReport",
     "ChannelBinding",
     "ConversationThread",
+    "ThreadModelUsageEvent",
     "GUIDANCE_TARGET_TYPES",
     "GuidanceEntry",
     "MessageLogEntry",

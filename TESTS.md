@@ -700,3 +700,10 @@ python3 scripts/live_agent_lab.py --suite tool-recovery --real-llm --timeout 900
 
 真实模式会先发起一次模型调用；key 仅存在但不可用、响应为空或 endpoint 失败都会直接终止，不会把专项
 harness 的离线结果冒充真实模型结果。
+
+会话级模型用量账本的 focused 回归覆盖 provider/estimated 分栏、明细裁剪后累计值、owner/thread
+隔离、append-once 重放、冲突/损坏显式失败，以及后台 `do_save=false` 仍落数字用量但不写 runtime fact：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_model_call_ledger.py agent_py_agent/tests/test_conversation_store.py agent_py_agent/tests/test_memory_runtime_basics.py::test_run_no_save_still_persists_thread_model_usage_without_runtime_archive agent_py_agent/tests/test_gateway_chat_conversation_context.py::test_gateway_response_does_not_fall_back_to_suppressed_internal_result -q --tb=short
+```

@@ -422,6 +422,46 @@ def test_run_no_save_does_not_write_runtime_fact(tmp_path):
     assert not (tmp_path / "memory_archive" / "runtime_facts").exists()
 
 
+def test_run_no_save_still_persists_thread_model_usage_without_runtime_archive(
+    tmp_path,
+) -> None:
+    agent = SimpleAgent(
+        _test_config(tmp_path, model_backend="echo"),
+        tmp_path,
+    )
+    agent.backend = SequenceUsageBackend(
+        [{"input_tokens": 123, "output_tokens": 45}]
+    )
+    thread = agent.conversation_store.get_or_create_thread(
+        {"canonical_user_id": "local-usage", "now": 10.0}
+    )
+
+    result = agent.run(
+        "后台继续整理，但不要写普通运行档案",
+        save=False,
+        request_id="background-usage-1",
+        run_id="task-usage-1",
+        task_id="task-usage-1",
+        source="background_main_agent",
+        allowed_tools=["read_file"],
+        task_attributes={"conversation_thread_id": thread.thread_id},
+    )
+
+    usage = agent.conversation_store.model_usage_summary(thread.thread_id)
+    assert result.archive_events == 0
+    assert usage["event_count"] == 1
+    assert usage["provider"]["call_count"] == 1
+    assert usage["provider"]["input_tokens"] == 123
+    assert usage["provider"]["output_tokens"] == 45
+    assert usage["estimated"]["call_count"] == 0
+    assert not (
+        Path(agent.home_paths.owner_home_dir)
+        / "memory_archive"
+        / "runtime_facts"
+        / "background-usage-1"
+    ).exists()
+
+
 def test_saved_run_runtime_fact_keeps_delivery_contract_outputs(tmp_path):
     agent = SimpleAgent(_test_config(tmp_path, model_backend="echo"), tmp_path)
     requested = tmp_path / "requested-output" / "report.md"

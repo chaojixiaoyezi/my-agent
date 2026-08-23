@@ -32,7 +32,10 @@ handler 内的 owner/thread 鉴权、turn 串行、operation 幂等或状态权�
 
 累计成本另走 `ModelCallLedger`：按 request/run 记录 provider input、output、cache read、
 cache creation 和真实/估算调用数，再投影到 runtime fact、`AgentRunResult` 与 Gateway
-result。它不会反向改动 Context 行，也不会参与 Compact 触发。
+result。每次 finalization 还会把同一冻结 summary 幂等追加到 exact owner/thread 的
+`model_usage/<thread_id>.jsonl`；后台 main 即使 `do_save=false` 也只跳过普通档案，不丢真实模型用量。
+供应商真值和本地估算分栏汇总，损坏账本不能降成零成本。它不会反向改动 Context 行，也不会参与
+Compact、任务完成或权限触发。
 
 薄 TUI 的 audit hook 与 workspace 传递相互独立：客户端无需构造第二个完整 Agent，仍必须把当前绝对
 cwd/roots 放进首次 ask。服务路径继续固定到 owner 唯一 Gateway；workspace 只属于 thread v6，不能因

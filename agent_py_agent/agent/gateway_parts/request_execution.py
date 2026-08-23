@@ -938,6 +938,10 @@ def _update_response_from_result(response: dict, result, request: dict) -> None:
             "model_estimated_usage_call_count": int(
                 getattr(result, "model_estimated_usage_call_count", 0) or 0
             ),
+            # LLM: 这是累计模型账本的冻结分栏投影；不从 Context 行或响应正文重新估算。
+            "model_usage_breakdown": dict(
+                getattr(result, "model_usage_breakdown", None) or {}
+            ),
             "memory_resume_context_injected": result.memory_resume_context_injected,
             "memory_resume_context_query": result.memory_resume_context_query,
             "memory_resume_context_matches": result.memory_resume_context_matches,

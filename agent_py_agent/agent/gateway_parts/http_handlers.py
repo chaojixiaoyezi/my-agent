@@ -402,6 +402,8 @@ _PUBLIC_RESULT_FIELDS = (
     "model_cache_creation_input_tokens",
     "model_provider_usage_call_count",
     "model_estimated_usage_call_count",
+    # LLM: 公开结果保留 provider/estimated 原始分栏，客户端不得从兼容总数反推计费真值。
+    "model_usage_breakdown",
     "memory_resume_context_injected",
     "memory_resume_context_matches",
     "memory_resume_context_token_estimate",

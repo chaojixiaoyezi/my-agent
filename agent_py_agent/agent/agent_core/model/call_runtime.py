@@ -326,6 +326,16 @@ def model_call_summary(
         max(0, int(record.accounted_input_tokens)) for record in records
     )
     output_tokens = sum(max(0, int(record.output_tokens)) for record in records)
+    provider_records = [
+        record
+        for record in records
+        if record.status == "finished" and record.provider_usage_reported
+    ]
+    estimated_records = [
+        record
+        for record in records
+        if record.status == "finished" and not record.provider_usage_reported
+    ]
     return {
         "schema": "model_call_summary.v1",
         "logical_model_turn_count": len(logical_ids),
@@ -353,6 +363,37 @@ def model_call_summary(
             record.status == "finished" and not record.provider_usage_reported
             for record in records
         ),
+        "usage_breakdown": {
+            "schema": "model_usage_breakdown.v1",
+            "provider": {
+                "input_tokens": sum(
+                    max(0, int(record.accounted_input_tokens))
+                    for record in provider_records
+                ),
+                "output_tokens": sum(
+                    max(0, int(record.output_tokens)) for record in provider_records
+                ),
+                "cache_read_input_tokens": sum(
+                    max(0, int(record.cached_input_tokens))
+                    for record in provider_records
+                ),
+                "cache_write_input_tokens": sum(
+                    max(0, int(record.cache_creation_input_tokens))
+                    for record in provider_records
+                ),
+                "call_count": len(provider_records),
+            },
+            "estimated": {
+                "input_tokens": sum(
+                    max(0, int(record.accounted_input_tokens))
+                    for record in estimated_records
+                ),
+                "output_tokens": sum(
+                    max(0, int(record.output_tokens)) for record in estimated_records
+                ),
+                "call_count": len(estimated_records),
+            },
+        },
     }
 
 
@@ -374,6 +415,21 @@ def _empty_model_call_summary() -> dict[str, object]:
         "cache_creation_input_tokens": 0,
         "provider_usage_call_count": 0,
         "estimated_usage_call_count": 0,
+        "usage_breakdown": {
+            "schema": "model_usage_breakdown.v1",
+            "provider": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "cache_write_input_tokens": 0,
+                "call_count": 0,
+            },
+            "estimated": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "call_count": 0,
+            },
+        },
     }
 
 

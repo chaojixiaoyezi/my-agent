@@ -38,6 +38,105 @@ def test_thread_messages_and_channel_bindings_survive_restart(tmp_path) -> None:
     assert bundle["channel_bindings"][1]["channel"] == "wechat"
 
 
+def test_thread_model_usage_is_idempotent_partitioned_and_survives_restart(
+    tmp_path,
+) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {"canonical_user_id": "user-usage", "now": 10.0}
+    )
+    request = {
+        "event_id": "usage-event-1",
+        "thread_id": thread.thread_id,
+        "request_id": "request-1",
+        "run_id": "run-1",
+        "task_id": "task-1",
+        "source": "background_main_agent",
+        "now": 11.0,
+        "model_calls": {
+            "schema": "model_call_summary.v1",
+            "usage_breakdown": {
+                "schema": "model_usage_breakdown.v1",
+                "provider": {
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "cache_read_input_tokens": 70,
+                    "cache_write_input_tokens": 5,
+                    "call_count": 1,
+                },
+                "estimated": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "call_count": 0,
+                },
+            },
+        },
+    }
+
+    first = store.append_model_usage_once(request)
+    replay = store.append_model_usage_once({**request, "now": 99.0})
+    reopened = ConversationStore(tmp_path / "conversations")
+
+    assert first == replay
+    assert reopened.model_usage_summary(thread.thread_id) == {
+        "schema": "thread_model_usage_summary.v1",
+        "thread_id": thread.thread_id,
+        "event_count": 1,
+        "provider": {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "cache_read_input_tokens": 70,
+            "cache_write_input_tokens": 5,
+            "call_count": 1,
+        },
+        "estimated": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "call_count": 0,
+        },
+    }
+
+
+def test_thread_model_usage_conflict_and_corruption_fail_closed(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {"canonical_user_id": "user-usage", "now": 10.0}
+    )
+    request = {
+        "event_id": "usage-event-1",
+        "thread_id": thread.thread_id,
+        "request_id": "request-1",
+        "model_calls": {
+            "schema": "model_call_summary.v1",
+            "usage_breakdown": {
+                "schema": "model_usage_breakdown.v1",
+                "provider": {"input_tokens": 10, "call_count": 1},
+                "estimated": {},
+            },
+        },
+    }
+    store.append_model_usage_once(request)
+
+    with pytest.raises(DataCorruptionError, match="reused with different input"):
+        store.append_model_usage_once(
+            {
+                **request,
+                "model_calls": {
+                    **request["model_calls"],
+                    "usage_breakdown": {
+                        "schema": "model_usage_breakdown.v1",
+                        "provider": {"input_tokens": 11, "call_count": 1},
+                        "estimated": {},
+                    },
+                },
+            }
+        )
+
+    store._model_usage_path(thread.thread_id).write_text("not-json\n", encoding="utf-8")
+    with pytest.raises(DataCorruptionError, match="unreadable"):
+        store.model_usage_summary(thread.thread_id)
+
+
 def test_exact_agent_thread_is_idempotent_unbound_and_rejects_run_collision(
     tmp_path,
 ) -> None:

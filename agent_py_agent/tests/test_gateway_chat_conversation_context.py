@@ -1316,6 +1316,21 @@ def test_gateway_response_does_not_fall_back_to_suppressed_internal_result() -> 
         model_cache_creation_input_tokens=50,
         model_provider_usage_call_count=1,
         model_estimated_usage_call_count=0,
+        model_usage_breakdown={
+            "schema": "model_usage_breakdown.v1",
+            "provider": {
+                "input_tokens": 1000,
+                "output_tokens": 100,
+                "cache_read_input_tokens": 700,
+                "cache_write_input_tokens": 50,
+                "call_count": 1,
+            },
+            "estimated": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "call_count": 0,
+            },
+        },
         memory_resume_context_injected=False,
         memory_resume_context_query="",
         memory_resume_context_matches=0,
@@ -1343,6 +1358,7 @@ def test_gateway_response_does_not_fall_back_to_suppressed_internal_result() -> 
     assert public["model_cache_creation_input_tokens"] == 50
     assert public["model_provider_usage_call_count"] == 1
     assert public["model_estimated_usage_call_count"] == 0
+    assert public["model_usage_breakdown"]["provider"]["cache_read_input_tokens"] == 700
 
 
 def test_gateway_public_path_sanitizer_preserves_completion_facts() -> None:

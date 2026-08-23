@@ -61,6 +61,10 @@ class AgentRunResult:
     model_cache_creation_input_tokens: int = 0
     model_provider_usage_call_count: int = 0
     model_estimated_usage_call_count: int = 0
+    # LLM: Cost-grade usage keeps provider-returned values separate from local
+    # estimates; legacy total fields above remain a compatibility projection.
+    # 字段用途: 区分供应商真实 token 与缺失用量时的本地估算。
+    model_usage_breakdown: dict[str, object] | None = None
     memory_compact_suggested: bool = False
     memory_compact_status: str = "ok"
     memory_compact_ratio: float = 0.0

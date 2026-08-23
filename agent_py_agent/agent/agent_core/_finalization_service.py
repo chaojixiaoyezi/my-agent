@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import time as time_module
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +42,7 @@ class BuildAgentRunResultParams:
     archive_result: object
     token_ledger: dict[str, int]
     run_request_id: str
+    model_calls: dict[str, object]
 
 
 class FinalizationService:
@@ -78,12 +80,24 @@ class FinalizationService:
             context_scope=ctx.context_scope,
         )
         archive_result = self._archive_run_if_needed(archive_params)
-        self._write_runtime_fact_source_if_needed(ctx, run_request_id)
+        model_calls = _current_model_call_summary(
+            self._agent,
+            ctx,
+            run_request_id,
+        )
+        self._write_runtime_fact_source_if_needed(ctx, run_request_id, model_calls)
+        self._write_thread_model_usage_if_bound(ctx, run_request_id, model_calls)
         self._update_main_context_bundle_artifacts(ctx, run_request_id)
         token_ledger = self._estimate_token_usage(_estimate_token_params(ctx, run_request_id))
 
         result = self._build_agent_run_result(
-            BuildAgentRunResultParams(ctx, archive_result, token_ledger, run_request_id)
+            BuildAgentRunResultParams(
+                ctx,
+                archive_result,
+                token_ledger,
+                run_request_id,
+                model_calls,
+            )
         )
         _schedule_typed_unfinished_continuation(self._agent, ctx)
         from ..conversation.goal_runtime import schedule_goal_activated_in_turn
@@ -96,7 +110,10 @@ class FinalizationService:
         return result
 
     def _write_runtime_fact_source_if_needed(
-        self, ctx: FinalizeContext, run_request_id: str
+        self,
+        ctx: FinalizeContext,
+        run_request_id: str,
+        model_calls: dict[str, object],
     ) -> str:
         if not ctx.do_save:
             return ""
@@ -126,14 +143,56 @@ class FinalizationService:
                     latest_archive_refs=_latest_archive_refs(ctx.archive_tool_calls or []),
                     artifact_refs=_artifact_refs(ctx.archive_tool_calls or []),
                     delivery_contract=ctx.delivery_contract,
-                    model_calls=_current_model_call_summary(
-                        self._agent,
-                        ctx,
-                        run_request_id,
-                    ),
+                    model_calls=model_calls,
                 )
             )
         return written
+
+    # LLM: Provider usage follows the exact conversation/agent thread even when
+    # do_save=False. This append is independent from transcript, memory and run
+    # archive saving, so a background wake cannot masquerade as a user turn.
+    # 函数用途: 将本轮模型账幂等写入所属会话；没有可信线程身份时明确跳过而不猜。
+    def _write_thread_model_usage_if_bound(
+        self,
+        ctx: FinalizeContext,
+        run_request_id: str,
+        model_calls: dict[str, object],
+    ) -> str:
+        if int(model_calls.get("physical_model_attempt_count") or 0) <= 0:
+            return ""
+        attrs = ctx.task_attributes if isinstance(ctx.task_attributes, dict) else {}
+        thread_id = str(
+            attrs.get("agent_thread_id")
+            or attrs.get("conversation_thread_id")
+            or ""
+        ).strip()
+        store = getattr(self._agent, "conversation_store", None)
+        append_usage = getattr(store, "append_model_usage_once", None)
+        if not thread_id or not callable(append_usage):
+            return ""
+        request_id = str(ctx.request_id or run_request_id or "").strip()
+        identity = "\x1f".join(
+            (
+                thread_id,
+                request_id,
+                str(ctx.run_id or "").strip(),
+                str(ctx.source or "").strip(),
+            )
+        )
+        event_id = "usage-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+        event = append_usage(
+            {
+                "event_id": event_id,
+                "thread_id": thread_id,
+                "request_id": request_id,
+                "run_id": str(ctx.run_id or "").strip(),
+                "task_id": str(ctx.task_id or "").strip(),
+                "source": str(ctx.source or "").strip(),
+                "model_calls": model_calls,
+                "now": time_module.time(),
+            }
+        )
+        return str(getattr(event, "event_id", "") or "")
 
     def _update_main_context_bundle_artifacts(
         self, ctx: FinalizeContext, run_request_id: str
@@ -235,11 +294,7 @@ class FinalizationService:
             self._agent,
             ctx.archive_tool_calls,
         )
-        model_calls = _current_model_call_summary(
-            self._agent,
-            ctx,
-            params.run_request_id,
-        )
+        model_calls = params.model_calls
         runtime_status = str(getattr(ctx.final_response, "runtime_status", "ok") or "ok")
         runtime_reason = str(getattr(ctx.final_response, "runtime_reason", "") or "")
         runtime_source = str(getattr(ctx.final_response, "runtime_source", "") or "")
@@ -374,6 +429,11 @@ def _model_call_result_fields(model_calls: dict[str, object]) -> dict[str, objec
         ),
         "model_estimated_usage_call_count": int(
             model_calls.get("estimated_usage_call_count") or 0
+        ),
+        "model_usage_breakdown": (
+            dict(model_calls.get("usage_breakdown"))
+            if isinstance(model_calls.get("usage_breakdown"), dict)
+            else None
         ),
     }
 

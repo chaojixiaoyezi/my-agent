@@ -136,6 +136,21 @@ def test_finished_model_call_records_provider_usage_and_cache_tokens() -> None:
         "cache_creation_input_tokens": 50,
         "provider_usage_call_count": 1,
         "estimated_usage_call_count": 0,
+        "usage_breakdown": {
+            "schema": "model_usage_breakdown.v1",
+            "provider": {
+                "input_tokens": 1000,
+                "output_tokens": 100,
+                "cache_read_input_tokens": 700,
+                "cache_write_input_tokens": 50,
+                "call_count": 1,
+            },
+            "estimated": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "call_count": 0,
+            },
+        },
     }
 
 
@@ -377,6 +392,21 @@ def test_same_logical_model_turn_preserves_distinct_physical_attempts() -> None:
         "cache_creation_input_tokens": 0,
         "provider_usage_call_count": 0,
         "estimated_usage_call_count": 0,
+        "usage_breakdown": {
+            "schema": "model_usage_breakdown.v1",
+            "provider": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "cache_write_input_tokens": 0,
+                "call_count": 0,
+            },
+            "estimated": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "call_count": 0,
+            },
+        },
     }
 
 
@@ -480,6 +510,21 @@ def test_summary_counts_all_calls_after_detail_retention_limit() -> None:
         "cache_creation_input_tokens": 0,
         "provider_usage_call_count": 0,
         "estimated_usage_call_count": 7,
+        "usage_breakdown": {
+            "schema": "model_usage_breakdown.v1",
+            "provider": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "cache_write_input_tokens": 0,
+                "call_count": 0,
+            },
+            "estimated": {
+                "input_tokens": 70,
+                "output_tokens": 7,
+                "call_count": 7,
+            },
+        },
     }
 
 

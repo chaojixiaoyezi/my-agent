@@ -2117,3 +2117,11 @@
 - 请求未携带 workspace 时保留 thread 原值；相对、不存在或远程 owner 伪造的 host cwd 在模型调用前以
   `GATEWAY_WORKSPACE_INVALID` 失败，不回退 daemon cwd。当前 focused 回归已通过，部署与正式提示词 2
   的真实 TUI 复验仍待完成。
+
+## 2026-08-23 Gateway 模型用量分栏
+
+- `/result/<request_id>` 在既有累计模型数字旁新增 `model_usage_breakdown`，原样区分 provider 真值与
+  estimated 估算；input/output/cache read/cache creation 和 call count 不再需要由客户端从混合总数猜测。
+- 同一冻结 summary 同时进入 owner/thread 的 append-only 用量账本。后台 main 即使不保存普通 transcript
+  也要留下真实调用成本；无可信 thread identity 时明确跳过，不从 cwd、prompt 或模型正文猜归属。
+- 该字段只做观测和对照测试，不改变请求状态、Compact 阈值、任务完成、授权或计费执行。

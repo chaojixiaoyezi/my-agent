@@ -197,6 +197,12 @@ class _ModelCallAggregate:
     cache_creation_input_tokens: int = 0
     provider_usage_call_count: int = 0
     estimated_usage_call_count: int = 0
+    provider_input_tokens: int = 0
+    provider_output_tokens: int = 0
+    provider_cache_read_input_tokens: int = 0
+    provider_cache_write_input_tokens: int = 0
+    estimated_input_tokens: int = 0
+    estimated_output_tokens: int = 0
 
     # LLM: 每个新 call_id 恰好调用一次；同 call_id 的状态变化必须走 observe_update，避免重复累计。
     # 函数用途: 把一条新模型调用加入累计统计，并登记逻辑回合、后端、模型和初始状态。
@@ -298,6 +304,26 @@ class _ModelCallAggregate:
         self.estimated_usage_call_count = max(
             0, self.estimated_usage_call_count + new_estimated - old_estimated
         )
+        old_usage = _partitioned_usage(old)
+        new_usage = _partitioned_usage(current)
+        for field_name in (
+            "provider_input_tokens",
+            "provider_output_tokens",
+            "provider_cache_read_input_tokens",
+            "provider_cache_write_input_tokens",
+            "estimated_input_tokens",
+            "estimated_output_tokens",
+        ):
+            setattr(
+                self,
+                field_name,
+                max(
+                    0,
+                    int(getattr(self, field_name))
+                    + int(new_usage[field_name])
+                    - int(old_usage[field_name]),
+                ),
+            )
 
     # LLM: 返回值只含公开统计，不泄露内部 logical id 集合或可变容器引用。
     # 函数用途: 生成最终结果和 runtime facts 可直接消费的累计统计快照。
@@ -328,7 +354,60 @@ class _ModelCallAggregate:
             ),
             "provider_usage_call_count": max(0, self.provider_usage_call_count),
             "estimated_usage_call_count": max(0, self.estimated_usage_call_count),
+            "usage_breakdown": {
+                "schema": "model_usage_breakdown.v1",
+                "provider": {
+                    "input_tokens": max(0, self.provider_input_tokens),
+                    "output_tokens": max(0, self.provider_output_tokens),
+                    "cache_read_input_tokens": max(
+                        0, self.provider_cache_read_input_tokens
+                    ),
+                    "cache_write_input_tokens": max(
+                        0, self.provider_cache_write_input_tokens
+                    ),
+                    "call_count": max(0, self.provider_usage_call_count),
+                },
+                "estimated": {
+                    "input_tokens": max(0, self.estimated_input_tokens),
+                    "output_tokens": max(0, self.estimated_output_tokens),
+                    "call_count": max(0, self.estimated_usage_call_count),
+                },
+            },
         }
+
+
+# LLM: Provider truth and fallback estimates share legacy compatibility totals,
+# but this partition is the only cost-grade view and never fills a missing
+# provider field from an estimate.
+# 函数用途: 将一条已结束调用拆成供应商真值或本地估算，供累计账本独立求和。
+def _partitioned_usage(record: ModelCallRecord) -> dict[str, int]:
+    empty = {
+        "provider_input_tokens": 0,
+        "provider_output_tokens": 0,
+        "provider_cache_read_input_tokens": 0,
+        "provider_cache_write_input_tokens": 0,
+        "estimated_input_tokens": 0,
+        "estimated_output_tokens": 0,
+    }
+    if record.status != "finished":
+        return empty
+    if record.provider_usage_reported:
+        return {
+            **empty,
+            "provider_input_tokens": max(0, int(record.accounted_input_tokens)),
+            "provider_output_tokens": max(0, int(record.output_tokens)),
+            "provider_cache_read_input_tokens": max(
+                0, int(record.cached_input_tokens)
+            ),
+            "provider_cache_write_input_tokens": max(
+                0, int(record.cache_creation_input_tokens)
+            ),
+        }
+    return {
+        **empty,
+        "estimated_input_tokens": max(0, int(record.accounted_input_tokens)),
+        "estimated_output_tokens": max(0, int(record.output_tokens)),
+    }
 
 
 # LLM: ledger 是模型调用观测的唯一进程内事实源；明细有界，但当前 request/run 累计值必须保持准确。

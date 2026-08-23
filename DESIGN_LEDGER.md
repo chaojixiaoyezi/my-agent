@@ -1234,6 +1234,20 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   存活但整屏空白。该反例不改变本条边界：宿主不按 LOC、测试数量或界面内容决定业务完成；后续改善必须
   让模型基于结构化工具事实维护计划和验证实际入口，而不是恢复第二套机器验收状态机。
 
+## 2026-08-23 会话级模型用量账本
+
+状态：本地实现与 focused 回归已通过，等待随下一批底座修复统一发布和真机复验。
+
+- `ModelCallLedger` 的兼容累计值继续保留，但计费视图必须把供应商返回的 input/output/cache read/
+  cache creation 与本地估算分栏；缺少 provider usage 时只能写进 `estimated`，不得用估算反填供应商真值。
+- 每次 finalization 都把冻结后的 `model_call_summary.v1` 以幂等事件追加到 exact owner-scoped
+  `ConversationThread` 的 `model_usage/<thread_id>.jsonl`。后台 main 的 `do_save=false` 只表示不写普通
+  transcript/runtime archive，不得因此丢失已经真实发生的模型调用成本。
+- 事件只保存 thread/request/run/task/source identity 和数字计数，不保存 prompt、response、key；同一
+  event id 重放必须与首次载荷一致，冲突或损坏显式失败，不能把无法读取的成本当成 0。
+- `current_context_token_estimate` 仍表示当前一次上下文压力；会话成本汇总只读取 append-only 用量事件，
+  两者不能互相推导，也不参与 Compact、生命周期、完成或权限裁决。
+
 ## 2026-08-23 单 Gateway 多 TUI 接入背压与断线退避
 
 状态：本地候选已通过 focused 回归，待部署 `.7` 和真实多 TUI 复验。
