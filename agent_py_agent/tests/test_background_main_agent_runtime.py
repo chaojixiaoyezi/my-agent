@@ -116,6 +116,197 @@ def test_background_auto_continuation_keeps_gateway_thread_project_cwd(tmp_path)
         delattr(agent, "_current_run_params")
 
 
+def test_subagent_wake_restores_original_task_and_root_tool_history(tmp_path) -> None:
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundRunRequest,
+        GoalRuntimeContext,
+        _goal_runtime_context,
+        _run_params,
+    )
+
+    task_root = tmp_path / "home" / "tasks" / "task-continue"
+    index = task_root / "work" / "blobs" / "tool_outputs" / "index.jsonl"
+    index.parent.mkdir(parents=True)
+    root_id = "task-continue"
+    rows = [
+        {
+            "kind": "tool_call",
+            "tool": "task_progress",
+            "call_id": "call-plan",
+            "scoped_call_id": f"{root_id}:call-plan",
+            "request_id": "foreground-request",
+            "run_id": root_id,
+            "task_id": root_id,
+            "ok": True,
+            "status": "ok",
+            "parameters": {"summary": "使用 Rust 复刻", "action": "create"},
+        },
+        {
+            "kind": "tool_output",
+            "tool": "create_subagents",
+            "call_id": "call-child",
+            "scoped_call_id": f"{root_id}:call-child",
+            "request_id": "foreground-request",
+            "run_id": root_id,
+            "task_id": root_id,
+            "ok": True,
+            "status": "ok",
+            "parameters": {"goal": "实现 Rust 命令层"},
+            "path": str(index.parent / "create-subagent.json"),
+            "sha256": "abc123",
+            "size_bytes": 42,
+        },
+        {
+            "kind": "tool_call",
+            "tool": "write_file",
+            "call_id": "call-child-private",
+            "scoped_call_id": "child-1:call-child-private",
+            "request_id": "child-request",
+            "run_id": "child-1",
+            "task_id": "child-1",
+            "ok": True,
+            "status": "ok",
+            "parameters": {"path": "child-only.txt"},
+        },
+    ]
+    index.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n")
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-continue",
+            "channel": "internal",
+            "channel_conversation_id": "thread-continue",
+            "channel_user_id": "user-continue",
+        }
+    )
+    objective = "换一种编程语言完整复刻现有项目，只由子代理编写功能代码。"
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": root_id,
+            "goal": objective,
+            "status": "active",
+            "task_path": str(task_root),
+        }
+    )
+    request = BackgroundRunRequest(
+        thread_id=thread.thread_id,
+        task_id=root_id,
+        reason="subagent_runner_finished",
+    )
+    context = _goal_runtime_context(agent, store, request)
+
+    params = _run_params(
+        thread.thread_id,
+        request,
+        agent,
+        goal_context=context,
+        thread=thread,
+    )
+    baseline = _run_params(
+        thread.thread_id,
+        request,
+        agent,
+        goal_context=GoalRuntimeContext(task_objective=objective),
+        thread=thread,
+    )
+
+    assert context.task_objective == objective
+    assert context.task_path == str(task_root)
+    assert params.root_user_prompt == objective
+    assert [row["call_id"] for row in params.carried_archive_tool_calls] == [
+        "call-plan",
+        "call-child",
+    ]
+    assert params.carried_archive_tool_calls[1]["artifact_ref"].endswith(
+        "create-subagent.json"
+    )
+    assert params.task_attributes["max_tool_rounds"] == (
+        baseline.task_attributes["max_tool_rounds"] + 2
+    )
+
+
+def test_subagent_wake_keeps_objective_in_user_task_slot() -> None:
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundRunRequest,
+        _background_model_inputs,
+    )
+
+    request = BackgroundRunRequest(
+        thread_id="thread-1",
+        task_id="task-1",
+        reason="subagent_runner_finished",
+    )
+
+    prompt, injections = _background_model_inputs(
+        request,
+        task_objective="原始用户任务",
+        wake_prompt="读取本次子代理完成事件后继续",
+    )
+
+    assert prompt == "原始用户任务"
+    assert injections == [
+        "[active-turn-continuation]\n读取本次子代理完成事件后继续"
+    ]
+
+
+def test_subagent_wake_provider_prompt_keeps_original_task_after_runtime_injection(
+    tmp_path,
+) -> None:
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    backend = _CapturingBackend()
+    agent.backend = backend
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-continuation",
+            "channel": "internal",
+            "channel_conversation_id": "thread-continuation",
+            "channel_user_id": "user-continuation",
+        }
+    )
+    task_root = tmp_path / "tasks" / "root-continuation"
+    task_root.mkdir(parents=True)
+    objective = "换一种编程语言完整复刻现有项目，只由子代理编写功能代码。"
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "root-continuation",
+            "goal": objective,
+            "status": "active",
+            "task_path": str(task_root),
+        }
+    )
+    runtime = BackgroundMainAgentRuntime(
+        agent=agent,
+        store=store,
+        channels=FakeDeliveryService(),
+    )
+
+    runtime.run_once(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "root-continuation",
+            "reason": "subagent_runner_finished",
+            "now": 20.0,
+        }
+    )
+
+    assert len(backend.prompts) == 1
+    prompt = backend.prompts[0]
+    continuation_at = prompt.index("[active-turn-continuation]")
+    user_task_at = prompt.index(f"# User Task\n{objective}")
+    assert continuation_at < user_task_at
+    assert "A subagent lifecycle event resumed this same task" in prompt
+
+
 def test_claimed_background_turn_can_use_its_own_task_workspace(tmp_path) -> None:
     from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
     from agent_py_agent.agent.agent_core.tool_call_runtime import (

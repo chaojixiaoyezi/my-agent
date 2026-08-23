@@ -1,5 +1,13 @@
 # Memory Progress
 
+## 2026-08-22 root active-turn 工具索引续接
+
+- child lifecycle wake 现在复用 task `work/blobs/tool_outputs/index.jsonl` 的 typed 行，按 exact root
+  `run_id + task_id` 还原同一 active turn 已经执行过的工具；小输出 `tool_call` 和大输出 `tool_output`
+  共用 scoped call id 去重，后者只携带 artifact ref，不把正文整体塞回 prompt。
+- 该恢复只用于 root 后台工作片的执行连续性与 one-shot 去重，不改变 Compact generation、长期 Memory、
+  child 私有 archive 或机器完成判断。两组 focused 回归通过，真实 r11 尚待部署验证。
+
 ## 2026-08-22 运行中工具历史 Compact 统一账本
 
 - 主代理、子代理和孙代理在同一运行 turn 内缩减 native 工具历史时，语义摘要会把

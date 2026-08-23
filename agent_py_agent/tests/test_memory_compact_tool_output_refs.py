@@ -21,6 +21,9 @@ from agent_py_agent.agent.memory_archive.compact_resume import (
     MemoryCompactResumeOptions,
     build_memory_compact_resume,
 )
+from agent_py_agent.agent.memory_archive.compact_tool_output_refs import (
+    carried_tool_call_records,
+)
 from agent_py_agent.agent.memory_archive.tool_output_externalizer import (
     ExternalizeToolOutputRequest,
     externalize_tool_output_record,
@@ -152,6 +155,101 @@ def _write_read_file_cursor_fixture_with_failed_retry(root: Path) -> None:
             parameters={"path": "data/big.txt", "offset": 100, "max_chars": 100},
         )
     )
+
+
+def test_carried_tool_call_records_restore_only_exact_root_scope(tmp_path: Path) -> None:
+    root = tmp_path / "work"
+    externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=root,
+            tool="task_progress",
+            call_id="plan-1",
+            output="已登记 Rust 复刻计划",
+            ok=True,
+            request_id="request-root",
+            run_id="root-run",
+            task_id="root-run",
+            min_chars=1000,
+            parameters={"action": "create", "summary": "使用 Rust 完整复刻"},
+            result_envelope={
+                "tool_execution": {
+                    "handler_executed": False,
+                    "duration_ms": 4,
+                    "failure_stage": "",
+                }
+            },
+        )
+    )
+    artifact = externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=root,
+            tool="create_subagents",
+            call_id="child-1",
+            output="x" * 1400,
+            ok=True,
+            request_id="request-root",
+            run_id="root-run",
+            task_id="root-run",
+            min_chars=1,
+            parameters={"goal": "用 Rust 实现命令层"},
+        )
+    )
+    externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=root,
+            tool="write_file",
+            call_id="private-1",
+            output="child output",
+            ok=True,
+            request_id="request-child",
+            run_id="child-run",
+            task_id="child-run",
+            min_chars=1000,
+            parameters={"path": "child-only.txt"},
+        )
+    )
+
+    records = carried_tool_call_records(
+        root,
+        {"run_id": "root-run", "task_id": "root-run"},
+    )
+
+    assert [item["call_id"] for item in records] == ["plan-1", "child-1"]
+    assert records[0]["parameters"]["summary"] == "使用 Rust 完整复刻"
+    assert records[0]["handler_executed"] is False
+    assert records[0]["duration_ms"] == 4
+    assert records[1]["artifact_ref"] == artifact["artifact_ref"]
+    assert records[1]["handler_executed"] is True
+
+
+def test_carried_tool_call_records_dedupe_same_scoped_call_id(tmp_path: Path) -> None:
+    root = tmp_path / "work"
+    index = root / "blobs" / "tool_outputs" / "index.jsonl"
+    index.parent.mkdir(parents=True)
+    row = {
+        "kind": "tool_call",
+        "tool": "create_subagents",
+        "call_id": "same-call",
+        "scoped_call_id": "root-run:same-call",
+        "request_id": "request-root",
+        "run_id": "root-run",
+        "task_id": "root-run",
+        "ok": True,
+        "status": "ok",
+        "parameters": {"goal": "一次性派工"},
+    }
+    index.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for _ in range(2)) + "\n",
+        encoding="utf-8",
+    )
+
+    records = carried_tool_call_records(
+        root,
+        {"run_id": "root-run", "task_id": "root-run"},
+    )
+
+    assert len(records) == 1
+    assert records[0]["scoped_call_id"] == "root-run:same-call"
 
 
 def test_compact_apply_and_resume_include_scoped_tool_output_artifact_refs(tmp_path: Path) -> None:

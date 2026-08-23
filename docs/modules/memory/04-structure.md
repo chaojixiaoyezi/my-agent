@@ -37,6 +37,17 @@
 - 摘要不是执行事实源。精确副作用和交付仍以 raw archive、operation ledger、artifact
   registry、任务工作区和真实文件为准。
 
+## lifecycle wake 的 carried tool archive
+
+- 每个 root task 的 `work/blobs/tool_outputs/index.jsonl` 同时索引 bounded `tool_call` 与外置
+  `tool_output`。child lifecycle 后续工作片按 exact root run/task 读取，保留 append 顺序，并以
+  `scoped_call_id` 去重；其它 task 和 child workspace 不扫描。
+- 恢复记录沿既有 `carried_archive_tool_calls` 进入工具循环，重建已执行工具、one-shot key、工具轮基线、
+  参数和 artifact refs。大输出正文仍留在 owner 私有 artifact，按需读取；索引损坏时 fail-soft 回到已有
+  task/transcript 上下文，但不得编造已执行事实。
+- 这条链只解决同一 active turn 跨后台工作片的连续性，不新建 Compact 账本，不推进 generation，也不让
+  自然语言计划获得机器权威。
+
 ## 2026-08-17 测试适配记录
 
 - 记忆相关测试的 `tool_protocol="text"` 配置移除、假后端 native 化、协议快照默认

@@ -4,6 +4,11 @@
 
 最近收口重点：
 
+- 2026-08-22 `0c6c916` 已推送并部署，Prompt 4 r10 真 TUI 证明未声明产物的 child 不再收到 synthetic
+  Markdown 业务合同，typed status、最终回复和系统报告可以独立完成交接。r10 同时形成新的底座失败样本：
+  completion wake 把 synthetic 文案当成新 User Task，导致 root 从 Rust 漂移到 Go。原始任务未丢盘；当前
+  工作树已按 会话运行时 active-turn history 完成 exact task objective 与 root tool archive 的续接实现，发布与
+  r11 真机结果以 STATUS/ROADMAP 为准。
 - 2026-08-22 Prompt 4 r9 已在真实 TUI 证明 `93e18f6` 的 child 身份所有权：5 名 child 均使用 exact
   thread/parent，未出现 child `ordinary_task_resume`、root/child 混合身份或双执行器。r9 同时暴露
   系统默认 Markdown 被 runner 冒充“用户业务产物”，让编码 child 只写分析报告。当前本地候选已按 会话运行时

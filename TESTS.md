@@ -61,6 +61,14 @@ Prompt 4 r9 使用 `93e18f6`、`.7` 唯一 Gateway、tmux `dsh-p4-lazygit-r9-ea9
 completion wake 和 child result index 都没有系统默认业务 ref；child 仍通过最终消息与
 `final_report_ref` 完成交接；显式输出路径继续锚定、授权和锁冲突；测试者仍不追加推动消息或修改产物。
 
+Prompt 4 r10 使用 `0c6c916`、`.7` 唯一 Gateway、tmux `dsh-p4-lazygit-r10-ea91639` 和固定
+`jesseduffield/lazygit@ea916395`，仍只输入一次原样 prompt。前两名 Rust child 没有系统默认业务 ref，
+但第二次 completion wake 后 root 改成 Go 并派出“只建基础框架”任务。r11 必须用 fresh cwd/tmux 证明：
+每次 child lifecycle wake 的 provider `User Task/root_user_prompt` 都是同一原始 Prompt 4；synthetic wake
+只在 runtime continuation；root 之前的 task_progress/create_subagents 结构化调用按 exact root task 恢复，
+child 私有调用不混入；已选目标语言和完整范围不因连续 child 完成而重置。仍只输入一次原样 prompt，测试者
+不得修改产物或给技术推动消息。
+
 `931ee20` 在 `.7` 唯一 Gateway 上以 tmux `dsh-p3-research-931ee20-verify` 执行第 3 条原样任务，prompt
 只输入一次。4 个 child 的短职责、实时 context 总 token、一次 attempt 自然 DONE 和 Todo 打标均正确；
 但 main 只收到不含最终正文/报告 ref 的生命周期通知，猜测 `research_reports/` 后反问用户，未继续第二批，

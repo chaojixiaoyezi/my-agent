@@ -6,6 +6,17 @@
 `task_node_closeout` 副本。canonical task/result 是唯一结果事实源；父代理通过结构化 status、blockers、
 findings、artifact refs 和 result payload 阅读子代理工作，再由模型向用户汇总。
 
+## 2026-08-22 lifecycle wake 的 root active-turn 续接
+
+- child completion/block/capability wake 是 exact root task 的下一工作片。`ThreadTaskLink.goal/task_path` 是
+  原始目标与任务目录权威；goal 保持 `User Task/root_user_prompt`，wake prompt 只进入 runtime injection。
+- `work/blobs/tool_outputs/index.jsonl` 是该 root 已执行工具的耐久索引。续接只接收 exact
+  `run_id == task_id == root task id` 的 `tool_call/tool_output` 行，按 scoped call id 去重，恢复参数、终态、
+  artifact ref、one-shot 派工键和工具轮基线。child 的 task index、sibling/旧 root 和自然语言正文不参加。
+- `background_max_tool_rounds` 仍表示每个新工作片可新增的轮数，因此 absolute limit 在 carried baseline 上
+  平移；这不是放大无限预算。typed Audit provider-quota wake 是 detached 用户通知，继续使用自己的 prompt，
+  不冒充 active-turn continuation。
+
 ## 2026-08-22 child runner 续跑所有权
 
 - canonical child task 与其独立 `agent_thread_id` 只由 child runner 续跑。task-local finalize 可以保存

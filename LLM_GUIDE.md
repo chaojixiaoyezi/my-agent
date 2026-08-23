@@ -21,6 +21,11 @@
 
 ## 2026-08-22 当前运行基线
 
+- 子代理完成、阻塞或能力申请唤醒不是一条新用户任务，而是原 root active turn 的后续工作片。必须从
+  exact thread/task link 恢复原始 objective 和 task path：原始 objective 继续占据 `User Task` /
+  `root_user_prompt`，结构化 wake 只作为 runtime continuation 注入。该 root 自己的 canonical tool-output
+  index 按 exact `run_id + task_id` 恢复已执行工具、一次性派工去重和有界执行轨迹；child 私有索引、其它
+  task 和 detached Audit 事件不得混入。后台每工作片的新增工具额度在恢复历史后保持不变。
 - 普通主代理和子代理共用 `turn_end.reason`：`completed` / `blocked` /
   `max-tokens` / `aborted` / `error` / `interrupted`。它只表示一轮为什么结束，
   不从模型正文、验收清单、产物数量或测试描述反推完成。

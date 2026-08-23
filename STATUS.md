@@ -1,5 +1,23 @@
 # STATUS
 
+## 2026-08-22 Prompt 4 r10：假产物合同已消失，child wake 把原任务换成新任务（本地修复候选）
+
+- `0c6c916` 已通过本地严格 gate、推送并部署到 `.7` 唯一 Gateway。fresh tmux
+  `dsh-p4-lazygit-r10-ea91639` 在 `/root/tui-tests/dsh-p4-lazygit-r10-ea91639` 对固定
+  `jesseduffield/lazygit@ea916395` 只输入一次原样 Prompt 4；GitHub API 当轮为 81,556 stars，本地为
+  957 个生产 Go 文件、91,175 行非空非纯注释功能代码、118 个测试文件、368 个测试函数。
+- r10 证明系统默认 Markdown 假合同已退出新 child 主链：前两名 Rust child 都按最终消息/typed result
+  自然 DONE，没有 synthetic expected output ref。但第二名完成后的 root 后台工作片把原来的 Rust 计划
+  改成 Go，并派出“只建基础框架”的 child，直接违反原任务的完整复刻和语言连续性；现场已用 `/stop`
+  收口，root/3 名 child 全部终态，无残留执行器。
+- 原始 Prompt 4 并未丢盘：task link、runtime fact、thread transcript 和 context snapshot 都仍保存原文。
+  根因是 `BackgroundMainAgentRuntime` 每次用 synthetic completion prompt 新开 `agent.run()`，使它取代
+  `User Task/root_user_prompt`，且没有恢复上一工作片的 root tool archive。第二次 wake 因而像新任务一样
+  重新规划。对照 会话运行时 `core/src/agent/control.rs`、`core/src/session/turn.rs` 和
+  `core/src/session/mod.rs` 后，本地候选让 lifecycle wake 沿 exact task link 续接原 active turn，并按 root
+  run/task 恢复 canonical tool index；child 私有记录和 detached Audit 配额事件排除。两组 focused 文件已
+  通过，严格 gate、推送、单 Gateway 部署及 fresh r11 原样 TUI 仍待完成。
+
 ## 2026-08-22 Prompt 4 r9：身份收口通过，默认 Markdown 假合同诱导 child 只写报告（本地修复候选）
 
 - `93e18f6` 已通过本地严格 gate、推送并部署到 `.7` 唯一 Gateway。tmux

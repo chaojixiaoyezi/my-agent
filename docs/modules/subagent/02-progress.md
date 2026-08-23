@@ -1,5 +1,17 @@
 # Subagent Progress
 
+## 2026-08-22 r10 completion wake active-turn 断点（本地候选）
+
+- `0c6c916` 部署后的 fresh r10 已证明默认 Markdown 假合同消失；两名 Rust child 通过 typed completion
+  正常交接。第二次 wake 后 root 却改成 Go，并创建“只做基础框架”的新 child。原 Prompt 4 仍完整存在于
+  task link、runtime fact、thread transcript 和 context snapshot，故不是持久化丢失。
+- 旧 `BackgroundMainAgentRuntime` 每次把 synthetic wake prompt 作为新的 `agent.run(user_prompt)`，没有
+  继续 root 的 User Task，也未恢复此前的 task_progress/create_subagents archive。对照 会话运行时
+  `agent/control.rs` 的 child notification 和 `session/turn.rs` 的同 history turn 后，当前候选改为 exact
+  task objective + runtime continuation，并恢复 root 自己的 canonical tool index；child/Audit 不混入。
+- 两组 focused 文件已通过。仍需严格 gate、推送、唯一 Gateway 部署和 fresh r11 原样 Prompt 4；真测继续
+  只观察，不向 TUI 补技术要求，不替被测对象写产物。
+
 ## 2026-08-22 r9 默认 Markdown 假合同退出主链（本地候选）
 
 - `93e18f6` 部署后的 fresh r9 中，5 名 child 均保持 exact thread/parent，未出现 child

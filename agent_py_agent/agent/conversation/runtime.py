@@ -1,4 +1,5 @@
-# Conversation runtime utilities
+# LLM: 本模块是会话后台运行、唤醒、投递和任务续接的权威入口；同一 active task 的结构化身份与工具历史必须跨工作片延续。
+# 模块用途: 处理会话后台事件、子代理完成唤醒、上下文投影、任务状态和消息投递。
 from __future__ import annotations
 
 import json
@@ -30,6 +31,7 @@ from .authority import (
 from .control_commands import conversation_request_interrupt_name
 from .models import (
     SUBAGENT_LIFECYCLE_WAKE_REASONS,
+    THREAD_TASK_LINK_ACTIVE_STATUS,
     ConversationThread,
     ObservationEvent,
     WakeSignal,
@@ -655,9 +657,14 @@ class BackgroundRunRequest:
     wake_signal: dict[str, Any] | None = None
 
 
+# LLM: This snapshot binds one exact task objective and child phase to one background sample;
+# callers must not replace the objective with the synthetic wake instruction.
+# 类用途: 固定一次后台模型调用所见的目标、任务目录和子代理阶段，避免采样中途漂移。
 @dataclass(frozen=True)
 class GoalRuntimeContext:
     goal: object | None = None
+    task_objective: str = ""
+    task_path: str = ""
     subagent_phase: str = ""
     state_error: str = ""
 
@@ -704,14 +711,22 @@ def _goal_runtime_context(
     task_id = str(request.task_id or "").strip()
     if not task_id:
         return GoalRuntimeContext()
+    task_objective, task_path, link_error = _background_task_continuation_fields(
+        store,
+        request.thread_id,
+        task_id,
+    )
     phase = ""
-    state_error = ""
+    state_error = link_error
     if str(request.reason or "").strip().lower() in SUBAGENT_LIFECYCLE_WAKE_REASONS:
-        phase, state_error = _goal_subagent_phase(agent, task_id)
+        phase, phase_error = _goal_subagent_phase(agent, task_id)
+        state_error = phase_error or link_error
     try:
         goal = store.load_goal(request.thread_id, task_id=task_id)
     except Exception:
         return GoalRuntimeContext(
+            task_objective=task_objective,
+            task_path=task_path,
             subagent_phase=phase,
             state_error=state_error or "goal_state_load_error",
         )
@@ -720,10 +735,55 @@ def _goal_runtime_context(
         or str(getattr(goal, "task_id", "") or "").strip() != task_id
         or str(getattr(goal, "status", "") or "").strip().lower() != "active"
     ):
-        return GoalRuntimeContext(subagent_phase=phase, state_error=state_error)
+        return GoalRuntimeContext(
+            task_objective=task_objective,
+            task_path=task_path,
+            subagent_phase=phase,
+            state_error=state_error,
+        )
     if not phase and not state_error:
         phase, state_error = _goal_subagent_phase(agent, task_id)
-    return GoalRuntimeContext(goal=goal, subagent_phase=phase, state_error=state_error)
+    return GoalRuntimeContext(
+        goal=goal,
+        task_objective=task_objective,
+        task_path=task_path,
+        subagent_phase=phase,
+        state_error=state_error,
+    )
+
+
+# LLM: The task link is the durable source of the original active objective and workspace.
+# A missing/corrupt link must fail soft into the existing bounded context, never invent prose.
+# 函数用途: 从精确 thread/task 绑定读取原任务和任务目录，供后台续接复用。
+def _background_task_continuation_fields(
+    store: ConversationStore,
+    thread_id: str,
+    task_id: str,
+) -> tuple[str, str, str]:
+    try:
+        link, load_error = store.load_task_link_report(task_id)
+    except Exception:
+        return "", "", "task_link_load_error"
+    if load_error is not None:
+        return "", "", "task_link_load_error"
+    if link is None:
+        return "", "", ""
+    if (
+        str(getattr(link, "task_id", "") or "").strip() != str(task_id or "").strip()
+        or str(getattr(link, "thread_id", "") or "").strip()
+        != str(thread_id or "").strip()
+    ):
+        return "", "", "task_link_scope_mismatch"
+    if (
+        str(getattr(link, "status", "") or "").strip().lower()
+        != THREAD_TASK_LINK_ACTIVE_STATUS
+    ):
+        return "", "", ""
+    return (
+        str(getattr(link, "goal", "") or "").strip(),
+        str(getattr(link, "task_path", "") or "").strip(),
+        "",
+    )
 
 
 class BackgroundMainAgentRuntime:
@@ -1074,6 +1134,19 @@ def _invoke_background_main_agent(
     delivery_availability: tuple[bool | None, bool | None],
 ) -> object:
     proactive_delivery_available, transcript_delivery_available = delivery_availability
+    wake_prompt = background_prompt(
+        request.reason,
+        goal=goal_context.goal,
+        goal_subagent_phase=goal_context.subagent_phase,
+        wake_signal=request.wake_signal,
+        proactive_delivery_available=proactive_delivery_available,
+        transcript_delivery_available=transcript_delivery_available,
+    )
+    user_prompt, continuation_injection = _background_model_inputs(
+        request,
+        task_objective=goal_context.task_objective,
+        wake_prompt=wake_prompt,
+    )
     activity_sink = BackgroundMainActivitySink(
         runtime.agent,
         thread_id=thread.thread_id,
@@ -1081,14 +1154,7 @@ def _invoke_background_main_agent(
     )
     try:
         result = runtime.agent.run(
-            background_prompt(
-                request.reason,
-                goal=goal_context.goal,
-                goal_subagent_phase=goal_context.subagent_phase,
-                wake_signal=request.wake_signal,
-                proactive_delivery_available=proactive_delivery_available,
-                transcript_delivery_available=transcript_delivery_available,
-            ),
+            user_prompt,
             params=_run_params(
                 thread.thread_id,
                 request,
@@ -1104,7 +1170,8 @@ def _invoke_background_main_agent(
                     thread=thread,
                     request=request,
                     proactive_delivery_available=proactive_delivery_available,
-                )
+                ),
+                *continuation_injection,
             ],
             on_chunk=activity_sink,
         )
@@ -1113,6 +1180,36 @@ def _invoke_background_main_agent(
         raise
     activity_sink.finish()
     return result
+
+
+# LLM: 会话运行时 keeps child completion inside the originating active turn. When an exact task
+# objective exists, keep it in the User Task slot and move the synthetic wake instruction into
+# runtime injection; other background event kinds retain their existing one-shot prompt.
+# 函数用途: 选择后台模型真正看到的用户任务和追加唤醒说明，避免子代理回报后把原任务换掉。
+def _background_model_inputs(
+    request: BackgroundRunRequest,
+    *,
+    task_objective: str,
+    wake_prompt: str,
+) -> tuple[str, list[str]]:
+    objective = str(task_objective or "").strip()
+    if _is_active_turn_lifecycle_continuation(request, objective):
+        return objective, ["[active-turn-continuation]\n" + str(wake_prompt or "").strip()]
+    return str(wake_prompt or ""), []
+
+
+# LLM: Detached Audit quota notices share a lifecycle reason for delivery but are not a slice
+# of the root task's active turn. The typed wake metadata, never message prose, owns this split.
+# 函数用途: 判断一条结构化唤醒是否应沿用原主任务的用户目标与工具历史。
+def _is_active_turn_lifecycle_continuation(
+    request: BackgroundRunRequest,
+    task_objective: str,
+) -> bool:
+    return (
+        bool(str(task_objective or "").strip())
+        and str(request.reason or "").strip().lower() in SUBAGENT_LIFECYCLE_WAKE_REASONS
+        and not _wake_payload_is_audit_provider_quota(request.wake_signal)
+    )
 
 
 def _commit_background_response(
@@ -2044,6 +2141,18 @@ def _run_params(
         else GoalRuntimeContext()
     )
     scheduler_run_id = _scheduler_run_id(request)
+    task_attributes = _background_task_attributes(
+        thread_id,
+        request,
+        agent,
+        sampled_subagent_phase=resolved_goal_context.subagent_phase,
+        thread=thread,
+    )
+    carried_tool_calls = _background_active_turn_tool_calls(
+        request,
+        resolved_goal_context,
+    )
+    _extend_background_slice_tool_budget(task_attributes, len(carried_tool_calls))
     return RunParams(
         save=False,
         source="background_main_agent",
@@ -2063,13 +2172,7 @@ def _run_params(
         # 不知道该关闭哪条 active task link，完成
         # 的任务会被定时 policy 反复叫醒。只在 request 有明确 task_id 时绑定，
         # 普通无任务后台消息不会被误升格成任务。
-        task_attributes=_background_task_attributes(
-            thread_id,
-            request,
-            agent,
-            sampled_subagent_phase=resolved_goal_context.subagent_phase,
-            thread=thread,
-        ),
+        task_attributes=task_attributes,
         allowed_tools=_background_run_allowed_tools(
             config,
             BackgroundToolPolicyRequest(
@@ -2083,7 +2186,58 @@ def _run_params(
                 proactive_delivery_available=proactive_delivery_available,
             ),
         ),
+        root_user_prompt=(
+            resolved_goal_context.task_objective
+            if _is_active_turn_lifecycle_continuation(
+                request,
+                resolved_goal_context.task_objective,
+            )
+            else ""
+        ),
+        carried_archive_tool_calls=carried_tool_calls,
     )
+
+
+# LLM: Only child lifecycle events continue the originating active turn. Restore exact root
+# run/task rows from its canonical work index; do not mix child workspaces or other requests.
+# 函数用途: 为子代理完成后的主代理工作片恢复此前工具调用、去重键和执行轨迹。
+def _background_active_turn_tool_calls(
+    request: BackgroundRunRequest,
+    context: GoalRuntimeContext,
+) -> list[dict[str, object]]:
+    if not _is_active_turn_lifecycle_continuation(request, context.task_objective):
+        return []
+    task_id = str(request.task_id or "").strip()
+    task_path = str(context.task_path or "").strip()
+    if not task_id or not task_path:
+        return []
+    try:
+        from ..memory_archive.compact_tool_output_refs import carried_tool_call_records
+
+        return carried_tool_call_records(
+            Path(task_path).expanduser().resolve(strict=False) / "work",
+            {"run_id": task_id, "task_id": task_id},
+        )
+    except (OSError, RuntimeError, ValueError):
+        return []
+
+
+# LLM: background_max_tool_rounds is a per-slice allowance. Carried calls count as the
+# reconstructed baseline, so extend the absolute limit by the same count to preserve the
+# configured number of fresh rounds without resetting same-turn history.
+# 函数用途: 恢复旧工具历史后，把后台工作片的新增轮数额度保持为原配置值。
+def _extend_background_slice_tool_budget(
+    attributes: dict[str, object] | None,
+    carried_count: int,
+) -> None:
+    if not isinstance(attributes, dict) or carried_count <= 0:
+        return
+    try:
+        current = int(attributes.get("max_tool_rounds") or 0)
+    except (TypeError, ValueError):
+        return
+    if current > 0:
+        attributes["max_tool_rounds"] = current + carried_count
 
 
 def _scheduler_run_id(request: BackgroundRunRequest) -> str:

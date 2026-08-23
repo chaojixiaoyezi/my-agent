@@ -121,6 +121,14 @@
 - 租户可见路径默认取最小权限：远程 owner 只能读写自己的 owner home，另外可读组织明确发布的 `~/.my-agent/shared/`；其他 user/group owner、根模板和旧顶层私有目录一律拒绝。外部目录只能由当前轮的结构化 capability/delivery contract 精确加入 workspace roots，不能由模型给出绝对路径自我授权；该授权也不能覆盖凭据文件或其他 owner 拒绝。随 wheel 发布的基础 tools/skills 是公共产品能力，shared 只用于组织显式共享的 skills/tools/role templates；个人 USER/SOUL、记忆、任务和产物不得由 shared 或 full mode 绕过。
 - 普通通道上下文必须在同一结构化 scope 内“累计 transcript → 自动 compact → 继续累计”：raw transcript 永不因 compact 改写或删除，thread JSON 的 summary+cursor+generation+checkpoint pointer 是唯一 live compact 状态；旧消息只进入该 owner 的 LocalStore 派生检索索引。每次先生成不改状态的候选，再按完整下一轮输入验证低于精确阈值，随后先写 owner-scoped 完整恢复 checkpoint，最后以一次 generation CAS 同时提交 summary/cursor/checkpoint；失败候选、checkpoint 写失败或 CAS 冲突都不得推进游标。正常达到配置阈值时允许在同一历史尾部保留有界的近期完整 user/assistant 回合，过大时退回压缩全部旧段；供应商已经返回上下文压力时则一次替换本轮之前的完整旧段，禁止把同一受保护尾部连续压成多代 checkpoint。这不是第二份 history，也不能让固定最近轮数重新成为遗忘边界。连续失败只更新同一 thread 的 typed failure circuit，三次后短暂冷却，成功提交清零，禁止每条新消息重复空烧摘要模型。
 - 同一 owner/thread 只有一份模型历史。聊天、文件工作、子代理协调、定时唤醒和普通小任务都继续使用同一 thread 的 summary + raw tail；task link、workspace、progress、wake 与子代理树只是结构化运行事实，不得过滤、替换或复制 transcript。普通 Gateway 请求按会话顺序执行，当前 turn 结束或耐久续轮启动后仍继续同一历史，不能创建平行“聊天上下文”。
+- 子代理 lifecycle wake 是同一 root active turn 的耐久工作片，不是 synthetic wake 文案发起的新任务。后台
+  续接必须以 exact task link 的原始 goal 作为 `User Task/root_user_prompt`，把 wake prompt 放入 runtime
+  continuation；同时从该 task 自己的 `work/blobs/tool_outputs/index.jsonl` 按 exact root
+  `run_id + task_id` 恢复结构化调用历史、one-shot 去重和已执行工具。不得扫描 child workspace、不得混入
+  sibling/旧 task，也不得从正文猜语言、计划或完成状态。恢复记录计入当前 absolute tool-round baseline，
+  但配置的每工作片新增轮数额度不缩水。detached Audit 配额通知继续是独立运营事件，不伪装成 root turn。
+  该边界对照 会话运行时 `core/src/agent/control.rs` 的 child notification 与
+  `core/src/session/turn.rs::run_turn`、`core/src/session/mod.rs` 的同 history active turn。
 - 后台 scheduler 只有在该 thread/task 没有 linked live turn 时才能启动一个续接 turn；续接仍加载完整 thread compact 与消息尾部，并额外读取精确 task 的运行状态。任务已 completed/cancelled/interrupted/abandoned/superseded 时，排队的定时或生命周期 wake 直接作废，不能复活任务。
 - task workspace 下只保留 progress、canonical state 和证据 refs 等结构化运行事实，不生成 task compact、task rollup package 或第二份主代理上下文。main、child、grandchild 的持久上下文压缩都只认各自 thread JSON 的 summary + cursor + generation + checkpoint；active turn 因 context pressure 续跑时，原生 ToolCall/ToolResult 的成对回收必须先在同一 owner Compact ledger 写 checkpoint，再推进该 ConversationThread generation，随后继续同一 turn。task-local workspace、工具和 Memory 仍按 run 隔离，但不得恢复旧 `memory_archive` continuation 或第二套计数。
 - 所有位于消息开头的 `/XXXX` 都先进入统一 typed command dispatcher；支持的命令由程序执行，

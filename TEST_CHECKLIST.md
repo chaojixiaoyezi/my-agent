@@ -22,6 +22,10 @@
   `system_default_output_ref=true` 可恢复但不进入 runner contract、completion wake 或
   `child_result_index.expected_outputs`；显式产物仍走现有锚定、写授权和冲突锁。focused tests 完成后还须
   fresh r10 原样 Prompt 4 真机验证。
+- [ ] child lifecycle wake 沿同一 root active turn 续接：exact task link 的原始 objective 仍是
+  `User Task/root_user_prompt`，wake 仅作 runtime continuation；root canonical tool index 按 exact
+  `run_id + task_id` 恢复并排除 child/其它 task，one-shot 派工不重放，每工作片新增工具额度不缩水。
+  focused 回归已通过，仍待部署后的 fresh r11 原样 Prompt 4 证明语言、范围和派工计划不会在连续 wake 后重置。
 - [x] Compact 权威探针兼容没有 `task_attributes` 的轻量/旧调用方；统一路径解析把 `None`/空白保留为
   “没有路径”，不能变成 `<repo>/None` 并压过真实 ToolRegistry cwd。工具轮 28 项与 cwd 集成回归通过。
 - [x] 后台 Task Runtime State 与 `task_progress` 工具使用同一 task-path 账本编号；回归同时放置正确路径账本

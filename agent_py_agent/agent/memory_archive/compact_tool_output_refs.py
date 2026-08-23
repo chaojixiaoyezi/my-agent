@@ -1,3 +1,5 @@
+# LLM: 本模块读取 owner 私有的工具输出索引，为 Compact 恢复和同一 active turn 的耐久续接提供结构化记录；不得从工具正文猜状态。
+# 模块用途: 从任务工作区的工具索引中恢复调用引用、输出引用和可续接的调用事实。
 
 from __future__ import annotations
 
@@ -8,6 +10,28 @@ from typing import Any
 from .tool_output_externalizer import tool_output_index_paths_for_lookup
 
 _INTERNAL_LEDGER_TOOLS = {"task_progress"}
+
+
+# LLM: Child lifecycle wakes are another slice of the same active root turn. Rehydrate only
+# exact run/task index rows, preserve append order, and never scan child workspaces or prose.
+# 函数用途: 从一个任务自己的工具索引恢复跨后台工作片所需的调用历史。
+def carried_tool_call_records(
+    workspace: str | Path,
+    scope: dict[str, Any],
+) -> list[dict[str, Any]]:
+    rows = _read_tool_output_index(Path(workspace))
+    records: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        if not _is_indexed_call_fact(row) or not _matches_scope(row, scope):
+            continue
+        record = _carried_tool_call_record(row)
+        identity = str(record.get("scoped_call_id") or record.get("call_id") or "").strip()
+        if not identity or identity in seen:
+            continue
+        seen.add(identity)
+        records.append(record)
+    return records
 
 
 def tool_output_source_refs(workspace: str | Path, scope: dict[str, Any]) -> list[dict[str, Any]]:
@@ -94,6 +118,66 @@ def _is_tool_call_row(row: dict[str, Any]) -> bool:
     return str(row.get("kind") or "") == "tool_call"
 
 
+# LLM: A small output is indexed as tool_call and an externalized output as tool_output;
+# both are one exact invocation, distinguished by scoped_call_id rather than filename.
+# 函数用途: 判断索引行能否作为一次历史工具调用恢复。
+def _is_indexed_call_fact(row: dict[str, Any]) -> bool:
+    return (
+        str(row.get("kind") or "") in {"tool_call", "tool_output"}
+        and bool(str(row.get("tool") or "").strip())
+        and bool(str(row.get("call_id") or "").strip())
+    )
+
+
+# LLM: Convert index metadata into the existing carried archive contract. Successful indexed
+# calls prove the handler ran; failed legacy rows remain fail-closed because the index does not
+# claim a handler boundary. Artifact paths are refs, never eagerly loaded into the prompt.
+# 函数用途: 把一条工具索引转换成工具循环可重建去重、参数和结果引用的轻量记录。
+def _carried_tool_call_record(row: dict[str, Any]) -> dict[str, Any]:
+    path = str(row.get("path") or "").strip()
+    digest = str(row.get("sha256") or "").strip()
+    execution = row.get("tool_execution")
+    execution = execution if isinstance(execution, dict) else {}
+    handler_executed = execution.get("handler_executed")
+    if not isinstance(handler_executed, bool):
+        handler_executed = row.get("ok") is True
+    record: dict[str, Any] = {
+        "id": str(row.get("call_id") or ""),
+        "call_id": str(row.get("call_id") or ""),
+        "scoped_call_id": str(row.get("scoped_call_id") or ""),
+        "request_id": str(row.get("request_id") or ""),
+        "run_id": str(row.get("run_id") or ""),
+        "task_id": str(row.get("task_id") or ""),
+        "tool": str(row.get("tool") or ""),
+        "parameters": dict(row.get("parameters") or {})
+        if isinstance(row.get("parameters"), dict)
+        else {},
+        "ok": row.get("ok") is True,
+        "status": str(row.get("status") or ""),
+        "error_code": str(row.get("error_code") or ""),
+        "reported_error_code": str(row.get("reported_error_code") or ""),
+        "handler_executed": handler_executed,
+        "duration_ms": int(execution.get("duration_ms") or 0),
+        "output_externalized": bool(row.get("output_externalized") or path),
+        "output_size_bytes": int(row.get("size_bytes") or 0),
+        "tool_output_trust": str(row.get("tool_output_trust") or "runtime"),
+        "tool_output_redaction": str(row.get("tool_output_redaction") or "default"),
+    }
+    if digest:
+        record["output_hash"] = digest
+    failure_stage = str(execution.get("failure_stage") or "").strip()
+    if failure_stage:
+        record["failure_stage"] = failure_stage
+    if path:
+        record["output_path"] = path
+        record["artifact_ref"] = path
+    for key in ("read_window", "page_window"):
+        value = row.get(key)
+        if isinstance(value, dict):
+            record[key] = dict(value)
+    return record
+
+
 def _source_ref(row: dict[str, Any]) -> dict[str, Any]:
     path = Path(str(row.get("path") or ""))
     return {
@@ -153,4 +237,10 @@ def _json_line(line: str) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-__all__ = ["tool_call_refs", "tool_call_source_refs", "tool_output_artifact_refs", "tool_output_source_refs"]
+__all__ = [
+    "carried_tool_call_records",
+    "tool_call_refs",
+    "tool_call_source_refs",
+    "tool_output_artifact_refs",
+    "tool_output_source_refs",
+]

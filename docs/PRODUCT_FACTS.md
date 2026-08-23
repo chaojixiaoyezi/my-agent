@@ -1,6 +1,6 @@
 # 当前产品事实
 
-更新时间：2026-08-18（`my-agent` 测试机 CST 2026-08-18）。本文是当前工作树能力状态的唯一权威页；README、路线图和历史审计
+更新时间：2026-08-22（`my-agent` 测试机）。本文是当前工作树能力状态的唯一权威页；README、路线图和历史审计
 只能引用这里，不能把“代码存在”“测试存在”或“设计完成”写成已经稳定可用。
 
 ## 状态定义
@@ -11,6 +11,17 @@
 - **仅设计**：只有方案、接口预留或文档，不应向用户宣称可用。
 
 状态只描述当前工作树。它不等同于已发布版本；未提交、未推送的能力不属于远程 `main`。
+
+## 2026-08-22 子代理生命周期 active-turn 续接
+
+- **状态：实验性（focused 回归通过，尚待 r11 真 TUI）**。child lifecycle wake 现在从 exact
+  Conversation task link 恢复原始 objective/task path；原始 objective 保持在 `User Task` 与
+  `root_user_prompt`，synthetic wake 只作为 runtime continuation。detached Audit 配额通知保持独立提示。
+- 同一 root task 的 canonical tool-output index 按 exact `run_id + task_id` 恢复成功/失败调用、参数、refs、
+  one-shot 去重和执行轮基线；child workspace 与其它 task 不参加。恢复历史后仍保留配置规定的每工作片
+  新增工具额度。该投影是结构化续接事实，不从任务正文判断语言、质量或完成。
+- Prompt 4 r10 的现场已证明原文仍在 task link/transcript，但旧后台轮会把 Rust 改成 Go；当前工作树已
+  对照 会话运行时 child notification 与同一 session history 修复，尚未推送/部署，因此不能宣称远程稳定。
 
 ## 2026-08-22 Delegated Agent Conversation Compact
 

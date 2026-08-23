@@ -232,6 +232,14 @@ r9 新抓到更底层的交付合同错误：模型没声明 `output_files` 时�
 合同，历史 `system_default_output_ref` 只保留迁移读取并从模型合同/完成信封/expected outputs 隐藏。
 严格 gate、推送、单 Gateway 部署后以 fresh r10 原样 Prompt 4 验证；仍不增加宿主机器质量门。
 
+`0c6c916` 部署后的 fresh r10 已证明上述假文件合同消失，前两名 Rust child 通过 typed status、最终回复
+和系统 final report 自然交接。但第二个 completion wake 后，root 把 Rust 改成 Go 并派出“只做基础框架”
+任务。原始 Prompt 4 仍完整存在于 task link/transcript；真正断点是后台每次拿 synthetic wake 文案新建
+`agent.run()`，既替换 User Task，又不携带前一工作片的 root tool archive。当前候选按 会话运行时 同一 active
+turn/history 修复：exact task goal 保持根用户任务，wake 只作 runtime continuation，root canonical tool
+index 按 exact run/task 恢复，child/Audit 不混入。待严格 gate、推送、唯一 Gateway 部署后，以 fresh r11
+原样 Prompt 4 验证语言/范围/派工连续性；仍禁止测试者补代码、追加技术推动或恢复机器质量验收。
+
 ### 用户直控子代理的共享控制面
 
 状态：设计中，直属 child 只读状态投影已部署并完成真机 smoke

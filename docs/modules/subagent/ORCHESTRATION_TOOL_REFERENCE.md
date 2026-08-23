@@ -84,6 +84,11 @@ shell 不应该读取或遍历 `work/agents/<run_id>/canonical_state.json`、`fi
 child 启动上下文中的父级 read/search 预览只取当前 tool loop archive，不使用跨任务进程缓存；正式的
 跨轮信息继续由 transcript、Compact 和 typed refs 承担。
 
+child 生命周期事件到达 root 后，后台模型轮必须继续同一个 active task：原 task link goal 仍是用户任务，
+完成通知只是 runtime continuation。宿主会从该 root 自己的 canonical tool index 恢复此前派工和进度调用，
+以便 one-shot 去重、执行守卫和模型上下文都知道已经做过什么；不会扫描 child 私有目录，也不会把 Audit
+运营通知并入任务。这个内部恢复不是新的模型工具，模型仍没有 inspect/wait/dispatch 入口。
+
 ## send_guidance
 
 用途：给当前代理直接创建的一个 child 插入一段普通自然语言要求。
