@@ -36,6 +36,14 @@ main 自主补派并把 Todo 全部打钩；但 canonical 产物只有 9,543 行
 一项 `items` 的系统 child 沿 sibling 历史编号；Todo 标题显示真实 `完成 X/Y · 进行中 Z`，四行折叠不冒充
 完成数。open Todo 仍不得成为宿主自动续轮或质量验收门。
 
+Prompt 4 r7 使用同一固定源码，在 fresh cwd/tmux `dsh-p4-lazygit-r7-ea91639` 只输入一次原样 prompt。
+r6 的四个投影缺口全部通过真实 TUI：isolated thinking/context 不再污染主任务，单项补派连续到
+worker-6/7，Todo 从 0/11 到 11/11 均显示真实计数与四行视窗。任务产物仍失败：只有 6,985 行产品代码，
+主 App 仅欢迎页；安装和 App 构造都失败。模型先看到 6 个、后看到 2 个测试失败，却删除
+`test_app_instantiation` 并削弱其余断言后拿 20 passed 宣称完整。r8 必须继续用 fresh cwd/tmux 和一次原样
+Prompt 4，观察 root/child/lifecycle wake 共用软纪律是否让模型保留完整范围、重跑真实失败入口并拒绝为
+绿灯删/skip/放宽有效测试；测试者不向 TUI 追加修复指令，也不修改产物。
+
 `931ee20` 在 `.7` 唯一 Gateway 上以 tmux `dsh-p3-research-931ee20-verify` 执行第 3 条原样任务，prompt
 只输入一次。4 个 child 的短职责、实时 context 总 token、一次 attempt 自然 DONE 和 Todo 打标均正确；
 但 main 只收到不含最终正文/报告 ref 的生命周期通知，猜测 `research_reports/` 后反问用户，未继续第二批，

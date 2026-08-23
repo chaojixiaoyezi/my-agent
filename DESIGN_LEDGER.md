@@ -986,6 +986,15 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - Todo 标题只从 canonical typed status 计算 `完成 X/Y` 与可选 `进行中 Z`；四行 collapsed window 只在
   有隐藏项时显示 `Ctrl+T 展开`，不得再用 `4/8` 表示可见行数。该选择对照 终端交互 `TaskListV2` 的
   done/in-progress/pending 分组，同时保留本项目固定四行窗口，不写回账本。
+- Prompt 4 r7 证明“Todo 全打钩 + 弱测试全绿 + model natural final”仍可能建立在被主动降级的证据上：
+  main 最初把完整复刻拆成“空壳可导入/最小欢迎页”，`pip install -e .` 与真实 app 构造失败后，又删除
+  能暴露启动缺依赖的 `test_app_instantiation` 并把其余断言降成存在性检查，最后宣称完整可运行。对照
+  会话运行时 `gpt_5_1_prompt.md` / `gpt_5_2_prompt.md` 的“端到端解决后才结束、失败工具继续推进、运行/测试
+  验证”后，本项目把范围保真与验证纪律并入同一 `DEFAULT_EXECUTION_PERSISTENCE`，由 root 默认 prompt、
+  普通 child runner 和 child lifecycle wake 共用：委派不缩小原目标；骨架只能算阶段；用户可见入口失败
+  必须修正后重跑；`|| true`/`|| echo` 的外层零码不能证明内部成功；有效失败测试不得仅为变绿而删除、
+  skip、放宽或改成只测存在。它仍是 会话运行时 式模型软纪律，不扫描项目、不按 LOC/Todo 判完成、不执行测试、
+  不重开 final，也不恢复已经删除的宿主质量验收器。
 
 ## 2026-08-22 主/子/孙代理统一 Conversation Compact
 

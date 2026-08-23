@@ -7,7 +7,11 @@
   任务条目验收，不能提前勾成端到端通过。
 - [x] `context_scope=isolated` 的自然回执物理调用仍进入 model-call/cost ledger，但不投影 provider thinking、
   main/child context 或 Compact；系统生成的一项 `items` 仍按 exact parent 连续编号；Todo 标题按 typed
-  status 显示 `完成 X/Y · 进行中 Z`，四行折叠只作视窗。200 项 focused 回归通过，r7 真机尚未通过。
+  status 显示 `完成 X/Y · 进行中 Z`，四行折叠只作视窗。200 项 focused 回归及 r7 真 TUI 均已通过。
+- [ ] root 默认 prompt、普通 child runner 与 child lifecycle wake 必须共用同一范围保真/验证软纪律：骨架
+  只算阶段，安装/构建/启动/关键路径失败后重跑，不把忽略错误包装当成功，不为绿灯删除、skip 或放宽
+  能暴露当前缺陷的有效测试。配置 YAML 与 dataclass 已字面一致，253 项 focused 与本地严格 gate 通过；
+  仍待 r8 真 TUI 验证。
 - [x] Compact 权威探针兼容没有 `task_attributes` 的轻量/旧调用方；统一路径解析把 `None`/空白保留为
   “没有路径”，不能变成 `<repo>/None` 并压过真实 ToolRegistry cwd。工具轮 28 项与 cwd 集成回归通过。
 - [x] 后台 Task Runtime State 与 `task_progress` 工具使用同一 task-path 账本编号；回归同时放置正确路径账本

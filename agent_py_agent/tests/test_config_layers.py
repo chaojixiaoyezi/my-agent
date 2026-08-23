@@ -20,6 +20,9 @@ def test_shipped_system_prompt_matches_schema_default() -> None:
 
     assert shipped == schema_default
     assert "只要当前用户目标仍有你已知的未完成部分" in shipped
+    assert "委派只是分工，不会缩小用户原始目标" in shipped
+    assert "不能把 `|| true`、`|| echo` 等忽略失败包装后的外层成功当成内部成功" in shipped
+    assert "有效测试不得仅为变绿而删除、跳过、放宽断言或改成只测存在" in shipped
     assert "go.mod" not in shipped
 
 

@@ -4,6 +4,12 @@
 
 最近收口重点：
 
+- 2026-08-22 Prompt 4 r7 已在真实 TUI 证明 r6 的四项修复：isolated 用户回执不再泄露 thinking 或覆盖
+  main context，单项补派连续编号为 worker-6/7，Todo 显示真实完成/运行数且四行只作视窗。该轮同时暴露
+  新的通用候选：main 把完整任务降成欢迎页空壳，安装/启动失败后删除有效失败测试再误报完成。当前实现
+  已对照 会话运行时 持续到端到端解决与运行测试验证的 prompt，把委派范围保真、失败入口重跑和禁止为绿灯
+  削弱有效测试并入 root/child/lifecycle wake 共用软纪律；不新增机器质量验收器。发布与 r8 状态以
+  `STATUS.md` / `docs/ROADMAP.md` 为准。
 - 2026-08-22 Prompt 4 r6 的真实 TUI 样本推动四个通用底层候选：`context_scope=isolated` 的用户回执轮
   继续进入模型成本/调用账本，但不再公开私有 thinking 或覆盖主任务 context；系统生成的一项 `items`
   返工也沿 exact parent 的历史 sibling 序号，显式自定义名保持不变；Todo 标题显示 typed

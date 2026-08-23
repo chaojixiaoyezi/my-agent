@@ -1,5 +1,17 @@
 # Subagent Progress
 
+## 2026-08-22 r7 真 TUI 投影通过，范围与验证软纪律候选
+
+- `19d4cea` 部署后的 r7 只输入一次原样 Prompt 4，7 名 child 全部自然 DONE；isolated thinking/context、
+  单项补派编号和 Todo 真实计数四项均通过 TUI。任务交付仍失败：6,985 行产品代码、欢迎页 App、安装与
+  App 构造失败，和 lazygit 原版 91,175 行/368 测试相差巨大。
+- main 初始派工明确使用“空壳可导入/最小欢迎页”，把完整范围降成阶段；随后删除能重现启动缺依赖的
+  `test_app_instantiation` 并放宽断言，以 20 个弱测试通过误报完整。该问题不靠宿主重启机器验收解决。
+- 对照 会话运行时 `gpt_5_1_prompt.md`、`gpt_5_2_prompt.md` 的端到端持续与真实运行/测试验证，当前候选扩展
+  `DEFAULT_EXECUTION_PERSISTENCE`：委派不缩小原目标；骨架只算阶段；失败入口修正后重跑；忽略失败包装
+  不算成功；有效失败测试不得为绿灯被删、skip 或放宽。root 默认 prompt、普通 child 和 lifecycle wake
+  共用同一文案，仍不读取 Todo/LOC、不解析完成正文、不恢复机器质量门。
+
 ## 2026-08-22 r6 展示轮隔离、单项补派编号与 Todo 计数（本地候选）
 
 - r6 的 10 名 child 全部自然 DONE，3 名各 Compact 一次，main 也在首批完成后自主补派并收口；但只读

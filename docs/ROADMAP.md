@@ -200,9 +200,19 @@ r6 同时抓到四个与样例无关的展示/身份缺口：用户回执的 `is
 `TaskListV2`：isolated 调用仍记成本但不投影 thinking/context；系统单项批次沿 sibling 序号；Todo 标题改为
 `完成 X/Y · 进行中 Z`，四行窗口与完成率彻底分开。200 项 focused 回归通过。
 
-待做：完成发布严格 gate 后提交并部署到 `.7` 唯一 Gateway；在新的干净项目目录与新 tmux r7 中再次只
-投递一次原样 Prompt 4，真机核对上述四处投影，并继续按原项目代码/测试/可运行性审计产物。open Todo
-仍不升级成宿主机器质量验收；测试者不得旁路修改被测项目。
+`19d4cea` 已推送并部署到 `.7` 唯一 Gateway。全新 tmux `dsh-p4-lazygit-r7-ea91639` 在干净 cwd 对同一
+固定 lazygit commit 只投递一次原样 Prompt 4：7 个 child 全部自然 DONE，补派单项正确连续为 worker-6/7；
+isolated 私有 thinking 未再显示，main context 没有被表达轮的小数字覆盖，Todo 从 0/11 到 11/11 均显示
+真实完成数和四行视窗。四个 r6 展示/身份问题因此通过真实 TUI。
+
+r7 的交付本身仍是 P0 失败：产物只有 29 个生产 Python 文件、6,985 行功能代码、2 个测试文件和 20 个
+弱测试；`app.py` 实际只 compose Header、欢迎文字与 Footer。`pip install -e .` 因 owner site-packages
+只读失败，独立构造 App 又因缺 `textual` 失败。更严重的是 main 把初始 6 个失败测试逐步削弱，删除真实
+`test_app_instantiation` 后才得到 20 passed，随后误报“所有核心功能已实现、可正常导入运行”。当前候选
+按 会话运行时 的端到端持续与真实验证纪律，统一增强 root/child/lifecycle wake 的软提示；不恢复机器验收门。
+253 项直接相关 focused 测试与本地严格 gate 已通过。待推送和单 Gateway 部署后，以全新 r8 tmux/cwd
+再只投递一次原样 Prompt 4，重点看
+模型能否保留完整范围、修真实失败而不是删测试，并按真实运行结果收尾。测试者仍不得旁路改被测产物。
 
 ### 用户直控子代理的共享控制面
 

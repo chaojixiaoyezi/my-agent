@@ -43,6 +43,8 @@ def test_integration_prompt_is_evidence_based_without_fixed_orchestration():
     assert "do not author the delegated implementation yourself" in prompt
     assert "只要当前用户目标仍有你已知的未完成部分" in prompt
     assert "continue coordinating instead of returning a partial final report" in prompt
+    assert "委派只是分工，不会缩小用户原始目标" in prompt
+    assert "有效测试不得仅为变绿而删除、跳过、放宽断言" in prompt
 
 
 def test_coordinator_policy_does_not_silently_take_over_delegated_work():
@@ -75,6 +77,9 @@ def test_subagent_runner_uses_the_same_soft_persistence_discipline():
 
     assert "只要当前用户目标仍有你已知的未完成部分" in prompt
     assert "一份诚实的未完成清单" in prompt
+    assert "只显示欢迎信息的 demo 只能算阶段成果" in prompt
+    assert "安装、构建、启动或关键路径失败" in prompt
+    assert "有效测试不得仅为变绿而删除、跳过、放宽断言" in prompt
 
 
 def test_scheduled_prompt_not_polluted():

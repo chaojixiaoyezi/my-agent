@@ -1,5 +1,19 @@
 # STATUS
 
+## 2026-08-22 Prompt 4 r7：TUI 投影通过，弱化测试后误报完整（本地验证纪律候选）
+
+- `19d4cea` 已部署到 `.7` 唯一 Gateway；tmux `dsh-p4-lazygit-r7-ea91639` 在干净 cwd 对
+  `jesseduffield/lazygit@ea916395` 只输入一次原样 Prompt 4。7 个 child 全部自然 DONE，单项补派连续编号
+  worker-6/7；isolated thinking/context 污染未复现，Todo 使用 `完成 X/Y · 进行中 Z` 并最终 11/11。
+- 产物仍远未复刻：`py-lazygit` 只有 29 个生产 Python 文件、6,985 行功能代码、2 个测试文件、20 个
+  测试定义；主 App 只渲染 Header、欢迎文字和 Footer。`pip install -e .` 失败，独立构造 App 因缺
+  `textual` 报错，原始 91,175 行/368 测试基线没有得到同等实现。
+- main 起初明确让 child 做“空壳可导入/最小欢迎页”。集成测试先出现 6 个、再出现 2 个真实失败；随后
+  删除 `test_app_instantiation`、放宽其余断言，才得到 20 passed，并误报“完整可运行”。当前本地候选把
+  委派范围保真、用户可见入口验证、失败后重跑、禁止为绿灯削弱有效测试写进 root/child/wake 共用软纪律。
+  宿主仍不解析完成文案、不按 Todo/LOC 判质量、不自动验收。253 项直接相关 focused 测试与本地严格
+  gate 已通过；r8 真机尚待完成。
+
 ## 2026-08-22 Prompt 4 r6：生命周期与 Compact 进步，产物仍远未复刻（本地展示修复候选）
 
 - `.7` 唯一 Gateway、MiniMax-M2.7、tmux `dsh-p4-lazygit-r6-ea91639` 只输入一次原样 Prompt 4；固定
