@@ -1,5 +1,19 @@
 # Subagent Progress
 
+## 2026-08-24 child pending attempt 原子激活（本地候选）
+
+- `.7` 唯一 Gateway 的 Prompt 4 fresh TUI 样本直接证明：每个新 child 在 runtime.db 同时出现两条未结
+  attempt。generation 1 由 `record_run_creation` 以 Gateway PID 登记为 running，真实 dispatcher 随后又
+  创建 generation 2 并写 dispatcher PID；终态收口再把两条一起改为 done，掩盖了重复执行身份。界面因此
+  会把首次执行误当成“尝试 1”，恢复、锁和崩溃判断也可能把 Gateway 当成 child runner。
+- 对照 会话运行时 `AgentStatus::PendingInit` 与 typed `TurnStarted` 后，child 创建现在只登记 `pending`
+  generation 1，不写 runner PID、不取得执行锁。真实 runner 的 `prepare_runner_attempt` 在同一事务原子
+  激活这条 exact attempt，替换为真实 runner identity、取得锁并追加 `agent_attempt.started` /
+  `agent_run.started`；不会再创建 generation 2。
+- 同一 current attempt 已是 running 时，runner 启动路径 fail-closed 返回冲突；只有旧 attempt 已结构化
+  收口后，恢复或重试才创建下一代。focused 回归覆盖 pending 初态、exact generation 1 激活、真实 PID、
+  唯一执行锁、typed events 与重复启动拒绝；待部署后用 fresh 原样 Prompt 4 做 runtime.db/TUI 真机复验。
+
 ## 2026-08-23 会话运行时 式 attempt 存活与迟到结果收口（本地候选）
 
 - 当前 Prompt 4 并行真机暴露两类底层问题：长模型请求超过 60 秒锁租期时，活 runner

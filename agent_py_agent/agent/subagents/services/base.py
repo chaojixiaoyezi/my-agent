@@ -457,7 +457,7 @@ class SubAgentBaseService:
     def _write_authority_records(self, task: SubAgentTask, params: CreateRunParams) -> None:
         """R1：create_run 权威主链写入（A.4/A.5/A.6/A.7/A.9）。
 
-        单事务落 Task→TaskRun→root AgentRun→第一个 AgentAttempt→(child)
+        单事务落 Task→TaskRun→root AgentRun→第一个 pending AgentAttempt→(child)
         Delegation→runtime_events；conversation_task_id/thread_id 同事务进
         tasks 行，ConversationTaskLink 不再独立权威。owner_home_dir 为空
         （无 home 上下文）时无权威库，只走投影（向后兼容）。
@@ -489,6 +489,7 @@ class SubAgentBaseService:
                 run_id=str(task.id or "").strip(),
                 role=str(task.role or "").strip(),
                 parent_run_id=str(params.parent_id or "").strip(),
+                attempt_status="pending",
             )
         except (OSError, KeyError) as exc:
             # 权威写入失败不再吞掉：有 home 时记录缺失 = 门后拒绝（fail-closed）。
@@ -496,7 +497,7 @@ class SubAgentBaseService:
                 "runtime.db 权威写入失败(run=%s): %s", task.id, exc, exc_info=True
             )
             raise
-        # seq 253 闭合：链身份回存任务属性——runner 启动时轮换 DB attempt、
+        # seq 253 闭合：链身份回存任务属性——runner 启动时激活 pending attempt、
         # run scope 携带 DB task_id（授权门比对键）都要从这里拿，不另起查询。
         _persist_runtime_authority_attrs(task, record)
 

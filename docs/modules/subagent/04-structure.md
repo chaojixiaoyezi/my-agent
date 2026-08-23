@@ -6,6 +6,18 @@
 `task_node_closeout` 副本。canonical task/result 是唯一结果事实源；父代理通过结构化 status、blockers、
 findings、artifact refs 和 result payload 阅读子代理工作，再由模型向用户汇总。
 
+## 2026-08-24 Child attempt registration and activation
+
+- `SubAgentBaseService._write_authority_records` 创建 child 时落一条 `pending` generation 1 AgentAttempt。
+  这一步只表达“委托已经存在”，metadata 不含 runner PID，也不取得 execution lock。
+- `lifecycle_runner_attempts._runtime_attempt_identity` 是 child runner 的唯一激活入口。它要求 repository
+  原子复用 current pending attempt，写入当前 runner PID/start token、建立 exact generation 的执行锁，
+  再发 typed started events；文件投影中的 `runner_active_attempt_id` 复用同一个 attempt id。
+- current attempt 已是 running 时重复调用该入口会 fail-closed，不生成下一代。后续 generation 只表示
+  previous attempt 已结构化结束后的真实 retry/resume；展示层因此隐藏首轮、只在真实重试后显示“尝试 N”。
+- 该状态边界参考 会话运行时 child 的 `PendingInit -> TurnStarted`，但执行权、owner 隔离和审计仍以本项目
+  runtime.db 的 AgentRun/current pointer/resource lock 为权威。
+
 ## 2026-08-23 Runner result commit fence
 
 - `runtime_db.repository.runner_result_commit_authority` 是 MANAGED runner 结果回写的 typed 查询口；

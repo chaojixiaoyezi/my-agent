@@ -39,6 +39,7 @@ from .delivery_operations import RuntimeDeliveryMixin
 from .operations import (
     _ATTEMPT_TERMINAL_STATUSES,
     AGENT_RUN_TERMINAL_STATUSES,
+    ATTEMPT_STATUS_PENDING,
     ATTEMPT_STATUS_RECOVERED,
     ATTEMPT_STATUS_UNKNOWN,
     EXEC_LOCK_GRACE_SECONDS,
@@ -182,6 +183,7 @@ class RuntimeRepository(
         run_id: str = "",
         role: str = "",
         parent_run_id: str = "",
+        attempt_status: str = "running",
     ) -> dict[str, str]:
         """create_run 权威主链写入（单事务）。
 
@@ -192,6 +194,11 @@ class RuntimeRepository(
         conversation_task_id 与 thread_id 在同一事务进入 tasks 行（A.9：
         ConversationTaskLink 不再是独立权威）。
 
+        ``attempt_status=pending`` 用于只完成委托登记、尚未交给 runner 的
+        子代理；真实 dispatcher 启动时必须原子激活同一个 generation 1，
+        不能再造一条 running attempt。默认 running 保留“登记即执行”的主代理
+        和底层直接调用语义。
+
         F9（A.4 树建模）：child（parent 有权威记录）并入 parent 的 TaskRun，
         不新建 TaskRun/Task——树的 AgentRun 同属一个 TaskRun，链是
         Task→TaskRun→AgentRun tree→AgentAttempt；child 经 immutable
@@ -199,6 +206,9 @@ class RuntimeRepository(
         （R1 前存量/旁路）时 child 自成新树根（parent/delegation 为空 =
         合法根身份 A.7），不阻断新链。
         """
+        normalized_attempt_status = str(attempt_status or "").strip().lower()
+        if normalized_attempt_status not in {ATTEMPT_STATUS_PENDING, "running"}:
+            raise ValueError(f"不支持的初始 attempt 状态: {attempt_status!r}")
         with self.transaction() as conn:
             now = time.time()
             task_run_id = ""
@@ -265,10 +275,20 @@ class RuntimeRepository(
                 """
                 INSERT INTO agent_attempts(attempt_id, agent_run_id, attempt_generation,
                                            status, started_at, metadata_json)
-                VALUES(?, ?, 1, 'running', ?, ?)
+                VALUES(?, ?, 1, ?, ?, ?)
                 """,
-                (attempt_id, agent_run_id, now,
-                 json.dumps(_runner_identity_metadata(), ensure_ascii=False)),
+                (
+                    attempt_id,
+                    agent_run_id,
+                    normalized_attempt_status,
+                    now,
+                    json.dumps(
+                        _runner_identity_metadata()
+                        if normalized_attempt_status == "running"
+                        else {"lifecycle": ATTEMPT_STATUS_PENDING},
+                        ensure_ascii=False,
+                    ),
+                ),
             )
             conn.execute(
                 """
@@ -568,10 +588,107 @@ class RuntimeRepository(
         }
 
     # ---------------------------------------------------------- AgentAttempt
+    # LLM: A delegated child is registered as pending before any worker owns it.
+    # Activation must reuse that exact current generation, install the execution
+    # lock, and replace registration metadata with the real runner identity.
+    # 函数用途: 在同一事务里把已登记但未启动的子代理 attempt 激活为真实运行态。
+    def _activate_pending_attempt_conn(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        run: sqlite3.Row,
+        attempt: sqlite3.Row,
+        now: float,
+        scope: str,
+    ) -> sqlite3.Row:
+        attempt_id = str(attempt["attempt_id"] or "")
+        agent_run_id = str(attempt["agent_run_id"] or "")
+        generation = int(attempt["attempt_generation"] or 0)
+        lock = conn.execute(
+            "SELECT * FROM resource_locks WHERE canonical_scope = ?", (scope,)
+        ).fetchone()
+        if lock is not None:
+            raise RuntimeConflictError(
+                f"pending attempt 已存在执行权锁，拒绝重复启动: {scope}"
+            )
+        metadata_json = json.dumps(_runner_identity_metadata(), ensure_ascii=False)
+        updated_attempt = conn.execute(
+            "UPDATE agent_attempts SET status = 'running', started_at = ?, metadata_json = ? "
+            "WHERE attempt_id = ? AND agent_run_id = ? AND status = ? AND ended_at = 0",
+            (
+                now,
+                metadata_json,
+                attempt_id,
+                agent_run_id,
+                ATTEMPT_STATUS_PENDING,
+            ),
+        ).rowcount
+        if updated_attempt != 1:
+            raise RuntimeConflictError(
+                f"pending attempt 激活 CAS 失败: {agent_run_id} generation {generation}"
+            )
+        updated_run = conn.execute(
+            "UPDATE agent_runs SET status = 'created', updated_at = ? "
+            "WHERE agent_run_id = ? AND current_attempt_id = ? "
+            "AND current_attempt_generation = ? AND status IN ('', 'created')",
+            (now, agent_run_id, attempt_id, generation),
+        ).rowcount
+        if updated_run != 1:
+            raise RuntimeConflictError(
+                f"pending AgentRun 激活 CAS 失败: {agent_run_id} generation {generation}"
+            )
+        conn.execute(
+            """
+            INSERT INTO resource_locks(lock_id, canonical_scope, holder_instance,
+                                       pid, start_token, attempt_id,
+                                       attempt_generation, workspace_epoch,
+                                       tool_operation_generation, lease_expires_at,
+                                       created_at, updated_at)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+            """,
+            (
+                uuid.uuid4().hex,
+                scope,
+                self.instance_id,
+                os.getpid(),
+                self._start_token(),
+                attempt_id,
+                generation,
+                int(run["workspace_epoch"] or 1),
+                now + EXEC_LOCK_LEASE_SECONDS,
+                now,
+                now,
+            ),
+        )
+        for event_type in ("agent_attempt.started", "agent_run.started"):
+            self._append_event_conn(
+                conn,
+                event_type=event_type,
+                attempt_id=attempt_id,
+                agent_run_id=agent_run_id,
+                task_run_id=str(run["task_run_id"] or ""),
+                payload={
+                    "previous_status": ATTEMPT_STATUS_PENDING,
+                    "status": "running",
+                    "attempt_generation": generation,
+                },
+            )
+        row = conn.execute(
+            "SELECT * FROM agent_attempts WHERE attempt_id = ?", (attempt_id,)
+        ).fetchone()
+        assert row is not None
+        return row
+
     # LLM: 创建 attempt 的事务闸与后台只读 recovery 投影必须共用
     # _main_agent_recovery_reason；只读 preflight 不能替代这里的最终 CAS。
     # 函数用途: 为现有 AgentRun 创建唯一新执行轮并原子取得执行权锁。
-    def create_attempt(self, agent_run_id: str) -> sqlite3.Row:
+    def create_attempt(
+        self,
+        agent_run_id: str,
+        *,
+        reuse_pending: bool = False,
+        reject_running: bool = False,
+    ) -> sqlite3.Row:
         """单事务创建新 attempt + 原子取得执行权（R1-03 v5）。
 
         挂载闸（防线分层）：自喂循环（settle 置 done 后仍被每 cooldown 挂新
@@ -599,6 +716,10 @@ class RuntimeRepository(
         行不可变（F.7）。G4 takeover（G4-4）原子收尾：旧 attempt 非终态
         operation 统一转 UNKNOWN、mutation 标 DIRTY（旧 worker 即使还活着
         也只能看到 UNKNOWN/DIRTY，无法盲重放）。
+
+        ``reuse_pending`` 只给真实 runner 启动路径使用：如果 current attempt
+        仍是 pending，就原子激活 generation 1；``reject_running`` 同时阻止
+        同一进程里的重复 dispatcher 偷偷轮换成 generation 2。
         """
         now = time.time()
         scope = exec_lock_scope(agent_run_id)
@@ -613,13 +734,42 @@ class RuntimeRepository(
                 raise KeyError(f"agent_run 不存在: {agent_run_id}")
             status = str(run["status"] or "")
             latest_attempt = conn.execute(
-                "SELECT attempt_id, status FROM agent_attempts "
-                "WHERE agent_run_id = ? ORDER BY started_at DESC LIMIT 1",
+                "SELECT attempt_id, agent_run_id, attempt_generation, status, ended_at "
+                "FROM agent_attempts WHERE agent_run_id = ? "
+                "ORDER BY attempt_generation DESC LIMIT 1",
                 (agent_run_id,),
             ).fetchone()
             latest_attempt_status = (
                 str(latest_attempt["status"] or "") if latest_attempt is not None else ""
             )
+            if (
+                reuse_pending
+                and latest_attempt is not None
+                and str(latest_attempt["attempt_id"] or "")
+                == str(run["current_attempt_id"] or "")
+                and latest_attempt_status == ATTEMPT_STATUS_PENDING
+                and float(latest_attempt["ended_at"] or 0) == 0
+            ):
+                activated = self._activate_pending_attempt_conn(
+                    conn,
+                    run=run,
+                    attempt=latest_attempt,
+                    now=now,
+                    scope=scope,
+                )
+                conn.commit()
+                return activated
+            if (
+                reject_running
+                and latest_attempt is not None
+                and str(latest_attempt["attempt_id"] or "")
+                == str(run["current_attempt_id"] or "")
+                and latest_attempt_status == "running"
+                and float(latest_attempt["ended_at"] or 0) == 0
+            ):
+                raise RuntimeConflictError(
+                    f"current attempt 仍在运行，拒绝重复启动: {agent_run_id}"
+                )
             recovery_reason = _main_agent_recovery_reason(status, latest_attempt_status)
             # 终态（done/failed/cancelled）挂载放行：见 docstring 防线分层——
             # 自喂防护在发现层过滤 + 执行权锁，任务级生命周期闸裁决「该不该重跑」。

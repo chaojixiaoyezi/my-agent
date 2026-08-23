@@ -7,11 +7,16 @@ runtime_events（A.4/A.5/A.6/A.7/A.9）；不带 → 无权威库，纯投影（
 
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 
 import pytest
 
-from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+from agent_py_agent.agent.runtime_db.repository import (
+    RuntimeConflictError,
+    RuntimeRepository,
+)
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 
 OWNER = "local/main"
@@ -40,14 +45,55 @@ def test_create_run_writes_full_authority_chain(manager, repo):
     assert agent_run["role"] == task.role
     task_run = repo.get_task_run(agent_run["task_run_id"])
     assert task_run is not None
-    # A.6：run 创建即建第一个 attempt 并生效 current pointer。
+    # A.6：run 创建即登记第一个 pending attempt 并生效 current pointer。
     current = repo.current_attempt(agent_run["agent_run_id"])
     assert current is not None and current["attempt_generation"] == 1
+    assert current["status"] == "pending"
+    assert "runner_pid" not in json.loads(current["metadata_json"])
     # A.8：事件追到 attempt。
     events = repo.events_for_attempt(current["attempt_id"])
     assert {item["event_type"] for item in events} == {"task.created", "agent_run.created"}
     # Task 由框架铸造（B.1 task_id 前缀）。
     assert repo.get_task(task_run["task_id"])["task_id"].startswith("task-")
+
+
+def test_first_runner_start_activates_pending_attempt_without_new_generation(manager, repo):
+    task = manager.create_run(goal="长任务", root_id="run-main", parent_id="run-main")
+    agent_run = repo.agent_run_for_run_id(task.id)
+    pending = repo.current_attempt(agent_run["agent_run_id"])
+
+    prepared = manager.lifecycle.prepare_runner_attempt(task.id)
+    active = repo.current_attempt(agent_run["agent_run_id"])
+
+    assert prepared.runner_active_attempt_id == pending["attempt_id"]
+    assert active["attempt_id"] == pending["attempt_id"]
+    assert active["attempt_generation"] == 1
+    assert active["status"] == "running"
+    assert json.loads(active["metadata_json"])["runner_pid"] == os.getpid()
+    assert len(repo.attempts_for_run(agent_run["agent_run_id"])) == 1
+    assert repo.has_active_exec_lock(agent_run["agent_run_id"])
+    assert [
+        event["event_type"] for event in repo.events_for_attempt(active["attempt_id"])
+    ] == [
+        "task.created",
+        "agent_run.created",
+        "agent_attempt.started",
+        "agent_run.started",
+    ]
+
+
+def test_duplicate_runner_start_rejects_current_running_attempt(manager, repo):
+    task = manager.create_run(goal="长任务", root_id="run-main", parent_id="run-main")
+    first = manager.lifecycle.prepare_runner_attempt(task.id)
+
+    with pytest.raises(RuntimeConflictError, match="仍在运行"):
+        manager.lifecycle.prepare_runner_attempt(task.id)
+
+    agent_run = repo.agent_run_for_run_id(task.id)
+    attempts = repo.attempts_for_run(agent_run["agent_run_id"])
+    assert [attempt["attempt_id"] for attempt in attempts] == [
+        first.runner_active_attempt_id
+    ]
 
 
 def test_conversation_task_id_reuses_task_row(manager, repo):

@@ -31,10 +31,11 @@ Gateway 可以并行，但不能作为“单 Gateway 多客户端”验收的替
 Attempt 生命周期与授权续跑的 focused 回归：
 
 ```bash
-python3 -m pytest agent_py_agent/tests/test_r103_closeout_gate.py agent_py_agent/tests/test_run_audit_terminal.py agent_py_agent/tests/test_operation_store_robustness.py agent_py_agent/tests/test_subagent_runtime_guards.py agent_py_agent/tests/test_subagent_runner_result_state.py agent_py_agent/tests/test_capability_auto_grant.py agent_py_agent/tests/test_manager_runner_capability_requests.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_runtime_db_main_chain.py agent_py_agent/tests/test_r103_closeout_gate.py agent_py_agent/tests/test_run_audit_terminal.py agent_py_agent/tests/test_operation_store_robustness.py agent_py_agent/tests/test_subagent_runtime_guards.py agent_py_agent/tests/test_subagent_runner_result_state.py agent_py_agent/tests/test_capability_auto_grant.py agent_py_agent/tests/test_manager_runner_capability_requests.py -q --tb=short
 ```
 
-要同时证明：过期但活着的 holder 不可接管；只有超 grace+明确死亡可回收；终态
+要同时证明：child 创建时只有一条无 runner PID 的 pending generation 1；真实 runner 原子激活同一条
+attempt 并取得锁，重复 runner 启动被拒且不生成 generation 2；过期但活着的 holder 不可接管；只有超 grace+明确死亡可回收；终态
 run/attempt 不能调工具；可续跑结果关闭旧 attempt 且新 attempt 可重开；已取消的 exact attempt 不接受
 迟到 DONE；第一次结果收口后重放失败；当轮已获 grant 的 BLOCKED 转同 run PENDING 并保留可续派；
 终态 TUI 短句不得残留“模型已生成回复”。

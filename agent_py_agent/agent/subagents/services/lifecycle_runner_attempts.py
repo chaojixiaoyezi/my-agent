@@ -151,8 +151,9 @@ def abandon_runner_attempt(
 def _runtime_attempt_identity(manager: object, task: SubAgentTask) -> tuple[str, str]:
     """MANAGED 下把 runner attempt 落到权威链（seq 253 闭合）。
 
-    每次 runner 启动轮换 DB current attempt（create_attempt 的 G4 takeover
-    语义：CAS 换代 + 旧 attempt 非终态操作转 UNKNOWN/锁同事务释放），返回
+    第一次 runner 启动原子激活创建时登记的 pending generation 1；只有前一
+    次执行已经结构化收口后，重试才由 create_attempt 创建下一代。任何仍在
+    running 的 current attempt 都拒绝重复启动。返回
     (DB attempt_id, 权威链 task_id)。repo 缺失或 run 未登记 → ("", "")，
     调用方回落投影 id（LOCAL_UNMANAGED / 旧 run 兼容，fail-closed 门后拦截
     与现状一致）。task_id 优先读创建时回存的 runtime_authority，缺则按
@@ -167,7 +168,11 @@ def _runtime_attempt_identity(manager: object, task: SubAgentTask) -> tuple[str,
     row = repo.agent_run_for_run_id(run_id)
     if row is None:
         return "", ""
-    attempt = repo.create_attempt(str(row["agent_run_id"]))
+    attempt = repo.create_attempt(
+        str(row["agent_run_id"]),
+        reuse_pending=True,
+        reject_running=True,
+    )
     task_id = _runtime_authority_task_id(task) or repo.task_id_for_run_id(run_id)
     return str(attempt["attempt_id"] or ""), task_id
 

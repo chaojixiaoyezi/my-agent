@@ -55,6 +55,7 @@ RUN_STATUS_LEGACY_CREATED = frozenset({"", "created"})
 # 执行者死亡 + 结果不可知(UNKNOWN op / 外部副作用未核实)——诚实标注, 绝不
 # 等同 failed(已知失败), 也绝不触发自动续跑(recovered 前 create_attempt
 # fail-closed 拒绝)。recovered = 人工核对后显式释放, 恢复路径的唯一出口。
+ATTEMPT_STATUS_PENDING = "pending"
 ATTEMPT_STATUS_UNKNOWN = "unknown"
 ATTEMPT_STATUS_RECOVERED = "recovered"
 _ATTEMPT_TERMINAL_STATUSES = frozenset(

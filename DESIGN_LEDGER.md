@@ -47,6 +47,11 @@
   本 child 的断点，不得把它登记成 root `BackgroundMainAgentRuntime` 的普通任务；后台来源若精确解析到
   child task，必须在模型调用前关闭并交回 child runner。共享 batch 进程只承载多个 runner，不拥有各 run
   的启动租约；单个 run 返回 `PENDING` 后立即回收其 task-local launch record，再从同一 run 续派。
+- child 创建只登记一个 `pending` generation 1 AgentAttempt，不得把 Gateway/创建请求进程冒充 runner。
+  真实 dispatcher 接手时必须在同一事务把该 exact attempt 激活为 `running`、写入真实 runner identity 并
+  取得执行权锁；current attempt 仍在运行时再次启动必须结构化拒绝，不能静默换成 generation 2。只有前一
+  attempt 已被 typed completion/abandon/recovery 收口，后续调度才可创建新 generation。该边界对照 会话运行时
+  `PendingInit -> TurnStarted -> TurnComplete/TurnAborted/Error`，同时保留本项目 runtime.db 审计链。
 - 子代理交付合同只来自用户/父代理显式 `output_files` / `output_refs` / artifact refs。没有声明时不生成
   内部 Markdown 槽冒充业务产物；直属完成事件以 typed status、child 最终回复和系统 `final_report_ref`
   回到父级。旧 durable task 的 `system_default_output_ref=true` 继续可迁移读取，但在所有模型可见合同与
