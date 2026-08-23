@@ -663,6 +663,16 @@ covers 又不允许省略，于是它把新 Git child 绑定到下一个 open GU
 guidance 要求 `status=in_progress + correction=true` 重开原 id，或省略 covers，不能顶替无关 open id。
 fresh r18 仍只输入一次原样 Prompt 4，测试者不改产物、不补技术提示。
 
+`2d03803` 部署后的 fresh r18 已证明可选 covers 不再强迫返工 child 绑定无关 Todo；但 root 在 8 项中只
+关闭 5 项，构建、自动测试与端到端验证仍 pending，机器没有 Rust/Cargo，最终却声称完整生成并被 durable
+workspace 写成 DONE。对应 focused 回归必须覆盖：普通 root/child 第一次自然 final 时把 exact open
+id/title/status 作为 native runtime-guidance 送入同一 active turn；模型关清后自然结束，仍 open 时仅一次
+后 typed blocked；只有 blocked 项时直接 blocked；`/goal`、Audit、isolated/control-plane、无工具/no-save
+继续走既有路径；不得创建 `ordinary_task_resume` 或扫描最终正文、代码、测试和产物。fresh r19 仍在固定
+lazygit commit 上只输入一次原样 Prompt 4，测试者不得安装工具链、修改产物或追加推动消息；验收重点是
+开放 Todo 触发同轮继续或诚实 blocked，durable root 不再假 DONE，并同时观察 main/child token、Compact
+与职责短句保持真实。
+
 真实本地模型回归示例：
 
 ```bash

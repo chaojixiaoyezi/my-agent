@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""task_progress is a bounded advisory ledger, never a host continuation gate."""
+"""task_progress stays advisory while ordinary final gets one same-turn reconciliation."""
 
 import json
 
@@ -19,6 +19,7 @@ class _CaptureBackend:
 
     def __init__(self) -> None:
         self.prompts: list[str] = []
+        self.messages: list[object] = []
 
     def probe_tool_capability(self):
         from agent_py_agent.agent.tooling.runtime_contracts import ProviderToolCapability
@@ -34,6 +35,7 @@ class _CaptureBackend:
 
     def generate(self, prompt: str, on_chunk=None, **kwargs):  # noqa: ARG002
         self.prompts.append(prompt)
+        self.messages.append(kwargs.get("messages"))
         return ModelResponse(text="这一回合的最终回复。", backend=self.name)
 
 
@@ -48,13 +50,13 @@ def _agent(tmp_path) -> SimpleAgent:
     )
 
 
-def test_open_progress_ledger_does_not_call_model_again(tmp_path) -> None:
+def test_open_progress_ledger_reconciles_once_without_cross_turn_resume(tmp_path) -> None:
     agent = _agent(tmp_path)
     backend = _CaptureBackend()
     agent.backend = backend
     write_task_progress(
         agent.home_paths.owner_home_dir,
-        "task-progress-run",
+        "run-progress-run",
         {
             "items": [
                 {
@@ -74,8 +76,15 @@ def test_open_progress_ledger_does_not_call_model_again(tmp_path) -> None:
         task_id="task-progress-run",
     )
 
-    assert len(backend.prompts) == 1
-    assert result.runtime_status == "ok"
+    assert len(backend.prompts) == 2
+    assert "task-progress-closeout-reconciliation" not in json.dumps(
+        backend.messages[0], ensure_ascii=False
+    )
+    assert "task-progress-closeout-reconciliation" in json.dumps(
+        backend.messages[1], ensure_ascii=False
+    )
+    assert result.runtime_status == "blocked"
+    assert result.runtime_reason == "TASK_PROGRESS_RECONCILIATION_EXHAUSTED"
     assert not hasattr(result, "task_progress_auto_continued")
 
 

@@ -344,7 +344,7 @@ def _reconcile_completed_child_items(
                     "id": child_id,
                     "status": "done",
                     "evidence": [f"subagent-done:{child_id}"],
-                    "notes": "精确绑定的子代理已进入 canonical DONE",
+                    "notes": "独立子代理已进入 canonical DONE",
                 }
             )
             continue
@@ -357,7 +357,7 @@ def _reconcile_completed_child_items(
                         f"subagent-handled:{child_status.lower()}:{child_id}"
                     ],
                     "notes": (
-                        "精确绑定的子代理已进入由主代理处理的 canonical "
+                        "独立子代理已进入由主代理处理的 canonical "
                         f"{child_status}"
                     ),
                 }
@@ -375,7 +375,7 @@ def _reconcile_completed_child_items(
                         f"subagent-blocked:{child_status.lower()}:{child_id}"
                     ],
                     "notes": (
-                        "精确绑定的子代理已进入失败终态 "
+                        "独立子代理已进入失败终态 "
                         f"{child_status}，父代理仍需修复、重派或接管"
                     ),
                 }

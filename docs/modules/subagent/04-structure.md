@@ -6,6 +6,16 @@
 `task_node_closeout` 副本。canonical task/result 是唯一结果事实源；父代理通过结构化 status、blockers、
 findings、artifact refs 和 result payload 阅读子代理工作，再由模型向用户汇总。
 
+## 2026-08-23 普通计划停止核对入口
+
+- `agent_core/tool_loop/plan_closeout.py` 是普通 root/child 自然 final 前的唯一清单一致性入口；它使用
+  `progress_ledger_id + runtime_owner_root` 读取与 `task_progress` 工具相同的 canonical 账本。
+- 该入口位于活动 child、命名 Audit、真实工具失败/未知副作用等专用收口之后，只返回 `ignore / continue /
+  block`。`continue` 仍在原工具循环和原 active turn；`block` 写 typed turn-end，不创建 progress policy、
+  新 task 或 runner。
+- closeout 状态只存在当前 `live_archive_state`，配置次数有界；不存在这份状态时 fail-open，避免旧调用方
+  形成无限提醒。原生协议通过 runtime-guidance user message 把核对包送给 provider。
+
 ## 2026-08-22 lifecycle wake 的 root active-turn 续接
 
 - child completion/block/capability wake 是 exact root task 的下一工作片。`ThreadTaskLink.goal/task_path` 是

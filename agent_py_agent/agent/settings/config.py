@@ -182,6 +182,9 @@ class _ToolConfigFields:
     # 模型输出格式偶发抖动（把工具调用写进正文/代码块/XML 标签）时，
     # 协议违规先给几次结构化修复机会再 break；1=只修一次就断（旧行为）。
     max_protocol_repairs: int = 2
+    # 模型准备自然收尾但自己仍有 open task_progress 时，同一 active turn 的
+    # 会话运行时 式核对次数；0=关闭。它不扫描产物、不验收质量，也不新开后台轮。
+    task_progress_closeout_repair_attempts: int = 1
     # 后台调度器的周期性孤儿 supervision(reconcile 兜底,零 LLM 成本):每隔此秒数巡查一次
     # "盯守死岗补建接管 + durable 复活 PENDING/PLANNING 停滞孤儿"。事件唤醒覆盖不了
     # 静默死亡(SIGKILL/断电不发 wake),靠这里捡回;0=关闭。

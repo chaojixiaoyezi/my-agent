@@ -139,7 +139,7 @@ def _persist_runtime_status(agent: object, task: SubAgentTask, result: object, p
     task.updated_at = now
     _append_recent_tool_trace(task, {"tool": tool, "ok": ok, "at": now, "progress": progress})
     if ok and tool:
-        summary = _progress_summary(tool, progress)
+        summary = _progress_summary(tool, progress, ok=True)
         task.last_progress_at = now
         task.last_progress_summary = summary
         task.progress = max(_safe_progress(getattr(task, "progress", 0.0)), 0.25 if progress else 0.05)
@@ -188,7 +188,7 @@ def _append_recent_tool_trace(task: SubAgentTask, event: dict[str, Any]) -> None
         "tool": tool,
         "ok": bool(event.get("ok", False)),
         "at": event.get("at", 0.0),
-        "summary": _progress_summary(tool, progress),
+        "summary": _progress_summary(tool, progress, ok=bool(event.get("ok", False))),
     }
     path = str(progress.get("latest_written_path") or "").strip() if isinstance(progress, dict) else ""
     if path:
@@ -206,11 +206,15 @@ def _safe_progress(value: object) -> float:
     return min(1.0, max(0.0, progress))
 
 
-def _progress_summary(tool: str, progress: dict[str, Any]) -> str:
+# LLM: Tool success comes from the typed ToolResult flag; never call a failed
+# event successful merely because no richer progress summary was available.
+# 函数用途: 为子代理工具轨迹生成与真实成功/失败一致的短说明。
+def _progress_summary(tool: str, progress: dict[str, Any], *, ok: bool) -> str:
     summary = str(progress.get("summary") or "").strip() if isinstance(progress, dict) else ""
     if summary:
         return summary
-    return f"最近成功调用工具: {tool}"
+    state = "成功" if ok else "失败"
+    return f"最近{state}调用工具: {tool}"
 
 
 def _progress_dir(task: SubAgentTask) -> Path | None:

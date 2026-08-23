@@ -633,6 +633,10 @@ max_parallel_tool_calls:
 # 协议违规的修复机会次数（默认 2 = 3 次尝试后才 break）。模型输出格式偶发抖动
 # （工具调用混进正文/代码块）时，多给两次机会能显著提高长任务成活率。
 max_protocol_repairs: 2
+# 模型准备自然收尾但自己维护的 task_progress 仍有开放项时，在同一个 active turn
+# 返给模型核对的次数。默认 1；0=关闭。只核对 exact id/status，不扫描代码、测试或产物，
+# 也不会另起后台续跑任务。
+task_progress_closeout_repair_attempts: 1
 tool_agent_budget_window_seconds:
 tool_agent_budget_max_calls:
 

@@ -53,6 +53,7 @@ agent_py_agent/
 |   |   |-- _finalization_service.py   # 保留模型最终正文并记录 turn_end.reason
 |   |   |-- tool_loop/natural_user_reply.py # 派工/续跑/完成共用的无工具 LLM 用户回复出口
 |   |   |-- tool_loop/completion.py     # 工具上限、截断与递归 child 创建后的结构化让出
+|   |   |-- tool_loop/plan_closeout.py  # canonical Todo 尚未核对时的 会话运行时 式同轮停止钩子
 |   |   `-- runner/                     # 子代理 runner prompt/worker/session/timeout；context.py 也隔离共享 Agent 的 thread-local 运行态
 |   |-- subagents/
 |   |   |-- manager.py                  # 子代理 root manager：初始化、基础生命周期、服务组合

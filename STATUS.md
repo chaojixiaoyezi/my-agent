@@ -1,5 +1,21 @@
 # STATUS
 
+## 2026-08-23 Prompt 4 r18：5/8 Todo 未完成却被写成 DONE（本地修复候选）
+
+- `2d03803` 部署后的 fresh tmux `dsh-p4-lazygit-r18-ea91639` 在固定
+  `jesseduffield/lazygit@ea916395` 上只输入一次原样 Prompt 4；MiniMax-M2.7 自主选 Rust、建立 8 项 Todo
+  并创建 child。最终只有 5/8 项关闭；构建、自动测试和端到端验证仍为 `pending`，机器也没有 Rust/Cargo，
+  canonical `next_action` 明确是等待工具链后继续验证，但 root 最终仍称“完整代码已生成”。
+- durable root 随后被普通 finalization 写成 `DONE`，没有 blocker/evidence；一名 child 甚至只读原 Go 代码并
+  写验证报告就声称已实现。root 后续确实识别并改派了真正编码 child，但没有派测试 child。这轮因此证明：
+  可选 covers 已消除 r17 的强制错绑，却暴露“模型自己的计划未结清，普通 final 仍被当成整个任务完成”的
+  生命周期真值缺口，不能把 5/8 或模型正文算成功。
+- 对照 会话运行时 `session/turn.rs` 的 stop hook，当前本地候选只在同一 active turn 核对一次 canonical
+  `task_progress`：若仍有 exact open id，就把结构化清单退回模型继续、关闭或明确标成 blocked；一次后仍
+  open 则以 typed blocked 收口，不创建跨轮续跑，也不把 durable task 写成 DONE。它不读最终正文、文件、
+  LOC、测试或产物，不恢复机器质量验收。另修正未绑定 child 被误称“精确绑定”和失败工具被误称“最近成功”。
+  focused 回归已通过，待文档严格 gate、发布部署和 fresh r19 原样真 TUI 验证。
+
 ## 2026-08-23 Prompt 4 r17：直接 goal 改善，mandatory covers 造成 Git 返工错绑 GUI（本地修复候选）
 
 - `4c3a59d` 已推送并部署到 `.7` 唯一 Gateway。fresh tmux

@@ -36,6 +36,11 @@ def test_normalize_agent_config_valid():
 def test_agent_config_default_max_tokens_matches_shipped_config():
     shipped = load_config(Path(__file__).parents[1] / "config" / "agent_config.yaml")
     assert AgentConfig().max_tokens == shipped.max_tokens
+    assert (
+        AgentConfig().task_progress_closeout_repair_attempts
+        == shipped.task_progress_closeout_repair_attempts
+        == 1
+    )
 
 
 def test_card_and_prompt_defaults_match_shipped_config():

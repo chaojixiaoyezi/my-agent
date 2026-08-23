@@ -1920,8 +1920,7 @@ def test_explicit_goal_cannot_close_with_open_progress(tmp_path):
     assert policies[0].next_due_at <= policies[0].metadata["expedited_at"]
 
 
-@pytest.mark.xfail(reason="EXEC-31b: native 下 natural-user-reply 经 IR 消息注入, 不再出现在 prompt 文本; 断言待适配")
-def test_ordinary_task_open_progress_is_history_not_turn_lifecycle(tmp_path):
+def test_ordinary_task_open_progress_gets_one_same_turn_reconciliation(tmp_path):
     from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_owner_root
     from agent_py_agent.agent.conversation.authority import (
         CONVERSATION_TASK_TURN_ACTIVE_ATTR,
@@ -1933,17 +1932,15 @@ def test_ordinary_task_open_progress_is_history_not_turn_lifecycle(tmp_path):
         tmp_path,
     )
 
-    class OrdinaryTaskBackend:
+    class OrdinaryTaskBackend(_NativeFakeBackend):
         name = "ordinary_open_progress"
 
         def __init__(self):
             self.prompts: list[str] = []
 
-        def generate(self, prompt: str, on_chunk=None):
-            del on_chunk
+        def generate(self, prompt: str, on_chunk=None, **kwargs):
+            del on_chunk, kwargs
             self.prompts.append(prompt)
-            assert "[tool-system:task-progress-completion-check]" not in prompt
-            assert "[tool-system:task-progress-tracking-reminder]" not in prompt
             return ModelResponse(text="当前这轮已经结束。", backend=self.name)
 
     backend = OrdinaryTaskBackend()
@@ -1982,11 +1979,13 @@ def test_ordinary_task_open_progress_is_history_not_turn_lifecycle(tmp_path):
         source="gateway",
     )
 
-    assert len(backend.prompts) == 1
+    assert len(backend.prompts) == 2
     assert result.response == "当前这轮已经结束。"
-    assert result.runtime_status == "ok"
+    assert result.runtime_status == "blocked"
+    assert result.runtime_reason == "TASK_PROGRESS_RECONCILIATION_EXHAUSTED"
+    assert result.runtime_source == "task_progress"
     current = agent.conversation_store.load_thread(thread.thread_id)
-    assert current is not None and current.active_task_ids == ()
+    assert current is not None and current.active_task_ids == ("task-ordinary-open-progress",)
     links = agent.conversation_store.task_links(thread.thread_id)
-    assert len(links) == 1 and links[0].status == "completed"
+    assert len(links) == 1 and links[0].status == "active"
     assert agent.conversation_store.list_progress_policies(enabled_only=True) == []

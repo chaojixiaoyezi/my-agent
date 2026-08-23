@@ -228,6 +228,7 @@ def test_done_child_closes_only_its_exact_seeded_progress_item(tmp_path):
     assert completed == ["subagent-aa11"]
     assert by_id["subagent-aa11"]["status"] == "done"
     assert by_id["subagent-aa11"]["evidence"] == ["subagent-done:subagent-aa11"]
+    assert by_id["subagent-aa11"]["notes"] == "独立子代理已进入 canonical DONE"
     assert by_id["subagent-bb22"]["status"] == "in_progress"
 
 

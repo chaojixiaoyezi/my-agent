@@ -4,6 +4,11 @@
 
 最近收口重点：
 
+- 2026-08-23 Prompt 4 r18 证明可选 covers 后 root 能继续多批真实编码，但在 canonical Todo 仅完成 5/8、
+  构建/测试仍 pending 且机器无 Rust/Cargo 时，普通 final 仍把 durable task 写成 DONE。本地切片已按 会话运行时
+  stop hook 增加同一 active turn 的一次结构化清单核对；耗尽后只会 typed blocked，不另起自动续轮，也不
+  扫描代码、测试或产物。原生指引转发、主链集成和状态保持的 focused 回归已通过；发布与 fresh r19 见
+  STATUS/ROADMAP。
 - 2026-08-23 `4c3a59d` 部署后的 Prompt 4 r17 证明骨架/TUI child 的直接 goal 边界改善；但 Git child 写成
   cwd 根部第二棵 Rust 树后，root 返工时被 mandatory covers 逼着把新 Git child 绑定到下一 open GUI
   Todo `4`，造成确定性假进度。现场已 `/stop`；当前切片把 covers 改为可选 exact 映射：省略时用真实

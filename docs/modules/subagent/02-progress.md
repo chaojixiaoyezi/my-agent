@@ -1,5 +1,18 @@
 # Subagent Progress
 
+## 2026-08-23 r18 普通计划同轮停止核对（本地候选）
+
+- `2d03803` 部署后的 fresh r18 中，root 已关闭 5/8 Todo；构建、自动测试、端到端验证仍 pending，机器也
+  没有 Rust/Cargo，但模型 final 声称完整生成，普通 finalization 又把 root durable workspace 写成 DONE。
+  这不是产物验收失败，而是模型自己的 canonical 计划与宿主生命周期相互矛盾。
+- 对照 会话运行时 `run_turn_stop_hooks`，新 `agent_core/tool_loop/plan_closeout.py` 只读取当前 exact
+  `task_progress`，在普通 root/child 自然 final 前同轮返一次 id/title/status。模型可继续、用 exact id
+  关闭，或记录真实 blocked；核对耗尽仍 open 时返回 typed blocked，保留原 thread/task/workspace 供用户
+  继续。它跳过 `/goal`、Audit、isolated/control-plane 和已有专用 child/失败收口，不创建后台续轮。
+- 该入口不读 final 文案、源码、LOC、测试、产物或 evidence，不替模型判断业务质量。配置
+  `task_progress_closeout_repair_attempts` 默认 1、设 0 可关；原生协议回归必须证明结构化提醒实际进入下一次
+  provider messages，而不只是让调用计数加一。另将未绑定 child 与失败工具的展示短句改为真实语义。
+
 ## 2026-08-23 r17 可选 exact covers 与返工重开（本地候选）
 
 - `4c3a59d` 部署后的 fresh r17 中，骨架/TUI child 基本停在各自直接 goal，生命周期 wake 也正常；Git
@@ -296,9 +309,10 @@
   而嵌套 child 又把成功事件越级投到根会话。现新增 exact direct-child wait：任意父级创建下一层后
   `interrupted/SUBAGENTS_ACTIVE` 让出，同批成功收齐只恢复一次，失败或 capability 阻塞立即恢复；
   孙代理事件只恢复直属父级，父级上下文直接带有界 `direct_children` status/result refs。
-- `task_progress` 现在只是软记事账本。普通任务的自动 continuation 模块、配置和深度状态已经删除；
-  open 项不会开新模型轮或阻止 final。新项必须有稳定 `id/title/status`，更新返回前以 canonical child
-  run id 重新对账，避免模型旧状态覆盖真实 DONE。
+- `task_progress` 现在只是软记事账本。普通任务的跨轮自动 continuation 模块、配置和深度状态已经删除；
+  open 项不会另开后台任务或触发业务质量验收。r18 后，模型准备自然 final 时会在同一 active turn 有界
+  核对一次自己留下的 exact open 项；耗尽后 typed blocked 而不是 durable DONE。新项必须有稳定
+  `id/title/status`，更新返回前以 canonical child run id 重新对账，避免模型旧状态覆盖真实 DONE。
 - `be531a8` 后的原样 TUI 样本一次创建 4 个 child，但所有 child 继承的 `/root`
   又被默认 home deny 同层拒绝，导致 `WRITE_FORBIDDEN -> capability_request`。候选修复不改
   通用“同层 deny 胜出”规则，而是在创建 local/unmanaged task 时调和精确的 inherited workspace

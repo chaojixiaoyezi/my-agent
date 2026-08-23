@@ -112,9 +112,11 @@
 - [ ] task-local 父级创建下一层后以 `interrupted/SUBAGENTS_ACTIVE` 让出；exact direct-child wait 在孩子
   活跃时阻止孤儿误复活。同批成功只恢复一次，失败/缺状态/capability 阻塞立即恢复；嵌套 child 只叫醒
   直属父级，恢复上下文包含有界 `direct_children` refs，Gateway 重启后也能从耐久标记补偿。
-- [x] `task_progress` 仅为软账本：open 项不触发普通任务自动续跑、不阻止自然 final；新项要求稳定
-  `id/title/status`，模型旧 pending 不能覆盖 canonical child DONE。`covers` 可绑定普通 items 或
-  coverage.targets 的 exact id，canonical child DONE 后原位打钩；工具结果只给非阻断续做 guidance。
+- [ ] `task_progress` 仅为软账本而非质量验收：open 项不触发跨轮自动续跑；但普通 root/child 准备自然
+  final 时，`pending/in_progress/unknown` exact 项会经 native runtime-guidance 在同一 active turn 有界核对
+  一次。关清后自然完成，耗尽仍 open 或只剩显式 blocked 时 typed blocked，不把 durable task 写成 DONE，
+  也不创建 `ordinary_task_resume`。新项要求稳定 `id/title/status`，模型旧 pending 不能覆盖 canonical child
+  DONE；`covers` 仍只绑定 exact id。focused 已通过，待 fresh r19 真 TUI 后勾选。
 - [x] lifecycle/Compact 续跑的 durable tool index 保留有界递归且凭据脱敏的 JSON 参数；native 不伪造旧
   ToolCall/ToolResult，而是安装唯一有界 CompactionSummary handoff。真实 UserTurn 保持在 handoff 之后；
   Task Runtime State 暴露 canonical Todo exact ids 与 `create_subagents.items[].covers` 字段，宿主不按标题猜。
@@ -171,10 +173,15 @@
   正确收口。
 - [ ] 四个 `TESTS.md` 原样重型任务全部通过真实 `MiniMax-M2.7` TUI 顺序验收；每次启动、切换或输入前已先
   向用户报告测试对象、`192.0.2.7`、tmux session 名称和可直接 attach 的完整命令，且全程只有一个 Gateway。
-- [ ] fresh Prompt 4 r18 的后续派工复用 canonical Todo；只有事实确实匹配时才带 exact covers，额外返工
+- [x] fresh Prompt 4 r18 的后续派工复用 canonical Todo；只有事实确实匹配时才带 exact covers，额外返工
   可不绑定并显示真实 child 行。已关闭项返工若仍要映射，先以 `correction=true` 重开原 id，绝不拿下一个
   open 兄弟 id 顶替。可选 output hint 若提供则只落当前 cwd，不把模型预报当完整写集或权限。每名 child
-  只完成直接父级 goal，不替兄弟扩做；root 保持原语言、完整范围和“主代理不得写功能代码”边界。
+  只完成直接父级 goal，不替兄弟扩做；root 保持原语言、完整范围和“主代理不得写功能代码”边界。r18
+  未再出现 r17 的强制错绑；新的 5/8 假收口单列为 r19 同轮停止核对验收。
+- [ ] fresh Prompt 4 r19 在固定 lazygit commit 和唯一 Gateway 上只输入一次原样用户 prompt；若 root 自己的
+  canonical Todo 尚有 open 项，TUI/日志应证明模型在同一 active turn 收到 exact 核对并继续，或将真实
+  阻塞写为 blocked 后如实汇报。任何情况下 durable root 都不能在 open Todo 下变成 DONE；测试者不装
+  Rust/Cargo、不改产物、不追加技术推动消息，并继续核对职责短句、失败工具状态、实时 token/Compact。
 - [ ] 真实测试中 main/child/grandchild 各自沿独立 `agent_thread_id` Compact 后能继续工作；至少一条 child
   链连续发生多代 generation，近期完整回合、工具事实、任务状态和产物引用不丢，且没有重做已经成功的
   副作用。持久 native IR 裁剪与 transcript 压缩都只推进该 thread generation；presentation/no-save 临时事件

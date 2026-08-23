@@ -231,6 +231,34 @@ def test_runtime_tool_progress_reports_task_load_error() -> None:
     assert progress["run_id"] == "missing-run"
 
 
+def test_failed_runtime_tool_trace_does_not_claim_success(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.subagents.services.session_progress import (
+        record_runtime_subagent_tool_progress,
+    )
+
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(goal="test", thought="", plan=["test"])
+    task.agent_run_workspace_dir = str(tmp_path / "agents" / task.id)
+    manager.save(task)
+    record_runtime_subagent_tool_progress(
+        SimpleNamespace(subagents=manager),
+        SimpleNamespace(
+            params=SimpleNamespace(context_scope="task_local", run_id=task.id),
+            result=SimpleNamespace(tool_name="run_command", output="failed", ok=False),
+            payload={"command": "cargo test"},
+            tool_rounds=1,
+            idx=1,
+        ),
+    )
+
+    loaded = manager.load(task.id)
+    trace = loaded.attributes["recent_tool_trace"]
+    assert trace[-1]["ok"] is False
+    assert trace[-1]["summary"] == "最近失败调用工具: run_command"
+
+
 def test_runtime_tool_progress_reports_status_save_error(tmp_path) -> None:
     from types import SimpleNamespace
 

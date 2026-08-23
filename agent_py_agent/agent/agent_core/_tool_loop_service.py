@@ -91,6 +91,7 @@ from .tool_loop.natural_user_reply import (
     pending_natural_user_reply,
     retry_natural_user_reply,
 )
+from .tool_loop.plan_closeout import decide_open_plan_closeout
 from .tool_loop.recovery import (
     append_long_content_recovery_context,
     without_tool_call_after_limit,
@@ -1074,6 +1075,16 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
                 tool_rounds=tool_rounds,
             ):
                 continue
+            plan_closeout = decide_open_plan_closeout(
+                service._agent,
+                params,
+                final_response,
+            )
+            if plan_closeout.action == "continue":
+                continue
+            if plan_closeout.action == "block":
+                final_response = plan_closeout.response or final_response
+                break
         verdict, routed_response = _routed_action_step(action)
         if verdict == "continue":
             continue

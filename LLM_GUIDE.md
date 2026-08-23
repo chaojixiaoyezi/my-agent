@@ -66,9 +66,12 @@
   `ordinary_task_resume` 或租用主代理后台回合。任何误指向 child task id 的旧后台 policy/wake 都在
   调用模型前关闭并由 child runner 接管，主代理不能携带 child 身份或权限运行。一次 runner 结果重新
   落为 `PENDING` 时只释放该 run 的启动占位；共享批次宿主 PID 仍活着不能阻止这个 child 立即续派。
-- `task_progress` 只是当前模型的软计划/记事账本。普通模型最终回复会直接结束当前回合；
-  open 进度项不会让宿主再调用模型、不会卡住收口。只有显式 `/goal`、Compact 或 typed
-  子代理/控制事件能开新工作片。新账本项必须有稳定 `id + title + status`，避免空白行。
+- `task_progress` 是当前模型的软计划/记事账本，不是业务质量验收器。普通模型准备自然 final 时，若自己
+  留下 `pending/in_progress/unknown` exact 项，宿主按 会话运行时 stop hook 在同一 active turn 有界核对一次；
+  模型继续使用原工具，或按原 id 关项/标记真实 blocked。核对耗尽仍 open 时本轮 typed blocked，不能把
+  durable task 写成 DONE；它不扫描正文、代码、测试或产物，也不创建 `ordinary_task_resume`。显式
+  `/goal`、Compact 和 typed 子代理/控制事件仍各走自己的既有生命周期。新账本项必须有稳定
+  `id + title + status`，避免空白行。
 - 模型侧旧 `raise_event` 已删除。进展、工具活动、阻塞、权限申请和终态都由宿主从真实 runner/thread
   事件写入；模型不能靠自报事件证明自己还活着。子代理 canonical state 会保存有界的“模型响应中 / 正在
   使用工具 / 工具成功或失败”短状态，不保存 prompt、response、工具输出或隐式推理正文。

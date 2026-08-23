@@ -1189,3 +1189,24 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   软 guidance 与 typed repair 都明确禁止拿无关 open id 顶替。宿主仍不解析 goal/title 做语义匹配。
 - 协议版本：planned dispatch 投影升为 `planned_dispatch.v2`，使用 `binding_mode=optional_exact` 与
   `unbound_item_indexes`；旧 `missing_covers_indexes` 删除，避免把“未映射”继续表达成错误。
+
+## 2026-08-23 普通计划的 会话运行时 式同轮停止核对
+
+状态：本地实现与定向回归已完成；待严格 gate、发布后用 fresh Prompt 4 r19 真 TUI 验收。
+
+- 解决问题：fresh Prompt 4 r18 中，root 自己建立 8 项 canonical Todo，只完成 5 项且把测试三项保留为
+  `pending`，最终回复仍声称“代码已完整生成”；会话任务和 task workspace 随后都被宿主写成完成。现场
+  结构化账本明确记录 `next_action=等待 Rust 工具链安装后继续编译验证`，说明错误不是用户看漏了，而是
+  普通模型 final 被直接等同整个 durable task 完成。
+- 会话运行时 对照：`会话运行时-rs/core/src/session/turn.rs` 在模型不再请求工具时先执行 `run_turn_stop_hooks`；若钩子
+  返回 `should_block`，宿主把结构化反馈记录进同一 active turn 并继续采样。最终的 `TurnComplete` 只是这次
+  用户回合生命周期事件，不是业务目标验收结论。本项目复用同一模式，不恢复旧 delivery/acceptance 扫描器。
+- 新合同只核对模型自己写入 canonical `task_progress` 的结构化一致性：没有 open 项时自然结束；仍有
+  `pending/in_progress/unknown` 时，在同一工具循环最多返给模型一次 exact id/title/status，要求继续用原工具
+  推进，或把真实无法推进项明确更新为 `blocked` 并说明原因。它不读取最终正文、不扫描代码、LOC、测试、
+  目录或产物，也不替模型判断工作质量。
+- 活跃直属 child、命名 Audit、真实工具失败/未知副作用等已有 typed 生命周期与安全修复先处理；计划核对
+  只在这些专用分支都未接管自然 final 时运行。默认次数通过唯一配置控制，`0` 可关闭，避免无界增加模型调用。
+- 一次同轮核对后仍有可执行 open 项，或清单只剩显式 `blocked` 项时，本轮以 typed `blocked` 结束，保留
+  模型撰写的诚实说明，不把 conversation task / standalone workspace 写成 `DONE`，也不偷偷创建第二个
+  `ordinary_task_resume`。用户后续消息仍可在同一 thread/task/workspace 继续。
