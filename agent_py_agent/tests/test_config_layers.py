@@ -19,11 +19,16 @@ def test_shipped_system_prompt_matches_schema_default() -> None:
     schema_default = AgentConfig().system_prompt
 
     assert shipped == schema_default
+    assert "缺少次要实现选择时，不要停下来反问" in shipped
+    assert "不要输出多选菜单来代替工作" in shipped
+    assert "任务规模大、耗时长或仅仅有可澄清之处，都不等于阻塞" in shipped
+    assert shipped.index("自主决策：") < shipped.index("执行纪律：")
     assert "只要当前用户目标仍有你已知的未完成部分" in shipped
     assert "委派只是分工，不会缩小用户原始目标" in shipped
     assert "不能把 `|| true`、`|| echo` 等忽略失败包装后的外层成功当成内部成功" in shipped
     assert "有效测试不得仅为变绿而删除、跳过、放宽断言或改成只测存在" in shipped
     assert "go.mod" not in shipped
+    assert "Rust" not in shipped
 
 
 def test_merge_config_layers_tracks_winning_source() -> None:

@@ -1128,3 +1128,21 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   目录，旧代码便自动写入 `covers=["i18n","config"]`，完成后错误勾掉三项 Todo。该旁路与本节“不读
   goal/标题”冲突，也不同于 会话运行时 的显式 spawn 参数，现已连同 `covers_auto_bound` 投影和测试一起删除；
   Todo 绑定只认调用参数中的显式 `covers`。
+
+## 2026-08-23 根代理 assumptions-first 自主决策软纪律
+
+状态：默认提示已落地并通过配置聚焦回归；待发布后 fresh Prompt 4 r16 真 TUI 验收。
+
+- 解决问题：`bdcc7d1` 部署后的 fresh r15 在固定 lazygit 源码上只读了项目便停止，要求用户在 Rust、
+  Python 或其它语言中选择；没有 Todo、没有 child、没有功能写入。用户已经授权“换一种编程语言”，
+  语言属于安全可逆的次要实现选择，不应把决定退回给无人值守测试者。
+- 对照决定：会话运行时 `collaboration-mode-templates/templates/default.md` 明确要求优先做 reasonable assumptions，
+  只有无法从本地上下文发现且合理假设有风险时才问；`execute.md` 更明确要求信息缺失时选择 sensible
+  assumption 后继续。相同 MiniMax-M2.7 的 会话运行时 真 TUI 虽先探索源码，最终也违背自身模板给出语言/范围/
+  测试菜单，说明这是模型在超大任务上的行为回避，不应照抄该次坏输出。
+- 落地边界：会话运行时 源码语义被适配为根默认 `system_prompt` 前部的通用中文软纪律。它只要求先查本地事实、
+  对安全可行方案选合理默认并继续；只有实质偏离、越权或不可逆风险才允许问一个关键问题，且不能用多选
+  菜单代替工作。规则不包含语言名、项目名或 Prompt 4 文本，不解析模型问句，也不新增重试器、完成门或
+  机器验收。
+- 配置权威：这不是第二套模式开关；既有 `system_prompt` 就是唯一用户配置入口。发布 YAML 与 dataclass
+  默认文本继续逐字一致，显式自定义 prompt 仍有最高权威。

@@ -4,6 +4,11 @@
 
 最近收口重点：
 
+- 2026-08-23 Prompt 4 r15 暴露根代理会把用户已授权的安全次要选择退回用户；相同 MiniMax-M2.7 的
+  会话运行时 对照也在探索后输出了语言/范围/测试菜单，均违背 会话运行时 Default 源码。当前切片把源码中的
+  assumptions-first 语义适配到根默认 `system_prompt` 前部：合理默认后继续，只有实质偏离、越权或不可逆
+  风险才问一个短问题。它不含项目/语言专项，不解析问句，不恢复机器验收；发布和 fresh r16 见
+  STATUS/ROADMAP。
 - 2026-08-23 Prompt 4 r14 证明 `c5cc7c2` 下主代理能在 child DONE 后自然醒来并创建第二批，同时抓到旧
   goal-id 自动补绑把目录名 `i18n/config` 当作 Todo id、造成 3 项假完成。当前本地切片删除这条自然语言
   决策旁路和 `covers_auto_bound` 投影；计划内派工继续只认显式 `covers`，漏填由同一 typed repair 返回

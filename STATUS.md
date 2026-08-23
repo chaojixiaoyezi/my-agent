@@ -1,5 +1,19 @@
 # STATUS
 
+## 2026-08-23 Prompt 4 r15：默认模型把安全次要选择退回用户（本地修复候选）
+
+- `bdcc7d1` 已推送并部署到 `.7` 唯一 Gateway。fresh tmux
+  `dsh-p4-lazygit-r15-ea91639` 在固定 `jesseduffield/lazygit@ea916395` 上只输入一次原样 Prompt 4；
+  MiniMax-M2.7 读取项目后停止，要求用户选择 Rust、Python 或其它语言。现场没有 Todo、没有 child、没有
+  功能写入，只有 TUI 自己的 `.chat_history`，因此 r15 明确失败，不能验证显式 covers 修复。
+- 相同模型、相同源码、相同 prompt 的 会话运行时 tmux `会话运行时-p4-lazygit-r15-ea91639` 先连续探索源码，证明
+  不是连接或模型完全不可工作；但它最后同样输出目标语言、范围和测试菜单。这一真机结果也违反 会话运行时
+  `default.md/execute.md` 源码的“合理假设后继续”规则，不能作为应复刻的正确行为。
+- 本地候选将 会话运行时 源码语义放入根默认 `system_prompt` 前部：安全可逆的次要选择采用合理默认，只有任何
+  假设都会实质偏离、越权或产生不可逆风险时才问一个简短问题，不能以多选菜单代替工作。规则不含 lazygit、
+  语言名或测试 prompt，不解析自然语言，不新增机器状态/验收/自动重试；既有 `system_prompt` 仍是唯一覆盖
+  入口。配置聚焦回归已通过，待严格 gate、发布、单 Gateway 部署与 fresh r16 真 TUI 验收。
+
 ## 2026-08-23 Prompt 4 r14：主代理唤醒正常，旧 goal 自动绑定造成 Todo 假完成（本地修复候选）
 
 - `c5cc7c2` 已通过严格 gate、推送并部署到 `.7` 唯一 Gateway。fresh tmux

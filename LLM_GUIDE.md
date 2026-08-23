@@ -21,6 +21,11 @@
 
 ## 2026-08-22 当前运行基线
 
+- 根代理的默认 `system_prompt` 采用 会话运行时 Default 的 assumptions-first 软纪律：明确目标下先从 cwd、代码、
+  用户约束和工具事实补信息；安全可逆的次要选择由模型采用合理默认并继续。只有无法从上下文取得、且任何
+  合理假设都会造成实质偏离、越权或不可逆风险的关键缺口才问一个简短问题。该纪律不解析用户正文、不生成
+  机器状态、不恢复完成验收；发布 YAML 与 dataclass 默认值必须逐字一致，用户仍可通过唯一
+  `system_prompt` 配置入口覆盖。
 - 子代理完成、阻塞或能力申请唤醒不是一条新用户任务，而是原 root active turn 的后续工作片。必须从
   exact thread/task link 恢复原始 objective 和 task path：原始 objective 继续占据 `User Task` /
   `root_user_prompt`，结构化 wake 只作为 runtime continuation 注入。该 root 自己的 canonical tool-output

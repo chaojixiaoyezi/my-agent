@@ -1,5 +1,16 @@
 # Subagent Progress
 
+## 2026-08-23 r15 根代理 assumptions-first 自主决策（本地候选）
+
+- `bdcc7d1` 部署后的 fresh r15 只输入一次原样 Prompt 4；root 在没有创建 Todo/child 前便要求用户从
+  Rust、Python、其它语言中选择。用户已明确授权换一种语言，因此这是根代理把安全次要决策退回用户，
+  不是编排器或 child 崩溃。
+- 对照 会话运行时 `default.md/execute.md` 后，当前切片只增强根默认 `system_prompt`：先从 cwd/源码/约束/工具
+  事实补信息，多种安全方案时采用合理默认并继续；只有无法安全推断的实质性缺口才问一个短问题。相同模型
+  的 会话运行时 真 TUI 也违背模板给了多选菜单，因此适配的是源码合同，不是照抄该次坏输出。
+- 该规则不读 prompt 关键词、不操作 Todo/child 状态、不解析问句、不新增宿主续轮。发布 YAML 与 dataclass
+  默认值仍逐字一致，聚焦配置回归已通过；fresh r16 再验证 root 自主选语言后进入计划与显式 covers 派工。
+
 ## 2026-08-23 r14 删除 goal 文本自动补 covers 旁路（本地候选）
 
 - `c5cc7c2` 部署后的 fresh r14 中，首名骨架 child 自然 DONE，root 正常 wake 并创建第二名 Git child；

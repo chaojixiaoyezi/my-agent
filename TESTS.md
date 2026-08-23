@@ -638,6 +638,13 @@ doc sync、strict code-size、diff 与 clean-package gate 全部通过。发布�
 fresh r15：固定 lazygit 源提交，只向真实 TUI 输入一次用户原样 Prompt 4，观察模型按 typed repairs 自行
 补齐 covers/write sets；测试者不追加提示、不写功能代码。
 
+`bdcc7d1` 部署后的 fresh r15 只输入一次原样 Prompt 4，但 root 读取源码后要求用户选择 Rust/Python/其它，
+没有 Todo、child 或功能写入；r15 因此失败，尚未覆盖显式 covers。相同 MiniMax-M2.7 的 会话运行时 对照先探索
+源码，最终也输出语言/范围/测试菜单，违反其 `default.md/execute.md` assumptions-first 源码合同。当前回归
+先锁定发布 YAML 与 dataclass 默认 prompt 逐字相同、自主决策纪律位于持续执行纪律之前、文本不含具体语言；
+发布后 fresh r16 仍只输入一次同一 Prompt 4，测试者不回答语言、不追加推动消息、不修改产物，观察 root
+是否采用合理默认、建立 Todo 并创建显式 `covers/output_files` 的 child。
+
 真实本地模型回归示例：
 
 ```bash

@@ -40,6 +40,7 @@ from .normalize import (
 
 __all__ = [
     "AgentConfig",
+    "DEFAULT_DECISION_AUTONOMY",
     "DEFAULT_EXECUTION_PERSISTENCE",
     "DEFAULT_SYSTEM_PROMPT",
     "INTERNAL_RUNTIME_CONFIG_FIELDS",
@@ -63,6 +64,21 @@ _LOG_LEVELS = {
     "error": logging.ERROR,
     "critical": logging.CRITICAL,
 }
+
+
+# LLM: Mirror 会话运行时 Default mode's assumptions-first boundary as model guidance,
+# not a host decision gate. Keep this generic: it must never inspect task text,
+# choose a domain-specific language, or turn an ordinary clarification into a
+# machine status transition.
+# 配置用途: 指导主代理在安全可逆的次要选择上自行采用合理默认，只有无法安全推断的关键缺口才向用户提问。
+DEFAULT_DECISION_AUTONOMY = (
+    "自主决策：用户已经给出明确目标时，优先从当前目录、现有代码、用户约束和工具事实补齐信息；"
+    "缺少次要实现选择时，不要停下来反问。若仍有多种安全可行方案，选择合理默认，必要时简短说明假设，"
+    "然后继续执行。只有缺失信息无法从上下文取得，而且任何合理假设都会导致实质偏离、越权或不可逆风险时，"
+    "才向用户提出一个简短的关键问题；不要输出多选菜单来代替工作。"
+    "用户已经明确授权你在可行方案中自行选择时，直接选择并继续。"
+    "任务规模大、耗时长或仅仅有可澄清之处，都不等于阻塞。"
+)
 
 
 # LLM: 会话运行时 keeps persistence and verification as model execution discipline,
@@ -92,6 +108,8 @@ DEFAULT_EXECUTION_PERSISTENCE = (
 # 配置用途: 提供未显式配置 system_prompt 时真正生效的默认人格和执行方式。
 DEFAULT_SYSTEM_PROMPT = (
     "你是 my-agent，一个自主的 CLI 智能体，用工具、多通道网关和子代理完成真实工程与运营任务。 "
+    + DEFAULT_DECISION_AUTONOMY
+    + " "
     + DEFAULT_EXECUTION_PERSISTENCE
     + " 沟通：尽量简短直接。除非用户要详细，否则别长篇、别加空洞开场和结尾、别堆能力清单；"
     "能一两句说清就一两句。 "

@@ -124,7 +124,11 @@
   路径覆盖都必须零创建并返回 typed repairs；不解析自然语言、不做质量/完成验收。223 项 focused 已通过，
   fresh r13 已证明错误批次零 child、模型能自行细分计划并合法创建第一名 child；taxonomy 漏码已修。
   fresh r14 又证明 goal 中的 `i18n/config` 会触发旧自动补绑并造成 Todo 假完成；该自然语言旁路已删除，
-  仍需 fresh r15 证明只认显式 covers，且 TUI/控制层不再显示 `UNKNOWN_ERROR`。
+  fresh r15 因 root 先反问目标语言而未进入派工；需 fresh r16 证明自主采用合理默认、只认显式 covers，
+  且 TUI/控制层不再显示 `UNKNOWN_ERROR`。
+- [x] 根默认 `system_prompt` 在持续执行纪律前包含 会话运行时 assumptions-first 软边界：安全可逆的次要选择采用
+  合理默认并继续；只有任何假设都会实质偏离、越权或产生不可逆风险时才问一个短问题。YAML 与 dataclass
+  逐字一致，文本不含项目名/语言专项，也不解析问句或写机器状态。
 - [x] 发布 YAML 与 dataclass 的默认 system prompt 文本完全一致，不再因测试机省略配置而回落到 Go 专项
   骨架；主/子/wake 共用 会话运行时 式持续完成软纪律，且没有重新引入 final 解析、Todo 自动续轮或机器质量验收。
 - [x] 同一 exact parent 下，系统生成的单个补派、批量补派和递归 child 名称沿历史 sibling 连续编号；

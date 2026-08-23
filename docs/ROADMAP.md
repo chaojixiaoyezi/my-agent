@@ -266,7 +266,11 @@ fresh r14 原样验证工具状态、模型返工和后续多批派工。r13 已
 `c5cc7c2` 部署后的 fresh r14 已证明第一名 child 完成后 root 会自动醒来并派第二批；但首名“项目骨架”
 goal 中出现 `src/i18n/`、`src/config/` 时，历史正文自动补绑旁路把两项 Todo 一起误判完成，TUI 从 0/9
 跳到 3/9。当前候选已删除 root/items/nested 全部 goal-id 自动补绑与回执投影，计划绑定只认显式
-`covers`；新增同名目录回归已通过。严格 gate、部署后使用 fresh r15 原样复验，旧 r14 不计最终通过。
+`covers`；新增同名目录回归已通过，`bdcc7d1` 已发布部署。fresh r15 没再走到 Todo/派工，而是在用户已
+授权自行换语言时停止并输出 Rust/Python/其它菜单；同模型 会话运行时 对照先探索、随后也输出语言/范围/测试
+菜单，均违背 会话运行时 Default 源码的 assumptions-first 规则。当前候选只把该源码语义适配到根默认
+`system_prompt` 前部，不解析问句、不造重试器或机器验收。严格 gate、部署后用 fresh r16 再只输入一次
+原样 Prompt 4，先证明 root 会自行选择语言、建计划和派 child，再继续观察显式 covers 与完整交付。
 
 ### 用户直控子代理的共享控制面
 
