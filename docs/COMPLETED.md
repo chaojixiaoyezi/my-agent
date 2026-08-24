@@ -9,7 +9,8 @@
   detach 仍明确保持进程。TUI 活动与后台 completion batching 均先按 root 索引选 exact run ids，再重读
   canonical task；无关历史损坏不再阻塞当前 root，当前树损坏仍 fail closed。`.7` 真机 exact resume 前后
   session 数均为 324，TUI PID 正常退出、Gateway 始终一个；8 秒 CPU 为约 12% 单核，12 次 stack 采样未再
-  出现全量 `list_runs_report/deepcopy`，16 会话并发快照最慢 0.294 秒。181 项 focused（2 xfail）与本地严格
+  出现全量 `list_runs_report/deepcopy`，16 会话并发快照最慢 0.294 秒。181 项 focused 跑到 100%
+  （179 passed、2 xfailed），本地严格
   gate 通过；未跑全仓 pytest，因改动远低于 10,000 行。
 
 - 2026-08-24 `c5026a7` 完成 TUI 子代理可进入视图和 owner-scoped 共用控制面：空输入 `↓/Enter` 进入，

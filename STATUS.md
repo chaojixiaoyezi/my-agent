@@ -11,7 +11,7 @@
   list/deepcopy；8 秒 CPU 约 12% 单核，16 会话并发活动快照最大 0.294 秒。
 - fresh tmux `ma-e2aba94-session-r14` 显示 MiniMax-M2.7；新 session 两次 `/exit` 的 TUI PID 均退出，
   中间 exact resume 没有新建 session，总数一直 324，唯一 Gateway PID `481449` 不变。181 项直接回归
-  通过（2 项既有 xfail），本地严格 gate 全通过；改动远低于 10,000 行，按规则未跑全仓 pytest。
+  跑到 100%（179 passed、2 项既有 xfailed），本地严格 gate 全通过；改动远低于 10,000 行，按规则未跑全仓 pytest。
 
 ## 2026-08-24 子代理可进入视图与精确控制（`.7` 真 TUI 已通过）
 
