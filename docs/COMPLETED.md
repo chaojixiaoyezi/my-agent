@@ -4,6 +4,14 @@
 
 最近收口重点：
 
+- 2026-08-24 `c12ea57` + `e2aba94` 完成 TUI 进程、durable session 与 Gateway task 分层，以及单 Gateway
+  活动/readiness 降载。普通 `/exit` 结束客户端/poller，保留 session 和后台任务并打印 exact resume；tmux
+  detach 仍明确保持进程。TUI 活动与后台 completion batching 均先按 root 索引选 exact run ids，再重读
+  canonical task；无关历史损坏不再阻塞当前 root，当前树损坏仍 fail closed。`.7` 真机 exact resume 前后
+  session 数均为 324，TUI PID 正常退出、Gateway 始终一个；8 秒 CPU 为约 12% 单核，12 次 stack 采样未再
+  出现全量 `list_runs_report/deepcopy`，16 会话并发快照最慢 0.294 秒。181 项 focused（2 xfail）与本地严格
+  gate 通过；未跑全仓 pytest，因改动远低于 10,000 行。
+
 - 2026-08-24 `c5026a7` 完成 TUI 子代理可进入视图和 owner-scoped 共用控制面：空输入 `↓/Enter` 进入，
   `Ctrl+G` 只返回，`Esc` 精确停止当前 child；运行 child 接受幂等普通中文 guidance，终态 child 保留历史/final
   但只读。child 的公开 thinking/tool/diff 使用有界跨进程事件流，状态与权限仍由 canonical 账本裁决。

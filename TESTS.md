@@ -45,6 +45,13 @@ session 恢复、`/client/notices` 延迟和 Gateway CPU；不得另启 Gateway�
 Gateway 做 Python stack/CPU 采样，不能把客户端减少误报成 scheduler 降载已完成。
 当前 root 的 canonical child 损坏必须保守返回 load error；另一棵无关历史树损坏不得再阻塞本 root 汇报。
 
+2026-08-24 `.7` 真机证据：`c12ea57` 和 `e2aba94` 依次部署到唯一 Gateway。fresh tmux
+`ma-e2aba94-session-r14`（`ssh root@192.0.2.7 -t 'tmux attach -t ma-e2aba94-session-r14'`）显示
+MiniMax-M2.7；新建 session `sess_1787572173_e90c7030` 后 `/exit` PID 消失、exact resume 未新增 session，
+再次 `/exit` 仍 status 0，session 总数全程 324。Gateway PID `481449`/8420 始终唯一；8 秒 `/proc` CPU
+差分约 12% 单核，12 次 `py-spy` 后台线程采样均为 wait 且零次出现全量 list/deepcopy；16 个 durable
+session 并发 `/client/notices` 全部成功，0.027--0.294 秒、总墙钟 0.315 秒。
+
 子代理详情与控制面的 focused 回归：
 
 ```bash

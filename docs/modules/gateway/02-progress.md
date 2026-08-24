@@ -1,6 +1,6 @@
 # Gateway Progress
 
-## 2026-08-24 detached TUI 会话降载与退出语义（首段已部署，scheduler 降载候选）
+## 2026-08-24 detached TUI 会话降载与退出语义（已部署真机）
 
 - `.7` 现场的 tmux 窗口虽然全部 detached，但其中 10 个 TUI Python 进程仍存活并持续查询唯一 Gateway；
   `/client/notices` 每次又扫描 owner 下全部历史子代理，形成高 CPU、BrokenPipe 和新消息排队。它不是
@@ -13,7 +13,11 @@
   活动任务的部署前 TUI，用户当前直连 TUI 未动，所有对应 durable session 均保留。
 - 关闭旧客户端后 Gateway 仍有约 40% CPU；`py-spy` 精确采到后台 readiness 在
   `_related_subagent_runs -> list_runs_report -> deepcopy`。当前候选让 lifecycle 合批也走 root 索引选 ID、
-  canonical 精确读取；部署后必须用同一 Gateway 重采空闲 CPU/stack，并确认有任务状态刷新仍不超过约 1 秒。
+  canonical 精确读取。`e2aba94` 部署后 12 次 stack 采样均为等待态，不再出现该全扫栈；8 秒 `/proc`
+  差分约 12% 单核，16 会话并发快照最慢 0.294 秒。
+- fresh TUI `ma-e2aba94-session-r14` 显示 MiniMax-M2.7 与正确 cwd；首次 `/exit`、exact resume、再次
+  `/exit` 的两个 PID 均消失且 status 0，canonical session 一直存在、总数一直 324，Gateway PID
+  `481449` 始终是唯一 8420 listener。
 
 ## 2026-08-24 后台 main 富过程双游标（本地候选）
 

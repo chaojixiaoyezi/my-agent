@@ -6,9 +6,12 @@
   exact `resume` 没有新建会话；16 个历史会话并发活动快照均在 0.011--0.206 秒返回。
 - 9 个部署前且 `active_task_count=0` 的 tmux TUI 已正常 `/exit`；对应 session 文件全部保留，用户当前直连
   PID 未触碰。终端交互 的 live PID registry 与 durable transcript 分层已按单 Gateway 架构适配完成。
-- 关闭旧客户端后只读采样仍抓到 Gateway scheduler 在 readiness 中 deepcopy 全部历史 run；当前本地候选
-  新增 root-scoped indexed canonical reader，181 项直接回归已通过（2 项既有 xfail）。待严格 gate、推送、部署并重采 CPU/
-  Python stack 后，才能把第二段降载写成真机完成。
+- 关闭旧客户端后只读采样仍抓到 Gateway scheduler 在 readiness 中 deepcopy 全部历史 run；`e2aba94`
+  已新增 root-scoped indexed canonical reader并部署。12 次后台 stack 采样均为 wait、未再出现全量
+  list/deepcopy；8 秒 CPU 约 12% 单核，16 会话并发活动快照最大 0.294 秒。
+- fresh tmux `ma-e2aba94-session-r14` 显示 MiniMax-M2.7；新 session 两次 `/exit` 的 TUI PID 均退出，
+  中间 exact resume 没有新建 session，总数一直 324，唯一 Gateway PID `481449` 不变。181 项直接回归
+  通过（2 项既有 xfail），本地严格 gate 全通过；改动远低于 10,000 行，按规则未跑全仓 pytest。
 
 ## 2026-08-24 子代理可进入视图与精确控制（`.7` 真 TUI 已通过）
 

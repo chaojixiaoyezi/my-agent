@@ -1294,7 +1294,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   本地可信 TUI 的 cwd 与远程用户 `owner_home` 隔离也不因传输优化改变。后续若升级为事件长连接，仍复用
   同一 canonical activity/notices，而不是建立第二份前端状态账。
 
-## 2026-08-24 TUI 进程退出与 durable session 分离【状态：首段已部署；后台 root 查询降载待真机】
+## 2026-08-24 TUI 进程退出与 durable session 分离【状态：已部署并完成 `.7` 真机】
 
 - 终端交互 对照把三层事实分开：`~/.模型助手/sessions/<pid>.json` 只登记仍活着的 REPL 进程，普通
   `/exit`/Ctrl-D 会走 graceful shutdown 并删除 PID 登记；聊天 transcript/session 继续持久化，可用
@@ -1315,6 +1315,10 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   复用 LocalStore 的 `root_task_id` 索引只选择 exact run ids，再逐个读取 canonical `task.json`；managed
   索引异常返回结构化 load error 并保守不推进，不能退回自然语言或展示树猜状态。只有显式
   local-unmanaged/fake manager 没有查询投影时保留 canonical 全扫兼容路径。
+- 真机验收保持全部历史数据和待处理 wake，不靠删任务制造低负载：`e2aba94` 部署后后台线程在 12 次
+  `py-spy` 采样中均处于定时等待，没有再进入 `list_runs_report/deepcopy`；8 秒 `/proc` 差分约 12% 单核，
+  16 个 durable session 并发活动快照最慢 0.294 秒。fresh TUI `ma-e2aba94-session-r14` 的新建、退出、
+  exact resume、再次退出均为 status 0，session 总数始终 324，唯一 Gateway 未被停止或复制。
 
 ## 2026-08-23 会话运行时 式活轮权限与结果提交栅栏
 

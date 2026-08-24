@@ -66,10 +66,11 @@
   `ma-c5026a7-agent-nav-r12` 已在原样 Prompt 2 实际验证选择/进入/返回/插话/停止/终态回看。
 - [x] `.7` 单 Gateway 真实 TUI 已观察两个 child 从等待启动推进到一次 attempt `DONE`，固定活动区展示
   状态、动作和耗时，真实文件内容正确；测试者未向主代理或 child 发送推动消息。
-- [ ] 普通 `/exit` 必须结束当前 TUI/poller、保留 durable session 与 Gateway task，并输出 exact resume；
+- [x] 普通 `/exit` 必须结束当前 TUI/poller、保留 durable session 与 Gateway task，并输出 exact resume；
   tmux detach 仍表示进程存活。活动面和后台 completion batching 都按 root 索引选 exact run ids 后读取
   canonical task，managed 主链不得扫描/deepcopy 全部历史。`c12ea57` 的退出/resume/接口延迟已在 `.7`
-  通过；scheduler root reader 已过 focused，待部署后用 stack/CPU 与自然 wake 合批补齐真机证据。
+  通过；`e2aba94` 部署后 12 次 stack 无全量 deepcopy，8 秒 CPU 约 12% 单核，16 会话并发快照最大
+  0.294 秒；fresh `ma-e2aba94-session-r14` exact resume 前后 session 数稳定为 324、Gateway 始终唯一。
 - [ ] durable child wake 已 ready 但 process-local thread lane 不推进时，Gateway 必须自行检测并有界恢复；
   不能依赖用户发“继续”或人工重启。本轮已保留可复现事实，但自愈尚未实现。
 - [x] 本地/admin 主会话晋升为持久任务后，项目 `execution_cwd` 仍在真实 `allowed_write_roots` 中；
