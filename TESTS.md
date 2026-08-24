@@ -74,6 +74,12 @@ python3 -m pytest agent_py_agent/tests/test_tui_agent_navigation.py agent_py_age
 exact agent-run 账本写入且用户消息在该 child 正文立即可见；已停止 worker-1 和已完成 worker-2 均可回看，
 输入不会复活终态，worker-2 canonical final 正常展示。
 
+同日完整消息页追补：`91a1c3d` 通过 218 项直接 focused 和本地严格 gate 后部署到 `.7` 唯一 Gateway
+（PID `499058`），fresh tmux `ma-91a1c3d-child-full-r17` 显示 MiniMax-M2.7，并只输入一次原样 Prompt 2。
+实按 `↓/Enter` 进入 worker-1 后，普通页出现 child 灰色 thinking、过程 commentary、`list_files`、`Bash`
+和写文件卡；`Ctrl+O` 保持 child 视角，Home 首行是完整 delegated goal，`Ctrl+G` 才回 main。现场三个 child
+JSONL 均含 tool started/completed，worker-1 采样为 6/6；长任务继续运行，不能把此 UI 验收当作游戏完成。
+
 Attempt 生命周期与授权续跑的 focused 回归：
 
 ```bash

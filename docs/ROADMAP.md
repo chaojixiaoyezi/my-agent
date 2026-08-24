@@ -168,11 +168,11 @@ TypeScript library，`dist/index.js` 没有 fzf 可执行入口。当前本地�
 红删蓝增` 可从后台链路显示且游标不重放；待严格 gate、部署后以全新 tmux 原样 Prompt 4 真机同时复验
 “root 不自写”和“后台两分钟工作期间持续可见”。
 
-子代理详情的真机回看又暴露三项同源缺口：详情首条错误优先使用短 `description`，非 callable 的 child
-transcript sink 在工具进度入口被提前返回，`Ctrl+O` 还固定冻结 root runtime。结果就是进入 child 后看不到
-完整派工 prompt、工具卡及工具前过程说明，展开历史又像切回主代理。当前切片按 终端交互 同一 `Messages`
-renderer 和 会话运行时 独立 child thread 修复这三个通用接线点；完成 focused/严格 gate 后，必须部署 `.7` 唯一
-Gateway，并用用户给出的原样重型 prompt 在公开 tmux 中实按 `↓/Enter/Ctrl+O/Ctrl+G` 验收。
+子代理详情的真机回看暴露的三项同源缺口已由 `91a1c3d` 收口：详情首条改读完整 `task.goal`，非 callable
+child sink 先按 typed `write_progress` 接工具事件，`Ctrl+O` 改为冻结 active runtime。218 项直接 focused 与
+本地严格 gate 通过后已推送并部署 `.7` 唯一 Gateway。公开 tmux `ma-91a1c3d-child-full-r17` 使用原样 Prompt 2，
+实按 `↓/Enter/Ctrl+O/Home/Ctrl+G` 后显示 child 完整 prompt、灰色思考/过程、工具卡和代码内容，展开未跳 root；
+三名 child 的 JSONL 均已有 tool started/completed。界面切片已完成，超级玛丽产物仍由被测任务自行继续。
 
 `931ee20` 已完成上述展示复验：四条短职责、实时 context、单行 main 和终态标记均正确。新阻塞转到底层
 完成交接：旧 wake 没带 child 最终回复和 `final_report.md`，main 因而猜错目录。当前候选按 会话运行时 标准

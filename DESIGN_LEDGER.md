@@ -1446,7 +1446,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 
 ## 2026-08-24 TUI/Web 共用的子代理详情与精确控制面
 
-状态：基础导航与控制已由 `c5026a7` 在 `.7` 唯一 Gateway 的原样 Prompt 2 验收；子代理完整消息页对齐正在实现。
+状态：完整消息页已由 `91a1c3d` 在 `.7` 唯一 Gateway 的原样 Prompt 2 真 TUI 验收。
 
 - 交互对照采用 终端交互 的列表进入详情习惯，控制语义采用 会话运行时 的 exact agent id。输入框为空时才允许
   `↓` 选择 child，`Enter` 进入；详情继续消费同一 typed TUI event/reducer/renderer，不复制一套子代理 UI。
@@ -1466,6 +1466,10 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - typed callback 的能力判断必须先检查 `write_progress` 等显式方法，再兼容普通 callable；不能因为 sink
   对象本身不可调用就丢弃结构化工具事件。`Ctrl+O` 冻结的也必须是导航栈当前 active runtime，而非固定 root
   runtime，避免进入 child 后展开历史却跳回主代理。
+- `.7` fresh tmux `ma-91a1c3d-child-full-r17` 实际进入 `agent-d1-worker-1` 后，普通页显示 child 灰色 thinking、
+  `list_files`、`Bash` 和写文件工具卡；`Ctrl+O` 后仍是该 child，Home 首行是完整派工 user block，`Ctrl+G`
+  才返回 main。三名 child 的 JSONL 均出现配对 tool 事件，worker-1 现场已有 6 次 started/6 次 completed；
+  该行为证据只证明详情展示接线，不替代超级玛丽任务的功能完成验收。
 
 ## 2026-08-24 终端原生复制与 TUI 鼠标双模式【状态：`.7` 协议已真机验证，宿主右键待用户验收】
 

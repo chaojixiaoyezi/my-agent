@@ -1,5 +1,16 @@
 # STATUS
 
+## 2026-08-24 子代理详情完整复用主消息格式（`.7` 真 TUI 已通过）
+
+- `91a1c3d` 修复三个根因：详情 prompt 从短 `description` 改为完整 canonical `task.goal`；工具进度先识别
+  typed `write_progress`，非 callable child sink 不再被提前丢弃；`Ctrl+O` 冻结导航当前 runtime，不再跳 root。
+- 218 项直接 focused 与本地严格 gate 全通过，未跑全仓 pytest（改动远低于 10,000 行）；提交已推送并部署
+  到 `192.0.2.7`，测试机保持唯一 Gateway PID `499058`，有效模型为 MiniMax-M2.7。
+- fresh tmux `ma-91a1c3d-child-full-r17` 只输入一次用户原样 Prompt 2，实际进入 worker-1 后可见 child 自己的
+  完整派工、灰色 thinking/process、`list_files`、`Bash`、写文件代码卡；`Ctrl+O` 后仍在 child，Home 回到
+  派工首行，`Ctrl+G` 才返回 main。三名 child 的事件 JSONL 均已有配对工具事件，worker-1 采样为 6/6。
+  该 tmux 和被测任务继续运行，以上只验收 TUI 内容与按键，不宣称超级玛丽产物已经完成。
+
 ## 2026-08-24 TUI 退出/session 分层与 Gateway root 查询降载
 
 - `c12ea57` 已推送并部署到 `.7` 唯一 Gateway。fresh TUI `/exit` 后进程退出且 durable session 保留，

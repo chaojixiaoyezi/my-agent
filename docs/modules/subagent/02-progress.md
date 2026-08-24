@@ -1326,6 +1326,7 @@ tasks/<日期>/<任务>/output，即用户拿走的东西），而非子代理�
   唯一 Gateway、MiniMax-M2.7 和原样 Prompt 2 中实际验证选择/进入/返回/插话/停止/终态回看。
 - 后续用户回看暴露详情内容未完全接通：Gateway 曾优先返回 240 字短 `description`；工具轮又在发现 child
   sink 不是 callable 时提前返回，连带工具卡和工具前过程说明都未写事件；`Ctrl+O` 还固定冻结 root。
-  当前本地候选已改为完整 `task.goal` 首条 user block、typed `write_progress` 优先和 active-runtime
-  transcript snapshot。直接 focused 回归已覆盖完整 prompt、灰色 thinking/process、工具卡、Todo/Context/final
-  以及 child 内 `Ctrl+O` 不跳 root；待严格 gate、推送、单 Gateway 部署和原样重型 TUI 复验。
+  `91a1c3d` 已改为完整 `task.goal` 首条 user block、typed `write_progress` 优先和 active-runtime transcript
+  snapshot。218 项直接 focused 与严格 gate 通过并部署 `.7` 唯一 Gateway；原样 Prompt 2 的 tmux
+  `ma-91a1c3d-child-full-r17` 已真实显示 child 完整 prompt、灰色 thinking/process、工具卡/代码，`Ctrl+O`
+  未跳 root，`Ctrl+G` 才返回 main。三名 child 的事件文件均出现配对 tool started/completed。

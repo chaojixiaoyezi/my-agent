@@ -4,6 +4,12 @@
 
 最近收口重点：
 
+- 2026-08-24 `91a1c3d` 完成子代理详情的完整消息页接线：详情首条读取 canonical `task.goal`，typed child
+  sink 不再因自身非 callable 丢失工具卡和工具前过程说明，`Ctrl+O` 冻结当前 active runtime。218 项 focused
+  和本地严格 gate 通过，已推送并部署到 `.7` 唯一 Gateway。原样 Prompt 2 的 tmux
+  `ma-91a1c3d-child-full-r17` 实际显示完整派工、灰色 thinking/process、工具与代码内容，并证明展开不跳 root；
+  三名 child 均产生配对工具事件。被测游戏任务仍在运行，不计入本完成项。
+
 - 2026-08-24 `c12ea57` + `e2aba94` 完成 TUI 进程、durable session 与 Gateway task 分层，以及单 Gateway
   活动/readiness 降载。普通 `/exit` 结束客户端/poller，保留 session 和后台任务并打印 exact resume；tmux
   detach 仍明确保持进程。TUI 活动与后台 completion batching 均先按 root 索引选 exact run ids，再重读
