@@ -1298,5 +1298,5 @@ tasks/<日期>/<任务>/output，即用户拿走的东西），而非子代理�
 - child runner 的公开 thinking/tool/compact 通过 owner-scoped durable event stream 投影，详情复用主视图
   renderer，同时读取 canonical Context/Compact、Todo、直属 child 与 final。完成后的 child 仍可查看但只读。
 - Gateway 新增 owner 树内 view/guidance/stop 服务；写操作使用 exact run id、active binding 与稳定 operation id，
-  historical view 则保留 owner/ancestry 校验但允许 attempt 已关闭。80 项 focused 回归已通过；发布和 `.7`
-  原样重型 TUI 的实际按键验收尚未完成。
+  historical view 则保留 owner/ancestry 校验但允许 attempt 已关闭。focused 回归已通过；`c5026a7` 在 `.7`
+  唯一 Gateway、MiniMax-M2.7 和原样 Prompt 2 中实际验证选择/进入/返回/插话/停止/终态回看。

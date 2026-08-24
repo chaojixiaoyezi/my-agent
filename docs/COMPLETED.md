@@ -4,6 +4,12 @@
 
 最近收口重点：
 
+- 2026-08-24 `c5026a7` 完成 TUI 子代理可进入视图和 owner-scoped 共用控制面：空输入 `↓/Enter` 进入，
+  `Ctrl+G` 只返回，`Esc` 精确停止当前 child；运行 child 接受幂等普通中文 guidance，终态 child 保留历史/final
+  但只读。child 的公开 thinking/tool/diff 使用有界跨进程事件流，状态与权限仍由 canonical 账本裁决。
+  focused 严格门通过并部署到 `.7` 唯一 Gateway；原样 Prompt 2 的 `ma-c5026a7-agent-nav-r12` 已实际覆盖
+  多行选择、运行/停止/完成详情、插话、返回和停止，模型为 MiniMax-M2.7。
+
 - 2026-08-24 `fb75b68` 已删除 会话运行时 没有的 `SUBAGENT_ACTIVE_LINEAGE_EXISTS` 硬门、冲突扫描与 Audit
   专项绕过；同一 canonical parent 可分批创建不同 child，重复工作仍由 typed idempotency/work-scope
   复用，单次 4、会话 6、active-turn claim 与 owner 权限墙保持不变。派工 focused suite 和本地严格 gate

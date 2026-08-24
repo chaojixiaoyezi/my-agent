@@ -40,6 +40,13 @@ python3 -m pytest agent_py_agent/tests/test_tui_agent_navigation.py agent_py_age
 关闭后通过 owner/ancestry 授权，任何写控制仍要求 active binding，越出当前 owner 根树一律拒绝。真机验收
 还必须在已公开 tmux 中逐项实际按键，单元测试不得代替。
 
+2026-08-24 真机证据：`c5026a7` 部署到 `192.0.2.7` 的唯一 Gateway，模型为 MiniMax-M2.7；tmux
+`ma-53ff260-agent-nav-r11` 只输入一次原样 Prompt 2 并创建 4 名 child，首次直接暴露 footer 回执被遮挡。
+小修后 tmux `ma-c5026a7-agent-nav-r12` 恢复同一个 `sess_1787565844_0fa7e764`，没有重发任务；实按
+`↓/Enter/Ctrl+G/Esc`，证明返回不停止、Esc 只取消 worker-1。运行中 worker-4 接收一条普通中文 guidance，
+exact agent-run 账本写入且用户消息在该 child 正文立即可见；已停止 worker-1 和已完成 worker-2 均可回看，
+输入不会复活终态，worker-2 canonical final 正常展示。
+
 Attempt 生命周期与授权续跑的 focused 回归：
 
 ```bash

@@ -2125,7 +2125,8 @@
   mutation authorization 与 active binding。guidance 以稳定 operation id 幂等追加，stop 复用 canonical
   cancel 服务，终态 child 的新输入返回结构化冲突且不会静默恢复。
 - TUI 当前已接通这三个入口，未来 Web 继续复用同一 service。本地 focused 回归通过，`.7` 单 Gateway
-  原样长任务的真实按键验收待发布后完成。
+  原样 Prompt 2 已在 `c5026a7` 的 tmux `ma-c5026a7-agent-nav-r12` 完成真实按键验收；同机仍只有一个
+  Gateway，终态 child 的普通输入没有新建 attempt。
 
 ## 2026-08-22 单 Gateway 多项目 cwd 主链候选
 

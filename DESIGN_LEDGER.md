@@ -1419,7 +1419,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 
 ## 2026-08-24 TUI/Web 共用的子代理详情与精确控制面
 
-状态：本地实现与 80 项 focused 回归已通过，待发布后在 `.7` 唯一 Gateway 的原样长任务 TUI 中做真实按键验收。
+状态：本地实现与 focused 回归通过；`c5026a7` 已在 `.7` 唯一 Gateway 的原样 Prompt 2 真实按键验收通过。
 
 - 交互对照采用 终端交互 的列表进入详情习惯，控制语义采用 会话运行时 的 exact agent id。输入框为空时才允许
   `↓` 选择 child，`Enter` 进入；详情继续消费同一 typed TUI event/reducer/renderer，不复制一套子代理 UI。

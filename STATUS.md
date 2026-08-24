@@ -1,15 +1,16 @@
 # STATUS
 
-## 2026-08-24 子代理可进入视图与精确控制（本地候选）
+## 2026-08-24 子代理可进入视图与精确控制（`.7` 真 TUI 已通过）
 
 - TUI 空输入可用 `↓` 选择直属 child、`Enter` 进入；详情复用主代理的 thinking、工具/diff、Todo、
   Context/Compact、直属 child 和 final。运行中可直接输入普通自然语言插话，完成后保留只读查看。
 - `Esc` 只停止当前查看的运行中代理；返回父代理使用 `Ctrl+G`，`Alt+←` 与 `/back` 仅兼容。底部提示会明确
   当前动作，前端返回不改变 task/run/session，也不会把完成 child 静默复活。
 - Gateway 已加入 owner 树内 exact view/guidance/stop 服务，child 公开过程改为 process-shared 有界事件流；
-  历史查看与写控制采用不同授权强度。`53ff260` 首次真 TUI 已证明 `↓/Enter/Ctrl+G/Esc` 和两条 exact child
-  guidance 均落账，同时暴露常驻 footer 遮住发送回执、root 选中后仍显示旧 Esc 提示；本地后续候选已调整
-  footer 优先级，待严格门、二次部署和同一长任务复验后才能标为完成。
+  历史查看与写控制采用不同授权强度。`53ff260` 首轮抓到 footer 遮住发送回执；`c5026a7` 随后部署到
+  `192.0.2.7` 唯一 Gateway。tmux `ma-c5026a7-agent-nav-r12` 恢复同一原样 Prompt 2 会话后，真实验证
+  多行选择、运行/终态进入、`Ctrl+G` 无副作用返回、`Esc` 精确停止 worker-1、运行中 worker-4 普通中文
+  guidance 落账并立即出现在其正文、停止/完成 child 只读及 completed final 回看。有效模型为 MiniMax-M2.7。
 
 ## 2026-08-24 Prompt 4 r9：Todo 13/16 却假完成，根因是 no-save 绕过停止核对（本地修复候选）
 
