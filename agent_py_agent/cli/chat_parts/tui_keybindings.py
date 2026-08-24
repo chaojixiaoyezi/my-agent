@@ -77,6 +77,7 @@ class TuiCreateKeybindingsParams:
     permission_feedback_area: Any
     transcript_scroll_lines: int = TRANSCRIPT_SCROLL_LINES
     tui_runtime: Any | None = None
+    agent_navigation: Any | None = None
     active_input_reconciler: Any | None = None
     control_operation_reconciler: Any | None = None
     exit_armed_at_ref: list[float] | None = field(default_factory=lambda: [0.0])
@@ -198,6 +199,12 @@ def _register_chat_bindings(
         lambda e: _cancel_history_search(e, params)
     )
     kb.add("escape", "r", filter=chat_active)(lambda e: _handle_alt_r_keybinding(e, params))
+    kb.add("escape", "left", filter=chat_active)(
+        lambda e: _handle_agent_back_keybinding(e, params)
+    )
+    kb.add("c-g", filter=chat_active)(
+        lambda e: _handle_agent_back_keybinding(e, params)
+    )
     kb.add("up", filter=chat_active)(lambda e: _handle_up_keybinding(e, params))
     kb.add("down", filter=chat_active)(lambda e: _handle_down_keybinding(e, params))
     kb.add("c-p", filter=chat_active)(lambda e: _handle_completion_or_history(e, params, -1))
@@ -351,6 +358,16 @@ def _handle_enter_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
                 _submit_input_area(event, params)
             event.app.invalidate()
             return
+    if not str(buffer.text or "").strip():
+        enter_selected = getattr(
+            getattr(params, "agent_navigation", None),
+            "enter_selected",
+            None,
+        )
+        if callable(enter_selected) and enter_selected():
+            _reset_exit_arms(params)
+            event.app.invalidate()
+            return
     _submit_input_area(event, params)
 
 
@@ -378,9 +395,41 @@ def _submit_input_area(event, params: TuiCreateKeybindingsParams) -> None:
         )
         event.app.invalidate()
         return
+    if text == "/back" and _navigate_agent_back(params):
+        _remember_input(params.input_area, text)
+        _set_input_draft(params, TuiDraft("", 0))
+        _reset_exit_arms(params)
+        _restore_stash_after_submit(params)
+        event.app.invalidate()
+        return
+    navigation_snapshot = _agent_navigation_snapshot(params)
+    active_agent_id = str(
+        getattr(navigation_snapshot, "active_run_id", "") or ""
+    ).strip()
+    if active_agent_id and bool(getattr(navigation_snapshot, "terminal", False)):
+        _active_tui_runtime(params).set_notice(
+            "这个子代理已经结束，当前页面只读；Ctrl+G 返回父代理",
+            duration_seconds=2.5,
+        )
+        event.app.invalidate()
+        return
     _remember_input(params.input_area, text)
     _set_input_draft(params, TuiDraft("", 0))
     _reset_exit_arms(params)
+    if active_agent_id and text == "/stop":
+        _dispatch_agent_interrupt(event, params, active_agent_id)
+        _restore_stash_after_submit(params)
+        return
+    if active_agent_id and not text.startswith("/"):
+        _tui_submit_agent_input(
+            event,
+            params,
+            run_id=active_agent_id,
+            text=text,
+            display_text=display_text,
+        )
+        _restore_stash_after_submit(params)
+        return
     if _tui_submit_control_operation(params, text):
         _restore_stash_after_submit(params)
         event.app.invalidate()
@@ -1277,6 +1326,199 @@ def _required_tui_runtime(params: TuiCreateKeybindingsParams):
     return params.tui_runtime
 
 
+# LLM: Agent navigation may select a child display runtime, but the root runtime
+# remains the only worker/queue runtime. Callers use this helper for visible notices
+# and child guidance receipts only.
+# 函数用途: 返回当前代理页面对应的 typed TUI runtime。
+def _active_tui_runtime(params: TuiCreateKeybindingsParams):
+    reader = getattr(getattr(params, "agent_navigation", None), "active_runtime", None)
+    runtime = reader() if callable(reader) else _required_tui_runtime(params)
+    from .tui_runtime import TuiRuntime
+
+    if not isinstance(runtime, TuiRuntime):
+        raise TypeError("active agent runtime must be TuiRuntime")
+    return runtime
+
+
+# LLM: Snapshot lookup is read-only and returns None when navigation is absent;
+# key handlers never reconstruct active identity from rendered row text.
+# 函数用途: 取得当前子代理视图/选择状态。
+def _agent_navigation_snapshot(params: TuiCreateKeybindingsParams):
+    reader = getattr(getattr(params, "agent_navigation", None), "snapshot", None)
+    return reader() if callable(reader) else None
+
+
+# LLM: Ctrl+G is the portable primary back key; Alt+Left remains a compatible
+# binding. Neither shares Esc's cancellation path, so back cannot stop a child.
+# 函数用途: 返回上一层代理页面并刷新界面。
+def _handle_agent_back_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
+    if not _navigate_agent_back(params):
+        _required_tui_runtime(params).set_notice(
+            "已经在主代理页面",
+            duration_seconds=1.2,
+        )
+    _reset_exit_arms(params)
+    event.app.invalidate()
+
+
+# LLM: Ctrl+G, Alt+Left, and `/back` call the same typed stack operation; no
+# input text or footer label is parsed to locate the parent.
+# 函数用途: 尝试返回父代理，成功时返回 True。
+def _navigate_agent_back(params: TuiCreateKeybindingsParams) -> bool:
+    back = getattr(getattr(params, "agent_navigation", None), "back", None)
+    return bool(back()) if callable(back) else False
+
+
+# LLM: A child input gets one stable client id and an idempotent Gateway mailbox
+# submission. Network uncertainty retries only that same id in a daemon thread;
+# it never creates a main-agent ChatJob or blocks prompt_toolkit rendering.
+# 函数用途: 将普通自然语言插入当前子代理，并把投递状态显示在该子代理页面。
+def _tui_submit_agent_input(
+    event,
+    params: TuiCreateKeybindingsParams,
+    *,
+    run_id: str,
+    text: str,
+    display_text: str,
+) -> None:
+    from ...agent.conversation.models import new_id
+
+    message_id = new_id("agent-steer")
+    runtime = _active_tui_runtime(params)
+    runtime.enqueue_active_turn_input(message_id, display_text)
+    sender = getattr(params.agent, "request_agent_guidance", None)
+    if not callable(sender):
+        runtime.cancel_active_turn_input(message_id)
+        runtime.set_notice("当前连接不支持子代理插话", duration_seconds=2.5)
+        _restore_failed_agent_input(event.app, params, text)
+        return
+    app = event.app
+
+    # LLM: The retry loop is bounded by the TUI stop event and reuses the exact
+    # idempotency identity. Only a structured success removes the pending receipt.
+    # 函数用途: 在后台确认补充消息已进入子代理消息箱，或把明确失败的正文恢复到输入框。
+    def deliver() -> None:
+        delay = ACTIVE_TURN_RETRY_INITIAL_SECONDS
+        while not params.stop_event.is_set():
+            try:
+                result = sender(
+                    params.current_session_id,
+                    run_id=run_id,
+                    message=text,
+                    message_id=message_id,
+                )
+            except Exception:
+                result = {"ok": False, "http_status": 0}
+            if isinstance(result, dict) and result.get("ok") is True:
+                # Gateway 回执只证明消息箱已接受，并不证明模型已在本次边界消费。
+                # 因此撤掉等待回执后显示普通用户消息，不伪造 steer_promoted。
+                runtime.cancel_active_turn_input(message_id)
+                runtime.enqueue_prompt(message_id, display_text, queued=False)
+                runtime.set_notice("已发送给当前子代理", duration_seconds=1.5)
+                app.invalidate()
+                return
+            status = _safe_http_status(result)
+            if status in {0, 500, 502, 503, 504}:
+                runtime.set_notice("正在确认子代理消息…", duration_seconds=2.0)
+                if params.stop_event.wait(delay):
+                    return
+                delay = min(ACTIVE_TURN_RETRY_MAX_SECONDS, delay * 2.0)
+                continue
+            runtime.cancel_active_turn_input(message_id)
+            code = str(result.get("error_code") or "") if isinstance(result, dict) else ""
+            runtime.set_notice(
+                "子代理已结束，消息未发送"
+                if code == "AGENT_ALREADY_TERMINAL"
+                else "消息未发送，已恢复到输入框",
+                duration_seconds=2.8,
+            )
+            _restore_failed_agent_input(app, params, text)
+            return
+
+    threading.Thread(target=deliver, daemon=True).start()
+    runtime.set_notice("正在确认子代理消息…", duration_seconds=1.2)
+    app.invalidate()
+
+
+# LLM: Failed delivery restoration runs on the prompt_toolkit event loop. It
+# never overwrites text the user typed while the network request was pending.
+# 函数用途: 明确未投递时把原消息放回空输入框，非空时留在正文中供用户复制。
+def _restore_failed_agent_input(
+    app: object,
+    params: TuiCreateKeybindingsParams,
+    text: str,
+) -> None:
+    def restore() -> None:
+        if not str(params.input_area.text or ""):
+            _set_input_draft(params, TuiDraft(text, len(text)))
+        else:
+            _active_tui_runtime(params).write_console(
+                "上一条给子代理的消息未发送，请重新提交。"
+            )
+        app.invalidate()
+
+    loop = getattr(app, "loop", None)
+    schedule = getattr(loop, "call_soon_threadsafe", None)
+    if callable(schedule):
+        schedule(restore)
+    else:
+        restore()
+
+
+# LLM: Esc in a child view submits one exact run cancellation on a background
+# thread. It never calls the root `/stop` path or uses the row index as identity.
+# 函数用途: 停止当前正在查看的子代理，并立即给用户可见反馈。
+def _dispatch_agent_interrupt(
+    event,
+    params: TuiCreateKeybindingsParams,
+    run_id: str,
+) -> None:
+    from ...agent.conversation.models import new_id
+
+    runtime = _active_tui_runtime(params)
+    requester = getattr(params.agent, "request_agent_stop", None)
+    if not callable(requester):
+        runtime.set_notice("当前连接不支持停止子代理", duration_seconds=2.5)
+        event.app.invalidate()
+        return
+    operation_id = new_id("agent-stop")
+    runtime.set_notice("正在停止当前子代理…", duration_seconds=2.0)
+    app = event.app
+
+    # LLM: The server's canonical cancellation result is the only completion
+    # signal; client-side notice text never changes run status.
+    # 函数用途: 在后台发送停止请求并显示确认结果。
+    def stop_agent() -> None:
+        try:
+            result = requester(
+                params.current_session_id,
+                run_id=run_id,
+                operation_id=operation_id,
+            )
+        except Exception:
+            result = {"ok": False}
+        if isinstance(result, dict) and result.get("ok") is True:
+            runtime.set_notice("停止请求已执行", duration_seconds=1.8)
+        else:
+            runtime.set_notice(
+                "停止结果暂时无法确认；系统没有自动重复执行",
+                duration_seconds=3.0,
+            )
+        app.invalidate()
+
+    threading.Thread(target=stop_agent, daemon=True).start()
+    event.app.invalidate()
+
+
+# LLM: HTTP status is transport metadata only and cannot decide child lifecycle.
+# 函数用途: 安全读取薄客户端返回的 HTTP 状态码。
+def _safe_http_status(value: object) -> int:
+    try:
+        return int(value.get("http_status") or 0) if isinstance(value, dict) else 0
+    except (TypeError, ValueError):
+        return 0
+
+
 # LLM: Ctrl-C 先复制当前输入选区，再复制 typed transcript 选区；两者都为空时才停止回合或进入双击退出状态。
 # 函数用途: 实现输入/正文复制、活动中断和防误触双击退出的明确优先级。
 def _handle_ctrl_c_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
@@ -1508,6 +1750,18 @@ def _handle_escape_keybinding(event, params: TuiCreateKeybindingsParams) -> None
         _reset_exit_arms(params)
         event.app.invalidate()
         return
+    navigation = _agent_navigation_snapshot(params)
+    active_agent_id = str(getattr(navigation, "active_run_id", "") or "").strip()
+    if active_agent_id:
+        if bool(getattr(navigation, "terminal", False)):
+            _active_tui_runtime(params).set_notice(
+                "这个子代理已经结束；Ctrl+G 返回父代理",
+                duration_seconds=2.0,
+            )
+            event.app.invalidate()
+            return
+        _dispatch_agent_interrupt(event, params, active_agent_id)
+        return
     with params.state_lock:
         running = bool(params.is_running_ref[0])
         queued = int(params.pending_jobs_ref[0] or 0) > 0
@@ -1546,6 +1800,20 @@ def _handle_up_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
         move_completion_selection(buffer, -event.arg)
         event.app.invalidate()
         return
+    navigation = _agent_navigation_snapshot(params)
+    if (
+        not str(buffer.text or "")
+        and str(getattr(navigation, "selected_run_id", "") or "")
+    ):
+        mover = getattr(
+            getattr(params, "agent_navigation", None),
+            "move_selection",
+            None,
+        )
+        if callable(mover) and mover(-max(1, int(event.arg))):
+            _reset_exit_arms(params)
+            event.app.invalidate()
+            return
     if move_input_cursor_by_wrapped_rows(
         buffer,
         width=_input_visual_width(event, params),
@@ -1621,6 +1889,16 @@ def _handle_down_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
         move_completion_selection(buffer, event.arg)
         event.app.invalidate()
         return
+    if not str(buffer.text or ""):
+        mover = getattr(
+            getattr(params, "agent_navigation", None),
+            "move_selection",
+            None,
+        )
+        if callable(mover) and mover(max(1, int(event.arg))):
+            _reset_exit_arms(params)
+            event.app.invalidate()
+            return
     if move_input_cursor_by_wrapped_rows(
         buffer,
         width=_input_visual_width(event, params),

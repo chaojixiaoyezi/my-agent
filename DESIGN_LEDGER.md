@@ -1416,3 +1416,19 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 会话运行时 对照：`AgentStatus::Errored/NotFound` 会让 multi-agent wait/tool 显式失败，重新启动走显式
   `resume_agent`；没有周期任务把异常 thread 先宣称复活再让执行入口报错。本项目因持久 Gateway 需要
   orphan 巡查，但采用同一原则把异常权威状态挡在调度之前。
+
+## 2026-08-24 TUI/Web 共用的子代理详情与精确控制面
+
+状态：本地实现与 80 项 focused 回归已通过，待发布后在 `.7` 唯一 Gateway 的原样长任务 TUI 中做真实按键验收。
+
+- 交互对照采用 终端交互 的列表进入详情习惯，控制语义采用 会话运行时 的 exact agent id。输入框为空时才允许
+  `↓` 选择 child，`Enter` 进入；详情继续消费同一 typed TUI event/reducer/renderer，不复制一套子代理 UI。
+  当前运行 child 的普通输入是幂等 guidance，已结束 child 只读。
+- `Esc` 的唯一语义是停止当前查看的运行中代理。返回父级改为 `Ctrl+G`，并保留 `Alt+←`、`/back` 兼容，
+  避免一个按键同时承担 destructive stop 和 navigation。视图栈只改变前端焦点，不改 run/task/session。
+- owner-scoped Gateway service 是 TUI 与未来 Web 的共用入口。历史查看要求 exact owner/root/ancestry，允许
+  attempt 已结束；guidance/stop 额外要求 active binding，并写 canonical 控制账。终态不会因新输入自动创建
+  attempt，未来若增加恢复必须单独实现显式 resume 操作和审计。
+- child 公开过程使用 process-shared、有界、增量游标 JSONL；只保存已经公开的 thinking/tool/compact 展示
+  事件。它不是任务状态、权限、完成裁决或 Compact 账本，丢失过程时可以降级显示 canonical final/status，
+  不能反向更改生命周期。

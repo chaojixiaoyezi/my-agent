@@ -82,9 +82,28 @@ class TuiFrameProvider:
         self._cached_frame: TuiRenderFrame | None = None
         self._invalidate_callback: Callable[[], None] | None = None
         self._lock = threading.Lock()
+        self._subscribed_store_ids: set[int] = {id(state_store)}
         self.state_store.subscribe(self.invalidate)
         if self.transcript_state is not None:
             self.transcript_state.set_invalidate_callback(self.invalidate)
+
+    # LLM: View navigation may swap only the visible typed store. Every seen
+    # store remains subscribed to this provider, while canonical state and event
+    # sequencing stay inside their original runtimes.
+    # 函数用途: 进入或返回代理详情时切换当前画面使用的状态仓库。
+    def set_state_store(self, state_store: TuiStateStore) -> None:
+        if not isinstance(state_store, TuiStateStore):
+            raise TypeError("state_store must be TuiStateStore")
+        with self._lock:
+            if self.state_store is state_store:
+                return
+            self.state_store = state_store
+            self._cached_key = None
+            needs_subscription = id(state_store) not in self._subscribed_store_ids
+            self._subscribed_store_ids.add(id(state_store))
+        if needs_subscription:
+            state_store.subscribe(self.invalidate)
+        self.invalidate()
 
     # LLM: frame key覆盖 block版本、queue、permission、status 与 context；diagnostics 不可见所以不触发重绘。
     # 函数用途: 返回当前宽度的共享渲染帧。

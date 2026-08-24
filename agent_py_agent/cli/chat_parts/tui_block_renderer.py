@@ -77,6 +77,7 @@ HELP_SHORTCUT_GROUPS = (
     ),
     (
         "double tap esc to clear input",
+        "ctrl + g back from child",
         "ctrl + o for detailed transcript",
         "ctrl + t to expand tasks",
         "ctrl + r to search prompts",
@@ -184,6 +185,11 @@ class TuiRenderContext:
     is_pasting: bool = False
     help_open: bool = False
     todos_expanded: bool = False
+    focused_agent_run_id: str = ""
+    focused_agent_name: str = "main"
+    focused_agent_status: str = ""
+    selected_agent_run_id: str = ""
+    agent_view_depth: int = 0
 
     # LLM: width 最小一列，名称字段只做展示字符串规范，不获得路径或配置控制权。
     # 函数用途: 规范渲染上下文，保证动画索引非负。
@@ -216,6 +222,31 @@ class TuiRenderContext:
         object.__setattr__(self, "is_pasting", bool(self.is_pasting))
         object.__setattr__(self, "help_open", bool(self.help_open))
         object.__setattr__(self, "todos_expanded", bool(self.todos_expanded))
+        object.__setattr__(
+            self,
+            "focused_agent_run_id",
+            str(self.focused_agent_run_id or "").strip(),
+        )
+        object.__setattr__(
+            self,
+            "focused_agent_name",
+            str(self.focused_agent_name or "main").strip() or "main",
+        )
+        object.__setattr__(
+            self,
+            "focused_agent_status",
+            str(self.focused_agent_status or "").strip().upper(),
+        )
+        object.__setattr__(
+            self,
+            "selected_agent_run_id",
+            str(self.selected_agent_run_id or "").strip(),
+        )
+        object.__setattr__(
+            self,
+            "agent_view_depth",
+            max(0, int(self.agent_view_depth or 0)),
+        )
 
 
 # LLM: frame provider 必须复用 renderer 的可见上下文规则；wall clock 仅在活动 connection/thinking/background/compact 真正改变画面时进入 key。
@@ -282,6 +313,11 @@ def tui_render_context_key(
         context.is_pasting,
         context.help_open,
         context.todos_expanded,
+        context.focused_agent_run_id,
+        context.focused_agent_name,
+        context.focused_agent_status,
+        context.selected_agent_run_id,
+        context.agent_view_depth,
         connection_animation,
         thinking_animation,
         background_animation,
@@ -553,6 +589,9 @@ def _render_background_activity(
         if isinstance(block.metadata.get("main_activity"), dict)
         else {}
     )
+    active_task_count = max(0, _safe_render_int(block.metadata.get("active_task_count")))
+    if not context.focused_agent_run_id and active_task_count <= 0:
+        return ()
     started_at = float(
         main_activity.get("started_at") or block.metadata.get("started_at") or 0.0
     )
@@ -563,13 +602,47 @@ def _render_background_activity(
     main_label = str(main_activity.get("activity") or "").strip() or derived_label
     if main_phase in {"", "waiting", "finalizing"} and _active_subagent_count(rows):
         main_label = derived_label
-    main_style = "class:tui-error" if main_phase == "failed" else "class:tui-subagent-running"
-    glyph = SPINNER_GLYPHS[context.spinner_index % len(SPINNER_GLYPHS)]
-    prefix: tuple[Fragment, ...] = (
-        (main_style, f"{glyph} "),
-        ("class:tui-strong", "Working"),
-        ("class:tui-muted", " · main"),
+    focused_status = context.focused_agent_status
+    focused_terminal = bool(
+        context.focused_agent_run_id
+        and focused_status
+        in {
+            "DONE",
+            "FAILED",
+            "BLOCKED",
+            "CHANNEL_ERROR",
+            "TIMEOUT",
+            "CANCELLED",
+            "ABANDONED",
+            "TAKEN_OVER",
+        }
     )
+    main_style = (
+        "class:tui-error"
+        if main_phase == "failed" or focused_status in {"FAILED", "TIMEOUT", "CHANNEL_ERROR"}
+        else "class:tui-subagent-done"
+        if focused_status == "DONE"
+        else "class:tui-subagent-running"
+    )
+    if focused_terminal:
+        terminal_icon, terminal_label, terminal_style = _subagent_status_display(
+            focused_status
+        )
+        prefix = (
+            (terminal_style, f"{terminal_icon} "),
+            ("class:tui-strong", context.focused_agent_name),
+            (terminal_style, f" · {terminal_label}"),
+        )
+    else:
+        glyph = SPINNER_GLYPHS[context.spinner_index % len(SPINNER_GLYPHS)]
+        prefix = (
+            (main_style, f"{glyph} "),
+            ("class:tui-strong", "Working"),
+            (
+                "class:tui-muted",
+                f" · {context.focused_agent_name if context.focused_agent_run_id else 'main'}",
+            ),
+        )
     suffix: tuple[Fragment, ...] = (
         ("class:tui-muted", f" · {_format_activity_duration(elapsed)}"),
     )
@@ -681,8 +754,10 @@ def _render_subagent_activity_row(
     ]
     if attempts > 1:
         suffix.append(("class:tui-muted", f" · 重试 {attempts - 1} 次"))
+    selected = str(row.get("run_id") or "").strip() == context.selected_agent_run_id
+    row_prefix = "› " if selected else "  "
     fixed_without_name: tuple[Fragment, ...] = (
-        ("class:tui-muted", "  "),
+        ("class:tui-agent-selected" if selected else "class:tui-muted", row_prefix),
         (style, f"{icon} "),
         (style, f" · {label}"),
         *suffix,
@@ -707,9 +782,9 @@ def _render_subagent_activity_row(
         - description_separator_width,
     )
     fragments: list[Fragment] = [
-        ("class:tui-muted", "  "),
+        ("class:tui-agent-selected" if selected else "class:tui-muted", row_prefix),
         (style, f"{icon} "),
-        ("class:tui-strong", name),
+        ("class:tui-agent-selected" if selected else "class:tui-strong", name),
         (style, f" · {label}"),
     ]
     if description and available_for_description > 0:
@@ -2154,10 +2229,29 @@ def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> Form
         if display_width_text(text) > context.width:
             text = "  Detailed · ctrl+o" + (" · ctrl+e all" if not context.show_all else "")
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
+    if context.focused_agent_run_id:
+        if context.focused_agent_status in {
+            "DONE",
+            "FAILED",
+            "BLOCKED",
+            "CHANNEL_ERROR",
+            "TIMEOUT",
+            "CANCELLED",
+            "ABANDONED",
+            "TAKEN_OVER",
+        }:
+            text = "  Ctrl+G 返回父代理 · 已结束，只读"
+        else:
+            text = "  Ctrl+G 返回父代理 · Esc 停止当前子代理"
+        return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
     if snapshot.status.phase in {"running", "interrupting"}:
         text = "  esc to interrupt"
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
-    if any(block.role == "background" for block in snapshot.active_blocks):
+    if any(
+        block.role == "background"
+        and _safe_render_int(block.metadata.get("active_task_count")) > 0
+        for block in snapshot.active_blocks
+    ):
         text = "  /stop to interrupt background task"
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
     if context.notice:
@@ -2166,6 +2260,8 @@ def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> Form
             _fit_text("  " + context.notice, context.width, "left").rstrip(),
         ),)
     text = "  ? for shortcuts"
+    if context.selected_agent_run_id:
+        text = "  ↑↓ 选择子代理 · Enter 查看"
     return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
 
 

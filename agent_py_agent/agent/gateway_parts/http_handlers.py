@@ -31,6 +31,12 @@ from ..conversation.control_commands import (
     parse_conversation_task_command,
 )
 from ..runtime_errors import DataCorruptionError, runtime_error_report
+from .agent_control_service import (
+    GatewayAgentControlError,
+    read_gateway_agent_view,
+    send_gateway_agent_guidance,
+    stop_gateway_agent,
+)
 from .client_service import execute_gateway_client_memory, read_gateway_client_history
 from .control_operation_service import (
     GatewayControlOperationConflict,
@@ -1015,6 +1021,129 @@ def handle_client_notices(handler, server) -> None:
         event_after=event_after,
     )
     handler._send_json(200, result)
+
+
+# LLM: View requests reuse trusted-source middleware and GatewayControlScope;
+# run_id is authorized against the resolved conversation root in the shared service.
+# 函数用途: 返回当前用户有权查看的一个子代理详情和增量过程事件。
+def handle_client_agent_view(handler, server) -> None:
+    body = _read_agent_control_body(handler, server)
+    if body is None:
+        return
+    user_id, channel = _request_channel(handler)
+    try:
+        result = read_gateway_agent_view(
+            server.agent,
+            scope=_gateway_control_scope(
+                handler,
+                body,
+                user_id=user_id,
+                channel=channel,
+            ),
+            run_id=str(body.get("run_id") or ""),
+            after=max(0, _safe_request_int(body.get("event_after"))),
+        )
+    except GatewayAgentControlError as exc:
+        _send_agent_control_error(handler, exc)
+        return
+    handler._send_json(200, result)
+
+
+# LLM: Guidance accepts ordinary user text only through the idempotent agent
+# mailbox service. It cannot be interpreted as a slash command or main turn.
+# 函数用途: 将一条补充消息投递给当前会话树内的指定子代理。
+def handle_client_agent_guidance(handler, server) -> None:
+    body = _read_agent_control_body(handler, server)
+    if body is None:
+        return
+    user_id, channel = _request_channel(handler)
+    try:
+        result = send_gateway_agent_guidance(
+            server.agent,
+            scope=_gateway_control_scope(
+                handler,
+                body,
+                user_id=user_id,
+                channel=channel,
+            ),
+            run_id=str(body.get("run_id") or ""),
+            message=str(body.get("message") or ""),
+            message_id=str(body.get("message_id") or ""),
+        )
+    except GatewayAgentControlError as exc:
+        _send_agent_control_error(handler, exc)
+        return
+    handler._send_json(202, result)
+
+
+# LLM: Stop accepts one exact run and opaque operation id. The shared service
+# handles terminal idempotency and the canonical process/lifecycle cancellation.
+# 函数用途: 停止当前会话树内用户正在查看的子代理。
+def handle_client_agent_stop(handler, server) -> None:
+    body = _read_agent_control_body(handler, server)
+    if body is None:
+        return
+    user_id, channel = _request_channel(handler)
+    try:
+        result = stop_gateway_agent(
+            server.agent,
+            scope=_gateway_control_scope(
+                handler,
+                body,
+                user_id=user_id,
+                channel=channel,
+            ),
+            run_id=str(body.get("run_id") or ""),
+            operation_id=str(body.get("operation_id") or ""),
+        )
+    except GatewayAgentControlError as exc:
+        _send_agent_control_error(handler, exc)
+        return
+    handler._send_json(200, result)
+
+
+# LLM: All three agent-control endpoints share identical transport validation;
+# parsing failure or unavailable service ends the request before scope resolution.
+# 函数用途: 读取并校验一条子代理控制 JSON 请求。
+def _read_agent_control_body(handler, server) -> dict[str, object] | None:
+    if require_trusted_source(handler):
+        return None
+    if server is None or server.agent is None:
+        handler._send_json(500, {"error": "server client service not initialized"})
+        return None
+    try:
+        body = handler._read_json()
+    except json.JSONDecodeError as exc:
+        handler._send_json(400, {"error": f"invalid JSON: {exc}"})
+        return None
+    if not _http_conversation_id(body):
+        handler._send_json(400, {"error": "conversation_id is required"})
+        return None
+    return body
+
+
+# LLM: Integer coercion is used only for display pagination and cannot affect
+# run identity, permission, or lifecycle transitions.
+# 函数用途: 将过程事件游标安全转换成非负整数。
+def _safe_request_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+# LLM: Public control errors expose stable status/code/message fields only;
+# nested exceptions and filesystem details never cross HTTP.
+# 函数用途: 将子代理控制服务拒绝转换成结构化响应。
+def _send_agent_control_error(handler, error: GatewayAgentControlError) -> None:
+    handler._send_json(
+        max(400, int(error.status or 500)),
+        {
+            "ok": False,
+            "error_code": str(error.error_code or "AGENT_CONTROL_FAILED"),
+            "error": str(error.message or "agent control failed"),
+        },
+    )
 
 
 # LLM: The canonical thread owns task candidates while each typed task link

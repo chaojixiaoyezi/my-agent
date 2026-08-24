@@ -128,6 +128,33 @@ def test_superseded_binding_rejected(ctx):
         authorize_operation(ctx.manager, _req("cancel", ctx.root.id))
 
 
+def test_historical_view_allows_ended_attempt_and_superseded_binding(ctx):
+    agent_run = ctx.repo.agent_run_for_run_id(ctx.root.id)
+    attempt = ctx.repo.current_attempt(agent_run["agent_run_id"])
+    binding = ctx.repo.create_binding(
+        agent_run_id=agent_run["agent_run_id"],
+        attempt_id=attempt["attempt_id"],
+        owner_id=OWNER,
+        root_path="/home/u/work",
+    )
+    ctx.repo.supersede_binding(binding_id=binding["binding_id"], expected_epoch=1)
+    with ctx.repo._runtime_connection() as conn:
+        conn.execute(
+            "DELETE FROM agent_attempts WHERE attempt_id = ?",
+            (attempt["attempt_id"],),
+        )
+        conn.execute(
+            "UPDATE agent_runs SET current_attempt_id = '' WHERE run_id = ?",
+            (ctx.root.id,),
+        )
+        conn.commit()
+
+    task = authorize_operation(ctx.manager, _req("view", ctx.root.id))
+    assert task.id == ctx.root.id
+    with pytest.raises(AuthorizationError, match="current attempt"):
+        authorize_operation(ctx.manager, _req("cancel", ctx.root.id))
+
+
 def test_never_bound_run_allowed(ctx):
     # 未执行（未建 binding）→ binding 校验放行。
     task = authorize_operation(ctx.manager, _req("cancel", ctx.root.id))

@@ -32,6 +32,7 @@ class TuiInputRefs:
     assistant_outputs: list[str]
     stop_event: threading.Event
     tui_runtime: object
+    agent_navigation: object
 
 
 @dataclass
@@ -174,6 +175,7 @@ def _make_tui_app_params(
     assistant_outputs: list[str],
     stop_event: threading.Event,
     tui_runtime: object,
+    agent_navigation: object,
 ) -> MakeTuiAppParams:
     return MakeTuiAppParams(
         agent=run_config.agent,
@@ -196,6 +198,7 @@ def _make_tui_app_params(
         stop_event=stop_event,
         current_session_id=run_config.current_session_id,
         tui_runtime=tui_runtime,
+        agent_navigation=agent_navigation,
     )
 
 
@@ -227,6 +230,7 @@ def _make_start_worker_params(
         stop_event=refs.stop_event,
         current_session_id=params.current_session_id,
         tui_runtime=refs.tui_runtime,
+        agent_navigation=refs.agent_navigation,
     )
 
 
@@ -235,6 +239,7 @@ def _make_start_worker_params(
 def run_tui(*, params: TuiRunParams) -> int:
     from agent_py_agent import __version__
 
+    from .tui_agent_navigation import TuiAgentNavigationState
     from .tui_runtime import TuiRuntime
 
     assistant_outputs: list[str] = []
@@ -242,6 +247,7 @@ def run_tui(*, params: TuiRunParams) -> int:
     app_ref: list = [None]
     refresh_stop = threading.Event()
     tui_runtime = TuiRuntime(params.current_session_id)
+    agent_navigation = TuiAgentNavigationState(tui_runtime)
     tui_runtime.publish_session(
         version=__version__,
         model=str(getattr(params.agent.config, "model_name", "") or ""),
@@ -255,6 +261,7 @@ def run_tui(*, params: TuiRunParams) -> int:
             assistant_outputs,
             stop_event,
             tui_runtime,
+            agent_navigation,
         )
     )
     app_ref[0] = app
@@ -264,6 +271,7 @@ def run_tui(*, params: TuiRunParams) -> int:
         assistant_outputs=assistant_outputs,
         stop_event=stop_event,
         tui_runtime=tui_runtime,
+        agent_navigation=agent_navigation,
     )
     worker_started = threading.Event()
 

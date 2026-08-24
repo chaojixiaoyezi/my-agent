@@ -688,3 +688,15 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
   `cli/gateway_loops.py::_GatewayOrphanReconciler`，两者都由同一 Gateway 持有。
 - `agent_core/orchestration/dispatch/lock.py` 的权威是打开文件描述符上的 OS advisory lock。持有者 JSON
   只用于观测，不能授权抢占、拒绝恢复或判断进程生死；释放时禁止 unlink 共享 inode。
+
+## Agent View And Control Service
+
+`gateway_parts/agent_control_service.py` 是 TUI 与未来 Web 查看/控制代理树的唯一 Gateway domain 入口。
+`view` 先用 owner、conversation root 与 canonical ancestry 证明 exact run 属于当前树，再返回
+`conversation_agent_view.v1`；结束 attempt 不影响历史可见性。`guidance` 和 `stop` 在相同只读证明之后继续
+执行 mutation gate，必须命中当前 active binding，不能凭历史关系修改已经结束或被替换的 run。
+
+HTTP handler 只负责可信来源、`GatewayControlScope`、字段类型和错误状态映射。guidance 的稳定 operation id
+进入 canonical guidance ledger，重试不重复插入；stop 调用现有 `cancel_subagent_task`。客户端返回父视图只是
+本地 navigation stack 变化，不会调用 stop；`Esc` 才向当前 exact run 发停止。终态 resume 不属于这组三个
+入口，后续若实现必须另设显式 typed 合同。

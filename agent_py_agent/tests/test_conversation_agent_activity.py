@@ -169,6 +169,114 @@ def test_conversation_agent_activity_marks_active_roots_unknown_on_link_failure(
     assert activity.warnings == ("conversation_task_links_unavailable",)
 
 
+def test_conversation_agent_activity_retains_completed_child_roster() -> None:
+    from agent_py_agent.agent.conversation.agent_activity import (
+        conversation_agent_activity,
+    )
+
+    link = SimpleNamespace(
+        task_id="task-live",
+        thread_id="thread-1",
+        status="completed",
+        task_path="",
+        created_at=10.0,
+    )
+    store = SimpleNamespace(
+        active_task_links_report=lambda _thread_id: ([], []),
+        load_thread_report=lambda _thread_id: (
+            SimpleNamespace(compact_generation=2, workspace_task_id="task-live"),
+            None,
+        ),
+        load_task_link_report=lambda _task_id: (link, None),
+    )
+    manager = SimpleNamespace(
+        list_runs_report=lambda: SimpleNamespace(
+            runs=[_run("child-done", status="DONE", ended_at=20.0)],
+            load_errors=[],
+        )
+    )
+
+    activity = conversation_agent_activity(
+        SimpleNamespace(subagents=manager),
+        store,
+        "thread-1",
+    )
+
+    assert activity.active_task_count == 0
+    assert [row["run_id"] for row in activity.subagents] == ["child-done"]
+    assert activity.main_activity == {}
+    assert activity.compact_count == 2
+
+
+def test_conversation_agent_view_reads_exact_child_state_and_final_reply(
+    tmp_path: Path,
+) -> None:
+    from agent_py_agent.agent.conversation.agent_activity import conversation_agent_view
+
+    usage = {
+        "schema": "model_visible_context_usage.v1",
+        "estimated": False,
+        "context_window_tokens": 128_000,
+        "compact_trigger_tokens": 115_200,
+        "current_tokens": 12_300,
+        "prompt_tokens": 4_000,
+        "messages_tokens": 3_000,
+        "runtime_guidance_tokens": 300,
+        "tool_schema_tokens": 5_000,
+        "protocol": "native",
+    }
+    child = _run(
+        "child-done",
+        status="DONE",
+        description="设计三个关卡",
+        attributes={"model_visible_context_usage": usage},
+        ended_at=22.0,
+    )
+    grandchild = _run(
+        "grandchild",
+        root_id="task-live",
+        parent_id="child-done",
+        depth=2,
+    )
+    store = SimpleNamespace(
+        root=tmp_path,
+        load_thread_report=lambda _thread_id: (
+            SimpleNamespace(compact_generation=1),
+            None,
+        ),
+        recent_messages_report=lambda _thread_id, *, limit: (
+            [SimpleNamespace(role="assistant", content="已提交关卡设计。")],
+            [],
+        ),
+    )
+    manager = SimpleNamespace(
+        load=lambda run_id: child if run_id == child.id else grandchild,
+        list_runs_report=lambda: SimpleNamespace(
+            runs=[child, grandchild],
+            load_errors=[],
+        ),
+    )
+    agent = SimpleNamespace(
+        subagents=manager,
+        conversation_store=store,
+        root=tmp_path,
+    )
+
+    view = conversation_agent_view(agent, store, child.id)
+
+    assert view["terminal"] is True
+    assert view["agent"]["goal"] == "设计三个关卡"
+    assert view["agent"]["context_usage"]["current_tokens"] == 12_300
+    assert view["agent"]["compact_count"] == 1
+    assert [row["run_id"] for row in view["children"]] == ["grandchild"]
+    assert view["final_response"] == "已提交关卡设计。"
+
+    child.status = "RUNNING"
+    running_view = conversation_agent_view(agent, store, child.id)
+    assert running_view["terminal"] is False
+    assert running_view["final_response"] == ""
+
+
 def test_conversation_agent_activity_reads_child_thread_generation_only(
     tmp_path: Path,
 ) -> None:

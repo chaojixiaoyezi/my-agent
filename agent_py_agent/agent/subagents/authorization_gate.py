@@ -1,6 +1,6 @@
 """统一授权查询门（3.txt B.4/B.5）。
 
-cancel、dispatch、resume、takeover、resolve capability、send guidance 共用
+cancel、dispatch、resume、takeover、resolve capability、send guidance、view 共用
 这一个门：操作名合法 → run_id 是 opaque identifier → 目标任务存在 →
 owner 一致性 → parent/delegation 可见性。每次操作过同一序列，杜绝
 "有的入口校验、有的入口裸奔"的缺口。
@@ -34,6 +34,7 @@ OPERATIONS = frozenset(
         "takeover",
         "resolve_capability",
         "send_guidance",
+        "view",
     }
 )
 #: parent 链查询上限：防数据损坏成环时死循环；环 = 越权拒绝（fail-closed）。
@@ -209,12 +210,7 @@ def _authorize_runtime_authority(
                 f"{request.operation}: DB 权威 owner={db_owner!r} 与请求方 "
                 f"owner={requester_owner!r} 不一致"
             )
-    # 3. 当前 AgentAttempt 必须存在（A.6/F.6：执行任何工具前必须有 attempt）。
-    if repo.current_attempt(agent_run_id) is None:
-        raise AuthorizationError(
-            f"{request.operation}: 权威 current attempt 缺失: {run_id}"
-        )
-    # 4. parent/delegation：有 parent 的 child 必须有 immutable delegation 指向
+    # 3. parent/delegation：有 parent 的 child 必须有 immutable delegation 指向
     #    同 parent（A.7），缺失/失配即拒绝。
     parent_id = str(agent_run["parent_agent_run_id"] or "").strip()
     if parent_id:
@@ -223,6 +219,17 @@ def _authorize_runtime_authority(
             raise AuthorizationError(
                 f"{request.operation}: 权威 delegation 缺失/失配: {run_id}"
             )
+    # LLM: Historical view is read-only: TaskRun, owner, ancestry, and immutable
+    # delegation still authorize identity, but an ended run is expected to have
+    # no current attempt or active binding. Mutating operations keep both gates.
+    # 函数用途: 已结束子代理可在原任务树中回看；插话、停止等写操作仍必须是当前运行尝试。
+    if request.operation == "view":
+        return
+    # 4. 当前 AgentAttempt 必须存在（A.6/F.6：执行任何工具前必须有 attempt）。
+    if repo.current_attempt(agent_run_id) is None:
+        raise AuthorizationError(
+            f"{request.operation}: 权威 current attempt 缺失: {run_id}"
+        )
     # 5. WorkspaceBinding：建过 binding 的 run 必须仍是 ACTIVE（D.9 迁移后
     #    旧 run fail-closed）；从未建 binding（未执行）→ 放行。
     latest = repo.latest_binding_for_run(agent_run_id)

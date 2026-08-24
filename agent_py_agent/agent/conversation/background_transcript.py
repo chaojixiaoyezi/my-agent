@@ -27,7 +27,7 @@ _TRANSCRIPT_LOCK_ATTR = "_conversation_background_transcript_projection_lock"
 _TRANSCRIPT_SEQ_ATTR = "_conversation_background_transcript_next_seq"
 _TRANSCRIPT_TURN_ATTR = "_conversation_background_transcript_next_turn"
 _TRANSCRIPT_SETUP_LOCK = threading.Lock()
-_ALLOWED_EVENT_KINDS = frozenset(
+BACKGROUND_TRANSCRIPT_EVENT_KINDS = frozenset(
     {
         "assistant_completed",
         "thinking_started",
@@ -46,7 +46,7 @@ _ALLOWED_EVENT_KINDS = frozenset(
         "compact_boundary",
     }
 )
-_ALLOWED_EVENT_PHASES = frozenset(
+BACKGROUND_TRANSCRIPT_EVENT_PHASES = frozenset(
     {"started", "delta", "updated", "completed", "failed", "interrupted"}
 )
 _TOOL_PAYLOAD_FIELDS = frozenset(
@@ -112,11 +112,22 @@ class BackgroundTranscriptSink:
     # LLM: Construction allocates one display-only turn identity; canonical task
     # and thread ids are inputs, while the generated request id is not authority.
     # 函数用途: 为一次后台续轮创建事件块编号和内部缓冲区。
-    def __init__(self, agent: object, *, thread_id: str, task_id: str) -> None:
+    def __init__(
+        self,
+        agent: object,
+        *,
+        thread_id: str,
+        task_id: str,
+        request_id: str = "",
+        event_writer: object | None = None,
+    ) -> None:
         self.agent = agent
         self.thread_id = str(thread_id or "").strip()
         self.task_id = str(task_id or "").strip()
-        self.request_id = begin_background_transcript_turn(
+        self._event_writer = (
+            event_writer if callable(event_writer) else append_background_transcript_event
+        )
+        self.request_id = str(request_id or "").strip() or begin_background_transcript_turn(
             agent,
             thread_id=self.thread_id,
             task_id=self.task_id,
@@ -360,16 +371,21 @@ class BackgroundTranscriptSink:
         block_id: str,
         payload: Mapping[str, object],
     ) -> None:
-        append_background_transcript_event(
-            self.agent,
-            thread_id=self.thread_id,
-            task_id=self.task_id,
-            request_id=self.request_id,
-            kind=kind,
-            phase=phase,
-            block_id=block_id,
-            payload=payload,
-        )
+        try:
+            self._event_writer(
+                self.agent,
+                thread_id=self.thread_id,
+                task_id=self.task_id,
+                request_id=self.request_id,
+                kind=kind,
+                phase=phase,
+                block_id=block_id,
+                payload=payload,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError):
+            # 展示投影丢失不能把真实模型轮变成失败；canonical transcript、task
+            # lifecycle 和工具结果仍由各自权威存储收口。
+            return
 
 
 # LLM: The lock lives on the shared Agent, so every background scheduler thread
@@ -475,8 +491,8 @@ def append_background_transcript_event(
         not thread_key
         or not request_key
         or not block_key
-        or event_kind not in _ALLOWED_EVENT_KINDS
-        or event_phase not in _ALLOWED_EVENT_PHASES
+        or event_kind not in BACKGROUND_TRANSCRIPT_EVENT_KINDS
+        or event_phase not in BACKGROUND_TRANSCRIPT_EVENT_PHASES
     ):
         return 0
     task_key = str(task_id or "").strip()
@@ -591,6 +607,8 @@ def _safe_int(value: Any) -> int:
 
 
 __all__ = [
+    "BACKGROUND_TRANSCRIPT_EVENT_KINDS",
+    "BACKGROUND_TRANSCRIPT_EVENT_PHASES",
     "BACKGROUND_TRANSCRIPT_SCHEMA",
     "BackgroundTranscriptSink",
     "append_background_transcript_event",

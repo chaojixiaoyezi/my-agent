@@ -78,6 +78,7 @@ class StartWorkerParams:
     stop_event: threading.Event
     current_session_id: str = ""
     tui_runtime: object | None = None
+    agent_navigation: object | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -102,6 +103,7 @@ class MakeTuiAppParams:
     stop_event: threading.Event
     current_session_id: str = ""
     tui_runtime: object | None = None
+    agent_navigation: object | None = None
 
 
 @dataclasses.dataclass(frozen=True)

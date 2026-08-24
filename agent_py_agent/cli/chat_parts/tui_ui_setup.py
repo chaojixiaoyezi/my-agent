@@ -93,11 +93,22 @@ def _make_render_context_factory(
     except (TypeError, ValueError):
         workspace = ""
     runtime = _required_runtime(params)
+    navigation = params.agent_navigation
 
     def make_context(width: int) -> TuiRenderContext:
         interaction_snapshot = interaction.snapshot()
         transcript_snapshot = transcript_state.snapshot()
-        view_snapshot = runtime.store.snapshot()
+        active_runtime = (
+            navigation.active_runtime()
+            if callable(getattr(navigation, "active_runtime", None))
+            else runtime
+        )
+        navigation_snapshot = (
+            navigation.snapshot()
+            if callable(getattr(navigation, "snapshot", None))
+            else None
+        )
+        view_snapshot = active_runtime.store.snapshot()
         status = view_snapshot.status
         return TuiRenderContext(
             width=width,
@@ -119,11 +130,27 @@ def _make_render_context_factory(
                 and block.phase not in {"completed", "failed", "interrupted"}
                 for block in view_snapshot.active_blocks
             ),
-            notice=runtime.notice(),
+            notice=active_runtime.notice(),
             has_stash=interaction_snapshot.has_stash,
             is_pasting=interaction_snapshot.is_pasting,
             help_open=interaction_snapshot.help_open,
             todos_expanded=interaction_snapshot.todos_expanded,
+            focused_agent_run_id=str(
+                getattr(navigation_snapshot, "active_run_id", "") or ""
+            ),
+            focused_agent_name=str(
+                getattr(navigation_snapshot, "active_name", "main") or "main"
+            ),
+            focused_agent_status=str(
+                getattr(navigation_snapshot, "active_status", "") or ""
+            ),
+            selected_agent_run_id=str(
+                getattr(navigation_snapshot, "selected_run_id", "") or ""
+            ),
+            agent_view_depth=max(
+                0,
+                int(getattr(navigation_snapshot, "depth", 0) or 0),
+            ),
         )
 
     return make_context
@@ -286,10 +313,14 @@ def _wire_history_search_area(
 def _wire_help_dismiss_on_input(
     input_area: Any,
     interaction: TuiInteractionState,
+    agent_navigation: object | None = None,
 ) -> None:
     def on_input_changed(buffer: Any) -> None:
         if str(buffer.text or ""):
             interaction.close_help()
+            clear_selection = getattr(agent_navigation, "clear_selection", None)
+            if callable(clear_selection):
+                clear_selection()
 
     input_area.buffer.on_text_changed += on_input_changed
 
@@ -438,7 +469,7 @@ def _prepare_tui_app_parts(params: MakeTuiAppParams) -> _TuiAppParts:
     history_file = Path(params.agent.root) / ".chat_history"
     history_file.parent.mkdir(parents=True, exist_ok=True)
     input_area = _make_input_area(str(history_file), runtime, Path(params.agent.root))
-    _wire_help_dismiss_on_input(input_area, interaction)
+    _wire_help_dismiss_on_input(input_area, interaction, params.agent_navigation)
     history_search_area = _make_history_search_area(interaction)
     _wire_history_search_area(history_search_area, input_area, interaction)
     history_search_active = Condition(
@@ -458,6 +489,16 @@ def _prepare_tui_app_parts(params: MakeTuiAppParams) -> _TuiAppParts:
         _make_render_context_factory(params, interaction, transcript_state),
         transcript_state=transcript_state,
     )
+    set_view_change = getattr(params.agent_navigation, "set_view_change_callback", None)
+    if callable(set_view_change):
+        # LLM: A navigation switch replaces only the provider's visible store and
+        # returns the new viewport to tail; it does not copy or clear either transcript.
+        # 函数用途: 进入/返回代理时切换正文页面并自动定位该页面最新位置。
+        def switch_agent_view(selected_runtime: TuiRuntime) -> None:
+            transcript_view.provider.set_state_store(selected_runtime.store)
+            transcript_view.end()
+
+        set_view_change(switch_agent_view)
     transcript_search_area = _make_transcript_search_area()
     _wire_transcript_search_area(
         transcript_search_area,
@@ -643,13 +684,22 @@ def _assemble_tui_application(
     # 函数用途: 在鼠标松手后自动复制最终选区，并保留高亮供用户确认。
     def copy_settled_selection(text: str) -> None:
         _write_selection_clipboard(app, text)
-        parts.runtime.set_notice(f"Copied {len(text)} chars", duration_seconds=1.2)
+        active_runtime = parts.runtime
+        runtime_reader = getattr(params.agent_navigation, "active_runtime", None)
+        if callable(runtime_reader):
+            active_runtime = runtime_reader()
+        active_runtime.set_notice(f"Copied {len(text)} chars", duration_seconds=1.2)
         app.invalidate()
 
     parts.transcript_view.set_copy_on_select(copy_settled_selection)
     _install_input_copy_on_select(parts.input_area, copy_settled_selection)
     app._my_agent_title_controller = parts.title_controller
-    set_tui_output_sink(parts.runtime.write_console)
+    def write_active_console(text: str) -> None:
+        runtime_reader = getattr(params.agent_navigation, "active_runtime", None)
+        selected_runtime = runtime_reader() if callable(runtime_reader) else parts.runtime
+        selected_runtime.write_console(text)
+
+    set_tui_output_sink(write_active_console)
     return app
 
 
@@ -819,6 +869,7 @@ def _make_tui_keybindings(
             parts.permission_feedback_area,
             int(getattr(app_config.agent.config, "chat_transcript_scroll_lines", 10) or 10),
             app_config.tui_runtime,
+            agent_navigation=app_config.agent_navigation,
         )
     )
 
@@ -945,6 +996,7 @@ def _make_tui_style():
             "tui-subagent-pending": "#949494",
             "tui-subagent-done": "#87d787",
             "tui-subagent-blocked": "#d7af5f",
+            "tui-agent-selected": "#ffffff bg:#3a3a3a bold",
             "tui-context-label": "#6c6c6c",
             "tui-context-safe": "#87afaf",
             "tui-context-warning": "#d7af5f",

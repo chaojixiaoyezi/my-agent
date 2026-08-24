@@ -80,6 +80,7 @@ def _start_worker_threads(*, params: StartWorkerParams) -> None:
             params.refresh_stop,
             params.app_ref,
             params.tui_runtime,
+            params.agent_navigation,
         ),
         daemon=True,
     ).start()
@@ -92,6 +93,7 @@ def _start_worker_threads(*, params: StartWorkerParams) -> None:
             params.current_session_id,
             params.tui_runtime,
             params.app_ref,
+            params.agent_navigation,
         ),
         daemon=True,
     ).start()
@@ -107,6 +109,7 @@ def _background_notice_loop(
     session_id: str,
     tui_runtime: object,
     app_ref: list,
+    agent_navigation: object | None = None,
 ) -> None:
     seen: set[float] = set()
     event_cursor = [0]
@@ -120,6 +123,7 @@ def _background_notice_loop(
                 app_ref,
                 seen,
                 event_cursor,
+                agent_navigation,
             )
         except Exception:
             # 监视失败绝不打扰会话；按同一退避合同等待下一轮。
@@ -148,6 +152,7 @@ def _consume_background_notices(
     app_ref: list,
     seen: set[float],
     event_cursor_ref: list[int] | None = None,
+    agent_navigation: object | None = None,
 ) -> bool:
     if tui_runtime is None or not session_id:
         return True
@@ -161,6 +166,7 @@ def _consume_background_notices(
             app_ref,
             seen,
             event_cursor,
+            agent_navigation,
         )
     return _consume_local_background_snapshot(
         agent,
@@ -170,6 +176,7 @@ def _consume_background_notices(
         app_ref,
         seen,
         event_cursor,
+        agent_navigation,
     )
 
 
@@ -184,6 +191,7 @@ def _consume_gateway_background_snapshot(
     app_ref: list,
     seen: set[float],
     event_cursor: list[int],
+    agent_navigation: object | None = None,
 ) -> bool:
     fetcher = getattr(agent, "request_background_notices", None)
     if not callable(fetcher):
@@ -204,6 +212,7 @@ def _consume_gateway_background_snapshot(
             payload.get("agent_activity")
             if isinstance(payload.get("agent_activity"), dict)
             else {"active_task_count": payload.get("active_task_count")},
+            agent_navigation=agent_navigation,
         )
         if isinstance(payload.get("agent_activity"), dict)
         or "active_task_count" in payload
@@ -223,7 +232,17 @@ def _consume_gateway_background_snapshot(
     fresh = [dict(row) for row in raw if isinstance(row, dict)]
     for row in fresh:
         _publish_background_notice_row(tui_runtime, row, seen)
-    if (fresh or activity_changed or transcript_changed) and app_ref[0] is not None:
+    agent_view_ok, agent_view_changed = _consume_selected_agent_view(
+        agent,
+        None,
+        session_id,
+        agent_navigation,
+    )
+    if not agent_view_ok:
+        return False
+    if (
+        fresh or activity_changed or transcript_changed or agent_view_changed
+    ) and app_ref[0] is not None:
         app_ref[0].invalidate()
     return True
 
@@ -240,6 +259,7 @@ def _consume_local_background_snapshot(
     app_ref: list,
     seen: set[float],
     event_cursor: list[int],
+    agent_navigation: object | None = None,
 ) -> bool:
     from ...agent.conversation.channels import LOCAL_AGENT_USER_ID, LOCAL_CHAT_CHANNEL
 
@@ -262,6 +282,7 @@ def _consume_local_background_snapshot(
     activity_changed = _publish_background_activity(
         tui_runtime,
         activity,
+        agent_navigation=agent_navigation,
     )
     from ...agent.conversation.background_transcript import (
         read_background_transcript_events,
@@ -281,8 +302,18 @@ def _consume_local_background_snapshot(
     if not transcript_ok:
         return False
     notices_path = Path(root) / "notices" / f"{thread_id}.notices.jsonl"
+    agent_view_ok, agent_view_changed = _consume_selected_agent_view(
+        agent,
+        store,
+        session_id,
+        agent_navigation,
+    )
+    if not agent_view_ok:
+        return False
     if not notices_path.exists():
-        if (activity_changed or transcript_changed) and app_ref[0] is not None:
+        if (
+            activity_changed or transcript_changed or agent_view_changed
+        ) and app_ref[0] is not None:
             app_ref[0].invalidate()
         return True
     fresh: list[dict[str, object]] = []
@@ -303,7 +334,9 @@ def _consume_local_background_snapshot(
             continue
         fresh.append(row)
     if not fresh:
-        if (activity_changed or transcript_changed) and app_ref[0] is not None:
+        if (
+            activity_changed or transcript_changed or agent_view_changed
+        ) and app_ref[0] is not None:
             app_ref[0].invalidate()
         return True
     for row in fresh:
@@ -347,6 +380,8 @@ def _consume_background_transcript_projection(
 def _publish_background_activity(
     tui_runtime: object,
     value: object,
+    *,
+    agent_navigation: object | None = None,
 ) -> bool:
     updater = getattr(tui_runtime, "update_background_activity", None)
     if not callable(updater) or not isinstance(value, Mapping):
@@ -362,7 +397,7 @@ def _publish_background_activity(
     subagents = value.get("subagents")
     if not isinstance(subagents, list | tuple):
         subagents = None
-    return bool(
+    changed = bool(
         updater(
             count,
             compact_count=compact_count,
@@ -376,6 +411,56 @@ def _publish_background_activity(
             ),
         )
     )
+    row_updater = getattr(agent_navigation, "update_rows", None)
+    if subagents is not None and callable(row_updater):
+        changed = bool(row_updater("", subagents)) or changed
+    return changed
+
+
+# LLM: The selected child page is polled only while its exact run id is active.
+# Gateway and embedded modes feed the same navigation projection, and failures
+# preserve the prior page for the caller's existing exponential backoff.
+# 函数用途: 拉取当前进入的子代理详情页并增量应用到独立 TUI runtime。
+def _consume_selected_agent_view(
+    agent: object,
+    store: object | None,
+    session_id: str,
+    agent_navigation: object | None,
+) -> tuple[bool, bool]:
+    snapshotter = getattr(agent_navigation, "snapshot", None)
+    applier = getattr(agent_navigation, "apply_agent_view", None)
+    cursor_reader = getattr(agent_navigation, "event_cursor", None)
+    if not callable(snapshotter) or not callable(applier) or not callable(cursor_reader):
+        return True, False
+    snapshot = snapshotter()
+    run_id = str(getattr(snapshot, "active_run_id", "") or "").strip()
+    if not run_id:
+        return True, False
+    cursor = max(0, int(cursor_reader(run_id) or 0))
+    try:
+        if store is None:
+            fetcher = getattr(agent, "request_agent_view", None)
+            if not callable(fetcher):
+                return False, False
+            payload = fetcher(
+                session_id,
+                run_id=run_id,
+                event_after=cursor,
+            )
+        else:
+            from ...agent.conversation.agent_activity import conversation_agent_view
+
+            payload = conversation_agent_view(
+                agent,
+                store,
+                run_id,
+                after=cursor,
+            )
+    except Exception:
+        return False, False
+    if not isinstance(payload, Mapping) or payload.get("ok") is not True:
+        return False, False
+    return True, bool(applier(run_id, payload))
 
 
 # LLM: A v2 committed owner delivery becomes an assistant block; legacy v1
@@ -417,11 +502,16 @@ def _refresh_loop(
     refresh_stop: threading.Event,
     app_ref: list,
     tui_runtime: object,
+    agent_navigation: object | None = None,
 ) -> None:
     while not refresh_stop.wait(TUI_REFRESH_INTERVAL_SECONDS):
+        active_runtime = tui_runtime
+        runtime_reader = getattr(agent_navigation, "active_runtime", None)
+        if callable(runtime_reader):
+            active_runtime = runtime_reader()
         if (
             app_ref[0] is not None
-            and tui_runtime.needs_periodic_refresh()
+            and active_runtime.needs_periodic_refresh()
         ):
             app_ref[0].invalidate()
 

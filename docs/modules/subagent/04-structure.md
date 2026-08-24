@@ -544,3 +544,20 @@ findings 渲染成占位文件。唯一允许的收尾复制是 `output_delivery
 - `services/runner_context_service.py`:`task_product_write_roots` 子代理产物写区
   (过滤自己 agent 目录与 report 区);为空时 `_task_workspace_fallback_roots`
   回退任务工作区 output/work,保证子代理总能写产物(batch3 C3/G4 修复)。
+
+## TUI/Web Agent View And Control
+
+`conversation_agent_view.v1` 是单个 exact run 的共用详情投影：返回 goal/activity、canonical status、
+Context/Compact、Todo、直属 child、公开过程事件 cursor 与终态 final。TUI 进入 child 后只换当前 view store，
+继续使用与 root 相同的 typed event reducer 和 renderer；未来 Web 也应调用同一个 Gateway service，不直接读
+runner 私有目录或拼接日志。
+
+查看和修改使用不同授权强度。历史 view 仍须证明 `owner + conversation root + ancestry`，但允许当前 attempt
+已结束；guidance/stop 除此之外还须通过 active binding 和 mutation gate。普通 guidance 只追加到 exact run
+的 canonical guidance 账本，`operation_id` 保证重试幂等；stop 调用现有 `cancel_subagent_task`，不另写前端
+状态。终态 child 不接受 guidance，也不会被普通输入恢复；显式 resume 若未来落地，必须是独立 typed 操作。
+
+`agent_transcript.py` 保存 child 已公开的 display 事件，路径固定在 owner conversation store 下并按 run id
+隔离。单调整数 cursor、原子追加、条数/字节裁剪用于跨进程增量展示；该流允许丢失或裁剪，不能替代 run、
+attempt、Compact generation、权限和交付事实。`Esc` 只发停止当前代理，`Ctrl+G` 只弹出前端 view stack，
+这两个动作不能在任何层共享副作用。

@@ -28,6 +28,18 @@ Gateway 可以并行，但不能作为“单 Gateway 多客户端”验收的替
 补代码、发技术推动指令或修改产物。单测、fake、renderer snapshot 和静态 gate 只作上线前护栏，不能替代
 上述真实 TUI 验收。
 
+子代理详情与控制面的 focused 回归：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_tui_agent_navigation.py agent_py_agent/tests/test_agent_transcript.py agent_py_agent/tests/test_gateway_agent_control_service.py agent_py_agent/tests/test_conversation_agent_activity.py agent_py_agent/tests/test_authorization_gate.py agent_py_agent/tests/test_authorization_gate_r1.py agent_py_agent/tests/test_tui_input.py -q --tb=short
+```
+
+要同时证明：空输入 `↓` 才选择 child，`Enter` 进入 exact run，详情增量展示公开过程、Context/Compact、Todo
+和直属下级；`Ctrl+G` 返回父代理但不改任何运行状态，`Esc` 停止当前运行中 child；普通输入以稳定 guidance id
+只投递给当前 child。已结束 child 可重新进入查看 final，但不能收消息或静默恢复。历史 view 可以在 attempt
+关闭后通过 owner/ancestry 授权，任何写控制仍要求 active binding，越出当前 owner 根树一律拒绝。真机验收
+还必须在已公开 tmux 中逐项实际按键，单元测试不得代替。
+
 Attempt 生命周期与授权续跑的 focused 回归：
 
 ```bash

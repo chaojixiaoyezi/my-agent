@@ -1,5 +1,15 @@
 # STATUS
 
+## 2026-08-24 子代理可进入视图与精确控制（本地候选）
+
+- TUI 空输入可用 `↓` 选择直属 child、`Enter` 进入；详情复用主代理的 thinking、工具/diff、Todo、
+  Context/Compact、直属 child 和 final。运行中可直接输入普通自然语言插话，完成后保留只读查看。
+- `Esc` 只停止当前查看的运行中代理；返回父代理使用 `Ctrl+G`，`Alt+←` 与 `/back` 仅兼容。底部提示会明确
+  当前动作，前端返回不改变 task/run/session，也不会把完成 child 静默复活。
+- Gateway 已加入 owner 树内 exact view/guidance/stop 服务，child 公开过程改为 process-shared 有界事件流；
+  历史查看与写控制采用不同授权强度。当前 80 项 focused 回归通过，尚未推送、部署或取得 `.7` 真 TUI
+  按键证据，不能标为真机完成。
+
 ## 2026-08-24 Prompt 4 r9：Todo 13/16 却假完成，根因是 no-save 绕过停止核对（本地修复候选）
 
 - r9 第二批 child 结束后，后台 main 最终回复声称“复刻完成”，但同一 canonical 进度账仍有 `p6`

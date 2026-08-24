@@ -59,6 +59,11 @@
   main 等待 child 时按 typed status 显示“等待 N 个子代理”，最终答复进入普通 assistant transcript；
   `7c052f2` 第 1 条真机任务已暴露布局/Todo 问题，新候选 147 项定向回归已过，仍需 `.7`
   单 Gateway + 下一条原样长任务 TUI 验收后勾选。
+- [ ] 空输入时 `↓` 选择直属 child、`Enter` 进入详情，`↑/↓` 可继续换行；详情与主代理共用 thinking、
+  工具/diff、Todo、Context/Compact 和直属 child 渲染。运行中 child 接受普通自然语言插话，`Esc` 精确停止
+  当前 child；`Ctrl+G` 返回父代理且不停止，`Alt+←`、`/back` 只作兼容。终态 child 可进入查看 final 但只读，
+  不允许普通输入静默复活。本地 80 项 focused 已通过，仍需 `.7` 唯一 Gateway、MiniMax-M2.7、已公开 tmux
+  和原样长任务实际按键后勾选。
 - [x] `.7` 单 Gateway 真实 TUI 已观察两个 child 从等待启动推进到一次 attempt `DONE`，固定活动区展示
   状态、动作和耗时，真实文件内容正确；测试者未向主代理或 child 发送推动消息。
 - [ ] durable child wake 已 ready 但 process-local thread lane 不推进时，Gateway 必须自行检测并有界恢复；

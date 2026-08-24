@@ -20,12 +20,15 @@ from pathlib import Path
 from typing import Any
 
 from ..agent_core.runtime.task_identity import task_path_progress_ledger_id
+from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
 from ..subagents.services.control_plane_projection import (
     runtime_compact_count,
     runtime_context_token_count,
 )
 from ..task_progress import read_task_progress_report
+from .agent_transcript import read_agent_transcript_events
 from .background_transcript import BackgroundTranscriptSink
+from .channels import project_user_reply, redact_host_absolute_paths
 from .models import THREAD_TASK_LINK_ACTIVE_STATUS
 
 _SCHEMA_VERSION = "conversation_agent_activity.v5"
@@ -315,7 +318,16 @@ def conversation_agent_activity(
     active_task_ids = [
         str(getattr(link, "task_id", "") or "").strip() for link in active_links
     ]
-    if not active_task_ids:
+    display_links = list(active_links)
+    if not display_links:
+        retained_link, retained_warnings = _retained_workspace_task_link(store, thread_id)
+        link_warnings.extend(retained_warnings)
+        if retained_link is not None:
+            display_links.append(retained_link)
+    display_task_ids = [
+        str(getattr(link, "task_id", "") or "").strip() for link in display_links
+    ]
+    if not display_task_ids:
         return ConversationAgentActivity(
             active_task_count=0,
             compact_count=compact_count,
@@ -325,12 +337,12 @@ def conversation_agent_activity(
 
     rows, run_warnings = _direct_subagent_rows(
         agent,
-        set(active_task_ids),
+        set(display_task_ids),
         conversation_store=store,
     )
     progress_items, progress_warnings = _task_progress_items_from_links(
         agent,
-        active_links,
+        display_links,
         preferred_task_id=_conversation_workspace_task_id(store, thread_id),
         hidden_item_ids=_row_run_ids(rows),
     )
@@ -338,7 +350,11 @@ def conversation_agent_activity(
     return ConversationAgentActivity(
         active_task_count=len(active_task_ids),
         compact_count=compact_count,
-        main_activity=background_main_activity(agent, thread_id, set(active_task_ids)),
+        main_activity=(
+            background_main_activity(agent, thread_id, set(active_task_ids))
+            if active_task_ids
+            else {}
+        ),
         subagents=tuple(visible),
         task_progress_items=progress_items,
         hidden_subagent_count=max(0, len(rows) - len(visible)),
@@ -351,6 +367,79 @@ def conversation_agent_activity(
             )
         ),
     )
+
+
+# LLM: Child detail is a bounded owner-facing projection over one exact canonical
+# run. It reads lifecycle, the independent ConversationThread, Todo ledger, and
+# public event stream but cannot authorize, mutate, resume, or complete the run.
+# 函数用途: 返回一个子代理详情页所需的任务说明、状态、直属下级、上下文、过程事件和最终回复。
+def conversation_agent_view(
+    agent: object,
+    store: object,
+    run_id: str,
+    *,
+    after: int = 0,
+) -> dict[str, object]:
+    selected = str(run_id or "").strip()
+    manager = getattr(agent, "subagents", None)
+    if manager is None or not selected:
+        raise FileNotFoundError(selected or "subagent")
+    task = manager.load(selected)
+    row = _subagent_row(task, conversation_store=store)
+    rows, warnings = _child_subagent_rows(
+        agent,
+        task,
+        conversation_store=store,
+    )
+    progress_items, progress_warnings = _task_progress_items_for_run(
+        agent,
+        selected,
+        hidden_item_ids=_row_run_ids(rows),
+    )
+    transcript = read_agent_transcript_events(
+        agent,
+        run_id=selected,
+        after=after,
+    )
+    thread_id = str(getattr(task, "agent_thread_id", "") or "").strip()
+    final_response, history_warnings = _agent_final_response(store, thread_id)
+    status = str(getattr(task, "status", "") or "").strip().upper()
+    terminal = task_status_in(status, SUBAGENT_ENDED_STATUSES)
+    transcript_warnings = (
+        ["agent_transcript_load_error"] if transcript.get("load_errors") else []
+    )
+    return {
+        "schema_version": "conversation_agent_view.v1",
+        "ok": True,
+        "agent": {
+            **row,
+            "goal": _public_agent_text(
+                getattr(task, "description", "") or getattr(task, "goal", ""),
+                limit=4_000,
+            ),
+            "activity": _subagent_current_activity(task),
+            "context_usage": _subagent_context_usage(task),
+        },
+        "terminal": terminal,
+        "children": rows[:_MAX_PROJECTED_SUBAGENTS],
+        "hidden_child_count": max(0, len(rows) - _MAX_PROJECTED_SUBAGENTS),
+        "task_progress_items": list(progress_items),
+        "transcript_events": list(transcript.get("events") or []),
+        "event_cursor": max(0, _safe_int(transcript.get("cursor"))),
+        "events_truncated": bool(transcript.get("truncated")),
+        # 运行中的历史 assistant 段可能只是 Compact 前一轮，不能冒充当前任务 final。
+        "final_response": final_response if terminal else "",
+        "warnings": list(
+            dict.fromkeys(
+                (
+                    *warnings,
+                    *progress_warnings,
+                    *history_warnings,
+                    *transcript_warnings,
+                )
+            )
+        ),
+    }
 
 
 # LLM: The durable ConversationThread generation is the only main-agent compact counter;
@@ -392,6 +481,41 @@ def _active_task_links(store: object, thread_id: str) -> tuple[list[object], lis
         str(getattr(link, "task_id", "") or "").strip(): link for link in active
     }
     return list(deduplicated.values()), warnings
+
+
+# LLM: Completed child rows remain discoverable through the thread's canonical
+# workspace_task_id only when its task link belongs to this exact thread. This
+# is a read projection and cannot reactivate an inactive link.
+# 函数用途: 主任务结束后保留最近一次任务的子代理名册，供方向键进入查看历史。
+def _retained_workspace_task_link(
+    store: object,
+    thread_id: str,
+) -> tuple[object | None, list[str]]:
+    loader = getattr(store, "load_thread_report", None)
+    link_loader = getattr(store, "load_task_link_report", None)
+    if not callable(loader) or not callable(link_loader):
+        return None, []
+    try:
+        thread, thread_error = loader(thread_id)
+    except Exception:
+        return None, ["conversation_thread_unavailable"]
+    task_id = str(getattr(thread, "workspace_task_id", "") or "").strip()
+    if not task_id:
+        return None, ["conversation_thread_load_error"] if thread_error else []
+    try:
+        link, link_error = link_loader(task_id)
+    except Exception:
+        return None, ["conversation_task_link_load_error"]
+    if (
+        link is None
+        or str(getattr(link, "thread_id", "") or "").strip()
+        != str(thread_id or "").strip()
+    ):
+        return None, ["conversation_workspace_task_mismatch"]
+    warnings = []
+    if thread_error or link_error:
+        warnings.append("conversation_task_link_load_error")
+    return link, warnings
 
 
 # LLM: Final notice and live activity must read the same canonical progress
@@ -544,20 +668,9 @@ def _direct_subagent_rows(
     *,
     conversation_store: object | None = None,
 ) -> tuple[list[dict[str, object]], list[str]]:
-    manager = getattr(agent, "subagents", None)
-    if manager is None:
-        return [], ["subagent_manager_unavailable"]
-    try:
-        report_method = getattr(manager, "list_runs_report", None)
-        if callable(report_method):
-            report = report_method()
-            tasks = list(getattr(report, "runs", ()) or ())
-            load_errors = list(getattr(report, "load_errors", ()) or ())
-        else:
-            tasks = list(manager.list_runs())
-            load_errors = []
-    except Exception:
-        return [], ["subagent_runs_unavailable"]
+    tasks, warnings = _all_subagent_tasks(agent)
+    if tasks is None:
+        return [], warnings
 
     selected: list[object] = []
     for task in tasks:
@@ -574,8 +687,59 @@ def _direct_subagent_rows(
         _subagent_row(task, conversation_store=conversation_store)
         for task in selected
     ]
-    warnings = ["subagent_run_load_error"] if load_errors else []
     return rows, warnings
+
+
+# LLM: A detail page lists only exact children of the selected run and preserves
+# the canonical root/depth relationship; it never flattens descendants by name.
+# 函数用途: 读取一个子代理自己直接创建的下级，供递归进入详情页。
+def _child_subagent_rows(
+    agent: object,
+    parent: object,
+    *,
+    conversation_store: object | None = None,
+) -> tuple[list[dict[str, object]], list[str]]:
+    tasks, warnings = _all_subagent_tasks(agent)
+    if tasks is None:
+        return [], warnings
+    parent_id = str(getattr(parent, "id", "") or "").strip()
+    root_id = str(getattr(parent, "root_id", "") or parent_id).strip()
+    depth = max(0, _safe_int(getattr(parent, "depth", 0))) + 1
+    selected = [
+        task
+        for task in tasks
+        if str(getattr(task, "parent_id", "") or "").strip() == parent_id
+        and str(getattr(task, "root_id", "") or "").strip() == root_id
+        and _safe_int(getattr(task, "depth", 0)) == depth
+    ]
+    selected.sort(key=_subagent_sort_key)
+    return [
+        _subagent_row(task, conversation_store=conversation_store)
+        for task in selected
+    ], warnings
+
+
+# LLM: One bounded report read is shared by root and nested child projections;
+# load errors remain explicit warnings and never cause guessed rows.
+# 函数用途: 从子代理权威管理器读取一次完整 run 名册，供精确关系过滤。
+def _all_subagent_tasks(
+    agent: object,
+) -> tuple[list[object] | None, list[str]]:
+    manager = getattr(agent, "subagents", None)
+    if manager is None:
+        return None, ["subagent_manager_unavailable"]
+    try:
+        report_method = getattr(manager, "list_runs_report", None)
+        if callable(report_method):
+            report = report_method()
+            tasks = list(getattr(report, "runs", ()) or ())
+            load_errors = list(getattr(report, "load_errors", ()) or ())
+        else:
+            tasks = list(manager.list_runs())
+            load_errors = []
+    except Exception:
+        return None, ["subagent_runs_unavailable"]
+    return tasks, (["subagent_run_load_error"] if load_errors else [])
 
 
 # LLM: Sorting is presentation-only and reads canonical statuses/timestamps; it
@@ -629,6 +793,115 @@ def _subagent_row(
         "heartbeat_at": max(0.0, _safe_float(getattr(task, "heartbeat_at", 0.0))),
         "ended_at": max(0.0, _safe_float(getattr(task, "ended_at", 0.0))),
     }
+
+
+# LLM: The child context strip reuses the frozen provider-preflight schema and
+# strips every content-bearing or unknown attribute before HTTP/TUI exposure.
+# 函数用途: 读取一个子代理最近一次模型调用前的完整数字上下文快照。
+def _subagent_context_usage(task: object) -> dict[str, object]:
+    attrs = getattr(task, "attributes", None)
+    usage = attrs.get("model_visible_context_usage") if isinstance(attrs, dict) else None
+    return _public_context_usage(usage)
+
+
+# LLM: Activity text is presentation-only and comes from typed tool/current-step
+# fields with status fallbacks. It cannot decide whether the run is alive or done.
+# 函数用途: 用一句短话说明当前子代理正在做什么，供详情页 Working 行显示。
+def _subagent_current_activity(task: object) -> str:
+    tool = _bounded_text(getattr(task, "current_tool", ""), limit=80)
+    if tool:
+        return f"正在使用 {tool}"
+    for value in (
+        getattr(task, "current_step", ""),
+        getattr(task, "last_progress_summary", ""),
+        getattr(task, "latest_summary", ""),
+    ):
+        if text := _bounded_text(value, limit=_ACTIVITY_TEXT_LIMIT):
+            return text
+    status = str(getattr(task, "status", "") or "").strip().upper()
+    return {
+        "PLANNING": "准备任务",
+        "PENDING": "等待启动",
+        "RUNNING": "运行中",
+        "DONE": "已完成",
+        "FAILED": "执行失败",
+        "BLOCKED": "等待处理",
+        "PAUSED": "已暂停",
+        "CANCELLED": "已停止",
+        "ABANDONED": "已放弃",
+        "TIMEOUT": "已超时",
+        "CHANNEL_ERROR": "执行通道失败",
+    }.get(status, "状态未知")
+
+
+# LLM: A child Todo ledger is selected only by its exact run id, which is the
+# same task_local progress key used by the tool runtime. Titles remain display text.
+# 函数用途: 读取子代理自己的任务清单，并隐藏与直属下级行重复的自动派工项。
+def _task_progress_items_for_run(
+    agent: object,
+    run_id: str,
+    *,
+    hidden_item_ids: set[str] | None = None,
+) -> tuple[tuple[dict[str, object], ...], list[str]]:
+    owner_root = _owner_runtime_root(agent)
+    if owner_root is None:
+        return (), []
+    progress, load_error = read_task_progress_report(owner_root, str(run_id or "").strip())
+    if load_error:
+        return (), ["task_progress_load_error"]
+    raw_items = progress.get("items") if isinstance(progress, dict) else None
+    if not isinstance(raw_items, list | tuple):
+        return (), []
+    hidden = hidden_item_ids or set()
+    rows = [
+        {
+            "id": _bounded_text(item.get("id"), limit=128),
+            "title": _bounded_text(item.get("title"), limit=_ACTIVITY_TEXT_LIMIT),
+            "status": _bounded_text(item.get("status"), limit=32) or "pending",
+        }
+        for item in raw_items
+        if isinstance(item, dict)
+        and _bounded_text(item.get("id"), limit=128)
+        and _bounded_text(item.get("id"), limit=128) not in hidden
+    ][:_MAX_PROJECTED_PROGRESS_ITEMS]
+    return tuple(rows), []
+
+
+# LLM: Only the canonical child ConversationThread assistant tail can become a
+# completed detail-page response. Internal runner files and result aliases are not fallbacks.
+# 函数用途: 读取子代理最近一次正式模型回复，供已完成详情页显示。
+def _agent_final_response(
+    store: object,
+    thread_id: str,
+) -> tuple[str, list[str]]:
+    if not thread_id:
+        return "", []
+    reader = getattr(store, "recent_messages_report", None)
+    if not callable(reader):
+        return "", ["agent_thread_unavailable"]
+    try:
+        messages, load_errors = reader(thread_id, limit=12)
+    except Exception:
+        return "", ["agent_thread_unavailable"]
+    response = next(
+        (
+            _public_agent_text(getattr(item, "content", ""), limit=24_000)
+            for item in reversed(messages)
+            if str(getattr(item, "role", "") or "") == "assistant"
+        ),
+        "",
+    )
+    return response, (["agent_thread_load_error"] if load_errors else [])
+
+
+# LLM: Owner-visible model prose uses the same projection and host-path
+# redaction as other public transcript surfaces, then applies a display bound.
+# 函数用途: 清洗子代理任务说明或最终回复，避免控制字符和宿主绝对路径进入界面。
+def _public_agent_text(value: object, *, limit: int) -> str:
+    content = redact_host_absolute_paths(project_user_reply(str(value or "")).content).strip()
+    if len(content) <= max(1, int(limit or 1)):
+        return content
+    return content[: max(1, int(limit or 1)) - 1].rstrip() + "…"
 
 
 # LLM: Covers are explicit task-progress ids recorded at dispatch time. They
@@ -695,5 +968,6 @@ __all__ = [
     "ConversationAgentActivity",
     "background_main_activity",
     "conversation_agent_activity",
+    "conversation_agent_view",
     "task_progress_items_for_task",
 ]

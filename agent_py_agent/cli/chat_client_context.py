@@ -161,6 +161,85 @@ class GatewayChatClientAgent:
             "active_task_count": 0,
         }
 
+    # LLM: Agent detail polling is an explicit owner-scoped HTTP projection. The
+    # thin client sends one run id and display cursor and never opens child files.
+    # 函数用途: 拉取当前选中子代理的状态、过程事件、Todo、直属下级和最终回复。
+    def request_agent_view(
+        self,
+        session_id: str,
+        *,
+        run_id: str,
+        event_after: int = 0,
+    ) -> dict[str, object]:
+        _status, body = self._post_gateway_json(
+            "/client/agent-view",
+            {
+                "user_id": "local-agent",
+                "channel": "chat",
+                "conversation_id": str(session_id or "default"),
+                "run_id": str(run_id or "").strip(),
+                "event_after": max(0, int(event_after or 0)),
+            },
+            timeout=2.0,
+        )
+        return body or {"ok": False, "error_code": "GATEWAY_UNAVAILABLE"}
+
+    # LLM: Child guidance carries a stable client message id to the dedicated
+    # mailbox endpoint. It cannot fall back to /ask or create a main-agent job.
+    # 函数用途: 给正在工作的指定子代理插入一条普通自然语言补充要求。
+    def request_agent_guidance(
+        self,
+        session_id: str,
+        *,
+        run_id: str,
+        message: str,
+        message_id: str,
+    ) -> dict[str, object]:
+        status, body = self._post_gateway_json(
+            "/client/agent-guidance",
+            {
+                "user_id": "local-agent",
+                "channel": "chat",
+                "conversation_id": str(session_id or "default"),
+                "run_id": str(run_id or "").strip(),
+                "message": str(message or ""),
+                "message_id": str(message_id or "").strip(),
+            },
+            timeout=2.0,
+        )
+        return {**body, "http_status": status} if body else {
+            "ok": False,
+            "http_status": status,
+            "error_code": "GATEWAY_UNAVAILABLE",
+        }
+
+    # LLM: Esc in a child view maps to one exact canonical cancellation request;
+    # the client never selects a process, pid, role name, or visible row index.
+    # 函数用途: 请求停止当前正在查看的子代理。
+    def request_agent_stop(
+        self,
+        session_id: str,
+        *,
+        run_id: str,
+        operation_id: str,
+    ) -> dict[str, object]:
+        status, body = self._post_gateway_json(
+            "/client/agent-stop",
+            {
+                "user_id": "local-agent",
+                "channel": "chat",
+                "conversation_id": str(session_id or "default"),
+                "run_id": str(run_id or "").strip(),
+                "operation_id": str(operation_id or "").strip(),
+            },
+            timeout=2.0,
+        )
+        return {**body, "http_status": status} if body else {
+            "ok": False,
+            "http_status": status,
+            "error_code": "GATEWAY_UNAVAILABLE",
+        }
+
     # LLM: Ordinary TUI input carries both 会话运行时 expected turn id and an opaque client id.
     # Only a typed rejected response permits queue fallback; transport failure remains UNKNOWN so
     # the caller can reconcile the same id without duplicating work.

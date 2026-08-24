@@ -9,6 +9,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from ...agent.common.opaque_id import validate_opaque_id
 from ...agent.contracts.tool_approval import (
     ToolApprovalDecision,
     ToolApprovalRequest,
@@ -347,10 +348,10 @@ class _TuiBackgroundActivityController:
         self._hidden_subagent_count = 0
         self._compact_count = 0
 
-    # LLM: Count and direct-child rows change the same display projection. A
-    # failed child projection preserves the last valid rows; zero removes the
-    # block without transcript output.
-    # 函数用途: 根据 canonical 主任务和直属子代理快照开始、更新或收起底部 Working 区。
+    # LLM: Count, one focused-agent row, and direct-child rows share one display
+    # projection. A valid zero count retains terminal rows for read-only
+    # navigation; only a zero count with no agent rows removes the block.
+    # 函数用途: 根据 canonical 主任务和直属子代理快照开始、更新或收起底部 Working 区，并保留已结束代理供查看。
     def update(
         self,
         active_task_count: int,
@@ -372,32 +373,33 @@ class _TuiBackgroundActivityController:
         owner = self._owner
         block_id = f"background-activity:{owner.session_id}"
         with owner._lock:
-            if count <= 0:
-                next_main_activity: dict[str, object] = {}
-                next_subagents: tuple[dict[str, object], ...] = ()
+            if main_activity is not None:
+                next_main_activity = _normalize_main_activity(main_activity)
+            elif count > 0:
+                next_main_activity = self._main_activity
+            else:
+                next_main_activity = {}
+            if projection_ok and subagents is not None:
+                next_subagents = _normalize_subagent_activity_rows(subagents)
+                next_hidden_count = max(0, int(hidden_subagent_count or 0))
+            elif count > 0:
+                next_subagents = self._subagents
+                next_hidden_count = self._hidden_subagent_count
+            else:
+                next_subagents = ()
+                next_hidden_count = 0
+            if task_progress_projection_ok and task_progress_items is not None:
+                next_task_progress_items = _normalize_task_progress_items(
+                    task_progress_items
+                )
+                next_task_progress_known = True
+            else:
                 next_task_progress_items = self._task_progress_items
                 next_task_progress_known = self._task_progress_known
-                next_hidden_count = 0
-            else:
-                next_main_activity = (
-                    _normalize_main_activity(main_activity)
-                    if main_activity is not None
-                    else self._main_activity
-                )
-                if projection_ok and subagents is not None:
-                    next_subagents = _normalize_subagent_activity_rows(subagents)
-                    next_hidden_count = max(0, int(hidden_subagent_count or 0))
-                else:
-                    next_subagents = self._subagents
-                    next_hidden_count = self._hidden_subagent_count
-                if task_progress_projection_ok and task_progress_items is not None:
-                    next_task_progress_items = _normalize_task_progress_items(
-                        task_progress_items
-                    )
-                    next_task_progress_known = True
-                else:
-                    next_task_progress_items = self._task_progress_items
-                    next_task_progress_known = self._task_progress_known
+            was_visible = bool(
+                self._count > 0 or self._main_activity or self._subagents
+            )
+            is_visible = bool(count > 0 or next_main_activity or next_subagents)
             if (
                 count == self._count
                 and next_main_activity == self._main_activity
@@ -408,10 +410,10 @@ class _TuiBackgroundActivityController:
                 and next_compact_count == self._compact_count
             ):
                 return False
-            if self._count <= 0 and count > 0:
+            if not was_visible and is_visible:
                 self._started_at = time.time()
                 kind, phase = "background_activity_started", "started"
-            elif count > 0:
+            elif is_visible:
                 kind, phase = "background_activity_updated", "updated"
             else:
                 kind, phase = "background_activity_completed", "completed"
@@ -446,7 +448,7 @@ class _TuiBackgroundActivityController:
                 },
                 request_id=f"background:{owner.session_id}",
             )
-            if count <= 0:
+            if not is_visible:
                 self._started_at = 0.0
         return True
 
@@ -687,9 +689,9 @@ class _TuiBackgroundActivityRuntimeMixin:
             )
 
     # LLM: Background transcript rows are a display-only Gateway projection.
-    # This entry accepts only the frozen schema and bg-main block namespace,
-    # then reuses the one session sequencer/reducer instead of creating another UI.
-    # 函数用途: 将后台主代理的灰色过程、思考、工具和 diff 事件发布到现有正文流，并返回已消费游标。
+    # This entry accepts only the frozen schema and the explicit bg-main or
+    # bg-agent namespace, then reuses one sequencer/reducer for the current page.
+    # 函数用途: 将后台主代理或当前子代理的灰色思考、工具和 diff 事件发布到当前正文流。
     def publish_background_transcript_events(self, value: object) -> int:
         if not isinstance(value, list | tuple):
             return 0
@@ -711,7 +713,7 @@ class _TuiBackgroundActivityRuntimeMixin:
                 item.get("schema") != _BACKGROUND_TRANSCRIPT_SCHEMA
                 or kind not in _BACKGROUND_TRANSCRIPT_KINDS
                 or phase not in _BACKGROUND_TRANSCRIPT_PHASES
-                or not request_id.startswith("bg-main:")
+                or not request_id.startswith(("bg-main:", "bg-agent:"))
                 or not block_id.startswith(f"{request_id}:")
                 or not isinstance(payload, Mapping)
             ):
@@ -724,6 +726,56 @@ class _TuiBackgroundActivityRuntimeMixin:
                 request_id=request_id,
             )
         return consumed_cursor
+
+    # LLM: A canonical child terminal status may arrive after its subprocess was
+    # killed before emitting final display events. This closes only active blocks
+    # in that exact bg-agent namespace; it cannot change task or model state.
+    # 函数用途: 子代理已结束但最后一条展示事件丢失时，收起其遗留的思考、工具或 Compact 动画。
+    def settle_agent_transcript(self, run_id: str, *, status: str) -> int:
+        selected = validate_opaque_id(str(run_id or ""), kind="run_id")
+        normalized_status = str(status or "").strip().upper()
+        phase = (
+            "completed"
+            if normalized_status == "DONE"
+            else "interrupted"
+            if normalized_status in {"CANCELLED", "ABANDONED", "TAKEN_OVER"}
+            else "failed"
+        )
+        prefix = f"bg-agent:{selected}:"
+        active = tuple(
+            block
+            for block in self.store.snapshot().active_blocks
+            if block.block_id.startswith(prefix)
+            and block.role in {"assistant", "thinking", "tool", "compact"}
+        )
+        for block in active:
+            attempt_suffix = block.block_id[len(prefix) :].split(":", 1)[0]
+            request_id = f"{prefix}{attempt_suffix}" if attempt_suffix else prefix.rstrip(":")
+            if block.role == "tool":
+                kind = "tool_completed" if phase == "completed" else "tool_failed"
+                payload = {"ok": phase == "completed"}
+            elif block.role == "compact":
+                kind = (
+                    "conversation_compaction_completed"
+                    if phase == "completed"
+                    else "conversation_compaction_failed"
+                )
+                payload = {}
+            else:
+                kind = (
+                    "assistant_completed"
+                    if block.role == "assistant"
+                    else "thinking_completed"
+                )
+                payload = {}
+            self._publish(
+                kind,
+                phase,
+                block.block_id,
+                payload,
+                request_id=request_id,
+            )
+        return len(active)
 
 
 # LLM: TuiRuntime 统一拥有 session 事件序号与 turn adapter；emit+publish 在同一锁内避免并发 seq 到达倒序。
@@ -977,8 +1029,10 @@ class TuiRuntime(_TuiBackgroundActivityRuntimeMixin):
                 self._notice_until = 0.0
             return self._notice_text
 
-    # LLM: 周期刷新只由仍会随时间改变的可见 typed 状态保活；空闲 transcript 必须停表，避免历史长度放大空转 CPU。
-    # 函数用途: 告诉动画线程当前是否还有连接/思考/Compact 动画或未过期短提示需要定时重绘。
+    # LLM: Periodic refresh stays alive only for time-varying typed state. A
+    # retained terminal-agent roster is interactive but static and must not
+    # redraw forever merely because its background block remains mounted.
+    # 函数用途: 告诉动画线程当前是否还有连接、思考、Compact、运行中代理或短提示需要定时重绘。
     def needs_periodic_refresh(self) -> bool:
         now = time.monotonic()
         with self._lock:
@@ -991,7 +1045,11 @@ class TuiRuntime(_TuiBackgroundActivityRuntimeMixin):
             return True
         snapshot = self.store.snapshot()
         return any(
-            block.role in {"connection", "thinking", "compact", "background"}
+            block.role in {"connection", "thinking", "compact"}
+            or (
+                block.role == "background"
+                and _nonnegative_int(block.metadata.get("active_task_count")) > 0
+            )
             or (
                 block.role == "todo"
                 and _todo_items_need_animation(block.metadata.get("items"))

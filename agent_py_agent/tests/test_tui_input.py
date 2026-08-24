@@ -94,6 +94,44 @@ def test_escape_queue_restore_uses_same_canonical_queue_path() -> None:
     assert runtime.store.snapshot().queued_inputs == ()
 
 
+def test_escape_stops_focused_child_and_ctrl_g_back_only_navigates(monkeypatch) -> None:
+    input_area = TextArea(multiline=True)
+    app = SimpleNamespace(invalidate_calls=0)
+    app.invalidate = lambda: setattr(app, "invalidate_calls", app.invalidate_calls + 1)
+    snapshot = SimpleNamespace(
+        active_run_id="child-a",
+        terminal=False,
+    )
+    back_calls: list[bool] = []
+    navigation = SimpleNamespace(
+        snapshot=lambda: snapshot,
+        back=lambda: back_calls.append(True) or True,
+    )
+    params = SimpleNamespace(
+        input_area=input_area,
+        agent_navigation=navigation,
+        exit_armed_at_ref=[0.0],
+        eof_armed_at_ref=[0.0],
+        escape_armed_at_ref=[0.0],
+        escape_armed_text_ref=[""],
+    )
+    stopped: list[str] = []
+    monkeypatch.setattr(
+        tui_keybindings,
+        "_dispatch_agent_interrupt",
+        lambda _event, _params, run_id: stopped.append(run_id),
+    )
+
+    event = SimpleNamespace(app=app)
+    tui_keybindings._handle_escape_keybinding(event, params)
+    assert stopped == ["child-a"]
+    assert back_calls == []
+
+    tui_keybindings._handle_agent_back_keybinding(event, params)
+    assert back_calls == [True]
+    assert stopped == ["child-a"]
+
+
 def test_queued_placeholder_is_display_only() -> None:
     runtime = TuiRuntime("placeholder")
     runtime.enqueue_prompt("queued", "two", queued=True)

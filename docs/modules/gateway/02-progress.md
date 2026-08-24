@@ -2117,6 +2117,16 @@
   出现输入框并通过普通中文请求。v2 锁持有者与 Gateway 同 PID，首轮监督复活 4、按父会话取消 21、
   回收失联 runner 5，3 条 RUNNING 后续自然 DONE；连续两次 status 近期计数一致。
 
+## 2026-08-24 owner 树内子代理详情与控制入口
+
+- Gateway 新增 `/client/agent-view`、`/client/agent-guidance`、`/client/agent-stop` 三个可信本机入口，
+  共用 `GatewayControlScope` 与 exact run id，不接受显示名、行号或自然语言状态作为目标。
+- view 允许 owner/root/ancestry 已证明的历史 child 在 attempt 关闭后继续查看；guidance 和 stop 额外执行
+  mutation authorization 与 active binding。guidance 以稳定 operation id 幂等追加，stop 复用 canonical
+  cancel 服务，终态 child 的新输入返回结构化冲突且不会静默恢复。
+- TUI 当前已接通这三个入口，未来 Web 继续复用同一 service。本地 focused 回归通过，`.7` 单 Gateway
+  原样长任务的真实按键验收待发布后完成。
+
 ## 2026-08-22 单 Gateway 多项目 cwd 主链候选
 
 - 真机第二条正式 TUI 在 `/root/dsh-tui-p2-f5d28b8` 启动时卡在 `Connecting to Gateway`，没有提交用户

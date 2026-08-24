@@ -1289,3 +1289,14 @@ tasks/<日期>/<任务>/output，即用户拿走的东西），而非子代理�
   `BLOCKED/UNVERIFIED/runner_worker_error`。旧代码只在 TYPE_CHECKING 导入，异常分支本身会再触发
   `NameError`，从而留下看似永久 RUNNING 的失联记录。
 - focused 回归覆盖客户端 cwd 的 child 相对输出和 future exception 结构化落账；正式长任务复验待部署。
+
+## 2026-08-24 子代理详情、插话与停止切片
+
+- TUI 已加入 typed child selection/navigation stack：空输入 `↓` 选择、`Enter` 进入、`Ctrl+G` 返回；
+  `Esc` 保持与主代理一致，停止当前查看的运行中 child。底部提示随运行/终态切换，不再让“退出”和“停止”
+  共用 Esc。
+- child runner 的公开 thinking/tool/compact 通过 owner-scoped durable event stream 投影，详情复用主视图
+  renderer，同时读取 canonical Context/Compact、Todo、直属 child 与 final。完成后的 child 仍可查看但只读。
+- Gateway 新增 owner 树内 view/guidance/stop 服务；写操作使用 exact run id、active binding 与稳定 operation id，
+  historical view 则保留 owner/ancestry 校验但允许 attempt 已关闭。80 项 focused 回归已通过；发布和 `.7`
+  原样重型 TUI 的实际按键验收尚未完成。

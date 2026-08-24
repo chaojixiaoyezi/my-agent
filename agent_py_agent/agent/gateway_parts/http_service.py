@@ -28,6 +28,9 @@ from .http_handlers import (
     handle_client_history,
     handle_client_notices,
     handle_client_memory,
+    handle_client_agent_guidance,
+    handle_client_agent_stop,
+    handle_client_agent_view,
     handle_control,
     handle_control_status,
     handle_input_status,
@@ -155,6 +158,15 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         if self.path == "/client/notices":
             self._handle_client_notices()
             return
+        if self.path == "/client/agent-view":
+            self._handle_client_agent_view()
+            return
+        if self.path == "/client/agent-guidance":
+            self._handle_client_agent_guidance()
+            return
+        if self.path == "/client/agent-stop":
+            self._handle_client_agent_stop()
+            return
         if self.path == "/stop":
             self._handle_stop()
             return
@@ -222,6 +234,24 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
 
     def _handle_client_notices(self) -> None:
         handle_client_notices(self, _server_instance)
+
+    # LLM: HTTP routing delegates exact descendant reads to the shared owner-scoped
+    # service; the handler never loads a task file directly.
+    # 函数用途: 处理 TUI/Web 查看一个子代理详情的请求。
+    def _handle_client_agent_view(self) -> None:
+        handle_client_agent_view(self, _server_instance)
+
+    # LLM: Guidance routing carries a stable client message id and cannot fall
+    # back to /ask or create a new main-agent turn.
+    # 函数用途: 处理用户给当前子代理插入补充要求的请求。
+    def _handle_client_agent_guidance(self) -> None:
+        handle_client_agent_guidance(self, _server_instance)
+
+    # LLM: Stop routing calls only the canonical child cancellation service;
+    # it never maps to process names or UI row positions.
+    # 函数用途: 处理用户按 Esc 停止当前子代理的请求。
+    def _handle_client_agent_stop(self) -> None:
+        handle_client_agent_stop(self, _server_instance)
 
     def _handle_stop(self) -> None:
         handle_stop(self, _server_instance)
