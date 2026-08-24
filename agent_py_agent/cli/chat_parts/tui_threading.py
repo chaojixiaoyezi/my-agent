@@ -109,6 +109,7 @@ def _background_notice_loop(
     app_ref: list,
 ) -> None:
     seen: set[float] = set()
+    event_cursor = [0]
     failure_delay = TUI_BACKGROUND_NOTICE_FAILURE_INITIAL_SECONDS
     while not stop_event.is_set():
         try:
@@ -118,6 +119,7 @@ def _background_notice_loop(
                 tui_runtime,
                 app_ref,
                 seen,
+                event_cursor,
             )
         except Exception:
             # 监视失败绝不打扰会话；按同一退避合同等待下一轮。
@@ -145,44 +147,100 @@ def _consume_background_notices(
     tui_runtime: object,
     app_ref: list,
     seen: set[float],
+    event_cursor_ref: list[int] | None = None,
 ) -> bool:
     if tui_runtime is None or not session_id:
         return True
+    event_cursor = event_cursor_ref if event_cursor_ref is not None else [0]
     store = getattr(agent, "conversation_store", None)
     if store is None:
-        # Gateway 轻量客户端：走 HTTP /client/notices（S-BG1）
-        fetcher = getattr(agent, "request_background_notices", None)
-        if not callable(fetcher):
-            return True
-        cursor = max(seen) if seen else 0.0
-        try:
-            payload = fetcher(session_id, after=cursor)
-        except Exception:
-            return False
-        if not isinstance(payload, dict) or payload.get("ok") is not True:
-            return False
-        activity_changed = (
-            _publish_background_activity(
-                tui_runtime,
-                payload.get("agent_activity")
-                if isinstance(payload.get("agent_activity"), dict)
-                else {"active_task_count": payload.get("active_task_count")},
-            )
-            if isinstance(payload.get("agent_activity"), dict)
-            or "active_task_count" in payload
-            else False
+        return _consume_gateway_background_snapshot(
+            agent,
+            session_id,
+            tui_runtime,
+            app_ref,
+            seen,
+            event_cursor,
         )
-        raw = payload.get("notices")
-        if not isinstance(raw, list):
-            if activity_changed and app_ref[0] is not None:
-                app_ref[0].invalidate()
-            return False
-        fresh = [dict(row) for row in raw if isinstance(row, dict)]
-        for row in fresh:
-            _publish_background_notice_row(tui_runtime, row, seen)
-        if (fresh or activity_changed) and app_ref[0] is not None:
-            app_ref[0].invalidate()
+    return _consume_local_background_snapshot(
+        agent,
+        store,
+        session_id,
+        tui_runtime,
+        app_ref,
+        seen,
+        event_cursor,
+    )
+
+
+# LLM: Thin clients consume the one authenticated /client/notices snapshot.
+# Notification time and transcript integer cursors remain independent, and any
+# invalid response is returned to the caller's existing exponential backoff.
+# 函数用途: 从单 Gateway 拉取一次后台活动、过程事件和最终回复并刷新 TUI。
+def _consume_gateway_background_snapshot(
+    agent: object,
+    session_id: str,
+    tui_runtime: object,
+    app_ref: list,
+    seen: set[float],
+    event_cursor: list[int],
+) -> bool:
+    fetcher = getattr(agent, "request_background_notices", None)
+    if not callable(fetcher):
         return True
+    try:
+        payload = fetcher(
+            session_id,
+            after=max(seen) if seen else 0.0,
+            event_after=max(0, int(event_cursor[0] or 0)),
+        )
+    except Exception:
+        return False
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        return False
+    activity_changed = (
+        _publish_background_activity(
+            tui_runtime,
+            payload.get("agent_activity")
+            if isinstance(payload.get("agent_activity"), dict)
+            else {"active_task_count": payload.get("active_task_count")},
+        )
+        if isinstance(payload.get("agent_activity"), dict)
+        or "active_task_count" in payload
+        else False
+    )
+    transcript_ok, transcript_changed = _consume_background_transcript_projection(
+        tui_runtime,
+        payload.get("transcript_events"),
+        payload.get("event_cursor"),
+        event_cursor,
+    )
+    if not transcript_ok:
+        return False
+    raw = payload.get("notices")
+    if not isinstance(raw, list):
+        return False
+    fresh = [dict(row) for row in raw if isinstance(row, dict)]
+    for row in fresh:
+        _publish_background_notice_row(tui_runtime, row, seen)
+    if (fresh or activity_changed or transcript_changed) and app_ref[0] is not None:
+        app_ref[0].invalidate()
+    return True
+
+
+# LLM: Embedded/local mode reads the same agent-owned projection and event ring
+# without HTTP. ConversationStore and notice files remain authoritative for
+# thread resolution and final replies; the ring is still display-only.
+# 函数用途: 在本地完整 Agent 模式消费一次后台活动、过程事件和最终通知。
+def _consume_local_background_snapshot(
+    agent: object,
+    store: object,
+    session_id: str,
+    tui_runtime: object,
+    app_ref: list,
+    seen: set[float],
+    event_cursor: list[int],
+) -> bool:
     from ...agent.conversation.channels import LOCAL_AGENT_USER_ID, LOCAL_CHAT_CHANNEL
 
     root = getattr(store, "root", None)
@@ -205,9 +263,26 @@ def _consume_background_notices(
         tui_runtime,
         activity,
     )
+    from ...agent.conversation.background_transcript import (
+        read_background_transcript_events,
+    )
+
+    transcript = read_background_transcript_events(
+        agent,
+        thread_id=thread_id,
+        after=max(0, int(event_cursor[0] or 0)),
+    )
+    transcript_ok, transcript_changed = _consume_background_transcript_projection(
+        tui_runtime,
+        transcript.get("events"),
+        transcript.get("cursor"),
+        event_cursor,
+    )
+    if not transcript_ok:
+        return False
     notices_path = Path(root) / "notices" / f"{thread_id}.notices.jsonl"
     if not notices_path.exists():
-        if activity_changed and app_ref[0] is not None:
+        if (activity_changed or transcript_changed) and app_ref[0] is not None:
             app_ref[0].invalidate()
         return True
     fresh: list[dict[str, object]] = []
@@ -228,7 +303,7 @@ def _consume_background_notices(
             continue
         fresh.append(row)
     if not fresh:
-        if activity_changed and app_ref[0] is not None:
+        if (activity_changed or transcript_changed) and app_ref[0] is not None:
             app_ref[0].invalidate()
         return True
     for row in fresh:
@@ -236,6 +311,33 @@ def _consume_background_notices(
     if app_ref[0] is not None:
         app_ref[0].invalidate()
     return True
+
+
+# LLM: The TUI cursor advances only through the typed background event page.
+# Invalid transport shape triggers the existing poll backoff; event prose is
+# never parsed, and the runtime remains the only sequencer/reducer owner.
+# 函数用途: 消费一页后台过程事件并推进独立整数游标，返回协议是否有效及画面是否变化。
+def _consume_background_transcript_projection(
+    tui_runtime: object,
+    events: object,
+    cursor_value: object,
+    cursor_ref: list[int],
+) -> tuple[bool, bool]:
+    if not isinstance(events, list):
+        return False, False
+    try:
+        response_cursor = max(0, int(cursor_value or 0))
+    except (TypeError, ValueError):
+        return False, False
+    publisher = getattr(tui_runtime, "publish_background_transcript_events", None)
+    if events and not callable(publisher):
+        return False, False
+    try:
+        consumed_cursor = int(publisher(events) or 0) if callable(publisher) else 0
+    except (TypeError, ValueError):
+        return False, False
+    cursor_ref[0] = max(cursor_ref[0], response_cursor, consumed_cursor)
+    return True, bool(events)
 
 
 # LLM: The monitor may project only the typed conversation-agent snapshot built

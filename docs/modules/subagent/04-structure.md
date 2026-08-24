@@ -6,6 +6,19 @@
 `task_node_closeout` 副本。canonical task/result 是唯一结果事实源；父代理通过结构化 status、blockers、
 findings、artifact refs 和 result payload 阅读子代理工作，再由模型向用户汇总。
 
+## 2026-08-24 Coordinator policy 与后台展示事件边界
+
+- `agent_core/orchestration/coordinator_policy.py` 是主代理工具发现、任意层 coordinator runner 和创建回执
+  共用的派工后职责说明。`coordinator_execution_scope.v1` 只区分允许的协调/整合/测试/汇报与禁止重复实现；
+  它是模型执行指导，不是 write boundary、工具授权、任务完成或质量验收事实。
+- `conversation/agent_activity.py` 继续只拥有固定 main/child/Todo scalar projection；
+  `conversation/background_transcript.py` 独立保存每 thread 最多 1024 条易失公开事件。两者都不是会话
+  transcript 或生命周期权威，Gateway 重启可以丢中间展示，最终回复仍由 `background_notice.v2` 持久交付。
+- 后台事件 block id 位于 `bg-main:<thread>:<turn>` 命名空间，内容仅含显式 thinking、真实工具边界前的
+  过程段、`_structured_tool_progress` 已脱敏的工具/display、数值 Compact 和重试计数。薄客户端以独立
+  `event_after/event_cursor` 拉取，并直接发布到既有 TUI session sequencer；不创建第二个 reducer、Working
+  行或前端完成状态。
+
 ## 2026-08-24 Child attempt registration and activation
 
 - `SubAgentBaseService._write_authority_records` 创建 child 时落一条 `pending` generation 1 AgentAttempt。

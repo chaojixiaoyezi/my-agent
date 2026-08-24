@@ -1,5 +1,16 @@
 # Gateway Structure
 
+## 后台过程事件传输
+
+- `conversation/background_transcript.py` 是 Gateway 进程内的有界公开事件环：每个 thread 最多 1024 条，
+  序号单调，新任务清旧正文但不回退序号。它只保存已脱敏显式 thinking、真实工具边界前的过程段、公开
+  tool/display、重试计数和数值 Compact；不保存 hidden reasoning、权限、任务状态或最终回复权威。
+- `/client/notices` 在原 `after/cursor` 最终通知流旁增加 `event_after/event_cursor` 过程流。客户端只能按
+  已鉴权 conversation 读取，不能指定内部 thread/task。慢客户端丢 start 后可由携带完整内容的 terminal
+  event 恢复稳定块；Gateway 重启允许丢中间过程，持久 `background_notice.v2` final 不受影响。
+- `cli/chat_parts/tui_threading.py` 同步推进两个游标，`TuiRuntime` 只接受冻结 schema 和 `bg-main:` 命名空间，
+  再交给原 sequencer/reducer/renderer；因此没有第二套 Working、完成状态或业务 transcript。
+
 ## 后台会话车道与公平调度
 
 - `conversation.runtime.BackgroundMainAgentScheduler.prepare_tick()` 只做无模型的维护、到期入队和恢复；

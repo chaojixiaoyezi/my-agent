@@ -55,6 +55,9 @@ def test_create_subagents_model_spec_uses_template_index_not_full_prompt():
     assert item_schema["properties"]["description"]["maxLength"] == 240
     assert item_schema["properties"]["output_files"]["type"] == "array"
     assert "交付身份与冲突范围" in spec.parameter_descriptions["output_files"]
+    assert "角色就变为协调者" in spec.description
+    assert "不要重做已经委派的任务" in spec.description
+    assert "replacement child" in spec.description
 
 
 def test_create_subagents_inherits_current_task_workspace(tmp_path):

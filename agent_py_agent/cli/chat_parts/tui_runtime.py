@@ -16,6 +16,30 @@ from ...agent.contracts.tool_approval import (
 from .tui_events import JournalAppendResult, TuiEvent, TuiEventSequencer
 from .tui_view_model import TuiStateStore
 
+_BACKGROUND_TRANSCRIPT_SCHEMA = "background_transcript_event.v1"
+_BACKGROUND_TRANSCRIPT_KINDS = frozenset(
+    {
+        "assistant_completed",
+        "thinking_started",
+        "thinking_delta",
+        "thinking_completed",
+        "tool_started",
+        "tool_progress",
+        "tool_completed",
+        "tool_failed",
+        "system_message",
+        "context_window_compacted",
+        "conversation_compaction_started",
+        "conversation_compaction_progress",
+        "conversation_compaction_completed",
+        "conversation_compaction_failed",
+        "compact_boundary",
+    }
+)
+_BACKGROUND_TRANSCRIPT_PHASES = frozenset(
+    {"started", "delta", "updated", "completed", "failed", "interrupted"}
+)
+
 
 # LLM: TuiTurnSummary 是 finalize 的结构化输入；error/status/token 不能从格式化 timing 文案反解析。
 # 类用途: 汇总一个 worker 回合的最终响应和统计。
@@ -661,6 +685,45 @@ class _TuiBackgroundActivityRuntimeMixin:
                 {"text": text},
                 request_id=request_id,
             )
+
+    # LLM: Background transcript rows are a display-only Gateway projection.
+    # This entry accepts only the frozen schema and bg-main block namespace,
+    # then reuses the one session sequencer/reducer instead of creating another UI.
+    # 函数用途: 将后台主代理的灰色过程、思考、工具和 diff 事件发布到现有正文流，并返回已消费游标。
+    def publish_background_transcript_events(self, value: object) -> int:
+        if not isinstance(value, list | tuple):
+            return 0
+        consumed_cursor = 0
+        for item in value:
+            if not isinstance(item, Mapping):
+                continue
+            try:
+                remote_seq = max(0, int(item.get("seq") or 0))
+            except (TypeError, ValueError):
+                continue
+            consumed_cursor = max(consumed_cursor, remote_seq)
+            request_id = str(item.get("request_id") or "").strip()
+            block_id = str(item.get("block_id") or "").strip()
+            kind = str(item.get("kind") or "").strip()
+            phase = str(item.get("phase") or "").strip()
+            payload = item.get("payload")
+            if (
+                item.get("schema") != _BACKGROUND_TRANSCRIPT_SCHEMA
+                or kind not in _BACKGROUND_TRANSCRIPT_KINDS
+                or phase not in _BACKGROUND_TRANSCRIPT_PHASES
+                or not request_id.startswith("bg-main:")
+                or not block_id.startswith(f"{request_id}:")
+                or not isinstance(payload, Mapping)
+            ):
+                continue
+            self._publish(
+                kind,
+                phase,
+                block_id,
+                dict(payload),
+                request_id=request_id,
+            )
+        return consumed_cursor
 
 
 # LLM: TuiRuntime 统一拥有 session 事件序号与 turn adapter；emit+publish 在同一锁内避免并发 seq 到达倒序。

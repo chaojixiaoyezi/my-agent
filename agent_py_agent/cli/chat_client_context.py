@@ -138,12 +138,14 @@ class GatewayChatClientAgent:
         session_id: str,
         *,
         after: float,
+        event_after: int = 0,
     ) -> dict[str, object]:
         # 后台状态只是易失展示；2 秒仍无响应就交给 TUI 退避，不能让每个窗口长期占住连接。
         _status, body = self._post_gateway_json(
             "/client/notices",
             {
                 "after": max(0.0, float(after or 0.0)),
+                "event_after": max(0, int(event_after or 0)),
                 "user_id": "local-agent",
                 "channel": "chat",
                 "conversation_id": str(session_id or "default"),
@@ -154,6 +156,8 @@ class GatewayChatClientAgent:
             "ok": False,
             "notices": [],
             "cursor": after,
+            "transcript_events": [],
+            "event_cursor": max(0, int(event_after or 0)),
             "active_task_count": 0,
         }
 

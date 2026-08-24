@@ -4,6 +4,13 @@
 
 最近收口重点：
 
+- 2026-08-24 本地候选已把 会话运行时 派工后 no-duplicate-work 规则集中到
+  `orchestration/coordinator_policy.py`，root 工具说明、递归 coordinator runner、角色模板与
+  `coordinator_execution_scope.v1` 创建回执不再互相矛盾；这只是模型软职责，不恢复机器验收或写工具硬拦。
+  同批新增后台 main 的 1024 条易失 typed 事件环与独立整数游标，显式思考、工具结果、终端交互 风格
+  `Update/Write/Bash`、折叠和红蓝 diff 复用原 TUI reducer/renderer，最终回复仍走持久 notice。
+  当前仅代表 focused 本地实现通过；严格 gate、推送、`.7` 单 Gateway 部署和原样 Prompt 4 真机证据见 ROADMAP。
+
 - 2026-08-23 本地候选已把普通 `workspace:*` 退出跨 run 持久 operation 锁，同时删除
   `output_files/output_refs` 的创建前所有权拒绝和活跃 child 动态 `locked_files` 投影。
   owner 分库/分目录、远程 owner home、write boundary、sandbox、operation 幂等/replay 与逻辑锁保留。

@@ -48,7 +48,8 @@ agent_py_agent/
 |   |   |-- tool_loop/                  # 工具轮次执行、恢复与自然结束
 |   |   |-- tool_context/               # 工具结果上下文：reducer、窗口、microcompact、PTL 单轮重试
 |   |   |-- orchestration/              # 四个递归直属控制工具与内部自动启动/恢复引擎；无兄弟 goal 广播，进展事件由宿主写入
-|   |   |   `-- planned_delegation.py  # 已有 Todo 时，创建前原子校验 exact covers、编码写入集合和父级 workspace 上界
+|   |   |   |-- coordinator_policy.py # 主代理/多层 coordinator 共用的 会话运行时 式派工后职责软合同
+|   |   |   `-- planned_delegation.py # 已有 Todo 时，创建前原子校验 exact covers、编码写入集合和父级 workspace 上界
 |   |   |-- agent_tree/status.py        # `/status`、TUI、恢复与诊断共用的内部代理树投影（不是模型工具）
 |   |   |-- _finalization_service.py   # 保留模型最终正文并记录 turn_end.reason
 |   |   |-- tool_loop/natural_user_reply.py # 派工/续跑/完成共用的无工具 LLM 用户回复出口
@@ -116,6 +117,7 @@ agent_py_agent/
 |   |   `-- goal_control_service.py    # 同 thread 持续目标的创建/修改/暂停/恢复/清除
 |   |-- conversation/                  # 通道会话账本、权威 transcript、结构化任务关联/续接
 |   |   |-- agent_activity.py          # active task link + canonical child run 到 TUI/Web 共用有界活动投影
+|   |   |-- background_transcript.py  # 后台 main 的有界易失 typed 过程事件环；只供 TUI/Web 实时展示
 |   |   |-- agent_thread.py            # child/grandchild 独立 thread、逐 attempt transcript 与统一 Compact 适配
 |   |   |-- agent_thread_store.py      # agent thread 精确 ID 物化、身份冲突与运行目录校验
 |   |   |-- closeout.py                # 收口状态机 decide_closeout(四改之 2): 终态 done/cancelled/wait_human/wait_handoff/resume_round

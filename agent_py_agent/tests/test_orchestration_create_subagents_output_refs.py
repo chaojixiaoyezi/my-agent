@@ -38,6 +38,20 @@ def test_items_mode_payload_rebinds_stale_self_output_run_id(tmp_path):
     loaded = mock_agent.subagents.load(run_id)
 
     assert result.ok is True
+    assert payload["parent_execution_scope"] == {
+        "schema": "coordinator_execution_scope.v1",
+        "mode": "coordinator_after_delegation",
+        "allowed_work": [
+            "coordinate_children",
+            "read_declared_results",
+            "integrate_existing_artifacts",
+            "run_allowed_tests",
+            "report_results",
+        ],
+        "delegated_work": "do_not_duplicate_or_reimplement",
+        "gap_action": "send_guidance_or_create_replacement_child",
+        "authority": "model_execution_guidance_only",
+    }
     assert stale_id not in payload["tasks"][0]["attributes"]["output_files"][0]
     assert payload["tasks"][0]["attributes"]["output_files"][0].endswith("data_collection.md")
     assert loaded.attributes["output_ref_rebindings"][0]["to"].endswith("/data_collection.md")

@@ -54,6 +54,7 @@ def test_coordinator_policy_does_not_silently_take_over_delegated_work():
 
     policy = "\n".join(coordinator_execution_policy_lines())
     assert "角色就变为协调者" in policy
+    assert "不要重做已经委派的任务" in policy
     assert "replacement child" in policy
     assert "诚实列出未完成项不能代替继续工作" in policy
     assert "下级卡住时，你可以直接完成" not in policy

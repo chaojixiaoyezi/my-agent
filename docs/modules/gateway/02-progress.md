@@ -1,5 +1,16 @@
 # Gateway Progress
 
+## 2026-08-24 后台 main 富过程双游标（本地候选）
+
+- 原 `/client/notices` 只返回 scalar activity、child/Todo 和持久 final notice，后台 main 的显式 thinking、
+  工具 output/display、diff 与 Compact 过程在到达 TUI 前丢失。renderer 本身已经具备 终端交互 风格的
+  `Update/Write/Bash`、缩进结果、折叠和红删蓝增，无需重写前端。
+- Gateway 现在额外返回 `background_transcript_event.v1` 有界易失事件页，使用独立
+  `event_after/event_cursor`；通知继续使用 created_at `after/cursor`，两条游标不能互相覆盖。薄 TUI
+  仍按同一 1 秒健康周期/0.5--8 秒失败退避读取，并把事件发布到唯一 session sequencer/reducer。
+- focused 回归已覆盖 HTTP page、二次游标去重、思考、过程段和 diff 样式。该候选仍待严格 gate、推送和
+  `.7` 单 Gateway 的原样 Prompt 4 真机观察，不能把本地 renderer snapshot 写成远端已通过。
+
 ## 2026-08-23 单 Gateway 多 TUI 接入背压候选
 
 - 首轮 会话运行时/my-agent 配对真 TUI 暴露的卡顿不是工作区锁：`.7` 唯一 Gateway 的标准库等待队列只有 5，

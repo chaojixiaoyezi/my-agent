@@ -747,6 +747,15 @@ python3 -m pytest agent_py_agent/tests/test_conversation_agent_activity.py agent
 `ma-84c6b90-p4-fzf-r6-todo`，只输入一次原样 prompt。main 进入“等待 4 个子代理”时，Todo 仍稳定显示
 `完成 1/9 · 进行中 6`，四行任务窗口和四名 child 同时可见，根 Todo 持续投影通过真实 TUI 回归。
 
+后台富过程与派工后职责的本地 focused 回归必须同时覆盖：显式 thinking delta/full、真实工具边界前的
+灰色过程段、`Update(path)`、增删统计和带样式的红删蓝增行；`event_after/event_cursor` 二次拉取不得重放；
+root/递归 coordinator/create 回执必须共用 no-duplicate-work 与 replacement child 语义。它们只是上线前
+协议护栏，不能代替新的原样 Prompt 4 真 TUI。常用入口：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_background_notice_display.py agent_py_agent/tests/test_conversation_agent_activity.py agent_py_agent/tests/test_orchestration_tools.py agent_py_agent/tests/test_orchestration_create_subagents_output_refs.py agent_py_agent/tests/test_integration_coverage_context.py agent_py_agent/tests/test_subagent_role_templates.py -q --tb=short
+```
+
 较早未决操作的最终软核对要覆盖 r5 的真实形态：一个 effect-bearing 调用 typed `unknown`，随后另一个
 不同 operation `succeeded`，首份最终草稿仍必须带原工具能力回到同一模型，并同时看到未决 operation、
 后续成功计数和被退回草稿；相同签名只触发一次。若最新 operation 自身仍未决，继续由既有

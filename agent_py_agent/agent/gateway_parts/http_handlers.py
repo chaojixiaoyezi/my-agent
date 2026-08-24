@@ -22,6 +22,7 @@ from ..conversation.agent_activity import (
     ConversationAgentActivity,
     conversation_agent_activity,
 )
+from ..conversation.background_transcript import read_background_transcript_events
 from ..conversation.channels import project_user_reply, redact_host_absolute_paths
 from ..conversation.control_commands import (
     ConversationControlCommand,
@@ -976,8 +977,8 @@ def handle_control_status(handler, server) -> None:
 def handle_client_notices(handler, server) -> None:
     """S-BG1: 返回当前会话的进行中任务数和后台主代理轮完成通知。
 
-    body: {"conversation_id": ..., "after": 游标(float created_at)}
-    响应: {"ok": true, "active_task_count": n, "notices": [...], "cursor": 最新 created_at}
+    body: {"conversation_id": ..., "after": 通知游标, "event_after": 过程事件游标}
+    响应同时返回 notices/cursor 与 transcript_events/event_cursor 两条独立增量流。
     """
     if require_trusted_source(handler):
         return
@@ -998,6 +999,10 @@ def handle_client_notices(handler, server) -> None:
         after = float(body.get("after") or 0.0)
     except (TypeError, ValueError):
         after = 0.0
+    try:
+        event_after = max(0, int(body.get("event_after") or 0))
+    except (TypeError, ValueError):
+        event_after = 0
     result = read_gateway_client_notices(
         server.agent,
         scope=_gateway_control_scope(
@@ -1007,6 +1012,7 @@ def handle_client_notices(handler, server) -> None:
             channel=channel,
         ),
         after=after,
+        event_after=event_after,
     )
     handler._send_json(200, result)
 
@@ -1021,8 +1027,9 @@ def read_gateway_client_notices(
     *,
     scope: object,
     after: float,
+    event_after: int = 0,
 ) -> dict[str, object]:
-    """返回当前 thread 的活跃任务、直属子代理投影与 after 之后的通知。"""
+    """返回当前 thread 的活动投影、后台过程事件与 after 之后的通知。"""
     from ..conversation.channels import LOCAL_AGENT_USER_ID, LOCAL_CHAT_CHANNEL
     from ..conversation.store import ConversationStore
 
@@ -1033,6 +1040,9 @@ def read_gateway_client_notices(
             "error": "conversation_id required",
             "notices": [],
             "cursor": after,
+            "transcript_events": [],
+            "event_cursor": max(0, int(event_after or 0)),
+            "events_truncated": False,
             "active_task_count": 0,
         }
     store = getattr(agent, "conversation_store", None)
@@ -1042,6 +1052,9 @@ def read_gateway_client_notices(
             "error": "conversation store unavailable",
             "notices": [],
             "cursor": after,
+            "transcript_events": [],
+            "event_cursor": max(0, int(event_after or 0)),
+            "events_truncated": False,
             "active_task_count": 0,
         }
     try:
@@ -1056,6 +1069,9 @@ def read_gateway_client_notices(
             "error": f"thread resolve failed: {exc}",
             "notices": [],
             "cursor": after,
+            "transcript_events": [],
+            "event_cursor": max(0, int(event_after or 0)),
+            "events_truncated": False,
             "active_task_count": 0,
         }
     if thread is None:
@@ -1064,47 +1080,32 @@ def read_gateway_client_notices(
             "ok": True,
             "notices": [],
             "cursor": after,
+            "transcript_events": [],
+            "event_cursor": max(0, int(event_after or 0)),
+            "events_truncated": False,
             "active_task_count": 0,
             "agent_activity": activity,
         }
     thread_id = str(getattr(thread, "thread_id", "") or "")
+    transcript = read_background_transcript_events(
+        agent,
+        thread_id=thread_id,
+        after=event_after,
+    )
     activity = conversation_agent_activity(agent, store, thread_id)
     activity_payload = activity.to_dict()
     active_task_count = activity.active_task_count
     notices_path = Path(store.root) / "notices" / f"{thread_id}.notices.jsonl"
-    if not notices_path.exists():
-        return {
-            "ok": True,
-            "notices": [],
-            "cursor": after,
-            "active_task_count": active_task_count,
-            "agent_activity": activity_payload,
-        }
-    notices: list[dict[str, object]] = []
-    cursor = after
-    try:
-        for line in notices_path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(row, dict):
-                continue
-            try:
-                created = float(row.get("created_at") or 0.0)
-            except (TypeError, ValueError):
-                created = 0.0
-            if created > after:
-                notices.append(row)
-                cursor = max(cursor, created)
-    except OSError:
+    notices, cursor, notices_ok = _read_background_notice_rows(notices_path, after)
+    if not notices_ok:
         return {
             "ok": False,
             "error": "notices read failed",
             "notices": [],
             "cursor": after,
+            "transcript_events": transcript["events"],
+            "event_cursor": transcript["cursor"],
+            "events_truncated": transcript["truncated"],
             "active_task_count": active_task_count,
             "agent_activity": activity_payload,
         }
@@ -1112,9 +1113,47 @@ def read_gateway_client_notices(
         "ok": True,
         "notices": notices,
         "cursor": cursor,
+        "transcript_events": transcript["events"],
+        "event_cursor": transcript["cursor"],
+        "events_truncated": transcript["truncated"],
         "active_task_count": active_task_count,
         "agent_activity": activity_payload,
     }
+
+
+# LLM: Notice files are append-only delivery projections. This reader filters
+# only by the typed created_at cursor and cannot affect activity or transcript
+# event cursors; malformed individual rows are skipped without guessing prose.
+# 函数用途: 读取通知文件中 after 之后的合法行，并返回新游标和文件读取状态。
+def _read_background_notice_rows(
+    notices_path: Path,
+    after: float,
+) -> tuple[list[dict[str, object]], float, bool]:
+    if not notices_path.exists():
+        return [], after, True
+    notices: list[dict[str, object]] = []
+    cursor = after
+    try:
+        lines = notices_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return [], after, False
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        try:
+            created = float(row.get("created_at") or 0.0)
+        except (TypeError, ValueError):
+            created = 0.0
+        if created > after:
+            notices.append(row)
+            cursor = max(cursor, created)
+    return notices, cursor, True
 
 
 def handle_client_memory(handler, server) -> None:

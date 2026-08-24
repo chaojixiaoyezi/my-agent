@@ -1,5 +1,24 @@
 # Subagent Progress
 
+## 2026-08-24 r6 派工边界与后台富过程展示（本地候选）
+
+- `.7` 唯一 Gateway、MiniMax-M2.7、tmux `ma-84c6b90-p4-fzf-r6-todo` 的 fresh Prompt 4 中，4 名 child
+  全部 DONE、root Todo 最终 9/9；root 随后仍自行调用 `edit_file/write_file` 修复功能代码，违背用户明确
+  “只能子代理编写”的分工。产物 244 项自测和 build 均真实通过，但独立入口没有 package `bin`，直接运行
+  `dist/index.js` 无帮助和交互输出，因此只是 TypeScript library 子集，不算 fzf 可执行/TUI 完整复刻。
+- 对照 会话运行时 `orchestrator.md` 与 `multi_agents_spec.rs` 后，派工后职责收口为一份 canonical 软合同：root
+  首轮工具说明、任意层 coordinator runner 和 `create_subagents` 回执共用“不要重复已委派工作；只协调、
+  读取结果、整合已有产物、运行测试和汇报；缺口 guidance 或 replacement child”。它不解析用户 prompt，
+  不按文件名拦工具，也不恢复机器质量验收。内置 coordinator 模板中“child 卡住即可亲自完成”的冲突文案已删除。
+- 终端交互 对照确认 `tui_block_renderer.py` 已有 `Update/Write/Bash`、缩进输出、折叠和行号红删蓝增 diff；
+  真缺口是后台 `BackgroundMainActivitySink` 只保留一条 scalar 活动摘要。新
+  `conversation/background_transcript.py` 用每 thread 单调游标和 1024 条易失事件环传递显式 thinking、
+  工具生命周期/公开 `display`、重试及 Compact 进度；`/client/notices` 增加独立 `event_after/event_cursor`，
+  TUI 仍复用唯一 sequencer/reducer/renderer，底部 main `Working` 仍只有一条。
+- 当前 focused 回归已证明后台链能实际渲染 `Update(src/components/ui.tsx)`、增删统计、红/蓝 diff，且游标
+  二次轮询不重复。该项仍需严格 gate、推送、单 Gateway 部署，再用新的原样 Prompt 4 真 TUI 同时验证
+  后台过程实时可见和 root 不再自行编写已委派功能。
+
 ## 2026-08-24 child pending attempt 原子激活（本地候选）
 
 - `.7` 唯一 Gateway 的 Prompt 4 fresh TUI 样本直接证明：每个新 child 在 runtime.db 同时出现两条未结

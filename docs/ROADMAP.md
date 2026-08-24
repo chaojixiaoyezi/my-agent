@@ -133,6 +133,14 @@ canonical subagent run 生成有界直属 child 快照，TUI 在输入框下固�
 coordinator 在委派后只整合、测试和汇报，缺口继续交给 child。8 个直接相关 focused 文件已通过，待严格
 gate、部署和下一条原样 MiniMax-M2.7 TUI 复验。
 
+`84c6b90` 的 fresh Prompt 4 r6 已证明 root Todo 在四名 child 运行期间持续可见，四名 child 最终全部
+DONE；但 root 在后台整合轮又亲自调用 `edit_file/write_file` 修复功能，且最终 244 tests/build 只覆盖
+TypeScript library，`dist/index.js` 没有 fzf 可执行入口。当前本地候选把 会话运行时 no-duplicate-work 规则收口
+到 root 工具说明、递归 coordinator prompt 和结构化创建回执；同时将后台 main 原先单行摘要扩成有界 typed
+过程事件流，复用现有 终端交互 风格 thinking/tool/diff renderer。focused 已证明 `Update + Added/removed +
+红删蓝增` 可从后台链路显示且游标不重放；待严格 gate、部署后以全新 tmux 原样 Prompt 4 真机同时复验
+“root 不自写”和“后台两分钟工作期间持续可见”。
+
 `931ee20` 已完成上述展示复验：四条短职责、实时 context、单行 main 和终态标记均正确。新阻塞转到底层
 完成交接：旧 wake 没带 child 最终回复和 `final_report.md`，main 因而猜错目录。当前候选按 会话运行时 标准
 completion message 补 `subagent-completion.v1`，同根 DONE 信封一次合批，并让 active wake 在上下文压力

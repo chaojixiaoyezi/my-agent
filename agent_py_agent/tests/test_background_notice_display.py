@@ -224,11 +224,19 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
     fetched: list[dict[str, object]] = []
 
     class _Agent:
-        def request_background_notices(self, session_id, *, after):
-            fetched.append({"session_id": session_id, "after": after})
+        def request_background_notices(self, session_id, *, after, event_after):
+            fetched.append(
+                {
+                    "session_id": session_id,
+                    "after": after,
+                    "event_after": event_after,
+                }
+            )
             return {
                 "ok": True,
                 "cursor": 200.0,
+                "transcript_events": [],
+                "event_cursor": event_after,
                 "active_task_count": 2,
                 "agent_activity": {
                     "schema_version": "conversation_agent_activity.v5",
@@ -296,6 +304,7 @@ def test_tui_thin_client_fetches_notices_via_http(tmp_path: Path) -> None:
     )
     assert len(fetched) == 1
     assert fetched[0]["after"] == 0.0
+    assert fetched[0]["event_after"] == 0
     assert len(published) == 2
     assert published[0] == "active:2:3:child-1:qa:0:True:True:False"
     assert published[1] == "HTTP 后台完成通知测试。"
@@ -311,11 +320,13 @@ def test_tui_notice_transport_failure_preserves_projection_and_reports_failure()
     from agent_py_agent.cli.chat_parts.tui_threading import _consume_background_notices
 
     class _Agent:
-        def request_background_notices(self, session_id, *, after):
+        def request_background_notices(self, session_id, *, after, event_after):
             return {
                 "ok": False,
                 "notices": [],
                 "cursor": after,
+                "transcript_events": [],
+                "event_cursor": event_after,
                 "active_task_count": 0,
             }
 
@@ -330,6 +341,392 @@ def test_tui_notice_transport_failure_preserves_projection_and_reports_failure()
         [None],
         set(),
     )
+
+
+def test_background_transcript_sink_reuses_free_code_diff_renderer() -> None:
+    """后台 main 的过程、思考和 Update diff 进入同一 TUI block renderer。"""
+    from agent_py_agent.agent.conversation.background_transcript import (
+        BackgroundTranscriptSink,
+        read_background_transcript_events,
+    )
+    from agent_py_agent.cli.chat_parts.tui_block_renderer import (
+        TuiRenderContext,
+        fragments_text,
+        render_tui_snapshot,
+    )
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+
+    agent = SimpleNamespace()
+    sink = BackgroundTranscriptSink(
+        agent,
+        thread_id="thread-rich-background",
+        task_id="task-rich-background",
+    )
+    assert sink.write_thinking_delta("先核对现有渲染，再修改事件传输。") is True
+    assert sink.write_thinking(
+        "先核对现有渲染，再修改事件传输。",
+        duration_seconds=2.5,
+    ) is True
+    sink.write_model("把后台工具结果接回现有正文渲染器：")
+    sink.write_progress(
+        {
+            "round": 1,
+            "call_index": 0,
+            "tool": "edit_file",
+            "phase": "started",
+            "status": "执行中",
+            "detail": "src/components/ui.tsx",
+        }
+    )
+    sink.write_progress(
+        {
+            "round": 1,
+            "call_index": 0,
+            "tool": "edit_file",
+            "phase": "finished",
+            "status": "完成",
+            "ok": True,
+            "output": "更新成功",
+            "display": {
+                "kind": "diff",
+                "path": "src/components/ui.tsx",
+                "lines_added": 1,
+                "lines_removed": 1,
+                "hidden_lines": 0,
+                "lines": [
+                    {
+                        "kind": "remove",
+                        "old_line": 120,
+                        "new_line": None,
+                        "text": "return oldValue;",
+                    },
+                    {
+                        "kind": "add",
+                        "old_line": None,
+                        "new_line": 120,
+                        "text": "return newValue;",
+                    },
+                ],
+            },
+        }
+    )
+    sink.finish()
+
+    page = read_background_transcript_events(
+        agent,
+        thread_id="thread-rich-background",
+        after=0,
+    )
+    kinds = [row["kind"] for row in page["events"]]
+    assert kinds == [
+        "thinking_started",
+        "thinking_delta",
+        "thinking_completed",
+        "assistant_completed",
+        "tool_started",
+        "tool_completed",
+    ]
+    assert page["cursor"] == 6
+    runtime = TuiRuntime("session-rich-background")
+    assert runtime.publish_background_transcript_events(page["events"]) == 6
+
+    frame = render_tui_snapshot(
+        runtime.store.snapshot(),
+        TuiRenderContext(
+            width=100,
+            detailed_transcript=True,
+            show_all=True,
+        ),
+    )
+    transcript = "\n".join(fragments_text(line) for line in frame.transcript_lines)
+    assert "先核对现有渲染，再修改事件传输。" in transcript
+    assert "把后台工具结果接回现有正文渲染器" in transcript
+    assert "Update(src/components/ui.tsx)" in transcript
+    assert "Added 1 lines, removed 1 lines" in transcript
+    assert "return oldValue;" in transcript
+    assert "return newValue;" in transcript
+    old_line = next(
+        line for line in frame.transcript_lines if "return oldValue;" in fragments_text(line)
+    )
+    new_line = next(
+        line for line in frame.transcript_lines if "return newValue;" in fragments_text(line)
+    )
+    assert any("class:tui-diff-remove" in fragment[0] for fragment in old_line)
+    assert any("class:tui-diff-add" in fragment[0] for fragment in new_line)
+
+
+def test_gateway_notice_page_transports_background_event_cursor(tmp_path: Path) -> None:
+    """独立 event_after 游标不会与最终通知 created_at 游标互相覆盖。"""
+    from agent_py_agent.agent.conversation.background_transcript import (
+        BackgroundTranscriptSink,
+    )
+    from agent_py_agent.agent.conversation.store import ConversationStore
+    from agent_py_agent.agent.gateway_parts.http_handlers import (
+        read_gateway_client_notices,
+    )
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "local-agent",
+            "channel": "chat",
+            "channel_conversation_id": "session-rich-cursor",
+            "channel_user_id": "local-agent",
+            "now": 1.0,
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-rich-cursor",
+            "goal": "后台显示测试",
+            "now": 2.0,
+        }
+    )
+    agent = SimpleNamespace(conversation_store=store)
+    sink = BackgroundTranscriptSink(
+        agent,
+        thread_id=thread.thread_id,
+        task_id="task-rich-cursor",
+    )
+    sink.write_model("准备调用工具。")
+    sink.write_progress(
+        {
+            "round": 1,
+            "call_index": 0,
+            "tool": "run_command",
+            "phase": "started",
+            "detail": "npm test",
+        }
+    )
+
+    first = read_gateway_client_notices(
+        agent,
+        scope=SimpleNamespace(conversation_id="session-rich-cursor"),
+        after=0.0,
+        event_after=0,
+    )
+    assert first["ok"] is True
+    assert [row["kind"] for row in first["transcript_events"]] == [
+        "assistant_completed",
+        "tool_started",
+    ]
+    assert first["event_cursor"] == 2
+    assert first["cursor"] == 0.0
+
+    second = read_gateway_client_notices(
+        agent,
+        scope=SimpleNamespace(conversation_id="session-rich-cursor"),
+        after=0.0,
+        event_after=first["event_cursor"],
+    )
+    assert second["transcript_events"] == []
+    assert second["event_cursor"] == 2
+
+
+def test_tui_notice_loop_consumes_background_transcript_once() -> None:
+    """薄客户端按 event_after 增量发布后台工具块，后续轮询不重复。"""
+    from agent_py_agent.agent.conversation.background_transcript import (
+        BackgroundTranscriptSink,
+        read_background_transcript_events,
+    )
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+    from agent_py_agent.cli.chat_parts.tui_threading import _consume_background_notices
+
+    source = SimpleNamespace()
+    sink = BackgroundTranscriptSink(
+        source,
+        thread_id="thread-http-rich",
+        task_id="task-http-rich",
+    )
+    sink.write_model("运行定向测试：")
+    sink.write_progress(
+        {
+            "round": 1,
+            "call_index": 0,
+            "tool": "run_command",
+            "phase": "started",
+            "detail": "pytest focused",
+        }
+    )
+    sink.write_progress(
+        {
+            "round": 1,
+            "call_index": 0,
+            "tool": "run_command",
+            "phase": "finished",
+            "ok": True,
+            "output": "2 passed",
+        }
+    )
+    fetched: list[int] = []
+
+    class _Agent:
+        def request_background_notices(
+            self,
+            session_id,
+            *,
+            after,
+            event_after,
+        ):
+            del session_id, after
+            fetched.append(event_after)
+            page = read_background_transcript_events(
+                source,
+                thread_id="thread-http-rich",
+                after=event_after,
+            )
+            return {
+                "ok": True,
+                "cursor": 0.0,
+                "notices": [],
+                "transcript_events": page["events"],
+                "event_cursor": page["cursor"],
+                "active_task_count": 0,
+                "agent_activity": {
+                    "active_task_count": 0,
+                    "active_task_projection_ok": True,
+                    "subagent_projection_ok": True,
+                    "task_progress_projection_ok": True,
+                    "subagents": [],
+                    "task_progress_items": [],
+                },
+            }
+
+    runtime = TuiRuntime("session-http-rich")
+    event_cursor = [0]
+    assert _consume_background_notices(
+        _Agent(),
+        "session-http-rich",
+        runtime,
+        [None],
+        set(),
+        event_cursor,
+    )
+    stable_count = len(runtime.store.snapshot().stable_blocks)
+    assert fetched == [0]
+    assert event_cursor == [3]
+    assert stable_count == 2
+    assert _consume_background_notices(
+        _Agent(),
+        "session-http-rich",
+        runtime,
+        [None],
+        set(),
+        event_cursor,
+    )
+    assert fetched == [0, 3]
+    assert len(runtime.store.snapshot().stable_blocks) == stable_count
+
+
+def test_background_transcript_lru_eviction_keeps_cursor_forward(monkeypatch) -> None:
+    """纯展示线程被 LRU 淘汰后，同会话重现仍使用更大的全局事件序号。"""
+    from agent_py_agent.agent.conversation import background_transcript
+
+    monkeypatch.setattr(background_transcript, "BACKGROUND_TRANSCRIPT_MAX_THREADS", 2)
+    agent = SimpleNamespace()
+    first = background_transcript.BackgroundTranscriptSink(
+        agent,
+        thread_id="thread-1",
+        task_id="task-1",
+    )
+    first.write_provider_retry(attempt=1, total=5, delay_seconds=1.0)
+    first_page = background_transcript.read_background_transcript_events(
+        agent,
+        thread_id="thread-1",
+        after=0,
+    )
+    old_cursor = first_page["cursor"]
+
+    for index in (2, 3):
+        sink = background_transcript.BackgroundTranscriptSink(
+            agent,
+            thread_id=f"thread-{index}",
+            task_id=f"task-{index}",
+        )
+        sink.write_provider_retry(attempt=1, total=5, delay_seconds=1.0)
+
+    resumed = background_transcript.BackgroundTranscriptSink(
+        agent,
+        thread_id="thread-1",
+        task_id="task-1",
+    )
+    resumed.write_provider_retry(attempt=2, total=5, delay_seconds=2.0)
+    resumed_page = background_transcript.read_background_transcript_events(
+        agent,
+        thread_id="thread-1",
+        after=old_cursor,
+    )
+
+    assert len(resumed_page["events"]) == 1
+    assert resumed_page["events"][0]["seq"] > old_cursor
+
+
+def test_background_transcript_projects_numeric_compact_events() -> None:
+    """后台 Compact 只传冻结数字字段，并复用前台 Compact block 生命周期。"""
+    from agent_py_agent.agent.conversation.background_transcript import (
+        BackgroundTranscriptSink,
+        read_background_transcript_events,
+    )
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+
+    agent = SimpleNamespace()
+    sink = BackgroundTranscriptSink(
+        agent,
+        thread_id="thread-background-compact",
+        task_id="task-background-compact",
+    )
+    assert sink.write_context_compaction(
+        {
+            "schema": "model_visible_context_compaction.v1",
+            "generation": 1,
+            "before_tokens": 118_000,
+            "after_tokens": 32_000,
+            "trigger_tokens": 115_200,
+            "dropped_pairs": 20,
+            "preserved_pairs": 5,
+            "summary": "不得进入事件",
+        }
+    ) is True
+    for phase, stage, percent in (
+        ("started", "preparing", 5),
+        ("progress", "summarizing", 52),
+        ("completed", "completed", 100),
+    ):
+        assert sink.write_conversation_compact_progress(
+            {
+                "schema": "conversation_compaction_progress.v1",
+                "generation": 2,
+                "phase": phase,
+                "stage": stage,
+                "percent": percent,
+                "before_tokens": 90_000,
+                "after_tokens": 30_000,
+                "trigger_tokens": 80_000,
+                "source_messages": 80,
+                "summary": "不得进入事件",
+            }
+        ) is True
+
+    page = read_background_transcript_events(
+        agent,
+        thread_id="thread-background-compact",
+        after=0,
+    )
+    assert [row["kind"] for row in page["events"]] == [
+        "context_window_compacted",
+        "conversation_compaction_started",
+        "conversation_compaction_progress",
+        "conversation_compaction_completed",
+    ]
+    assert all("summary" not in row["payload"] for row in page["events"])
+    runtime = TuiRuntime("session-background-compact")
+    runtime.publish_background_transcript_events(page["events"])
+    snapshot = runtime.store.snapshot()
+    assert any(
+        block.kind == "context_window_compacted" for block in snapshot.stable_blocks
+    )
+    assert not any(block.role == "compact" for block in snapshot.active_blocks)
 
 
 def test_tui_notice_loop_backs_off_and_resets_after_success(monkeypatch) -> None:

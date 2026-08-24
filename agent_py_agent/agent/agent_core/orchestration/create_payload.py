@@ -17,6 +17,7 @@ from ..runner.ref_fields import (
     params_output_refs,
 )
 from .child_result_index import child_result_index
+from .coordinator_policy import coordinator_parent_execution_scope
 from .create_constraints import created_tasks, dispatchable_tasks, reused_tasks
 from .dispatch.state_contract import dispatch_state_contract_payload
 from .finding_relation import finding_investigation_payload
@@ -61,6 +62,7 @@ def create_subagents_payload(request: CreateSubagentsPayloadInput) -> dict[str, 
         "scheduling_advice": _scheduling_advice(tasks, request_params, auto_start),
         "child_result_index": result_index,
         "child_output_read_order": _child_output_read_order(result_index),
+        "parent_execution_scope": coordinator_parent_execution_scope(),
         "tasks": [_task_payload(task) for task in tasks],
     }
     payload.update(dispatch_state_contract_payload(agent))

@@ -1335,6 +1335,23 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   Prompt 4；main 进入“等待 4 个子代理”后，固定 Todo 仍显示 `完成 1/9 · 进行中 6` 和四行窗口，下面
   同时展示 4 个直属 child。该证据直接覆盖修复前“child link 更新更晚就把 root Todo 清空”的失败窗口。
 
+## 2026-08-24 后台主代理富过程事件流【状态：实现中】
+
+- 用户要求后台续跑也采用 终端交互 的正文过程展示：模型过程说明为灰色消息，工具以蓝色标题和缩进结果
+  展示，文件修改继续使用已有的行号、红删蓝增 diff 与折叠提示；输入框上方仍只保留一条 main
+  `Working` 活动行，不复制第二套状态面板。
+- 对照确认本项目现有 `tui_block_renderer.py` 已经具备 `Update/Write/Bash`、结构化输出、折叠和 diff
+  renderer；真实缺口位于后台主代理 transport。旧 `BackgroundMainActivitySink` 只保留一条 240 字符
+  scalar activity，`/client/notices` 也只传活动快照和最终回复，工具结果携带的公开 `display` 在到达 TUI
+  前被丢弃。因此本轮不新增第二套 renderer，而是让前后台复用同一 typed TUI block 协议。
+- Gateway 进程为每个 conversation thread 保存有界、易失、单调游标的公开 transcript event ring。它只接收
+  已经脱敏和限长的显式 thinking、工具生命周期/`display`，以及真实工具边界前确认的模型过程段；不保存
+  hidden reasoning、签名、权限、任务状态或完成裁决。新任务会清掉同 thread 的旧事件正文，但序号不回退；
+  慢客户端即使错过 start，也可用携带完整内容的 terminal event 恢复稳定块。
+- `/client/notices` 以独立 `event_after/event_cursor` 增量读取该 ring；最终 owner reply 仍走原来的持久
+  `background_notice.v2`，活动数量/Todo/child 仍来自 canonical projection。该事件流只增强实时展示，
+  Gateway 重启后允许丢失中间过程，不能成为 transcript、任务生命周期、Compact、重试或恢复的新权威。
+
 ## 2026-08-24 较早未决操作的 会话运行时 式软核对
 
 状态：真实 Prompt 4 r5 已给出反例；本地实现与 focused 回归通过，待发布后用新的原样重型 TUI 终态复验。

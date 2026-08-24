@@ -1,5 +1,20 @@
 # STATUS
 
+## 2026-08-24 Prompt 4 r6：Todo/child 通过，root 越界与后台过程不可见（本地候选）
+
+- `.7` 唯一 Gateway、MiniMax-M2.7、tmux `ma-84c6b90-p4-fzf-r6-todo` 只输入一次原样 Prompt 4；4 名
+  child 全部 DONE，root Todo 在运行期持续显示并最终 9/9。root 随后仍自行执行多次 `edit_file/write_file`
+  修复功能，违背用户限定的纯委派分工。244 tests 与 build 是真实结果，但独立 `dist/index.js` 没有帮助、
+  交互输出或 package `bin`，产物只是 TypeScript library 子集，不能算 fzf 完整复刻。
+- 当前本地候选按 会话运行时 orchestrator/no-duplicate-work 源码把派工后职责集中到一个软合同，供 root 工具
+  说明、递归 coordinator runner、角色模板和结构化创建回执共用；不解析 prompt、不按文件硬拦，也不恢复
+  宿主机器质量验收。缺口由 guidance 或 replacement child 继续处理。
+- 后台 main 原先只投影 240 字符活动行，工具公开 `display` 在 TUI 前丢失。当前新增每 thread 1024 条易失
+  typed 事件环与独立 `event_after/event_cursor`，显式 thinking、过程段、工具、重试、Compact 和
+  `Update/Write/Bash` diff 复用现有 TUI sequencer/reducer/renderer；持久 final 和唯一 Working 行保持不变。
+- 直接 focused 回归已证明后台链能显示 `Update(path)`、增删统计和红蓝 diff，二次轮询不重复。严格 gate、
+  推送、`.7` 部署和新的原样 Prompt 4 真 TUI 仍待本轮后续完成；当前不能写成真机已通过。
+
 ## 2026-08-23 会话运行时 式目录并发与单 run token 账本（本地严格门通过）
 
 - 已对照 会话运行时 当前 turn `RwLock`、`exec_command` 并行入口、active-turn 注入和

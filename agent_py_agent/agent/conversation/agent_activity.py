@@ -25,6 +25,7 @@ from ..subagents.services.control_plane_projection import (
     runtime_context_token_count,
 )
 from ..task_progress import read_task_progress_report
+from .background_transcript import BackgroundTranscriptSink
 from .models import THREAD_TASK_LINK_ACTIVE_STATUS
 
 _SCHEMA_VERSION = "conversation_agent_activity.v5"
@@ -46,9 +47,10 @@ _MAIN_ACTIVITY_LOCK_ATTR = "_conversation_main_activity_projection_lock"
 _MAIN_ACTIVITY_SETUP_LOCK = threading.Lock()
 
 
-# LLM: This sink publishes volatile, display-only facts for one background owner
-# turn. It cannot deliver messages, mutate task links, or decide completion.
-# 类用途: 接收后台主代理真实的思考、工具和回复阶段，让 TUI/Web 能看到 main 正在做什么。
+# LLM: This sink publishes one scalar activity row and delegates public rich
+# events to the bounded background transcript ring. Neither path may deliver
+# messages, mutate task links, or decide completion.
+# 类用途: 接收后台主代理真实的思考、工具和回复阶段，同时更新固定 main 行和可滚动过程正文。
 class BackgroundMainActivitySink:
     # LLM: Construction registers one exact thread/task identity; later updates
     # may replace only that thread's display row under the agent-owned lock.
@@ -58,6 +60,11 @@ class BackgroundMainActivitySink:
         self.thread_id = str(thread_id or "").strip()
         self.task_id = str(task_id or "").strip()
         self.started_at = time.time()
+        self._transcript = BackgroundTranscriptSink(
+            agent,
+            thread_id=self.thread_id,
+            task_id=self.task_id,
+        )
         self._publish("running", "整理任务上下文")
 
     # LLM: Plain callback compatibility records only a generic phase; arbitrary
@@ -69,14 +76,24 @@ class BackgroundMainActivitySink:
     # LLM: Model deltas indicate generation liveness only; answer content stays
     # in the normal committed transcript and is not duplicated into activity state.
     # 函数用途: 模型开始生成普通回复时更新 main 行。
-    def write_model(self, _text: str) -> None:
+    def write_model(self, text: str) -> None:
+        self._transcript.write_model(text)
         self._publish("responding", "正在生成回复")
+
+    # LLM: Streaming thinking is forwarded only through the explicit typed
+    # provider callback; the scalar activity row remains a content-free liveness hint.
+    # 函数用途: 实时显示后台主代理的显式思考增量，同时更新 main 活动行。
+    def write_thinking_delta(self, text: str) -> bool:
+        published = self._transcript.write_thinking_delta(text)
+        if published:
+            self._publish("thinking", "思考中")
+        return published
 
     # LLM: Thinking text is bounded and whitespace-normalized for display; it
     # remains non-authoritative and never enters prompts or completion logic.
     # 函数用途: 把后台主代理最近一段真实思考显示在 main 行，避免用户误判卡死。
     def write_thinking(self, text: str, *, duration_seconds: float = 0.0) -> None:
-        del duration_seconds
+        self._transcript.write_thinking(text, duration_seconds=duration_seconds)
         activity = _bounded_text(text, limit=_ACTIVITY_TEXT_LIMIT)
         self._publish("thinking", activity or "思考中")
 
@@ -103,10 +120,12 @@ class BackgroundMainActivitySink:
             rows[self.thread_id] = current
         return True
 
-    # LLM: Tool activity reads only typed progress fields. Output, command text,
-    # paths and errors are intentionally excluded from this compact public row.
-    # 函数用途: 后台主代理调用工具时在 main 行显示工具名和阶段。
+    # LLM: Tool activity reads only typed progress fields. The compact row keeps
+    # a short tool phase while the separate ring receives the existing bounded
+    # public output/display projection for rich rendering.
+    # 函数用途: 后台主代理调用工具时更新 main 行，并把公开结果送入正文工具卡片。
     def write_progress(self, progress: dict[str, object], _legacy_text: str = "") -> None:
+        self._transcript.write_progress(progress)
         tool = _bounded_text(progress.get("tool"), limit=80)
         phase = str(progress.get("phase") or "").strip().lower()
         if tool and phase in {"finished", "completed", "succeeded", "failed"}:
@@ -130,22 +149,47 @@ class BackgroundMainActivitySink:
         error_type: str,
     ) -> bool:
         del scope, error_type
+        self._transcript.write_provider_retry(
+            attempt=attempt,
+            total=total,
+            delay_seconds=delay_seconds,
+        )
         self._publish(
             "retrying",
             f"模型重连 {max(1, int(attempt))}/{max(1, int(total))}，等待 {max(0.0, float(delay_seconds)):.1f}s",
         )
         return True
 
+    # LLM: Native IR compaction is forwarded as public numeric transcript data;
+    # the scalar main row remains a liveness hint and cannot advance generations.
+    # 函数用途: 在后台正文显示一次真实工具上下文裁剪。
+    def write_context_compaction(self, value: dict[str, object]) -> bool:
+        published = self._transcript.write_context_compaction(value)
+        if published:
+            self._publish("compacting", "正在整理上下文")
+        return published
+
+    # LLM: Durable Compact progress shares the foreground TUI block protocol;
+    # this callback does not write checkpoints or infer phase from display text.
+    # 函数用途: 把后台会话 Compact 的结构化进度送进正文进度块。
+    def write_conversation_compact_progress(self, value: dict[str, object]) -> bool:
+        published = self._transcript.write_conversation_compact_progress(value)
+        if published:
+            self._publish("compacting", "正在压缩会话上下文")
+        return published
+
     # LLM: Finish marks only rendering phase while the durable task link remains
     # active; one model turn ending does not prove the whole task is final.
     # 函数用途: 模型轮返回后显示等待后续事件，避免有活跃 child 时误报“整理最终回复”。
     def finish(self) -> None:
+        self._transcript.finish()
         self._publish("waiting", "等待后续事件")
 
     # LLM: Fail is a liveness hint only. The real exception/retry/task state is
     # still owned by the background runtime and structured lifecycle stores.
     # 函数用途: 后台主代理轮异常退出时让 main 行显示真实失败阶段。
     def fail(self) -> None:
+        self._transcript.fail()
         self._publish("failed", "本轮处理失败，等待底层恢复")
 
     # LLM: Updates are bounded scalar projections under one agent-owned lock;
