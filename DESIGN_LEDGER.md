@@ -1460,7 +1460,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   事件。它不是任务状态、权限、完成裁决或 Compact 账本，丢失过程时可以降级显示 canonical final/status，
   不能反向更改生命周期。
 
-## 2026-08-24 终端原生复制与 TUI 鼠标双模式【状态：已实现，真机复验中】
+## 2026-08-24 终端原生复制与 TUI 鼠标双模式【状态：`.7` 协议已真机验证，宿主右键待用户验收】
 
 - 既有应用内右键复制只能证明 prompt_toolkit/tmux/OSC52 投影已执行，不能保证 SSH 外层的 Apple Terminal
   系统剪贴板已经改变。用户实测“右键没反应”证明全屏 mouse tracking 吞掉原生右键菜单后，这条
@@ -1474,3 +1474,8 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   `Copied` 成功。真实验收必须同时证明：默认启动没有开启 1000/1002/1003 mouse tracking、终端 bracketed
   paste 能进入输入框、F6 开启时协议生效、再次 F6 后协议关闭；macOS 系统剪贴板仍由用户 attach 后做一次
   真实右键复制与粘贴验收。
+- `.7` 唯一 Gateway、MiniMax-M2.7、tmux `ma-af5a03b-native-copy-r16` 的真实 attach 输出已证明：初始帧
+  显式发送 1000/1002/1003 disable，bracketed paste 完整保留“右键粘贴验证ABC中文🙂”，第一次 F6 发送
+  三项 enable，第二次 F6 再发送三项 disable，输入正文保持不变。该证据覆盖 TUI/终端协议，但 Computer
+  Use 的安全边界不允许代替用户控制 Terminal.app，因此外层 macOS 右键菜单与系统剪贴板仍保留为用户
+  attach 后的最后一项验收，不能虚报通过。

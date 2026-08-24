@@ -404,6 +404,11 @@ release/OSC52/tmux 回归，但它的远端 notice 只能报告已选中，不�
 验收必须在用户实际 attach 的宿主终端执行一次“拖选中文 -> 右键复制 -> 输入框右键粘贴”；tmux buffer
 内容或 OSC52 字节只能作中间证据，不能替代这一步。
 
+同日 `.7` 的 tmux `ma-af5a03b-native-copy-r16` 完成真实协议验收：启动原始输出只有 1000/1002/1003
+disable；中文/表情 bracketed paste 完整进入输入框；F6 第一次输出对应 enable，第二次输出 disable，且
+输入未改变。测试时保持唯一 Gateway 和 MiniMax-M2.7。因为自动化不能控制用户的 Terminal.app，macOS
+右键菜单与系统剪贴板的最终通过状态仍须由用户 attach 后实际复制、粘贴确认。
+
 富 transcript 追补还必须覆盖：未声明能力的 Gateway 不公开 thinking/display 且继续按 verbose 裁剪；TUI
 声明能力后逐轮 commentary、provider 明示 thinking、edit/overwrite/patch diff、write preview、命令
 stdout/stderr/exit code 均走结构化事件；思考 Markdown 与 `Ctrl+O` 折叠提示的每个可见 fragment 都必须
