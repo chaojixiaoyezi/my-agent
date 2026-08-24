@@ -1,5 +1,16 @@
 # STATUS
 
+## 2026-08-24 切换子代理后历史滚动位置独立保留（`.7` 真 TUI 已通过）
+
+- `d14549c` 已把主代理、每个 child/grandchild 的普通与详细 transcript viewport 按 exact
+  `TuiStateStore` 隔离；切换前保存 follow/cursor/unseen，返回时恢复原锚点，不再共用游标或无条件跳尾。
+- 128 项相关 focused 与本地严格 gate 全通过，改动远低于 10,000 行，按规则未跑全仓 pytest；提交已推送
+  并部署到 `192.0.2.7`，唯一 Gateway 监听 PID 仍为 `499058`，有效模型为 MiniMax-M2.7。
+- fresh tmux `ma-d14549c-scroll-r18` exact resume 原样 Prompt 2 会话且未重发任务。真实按键证明：root 与
+  worker-1 各自滚到最早消息后，`Ctrl+G`/再次进入都恢复各自原位置；默认模式 `PageUp/Ctrl+Home` 可看完整
+  历史，`F6` 后真实 SGR 滚轮可翻到旧工具调用，再按 F6 已恢复原生复制。宿主 Terminal.app 的物理滚轮和
+  右键菜单仍须用户 attach 验收，自动化只证明 TUI 收到的协议事件。
+
 ## 2026-08-24 子代理详情完整复用主消息格式（`.7` 真 TUI 已通过）
 
 - `91a1c3d` 修复三个根因：详情 prompt 从短 `description` 改为完整 canonical `task.goal`；工具进度先识别

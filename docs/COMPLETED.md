@@ -4,6 +4,12 @@
 
 最近收口重点：
 
+- 2026-08-24 `d14549c` 完成代理视角独立滚动状态：main/child/grandchild 的普通与详细 viewport 分别保存
+  follow、cursor 与未读基线，返回已有页面恢复原锚点，跨页选区清除；原生复制模式返回父级时明确提示
+  `PgUp/Ctrl+Home` 与 `F6` 取舍。128 项 focused 和本地严格 gate 通过，已推送并部署到 `.7` 唯一
+  Gateway。tmux `ma-d14549c-scroll-r18` exact resume 同一 Prompt 2 会话、不重发任务，实按证明 main 与
+  worker-1 的首屏锚点可双向恢复，F6 后滚轮能翻到旧工具调用，再次 F6 可回原生复制。
+
 - 2026-08-24 `91a1c3d` 完成子代理详情的完整消息页接线：详情首条读取 canonical `task.goal`，typed child
   sink 不再因自身非 callable 丢失工具卡和工具前过程说明，`Ctrl+O` 冻结当前 active runtime。218 项 focused
   和本地严格 gate 通过，已推送并部署到 `.7` 唯一 Gateway。原样 Prompt 2 的 tmux

@@ -425,6 +425,12 @@ disable；中文/表情 bracketed paste 完整进入输入框；F6 第一次输�
 协议取舍，测试不得把终端空 scrollback 误报成 canonical history 被删除，也不得靠默认开启 mouse tracking
 修复而再次破坏宿主右键复制。
 
+2026-08-24 真机证据：`d14549c` 已部署到 `.7` 唯一 Gateway，tmux
+`ma-d14549c-scroll-r18` exact resume `sess_1787579367_f677cf76`，没有重新提交模型任务。root 与
+worker-1 分别 `Ctrl+Home` 后来回进入/返回，均恢复各自原始 prompt 锚点；返回 root 出现历史操作提示。
+F6 开启 mouse tracking 后注入真实 SGR wheel-up，正文从终态总结翻到旧 Bash/Thought；再次 F6 后回到
+原生复制。该证据验证 TUI 协议路径，不代替用户在 Terminal.app 外层亲手滚轮、右键复制和粘贴。
+
 富 transcript 追补还必须覆盖：未声明能力的 Gateway 不公开 thinking/display 且继续按 verbose 裁剪；TUI
 声明能力后逐轮 commentary、provider 明示 thinking、edit/overwrite/patch diff、write preview、命令
 stdout/stderr/exit code 均走结构化事件；思考 Markdown 与 `Ctrl+O` 折叠提示的每个可见 fragment 都必须

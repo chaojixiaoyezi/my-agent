@@ -1446,7 +1446,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 
 ## 2026-08-24 TUI/Web 共用的子代理详情与精确控制面
 
-状态：完整消息页已由 `91a1c3d` 在 `.7` 唯一 Gateway 的原样 Prompt 2 真 TUI 验收。
+状态：完整消息页已由 `91a1c3d` 验收；独立 viewport 已由 `d14549c` 在 `.7` 唯一 Gateway 真 TUI 验收。
 
 - 交互对照采用 终端交互 的列表进入详情习惯，控制语义采用 会话运行时 的 exact agent id。输入框为空时才允许
   `↓` 选择 child，`Enter` 进入；详情继续消费同一 typed TUI event/reducer/renderer，不复制一套子代理 UI。
@@ -1474,6 +1474,9 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   `TuiStateStore` 保存 follow、cursor 和 unseen 基线；新页面默认跟随尾部，返回页面恢复其原位置，选区则
   在切换时清除。默认原生复制模式下备用屏幕不会收到滚轮，返回父级时提示 `PgUp/Ctrl+Home` 或按 `F6`
   开启滚轮；不得自动改鼠标模式，因为那会再次吞掉用户要求的宿主右键菜单。
+- `.7` fresh tmux `ma-d14549c-scroll-r18` exact resume 同一 Prompt 2 会话且没有再次调用模型。root 与
+  worker-1 各自滚到首条 prompt 后来回切换，均恢复自己的锚点；F6 后 SGR wheel-up 翻到旧工具调用，
+  再按 F6 回到原生复制。自动化不把协议事件冒充宿主 Terminal.app 的物理滚轮或右键菜单验收。
 
 ## 2026-08-24 终端原生复制与 TUI 鼠标双模式【状态：`.7` 协议已真机验证，宿主右键待用户验收】
 
