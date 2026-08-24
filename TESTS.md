@@ -41,6 +41,17 @@ run/attempt 不能调工具；可续跑结果关闭旧 attempt 且新 attempt �
 宿主先关闭的 max-token attempt 只接受同 `turn_end_reason` 的 PENDING，随后可创建 generation 2；
 同一窗口的伪 DONE 必须被冲突栅栏拒绝；终态 TUI 短句不得残留“模型已生成回复”。
 
+会话运行时 式分批创建与容量/幂等边界的 focused 回归：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_orchestration_create_subagents_idempotency.py agent_py_agent/tests/test_orchestration_create_subagents_items.py agent_py_agent/tests/test_orchestration_create_subagents_tool.py agent_py_agent/tests/test_orchestration_tools.py agent_py_agent/tests/test_background_main_agent_runtime.py -q --tb=short
+```
+
+要同时证明：同一 canonical parent 的后台唤醒轮可以在活跃 sibling 存在时创建不同职责的第二批 child；
+相同 idempotency/work-scope 合同仍复用既有 run；单次上限与 root-session 容量仍原子整批拒绝；并发后台
+执行器仍由 active-turn claim 控制。不能恢复 `SUBAGENT_ACTIVE_LINEAGE_EXISTS`，也不能增加 Audit、任务名
+或 prompt 关键词绕过。
+
 Prompt 4 r6 使用 `.7` 唯一 Gateway、MiniMax-M2.7、tmux `dsh-p4-lazygit-r6-ea91639` 和固定
 `jesseduffield/lazygit@ea916395`，只输入一次原样 prompt。10 个 child 全部自然 DONE、3 个真实 Compact，
 main 自主补派并把 Todo 全部打钩；但 canonical 产物只有 9,543 行、55 个空桩、5 个测试定义，8 项集成

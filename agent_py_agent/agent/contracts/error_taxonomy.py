@@ -349,16 +349,6 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "父级 workspace 内互不重叠的 output_files 后，保持用户原始约束重新派工。"
         ),
     ),
-    "SUBAGENT_ACTIVE_LINEAGE_EXISTS": ErrorContract(
-        code="SUBAGENT_ACTIVE_LINEAGE_EXISTS",
-        category="orchestration",
-        retryable=True,
-        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
-        recovery_hint=(
-            "后台监督轮所属任务已有未结束子代理；等宿主向直接父级发送生命周期事件，"
-            "需要纠偏时用 send_guidance 发消息。启动和可恢复重试由系统调度，只有明确接管时才新建 replacement run。"
-        ),
-    ),
     "AUDIT_SOURCE_WORKER_SYSTEM_MANAGED": ErrorContract(
         code="AUDIT_SOURCE_WORKER_SYSTEM_MANAGED",
         category="orchestration",

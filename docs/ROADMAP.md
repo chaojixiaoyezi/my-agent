@@ -17,11 +17,21 @@
 
 ## 下一版优先级
 
-来自 STATUS.md，当前先收口 r7 暴露的子代理切片续跑断链，再继续正式矩阵。
+来自 STATUS.md，当前先收口 r8 暴露的第二批活跃血缘误拦，再继续正式矩阵。
+
+### 会话运行时 式同一父级分批创建
+
+状态：r8 真 TUI 根因已确认；focused suite 与本地严格 gate 通过，待推送部署和 fresh TUI
+
+解决问题：后台 main 在第一批完成后会继续原任务；若第二批先创建一名仍在运行的 child，旧硬门会把
+其余不同职责全部当作“重复 lineage”拒绝，哪怕会话容量仍有空位。当前候选按 会话运行时 spawn 语义删除该门，
+同一 canonical parent 可多次创建到容量上限；重复请求由 typed idempotency/work-scope 复用，双执行器由
+active-turn claim 拒绝，单次 4 与会话 6 的资源门不变。fresh Prompt 4 必须看到第二批多名 child 在首名
+仍运行时继续成功创建，并核对没有重复 run、没有额外 Gateway。
 
 ### 会话运行时 式子代理切片续跑提交桥
 
-状态：r7 真 TUI 根因已确认；本地修复与直接回归通过，待严格 gate、推送部署和 fresh TUI
+状态：`31648ce` 已严格 gate、推送并部署；fresh r8 四名长 child 自然完成，待自然截断直接样本
 
 解决问题：子代理一轮在 max-token/context 截断时，宿主会先正确关闭 exact AgentAttempt，
 再把逻辑 child 交回 PENDING 以便续跑。旧 MANAGED 结果栅栏只接受 running attempt 或 run 级终态，

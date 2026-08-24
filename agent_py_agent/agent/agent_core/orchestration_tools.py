@@ -32,7 +32,6 @@ from ..tooling.models import (
 from .hierarchy_tools import execute_child_creation
 from .orchestration.create_constraints import (
     CreateTaskResolution,
-    creation_active_lineage_conflicts,
     explicit_root_missing_write_root_error,
     resolve_create_run,
 )
@@ -357,8 +356,6 @@ def _execute_create_subagents(agent: SimpleAgent, params: dict[str, object]) -> 
         return invalid
     run_params = _indexed_single_run_params(agent, run_params)
     task_params = [run_params]
-    if conflict := _active_lineage_creation_result(agent, task_params):
-        return conflict
     return _created_tasks_result(
         agent,
         _resolve_task_params(agent, task_params),
@@ -487,8 +484,6 @@ def _execute_items(
     if validation:
         return ToolHandlerOutcome("create_subagents", False, validation, error_code="TOOL_INVALID_ARGUMENTS")
     task_params = _indexed_item_run_params(agent, capped)
-    if conflict := _active_lineage_creation_result(agent, task_params):
-        return conflict
     resolutions = _resolve_task_params(agent, task_params)
     return _created_items_result(CreatedItemsResultRequest(
         agent=agent,
@@ -742,50 +737,6 @@ def _validate_single_goal(request: ValidateSingleGoalRequest) -> str:
 
 def _resolve_task_params(agent: SimpleAgent, task_params: list[CreateRunParams]) -> list[CreateTaskResolution]:
     return [resolve_create_run(agent.subagents, item) for item in task_params]
-
-
-# LLM: 后台轮遇到活跃同 lineage 时复用原树并等待事件，不能创建第二批影子 run。
-# 函数用途: 返回“已有活跃子代理”的结构化拒绝与后续等待说明。
-def _active_lineage_creation_result(
-    agent: SimpleAgent,
-    task_params: list[CreateRunParams],
-) -> ToolHandlerOutcome | None:
-    current = getattr(agent, "_current_run_params", None)
-    if str(getattr(current, "source", "") or "").strip() != "background_main_agent":
-        return None
-    conflicts = creation_active_lineage_conflicts(agent.subagents, task_params)
-    if not conflicts:
-        return None
-    run_ids = list(dict.fromkeys(
-        str(item.get("existing_run_id") or "").strip()
-        for item in conflicts
-        if str(item.get("existing_run_id") or "").strip()
-    ))
-    payload = {
-        "ok": False,
-        "error_code": "SUBAGENT_ACTIVE_LINEAGE_EXISTS",
-        "error": (
-            "当前后台监督轮所属任务已有未结束子代理；本批没有创建任何子代理。"
-            "请查看或引导现有 run，而不是另起一批。"
-        ),
-        "conflicts": conflicts,
-        "existing_run_ids": run_ids,
-        "next_action": {
-            "action": "await_existing_run_lifecycle_event",
-            "run_ids": run_ids,
-            "reason": (
-                "宿主会把现有 run 的进展送回直接父级；必要时使用 send_guidance 补充消息；"
-                "只有明确接管旧 run 时才使用 replacement_for_run_ids。"
-            ),
-        },
-    }
-    return ToolHandlerOutcome(
-        "create_subagents",
-        False,
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        error_code="SUBAGENT_ACTIVE_LINEAGE_EXISTS",
-        effect_outcome="not_started",
-    )
 
 
 def _payload_allowed_tools(values: list[list[str] | None]) -> list[str] | str | None:

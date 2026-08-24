@@ -214,7 +214,7 @@ def test_explicit_replacement_may_take_over_same_declared_output(tmp_path):
     assert len(agent.subagents.list_runs()) == 2
 
 
-def test_background_main_must_continue_active_lineage_instead_of_expanding_it(tmp_path):
+def test_background_main_may_add_independent_work_to_active_lineage(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     agent = _workspace_agent(tmp_path)
@@ -227,15 +227,35 @@ def test_background_main_must_continue_active_lineage_instead_of_expanding_it(tm
 
     agent._current_run_params = _run_params("bg-main-1", source="background_main_agent")
     result = tool.execute({
-        "goal": "再创建一个代理重新审计 Codex。",
-        "output_files": ["output/codex-retry.md"],
+        "goal": "同时审计 Hermes。",
+        "output_files": ["output/hermes.md"],
     })
     payload = json.loads(result.output)
 
-    assert result.ok is False
-    assert result.error_code == "SUBAGENT_ACTIVE_LINEAGE_EXISTS"
-    assert payload["existing_run_ids"] == first["created_run_ids"]
-    assert payload["next_action"]["action"] == "await_existing_run_lifecycle_event"
+    assert result.ok is True
+    assert payload["created_run_ids"]
+    assert payload["created_run_ids"] != first["created_run_ids"]
+    assert len(agent.subagents.list_runs()) == 2
+
+
+def test_background_main_still_reuses_explicit_idempotency_contract(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent = _workspace_agent(tmp_path)
+    agent._current_run_params = _run_params("request-1", source="foreground")
+    tool = CreateSubagentsTool(agent)
+    params = {
+        "goal": "审计 Codex。",
+        "output_files": ["output/codex.md"],
+        "context_packs": [_idempotency_pack("codex-audit", "output/codex.md")],
+    }
+    first = json.loads(tool.execute(params).output)
+
+    agent._current_run_params = _run_params("bg-main-1", source="background_main_agent")
+    second = json.loads(tool.execute(params).output)
+
+    assert second["created_run_ids"] == []
+    assert second["reused_run_ids"] == first["created_run_ids"]
     assert len(agent.subagents.list_runs()) == 1
 
 

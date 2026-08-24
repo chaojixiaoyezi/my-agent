@@ -320,91 +320,6 @@ class CreateTaskResolution:
     reused: bool = False
 
 
-_OUTPUT_SCOPE_OWNING_STATUSES = frozenset({
-    "PLANNING",
-    "PENDING",
-    "RUNNING",
-    "BLOCKED",
-    "PAUSED",
-})
-
-
-def creation_active_lineage_conflicts(
-    manager: Any,
-    task_params: list[CreateRunParams],
-) -> list[dict[str, object]]:
-    """Block unstructured expansion of an already-active child lineage.
-
-    Background main-agent turns are supervisors of an existing durable task.
-    When that task already has live children, new work must either reuse a
-    machine-identical run or explicitly replace one.  Goal text and filename
-    similarity are deliberately irrelevant.
-    """
-
-    existing = _safe_list_runs(manager)
-    conflicts: list[dict[str, object]] = []
-    for index, params in enumerate(task_params):
-        if _is_system_managed_audit_source_worker(params):
-            # One Audit may have many disjoint sources.  A currently active
-            # sibling is therefore not a lineage conflict for a fully typed
-            # source worker; capacity and stable work_scope reuse still apply.
-            continue
-        if _is_validated_audit_finding_investigation(params):
-            # One Audit may investigate several independent findings while its
-            # source workers continue.  The exception is a validated persisted
-            # relation, never a role or goal-text convention.
-            continue
-        if _replacement_run_ids(params):
-            continue
-        reusable = find_reusable_named_child(manager, params)
-        if reusable is not None:
-            continue
-        for task in existing:
-            if not _same_output_scope_lineage(task, params):
-                continue
-            status = _status(task)
-            if not task_status_in(status, _OUTPUT_SCOPE_OWNING_STATUSES):
-                continue
-            run_id = _text(getattr(task, "id", ""))
-            if not run_id:
-                continue
-            conflicts.append({
-                "proposed_index": index,
-                "existing_run_id": run_id,
-                "existing_status": status,
-                "parent_id": _text(getattr(task, "parent_id", "")),
-                "root_id": _text(getattr(task, "root_id", "")),
-            })
-    return conflicts
-
-
-# LLM: The active-lineage exception accepts only the complete, self-consistent
-# pending-or-bound source-worker contract; role/name/goal text cannot request it.
-# 函数用途: 允许同一 Audit 为不同已发布来源并行建立待绑定/已绑定子代理，同时不放宽普通后台派工防重闸。
-def _is_system_managed_audit_source_worker(params: CreateRunParams) -> bool:
-    from ...common.audit_activation import (
-        structured_audit_supervised_worker_attributes,
-    )
-
-    return structured_audit_supervised_worker_attributes(
-        params.attributes if isinstance(params.attributes, dict) else None
-    )
-
-
-# LLM: Background coordination may create parallel investigations only when
-# create_subagents already attached a fully validated persisted finding
-# relation; arbitrary agent names and natural-language goals gain no bypass.
-# 函数用途: 让真实 finding 调查与来源工作者并行，同时保持普通后台重复派工闸不变。
-def _is_validated_audit_finding_investigation(params: CreateRunParams) -> bool:
-    from .finding_relation import structured_audit_finding_relation
-
-    return bool(
-        structured_audit_finding_relation(
-            params.attributes if isinstance(params.attributes, dict) else None
-        )
-    )
-
-
 def resolve_create_run(manager: Any, params: CreateRunParams) -> CreateTaskResolution:
     if _has_reusable_create_identity(params):
         workspace = getattr(manager, "workspace", None)
@@ -540,22 +455,6 @@ def _same_work_scope(task: Any, params: CreateRunParams, work_scope_key: str) ->
         return False
     attrs = getattr(task, "attributes", {}) or {}
     return isinstance(attrs, dict) and _text(attrs.get("work_scope_key")) == work_scope_key
-
-
-def _same_output_scope_lineage(task: Any, params: CreateRunParams) -> bool:
-    if _text(getattr(task, "parent_id", "")) != _text(params.parent_id):
-        return False
-    requested_root = _requested_root_id(params)
-    return not requested_root or _text(getattr(task, "root_id", "")) == requested_root
-
-
-def _replacement_run_ids(params: CreateRunParams) -> set[str]:
-    attrs = params.attributes if isinstance(params.attributes, dict) else {}
-    return {
-        _text(item)
-        for item in string_list(attrs.get("replacement_for_run_ids"), TOOL_TEXT_LIST_OPTIONS)
-        if _text(item)
-    }
 
 
 def _work_scope_key(params: CreateRunParams) -> str:

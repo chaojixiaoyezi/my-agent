@@ -1,6 +1,19 @@
 # Subagent Progress
 
-## 2026-08-24 r7 后台展示上线，截断片段被误留在 RUNNING（本地修复候选）
+## 2026-08-24 r8 删除阻断合法第二批的活跃血缘硬门（本地修复候选）
+
+- `31648ce` 的 fresh Prompt 4 使用合格的 `lazygit@ea916395`：首批四名 child 全部 DONE 后，root 自然醒来；
+  第二批成功创建一名 child，但后续不同职责创建被 `SUBAGENT_ACTIVE_LINEAGE_EXISTS` 拒绝，尽管 root
+  session 尚未达到 6 个活跃 child。该错误发生在 runner 启动前，是创建合同误判，不是 provider 失败。
+- 旧门仅凭 `source=background_main_agent + 同 parent/root 存在活跃 sibling` 拒绝新 run，无法区分重复派工
+  与同一权威父代理的分批扩展；普通项目因共享 parent/root 会稳定误伤。会话运行时 的 spawn 主链只按 depth、
+  session capacity 和原子 slot reservation 限制，多次 spawn 不要求现有 sibling 全部结束。
+- 当前候选删除该门、对应冲突扫描、Audit 专项绕过和退休错误码。重复创建仍由 idempotency contract /
+  work-scope identity 原子复用；并发后台执行者仍由现有 turn claim 拒绝；单次 4、会话 6 与 owner policy
+  仍是硬资源边界。回归同时钉住“后台第二批不同工作成功”和“后台相同幂等合同只复用不重复创建”；
+  派工相关 focused suite 与本地严格 gate 已通过，待推送、单 Gateway 部署和 fresh TUI。
+
+## 2026-08-24 r7 后台展示上线，截断片段续跑桥已发布
 
 - `80386ac` 已推送、部署到 `.7` 唯一 Gateway；有效模型为 `MiniMax-M2.7`。fresh tmux
   `ma-80386ac-p4-fzf-r7-rich` 在固定 `fzf@956562da` 源码上只输入一次原样 Prompt 4。前台已显示
@@ -8,10 +21,11 @@
 - 其中一名 child 的 provider 回复以 `MODEL_RESPONSE_TRUNCATED` 结束。runtime.db 正确记录
   `AgentRun=created/current AgentAttempt=done`，runner session 也已 completed；但 MANAGED 结果栅栏不接受
   这个“已关闭片段→PENDING”的合法窗口，canonical task 仍是 RUNNING，TUI 与父级因而永久等待。
-- 对照 会话运行时 `session/turn.rs` 中 `needs_follow_up` 继续同一 active turn，本地候选只放行 exact current
+- 对照 会话运行时 `session/turn.rs` 中 `needs_follow_up` 继续同一 active turn，`31648ce` 只放行 exact current
   generation 且 `turn_end_reason` 与 `PENDING/BLOCKED` 严格匹配的回写。`DONE/FAILED/CANCELLED`
   继续要求 run 级终态，迟到或伪完成不放行。回归已覆盖 PENDING 投影、launch 回收、
-  generation 2 重开与伪 DONE 拒绝；待严格 gate、推送部署和 fresh Prompt 4 真 TUI 自然截断复验。
+  generation 2 重开与伪 DONE 拒绝；严格 gate、推送和单 Gateway 部署已完成，继续等待 fresh Prompt 4
+  自然出现 max-token 截断以补直接运行证据。
 
 ## 2026-08-24 r6 派工边界与后台富过程展示（本地候选）
 
