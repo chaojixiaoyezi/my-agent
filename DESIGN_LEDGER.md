@@ -1314,3 +1314,21 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   typed TurnComplete→清除 active turn→thread idle 边界一致。
 - 安全边界不放宽：stale-attempt CAS、unknown recovery block、单 thread claim 与客观副作用锁继续
   fail closed。本修复只让执行者携带正确身份收口，不允许调度器忽略冲突，也不消费或伪造历史 wake。
+
+## 2026-08-24 会话根 Todo 持续投影
+
+状态：`.7` fresh Prompt 4 r5 已定位真实根因；本地 focused 回归通过，等待 r5 主代理唤醒证据完成后发布，
+再用全新 TUI 验证固定 Todo 不随前台 turn 收起。
+
+- 真实失败链：root 先建立 6 项 canonical `task_progress.v1`，创建 4 个 child 后 TUI 的固定 Todo 整块消失；
+  权威账本仍保留 6 项，但 `/client/notices` 的 `conversation_agent_activity.v5.task_progress_items` 返回空列表。
+  原因不是 prompt_toolkit 渲染或轮询丢包，而是同一 thread 的活动 link 同时含 root 与 child，旧投影按
+  `created_at` 选择最新 link，必然读到较晚创建、没有 root Todo 的 child 账本，再用结构化空列表清屏。
+- 对照决定：终端交互 `src/hooks/useTasksV2.ts` 用会话期 singleton store 持有 task list；Spinner 的逐轮
+  mount/unmount 不改变清单所有权，存在未完成项时还保留 watcher 与 5 秒 fallback poll。my-agent 不复制
+  React store，而是复用已有 `ConversationThread.workspace_task_id` 这一 canonical 会话根身份，按 exact
+  task id 选择 root link；child 只通过结构化 `covers/progress_item_ids` 更新或标记 Todo，不得因创建更晚
+  抢占面板。
+- 兼容与安全边界：缺少 thread loader 或旧测试 fixture 没有 `workspace_task_id` 时，仍保留既有有界 link
+  fallback；真实会话存在 preferred id 时只做 exact join，不解析 goal、标题、路径或“子代理”等正文。
+  投影仍只读 `task_progress.v1`，不改变 Todo 状态、任务完成、调度、权限或验收。

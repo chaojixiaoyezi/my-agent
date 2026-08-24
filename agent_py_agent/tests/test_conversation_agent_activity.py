@@ -330,6 +330,67 @@ def test_conversation_agent_activity_projects_canonical_task_progress(tmp_path: 
     )
 
 
+def test_task_progress_projection_keeps_workspace_root_when_children_are_newer(
+    tmp_path: Path,
+) -> None:
+    """同一 thread 的新 child link 不能把主任务 Todo 投影成空列表。"""
+    import hashlib
+
+    from agent_py_agent.agent.conversation.agent_activity import (
+        conversation_agent_activity,
+    )
+    from agent_py_agent.agent.task_progress import write_task_progress
+
+    owner_root = tmp_path / "owner"
+    root_task_path = str(tmp_path / "project" / "root-task")
+    root_ledger_id = (
+        "task-path:"
+        f"{hashlib.sha256(root_task_path.encode('utf-8')).hexdigest()[:16]}"
+    )
+    write_task_progress(
+        owner_root,
+        root_ledger_id,
+        {
+            "items": [
+                {"id": "A", "title": "项目骨架", "status": "pending"},
+                {"id": "B", "title": "算法实现", "status": "in_progress"},
+            ]
+        },
+    )
+    root_link = SimpleNamespace(
+        task_id="task-root",
+        task_path=root_task_path,
+        status="active",
+        created_at=10.0,
+    )
+    child_link = SimpleNamespace(
+        task_id="child-newer",
+        task_path=str(tmp_path / "project" / "root-task" / "work" / "child"),
+        status="active",
+        created_at=20.0,
+    )
+    store = SimpleNamespace(
+        active_task_links_report=lambda _thread_id: ([root_link, child_link], []),
+        load_thread_report=lambda _thread_id: (
+            SimpleNamespace(workspace_task_id="task-root", compact_generation=0),
+            None,
+        ),
+    )
+    agent = SimpleNamespace(
+        home_paths=SimpleNamespace(owner_home_dir=owner_root),
+        subagents=SimpleNamespace(
+            list_runs_report=lambda: SimpleNamespace(runs=[], load_errors=[])
+        ),
+    )
+
+    activity = conversation_agent_activity(agent, store, "thread-progress")
+
+    assert list(activity.task_progress_items) == [
+        {"id": "A", "title": "项目骨架", "status": "pending"},
+        {"id": "B", "title": "算法实现", "status": "in_progress"},
+    ]
+
+
 def test_task_progress_projection_hides_exact_direct_child_seed_after_finish(
     tmp_path: Path,
 ) -> None:

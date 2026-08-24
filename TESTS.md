@@ -733,3 +733,12 @@ python3 -m pytest agent_py_agent/tests/test_r103_run_reuse_no_split.py -q --tb=s
 验收不能靠 TUI 的“整理结果中”：必须同时证明首轮 root attempt 已结束，最后一名 child 的 durable wake
 从 pending 进入 handled，后台 main 创建下一代 attempt 并发生真实模型用量/typed transcript 前进；测试者
 不得追加“继续”、手工改状态或旁路消费 wake。
+
+Todo 会话根投影回归必须覆盖同一 thread 同时存在较早 root link 和较晚 child link 的真实形态：
+`ConversationThread.workspace_task_id` 精确指向 root 时，`conversation_agent_activity.v5` 必须继续返回 root
+的 canonical Todo，不能因为 child 更新更晚而返回空列表并让 TUI 清屏。最终 notice 的 exact task helper、
+直属 child seed 去重、明确空快照清理旧清单语义保持不变：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_conversation_agent_activity.py agent_py_agent/tests/test_background_notice_display.py -q --tb=short
+```

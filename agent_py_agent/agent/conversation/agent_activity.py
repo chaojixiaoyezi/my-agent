@@ -287,6 +287,7 @@ def conversation_agent_activity(
     progress_items, progress_warnings = _task_progress_items_from_links(
         agent,
         active_links,
+        preferred_task_id=_conversation_workspace_task_id(store, thread_id),
         hidden_item_ids=_row_run_ids(rows),
     )
     visible = rows[:_MAX_PROJECTED_SUBAGENTS]
@@ -378,22 +379,36 @@ def task_progress_items_for_task(
     return items
 
 
-# LLM: The newest active task owns the single Todo panel. Rows come only from
-# task_progress.v1 and are reduced to stable id/title/status display fields.
-# 函数用途: 把当前会话任务的权威进度账本压成 TUI 可展示的清单。
+# LLM: The ConversationThread workspace_task_id is the canonical Todo owner when
+# it matches an active link. Child links share the thread but must never replace
+# the root ledger merely because they were created later. Rows still come only
+# from task_progress.v1 and are reduced to stable display fields.
+# 函数用途: 按会话明确登记的主任务选择权威进度账本，再压成 TUI 可展示的清单。
 def _task_progress_items_from_links(
     agent: object,
     links: list[object],
     *,
+    preferred_task_id: str = "",
     hidden_item_ids: set[str] | None = None,
 ) -> tuple[tuple[dict[str, object], ...], list[str]]:
     candidates = [link for link in links if link is not None]
     if not candidates:
         return (), []
-    link = max(
-        candidates,
-        key=lambda item: _safe_float(getattr(item, "created_at", 0.0)),
+    preferred = str(preferred_task_id or "").strip()
+    link = next(
+        (
+            item
+            for item in candidates
+            if preferred
+            and str(getattr(item, "task_id", "") or "").strip() == preferred
+        ),
+        None,
     )
+    if link is None:
+        link = max(
+            candidates,
+            key=lambda item: _safe_float(getattr(item, "created_at", 0.0)),
+        )
     task_path = str(getattr(link, "task_path", "") or "").strip()
     owner_root = _owner_runtime_root(agent)
     if not task_path or owner_root is None:
@@ -423,6 +438,21 @@ def _task_progress_items_from_links(
         if len(rows) >= _MAX_PROJECTED_PROGRESS_ITEMS:
             break
     return tuple(rows), []
+
+
+# LLM: Todo ownership is an exact join to ConversationThread.workspace_task_id.
+# Missing legacy/fake store support returns no preference and lets the bounded
+# link reader keep its previous fallback; prompt text and task paths are never parsed.
+# 函数用途: 从会话权威记录读取当前主任务 ID，防止较晚创建的子代理抢走 Todo 面板。
+def _conversation_workspace_task_id(store: object, thread_id: str) -> str:
+    loader = getattr(store, "load_thread_report", None)
+    if not callable(loader):
+        return ""
+    try:
+        thread, _load_error = loader(thread_id)
+    except Exception:
+        return ""
+    return str(getattr(thread, "workspace_task_id", "") or "").strip()
 
 
 # LLM: Child identity joins are exact run-id joins. This helper must never use
