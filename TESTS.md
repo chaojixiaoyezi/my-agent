@@ -705,8 +705,9 @@ fresh r18 仍只输入一次原样 Prompt 4，测试者不改产物、不补技�
 关闭 5 项，构建、自动测试与端到端验证仍 pending，机器没有 Rust/Cargo，最终却声称完整生成并被 durable
 workspace 写成 DONE。对应 focused 回归必须覆盖：普通 root/child 第一次自然 final 时把 exact open
 id/title/status 作为 native runtime-guidance 送入同一 active turn；模型关清后自然结束，仍 open 时仅一次
-后 typed blocked；只有 blocked 项时直接 blocked；`/goal`、Audit、isolated/control-plane、无工具/no-save
-继续走既有路径；不得创建 `ordinary_task_resume` 或扫描最终正文、代码、测试和产物。fresh r19 仍在固定
+后 typed blocked；只有 blocked 项时直接 blocked；`/goal`、Audit、isolated/control-plane、无工具继续走
+既有路径。`save=False` 只关闭可选 archive，Gateway/TUI 与后台 main 仍必须核对；不得创建
+`ordinary_task_resume` 或扫描最终正文、代码、测试和产物。fresh r19 仍在固定
 lazygit commit 上只输入一次原样 Prompt 4，测试者不得安装工具链、修改产物或追加推动消息；验收重点是
 开放 Todo 触发同轮继续或诚实 blocked，durable root 不再假 DONE，并同时观察 main/child token、Compact
 与职责短句保持真实。
@@ -720,6 +721,10 @@ smoke 的 tmux `dsh-p4-product-r19-ea91639` 只有背景色、零可见组件。
 port 只有 30 个生产文件、5,404 行生产代码；5 个测试文件不能证明完整功能等价。r19 在 final 前自行关闭
 8/8 Todo，故没有直接命中 open-Todo 核对分支；该分支仍以 native provider-message focused 回归为发布
 证据，下一次自然出现 open Todo 的原样重型任务再补直接 TUI 证据，不能人为改账或用玩具 prompt 诱发。
+
+r9 随后给出真实失败分支：后台 main 在 13/16 Todo 关闭时因 `save=False` 直接绕过核对并写成完成。定向回归
+现在覆盖 Gateway `save=True/False`、后台 main `save=False`、稳定 task-path ledger 和 blocked 后 durable
+task 仍 active；修复部署后的原样 Prompt 4 才能把该项升级为直接真机通过。
 
 真实本地模型回归示例：
 

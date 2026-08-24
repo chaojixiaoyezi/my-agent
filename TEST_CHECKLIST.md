@@ -117,7 +117,8 @@
   一次。关清后自然完成，耗尽仍 open 或只剩显式 blocked 时 typed blocked，不把 durable task 写成 DONE，
   也不创建 `ordinary_task_resume`。新项要求稳定 `id/title/status`，模型旧 pending 不能覆盖 canonical child
   DONE；`covers` 仍只绑定 exact id。native provider-message 与主链 focused 已通过并随 `e94f8ec` 发布；
-  r19 在 final 前自行关闭 8/8，未直接命中 open 分支，仍待下一条自然留下 open Todo 的真实 TUI 证据后勾选。
+  r19 在 final 前自行关闭 8/8，未直接命中 open 分支；r9 随后在 13/16 时直接暴露 `save=False` 绕过。
+  本地回归已覆盖 Gateway save/no-save 与后台 no-save，仍待修复部署后的原样 TUI 通过后勾选。
 - [x] lifecycle/Compact 续跑的 durable tool index 保留有界递归且凭据脱敏的 JSON 参数；native 不伪造旧
   ToolCall/ToolResult，而是安装唯一有界 CompactionSummary handoff。真实 UserTurn 保持在 handoff 之后；
   Task Runtime State 暴露 canonical Todo exact ids 与 `create_subagents.items[].covers` 字段，宿主不按标题猜。
@@ -184,7 +185,8 @@
   一项只证明 r19 测试已完成，不冒充 open-Todo 停止钩子的直接真机证据。
 - [ ] 下一条原样重型任务若自然留下 canonical open Todo，TUI/日志应证明模型在同一 active turn 收到 exact
   核对并继续，或将真实阻塞写为 blocked 后如实汇报；durable root 不能在 open Todo 下变成 DONE。不得
-  人工篡改账本、追加技术提示或用玩具 prompt 专门诱发。
+  人工篡改账本、追加技术提示或用玩具 prompt 专门诱发。r9 已作为修复前失败基线保留：13/16 关闭时
+  后台 no-save 假完成；修复后样本必须与它分开记录。
 - [ ] 真实测试中 main/child/grandchild 各自沿独立 `agent_thread_id` Compact 后能继续工作；至少一条 child
   链连续发生多代 generation，近期完整回合、工具事实、任务状态和产物引用不丢，且没有重做已经成功的
   副作用。持久 native IR 裁剪与 transcript 压缩都只推进该 thread generation；presentation/no-save 临时事件

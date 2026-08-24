@@ -1,5 +1,23 @@
 # STATUS
 
+## 2026-08-24 Prompt 4 r9：Todo 13/16 却假完成，根因是 no-save 绕过停止核对（本地修复候选）
+
+- r9 第二批 child 结束后，后台 main 最终回复声称“复刻完成”，但同一 canonical 进度账仍有 `p6`
+  `in_progress`、`p8/p9` `pending`；16 行中仅 13 行关闭。conversation task 随后变成 `completed`，root
+  workspace 也写成 `DONE`。生成 TypeScript 生产代码 16,045 行，而原 lazygit Go 生产代码 114,376 行；
+  规模差距是用户验收证据，不参与本次宿主完成裁决。
+- 精确工具账证明最后一轮来自 `background_main_agent`，真实执行了构建、测试和启动检查，却没有更新上述
+  Todo。代码追踪发现 `plan_closeout._eligible_closeout` 把 `save=False` 整轮排除；而 TUI/Gateway 与后台
+  main 正常就使用 no-save，导致已发布的 会话运行时 式 stop hook 只在 `save=True` 单测里生效，真机主链直接绕过。
+- 当前候选删除的只有这个错误耦合：`save` 继续只控制可选 archive/memory 持久化，不再控制 active-turn
+  生命周期。普通 Gateway no-save 和后台 main 都读取同一 task-path ledger，同轮最多核对一次；仍 open 时
+  typed blocked，不能关闭 durable task。`/goal`、Audit、isolated/control-plane、无工具和已有专用生命周期
+  分支保持原边界，不恢复 LOC、测试数、目录或最终正文机器验收。
+- 直接 focused 已覆盖 Gateway `save=True/False`、后台 main `save=False`、跨后台 attempt 的稳定 task-path
+  账本以及 blocked 后 task link 保持 active；本地 30 项 focused 与 Ruff、doc-sync、strict code-size、diff、
+  clean-package 严格门均通过。本轮远低于 10,000 行，按规则未跑全仓 pytest。待推送、单 Gateway 部署和
+  fresh 原样 Prompt 4 直接 TUI 复验后再转完成。
+
 ## 2026-08-24 Prompt 4 r8/r9：活跃血缘硬门已删除并通过后台第二批真 TUI
 
 - `31648ce` 已推送并部署到 `192.0.2.7` 唯一 Gateway；fresh tmux

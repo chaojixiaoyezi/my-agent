@@ -1920,7 +1920,15 @@ def test_explicit_goal_cannot_close_with_open_progress(tmp_path):
     assert policies[0].next_due_at <= policies[0].metadata["expedited_at"]
 
 
-def test_ordinary_task_open_progress_gets_one_same_turn_reconciliation(tmp_path):
+@pytest.mark.parametrize(
+    ("source", "save"),
+    (("gateway", True), ("gateway", False), ("background_main_agent", False)),
+)
+def test_ordinary_task_open_progress_gets_one_same_turn_reconciliation(
+    tmp_path,
+    source,
+    save,
+):
     from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_owner_root
     from agent_py_agent.agent.conversation.authority import (
         CONVERSATION_TASK_TURN_ACTIVE_ATTR,
@@ -1953,30 +1961,41 @@ def test_ordinary_task_open_progress_gets_one_same_turn_reconciliation(tmp_path)
             "channel_user_id": "user-1",
         }
     )
+    task_path = tmp_path / "ordinary-open-progress-workspace"
+    task_path.mkdir()
     agent.conversation_store.bind_task(
         {
             "thread_id": thread.thread_id,
             "task_id": "task-ordinary-open-progress",
             "goal": "完成普通任务",
             "status": "active",
+            "task_path": str(task_path),
         }
     )
+    from agent_py_agent.agent.agent_core.runtime.task_identity import (
+        task_path_progress_ledger_id,
+    )
+
     write_task_progress(
         runtime_owner_root(agent),
-        "task-ordinary-open-progress",
+        task_path_progress_ledger_id(task_path),
         {"items": [{"id": "verify", "status": "pending", "title": "可选核对"}]},
     )
 
     result = agent.run(
         "继续处理",
-        save=True,
-        task_id="request-attempt-ordinary-open-progress",
+        save=save,
+        task_id=(
+            "task-ordinary-open-progress"
+            if source == "background_main_agent"
+            else "request-attempt-ordinary-open-progress"
+        ),
         task_attributes={
             "conversation_thread_id": thread.thread_id,
             "conversation_task_id": "task-ordinary-open-progress",
             CONVERSATION_TASK_TURN_ACTIVE_ATTR: True,
         },
-        source="gateway",
+        source=source,
     )
 
     assert len(backend.prompts) == 2

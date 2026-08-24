@@ -38,6 +38,7 @@ def test_background_run_params_carry_structured_conversation_task_identity() -> 
     params = _run_params(request.thread_id, request)
 
     assert params.source == "background_main_agent"
+    assert params.save is False
     assert params.run_id == "task-1"
     assert params.task_id == "task-1"
     assert params.task_attributes == {

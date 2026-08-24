@@ -1,4 +1,4 @@
-# 轮结束与自然收口设计（状态：2026-08-23 已发布；open-Todo 直接真机样本待补）
+# 轮结束与自然收口设计（状态：2026-08-24 r9 no-save 绕过已定位并本地修复）
 
 > 参考：会话运行时 的模型/工具 active turn 和 DSH `turn/end.reason`。
 > 本文只定义“一轮为什么停”，不定义通用业务质量验收。
@@ -64,6 +64,8 @@ capability 阻塞立即唤醒。新工作片从 canonical child state 获得结�
 - 普通任务自然结束后不自动新开一轮。
 - 普通 `task_progress` 仍是模型的软计划，不是机器质量验收或跨轮自动续跑授权；但模型准备自然 final 时，
   宿主会仿照 会话运行时 stop hook，把仍 open 的 exact 结构化清单在同一 active turn 有界返给模型核对一次。
+- `save=False` 仅禁止可选运行档案/记忆写入，不改变本轮是否为真实任务 turn；TUI/Gateway 和后台 main
+  仍必须经过上述核对。presentation/control-plane 等辅助轮继续按结构化 scope 排除，不能拿 save 代替 scope。
 - 同轮核对不读取回复正文、代码量、测试、目录或产物。模型可以继续调用原工具，或把真实无法推进项更新为
   `blocked` 并如实说明；核对耗尽仍 open 时，本轮投影为 typed `blocked`，不得把 durable task 写成完成。
 - 显式 `/goal` 是 thread 上的持久目标 overlay；只有它可以按 typed goal 状态与预算续跑。
@@ -80,5 +82,8 @@ capability 阻塞立即唤醒。新工作片从 canonical child state 获得结�
 - 真机只用一个 Gateway，通过 TUI 发送普通用户 prompt，测试者不旁路补产物。
 - `e94f8ec` 的 native 回归必须证明核对包进入下一次 provider messages，而不是只增加调用计数；fresh
   Prompt 4 r19 因模型先关闭 8/8 Todo 未触发该分支，只算发布后无回归样本，不算直接分支验收。
+- r9 已给出直接失败样本：后台 main 使用 `save=False` 时在 13/16 关闭状态下绕过核对并把任务写成完成。
+  修复回归必须覆盖 Gateway `save=True/False` 和后台 `save=False`，且 task-path ledger 跨 attempt 不漂移；
+  发布后仍需原样重型 TUI 证明 open 项会被同轮继续或 typed blocked。
 - 产品代码量、生成测试数量和真实界面质量继续留给模型/用户验收。r19 的“112 passed 但真实 TUI 白屏”
   是明确反例，禁止因此把宿主目录扫描或业务质量判定重新塞回本状态机。

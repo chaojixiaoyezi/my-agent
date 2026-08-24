@@ -1247,6 +1247,21 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   存活但整屏空白。该反例不改变本条边界：宿主不按 LOC、测试数量或界面内容决定业务完成；后续改善必须
   让模型基于结构化工具事实维护计划和验证实际入口，而不是恢复第二套机器验收状态机。
 
+## 2026-08-24 no-save 主任务仍必须经过同轮停止核对
+
+状态：r9 真实失败已定位，本地修复、focused 回归与严格 gate 通过，待发布和原样 TUI 复验。
+
+- `save` 只表示是否写普通运行档案、长期记忆和相关可选持久化，不是 turn/task lifecycle authority。
+  Gateway/TUI 和 `background_main_agent` 为避免重复 transcript 正常使用 `save=False`；它们仍是 exact
+  durable task 的真实 active turn，不能因此跳过 canonical `task_progress` 停止核对。
+- r9 的后台 main 在 task-path ledger 仍有 1 个 `in_progress`、2 个 `pending` 时输出完成，随后 task link 与
+  workspace 被写成终态。最后一轮结构化工具账没有任何 `task_progress` 更新；已发布入口因
+  `_eligible_closeout(... save=False)` 被整轮短路。这是生命周期开关误绑，不是账本 id 漂移，也不是需要恢复
+  代码量、测试、产物或自然语言完成验收。
+- 修复只解除 save 与停止核对的耦合；exact task-path 账本、同轮一次 repair、耗尽 typed blocked、显式
+  `/goal`、Audit、辅助 scope 和真实工具失败优先级均保持。回归必须同时覆盖 Gateway save/no-save 与后台
+  no-save，并证明 blocked 后 conversation task 仍 active。
+
 ## 2026-08-23 会话级模型用量账本
 
 状态：本地实现与 focused 回归已通过，等待随下一批底座修复统一发布和真机复验。

@@ -105,6 +105,15 @@
   `task_progress_closeout_repair_attempts` 默认 1、设 0 可关；原生协议回归必须证明结构化提醒实际进入下一次
   provider messages，而不只是让调用计数加一。另将未绑定 child 与失败工具的展示短句改为真实语义。
 
+## 2026-08-24 r9 no-save 停止核对缺口（本地修复候选）
+
+- r9 后台 main 收尾时 canonical Todo 为 13/16，仍有 `in_progress/pending`，却输出完成并把 durable root
+  关闭。最后一轮工具账没有更新 Todo，说明不是 UI 延迟或展示旧快照。
+- 根因是 `_eligible_closeout` 把 `save=False` 当成跳过依据；真实 TUI 和后台 main 恰好使用该值，所以
+  `e94f8ec` 的 `save=True` 回归无法覆盖生产路径。当前删除该条件，不改变 archive 的 no-save 语义。
+- 新回归使用稳定 task-path ledger 和不同后台 attempt id，证明第一次 final 进入同轮 reconciliation，第二次
+  仍 open 时 typed blocked；Gateway save/no-save 与后台 no-save 都不能把 task link 关成 completed。
+
 ## 2026-08-23 r17 可选 exact covers 与返工重开（本地候选）
 
 - `4c3a59d` 部署后的 fresh r17 中，骨架/TUI child 基本停在各自直接 goal，生命周期 wake 也正常；Git

@@ -62,7 +62,7 @@ durable path 和不同 cwd/session 隔离。首批 Prompt 1/2 配对 TUI 暴露�
 
 ### 普通计划的 会话运行时 式同轮停止核对
 
-状态：`e94f8ec` 已通过严格 gate、推送并部署；直接 open-Todo 真 TUI 分支待自然样本
+状态：r9 已出现直接 open-Todo 真 TUI 失败；no-save 修复已过 focused/严格 gate，待发布和复验
 
 解决问题：模型自己留下未完成 Todo 时，旧底座仍把普通 final 写成整个任务完成，造成“5/8 已做却
 DONE”的假收口。当前按 会话运行时 stop hook 在同一 active turn 有界返工一次；不扫描业务产物、不恢复机器
@@ -74,6 +74,10 @@ DONE”的假收口。当前按 会话运行时 stop hook 在同一 active turn 
 自测 112 passed，独立真实启动却因 App 没有挂载已定义 Screen 而白屏；这属于模型计划/测试覆盖失真，
 不能通过恢复宿主 LOC、测试数或产物扫描来冒充通用质量裁判。下一条真实长任务自然出现 open Todo 时再补
 直接分支证据，不用玩具 prompt 或人工改账诱发。
+
+2026-08-24 r9 在 13/16 关闭、仍有 1 个 `in_progress` 和 2 个 `pending` 时由后台 main 假收口。根因不是
+task-path identity，而是 `save=False` 被错误用作生命周期排除条件；TUI/Gateway 和后台 main 正常都可能
+no-save。当前候选让 save 只控制 archive，真实任务轮仍做同轮核对；严格门后部署并用原样 Prompt 4 复验。
 
 ### 单 Gateway 多 TUI 项目目录与正式提示词 2
 

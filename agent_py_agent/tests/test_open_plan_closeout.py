@@ -4,6 +4,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
+from agent_py_agent.agent.agent_core.runtime.task_identity import (
+    task_path_progress_ledger_id,
+)
 from agent_py_agent.agent.agent_core.tool_loop.plan_closeout import (
     decide_open_plan_closeout,
 )
@@ -28,6 +31,10 @@ def _params(
     *,
     context_scope: str = "default",
     task_attributes: dict[str, object] | None = None,
+    save: bool = True,
+    source: str = "run",
+    run_id: str = "run-1",
+    task_id: str = "task-1",
 ) -> ToolLoopExecuteParams:
     return ToolLoopExecuteParams(
         user_prompt="完成复杂任务",
@@ -42,13 +49,14 @@ def _params(
         write_boundary=None,
         task_attributes=task_attributes or {},
         request_id="request-1",
-        run_id="run-1",
-        task_id="task-1",
+        run_id=run_id,
+        task_id=task_id,
         one_shot_tool_calls=set(),
         executed_tools=[],
         archive_tool_calls=[],
-        save=True,
+        save=save,
         context_scope=context_scope,
+        source=source,
     )
 
 
@@ -227,3 +235,47 @@ def test_explicit_goal_keeps_its_existing_cross_turn_lifecycle(tmp_path: Path) -
 
     assert decision.action == "ignore"
     assert params.tool_context == []
+
+
+# LLM: Regression for the real TUI/background failure where save=False skipped
+# the stop hook even though the same durable task-path ledger remained open.
+# 函数用途: 模拟后台主代理续跑使用新 run 身份且不存档，验证它仍读取原任务目录的 Todo。
+def test_background_no_save_turn_reconciles_canonical_task_path_plan(
+    tmp_path: Path,
+) -> None:
+    agent = _agent(tmp_path)
+    task_root = tmp_path / "durable-task"
+    task_root.mkdir()
+
+    class _Store:
+        def load_task_link(self, task_id: str) -> object | None:
+            if task_id != "root-task":
+                return None
+            return SimpleNamespace(task_path=str(task_root))
+
+    agent.conversation_store = _Store()
+    ledger_id = task_path_progress_ledger_id(task_root)
+    write_task_progress(
+        agent.home_paths.owner_home_dir,
+        ledger_id,
+        {"items": [{"id": "verify", "title": "完成集成验证", "status": "pending"}]},
+    )
+    params = _params(
+        save=False,
+        source="background_main_agent",
+        run_id="background-attempt-2",
+        task_id="root-task",
+        task_attributes={
+            "conversation_thread_id": "thread-1",
+            "conversation_task_id": "root-task",
+        },
+    )
+
+    first = decide_open_plan_closeout(agent, params, _response("后台声称完成"))
+    second = decide_open_plan_closeout(agent, params, _response("后台仍声称完成"))
+
+    assert first.action == "continue"
+    assert '"ledger_id":"' + ledger_id + '"' in params.tool_context[0]
+    assert second.action == "block"
+    assert second.response is not None
+    assert second.response.runtime_reason == "TASK_PROGRESS_RECONCILIATION_EXHAUSTED"

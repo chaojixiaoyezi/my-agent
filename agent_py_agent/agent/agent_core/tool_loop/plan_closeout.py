@@ -159,9 +159,10 @@ def _blocked_plan_decision(
 
 
 # LLM: Auxiliary expression/control turns and already-typed non-ok responses do
-# not own ordinary task closeout. A disabled tool runtime cannot reconcile via
-# task_progress and therefore remains on the existing no-tools path.
-# 函数用途: 过滤不属于普通主/子代理工作回合的响应，避免辅助回复误读主任务清单。
+# not own ordinary task closeout. `save` controls optional archive persistence,
+# not active-turn lifecycle: Gateway/TUI and background-main turns legitimately
+# use save=False and must still reconcile their canonical task_progress ledger.
+# 函数用途: 过滤不属于普通主/子代理工作回合的响应，同时让不存档的真实任务轮照常核对清单。
 def _eligible_closeout(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -176,7 +177,6 @@ def _eligible_closeout(
         and not str(attrs.get("thread_goal_id") or "").strip()
         and str(attrs.get("conversation_work_kind") or "").strip().lower() != "audit"
         and bool(getattr(getattr(agent, "config", None), "enable_tools", True))
-        and getattr(params, "save", None) is not False
     )
 
 
