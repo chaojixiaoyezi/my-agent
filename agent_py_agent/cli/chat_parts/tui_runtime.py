@@ -348,6 +348,13 @@ class _TuiBackgroundActivityController:
         self._hidden_subagent_count = 0
         self._compact_count = 0
 
+    # LLM: Poll cadence may read only the typed count already accepted by this controller. The
+    # value is display liveness, not task scheduling or completion authority.
+    # 函数用途: 返回最近一次有效活动快照是否表明还有后台主任务。
+    def is_active(self) -> bool:
+        with self._owner._lock:
+            return self._count > 0
+
     # LLM: Count, one focused-agent row, and direct-child rows share one display
     # projection. A valid zero count retains terminal rows for read-only
     # navigation; only a zero count with no agent rows removes the block.
@@ -603,6 +610,12 @@ def _normalize_subagent_activity_rows(
 # and must not gain independent state or event sequencing.
 # 类用途: 为 TuiRuntime 提供后台主任务和直属子代理快照的唯一公开更新入口。
 class _TuiBackgroundActivityRuntimeMixin:
+    # LLM: This is the single readback for display polling cadence; it delegates to the same
+    # controller that consumes canonical activity snapshots and never parses rendered text.
+    # 函数用途: 告诉后台轮询线程当前会话是否需要保持一秒刷新。
+    def has_active_background_task(self) -> bool:
+        return self._background_activity.is_active()
+
     # LLM: This display projection accepts only the canonical conversation-agent
     # snapshot. It never starts, stops, retries, or accepts work; equal snapshots
     # are idempotent and zero removes the active block without history.

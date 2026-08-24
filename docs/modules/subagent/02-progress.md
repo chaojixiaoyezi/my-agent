@@ -1,5 +1,17 @@
 # Subagent Progress
 
+## 2026-08-24 TUI 活动面精确读取与线程安全缓存（本地候选）
+
+- `.7` 多个 detached TUI 的 `/client/notices` 现场显示，活动面板为当前几名直属 child 查询时仍调用
+  `list_runs_report()`，扫描并 deepcopy owner 下全部历史 `task.json`；窗口越多、历史越长，唯一 Gateway
+  的 CPU 与响应延迟越高。
+- `conversation_agent_activity` 现在先用 LocalStore 的 `root_task_id/parent_run_id/depth` 结构化索引选择
+  exact run id，再由 `SubAgentPersistenceService.list_runs_by_ids_report` 读取 canonical 文件并重新核对
+  lineage。SQLite 仍只是 read projection，缺失适配器或查询异常时保留兼容全量路径，不能据索引改状态。
+- 解析缓存改用纳秒 mtime，并以 `RLock` 串行化 Gateway 多请求线程的命中、重载、deepcopy 与清理。
+  exact-id 入口对缺失/损坏文件返回结构化 load error，不把索引悬挂误报成“没有子代理”。focused 回归已
+  钉住不扫描未选择的历史 run、canonical 副本隔离与活动投影主链；待 `.7` 单 Gateway 负载复验。
+
 ## 2026-08-24 r8/r9 删除阻断合法第二批的活跃血缘硬门（已部署，真 TUI 部分覆盖）
 
 - `31648ce` 的 fresh Prompt 4 使用合格的 `lazygit@ea916395`：首批四名 child 全部 DONE 后，root 自然醒来；

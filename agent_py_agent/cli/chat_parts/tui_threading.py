@@ -12,8 +12,9 @@ from .tui_params import StartWorkerParams, WorkerConfigParams
 
 TUI_REFRESH_INTERVAL_SECONDS = 0.125
 # S-BG1: 后台主代理轮和子代理面板走 Gateway 轻量快照。会话运行时 用服务端事件推送；
-# 当前 HTTP 兼容协议按 1 秒刷新，既保留近实时体验，也不让多个 TUI 高频争抢单 Gateway。
+# 当前 HTTP 兼容协议在有任务时按 1 秒刷新，完全空闲时降到 5 秒，兼顾近实时与单 Gateway 负载。
 TUI_BACKGROUND_NOTICE_INTERVAL_SECONDS = 1.0
+TUI_BACKGROUND_NOTICE_IDLE_INTERVAL_SECONDS = 5.0
 TUI_BACKGROUND_NOTICE_FAILURE_INITIAL_SECONDS = 0.5
 TUI_BACKGROUND_NOTICE_FAILURE_MAX_SECONDS = 8.0
 
@@ -94,15 +95,16 @@ def _start_worker_threads(*, params: StartWorkerParams) -> None:
             params.tui_runtime,
             params.app_ref,
             params.agent_navigation,
+            params.is_running_ref,
         ),
         daemon=True,
     ).start()
 
 
-# LLM: The first snapshot is immediate. Healthy polling stays near-real-time; transport or
-# contract failures exponentially back off and reset after the next valid snapshot so disconnected
-# TUIs cannot create a reconnect storm against the single Gateway.
-# 函数用途: 持续检查当前会话的后台更新；断线时逐步放慢，恢复后自动回到正常刷新速度。
+# LLM: The first snapshot is immediate. Foreground/background-active sessions poll at one second;
+# inactive sessions poll at five seconds. Transport failures use a separate exponential backoff
+# that resets after the next valid snapshot, so detached TUIs cannot storm the single Gateway.
+# 函数用途: 持续检查当前会话更新；有工作时每秒刷新，空闲或断线时自动放慢。
 def _background_notice_loop(
     stop_event: threading.Event,
     agent: object,
@@ -110,6 +112,7 @@ def _background_notice_loop(
     tui_runtime: object,
     app_ref: list,
     agent_navigation: object | None = None,
+    foreground_running_ref: list[bool] | None = None,
 ) -> None:
     seen: set[float] = set()
     event_cursor = [0]
@@ -129,7 +132,20 @@ def _background_notice_loop(
             # 监视失败绝不打扰会话；按同一退避合同等待下一轮。
             snapshot_ok = False
         if snapshot_ok:
-            delay = TUI_BACKGROUND_NOTICE_INTERVAL_SECONDS
+            foreground_running = bool(
+                foreground_running_ref and foreground_running_ref[0]
+            )
+            activity_reader = getattr(
+                tui_runtime,
+                "has_active_background_task",
+                None,
+            )
+            background_active = bool(activity_reader()) if callable(activity_reader) else False
+            delay = (
+                TUI_BACKGROUND_NOTICE_INTERVAL_SECONDS
+                if foreground_running or background_active
+                else TUI_BACKGROUND_NOTICE_IDLE_INTERVAL_SECONDS
+            )
             failure_delay = TUI_BACKGROUND_NOTICE_FAILURE_INITIAL_SECONDS
         else:
             delay = failure_delay
@@ -141,10 +157,10 @@ def _background_notice_loop(
             break
 
 
-# LLM: Each poll reads one canonical thread snapshot. The boolean result distinguishes a valid
-# snapshot from transport/contract failure for the caller's backoff; failures preserve the previous
-# activity projection, while a valid zero count removes it. Notice rows remain append-only display.
-# 函数用途: 消费一次后台状态并返回查询是否成功，供监视线程决定正常刷新还是断线退避。
+# LLM: Each poll reads one canonical thread snapshot. The boolean result distinguishes transport
+# health; the runtime-owned typed activity controller separately exposes the healthy idle cadence.
+# Failures preserve the previous projection; a valid zero remains authoritative display state.
+# 函数用途: 消费一次后台快照并返回连接状态；已发布的活动计数供下一轮调速。
 def _consume_background_notices(
     agent: object,
     session_id: str,
@@ -180,10 +196,10 @@ def _consume_background_notices(
     )
 
 
-# LLM: Thin clients consume the one authenticated /client/notices snapshot.
-# Notification time and transcript integer cursors remain independent, and any
-# invalid response is returned to the caller's existing exponential backoff.
-# 函数用途: 从单 Gateway 拉取一次后台活动、过程事件和最终回复并刷新 TUI。
+# LLM: Thin clients consume the one authenticated /client/notices snapshot. Notification and
+# transcript cursors remain independent; only the typed active count may update healthy poll cadence.
+# Invalid responses enter the existing exponential backoff without clearing display state.
+# 函数用途: 从单 Gateway 拉取活动、过程事件和最终回复，并记录下一轮是否需要秒级刷新。
 def _consume_gateway_background_snapshot(
     agent: object,
     session_id: str,
@@ -247,10 +263,10 @@ def _consume_gateway_background_snapshot(
     return True
 
 
-# LLM: Embedded/local mode reads the same agent-owned projection and event ring
-# without HTTP. ConversationStore and notice files remain authoritative for
-# thread resolution and final replies; the ring is still display-only.
-# 函数用途: 在本地完整 Agent 模式消费一次后台活动、过程事件和最终通知。
+# LLM: Embedded/local mode reads the same agent-owned projection and event ring without HTTP.
+# ConversationStore and notice files remain authoritative; the typed active count affects only the
+# next display delay, while the event ring stays display-only.
+# 函数用途: 在本地完整 Agent 模式消费后台活动、过程事件和最终通知，并更新空闲刷新节奏。
 def _consume_local_background_snapshot(
     agent: object,
     store: object,

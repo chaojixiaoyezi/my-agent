@@ -1,5 +1,17 @@
 # Gateway Progress
 
+## 2026-08-24 detached TUI 会话降载与退出语义（本地候选）
+
+- `.7` 现场的 tmux 窗口虽然全部 detached，但其中 10 个 TUI Python 进程仍存活并持续查询唯一 Gateway；
+  `/client/notices` 每次又扫描 owner 下全部历史子代理，形成高 CPU、BrokenPipe 和新消息排队。它不是
+  workspace/owner 锁，也不是 MiniMax 单次推理本身变慢。
+- 对照 终端交互 后，普通 `/exit` 改为关闭本客户端及 poller、保留 durable session 和 Gateway task，
+  并打印精确 resume 命令；tmux 自己的 detach 仍明确表示进程继续。活动 roster 改成 SQLite 选 exact id、
+  canonical 文件复核；空闲健康轮询 5 秒，有任务 1 秒，断线维持独立指数退避。
+- 本地 exact-read、indexed activity、轮询节奏与 TUI exit 回归完成后，需在 `.7` 唯一 Gateway 上证明：
+  `/exit` 后 TUI PID 消失而 session 可恢复；旧/新多个客户端下 `/client/notices` 延迟与 Gateway CPU 回落；
+  有任务时状态刷新仍不超过约 1 秒。真机证据完成前不得写成已发布。
+
 ## 2026-08-24 后台 main 富过程双游标（本地候选）
 
 - 原 `/client/notices` 只返回 scalar activity、child/Todo 和持久 final notice，后台 main 的显式 thinking、

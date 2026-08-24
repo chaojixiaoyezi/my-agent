@@ -668,7 +668,12 @@ def _direct_subagent_rows(
     *,
     conversation_store: object | None = None,
 ) -> tuple[list[dict[str, object]], list[str]]:
-    tasks, warnings = _all_subagent_tasks(agent)
+    tasks, warnings = _related_subagent_tasks(
+        agent,
+        root_task_ids=root_task_ids,
+        parent_run_ids=root_task_ids,
+        depth=1,
+    )
     if tasks is None:
         return [], warnings
 
@@ -699,12 +704,17 @@ def _child_subagent_rows(
     *,
     conversation_store: object | None = None,
 ) -> tuple[list[dict[str, object]], list[str]]:
-    tasks, warnings = _all_subagent_tasks(agent)
-    if tasks is None:
-        return [], warnings
     parent_id = str(getattr(parent, "id", "") or "").strip()
     root_id = str(getattr(parent, "root_id", "") or parent_id).strip()
     depth = max(0, _safe_int(getattr(parent, "depth", 0))) + 1
+    tasks, warnings = _related_subagent_tasks(
+        agent,
+        root_task_ids={root_id},
+        parent_run_ids={parent_id},
+        depth=depth,
+    )
+    if tasks is None:
+        return [], warnings
     selected = [
         task
         for task in tasks
@@ -717,6 +727,93 @@ def _child_subagent_rows(
         _subagent_row(task, conversation_store=conversation_store)
         for task in selected
     ], warnings
+
+
+# LLM: The SQLite control plane is only a bounded lookup index. It selects exact run ids for the
+# requested root/parent/depth relation, then the persistence service reloads those ids from
+# canonical task files. If either adapter is unavailable, legacy/fake agents retain the full-scan
+# compatibility path; prompt text, titles, and status prose never participate in selection.
+# 函数用途: 先按结构化父子关系查索引，再只读取命中的子代理，避免每个 TUI 快照复制全部历史 run。
+def _related_subagent_tasks(
+    agent: object,
+    *,
+    root_task_ids: set[str],
+    parent_run_ids: set[str],
+    depth: int,
+) -> tuple[list[object] | None, list[str]]:
+    manager = getattr(agent, "subagents", None)
+    if manager is None:
+        return None, ["subagent_manager_unavailable"]
+    local_store = getattr(manager, "local_store", None)
+    tree_reader = getattr(local_store, "list_agent_tree", None)
+    selected_reader = getattr(manager, "list_runs_by_ids_report", None)
+    if callable(tree_reader) and callable(selected_reader):
+        try:
+            selected_ids = _indexed_related_run_ids(
+                tree_reader,
+                root_task_ids=root_task_ids,
+                parent_run_ids=parent_run_ids,
+                depth=depth,
+            )
+            report = selected_reader(selected_ids)
+            tasks = list(getattr(report, "runs", ()) or ())
+            load_errors = list(getattr(report, "load_errors", ()) or ())
+            return tasks, (["subagent_run_load_error"] if load_errors else [])
+        except Exception:
+            # Canonical full-scan fallback preserves existing/fake deployments when the optional
+            # lookup projection is unavailable; it is not a second result authority.
+            pass
+    return _all_subagent_tasks(agent)
+
+
+# LLM: This helper reads each requested root through the bounded SQLite projection and delegates
+# per-record structural filtering. It returns stable unique ids only; canonical task reads happen
+# afterward and remain authoritative.
+# 函数用途: 从一个或多个根任务索引中收集符合父级和层级条件的唯一子代理 id。
+def _indexed_related_run_ids(
+    tree_reader: object,
+    *,
+    root_task_ids: set[str],
+    parent_run_ids: set[str],
+    depth: int,
+) -> list[str]:
+    selected: list[str] = []
+    for root_id in sorted(root_task_ids):
+        tree = tree_reader(root_id)
+        selected.extend(
+            _indexed_run_ids_for_root(
+                tree,
+                root_id=root_id,
+                parent_run_ids=parent_run_ids,
+                depth=depth,
+            )
+        )
+    return list(dict.fromkeys(selected))
+
+
+# LLM: Index records are matched only by typed root, parent, depth, and run id fields. Display
+# names, task prose, status labels, and paths must never select a child relation.
+# 函数用途: 在单个根任务的索引结果中筛出指定直属层级的 run id。
+def _indexed_run_ids_for_root(
+    tree: object,
+    *,
+    root_id: str,
+    parent_run_ids: set[str],
+    depth: int,
+) -> list[str]:
+    selected: list[str] = []
+    for record in list(getattr(tree, "runs", ()) or ()):
+        if str(getattr(record, "root_task_id", "") or "").strip() != root_id:
+            continue
+        parent_id = str(getattr(record, "parent_run_id", "") or "").strip()
+        if parent_id not in parent_run_ids:
+            continue
+        if _safe_int(getattr(record, "depth", 0)) != depth:
+            continue
+        run_id = str(getattr(record, "run_id", "") or "").strip()
+        if run_id:
+            selected.append(run_id)
+    return selected
 
 
 # LLM: One bounded report read is shared by root and nested child projections;

@@ -1294,6 +1294,23 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   本地可信 TUI 的 cwd 与远程用户 `owner_home` 隔离也不因传输优化改变。后续若升级为事件长连接，仍复用
   同一 canonical activity/notices，而不是建立第二份前端状态账。
 
+## 2026-08-24 TUI 进程退出与 durable session 分离【状态：本地候选待 `.7` 真机】
+
+- 终端交互 对照把三层事实分开：`~/.模型助手/sessions/<pid>.json` 只登记仍活着的 REPL 进程，普通
+  `/exit`/Ctrl-D 会走 graceful shutdown 并删除 PID 登记；聊天 transcript/session 继续持久化，可用
+  `--resume` 恢复。只有显式 `--bg` tmux 会话才把 exit 映射成 detach，让同一 REPL 继续运行。
+- my-agent 的普通 `/exit` 现在明确结束当前 TUI 及其 refresh/notices/worker 线程，但不取消 Gateway
+  canonical task，也不删除 session。退出后打印精确 `my-agent resume <session_id>`；取消任务仍只走
+  `/stop` 或 `Esc`。外部 tmux `Ctrl+B D` 只是观察者 detach，不得伪装成产品退出。
+- 现场慢响应的主要放大器不是 session 文件或 workspace 锁，而是多个已 detach TUI 仍每秒调用
+  `/client/notices`，旧活动投影又为少量直属 child 扫描、解析并 deepcopy owner 下全部历史 run。
+  Gateway 现在先从 SQLite read projection 按 root/parent/depth 选 exact run id，再从 canonical
+  `task.json` 批量精确读取；投影只做查找，不成为生命周期权威。空闲 TUI 健康轮询降到 5 秒，有前台或
+  后台任务时仍保持 1 秒，连接失败继续走 0.5/1/2/4/8 秒退避。
+- 本轮不增加第二套“在线 session”数据库，也不自动杀 detached tmux。真正在线的 TUI 以后若需要
+  `ps/attach/kill` 管理面，应另建带 PID/start-token 的易失进程登记；durable chat session 与 Gateway
+  task 仍保持独立，不能按名称或模型文案判断存活。
+
 ## 2026-08-23 会话运行时 式活轮权限与结果提交栅栏
 
 状态：本地实现与 focused 回归已通过；待与当前 Prompt 4 真机样本安全分隔后部署复验。

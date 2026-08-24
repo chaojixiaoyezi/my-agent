@@ -7,6 +7,7 @@ from __future__ import annotations
 """
 
 import threading
+from contextlib import nullcontext
 from queue import Queue
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -358,3 +359,38 @@ def test_tui_escape_timeouts_keep_meta_window_short() -> None:
 
     assert application.timeoutlen == ESCAPE_SEQUENCE_TIMEOUT_SECONDS == 0.1
     assert application.ttimeoutlen == TERMINAL_ESCAPE_PREFIX_TIMEOUT_SECONDS == 0.05
+
+
+def test_tui_loop_exit_stops_client_and_prints_exact_resume_command(
+    monkeypatch,
+    capsys,
+) -> None:
+    """普通退出结束当前 TUI，但保留 durable session 并给出精确恢复命令。"""
+    from agent_py_agent.cli.chat_parts import tui
+
+    refresh_stop = threading.Event()
+    stop_event = threading.Event()
+    session_manager = MagicMock()
+    app = SimpleNamespace(run=lambda *, pre_run: 0)
+    monkeypatch.setattr(tui, "patch_stdout", lambda: nullcontext())
+
+    result = tui._run_tui_loop(
+        tui.TuiLoopContext(
+            app=app,
+            refresh_stop=refresh_stop,
+            stop_event=stop_event,
+            session_manager=session_manager,
+            current_session_id="sess-exit-resume",
+        )
+    )
+
+    assert result == 0
+    assert refresh_stop.is_set()
+    assert stop_event.is_set()
+    session_manager.touch_session.assert_called_once_with(
+        "sess-exit-resume",
+        channel="chat",
+    )
+    output = capsys.readouterr().out
+    assert "已退出界面" in output
+    assert "my-agent resume sess-exit-resume" in output

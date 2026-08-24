@@ -218,6 +218,12 @@ class SubAgentManager(SubagentKernelMixin):
     def list_runs_report(self):
         return self.persistence.list_runs_report()
 
+    # LLM: Exact-id batch reads delegate to the persistence cache and never treat the selection
+    # index as lifecycle authority. Callers receive canonical task copies plus structured errors.
+    # 函数用途: 按一组明确 run_id 批量读取子代理，供状态界面避免扫描全部历史任务。
+    def list_runs_by_ids_report(self, run_ids):
+        return self.persistence.list_runs_by_ids_report(run_ids)
+
     def save(self, task: SubAgentTask) -> None:
         self.persistence.save(task)
 

@@ -28,6 +28,19 @@ Gateway 可以并行，但不能作为“单 Gateway 多客户端”验收的替
 补代码、发技术推动指令或修改产物。单测、fake、renderer snapshot 和静态 gate 只作上线前护栏，不能替代
 上述真实 TUI 验收。
 
+TUI 退出/session 生命周期与单 Gateway 降载回归：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_chat_parts.py agent_py_agent/tests/test_background_notice_display.py agent_py_agent/tests/test_conversation_agent_activity.py agent_py_agent/tests/test_subagent_listruns_cache.py -q --tb=short
+```
+
+必须证明普通 `/exit` 会停止当前 TUI 的 refresh/notices/worker，并保留 canonical session，输出精确
+`my-agent resume <session_id>`；恢复后只读取同 session 的历史且不重新提交 prompt。tmux `Ctrl+B D` 只是
+detach，因此 TUI PID 和轮询保持存在，不得把它记为产品退出。活动快照必须经 root/parent/depth 索引选择
+exact run id，再从 canonical task 文件复核；索引不是状态权威。健康空闲轮询为 5 秒，前台或后台有任务时
+为 1 秒，失败仍按 0.5/1/2/4/8 秒退避。`.7` 真机需同时记录退出前后 TUI PID、唯一 Gateway PID、
+session 恢复、`/client/notices` 延迟和 Gateway CPU；不得另启 Gateway，也不得删除运行任务来制造通过。
+
 子代理详情与控制面的 focused 回归：
 
 ```bash

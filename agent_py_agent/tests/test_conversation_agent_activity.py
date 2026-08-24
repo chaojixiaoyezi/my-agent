@@ -124,6 +124,58 @@ def test_conversation_agent_activity_projects_only_active_roots_direct_children(
     assert payload["subagent_projection_ok"] is True
 
 
+def test_conversation_agent_activity_uses_index_then_exact_canonical_reads() -> None:
+    """生产管理器有查询索引时，活动快照不得退回全部历史 run 扫描。"""
+    from agent_py_agent.agent.conversation.agent_activity import (
+        conversation_agent_activity,
+    )
+
+    direct = _run("child-indexed", description="实现核心逻辑")
+    records = [
+        SimpleNamespace(
+            run_id=direct.id,
+            root_task_id="task-live",
+            parent_run_id="task-live",
+            depth=1,
+        ),
+        SimpleNamespace(
+            run_id="grandchild-indexed",
+            root_task_id="task-live",
+            parent_run_id=direct.id,
+            depth=2,
+        ),
+    ]
+    selected_ids: list[str] = []
+
+    class _Manager:
+        local_store = SimpleNamespace(
+            list_agent_tree=lambda _root_id: SimpleNamespace(runs=records)
+        )
+
+        def list_runs_by_ids_report(self, run_ids):
+            selected_ids.extend(run_ids)
+            return SimpleNamespace(runs=[direct], load_errors=[])
+
+        def list_runs_report(self):
+            raise AssertionError("indexed activity lookup must not scan all runs")
+
+    store = SimpleNamespace(
+        active_task_links_report=lambda _thread_id: (
+            [SimpleNamespace(task_id="task-live", status="active")],
+            [],
+        )
+    )
+
+    activity = conversation_agent_activity(
+        SimpleNamespace(subagents=_Manager()),
+        store,
+        "thread-indexed",
+    )
+
+    assert selected_ids == [direct.id]
+    assert [row["run_id"] for row in activity.subagents] == [direct.id]
+
+
 def test_conversation_agent_activity_reports_projection_failure_without_claiming_rows() -> None:
     from agent_py_agent.agent.conversation.agent_activity import (
         conversation_agent_activity,

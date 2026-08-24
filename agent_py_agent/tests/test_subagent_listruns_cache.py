@@ -60,3 +60,28 @@ def test_list_runs_evicts_deleted_run_from_cache(tmp_path: Path) -> None:
     shutil.rmtree(agent.subagents.persistence.workspace / rid)
     assert agent.subagents.list_runs() == []
     assert rid not in agent.subagents.persistence._run_cache
+
+
+def test_list_runs_by_ids_reads_only_selected_canonical_runs(tmp_path: Path) -> None:
+    """活动投影的 exact-id 入口不扫描或缓存未选中的历史 run。"""
+    agent = _agent(tmp_path)
+    selected = agent.subagents.create_run(goal="selected", agent_name="selected").id
+    ignored = agent.subagents.create_run(goal="ignored", agent_name="ignored").id
+
+    report = agent.subagents.list_runs_by_ids_report([selected, selected])
+
+    assert [task.id for task in report.runs] == [selected]
+    assert report.load_errors == []
+    assert selected in agent.subagents.persistence._run_cache
+    assert ignored not in agent.subagents.persistence._run_cache
+
+
+def test_list_runs_by_ids_keeps_missing_run_as_structured_error(tmp_path: Path) -> None:
+    """索引若指向已丢失记录，不能把它静默当成空列表。"""
+    agent = _agent(tmp_path)
+
+    report = agent.subagents.list_runs_by_ids_report(["subagent-missing"])
+
+    assert report.runs == []
+    assert len(report.load_errors) == 1
+    assert report.load_errors[0]["run_id"] == "subagent-missing"

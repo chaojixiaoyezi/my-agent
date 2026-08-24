@@ -756,9 +756,75 @@ def test_tui_notice_loop_backs_off_and_resets_after_success(monkeypatch) -> None
         "session-backoff",
         object(),
         [None],
+        foreground_running_ref=[True],
     )
 
     assert waits == [0.5, 1.0, 2.0, 1.0, 0.5, 1.0]
+
+
+def test_tui_notice_loop_slows_healthy_idle_sessions(monkeypatch) -> None:
+    """后台与前台都空闲时按五秒刷新，避免退出观察后的 tmux 窗口压垮 Gateway。"""
+    from agent_py_agent.cli.chat_parts import tui_threading
+
+    waits: list[float] = []
+
+    class _StopEvent:
+        def is_set(self):
+            return False
+
+        def wait(self, delay):
+            waits.append(delay)
+            return len(waits) >= 2
+
+    monkeypatch.setattr(
+        tui_threading,
+        "_consume_background_notices",
+        lambda *_args, **_kwargs: True,
+    )
+
+    tui_threading._background_notice_loop(
+        _StopEvent(),
+        object(),
+        "session-idle",
+        object(),
+        [None],
+        foreground_running_ref=[False],
+    )
+
+    assert waits == [5.0, 5.0]
+
+
+def test_tui_notice_loop_keeps_active_background_session_realtime(monkeypatch) -> None:
+    """runtime 已接收 typed active count 时，即使前台空闲也继续每秒刷新。"""
+    from agent_py_agent.cli.chat_parts import tui_threading
+
+    waits: list[float] = []
+
+    class _StopEvent:
+        def is_set(self):
+            return False
+
+        def wait(self, delay):
+            waits.append(delay)
+            return len(waits) >= 2
+
+    runtime = SimpleNamespace(has_active_background_task=lambda: True)
+    monkeypatch.setattr(
+        tui_threading,
+        "_consume_background_notices",
+        lambda *_args, **_kwargs: True,
+    )
+
+    tui_threading._background_notice_loop(
+        _StopEvent(),
+        object(),
+        "session-active",
+        runtime,
+        [None],
+        foreground_running_ref=[False],
+    )
+
+    assert waits == [1.0, 1.0]
 
 
 def test_gateway_notice_snapshot_reports_canonical_active_task_count(tmp_path: Path) -> None:
@@ -904,6 +970,7 @@ def test_runtime_background_activity_is_one_removable_animated_block() -> None:
     assert snapshot.status.context_usage is not None
     assert snapshot.status.context_usage.prompt_tokens == 8_700
     assert snapshot.status.compact_count == 3
+    assert runtime.has_active_background_task() is True
     todo = next(block for block in snapshot.active_blocks if block.role == "todo")
     assert todo.metadata["items"] == progress_items
     assert runtime.needs_periodic_refresh() is True
@@ -957,6 +1024,7 @@ def test_runtime_background_activity_is_one_removable_animated_block() -> None:
     )
 
     assert runtime.update_background_activity(0) is True
+    assert runtime.has_active_background_task() is False
     assert not any(
         block.role == "background" for block in runtime.store.snapshot().active_blocks
     )

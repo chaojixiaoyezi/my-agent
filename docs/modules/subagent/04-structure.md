@@ -6,6 +6,18 @@
 `task_node_closeout` 副本。canonical task/result 是唯一结果事实源；父代理通过结构化 status、blockers、
 findings、artifact refs 和 result payload 阅读子代理工作，再由模型向用户汇总。
 
+## 2026-08-24 活动投影的索引选择与 canonical 精确读取
+
+- LocalStore `legacy_agent_runs` 只负责按 `root_task_id/parent_run_id/depth` 找出候选 run id；它是
+  可重建 read projection，不拥有 lifecycle、结果、Compact、权限或完成事实。
+- `SubAgentPersistenceService.list_runs_by_ids_report` 是候选 id 到 canonical `task.json` 的唯一批量精确
+  读取入口。它逐个校验 opaque id、保留缺失/损坏记录的结构化错误，并返回与 `list_runs_report` 相同的
+  独立 `SubAgentTask` 副本。调用方仍须按 canonical `root_id/parent_id/depth` 复核关系。
+- 进程内 parsed-state cache 由 persistence service 唯一持有，以 `st_mtime_ns` 失效并由 `RLock` 保护；
+  这只减少 ThreadingHTTPServer 并发展示读取的重复解析，不改变跨进程写入、文件权威或 save 的投影同步。
+- fake/旧适配器没有 LocalStore 或 exact-id reader 时，`conversation_agent_activity` 可退回既有全量读取；
+  该分支只为接口兼容，产品 Gateway 主链必须走索引选择，不能再让每个 TUI 快照复制全部历史 run。
+
 ## 2026-08-24 Coordinator policy 与后台展示事件边界
 
 - `agent_core/orchestration/coordinator_policy.py` 是主代理工具发现、任意层 coordinator runner 和创建回执

@@ -78,12 +78,15 @@ def _tui_handle_expand_command(raw: str, assistant_outputs: list[str]) -> bool:
     return True
 
 
+# LLM: Exit stops only this TUI process and its owned polling/worker threads. Durable Gateway work
+# and the canonical session remain alive; cancelling work must continue to use /stop or Esc.
+# 函数用途: 请求关闭当前界面；若还有任务则明确说明它们会在 Gateway 后台继续运行。
 def _tui_request_exit(refs: TuiExitRefs) -> None:
     refs.shutting_down_ref[0] = True
     with refs.state_lock:
         active = refs.pending_jobs_ref[0] + (1 if refs.is_running_ref[0] else 0)
     if active:
-        _cprint(f"Waiting for {active} background task(s) before exit.")
+        _cprint(f"正在退出界面；{active} 个任务继续由 Gateway 后台运行。")
     refs.stop_event.set()
 
 
@@ -144,8 +147,9 @@ def _tui_control_state(params: TuiHandleCommandParams) -> ChatControlState:
         )
 
 
-# LLM: app result 只用于 startup readiness 的明确失败码；正常退出/EOF 仍返回 0，finally 始终恢复标题和输出 sink。
-# 函数用途: 运行 TUI 事件循环，并执行 worker/preflight 的 pre-run 启动器。
+# LLM: App exit always stops client-owned refresh/poll threads and leaves the durable session
+# resumable. The result is reserved for startup readiness failures; normal exit/EOF returns zero.
+# 函数用途: 运行 TUI 事件循环，退出时恢复终端、保存会话并打印精确恢复命令。
 def _run_tui_loop(ctx: TuiLoopContext) -> int:
     from .rendering import set_tui_output_sink
 
@@ -163,8 +167,11 @@ def _run_tui_loop(ctx: TuiLoopContext) -> int:
         set_tui_output_sink(None)
         ctx.refresh_stop.set()
     ctx.stop_event.set()
-    _cprint("\nGoodbye.")
     ctx.session_manager.touch_session(ctx.current_session_id, channel="chat")
+    _cprint(
+        "\n已退出界面；会话与 Gateway 后台任务已保留。\n"
+        f"恢复：my-agent resume {ctx.current_session_id}"
+    )
     return result
 
 

@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import copy
 import json
+import threading
 import time
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -90,12 +92,17 @@ class SubAgentListRunsReport:
 class SubAgentPersistenceService:
     """Read and write SubAgentTask records for SubAgentManager."""
 
+    # LLM: The persistence service owns one process-local parsed-state cache. Every list/read
+    # projection may share it, but callers always receive deep copies and canonical files remain
+    # authoritative across processes.
+    # 函数用途: 初始化子代理持久化服务及线程安全的解析缓存，供 Gateway 并发状态查询复用。
     def __init__(self, manager: Any):
         self.manager = manager
         # mtime 缓存:子代理 task.json 未变时复用已解析对象,避免每轮 dispatch 全量重读+重解析。
         # 大量历史 DONE 子代理累积时(实测 600 个全量 745ms)命中后只 stat。返回 deepcopy 副本,
         # 调用方改了也不污染缓存(无需逐一审 33 处调用方是否只读)。
-        self._run_cache: dict[str, tuple[float, SubAgentTask]] = {}
+        self._run_cache: dict[str, tuple[int, SubAgentTask]] = {}
+        self._run_cache_lock = threading.RLock()
 
     @property
     def workspace(self) -> Path:
@@ -189,19 +196,59 @@ class SubAgentPersistenceService:
         runs.sort(key=lambda item: item.updated_at or item.created_at, reverse=True)
         return SubAgentListRunsReport(runs=runs, load_errors=load_errors)
 
-    def _cached_run_copy(self, run_id: str, task_file: Path) -> SubAgentTask:
-        """命中(mtime 未变)→复用缓存解析结果;未命中→读盘并缓存。一律返回 deepcopy 副本。"""
-        mtime = task_file.stat().st_mtime
-        cached = self._run_cache.get(run_id)
-        if cached is None or cached[0] != mtime:
-            self._run_cache[run_id] = (mtime, self.load(run_id))
-        return copy.deepcopy(self._run_cache[run_id][1])
+    # LLM: Exact-id reads are the canonical-data half of an indexed lookup. The caller may use a
+    # read projection to select ids, but every returned task is reloaded from its exact canonical
+    # locator and malformed/missing rows remain structured errors rather than guessed absence.
+    # 函数用途: 只读取给定的子代理记录，避免活动面板为几名直属子代理扫描并复制全部历史任务。
+    def list_runs_by_ids_report(
+        self,
+        run_ids: Iterable[str],
+    ) -> SubAgentListRunsReport:
+        runs: list[SubAgentTask] = []
+        load_errors: list[dict[str, Any]] = []
+        selected = list(
+            dict.fromkeys(
+                str(run_id or "").strip()
+                for run_id in run_ids
+                if str(run_id or "").strip()
+            )
+        )
+        for raw_run_id in selected:
+            task_file: Path | None = None
+            try:
+                run_id = validate_opaque_id(raw_run_id, kind="run_id")
+                task_file = self.workspace / run_id / "task.json"
+                if not task_file.exists():
+                    raise FileNotFoundError(f"子代理记录不存在: {run_id}")
+                runs.append(self._cached_run_copy(run_id, task_file))
+            except Exception as exc:
+                report = runtime_error_report(exc, context="subagents.load_selected")
+                report["run_id"] = raw_run_id
+                report["path"] = str(task_file) if task_file is not None else ""
+                load_errors.append(report)
+        runs.sort(key=lambda item: item.updated_at or item.created_at, reverse=True)
+        return SubAgentListRunsReport(runs=runs, load_errors=load_errors)
 
+    # LLM: Cache access is serialized because ThreadingHTTPServer may render several TUI/Web
+    # projections concurrently. Nanosecond mtimes invalidate parsed objects; deep copies preserve
+    # the existing rule that callers cannot mutate shared cached state.
+    # 函数用途: 线程安全地复用未变化的子代理解析结果，并给调用方返回独立副本。
+    def _cached_run_copy(self, run_id: str, task_file: Path) -> SubAgentTask:
+        with self._run_cache_lock:
+            mtime_ns = task_file.stat().st_mtime_ns
+            cached = self._run_cache.get(run_id)
+            if cached is None or cached[0] != mtime_ns:
+                self._run_cache[run_id] = (mtime_ns, self.load(run_id))
+            return copy.deepcopy(self._run_cache[run_id][1])
+
+    # LLM: Eviction shares the cache lock with exact-id reads so a concurrent full scan cannot
+    # remove an entry between lookup and deepcopy. It affects only the volatile parse cache.
+    # 函数用途: 清理磁盘上已不存在的历史 run 缓存，避免并发查询报错或长期占用内存。
     def _evict_run_cache(self, seen: set[str]) -> None:
-        """清理已从磁盘消失的 run 的缓存项,防内存随历史增长泄漏。"""
-        if len(self._run_cache) > len(seen):
-            for stale in [rid for rid in self._run_cache if rid not in seen]:
-                self._run_cache.pop(stale, None)
+        with self._run_cache_lock:
+            if len(self._run_cache) > len(seen):
+                for stale in [rid for rid in self._run_cache if rid not in seen]:
+                    self._run_cache.pop(stale, None)
 
     def save(self, task: SubAgentTask, *, preserve_child_links: bool = True) -> None:
         """Persist a task as JSON plus human-readable Markdown."""
