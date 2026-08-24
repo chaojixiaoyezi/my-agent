@@ -13,7 +13,11 @@ _MAX_MUTATING_CALLS = 64
 _MAX_VISIBLE_OPERATION_GROUPS = 12
 _MAX_REFS_PER_CALL = 4
 _MAX_FOLLOWUP_STALE_ROOTS = 4
+_MAX_UNRESOLVED_RECONCILIATION_OPERATIONS = 8
 _MUTATING_EFFECTS = frozenset({"mutating", "dangerous"})
+_UNRESOLVED_EFFECT_STATUSES = frozenset(
+    {"failed", "unknown", "cancelled", "incomplete"}
+)
 _PRE_HANDLER_FAILURE_STAGES = frozenset(
     {"protocol", "authorization", "validation", "runtime_gate"}
 )
@@ -245,6 +249,75 @@ def incomplete_final_mutation_facts(
         "schema": "incomplete_final_mutation.v1",
         "latest_mutating_operation": latest_public,
         "operation_verification": public_operation_verification(verification),
+    }
+
+
+# LLM: Earlier effect-bearing failures remain relevant when a later, different
+# operation succeeds.  This projection is a bounded model reconciliation input,
+# never a task-completion verdict and never a parser over the final prose.
+# 函数用途: 找出被后续成功操作盖住的失败、未知、取消或未结束操作，供主模型在自然收口前复核一次。
+def prior_unresolved_mutation_facts(
+    agent: object,
+    records: list[dict[str, object]] | None,
+) -> dict[str, object]:
+    calls = [
+        _execution_call(agent, record)
+        for record in list(records or [])
+        if isinstance(record, dict)
+    ]
+    mutating = [item for item in calls if item["effect"] in _MUTATING_EFFECTS]
+    operations = _deduplicated_operations(mutating)
+    if not operations:
+        return {}
+    latest_status = str(
+        operations[-1].get("verification_status") or "unverified"
+    )
+    if latest_status in _UNRESOLVED_EFFECT_STATUSES:
+        # The existing latest-mutation path owns this case, including its
+        # bounded repair/fallback behavior.  This helper only closes the hole
+        # where a later success hides an earlier unresolved effect.
+        return {}
+    unresolved = [
+        item
+        for item in operations
+        if str(item.get("verification_status") or "unverified")
+        in _UNRESOLVED_EFFECT_STATUSES
+        and item.get("handler_executed") is True
+    ]
+    if not unresolved:
+        return {}
+    latest_unresolved_index = max(
+        index
+        for index, item in enumerate(operations)
+        if item in unresolved
+    )
+    later_succeeded_count = sum(
+        str(item.get("verification_status") or "") == "succeeded"
+        for item in operations[latest_unresolved_index + 1 :]
+    )
+    counts = {
+        status: sum(
+            str(item.get("verification_status") or "") == status
+            for item in unresolved
+        )
+        for status in sorted(_UNRESOLVED_EFFECT_STATUSES)
+    }
+    return {
+        "schema": "prior_unresolved_mutation.v1",
+        "status": "needs_model_reconciliation",
+        "unresolved_operation_count": len(unresolved),
+        "counts": counts,
+        "later_succeeded_operation_count": later_succeeded_count,
+        "unresolved_operations": unresolved[
+            -_MAX_UNRESOLVED_RECONCILIATION_OPERATIONS:
+        ],
+        "omitted_unresolved_operation_count": max(
+            0,
+            len(unresolved) - _MAX_UNRESOLVED_RECONCILIATION_OPERATIONS,
+        ),
+        "operation_verification": public_operation_verification(
+            build_operation_verification(agent, records)
+        ),
     }
 
 
@@ -790,6 +863,7 @@ __all__ = [
     "incomplete_final_mutation_facts",
     "post_failure_workspace_mutation_followup_facts",
     "post_failure_workspace_mutation_followup_signature",
+    "prior_unresolved_mutation_facts",
     "public_operation_verification",
     "redact_executed_operation_labels",
     "render_current_turn_execution_facts",

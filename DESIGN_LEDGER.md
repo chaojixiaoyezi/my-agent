@@ -1317,8 +1317,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 
 ## 2026-08-24 会话根 Todo 持续投影
 
-状态：`.7` fresh Prompt 4 r5 已定位真实根因；本地 focused 回归通过，等待 r5 主代理唤醒证据完成后发布，
-再用全新 TUI 验证固定 Todo 不随前台 turn 收起。
+状态：`84c6b90` 已发布并部署到 `.7`；fresh Prompt 4 r6 已在真实子代理运行期通过 TUI 复验。
 
 - 真实失败链：root 先建立 6 项 canonical `task_progress.v1`，创建 4 个 child 后 TUI 的固定 Todo 整块消失；
   权威账本仍保留 6 项，但 `/client/notices` 的 `conversation_agent_activity.v5.task_progress_items` 返回空列表。
@@ -1332,3 +1331,26 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 兼容与安全边界：缺少 thread loader 或旧测试 fixture 没有 `workspace_task_id` 时，仍保留既有有界 link
   fallback；真实会话存在 preferred id 时只做 exact join，不解析 goal、标题、路径或“子代理”等正文。
   投影仍只读 `task_progress.v1`，不改变 Todo 状态、任务完成、调度、权限或验收。
+- 真机结果：`.7` 唯一 Gateway、MiniMax-M2.7、tmux `ma-84c6b90-p4-fzf-r6-todo` 只提交一次原样
+  Prompt 4；main 进入“等待 4 个子代理”后，固定 Todo 仍显示 `完成 1/9 · 进行中 6` 和四行窗口，下面
+  同时展示 4 个直属 child。该证据直接覆盖修复前“child link 更新更晚就把 root Todo 清空”的失败窗口。
+
+## 2026-08-24 较早未决操作的 会话运行时 式软核对
+
+状态：真实 Prompt 4 r5 已给出反例；本地实现与 focused 回归通过，待发布后用新的原样重型 TUI 终态复验。
+
+- 真实失败链：r5 的 root 两次执行 `npm test`/Jest 都以 typed `unknown + TOOL_TIMEOUT` 收口，随后不同的
+  build、自写 E2E 和算法脚本成功。最终 `operation_verification` 因 2 个 unknown 保持 `uncertain`，模型却
+  把不同测试的成功写成“构建、测试均验证通过”。这不是目录扫描能解决的质量验收问题，而是前序未决
+  工具事实被后序成功掩盖后，模型没有在自然 final 前重新对账。
+- 会话运行时 对照：`会话运行时-rs/core/src/tools/context.rs` 把每个结果保持为带 `success` 的原生
+  `FunctionCallOutput`；`session/turn.rs` 在无 follow-up 的最终草稿处运行 stop hook，blocking hook 的
+  continuation 会作为新的 response item 回到同一个 active turn 再采样。my-agent 保留现有逐轮工具 IR，
+  并在跨 background wake 的扁平 archive 上补同类有界 continuation。
+- 新软核对只读取当前请求 canonical operation records：若较早 effect-bearing 操作仍为
+  `failed/unknown/cancelled/incomplete`，而最后一个操作已是其它终态，第一次自然 final 会收到有界未决项、
+  操作引用和被退回草稿。模型仍保有原工具，自主选择复查、修复或如实披露；同一签名不重复，整个 active
+  turn 最多两次。
+- 该机制不是机器验收：不解析 final 正文，不理解“测试/完整复刻”等业务词，不扫描文件、LOC、Todo 或
+  产物，也不替模型判任务完成。`unverified` 与 `not_started` 不自动触发这条历史核对；最新操作本身未决时
+  继续由既有 completion-conflict 路径处理。即使模型复核后仍决定结束，宿主也接受其第二份自然回复。

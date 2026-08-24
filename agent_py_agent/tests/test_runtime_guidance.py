@@ -32,6 +32,7 @@ from agent_py_agent.agent.agent_core.tool_loop.completion import (
     queue_followup_after_post_failure_workspace_mutation,
     queue_interim_reply_for_active_named_work,
     queue_interim_reply_for_open_subagents,
+    queue_reconciliation_for_prior_unresolved_operations,
     queue_reply_for_audit_prepare,
     queue_reply_for_incomplete_final_mutation,
 )
@@ -1361,6 +1362,55 @@ def test_unknown_completion_conflict_keeps_fail_closed_no_tools_reply(tmp_path) 
     assert phase is not None
     assert phase["kind"] == "operation_incomplete"
     assert phase["facts"]["latest_mutating_operation"]["status"] == "unknown"
+
+
+def test_prior_unknown_operation_gets_one_codex_style_model_reconciliation(
+    tmp_path,
+) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    records = [
+        {
+            "tool": "run_command",
+            "call_id": "call-test-timeout",
+            "operation_id": "operation-test-timeout",
+            "ok": False,
+            "handler_executed": True,
+            "tool_operation_status": "unknown",
+            "effect_outcome": "unknown",
+            "error_code": "TOOL_OPERATION_OUTCOME_UNKNOWN",
+            "parameters": {"command": "npm test"},
+        },
+        {
+            "tool": "run_command",
+            "call_id": "call-build-success",
+            "operation_id": "operation-build-success",
+            "ok": True,
+            "handler_executed": True,
+            "tool_operation_status": "succeeded",
+            "effect_outcome": "succeeded",
+            "parameters": {"command": "npm run build"},
+        },
+    ]
+    params = _tool_loop_params(
+        context_scope="conversation",
+        live_archive_state={},
+        archive_tool_calls=records,
+    )
+    response = ModelResponse(text="所有测试和构建均已通过。", backend="fake")
+
+    assert queue_reconciliation_for_prior_unresolved_operations(
+        agent,
+        params,
+        response=response,
+    ) is True
+    assert "prior_unresolved_reconciliation.v1" in params.tool_context[-1]
+    assert "所有测试和构建均已通过" in params.tool_context[-1]
+    assert "不是机器验收结论" in params.tool_context[-1]
+    assert queue_reconciliation_for_prior_unresolved_operations(
+        agent,
+        params,
+        response=response,
+    ) is False
 
 
 def test_new_failed_call_id_does_not_reset_completion_repair_budget(tmp_path) -> None:

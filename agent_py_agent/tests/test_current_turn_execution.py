@@ -14,6 +14,7 @@ from agent_py_agent.agent.tooling.operation_verification import (
     incomplete_final_mutation_facts,
     post_failure_workspace_mutation_followup_facts,
     post_failure_workspace_mutation_followup_signature,
+    prior_unresolved_mutation_facts,
     public_operation_verification,
     redact_executed_operation_labels,
     render_current_turn_execution_facts,
@@ -471,6 +472,40 @@ def test_unknown_tail_still_overrides_prior_succeeded_effect() -> None:
     assert facts["latest_mutating_operation"]["status"] == "unknown"
 
 
+def test_prior_unknown_effect_survives_a_later_different_success() -> None:
+    unknown = {
+        "tool": "remember",
+        "call_id": "call-unknown",
+        "operation_id": "operation-unknown",
+        "ok": False,
+        "handler_executed": True,
+        "tool_operation_status": "unknown",
+        "effect_outcome": "unknown",
+        "error_code": "TOOL_OPERATION_OUTCOME_UNKNOWN",
+        "parameters": {"action": "add"},
+    }
+    succeeded = {
+        "tool": "remember",
+        "call_id": "call-succeeded",
+        "operation_id": "operation-succeeded",
+        "ok": True,
+        "handler_executed": True,
+        "tool_operation_status": "succeeded",
+        "effect_outcome": "succeeded",
+        "parameters": {"action": "replace"},
+    }
+
+    facts = prior_unresolved_mutation_facts(_agent(), [unknown, succeeded])
+
+    assert facts["schema"] == "prior_unresolved_mutation.v1"
+    assert facts["unresolved_operation_count"] == 1
+    assert facts["later_succeeded_operation_count"] == 1
+    assert facts["counts"]["unknown"] == 1
+    assert facts["unresolved_operations"][0]["call_id"] == "call-unknown"
+    assert facts["operation_verification"]["status"] == "uncertain"
+    assert prior_unresolved_mutation_facts(_agent(), [succeeded, unknown]) == {}
+
+
 def test_failed_call_then_final_workspace_write_requests_one_soft_followup() -> None:
     records = [
         {
@@ -783,7 +818,12 @@ class _FailedMutationRepairBackend(_FailedMutationFalseClaimBackend):
                     "input": {},
                 }],
             )
-        assert self.calls == 4
+        if self.calls == 4:
+            return ModelResponse(text="修复和复验已经完成。", backend=self.name)
+        assert self.calls == 5
+        visible = _model_visible_text(prompt, messages)
+        assert "prior_unresolved_reconciliation.v1" in visible
+        assert "修复和复验已经完成" in visible
         return ModelResponse(text="修复和复验已经完成。", backend=self.name)
 
 
@@ -809,7 +849,7 @@ def test_failed_final_mutation_can_repair_with_tools_in_same_active_turn(tmp_pat
         task_id="task-failed-mutation-repair",
     )
 
-    assert backend.calls == 4
+    assert backend.calls == 5
     assert result.response == "修复和复验已经完成。"
     assert result.runtime_status == "ok"
     assert result.operation_verification["status"] == "partial"

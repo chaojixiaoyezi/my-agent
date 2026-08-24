@@ -742,3 +742,17 @@ Todo 会话根投影回归必须覆盖同一 thread 同时存在较早 root link
 ```bash
 python3 -m pytest agent_py_agent/tests/test_conversation_agent_activity.py agent_py_agent/tests/test_background_notice_display.py -q --tb=short
 ```
+
+`84c6b90` 部署后的 fresh Prompt 4 r6 使用 `.7` 唯一 Gateway、MiniMax-M2.7、tmux
+`ma-84c6b90-p4-fzf-r6-todo`，只输入一次原样 prompt。main 进入“等待 4 个子代理”时，Todo 仍稳定显示
+`完成 1/9 · 进行中 6`，四行任务窗口和四名 child 同时可见，根 Todo 持续投影通过真实 TUI 回归。
+
+较早未决操作的最终软核对要覆盖 r5 的真实形态：一个 effect-bearing 调用 typed `unknown`，随后另一个
+不同 operation `succeeded`，首份最终草稿仍必须带原工具能力回到同一模型，并同时看到未决 operation、
+后续成功计数和被退回草稿；相同签名只触发一次。若最新 operation 自身仍未决，继续由既有
+completion-conflict 负责；task-local child、只有 `unverified` 或纯 `not_started` 的历史不新增这条 root
+软核对。focused 入口：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_current_turn_execution.py agent_py_agent/tests/test_runtime_guidance.py -q --tb=short
+```

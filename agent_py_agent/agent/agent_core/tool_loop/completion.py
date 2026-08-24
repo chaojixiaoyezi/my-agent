@@ -21,6 +21,7 @@ from ...tooling.operation_verification import (
     incomplete_final_mutation_facts,
     post_failure_workspace_mutation_followup_facts,
     post_failure_workspace_mutation_followup_signature,
+    prior_unresolved_mutation_facts,
     public_operation_verification,
 )
 from .._runtime_params import ToolLoopExecuteParams
@@ -34,7 +35,9 @@ _POST_FAILURE_MUTATION_FOLLOWUP_SIGNATURE_KEY = (
     "post_failure_workspace_mutation_followup_signature"
 )
 _COMPLETION_CONFLICT_REPAIR_STATE_KEY = "completion_conflict_repair"
+_PRIOR_UNRESOLVED_RECONCILIATION_STATE_KEY = "prior_unresolved_reconciliation"
 _MAX_COMPLETION_CONFLICT_REPAIRS = 2
+_MAX_PRIOR_UNRESOLVED_RECONCILIATIONS = 2
 _MAX_COMPLETION_CONFLICT_DRAFT_CHARS = 1200
 _REPAIRABLE_COMPLETION_CONFLICT_STATUSES = frozenset({"failed", "not_started"})
 
@@ -298,6 +301,79 @@ def queue_reply_for_incomplete_final_mutation(
         response=response,
         operation_facts=operation_facts,
         tool_rounds=tool_rounds,
+    )
+    return True
+
+
+# LLM: 会话运行时 keeps every function-call output in the turn and lets a blocking
+# stop hook return a continuation prompt to the same model.  Background wakes
+# flatten several execution slices, so an earlier unresolved effect can sit
+# behind a later success.  Re-present that typed conflict at most twice; do not
+# infer task quality, rewrite the draft, or create a machine acceptance gate.
+# 函数用途: 最终草稿前仍有较早失败或结果未知的操作时，把事实和草稿交回同一模型做一次有界核对。
+def queue_reconciliation_for_prior_unresolved_operations(
+    agent: object,
+    params: ToolLoopExecuteParams,
+    *,
+    response: ModelResponse,
+) -> bool:
+    if str(getattr(params, "context_scope", "") or "") == "task_local":
+        return False
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return False
+    facts = prior_unresolved_mutation_facts(
+        agent,
+        list(getattr(params, "archive_tool_calls", None) or []),
+    )
+    if not facts:
+        return False
+    unresolved = facts.get("unresolved_operations")
+    unresolved = unresolved if isinstance(unresolved, list) else []
+    signature = json.dumps(
+        [
+            (
+                str(item.get("operation_id") or item.get("call_id") or ""),
+                str(item.get("verification_status") or ""),
+            )
+            for item in unresolved
+            if isinstance(item, dict)
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    prior_state = state.get(_PRIOR_UNRESOLVED_RECONCILIATION_STATE_KEY)
+    prior_state = prior_state if isinstance(prior_state, dict) else {}
+    attempts = _nonnegative_int(prior_state.get("attempts"))
+    if (
+        str(prior_state.get("signature") or "") == signature
+        or attempts >= _MAX_PRIOR_UNRESOLVED_RECONCILIATIONS
+    ):
+        return False
+    attempts += 1
+    state[_PRIOR_UNRESOLVED_RECONCILIATION_STATE_KEY] = {
+        "attempts": attempts,
+        "signature": signature,
+    }
+    envelope = {
+        "schema": "prior_unresolved_reconciliation.v1",
+        "reconciliation_attempt": attempts,
+        "facts": facts,
+        "rejected_draft": _bounded_reply_fact_text(
+            str(getattr(response, "text", "") or ""),
+            _MAX_COMPLETION_CONFLICT_DRAFT_CHARS,
+        ),
+    }
+    params.tool_context.append(
+        "# Prior unresolved operation reconciliation\n"
+        "```json\n"
+        + json.dumps(envelope, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n```\n"
+        "这是当前请求的结构化操作事实和刚才的最终草稿，不是机器验收结论。较早的副作用操作仍有"
+        "失败、结果未知、取消或未结束，后续另一项成功不能自动把它们改成成功。请回看对应工具输出或"
+        "引用并自主核对：已被后续证据真正解决的，要明确说明依据；仍未解决的，就继续修复/复验或在"
+        "最终回复中如实披露。不要把不同的成功操作当作这些未决操作已经成功。核对后仍由你自然决定"
+        "继续调用工具还是给出最终回复。"
     )
     return True
 
@@ -895,6 +971,7 @@ __all__ = [
     "queue_interim_reply_for_active_named_work",
     "queue_interim_reply_for_open_subagents",
     "queue_interim_reply_for_tool_round_limit",
+    "queue_reconciliation_for_prior_unresolved_operations",
     "queue_reply_for_incomplete_final_mutation",
     "queue_reply_for_audit_prepare",
     "task_local_wait_response_for_open_subagents",

@@ -79,6 +79,7 @@ from .tool_loop.completion import (
     queue_interim_reply_for_active_named_work,
     queue_interim_reply_for_open_subagents,
     queue_interim_reply_for_tool_round_limit,
+    queue_reconciliation_for_prior_unresolved_operations,
     queue_reply_for_audit_prepare,
     queue_reply_for_incomplete_final_mutation,
     task_local_wait_response_for_open_subagents,
@@ -1061,6 +1062,12 @@ def _execute_tool_loop_service(service: ToolLoopService, params: ToolLoopExecute
                 params,
                 response=final_response,
                 tool_rounds=tool_rounds,
+            ):
+                continue
+            if queue_reconciliation_for_prior_unresolved_operations(
+                service._agent,
+                params,
+                response=final_response,
             ):
                 continue
             if queue_followup_after_post_failure_workspace_mutation(
