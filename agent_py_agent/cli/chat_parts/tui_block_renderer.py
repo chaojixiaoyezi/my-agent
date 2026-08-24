@@ -2229,6 +2229,13 @@ def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> Form
         if display_width_text(text) > context.width:
             text = "  Detailed · ctrl+o" + (" · ctrl+e all" if not context.show_all else "")
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
+    # 网络回执、复制和停止反馈必须短暂覆盖常驻快捷键，否则用户只会看见
+    # “Ctrl+G/Esc”而误以为刚才的输入或操作没有发生。
+    if context.notice:
+        return ((
+            "class:tui-muted",
+            _fit_text("  " + context.notice, context.width, "left").rstrip(),
+        ),)
     if context.focused_agent_run_id:
         if context.focused_agent_status in {
             "DONE",
@@ -2244,6 +2251,11 @@ def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> Form
         else:
             text = "  Ctrl+G 返回父代理 · Esc 停止当前子代理"
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
+    if context.selected_agent_run_id:
+        text = "  ↑↓ 选择子代理 · Enter 查看"
+        if snapshot.status.phase in {"running", "interrupting"}:
+            text += " · Esc 停止主代理"
+        return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
     if snapshot.status.phase in {"running", "interrupting"}:
         text = "  esc to interrupt"
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
@@ -2254,14 +2266,7 @@ def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> Form
     ):
         text = "  /stop to interrupt background task"
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
-    if context.notice:
-        return ((
-            "class:tui-muted",
-            _fit_text("  " + context.notice, context.width, "left").rstrip(),
-        ),)
     text = "  ? for shortcuts"
-    if context.selected_agent_run_id:
-        text = "  ↑↓ 选择子代理 · Enter 查看"
     return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
 
 

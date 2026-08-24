@@ -7,8 +7,9 @@
 - `Esc` 只停止当前查看的运行中代理；返回父代理使用 `Ctrl+G`，`Alt+←` 与 `/back` 仅兼容。底部提示会明确
   当前动作，前端返回不改变 task/run/session，也不会把完成 child 静默复活。
 - Gateway 已加入 owner 树内 exact view/guidance/stop 服务，child 公开过程改为 process-shared 有界事件流；
-  历史查看与写控制采用不同授权强度。当前 80 项 focused 回归通过，尚未推送、部署或取得 `.7` 真 TUI
-  按键证据，不能标为真机完成。
+  历史查看与写控制采用不同授权强度。`53ff260` 首次真 TUI 已证明 `↓/Enter/Ctrl+G/Esc` 和两条 exact child
+  guidance 均落账，同时暴露常驻 footer 遮住发送回执、root 选中后仍显示旧 Esc 提示；本地后续候选已调整
+  footer 优先级，待严格门、二次部署和同一长任务复验后才能标为完成。
 
 ## 2026-08-24 Prompt 4 r9：Todo 13/16 却假完成，根因是 no-save 绕过停止核对（本地修复候选）
 

@@ -11,6 +11,7 @@ from agent_py_agent.cli.chat_parts.tui_block_renderer import (
     fragments_text,
     render_tui_snapshot,
 )
+from agent_py_agent.cli.chat_parts.tui_events import TuiEventSequencer
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
 
 
@@ -176,6 +177,19 @@ def test_child_footer_makes_back_and_escape_semantics_explicit() -> None:
     assert fragments_text(running_frame.footer).strip() == (
         "Ctrl+G 返回父代理 · Esc 停止当前子代理"
     )
+    running_notice = render_tui_snapshot(
+        running.store.snapshot(),
+        TuiRenderContext(
+            width=100,
+            focused_agent_run_id="child-a",
+            focused_agent_name="worker-a",
+            focused_agent_status="RUNNING",
+            notice="已发送给当前子代理：继续检查操作手感",
+        ),
+    )
+    assert fragments_text(running_notice.footer).strip() == (
+        "已发送给当前子代理：继续检查操作手感"
+    )
 
     terminal = TuiRuntime("nav-footer-terminal")
     terminal.update_background_activity(
@@ -193,4 +207,19 @@ def test_child_footer_makes_back_and_escape_semantics_explicit() -> None:
     )
     assert fragments_text(terminal_frame.footer).strip() == (
         "Ctrl+G 返回父代理 · 已结束，只读"
+    )
+
+
+def test_selected_child_footer_overrides_root_running_hint() -> None:
+    runtime = TuiRuntime("nav-selected-running")
+    sequencer = TuiEventSequencer("nav-selected-running")
+    runtime.store.publish(sequencer.emit("turn_started", "started", "turn"))
+
+    frame = render_tui_snapshot(
+        runtime.store.snapshot(),
+        TuiRenderContext(width=100, selected_agent_run_id="child-a"),
+    )
+
+    assert fragments_text(frame.footer).strip() == (
+        "↑↓ 选择子代理 · Enter 查看 · Esc 停止主代理"
     )

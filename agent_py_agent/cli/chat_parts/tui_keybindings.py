@@ -1414,7 +1414,10 @@ def _tui_submit_agent_input(
                 # 因此撤掉等待回执后显示普通用户消息，不伪造 steer_promoted。
                 runtime.cancel_active_turn_input(message_id)
                 runtime.enqueue_prompt(message_id, display_text, queued=False)
-                runtime.set_notice("已发送给当前子代理", duration_seconds=1.5)
+                runtime.set_notice(
+                    _agent_guidance_sent_notice(display_text),
+                    duration_seconds=2.5,
+                )
                 app.invalidate()
                 return
             status = _safe_http_status(result)
@@ -1438,6 +1441,16 @@ def _tui_submit_agent_input(
     threading.Thread(target=deliver, daemon=True).start()
     runtime.set_notice("正在确认子代理消息…", duration_seconds=1.2)
     app.invalidate()
+
+
+# LLM: The acknowledgement is a bounded display preview of the exact submitted
+# user text. It confirms mailbox acceptance only and carries no delivery authority.
+# 函数用途: 生成输入框下方短暂可见的子代理消息发送回执。
+def _agent_guidance_sent_notice(text: str) -> str:
+    preview = " ".join(str(text or "").split())
+    if len(preview) > 32:
+        preview = preview[:31].rstrip() + "…"
+    return f"已发送给当前子代理：{preview}" if preview else "已发送给当前子代理"
 
 
 # LLM: Failed delivery restoration runs on the prompt_toolkit event loop. It
