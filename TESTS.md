@@ -52,6 +52,12 @@ python3 -m pytest agent_py_agent/tests/test_orchestration_create_subagents_idemp
 执行器仍由 active-turn claim 控制。不能恢复 `SUBAGENT_ACTIVE_LINEAGE_EXISTS`，也不能增加 Audit、任务名
 或 prompt 关键词绕过。
 
+`fb75b68` 的 fresh Prompt 4 r9 使用 `.7` 唯一 Gateway、MiniMax-M2.7、tmux
+`ma-fb75b68-p4-lazygit-r9-phased` 与固定 `lazygit@ea916395`。首批 3 名 child 自然完成，其中 worker-3
+真实 Compact 1 次；main 自动醒来并通过一个 items 调用创建第二批 worker-4/5/6，没有活跃血缘错误。
+这份直接证据覆盖“后台第二批”，但不覆盖“先创建一名后，在其仍活跃时发第二次独立创建调用”；后者继续
+以 focused 回归为当前证据，不得把同批原子创建夸成 exact 真机覆盖。
+
 Prompt 4 r6 使用 `.7` 唯一 Gateway、MiniMax-M2.7、tmux `dsh-p4-lazygit-r6-ea91639` 和固定
 `jesseduffield/lazygit@ea916395`，只输入一次原样 prompt。10 个 child 全部自然 DONE、3 个真实 Compact，
 main 自主补派并把 Todo 全部打钩；但 canonical 产物只有 9,543 行、55 个空桩、5 个测试定义，8 项集成

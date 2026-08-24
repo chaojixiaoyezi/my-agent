@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-08-24 Prompt 4 r8：第二批合法派工被活跃血缘门误拦（本地修复候选）
+## 2026-08-24 Prompt 4 r8/r9：活跃血缘硬门已删除并通过后台第二批真 TUI
 
 - `31648ce` 已推送并部署到 `192.0.2.7` 唯一 Gateway；fresh tmux
   `ma-31648ce-p4-lazygit-r8-resume` 在固定 `lazygit@ea916395` 上只输入一次原样 Prompt 4。该源码排除
@@ -8,10 +8,14 @@
 - 首批 4 名 child 全部自然 DONE，两名真实 Compact 后继续，root 自然醒来并更新 Todo 4/9；随后成功创建
   worker-5，却把其后的不同职责 worker-6/7 以 `SUBAGENT_ACTIVE_LINEAGE_EXISTS` 拒绝。容量当时仍有空位，
   所以不是模型服务或 runner 启动失败，而是后台来源只要看见同 parent 的任一活跃 sibling 就封死第二批。
-- 对照 会话运行时 `multi_agents_v2/spawn.rs`、`agent/control/spawn.rs` 与 registry 槽位测试后，本地候选删除该
+- 对照 会话运行时 `multi_agents_v2/spawn.rs`、`agent/control/spawn.rs` 与 registry 槽位测试后，`fb75b68` 删除该
   活跃血缘硬门及其 Audit 特例和错误码。同一父级可多次 spawn；结构化幂等复用、单次 4、会话 6、
-  active-turn 租约和 owner 权限墙均保留。派工/容量/幂等/后台唤醒 focused suite 与本地严格 gate 已通过；
-  推送部署和 fresh TUI 待完成。
+  active-turn 租约和 owner 权限墙均保留。派工/容量/幂等/后台唤醒 focused suite 与本地严格 gate 已通过，
+  已推送并部署到 `.7` 唯一 Gateway；有效模型为 `MiniMax-M2.7`。
+- fresh tmux `ma-fb75b68-p4-lazygit-r9-phased` 只输入一次原样 Prompt 4。首批 3 名 child 自然 DONE，
+  worker-3 从约 109k Compact 到 41.4k 后继续完成；main 自然醒来、检查产物和构建，再一次创建第二批 3 名
+  worker-4/5/6，未再出现活跃血缘错误。该次第二批是单个 items 调用；“已有一名活跃 sibling 时第二次
+  独立创建”的 exact 分支由 focused 回归直接覆盖，r9 尚未自然覆盖，不能混写成直接真机证据。
 
 ## 2026-08-24 Prompt 4 r7：富工具展示与截断 child 续跑提交桥已发布
 

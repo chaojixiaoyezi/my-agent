@@ -1,6 +1,6 @@
 # Subagent Progress
 
-## 2026-08-24 r8 删除阻断合法第二批的活跃血缘硬门（本地修复候选）
+## 2026-08-24 r8/r9 删除阻断合法第二批的活跃血缘硬门（已部署，真 TUI 部分覆盖）
 
 - `31648ce` 的 fresh Prompt 4 使用合格的 `lazygit@ea916395`：首批四名 child 全部 DONE 后，root 自然醒来；
   第二批成功创建一名 child，但后续不同职责创建被 `SUBAGENT_ACTIVE_LINEAGE_EXISTS` 拒绝，尽管 root
@@ -8,10 +8,13 @@
 - 旧门仅凭 `source=background_main_agent + 同 parent/root 存在活跃 sibling` 拒绝新 run，无法区分重复派工
   与同一权威父代理的分批扩展；普通项目因共享 parent/root 会稳定误伤。会话运行时 的 spawn 主链只按 depth、
   session capacity 和原子 slot reservation 限制，多次 spawn 不要求现有 sibling 全部结束。
-- 当前候选删除该门、对应冲突扫描、Audit 专项绕过和退休错误码。重复创建仍由 idempotency contract /
+- `fb75b68` 删除该门、对应冲突扫描、Audit 专项绕过和退休错误码。重复创建仍由 idempotency contract /
   work-scope identity 原子复用；并发后台执行者仍由现有 turn claim 拒绝；单次 4、会话 6 与 owner policy
   仍是硬资源边界。回归同时钉住“后台第二批不同工作成功”和“后台相同幂等合同只复用不重复创建”；
-  派工相关 focused suite 与本地严格 gate 已通过，待推送、单 Gateway 部署和 fresh TUI。
+  派工相关 focused suite 与本地严格 gate 已通过，已推送并部署到 `.7` 唯一 Gateway。
+- fresh r9 使用原样 Prompt 4：首批 3 名自然 DONE，main 自动醒来并用一个 items 调用创建第二批 3 名，
+  未再出现 `SUBAGENT_ACTIVE_LINEAGE_EXISTS`。该运行直接证明后台第二批主链；它没有自然形成“先创建一名、
+  该名仍活跃时再调用一次 create”的形状，因此该 exact repeated-call 分支仍以直接回归为证，等待后续自然样本。
 
 ## 2026-08-24 r7 后台展示上线，截断片段续跑桥已发布
 

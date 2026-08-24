@@ -21,13 +21,15 @@
 
 ### 会话运行时 式同一父级分批创建
 
-状态：r8 真 TUI 根因已确认；focused suite 与本地严格 gate 通过，待推送部署和 fresh TUI
+状态：`fb75b68` 已严格 gate、推送并部署；fresh r9 后台第二批通过，活跃 sibling 间的第二次独立调用待自然样本
 
 解决问题：后台 main 在第一批完成后会继续原任务；若第二批先创建一名仍在运行的 child，旧硬门会把
 其余不同职责全部当作“重复 lineage”拒绝，哪怕会话容量仍有空位。当前候选按 会话运行时 spawn 语义删除该门，
 同一 canonical parent 可多次创建到容量上限；重复请求由 typed idempotency/work-scope 复用，双执行器由
 active-turn claim 拒绝，单次 4 与会话 6 的资源门不变。fresh Prompt 4 必须看到第二批多名 child 在首名
-仍运行时继续成功创建，并核对没有重复 run、没有额外 Gateway。
+仍运行时继续成功创建，并核对没有重复 run、没有额外 Gateway。r9 已由一个 items 调用创建第二批 3 名，
+没有错误或额外 Gateway；因为三名在同一原子调用中创建，它不等价于“第二次独立调用遇到活跃 sibling”，
+后者当前由 focused 回归覆盖，继续等待真实任务自然触发。
 
 ### 会话运行时 式子代理切片续跑提交桥
 

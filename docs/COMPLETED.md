@@ -4,6 +4,13 @@
 
 最近收口重点：
 
+- 2026-08-24 `fb75b68` 已删除 会话运行时 没有的 `SUBAGENT_ACTIVE_LINEAGE_EXISTS` 硬门、冲突扫描与 Audit
+  专项绕过；同一 canonical parent 可分批创建不同 child，重复工作仍由 typed idempotency/work-scope
+  复用，单次 4、会话 6、active-turn claim 与 owner 权限墙保持不变。派工 focused suite 和本地严格 gate
+  通过，代码已推送并部署到 `.7` 唯一 Gateway。fresh r9 首批 3 名自然 DONE、一次 child Compact 后，
+  background main 成功用一个 items 调用创建第二批 3 名；独立 repeated-call+active-sibling 分支当前证据
+  仍是直接回归，等待自然 TUI 样本。
+
 - 2026-08-24 `80386ac` 已把 会话运行时 派工后 no-duplicate-work 规则集中到
   `orchestration/coordinator_policy.py`，root 工具说明、递归 coordinator runner、角色模板与
   `coordinator_execution_scope.v1` 创建回执不再互相矛盾；这只是模型软职责，不恢复机器验收或写工具硬拦。
