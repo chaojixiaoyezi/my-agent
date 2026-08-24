@@ -108,3 +108,28 @@ def test_tui_declares_block_cursor_instead_of_inheriting_terminal_shape(tmp_path
             app = make_tui_app(_app_params(tmp_path, runtime))
 
     assert app.cursor.get_cursor_shape(app) is CursorShape.BLOCK
+
+
+def test_real_prompt_toolkit_pipe_defaults_native_mouse_and_f6_toggles(tmp_path) -> None:
+    async def scenario() -> None:
+        runtime = TuiRuntime("mouse-filter-session")
+        runtime.publish_session(version="test", model="fixture", workspace=str(tmp_path))
+        with create_pipe_input() as pipe_input:
+            with create_app_session(input=pipe_input, output=DummyOutput()):
+                app = make_tui_app(_app_params(tmp_path, runtime))
+                assert app.mouse_support() is False
+                run_task = asyncio.create_task(app.run_async())
+                await asyncio.sleep(0.05)
+
+                pipe_input.send_bytes(b"\x1b[17~")
+                await asyncio.sleep(0.05)
+                assert app.mouse_support() is True
+
+                pipe_input.send_bytes(b"\x1b[17~")
+                await asyncio.sleep(0.05)
+                assert app.mouse_support() is False
+
+                app.exit(result=0)
+                assert await run_task == 0
+
+    asyncio.run(scenario())

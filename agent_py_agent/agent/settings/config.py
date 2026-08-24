@@ -299,6 +299,9 @@ class _RuntimeBudgetConfigFields:
 class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetConfigFields):
 
     agent_name: str = "myagent"
+    # 默认把鼠标留给宿主终端，保证 SSH/Apple Terminal 下原生拖选、右键菜单和粘贴可用。
+    # 开启后改用 TUI 内部鼠标滚动/点击/高亮；运行中仍可按 F6 临时切换。
+    tui_mouse_capture_default: bool = False
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     workspace_root: str | list[str] = ""
     model_backend: str = "echo"

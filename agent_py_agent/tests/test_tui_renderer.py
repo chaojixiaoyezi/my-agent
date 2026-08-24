@@ -895,6 +895,7 @@ def test_question_help_footer_maps_only_real_tui_shortcuts() -> None:
     assert "ctrl + t to expand tasks" in wide_text
     assert "ctrl + g back from child" in wide_text
     assert "ctrl + s to stash prompt" in wide_text
+    assert "F6 切换原生复制/滚轮" in wide_text
     assert wide_text.count("\n") == 5
     assert narrow_text.count("\n") > wide_text.count("\n")
 

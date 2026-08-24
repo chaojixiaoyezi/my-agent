@@ -1,5 +1,5 @@
 # LLM: 本模块保存一次 TUI 生命周期内的纯输入交互状态；它不执行命令、不写 history，也不把提示文案当控制信号。
-# 模块用途: 为 终端交互 风格的草稿 stash、Ctrl-R 历史搜索、快捷键帮助和括号粘贴提示提供线程安全状态机。
+# 模块用途: 为草稿 stash、Ctrl-R 历史搜索、快捷键帮助、鼠标模式和括号粘贴提示提供线程安全状态机。
 
 from __future__ import annotations
 
@@ -44,6 +44,7 @@ class TuiInteractionSnapshot:
     is_pasting: bool = False
     help_open: bool = False
     todos_expanded: bool = False
+    mouse_capture_enabled: bool = False
 
 
 # LLM: _HistorySearchSession 是 Ctrl-R 的内部游标；entries 已按新到旧去重，query 匹配只影响编辑器投影，不执行历史 prompt。
@@ -63,13 +64,19 @@ class _HistorySearchSession:
 # 类用途: 管理单槽 stash、可取消历史搜索、快捷键帮助和短暂粘贴状态。
 class TuiInteractionState:
     # LLM: invalidate callback 只能请求重绘，不能重入本状态机或执行业务动作。
-    # 函数用途: 创建空交互状态，并可绑定界面刷新函数。
-    def __init__(self, invalidate: Callable[[], None] | None = None) -> None:
+    # 函数用途: 创建空交互状态，设定本次 TUI 的初始鼠标模式，并可绑定界面刷新函数。
+    def __init__(
+        self,
+        invalidate: Callable[[], None] | None = None,
+        *,
+        mouse_capture_enabled: bool = False,
+    ) -> None:
         self._stash: TuiDraft | None = None
         self._history: _HistorySearchSession | None = None
         self._is_pasting = False
         self._help_open = False
         self._todos_expanded = False
+        self._mouse_capture_enabled = bool(mouse_capture_enabled)
         self._current_pasted_text_refs: tuple[TuiPastedTextRef, ...] = ()
         self._next_paste_id = 1
         self._invalidate = invalidate
@@ -94,6 +101,7 @@ class TuiInteractionState:
                 is_pasting=self._is_pasting,
                 help_open=self._help_open,
                 todos_expanded=self._todos_expanded,
+                mouse_capture_enabled=self._mouse_capture_enabled,
             )
 
     # LLM: 帮助面板只是一项显式 UI 状态；切换不能向输入 Buffer 写入 `?`、提交命令或改会话历史。
@@ -124,6 +132,15 @@ class TuiInteractionState:
             expanded = self._todos_expanded
         self._notify()
         return expanded
+
+    # LLM: 鼠标 capture 只控制 prompt_toolkit 是否请求终端鼠标协议；它不改变 transcript、选区正文或配置默认值。
+    # 函数用途: 在终端原生复制/右键模式与 TUI 滚轮/点击模式之间切换，并返回切换后的 capture 状态。
+    def toggle_mouse_capture(self) -> bool:
+        with self._lock:
+            self._mouse_capture_enabled = not self._mouse_capture_enabled
+            enabled = self._mouse_capture_enabled
+        self._notify()
+        return enabled
 
     # LLM: stash 是严格单槽：非空草稿覆盖当前槽，空编辑器只弹出已有槽；空白输入不会制造不可见 stash。
     # 函数用途: 按 Ctrl-S 语义保存当前草稿或恢复已保存草稿。

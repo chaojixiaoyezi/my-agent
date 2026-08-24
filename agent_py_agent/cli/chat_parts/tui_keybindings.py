@@ -1,6 +1,6 @@
 
 # LLM: 本模块把 prompt_toolkit 按键转换为输入、队列、滚动、显示模式和结构化控制动作；不得直接改 transcript 文本。
-# 模块用途: 定义 chat TUI 的提交、多行编辑、中断、退出、历史视图和模式快捷键。
+# 模块用途: 定义 chat TUI 的提交、多行编辑、中断、退出、鼠标切换、历史视图和模式快捷键。
 
 from __future__ import annotations
 
@@ -296,8 +296,8 @@ def _register_scroll_bindings(
     kb.add(keys.ScrollDown, filter=scroll_active)(lambda e: _scroll_transcript(params, 3))
 
 
-# LLM: 全局 bindings 只接管 终端交互 明确行为；普通 Emacs 编辑键继续交给 TextArea 默认 key map。
-# 函数用途: 创建对话输入和 transcript 导航的快捷键集合。
+# LLM: 全局 bindings 只接管已接通的 会话运行时/终端交互 映射；普通 Emacs 编辑键继续交给 TextArea 默认 key map。
+# 函数用途: 创建对话输入、鼠标模式和 transcript 导航的快捷键集合。
 def _tui_create_keybindings(params: TuiCreateKeybindingsParams):
     from prompt_toolkit.filters import Condition
     from prompt_toolkit.key_binding import KeyBindings
@@ -312,6 +312,7 @@ def _tui_create_keybindings(params: TuiCreateKeybindingsParams):
     _register_chat_bindings(kb, params, filters, Keys, Condition)
     _register_help_bindings(kb, params, filters, Condition)
     kb.add("c-l")(lambda e: _handle_ctrl_l_keybinding(e, params))
+    kb.add("f6")(lambda e: _handle_f6_mouse_keybinding(e, params))
     kb.add(
         "c-o",
         filter=~filters.history_search_active & ~filters.permission_active,
@@ -1972,6 +1973,25 @@ def _input_visual_width(event, params: TuiCreateKeybindingsParams) -> int:
 # 函数用途: 重绘当前 TUI 画面。
 def _handle_ctrl_l_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
     del params
+    event.app.invalidate()
+
+
+# LLM: F6 只切换 process-local mouse-support filter；配置默认、终端剪贴板、选区和会话状态都不得被它改写。
+# 函数用途: 在终端原生拖选/右键与 TUI 滚轮/点击之间即时切换，并给出不会误报系统复制成功的提示。
+def _handle_f6_mouse_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
+    enabled = _required_interaction(params).toggle_mouse_capture()
+    runtime = _active_tui_runtime(params)
+    if enabled:
+        runtime.set_notice(
+            "TUI 鼠标已开启：滚轮/点击可用；复制失效时按 F6 返回原生模式",
+            duration_seconds=4.0,
+        )
+    else:
+        runtime.set_notice(
+            "原生复制已开启：可直接拖选并用右键复制/粘贴；F6 返回",
+            duration_seconds=4.0,
+        )
+    _reset_exit_arms(params)
     event.app.invalidate()
 
 

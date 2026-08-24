@@ -403,6 +403,7 @@ class TestAgentConfigDefaults:
         assert config.subagent_hierarchy_max_children_per_tool_call == 4
         assert config.runner_auto_concurrency == 4
         assert config.access_mode == "workspace-write"
+        assert config.tui_mouse_capture_default is False
 
     def test_agent_config_dispatch_defaults(self):
         """验证 dispatch 相关默认值。"""

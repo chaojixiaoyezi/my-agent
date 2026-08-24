@@ -768,19 +768,20 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 空闲动画时钟不应让静态长历史失效。完整 frame key 由 renderer 统一决定；connection/thinking 活动时
   才加入可见动画字段，thinking 周期取 glyph 与稳定词长的最小公倍数，禁止经验魔数。20k block LRU
   和 20k stable display window 是性能边界，不是新的会话事实源。
-- transcript 鼠标选择只持有当前 viewport 中经 prompt_toolkit `Window` 从屏幕列反解后的源字符索引，
-  resize 清除；产品层不得再按 `wcwidth` 二次换算，否则中文会只复制一半。最终 focus 字符必须包含在高亮
-  和复制文本中。任何形式的 mouse-up 都结束
-  拖动；1003 无按键 motion 和下一次 fresh press 负责收口窗口外遗失的 release。松手自动写
-  prompt_toolkit clipboard、OSC52 和 tmux buffer，Ctrl-C 仍可重复复制；无选择时才进入审批取消、turn
-  interrupt 或双击退出。输入 Buffer 的显式选区具有更高 Ctrl-C 优先级，鼠标松手也自动复制且不清高亮；
-  full-screen mouse tracking 已取得事件后，SSH 内应用无法强制宿主终端弹出原生右键菜单；已有非空选区
-  的右键按下因此复用同一 clipboard 投影直接复制，正文与输入框均须在原 handler 前拦截并保留高亮，
-  配对 release 只收口不重复复制。右键 release 丢失时由无按键 motion 或下一次其它 press 解锁，不能令
-  后续鼠标永久失效；`Copied` notice 只证明应用已发起投影，外层系统剪贴板仍需真实粘贴确认。
-  Ctrl-V 只粘贴应用剪贴板，系统剪贴板继续由终端 bracketed paste 注入，两条路径都走同一大文本合同并
-  替换现有选区。输入 marker 使用普通空格，禁止用会触发 `nbsp` 下划线样式的不换行空格。审批 overlay
-  继续允许 Page/wheel/Ctrl-Home/End 查看上文，Up/Down 仍专属于选项导航。
+- TUI 鼠标采用 会话运行时 式原生模式作为唯一默认：`tui_mouse_capture_default=false` 时不向终端申请 mouse
+  tracking，宿主终端直接负责左键拖选、右键菜单和系统剪贴板粘贴，尤其避免 SSH/Apple Terminal 下把
+  “tmux buffer 已写入”误报成“本机剪贴板已复制”。F6 只切换当前 TUI process-local 状态，不写配置、不改
+  session；开启后恢复 终端交互 式滚轮、点击和应用内高亮，再按 F6 回到原生复制。帮助区和短暂 notice
+  必须始终提示这个取舍。
+- 仅在 TUI 鼠标模式中，transcript 选择才持有当前 viewport 中经 prompt_toolkit `Window` 从屏幕列反解后
+  的源字符索引，resize 清除；产品层不得再按 `wcwidth` 二次换算，否则中文会只复制一半。最终 focus 字符
+  必须包含在高亮和复制文本中。任何形式的 mouse-up 都结束拖动；1003 无按键 motion 和下一次 fresh press
+  负责收口窗口外遗失的 release。松手继续写 prompt_toolkit clipboard、OSC52 和 tmux buffer，Ctrl-C 可
+  重复投影；SSH notice 只能说明“已选中并尝试投影”，不能声称外层系统剪贴板已改变，并明确提示 F6 回到
+  原生模式。输入 Buffer 的显式选区具有更高 Ctrl-C 优先级。Ctrl-V 只粘贴应用剪贴板，系统剪贴板由终端
+  bracketed paste 注入，两条路径都走同一大文本合同并替换现有选区。输入 marker 使用普通空格，禁止用会
+  触发 `nbsp` 下划线样式的不换行空格。审批 overlay 继续允许 Page/wheel/Ctrl-Home/End 查看上文，Up/Down
+  仍专属于选项导航。
 - 审批 y/n 只能匹配 option 的 structured `decision`，不匹配 Yes/No/中文 label。普通工具结果最多六行；
   用户显式进入 transcript 并 Ctrl-E 后才展开全部，避免大输出常驻主视图。
 - 终端交互 独有 model picker、permission mode carousel、team/buddy/voice/browser 等不造空壳；帮助和补全
@@ -1458,3 +1459,18 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - child 公开过程使用 process-shared、有界、增量游标 JSONL；只保存已经公开的 thinking/tool/compact 展示
   事件。它不是任务状态、权限、完成裁决或 Compact 账本，丢失过程时可以降级显示 canonical final/status，
   不能反向更改生命周期。
+
+## 2026-08-24 终端原生复制与 TUI 鼠标双模式【状态：已实现，真机复验中】
+
+- 既有应用内右键复制只能证明 prompt_toolkit/tmux/OSC52 投影已执行，不能保证 SSH 外层的 Apple Terminal
+  系统剪贴板已经改变。用户实测“右键没反应”证明全屏 mouse tracking 吞掉原生右键菜单后，这条
+  best-effort 路径不能作为默认交互。
+- 对照 会话运行时 `会话运行时-rs/tui/src/tui.rs` 的默认非 mouse-capture 行为，以及 终端交互
+  `src/utils/fullscreen.ts` 的 `模型助手_CODE_DISABLE_MOUSE=1` 逃生口，当前默认关闭 prompt_toolkit mouse
+  support。终端原生负责拖选、右键复制/粘贴；F6 在当前进程内动态开启/关闭 TUI mouse support，开启时
+  才提供滚轮、点击和应用内高亮。该切换不进入 prompt、history、session 或 durable config。
+- `tui_mouse_capture_default` 只决定新 TUI 的初始模式，默认 `false`；显式设为 `true` 的用户仍可保留
+  终端交互 式体验。远程 TUI 模式下的 notice 改为“已选中；粘贴无效请按 F6”，不得再显示无证据的
+  `Copied` 成功。真实验收必须同时证明：默认启动没有开启 1000/1002/1003 mouse tracking、终端 bracketed
+  paste 能进入输入框、F6 开启时协议生效、再次 F6 后协议关闭；macOS 系统剪贴板仍由用户 attach 后做一次
+  真实右键复制与粘贴验收。

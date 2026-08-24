@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -461,7 +462,12 @@ def _prepare_tui_app_parts(params: MakeTuiAppParams) -> _TuiAppParts:
     from prompt_toolkit.filters import Condition
 
     runtime = _required_runtime(params)
-    interaction = TuiInteractionState(runtime.store.invalidate)
+    interaction = TuiInteractionState(
+        runtime.store.invalidate,
+        mouse_capture_enabled=bool(
+            getattr(params.agent.config, "tui_mouse_capture_default", False)
+        ),
+    )
     transcript_state = TuiTranscriptModeState(runtime.store.invalidate)
     title_controller = TuiTerminalTitleController(
         str(getattr(params.agent.config, "agent_name", "my-agent") or "my-agent")
@@ -633,8 +639,8 @@ def _make_transcript_tui_body(parts: _TuiAppParts) -> Any:
     )
 
 
-# LLM: Application 组装必须保留同一个 parts 生命周期、alternate screen、显式块状输入光标、60Hz 合并上限、事件/活动动画触发重绘、鼠标与 before_render 焦点同步；不得另建 runtime。
-# 函数用途: 用准备好的控件和两个模式布局创建 终端交互 同类全屏终端 Application。
+# LLM: Application 组装必须保留同一个 parts 生命周期、alternate screen、显式块状输入光标、60Hz 合并上限、事件/活动动画触发重绘、动态鼠标 filter 与 before_render 焦点同步；不得另建 runtime。
+# 函数用途: 用准备好的控件和两个模式布局创建可在 会话运行时 原生鼠标与 终端交互 TUI 鼠标间切换的全屏 Application。
 def _assemble_tui_application(
     params: MakeTuiAppParams,
     parts: _TuiAppParts,
@@ -643,6 +649,7 @@ def _assemble_tui_application(
 ) -> Any:
     from prompt_toolkit.application import Application
     from prompt_toolkit.cursor_shapes import CursorShape
+    from prompt_toolkit.filters import Condition
     from prompt_toolkit.layout import DynamicContainer, Layout
 
     body = DynamicContainer(
@@ -662,7 +669,9 @@ def _assemble_tui_application(
         style=_make_tui_style(),
         full_screen=True,
         erase_when_done=False,
-        mouse_support=True,
+        mouse_support=Condition(
+            lambda: parts.interaction.snapshot().mouse_capture_enabled
+        ),
         cursor=CursorShape.BLOCK,
         min_redraw_interval=APP_REDRAW_INTERVAL_SECONDS,
         max_render_postpone_time=APP_RENDER_POSTPONE_SECONDS,
@@ -679,20 +688,30 @@ def _assemble_tui_application(
     _configure_escape_timeouts(app)
     parts.transcript_view.provider.set_invalidate_callback(app.invalidate)
 
-    # LLM: Full-screen mouse tracking suppresses native terminal selection, so settled transcript
-    # selections must update the application clipboard and OSC 52 immediately, like 终端交互.
-    # 函数用途: 在鼠标松手后自动复制最终选区，并保留高亮供用户确认。
+    # LLM: TUI mouse mode suppresses native terminal selection, so settled selections still project
+    # to application/tmux/OSC52. Over SSH this projection is best-effort and the notice must not claim
+    # that an unsupported outer terminal actually changed its system clipboard.
+    # 函数用途: 在 TUI 鼠标模式松手后投影最终选区，并如实提示远程终端可能仍需按 F6 使用原生复制。
     def copy_settled_selection(text: str) -> None:
         _write_selection_clipboard(app, text)
         active_runtime = parts.runtime
         runtime_reader = getattr(params.agent_navigation, "active_runtime", None)
         if callable(runtime_reader):
             active_runtime = runtime_reader()
-        active_runtime.set_notice(f"Copied {len(text)} chars", duration_seconds=1.2)
+        if os.environ.get("SSH_CONNECTION"):
+            notice = f"已选中 {len(text)} 个字符；若系统粘贴无效，按 F6 使用原生复制"
+        else:
+            notice = f"已复制 {len(text)} 个字符"
+        active_runtime.set_notice(notice, duration_seconds=2.5)
         app.invalidate()
 
     parts.transcript_view.set_copy_on_select(copy_settled_selection)
     _install_input_copy_on_select(parts.input_area, copy_settled_selection)
+    if not parts.interaction.snapshot().mouse_capture_enabled:
+        parts.runtime.set_notice(
+            "原生复制模式：直接拖选、右键复制/粘贴；F6 开启 TUI 滚轮/点击",
+            duration_seconds=6.0,
+        )
     app._my_agent_title_controller = parts.title_controller
     def write_active_console(text: str) -> None:
         runtime_reader = getattr(params.agent_navigation, "active_runtime", None)

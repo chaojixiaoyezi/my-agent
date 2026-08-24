@@ -85,6 +85,7 @@ HELP_SHORTCUT_GROUPS = (
     ),
     (
         "ctrl + s to stash prompt",
+        "F6 切换原生复制/滚轮",
         "page up/down to scroll",
         "ctrl + l to redraw",
         "ctrl + c/d twice to exit",

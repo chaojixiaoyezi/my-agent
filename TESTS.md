@@ -396,6 +396,14 @@ history/search/paste/completion/queue/stash、follow/unseen、session-history、
 `nbsp` 下划线。运行中普通输入还要证明下一次
 真实模型调用能看到该输入；若 exact turn 已结束，TUI 只能挂接 Gateway 返回的 canonical queued request，
 不得再次提交正文。
+
+2026-08-24 起鼠标验收增加双模式合同：默认 `tui_mouse_capture_default=false` 的 prompt_toolkit PTY 启动
+不得开启 1000/1002/1003 mouse tracking，终端 bracketed paste 必须直接进入输入 Buffer；F6 第一次须动态
+开启 mouse tracking 且不改输入，第二次须关闭并恢复原生选择。TUI mouse 模式继续运行上述中文/丢失
+release/OSC52/tmux 回归，但它的远端 notice 只能报告已选中，不能把投影成功写成系统剪贴板成功。最终真机
+验收必须在用户实际 attach 的宿主终端执行一次“拖选中文 -> 右键复制 -> 输入框右键粘贴”；tmux buffer
+内容或 OSC52 字节只能作中间证据，不能替代这一步。
+
 富 transcript 追补还必须覆盖：未声明能力的 Gateway 不公开 thinking/display 且继续按 verbose 裁剪；TUI
 声明能力后逐轮 commentary、provider 明示 thinking、edit/overwrite/patch diff、write preview、命令
 stdout/stderr/exit code 均走结构化事件；思考 Markdown 与 `Ctrl+O` 折叠提示的每个可见 fragment 都必须

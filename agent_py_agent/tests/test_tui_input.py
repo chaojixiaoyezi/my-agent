@@ -706,6 +706,39 @@ def test_ctrl_t_toggles_todo_view_without_editing_input() -> None:
     assert redraws == [True]
 
 
+def test_f6_toggles_native_copy_and_tui_mouse_without_touching_input() -> None:
+    redraws: list[bool] = []
+    interaction = TuiInteractionState()
+    runtime = TuiRuntime("mouse-mode")
+    input_area = TextArea(multiline=True)
+    input_area.text = "保留输入"
+    params = SimpleNamespace(
+        input_area=input_area,
+        interaction_state=interaction,
+        tui_runtime=runtime,
+        agent_navigation=None,
+        exit_armed_at_ref=[1.0],
+        eof_armed_at_ref=[1.0],
+        escape_armed_at_ref=[1.0],
+        escape_armed_text_ref=["保留输入"],
+    )
+    event = SimpleNamespace(app=SimpleNamespace(invalidate=lambda: redraws.append(True)))
+
+    tui_keybindings._handle_f6_mouse_keybinding(event, params)
+
+    assert interaction.snapshot().mouse_capture_enabled is True
+    assert "TUI 鼠标已开启" in runtime.notice()
+    assert input_area.text == "保留输入"
+    assert params.exit_armed_at_ref == [0.0]
+    assert redraws == [True]
+
+    tui_keybindings._handle_f6_mouse_keybinding(event, params)
+
+    assert interaction.snapshot().mouse_capture_enabled is False
+    assert "原生复制已开启" in runtime.notice()
+    assert redraws == [True, True]
+
+
 def test_input_mouse_up_auto_copies_settled_selection() -> None:
     from prompt_toolkit.data_structures import Point
     from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType

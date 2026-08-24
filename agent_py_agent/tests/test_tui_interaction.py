@@ -91,6 +91,24 @@ def test_todo_expansion_toggle_is_display_only_and_redraws() -> None:
     assert len(redraws) == 2
 
 
+def test_mouse_capture_defaults_native_and_toggles_without_other_state() -> None:
+    redraws: list[bool] = []
+    state = TuiInteractionState(lambda: redraws.append(True))
+
+    assert state.snapshot().mouse_capture_enabled is False
+    assert state.toggle_mouse_capture() is True
+    assert state.snapshot().mouse_capture_enabled is True
+    assert state.toggle_mouse_capture() is False
+    assert state.snapshot().mouse_capture_enabled is False
+    assert redraws == [True, True]
+
+
+def test_mouse_capture_can_start_in_tui_mode_from_config() -> None:
+    state = TuiInteractionState(mouse_capture_enabled=True)
+
+    assert state.snapshot().mouse_capture_enabled is True
+
+
 def test_long_paste_refs_survive_stash_and_expand_only_on_submit() -> None:
     state = TuiInteractionState()
     visible = state.register_text_paste("one\ntwo\nthree\nfour")
