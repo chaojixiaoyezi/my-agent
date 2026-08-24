@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
     ToolProgressEvent,
     ToolRoundExecutionRequest,
+    _emit_tool_progress,
     _structured_tool_progress,
     execute_tool_round,
 )
@@ -188,6 +189,56 @@ def test_structured_tool_progress_projects_bounded_public_display() -> None:
     assert display["path"] == "~/.my-agent/owner/task/src/ui.py"
     assert display["lines_added"] == 1
     assert "private_extra" not in display["lines"][0]
+
+
+def test_non_callable_typed_sink_receives_child_tool_and_process_events() -> None:
+    from agent_py_agent.agent.conversation.background_transcript import (
+        BackgroundTranscriptSink,
+    )
+
+    events: list[dict[str, object]] = []
+
+    def event_writer(_agent, **event: object) -> None:
+        events.append(dict(event))
+
+    sink = BackgroundTranscriptSink(
+        SimpleNamespace(),
+        thread_id="thread-child-a",
+        task_id="child-a",
+        request_id="bg-agent:child-a:attempt-a",
+        event_writer=event_writer,
+    )
+    sink.write_model("我先检查入口和现有测试。")
+    call = _canonical_calls([{"tool": "run_command", "command": "pytest -q"}])[0]
+    request = _round_request(
+        agent=SimpleNamespace(),
+        params=SimpleNamespace(tool_context=[], effective_on_chunk=sink),
+        tool_rounds=1,
+        response=ModelResponse(text="", backend="test"),
+        calls=[{"tool": "run_command", "command": "pytest -q"}],
+        execute_one=lambda _request: None,
+        record_one=lambda _record: None,
+    )
+    result = ToolResult.succeeded(
+        call,
+        "12 passed",
+        facts=ToolSuccessFacts(effect_outcome="confirmed"),
+    )
+
+    _emit_tool_progress(ToolProgressEvent(request, 0, call, "started", "开始"))
+    _emit_tool_progress(
+        ToolProgressEvent(request, 0, call, "finished", "完成", result=result)
+    )
+
+    assert [event["kind"] for event in events] == [
+        "assistant_completed",
+        "tool_started",
+        "tool_completed",
+    ]
+    assert events[0]["payload"] == {
+        "text": "我先检查入口和现有测试。",
+        "process": True,
+    }
 
 
 def test_structured_tool_progress_prefers_todo_snapshot_from_result_envelope() -> None:

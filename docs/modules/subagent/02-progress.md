@@ -1324,3 +1324,8 @@ tasks/<日期>/<任务>/output，即用户拿走的东西），而非子代理�
 - Gateway 新增 owner 树内 view/guidance/stop 服务；写操作使用 exact run id、active binding 与稳定 operation id，
   historical view 则保留 owner/ancestry 校验但允许 attempt 已关闭。focused 回归已通过；`c5026a7` 在 `.7`
   唯一 Gateway、MiniMax-M2.7 和原样 Prompt 2 中实际验证选择/进入/返回/插话/停止/终态回看。
+- 后续用户回看暴露详情内容未完全接通：Gateway 曾优先返回 240 字短 `description`；工具轮又在发现 child
+  sink 不是 callable 时提前返回，连带工具卡和工具前过程说明都未写事件；`Ctrl+O` 还固定冻结 root。
+  当前本地候选已改为完整 `task.goal` 首条 user block、typed `write_progress` 优先和 active-runtime
+  transcript snapshot。直接 focused 回归已覆盖完整 prompt、灰色 thinking/process、工具卡、Todo/Context/final
+  以及 child 内 `Ctrl+O` 不跳 root；待严格 gate、推送、单 Gateway 部署和原样重型 TUI 复验。

@@ -12,6 +12,7 @@ from prompt_toolkit.widgets import TextArea
 from agent_py_agent.cli.chat_parts import tui_keybindings
 from agent_py_agent.cli.chat_parts.chat_style import CHAT_RESPONSE_STYLE_INJECT
 from agent_py_agent.cli.chat_parts.plain_state import ChatJob
+from agent_py_agent.cli.chat_parts.tui_agent_navigation import TuiAgentNavigationState
 from agent_py_agent.cli.chat_parts.tui_events import TuiEventSequencer
 from agent_py_agent.cli.chat_parts.tui_input import (
     QUEUE_EDIT_PLACEHOLDER,
@@ -704,6 +705,77 @@ def test_ctrl_t_toggles_todo_view_without_editing_input() -> None:
     assert params.escape_armed_at_ref == [0.0]
     assert params.escape_armed_text_ref == [""]
     assert redraws == [True]
+
+
+def test_ctrl_o_freezes_current_child_runtime_instead_of_root() -> None:
+    root = TuiRuntime("ctrl-o-root")
+    root.enqueue_prompt("root-prompt", "主代理正文", queued=False)
+    navigation = TuiAgentNavigationState(root)
+    navigation.update_rows(
+        "",
+        [
+            {
+                "run_id": "child-a",
+                "parent_run_id": "",
+                "name": "worker-a",
+                "status": "RUNNING",
+                "description": "短标题",
+            }
+        ],
+    )
+    navigation.move_selection(1)
+    navigation.enter_selected()
+    navigation.apply_agent_view(
+        "child-a",
+        {
+            "ok": True,
+            "agent": {
+                "run_id": "child-a",
+                "parent_run_id": "",
+                "name": "worker-a",
+                "status": "RUNNING",
+                "description": "短标题",
+                "goal": "子代理完整派工正文",
+            },
+            "terminal": False,
+            "children": [],
+            "task_progress_items": [],
+            "transcript_events": [],
+            "event_cursor": 0,
+            "final_response": "",
+        },
+    )
+    transcript_state = TuiTranscriptModeState()
+    moved: list[bool] = []
+    focused: list[object] = []
+    modal_window = object()
+    params = SimpleNamespace(
+        tui_runtime=root,
+        agent_navigation=navigation,
+        transcript_state=transcript_state,
+        transcript_area=SimpleNamespace(
+            modal_control=SimpleNamespace(move_end=lambda: moved.append(True)),
+            modal_window=modal_window,
+        ),
+    )
+    event = SimpleNamespace(
+        app=SimpleNamespace(
+            layout=SimpleNamespace(focus=lambda target: focused.append(target)),
+            invalidate=lambda: None,
+        )
+    )
+
+    tui_keybindings._handle_ctrl_o_keybinding(event, params)
+
+    frozen = transcript_state.snapshot_for_render(root.store.snapshot())
+    assert transcript_state.snapshot().active is True
+    assert any(
+        block.role == "user" and block.text == "子代理完整派工正文"
+        for block in frozen.stable_blocks
+    )
+    assert all("主代理正文" not in block.text for block in frozen.stable_blocks)
+    assert moved == [True]
+    assert focused == [modal_window]
 
 
 def test_f6_toggles_native_copy_and_tui_mouse_without_touching_input() -> None:

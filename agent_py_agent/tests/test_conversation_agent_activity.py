@@ -265,6 +265,7 @@ def test_conversation_agent_view_reads_exact_child_state_and_final_reply(
 ) -> None:
     from agent_py_agent.agent.conversation.agent_activity import conversation_agent_view
 
+    delegated_goal = "完整派工要求：" + "逐项核对实现、测试与交付。" * 320
     usage = {
         "schema": "model_visible_context_usage.v1",
         "estimated": False,
@@ -281,6 +282,7 @@ def test_conversation_agent_view_reads_exact_child_state_and_final_reply(
         "child-done",
         status="DONE",
         description="设计三个关卡",
+        goal=delegated_goal,
         attributes={"model_visible_context_usage": usage},
         ended_at=22.0,
     )
@@ -317,7 +319,7 @@ def test_conversation_agent_view_reads_exact_child_state_and_final_reply(
     view = conversation_agent_view(agent, store, child.id)
 
     assert view["terminal"] is True
-    assert view["agent"]["goal"] == "设计三个关卡"
+    assert view["agent"]["goal"] == delegated_goal
     assert view["agent"]["context_usage"]["current_tokens"] == 12_300
     assert view["agent"]["compact_count"] == 1
     assert [row["run_id"] for row in view["children"]] == ["grandchild"]

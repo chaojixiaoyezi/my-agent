@@ -67,21 +67,89 @@ def test_child_view_applies_live_events_todo_context_children_and_final() -> Non
     navigation.update_rows("", [_row("child-a")])
     navigation.move_selection(1)
     navigation.enter_selected()
-    event = {
-        "schema": BACKGROUND_TRANSCRIPT_SCHEMA,
-        "seq": 1,
-        "task_id": "child-a",
-        "request_id": "bg-agent:child-a:attempt-a",
-        "kind": "thinking_started",
-        "phase": "started",
-        "block_id": "bg-agent:child-a:attempt-a:thinking",
-        "payload": {},
-    }
+    delegated_goal = "实现核心玩法，并逐项验证碰撞、关卡与启动方式。"
+    request_id = "bg-agent:child-a:attempt-a"
+    events = [
+        {
+            "schema": BACKGROUND_TRANSCRIPT_SCHEMA,
+            "seq": 1,
+            "task_id": "child-a",
+            "request_id": request_id,
+            "kind": "thinking_started",
+            "phase": "started",
+            "block_id": f"{request_id}:thinking:1",
+            "payload": {"started_at": 10.0},
+        },
+        {
+            "schema": BACKGROUND_TRANSCRIPT_SCHEMA,
+            "seq": 2,
+            "task_id": "child-a",
+            "request_id": request_id,
+            "kind": "thinking_delta",
+            "phase": "delta",
+            "block_id": f"{request_id}:thinking:1",
+            "payload": {"text": "先阅读现有代码。"},
+        },
+        {
+            "schema": BACKGROUND_TRANSCRIPT_SCHEMA,
+            "seq": 3,
+            "task_id": "child-a",
+            "request_id": request_id,
+            "kind": "thinking_completed",
+            "phase": "completed",
+            "block_id": f"{request_id}:thinking:1",
+            "payload": {"text": "先阅读现有代码。", "duration_seconds": 1.2},
+        },
+        {
+            "schema": BACKGROUND_TRANSCRIPT_SCHEMA,
+            "seq": 4,
+            "task_id": "child-a",
+            "request_id": request_id,
+            "kind": "assistant_completed",
+            "phase": "completed",
+            "block_id": f"{request_id}:assistant:1",
+            "payload": {"text": "我先检查入口和测试。", "process": True},
+        },
+        {
+            "schema": BACKGROUND_TRANSCRIPT_SCHEMA,
+            "seq": 5,
+            "task_id": "child-a",
+            "request_id": request_id,
+            "kind": "tool_started",
+            "phase": "started",
+            "block_id": f"{request_id}:tool:1:0",
+            "payload": {
+                "tool": "run_command",
+                "round": 1,
+                "call_index": 0,
+                "phase": "started",
+                "detail": "python -m pytest",
+            },
+        },
+        {
+            "schema": BACKGROUND_TRANSCRIPT_SCHEMA,
+            "seq": 6,
+            "task_id": "child-a",
+            "request_id": request_id,
+            "kind": "tool_completed",
+            "phase": "completed",
+            "block_id": f"{request_id}:tool:1:0",
+            "payload": {
+                "tool": "run_command",
+                "round": 1,
+                "call_index": 0,
+                "phase": "finished",
+                "status": "完成",
+                "output": "12 passed",
+                "ok": True,
+            },
+        },
+    ]
     payload = {
         "ok": True,
         "agent": {
             **_row("child-a"),
-            "goal": "实现核心玩法",
+            "goal": delegated_goal,
             "activity": "正在运行测试",
             "context_usage": {
                 "schema": "model_visible_context_usage.v1",
@@ -102,17 +170,31 @@ def test_child_view_applies_live_events_todo_context_children_and_final() -> Non
         "task_progress_items": [
             {"id": "qa", "title": "运行完整测试", "status": "in_progress"}
         ],
-        "transcript_events": [event],
-        "event_cursor": 1,
+        "transcript_events": events,
+        "event_cursor": 6,
         "final_response": "",
     }
 
     assert navigation.apply_agent_view("child-a", payload) is True
     snapshot = navigation.active_runtime().store.snapshot()
     assert snapshot.status.context_tokens == 8_000
-    assert any(block.role == "thinking" for block in snapshot.active_blocks)
+    assert any(
+        block.role == "user" and block.text == delegated_goal
+        for block in snapshot.stable_blocks
+    )
+    assert any(block.role == "thinking" for block in snapshot.stable_blocks)
+    assert any(
+        block.role == "assistant"
+        and block.metadata.get("process") is True
+        and "检查入口" in block.text
+        for block in snapshot.stable_blocks
+    )
+    assert any(
+        block.role == "tool" and block.metadata.get("tool") == "run_command"
+        for block in snapshot.stable_blocks
+    )
     assert any(block.role == "todo" for block in snapshot.active_blocks)
-    assert navigation.event_cursor("child-a") == 1
+    assert navigation.event_cursor("child-a") == 6
 
     assert navigation.move_selection(1) is True
     assert navigation.snapshot().selected_run_id == "grandchild"

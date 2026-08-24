@@ -219,10 +219,10 @@ class TuiAgentNavigationState:
         with self._lock:
             return max(0, int(self._event_cursors.get(str(run_id or ""), 0)))
 
-    # LLM: One authenticated detail payload updates only its exact run runtime,
-    # direct-child rows, numeric context, Todo, public events, and final reply.
-    # It cannot change the navigation path or execute a control action.
-    # 函数用途: 把 Gateway 子代理详情快照应用到对应页面并增量刷新正文。
+    # LLM: One authenticated detail payload updates only its exact run runtime.
+    # The first non-empty delegated goal becomes the child page's user block;
+    # a transient incomplete payload must not permanently suppress that prompt.
+    # 函数用途: 把 Gateway 子代理完整消息快照应用到对应页面并增量刷新正文。
     def apply_agent_view(self, run_id: str, payload: object) -> bool:
         selected = str(run_id or "").strip()
         if not selected or not isinstance(payload, Mapping) or payload.get("ok") is not True:
@@ -244,15 +244,15 @@ class TuiAgentNavigationState:
                 self._selected_by_parent.pop(selected, None)
             runtime = self._runtime_for_locked(selected)
             first_goal = selected not in self._goal_published
-            if first_goal:
-                self._goal_published.add(selected)
             prior_final = self._final_responses.get(selected, "")
             final_response = str(payload.get("final_response") or "").strip()
             if final_response:
                 self._final_responses[selected] = final_response
-        goal = str(row.get("goal") or row.get("description") or "").strip()
+        goal = str(row.get("goal") or "").strip()
         if first_goal and goal:
             runtime.enqueue_prompt(f"agent-goal:{selected}", goal, queued=False)
+            with self._lock:
+                self._goal_published.add(selected)
         terminal = bool(payload.get("terminal"))
         status = str(row.get("status") or "").strip().upper()
         events = payload.get("transcript_events")

@@ -1995,14 +1995,15 @@ def _handle_f6_mouse_keybinding(event, params: TuiCreateKeybindingsParams) -> No
     event.app.invalidate()
 
 
-# LLM: Ctrl-O 通过唯一 transcript state 冻结/释放当前 typed view snapshot，并显式切换焦点；不会改写消息正文或业务 verbose_level。
-# 函数用途: 进入或退出 终端交互 风格的详细 transcript 模式。
+# LLM: Ctrl-O freezes the navigation stack's active runtime, not the root runtime.
+# This preserves child identity while reusing the one transcript state and renderer.
+# 函数用途: 展开当前主代理或子代理页面的详细 transcript，不切换代理视角。
 def _handle_ctrl_o_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
     state = _required_transcript_state(params)
     if state.snapshot().active:
         _exit_transcript_mode(event, params)
         return
-    state.enter(_required_tui_runtime(params).store.snapshot())
+    state.enter(_active_tui_runtime(params).store.snapshot())
     params.transcript_area.modal_control.move_end()
     event.app.layout.focus(params.transcript_area.modal_window)
     event.app.invalidate()

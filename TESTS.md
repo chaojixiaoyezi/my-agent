@@ -55,7 +55,7 @@ session 并发 `/client/notices` 全部成功，0.027--0.294 秒、总墙钟 0.3
 子代理详情与控制面的 focused 回归：
 
 ```bash
-python3 -m pytest agent_py_agent/tests/test_tui_agent_navigation.py agent_py_agent/tests/test_agent_transcript.py agent_py_agent/tests/test_gateway_agent_control_service.py agent_py_agent/tests/test_conversation_agent_activity.py agent_py_agent/tests/test_authorization_gate.py agent_py_agent/tests/test_authorization_gate_r1.py agent_py_agent/tests/test_tui_input.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_tui_agent_navigation.py agent_py_agent/tests/test_agent_transcript.py agent_py_agent/tests/test_gateway_agent_control_service.py agent_py_agent/tests/test_conversation_agent_activity.py agent_py_agent/tests/test_authorization_gate.py agent_py_agent/tests/test_authorization_gate_r1.py agent_py_agent/tests/test_tui_input.py agent_py_agent/tests/test_tool_round_execution.py agent_py_agent/tests/test_background_notice_display.py -q --tb=short
 ```
 
 要同时证明：空输入 `↓` 才选择 child，`Enter` 进入 exact run，详情增量展示公开过程、Context/Compact、Todo
@@ -63,6 +63,9 @@ python3 -m pytest agent_py_agent/tests/test_tui_agent_navigation.py agent_py_age
 只投递给当前 child。已结束 child 可重新进入查看 final，但不能收消息或静默恢复。历史 view 可以在 attempt
 关闭后通过 owner/ancestry 授权，任何写控制仍要求 active binding，越出当前 owner 根树一律拒绝。真机验收
 还必须在已公开 tmux 中逐项实际按键，单元测试不得代替。
+详情内容回归还要证明：第一条 user block 是 canonical `task.goal` 而不是短 `description`；非 callable 但实现
+`write_progress` 的 child sink 能收到工具开始/完成，并在工具边界前冻结过程 commentary；thinking、工具/diff
+和 final 继续复用主页面 block renderer。child 内按 `Ctrl+O` 必须冻结当前 child runtime，正文不得混入 root。
 
 2026-08-24 真机证据：`c5026a7` 部署到 `192.0.2.7` 的唯一 Gateway，模型为 MiniMax-M2.7；tmux
 `ma-53ff260-agent-nav-r11` 只输入一次原样 Prompt 2 并创建 4 名 child，首次直接暴露 footer 回执被遮挡。

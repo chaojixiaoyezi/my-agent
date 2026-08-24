@@ -35,6 +35,7 @@ _SCHEMA_VERSION = "conversation_agent_activity.v5"
 _MAX_PROJECTED_SUBAGENTS = 64
 _MAX_PROJECTED_PROGRESS_ITEMS = 128
 _ACTIVITY_TEXT_LIMIT = 240
+_AGENT_PROMPT_TEXT_LIMIT = 10_000
 _CONTEXT_USAGE_SCHEMA = "model_visible_context_usage.v1"
 _CONTEXT_USAGE_TOKEN_FIELDS = (
     "context_window_tokens",
@@ -370,9 +371,9 @@ def conversation_agent_activity(
 
 
 # LLM: Child detail is a bounded owner-facing projection over one exact canonical
-# run. It reads lifecycle, the independent ConversationThread, Todo ledger, and
-# public event stream but cannot authorize, mutate, resume, or complete the run.
-# 函数用途: 返回一个子代理详情页所需的任务说明、状态、直属下级、上下文、过程事件和最终回复。
+# run. The exact delegated goal is the first user-message source; the roster-only
+# description must never replace it. This reader cannot authorize or mutate a run.
+# 函数用途: 返回子代理详情页的完整派工要求、状态、直属下级、上下文、过程事件和最终回复。
 def conversation_agent_view(
     agent: object,
     store: object,
@@ -414,8 +415,8 @@ def conversation_agent_view(
         "agent": {
             **row,
             "goal": _public_agent_text(
-                getattr(task, "description", "") or getattr(task, "goal", ""),
-                limit=4_000,
+                getattr(task, "goal", "") or getattr(task, "description", ""),
+                limit=_AGENT_PROMPT_TEXT_LIMIT,
             ),
             "activity": _subagent_current_activity(task),
             "context_usage": _subagent_context_usage(task),

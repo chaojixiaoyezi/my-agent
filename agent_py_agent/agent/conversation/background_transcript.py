@@ -1,9 +1,9 @@
-"""Bounded public transcript events for background main-agent turns."""
+"""Bounded public transcript events shared by background main and child turns."""
 
-# LLM: This module is the only volatile background transcript transport. It may
-# carry already-public display events, but it must never own conversation text,
-# task lifecycle, completion, permissions, retries, or recovery authority.
-# 模块用途: 在 Gateway 进程内暂存后台主代理的有界思考、工具和 diff 展示事件，供 TUI/Web 增量读取。
+# LLM: This module owns the shared public event mapper and the main-agent volatile
+# ring. Child callers may replace the event writer with their durable bounded JSONL;
+# neither route owns conversation text, lifecycle, permissions, or completion.
+# 模块用途: 将后台主代理或子代理的思考、工具和 diff 转成同一展示事件，供 TUI/Web 增量读取。
 
 from __future__ import annotations
 
@@ -196,11 +196,15 @@ class BackgroundTranscriptSink:
         self._thinking_text = ""
         return True
 
-    # LLM: Tool events already come from _structured_tool_progress, whose output
-    # and display are bounded public projections. This layer whitelists fields and
-    # maps typed phases without parsing status prose.
-    # 函数用途: 将后台工具开始、进度、成功或失败映射为现有 TUI 工具卡片事件。
-    def write_progress(self, progress: Mapping[str, object]) -> None:
+    # LLM: Tool events already come from _structured_tool_progress. The optional
+    # legacy text keeps the shared typed writer protocol without becoming data.
+    # This layer whitelists fields and never parses status prose for authority.
+    # 函数用途: 将主代理或子代理工具阶段映射为现有 TUI 工具卡片事件，忽略旧文本副本。
+    def write_progress(
+        self,
+        progress: Mapping[str, object],
+        _legacy_text: str = "",
+    ) -> None:
         public = {
             key: copy.deepcopy(progress[key])
             for key in _TOOL_PAYLOAD_FIELDS

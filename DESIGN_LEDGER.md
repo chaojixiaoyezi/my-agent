@@ -1446,7 +1446,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 
 ## 2026-08-24 TUI/Web 共用的子代理详情与精确控制面
 
-状态：本地实现与 focused 回归通过；`c5026a7` 已在 `.7` 唯一 Gateway 的原样 Prompt 2 真实按键验收通过。
+状态：基础导航与控制已由 `c5026a7` 在 `.7` 唯一 Gateway 的原样 Prompt 2 验收；子代理完整消息页对齐正在实现。
 
 - 交互对照采用 终端交互 的列表进入详情习惯，控制语义采用 会话运行时 的 exact agent id。输入框为空时才允许
   `↓` 选择 child，`Enter` 进入；详情继续消费同一 typed TUI event/reducer/renderer，不复制一套子代理 UI。
@@ -1459,6 +1459,13 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - child 公开过程使用 process-shared、有界、增量游标 JSONL；只保存已经公开的 thinking/tool/compact 展示
   事件。它不是任务状态、权限、完成裁决或 Compact 账本，丢失过程时可以降级显示 canonical final/status，
   不能反向更改生命周期。
+- 详情页不是状态摘要页。对照 终端交互 `REPL.tsx` 的 `viewedAgentTask -> Messages` 与 会话运行时 每个 child 的
+  独立 thread，进入 child 后必须继续使用主代理同一套消息 reducer/renderer：第一条用户消息显示父代理实际
+  派发的完整 `task.goal`，后续按原格式显示灰色 thinking、过程 commentary、工具卡/diff、Todo、
+  Context/Compact 和 final。底部短 `description` 只属于名册，不能替代详情页 prompt。
+- typed callback 的能力判断必须先检查 `write_progress` 等显式方法，再兼容普通 callable；不能因为 sink
+  对象本身不可调用就丢弃结构化工具事件。`Ctrl+O` 冻结的也必须是导航栈当前 active runtime，而非固定 root
+  runtime，避免进入 child 后展开历史却跳回主代理。
 
 ## 2026-08-24 终端原生复制与 TUI 鼠标双模式【状态：`.7` 协议已真机验证，宿主右键待用户验收】
 

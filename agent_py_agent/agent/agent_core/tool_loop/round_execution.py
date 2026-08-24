@@ -1186,10 +1186,11 @@ def _persistent_compact_enabled(agent: object, params: object) -> bool:
     return bool(getattr(getattr(agent, "config", None), "auto_save_memory", True))
 
 
+# LLM: Typed sink methods are the primary progress protocol; plain callable text
+# callbacks are legacy fallback only. Display failures must never fail tool execution.
+# 函数用途: 将一次工具阶段发送给结构化 TUI/子代理事件接收器，旧文本 callback 仅作兼容。
 def _emit_tool_progress(event: ToolProgressEvent) -> None:
     on_chunk = getattr(event.request.params, "effective_on_chunk", None)
-    if not callable(on_chunk):
-        return
     tool_name = event.call.tool_name or "unknown"
     detail = _payload_progress_detail(event.call)
     elapsed = ""
@@ -1202,7 +1203,12 @@ def _emit_tool_progress(event: ToolProgressEvent) -> None:
     )
     progress_writer = getattr(on_chunk, "write_progress", None)
     if callable(progress_writer):
-        progress_writer(_structured_tool_progress(event, tool_name, detail), legacy_text)
+        try:
+            progress_writer(_structured_tool_progress(event, tool_name, detail), legacy_text)
+        except Exception:
+            return
+        return
+    if not callable(on_chunk):
         return
     try:
         on_chunk(legacy_text)

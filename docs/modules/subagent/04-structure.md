@@ -30,6 +30,11 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   过程段、`_structured_tool_progress` 已脱敏的工具/display、数值 Compact 和重试计数。薄客户端以独立
   `event_after/event_cursor` 拉取，并直接发布到既有 TUI session sequencer；不创建第二个 reducer、Working
   行或前端完成状态。
+- child 使用相同的 `BackgroundTranscriptSink` 事件映射，但把 writer 换成
+  `agent_transcript_events/<run_id>.jsonl`，命名空间为 `bg-agent:<run>:<attempt>`。工具轮先识别 sink 的
+  `write_progress` typed 方法，只有没有该方法时才退回普通 callable；因此对象本身不可调用也不会再丢失
+  工具卡和工具前 commentary。详情的首条 user block 单独来自 canonical `SubAgentTask.goal`，名册短标题
+  `description` 只留在固定 child 行。
 
 ## 2026-08-24 Child attempt registration and activation
 
