@@ -31,7 +31,7 @@ Gateway 可以并行，但不能作为“单 Gateway 多客户端”验收的替
 TUI 退出/session 生命周期与单 Gateway 降载回归：
 
 ```bash
-python3 -m pytest agent_py_agent/tests/test_chat_parts.py agent_py_agent/tests/test_background_notice_display.py agent_py_agent/tests/test_conversation_agent_activity.py agent_py_agent/tests/test_subagent_listruns_cache.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_chat_parts.py agent_py_agent/tests/test_background_notice_display.py agent_py_agent/tests/test_conversation_agent_activity.py agent_py_agent/tests/test_subagent_listruns_cache.py agent_py_agent/tests/test_direct_parent_lifecycle.py agent_py_agent/tests/test_background_main_agent_runtime.py -q --tb=short
 ```
 
 必须证明普通 `/exit` 会停止当前 TUI 的 refresh/notices/worker，并保留 canonical session，输出精确
@@ -40,6 +40,10 @@ detach，因此 TUI PID 和轮询保持存在，不得把它记为产品退出�
 exact run id，再从 canonical task 文件复核；索引不是状态权威。健康空闲轮询为 5 秒，前台或后台有任务时
 为 1 秒，失败仍按 0.5/1/2/4/8 秒退避。`.7` 真机需同时记录退出前后 TUI PID、唯一 Gateway PID、
 session 恢复、`/client/notices` 延迟和 Gateway CPU；不得另启 Gateway，也不得删除运行任务来制造通过。
+后台 scheduler 的完成合批同样必须使用 root 索引选择 exact ids、canonical 文件复核；focused 测试要让
+全量 `list_runs_report` 主动报错，证明 managed root 查询没有偷走旧路径。真机关闭空闲旧 TUI 后还要对
+Gateway 做 Python stack/CPU 采样，不能把客户端减少误报成 scheduler 降载已完成。
+当前 root 的 canonical child 损坏必须保守返回 load error；另一棵无关历史树损坏不得再阻塞本 root 汇报。
 
 子代理详情与控制面的 focused 回归：
 

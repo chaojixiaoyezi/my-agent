@@ -648,6 +648,10 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
   持有自己的门，空闲时单轮成本从全目录扫描降为一次 stat。
 - worker-0 的 stale lease 恢复扫描改为按 `gateway_processing_timeout_seconds/3`（至少 2 秒）节流
   （cli/gateway_loops.py `_RecoverThrottle`），不再每个轮询周期全量扫 processing 目录。
+- `conversation/runtime.py::_related_subagent_runs` 是后台完成合批、投递与 goal child-phase 的共用读取缝。
+  managed 主链调用 `SubAgentManager.list_runs_for_root_report(root_task_id)`，由 LocalStore 根索引选择 exact
+  run ids 后重读 canonical task；索引/load error 保守返回 unknown。只有没有 LocalStore 的显式
+  local-unmanaged/fake manager 才使用全量 canonical fallback，Gateway 正常 tick 不得复制无关历史树。
 - heartbeat 新增 `queue_ages`（gateway_parts/io.py `gateway_queue_ages`）：最老 pending 等待秒数、
   最老 processing lease 年龄，只读文件 mtime，仅用于观测展示，不参与调度或恢复决策。
 - `agent/io/jsonl.py` 路径锁改为引用计数 + 容量水位回收，长驻 gateway 进程不再无限增长；

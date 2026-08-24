@@ -2027,6 +2027,10 @@ def _is_legacy_per_source_audit_capacity_signal(signal: WakeSignal) -> bool:
     )
 
 
+# LLM: Runtime lifecycle checks prefer the indexed root lookup that reloads exact canonical runs.
+# Legacy/fake managers without that adapter retain one full-scan compatibility path; production
+# scheduling must never deepcopy unrelated historical trees on each readiness tick.
+# 函数用途: 读取一个根任务的真实子代理状态，供完成合批、投递和续跑判断复用。
 def _related_subagent_runs(agent: object, root_task_id: str) -> tuple[list[object], str]:
     if not root_task_id:
         return [], "subagent_root_unknown"
@@ -2034,7 +2038,13 @@ def _related_subagent_runs(agent: object, root_task_id: str) -> tuple[list[objec
     if manager is None:
         return [], "subagent_state_unavailable"
     try:
-        if callable(getattr(manager, "list_runs_report", None)):
+        root_reader = getattr(manager, "list_runs_for_root_report", None)
+        if callable(root_reader):
+            report = root_reader(root_task_id)
+            if list(getattr(report, "load_errors", []) or []):
+                return [], "subagent_state_load_error"
+            tasks = list(getattr(report, "runs", []) or [])
+        elif callable(getattr(manager, "list_runs_report", None)):
             report = manager.list_runs_report()
             if list(getattr(report, "load_errors", []) or []):
                 return [], "subagent_state_load_error"

@@ -89,6 +89,82 @@ class SubAgentListRunsReport:
     load_errors: list[dict[str, Any]] = field(default_factory=list)
 
 
+# LLM: Canonical root verification accepts either the explicit root relation or the root run
+# itself. It never derives lineage from names, descriptions, paths, or status prose.
+# 函数用途: 复核索引选出的 run 确实属于指定根任务，防止陈旧查询行串树。
+def _canonical_runs_for_root(
+    runs: Iterable[SubAgentTask],
+    root_task_id: str,
+) -> list[SubAgentTask]:
+    return [
+        task
+        for task in runs
+        if str(getattr(task, "id", "") or "").strip() == root_task_id
+        or str(getattr(task, "root_id", "") or "").strip() == root_task_id
+    ]
+
+
+# LLM: This adapter keeps indexed selection outside the persistence class size budget. Managed
+# lookup failures remain explicit, while local-unmanaged callers intentionally use canonical scan.
+# 函数用途: 实现按根任务的“索引选 ID、文件复核”读取，并返回结构化错误。
+def _list_runs_for_root_report(
+    service: SubAgentPersistenceService,
+    root_task_id: str,
+) -> SubAgentListRunsReport:
+    try:
+        root_id = validate_opaque_id(root_task_id, kind="root_task_id")
+    except Exception as exc:
+        report = runtime_error_report(exc, context="subagents.load_root")
+        report["root_task_id"] = str(root_task_id or "")
+        return SubAgentListRunsReport(load_errors=[report])
+
+    local_store = getattr(service.manager, "local_store", None)
+    tree_reader = getattr(local_store, "list_agent_tree", None)
+    if not callable(tree_reader):
+        report = service.list_runs_report()
+        return SubAgentListRunsReport(
+            runs=_canonical_runs_for_root(report.runs, root_id),
+            load_errors=report.load_errors,
+        )
+
+    try:
+        tree = tree_reader(root_id)
+        selected_ids = list(
+            dict.fromkeys(
+                str(getattr(record, "run_id", "") or "").strip()
+                for record in list(getattr(tree, "runs", ()) or ())
+                if str(getattr(record, "root_task_id", "") or "").strip()
+                == root_id
+                and str(getattr(record, "run_id", "") or "").strip()
+            )
+        )
+    except Exception as exc:
+        report = runtime_error_report(exc, context="subagents.load_root_index")
+        report["root_task_id"] = root_id
+        return SubAgentListRunsReport(load_errors=[report])
+
+    selected = service.list_runs_by_ids_report(selected_ids)
+    canonical = _canonical_runs_for_root(selected.runs, root_id)
+    canonical_ids = {
+        str(getattr(task, "id", "") or "").strip() for task in canonical
+    }
+    mismatched_ids = {
+        str(getattr(task, "id", "") or "").strip()
+        for task in selected.runs
+        if str(getattr(task, "id", "") or "").strip() not in canonical_ids
+    }
+    load_errors = list(selected.load_errors)
+    if mismatched_ids:
+        report = runtime_error_report(
+            ValueError("子代理根索引与 canonical task 不一致"),
+            context="subagents.load_root_index",
+        )
+        report["root_task_id"] = root_id
+        report["run_ids"] = sorted(mismatched_ids)
+        load_errors.append(report)
+    return SubAgentListRunsReport(runs=canonical, load_errors=load_errors)
+
+
 class SubAgentPersistenceService:
     """Read and write SubAgentTask records for SubAgentManager."""
 
@@ -228,6 +304,16 @@ class SubAgentPersistenceService:
                 load_errors.append(report)
         runs.sort(key=lambda item: item.updated_at or item.created_at, reverse=True)
         return SubAgentListRunsReport(runs=runs, load_errors=load_errors)
+
+    # LLM: Root-tree lookup uses LocalStore only to select exact ids, then reloads every selected
+    # canonical task file. Managed index errors stay explicit; local-unmanaged callers retain the
+    # canonical full-scan path because they deliberately have no lookup projection.
+    # 函数用途: 按一个根任务读取其子代理树，避免后台调度每秒复制全部历史 run。
+    def list_runs_for_root_report(
+        self,
+        root_task_id: str,
+    ) -> SubAgentListRunsReport:
+        return _list_runs_for_root_report(self, root_task_id)
 
     # LLM: Cache access is serialized because ThreadingHTTPServer may render several TUI/Web
     # projections concurrently. Nanosecond mtimes invalidate parsed objects; deep copies preserve

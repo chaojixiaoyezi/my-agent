@@ -224,6 +224,12 @@ class SubAgentManager(SubagentKernelMixin):
     def list_runs_by_ids_report(self, run_ids):
         return self.persistence.list_runs_by_ids_report(run_ids)
 
+    # LLM: Root-scoped reads delegate to the persistence/index adapter and return canonical task
+    # copies. Scheduler callers must not fall back to parsing goal text or display tree rows.
+    # 函数用途: 精确读取某个根任务的子代理，供后台完成合批和续跑判断使用。
+    def list_runs_for_root_report(self, root_task_id):
+        return self.persistence.list_runs_for_root_report(root_task_id)
+
     def save(self, task: SubAgentTask) -> None:
         self.persistence.save(task)
 

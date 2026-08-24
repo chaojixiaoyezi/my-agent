@@ -1,5 +1,14 @@
 # Subagent Progress
 
+## 2026-08-24 后台 root-tree 精确读取降载（本地候选）
+
+- `.7` Gateway 进程采样证明后台 main readiness 反复进入 `list_runs_report`，缓存命中后仍 deepcopy 全部
+  历史 SubAgentTask；退出空闲 TUI 只能减少 HTTP 查询，不能消除 scheduler 自身的这一成本。
+- persistence/manager 新增 `list_runs_for_root_report`：LocalStore 只负责按 `root_task_id` 选 exact run id，
+  每个结果仍从 canonical `task.json` 读取并复核 root；索引异常和文件缺失保留结构化错误。
+- focused 回归钉死 managed root 查询不会调用全量扫描，也不会把另一棵历史树装入解析缓存；发布后需以
+  单 Gateway 的进程 stack、CPU 和 lifecycle wake 自然合批共同验收，不能只看接口延迟。
+
 ## 2026-08-24 TUI 活动面精确读取与线程安全缓存（本地候选）
 
 - `.7` 多个 detached TUI 的 `/client/notices` 现场显示，活动面板为当前几名直属 child 查询时仍调用

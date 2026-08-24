@@ -1,5 +1,15 @@
 # STATUS
 
+## 2026-08-24 TUI 退出/session 分层与 Gateway root 查询降载
+
+- `c12ea57` 已推送并部署到 `.7` 唯一 Gateway。fresh TUI `/exit` 后进程退出且 durable session 保留，
+  exact `resume` 没有新建会话；16 个历史会话并发活动快照均在 0.011--0.206 秒返回。
+- 9 个部署前且 `active_task_count=0` 的 tmux TUI 已正常 `/exit`；对应 session 文件全部保留，用户当前直连
+  PID 未触碰。终端交互 的 live PID registry 与 durable transcript 分层已按单 Gateway 架构适配完成。
+- 关闭旧客户端后只读采样仍抓到 Gateway scheduler 在 readiness 中 deepcopy 全部历史 run；当前本地候选
+  新增 root-scoped indexed canonical reader，181 项直接回归已通过（2 项既有 xfail）。待严格 gate、推送、部署并重采 CPU/
+  Python stack 后，才能把第二段降载写成真机完成。
+
 ## 2026-08-24 子代理可进入视图与精确控制（`.7` 真 TUI 已通过）
 
 - TUI 空输入可用 `↓` 选择直属 child、`Enter` 进入；详情复用主代理的 thinking、工具/diff、Todo、

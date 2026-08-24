@@ -1294,7 +1294,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   本地可信 TUI 的 cwd 与远程用户 `owner_home` 隔离也不因传输优化改变。后续若升级为事件长连接，仍复用
   同一 canonical activity/notices，而不是建立第二份前端状态账。
 
-## 2026-08-24 TUI 进程退出与 durable session 分离【状态：本地候选待 `.7` 真机】
+## 2026-08-24 TUI 进程退出与 durable session 分离【状态：首段已部署；后台 root 查询降载待真机】
 
 - 终端交互 对照把三层事实分开：`~/.模型助手/sessions/<pid>.json` 只登记仍活着的 REPL 进程，普通
   `/exit`/Ctrl-D 会走 graceful shutdown 并删除 PID 登记；聊天 transcript/session 继续持久化，可用
@@ -1310,6 +1310,11 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 本轮不增加第二套“在线 session”数据库，也不自动杀 detached tmux。真正在线的 TUI 以后若需要
   `ps/attach/kill` 管理面，应另建带 PID/start-token 的易失进程登记；durable chat session 与 Gateway
   task 仍保持独立，不能按名称或模型文案判断存活。
+- `.7` 部署后又用进程采样确认第二个同源热点：后台主代理 readiness 为每条待合批 wake 调用
+  `_related_subagent_runs`，旧实现即使解析缓存命中，仍会 deepcopy 全部历史 run 后再筛一棵树。当前适配
+  复用 LocalStore 的 `root_task_id` 索引只选择 exact run ids，再逐个读取 canonical `task.json`；managed
+  索引异常返回结构化 load error 并保守不推进，不能退回自然语言或展示树猜状态。只有显式
+  local-unmanaged/fake manager 没有查询投影时保留 canonical 全扫兼容路径。
 
 ## 2026-08-23 会话运行时 式活轮权限与结果提交栅栏
 

@@ -438,3 +438,38 @@ def test_root_success_wake_waits_model_free_until_same_tree_settles(tmp_path) ->
     manager.save(second)
 
     assert _successful_completion_waiting_for_batch(scheduler, signal, 10.0) is False
+
+
+def test_completion_batch_uses_root_reader_without_full_history_scan() -> None:
+    """生产 manager 提供 root reader 时，后台合批不得再读全部历史。"""
+    seen: list[str] = []
+
+    def root_report(root_task_id: str):
+        seen.append(root_task_id)
+        return SimpleNamespace(
+            runs=[SimpleNamespace(id="child-done", root_id=root_task_id, status="DONE")],
+            load_errors=[],
+        )
+
+    def fail_full_scan():
+        raise AssertionError("completion batching must not scan every historical run")
+
+    manager = SimpleNamespace(
+        list_runs_for_root_report=root_report,
+        list_runs_report=fail_full_scan,
+    )
+    scheduler = SimpleNamespace(
+        runtime=SimpleNamespace(agent=SimpleNamespace(subagents=manager)),
+        _config_limit=lambda _name: 0,
+    )
+    signal = WakeSignal(
+        wake_signal_id="wake-indexed",
+        thread_id="thread-indexed",
+        reason="subagent_runner_finished",
+        root_task_id="root-indexed",
+        created_at=1.0,
+        metadata={"status": "DONE"},
+    )
+
+    assert _successful_completion_waiting_for_batch(scheduler, signal, 10.0) is False
+    assert seen == ["root-indexed"]

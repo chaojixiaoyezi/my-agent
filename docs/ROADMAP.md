@@ -20,6 +20,16 @@
 来自 STATUS.md，子代理可进入视图与精确控制已转入 COMPLETED；当前继续正式矩阵与仍缺直接自然样本的
 生命周期分支。
 
+### TUI 退出/session 分层与单 Gateway 空闲降载
+
+状态：`c12ea57` 的退出、exact resume、活动接口索引与空闲轮询已部署；后台 root-tree 查询候选待部署采样
+
+解决问题：tmux detach 后旧 TUI 进程仍活着，多个客户端持续轮询；同时活动面和后台 lifecycle readiness
+会为一棵小子代理树扫描或 deepcopy 全部历史 run，造成 Gateway 高 CPU、BrokenPipe 和普通消息二十多秒才
+有反应。普通 `/exit` 现在只结束客户端、保留 durable session/Gateway task；查询先用结构化索引选 exact
+ids，再回 canonical 文件复核。当前还需部署 scheduler 的 root-scoped reader，以真实 stack/CPU 证明后台
+循环也不再走全量路径，并确认自然 child 完成合批未回归。
+
 ### 会话运行时 式同一父级分批创建
 
 状态：`fb75b68` 已严格 gate、推送并部署；fresh r9 后台第二批通过，活跃 sibling 间的第二次独立调用待自然样本

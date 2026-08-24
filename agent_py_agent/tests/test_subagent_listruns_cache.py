@@ -85,3 +85,34 @@ def test_list_runs_by_ids_keeps_missing_run_as_structured_error(tmp_path: Path) 
     assert report.runs == []
     assert len(report.load_errors) == 1
     assert report.load_errors[0]["run_id"] == "subagent-missing"
+
+
+def test_list_runs_for_root_uses_index_then_exact_canonical_reads(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """后台 root 查询不能为一棵小树复制其它历史 run。"""
+    agent = _agent(tmp_path)
+    selected = agent.subagents.create_run(goal="selected", agent_name="selected")
+    selected.root_id = "root-selected"
+    selected.parent_id = "root-selected"
+    selected.depth = 1
+    agent.subagents.save(selected)
+    ignored = agent.subagents.create_run(goal="ignored", agent_name="ignored")
+    ignored.root_id = "root-ignored"
+    ignored.parent_id = "root-ignored"
+    ignored.depth = 1
+    agent.subagents.save(ignored)
+    agent.subagents.persistence._run_cache.clear()
+
+    def fail_full_scan():
+        raise AssertionError("managed root lookup must not scan every run")
+
+    monkeypatch.setattr(agent.subagents.persistence, "list_runs_report", fail_full_scan)
+
+    report = agent.subagents.list_runs_for_root_report("root-selected")
+
+    assert [task.id for task in report.runs] == [selected.id]
+    assert report.load_errors == []
+    assert selected.id in agent.subagents.persistence._run_cache
+    assert ignored.id not in agent.subagents.persistence._run_cache

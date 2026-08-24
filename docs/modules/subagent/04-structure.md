@@ -154,6 +154,11 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   declared/artifact refs 继续来自 canonical 合同/结果。`conversation/runtime.py` 只把同 root 的普通 DONE
   信封按预算合批，`context_budget.py` 保证 active wake 在压力下不丢 metadata 和批成员；这些投影不拥有
   验收、权限或根任务完成权。
+- `services/persistence/service.py::list_runs_for_root_report` 是 runtime 按 root 读取 child tree 的查询入口。
+  managed 模式先用 LocalStore `legacy_agent_runs.root_task_id` 索引选 run ids，再调用 exact-id reader 重载
+  canonical task 并复核 `id/root_id`；SQLite 行只负责定位。索引损坏、canonical 缺失或 lineage 不一致均
+  形成 load error，后台完成合批保守等待，不从 title/goal/status 文案补猜。没有 LocalStore 的显式
+  local-unmanaged 测试/嵌入模式才允许全量 canonical fallback。
 
 ## Memory Candidate 接口
 

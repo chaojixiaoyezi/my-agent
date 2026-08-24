@@ -1,6 +1,6 @@
 # Gateway Progress
 
-## 2026-08-24 detached TUI 会话降载与退出语义（本地候选）
+## 2026-08-24 detached TUI 会话降载与退出语义（首段已部署，scheduler 降载候选）
 
 - `.7` 现场的 tmux 窗口虽然全部 detached，但其中 10 个 TUI Python 进程仍存活并持续查询唯一 Gateway；
   `/client/notices` 每次又扫描 owner 下全部历史子代理，形成高 CPU、BrokenPipe 和新消息排队。它不是
@@ -8,9 +8,12 @@
 - 对照 终端交互 后，普通 `/exit` 改为关闭本客户端及 poller、保留 durable session 和 Gateway task，
   并打印精确 resume 命令；tmux 自己的 detach 仍明确表示进程继续。活动 roster 改成 SQLite 选 exact id、
   canonical 文件复核；空闲健康轮询 5 秒，有任务 1 秒，断线维持独立指数退避。
-- 本地 exact-read、indexed activity、轮询节奏与 TUI exit 回归完成后，需在 `.7` 唯一 Gateway 上证明：
-  `/exit` 后 TUI PID 消失而 session 可恢复；旧/新多个客户端下 `/client/notices` 延迟与 Gateway CPU 回落；
-  有任务时状态刷新仍不超过约 1 秒。真机证据完成前不得写成已发布。
+- `c12ea57` 已推送并部署到 `.7` 唯一 Gateway：fresh TUI 的 `/exit` 后 PID 消失、原 session 文件保留，
+  exact `resume` 没有新增 session；16 个会话并发 `/client/notices` 为 0.011--0.206 秒。随后关闭 9 个已无
+  活动任务的部署前 TUI，用户当前直连 TUI 未动，所有对应 durable session 均保留。
+- 关闭旧客户端后 Gateway 仍有约 40% CPU；`py-spy` 精确采到后台 readiness 在
+  `_related_subagent_runs -> list_runs_report -> deepcopy`。当前候选让 lifecycle 合批也走 root 索引选 ID、
+  canonical 精确读取；部署后必须用同一 Gateway 重采空闲 CPU/stack，并确认有任务状态刷新仍不超过约 1 秒。
 
 ## 2026-08-24 后台 main 富过程双游标（本地候选）
 
