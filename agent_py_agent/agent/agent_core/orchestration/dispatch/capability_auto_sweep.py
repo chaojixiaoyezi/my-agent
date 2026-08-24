@@ -96,26 +96,41 @@ def auto_start_stalled_orphans(agent: Any) -> dict[str, object]:
     try:
         tasks = manager.list_runs()
         decisions = conversation_lifecycle_decisions(agent, tasks)
-        stalled = [
-            task
-            for task in tasks
-            if _is_stalled_dispatchable_orphan(
+        stalled: list[Any] = []
+        recovery_blocks: list[dict[str, str]] = []
+        for task in tasks:
+            if not _is_stalled_dispatchable_orphan(
                 task,
                 decisions.get(str(getattr(task, "id", "") or "")),
-            )
-        ]
+            ):
+                continue
+            recovery_block = _runtime_authority_recovery_block(manager, task)
+            if recovery_block is not None:
+                recovery_blocks.append(recovery_block)
+                continue
+            stalled.append(task)
     except Exception:
         _LOGGER.warning("orphan revive list_runs failed", exc_info=True)
         return {"started": 0}
     if not stalled:
-        return {"started": 0}
+        return {
+            "started": 0,
+            "authority_recovery_blocked": len(recovery_blocks),
+            "recovery_blocks": recovery_blocks,
+        }
     from ..background.dispatch import auto_start_tasks
 
     result = auto_start_tasks(agent, stalled, {})
     started = (
         list(result.get("run_ids") or []) if str(result.get("status") or "") == "started" else []
     )
-    return {"started": len(started), "status": str(result.get("status") or ""), "run_ids": started}
+    return {
+        "started": len(started),
+        "status": str(result.get("status") or ""),
+        "run_ids": started,
+        "authority_recovery_blocked": len(recovery_blocks),
+        "recovery_blocks": recovery_blocks,
+    }
 
 
 # 函数用途：在一个 runner session 已经持久化终态后，只续派指定的孤儿 run；
@@ -130,6 +145,14 @@ def auto_start_orphan_run(agent: Any, run_id: str) -> dict[str, object]:
         decision = conversation_lifecycle_decisions(agent, [task]).get(key)
         if not _is_stalled_dispatchable_orphan(task, decision):
             return {"started": 0, "status": "not_needed", "run_ids": []}
+        recovery_block = _runtime_authority_recovery_block(manager, task)
+        if recovery_block is not None:
+            return {
+                "started": 0,
+                "status": "authority_recovery_blocked",
+                "run_ids": [],
+                "recovery_block": recovery_block,
+            }
     except Exception:
         _LOGGER.warning(
             "targeted orphan revive preflight failed (run_id=%s)",
@@ -183,6 +206,24 @@ def _is_stalled_dispatchable_orphan(task: Any, decision: Any = None) -> bool:
         return False
     # 复用派工候选判定(launch 防重/open 能力申请/gap/verified 排除),与 dispatch 同一口径。
     return _is_dispatch_runner_candidate(task)
+
+
+# LLM: This read-side preflight mirrors the runtime repository's unknown-state
+# gate. It must never infer safety from task projection status, runner prose, or
+# retry counts; create_attempt remains the transactional last line of defence.
+# 函数用途: 在自动拉起孤儿前读取 runtime.db 权威状态，unknown 时返回结构化阻断事实。
+def _runtime_authority_recovery_block(
+    manager: Any,
+    task: Any,
+) -> dict[str, str] | None:
+    repo = getattr(manager, "runtime_db", None)
+    checker = getattr(repo, "agent_run_recovery_block_for_run_id", None)
+    if not callable(checker):
+        return None
+    run_id = str(getattr(task, "id", "") or "").strip()
+    if not run_id:
+        return None
+    return checker(run_id)
 
 
 def _has_live_abandoned_runner_attempt(task: Any) -> bool:
@@ -244,6 +285,7 @@ def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
         "stalled_source_hosts_cleanup_attempted": 0,
         "stalled_source_hosts_terminated": 0,
         "orphans_revived": 0,
+        "orphan_authority_recovery_blocked": 0,
     }
     try:
         parent_summary = _reconcile_conversation_parent_lifecycle(agent)
@@ -285,7 +327,7 @@ def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
         # broader watch-policy/source-reconciliation scans. Those scans can
         # wait on unrelated file locks and previously delayed an already
         # recovered source worker by another full minute.
-        summary["orphans_revived"] = int(auto_start_stalled_orphans(agent).get("started") or 0)
+        _merge_orphan_revive_summary(summary, auto_start_stalled_orphans(agent))
     except Exception:
         _LOGGER.debug("supervision immediate orphan revive failed", exc_info=True)
     try:
@@ -316,6 +358,23 @@ def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
                     exc_info=True,
                 )
     return summary
+
+
+# LLM: Supervisor reporting must distinguish accepted starts from authority
+# blocks without duplicating the orphan-start policy or changing task state.
+# 函数用途: 把一次孤儿恢复扫描的结构化结果合并到 Gateway 监督摘要。
+def _merge_orphan_revive_summary(
+    summary: dict[str, object],
+    revive_summary: dict[str, object],
+) -> None:
+    summary["orphans_revived"] = int(revive_summary.get("started") or 0)
+    summary["orphan_authority_recovery_blocked"] = int(
+        revive_summary.get("authority_recovery_blocked") or 0
+    )
+    if revive_summary.get("recovery_blocks"):
+        summary["orphan_recovery_blocks"] = list(
+            revive_summary.get("recovery_blocks") or []
+        )
 
 
 # LLM: Parent-wait crash compensation is isolated from the broader supervisor;

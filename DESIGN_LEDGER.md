@@ -1354,3 +1354,21 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 该机制不是机器验收：不解析 final 正文，不理解“测试/完整复刻”等业务词，不扫描文件、LOC、Todo 或
   产物，也不替模型判任务完成。`unverified` 与 `not_started` 不自动触发这条历史核对；最新操作本身未决时
   继续由既有 completion-conflict 路径处理。即使模型复核后仍决定结束，宿主也接受其第二份自然回复。
+
+## 2026-08-24 子代理 unknown 孤儿恢复预检
+
+状态：`.7` 历史日志与 runtime.db 已确认根因；本地实现及 focused 回归通过，待当前 r6 自然结束后部署。
+
+- 真实失败链：旧 child 的 AgentRun/current AgentAttempt 已被崩溃恢复写成 `unknown`，文件投影一度仍为
+  `PENDING`。周期 orphan supervisor 只看投影就调用 durable auto-start，并先把动作计作
+  `orphans_revived=1`；真正 runner 到 `create_attempt` 才被权威闸拒绝。现场同一 `agent_run_id` 留下 3 条
+  `status_conflict(unknown_run_status)`，最后文件投影成为 `CHANNEL_ERROR` 才停止。
+- 底层决定：repository 新增按 exact subagent run id 的 recovery-block 投影，与 `create_attempt` 共用
+  `_main_agent_recovery_reason`。周期和 targeted orphan 启动都必须先读该结构化事实；unknown 直接返回
+  `authority_recovery_blocked`，不建 runner、不占槽、不虚报复活。
+- 安全边界不变：预检只是减少已知无效启动，事务闸和执行权锁仍保留；无权威记录沿用既有 MANAGED
+  授权门处理，unknown 不自动改 failed/abandoned，只有人工核对后的 `recover_attempt_unknown` 能释放。
+  不读取任务正文、错误字符串、职责描述或重试文案。
+- 会话运行时 对照：`AgentStatus::Errored/NotFound` 会让 multi-agent wait/tool 显式失败，重新启动走显式
+  `resume_agent`；没有周期任务把异常 thread 先宣称复活再让执行入口报错。本项目因持久 Gateway 需要
+  orphan 巡查，但采用同一原则把异常权威状态挡在调度之前。

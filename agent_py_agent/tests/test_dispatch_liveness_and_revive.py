@@ -233,6 +233,47 @@ def test_targeted_orphan_revive_rejects_fresh_runner(
     assert calls == []
 
 
+def test_orphan_revive_stops_before_runtime_unknown_attempt(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager = SubAgentManager(
+        tmp_path / "subagents",
+        owner_id="local/main",
+        owner_home_dir=str(tmp_path / "owner"),
+    )
+    requested = _make_child(manager, status="PENDING")
+    prepared = manager.lifecycle.prepare_runner_attempt(requested.id)
+    run = manager.runtime_db.agent_run_for_run_id(requested.id)
+    assert run is not None
+    assert manager.runtime_db._mark_attempt_unknown(
+        prepared.runner_active_attempt_id,
+        str(run["agent_run_id"]),
+        reason="test worker disappeared",
+        operator="test",
+    )
+    requested = manager.load(requested.id)
+    requested.status = "PENDING"
+    requested.runner_active_attempt_id = ""
+    manager.save(requested)
+    calls = _capture_auto_start(monkeypatch)
+
+    targeted = capability_auto_sweep.auto_start_orphan_run(
+        _agent(tmp_path, manager),
+        requested.id,
+    )
+    swept = capability_auto_sweep.auto_start_stalled_orphans(
+        _agent(tmp_path, manager)
+    )
+
+    assert targeted["status"] == "authority_recovery_blocked"
+    assert targeted["recovery_block"]["reason"] == "attempt_unknown_terminal"
+    assert swept["started"] == 0
+    assert swept["authority_recovery_blocked"] == 1
+    assert swept["recovery_blocks"][0]["run_id"] == requested.id
+    assert calls == []
+
+
 def test_orphan_revive_waits_for_abandoned_attempt_thread_to_exit(
     tmp_path: Path,
 ) -> None:

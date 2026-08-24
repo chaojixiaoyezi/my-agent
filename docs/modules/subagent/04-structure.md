@@ -18,6 +18,19 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 - 该状态边界参考 会话运行时 child 的 `PendingInit -> TurnStarted`，但执行权、owner 隔离和审计仍以本项目
   runtime.db 的 AgentRun/current pointer/resource lock 为权威。
 
+## 2026-08-24 Unknown orphan recovery preflight
+
+- `RuntimeRepository.agent_run_recovery_block_for_run_id` 是子代理自动恢复的权威只读预检；它与
+  `create_attempt` 共用 run/current-attempt 的结构化 unknown 判据。前者避免明知不合法的调度，后者仍是
+  事务内最终执行权闸。
+- `supervise_stalled_orphans` 只对文件投影和 conversation lifecycle 都可派、且 runtime.db 没有 recovery
+  block 的 run 调用 durable auto-start。unknown run/attempt 返回 `authority_recovery_blocked`，不会创建
+  runner、占用并发或把未启动的进程计作 `orphans_revived`。
+- 该预检不从 `CHANNEL_ERROR`、重试次数、模型正文或错误文案猜恢复安全性，也不自动把 unknown 改成
+  failed/abandoned。唯一放行仍是操作者核对副作用后调用 `recover_attempt_unknown`。
+- 对照 会话运行时 的 `AgentStatus`：`Errored/NotFound` 在 multi-agent wait/tool 状态中直接投影失败，恢复是
+  显式 `resume_agent` 行为；本项目保留持久 orphan 巡查，但不再周期性盲拉已知 unknown 执行。
+
 ## 2026-08-23 Runner result commit fence
 
 - `runtime_db.repository.runner_result_commit_authority` 是 MANAGED runner 结果回写的 typed 查询口；

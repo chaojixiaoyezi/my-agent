@@ -756,3 +756,12 @@ completion-conflict 负责；task-local child、只有 `unverified` 或纯 `not_
 ```bash
 python3 -m pytest agent_py_agent/tests/test_current_turn_execution.py agent_py_agent/tests/test_runtime_guidance.py -q --tb=short
 ```
+
+子代理 orphan 恢复必须覆盖 runtime.db 与文件投影暂时不一致的崩溃窗口：task 投影仍为 `PENDING`，但
+current AgentAttempt 已是 `unknown` 时，targeted 与周期 sweep 都必须返回结构化 recovery block，零次调用
+auto-start，且不能增加 `orphans_revived`。正常 pending/planning、活 session、防重锁与 attempt cap 继续走
+原行为：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_dispatch_liveness_and_revive.py -q --tb=short
+```

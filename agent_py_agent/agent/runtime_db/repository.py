@@ -587,6 +587,39 @@ class RuntimeRepository(
             "attempt_status": str(row["attempt_status"] or ""),
         }
 
+    # LLM: Subagent orphan recovery must consult this projection before it
+    # schedules a replacement worker. The transactional create_attempt gate
+    # remains the final authority; this read-side check prevents known-invalid
+    # starts from being reported as revived or consuming a runner slot.
+    # 函数用途: 按子代理 run_id 查询 unknown 权威状态，供自动孤儿恢复在启动前停手。
+    def agent_run_recovery_block_for_run_id(self, run_id: str) -> dict[str, str] | None:
+        with self._runtime_connection() as conn:
+            row = conn.execute(
+                "SELECT ar.agent_run_id, ar.status AS run_status, "
+                "ar.current_attempt_id, aa.status AS attempt_status "
+                "FROM agent_runs ar "
+                "LEFT JOIN agent_attempts aa ON aa.attempt_id = ar.current_attempt_id "
+                "WHERE ar.run_id = ? LIMIT 1",
+                (str(run_id or ""),),
+            ).fetchone()
+        if row is None:
+            return None
+        reason = _main_agent_recovery_reason(
+            str(row["run_status"] or ""),
+            str(row["attempt_status"] or ""),
+        )
+        if not reason:
+            return None
+        return {
+            "schema_version": "agent-run-recovery-block.v1",
+            "reason": reason,
+            "run_id": str(run_id or ""),
+            "agent_run_id": str(row["agent_run_id"] or ""),
+            "attempt_id": str(row["current_attempt_id"] or ""),
+            "run_status": str(row["run_status"] or ""),
+            "attempt_status": str(row["attempt_status"] or ""),
+        }
+
     # ---------------------------------------------------------- AgentAttempt
     # LLM: A delegated child is registered as pending before any worker owns it.
     # Activation must reuse that exact current generation, install the execution
