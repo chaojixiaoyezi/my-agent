@@ -17,7 +17,17 @@
 
 ## 下一版优先级
 
-来自 STATUS.md，当前最急迫的任务已清空，下面保留中长期项。
+来自 STATUS.md，当前先收口 r7 暴露的子代理切片续跑断链，再继续正式矩阵。
+
+### 会话运行时 式子代理切片续跑提交桥
+
+状态：r7 真 TUI 根因已确认；本地修复与直接回归通过，待严格 gate、推送部署和 fresh TUI
+
+解决问题：子代理一轮在 max-token/context 截断时，宿主会先正确关闭 exact AgentAttempt，
+再把逻辑 child 交回 PENDING 以便续跑。旧 MANAGED 结果栅栏只接受 running attempt 或 run 级终态，
+将该顺序当成冲突，造成 session/attempt 已结束而 TUI 永久 RUNNING。当前候选只接受 exact current
+generation 且与 typed `turn_end_reason` 严格对应的 PENDING/BLOCKED；终态仍要求 run 级事实。
+fresh Prompt 4 需自然观察一次截断后新 generation 立即启动，同时确认父级自然唤醒。
 
 ### 会话运行时 式工作区并发与双 TUI 对照
 

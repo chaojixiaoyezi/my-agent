@@ -52,6 +52,10 @@
   取得执行权锁；current attempt 仍在运行时再次启动必须结构化拒绝，不能静默换成 generation 2。只有前一
   attempt 已被 typed completion/abandon/recovery 收口，后续调度才可创建新 generation。该边界对照 会话运行时
   `PendingInit -> TurnStarted -> TurnComplete/TurnAborted/Error`，同时保留本项目 runtime.db 审计链。
+- 一个可续跑模型/工具片段结束时，宿主先将 exact current attempt 收口为 `done`，AgentRun
+  仍保持 `created`；随后 runner result 只可回写与同一 `turn_end_reason` 严格对应的
+  `PENDING/BLOCKED`。该提交桥只对 exact current generation 开放；`DONE/FAILED/CANCELLED`
+  仍必须有匹配的 run 级结构化终态，模型正文、parsed output 和展示短句都没有该权限。
 - 子代理交付合同只来自用户/父代理显式 `output_files` / `output_refs` / artifact refs。没有声明时不生成
   内部 Markdown 槽冒充业务产物；直属完成事件以 typed status、child 最终回复和系统 `final_report_ref`
   回到父级。旧 durable task 的 `system_default_output_ref=true` 继续可迁移读取，但在所有模型可见合同与
@@ -1287,6 +1291,10 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - runner result 与 runtime.db 建立双层 CAS：canonical active attempt 必须一致；MANAGED 还要求
   exact current generation。宿主先收口的 `done/failed/cancelled` 只接受对应结果；旧 attempt 或已取消
   后迟到的 `DONE` 不得复活 task。原始 provider 响应仍可留在 archive 供查错，但不获得 canonical 写权。
+- 会话运行时 的同一 active turn 可在 `needs_follow_up` 时继续下一个物理片段。my-agent 因需持久审计，
+  会先关闭旧 attempt 再投影 task 状态，因此提交栅栏必须显式接受
+  `run=created + current attempt=done + turn_end_reason=max-tokens/interrupted/blocked` 的同源非终态回写。
+  不做这一步会把真实已结束的片段永久留在 TUI `RUNNING`；放宽到任意状态又会让伪完成穿透 CAS。
 - 能力申请已在当 attempt 获得 typed grant 后，原 `BLOCKED` 已没有待人处理的外部条件。它现投影为
   同 run `PENDING`，退出 runner session 后由现有 durable auto-start 继续；这避免先把 conversation child link
   写成 blocked，又被 conversation lifecycle gate 阻止续派的自相矛盾。

@@ -1,5 +1,18 @@
 # STATUS
 
+## 2026-08-24 Prompt 4 r7：富工具展示已上机，截断 child 的续跑提交桥待发布
+
+- `80386ac` 已通过 218 项 focused 回归和本地严格 gate，推送并部署到 `192.0.2.7`
+  唯一 Gateway；运行模型确认为 `MiniMax-M2.7`。fresh tmux `ma-80386ac-p4-fzf-r7-rich`
+  对固定 `fzf@956562da` 只接收一次原样 Prompt 4，已真实显示蓝色工具标题、层级输出、折叠提示、
+  11 项 Todo 和 6 名 child 活动行。
+- r7 同时捕到一个底座死等：child 因 `MODEL_RESPONSE_TRUNCATED` 结束时，runner session
+  已 completed、runtime.db exact attempt 已 done，但 canonical task 仍 RUNNING。根因是结果提交栅栏漏了
+  `AgentRun=created + current attempt=done + host PENDING` 的合法切片窗口，不是模型仍在计算。
+- 本地候选已按 会话运行时 `needs_follow_up` 语义补齐：只放行同一 generation、同一 typed
+  `turn_end_reason` 映射出的 PENDING/BLOCKED；伪 DONE 仍拒绝。定向回归已通过，仍需完成
+  严格 gate、推送、单 Gateway 部署和 fresh TUI 复验才能写成真机修复。
+
 ## 2026-08-24 Prompt 4 r6：Todo/child 通过，root 越界与后台过程不可见（本地候选）
 
 - `.7` 唯一 Gateway、MiniMax-M2.7、tmux `ma-84c6b90-p4-fzf-r6-todo` 只输入一次原样 Prompt 4；4 名

@@ -96,6 +96,10 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   结果一旦把 exact run 投影回 `PENDING`，`runner_result_state.py` 只回收该 task 的
   `background_start`；不终止共享进程、不碰兄弟记录。session lease 退出后由 canonical orphan auto-start
   立即续派，周期监督只承担崩溃兜底。
+- 对于因 `max-tokens/interrupted/blocked` 结束的物理片段，runtime.db 先关闭 exact
+  current attempt，然后 runner result 再按同一 `turn_end_reason` 回写 `PENDING/BLOCKED`。
+  `runner_result_service.py` 的 MANAGED 提交栅栏只放行这个严格匹配；错代、缺 reason、伪 `DONE`
+  或与 run 级终态冲突的迟到结果继续拒绝。新一代 attempt 只能在该投影清空 active id 后重建。
 - 上述判断只读取 exact task id、canonical manager 与 typed context scope，不读 run id 前缀、模型正文、
   Todo 或职责描述；因此它是身份/调度收口，不是任务质量验收或自然语言状态机。
 

@@ -1,5 +1,18 @@
 # Subagent Progress
 
+## 2026-08-24 r7 后台展示上线，截断片段被误留在 RUNNING（本地修复候选）
+
+- `80386ac` 已推送、部署到 `.7` 唯一 Gateway；有效模型为 `MiniMax-M2.7`。fresh tmux
+  `ma-80386ac-p4-fzf-r7-rich` 在固定 `fzf@956562da` 源码上只输入一次原样 Prompt 4。前台已显示
+  终端交互 式蓝色工具标题、缩进输出和折叠提示；root 建立 11 项 Todo，并按当前容量创建 6 名 child。
+- 其中一名 child 的 provider 回复以 `MODEL_RESPONSE_TRUNCATED` 结束。runtime.db 正确记录
+  `AgentRun=created/current AgentAttempt=done`，runner session 也已 completed；但 MANAGED 结果栅栏不接受
+  这个“已关闭片段→PENDING”的合法窗口，canonical task 仍是 RUNNING，TUI 与父级因而永久等待。
+- 对照 会话运行时 `session/turn.rs` 中 `needs_follow_up` 继续同一 active turn，本地候选只放行 exact current
+  generation 且 `turn_end_reason` 与 `PENDING/BLOCKED` 严格匹配的回写。`DONE/FAILED/CANCELLED`
+  继续要求 run 级终态，迟到或伪完成不放行。回归已覆盖 PENDING 投影、launch 回收、
+  generation 2 重开与伪 DONE 拒绝；待严格 gate、推送部署和 fresh Prompt 4 真 TUI 自然截断复验。
+
 ## 2026-08-24 r6 派工边界与后台富过程展示（本地候选）
 
 - `.7` 唯一 Gateway、MiniMax-M2.7、tmux `ma-84c6b90-p4-fzf-r6-todo` 的 fresh Prompt 4 中，4 名 child

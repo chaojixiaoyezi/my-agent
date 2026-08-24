@@ -247,6 +247,139 @@ def test_clean_runtime_completion_can_project_blocked_task_outcome(tmp_path):
     assert manager.load(task.id).status == "BLOCKED"
 
 
+def test_settled_max_token_slice_projects_pending_and_releases_launch(tmp_path):
+    manager = SubAgentManager(
+        tmp_path / "subs",
+        owner_home_dir=str(tmp_path / "owner"),
+    )
+    task = manager.create_run(goal="长任务", thought="模拟上下文截断", plan=["继续"])
+    prepared = manager.lifecycle.prepare_runner_attempt(task.id)
+    attempt_id = prepared.runner_active_attempt_id
+    prepared.attributes = {
+        **dict(prepared.attributes or {}),
+        "background_start": {
+            "launch_id": "shared-batch",
+            "status": "running",
+            "pid": 9876,
+        },
+    }
+    manager.save(prepared)
+    run = manager.runtime_db.agent_run_for_run_id(task.id)
+    assert run is not None
+    settled = manager.runtime_db.settle_agent_attempt(
+        agent_run_id=str(run["agent_run_id"]),
+        attempt_id=attempt_id,
+        payload={
+            "status": "attempt_done",
+            "runtime_status": "unfinished",
+            "runtime_reason": "MODEL_RESPONSE_TRUNCATED",
+        },
+    )
+    assert settled["settled"] is True
+
+    result = manager.runner_result.record_runner_result(
+        RecordRunnerResultParams(
+            run_id=task.id,
+            attempt_id=attempt_id,
+            dry_run=False,
+            ok=False,
+            message="runner 本轮结束: max-tokens",
+            status="PENDING",
+            turn_end_reason="max-tokens",
+            failure_type="model_error",
+        )
+    )
+
+    persisted = manager.load(task.id)
+    authority = manager.runtime_db.runner_result_commit_authority(
+        run_id=task.id,
+        attempt_id=attempt_id,
+    )
+    assert result.status == "PENDING"
+    assert persisted.status == "PENDING"
+    assert persisted.current_step == "等待继续"
+    assert persisted.runner_active_attempt_id == ""
+    assert persisted.attributes["background_start"]["status"] == "reclaimed"
+    assert authority is not None
+    assert authority["run_status"] == "created"
+    assert authority["attempt_status"] == "done"
+
+    continued = manager.lifecycle.prepare_runner_attempt(task.id)
+    next_attempt = manager.runtime_db.current_attempt(str(run["agent_run_id"]))
+    assert continued.runner_active_attempt_id != attempt_id
+    assert next_attempt is not None
+    assert next_attempt["attempt_generation"] == 2
+    assert next_attempt["status"] == "running"
+
+
+def test_settled_nonterminal_slice_rejects_mismatched_done_projection(tmp_path):
+    manager = SubAgentManager(
+        tmp_path / "subs",
+        owner_home_dir=str(tmp_path / "owner"),
+    )
+    task = manager.create_run(goal="长任务", thought="模拟伪完成", plan=["继续"])
+    prepared = manager.lifecycle.prepare_runner_attempt(task.id)
+    attempt_id = prepared.runner_active_attempt_id
+    run = manager.runtime_db.agent_run_for_run_id(task.id)
+    assert run is not None
+    settled = manager.runtime_db.settle_agent_attempt(
+        agent_run_id=str(run["agent_run_id"]),
+        attempt_id=attempt_id,
+        payload={"status": "attempt_done", "runtime_status": "unfinished"},
+    )
+    assert settled["settled"] is True
+
+    result = manager.runner_result.record_runner_result(
+        RecordRunnerResultParams(
+            run_id=task.id,
+            attempt_id=attempt_id,
+            dry_run=False,
+            ok=True,
+            message="late done",
+            status="DONE",
+            turn_end_reason="max-tokens",
+        )
+    )
+
+    assert result.ok is False
+    assert "conflicting with runtime terminal fact" in result.message
+    assert manager.load(task.id).status == "RUNNING"
+
+
+def test_settled_blocked_slice_projects_matching_host_wait_state(tmp_path):
+    manager = SubAgentManager(
+        tmp_path / "subs",
+        owner_home_dir=str(tmp_path / "owner"),
+    )
+    task = manager.create_run(goal="等待授权", thought="模拟宿主阻塞", plan=["等待"])
+    prepared = manager.lifecycle.prepare_runner_attempt(task.id)
+    attempt_id = prepared.runner_active_attempt_id
+    run = manager.runtime_db.agent_run_for_run_id(task.id)
+    assert run is not None
+    settled = manager.runtime_db.settle_agent_attempt(
+        agent_run_id=str(run["agent_run_id"]),
+        attempt_id=attempt_id,
+        payload={"status": "attempt_done", "runtime_status": "blocked"},
+    )
+    assert settled["settled"] is True
+
+    result = manager.runner_result.record_runner_result(
+        RecordRunnerResultParams(
+            run_id=task.id,
+            attempt_id=attempt_id,
+            dry_run=False,
+            ok=False,
+            message="runner 本轮结束: blocked",
+            status="BLOCKED",
+            turn_end_reason="blocked",
+            failure_type="status_blocked",
+        )
+    )
+
+    assert result.status == "BLOCKED"
+    assert manager.load(task.id).current_step == "等待处理"
+
+
 def test_dispatch_round_returns_to_parent_when_child_report_exists(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     task = manager.create_run(goal="deliver web artifact", thought="await parent", plan=["report"])

@@ -38,7 +38,8 @@ python3 -m pytest agent_py_agent/tests/test_runtime_db_main_chain.py agent_py_ag
 attempt 并取得锁，重复 runner 启动被拒且不生成 generation 2；过期但活着的 holder 不可接管；只有超 grace+明确死亡可回收；终态
 run/attempt 不能调工具；可续跑结果关闭旧 attempt 且新 attempt 可重开；已取消的 exact attempt 不接受
 迟到 DONE；第一次结果收口后重放失败；当轮已获 grant 的 BLOCKED 转同 run PENDING 并保留可续派；
-终态 TUI 短句不得残留“模型已生成回复”。
+宿主先关闭的 max-token attempt 只接受同 `turn_end_reason` 的 PENDING，随后可创建 generation 2；
+同一窗口的伪 DONE 必须被冲突栅栏拒绝；终态 TUI 短句不得残留“模型已生成回复”。
 
 Prompt 4 r6 使用 `.7` 唯一 Gateway、MiniMax-M2.7、tmux `dsh-p4-lazygit-r6-ea91639` 和固定
 `jesseduffield/lazygit@ea916395`，只输入一次原样 prompt。10 个 child 全部自然 DONE、3 个真实 Compact，

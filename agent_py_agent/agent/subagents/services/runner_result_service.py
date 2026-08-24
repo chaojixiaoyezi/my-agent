@@ -6,6 +6,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+from ...turn_end import subagent_outcome_for_turn_end
 from ..manager_runner_result_payload import (
     BuildAndPersistContext,
     RecordRunnerResultParams,
@@ -232,9 +233,10 @@ class SubAgentRunnerResultService:
         return output_payload, build_ctx
 
     # LLM: Canonical task projection and runtime.db form one commit fence. In
-    # MANAGED mode an exact current attempt may project while active, after a
-    # successful completed attempt, or after a matching cancelled/failed
-    # settlement; a mismatched late result is archival evidence only.
+    # MANAGED mode an exact current attempt may project while active, after its
+    # resumable slice was settled with the AgentRun still created, after a
+    # successful completed run, or after matching cancelled/failed settlement;
+    # a mismatched late result is archival evidence only.
     # 函数用途: 在写入子代理最终状态前，拦住旧轮次和与已取消/失败事实冲突的迟到回复。
     def _check_stale_runner_result(
         self,
@@ -259,42 +261,15 @@ class SubAgentRunnerResultService:
                 return self._make_quick_result(task, dry_run, False, conflict)
         return None
 
-    # LLM: Runtime terminal states are host-owned facts. A cleanly completed
-    # execution may still project any typed task outcome (DONE/BLOCKED/FAILED),
-    # while host cancellation/failure only accepts its matching task outcome.
+    # LLM: Keep the service class as orchestration only; the commit-fence rules
+    # live in one module helper so adding lifecycle cases does not grow this class.
     # 函数用途: 核对 runtime.db 的当前 attempt 与本次回写是否同一事实。
     def _managed_runtime_result_conflict(
         self,
         task: SubAgentTask,
         params: RecordRunnerResultParams,
     ) -> str:
-        repo = getattr(self.manager, "runtime_db", None)
-        if repo is None or params.dry_run:
-            return ""
-        authority = repo.runner_result_commit_authority(
-            run_id=str(task.id or ""),
-            attempt_id=str(params.attempt_id or ""),
-        )
-        if authority is None:
-            return f"ignored runner result without runtime authority for attempt {params.attempt_id}"
-        if not bool(authority.get("is_current")):
-            return f"ignored stale runner result for superseded attempt {params.attempt_id}"
-        run_status = str(authority.get("run_status") or "")
-        attempt_status = str(authority.get("attempt_status") or "")
-        if run_status in {"", "created"} and attempt_status == "running":
-            return ""
-        incoming_terminal = _runner_runtime_terminal_status(params)
-        if run_status == "done" and attempt_status == "done":
-            return ""
-        if run_status in {"failed", "cancelled"} and (
-            attempt_status == run_status and incoming_terminal == run_status
-        ):
-            return ""
-        return (
-            "ignored runner result conflicting with runtime terminal fact "
-            f"run={run_status or 'unknown'} attempt={attempt_status or 'unknown'} "
-            f"incoming={incoming_terminal or 'nonterminal'}"
-        )
+        return _managed_runtime_result_conflict(self.manager, task, params)
 
     def _make_quick_result(self, task, dry_run, ok, message):
         return SubAgentRunnerResult(
@@ -307,6 +282,46 @@ class SubAgentRunnerResultService:
             result_file=task.runner_result_file, result_json=task.runner_result_json,
             output_json=task.output_json, created_at=time.time(),
         )
+
+
+# LLM: Runtime terminal states are host-owned facts. A settled nonterminal
+# slice accepts only the matching host turn reason; completed/cancelled/failed
+# results still require the corresponding run-level settlement.
+# 函数用途: 按 runtime.db 权威链判断 runner 结果是否与当前轮次冲突。
+def _managed_runtime_result_conflict(
+    manager: object,
+    task: SubAgentTask,
+    params: RecordRunnerResultParams,
+) -> str:
+    repo = getattr(manager, "runtime_db", None)
+    if repo is None or params.dry_run:
+        return ""
+    authority = repo.runner_result_commit_authority(
+        run_id=str(task.id or ""),
+        attempt_id=str(params.attempt_id or ""),
+    )
+    if authority is None:
+        return f"ignored runner result without runtime authority for attempt {params.attempt_id}"
+    if not bool(authority.get("is_current")):
+        return f"ignored stale runner result for superseded attempt {params.attempt_id}"
+    run_status = str(authority.get("run_status") or "")
+    attempt_status = str(authority.get("attempt_status") or "")
+    if run_status in {"", "created"} and attempt_status == "running":
+        return ""
+    incoming_terminal = _runner_runtime_terminal_status(params)
+    if _runner_result_matches_settled_attempt(run_status, attempt_status, params):
+        return ""
+    if run_status == "done" and attempt_status == "done":
+        return ""
+    if run_status in {"failed", "cancelled"} and (
+        attempt_status == run_status and incoming_terminal == run_status
+    ):
+        return ""
+    return (
+        "ignored runner result conflicting with runtime terminal fact "
+        f"run={run_status or 'unknown'} attempt={attempt_status or 'unknown'} "
+        f"incoming={incoming_terminal or 'nonterminal'}"
+    )
 
 
 def _task_text_attr(task, name: str) -> str:
@@ -343,3 +358,26 @@ def _runner_runtime_terminal_status(params: RecordRunnerResultParams) -> str:
     }:
         return "failed"
     return ""
+
+
+# LLM: A settled current attempt may update only to the exact host-facing
+# nonterminal state derived from its typed turn_end_reason while AgentRun stays
+# created. Model prose and parsed output cannot obtain post-settlement authority.
+# 函数用途: 判断一次已结束的执行片段是否正把同一子代理交回可续跑或等待状态。
+def _runner_result_matches_settled_attempt(
+    run_status: str,
+    attempt_status: str,
+    params: RecordRunnerResultParams,
+) -> bool:
+    if run_status not in {"", "created"} or attempt_status != "done":
+        return False
+    raw_status = str(params.status or "").strip().upper()
+    expected_status, _failure_type, _ok = subagent_outcome_for_turn_end(
+        params.turn_end_reason
+    )
+    if expected_status not in {
+        TaskStatus.PENDING.value,
+        TaskStatus.BLOCKED.value,
+    }:
+        return False
+    return raw_status == expected_status
