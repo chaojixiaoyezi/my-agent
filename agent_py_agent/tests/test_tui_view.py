@@ -108,6 +108,74 @@ def test_scrolling_down_to_last_line_restores_sticky_follow() -> None:
     assert updated.cursor_position.y == updated.line_count - 1
 
 
+def test_agent_store_switch_restores_each_viewport_without_cross_view_selection() -> None:
+    root_store = TuiStateStore()
+    child_store = TuiStateStore()
+    root_seq = TuiEventSequencer("root-viewport", clock=lambda: 2.3)
+    child_seq = TuiEventSequencer("child-viewport", clock=lambda: 2.4)
+    for index in range(10):
+        root_store.publish(
+            root_seq.emit(
+                "system_message",
+                "completed",
+                f"root-{index}",
+                {"text": f"root line {index}"},
+            )
+        )
+    for index in range(7):
+        child_store.publish(
+            child_seq.emit(
+                "system_message",
+                "completed",
+                f"child-{index}",
+                {"text": f"child line {index}"},
+            )
+        )
+    view = make_tui_transcript_view(
+        root_store,
+        lambda width: TuiRenderContext(width=width),
+    )
+
+    root_tail = view.control.create_content(40, 5)
+    view.scroll(-6)
+    root_anchor = view.control.create_content(40, 5).cursor_position.y
+    view.control.mouse_handler(
+        MouseEvent(
+            Point(x=0, y=root_anchor),
+            MouseEventType.MOUSE_DOWN,
+            MouseButton.LEFT,
+            frozenset(),
+        )
+    )
+    view.control.mouse_handler(
+        MouseEvent(
+            Point(x=3, y=root_anchor),
+            MouseEventType.MOUSE_UP,
+            MouseButton.LEFT,
+            frozenset(),
+        )
+    )
+    assert root_anchor < root_tail.line_count - 1
+    assert view.control.selected_text()
+
+    view.set_state_store(child_store)
+    child_tail = view.control.create_content(40, 5)
+    assert child_tail.cursor_position.y == child_tail.line_count - 1
+    assert view.control.selected_text() == ""
+    view.scroll(-4)
+    child_anchor = view.control.create_content(40, 5).cursor_position.y
+
+    view.set_state_store(root_store)
+    restored_root = view.control.create_content(40, 5)
+    assert restored_root.cursor_position.y == root_anchor
+    assert view.control.follow is False
+
+    view.set_state_store(child_store)
+    restored_child = view.control.create_content(40, 5)
+    assert restored_child.cursor_position.y == child_anchor
+    assert view.control.follow is False
+
+
 def test_manual_scroll_counts_new_typed_messages_without_counting_tool_blocks() -> None:
     store = TuiStateStore()
     seq = TuiEventSequencer("unseen", clock=lambda: 2.5)

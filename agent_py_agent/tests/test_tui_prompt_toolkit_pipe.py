@@ -10,12 +10,18 @@ from prompt_toolkit.cursor_shapes import CursorShape
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
+from agent_py_agent.cli.chat_parts.tui_agent_navigation import TuiAgentNavigationState
 from agent_py_agent.cli.chat_parts.tui_params import MakeTuiAppParams
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
-from agent_py_agent.cli.chat_parts.tui_ui_setup import make_tui_app
+from agent_py_agent.cli.chat_parts.tui_ui_setup import _prepare_tui_app_parts, make_tui_app
 
 
-def _app_params(tmp_path, runtime: TuiRuntime) -> MakeTuiAppParams:
+def _app_params(
+    tmp_path,
+    runtime: TuiRuntime,
+    *,
+    agent_navigation: object | None = None,
+) -> MakeTuiAppParams:
     pending = [0]
     return MakeTuiAppParams(
         agent=SimpleNamespace(
@@ -41,6 +47,7 @@ def _app_params(tmp_path, runtime: TuiRuntime) -> MakeTuiAppParams:
         stop_event=threading.Event(),
         current_session_id="pipe-session",
         tui_runtime=runtime,
+        agent_navigation=agent_navigation,
     )
 
 
@@ -133,3 +140,42 @@ def test_real_prompt_toolkit_pipe_defaults_native_mouse_and_f6_toggles(tmp_path)
                 assert await run_task == 0
 
     asyncio.run(scenario())
+
+
+def test_navigation_callback_restores_root_viewport_and_explains_native_scroll(
+    tmp_path,
+) -> None:
+    root = TuiRuntime("navigation-viewport-session")
+    for index in range(10):
+        root.write_console(f"root history {index}")
+    navigation = TuiAgentNavigationState(root)
+    navigation.update_rows(
+        "",
+        [
+            {
+                "run_id": "child-scroll",
+                "parent_run_id": "",
+                "name": "child-scroll",
+                "status": "DONE",
+                "description": "滚动验证",
+            }
+        ],
+    )
+    parts = _prepare_tui_app_parts(
+        _app_params(tmp_path, root, agent_navigation=navigation)
+    )
+    parts.transcript_view.control.create_content(40, 5)
+    parts.transcript_view.scroll(-6)
+    root_anchor = parts.transcript_view.control.current_line()
+
+    assert navigation.move_selection(1) is True
+    assert navigation.enter_selected() is True
+    assert parts.transcript_view.provider.state_store is navigation.active_runtime().store
+
+    assert navigation.back() is True
+    restored = parts.transcript_view.control.create_content(40, 5)
+
+    assert parts.transcript_view.provider.state_store is root.store
+    assert restored.cursor_position.y == root_anchor
+    assert "PgUp/Ctrl+Home" in root.notice()
+    assert parts.interaction.snapshot().mouse_capture_enabled is False

@@ -1,5 +1,16 @@
 # Subagent Progress
 
+## 2026-08-24 子代理视角切换后的历史滚动（本地候选）
+
+- `ma-91a1c3d-child-full-r17` 返回 main 后鼠标上翻看似无历史；同一现场发送 `PageUp` 出现离尾 pill，
+  `Ctrl+Home` 立即显示欢迎块与原始 Prompt，证明 typed root history 完整。默认原生复制模式不启用 mouse
+  tracking，alternate screen 下宿主滚轮不会进入 TUI，这是与右键复制并存时必须显式提示的终端取舍。
+- 另一个真实缺口是普通/modal `TuiTranscriptControl` 共用一份全局 cursor，setup 又在每次 agent view
+  change 后无条件 `End`。当前候选按 exact store 保存 follow/cursor/line-count/unseen，首次访问才从尾部开始，
+  返回已有 root/child 恢复各自锚点，并清除跨 store selection；返回原生模式时提示 PgUp/Ctrl+Home 或 F6。
+- 相关 view/navigation/input/renderer/runtime/prompt_toolkit pipe 共 128 项 focused 已通过；严格 gate、`.7`
+  部署和 fresh tmux 真机切换/上翻尚待完成，不把旧进程的键盘复现写成新代码已验收。
+
 ## 2026-08-24 后台 root-tree 精确读取降载（已部署真机）
 
 - `.7` Gateway 进程采样证明后台 main readiness 反复进入 `list_runs_report`，缓存命中后仍 deepcopy 全部

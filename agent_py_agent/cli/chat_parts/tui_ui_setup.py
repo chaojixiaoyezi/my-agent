@@ -497,12 +497,31 @@ def _prepare_tui_app_parts(params: MakeTuiAppParams) -> _TuiAppParts:
     )
     set_view_change = getattr(params.agent_navigation, "set_view_change_callback", None)
     if callable(set_view_change):
-        # LLM: A navigation switch replaces only the provider's visible store and
-        # returns the new viewport to tail; it does not copy or clear either transcript.
-        # 函数用途: 进入/返回代理时切换正文页面并自动定位该页面最新位置。
+        view_depth_ref = [0]
+
+        # LLM: A navigation switch delegates atomic store/viewport restoration to
+        # the transcript view. Returning in native-copy mode may surface one hint,
+        # but must not toggle terminal mouse tracking or overwrite an active receipt.
+        # 函数用途: 进入或返回代理页面，恢复该页面原滚动位置并提示如何查看历史。
         def switch_agent_view(selected_runtime: TuiRuntime) -> None:
-            transcript_view.provider.set_state_store(selected_runtime.store)
-            transcript_view.end()
+            snapshotter = getattr(params.agent_navigation, "snapshot", None)
+            navigation_snapshot = snapshotter() if callable(snapshotter) else None
+            next_depth = max(
+                0,
+                int(getattr(navigation_snapshot, "depth", 0) or 0),
+            )
+            returning = next_depth < view_depth_ref[0]
+            view_depth_ref[0] = next_depth
+            transcript_view.set_state_store(selected_runtime.store)
+            if (
+                returning
+                and not interaction.snapshot().mouse_capture_enabled
+                and not selected_runtime.notice()
+            ):
+                selected_runtime.set_notice(
+                    "历史已保留：PgUp/Ctrl+Home 翻阅；F6 开启滚轮",
+                    duration_seconds=5.5,
+                )
 
         set_view_change(switch_agent_view)
     transcript_search_area = _make_transcript_search_area()

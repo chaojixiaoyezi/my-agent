@@ -174,6 +174,13 @@ child sink 先按 typed `write_progress` 接工具事件，`Ctrl+O` 改为冻结
 实按 `↓/Enter/Ctrl+O/Home/Ctrl+G` 后显示 child 完整 prompt、灰色思考/过程、工具卡和代码内容，展开未跳 root；
 三名 child 的 JSONL 均已有 tool started/completed。界面切片已完成，超级玛丽产物仍由被测任务自行继续。
 
+同一 tmux 后续暴露“进入 child 再返回后，鼠标上翻像没有历史”。现场 `Ctrl+Home` 能立即显示 root 首条原始
+Prompt，证明 canonical history 未丢；根因一是普通/modal control 复用全局 cursor 并在每次切换时强制 End，
+二是用户要求的默认原生复制模式在 alternate screen 中不会把滚轮交给应用。当前候选按 exact store 保存每页
+follow/cursor/unseen，首次进入才默认尾部，返回恢复原位置并清跨页选区；原生模式返回时明确提示
+`PgUp/Ctrl+Home`，滚轮仍须 `F6` 开启，不能为修滚轮重新吞掉宿主右键。128 项相关 TUI focused 已通过，
+待严格 gate、部署和 fresh tmux 真按键复验后转完成。
+
 `931ee20` 已完成上述展示复验：四条短职责、实时 context、单行 main 和终态标记均正确。新阻塞转到底层
 完成交接：旧 wake 没带 child 最终回复和 `final_report.md`，main 因而猜错目录。当前候选按 会话运行时 标准
 completion message 补 `subagent-completion.v1`，同根 DONE 信封一次合批，并让 active wake 在上下文压力

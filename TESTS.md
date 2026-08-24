@@ -418,6 +418,13 @@ disable；中文/表情 bracketed paste 完整进入输入框；F6 第一次输�
 输入未改变。测试时保持唯一 Gateway 和 MiniMax-M2.7。因为自动化不能控制用户的 Terminal.app，macOS
 右键菜单与系统剪贴板的最终通过状态仍须由用户 attach 后实际复制、粘贴确认。
 
+代理视角滚动回归必须至少建立两个独立 `TuiStateStore`：root 与 child 都先离开尾部，来回切换后各自恢复
+原 cursor/follow/unseen，第一次进入的新页位于尾部；切换必须清除当前选区，不能把 root 坐标套到 child
+正文。真实 TUI 还要分别证明 `PageUp/Ctrl+Home` 在默认原生复制模式可查看当前页完整历史、`F6` 后滚轮
+可查看同一历史、`Ctrl+G` 返回时出现一次模式提示。原生模式下滚轮不进入应用是 terminal alternate-screen
+协议取舍，测试不得把终端空 scrollback 误报成 canonical history 被删除，也不得靠默认开启 mouse tracking
+修复而再次破坏宿主右键复制。
+
 富 transcript 追补还必须覆盖：未声明能力的 Gateway 不公开 thinking/display 且继续按 verbose 裁剪；TUI
 声明能力后逐轮 commentary、provider 明示 thinking、edit/overwrite/patch diff、write preview、命令
 stdout/stderr/exit code 均走结构化事件；思考 Markdown 与 `Ctrl+O` 折叠提示的每个可见 fragment 都必须

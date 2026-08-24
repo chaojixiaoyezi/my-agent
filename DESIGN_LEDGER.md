@@ -1470,6 +1470,10 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   `list_files`、`Bash` 和写文件工具卡；`Ctrl+O` 后仍是该 child，Home 首行是完整派工 user block，`Ctrl+G`
   才返回 main。三名 child 的 JSONL 均出现配对 tool 事件，worker-1 现场已有 6 次 started/6 次 completed；
   该行为证据只证明详情展示接线，不替代超级玛丽任务的功能完成验收。
+- 视角切换不得复用一份全局滚动锚点或每次强制回尾。普通与详细 transcript control 分别按 exact
+  `TuiStateStore` 保存 follow、cursor 和 unseen 基线；新页面默认跟随尾部，返回页面恢复其原位置，选区则
+  在切换时清除。默认原生复制模式下备用屏幕不会收到滚轮，返回父级时提示 `PgUp/Ctrl+Home` 或按 `F6`
+  开启滚轮；不得自动改鼠标模式，因为那会再次吞掉用户要求的宿主右键菜单。
 
 ## 2026-08-24 终端原生复制与 TUI 鼠标双模式【状态：`.7` 协议已真机验证，宿主右键待用户验收】
 

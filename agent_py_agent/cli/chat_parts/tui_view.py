@@ -37,6 +37,21 @@ class TuiTextSelection:
     focus: Point
 
 
+# LLM: Viewport snapshots are process-local presentation state keyed by the exact
+# typed store. They must never be persisted or treated as conversation position.
+# 类用途: 保存一个主代理或子代理页面离开时的滚动位置、跟随状态和未读基线。
+@dataclass(frozen=True)
+class _TuiViewportState:
+    follow: bool
+    cursor_line: int
+    line_count: int
+    unseen_baseline: frozenset[str] | None
+    unseen_block_ids: frozenset[str]
+
+
+_TAIL_VIEWPORT_STATE = _TuiViewportState(True, 0, 1, None, frozenset())
+
+
 # LLM: 右键复制 latch 只描述 mouse gesture，不读取选区或剪贴板；调用方仍分别持有正文/输入 authority。
 # 函数用途: 把右键按下、松开、遗失松开和其它新点击归一成复制、吞事件及下一状态。
 def _right_copy_mouse_transition(
@@ -154,6 +169,51 @@ class TuiFrameProvider:
             self._invalidate_callback = callback
 
 
+# LLM: Store switching mutates only one control's process-local viewport fields
+# under its lock. The provider swap remains owned by TuiTranscriptView so both
+# normal/modal controls move together before the next render.
+# 函数用途: 保存当前代理页面滚动状态、恢复目标页面状态，并清掉不能跨页面使用的文本选区。
+def _switch_transcript_control_store(
+    control: TuiTranscriptControl,
+    state_store: TuiStateStore,
+) -> None:
+    if not isinstance(state_store, TuiStateStore):
+        raise TypeError("state_store must be TuiStateStore")
+    with control._lock:
+        if control._state_store is state_store:
+            return
+        control._viewport_by_store[control._state_store] = _TuiViewportState(
+            follow=control.follow,
+            cursor_line=control.cursor_line,
+            line_count=control._line_count,
+            unseen_baseline=control._unseen_baseline,
+            unseen_block_ids=control._unseen_block_ids,
+        )
+        restored = control._viewport_by_store.get(state_store, _TAIL_VIEWPORT_STATE)
+        control._state_store = state_store
+        (
+            control.follow,
+            control.cursor_line,
+            control._line_count,
+            control._unseen_baseline,
+            control._unseen_block_ids,
+        ) = (
+            restored.follow,
+            max(0, restored.cursor_line),
+            max(1, restored.line_count),
+            restored.unseen_baseline,
+            restored.unseen_block_ids,
+        )
+        (
+            control._selection,
+            control._selection_dragging,
+            control._selection_copied,
+            control._right_copy_armed,
+            control._selection_width,
+            control._last_lines,
+        ) = (None, False, False, False, 0, ())
+
+
 # LLM: TuiTranscriptControl 只投影 provider transcript 行并维护可视 cursor anchor；它不复制 transcript 字符串。
 # 类用途: 给 prompt_toolkit Window 提供按需 formatted lines、follow-tail 和手动滚动。
 class TuiTranscriptControl(UIControl):
@@ -161,6 +221,8 @@ class TuiTranscriptControl(UIControl):
     # 函数用途: 创建一个非 focusable 的滚动 transcript control。
     def __init__(self, provider: TuiFrameProvider) -> None:
         self.provider = provider
+        self._state_store = provider.state_store
+        self._viewport_by_store: dict[TuiStateStore, _TuiViewportState] = {}
         self.follow = True
         self.cursor_line = 0
         self._line_count = 1
@@ -174,6 +236,13 @@ class TuiTranscriptControl(UIControl):
         self._selection_width = 0
         self._last_lines: tuple[FormattedLine, ...] = ()
         self._lock = threading.Lock()
+
+    # LLM: A source switch saves only viewport state under the exact typed store,
+    # restores an existing page or initializes a new page at sticky tail, and
+    # always clears selection so text coordinates cannot cross agent boundaries.
+    # 函数用途: 切换主代理/子代理正文来源时分别保存和恢复各自的滚动位置。
+    def switch_state_store(self, state_store: TuiStateStore) -> None:
+        _switch_transcript_control_store(self, state_store)
 
     # LLM: modal transcript 必须可获得焦点以隔离普通输入 Buffer；control 本身仍只处理全局 keybindings，不接收正文编辑。
     # 函数用途: 允许 Layout 在 Ctrl-O 模式把键盘焦点放到 transcript viewport。
@@ -471,6 +540,19 @@ class TuiTranscriptView:
     todo_control: FormattedTextControl
     agent_control: FormattedTextControl
     footer_control: FormattedTextControl
+
+    # LLM: Agent navigation must switch the provider and both normal/modal
+    # controls as one UI operation. Existing pages restore their own viewport;
+    # a first visit starts at tail without clearing either typed transcript.
+    # 函数用途: 在主代理和子代理页面之间切换正文，并保留每个页面自己的上翻位置。
+    def set_state_store(self, state_store: TuiStateStore) -> None:
+        if not isinstance(state_store, TuiStateStore):
+            raise TypeError("state_store must be TuiStateStore")
+        if self.provider.state_store is state_store:
+            return
+        self.control.switch_state_store(state_store)
+        self.modal_control.switch_state_store(state_store)
+        self.provider.set_state_store(state_store)
 
     # LLM: scroll 委托 control 并由 setup/app invalidate，view 不持有 Application 反向引用。
     # 函数用途: 按行移动 transcript anchor。
