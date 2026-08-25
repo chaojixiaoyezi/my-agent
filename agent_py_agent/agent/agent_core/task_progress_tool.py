@@ -34,7 +34,7 @@ from .orchestration.dispatch_progress_seed import (
 from .orchestration.tool_specs import build_task_progress_model_spec
 from .runner.context import current_subagent_run_id
 from .runtime.owner_roots import runtime_owner_root
-from .runtime.task_identity import progress_ledger_id
+from .runtime.task_identity import durable_task_id, progress_ledger_id
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -313,16 +313,30 @@ def _invalid_action_fields_result(
         effect_outcome="not_started",
     )
 
+# LLM: An explicit read target that equals the current structured task identity
+# is only an alias for this turn's canonical ledger. Keep true cross-run reads
+# exact, and never infer aliases from prompt text or identifier prefixes.
+# 函数用途: 解析进度账本编号；当前任务编号自动归一到唯一账本，其他历史编号仍按原值读取。
 def _target_run_id(agent: object, params: dict[str, object], *, allow_explicit: bool) -> str:
     """账本键解析（与派工 seed 和任务工作区使用同一份任务身份）。
     唯一特殊分支=【后台唤醒轮】(_current_run_params.source=="background_main_agent"):
     其 run_id 是新的(bg-main-*),task_id 仍是主任务——账本按【任务】延续,否则派工 seed
     立的账在唤醒轮里读写不到、模型只能另立新账。其余场景原链不动（子代理按自己 run 隔离）。"""
-    explicit = str(params.get("run_id") or "").strip()
-    if explicit and allow_explicit:
-        return explicit
-    scoped = _scope_run_id(params.get("__run_scope"))
     current = getattr(agent, "_current_run_params", None)
+    explicit = str(params.get("run_id") or "").strip()
+    scoped = _scope_run_id(params.get("__run_scope"))
+    if explicit and allow_explicit:
+        # 会话运行时 的 update_plan 由 session+turn 直接定域，不让模型另猜当前计划的
+        # 存储键。这里仍保留查看其他历史 run 的扩展能力，但模型把当前 task_id
+        # 原样传回来时，它只是当前账本的别名，必须经过同一 canonical resolver。
+        if current is not None and explicit == durable_task_id(current):
+            resolved = progress_ledger_id(
+                agent,
+                current,
+                scoped_id=scoped or current_subagent_run_id(agent),
+            )
+            return resolved or explicit
+        return explicit
     if current is None:
         return str(
             scoped

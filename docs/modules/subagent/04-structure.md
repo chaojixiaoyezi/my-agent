@@ -13,6 +13,13 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 - `tool_specs.py::build_create_subagents_model_spec` 只把该软合同放进 provider 可见 schema/description。
   执行器继续按结构化 items 立即启动；它不解析自然语言顺序、不把 role 当依赖事实，也不增加完成裁决。
 
+## 2026-08-25 当前任务 Todo 的显式读别名
+
+- 会话运行时 `update_plan` 由当前 session/turn 定域，不接受模型提供另一个计划身份。本项目保留读取其它历史
+  run 的扩展，但 `task_progress(read, run_id=<当前 typed task_id>)` 必须与省略 `run_id` 等价。
+- `TaskProgressTool` 只在显式 id 精确等于当前 `durable_task_id` 时复用 `progress_ledger_id`；其它 id
+  原样读取，因此不会把 child/历史账错误吸进当前计划，也不会从 `gwreq-` 等字符串前缀猜身份。
+
 ## 2026-08-25 完成续片的操作事实与交接叶子
 
 - root lifecycle wake 是原 active turn 的后续工作片；child canonical attributes 与 completion wake 携带

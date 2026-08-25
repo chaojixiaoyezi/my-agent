@@ -143,6 +143,10 @@ exact id 放入 `covers`；child 进入 canonical `DONE` 后宿主只按该 id �
 关系。后续补派仍沿用原 id，不重建 `p1/s1` 之类同义计划。open 项只会在工具回执里给模型一条软续做
 提示：已知缺口且仍有工具或 child 容量时继续协调；它不会让宿主自动再调用一次模型，也不会充当质量验收。
 
+读取当前 Todo 时使用 `task_progress(action=read)`，不要把界面或恢复包里的当前 task id 当成另一份
+`run_id`。底座会把误传的当前 typed task id 归一到同一 task-path 账本；只有确实要查看另一个历史 run
+时才显式传不同 id。该别名裁决只认当前运行参数和 ConversationStore 链接，不解析任务正文。
+
 系统生成的 child 显示名在同一 exact parent 下跨单个、批量和递归创建连续编号，方便 TUI 与未来 Web
 区分后续补派。显式自定义名称保持原样；控制、权限、状态和产物归属始终只认结构化 run_id/lineage，
 不能用显示名代替机器身份。

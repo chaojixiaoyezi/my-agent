@@ -20,6 +20,17 @@
 来自 STATUS.md，子代理可进入视图、精确控制以及插话排队/公开回复已转入 COMPLETED；当前继续正式矩阵与
 仍缺直接自然样本的生命周期分支。
 
+### 当前任务 Todo 显式读别名
+
+状态：底层候选 focused 通过，待严格 gate、推送与 `.7` 真 TUI
+
+解决问题：长任务 child 完成后的后台 root 明明有完整 Todo，却把当前 `gwreq` task id 显式传给
+`task_progress(read)`；旧工具把它当另一份历史账原样读取，模型收到 0 项，而 TUI 仍显示原 18 项。
+
+当前进展：已从真实 tool-output index 证明调用参数和空返回，对照 会话运行时 `update_plan` 的 session/turn
+定域，把“显式 id 精确等于当前 typed task id”收为当前 canonical task-path 账本别名；其它历史 id
+保持精确读取。不解析 id 前缀或正文、不新增账本、不恢复机器验收。两个 focused 文件当前 16 项通过。
+
 ### 子代理完成详情引用与安全状态面一致化
 
 状态：第二层本地候选严格 gate 通过；待推送、`.7` 同一长 TUI 复验

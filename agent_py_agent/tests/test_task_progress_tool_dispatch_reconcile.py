@@ -11,6 +11,9 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from agent_py_agent.agent.agent_core.runtime.task_identity import (
+    task_path_progress_ledger_id,
+)
 from agent_py_agent.agent.agent_core.task_progress_tool import TaskProgressTool
 from agent_py_agent.agent.task_progress import read_task_progress, write_task_progress
 
@@ -144,6 +147,47 @@ def test_read_explicit_other_run_id_does_not_reconcile(tmp_path):
     assert result.ok is True
     persisted = read_task_progress(home, other)["coverage"]["targets"]
     assert {t["id"]: t["status"] for t in persisted}["req-01"] == "pending"
+
+
+def test_read_explicit_current_task_id_uses_canonical_task_path_ledger(tmp_path):
+    """后台恢复轮误传当前 task_id 时仍读原 Todo，不生成一份空的 request-id 视图。"""
+    home, task_root = _setup(tmp_path)
+    task_id = "gwreq-current-task"
+    ledger_id = task_path_progress_ledger_id(task_root)
+    write_task_progress(
+        home,
+        ledger_id,
+        {"items": [{"id": "C1", "title": "实现核心功能", "status": "in_progress"}]},
+    )
+    store = SimpleNamespace(
+        load_task_link=lambda selected: (
+            SimpleNamespace(task_path=str(task_root)) if selected == task_id else None
+        )
+    )
+    agent = SimpleNamespace(
+        conversation_store=store,
+        home_paths=SimpleNamespace(owner_home_dir=str(home)),
+        root=str(home),
+        _current_run_params=SimpleNamespace(
+            run_id="bg-main-attempt",
+            task_id=task_id,
+            source="background_main_agent",
+            context_scope="default",
+            task_attributes={
+                "conversation_thread_id": "thread-1",
+                "conversation_task_id": task_id,
+            },
+        ),
+    )
+
+    result = TaskProgressTool(agent).execute({"action": "read", "run_id": task_id})
+
+    payload = json.loads(result.output)
+    assert result.ok is True
+    assert payload["run_id"] == ledger_id
+    assert [(item["id"], item["status"]) for item in payload["items"]] == [
+        ("C1", "in_progress")
+    ]
 
 
 def test_read_without_run_params_still_reads(tmp_path):

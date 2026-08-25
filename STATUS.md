@@ -1,5 +1,16 @@
 # STATUS
 
+## 2026-08-25 后台 root 显式当前 task id 读空 Todo（本地候选）
+
+- `.7` 长 TUI `ma-97468f3-longchain-r27` 的 Click→Go 复刻任务已有 canonical task-path Todo 18 项；第三批
+  child 启动后该账仍有 8 done、9 in_progress、1 pending。root 的真实 tool-output index 证明它随后调用
+  `task_progress(action=read, run_id=<当前 gwreq task id>)`，旧 handler 返回 0 项。
+- ConversationStore 的 exact task link 与 task path 均完整，因此不是持久化丢失；问题是 read 专用显式
+  `run_id` 分支早于 canonical resolver，模型把当前任务身份回填后被当作另一份历史账。
+- 当前候选对照 会话运行时 `update_plan` 的 session/turn 定域：只有显式 id 精确等于当前 structured
+  `durable_task_id` 时走共享 `progress_ledger_id`；明确不同的历史 id 仍原样读取。没有 prompt/id 前缀解析、
+  第二账本、自动续跑或机器验收。两个 focused 文件 16 项通过，待严格 gate、推送和真 TUI 复验。
+
 ## 2026-08-25 依赖型 child 被同批并发（本地候选）
 
 - `.7` 同一长 TUI 的 ESM 入口返工里，root 口头说“先修复、再独立测试”，却一次创建 worker/tester；

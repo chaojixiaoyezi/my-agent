@@ -1,5 +1,9 @@
 # TEST CHECKLIST
 
+- [ ] 长 TUI 的 child lifecycle wake 后，root 即使显式用当前 typed task id 调用
+  `task_progress(action=read)`，也必须返回界面正在展示的同一 task-path Todo；不同历史 run id 仍保持精确
+  隔离。部署后在原 `ma-97468f3-longchain-r27` 或其恢复 session 自然触发，不人工篡改账本。
+
 ## 子代理 TUI 插话与容量
 
 - [x] `.7` 唯一 Gateway 的 fresh TUI 中，完成 child 即使留下旧 `current_tool` 也只显示终态，详情工具/思考

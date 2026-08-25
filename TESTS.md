@@ -1,5 +1,22 @@
 # TESTS
 
+## 2026-08-25 后台恢复轮不得用当前 task id 读出空 Todo
+
+focused 回归命令：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_task_progress_tool_dispatch_reconcile.py \
+  agent_py_agent/tests/test_task_identity.py \
+  -q --tb=short
+```
+
+真实长 TUI 的 root 在 child 完成唤醒后调用
+`task_progress(action=read, run_id=<当前 gwreq task id>)`，旧工具把它当历史账原样读取，返回 0 项；同一时刻
+TUI 从 canonical task-path 账本仍显示 18 项。回归必须证明当前 typed task id 会归一到原 task-path 账本，
+而明确不同的历史 run id 仍精确读取自己的账，不发生跨任务吸附。该修复对照 会话运行时 session/turn-scoped
+`update_plan`，不解析标识前缀或 prompt，也不把 Todo 恢复成机器验收门。
+
 ## 2026-08-25 依赖型派工不得伪装成同批串行
 
 focused 回归命令：

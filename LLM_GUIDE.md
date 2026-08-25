@@ -90,6 +90,9 @@
   durable task 写成 DONE；它不扫描正文、代码、测试或产物，也不创建 `ordinary_task_resume`。显式
   `/goal`、Compact 和 typed 子代理/控制事件仍各走自己的既有生命周期。新账本项必须有稳定
   `id + title + status`，避免空白行。
+- `task_progress(action=read)` 默认只读当前 active turn 的 canonical 账本。模型若把当前结构化
+  `task_id` 显式填进 `run_id`，该值只作为当前账本别名并经过共享 task-path resolver；只有与当前任务
+  不同的明确 run id 才按历史账本精确读取。不能让 request/task id 在后台续片中旁生一份空 Todo。
 - 模型侧旧 `raise_event` 已删除。进展、工具活动、阻塞、权限申请和终态都由宿主从真实 runner/thread
   事件写入；模型不能靠自报事件证明自己还活着。子代理 canonical state 会保存有界的“模型响应中 / 正在
   使用工具 / 工具成功或失败”短状态，不保存 prompt、response、工具输出或隐式推理正文。

@@ -132,7 +132,7 @@ def build_task_progress_model_spec() -> ToolModelSpec:
     coverage_target_schema = _task_progress_coverage_target_schema()
     parameters = {
         "action": "read/update/create；不填默认 read。create 与 update 等效（账本不存在时自动创建，首次建清单也用 create 或 update），清单内容不会自动续跑普通任务，也不会阻止模型结束当前轮。",
-        "run_id": "仅用于 read 时可选指定进度账本；update 始终写当前运行自己的账本。",
+        "run_id": "仅用于 read 时查看另一个明确的历史运行；读取当前任务请省略。即使误传当前 task_id，系统也会归一到当前唯一账本；update 始终写当前运行自己的账本。",
         "summary": "可选。当前整体进展一句话",
         "next_action": "可选。下一步最应该做什么",
         "items": "可选。进度项列表，每项可含 id/title/status/evidence/notes/next",
