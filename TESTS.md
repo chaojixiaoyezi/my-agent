@@ -6,17 +6,18 @@ focused 回归命令：
 
 ```bash
 python3 -m pytest \
-  agent_py_agent/tests/test_tool_output_externalizer.py \
-  agent_py_agent/tests/test_memory_compact_tool_output_refs.py \
-  agent_py_agent/tests/test_tools/test_filesystem_tools.py \
-  agent_py_agent/tests/test_tools/test_shell_tool.py \
   agent_py_agent/tests/test_background_main_agent_runtime.py \
+  agent_py_agent/tests/test_direct_parent_lifecycle.py \
+  agent_py_agent/tests/test_memory_compact_tool_output_refs.py \
+  agent_py_agent/tests/test_tool_output_externalizer.py \
+  agent_py_agent/tests/test_tools/test_filesystem_tools.py \
   -q --tb=short
 ```
 
-共收集 234 项，结果为 232 passed、2 个既有 xfailed。它必须同时证明：大小工具输出的 index 都保留有界
+共收集 206 项，结果为 204 passed、2 个既有 xfailed。它必须同时证明：大小工具输出的 index 都保留有界
 execution/operation；私有 envelope 字段不进入索引；成功派工跨 child wake 后仍核验 succeeded；自然 final
-关闭 root task link；精确 `final_report.md` 可读，而 canonical state、目录枚举和 shell 仍拒绝。改动远低于
+关闭 root task link；foreground request id 与 durable task id 不同、以及旧行尚无新字段时仍只恢复 exact
+active turn；精确和可权威解析的 stale-task `final_report.md` 可读，而其它 agent state 不会跟随跳转。改动远低于
 10,000 行，按约定不跑全仓 pytest；Ruff、doc-sync、strict code-size、diff 与 clean-package 均通过。
 
 部署后继续复用同一个 durable TUI/tmux 完成长链，不为阶段切换新建会话：多子代理代码级调研 → 两条普通

@@ -428,6 +428,7 @@ def test_tool_output_index_preserves_operation_terminal_for_background_carry(
             output="created\n" + ("x" * 2_000),
             ok=True,
             request_id="request-root",
+            conversation_request_id="foreground-turn-1",
             run_id="root-run",
             task_id="root-run",
             min_chars=0,
@@ -448,7 +449,7 @@ def test_tool_output_index_preserves_operation_terminal_for_background_carry(
     )
     carried = carried_tool_call_records(
         tmp_path,
-        {"run_id": "root-run", "task_id": "root-run"},
+        {"conversation_request_id": ("foreground-turn-1",)},
     )
 
     expected_operation = {
@@ -457,14 +458,18 @@ def test_tool_output_index_preserves_operation_terminal_for_background_carry(
         if key not in {"diagnostic", "private"}
     }
     assert record["tool_operation"] == expected_operation
+    assert record["conversation_request_id"] == "foreground-turn-1"
     assert artifact["tool_operation"] == expected_operation
+    assert artifact["conversation_request_id"] == "foreground-turn-1"
     assert index["tool_operation"] == expected_operation
+    assert index["conversation_request_id"] == "foreground-turn-1"
     assert carried[0]["handler_executed"] is True
     assert carried[0]["operation_id"] == "operation-create-1"
     assert carried[0]["tool_operation_status"] == "succeeded"
     assert carried[0]["tool_operation_action"] == "execute"
     assert carried[0]["tool_operation_idempotency_scope"] == "turn"
     assert carried[0]["tool_operation_replayed"] is False
+    assert carried[0]["conversation_request_id"] == "foreground-turn-1"
     assert "must-not-persist" not in json.dumps(
         [record["tool_operation"], artifact["tool_operation"], index["tool_operation"]],
         ensure_ascii=False,

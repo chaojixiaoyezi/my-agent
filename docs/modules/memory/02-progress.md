@@ -10,11 +10,15 @@
   旧记录仍保持 unverified，不用 `ok` 或输出正文补猜。
 - externalizer、carried refs 与 background root completion 定向回归已证明成功 operation 跨片保持
   succeeded 且 task link 关闭；真 Gateway/TUI 复验待部署后执行。
+- `4106025` 真机复验发现索引虽已有 operation，后台仍按 durable task id 查 foreground request 行。
+  当前 externalizer 显式保存 `conversation_request_id`，child completion 信封传递同一 exact turn，
+  carried refs 只按它恢复；字段落盘前的旧行仅在 `request_id` 同值时精确兼容。
 
 ## 2026-08-22 root active-turn 工具索引续接
 
-- child lifecycle wake 现在复用 task `work/blobs/tool_outputs/index.jsonl` 的 typed 行，按 exact root
-  `run_id + task_id` 还原同一 active turn 已经执行过的工具；小输出 `tool_call` 和大输出 `tool_output`
+- child lifecycle wake 现在复用 task `work/blobs/tool_outputs/index.jsonl` 的 typed 行，按 completion 信封的
+  exact `conversation_request_id` 还原同一 active turn 已经执行过的工具；durable task id 只定位索引，
+  不能当 turn id。小输出 `tool_call` 和大输出 `tool_output`
   共用 scoped call id 去重，后者只携带 artifact ref，不把正文整体塞回 prompt。
 - r11 证明只恢复调用行仍不够：旧参数投影把 list 内 dict 丢掉，使 Todo/批量派工 `items=[]`；native 又
   不消费机械 tool-context。当前索引对 JSON 参数限深、限宽并递归脱敏，保留 items/covers 等结构关系；

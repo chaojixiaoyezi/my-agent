@@ -57,6 +57,9 @@ class ExternalizeToolOutputRequest:
     run_id: str = ""
     task_id: str = ""
     request_id: str = ""
+    # 同一个 durable task 可经历多个普通用户回合；该字段固定工具真正所属的
+    # conversation active turn，不能用 task_id 或后台切片 request_id 代替。
+    conversation_request_id: str = ""
     min_chars: int = -1
     preview_chars: int = -1
     parameters: dict[str, Any] | None = None
@@ -171,6 +174,7 @@ def _base_record(request: ExternalizeToolOutputRequest, output: str, digest: str
         "id": request.call_id,
         "call_id": request.call_id,
         "request_id": request.request_id,
+        "conversation_request_id": request.conversation_request_id,
         "run_id": request.run_id,
         "task_id": request.task_id,
         "scoped_call_id": _scoped_call_id(request),
@@ -207,6 +211,7 @@ def _write_output_artifact(request: ExternalizeToolOutputRequest, output: str, d
         "error_code": str(request.error_code or "").strip(),
         "reported_error_code": str(request.reported_error_code or "").strip(),
         "request_id": request.request_id,
+        "conversation_request_id": request.conversation_request_id,
         "run_id": request.run_id,
         "task_id": request.task_id,
         "parameters": _safe_parameters(request.parameters),
@@ -232,6 +237,7 @@ def _append_index(path: Path, payload: dict[str, Any]) -> None:
         "call_id": payload["call_id"],
         "scoped_call_id": payload.get("scoped_call_id", ""),
         "request_id": payload["request_id"],
+        "conversation_request_id": str(payload.get("conversation_request_id") or ""),
         "run_id": payload["run_id"],
         "task_id": payload["task_id"],
         "ok": bool(payload.get("ok")),
@@ -261,6 +267,7 @@ def _append_tool_call_index(request: ExternalizeToolOutputRequest, record: dict[
         "call_id": request.call_id,
         "scoped_call_id": _scoped_call_id(request),
         "request_id": request.request_id,
+        "conversation_request_id": request.conversation_request_id,
         "run_id": request.run_id,
         "task_id": request.task_id,
         "ok": request.ok,

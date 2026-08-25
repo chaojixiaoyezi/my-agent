@@ -9,6 +9,7 @@ from typing import Any
 from ..common.encoding_detect import decode_bytes
 from ..path_recovery_hints import suggest_workspace_typo_target
 from ._filesystem_helpers import (
+    _canonical_agent_final_report_target,
     _int_param,
     _internal_agent_status_ref,
     _readable_agent_final_report,
@@ -88,6 +89,24 @@ def execute_read_file(tool, params: dict[str, Any], max_chars: int) -> ToolHandl
 # 函数用途: 完成路径检查和安全分流后读取文件；只对精确 final_report 交接件开放内部目录例外。
 def _execute_read_file_request(request: ReadFileRequest) -> ToolHandlerOutcome:
     target = request.target
+    redirected_from = ""
+    if not target.exists():
+        canonical = _canonical_agent_final_report_target(target)
+        if canonical is not None:
+            try:
+                canonical = request.tool.resolve_path(str(canonical))
+            except ValueError:
+                canonical = None
+            if canonical is not None:
+                redirected_from = str(target)
+                request = ReadFileRequest(
+                    tool=request.tool,
+                    params=request.params,
+                    max_chars=request.max_chars,
+                    raw_path=request.raw_path,
+                    target=canonical,
+                )
+                target = canonical
     if not target.exists():
         typo_hint = _missing_tool_artifact_typo_hint(request.tool, request.raw_path)
         if typo_hint:
@@ -121,7 +140,14 @@ def _execute_read_file_request(request: ReadFileRequest) -> ToolHandlerOutcome:
         # container. If normal file reading handles it below, it must not regain
         # runtime/source-code trust merely because unwrapping failed.
         return mark_tool_output_artifact_result(_ordinary_file_result(request))
-    return _ordinary_file_result(request)
+    outcome = _ordinary_file_result(request)
+    if redirected_from:
+        outcome.result_envelope["path_resolution"] = {
+            "authority": "owner_agent_projection",
+            "requested_path": redirected_from,
+            "resolved_path": str(target),
+        }
+    return outcome
 
 
 def _ordinary_file_result(request: ReadFileRequest) -> ToolHandlerOutcome:

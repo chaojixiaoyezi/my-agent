@@ -6,10 +6,14 @@
   在 externalized tool index 中丢失，后台完成续片将它降为 unverified，导致 final runtime unfinished、
   task link 保持 active。当前已在耐久 index/carry 主链保留 typed execution/operation，并用 background
   回归证明 link 会转 completed；没有恢复前端超时隐藏。
+- `4106025` 真机续测又证明 active-turn identity 仍错：foreground 工具行和 durable task 合法地使用不同 id。
+  当前把 child 的 `conversation_request_id` 写入 completion wake 与新工具索引，background 只按该 exact turn
+  恢复；字段落盘前的旧行只在 `request_id` 同值时兼容，不能混入同一长期任务的其它追加轮。
 - `subagent-completion.v1.final_report_ref` 现在与工具能力一致：精确宿主 `final_report.md` 可由 read_file
-  读取，canonical state/checkpoint/summary、目录枚举和 shell 仍拒绝。该报告只是有界自然语言交接证据，
+  读取；模型把 exact run id 拼进过期 task 目录时，只能经同 owner canonical agent projection 解析这一
+  叶子并再次过读权限门。canonical state/checkpoint/summary、目录枚举和 shell 仍拒绝。该报告只是有界自然语言交接证据，
   不能反推 child 状态、验收或 root 完成。
-- 5 个 focused 文件 234 项收集结果为 232 passed、2 个既有 xfailed；部署后的原长 TUI 仍须验证模型不再
+- 5 个 focused 文件 206 项收集结果为 204 passed、2 个既有 xfailed，完整本地严格 gate 通过；部署后的原长 TUI 仍须验证模型不再
   猜报告目录，最终回复后唯一 Working 正常收起。
 
 ## 2026-08-25 同一 session 的多阶段调研、复刻与返工

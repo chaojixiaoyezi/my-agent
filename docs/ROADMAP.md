@@ -22,7 +22,7 @@
 
 ### 子代理完成详情引用与安全状态面一致化
 
-状态：实现中；普通续轮 completion 正文已由 `999a621` 真 TUI 验证，精确交接 ref 正在收口
+状态：第二层本地候选严格 gate 通过；待推送、`.7` 同一长 TUI 复验
 
 解决问题：普通前台续轮现在能直接收到并整合直属 child 的有界 `completion_message`，不再猜目录；但模型
 若按信封里的 `final_report_ref` 深挖完整报告，当前 `Read` 会把该路径识别为内部 agent 状态面并拒绝。
@@ -33,10 +33,12 @@ shell 读取仍按内部状态面拒绝。后台续接还必须把成功副作�
 工具索引，避免 child 完成后的新工作片把已成功派工误降为 unverified，导致用户已收到最终回复而 root
 active task link 仍不关闭。
 
-当前进展：代码与 5 个 focused 文件已覆盖大小输出索引、私有字段裁剪、carried operation 恢复、精确报告
-读取、状态/list/shell 继续拒绝，以及 child 终态后 root task link 转 completed。234 项收集结果为
-232 passed、2 个既有 xfailed，本地严格 gate 全通过；待推送、`.7` 单 Gateway 部署和同一长 tmux 真 TUI
-复验后完成。
+当前进展：`4106025` 已推送部署，原长 tmux r27 证明 operation 字段本身已落盘，却暴露 foreground request
+与 durable task id 的第二层错位；模型还把 exact run id 拼进过期 task 目录。当前候选把 typed
+`conversation_request_id` 沿 child state/completion wake/index carry 传到底，旧行只按同值 request id
+兼容；错误 task 目录只可经同 owner canonical agent projection 找回 exact `final_report.md`，并再次过读
+权限门。5 个直接相关测试文件共 206 项，结果 204 passed、2 个既有 xfailed；Ruff、doc-sync、strict
+code-size、diff 与 clean-package 均通过。推送、`.7` 单 Gateway 部署和同一 tmux 复验尚待完成。
 
 ### 会话运行时 式同一父级分批创建
 

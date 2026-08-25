@@ -10,6 +10,9 @@
   旧记录继续 unverified，绝不把所有 `ok=true` mutation 放宽为成功。
 - background focused 回归已直接证明 child terminal wake 后 operation verification 为 succeeded、root link
   为 completed；externalizer 回归同时证明任意 diagnostic/private envelope 字段不会进入耐久 index。
+- 后续真机证明 durable task id 与 foreground request id 不同，旧恢复范围仍会漏掉已持久化的 succeeded
+  operation。当前把 exact `conversation_request_id` 从 child canonical attributes 送到 completion wake，
+  background verification 只恢复该 turn；旧索引只在 row request id 同值时兼容，不放宽 fail-closed。
 
 ## 2026-08-18 Fiber 143 收口冲突返工
 

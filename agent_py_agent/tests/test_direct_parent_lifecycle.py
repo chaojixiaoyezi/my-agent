@@ -289,7 +289,10 @@ def test_root_child_wake_carries_bounded_completion_message_and_exact_refs(tmp_p
     artifact.write_text("调研产物", encoding="utf-8")
     child.status = "DONE"
     child.result = "结论开头\n" + ("甲" * 1800) + "\n结论结尾"
-    child.attributes = {"output_files": [str(artifact)]}
+    child.attributes = {
+        "output_files": [str(artifact)],
+        "conversation_request_id": "foreground-turn-1",
+    }
     manager.save(child)
 
     store = ConversationStore(tmp_path / "conversations")
@@ -339,6 +342,7 @@ def test_root_child_wake_carries_bounded_completion_message_and_exact_refs(tmp_p
     assert metadata["final_report_ref"] == str(final_report)
     assert metadata["declared_output_refs"] == [str(artifact)]
     assert metadata["artifact_refs"] == [str(artifact)]
+    assert metadata["conversation_request_id"] == "foreground-turn-1"
     assert list(signal.evidence_refs) == [str(final_report), str(artifact)]
 
 

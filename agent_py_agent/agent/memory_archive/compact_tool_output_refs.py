@@ -12,8 +12,8 @@ from .tool_output_externalizer import tool_output_index_paths_for_lookup
 _INTERNAL_LEDGER_TOOLS = {"task_progress"}
 
 
-# LLM: Child lifecycle wakes are another slice of the same active root turn. Rehydrate only
-# exact run/task index rows, preserve append order, and never scan child workspaces or prose.
+# LLM: Child lifecycle wakes are another slice of the originating conversation turn. Rehydrate
+# only exact typed turn rows, preserve append order, and never scan child workspaces or prose.
 # 函数用途: 从一个任务自己的工具索引恢复跨后台工作片所需的调用历史。
 def carried_tool_call_records(
     workspace: str | Path,
@@ -96,9 +96,32 @@ def _read_tool_output_index_path(path: Path) -> list[dict[str, Any]]:
 
 def _matches_scope(row: dict[str, Any], scope: dict[str, Any]) -> bool:
     return all(
-        not expected or str(row.get(key) or "") == str(expected)
-        for key in ("request_id", "run_id", "task_id")
+        not expected or _scope_value_matches(row, key, expected)
+        for key in ("conversation_request_id", "request_id", "run_id", "task_id")
         if (expected := scope.get(key))
+    )
+
+
+# LLM: Active-turn recovery may receive a bounded batch of child wakes. Match each row by
+# typed conversation request ids while accepting pre-field legacy rows only when request_id
+# already equals that exact id; never broaden to the durable task id implicitly.
+# 函数用途: 判断工具索引行是否属于一个或一组明确用户回合，并兼容字段落盘前的同值旧记录。
+def _scope_value_matches(row: dict[str, Any], key: str, expected: object) -> bool:
+    values = (
+        tuple(str(item or "").strip() for item in expected)
+        if isinstance(expected, (list, tuple, set, frozenset))
+        else (str(expected or "").strip(),)
+    )
+    allowed = {item for item in values if item}
+    if not allowed:
+        return True
+    actual = str(row.get(key) or "").strip()
+    if actual in allowed:
+        return True
+    return (
+        key == "conversation_request_id"
+        and not actual
+        and str(row.get("request_id") or "").strip() in allowed
     )
 
 
@@ -146,6 +169,7 @@ def _carried_tool_call_record(row: dict[str, Any]) -> dict[str, Any]:
         "call_id": str(row.get("call_id") or ""),
         "scoped_call_id": str(row.get("scoped_call_id") or ""),
         "request_id": str(row.get("request_id") or ""),
+        "conversation_request_id": str(row.get("conversation_request_id") or ""),
         "run_id": str(row.get("run_id") or ""),
         "task_id": str(row.get("task_id") or ""),
         "tool": str(row.get("tool") or ""),
@@ -220,6 +244,7 @@ def _source_ref(row: dict[str, Any]) -> dict[str, Any]:
         "source_path": str(row.get("source_input") or ""),
         "parameters": dict(row.get("parameters", {}) if isinstance(row.get("parameters"), dict) else {}),
         "request_id": str(row.get("request_id", "") or ""),
+        "conversation_request_id": str(row.get("conversation_request_id", "") or ""),
         "run_id": str(row.get("run_id", "") or ""),
         "task_id": str(row.get("task_id", "") or ""),
         "ok": row.get("ok"),
@@ -242,6 +267,7 @@ def _tool_call_ref(row: dict[str, Any]) -> dict[str, Any]:
         "source_path": str(row.get("source_input") or ""),
         "parameters": dict(row.get("parameters", {}) if isinstance(row.get("parameters"), dict) else {}),
         "request_id": str(row.get("request_id", "") or ""),
+        "conversation_request_id": str(row.get("conversation_request_id", "") or ""),
         "run_id": str(row.get("run_id", "") or ""),
         "task_id": str(row.get("task_id", "") or ""),
         "ok": row.get("ok"),

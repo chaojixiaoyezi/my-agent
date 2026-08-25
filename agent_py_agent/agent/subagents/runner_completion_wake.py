@@ -151,9 +151,9 @@ def _summary(task: Any, result: Any, status: str) -> str:
     )
 
 
-# LLM: Completion metadata combines host-owned lifecycle facts with bounded
-# read-only delivery content; consumers must never infer status from the prose.
-# 函数用途: 组装子代理完成通知的结构化状态、最终回复预览和精确交付位置。
+# LLM: Completion metadata combines host-owned lifecycle facts, the exact originating
+# conversation turn id, and bounded read-only delivery content; prose never owns status.
+# 函数用途: 组装子代理完成通知的结构化状态、本轮编号、最终回复预览和精确交付位置。
 def _metadata(task: Any, result: Any, output_payload: dict[str, object]) -> dict[str, object]:
     payload = {
         "task_id": str(getattr(task, "id", "") or getattr(result, "run_id", "") or ""),
@@ -182,6 +182,10 @@ def _metadata(task: Any, result: Any, output_payload: dict[str, object]) -> dict
         structured_audit_supervised_worker_attributes,
     )
     from ..conversation.authority import CONVERSATION_REQUEST_ID_ATTR
+
+    conversation_request_id = str(attrs.get(CONVERSATION_REQUEST_ID_ATTR) or "").strip()
+    if conversation_request_id:
+        payload[CONVERSATION_REQUEST_ID_ATTR] = conversation_request_id
 
     if structured_audit_supervised_worker_attributes(attrs):
         bound = structured_audit_source_worker_attributes(attrs)

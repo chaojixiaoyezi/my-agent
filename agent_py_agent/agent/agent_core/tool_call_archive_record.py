@@ -53,6 +53,7 @@ def archive_tool_output_projection(
         error_code=str(outcome.error_code or ""),
         reported_error_code=str(outcome.reported_error_code or ""),
         request_id=str(getattr(params, "request_id", "") or ""),
+        conversation_request_id=_conversation_request_id(params),
         run_id=call.run_id,
         task_id=str(getattr(params, "task_id", "") or ""),
         min_chars=_config_int(agent, "tool_output_externalize_min_chars"),
@@ -147,6 +148,7 @@ def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dic
             error_code=record.result.error_code,
             reported_error_code=record.result.reported_error_code,
             request_id=record.params.request_id,
+            conversation_request_id=_conversation_request_id(record.params),
             run_id=runtime_run_id(agent, record.params),
             task_id=record.params.task_id,
             min_chars=_config_int(agent, "tool_output_externalize_min_chars"),
@@ -233,6 +235,20 @@ def _tool_output_archive_root(agent: object, params: object) -> Path:
     if work_dir is not None:
         return work_dir
     return runtime_owner_root(agent)
+
+
+# LLM: Tool archive rows need the originating ordinary conversation turn even when a
+# background slice has a different request_id; task_id is a durable task, not a turn id.
+# 函数用途: 从结构化运行参数读取工具所属用户回合编号，旧调用方缺字段时回退当前请求编号。
+def _conversation_request_id(params: object) -> str:
+    attributes = getattr(params, "task_attributes", None)
+    if isinstance(attributes, dict):
+        from ..conversation.authority import CONVERSATION_REQUEST_ID_ATTR
+
+        value = str(attributes.get(CONVERSATION_REQUEST_ID_ATTR) or "").strip()
+        if value:
+            return value
+    return str(getattr(params, "request_id", "") or "").strip()
 
 
 def _attach_gate_and_refs(output_record: dict[str, object], result: object) -> None:

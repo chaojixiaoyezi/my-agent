@@ -240,6 +240,61 @@ def test_carried_tool_call_records_restore_only_exact_root_scope(tmp_path: Path)
     assert records[1]["tool_operation_action"] == "execute"
 
 
+def test_carried_tool_call_records_restore_exact_conversation_turn_across_durable_task(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "work"
+    for request_id, call_id in (
+        ("foreground-turn-1", "child-1"),
+        ("foreground-turn-2", "child-2"),
+    ):
+        externalize_tool_output_record(
+            ExternalizeToolOutputRequest(
+                root=root,
+                tool="create_subagents",
+                call_id=call_id,
+                output=f"created {call_id}",
+                ok=True,
+                request_id=request_id,
+                conversation_request_id=request_id,
+                run_id=request_id,
+                task_id=request_id,
+                min_chars=1000,
+                parameters={"items": [{"goal": call_id}]},
+            )
+        )
+
+    records = carried_tool_call_records(
+        root,
+        {"conversation_request_id": ("foreground-turn-2",)},
+    )
+
+    assert [item["call_id"] for item in records] == ["child-2"]
+    assert records[0]["conversation_request_id"] == "foreground-turn-2"
+
+    externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=root,
+            tool="create_subagents",
+            call_id="legacy-child",
+            output="created legacy child",
+            ok=True,
+            request_id="legacy-foreground-turn",
+            run_id="legacy-foreground-turn",
+            task_id="legacy-foreground-turn",
+            min_chars=1000,
+            parameters={"items": [{"goal": "legacy child"}]},
+        )
+    )
+
+    legacy_records = carried_tool_call_records(
+        root,
+        {"conversation_request_id": ("legacy-foreground-turn",)},
+    )
+
+    assert [item["call_id"] for item in legacy_records] == ["legacy-child"]
+
+
 def test_carried_tool_call_records_dedupe_same_scoped_call_id(tmp_path: Path) -> None:
     root = tmp_path / "work"
     index = root / "blobs" / "tool_outputs" / "index.jsonl"

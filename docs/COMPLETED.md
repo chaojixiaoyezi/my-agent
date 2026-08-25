@@ -4,6 +4,13 @@
 
 最近收口重点：
 
+- 2026-08-25 收口 `4106025` 真 TUI 暴露的第二层 active-turn 身份错位：durable task id 只定位 root
+  workspace，child canonical attributes/completion wake/工具索引统一携带 exact
+  `conversation_request_id`，后台只恢复该 turn 的工具事实；字段落盘前的旧行仅由同值 request id 精确
+  兼容。模型把 exact run id 拼入过期 task 目录时，`read_file` 只经同 owner canonical agent projection
+  找回唯一 `final_report.md` 并重过权限门，其它内部状态不跳转。5 个 focused 文件 206 项结果为 204 passed、
+  2 个既有 xfailed；本地严格 gate 全通过，真 TUI 复验仍留在 ROADMAP。
+
 - 2026-08-25 收口 child 完成后 root 已回复但 TUI 永久 Working 的底层事实断点：工具输出首次归档现把
   host-owned `tool_execution/tool_operation` 以有界白名单写入大小输出 index，background carried record
   恢复 succeeded operation，仍不把 `ok=true` 或正文猜成副作用成功；精确宿主 `final_report.md` 作为完成

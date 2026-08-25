@@ -40,8 +40,9 @@
 ## lifecycle wake 的 carried tool archive
 
 - 每个 root task 的 `work/blobs/tool_outputs/index.jsonl` 同时索引 bounded `tool_call` 与外置
-  `tool_output`。child lifecycle 后续工作片按 exact root run/task 读取，保留 append 顺序，并以
-  `scoped_call_id` 去重；其它 task 和 child workspace 不扫描。
+  `tool_output`。child lifecycle 后续工作片用 durable task id 定位这一文件，再按 completion 信封的 exact
+  `conversation_request_id` 读取，保留 append 顺序，并以 `scoped_call_id` 去重；新行显式保存 turn id，
+  旧行仅以同值 `request_id` 兼容，其它 task、同 task 的其它 turn 和 child workspace 不扫描。
 - 恢复记录沿既有 `carried_archive_tool_calls` 进入工具循环，重建已执行工具、one-shot key、工具轮基线、
   参数和 artifact refs。工具参数使用限深、限宽、凭据脱敏的 JSON 投影，Todo items、批量派工 items 与
   typed covers 不得因嵌套而变成空数组。大输出正文仍留在 owner 私有 artifact，按需读取；索引损坏时

@@ -2208,9 +2208,9 @@ def _run_params(
     )
 
 
-# LLM: Only child lifecycle events continue the originating active turn. Restore exact root
-# run/task rows from its canonical work index; do not mix child workspaces or other requests.
-# 函数用途: 为子代理完成后的主代理工作片恢复此前工具调用、去重键和执行轨迹。
+# LLM: Only child lifecycle events continue the originating active turn. Restore rows by the
+# child envelope's conversation request id; the durable task id is only a legacy fallback.
+# 函数用途: 为子代理完成后的主代理工作片恢复原用户回合的工具调用、去重键和执行轨迹。
 def _background_active_turn_tool_calls(
     request: BackgroundRunRequest,
     context: GoalRuntimeContext,
@@ -2224,12 +2224,42 @@ def _background_active_turn_tool_calls(
     try:
         from ..memory_archive.compact_tool_output_refs import carried_tool_call_records
 
+        active_turn_request_ids = _background_active_turn_request_ids(request)
+        scope: dict[str, object] = (
+            {"conversation_request_id": active_turn_request_ids}
+            if active_turn_request_ids
+            else {"run_id": task_id, "task_id": task_id}
+        )
         return carried_tool_call_records(
             Path(task_path).expanduser().resolve(strict=False) / "work",
-            {"run_id": task_id, "task_id": task_id},
+            scope,
         )
     except (OSError, RuntimeError, ValueError):
         return []
+
+
+# LLM: A durable task id and an originating conversation turn id are distinct. Child wake
+# metadata owns the latter; batched wakes may name several exact turns and must never infer
+# one from the task id or completion prose.
+# 函数用途: 从子代理完成信封中读取本轮工具历史所属的普通用户请求编号，供后台续接精确恢复。
+def _background_active_turn_request_ids(
+    request: BackgroundRunRequest,
+) -> tuple[str, ...]:
+    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
+    metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
+    envelopes: list[dict[str, object]] = [metadata]
+    events = metadata.get("events")
+    for event in events if isinstance(events, list) else ():
+        if not isinstance(event, dict):
+            continue
+        event_metadata = event.get("metadata")
+        if isinstance(event_metadata, dict):
+            envelopes.append(event_metadata)
+    values = [
+        str(envelope.get(CONVERSATION_REQUEST_ID_ATTR) or "").strip()
+        for envelope in envelopes
+    ]
+    return tuple(dict.fromkeys(value for value in values if value))
 
 
 # LLM: background_max_tool_rounds is a per-slice allowance. Carried calls count as the
@@ -2305,13 +2335,16 @@ def _background_task_attributes(
             _background_delivery_evidence_refs(request)
         )
     if task_id:
+        active_turn_request_ids = _background_active_turn_request_ids(request)
         attributes.update(
             {
                 "conversation_task_id": task_id,
                 # A durable background turn is another execution of this exact
                 # task, not a new lineage. Descendants and audit ledgers must
                 # keep the original task id across wakeups.
-                CONVERSATION_REQUEST_ID_ATTR: task_id,
+                CONVERSATION_REQUEST_ID_ATTR: (
+                    active_turn_request_ids[0] if active_turn_request_ids else task_id
+                ),
                 # The scheduler acquired the thread claim before constructing
                 # these params, so this background turn is the current task's
                 # live executor rather than a competing executor.  Keep that

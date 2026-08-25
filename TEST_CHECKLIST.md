@@ -51,8 +51,9 @@
   `child_result_index.expected_outputs`；显式产物仍走现有锚定、写授权和冲突锁。focused tests 完成后还须
   fresh r10 原样 Prompt 4 真机验证。
 - [ ] child lifecycle wake 沿同一 root active turn 续接：exact task link 的原始 objective 仍是
-  `User Task/root_user_prompt`，wake 仅作 runtime continuation；root canonical tool index 按 exact
-  `run_id + task_id` 恢复并排除 child/其它 task，one-shot 派工不重放，每工作片新增工具额度不缩水。
+  `User Task/root_user_prompt`，wake 仅作 runtime continuation；root canonical tool index 按 completion
+  信封的 exact `conversation_request_id` 恢复并排除 child/其它 task/同 durable task 的其它用户轮，
+  one-shot 派工不重放，每工作片新增工具额度不缩水；字段落盘前旧行只按同值 `request_id` 兼容。
   focused 回归与 fresh r12b 已证明语言、范围和嵌套派工参数不会在连续 wake 后重置。2026-08-25 又补齐
   externalized index 的 typed execution/operation 终态恢复与 root link completed 回归；仍待同一长 TUI
   部署样本证明最终回复后 Working 收起，才勾整项。

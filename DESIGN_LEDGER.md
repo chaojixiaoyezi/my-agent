@@ -144,8 +144,9 @@
 - 同一 owner/thread 只有一份模型历史。聊天、文件工作、子代理协调、定时唤醒和普通小任务都继续使用同一 thread 的 summary + raw tail；task link、workspace、progress、wake 与子代理树只是结构化运行事实，不得过滤、替换或复制 transcript。普通 Gateway 请求按会话顺序执行，当前 turn 结束或耐久续轮启动后仍继续同一历史，不能创建平行“聊天上下文”。
 - 子代理 lifecycle wake 是同一 root active turn 的耐久工作片，不是 synthetic wake 文案发起的新任务。后台
   续接必须以 exact task link 的原始 goal 作为 `User Task/root_user_prompt`，把 wake prompt 放入 runtime
-  continuation；同时从该 task 自己的 `work/blobs/tool_outputs/index.jsonl` 按 exact root
-  `run_id + task_id` 恢复结构化调用历史、one-shot 去重和已执行工具。不得扫描 child workspace、不得混入
+  continuation；同时从该 task 自己的 `work/blobs/tool_outputs/index.jsonl` 按 child 信封的 exact
+  `conversation_request_id` 恢复结构化调用历史、one-shot 去重和已执行工具。durable task id 只负责定位
+  工作区，不能冒充 active turn；旧索引缺该字段时只允许同值 `request_id` 精确兼容。不得扫描 child workspace、不得混入
   sibling/旧 task，也不得从正文猜语言、计划或完成状态。恢复记录计入当前 absolute tool-round baseline，
   但配置的每工作片新增轮数额度不缩水。detached Audit 配额通知继续是独立运营事件，不伪装成 root turn。
   该边界对照 会话运行时 `core/src/agent/control.rs` 的 child notification 与
@@ -1596,7 +1597,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   在“原生复制/恢复滚轮”间真实切换；输入框拖选“中文复制验证ABC”后 tmux buffer 得到完整 9 字符，右键
   再次复制结果相同。外层 macOS 系统剪贴板仍只能由用户 attach 后亲自粘贴确认，不能由 tmux 证据冒充。
 
-## 2026-08-25 后台续接操作事实与精确子代理交接引用【状态：本地严格 gate 通过，待真机】
+## 2026-08-25 后台续接操作事实与精确子代理交接引用【状态：第二层修复严格 gate 通过，待真机】
 
 - 会话运行时 的 active turn 只有收到 typed `TurnCompleted` 才清除 Working；不能用前端超时、最终正文或 child
   数量猜终态。本项目同样要求 background slice 恢复原轮成功工具时，继续携带 host-owned
@@ -1606,10 +1607,19 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   `ok=true`；child 完成唤醒后的新工作片因缺少 operation 终态把派工判为 `unverified`，自然 final 仍落成
   unfinished，active task link 因而持续显示 Working。修复必须保留既有 fail-closed 核验，不允许把所有
   `ok=true` 副作用直接猜成 succeeded。
+- `4106025` 部署后的同一长 TUI 又暴露第二层身份错位：前台工具行的 request/run/task 都是 exact foreground
+  request，后台 wake 却拿 durable task id 查索引；两者都合法但不是同一个概念。当前按 会话运行时
+  `session/inject.rs`、`session/turn.rs` 与 `tool_dispatch_trace.rs` 的 per-turn 绑定方式，把 child 创建时的
+  `conversation_request_id` 沿 canonical child state → completion wake → background carried scope 传递；
+  新索引显式落该字段，旧索引仅在 row `request_id` 同值时兼容，不扫描同 task 的其它用户轮。
 - `work/agents/<run_id>/final_report.md` 由宿主写入，只含 task/run/status 与 child 最终回复，是完成信封已经
   暴露给直接父级的有界交接投影，不是 canonical 状态权威。精确该文件允许通过 `read_file` 按现有
   workspace/owner 边界读取；同目录的 state/checkpoint/summary/progress、目录枚举和 shell 仍拒绝。
   不复制第二份报告，也不让 final_report 正文参与 child 或 root 的完成、权限、验收裁决。
+- 同一现场的 completion 信封已经给出正确 `final_report_ref`，但模型保留 exact run id 后拼入了完整 durable
+  task id，形成不存在的目录。读取层只对这个 exact final-report 叶子按同 owner
+  `agents/<run>/state.json` 投影找 canonical ref，并再次执行原读权限检查；run id、run dir、owner containment
+  任一不一致即不跳转，state/checkpoint/list/shell 不共享该能力。
 - 部署后验收继续复用同一个 durable TUI：多 child 调研、两个普通追加、多 child 复刻、普通验收追加、
   多 child 返工和最终追加必须连续发生在一条 session 中。该链只测试跨工作片连续性，不改变单次任务边界，
   也不允许测试者替被测对象改产物或用技术提示直接告诉它底座诊断答案。

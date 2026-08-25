@@ -189,6 +189,74 @@ def _readable_agent_final_report(path: Path) -> bool:
     return False
 
 
+# LLM: A model may retain the correct run id but combine it with a stale durable-task
+# directory. Resolve only the exact final_report leaf through the owner's typed agent
+# projection, then validate the canonical run directory and every filesystem boundary.
+# 函数用途: 当子代理报告路径里的任务目录过期时，按唯一 run_id 找回其真实最终报告；其他内部文件不做跳转。
+def _canonical_agent_final_report_target(
+    path: Path,
+) -> Path | None:
+    location = _agent_final_report_location(path)
+    if location is None:
+        return None
+    owner_home, run_id = location
+    state = _read_json_object(owner_home / "agents" / run_id / "state.json")
+    if str(state.get("run_id") or "").strip() != run_id:
+        return None
+    final_ref = str(state.get("final_report_ref") or "").strip()
+    run_dir_ref = str(state.get("agent_run_workspace_dir") or "").strip()
+    if not final_ref or not run_dir_ref:
+        return None
+    try:
+        owner_root = owner_home.expanduser().resolve(strict=False)
+        run_dir = Path(run_dir_ref).expanduser().resolve(strict=False)
+        candidate = Path(final_ref).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if (
+        run_dir.name != run_id
+        or candidate != run_dir / "final_report.md"
+        or not _readable_agent_final_report(candidate)
+        or not candidate.is_file()
+        or not _path_inside(candidate, owner_root)
+    ):
+        return None
+    return candidate
+
+
+# LLM: Owner lookup is permitted only for the canonical tasks/.../work/agents/<run>/final_report
+# shape. The run id remains opaque and no fuzzy basename search participates in authority.
+# 函数用途: 从一个精确子代理报告地址拆出 owner home 和 run_id，供权威索引定位使用。
+def _agent_final_report_location(path: Path) -> tuple[Path, str] | None:
+    parts = path.expanduser().resolve(strict=False).parts
+    for work_index in range(len(parts) - 3):
+        if parts[work_index : work_index + 2] != ("work", "agents"):
+            continue
+        relative = parts[work_index + 2 :]
+        if len(relative) != 2 or relative[1] != "final_report.md":
+            continue
+        run_id = str(relative[0])
+        if not run_id.startswith(("subagent-", "run-")):
+            return None
+        task_indexes = [
+            index for index, part in enumerate(parts[:work_index]) if part == "tasks"
+        ]
+        if not task_indexes:
+            return None
+        return Path(*parts[: task_indexes[-1]]), run_id
+    return None
+
+
+# LLM: Path containment must use resolved path components, never string prefixes.
+# 函数用途: 判断一个已解析路径是否位于给定根目录内。
+def _path_inside(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
 # LLM: 内部 agent 文件不是模型状态 API；拒绝结果只给事件等待和真实产物读取顺序，
 # 不能建议已从模型 surface 删除的 inspect 工具。
 # 函数用途: 把误读子代理内部状态文件转换成安全的结构化指引。

@@ -129,15 +129,16 @@ def test_subagent_wake_restores_original_task_and_root_tool_history(tmp_path) ->
     index = task_root / "work" / "blobs" / "tool_outputs" / "index.jsonl"
     index.parent.mkdir(parents=True)
     root_id = "task-continue"
+    foreground_request_id = "foreground-request"
     rows = [
         {
             "kind": "tool_call",
             "tool": "task_progress",
             "call_id": "call-plan",
             "scoped_call_id": f"{root_id}:call-plan",
-            "request_id": "foreground-request",
-            "run_id": root_id,
-            "task_id": root_id,
+            "request_id": foreground_request_id,
+            "run_id": foreground_request_id,
+            "task_id": foreground_request_id,
             "ok": True,
             "status": "ok",
             "parameters": {"summary": "使用 Rust 复刻", "action": "create"},
@@ -147,9 +148,9 @@ def test_subagent_wake_restores_original_task_and_root_tool_history(tmp_path) ->
             "tool": "create_subagents",
             "call_id": "call-child",
             "scoped_call_id": f"{root_id}:call-child",
-            "request_id": "foreground-request",
-            "run_id": root_id,
-            "task_id": root_id,
+            "request_id": foreground_request_id,
+            "run_id": foreground_request_id,
+            "task_id": foreground_request_id,
             "ok": True,
             "status": "ok",
             "parameters": {"goal": "实现 Rust 命令层"},
@@ -198,6 +199,11 @@ def test_subagent_wake_restores_original_task_and_root_tool_history(tmp_path) ->
         thread_id=thread.thread_id,
         task_id=root_id,
         reason="subagent_runner_finished",
+        wake_signal={
+            "metadata": {
+                "conversation_request_id": foreground_request_id,
+            }
+        },
     )
     context = _goal_runtime_context(agent, store, request)
 
@@ -219,6 +225,7 @@ def test_subagent_wake_restores_original_task_and_root_tool_history(tmp_path) ->
     assert context.task_objective == objective
     assert context.task_path == str(task_root)
     assert params.root_user_prompt == objective
+    assert params.task_attributes[CONVERSATION_REQUEST_ID_ATTR] == foreground_request_id
     assert [row["call_id"] for row in params.carried_archive_tool_calls] == [
         "call-plan",
         "call-child",
@@ -3930,8 +3937,8 @@ def test_done_child_wake_with_carried_successful_spawn_closes_root_task(
             output="created child",
             ok=True,
             request_id="foreground-request",
-            run_id="task-root",
-            task_id="task-root",
+            run_id="foreground-request",
+            task_id="foreground-request",
             min_chars=0,
             parameters={"items": [{"goal": "完成实现", "role": "worker"}]},
             result_envelope={
@@ -3966,6 +3973,7 @@ def test_done_child_wake_with_carried_successful_spawn_closes_root_task(
         plan=["执行"],
         parent_id="task-root",
         root_id="task-root",
+        attributes={"conversation_request_id": "foreground-request"},
     )
     agent.subagents.lifecycle.set_status(child.id, "DONE")
     store = agent.conversation_store
@@ -3997,7 +4005,11 @@ def test_done_child_wake_with_carried_successful_spawn_closes_root_task(
             "wake_signal": {
                 "root_task_id": "task-root",
                 "source_agent_id": child.id,
-                "metadata": {"task_id": child.id, "status": "DONE"},
+                "metadata": {
+                    "task_id": child.id,
+                    "status": "DONE",
+                    "conversation_request_id": "foreground-request",
+                },
             },
         }
     )

@@ -37,7 +37,8 @@
 - 子代理完成、阻塞或能力申请唤醒不是一条新用户任务，而是原 root active turn 的后续工作片。必须从
   exact thread/task link 恢复原始 objective 和 task path：原始 objective 继续占据 `User Task` /
   `root_user_prompt`，结构化 wake 只作为 runtime continuation 注入。该 root 自己的 canonical tool-output
-  index 按 exact `run_id + task_id` 恢复已执行工具、一次性派工去重和有界执行轨迹；嵌套 Todo/派工参数
+  index 按 child 完成信封携带的 exact `conversation_request_id` 恢复已执行工具、一次性派工去重和有界执行
+  轨迹；durable task id 不能冒充 active turn id，字段落盘前的旧行只可由同值 `request_id` 精确兼容；嵌套 Todo/派工参数
   必须以限深、限宽、凭据脱敏的 JSON 保留，不能退化成空数组。跨进程索引不能伪造原始 ToolCall/ToolResult
   配对；native 续跑用唯一 `CompactionSummary` handoff 持续携带这批事实，精确副作用仍以 archive、operation
   ledger、artifact refs 和当前文件为准。child 私有索引、其它 task 和 detached Audit 事件不得混入。
@@ -47,7 +48,9 @@
 - lifecycle wake 恢复的耐久工具索引必须同时保留 bounded `tool_execution` 与 `tool_operation`；副作用
   工具不能因跨后台工作片丢失 operation 终态而从 succeeded 退化为 unverified，也不能只凭 `ok=true`
   反推成功。系统生成的精确 `work/agents/<run>/final_report.md` 是完成信封的有界交接投影，可由
-  `read_file` 读取；同目录其它状态文件、目录枚举和 shell 读取继续拒绝，报告正文不参与完成裁决。
+  `read_file` 读取；若模型保留 exact run id 却拼入过期 task 目录，读取层只可经同 owner 的 canonical agent
+  projection 找回这一片叶子并再次经过读权限门。同目录其它状态文件、目录枚举和 shell 读取继续拒绝，
+  报告正文不参与完成裁决。
 - 当前 canonical `task_progress` 已有计划时，`create_subagents` 在任何 child 落盘前执行一份原子结构预检：
   `covers` 与 `output_files` 都是可选结构化提示。提供的 covers 必须绑定仍 open、且未被同批其它 item
   占用的 exact id；提供的 output 必须位于父级 workspace。省略 covers 时 child 按真实 run id 记进度，

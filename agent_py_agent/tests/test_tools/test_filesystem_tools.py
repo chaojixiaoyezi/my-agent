@@ -368,6 +368,99 @@ def test_read_file_allows_exact_final_report_but_routes_other_agent_status_refs(
     assert "declared child result" in output_result.output
 
 
+def test_read_file_resolves_stale_task_dir_to_canonical_agent_final_report(
+    tmp_path: Path,
+) -> None:
+    owner_home = tmp_path / "owners" / "local" / "main"
+    run_id = "subagent-123"
+    canonical_run_dir = (
+        owner_home
+        / "tasks"
+        / "2026-08-25"
+        / "gwreq-short"
+        / "work"
+        / "agents"
+        / run_id
+    )
+    canonical_report = canonical_run_dir / "final_report.md"
+    canonical_run_dir.mkdir(parents=True)
+    canonical_report.write_text("权威子代理交接", encoding="utf-8")
+    projection = owner_home / "agents" / run_id / "state.json"
+    projection.parent.mkdir(parents=True)
+    projection.write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "agent_run_workspace_dir": str(canonical_run_dir),
+                "final_report_ref": str(canonical_report),
+            }
+        ),
+        encoding="utf-8",
+    )
+    stale_report = (
+        owner_home
+        / "tasks"
+        / "2026-08-25"
+        / "gwreq-full-stale"
+        / "work"
+        / "agents"
+        / run_id
+        / "final_report.md"
+    )
+    project_root = tmp_path / "replica-project"
+    project_root.mkdir()
+    read_tool = ReadFileTool(project_root, max_chars=2000)
+
+    result = read_tool.execute({"path": str(stale_report)})
+
+    assert result.ok is True
+    assert "权威子代理交接" in result.output
+    assert result.result_envelope["path_resolution"] == {
+        "authority": "owner_agent_projection",
+        "requested_path": str(stale_report.resolve(strict=False)),
+        "resolved_path": str(canonical_report.resolve()),
+    }
+
+
+def test_read_file_does_not_redirect_stale_agent_status_sibling(tmp_path: Path) -> None:
+    owner_home = tmp_path / "owners" / "local" / "main"
+    run_id = "subagent-123"
+    canonical_run_dir = (
+        owner_home / "tasks" / "day" / "short" / "work" / "agents" / run_id
+    )
+    canonical_run_dir.mkdir(parents=True)
+    canonical_report = canonical_run_dir / "final_report.md"
+    canonical_report.write_text("权威交接", encoding="utf-8")
+    projection = owner_home / "agents" / run_id / "state.json"
+    projection.parent.mkdir(parents=True)
+    projection.write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "agent_run_workspace_dir": str(canonical_run_dir),
+                "final_report_ref": str(canonical_report),
+            }
+        ),
+        encoding="utf-8",
+    )
+    stale_state = (
+        owner_home
+        / "tasks"
+        / "day"
+        / "stale"
+        / "work"
+        / "agents"
+        / run_id
+        / "state.json"
+    )
+    read_tool = ReadFileTool(owner_home, max_chars=2000, workspace_roots=[owner_home])
+
+    result = read_tool.execute({"path": str(stale_state)})
+
+    assert result.ok is False
+    assert result.error_code == "PATH_NOT_FOUND"
+
+
 def test_list_files_routes_internal_agent_status_dirs_to_agent_tree(tmp_path: Path):
     workspace = tmp_path / "workspace"
     internal = workspace / "tasks" / "2026-06-06" / "demo" / "work" / "agents" / "subagent-123"

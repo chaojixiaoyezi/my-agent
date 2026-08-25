@@ -8,11 +8,14 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 
 ## 2026-08-25 完成续片的操作事实与交接叶子
 
-- root lifecycle wake 是原 active turn 的后续工作片；其 carried tool index 必须恢复原派工的 typed
+- root lifecycle wake 是原 active turn 的后续工作片；child canonical attributes 与 completion wake 携带
+  exact `conversation_request_id`，carried tool index 按该 turn id 恢复原派工的 typed
   `tool_execution/tool_operation`。operation verification 仍要求 mutating call 同时满足 `ok=true` 与
-  `operation.status=succeeded`，不允许因索引缺字段降级后靠正文或前端补完成。
+  `operation.status=succeeded`，不允许因索引缺字段降级后靠正文或前端补完成。durable task id 只定位
+  workspace；新索引显式保存 turn id，旧索引仅以同值 `request_id` 精确兼容。
 - `work/agents/<run>/final_report.md` 是宿主从 canonical child result 生成的有界交接叶子，只含
-  task/run/status 与最终回复。完成信封可以把精确 ref 给直接父级，`read_file` 可读该叶子；同目录内部状态、
+  task/run/status 与最终回复。完成信封可以把精确 ref 给直接父级，`read_file` 可读该叶子；若请求保留
+  exact run id 但 task 目录过期，只按同 owner agent projection 解析 canonical ref 并重过读权限；同目录内部状态、
   list/shell 仍受 `WRONG_STATUS_SURFACE` 保护。报告是证据投影，不是第二份 lifecycle authority。
 
 ## 2026-08-25 普通前台续轮的完成输入

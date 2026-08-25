@@ -1,21 +1,28 @@
 # STATUS
 
-## 2026-08-25 child 完成后 Working 不收口与报告引用冲突（本地候选）
+## 2026-08-25 child 完成后 Working 不收口与报告引用冲突（第二层本地候选）
 
 - `.7` 长会话现场证明 child 已 `DONE`、root 已给最终回复，但 task link 仍 `active`，TUI 因而持续显示
   `Working · 等待后续事件`。这不是前端动画卡住：原始 `create_subagents` 外置结果有
   `tool_operation.status=succeeded`，耐久 index 却只剩 `ok=true`；后台续片把副作用派工判成 unverified，
   final runtime 落为 unfinished，所以 canonical link 合法地没有关闭。
-- 当前候选在首次归档前写入 host-owned `tool_execution/tool_operation`，外置大输出与短输出共用同一有界
+- `4106025` 已在首次归档前写入 host-owned `tool_execution/tool_operation`，外置大输出与短输出共用同一有界
   白名单，carried record 恢复 operation id/status/action/replay；仍禁止用工具正文或 `ok=true` 猜副作用成功。
   新增 background 回归已直接证明 child 终态续轮将 root link 写成 `completed`，operation verification 为
-  succeeded。
-- 完成信封要求模型“先读 `final_report_ref`”，旧 `read_file` 却把同一路径当内部状态拒绝。当前只开放宿主
+  succeeded，并已推送部署到 `.7` 单 Gateway。
+- 同一长 TUI `ma-97468f3-longchain-r27` 的下一轮真实返工证明还有第二层：foreground
+  `create_subagents` 索引行使用 exact request id，而 background wake 用 durable task id 查找，因此仍漏掉
+  已成功派工。当前候选从 child canonical attributes 把 exact `conversation_request_id` 放入 completion
+  wake，后台按该 turn id 恢复；新索引显式落字段，`4106025` 前的旧行只在 `request_id` 同值时精确兼容。
+- 完成信封已给出正确 `final_report_ref`，但同轮模型把 exact run id 与过期 durable task 目录重新拼接，
+  命中不存在路径。当前只开放宿主
   生成的精确 `work/agents/<run>/final_report.md`：它只含 task/run/status 与 child 最终回复；state、checkpoint、
-  summary、目录枚举和 shell 仍返回 `WRONG_STATUS_SURFACE`，不复制第二份报告、不恢复机器质量验收。
-- 5 个直接相关测试文件共收集 234 项，结果为 232 passed、2 个既有 xfailed；Ruff、doc-sync、strict
-  code-size、diff 与 clean-package 全通过。改动远低于 10,000 行，未跑全仓 pytest；推送、`.7` 单 Gateway
-  部署及原长 tmux 复验尚待完成。
+  summary、目录枚举和 shell 仍返回 `WRONG_STATUS_SURFACE`。错误 task 目录只有在同 owner agent projection
+  的 run id、canonical run dir、final ref 与读权限全部一致时才跳到这一个叶子；不复制第二份报告、不恢复
+  机器质量验收。
+- 5 个直接相关测试文件共收集 206 项，结果为 204 passed、2 个既有 xfailed；Ruff、doc-sync、strict
+  code-size、diff 与 clean-package 均通过。推送、`.7` 单 Gateway 部署及原长 tmux 复验尚待完成。改动远低于
+  10,000 行，按约定不跑全仓 pytest。
 
 ## 2026-08-25 同一长会话调研、追问、复刻与返工（TUI 交互修复待部署）
 
