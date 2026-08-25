@@ -1424,8 +1424,9 @@ def _format_compact_number(value: int) -> str:
 
 
 # LLM: Todo is a read-only projection. The header counts typed completed/running
-# states while the collapsed view is only a four-item window; neither changes ledger state.
-# 函数用途: 渲染真实完成/运行数和四行任务窗口；Ctrl-T 只负责展开或收起全部任务。
+# states and separately reports active child rows not represented by a visible Todo;
+# the collapsed view remains only a four-item window and never changes ledger state.
+# 函数用途: 渲染真实完成/运行数、未映射的运行中子代理提示和四行任务窗口；Ctrl-T 只负责展开或收起全部任务。
 def _render_todo(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedLine, ...]:
     items = block.metadata.get("items")
     if not isinstance(items, list) or not items:
@@ -1448,6 +1449,12 @@ def _render_todo(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedL
     title = f"📋 任务清单 · 完成 {completed_count}/{len(public_items)}"
     if in_progress_count:
         title += f" · 进行中 {in_progress_count}"
+    unrepresented_active_child_count = max(
+        0,
+        _safe_render_int(block.metadata.get("unrepresented_active_child_count")),
+    )
+    if unrepresented_active_child_count:
+        title += f" · 子代理运行中 {unrepresented_active_child_count}"
     if hidden_count:
         title += "（Ctrl+T 展开）"
     elif context.todos_expanded and len(public_items) > TODO_COLLAPSED_MAX_ITEMS:
@@ -1988,8 +1995,9 @@ def _render_input_status(
 # LLM: Todo is selected from the one reducer-owned task_progress block and may
 # overlay exact direct-child statuses for display. Auto-seeded items whose id is
 # an exact visible child run id are omitted because the coordinator panel owns
-# those rows; the canonical ledger remains unchanged.
-# 函数用途: 生成输入框上方的用户任务清单，隐藏与下方子代理面板重复的自动派工项，并原位更新关联状态。
+# those rows; active children without an explicit visible Todo link remain a
+# separate header count. The canonical ledger remains unchanged.
+# 函数用途: 生成输入框上方的用户任务清单，隐藏与下方子代理面板重复的自动派工项，原位更新关联状态，并提示仍在运行的额外子代理。
 def _render_fixed_todo(
     snapshot: TuiViewSnapshot,
     context: TuiRenderContext,
@@ -2029,9 +2037,23 @@ def _render_fixed_todo(
             and str(item.get("id") or "").strip() in child_run_ids
         )
     ]
+    visible_item_ids = {
+        str(item.get("id") or "").strip()
+        for item in visible_items
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    }
+    unrepresented_active_child_count = _unrepresented_active_child_count(
+        child_rows,
+        visible_item_ids,
+    )
+    projected_metadata = {
+        **todo.metadata,
+        "items": visible_items,
+        "unrepresented_active_child_count": unrepresented_active_child_count,
+    }
     if not statuses:
         return _render_todo(
-            replace(todo, metadata={**todo.metadata, "items": visible_items}),
+            replace(todo, metadata=projected_metadata),
             context,
         )
     projected = [
@@ -2041,7 +2063,7 @@ def _render_fixed_todo(
         for item in visible_items
     ]
     return _render_todo(
-        replace(todo, metadata={**todo.metadata, "items": projected}),
+        replace(todo, metadata={**projected_metadata, "items": projected}),
         context,
     )
 
@@ -2098,6 +2120,38 @@ def _todo_child_statuses(
         for item_id in dict.fromkeys(([run_id] if run_id else []) + progress_ids):
             collected.setdefault(item_id, []).append(status)
     return {key: tuple(values) for key, values in collected.items()}
+
+
+# LLM: This count uses only canonical active child statuses and explicit
+# progress_item_ids. It describes display coverage and must never infer a Todo link
+# from child names, goals, descriptions or run output.
+# 函数用途: 统计仍在运行但没有映射到当前可见 Todo 项的直属子代理，避免清单全勾时误显得已经停工。
+def _unrepresented_active_child_count(
+    rows: list[dict[str, object]],
+    visible_item_ids: set[str],
+) -> int:
+    count = 0
+    for row in rows:
+        if str(row.get("status") or "").strip().upper() not in {
+            "PLANNING",
+            "PENDING",
+            "RUNNING",
+        }:
+            continue
+        raw_progress_ids = row.get("progress_item_ids")
+        progress_ids = (
+            {
+                str(value).strip()
+                for value in raw_progress_ids
+                if str(value or "").strip()
+            }
+            if isinstance(raw_progress_ids, list | tuple)
+            else set()
+        )
+        if progress_ids & visible_item_ids:
+            continue
+        count += 1
+    return count
 
 
 # LLM: The coordinator panel consumes only child rows from the removable

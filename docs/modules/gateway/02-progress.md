@@ -1,6 +1,16 @@
 # Gateway Progress
 
-## 2026-08-25 普通前台续轮补入子代理完成信封（workspace-lineage 修正中）
+## 2026-08-25 有效提交恢复 follow-tail（本地候选）
+
+- 同一长 session 的最终回复已经进入 ConversationStore，但 TUI footer 仍显示 `Jump to bottom`；根因是
+  `TuiTranscriptControl` 的条件跟随本身正确，输入提交入口却没有像 终端交互 `REPL.tsx::repinScroll`
+  那样把一次用户主动提交定义成 return-to-live。此前上翻/视图切换留下的 `follow=false` 会一直保留，用户
+  因而看不见自己刚发出的消息和新回复。
+- 当前候选只在非空、未超限、且没有被终态 child 只读门拒绝的提交上调用当前 transcript view 的唯一
+  `end()`；main/child 各自 viewport 不合并，被动到达的新消息仍不会抢用户阅读位置。focused 已覆盖回底、
+  follow flag 与 canonical enqueue 同时发生，待 `.7` 唯一 Gateway 真 TUI 复验。
+
+## 2026-08-25 普通前台续轮补入子代理完成信封（已部署真 TUI）
 
 - `.7` 原长会话证明 completion observation 与后台 wake 都有十名直属 child 的最终回复和 refs，但普通
   TUI 追加消息时 `_gateway_conversation_context` 只恢复 transcript/artifact/workspace，模型因此又猜
@@ -8,12 +18,16 @@
 - `24940a6` 首次部署后真实模型仍发出八次 `find_files`。现场结构化事实说明：普通追加轮会为同一工作目录
   创建新 task id，第一版把这个最新 id 误当原 child root，所以 completion 过滤为空；不是模型无视已注入
   数据。该轮已 Esc 停止。
-- 当前修正复用同一 ConversationStore observation，不新增消息或状态源。它按同 thread、非 detached
+- `999a621` 复用同一 ConversationStore observation，不新增消息或状态源。它按同 thread、非 detached
   task link 的 exact canonical task path 形成 workspace lineage，再要求 event root 位于 lineage 且
   parent 等于该 root；按 child task id 取最新终态，最多注入 12 项并保留 omitted_count。投影只含公开
   completion 字段；内部 runner/output JSON、孙代理、其它 workspace 与 Audit prepare 都被隔离。
-- 定向回归覆盖 follow-up task-id 换代、最新终态去重、范围隔离、敏感字段隐藏和 12 项有界视图。仍待
-  重新严格 gate、推送部署及同一真实长会话复验。
+- 定向回归覆盖 follow-up task-id 换代、最新终态去重、范围隔离、敏感字段隐藏和 12 项有界视图。119 项
+  focused 与本地严格 gate 通过，提交已推送并部署 `.7` 唯一 Gateway。
+- tmux `ma-41d5a4a-terminal-fix-r26` 的原长 session 在 workspace 已换多次 follow-up task id 后，普通中文
+  续轮仍收到十份 completion，模型明确按信封内容完成八项目整合且没有目录搜索；随后两条小续轮继续
+  复用同一 session 且零工具调用。`final_report_ref` 仍指向会被 Read 安全层拒绝的内部状态面，这是独立
+  合同缺口；本轮以有界 completion 正文完成，不将它误报为详情引用已通过。
 
 ## 2026-08-24 child guidance 排队/消费两阶段回执（本地候选）
 

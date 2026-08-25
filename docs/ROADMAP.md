@@ -20,20 +20,15 @@
 来自 STATUS.md，子代理可进入视图、精确控制以及插话排队/公开回复已转入 COMPLETED；当前继续正式矩阵与
 仍缺直接自然样本的生命周期分支。
 
-### 会话运行时 式完成信封进入普通前台续轮
+### 子代理完成详情引用与安全状态面一致化
 
-状态：`24940a6` 首次真 TUI 复验抓到 follow-up task-id 换代，workspace-lineage 修正本地待 gate
+状态：设计中；普通续轮 completion 正文已由 `999a621` 真 TUI 验证，详情 ref 边界待收口
 
-解决问题：child 完成信封已经写入 ConversationStore，后台 lifecycle wake 能看到，但用户在同一 TUI
-追加普通消息时，Gateway 只恢复聊天历史、产物和 workspace，没有把这些 typed completion 输入放回模型
-上下文。主代理因此明明在底栏看到全部 DONE，仍猜 `child_outputs`、遍历内部目录，甚至误报只收到部分
-结果。首次部署只用最新 workspace task id 选 root，但每次普通追加都会生成新 turn/task id，因此仍漏掉
-原调研 root，真机再次出现八次 `find_files` 后已由 Esc 停止。当前修正对照 会话运行时 的 inter-agent
-completion message：用同 thread 非 detached task link 的 exact canonical task path 形成 workspace
-lineage，再从观察账本提取这些 root 的直属 child 最新终态，最多展开 12 份最终回复与精确 refs；其它
-workspace、孙代理、内部
-`runner_result_json/output_json` 和 named Audit prepare 全部隔离。部署后必须恢复原长会话，证明模型直接
-整合已有十名 child 结果而不再搜索内部路径，再继续用户指定的长链追加任务。
+解决问题：普通前台续轮现在能直接收到并整合直属 child 的有界 `completion_message`，不再猜目录；但模型
+若按信封里的 `final_report_ref` 深挖完整报告，当前 `Read` 会把该路径识别为内部 agent 状态面并拒绝。
+后续应在不暴露 runner/result 内部载荷的前提下，让模型可见的详情引用指向一个真实可读、按 exact
+root/parent/run 授权的公开投影，或者不再向模型宣称该内部引用可直接读取。不能靠放宽整个状态目录权限
+解决，也不能复制出第二份生命周期事实源。
 
 ### 会话运行时 式同一父级分批创建
 
@@ -120,17 +115,21 @@ working_dir 全部保持 `/root/dsh-tui-p2-993ce4f`，最终 `bbb/` 产物齐全
 
 ### TUI 活动状态、跟随滚动与 Compact 真机复验
 
-状态：直属 child 活动区已部署并完成真实 TUI smoke；其余交互矩阵和 process-local lane 自愈待验证
+状态：直属 child 活动区已部署并完成真实 TUI smoke；submit 回底与 Todo 额外 child 提示为本地候选，
+其余交互矩阵和 process-local lane 自愈待验证
 
 解决问题：旧 TUI 在长任务运行时把普通 Enter 当成下一轮队列，用户补充消息要等当前任务结束才执行；
 queue preview 又位于可滚动 transcript，离开尾部后看不见。并行实验室若完成后长期空闲，也会浪费四路
 换时间的测试目标。
 
 当前进展：ordinary input 和控制操作已使用稳定 message/operation ID、exact expected turn、持久 outbox、
-accepted/rejected/unknown 三态和 GET-only reconciler。2026-08-20 的灰色思考、灰色 `Ctrl+O` 提示、
+accepted/rejected/unknown 三态和 GET-only reconciler。对照 终端交互 `repinScroll` 的本地候选把一次有效
+用户提交定义为 return-to-live：当前 main/child viewport 立即回底并恢复 follow；被动新输出继续不抢用户
+上翻位置。Todo 全部打钩但仍有未映射的 typed active child 时，标题只读补充“子代理运行中 N”，不修改
+账本或猜任务关系。2026-08-20 的灰色思考、灰色 `Ctrl+O` 提示、
 tmux 左键复制已部署 `.7`；右键直接复制仍是本地候选。2026-08-21 本地又补齐 Working 动画、仅在用户
 原本位于页底时自动跟随、后续 thinking 增量持续显示，以及 typed Compact 活动块和 5/15/52/78/92/100
-阶段进度。输入后续消息时也会保留可见回执；离开页底浏览历史时不会被强拉回去。
+阶段进度。输入后续消息时也会保留可见回执；只有被动更新保持离底，用户实际提交会明确回到底部。
 真实植物大战僵尸复验又暴露同 thread 旧后台 run 错挂新任务权威链、后台 notice 复用 block id 被丢、
 用户目录只写在 child goal 而未进入结构化权限，以及创建后周期性 LLM 巡场。当前已改为 task-bound
 后台 run、notice 立即/每秒独立块、`items[].output_files` 完整 schema，并删除自动巡场与 wait 工具；

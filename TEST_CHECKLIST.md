@@ -2,7 +2,7 @@
 
 ## 子代理 TUI 插话与容量
 
-- [ ] `.7` 唯一 Gateway 的 fresh TUI 中，完成 child 即使留下旧 `current_tool` 也只显示终态，详情工具/思考
+- [x] `.7` 唯一 Gateway 的 fresh TUI 中，完成 child 即使留下旧 `current_tool` 也只显示终态，详情工具/思考
   动画全部封口，耗时冻结在 canonical `ended_at`；父级收到 `completion_message` 和精确 refs 后不再搜索
   `child_outputs` 或内部 runner 文件。停止 root 后同一 TUI 追加汇总消息，即使 workspace task id 已换成
   新 follow-up id，也须按 exact canonical task-path lineage + root/direct parent 收到全部最新 completion；
@@ -21,6 +21,12 @@
   常驻 footer 显示应用内“拖选/右键复制”和 `F6 原生模式`，切换后改为 `F6 恢复滚轮`。
 - [x] 历史累计 child 超过八项时，`↑/↓` 选择窗口必须滚入 exact 选中项并显示 `›`；`Enter` 进入的 run id
   与屏幕高亮一致，renderer 的八行裁剪不得把选中项藏在省略提示后。
+- [ ] main/child 页面主动上翻时，被动新输出继续保留阅读位置；一旦提交一条通过输入校验的真实消息或命令，
+  当前 viewport 必须立即回到底部并恢复 follow，让用户看见自己的消息和下一轮输出。空输入、超限输入和
+  终态 child 拒绝不得改变滚动位置。
+- [ ] Todo 的 canonical 项全部完成但仍有未显式映射到可见 Todo 的 typed active child 时，标题显示
+  `子代理运行中 N`；有 exact `progress_item_ids` 的 child 仍只原位更新对应 Todo，展示层不得重开账本或按
+  child 名称/goal/输出猜关系。
 
 - [x] 工具运行时改动相关 focused tests 通过（Schema/runtime/protocol/policy/executor/ledger/output/concurrency/cancel/compact 矩阵）；其他并行模块仍按各自条目验收。
 - [x] 默认可恢复工具失败只返回当前模型返工，不按同类失败次数结束 turn；同一批后到的同工具成功会

@@ -1,6 +1,19 @@
 # Subagent Progress
 
-## 2026-08-25 终态交接、活动收口与宽搜索止损（已部署，前台续轮补丁待复验）
+## 2026-08-25 同一 session 的多阶段调研、复刻与返工
+
+- `ma-41d5a4a-terminal-fix-r26` 在同一 durable session 连续完成十名 child 调研整合、两条零工具追问、
+  5 名 child 的 Python→TypeScript 复刻、零工具缺口审计和 5 名 child 的返工；父级每次都由 ordinary
+  follow-up 续接，没有重新开 TUI/session，也没有猜 child 产物目录。
+- 第一轮 5 名 child 全部完成且两条 child thread 分别提交 generation 1/2 Compact，但 root 对尚未启动的
+  TUI、空 `--version` 和缺失真实 Git 集成作了过早 11/11。普通用户追问使模型明确撤回并列出 6 个缺口，
+  后续返工重新派 5 名 child、全部自然完成，最终得到可启动 TUI、version/help、真实 Git 路径和 152 项测试。
+  这证明质量分歧适合回给模型返工，不需要恢复宿主机器质量裁判。
+- 返工期间 Todo 先到 6/6、最后一名 residual child 仍在运行；canonical 账本没有错误，只是 auto-seeded child
+  项被下方面板去重。当前展示候选因此只按 typed status/explicit progress ids 在标题补充
+  `子代理运行中 N`，不重开 Todo、不解析职责正文。
+
+## 2026-08-25 终态交接、活动收口与宽搜索止损（已部署真 TUI）
 
 - 对照 会话运行时 `AgentStatus::Completed(last_agent_message)` 后，递归父级的
   `direct-children-context.v2` 与根会话 completion wake 统一携带同一个
@@ -21,7 +34,9 @@
   并兼容只转发右键 release 的 SSH/tmux/终端组合。
 - `41d5a4a` 的 200 项直接 focused 与严格 gate 已通过并部署 `.7` 唯一 Gateway；公开 tmux
   `ma-41d5a4a-terminal-fix-r26` 已证明 root/终态 child 历史、终态封口、冻结耗时和停止工作。普通前台
-  completion 注入仍须发布后在该长会话证明；外层系统剪贴板仍由用户 attach 验证。
+  completion 注入随后由 `999a621` 按 workspace lineage 修正，119 项 focused/严格 gate 后推送部署；
+  同一长 session 的普通中文续轮收到十份 child 最终回复、直接整合且不再搜索目录。外层系统剪贴板仍由
+  用户 attach 验证，内部 `final_report_ref` 的可读投影另列 ROADMAP，不与完成正文混为一项。
 
 ## 2026-08-24 子代理插话排队与公开回复（本地候选）
 

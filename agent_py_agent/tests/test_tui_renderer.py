@@ -1064,6 +1064,73 @@ def test_todo_panel_gateway_event_payload_keeps_task_progress_items() -> None:
     assert any("analysis" in fragments_text(line) for line in frame.agent_lines)
 
 
+def test_todo_header_reports_active_child_not_represented_by_visible_items() -> None:
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime, TuiTurnEventAdapter
+
+    store = TuiStateStore()
+    runtime = TuiRuntime("todo-extra-child", store=store)
+    adapter = TuiTurnEventAdapter(runtime, "req-extra-child")
+    assert adapter.on_gateway_event(
+        {
+            "kind": "tool_progress",
+            "progress": {
+                "tool": "task_progress",
+                "round": 1,
+                "call_index": 0,
+                "phase": "finished",
+                "status": "completed",
+                "ok": True,
+                "handler_executed": True,
+                "task_progress_items": [
+                    {"id": "verify", "title": "完成验收", "status": "done"},
+                    {"id": "report", "title": "完成汇报", "status": "done"},
+                    {
+                        "id": "child-residual",
+                        "title": "修复残留构建问题",
+                        "status": "in_progress",
+                    },
+                ],
+            },
+        }
+    )
+    runtime.update_background_activity(
+        1,
+        subagents=[
+            {
+                "run_id": "child-residual",
+                "name": "build-fixer-5",
+                "status": "RUNNING",
+                "progress_item_ids": [],
+            }
+        ],
+    )
+
+    frame = render_tui_snapshot(store.snapshot(), TuiRenderContext(width=100))
+    todo_text = "\n".join(fragments_text(line) for line in frame.todo_lines)
+
+    assert "完成 2/2 · 子代理运行中 1" in todo_text
+    assert "修复残留构建问题" not in todo_text
+    assert any("build-fixer-5" in fragments_text(line) for line in frame.agent_lines)
+
+    runtime.update_background_activity(
+        1,
+        subagents=[
+            {
+                "run_id": "child-residual",
+                "name": "build-fixer-5",
+                "status": "RUNNING",
+                "progress_item_ids": ["verify"],
+            }
+        ],
+    )
+    linked_frame = render_tui_snapshot(store.snapshot(), TuiRenderContext(width=100))
+    linked_text = "\n".join(
+        fragments_text(line) for line in linked_frame.todo_lines
+    )
+    assert "完成 1/2 · 进行中 1" in linked_text
+    assert "子代理运行中" not in linked_text
+
+
 def test_todo_panel_empty_items_renders_nothing() -> None:
     from agent_py_agent.cli.chat_parts.tui_block_renderer import TuiBlockRenderCache
     from agent_py_agent.cli.chat_parts.tui_view_model import TuiBlock

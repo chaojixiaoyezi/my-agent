@@ -68,6 +68,10 @@
   去重后有界注入 `completion_message/final_report_ref/declared_output_refs/artifact_refs`；不得把
   `runner_result_json/output_json` 或内部状态路径带入模型，也不得从用户正文猜父子关系。named Audit prepare
   与其它 root/sibling 继续隔离。这个投影只提供整合输入，不改变 child/root 的完成、权限或验收状态。
+- 模型可见的 completion 详情 ref 必须与工具读取边界一致：要么解析到按 exact
+  `root_task_id/parent_agent_id/run_id` 授权的只读公开投影，要么不向模型宣称它可以读取。禁止把内部
+  agent 状态路径作为可操作 ref 暴露后再由 `Read` 拒绝，也禁止为绕过拒绝而开放整个 runner 状态目录。
+  `completion_message` 仍是有界主链输入，公开详情只补深挖能力，不复制生命周期或完成事实源。
 - 会话运行时 式 cwd 与运行台账严格分离：Gateway/会话及其所有后代的普通相对路径统一从用户启动时的项目
   cwd 解析；隐藏 task root 只保存状态，只有显式 `work/...`、`output/...` 才进入内部任务命名空间。
   `allowed_write_roots` 只决定能否写，不能反向选择 cwd；只有宿主写入的 `execution_cwd` 可覆盖工具
@@ -191,7 +195,9 @@
 - TUI 输入的 Up/Down 必须先依据输入 Window 的真实显示宽度和 Unicode cell width 在软折视觉行间移动，
   到视觉顶/底后才能进入逻辑换行、queue 或 history；不能只按 `\n` 判定。手动离开 transcript 尾部后，
   `N new messages ↓` 是带 typed mouse handler 的按钮，左键释放与 Ctrl-End 共用 `move_end()` 恢复 follow-tail，
-  不从显示文字反向解析未读状态。
+  不从显示文字反向解析未读状态。被动到达的新输出不得抢走用户正在阅读的位置；但一次通过长度/只读门的
+  真实用户提交是明确的 return-to-live 动作，必须对当前 main/child viewport 调用同一 `end()`，让这条用户
+  消息和后续回复立即可见。空输入、超限消息与终态 child 的拒绝输入不能借此改变滚动位置。
 - 工具是否展示给模型与能否执行必须共用一次 `ToolRegistry.runtime_snapshot`。像 `send_message` 这类依赖
   当前 owner 外部通道的工具，availability 必须在每轮用结构化 provider/target/root/capability 判定；没有
   proactive route 时从 schema、tool search 和调用快照同时移除，但实现仍留在唯一 registry。不能先暴露
@@ -1024,8 +1030,10 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   usage 和 child activity 均不得覆盖 main/child 的 durable 投影。r6 的 74.4k→9.7k 且 `compact 0`
   正是表达轮污染，不是一次真实 Compact。
 - Todo 标题只从 canonical typed status 计算 `完成 X/Y` 与可选 `进行中 Z`；四行 collapsed window 只在
-  有隐藏项时显示 `Ctrl+T 展开`，不得再用 `4/8` 表示可见行数。该选择对照 终端交互 `TaskListV2` 的
-  done/in-progress/pending 分组，同时保留本项目固定四行窗口，不写回账本。
+  有隐藏项时显示 `Ctrl+T 展开`，不得再用 `4/8` 表示可见行数。直属 child 若仍处于 typed
+  `PLANNING/PENDING/RUNNING`、却没有 explicit `progress_item_ids` 映射到当前可见 Todo，标题另显示
+  `子代理运行中 N`；它只解释下方面板为何还在工作，不能重开/改写 Todo，也不能从名称、goal 或输出猜映射。
+  该选择对照 终端交互 `TaskListV2` 的 done/in-progress/pending 分组，同时保留本项目固定四行窗口，不写回账本。
 - Prompt 4 r7 证明“Todo 全打钩 + 弱测试全绿 + model natural final”仍可能建立在被主动降级的证据上：
   main 最初把完整复刻拆成“空壳可导入/最小欢迎页”，`pip install -e .` 与真实 app 构造失败后，又删除
   能暴露启动缺依赖的 `test_app_instantiation` 并把其余断言降成存在性检查，最后宣称完整可运行。对照

@@ -93,7 +93,12 @@ audit Agent 为空而回退 daemon cwd。
   完成裁决权。
 - Todo 默认是四条状态窗口：最近完成、全部当前运行项和下一待办按优先级占位，超出部分由 `Ctrl+T`
   展开。运行项复用 Working 的全局动画帧；该本地展开状态不写回账本。常驻 Context 只显示总量、窗口占比、
-  已提交 Compact 次数和明确命名的自动压缩点，prompt/messages/tools 的协议构成留在 `/context`。
+  已提交 Compact 次数和明确命名的自动压缩点，prompt/messages/tools 的协议构成留在 `/context`。若下方
+  coordinator panel 仍有 typed active child、但它没有 explicit progress id 映射到可见 Todo，标题单独显示
+  `子代理运行中 N`；该数字不进入 Todo 完成数、不写回 ledger，也不从展示文案猜关联。
+- transcript 的 `follow` 仍是每个 main/child viewport 的 process-local 展示状态：被动事件仅在原本位于尾部
+  时自动推进，用户上翻后保留阅读位置。一次通过输入长度与 child 只读检查的真实提交则复用唯一 `end()`
+  显式 return-to-live；无效输入不能移动 viewport，命令/消息也不创建第二个滚动事实源。
 
 ## 回合终态与 Compact 进度投影
 

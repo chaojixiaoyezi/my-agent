@@ -4,12 +4,18 @@
 
 最近收口重点：
 
+- 2026-08-25 `999a621` 把 `subagent-completion.v1` 接入普通 Gateway follow-up，并按同 thread、非 detached
+  task link 的 exact canonical task path 建立 workspace lineage，避免新 follow-up task id 切断原 root
+  child 结果。119 项 focused 与本地严格 gate 通过，已推送并部署 `.7` 唯一 Gateway。原长 session tmux
+  `ma-41d5a4a-terminal-fix-r26` 的普通中文续轮收到十份 completion、直接完成八项目整合且零目录搜索；
+  后续两条小任务仍复用同一 session 且零工具调用。内部 `final_report_ref` 的安全可读投影仍留在 ROADMAP。
+
 - 2026-08-25 `41d5a4a` 对照 会话运行时 terminal child 完成消息收口三处底座：统一根/递归父级的
   `subagent-completion.v1` 最终回复与 refs，隐藏内部 runner 文件；`search_text` Python fallback 流式返回并
   受 20,000 文件/10 秒与 cancellation 约束；TUI 终态优先关闭陈旧工具动画、冻结耗时，并兼容 SSH/tmux
   只转发右键 release 的复制序列。200 项 focused 与本地严格 gate 通过，已推送并部署 `.7` 唯一 Gateway。
-  tmux `ma-41d5a4a-terminal-fix-r26` 已证明主/子历史、终态显示和 Esc 停止；该现场另发现普通前台续轮未
-  注入已落盘 completion observation，作为下一切片进入 ROADMAP，不把未验证补丁写成已完成。
+  tmux `ma-41d5a4a-terminal-fix-r26` 已证明主/子历史、终态显示和 Esc 停止；该现场另发现的普通前台续轮
+  completion 漏接已由上面的 `999a621` 收口。
 
 - 2026-08-24 `2bf4602` 修复运行中 child 插话“HTTP 接受后立即消失、模型只在 thinking 里理人”的合同
   错位：Gateway 接受只表示 `queued/pending`，child TUI 继续显示 exact pending；provider 成功消费后才以

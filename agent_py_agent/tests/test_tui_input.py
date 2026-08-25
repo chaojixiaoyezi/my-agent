@@ -337,6 +337,55 @@ def test_submit_expands_hidden_paste_but_keeps_placeholder_for_display(monkeypat
     assert interaction.capture_draft("", 0).pasted_text_refs == ()
 
 
+def test_successful_submit_repins_transcript_before_enqueue(monkeypatch) -> None:
+    input_area = TextArea(multiline=True)
+    input_area.text = "继续检查真实结果"
+    captured: dict[str, object] = {}
+    transcript_area = SimpleNamespace(end_calls=0)
+    transcript_area.end = lambda: setattr(
+        transcript_area,
+        "end_calls",
+        transcript_area.end_calls + 1,
+    )
+    monkeypatch.setattr(tui_keybindings, "_handle_command_params", lambda _params, _text: None)
+    monkeypatch.setattr(tui_keybindings, "_tui_handle_command", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        tui_keybindings,
+        "_tui_submit_active_turn_input",
+        lambda _params, _text, *, display_text: False,
+    )
+    monkeypatch.setattr(
+        tui_keybindings,
+        "_tui_enqueue_job",
+        lambda _params, text, *, display_text=None: captured.update(
+            text=text,
+            display_text=display_text,
+        ),
+    )
+    params = SimpleNamespace(
+        input_area=input_area,
+        transcript_area=transcript_area,
+        transcript_follow_ref=[False],
+        interaction_state=TuiInteractionState(),
+        exit_armed_at_ref=[0.0],
+        eof_armed_at_ref=[0.0],
+        escape_armed_at_ref=[0.0],
+        escape_armed_text_ref=[""],
+    )
+
+    tui_keybindings._submit_input_area(
+        SimpleNamespace(app=SimpleNamespace(exit=lambda: None)),
+        params,
+    )
+
+    assert captured == {
+        "text": "继续检查真实结果",
+        "display_text": "继续检查真实结果",
+    }
+    assert transcript_area.end_calls == 1
+    assert params.transcript_follow_ref == [True]
+
+
 def test_gateway_btw_enters_durable_control_outbox_with_exact_turn() -> None:
     runtime = TuiRuntime("control-submit")
     captured: list[object] = []

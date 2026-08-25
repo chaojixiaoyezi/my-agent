@@ -1,19 +1,39 @@
 # STATUS
 
-## 2026-08-25 子代理完成交付进入普通前台续轮（workspace-lineage 修正中）
+## 2026-08-25 同一长会话调研、追问、复刻与返工（TUI 交互修复待部署）
+
+- tmux `ma-41d5a4a-terminal-fix-r26` 在同一 durable session 完成“十名 child 调研整合 → 两条无工具小追问 →
+  五名 child 把既有 Python `lazygit-clone` 迁成 TypeScript → 无工具验收追问 → 五名 child 返工”的连续链路；
+  每一步都由普通中文 TUI 输入触发，没有测试者替被测对象改产物。
+- 第一轮复刻虽然 5 名 child 全部完成、两名 child 分别真实 Compact 1/2 次，root 却在 TUI/`--version`/真实
+  Git 集成尚未验证时宣称 11/11。下一条普通追问没有调用工具，模型自行列出 6 个缺口；再下一条返工把
+  0/6 重新推进到 6/6，追加 5 名 child 全部完成，最终构建可启动 TUI、version/help、真实 Git 链和
+  6 个测试文件 152 项测试。危险清理命令被安全门拒绝后，模型改用不删除的临时目录继续，不会硬停整轮。
+- 新 follow-up 的 provider context 从约 100k 降到 38.6k，但 canonical thread 仍是
+  `compact_generation=0` 且没有 checkpoint/summary；这是上一 active turn 的易失工具/思考片段未进入普通
+  durable follow-up，不是一次未记账 Compact。child 的 generation 1/2 仍按各自独立 thread 正确显示。
+- 本地候选对照 终端交互 `REPL.tsx::repinScroll`：有效提交会把当前 main/child 页面恢复到尾部，随后继续
+  follow；被动新输出仍不抢用户上翻位置。Todo 若已显示全完成但仍有未映射的 typed active child，标题只读
+  追加“子代理运行中 N”，不修改 canonical Todo。相关 TUI focused 已通过，待 `.7` 单 Gateway 真 TUI 复验。
+
+## 2026-08-25 子代理完成交付进入普通前台续轮（已部署真 TUI）
 
 - `.7` 真 TUI 已证明 child 的 `subagent-completion.v1` observation 和后台 wake 完整，缺陷只在普通
   Gateway 后续轮：模型没收到完成信封，因而猜目录并误判部分 child 没有产物。
 - `24940a6` 已通过 119 项 focused/严格 gate、推送部署唯一 Gateway，但真 TUI 暴露普通追加轮会把
   `ConversationThread.workspace_task_id` 推进到新的 follow-up task id；该 id 没有原始调研 child，所以
   第一版仍漏接并触发八次 `find_files`。该轮已 Esc 停止，不计通过。
-- 当前修正从同一 ConversationStore 先按同 thread、非 detached task link 的 exact canonical task path
+- `999a621` 从同一 ConversationStore 先按同 thread、非 detached task link 的 exact canonical task path
   建立 workspace lineage，再要求 completion event 的 root 位于 lineage 且 parent 等于该 root。最多注入
   12 项最新回复和精确 refs；其它 workspace、孙代理、Audit prepare 与内部
   `runner_result_json/output_json` 全部隔离。它不新增状态源、不改变完成/权限/验收。
 - 定向回归增加“workspace 已切到新 follow-up task id，仍接回原 root child”的现场反例，并继续覆盖同 child
-  失败后成功取最新、兄弟 workspace/孙代理隔离、内部 payload 隐藏和 Audit prepare 隔离。仍待重新 gate、
-  推送部署及原长会话复验。
+  失败后成功取最新、兄弟 workspace/孙代理隔离、内部 payload 隐藏和 Audit prepare 隔离。119 项
+  focused 与本地严格 gate 通过，提交已推送并部署到 `.7` 唯一 Gateway。
+- 原长会话 tmux `ma-41d5a4a-terminal-fix-r26` 的普通中文续轮实际收到十份 completion，并直接完成八项目
+  横向整合，没有再次调用目录搜索；随后两条普通 follow-up 均在同一 session 回复且没有工具调用。模型
+  尝试读取信封中的内部 `final_report_ref` 时仍被状态面安全边界拒绝，但有界 `completion_message` 足以完成
+  本轮整合；后续须把“可向模型展示的详情引用”和“禁止直接读取的内部状态路径”收为一致合同。
 
 ## 2026-08-24 子代理普通插话排队与正文回复（`.7` 真 TUI 已通过）
 

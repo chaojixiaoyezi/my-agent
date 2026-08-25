@@ -372,8 +372,8 @@ def _handle_enter_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
     _submit_input_area(event, params)
 
 
-# LLM: 提交入口统一保存历史、执行 typed command 或进入 canonical queue；补全 Enter 也必须复用它。
-# 函数用途: 提交当前输入框内容，并在命令未消费时创建一个聊天任务。
+# LLM: 提交入口统一恢复 transcript follow-tail、保存历史、执行 typed command 或进入 canonical queue；补全 Enter 也必须复用它。
+# 函数用途: 提交当前输入框内容，先回到最新对话，再在命令未消费时创建一个聊天任务。
 def _submit_input_area(event, params: TuiCreateKeybindingsParams) -> None:
     if _replace_trailing_backslash_with_newline(params.input_area):
         return
@@ -397,6 +397,7 @@ def _submit_input_area(event, params: TuiCreateKeybindingsParams) -> None:
         event.app.invalidate()
         return
     if text == "/back" and _navigate_agent_back(params):
+        _repin_transcript_after_submit(params)
         _remember_input(params.input_area, text)
         _set_input_draft(params, TuiDraft("", 0))
         _reset_exit_arms(params)
@@ -414,6 +415,7 @@ def _submit_input_area(event, params: TuiCreateKeybindingsParams) -> None:
         )
         event.app.invalidate()
         return
+    _repin_transcript_after_submit(params)
     _remember_input(params.input_area, text)
     _set_input_draft(params, TuiDraft("", 0))
     _reset_exit_arms(params)
@@ -447,6 +449,15 @@ def _submit_input_area(event, params: TuiCreateKeybindingsParams) -> None:
         return
     _tui_enqueue_job(params, text, display_text=display_text)
     _restore_stash_after_submit(params)
+
+
+# LLM: A valid user submit is an explicit return-to-live action like 终端交互's
+# repinScroll; it may change viewport state only and must not publish transcript data.
+# 函数用途: 用户真正发出消息或命令时跳到当前代理页面底部，并恢复后续输出自动跟随。
+def _repin_transcript_after_submit(params: TuiCreateKeybindingsParams) -> None:
+    if getattr(params, "transcript_area", None) is None:
+        return
+    _scroll_transcript_end(params)
 
 
 # LLM: Tab 只接受当前候选、不执行命令；候选不存在时保留默认的字面 tab 抑制行为。
