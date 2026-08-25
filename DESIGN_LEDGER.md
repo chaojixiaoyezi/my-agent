@@ -1553,7 +1553,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   在“原生复制/恢复滚轮”间真实切换；输入框拖选“中文复制验证ABC”后 tmux buffer 得到完整 9 字符，右键
   再次复制结果相同。外层 macOS 系统剪贴板仍只能由用户 attach 后亲自粘贴确认，不能由 tmux 证据冒充。
 
-## 2026-08-24 单 Gateway HTTP 有界复用工作池【状态：本地候选，待 `.7` 真 TUI 验收】
+## 2026-08-24 单 Gateway HTTP 有界复用工作池【状态：`53498c1` 已部署 `.7` 真 TUI】
 
 - 解决问题：唯一 Gateway 被 OOM killer 杀死后，新 TUI 只能短暂显示“正在连接 Gateway”再退出。内核事实
   证明被杀进程 RSS 约 6.68 GB；现场 8 个长期 TUI 以活动态 1 秒/空闲态 5 秒轮询，而标准库
@@ -1577,3 +1577,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 固定 worker 按 TCP connection 执行 stdlib handler，因此所有 JSON/metrics 响应显式
   `Connection: close`；否则一个客户端只需保留 16 条空闲 HTTP/1.1 keep-alive 就能占满全部工位。当前 TUI
   本来就是短轮询，这一边界只牺牲无用的连接复用，不改变 session、历史、模型 turn 或 owner 状态。
+- 验收：40 项 focused 和本地严格 gate 通过；`.7` 唯一 Gateway PID `604186` 下，旧 TUI 自动重连，fresh
+  `ma-53498c1-http-pool-r24` 约 1 秒启动并完成 MiniMax-M2.7 真调用。9 个 TUI 自然轮询时只创建 5 个
+  `gateway-http_*` worker、旧 request thread 为 0，12 秒 RSS 约 132.7 -> 131.7 MB。该证据只证明当前
+  有界实现与短时稳定，不把 12 秒观察写成长期内存无泄漏结论。

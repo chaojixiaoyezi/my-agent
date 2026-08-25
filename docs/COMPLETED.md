@@ -4,6 +4,15 @@
 
 最近收口重点：
 
+- 2026-08-24 `53498c1` 修复唯一 Gateway 被多 TUI 轮询拖到 6.68 GB 后遭 OOM kill、fresh TUI 只显示
+  “正在连接 Gateway”便退出的问题：按 会话运行时 固定执行者/容量 128 背压原则，将 thread-per-request 换成
+  16 个复用 daemon worker、128 总在途上限和 typed 503；所有短轮询响应关闭 keep-alive，防单客户端占满
+  工位。多用户边界另对照 通道运行时 的入口限流与 长期助手 的 session lease，继续由鉴权后的每用户/同会话
+  准入及 owner round-robin 守公平，不在 socket 层相信身份头。40 项 focused 和本地严格 gate 通过，已
+  推送部署 `.7` 唯一 Gateway。fresh tmux `ma-53498c1-http-pool-r24` 约 1 秒进入 TUI，MiniMax-M2.7 真调用
+  成功；9 个 TUI 自然轮询只生成 `gateway-http_0..4`，旧 `process_request_thread` 为 0，RSS 约 132 MB
+  稳定。Gateway tmux 为 `ma-gateway-53498c1`。
+
 - 2026-08-24 `0da26f0` 修复“历史存在但物理滚轮看不到”的默认交互回归：按 终端交互 恢复启动即开启
   mouse tracking，wheel/离底/follow 与应用内复制共用现有 typed viewport；F6 只作原生复制逃生口，footer
   随模式变化。155 项 focused 与本地严格 gate 通过，已推送部署 `.7`。tmux

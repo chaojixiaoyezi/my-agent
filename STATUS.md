@@ -1,5 +1,20 @@
 # STATUS
 
+## 2026-08-24 单 Gateway HTTP OOM 修复（`.7` 真 TUI 已通过）
+
+- 旧唯一 Gateway PID `557079` 被 Linux OOM killer 在约 6.68 GB RSS 时杀死；8 个存活 TUI 的短轮询在
+  十分钟内创建约 3,300 个 `process_request_thread`。这才是 fresh TUI “正在连接 Gateway”后退出的直接
+  原因，不是 session、历史或 MiniMax 配置错误。
+- `53498c1` 已把 HTTP 接入收为 16 个复用 daemon worker、128 运行+排队总上限，过载返回 typed 503 与
+  `Retry-After: 1`；JSON/metrics 响应显式关闭连接，防空闲 keep-alive 占住固定池。任务、owner、turn、
+  恢复和模型并发合同未改变。
+- 会话运行时 提供固定执行者和 bounded queue 蓝本；通道运行时 的 pre-auth/auth/control-plane 分层限流更适合
+  多通道入口，长期助手 的 resolved session lease/profile DB 更适合会话一致性。当前 socket 层不相信
+  `X-User-Id`，鉴权后仍由每用户 8、同会话单飞、全局准入以及后台 owner round-robin 守多用户公平。
+- 40 项 focused、本地严格 gate、远端推送与 `.7` 单 Gateway 部署均通过。fresh tmux
+  `ma-53498c1-http-pool-r24` 约 1 秒进入界面并完成 MiniMax-M2.7 真调用；9 个 TUI 自然轮询时只创建 5 个
+  `gateway-http_*` worker，旧 `process_request_thread` 为 0，12 秒 RSS 约 132.7 -> 131.7 MB。
+
 ## 2026-08-24 历史滚轮恢复 终端交互 默认（`.7` 真 TUI 已通过）
 
 - 根因不是历史丢失：旧 r22 用 `PageUp/Ctrl+Home` 能回到欢迎页、原始 Prompt 和工具记录；`af5a03b` 把

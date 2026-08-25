@@ -44,10 +44,10 @@ fresh Prompt 4 需自然观察一次截断后新 generation 立即启动，同�
 
 ### 会话运行时 式工作区并发与双 TUI 对照
 
-状态：`f07c647` 已推送、部署 `.7` 并通过隔离回归；HTTP 固定工作池本地候选待部署后重跑正式矩阵
+状态：`f07c647` 隔离回归与 `53498c1` HTTP 固定工作池均已推送、部署 `.7` 并通过真 TUI
 
 解决问题：旧 `resource_locks` 把 `/root` 与所有子目录当成跨任务独占资源，死进程留下的
-过期行可以使 `run_command/create_subagents` 在 handler 前永久失败。当前候选按 会话运行时
+过期行可以使 `run_command/create_subagents` 在 handler 前永久失败。当前实现按 会话运行时
 turn/cwd 语义过滤所有普通 `workspace:*` 持久锁，保留 operation ledger、精确逻辑锁、
 owner 墙、写边界与沙箱；`output_files` 降为交付/验证元数据，不再拒绝共享 cwd 的父子代理。
 现有 ModelCallLedger 同时累计每个 request/run 的 provider input/output/cache-read/cache-write；
@@ -57,12 +57,14 @@ owner 墙、写边界与沙箱；`output_files` 降为交付/验证元数据，�
 
 当前进展：`.7` 已确认唯一 Gateway、有效模型 `MiniMax-M2.7`、真实模型调用成功，以及 owner-local
 durable path 和不同 cwd/session 隔离。首批 Prompt 1/2 配对 TUI 暴露新的非锁故障：旧客户端每
-250ms 请求活动快照，而标准库接入队列只有 5，历史 TUI 重连可把唯一 Gateway 挤满。当前候选已对照
+250ms 请求活动快照，而标准库接入队列只有 5，历史 TUI 重连可把唯一 Gateway 挤满。当前实现已对照
 会话运行时 的事件通知/有界慢连接原则，将 backlog 提高到 128，健康刷新收为 1 秒，失败按 0.5 至 8 秒退避；
 部署后先把这批故障样本标为 diagnostic，再在新目录重跑同题，不混入正式评分。2026-08-24 旧 Gateway
 进一步被 OOM killer 以约 6.68 GB RSS 杀死，8 个存活 TUI 在十分钟内已产生约 3,300 个短命 HTTP request
-thread。当前本地候选按 会话运行时 容量 128 的 bounded channel 适配为 16 个复用 daemon worker、128 总在途
-请求上限与 typed 503 退避；待 `.7` 唯一 Gateway 重启后以真 TUI 和 RSS/线程证据闭环。
+thread。`53498c1` 按 会话运行时 容量 128 的 bounded channel 适配为 16 个复用 daemon worker、128 总在途
+请求上限与 typed 503 退避。`.7` 已以唯一 Gateway `604186` 验证：fresh TUI 约 1 秒启动、MiniMax-M2.7
+真实调用成功，9 个 TUI 自然轮询只生成 5 个 `gateway-http_*` worker，旧 request thread 为 0，RSS 约
+132 MB 稳定。下一阶段回到用户给定长任务/会话运行时 对照矩阵，不再把本次 transport 故障混入正式评分。
 
 ### 普通计划的 会话运行时 式同轮停止核对
 
