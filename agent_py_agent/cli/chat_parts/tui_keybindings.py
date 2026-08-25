@@ -1976,19 +1976,19 @@ def _handle_ctrl_l_keybinding(event, params: TuiCreateKeybindingsParams) -> None
     event.app.invalidate()
 
 
-# LLM: F6 只切换 process-local mouse-support filter；配置默认、终端剪贴板、选区和会话状态都不得被它改写。
-# 函数用途: 在终端原生拖选/右键与 TUI 滚轮/点击之间即时切换，并给出不会误报系统复制成功的提示。
+# LLM: F6 只切换 process-local mouse-support filter；终端交互 式默认滚轮、配置、剪贴板投影、选区和会话状态都不得被它改写。
+# 函数用途: 在默认 TUI 滚轮/应用内复制与备用终端原生拖选之间即时切换，并明确两种模式的历史查看方式。
 def _handle_f6_mouse_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
     enabled = _required_interaction(params).toggle_mouse_capture()
     runtime = _active_tui_runtime(params)
     if enabled:
         runtime.set_notice(
-            "TUI 鼠标已开启：滚轮/点击可用；复制失效时按 F6 返回原生模式",
+            "滚轮模式：滚轮浏览，拖选松手/右键复制；F6 切原生复制",
             duration_seconds=4.0,
         )
     else:
         runtime.set_notice(
-            "原生复制已开启：可直接拖选并用右键复制/粘贴；F6 返回",
+            "原生复制模式：终端拖选/右键；历史用 PgUp/Ctrl+Home，F6 恢复滚轮",
             duration_seconds=4.0,
         )
     _reset_exit_arms(params)

@@ -299,9 +299,9 @@ class _RuntimeBudgetConfigFields:
 class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetConfigFields):
 
     agent_name: str = "myagent"
-    # 默认把鼠标留给宿主终端，保证 SSH/Apple Terminal 下原生拖选、右键菜单和粘贴可用。
-    # 开启后改用 TUI 内部鼠标滚动/点击/高亮；运行中仍可按 F6 临时切换。
-    tui_mouse_capture_default: bool = False
+    # 默认沿 终端交互 主链由 TUI 接管滚轮、点击与应用内选区；F6 仍可临时退回宿主终端原生复制。
+    # 关闭后备用屏幕收不到物理滚轮，历史只能用 PgUp/Ctrl+Home，因此不再作为开箱默认。
+    tui_mouse_capture_default: bool = True
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     workspace_root: str | list[str] = ""
     model_backend: str = "echo"

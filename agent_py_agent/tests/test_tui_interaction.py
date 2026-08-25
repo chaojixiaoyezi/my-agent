@@ -91,15 +91,15 @@ def test_todo_expansion_toggle_is_display_only_and_redraws() -> None:
     assert len(redraws) == 2
 
 
-def test_mouse_capture_defaults_native_and_toggles_without_other_state() -> None:
+def test_mouse_capture_defaults_free_code_style_and_toggles_without_other_state() -> None:
     redraws: list[bool] = []
     state = TuiInteractionState(lambda: redraws.append(True))
 
-    assert state.snapshot().mouse_capture_enabled is False
-    assert state.toggle_mouse_capture() is True
     assert state.snapshot().mouse_capture_enabled is True
     assert state.toggle_mouse_capture() is False
     assert state.snapshot().mouse_capture_enabled is False
+    assert state.toggle_mouse_capture() is True
+    assert state.snapshot().mouse_capture_enabled is True
     assert redraws == [True, True]
 
 

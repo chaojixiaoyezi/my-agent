@@ -768,11 +768,10 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 空闲动画时钟不应让静态长历史失效。完整 frame key 由 renderer 统一决定；connection/thinking 活动时
   才加入可见动画字段，thinking 周期取 glyph 与稳定词长的最小公倍数，禁止经验魔数。20k block LRU
   和 20k stable display window 是性能边界，不是新的会话事实源。
-- TUI 鼠标采用 会话运行时 式原生模式作为唯一默认：`tui_mouse_capture_default=false` 时不向终端申请 mouse
-  tracking，宿主终端直接负责左键拖选、右键菜单和系统剪贴板粘贴，尤其避免 SSH/Apple Terminal 下把
-  “tmux buffer 已写入”误报成“本机剪贴板已复制”。F6 只切换当前 TUI process-local 状态，不写配置、不改
-  session；开启后恢复 终端交互 式滚轮、点击和应用内高亮，再按 F6 回到原生复制。帮助区和短暂 notice
-  必须始终提示这个取舍。
+- TUI 鼠标采用 终端交互 式应用内模式作为唯一默认：`tui_mouse_capture_default=true` 时申请 mouse
+  tracking，滚轮直接浏览、离底后保持锚点、回到底部才恢复自动跟随，左键拖选松手与右键都投影同一应用
+  选区。F6 只切换当前 TUI process-local 状态，不写配置、不改 session；第一次切到宿主终端原生复制，
+  再按恢复滚轮。远程复制仍必须如实区分应用/tmux/OSC52 投影与不可观测的外层系统剪贴板。
 - 仅在 TUI 鼠标模式中，transcript 选择才持有当前 viewport 中经 prompt_toolkit `Window` 从屏幕列反解后
   的源字符索引，resize 清除；产品层不得再按 `wcwidth` 二次换算，否则中文会只复制一半。最终 focus 字符
   必须包含在高亮和复制文本中。任何形式的 mouse-up 都结束拖动；1003 无按键 motion 和下一次 fresh press
@@ -1472,26 +1471,24 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   该行为证据只证明详情展示接线，不替代超级玛丽任务的功能完成验收。
 - 视角切换不得复用一份全局滚动锚点或每次强制回尾。普通与详细 transcript control 分别按 exact
   `TuiStateStore` 保存 follow、cursor 和 unseen 基线；新页面默认跟随尾部，返回页面恢复其原位置，选区则
-  在切换时清除。默认原生复制模式下备用屏幕不会收到滚轮，返回父级时提示 `PgUp/Ctrl+Home` 或按 `F6`
-  开启滚轮；不得自动改鼠标模式，因为那会再次吞掉用户要求的宿主右键菜单。
+  在切换时清除。默认应用内鼠标直接把滚轮交给当前页面；用户按 F6 进入备用原生复制模式后，footer 必须
+  明示历史改用 `PgUp/Ctrl+Home`，并提示再次 F6 恢复滚轮。
 - `.7` fresh tmux `ma-d14549c-scroll-r18` exact resume 同一 Prompt 2 会话且没有再次调用模型。root 与
   worker-1 各自滚到首条 prompt 后来回切换，均恢复自己的锚点；F6 后 SGR wheel-up 翻到旧工具调用，
   再按 F6 回到原生复制。自动化不把协议事件冒充宿主 Terminal.app 的物理滚轮或右键菜单验收。
 
-## 2026-08-24 终端原生复制与 TUI 鼠标双模式【状态：`.7` 协议已真机验证，宿主右键待用户验收】
+## 2026-08-24 终端原生复制与 TUI 鼠标双模式【状态：历史方案；默认原生模式已被同日 终端交互 对齐取代】
 
 - 既有应用内右键复制只能证明 prompt_toolkit/tmux/OSC52 投影已执行，不能保证 SSH 外层的 Apple Terminal
   系统剪贴板已经改变。用户实测“右键没反应”证明全屏 mouse tracking 吞掉原生右键菜单后，这条
   best-effort 路径不能作为默认交互。
-- 对照 会话运行时 `会话运行时-rs/tui/src/tui.rs` 的默认非 mouse-capture 行为，以及 终端交互
-  `src/utils/fullscreen.ts` 的 `模型助手_CODE_DISABLE_MOUSE=1` 逃生口，当前默认关闭 prompt_toolkit mouse
-  support。终端原生负责拖选、右键复制/粘贴；F6 在当前进程内动态开启/关闭 TUI mouse support，开启时
-  才提供滚轮、点击和应用内高亮。该切换不进入 prompt、history、session 或 durable config。
-- `tui_mouse_capture_default` 只决定新 TUI 的初始模式，默认 `false`；显式设为 `true` 的用户仍可保留
-  终端交互 式体验。远程 TUI 模式下的 notice 改为“已选中；粘贴无效请按 F6”，不得再显示无证据的
-  `Copied` 成功。真实验收必须同时证明：默认启动没有开启 1000/1002/1003 mouse tracking、终端 bracketed
-  paste 能进入输入框、F6 开启时协议生效、再次 F6 后协议关闭；macOS 系统剪贴板仍由用户 attach 后做一次
-  真实右键复制与粘贴验收。
+- 该轮曾以 会话运行时 的非 mouse-capture 行为和 终端交互 的 `模型助手_CODE_DISABLE_MOUSE=1` 逃生口为依据，把
+  默认改成关闭 prompt_toolkit mouse support。后续真实用户回归证明 alternate screen 因此完全收不到物理
+  滚轮，造成“历史消息消失”的直接体验故障；这个默认决定已经废止，下面的 r16 证据只保留为双模式协议
+  能切换的历史记录，不能再解释当前默认行为。
+- 当前 `tui_mouse_capture_default` 默认为 `true`；终端交互 式滚轮、点击、应用内选区是主链，F6 切到
+  原生拖选只是外层剪贴板不接受 tmux/OSC52 时的备用路径。远程 notice 仍只能报告“已选中并尝试复制”，
+  不能把不可观测的外层系统剪贴板写成确定成功。
 - `.7` 唯一 Gateway、MiniMax-M2.7、tmux `ma-af5a03b-native-copy-r16` 的真实 attach 输出已证明：初始帧
   显式发送 1000/1002/1003 disable，bracketed paste 完整保留“右键粘贴验证ABC中文🙂”，第一次 F6 发送
   三项 enable，第二次 F6 再发送三项 disable，输入正文保持不变。该证据覆盖 TUI/终端协议，但 Computer
@@ -1519,9 +1516,9 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   `runner_auto_concurrency=8` 让默认八个槽位都能真正并行。历史累计 child 数不是当前占用量，终态释放
   槽位后可以继续创建，所以总历史数量允许超过 8。
 - 备用屏幕中的 root/child 历史继续由各自 `TuiStateStore` 持久投影；当前 `.7` exact resume 已用
-  `Ctrl+Home` 分别看到 root 原始 Prompt 与 child 完整派工、thinking、工具卡，证明数据没有丢失。默认
-  原生复制模式不会把物理滚轮交给 TUI，这是终端协议边界；所有主/子代理 footer 必须常驻显示
-  `PgUp/Ctrl+Home 历史 · F6 滚轮`，不能只在返回父级后的 5.5 秒 notice 中提示。
+  `Ctrl+Home` 分别看到 root 原始 Prompt 与 child 完整派工、thinking、工具卡，证明数据没有丢失。当前
+  终端交互 式默认直接启用滚轮；主/子代理 footer 显示 `滚轮/PgUp/Ctrl+Home 历史 · F6 原生复制`，只有
+  用户主动切到原生复制后才改为 `PgUp/Ctrl+Home 历史 · F6 恢复滚轮`。
 - `.7` 唯一 Gateway 的 fresh `ma-6d33228-p3-guidance8-r20` 只提交一次原样 Prompt 3，随后八名
   researcher 同时 RUNNING。进入 researcher-1 输入普通中文后，receipt 的
   `expected_turn_id=attempt-1787621674-fdb6e96a` 与 reservation attempt 相同，最终状态 `consumed`；child
@@ -1538,3 +1535,15 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - `7e2ffb6` 在 `.7` 唯一 Gateway、MiniMax-M2.7 的 exact resume
   `ma-7e2ffb6-roster-r21` 验证九项名册：第九次 `↓` 后 coordinator-9 带 `›` 出现，`Enter` 进入同名详情；
   `Ctrl+G` 返回再按 `↑` 后 researcher-8 高亮且前八项恢复。测试者没有发送模型消息或改任务产物。
+
+## 2026-08-24 终端交互 默认滚轮回归修复【状态：实现与本地协议回归已完成，待 `.7` 真 TUI】
+
+- 用户在 exact resume 中用 `PageUp` 和 `Ctrl+Home` 能看到欢迎页、原始 Prompt 与旧工具记录，证明 canonical
+  history 和每页 viewport 均未丢失；物理滚轮无反应来自 `af5a03b` 把 mouse tracking 默认关闭，不是消息
+  加载或 Compact 删除。这个取舍使“能复制”和“能看历史”变成二选一，属于默认交互回归。
+- 参考 终端交互 `AlternateScreen.tsx`、`fullscreen.ts`、`termio/dec.ts`、`ScrollKeybindingHandler.tsx`、
+  `ScrollBox.tsx`、`selection.ts`、`useCopyOnSelect.ts` 与 `termio/osc.ts`：全屏默认开启鼠标；wheel 直接驱动
+  ScrollBox，向上打破 sticky、回到底才恢复；应用内选区 copy-on-select，并投影 native/tmux/OSC52。
+- 本项目已有相同的 typed viewport、中文源字符选区、lost-release、右键复制、tmux buffer 和 OSC52 主链，
+  因此修复只把唯一默认恢复为 `true`，让 F6 成为原生复制逃生口，并让 footer 从 typed mouse state 动态
+  显示当前真实操作。不得增加另一份历史、滚动游标或终端品牌判断。

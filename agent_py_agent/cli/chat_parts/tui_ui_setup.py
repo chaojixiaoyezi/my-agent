@@ -136,6 +136,7 @@ def _make_render_context_factory(
             is_pasting=interaction_snapshot.is_pasting,
             help_open=interaction_snapshot.help_open,
             todos_expanded=interaction_snapshot.todos_expanded,
+            mouse_capture_enabled=interaction_snapshot.mouse_capture_enabled,
             focused_agent_run_id=str(
                 getattr(navigation_snapshot, "active_run_id", "") or ""
             ),
@@ -465,7 +466,7 @@ def _prepare_tui_app_parts(params: MakeTuiAppParams) -> _TuiAppParts:
     interaction = TuiInteractionState(
         runtime.store.invalidate,
         mouse_capture_enabled=bool(
-            getattr(params.agent.config, "tui_mouse_capture_default", False)
+            getattr(params.agent.config, "tui_mouse_capture_default", True)
         ),
     )
     transcript_state = TuiTranscriptModeState(runtime.store.invalidate)
@@ -519,7 +520,7 @@ def _prepare_tui_app_parts(params: MakeTuiAppParams) -> _TuiAppParts:
                 and not selected_runtime.notice()
             ):
                 selected_runtime.set_notice(
-                    "历史已保留：PgUp/Ctrl+Home 翻阅；F6 开启滚轮",
+                    "历史已保留：PgUp/Ctrl+Home 翻阅；F6 恢复滚轮",
                     duration_seconds=5.5,
                 )
 
@@ -707,10 +708,9 @@ def _assemble_tui_application(
     _configure_escape_timeouts(app)
     parts.transcript_view.provider.set_invalidate_callback(app.invalidate)
 
-    # LLM: TUI mouse mode suppresses native terminal selection, so settled selections still project
-    # to application/tmux/OSC52. Over SSH this projection is best-effort and the notice must not claim
-    # that an unsupported outer terminal actually changed its system clipboard.
-    # 函数用途: 在 TUI 鼠标模式松手后投影最终选区，并如实提示远程终端可能仍需按 F6 使用原生复制。
+    # LLM: 默认 TUI mouse 模式必须同时保有 终端交互 式滚轮与应用内选区复制；settled selection
+    # 投影到 application/tmux/OSC52，但 SSH notice 不得声称不可观测的外层系统剪贴板一定已改变。
+    # 函数用途: 在 TUI 鼠标模式松手或右键后投影最终选区，并提示远程复制失败时可按 F6 使用原生复制。
     def copy_settled_selection(text: str) -> None:
         _write_selection_clipboard(app, text)
         active_runtime = parts.runtime
@@ -718,7 +718,7 @@ def _assemble_tui_application(
         if callable(runtime_reader):
             active_runtime = runtime_reader()
         if os.environ.get("SSH_CONNECTION"):
-            notice = f"已选中 {len(text)} 个字符；若系统粘贴无效，按 F6 使用原生复制"
+            notice = f"已选中 {len(text)} 个字符；已尝试复制，粘贴无效可按 F6 原生复制"
         else:
             notice = f"已复制 {len(text)} 个字符"
         active_runtime.set_notice(notice, duration_seconds=2.5)
@@ -728,7 +728,7 @@ def _assemble_tui_application(
     _install_input_copy_on_select(parts.input_area, copy_settled_selection)
     if not parts.interaction.snapshot().mouse_capture_enabled:
         parts.runtime.set_notice(
-            "原生复制模式：直接拖选、右键复制/粘贴；F6 开启 TUI 滚轮/点击",
+            "原生复制模式：终端拖选/右键；历史用 PgUp/Ctrl+Home，F6 恢复滚轮",
             duration_seconds=6.0,
         )
     app._my_agent_title_controller = parts.title_controller

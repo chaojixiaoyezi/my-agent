@@ -194,7 +194,19 @@ def test_full_frame_matches_reference_message_geometry_at_120_columns() -> None:
     assert user_styles == ["class:tui-user-marker", "class:tui-user-text", "class:tui-user-fill"]
     assert frame.footer == ((
         "class:tui-muted",
-        "  ? 快捷键 · PgUp/Ctrl+Home 历史 · F6 滚轮",
+        "  ? 快捷键 · 滚轮/PgUp/Ctrl+Home 历史 · F6 原生复制",
+    ),)
+
+
+def test_footer_explains_native_copy_escape_hatch_without_hiding_history() -> None:
+    frame = render_tui_snapshot(
+        _fixture_store().snapshot(),
+        TuiRenderContext(width=120, mouse_capture_enabled=False),
+    )
+
+    assert frame.footer == ((
+        "class:tui-muted",
+        "  ? 快捷键 · PgUp/Ctrl+Home 历史 · F6 恢复滚轮",
     ),)
 
 

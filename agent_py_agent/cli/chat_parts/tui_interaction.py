@@ -44,7 +44,7 @@ class TuiInteractionSnapshot:
     is_pasting: bool = False
     help_open: bool = False
     todos_expanded: bool = False
-    mouse_capture_enabled: bool = False
+    mouse_capture_enabled: bool = True
 
 
 # LLM: _HistorySearchSession 是 Ctrl-R 的内部游标；entries 已按新到旧去重，query 匹配只影响编辑器投影，不执行历史 prompt。
@@ -69,7 +69,7 @@ class TuiInteractionState:
         self,
         invalidate: Callable[[], None] | None = None,
         *,
-        mouse_capture_enabled: bool = False,
+        mouse_capture_enabled: bool = True,
     ) -> None:
         self._stash: TuiDraft | None = None
         self._history: _HistorySearchSession | None = None

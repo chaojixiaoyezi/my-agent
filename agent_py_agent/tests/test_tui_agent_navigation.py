@@ -282,7 +282,7 @@ def test_child_footer_makes_back_and_escape_semantics_explicit() -> None:
         ),
     )
     assert fragments_text(running_frame.footer).strip() == (
-        "Ctrl+G 返回 · Esc 停止 · PgUp/Ctrl+Home 历史 · F6 滚轮"
+        "Ctrl+G 返回 · Esc 停止 · 滚轮/PgUp/Ctrl+Home 历史 · F6 原生复制"
     )
     running_notice = render_tui_snapshot(
         running.store.snapshot(),
@@ -313,7 +313,7 @@ def test_child_footer_makes_back_and_escape_semantics_explicit() -> None:
         ),
     )
     assert fragments_text(terminal_frame.footer).strip() == (
-        "Ctrl+G 返回 · 已结束，只读 · PgUp/Ctrl+Home 历史 · F6 滚轮"
+        "Ctrl+G 返回 · 已结束，只读 · 滚轮/PgUp/Ctrl+Home 历史 · F6 原生复制"
     )
 
 
@@ -328,5 +328,5 @@ def test_selected_child_footer_overrides_root_running_hint() -> None:
     )
 
     assert fragments_text(frame.footer).strip() == (
-        "↑↓ 选择 · Enter 查看 · PgUp/Ctrl+Home 历史 · F6 滚轮 · Esc 停止主代理"
+        "↑↓ 选择 · Enter 查看 · 滚轮/PgUp/Ctrl+Home 历史 · F6 原生复制 · Esc 停止主代理"
     )

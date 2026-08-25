@@ -798,16 +798,16 @@ def test_f6_toggles_native_copy_and_tui_mouse_without_touching_input() -> None:
 
     tui_keybindings._handle_f6_mouse_keybinding(event, params)
 
-    assert interaction.snapshot().mouse_capture_enabled is True
-    assert "TUI 鼠标已开启" in runtime.notice()
+    assert interaction.snapshot().mouse_capture_enabled is False
+    assert "原生复制模式" in runtime.notice()
     assert input_area.text == "保留输入"
     assert params.exit_armed_at_ref == [0.0]
     assert redraws == [True]
 
     tui_keybindings._handle_f6_mouse_keybinding(event, params)
 
-    assert interaction.snapshot().mouse_capture_enabled is False
-    assert "原生复制已开启" in runtime.notice()
+    assert interaction.snapshot().mouse_capture_enabled is True
+    assert "滚轮模式" in runtime.notice()
     assert redraws == [True, True]
 
 

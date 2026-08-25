@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import threading
 from queue import Queue
 from types import SimpleNamespace
 
 from prompt_toolkit.application import create_app_session
 from prompt_toolkit.cursor_shapes import CursorShape
+from prompt_toolkit.data_structures import Size
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
+from prompt_toolkit.output.vt100 import Vt100_Output
 
 from agent_py_agent.cli.chat_parts.tui_agent_navigation import TuiAgentNavigationState
 from agent_py_agent.cli.chat_parts.tui_params import MakeTuiAppParams
@@ -117,24 +120,69 @@ def test_tui_declares_block_cursor_instead_of_inheriting_terminal_shape(tmp_path
     assert app.cursor.get_cursor_shape(app) is CursorShape.BLOCK
 
 
-def test_real_prompt_toolkit_pipe_defaults_native_mouse_and_f6_toggles(tmp_path) -> None:
+def test_real_prompt_toolkit_pipe_defaults_tui_mouse_and_f6_toggles(tmp_path) -> None:
     async def scenario() -> None:
         runtime = TuiRuntime("mouse-filter-session")
         runtime.publish_session(version="test", model="fixture", workspace=str(tmp_path))
         with create_pipe_input() as pipe_input:
             with create_app_session(input=pipe_input, output=DummyOutput()):
                 app = make_tui_app(_app_params(tmp_path, runtime))
-                assert app.mouse_support() is False
+                assert app.mouse_support() is True
                 run_task = asyncio.create_task(app.run_async())
                 await asyncio.sleep(0.05)
 
                 pipe_input.send_bytes(b"\x1b[17~")
                 await asyncio.sleep(0.05)
-                assert app.mouse_support() is True
+                assert app.mouse_support() is False
 
                 pipe_input.send_bytes(b"\x1b[17~")
                 await asyncio.sleep(0.05)
-                assert app.mouse_support() is False
+                assert app.mouse_support() is True
+
+                app.exit(result=0)
+                assert await run_task == 0
+
+    asyncio.run(scenario())
+
+
+def test_real_vt100_output_enables_default_mouse_and_f6_emits_both_transitions(
+    tmp_path,
+) -> None:
+    async def scenario() -> None:
+        runtime = TuiRuntime("mouse-protocol-session")
+        runtime.publish_session(version="test", model="fixture", workspace=str(tmp_path))
+        terminal = io.StringIO()
+        output = Vt100_Output(
+            terminal,
+            get_size=lambda: Size(rows=30, columns=100),
+            term="xterm-256color",
+        )
+        with create_pipe_input() as pipe_input:
+            with create_app_session(input=pipe_input, output=output):
+                app = make_tui_app(_app_params(tmp_path, runtime))
+                run_task = asyncio.create_task(app.run_async())
+                await asyncio.sleep(0.08)
+
+                started = terminal.getvalue()
+                assert "\x1b[?1000h" in started
+                assert "\x1b[?1003h" in started
+                assert "\x1b[?1006h" in started
+
+                offset = len(started)
+                pipe_input.send_bytes(b"\x1b[17~")
+                await asyncio.sleep(0.08)
+                disabled = terminal.getvalue()[offset:]
+                assert "\x1b[?1000l" in disabled
+                assert "\x1b[?1003l" in disabled
+                assert "\x1b[?1006l" in disabled
+
+                offset = len(terminal.getvalue())
+                pipe_input.send_bytes(b"\x1b[17~")
+                await asyncio.sleep(0.08)
+                restored = terminal.getvalue()[offset:]
+                assert "\x1b[?1000h" in restored
+                assert "\x1b[?1003h" in restored
+                assert "\x1b[?1006h" in restored
 
                 app.exit(result=0)
                 assert await run_task == 0
@@ -161,9 +209,9 @@ def test_navigation_callback_restores_root_viewport_and_explains_native_scroll(
             }
         ],
     )
-    parts = _prepare_tui_app_parts(
-        _app_params(tmp_path, root, agent_navigation=navigation)
-    )
+    params = _app_params(tmp_path, root, agent_navigation=navigation)
+    params.agent.config.tui_mouse_capture_default = False
+    parts = _prepare_tui_app_parts(params)
     parts.transcript_view.control.create_content(40, 5)
     parts.transcript_view.scroll(-6)
     root_anchor = parts.transcript_view.control.current_line()

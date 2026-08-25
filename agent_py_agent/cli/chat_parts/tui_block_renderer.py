@@ -186,6 +186,7 @@ class TuiRenderContext:
     is_pasting: bool = False
     help_open: bool = False
     todos_expanded: bool = False
+    mouse_capture_enabled: bool = True
     focused_agent_run_id: str = ""
     focused_agent_name: str = "main"
     focused_agent_status: str = ""
@@ -223,6 +224,11 @@ class TuiRenderContext:
         object.__setattr__(self, "is_pasting", bool(self.is_pasting))
         object.__setattr__(self, "help_open", bool(self.help_open))
         object.__setattr__(self, "todos_expanded", bool(self.todos_expanded))
+        object.__setattr__(
+            self,
+            "mouse_capture_enabled",
+            bool(self.mouse_capture_enabled),
+        )
         object.__setattr__(
             self,
             "focused_agent_run_id",
@@ -314,6 +320,7 @@ def tui_render_context_key(
         context.is_pasting,
         context.help_open,
         context.todos_expanded,
+        context.mouse_capture_enabled,
         context.focused_agent_run_id,
         context.focused_agent_name,
         context.focused_agent_status,
@@ -2273,6 +2280,7 @@ def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> Form
             "class:tui-muted",
             _fit_text("  " + context.notice, context.width, "left").rstrip(),
         ),)
+    history_hint = _history_mouse_hint(context)
     if context.focused_agent_run_id:
         if context.focused_agent_status in {
             "DONE",
@@ -2284,27 +2292,35 @@ def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> Form
             "ABANDONED",
             "TAKEN_OVER",
         }:
-            text = "  Ctrl+G 返回 · 已结束，只读 · PgUp/Ctrl+Home 历史 · F6 滚轮"
+            text = f"  Ctrl+G 返回 · 已结束，只读 · {history_hint}"
         else:
-            text = "  Ctrl+G 返回 · Esc 停止 · PgUp/Ctrl+Home 历史 · F6 滚轮"
+            text = f"  Ctrl+G 返回 · Esc 停止 · {history_hint}"
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
     if context.selected_agent_run_id:
-        text = "  ↑↓ 选择 · Enter 查看 · PgUp/Ctrl+Home 历史 · F6 滚轮"
+        text = f"  ↑↓ 选择 · Enter 查看 · {history_hint}"
         if snapshot.status.phase in {"running", "interrupting"}:
             text += " · Esc 停止主代理"
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
     if snapshot.status.phase in {"running", "interrupting"}:
-        text = "  Esc 停止 · PgUp/Ctrl+Home 历史 · F6 滚轮"
+        text = f"  Esc 停止 · {history_hint}"
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
     if any(
         block.role == "background"
         and _safe_render_int(block.metadata.get("active_task_count")) > 0
         for block in snapshot.active_blocks
     ):
-        text = "  /stop 停止后台任务 · PgUp/Ctrl+Home 历史 · F6 滚轮"
+        text = f"  /stop 停止后台任务 · {history_hint}"
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
-    text = "  ? 快捷键 · PgUp/Ctrl+Home 历史 · F6 滚轮"
+    text = f"  ? 快捷键 · {history_hint}"
     return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
+
+
+# LLM: footer 必须从 typed mouse mode 说明当前真实交互；不得固定显示 F6 滚轮而在默认已开启时误导用户。
+# 函数用途: 生成当前鼠标模式下的历史浏览与 F6 备用模式提示。
+def _history_mouse_hint(context: TuiRenderContext) -> str:
+    if context.mouse_capture_enabled:
+        return "滚轮/PgUp/Ctrl+Home 历史 · F6 原生复制"
+    return "PgUp/Ctrl+Home 历史 · F6 恢复滚轮"
 
 
 # LLM: 帮助只列真实接通的输入/导航能力；宽屏三列、窄屏单列由 width 决定，不能为参考产品独有功能造空入口。

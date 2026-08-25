@@ -436,10 +436,10 @@ history/search/paste/completion/queue/stash、follow/unseen、session-history、
 真实模型调用能看到该输入；若 exact turn 已结束，TUI 只能挂接 Gateway 返回的 canonical queued request，
 不得再次提交正文。
 
-2026-08-24 起鼠标验收增加双模式合同：默认 `tui_mouse_capture_default=false` 的 prompt_toolkit PTY 启动
-不得开启 1000/1002/1003 mouse tracking，终端 bracketed paste 必须直接进入输入 Buffer；F6 第一次须动态
-开启 mouse tracking 且不改输入，第二次须关闭并恢复原生选择。TUI mouse 模式继续运行上述中文/丢失
-release/OSC52/tmux 回归，但它的远端 notice 只能报告已选中，不能把投影成功写成系统剪贴板成功。最终真机
+2026-08-24 起鼠标验收采用 终端交互 默认合同：`tui_mouse_capture_default=true` 的 prompt_toolkit VT100
+启动必须开启 1000/1003/1006 mouse tracking；F6 第一次须关闭并进入原生选择，第二次须恢复 mouse
+tracking，且两次都不改输入。默认模式继续运行上述中文/丢失 release/OSC52/tmux 回归，远端 notice 只能
+报告已选中并尝试复制，不能把投影成功写成系统剪贴板成功。最终真机
 验收必须在用户实际 attach 的宿主终端执行一次“拖选中文 -> 右键复制 -> 输入框右键粘贴”；tmux buffer
 内容或 OSC52 字节只能作中间证据，不能替代这一步。
 
@@ -450,10 +450,9 @@ disable；中文/表情 bracketed paste 完整进入输入框；F6 第一次输�
 
 代理视角滚动回归必须至少建立两个独立 `TuiStateStore`：root 与 child 都先离开尾部，来回切换后各自恢复
 原 cursor/follow/unseen，第一次进入的新页位于尾部；切换必须清除当前选区，不能把 root 坐标套到 child
-正文。真实 TUI 还要分别证明 `PageUp/Ctrl+Home` 在默认原生复制模式可查看当前页完整历史、`F6` 后滚轮
-可查看同一历史、`Ctrl+G` 返回时出现一次模式提示。原生模式下滚轮不进入应用是 terminal alternate-screen
-协议取舍，测试不得把终端空 scrollback 误报成 canonical history 被删除，也不得靠默认开启 mouse tracking
-修复而再次破坏宿主右键复制。
+正文。真实 TUI 还要分别证明默认物理滚轮、`PageUp/Ctrl+Home` 都能查看当前页完整历史，离尾后保持锚点，
+回底后才自动跟随；F6 切到原生复制后 footer 明示键盘入口，再按 F6 恢复滚轮。原生模式下滚轮不进入应用
+是 terminal alternate-screen 协议边界，测试不得把终端空 scrollback 误报成 canonical history 被删除。
 
 2026-08-24 真机证据：`d14549c` 已部署到 `.7` 唯一 Gateway，tmux
 `ma-d14549c-scroll-r18` exact resume `sess_1787579367_f677cf76`，没有重新提交模型任务。root 与
