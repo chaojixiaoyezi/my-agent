@@ -4,6 +4,12 @@
 
 最近收口重点：
 
+- 2026-08-24 `7e2ffb6` 修复子代理名册“游标已到隐藏项但屏幕仍画前八项”：renderer 现在从同一
+  canonical ordered roster 裁出包含 exact `selected_run_id` 的八行窗口，不新增滚动状态、不改 Enter
+  裁决或 child 状态。65 项 focused 与本地严格 gate 通过，已部署 `.7` 且未重启唯一 Gateway；tmux
+  `ma-7e2ffb6-roster-r21` 连按九次 `↓` 显示 coordinator-9 高亮，Enter 进入同名详情，返回向上后
+  researcher-8 与前八项恢复。未发送模型消息，未改被测产物。
+
 - 2026-08-24 `6d33228` 修复 TUI 给运行 child 插话会触发
   `guidance submission reservation mismatch` 的底座错误：Gateway 入账前绑定 exact pending/running
   AgentAttempt，缺少活跃片时拒绝且不落消息，ConversationStore 严格门未放宽。默认容量从会话 6、单次 4、

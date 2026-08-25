@@ -1,6 +1,6 @@
 # Subagent Progress
 
-## 2026-08-24 子代理八行名册跟随选中项（本地候选）
+## 2026-08-24 子代理八行名册跟随选中项（已部署真 TUI）
 
 - 真实 TUI 中历史累计出现第 9 名 child 后，`↓` 已把导航的 exact `selected_run_id` 移到屏幕外，`Enter`
   仍会进入正确 child，但 renderer 固定使用 `rows[:8]`，所以用户看不到高亮，像是按键失效。
@@ -8,7 +8,9 @@
   但从同一 canonical ordered roster 裁出包含选中 run 的最小窗口。渲染不持有第二份游标、不改顺序或状态，
   省略数仍只表示窗口外条目。
 - focused 回归构造九名 child，连续九次向下后要求第 1 行退出、第 9 行带 `›` 出现，随后 `Enter` 必须进入
-  同一个 `child-9`。部署后还需在 `.7` 单 Gateway 的真实九项会话中实按复验。
+  同一个 `child-9`。`7e2ffb6` 已部署到 `.7` 且未重启唯一 Gateway；exact resume tmux
+  `ma-7e2ffb6-roster-r21` 中连按九次 `↓` 后 researcher-1 被移出、coordinator-9 带 `›` 出现，`Enter`
+  进入 coordinator-9，`Ctrl+G` 返回再按 `↑` 后前八项恢复且 researcher-8 高亮。全过程未发送模型消息。
 
 ## 2026-08-24 插话 exact-attempt 与八槽单一容量（已部署真 TUI）
 

@@ -1527,7 +1527,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   `expected_turn_id=attempt-1787621674-fdb6e96a` 与 reservation attempt 相同，最终状态 `consumed`；child
   继续多轮 WebSearch 且未失败。root/child `Ctrl+Home` 和 F6 SGR wheel 均通过，测试结束后已回原生复制。
 
-## 2026-08-24 子代理名册的选择可见性【状态：本地候选，待 `.7` 真 TUI】
+## 2026-08-24 子代理名册的选择可见性【状态：已部署 `.7` 并真 TUI 验收】
 
 - 子代理导航的权威仍是按 parent 保存的 ordered exact run rows；八行名册只是 renderer 视窗。历史累计
   超过八项时，方向键可以把 `selected_run_id` 移到第九项，旧 `rows[:8]` 却继续画前八项，造成“屏幕无
@@ -1535,3 +1535,6 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 参考 终端交互 `MessageSelector` 由 `selectedIndex` 推导可见窗口：选中项还在前八项时保持原窗口，越过
   下边界后只移动足够多的起始行让 exact run 出现。该计算是纯投影，不增加 scroll 状态，不改变 canonical
   排序、状态、容量或 Enter 的 run-id 裁决；屏幕外总数继续由本地裁剪数与 backend hidden count 相加。
+- `7e2ffb6` 在 `.7` 唯一 Gateway、MiniMax-M2.7 的 exact resume
+  `ma-7e2ffb6-roster-r21` 验证九项名册：第九次 `↓` 后 coordinator-9 带 `›` 出现，`Enter` 进入同名详情；
+  `Ctrl+G` 返回再按 `↑` 后 researcher-8 高亮且前八项恢复。测试者没有发送模型消息或改任务产物。
