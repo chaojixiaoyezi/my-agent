@@ -27,6 +27,7 @@ def test_coding_subagent_tools_defaults_to_leaf_execution_tools():
     assert "apply_patch" in CODING_SUBAGENT_TOOLS
     assert "read_file" in CODING_SUBAGENT_TOOLS
     assert "list_files" in CODING_SUBAGENT_TOOLS
+    assert "process_session" in CODING_SUBAGENT_TOOLS
     assert "create_subagents" not in CODING_SUBAGENT_TOOLS
     assert "send_guidance" not in CODING_SUBAGENT_TOOLS
     assert "cancel_subagents" not in CODING_SUBAGENT_TOOLS
@@ -52,6 +53,18 @@ def test_retired_subagent_controls_are_removed_from_legacy_snapshots():
             "send_guidance",
         ]
     ) == ["read_file", "send_guidance"]
+
+
+def test_background_shell_companion_is_restored_in_legacy_snapshots():
+    from agent_py_agent.agent.subagents.role_templates import (
+        active_model_subagent_tools,
+    )
+
+    assert active_model_subagent_tools(["read_file", "run_command"]) == [
+        "read_file",
+        "run_command",
+        "process_session",
+    ]
 
 
 def test_raise_event_is_not_registered_as_a_model_tool(tmp_path):

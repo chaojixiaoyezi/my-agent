@@ -19,6 +19,8 @@ ARTIFACT_BUILDER_TOOLS: list[str] = []
 WORKER_WRITE_TOOLS = ["write_file", "apply_patch"]
 REPORT_WRITE_TOOLS = ["write_file", "apply_patch"]
 SHELL_TOOL = "run_command"
+PROCESS_SESSION_TOOL = "process_session"
+SHELL_SESSION_TOOLS = (SHELL_TOOL, PROCESS_SESSION_TOOL)
 CAPABILITY_REQUEST_TOOL = "capability_request"
 COLLABORATION_TOOLS: list[str] = []
 RETIRED_MODEL_SUBAGENT_CONTROL_TOOLS = frozenset(
@@ -36,7 +38,7 @@ RETIRED_MODEL_SUBAGENT_CONTROL_TOOLS = frozenset(
 ROLE_BASE_TOOLS = [
     *READ_ONLY_TOOLS,
     *REPORT_WRITE_TOOLS,
-    SHELL_TOOL,
+    *SHELL_SESSION_TOOLS,
     *COLLABORATION_TOOLS,
     CAPABILITY_REQUEST_TOOL,
 ]
@@ -56,12 +58,13 @@ COORDINATOR_TOOLS = [
 
 
 # LLM: Every model-facing tool snapshot, including persisted legacy grants,
-# must pass this single retirement filter before prompt or execution exposure.
-# 函数用途: 从工具名列表中剔除已删除的子代理巡检和手动推动入口，并保持原顺序去重。
+# must pass this single retirement/dependency closure before prompt or execution exposure.
+# run_command includes run_in_background, so its same-session continuation tool is inseparable.
+# 函数用途: 清理已退休工具，并保证能启动后台命令的子代理同时能查询、等待和停止该命令。
 def active_model_subagent_tools(value: object) -> list[str]:
     if not isinstance(value, list | tuple | set):
         return []
-    return [
+    tools = [
         tool
         for tool in dict.fromkeys(
             str(item or "").strip()
@@ -70,6 +73,9 @@ def active_model_subagent_tools(value: object) -> list[str]:
         )
         if tool not in RETIRED_MODEL_SUBAGENT_CONTROL_TOOLS
     ]
+    if SHELL_TOOL in tools and PROCESS_SESSION_TOOL not in tools:
+        tools.insert(tools.index(SHELL_TOOL) + 1, PROCESS_SESSION_TOOL)
+    return tools
 
 
 @dataclass(frozen=True)

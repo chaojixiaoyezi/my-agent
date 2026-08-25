@@ -56,6 +56,24 @@ def test_subagent_effective_permission_snapshot_keeps_restricted_shell(tmp_path)
     assert loaded.runtime_identity.memory_namespace == f"subagent:{loaded.root_id}:{loaded.id}"
 
 
+def test_owner_disabled_tool_remains_final_after_shell_dependency_closure(tmp_path) -> None:
+    """旧任务会补齐续接工具，但 owner 的显式禁用不能被依赖闭包加回。"""
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(
+        goal="运行一次前台检查",
+        thought="只允许前台命令",
+        plan=["check"],
+        allowed_tools=["run_command"],
+    )
+    task.effective_permissions["disabled_tools"] = ["process_session"]
+    manager.save(task)
+
+    context = manager.runner_context.build_execution_context(task.id)
+
+    assert "run_command" in context.allowed_tools
+    assert "process_session" not in context.allowed_tools
+
+
 def test_subagent_memory_scope_uses_create_params_policy(tmp_path) -> None:
     """子代理记忆命名空间由系统生成，保留策略来自配置/创建参数。"""
     manager = SubAgentManager(tmp_path)

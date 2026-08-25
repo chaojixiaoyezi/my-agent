@@ -1426,7 +1426,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   Prompt 4；main 进入“等待 4 个子代理”后，固定 Todo 仍显示 `完成 1/9 · 进行中 6` 和四行窗口，下面
   同时展示 4 个直属 child。该证据直接覆盖修复前“child link 更新更晚就把 root Todo 清空”的失败窗口。
 
-## 2026-08-24 后台主代理富过程事件流【状态：实现中】
+## 2026-08-24 后台主代理富过程事件流【状态：传输合批本地候选 focused 通过，待 `.7` 真机】
 
 - 用户要求后台续跑也采用 终端交互 的正文过程展示：模型过程说明为灰色消息，工具以蓝色标题和缩进结果
   展示，文件修改继续使用已有的行号、红删蓝增 diff 与折叠提示；输入框上方仍只保留一条 main
@@ -1442,6 +1442,33 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - `/client/notices` 以独立 `event_after/event_cursor` 增量读取该 ring；最终 owner reply 仍走原来的持久
   `background_notice.v2`，活动数量/Todo/child 仍来自 canonical projection。该事件流只增强实时展示，
   Gateway 重启后允许丢失中间过程，不能成为 transcript、任务生命周期、Compact、重试或恢复的新权威。
+- `ma-97468f3-longchain-r27` 的 Rust 复刻续轮给出新的直接反例：Gateway 持续执行工具且 main activity 正常
+  更新，但 MiniMax 把一段 reasoning 拆成数百个极短 delta；1024 条 ring 被逐 token 事件打满后，TUI 数分钟
+  只显示旧 `run_command`，随后一次性追上。对照 会话运行时
+  `会话运行时-rs/tui/src/chatwidget/streaming.rs::on_agent_reasoning_delta` 的当前 reasoning buffer，以及 终端交互
+  `src/utils/messages.ts::handleMessageFromStream` + Ink 帧级 render throttle，当前传输层保留首片即时事件，
+  后续同一 block 按 0.25 秒或 256 字符合批；完整 `thinking_completed` 仍是慢客户端恢复权威。合批不改变
+  lifecycle、Compact、正文持久化或完成判断，47 项 background/TUI focused 已通过。
+
+## 2026-08-25 会话运行时 式后台进程会话续接【状态：本地候选 focused 通过，待 `.7` 真机】
+
+- 真实 Rust 构建现场使用 `run_command(run_in_background=true)` 后，返回文案要求模型调用
+  `process_status/list_processes/kill_process`，但 Registry 从未注册这三个模型工具；shell 又正确拒绝裸 `&`，
+  最终模型只能执行 `sleep 60 && cat log`，额外占用工具轮、延迟回复，并把 sleep 当成进程管理。
+- 对照 会话运行时 `unified_exec/write_stdin.rs` 与 `process_manager.rs`：已有 exec session 应由同一个 session id
+  续接，空输入做有界等待并返回真实终态；对照 终端交互 `LocalShellTask`/`TaskOutputTool`：后台任务归属当前
+  app session，输出和停止走任务面，不重新拼 shell 轮询。当前适配为唯一 `process_session` 工具，提供
+  `list/status/wait/stop`，其中 wait 最长 30 秒，超时只返回 running，不伪造失败。
+- 单 Gateway 是多用户共享进程，不能照搬单用户内存表。每条后台记录在启动时绑定 executor host 注入的
+  `owner_id + conversation session`（无 session 时依次退到 root task/root run/run）以及 owner home；查询、
+  日志和停止必须精确匹配，错误 scope 与不存在统一返回 `PROCESS_NOT_FOUND`。模型只能提供 session id，不能
+  提供或覆盖 scope。主子代理若属于不同 agent thread 也互不越界。
+- 原先三个不存在的工具名和恢复提示已统一改成 `process_session`；模型需要结果时调用 wait，不再运行
+  `sleep` 轮询。新增 7 项 focused 覆盖真实后台结束、日志返回、会话隔离、scope 缺失、完整进程树停止，
+  并证明能启动后台命令的 main/coding child 工具快照一定同时包含续接工具。
+- 子代理的最终执行工具快照把 `run_command -> process_session` 作为结构化依赖闭包：角色默认、显式 coding
+  预设、能力申请获批和旧任务恢复都走同一规范化入口；owner 显式 `disabled_tools` 仍在闭包之后做最终收窄。
+  因此不是靠提示词要求模型再次申请，也不会只有新建 child 生效、恢复 child 继续缺工具。
 
 ## 2026-08-24 较早未决操作的 会话运行时 式软核对
 

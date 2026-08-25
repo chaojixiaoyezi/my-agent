@@ -22,7 +22,11 @@ from ..policies import (
     _dedupe_granted_cards,
     _execution_context_instructions,
 )
-from ..role_templates import is_self_authorized_root_task, role_template_snapshot_for_task
+from ..role_templates import (
+    active_model_subagent_tools,
+    is_self_authorized_root_task,
+    role_template_snapshot_for_task,
+)
 from ..runner_context_bundle_files import execution_context_bundle, write_context_bundle_files
 from ..runner_rendering import render_execution_context_markdown
 from ..utils import (
@@ -367,17 +371,21 @@ def _attach_runtime_guidance(bundle: dict[str, object], guidance: list[dict[str,
         bundle["runtime_guidance"] = guidance
 
 
+# LLM: This is the last model-execution seam for persisted task/grant tools; apply the canonical
+# retirement and shell-session dependency closure before owner disabled-tool policy, which remains final.
+# 函数用途: 生成子代理本轮真正可见的工具清单，并为旧任务补齐后台命令续接工具。
 def _runner_allowed_tools(task: SubAgentTask, tools: list[str]) -> list[str]:
     if exact_scope := audit_worker_tool_scope(
         getattr(task, "attributes", None)
     ):
-        return list(exact_scope)
+        return active_model_subagent_tools(exact_scope)
     disabled = {
         str(item or "").strip()
         for item in (getattr(task, "effective_permissions", {}) or {}).get("disabled_tools", [])
         if str(item or "").strip()
     }
-    filtered = [item for item in tools if str(item or "").strip() not in disabled]
+    normalized = active_model_subagent_tools(tools)
+    filtered = [item for item in normalized if str(item or "").strip() not in disabled]
     if not is_self_authorized_root_task(task):
         return filtered
     return [item for item in filtered if item != "capability_request"]

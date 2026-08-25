@@ -1,5 +1,54 @@
 # TESTS
 
+## 2026-08-25 后台进程只能由所属用户会话续接
+
+真实失败样本是 `.7` 长任务启动后台 `cargo check` 后，模型按工具回执寻找
+`process_status/list_processes/kill_process`，但三个名字都不存在，只能另跑 shell sleep 轮询。回归要求
+`run_command` 的 host scope 随后台记录冻结，`process_session wait` 返回真实退出码和日志，其他 TUI session
+看不到同一 id，stop 终止完整进程树，裸工具调用在缺少可信 scope 时 fail-closed：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_process_sessions.py \
+  agent_py_agent/tests/test_tools/test_shell_background.py \
+  agent_py_agent/tests/test_tooling_shell.py \
+  -q --tb=short
+```
+
+当前结果：46 passed。部署后在同一长 TUI 的下一次后台构建中检查模型实际调用
+`process_session(action=wait)`，不得再出现 `run_command("sleep ...")` 轮询。
+
+子代理还要覆盖默认角色、动态 shell 授权和旧持久任务恢复的工具依赖闭包：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_orchestration_tool_constants.py \
+  agent_py_agent/tests/test_capability_auto_grant.py \
+  agent_py_agent/tests/test_subagent_capability_request_tool.py \
+  agent_py_agent/tests/test_subagent_role_templates.py \
+  agent_py_agent/tests/test_subagent_effective_runtime_context.py \
+  -q --tb=short
+```
+
+与 process session 回归合跑当前 54 passed；owner 显式 `disabled_tools` 仍是最终收窄，依赖闭包不能把禁用工具
+偷偷加回。
+
+## 2026-08-25 后台 thinking 传输必须合批且保留完整终态
+
+真实失败样本来自 `.7` 长 TUI `ma-97468f3-longchain-r27`：后台工具仍连续执行，但一个 reasoning block 的
+逐 token delta 把 1024 条公开事件环打满，TUI 数分钟停在旧工具后才一次性追上。回归要求首片即时可见、
+短时间内的碎片不逐条落事件、到时间/字符阈值后按原顺序合批，最终完整 thinking 仍覆盖全部正文：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_background_notice_display.py \
+  agent_py_agent/tests/test_tui_runtime.py \
+  -q --tb=short
+```
+
+当前结果：47 passed。部署后继续使用同一 session 的普通追加轮，比较 Gateway `event_cursor` 增长、TUI 首次
+可见延迟和终态正文；测试者不读取或修改被测产物来推动任务。
+
 ## 2026-08-25 完成合批不能漏掉 sibling 结果
 
 真实失败样本为 `.7` 同一长 TUI 的七路调研：7 个 child 全部 `DONE`，root 只读取 5 份并把另两份误报为
@@ -441,7 +490,8 @@ sibling 占用时才返回 `await_existing_run_lifecycle_event` 和其 run id。
 `db41bb0` 部署后的原样 TUI 复验已有四名 child 全部 `DONE` 和完整页面文件，但 8080 最终未监听。证据
 显示模型在前台 `run_command` 内使用 `nohup ... &`，同一条命令里的 curl 得到 200 后，foreground shell
 结束时未受管 child 被清理。新增回归覆盖：独立 `&` 在任何模式都以 `not_started` 拒绝；`2>&1` 和引号内
-`&` 不误伤；真正的 `run_in_background=true` 在工具返回后仍能由 `process_status` 看到并由 registry 终止。
+`&` 不误伤；真正的 `run_in_background=true` 在工具返回后仍能由 `process_session` 看到、等待并由 registry
+终止，其他 owner/TUI 会话不能通过可猜 session id 读取日志或发停止信号。
 子代理侧同时覆盖单次 phase 快照、采样期间终态回复不公开、晚于采样时刻的 sibling wake 保持 pending，
 以及全部 child 已终态时不依赖 active root task status 放行自然回复。定向 runtime/shell/error taxonomy
 组合通过；按用户约定不重跑全仓 pytest。
@@ -525,7 +575,7 @@ python3 -m pytest agent_py_agent/tests/test_lease.py agent_py_agent/tests/test_g
 python3 -m pytest agent_py_agent/tests/test_planner.py agent_py_agent/tests/test_agent/test_dispatch_capability_followup.py -q
 python3 -m pytest agent_py_agent/tests/test_code_size_script.py agent_py_agent/tests/test_architecture_guardrails.py -q
 python3 -m pytest agent_py_agent/tests/test_registry_resilience_contract.py agent_py_agent/tests/test_attempt_sandbox.py agent_py_agent/tests/test_sandbox.py agent_py_agent/tests/test_tooling_shell.py agent_py_agent/tests/test_owner_scoped_pip_env.py agent_py_agent/tests/test_path_access_owner_scope.py agent_py_agent/tests/test_graceful_shutdown.py -q
-python3 -m pytest agent_py_agent/tests/test_shell_orphan_kill.py agent_py_agent/tests/test_process_registry_tools.py agent_py_agent/tests/test_shell_bg_log_cap.py -q
+python3 -m pytest agent_py_agent/tests/test_shell_orphan_kill.py agent_py_agent/tests/test_process_sessions.py agent_py_agent/tests/test_shell_bg_log_cap.py -q
 python3 -m pytest agent_py_agent/tests/test_container_install.py agent_py_agent/tests/test_check_clean_package.py -q
 python3 -m pytest agent_py_agent/tests/test_mcp_registration.py agent_py_agent/tests/test_offline_contract_matrix_gate.py -q
 python3 -m pytest agent_py_agent/tests/test_tool_input_completion_provenance.py agent_py_agent/tests/test_tool_input_schema.py agent_py_agent/tests/test_tool_call_policy_contract.py agent_py_agent/tests/test_tool_call_parameter_gate_wiring.py agent_py_agent/tests/test_runtime_gate_integration.py agent_py_agent/tests/test_backends_tool_schema.py agent_py_agent/tests/test_backends_tool_schema_precise.py agent_py_agent/tests/test_mcp_registration.py -q

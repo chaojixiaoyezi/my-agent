@@ -164,6 +164,7 @@ agent_py_agent/
 |   |   |-- _filesystem_display.py   # 文件工具共用的有界 diff/write 富终端展示事实构造器
 |   |   |-- _persona_write_guard.py   # SOUL/USER/AGENTS 统一强制走 update_persona
 |   |   |-- process_registry.py       # 前后台命令完整后代树终止的唯一进程入口
+|   |   |-- process_sessions.py       # owner+TUI 会话隔离的后台命令查询、等待与停止工具
 |   |   |-- shell.py                  # run_command、超时/中断与有界 pipe drain
 |   |   |-- tool_input_completion.py # 明示安全默认值、可信上下文补参与脱敏 source/source_ref
 |   |   `-- sandbox.py                # bwrap 唯一策略、自检、worker/K8s readiness 硬门
@@ -216,6 +217,7 @@ agent_py_agent/
 |   |-- test_memory_admin_cli_v2.py    # 统一 Memory 管理命令复用正式服务
 |   |-- test_tool_input_completion_provenance.py # 有限补参、来源账目、伪造拒绝和旧旁路删除回归
 |   |-- test_tool_input_schema.py      # 强类型纠正、嵌套/组合/边界规则与显式 Schema fail-closed
+|   |-- test_process_sessions.py       # 后台命令有界等待、进程树停止与 owner/TUI 会话隔离回归
 |   |-- test_sandbox.py                # bwrap argv、自检协议、owner-scoped fail-closed
 |   |-- test_container_install.py      # 假 runtime 验证一键 build/probe/透明包装器
 |   `-- test_check_clean_package.py    # untracked、运行目录和 tar/wheel 制品门

@@ -61,6 +61,8 @@ def test_routine_shell_write_request_auto_grants():
         assert grant is not None
         assert "run_command" in grant.tools
         assert "write_file" in grant.tools and "apply_patch" in grant.tools
+        context = agent.subagents.runner_context.build_execution_context(task.id)
+        assert "process_session" in context.allowed_tools
         assert grant.command_allowlist == ["npm"]
         assert grant.request_scope.get("resolved_by") == "capability_auto_grant"
         reloaded = agent.subagents.load(task.id)

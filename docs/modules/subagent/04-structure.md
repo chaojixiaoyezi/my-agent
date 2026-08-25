@@ -6,6 +6,18 @@
 `task_node_closeout` 副本。canonical task/result 是唯一结果事实源；父代理通过结构化 status、blockers、
 findings、artifact refs 和 result payload 阅读子代理工作，再由模型向用户汇总。
 
+## 2026-08-25 后台命令工具依赖闭包
+
+- `run_command` 的 schema 自带 `run_in_background=true`，因此 `process_session` 不是模型另行申请的可选便利，
+  而是同一能力的续接面。`role_templates.active_model_subagent_tools` 是该依赖的 canonical closure：任何模型
+  快照只要含 `run_command`，就按原顺序在其后补一个 `process_session`。
+- 新建 role/coding preset、动态 capability grant、磁盘恢复的旧 `allowed_tools` 和后台 main 配置都经过该
+  closure；`runner_context_service._runner_allowed_tools` 是 child 真正执行前的最后补齐点，不能只在创建回执
+  或 prompt 里声称存在。
+- owner/task 的结构化 `disabled_tools` 在补齐后做最终收窄，仍可明确禁用 `process_session`；session id 只做
+  定位，实际读日志、等待和停止还要通过 executor 注入的 owner/TUI scope 精确匹配。这不新增自然语言授权，
+  也不扩大 workspace 或 shell access mode。
+
 ## 2026-08-25 root completion mailbox 合批边界
 
 - 每个直属 child 的 `subagent-completion.v1` 都是独立耐久交付义务；canonical 树全终态只证明可以整合，

@@ -1,5 +1,30 @@
 # STATUS
 
+## 2026-08-25 后台命令返回了不存在的管理工具（本地候选）
+
+- `.7` Rust 复刻现场中，`run_command(run_in_background=true)` 明示可用
+  `process_status/list_processes/kill_process`，实际 Tool Registry 一个也没有注册，模型只能用
+  `sleep 60 && cat log` 轮询。这不是 MiniMax 慢，而是底座向模型承诺了不存在的工具。
+- 当前候选新增一个统一 `process_session`，支持 `list/status/wait/stop`；wait 在一个工具调用内有界等待真实
+  Popen/PID，不创建 shell sleep。run_command 返回提示、`PROCESS_NOT_FOUND` 恢复建议和实际工具名已一致。
+- 共享 Gateway 中的后台记录按可信 `owner + conversation session + owner home` 精确隔离，模型不能传 scope；
+  错误会话既看不到日志，也不能停止进程。7 项新 focused 与既有 shell focused 合计 46 项全部通过，待当前长
+  任务自然结束后随 thinking 合批一起严格 gate、提交、只重启唯一 Gateway，并在同一 TUI 后续轮真测。
+- 子代理最终工具快照会为任何 `run_command` 自动补齐 `process_session`，覆盖默认 role、coding preset、动态
+  capability grant 和旧任务恢复；显式禁用仍优先。角色/授权/运行上下文组合 54 项通过。
+
+## 2026-08-25 后台 thinking 碎事件拖慢 TUI（本地候选）
+
+- `.7` 长 TUI `ma-97468f3-longchain-r27` 的 Rust 复刻续轮中，Gateway 工具索引在数分钟内持续新增
+  `cargo check/read/edit`，main context 也从约 50k 增至 80k；界面却长期停在旧 `run_command`，随后突然补出
+  大段 reasoning 和后续工具。只读 `/client/notices` 证明同一 thinking block 已产生 1024 条保留事件并发生
+  ring 裁剪，其中大量事件只有一个词或几个字符，因此不是模型或命令停住，而是 TUI 在追赶碎事件。
+- 对照 会话运行时 当前 reasoning buffer 和 终端交互 状态累积 + render throttle，当前候选让首个 delta 立即可见，
+  后续同块碎片按 0.25 秒或 256 字符合批，最终 `thinking_completed` 仍携带完整正文供慢客户端恢复。展示层
+  合批不参与消息、任务、Compact、权限或完成事实。
+- `test_background_notice_display.py` 与 `test_tui_runtime.py` 共 47 项通过。待当前真实任务自然结束后再严格
+  gate、部署唯一 Gateway，并在同一 session 的下一轮普通输入验证不再分钟级追赶。
+
 ## 2026-08-25 七路 child 完成只交给 root 五份（本地候选）
 
 - `.7` 长 TUI `ma-97468f3-longchain-r27` 的 7 个调研 child 全部真实 `DONE`，固定 task state 也保存了 7 个

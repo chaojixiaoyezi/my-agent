@@ -48,7 +48,12 @@ from .models import (
     ToolRuntimePolicy,
     TrustedParameterBinding,
 )
-from .process_registry import process_registry, terminate_process_tree
+from .process_registry import (
+    ProcessAccessScope,
+    process_access_scope,
+    process_registry,
+    terminate_process_tree,
+)
 from .sandbox import SandboxUnavailable
 
 _MAX_COMMAND_CHARS = 2000
@@ -740,7 +745,7 @@ def _build_shell_tool_model_spec(
             avoid_when=(
                 "Use read_file / write_file when only file IO is needed.",
                 "Avoid for interactive terminal workflows.",
-                "Never append shell '&' or use 'nohup ... &' for a service; remove those wrappers and set run_in_background=true so process_status and kill_process can manage it.",
+                "Never append shell '&' or use 'nohup ... &' for a service; remove those wrappers, set run_in_background=true, then use process_session to wait, inspect, or stop it.",
                 "Prefer write_file for file changes instead of shell redirection.",
                 "Do not use rm/rmdir/unlink. Delete one text file with apply_patch; route directory or bulk deletion through task_trash.",
                 "Files written under /tmp inside the owner-scoped sandbox are kept in the task workspace .sandbox-tmp directory and survive across tool calls and requests; still keep final deliverables in the selected workspace, not in /tmp.",
@@ -798,6 +803,7 @@ class ShellTool(BaseTool):
                     "__sandbox_write_roots",
                     "__sandbox_read_roots",
                     "__access_mode",
+                    "__run_scope",
                 ),
                 safe_parameter_defaults=(
                     ("timeout", self.default_timeout),
@@ -914,6 +920,10 @@ class ShellTool(BaseTool):
                 target,
                 sandbox_write_roots,
                 sandbox_read_roots,
+                process_access_scope(
+                    params.get("__run_scope"),
+                    self.path_access_policy.owner_scope_root,
+                ),
             )
         return self._execute_with_artifact_protection(
             command,
@@ -1136,16 +1146,16 @@ class ShellTool(BaseTool):
     #   run_command 此前只能一次性阻塞执行,跑不了长任务而不卡住工具循环)。
     #   契约:Popen 独立会话启动(start_new_session,与子代理后台进程同款,出口
     #   孤儿回收能发现),stdout/stderr 合并落工作区 .background_jobs/ 日志文件,
-    #   立即返回 pid + output_file;模型用 read_file 读进度、kill <pid> 收尾。
-    #   不做交互式 stdin(那是 P0-2b,需 PTY 会话池),先覆盖最高频的"长任务
-    #   后台化"。
-    # 函数用途: 把命令丢到后台跑,马上回 pid 和日志路径,不等它结束。
+    #   立即返回 pid + output_file + session_id；所属用户会话由 host scope 固定，
+    #   后续只允许 process_session 查询/等待/停止。不做交互式 stdin（由 PTY 管）。
+    # 函数用途: 把命令放到当前用户会话的后台，马上返回，不堵住模型工具循环。
     def _start_background_command(
         self,
         command: str,
         target: Path,
         sandbox_write_roots: tuple[Path, ...] | None,
         sandbox_read_roots: tuple[Path, ...] | None,
+        access_scope: ProcessAccessScope,
     ) -> ToolHandlerOutcome:
         try:
             jobs_dir = self.workspace_root / ".background_jobs"
@@ -1187,14 +1197,15 @@ class ShellTool(BaseTool):
             )
         handle.close()  # 子进程已持有 fd 副本,父进程关闭自己的句柄避免泄漏
         _record_background_job(jobs_dir, process.pid, command, log_path)
-        # 登记进进程内注册表,模型可用 list_processes/process_status/kill_process
-        # 按 session_id 查状态、收割、按进程组杀(避免只剩日志文件管不了进程)。
+        # 登记进程及可信会话范围；模型只通过 process_session 按 session_id
+        # 查询、等待或整组停止，避免只剩日志文件却管不了进程。
         record = process_registry.register(
             command=command,
             pid=process.pid,
             output_file=str(log_path),
             process=process,
             cwd=str(target),
+            access_scope=access_scope,
         )
         _LogSizeWatchdog(
             process,
@@ -1207,9 +1218,9 @@ class ShellTool(BaseTool):
             "pid": process.pid,
             "output_file": str(log_path),
             "hint": (
-                "命令已在后台运行。用 process_status 传 session_id 查状态+最近输出,"
-                "list_processes 看所有后台进程,kill_process 传 session_id 终止(会杀整个进程组)。"
-                "也可以用 read_file 直接读 output_file 看完整日志。"
+                "命令已在后台运行。用 process_session 的 status/wait/list/stop 动作管理；"
+                "需要结果时用 wait 有界等待，不要运行 sleep 轮询。"
+                "也可以用 read_file 读取 output_file 的完整日志。"
             ),
         }
         return ToolHandlerOutcome(

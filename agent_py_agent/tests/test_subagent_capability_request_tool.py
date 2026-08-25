@@ -183,6 +183,7 @@ def test_capability_request_tool_is_registered_for_simple_agent(tmp_path):
 
 def test_capability_request_tool_role_default_still_requires_parent_scope(tmp_path):
     assert "capability_request" in ROLE_BASE_TOOLS
+    assert "process_session" in ROLE_BASE_TOOLS
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
     parent = manager.create_run(

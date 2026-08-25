@@ -986,7 +986,10 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         category="tool",
         retryable=True,
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
-        recovery_hint="没有这个 session_id 的后台进程；先用 list_processes 查当前后台进程及其 session_id，再用正确的 session_id 调 process_status/kill_process。",
+        recovery_hint=(
+            "当前用户会话中没有这个 session_id 的后台进程；先用 process_session "
+            "的 list 动作查看，再用正确的 session_id 调 status/wait/stop。"
+        ),
     ),
     "WRONG_STATUS_SURFACE": ErrorContract(
         code="WRONG_STATUS_SURFACE",

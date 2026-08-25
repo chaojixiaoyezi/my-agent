@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from ...common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
-from ...subagents.role_templates import active_model_subagent_tools
+from ...subagents.role_templates import SHELL_SESSION_TOOLS, active_model_subagent_tools
 
 CODING_SUBAGENT_TOOLS = [
     "list_files",
@@ -14,7 +14,7 @@ CODING_SUBAGENT_TOOLS = [
     "watch_stream",
     "write_file",
     "apply_patch",
-    "run_command",
+    *SHELL_SESSION_TOOLS,
     "capability_request",
 ]
 READ_ONLY_SUBAGENT_TOOLS = [

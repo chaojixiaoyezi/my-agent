@@ -1,5 +1,14 @@
 # Subagent Progress
 
+## 2026-08-25 后台过程 thinking 合批（本地候选）
+
+- `ma-97468f3-longchain-r27` 中 Gateway 的工具调用持续前进，TUI 却数分钟只显示旧工具；只读事件页证明
+  单个 thinking block 的逐 token delta 已塞满 1024 条 ring，随后客户端才批量追上。
+- 对照 会话运行时 reasoning buffer 与 终端交互 状态累积/帧级 render，当前 sink 保留首片即时显示，把后续同块
+  碎片按 0.25 秒或 256 字符合并，完整终态继续兜底。该变更只减少公开展示事件，不改 child/main 生命周期、
+  transcript、Compact 或完成判断。
+- background/TUI 47 项 focused 已通过；待当前真实复刻自然结束后部署单 Gateway，并在同一 session 复验。
+
 ## 2026-08-25 七路完成信封被合批截断（本地候选）
 
 - 七个真实 child 均已 `DONE`，root task state 也有七个 exact id；后台 active wake 只带五份，root 猜路径后

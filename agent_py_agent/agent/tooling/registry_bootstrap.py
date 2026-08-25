@@ -16,6 +16,7 @@ from .models import (
     KeywordToolSearchProvider,
     VectorToolSearchProvider,
 )
+from .process_sessions import ProcessSessionTool
 from .pty_sessions import TerminalSessionTool
 from .shell import ShellTool, ShellToolOptions
 from .web import WebFetchTool
@@ -110,8 +111,8 @@ def _register_network_tools(registry: Any, params: Any) -> None:
         ),
     )
     registry.register(shell_tool)
+    registry.register(ProcessSessionTool(params.owner_scope_root))
     registry.register(TerminalSessionTool(shell_tool))
-    # 后台进程管理由 run_command 自带 (& 后台/ps/kill) 覆盖,不注册独立工具。
     # controlled_exec is an internal tool used by capability grants.
     # flows, but ToolRegistry hides it from the default model-facing catalog.
     registry.register(ControlledExecTool())

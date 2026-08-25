@@ -21,6 +21,10 @@ BACKGROUND_TRANSCRIPT_SCHEMA = "background_transcript_event.v1"
 BACKGROUND_TRANSCRIPT_MAX_EVENTS = 1024
 BACKGROUND_TRANSCRIPT_MAX_THREADS = 256
 BACKGROUND_TRANSCRIPT_TEXT_LIMIT = 12_000
+# 远端 TUI 每秒读取一次过程页；比这个频率更密的逐 token thinking 事件只会
+# 挤满有界环并拖慢 reducer，合到短批次后仍能保持肉眼连续更新。
+BACKGROUND_TRANSCRIPT_DELTA_FLUSH_SECONDS = 0.25
+BACKGROUND_TRANSCRIPT_DELTA_FLUSH_CHARS = 256
 
 _TRANSCRIPT_STATE_ATTR = "_conversation_background_transcript_projection"
 _TRANSCRIPT_LOCK_ATTR = "_conversation_background_transcript_projection_lock"
@@ -104,6 +108,43 @@ class _ThreadTranscriptState:
     )
 
 
+# LLM: This helper owns only transport batching for one active thinking block; it never writes
+# events or carries task/thread identity, so terminal recovery remains in BackgroundTranscriptSink.
+# 类用途: 累积逐 token 思考碎片，并在首片、时间、换行或字符阈值到达时交出一批正文。
+@dataclass
+class _ThinkingDeltaBatcher:
+    pending: str = ""
+    emitted: bool = False
+    last_flush_at: float = field(default_factory=lambda: time.monotonic())
+
+    # LLM: Reset is called only when a new thinking block starts or its terminal full event lands.
+    # 函数用途: 清空上一思考块的合批状态并重新开始计时。
+    def reset(self) -> None:
+        self.pending = ""
+        self.emitted = False
+        self.last_flush_at = time.monotonic()
+
+    # LLM: Returned text preserves exact append order; an empty return means keep buffering and
+    # must not be interpreted as a lifecycle or provider failure.
+    # 函数用途: 追加一段思考碎片，并在达到刷新条件时返回整批文本。
+    def append(self, content: str) -> str:
+        self.pending += content
+        now = time.monotonic()
+        should_flush = (
+            not self.emitted
+            or len(self.pending) >= BACKGROUND_TRANSCRIPT_DELTA_FLUSH_CHARS
+            or "\n" in self.pending
+            or now - self.last_flush_at >= BACKGROUND_TRANSCRIPT_DELTA_FLUSH_SECONDS
+        )
+        if not should_flush:
+            return ""
+        batch = self.pending
+        self.pending = ""
+        self.emitted = True
+        self.last_flush_at = now
+        return batch
+
+
 # LLM: This writer converts one background model callback into the same public
 # block vocabulary already rendered by the foreground TUI. It buffers candidate
 # model text until a real tool boundary so the durable final reply is not shown
@@ -138,6 +179,7 @@ class BackgroundTranscriptSink:
         self._thinking_block_id = ""
         self._thinking_text = ""
         self._thinking_active = False
+        self._thinking_delta_batcher = _ThinkingDeltaBatcher()
         self._model_text = ""
         self._tool_blocks: set[str] = set()
         self._retry_index = 0
@@ -181,12 +223,14 @@ class BackgroundTranscriptSink:
             return False
         self._ensure_thinking_started()
         self._thinking_text += content
-        self._event(
-            "thinking_delta",
-            "delta",
-            self._thinking_block_id,
-            {"text": content},
-        )
+        batch = self._thinking_delta_batcher.append(content)
+        if batch:
+            self._event(
+                "thinking_delta",
+                "delta",
+                self._thinking_block_id,
+                {"text": batch},
+            )
         return True
 
     # LLM: A full explicit thinking result freezes the currently streamed block,
@@ -211,6 +255,7 @@ class BackgroundTranscriptSink:
         self._thinking_active = False
         self._thinking_block_id = ""
         self._thinking_text = ""
+        self._thinking_delta_batcher.reset()
         return True
 
     # LLM: Tool events already come from _structured_tool_progress. The optional
@@ -350,6 +395,7 @@ class BackgroundTranscriptSink:
         self._thinking_index += 1
         self._thinking_block_id = f"{self.request_id}:thinking:{self._thinking_index}"
         self._thinking_active = True
+        self._thinking_delta_batcher.reset()
         self._event(
             "thinking_started",
             "started",

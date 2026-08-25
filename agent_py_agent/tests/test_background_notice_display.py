@@ -455,6 +455,52 @@ def test_background_transcript_sink_reuses_free_code_diff_renderer() -> None:
     assert any("class:tui-diff-add" in fragment[0] for fragment in new_line)
 
 
+def test_background_thinking_deltas_are_batched_before_tui_transport(monkeypatch) -> None:
+    """逐 token 思考先合批，首片即时可见且完整终态仍能恢复全部正文。"""
+    from agent_py_agent.agent.conversation import background_transcript
+
+    now = [100.0]
+    monkeypatch.setattr(background_transcript.time, "monotonic", lambda: now[0])
+    agent = SimpleNamespace()
+    sink = background_transcript.BackgroundTranscriptSink(
+        agent,
+        thread_id="thread-batched-thinking",
+        task_id="task-batched-thinking",
+    )
+
+    assert sink.write_thinking_delta("首") is True
+    for _index in range(100):
+        assert sink.write_thinking_delta("片") is True
+    first_page = background_transcript.read_background_transcript_events(
+        agent,
+        thread_id="thread-batched-thinking",
+        after=0,
+    )
+    assert [row["kind"] for row in first_page["events"]] == [
+        "thinking_started",
+        "thinking_delta",
+    ]
+    assert first_page["events"][1]["payload"]["text"] == "首"
+
+    now[0] += background_transcript.BACKGROUND_TRANSCRIPT_DELTA_FLUSH_SECONDS
+    assert sink.write_thinking_delta("末") is True
+    full_text = "首" + "片" * 100 + "末"
+    assert sink.write_thinking(full_text, duration_seconds=3.0) is True
+    final_page = background_transcript.read_background_transcript_events(
+        agent,
+        thread_id="thread-batched-thinking",
+        after=0,
+    )
+    assert [row["kind"] for row in final_page["events"]] == [
+        "thinking_started",
+        "thinking_delta",
+        "thinking_delta",
+        "thinking_completed",
+    ]
+    assert final_page["events"][2]["payload"]["text"] == "片" * 100 + "末"
+    assert final_page["events"][3]["payload"]["text"] == full_text
+
+
 def test_child_transcript_publishes_consumed_input_only_after_provider_acceptance() -> None:
     """child sink 只在模型请求成功后发布 exact 用户消费回执。"""
     from agent_py_agent.agent.conversation.background_transcript import (

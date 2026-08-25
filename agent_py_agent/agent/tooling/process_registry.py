@@ -23,6 +23,10 @@ from __future__ import annotations
 SIGTERM 宽限后再 SIGKILL;Windows 用 taskkill /T /F 杀进程树。
 """
 
+# LLM: 本模块是后台 shell 的唯一进程事实源；任何模型可见的查询或停止入口都必须
+# 携带 host 注入的 ProcessAccessScope，不能仅凭可猜的 session_id 访问全局记录。
+# 模块用途: 登记后台命令、按用户会话隔离查询，并可靠终止整棵进程树。
+
 import json
 import os
 import signal
@@ -44,6 +48,56 @@ _OUTPUT_TAIL_CHARS = 4000
 _MAX_FINISHED = 128
 
 
+# LLM: Scope equality is the authorization test; do not add fuzzy path ancestry or natural-language
+# identity fallback here. Empty fields deliberately fail the model-facing bound check.
+# 类用途: 保存一条后台进程可被哪个用户、哪个 TUI 会话访问的不可变身份。
+@dataclass(frozen=True)
+class ProcessAccessScope:
+    """后台进程的可信访问边界；空 conversation_id 表示不能暴露给模型工具。"""
+
+    owner_id: str = ""
+    conversation_id: str = ""
+    owner_home: str = ""
+
+    # LLM: Both owner and conversation identity are required before model-visible access.
+    # 函数用途: 判断这份范围是否足以安全地访问共享 Gateway 里的后台进程。
+    def is_bound(self) -> bool:
+        return bool(self.owner_id and self.conversation_id)
+
+
+# LLM: Scope 只能从 executor 注入的 run_scope 和 registry 的 owner home 构造；
+# 选择 session -> root task -> root run -> run 的稳定降级顺序，以便主子代理在同一
+# 对话树内协作，同时隔离其他用户、其他 TUI 会话和无法证明归属的裸调用。
+# 函数用途: 把本轮可信身份整理成后台进程查询和停止所用的精确访问范围。
+def process_access_scope(
+    run_scope: object,
+    owner_scope_root: object = "",
+) -> ProcessAccessScope:
+    scope = run_scope if isinstance(run_scope, dict) else {}
+    owner_home = ""
+    if owner_scope_root:
+        owner_home = str(Path(str(owner_scope_root)).expanduser().resolve(strict=False))
+    owner_id = str(scope.get("owner_id") or "").strip()
+    if not owner_id and owner_home:
+        owner_id = f"path:{owner_home}"
+    conversation_id = next(
+        (
+            str(scope.get(key) or "").strip()
+            for key in ("session_id", "root_task_id", "root_run_id", "run_id")
+            if str(scope.get(key) or "").strip()
+        ),
+        "",
+    )
+    return ProcessAccessScope(
+        owner_id=owner_id,
+        conversation_id=conversation_id,
+        owner_home=owner_home,
+    )
+
+
+# LLM: 记录既保存进程生命周期事实，也保存启动时的不可变访问范围；后续查询不得
+# 用当前工作目录猜归属。新增生命周期字段时同步 summary 投影和进程工具测试。
+# 类用途: 保存一条后台命令的进程、日志、状态和所属用户会话。
 @dataclass
 class BackgroundProcess:
     """一个被登记的后台进程。对标 长期助手 ProcessSession,裁剪到 my-agent 够用的字段。"""
@@ -52,6 +106,7 @@ class BackgroundProcess:
     command: str
     pid: int
     started_at: float
+    access_scope: ProcessAccessScope = field(default_factory=ProcessAccessScope)
     cwd: str = ""
     output_file: str = ""
     process: subprocess.Popen | None = None  # 父进程 Popen 句柄(同进程内才有)
@@ -103,6 +158,9 @@ def _read_log_tail(output_file: str, max_chars: int) -> str:
     return text
 
 
+# LLM: Registry 是 Gateway 进程级共享对象；所有模型可见读写必须传 access_scope，
+# None 只保留给进程内部兼容调用和测试，不能从工具参数产生。
+# 类用途: 线程安全地登记、等待、列出和终止后台命令，并按用户会话过滤记录。
 class ProcessRegistry:
     """进程内单实例后台进程注册表。线程安全(run_command 与查询/杀工具可能并发)。"""
 
@@ -116,6 +174,9 @@ class ProcessRegistry:
         self._counter += 1
         return f"bg-{self._counter}-{int(time.time())}"
 
+    # LLM: access_scope is frozen into the record at launch and cannot be replaced later by a
+    # caller-supplied session id; callers without trusted scope remain internal-only records.
+    # 函数用途: 登记一条刚启动的后台命令，并返回后续管理所需的 session id。
     def register(
         self,
         *,
@@ -125,6 +186,7 @@ class ProcessRegistry:
         process: subprocess.Popen | None = None,
         cwd: str = "",
         session_id: str | None = None,
+        access_scope: ProcessAccessScope | None = None,
     ) -> BackgroundProcess:
         """登记一个刚启动的后台进程,返回其记录(含 session_id 供模型后续查/杀)。"""
         with self._lock:
@@ -134,6 +196,7 @@ class ProcessRegistry:
                 command=command,
                 pid=pid,
                 started_at=time.time(),
+                access_scope=access_scope or ProcessAccessScope(),
                 cwd=cwd,
                 output_file=output_file,
                 process=process,
@@ -142,9 +205,16 @@ class ProcessRegistry:
             self._prune_finished_locked()
             return record
 
-    def get(self, session_id: str) -> BackgroundProcess | None:
+    # LLM: access_scope 非空时必须精确匹配启动记录，错误 scope 与不存在统一返回 None，
+    # 避免通过错误差异探测其他用户的 session_id。
+    # 函数用途: 在允许的用户会话范围内取得一条后台进程记录。
+    def get(
+        self,
+        session_id: str,
+        access_scope: ProcessAccessScope | None = None,
+    ) -> BackgroundProcess | None:
         with self._lock:
-            return self._processes.get(session_id)
+            return self._visible_record_locked(session_id, access_scope)
 
     def _refresh_locked(self, record: BackgroundProcess) -> None:
         """惰性更新单条记录状态:用 Popen.poll() 收退出码,句柄丢失则按 pid 存活探测。
@@ -166,30 +236,52 @@ class ProcessRegistry:
             record.exit_code = None
             record.finished_at = time.time()
 
-    def status(self, session_id: str) -> dict[str, Any] | None:
+    # LLM: status 的日志尾部可能包含外部数据，只能在 scope 匹配后读取。
+    # 函数用途: 查询一个后台进程的状态和最近输出。
+    def status(
+        self,
+        session_id: str,
+        access_scope: ProcessAccessScope | None = None,
+    ) -> dict[str, Any] | None:
         """查单个进程状态 + 最近输出(日志尾部)。不存在返回 None。"""
         with self._lock:
-            record = self._processes.get(session_id)
+            record = self._visible_record_locked(session_id, access_scope)
             if record is None:
                 return None
             self._refresh_locked(record)
             return record.to_summary(include_output=True)
 
-    def list(self) -> list[dict[str, Any]]:
+    # LLM: 模型工具必须传 scope；内部 None 调用仍可看全表用于 Gateway 清理和旧测试。
+    # 函数用途: 列出当前用户会话可见的后台进程摘要。
+    def list(
+        self,
+        access_scope: ProcessAccessScope | None = None,
+    ) -> list[dict[str, Any]]:
         """列出所有登记的后台进程 + 状态(运行中的会先惰性刷新)。"""
         with self._lock:
-            records = list(self._processes.values())
+            records = [
+                record
+                for record in self._processes.values()
+                if access_scope is None or record.access_scope == access_scope
+            ]
             for record in records:
                 self._refresh_locked(record)
             # 运行中的排前面,其次按启动时间倒序(新的在前)。
             records.sort(key=lambda item: (item.is_terminal(), -item.started_at))
             return [record.to_summary(include_output=False) for record in records]
 
-    def kill(self, session_id: str) -> dict[str, Any] | None:
+    # LLM: kill 在拿到 PID 前先做 scope 精确匹配，实际发信号放在锁外；二次回锁时
+    # 仍核对同一记录，避免并发清理或 session 复用导致误杀/误报。
+    # 函数用途: 停止当前用户会话所属的后台进程及其全部后代。
+    def kill(
+        self,
+        session_id: str,
+        access_scope: ProcessAccessScope | None = None,
+    ) -> dict[str, Any] | None:
         """SIGTERM→(宽限超时)SIGKILL 杀进程组,更新状态。不存在返回 None;
         已结束返回 already_exited。"""
         with self._lock:
-            record = self._processes.get(session_id)
+            record = self._visible_record_locked(session_id, access_scope)
             if record is None:
                 return None
             self._refresh_locked(record)
@@ -207,7 +299,7 @@ class ProcessRegistry:
         killed_signal = terminate_process_tree(pid, proc)
 
         with self._lock:
-            record = self._processes.get(session_id)
+            record = self._visible_record_locked(session_id, access_scope)
             if record is not None:
                 record.status = "killed"
                 record.finished_at = time.time()
@@ -221,6 +313,60 @@ class ProcessRegistry:
                 summary["message"] = "已向进程组发送终止信号。"
                 return summary
         return None
+
+    # LLM: wait 是 会话运行时 write_stdin 空轮询的有界等价入口；它等待真实 Popen/PID，
+    # 不启动 shell sleep、不循环调用模型，超时只返回 running 事实而不伪造失败。
+    # 函数用途: 在限定秒数内等待后台命令结束，并返回结束状态或当前进度。
+    def wait(
+        self,
+        session_id: str,
+        timeout_seconds: float,
+        access_scope: ProcessAccessScope | None = None,
+    ) -> dict[str, Any] | None:
+        timeout = max(0.0, float(timeout_seconds or 0.0))
+        with self._lock:
+            record = self._visible_record_locked(session_id, access_scope)
+            if record is None:
+                return None
+            self._refresh_locked(record)
+            if record.is_terminal():
+                summary = record.to_summary(include_output=True)
+                summary["wait_timed_out"] = False
+                return summary
+            proc = record.process
+            pid = record.pid
+
+        timed_out = False
+        if proc is not None:
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+        else:
+            deadline = time.monotonic() + timeout
+            while _pid_alive(pid) and time.monotonic() < deadline:
+                time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+            timed_out = _pid_alive(pid)
+
+        summary = self.status(session_id, access_scope)
+        if summary is not None:
+            summary["wait_timed_out"] = timed_out and summary.get("status") == "running"
+        return summary
+
+    # LLM: This is the single scope predicate used before process state or logs are exposed.
+    # 函数用途: 在持锁状态下取得当前范围可见的记录。
+    def _visible_record_locked(
+        self,
+        session_id: str,
+        access_scope: ProcessAccessScope | None,
+    ) -> BackgroundProcess | None:
+        """返回 scope 可见记录；调用方必须持有 _lock。"""
+        record = self._processes.get(session_id)
+        if record is None:
+            return None
+        if access_scope is not None and record.access_scope != access_scope:
+            return None
+        return record
 
     def _prune_finished_locked(self) -> None:
         """已结束记录超上限时淘汰最老的。必须持锁调用。"""
@@ -455,4 +601,11 @@ def _wait_process_snapshot_gone(
 process_registry = ProcessRegistry()
 
 
-__all__ = ["BackgroundProcess", "ProcessRegistry", "process_registry", "terminate_process_tree"]
+__all__ = [
+    "BackgroundProcess",
+    "ProcessAccessScope",
+    "ProcessRegistry",
+    "process_access_scope",
+    "process_registry",
+    "terminate_process_tree",
+]

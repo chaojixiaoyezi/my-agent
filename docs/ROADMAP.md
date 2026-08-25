@@ -249,6 +249,18 @@ TypeScript library，`dist/index.js` 没有 fzf 可执行入口。当前本地�
 红删蓝增` 可从后台链路显示且游标不重放；待严格 gate、部署后以全新 tmux 原样 Prompt 4 真机同时复验
 “root 不自写”和“后台两分钟工作期间持续可见”。
 
+同一长会话 `ma-97468f3-longchain-r27` 的 Rust 复刻又证明富事件流本身会被逐 token thinking 淹没：Gateway
+工具索引持续前进，TUI 却数分钟停在旧工具，1024 条 ring 已裁剪后才一次性补画。当前候选按 会话运行时 reasoning
+buffer 和 终端交互 状态累积/帧级刷新，把首片之外的同块 delta 按 0.25 秒或 256 字符合批，终态完整正文
+继续兜底；47 项 focused 已通过。待当前真实复刻阶段自然结束后部署唯一 Gateway，并在同一 session 的下一条
+普通追加中核对事件数、首屏延迟和持续思考可见性。
+
+同一现场还证明后台进程续接合同是断的：`run_command` 返回三个未注册工具名，模型被迫执行 shell sleep
+轮询。当前候选对照 会话运行时 unified exec 和 终端交互 LocalShellTask，新增一个 scope-aware
+`process_session(list/status/wait/stop)`；启动记录绑定可信 owner/TUI session，wait 最长 30 秒且返回真实状态。
+46 项 shell/process focused 已通过，待当前任务自然结束后部署单 Gateway，并在本 session 下一轮确认不再出现
+`sleep + cat log`。
+
 子代理详情的真机回看暴露的三项同源缺口已由 `91a1c3d` 收口：详情首条改读完整 `task.goal`，非 callable
 child sink 先按 typed `write_progress` 接工具事件，`Ctrl+O` 改为冻结 active runtime。218 项直接 focused 与
 本地严格 gate 通过后已推送并部署 `.7` 唯一 Gateway。公开 tmux `ma-91a1c3d-child-full-r17` 使用原样 Prompt 2，
