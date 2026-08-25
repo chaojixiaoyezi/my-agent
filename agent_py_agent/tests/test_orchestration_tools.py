@@ -58,6 +58,8 @@ def test_create_subagents_model_spec_uses_template_index_not_full_prompt():
     assert "角色就变为协调者" in spec.description
     assert "不要重做已经委派的任务" in spec.description
     assert "replacement child" in spec.description
+    assert "goal 里写‘先 A 后 B’不会形成执行顺序" in spec.description
+    assert "等 A 的生命周期完成事件自动唤醒后" in spec.description
 
 
 def test_create_subagents_inherits_current_task_workspace(tmp_path):

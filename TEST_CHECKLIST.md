@@ -45,6 +45,10 @@
   无模型确认。runner 结果回到 `PENDING` 时只回收 exact run 的启动占位，共享批次 PID 仍活不能阻塞
   即时续派。相关 focused 回归与 r9 的身份/单执行器真机证据已通过；r9 未自然触发 PENDING，故共享 PID
   下即时续派仍待后续 fresh TUI 正向样本。
+- [ ] `create_subagents.items` 只承载可立即并发且彼此不等未来结果的任务；goal 里写“先后”不形成执行顺序。
+  后项必须读取前项修复/产物/结论时，父级先只创建前项，等 typed lifecycle wake 后再创建后项。该规则只在
+  模型合同中软引导，不解析 goal/role、不恢复机器验收或第二套依赖调度器；15 项 focused 已通过，待 `.7`
+  单 Gateway 真 TUI 证明 tester 不再早于 fixer 启动。
 - [ ] 未显式声明 `output_files/output_refs/artifact_refs` 的普通 child 不生成系统 Markdown 业务合同；父级
   只从 typed status、最终回复、`final_report_ref` 与真实 artifact refs 接收结果。旧
   `system_default_output_ref=true` 可恢复但不进入 runner contract、completion wake 或

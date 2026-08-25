@@ -68,6 +68,9 @@
 - 递归协作只有一个创建入口 `create_subagents`，创建成功后宿主立即自动启动。
   模型不再看到 `dispatch_subagents` 或 `schedule_child_subagents`；内部 dispatcher
   只是启动、恢复与有界重试引擎，不是人工推动工具。
+- `create_subagents.items` 只放可立即并发、彼此不等待未来结果的工作；同批 child 不会因为 goal 写了
+  “先 A 后 B”而串行。B 必须读取 A 的修复、产物或结论时，先只创建 A，等 typed lifecycle wake 后再创建
+  B。该边界沿用 会话运行时 的独立 sidecar 软纪律，宿主不解析 goal/role、不新增依赖状态机或机器质量验收。
 - `orchestration` 不进渐进披露折叠区；`create_subagents`、`send_guidance`、
   `cancel_subagents` 和 `resolve_capability_requests` 必须从前台首次模型调用就直接可见。
   `tool_search` 继续用于 /goal、外部协作、web、vision、meta 和 MCP 等延迟能力。

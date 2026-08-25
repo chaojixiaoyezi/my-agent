@@ -24,6 +24,11 @@ orphan reconciler、observation/wake 和代理树 projection
 `subagent_hierarchy_max_children_per_tool_call` 仍可由部署方显式设置更小批次，`0` 表示不额外收紧；
 默认 `runner_auto_concurrency=8`，所以八个已创建 child 可以真正并行启动。
 
+`items` 里的所有 child 都会立即并发启动，因此只允许放彼此独立、无需等待兄弟未来结果的工作。把 goal
+写成“先修复、再测试”不会形成串行顺序；若测试必须读取本轮修复后的代码，应先只创建修复 child，等其
+生命周期完成事件自动唤醒父级后，再创建测试 child。该约束对齐 会话运行时 的独立 sidecar 派工纪律，只是
+模型可见的执行合同：宿主不解析 goal/role 猜依赖，也不恢复机器验收或另建依赖调度器。
+
 ## 状态与通知
 
 创建回执只给本批 run ids、结果读取 refs 和 `await_lifecycle_event`。根主代理会先给用户一条短回执；

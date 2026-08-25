@@ -6,6 +6,13 @@
 `task_node_closeout` 副本。canonical task/result 是唯一结果事实源；父代理通过结构化 status、blockers、
 findings、artifact refs 和 result payload 阅读子代理工作，再由模型向用户汇总。
 
+## 2026-08-25 create_subagents 并行边界
+
+- `agent_core/orchestration/tool_spec_data.py::_CREATE_DEPENDENCY_ORDER_RULE` 是 items 立即并发与依赖任务分批
+  创建的唯一模型文案事实；参数详情和 native 工具总说明复用它，避免两处语义漂移。
+- `tool_specs.py::build_create_subagents_model_spec` 只把该软合同放进 provider 可见 schema/description。
+  执行器继续按结构化 items 立即启动；它不解析自然语言顺序、不把 role 当依赖事实，也不增加完成裁决。
+
 ## 2026-08-25 完成续片的操作事实与交接叶子
 
 - root lifecycle wake 是原 active turn 的后续工作片；child canonical attributes 与 completion wake 携带

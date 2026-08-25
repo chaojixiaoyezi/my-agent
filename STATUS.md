@@ -1,5 +1,16 @@
 # STATUS
 
+## 2026-08-25 依赖型 child 被同批并发（本地候选）
+
+- `.7` 同一长 TUI 的 ESM 入口返工里，root 口头说“先修复、再独立测试”，却一次创建 worker/tester；
+  tester 在 4:15 结束，worker 在 4:42 才结束，因此该 tester 不能证明修后状态。随后单独新派的 tester
+  在修复完成后运行 3:00，入口、真实 Git 操作、安全边界、构建与测试均通过。
+- 会话运行时 对照只把可与当前工作同时推进的 concrete/bounded/independent sidecar 交给 child。当前候选复用
+  这一软纪律，明确 `items` 立即并发、goal 中的“先后”不形成顺序；后项依赖前项未来结果时必须等 lifecycle
+  wake 后再创建。不解析自然语言、不按 tester 角色硬拦，也不新增依赖状态机或机器验收。
+- 两个模型规格 focused 文件 15 项通过。改动远低于 10,000 行，不跑全仓 pytest；仍待文档门、严格 gate、
+  推送、单 Gateway 部署和真 TUI 顺序复验。
+
 ## 2026-08-25 child 完成后 Working 不收口与报告引用冲突（第二层本地候选）
 
 - `.7` 长会话现场证明 child 已 `DONE`、root 已给最终回复，但 task link 仍 `active`，TUI 因而持续显示

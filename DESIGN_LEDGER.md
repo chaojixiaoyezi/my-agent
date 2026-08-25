@@ -1623,6 +1623,12 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 部署后验收继续复用同一个 durable TUI：多 child 调研、两个普通追加、多 child 复刻、普通验收追加、
   多 child 返工和最终追加必须连续发生在一条 session 中。该链只测试跨工作片连续性，不改变单次任务边界，
   也不允许测试者替被测对象改产物或用技术提示直接告诉它底座诊断答案。
+- 同一 r27 返工又暴露派工次序是假象：root 正文明确“先修复、再独立测试”，却把 worker/tester 放进同一
+  `items`，两者被宿主正确地立即并发，tester 反而早 27 秒结束。对照 会话运行时
+  `会话运行时-rs/core/src/tools/handlers/multi_agents_spec.rs` 的 concrete/bounded/independent sidecar 纪律，
+  `create_subagents` 模型合同必须直说：同批每项立即并行，自然语言“先后”不形成依赖；B 读取 A 的未来
+  修复、产物或结论时，先只创建 A，等 lifecycle wake 后再创建 B。当前只改唯一工具说明和 schema 参数
+  详情，不解析 goal/role、不硬拦 tester、不新增 `depends_on` 调度器或机器质量验收。
 
 ## 2026-08-24 单 Gateway HTTP 有界复用工作池【状态：`53498c1` 已部署 `.7` 真 TUI】
 

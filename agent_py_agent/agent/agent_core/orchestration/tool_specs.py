@@ -7,6 +7,7 @@ from ...subagents.role_templates import role_template_index_text
 from ...tooling.models import ToolModelHints, ToolModelSpec
 from .coordinator_policy import coordinator_tool_boundary_text
 from .tool_spec_data import (
+    _CREATE_DEPENDENCY_ORDER_RULE,
     _CREATE_EXAMPLES,
     _CREATE_ITEM_PARAMETER_DETAILS,
     _CREATE_KEYWORDS,
@@ -96,7 +97,9 @@ def build_create_subagents_model_spec() -> ToolModelSpec:
             "把可并行的独立工作交给下级代理。无论当前是主代理、子代理还是孙代理，都使用同一个 "
             "create_subagents；创建成功后下级立即运行，进展、阻塞或完成时系统自动唤醒直接父级，不需要也没有"
             "查询或推进工具。goal 始终必填；只传 goal 就只创建一个 child，需要多个时必须同时传总 goal 和 "
-            "items，每项都要有独立 goal。不支持 operations、count 或 max_concurrency 参数。covers 是可选的 "
+            "items，每项都要有独立 goal。"
+            + _CREATE_DEPENDENCY_ORDER_RULE
+            + "不支持 operations、count 或 max_concurrency 参数。covers 是可选的 "
             "task_progress exact-id 映射：只有 child 与仍 open 项确实是同一工作时才填，提供的未知、已关闭或跨 "
             "item 重复 id 会整批拒绝；省略时 child 按真实 run_id 单独显示，不会给现有 Todo 打勾。返工已关闭项先用 "
             "task_progress 对原 id 传 status=in_progress, correction=true，再绑定原 id；绝不能拿无关 open id 顶替。"

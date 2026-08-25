@@ -40,6 +40,19 @@ active task link 仍不关闭。
 权限门。5 个直接相关测试文件共 206 项，结果 204 passed、2 个既有 xfailed；Ruff、doc-sync、strict
 code-size、diff 与 clean-package 均通过。推送、`.7` 单 Gateway 部署和同一 tmux 复验尚待完成。
 
+### 会话运行时 式依赖派工分批
+
+状态：模型合同候选 focused 通过，待严格 gate、推送与 `.7` 真 TUI
+
+解决问题：同一长 TUI 中，主代理明确说“先修复、再独立测试”，实际却把 worker/tester 放进同一个
+`create_subagents.items`。宿主按既有合同立即并发，tester 比 worker 早 27 秒结束，造成“独立修后验收”
+名义成立、时间顺序不成立。
+
+当前进展：已对照 会话运行时 `multi_agents_spec.rs`，把 items 收紧为模型可见的独立并行合同：后项必须读取前项
+未来结果时，先只创建前项，等 typed lifecycle wake 后再创建后项。自然语言“先后”不产生机器顺序；
+不解析 goal/role、不新增依赖状态机或机器质量验收。两个 focused 文件 15 项通过。部署后继续使用同一
+长 tmux，以普通中文要求“先修复、再派独立测试”，核对 child 的真实创建/终态时间顺序。
+
 ### 会话运行时 式同一父级分批创建
 
 状态：`fb75b68` 已严格 gate、推送并部署；fresh r9 后台第二批通过，活跃 sibling 间的第二次独立调用待自然样本

@@ -35,6 +35,8 @@ class TestOrchestrationToolsSpec:
         assert "writer" in spec.parameter_descriptions["role"]
         assert "资料线索" in spec.parameter_descriptions["items"]
         assert "可选结构化提示" in spec.parameter_descriptions["items"]
+        assert "goal 里写‘先 A 后 B’不会形成执行顺序" in spec.parameter_descriptions["items"]
+        assert "等 A 的生命周期完成事件自动唤醒后" in spec.parameter_descriptions["items"]
         assert "已有 Todo 时每项必须" not in spec.parameter_descriptions["items"]
         assert "绝不能拿无关 open id 顶替" in spec.parameter_descriptions["covers"]
         assert "不是权限、完整写集或创建前置条件" in spec.parameter_descriptions["output_files"]

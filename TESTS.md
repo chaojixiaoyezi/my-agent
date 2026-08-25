@@ -1,5 +1,23 @@
 # TESTS
 
+## 2026-08-25 依赖型派工不得伪装成同批串行
+
+focused 回归命令：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_orchestration_tool_specs.py \
+  agent_py_agent/tests/test_orchestration_tools.py \
+  -q --tb=short
+```
+
+当前 15 项通过。回归要求 `create_subagents` 的总说明与 `items` 参数详情都明确：同批 child 会立即并发，
+自然语言写“先 A 后 B”不形成顺序；B 依赖 A 的未来修复/产物/结论时，必须等 A 的生命周期完成事件后再
+创建 B。该测试只锁模型合同，不解析业务 prompt，也不把测试角色变成机器依赖。
+
+真机复验继续使用 `.7` 唯一 Gateway、MiniMax-M2.7 和公开 tmux：用普通中文要求“先修复，再派独立测试”，
+必须先只出现修复 child；修复终态唤醒后才出现测试 child。测试者不修改被测产物、不新增 Gateway。
+
 ## 2026-08-25 后台续片操作终态与子代理报告读取
 
 focused 回归命令：
