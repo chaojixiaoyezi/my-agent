@@ -265,9 +265,10 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   最多阻塞控制调用 `100 ms`；慢关闭在 daemon thread 继续，不能把 `/stop` 拖到 provider 超时。
 - `agent/backends/gateway_helpers.py`：模型 JSON/SSE 响应读取在真正发请求时惰性挂接中断回调；
   `/stop` 会关闭正在读取的响应并报为 `InterruptedError`，不得包装成可重试的 provider 网络故障。
-  系统级 `ConnectionRefusedError/ECONNREFUSED` 属于可恢复供应故障，先按 `2/5/15` 秒执行三次物理 HTTP
-  退避；DNS、地址和代理配置错误仍快速失败。每次物理 attempt 把 retry 序号和等待值写入同一 model-call
-  ledger，不从异常文本决定是否重试。
+  系统级 `ConnectionRefusedError/ECONNREFUSED` 与异常链中的 typed `socket.gaierror` 属于可恢复供应故障，
+  先按 `2/5/15` 秒执行三次物理 HTTP 退避；三次 DNS 仍失败时返回 transient 供模型轮恢复。畸形 URL、
+  认证/额度和代理配置错误仍快速失败。每次物理 attempt 把 retry 序号和等待值写入同一 model-call ledger，
+  不从异常文本决定是否重试。
   流式 `request_timeout` 按 会话运行时 语义是有效 SSE `data:` 事件之间的 idle timeout（空闲超时），不是整轮
   总墙钟上限；注释、空行、半行和静默不能续期。与 concurrency 的依赖保持请求时惰性解析，避免
   backend/runtime 初始化环。

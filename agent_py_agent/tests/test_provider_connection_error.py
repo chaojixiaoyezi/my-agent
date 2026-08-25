@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""NET-01 回归：系统级拒绝连接可退避，DNS/配置连接失败仍快速报错。
+"""NET-01 回归：系统级拒绝连接和 typed DNS 失败可退避，非 typed 配置错误仍快速报错。
 
 2026-08-15 C3 真机：api_base 指向死端口时 CLI 打印完整 Python traceback（RC=1）。
 2026-08-18 长任务：远端 MiniMax 在 127 个工具轮后短暂拒绝连接，旧分类没有进入任何退避。
@@ -50,13 +50,13 @@ def test_connection_refused_text_without_errno_is_not_machine_retry_fact():
     assert not isinstance(err, ProviderRecoverableError)
 
 
-# LLM: DNS 解析失败不是 ECONNREFUSED，必须保持快速失败，避免错误 api_base 消耗整套长退避。
-# 函数用途: 验证无效域名继续提示用户检查 DNS/配置。
-def test_dns_failure_stays_provider_connection_error():
+# LLM: typed gaierror 可能是 resolver 瞬断；与 会话运行时 ConnectionFailed 一样进入有界恢复，不能一跳杀死长任务。
+# 函数用途: 验证 DNS 解析错误保留可恢复类型，物理重试次数由 gateway helper 的独立回归约束。
+def test_dns_failure_is_provider_transient_error():
     exc = urllib.error.URLError(socket.gaierror(socket.EAI_NONAME, "Name or service not known"))
     err = _runtime_network_error(exc, _request())
-    assert isinstance(err, ProviderConnectionError)
-    assert not isinstance(err, ProviderRecoverableError)
+    assert isinstance(err, ProviderTransientError)
+    assert isinstance(err, ProviderRecoverableError)
 
 
 # LLM: 瞬时网络错误（连接重置）仍归 ProviderTransientError，重试语义不变。

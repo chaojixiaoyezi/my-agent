@@ -907,15 +907,23 @@ def _is_timeout_exception(exc: BaseException) -> bool:
     return isinstance(reason, (TimeoutError, socket.timeout))
 
 
-# LLM: 瞬时网络判定优先读取 typed ECONNREFUSED；受控文本 marker 仅兼容没有 errno 的既有断流库异常。
+# LLM: 瞬时网络判定优先读取 typed DNS/ECONNREFUSED；受控文本 marker 仅兼容没有 errno 的既有断流库异常。
 # 函数用途: 判断网络异常是否值得进入当前请求的有界重试。
 def _is_transient_network_error(exc: BaseException) -> bool:
     if _is_timeout_exception(exc):
         return False
+    if _is_dns_resolution_exception(exc):
+        return True
     if _is_connection_refused_exception(exc):
         return True
     text = _network_error_text(exc).lower()
     return any(marker in text for marker in _RETRYABLE_NETWORK_ERROR_MARKERS)
+
+
+# LLM: DNS 解析失败可能来自本机 resolver 短暂不可用；只认 typed gaierror 并复用现有有界退避，不能按错误正文扩大分类。
+# 函数用途: 识别 urllib reason 或异常链里的 DNS 解析错误，让一次网络抖动不会直接终止长任务。
+def _is_dns_resolution_exception(exc: BaseException) -> bool:
+    return any(isinstance(item, socket.gaierror) for item in _network_exception_chain(exc))
 
 
 # LLM: 连接拒绝必须遍历 urllib reason 与 Python exception chaining，但只接受系统异常类型或 ECONNREFUSED 数值。

@@ -483,15 +483,27 @@ class TestPostJson:
         assert mock_urlopen.call_count == 1
         mock_sleep.assert_not_called()
 
+    @patch("agent_py_agent.agent.backends.gateway_helpers._provider_retry_wait")
     @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
-    def test_url_error_is_wrapped_with_endpoint_hint(self, mock_urlopen):
-        """验证 DNS/网络错误被包装成可读提示。"""
-        mock_urlopen.side_effect = urllib.error.URLError("[Errno 11001] getaddrinfo failed")
+    def test_dns_error_retries_before_returning_transient_failure(
+        self,
+        mock_urlopen,
+        mock_wait,
+    ):
+        """DNS 瞬断像 会话运行时 ConnectionFailed 一样先有界退避，耗尽后才结束当前请求。"""
+        import socket
 
+        mock_urlopen.side_effect = urllib.error.URLError(
+            socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
+        )
+
+        from agent_py_agent.agent.backends.errors import ProviderTransientError
         from agent_py_agent.agent.backends.gateway_helpers import post_json
 
-        with pytest.raises(RuntimeError, match="网络请求失败.*api.example.com"):
+        with pytest.raises(ProviderTransientError, match="网络请求失败.*api.example.com"):
             post_json(_request())
+        assert mock_urlopen.call_count == 4
+        assert mock_wait.call_count == 3
 
 
 class TestPostStream:
@@ -657,15 +669,23 @@ class TestPostStreamIter:
         with pytest.raises(ProviderTransientError, match="HTTP 500.*input new_sensitive"):
             list(post_stream_iter(_request()))
 
+    @patch("agent_py_agent.agent.backends.gateway_helpers._provider_retry_wait")
     @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
-    def test_iter_handles_url_error(self, mock_urlopen):
-        """验证流式 DNS/网络错误也被包装。"""
-        mock_urlopen.side_effect = urllib.error.URLError("[Errno 11001] getaddrinfo failed")
+    def test_iter_retries_dns_error_before_transient_failure(self, mock_urlopen, mock_wait):
+        """流式入口与普通请求共用 DNS 有界退避，不因一次解析抖动杀死长代理。"""
+        import socket
 
+        mock_urlopen.side_effect = urllib.error.URLError(
+            socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
+        )
+
+        from agent_py_agent.agent.backends.errors import ProviderTransientError
         from agent_py_agent.agent.backends.gateway_helpers import post_stream_iter
 
-        with pytest.raises(RuntimeError, match="网络请求失败.*api.example.com"):
+        with pytest.raises(ProviderTransientError, match="网络请求失败.*api.example.com"):
             list(post_stream_iter(_request()))
+        assert mock_urlopen.call_count == 4
+        assert mock_wait.call_count == 3
 
     @patch("agent_py_agent.agent.backends.gateway_helpers._gateway_urlopen")
     def test_iter_stops_on_empty_stream(self, mock_urlopen):

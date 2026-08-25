@@ -1,5 +1,8 @@
 # TEST CHECKLIST
 
+- [ ] 长 main/child 遇到异常链中的 typed `socket.gaierror` 时，普通 JSON 与流式 provider 请求都先按
+  2/5/15 秒有界退避，耗尽后保持 transient 供模型轮恢复；不得因一次 DNS 抖动终止数小时任务，也不得把
+  畸形 URL、认证/额度、代理错误或普通字符串升级为重试。两个失败优先回归已转绿，待完整 focused/真机。
 - [ ] 批量编码 `create_subagents.items` 必须由模型写清同一个目标目录和互不重叠的文件/模块边界；职责宽到
   会覆盖兄弟项或会修改同一文件/模块时应分批。该项只靠 会话运行时 式软派工纪律，不恢复 cwd/目录锁、不解析
   goal 猜写集；13 项 focused 已通过，待唯一 Gateway 部署后的下一轮真实复刻验证派工参数。

@@ -1,5 +1,17 @@
 # TESTS
 
+## 2026-08-25 DNS 解析瞬断必须先有界重试
+
+真实失败样本是运行 1:56:09、Compact 3 次的 child 因一次 typed `socket.gaierror` 直接终止。普通 JSON 和
+流式入口都要先执行现有 2/5/15 秒退避，耗尽后保持 `ProviderTransientError`，供模型轮恢复：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_gateway_helpers.py -q --tb=short
+```
+
+新增两个定向断言先在旧实现稳定失败，再证明每个入口 4 次物理 open、3 次 wait。测试 mock 掉真实等待；
+不靠异常字符串，不把 malformed URL、认证、额度或代理错误变成可重试。
+
 ## 2026-08-25 并行编码派工必须向模型说明互斥写入范围
 
 真实失败样本来自 `.7` 的 `ma-97468f3-longchain-r27`：多个 child 的职责标题看似不同，实际在旧目标目录
@@ -684,7 +696,8 @@ stdout/stderr/exit code 均走结构化事件；思考 Markdown 与 `Ctrl+O` 折
 以最终 muted/thinking role 覆盖正文前景色，不能只断言行前缀是灰色。失败后最后一次 workspace mutation 的软续跑只触发一次，简单写入
 和已有后续检查不触发。供应商网络回归还要用真实 `ConnectionRefusedError/ECONNREFUSED` 证明传输层
 `2/5/15` 秒三次退避、模型回合层 `10/25/45/100/180` 秒五次恢复和富 TUI typed retry 提示；普通
-`"connection refused"` 字符串、DNS 与无效地址不得取得重试权。常用定向命令为：
+`"connection refused"` 字符串不得取得重试权，DNS 只认异常链中的 typed `socket.gaierror`，畸形 URL、
+认证和代理配置仍快速失败。常用定向命令为：
 
 ```bash
 python3 -m pytest -q --tb=short agent_py_agent/tests/test_provider_connection_error.py agent_py_agent/tests/test_provider_transient_auto_resume.py agent_py_agent/tests/test_runtime_error_reports.py agent_py_agent/tests/test_gateway_helpers.py agent_py_agent/tests/test_gateway_verbose_progress.py agent_py_agent/tests/test_gateway_streaming.py agent_py_agent/tests/test_gateway_client.py agent_py_agent/tests/test_tool_model_generation.py agent_py_agent/tests/test_tui_runtime.py agent_py_agent/tests/test_tui_renderer.py agent_py_agent/tests/test_tui_worker_paths.py agent_py_agent/tests/test_tool_round_execution.py agent_py_agent/tests/test_tools/test_edit_file_tool.py agent_py_agent/tests/test_tooling_filesystem_write.py agent_py_agent/tests/test_tools/test_shell_tool.py agent_py_agent/tests/test_current_turn_execution.py agent_py_agent/tests/test_runtime_guidance.py agent_py_agent/tests/test_tui_pty.py agent_py_agent/tests/test_tui_ansi_snapshot.py agent_py_agent/tests/test_tui_view.py

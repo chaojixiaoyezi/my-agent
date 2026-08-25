@@ -23,6 +23,17 @@
 root lineage 只表示血缘，不授予 child 读取父收件箱的权限。下一步严格 gate 后部署唯一 Gateway，在同一
 session 先补齐这次调研，再连续做两个小追加和多子代理复刻；不能另启测试 Gateway。
 
+### DNS 瞬断不能终止长代理
+
+状态：本地候选失败优先回归通过，待完整 focused、严格 gate、推送与 `.7` 同 TUI 复验
+
+解决问题：复刻 child 已运行近两小时、Compact 3 次，一次 typed DNS 解析失败便终止，前面全部上下文和
+工具进展只能以失败交接。长任务不能把 resolver 的一次瞬断当成永久 api_base 配错。
+
+当前进展：对照 会话运行时 retryable `ConnectionFailed`，异常链中的 typed `socket.gaierror` 复用现有
+2/5/15 秒三次 HTTP 退避，耗尽后进入既有模型轮恢复；不解析错误正文、不放宽认证/额度/代理或畸形 URL。
+普通/流式两个定向回归均已先红后绿。
+
 来自 STATUS.md，子代理可进入视图、精确控制以及插话排队/公开回复已转入 COMPLETED；当前继续正式矩阵与
 仍缺直接自然样本的生命周期分支。
 

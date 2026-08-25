@@ -1,5 +1,15 @@
 # Gateway Progress
 
+## 2026-08-25 DNS 瞬断的 会话运行时 式有界恢复（本地候选）
+
+- `ma-97468f3-longchain-r27` 的 worker-6 已运行近两小时并 Compact 3 次，一次 typed
+  `socket.gaierror [Errno -2]` 却直接终止；同一时段其它外网稍后恢复，证明 DNS 不能一律当永久配置错误。
+- 会话运行时 把 transport Network 归入可重试 Stream/ConnectionFailed。当前候选只按异常链里的 typed
+  `socket.gaierror` 扩展既有 2/5/15 秒物理退避，耗尽后保持 ProviderTransientError；不解析错误正文，
+  不放宽 malformed URL、认证/额度或代理配置，也不添加无限 runner 重试。
+- 普通 JSON/流式两个失败优先回归均已转绿，各证明 4 次 open、3 次 wait；待完整 gateway focused、严格门、
+  推送和 `.7` 唯一 Gateway 部署，再用同一长 TUI 后续多子代理阶段观察自然网络抖动。
+
 ## 2026-08-25 有效提交恢复 follow-tail（本地候选）
 
 - 同一长 session 的最终回复已经进入 ConversationStore，但 TUI footer 仍显示 `Jump to bottom`；根因是
@@ -310,9 +320,10 @@
   `ConnectionRefusedError(errno=ECONNREFUSED)`。旧 transport 把它与 DNS/api_base 配错合并为不可恢复
   `ProviderConnectionError`，因此既没有执行既有 `2/5/15` 秒 HTTP 退避，也没有进入
   `10/25/45/100/180` 秒模型回合恢复，最终被 Gateway 误投影为 `programmer_bug` 并直接终止。
-- 当前分类只读取异常类型、`errno` 和受控异常链：typed `ECONNREFUSED` 归
-  `ProviderTransientError`，先用三次传输退避，耗尽后再用五次模型回合退避；纯同名字符串、DNS 和其它
-  未证明为瞬时的连接错误仍快速失败。用户中断继续优先退出，不进入重连。
+- 当前分类只读取异常类型、`errno` 和受控异常链：typed `ECONNREFUSED` 与 typed `socket.gaierror` 归
+  `ProviderTransientError`，先用三次传输退避，耗尽后再用五次模型回合退避；纯同名字符串、畸形 URL、
+  认证和代理配置仍快速失败。用户中断继续优先退出，不进入重连。DNS 支持为 2026-08-25 长任务真机
+  失败后追加，不回写成 2026-08-18 当时已经具备。
 - provider attempt observer 继续先写唯一 model-call ledger，同时把 `retry_scheduled/attempt/total/wait`
   投影给显式 rich Gateway writer。TUI 立即显示“连接 1/3”或“模型回合 1/5”，公开事件不含 endpoint、
   原始异常或 key；普通客户端继续沿旧 runtime-progress 策略，不扩大 transcript。

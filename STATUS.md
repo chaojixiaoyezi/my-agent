@@ -1,5 +1,16 @@
 # STATUS
 
+## 2026-08-25 DNS 瞬断直接杀死两小时 child（本地候选）
+
+- `.7` 的 `ma-97468f3-longchain-r27` 中 worker-6 已运行 1:56:09、完成 3 次 Compact，随后一次
+  `socket.gaierror [Errno -2] Name or service not known` 直接把 runner 写成 FAILED、canonical 显示 CANCELLED。
+  同时段本机 GitHub 也曾连接超时后恢复，不能把这次真实 DNS 抖动等同永久 api_base 配错。
+- 对照 会话运行时 `TransportError::Network` 到 retryable `Stream/ConnectionFailed`，当前候选把异常链中的 typed
+  `socket.gaierror` 纳入既有 2/5/15 秒物理 HTTP 退避；三次耗尽后返回 `ProviderTransientError`，继续沿既有
+  模型轮恢复。畸形 URL、认证/额度、代理配置和普通字符串不取得重试权。
+- 普通 JSON 与流式入口的失败回归均先红后绿，现各证明 4 次 open、3 次 wait；尚待完整 provider focused、
+  严格 gate、推送和唯一 Gateway 部署。
+
 ## 2026-08-25 并行编码 child 写入范围重叠（本地候选）
 
 - `.7` 同一长 TUI `ma-97468f3-longchain-r27` 的 Click→Go 复刻中，7 个实现 child 被口头拆成不同职责，

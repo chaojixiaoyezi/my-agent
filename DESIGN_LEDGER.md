@@ -36,6 +36,10 @@
   为等待刷新而让任务空转；本地首选端口和供应商刷新时刻来自显式配置，不从错误正文或自然语言猜测。
   只有当前没有 live request、到达配置刷新点且供应商探活成功时才安全切回，模型切换不得创建第二个
   Gateway、测试服务或平行会话。
+- provider 连接失败按 会话运行时 `TransportError::Network -> retryable Stream/ConnectionFailed` 适配：异常链中
+  typed `socket.gaierror` 先复用 2/5/15 秒三次物理退避，耗尽后保留 transient 语义进入既有模型轮恢复。
+  这只保护 DNS resolver 短暂失效，不从错误正文猜网络状态，不放宽畸形 URL、认证/额度或代理配置错误，
+  也不增加无限 runner 重试。
 - 主代理长期记忆归 owner home；子代理只保留任务周期内可审计状态。
 - 子代理可以写协作产物，但最终交付由主代理汇总和验收。
 - 工具面要少，优先增强现有工具和运行时语义。
@@ -874,9 +878,9 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 真实长任务若更早有失败、最后一条工具是注册表声明的成功 workspace mutation，且之后没有任何工具记录，
   主循环只丢弃一次过早收口草稿并注入结构化软提醒，让模型自主选择复核或明确解释。该规则不解析草稿、
   不设置 blocked/unfinished，也不影响简单写文件或已经有后续检查的回合。
-- 模型网络故障必须按系统异常事实分类：`ConnectionRefusedError` / `errno=ECONNREFUSED` 是服务端点临时
-  拒绝连接，先走 HTTP 传输层有界退避，再走模型回合级有界恢复；DNS、无效地址和其它未证明为瞬时的
-  连接故障继续快速失败。富 TUI 从结构化 retry 事件显示层级、序号和等待秒数，不能解析错误文案决定
+- 模型网络故障必须按系统异常事实分类：`ConnectionRefusedError` / `errno=ECONNREFUSED` 与异常链中的
+  typed `socket.gaierror` 先走 HTTP 传输层有界退避，再走模型回合级有界恢复；畸形 URL、认证和代理配置
+  仍快速失败。富 TUI 从结构化 retry 事件显示层级、序号和等待秒数，不能解析错误文案决定
   是否重试，也不能把重连提示混成 assistant commentary。
 - Click→Go 恢复任务证明 rich transcript 与长链收口已可用，也暴露了与界面无关的 workspace 污染：
   Attempt sandbox 曾把当前项目 cwd 放在结构化 task roots 之前，导致 `/tmp` 实际映射到

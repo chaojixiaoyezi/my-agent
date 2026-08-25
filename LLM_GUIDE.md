@@ -28,6 +28,9 @@
 - 模型成本统计复用唯一 `ModelCallLedger`，按 request/run 累计 provider input/output/
   cache-read/cache-creation，明细裁剪不截断总账。无 provider usage 时按结构化估算
   单独计数。TUI `ctx` 只表示当前上下文压力，不得当成任务累计消耗。
+- provider 的 typed `socket.gaierror` 与 会话运行时 `ConnectionFailed` 一样先走现有 2/5/15 秒有界 HTTP 退避；
+  DNS 瞬断不能一跳终止数小时 child。三次耗尽后仍返回 typed transient failure 供既有模型轮恢复，畸形
+  URL、认证、代理配置和普通错误字符串不因此取得重试权；每个物理 attempt 继续进入唯一调用账。
 
 - 根代理的默认 `system_prompt` 采用 会话运行时 Default 的 assumptions-first 软纪律：明确目标下先从 cwd、代码、
   用户约束和工具事实补信息；安全可逆的次要选择由模型采用合理默认并继续。只有无法从上下文取得、且任何
