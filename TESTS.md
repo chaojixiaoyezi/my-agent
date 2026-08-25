@@ -25,9 +25,10 @@ focused 回归覆盖 Gateway owner 控制、guidance exact-turn reserve/submissi
   agent_py_agent/tests/test_background_notice_display.py
 ```
 
-本地 428 项已运行到 100%，保留既有 xfail。真实验收必须使用 `.7` 唯一 Gateway、MiniMax-M2.7 和 fresh
-tmux，只输入一次用户原样 Prompt 3；验证一次创建/并行 8 名、进入运行 child 后输入普通中文且继续工作、
-root/child `Ctrl+Home` 历史、F6 后滚轮与返回原生复制。测试者不得改调研产物或另开 Gateway。
+本地 429 项已运行到 100%，保留既有 xfail；Ruff、doc-sync、strict code-size、diff 与 clean-package 也
+通过。`.7` 唯一 Gateway、MiniMax-M2.7 的 fresh `ma-6d33228-p3-guidance8-r20` 只输入一次用户原样 Prompt 3，
+已验证八名 child 同时运行、运行 child 的普通中文消息 exact receipt 最终 consumed 且继续工作、root/child
+`Ctrl+Home` 历史、F6 后滚轮与返回原生复制。测试者没有改调研产物或另开 Gateway，任务继续自行运行。
 
 当前测试文档只保留常用入口。完整文件清单以 `agent_py_agent/tests/` 为准，不再手工维护旧表格。
 

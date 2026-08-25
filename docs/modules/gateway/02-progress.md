@@ -1,6 +1,6 @@
 # Gateway Progress
 
-## 2026-08-24 child guidance exact-turn 入账（本地候选）
+## 2026-08-24 child guidance exact-turn 入账（已部署真 TUI）
 
 - `.7` Prompt 3 的运行中 child 收到用户普通中文后，Gateway receipt 缺少 `expected_turn_id`；runtime 已按
   current attempt reserve，provider submission 原子校验再报 `guidance submission reservation mismatch`，
@@ -8,8 +8,9 @@
 - `agent_control_service` 现在从 RuntimeDB exact AgentRun 读取 current AgentAttempt，只接受
   `pending/running`，并把 attempt id 写入 guidance metadata。task-local active pointer 只做附加一致性栅栏；
   没有活跃回合、投影冲突或权威库不可用时，入口分别返回 typed 409/503 且不写消息。
-- ConversationStore 的 reserve/submission/consume 严格校验没有放宽；428 项相关 focused 已到 100%，待
-  严格 gate、推送和 `.7` 唯一 Gateway fresh TUI 证明 child 插话后继续执行。
+- ConversationStore 的 reserve/submission/consume 严格校验没有放宽；`6d33228` 的 429 项相关 focused 与
+  本地严格 gate 全通过并部署 `.7`。fresh Prompt 3 中 researcher-1 receipt 的 expected turn 与 reservation
+  attempt 同为 `attempt-1787621674-fdb6e96a`，状态最终 `consumed`；child 随后继续模型与 WebSearch，未失败。
 
 ## 2026-08-24 detached TUI 会话降载与退出语义（已部署真机）
 

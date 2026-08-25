@@ -356,6 +356,37 @@ class TestCreateSubagentsToolExecute:
         assert "agent_tree" not in payload["auto_start"]
         assert payload["next_action"]["action"] == "await_lifecycle_event"
 
+    def test_default_capacity_accepts_one_atomic_batch_of_eight(self, monkeypatch):
+        """默认八槽必须允许一个 items 调用完整创建八名 child，不静默拆批或截断。"""
+        import agent_py_agent.agent.agent_core.orchestration.background.dispatch as background_dispatch
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = _mock_create_items_agent(task_count=8)
+        mock_agent.config.max_subagents = 8
+        mock_agent.config.subagent_hierarchy_max_children_per_tool_call = 0
+        mock_agent.config.task_max_subagents = 0
+        mock_agent.tools.specs.return_value = []
+        monkeypatch.setattr(
+            background_dispatch,
+            "_start_background_dispatch",
+            lambda _agent, run_ids: {
+                "status": "started",
+                "dispatch_mode": "background",
+                "run_ids": list(run_ids),
+            },
+        )
+
+        result = CreateSubagentsTool(mock_agent).execute({
+            "goal": "分别调研八个项目",
+            "items": [{"goal": f"调研项目 {index}"} for index in range(8)],
+        })
+        payload = json.loads(result.output)
+
+        assert result.ok is True
+        assert payload["created"] == 8
+        assert payload["created_run_ids"] == [f"run_{index}" for index in range(8)]
+        assert mock_agent.subagents.create_run.call_count == 8
+
     def test_auto_start_process_command_runs_direct_dispatch_for_created_run_ids(self):
         """真实后台进程只跑精确 run_id 的一轮 dispatch，不再抢父进程 watch lock。"""
         from agent_py_agent.agent.agent_core.orchestration.background.dispatch import (

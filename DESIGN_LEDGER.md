@@ -1500,7 +1500,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 
 ## 2026-08-24 子代理插话绑定活跃 attempt 与单一会话容量
 
-状态：`.7` 真实失败已定位；设计已确认，实现与真 TUI 复验进行中。
+状态：`6d33228` 已发布、部署 `.7` 并完成 fresh 真 TUI 复验。
 
 - 真实失败链：TUI 给运行中 child 发送“给我讲讲你在做啥额，你不要停”后，Gateway 把 guidance 写入
   canonical message box，却没有写 `expected_turn_id`。运行时先按当前 attempt 成功 reserve，真正模型
@@ -1522,3 +1522,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   `Ctrl+Home` 分别看到 root 原始 Prompt 与 child 完整派工、thinking、工具卡，证明数据没有丢失。默认
   原生复制模式不会把物理滚轮交给 TUI，这是终端协议边界；所有主/子代理 footer 必须常驻显示
   `PgUp/Ctrl+Home 历史 · F6 滚轮`，不能只在返回父级后的 5.5 秒 notice 中提示。
+- `.7` 唯一 Gateway 的 fresh `ma-6d33228-p3-guidance8-r20` 只提交一次原样 Prompt 3，随后八名
+  researcher 同时 RUNNING。进入 researcher-1 输入普通中文后，receipt 的
+  `expected_turn_id=attempt-1787621674-fdb6e96a` 与 reservation attempt 相同，最终状态 `consumed`；child
+  继续多轮 WebSearch 且未失败。root/child `Ctrl+Home` 和 F6 SGR wheel 均通过，测试结束后已回原生复制。

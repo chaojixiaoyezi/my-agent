@@ -369,15 +369,17 @@ goal 中出现 `src/i18n/`、`src/config/` 时，历史正文自动补绑旁路�
 
 ### 用户直控子代理的共享控制面
 
-状态：详情/插话/停止已部署；exact-attempt 插话修复与八槽容量待 `.7` fresh TUI 验证
+状态：详情/插话/停止与 exact-attempt 修复已部署真 TUI；显式 interrupt/resume 仍待设计
 
 解决问题：当前用户只能给主代理插话或停整个任务，无法定位一个正在跑的 child；现有
 `cancel_subagents` 又是终态取消，不是“打断当前一轮后仍能继续”。如果 TUI 和未来 Web 各自直改账本，会导致状态、
 权限和恢复逻辑分裂。
 
 当前进展：已有 owner/thread 范围的 active root + direct-child 投影，TUI 可进入详情、给运行 child 发消息、
-Esc 停止并在终态只读回看。真实 Prompt 3 暴露 guidance 未绑定 exact turn 会杀掉 child，当前候选已要求
+Esc 停止并在终态只读回看。真实 Prompt 3 暴露 guidance 未绑定 exact turn 会杀掉 child，`6d33228` 已要求
 pending/running AgentAttempt 后再入账；默认容量同时从会话 6/单次 4/runner 4 收口为会话 8/单次 0/runner 8。
+fresh `ma-6d33228-p3-guidance8-r20` 已证明八名 child 同时运行，中文插话 exact receipt 最终 consumed 且 child
+继续工作，root/child 历史均可查看。
 后续仍待做 interrupt 当前 turn 后可恢复、resume/start 同一 session、cancel/close 和 capability 裁决。
 root owner 可操作自己树内任意后代，模型代理仍只能管直属下级。
 每个写操作必须带幂等 `operation_id`、exact target、expected version/state 和 accepted/rejected/unknown 回执，

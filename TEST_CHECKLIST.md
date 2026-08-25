@@ -2,12 +2,12 @@
 
 ## 子代理 TUI 插话与容量
 
-- [ ] 运行 child 的用户消息 receipt 带 exact `expected_turn_id`，reserve、provider submission 与 consume
+- [x] 运行 child 的用户消息 receipt 带 exact `expected_turn_id`，reserve、provider submission 与 consume
   使用同一 attempt；不得再出现 `guidance submission reservation mismatch`。
-- [ ] child 没有 pending/running attempt 时，入口明确拒绝、用户输入保留且 guidance message box 零新增。
-- [ ] 默认 root 一次可原子创建 8 名 child，`per_call_cap=0`、session cap=8；第 9 名整批拒绝，终态释放后
+- [x] child 没有 pending/running attempt 时，入口明确拒绝、用户输入保留且 guidance message box 零新增。
+- [x] 默认 root 一次可原子创建 8 名 child，`per_call_cap=0`、session cap=8；第 9 名整批拒绝，终态释放后
   可继续创建，历史累计允许超过 8。
-- [ ] root 与 child 在默认原生复制模式均可用 `PgUp/Ctrl+Home` 查看历史，常驻 footer 能看到 `F6` 滚轮提示。
+- [x] root 与 child 在默认原生复制模式均可用 `PgUp/Ctrl+Home` 查看历史，常驻 footer 能看到 `F6` 滚轮提示。
 
 - [x] 工具运行时改动相关 focused tests 通过（Schema/runtime/protocol/policy/executor/ledger/output/concurrency/cancel/compact 矩阵）；其他并行模块仍按各自条目验收。
 - [x] 默认可恢复工具失败只返回当前模型返工，不按同类失败次数结束 turn；同一批后到的同工具成功会

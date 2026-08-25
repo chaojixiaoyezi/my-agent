@@ -1,6 +1,6 @@
 # Subagent Progress
 
-## 2026-08-24 插话 exact-attempt 与八槽单一容量（本地候选）
+## 2026-08-24 插话 exact-attempt 与八槽单一容量（已部署真 TUI）
 
 - `.7` Prompt 3 现场确认，用户给 researcher-1 输入普通中文后，Gateway guidance receipt 缺少
   `expected_turn_id`；runtime reserve 后在 provider submission 原子门抛
@@ -12,8 +12,10 @@
 - exact resume `ma-p3-history-guidance-r19` 已用 `Ctrl+Home` 分别看到 root 原始 Prompt 和 DeepSeek child
   完整派工/thinking/WebSearch，证明 canonical history 未丢。默认原生复制模式的物理滚轮不会进入备用
   屏幕，因此 root/child/footer 改为常驻显示 `PgUp/Ctrl+Home 历史 · F6 滚轮`。
-- 428 项 guidance/runtime/capacity/config/TUI focused 已运行到 100%（保留既有 xfail）；待本地严格 gate、
-  推送、`.7` 单 Gateway 部署和 fresh MiniMax-M2.7 真 TUI 复验后转完成。
+- `6d33228` 的 429 项 guidance/runtime/capacity/config/TUI focused、Ruff、doc-sync、strict code-size、diff 与
+  clean-package 全通过，已推送并部署 `.7` 唯一 Gateway。fresh `ma-6d33228-p3-guidance8-r20` 只输入一次
+  原样 Prompt 3，八名 child 同时 RUNNING；researcher-1 中文插话 receipt exact attempt 一致且最终
+  `consumed`，child 继续工作。root/child `Ctrl+Home` 与 F6 wheel 均通过，测试后已恢复原生复制。
 
 ## 2026-08-24 子代理视角切换后的历史滚动（已部署真 TUI）
 

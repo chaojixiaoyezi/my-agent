@@ -4,6 +4,14 @@
 
 最近收口重点：
 
+- 2026-08-24 `6d33228` 修复 TUI 给运行 child 插话会触发
+  `guidance submission reservation mismatch` 的底座错误：Gateway 入账前绑定 exact pending/running
+  AgentAttempt，缺少活跃片时拒绝且不落消息，ConversationStore 严格门未放宽。默认容量从会话 6、单次 4、
+  runner 4 收口为会话 8、单次 0、runner 8；root/child 常驻 footer 明示 PgUp/Ctrl+Home 与 F6。429 项
+  focused 和本地严格 gate 通过，已推送、部署 `.7` 唯一 Gateway。fresh
+  `ma-6d33228-p3-guidance8-r20` 中八名 researcher 同时 RUNNING；researcher-1 中文插话 receipt 最终
+  consumed、child 继续工作，root/child 历史及 F6 滚轮均通过。任务产物未被测试者修改。
+
 - 2026-08-24 `d14549c` 完成代理视角独立滚动状态：main/child/grandchild 的普通与详细 viewport 分别保存
   follow、cursor 与未读基线，返回已有页面恢复原锚点，跨页选区清除；原生复制模式返回父级时明确提示
   `PgUp/Ctrl+Home` 与 `F6` 取舍。128 项 focused 和本地严格 gate 通过，已推送并部署到 `.7` 唯一

@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-08-24 子代理插话失败、历史入口与 4/8 容量混淆（本地候选）
+## 2026-08-24 子代理插话、八槽容量与历史入口（`.7` 真 TUI 已通过）
 
 - Prompt 3 真实账本证明 researcher-1 不是因 WebFetch 失败退出，而是用户插话 receipt 漏
   `expected_turn_id`，在 provider submission gate 抛 `guidance submission reservation mismatch`。
@@ -10,8 +10,12 @@
   没有批量工具的第二个默认四项限制。
 - 同一 exact session 的 root/DeepSeek child 用 `Ctrl+Home` 均看到完整历史，数据未丢；默认原生复制模式下
   物理滚轮不进入 alternate screen。所有常驻 footer 已补 `PgUp/Ctrl+Home 历史 · F6 滚轮`。
-- 428 项直接 focused 已到 100%（保留既有 xfail）；待严格 gate、推送、单 Gateway 部署和 fresh 原样
-  Prompt 3 真 TUI 同时复验八名创建、child 插话不断线、root/child 历史与 MiniMax-M2.7。
+- `6d33228` 的 429 项直接 focused、Ruff、doc-sync、strict code-size、diff 与 clean-package 全通过；改动
+  远低于 10,000 行，按规则未跑全仓。已推送并部署到 `.7`，唯一 Gateway PID `557079`，有效配置
+  `MiniMax-M2.7 / max=8 / per-call=0 / runner=8`。
+- fresh tmux `ma-6d33228-p3-guidance8-r20` 只提交一次原样 Prompt 3，八名 researcher 同时 RUNNING。
+  researcher-1 的中文插话 receipt 绑定 exact attempt 并最终 `consumed`，随后继续多轮 WebSearch；root/child
+  `Ctrl+Home` 与 F6 滚轮都通过，测试后已恢复原生复制。任务继续自行运行，未被测试者停止或修改产物。
 
 ## 2026-08-24 切换子代理后历史滚动位置独立保留（`.7` 真 TUI 已通过）
 
