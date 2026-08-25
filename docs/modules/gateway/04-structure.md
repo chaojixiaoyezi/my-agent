@@ -50,6 +50,11 @@ canonical `task_progress.v1` 账本只读投影为 `id/title/status`；
 数值与 Todo 仍由各自 canonical ledger 持有，全部展示字段都不参与任务结束、恢复或授权，真实 task
 link/run/turn_end 仍是唯一生命周期事实。
 
+main 行的 task identity 与耗时不由易失 sink 或客户端面板年龄决定。activity projector 精确选择
+`ConversationThread.workspace_task_id` 对应的 active root，并用该 `ThreadTaskLink.created_at` 作为当前普通
+回合起点；sink 只补 thinking/tool/context 阶段。Gateway 重启使 sink 为空时仍从这个 root 恢复 waiting 行，
+而缺少结构化 root 起点的旧数据只显示 `0:00`。较晚 child link 不得抢占主时钟，该投影也不参与续跑或收口。
+
 `gateway_parts/bounded_http_server.py::GatewayBoundedHTTPServer` 是这些客户端共享的唯一 HTTP 并发入口；
 accept backlog 与在途请求上限均为 128，16 个 daemon worker 在进程生命周期内复用。容量满时入口在进入
 产品 handler 前返回 `503 GATEWAY_HTTP_BUSY + Retry-After: 1`，让客户端沿现有失败退避重连；它不能改变

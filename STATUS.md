@@ -1,17 +1,31 @@
 # STATUS
 
-## 2026-08-25 后台 root 显式当前 task id 读空 Todo（本地候选）
+## 2026-08-25 长会话追加回合继承旧 Working 计时（本地候选）
+
+- `.7` 长 TUI `ma-97468f3-longchain-r27` 在三小时会话内追加一个新的“修复者完成后再派独立测试者”回合；
+  当前 child 仅运行约 3 分钟时，main 却显示 `3:18:04`。`/client/notices` 的结构化现场为
+  `active_task_count=2`、当前 child 正常 RUNNING、`main_activity={}`，证明 renderer 误拿 session 级后台
+  面板首次出现时间充当当前回合时间。
+- 对照 终端交互 `REPL.tsx` 的 `isQueryActive false→true` 重置 `loadingStartTimeRef`：当前候选将 main 行精确
+  绑定 `ConversationThread.workspace_task_id` 对应 active root 的 `ThreadTaskLink.created_at`；较晚 child link
+  和旧易失 sink 均不能抢主时钟。Gateway 重启导致 sink 为空时，从同一持久 root 恢复 `waiting` 展示；
+  renderer 不再回退面板年龄，缺少结构化起点只显示 `0:00`。
+- `test_conversation_agent_activity.py` 与 `test_background_notice_display.py` 共 35 项通过；待当前真实 child 链
+  自然结束后推送、部署唯一 Gateway，并在同一 session 追加下一任务验证计时从新 root 重新开始。
+
+## 2026-08-25 后台 root 显式当前 task id 读空 Todo（已部署，真实自然 read 待复验）
 
 - `.7` 长 TUI `ma-97468f3-longchain-r27` 的 Click→Go 复刻任务已有 canonical task-path Todo 18 项；第三批
   child 启动后该账仍有 8 done、9 in_progress、1 pending。root 的真实 tool-output index 证明它随后调用
   `task_progress(action=read, run_id=<当前 gwreq task id>)`，旧 handler 返回 0 项。
 - ConversationStore 的 exact task link 与 task path 均完整，因此不是持久化丢失；问题是 read 专用显式
   `run_id` 分支早于 canonical resolver，模型把当前任务身份回填后被当作另一份历史账。
-- 当前候选对照 会话运行时 `update_plan` 的 session/turn 定域：只有显式 id 精确等于当前 structured
+- `ec88216` 已对照 会话运行时 `update_plan` 的 session/turn 定域：只有显式 id 精确等于当前 structured
   `durable_task_id` 时走共享 `progress_ledger_id`；明确不同的历史 id 仍原样读取。没有 prompt/id 前缀解析、
-  第二账本、自动续跑或机器验收。两个 focused 文件 16 项通过，待严格 gate、推送和真 TUI 复验。
+  第二账本、自动续跑或机器验收。两个 focused 文件 16 项与严格 gate 已通过，代码已推送并部署 `.7` 唯一
+  Gateway；当前修复/测试链未自然调用该 read 形态，因此还不能把定向回归冒充真实 read 复验。
 
-## 2026-08-25 依赖型 child 被同批并发（本地候选）
+## 2026-08-25 依赖型 child 被同批并发（已部署真 TUI）
 
 - `.7` 同一长 TUI 的 ESM 入口返工里，root 口头说“先修复、再独立测试”，却一次创建 worker/tester；
   tester 在 4:15 结束，worker 在 4:42 才结束，因此该 tester 不能证明修后状态。随后单独新派的 tester
@@ -19,8 +33,10 @@
 - 会话运行时 对照只把可与当前工作同时推进的 concrete/bounded/independent sidecar 交给 child。当前候选复用
   这一软纪律，明确 `items` 立即并发、goal 中的“先后”不形成顺序；后项依赖前项未来结果时必须等 lifecycle
   wake 后再创建。不解析自然语言、不按 tester 角色硬拦，也不新增依赖状态机或机器验收。
-- 两个模型规格 focused 文件 15 项通过。改动远低于 10,000 行，不跑全仓 pytest；仍待文档门、严格 gate、
-  推送、单 Gateway 部署和真 TUI 顺序复验。
+- `8e6948d` 的两个模型规格 focused 文件 15 项与严格 gate 通过并部署 `.7` 唯一 Gateway。同一长 TUI 随后
+  只先创建修复 child `subagent-1787665491-62bbb03c`；它在 12:50、104.7k context 时完成，typed wake 才
+  创建独立 tester `subagent-1787666292-c98adb9d`，后者 2:27、40.4k context 完成。两者各一次 attempt、
+  Compact 0，结构化活动最终归零；测试者没有发送“继续”，真实分阶段语义通过。
 
 ## 2026-08-25 child 完成后 Working 不收口与报告引用冲突（第二层本地候选）
 

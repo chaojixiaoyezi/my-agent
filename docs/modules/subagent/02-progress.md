@@ -1,14 +1,15 @@
 # Subagent Progress
 
-## 2026-08-25 依赖型子代理分批创建候选
+## 2026-08-25 依赖型子代理分批创建（已部署真 TUI）
 
 - 同一长 TUI 的真实返工中，root 明确说“先修复、再独立测试”，却把 worker/tester 放进一个
   `create_subagents.items`；两者立即并发，tester 比 worker 早 27 秒结束，不能作为修后验收。
-- 对照 会话运行时 `会话运行时-rs/core/src/tools/handlers/multi_agents_spec.rs` 后，当前候选把同一原则写进唯一
+- 对照 会话运行时 `会话运行时-rs/core/src/tools/handlers/multi_agents_spec.rs` 后，`8e6948d` 把同一原则写进唯一
   `create_subagents` 模型合同：items 只含可立即并行、彼此不等结果的任务；后项依赖前项未来产物时，
   先创建前项，等 typed lifecycle wake 后再创建后项。文字里的“先后”不产生机器顺序。
 - 这只是通用软纪律，不解析 goal/role、不硬拦 tester、不新增 `depends_on` 状态机或机器质量验收。
-  两个模型规格 focused 文件 15 项已通过；仍待严格 gate、推送、单 Gateway 部署与同一长 TUI 复验。
+  两个模型规格 focused 文件 15 项与严格 gate 已通过。`.7` 同一长 TUI 先单独运行修复 child 12:50，
+  其完成 wake 后才创建独立 tester 并运行 2:27；两者无并发、无需用户推动，最终 activity 归零。
 
 ## 2026-08-25 完成续片终态与精确报告读取
 

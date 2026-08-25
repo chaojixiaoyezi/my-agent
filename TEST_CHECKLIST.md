@@ -98,6 +98,8 @@
   main 等待 child 时按 typed status 显示“等待 N 个子代理”，最终答复进入普通 assistant transcript；
   `7c052f2` 第 1 条真机任务已暴露布局/Todo 问题，新候选 147 项定向回归已过，仍需 `.7`
   单 Gateway + 下一条原样长任务 TUI 验收后勾选。
+  - [x] 同一 session 追加普通回合时，main 计时绑定当前 `workspace_task_id` root 的 `created_at`；较晚 child、
+    旧 sink 和 background block 首次出现时间均不能抢时钟，结构化起点缺失时显示 `0:00`。
 - [x] 空输入时 `↓` 选择直属 child、`Enter` 进入详情，`↑/↓` 可继续换行；详情与主代理共用 thinking、
   工具/diff、Todo、Context/Compact 和直属 child 渲染。运行中 child 接受普通自然语言插话，`Esc` 精确停止
   当前 child；`Ctrl+G` 返回父代理且不停止，`Alt+←`、`/back` 只作兼容。终态 child 可进入查看 final 但只读，

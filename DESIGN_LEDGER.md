@@ -348,6 +348,17 @@
 
 以后新增长期设计，只写摘要和链接，不再把完整方案塞回这个文件。
 
+## 2026-08-25 当前主任务 Working 时钟【状态：本地 focused 通过，待单 Gateway 真机复验】
+
+- 终端交互 的 spinner 时间只读当前 query 的 `loadingStartTimeRef`，并在 query 从 idle 进入 active 的同一渲染
+  立即重置；不会把 session 或组件首次挂载时间当本轮耗时。本项目对应的持久当前 query 身份是
+  `ConversationThread.workspace_task_id`，起点是它对应 active `ThreadTaskLink.created_at`。
+- `conversation_agent_activity.v5.main_activity` 的阶段/context 仍可来自进程内易失 sink，但 task id 与时钟
+  必须重新绑定当前 workspace root。较晚创建的 child link、旧 root sink 与 TUI background block 年龄只可
+  作为各自展示事实，不能替换主任务时钟；Gateway 重启后 sink 丢失时以 root 起点和 `waiting` 恢复。
+- renderer 只读 `main_activity.started_at`。字段缺失显示 `0:00`，不新增客户端时钟状态、不猜 prompt、不影响
+  lifecycle/Compact/完成权威。详细合同同步见 `docs/modules/gateway/04-structure.md#tui-后台活动投影`。
+
 ## 2026-08-21 子代理递归控制面与自然收口【状态：直属活动区已真机验证，lane 自愈待补】
 
 - 问题根因：历史实现同时暴露“创建—调度—推进”多个模型工具，并用

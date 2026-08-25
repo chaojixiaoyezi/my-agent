@@ -600,9 +600,9 @@ def _render_background_activity(
     active_task_count = max(0, _safe_render_int(block.metadata.get("active_task_count")))
     if not context.focused_agent_run_id and active_task_count <= 0:
         return ()
-    started_at = float(
-        main_activity.get("started_at") or block.metadata.get("started_at") or 0.0
-    )
+    # 面板的首次出现时间可能跨越多个普通回合；终端交互 也只用当前
+    # query 的 loadingStartTime。主行缺少结构化任务起点时宁可显示 0:00。
+    started_at = float(main_activity.get("started_at") or 0.0)
     rows = _subagent_activity_rows(block.metadata.get("subagents"))
     main_phase = str(main_activity.get("phase") or "").strip().lower()
     derived_label = _main_agent_activity_label(rows)

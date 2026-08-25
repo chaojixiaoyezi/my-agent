@@ -443,6 +443,75 @@ def test_background_main_activity_sink_projects_real_stage_for_active_task() -> 
     assert activity.main_activity["context_usage"]["current_tokens"] == 42_100
 
 
+def test_main_activity_clock_uses_current_workspace_root_not_panel_or_child() -> None:
+    """同一长会话追加任务后，main 计时必须从当前主任务重新开始。"""
+    from agent_py_agent.agent.conversation.agent_activity import (
+        BackgroundMainActivitySink,
+        conversation_agent_activity,
+    )
+
+    old_root = SimpleNamespace(
+        task_id="task-old",
+        status="active",
+        created_at=10.0,
+    )
+    current_root = SimpleNamespace(
+        task_id="task-current",
+        status="active",
+        created_at=300.0,
+    )
+    newer_child = SimpleNamespace(
+        task_id="child-current",
+        status="active",
+        created_at=320.0,
+    )
+    store = SimpleNamespace(
+        active_task_links_report=lambda _thread_id: (
+            [old_root, current_root, newer_child],
+            [],
+        ),
+        load_thread_report=lambda _thread_id: (
+            SimpleNamespace(
+                workspace_task_id="task-current",
+                compact_generation=0,
+            ),
+            None,
+        ),
+    )
+    agent = SimpleNamespace(
+        subagents=SimpleNamespace(
+            list_runs_report=lambda: SimpleNamespace(runs=[], load_errors=[])
+        )
+    )
+    BackgroundMainActivitySink(
+        agent,
+        thread_id="thread-long",
+        task_id="task-old",
+    ).write_thinking("旧回合仍在思考")
+
+    activity = conversation_agent_activity(agent, store, "thread-long")
+
+    assert activity.main_activity == {
+        "task_id": "task-current",
+        "phase": "waiting",
+        "activity": "等待后续事件",
+        "started_at": 300.0,
+        "updated_at": 300.0,
+    }
+
+    current_sink = BackgroundMainActivitySink(
+        agent,
+        thread_id="thread-long",
+        task_id="task-current",
+    )
+    current_sink.write_thinking("核对当前修复子代理")
+    activity = conversation_agent_activity(agent, store, "thread-long")
+
+    assert activity.main_activity["task_id"] == "task-current"
+    assert activity.main_activity["activity"] == "核对当前修复子代理"
+    assert activity.main_activity["started_at"] == 300.0
+
+
 def test_conversation_agent_activity_projects_canonical_task_progress(tmp_path: Path) -> None:
     import hashlib
 

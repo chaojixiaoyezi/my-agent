@@ -1,5 +1,21 @@
 # TESTS
 
+## 2026-08-25 同一长会话的新主任务必须重置 Working 计时
+
+focused 回归命令：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_conversation_agent_activity.py \
+  agent_py_agent/tests/test_background_notice_display.py \
+  -q --tb=short
+```
+
+回归构造同一 thread 中旧 root、当前 `workspace_task_id` root 和更新更晚的 child，并预置一条旧 root 的
+易失 main sink。活动投影必须保留当前 root 的阶段内容，同时把 `started_at` 固定到当前 root
+`ThreadTaskLink.created_at`；没有 main activity 的 renderer 不允许拿 session-scoped background block 起点
+冒充本回合耗时。该测试只验证只读展示，不改变 active link、child 生命周期或任务完成判断。
+
 ## 2026-08-25 后台恢复轮不得用当前 task id 读出空 Todo
 
 focused 回归命令：

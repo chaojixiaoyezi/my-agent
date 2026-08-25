@@ -1125,3 +1125,43 @@ def test_long_main_activity_stays_on_one_terminal_line() -> None:
 
     assert len(working_lines) == 1
     assert max(0, wcswidth(fragments_text(working_lines[0]))) <= 52
+
+
+def test_main_activity_elapsed_never_falls_back_to_old_panel_start() -> None:
+    """缺少当前主任务时钟时，底部面板年龄不能冒充本回合耗时。"""
+    from agent_py_agent.cli.chat_parts.tui_block_renderer import (
+        TuiRenderContext,
+        fragments_text,
+        render_tui_snapshot,
+    )
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+
+    runtime = TuiRuntime("session-main-clock")
+    assert runtime.update_background_activity(
+        1,
+        main_activity={},
+        subagents=[
+            {
+                "run_id": "child-live",
+                "name": "worker",
+                "status": "RUNNING",
+                "created_at": 990.0,
+            }
+        ],
+    ) is True
+    snapshot = runtime.store.snapshot()
+    background = next(
+        block for block in snapshot.active_blocks if block.role == "background"
+    )
+    background.metadata["started_at"] = 100.0
+
+    frame = render_tui_snapshot(
+        snapshot,
+        TuiRenderContext(width=80, spinner_index=0, now=1_000.0),
+    )
+    rendered = "\n".join(
+        fragments_text(line) for line in frame.transcript_lines
+    )
+
+    assert "Working · main · 等待 1 个子代理 · 0:00" in rendered
+    assert "15:00" not in rendered

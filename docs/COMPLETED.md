@@ -1,5 +1,10 @@
 # COMPLETED
 
+- 2026-08-25 `8e6948d` 已把 会话运行时 的“同批只放可立即并行的独立 sidecar”写入唯一
+  `create_subagents` 模型合同并部署 `.7` 单 Gateway。长 TUI `ma-97468f3-longchain-r27` 真实证明修复 child
+  完成后才由 typed wake 创建独立 tester：12:50 与 2:27 两段没有重叠、均一次 attempt、无需用户发送
+  “继续”，最终活动归零。该能力仍是软派工纪律，不新增依赖状态机或机器验收。
+
 本文件不再保存历史流水。当前完成项以 git 历史和模块 `02-progress.md` 为准。
 
 最近收口重点：

@@ -17,6 +17,11 @@
 
 ## 下一版优先级
 
+当前 `.7` 长会话暴露 main Working 计时继承 session 面板年龄；本地候选已改为
+`workspace_task_id -> active ThreadTaskLink.created_at` 的精确时钟，并取消 renderer 面板年龄兜底。下一步在
+当前 child/独立 tester 自然结束后部署唯一 Gateway，再用同一 session 的新追加任务验证从 `0:00` 重新计时；
+不能为验证而中断正在运行的 child，也不能另启测试 Gateway。
+
 来自 STATUS.md，子代理可进入视图、精确控制以及插话排队/公开回复已转入 COMPLETED；当前继续正式矩阵与
 仍缺直接自然样本的生命周期分支。
 

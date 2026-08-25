@@ -316,6 +316,7 @@ def conversation_agent_activity(
 ) -> ConversationAgentActivity:
     compact_count, compact_warnings = _conversation_compact_count(store, thread_id)
     active_links, link_warnings = _active_task_links(store, thread_id)
+    workspace_task_id = _conversation_workspace_task_id(store, thread_id)
     active_task_ids = [
         str(getattr(link, "task_id", "") or "").strip() for link in active_links
     ]
@@ -351,10 +352,11 @@ def conversation_agent_activity(
     return ConversationAgentActivity(
         active_task_count=len(active_task_ids),
         compact_count=compact_count,
-        main_activity=(
-            background_main_activity(agent, thread_id, set(active_task_ids))
-            if active_task_ids
-            else {}
+        main_activity=_conversation_main_activity(
+            agent,
+            thread_id,
+            active_links,
+            workspace_task_id=workspace_task_id,
         ),
         subagents=tuple(visible),
         task_progress_items=progress_items,
@@ -368,6 +370,55 @@ def conversation_agent_activity(
             )
         ),
     )
+
+
+# LLM: The main row is bound to ConversationThread.workspace_task_id, which is the
+# current user turn's canonical root. Child links and an older volatile sink row may
+# never replace its identity or clock; the renderer receives no inferred prose timing.
+# 函数用途: 组合当前主任务的实时阶段与持久起点，让新回合和 Gateway 重启后计时仍然正确。
+def _conversation_main_activity(
+    agent: object,
+    thread_id: str,
+    active_links: list[object],
+    *,
+    workspace_task_id: str,
+) -> dict[str, object]:
+    active_by_id = {
+        str(getattr(link, "task_id", "") or "").strip(): link
+        for link in active_links
+        if str(getattr(link, "task_id", "") or "").strip()
+    }
+    current_link = active_by_id.get(str(workspace_task_id or "").strip())
+    allowed_task_ids = (
+        {str(workspace_task_id).strip()}
+        if current_link is not None
+        else set(active_by_id)
+    )
+    if not allowed_task_ids:
+        return {}
+    row = background_main_activity(agent, thread_id, allowed_task_ids)
+    if current_link is None:
+        return row
+    link_started_at = max(
+        0.0,
+        _safe_float(getattr(current_link, "created_at", 0.0)),
+    )
+    started_at = link_started_at or max(0.0, _safe_float(row.get("started_at")))
+    return {
+        "task_id": str(workspace_task_id).strip(),
+        "phase": _bounded_text(row.get("phase"), limit=40) or "waiting",
+        "activity": (
+            _bounded_text(row.get("activity"), limit=_ACTIVITY_TEXT_LIMIT)
+            or "等待后续事件"
+        ),
+        "started_at": started_at,
+        "updated_at": max(started_at, _safe_float(row.get("updated_at"))),
+        **(
+            {"context_usage": dict(row["context_usage"])}
+            if isinstance(row.get("context_usage"), dict)
+            else {}
+        ),
+    }
 
 
 # LLM: Child detail is a bounded owner-facing projection over one exact canonical
