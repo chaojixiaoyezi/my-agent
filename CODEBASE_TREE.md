@@ -110,6 +110,7 @@ agent_py_agent/
 |   |-- runtime_db/                     # SQLite 运行事实源：wake_queue 闹钟字条账本(schema.py 建表+repository.py 读写)
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
 |   |   |-- agent_control_service.py   # owner 树内代理详情、运行中 guidance 与精确停止的共用控制面
+|   |   |-- bounded_http_server.py     # 单 Gateway 固定 daemon worker、128 在途上限与过载 503 背压
 |   |   |-- control_service.py         # owner/thread 持久根任务的即时状态、纠偏和中断
 |   |   |-- control_operation_service.py # slash 控制副作用前置回执、幂等重放与 unknown 对账
 |   |   |-- input_delivery_service.py  # 普通消息 active/queued 去向的唯一持久回执与后台对账
@@ -198,6 +199,7 @@ agent_py_agent/
 |   |-- test_tui_reference_fixture_server.py # loopback Anthropic 参考场景协议与审计脱敏回归
 |   |-- test_tui_view_model.py          # active→stable、工具权限、队列、状态和未知事件 fail-closed reducer 回归
 |   |-- test_gateway_agent_control_service.py # owner 树内详情、幂等插话、停止和终态拒绝回归
+|   |-- test_gateway_bounded_http_server.py # 固定 HTTP worker 复用、容量 503 与停机排队回收回归
 |   |-- test_current_turn_execution.py # 当前轮成功/失败副作用事实投影回归
 |   |-- test_cli_run_conversation.py   # CLI transcript、Memory 消息证据、任务链接与 workspace 收口回归
 |   |-- test_closeout_machine.py      # 收口状态机 truth table 穷举测试(全组合+场景)

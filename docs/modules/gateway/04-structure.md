@@ -36,10 +36,19 @@ canonical `task_progress.v1` 账本只读投影为 `id/title/status`；
 数值与 Todo 仍由各自 canonical ledger 持有，全部展示字段都不参与任务结束、恢复或授权，真实 task
 link/run/turn_end 仍是唯一生命周期事实。
 
-`gateway_parts/http_service.py::GatewayThreadingHTTPServer` 是这些客户端共享的唯一 HTTP 接入口；
-accept backlog 为 128，request thread 为 daemon 且关闭不等待失联连接。它只吸收短时重连突发，不能改变
-handler 内的 owner/thread 鉴权、turn 串行、operation 幂等或状态权威。后台 notice 请求 2 秒无响应即由
-客户端转入退避，避免一个失联窗口长期占住连接。
+`gateway_parts/bounded_http_server.py::GatewayBoundedHTTPServer` 是这些客户端共享的唯一 HTTP 并发入口；
+accept backlog 与在途请求上限均为 128，16 个 daemon worker 在进程生命周期内复用。容量满时入口在进入
+产品 handler 前返回 `503 GATEWAY_HTTP_BUSY + Retry-After: 1`，让客户端沿现有失败退避重连；它不能改变
+handler 内的 owner/thread 鉴权、turn 串行、operation 幂等或状态权威。停机时未开始的排队连接会被取消
+并关闭，正在执行的 daemon handler 不得拖住 Gateway 退出。JSON 与 metrics 响应统一声明
+`Connection: close`，防止空闲 keep-alive 永久占用固定 worker；后台 notice 请求 2 秒无响应仍由客户端转入
+退避，避免一个失联窗口长期占住连接。
+
+多用户公平分层处理：未鉴权 socket 只受全局 16/128 transport 上限约束，不能相信 header 猜 owner；handler
+鉴权以后，模型任务沿 `GatewayAdmission` 的每用户/全局/同会话三层准入进入持久队列，后台会话再按 owner
+轮询。对照中 通道运行时 更适合多通道入口（pre-auth IP budget、auth scope 限流、device/IP 控制面限流），
+长期助手 更适合会话一致性（resolved session lease、profile 独立 DB）。未来接 Web/飞书仍共用一个 Gateway，
+只在各自层适配这两类合同，不按用户启动 Gateway，也不把共享 IP 当成 owner 身份。
 
 累计成本另走 `ModelCallLedger`：按 request/run 记录 provider input、output、cache read、
 cache creation 和真实/估算调用数，再投影到 runtime fact、`AgentRunResult` 与 Gateway

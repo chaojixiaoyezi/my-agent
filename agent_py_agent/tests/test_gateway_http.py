@@ -88,7 +88,7 @@ class TestGatewayHTTPHandler:
         assert len(set(ids)) == len(ids)
 
     def test_generate_request_id_unique_across_threads(self):
-        """ThreadingHTTPServer 是多线程:并发线程各生成一批 id 也必须全唯一(next() GIL 原子)。"""
+        """固定 HTTP worker 并发生成多批 id 时也必须全唯一(next() GIL 原子)。"""
         import threading
 
         from agent_py_agent.agent.gateway_parts.http_service import _generate_request_id
@@ -199,6 +199,7 @@ class TestGatewayHTTPIntegration:
         try:
             with urllib.request.urlopen(url, timeout=5) as response:
                 assert response.status == 200
+                assert response.headers.get("Connection") == "close"
                 data = json.loads(response.read().decode("utf-8"))
                 assert "status" in data
                 assert "requests" in data
@@ -215,6 +216,7 @@ class TestGatewayHTTPIntegration:
         gateway_worker_busy(0)  # 触发指标注册(懒创建),真机由热路径自然注册
         with urllib.request.urlopen(f"http://localhost:{port}/metrics", timeout=5) as response:
             assert response.status == 200
+            assert response.headers.get("Connection") == "close"
             assert "text/plain" in response.headers.get("Content-Type", "")
             body = response.read().decode("utf-8")
         assert "agent_gateway_workers_busy" in body

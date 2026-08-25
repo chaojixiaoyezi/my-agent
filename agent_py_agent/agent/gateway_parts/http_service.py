@@ -1,11 +1,11 @@
 
 from __future__ import annotations
 
-"""HTTP service for gateway using standard library http.server.
+"""HTTP service for gateway using a bounded standard-library HTTP server.
 
 这个文件实现 gateway 的 HTTP 接口：POST /ask、POST /control、GET /control-status/<id>、
 GET /result/<id>、GET /progress/<id>、GET /status、POST /stop。
-用标准库 http.server + threading 实现并发。
+用标准库 http.server + 固定 daemon worker 池实现有界并发。
 支持多租户鉴权：外部通道请求需要 X-User-Id / X-Channel header。
 """
 
@@ -18,10 +18,11 @@ import os
 import threading
 import time
 from dataclasses import dataclass
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from typing import TYPE_CHECKING, Any, Optional
 
 from ..runtime_errors import runtime_error_report
+from .bounded_http_server import GatewayBoundedHTTPServer
 from .http_handlers import (
     handle_admin_summary,
     handle_ask,
@@ -96,11 +97,17 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         if server is not None and server.auth_middleware is not None:
             self._auth_middleware = server.auth_middleware
 
+    # LLM: Every response closes its HTTP/1.1 connection because one pooled
+    # worker owns the connection until BaseHTTPRequestHandler finishes it.
+    # Keeping an idle socket alive would let a client monopolize the fixed pool.
+    # 函数用途: 发送 JSON 后关闭短轮询连接，避免一个客户端长期占住 Gateway HTTP 工位。
     def _send_json(self, status: int, body: dict[str, Any]) -> None:
         body_str = json.dumps(body, ensure_ascii=False)
+        self.close_connection = True
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body_str.encode("utf-8"))))
+        self.send_header("Connection", "close")
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body_str.encode("utf-8"))
@@ -178,6 +185,9 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
     def _handle_status(self) -> None:
         handle_status(self, _server_instance)
 
+    # LLM: Metrics uses the same short-connection boundary as JSON routes so
+    # a scraper cannot retain one of the finite Gateway request workers.
+    # 函数用途: 返回 Prometheus 指标并立即释放当前 HTTP 工作线程。
     def _handle_metrics(self) -> None:
         # §6-A 量化端点:Prometheus 文本暴露(LLM RED/token/cost + 并发占用探针同端点)。
         # 只读、无副作用;渲染失败不崩网关。
@@ -192,9 +202,11 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send_json(500, {"error": runtime_error_report(exc, context="gateway.metrics.render")})
             return
+        self.close_connection = True
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -266,16 +278,6 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         handle_admin_summary(self, _server_instance)
 
 
-# LLM: This server is the single local Gateway transport shared by every TUI. Keep the accept
-# backlog large enough for reconnect bursts, and never let idle client threads delay a controlled
-# Gateway restart; request ownership and serialization remain in the typed handlers/ledgers.
-# 类用途: 为单 Gateway 多 TUI 提供有界并发接入，避免短时重连把系统默认的 5 个等待位挤满。
-class GatewayThreadingHTTPServer(ThreadingHTTPServer):
-    request_queue_size = 128
-    daemon_threads = True
-    block_on_close = False
-
-
 # LLM: This wrapper owns the lifecycle of exactly one concurrent HTTP listener. Changes must keep
 # exposure checks before bind, preserve the module-global handler context, and stop cleanly without
 # changing request/owner serialization inside Gateway services.
@@ -303,7 +305,7 @@ class GatewayHTTPServer:
         self.auth_middleware = server_params.auth_middleware
         self.bind_host = server_params.bind_host
         self.agent = server_params.agent
-        self.server: GatewayThreadingHTTPServer | None = None
+        self.server: GatewayBoundedHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self.last_error_report: dict[str, Any] | None = None
@@ -325,7 +327,7 @@ class GatewayHTTPServer:
         _server_instance = self
         self.last_error_report = None
 
-        self.server = GatewayThreadingHTTPServer(
+        self.server = GatewayBoundedHTTPServer(
             (self.bind_host, self.port),
             GatewayHTTPHandler,
         )

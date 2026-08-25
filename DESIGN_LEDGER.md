@@ -1552,3 +1552,28 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   `Jump to bottom`、回底后消失；进入 researcher-1 后滚轮翻到完整派工、Thought 和工具记录。F6 的 footer
   在“原生复制/恢复滚轮”间真实切换；输入框拖选“中文复制验证ABC”后 tmux buffer 得到完整 9 字符，右键
   再次复制结果相同。外层 macOS 系统剪贴板仍只能由用户 attach 后亲自粘贴确认，不能由 tmux 证据冒充。
+
+## 2026-08-24 单 Gateway HTTP 有界复用工作池【状态：本地候选，待 `.7` 真 TUI 验收】
+
+- 解决问题：唯一 Gateway 被 OOM killer 杀死后，新 TUI 只能短暂显示“正在连接 Gateway”再退出。内核事实
+  证明被杀进程 RSS 约 6.68 GB；现场 8 个长期 TUI 以活动态 1 秒/空闲态 5 秒轮询，而标准库
+  `ThreadingHTTPServer` 为每个请求创建一个新 OS 线程。即使请求结束，反复 transcript/child 投影分配也会
+  放大 allocator 高水位；一旦 handler 变慢，线程和请求对象还会同时堆叠。
+- 会话运行时 对照：`app-server/src/in_process.rs` 以固定 Tokio task 处理消息，入口和出口均使用容量 128 的
+  bounded mpsc channel；thread list/state 再用单 permit semaphore 串行权威更新。这里不引入第二套 ASGI
+  或新依赖，只适配它的“固定执行者 + 有界排队 + 显式背压”原则。
+- 唯一实现位于 `gateway_parts/bounded_http_server.py`：16 个可复用 daemon worker，运行与排队合计最多
+  128 个；满载在鉴权/业务 handler 前返回 `GATEWAY_HTTP_BUSY`、HTTP 503 与 `Retry-After: 1`。客户端现有
+  transport failure backoff 负责稍后重试，忙不等于任务失败，也不得创建、取消或改变 run。
+- 停机先关闭准入并取消未开始的 Future；取消回调关闭对应 socket 且精确释放一个槽位。已经进入 handler
+  的请求沿原 typed ledger/幂等合同自然收尾，daemon worker 不参加解释器全局 join，保持旧 Gateway 可控
+  重启边界。accept backlog、owner 鉴权、active turn、模型并发和子代理恢复均不借此放宽。
+- 多用户对照结论：通道运行时 在入口保护上更完整——未鉴权 WebSocket 按 IP 限连接，鉴权失败按 scope/IP
+  滑窗退避，控制写操作再按 device/IP 单独计费；长期助手 更擅长 resolved session lease、profile 独立状态库
+  和全局 agent-run 上限。当前项目不在 socket 层读取可伪造的 `X-User-Id` 做“假公平”：transport 只守全局
+  16/128 硬上限，鉴权后沿既有 request admission 守每用户 8、全局 500、同会话单飞，后台再按 owner
+  round-robin 与每 owner 4 条会话车道调度。若未来改 WebSocket，优先适配 通道运行时 的 pre-auth connection
+  budget；不能把连接 IP 当成最终 owner（同机 TUI、飞书适配器和 NAT 都可能多人共用 IP）。
+- 固定 worker 按 TCP connection 执行 stdlib handler，因此所有 JSON/metrics 响应显式
+  `Connection: close`；否则一个客户端只需保留 16 条空闲 HTTP/1.1 keep-alive 就能占满全部工位。当前 TUI
+  本来就是短轮询，这一边界只牺牲无用的连接复用，不改变 session、历史、模型 turn 或 owner 状态。

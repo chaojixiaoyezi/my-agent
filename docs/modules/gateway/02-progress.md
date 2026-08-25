@@ -1,5 +1,23 @@
 # Gateway Progress
 
+## 2026-08-24 单 Gateway HTTP 固定工作池（本地候选）
+
+- `.7` 唯一 Gateway PID `557079` 被 Linux OOM killer 杀死；系统证据为进程匿名常驻约 6.68 GB、整机内存
+  7.3 GiB。新 TUI 因 8420 已无监听，只显示“正在连接 Gateway”后按 transport failure 退出；不是 session、
+  历史或 MiniMax 配置错误。临时恢复的唯一 Gateway 为 tmux `ma-gateway-15db288`，启动后旧 TUI 自动恢复。
+- 现场 `py-spy` 在 8 个存活 TUI 下采到十分钟内约 3,300 个 `process_request_thread`：标准库
+  `ThreadingHTTPServer` 为每次 `/client/notices` / child view 轮询新建 OS 线程，handler 又会解析 transcript
+  和复制 exact child 投影。重启后当前代码的索引读取已把 RSS 保持在约 150--220 MB，但旧线程模型仍会在
+  慢请求/重连叠加时放大瞬时对象和 allocator 高水位。
+- 对照 会话运行时 app-server 的固定 Tokio task、容量 128 的 bounded channel 和 thread-state semaphore，当前
+  候选保留 stdlib handler/鉴权协议，只把 HTTP 接入换成 16 个可复用 daemon worker、128 个总在途上限；
+  满载在 handler 前返回 typed 503 和 `Retry-After: 1`。本地真实 socket 覆盖过载、停机取消与 2,000 请求
+  压测：全部 200，只创建 11 个 worker，未超过 16。多用户补充对照确认 通道运行时 的入口分层限流优于
+  长期助手，长期助手 的 resolved-session lease/profile DB 更适合会话一致性；本项目保留现有鉴权后 per-user /
+  per-conversation 公平，不在 transport 层相信身份头。所有响应另强制关闭 HTTP/1.1 keep-alive，避免固定
+  worker 被空闲连接占满。40 项直接 focused 回归已通过；待严格 gate、发布并重启唯一 Gateway 后，以
+  真实 TUI 验证启动、重连、线程上限、RSS 和 MiniMax-M2.7。
+
 ## 2026-08-24 child guidance exact-turn 入账（已部署真 TUI）
 
 - `.7` Prompt 3 的运行中 child 收到用户普通中文后，Gateway receipt 缺少 `expected_turn_id`；runtime 已按

@@ -17,10 +17,12 @@ import pytest
 
 from agent_py_agent.agent.auth.manager import AuthManager
 from agent_py_agent.agent.auth.middleware import AuthMiddleware
+from agent_py_agent.agent.gateway_parts.bounded_http_server import (
+    GatewayBoundedHTTPServer,
+)
 from agent_py_agent.agent.gateway_parts.http_service import (
     GatewayHTTPServer,
     GatewayHTTPServerParams,
-    GatewayThreadingHTTPServer,
     _is_loopback_host,
 )
 
@@ -76,10 +78,13 @@ def test_default_bind_is_loopback(tmp_path) -> None:
 
 
 def test_gateway_server_absorbs_multi_tui_reconnect_bursts() -> None:
-    """单 Gateway 不沿用标准库仅 5 个等待位，关闭也不等待闲置客户端线程。"""
-    assert GatewayThreadingHTTPServer.request_queue_size >= 128
-    assert GatewayThreadingHTTPServer.daemon_threads is True
-    assert GatewayThreadingHTTPServer.block_on_close is False
+    """单 Gateway 复用固定 worker，并给重连突发保留有界容量。"""
+    assert GatewayBoundedHTTPServer.request_queue_size >= 128
+    assert GatewayBoundedHTTPServer.max_request_workers == 16
+    assert (
+        GatewayBoundedHTTPServer.max_outstanding_requests
+        >= GatewayBoundedHTTPServer.max_request_workers
+    )
 
 
 def test_refuse_nonloopback_without_auth(tmp_path) -> None:
