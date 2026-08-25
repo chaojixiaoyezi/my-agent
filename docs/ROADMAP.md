@@ -27,7 +27,7 @@
 解决问题：后台 main 在第一批完成后会继续原任务；若第二批先创建一名仍在运行的 child，旧硬门会把
 其余不同职责全部当作“重复 lineage”拒绝，哪怕会话容量仍有空位。当前候选按 会话运行时 spawn 语义删除该门，
 同一 canonical parent 可多次创建到容量上限；重复请求由 typed idempotency/work-scope 复用，双执行器由
-active-turn claim 拒绝，单次 4 与会话 6 的资源门不变。fresh Prompt 4 必须看到第二批多名 child 在首名
+active-turn claim 拒绝。当前默认容量已进一步收口为单一会话 8 槽，单次额外限制默认关闭；fresh Prompt 4 必须看到第二批多名 child 在首名
 仍运行时继续成功创建，并核对没有重复 run、没有额外 Gateway。r9 已由一个 items 调用创建第二批 3 名，
 没有错误或额外 Gateway；因为三名在同一原子调用中创建，它不等价于“第二次独立调用遇到活跃 sibling”，
 后者当前由 focused 回归覆盖，继续等待真实任务自然触发。
@@ -369,15 +369,17 @@ goal 中出现 `src/i18n/`、`src/config/` 时，历史正文自动补绑旁路�
 
 ### 用户直控子代理的共享控制面
 
-状态：设计中，直属 child 只读状态投影已部署并完成真机 smoke
+状态：详情/插话/停止已部署；exact-attempt 插话修复与八槽容量待 `.7` fresh TUI 验证
 
 解决问题：当前用户只能给主代理插话或停整个任务，无法定位一个正在跑的 child；现有
 `cancel_subagents` 又是终态取消，不是“打断当前一轮后仍能继续”。如果 TUI 和未来 Web 各自直改账本，会导致状态、
 权限和恢复逻辑分裂。
 
-当前进展：已有 owner/thread 范围的 active root + direct-child 只读投影。待做是 Gateway/domain 唯一
-typed protocol，支持查看树、给选中 run 发消息、interrupt 当前 turn、resume/start 同一 session、
-cancel/close 和 capability 裁决。root owner 可操作自己树内任意后代，模型代理仍只能管直属下级。
+当前进展：已有 owner/thread 范围的 active root + direct-child 投影，TUI 可进入详情、给运行 child 发消息、
+Esc 停止并在终态只读回看。真实 Prompt 3 暴露 guidance 未绑定 exact turn 会杀掉 child，当前候选已要求
+pending/running AgentAttempt 后再入账；默认容量同时从会话 6/单次 4/runner 4 收口为会话 8/单次 0/runner 8。
+后续仍待做 interrupt 当前 turn 后可恢复、resume/start 同一 session、cancel/close 和 capability 裁决。
+root owner 可操作自己树内任意后代，模型代理仍只能管直属下级。
 每个写操作必须带幂等 `operation_id`、exact target、expected version/state 和 accepted/rejected/unknown 回执，
 TUI/Web/IM 都只调用这一份服务。
 

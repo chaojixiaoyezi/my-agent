@@ -84,7 +84,21 @@ def test_owner_can_view_steer_stop_and_reopen_terminal_child(tmp_path) -> None:
         message_id="agent-steer-1",
     )
     assert accepted["guidance_id"] == replay["guidance_id"]
-    assert len(agent.conversation_store.recent_guidance("agent_run", child.id)) == 1
+    entries = agent.conversation_store.recent_guidance("agent_run", child.id)
+    assert len(entries) == 1
+    entry = entries[0]
+    expected_turn_id = str(entry.metadata["expected_turn_id"])
+    assert expected_turn_id.startswith("attempt-")
+    assert agent.conversation_store.claim_guidance_once_for_turn(
+        entry,
+        expected_turn_id=expected_turn_id,
+        attempt_id=expected_turn_id,
+    ) is True
+    assert agent.conversation_store.mark_guidance_entries_submitted(
+        expected_turn_id,
+        [entry],
+        attempt_id=expected_turn_id,
+    ) == (entry.guidance_id,)
 
     stopped = stop_gateway_agent(
         agent,
@@ -112,6 +126,35 @@ def test_owner_can_view_steer_stop_and_reopen_terminal_child(tmp_path) -> None:
         )
     assert exc_info.value.status == 409
     assert exc_info.value.error_code == "AGENT_ALREADY_TERMINAL"
+
+
+def test_agent_guidance_rejects_nonterminal_task_without_active_attempt(tmp_path) -> None:
+    agent, scope, child = _bound_agent_tree(tmp_path)
+    repo = agent.subagents.runtime_db
+    agent_run = repo.agent_run_for_run_id(child.id)
+    assert agent_run is not None
+    attempt = repo.create_attempt(
+        str(agent_run["agent_run_id"]),
+        reuse_pending=True,
+        reject_running=True,
+    )
+    settled = repo.settle_agent_attempt(
+        agent_run_id=str(agent_run["agent_run_id"]),
+        attempt_id=str(attempt["attempt_id"]),
+    )
+    assert settled["settled"] is True
+
+    with pytest.raises(GatewayAgentControlError) as exc_info:
+        send_gateway_agent_guidance(
+            agent,
+            scope=scope,
+            run_id=child.id,
+            message="继续检查",
+            message_id="agent-steer-no-turn",
+        )
+
+    assert exc_info.value.error_code == "AGENT_NOT_RUNNING"
+    assert agent.conversation_store.recent_guidance("agent_run", child.id) == []
 
 
 def test_agent_control_rejects_run_outside_conversation_root(tmp_path) -> None:

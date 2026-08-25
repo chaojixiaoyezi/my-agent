@@ -1,5 +1,16 @@
 # Gateway Progress
 
+## 2026-08-24 child guidance exact-turn 入账（本地候选）
+
+- `.7` Prompt 3 的运行中 child 收到用户普通中文后，Gateway receipt 缺少 `expected_turn_id`；runtime 已按
+  current attempt reserve，provider submission 原子校验再报 `guidance submission reservation mismatch`，
+  造成 child 失败。该错误与更早的 WebFetch 失败无关。
+- `agent_control_service` 现在从 RuntimeDB exact AgentRun 读取 current AgentAttempt，只接受
+  `pending/running`，并把 attempt id 写入 guidance metadata。task-local active pointer 只做附加一致性栅栏；
+  没有活跃回合、投影冲突或权威库不可用时，入口分别返回 typed 409/503 且不写消息。
+- ConversationStore 的 reserve/submission/consume 严格校验没有放宽；428 项相关 focused 已到 100%，待
+  严格 gate、推送和 `.7` 唯一 Gateway fresh TUI 证明 child 插话后继续执行。
+
 ## 2026-08-24 detached TUI 会话降载与退出语义（已部署真机）
 
 - `.7` 现场的 tmux 窗口虽然全部 detached，但其中 10 个 TUI Python 进程仍存活并持续查询唯一 Gateway；

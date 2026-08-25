@@ -1,5 +1,18 @@
 # STATUS
 
+## 2026-08-24 子代理插话失败、历史入口与 4/8 容量混淆（本地候选）
+
+- Prompt 3 真实账本证明 researcher-1 不是因 WebFetch 失败退出，而是用户插话 receipt 漏
+  `expected_turn_id`，在 provider submission gate 抛 `guidance submission reservation mismatch`。
+  当前候选从 RuntimeDB 绑定 exact pending/running AgentAttempt；无活跃片时拒绝且不落消息。
+- 默认容量从“会话 6 + 单次 4 + runner 4”收口为“会话 8 + 无重复单次默认 + runner 8”。因此一次可以
+  创建并并行启动 8 名 child；终态释放槽位后总历史仍可超过 8。会话运行时 对照采用 session slot reservation，
+  没有批量工具的第二个默认四项限制。
+- 同一 exact session 的 root/DeepSeek child 用 `Ctrl+Home` 均看到完整历史，数据未丢；默认原生复制模式下
+  物理滚轮不进入 alternate screen。所有常驻 footer 已补 `PgUp/Ctrl+Home 历史 · F6 滚轮`。
+- 428 项直接 focused 已到 100%（保留既有 xfail）；待严格 gate、推送、单 Gateway 部署和 fresh 原样
+  Prompt 3 真 TUI 同时复验八名创建、child 插话不断线、root/child 历史与 MiniMax-M2.7。
+
 ## 2026-08-24 切换子代理后历史滚动位置独立保留（`.7` 真 TUI 已通过）
 
 - `d14549c` 已把主代理、每个 child/grandchild 的普通与详细 transcript viewport 按 exact

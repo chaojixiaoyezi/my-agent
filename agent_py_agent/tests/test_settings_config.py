@@ -399,9 +399,9 @@ class TestAgentConfigDefaults:
         assert config.model_backend == "echo"
         assert config.max_tool_rounds is None
         assert config.memory_top_k == 5
-        assert config.max_subagents == 6
-        assert config.subagent_hierarchy_max_children_per_tool_call == 4
-        assert config.runner_auto_concurrency == 4
+        assert config.max_subagents == 8
+        assert config.subagent_hierarchy_max_children_per_tool_call == 0
+        assert config.runner_auto_concurrency == 8
         assert config.access_mode == "workspace-write"
         assert config.tui_mouse_capture_default is False
 

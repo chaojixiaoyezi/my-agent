@@ -1,5 +1,20 @@
 # Subagent Progress
 
+## 2026-08-24 插话 exact-attempt 与八槽单一容量（本地候选）
+
+- `.7` Prompt 3 现场确认，用户给 researcher-1 输入普通中文后，Gateway guidance receipt 缺少
+  `expected_turn_id`；runtime reserve 后在 provider submission 原子门抛
+  `guidance submission reservation mismatch`，child 随即失败。当前入口改为从 RuntimeDB 读取 exact
+  current AgentAttempt，只允许 pending/running，并把该 id 写入 receipt；没有活跃片段则拒绝且不落消息。
+- 同一现场第一次请求 5 名 child 被 `available=4` 整批拒绝，原因是默认同时存在 per-call=4、session=6、
+  runner=4 三个数字；随后首批终态释放槽位，第二批又建 4 名，所以历史累计出现 8。当前默认收口为
+  session=8、per-call=0、runner=8；显式部署仍能设置更小单批，历史累计仍不受 8 限制。
+- exact resume `ma-p3-history-guidance-r19` 已用 `Ctrl+Home` 分别看到 root 原始 Prompt 和 DeepSeek child
+  完整派工/thinking/WebSearch，证明 canonical history 未丢。默认原生复制模式的物理滚轮不会进入备用
+  屏幕，因此 root/child/footer 改为常驻显示 `PgUp/Ctrl+Home 历史 · F6 滚轮`。
+- 428 项 guidance/runtime/capacity/config/TUI focused 已运行到 100%（保留既有 xfail）；待本地严格 gate、
+  推送、`.7` 单 Gateway 部署和 fresh MiniMax-M2.7 真 TUI 复验后转完成。
+
 ## 2026-08-24 子代理视角切换后的历史滚动（已部署真 TUI）
 
 - `ma-91a1c3d-child-full-r17` 返回 main 后鼠标上翻看似无历史；同一现场发送 `PageUp` 出现离尾 pill，

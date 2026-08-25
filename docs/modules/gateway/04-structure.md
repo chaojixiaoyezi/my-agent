@@ -700,6 +700,12 @@ per-owner Agent，也必须跟随基础 Gateway 的权威队列记录，不能�
 `conversation_agent_view.v1`；结束 attempt 不影响历史可见性。`guidance` 和 `stop` 在相同只读证明之后继续
 执行 mutation gate，必须命中当前 active binding，不能凭历史关系修改已经结束或被替换的 run。
 
+guidance 在入 canonical ledger 前还必须解析 exact current AgentAttempt：managed 模式只接受 RuntimeDB
+中状态为 `pending/running` 的 attempt，task 文件里的 `runner_active_attempt_id` 只做冲突栅栏；
+local-unmanaged 只接受已有的 task-local active pointer。解析成功后同一 attempt id 写入
+`metadata.expected_turn_id`，供 runtime reserve、provider submission 和 consume 三段复用。拿不到 exact
+attempt 时服务明确拒绝且不落消息，不能让下一代 attempt 继承无归属 guidance，也不能放宽 store 校验。
+
 HTTP handler 只负责可信来源、`GatewayControlScope`、字段类型和错误状态映射。guidance 的稳定 operation id
 进入 canonical guidance ledger，重试不重复插入；stop 调用现有 `cancel_subagent_task`。客户端返回父视图只是
 本地 navigation stack 变化，不会调用 stop；`Esc` 才向当前 exact run 发停止。终态 resume 不属于这组三个

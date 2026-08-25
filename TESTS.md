@@ -1,5 +1,34 @@
 # TESTS
 
+## 2026-08-24 child 插话、八槽容量与历史入口
+
+focused 回归覆盖 Gateway owner 控制、guidance exact-turn reserve/submission、无活跃 attempt 拒绝、默认
+八个 root slots、显式单批收紧、配置 YAML/dataclass 一致，以及 root/child 常驻历史快捷键。当前命令：
+
+```bash
+.venv/bin/python -m pytest -q --tb=short \
+  agent_py_agent/tests/test_gateway_agent_control_service.py \
+  agent_py_agent/tests/test_runtime_guidance.py \
+  agent_py_agent/tests/test_gateway_request_runtime_errors.py \
+  agent_py_agent/tests/test_gateway_conversation_control.py \
+  agent_py_agent/tests/test_orchestration_create_subagents_tool.py \
+  agent_py_agent/tests/test_orchestration_tools.py \
+  agent_py_agent/tests/test_orchestration_create_subagents_items.py \
+  agent_py_agent/tests/test_orchestration_create_subagents_guardrails.py \
+  agent_py_agent/tests/test_settings_config.py \
+  agent_py_agent/tests/test_config_normalize.py \
+  agent_py_agent/tests/test_tui_agent_navigation.py \
+  agent_py_agent/tests/test_tui_renderer.py \
+  agent_py_agent/tests/test_tui_stateful.py \
+  agent_py_agent/tests/test_tui_input.py \
+  agent_py_agent/tests/test_tui_view.py \
+  agent_py_agent/tests/test_background_notice_display.py
+```
+
+本地 428 项已运行到 100%，保留既有 xfail。真实验收必须使用 `.7` 唯一 Gateway、MiniMax-M2.7 和 fresh
+tmux，只输入一次用户原样 Prompt 3；验证一次创建/并行 8 名、进入运行 child 后输入普通中文且继续工作、
+root/child `Ctrl+Home` 历史、F6 后滚轮与返回原生复制。测试者不得改调研产物或另开 Gateway。
+
 当前测试文档只保留常用入口。完整文件清单以 `agent_py_agent/tests/` 为准，不再手工维护旧表格。
 
 默认按改动范围运行 focused tests，不重复运行全仓 pytest。只有本轮生产代码和测试代码新增、删除累计

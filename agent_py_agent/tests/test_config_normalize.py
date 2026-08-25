@@ -163,9 +163,9 @@ class TestNormalizeSubagentAgentConfig:
         """验证默认子代理配置不让用户预判工具和工作流，并使用 会话运行时 风格小并发上限。"""
         normalized, warnings = normalize_agent_config({})
         assert warnings == []
-        assert normalized["max_subagents"] == 6
-        assert normalized["subagent_hierarchy_max_children_per_tool_call"] == 4
-        assert normalized["runner_auto_concurrency"] == 4
+        assert normalized["max_subagents"] == 8
+        assert normalized["subagent_hierarchy_max_children_per_tool_call"] == 0
+        assert normalized["runner_auto_concurrency"] == 8
         assert normalized["subagent_allowed_tools"] == []
         assert normalized["subagent_role_template_dirs"] == []
         assert normalized["subagent_mode"] == "trusted_local_hardening"
@@ -235,7 +235,7 @@ class TestNormalizeSubagentAgentConfig:
         )
 
         assert defaults.subagent_hierarchy_default_max_depth == 0
-        assert defaults.subagent_hierarchy_max_children_per_tool_call == 4
+        assert defaults.subagent_hierarchy_max_children_per_tool_call == 0
         assert defaults.subagent_takeover_chain_max_depth == 0
         assert normalized["subagent_hierarchy_default_max_depth"] == 0
         assert normalized["subagent_hierarchy_max_children_per_tool_call"] == 0

@@ -232,8 +232,8 @@ subagent_mode: "trusted_local_hardening"
 
 # 同一根会话树同时最多保留多少个未结束子代理；不同 TUI/根任务互不占槽。
 # 对照 会话运行时 AgentControl：容量属于 root session，不由 owner 历史账本全局占用。
-# 默认 6 是单任务安全上限，实际同时启动仍由 runner_auto_concurrency=4 收紧。
-max_subagents: 6
+# 默认允许按 8 个独立职责一次铺开；终态 child 释放槽位，历史累计数量可以超过 8。
+max_subagents: 8
 # 可选的更严格当前任务上限；0 表示不在 max_subagents 之外再收紧。
 task_max_subagents: 0
 task_max_grandchildren: 0
@@ -254,7 +254,9 @@ subagent_cli_default_limit: 20
 subagent_probe_default_limit: 20
 subagent_hierarchy_default_max_depth: 0
 subagent_hierarchy_recovery_max_nodes: 200
-subagent_hierarchy_max_children_per_tool_call: 4
+# 0 表示不再设置一份重复的“单次创建”默认上限；实际批量仍受 max_subagents 可用槽位约束。
+# 部署方若要更小批次，可显式填写正整数。
+subagent_hierarchy_max_children_per_tool_call: 0
 subagent_descendant_scan_limit: 128
 subagent_takeover_chain_max_depth: 0
 subagent_context_summary_inline_json_chars: 900
@@ -333,8 +335,8 @@ runner_timeout_by_role: []
 
 # runner_concurrency 为 auto 时的并发上限。
 # - 这个值适用于当前 dispatch 批次里要跑的 runner：子代理、孙代理或更深层代理都走同一套 runner。
-# - 0 表示 auto 不额外设上限；默认 4 与 会话运行时 V2 的小并发槽一致，避免模型、网络和 token 被瞬时拉满。
-runner_auto_concurrency: 4
+# - 0 表示 auto 不额外设上限；默认 8 与单根会话的 8 个 child 槽位一致。
+runner_auto_concurrency: 8
 dynamic_timeout_safety_margin: 2.0
 dynamic_timeout_min: 30
 dynamic_timeout_max: 600

@@ -62,10 +62,10 @@ def read_gateway_agent_view(
     )
 
 
-# LLM: Guidance uses one caller-supplied stable message id and the canonical
-# ConversationStore idempotency receipt. It never resumes a terminal child or
-# creates a replacement run.
-# 函数用途: 把普通用户补充要求放进一个仍在工作的子代理消息箱。
+# LLM: Guidance uses one caller-supplied stable message id, binds it to the
+# canonical current AgentAttempt, and writes one ConversationStore idempotency
+# receipt. It never resumes a terminal child or creates a replacement run.
+# 函数用途: 把普通用户补充要求精确投进一个正在执行或等待启动的子代理回合。
 def send_gateway_agent_guidance(
     agent: object,
     *,
@@ -88,6 +88,20 @@ def send_gateway_agent_guidance(
         raise GatewayAgentControlError(413, "AGENT_GUIDANCE_TOO_LARGE", "补充消息超过长度上限，未发送。")
     if _task_is_terminal(task):
         raise GatewayAgentControlError(409, "AGENT_ALREADY_TERMINAL", "这个子代理已经结束；当前详情页只读。")
+    try:
+        expected_turn_id = _active_agent_turn_id(agent, task)
+    except Exception as exc:
+        raise GatewayAgentControlError(
+            503,
+            "AGENT_ATTEMPT_UNAVAILABLE",
+            "暂时无法确认子代理当前执行回合，消息未发送。",
+        ) from exc
+    if not expected_turn_id:
+        raise GatewayAgentControlError(
+            409,
+            "AGENT_NOT_RUNNING",
+            "子代理正在切换执行回合，消息未发送；请稍后重试。",
+        )
     dedupe_key = f"user-agent-guidance:{stable_id}"
     try:
         entry = store.append_guidance_once(
@@ -101,6 +115,7 @@ def send_gateway_agent_guidance(
                 "metadata": {
                     "channel_message_id": stable_id,
                     "conversation_thread_id": str(getattr(thread, "thread_id", "") or ""),
+                    "expected_turn_id": expected_turn_id,
                     "source": "user_agent_control",
                 },
             },
@@ -125,6 +140,35 @@ def send_gateway_agent_guidance(
         "guidance_id": entry.guidance_id,
         "run_id": str(getattr(task, "id", "") or ""),
     }
+
+
+# LLM: Managed mode reads the exact current attempt from RuntimeDB and accepts
+# only pending/running slices; the task projection may lag and is used only as
+# an additional mismatch fence. Local-unmanaged runners can use their canonical
+# task-local active pointer, but no prose/status label may invent a turn id.
+# 函数用途: 找到这条插话唯一归属的子代理执行回合；没有活跃回合时返回空字符串让入口拒绝写账。
+def _active_agent_turn_id(agent: object, task: object) -> str:
+    manager = getattr(agent, "subagents", None)
+    repo = getattr(manager, "runtime_db", None)
+    projected_attempt_id = str(
+        getattr(task, "runner_active_attempt_id", "") or ""
+    ).strip()
+    if repo is None:
+        return projected_attempt_id
+    run_id = str(getattr(task, "id", "") or "").strip()
+    agent_run = repo.agent_run_for_run_id(run_id)
+    if agent_run is None:
+        return ""
+    current = repo.current_attempt(str(agent_run["agent_run_id"] or "").strip())
+    if current is None:
+        return ""
+    attempt_status = str(current["status"] or "").strip().lower()
+    attempt_id = str(current["attempt_id"] or "").strip()
+    if attempt_status not in {"pending", "running"} or not attempt_id:
+        return ""
+    if projected_attempt_id and projected_attempt_id != attempt_id:
+        return ""
+    return attempt_id
 
 
 # LLM: Stop reuses the canonical cancellation primitive after the same subtree

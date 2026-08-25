@@ -2248,26 +2248,26 @@ def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> Form
             "ABANDONED",
             "TAKEN_OVER",
         }:
-            text = "  Ctrl+G 返回父代理 · 已结束，只读"
+            text = "  Ctrl+G 返回 · 已结束，只读 · PgUp/Ctrl+Home 历史 · F6 滚轮"
         else:
-            text = "  Ctrl+G 返回父代理 · Esc 停止当前子代理"
+            text = "  Ctrl+G 返回 · Esc 停止 · PgUp/Ctrl+Home 历史 · F6 滚轮"
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
     if context.selected_agent_run_id:
-        text = "  ↑↓ 选择子代理 · Enter 查看"
+        text = "  ↑↓ 选择 · Enter 查看 · PgUp/Ctrl+Home 历史 · F6 滚轮"
         if snapshot.status.phase in {"running", "interrupting"}:
             text += " · Esc 停止主代理"
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
     if snapshot.status.phase in {"running", "interrupting"}:
-        text = "  esc to interrupt"
+        text = "  Esc 停止 · PgUp/Ctrl+Home 历史 · F6 滚轮"
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
     if any(
         block.role == "background"
         and _safe_render_int(block.metadata.get("active_task_count")) > 0
         for block in snapshot.active_blocks
     ):
-        text = "  /stop to interrupt background task"
+        text = "  /stop 停止后台任务 · PgUp/Ctrl+Home 历史 · F6 滚轮"
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
-    text = "  ? for shortcuts"
+    text = "  ? 快捷键 · PgUp/Ctrl+Home 历史 · F6 滚轮"
     return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
 
 

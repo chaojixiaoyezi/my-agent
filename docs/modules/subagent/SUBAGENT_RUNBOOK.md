@@ -19,6 +19,11 @@ worker、researcher、tester、writer、bug-finder 等普通 leaf 不创建下�
 orphan reconciler、observation/wake 和代理树 projection
 都是宿主底座：负责启动、租约、恢复、通知、`/status`、TUI 和诊断，不由模型手工推动。
 
+默认同一 root 可保留 8 个未结束 child，终态会释放槽位；历史累计数量可以超过 8。批量
+`create_subagents` 默认不再另设“单次最多 4 个”，整批只按当前 root 可用槽位原子接受或拒绝。
+`subagent_hierarchy_max_children_per_tool_call` 仍可由部署方显式设置更小批次，`0` 表示不额外收紧；
+默认 `runner_auto_concurrency=8`，所以八个已创建 child 可以真正并行启动。
+
 ## 状态与通知
 
 创建回执只给本批 run ids、结果读取 refs 和 `await_lifecycle_event`。根主代理会先给用户一条短回执；
@@ -82,6 +87,9 @@ allow 与 forbidden 同时命中时按最具体路径条目决定，同层由 fo
 ## 插话、取消与替代
 
 - 补充要求：`send_guidance(target, message)`，target 必须是当前代理的直属 child。
+- 用户从 TUI/Web 发给运行 child 的普通输入也走同一消息箱，但 Gateway 必须在写账前把消息绑定到
+  canonical 当前 `AgentAttempt`。只有 `pending/running` attempt 可接收；执行片切换期间明确拒绝并保留
+  用户输入，不能落一条没有 `expected_turn_id` 的消息，也不能因校验失败杀掉 child。
 - 停止：`cancel_subagents(run_id|run_ids, reason)`，只停止点名的直属 child。
 - 权限：`resolve_capability_requests(run_id, decision, reason, ...)`，只裁决直属 child。
 - child 的 child 由 child 自己管理；根代理不能越过中间层直接控制孙代理。

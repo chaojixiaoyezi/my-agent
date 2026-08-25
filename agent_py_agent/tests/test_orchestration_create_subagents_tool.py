@@ -61,6 +61,30 @@ def test_unrelated_open_runs_do_not_consume_current_root_session_slots():
     assert details["owner_active"] == 12
 
 
+def test_default_root_session_exposes_eight_slots_without_second_batch_cap():
+    """默认只由八个会话槽位收口，不再先用隐藏的四个单次槽位拒绝整批。"""
+    from agent_py_agent.agent.agent_core.orchestration_tools import (
+        _available_creation_slots,
+    )
+    from agent_py_agent.agent.settings import AgentConfig
+
+    agent = SimpleNamespace(
+        config=AgentConfig(),
+        owner_policy=SimpleNamespace(max_subagents=50, max_active_agents=1000),
+        _current_run_params=SimpleNamespace(
+            task_attributes={"conversation_task_id": "current-root"}
+        ),
+        subagents=SimpleNamespace(list_runs=lambda: []),
+        subagent_run_ids_for_request=lambda _task_id: [],
+    )
+
+    slots, details = _available_creation_slots(agent)
+
+    assert slots == 8
+    assert details["session_cap"] == 8
+    assert details["per_call_cap"] == 0
+
+
 class TestCreateSubagentsToolExecute:
     """测试 CreateSubagentsTool.execute() 方法。"""
 

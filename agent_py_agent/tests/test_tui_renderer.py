@@ -192,7 +192,10 @@ def test_full_frame_matches_reference_message_geometry_at_120_columns() -> None:
     assert "  ┌──────┬──────┐" in texts
     user_styles = [style for style, _text in frame.transcript_lines[user_index]]
     assert user_styles == ["class:tui-user-marker", "class:tui-user-text", "class:tui-user-fill"]
-    assert frame.footer == (("class:tui-muted", "  ? for shortcuts"),)
+    assert frame.footer == ((
+        "class:tui-muted",
+        "  ? 快捷键 · PgUp/Ctrl+Home 历史 · F6 滚轮",
+    ),)
 
 
 def test_narrow_frame_never_exceeds_width_and_uses_single_column_card() -> None:

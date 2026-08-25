@@ -993,7 +993,7 @@ def test_runtime_background_activity_is_one_removable_animated_block() -> None:
     assert "level-design · 已完成 · 设计前三个关卡 · 0:45 · ctx 6.8k · compact 0" in rendered
     assert "模型已生成回复" not in rendered
     assert "尝试 1" not in rendered
-    assert "/stop to interrupt" in fragments_text(frame.footer)
+    assert "/stop 停止后台任务" in fragments_text(frame.footer)
 
     changed_children = [dict(children[0], context_tokens=14000), children[1]]
     assert runtime.update_background_activity(1, subagents=changed_children) is True

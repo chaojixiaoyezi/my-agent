@@ -1497,3 +1497,28 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   三项 enable，第二次 F6 再发送三项 disable，输入正文保持不变。该证据覆盖 TUI/终端协议，但 Computer
   Use 的安全边界不允许代替用户控制 Terminal.app，因此外层 macOS 右键菜单与系统剪贴板仍保留为用户
   attach 后的最后一项验收，不能虚报通过。
+
+## 2026-08-24 子代理插话绑定活跃 attempt 与单一会话容量
+
+状态：`.7` 真实失败已定位；设计已确认，实现与真 TUI 复验进行中。
+
+- 真实失败链：TUI 给运行中 child 发送“给我讲讲你在做啥额，你不要停”后，Gateway 把 guidance 写入
+  canonical message box，却没有写 `expected_turn_id`。运行时先按当前 attempt 成功 reserve，真正模型
+  请求前的原子 submission gate 再发现 receipt 没有 exact turn，抛出
+  `guidance submission reservation mismatch` 并结束该 child。WebFetch 失败发生在前，但不是本次
+  runner 终止原因。
+- 会话运行时 对照：V2 `send_message` 只把消息交给一个 exact agent thread，运行中在消息边界消费且不另起 turn；
+  idle 后续工作另用 `followup_task`。my-agent 当前 TUI 只实现运行中插话，因此 Gateway 入账前必须从
+  canonical child 取得当前 AgentAttempt，把 exact attempt id 同时写入 guidance 的
+  `expected_turn_id`；拿不到活跃/pending attempt 时明确拒绝并保留输入，不得写一条无归属消息，也不得
+  放宽 ConversationStore 的原子提交校验。
+- 容量只保留一个默认会话树权威：`max_subagents=8` 表示同一 root 最多 8 个未结束 child。会话运行时 的
+  `AgentControl::reserve_spawn_slot` 同样只守 session slot；其 `spawn_agent` 是单个创建，所以没有第二个
+  “每次最多 4 个”的产品默认。my-agent 的批量工具把
+  `subagent_hierarchy_max_children_per_tool_call` 默认改为 `0`（不额外收紧），显式部署仍可配置更小批次；
+  `runner_auto_concurrency=8` 让默认八个槽位都能真正并行。历史累计 child 数不是当前占用量，终态释放
+  槽位后可以继续创建，所以总历史数量允许超过 8。
+- 备用屏幕中的 root/child 历史继续由各自 `TuiStateStore` 持久投影；当前 `.7` exact resume 已用
+  `Ctrl+Home` 分别看到 root 原始 Prompt 与 child 完整派工、thinking、工具卡，证明数据没有丢失。默认
+  原生复制模式不会把物理滚轮交给 TUI，这是终端协议边界；所有主/子代理 footer 必须常驻显示
+  `PgUp/Ctrl+Home 历史 · F6 滚轮`，不能只在返回父级后的 5.5 秒 notice 中提示。
