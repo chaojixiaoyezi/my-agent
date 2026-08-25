@@ -60,6 +60,10 @@ def test_create_subagents_model_spec_uses_template_index_not_full_prompt():
     assert "replacement child" in spec.description
     assert "goal 里写‘先 A 后 B’不会形成执行顺序" in spec.description
     assert "等 A 的生命周期完成事件自动唤醒后" in spec.description
+    assert "并行编码任务必须拆成互不重叠的文件或模块写入范围" in spec.description
+    assert "共同目标目录和该项独占范围" in spec.description
+    assert "互不重叠的文件或模块范围" in item_schema["properties"]["goal"]["description"]
+    assert "不是完整写集、权限或机器锁" in spec.description
     assert "顶层 goal 只是可选批次说明" in spec.description
 
 

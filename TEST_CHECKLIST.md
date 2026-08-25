@@ -1,5 +1,8 @@
 # TEST CHECKLIST
 
+- [ ] 批量编码 `create_subagents.items` 必须由模型写清同一个目标目录和互不重叠的文件/模块边界；职责宽到
+  会覆盖兄弟项或会修改同一文件/模块时应分批。该项只靠 会话运行时 式软派工纪律，不恢复 cwd/目录锁、不解析
+  goal 猜写集；13 项 focused 已通过，待唯一 Gateway 部署后的下一轮真实复刻验证派工参数。
 - [ ] 逐个结束的 sibling child 即使共享 `root_task_id`，运行中的 `task_local` 安全点也不得读取或确认主代理
   lifecycle mailbox；每份 completion 必须保持 pending 直到 exact conversation parent 消费。focused 已用
   “child 零注入/零 ack，随后 parent 成功消费同一 id”覆盖，待原 `ma-97468f3-longchain-r27` 的七份调研

@@ -71,6 +71,9 @@
 - `create_subagents.items` 只放可立即并发、彼此不等待未来结果的工作；同批 child 不会因为 goal 写了
   “先 A 后 B”而串行。B 必须读取 A 的修复、产物或结论时，先只创建 A，等 typed lifecycle wake 后再创建
   B。该边界沿用 会话运行时 的独立 sidecar 软纪律，宿主不解析 goal/role、不新增依赖状态机或机器质量验收。
+- 并行代码 child 必须按 会话运行时 的 disjoint write set 软纪律拆分：每个 item 的 goal 同时写清共同目标目录和
+  该项独占的文件/模块范围，职责宽到会覆盖兄弟项或会修改同一文件/模块时不得同批创建。`output_files`
+  可以辅助说明交付范围，但仍不是完整写集、权限或机器锁；宿主不解析 goal 猜路径，也不恢复目录锁。
 - `orchestration` 不进渐进披露折叠区；`create_subagents`、`send_guidance`、
   `cancel_subagents` 和 `resolve_capability_requests` 必须从前台首次模型调用就直接可见。
   `tool_search` 继续用于 /goal、外部协作、web、vision、meta 和 MCP 等延迟能力。

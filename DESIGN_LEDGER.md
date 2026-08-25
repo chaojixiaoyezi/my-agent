@@ -146,6 +146,10 @@
   顶层 `goal` 只作可选批次说明。两种形态都没有、空批次或任一 item 缺目标时，必须在落任何 run 前返回
   typed 可恢复参数错误，不能从普通自然语言猜目标。该边界适配 会话运行时 v1 可选 schema + handler one-of
   校验；不为兼容恢复第二份批量目标权威。
+- 并行编码派工采用 会话运行时 `multi_agents_spec.rs` 的 disjoint write set 软纪律：模型必须在每项 goal 写明
+  同一个目标目录和互不重叠的文件/模块边界，职责宽到会覆盖兄弟项、或两项会修改同一文件/模块时应改为
+  分批。该规则只进入唯一工具 description/schema 参数提示；`output_files` 仍是可选交付与冲突线索，不是
+  完整写集、权限、锁或宿主完成裁决，运行时不得解析 goal 自动改目录或拒绝业务派工。
 - gateway 请求进入终态归档时，response 的 `done/interrupted/failed` 是最终状态权威；processing lease 只提供 owner/attempt/heartbeat 等运行字段，不能覆盖终态。归档目录、请求 JSON、response 与 `/status` 必须表达同一事实。
 - 恢复任务后，新的 request/run id 只表示这次执行尝试，不得成为新的任务事实源。模型可见的 main context bundle 摘要不裸露这些本轮运行 id；完整值留在 JSON 事实源，只有结构化选择既有任务后才显示 `selected_conversation_task_id`。default 主代理的 guidance、task_progress 工具、需求/派工 seed、coverage、wait、监督提醒、workspace 懒建和 delivery closeout 必须统一读取结构化 `conversation_task_id`；task_local 子代理仍按自己的 run id 隔离。该解析只保留一个共享实现，禁止各模块复制一套优先级。`task_progress` 的显式 read 若收到的正是当前 typed task id，必须把它归一成当前 task-path 账本；只有不同的 exact id 才能读取其它历史 run。conversation task link 是生命周期权威，`work/state.json` 是同一 task path 的 owner-local 投影；完成、停止、取消等结构化状态迁移必须同步投影，且目标与解析后的状态文件都必须位于当前 `owner_home/tasks/` 的精确 task 根内。路径越界、符号链接、身份不一致或文件损坏时只告警、不得覆盖别的任务目录。
 - 租户可见路径默认取最小权限：远程 owner 只能读写自己的 owner home，另外可读组织明确发布的 `~/.my-agent/shared/`；其他 user/group owner、根模板和旧顶层私有目录一律拒绝。外部目录只能由当前轮的结构化 capability/delivery contract 精确加入 workspace roots，不能由模型给出绝对路径自我授权；该授权也不能覆盖凭据文件或其他 owner 拒绝。随 wheel 发布的基础 tools/skills 是公共产品能力，shared 只用于组织显式共享的 skills/tools/role templates；个人 USER/SOUL、记忆、任务和产物不得由 shared 或 full mode 绕过。

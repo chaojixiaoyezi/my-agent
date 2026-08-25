@@ -106,6 +106,17 @@ code-size、diff 与 clean-package 均通过。推送、`.7` 单 Gateway 部署�
 不解析 goal/role、不新增依赖状态机或机器质量验收。两个 focused 文件 15 项通过。部署后继续使用同一
 长 tmux，以普通中文要求“先修复、再派独立测试”，核对 child 的真实创建/终态时间顺序。
 
+### 会话运行时 式并行编码互斥写入范围
+
+状态：本地候选 focused 通过，待当前长复刻自然结束后严格 gate、部署与同 TUI 复验
+
+解决问题：当前 Click→Go 复刻的多个 child 虽有不同职责标题，却同时写旧目标的同一组参数文件；宽职责
+child 还覆盖多个兄弟模块。三路运行到 230+ 轮仍互相制造编译错误，既浪费 token，也使最终产物不可归因。
+
+当前进展：对照 会话运行时 `multi_agents_spec.rs` 的 disjoint write set，把“共同目标目录 + 每项独占文件/模块
+范围 + 重叠职责分批”写入唯一 `create_subagents` 模型说明、items 参数和 item goal 描述。该约束仍是软
+纪律；`output_files` 不恢复为完整写集/权限/锁，宿主不解析 goal 猜目录或业务正确性。13 项 focused 通过。
+
 ### 会话运行时 式同一父级分批创建
 
 状态：`fb75b68` 已严格 gate、推送并部署；fresh r9 后台第二批通过，活跃 sibling 间的第二次独立调用待自然样本

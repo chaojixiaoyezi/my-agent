@@ -1,5 +1,17 @@
 # STATUS
 
+## 2026-08-25 并行编码 child 写入范围重叠（本地候选）
+
+- `.7` 同一长 TUI `ma-97468f3-longchain-r27` 的 Click→Go 复刻中，7 个实现 child 被口头拆成不同职责，
+  但至少 3 个长期同时改旧目标 `click-go-replica/internal/param/`；一名宽职责 child 还覆盖 core、param、
+  format、completion、testing 和 utils。现场公开事件直接出现“param package keeps getting in the way”，
+  三路在 230+ 模型/工具轮后仍反复修复彼此覆盖造成的编译错误。
+- 对照 会话运行时 `会话运行时-rs/core/src/tools/handlers/multi_agents_spec.rs:724-745`，并行代码子任务必须有 disjoint
+  write set。当前本地候选只把同义软纪律补进唯一 `create_subagents` description、items 参数和逐项 goal
+  说明：共同目标目录必须一致，每项写清独占文件/模块范围，重叠职责不能同批。
+- `output_files` 继续只是可选提示，不新增机器锁、不解析自然语言猜路径，也不让宿主判断哪份代码正确。
+  `test_orchestration_tools.py` 13 项通过；为保留当前长任务真实样本，尚未重启唯一 Gateway。
+
 ## 2026-08-25 运行中 child 偷走主代理完成通知（本地候选）
 
 - `.7` 同一长 TUI `ma-97468f3-longchain-r27` 的 Click 七路调研中，7 个 child canonical 状态均为

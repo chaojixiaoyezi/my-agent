@@ -9,6 +9,11 @@ _CREATE_DEPENDENCY_ORDER_RULE = (
     "若 B 要读取 A 尚未产生的修复、产物或结论，不能把 A/B 放进同一批：先只创建 A，"
     "等 A 的生命周期完成事件自动唤醒后，再单独创建 B。"
 )
+_CREATE_DISJOINT_WRITE_SCOPE_RULE = (
+    "并行编码任务必须拆成互不重叠的文件或模块写入范围，并在每项 goal 里写清共同目标目录和该项独占范围；"
+    "会修改同一文件、同一模块，或职责宽到会覆盖兄弟项的工作不能放进同一批。"
+    "output_files 可辅助说明交付范围，但仍不是完整写集、权限或机器锁。"
+)
 _CREATE_USE_CASES = [
     "任务能拆成 2+ 个可并行的独立子任务(各自跑、不互相等)——一个一个派、每个一句 goal，或一次用 items 列多个且每项含独立 goal，并行推进省主代理上下文",
     "要动多个文件/多个模块/多个目标,或需要不同角色(研究/实现/检查/汇总)分头干",
@@ -18,7 +23,10 @@ _CREATE_USE_CASES = [
 _CREATE_KEYWORDS = ["子代理", "派工", "拆分", "任务", "分别", "分头", "并行", "不同项目", "各项目", "subagent", "delegate", "spawn"]
 _CREATE_PARAMETERS = {
     "goal": "只派一个子代理时必填，写这个子代理的完整目标；使用 items 批量派工时可选，只作整批说明，不替代每项自己的 goal",
-    "items": "一次派多个可同时立即运行、彼此不等结果的任务时使用；每项必须自带独立 goal，顶层 goal 可省略。只派一个时直接传 goal",
+    "items": (
+        "一次派多个可同时立即运行、彼此不等结果的任务时使用；每项必须自带独立 goal，顶层 goal 可省略。"
+        "编码项还必须有互不重叠的文件或模块写入范围。只派一个时直接传 goal"
+    ),
     "description": "可选的 3-12 字职责短标题，只说明这个子代理大概负责什么，供 TUI/Web 单行展示",
     "role": "子代理角色模板 id，默认 worker",
     "agent_name": "可选展示名；只影响状态树和报告里的名字，不改变权限",
@@ -41,6 +49,7 @@ _CREATE_PARAMETER_DETAILS = {
     "items": (
         "仅一次派多个可同时立即运行、彼此不等待结果的任务时用；"
         + _CREATE_DEPENDENCY_ORDER_RULE
+        + _CREATE_DISJOINT_WRITE_SCOPE_RULE
         + "顶层 goal 可选写整批目的，每个元素必须含自己的独立 "
         "goal、别传空 items。资料线索放 item.input_refs；covers/output_files 都是可选结构化提示，只有事实匹配时才填。"
     ),
@@ -75,7 +84,11 @@ _CREATE_PARAMETER_DETAILS = {
     ),
 }
 _CREATE_ITEM_PARAMETER_DETAILS = {
-    "goal": "每个 item 都必填；只写这一个子代理要完成和交付的具体工作，不要复制顶层整批 goal。该 goal 是 child 的完整工作边界，不要把兄弟 item 也塞进来。",
+    "goal": (
+        "每个 item 都必填；只写这一个子代理要完成和交付的具体工作，不要复制顶层整批 goal。"
+        "该 goal 是 child 的完整工作边界，不要把兄弟 item 也塞进来；编码任务要同时写清共同目标目录"
+        "以及与兄弟项互不重叠的文件或模块范围。"
+    ),
     "description": "每个 item 可选；职责短标题只用 3-12 字概括这一个子代理负责什么，不要复制顶层整批 description。",
 }
 _CREATE_EXAMPLES = [

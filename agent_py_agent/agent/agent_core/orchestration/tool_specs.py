@@ -8,6 +8,7 @@ from ...tooling.models import ToolModelHints, ToolModelSpec
 from .coordinator_policy import coordinator_tool_boundary_text
 from .tool_spec_data import (
     _CREATE_DEPENDENCY_ORDER_RULE,
+    _CREATE_DISJOINT_WRITE_SCOPE_RULE,
     _CREATE_EXAMPLES,
     _CREATE_ITEM_PARAMETER_DETAILS,
     _CREATE_KEYWORDS,
@@ -99,6 +100,7 @@ def build_create_subagents_model_spec() -> ToolModelSpec:
             "查询或推进工具。只派一个时传非空 goal；需要多个时传 items，每项都要有独立 goal，顶层 goal "
             "只是可选批次说明。goal 与 items 都没有时会返回可恢复参数错误。"
             + _CREATE_DEPENDENCY_ORDER_RULE
+            + _CREATE_DISJOINT_WRITE_SCOPE_RULE
             + "不支持 operations、count 或 max_concurrency 参数。covers 是可选的 "
             "task_progress exact-id 映射：只有 child 与仍 open 项确实是同一工作时才填，提供的未知、已关闭或跨 "
             "item 重复 id 会整批拒绝；省略时 child 按真实 run_id 单独显示，不会给现有 Todo 打勾。返工已关闭项先用 "

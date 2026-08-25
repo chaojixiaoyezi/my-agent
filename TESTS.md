@@ -1,5 +1,19 @@
 # TESTS
 
+## 2026-08-25 并行编码派工必须向模型说明互斥写入范围
+
+真实失败样本来自 `.7` 的 `ma-97468f3-longchain-r27`：多个 child 的职责标题看似不同，实际在旧目标目录
+同时覆盖同一批 Go 参数文件，230+ 轮后仍互相制造编译错误。回归只验证模型可见合同，不把软纪律升级为
+目录锁或自然语言机器裁决：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_orchestration_tools.py -q --tb=short
+```
+
+当前结果：13 passed。断言覆盖总工具说明、items 参数和逐项 goal 都明确共同目标目录与互不重叠的文件/
+模块范围，同时保留 `output_files` 不是完整写集、权限或机器锁。部署后须在同一长 TUI 的新复刻阶段观察
+模型实际生成的 items，不得由测试者人工改写被测派工。
+
 ## 2026-08-25 父级 lifecycle mailbox 不得被兄弟 child 消费
 
 真实失败序列不是“7 个 child 一次性全部结束”，而是 child 逐个结束时，其余 task-local child 仍在模型轮中。
