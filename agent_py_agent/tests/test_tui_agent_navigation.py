@@ -241,6 +241,31 @@ def test_completed_root_roster_stays_selectable_but_does_not_animate() -> None:
     )
 
 
+def test_hidden_ninth_child_scrolls_into_panel_and_enter_opens_same_run() -> None:
+    root = TuiRuntime("nav-roster-window")
+    navigation = TuiAgentNavigationState(root)
+    rows = [_row(f"child-{index}") for index in range(1, 10)]
+    navigation.update_rows("", rows)
+    root.update_background_activity(9, subagents=rows)
+
+    for _ in rows:
+        assert navigation.move_selection(1) is True
+    selected = navigation.snapshot().selected_run_id
+    assert selected == "child-9"
+
+    frame = render_tui_snapshot(
+        root.store.snapshot(),
+        TuiRenderContext(width=100, selected_agent_run_id=selected),
+    )
+    rendered_rows = [fragments_text(line) for line in frame.agent_lines]
+    assert not any("child-1 " in line for line in rendered_rows)
+    assert any("› ● child-9 " in line for line in rendered_rows)
+    assert any("还有 1 个子代理未展开" in line for line in rendered_rows)
+
+    assert navigation.enter_selected() is True
+    assert navigation.snapshot().active_run_id == "child-9"
+
+
 def test_child_footer_makes_back_and_escape_semantics_explicit() -> None:
     running = TuiRuntime("nav-footer-running")
     running.update_background_activity(

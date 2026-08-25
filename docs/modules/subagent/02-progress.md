@@ -1,5 +1,15 @@
 # Subagent Progress
 
+## 2026-08-24 子代理八行名册跟随选中项（本地候选）
+
+- 真实 TUI 中历史累计出现第 9 名 child 后，`↓` 已把导航的 exact `selected_run_id` 移到屏幕外，`Enter`
+  仍会进入正确 child，但 renderer 固定使用 `rows[:8]`，所以用户看不到高亮，像是按键失效。
+- 对照 终端交互 的 `MessageSelector` 可见窗口由 `selectedIndex` 推导；本项目保留最多八行的固定区域，
+  但从同一 canonical ordered roster 裁出包含选中 run 的最小窗口。渲染不持有第二份游标、不改顺序或状态，
+  省略数仍只表示窗口外条目。
+- focused 回归构造九名 child，连续九次向下后要求第 1 行退出、第 9 行带 `›` 出现，随后 `Enter` 必须进入
+  同一个 `child-9`。部署后还需在 `.7` 单 Gateway 的真实九项会话中实按复验。
+
 ## 2026-08-24 插话 exact-attempt 与八槽单一容量（已部署真 TUI）
 
 - `.7` Prompt 3 现场确认，用户给 researcher-1 输入普通中文后，Gateway guidance receipt 缺少

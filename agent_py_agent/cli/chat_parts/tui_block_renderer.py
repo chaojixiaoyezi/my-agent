@@ -665,8 +665,10 @@ def _render_background_activity(
 
 
 # LLM: Child rows share the same canonical background projection as main but
-# render in 终端交互's coordinator region below the composer, without a second main row.
-# 函数用途: 在输入框下方绘制直属子代理列表。
+# render in 终端交互's coordinator region below the composer. The bounded
+# viewport must always include the exact run selected by navigation so the
+# highlight and Enter target cannot diverge.
+# 函数用途: 在输入框下方绘制直属子代理列表，并让方向键选中的行始终留在八行可见窗口内。
 def _render_subagent_panel(
     block: TuiBlock,
     context: TuiRenderContext,
@@ -674,7 +676,11 @@ def _render_subagent_panel(
     rows = _subagent_activity_rows(block.metadata.get("subagents"))
     hidden = max(0, int(block.metadata.get("hidden_subagent_count") or 0))
     lines: list[FormattedLine] = []
-    visible_rows = rows[:8]
+    visible_rows = _visible_subagent_activity_rows(
+        rows,
+        selected_run_id=context.selected_agent_run_id,
+        limit=8,
+    )
     for row in visible_rows:
         lines.extend(_render_subagent_activity_row(row, context))
     hidden += max(0, len(rows) - len(visible_rows))
@@ -688,6 +694,36 @@ def _render_subagent_panel(
             )
         )
     return tuple(lines)
+
+
+# LLM: This is a pure presentation window over the canonical ordered roster.
+# It never changes selection or run order; when selection falls past the first
+# page, only the minimum leading rows are displaced to reveal that exact run.
+# 函数用途: 裁出固定行数的子代理窗口，避免游标已经移到隐藏项而屏幕仍停在前几项。
+def _visible_subagent_activity_rows(
+    rows: list[dict[str, object]],
+    *,
+    selected_run_id: str,
+    limit: int,
+) -> list[dict[str, object]]:
+    visible_limit = max(1, int(limit or 1))
+    if len(rows) <= visible_limit:
+        return rows
+    selected = str(selected_run_id or "").strip()
+    selected_index = next(
+        (
+            index
+            for index, row in enumerate(rows)
+            if str(row.get("run_id") or "").strip() == selected
+        ),
+        -1,
+    )
+    start = (
+        max(0, min(selected_index - visible_limit + 1, len(rows) - visible_limit))
+        if selected_index >= visible_limit
+        else 0
+    )
+    return rows[start : start + visible_limit]
 
 
 # LLM: Rows are already whitelisted by runtime/reducer; this final shape check

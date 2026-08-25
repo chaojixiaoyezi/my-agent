@@ -905,3 +905,15 @@ auto-start，且不能增加 `orphans_revived`。正常 pending/planning、活 s
 ```bash
 python3 -m pytest agent_py_agent/tests/test_dispatch_liveness_and_revive.py -q --tb=short
 ```
+
+子代理名册的固定八行区域必须与完整导航名册使用同一个 exact run 顺序。回归至少构造九名 child，连续
+向下选到第九名后要求第九行带 `›` 出现在屏幕、第一个 child 被窗口挤出、省略数仍为一，并且 `Enter`
+进入同一个第九名 run；不能只断言导航状态已变化。focused 入口：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_tui_agent_navigation.py agent_py_agent/tests/test_tui_renderer.py agent_py_agent/tests/test_background_notice_display.py -q --tb=short
+```
+
+真机验收必须使用 `.7` 唯一 Gateway、MiniMax-M2.7 和已有历史累计超过八名 child 的 exact resume。启动前
+公开 tmux 名称；在 root 空输入状态连续按 `↓`，每次选中行必须可见，第九名出现后 `Enter` 进入的页面名称
+必须与该高亮行一致，再用 `Ctrl+G` 返回。测试者不得给模型补消息或修改被测任务产物。
