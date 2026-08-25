@@ -1,5 +1,9 @@
 # TEST CHECKLIST
 
+- [ ] 逐个结束的 sibling child 即使共享 `root_task_id`，运行中的 `task_local` 安全点也不得读取或确认主代理
+  lifecycle mailbox；每份 completion 必须保持 pending 直到 exact conversation parent 消费。focused 已用
+  “child 零注入/零 ack，随后 parent 成功消费同一 id”覆盖，待原 `ma-97468f3-longchain-r27` 的七份调研
+  自然补齐与后续多阶段长链真 TUI 验证。
 - [ ] 长 TUI 的 child lifecycle wake 后，root 即使显式用当前 typed task id 调用
   `task_progress(action=read)`，也必须返回界面正在展示的同一 task-path Todo；不同历史 run id 仍保持精确
   隔离。部署后在原 `ma-97468f3-longchain-r27` 或其恢复 session 自然触发，不人工篡改账本。

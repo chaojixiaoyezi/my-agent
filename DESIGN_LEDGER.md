@@ -43,6 +43,11 @@
   直属 child，并裁决直属 child 的能力申请。创建后由宿主自动启动，生命周期事件自动回到直属父级；
   模型不拥有查询、等待、巡场、手动推进或机器验收下级的工具。同批 child 之间不互相广播完整 goal，
   孙代理也只与自己的直接父级交换有界状态和 refs。
+- 生命周期收件箱按接收者隔离，不按共同 root 血缘共享。根 child 的 completion/capability wake 只能由
+  exact 主代理会话轮读取和确认；`task_local` child、孙代理、控制面和辅助模型轮即使携带同一个
+  `root_task_id`，也不得枚举或确认根主代理收件箱。对子代理的用户插话继续走 exact `agent_run` guidance
+  收件箱，两条链不能互相兜底或串读。该边界适配 会话运行时 的 child completion 直投 parent thread/session
+  mailbox，而不是把 root lineage 当广播地址。
 - child 的 canonical task、独立 `agent_thread_id` 与 runner 是唯一续跑权威。task-local finalize 只保存
   本 child 的断点，不得把它登记成 root `BackgroundMainAgentRuntime` 的普通任务；后台来源若精确解析到
   child task，必须在模型调用前关闭并交回 child runner。共享 batch 进程只承载多个 runner，不拥有各 run

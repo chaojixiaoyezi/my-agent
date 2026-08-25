@@ -1,5 +1,16 @@
 # Subagent Progress
 
+## 2026-08-25 父级完成收件箱按接收者隔离（本地候选）
+
+- 同一长 TUI 的新七路调研中，7 个 child 和 7 份完成信封均真实存在，但前 6 份在其它 child 仍运行时被
+  标记 handled，期间没有 background main claim；root 最终只基于残缺输入写出“3/7”并关闭，报告未生成。
+- `task_local` 子代理为了血缘和工作区携带 root task id，旧 active-turn 安全点却直接用这个 id 扫 root wake
+  queue，因而把父级 mailbox 当成同根广播。当前候选只允许主 `default/conversation` 作用域消费该队列；
+  child 的 direct `agent_run` guidance 路径保持不变。
+- 对照 会话运行时 直投 parent thread/session input queue；新增回归模拟 sibling 仍活跃时一条 completion 到达，证明
+  child 不能注入/ack、wake 不丢，随后 exact parent 可消费。下一步部署单 Gateway 后沿原 session 补齐调研，
+  再连续跑两个小任务与多子代理复刻。
+
 ## 2026-08-25 后台过程 thinking 合批（本地候选）
 
 - `ma-97468f3-longchain-r27` 中 Gateway 的工具调用持续前进，TUI 却数分钟只显示旧工具；只读事件页证明

@@ -6,6 +6,16 @@
 `task_node_closeout` 副本。canonical task/result 是唯一结果事实源；父代理通过结构化 status、blockers、
 findings、artifact refs 和 result payload 阅读子代理工作，再由模型向用户汇总。
 
+## 2026-08-25 lifecycle mailbox 接收者边界
+
+- `root_task_id/parent_run_id` 是血缘事实，不是广播订阅。根 child 的 completion/capability wake 只属于 exact
+  conversation parent；`task_local` child、孙代理、控制面和辅助轮不能枚举或确认这份队列。
+- `runtime/guidance.py::_pending_task_events` 在读取 durable wake 前先校验当前 scope 是主代理
+  `default/conversation`。后台主代理仍以 default scope 消费合批 snapshot；被本轮 snapshot 选中的 id 继续由
+  scheduler 精确 ack，未选 id 保持 pending。
+- 子代理的用户插话使用 `target_type=agent_run + exact run_id`，不依赖 root lifecycle mailbox。实现不得为了
+  修父级漏信而关闭、广播或改写 direct child guidance。
+
 ## 2026-08-25 后台命令工具依赖闭包
 
 - `run_command` 的 schema 自带 `run_in_background=true`，因此 `process_session` 不是模型另行申请的可选便利，

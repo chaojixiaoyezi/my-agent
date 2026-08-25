@@ -722,6 +722,62 @@ def test_active_turn_injects_matching_subagent_events_in_fifo_and_acks_after_mod
     ]
 
 
+def test_task_local_child_cannot_consume_parent_lifecycle_mailbox(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "chat-1",
+            "channel_user_id": "user-1",
+            "now": 1.0,
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-root",
+            "goal": "research",
+            "now": 2.0,
+        }
+    )
+    signal = store.raise_wake_signal(
+        {
+            "thread_id": thread.thread_id,
+            "root_task_id": "task-root",
+            "reason": "subagent_runner_finished",
+            "source_agent_id": "child-finished",
+            "metadata": {"task_id": "child-finished", "status": "DONE"},
+            "now": 10.0,
+        }
+    )
+    child_params = _tool_loop_params(
+        request_id="child-active-attempt",
+        run_id="child-active",
+        task_id="task-root",
+        context_scope="task_local",
+    )
+
+    assert has_pending_turn_input(agent, child_params) is False
+    assert inject_pending_turn_input(agent, child_params, now=11.0) is False
+    assert acknowledge_injected_turn_input(agent, child_params, now=12.0) == 0
+    assert [item.wake_signal_id for item in store.pending_wake_signals()] == [
+        signal.wake_signal_id
+    ]
+
+    parent_params = _tool_loop_params(
+        request_id="parent-continuation",
+        run_id="task-root",
+        task_id="task-root",
+        context_scope="conversation",
+        task_attributes={"conversation_task_id": "task-root"},
+    )
+    assert inject_pending_turn_input(agent, parent_params, now=13.0) is True
+    assert acknowledge_injected_turn_input(agent, parent_params, now=14.0) == 1
+    assert store.pending_wake_signals() == []
+
+
 def test_active_background_wake_batch_is_left_for_scheduler_ack(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     store = agent.conversation_store

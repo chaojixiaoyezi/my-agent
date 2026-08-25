@@ -1,5 +1,17 @@
 # STATUS
 
+## 2026-08-25 运行中 child 偷走主代理完成通知（本地候选）
+
+- `.7` 同一长 TUI `ma-97468f3-longchain-r27` 的 Click 七路调研中，7 个 child canonical 状态均为
+  `DONE`，7 份 `subagent-completion.v1` wake 也都完整落盘；root 却只说收到 3/7，目标报告没有生成。
+- 时间线证明前 6 条 wake 都在其它 child 尚运行时转为 handled，期间没有任何 background main claim；最后
+  一条才真正触发主代理。根因是 child `context_scope=task_local` 仍携带 root task id，旧
+  `_pending_task_events` 仅按该 id 选 mailbox，兄弟 child 的普通模型安全点因此读取、注入并确认了父级通知。
+- 对照 会话运行时 `forward_child_completion_to_parent` 和 session-scoped input queue，当前候选把 root
+  lifecycle mailbox 限定给 `default/conversation` 主代理执行；root lineage 不再等同接收权限，child 自己的
+  `agent_run` 插话链不受影响。回归先证明旧代码失败，再证明 child 零注入/零确认、wake 仍 pending，最后由
+  exact conversation parent 成功消费；runtime-guidance 与 background-main 两文件 focused 已通过。
+
 ## 2026-08-25 后台命令返回了不存在的管理工具（本地候选）
 
 - `.7` Rust 复刻现场中，`run_command(run_in_background=true)` 明示可用

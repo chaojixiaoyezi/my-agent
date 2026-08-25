@@ -1,5 +1,22 @@
 # TESTS
 
+## 2026-08-25 父级 lifecycle mailbox 不得被兄弟 child 消费
+
+真实失败序列不是“7 个 child 一次性全部结束”，而是 child 逐个结束时，其余 task-local child 仍在模型轮中。
+因此回归必须同时验证：共同 `root_task_id` 不等于共同收件箱；运行 child 的安全点看不到、不能注入或 ack
+兄弟完成 wake；原 wake 保持 pending，随后 exact conversation parent 仍能按 FIFO 注入并确认。与既有七份
+长结果有界排空测试组合执行：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_runtime_guidance.py \
+  agent_py_agent/tests/test_background_main_agent_runtime.py \
+  -q --tb=short
+```
+
+当前结果：通过（含旧代码先红、新候选转绿的定向证据）。部署后仍须在原长 TUI 中先补齐七份调研，再追加
+两个普通小任务、第二个多子代理复刻和独立验收，确认同一 session 不再漏交接。
+
 ## 2026-08-25 后台进程只能由所属用户会话续接
 
 真实失败样本是 `.7` 长任务启动后台 `cargo check` 后，模型按工具回执寻找

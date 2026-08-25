@@ -428,9 +428,13 @@ def _guidance_client_message_ids(entries: list[Any]) -> tuple[str, ...]:
     return tuple(result)
 
 
+# LLM: Parent lifecycle wakes are an exact receiver mailbox, matching 会话运行时's direct
+# parent-thread delivery. Task-local/control-plane/isolated turns may share root lineage but
+# must never inspect or acknowledge the root main agent's completion queue.
+# 函数用途: 读取只属于当前主代理会话任务的子代理完成事件，防止运行中的兄弟子代理偷走通知。
 def _pending_task_events(agent: object, params: object) -> list[WakeSignal]:
     store = getattr(agent, "conversation_store", None)
-    task_id = durable_task_id(params)
+    task_id = _parent_lifecycle_mailbox_task_id(params)
     if store is None or not task_id:
         return []
     try:
@@ -450,6 +454,17 @@ def _pending_task_events(agent: object, params: object) -> list[WakeSignal]:
         and signal.wake_signal_id not in excluded_ids
     ]
     return matching[:_TASK_EVENT_LIMIT]
+
+
+# LLM: Root lineage identifies ancestry, not mailbox ownership. Only a main conversation
+# execution owns root-task lifecycle input; direct child steering remains independently routed
+# by the agent_run guidance mailbox and is intentionally unaffected by this guard.
+# 函数用途: 判断本轮是否有权读取父级任务收件箱，并返回其唯一持久任务编号。
+def _parent_lifecycle_mailbox_task_id(params: object) -> str:
+    scope = str(getattr(params, "context_scope", "") or "default").strip().lower()
+    if scope not in {"", "default", "conversation"}:
+        return ""
+    return durable_task_id(params)
 
 
 # LLM: A coalesced background turn already owns every typed id in its batch;

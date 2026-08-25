@@ -17,13 +17,27 @@
 
 ## 下一版优先级
 
-当前 `.7` 七路调研已自然结束，却暴露两个同源底座缺口：批量每项已有 goal 时 schema 仍强制重复总 goal；
-7 个 child 全终态后，完成合批又因 token 预算只把 5 份交给 root，导致漏汇总后错误收口。两个本地候选
-分别按 会话运行时 的 handler 形态校验与 parent mailbox 完成通知语义收口。下一步严格 gate 后部署唯一 Gateway，
-在同一 session 先补齐这次调研，再连续做两个小追加和多子代理复刻；不能另启测试 Gateway。
+当前 `.7` 同一长 TUI 的新七路调研再次证明 7 个 child 都真实 `DONE`，但 root 最终只收到 3 份并错误收口。
+逐条 wake 账本已定位到更底层的接收者串线：前 6 条 completion 在兄弟 child 仍运行时被其 task-local
+模型安全点读取并确认，只有最后一条留给主代理。当前候选按 会话运行时 的 exact parent session mailbox 收口：
+root lineage 只表示血缘，不授予 child 读取父收件箱的权限。下一步严格 gate 后部署唯一 Gateway，在同一
+session 先补齐这次调研，再连续做两个小追加和多子代理复刻；不能另启测试 Gateway。
 
 来自 STATUS.md，子代理可进入视图、精确控制以及插话排队/公开回复已转入 COMPLETED；当前继续正式矩阵与
 仍缺直接自然样本的生命周期分支。
+
+### 父级生命周期收件箱接收者隔离
+
+状态：本地候选 focused 通过，待严格 gate、推送与 `.7` 同一长 TUI 复验
+
+解决问题：多个 child 并行时，每个 task-local 回合都携带共同的 root task id。旧安全点把这个血缘 id
+误当作收件箱接收者，导致运行中的 sibling 能读取并 ack 主代理的 completion wake；canonical child 状态
+虽全为 `DONE`，root 实际只看到残缺报告，却仍可自然误判完成。
+
+当前进展：`runtime/guidance.py` 只允许 `default/conversation` 主代理作用域读取 root lifecycle mailbox；
+`task_local/control_plane/isolated` 均返回空，direct child 插话仍独立走 exact `agent_run` guidance。
+新增回归先在旧代码稳定复现失败，再证明 child 无法注入/确认父级 wake，而同一 wake 随后仍可由 exact
+conversation parent 注入并确认。`test_runtime_guidance.py` 与后台 mailbox focused 已通过。
 
 ### 批量派工目标去重
 
