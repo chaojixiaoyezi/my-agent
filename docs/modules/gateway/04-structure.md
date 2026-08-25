@@ -1,5 +1,17 @@
 # Gateway Structure
 
+## 普通续轮的直属子代理完成输入
+
+- `request_execution._gateway_conversation_context` 在加载 sticky workspace 后，从同一 thread 的
+  ConversationStore observation 构造 `conversation-subagent-completions.v1`。workspace task id 是 root
+  选择权威；只有 exact `root_task_id == parent_agent_id == workspace task id` 的
+  `subagent_runner_finished` 才能进入。
+- 同 child 的多条终态按 observation 时间取最新，详细项最多 12 条并显式报告 total/omitted_count。
+  Gateway 只投影 `subagent-completion.v1` 的 status、turn-end、最终回复和 refs，永不投影
+  `runner_result_json/output_json`。普通前台 prompt 在历史后注入这批整合输入；named Audit prepare 不注入。
+- 这是 会话运行时 child completion message 在现有文件协议上的适配：后台 wake、前台续轮和递归父级共用一个
+  completion schema，Gateway 不复制 child lifecycle、权限或验收状态。
+
 ## 后台过程事件传输
 
 - `conversation/background_transcript.py` 是 Gateway 进程内的有界公开事件环：每个 thread 最多 1024 条，

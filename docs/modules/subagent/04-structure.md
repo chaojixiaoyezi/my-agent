@@ -6,6 +6,17 @@
 `task_node_closeout` 副本。canonical task/result 是唯一结果事实源；父代理通过结构化 status、blockers、
 findings、artifact refs 和 result payload 阅读子代理工作，再由模型向用户汇总。
 
+## 2026-08-25 普通前台续轮的完成输入
+
+- `subagents/runner_completion_wake.py` 继续是 `subagent-completion.v1` 的唯一生产者；完成状态仍由 canonical
+  child task/attempt 决定，信封正文没有状态权威。
+- `gateway_parts/request_execution.py::_gateway_subagent_completion_context` 只做 ConversationStore 的有界
+  读取投影。它以 thread 当前 sticky workspace 的 exact root task id 为范围，同时要求 observation 的
+  `root_task_id` 与 `parent_agent_id` 都等于该 root，因此只返回直属 child；同 child 多次终态取最新一条。
+- 模型视图 `conversation-subagent-completions.v1` 最多展开 12 项并保留 total/omitted_count。每项只含
+  task/status/turn-end、完成回复、报告与产物 refs；内部 runner/output JSON 不投影。普通聊天可见，named
+  Audit prepare 不可见。这是 会话运行时 inter-agent completion message 的本项目适配，不新增第二套消息账本。
+
 ## 2026-08-24 活动投影的索引选择与 canonical 精确读取
 
 - LocalStore `legacy_agent_runs` 只负责按 `root_task_id/parent_run_id/depth` 找出候选 run id；它是

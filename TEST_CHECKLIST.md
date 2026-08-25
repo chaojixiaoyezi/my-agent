@@ -4,7 +4,8 @@
 
 - [ ] `.7` 唯一 Gateway 的 fresh TUI 中，完成 child 即使留下旧 `current_tool` 也只显示终态，详情工具/思考
   动画全部封口，耗时冻结在 canonical `ended_at`；父级收到 `completion_message` 和精确 refs 后不再搜索
-  `child_outputs` 或内部 runner 文件。
+  `child_outputs` 或内部 runner 文件。停止 root 后同一 TUI 追加汇总消息，普通前台 context 仍须按 exact
+  root/direct parent 收到全部最新 completion；其它 root、孙代理和 `runner_result_json/output_json` 不得串入。
 - [ ] 没有 `rg` 的远端宽目录 `search_text` 能被 `/stop` 及时打断；默认 content 页命中后不扫描余下目录，
   无命中超出 20,000 文件/10 秒时明确标注 `scan_limited`，不得显示成完整“没有找到”。
 - [ ] 同一个 fresh TUI 默认鼠标模式下，滚轮/PgUp/Ctrl+Home 历史、中文左键拖选自动复制和右键重复复制

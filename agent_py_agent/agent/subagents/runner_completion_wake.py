@@ -13,13 +13,14 @@ from .models import (
     task_status_in,
 )
 
-# LLM: This module publishes typed terminal/capability events from one child to
-# its direct parent boundary; prose payloads are integration evidence only.
-# 模块用途: 把子代理结束结果和能力申请可靠交给父级，并保留状态、报告和产物引用。
+# LLM: This module publishes one versioned terminal/capability envelope from a child to its direct
+# parent; background wakes and ordinary foreground continuation must consume that same schema.
+# 模块用途: 把子代理结束结果和能力申请可靠交给父级，并为后台唤醒与前台续轮统一状态、回复和产物引用。
 
 _LOGGER = logging.getLogger(__name__)
 _COMPLETION_MESSAGE_MAX_TOKENS = 1_000
 _COMPLETION_EVIDENCE_REF_LIMIT = 20
+SUBAGENT_COMPLETION_SCHEMA_VERSION = "subagent-completion.v1"
 
 
 # LLM: Root children publish a conversation wake; nested children never skip a
@@ -219,19 +220,27 @@ def completion_handoff_payload(
         selected_result,
         selected_output,
     )
+    selected_artifacts = selected_output.get("artifacts")
+    artifact_refs: list[str] = []
+    if isinstance(selected_artifacts, list):
+        for item in selected_artifacts:
+            ref = current_model_ref(item.get("path") if isinstance(item, dict) else item)
+            if ref and ref not in artifact_refs:
+                artifact_refs.append(ref)
+    else:
+        artifact_refs = current_model_ref_list(
+            getattr(task, "artifact_refs", []) or [],
+            limit=_COMPLETION_EVIDENCE_REF_LIMIT,
+        )
     payload: dict[str, object] = {
-        "completion_schema_version": "subagent-completion.v1",
+        "completion_schema_version": SUBAGENT_COMPLETION_SCHEMA_VERSION,
         "completion_message": completion_message,
         "final_report_ref": current_model_ref(
             getattr(task, "agent_run_final_report_md", "")
             or getattr(task, "debrief_file", "")
         ),
         "declared_output_refs": declared_output_refs(task)[:_COMPLETION_EVIDENCE_REF_LIMIT],
-        "artifact_refs": (
-            list(selected_output.get("artifacts") or [])
-            if isinstance(selected_output.get("artifacts"), list)
-            else list(getattr(task, "artifact_refs", []) or [])[:_COMPLETION_EVIDENCE_REF_LIMIT]
-        ),
+        "artifact_refs": artifact_refs[:_COMPLETION_EVIDENCE_REF_LIMIT],
     }
     if completion_truncated:
         payload["completion_message_truncated"] = True

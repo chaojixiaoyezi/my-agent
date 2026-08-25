@@ -60,6 +60,12 @@
   内部 Markdown 槽冒充业务产物；直属完成事件以 typed status、child 最终回复和系统 `final_report_ref`
   回到父级。旧 durable task 的 `system_default_output_ref=true` 继续可迁移读取，但在所有模型可见合同与
   expected outputs 投影中隐藏，不能影响新执行。
+- 会话运行时 把 child `TurnComplete` 的最后一条 assistant message 作为 inter-agent message 留在父线程；本项目
+  对应的唯一持久事实是同一 ConversationStore observation 中的 `subagent-completion.v1`。后台 lifecycle
+  wake 和普通 TUI 后续轮必须消费同一信封：只按 exact `root_task_id + parent_agent_id` 选择直属 child，
+  去重后有界注入 `completion_message/final_report_ref/declared_output_refs/artifact_refs`；不得把
+  `runner_result_json/output_json` 或内部状态路径带入模型，也不得从用户正文猜父子关系。named Audit prepare
+  与其它 root/sibling 继续隔离。这个投影只提供整合输入，不改变 child/root 的完成、权限或验收状态。
 - 会话运行时 式 cwd 与运行台账严格分离：Gateway/会话及其所有后代的普通相对路径统一从用户启动时的项目
   cwd 解析；隐藏 task root 只保存状态，只有显式 `work/...`、`output/...` 才进入内部任务命名空间。
   `allowed_write_roots` 只决定能否写，不能反向选择 cwd；只有宿主写入的 `execution_cwd` 可覆盖工具

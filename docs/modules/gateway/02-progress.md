@@ -1,5 +1,17 @@
 # Gateway Progress
 
+## 2026-08-25 普通前台续轮补入子代理完成信封（本地候选）
+
+- `.7` 原长会话证明 completion observation 与后台 wake 都有十名直属 child 的最终回复和 refs，但普通
+  TUI 追加消息时 `_gateway_conversation_context` 只恢复 transcript/artifact/workspace，模型因此又猜
+  `child_outputs` 并误报结果缺失。
+- 当前候选复用同一 ConversationStore observation，不新增消息或状态源。sticky workspace task 提供 exact
+  root id，同时要求 event 的 root/parent 都匹配，按 child task id 取最新终态，最多注入 12 项并保留
+  omitted_count。投影只含公开 completion 字段；内部 runner/output JSON、孙代理、其它 root 与 Audit
+  prepare 都被隔离。
+- 定向回归已覆盖最新终态去重、范围隔离、敏感内部字段隐藏和 12 项有界视图。仍待严格 gate、推送、
+  `.7` 唯一 Gateway 部署及同一真实长会话复验。
+
 ## 2026-08-24 child guidance 排队/消费两阶段回执（本地候选）
 
 - `/client/agent-guidance` 的 HTTP 202 现在只返回 `delivery=queued,status=pending` 和 exact

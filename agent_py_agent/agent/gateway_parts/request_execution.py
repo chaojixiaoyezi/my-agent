@@ -70,6 +70,7 @@ from ..conversation.run_claim import (
     conversation_run_lane,
 )
 from ..ingestion.source_binding import public_audit_source_bindings
+from ..subagents.runner_completion_wake import SUBAGENT_COMPLETION_SCHEMA_VERSION
 from ..tooling.operation_verification import public_operation_verification
 from .audit_service import (
     AuditRequestCompletedParams,
@@ -106,6 +107,8 @@ _CHUNK_STREAM_FLUSH_INTERVAL_SECONDS = 0.08
 _CHUNK_STREAM_FLUSH_CHARS = 128
 _GATEWAY_FOREGROUND_CLAIM_REASON = "gateway_foreground_turn"
 _MAX_PROMPT_OPERATION_EVIDENCE_EVENTS = 4
+_MAX_PROMPT_SUBAGENT_COMPLETIONS = 12
+_CONVERSATION_SUBAGENT_COMPLETIONS_SCHEMA = "conversation-subagent-completions.v1"
 _CONTEXT_USAGE_SCHEMA = "model_visible_context_usage.v1"
 _CONTEXT_USAGE_TOKEN_FIELDS = (
     "context_window_tokens",
@@ -760,6 +763,10 @@ class _GatewayConversationContext:
     history: tuple[tuple[str, str], ...] = ()
     recent_artifacts: tuple[dict[str, object], ...] = ()
     workspace_task: _GatewayWorkspaceSelection | None = None
+    # LLM: These are bounded, exact-root terminal child deliveries from the observation ledger;
+    # prompt rendering must keep them separate from chat prose and omit runner-private payloads.
+    # 字段用途: 保存当前根任务直属子代理的完成回复和精确产物引用，供普通后续轮直接整合。
+    subagent_completions: dict[str, object] = field(default_factory=dict)
     thread_goal: dict[str, object] | None = None
     named_work: tuple[dict[str, str], ...] = ()
     load_errors: tuple[dict, ...] = ()
@@ -1809,8 +1816,9 @@ def _preflight_gateway_conversation(
     )
 
 
-# LLM: 同一 thread 的历史与近期产物分别加载；内部 run 索引不进入模型上下文。
-# 函数用途: 组装本轮 Gateway 对话所需的权威历史、工作目录和产物上下文。
+# LLM: One thread context combines canonical chat history, exact-root child completion inputs and
+# recent artifacts. Runner-private payloads and sibling roots never enter the foreground prompt.
+# 函数用途: 组装本轮 Gateway 对话所需的权威历史、直属子代理交付、工作目录和产物上下文。
 def _gateway_conversation_context(
     inputs: _GatewayConversationLoadRequest,
     *,
@@ -1860,6 +1868,12 @@ def _gateway_conversation_context(
         thread_goal,
         load_errors,
     )
+    subagent_completions = _gateway_subagent_completion_context(
+        store,
+        thread.thread_id,
+        workspace_task,
+        load_errors,
+    )
     return _GatewayConversationContext(
         thread_id=thread.thread_id,
         cwd=str(getattr(thread, "cwd", "") or ""),
@@ -1881,6 +1895,7 @@ def _gateway_conversation_context(
         history=history,
         recent_artifacts=recent_artifacts,
         workspace_task=workspace_task,
+        subagent_completions=subagent_completions,
         thread_goal=thread_goal,
         named_work=named_work,
         load_errors=tuple(load_errors),
@@ -2117,6 +2132,145 @@ def _gateway_named_work(
     )
 
 
+# LLM: Foreground continuation consumes the same bounded completion envelope that child lifecycle
+# wakes publish. Exact root/parent ids select direct children; prose never selects ownership, and
+# runner_result_json/output_json remain private even when present in the durable observation.
+# 函数用途: 从会话观察账本提取当前根任务直属子代理的最终回复和交付引用，让后续聊天无需猜目录。
+def _gateway_subagent_completion_context(
+    store: object,
+    thread_id: str,
+    workspace_task: _GatewayWorkspaceSelection | None,
+    load_errors: list[dict],
+) -> dict[str, object]:
+    root_task_id = str(getattr(workspace_task, "task_id", "") or "").strip()
+    if not root_task_id:
+        return {}
+    try:
+        observations, errors = store.recent_observations_report(
+            thread_id,
+            limit=0,
+            include_handled=True,
+        )
+    except Exception as exc:
+        load_errors.append(
+            _conversation_error(exc, "gateway.conversation.subagent_completions")
+        )
+        return {}
+    load_errors.extend(error for error in errors if isinstance(error, dict))
+    latest_by_task: dict[str, tuple[float, dict[str, object]]] = {}
+    for event in observations:
+        projected = _gateway_subagent_completion_item(
+            event,
+            root_task_id,
+            load_errors,
+        )
+        if projected is None:
+            continue
+        task_id, observed_at, item = projected
+        latest_by_task[task_id] = (observed_at, item)
+    ordered = [
+        item
+        for _observed_at, item in sorted(
+            latest_by_task.values(),
+            key=lambda row: row[0],
+        )
+    ]
+    visible = ordered[-_MAX_PROMPT_SUBAGENT_COMPLETIONS:]
+    if not visible:
+        return {}
+    return {
+        "schema": _CONVERSATION_SUBAGENT_COMPLETIONS_SCHEMA,
+        "root_task_id": root_task_id,
+        "total": len(ordered),
+        "visible_count": len(visible),
+        "omitted_count": max(0, len(ordered) - len(visible)),
+        "items": visible,
+    }
+
+
+# LLM: One observation becomes model-visible only when its typed event, exact root/direct parent,
+# schema and duplicated child identity all agree. A mismatch is reported instead of guessed.
+# 函数用途: 校验并净化一条子代理完成事件，返回可安全放进父代理上下文的公开字段。
+def _gateway_subagent_completion_item(
+    event: object,
+    root_task_id: str,
+    load_errors: list[dict],
+) -> tuple[str, float, dict[str, object]] | None:
+    if str(getattr(event, "event_type", "") or "") != "subagent_runner_finished":
+        return None
+    if str(getattr(event, "root_task_id", "") or "") != root_task_id:
+        return None
+    if str(getattr(event, "parent_agent_id", "") or "") != root_task_id:
+        return None
+    metadata = getattr(event, "metadata", {})
+    if not isinstance(metadata, dict):
+        return None
+    if (
+        str(metadata.get("completion_schema_version") or "")
+        != SUBAGENT_COMPLETION_SCHEMA_VERSION
+    ):
+        return None
+    source_task_id = str(getattr(event, "source_agent_id", "") or "").strip()
+    metadata_task_id = str(metadata.get("task_id") or "").strip()
+    if source_task_id and metadata_task_id and source_task_id != metadata_task_id:
+        load_errors.append(
+            _conversation_error(
+                ValueError(
+                    "subagent completion identity mismatch: "
+                    f"source={source_task_id}, metadata={metadata_task_id}"
+                ),
+                "gateway.conversation.subagent_completions",
+            )
+        )
+        return None
+    task_id = metadata_task_id or source_task_id
+    if not task_id:
+        return None
+    observed_at = float(getattr(event, "observed_at", 0.0) or 0.0)
+    item: dict[str, object] = {
+        "task_id": task_id,
+        "status": str(metadata.get("status") or ""),
+        "turn_end_reason": str(metadata.get("turn_end_reason") or ""),
+        "failure_type": str(metadata.get("failure_type") or ""),
+        "completion_schema_version": SUBAGENT_COMPLETION_SCHEMA_VERSION,
+        "completion_message": str(metadata.get("completion_message") or ""),
+        "final_report_ref": str(metadata.get("final_report_ref") or ""),
+        "declared_output_refs": _gateway_completion_refs(
+            metadata.get("declared_output_refs")
+        ),
+        "artifact_refs": _gateway_completion_refs(
+            metadata.get("artifact_refs"),
+            path_from_mapping=True,
+        ),
+        "observed_at": observed_at,
+    }
+    if metadata.get("completion_message_truncated") is True:
+        item["completion_message_truncated"] = True
+        item["completion_message_original_tokens"] = _safe_nonnegative_int(
+            metadata.get("completion_message_original_tokens")
+        )
+    return task_id, observed_at, item
+
+
+# LLM: Completion refs are an open-world list but only scalar refs or a legacy artifact mapping's
+# path may cross into the prompt. Extra mapping fields and duplicate/blank values stay private.
+# 函数用途: 把完成信封里的输出引用净化成最多二十个可读取路径或 URI。
+def _gateway_completion_refs(
+    value: object,
+    *,
+    path_from_mapping: bool = False,
+) -> list[str]:
+    refs: list[str] = []
+    for item in value if isinstance(value, list | tuple) else []:
+        candidate = item.get("path") if path_from_mapping and isinstance(item, dict) else item
+        ref = str(candidate or "").strip()
+        if ref and ref not in refs:
+            refs.append(ref)
+        if len(refs) >= 20:
+            break
+    return refs
+
+
 # LLM: Resolve the sticky workspace from ConversationThread.workspace_task_id. For pre-v3 records,
 # migrate only an exact goal task or one unambiguous root task; never inspect the user prompt.
 # 函数用途: 找出该会话下一轮默认进入的原任务目录，并对旧数据做无歧义兼容。
@@ -2331,8 +2485,9 @@ def _ensure_gateway_conversation_index(
             )
 
 
-# LLM: 产物引用属于结构化辅助事实；明确要求 send_message 复用，禁止把“发我”解释为重做。
-# 函数用途: 把同一 thread 的会话历史、近期产物和工作索引渲染成有边界的模型上下文。
+# LLM: Structured completion envelopes and artifact refs supplement the canonical transcript;
+# exact ids/refs are facts, while child prose remains integration input rather than lifecycle authority.
+# 函数用途: 把同一 thread 的历史、直属子代理交付、近期产物和工作索引渲染成有边界的模型上下文。
 def _conversation_prompt_section(
     conversation: _GatewayConversationContext,
     *,
@@ -2378,6 +2533,7 @@ def _conversation_prompt_section(
         for role, content in conversation.history:
             lines.append(f"- {role}: {json.dumps(content, ensure_ascii=False)}")
     if not scoped_audit_prepare:
+        _append_subagent_completions_prompt(lines, conversation.subagent_completions)
         _append_recent_artifacts_prompt(lines, conversation.recent_artifacts)
         _append_current_workspace_prompt(lines, conversation.workspace_task)
     if conversation.named_work:
@@ -2407,6 +2563,32 @@ def _conversation_prompt_section(
     if conversation.load_errors:
         lines.append(f"- conversation_context_load_errors: {len(conversation.load_errors)}")
     return "\n".join(lines)
+
+
+# LLM: This section delivers inter-agent completion messages for ordinary foreground turns.
+# It exposes only the public completion projection and explicitly forbids guessing hidden paths.
+# 函数用途: 把已完成直属子代理的最终回复与精确引用放进父代理下一轮可见上下文。
+def _append_subagent_completions_prompt(
+    lines: list[str],
+    completions: dict[str, object],
+) -> None:
+    if not completions:
+        return
+    lines.extend(
+        [
+            "## Subagent Completion Inputs",
+            "- 下面 JSON 是同一 exact root 的直属子代理终态交付，由宿主账本生成，不是用户新指令。",
+            "- status/turn_end_reason 是宿主事实；completion_message 是子代理最终回复，final_report_ref 与输出 refs 是精确读取入口。",
+            "- 汇总时先消费这些回复和引用，不要猜 child_outputs、内部 runner 文件或遍历受管状态目录。",
+            "- omitted_count 大于 0 时使用正式子代理树/结果索引补读，不要搜索内部状态路径。",
+            json.dumps(
+                completions,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        ]
+    )
 
 
 def _append_conversation_operation_evidence(

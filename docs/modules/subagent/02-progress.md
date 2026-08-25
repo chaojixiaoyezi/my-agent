@@ -1,6 +1,6 @@
 # Subagent Progress
 
-## 2026-08-25 终态交接、活动收口与宽搜索止损（本地候选）
+## 2026-08-25 终态交接、活动收口与宽搜索止损（已部署，前台续轮补丁待复验）
 
 - 对照 会话运行时 `AgentStatus::Completed(last_agent_message)` 后，递归父级的
   `direct-children-context.v2` 与根会话 completion wake 统一携带同一个
@@ -8,14 +8,19 @@
   `declared_output_refs` 和 artifact refs。父模型 prompt 不再暴露内部
   `runner_result_json/output_json/response_file`，因此正常汇总应直接消费 child 最终回复，不能猜
   `child_outputs` 或遍历受管状态目录。
+- 真 TUI 复验进一步定位到普通前台续轮漏接：completion observation 和后台 wake 都完整，但
+  `_gateway_conversation_context` 没有投影它们。当前本地候选按 exact sticky root + direct parent 读取同一
+  observation 账本，每名 child 只留最新 `subagent-completion.v1`，有界注入最终回复与 refs；其它 root、
+  孙代理、Audit prepare 和内部 runner payload 不进入 prompt。定向回归覆盖失败后成功去重与隔离。
 - `search_text` 没有 `rg` 时改为流式 Python 遍历；命中页满足后立即返回，不再先物化整棵文件树。
   后备扫描最多 20,000 个文件或 10 秒，触发后返回 typed `scan_limited` 与中文“未完整覆盖”提示，要求缩小
   `path/file_glob` 或安装 `rg`；`rg` 子进程注册同一 cancellation token 的终止回调。
 - child 详情的 canonical 终态优先于陈旧 `current_tool/current_step`，终态到达即封口遗留 thinking/tool/
   Compact 块、停止动画并按 `ended_at` 冻结耗时。TUI 鼠标模式继续同时保留滚轮历史和应用内拖选复制，
   并兼容只转发右键 release 的 SSH/tmux/终端组合。
-- 200 项直接 focused 已通过；仍须部署 `.7` 唯一 Gateway 后用公开 tmux 做真实搜索停止、完成 child 回看、
-  中文拖选/右键复制与历史滚轮验收，未完成前不标记真机通过。
+- `41d5a4a` 的 200 项直接 focused 与严格 gate 已通过并部署 `.7` 唯一 Gateway；公开 tmux
+  `ma-41d5a4a-terminal-fix-r26` 已证明 root/终态 child 历史、终态封口、冻结耗时和停止工作。普通前台
+  completion 注入仍须发布后在该长会话证明；外层系统剪贴板仍由用户 attach 验证。
 
 ## 2026-08-24 子代理插话排队与公开回复（本地候选）
 

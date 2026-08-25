@@ -338,6 +338,7 @@ def test_root_child_wake_carries_bounded_completion_message_and_exact_refs(tmp_p
     assert "结论结尾" in metadata["completion_message"]
     assert metadata["final_report_ref"] == str(final_report)
     assert metadata["declared_output_refs"] == [str(artifact)]
+    assert metadata["artifact_refs"] == [str(artifact)]
     assert list(signal.evidence_refs) == [str(final_report), str(artifact)]
 
 

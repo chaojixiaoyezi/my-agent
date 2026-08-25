@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -459,6 +460,10 @@ def test_audit_prepare_projection_does_not_use_global_compact_or_sibling_artifac
             goal="旧普通任务",
             task_path="/tmp/ordinary-task",
         ),
+        subagent_completions={
+            "schema": "conversation-subagent-completions.v1",
+            "items": [{"task_id": "ordinary-child", "completion_message": "旧子代理交付"}],
+        },
         thread_goal={"name": "旧目标", "objective": "无关目标"},
     )
     request = {
@@ -483,7 +488,168 @@ def test_audit_prepare_projection_does_not_use_global_compact_or_sibling_artifac
     assert "旧 Audit 的 captured 规则" not in section
     assert "old-audit-profile.md" not in section
     assert "旧普通任务" not in section
+    assert "旧子代理交付" not in section
     assert "无关目标" not in section
+
+
+def _completion_followup_fixture(tmp_path: Path) -> tuple[SimpleAgent, dict, str]:
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    request = {
+        "conversation": {
+            "channel": "chat",
+            "channel_conversation_id": "child-completion-followup",
+            "channel_user_id": "local-agent",
+            "canonical_user_id": "local-agent",
+        }
+    }
+    first = _conversation_context(agent, request, "gw-root", "派子代理调研")
+    workspace = tmp_path / "root-workspace"
+    (workspace / "output").mkdir(parents=True)
+    (workspace / "work").mkdir()
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": first.thread_id,
+            "task_id": "root-task",
+            "goal": "多子代理调研",
+            "status": "interrupted",
+            "task_path": str(workspace),
+        }
+    )
+    agent.conversation_store.select_workspace_task(
+        {"thread_id": first.thread_id, "task_id": "root-task"}
+    )
+    return agent, request, first.thread_id
+
+
+def _append_completion_observation(
+    agent: SimpleAgent,
+    thread_id: str,
+    *,
+    task_id: str,
+    parent_id: str,
+    root_id: str,
+    status: str,
+    message: str,
+    now: float,
+) -> None:
+    agent.conversation_store.append_observation(
+        {
+            "thread_id": thread_id,
+            "event_type": "subagent_runner_finished",
+            "source_agent_id": task_id,
+            "parent_agent_id": parent_id,
+            "root_task_id": root_id,
+            "now": now,
+            "metadata": {
+                "task_id": task_id,
+                "status": status,
+                "turn_end_reason": "completed" if status == "DONE" else "error",
+                "failure_type": "" if status == "DONE" else "provider_error",
+                "completion_schema_version": "subagent-completion.v1",
+                "completion_message": message,
+                "final_report_ref": f"/workspace/{task_id}/final.md",
+                "declared_output_refs": [f"/workspace/{task_id}/report.md"],
+                "artifact_refs": [{"path": f"/workspace/{task_id}/artifact.json"}],
+                "runner_result_json": f"/private/{task_id}/runner_result.json",
+                "output_json": f"/private/{task_id}/output.json",
+            },
+        }
+    )
+
+
+def test_gateway_followup_receives_exact_root_child_completion_inputs(tmp_path):
+    agent, request, thread_id = _completion_followup_fixture(tmp_path)
+    append = partial(_append_completion_observation, agent, thread_id)
+    append(
+        task_id="child-1",
+        parent_id="root-task",
+        root_id="root-task",
+        status="FAILED",
+        message="旧失败结果",
+        now=10.0,
+    )
+    append(
+        task_id="child-2",
+        parent_id="root-task",
+        root_id="root-task",
+        status="DONE",
+        message="第二份调研已交付",
+        now=15.0,
+    )
+    append(
+        task_id="child-1",
+        parent_id="root-task",
+        root_id="root-task",
+        status="DONE",
+        message="第一份调研返工后已交付",
+        now=20.0,
+    )
+    append(
+        task_id="grandchild-1",
+        parent_id="child-1",
+        root_id="root-task",
+        status="DONE",
+        message="孙代理内容不能越级进入根会话",
+        now=25.0,
+    )
+    append(
+        task_id="other-child",
+        parent_id="other-root",
+        root_id="other-root",
+        status="DONE",
+        message="其它根任务内容不能串入",
+        now=30.0,
+    )
+
+    followup = _conversation_context(agent, request, "gw-followup", "汇总子代理结果")
+    completion_context = followup.subagent_completions
+    section = _gateway_injections({"inject": []}, followup)[0]
+
+    assert completion_context["schema"] == "conversation-subagent-completions.v1"
+    assert completion_context["root_task_id"] == "root-task"
+    assert completion_context["total"] == 2
+    assert completion_context["omitted_count"] == 0
+    items = {item["task_id"]: item for item in completion_context["items"]}
+    assert items["child-1"]["status"] == "DONE"
+    assert items["child-1"]["completion_message"] == "第一份调研返工后已交付"
+    assert items["child-2"]["final_report_ref"] == "/workspace/child-2/final.md"
+    assert items["child-2"]["artifact_refs"] == ["/workspace/child-2/artifact.json"]
+    assert "Subagent Completion Inputs" in section
+    assert "第一份调研返工后已交付" in section
+    assert "第二份调研已交付" in section
+    assert "旧失败结果" not in section
+    assert "孙代理内容不能越级进入根会话" not in section
+    assert "其它根任务内容不能串入" not in section
+    assert "runner_result_json" not in section
+    assert "output_json" not in section
+    assert "/private/" not in section
+
+
+def test_gateway_child_completion_inputs_are_bounded_with_explicit_omission(tmp_path):
+    agent, request, thread_id = _completion_followup_fixture(tmp_path)
+    for index in range(1, 16):
+        _append_completion_observation(
+            agent,
+            thread_id,
+            task_id=f"child-{index}",
+            parent_id="root-task",
+            root_id="root-task",
+            status="DONE",
+            message=f"第 {index} 份调研已交付",
+            now=float(index),
+        )
+    bounded = _conversation_context(agent, request, "gw-bounded", "继续汇总")
+    bounded_items = {
+        item["task_id"]: item for item in bounded.subagent_completions["items"]
+    }
+    assert bounded.subagent_completions["total"] == 15
+    assert bounded.subagent_completions["visible_count"] == 12
+    assert bounded.subagent_completions["omitted_count"] == 3
+    assert "child-3" not in bounded_items
+    assert bounded_items["child-15"]["completion_message"] == "第 15 份调研已交付"
 
 
 def test_gateway_run_persists_user_and_assistant_for_next_turn(tmp_path):

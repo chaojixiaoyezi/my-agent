@@ -4,6 +4,13 @@
 
 最近收口重点：
 
+- 2026-08-25 `41d5a4a` 对照 会话运行时 terminal child 完成消息收口三处底座：统一根/递归父级的
+  `subagent-completion.v1` 最终回复与 refs，隐藏内部 runner 文件；`search_text` Python fallback 流式返回并
+  受 20,000 文件/10 秒与 cancellation 约束；TUI 终态优先关闭陈旧工具动画、冻结耗时，并兼容 SSH/tmux
+  只转发右键 release 的复制序列。200 项 focused 与本地严格 gate 通过，已推送并部署 `.7` 唯一 Gateway。
+  tmux `ma-41d5a4a-terminal-fix-r26` 已证明主/子历史、终态显示和 Esc 停止；该现场另发现普通前台续轮未
+  注入已落盘 completion observation，作为下一切片进入 ROADMAP，不把未验证补丁写成已完成。
+
 - 2026-08-24 `2bf4602` 修复运行中 child 插话“HTTP 接受后立即消失、模型只在 thinking 里理人”的合同
   错位：Gateway 接受只表示 `queued/pending`，child TUI 继续显示 exact pending；provider 成功消费后才以
   `active_turn_input_consumed(client_message_ids)` 按 FIFO 提升为正式用户历史。child 系统提示要求先用普通

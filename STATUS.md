@@ -1,5 +1,15 @@
 # STATUS
 
+## 2026-08-25 子代理完成交付进入普通前台续轮（本地候选）
+
+- `.7` 真 TUI 已证明 child 的 `subagent-completion.v1` observation 和后台 wake 完整，缺陷只在普通
+  Gateway 后续轮：模型没收到完成信封，因而猜目录并误判部分 child 没有产物。
+- 当前候选从同一 ConversationStore 按 sticky root 的 exact `root_task_id + parent_agent_id` 提取直属 child
+  最新终态，最多注入 12 项最终回复和精确 refs；其它 root、孙代理、Audit prepare 与内部
+  `runner_result_json/output_json` 全部隔离。它不新增状态源、不改变完成/权限/验收。
+- 定向回归已覆盖同 child 失败后成功取最新、兄弟 root/孙代理隔离、内部 payload 隐藏和 Audit prepare
+  隔离。仍待本地严格 gate、推送、`.7` 唯一 Gateway 部署，以及原长会话真 TUI 直接整合验证。
+
 ## 2026-08-24 子代理普通插话排队与正文回复（`.7` 真 TUI 已通过）
 
 - 根因有两层：TUI 把 Gateway 的 HTTP 202“消息箱已收件”提前当成“模型已读”，所以 pending 立即消失；
