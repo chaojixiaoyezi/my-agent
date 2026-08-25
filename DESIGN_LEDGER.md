@@ -333,6 +333,11 @@
   只有结构化角色模板明确 `can_spawn_children=true` 的 coordinator，且父级本来拥有对应能力时，才保留
   这四项。leaf 自己仍可用 `capability_request` 请求本层能力。显式 `allowed_tools` 只是收窄请求，
   不得凭 agent 名、goal 文本或模型声称扩权。
+- 角色模板的 `prompt_zh` 是创建时冻结的软行为合同：snapshot 必须携带当前角色名称和提示，leaf runner
+  只注入自己这一份，不加载整份角色目录；旧 snapshot 缺字段时才按明确 role id 读取当前内置模板。提示
+  不能授予工具、路径或生命周期权力。内置 worker 对齐 会话运行时 shared-workspace 纪律，只做父级分配的明确
+  文件/模块范围，不覆盖或撤销兄弟改动；已有文本局部修改先用 `apply_patch`，上下文未命中时重读最小片段
+  再重试，不能用整文件重写绕过冲突。该纪律不恢复 workspace 锁或自然语言机器裁决。
 - 模型调用观测区分 logical turn、物理 model attempt 与 provider HTTP attempt；每次 provider 重试、模型级重试、失败、超时和最终状态写入同一线程安全账本，并投影到 runtime facts 与内部 Gateway result。观测回调不得读取 key/body，也不得改变真实请求结果。
 - owner quota 的唯一应用层锁序是 `owner quota -> repository/file lock -> mutation`。文件工具、Memory、Persona、Scheduler 和 Skill draft 必须在同一 owner lock 内按完整 multi-file mutation 的最终字节准入；策略、用量或锁不可读时 fail-closed。应用门不能冒充 filesystem quota：Shell/PTY/LSP 任意进程写盘必须由正式部署的 filesystem/project/container quota 硬限制。
 - owner retention 只依据 typed policy、terminal authority 和 timestamp；task/scratch 执行前必须二次校验，先移入 owner trash 并写 tombstone，再按期限删除。owner/task legal hold、损坏 policy 或状态漂移均跳过并留审计。Gateway 只用 cursor 有界扫描 owner，不为清理实例化 Agent。
@@ -821,6 +826,9 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   tracking，滚轮直接浏览、离底后保持锚点、回到底部才恢复自动跟随，左键拖选松手与右键都投影同一应用
   选区。F6 只切换当前 TUI process-local 状态，不写配置、不改 session；第一次切到宿主终端原生复制，
   再按恢复滚轮。远程复制仍必须如实区分应用/tmux/OSC52 投影与不可观测的外层系统剪贴板。
+- tmux 剪贴板写穿只调用目标版本真实公开的命令：普通终端使用 `tmux set-buffer -w -- <text>` 同时更新
+  paste buffer 与外层 OSC 52；iTerm2 因 SSH 崩溃风险只走 `load-buffer -`，再由应用 DCS/OSC 52 尝试外传。
+  禁止把不存在的 `load-buffer -w` mock 成成功；最终系统剪贴板仍必须由用户在 attach 终端实际粘贴确认。
 - 仅在 TUI 鼠标模式中，transcript 选择才持有当前 viewport 中经 prompt_toolkit `Window` 从屏幕列反解后
   的源字符索引，resize 清除；产品层不得再按 `wcwidth` 二次换算，否则中文会只复制一半。最终 focus 字符
   必须包含在高亮和复制文本中。任何形式的 mouse-up 都结束拖动；1003 无按键 motion 和下一次 fresh press

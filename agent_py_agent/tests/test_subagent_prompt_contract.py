@@ -136,8 +136,8 @@ def test_runner_prompt_tells_coordinator_to_stay_capable_and_delegate_when_usefu
     assert "不要在派工前把所有正文" in prompt
     assert "先创建 child；创建后它会自动运行" in prompt
     assert "不要把所有 child 正文一次性吞回自己的上下文" in prompt
-    assert "派工是为了把活做好，不是硬流程" in prompt
-    assert "你可以直接完成" in prompt
+    assert "是否派工由目标规模、可并行性和用户要求决定" in prompt
+    assert "简单任务可以一开始就直接做" in prompt
     assert "不要误以为只能创建 worker" in prompt
     assert "下一层仍使用统一的 create_subagents" in prompt
     assert "创建 child 时" in prompt
@@ -204,8 +204,8 @@ def test_runner_prompt_keeps_role_template_details_out_of_leaf_prompt():
     assert "你是找茬子代理" not in prompt
 
 
-def test_runner_prompt_keeps_worker_template_details_compact():
-    """执行型子代理不额外加载当前模板详情，避免每个 worker prompt 变厚。"""
+def test_runner_prompt_keeps_only_current_worker_behavior_compact():
+    """执行型子代理只加载当前角色行为，不加载其它角色或整份目录。"""
     context = SubAgentExecutionContext(
         run_id="worker-1",
         generated_at=1.0,
@@ -219,8 +219,9 @@ def test_runner_prompt_keeps_worker_template_details_compact():
 
     prompt = _build_subagent_runner_prompt(context)
 
-    assert "当前角色模板详情" not in prompt
-    assert "你是执行子代理" not in prompt
+    assert "当前角色行为" in prompt
+    assert "你是执行子代理" in prompt
+    assert "不要覆盖或撤销兄弟代理" in prompt
     assert "你是找茬子代理" not in prompt
 
 

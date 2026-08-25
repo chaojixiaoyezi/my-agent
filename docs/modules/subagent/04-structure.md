@@ -523,6 +523,9 @@ SimpleAgent orchestration tool
   深度、权限、模板和状态仍只读结构化字段，不能从显示名、中文叫法或英文别名里反推。
 - `role` 选择角色模板时只认明确模板 id；不做“字符串里包含 tester/worker 就套模板”的宽匹配，
   也不再把旧层级别名静默映射成当前模板。
+- role snapshot 除能力标量外还冻结 `name_zh/prompt_zh`。普通 leaf runner 只把当前角色提示作为软行为条款
+  注入；coordinator 继续使用完整角色索引。旧 snapshot 缺提示时只按 exact role id 回落内置模板，不能从
+  goal 或展示名猜角色。worker 的共享目录/局部 patch 纪律不产生目录锁、写权限或完成判定。
 - 层级继承状态写在 `attributes.inherited_parent_context`；`goal` 只承载给模型阅读的任务说明和
   父级边界摘要，不承担机器状态判断。
 

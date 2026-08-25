@@ -305,12 +305,13 @@ def test_all_builtin_role_contracts_are_applied_on_create_run(tmp_path):
         assert task.role == template_id
         assert task.allowed_tools[:len(template.default_tools)] == list(template.default_tools)
         assert task.acceptance_checks == []
+        assert task.attributes["role_template"]["prompt_zh"] == template.prompt_zh
         for tool_name in ["write_file", "apply_patch", "apply_patch"]:
             assert tool_name in task.allowed_tools
         assert ("create_subagents" in task.allowed_tools) is template.can_spawn_children
 
 
-def test_coordinator_runner_prompt_loads_role_catalog_without_current_worker_details():
+def test_runner_prompt_loads_current_role_behavior_without_other_leaf_details():
     store = load_role_template_store()
 
     for template_id in BUILTIN_ROLE_IDS:
@@ -333,6 +334,6 @@ def test_coordinator_runner_prompt_loads_role_catalog_without_current_worker_det
             assert "模板详情" in prompt
             assert "你是找茬子代理" in prompt
         else:
-            assert template.prompt_zh not in prompt
-            assert "当前角色模板详情" not in prompt
+            assert template.prompt_zh in prompt
+            assert "当前角色行为" in prompt
             _assert_other_role_prompts_absent(prompt, store=store, template_id=template_id)

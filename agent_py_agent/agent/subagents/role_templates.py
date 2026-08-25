@@ -154,11 +154,16 @@ def template_for_role_identity(
     return template_for_role(template_id, user_template_dir) if template_id else None
 
 
+# LLM: The creation-time role snapshot freezes both machine capability scalars
+# and the one current soft prompt. Consumers must never treat prompt_zh/name_zh
+# as authority for tools, paths, identity, or lifecycle decisions.
+# 函数用途: 把创建时选定的角色能力和当前角色说明冻结到任务，供重启后的 runner 保持一致行为。
 def role_template_snapshot(template: RoleTemplate | None) -> dict[str, object]:
     if template is None:
         return {}
     return {
         "id": template.id,
+        "name_zh": template.name_zh,
         "source": template.source,
         "source_path": template.source_path,
         "can_write": template.can_write,
@@ -167,6 +172,7 @@ def role_template_snapshot(template: RoleTemplate | None) -> dict[str, object]:
         "can_spawn_children": template.can_spawn_children,
         "depends_on_outputs": template.depends_on_outputs,
         "output_contract": dict(template.output_contract or {}),
+        "prompt_zh": template.prompt_zh,
     }
 
 

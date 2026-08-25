@@ -23,6 +23,46 @@
 root lineage 只表示血缘，不授予 child 读取父收件箱的权限。下一步严格 gate 后部署唯一 Gateway，在同一
 session 先补齐这次调研，再连续做两个小追加和多子代理复刻；不能另启测试 Gateway。
 
+### Leaf 角色行为与共享工作区修改纪律
+
+状态：本地候选 focused 与严格 gate 已通过，待推送、`.7` 单 Gateway 部署及同一 TUI 后续复刻验证
+
+解决问题：Click→Go 复刻的 worker-2 被分配 examples，却扩到 `internal/core`、覆盖兄弟文件，并在局部补丁
+失败后用 `head/write_file/mv/heredoc` 整文件重写。对照 会话运行时 `core/src/agent/role.rs` 后确认，本项目 leaf
+runner 把当前 role `prompt_zh` 直接丢弃，worker 实际从未看到共享工作区和职责边界。
+
+当前进展：创建 snapshot 新增当前角色名称/提示，leaf 只注入自己一份；worker 内置规则明确独占分工、
+不覆盖兄弟和局部补丁重试。自然语言仍只是软纪律，不增加目录锁、diff 机器验收或 Click 专项分支。
+
+### heredoc 正文不能冒充后台 shell 操作符
+
+状态：本地候选 shell focused 与严格 gate 已通过，待推送、部署后真 TUI 复验
+
+解决问题：worker 写 Go 源码时，heredoc 正文中的 `&Context{}` 被宿主当成 shell 独立 `&`，返回
+`BACKGROUND_PROCESS_MODE_REQUIRED`；模型随后改用整文件覆盖，放大共享目录冲突。
+
+当前进展：后台检测先以 quote-aware shell lexer 找出真实 heredoc opener，只分析 opener 与后续 shell
+命令，忽略 payload 和结束标记；注释里的伪 opener 不能隐藏真正的 `sleep &`。独立后台操作符仍 fail closed。
+
+### tmux 3.3a 拖选/右键复制写穿
+
+状态：本地候选 TUI focused 与严格 gate 已通过，待推送、部署和用户 attach 后实际粘贴
+
+解决问题：`.7` 的 tmux 3.3a 明确显示 `load-buffer` 没有 `-w`，旧实现却调用
+`tmux load-buffer -w -`；mock 测试虚构返回 0，导致界面高亮、右键事件和内部 clipboard 都正常，外层系统
+剪贴板始终没收到内容。
+
+当前进展：普通 tmux 改用真实支持的 `set-buffer -w -- <text>`；iTerm2 保留无写穿的 stdin buffer 路径，
+避免已知 SSH 崩溃风险。应用 clipboard、OSC 52、F6 原生复制均保留，最终外层结果不由自动化冒充。
+
+### 新阶段仍展示上一份已关闭 Todo
+
+状态：真实样本已确认，待本轮复制链自然结束后对照 会话运行时 active-turn plan 展示再修
+
+解决问题：`ma-97468f3-longchain-r27` 已进入独立验收失败后的三路修复，底部 child 面板正确显示三名
+RUNNING，固定 Todo 却仍显示上一轮调研的 `完成 4/7`（实际 4 done + 3 skipped）。这是旧 task-path 计划
+投影，不是当前修复进度；不能按标题猜阶段，也不能清掉仍属同一 active turn 的真计划。
+
 ### DNS 瞬断不能终止长代理
 
 状态：本地候选失败优先回归通过，待完整 focused、严格 gate、推送与 `.7` 同 TUI 复验

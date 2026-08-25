@@ -1021,38 +1021,38 @@ def test_osc52_clipboard_sequence_wraps_for_tmux() -> None:
     assert wrapped == "\x1bPtmux;\x1b\x1b]52;c;YWJj\x07\x1b\\"
 
 
-def test_tmux_clipboard_buffer_uses_write_through(monkeypatch) -> None:
-    calls: list[tuple[list[str], str]] = []
+def test_tmux_clipboard_buffer_uses_documented_set_buffer_write_through(monkeypatch) -> None:
+    calls: list[tuple[list[str], object]] = []
 
     class Result:
         returncode = 0
 
-    def fake_run(args, *, input, **_kwargs):
-        calls.append((list(args), input))
+    def fake_run(args, **kwargs):
+        calls.append((list(args), kwargs.get("input")))
         return Result()
 
     monkeypatch.delenv("LC_TERMINAL", raising=False)
     monkeypatch.setattr(tui_keybindings.subprocess, "run", fake_run)
 
     assert tui_keybindings._load_tmux_clipboard_buffer("甲乙")
-    assert calls == [(["tmux", "load-buffer", "-w", "-"], "甲乙")]
+    assert calls == [(["tmux", "set-buffer", "-w", "--", "甲乙"], None)]
 
 
-def test_tmux_clipboard_buffer_keeps_iterm2_write_through(monkeypatch) -> None:
-    calls: list[list[str]] = []
+def test_tmux_clipboard_buffer_uses_stdin_only_for_iterm2(monkeypatch) -> None:
+    calls: list[tuple[list[str], object]] = []
 
     class Result:
         returncode = 0
 
-    def fake_run(args, **_kwargs):
-        calls.append(list(args))
+    def fake_run(args, **kwargs):
+        calls.append((list(args), kwargs.get("input")))
         return Result()
 
     monkeypatch.setenv("LC_TERMINAL", "iTerm2")
     monkeypatch.setattr(tui_keybindings.subprocess, "run", fake_run)
 
     assert tui_keybindings._load_tmux_clipboard_buffer("copy")
-    assert calls == [["tmux", "load-buffer", "-w", "-"]]
+    assert calls == [(["tmux", "load-buffer", "-"], "copy")]
 
 
 def test_permission_y_n_shortcuts_use_typed_decisions(monkeypatch) -> None:

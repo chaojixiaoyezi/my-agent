@@ -90,6 +90,33 @@ def test_background_operator_parser_ignores_quotes_and_fd_redirects():
     assert _contains_unmanaged_background_operator("echo hi 2>&1") is False
 
 
+def test_background_operator_parser_ignores_heredoc_body_but_keeps_shell_lines():
+    go_source = """cat > main.go <<'EOF'
+value := &Context{}
+callback := func() { left & right }
+EOF
+echo done
+"""
+    background_after_body = """cat <<EOF
+body & data
+EOF
+sleep 1 &
+"""
+    background_on_opener = """cat <<EOF &
+body
+EOF
+"""
+    commented_fake_opener = """# cat <<EOF
+sleep 1 &
+EOF
+"""
+
+    assert _contains_unmanaged_background_operator(go_source) is False
+    assert _contains_unmanaged_background_operator(background_after_body) is True
+    assert _contains_unmanaged_background_operator(background_on_opener) is True
+    assert _contains_unmanaged_background_operator(commented_fake_opener) is True
+
+
 def test_fd_redirect_remains_valid_in_foreground(tmp_path):
     res = ShellTool(tmp_path).execute({"command": "echo redirect-ok 2>&1"})
 

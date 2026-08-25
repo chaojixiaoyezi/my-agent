@@ -1722,21 +1722,26 @@ def _run_clipboard_tool(args: list[str], text: str) -> bool:
     return result.returncode == 0
 
 
-# LLM: tmux paste buffer and outer-terminal clipboard must be updated by one `load-buffer -w` call;
-# terminal brand cannot disable `-w`, because DCS passthrough may be off and the plain buffer would
-# then never reach the user's local clipboard over SSH.
-# 函数用途: 把已选文本写入 tmux buffer并转发到外层终端剪贴板；失败时仍保留 OSC 52 和应用内剪贴板兜底。
+# LLM: Documented tmux releases put clipboard write-through on `set-buffer -w`,
+# not `load-buffer`. iTerm2 keeps the stdin-only buffer path because tmux OSC 52
+# write-through can terminate that SSH client; raw OSC remains a best-effort path.
+# 函数用途: 把已选文本写入 tmux buffer，并在兼容终端上转发到外层剪贴板。
 def _load_tmux_clipboard_buffer(text: str) -> bool:
-    args = ["tmux", "load-buffer", "-w", "-"]
+    normalized = str(text or "")
+    if os.environ.get("LC_TERMINAL") == "iTerm2":
+        args = ["tmux", "load-buffer", "-"]
+        run_kwargs: dict[str, Any] = {"input": normalized, "text": True}
+    else:
+        args = ["tmux", "set-buffer", "-w", "--", normalized]
+        run_kwargs = {}
     try:
         result = subprocess.run(
             args,
-            input=str(text or ""),
-            text=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=2.0,
             check=False,
+            **run_kwargs,
         )
     except (OSError, subprocess.SubprocessError):
         return False

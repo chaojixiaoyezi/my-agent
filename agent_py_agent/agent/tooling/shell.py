@@ -490,12 +490,56 @@ def _wants_background(params: dict[str, Any]) -> bool:
     return str(value or "").strip().lower() in {"true", "1", "yes"}
 
 
+# LLM: Heredoc bodies are payload bytes rather than shell syntax. This helper
+# removes only those bodies while retaining opener and later shell lines, so
+# background detection cannot mistake source-code address operators for `&`.
+# 函数用途: 剔除 heredoc 正文，保留真正会由 shell 解释的命令行。
+def _shell_syntax_without_heredoc_bodies(command: str) -> str:
+    syntax_lines: list[str] = []
+    pending: list[tuple[str, bool]] = []
+    for line in str(command or "").splitlines():
+        if pending:
+            delimiter, strip_tabs = pending[0]
+            candidate = line.lstrip("\t") if strip_tabs else line
+            if candidate == delimiter:
+                pending.pop(0)
+            continue
+        syntax_lines.append(line)
+        pending.extend(_heredoc_delimiters_from_shell_line(line))
+    return "\n".join(syntax_lines)
+
+
+# LLM: Delimiter discovery uses the same quote-aware shell lexer as control
+# parsing. It recognizes `<<`/`<<-` only on syntax lines and never scans payload.
+# 函数用途: 读取一条 shell 命令里按出现顺序声明的 heredoc 结束标记。
+def _heredoc_delimiters_from_shell_line(line: str) -> list[tuple[str, bool]]:
+    try:
+        lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|<>")
+        lexer.whitespace_split = True
+        lexer.commenters = "#"
+        tokens = tuple(lexer)
+    except ValueError:
+        return []
+    delimiters: list[tuple[str, bool]] = []
+    for index, token in enumerate(tokens[:-1]):
+        if token != "<<":
+            continue
+        delimiter = str(tokens[index + 1] or "")
+        strip_tabs = delimiter.startswith("-")
+        if strip_tabs:
+            delimiter = delimiter[1:]
+        if delimiter and delimiter not in {";", "&", "|", "<", ">"}:
+            delimiters.append((delimiter, strip_tabs))
+    return delimiters
+
+
 # LLM: 持久进程只有 run_in_background 一条权威启动路径；这里识别 shell 语法 token，
-#   不能用正则匹配自然语言，也不能把引号内的 & 或 2>&1 重定向误判为后台操作符。
+#   不能用正则匹配自然语言，也不能把 heredoc/引号内的 & 或 2>&1 重定向误判为后台操作符。
 # 函数用途: 判断命令是否试图用 shell 的独立 & 操作符绕开后台进程注册表。
 def _contains_unmanaged_background_operator(command: str) -> bool:
     try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>")
+        shell_syntax = _shell_syntax_without_heredoc_bodies(command)
+        lexer = shlex.shlex(shell_syntax, posix=True, punctuation_chars=";&|<>")
         lexer.whitespace_split = True
         lexer.commenters = ""
         return "&" in tuple(lexer)

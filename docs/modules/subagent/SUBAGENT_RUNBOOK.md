@@ -75,6 +75,11 @@ OPEN 或非法未闭合 capability request 是宿主掌握的结构化阻塞事�
 root 继续对用户完整目标负责；普通 child 只把直接父级给自己的当前 `goal` 当作本轮完整工作边界，必须
 完整完成该 goal，但不得因为根目标更大而替兄弟计划项扩做。宿主不解析 goal 或扫描 diff 做机器验收。
 
+并行 worker 共享同一实时 workspace，但每名 worker 只修改父级明确分配的文件/模块范围。看到兄弟改动时
+不得回滚、覆盖或“整理掉”；整合必须碰兄弟范围时，先向直接父级报告并重新分工。修改已有文本优先
+`apply_patch`；上下文未命中先重读最小准确片段再重试，不能用整文件 `write_file`、`sed/head/mv` 或
+heredoc 绕过局部冲突。它是 会话运行时 式软执行纪律，机器权限仍只认结构化写边界。
+
 `covers` 只在 child 确实原样承接一个 open Todo 时提供。省略时 child 用真实 run id 显示自己的进度，不
 关闭现有 Todo；提供的未知、关闭或重复 id 会在创建前拒绝。若已完成项因路径、测试等问题需要返工，先
 用 `task_progress` 对原 id 传 `status=in_progress, correction=true` 显式重开，再绑定原 id；不能为了通过

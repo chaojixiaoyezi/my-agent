@@ -1,5 +1,22 @@
 # TESTS
 
+## 2026-08-25 角色提示、heredoc 与 tmux 3.3a 复制真失败回归
+
+本轮三个失败都来自同一长 TUI `ma-97468f3-longchain-r27`，不得用项目名写专项分支：leaf 角色提示被丢弃、
+Go heredoc 的 `&Context{}` 被误判后台操作符、tmux 3.3a 不支持被 mock 成功的 `load-buffer -w`。定向命令：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_tools/test_shell_background.py \
+  agent_py_agent/tests/test_subagent_prompt_contract.py \
+  agent_py_agent/tests/test_subagent_role_templates.py \
+  agent_py_agent/tests/test_tui_input.py -q --tb=short
+```
+
+当前结果 75 passed。角色回归要求 leaf 只见当前 `prompt_zh`、snapshot 可跨重启保留；shell 回归要求忽略
+heredoc payload 但仍抓 opener/结束后的真实 `&` 及注释伪 opener；tmux 回归要求普通终端调用公开的
+`set-buffer -w`，iTerm2 只用 `load-buffer -`。最终复制仍以用户 attach 后粘贴为准。
+
 ## 2026-08-25 DNS 解析瞬断必须先有界重试
 
 真实失败样本是运行 1:56:09、Compact 3 次的 child 因一次 typed `socket.gaierror` 直接终止。普通 JSON 和
@@ -547,8 +564,9 @@ Gateway 新日志偏移确认只出现一次结构化 recovery block、没有重
 
 2026-08-20 TUI 灰色层级与 tmux 复制修复在本地、`192.0.2.7` 各运行 renderer/view/input/ANSI/PTY/chat
 6 文件 focused 组合，均为 105 项通过。测试机仅有一个 Gateway（8420），10 个 TUI 共享；真实中文请求
-约 3.09 秒出现回答，ANSI capture 证明思考为 246 灰、助手正文为 231，`tmux load-buffer -w` 中文探针
-完整。外层系统剪贴板必须在用户 attach 的终端执行一次真实粘贴才可标最终通过。全仓 Ruff 20 项、strict
+约 3.09 秒出现回答，ANSI capture 证明思考为 246 灰、助手正文为 231。该轮曾把 mock 的
+`tmux load-buffer -w` 当作写穿证据；tmux 3.3a 真命令表已否定这一点，现由 `set-buffer -w` 候选修正。
+外层系统剪贴板必须在用户 attach 的终端执行一次真实粘贴才可标最终通过。全仓 Ruff 20 项、strict
 code-size 29 项均为修复前基线已有且本提交未新增；用户在获知后明确授权推送和测试部署，因此不能把本轮
 记录写成“严格发布 gate 全绿”。
 
@@ -653,8 +671,8 @@ history/search/paste/completion/queue/stash、follow/unseen、session-history、
 不能用测试者旁路修改项目来制造成功。
 鼠标回归还必须覆盖：prompt_toolkit 传入的是源字符索引，中文宽字符不得再次按显示列换算或只复制一半；窗口外丢失 mouse-up 后，首个
 `MouseButton.NONE` motion 或下一次 fresh press 只结束旧拖动，后续 hover 不再扩展；一次 settled selection
-只自动复制一次，并同时保留 prompt_toolkit、OSC52 与 `tmux load-buffer -w` 外层剪贴板路径；iTerm2
-也不得退化成只写 tmux 内部 buffer。输入回归还要覆盖鼠标松手自动
+只自动复制一次，并同时保留 prompt_toolkit、OSC52 与 `tmux set-buffer -w` 外层剪贴板路径；iTerm2
+因已知 SSH 崩溃风险只保证 `load-buffer -` 和应用 OSC 52 尝试。输入回归还要覆盖鼠标松手自动
 复制、Ctrl-C/右键复制且保留输入高亮、右键 press/release 只复制一次、Ctrl-V/终端 bracketed paste 替换选区，以及 marker 普通空格不会触发
 `nbsp` 下划线。运行中普通输入还要证明下一次
 真实模型调用能看到该输入；若 exact turn 已结束，TUI 只能挂接 Gateway 返回的 canonical queued request，

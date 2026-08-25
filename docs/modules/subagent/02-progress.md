@@ -1,5 +1,14 @@
 # Subagent Progress
 
+## 2026-08-25 Leaf 当前角色提示与局部修改纪律（本地候选）
+
+- 真 TUI 的 examples worker 越界改 `internal/core`，局部补丁失败后多次整文件覆盖；代码核对发现
+  `_current_role_template_lines()` 固定返回空，普通 leaf 从未收到角色模板行为。
+- 对照 会话运行时 worker shared-workspace 规则，创建 snapshot 现在冻结 `name_zh/prompt_zh`，runner 只注入当前
+  角色；worker 明确独占分工、不撤销兄弟改动、局部修改先 patch。提示仍不参与权限或状态裁决。
+- heredoc payload 同时从后台 `&` 检测中剔除，Go `&Context{}` 不再诱发整文件 fallback；角色/shell 组合
+  focused 35 项通过，待严格 gate、单 Gateway 部署和同 session 下一批 worker 真测。
+
 ## 2026-08-25 并行编码写入范围软纪律（本地候选）
 
 - 同一长 TUI 的 Click→Go 复刻中，至少 3 名 child 同时改旧目录的 `internal/param`，并明确报告兄弟修改持续

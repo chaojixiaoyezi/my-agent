@@ -34,7 +34,9 @@
 - [ ] 没有 `rg` 的远端宽目录 `search_text` 能被 `/stop` 及时打断；默认 content 页命中后不扫描余下目录，
   无命中超出 20,000 文件/10 秒时明确标注 `scan_limited`，不得显示成完整“没有找到”。
 - [ ] 同一个 fresh TUI 默认鼠标模式下，滚轮/PgUp/Ctrl+Home 历史、中文左键拖选自动复制和右键重复复制
-  同时可用；完整右键 down/up 与仅 release 两种序列都只复制一次，选区高亮不被清除。
+  同时可用；完整右键 down/up 与仅 release 两种序列都只复制一次，选区高亮不被清除。真实 tmux 版本必须
+  用 `list-commands` 证明写穿参数存在；普通 tmux 使用 `set-buffer -w`，不得再 mock 不存在的
+  `load-buffer -w` 为成功，外层粘贴仍由用户 attach 后确认。
 
 - [x] 运行 child 的用户消息 receipt 带 exact `expected_turn_id`，reserve、provider submission 与 consume
   使用同一 attempt；不得再出现 `guidance submission reservation mismatch`。

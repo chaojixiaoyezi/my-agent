@@ -16,6 +16,7 @@ from ...subagents.role_templates import (
     role_template_detail_text,
     role_template_index_text,
     role_template_snapshot_for_role,
+    template_for_role_identity,
 )
 from ...tooling.content_transport_policy import filesystem_text_mutation_rule
 from ..orchestration.coordinator_policy import coordinator_execution_policy_lines
@@ -452,9 +453,24 @@ def _coordinator_execution_contract_lines() -> list[str]:
     return lines
 
 
+# LLM: A leaf receives only its own role behavior, preferably from the
+# creation-time snapshot so custom templates remain stable across restarts.
+# Role prose is soft guidance and never grants tools, paths, or lifecycle state.
+# 函数用途: 给普通子代理补入自己的精简角色行为，不把整份角色目录塞进上下文。
 def _current_role_template_lines(context: SubAgentExecutionContext) -> list[str]:
-    del context
-    return []
+    if _is_coordinator_context(context):
+        return []
+    snapshot = context.role_template if isinstance(context.role_template, dict) else {}
+    prompt = str(snapshot.get("prompt_zh") or "").strip()
+    role_name = str(snapshot.get("name_zh") or context.role or "当前角色").strip()
+    if not prompt:
+        template = template_for_role_identity(str(context.role or ""))
+        if template is not None:
+            prompt = template.prompt_zh
+            role_name = template.name_zh or role_name
+    if not prompt:
+        return []
+    return [f"- 当前角色行为（{role_name}）：{prompt}"]
 
 
 def _is_coordinator_context(context: SubAgentExecutionContext) -> bool:
