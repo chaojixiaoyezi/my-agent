@@ -463,7 +463,7 @@ class _TuiBackgroundActivityController:
 
 _SUBAGENT_ACTIVITY_ROW_LIMIT = 64
 _MAIN_ACTIVITY_FIELDS = frozenset(
-    {"task_id", "phase", "activity", "started_at", "updated_at"}
+    {"task_id", "phase", "activity", "started_at", "updated_at", "ended_at"}
 )
 _CONTEXT_USAGE_SCHEMA = "model_visible_context_usage.v1"
 _CONTEXT_USAGE_TOKEN_FIELDS = (

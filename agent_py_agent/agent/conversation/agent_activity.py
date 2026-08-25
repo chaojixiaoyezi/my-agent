@@ -906,6 +906,20 @@ def _subagent_context_usage(task: object) -> dict[str, object]:
 # fields with status fallbacks. It cannot decide whether the run is alive or done.
 # 函数用途: 用一句短话说明当前子代理正在做什么，供详情页 Working 行显示。
 def _subagent_current_activity(task: object) -> str:
+    status = str(getattr(task, "status", "") or "").strip().upper()
+    terminal_activity = {
+        "DONE": "已完成",
+        "FAILED": "执行失败",
+        "BLOCKED": "等待处理",
+        "PAUSED": "已暂停",
+        "CANCELLED": "已停止",
+        "ABANDONED": "已放弃",
+        "TIMEOUT": "已超时",
+        "CHANNEL_ERROR": "执行通道失败",
+        "TAKEN_OVER": "已被接管",
+    }.get(status)
+    if terminal_activity:
+        return terminal_activity
     tool = _bounded_text(getattr(task, "current_tool", ""), limit=80)
     if tool:
         return f"正在使用 {tool}"
@@ -916,19 +930,10 @@ def _subagent_current_activity(task: object) -> str:
     ):
         if text := _bounded_text(value, limit=_ACTIVITY_TEXT_LIMIT):
             return text
-    status = str(getattr(task, "status", "") or "").strip().upper()
     return {
         "PLANNING": "准备任务",
         "PENDING": "等待启动",
         "RUNNING": "运行中",
-        "DONE": "已完成",
-        "FAILED": "执行失败",
-        "BLOCKED": "等待处理",
-        "PAUSED": "已暂停",
-        "CANCELLED": "已停止",
-        "ABANDONED": "已放弃",
-        "TIMEOUT": "已超时",
-        "CHANNEL_ERROR": "执行通道失败",
     }.get(status, "状态未知")
 
 

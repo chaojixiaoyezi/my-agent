@@ -34,7 +34,8 @@ orphan reconciler、observation/wake 和代理树 projection
 
 成功同批 child 会等到收齐后只唤醒一次，避免每个 child 都让父级重读整份上下文。失败、
 缺失 canonical state 或 capability 阻塞会立即唤醒。父级新工作片的 `direct_children` 包直接给出
-status、turn end、failure type、result/output/artifact refs 和待裁决请求；原始大回复仍留在引用文件中。
+status、turn end、failure type、有界最终回复、正式 artifact/声明输出 refs 和待裁决请求；过长最终回复可按
+`final_report_ref` 继续读取。内部 runner result/output/response 文件不进入正常父模型 prompt。
 
 宿主内部 `agent_tree_status_payload` 会展示 run/parent/root、状态、heartbeat、当前步骤、失败原因和
 artifact refs，但这是运维状态投影，不是模型工具。用户可以通过 `/status` 和 TUI 看，恢复器也可以读；
@@ -102,9 +103,9 @@ allow 与 forbidden 同时命中时按最具体路径条目决定，同层由 fo
 
 child 的自然最终回复、typed lifecycle event 与真实 artifact refs 是父级汇总输入。推荐顺序：
 
-1. 创建回执或完成事件里的 `child_output_read_order`。
-2. 结构化结果里的 `primary_artifact_refs`、`expected_outputs` 和 artifact refs。
-3. 只有结构化 refs 缺失或损坏时，才把 run 内部报告当恢复证据。
+1. 完成事件或 `direct_children.items[].completion_message` 里的 child 最终回复。
+2. 同一交接包里的 artifact refs、`declared_output_refs` 与 `final_report_ref`。
+3. 只有这些结构化交接内容缺失或损坏时，才由宿主把 run 内部结果文件当恢复证据。
 
 `work/agents/<run_id>/canonical_state.json`、`checkpoint.json`、`summary.md` 和内部
 `final_report.md` 是审计/恢复资料，不是正常状态面或默认汇总入口。普通文件/shell 工具若碰到这些路径，

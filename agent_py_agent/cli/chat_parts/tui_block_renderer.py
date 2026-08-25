@@ -603,7 +603,6 @@ def _render_background_activity(
     started_at = float(
         main_activity.get("started_at") or block.metadata.get("started_at") or 0.0
     )
-    elapsed = max(0, int(context.now - started_at)) if started_at and context.now else 0
     rows = _subagent_activity_rows(block.metadata.get("subagents"))
     main_phase = str(main_activity.get("phase") or "").strip().lower()
     derived_label = _main_agent_activity_label(rows)
@@ -625,6 +624,9 @@ def _render_background_activity(
             "TAKEN_OVER",
         }
     )
+    ended_at = _safe_render_float(main_activity.get("ended_at"))
+    elapsed_end = ended_at if focused_terminal and ended_at > 0 else context.now
+    elapsed = max(0, int(elapsed_end - started_at)) if started_at and elapsed_end else 0
     main_style = (
         "class:tui-error"
         if main_phase == "failed" or focused_status in {"FAILED", "TIMEOUT", "CHANNEL_ERROR"}
@@ -2319,7 +2321,7 @@ def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> Form
 # 函数用途: 生成当前鼠标模式下的历史浏览与 F6 备用模式提示。
 def _history_mouse_hint(context: TuiRenderContext) -> str:
     if context.mouse_capture_enabled:
-        return "滚轮/PgUp/Ctrl+Home 历史 · F6 原生复制"
+        return "滚轮/PgUp/Ctrl+Home 历史 · 拖选/右键复制 · F6 原生模式"
     return "PgUp/Ctrl+Home 历史 · F6 恢复滚轮"
 
 

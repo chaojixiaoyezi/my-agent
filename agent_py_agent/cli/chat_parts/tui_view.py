@@ -63,6 +63,13 @@ def _right_copy_mouse_transition(
         and mouse_event.button == MouseButton.RIGHT
     ):
         return True, True, True
+    if (
+        mouse_event.event_type == MouseEventType.MOUSE_UP
+        and mouse_event.button == MouseButton.RIGHT
+    ):
+        # 部分 SSH/tmux/终端组合只转发右键 release；没有对应 down 时也要
+        # 完成一次复制，完整 down+up 序列仍由 armed 去重。
+        return (not armed), True, False
     if not armed:
         return False, False, False
     if mouse_event.event_type == MouseEventType.MOUSE_UP or (

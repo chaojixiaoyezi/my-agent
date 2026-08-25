@@ -9,6 +9,7 @@ import base64
 import io
 import json
 import tempfile
+import threading
 import types
 from pathlib import Path
 
@@ -19,6 +20,11 @@ from agent_py_agent.agent.tooling._filesystem_patch import ApplyPatchTool
 from agent_py_agent.agent.tooling._filesystem_read import ReadFileTool
 from agent_py_agent.agent.tooling._filesystem_search import SearchTextTool
 from agent_py_agent.agent.tooling._filesystem_write import WriteFileTool
+from agent_py_agent.agent.tooling.cancellation import (
+    CancellationToken,
+    ToolCancelled,
+    bind_cancellation_token,
+)
 from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
 from agent_py_agent.tests.support.xlsx_fixtures import write_xlsx_fixture
 
@@ -909,6 +915,131 @@ def test_search_text_streams_rg_and_stops_after_page(tmp_path: Path, monkeypatch
     assert "large.log:5" in result.output
     assert "next_offset=5" in result.output
     assert processes and processes[0].terminated
+
+
+def test_search_text_streams_python_fallback_and_stops_after_page(
+    tmp_path: Path,
+    monkeypatch,
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    for index in range(20):
+        content = "needle\n" if index < 2 else "noise\n"
+        (workspace / f"{index:02d}.txt").write_text(content, encoding="utf-8")
+    tool = SearchTextTool(workspace, max_matches=5)
+    admitted: list[int] = []
+    original = search_mod._admit_fallback_candidate
+
+    def record_admission(state):
+        accepted = original(state)
+        if accepted:
+            admitted.append(state.candidates)
+        return accepted
+
+    monkeypatch.setattr(search_mod.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(search_mod, "_admit_fallback_candidate", record_admission)
+
+    result = tool.execute({"query": "needle", "limit": 1})
+
+    assert result.ok
+    assert "00.txt:1" in result.output
+    assert "next_offset=1" in result.output
+    assert admitted == [1, 2]
+
+
+def test_search_text_python_fallback_reports_incomplete_scan_limit(
+    tmp_path: Path,
+    monkeypatch,
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    for index in range(4):
+        (workspace / f"{index}.txt").write_text("noise\n", encoding="utf-8")
+    tool = SearchTextTool(workspace, max_matches=5)
+    monkeypatch.setattr(search_mod.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(search_mod, "_FALLBACK_SCAN_MAX_FILES", 2)
+
+    result = tool.execute({"query": "needle"})
+
+    assert result.ok
+    assert "搜索未完整覆盖" in result.output
+    assert result.result_envelope["page_window"]["complete"] is False
+    assert result.result_envelope["page_window"]["scan_limited"] is True
+    assert result.result_envelope["page_window"]["scanned_files"] == 2
+    assert result.result_envelope["page_window"]["scan_limit_reason"] == "file_limit"
+
+
+def test_search_text_rg_reader_stops_when_tool_token_is_cancelled(
+    tmp_path: Path,
+    monkeypatch,
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "a.txt").write_text("needle\n", encoding="utf-8")
+    tool = SearchTextTool(workspace, max_matches=5)
+    process_started = threading.Event()
+    process_stopped = threading.Event()
+
+    class BlockingStdout:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            process_started.set()
+            process_stopped.wait(2.0)
+            raise StopIteration
+
+    class FakePopen:
+        def __init__(self, *_args, **_kwargs):
+            self.stdout = BlockingStdout()
+            self.returncode = None
+
+        def wait(self, timeout=None):
+            process_stopped.wait(timeout)
+            return self.returncode if self.returncode is not None else 0
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+            process_stopped.set()
+
+        def kill(self):
+            self.returncode = -9
+            process_stopped.set()
+
+    monkeypatch.setattr(search_mod.shutil, "which", lambda _name: "/usr/bin/rg")
+    monkeypatch.setattr(
+        search_mod,
+        "subprocess",
+        types.SimpleNamespace(
+            Popen=FakePopen,
+            PIPE=object(),
+            DEVNULL=None,
+            TimeoutExpired=TimeoutError,
+        ),
+    )
+    token = CancellationToken()
+    errors: list[BaseException] = []
+
+    def run_search() -> None:
+        try:
+            with bind_cancellation_token(token):
+                tool.execute({"query": "needle"})
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=run_search)
+    thread.start()
+    assert process_started.wait(1.0)
+    token.cancel("user stop")
+    thread.join(1.0)
+
+    assert not thread.is_alive()
+    assert process_stopped.is_set()
+    assert len(errors) == 1
+    assert isinstance(errors[0], ToolCancelled)
 
 
 def test_search_text_treats_rg_no_matches_as_empty_result(tmp_path: Path, monkeypatch):

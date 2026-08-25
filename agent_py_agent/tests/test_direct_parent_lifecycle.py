@@ -169,6 +169,8 @@ def test_resumed_parent_context_contains_direct_child_results_and_requests(tmp_p
     child = manager.load(children[0].id)
     child.failure_type = "capability_request"
     child.latest_summary = "需要读取共享素材"
+    child.result = "已完成调研，正式结果位于 /tmp/shared/report.md。"
+    child.agent_run_final_report_md = "/tmp/internal/final_report.md"
     child.runner_result_json = "/tmp/result.json"
     child.output_json = "/tmp/output.json"
     child.capability_requests = [
@@ -189,8 +191,13 @@ def test_resumed_parent_context_contains_direct_child_results_and_requests(tmp_p
     prompt_payload = runner_context_summary_payload(context)["direct_children"]
 
     assert payload["attention_run_ids"] == [child.id]
-    assert payload["items"][0]["runner_result_json"] == child.runner_result_json
-    assert payload["items"][0]["output_json"] == child.output_json
+    assert payload["schema_version"] == "direct-children-context.v2"
+    assert payload["items"][0]["completion_message"] == child.result
+    assert payload["items"][0]["final_report_ref"] == child.agent_run_final_report_md
+    assert "runner_result_json" not in payload["items"][0]
+    assert "output_json" not in payload["items"][0]
+    assert prompt_payload["items"][0]["completion_message"] == child.result
+    assert "runner_result_json" not in prompt_payload["items"][0]
     assert prompt_payload["items"][0]["open_capability_requests"][0] == {
         "request_id": "cap-1",
         "capability_type": "generic",

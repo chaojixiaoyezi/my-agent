@@ -462,6 +462,37 @@ def test_right_click_copies_wide_selection_once_and_keeps_highlight() -> None:
     assert any("class:tui-selection" in style for style, _text, *_ in selected_line)
 
 
+def test_right_release_without_down_still_copies_existing_selection_once() -> None:
+    store = TuiStateStore()
+    seq = TuiEventSequencer("selection-right-release-only", clock=lambda: 5.97)
+    store.publish(
+        seq.emit(
+            "assistant_completed",
+            "completed",
+            "assistant-selection-right-release-only",
+            {"text": "远端右键复制"},
+        )
+    )
+    control = TuiTranscriptControl(_provider(store))
+    control.create_content(40, 5)
+    control.mouse_handler(
+        MouseEvent(Point(x=2, y=0), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    )
+    control.mouse_handler(
+        MouseEvent(Point(x=7, y=0), MouseEventType.MOUSE_UP, MouseButton.LEFT, frozenset())
+    )
+    copied: list[str] = []
+    control.set_copy_on_select(copied.append)
+
+    result = control.mouse_handler(
+        MouseEvent(Point(x=5, y=0), MouseEventType.MOUSE_UP, MouseButton.RIGHT, frozenset())
+    )
+
+    assert result is None
+    assert copied == ["远端右键复制"]
+    assert control.selected_text() == "远端右键复制"
+
+
 def test_resize_clears_viewport_selection() -> None:
     store = TuiStateStore()
     seq = TuiEventSequencer("selection-resize", clock=lambda: 6.0)

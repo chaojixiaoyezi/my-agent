@@ -96,11 +96,14 @@ def _direct_child_prompt_row(item: dict[str, object]) -> dict[str, object]:
             "failure_type",
             "goal",
             "latest_summary",
+            "completion_schema_version",
+            "completion_message",
+            "completion_message_truncated",
+            "completion_message_original_tokens",
+            "final_report_ref",
+            "declared_output_refs",
             "artifact_refs",
             "evidence_refs",
-            "runner_result_json",
-            "output_json",
-            "response_file",
         ],
     )
     requests = item.get("open_capability_requests")

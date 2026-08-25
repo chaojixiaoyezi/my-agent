@@ -154,11 +154,6 @@ def _summary(task: Any, result: Any, status: str) -> str:
 # read-only delivery content; consumers must never infer status from the prose.
 # 函数用途: 组装子代理完成通知的结构化状态、最终回复预览和精确交付位置。
 def _metadata(task: Any, result: Any, output_payload: dict[str, object]) -> dict[str, object]:
-    completion_message, completion_truncated, completion_tokens = _completion_message(
-        task,
-        result,
-        output_payload,
-    )
     payload = {
         "task_id": str(getattr(task, "id", "") or getattr(result, "run_id", "") or ""),
         "status": str(getattr(result, "status", "") or getattr(task, "status", "") or ""),
@@ -170,18 +165,8 @@ def _metadata(task: Any, result: Any, output_payload: dict[str, object]) -> dict
         "failure_type": str(getattr(task, "failure_type", "") or ""),
         "runner_result_json": str(getattr(result, "result_json", "") or getattr(task, "runner_result_json", "") or ""),
         "output_json": str(getattr(task, "output_json", "") or ""),
-        "artifact_refs": list(output_payload.get("artifacts") or []) if isinstance(output_payload.get("artifacts"), list) else [],
-        "completion_schema_version": "subagent-completion.v1",
-        "completion_message": completion_message,
-        "final_report_ref": current_model_ref(
-            getattr(task, "agent_run_final_report_md", "")
-            or getattr(task, "debrief_file", "")
-        ),
-        "declared_output_refs": declared_output_refs(task)[:_COMPLETION_EVIDENCE_REF_LIMIT],
+        **completion_handoff_payload(task, result, output_payload),
     }
-    if completion_truncated:
-        payload["completion_message_truncated"] = True
-        payload["completion_message_original_tokens"] = completion_tokens
     remaining = _service_window_remaining(task)
     if remaining > 0:
         payload["service_window_incomplete"] = True
@@ -215,6 +200,42 @@ def _metadata(task: Any, result: Any, output_payload: dict[str, object]) -> dict
                 "worker_key": str(attrs.get(AUDIT_SOURCE_WORKER_KEY_ATTR) or ""),
             }
         )
+    return payload
+
+
+# LLM: Root wakes and recursively resumed parents must consume one identical
+# 会话运行时 child handoff. Status remains external; this payload carries only
+# bounded final content and canonical refs, never completion authority.
+# 函数用途: 生成子代理结束后的统一交接包，让直属父级直接看到最终回复和交付位置而不用猜目录。
+def completion_handoff_payload(
+    task: Any,
+    result: Any | None = None,
+    output_payload: dict[str, object] | None = None,
+) -> dict[str, object]:
+    selected_result = result if result is not None else task
+    selected_output = output_payload if isinstance(output_payload, dict) else {}
+    completion_message, completion_truncated, completion_tokens = _completion_message(
+        task,
+        selected_result,
+        selected_output,
+    )
+    payload: dict[str, object] = {
+        "completion_schema_version": "subagent-completion.v1",
+        "completion_message": completion_message,
+        "final_report_ref": current_model_ref(
+            getattr(task, "agent_run_final_report_md", "")
+            or getattr(task, "debrief_file", "")
+        ),
+        "declared_output_refs": declared_output_refs(task)[:_COMPLETION_EVIDENCE_REF_LIMIT],
+        "artifact_refs": (
+            list(selected_output.get("artifacts") or [])
+            if isinstance(selected_output.get("artifacts"), list)
+            else list(getattr(task, "artifact_refs", []) or [])[:_COMPLETION_EVIDENCE_REF_LIMIT]
+        ),
+    }
+    if completion_truncated:
+        payload["completion_message_truncated"] = True
+        payload["completion_message_original_tokens"] = completion_tokens
     return payload
 
 
@@ -416,4 +437,8 @@ def _record_wake_error(manager: Any, task: Any, result: Any, exc: BaseException)
         _LOGGER.warning("subagent runner completion wake error could not be saved: %s", report)
 
 
-__all__ = ["notify_parent_on_capability_request", "notify_parent_on_runner_result"]
+__all__ = [
+    "completion_handoff_payload",
+    "notify_parent_on_capability_request",
+    "notify_parent_on_runner_result",
+]

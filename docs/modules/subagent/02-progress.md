@@ -1,5 +1,22 @@
 # Subagent Progress
 
+## 2026-08-25 终态交接、活动收口与宽搜索止损（本地候选）
+
+- 对照 会话运行时 `AgentStatus::Completed(last_agent_message)` 后，递归父级的
+  `direct-children-context.v2` 与根会话 completion wake 统一携带同一个
+  `subagent-completion.v1`：有界 `completion_message`、`final_report_ref`、显式
+  `declared_output_refs` 和 artifact refs。父模型 prompt 不再暴露内部
+  `runner_result_json/output_json/response_file`，因此正常汇总应直接消费 child 最终回复，不能猜
+  `child_outputs` 或遍历受管状态目录。
+- `search_text` 没有 `rg` 时改为流式 Python 遍历；命中页满足后立即返回，不再先物化整棵文件树。
+  后备扫描最多 20,000 个文件或 10 秒，触发后返回 typed `scan_limited` 与中文“未完整覆盖”提示，要求缩小
+  `path/file_glob` 或安装 `rg`；`rg` 子进程注册同一 cancellation token 的终止回调。
+- child 详情的 canonical 终态优先于陈旧 `current_tool/current_step`，终态到达即封口遗留 thinking/tool/
+  Compact 块、停止动画并按 `ended_at` 冻结耗时。TUI 鼠标模式继续同时保留滚轮历史和应用内拖选复制，
+  并兼容只转发右键 release 的 SSH/tmux/终端组合。
+- 200 项直接 focused 已通过；仍须部署 `.7` 唯一 Gateway 后用公开 tmux 做真实搜索停止、完成 child 回看、
+  中文拖选/右键复制与历史滚轮验收，未完成前不标记真机通过。
+
 ## 2026-08-24 子代理插话排队与公开回复（本地候选）
 
 - 现场回执证明用户消息已经进入 exact child guidance 消息箱并被 provider 消费；缺陷是

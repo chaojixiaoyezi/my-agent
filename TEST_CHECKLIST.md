@@ -2,13 +2,21 @@
 
 ## 子代理 TUI 插话与容量
 
+- [ ] `.7` 唯一 Gateway 的 fresh TUI 中，完成 child 即使留下旧 `current_tool` 也只显示终态，详情工具/思考
+  动画全部封口，耗时冻结在 canonical `ended_at`；父级收到 `completion_message` 和精确 refs 后不再搜索
+  `child_outputs` 或内部 runner 文件。
+- [ ] 没有 `rg` 的远端宽目录 `search_text` 能被 `/stop` 及时打断；默认 content 页命中后不扫描余下目录，
+  无命中超出 20,000 文件/10 秒时明确标注 `scan_limited`，不得显示成完整“没有找到”。
+- [ ] 同一个 fresh TUI 默认鼠标模式下，滚轮/PgUp/Ctrl+Home 历史、中文左键拖选自动复制和右键重复复制
+  同时可用；完整右键 down/up 与仅 release 两种序列都只复制一次，选区高亮不被清除。
+
 - [x] 运行 child 的用户消息 receipt 带 exact `expected_turn_id`，reserve、provider submission 与 consume
   使用同一 attempt；不得再出现 `guidance submission reservation mismatch`。
 - [x] child 没有 pending/running attempt 时，入口明确拒绝、用户输入保留且 guidance message box 零新增。
 - [x] 默认 root 一次可原子创建 8 名 child，`per_call_cap=0`、session cap=8；第 9 名整批拒绝，终态释放后
   可继续创建，历史累计允许超过 8。
 - [x] root 与 child 在默认 终端交互 鼠标模式可直接用物理滚轮查看历史，并继续支持 `PgUp/Ctrl+Home`；
-  常驻 footer 显示 `F6 原生复制`，切换后改为 `F6 恢复滚轮`。
+  常驻 footer 显示应用内“拖选/右键复制”和 `F6 原生模式`，切换后改为 `F6 恢复滚轮`。
 - [x] 历史累计 child 超过八项时，`↑/↓` 选择窗口必须滚入 exact 选中项并显示 `›`；`Enter` 进入的 run id
   与屏幕高亮一致，renderer 的八行裁剪不得把选中项藏在省略提示后。
 

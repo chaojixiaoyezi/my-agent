@@ -145,6 +145,15 @@ received -> normalized -> validated -> authorized
 - 并发/取消：无冲突只读并行、写冲突/审批屏障、停止后不再启动。
 - 普通中文真实模型场景与完整静态/pytest/发布门。
 
+### 2026-08-25 `search_text` 后备扫描存活边界
+
+- 会话运行时 的仓库检索依赖可取消的进程工具；本项目优先使用 `rg`，并把该进程绑定到当前 ToolCall 的统一
+  cancellation token。`/stop` 只取消当前 turn，不停止 Gateway。
+- 跨平台 Python fallback 必须边遍历边搜索，页命中预算满足即返回；禁止先建立全目录候选列表。
+- fallback 的 20,000 文件/10 秒是客观存活围栏。触发时 ToolResult 保留已找到内容，同时将
+  `page_window.complete=false`、`scan_limited=true` 和原因显式返回；自然语言只解释事实，不把部分扫描冒充
+  完整无结果。
+
 ## Acceptance Criteria / 验收标准
 
 - [x] AC-001: FR-001/002，工具定义、Schema 和运行对象各只有一个当前权威入口。

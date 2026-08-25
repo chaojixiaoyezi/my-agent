@@ -980,7 +980,7 @@ def _public_metadata(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 _PUBLIC_MAIN_ACTIVITY_FIELDS = frozenset(
-    {"task_id", "phase", "activity", "started_at", "updated_at"}
+    {"task_id", "phase", "activity", "started_at", "updated_at", "ended_at"}
 )
 
 

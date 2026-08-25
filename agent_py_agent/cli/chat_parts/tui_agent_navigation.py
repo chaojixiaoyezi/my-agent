@@ -269,6 +269,7 @@ class TuiAgentNavigationState:
             "activity": str(row.get("activity") or "").strip(),
             "started_at": row.get("created_at", 0.0),
             "updated_at": row.get("updated_at", 0.0),
+            "ended_at": row.get("ended_at", 0.0),
             **(
                 {"context_usage": dict(raw_agent["context_usage"])}
                 if isinstance(raw_agent.get("context_usage"), Mapping)

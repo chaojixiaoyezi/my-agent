@@ -17,6 +17,7 @@ from .models import (
     task_has_ended_status,
     task_status_in,
 )
+from .runner_completion_wake import completion_handoff_payload
 
 DIRECT_CHILD_WAIT_ATTR = "direct_child_wait"
 _WAIT_SCHEMA_VERSION = "direct-child-wait.v1"
@@ -178,7 +179,7 @@ def direct_children_context_payload(manager: Any, parent_run_id: str) -> dict[st
         status = str(getattr(item, "status", "") or "UNKNOWN").strip().upper()
         counts[status] = counts.get(status, 0) + 1
     return {
-        "schema_version": "direct-children-context.v1",
+        "schema_version": "direct-children-context.v2",
         "parent_run_id": parent_id,
         "total": len(children),
         "counts": counts,
@@ -271,6 +272,7 @@ def _direct_child_context_row(task: object) -> dict[str, object]:
         )
         if len(requests) >= _CONTEXT_REQUEST_LIMIT:
             break
+    handoff = completion_handoff_payload(task)
     return {
         "run_id": str(getattr(task, "id", "") or ""),
         "status": str(getattr(task, "status", "") or ""),
@@ -282,9 +284,7 @@ def _direct_child_context_row(task: object) -> dict[str, object]:
         )[:600],
         "artifact_refs": list(getattr(task, "artifact_refs", []) or [])[:8],
         "evidence_refs": list(getattr(task, "evidence_refs", []) or [])[:8],
-        "runner_result_json": str(getattr(task, "runner_result_json", "") or ""),
-        "output_json": str(getattr(task, "output_json", "") or ""),
-        "response_file": str(getattr(task, "runner_response_file", "") or ""),
+        **handoff,
         "open_capability_requests": requests,
     }
 

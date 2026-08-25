@@ -283,6 +283,8 @@ def test_conversation_agent_view_reads_exact_child_state_and_final_reply(
         status="DONE",
         description="设计三个关卡",
         goal=delegated_goal,
+        current_tool="web_fetch",
+        current_step="仍在抓取网页",
         attributes={"model_visible_context_usage": usage},
         ended_at=22.0,
     )
@@ -322,6 +324,7 @@ def test_conversation_agent_view_reads_exact_child_state_and_final_reply(
     assert view["agent"]["goal"] == delegated_goal
     assert view["agent"]["context_usage"]["current_tokens"] == 12_300
     assert view["agent"]["compact_count"] == 1
+    assert view["agent"]["activity"] == "已完成"
     assert [row["run_id"] for row in view["children"]] == ["grandchild"]
     assert view["final_response"] == "已提交关卡设计。"
 

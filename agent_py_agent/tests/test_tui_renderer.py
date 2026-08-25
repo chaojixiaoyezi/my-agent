@@ -194,7 +194,7 @@ def test_full_frame_matches_reference_message_geometry_at_120_columns() -> None:
     assert user_styles == ["class:tui-user-marker", "class:tui-user-text", "class:tui-user-fill"]
     assert frame.footer == ((
         "class:tui-muted",
-        "  ? 快捷键 · 滚轮/PgUp/Ctrl+Home 历史 · F6 原生复制",
+        "  ? 快捷键 · 滚轮/PgUp/Ctrl+Home 历史 · 拖选/右键复制 · F6 原生模式",
     ),)
 
 

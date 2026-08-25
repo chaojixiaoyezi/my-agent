@@ -30,6 +30,7 @@ def _row(run_id: str, *, parent: str = "", status: str = "RUNNING") -> dict[str,
         "compact_count": 0,
         "created_at": 10.0,
         "updated_at": 20.0,
+        "ended_at": 0.0,
     }
 
 
@@ -204,11 +205,34 @@ def test_child_view_applies_live_events_todo_context_children_and_final() -> Non
 
     terminal = {
         **payload,
-        "agent": {**payload["agent"], "status": "DONE", "activity": "已完成"},
+        "agent": {
+            **payload["agent"],
+            "status": "DONE",
+            "activity": "已完成",
+            "ended_at": 22.0,
+        },
         "terminal": True,
         "children": [],
         "task_progress_items": [],
-        "transcript_events": [],
+        "transcript_events": [
+            {
+                "schema": BACKGROUND_TRANSCRIPT_SCHEMA,
+                "seq": 7,
+                "task_id": "child-a",
+                "request_id": request_id,
+                "kind": "tool_started",
+                "phase": "started",
+                "block_id": f"{request_id}:tool:2:0",
+                "payload": {
+                    "tool": "web_fetch",
+                    "round": 2,
+                    "call_index": 0,
+                    "phase": "started",
+                    "detail": "https://example.test",
+                },
+            }
+        ],
+        "event_cursor": 7,
         "final_response": "子代理已完成并提交结果。",
     }
     assert navigation.apply_agent_view("child-a", terminal) is True
@@ -218,7 +242,19 @@ def test_child_view_applies_live_events_todo_context_children_and_final() -> Non
         block.role == "assistant" and "提交结果" in block.text
         for block in snapshot.stable_blocks
     )
+    assert not any(block.role == "tool" for block in snapshot.active_blocks)
     assert navigation.active_runtime().needs_periodic_refresh() is False
+    frame = render_tui_snapshot(
+        snapshot,
+        TuiRenderContext(
+            width=100,
+            now=1_000.0,
+            focused_agent_run_id="child-a",
+            focused_agent_name="child-a",
+            focused_agent_status="DONE",
+        ),
+    )
+    assert any("0:12" in fragments_text(line) for line in frame.transcript_lines)
 
 
 def test_completed_root_roster_stays_selectable_but_does_not_animate() -> None:
@@ -282,7 +318,7 @@ def test_child_footer_makes_back_and_escape_semantics_explicit() -> None:
         ),
     )
     assert fragments_text(running_frame.footer).strip() == (
-        "Ctrl+G 返回 · Esc 停止 · 滚轮/PgUp/Ctrl+Home 历史 · F6 原生复制"
+        "Ctrl+G 返回 · Esc 停止 · 滚轮/PgUp/Ctrl+Home 历史 · 拖选/右键复制 · F6 原生模式"
     )
     running_notice = render_tui_snapshot(
         running.store.snapshot(),
@@ -313,7 +349,7 @@ def test_child_footer_makes_back_and_escape_semantics_explicit() -> None:
         ),
     )
     assert fragments_text(terminal_frame.footer).strip() == (
-        "Ctrl+G 返回 · 已结束，只读 · 滚轮/PgUp/Ctrl+Home 历史 · F6 原生复制"
+        "Ctrl+G 返回 · 已结束，只读 · 滚轮/PgUp/Ctrl+Home 历史 · 拖选/右键复制 · F6 原生模式"
     )
 
 
@@ -328,5 +364,5 @@ def test_selected_child_footer_overrides_root_running_hint() -> None:
     )
 
     assert fragments_text(frame.footer).strip() == (
-        "↑↓ 选择 · Enter 查看 · 滚轮/PgUp/Ctrl+Home 历史 · F6 原生复制 · Esc 停止主代理"
+        "↑↓ 选择 · Enter 查看 · 滚轮/PgUp/Ctrl+Home 历史 · 拖选/右键复制 · F6 原生模式 · Esc 停止主代理"
     )

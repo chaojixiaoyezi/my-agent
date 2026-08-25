@@ -203,6 +203,10 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   `work/child_outputs/<run_id>/<slot>-<slug>.md`。唯一 rebind 读取入口继续保留，避免恢复时路径相撞；但
   context bundle、完成信封和父级 `expected_outputs` 全部隐藏该内部 ref。真正的用户文件、artifact 和
   显式共享引用不享受隐藏或冲突例外。
+- 2026-08-25 起，根 wake 与递归父级恢复上下文共用 `subagent-completion.v1` 交接内容；
+  `direct-children-context.v2` 直接给出有界最终回复和精确交付 refs。内部
+  `runner_result.json`、`output.json`、`runner_response.md` 仍可供宿主审计/恢复，但不再进入父模型的正常
+  prompt。该设计对应 会话运行时 把 child `last_agent_message` 随 terminal status 交给父级，而不是让父级猜目录。
 
 ## 2026-07-29 后台 claim 与当前执行轮
 

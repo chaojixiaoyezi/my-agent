@@ -8,6 +8,7 @@ import os
 import shutil
 import signal
 import subprocess
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from itertools import islice
@@ -38,7 +39,7 @@ from ._filesystem_search_models import (
     search_request_from_params,
     slice_hits,
 )
-from .cancellation import raise_if_cancelled
+from .cancellation import raise_if_cancelled, register_cancellation_callback
 from .filesystem_artifact_guard import (
     is_tool_output_artifact_path,
     mark_tool_output_artifact_result,
@@ -99,9 +100,22 @@ _SEARCH_TEXT_EXAMPLES = [
 
 
 _LOGGER = logging.getLogger(__name__)
+_FALLBACK_SCAN_MAX_FILES = 20_000
+_FALLBACK_SCAN_MAX_SECONDS = 10.0
 
 class MalformedRgOutput(Exception):
     pass
+
+
+# LLM: Python fallback search is a bounded streaming walk; this state is local
+# to one invocation and may affect result completeness, never path authority.
+# 类用途: 记录没有 rg 时本轮已扫描多少文件，以及是否触发安全上限。
+@dataclass
+class SearchScanState:
+    started_at: float
+    candidates: int = 0
+    limited: bool = False
+    limit_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -215,6 +229,9 @@ class SearchTextTool(FileSystemTool):
             ))
         return self._search_target(target, request)
 
+    # LLM: One search invocation prefers cancellable rg and otherwise owns one
+    # bounded fallback scan state whose incompleteness must reach the envelope.
+    # 函数用途: 在已解析的文件或目录中执行搜索，并如实标出后备扫描是否完整。
     def _search_target(self, target: Path, request: SearchRequest) -> ToolHandlerOutcome:
         try:
             matcher = SearchMatcher.from_request(request)
@@ -223,26 +240,44 @@ class SearchTextTool(FileSystemTool):
             # (retryable=False)会让模型放弃整个搜索而非修正 query/pattern。
             return ToolHandlerOutcome("search_text", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
         if request.output_mode == "count":
+            scan_state: SearchScanState | None = None
             counts = _collect_counts_with_rg(self, target, request)
             if counts is None:
-                counts = self._collect_counts(target, request, matcher)
+                scan_state = SearchScanState(started_at=time.monotonic())
+                counts = self._collect_counts(target, request, matcher, scan_state)
             result = ToolHandlerOutcome(
                 "search_text",
                 True,
-                render_match_counts(counts, request),
-                result_envelope={"page_window": self._page_window(target, request, total_items=len(counts))},
+                _with_scan_notice(render_match_counts(counts, request), scan_state),
+                result_envelope={
+                    "page_window": self._page_window(
+                        target,
+                        request,
+                        total_items=len(counts),
+                        scan_state=scan_state,
+                    )
+                },
             )
             return _search_result_with_source_projection(result, target, counts)
+        scan_state = None
         hits = _collect_hits_with_rg(self, target, request)
         if hits is None:
-            hits = self._collect_hits(target, request, matcher)
+            scan_state = SearchScanState(started_at=time.monotonic())
+            hits = self._collect_hits(target, request, matcher, scan_state)
         if request.output_mode == "files_with_matches":
             total_items = len(dict.fromkeys(hit.rel for hit in hits))
             result = ToolHandlerOutcome(
                 "search_text",
                 True,
-                render_files_with_matches(hits, request),
-                result_envelope={"page_window": self._page_window(target, request, total_items=total_items)},
+                _with_scan_notice(render_files_with_matches(hits, request), scan_state),
+                result_envelope={
+                    "page_window": self._page_window(
+                        target,
+                        request,
+                        total_items=total_items,
+                        scan_state=scan_state,
+                    )
+                },
             )
             return _search_result_with_source_projection(
                 result,
@@ -253,8 +288,15 @@ class SearchTextTool(FileSystemTool):
             result = ToolHandlerOutcome(
                 "search_text",
                 True,
-                render_line_numbers(hits, request),
-                result_envelope={"page_window": self._page_window(target, request, total_items=len(hits))},
+                _with_scan_notice(render_line_numbers(hits, request), scan_state),
+                result_envelope={
+                    "page_window": self._page_window(
+                        target,
+                        request,
+                        total_items=len(hits),
+                        scan_state=scan_state,
+                    )
+                },
             )
             return _search_result_with_source_projection(
                 result,
@@ -264,8 +306,15 @@ class SearchTextTool(FileSystemTool):
         result = ToolHandlerOutcome(
             "search_text",
             True,
-            self._render_content_hits(hits, request),
-            result_envelope={"page_window": self._page_window(target, request, total_items=len(hits))},
+            _with_scan_notice(self._render_content_hits(hits, request), scan_state),
+            result_envelope={
+                "page_window": self._page_window(
+                    target,
+                    request,
+                    total_items=len(hits),
+                    scan_state=scan_state,
+                )
+            },
         )
         return _search_result_with_source_projection(
             result,
@@ -273,10 +322,19 @@ class SearchTextTool(FileSystemTool):
             (hit.rel for hit in hits),
         )
 
-    def _iter_search_candidates(self, target: Path, request: SearchRequest) -> list[Path]:
+    # LLM: Candidate discovery is streaming and cancellation-aware; callers may
+    # stop after their page budget without materializing the remaining tree.
+    # 函数用途: 逐个产出可搜索文件，并在后备扫描达到存活上限时停止。
+    def _iter_search_candidates(
+        self,
+        target: Path,
+        request: SearchRequest,
+        scan_state: SearchScanState,
+    ) -> Iterable[Path]:
         if target.is_file():
-            return [target]
-        candidates: list[Path] = []
+            if _admit_fallback_candidate(scan_state):
+                yield target
+            return
         for root, dirnames, filenames in os.walk(target):
             raise_if_cancelled()
             dirnames.sort()
@@ -286,18 +344,29 @@ class SearchTextTool(FileSystemTool):
             items = [item for item in items if not item.is_symlink()]
             if not request.include_ignored:
                 items = [item for item in items if not path_has_ignored_part(item, target)]
-            candidates.extend(items)
-        return candidates
+            for item in items:
+                if not _admit_fallback_candidate(scan_state):
+                    return
+                yield item
 
     def _filter_search_dirs(self, dirnames: list[str], request: SearchRequest) -> None:
         if not request.include_ignored:
             dirnames[:] = [name for name in dirnames if name not in _COMMON_FILE_DISCOVERY_IGNORES]
 
-    def _collect_hits(self, target: Path, request: SearchRequest, matcher: SearchMatcher) -> list[SearchHit]:
+    # LLM: Hit collection consumes only enough streamed candidates for one
+    # requested page plus the has-more sentinel.
+    # 函数用途: 从 Python 后备遍历中收集当前分页需要的文本命中。
+    def _collect_hits(
+        self,
+        target: Path,
+        request: SearchRequest,
+        matcher: SearchMatcher,
+        scan_state: SearchScanState,
+    ) -> list[SearchHit]:
         hits: list[SearchHit] = []
         seen_files: set[str] = set()
         hit_budget = request.offset + request.limit + 1
-        for item in self._iter_search_candidates(target, request):
+        for item in self._iter_search_candidates(target, request, scan_state):
             raise_if_cancelled()
             if not self._should_search_item(item, request):
                 continue
@@ -325,9 +394,18 @@ class SearchTextTool(FileSystemTool):
                 return True
         return False
 
-    def _collect_counts(self, target: Path, request: SearchRequest, matcher: SearchMatcher) -> dict[str, int]:
+    # LLM: Count mode still obeys the same bounded fallback state; a partial
+    # count is explicitly marked incomplete by the caller.
+    # 函数用途: 统计各文件命中数，同时遵守后备扫描的文件数和时间上限。
+    def _collect_counts(
+        self,
+        target: Path,
+        request: SearchRequest,
+        matcher: SearchMatcher,
+        scan_state: SearchScanState,
+    ) -> dict[str, int]:
         counts: dict[str, int] = {}
-        for item in self._iter_search_candidates(target, request):
+        for item in self._iter_search_candidates(target, request, scan_state):
             raise_if_cancelled()
             if not self._should_search_item(item, request):
                 continue
@@ -385,20 +463,69 @@ class SearchTextTool(FileSystemTool):
         display = self.display_path(item)
         return fnmatch.fnmatch(item.name, file_glob) or fnmatch.fnmatch(display, file_glob)
 
-    def _page_window(self, target: Path, request: SearchRequest, *, total_items: int) -> dict[str, int | bool | str]:
+    # LLM: Pagination completeness combines hit paging with fallback traversal
+    # completeness; a scan fence can never produce complete=true.
+    # 函数用途: 生成搜索分页事实，并在后备扫描提前停止时附上结构化原因。
+    def _page_window(
+        self,
+        target: Path,
+        request: SearchRequest,
+        *,
+        total_items: int,
+        scan_state: SearchScanState | None = None,
+    ) -> dict[str, int | bool | str]:
         returned = max(0, min(request.limit, total_items - request.offset))
         has_more = total_items > request.offset + request.limit
-        return {
+        scan_limited = bool(scan_state and scan_state.limited)
+        payload: dict[str, int | bool | str] = {
             "kind": "offset_page",
             "tool": "search_text",
             "source_path": self.display_path(target),
             "offset": request.offset,
             "limit": request.limit,
             "returned": returned,
-            "next_offset": request.offset + returned if has_more else 0,
-            "complete": not has_more,
+            "next_offset": request.offset + returned if has_more and not scan_limited else 0,
+            "complete": not has_more and not scan_limited,
             "output_mode": request.output_mode,
         }
+        if scan_limited and scan_state is not None:
+            payload.update(
+                {
+                    "scan_limited": True,
+                    "scanned_files": scan_state.candidates,
+                    "scan_limit_reason": scan_state.limit_reason,
+                }
+            )
+        return payload
+
+
+# LLM: The fallback limit is an objective liveness fence, not a no-match claim;
+# callers must expose an incomplete result and ask the model to narrow scope.
+# 函数用途: 在 Python 后备搜索扫描文件过多或耗时过久前停止继续遍历。
+def _admit_fallback_candidate(state: SearchScanState) -> bool:
+    if state.candidates >= _FALLBACK_SCAN_MAX_FILES:
+        state.limited = True
+        state.limit_reason = "file_limit"
+        return False
+    if time.monotonic() - state.started_at >= _FALLBACK_SCAN_MAX_SECONDS:
+        state.limited = True
+        state.limit_reason = "time_limit"
+        return False
+    state.candidates += 1
+    return True
+
+
+# LLM: A bounded fallback result must never masquerade as complete coverage;
+# this notice is derived solely from typed scan state.
+# 函数用途: 在后备搜索提前停止时追加可操作提示，要求缩小目录或使用 rg。
+def _with_scan_notice(text: str, state: SearchScanState | None) -> str:
+    if state is None or not state.limited:
+        return text
+    return (
+        f"{text}\n\n"
+        f"搜索未完整覆盖：Python 后备扫描已在 {state.candidates} 个文件处停止"
+        f"（{state.limit_reason}）。请缩小 path/file_glob，或安装 rg 后重试。"
+    )
 
 
 def _search_result_with_source_projection(
@@ -474,18 +601,25 @@ def _item_relative_path(tool: SearchTextTool, item: Path, safe_item: Path) -> st
     return tool.display_path(safe_item if safe_item.is_absolute() else item)
 
 
+# LLM: rg lifetime is registered on the shared cancellation token so /stop can
+# terminate a blocked stdout reader instead of waiting for process completion.
+# 函数用途: 使用 rg 流式收集命中，并在当前工具调用取消时结束子进程。
 def _collect_hits_with_rg(tool: SearchTextTool, target: Path, request: SearchRequest) -> list[SearchHit] | None:
     process = _start_rg_process(tool, target, request)
     if process is None:
         return None
-    return _rg_hits_from_process(tool, process, request)
+    with register_cancellation_callback(lambda: _stop_process(process)):
+        return _rg_hits_from_process(tool, process, request)
 
 
+# LLM: Count-mode rg uses the same process cancellation boundary as content mode.
+# 函数用途: 使用可取消的 rg 子进程统计各文件命中数。
 def _collect_counts_with_rg(tool: SearchTextTool, target: Path, request: SearchRequest) -> dict[str, int] | None:
     process = _start_rg_process(tool, target, request)
     if process is None:
         return None
-    return _rg_counts_from_process(tool, process, request)
+    with register_cancellation_callback(lambda: _stop_process(process)):
+        return _rg_counts_from_process(tool, process, request)
 
 
 def _start_rg_process(
