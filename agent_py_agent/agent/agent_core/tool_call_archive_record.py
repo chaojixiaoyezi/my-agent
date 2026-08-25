@@ -19,6 +19,9 @@ from .tool_output_failsafe import write_tool_output_fail_safe_checkpoint
 _MODEL_SUMMARY_MAX_CHARS = 12_000
 
 
+# LLM: Raw tool output must be archived together with host-owned execution and operation facts
+# before the later in-memory record is enriched; background slices restore only this durable index.
+# 函数用途: 归档工具原始输出和执行终态，确保子代理唤醒后的续轮不会把已成功操作误判为未核验。
 def archive_tool_output_projection(
     agent: object,
     params: object,
@@ -36,7 +39,7 @@ def archive_tool_output_projection(
     )
     trust = output_policy.trust if output_policy is not None else "runtime"
     redaction = output_policy.redaction if output_policy is not None else "default"
-    envelope = dict(outcome.result_envelope or {})
+    envelope = _archive_result_envelope(outcome.result_envelope, outcome)
     envelope["tool_output_policy"] = {
         "trust": trust,
         "redaction": redaction,
@@ -126,6 +129,9 @@ def _projection_refs(
     return tuple(refs)
 
 
+# LLM: The canonical archive row must reuse the output already externalized at execution time;
+# direct/fallback callers still receive the same typed lifecycle envelope before persistence.
+# 函数用途: 汇总一次工具调用的耐久记录、执行事实、操作终态和产物引用，供当前轮与后台续接共用。
 def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dict[str, object]:
     call_id = record.call.call_id
     cached = record.result.metadata.get("archive_output_record")
@@ -146,7 +152,10 @@ def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dic
             min_chars=_config_int(agent, "tool_output_externalize_min_chars"),
             preview_chars=_config_int(agent, "tool_output_preview_chars"),
             parameters=dict(record.call.arguments),
-            result_envelope=_result_details(record.result),
+            result_envelope=_archive_result_envelope(
+                _result_details(record.result),
+                record.result,
+            ),
         )
         output_record = externalize_tool_output_record(request)
         output_record.update(write_tool_output_fail_safe_checkpoint(request))
@@ -318,6 +327,36 @@ def _result_details(result: object) -> dict[str, object]:
         if isinstance(details, dict):
             return dict(details)
     return {}
+
+
+# LLM: This envelope is the sole pre-externalization lifecycle projection. It may copy typed
+# ToolResult/ToolHandlerOutcome fields, but must never infer execution or operation state from output text.
+# 函数用途: 给耐久工具索引补齐宿主确认的执行层级和副作用操作终态，供后台续接原样恢复。
+def _archive_result_envelope(
+    value: object,
+    result: object,
+) -> dict[str, object]:
+    envelope = dict(value) if isinstance(value, dict) else {}
+    envelope["tool_execution"] = _tool_execution_facts_from_result(result)
+    operation_value = getattr(result, "operation", None)
+    if operation_value is not None and hasattr(operation_value, "to_dict"):
+        typed_operation = operation_value.to_dict()
+        operation = (
+            dict(envelope.get("tool_operation") or {})
+            if isinstance(envelope.get("tool_operation"), dict)
+            else {}
+        )
+        for key in (
+            "operation_id",
+            "result_ref",
+            "status",
+            "replayed",
+        ):
+            if key not in operation and key in typed_operation:
+                operation[key] = typed_operation[key]
+        if operation:
+            envelope["tool_operation"] = operation
+    return envelope
 
 
 def _scope_from_result(result: object) -> dict[str, object]:

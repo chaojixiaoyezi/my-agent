@@ -482,14 +482,17 @@ def _safe_parameters(value: Any) -> dict[str, Any]:
     return result
 
 
-# LLM: 持久索引只保存字段路径、来源类别和结构化引用，不得复制参数值或任意 envelope 私有字段。
-# 函数用途: 把工具入口生成的 value-free 参数来源与既有读取窗口统一投影到耐久工具索引。
+# LLM: 持久索引只保存执行/操作生命周期、字段路径、来源类别和结构化引用，
+# 不得复制参数值、工具正文或任意 envelope 私有字段。
+# 函数用途: 把工具入口生成的权威终态、value-free 参数来源与读取窗口统一投影到耐久工具索引。
 def _result_envelope_index_metadata(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     metadata: dict[str, Any] = {}
     if tool_execution := _safe_tool_execution(value.get("tool_execution")):
         metadata["tool_execution"] = tool_execution
+    if tool_operation := _safe_tool_operation(value.get("tool_operation")):
+        metadata["tool_operation"] = tool_operation
     if read_window := _read_window_from_envelope(value):
         metadata["read_window"] = read_window
     if page_window := _page_window_from_envelope(value):
@@ -504,6 +507,9 @@ def _result_envelope_index_metadata(value: Any) -> dict[str, Any]:
     return metadata
 
 
+# LLM: Artifact and short-call index rows must carry the same bounded lifecycle metadata;
+# never copy arbitrary artifact payload fields into the lookup index.
+# 函数用途: 从工具归档记录中挑出后台续接需要的安全元数据，保证大小输出采用同一恢复语义。
 def _index_metadata_from_record(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
@@ -512,6 +518,7 @@ def _index_metadata_from_record(value: Any) -> dict[str, Any]:
         "read_window",
         "page_window",
         "tool_execution",
+        "tool_operation",
         "tool_output_trust",
         "tool_output_redaction",
     ):
@@ -543,6 +550,38 @@ def _safe_tool_execution(value: Any) -> dict[str, Any]:
     }
     if failure_stage:
         payload["failure_stage"] = failure_stage
+    return payload
+
+
+# LLM: Operation recovery accepts only the coordinator's bounded identity/lifecycle fields.
+# Unknown private keys, diagnostics and arbitrary nested values must not enter the durable index.
+# 函数用途: 清洗副作用操作终态，让后台续轮能区分成功、失败、未知和重放，同时不保存实现私有载荷。
+def _safe_tool_operation(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    operation_id = _single_line_text(value.get("operation_id"), max_chars=512)
+    status = _single_line_text(value.get("status"), max_chars=64)
+    if not operation_id or not status:
+        return {}
+    payload: dict[str, Any] = {
+        "operation_id": operation_id,
+        "status": status,
+    }
+    for key, max_chars in (
+        ("schema_version", 64),
+        ("result_ref", 1024),
+        ("action", 128),
+        ("idempotency_scope", 128),
+        ("reconciliation_source_ref", 1024),
+    ):
+        text = _single_line_text(value.get(key), max_chars=max_chars)
+        if text:
+            payload[key] = text
+    if isinstance(value.get("replayed"), bool):
+        payload["replayed"] = value.get("replayed") is True
+    original_execution = _safe_tool_execution(value.get("original_tool_execution"))
+    if original_execution:
+        payload["original_tool_execution"] = original_execution
     return payload
 
 

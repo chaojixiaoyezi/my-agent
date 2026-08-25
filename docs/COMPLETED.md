@@ -4,6 +4,13 @@
 
 最近收口重点：
 
+- 2026-08-25 收口 child 完成后 root 已回复但 TUI 永久 Working 的底层事实断点：工具输出首次归档现把
+  host-owned `tool_execution/tool_operation` 以有界白名单写入大小输出 index，background carried record
+  恢复 succeeded operation，仍不把 `ok=true` 或正文猜成副作用成功；精确宿主 `final_report.md` 作为完成
+  信封交接叶子可由 `read_file` 读取，其它 state/list/shell 状态面继续拒绝。5 个 focused 文件共 234 项，
+  结果 232 passed、2 个既有 xfailed；Ruff、doc-sync、strict code-size、diff 与 clean-package 全通过，改动
+  远低于 10,000 行，未跑全仓。`.7` 单 Gateway 真 TUI 复验仍按 ROADMAP 执行。
+
 - 2026-08-25 `999a621` 把 `subagent-completion.v1` 接入普通 Gateway follow-up，并按同 thread、非 detached
   task link 的 exact canonical task path 建立 workspace lineage，避免新 follow-up task id 切断原 root
   child 结果。119 项 focused 与本地严格 gate 通过，已推送并部署 `.7` 唯一 Gateway。原长 session tmux

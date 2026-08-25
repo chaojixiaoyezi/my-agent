@@ -172,6 +172,23 @@ def _internal_agent_status_ref(
     return None
 
 
+# LLM: The host-generated final report is the one model-visible handoff file inside an agent
+# workspace. This exact leaf exception must not authorize sibling state files or directory access.
+# 函数用途: 判断路径是否为完成信封明确暴露、可由 read_file 读取的精确子代理交接报告。
+def _readable_agent_final_report(path: Path) -> bool:
+    parts = path.parts
+    for index in range(len(parts) - 1):
+        if parts[index : index + 2] != ("work", "agents"):
+            continue
+        relative = parts[index + 2 :]
+        return bool(
+            len(relative) == 2
+            and str(relative[0]).startswith(("subagent-", "run-"))
+            and relative[1] == "final_report.md"
+        )
+    return False
+
+
 # LLM: 内部 agent 文件不是模型状态 API；拒绝结果只给事件等待和真实产物读取顺序，
 # 不能建议已从模型 surface 删除的 inspect 工具。
 # 函数用途: 把误读子代理内部状态文件转换成安全的结构化指引。

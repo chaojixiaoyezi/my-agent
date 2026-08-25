@@ -6,6 +6,15 @@
 `task_node_closeout` 副本。canonical task/result 是唯一结果事实源；父代理通过结构化 status、blockers、
 findings、artifact refs 和 result payload 阅读子代理工作，再由模型向用户汇总。
 
+## 2026-08-25 完成续片的操作事实与交接叶子
+
+- root lifecycle wake 是原 active turn 的后续工作片；其 carried tool index 必须恢复原派工的 typed
+  `tool_execution/tool_operation`。operation verification 仍要求 mutating call 同时满足 `ok=true` 与
+  `operation.status=succeeded`，不允许因索引缺字段降级后靠正文或前端补完成。
+- `work/agents/<run>/final_report.md` 是宿主从 canonical child result 生成的有界交接叶子，只含
+  task/run/status 与最终回复。完成信封可以把精确 ref 给直接父级，`read_file` 可读该叶子；同目录内部状态、
+  list/shell 仍受 `WRONG_STATUS_SURFACE` 保护。报告是证据投影，不是第二份 lifecycle authority。
+
 ## 2026-08-25 普通前台续轮的完成输入
 
 - `subagents/runner_completion_wake.py` 继续是 `subagent-completion.v1` 的唯一生产者；完成状态仍由 canonical

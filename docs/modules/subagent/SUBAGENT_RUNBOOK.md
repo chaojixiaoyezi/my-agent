@@ -114,9 +114,11 @@ task path 形成 workspace lineage，再从 ConversationStore observation 中选
 `completion_message` 与精确 refs 汇总；不要猜 `child_outputs`、遍历 `work/agents`，也不要读取
 `runner_result_json/output_json`。若有界视图显示 `omitted_count > 0`，改用正式子代理树/结果索引补读。
 
-`work/agents/<run_id>/canonical_state.json`、`checkpoint.json`、`summary.md` 和内部
-`final_report.md` 是审计/恢复资料，不是正常状态面或默认汇总入口。普通文件/shell 工具若碰到这些路径，
-会返回结构化 child result index，模型应转读其中给出的产物 refs。
+`work/agents/<run_id>/canonical_state.json`、`checkpoint.json`、`summary.md`、`progress/` 是内部审计/恢复
+状态面，不是正常汇总入口。普通文件/shell 工具若碰到这些路径，会返回结构化 child result index，模型
+应转读其中给出的产物 refs。系统生成的精确 `final_report.md` 是例外：它是完成信封显式给直接父级的
+有界交接投影，只含 task/run/status 与 child 最终回复，可由 `read_file` 直接读取；它不参与状态裁决，
+目录枚举和 shell 也不能借此进入整个 agent 工作区。
 
 这类拒绝发生在 shell 进程启动前，运行时记录为 `WRONG_STATUS_SURFACE/not_started`，把可操作原因返回
 当前模型继续换正式读取入口；它不是副作用未知，也不能据此把 child 整轮挂起。该分类不允许模型绕过

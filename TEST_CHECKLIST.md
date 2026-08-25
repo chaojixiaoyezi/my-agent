@@ -53,7 +53,9 @@
 - [ ] child lifecycle wake 沿同一 root active turn 续接：exact task link 的原始 objective 仍是
   `User Task/root_user_prompt`，wake 仅作 runtime continuation；root canonical tool index 按 exact
   `run_id + task_id` 恢复并排除 child/其它 task，one-shot 派工不重放，每工作片新增工具额度不缩水。
-  focused 回归与 fresh r12b 已证明语言、范围和嵌套派工参数不会在连续 wake 后重置。
+  focused 回归与 fresh r12b 已证明语言、范围和嵌套派工参数不会在连续 wake 后重置。2026-08-25 又补齐
+  externalized index 的 typed execution/operation 终态恢复与 root link completed 回归；仍待同一长 TUI
+  部署样本证明最终回复后 Working 收起，才勾整项。
 - [x] Compact 权威探针兼容没有 `task_attributes` 的轻量/旧调用方；统一路径解析把 `None`/空白保留为
   “没有路径”，不能变成 `<repo>/None` 并压过真实 ToolRegistry cwd。工具轮 28 项与 cwd 集成回归通过。
 - [x] 后台 Task Runtime State 与 `task_progress` 工具使用同一 task-path 账本编号；回归同时放置正确路径账本

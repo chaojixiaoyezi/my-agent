@@ -44,6 +44,10 @@
   后台每工作片的新增工具额度在恢复历史后保持不变；现有 Todo 更新必须复用 exact id。派 child 时只有
   调用方显式提供的 `create_subagents.items[].covers` 才建立映射，不从标题或 goal 猜关系；未绑定 child
   以真实 run id 形成独立进度行，不关闭现有 Todo。
+- lifecycle wake 恢复的耐久工具索引必须同时保留 bounded `tool_execution` 与 `tool_operation`；副作用
+  工具不能因跨后台工作片丢失 operation 终态而从 succeeded 退化为 unverified，也不能只凭 `ok=true`
+  反推成功。系统生成的精确 `work/agents/<run>/final_report.md` 是完成信封的有界交接投影，可由
+  `read_file` 读取；同目录其它状态文件、目录枚举和 shell 读取继续拒绝，报告正文不参与完成裁决。
 - 当前 canonical `task_progress` 已有计划时，`create_subagents` 在任何 child 落盘前执行一份原子结构预检：
   `covers` 与 `output_files` 都是可选结构化提示。提供的 covers 必须绑定仍 open、且未被同批其它 item
   占用的 exact id；提供的 output 必须位于父级 workspace。省略 covers 时 child 按真实 run id 记进度，

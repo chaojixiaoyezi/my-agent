@@ -1,5 +1,17 @@
 # Subagent Progress
 
+## 2026-08-25 完成续片终态与精确报告读取
+
+- 真 TUI 现场的 child 已 DONE、root 已回复但 Working 不消失，根因是 root 原始派工的 succeeded operation
+  在 externalized tool index 中丢失，后台完成续片将它降为 unverified，导致 final runtime unfinished、
+  task link 保持 active。当前已在耐久 index/carry 主链保留 typed execution/operation，并用 background
+  回归证明 link 会转 completed；没有恢复前端超时隐藏。
+- `subagent-completion.v1.final_report_ref` 现在与工具能力一致：精确宿主 `final_report.md` 可由 read_file
+  读取，canonical state/checkpoint/summary、目录枚举和 shell 仍拒绝。该报告只是有界自然语言交接证据，
+  不能反推 child 状态、验收或 root 完成。
+- 5 个 focused 文件 234 项收集结果为 232 passed、2 个既有 xfailed；部署后的原长 TUI 仍须验证模型不再
+  猜报告目录，最终回复后唯一 Working 正常收起。
+
 ## 2026-08-25 同一 session 的多阶段调研、复刻与返工
 
 - `ma-41d5a4a-terminal-fix-r26` 在同一 durable session 连续完成十名 child 调研整合、两条零工具追问、

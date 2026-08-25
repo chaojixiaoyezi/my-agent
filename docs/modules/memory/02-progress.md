@@ -1,5 +1,16 @@
 # Memory Progress
 
+## 2026-08-25 后台续片保留副作用操作终态
+
+- 真机 `create_subagents` 的原始 tool artifact 已有 `tool_operation.status=succeeded`，但旧 index 没保存该
+  nested typed fact；child 完成唤醒后的 carried record 只有 `ok=true`，按 fail-closed 核验被判 unverified，
+  使 root 已回复却仍保持 active/Working。
+- 当前 externalizer 对大小输出统一白名单保存 `tool_execution` 与 `tool_operation`，恢复时展开为现有
+  operation verification 字段。`diagnostic/private` 等任意 envelope 字段不落 index；没有 operation 终态的
+  旧记录仍保持 unverified，不用 `ok` 或输出正文补猜。
+- externalizer、carried refs 与 background root completion 定向回归已证明成功 operation 跨片保持
+  succeeded 且 task link 关闭；真 Gateway/TUI 复验待部署后执行。
+
 ## 2026-08-22 root active-turn 工具索引续接
 
 - child lifecycle wake 现在复用 task `work/blobs/tool_outputs/index.jsonl` 的 typed 行，按 exact root

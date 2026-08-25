@@ -46,6 +46,9 @@
   参数和 artifact refs。工具参数使用限深、限宽、凭据脱敏的 JSON 投影，Todo items、批量派工 items 与
   typed covers 不得因嵌套而变成空数组。大输出正文仍留在 owner 私有 artifact，按需读取；索引损坏时
   fail-soft 回到已有 task/transcript 上下文，但不得编造已执行事实。
+- 工具首次 externalize 时同时写入宿主确认的 bounded `tool_execution` 与 `tool_operation`。carried record
+  将它们恢复到现有 handler/failure/operation status 字段，供同一 active turn 的 operation verification
+  原样核对；任意诊断私有字段和工具正文不进入索引，没有 typed operation 终态时继续 fail-closed。
 - text 协议继续读取机械 tool-context；native 跨进程续跑不能伪造原 provider ToolCall/ToolResult 对，改为
   把同一批 carried 记录压成唯一、有界的 `CompactionSummary` handoff 放回 IR。它随之后每次 provider
   请求持续可见，但不推进 ConversationThread generation，不增加 TUI `compact N`，也不获得副作用权威。

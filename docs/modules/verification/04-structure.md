@@ -38,6 +38,9 @@ Compact 不建立第二套验证链。live tool-context 与 archive 共用一个
    provider 日志猜测；该证据只供 conversation source-delivery 收口，不写入 verification SQLite。
    `evidence_refs` 只把送达回执关联到同一 owner 已持久化的 Audit 记录，不复制记录正文，也不能反向
    生成工具成功、授权或验证事实。
+7. 工具输出首次 externalize 时，大小输出索引统一保存宿主确认的 bounded `tool_execution` 与
+   `tool_operation`。background slice 只从该 typed index 恢复 handler/operation 事实；缺少
+   `operation.status` 的 mutating 历史保持 unverified，`ok`、output preview 和模型正文都不能补猜成功。
 
 主代理 completion 只消费上述 typed verification state：stale root + 最近 durable event ID/status 组成
 一次性 followup signature，同一 verify→write 周期最多软核对一次，新 verify 才重新武装。它不执行命令、

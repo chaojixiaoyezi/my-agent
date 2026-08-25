@@ -192,6 +192,20 @@ def test_carried_tool_call_records_restore_only_exact_root_scope(tmp_path: Path)
             task_id="root-run",
             min_chars=1,
             parameters={"goal": "用 Rust 实现命令层"},
+            result_envelope={
+                "tool_execution": {
+                    "handler_executed": True,
+                    "duration_ms": 19,
+                },
+                "tool_operation": {
+                    "schema_version": "tool_operation.v1",
+                    "operation_id": "operation-child-1",
+                    "status": "succeeded",
+                    "action": "execute",
+                    "replayed": False,
+                    "idempotency_scope": "turn",
+                },
+            },
         )
     )
     externalize_tool_output_record(
@@ -220,6 +234,10 @@ def test_carried_tool_call_records_restore_only_exact_root_scope(tmp_path: Path)
     assert records[0]["duration_ms"] == 4
     assert records[1]["artifact_ref"] == artifact["artifact_ref"]
     assert records[1]["handler_executed"] is True
+    assert records[1]["duration_ms"] == 19
+    assert records[1]["operation_id"] == "operation-child-1"
+    assert records[1]["tool_operation_status"] == "succeeded"
+    assert records[1]["tool_operation_action"] == "execute"
 
 
 def test_carried_tool_call_records_dedupe_same_scoped_call_id(tmp_path: Path) -> None:

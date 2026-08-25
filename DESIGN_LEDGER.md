@@ -1596,6 +1596,24 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   在“原生复制/恢复滚轮”间真实切换；输入框拖选“中文复制验证ABC”后 tmux buffer 得到完整 9 字符，右键
   再次复制结果相同。外层 macOS 系统剪贴板仍只能由用户 attach 后亲自粘贴确认，不能由 tmux 证据冒充。
 
+## 2026-08-25 后台续接操作事实与精确子代理交接引用【状态：本地严格 gate 通过，待真机】
+
+- 会话运行时 的 active turn 只有收到 typed `TurnCompleted` 才清除 Working；不能用前端超时、最终正文或 child
+  数量猜终态。本项目同样要求 background slice 恢复原轮成功工具时，继续携带 host-owned
+  `tool_execution` 与 `tool_operation`。这两类字段必须在工具输出首次 externalize 时进入有界耐久索引，
+  后续 carried record 只从该结构化白名单恢复，不能解析工具正文里的 operation contract。
+- 真机失败证明：`create_subagents` 原始结果已有 `tool_operation.status=succeeded`，但外置索引只保留
+  `ok=true`；child 完成唤醒后的新工作片因缺少 operation 终态把派工判为 `unverified`，自然 final 仍落成
+  unfinished，active task link 因而持续显示 Working。修复必须保留既有 fail-closed 核验，不允许把所有
+  `ok=true` 副作用直接猜成 succeeded。
+- `work/agents/<run_id>/final_report.md` 由宿主写入，只含 task/run/status 与 child 最终回复，是完成信封已经
+  暴露给直接父级的有界交接投影，不是 canonical 状态权威。精确该文件允许通过 `read_file` 按现有
+  workspace/owner 边界读取；同目录的 state/checkpoint/summary/progress、目录枚举和 shell 仍拒绝。
+  不复制第二份报告，也不让 final_report 正文参与 child 或 root 的完成、权限、验收裁决。
+- 部署后验收继续复用同一个 durable TUI：多 child 调研、两个普通追加、多 child 复刻、普通验收追加、
+  多 child 返工和最终追加必须连续发生在一条 session 中。该链只测试跨工作片连续性，不改变单次任务边界，
+  也不允许测试者替被测对象改产物或用技术提示直接告诉它底座诊断答案。
+
 ## 2026-08-24 单 Gateway HTTP 有界复用工作池【状态：`53498c1` 已部署 `.7` 真 TUI】
 
 - 解决问题：唯一 Gateway 被 OOM killer 杀死后，新 TUI 只能短暂显示“正在连接 Gateway”再退出。内核事实

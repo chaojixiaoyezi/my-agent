@@ -1,5 +1,16 @@
 # Verification：开发推进
 
+## 2026-08-25 后台续片不再丢失 succeeded operation
+
+- 真机 root 首次 `create_subagents` 的 canonical 结果已经有 succeeded operation，但外置工具索引没有保存
+  该字段。child 完成后的 background slice 只能恢复 `ok=true`，按现有 fail-closed 规则正确归为
+  unverified；最终回复因此是 unfinished，active task link 和 TUI Working 均不会关闭。
+- 当前在工具输出第一次 externalize 前注入 host-owned execution，并对白名单 operation identity/status/
+  action/replay 做大小输出一致持久化。carried record 恢复现有 flat verification 字段；没有 typed status 的
+  旧记录继续 unverified，绝不把所有 `ok=true` mutation 放宽为成功。
+- background focused 回归已直接证明 child terminal wake 后 operation verification 为 succeeded、root link
+  为 completed；externalizer 回归同时证明任意 diagnostic/private envelope 字段不会进入耐久 index。
+
 ## 2026-08-18 Fiber 143 收口冲突返工
 
 - Fiber→TypeScript 前台最后一条 E2E `run_command` 实际完成 HTTP 请求后由清理命令收到 SIGTERM，权威

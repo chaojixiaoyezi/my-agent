@@ -1,5 +1,22 @@
 # STATUS
 
+## 2026-08-25 child 完成后 Working 不收口与报告引用冲突（本地候选）
+
+- `.7` 长会话现场证明 child 已 `DONE`、root 已给最终回复，但 task link 仍 `active`，TUI 因而持续显示
+  `Working · 等待后续事件`。这不是前端动画卡住：原始 `create_subagents` 外置结果有
+  `tool_operation.status=succeeded`，耐久 index 却只剩 `ok=true`；后台续片把副作用派工判成 unverified，
+  final runtime 落为 unfinished，所以 canonical link 合法地没有关闭。
+- 当前候选在首次归档前写入 host-owned `tool_execution/tool_operation`，外置大输出与短输出共用同一有界
+  白名单，carried record 恢复 operation id/status/action/replay；仍禁止用工具正文或 `ok=true` 猜副作用成功。
+  新增 background 回归已直接证明 child 终态续轮将 root link 写成 `completed`，operation verification 为
+  succeeded。
+- 完成信封要求模型“先读 `final_report_ref`”，旧 `read_file` 却把同一路径当内部状态拒绝。当前只开放宿主
+  生成的精确 `work/agents/<run>/final_report.md`：它只含 task/run/status 与 child 最终回复；state、checkpoint、
+  summary、目录枚举和 shell 仍返回 `WRONG_STATUS_SURFACE`，不复制第二份报告、不恢复机器质量验收。
+- 5 个直接相关测试文件共收集 234 项，结果为 232 passed、2 个既有 xfailed；Ruff、doc-sync、strict
+  code-size、diff 与 clean-package 全通过。改动远低于 10,000 行，未跑全仓 pytest；推送、`.7` 单 Gateway
+  部署及原长 tmux 复验尚待完成。
+
 ## 2026-08-25 同一长会话调研、追问、复刻与返工（TUI 交互修复待部署）
 
 - tmux `ma-41d5a4a-terminal-fix-r26` 在同一 durable session 完成“十名 child 调研整合 → 两条无工具小追问 →
@@ -15,6 +32,10 @@
 - 本地候选对照 终端交互 `REPL.tsx::repinScroll`：有效提交会把当前 main/child 页面恢复到尾部，随后继续
   follow；被动新输出仍不抢用户上翻位置。Todo 若已显示全完成但仍有未映射的 typed active child，标题只读
   追加“子代理运行中 N”，不修改 canonical Todo。相关 TUI focused 已通过，待 `.7` 单 Gateway 真 TUI 复验。
+- 独立验证 child 随后发现复刻仍有两个真实缺口：`bin/lazygit` 在 ESM 下使用 `require()` 导致入口失败，
+  `src/cli.tsx` 仍读硬编码 mock 数据而不是真实 Git 状态。构建、`dist/main.js --version/--help` 和 152 项测试
+  通过不能覆盖这两个入口，所以该复刻仍判失败。部署当前底座修复后，继续在同一 tmux 用普通中文要求多个
+  child 返工并做真实入口复验，不由测试者修改产物。
 
 ## 2026-08-25 子代理完成交付进入普通前台续轮（已部署真 TUI）
 

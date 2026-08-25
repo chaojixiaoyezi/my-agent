@@ -307,7 +307,9 @@ def test_filesystem_tools_allow_configured_extra_workspace_root():
         assert "report.txt" in list_result.output
 
 
-def test_read_file_routes_internal_agent_status_refs_to_agent_tree(tmp_path: Path):
+def test_read_file_allows_exact_final_report_but_routes_other_agent_status_refs(
+    tmp_path: Path,
+):
     workspace = tmp_path / "workspace"
     internal = workspace / "tasks" / "2026-06-06" / "demo" / "work" / "agents" / "subagent-123" / "final_report.md"
     child_output = workspace / "tasks" / "2026-06-06" / "demo" / "work" / "child_outputs" / "subagent-123.md"
@@ -338,10 +340,13 @@ def test_read_file_routes_internal_agent_status_refs_to_agent_tree(tmp_path: Pat
     )
     read_tool = ReadFileTool(workspace, max_chars=2000)
 
-    internal_result = read_tool.execute({"path": str(internal)})
+    report_result = read_tool.execute({"path": str(internal)})
+    internal_result = read_tool.execute({"path": str(internal.parent / "canonical_state.json")})
     output_result = read_tool.execute({"path": str(child_output)})
     payload = json.loads(internal_result.output)
 
+    assert report_result.ok is True
+    assert "internal progress only" in report_result.output
     assert internal_result.ok is False
     assert internal_result.error_code == "WRONG_STATUS_SURFACE"
     assert payload["error"] == "internal_agent_status_ref"

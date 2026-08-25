@@ -175,7 +175,35 @@ def _carried_tool_call_record(row: dict[str, Any]) -> dict[str, Any]:
         value = row.get(key)
         if isinstance(value, dict):
             record[key] = dict(value)
+    _attach_carried_operation_facts(record, row.get("tool_operation"))
     return record
+
+
+# LLM: Carried operation facts come only from the externalizer's typed whitelist; ``ok`` or
+# output prose can never synthesize a succeeded mutation across background slices.
+# 函数用途: 把耐久索引里的副作用操作身份和终态恢复成现有工具核验记录字段。
+def _attach_carried_operation_facts(
+    record: dict[str, Any],
+    value: object,
+) -> None:
+    if not isinstance(value, dict):
+        return
+    for source_key, target_key in (
+        ("operation_id", "operation_id"),
+        ("result_ref", "result_ref"),
+        ("status", "tool_operation_status"),
+        ("action", "tool_operation_action"),
+        ("idempotency_scope", "tool_operation_idempotency_scope"),
+        (
+            "reconciliation_source_ref",
+            "tool_operation_reconciliation_source_ref",
+        ),
+    ):
+        text = str(value.get(source_key) or "").strip()
+        if text:
+            record[target_key] = text
+    if isinstance(value.get("replayed"), bool):
+        record["tool_operation_replayed"] = value.get("replayed") is True
 
 
 def _source_ref(row: dict[str, Any]) -> dict[str, Any]:

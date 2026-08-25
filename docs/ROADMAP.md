@@ -22,13 +22,21 @@
 
 ### 子代理完成详情引用与安全状态面一致化
 
-状态：设计中；普通续轮 completion 正文已由 `999a621` 真 TUI 验证，详情 ref 边界待收口
+状态：实现中；普通续轮 completion 正文已由 `999a621` 真 TUI 验证，精确交接 ref 正在收口
 
 解决问题：普通前台续轮现在能直接收到并整合直属 child 的有界 `completion_message`，不再猜目录；但模型
 若按信封里的 `final_report_ref` 深挖完整报告，当前 `Read` 会把该路径识别为内部 agent 状态面并拒绝。
-后续应在不暴露 runner/result 内部载荷的前提下，让模型可见的详情引用指向一个真实可读、按 exact
-root/parent/run 授权的公开投影，或者不再向模型宣称该内部引用可直接读取。不能靠放宽整个状态目录权限
-解决，也不能复制出第二份生命周期事实源。
+当前决定不复制第二份生命周期事实源：系统生成的精确
+`work/agents/<run_id>/final_report.md` 本身已经是有界交接投影，只含 task/run/status 与 child 最终回复，
+因此只允许 `read_file` 读取这一文件。`canonical_state.json`、checkpoint、summary、progress、目录枚举和
+shell 读取仍按内部状态面拒绝。后台续接还必须把成功副作用的 typed operation/execution 事实写入耐久
+工具索引，避免 child 完成后的新工作片把已成功派工误降为 unverified，导致用户已收到最终回复而 root
+active task link 仍不关闭。
+
+当前进展：代码与 5 个 focused 文件已覆盖大小输出索引、私有字段裁剪、carried operation 恢复、精确报告
+读取、状态/list/shell 继续拒绝，以及 child 终态后 root task link 转 completed。234 项收集结果为
+232 passed、2 个既有 xfailed，本地严格 gate 全通过；待推送、`.7` 单 Gateway 部署和同一长 tmux 真 TUI
+复验后完成。
 
 ### 会话运行时 式同一父级分批创建
 

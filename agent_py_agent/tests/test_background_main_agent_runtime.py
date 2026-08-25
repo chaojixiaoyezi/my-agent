@@ -3912,6 +3912,104 @@ def test_done_child_wake_delivers_natural_final_response(tmp_path) -> None:
     assert [row.content for row in store.recent_messages(thread.thread_id)] == [report.response]
 
 
+def test_done_child_wake_with_carried_successful_spawn_closes_root_task(
+    tmp_path,
+) -> None:
+    from agent_py_agent.agent.memory_archive.tool_output_externalizer import (
+        ExternalizeToolOutputRequest,
+        externalize_tool_output_record,
+    )
+
+    home = tmp_path / "home"
+    task_root = home / "tasks" / "2026-08-25" / "task-root"
+    externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=task_root / "work",
+            tool="create_subagents",
+            call_id="create-child-1",
+            output="created child",
+            ok=True,
+            request_id="foreground-request",
+            run_id="task-root",
+            task_id="task-root",
+            min_chars=0,
+            parameters={"items": [{"goal": "完成实现", "role": "worker"}]},
+            result_envelope={
+                "tool_execution": {
+                    "handler_executed": True,
+                    "duration_ms": 25,
+                },
+                "tool_operation": {
+                    "schema_version": "tool_operation.v1",
+                    "operation_id": "operation-create-child-1",
+                    "status": "succeeded",
+                    "action": "execute",
+                    "replayed": False,
+                    "idempotency_scope": "turn",
+                },
+            },
+        )
+    )
+    agent = SimpleAgent(
+        AgentConfig(
+            enable_tools=True,
+            memory_path="memory.jsonl",
+            my_agent_home=str(home),
+            orphan_supervision_interval_seconds=0,
+        ),
+        tmp_path,
+    )
+    agent.backend = _NaturalCompletionBackend()
+    child = agent.subagents.create_run(
+        goal="完成实现",
+        thought="",
+        plan=["执行"],
+        parent_id="task-root",
+        root_id="task-root",
+    )
+    agent.subagents.lifecycle.set_status(child.id, "DONE")
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-carried-operation",
+            "channel_user_id": "user-1",
+        }
+    )
+    store.bind_task(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-root",
+            "goal": "由子代理完成实现后汇总",
+            "status": "active",
+            "task_path": str(task_root),
+        }
+    )
+    channels = FakeDeliveryService()
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
+
+    report = runtime.run_once(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-root",
+            "reason": "subagent_runner_finished",
+            "wake_signal": {
+                "root_task_id": "task-root",
+                "source_agent_id": child.id,
+                "metadata": {"task_id": child.id, "status": "DONE"},
+            },
+        }
+    )
+
+    assert report.delivery_status == "sent"
+    assert report.delivery_reason == "root_subagents_terminal"
+    assert store.load_task_link("task-root").status == "completed"
+    final_row = store.recent_messages(thread.thread_id, limit=1)[0]
+    assert final_row.metadata["operation_verification"]["status"] == "succeeded"
+    assert final_row.metadata["operation_verification"]["counts"]["succeeded"] == 1
+
+
 def test_successful_sibling_completion_wakes_are_coalesced_before_one_llm_turn(
     tmp_path,
 ) -> None:

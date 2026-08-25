@@ -11,6 +11,7 @@ from ..path_recovery_hints import suggest_workspace_typo_target
 from ._filesystem_helpers import (
     _int_param,
     _internal_agent_status_ref,
+    _readable_agent_final_report,
     _required_path,
 )
 from .filesystem_artifact_guard import (
@@ -82,6 +83,9 @@ def execute_read_file(tool, params: dict[str, Any], max_chars: int) -> ToolHandl
     ))
 
 
+# LLM: read_file may expose the exact host-generated child handoff report, but every other
+# internal agent status ref remains blocked and must route through the typed lifecycle surface.
+# 函数用途: 完成路径检查和安全分流后读取文件；只对精确 final_report 交接件开放内部目录例外。
 def _execute_read_file_request(request: ReadFileRequest) -> ToolHandlerOutcome:
     target = request.target
     if not target.exists():
@@ -100,7 +104,7 @@ def _execute_read_file_request(request: ReadFileRequest) -> ToolHandlerOutcome:
     if not target.is_file():
         return _not_file_result(request.tool, target)
     internal_ref = _internal_agent_status_ref(target)
-    if internal_ref:
+    if internal_ref and not _readable_agent_final_report(target):
         return ToolHandlerOutcome(
             "read_file",
             False,

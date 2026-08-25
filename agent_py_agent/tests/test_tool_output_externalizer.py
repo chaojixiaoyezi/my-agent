@@ -402,6 +402,75 @@ def test_tool_output_index_preserves_host_execution_diagnostics(tmp_path: Path) 
     )
 
 
+def test_tool_output_index_preserves_operation_terminal_for_background_carry(
+    tmp_path: Path,
+) -> None:
+    from agent_py_agent.agent.memory_archive.compact_tool_output_refs import (
+        carried_tool_call_records,
+    )
+
+    operation = {
+        "schema_version": "tool_operation.v1",
+        "operation_id": "operation-create-1",
+        "result_ref": "tool-operation://root-run/operation-create-1",
+        "status": "succeeded",
+        "action": "execute",
+        "replayed": False,
+        "idempotency_scope": "turn",
+        "diagnostic": "must-not-persist",
+        "private": {"token": "must-not-persist"},
+    }
+    record = externalize_tool_output_record(
+        ExternalizeToolOutputRequest(
+            root=tmp_path,
+            tool="create_subagents",
+            call_id="create-1",
+            output="created\n" + ("x" * 2_000),
+            ok=True,
+            request_id="request-root",
+            run_id="root-run",
+            task_id="root-run",
+            min_chars=0,
+            parameters={"items": [{"goal": "实现模块"}]},
+            result_envelope={
+                "tool_execution": {
+                    "handler_executed": True,
+                    "duration_ms": 31,
+                },
+                "tool_operation": operation,
+            },
+        )
+    )
+    artifact_path = Path(str(record["artifact_ref"]))
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    index = json.loads(
+        (artifact_path.parent / "index.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+    )
+    carried = carried_tool_call_records(
+        tmp_path,
+        {"run_id": "root-run", "task_id": "root-run"},
+    )
+
+    expected_operation = {
+        key: value
+        for key, value in operation.items()
+        if key not in {"diagnostic", "private"}
+    }
+    assert record["tool_operation"] == expected_operation
+    assert artifact["tool_operation"] == expected_operation
+    assert index["tool_operation"] == expected_operation
+    assert carried[0]["handler_executed"] is True
+    assert carried[0]["operation_id"] == "operation-create-1"
+    assert carried[0]["tool_operation_status"] == "succeeded"
+    assert carried[0]["tool_operation_action"] == "execute"
+    assert carried[0]["tool_operation_idempotency_scope"] == "turn"
+    assert carried[0]["tool_operation_replayed"] is False
+    assert "must-not-persist" not in json.dumps(
+        [record["tool_operation"], artifact["tool_operation"], index["tool_operation"]],
+        ensure_ascii=False,
+    )
+
+
 def test_tool_output_index_preserves_read_file_window_metadata(tmp_path: Path) -> None:
     read_window = {
         "kind": "char_window",

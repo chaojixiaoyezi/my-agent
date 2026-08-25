@@ -1,5 +1,30 @@
 # TESTS
 
+## 2026-08-25 后台续片操作终态与子代理报告读取
+
+focused 回归命令：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_tool_output_externalizer.py \
+  agent_py_agent/tests/test_memory_compact_tool_output_refs.py \
+  agent_py_agent/tests/test_tools/test_filesystem_tools.py \
+  agent_py_agent/tests/test_tools/test_shell_tool.py \
+  agent_py_agent/tests/test_background_main_agent_runtime.py \
+  -q --tb=short
+```
+
+共收集 234 项，结果为 232 passed、2 个既有 xfailed。它必须同时证明：大小工具输出的 index 都保留有界
+execution/operation；私有 envelope 字段不进入索引；成功派工跨 child wake 后仍核验 succeeded；自然 final
+关闭 root task link；精确 `final_report.md` 可读，而 canonical state、目录枚举和 shell 仍拒绝。改动远低于
+10,000 行，按约定不跑全仓 pytest；Ruff、doc-sync、strict code-size、diff 与 clean-package 均通过。
+
+部署后继续复用同一个 durable TUI/tmux 完成长链，不为阶段切换新建会话：多子代理代码级调研 → 两条普通
+小追加 → 多子代理跨语言复刻既有项目 → 普通验收追加 → 针对真实入口缺口的多子代理返工 → 最终普通追加。
+每次输入前公开同一个 tmux 名称；全部消息使用普通用户能懂的中文，不向被测代理注入技术定位答案，测试者
+不修改被测产物。链路要同时观察 completion 报告直读、root Working 收口、Todo、child token/Compact、
+后续消息排队和真实入口验证。
+
 ## 2026-08-24 child 插话、八槽容量与历史入口
 
 focused 回归覆盖 Gateway owner 控制、guidance exact-turn reserve/submission、无活跃 attempt 拒绝、默认
