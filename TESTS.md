@@ -460,6 +460,12 @@ worker-1 分别 `Ctrl+Home` 后来回进入/返回，均恢复各自原始 promp
 F6 开启 mouse tracking 后注入真实 SGR wheel-up，正文从终态总结翻到旧 Bash/Thought；再次 F6 后回到
 原生复制。该证据验证 TUI 协议路径，不代替用户在 Terminal.app 外层亲手滚轮、右键复制和粘贴。
 
+2026-08-24 终端交互 默认滚轮回归真机证据：`0da26f0` 部署到 `.7` 唯一 Gateway 后，fresh exact resume
+tmux `ma-0da26f0-终端交互-history-r23` 未发送模型消息。启动 footer 直接显示滚轮入口；默认 SGR wheel-up
+使 root 离尾并出现 `Jump to bottom`，wheel-down 回尾后 pill 消失。进入 researcher-1 后默认滚轮翻到完整
+派工 Prompt、Thought 和工具卡。F6 后 footer 改为键盘历史/恢复滚轮，再按恢复默认。输入框应用内拖选与
+右键都把“中文复制验证ABC”完整写入 tmux buffer；外层系统剪贴板仍保留给用户 attach 后亲测。
+
 富 transcript 追补还必须覆盖：未声明能力的 Gateway 不公开 thinking/display 且继续按 verbose 裁剪；TUI
 声明能力后逐轮 commentary、provider 明示 thinking、edit/overwrite/patch diff、write preview、命令
 stdout/stderr/exit code 均走结构化事件；思考 Markdown 与 `Ctrl+O` 折叠提示的每个可见 fragment 都必须

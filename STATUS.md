@@ -1,5 +1,17 @@
 # STATUS
 
+## 2026-08-24 历史滚轮恢复 终端交互 默认（`.7` 真 TUI 已通过）
+
+- 根因不是历史丢失：旧 r22 用 `PageUp/Ctrl+Home` 能回到欢迎页、原始 Prompt 和工具记录；`af5a03b` 把
+  mouse tracking 默认关闭后，alternate screen 收不到物理滚轮，才让用户看起来像“历史消失”。
+- `0da26f0` 恢复 终端交互 式默认滚轮与应用内选区；F6 改为原生复制逃生口。footer 按 typed 模式动态显示
+  `F6 原生复制` 或 `F6 恢复滚轮`，没有新增会话、历史或滚动状态源。
+- 155 项相关 focused、VT100 mouse enable/disable 协议、Ruff、doc-sync、strict code-size、diff 与
+  clean-package 通过；改动远低于 10,000 行，未跑全仓 pytest。提交已推送并部署，唯一 Gateway PID
+  `557079`，有效模型 MiniMax-M2.7。
+- fresh tmux `ma-0da26f0-终端交互-history-r23` 默认滚轮在 root/child 均能翻到完整旧记录，回底恢复 follow；
+  中文输入拖选和右键都把“中文复制验证ABC”完整写入 tmux buffer。未发送模型消息或修改任务产物。
+
 ## 2026-08-24 子代理插话、八槽容量与历史入口（`.7` 真 TUI 已通过）
 
 - Prompt 3 真实账本证明 researcher-1 不是因 WebFetch 失败退出，而是用户插话 receipt 漏

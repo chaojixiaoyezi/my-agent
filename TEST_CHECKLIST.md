@@ -7,7 +7,7 @@
 - [x] child 没有 pending/running attempt 时，入口明确拒绝、用户输入保留且 guidance message box 零新增。
 - [x] 默认 root 一次可原子创建 8 名 child，`per_call_cap=0`、session cap=8；第 9 名整批拒绝，终态释放后
   可继续创建，历史累计允许超过 8。
-- [ ] root 与 child 在默认 终端交互 鼠标模式可直接用物理滚轮查看历史，并继续支持 `PgUp/Ctrl+Home`；
+- [x] root 与 child 在默认 终端交互 鼠标模式可直接用物理滚轮查看历史，并继续支持 `PgUp/Ctrl+Home`；
   常驻 footer 显示 `F6 原生复制`，切换后改为 `F6 恢复滚轮`。
 - [x] 历史累计 child 超过八项时，`↑/↓` 选择窗口必须滚入 exact 选中项并显示 `›`；`Enter` 进入的 run id
   与屏幕高亮一致，renderer 的八行裁剪不得把选中项藏在省略提示后。

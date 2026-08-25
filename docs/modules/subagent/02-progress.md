@@ -1,5 +1,14 @@
 # Subagent Progress
 
+## 2026-08-24 终端交互 默认滚轮与主/子代理历史（已部署真 TUI）
+
+- `PageUp/Ctrl+Home` 已证明旧 root/child typed history 完整；实际回归是默认关闭 mouse tracking 后，物理
+  滚轮不会进入 alternate screen。`0da26f0` 恢复 终端交互 主链：默认 wheel、离底保持、回底 follow，F6
+  仅切到宿主原生复制备用模式；footer 始终说明当前真实操作。
+- `.7` fresh `ma-0da26f0-终端交互-history-r23` 未发模型消息，root 默认滚轮翻到旧 Bash/Thought，child 默认
+  滚轮翻到完整派工、Thought 和工具卡，回到底后 `Jump to bottom` 消失。输入中文拖选及右键均完整写入
+  tmux buffer；外层系统剪贴板仍由用户 attach 后验证。
+
 ## 2026-08-24 子代理八行名册跟随选中项（已部署真 TUI）
 
 - 真实 TUI 中历史累计出现第 9 名 child 后，`↓` 已把导航的 exact `selected_run_id` 移到屏幕外，`Enter`

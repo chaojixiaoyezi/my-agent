@@ -4,6 +4,12 @@
 
 最近收口重点：
 
+- 2026-08-24 `0da26f0` 修复“历史存在但物理滚轮看不到”的默认交互回归：按 终端交互 恢复启动即开启
+  mouse tracking，wheel/离底/follow 与应用内复制共用现有 typed viewport；F6 只作原生复制逃生口，footer
+  随模式变化。155 项 focused 与本地严格 gate 通过，已推送部署 `.7`。tmux
+  `ma-0da26f0-终端交互-history-r23` 中 root/child 默认滚轮均看到完整历史，中文拖选和右键复制完整写入
+  tmux buffer；未发送模型消息或改被测产物。
+
 - 2026-08-24 `7e2ffb6` 修复子代理名册“游标已到隐藏项但屏幕仍画前八项”：renderer 现在从同一
   canonical ordered roster 裁出包含 exact `selected_run_id` 的八行窗口，不新增滚动状态、不改 Enter
   裁决或 child 状态。65 项 focused 与本地严格 gate 通过，已部署 `.7` 且未重启唯一 Gateway；tmux

@@ -1536,7 +1536,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   `ma-7e2ffb6-roster-r21` 验证九项名册：第九次 `↓` 后 coordinator-9 带 `›` 出现，`Enter` 进入同名详情；
   `Ctrl+G` 返回再按 `↑` 后 researcher-8 高亮且前八项恢复。测试者没有发送模型消息或改任务产物。
 
-## 2026-08-24 终端交互 默认滚轮回归修复【状态：实现与本地协议回归已完成，待 `.7` 真 TUI】
+## 2026-08-24 终端交互 默认滚轮回归修复【状态：`0da26f0` 已部署 `.7` 并真 TUI 验收】
 
 - 用户在 exact resume 中用 `PageUp` 和 `Ctrl+Home` 能看到欢迎页、原始 Prompt 与旧工具记录，证明 canonical
   history 和每页 viewport 均未丢失；物理滚轮无反应来自 `af5a03b` 把 mouse tracking 默认关闭，不是消息
@@ -1547,3 +1547,8 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 本项目已有相同的 typed viewport、中文源字符选区、lost-release、右键复制、tmux buffer 和 OSC52 主链，
   因此修复只把唯一默认恢复为 `true`，让 F6 成为原生复制逃生口，并让 footer 从 typed mouse state 动态
   显示当前真实操作。不得增加另一份历史、滚动游标或终端品牌判断。
+- `.7` 唯一 Gateway PID `557079`、MiniMax-M2.7、exact resume tmux
+  `ma-0da26f0-终端交互-history-r23` 未提交新模型消息。默认状态直接接收 SGR wheel：root 离尾出现
+  `Jump to bottom`、回底后消失；进入 researcher-1 后滚轮翻到完整派工、Thought 和工具记录。F6 的 footer
+  在“原生复制/恢复滚轮”间真实切换；输入框拖选“中文复制验证ABC”后 tmux buffer 得到完整 9 字符，右键
+  再次复制结果相同。外层 macOS 系统剪贴板仍只能由用户 attach 后亲自粘贴确认，不能由 tmux 证据冒充。
