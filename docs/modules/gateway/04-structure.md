@@ -3,9 +3,11 @@
 ## 普通续轮的直属子代理完成输入
 
 - `request_execution._gateway_conversation_context` 在加载 sticky workspace 后，从同一 thread 的
-  ConversationStore observation 构造 `conversation-subagent-completions.v1`。workspace task id 是 root
-  选择权威；只有 exact `root_task_id == parent_agent_id == workspace task id` 的
-  `subagent_runner_finished` 才能进入。
+  ConversationStore observation 构造 `conversation-subagent-completions.v1`。普通追加轮会换 task id，
+  所以 `_gateway_workspace_lineage_task_ids` 以同 thread、非 detached task link 的 exact canonical
+  `task_path` 等值形成持续 workspace lineage；cwd、goal 和用户正文都不参与。
+- 只有 event `root_task_id` 属于该 lineage，且 exact `parent_agent_id == root_task_id` 的
+  `subagent_runner_finished` 才能进入。每项保留自己的 root id，便于审计多个分批 follow-up root。
 - 同 child 的多条终态按 observation 时间取最新，详细项最多 12 条并显式报告 total/omitted_count。
   Gateway 只投影 `subagent-completion.v1` 的 status、turn-end、最终回复和 refs，永不投影
   `runner_result_json/output_json`。普通前台 prompt 在历史后注入这批整合输入；named Audit prepare 不注入。

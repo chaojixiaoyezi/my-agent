@@ -62,7 +62,9 @@
   expected outputs 投影中隐藏，不能影响新执行。
 - 会话运行时 把 child `TurnComplete` 的最后一条 assistant message 作为 inter-agent message 留在父线程；本项目
   对应的唯一持久事实是同一 ConversationStore observation 中的 `subagent-completion.v1`。后台 lifecycle
-  wake 和普通 TUI 后续轮必须消费同一信封：只按 exact `root_task_id + parent_agent_id` 选择直属 child，
+  wake 和普通 TUI 后续轮必须消费同一信封。普通追加轮会获得新的 task id，但复用原 canonical task
+  workspace；因此先按同 thread、非 detached task link 的 exact `task_path` 等值找出 workspace lineage，
+  再要求 event 的 `root_task_id` 属于该 lineage 且 `parent_agent_id == root_task_id`，只选择直属 child。
   去重后有界注入 `completion_message/final_report_ref/declared_output_refs/artifact_refs`；不得把
   `runner_result_json/output_json` 或内部状态路径带入模型，也不得从用户正文猜父子关系。named Audit prepare
   与其它 root/sibling 继续隔离。这个投影只提供整合输入，不改变 child/root 的完成、权限或验收状态。

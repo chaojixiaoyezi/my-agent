@@ -2142,8 +2142,14 @@ def _gateway_subagent_completion_context(
     workspace_task: _GatewayWorkspaceSelection | None,
     load_errors: list[dict],
 ) -> dict[str, object]:
-    root_task_id = str(getattr(workspace_task, "task_id", "") or "").strip()
-    if not root_task_id:
+    workspace_task_id = str(getattr(workspace_task, "task_id", "") or "").strip()
+    root_task_ids = _gateway_workspace_lineage_task_ids(
+        store,
+        thread_id,
+        workspace_task,
+        load_errors,
+    )
+    if not root_task_ids:
         return {}
     try:
         observations, errors = store.recent_observations_report(
@@ -2161,7 +2167,7 @@ def _gateway_subagent_completion_context(
     for event in observations:
         projected = _gateway_subagent_completion_item(
             event,
-            root_task_id,
+            root_task_ids,
             load_errors,
         )
         if projected is None:
@@ -2180,7 +2186,14 @@ def _gateway_subagent_completion_context(
         return {}
     return {
         "schema": _CONVERSATION_SUBAGENT_COMPLETIONS_SCHEMA,
-        "root_task_id": root_task_id,
+        "workspace_task_id": workspace_task_id,
+        "completion_root_task_ids": sorted(
+            {
+                str(item.get("root_task_id") or "")
+                for item in ordered
+                if str(item.get("root_task_id") or "")
+            }
+        ),
         "total": len(ordered),
         "visible_count": len(visible),
         "omitted_count": max(0, len(ordered) - len(visible)),
@@ -2188,19 +2201,56 @@ def _gateway_subagent_completion_context(
     }
 
 
-# LLM: One observation becomes model-visible only when its typed event, exact root/direct parent,
-# schema and duplicated child identity all agree. A mismatch is reported instead of guessed.
+# LLM: A continued foreground turn gets a new task id while retaining the same canonical task
+# workspace. Exact task-link path equality is the only lineage join; prompt prose and cwd do not
+# participate, and detached named work remains outside the ordinary lineage.
+# 函数用途: 找出当前持续工作目录在同一 thread 中使用过的结构化主任务 id，供后续轮接回早先 child 交付。
+def _gateway_workspace_lineage_task_ids(
+    store: object,
+    thread_id: str,
+    workspace_task: _GatewayWorkspaceSelection | None,
+    load_errors: list[dict],
+) -> set[str]:
+    current_task_id = str(getattr(workspace_task, "task_id", "") or "").strip()
+    task_path = _existing_gateway_workspace_path(
+        getattr(workspace_task, "task_path", "")
+    )
+    if not current_task_id or not task_path:
+        return set()
+    try:
+        links, errors = store.task_links_report(thread_id)
+    except Exception as exc:
+        load_errors.append(
+            _conversation_error(exc, "gateway.conversation.subagent_completion_lineage")
+        )
+        return {current_task_id}
+    load_errors.extend(error for error in errors if isinstance(error, dict))
+    selected = {
+        str(getattr(link, "task_id", "") or "").strip()
+        for link in links
+        if str(getattr(link, "task_id", "") or "").strip()
+        if str(getattr(link, "cancellation_scope", "") or "").strip().lower()
+        != "detached"
+        if _existing_gateway_workspace_path(getattr(link, "task_path", "")) == task_path
+    }
+    selected.add(current_task_id)
+    return selected
+
+
+# LLM: One observation becomes model-visible only when its typed event, exact workspace-lineage
+# root/direct parent, schema and duplicated child identity all agree. Mismatches are never guessed.
 # 函数用途: 校验并净化一条子代理完成事件，返回可安全放进父代理上下文的公开字段。
 def _gateway_subagent_completion_item(
     event: object,
-    root_task_id: str,
+    root_task_ids: set[str],
     load_errors: list[dict],
 ) -> tuple[str, float, dict[str, object]] | None:
     if str(getattr(event, "event_type", "") or "") != "subagent_runner_finished":
         return None
-    if str(getattr(event, "root_task_id", "") or "") != root_task_id:
+    event_root_task_id = str(getattr(event, "root_task_id", "") or "").strip()
+    if event_root_task_id not in root_task_ids:
         return None
-    if str(getattr(event, "parent_agent_id", "") or "") != root_task_id:
+    if str(getattr(event, "parent_agent_id", "") or "").strip() != event_root_task_id:
         return None
     metadata = getattr(event, "metadata", {})
     if not isinstance(metadata, dict):
@@ -2229,6 +2279,7 @@ def _gateway_subagent_completion_item(
     observed_at = float(getattr(event, "observed_at", 0.0) or 0.0)
     item: dict[str, object] = {
         "task_id": task_id,
+        "root_task_id": event_root_task_id,
         "status": str(metadata.get("status") or ""),
         "turn_end_reason": str(metadata.get("turn_end_reason") or ""),
         "failure_type": str(metadata.get("failure_type") or ""),

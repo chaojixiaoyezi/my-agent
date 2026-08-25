@@ -11,8 +11,9 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 - `subagents/runner_completion_wake.py` 继续是 `subagent-completion.v1` 的唯一生产者；完成状态仍由 canonical
   child task/attempt 决定，信封正文没有状态权威。
 - `gateway_parts/request_execution.py::_gateway_subagent_completion_context` 只做 ConversationStore 的有界
-  读取投影。它以 thread 当前 sticky workspace 的 exact root task id 为范围，同时要求 observation 的
-  `root_task_id` 与 `parent_agent_id` 都等于该 root，因此只返回直属 child；同 child 多次终态取最新一条。
+  读取投影。普通追加轮会为同一 workspace 产生新 task id；它先按 same-thread、非 detached task link 的
+  exact canonical task path 找出 workspace lineage，再要求 observation root 属于 lineage 且 parent 等于
+  该 root，因此只返回直属 child；同 child 多次终态取最新一条。
 - 模型视图 `conversation-subagent-completions.v1` 最多展开 12 项并保留 total/omitted_count。每项只含
   task/status/turn-end、完成回复、报告与产物 refs；内部 runner/output JSON 不投影。普通聊天可见，named
   Audit prepare 不可见。这是 会话运行时 inter-agent completion message 的本项目适配，不新增第二套消息账本。

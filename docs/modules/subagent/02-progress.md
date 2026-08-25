@@ -9,9 +9,10 @@
   `runner_result_json/output_json/response_file`，因此正常汇总应直接消费 child 最终回复，不能猜
   `child_outputs` 或遍历受管状态目录。
 - 真 TUI 复验进一步定位到普通前台续轮漏接：completion observation 和后台 wake 都完整，但
-  `_gateway_conversation_context` 没有投影它们。当前本地候选按 exact sticky root + direct parent 读取同一
-  observation 账本，每名 child 只留最新 `subagent-completion.v1`，有界注入最终回复与 refs；其它 root、
-  孙代理、Audit prepare 和内部 runner payload 不进入 prompt。定向回归覆盖失败后成功去重与隔离。
+  `_gateway_conversation_context` 没有投影它们。`24940a6` 首版又把最新 follow-up task id 当成原 root，
+  真机仍漏接并产生八次 `find_files`。当前修正按 same-thread task link 的 exact canonical task path 形成
+  workspace lineage，再以 lineage root + direct parent 读取同一 observation 账本；每名 child 只留最新
+  `subagent-completion.v1`。其它 workspace、孙代理、Audit prepare 和内部 runner payload 不进入 prompt。
 - `search_text` 没有 `rg` 时改为流式 Python 遍历；命中页满足后立即返回，不再先物化整棵文件树。
   后备扫描最多 20,000 个文件或 10 秒，触发后返回 typed `scan_limited` 与中文“未完整覆盖”提示，要求缩小
   `path/file_glob` 或安装 `rg`；`rg` 子进程注册同一 cancellation token 的终止回调。

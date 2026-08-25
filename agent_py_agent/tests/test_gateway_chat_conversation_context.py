@@ -603,13 +603,26 @@ def test_gateway_followup_receives_exact_root_child_completion_inputs(tmp_path):
         message="其它根任务内容不能串入",
         now=30.0,
     )
+    agent.conversation_store.bind_task(
+        {
+            "thread_id": thread_id,
+            "task_id": "followup-task",
+            "goal": "继续汇总",
+            "status": "interrupted",
+            "task_path": str(tmp_path / "root-workspace"),
+        }
+    )
+    agent.conversation_store.select_workspace_task(
+        {"thread_id": thread_id, "task_id": "followup-task"}
+    )
 
     followup = _conversation_context(agent, request, "gw-followup", "汇总子代理结果")
     completion_context = followup.subagent_completions
     section = _gateway_injections({"inject": []}, followup)[0]
 
     assert completion_context["schema"] == "conversation-subagent-completions.v1"
-    assert completion_context["root_task_id"] == "root-task"
+    assert completion_context["workspace_task_id"] == "followup-task"
+    assert completion_context["completion_root_task_ids"] == ["root-task"]
     assert completion_context["total"] == 2
     assert completion_context["omitted_count"] == 0
     items = {item["task_id"]: item for item in completion_context["items"]}

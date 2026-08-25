@@ -1,14 +1,19 @@
 # STATUS
 
-## 2026-08-25 子代理完成交付进入普通前台续轮（本地候选）
+## 2026-08-25 子代理完成交付进入普通前台续轮（workspace-lineage 修正中）
 
 - `.7` 真 TUI 已证明 child 的 `subagent-completion.v1` observation 和后台 wake 完整，缺陷只在普通
   Gateway 后续轮：模型没收到完成信封，因而猜目录并误判部分 child 没有产物。
-- 当前候选从同一 ConversationStore 按 sticky root 的 exact `root_task_id + parent_agent_id` 提取直属 child
-  最新终态，最多注入 12 项最终回复和精确 refs；其它 root、孙代理、Audit prepare 与内部
+- `24940a6` 已通过 119 项 focused/严格 gate、推送部署唯一 Gateway，但真 TUI 暴露普通追加轮会把
+  `ConversationThread.workspace_task_id` 推进到新的 follow-up task id；该 id 没有原始调研 child，所以
+  第一版仍漏接并触发八次 `find_files`。该轮已 Esc 停止，不计通过。
+- 当前修正从同一 ConversationStore 先按同 thread、非 detached task link 的 exact canonical task path
+  建立 workspace lineage，再要求 completion event 的 root 位于 lineage 且 parent 等于该 root。最多注入
+  12 项最新回复和精确 refs；其它 workspace、孙代理、Audit prepare 与内部
   `runner_result_json/output_json` 全部隔离。它不新增状态源、不改变完成/权限/验收。
-- 定向回归已覆盖同 child 失败后成功取最新、兄弟 root/孙代理隔离、内部 payload 隐藏和 Audit prepare
-  隔离。仍待本地严格 gate、推送、`.7` 唯一 Gateway 部署，以及原长会话真 TUI 直接整合验证。
+- 定向回归增加“workspace 已切到新 follow-up task id，仍接回原 root child”的现场反例，并继续覆盖同 child
+  失败后成功取最新、兄弟 workspace/孙代理隔离、内部 payload 隐藏和 Audit prepare 隔离。仍待重新 gate、
+  推送部署及原长会话复验。
 
 ## 2026-08-24 子代理普通插话排队与正文回复（`.7` 真 TUI 已通过）
 

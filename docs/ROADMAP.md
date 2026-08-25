@@ -22,13 +22,16 @@
 
 ### 会话运行时 式完成信封进入普通前台续轮
 
-状态：本地候选已过定向回归，待 `.7` 唯一 Gateway 真 TUI 复验
+状态：`24940a6` 首次真 TUI 复验抓到 follow-up task-id 换代，workspace-lineage 修正本地待 gate
 
 解决问题：child 完成信封已经写入 ConversationStore，后台 lifecycle wake 能看到，但用户在同一 TUI
 追加普通消息时，Gateway 只恢复聊天历史、产物和 workspace，没有把这些 typed completion 输入放回模型
 上下文。主代理因此明明在底栏看到全部 DONE，仍猜 `child_outputs`、遍历内部目录，甚至误报只收到部分
-结果。当前候选对照 会话运行时 的 inter-agent completion message，从 exact sticky root 的观察账本提取直属
-child 最新终态，最多展开 12 份最终回复与精确 refs，并明确省略数；其它 root、孙代理、内部
+结果。首次部署只用最新 workspace task id 选 root，但每次普通追加都会生成新 turn/task id，因此仍漏掉
+原调研 root，真机再次出现八次 `find_files` 后已由 Esc 停止。当前修正对照 会话运行时 的 inter-agent
+completion message：用同 thread 非 detached task link 的 exact canonical task path 形成 workspace
+lineage，再从观察账本提取这些 root 的直属 child 最新终态，最多展开 12 份最终回复与精确 refs；其它
+workspace、孙代理、内部
 `runner_result_json/output_json` 和 named Audit prepare 全部隔离。部署后必须恢复原长会话，证明模型直接
 整合已有十名 child 结果而不再搜索内部路径，再继续用户指定的长链追加任务。
 

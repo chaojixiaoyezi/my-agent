@@ -107,9 +107,10 @@ child 的自然最终回复、typed lifecycle event 与真实 artifact refs 是�
 2. 同一交接包里的 artifact refs、`declared_output_refs` 与 `final_report_ref`。
 3. 只有这些结构化交接内容缺失或损坏时，才由宿主把 run 内部结果文件当恢复证据。
 
-后台 lifecycle wake 与用户在同一 TUI 里追加的普通前台消息必须读取同一份完成信封。前台续轮会按当前
-sticky workspace 的 exact root id，从 ConversationStore observation 中选择 `root_task_id` 和
-`parent_agent_id` 都等于该 root 的直属 child，按 task id 去重后注入最新结果。模型应直接用这些
+后台 lifecycle wake 与用户在同一 TUI 里追加的普通前台消息必须读取同一份完成信封。普通追加轮会换
+task id，但继续复用原 canonical task workspace；前台续轮会按 same-thread、非 detached task link 的 exact
+task path 形成 workspace lineage，再从 ConversationStore observation 中选择 root 属于 lineage、且
+`parent_agent_id == root_task_id` 的直属 child，按 task id 去重后注入最新结果。模型应直接用这些
 `completion_message` 与精确 refs 汇总；不要猜 `child_outputs`、遍历 `work/agents`，也不要读取
 `runner_result_json/output_json`。若有界视图显示 `omitted_count > 0`，改用正式子代理树/结果索引补读。
 
