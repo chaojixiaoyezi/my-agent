@@ -1,5 +1,22 @@
 # TESTS
 
+## 2026-08-25 显式 output_files 祖先冲突必须整批返工
+
+真实 r28 批次同时声明 `/internal`、`/internal/core` 和 `/internal/param`，三个 child 均已启动并在 4 分钟内
+写出重复 API。新增回归只比较同一次调用里主动提供的结构化路径段，不解析 goal、不扫描实际文件：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_orchestration_create_subagents_items.py \
+  agent_py_agent/tests/test_orchestration_create_subagents_items_policy.py \
+  agent_py_agent/tests/test_orchestration_tools.py \
+  agent_py_agent/tests/test_tool_input_schema.py \
+  agent_py_agent/tests/test_tool_input_normalize_gate.py -q --tb=short
+```
+
+当前结果 59 passed。覆盖父目录/子目录整批 `not_started`、等价文件路径、exact 冲突对和修复动作，以及 `core`/`corex`、
+不同文件、未声明 output 继续允许；最终仍须在同一真 TUI 观察模型收到结构化错误后自行重拆。
+
 ## 2026-08-25 角色提示、heredoc 与 tmux 3.3a 复制真失败回归
 
 本轮三个失败都来自同一长 TUI `ma-97468f3-longchain-r27`，不得用项目名写专项分支：leaf 角色提示被丢弃、

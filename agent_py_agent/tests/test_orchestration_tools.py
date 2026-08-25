@@ -63,6 +63,7 @@ def test_create_subagents_model_spec_uses_template_index_not_full_prompt():
     assert "并行编码任务必须拆成互不重叠的文件或模块写入范围" in spec.description
     assert "共同目标目录和该项独占范围" in spec.description
     assert "互不重叠的文件或模块范围" in item_schema["properties"]["goal"]["description"]
+    assert "祖先/子目录重叠会在创建前整批退回" in spec.description
     assert "不是完整写集、权限或机器锁" in spec.description
     assert "顶层 goal 只是可选批次说明" in spec.description
 

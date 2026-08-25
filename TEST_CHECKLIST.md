@@ -202,9 +202,10 @@
   ToolCall/ToolResult，而是安装唯一有界 CompactionSummary handoff。真实 UserTurn 保持在 handoff 之后；
   Task Runtime State 暴露 canonical Todo exact ids 与 `create_subagents.items[].covers` 字段，宿主不按标题猜。
 - [ ] 已有 canonical Todo 时，root/child 的单项和批量 `create_subagents` 在落任何 run 前执行同一原子
-  planned-delegation 预检：`covers/output_files` 都是可选结构化提示，不是权限、完整写集或创建前置条件。
+  planned-delegation 预检：`covers/output_files` 都是可选结构化提示，不是权限或完整写集；省略时不猜，
+  但主动提供后必须通过 exact covers、workspace 上界和同批 output 无相同/祖先关系的结构检查。
   未绑定 child 正常创建并用真实 run id 记进度，不关闭现有 Todo；未知/关闭/重复的显式 covers，以及显式
-  output 越出 workspace，都必须零创建并返回 typed repairs；可选输出的同批父子路径覆盖仍走现有冲突门。
+  output 越出 workspace，或同批显式 output 相同/互为祖先，都必须零创建并返回 typed repairs。
   不解析自然语言、不做质量/完成验收。
   223 项历史 focused 已通过，
   fresh r13 已证明错误批次零 child、模型能自行细分计划并合法创建第一名 child；taxonomy 漏码已修。
@@ -233,8 +234,9 @@
   更窄凭据/用户目录 deny 与远程 owner home 围栏必须保留。
 - [ ] TUI `/stop` 在前台 turn 运行/提交时精确绑定 turn id；前台让出但当前 conversation
   仍有唯一 live background task 时也可停止，不得因 TUI 本地 `is_running=false` 拒绝发送。
-- [ ] 同批、同级或父子 child 的 `output_files/output_refs` 重叠时仍可创建；这些字段不产生
-  文件所有权、持久 workspace 租约或动态 `locked_files`。显式越出父级 workspace 仍须在创建前拒绝。
+- [ ] 既有同级/父子 child 的 `output_files/output_refs` 不产生文件所有权、持久 workspace 租约或动态
+  `locked_files`；但同一次 `create_subagents.items` 主动提供的 `output_files` 若完全相同或互为祖先/子路径，
+  必须整批 `not_started` 并返回冲突 item/path 供模型缩窄或分批。未声明写集不猜，越出父 workspace 仍拒绝。
 - [ ] child 完成事件在后台轮开始时只采样一次；采样后才创建的 DONE wake 保持 pending 并另开新轮。
   新鲜终态轮的自然回复不等待 root task status 充当第二验收器。
 - [ ] 单 Gateway 内后台车道按 `owner + durable thread_id` 隔离；同 thread 继续由 run claim

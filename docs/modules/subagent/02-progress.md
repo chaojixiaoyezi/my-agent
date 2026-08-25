@@ -1,5 +1,16 @@
 # Subagent Progress
 
+## 2026-08-25 同批显式 output 范围祖先冲突（本地候选）
+
+- `ma-97468f3-longchain-r27` 部署 leaf 角色提示后，r28 父级仍把骨架 worker 的结构化 `output_files`
+  声明为整个 `/internal`，同时把 `/internal/core`、`/internal/param` 交给另外两名并行 worker；三名都按各自
+  goal 执行，数分钟内即出现 `Context/GetCurrentContext` 重复声明，证明问题在父级批次结构而非 child 越界。
+- 会话运行时 仍只提供 disjoint write set 软说明，不做目录锁；本项目利用已有可选结构化提示做更窄的输入自洽门：
+  同批已声明 output 完全相同或互为祖先/子路径时整批 `not_started`，返回 exact item/path 让模型缩窄或分批。
+  不提供 output 时不猜，不读取 goal、文件内容、diff 或历史 run，也不改变共享 cwd/权限。
+- 复现回归先红后绿，创建链 5 个 focused 文件当前 59 项通过；待严格 gate、推送、单 Gateway 部署后在同一
+  TUI 用全新目录重派，确认模型收到冲突后自行返工且没有任何部分 child 落盘。
+
 ## 2026-08-25 Leaf 当前角色提示与局部修改纪律（本地候选）
 
 - 真 TUI 的 examples worker 越界改 `internal/core`，局部补丁失败后多次整文件覆盖；代码核对发现
@@ -7,7 +18,8 @@
 - 对照 会话运行时 worker shared-workspace 规则，创建 snapshot 现在冻结 `name_zh/prompt_zh`，runner 只注入当前
   角色；worker 明确独占分工、不撤销兄弟改动、局部修改先 patch。提示仍不参与权限或状态裁决。
 - heredoc payload 同时从后台 `&` 检测中剔除，Go `&Context{}` 不再诱发整文件 fallback；角色/shell 组合
-  focused 35 项通过，待严格 gate、单 Gateway 部署和同 session 下一批 worker 真测。
+  focused 35 项通过并随 `85433d4` 部署。r28 状态文件和 child TUI 已证明当前 worker 提示真实注入；该批
+  后续冲突来自父级主动声明的祖先范围，已转入上方第二层结构化预检候选。
 
 ## 2026-08-25 并行编码写入范围软纪律（本地候选）
 

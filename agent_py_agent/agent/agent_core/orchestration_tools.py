@@ -112,10 +112,10 @@ class ValidateSingleGoalRequest:
     allowed_tools: list[str] | None
 
 
-# LLM: The plan/write-set preflight must finish before create_run/save/publish.
-# Its failure is an atomic, explicitly not-started tool result and never changes
-# task progress, child lifecycle, user constraints, or completion state.
-# 函数用途: 把计划内派工校验失败包装成模型可直接修正参数后重试的结构化回执。
+# LLM: The plan/declared-write-scope preflight must finish before
+# create_run/save/publish. Its failure is an atomic, explicitly not-started tool
+# result and never changes progress, lifecycle, constraints, or completion state.
+# 函数用途: 把计划绑定或显式范围校验失败包装成模型可直接修正参数后重试的结构化回执。
 def _planned_delegation_result(
     agent: SimpleAgent,
     items: list[CreateSubagentItem],

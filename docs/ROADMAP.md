@@ -25,7 +25,7 @@ session 先补齐这次调研，再连续做两个小追加和多子代理复刻
 
 ### Leaf 角色行为与共享工作区修改纪律
 
-状态：本地候选 focused 与严格 gate 已通过，待推送、`.7` 单 Gateway 部署及同一 TUI 后续复刻验证
+状态：`85433d4` 已严格 gate、推送并部署；r28 真实 child 已验证角色提示注入，继续观察跨批职责行为
 
 解决问题：Click→Go 复刻的 worker-2 被分配 examples，却扩到 `internal/core`、覆盖兄弟文件，并在局部补丁
 失败后用 `head/write_file/mv/heredoc` 整文件重写。对照 会话运行时 `core/src/agent/role.rs` 后确认，本项目 leaf
@@ -36,7 +36,7 @@ runner 把当前 role `prompt_zh` 直接丢弃，worker 实际从未看到共享
 
 ### heredoc 正文不能冒充后台 shell 操作符
 
-状态：本地候选 shell focused 与严格 gate 已通过，待推送、部署后真 TUI 复验
+状态：`85433d4` 已严格 gate、推送并部署；待真 TUI 自然命中 heredoc 源码正文复验
 
 解决问题：worker 写 Go 源码时，heredoc 正文中的 `&Context{}` 被宿主当成 shell 独立 `&`，返回
 `BACKGROUND_PROCESS_MODE_REQUIRED`；模型随后改用整文件覆盖，放大共享目录冲突。
@@ -46,7 +46,7 @@ runner 把当前 role `prompt_zh` 直接丢弃，worker 实际从未看到共享
 
 ### tmux 3.3a 拖选/右键复制写穿
 
-状态：本地候选 TUI focused 与严格 gate 已通过，待推送、部署和用户 attach 后实际粘贴
+状态：`85433d4` 已严格 gate、推送并部署；tmux 真实命令已核对，待用户 attach 后实际粘贴
 
 解决问题：`.7` 的 tmux 3.3a 明确显示 `load-buffer` 没有 `-w`，旧实现却调用
 `tmux load-buffer -w -`；mock 测试虚构返回 0，导致界面高亮、右键事件和内部 clipboard 都正常，外层系统
@@ -159,14 +159,15 @@ code-size、diff 与 clean-package 均通过。推送、`.7` 单 Gateway 部署�
 
 ### 会话运行时 式并行编码互斥写入范围
 
-状态：本地候选 focused 通过，待当前长复刻自然结束后严格 gate、部署与同 TUI 复验
+状态：第二层本地候选 59 项 focused 通过，待严格 gate、部署与同 TUI r29 复验
 
 解决问题：当前 Click→Go 复刻的多个 child 虽有不同职责标题，却同时写旧目标的同一组参数文件；宽职责
 child 还覆盖多个兄弟模块。三路运行到 230+ 轮仍互相制造编译错误，既浪费 token，也使最终产物不可归因。
 
-当前进展：对照 会话运行时 `multi_agents_spec.rs` 的 disjoint write set，把“共同目标目录 + 每项独占文件/模块
-范围 + 重叠职责分批”写入唯一 `create_subagents` 模型说明、items 参数和 item goal 描述。该约束仍是软
-纪律；`output_files` 不恢复为完整写集/权限/锁，宿主不解析 goal 猜目录或业务正确性。13 项 focused 通过。
+当前进展：第一层已对照 会话运行时 把“共同目标目录 + 每项独占文件/模块范围 + 重叠职责分批”写入唯一模型
+说明。部署后 r28 又主动声明 `/internal`、`/internal/core`、`/internal/param` 并被放行，三个 worker 数分钟内
+写出重复 API。第二层只比较同一次调用中主动提供的结构化 `output_files`：相同或祖先/子路径整批
+`not_started` 并返回 exact conflicts；省略时不猜，不恢复完整写集、权限、锁或业务验收。59 项 focused 通过。
 
 ### 会话运行时 式同一父级分批创建
 

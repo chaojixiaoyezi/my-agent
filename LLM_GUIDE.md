@@ -56,7 +56,8 @@
   报告正文不参与完成裁决。
 - 当前 canonical `task_progress` 已有计划时，`create_subagents` 在任何 child 落盘前执行一份原子结构预检：
   `covers` 与 `output_files` 都是可选结构化提示。提供的 covers 必须绑定仍 open、且未被同批其它 item
-  占用的 exact id；提供的 output 必须位于父级 workspace。省略 covers 时 child 按真实 run id 记进度，
+  占用的 exact id；提供的 output 必须位于父级 workspace。同批多项主动声明的 output 完全相同，或存在
+  祖先/子目录关系时也在创建前整批退回；省略 output 时宿主不猜实际写集。省略 covers 时 child 按真实 run id 记进度，
   不会给现有 Todo 打勾。无效的显式值统一返回 `effect_outcome=not_started + required_repairs`，整批零创建。
   这个合同不读 goal/标题/代码量，不判断质量或完成，也不能靠 capability grant 扩到兄弟目录；模型修正
   结构化参数后重试原任务。它的控制报码必须
@@ -77,6 +78,7 @@
 - 并行代码 child 必须按 会话运行时 的 disjoint write set 软纪律拆分：每个 item 的 goal 同时写清共同目标目录和
   该项独占的文件/模块范围，职责宽到会覆盖兄弟项或会修改同一文件/模块时不得同批创建。`output_files`
   可以辅助说明交付范围，但仍不是完整写集、权限或机器锁；宿主不解析 goal 猜路径，也不恢复目录锁。
+  唯一硬反馈只来自调用者自己提供的结构化 output：同批相同或祖先/子目录声明原子拒绝，要求模型缩窄或分批。
 - `orchestration` 不进渐进披露折叠区；`create_subagents`、`send_guidance`、
   `cancel_subagents` 和 `resolve_capability_requests` 必须从前台首次模型调用就直接可见。
   `tool_search` 继续用于 /goal、外部协作、web、vision、meta 和 MCP 等延迟能力。
@@ -123,7 +125,8 @@
   一个旧会话的长 policy 回合不能占住整个用户的子代理完成唤醒。
 - 普通 child 自动继承直接父级的结构化工作区上界，孙代理逐层继承同一上界；不要求模型重复声明父级
   本来就能写的目录。`output_files` 可记录用户明确交付目标和冲突线索，批量时可由负责写入的 item 分别
-  声明；它不是完整写集或写权限，也不能把父级工作区外的自然语言路径变成权限。模型没有声明产物时，
+  声明；它不是完整写集或写权限，也不能把父级工作区外的自然语言路径变成权限。同批显式声明若相同或
+  互为祖先/子路径，创建入口只退回这一批让模型重新分工；模型没有声明产物时，
   编排器不得凭空生成 Markdown
   业务交付合同；child 的 typed status、最终回复与系统 `final_report_ref` 已构成 会话运行时 式完成交接。
   历史 `system_default_output_ref=true` 只作旧账恢复，不进入模型可见文件合同或父级 expected outputs。

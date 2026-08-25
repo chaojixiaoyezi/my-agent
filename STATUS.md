@@ -11,7 +11,7 @@
 - 普通 JSON 与流式入口的失败回归均先红后绿，现各证明 4 次 open、3 次 wait；尚待完整 provider focused、
   严格 gate、推送和唯一 Gateway 部署。
 
-## 2026-08-25 并行编码 child 写入范围重叠（本地候选）
+## 2026-08-25 并行编码 child 显式范围重叠（第二层本地候选）
 
 - `.7` 同一长 TUI `ma-97468f3-longchain-r27` 的 Click→Go 复刻中，7 个实现 child 被口头拆成不同职责，
   但至少 3 个长期同时改旧目标 `click-go-replica/internal/param/`；一名宽职责 child 还覆盖 core、param、
@@ -20,8 +20,11 @@
 - 对照 会话运行时 `会话运行时-rs/core/src/tools/handlers/multi_agents_spec.rs:724-745`，并行代码子任务必须有 disjoint
   write set。当前本地候选只把同义软纪律补进唯一 `create_subagents` description、items 参数和逐项 goal
   说明：共同目标目录必须一致，每项写清独占文件/模块范围，重叠职责不能同批。
-- `output_files` 继续只是可选提示，不新增机器锁、不解析自然语言猜路径，也不让宿主判断哪份代码正确。
-  `test_orchestration_tools.py` 13 项通过；为保留当前长任务真实样本，尚未重启唯一 Gateway。
+- 第一层部署后 r28 给出更强反例：骨架 item 主动声明整个 `/internal`，另两项主动声明 `/internal/core` 与
+  `/internal/param`；角色提示均已注入，但父级的结构化分工自相矛盾，数分钟内即出现重复声明。当前第二层
+  候选只对同一次调用里主动提供的相同或祖先/子路径整批返回 `not_started + exact conflicts`，让模型缩窄
+  或分批；省略 output 时不猜，不新增机器锁、不解析 goal/diff、不判断业务质量。创建链 59 项 focused 通过，
+  待严格 gate、推送和唯一 Gateway 部署后在原 TUI 用全新 r29 复验。
 
 ## 2026-08-25 运行中 child 偷走主代理完成通知（本地候选）
 
@@ -364,8 +367,9 @@
   `SpawnReservation` 源码。my-agent 普通 shell/写文件/patch/派工不再把 cwd 或父子目录写入
   跨 run 持久锁；旧数据库遗留的 `workspace:*` 行不再阻断新 handler。工具幂等、
   精确逻辑资源锁、active turn、owner 墙、写边界和沙箱未删。
-- `output_files/output_refs` 现为交付/验证元数据；同批、同级、父子重叠目标均可创建，
-  活跃 child 也不再向主代理写边界自动注入 `locked_files`。
+- `output_files/output_refs` 现为交付/验证元数据；既有同级、父子重叠目标不形成运行时锁，活跃 child 也不再
+  向主代理写边界自动注入 `locked_files`。2026-08-25 r28 后新增的更窄规则只拒绝同一次调用中主动声明的
+  相同/祖先 `output_files`，不恢复历史 run 锁或未声明写集推断。
 - `ModelCallLedger` 新增每 request/run 的 provider input/output/cache read/cache creation 累计，
   并投影到 `AgentRunResult`、Gateway result 和 runtime fact。无 usage 调用与真实 usage 分开计数；
   该累计不与 TUI 当前 context token 混用。

@@ -105,8 +105,9 @@ def build_create_subagents_model_spec() -> ToolModelSpec:
             "task_progress exact-id 映射：只有 child 与仍 open 项确实是同一工作时才填，提供的未知、已关闭或跨 "
             "item 重复 id 会整批拒绝；省略时 child 按真实 run_id 单独显示，不会给现有 Todo 打勾。返工已关闭项先用 "
             "task_progress 对原 id 传 status=in_progress, correction=true，再绑定原 id；绝不能拿无关 open id 顶替。"
-            "output_files 也是可选交付/冲突提示，不是权限、完整写集或创建前置条件；一旦提供仍必须位于当前 "
-            "workspace。普通 child 自动继承父级工作区权限；goal、output_files 和 capability grant 都不能扩到兄弟"
+            "output_files 也是可选交付/冲突提示，不是权限或完整写集；可以省略，但一旦同批多项提供，"
+            "相同路径或祖先/子目录重叠会在创建前整批退回，所有路径仍必须位于当前 workspace。"
+            "普通 child 自动继承父级工作区权限；goal、output_files 和 capability grant 都不能扩到兄弟"
             "目录。不要为了显得忙而派，也不要重复创建同一任务。派工后的统一职责边界："
             + coordinator_tool_boundary_text()
         ),

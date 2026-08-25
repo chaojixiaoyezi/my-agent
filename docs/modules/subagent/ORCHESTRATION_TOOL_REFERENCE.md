@@ -23,14 +23,15 @@ create/guidance/cancel/resolve 四个直属下级控制入口；普通 leaf 不�
   以真实 run id 形成独立进度行，不关闭现有 Todo。提供的未知、已关闭或同批重复 id 会在创建任何 run
   前整批拒绝，宿主不从 goal 或标题猜绑定。返工已关闭项先用 task_progress 对原 id 传
   `status=in_progress, correction=true` 重开，或省略 covers；不得拿无关 open id 顶替。
-- `output_files/output_refs` 是可选交付元数据，不是文件所有权。同批、同级或父子路径
-  重叠不再拒绝创建，也不会自动加入持久 workspace 锁或其它代理的 `locked_files`。
-  这不改变路径授权：显式输出仍必须在父级 workspace 上界内。
+- `output_files/output_refs` 是可选交付元数据，不是文件所有权；既有同级/父子 run 的路径重叠不会形成
+  持久 workspace 锁或其它代理的 `locked_files`。但同一次批量调用主动提供的 `output_files` 若相同或
+  互为祖先/子路径，会在创建前整批 `not_started`，由模型缩窄范围或分批。未声明写集不猜，显式输出仍
+  必须在父级 workspace 上界内。
 - `allowed_tools` 只是工具偏好提示，不是安全边界；基础读写工具由系统按角色和目标补齐。
 - 子代理自己的资料线索写到对应 item 的 `input_refs`，公共资料才放顶层。
 - 普通 child 自动继承直接父级的结构化工作区上界。用户明确了产物路径时可写 `output_files`；批量派工
-  可由每个负责写入的 item 分别声明。它负责交付身份、读取顺序和冲突提示，不是完整写集、创建前置条件
-  或普通 child 的权限来源；goal 或 output_files 都不能把写权扩大到父级 workspace 外。没有明确路径时
+  可由每个负责写入的 item 分别声明。它负责交付身份、读取顺序和冲突提示，不是完整写集或普通 child 的
+  权限来源；一旦同批声明则必须彼此不重叠。goal 或 output_files 都不能把写权扩大到父级 workspace 外。没有明确路径时
   不要强造。
 - root 的执行纪律覆盖用户完整目标；child 的直接父级 `goal` 是该 child 的完整工作边界。child 应完整
   完成这份具体任务，但不能因根目标更大而实现未分给自己的兄弟项；这是模型软纪律，不是 goal 文本硬门。

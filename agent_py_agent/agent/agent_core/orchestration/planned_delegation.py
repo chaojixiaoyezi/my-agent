@@ -14,10 +14,11 @@ from .dispatch_progress_seed import planned_dispatch_contract
 PLANNED_DELEGATION_ERROR_CODE = "SUBAGENT_PLANNED_DELEGATION_INVALID"
 
 
-# LLM: This is a structural creation gate, not a quality or completion gate. It
-# activates only when an authoritative plan exists and returns data for an
-# atomic not-started tool result; goals and titles never influence its verdict.
-# 函数用途: 汇总调用方主动提供的计划绑定与产物路径错误，未提供这些可选字段时允许创建。
+# LLM: This is a structural creation gate, not a quality or completion gate.
+# Exact plan bindings need a canonical plan, while explicitly declared sibling
+# output collisions are provable without one. Both return one atomic not-started
+# result; goals, titles, filesystem contents, and undeclared writes are ignored.
+# 函数用途: 汇总调用方主动提供的计划绑定、产物越界和同批产物范围冲突；未声明的范围不猜测。
 def planned_delegation_failure(
     agent: object,
     items: list,
@@ -25,36 +26,42 @@ def planned_delegation_failure(
 ) -> dict[str, object] | None:
     del allowed_tool_values
     contract = planned_dispatch_contract(agent, items)
-    if contract is None:
-        return None
     roots = delegated_product_write_roots(agent)
     invalid_output_files: list[dict[str, object]] = []
-    for index, item in enumerate(items):
-        params = getattr(item, "params", None)
-        params = params if isinstance(params, dict) else {}
-        outputs = string_list(params.get("output_files"), TOOL_TEXT_LIST_OPTIONS)
-        if not outputs:
-            continue
-        issues = _output_scope_issues(outputs, roots)
-        if issues:
-            invalid_output_files.append({"index": index, "issues": issues})
+    if contract is not None:
+        for index, item in enumerate(items):
+            params = getattr(item, "params", None)
+            params = params if isinstance(params, dict) else {}
+            outputs = string_list(params.get("output_files"), TOOL_TEXT_LIST_OPTIONS)
+            if not outputs:
+                continue
+            issues = _output_scope_issues(outputs, roots)
+            if issues:
+                invalid_output_files.append({"index": index, "issues": issues})
+    overlapping_output_files = _overlapping_output_files(items, roots)
     if (
-        bool(contract.get("valid"))
+        (contract is None or bool(contract.get("valid")))
         and not invalid_output_files
+        and not overlapping_output_files
     ):
         return None
     repairs = _required_repairs(
-        contract,
+        contract or {},
         roots=roots,
         invalid_output_files=invalid_output_files,
+        overlapping_output_files=overlapping_output_files,
     )
     return {
         "ok": False,
         "error_code": PLANNED_DELEGATION_ERROR_CODE,
-        "error": "本次派工提供了无效的计划绑定，或显式产物声明越出当前工作区；本批没有创建任何子代理。",
-        "planned_dispatch": contract,
+        "error": (
+            "本次派工提供了无效的计划绑定、越出当前工作区的产物声明，或同批互相重叠的"
+            "显式产物范围；本批没有创建任何子代理。"
+        ),
+        "planned_dispatch": contract or {},
         "allowed_workspace_roots": list(roots),
         "invalid_output_files": invalid_output_files,
+        "overlapping_output_files": overlapping_output_files,
         "next_action": {
             "action": "repair_planned_delegation_and_retry",
             "required_repairs": repairs,
@@ -62,6 +69,60 @@ def planned_delegation_failure(
             "preserve_user_constraints": True,
         },
     }
+
+
+# LLM: Only caller-declared local output paths participate. Comparison is by
+# normalized path segments, so `/core` and `/corex` stay disjoint while equal or
+# ancestor/descendant scopes conflict. Missing declarations remain open-world.
+# 函数用途: 找出同一批不同 item 主动声明的相同目录或祖先/子目录范围。
+def _overlapping_output_files(
+    items: list,
+    roots: tuple[str, ...],
+) -> list[dict[str, object]]:
+    resolved_roots = _resolved_roots(roots)
+    comparison_root = (
+        resolved_roots[0]
+        if resolved_roots
+        else Path("/__my_agent_declared_workspace__")
+    )
+    declared: list[tuple[int, str, Path]] = []
+    for index, item in enumerate(items):
+        params = getattr(item, "params", None)
+        params = params if isinstance(params, dict) else {}
+        outputs = string_list(params.get("output_files"), TOOL_TEXT_LIST_OPTIONS)
+        for output in outputs:
+            normalized = output.strip().replace("\\", "/")
+            if not normalized or "://" in normalized:
+                continue
+            try:
+                path = Path(normalized).expanduser()
+                resolved = (
+                    path.resolve(strict=False)
+                    if path.is_absolute()
+                    else (comparison_root / path).resolve(strict=False)
+                )
+            except (OSError, RuntimeError):
+                continue
+            declared.append((index, output, resolved))
+    conflicts: list[dict[str, object]] = []
+    for left_position, (left_index, left_raw, left_path) in enumerate(declared):
+        for right_index, right_raw, right_path in declared[left_position + 1 :]:
+            if left_index == right_index:
+                continue
+            if not (
+                left_path == right_path
+                or is_relative_to(left_path, right_path)
+                or is_relative_to(right_path, left_path)
+            ):
+                continue
+            conflicts.append({
+                "left_index": left_index,
+                "left_output_file": left_raw,
+                "right_index": right_index,
+                "right_output_file": right_raw,
+                "reason": "same_or_nested_output_scope",
+            })
+    return conflicts
 
 
 # LLM: Proposed write paths are resolved only against inherited structured
@@ -136,6 +197,7 @@ def _required_repairs(
     *,
     roots: tuple[str, ...],
     invalid_output_files: list[dict[str, object]],
+    overlapping_output_files: list[dict[str, object]],
 ) -> list[dict[str, object]]:
     repairs: list[dict[str, object]] = []
     if (
@@ -158,6 +220,15 @@ def _required_repairs(
             "allowed_workspace_roots": list(roots),
             "item_indexes": [int(item["index"]) for item in invalid_output_files],
             "reason": "新实现必须位于当前父级工作区；兄弟目录不能靠 goal 或 capability grant 扩权。",
+        })
+    if overlapping_output_files:
+        repairs.append({
+            "action": "split_overlapping_output_scopes",
+            "conflicts": [dict(item) for item in overlapping_output_files],
+            "reason": (
+                "同批每个 item 只声明自己独占的最窄文件或目录。宽范围初始化若包含兄弟负责的子目录，"
+                "应先单独完成，或把声明缩到真正独占的文件后再并行。"
+            ),
         })
     return repairs
 
