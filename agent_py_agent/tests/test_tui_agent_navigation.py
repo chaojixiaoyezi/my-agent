@@ -291,11 +291,11 @@ def test_child_footer_makes_back_and_escape_semantics_explicit() -> None:
             focused_agent_run_id="child-a",
             focused_agent_name="worker-a",
             focused_agent_status="RUNNING",
-            notice="已发送给当前子代理：继续检查操作手感",
+            notice="已排队给当前子代理：继续检查操作手感",
         ),
     )
     assert fragments_text(running_notice.footer).strip() == (
-        "已发送给当前子代理：继续检查操作手感"
+        "已排队给当前子代理：继续检查操作手感"
     )
 
     terminal = TuiRuntime("nav-footer-terminal")

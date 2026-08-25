@@ -62,10 +62,11 @@ def read_gateway_agent_view(
     )
 
 
-# LLM: Guidance uses one caller-supplied stable message id, binds it to the
+# LLM: Child input uses one caller-supplied stable message id, binds it to the
 # canonical current AgentAttempt, and writes one ConversationStore idempotency
-# receipt. It never resumes a terminal child or creates a replacement run.
-# 函数用途: 把普通用户补充要求精确投进一个正在执行或等待启动的子代理回合。
+# receipt. Acceptance means queued only; provider consumption is a later state.
+# It never resumes a terminal child or creates a replacement run.
+# 函数用途: 把普通用户消息精确排进当前子代理回合，并返回真实的排队状态。
 def send_gateway_agent_guidance(
     agent: object,
     *,
@@ -135,9 +136,11 @@ def send_gateway_agent_guidance(
         ) from exc
     return {
         "ok": True,
-        "delivery": "accepted",
+        "delivery": "queued",
+        "status": "pending",
         "operation_id": stable_id,
         "guidance_id": entry.guidance_id,
+        "expected_turn_id": expected_turn_id,
         "run_id": str(getattr(task, "id", "") or ""),
     }
 

@@ -51,11 +51,7 @@ def acknowledge_injected_turn_input(
 
     acknowledged = 0
     guidance_pending = state.get("_guidance_ack_ids")
-    guidance_ids = (
-        sorted(str(item) for item in guidance_pending if str(item or "").strip())
-        if isinstance(guidance_pending, set)
-        else []
-    )
+    guidance_ids = _guidance_ack_ids_in_injection_order(state, guidance_pending)
     if guidance_ids:
         entries = _guidance_ack_entries(state, guidance_ids)
         acknowledged_entries = [
@@ -129,11 +125,7 @@ def mark_injected_turn_input_submitted(
     if store is None or not isinstance(state, dict):
         return 0
     guidance_pending = state.get("_guidance_ack_ids")
-    guidance_ids = (
-        sorted(str(item) for item in guidance_pending if str(item or "").strip())
-        if isinstance(guidance_pending, set)
-        else []
-    )
+    guidance_ids = _guidance_ack_ids_in_injection_order(state, guidance_pending)
     entries = _guidance_ack_entries(state, guidance_ids)
     submitted_entries = [
         entries[guidance_id]
@@ -174,11 +166,7 @@ def restore_injected_turn_input_for_provider_retry(agent: object, params: object
     if store is None or not isinstance(state, dict):
         return 0
     pending = state.get("_guidance_ack_ids")
-    guidance_ids = (
-        sorted(str(item) for item in pending if str(item or "").strip())
-        if isinstance(pending, set)
-        else []
-    )
+    guidance_ids = _guidance_ack_ids_in_injection_order(state, pending)
     entries = _guidance_ack_entries(state, guidance_ids)
     prepared = [entries[item] for item in guidance_ids if entries.get(item) is not None]
     if not prepared:
@@ -215,10 +203,11 @@ def release_reserved_turn_input_after_attempt(
 ) -> tuple[str, ...]:
     state = getattr(params, "live_archive_state", None)
     pending = state.get("_guidance_ack_ids") if isinstance(state, dict) else None
-    guidance_ids = (
-        tuple(sorted(str(item) for item in pending if str(item or "").strip()))
-        if isinstance(pending, (set, list, tuple))
-        else ()
+    guidance_ids = tuple(
+        _guidance_ack_ids_in_injection_order(
+            state if isinstance(state, dict) else {},
+            pending,
+        )
     )
     # No receipt was reserved in this attempt, so acquiring the Gateway turn lock would turn a
     # normal compact into an exact-turn lifecycle error in direct/fake runtimes.
@@ -574,6 +563,33 @@ def _queue_guidance_ack(params: object, entries: list[Any]) -> None:
             if str(getattr(entry, "guidance_id", "") or "")
         }
     )
+
+
+# LLM: The pending set is membership authority while the insertion-ordered entry
+# map preserves the FIFO sequence injected into the provider prompt. Unknown
+# legacy ids are appended deterministically and cannot reorder known user input.
+# 函数用途: 按实际注入顺序取出待提交或待确认的插话 ID。
+def _guidance_ack_ids_in_injection_order(
+    state: dict[str, object],
+    pending: object,
+) -> list[str]:
+    if not isinstance(pending, (set, list, tuple)):
+        return []
+    pending_ids = {
+        str(item or "").strip()
+        for item in pending
+        if str(item or "").strip()
+    }
+    if not pending_ids:
+        return []
+    entries = state.get("_guidance_ack_entries")
+    ordered = (
+        [str(item) for item in entries if str(item) in pending_ids]
+        if isinstance(entries, dict)
+        else []
+    )
+    ordered.extend(sorted(pending_ids.difference(ordered)))
+    return ordered
 
 
 def _guidance_ack_entries(state: dict[str, object], guidance_ids: list[str]) -> dict[str, Any]:

@@ -1371,9 +1371,10 @@ def _navigate_agent_back(params: TuiCreateKeybindingsParams) -> bool:
 
 
 # LLM: A child input gets one stable client id and an idempotent Gateway mailbox
-# submission. Network uncertainty retries only that same id in a daemon thread;
-# it never creates a main-agent ChatJob or blocks prompt_toolkit rendering.
-# 函数用途: 将普通自然语言插入当前子代理，并把投递状态显示在该子代理页面。
+# submission. HTTP acceptance leaves the pending row visible; only the child
+# provider-consumed event may promote it into transcript history. Network
+# uncertainty retries only that same id and never creates a main-agent ChatJob.
+# 函数用途: 将普通自然语言排进当前子代理，并一直显示到模型真正收到为止。
 def _tui_submit_agent_input(
     event,
     params: TuiCreateKeybindingsParams,
@@ -1411,10 +1412,8 @@ def _tui_submit_agent_input(
             except Exception:
                 result = {"ok": False, "http_status": 0}
             if isinstance(result, dict) and result.get("ok") is True:
-                # Gateway 回执只证明消息箱已接受，并不证明模型已在本次边界消费。
-                # 因此撤掉等待回执后显示普通用户消息，不伪造 steer_promoted。
-                runtime.cancel_active_turn_input(message_id)
-                runtime.enqueue_prompt(message_id, display_text, queued=False)
+                # Gateway 回执只证明消息箱已接受；保持 pending，等待 child
+                # provider-consumed 事件按同一 message_id 原子提升为用户消息。
                 runtime.set_notice(
                     _agent_guidance_sent_notice(display_text),
                     duration_seconds=2.5,
@@ -1439,19 +1438,21 @@ def _tui_submit_agent_input(
             _restore_failed_agent_input(app, params, text)
             return
 
-    threading.Thread(target=deliver, daemon=True).start()
+    # 先发布“正在确认”再启动 worker，避免极快回执先写入
+    # “已排队”后又被主线程的旧状态覆盖。
     runtime.set_notice("正在确认子代理消息…", duration_seconds=1.2)
+    threading.Thread(target=deliver, daemon=True).start()
     app.invalidate()
 
 
-# LLM: The acknowledgement is a bounded display preview of the exact submitted
-# user text. It confirms mailbox acceptance only and carries no delivery authority.
-# 函数用途: 生成输入框下方短暂可见的子代理消息发送回执。
+# LLM: The acknowledgement is a bounded preview of one mailbox-accepted but not
+# yet provider-consumed child input. It carries no delivery or reply authority.
+# 函数用途: 提示消息已进入子代理排队区，稍后由结构化消费事件收口。
 def _agent_guidance_sent_notice(text: str) -> str:
     preview = " ".join(str(text or "").split())
     if len(preview) > 32:
         preview = preview[:31].rstrip() + "…"
-    return f"已发送给当前子代理：{preview}" if preview else "已发送给当前子代理"
+    return f"已排队给当前子代理：{preview}" if preview else "已排队给当前子代理"
 
 
 # LLM: Failed delivery restoration runs on the prompt_toolkit event loop. It

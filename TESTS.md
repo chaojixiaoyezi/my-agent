@@ -380,6 +380,19 @@ receipt 在真实注入事件前不进入稳定历史；外部 ID 不得移除�
 不携带正文。`.13` 还必须用真实长回合
 覆盖“连续两条补充、滚离尾部、注入确认、结束竞态”四步，单元测试不能替代真机通过。
 
+2026-08-24 子代理详情页插话回执必须在上述主代理合同之上额外证明：Gateway 成功只是
+`queued/pending`；快回执不能被后到的“正在确认”覆盖；两条连续消息在 provider 消费前均
+保留 pending，消费后按 exact id/FIFO 进入 user history；child 公开事件 sink 只在 provider 成功后发
+`active_turn_input_consumed`；系统提示明确禁止只在 thinking 中回应真实用户。focused 至少运行：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_runtime_guidance.py agent_py_agent/tests/test_tool_model_generation.py agent_py_agent/tests/test_tui_input.py agent_py_agent/tests/test_tui_agent_navigation.py agent_py_agent/tests/test_gateway_agent_control_service.py agent_py_agent/tests/test_background_notice_display.py agent_py_agent/tests/test_integration_coverage_context.py -q --tb=short
+```
+
+`.7` 真 TUI 必须在启动前公开 tmux 名称，进入一名运行 child 后连续发两条普通中文消息，验证
+排队行、顺序消费、普通 assistant 回复以及 child 继续原任务。不能用直接写 guidance 文件或人工改任务
+产物代替真实按键。
+
 Gateway chunk JSONL 的两个本机 reader 必须共享 byte-offset 合同：只消费换行已完整落盘的 UTF-8 行，末尾
 半行保留原 offset，下一次补齐后恰好交付一次；暂时读取失败不得把 offset 清零造成重复。focused 使用
 `test_gateway_client.py + test_gateway_streaming.py` 同时覆盖富 TUI 与普通 CLI。

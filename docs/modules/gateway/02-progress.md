@@ -1,5 +1,18 @@
 # Gateway Progress
 
+## 2026-08-24 child guidance 排队/消费两阶段回执（本地候选）
+
+- `/client/agent-guidance` 的 HTTP 202 现在只返回 `delivery=queued,status=pending` 和 exact
+  `expected_turn_id`，不再把消息箱接受写成模型已处理。薄 TUI 保留该 message-id 的 pending 行，
+  明确失败才撤下并恢复输入。
+- child runner 的 provider 请求成功后，既有 ConversationStore 先把 exact receipt 推进为
+  `consumed`，同一边界再由 durable child transcript 发布 `active_turn_input_consumed`。TUI 只按
+  exact client ids 提升自己已登记的 pending，不比对正文或提示文案。多条 receipt 按 provider 注入 FIFO
+  提交/消费，不按随机 guidance UUID 重排。
+- focused 回归已覆盖快速 202 不被后到的“正在确认”覆盖、两条 pending 持续可见、provider
+  消费后 exact/FIFO 进入 user history，以及 child sink 的消费事件。待 `.7` 唯一 Gateway 真 TUI
+  验证普通 assistant 回复和原任务继续。
+
 ## 2026-08-24 单 Gateway HTTP 固定工作池（已部署真 TUI）
 
 - `.7` 唯一 Gateway PID `557079` 被 Linux OOM killer 杀死；系统证据为进程匿名常驻约 6.68 GB、整机内存

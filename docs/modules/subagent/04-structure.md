@@ -35,6 +35,10 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   `write_progress` typed 方法，只有没有该方法时才退回普通 callable；因此对象本身不可调用也不会再丢失
   工具卡和工具前 commentary。详情的首条 user block 单独来自 canonical `SubAgentTask.goal`，名册短标题
   `description` 只留在固定 child 行。
+- 运行 child 的用户输入复用 ConversationStore 唯一 guidance receipt。Gateway HTTP 成功只表示
+  `queued/pending`；`BackgroundTranscriptSink.complete_active_turn_input` 只在 provider 成功消费后把
+  exact `client_message_ids` 写入上述 child 事件流。导航页的 `TuiRuntime` 据此将本地 pending
+  提升为 user history；这条展示回执不代替 receipt 状态，也不能改 child 生命周期。
 
 ## 2026-08-24 Child attempt registration and activation
 

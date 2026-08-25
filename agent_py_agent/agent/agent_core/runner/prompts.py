@@ -26,9 +26,11 @@ SUBAGENT_DEFAULT_THOUGHT = "根据父代理派工执行，并保留真实结果�
 SUBAGENT_DEFAULT_PLAN: tuple[str, ...] = ("理解目标", "执行任务", "核对真实结果", "交回结果和引用")
 
 
-# LLM: Every delegated runner receives the shared persistence discipline while
-# its structured context remains the authority for identity, scope, and tools.
-# 函数用途: 生成子代理每次模型调用使用的系统提示与执行边界。
+# LLM: Every delegated runner receives the shared persistence discipline and
+# live-user reply etiquette while structured context remains the authority for
+# identity, scope, tools, and lifecycle. Reply etiquette is model behavior only;
+# machine delivery continues to use typed guidance receipts.
+# 函数用途: 生成子代理每次模型调用使用的系统提示、执行边界和用户插话回复习惯。
 def subagent_runner_system_prompt(context: SubAgentExecutionContext) -> str:
     if _audit_source_runtime_profile(context):
         return _audit_source_worker_system_prompt(context)
@@ -49,6 +51,9 @@ def subagent_runner_system_prompt(context: SubAgentExecutionContext) -> str:
         "不能把候选排序、结构频次或工具提示当成业务结论，也不能把部分覆盖说成完整覆盖。"
         "怎样分析、是否委派、是否复核和怎样交付，由你结合本轮用户目标、可用工具及真实结果"
         "自主决定，不要编造固定流程。\n"
+        "运行中如果收到新的真实用户消息，它与普通聊天输入同等优先：先在普通 assistant 回复中"
+        "直接回答或确认用户，再继续工具和原任务（除非用户要求停止或改向）；不要只在 thinking"
+        "里回应，也不要把用户消息当成无须回复的内部便签。\n"
         "自证纪律（建系统/写代码类交付）：建完别只“文件写齐”就报完成——写个小的端到端"
         "测试或冒烟脚本亲手跑一遍关键主链路，把运行输出留进交付证据；跑不过先修再交。\n"
         "数据纪律（分析/统计/排名类交付）：聚合前先识别明显异常记录（缺字段/重复/数量级"

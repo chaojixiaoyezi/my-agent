@@ -455,6 +455,46 @@ def test_background_transcript_sink_reuses_free_code_diff_renderer() -> None:
     assert any("class:tui-diff-add" in fragment[0] for fragment in new_line)
 
 
+def test_child_transcript_publishes_consumed_input_only_after_provider_acceptance() -> None:
+    """child sink 只在模型请求成功后发布 exact 用户消费回执。"""
+    from agent_py_agent.agent.conversation.background_transcript import (
+        BACKGROUND_TRANSCRIPT_SCHEMA,
+        BackgroundTranscriptSink,
+    )
+
+    rows: list[dict[str, object]] = []
+
+    def append_event(_agent, **kwargs) -> None:
+        rows.append(
+            {
+                "schema": BACKGROUND_TRANSCRIPT_SCHEMA,
+                "seq": len(rows) + 1,
+                **kwargs,
+            }
+        )
+
+    request_id = "bg-agent:child-a:attempt-a"
+    sink = BackgroundTranscriptSink(
+        SimpleNamespace(),
+        thread_id="thread-child-a",
+        task_id="child-a",
+        request_id=request_id,
+        event_writer=append_event,
+    )
+
+    sink.begin_active_turn_input(("agent-steer-1", "agent-steer-2"))
+    assert rows == []
+    sink.complete_active_turn_input(("agent-steer-1", "agent-steer-2"))
+
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "active_turn_input_consumed"
+    assert rows[0]["phase"] == "completed"
+    assert rows[0]["block_id"] == f"{request_id}:active-input:1"
+    assert rows[0]["payload"] == {
+        "client_message_ids": ["agent-steer-1", "agent-steer-2"]
+    }
+
+
 def test_gateway_notice_page_transports_background_event_cursor(tmp_path: Path) -> None:
     """独立 event_after 游标不会与最终通知 created_at 游标互相覆盖。"""
     from agent_py_agent.agent.conversation.background_transcript import (

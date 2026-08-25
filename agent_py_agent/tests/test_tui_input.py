@@ -458,6 +458,81 @@ def test_running_gateway_submit_uses_active_turn_receipt_instead_of_job_queue() 
     assert entry.execution_options.rich_transcript is True
 
 
+def test_child_input_stays_queued_until_exact_provider_consumption(monkeypatch) -> None:
+    runtime = TuiRuntime("child-input-queued")
+    submitted: list[dict[str, object]] = []
+
+    class Agent:
+        def request_agent_guidance(self, session_id, **kwargs):
+            submitted.append({"session_id": session_id, **kwargs})
+            return {
+                "ok": True,
+                "delivery": "queued",
+                "status": "pending",
+                "operation_id": kwargs["message_id"],
+            }
+
+    invalidations: list[bool] = []
+    app = SimpleNamespace(invalidate=lambda: invalidations.append(True))
+    params = SimpleNamespace(
+        agent=Agent(),
+        current_session_id="session-child-input",
+        stop_event=threading.Event(),
+        tui_runtime=runtime,
+        agent_navigation=None,
+    )
+    monkeypatch.setattr(
+        tui_keybindings.threading.Thread,
+        "start",
+        lambda worker: worker.run(),
+    )
+
+    for text in ("第一条用户插话", "第二条用户插话"):
+        tui_keybindings._tui_submit_agent_input(
+            SimpleNamespace(app=app),
+            params,
+            run_id="child-a",
+            text=text,
+            display_text=text,
+        )
+
+    pending = runtime.store.snapshot()
+    assert [item.text for item in pending.pending_steers] == [
+        "第一条用户插话",
+        "第二条用户插话",
+    ]
+    assert not [block for block in pending.stable_blocks if block.role == "user"]
+    assert runtime.notice() == "已排队给当前子代理：第二条用户插话"
+    assert [item["message"] for item in submitted] == [
+        "第一条用户插话",
+        "第二条用户插话",
+    ]
+
+    message_ids = [str(item["message_id"]) for item in submitted]
+    request_id = "bg-agent:child-a:attempt-a"
+    assert runtime.publish_background_transcript_events(
+        [
+            {
+                "schema": "background_transcript_event.v1",
+                "seq": 1,
+                "task_id": "child-a",
+                "request_id": request_id,
+                "kind": "active_turn_input_consumed",
+                "phase": "completed",
+                "block_id": f"{request_id}:active-input:1",
+                "payload": {"client_message_ids": message_ids},
+            }
+        ]
+    ) == 1
+    consumed = runtime.store.snapshot()
+    assert consumed.pending_steers == ()
+    assert [block.text for block in consumed.stable_blocks if block.role == "user"] == [
+        "第一条用户插话",
+        "第二条用户插话",
+    ]
+    assert invalidations
+
+
 def test_active_input_outbox_v1_migration_records_tui_execution_defaults() -> None:
     from agent_py_agent.cli.chat_parts.tui_input_delivery import (
         TuiActiveInputOutboxEntry,

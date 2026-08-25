@@ -99,8 +99,9 @@ audit Agent 为空而回退 daemon cwd。
   入口；它只调用本机 `/control`，携带 owner conversation 与 opaque `message_id`，返回值只表示 steer 是否
   被 Gateway 接收，不能创建 fallback request。
 - `agent_core/runtime/guidance.py` 从持久 guidance 的结构化 `channel_message_id` 提取本批关联 ID；正文和
-  FIFO 位置均不参与身份。`BufferedChunkStreamWriter.begin_active_turn_input(ids)` 在 rich client 上写
-  `active_turn_input_consumed`，普通客户端不扩大公开面。
+  FIFO 位置均不参与身份。`begin_active_turn_input(ids)` 只切分新的用户回复段；只有
+  ConversationStore 在 provider 成功后把 exact receipt 推进为 consumed，才调用 sink 的
+  `complete_active_turn_input(ids)` 写 `active_turn_input_consumed`。普通客户端不扩大公开面。
 - `cli/chat_parts/tui_runtime.py` 保存 session-local pending receipt，Gateway event 只提升本 TUI 已登记的
   精确 ID；未知外部 ID 被消费但不创建本地消息。`tui_view_model.py` 分开保存 `pending_steers` 与
   `queued_inputs`，`tui_block_renderer.py` 把两者固定在 composer 上方，不放进滚动 transcript。
@@ -716,6 +717,7 @@ local-unmanaged 只接受已有的 task-local active pointer。解析成功后�
 attempt 时服务明确拒绝且不落消息，不能让下一代 attempt 继承无归属 guidance，也不能放宽 store 校验。
 
 HTTP handler 只负责可信来源、`GatewayControlScope`、字段类型和错误状态映射。guidance 的稳定 operation id
-进入 canonical guidance ledger，重试不重复插入；stop 调用现有 `cancel_subagent_task`。客户端返回父视图只是
+进入 canonical guidance ledger，重试不重复插入。HTTP 成功只报 `queued/pending`，provider 消费由
+child 的 `active_turn_input_consumed` 展示事件另行确认；stop 调用现有 `cancel_subagent_task`。客户端返回父视图只是
 本地 navigation stack 变化，不会调用 stop；`Esc` 才向当前 exact run 发停止。终态 resume 不属于这组三个
 入口，后续若实现必须另设显式 typed 合同。

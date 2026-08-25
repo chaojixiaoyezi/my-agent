@@ -83,7 +83,13 @@ def test_owner_can_view_steer_stop_and_reopen_terminal_child(tmp_path) -> None:
         message="请先运行完整测试",
         message_id="agent-steer-1",
     )
+    assert accepted["delivery"] == "queued"
+    assert accepted["status"] == "pending"
+    assert accepted["operation_id"] == "agent-steer-1"
+    assert accepted["expected_turn_id"]
     assert accepted["guidance_id"] == replay["guidance_id"]
+    assert replay["delivery"] == "queued"
+    assert replay["status"] == "pending"
     entries = agent.conversation_store.recent_guidance("agent_run", child.id)
     assert len(entries) == 1
     entry = entries[0]

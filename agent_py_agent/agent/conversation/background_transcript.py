@@ -29,6 +29,7 @@ _TRANSCRIPT_TURN_ATTR = "_conversation_background_transcript_next_turn"
 _TRANSCRIPT_SETUP_LOCK = threading.Lock()
 BACKGROUND_TRANSCRIPT_EVENT_KINDS = frozenset(
     {
+        "active_turn_input_consumed",
         "assistant_completed",
         "thinking_started",
         "thinking_delta",
@@ -140,6 +141,22 @@ class BackgroundTranscriptSink:
         self._model_text = ""
         self._tool_blocks: set[str] = set()
         self._retry_index = 0
+        self._active_input_index = 0
+
+    # LLM: A real active-turn user message invalidates any uncommitted model
+    # candidate that preceded it. The client ids are correlation only; canonical
+    # delivery remains in ConversationStore and no display event is emitted yet.
+    # 函数用途: 子代理开始处理用户插话时丢弃旧候选回复，并为新的公开回复重新分段。
+    def begin_active_turn_input(self, client_message_ids: tuple[str, ...]) -> None:
+        self._model_text = ""
+        del client_message_ids
+
+    # LLM: Provider acceptance is the only edge that may publish consumption.
+    # The durable child transcript carries opaque client ids so the exact TUI
+    # pending rows can move into history without matching message prose.
+    # 函数用途: 模型真正收到子代理插话后发布结构化消费回执，供当前详情页收起排队提示。
+    def complete_active_turn_input(self, client_message_ids: tuple[str, ...]) -> None:
+        _emit_active_input_consumed(self, client_message_ids)
 
     # LLM: Candidate answer deltas stay private until a subsequent tool start
     # proves that segment was process commentary rather than the committed final.
@@ -390,6 +407,38 @@ class BackgroundTranscriptSink:
             # 展示投影丢失不能把真实模型轮变成失败；canonical transcript、task
             # lifecycle 和工具结果仍由各自权威存储收口。
             return
+
+
+# LLM: Client ids are opaque correlation values; normalization removes only
+# blanks and repeats while preserving provider-injection order.
+# 函数用途: 清理子代理消费回执里的消息 ID，不改变原排队顺序。
+def _normalized_active_input_ids(value: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            item
+            for raw in tuple(value or ())
+            if (item := str(raw or "").strip())
+        )
+    )
+
+
+# LLM: This small display-only helper keeps BackgroundTranscriptSink below the
+# class-size guard. It advances only the sink-local block counter and event stream.
+# 函数用途: 为一批已被模型消费的子代理消息写唯一展示回执。
+def _emit_active_input_consumed(
+    sink: BackgroundTranscriptSink,
+    client_message_ids: tuple[str, ...],
+) -> None:
+    message_ids = _normalized_active_input_ids(client_message_ids)
+    if not message_ids:
+        return
+    sink._active_input_index += 1
+    sink._event(
+        "active_turn_input_consumed",
+        "completed",
+        f"{sink.request_id}:active-input:{sink._active_input_index}",
+        {"client_message_ids": list(message_ids)},
+    )
 
 
 # LLM: The lock lives on the shared Agent, so every background scheduler thread

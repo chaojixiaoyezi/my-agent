@@ -628,6 +628,24 @@ def test_active_turn_user_input_reopens_the_model_reply_sink_once(tmp_path) -> N
     assert sink.client_message_ids == ("steer-client-1",)
 
 
+def test_guidance_consumption_receipt_keeps_provider_injection_fifo() -> None:
+    from agent_py_agent.agent.agent_core.runtime.guidance import (
+        _guidance_ack_ids_in_injection_order,
+    )
+
+    state = {
+        "_guidance_ack_entries": {
+            "guidance-z": object(),
+            "guidance-a": object(),
+        }
+    }
+
+    assert _guidance_ack_ids_in_injection_order(
+        state,
+        {"guidance-a", "guidance-z"},
+    ) == ["guidance-z", "guidance-a"]
+
+
 def test_active_turn_injects_matching_subagent_events_in_fifo_and_acks_after_model_accepts_prompt(
     tmp_path,
 ) -> None:

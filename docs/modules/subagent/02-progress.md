@@ -1,5 +1,17 @@
 # Subagent Progress
 
+## 2026-08-24 子代理插话排队与公开回复（本地候选）
+
+- 现场回执证明用户消息已经进入 exact child guidance 消息箱并被 provider 消费；缺陷是
+  TUI 把 HTTP 接受后的 pending 立即撤下，而模型只在 thinking 中承认用户，没有普通回复。
+- Gateway 现在只报 `queued/pending`；子代理详情页保留 exact message-id 排队行，直到
+  provider 成功边界写入 `active_turn_input_consumed`。详情 runtime 只提升本页已知的 exact ids，
+  连续多条保持注入 FIFO，外部或陌生 id 不能撤下本地消息。
+- child runner 提示增加与普通聊天相同的回复约束：真实用户插话必须在普通 assistant
+  消息中先回答或确认，不能只在 thinking 里回应。该项不解析文案做状态裁决。
+- focused 已覆盖 Gateway 排队状态、快回执提示竞态、两条 pending 的 exact 消费/FIFO、child
+  durable display event 和普通回复提示。待部署 `.7` 后使用公开 tmux 名称做真 TUI 复验。
+
 ## 2026-08-24 终端交互 默认滚轮与主/子代理历史（已部署真 TUI）
 
 - `PageUp/Ctrl+Home` 已证明旧 root/child typed history 完整；实际回归是默认关闭 mouse tracking 后，物理

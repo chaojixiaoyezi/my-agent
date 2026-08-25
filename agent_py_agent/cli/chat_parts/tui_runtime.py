@@ -20,6 +20,7 @@ from .tui_view_model import TuiStateStore
 _BACKGROUND_TRANSCRIPT_SCHEMA = "background_transcript_event.v1"
 _BACKGROUND_TRANSCRIPT_KINDS = frozenset(
     {
+        "active_turn_input_consumed",
         "assistant_completed",
         "thinking_started",
         "thinking_delta",
@@ -730,6 +731,23 @@ class _TuiBackgroundActivityRuntimeMixin:
                 or not block_id.startswith(f"{request_id}:")
                 or not isinstance(payload, Mapping)
             ):
+                continue
+            if kind == "active_turn_input_consumed":
+                raw_ids = payload.get("client_message_ids")
+                message_ids = tuple(
+                    dict.fromkeys(
+                        str(item or "").strip()
+                        for item in (
+                            raw_ids if isinstance(raw_ids, (list, tuple)) else ()
+                        )
+                        if str(item or "").strip()
+                    )
+                )
+                if message_ids:
+                    self.promote_active_turn_inputs(
+                        message_ids,
+                        request_id=request_id,
+                    )
                 continue
             self._publish(
                 kind,

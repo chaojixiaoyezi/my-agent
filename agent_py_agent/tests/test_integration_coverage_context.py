@@ -88,6 +88,8 @@ def test_subagent_runner_uses_task_scoped_soft_persistence_discipline():
     assert "验证必须覆盖当前 goal 实际要求" in prompt
     assert "安装、构建、启动或关键路径失败" in prompt
     assert "有效测试不得仅为变绿而删除、跳过、放宽断言" in prompt
+    assert "先在普通 assistant 回复中直接回答或确认用户" in prompt
+    assert "不要只在 thinking里回应" in prompt
 
 
 def test_scheduled_prompt_not_polluted():

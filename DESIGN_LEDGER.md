@@ -1524,6 +1524,27 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   `expected_turn_id=attempt-1787621674-fdb6e96a` 与 reservation attempt 相同，最终状态 `consumed`；child
   继续多轮 WebSearch 且未失败。root/child `Ctrl+Home` 和 F6 SGR wheel 均通过，测试结束后已回原生复制。
 
+## 2026-08-24 子代理插话的 provider 消费回执与公开回复
+
+状态：本地实现和 focused 回归已通过，待 `.7` 唯一 Gateway 真 TUI 验收。
+
+- 解决问题：现场 guidance receipt 已绑定 exact child attempt 且最终变为 `consumed`，但 TUI 在
+  `/client/agent-guidance` 返回 HTTP 202 时就撤下 pending，把“消息箱已收到”冒充“模型已处理”。
+  同一 child 的 provider thinking 已明确识别用户问话，但模型继续工具任务而没有普通 assistant
+  回应，用户因而同时看到“没有排队”和“不理我”。
+- 会话运行时 对照：`AgentControl::send_input` 把 exact `UserInput` 放入 child thread；TUI 的
+  `pending_steers` 在注入/消费边界前保持可见。终端交互 对照：当前 viewed teammate 的输入
+  立即进入该 teammate 自己的 `pendingUserMessages` 和消息页，再由 runner FIFO 消费。本项目
+  不复制第二套队列，继续使用唯一 ConversationStore guidance receipt。
+- 新合同：Gateway 接受只回复 `delivery=queued,status=pending`；child TUI 保留 exact
+  `message_id` 的灰色 pending 行。只有 provider 请求成功并把 receipt 推进到 consumed 后，child
+  `BackgroundTranscriptSink` 才向同一 run 的耐久展示流写
+  `active_turn_input_consumed(client_message_ids)`；详情页按 exact ids 把 pending 原子提升为 user
+  history，不比对文案。连续多条输入按真实注入顺序提交和展示，不按随机 UUID 排序。
+- 回复边界：用户插话仍是普通 UserTurn，不增加自定义验收器或强制断轮。child 的系统提示
+  明确要求先在普通 assistant 消息中回答或确认真实用户，再继续原任务；provider thinking
+  不能代替对用户的公开回复。机器状态仍只看 typed receipt/event，不解析这句提示。
+
 ## 2026-08-24 子代理名册的选择可见性【状态：已部署 `.7` 并真 TUI 验收】
 
 - 子代理导航的权威仍是按 parent 保存的 ordered exact run rows；八行名册只是 renderer 视窗。历史累计
