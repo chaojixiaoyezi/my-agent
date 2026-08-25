@@ -4096,6 +4096,99 @@ def test_successful_sibling_completion_wakes_are_coalesced_before_one_llm_turn(
     assert reports[0].delivery_status == "sent"
 
 
+def _seed_seven_completion_wakes(agent, store, thread_id: str) -> None:
+    """写入七个终态 child 和七份带长正文/精确报告引用的完成信封。"""
+    for index in range(1, 8):
+        child = agent.subagents.create_run(
+            goal=f"第{index}部分", thought="", plan=["执行"],
+            parent_id="task-root", root_id="task-root",
+        )
+        agent.subagents.lifecycle.set_status(child.id, "DONE")
+    for index in range(1, 8):
+        store.raise_wake_signal(
+            {
+                "thread_id": thread_id,
+                "reason": "subagent_runner_finished",
+                "root_task_id": "task-root",
+                "source_agent_id": f"child-{index}",
+                "metadata": {
+                    "task_id": f"child-{index}",
+                    "status": "DONE",
+                    "completion_schema_version": "subagent-completion.v1",
+                    "completion_message": f"第{index}个子代理的最终结论：" + ("甲" * 900),
+                    "final_report_ref": f"/tmp/child-{index}/final_report.md",
+                },
+                "now": 20.0 + index,
+            }
+        )
+
+
+def _seven_completion_mailbox_fixture(tmp_path):
+    """建立七份长 completion 和一个 4k/5 条有界后台消费者。"""
+    agent = SimpleAgent(
+        AgentConfig(
+            enable_tools=False, memory_path="memory.jsonl",
+            orphan_supervision_interval_seconds=0, background_completion_coalesce_seconds=0,
+            background_pending_wake_prompt_limit=5, background_context_max_total_tokens=4096,
+        ),
+        tmp_path,
+    )
+    backend = _NaturalCompletionBackend()
+    agent.backend = backend
+    store = agent.conversation_store
+    thread = store.get_or_create_thread(
+        {
+            "canonical_user_id": "user-1", "channel": "internal",
+            "channel_conversation_id": "thread-seven-results", "channel_user_id": "user-1",
+        }
+    )
+    store.bind_task(
+        {"thread_id": thread.thread_id, "task_id": "task-root", "goal": "七路并行"}
+    )
+    _seed_seven_completion_wakes(agent, store, thread.thread_id)
+    channels = FakeDeliveryService()
+    runtime = BackgroundMainAgentRuntime(
+        agent=agent,
+        store=store,
+        channels=channels,
+    )
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    return backend, channels, store, scheduler
+
+
+def test_successful_completion_mailbox_drains_every_sibling_under_prompt_pressure(
+    tmp_path,
+) -> None:
+    """长结果可以分批，但没读完前不收口，最终每个 child 引用都必须交付。"""
+    backend, channels, store, scheduler = _seven_completion_mailbox_fixture(tmp_path)
+
+    reports = scheduler.tick(now=40.0)
+
+    assert len(reports) == 1
+    assert len(backend.prompts) == 1
+    assert reports[0].delivery_status == "suppressed"
+    assert reports[0].delivery_reason == "subagent_completion_mailbox_pending"
+    assert store.load_task_link("task-root").status == "active"
+    assert 0 < len(store.pending_wake_signals()) < 7
+
+    all_reports = list(reports)
+    for tick in range(1, 8):
+        if not store.pending_wake_signals():
+            break
+        all_reports.extend(scheduler.tick(now=40.0 + tick))
+
+    rendered_prompts = "\n".join(backend.prompts)
+    for index in range(1, 8):
+        assert f"第{index}个子代理的最终结论" in rendered_prompts
+        assert f"/tmp/child-{index}/final_report.md" in rendered_prompts
+    assert store.pending_wake_signals() == []
+    assert store.load_task_link("task-root").status == "completed"
+    assert all_reports[-1].delivery_status == "sent"
+    assert all_reports[-1].delivery_reason == "root_subagents_terminal"
+    assert all(report.delivery_status == "suppressed" for report in all_reports[:-1])
+    assert len(channels.adapter("internal").sent_messages) == 1
+
+
 def test_completion_coalescing_acknowledges_only_the_selected_wake_snapshot(
     tmp_path,
 ) -> None:

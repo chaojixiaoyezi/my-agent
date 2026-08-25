@@ -32,6 +32,14 @@ CONVERSATION_BACKGROUND_EVENT_REASON_ATTR = "conversation_background_event_reaso
 # model sample.  Finalization uses this snapshot only as an event freshness
 # fence; it never judges whether the user's objective is good enough.
 CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR = "conversation_background_subagent_phase_at_start"
+# A background child-mail turn may own several coalesced durable envelopes.  The
+# exact ids let finalization ignore only the mail sampled by this turn while
+# keeping later or budget-deferred siblings as a closeout barrier.
+CONVERSATION_BACKGROUND_WAKE_SIGNAL_IDS_ATTR = "conversation_background_wake_signal_ids"
+# All lifecycle mail already present when a background turn starts forms a
+# sampling fence. Deferred members wait for a later full mailbox slice; only
+# mail arriving after this snapshot may enter the active-turn safe point.
+CONVERSATION_BACKGROUND_WAKE_SNAPSHOT_IDS_ATTR = "conversation_background_wake_snapshot_ids"
 # A prepare turn is scoped to one exact durable Audit without activating its
 # long-running guarantee.  The stable id and workspace are injected by the
 # gateway after owner/thread-scoped resolution; user prose never supplies them.
@@ -112,6 +120,8 @@ __all__ = [
     "CONVERSATION_CANCELLATION_SCOPE_ATTR",
     "CONVERSATION_BACKGROUND_EVENT_REASON_ATTR",
     "CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR",
+    "CONVERSATION_BACKGROUND_WAKE_SIGNAL_IDS_ATTR",
+    "CONVERSATION_BACKGROUND_WAKE_SNAPSHOT_IDS_ATTR",
     "CONVERSATION_AUDIT_PREPARE_ATTR",
     "CONVERSATION_TRANSIENT_WORKSPACE_ATTR",
     "CONVERSATION_WORKSPACE_EXECUTION_RUNNING_ATTR",

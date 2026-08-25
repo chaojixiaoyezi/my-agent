@@ -17,13 +17,36 @@
 
 ## 下一版优先级
 
-当前 `.7` 长会话暴露 main Working 计时继承 session 面板年龄；本地候选已改为
-`workspace_task_id -> active ThreadTaskLink.created_at` 的精确时钟，并取消 renderer 面板年龄兜底。下一步在
-当前 child/独立 tester 自然结束后部署唯一 Gateway，再用同一 session 的新追加任务验证从 `0:00` 重新计时；
-不能为验证而中断正在运行的 child，也不能另启测试 Gateway。
+当前 `.7` 七路调研已自然结束，却暴露两个同源底座缺口：批量每项已有 goal 时 schema 仍强制重复总 goal；
+7 个 child 全终态后，完成合批又因 token 预算只把 5 份交给 root，导致漏汇总后错误收口。两个本地候选
+分别按 会话运行时 的 handler 形态校验与 parent mailbox 完成通知语义收口。下一步严格 gate 后部署唯一 Gateway，
+在同一 session 先补齐这次调研，再连续做两个小追加和多子代理复刻；不能另启测试 Gateway。
 
 来自 STATUS.md，子代理可进入视图、精确控制以及插话排队/公开回复已转入 COMPLETED；当前继续正式矩阵与
 仍缺直接自然样本的生命周期分支。
+
+### 批量派工目标去重
+
+状态：本地候选 focused 通过，待当前真实 child 结束后严格 gate、推送与 `.7` 真 TUI
+
+解决问题：模型已经为每个并行 child 填好完整 `items[].goal`，旧 schema 仍要求再写一遍整批顶层
+`goal`，真实 MiniMax 调用因此在 handler 前失败并多耗一个自纠回合。
+
+当前进展：根与递归 coordinator 均改为“单个非空 goal 或非空 items”；批量每项 goal 继续原子校验，顶层
+goal 仅作可选说明，两种形态都缺失时仍返回 typed 可恢复错误。对照代码为 会话运行时
+`multi_agents_spec.rs` / `multi_agents_common.rs::parse_collab_input`；三个 focused 文件 65 项通过。
+
+### 完成邮箱有界排空
+
+状态：本地候选定向回归通过，待严格 gate、推送与 `.7` 真 TUI
+
+解决问题：七个直属 child 都已 `DONE`，旧 successful-completion selector 却在上下文投影前按 token 预算
+截成五条；root 只读五份报告便因 canonical 树全终态而关闭任务，另外两条完成通知随后被当成晚事件消费。
+
+当前进展：对照 会话运行时 `forward_child_completion_to_parent` 与 session input queue 的逐项 mailbox 交付，同一
+exact root 的 pending DONE 信封按条数/token 分成有界 active wake；未选成员保留到下一轮，并由采样快照阻止
+安全点提前消费。root closeout 与用户最终投递共同等待邮箱排空。4k 总预算、prompt limit=5 的七路长结果已
+跨多个模型轮逐条读取，只有最后一轮对用户投递一次。
 
 ### 当前任务 Todo 显式读别名
 

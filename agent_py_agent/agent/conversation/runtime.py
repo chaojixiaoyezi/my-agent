@@ -23,6 +23,8 @@ from .agent_activity import BackgroundMainActivitySink, task_progress_items_for_
 from .authority import (
     CONVERSATION_BACKGROUND_EVENT_REASON_ATTR,
     CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR,
+    CONVERSATION_BACKGROUND_WAKE_SIGNAL_IDS_ATTR,
+    CONVERSATION_BACKGROUND_WAKE_SNAPSHOT_IDS_ATTR,
     CONVERSATION_EXECUTION_CWD_ATTR,
     CONVERSATION_REQUEST_ID_ATTR,
     CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR,
@@ -1656,7 +1658,31 @@ def _background_delivery_decision(
         return False, "partial_subagent_success"
     if str(sampled_subagent_phase or "").strip() == "subagents_active":
         return False, "subagent_completion_requires_fresh_turn"
-    return True, "root_subagents_terminal"
+    return _terminal_subagent_delivery_decision(agent, store, wake, root_task_id)
+
+
+# LLM: Owner delivery follows the same durable mailbox barrier as task closeout.
+# Only the exact active batch is sampled; any other same-root lifecycle envelope
+# suppresses this draft without interpreting child prose or terminal tree shape.
+# 函数用途: 根据当前批次之外是否还有未读信封，决定抑制或发送最终汇总。
+def _terminal_subagent_delivery_decision(
+    agent: object,
+    store: ConversationStore | None,
+    wake: dict[str, Any],
+    root_task_id: str,
+) -> tuple[bool, str]:
+    from .task_promotion import conversation_task_has_unseen_lifecycle_wakes
+
+    pending = conversation_task_has_unseen_lifecycle_wakes(
+        store or getattr(agent, "conversation_store", None),
+        root_task_id,
+        active_wake_signal_ids=_background_wake_signal_ids(wake),
+    )
+    return (
+        (False, "subagent_completion_mailbox_pending")
+        if pending
+        else (True, "root_subagents_terminal")
+    )
 
 
 def _background_owner_delivery_committed(
@@ -2262,6 +2288,80 @@ def _background_active_turn_request_ids(
     return tuple(dict.fromkeys(value for value in values if value))
 
 
+# LLM: One background turn may sample a coalesced mailbox slice. These ids are
+# delivery/finalization authority and must come only from the typed wake envelope;
+# the primary id is retained even if older records lack the explicit batch list.
+# 函数用途: 读取当前后台轮已经纳入提示的精确唤醒编号，供事件去重和任务收口使用。
+def _background_wake_signal_ids(wake: object) -> tuple[str, ...]:
+    row = wake if isinstance(wake, dict) else {}
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    raw_batch = metadata.get("batched_wake_signal_ids")
+    values = raw_batch if isinstance(raw_batch, list) else []
+    primary = str(row.get("wake_signal_id") or "").strip()
+    selected = [str(item).strip() for item in values if str(item).strip()]
+    if primary and primary not in selected:
+        selected.insert(0, primary)
+    return tuple(dict.fromkeys(selected))
+
+
+# LLM: Capture every same-root lifecycle envelope that predates this sampling
+# boundary. Items omitted from the active batch remain durable for a later full
+# turn and must not be consumed by the slim mid-turn event injection path.
+# 函数用途: 冻结后台轮开始时已经排队的同任务生命周期信封编号。
+def _background_lifecycle_wake_snapshot_ids(
+    agent: object | None,
+    task_id: str,
+) -> tuple[str, ...]:
+    store = getattr(agent, "conversation_store", None)
+    selected = str(task_id or "").strip()
+    if store is None or not selected:
+        return ()
+    try:
+        loader = getattr(store, "pending_wake_signals_report", None)
+        if callable(loader):
+            signals, load_errors = loader(limit=0)
+            if load_errors:
+                return ()
+        else:
+            signals = store.pending_wake_signals(limit=0)
+    except Exception:
+        return ()
+    return tuple(
+        str(signal.wake_signal_id)
+        for signal in signals
+        if str(getattr(signal, "root_task_id", "") or "").strip() == selected
+        and str(getattr(signal, "reason", "") or "").strip().lower()
+        in SUBAGENT_LIFECYCLE_WAKE_REASONS
+        and str(getattr(signal, "wake_signal_id", "") or "").strip()
+    )
+
+
+# LLM: Background wake identity has one authoritative projection into per-turn
+# attributes. Keep generic scheduler ids singular; lifecycle mail additionally
+# carries the active batch and pre-sampling queue fence used by closeout/safe points.
+# 函数用途: 把当前后台唤醒及其生命周期邮箱快照写入运行参数。
+def _apply_background_wake_attributes(
+    attributes: dict[str, object],
+    request: BackgroundRunRequest,
+    agent: object | None,
+) -> None:
+    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
+    task_id = str(request.task_id or "").strip()
+    lifecycle_reason = str(request.reason or "").strip().lower()
+    wake_signal_id = str(wake.get("wake_signal_id") or "").strip()
+    if not wake_signal_id:
+        return
+    attributes["background_wake_signal_id"] = wake_signal_id
+    if not task_id or lifecycle_reason not in SUBAGENT_LIFECYCLE_WAKE_REASONS:
+        return
+    attributes[CONVERSATION_BACKGROUND_WAKE_SIGNAL_IDS_ATTR] = list(
+        _background_wake_signal_ids(wake)
+    )
+    attributes[CONVERSATION_BACKGROUND_WAKE_SNAPSHOT_IDS_ATTR] = list(
+        _background_lifecycle_wake_snapshot_ids(agent, task_id)
+    )
+
+
 # LLM: background_max_tool_rounds is a per-slice allowance. Carried calls count as the
 # reconstructed baseline, so extend the absolute limit by the same count to preserve the
 # configured number of fresh rounds without resetting same-turn history.
@@ -2325,11 +2425,7 @@ def _background_task_attributes(
         )
     if thread_id and (task_id or scheduler_run_id):
         attributes["conversation_thread_id"] = str(thread_id).strip()
-    wake_signal_id = str(wake.get("wake_signal_id") or "").strip()
-    if wake_signal_id:
-        # The scheduler acknowledges the event that started this turn. The
-        # active-turn inbox only consumes newer events arriving mid-turn.
-        attributes["background_wake_signal_id"] = wake_signal_id
+    _apply_background_wake_attributes(attributes, request, agent)
     if _audit_finding_report_event(request):
         attributes["background_delivery_evidence_refs"] = list(
             _background_delivery_evidence_refs(request)
@@ -3774,9 +3870,11 @@ def _select_wake_batch(
     return _select_same_reason_wake_batch(scheduler, primary, signals)
 
 
-# LLM: This selector coalesces only typed DONE events from one exact root tree;
-# failures and Audit source-worker lifecycles retain their immediate dedicated paths.
-# 函数用途: 把同一批成功子代理的完成信封一起交给主代理，避免只看见最早一名孩子的结果。
+# LLM: This selector takes one bounded mailbox slice of typed DONE events from one
+# exact root. Deferred siblings remain durable and the conversation closeout gate
+# keeps the root active until later slices consume them; never acknowledge a wake
+# merely because the canonical child tree is terminal. Failures/Audit stay separate.
+# 函数用途: 按条数和提示预算读取一批成功完成信封，剩余信封留待后续后台轮。
 def _select_successful_completion_batch(
     scheduler: BackgroundMainAgentScheduler,
     primary: WakeSignal,

@@ -1033,9 +1033,14 @@ proof 的事实见下方 2026-07-12 收口快照。
   交给同一个无工具模型回复轮；仍依赖前一次返回 ID 的 dispatch/inspect 等动作继续延到下一轮，并返回
   `ORCHESTRATION_CALL_DEFERRED`，不再丢成 `UNKNOWN_ERROR`。这使“5 个不同子任务”既不会虚报，也不会
   因原生工具调用批次只实际创建第一个。
-- 2026-07-16 双用户长任务实测又发现 MiniMax 会发出空参数 `create_subagents`：根因是旧 schema 没把
-  `goal` 标为 required。当前工作树已把顶层 `goal` 设为机器必填；`items` 模式也必须带总 goal，并保留
-  每项独立 goal。相关编排、原生工具和网关回归已通过，1.10 尚待当前长任务自然结束后部署复测。
+- 同一 root 的成功 child 完成通知可以合成有界后台模型轮；`.7` 七路调研曾在只读五份后错误收口。当前
+  候选保留 token/条数分批，但延期 sibling 继续留在 durable mailbox，不能被 mid-turn 瘦事件入口提前确认，
+  并在 root closeout 与用户最终投递前形成等待；每批仍保留 child id、typed status 与报告引用。
+- 2026-07-16 双用户长任务实测发现 MiniMax 会发出完全空参数 `create_subagents`。当前合同不再用“全局
+  required 顶层 goal”误伤批量形态，而是在统一 handler 校验二选一：单派必须有非空顶层 `goal`；批量
+  必须有非空 `items` 且每项独立 `goal`，顶层批次 goal 可选。完全空调用仍在创建任何 run 前返回 typed
+  可恢复错误；`.7` 七路调研的真实失败样本证明旧全局 required 会白耗一次自纠，65 项 focused 已覆盖新
+  合同，待当前长任务自然结束后部署正向复验。
 - 同轮 `/stop` 实测还发现终态请求已移入 `done/`、task link 与 response 均为 `interrupted`，但归档 JSON
   残留 `processing`。当前工作树已改成以 response 终态覆盖旧 lease 状态；本地专项回归通过，1.10 部署
   验证尚未完成。

@@ -232,27 +232,28 @@ class CreateSubagentsTool(BaseTool):
         return execute_create_subagents_service(self.agent, params)
 
 
-# LLM: A descendant uses the same create_subagents schema as the root; this adapter only
-# converts the public batch shape into the hierarchy service's structured children list.
-# 函数用途: 把子代理发来的统一 create_subagents 参数转换为下一层创建参数。
+# LLM: A descendant uses the same one-of contract as the root: one non-empty
+# goal or non-empty items whose entries each own a goal. This adapter only converts
+# the public batch shape into the hierarchy service's structured children list.
+# 函数用途: 把子代理发来的单目标或批量 items 转成下一层创建参数。
 def _nested_create_params(
     agent: SimpleAgent,
     params: dict[str, object],
 ) -> dict[str, object] | ToolHandlerOutcome:
     goal = str(params.get("goal") or "").strip()
-    if not goal:
-        return ToolHandlerOutcome(
-            "create_subagents",
-            False,
-            "create_subagents 缺少始终必填的 goal。",
-            error_code="TOOL_INVALID_ARGUMENTS",
-        )
     items = create_items_from_params(params)
     if isinstance(items, str):
         return ToolHandlerOutcome(
             "create_subagents",
             False,
             items,
+            error_code="TOOL_INVALID_ARGUMENTS",
+        )
+    if not goal and not items:
+        return ToolHandlerOutcome(
+            "create_subagents",
+            False,
+            "create_subagents 需要一个非空 goal，或一个含独立 goal 的非空 items 批次。",
             error_code="TOOL_INVALID_ARGUMENTS",
         )
     delegated_items = items or [CreateSubagentItem(goal=goal, params=dict(params))]
@@ -300,23 +301,25 @@ def execute_create_subagents_service(
             error_code="TOOL_INVALID_ARGUMENTS",
         )
 
-# LLM: All root child creation modes converge here; single and batch paths must
-# share identity, scope, progress binding, and lifecycle publication semantics.
-# 函数用途: 校验并创建一个或一批直属子代理，成功后交给统一后台调度链启动。
+# LLM: All root child creation modes converge here. A single child requires goal;
+# a batch is authoritative through each item goal and may omit redundant top-level
+# goal. Both paths share identity, scope, progress, and lifecycle publication.
+# 函数用途: 按单目标或批量 items 校验并创建直属子代理，再交给统一后台调度链启动。
 def _execute_create_subagents(agent: SimpleAgent, params: dict[str, object]) -> ToolHandlerOutcome:
     if not agent.config.enable_subagents:
         return ToolHandlerOutcome("create_subagents", False, "配置已禁用 subagent。", error_code="TOOL_UNAVAILABLE")
+    items_result = _items_result(agent, params)
+    if items_result is not None:
+        return items_result
     if not str(params.get("goal") or "").strip():
-        # goal 是整批派工的结构化意图，items 模式也不能省。这样 schema 入口与直接
-        # execute 入口使用同一硬约束，不靠模型正文猜本批任务是什么。
         return ToolHandlerOutcome(
             "create_subagents",
             False,
-            "create_subagents 缺少始终必填的 goal。这里的 goal 是内部整批派工说明，"
-            "与用户是否使用 /goal 无关；普通聊天任务也可以派子代理。要派工必须说清整批要完成什么。两种正确写法:"
+            "create_subagents 需要一个非空 goal，或一个含独立 goal 的非空 items 批次。"
+            "这里与用户是否使用 /goal 无关；普通聊天任务也可以派子代理。两种正确写法:"
             '① 派一个: {"goal":"这个子代理要完成的具体任务"};'
-            '② 派多个不同任务: {"goal":"整批派工目的","items":[{"goal":"任务A"},{"goal":"任务B"}]};'
-            "请补上顶层 goal 后重试，使用 items 时每项也要有独立 goal；别因为这个就改回自己写。",
+            '② 派多个不同任务: {"items":[{"goal":"任务A"},{"goal":"任务B"}]};'
+            "请补全其中一种后重试；别因为这个就改回自己写。",
             error_code="TOOL_INVALID_ARGUMENTS",
         )
     if "count" in params:
@@ -327,9 +330,6 @@ def _execute_create_subagents(agent: SimpleAgent, params: dict[str, object]) -> 
             "需要并行时使用 items 明确列出互不重复的具体子任务和各自交付边界。",
             error_code="TOOL_INVALID_ARGUMENTS",
         )
-    items_result = _items_result(agent, params)
-    if items_result is not None:
-        return items_result
     related_params, relation_error = prepare_audit_finding_relation(
         agent,
         params,

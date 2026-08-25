@@ -33,7 +33,7 @@ def coordinator_execution_policy_lines() -> list[str]:
         "需要多层协作时不要误以为只能创建 worker；父级要求多层链路时，深度未到目标层前先创建下一层 coordinator。",
         "- 只创建父级任务确实需要的 child；父级明确点名 tester、reviewer 等角色时才创建对应 run，"
         "不要为了凑角色或验收格式自动扩容。",
-        '- 下一层仍使用统一的 create_subagents，例如 {"tool":"create_subagents","goal":"整批目标","items":[{"goal":"子任务"}]}；'
+        '- 下一层仍使用统一的 create_subagents，例如 {"tool":"create_subagents","items":[{"goal":"子任务A"},{"goal":"子任务B"}]}；'
         "长目标可分多次创建，每个 child 的 goal 必须自包含。",
         "- 不要让 worker/writer 代写 coordinator 自己的协调证据；需要共享时引用 artifact_refs/evidence_refs。",
         "- 创建 child/leaf 时必须原样传递父级指定的文件名、目录和质量要求，不要把 solution.py 改成别的模块名。",

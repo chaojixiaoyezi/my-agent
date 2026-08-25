@@ -5,6 +5,10 @@ import json
 from typing import Any
 
 from ...conversation.active_turn_input import append_active_turn_user_input, packet_from_guidance
+from ...conversation.authority import (
+    CONVERSATION_BACKGROUND_WAKE_SIGNAL_IDS_ATTR,
+    CONVERSATION_BACKGROUND_WAKE_SNAPSHOT_IDS_ATTR,
+)
 from ...conversation.models import SUBAGENT_LIFECYCLE_WAKE_REASONS, WakeSignal
 from ...runtime_errors import runtime_error_report
 from .task_identity import durable_task_id
@@ -437,22 +441,37 @@ def _pending_task_events(agent: object, params: object) -> list[WakeSignal]:
         return []
     if load_errors:
         return []
-    excluded_id = _active_background_wake_signal_id(params)
+    excluded_ids = _active_background_wake_signal_ids(params)
     matching = [
         signal
         for signal in signals
         if signal.root_task_id == task_id
         and str(signal.reason or "").strip().lower() in SUBAGENT_LIFECYCLE_WAKE_REASONS
-        and signal.wake_signal_id != excluded_id
+        and signal.wake_signal_id not in excluded_ids
     ]
     return matching[:_TASK_EVENT_LIMIT]
 
 
-def _active_background_wake_signal_id(params: object) -> str:
+# LLM: A coalesced background turn already owns every typed id in its batch;
+# reinjecting siblings as "new" task events duplicates mail and may consume the
+# same completion twice. Legacy turns still expose only the singular id.
+# 函数用途: 读取本轮已纳入提示的唤醒编号集合，供安全点过滤重复事件。
+def _active_background_wake_signal_ids(params: object) -> set[str]:
     attrs = getattr(params, "task_attributes", None)
     if not isinstance(attrs, dict):
-        return ""
-    return str(attrs.get("background_wake_signal_id") or "").strip()
+        return set()
+    selected: set[str] = set()
+    for key in (
+        CONVERSATION_BACKGROUND_WAKE_SIGNAL_IDS_ATTR,
+        CONVERSATION_BACKGROUND_WAKE_SNAPSHOT_IDS_ATTR,
+    ):
+        raw = attrs.get(key)
+        values = raw if isinstance(raw, (list, tuple, set)) else ()
+        selected.update(str(item).strip() for item in values if str(item).strip())
+    legacy = str(attrs.get("background_wake_signal_id") or "").strip()
+    if legacy:
+        selected.add(legacy)
+    return selected
 
 
 def _task_events_not_yet_injected(params: object, events: list[WakeSignal]) -> list[WakeSignal]:

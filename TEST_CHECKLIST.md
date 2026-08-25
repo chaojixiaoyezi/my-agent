@@ -49,10 +49,16 @@
   无模型确认。runner 结果回到 `PENDING` 时只回收 exact run 的启动占位，共享批次 PID 仍活不能阻塞
   即时续派。相关 focused 回归与 r9 的身份/单执行器真机证据已通过；r9 未自然触发 PENDING，故共享 PID
   下即时续派仍待后续 fresh TUI 正向样本。
-- [ ] `create_subagents.items` 只承载可立即并发且彼此不等未来结果的任务；goal 里写“先后”不形成执行顺序。
+- [x] `create_subagents.items` 只承载可立即并发且彼此不等未来结果的任务；goal 里写“先后”不形成执行顺序。
   后项必须读取前项修复/产物/结论时，父级先只创建前项，等 typed lifecycle wake 后再创建后项。该规则只在
-  模型合同中软引导，不解析 goal/role、不恢复机器验收或第二套依赖调度器；15 项 focused 已通过，待 `.7`
-  单 Gateway 真 TUI 证明 tester 不再早于 fixer 启动。
+  模型合同中软引导，不解析 goal/role、不恢复机器验收或第二套依赖调度器；15 项 focused 已通过，`.7`
+  单 Gateway 真 TUI 已证明 fixer 完成并触发 typed wake 后才创建 tester，两者没有并发。
+- [ ] 批量 `create_subagents` 只要求每个 `items[].goal`，不再额外强制一份无机器用途的顶层 `goal`；单派仍
+  必须有非空 `goal`，空批次/空 item 仍原子拒绝。root/descendant/schema 65 项 focused 已通过，真实失败
+  样本已留存；待部署后在同一长 TUI 的下一批自然派工中复验。
+- [ ] 同一 exact root 的 completion mailbox 可按预算分批，但延期 sibling 不能丢、不能被瘦事件入口提前 ack，
+  也不能因 canonical 树已全终态就收口。4k budget + prompt limit 5 下，7 路长结果已在多个模型轮全部读取，
+  中间轮保持 active/suppressed、最后仅投递一次；关键路径 4 项通过，待同一长 TUI 复刻批次自然复验。
 - [ ] 未显式声明 `output_files/output_refs/artifact_refs` 的普通 child 不生成系统 Markdown 业务合同；父级
   只从 typed status、最终回复、`final_report_ref` 与真实 artifact refs 接收结果。旧
   `system_default_output_ref=true` 可恢复但不进入 runner contract、completion wake 或

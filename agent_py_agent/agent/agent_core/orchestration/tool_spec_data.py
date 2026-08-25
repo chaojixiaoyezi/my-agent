@@ -10,15 +10,15 @@ _CREATE_DEPENDENCY_ORDER_RULE = (
     "等 A 的生命周期完成事件自动唤醒后，再单独创建 B。"
 )
 _CREATE_USE_CASES = [
-    "任务能拆成 2+ 个可并行的独立子任务(各自跑、不互相等)——一个一个派、每个一句 goal,或一次给总 goal 并用 items 列多个(每项含独立 goal),并行推进省主代理上下文",
+    "任务能拆成 2+ 个可并行的独立子任务(各自跑、不互相等)——一个一个派、每个一句 goal，或一次用 items 列多个且每项含独立 goal，并行推进省主代理上下文",
     "要动多个文件/多个模块/多个目标,或需要不同角色(研究/实现/检查/汇总)分头干",
     "需要在隔离上下文里跑一段重活(大范围检索、独立验证、整块审计)——派出去、只收结论回来,不拿一堆中间过程塞满主代理上下文",
     "是否委派、派几个、怎样分工由你根据用户目标、可并行性、当前负载、可用工具和运行事实自主决定。持续任务可用 long_running 与 service_window_seconds 表达生命周期；不要为了某种任务类别固定子代理数量、角色、层级或执行顺序",
 ]
 _CREATE_KEYWORDS = ["子代理", "派工", "拆分", "任务", "分别", "分头", "并行", "不同项目", "各项目", "subagent", "delegate", "spawn"]
 _CREATE_PARAMETERS = {
-    "goal": "本次派工要完成的具体目标(始终必填)。只派一个时它就是子代理目标；使用 items 时它是整批派工的总目标",
-    "items": "只在一次派多个可同时立即运行、彼此不等结果的任务时才用;顶层 goal 仍必填，且每项必须自带独立 goal。只派一个别用 items",
+    "goal": "只派一个子代理时必填，写这个子代理的完整目标；使用 items 批量派工时可选，只作整批说明，不替代每项自己的 goal",
+    "items": "一次派多个可同时立即运行、彼此不等结果的任务时使用；每项必须自带独立 goal，顶层 goal 可省略。只派一个时直接传 goal",
     "description": "可选的 3-12 字职责短标题，只说明这个子代理大概负责什么，供 TUI/Web 单行展示",
     "role": "子代理角色模板 id，默认 worker",
     "agent_name": "可选展示名；只影响状态树和报告里的名字，不改变权限",
@@ -37,11 +37,11 @@ _CREATE_PARAMETERS = {
     "audit_source_id": "仅当前命名 Audit 已发布结构化来源时使用；为这个叶子选择一个返回给你的精确 source_id。程序会把已验证的传输事实交给子代理，别把 URL 或 watch_id 重新写进任务步骤",
 }
 _CREATE_PARAMETER_DETAILS = {
-    "goal": "工具内部的整批派工说明，与用户命令 /goal 无关；普通聊天任务也可派工。写清子代理要交付什么，保留分给它的全部硬约束；用户声明的产物格式要求（输出路径、最少字数、文件路径:行号引用、必含章节）要原样写进相关子代理 goal，汇总时保留这些格式要素。",
+    "goal": "与用户命令 /goal 无关；普通聊天任务也可派工。单派时写清这个子代理要交付什么并保留全部硬约束；items 批量模式可省略顶层 goal，每项自己的 goal 才是 child 的完整工作边界。",
     "items": (
         "仅一次派多个可同时立即运行、彼此不等待结果的任务时用；"
         + _CREATE_DEPENDENCY_ORDER_RULE
-        + "顶层 goal 写整批目的，每个元素必须含自己的独立 "
+        + "顶层 goal 可选写整批目的，每个元素必须含自己的独立 "
         "goal、别传空 items。资料线索放 item.input_refs；covers/output_files 都是可选结构化提示，只有事实匹配时才填。"
     ),
     "description": "只写一句职责短标题，例如“实现超级玛丽核心玩法”；不要写过程、状态、路径或完整任务要求。省略时界面会截取 goal 开头。",
@@ -80,6 +80,6 @@ _CREATE_ITEM_PARAMETER_DETAILS = {
 }
 _CREATE_EXAMPLES = [
     '{"tool":"create_subagents","goal":"实现用户认证模块并写到 platform/auth/,要可运行","description":"实现用户认证","output_files":["platform/auth/"]}',
-    '{"tool":"create_subagents","goal":"并行完成认证实现与资料核对","items":[{"goal":"实现注册登录模块","description":"实现注册登录","output_files":["platform/auth/"]},{"goal":"读资料B并写证据摘要","description":"核对资料B","input_refs":["data/b.md"],"output_files":["reports/b.md"]}]}',
+    '{"tool":"create_subagents","items":[{"goal":"实现注册登录模块","description":"实现注册登录","output_files":["platform/auth/"]},{"goal":"读资料B并写证据摘要","description":"核对资料B","input_refs":["data/b.md"],"output_files":["reports/b.md"]}]}',
     '{"tool":"create_subagents","goal":"完成现有 Todo","items":[{"goal":"实现 req-03 用户模块","description":"实现用户模块","covers":["req-03"],"output_files":["src/auth/"]},{"goal":"补齐 req-04 测试","description":"补齐模块测试","role":"tester","covers":["req-04"]}]}',
 ]

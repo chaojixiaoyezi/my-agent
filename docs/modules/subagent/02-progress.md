@@ -1,5 +1,23 @@
 # Subagent Progress
 
+## 2026-08-25 七路完成信封被合批截断（本地候选）
+
+- 七个真实 child 均已 `DONE`，root task state 也有七个 exact id；后台 active wake 只带五份，root 猜路径后
+  将测试/许可误报为未完成并关闭任务。两份报告实际早已落盘，因此不是 child 慢或 TUI 状态错。
+- successful completion selector 保持有界批次；真正修复点是未选成员继续留在 mailbox，并在 root closeout
+  与用户最终投递前形成硬等待。后台轮开始时冻结队列快照，延期信封不能被安全点降成瘦状态后提前 ack。
+- 对照 会话运行时 每个 child completion 进入 parent mailbox 的语义。4k budget、普通 prompt limit=5、七份长
+  completion 已跨多个有界轮全部读到；中间轮 suppressed，最后仅投递一次。待原长会话复刻阶段自然复验。
+
+## 2026-08-25 批量目标不再重复填写（本地候选）
+
+- `.7` 长 TUI 的七路调研已为每个 `items[].goal` 写清完整分工，旧 native schema 仍在 handler 前报
+  `$.goal: 必填缺失`；模型自纠补写整批 goal 后才真正创建 child。
+- 对照 会话运行时 v1 optional schema 与 `parse_collab_input` 运行时形态校验，当前 root/descendant 统一接受单个
+  非空 goal 或非空 items；批量顶层 goal 可选，每项 goal 仍是机器权威。空形态与坏 item 继续原子拒绝。
+- 三个 focused 文件 65 项通过；为不打断仍运行的真实 child，推送、单 Gateway 部署与自然正向复验等待
+  当前调研链结束后进行。
+
 ## 2026-08-25 依赖型子代理分批创建（已部署真 TUI）
 
 - 同一长 TUI 的真实返工中，root 明确说“先修复、再独立测试”，却把 worker/tester 放进一个

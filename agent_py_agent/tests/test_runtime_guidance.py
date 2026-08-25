@@ -722,7 +722,7 @@ def test_active_turn_injects_matching_subagent_events_in_fifo_and_acks_after_mod
     ]
 
 
-def test_active_background_wake_is_left_for_scheduler_ack(tmp_path) -> None:
+def test_active_background_wake_batch_is_left_for_scheduler_ack(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
     store = agent.conversation_store
     thread = store.get_or_create_thread(
@@ -737,26 +737,34 @@ def test_active_background_wake_is_left_for_scheduler_ack(tmp_path) -> None:
     store.bind_task(
         {"thread_id": thread.thread_id, "task_id": "task-1", "goal": "build", "now": 2.0}
     )
-    signal = store.raise_wake_signal(
-        {
-            "thread_id": thread.thread_id,
-            "root_task_id": "task-1",
-            "reason": "subagent_runner_finished",
-            "metadata": {"task_id": "child-1", "status": "DONE"},
-            "now": 10.0,
-        }
-    )
+    signals = [
+        store.raise_wake_signal(
+            {
+                "thread_id": thread.thread_id,
+                "root_task_id": "task-1",
+                "reason": "subagent_runner_finished",
+                "metadata": {"task_id": f"child-{index}", "status": "DONE"},
+                "now": 10.0 + index,
+            }
+        )
+        for index in (1, 2)
+    ]
     params = _tool_loop_params(
         task_id="task-1",
         task_attributes={
             "conversation_task_id": "task-1",
-            "background_wake_signal_id": signal.wake_signal_id,
+            "background_wake_signal_id": signals[0].wake_signal_id,
+            "conversation_background_wake_signal_ids": [
+                signal.wake_signal_id for signal in signals
+            ],
         },
     )
 
     assert has_pending_turn_input(agent, params) is False
     assert inject_pending_turn_input(agent, params, now=20.0) is False
-    assert [item.wake_signal_id for item in store.pending_wake_signals()] == [signal.wake_signal_id]
+    assert [item.wake_signal_id for item in store.pending_wake_signals()] == [
+        signal.wake_signal_id for signal in signals
+    ]
 
 
 def test_request_guidance_is_one_shot_and_does_not_leak_to_next_request(tmp_path) -> None:

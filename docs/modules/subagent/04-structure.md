@@ -6,6 +6,26 @@
 `task_node_closeout` 副本。canonical task/result 是唯一结果事实源；父代理通过结构化 status、blockers、
 findings、artifact refs 和 result payload 阅读子代理工作，再由模型向用户汇总。
 
+## 2026-08-25 root completion mailbox 合批边界
+
+- 每个直属 child 的 `subagent-completion.v1` 都是独立耐久交付义务；canonical 树全终态只证明可以整合，
+  不能证明 root 模型已经读取每份结果。
+- scheduler 可把同一 exact root 的多个成功信封合成有界模型轮。选中的 batch 由 background context projector
+  缩短 `completion_message`，同时保留 child id、status、`final_report_ref`；预算外 sibling 仍在 durable queue。
+- 后台轮开始时记录队列采样快照：快照内但未入 active batch 的信封不能走 mid-turn 瘦事件通道。root 任务
+  关闭和用户最终回复都要等这些延期信封被后续批次完整读取；每批提交后只 ack 本批精确 id。
+- 该结构适配 会话运行时 `forward_child_completion_to_parent -> parent mailbox`：调用次数可以合并，完成消息不能
+  因 token 预算或普通 pending-list 展示上限被提前确认。
+
+## 2026-08-25 create_subagents 单派/批量目标合同
+
+- 单派以顶层非空 `goal` 为 child 的完整目标；批量以非空 `items` 为权威，每个 item 的非空 `goal` 分别
+  约束对应 child，顶层 `goal` 只是可选的人类可读批次说明。
+- native schema 不把任一互斥形态静态写成全局 required；root 与 descendant 在统一 handler 中校验至少
+  命中一种。空调用、空批次且无单目标、item 缺目标仍在创建任何 run 前原子失败。
+- 该结构对照 会话运行时 v1 `spawn_agent`/`parse_collab_input` 的“schema 可选、运行时判形态”，避免为了批量
+  派工复制一份没有身份、权限、调度或交付用途的总目标。
+
 ## 2026-08-25 create_subagents 并行边界
 
 - `agent_core/orchestration/tool_spec_data.py::_CREATE_DEPENDENCY_ORDER_RULE` 是 items 立即并发与依赖任务分批

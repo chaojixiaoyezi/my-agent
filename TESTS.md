@@ -1,5 +1,40 @@
 # TESTS
 
+## 2026-08-25 完成合批不能漏掉 sibling 结果
+
+真实失败样本为 `.7` 同一长 TUI 的七路调研：7 个 child 全部 `DONE`，root 只读取 5 份并把另两份误报为
+未完成。新回归把 7 份长 completion 放进 4k background 总预算，同时把普通 pending prompt limit 设为 5；
+每轮只取有界批次，延期成员必须留在 mailbox，不能被安全点降成瘦事件后提前确认：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_background_main_agent_runtime.py \
+  -q --tb=short \
+  -k 'successful_sibling_completion_wakes_are_coalesced or \
+      successful_completion_mailbox_drains_every_sibling_under_prompt_pressure or \
+      completion_coalescing_acknowledges_only'
+```
+
+当前关键路径结果：4 passed。断言覆盖多个有界模型轮最终读到 7 个 child 的结论前缀和精确报告引用、延期
+wake 在下一轮前仍 pending、root link 保持 active、中间回复全部 suppressed、最终 pending 归零且只投递一次。
+部署后的自然正向样本继续复用原长 TUI。
+
+## 2026-08-25 批量 create_subagents 不重复要求顶层 goal
+
+真实失败样本来自 `.7` 长 TUI `ma-97468f3-longchain-r27`：七个 `items` 都已有独立 `goal`，provider 仍在
+handler 前报 `$.goal: 必填缺失`，模型补发后才创建成功。回归同时覆盖 root 与 descendant 批量入口、省略
+顶层 goal 的成功路径、schema 提示和原有显式批次说明兼容：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_orchestration_tools.py \
+  agent_py_agent/tests/test_orchestration_create_subagents_items.py \
+  agent_py_agent/tests/test_orchestration_create_subagents_tool.py \
+  -q --tb=short
+```
+
+当前结果：65 passed。部署前还需运行 Ruff、doc-sync、strict code-size、diff 与 clean-package；真实自然正向
+样本继续复用同一个长 TUI，不另开 Gateway。
+
 ## 2026-08-25 同一长会话的新主任务必须重置 Working 计时
 
 focused 回归命令：

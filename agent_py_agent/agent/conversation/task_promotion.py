@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .authority import (
     CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR,
+    CONVERSATION_BACKGROUND_WAKE_SIGNAL_IDS_ATTR,
     CONVERSATION_CANCELLATION_SCOPE_ATTR,
     CONVERSATION_TASK_TURN_ACTIVE_ATTR,
     CONVERSATION_TRANSIENT_WORKSPACE_ATTR,
@@ -885,6 +886,11 @@ def complete_current_conversation_task(
                 link is None
                 or store.pending_guidance("task", task_id, limit=1)
                 or _conversation_task_has_open_subagents(agent, task_id)
+                or conversation_task_has_unseen_lifecycle_wakes(
+                    store,
+                    task_id,
+                    active_wake_signal_ids=_active_background_wake_signal_ids(attrs),
+                )
             ):
                 return False
             completed_work_kind = (
@@ -955,6 +961,54 @@ def _background_child_phase_requires_fresh_turn(
         return False
     phase = str(attrs.get(CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR) or "").strip()
     return phase in {"subagents_active", "subagent_state_unknown"}
+
+
+# LLM: Child lifecycle envelopes are durable parent-mailbox obligations. A task
+# may ignore only the exact envelopes sampled by its current background turn;
+# read failures and every other same-root lifecycle wake keep closeout blocked.
+# 函数用途: 判断当前根任务是否还有尚未交给主代理的子代理生命周期信封。
+def conversation_task_has_unseen_lifecycle_wakes(
+    store: object,
+    task_id: str,
+    *,
+    active_wake_signal_ids: tuple[str, ...] = (),
+) -> bool:
+    selected = str(task_id or "").strip()
+    if not selected or store is None:
+        return True
+    loader = getattr(store, "pending_wake_signals_report", None)
+    try:
+        if callable(loader):
+            signals, load_errors = loader(limit=0)
+            if load_errors:
+                return True
+        else:
+            signals = store.pending_wake_signals(limit=0)
+    except Exception:
+        return True
+    from .models import SUBAGENT_LIFECYCLE_WAKE_REASONS
+
+    sampled = {str(item).strip() for item in active_wake_signal_ids if str(item).strip()}
+    return any(
+        str(getattr(signal, "root_task_id", "") or "").strip() == selected
+        and str(getattr(signal, "reason", "") or "").strip().lower()
+        in SUBAGENT_LIFECYCLE_WAKE_REASONS
+        and str(getattr(signal, "wake_signal_id", "") or "").strip() not in sampled
+        for signal in signals
+    )
+
+
+# LLM: The active mailbox ids are trusted per-turn attributes written by the
+# scheduler. Keep the legacy singular id for already persisted/background runs.
+# 函数用途: 从当前后台轮属性读取已采样信封编号，兼容旧的单编号字段。
+def _active_background_wake_signal_ids(attrs: dict[str, object]) -> tuple[str, ...]:
+    raw = attrs.get(CONVERSATION_BACKGROUND_WAKE_SIGNAL_IDS_ATTR)
+    values = raw if isinstance(raw, (list, tuple, set)) else ()
+    selected = [str(item).strip() for item in values if str(item).strip()]
+    legacy = str(attrs.get("background_wake_signal_id") or "").strip()
+    if legacy and legacy not in selected:
+        selected.insert(0, legacy)
+    return tuple(dict.fromkeys(selected))
 
 
 def _audit_owner_report_pending(store: object, task_id: str) -> bool:

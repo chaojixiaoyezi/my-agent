@@ -47,7 +47,7 @@ def test_create_subagents_model_spec_uses_template_index_not_full_prompt():
     assert "你是执行子代理" not in role_detail
     assert "count" not in spec.parameter_descriptions
     assert "count" not in spec.input_schema["properties"]
-    assert spec.input_schema["required"] == ["goal"]
+    assert spec.input_schema["required"] == []
     assert all('"goal"' in example for example in spec.examples)
     assert "职责短标题" in spec.parameter_descriptions["description"]
     item_schema = spec.input_schema["properties"]["items"]["items"]
@@ -60,6 +60,7 @@ def test_create_subagents_model_spec_uses_template_index_not_full_prompt():
     assert "replacement child" in spec.description
     assert "goal 里写‘先 A 后 B’不会形成执行顺序" in spec.description
     assert "等 A 的生命周期完成事件自动唤醒后" in spec.description
+    assert "顶层 goal 只是可选批次说明" in spec.description
 
 
 def test_create_subagents_inherits_current_task_workspace(tmp_path):
@@ -159,6 +160,30 @@ def test_descendant_create_uses_same_public_tool_and_hierarchy_service():
     call_params = nested.call_args.args[1]
     assert [item["goal"] for item in call_params["children"]] == ["写模块 A", "写模块 B"]
     assert nested.call_args.kwargs["tool_name"] == "create_subagents"
+
+
+def test_descendant_batch_does_not_require_redundant_top_level_goal():
+    """递归批量派工与根一致：items 自带目标时无需再复制一份总 goal。"""
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+    from agent_py_agent.agent.tooling.models import ToolHandlerOutcome
+
+    agent = SimpleNamespace(
+        _current_subagent_run_id="parent-child",
+        config=SimpleNamespace(enable_subagents=True),
+    )
+    with patch(
+        "agent_py_agent.agent.agent_core.orchestration_tools.execute_child_creation",
+        return_value=ToolHandlerOutcome("create_subagents", True, "ok"),
+    ) as nested:
+        result = CreateSubagentsTool(agent).execute(
+            {"items": [{"goal": "写模块 A"}, {"goal": "写模块 B"}]}
+        )
+
+    assert result.ok is True
+    assert [item["goal"] for item in nested.call_args.args[1]["children"]] == [
+        "写模块 A",
+        "写模块 B",
+    ]
 
 
 def test_descendant_create_enforces_same_per_call_limit(tmp_path):

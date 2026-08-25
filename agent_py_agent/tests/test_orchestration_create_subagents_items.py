@@ -68,6 +68,28 @@ def _seed_plan(agent: MagicMock, items: list[dict[str, str]]) -> None:
     write_task_progress(agent.root, "plan-root", {"items": items})
 
 
+def test_items_create_without_redundant_batch_goal():
+    """每项已有完整 goal 时，批量入口不应再要求一份顶层复述。"""
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    mock_agent = _agent()
+    mock_agent.subagents.create_run.side_effect = _create_run_sequence()
+    result = CreateSubagentsTool(mock_agent).execute(
+        {
+            "items": [
+                {"goal": "研究终端界面", "description": "终端界面"},
+                {"goal": "研究 Git 命令", "description": "Git 命令"},
+            ]
+        }
+    )
+
+    assert result.ok is True
+    assert [
+        call.kwargs["params"].goal
+        for call in mock_agent.subagents.create_run.call_args_list
+    ] == ["研究终端界面", "研究 Git 命令"]
+
+
 class TestCreateSubagentsItemsMode:
     """测试 create_subagents 的 items 结构化批量入口。"""
 

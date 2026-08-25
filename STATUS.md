@@ -1,6 +1,34 @@
 # STATUS
 
-## 2026-08-25 长会话追加回合继承旧 Working 计时（本地候选）
+## 2026-08-25 七路 child 完成只交给 root 五份（本地候选）
+
+- `.7` 长 TUI `ma-97468f3-longchain-r27` 的 7 个调研 child 全部真实 `DONE`，固定 task state 也保存了 7 个
+  exact `child_run_ids`；测试/构建 child 在 root 汇总前约 4 分钟完成，许可 child 约 7 分钟前完成。root
+  最终却只读到 5 份报告，猜了 5 个不存在路径，并向用户写“测试与许可仍未完成”；随后根 link 错误关成
+  `DONE`，两个未交给模型的 pending wake 被当成 inactive-root 晚事件消费。
+- 根因不是“预算不能分批”，而是 selector 延期 sibling 后没有 mailbox 收口门：后续结构化树只证明全部 child
+  已终态，不能证明模型看过全部交接信封；活动回合安全点还会把延期信封降成瘦状态后提前确认。对照 会话运行时
+  `session/mod.rs::forward_child_completion_to_parent` 与 `session/input_queue.rs` 的耐久 mailbox，当前候选保留
+  有界 completion batch，并冻结本轮开始时的队列快照；延期 sibling 不走瘦事件插入，留给下一后台轮完整读取。
+- 根任务与用户可见最终回复都增加 mailbox barrier：只有当前批次可以忽略，仍 pending 的同 root 生命周期信封
+  会保持 task active 并抑制中间汇总。新回归在 4k budget、prompt limit=5 下用多个有界模型轮排空 7 份长结果，
+  7 个结论前缀和报告引用最终全部出现，前几轮全部 suppressed，最后一轮才完成并只投递一次。当前 4 项关键
+  定向生命周期测试通过；待完整 focused 与严格 gate、推送并部署唯一 Gateway 后做同长会话自然复验。
+
+## 2026-08-25 批量派工重复要求顶层 goal（本地候选）
+
+- `.7` 长 TUI `ma-97468f3-longchain-r27` 的七路代码调研第一次调用已经给出七个
+  `items[].goal`，native schema 仍在 handler 前拒绝 `$.goal: 必填缺失`；MiniMax 读取错误后补写一份整批
+  `goal` 才成功创建 7 个 child。每项目标已经是 child 的完整机器边界，额外总 goal 没有参与身份、权限、
+  调度或交付裁决，只浪费一次模型/工具回合。
+- 对照 会话运行时 v1 `multi_agents_spec.rs` 的可选输入 schema 与
+  `multi_agents_common.rs::parse_collab_input` 运行时 one-of 校验：当前候选允许“单个非空 `goal`”或“非空
+  `items` 且每项非空 `goal`”；批量顶层 `goal` 仅保留为可选说明。两者都缺失、空批次或 item 缺目标仍在
+  创建任何 run 前返回可恢复参数错误，不从普通自然语言猜目标。
+- 根代理与递归 coordinator 共用该合同；65 项 create-subagents focused 回归已通过。待当前 7 路调研自然
+  结束后再推送、部署唯一 Gateway，避免重启打断真实 child；随后同一长会话的复刻批次继续做自然复验。
+
+## 2026-08-25 长会话追加回合继承旧 Working 计时（已部署真 TUI）
 
 - `.7` 长 TUI `ma-97468f3-longchain-r27` 在三小时会话内追加一个新的“修复者完成后再派独立测试者”回合；
   当前 child 仅运行约 3 分钟时，main 却显示 `3:18:04`。`/client/notices` 的结构化现场为
@@ -10,8 +38,9 @@
   绑定 `ConversationThread.workspace_task_id` 对应 active root 的 `ThreadTaskLink.created_at`；较晚 child link
   和旧易失 sink 均不能抢主时钟。Gateway 重启导致 sink 为空时，从同一持久 root 恢复 `waiting` 展示；
   renderer 不再回退面板年龄，缺少结构化起点只显示 `0:00`。
-- `test_conversation_agent_activity.py` 与 `test_background_notice_display.py` 共 35 项通过；待当前真实 child 链
-  自然结束后推送、部署唯一 Gateway，并在同一 session 追加下一任务验证计时从新 root 重新开始。
+- `7c3d9a7` 的两个 focused 文件 35 项与本地严格 gate 已通过并部署 `.7` 唯一 Gateway。同一 session 随后
+  追加七路代码调研：新回合先显示 `Working 0:08`，创建 child 后 main 为 `2:31`、child 为
+  `2:29--2:30`，证明时钟从当前 root 重置且没有再继承三小时 session 年龄。
 
 ## 2026-08-25 后台 root 显式当前 task id 读空 Todo（已部署，真实自然 read 待复验）
 

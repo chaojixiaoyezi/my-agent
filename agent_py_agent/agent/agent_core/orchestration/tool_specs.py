@@ -69,7 +69,7 @@ def _create_subagents_input_schema() -> dict[str, object]:
         _CREATE_PARAMETERS,
         _CREATE_PARAMETER_SCHEMA,
         details=details,
-        required=("goal",),
+        required=(),
     )
     properties = schema.get("properties")
     items_shape = properties.get("items") if isinstance(properties, dict) else None
@@ -87,8 +87,8 @@ def _create_subagents_input_schema() -> dict[str, object]:
     return schema
 
 
-# LLM: 这是递归创建唯一模型合同；保持 goal 必填、items 显式批量、自动启动和
-# 事件回传语义，不重新加入 count/operations/dispatch/inspect 参数。
+# LLM: 这是递归创建唯一模型合同；单派 goal 与批量 items 由运行时做 one-of
+# 校验，items 每项 goal 仍必填；保持自动启动和事件回传，不重加旧控制参数。
 # 函数用途: 构造 create_subagents 给模型看的说明和 JSON Schema。
 def build_create_subagents_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
@@ -96,8 +96,8 @@ def build_create_subagents_model_spec() -> ToolModelSpec:
         description=(
             "把可并行的独立工作交给下级代理。无论当前是主代理、子代理还是孙代理，都使用同一个 "
             "create_subagents；创建成功后下级立即运行，进展、阻塞或完成时系统自动唤醒直接父级，不需要也没有"
-            "查询或推进工具。goal 始终必填；只传 goal 就只创建一个 child，需要多个时必须同时传总 goal 和 "
-            "items，每项都要有独立 goal。"
+            "查询或推进工具。只派一个时传非空 goal；需要多个时传 items，每项都要有独立 goal，顶层 goal "
+            "只是可选批次说明。goal 与 items 都没有时会返回可恢复参数错误。"
             + _CREATE_DEPENDENCY_ORDER_RULE
             + "不支持 operations、count 或 max_concurrency 参数。covers 是可选的 "
             "task_progress exact-id 映射：只有 child 与仍 open 项确实是同一工作时才填，提供的未知、已关闭或跨 "

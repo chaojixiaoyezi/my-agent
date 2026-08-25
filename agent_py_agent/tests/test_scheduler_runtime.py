@@ -20,7 +20,8 @@ class _Backend:
     def __init__(self) -> None:
         self.prompts: list[str] = []
 
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None, on_thinking_delta=None) -> ModelResponse:
+        del on_chunk, on_thinking_delta
         self.prompts.append(prompt)
         return ModelResponse(text="已按计划完成。", backend=self.name)
 
