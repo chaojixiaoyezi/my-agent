@@ -1526,7 +1526,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 
 ## 2026-08-24 子代理插话的 provider 消费回执与公开回复
 
-状态：本地实现和 focused 回归已通过，待 `.7` 唯一 Gateway 真 TUI 验收。
+状态：`2bf4602` 已通过 focused/严格 gate、推送、部署，并在 `.7` 唯一 Gateway 真 TUI 验收通过。
 
 - 解决问题：现场 guidance receipt 已绑定 exact child attempt 且最终变为 `consumed`，但 TUI 在
   `/client/agent-guidance` 返回 HTTP 202 时就撤下 pending，把“消息箱已收到”冒充“模型已处理”。
@@ -1544,6 +1544,12 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 回复边界：用户插话仍是普通 UserTurn，不增加自定义验收器或强制断轮。child 的系统提示
   明确要求先在普通 assistant 消息中回答或确认真实用户，再继续原任务；provider thinking
   不能代替对用户的公开回复。机器状态仍只看 typed receipt/event，不解析这句提示。
+- `.7` 唯一 Gateway PID `610573`、MiniMax-M2.7 的 exact resume
+  `ma-2bf4602-child-chat-r25` 进入运行中的 `agent-d1-researcher-10`，连续输入两条普通中文。
+  两条消息在下一次 provider 消费前同时显示于 pending 区；随后按输入顺序出现在 child 用户历史。
+  同一耐久事件流先写 seq 46 `active_turn_input_consumed`，其中 exact ids 顺序为
+  `agent-steer-b9030ebf56cb4837`、`agent-steer-c9ef34a1ffca42f2`，再写 seq 47 普通
+  `assistant_completed` 分别回答两问，seq 48 继续 `web_fetch` 原任务。`Ctrl+O` 全程留在 child 视角。
 
 ## 2026-08-24 子代理名册的选择可见性【状态：已部署 `.7` 并真 TUI 验收】
 

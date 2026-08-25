@@ -17,20 +17,8 @@
 
 ## 下一版优先级
 
-来自 STATUS.md，子代理可进入视图与精确控制已转入 COMPLETED；当前继续正式矩阵与仍缺直接自然样本的
-生命周期分支。
-
-### 子代理插话的排队回执与公开回复
-
-状态：本地候选与 focused 回归通过，待 `.7` 唯一 Gateway 真 TUI 验收
-
-解决问题：运行 child 的普通输入已进入 canonical guidance 消息箱，但旧 TUI 把 HTTP
-接受当成模型已处理，立即撤下 pending；模型又可能只在 thinking 里承认用户，于是用户
-看不到排队，也收不到普通回复。当前候选复用主代理的 exact receipt：接受只返回
-`queued/pending`，pending 行持续展示；只有 child provider 成功消费后才以 exact client ids 发布
-`active_turn_input_consumed`，再按 FIFO 移入用户历史。child runner 还明确要求在普通 assistant
-回复中先回应真实用户，不能只在 thinking 里答。真机需要连续发两条普通中文消息，
-同时验证排队可见、顺序消费、正文回应和原任务继续。
+来自 STATUS.md，子代理可进入视图、精确控制以及插话排队/公开回复已转入 COMPLETED；当前继续正式矩阵与
+仍缺直接自然样本的生命周期分支。
 
 ### 会话运行时 式同一父级分批创建
 

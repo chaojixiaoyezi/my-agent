@@ -4,6 +4,13 @@
 
 最近收口重点：
 
+- 2026-08-24 `2bf4602` 修复运行中 child 插话“HTTP 接受后立即消失、模型只在 thinking 里理人”的合同
+  错位：Gateway 接受只表示 `queued/pending`，child TUI 继续显示 exact pending；provider 成功消费后才以
+  `active_turn_input_consumed(client_message_ids)` 按 FIFO 提升为正式用户历史。child 系统提示要求先用普通
+  assistant 回答真实用户再继续原任务。148 项相关 focused 与本地严格 gate 通过，已推送、部署 `.7`
+  唯一 Gateway。tmux `ma-2bf4602-child-chat-r25` 中连续两条中文同时排队，随后顺序入历史、获得一条分别
+  回答两问的正文，紧接着继续 `web_fetch`；`Ctrl+O` 未离开 child 视角。
+
 - 2026-08-24 `53498c1` 修复唯一 Gateway 被多 TUI 轮询拖到 6.68 GB 后遭 OOM kill、fresh TUI 只显示
   “正在连接 Gateway”便退出的问题：按 会话运行时 固定执行者/容量 128 背压原则，将 thread-per-request 换成
   16 个复用 daemon worker、128 总在途上限和 typed 503；所有短轮询响应关闭 keep-alive，防单客户端占满

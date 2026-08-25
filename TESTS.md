@@ -393,6 +393,12 @@ python3 -m pytest agent_py_agent/tests/test_runtime_guidance.py agent_py_agent/t
 排队行、顺序消费、普通 assistant 回复以及 child 继续原任务。不能用直接写 guidance 文件或人工改任务
 产物代替真实按键。
 
+2026-08-24 已按上述合同在 `ma-2bf4602-child-chat-r25` 实按通过：从 Prompt 3 的主任务新增并进入运行中的
+`agent-d1-researcher-10`，连续输入两条普通中文，两条均在 provider 消费前同时保留于 pending；消费事件
+携带两个 exact client ids 且保持 FIFO，child 随后以普通 assistant 正文分别回答，并继续执行
+`web_fetch`。`Ctrl+O` 没有切回主代理。唯一 Gateway PID `610573`，有效模型 MiniMax-M2.7；测试者未修改
+长期助手 调研产物，也未停止 child。
+
 Gateway chunk JSONL 的两个本机 reader 必须共享 byte-offset 合同：只消费换行已完整落盘的 UTF-8 行，末尾
 半行保留原 offset，下一次补齐后恰好交付一次；暂时读取失败不得把 offset 清零造成重复。focused 使用
 `test_gateway_client.py + test_gateway_streaming.py` 同时覆盖富 TUI 与普通 CLI。

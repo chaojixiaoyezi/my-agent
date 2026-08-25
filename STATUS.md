@@ -1,5 +1,19 @@
 # STATUS
 
+## 2026-08-24 子代理普通插话排队与正文回复（`.7` 真 TUI 已通过）
+
+- 根因有两层：TUI 把 Gateway 的 HTTP 202“消息箱已收件”提前当成“模型已读”，所以 pending 立即消失；
+  child 提示又没明确区分 thinking 和公开回复，模型可能在思考里承认用户，却继续工具工作而不对用户开口。
+- `2bf4602` 复用唯一 guidance receipt，不另造队列：接受返回 `queued/pending`；只有 provider 成功消费后，
+  child 展示流才写 `active_turn_input_consumed`，TUI 再按 exact ids/FIFO 把 pending 提升为用户历史。模型被
+  明确要求在普通 assistant 正文先回应真实用户，然后继续原任务。
+- 148 项直接 focused、Ruff、doc-sync、strict code-size、diff 和 clean-package 均通过；改动远低于
+  10,000 行，按约定未跑全仓 pytest。提交已推送并部署，唯一 Gateway PID `610573`，有效模型
+  MiniMax-M2.7。
+- tmux `ma-2bf4602-child-chat-r25` 进入 Prompt 3 运行 child 后实按连续两条中文：两条同时保留 pending，
+  随后顺序进入 child 历史，普通 assistant 正文分别回答两问，并继续 `web_fetch`；`Ctrl+O` 没有跳回主
+  代理。测试者没有停止 child 或修改任务产物。
+
 ## 2026-08-24 单 Gateway HTTP OOM 修复（`.7` 真 TUI 已通过）
 
 - 旧唯一 Gateway PID `557079` 被 Linux OOM killer 在约 6.68 GB RSS 时杀死；8 个存活 TUI 的短轮询在
