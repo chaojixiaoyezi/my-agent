@@ -9,13 +9,17 @@ from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime, TuiTurnSummary
 
 
 def _approval_request(request_id: str):
+    return _approval_request_for(request_id, "permission-call", "permission-run")
+
+
+def _approval_request_for(request_id: str, call_id: str, run_id: str):
     call = ToolCall(
-        call_id="permission-call",
+        call_id=call_id,
         tool_name="run_command",
         arguments={"command": "printf fixture"},
         source_protocol="native",
         schema_hash="sha256:permission-fixture",
-        run_id="permission-run",
+        run_id=run_id,
         turn_id="permission-turn",
         attempt_id="permission-attempt",
     )
@@ -658,6 +662,155 @@ def test_gateway_permission_resolution_calls_exact_sink_once() -> None:
             "decision": "denied",
         }
     )
+
+
+def test_concurrent_turn_permissions_are_fifo_and_never_replace_overlay() -> None:
+    runtime = TuiRuntime("permission-fifo")
+    first_turn = runtime.begin_turn("permission-fifo-first")
+    second_turn = runtime.begin_turn("permission-fifo-second")
+    first = _approval_request_for(
+        "permission-fifo-first",
+        "permission-call-first",
+        "permission-run-first",
+    )
+    second = _approval_request_for(
+        "permission-fifo-second",
+        "permission-call-second",
+        "permission-run-second",
+    )
+    results: dict[str, dict[str, object]] = {"first": {}, "second": {}}
+
+    first_thread = threading.Thread(
+        target=lambda: results["first"].update(
+            first_turn.request_permission(first.to_dict())
+        )
+    )
+    second_thread = threading.Thread(
+        target=lambda: results["second"].update(
+            second_turn.request_permission(second.to_dict())
+        )
+    )
+    first_thread.start()
+    deadline = time.monotonic() + 1.0
+    while runtime.store.snapshot().permission is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    overlay = runtime.store.snapshot().permission
+    assert overlay is not None
+    assert overlay.permission_id == first.permission_id
+    second_thread.start()
+    assert runtime.resolve_permission(first.permission_id, "approved")
+    assert runtime.store.snapshot().permission.permission_id == second.permission_id
+    assert runtime.resolve_permission(second.permission_id, "denied")
+    first_thread.join(timeout=1.0)
+    second_thread.join(timeout=1.0)
+
+    assert results["first"]["decision"] == "approved"
+    assert results["second"]["decision"] == "denied"
+    assert runtime.store.snapshot().permission is None
+
+
+def test_external_child_permissions_use_same_fifo_and_exact_writer() -> None:
+    runtime = TuiRuntime("permission-child-fifo")
+    first = _approval_request_for(
+        "attempt-child-first",
+        "child-call-first",
+        "subagent-child-first",
+    )
+    second = _approval_request_for(
+        "attempt-child-second",
+        "child-call-second",
+        "subagent-child-second",
+    )
+    written: list[tuple[str, object, object]] = []
+
+    changed = runtime.sync_agent_permission_requests(
+        [
+            {
+                "run_id": "subagent-child-first",
+                "agent_name": "researcher-1",
+                "request": first.to_dict(),
+            },
+            {
+                "run_id": "subagent-child-second",
+                "agent_name": "tester-2",
+                "request": second.to_dict(),
+            },
+        ],
+        decision_writer=lambda run_id, request, decision: (
+            written.append((run_id, request, decision)) or {"ok": True}
+        ),
+    )
+
+    assert changed is True
+    overlay = runtime.store.snapshot().permission
+    assert overlay is not None
+    assert overlay.permission_id == first.permission_id
+    assert overlay.title.startswith("子代理 researcher-1")
+    assert runtime.resolve_permission(first.permission_id, "approved")
+    assert runtime.store.snapshot().permission.permission_id == second.permission_id
+    assert runtime.resolve_permission(second.permission_id, "cancelled")
+
+    assert [(row[0], row[1]) for row in written] == [
+        ("subagent-child-first", first),
+        ("subagent-child-second", second),
+    ]
+    assert [row[2].decision for row in written] == ["approved", "cancelled"]
+    assert runtime.store.snapshot().permission is None
+
+
+def test_foreground_and_child_permissions_share_one_fifo() -> None:
+    runtime = TuiRuntime("permission-mixed-fifo")
+    foreground_turn = runtime.begin_turn("permission-mixed-foreground")
+    foreground = _approval_request_for(
+        "permission-mixed-foreground",
+        "permission-call-foreground",
+        "permission-run-foreground",
+    )
+    child = _approval_request_for(
+        "permission-mixed-child",
+        "permission-call-child",
+        "subagent-mixed-child",
+    )
+    foreground_result: dict[str, object] = {}
+    written: list[tuple[str, object, object]] = []
+
+    foreground_thread = threading.Thread(
+        target=lambda: foreground_result.update(
+            foreground_turn.request_permission(foreground.to_dict())
+        )
+    )
+    foreground_thread.start()
+    deadline = time.monotonic() + 1.0
+    while runtime.store.snapshot().permission is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert runtime.store.snapshot().permission.permission_id == foreground.permission_id
+    assert runtime.sync_agent_permission_requests(
+        [
+            {
+                "run_id": "subagent-mixed-child",
+                "agent_name": "builder-1",
+                "request": child.to_dict(),
+            }
+        ],
+        decision_writer=lambda run_id, request, decision: (
+            written.append((run_id, request, decision)) or {"ok": True}
+        ),
+    )
+    assert runtime.store.snapshot().permission.permission_id == foreground.permission_id
+
+    assert runtime.resolve_permission(foreground.permission_id, "approved")
+    assert runtime.store.snapshot().permission.permission_id == child.permission_id
+    assert runtime.resolve_permission(child.permission_id, "denied")
+    foreground_thread.join(timeout=1.0)
+
+    assert not foreground_thread.is_alive()
+    assert foreground_result["decision"] == "approved"
+    assert [(row[0], row[1], row[2].decision) for row in written] == [
+        ("subagent-mixed-child", child, "denied")
+    ]
+    assert runtime.store.snapshot().permission is None
 
 
 def _assistant_blocks(runtime) -> list:

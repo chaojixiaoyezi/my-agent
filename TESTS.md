@@ -1,5 +1,33 @@
 # TESTS
 
+## 2026-08-26 子代理具体工具审批回送所属 TUI
+
+第七层安全修复正确让 `controlled_exec(apply=true)` 在 child capability grant 后仍停在
+`APPROVAL_REQUIRED`，但 child 使用的 `BackgroundTranscriptSink` 没有 `request_permission`，因此用户无法
+裁决并让同一调用续跑。回归必须钉住：
+
+- 实际后台 sink 发布完整 exact request，owner TUI 决定后原等待者收到同一 permission 决定；
+- pending record 只位于 owner ConversationStore，并按 root/run/full request 校验；
+- 无显式交互 consumer、租约过期、取消、终态、损坏与 stale 决定全部 fail closed；
+- 前台 main、两个 child 以及 main+child 混合到达时共用一个 FIFO，后到项不能覆盖当前 overlay；
+- child 标题只作显示，HTTP/local writer 都使用服务端原 request；页面切换不隐藏 root 审批面板。
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_gateway_agent_control_service.py \
+  agent_py_agent/tests/test_tui_runtime.py \
+  agent_py_agent/tests/test_gateway_streaming.py \
+  agent_py_agent/tests/test_background_notice_display.py \
+  agent_py_agent/tests/test_tool_round_execution.py \
+  agent_py_agent/tests/test_authorization_gate.py \
+  agent_py_agent/tests/test_tui_view.py \
+  agent_py_agent/tests/test_tui_input.py \
+  -q --tb=short
+```
+
+当前 179 项 focused 全部通过，定向 Ruff 通过。本轮生产/测试改动远低于 10,000 行，不跑全仓 pytest；
+严格 gate、`.7` 单 Gateway 部署和 fresh MiniMax-M2.7 TUI 仍待完成。
+
 ## 2026-08-26 受管后台进程与 PTY start 必须经过精确审批
 
 真机 r43 证明 provider system 能改正“尚未跨机验证”的回复，但模型仍可以在只读要求下

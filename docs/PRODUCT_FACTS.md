@@ -14,7 +14,7 @@
 
 ## 2026-08-26 受管后台进程、PTY 与子代理副作用授权
 
-- **状态：实验性（`467093c` 已部署，直接 run_command 与 PTY 的真 TUI 拒绝均通过；r47 发现 child capability grant 绕过，第七候选 240 项 focused 与严格 gate 通过，待部署和真 TUI）**。
+- **状态：实验性（`c8a01f7` 已部署并通过 child grant/approval 隔离真测；当前工作树已补 owner TUI 审批桥，179 项 focused 通过，尚未部署/真机）**。
   `EffectResolverPolicy` 允许 command parser 和结构化参数 mapping 叠加，各 effect 消费者统一
   取最高风险。`ShellTool` 声明 `run_in_background=true` 为 `dangerous`。
 - 当前 bwrap 只包住文件边界，依然共享主机网络；受管后台进程和新 PTY 也会越过单次
@@ -25,6 +25,11 @@
   r47 证明旧 `controlled_exec` 在已有 grant 后会经直接 `subprocess.Popen` 启动服务。当前候选把其
   runtime sandbox 声明改为真实的 `none`；`apply=true` 仍走与 root 相同的 exact approval binding，
   未批准时 handler 不执行。该边界对齐 会话运行时 child 继承审批策略和 终端交互 worker 回送 leader 确认。
+- `c8a01f7` 的 r51 已证明 child 获得 scope grant 后，具体 `controlled_exec(apply=true)` 仍停在
+  `APPROVAL_REQUIRED` 且 handler/端口均未启动。当前未部署工作树进一步让 child 通过唯一
+  `subagent_tool_approval.v1` 记录向所属 owner TUI 请求决定；主代理与多个 child 共用 FIFO，批准后由现有
+  ToolExecutor 续跑原 ToolCall。无交互客户端、断线、取消、终态和坏记录均返回 unavailable/cancelled，
+  不会自动放行。远程稳定能力仍以部署后的 fresh TUI 证据为准。
 
 ## 2026-08-25 跨回合工具终态折叠与缓存稳定前缀
 

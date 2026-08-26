@@ -1,5 +1,16 @@
 # Subagent Progress
 
+## 2026-08-26 child exact tool approval 上送 owner TUI（本地候选）
+
+- r51 证明 capability grant 与具体批准分账后，child 的危险调用能正确停在 handler 前；但后台 sink 没有
+  `request_permission`，用户看不到确认框，也无法批准后续跑原 ToolCall。
+- 当前候选新增 owner ConversationStore 下唯一 pending record 与显式 TUI consumer lease；决定继续经过
+  owner/root/current-attempt 门和完整 `ToolApprovalRequest` 比对。无界面、断线、取消、终态和坏记录全部
+  fail closed，不从模型回复或 Working 文案猜状态。
+- 前台 main、两个 child 和 main+child 混合并发统一进入一个 TUI FIFO；child 页面与 main 页面共享 root
+  overlay，展示标签不能参与授权。实际 `BackgroundTranscriptSink` 等 179 项 focused 已通过，待严格 gate、
+  `.7` 单 Gateway 部署和 MiniMax-M2.7 真 TUI。
+
 ## 2026-08-25 子代理不再自行生成宿主交接文件（本地候选）
 
 - r31 Shell 补全 child 在业务实现结束后额外调用 `write_file` 写内部 `final_report.md`，宿主随后又从自然

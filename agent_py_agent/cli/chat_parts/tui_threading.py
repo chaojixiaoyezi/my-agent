@@ -222,6 +222,12 @@ def _consume_gateway_background_snapshot(
         return False
     if not isinstance(payload, dict) or payload.get("ok") is not True:
         return False
+    permission_changed = _sync_gateway_agent_permissions(
+        agent,
+        session_id,
+        tui_runtime,
+        payload.get("agent_permission_requests", []),
+    )
     activity_changed = (
         _publish_background_activity(
             tui_runtime,
@@ -257,7 +263,11 @@ def _consume_gateway_background_snapshot(
     if not agent_view_ok:
         return False
     if (
-        fresh or activity_changed or transcript_changed or agent_view_changed
+        fresh
+        or activity_changed
+        or transcript_changed
+        or agent_view_changed
+        or permission_changed
     ) and app_ref[0] is not None:
         app_ref[0].invalidate()
     return True
@@ -292,6 +302,11 @@ def _consume_local_background_snapshot(
     thread_id = str(getattr(thread, "thread_id", "") or "")
     if not thread_id:
         return True
+    permission_changed = _sync_local_agent_permissions(
+        agent,
+        thread,
+        tui_runtime,
+    )
     from ...agent.conversation.agent_activity import conversation_agent_activity
 
     activity = conversation_agent_activity(agent, store, thread_id).to_dict()
@@ -328,10 +343,37 @@ def _consume_local_background_snapshot(
         return False
     if not notices_path.exists():
         if (
-            activity_changed or transcript_changed or agent_view_changed
+            activity_changed
+            or transcript_changed
+            or agent_view_changed
+            or permission_changed
         ) and app_ref[0] is not None:
             app_ref[0].invalidate()
         return True
+    fresh = _read_local_notice_rows(notices_path, seen)
+    if not fresh:
+        if (
+            activity_changed
+            or transcript_changed
+            or agent_view_changed
+            or permission_changed
+        ) and app_ref[0] is not None:
+            app_ref[0].invalidate()
+        return True
+    for row in fresh:
+        _publish_background_notice_row(tui_runtime, row, seen)
+    if app_ref[0] is not None:
+        app_ref[0].invalidate()
+    return True
+
+
+# LLM: Local notice parsing is a display-only bounded adapter. Invalid JSON and
+# duplicate typed timestamps are skipped without changing task/activity state.
+# 函数用途: 读取嵌入式 TUI 尚未显示的后台通知行。
+def _read_local_notice_rows(
+    notices_path: Path,
+    seen: set[float],
+) -> list[dict[str, object]]:
     fresh: list[dict[str, object]] = []
     for line in notices_path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
@@ -346,20 +388,85 @@ def _consume_local_background_snapshot(
             key = float(row.get("created_at") or 0.0)
         except (TypeError, ValueError):
             key = 0.0
-        if key in seen:
-            continue
-        fresh.append(row)
-    if not fresh:
-        if (
-            activity_changed or transcript_changed or agent_view_changed
-        ) and app_ref[0] is not None:
-            app_ref[0].invalidate()
-        return True
-    for row in fresh:
-        _publish_background_notice_row(tui_runtime, row, seen)
-    if app_ref[0] is not None:
-        app_ref[0].invalidate()
-    return True
+        if key not in seen:
+            fresh.append(row)
+    return fresh
+
+
+# LLM: Gateway rows are already owner-scoped; this adapter supplies one exact
+# POST writer and treats any non-confirmed response as failure so the overlay
+# remains open rather than assuming approval delivery.
+# 函数用途: 将单 Gateway 返回的子代理审批请求接进 TUI，并回写用户选择。
+def _sync_gateway_agent_permissions(
+    agent: object,
+    session_id: str,
+    tui_runtime: object,
+    value: object,
+) -> bool:
+    syncer = getattr(tui_runtime, "sync_agent_permission_requests", None)
+    sender = getattr(agent, "request_agent_permission", None)
+    if not callable(syncer) or not callable(sender):
+        return False
+
+    # LLM: The closure preserves canonical run/request and submits the typed
+    # decision only to the dedicated child-approval endpoint.
+    # 函数用途: 回写当前面板选中的精确子代理审批决定。
+    def write_decision(run_id, request, decision):
+        result = sender(
+            session_id,
+            run_id=run_id,
+            request=request.to_dict(),
+            decision=decision.to_dict(),
+        )
+        if not isinstance(result, Mapping) or result.get("ok") is not True:
+            notifier = getattr(tui_runtime, "set_notice", None)
+            if callable(notifier):
+                notifier("审批结果尚未写回，请重试", duration_seconds=2.5)
+        return result
+
+    return bool(syncer(value, decision_writer=write_decision))
+
+
+# LLM: Embedded mode uses the same durable bridge as Gateway mode. Its local
+# writer does not bypass request validation, and consumer renewal is only a
+# liveness lease, never an approval.
+# 函数用途: 在不走 HTTP 的完整 Agent TUI 中同步并处理子代理审批。
+def _sync_local_agent_permissions(
+    agent: object,
+    thread: object,
+    tui_runtime: object,
+) -> bool:
+    syncer = getattr(tui_runtime, "sync_agent_permission_requests", None)
+    root_task_id = str(getattr(thread, "workspace_task_id", "") or "").strip()
+    if not callable(syncer) or not root_task_id:
+        return False
+    from ...agent.subagents.tool_approval_bridge import (
+        list_pending_subagent_tool_approvals,
+        renew_subagent_tool_approval_consumer,
+        resolve_subagent_tool_approval,
+    )
+
+    try:
+        renew_subagent_tool_approval_consumer(agent, root_task_id=root_task_id)
+        rows = list_pending_subagent_tool_approvals(
+            agent,
+            root_task_id=root_task_id,
+        )
+    except (FileNotFoundError, OSError, RuntimeError, TypeError, ValueError):
+        return False
+
+    # LLM: Local resolution still validates the full canonical request under
+    # the process-shared transition lock before changing pending state.
+    # 函数用途: 将嵌入式 TUI 的选择写回同一审批账本。
+    def write_decision(run_id, request, decision):
+        return resolve_subagent_tool_approval(
+            agent,
+            run_id=run_id,
+            request_value=request,
+            decision_value=decision,
+        )
+
+    return bool(syncer(rows, decision_writer=write_decision))
 
 
 # LLM: The TUI cursor advances only through the typed background event page.

@@ -1,18 +1,34 @@
 from __future__ import annotations
 
+import threading
 import time
 
 import pytest
 
+from agent_py_agent.agent.contracts.tool_approval import (
+    ToolApprovalDecision,
+    build_tool_approval_request,
+)
+from agent_py_agent.agent.conversation.background_transcript import (
+    BackgroundTranscriptSink,
+)
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts.agent_control_service import (
     GatewayAgentControlError,
     read_gateway_agent_view,
+    resolve_gateway_agent_permission,
     send_gateway_agent_guidance,
     stop_gateway_agent,
 )
 from agent_py_agent.agent.gateway_parts.control_service import GatewayControlScope
+from agent_py_agent.agent.gateway_parts.http_handlers import read_gateway_client_notices
 from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.subagents.tool_approval_bridge import (
+    list_pending_subagent_tool_approvals,
+    publish_subagent_tool_approval,
+    wait_for_subagent_tool_approval,
+)
+from agent_py_agent.agent.tooling.runtime_contracts import ToolCall
 from agent_py_agent.cli.chat_client_context import GatewayChatClientAgent
 
 
@@ -59,6 +75,25 @@ def _bound_agent_tree(tmp_path):
     )
     scope = GatewayControlScope("local-agent", "chat", "session-a")
     return agent, scope, child
+
+
+def _child_approval_request(run_id: str, request_id: str = "attempt-child"):
+    return build_tool_approval_request(
+        ToolCall(
+            call_id=f"call-{request_id}",
+            tool_name="controlled_exec",
+            arguments={"apply": True, "command": ["python3", "-V"]},
+            source_protocol="native",
+            schema_hash="sha256:child-approval",
+            run_id=run_id,
+            turn_id=request_id,
+            attempt_id=request_id,
+        ),
+        request_id=request_id,
+        round_number=1,
+        call_index=1,
+        description="controlled_exec(python3 -V)",
+    )
 
 
 def test_owner_can_view_steer_stop_and_reopen_terminal_child(tmp_path) -> None:
@@ -186,12 +221,23 @@ def test_thin_client_agent_requests_keep_local_conversation_identity() -> None:
         return 200, {"ok": True}
 
     client._post_gateway_json = post
+    client.request_background_notices("session-a", after=0.0)
     client.request_agent_view("session-a", run_id="child-a")
     client.request_agent_guidance(
         "session-a",
         run_id="child-a",
         message="继续",
         message_id="agent-steer-1",
+    )
+    request = _child_approval_request("child-a")
+    client.request_agent_permission(
+        "session-a",
+        run_id="child-a",
+        request=request.to_dict(),
+        decision=ToolApprovalDecision(
+            request.permission_id,
+            "approved",
+        ).to_dict(),
     )
     client.request_agent_stop(
         "session-a",
@@ -200,10 +246,163 @@ def test_thin_client_agent_requests_keep_local_conversation_identity() -> None:
     )
 
     assert [path for path, _payload, _timeout in calls] == [
+        "/client/notices",
         "/client/agent-view",
         "/client/agent-guidance",
+        "/client/agent-permission",
         "/client/agent-stop",
     ]
     assert all(payload["user_id"] == "local-agent" for _path, payload, _ in calls)
     assert all(payload["channel"] == "chat" for _path, payload, _ in calls)
     assert all(payload["conversation_id"] == "session-a" for _path, payload, _ in calls)
+    assert calls[0][1]["client_capabilities"] == {"tool_approval": True}
+
+
+def test_owner_tui_decision_resumes_exact_child_approval(tmp_path) -> None:
+    agent, scope, child = _bound_agent_tree(tmp_path)
+    request = _child_approval_request(child.id)
+    initial = read_gateway_client_notices(
+        agent,
+        scope=scope,
+        after=0.0,
+        interactive_approvals=True,
+    )
+    assert initial["agent_permission_requests"] == []
+    sink = BackgroundTranscriptSink(
+        agent,
+        thread_id=child.agent_thread_id,
+        task_id=child.id,
+        request_id="child-approval-transcript",
+        event_writer=lambda *_args, **_kwargs: None,
+    )
+    result: dict[str, object] = {}
+
+    def wait() -> None:
+        result.update(sink.request_permission(request.to_dict()))
+
+    thread = threading.Thread(target=wait)
+    thread.start()
+    pending: list[dict[str, object]] = []
+    deadline = time.monotonic() + 1.0
+    while not pending and time.monotonic() < deadline:
+        pending = list_pending_subagent_tool_approvals(
+            agent,
+            root_task_id=child.root_id,
+        )
+        if not pending:
+            time.sleep(0.01)
+    assert [row["run_id"] for row in pending] == [child.id]
+    noninteractive = read_gateway_client_notices(
+        agent,
+        scope=scope,
+        after=0.0,
+    )
+    assert noninteractive["agent_permission_requests"] == []
+    projected = read_gateway_client_notices(
+        agent,
+        scope=scope,
+        after=0.0,
+        interactive_approvals=True,
+    )
+    assert projected["agent_permission_requests"][0]["request"] == request.to_dict()
+    decision = ToolApprovalDecision(
+        request.permission_id,
+        "approved",
+        "只执行这一次",
+    )
+    written = resolve_gateway_agent_permission(
+        agent,
+        scope=scope,
+        run_id=child.id,
+        request=request.to_dict(),
+        decision=decision.to_dict(),
+    )
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    assert written["ok"] is True
+    assert result["decision"] == "approved"
+    assert result["feedback"] == "只执行这一次"
+    assert list_pending_subagent_tool_approvals(
+        agent,
+        root_task_id=child.root_id,
+    ) == []
+
+
+def test_child_approval_without_interactive_consumer_fails_closed(tmp_path) -> None:
+    agent, _scope, child = _bound_agent_tree(tmp_path)
+    request = _child_approval_request(child.id, "attempt-no-consumer")
+    handle = publish_subagent_tool_approval(
+        agent,
+        run_id=child.id,
+        thread_id=child.agent_thread_id,
+        request_value=request,
+    )
+
+    decision = wait_for_subagent_tool_approval(
+        handle,
+        poll_seconds=0.01,
+        discovery_seconds=0.01,
+        consumer_lease_seconds=0.01,
+    )
+
+    assert decision.decision == "unavailable"
+    assert list_pending_subagent_tool_approvals(
+        agent,
+        root_task_id=child.root_id,
+    ) == []
+
+
+def test_child_session_approval_reuses_same_sink_and_args(tmp_path) -> None:
+    agent, scope, child = _bound_agent_tree(tmp_path)
+    read_gateway_client_notices(
+        agent,
+        scope=scope,
+        after=0.0,
+        interactive_approvals=True,
+    )
+    sink = BackgroundTranscriptSink(
+        agent,
+        thread_id=child.agent_thread_id,
+        task_id=child.id,
+        request_id="child-session-approval",
+        event_writer=lambda *_args, **_kwargs: None,
+    )
+    first = _child_approval_request(child.id, "attempt-session-first")
+    first_result: dict[str, object] = {}
+    thread = threading.Thread(
+        target=lambda: first_result.update(sink.request_permission(first.to_dict()))
+    )
+    thread.start()
+    pending: list[dict[str, object]] = []
+    deadline = time.monotonic() + 1.0
+    while not pending and time.monotonic() < deadline:
+        pending = list_pending_subagent_tool_approvals(
+            agent,
+            root_task_id=child.root_id,
+        )
+        if not pending:
+            time.sleep(0.01)
+    assert pending
+
+    resolve_gateway_agent_permission(
+        agent,
+        scope=scope,
+        run_id=child.id,
+        request=first.to_dict(),
+        decision=ToolApprovalDecision(
+            first.permission_id,
+            "approved_session",
+        ).to_dict(),
+    )
+    thread.join(timeout=1.0)
+    second = _child_approval_request(child.id, "attempt-session-second")
+    second_result = sink.request_permission(second.to_dict())
+
+    assert not thread.is_alive()
+    assert first_result["decision"] == "approved_session"
+    assert second_result["decision"] == "approved"
+    assert list_pending_subagent_tool_approvals(
+        agent,
+        root_task_id=child.root_id,
+    ) == []

@@ -1,5 +1,23 @@
 # STATUS
 
+## 2026-08-26 子代理 exact tool approval 转交 owner TUI（第八候选）
+
+- `c8a01f7` 已推送、部署 `.7` 唯一 Gateway。fresh r51 中，child 先获得匹配的 command/path capability
+  grant，随后 `controlled_exec(apply=true)` 仍返回 `APPROVAL_REQUIRED`；handler 未执行、测试端口关闭。
+  这证明第七层安全边界正确，也证明旧 child 没有交互 consumer：用户不能在主 TUI 看见这条请求并批准后
+  续跑，模型只能把它当普通工具失败。
+- 对照 会话运行时 `request_command_approval`/pending approval queue 与 终端交互
+  `swarmWorkerHandler`/leader `ToolUseConfirm` 后，第八候选复用现有 ToolExecutor 回调：
+  `BackgroundTranscriptSink` 发布完整 exact request 到 owner ConversationStore 的唯一记录并等待；
+  Gateway 只向显式声明 `tool_approval` 的 TUI 续 consumer lease，决定再经过 owner/thread/root/current
+  attempt 授权门和完整 request 比对。批准后 `_resolve_tool_approval` 重执行原 ToolCall，不新造命令。
+- `TuiPermissionCoordinator` 将当前 main 工具回合与多个 child 的控制器排进一个 FIFO；只有队首能显示和
+  收键，child 标题只作展示，回写始终使用服务端原 request。切入 child 页面时 overlay 仍绑定 root runtime。
+  写回失败保持面板，无客户端/租约过期/取消/终态/坏记录全部 fail closed。
+- 实际 `BackgroundTranscriptSink` 接线、无 consumer 关闭式失败、owner 服务、薄客户端、两个 child FIFO
+  及 main+child 混合 FIFO、child session exact 缓存等 179 项 focused 已通过；全项目严格 gate、提交、部署和 fresh MiniMax-M2.7
+  child 真 TUI 尚待本轮继续完成。
+
 ## 2026-08-26 受管后台进程、PTY 与子代理授权边界（第七候选）
 
 - 第四候选 `b33badf` 已通过 366 项 provider/system 相关 focused（359 passed、7 个既有

@@ -30,6 +30,7 @@ from .http_handlers import (
     handle_client_notices,
     handle_client_memory,
     handle_client_agent_guidance,
+    handle_client_agent_permission,
     handle_client_agent_stop,
     handle_client_agent_view,
     handle_control,
@@ -171,6 +172,9 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         if self.path == "/client/agent-guidance":
             self._handle_client_agent_guidance()
             return
+        if self.path == "/client/agent-permission":
+            self._handle_client_agent_permission()
+            return
         if self.path == "/client/agent-stop":
             self._handle_client_agent_stop()
             return
@@ -258,6 +262,12 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
     # 函数用途: 处理用户给当前子代理插入补充要求的请求。
     def _handle_client_agent_guidance(self) -> None:
         handle_client_agent_guidance(self, _server_instance)
+
+    # LLM: Approval routing accepts an exact child-published request plus one
+    # typed decision; it cannot fall back to guidance text or main-turn input.
+    # 函数用途: 处理用户对当前任务树内子代理工具调用的批准或拒绝。
+    def _handle_client_agent_permission(self) -> None:
+        handle_client_agent_permission(self, _server_instance)
 
     # LLM: Stop routing calls only the canonical child cancellation service;
     # it never maps to process names or UI row positions.

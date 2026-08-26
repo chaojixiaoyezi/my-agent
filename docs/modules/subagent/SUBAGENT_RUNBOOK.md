@@ -63,6 +63,22 @@ OPEN 或非法未闭合 capability request 是宿主掌握的结构化阻塞事�
 二是“创建孙代理后父级 PENDING—孤儿器立即误复活—只能反复轮询，孙代理结果又越级发给根会话”。
 当前两条都由结构化状态和直属事件链修复，不需要增加催办工具。
 
+## 具体工具审批
+
+capability grant 与一次具体副作用批准是两件事。grant 只缩小 child 能使用的工具、命令、路径和网络范围；
+即使 grant 完整匹配，ToolExecutor 对 `ask` 动作仍必须生成 exact `ToolApprovalRequest`，不能直接执行 handler。
+
+交互式 TUI/Web 存在时，child 的 `BackgroundTranscriptSink` 将 request 发布到所属 owner
+ConversationStore 的 `subagent_tool_approval.v1` 记录，并阻塞原 ToolCall。所属 TUI 通过
+`/client/notices` 显式声明 `tool_approval` 能力、续短租约并领取请求；用户决定经
+`/client/agent-permission`、owner/thread/root/current-attempt 门和完整 request 比对后写回。批准只让现有
+ToolExecutor 对原 ToolCall 原地重试，不新造工具参数；拒绝/取消进入当前模型的结构化工具结果。
+
+主代理与多个 child 同时请求时，TUI 只显示一个全局 FIFO 队首，标题会标明 child 名称。切入 child 详情不会
+隐藏 root 审批面板。没有交互客户端、客户端断线、租约过期、child 终态、请求损坏或写回失败时，系统不会
+自动批准；等待者返回 unavailable/cancelled，模型可继续改方案或向用户如实说明。详细身份、租约和故障语义
+见 `docs/design/SUBAGENT_TOOL_APPROVAL_BRIDGE.md`。
+
 ## 路径与写权限
 
 普通 child 自动继承直接父级的结构化产品写区；孙代理继续逐层继承同一上界，不能扩大到父级之外。

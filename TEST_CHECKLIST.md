@@ -1,5 +1,11 @@
 # TEST CHECKLIST
 
+- [ ] child capability grant 与 exact tool approval 继续分账；child 的实际 `BackgroundTranscriptSink` 遇到
+  `ask` 时必须把完整 request 上送所属 owner TUI，并阻塞原 ToolCall。main 与多个 child 的确认共用一个
+  FIFO，页面切换不隐藏 root overlay；无交互 consumer、租约过期、取消、终态、损坏或 stale 决定全部
+  fail closed。179 项 focused 已通过，待 `.7` 唯一 Gateway 的 fresh MiniMax-M2.7 TUI 证明审批前无副作用、
+  面板标出 child、批准后同一调用原地续跑。
+
 - [ ] fresh MiniMax-M2.7 child 的 output contract、task packet、workspace refs 和 runner prompt 均不得暴露
   宿主 `final_report/output.json/runner_result`；child 完成业务后直接自然 final，不额外调用写工具生成内部
   报告。宿主仍须从最终回复生成完成信封/交接投影，显式同名业务文件继续按 `required_file_refs` 交付。

@@ -203,6 +203,16 @@ audit Agent 为空而回退 daemon cwd。
   后者才按 exact `tool_name/run_id/operation_id/idempotency_key/args_hash` 批准一次具体副作用。
   `controlled_exec` 当前经 `subprocess.Popen` 执行且没有 OS sandbox，因此声明 `sandbox=none`；即使 grant
   完整匹配，`apply=true` 仍必须进入同一 ToolExecutor/permission bridge，未批准时 handler 不运行。
+- `agent/subagents/tool_approval_bridge.py` 是后台 child 到 owner UI 的唯一 pending/decision 账本。记录位于
+  owner ConversationStore 的 root/run 哈希路径，发布、决定和清理共用 exact transition lock；
+  `.consumer.json` 只表示显式交互客户端的短租约，不是批准。无租约、取消、终态、损坏和 identity mismatch
+  全部关闭式失败。
+- `/client/notices.agent_permission_requests` 只向同 conversation 的有界 root 投影返回；客户端必须显式声明
+  `client_capabilities.tool_approval=true` 才续租。`/client/agent-permission` 经过统一 agent control owner/
+  thread/root/current-attempt 门，并再次比较完整 request。HTTP 错误不能回退成普通聊天或批准。
+- `cli/chat_parts/tui_permission_queue.py` 将前台和多个 child 控制器排入 root runtime 的同一 FIFO。只有队首
+  发布 overlay/接收按键；child 名称只装饰标题，writer 捕获服务端原始 request。详情页只切正文 store，
+  root overlay provider 不切换，因此导航不能隐藏安全确认。
 - `agent/gateway_parts/permission_bridge.py` 是跨进程决定桥。目标固定为 processing chunk 同级的
   `.approvals/<sha256(request_id)[:24]>/<sha256(permission_id)[:24]>.json`；路径不接受外部 id 拼接，
   原子文件在 schema、request id、permission id、完整 binding 全部匹配后才消费。

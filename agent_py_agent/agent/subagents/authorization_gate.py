@@ -23,8 +23,8 @@ from ..common.opaque_id import OpaqueIdError, validate_opaque_id
 from ..runtime_db.repository import BINDING_ACTIVE
 from .models import SubAgentTask
 
-# LLM: send_guidance 与 cancel 共用同一 owner、parent chain 和 runtime authority 门；
-# 不能因为消息是软上下文就允许跨 owner、跨树或向不存在的 run 投递。
+# LLM: send_guidance、tool approval 与 cancel 共用同一 owner、parent chain 和
+# runtime authority 门；不能因为控制来自 UI 就允许跨 owner、跨树或命中旧 attempt。
 # 常量用途: 列出允许进入统一子代理授权查询门的结构化操作名。
 OPERATIONS = frozenset(
     {
@@ -33,6 +33,7 @@ OPERATIONS = frozenset(
         "resume",
         "takeover",
         "resolve_capability",
+        "resolve_tool_approval",
         "send_guidance",
         "view",
     }

@@ -165,7 +165,7 @@ def _make_overlay_window(view: TuiTranscriptView) -> Any:
 
     return Window(
         content=view.overlay_control,
-        height=lambda: len(view.provider.frame(view.provider.last_width).overlay_lines),
+        height=view.overlay_line_count,
         dont_extend_height=True,
     )
 
@@ -707,6 +707,7 @@ def _assemble_tui_application(
     )
     _configure_escape_timeouts(app)
     parts.transcript_view.provider.set_invalidate_callback(app.invalidate)
+    parts.transcript_view.overlay_provider.set_invalidate_callback(app.invalidate)
 
     # LLM: 默认 TUI mouse 模式必须同时保有 终端交互 式滚轮与应用内选区复制；settled selection
     # 投影到 application/tmux/OSC52，但 SSH notice 不得声称不可观测的外层系统剪贴板一定已改变。

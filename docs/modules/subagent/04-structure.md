@@ -279,6 +279,20 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   形成 load error，后台完成合批保守等待，不从 title/goal/status 文案补猜。没有 LocalStore 的显式
   local-unmanaged 测试/嵌入模式才允许全量 canonical fallback。
 
+## 2026-08-26 子代理具体工具审批
+
+- `conversation/background_transcript.py::BackgroundTranscriptSink` 通过
+  `subagents/tool_approval_bridge.py::SubagentToolApprovalSinkMixin` 获得 child `request_permission`；
+  它只发布并等待共享 `ToolApprovalRequest/Decision`，不拥有 ActionPolicy 或 handler 执行权。
+- pending record 的身份来自 canonical child task/root 与 request 完整 binding。显示名、goal、工具说明、
+  TUI 行号和 feedback 都不能决定授权；child 终态行不再投影。
+- owner TUI/Web consumer lease 只解决“是否有人接收”。批准仍由 agent control 服务的 owner/root/current
+  attempt 门和 record transition lock 裁决；无 consumer 时 child 返回 unavailable，而不是永久 RUNNING 或
+  自动放行。
+- approved 后由公共 `_resolve_tool_approval` 对原 ToolCall 追加 approved binding 并原地重执行；
+  denied/cancelled 进入既有 rejected-action 账。该链不改变 child DONE/BLOCKED、capability lifecycle、
+  completion wake、Todo 或 Compact。
+
 ## Memory Candidate 接口
 
 - `SubAgentManagerInitParams.candidate_service` 只接收当前 owner 已创建的 CandidateService，不在

@@ -146,6 +146,7 @@ class GatewayChatClientAgent:
             {
                 "after": max(0.0, float(after or 0.0)),
                 "event_after": max(0, int(event_after or 0)),
+                "client_capabilities": {"tool_approval": True},
                 "user_id": "local-agent",
                 "channel": "chat",
                 "conversation_id": str(session_id or "default"),
@@ -159,6 +160,7 @@ class GatewayChatClientAgent:
             "transcript_events": [],
             "event_cursor": max(0, int(event_after or 0)),
             "active_task_count": 0,
+            "agent_permission_requests": [],
         }
 
     # LLM: Agent detail polling is an explicit owner-scoped HTTP projection. The
@@ -204,6 +206,36 @@ class GatewayChatClientAgent:
                 "run_id": str(run_id or "").strip(),
                 "message": str(message or ""),
                 "message_id": str(message_id or "").strip(),
+            },
+            timeout=2.0,
+        )
+        return {**body, "http_status": status} if body else {
+            "ok": False,
+            "http_status": status,
+            "error_code": "GATEWAY_UNAVAILABLE",
+        }
+
+    # LLM: Child approval submission carries the exact server-projected request
+    # and typed decision to its dedicated endpoint. It never retries as chat text
+    # or turns a transport failure into an approval.
+    # 函数用途: 把用户在 TUI 里选择的子代理工具审批结果写回单 Gateway。
+    def request_agent_permission(
+        self,
+        session_id: str,
+        *,
+        run_id: str,
+        request: dict[str, object],
+        decision: dict[str, object],
+    ) -> dict[str, object]:
+        status, body = self._post_gateway_json(
+            "/client/agent-permission",
+            {
+                "user_id": "local-agent",
+                "channel": "chat",
+                "conversation_id": str(session_id or "default"),
+                "run_id": str(run_id or "").strip(),
+                "request": dict(request),
+                "decision": dict(decision),
             },
             timeout=2.0,
         )

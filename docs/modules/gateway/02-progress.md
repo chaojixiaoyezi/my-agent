@@ -1,5 +1,14 @@
 # Gateway Progress
 
+## 2026-08-26 owner TUI 子代理审批桥（本地候选）
+
+- `/client/notices` 只有在客户端显式声明 `client_capabilities.tool_approval=true` 时才续 root consumer lease；
+  pending rows 是有界只读投影，不能批准工具。
+- `/client/agent-permission` 复用 agent control 的 owner/thread/root/current-attempt 授权，再对 canonical full
+  request 做原子比对。stale/mismatch/unavailable 使用 typed HTTP 错误，不回退成聊天文字或自动重试批准。
+- TUI 将 Gateway rows 与前台审批放入同一 FIFO，写回失败保留当前面板。薄客户端、Gateway service、真实
+  sink、并发 UI 等 179 项 focused 已通过；待严格 gate、部署和 fresh 真 TUI。
+
 ## 2026-08-26 空输入 ↓ 返回当前视口尾部（已部署真机验证）
 
 - r37 真 TUI 的 child 视图证明 canonical 历史和新事件都在：`Ctrl+Home` 离尾后出现 `1 new message ↓`，

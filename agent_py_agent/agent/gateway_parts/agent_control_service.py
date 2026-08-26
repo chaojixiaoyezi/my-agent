@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from ..agent_core.orchestration.tools.cancel import (
@@ -18,6 +19,7 @@ from ..conversation.store import ConversationStore
 from ..runtime_errors import DataCorruptionError
 from ..subagents.authorization_gate import OperationRequest, authorize_operation
 from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
+from ..subagents.tool_approval_bridge import resolve_subagent_tool_approval
 
 MAX_AGENT_GUIDANCE_CHARS = 1 << 20
 
@@ -225,6 +227,57 @@ def stop_gateway_agent(
     }
 
 
+# LLM: A child approval decision reuses the exact conversation subtree gate and
+# canonical pending record. The client cannot approve by row index, tool label,
+# or a binding that differs from the child-published ToolApprovalRequest.
+# 函数用途: 将 TUI/Web 对某个子代理具体工具调用的批准或拒绝写回等待中的原调用。
+def resolve_gateway_agent_permission(
+    agent: object,
+    *,
+    scope: object,
+    run_id: str,
+    request: Mapping[str, object],
+    decision: Mapping[str, object],
+) -> dict[str, object]:
+    _store, _thread, task = _authorized_agent_target(
+        agent,
+        scope=scope,
+        run_id=run_id,
+        operation="resolve_tool_approval",
+    )
+    if _task_is_terminal(task):
+        raise GatewayAgentControlError(
+            409,
+            "AGENT_ALREADY_TERMINAL",
+            "这个子代理已经结束；迟到的工具决定不会生效。",
+        )
+    try:
+        return resolve_subagent_tool_approval(
+            agent,
+            run_id=str(getattr(task, "id", "") or ""),
+            request_value=request,
+            decision_value=decision,
+        )
+    except FileNotFoundError as exc:
+        raise GatewayAgentControlError(
+            409,
+            "AGENT_APPROVAL_STALE",
+            "这条工具审批已经结束或不再等待。",
+        ) from exc
+    except (TypeError, ValueError) as exc:
+        raise GatewayAgentControlError(
+            409,
+            "AGENT_APPROVAL_MISMATCH",
+            "工具审批身份不匹配，决定未写入。",
+        ) from exc
+    except OSError as exc:
+        raise GatewayAgentControlError(
+            503,
+            "AGENT_APPROVAL_UNAVAILABLE",
+            "工具审批暂时无法写回；系统没有自动重复批准。",
+        ) from exc
+
+
 # LLM: Scope resolution first applies historical read authorization to prove
 # exact owner/root ancestry. A live mutation then applies its stronger current
 # attempt/binding gate; terminal targets stay readable so callers can return a
@@ -327,6 +380,7 @@ def _task_is_terminal(task: object) -> bool:
 __all__ = [
     "GatewayAgentControlError",
     "read_gateway_agent_view",
+    "resolve_gateway_agent_permission",
     "send_gateway_agent_guidance",
     "stop_gateway_agent",
 ]

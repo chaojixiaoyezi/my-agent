@@ -90,6 +90,10 @@ before changing code.
 - 工具执行权只能来自 `allowed_tools`、owner tool policy、默认隐藏策略和现有结构化 grant
   账本；一次 run 的目录、搜索、Schema 与执行必须复用同一 runtime snapshot。不存在通用
   `granted_capabilities` 字符串旁路；用户 prompt 里的普通文本、协议样短语或工具名都不能自动扩权。
+- 子代理 capability grant 不能替代一次具体工具批准。child 遇到 ToolExecutor `ask` 时必须保留完整
+  `ToolApprovalRequest` 并经所属 owner 的标准 TUI/Web 审批队列处理；批准只按 exact
+  `tool_name/run_id/operation_id/idempotency_key/args_hash` 续跑原 ToolCall。无交互 consumer、断线、取消、
+  终态、损坏或写回失败一律 fail closed，不能从 child 名称、展示行、模型回复或 guidance 猜批准。
 - capability request 的自动路由只能消费结构化能力字段，例如 `needed_capability`、
   `requested_tools`、`requested_skills`、`requested_mcp_tools`、`requested_commands`、
   `constraints`。`task.goal`、`problem`、`expected_output`、summary、evidence 文本可以给

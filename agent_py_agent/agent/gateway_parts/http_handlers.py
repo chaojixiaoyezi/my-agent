@@ -11,7 +11,7 @@ or queue writes so their syntax never reaches transcript or model execution.
 import hashlib
 import json
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -34,6 +34,7 @@ from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .agent_control_service import (
     GatewayAgentControlError,
     read_gateway_agent_view,
+    resolve_gateway_agent_permission,
     send_gateway_agent_guidance,
     stop_gateway_agent,
 )
@@ -1019,6 +1020,10 @@ def handle_client_notices(handler, server) -> None:
         ),
         after=after,
         event_after=event_after,
+        interactive_approvals=bool(
+            isinstance(body.get("client_capabilities"), dict)
+            and body["client_capabilities"].get("tool_approval") is True
+        ),
     )
     handler._send_json(200, result)
 
@@ -1076,6 +1081,38 @@ def handle_client_agent_guidance(handler, server) -> None:
     handler._send_json(202, result)
 
 
+# LLM: The handler forwards only mappings to the owner-scoped approval service;
+# missing or scalar request/decision bodies fail before any durable mutation.
+# 函数用途: 把 TUI/Web 的子代理工具审批决定写回原始等待调用。
+def handle_client_agent_permission(handler, server) -> None:
+    body = _read_agent_control_body(handler, server)
+    if body is None:
+        return
+    request = body.get("request")
+    decision = body.get("decision")
+    if not isinstance(request, dict) or not isinstance(decision, dict):
+        handler._send_json(400, {"error": "request and decision are required"})
+        return
+    user_id, channel = _request_channel(handler)
+    try:
+        result = resolve_gateway_agent_permission(
+            server.agent,
+            scope=_gateway_control_scope(
+                handler,
+                body,
+                user_id=user_id,
+                channel=channel,
+            ),
+            run_id=str(body.get("run_id") or ""),
+            request=request,
+            decision=decision,
+        )
+    except GatewayAgentControlError as exc:
+        _send_agent_control_error(handler, exc)
+        return
+    handler._send_json(200, result)
+
+
 # LLM: Stop accepts one exact run and opaque operation id. The shared service
 # handles terminal idempotency and the canonical process/lifecycle cancellation.
 # 函数用途: 停止当前会话树内用户正在查看的子代理。
@@ -1102,7 +1139,7 @@ def handle_client_agent_stop(handler, server) -> None:
     handler._send_json(200, result)
 
 
-# LLM: All three agent-control endpoints share identical transport validation;
+# LLM: All agent-control endpoints share identical transport validation;
 # parsing failure or unavailable service ends the request before scope resolution.
 # 函数用途: 读取并校验一条子代理控制 JSON 请求。
 def _read_agent_control_body(handler, server) -> dict[str, object] | None:
@@ -1157,6 +1194,7 @@ def read_gateway_client_notices(
     scope: object,
     after: float,
     event_after: int = 0,
+    interactive_approvals: bool = False,
 ) -> dict[str, object]:
     """返回当前 thread 的活动投影、后台过程事件与 after 之后的通知。"""
     from ..conversation.channels import LOCAL_AGENT_USER_ID, LOCAL_CHAT_CHANNEL
@@ -1164,28 +1202,18 @@ def read_gateway_client_notices(
 
     conversation_id = str(getattr(scope, "conversation_id", "") or "").strip()
     if not conversation_id:
-        return {
-            "ok": False,
-            "error": "conversation_id required",
-            "notices": [],
-            "cursor": after,
-            "transcript_events": [],
-            "event_cursor": max(0, int(event_after or 0)),
-            "events_truncated": False,
-            "active_task_count": 0,
-        }
+        return _empty_gateway_notice_response(
+            after,
+            event_after,
+            error="conversation_id required",
+        )
     store = getattr(agent, "conversation_store", None)
     if not isinstance(store, ConversationStore):
-        return {
-            "ok": False,
-            "error": "conversation store unavailable",
-            "notices": [],
-            "cursor": after,
-            "transcript_events": [],
-            "event_cursor": max(0, int(event_after or 0)),
-            "events_truncated": False,
-            "active_task_count": 0,
-        }
+        return _empty_gateway_notice_response(
+            after,
+            event_after,
+            error="conversation store unavailable",
+        )
     try:
         thread, _error = store.resolve_thread_report(
             channel=LOCAL_CHAT_CHANNEL,
@@ -1193,29 +1221,24 @@ def read_gateway_client_notices(
             channel_user_id=LOCAL_AGENT_USER_ID,
         )
     except Exception as exc:
-        return {
-            "ok": False,
-            "error": f"thread resolve failed: {exc}",
-            "notices": [],
-            "cursor": after,
-            "transcript_events": [],
-            "event_cursor": max(0, int(event_after or 0)),
-            "events_truncated": False,
-            "active_task_count": 0,
-        }
+        return _empty_gateway_notice_response(
+            after,
+            event_after,
+            error=f"thread resolve failed: {exc}",
+        )
     if thread is None:
-        activity = ConversationAgentActivity().to_dict()
-        return {
-            "ok": True,
-            "notices": [],
-            "cursor": after,
-            "transcript_events": [],
-            "event_cursor": max(0, int(event_after or 0)),
-            "events_truncated": False,
-            "active_task_count": 0,
-            "agent_activity": activity,
-        }
+        return _empty_gateway_notice_response(
+            after,
+            event_after,
+            ok=True,
+            agent_activity=ConversationAgentActivity().to_dict(),
+        )
     thread_id = str(getattr(thread, "thread_id", "") or "")
+    permission_requests = _gateway_agent_permission_requests(
+        agent,
+        thread,
+        interactive_approvals=interactive_approvals,
+    )
     transcript = read_background_transcript_events(
         agent,
         thread_id=thread_id,
@@ -1237,6 +1260,7 @@ def read_gateway_client_notices(
             "events_truncated": transcript["truncated"],
             "active_task_count": active_task_count,
             "agent_activity": activity_payload,
+            "agent_permission_requests": permission_requests,
         }
     return {
         "ok": True,
@@ -1247,7 +1271,70 @@ def read_gateway_client_notices(
         "events_truncated": transcript["truncated"],
         "active_task_count": active_task_count,
         "agent_activity": activity_payload,
+        "agent_permission_requests": permission_requests,
     }
+
+
+# LLM: Empty/error snapshots share one stable transport shape so clients never
+# infer missing approval/activity fields. This helper creates no task state.
+# 函数用途: 构造无线程或读取失败时的空后台快照。
+def _empty_gateway_notice_response(
+    after: float,
+    event_after: int,
+    *,
+    ok: bool = False,
+    error: str = "",
+    agent_activity: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "ok": bool(ok),
+        "notices": [],
+        "cursor": after,
+        "transcript_events": [],
+        "event_cursor": max(0, int(event_after or 0)),
+        "events_truncated": False,
+        "active_task_count": 0,
+        "agent_permission_requests": [],
+    }
+    if error:
+        payload["error"] = error
+    if agent_activity is not None:
+        payload["agent_activity"] = dict(agent_activity)
+    return payload
+
+
+# LLM: A notice poll renews the approval-consumer lease only when the client
+# explicitly advertises tool_approval. The returned rows remain a read-only
+# projection and cannot grant a child tool call.
+# 函数用途: 为当前主任务树续接交互审批接收能力并返回等待中的子代理请求。
+def _gateway_agent_permission_requests(
+    agent: object,
+    thread: object,
+    *,
+    interactive_approvals: bool,
+) -> list[dict[str, object]]:
+    if not interactive_approvals:
+        return []
+    root_task_id = str(getattr(thread, "workspace_task_id", "") or "").strip()
+    if not root_task_id:
+        return []
+    from ..subagents.tool_approval_bridge import (
+        list_pending_subagent_tool_approvals,
+        renew_subagent_tool_approval_consumer,
+    )
+
+    try:
+        if interactive_approvals:
+            renew_subagent_tool_approval_consumer(
+                agent,
+                root_task_id=root_task_id,
+            )
+        return list_pending_subagent_tool_approvals(
+            agent,
+            root_task_id=root_task_id,
+        )
+    except (FileNotFoundError, OSError, RuntimeError, TypeError, ValueError):
+        return []
 
 
 # LLM: Notice files are append-only delivery projections. This reader filters

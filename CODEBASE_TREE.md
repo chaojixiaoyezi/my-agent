@@ -26,6 +26,7 @@ agent_py_agent/
 |   |   |-- tui_markdown.py             # CommonMark/table token 到 Unicode 宽度换行、语法色和 prompt_toolkit fragments
 |   |   |-- tui_paste.py                # 大文本粘贴显示引用与提交时精确展开合同
 |   |   |-- tui_preflight.py            # alternate screen 内真实 Gateway readiness 等待、typed 连接事件与 worker 启动门
+|   |   |-- tui_permission_queue.py     # 主代理与多个 child 的工具审批统一 FIFO、原 request 回写和展示去重
 |   |   |-- tui_runtime.py              # session/queue/turn/model/tool/Gateway typed rows 到稳定 TuiEvent 的唯一 adapter
 |   |   |-- tui_terminal.py             # OSC 终端标题、活动帧与退出清理
 |   |   |-- tui_transcript.py           # 详细 transcript 冻结视图、全文搜索与命中导航状态
@@ -63,6 +64,7 @@ agent_py_agent/
 |   |   |-- kernel.py                   # 子代理树快照
 |   |   |-- manager_work_orders.py      # 工单路径、默认文件、校验
 |   |   |-- models.py                   # 子代理数据模型
+|   |   |-- tool_approval_bridge.py     # child exact ToolApprovalRequest 的 owner 耐久记录、consumer 租约与决定等待
 |   |   |-- process_control.py          # 后台进程治理原语：存活探测/两阶段终止（SIGTERM→SIGKILL）
 |   |   |-- direct_parent_lifecycle.py # 直属父子等待、事件唤醒、同批合并与结果上下文
 |   |   |-- tool_failure_ledger.py      # 系统级工具失败账本：archive ok=False 摘要 -> attributes/对账投影
@@ -122,7 +124,7 @@ agent_py_agent/
 |   |-- conversation/                  # 通道会话账本、权威 transcript、结构化任务关联/续接
 |   |   |-- agent_activity.py          # active task link + canonical child run 到 TUI/Web 共用有界活动投影
 |   |   |-- agent_transcript.py        # 子代理跨进程公开过程事件的 owner 存储、游标和有界裁剪
-|   |   |-- background_transcript.py  # 后台 main 的有界易失 typed 过程事件环；只供 TUI/Web 实时展示
+|   |   |-- background_transcript.py  # 后台 main/child 的有界 typed 过程事件环与 child 工具审批 sink
 |   |   |-- tool_input_progress.py     # provider 大工具参数生成期的脱敏临时展示合同
 |   |   |-- agent_thread.py            # child/grandchild 独立 thread、逐 attempt transcript 与统一 Compact 适配
 |   |   |-- agent_thread_store.py      # agent thread 精确 ID 物化、身份冲突与运行目录校验
@@ -238,6 +240,7 @@ deploy/
 `-- k8s/                              # stable/canary、Gateway route、migration、monitor 与 DR 清单
 docs/
 |-- PRODUCT_FACTS.md                    # 当前能力状态唯一权威：稳定/部分可用/实验性/仅设计
+|-- design/SUBAGENT_TOOL_APPROVAL_BRIDGE.md # child→owner 具体工具审批的身份、租约、FIFO 与失败语义
 |-- design/FEATURE-20260818-终端交互-tui-parity.md # 终端交互 TUI Python 原生复刻的用户行为、事件架构与验收规格
 |-- design/TUI_终端交互_PARITY_MATRIX.md # 启动、消息、输入、权限、生命周期和命令映射逐项证据账
 |-- tasks/completed/TASK-20260818-终端交互-tui-parity.md # 已完成 TUI 复刻实施、测试机边界和验收记录

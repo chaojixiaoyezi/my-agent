@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..subagents.tool_approval_bridge import SubagentToolApprovalSinkMixin
 from .channels import project_user_reply, redact_host_absolute_paths
 from .tool_input_progress import ToolInputProgressSinkMixin
 
@@ -151,12 +152,12 @@ class _ThinkingDeltaBatcher:
         return batch
 
 
-# LLM: This writer converts one background model callback into the same public
-# block vocabulary already rendered by the foreground TUI. It buffers candidate
-# model text until a real tool boundary so the durable final reply is not shown
-# twice, and it never changes the scalar main activity or business lifecycle.
-# 类用途: 把一次后台主代理回调转换成灰色过程、实时思考、工具结果和 diff 展示事件。
-class BackgroundTranscriptSink(ToolInputProgressSinkMixin):
+# LLM: This writer converts one background main/child model callback into the
+# same public block vocabulary already rendered by the foreground TUI. It also
+# gives child calls the canonical approval sink, while display events still
+# never change scalar activity or business lifecycle.
+# 类用途: 把后台主代理或子代理回调转换成灰色过程、实时思考、工具结果和 diff，并为 child 接入具体工具审批。
+class BackgroundTranscriptSink(SubagentToolApprovalSinkMixin, ToolInputProgressSinkMixin):
     # LLM: Construction allocates one display-only turn identity; canonical task
     # and thread ids are inputs, while the generated request id is not authority.
     # 函数用途: 为一次后台续轮创建事件块编号和内部缓冲区。

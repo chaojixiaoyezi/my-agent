@@ -16,6 +16,7 @@ from ...agent.contracts.tool_approval import (
 )
 from ...agent.conversation.tool_input_progress import ToolInputProgressEventProjector
 from .tui_events import JournalAppendResult, TuiEvent, TuiEventSequencer
+from .tui_permission_queue import TuiPermissionCoordinator, TuiPermissionRuntimeMixin
 from .tui_view_model import TuiStateStore
 
 _BACKGROUND_TRANSCRIPT_SCHEMA = "background_transcript_event.v1"
@@ -76,7 +77,7 @@ class _PendingTuiPermission:
 class _TuiPermissionController:
     # LLM: owner 是唯一 TuiTurnEventAdapter；控制器复用 owner 锁和 publish 入口，不创建第二 sequencer/store。
     # 函数用途: 为一个活动回合初始化审批状态。
-    def __init__(self, owner: TuiTurnEventAdapter) -> None:
+    def __init__(self, owner: object) -> None:
         self._owner = owner
         self._pending: _PendingTuiPermission | None = None
         self._sink: Callable[[ToolApprovalRequest, ToolApprovalDecision], None] | None = None
@@ -246,13 +247,16 @@ class _TuiPermissionController:
             pending.ready.set()
             self._pending = None
             self._resolved_ids.add(normalized_id)
-            self._publish(
-                "permission_resolved",
-                decision.to_dict(),
-                phase="completed",
-                request=pending.request,
-            )
-            return True
+            active = self._owner.runtime._permission_coordinator.is_active(self)
+            if active:
+                self._publish(
+                    "permission_resolved",
+                    decision.to_dict(),
+                    phase="completed",
+                    request=pending.request,
+                )
+        self._owner.runtime._permission_coordinator.release(self)
+        return True
 
     # LLM: request 打开顺序必须在 tool_started 之后且一次仅一个；重复同 id 幂等，冲突请求显式失败而不覆盖等待者。
     # 函数用途: 建立 pending 对象并发布 permission_requested UI 事件。
@@ -265,9 +269,24 @@ class _TuiPermissionController:
                 raise RuntimeError("another TUI permission request is already pending")
             pending = _PendingTuiPermission(request, threading.Event())
             self._pending = pending
+        self._owner.runtime._permission_coordinator.enqueue(self)
+        return pending
+
+    # LLM: Only the global queue head may publish the overlay. Activation keeps
+    # the original controller/request and never creates a replacement tool call.
+    # 函数用途: 队列轮到本审批时打开底部确认面板。
+    def activate_pending(self) -> bool:
+        with self._owner._lock:
+            pending = self._pending
+            if pending is None:
+                return False
             self._owner._complete_active_assistant(process=True)
-            self._publish("permission_requested", request.to_dict(), phase="waiting_permission")
-            return pending
+            self._publish(
+                "permission_requested",
+                pending.request.to_dict(),
+                phase="waiting_permission",
+            )
+            return True
 
     # LLM: Gateway terminal resolution 可能在本地 UI 已写回后重放；同 id 重放只消费，不制造 reducer mismatch。
     # 函数用途: 接收 Gateway writer 发布的最终审批决定。
@@ -283,31 +302,41 @@ class _TuiPermissionController:
             pending.ready.set()
             self._pending = None
             self._resolved_ids.add(decision.permission_id)
-            self._publish(
-                "permission_resolved",
-                decision.to_dict(),
-                phase="completed",
-                request=pending.request,
-            )
-            return True
+            active = self._owner.runtime._permission_coordinator.is_active(self)
+            if active:
+                self._publish(
+                    "permission_resolved",
+                    decision.to_dict(),
+                    phase="completed",
+                    request=pending.request,
+                )
+        self._owner.runtime._permission_coordinator.release(self)
+        return True
 
     # LLM: turn 收口时仍在等待的审批必须成为 cancelled 并唤醒本地线程；不得留下悬挂 Event 或可迟到批准的 sink。
     # 函数用途: 取消并关闭当前 pending 审批。
-    def cancel_pending(self) -> None:
-        pending = self._pending
-        if pending is None:
-            return
-        decision = ToolApprovalDecision(pending.request.permission_id, "cancelled")
-        pending.decision = decision
-        pending.ready.set()
-        self._pending = None
-        self._resolved_ids.add(decision.permission_id)
-        self._publish(
-            "permission_resolved",
-            decision.to_dict(),
-            phase="completed",
-            request=pending.request,
-        )
+    def cancel_pending(self, *, decision_value: str = "cancelled") -> None:
+        with self._owner._lock:
+            pending = self._pending
+            if pending is None:
+                return
+            decision = ToolApprovalDecision(
+                pending.request.permission_id,
+                str(decision_value or "cancelled"),
+            )
+            pending.decision = decision
+            pending.ready.set()
+            self._pending = None
+            self._resolved_ids.add(decision.permission_id)
+            active = self._owner.runtime._permission_coordinator.is_active(self)
+            if active:
+                self._publish(
+                    "permission_resolved",
+                    decision.to_dict(),
+                    phase="completed",
+                    request=pending.request,
+                )
+        self._owner.runtime._permission_coordinator.release(self)
 
     # LLM: controller 只能经 owner runtime 发布同一 permission 的 typed event；block id 由 request round/index 事实生成。
     # 函数用途: 统一发布审批覆盖层事件，避免各交互分支重复拼装身份字段。
@@ -924,6 +953,7 @@ class _TuiBackgroundActivityRuntimeMixin:
 class TuiRuntime(
     _TuiConversationBoundaryRuntimeMixin,
     _TuiBackgroundActivityRuntimeMixin,
+    TuiPermissionRuntimeMixin,
 ):
     # LLM: session_id 固定一个 UI 生命周期；store 可注入用于 replay/tests，但不能在运行中替换。
     # 函数用途: 创建 TUI runtime 和全局单调 sequencer。
@@ -943,6 +973,7 @@ class TuiRuntime(
         self._notice_text = ""
         self._notice_until = 0.0
         self._lock = threading.RLock()
+        self._permission_coordinator = TuiPermissionCoordinator(self)
         self._background_activity = _TuiBackgroundActivityController(self)
 
     # LLM: publish_session 只携带公开品牌/模型/目录元数据，真实配置与 secret 不进入 UI event。
@@ -1255,51 +1286,24 @@ class TuiRuntime(
         active[-1].request_interrupt()
         return True
 
-    # LLM: selection 只更新当前 permission_id 的 UI 投影；它不能构造批准或修改 ActionPolicy binding。
-    # 函数用途: 上下移动当前审批面板的选择光标。
-    def move_permission_selection(self, delta: int) -> bool:
-        with self._lock:
-            active = tuple(self._turns.values())
-        for adapter in reversed(active):
-            if adapter.move_permission_selection(delta):
-                return True
-        return False
-
-    # LLM: Tab intent 只路由到持有当前 permission 的 adapter；展开输入不代表允许或拒绝。
-    # 函数用途: 展开或收起当前权限选项的补充说明输入。
-    def toggle_permission_feedback(self) -> bool:
-        with self._lock:
-            active = tuple(self._turns.values())
-        for adapter in reversed(active):
-            if adapter.toggle_permission_feedback():
-                return True
-        return False
-
-    # LLM: feedback 更新必须携带 permission_id 并只命中该活动请求，不能广播到其它回合。
-    # 函数用途: 保存当前权限选项的补充说明草稿。
-    def update_permission_feedback(self, permission_id: str, text: str) -> bool:
-        with self._lock:
-            active = tuple(self._turns.values())
-        for adapter in reversed(active):
-            if adapter.update_permission_feedback(permission_id, text):
-                return True
-        return False
-
-    # LLM: 决定必须路由到持有同 permission_id 的活动 adapter；找不到时 fail-closed，不广播到其它回合。
-    # 函数用途: 将用户的审批选择送回本地等待线程或 Gateway 决定文件。
-    def resolve_permission(
+    # LLM: Child requests are server-projected exact contracts. The coordinator
+    # decorates only display text, queues them with foreground approvals, and
+    # invokes the supplied writer for the original request on user selection.
+    # 函数用途: 将当前会话等待中的子代理工具审批同步到统一底部面板。
+    def sync_agent_permission_requests(
         self,
-        permission_id: str,
-        decision: str,
+        value: object,
         *,
-        feedback: str = "",
+        decision_writer: Callable[
+            [str, ToolApprovalRequest, ToolApprovalDecision],
+            object,
+        ],
     ) -> bool:
-        with self._lock:
-            active = tuple(self._turns.values())
-        for adapter in reversed(active):
-            if adapter.resolve_permission(permission_id, decision, feedback=feedback):
-                return True
-        return False
+        return self._permission_coordinator.sync_external(
+            value,
+            decision_writer=decision_writer,
+            controller_factory=_TuiPermissionController,
+        )
 
     # LLM: 统一 publish 锁住 sequencer+store，任何来源都不能让较大 seq 先进入 journal。
     # 函数用途: 生成并发布一条 session stream TuiEvent。

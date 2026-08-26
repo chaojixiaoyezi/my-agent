@@ -555,6 +555,7 @@ def _handle_transcript_right_copy(
 @dataclass(frozen=True)
 class TuiTranscriptView:
     provider: TuiFrameProvider
+    overlay_provider: TuiFrameProvider
     control: TuiTranscriptControl
     window: Window
     modal_control: TuiTranscriptControl
@@ -565,6 +566,17 @@ class TuiTranscriptView:
     todo_control: FormattedTextControl
     agent_control: FormattedTextControl
     footer_control: FormattedTextControl
+
+    # LLM: Permission overlay stays bound to the root runtime even while the
+    # transcript provider shows a child page, so an owner never misses a queued
+    # child approval because of navigation.
+    # 函数用途: 返回全局审批面板当前应占的终端行数。
+    def overlay_line_count(self) -> int:
+        return len(
+            self.overlay_provider.frame(
+                self.provider.last_width
+            ).overlay_lines
+        )
 
     # LLM: Agent navigation must switch the provider and both normal/modal
     # controls as one UI operation. Existing pages restore their own viewport;
@@ -658,6 +670,7 @@ def make_tui_transcript_view(
         context_factory,
         transcript_state=mode_state,
     )
+    overlay_provider = TuiFrameProvider(state_store, context_factory)
     control = TuiTranscriptControl(provider)
     window = Window(
         content=control,
@@ -678,7 +691,11 @@ def make_tui_transcript_view(
         allow_scroll_beyond_bottom=False,
         style="class:tui-transcript",
     )
-    overlay_control = FormattedTextControl(lambda: _flatten_lines(provider.frame(provider.last_width).overlay_lines))
+    overlay_control = FormattedTextControl(
+        lambda: _flatten_lines(
+            overlay_provider.frame(provider.last_width).overlay_lines
+        )
+    )
     input_status_control = FormattedTextControl(
         lambda: _flatten_lines(provider.frame(provider.last_width).input_status_lines)
     )
@@ -696,6 +713,7 @@ def make_tui_transcript_view(
     )
     return TuiTranscriptView(
         provider,
+        overlay_provider,
         control,
         window,
         modal_control,

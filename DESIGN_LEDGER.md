@@ -39,6 +39,13 @@
   适配为同一 ToolExecutor 审批门。当前 `controlled_exec` 直接进入 `subprocess.Popen`，没有 bwrap/OS
   sandbox，所以必须声明 `sandbox=none`；`apply=true` 未批准时 handler 不执行。未来只有真实执行器已接入
   可验证 sandbox 后，才能修改该声明，不能凭 capability grant、工具名或自然语言放宽。
+- 子代理具体工具审批复用 owner TUI/Web 的标准确认面，不另造模型推动工具：child 的
+  `BackgroundTranscriptSink` 把完整 `ToolApprovalRequest` 发布到 owner ConversationStore 下唯一
+  `subagent_tool_approval.v1` 记录，并阻塞原 ToolCall；界面以显式 consumer lease 领取，决定仍经过
+  owner/thread/root/current-attempt 授权门和完整 request 比对。主代理与多 child 的面板进入一个 FIFO，
+  页面切换不改变 root overlay。无交互 consumer、取消、终态、损坏或写回失败全部 fail closed；不从标题、
+  行位置或回复文案猜授权。详细设计见
+  `docs/design/SUBAGENT_TOOL_APPROVAL_BRIDGE.md`。
 - 普通可恢复工具错误按 会话运行时 的 `RespondToModel` 语义回到当前模型继续修正：同工具同类失败达到
   提示阈值只能注入换参数、换工具或拆步骤的强返工提示，不能按次数结束 turn。精确同参机械重试可由
   action guardrail 拒绝该次动作，但不得升级成任务终态；跨轮 streak/episode 机器裁判不进入默认主链。
