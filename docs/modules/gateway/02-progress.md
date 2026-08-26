@@ -1,5 +1,15 @@
 # Gateway Progress
 
+## 2026-08-26 Anthropic native 首轮缓存身份（本地候选）
+
+- `69bf2ec` 部署后的 fresh TUI 权威账本显示前三次 MiniMax-M2.7 调用仍为 0 cache-write/read；同配置的
+  脱敏请求组装和直连重复前缀探针分别证明断点已加载、供应商能写 10,551 并读 10,541 tokens。
+- 根因不在 Gateway、Key 或供应商，而是 native 第一轮空 IR 被 `_native_provider_messages()` 压成 `None`，
+  backend 将它误作普通 text。当前保留 `[]=native empty`、`None=text`，使首轮 prompt/tools 也进入唯一
+  Anthropic cache 投影；Compact、canonical IR 与任务状态不变。
+- 9 个直接相关测试文件 193 项通过。待当前真 TUI 任务安全终态后完成严格 gate、唯一 Gateway 部署与
+  fresh provider usage 复验；直连探针不能替代 Agent 真链证据。
+
 ## 2026-08-25 assistant 终态折叠、缓存稳定前缀与 Compact 回执刷新（已部署真机验证）
 
 - Gateway 完成回合仍只向用户保存原 assistant 正文；同一条消息 metadata 新增一次从 canonical archive 构造的

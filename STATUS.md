@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-08-26 Anthropic-compatible 主动缓存（本地候选，待严格 gate 后部署）
+## 2026-08-26 Anthropic-compatible 主动缓存（首版已部署，首轮分叉修复待真 TUI）
 
 - `.7` 唯一 Gateway 的旧 HEAD 长 TUI `ma-97468f3-longchain-r27` 已到终态，耗时约 3 小时 59 分。
   主代理与 19 个 child 合计 1,156 次 MiniMax-M2.7 物理调用、46,024,438 accounted input、
@@ -13,12 +13,21 @@
 - 主代理独立复测曾看到 exit 1，但随后亲自把 `dangerouslyIgnoreUnhandledErrors: true`
   写入测试配置，并把仍在输出中的 ENOENT 说成“测试完全通过”。这一样本是模型违反已有
   system 约束的语义失败，不重新引入机器质量验收门；继续用 会话运行时 同模型对照区分模型与底座责任。
-- 本地 backend 候选仅给 Anthropic-compatible 原生多轮链投影三个 copy-on-write `cache_control` 断点：
+- `69bf2ec` 已通过 174 项 focused 与本地严格 gate、推送并部署唯一 Gateway。fresh TUI
+  `ma-cache-r32` 的主代理前三次真实调用仍是 46,269 input、0 cache-creation、0 cache-read；这证明首版
+  payload 投影存在、但真实首轮没有进入该分支，不能冒充真机通过。
+- 脱敏组装探针确认部署进程读取 `anthropic_prompt_cache_enabled=true`，会在 message/tool 各写一个断点；
+  同配置直连 MiniMax-M2.7 的两次重复前缀探针分别返回 10,551 cache-creation，以及 10,541 cache-read +
+  10 cache-creation。端点、Key 与 usage 解析均正常，故障收敛到主运行链。
+- 根因是 `_native_provider_messages()` 把 native 首轮空历史 `[]` 压成 `None`，backend 随即按普通 text
+  请求跳过缓存。当前二层候选保留结构化区别：`None` 只代表 text，native 首轮明确传 `[]`，从第一次
+  模型请求就缓存稳定 prompt 与工具清单；不增加 fallback，也不改变 Compact 或任务状态。
+- backend 继续只给 Anthropic-compatible 原生多轮链投影三个 copy-on-write `cache_control` 断点：
   稳定工具尾、首条真实 prompt、最新历史块。普通 text 请求、canonical native IR、Compact generation 与
   任务状态均不改变；`anthropic_prompt_cache_enabled` 是唯一开关。
-- 相关 7 个测试文件的 174 项 focused、doc sync、strict code-size 和 diff check 已通过；
-  提交前严格 gate 本轮再统一复跑。部署后以 fresh child 的 provider cache-write/cache-read 账本
-  作为真机通过标准。
+- 二层候选 9 个直接相关测试文件 193 项通过。当前真实调研任务仍运行在旧 Gateway 进程，待它安全终态后再
+  跑完整 focused 与严格 gate、推送、只重启唯一 Gateway，并以 fresh child 的 provider cache-write/
+  cache-read 账本作为最终真机标准。
 
 ## 2026-08-25 跨回合工具终态折叠、缓存稳定前缀与 Compact 回执刷新（已部署真机验证）
 

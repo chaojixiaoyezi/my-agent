@@ -155,6 +155,35 @@ def test_native_prompt_cache_can_be_disabled_for_incompatible_endpoints():
     assert captured["payload"]["tools"] == _TOOLS
 
 
+def test_native_prompt_cache_marks_prompt_and_tools_on_empty_first_turn():
+    backend = AnthropicCompatibleBackend(_options(stream_enabled=False))
+    captured: dict[str, object] = {}
+
+    def fake_request_json(path, payload, headers):
+        del path, headers
+        captured["payload"] = payload
+        return {"content": [{"type": "text", "text": "ok"}]}
+
+    backend.request_json = fake_request_json
+    backend.generate("root prompt", tools=_TOOLS, messages=[])
+
+    assert captured["payload"]["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "root prompt",
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+        }
+    ]
+    assert captured["payload"]["tools"][-1]["cache_control"] == {
+        "type": "ephemeral"
+    }
+
+
 def test_native_prompt_cache_keeps_empty_first_request_shape():
     backend = AnthropicCompatibleBackend(_options(stream_enabled=False))
     captured: dict[str, object] = {}

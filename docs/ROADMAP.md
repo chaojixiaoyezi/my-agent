@@ -19,8 +19,8 @@
 
 ### Anthropic-compatible 原生长循环主动缓存
 
-状态：旧 Gateway 长任务已终态并完成独立产物验收；本地候选 174 项 focused 通过，待提交前
-严格 gate、单 Gateway 部署与 fresh TUI 验证
+状态：`69bf2ec` 首版已严格 gate、推送并部署；fresh TUI 定位首轮 native 空历史分叉，二层修复 193 项
+focused 通过，待当前任务安全终态后严格 gate、单 Gateway 部署与 fresh TUI 验证
 
 解决问题：`.7` 的 Click→TypeScript 复刻最终使用 19 个 child、1,156 次真实 MiniMax-M2.7
 调用，累计 `46,024,438` accounted input、`565,392` output、`6,454,431` cache-read、`0`
@@ -33,6 +33,11 @@ provider 创建主动缓存断点。
 tools 不变，普通单次 text 请求不变，Compact generation 也不因此增加。配置
 `anthropic_prompt_cache_enabled` 默认开启，不支持该标准字段的兼容端点可关闭。会话运行时 的稳定 session
 `prompt_cache_key` 只作为“同一会话稳定前缀”的设计参照，不把 Responses API 字段硬塞进 Anthropic 协议。
+
+首版 fresh TUI 主轮前三次真实调用仍为 46,269 input、0 cache-write/read。脱敏 payload 探针确认断点与开关
+都已加载，同配置直连 MiniMax-M2.7 又真实得到首次 10,551 cache-write、第二次 10,541 cache-read；根因因此
+锁定为 native 首轮空 IR 被 `messages or None` 压成普通 text。二层候选固定 `None=text`、`[]=native empty`
+的结构化边界，从第一次 Agent 模型请求就建立稳定工具/prompt 缓存，不增加第二条请求路径。
 
 真机验收必须证明 fresh child 的连续原生工具轮出现 provider `cache_creation_input_tokens`，随后出现
 `cached_input_tokens`，并核对模型仍为 MiniMax-M2.7、只有一个 my-agent Gateway；只看 Context 下降或界面

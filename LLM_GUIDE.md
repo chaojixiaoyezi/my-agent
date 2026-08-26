@@ -31,7 +31,9 @@
 - Anthropic-compatible 原生多轮工具循环由 backend 按 tools → prompt → messages 顺序主动投影
   `cache_control`：稳定工具尾、首条真实任务和最新历史块最多占三个宿主断点，且必须 copy-on-write，
   不能污染 canonical native IR 或推进 Compact。普通单次 text 请求保持原样；兼容端点不支持时只通过
-  `anthropic_prompt_cache_enabled=false` 关闭。是否命中只看 provider usage ledger 的 cache-write/cache-read。
+  `anthropic_prompt_cache_enabled=false` 关闭。`messages=None` 只表示 text；native 第一轮即使历史为空也必须
+  明确传 `messages=[]`，从首次请求缓存稳定工具和 prompt。是否命中只看 provider usage ledger 的
+  cache-write/cache-read。
 - provider 的 typed `socket.gaierror` 与 会话运行时 `ConnectionFailed` 一样先走现有 2/5/15 秒有界 HTTP 退避；
   DNS 瞬断不能一跳终止数小时 child。三次耗尽后仍返回 typed transient failure 供既有模型轮恢复，畸形
   URL、认证、代理配置和普通错误字符串不因此取得重试权；每个物理 attempt 继续进入唯一调用账。

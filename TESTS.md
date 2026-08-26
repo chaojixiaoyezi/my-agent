@@ -22,13 +22,22 @@ python3 -m pytest \
 覆盖点：
 
 - native 首轮在稳定工具尾、首条真实 prompt 上标断点，续轮另在最新 text/tool_use/tool_result 块标断点；
+- native 首轮即使 IR 历史为空也必须保留 `messages=[]`，不能压成代表 text 请求的 `None`；
 - copy-on-write 后输入 messages/tools 与 canonical IR 保持逐字段不变；
 - `messages=None` 的普通 text 请求和空 prompt 的旧请求形态不变；
 - 配置关闭后 payload 不出现 `cache_control`，YAML 与 dataclass 默认一致；
 - 部署后的真 TUI 必须从 provider usage ledger 观察到先 cache-write、后 cache-read，不能用 Context 或
   Compact 数字替代该证据。
 
-当前结果：174 项已通过。本轮改动远低于 10,000 行，不跑全仓 pytest。
+首版 174 项和严格 gate 已通过并以 `69bf2ec` 部署。fresh TUI 首轮权威账本仍为 0 cache-write/read，
+二层分叉修复的 9 个直接相关测试文件 193 项通过。本轮改动远低于 10,000 行，不跑全仓 pytest。
+
+真机协议探针（同一部署代码、同一配置、同一 MiniMax-M2.7 端点，不输出 Key 或 prompt）：
+
+- 脱敏 payload 组装：`cache_enabled=True`，message/tool 各一个 `cache_control`；
+- 第一次重复前缀请求：10,551 cache-creation、0 cache-read；
+- 第二次：10 cache-creation、10,541 cache-read；
+- fresh Agent 主轮前三次：46,269 input、0 cache-creation、0 cache-read，因 native `[]` 被压成 `None`。
 
 真 TUI 旧版对照样本（`ma-97468f3-longchain-r27`）：
 

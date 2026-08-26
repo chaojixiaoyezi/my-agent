@@ -1783,7 +1783,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   TUI reducer 只接受当前期望 generation 且不倒退 revision 的快照，最终 notice 也携带同一身份。
 - 视窗：每个 main/child store 仍保存自己的 follow/cursor；真实 prompt_toolkit Window 通过公开
   `get_vertical_scroll` 每帧应用锚点。提交、首次进入或显式 End 粘底，手动上翻不被新输出抢走。
-## 2026-08-26 Anthropic-compatible 主动缓存断点【状态：本地候选，待真 TUI】
+## 2026-08-26 Anthropic-compatible 主动缓存断点【状态：首版已部署，首轮分叉修复待真 TUI】
 
 - 当前原生工具循环每次都复用稳定工具清单、首条真实任务和不断增长的历史，但旧 backend 没有发任何
   `cache_control`。真实 MiniMax-M2.7 child 的 82 次调用累计 4,225,275 input，cache write 为 0，不能再用
@@ -1794,6 +1794,12 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - 该能力只在调用方显式传入 `messages` 的原生多轮链启用；普通 text/auxiliary 单次请求保持旧 payload。
   `anthropic_prompt_cache_enabled` 是唯一兼容开关，YAML 与 dataclass 默认均为 true。端点拒绝标准字段时由
   用户明确关闭，不增加 provider 名称猜测、错误字符串重试或第二条隐式 fallback。
+- `69bf2ec` 部署后的 fresh TUI 暴露 native 第一轮空 IR 被 `messages or None` 压成 text 语义，前三次真实
+  调用因而没有 cache write/read。统一入口现在固定 `None=text`、`[]=native empty history`；原生首轮从
+  第一次请求就建立工具/prompt 缓存，后续继续推进 history 断点。这个类型区别属于 provider 协议事实，
+  不依赖任务正文、模型判断或界面状态。
+- 同部署配置的直连 MiniMax-M2.7 探针已证明协议可用：首次写 10,551 tokens，第二次读 10,541 tokens。
+  因此真 TUI 仍必须在二层候选部署后复验，探针不能替代完整 Agent 运行证据。
 - 会话运行时 的 session-scoped `prompt_cache_key` 证明稳定会话前缀应由底座承担；具体 wire 字段继续服从当前
   Anthropic-compatible 协议。真机是否有效只读 provider usage ledger 的 cache-write/cache-read，不根据
   延迟、上下文百分比或自然语言推断。

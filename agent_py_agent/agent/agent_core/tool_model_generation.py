@@ -346,9 +346,11 @@ def _begin_model_turn_identity(params: object, tool_rounds: int) -> str:
 def _native_provider_messages(agent: object, params: object) -> list[dict] | None:
     """native 下把 IR 历史和宿主运行时指引翻成厂商原生 messages。
 
-    text 协议始终返回 ``None``。native 第一轮或协议修复轮可能没有 IR 工具
-    历史，但只要 ``tool_context`` 有尚未转发的宿主指引，仍必须返回结构化
-    user 消息。backend 会先放入原始 prompt，再追加这些指引。
+    text 协议始终返回 ``None``。native 第一轮即使还没有 IR 工具历史，也必须
+    返回 ``[]``，让 backend 保留“这是原生会话”的结构化事实，并从首个模型
+    请求开始缓存稳定 prompt 与工具清单；不能把空 native 历史压成 text 路径。
+    ``tool_context`` 有尚未转发的宿主指引时，继续返回结构化 user 消息。
+    backend 会先放入原始 prompt，再追加这些指引。
     """
     if not native_tool_use_active(params):
         return None
@@ -373,7 +375,7 @@ def _native_provider_messages(agent: object, params: object) -> list[dict] | Non
         getattr(params, "tool_context", None),
         seen=_forwarded_guidance_seen(params),
     )
-    return messages or None
+    return messages
 
 
 def _model_turn_tool_choice(

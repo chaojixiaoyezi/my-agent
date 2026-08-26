@@ -196,7 +196,9 @@ def test_native_provider_messages_forwards_first_turn_guidance_without_ir(tmp_pa
         }
     ]
     # The exact guidance is sent only once across model retries.
-    assert _native_provider_messages(agent, params) is None
+    # Native empty history remains [] so the backend can cache the first stable
+    # prompt/tool prefix; only text protocol uses None.
+    assert _native_provider_messages(agent, params) == []
 
 
 def test_text_protocol_unaffected_by_guidance_forwarding(tmp_path):
