@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-08-26 后台进程改归 conversation session 托管（第九候选）
+## 2026-08-26 后台进程改归 conversation session 托管（已部署真机通过）
 
 - `d29caab` 已推送并部署 `.7` 唯一 Gateway。fresh
   `ma-evidence-r52-child-owner-approval-fresh` 证明 child 的 exact 工具请求能在 owner TUI 展示；Yes、
@@ -13,9 +13,15 @@
   语义：已明确批准的后台服务属于 owner conversation session，而不是一次模型工作片。当前候选为每条命令
   启动 detached managed host，host 再持有原 bwrap；受保护的 `managed_process_session.v1` 记录 owner/
   conversation、host/child PID、PID 出生指纹和单调终态。登记失败会先杀 host，主机崩溃后不自动重放。
-- one-shot launcher 退出后由另一 Python 进程重新水合、查询 running 和 stop，owner 沙箱外存储、终态不回退、
-  runner 退出后的日志上限及完整后代树回收共 50 项 focused 已通过；严格 gate、提交部署和 fresh r53
-  MiniMax-M2.7 真 TUI 仍待完成。
+- 直接相关扩大回归 140 项、全项目 Ruff、doc sync、strict code-size、diff 和 clean-package 全绿；本轮
+  1,356 additions / 142 deletions，低于 10,000 行，按约定未跑全仓 pytest。`8f50d19` 已推送并快进部署，
+  `.7` 仍只有 Gateway PID `1389972`、127.0.0.1:8420 和 MiniMax-M2.7。
+- fresh `ma-evidence-r53-child-process-session` 只收到一次普通中文任务：审批前 8769 为关闭，owner TUI
+  Yes 后原 child 启动服务并 DONE；child DONE 至少 27 秒、root 自己 curl 后自然 final 至少 12 秒，HTTP
+  仍为 200 且包含 r53。另一 Python 进程从 owner sandbox 外 `0600/0700` 权威记录水合到 running；错误
+  conversation 看不到，精确 stop 返回 killed，host/bwrap 全部退出、端口关闭、记录保持 killed。
+- 该 P0 已通过。r53 另暴露一项非进程问题：用户要求主代理“只协调”，模型仍亲自调用 Bash 创建目录；
+  这是 会话运行时 式 coordinator 软纪律未完全生效，不能混入本项冒充已解决，继续留给下一轮对照修复。
 
 ## 2026-08-26 子代理 exact tool approval 转交 owner TUI（第八候选）
 

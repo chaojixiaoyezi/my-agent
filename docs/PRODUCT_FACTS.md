@@ -14,7 +14,7 @@
 
 ## 2026-08-26 受管后台进程、PTY 与子代理副作用授权
 
-- **状态：实验性（`d29caab` 已部署并通过 owner TUI 的 child exact approval 真测；当前工作树正补后台进程跨 runner 托管，50 项 focused 通过，尚未部署/真机）**。
+- **状态：实验性（`8f50d19` 已部署；owner TUI child exact approval 与后台进程跨 runner 托管均已 fresh 真测）**。
   `EffectResolverPolicy` 允许 command parser 和结构化参数 mapping 叠加，各 effect 消费者统一
   取最高风险。`ShellTool` 声明 `run_in_background=true` 为 `dangerous`。
 - 当前 bwrap 只包住文件边界，依然共享主机网络；受管后台进程和新 PTY 也会越过单次
@@ -31,9 +31,11 @@
   ToolExecutor 续跑原 ToolCall。无交互客户端、断线、取消、终态和坏记录均返回 unavailable/cancelled，
   不会自动放行；fresh r52 的 Yes、Yes always 与 No 已真机通过。
 - r52 同时证明旧后台进程仍归一次性 child runner，child DONE 后 bwrap 会按 `--die-with-parent` 正确杀掉
-  服务，而主代理仍按旧启动回执误报。当前工作树将后台命令改归 owner conversation session：独立 host
+  服务，而主代理仍按旧启动回执误报。`8f50d19` 将后台命令改归 owner conversation session：独立 host
   持有原 bwrap，跨进程权威记录位于 owner 沙箱外，查询/停止核对 exact scope、store root 和 PID 出生指纹，
-  终态不可回退且不会自动重放命令。远程承诺仍等待 fresh r53 证明 child/root 结束后服务继续存活。
+  终态不可回退且不会自动重放命令。fresh r53 已证明 child/root 结束后服务继续返回 200，另一进程可水合
+  running，错误 conversation 不可见，精确 stop 关闭完整树并持久化 killed。整体仍标实验性，是因为本节还
+  包含 PTY/多种副作用授权的更大兼容面；上述后台 session 支持范围本身已完成本轮真实验收。
 
 ## 2026-08-25 跨回合工具终态折叠与缓存稳定前缀
 

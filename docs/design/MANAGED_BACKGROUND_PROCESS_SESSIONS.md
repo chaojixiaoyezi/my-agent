@@ -1,6 +1,6 @@
 # 受管后台进程会话
 
-状态：本地候选已完成，待 `.7` 唯一 Gateway 的 fresh TUI 真机验收。
+状态：`8f50d19` 已部署 `.7` 唯一 Gateway，fresh r53 MiniMax-M2.7 真机验收通过。
 
 ## 解决问题
 
@@ -110,3 +110,8 @@ run_command(run_in_background=true)
 真机必须使用 `.7` 的一个 Gateway、MiniMax-M2.7 和 fresh TUI：child 经 owner TUI 批准后启动本地 HTTP
 服务；child 和 root 工作片自然结束至少十秒后端口仍监听，随后同一用户会话可由 `process_session`
 查询/停止。测试者只给一次普通中文任务并观察，不替被测 agent 补服务或产物。
+
+`ma-evidence-r53-child-process-session` 已完成该验收：审批前 8769 关闭，Yes 后 child DONE；child DONE 至少
+27 秒、root final 至少 12 秒后 HTTP 仍为 200 且正文含 r53。另一 Python 进程从 owner sandbox 外的
+`0600` 记录水合 `running`，错误 conversation 返回 `PROCESS_NOT_FOUND`；精确 stop 后 host 与 bwrap PID
+均消失、端口关闭、持久终态为 `killed`。一次性 launch spec 已删除，Gateway 全程只有一个。

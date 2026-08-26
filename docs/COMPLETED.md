@@ -1,5 +1,12 @@
 # COMPLETED
 
+- 2026-08-26 `8f50d19` 将显式后台命令从 one-shot main/child runner 改归 owner conversation session：
+  detached host 持有原 bwrap 与 `--die-with-parent`，owner 沙箱外 `managed_process_session.v1` 保存 exact
+  scope、store root、PID 出生指纹和单调终态；登记失败先回收，runner 退出后仍守日志上限，主机崩溃不
+  自动重放。140 项直接相关回归与本地严格 gate 通过，已推送并部署 `.7` 唯一 Gateway。fresh
+  `ma-evidence-r53-child-process-session` 在 child DONE 至少 27 秒、root final 至少 12 秒后仍返回 r53/200；
+  另一进程水合 running，错 scope 隐藏，stop 关闭 host/bwrap/8769 并持久化 killed。
+
 - 2026-08-26 `814cc3b` 让空输入 `Down` 先读取当前 main/child viewport 的 typed `follow`：离尾时复用
   唯一 `end()` 返回最新消息，已贴底时才继续 child selection/history；输入有字的视觉折行行为不变，也不
   解析 `N new messages` 文案。145 项相关 TUI 回归与本地严格 gate 通过，已推送并快进部署 `.7` 唯一

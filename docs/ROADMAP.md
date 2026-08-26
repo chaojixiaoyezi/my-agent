@@ -414,8 +414,10 @@ buffer 和 终端交互 状态累积/帧级刷新，把首片之外的同块 del
 旧进程所有权仍在一次性 child runner：child DONE 后 bwrap 按 `--die-with-parent` 杀掉服务，主代理却按旧
 启动回执误报运行。当前候选对照 会话运行时 Session process manager，将原 bwrap 的父进程改为 detached managed
 host，并把 owner/conversation/PID 出生指纹/终态写到 owner 沙箱外唯一记录；不采用 终端交互 的 worker-exit
-即清理语义，也不自动重放命令。50 项 shell/process focused 已通过，待严格 gate、部署一个 Gateway 和
-fresh r53 验证 child/root 工作片结束十秒后端口仍在、同 scope 可查询停止。
+即清理语义，也不自动重放命令。`8f50d19` 的 140 项直接相关回归与严格 gate 已通过并部署一个 Gateway；
+fresh r53 已证明 child/root 工作片结束后端口仍在、另一进程同 scope 可查询停止、错 scope 不可见、stop
+收掉完整树。本项转入 COMPLETED。r53 同时留下下一项：主代理在“只协调”任务中仍亲自执行 mkdir，需要
+继续对照 会话运行时 coordinator/no-duplicate-work 的真实 prompt 和工具选择，不增加任务专项硬门。
 
 子代理详情的真机回看暴露的三项同源缺口已由 `91a1c3d` 收口：详情首条改读完整 `task.goal`，非 callable
 child sink 先按 typed `write_progress` 接工具事件，`Ctrl+O` 改为冻结 active runtime。218 项直接 focused 与

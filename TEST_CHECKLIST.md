@@ -51,12 +51,13 @@
 - [ ] 后台 main/child 的逐 token thinking 不得一片一条挤满公开事件环；首片应即时可见，后续同块按短时间
   或字符阈值合批，完整终态仍恢复全部正文。47 项 focused 已通过，待 `.7` 唯一 Gateway 与同一长 session
   普通追加轮证明 TUI 不再数分钟停在旧工具后一次性追赶。
-- [ ] `run_command(run_in_background=true)` 返回的 session 必须能由同一用户会话通过
+- [x] `run_command(run_in_background=true)` 返回的 session 必须能由同一用户会话通过
   `process_session list/status/wait/stop` 管理；wait 不派生 shell sleep，另一 TUI/owner 即使猜到 id 也看不到
   日志、不能停止。默认 coding role、动态 capability grant 和旧任务恢复也必须自动补齐该依赖，owner 显式
   禁用仍优先。后台命令必须归 conversation session，不归 one-shot child runner；原 runner 退出后 detached
   host 继续持有 bwrap，受保护记录按 scope/store/PID 出生指纹水合，终态不回退。50 项 shell/process 与
-  54 项角色/授权组合 focused 已通过，待 fresh r53 真机证明 child/root 结束十秒后服务仍在且可查询停止。
+  54 项角色/授权组合 focused 已通过。`8f50d19` 部署后的 fresh r53 已证明 child DONE 至少 27 秒、root final
+  至少 12 秒后服务仍在；另一进程同 scope 水合 running，错 scope 隐藏，stop 后完整树退出且记录为 killed。
 - [ ] 同一个长 TUI/同一个 conversation 依次完成“大型多子代理任务 -> 两个普通小任务/追问 -> 第二个大型
   多子代理复刻 -> 独立审计/修复”时，历史、工作区、输入队列、Todo、child 列表、Compact 计数和 main 状态
   必须连续且互不串轮；每阶段只给一次普通中文 prompt，测试者只观察，不替被测 Agent 补产物。

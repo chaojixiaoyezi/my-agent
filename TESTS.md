@@ -49,7 +49,10 @@ python3 -m pytest \
   -q --tb=short
 ```
 
-当前 50 passed，定向 Ruff 与 strict code-size 通过。待严格 gate、部署和 fresh r53 MiniMax-M2.7 TUI。
+扩大后的直接相关回归 140 项通过；全项目 Ruff、doc sync、strict code-size、diff 和 clean-package 严格 gate
+全绿。`8f50d19` 已推送并部署 `.7` 唯一 Gateway。fresh `ma-evidence-r53-child-process-session` 已证明：
+审批前 8769 关闭；Yes 后 child DONE，服务跨 child/root 终态继续 200；另一进程水合 running，错误 scope
+不可见，精确 stop 后 host/命令树消失、端口关闭、记录为 killed。本轮低于 10,000 行，未跑全仓 pytest。
 
 ## 2026-08-26 受管后台进程与 PTY start 必须经过精确审批
 

@@ -1546,7 +1546,7 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   后续同一 block 按 0.25 秒或 256 字符合批；完整 `thinking_completed` 仍是慢客户端恢复权威。合批不改变
   lifecycle、Compact、正文持久化或完成判断，47 项 background/TUI focused 已通过。
 
-## 2026-08-25 会话运行时 式后台进程会话续接【状态：跨 runner 托管候选 focused 通过，待 `.7` fresh 真机】
+## 2026-08-25 会话运行时 式后台进程会话续接【状态：`8f50d19` 已部署，r53 fresh 真机通过】
 
 - 真实 Rust 构建现场使用 `run_command(run_in_background=true)` 后，返回文案要求模型调用
   `process_status/list_processes/kill_process`，但 Registry 从未注册这三个模型工具；shell 又正确拒绝裸 `&`，
@@ -1568,7 +1568,8 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
 - fresh r52 进一步暴露旧内存注册表只活在 child runner：child 启动 HTTP 服务后自然 DONE，bwrap 因
   `--die-with-parent` 随 runner 退出，主代理仍按启动回执误报运行。当前候选保留该安全参数，但把直接父进程
   改为 detached managed host，并将 scope/PID/出生指纹/终态写入 owner 沙箱外权威记录；另一个进程已能
-  水合 running、读取日志并 stop。完整合同见
+  水合 running、读取日志并 stop。r53 已证明 child/root 结束后服务继续存活、错 scope 不可见、精确 stop
+  关闭完整树并持久化 killed。完整合同见
   `docs/design/MANAGED_BACKGROUND_PROCESS_SESSIONS.md`。
 
 ## 2026-08-24 较早未决操作的 会话运行时 式软核对
