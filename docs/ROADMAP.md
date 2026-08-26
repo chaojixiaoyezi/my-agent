@@ -19,7 +19,7 @@
 
 ### 跨回合工具终态折叠与缓存稳定前缀
 
-状态：本地实现、289 项 focused 与严格 gate 已通过，待 `.7` 单 Gateway 真 TUI
+状态：`7b14e34` 已推送、部署并完成 `.7` 单 Gateway 真 TUI；手动 Compact 状态刷新二层候选待发布
 
 解决问题：同一长 TUI 中，当前模型可见上下文从 60 多 K 回落到 50 多 K，但 canonical thread 仍为
 `compact 0`。权威账本证明没有漏记 Compact；真实缺口是普通回合结束后 native ToolCall/ToolResult 只保留
@@ -41,6 +41,12 @@ Compact 继续成功后再以同 event id 写更大的累计账，Store 正确 f
 模型安全点读取并确认，只有最后一条留给主代理。当前候选按 会话运行时 的 exact parent session mailbox 收口：
 root lineage 只表示血缘，不授予 child 读取父收件箱的权限。下一步严格 gate 后部署唯一 Gateway，在同一
 session 先补齐这次调研，再连续做两个小追加和多子代理复刻；不能另启测试 Gateway。
+
+终态折叠真机已证明普通 follow-up 可直接回答前一轮 2 次 Read 的数量、成功状态与 exact path，且 provider
+分别返回 42,107 与 12,987 cache-read token；手动 Compact 真实提交 generation 1、45,639 → 15,029。
+新暴露的缺口只是控制完成没有向 TUI 发布 typed boundary，导致旧 `compact 0` 和压缩前 Context 留屏。
+二层候选通过既有 `task_status.compact_generation` 跨 HTTP/operation receipt 传递 canonical 代数，立即撤下
+失效 Context，固定显示下次真实模型调用刷新；不额外调用模型、不解析文案、不改 provider cache 协议。
 
 ### Leaf 角色行为与共享工作区修改纪律
 

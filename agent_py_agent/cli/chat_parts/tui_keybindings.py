@@ -1099,12 +1099,21 @@ def _ensure_control_operation_reconciler(
     def on_restore(_entry) -> None:
         runtime.set_notice("Restoring control confirmation…", duration_seconds=2.0)
 
-    # LLM: Completed controls produce one local projection; stop stays a compact status notice.
-    # 函数用途: 展示已经有持久结果的控制命令。
+    # LLM: A successful compact consumes only the typed canonical generation returned by Gateway;
+    # prose remains display text and cannot advance status. Other controls keep the console path.
+    # 函数用途: 展示控制结果，并让手动 Compact 立即刷新历史边界和固定状态栏。
     def on_complete(entry, result) -> None:
         if entry.command_kind == "stop":
             runtime.set_notice(result.message or "Stop request completed", duration_seconds=2.0)
             return
+        if entry.command_kind == "compact" and result.ok and result.status is not None:
+            generation = result.status.compact_generation
+            if generation is not None and generation > 0:
+                runtime.publish_compact_boundary(
+                    generation,
+                    text=result.message,
+                )
+                return
         runtime.write_console(result.message or "控制命令已完成。")
 
     # LLM: Terminal uncertainty is never rendered as success or retried with a fresh id.

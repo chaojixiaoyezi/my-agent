@@ -247,6 +247,32 @@ def test_terminal_tool_fold_reaches_next_turn_without_incrementing_compact(tmp_p
     assert "当前未压缩尾部 1 个回合、2 次工具调用" in rendered
     assert "不计入 compact 次数" in rendered
 
+    assert _append_gateway_conversation_message(
+        agent,
+        {"metadata": {"channel": "feishu"}},
+        context,
+        request_id="gw-second-user",
+        role="user",
+        content="再核对一次",
+    )
+    assert _append_gateway_conversation_message(
+        agent,
+        {"metadata": {"channel": "feishu"}},
+        context,
+        request_id="gw-second-assistant",
+        role="assistant",
+        content="复核完成。",
+        terminal_tool_fold={
+            **fold,
+            "text": fold["text"].replace("call-read", "call-read-again"),
+        },
+    )
+    later = _context(agent, request, "gw-later", "继续下一项")
+
+    assert later.compact_generation == 0
+    assert later.history[: len(followup.history)] == followup.history
+    assert "call-read-again" in later.history[-1][1]
+
 
 def test_forced_compact_passes_optional_instructions_as_soft_summary_context(tmp_path) -> None:
     agent = _agent(tmp_path, context_tokens=20_000)

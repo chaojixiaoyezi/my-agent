@@ -653,6 +653,31 @@ def _normalize_subagent_activity_rows(
     return tuple(rows)
 
 
+# LLM: This narrow mixin owns only the typed conversation boundary publisher. It delegates to
+# TuiRuntime's sequencer/store and must not acquire independent lifecycle state.
+# 类用途: 为 TuiRuntime 提供已提交 Compact 边界的唯一公开发布入口。
+class _TuiConversationBoundaryRuntimeMixin:
+    # LLM: Manual control completion and streamed auto-compact share one typed boundary. The
+    # generation comes from the canonical thread; display text cannot advance compact state.
+    # 函数用途: 将一次已提交的会话 Compact 立即同步到历史和固定状态栏，不等待下一次模型调用。
+    def publish_compact_boundary(self, generation: int, *, text: str = "") -> None:
+        from .renderer import strip_ansi
+
+        normalized_generation = max(0, int(generation or 0))
+        if normalized_generation <= 0:
+            raise ValueError("compact generation must be positive")
+        normalized_text = strip_ansi(str(text or "")).rstrip("\n")
+        self._publish(
+            "compact_boundary",
+            "completed",
+            f"compact:{self.session_id}:{normalized_generation}",
+            {
+                "compact_generation": normalized_generation,
+                "text": normalized_text,
+            },
+        )
+
+
 # LLM: This narrow mixin keeps the public display adapter out of the central
 # runtime class size budget. It only delegates to the runtime-owned controller
 # and must not gain independent state or event sequencing.
@@ -884,9 +909,12 @@ class _TuiBackgroundActivityRuntimeMixin:
         return len(active)
 
 
-# LLM: TuiRuntime 统一拥有 session 事件序号与 turn adapter；emit+publish 在同一锁内避免并发 seq 到达倒序。
-# 类用途: 建立 TUI 状态容器、发布启动/输入事件，并为每个 request 创建唯一 adapter。
-class TuiRuntime(_TuiBackgroundActivityRuntimeMixin):
+# LLM: TuiRuntime 统一拥有 session 事件序号与 turn adapter；两个无状态 mixin 只能借用同一 publish/store。
+# 类用途: 建立 TUI 状态容器、发布启动/输入与 Compact 边界事件，并为每个 request 创建唯一 adapter。
+class TuiRuntime(
+    _TuiConversationBoundaryRuntimeMixin,
+    _TuiBackgroundActivityRuntimeMixin,
+):
     # LLM: session_id 固定一个 UI 生命周期；store 可注入用于 replay/tests，但不能在运行中替换。
     # 函数用途: 创建 TUI runtime 和全局单调 sequencer。
     def __init__(self, session_id: str, *, store: TuiStateStore | None = None) -> None:

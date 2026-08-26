@@ -380,6 +380,32 @@ def test_gateway_control_status_is_read_only_and_preserves_delivery(monkeypatch)
     assert result.control_state == "completed"
 
 
+def test_gateway_compact_result_restores_typed_generation_without_parsing_message(
+    monkeypatch,
+) -> None:
+    response = MagicMock()
+    response.__enter__.return_value.read.return_value = (
+        b'{"ok": true, "kind": "compact", "message": "localized display only", '
+        b'"operation_id": "gwctl-compact", "control_state": "completed", '
+        b'"task_status": {"state": "idle", "compact_generation": 4}}'
+    )
+    monkeypatch.setattr(
+        "agent_py_agent.cli.chat_parts.control_runtime.urllib.request.urlopen",
+        MagicMock(return_value=response),
+    )
+    execution = ChatControlExecution(
+        SimpleNamespace(config=SimpleNamespace(gateway_port=8420)),
+        True,
+        ChatControlState(False, 0, "", 0.0, "session-compact-status"),
+    )
+
+    result = request_gateway_control_status(execution, "gwctl-compact")
+
+    assert result.status is not None
+    assert result.status.compact_generation == 4
+    assert result.message == "localized display only"
+
+
 def test_gateway_manual_compact_timeout_covers_one_provider_call(monkeypatch) -> None:
     response = MagicMock()
     response.__enter__.return_value.read.return_value = (

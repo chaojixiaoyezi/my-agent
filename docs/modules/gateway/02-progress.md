@@ -1,15 +1,21 @@
 # Gateway Progress
 
-## 2026-08-25 assistant 终态折叠与 Compact 续跑用量增量（本地候选）
+## 2026-08-25 assistant 终态折叠、缓存稳定前缀与 Compact 回执刷新（一层已部署，二层本地候选）
 
 - Gateway 完成回合仍只向用户保存原 assistant 正文；同一条消息 metadata 新增一次从 canonical archive 构造的
   `conversation_terminal_tool_fold.v1`。下一轮历史按原顺序附加这份不可变、有界、脱敏投影，不复制完整
   ToolCall/ToolResult，也不重新总结旧轮，因此历史前缀稳定且 provider cache 可继续复用。
 - `/context` 单列当前未压缩尾部的 fold 回合/调用数，普通折叠不推进 `compact_generation`；真正 Compact 才
   吸收它。消息 repair 使用完全相同的 metadata，不能因正常落账失败而丢掉续接事实。
-- HEAD 基线可复现 overflow→Compact→成功继续时 model-usage event id 异值冲突。当前 finalizer 用物理调用累计
+- HEAD 基线可复现 overflow→Compact→成功继续时 model-usage event id 异值冲突。`7b14e34` finalizer 用物理调用累计
   数作 cursor，ConversationStore 在唯一锁内把累计快照换成增量，cache-read/cache-write 不双计。289 项相关
-  focused 与本地严格 gate 已通过，待 `.7` 唯一 Gateway 真 TUI。
+  focused 与本地严格 gate 已通过并部署 `.7` 唯一 Gateway。
+- 原长真 TUI 的两轮 provider 回执分别有 42,107 与 12,987 cache-read，第二轮无需重读仍能准确回答前轮
+  两次 Read；手动 Compact generation 1 把 45,639 降到 15,029 并吸收 98 条消息。普通 fold 不重写旧轮，
+  真 Compact 才替换一次前缀，因此缓存命中与压缩节省不是同一个计数。
+- 现场同时发现控制成功后 footer 仍留着压缩前 `Context/compact 0`。二层候选让 Gateway 回执携带 typed
+  `task_status.compact_generation`，TUI 发布 canonical boundary 并撤下旧 snapshot；下一次真实模型调用再刷新
+  数字，不解析文案、不额外调用模型。5 个直接相关测试文件当前 190 项通过，待 generation 2 真 TUI 复验。
 
 ## 2026-08-25 DNS 瞬断的 会话运行时 式有界恢复（本地候选）
 

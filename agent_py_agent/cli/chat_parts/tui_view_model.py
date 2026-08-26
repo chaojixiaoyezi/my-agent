@@ -470,9 +470,10 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             event,
         )
 
-    # LLM: Only a canonical compact boundary may advance the visible main-agent count;
-    # progress percentages and prose are temporary display details, never completion facts.
-    # 函数用途: 记录会话成功 Compact 的累计次数，并保留原有的稳定边界提示。
+    # LLM: Only a canonical compact boundary may advance the visible main-agent count. The last
+    # provider preflight snapshot describes the pre-compact history, so it must be retired until
+    # the next real model call publishes a fresh model_visible_context_usage.v1 snapshot.
+    # 函数用途: 记录成功 Compact 次数、清掉已失效的旧 Context 数字，并保留稳定边界提示。
     def _handle_compact_boundary(self, event: TuiEvent) -> None:
         generation = _nonnegative_int(event.payload.get("compact_generation"), 0)
         if generation <= 0:
@@ -480,6 +481,8 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
         self.status = replace(
             self.status,
             compact_count=max(self.status.compact_count, generation),
+            context_tokens=0,
+            context_usage=None,
         )
         self._handle_system_message(event)
 

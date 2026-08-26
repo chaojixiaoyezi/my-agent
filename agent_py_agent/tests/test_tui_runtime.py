@@ -182,6 +182,38 @@ def test_gateway_context_usage_updates_status_without_creating_transcript_blocks
     assert not hasattr(snapshot.status.context_usage, "prompt")
 
 
+def test_manual_compact_boundary_retires_stale_context_and_updates_generation() -> None:
+    runtime = TuiRuntime("manual-compact-runtime")
+    runtime.enqueue_prompt("context-request", "go", queued=False)
+    turn = runtime.begin_turn("context-request")
+    assert turn.write_context_usage(
+        {
+            "schema": "model_visible_context_usage.v1",
+            "estimated": True,
+            "context_window_tokens": 128_000,
+            "compact_trigger_tokens": 115_200,
+            "current_tokens": 61_200,
+            "prompt_tokens": 8_000,
+            "messages_tokens": 35_000,
+            "runtime_guidance_tokens": 1_200,
+            "tool_schema_tokens": 17_000,
+            "protocol": "native",
+        }
+    )
+
+    runtime.publish_compact_boundary(
+        1,
+        text="Context compacted · generation 1\n上下文估算：45,639 → 15,029 tokens。",
+    )
+
+    snapshot = runtime.store.snapshot()
+    assert snapshot.status.compact_count == 1
+    assert snapshot.status.context_tokens == 0
+    assert snapshot.status.context_usage is None
+    assert snapshot.stable_blocks[-1].kind == "compact_boundary"
+    assert "45,639 → 15,029" in snapshot.stable_blocks[-1].text
+
+
 def test_gateway_context_compaction_creates_one_content_free_history_event() -> None:
     runtime = TuiRuntime("context-compaction-runtime")
     runtime.enqueue_prompt("context-request", "go", queued=False)

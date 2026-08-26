@@ -2804,6 +2804,8 @@ def test_manual_compact_uses_canonical_checkpoint_lane_and_custom_instructions(t
 
     assert result.ok is True
     assert "Context compacted · generation 1" in result.message
+    assert result.status is not None
+    assert result.status.compact_generation == 1
     assert compacted is not None and compacted.compact_generation == 1
     assert compacted.compact_checkpoint_id
     assert "优先保留未完成事项" in prompts[0]

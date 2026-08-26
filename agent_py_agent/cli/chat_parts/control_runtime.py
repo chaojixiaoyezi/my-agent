@@ -19,6 +19,7 @@ from ...agent.conversation.control_commands import (
     ConversationControlCommand,
     ConversationControlResult,
     ConversationTaskStatus,
+    NamedConversationWorkStatus,
     conversation_request_interrupt_name,
     render_conversation_task_status,
     render_verbose_control,
@@ -186,11 +187,91 @@ def _gateway_control_result_from_body(
         bool(body.get("ok")),
         str(body.get("message") or body.get("error") or "控制命令没有返回结果。"),
         request_id=str(body.get("request_id") or ""),
+        status=_conversation_task_status_from_body(body.get("task_status")),
         delivery_status=delivery_status,
         guidance_dedupe_key=str(body.get("guidance_dedupe_key") or ""),
         operation_id=str(body.get("operation_id") or ""),
         control_state=control_state,
     )
+
+
+# LLM: HTTP task status is untrusted adapter input. Restore only the frozen scalar fields and
+# bounded durable-work rows; malformed values cannot become a compact boundary or runtime state.
+# 函数用途: 把 Gateway 控制结果里的结构化任务状态安全恢复成共享 dataclass，供 TUI 消费真实 Compact 代数。
+def _conversation_task_status_from_body(value: object) -> ConversationTaskStatus | None:
+    if not isinstance(value, dict):
+        return None
+    state = str(value.get("state") or "idle").strip().lower()
+    if state not in {"idle", "queued", "running", "stopping"}:
+        state = "idle"
+    compact_generation = _optional_nonnegative_int(value.get("compact_generation"))
+    durable_work: list[NamedConversationWorkStatus] = []
+    raw_work = value.get("durable_work")
+    if isinstance(raw_work, list | tuple):
+        for row in raw_work[:64]:
+            if not isinstance(row, dict):
+                continue
+            kind = str(row.get("kind") or "").strip().lower()
+            name = str(row.get("name") or "").strip()
+            if kind not in {"audit", "goal"} or not name:
+                continue
+            durable_work.append(
+                NamedConversationWorkStatus(
+                    kind=kind,
+                    name=name[:64],
+                    status=str(row.get("status") or "")[:32],
+                    elapsed_seconds=_nonnegative_float(row.get("elapsed_seconds")),
+                )
+            )
+    return ConversationTaskStatus(
+        state=state,
+        task=str(value.get("task") or ""),
+        elapsed_seconds=_nonnegative_float(value.get("elapsed_seconds")),
+        queued_count=_nonnegative_int(value.get("queued_count")),
+        recent_progress=str(value.get("recent_progress") or ""),
+        subagent_total=_nonnegative_int(value.get("subagent_total")),
+        subagent_running=_nonnegative_int(value.get("subagent_running")),
+        subagent_done=_nonnegative_int(value.get("subagent_done")),
+        subagent_failed=_nonnegative_int(value.get("subagent_failed")),
+        model_name=str(value.get("model_name") or ""),
+        compact_generation=compact_generation,
+        verbose_level=str(value.get("verbose_level") or ""),
+        durable_work=tuple(durable_work),
+    )
+
+
+# LLM: Numeric control projections reject booleans and malformed strings instead of silently
+# turning them into status authority.
+# 函数用途: 将控制结果中的整数计数安全收口为非负值。
+def _nonnegative_int(value: object) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+# LLM: Optional compact generation distinguishes an absent field from canonical generation zero.
+# 函数用途: 安全读取可选的 Compact 代数，非法输入返回空。
+def _optional_nonnegative_int(value: object) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
+
+
+# LLM: Elapsed time is display-only and cannot accept negative or non-numeric transport values.
+# 函数用途: 将控制结果中的耗时安全收口为非负秒数。
+def _nonnegative_float(value: object) -> float:
+    if isinstance(value, bool):
+        return 0.0
+    try:
+        return max(0.0, float(value or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 # LLM: Structured HTTP errors such as idempotency conflicts are terminal protocol facts; reading

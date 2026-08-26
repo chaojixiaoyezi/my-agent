@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-08-25 跨回合工具终态折叠与缓存稳定前缀（本地候选）
+## 2026-08-25 跨回合工具终态折叠、缓存稳定前缀与 Compact 回执刷新（已部署一层，二层本地候选）
 
 - 原长 TUI 当前模型可见上下文在同一次请求内约 58k–61k，下一普通回合回到约 58k，而 canonical
   `compact_generation=0`。这不是一次漏显示的 Compact：缺口是普通回合结束后，native ToolCall/ToolResult
@@ -13,10 +13,19 @@
 - 折叠与 assistant 同账追加，旧行不随新轮重新总结，因此 provider 可复用 append-only 稳定前缀；它不推进
   `compact_generation`。真正 Compact 会把这些折叠纳入摘要；`/context` 已把当前尾部折叠回合/工具调用数与
   Compact 次数分开。
+- `7b14e34` 已通过 289 项 focused、严格 gate、推送并部署 `.7` 唯一 Gateway。原长 tmux 的真实两轮中，
+  第一轮 2 次 Read 的 provider usage 为 input 44,987、cache-read 42,107；下一轮不再读文件仍准确记得 2 次
+  调用，usage 为 input 30,515、cache-read 12,987。历史投影从约 61.2k 回到 59.9k 是普通终态折叠，不推进
+  generation；`/context` 明示 1 个 fold 回合/2 次工具调用。手动 `/compact` 随后真实提交 generation 1，
+  会话估算 45,639 → 15,029，并吸收 98 条消息。
 - 扩展回归同时复现并修掉一项 HEAD 既有故障：同一 child 在 overflow→Compact→继续回复时，旧会话用量事件
   只按 request/run 生成一个 id，却先后写入“一次调用”和“两次累计调用”，把第二次成功结果打成数据冲突。
-  现在按物理调用游标把累计快照原子换成增量事件，缓存读写 token 也只加新增部分。289 项 Compact、Gateway、
-  child、store/config focused 与本地严格 gate 已通过，待部署和 MiniMax-M2.7 真 TUI 连续轮验收。
+  现在按物理调用游标把累计快照原子换成增量事件，缓存读写 token 也只加新增部分。
+- 真 TUI 同时暴露第二层显示错误：手动 Compact 的成功正文已经写出 generation 1，但底部仍保留旧
+  `Context ~59.9k · compact 0`。当前候选不解析正文，改由控制回执的 typed `task_status` 恢复 generation，
+  发布 canonical boundary，并撤下已失效的 pre-compact Context；下一真实模型调用再刷新 provider-visible
+  数字。另补未 Compact 时后一轮 history 必须以前一轮完整 history 为稳定前缀的缓存回归。5 个直接相关
+  文件当前 190 项通过，待严格 gate、推送、部署和同 tmux generation 2 复验。
 
 ## 2026-08-25 当前回合 Todo 与物理 Window 粘底（已部署真机验证）
 

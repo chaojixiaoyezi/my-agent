@@ -1,5 +1,12 @@
 # COMPLETED
 
+- 2026-08-25 `7b14e34` 已把普通 main/child 回合的 canonical 工具 archive 一次折成不可变、脱敏、6k 默认上限
+  的 `conversation_terminal_tool_fold.v1`；公开正文不变，下一轮历史只追加同一 fold，真正 Compact 才摘要。
+  overflow→Compact→继续调用的累计 provider usage 同时按物理游标原子转为增量，cache-read/cache-write 不再
+  重复累计。289 项 focused 与严格 gate 通过并部署 `.7` 唯一 Gateway；原长 tmux 两轮真实证明 2 次 Read
+  可跨回合准确续接，provider cache-read 分别为 42,107 与 12,987，手动 Compact generation 1 成功吸收
+  98 条消息。其成功后 TUI 仍显示旧 `compact 0` 的二层显示同步已转入 ROADMAP 候选。
+
 - 2026-08-25 `4425618` 把完整 task-path 进度账本与当前 conversation request 的 TUI Todo 分层：宿主
   `display_plan` 携带 exact generation/revision/item ids，迟到旧快照不能复活上一阶段清单；主/子 transcript
   的 typed anchor 通过 prompt_toolkit `Window.get_vertical_scroll` 落到真实窗口。362 项 focused（2 xfail）、

@@ -1879,7 +1879,7 @@ def _render_system(block: TuiBlock, context: TuiRenderContext) -> tuple[Formatte
     marker = "! " if block.role == "error" else "◇ "
     if block.kind == "compact_boundary":
         generation = max(0, int(block.metadata.get("compact_generation") or 0))
-        text = f"Context compacted · generation {generation}"
+        text = block.text or f"Context compacted · generation {generation}"
     elif block.kind == "context_window_compacted":
         before = _format_compact_number(int(block.metadata.get("before_tokens") or 0))
         after = _format_compact_number(int(block.metadata.get("after_tokens") or 0))
@@ -1978,6 +1978,20 @@ def _render_input_status(
                 context.context_usage,
                 context.width,
                 compact_count=context.compact_count,
+            )
+        )
+    elif context.compact_count > 0:
+        lines.extend(
+            wrap_fragments(
+                (
+                    (
+                        "class:tui-muted",
+                        f"Context 将在下次模型调用时刷新 · compact {context.compact_count}",
+                    ),
+                ),
+                width=context.width,
+                first_prefix=(("class:tui-context-label", "  ◉ "),),
+                continuation_prefix=(("class:tui-context-label", "    "),),
             )
         )
     if context.has_stash:

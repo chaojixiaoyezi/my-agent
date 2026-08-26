@@ -694,7 +694,8 @@ def _execute_context_control(
 
 # LLM: Manual compact may mutate only the exact idle owner/thread and must hold the same durable
 # execution lane as foreground/background turns before calling the canonical checkpoint/CAS path.
-# 函数用途: 强制压缩当前已完成的会话历史；活跃任务或并发执行时会明确拒绝。
+# A committed result returns its typed thread generation so adapters never parse display prose.
+# 函数用途: 强制压缩当前已完成的会话历史；活跃任务或并发执行时会明确拒绝，成功时返回权威 Compact 代数。
 def _execute_compact_control(
     base_agent: object,
     paths: GatewayPaths,
@@ -751,6 +752,10 @@ def _execute_compact_control(
                 f"上下文估算：{before.projected_tokens:,} → "
                 f"{compacted.projected_tokens:,} tokens；"
                 f"本次纳入摘要 {before.pending_messages} 条已完成消息。"
+            ),
+            status=ConversationTaskStatus(
+                state="idle",
+                compact_generation=compacted.thread.compact_generation,
             ),
         )
     except InterruptedError:

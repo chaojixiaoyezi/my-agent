@@ -12,9 +12,9 @@
 
 状态只描述当前工作树。它不等同于已发布版本；未提交、未推送的能力不属于远程 `main`。
 
-## 2026-08-25 跨回合工具终态折叠
+## 2026-08-25 跨回合工具终态折叠与缓存稳定前缀
 
-- **状态：实验性（本地 289 项 focused 与严格 gate 通过，尚未部署真机）**。普通 main/child 工具回合结束时，从 canonical
+- **状态：部分可用（`7b14e34` 已部署真机；手动 Compact 状态刷新二层候选尚未发布）**。普通 main/child 工具回合结束时，从 canonical
   archive 一次生成有界、脱敏、确定性的 `conversation_terminal_tool_fold.v1`，与 assistant 正文同一条
   ConversationStore 消息落账。用户可见正文不拼接折叠；下一模型轮才从 metadata 读取。
 - 该折叠是 会话运行时 完整 ResponseItem 历史与 终端交互 cache-aware microcompact 之间的适配：完整工具输出继续
@@ -26,6 +26,12 @@
   `physical_model_attempt_count` 游标换成 append-only 增量；事件保留原快照指纹以幂等重放，供应商 input/output/
   cache-read/cache-write 和 estimated 分区均只累计新增值。该修复避免第二次成功回复因 scope-only event id
   冲突而反向把 child 标成失败。
+- `.7` 原长 TUI 已证明：前一轮 2 次 Read 能在下一轮无工具调用时准确续接，两轮 provider cache-read 分别为
+  42,107 与 12,987；手动 Compact generation 1 把 45,639 降到 15,029 并吸收 98 条消息。缓存策略不是每轮
+  重写旧摘要：普通 fold 保持旧历史 exact 稳定前缀，真正 Compact 才一次替换为新摘要前缀。
+- 当前工作树的二层候选让手动 Compact 通过 typed `task_status.compact_generation` 立即更新 TUI，并清掉已经
+  失效的压缩前 Context 数字；下一次真实模型调用再发布新 provider-visible snapshot。它不解析成功文案，
+  不为界面刷新额外调用模型，也不新增一套 provider cache key。
 
 ## 2026-08-25 长 session 当前回合 Todo 与滚动锚点
 

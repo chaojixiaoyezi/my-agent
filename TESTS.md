@@ -22,12 +22,28 @@ python3 -m pytest \
   -q --tb=short
 ```
 
-当前 289 项通过。覆盖折叠确定性、字符上限、嵌套敏感参数脱敏、主链同账、公开正文不变、下一轮可见、
+`7b14e34` 的 289 项已通过并部署 `.7` 唯一 Gateway。覆盖折叠确定性、字符上限、嵌套敏感参数脱敏、主链同账、公开正文不变、下一轮可见、
 main/child 共用、真正 Compact 摘要输入、token 估算和 `compact 0` 不被普通折叠冒充。还覆盖 HEAD 原可复现的
 child overflow→Compact→继续回复：会话用量从同 scope 累计快照原子换成逐物理调用增量，第二次成功不再因
-event id 异值复用失败，provider cache-read/cache-write 不重复累计。真机仍需核对连续轮供应商用量，不能只看
-本地估算。本轮远端提交前的 Ruff、doc sync、strict code-size、diff 与 clean-package 也全部通过；改动远低于
-一万行，因此按约定未重复跑全仓 pytest。
+event id 异值复用失败，provider cache-read/cache-write 不重复累计。原长真 TUI 两次真实 provider 回执分别
+出现 42,107 与 12,987 cache-read token，且后一轮能准确续接前轮两次 Read；手动 Compact generation 1
+把 45,639 降到 15,029，并吸收 98 条消息，不能只用本地估算冒充缓存证据。
+
+手动 Compact 的 typed 回执与缓存稳定前缀补充回归：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_gateway_conversation_control.py \
+  agent_py_agent/tests/test_chat_control_runtime.py \
+  agent_py_agent/tests/test_tui_runtime.py \
+  agent_py_agent/tests/test_tui_renderer.py \
+  agent_py_agent/tests/test_gateway_conversation_compact.py \
+  -q --tb=short
+```
+
+当前 190 项通过。覆盖控制回执不解析显示文案、只按 typed generation 发布 Compact 边界、立即撤下已失效的
+压缩前 Context 数字、下次真实模型调用再刷新，以及未 Compact 时后一轮 history 必须以前一轮完整 history
+为 exact 稳定前缀。该显示刷新不会额外调用模型，也不改变 MiniMax/Anthropic 兼容链的自动缓存协议。
 
 ## 2026-08-25 当前回合 Todo、真实 Window 粘底与 Compact 计数
 

@@ -45,6 +45,11 @@
   `physical_model_attempt_count` 游标原子换算成 append-only 增量。每个增量事件保存原累计快照指纹，精确重放
   幂等、同 id 异值 fail closed；input/output/cache-read/cache-write 与 provider/estimated 分区均只累计新增值。
   禁止把第二份累计快照整条相加，也禁止复用 scope-only event id 让一次正常 Compact 续跑变成数据冲突。
+- Compact 完成后的界面同步沿用 会话运行时 的 typed compact/token event 与 终端交互 的即时 post-compact state
+  replacement：手动控制回执携带 canonical `task_status.compact_generation`，TUI 只据此推进次数。压缩前最后
+  一份 provider-visible Context 快照立即失效并撤下，固定行保留真实代数和“下次模型调用刷新”；不得继续
+  展示旧 token，也不得为了刷新显示发一次辅助模型请求。未 Compact 的历史只在尾部追加 immutable fold，
+  不按新预算重写旧轮；真正 Compact 才允许替换历史前缀。cache-read/cache-write 只读 provider 账本。
 - 供应商额度耗尽、明确不可用或健康探测失败时，正式运行面立即切到已配置且探活成功的本地模型，禁止
   为等待刷新而让任务空转；本地首选端口和供应商刷新时刻来自显式配置，不从错误正文或自然语言猜测。
   只有当前没有 live request、到达配置刷新点且供应商探活成功时才安全切回，模型切换不得创建第二个

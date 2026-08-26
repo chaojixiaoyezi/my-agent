@@ -10,6 +10,11 @@
   operation/artifact refs 继续是副作用与产物事实源。
 - `conversation/compact.py` 计量并摘要正文加 fold，但普通 fold 不推进 generation。当前尾部 fold 次数与
   `compact_source_tool_pairs` 分栏，后者仍只表示运行中 native IR 真压掉的完整工具对。
+- 普通续轮 history 只在末尾追加新 user/assistant/fold，旧前缀不得按新预算重写，以便兼容 provider 自动
+  命中 cache-read。真正 Compact 才原子替换旧 history 为 checkpoint summary；替换后的新前缀继续保持稳定。
+- 手动 `/compact` 的 Gateway 控制结果把 canonical generation 放在 typed `task_status`，operation receipt
+  原样保存，CLI adapter 只恢复结构化字段。TUI 收到成功代数后发布 `compact_boundary`、撤下失效的压缩前
+  Context snapshot，并显示“下次模型调用刷新”；下一次真实模型 preflight 才写入新用量，不为 UI 单独发模型请求。
 
 ## 普通续轮的直属子代理完成输入
 

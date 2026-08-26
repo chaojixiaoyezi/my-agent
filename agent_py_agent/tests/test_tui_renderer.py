@@ -795,6 +795,47 @@ def test_live_context_strip_uses_wide_and_narrow_density_and_keeps_stash() -> No
     assert all(display_width_fragments(line) <= 24 for line in tiny.input_status_lines)
 
 
+def test_compact_count_stays_visible_while_provider_context_snapshot_refreshes() -> None:
+    store = TuiStateStore()
+
+    frame = render_tui_snapshot(
+        store.snapshot(),
+        TuiRenderContext(width=80, context_usage=None, compact_count=3),
+    )
+
+    assert [fragments_text(line) for line in frame.input_status_lines] == [
+        "  ◉ Context 将在下次模型调用时刷新 · compact 3"
+    ]
+
+
+def test_manual_compact_boundary_keeps_structured_generation_and_display_details() -> None:
+    store = TuiStateStore()
+    seq = TuiEventSequencer("manual-compact-render", clock=lambda: 12.0)
+    store.publish(
+        seq.emit(
+            "compact_boundary",
+            "completed",
+            "compact:session:2",
+            {
+                "compact_generation": 2,
+                "text": (
+                    "Context compacted · generation 2\n"
+                    "上下文估算：45,639 → 15,029 tokens。"
+                ),
+            },
+        )
+    )
+
+    frame = render_tui_snapshot(
+        store.snapshot(),
+        TuiRenderContext(width=100, compact_count=2),
+    )
+    rendered = "\n".join(_frame_lines(frame))
+
+    assert "Context compacted · generation 2" in rendered
+    assert "45,639 → 15,029 tokens" in rendered
+
+
 def test_live_context_strip_warning_color_comes_from_compact_trigger() -> None:
     store = TuiStateStore()
     warning = TuiContextUsage(
