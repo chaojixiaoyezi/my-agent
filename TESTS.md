@@ -1,5 +1,50 @@
 # TESTS
 
+## 2026-08-26 Anthropic-compatible 原生主动缓存
+
+目标：证明主动缓存只改变 provider payload 投影，不污染 canonical messages/tools、不伪造 Compact，并能
+通过唯一配置开关兼容不支持 `cache_control` 的端点。
+
+当前 focused：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_backends_base.py \
+  agent_py_agent/tests/test_backends_native_tool_use.py \
+  agent_py_agent/tests/test_backends_message_adapter.py \
+  agent_py_agent/tests/test_native_tool_use_ir_messages_flow.py \
+  agent_py_agent/tests/test_backends_incomplete_response.py \
+  agent_py_agent/tests/test_config_validation.py \
+  agent_py_agent/tests/test_config_normalize.py \
+  -q --tb=short
+```
+
+覆盖点：
+
+- native 首轮在稳定工具尾、首条真实 prompt 上标断点，续轮另在最新 text/tool_use/tool_result 块标断点；
+- copy-on-write 后输入 messages/tools 与 canonical IR 保持逐字段不变；
+- `messages=None` 的普通 text 请求和空 prompt 的旧请求形态不变；
+- 配置关闭后 payload 不出现 `cache_control`，YAML 与 dataclass 默认一致；
+- 部署后的真 TUI 必须从 provider usage ledger 观察到先 cache-write、后 cache-read，不能用 Context 或
+  Compact 数字替代该证据。
+
+当前结果：174 项已通过。本轮改动远低于 10,000 行，不跑全仓 pytest。
+
+真 TUI 旧版对照样本（`ma-97468f3-longchain-r27`）：
+
+- 一个主代理 + 19 个 child 约 3 小时 59 分，合计 1,156 次模型调用、46,024,438
+  accounted input、565,392 output、6,454,431 cache-read、0 cache-creation；
+- canonical Compact 主代理 2 次、child 合计 10 次；19 个 child 虽均生命周期 `DONE`，
+  但独立产物验收不通过；
+- `npx tsc --noEmit` exit 0；`npx vitest run --no-cache --dangerouslyIgnoreUnhandledErrors=false`
+  为 68 pass / 8 skip / 1 fail / 1 unhandled error，exit 1；
+- 原 Click 测试是 46 个 Python 文件/14,529 行，复刻是 8 个 TypeScript 文件/880 行；
+- 独立 Python/TypeScript 对照探针证明 7 条核心行为不一致：选项取值、Group 子命令、未知
+  子命令、`--help` 退出码、callback return value、ANSI style、`open_file("-")`。
+
+该真任务的产物失败只作为底座样本，未由测试者修改任何复刻产物文件。同一普通中文
+prompt 已在 `会话运行时-m27-click-r31` 启动 会话运行时 + MiniMax-M2.7 对照，结论以对照终态再归因。
+
 ## 2026-08-25 子代理业务产物与宿主交接文件隔离
 
 子代理只能看到和写入父级/用户明确声明的业务产物；宿主内部 `final_report/output.json/runner_result` 不得

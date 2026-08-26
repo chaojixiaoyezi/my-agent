@@ -618,6 +618,12 @@ temperature: 0.2
 # Anthropic API 版本
 anthropic_version: "2023-06-01"
 
+# Anthropic-compatible 原生多轮工具请求主动缓存：
+# - true：在稳定工具清单、首条任务提示和最新历史块写 cache_control 断点，长任务可增量复用旧前缀。
+# - false：不写主动缓存字段，供不支持该标准字段的兼容端点使用。
+# 普通单次聊天不受影响；开启后首次缓存写入会按供应商规则计费，后续命中通常显著降低成本和延迟。
+anthropic_prompt_cache_enabled: true
+
 # 是否启用工具调用循环
 enable_tools: true
 

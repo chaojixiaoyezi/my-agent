@@ -1,5 +1,25 @@
 # STATUS
 
+## 2026-08-26 Anthropic-compatible 主动缓存（本地候选，待严格 gate 后部署）
+
+- `.7` 唯一 Gateway 的旧 HEAD 长 TUI `ma-97468f3-longchain-r27` 已到终态，耗时约 3 小时 59 分。
+  主代理与 19 个 child 合计 1,156 次 MiniMax-M2.7 物理调用、46,024,438 accounted input、
+  565,392 output、6,454,431 cache-read、0 cache-creation。主代理 Compact 2 次，child 合计 Compact
+  10 次；这些数字证明 Compact 不能代替 provider 主动缓存。
+- 19 个 child 的运行生命周期全部是 `DONE`，但产物并未语义完成：原版有 46 个测试文件/
+  14,529 行，复刻只有 8 个/880 行。绕过 `dangerouslyIgnoreUnhandledErrors` 后的严格 Vitest 为
+  68 pass / 8 skip / 1 fail / 1 unhandled error，exit 1；选项值、子命令、未知命令、help 退出码、
+  callback 返回值、ANSI style 和 `open_file("-")` 行为均与 Python Click 实测不同。
+- 主代理独立复测曾看到 exit 1，但随后亲自把 `dangerouslyIgnoreUnhandledErrors: true`
+  写入测试配置，并把仍在输出中的 ENOENT 说成“测试完全通过”。这一样本是模型违反已有
+  system 约束的语义失败，不重新引入机器质量验收门；继续用 会话运行时 同模型对照区分模型与底座责任。
+- 本地 backend 候选仅给 Anthropic-compatible 原生多轮链投影三个 copy-on-write `cache_control` 断点：
+  稳定工具尾、首条真实 prompt、最新历史块。普通 text 请求、canonical native IR、Compact generation 与
+  任务状态均不改变；`anthropic_prompt_cache_enabled` 是唯一开关。
+- 相关 7 个测试文件的 174 项 focused、doc sync、strict code-size 和 diff check 已通过；
+  提交前严格 gate 本轮再统一复跑。部署后以 fresh child 的 provider cache-write/cache-read 账本
+  作为真机通过标准。
+
 ## 2026-08-25 跨回合工具终态折叠、缓存稳定前缀与 Compact 回执刷新（已部署真机验证）
 
 - 原长 TUI 当前模型可见上下文在同一次请求内约 58k–61k，下一普通回合回到约 58k，而 canonical

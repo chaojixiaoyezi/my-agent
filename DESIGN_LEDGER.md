@@ -1783,3 +1783,17 @@ HANDOFF_reliability-gaps-20260813.md P2-5 要求人工拍板「接线 or 停用�
   TUI reducer 只接受当前期望 generation 且不倒退 revision 的快照，最终 notice 也携带同一身份。
 - 视窗：每个 main/child store 仍保存自己的 follow/cursor；真实 prompt_toolkit Window 通过公开
   `get_vertical_scroll` 每帧应用锚点。提交、首次进入或显式 End 粘底，手动上翻不被新输出抢走。
+## 2026-08-26 Anthropic-compatible 主动缓存断点【状态：本地候选，待真 TUI】
+
+- 当前原生工具循环每次都复用稳定工具清单、首条真实任务和不断增长的历史，但旧 backend 没有发任何
+  `cache_control`。真实 MiniMax-M2.7 child 的 82 次调用累计 4,225,275 input，cache write 为 0，不能再用
+  当前 Context 数字或 Compact generation 代替 provider 成本事实。
+- Anthropic 协议的唯一投影入口位于 `backends/anthropic_prompt_cache.py`。它按 provider 规定的
+  tools → prompt → messages 顺序，最多使用三个宿主断点：最后一个工具、首条 prompt、最新可缓存历史块。
+  所有修改都是 copy-on-write，不污染 canonical native IR，也不让展示、缓存或 Compact 互相取得裁决权。
+- 该能力只在调用方显式传入 `messages` 的原生多轮链启用；普通 text/auxiliary 单次请求保持旧 payload。
+  `anthropic_prompt_cache_enabled` 是唯一兼容开关，YAML 与 dataclass 默认均为 true。端点拒绝标准字段时由
+  用户明确关闭，不增加 provider 名称猜测、错误字符串重试或第二条隐式 fallback。
+- 会话运行时 的 session-scoped `prompt_cache_key` 证明稳定会话前缀应由底座承担；具体 wire 字段继续服从当前
+  Anthropic-compatible 协议。真机是否有效只读 provider usage ledger 的 cache-write/cache-read，不根据
+  延迟、上下文百分比或自然语言推断。

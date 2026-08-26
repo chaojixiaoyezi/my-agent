@@ -37,6 +37,11 @@ def test_agent_config_default_max_tokens_matches_shipped_config():
     shipped = load_config(Path(__file__).parents[1] / "config" / "agent_config.yaml")
     assert AgentConfig().max_tokens == shipped.max_tokens
     assert (
+        AgentConfig().anthropic_prompt_cache_enabled
+        is shipped.anthropic_prompt_cache_enabled
+        is True
+    )
+    assert (
         AgentConfig().task_progress_closeout_repair_attempts
         == shipped.task_progress_closeout_repair_attempts
         == 1
@@ -54,7 +59,6 @@ def test_card_and_prompt_defaults_match_shipped_config():
     assert defaults.gateway_per_user_owner_scoping is shipped.gateway_per_user_owner_scoping is True
     assert defaults.tool_catalog_deferred_categories == shipped.tool_catalog_deferred_categories == [
         "collaboration",
-        "orchestration",
         "goal",
         "web",
         "vision",

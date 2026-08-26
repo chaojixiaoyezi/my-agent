@@ -28,6 +28,10 @@
 - 模型成本统计复用唯一 `ModelCallLedger`，按 request/run 累计 provider input/output/
   cache-read/cache-creation，明细裁剪不截断总账。无 provider usage 时按结构化估算
   单独计数。TUI `ctx` 只表示当前上下文压力，不得当成任务累计消耗。
+- Anthropic-compatible 原生多轮工具循环由 backend 按 tools → prompt → messages 顺序主动投影
+  `cache_control`：稳定工具尾、首条真实任务和最新历史块最多占三个宿主断点，且必须 copy-on-write，
+  不能污染 canonical native IR 或推进 Compact。普通单次 text 请求保持原样；兼容端点不支持时只通过
+  `anthropic_prompt_cache_enabled=false` 关闭。是否命中只看 provider usage ledger 的 cache-write/cache-read。
 - provider 的 typed `socket.gaierror` 与 会话运行时 `ConnectionFailed` 一样先走现有 2/5/15 秒有界 HTTP 退避；
   DNS 瞬断不能一跳终止数小时 child。三次耗尽后仍返回 typed transient failure 供既有模型轮恢复，畸形
   URL、认证、代理配置和普通错误字符串不因此取得重试权；每个物理 attempt 继续进入唯一调用账。

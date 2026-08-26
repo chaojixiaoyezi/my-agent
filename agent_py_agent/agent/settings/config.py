@@ -527,6 +527,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     model_context_window_tokens: int = 128_000
     temperature: str = "0.2"
     anthropic_version: str = "2023-06-01"
+    # Anthropic-compatible 原生多轮工具请求是否写 cache_control 断点。仅影响 native
+    # 工具循环；普通单次聊天不额外创建主动缓存，兼容端点不支持时可显式关闭。
+    anthropic_prompt_cache_enabled: bool = True
     chat_history_max_turns: int = 20
     chat_history_assistant_preview_chars: int = 500
     conversation_history_max_turns: int = 20

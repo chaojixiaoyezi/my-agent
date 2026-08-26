@@ -19,6 +19,7 @@ from typing import Any
 
 from ..settings.defaults import DEFAULT_MODEL_MAX_TOKENS
 from ..tooling.runtime_contracts import ProviderToolCapability, ToolChoice
+from .anthropic_prompt_cache import anthropic_messages_with_optional_cache
 from .errors import (
     ProviderConfigurationError,
     ProviderRecoverableError,
@@ -105,6 +106,7 @@ class BackendOptions:
     context_window_tokens: int = 0
     temperature: float = 0.2
     stream_enabled: bool = True
+    prompt_cache_enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -271,6 +273,7 @@ class HttpBackend(BaseBackend):
         self.model_metadata: dict[str, Any] = {}
         self.temperature = float(options.temperature)
         self.stream_enabled = bool(options.stream_enabled)
+        self.prompt_cache_enabled = bool(options.prompt_cache_enabled)
         # Streaming HTTP transports enforce request_timeout as an SSE idle
         # timeout.  The tool-loop guard therefore must not also reinterpret it
         # as a total wall-clock limit while valid events keep arriving.
@@ -904,14 +907,13 @@ class AnthropicCompatibleBackend(HttpBackend):
         if thinking_disabled:
             # LLM: 兼容 Anthropic 官方 thinking 参数；不识别该字段的端点(如 MiniMax)静默忽略。
             payload["thinking"] = {"type": "disabled"}
-        if messages:
-            if prompt:
-                payload["messages"] = [{"role": "user", "content": prompt}, *messages]
-            else:
-                payload["messages"] = messages
-        else:
-            payload["messages"] = [{"role": "user", "content": prompt}]
         selected_tools = _tools_for_choice(tools, tool_choice)
+        payload["messages"], selected_tools = anthropic_messages_with_optional_cache(
+            prompt=prompt,
+            messages=messages,
+            tools=selected_tools,
+            cache_enabled=self.prompt_cache_enabled,
+        )
         if selected_tools:
             from .tool_protocol_adapter import anthropic_tool_choice
 
@@ -1171,6 +1173,7 @@ def get_backend(name: str, config: Any | None = None) -> BaseBackend:
         context_window_tokens=getattr(config, "model_context_window_tokens", 0),
         temperature=float(config.temperature),
         stream_enabled=getattr(config, "stream_enabled", True),
+        prompt_cache_enabled=getattr(config, "anthropic_prompt_cache_enabled", True),
     )
 
     if name == "openai_compatible":

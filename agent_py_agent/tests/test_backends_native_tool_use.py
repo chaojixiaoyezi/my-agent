@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from dataclasses import replace
 
 import pytest
@@ -69,8 +70,104 @@ def test_non_stream_extracts_tool_use_blocks():
     assert resp.tool_use_blocks == [
         {"id": "toolu_1", "name": "read_file", "input": {"path": "README.md"}}
     ]
-    # tools must be forwarded into the payload
+    # 没有 native messages 的单次请求保持旧形态，不额外创建主动缓存。
     assert captured["payload"]["tools"] == _TOOLS
+
+
+def test_native_prompt_cache_marks_prompt_and_latest_history_without_mutating_inputs():
+    backend = AnthropicCompatibleBackend(_options(stream_enabled=False))
+    captured: dict[str, object] = {}
+    tools = deepcopy(_TOOLS)
+    messages = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "inspect", "signature": "sig"},
+                {"type": "text", "text": "reading"},
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "read_file",
+                    "input": {"path": "README.md"},
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_1",
+                    "content": "done",
+                    "is_error": False,
+                }
+            ],
+        },
+    ]
+    original_messages = deepcopy(messages)
+    original_tools = deepcopy(tools)
+
+    def fake_request_json(path, payload, headers):
+        del path, headers
+        captured["payload"] = payload
+        return {"content": [{"type": "text", "text": "continue"}]}
+
+    backend.request_json = fake_request_json
+    backend.generate("root prompt", tools=tools, messages=messages)
+
+    payload = captured["payload"]
+    assert payload["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert payload["messages"][0] == {
+        "role": "user",
+        "content": [
+            {
+                "type": "text",
+                "text": "root prompt",
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+    }
+    assert payload["messages"][-1]["content"][-1]["cache_control"] == {
+        "type": "ephemeral"
+    }
+    assert "cache_control" not in payload["messages"][1]["content"][-1]
+    assert messages == original_messages
+    assert tools == original_tools
+
+
+def test_native_prompt_cache_can_be_disabled_for_incompatible_endpoints():
+    backend = AnthropicCompatibleBackend(
+        replace(_options(stream_enabled=False), prompt_cache_enabled=False),
+    )
+    captured: dict[str, object] = {}
+
+    def fake_request_json(path, payload, headers):
+        del path, headers
+        captured["payload"] = payload
+        return {"content": [{"type": "text", "text": "ok"}]}
+
+    backend.request_json = fake_request_json
+    backend.generate("root prompt", tools=_TOOLS, messages=[])
+
+    assert captured["payload"]["messages"] == [
+        {"role": "user", "content": "root prompt"}
+    ]
+    assert captured["payload"]["tools"] == _TOOLS
+
+
+def test_native_prompt_cache_keeps_empty_first_request_shape():
+    backend = AnthropicCompatibleBackend(_options(stream_enabled=False))
+    captured: dict[str, object] = {}
+
+    def fake_request_json(path, payload, headers):
+        del path, headers
+        captured["payload"] = payload
+        return {"content": [{"type": "text", "text": "ok"}]}
+
+    backend.request_json = fake_request_json
+    backend.generate("", messages=[])
+
+    assert captured["payload"]["messages"] == [{"role": "user", "content": ""}]
 
 
 def test_anthropic_structured_generation_uses_forced_schema_tool_and_non_stream_transport():
@@ -460,6 +557,26 @@ def test_stream_generate_returns_tool_use_blocks():
         {"id": "toolu_9", "name": "read_file", "input": {"path": "README.md"}}
     ]
     assert captured["payload"]["tools"] == _TOOLS
+
+
+def test_stream_native_request_uses_the_same_prompt_cache_projection():
+    backend = AnthropicCompatibleBackend(_options(stream_enabled=True))
+    captured: dict[str, object] = {}
+
+    def request_stream(path, payload, headers):
+        del path, headers
+        captured["payload"] = payload
+        return _tool_use_sse_lines()
+
+    backend.request_stream = request_stream
+    backend.generate("read README", tools=_TOOLS, messages=[])
+
+    assert captured["payload"]["tools"][-1]["cache_control"] == {
+        "type": "ephemeral"
+    }
+    assert captured["payload"]["messages"][0]["content"][-1][
+        "cache_control"
+    ] == {"type": "ephemeral"}
 
 
 def test_stream_generate_carries_internal_blocks_separately_from_visible_text():

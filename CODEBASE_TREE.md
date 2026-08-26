@@ -177,6 +177,8 @@ agent_py_agent/
 |   |   `-- memory_context.py          # 非权威、可转义且可统一剥离的召回记忆信封
 |   |-- scale_downstream.py            # scale worker 复用普通 gateway 会话执行主链
 |   `-- backends/                      # 模型后端适配、run 固定协议/tool_choice、原生工具历史与结构化生成
+|       |-- anthropic_prompt_cache.py  # Anthropic 原生多轮工具/首条提示/最新历史的主动缓存断点投影
+|       |-- base.py                    # 各 provider HTTP 请求、流式解析与统一 Backend 工厂
 |       `-- tool_protocol_adapter.py   # native 事件或显式完整 text 帧到 canonical ToolCall 的唯一适配口
 |-- tests/                             # 单元、集成、真实链路回归
 |   |-- fixtures/tui/                   # 固定尺寸/时间线的非敏感 TUI PTY 动作 fixture

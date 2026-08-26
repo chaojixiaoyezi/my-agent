@@ -646,10 +646,12 @@ class TestGetBackend:
         config.temperature = "0.7"
         config.stream_enabled = True
         config.anthropic_version = "2023-06-01"
+        config.anthropic_prompt_cache_enabled = False
 
         backend = get_backend("anthropic_compatible", config)
         assert isinstance(backend, AnthropicCompatibleBackend)
         assert backend.context_window_tokens == 200000
+        assert backend.prompt_cache_enabled is False
 
 
 def test_probe_reraises_provider_quota_error(tmp_path):

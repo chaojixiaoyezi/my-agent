@@ -314,9 +314,28 @@ def test_anthropic_backend_keeps_initial_user_prompt_before_native_history():
     assert resp.text == "done"
     # The first request sent prompt as a user turn; every continuation preserves that identity.
     assert captured["payload"]["messages"] == [
-        {"role": "user", "content": "SYSTEM+TASK PROMPT"},
-        *msgs,
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "SYSTEM+TASK PROMPT",
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+        },
+        msgs[0],
+        {
+            **msgs[1],
+            "content": [
+                {
+                    **msgs[1]["content"][0],
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+        },
     ]
+    assert "cache_control" not in msgs[-1]["content"][-1]
     assert "system" not in captured["payload"]
 
 
