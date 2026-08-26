@@ -467,7 +467,10 @@ def _next_background_activity_state(
     compact_count = (
         current.compact_count
         if snapshot.get("compact_count") is None
-        else _nonnegative_int(snapshot.get("compact_count"))
+        else max(
+            current.compact_count,
+            _nonnegative_int(snapshot.get("compact_count")),
+        )
     )
     main_value = snapshot.get("main_activity")
     main_activity = (

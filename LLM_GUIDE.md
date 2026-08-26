@@ -152,7 +152,8 @@
   缓存命中只读取 provider usage 账，不以 Context 估算冒充。手动 `/compact` 成功后，Gateway 控制结果通过
   `task_status.compact_generation` 返回 canonical 代数，TUI 立即发布同一 typed boundary 并撤下压缩前的
   provider-visible Context 快照；下一次真实模型调用再刷新精确数字，不能继续显示旧 `compact 0`，也不能
-  为刷新界面额外调用模型或从成功文案反解析代数。
+  为刷新界面额外调用模型或从成功文案反解析代数。TUI 启动、恢复或空闲轮询时，即使当前没有 Working 块，
+  也必须消费 activity snapshot 中的 canonical generation；同一 session 的代数只能单调增加，迟到旧帧不能回退。
 - TUI transcript 的 follow/离尾状态属于每个 main/child 页面各自的 process-local viewport。提交有效消息、
   首次进入新页面或显式回到底部时，prompt_toolkit `Window.get_vertical_scroll` 必须把 control 的尾部锚点
   落到真实窗口；手动滚轮/PgUp 离尾后保持原阅读位置，不因后台输出或切换页面复用旧 Window scroll。

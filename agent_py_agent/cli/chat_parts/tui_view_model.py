@@ -426,12 +426,13 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
         self.status = _status_with_update(self.status, event)
         self._consume_task_progress_items(event)
 
-    # LLM: A zero canonical count removes the projection without freezing a
-    # fake chat message; completion reporting remains the notice channel's job.
-    # 函数用途: 会话没有进行中任务时原位收起后台 Working 块。
+    # LLM: A zero active-task count removes the projection without freezing a fake chat message,
+    # but the same canonical snapshot may hydrate compact/context status while no block exists.
+    # 函数用途: 会话没有进行中任务时收起 Working，同时保留同帧携带的权威 Compact 与 Context 状态。
     def _handle_background_activity_completed(self, event: TuiEvent) -> None:
-        if self.active_blocks.pop(event.block_id, None) is None:
-            self.record_diagnostic("BACKGROUND_ACTIVITY_COMPLETE_WITHOUT_START", event)
+        self.active_blocks.pop(event.block_id, None)
+        self.status = _status_with_update(self.status, event)
+        self._consume_task_progress_items(event)
 
     # LLM: A final canonical Todo snapshot may arrive after Working was removed.
     # It updates only the existing display ledger and cannot reopen a task or turn.
@@ -959,9 +960,12 @@ def _status_with_update(status: TuiStatus, event: TuiEvent) -> TuiStatus:
         context_tokens=context_tokens,
         output_tokens=_nonnegative_int(event.payload.get("output_tokens"), status.output_tokens),
         tool_rounds=_nonnegative_int(event.payload.get("tool_rounds"), status.tool_rounds),
-        compact_count=_nonnegative_int(
-            event.payload.get("compact_count"),
+        compact_count=max(
             status.compact_count,
+            _nonnegative_int(
+                event.payload.get("compact_count"),
+                status.compact_count,
+            ),
         ),
         mode=str(event.payload.get("mode") or status.mode),
         context_usage=context_usage,

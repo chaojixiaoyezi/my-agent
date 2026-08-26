@@ -45,6 +45,21 @@ python3 -m pytest \
 压缩前 Context 数字、下次真实模型调用再刷新，以及未 Compact 时后一轮 history 必须以前一轮完整 history
 为 exact 稳定前缀。该显示刷新不会额外调用模型，也不改变 MiniMax/Anthropic 兼容链的自动缓存协议。
 
+真 TUI 进一步暴露 idle/resume snapshot 会丢失代数；以下回归覆盖没有 Working block 时仍水合 Compact，且
+迟到旧 activity frame 不能把同一 session 的 generation 从 3 回退到 1：
+
+```bash
+python3 -m pytest \
+  agent_py_agent/tests/test_tui_runtime.py \
+  agent_py_agent/tests/test_tui_view_model.py \
+  agent_py_agent/tests/test_background_notice_display.py \
+  agent_py_agent/tests/test_tui_renderer.py \
+  -q --tb=short
+```
+
+当前 105 项通过。现场服务端 activity 已独立返回 `compact_count=1`，因此该回归锁定的是客户端状态水合，
+不复制服务端账本，也不从屏幕文字猜次数。
+
 ## 2026-08-25 当前回合 Todo、真实 Window 粘底与 Compact 计数
 
 同一长 conversation 会把完整 task-path 进度账本跨回合保留，但底部 Todo 只能显示当前普通用户回合明确

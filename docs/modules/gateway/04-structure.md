@@ -15,6 +15,9 @@
 - 手动 `/compact` 的 Gateway 控制结果把 canonical generation 放在 typed `task_status`，operation receipt
   原样保存，CLI adapter 只恢复结构化字段。TUI 收到成功代数后发布 `compact_boundary`、撤下失效的压缩前
   Context snapshot，并显示“下次模型调用刷新”；下一次真实模型 preflight 才写入新用量，不为 UI 单独发模型请求。
+- `/client/notices.agent_activity.compact_count` 是 TUI 启动/恢复的 typed 水合入口。即使 active task 为 0、
+  没有 Working block，completed display frame 也要更新 status；controller 与 reducer 都按 max 合并代数，
+  只防迟到帧回退，不把客户端投影升级成新的 Compact 权威。
 
 ## 普通续轮的直属子代理完成输入
 

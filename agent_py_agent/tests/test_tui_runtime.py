@@ -214,6 +214,22 @@ def test_manual_compact_boundary_retires_stale_context_and_updates_generation() 
     assert "45,639 → 15,029" in snapshot.stable_blocks[-1].text
 
 
+def test_idle_activity_snapshot_hydrates_compact_count_and_cannot_regress() -> None:
+    runtime = TuiRuntime("resumed-compact-runtime")
+
+    assert runtime.update_background_activity(0, {"compact_count": 3}) is True
+    hydrated = runtime.store.snapshot()
+    assert hydrated.status.compact_count == 3
+    assert not any(block.role == "background" for block in hydrated.active_blocks)
+    assert not any(
+        diagnostic.code == "BACKGROUND_ACTIVITY_COMPLETE_WITHOUT_START"
+        for diagnostic in hydrated.diagnostics
+    )
+
+    assert runtime.update_background_activity(0, {"compact_count": 1}) is False
+    assert runtime.store.snapshot().status.compact_count == 3
+
+
 def test_gateway_context_compaction_creates_one_content_free_history_event() -> None:
     runtime = TuiRuntime("context-compaction-runtime")
     runtime.enqueue_prompt("context-request", "go", queued=False)

@@ -47,6 +47,8 @@ session 先补齐这次调研，再连续做两个小追加和多子代理复刻
 新暴露的缺口只是控制完成没有向 TUI 发布 typed boundary，导致旧 `compact 0` 和压缩前 Context 留屏。
 二层候选通过既有 `task_status.compact_generation` 跨 HTTP/operation receipt 传递 canonical 代数，立即撤下
 失效 Context，固定显示下次真实模型调用刷新；不额外调用模型、不解析文案、不改 provider cache 协议。
+`f901645` 首次部署后又定位到恢复水合缺口：Gateway activity 已是 1，客户端因没有 Working block 丢掉同帧
+状态。后续候选让 idle/resume frame 同样更新 status，且 generation 单调不减；待原 tmux 真机闭环后完成。
 
 ### Leaf 角色行为与共享工作区修改纪律
 

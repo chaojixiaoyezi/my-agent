@@ -15,7 +15,10 @@
   真 Compact 才替换一次前缀，因此缓存命中与压缩节省不是同一个计数。
 - 现场同时发现控制成功后 footer 仍留着压缩前 `Context/compact 0`。二层候选让 Gateway 回执携带 typed
   `task_status.compact_generation`，TUI 发布 canonical boundary 并撤下旧 snapshot；下一次真实模型调用再刷新
-  数字，不解析文案、不额外调用模型。5 个直接相关测试文件当前 190 项通过，待 generation 2 真 TUI 复验。
+  数字，不解析文案、不额外调用模型。5 个直接相关测试文件当前 190 项通过。
+- `f901645` 部署并恢复原 TUI 后，Gateway activity 明确返回 generation 1、真实模型轮把 Context 刷新到约
+  29.4k，footer 仍为 0。根因是无 Working block 的 completed frame 没更新 status。当前候选让 idle/resume
+  同帧水合 Compact，并在 controller/reducer 两层拒绝旧代数回退；4 个相关文件 105 项通过，待再部署真测。
 
 ## 2026-08-25 DNS 瞬断的 会话运行时 式有界恢复（本地候选）
 

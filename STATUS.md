@@ -25,7 +25,12 @@
   `Context ~59.9k · compact 0`。当前候选不解析正文，改由控制回执的 typed `task_status` 恢复 generation，
   发布 canonical boundary，并撤下已失效的 pre-compact Context；下一真实模型调用再刷新 provider-visible
   数字。另补未 Compact 时后一轮 history 必须以前一轮完整 history 为稳定前缀的缓存回归。5 个直接相关
-  文件当前 190 项通过，待严格 gate、推送、部署和同 tmux generation 2 复验。
+  文件当前 190 项通过。
+- `f901645` 部署后用原 session 重启 TUI，服务端 `/client/notices` 已返回 `compact_count=1`，下一次真实模型
+  调用也把 Context 刷到约 29.4k，但客户端仍显示 0。根因是 count=0、无 Working block 的合法 activity frame
+  被 reducer 当成纯收起事件，完整丢掉同帧 generation。当前第二层补丁让 idle/resume frame 也更新 status，
+  controller 与 reducer 双层保证 generation 单调不减；105 项活动/TUI focused 已通过，待重新严格 gate、
+  推送部署及同 tmux 验证 generation 1 水合和 generation 2 即时刷新。
 
 ## 2026-08-25 当前回合 Todo 与物理 Window 粘底（已部署真机验证）
 

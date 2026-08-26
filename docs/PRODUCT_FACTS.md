@@ -32,6 +32,9 @@
 - 当前工作树的二层候选让手动 Compact 通过 typed `task_status.compact_generation` 立即更新 TUI，并清掉已经
   失效的压缩前 Context 数字；下一次真实模型调用再发布新 provider-visible snapshot。它不解析成功文案，
   不为界面刷新额外调用模型，也不新增一套 provider cache key。
+- `f901645` 真机首次复验又证明 Gateway activity 已返回 generation 1，但无 Working block 的客户端完成事件
+  丢掉了水合值。当前工作树继续让 idle/resume frame 更新 status，并在 controller/reducer 两层保持代数单调；
+  服务端 ConversationThread 仍是唯一权威，客户端只保留该 session 已观察到的最大 generation。
 
 ## 2026-08-25 长 session 当前回合 Todo 与滚动锚点
 
